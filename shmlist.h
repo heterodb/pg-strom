@@ -14,8 +14,7 @@ typedef struct {
 	shmptr_t		next;
 } shmlist_t;
 
-#define offset_of(type, member)							\
-	((uintptr_t) &((type *)0)->member)
+#define offsetof(type, member)	__builtin_offsetof (type, member)
 #define container_of(addr, type, member)				\
 	(type *)(((char *)addr) - offset_of(type, member))
 #define list_entry(shmptr, type, member)				\

@@ -8,11 +8,13 @@
 #include "pg_boost.h"
 #include "shmlist.h"
 
-
-
-
-
-
+/*
+ * Shared memory segment header
+ */
+#define SHMCLASS_MIN_BITS		5	/* 32bytes */
+#define SHMCLASS_MAX_BITS		30	/* 1Gbytes */
+#define SHMCLASS_MIN_SIZE		(1 << SHMCLASS_MIN_BITS)
+#define SHMCLASS_MAX_SIZE		(1 << SHMCLASS_MAX_BITS)
 
 typedef struct {
 	int				shmid;
@@ -21,8 +23,10 @@ typedef struct {
 	int				num_active[SHMCLASS_MAX_BITS + 1];
 	int				num_free[SHMCLASS_MAX_BITS + 1];
 	pthread_mutex_t lock;
-
-	/* memory caching support */
+	/*
+	 * In-memory cache mechanism
+	 */
+#define SHMCACHE_NUM_SLOTS		64
 	mlist_t			cache_list[SHMCACHE_NUM_SLOTS];
 	pthread_mutex_t	cache_lock[SHMCACHE_NUM_SLOTS];
 	int				cache_hint;
@@ -44,12 +48,12 @@ typedef struct {
 
 typedef struct {
 	mchunk_common_t	c;
-	uintptr_t		data[0];
+	uintptr_t		data[0];	/* being aligned to word */
 } mchunk_item;
 
-#define MCHUNK_FLAG_DIRTY_CACHE		0x01
-#define MCHUNK_FLAG_HOT_CACHE		0x02
-#define MCHUNK_FLAG_COMPRESSED		0x04
+#define SHMCACHE_FLAG_DIRTY_CACHE		0x01
+#define SHMCACHE_FLAG_HOT_CACHE			0x02
+#define SHMCACHE_FLAG_COMPRESSED		0x04
 typedef struct {
 	mchunk_common_t	c;
 	uint32			refcnt;
@@ -68,7 +72,23 @@ typedef struct {
  */
 static msegment_t *msegment = NULL;
 
+/*
+ * ffs - returns first (smallest) bit of the value
+ */
+static inline int ffs(shmptr_t ptr)
+{
+	return __builtin_ffsl((unsigned long)ptr);
+}
 
+/*
+ * fls - returns last (biggest) bit of the value
+ */
+static inline int fls(shmptr_t ptr)
+{
+	if (ptr == 0)
+		return 64;
+	return sizeof(shmptr_t) * 8 - __builtin_clz(ptr);
+}
 
 
 extern shmptr_t	shmmgr_alloc(size_t size);
@@ -93,84 +113,7 @@ extern uint8	shmptr_get_tag(shmptr_t ptr);
 
 
 
-/*
- * shmchunk_t - memory chunk of shared memory segment
- */
-#define SHMBUFFER_FLAG_DIRTY_CACHE	0x01
-#define SHMBUFFER_HOT_CACHE			0x02
-#define SHMBUFFER_COMPRESSED		0x04
-#define SHMBUFFER_NUM_ACTIVE_SLOTS	64
-typedef struct {
-	uint16				mclass;
-	bool				is_free;
-	bool				is_buffer;
-	union {
-		struct {
-			mlist_t		list;
-		} free;		/* is_free == true */
-		struct {
-			uint8		data[0];
-		} item;
-	};
-} shmchunk_t;
 
-/*
- * Shared memory segment header
- */
-#define SHMCLASS_MIN_BITS		5	/* 32bytes */
-#define SHMCLASS_MAX_BITS		30	/* 1Gbytes */
-#define SHMCLASS_MIN_SIZE		(1 << SHMCLASS_MIN_BITS)
-#define SHMCLASS_MAX_SIZE		(1 << SHMCLASS_MAX_BITS)
-
-typedef struct {
-	int			shmid;
-	int			index;
-	size_t		segment_size;
-	mlist_t		free_list[SHMCLASS_MAX_BITS + 1];
-	int			num_active[SHMCLASS_MAX_BITS + 1];
-	int			num_free[SHMCLASS_MAX_BITS + 1];
-	pthread_mutex_t	lock;
-
-	/* buffering support */
-	struct {
-		mlist_t		active_list[SHMBUFFER_NUM_ACTIVE_SLOTS];
-		pthread_mutex_t	active_lock[SHMBUFFER_NUM_ACTIVE_SLOTS];
-		int			buffer_hint;
-		int			reclaim_hint;
-		size_t		total_size;
-		size_t		limit_size;
-	} buffer;
-} shmsegment_t;
-
-#ifdef	SIZEOF_VOID_P == 8
-#define SHMSEGMENT_NUM_MAX_BITS		12		/* 4096 */
-#define SHMSEGMENT_SIZE_MAX_BITS	36		/* 64GB */
-#elseif SIZEOF_VOID_P == 4
-#define SHMSEGMENT_NUM_MAX_BITS		0		/* No multisegment support */
-#define SHMSEGMENT_SIZE_MAX_BITS	32		/* 4 GB */
-#endif
-#define SHMSEGMENT_NUM_MAX			(1 << SHMSEGMENT_NUM_MAX_BITS)
-#define SHMSEGMENT_SIZE_MAX			(1 << SHMSEGMENT_SIZE_MAX)
-#define shmptr_to_segment(p)		(((p) >> SHMSEGMENT_SIZE_MAX_BITS) & (SHMSEGMENT_SIZE_MAX - 1)
-#define shmptr_to_offset(p)			((p) & (SHMSEGMENT_SIZE_MAX - 1))
-
-static msegment_t **msegments;
-static int			msegments_num;
-
-
-
-
-extern uintptr_t	shmmgr_alloc(size_t size, bool is_buffer);
-extern uintptr_t	shmmgr_try_alloc(size_t size, bool is_buffer);
-extern void			shmmgr_free(uintptr_t ptr);
-extern void			shmmgr_init_mutex(pthread_mutex_t *lock);
-extern void			shmmgr_init_rwlock(pthread_rwlock_t *lock);
-extern void		   *shmmgr_get_addr(uintptr_t ptr);
-extern void			shmmgr_put_addr(uintptr_t ptr);
-extern void			shmmgr_get_size(uintptr_t ptr);
-extern void			shmmgr_set_dirty(uintptr_t ptr);
-extern void			shmmgr_init(int nsegments, size_t segment_size);
-extern void			shmmgr_exit(void);
 
 /*
  * shmmgr_init
