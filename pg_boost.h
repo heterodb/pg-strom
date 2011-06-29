@@ -15,7 +15,7 @@
  * XXX - to be defined in postgres.h
  */
 #ifndef bool
-typedef char bool
+typedef char bool;
 #endif
 
 #ifndef true
@@ -31,15 +31,14 @@ typedef char bool
  */
 typedef uint64_t	offset_t;
 
-/* dual linked list */
 typedef struct {
-  offset_t	prev;
-  offset_t	next;
+	offset_t	prev;
+	offset_t	next;
 } shmlist_t;
 
-#define offset_of(type, member)	\
+#define offset_of(type, member)					\
 	((unsigned long) &((type *)0)->member)
-#define container_of(ptr, type, member) \
+#define container_of(ptr, type, member)			\
 	(type *)(((char *)ptr) - offset_of(type, member))
 
 extern bool	shmlist_empty(shmlist_t *list);
@@ -47,7 +46,7 @@ extern void	shmlist_init(shmlist_t *list);
 extern void	shmlist_add(shmlist_t *base, shmlist_t *list);
 extern void	shmlist_del(shmlist_t *list);
 
-extern int	shmmgr_init(key_t key, size_t size, bool hugetlb);
+extern int	shmmgr_init(size_t size, bool hugetlb);
 extern void	shmmgr_exit(void);
 extern void    *shmmgr_alloc(size_t size);
 extern void	shmmgr_free(void *ptr);
