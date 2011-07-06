@@ -1,7 +1,7 @@
 # pg_boost Makefile
 
 MODULE_big = pg_boost
-OBJS = shmmgr.o
+OBJS = shmmgr.o bufmgr.o
 
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)

@@ -41,6 +41,91 @@ typedef struct {
 static shmhead_t   *shmhead = NULL;
 
 /*
+ * ffs64 - returns first (smallest) bit of the value
+ */
+static inline int ffs64(uint64_t value)
+{
+	int		ret = 1;
+
+	if (!value)
+		return 0;
+	if (!(value & 0xffffffff))
+	{
+		value >>= 32;
+		ret += 32;
+	}
+	if (!(value & 0x0000ffff))
+	{
+		value >>= 16;
+		ret += 16;
+	}
+	if (!(value & 0x000000ff))
+	{
+		value >>= 8;
+		ret += 8;
+	}
+	if (!(value & 0x0000000f))
+	{
+		value >>= 4;
+		ret += 4;
+	}
+	if (!(value & 0x00000003))
+	{
+		value >>= 2;
+		ret += 2;
+	}
+	if (!(value & 0x00000001))
+	{
+		value >>= 1;
+		ret += 1;
+	}
+	return ret;
+}
+
+
+/*
+ * fls64 - returns last (biggest) bit of the value
+ */
+static inline int fls64(uint64_t value)
+{
+	int		ret = 1;
+
+	if (!value)
+		return 0;
+	if (value & 0xffffffff00000000)
+	{
+		value >>= 32;
+		ret += 32;
+	}
+	if (value & 0xffff0000)
+	{
+		value >>= 16;
+		ret += 16;
+	}
+	if (value & 0xff00)
+	{
+		value >>= 8;
+		ret += 8;
+	}
+	if (value & 0xf0)
+	{
+		value >>= 4;
+		ret += 4;
+	}
+	if (value & 0xc)
+	{
+		value >>= 2;
+		ret += 2;
+	}
+	if (value & 0x2)
+	{
+		value >>= 1;
+		ret += 1;
+	}
+	return ret;
+}
+
+/*
  * addr_to_offset - Translation from an address to offset
  */
 offset_t
@@ -199,6 +284,9 @@ shmmgr_split_chunk(int mclass)
 	return true;
 }
 
+/*
+ * shmmgr_alloc - allocate a memory chunk on the shared memory segment
+ */
 void *
 shmmgr_alloc(size_t size)
 {
@@ -206,7 +294,7 @@ shmmgr_alloc(size_t size)
 	shmlist_t  *list;
 	int			mclass;
 
-	mclass = sizeof(unsigned int) * 8 - __builtin_clz(size - 1);
+	mclass = fls64(size + offset_of(shmchunk_t, list) - 1);
 	if (mclass > SHMCLASS_MAX_BITS)
 		return NULL;
 	if (mclass < SHMCLASS_MIN_BITS)
@@ -242,6 +330,9 @@ shmmgr_alloc(size_t size)
 	return (void *)&chunk->list;
 }
 
+/*
+ * shmmgr_free - free a memory chunk on the shared memory segment
+ */
 void
 shmmgr_free(void *ptr)
 {
@@ -336,7 +427,7 @@ shmmgr_init(size_t size, bool hugetlb)
 		shmhead->num_active[mclass] = 0;
 	}
 
-	offset = 1 << (32 - __builtin_clz(sizeof(shmhead_t) - 1));
+	offset = 1 << (fls64(sizeof(shmhead_t)) + 1);
 	if (offset < SHMCLASS_MIN_SIZE)
 		offset = SHMCLASS_MIN_SIZE;
 
@@ -345,7 +436,7 @@ shmmgr_init(size_t size, bool hugetlb)
 		shmchunk_t *chunk;
 
 		/* choose an appropriate chunk class */
-		mclass = __builtin_ffsl(offset) - 1;
+		mclass = ffs64(offset) - 1;
 		if (mclass > SHMCLASS_MAX_BITS)
 			mclass = SHMCLASS_MAX_BITS;
 		assert(mclass >= SHMCLASS_MIN_BITS);
@@ -368,6 +459,9 @@ shmmgr_init(size_t size, bool hugetlb)
 		offset += (1 << mclass);
 	}
 	shmmgr_init_mutex(&shmhead->lock);
+
+	/* Also initialize shared buffer management */
+	shmbuf_init(size);
 
 	return 0;
 }
