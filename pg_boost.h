@@ -29,17 +29,29 @@ typedef struct {
 	((unsigned long) &((type *)0)->member)
 #define container_of(ptr, type, member)			\
 	(type *)(((char *)ptr) - offset_of(type, member))
+#define list_entry(offset, type, member)		\
+	container_of(offset_to_addr(offset), type, member)
 
 /*
- * iterator of shmlist
- * @entry  : the typed pointer to use as a loop cursor
- * @head   : the head of shmlist
- * @member : the name of the shmlist_t member within the struct
+ * shmlist_foreach_entry(_safe)
+ *
+ * iterator of the shmlist. _safe version is safe against remove items.
+ * @entry  : pointer of type * owning the list as a loop cursor.
+ * @temp   : another type * to use as temporary storage
+ * @head   : head of the list to be iterated
+ * @member : name of the shmlist_t within the struct
  */
 #define shmlist_foreach_entry(entry, head, member)						\
-	for (entry = container_of(offset_to_addr((head)->next), typeof(*entry), member); \
+	for (entry = list_entry((head)->next, typeof(*entry), member);		\
 		 &entry->member != (head);										\
-		 entry = container_of(offset_to_addr(entry->member.next), typeof(*entry), member))
+		 entry = list_entry(entry->member.next, typeof(*entry), member))
+
+#define shmlist_foreach_entry_safe(entry, temp, head, member)			\
+	for (entry = list_entry((head)->next, typeof(*entry), member),		\
+		 temp = list_entry(entry->member.next, typeof(*entry), member); \
+		 &entry->member != (head);										\
+		 entry = temp,													\
+		 temp = list_entry(entry->member.next, typeof(*entry), member))
 
 extern bool			shmlist_empty(shmlist_t *list);
 extern void			shmlist_init(shmlist_t *list);
@@ -82,9 +94,10 @@ typedef struct {
 
 extern bool		shmbuf_create(shmbuf_t *shmbuf, int tag, size_t size);
 extern void		shmbuf_delete(shmbuf_t *shmbuf);
+extern void		shmbuf_reclaim(size_t size);
 extern void	   *shmbuf_get_buffer(shmbuf_t *shmbuf);
-extern void	   *shmbuf_put_buffer(shmbuf_t *shmbuf);
-extern void		shmbuf_set_dirty(shmbuf_t);
-extern offset_t	shmbuf_init(void);
+extern void		shmbuf_put_buffer(shmbuf_t *shmbuf);
+extern void		shmbuf_set_dirty(shmbuf_t *shmbuf);
+extern offset_t	shmbuf_init(size_t size);
 
 #endif	/* PG_BOOST_H */

@@ -5,6 +5,7 @@
  *
  */
 #include "pg_boost.h"
+#include "utils/pg_lzcompress.h"
 #include <alloca.h>
 
 /*
@@ -190,17 +191,19 @@ shmbuf_reclaim(size_t size)
 {
 	shmbuf_head_t *sbh = (shmbuf_head_t *)shmmgr_get_bufmgr_head();
 	shmbuf_t   *shmbuf;
+	shmbuf_t   *temp;
 	size_t		reclaimed = 0;
 	int			index;
 
-	while (reclaimed < size)
+	while (reclaimed < size &&
+		   sbh->cache_size_total > sbh->cache_size_limit)
 	{
-		index = __sync_fetch_and_add(sbh->reclaim_hint, 1)
+		index = __sync_fetch_and_add(&sbh->reclaim_hint, 1)
 			% SHMBUF_NUM_ACTIVE_SLOT;
 
 		pthread_mutex_lock(&sbh->active_lock[index]);
 
-		shmlist_foreach_entry(shmbuf, &sbh->active_list[index], list)
+		shmlist_foreach_entry_safe(shmbuf, temp, &sbh->active_list[index], list)
 		{
 			pthread_mutex_lock(&shmbuf->lock);
 
@@ -239,7 +242,6 @@ shmbuf_get_buffer(shmbuf_t *shmbuf)
 	if (!cached)
 	{
 		void   *storage = offset_to_addr(shmbuf->storage);
-		int		reclaim;
 		int		index;
 
 		/*
@@ -253,13 +255,11 @@ shmbuf_get_buffer(shmbuf_t *shmbuf)
 		/*
 		 * Reclaim other cache, if overusage
 		 */
-		reclaim = sbh->cache_size_total - sbh->cache_size_limit;
-		if (reclaim > 0)
-			shmbuf_reclaim(reclaim);
+		shmbuf_reclaim(0);
 
 		if (shmbuf->flags & SHMBUF_FLAGS_COMPRESSED)
 		{
-			PG_TRY()
+			PG_TRY();
 			{
 				pglz_decompress(storage, cached);
 			}
@@ -274,7 +274,7 @@ shmbuf_get_buffer(shmbuf_t *shmbuf)
 		{
 			memcpy(cached, storage, shmbuf->size);
 		}
-		shmbuf->cached = cached;
+		shmbuf->cached = addr_to_offset(cached);
 		shmbuf->flags &= ~SHMBUF_FLAGS_DIRTY_CACHE;
 
 		index = __sync_fetch_and_and(&sbh->cache_hint, 1)
