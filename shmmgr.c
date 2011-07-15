@@ -5,6 +5,7 @@
  *
  *
  */
+#include "postgres.h"
 #include "pg_boost.h"
 #include <assert.h>
 #include <inttypes.h>
@@ -16,13 +17,13 @@
  * Shared memory chunk
  */
 typedef struct {
-	uint8_t		mclass;		/* power of chunk size */
+	uint8		mclass;		/* power of chunk size */
 	bool		active;		/* true, if active chunk */
 	shmlist_t	list;
 } shmchunk_t;
 
 /*
- * Shared memory header
+ * Shared memory segment header
  */
 #define SHMCLASS_MIN_BITS	6		/* 64bytes */
 #define SHMCLASS_MAX_BITS	31		/* 2Gbytes */
@@ -36,6 +37,8 @@ typedef struct {
 	int			num_active[SHMCLASS_MAX_BITS + 1];
 	int			num_free[SHMCLASS_MAX_BITS + 1];
 	pthread_mutex_t	lock;
+
+	offset_t	shmbuf_head;	/* superblock of shared buffer */
 } shmhead_t;
 
 static shmhead_t   *shmhead = NULL;
@@ -43,7 +46,7 @@ static shmhead_t   *shmhead = NULL;
 /*
  * ffs64 - returns first (smallest) bit of the value
  */
-static inline int ffs64(uint64_t value)
+static inline int ffs64(uint64 value)
 {
 	int		ret = 1;
 
@@ -86,7 +89,7 @@ static inline int ffs64(uint64_t value)
 /*
  * fls64 - returns last (biggest) bit of the value
  */
-static inline int fls64(uint64_t value)
+static inline int fls64(uint64 value)
 {
 	int		ret = 1;
 
@@ -389,7 +392,21 @@ shmmgr_free(void *ptr)
 	pthread_mutex_unlock(&shmhead->lock);
 }
 
-int
+void *
+shmmgr_get_bufmgr_head(void)
+{
+	return offset_to_addr(shmhead->shmbuf_head);
+}
+
+size_t
+shmmgr_get_size(void *ptr)
+{
+	shmchunk_t *chunk = container_of(ptr, shmchunk_t, list);
+
+	return (1 << chunk->mclass);
+}
+
+bool
 shmmgr_init(size_t size, bool hugetlb)
 {
 	int			shmid;
@@ -402,7 +419,7 @@ shmmgr_init(size_t size, bool hugetlb)
 
 	shmid = shmget(IPC_PRIVATE, size, shmflag);
 	if (shmid < 0)
-		return -1;
+		return false;
 
 	shmhead = shmat(shmid, NULL, 0);
 
@@ -415,7 +432,7 @@ shmmgr_init(size_t size, bool hugetlb)
 	shmctl(shmid, IPC_RMID, NULL);
 
 	if (shmhead == (void *)(-1))
-		return -1;
+		return false;
 
 	shmhead->shmid = shmid;
 	shmhead->segment_size = size;
@@ -460,13 +477,13 @@ shmmgr_init(size_t size, bool hugetlb)
 	}
 	shmmgr_init_mutex(&shmhead->lock);
 
-	/* Also initialize shared buffer management */
-	shmbuf_init(size);
+	/* initialization of shared buffer management */
+	shmhead->shmbuf_head = shmbuf_init(size);
 
-	return 0;
+	return true;
 }
 
-#if 1
+#if 0
 /*
  * Routines to module testing
  */
