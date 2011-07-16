@@ -6,6 +6,90 @@
  * Copyright (c) 2011, KaiGai Kohei
  */
 #include "pg_boost.h"
+#include "shmlist.h"
+
+
+
+
+
+
+
+typedef struct {
+	int				shmid;
+	size_t			total_size;
+	mlist_t			free_list[SHMCLASS_MAX_BITS + 1];
+	int				num_active[SHMCLASS_MAX_BITS + 1];
+	int				num_free[SHMCLASS_MAX_BITS + 1];
+	pthread_mutex_t lock;
+
+	/* memory caching support */
+	mlist_t			cache_list[SHMCACHE_NUM_SLOTS];
+	pthread_mutex_t	cache_lock[SHMCACHE_NUM_SLOTS];
+	int				cache_hint;
+	int				reclaim_hint;
+	size_t			cache_size;
+	size_t			cache_limit;
+} msegment_t;
+
+typedef struct {
+	uint16			mclass;
+	bool			is_active;
+	bool			is_buffer;
+} mchunk_common_t;
+
+typedef struct {
+	mchunk_common_t	c;
+	mlist_t			list;
+} mchunk_free;
+
+typedef struct {
+	mchunk_common_t	c;
+	uintptr_t		data[0];
+} mchunk_item;
+
+#define MCHUNK_FLAG_DIRTY_CACHE		0x01
+#define MCHUNK_FLAG_HOT_CACHE		0x02
+#define MCHUNK_FLAG_COMPRESSED		0x04
+typedef struct {
+	mchunk_common_t	c;
+	uint32			refcnt;
+	shmptr_t		storage;
+	shmptr_t		cached;
+	uint32			length;
+	uint16			index;
+	uint8			tag;
+	uint8			flags;
+	mlist_t			list;
+	pthread_mutex_t	lock;
+} mchunk_cache;
+
+/*
+ * Static variables
+ */
+static msegment_t *msegment = NULL;
+
+
+
+
+extern shmptr_t	shmmgr_alloc(size_t size);
+extern shmptr_t shmmgr_try_alloc(size_t size);
+extern shmptr_t	shmmgr_cache_alloc(size_t size, uint8 tag);
+extern void		shmmgr_free(shmptr_t ptr);
+extern void		shmmgr_init_mutex(pthread_mutex_t *lock);
+extern void		shmmgr_init_rwlock(pthread_rwlock_t *lock);
+extern void	   *shmmgr_get_addr(shmptr_t ptr);
+extern void		shmmgr_put_addr(shmptr_t ptr, bool is_dirty);
+extern void		shmmgr_init(size_t size, bool hugetlb);
+extern void		shmmgr_exit(void);
+extern void	   *shmptr_to_addr(shmptr_t ptr);
+extern shmptr_t	shmptr_from_addr(void *addr);
+extern size_t	shmptr_get_size(shmptr_t ptr);
+extern uint8	shmptr_get_tag(shmptr_t ptr);
+
+
+
+
+
 
 
 
@@ -27,16 +111,6 @@ typedef struct {
 		struct {
 			uint8		data[0];
 		} item;
-		struct {	/* is_free == false && is_buffer == false */
-			uintptr_t	storage;
-			uintptr_t	cached;
-			uint32		length;
-			uint32		refcnt;
-			mlist_t		list;
-			uint16		index;
-			uint8		tag;
-			uint8		flags;
-		} buffer;	/* is_free == false && is_buffer == true */
 	};
 } shmchunk_t;
 
