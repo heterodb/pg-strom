@@ -71,6 +71,15 @@ typedef struct {
  * Static variables
  */
 static msegment_t *msegment = NULL;
+static pthread_mutexattr_t	msegment_mutex_attr;
+static pthread_rwlockattr_t	msegment_rwlock_attr;
+
+/*
+ * GUC Variables
+ */
+static int	msegment_cache_ratio = 60;		// 60%
+static int	msegment_total_size  = 128;		// 128MB
+static bool	msegment_with_hugetlb = true;	// with HUGETLB
 
 /*
  * ffs - returns first (smallest) bit of the value
@@ -90,7 +99,10 @@ static inline int fls(shmptr_t ptr)
 	return sizeof(shmptr_t) * 8 - __builtin_clz(ptr);
 }
 
-
+extern void	   *shmptr_to_addr(shmptr_t ptr);
+extern shmptr_t	addr_to_shmptr(void *addr);
+extern size_t	shmptr_get_size(shmptr_t ptr);
+extern uint8	shmptr_get_tag(shmptr_t ptr);
 extern shmptr_t	shmmgr_alloc(size_t size);
 extern shmptr_t shmmgr_try_alloc(size_t size);
 extern shmptr_t	shmmgr_cache_alloc(size_t size, uint8 tag);
@@ -99,12 +111,119 @@ extern void		shmmgr_init_mutex(pthread_mutex_t *lock);
 extern void		shmmgr_init_rwlock(pthread_rwlock_t *lock);
 extern void	   *shmmgr_get_addr(shmptr_t ptr);
 extern void		shmmgr_put_addr(shmptr_t ptr, bool is_dirty);
-extern void		shmmgr_init(size_t size, bool hugetlb);
-extern void		shmmgr_exit(void);
-extern void	   *shmptr_to_addr(shmptr_t ptr);
-extern shmptr_t	shmptr_from_addr(void *addr);
-extern size_t	shmptr_get_size(shmptr_t ptr);
-extern uint8	shmptr_get_tag(shmptr_t ptr);
+void
+shmmgr_init(boid)
+{
+	int			shmid;
+	int			shmflag;
+	int			mclass;
+	shmptr_t	shmptr;
+	size_t		total_size;
+	size_t		cache_limit;
+
+	DefineCustomIntVariable("pg_boost.cache_ratio",
+							"",
+							NULL,
+							&msegment_cache_ratio,
+							60,
+							5,
+							95,
+							PGC_SIGHUP,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pg_boost.total_size",
+							"",
+							NULL,
+							&msegment_total_size,
+							128,			/* 128MB */
+							128,			/* 128MB */
+							1024 * 1024,	/* 1TB */
+							PGC_SIGHUP,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("pg_boost.with_hugetlb",
+							 "",
+							 NULL,
+							 &msegment_with_hugetlb,
+							 true,
+							 PGC_SIGHUP,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/*
+	 * Init mutex object
+	 */
+	if (pthread_mutexattr_init(&msegment_mutex_attr) != 0 ||
+		pthread_mutexattr_setpshared(&msegment_mutex_attr,
+									 PTHREAD_PROCESS_SHARED) != 0)
+		elog(ERROR, "failed to initialize mutex attribute");
+
+	if (pthread_rwlockattr_init(&msegment_rwlock_attr) != 0 ||
+		pthread_rwlockattr_setpshared(&msegment_rwlock_attr,
+									  PTHREAD_PROCESS_SHARED) != 0)
+		elog(ERROR, "failed to initialize rwlock attribute");
+
+	/*
+	 * Get shared memory segment
+	 */
+	shmflag = 0600 | IPC_CREAT | IPC_EXCL;
+	if (msegment_with_hugetlb)
+		shmflag |= SHM_HUGETLB;
+
+	total_size = msegment_total_size * 1024 * 1024;
+	cache_limit = total_size * 100 / msegment_cache_ratio;
+
+	shmid = shmget(IPC_PRIVATE, total_size, shmflag);
+	if (shmid < 0)
+		elog(ERROR, "failed on shmget(2)");
+
+	msegment = shmat(shmid, NULL, 0);
+
+	/*
+	 * To make sure the shared memory segment being released
+	 * when the process exit.
+	 * If shmat(2) failed, this segment shall be removed soon,
+	 * because nobody maps it.
+	 */
+    shmctl(shmid, IPC_RMID, NULL);
+
+	if (msegment == (void *)(-1))
+		elog(ERROR, "failed on shmget(2)");
+
+	/*
+	 * Initialization
+	 */
+	msegment->shmid = shmid;
+	msegment->total_size = total_size;
+	for (mclass = 0; mclass <= SHMCLASS_MAX_BITS; mclass++)
+	{
+		mlist_init(&msegment->free_list[mclass]);
+		msegment->num_active[mclass] = 0;
+		msegment->num_free[mclass] = 0;
+	}
+	shmmgr_init_mutex(&msegment->lock);
+
+	shmptr = 1 << fls(sizeof(msegment_t) + 1);
+	if (shmptr < SHMCLASS_MIN_SIZE)
+		shmptr = SHMCLASS_MIN_SIZE;
+
+	while (msegment->total_size - shmptr >= SHMCLASS_MIN_SIZE)
+	{
+		mchunk_t   *chunk;
+
+
+
+
+
+
+
+
+}
+
+void
+shmmgr_exit(void)
+{}
 
 
 

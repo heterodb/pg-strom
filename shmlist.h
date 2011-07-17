@@ -50,7 +50,7 @@ shmlist_empty(shmlist_t *list)
 static inline void
 shmlist_init(shmlist_t *list)
 {
-	list->next = list->prev = shmptr_from_addr(list);
+	list->next = list->prev = addr_to_shmptr(list);
 }
 
 static inline void
@@ -58,10 +58,10 @@ shmlist_add(shmlist_t *base, shmlist_t *list)
 {
 	shmlist_t  *nlist = shmptr_to_addr(base->next);
 
-	base->next = shmptr_from_addr(list);
-	list->prev = shmptr_from_addr(base);
-	list->next = shmptr_from_addr(nlist);
-	nlist->prev = shmptr_from_addr(list);
+	base->next = addr_to_shmptr(list);
+	list->prev = addr_to_shmptr(base);
+	list->next = addr_to_shmptr(nlist);
+	nlist->prev = addr_to_shmptr(list);
 }
 
 static inline void
@@ -70,11 +70,10 @@ shmlist_del(shmlist_t *list)
 	shmlist_t  *plist = shmptr_to_addr(list->prev);
 	shmlist_t  *nlist = shmptr_to_addr(list->next);
 
-	plist->next = shmptr_from_addr(nlist);
-	nlist->prev = shmptr_from_addr(plist);
+	plist->next = addr_to_shmptr(nlist);
+	nlist->prev = addr_to_shmptr(plist);
 
 	shmlist_init(list);
 }
 
 #endif	/* SHMLIST_H */
-
