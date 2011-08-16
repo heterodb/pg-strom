@@ -6,6 +6,7 @@
 #include "postgres.h"
 #include "pg_boost.h"
 #include "utils/guc.h"
+#include "utils/pg_lzcompress.h"
 #include <sys/ipc.h>
 #include <sys/shm.h>
 
@@ -321,6 +322,7 @@ shmseg_free(void *addr)
 		/*
 		 * Also free? and same class?
 		 */
+		buddy = offset_to_addr(offset_buddy);
 		if (buddy->mclass != mclass || buddy->mtag != MCHUNK_TAG_FREE)
 			break;
 
@@ -347,26 +349,29 @@ shmseg_free(void *addr)
 }
 
 static int
-shmseg_get_mclass(void *addr)
+shmseg_get_rawsize(void *addr)
 {
 	mchunk_item_t  *mitem = container_of(addr, mchunk_item_t, data);
 
 	Assert(mitem->mtag == MCHUNK_TAG_ITEM);
 
-	return mitem->mclass;
+	return (1 << mitem->mclass);
 }
 
 size_t
 shmseg_get_size(void *addr)
 {
-	return (1 << shmseg_get_mclass(addr)) - offsetof(mchunk_item_t, data);
+	return shmseg_get_rawsize(addr) - offsetof(mchunk_item_t, data);
 }
 
 static size_t
 shmseg_try_reclaim_buffer(mchunk_buffer_t *mbuffer)
 {
 	struct PGLZ_Header *temp;
-	void   *cached = offset_to_addr(mbuffer->cached);
+	void   *cached;
+	void   *storage_old;
+	void   *storage_new;
+	size_t	cached_size;
 	size_t	reclaimed = 0;
 	int		flags;
 
@@ -380,6 +385,13 @@ shmseg_try_reclaim_buffer(mchunk_buffer_t *mbuffer)
 		return 0;
 
 	/*
+	 * Cold buffer cached shall be reclaimed
+	 */
+	mlist_del(&mbuffer->list);
+	cached = offset_to_addr(mbuffer->cached);
+	cached_size = shmseg_get_rawsize(cached);
+
+	/*
 	 * A simple case: the buffer cache is not dirty, and it already
 	 * have a storage area. All we need to do is just release the
 	 * buffer cache.
@@ -388,41 +400,53 @@ shmseg_try_reclaim_buffer(mchunk_buffer_t *mbuffer)
 	{
 		shmseg_free(cached);
 		mbuffer->cached = 0;
-		return (1 << shmseg_get_mclass(cached));
+
+		__sync_fetch_and_sub(&msegment->mbuffer_usage, cached_size);
+
+		return cached_size;
 	}
 
 	/*
-	 * A complex case: the buffer cache is dirty, or/and does not
-	 * have compressed storage area.
+	 * A complex case: If the buffer cache was dirty, or does not have
+	 * storage area, we need to compress and write back the cached one.
 	 */
 	temp = alloca(PGLZ_MAX_OUTPUT(mbuffer->length));
-	if (pglz_compress(cached, mcache->length, temp, PGLZ_strategy_default))
+
+	if (pglz_compress(cached, mbuffer->length, temp, PGLZ_strategy_default))
 	{
-		void   *storage_new
-			= shmseg_resize(mbuffer->cached, VARSIZE(temp));
-		memcpy(storage_new, VARDATA(temp), VARSIZE(temp));
+		storage_new = shmseg_resize(cached, VARSIZE(temp));
+		storage_old = offset_to_addr(mbuffer->storage);
 
-		mlist_del(&mbuffer->list);
-		if (mbuffer->storage)
+		if (storage_old)
 		{
-			void   *storage_old = offset_to_addr(mbuffer->storage);
-
-			reclaimed += shmseg_get_mclass(cached);
-
-			shmseg_free(offset_to_addr(mbuffer->storage));
+			reclaimed += shmseg_get_rawsize(storage_old);
+			shmseg_free(storage_old);
 		}
+		mbuffer->storage = addr_to_offset(storage_new);
+		mbuffer->cached = 0;
+		mbuffer->flags = MBUFFER_FLAG_COMPRESSED;
 
+		__sync_fetch_and_sub(&msegment->mbuffer_usage, cached_size);
 
+		reclaimed += (cached_size - shmseg_get_rawsize(storage_new));
 
+		return reclaimed;
 	}
+	/*
+	 * If failed to compress, we just swap cached data to storage data
+	 */
+	storage_old = offset_to_addr(mbuffer->storage);
+	if (storage_old)
+	{
+		reclaimed += shmseg_get_rawsize(storage_old);
+		shmseg_free(storage_old);
+	}
+	mbuffer->storage = mbuffer->cached;
+	mbuffer->cached = 0;
+	mbuffer->flags = 0;
+	__sync_fetch_and_sub(&msegment->mbuffer_usage, cached_size);
 
-
-
-
-
-
-
-
+	return reclaimed;
 }
 
 static void
@@ -436,12 +460,12 @@ shmseg_reclaim_buffer(size_t size)
 		mchunk_buffer_t	   *mbuffer;
 		mchunk_buffer_t	   *temp;
 		int	index = __sync_fetch_and_add(&msegment->mbuffer_reclaim, 1)
-			& (SHMSEG_CACHE_NUM_SLOTS - 1);
+			& (MSEGMENT_BUFFER_NUM_SLOTS - 1);
 
 		pthread_mutex_lock(&msegment->mbuffer_lock[index]);
 
 		mlist_foreach_entry_safe(mbuffer, temp,
-								 &msegment->mcache_list[index], list)
+								 &msegment->mbuffer_list[index], list)
 		{
 			if (pthread_rwlock_trywrlock(&mbuffer->lock) == 0)
 			{
@@ -469,12 +493,13 @@ shmseg_alloc_buffer(size_t size)
 	mchunk_buffer_t	*mbuffer;
 	void	   *temp;
 	void	   *cached;
+	int			index;
 	int			retry = 4;
 
 	temp = shmseg_alloc(sizeof(mchunk_buffer_t));
 	mbuffer = (mchunk_buffer_t *)container_of(temp, mchunk_item_t, data);
 	while ((cached = shmseg_try_alloc(size)) == NULL && retry-- > 0)
-		shmseg_buffer_reclaim(size);
+		shmseg_reclaim_buffer(size);
 	if (!cached)
 	{
 		shmseg_free(temp);
@@ -482,8 +507,8 @@ shmseg_alloc_buffer(size_t size)
 				(errcode(ERRCODE_OUT_OF_MEMORY),
 				 errmsg("pg_boost: out of shared memory")));
 	}
-	index = __sync_fetch_and_add(&msegment->mbuffer_index, 1)
-		& (MSEGMENT_BUFFER_NUM_SLOTS - 1);
+	index = (__sync_fetch_and_add(&msegment->mbuffer_index, 1)
+			 & (MSEGMENT_BUFFER_NUM_SLOTS - 1));
 
 	mbuffer->mtag = MCHUNK_TAG_BUFFER;
 	mbuffer->flags = MBUFFER_FLAG_HOT_CACHE;
@@ -492,9 +517,12 @@ shmseg_alloc_buffer(size_t size)
 	mbuffer->length = size;
 	mbuffer->index = index;
 
+	__sync_fetch_and_add(&msegment->mbuffer_usage,
+						 shmseg_get_rawsize(cached));
+
 	pthread_mutex_lock(&msegment->mbuffer_lock[index]);
-    mlist_add(&msegment->mbuffer_list[index], &mbuffer->list);
-    pthread_mutex_unlock(&msegment->mbuffer_lock[index]);
+	mlist_add(&msegment->mbuffer_list[index], &mbuffer->list);
+	pthread_mutex_unlock(&msegment->mbuffer_lock[index]);
 
 	return mbuffer;
 }
@@ -537,7 +565,7 @@ shmseg_load_buffer(mchunk_buffer_t *mbuffer)
 
 	while ((cached = shmseg_try_alloc(mbuffer->length)) == NULL &&
 		   retry-- > 0)
-		shmseg_buffer_reclaim(mbuffer->length);
+		shmseg_reclaim_buffer(mbuffer->length);
 	if (!cached)
 		ereport(ERROR,
 				(errcode(ERRCODE_OUT_OF_MEMORY),
