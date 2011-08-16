@@ -62,9 +62,10 @@ struct mchunk_buffer_t {
 	uint8		mtag;
 	uint8		flags;
 	uintptr_t	storage;
-	uintptr_t	buffered;
+	uintptr_t	cached;
 	mlist_t		list;
 	uint32		length;
+	uint16		index;
 	pthread_rwlock_t	lock;
 };
 typedef struct mchunk_buffer_t	mchunk_buffer_t;
@@ -94,6 +95,7 @@ static inline int fast_fls(uintptr_t value)
 		return 0;
 	return sizeof(value) * 8 - __builtin_clz(value);
 }
+
 
 static bool
 shmseg_split_chunk(int mclass)
@@ -344,33 +346,271 @@ shmseg_free(void *addr)
 	pthread_mutex_unlock(&msegment->lock);
 }
 
-size_t
-shmseg_get_size(void *addr)
+static int
+shmseg_get_mclass(void *addr)
 {
 	mchunk_item_t  *mitem = container_of(addr, mchunk_item_t, data);
 
-	return (1 << mitem->mclass) - offsetof(mchunk_item_t, data);
+	Assert(mitem->mtag == MCHUNK_TAG_ITEM);
+
+	return mitem->mclass;
+}
+
+size_t
+shmseg_get_size(void *addr)
+{
+	return (1 << shmseg_get_mclass(addr)) - offsetof(mchunk_item_t, data);
+}
+
+static size_t
+shmseg_try_reclaim_buffer(mchunk_buffer_t *mbuffer)
+{
+	struct PGLZ_Header *temp;
+	void   *cached = offset_to_addr(mbuffer->cached);
+	size_t	reclaimed = 0;
+	int		flags;
+
+	Assert(mbuffer->cached != 0);
+
+	/*
+	 * Postpone to reclaim buffer cache being recently referenced
+	 */
+	flags = __sync_fetch_and_and(&mbuffer->flags, ~MBUFFER_FLAG_HOT_CACHE);
+	if (flags & MBUFFER_FLAG_HOT_CACHE)
+		return 0;
+
+	/*
+	 * A simple case: the buffer cache is not dirty, and it already
+	 * have a storage area. All we need to do is just release the
+	 * buffer cache.
+	 */
+	if (mbuffer->storage && (flags & MBUFFER_FLAG_DIRTY_CACHE) == 0)
+	{
+		shmseg_free(cached);
+		mbuffer->cached = 0;
+		return (1 << shmseg_get_mclass(cached));
+	}
+
+	/*
+	 * A complex case: the buffer cache is dirty, or/and does not
+	 * have compressed storage area.
+	 */
+	temp = alloca(PGLZ_MAX_OUTPUT(mbuffer->length));
+	if (pglz_compress(cached, mcache->length, temp, PGLZ_strategy_default))
+	{
+		void   *storage_new
+			= shmseg_resize(mbuffer->cached, VARSIZE(temp));
+		memcpy(storage_new, VARDATA(temp), VARSIZE(temp));
+
+		mlist_del(&mbuffer->list);
+		if (mbuffer->storage)
+		{
+			void   *storage_old = offset_to_addr(mbuffer->storage);
+
+			reclaimed += shmseg_get_mclass(cached);
+
+			shmseg_free(offset_to_addr(mbuffer->storage));
+		}
+
+
+
+	}
+
+
+
+
+
+
+
+
+}
+
+static void
+shmseg_reclaim_buffer(size_t size)
+{
+	size_t	reclaimed = 0;
+
+	while (msegment->mbuffer_size >= msegment->mbuffer_usage &&
+		   reclaimed < size)
+	{
+		mchunk_buffer_t	   *mbuffer;
+		mchunk_buffer_t	   *temp;
+		int	index = __sync_fetch_and_add(&msegment->mbuffer_reclaim, 1)
+			& (SHMSEG_CACHE_NUM_SLOTS - 1);
+
+		pthread_mutex_lock(&msegment->mbuffer_lock[index]);
+
+		mlist_foreach_entry_safe(mbuffer, temp,
+								 &msegment->mcache_list[index], list)
+		{
+			if (pthread_rwlock_trywrlock(&mbuffer->lock) == 0)
+			{
+				PG_TRY();
+				{
+					reclaimed += shmseg_try_reclaim_buffer(mbuffer);
+				}
+				PG_CATCH();
+				{
+					pthread_rwlock_unlock(&mbuffer->lock);
+					pthread_mutex_unlock(&msegment->mbuffer_lock[index]);
+					PG_RE_THROW();
+				}
+				PG_END_TRY();
+				pthread_rwlock_unlock(&mbuffer->lock);
+			}
+		}
+		pthread_mutex_unlock(&msegment->mbuffer_lock[index]);
+	}
 }
 
 mchunk_buffer_t *
 shmseg_alloc_buffer(size_t size)
-{}
+{
+	mchunk_buffer_t	*mbuffer;
+	void	   *temp;
+	void	   *cached;
+	int			retry = 4;
+
+	temp = shmseg_alloc(sizeof(mchunk_buffer_t));
+	mbuffer = (mchunk_buffer_t *)container_of(temp, mchunk_item_t, data);
+	while ((cached = shmseg_try_alloc(size)) == NULL && retry-- > 0)
+		shmseg_buffer_reclaim(size);
+	if (!cached)
+	{
+		shmseg_free(temp);
+		ereport(ERROR,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("pg_boost: out of shared memory")));
+	}
+	index = __sync_fetch_and_add(&msegment->mbuffer_index, 1)
+		& (MSEGMENT_BUFFER_NUM_SLOTS - 1);
+
+	mbuffer->mtag = MCHUNK_TAG_BUFFER;
+	mbuffer->flags = MBUFFER_FLAG_HOT_CACHE;
+	mbuffer->storage = 0;
+	mbuffer->cached = addr_to_offset(cached);
+	mbuffer->length = size;
+	mbuffer->index = index;
+
+	pthread_mutex_lock(&msegment->mbuffer_lock[index]);
+    mlist_add(&msegment->mbuffer_list[index], &mbuffer->list);
+    pthread_mutex_unlock(&msegment->mbuffer_lock[index]);
+
+	return mbuffer;
+}
+
 void
-shmseg_free_buffer(mchunk_buffer_t *mbuffer);
+shmseg_free_buffer(mchunk_buffer_t *mbuffer)
+{
+	if (mbuffer->storage)
+		shmseg_free(offset_to_addr(mbuffer->storage));
+	if (mbuffer->cached)
+	{
+		pthread_mutex_lock(&msegment->mbuffer_lock[mbuffer->index]);
+		mlist_del(&mbuffer->list);
+		pthread_mutex_unlock(&msegment->mbuffer_lock[mbuffer->index]);
+
+		shmseg_free(offset_to_addr(mbuffer->cached));
+	}
+	shmseg_free(container_of(mbuffer, mchunk_item_t, data));
+}
+
+static void
+shmseg_load_buffer(mchunk_buffer_t *mbuffer)
+{
+	void   *cached;
+	int		retry = 4;
+
+	if (mbuffer->cached)
+		return;
+
+	if ((mbuffer->flags & MBUFFER_FLAG_COMPRESSED) == 0)
+	{
+		mbuffer->cached = mbuffer->storage;
+		mbuffer->storage = 0;
+
+		/* make sure 'cached' shall be write back to storage */
+		mbuffer->flags |= MBUFFER_FLAG_DIRTY_CACHE;
+
+		return;
+	}
+
+	while ((cached = shmseg_try_alloc(mbuffer->length)) == NULL &&
+		   retry-- > 0)
+		shmseg_buffer_reclaim(mbuffer->length);
+	if (!cached)
+		ereport(ERROR,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("pg_boost: out of shared memory")));
+	PG_TRY();
+	{
+		pglz_decompress(offset_to_addr(mbuffer->storage), cached);
+	}
+	PG_CATCH();
+	{
+		shmseg_free(cached);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	mbuffer->cached = addr_to_offset(cached);
+	mbuffer->flags &= ~MBUFFER_FLAG_DIRTY_CACHE;
+}
 
 void *
 shmseg_get_read_buffer(mchunk_buffer_t *mbuffer)
-{}
+{
+	pthread_rwlock_rdlock(&mbuffer->lock);
+	while (!mbuffer->cached)
+	{
+		/* Lock upgrade */
+		pthread_rwlock_unlock(&mbuffer->lock);
+		pthread_rwlock_wrlock(&mbuffer->lock);
+
+		PG_TRY();
+		{
+			shmseg_load_buffer(mbuffer);
+		}
+		PG_CATCH();
+		{
+			pthread_rwlock_unlock(&mbuffer->lock);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+
+		/* Lock downgrade */
+		pthread_rwlock_unlock(&mbuffer->lock);
+		pthread_rwlock_rdlock(&mbuffer->lock);
+	}
+	__sync_fetch_and_or(&mbuffer->flags, MBUFFER_FLAG_HOT_CACHE);
+	return offset_to_addr(mbuffer->cached);
+}
 
 void *
 shmseg_get_write_buffer(mchunk_buffer_t *mbuffer)
 {
-
+	pthread_rwlock_wrlock(&mbuffer->lock);
+	PG_TRY();
+	{
+		shmseg_load_buffer(mbuffer);
+	}
+	PG_CATCH();
+	{
+		pthread_rwlock_unlock(&mbuffer->lock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	__sync_fetch_and_or(&mbuffer->flags, MBUFFER_FLAG_HOT_CACHE);
+	return offset_to_addr(mbuffer->cached);
 }
 
 void
 shmseg_put_buffer(mbuffer_t mbuffer, bool is_dirty)
-{}
+{
+	if (is_dirty)
+		mbuffer->flags |= MBUFFER_FLAG_DIRTY_CACHE;
+	pthread_rwlock_unlock(&mbuffer->lock);
+}
 
 void
 shmseg_init_mutex(pthread_mutex_t *lock)
