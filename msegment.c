@@ -80,6 +80,11 @@ static pthread_mutexattr_t	msegment_mutex_attr;
 static pthread_rwlockattr_t	msegment_rwlock_attr;
 
 /*
+ * Declaration of static functions
+ */
+static void	shmseg_reclaim_buffer(size_t size);
+
+/*
  * ffs - returns first (smallest) bit of the value
  */
 static inline int fast_ffs(uintptr_t value)
@@ -94,9 +99,8 @@ static inline int fast_fls(uintptr_t value)
 {
 	if (!value)
 		return 0;
-	return sizeof(value) * 8 - __builtin_clz(value);
+	return sizeof(value) * 8 - __builtin_clzl(value);
 }
-
 
 static bool
 shmseg_split_chunk(int mclass)
@@ -132,7 +136,7 @@ shmseg_split_chunk(int mclass)
 
 	mlist_add(&msegment->free_list[mclass], &mfree1->list);
 	mlist_add(&msegment->free_list[mclass], &mfree2->list);
-	msegment->num_free[mclass] -= 2;
+	msegment->num_free[mclass] += 2;
 
 	return true;
 }
@@ -143,9 +147,10 @@ shmseg_try_alloc(size_t size)
 	mchunk_item_t  *mitem;
 	mlist_t		   *mlist;
 	int				mclass;
-	bool			retried = false;
+	int				retry = 4;
 
 	mclass = fast_fls(size + offsetof(mchunk_item_t, data) - 1);
+	elog(NOTICE, "mclass = %u", mclass);
 	if (mclass > MSEGMENT_CLASS_MAX_BITS)
 		return NULL;
 	if (mclass < MSEGMENT_CLASS_MIN_BITS)
@@ -164,9 +169,9 @@ retry:
 		if (!shmseg_split_chunk(mclass + 1))
 		{
 			pthread_mutex_unlock(&msegment->lock);
-			if (!retried)
+			if (retry-- > 0)
 			{
-				retried = true;
+				shmseg_reclaim_buffer(2 * size);
 				goto retry;
 			}
 			return NULL;
@@ -681,7 +686,7 @@ shmseg_init_msegment(int shmid, size_t segment_size, size_t buffer_size)
 		mchunk_free_t  *mfree;
 
 		/* choose an appropriate chunk class */
-		mclass = fast_ffs(offset);
+		mclass = fast_ffs(offset) - 1;
 		if (mclass >= MSEGMENT_CLASS_MAX_BITS)
 			mclass = MSEGMENT_CLASS_MAX_BITS;
 		Assert(mclass >= MSEGMENT_CLASS_MIN_BITS);
@@ -815,6 +820,9 @@ shmseg_init(void)
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+
+	elog(LOG, "pg_boost: initialize %u MB of shared memory segment",
+		 guc_segment_size);
 }
 
 void
@@ -896,12 +904,13 @@ pg_shmseg_statinfo(PG_FUNCTION_ARGS)
 
 	pthread_mutex_lock(&msegment->lock);
 
-	values[0] = mclass;
-	values[1] = msegment->num_active[mclass];
-	values[2] = msegment->num_free[mclass];
+	values[0] = Int32GetDatum(mclass);
+	values[1] = Int32GetDatum(msegment->num_active[mclass]);
+	values[2] = Int32GetDatum(msegment->num_free[mclass]);
 
 	pthread_mutex_unlock(&msegment->lock);
 
+	memset(nulls, false, sizeof(nulls));
 	tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
 	result = HeapTupleGetDatum(tuple);
 

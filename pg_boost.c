@@ -7,20 +7,25 @@
  *
  */
 #include "postgres.h"
+#include "fmgr.h"
+#include "miscadmin.h"
 #include "pg_boost.h"
 
-#ifdef PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
-#endif
 
-void	PG_init(void);
+void	_PG_init(void);
 
 /*
  * Entrypoint of the pg_boost module
  */
 void
-PG_init(void)
+_PG_init(void)
 {
+	if (!process_shared_preload_libraries_in_progress)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+		errmsg("pg_boost must be loaded via shared_preload_libraries")));
+
 	/* Create own shared memory segment */
 	shmseg_init();
 }
