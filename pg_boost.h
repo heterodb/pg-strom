@@ -3,7 +3,6 @@
  *
  * Copyright (c) 2011 KaiGai Kohei <kaigai@kaigai.gr.jp>
  *
- * 
  */
 #ifndef PG_BOOST_H
 #define PG_BOOST_H

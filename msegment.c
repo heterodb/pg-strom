@@ -4,9 +4,9 @@
  * Copyright (c) 2011 KaiGai Kohei <kaigai@kaigai.gr.jp>
  */
 #include "postgres.h"
-#include "pg_boost.h"
 #include "utils/guc.h"
 #include "utils/pg_lzcompress.h"
+#include "pg_boost.h"
 #include <sys/ipc.h>
 #include <sys/shm.h>
 
@@ -822,3 +822,94 @@ shmseg_exit(void)
 {
 	shmdt(msegment);
 }
+
+#ifdef PG_DEBUG
+#include "funcapi.h"
+#include "catalog/pg_type.h"
+
+Datum pg_shmseg_alloc(PG_FUNCTION_ARGS);
+Datum pg_shmseg_free(PG_FUNCTION_ARGS);
+Datum pg_shmseg_statinfo(PG_FUNCTION_ARGS);
+
+Datum
+pg_shmseg_alloc(PG_FUNCTION_ARGS)
+{
+	size_t	size = PG_GETARG_UINT32(0);
+	void   *addr = shmseg_alloc(size);
+
+	PG_RETURN_UINT32(addr_to_offset(addr));
+}
+
+Datum
+pg_shmseg_free(PG_FUNCTION_ARGS)
+{
+	uintptr_t		offset = PG_GETARG_UINT32(0);
+	mchunk_item_t  *mitem;
+
+	if (offset < sizeof(msegment_t) || offset > msegment->segment_size)
+		elog(ERROR, "offset %u is out of range", (uint32)offset);
+
+	mitem = container_of(offset_to_addr(offset), mchunk_item_t, data);
+	if (mitem->mtag != MCHUNK_TAG_ITEM)
+		elog(ERROR, "offset %u is not mchunk item", (uint32)offset);
+
+	shmseg_free(mitem->data);
+
+	PG_RETURN_BOOL(true);
+}
+
+Datum
+pg_shmseg_statinfo(PG_FUNCTION_ARGS)
+{
+	FuncCallContext	*funcctx;
+	HeapTuple	tuple;
+	int			mclass;
+	Datum		result;
+	Datum		values[3];
+	bool		nulls[3];
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		MemoryContext	oldctx;
+		TupleDesc		tupdesc;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+
+		oldctx = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(3, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "mclass",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "actives",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "frees",
+						   INT4OID, -1, 0);
+
+		funcctx->tuple_desc = BlessTupleDesc(tupdesc);
+        MemoryContextSwitchTo(oldctx);
+	}
+	funcctx = SRF_PERCALL_SETUP();
+
+	mclass = MSEGMENT_CLASS_MIN_BITS + funcctx->call_cntr;
+	if (mclass > MSEGMENT_CLASS_MAX_BITS)
+		SRF_RETURN_DONE(funcctx);
+
+	pthread_mutex_lock(&msegment->lock);
+
+	values[0] = mclass;
+	values[1] = msegment->num_active[mclass];
+	values[2] = msegment->num_free[mclass];
+
+	pthread_mutex_unlock(&msegment->lock);
+
+	tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+	result = HeapTupleGetDatum(tuple);
+
+	SRF_RETURN_NEXT(funcctx, result);
+}
+
+PG_FUNCTION_INFO_V1(pg_shmseg_alloc);
+PG_FUNCTION_INFO_V1(pg_shmseg_free);
+PG_FUNCTION_INFO_V1(pg_shmseg_statinfo);
+
+#endif
