@@ -16,6 +16,13 @@ PG_MODULE_MAGIC;
 void	_PG_init(void);
 
 /*
+ * Global variables
+ */
+int		guc_segment_size;
+bool	guc_use_hugetlb;;
+char   *guc_temp_dir;
+
+/*
  * Entrypoint of the pg_boost module
  */
 void
