@@ -1,7 +1,7 @@
 # pg_boost Makefile
 
 MODULE_big = pg_boost
-OBJS = pg_boost.o msegment.o
+OBJS = pg_boost.o shmmgr.o
 
 PG_CPPFLAGS += -DPG_DEBUG
 SHLIB_LINK += -lpthread
