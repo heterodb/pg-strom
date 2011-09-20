@@ -7,6 +7,7 @@
  *
  */
 #include "postgres.h"
+#include "access/reloptions.h"
 #include "fmgr.h"
 #include "miscadmin.h"
 #include "utils/guc.h"
@@ -14,48 +15,53 @@
 
 PG_MODULE_MAGIC;
 
-void	_PG_init(void);
+/*
+ *
+ *
+ *
+ *
+ */
+Datum
+pgboost_fdw_validator(PG_FUNCTION_ARGS)
+{
+	List   *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
+	Oid		catalog = DatumGetObjectId(PG_GETARG_OID(1));
+	List   *cell;
+
+	foreach (cell, options_list)
+	{
+		/*
+		 * Currently no options are supported
+		 */
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+				 errmsg("invalid option \"%s\"", def->defname)));
+	}
+}
+PG_FUNCTION_INFO_V1(pgboost_fdw_validator);
 
 /*
- * Global variables
+ *
+ *
+ *
+ *
+ *
  */
-int		guc_segment_size;
-bool	guc_with_hugetlb;
-char   *guc_unbuffered_dir;
-
-static void
-pg_boost_guc_init(void)
+Datum
+pgboost_fdw_handler(PG_FUNCTION_ARGS)
 {
-	DefineCustomIntVariable("pg_boost.segment_size",
-							"Size of shared memory segment in MB",
-                            NULL,
-							&guc_segment_size,
-							128,			/* 128MB */
-							32,				/*  32MB */
-							2048 * 1024,	/*   2TB */
-							PGC_SIGHUP,
-							GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
+	FdwRoutine *fdwroutine = makeNode(FdwRoutine);
 
-	DefineCustomBoolVariable("pg_boost.with_hugetlb",
-							 "True, if HugeTlb on shared memory segment",
-							 NULL,
-							 &guc_with_hugetlb,
-							 false,
-							 PGC_SIGHUP,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
+	fdwroutine->PlanForeignScan = PgBoostPlanForeignScan;
+	fdwroutine->ExplainForeignScan = PgBoostExplainForeignScan;
+	fdwroutine->BeginForeignScan = PgBoostBeginForeignScan;
+	fdwroutine->IterateForeignScan = PgBoostIterateForeignScan;
+	fdwroutine->ReScanForeignScan = PgBoostReScanForeignScan;
+	fdwroutine->EndForeignScan = PgBoostEndForeignScan;
 
-	DefineCustomStringVariable("pg_boost.unbuffered_dir",
-							   "Path to the directory of unbuffered data",
-							   NULL,
-							   &guc_unbuffered_dir,
-							   "/dev/shm/pg_boost",
-							   PGC_SIGHUP,
-							   GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
+	PG_RETURN_POINTER(fdwroutine);
 }
-
+PG_FUNCTION_INFO_V1(pgboost_fdw_handler);
 
 /*
  * Entrypoint of the pg_boost module
@@ -63,16 +69,4 @@ pg_boost_guc_init(void)
 void
 _PG_init(void)
 {
-	if (!process_shared_preload_libraries_in_progress)
-		ereport(ERROR,
-				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-		errmsg("pg_boost must be loaded via shared_preload_libraries")));
-
-	/* Get GUC configurations */
-	pg_boost_guc_init();
-
-
-
-	/* Create own shared memory segment */
-	shmmgr_init();
 }
