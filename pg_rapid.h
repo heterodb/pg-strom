@@ -25,6 +25,8 @@
 
 #define PGRAPID_SCHEMA_NAME		"pg_rapid"
 
+#define PGRAPID_USEMAP_UNITSZ	(2400 * (BLCKSZ / 8192))
+
 /*
  * utilcmds.c
  */

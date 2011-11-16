@@ -11,6 +11,7 @@
  * this package.
  */
 #include "postgres.h"
+#include "foreign/fdwapi.h"
 #include "miscadmin.h"
 #include "pg_rapid.h"
 
@@ -25,9 +26,9 @@ bool	pgrapid_fdw_handler_is_called = false;
 
 
 /*
+ * pgrapid_fdw_handler
  *
- *
- *
+ * FDW Handler function of pg_rapid
  */
 Datum
 pgrapid_fdw_handler(PG_FUNCTION_ARGS)

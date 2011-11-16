@@ -1,7 +1,7 @@
 # pg_rapid Makefile
 
 MODULE = pg_rapid
-OBJS = pg_rapid.o hwinfo.o utilcmds.o blkload.o cuda.o
+OBJS = pg_rapid.o utilcmds.o blkload.o cuda.o
 
 CUDAROOT := /usr/local/cuda
 NVCC := $(shell which nvcc 2>/dev/null || echo $(CUDAROOT)/bin/nvcc)

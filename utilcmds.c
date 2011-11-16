@@ -11,7 +11,26 @@
  * this package.
  */
 #include "postgres.h"
+#include "access/xact.h"
+#include "catalog/dependency.h"
+#include "catalog/heap.h"
+#include "catalog/index.h"
+#include "catalog/namespace.h"
+#include "catalog/pg_am.h"
+#include "catalog/pg_authid.h"
+#include "catalog/pg_class.h"
+#include "catalog/pg_namespace.h"
+#include "catalog/pg_type.h"
+#include "commands/defrem.h"
+#include "commands/sequence.h"
+#include "foreign/fdwapi.h"
+#include "foreign/foreign.h"
+#include "nodes/makefuncs.h"
+#include "nodes/pg_list.h"
+#include "miscadmin.h"
 #include "tcop/utility.h"
+#include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "pg_rapid.h"
 
 /*
@@ -27,8 +46,76 @@ static ProcessUtility_hook_type next_process_utility_hook = NULL;
  */
 static void
 pgrapid_create_rowid_index(Relation base_rel, const char *attname,
-						   Relation behind_rel, AttrNumber indexed)
-{}
+						   Relation store_rel, AttrNumber indexed_anum)
+{
+	char	   *nsp_name;
+	char		index_name[3 * NAMEDATALEN + 20];
+	char	   *indexed_attname;
+	IndexInfo  *index_info;
+	Oid			collationObjectId[1];
+	Oid			classObjectId[1];
+	int16		coloptions[1];
+
+	nsp_name = get_namespace_name(RelationGetForm(base_rel)->relnamespace);
+	if (!attname)
+		snprintf(index_name, sizeof(index_name), "%s.%s.idx",
+				 nsp_name, RelationGetRelationName(base_rel));
+	else
+		snprintf(index_name, sizeof(index_name), "%s.%s.%s.idx",
+				 nsp_name, RelationGetRelationName(base_rel), attname);
+
+	if (strlen(index_name) >= NAMEDATALEN - 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_NAME_TOO_LONG),
+				 errmsg("Name of shadow index: \"%s\" too long", index_name)));
+
+	indexed_attname =
+		NameStr(store_rel->rd_att->attrs[indexed_anum - 1]->attname);
+
+	index_info = makeNode(IndexInfo);
+	index_info->ii_NumIndexAttrs = 1;
+	index_info->ii_KeyAttrNumbers[0] = indexed_anum;
+	index_info->ii_Expressions = NIL;
+	index_info->ii_ExpressionsState = NIL;
+	index_info->ii_Predicate = NIL;
+	index_info->ii_PredicateState = NIL;
+	index_info->ii_ExclusionOps = NULL;
+	index_info->ii_ExclusionProcs = NULL;
+	index_info->ii_ExclusionStrats = NULL;
+	index_info->ii_Unique = true;
+	index_info->ii_ReadyForInserts = true;
+	index_info->ii_Concurrent = false;
+	index_info->ii_BrokenHotChain = false;
+
+	collationObjectId[0] = InvalidOid;
+	coloptions[0] = 0;
+	classObjectId[0] = GetDefaultOpClass(INT8OID, BTREE_AM_OID);
+	if (!OidIsValid(classObjectId[0]))
+		elog(ERROR, "defaule operator class was not found: {int8, btree}");
+
+	index_create(store_rel,			/* heapRelation */
+				 index_name,		/* indexRelationName */
+				 InvalidOid,		/* indexRelationId */
+				 InvalidOid,		/* relFileNode */
+				 index_info,		/* indexInfo */
+				 list_make1(indexed_attname),	/* indexColNames */
+				 BTREE_AM_OID,		/* accessMethodObjectId */
+				 store_rel->rd_rel->reltablespace, /* tableSpaceId */
+				 collationObjectId,	/* collationObjectId */
+				 classObjectId,		/* OpClassObjectId */
+				 coloptions,		/* coloptions */
+				 (Datum) 0,			/* reloptions */
+				 false,				/* isprimary */
+				 false,				/* isconstraint */
+				 false,				/* deferrable */
+				 false,				/* initdeferred */
+				 false,				/* allow_system_table_mods */
+				 false,				/* skip_build */
+				 false);			/* concurrent */
+
+	elog(NOTICE, "pg_rapid implicitly created a shadow index: \"%s.%s\"",
+		 PGRAPID_SCHEMA_NAME, index_name);
+}
 
 /*
  * pgrapid_create_usemap_store
@@ -39,7 +126,90 @@ pgrapid_create_rowid_index(Relation base_rel, const char *attname,
  */
 static void
 pgrapid_create_usemap_store(Oid namespaceId, Relation base_rel)
-{}
+{
+	char		   *nsp_name;
+	char			store_name[NAMEDATALEN * 2 + 20];
+	Oid				store_oid;
+	Relation		store_rel;
+	TupleDesc		tupdesc;
+	ObjectAddress	base_address;
+	ObjectAddress	store_address;
+
+	nsp_name = get_namespace_name(RelationGetForm(base_rel)->relnamespace);
+	snprintf(store_name, sizeof(store_name), "%s.%s.usemap",
+			 nsp_name, RelationGetRelationName(base_rel));
+	if (strlen(store_name) >= NAMEDATALEN - 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_NAME_TOO_LONG),
+				 errmsg("Name of shadow table: \"%s\" too long", store_name)));
+
+	tupdesc = CreateTemplateTupleDesc(2, false);
+	TupleDescInitEntry(tupdesc,
+					   (AttrNumber) 1,
+					   "rowid",
+					   INT8OID,
+					   -1, 0);
+	TupleDescInitEntry(tupdesc,
+					   (AttrNumber) 2,
+					   "usemap",
+					   BITOID,
+					   -1, 0);
+	/*
+	 * Pg_rapid want to keep varlena data being inlined; never uses external
+	 * toast relation due to the performance reason. So, we override the
+	 * default setting of pg_type definitions.
+	 */
+	tupdesc->attrs[0]->attstorage = 'p';
+	tupdesc->attrs[1]->attstorage = 'm';
+
+	store_oid = heap_create_with_catalog(store_name,
+										 namespaceId,
+										 InvalidOid,
+										 InvalidOid,
+										 InvalidOid,
+										 InvalidOid,
+										 base_rel->rd_rel->relowner,
+										 tupdesc,
+										 NIL,
+										 RELKIND_RELATION,
+										 base_rel->rd_rel->relpersistence,
+										 false,
+										 false,
+										 true,
+										 0,
+										 ONCOMMIT_NOOP,
+										 (Datum) 0,
+										 false,
+										 false);
+	Assert(OidIsValid(store_oid));
+
+	elog(NOTICE, "pg_rapid implicitly created a shadow table: \"%s.%s\"",
+		 PGRAPID_SCHEMA_NAME, store_name);
+
+	/* make the shadow table visible */
+	CommandCounterIncrement();
+
+	/* ShareLock is not really needed here, but take it anyway */
+    store_rel = heap_open(store_oid, ShareLock);
+
+	/* Create a unique index on the rowid */
+	pgrapid_create_rowid_index(base_rel, NULL, store_rel, (AttrNumber) 1);
+
+	heap_close(store_rel, NoLock);
+
+	/* Register dependency between base and shadow tables */
+	base_address.classId  = RelationRelationId;
+	base_address.objectId =	RelationGetRelid(base_rel);
+	base_address.objectSubId = 0;
+	store_address.classId = RelationRelationId;
+	store_address.objectId = store_oid;
+	store_address.objectSubId = 0;
+
+	recordDependencyOn(&store_address, &base_address, DEPENDENCY_INTERNAL);
+
+	/* Make changes visible */
+	CommandCounterIncrement();
+}
 
 /*
  * pgrapid_create_column_store
@@ -52,7 +222,96 @@ pgrapid_create_usemap_store(Oid namespaceId, Relation base_rel)
 static void
 pgrapid_create_column_store(Oid namespaceId, Relation base_rel,
 							const char *attname)
-{}
+{
+	char		   *nsp_name;
+	char			store_name[NAMEDATALEN * 3 + 20];
+	Oid				store_oid;
+	Relation		store_rel;
+	TupleDesc		tupdesc;
+	ObjectAddress	base_address;
+	ObjectAddress	store_address;
+
+	nsp_name = get_namespace_name(RelationGetForm(base_rel)->relnamespace);
+	snprintf(store_name, sizeof(store_name), "%s.%s.%s.col",
+			 nsp_name, RelationGetRelationName(base_rel), attname);
+	if (strlen(store_name) >= NAMEDATALEN - 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_NAME_TOO_LONG),
+				 errmsg("Name of shadow table: \"%s\" too long", store_name)));
+
+	tupdesc = CreateTemplateTupleDesc(3, false);
+	TupleDescInitEntry(tupdesc,
+					   (AttrNumber) 1,
+					   "rowid",
+					   INT8OID,
+					   -1, 0);
+	TupleDescInitEntry(tupdesc,
+					   (AttrNumber) 2,
+					   "nulls",
+					   BITOID,
+					   -1, 0);
+	TupleDescInitEntry(tupdesc,
+					   (AttrNumber) 3,
+					   "values",
+					   BYTEAOID,
+					   -1, 0);
+	/*
+	 * Pg_rapid want to keep varlena data being inlined; never uses external
+	 * toast relation due to the performance reason. So, we override the
+	 * default setting of pg_type definitions.
+	 */
+	tupdesc->attrs[0]->attstorage = 'p';
+	tupdesc->attrs[1]->attstorage = 'm';
+	tupdesc->attrs[2]->attstorage = 'm';
+
+	store_oid = heap_create_with_catalog(store_name,
+										 namespaceId,
+										 InvalidOid,
+										 InvalidOid,
+										 InvalidOid,
+										 InvalidOid,
+										 base_rel->rd_rel->relowner,
+										 tupdesc,
+										 NIL,
+										 RELKIND_RELATION,
+										 base_rel->rd_rel->relpersistence,
+										 false,
+										 false,
+										 true,
+										 0,
+										 ONCOMMIT_NOOP,
+										 (Datum) 0,
+										 false,
+										 false);
+	Assert(OidIsValid(store_oid));
+
+	elog(NOTICE, "pg_rapid implicitly created a shadow table: \"%s.%s\"",
+		 PGRAPID_SCHEMA_NAME, store_name);
+
+	/* make the shadow table visible */
+	CommandCounterIncrement();
+
+	/* ShareLock is not really needed here, but take it anyway */
+    store_rel = heap_open(store_oid, ShareLock);
+
+	/* Create a unique index on the rowid */
+	pgrapid_create_rowid_index(base_rel, NULL, store_rel, (AttrNumber) 1);
+
+	heap_close(store_rel, NoLock);
+
+	/* Register dependency between base and shadow tables */
+	base_address.classId  = RelationRelationId;
+	base_address.objectId =	RelationGetRelid(base_rel);
+	base_address.objectSubId = 0;
+	store_address.classId = RelationRelationId;
+	store_address.objectId = store_oid;
+	store_address.objectSubId = 0;
+
+	recordDependencyOn(&store_address, &base_address, DEPENDENCY_INTERNAL);
+
+	/* Make changes visible */
+	CommandCounterIncrement();
+}
 
 /*
  * pgrapid_create_usemap_seq
@@ -62,8 +321,38 @@ pgrapid_create_column_store(Oid namespaceId, Relation base_rel,
  * PGRAPID_USEMAP_UNITSZ.
  */
 static void
-pgrapid_create_usemap_seq(Oid namespaceId, base_rel)
-{}
+pgrapid_create_usemap_seq(Oid namespaceId, Relation base_rel)
+{
+	CreateSeqStmt  *seq_stmt;
+	char		   *nsp_name;
+	char			seq_name[2*NAMEDATALEN + 20];
+	char			rel_name[2*NAMEDATALEN + 20];
+	List		   *rowid_namelist;
+
+	nsp_name = get_namespace_name(RelationGetForm(base_rel)->relnamespace);
+	snprintf(rel_name, sizeof(rel_name), "%s.%s.usemap",
+			 nsp_name, RelationGetRelationName(base_rel));
+	snprintf(seq_name, sizeof(seq_name), "%s.%s.seq",
+			 nsp_name, RelationGetRelationName(base_rel));
+	Assert(strlen(rel_name) < NAMEDATALEN);
+
+	seq_stmt = makeNode(CreateSeqStmt);
+	seq_stmt->sequence = makeRangeVar(PGRAPID_SCHEMA_NAME, seq_name, -1);
+	rowid_namelist = list_make3(makeString(PGRAPID_SCHEMA_NAME),
+								makeString(rel_name),
+								makeString("rowid"));
+	seq_stmt->options = list_make4(
+		makeDefElem("minvalue", (Node *)makeInteger(0)),
+		makeDefElem("maxvalue", (Node *)makeInteger((1UL<<48) - 1)),
+		makeDefElem("increment",(Node *)makeInteger(PGRAPID_USEMAP_UNITSZ)),
+		makeDefElem("owned_by", (Node *)rowid_namelist));
+	seq_stmt->ownerId = RelationGetForm(base_rel)->relowner;
+
+	DefineSequence(seq_stmt);
+
+	elog(NOTICE, "pg_rapid implicitly created a shadow table: \"%s.%s\"",
+		 PGRAPID_SCHEMA_NAME, seq_name);
+}
 
 static void
 pgrapid_process_post_create(RangeVar *base_range)
@@ -84,7 +373,7 @@ pgrapid_process_post_create(RangeVar *base_range)
 	namespaceId = get_namespace_oid(PGRAPID_SCHEMA_NAME, true);
 	if (!OidIsValid(namespaceId))
 	{
-		namespaceId = NamespaceCreate(PGBOOST_SCHEMA_NAME,
+		namespaceId = NamespaceCreate(PGRAPID_SCHEMA_NAME,
 									  BOOTSTRAP_SUPERUSERID);
 		CommandCounterIncrement();
 	}
@@ -124,15 +413,15 @@ pgrapid_process_post_create(RangeVar *base_range)
 }
 
 static void
-pgrapid_process_post_alter_schema(RangeVar *base_range)
+pgrapid_process_post_alter_schema(void)
 {}
 
 static void
-pgrapid_process_post_alter_rename(RangeVar *base_range)
+pgrapid_process_post_alter_rename(void)
 {}
 
 static void
-pgrapid_process_post_alter_owner(RangeVar *base_range)
+pgrapid_process_post_alter_owner(void)
 {}
 
 /*
@@ -168,16 +457,22 @@ pgrapid_process_utility_command(Node *stmt,
 		fdw = GetForeignDataWrapper(fservId);
 		
 		pgrapid_fdw_handler_is_called = false;
-		fdwfn = GetFdwRoutine(fdw);
+		fdwfn = GetFdwRoutine(fdw->fdwhandler);
 		if (pgrapid_fdw_handler_is_called)
 			pgrapid_process_post_create(cfts->base.relation);
 	}
 	else if (IsA(stmt, AlterObjectSchemaStmt))
-	{}
+	{
+		pgrapid_process_post_alter_schema();
+	}
 	else if (IsA(stmt, RenameStmt))
-	{}
+	{
+		pgrapid_process_post_alter_rename();
+	}
 	else if (IsA(stmt, AlterOwnerStmt))
-	{}
+	{
+		pgrapid_process_post_alter_owner();
+	}
 }
 
 /*
