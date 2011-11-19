@@ -1,7 +1,7 @@
 # pg_rapid Makefile
 
-MODULE = pg_rapid
-OBJS = pg_rapid.o utilcmds.o blkload.o cuda.o
+MODULE = pg_strom
+OBJS = pg_strom.o utilcmds.o blkload.o plan.o scan.o cuda.o
 
 CUDAROOT := /usr/local/cuda
 NVCC := $(shell which nvcc 2>/dev/null || echo $(CUDAROOT)/bin/nvcc)
@@ -12,8 +12,8 @@ NVCFLAGS  += -I$(shell $(PG_CONFIG) --includedir-server)
 NVCFLAGS  += -Xcompiler=-Wall -Xcompiler=-g -Xcompiler=-fpic
 NVLDFLAGS := -Xlinker=--as-needed
 NVLDFLAGS += -Xlinker=-rpath,$(shell $(PG_CONFIG) --libdir)
-NVLDFLAGS += -Xlinker=-rpath,$(CUDAROOT)/lib
 NVLDFLAGS += -Xlinker=-rpath,$(CUDAROOT)/lib64
+NVLDFLAGS += -Xlinker=-rpath,$(CUDAROOT)/lib
 
 all: $(MODULE).so
 

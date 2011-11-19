@@ -4,7 +4,7 @@
  * A set of simple wrappers to CUDA runtime APIs, because some of basic
  * declarations are conflicts between PostgreSQL and CUDA, thus we need
  * to invoke CUDA runtime API from files that does not include any
- * header files of PostgreSQL. That's too bad.
+ * header files of PostgreSQL. That's too bad. :(
  *
  * --
  * Copyright 2011-2012 (c) KaiGai Kohei <kaigai@kaigai.gr.jp>
@@ -13,7 +13,7 @@
  * modify it under the terms of the 'LICENSE' included within
  * this package.
  */
-#include "pg_rapid.h"
+#include "pg_strom.h"
 #include <cuda_runtime.h>
 
 const char *

@@ -31,7 +31,7 @@
 #include "tcop/utility.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
-#include "pg_rapid.h"
+#include "pg_strom.h"
 
 /*
  * Saved hook entries
@@ -39,13 +39,13 @@
 static ProcessUtility_hook_type next_process_utility_hook = NULL;
 
 /*
- * pgrapid_create_rowid_index
+ * pgstrom_create_rowid_index
  *
- * create "<base_schema>.<base_rel>.(<column>.)idx" index of pg_rapid
+ * create "<base_schema>.<base_rel>.(<column>.)idx" index of pg_strom
  * schema to find-up a tuple that contains a particular rowid.
  */
 static void
-pgrapid_create_rowid_index(Relation base_rel, const char *attname,
+pgstrom_create_rowid_index(Relation base_rel, const char *attname,
 						   Relation store_rel, AttrNumber indexed_anum)
 {
 	char	   *nsp_name;
@@ -113,19 +113,19 @@ pgrapid_create_rowid_index(Relation base_rel, const char *attname,
 				 false,				/* skip_build */
 				 false);			/* concurrent */
 
-	elog(NOTICE, "pg_rapid implicitly created a shadow index: \"%s.%s\"",
-		 PGRAPID_SCHEMA_NAME, index_name);
+	elog(NOTICE, "pg_strom implicitly created a shadow index: \"%s.%s\"",
+		 PGSTROM_SCHEMA_NAME, index_name);
 }
 
 /*
- * pgrapid_create_usemap_store
+ * pgstrom_create_usemap_store
  *
- * create "<base_schema>.<base_rel>.usemap" table of pg_rapid schema
+ * create "<base_schema>.<base_rel>.usemap" table of pg_strom schema
  * that has "rowid(int8)" and "usemap(VarBit)" to track which rowid
  * has been in use.
  */
 static void
-pgrapid_create_usemap_store(Oid namespaceId, Relation base_rel)
+pgstrom_create_usemap_store(Oid namespaceId, Relation base_rel)
 {
 	char		   *nsp_name;
 	char			store_name[NAMEDATALEN * 2 + 20];
@@ -155,7 +155,7 @@ pgrapid_create_usemap_store(Oid namespaceId, Relation base_rel)
 					   BITOID,
 					   -1, 0);
 	/*
-	 * Pg_rapid want to keep varlena data being inlined; never uses external
+	 * Pg_strom want to keep varlena data being inlined; never uses external
 	 * toast relation due to the performance reason. So, we override the
 	 * default setting of pg_type definitions.
 	 */
@@ -183,8 +183,8 @@ pgrapid_create_usemap_store(Oid namespaceId, Relation base_rel)
 										 false);
 	Assert(OidIsValid(store_oid));
 
-	elog(NOTICE, "pg_rapid implicitly created a shadow table: \"%s.%s\"",
-		 PGRAPID_SCHEMA_NAME, store_name);
+	elog(NOTICE, "pg_strom implicitly created a shadow table: \"%s.%s\"",
+		 PGSTROM_SCHEMA_NAME, store_name);
 
 	/* make the shadow table visible */
 	CommandCounterIncrement();
@@ -193,7 +193,7 @@ pgrapid_create_usemap_store(Oid namespaceId, Relation base_rel)
     store_rel = heap_open(store_oid, ShareLock);
 
 	/* Create a unique index on the rowid */
-	pgrapid_create_rowid_index(base_rel, NULL, store_rel, (AttrNumber) 1);
+	pgstrom_create_rowid_index(base_rel, NULL, store_rel, (AttrNumber) 1);
 
 	heap_close(store_rel, NoLock);
 
@@ -212,15 +212,15 @@ pgrapid_create_usemap_store(Oid namespaceId, Relation base_rel)
 }
 
 /*
- * pgrapid_create_column_store
+ * pgstrom_create_column_store
  *
- * create "<base_schema>.<base_rel>.<column>.col" table of pg_rapid
+ * create "<base_schema>.<base_rel>.<column>.col" table of pg_strom
  * schema that has "rowid(int8)", "nulls(VarBit)" and "values(bytes)"
  * to store the values of original columns. The maximum number of
  * values being stored in a tuple depends on length of unit data.
  */
 static void
-pgrapid_create_column_store(Oid namespaceId, Relation base_rel,
+pgstrom_create_column_store(Oid namespaceId, Relation base_rel,
 							const char *attname)
 {
 	char		   *nsp_name;
@@ -256,7 +256,7 @@ pgrapid_create_column_store(Oid namespaceId, Relation base_rel,
 					   BYTEAOID,
 					   -1, 0);
 	/*
-	 * Pg_rapid want to keep varlena data being inlined; never uses external
+	 * Pg_strom want to keep varlena data being inlined; never uses external
 	 * toast relation due to the performance reason. So, we override the
 	 * default setting of pg_type definitions.
 	 */
@@ -285,8 +285,8 @@ pgrapid_create_column_store(Oid namespaceId, Relation base_rel,
 										 false);
 	Assert(OidIsValid(store_oid));
 
-	elog(NOTICE, "pg_rapid implicitly created a shadow table: \"%s.%s\"",
-		 PGRAPID_SCHEMA_NAME, store_name);
+	elog(NOTICE, "pg_strom implicitly created a shadow table: \"%s.%s\"",
+		 PGSTROM_SCHEMA_NAME, store_name);
 
 	/* make the shadow table visible */
 	CommandCounterIncrement();
@@ -295,7 +295,7 @@ pgrapid_create_column_store(Oid namespaceId, Relation base_rel,
     store_rel = heap_open(store_oid, ShareLock);
 
 	/* Create a unique index on the rowid */
-	pgrapid_create_rowid_index(base_rel, NULL, store_rel, (AttrNumber) 1);
+	pgstrom_create_rowid_index(base_rel, NULL, store_rel, (AttrNumber) 1);
 
 	heap_close(store_rel, NoLock);
 
@@ -314,14 +314,14 @@ pgrapid_create_column_store(Oid namespaceId, Relation base_rel,
 }
 
 /*
- * pgrapid_create_usemap_seq
+ * pgstrom_create_usemap_seq
  *
- * create "<base_schema>.<base_rel>.seq" sequence of pg_rapid schema
+ * create "<base_schema>.<base_rel>.seq" sequence of pg_strom schema
  * that enables to generate unique number between 0 to 2^48-1 by
- * PGRAPID_USEMAP_UNITSZ.
+ * PGSTROM_USEMAP_UNITSZ.
  */
 static void
-pgrapid_create_usemap_seq(Oid namespaceId, Relation base_rel)
+pgstrom_create_usemap_seq(Oid namespaceId, Relation base_rel)
 {
 	CreateSeqStmt  *seq_stmt;
 	char		   *nsp_name;
@@ -337,25 +337,25 @@ pgrapid_create_usemap_seq(Oid namespaceId, Relation base_rel)
 	Assert(strlen(rel_name) < NAMEDATALEN);
 
 	seq_stmt = makeNode(CreateSeqStmt);
-	seq_stmt->sequence = makeRangeVar(PGRAPID_SCHEMA_NAME, seq_name, -1);
-	rowid_namelist = list_make3(makeString(PGRAPID_SCHEMA_NAME),
+	seq_stmt->sequence = makeRangeVar(PGSTROM_SCHEMA_NAME, seq_name, -1);
+	rowid_namelist = list_make3(makeString(PGSTROM_SCHEMA_NAME),
 								makeString(rel_name),
 								makeString("rowid"));
 	seq_stmt->options = list_make4(
 		makeDefElem("minvalue", (Node *)makeInteger(0)),
 		makeDefElem("maxvalue", (Node *)makeInteger((1UL<<48) - 1)),
-		makeDefElem("increment",(Node *)makeInteger(PGRAPID_USEMAP_UNITSZ)),
+		makeDefElem("increment",(Node *)makeInteger(PGSTROM_USEMAP_UNITSZ)),
 		makeDefElem("owned_by", (Node *)rowid_namelist));
 	seq_stmt->ownerId = RelationGetForm(base_rel)->relowner;
 
 	DefineSequence(seq_stmt);
 
-	elog(NOTICE, "pg_rapid implicitly created a shadow table: \"%s.%s\"",
-		 PGRAPID_SCHEMA_NAME, seq_name);
+	elog(NOTICE, "pg_strom implicitly created a shadow table: \"%s.%s\"",
+		 PGSTROM_SCHEMA_NAME, seq_name);
 }
 
 static void
-pgrapid_process_post_create(RangeVar *base_range)
+pgstrom_process_post_create(RangeVar *base_range)
 {
 	Relation	base_rel;
 	Oid			namespaceId;
@@ -370,10 +370,10 @@ pgrapid_process_post_create(RangeVar *base_range)
 	 * Ensure existence of the schema that shall stores all the
 	 * corresponding stuff. If not found, create it anyway.
 	 */
-	namespaceId = get_namespace_oid(PGRAPID_SCHEMA_NAME, true);
+	namespaceId = get_namespace_oid(PGSTROM_SCHEMA_NAME, true);
 	if (!OidIsValid(namespaceId))
 	{
-		namespaceId = NamespaceCreate(PGRAPID_SCHEMA_NAME,
+		namespaceId = NamespaceCreate(PGSTROM_SCHEMA_NAME,
 									  BOOTSTRAP_SUPERUSERID);
 		CommandCounterIncrement();
 	}
@@ -388,10 +388,10 @@ pgrapid_process_post_create(RangeVar *base_range)
 	GetUserIdAndSecContext(&save_userid, &save_sec_context);
 	SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID, save_sec_context);
 
-	/* create pg_rapid.<base_schema>_<base_rel>.map */
-	pgrapid_create_usemap_store(namespaceId, base_rel);
+	/* create pg_strom.<base_schema>_<base_rel>.map */
+	pgstrom_create_usemap_store(namespaceId, base_rel);
 
-	/* create pg_rapid.<base_schema>_<base_rel>_<column> */
+	/* create pg_strom.<base_schema>_<base_rel>_<column> */
 	for (attnum = 0;
 		 attnum < RelationGetNumberOfAttributes(base_rel);
 		 attnum++)
@@ -399,11 +399,11 @@ pgrapid_process_post_create(RangeVar *base_range)
 		const char *attname =
 			NameStr(RelationGetDescr(base_rel)->attrs[attnum]->attname);
 
-		pgrapid_create_column_store(namespaceId, base_rel, attname);
+		pgstrom_create_column_store(namespaceId, base_rel, attname);
 	}
 
-	/* create pg_rapid.<base_schema>_<base_rel>.seq */
-	pgrapid_create_usemap_seq(namespaceId, base_rel);
+	/* create pg_strom.<base_schema>_<base_rel>.seq */
+	pgstrom_create_usemap_seq(namespaceId, base_rel);
 
 
 	/* restore security setting and close the base relation */
@@ -413,24 +413,24 @@ pgrapid_process_post_create(RangeVar *base_range)
 }
 
 static void
-pgrapid_process_post_alter_schema(void)
+pgstrom_process_post_alter_schema(void)
 {}
 
 static void
-pgrapid_process_post_alter_rename(void)
+pgstrom_process_post_alter_rename(void)
 {}
 
 static void
-pgrapid_process_post_alter_owner(void)
+pgstrom_process_post_alter_owner(void)
 {}
 
 /*
- * pgrapid_process_utility_command
+ * pgstrom_process_utility_command
  *
  * Entrypoint of the ProcessUtility hook; that handles post DDL operations.
  */
 static void
-pgrapid_process_utility_command(Node *stmt,
+pgstrom_process_utility_command(Node *stmt,
 								const char *queryString,
 								ParamListInfo params,
 								bool isTopLevel,
@@ -450,39 +450,37 @@ pgrapid_process_utility_command(Node *stmt,
 	{
 		CreateForeignTableStmt *cfts = (CreateForeignTableStmt *)stmt;
 		ForeignDataWrapper	   *fdw;
-		FdwRoutine			   *fdwfn;
+		FdwRoutine			   *fdwfns;
 		Oid		fservId;
 
 		fservId = get_foreign_server_oid(cfts->servername, false);
 		fdw = GetForeignDataWrapper(fservId);
-		
-		pgrapid_fdw_handler_is_called = false;
-		fdwfn = GetFdwRoutine(fdw->fdwhandler);
-		if (pgrapid_fdw_handler_is_called)
-			pgrapid_process_post_create(cfts->base.relation);
+		fdwfns = GetFdwRoutine(fdw->fdwhandler);
+		if (fdwfns->PlanForeignScan == pgstrom_plan_foreign_scan)
+		   	pgstrom_process_post_create(cfts->base.relation);
 	}
 	else if (IsA(stmt, AlterObjectSchemaStmt))
 	{
-		pgrapid_process_post_alter_schema();
+		pgstrom_process_post_alter_schema();
 	}
 	else if (IsA(stmt, RenameStmt))
 	{
-		pgrapid_process_post_alter_rename();
+		pgstrom_process_post_alter_rename();
 	}
 	else if (IsA(stmt, AlterOwnerStmt))
 	{
-		pgrapid_process_post_alter_owner();
+		pgstrom_process_post_alter_owner();
 	}
 }
 
 /*
- * pgrapid_utilcmds_init
+ * pgstrom_utilcmds_init
  *
  * Registers ProcessUtility hook
  */
 void
-pgrapid_utilcmds_init(void)
+pgstrom_utilcmds_init(void)
 {
 	next_process_utility_hook = ProcessUtility_hook;
-	ProcessUtility_hook = pgrapid_process_utility_command;
+	ProcessUtility_hook = pgstrom_process_utility_command;
 }

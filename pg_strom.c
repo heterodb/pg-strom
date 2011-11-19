@@ -1,7 +1,7 @@
 /*
- * pg_rapid.c
+ * pg_strom.c
  *
- * Entrypoint of the pg_rapid module
+ * Entrypoint of the pg_strom module
  *
  * --
  * Copyright 2011-2012 (c) KaiGai Kohei <kaigai@kaigai.gr.jp>
@@ -13,7 +13,7 @@
 #include "postgres.h"
 #include "foreign/fdwapi.h"
 #include "miscadmin.h"
-#include "pg_rapid.h"
+#include "pg_strom.h"
 
 PG_MODULE_MAGIC;
 
@@ -21,39 +21,35 @@ PG_MODULE_MAGIC;
  * Local declarations
  */
 void	_PG_init(void);
-bool	pgrapid_fdw_handler_is_called = false;
-
 
 
 /*
- * pgrapid_fdw_handler
+ * pgstrom_fdw_handler
  *
- * FDW Handler function of pg_rapid
+ * FDW Handler function of pg_strom
  */
 Datum
-pgrapid_fdw_handler(PG_FUNCTION_ARGS)
+pgstrom_fdw_handler(PG_FUNCTION_ARGS)
 {
 	FdwRoutine *fdwroutine = makeNode(FdwRoutine);
 
-	pgrapid_fdw_handler_is_called = true;
-
-	fdwroutine->PlanForeignScan = NULL;
-	fdwroutine->ExplainForeignScan = NULL;
-	fdwroutine->BeginForeignScan = NULL;
-	fdwroutine->IterateForeignScan = NULL;
-	fdwroutine->ReScanForeignScan = NULL;
-	fdwroutine->EndForeignScan = NULL;
+	fdwroutine->PlanForeignScan = pgstrom_plan_foreign_scan;
+	fdwroutine->ExplainForeignScan = pgstrom_explain_foreign_scan;
+	fdwroutine->BeginForeignScan = pgstrom_begin_foreign_scan;
+	fdwroutine->IterateForeignScan = pgstrom_iterate_foreign_scan;
+	fdwroutine->ReScanForeignScan = pgboost_rescan_foreign_scan;
+	fdwroutine->EndForeignScan = pgboost_end_foreign_scan;
 
 	PG_RETURN_POINTER(fdwroutine);
 }
 
 /*
- * pgrapid_log_device_info
+ * pgstrom_log_device_info
  *
  * Logs name and properties of installed GPU devices.
  */
 static void
-pgrapid_log_device_info(void)
+pgstrom_log_device_info(void)
 {
 	struct cudaDeviceProp prop;
 	cudaError_t	rc;
@@ -83,22 +79,22 @@ pgrapid_log_device_info(void)
 }
 
 /*
- * Entrypoint of the pg_rapid module
+ * Entrypoint of the pg_strom module
  */
 void
 _PG_init(void)
 {
 	/*
-	 * pg_rapid has to be loaded using shared_preload_libraries setting.
+	 * pg_strom has to be loaded using shared_preload_libraries setting.
 	 */
 	if (!process_shared_preload_libraries_in_progress)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-		errmsg("sepgsql must be loaded via shared_preload_libraries")));
+		errmsg("pg_strom must be loaded via shared_preload_libraries")));
 
 	/* Register Hooks of PostgreSQL */
-	pgrapid_utilcmds_init();
+	pgstrom_utilcmds_init();
 
 	/* Logs information of GPU deviced installed */
-	pgrapid_log_device_info();
+	pgstrom_log_device_info();
 }
