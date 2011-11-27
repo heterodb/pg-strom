@@ -152,7 +152,7 @@ pgstrom_create_usemap_store(Oid namespaceId, Relation base_rel)
 	TupleDescInitEntry(tupdesc,
 					   (AttrNumber) 2,
 					   "usemap",
-					   BITOID,
+					   VARBITOID,
 					   -1, 0);
 	/*
 	 * Pg_strom want to keep varlena data being inlined; never uses external
@@ -221,7 +221,7 @@ pgstrom_create_usemap_store(Oid namespaceId, Relation base_rel)
  */
 static void
 pgstrom_create_column_store(Oid namespaceId, Relation base_rel,
-							const char *attname)
+							Form_pg_attribute attform)
 {
 	char		   *nsp_name;
 	char			store_name[NAMEDATALEN * 3 + 20];
@@ -233,7 +233,9 @@ pgstrom_create_column_store(Oid namespaceId, Relation base_rel,
 
 	nsp_name = get_namespace_name(RelationGetForm(base_rel)->relnamespace);
 	snprintf(store_name, sizeof(store_name), "%s.%s.%s.col",
-			 nsp_name, RelationGetRelationName(base_rel), attname);
+			 nsp_name,
+			 RelationGetRelationName(base_rel),
+			 NameStr(attform->attname));
 	if (strlen(store_name) >= NAMEDATALEN - 1)
 		ereport(ERROR,
 				(errcode(ERRCODE_NAME_TOO_LONG),
@@ -248,7 +250,7 @@ pgstrom_create_column_store(Oid namespaceId, Relation base_rel,
 	TupleDescInitEntry(tupdesc,
 					   (AttrNumber) 2,
 					   "nulls",
-					   BITOID,
+					   VARBITOID,
 					   -1, 0);
 	TupleDescInitEntry(tupdesc,
 					   (AttrNumber) 3,
@@ -318,7 +320,7 @@ pgstrom_create_column_store(Oid namespaceId, Relation base_rel,
  *
  * create "<base_schema>.<base_rel>.seq" sequence of pg_strom schema
  * that enables to generate unique number between 0 to 2^48-1 by
- * PGSTROM_USEMAP_UNITSZ.
+ * PGSTROM_CHUNK_SIZE.
  */
 static void
 pgstrom_create_usemap_seq(Oid namespaceId, Relation base_rel)
@@ -344,7 +346,7 @@ pgstrom_create_usemap_seq(Oid namespaceId, Relation base_rel)
 	seq_stmt->options = list_make4(
 		makeDefElem("minvalue", (Node *)makeInteger(0)),
 		makeDefElem("maxvalue", (Node *)makeInteger((1UL<<48) - 1)),
-		makeDefElem("increment",(Node *)makeInteger(PGSTROM_USEMAP_UNITSZ)),
+		makeDefElem("increment",(Node *)makeInteger(PGSTROM_CHUNK_SIZE)),
 		makeDefElem("owned_by", (Node *)rowid_namelist));
 	seq_stmt->ownerId = RelationGetForm(base_rel)->relowner;
 

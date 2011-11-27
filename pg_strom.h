@@ -27,7 +27,7 @@
 
 #define PGSTROM_SCHEMA_NAME		"pg_strom"
 
-#define PGSTROM_USEMAP_UNITSZ	(2400 * (BLCKSZ / 8192))
+#define PGSTROM_CHUNK_SIZE		(2400 * (BLCKSZ / 8192))
 
 /*
  * utilcmds.c
@@ -40,6 +40,7 @@ extern void	pgstrom_utilcmds_init(void);
  * blkload.c
  */
 #ifdef POSTGRES_H
+extern Datum pgstrom_fdw_handler(PG_FUNCTION_ARGS);
 
 
 #endif
