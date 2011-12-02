@@ -50,7 +50,6 @@ pgstrom_relation_bunch_open(Oid base_relid, LOCKMODE lockmode)
 	ForeignTable	   *ft;
 	ForeignServer	   *fs;
 	ForeignDataWrapper *fdw;
-	FdwRoutine		   *fdwfns;
 	AttrNumber			i, nattrs;
 	RangeVar		   *range;
 	char			   *base_schema;
@@ -74,8 +73,7 @@ pgstrom_relation_bunch_open(Oid base_relid, LOCKMODE lockmode)
 	ft = GetForeignTable(RelationGetRelid(base_rel));
 	fs = GetForeignServer(ft->serverid);
 	fdw = GetForeignDataWrapper(fs->fdwid);
-	fdwfns = GetFdwRoutine(fdw->fdwhandler);
-	if (fdwfns->PlanForeignScan != pgstrom_plan_foreign_scan)
+	if (GetFdwRoutine(fdw->fdwhandler) != &pgstromFdwHandlerData)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a foreign table managed by pg_strom",

@@ -22,6 +22,15 @@ PG_MODULE_MAGIC;
  */
 void	_PG_init(void);
 
+FdwRoutine	pgstromFdwHandlerData = {
+	.type				= T_FdwRoutine,
+	.PlanForeignScan	= pgstrom_plan_foreign_scan,
+	.ExplainForeignScan	= pgstrom_explain_foreign_scan,
+	.BeginForeignScan	= pgstrom_begin_foreign_scan,
+	.IterateForeignScan	= pgstrom_iterate_foreign_scan,
+	.ReScanForeignScan	= pgboost_rescan_foreign_scan,
+	.EndForeignScan		= pgboost_end_foreign_scan,
+};
 
 /*
  * pgstrom_fdw_handler
@@ -31,16 +40,7 @@ void	_PG_init(void);
 Datum
 pgstrom_fdw_handler(PG_FUNCTION_ARGS)
 {
-	FdwRoutine *fdwroutine = makeNode(FdwRoutine);
-
-	fdwroutine->PlanForeignScan = pgstrom_plan_foreign_scan;
-	fdwroutine->ExplainForeignScan = pgstrom_explain_foreign_scan;
-	fdwroutine->BeginForeignScan = pgstrom_begin_foreign_scan;
-	fdwroutine->IterateForeignScan = pgstrom_iterate_foreign_scan;
-	fdwroutine->ReScanForeignScan = pgboost_rescan_foreign_scan;
-	fdwroutine->EndForeignScan = pgboost_end_foreign_scan;
-
-	PG_RETURN_POINTER(fdwroutine);
+	PG_RETURN_POINTER(&pgstromFdwHandlerData);
 }
 
 /*

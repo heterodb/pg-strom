@@ -398,10 +398,8 @@ pgstrom_process_post_create(RangeVar *base_range)
 		 attnum < RelationGetNumberOfAttributes(base_rel);
 		 attnum++)
 	{
-		const char *attname =
-			NameStr(RelationGetDescr(base_rel)->attrs[attnum]->attname);
-
-		pgstrom_create_column_store(namespaceId, base_rel, attname);
+		pgstrom_create_column_store(namespaceId, base_rel,
+									RelationGetDescr(base_rel)->attrs[attnum]);
 	}
 
 	/* create pg_strom.<base_schema>_<base_rel>.seq */
@@ -452,13 +450,11 @@ pgstrom_process_utility_command(Node *stmt,
 	{
 		CreateForeignTableStmt *cfts = (CreateForeignTableStmt *)stmt;
 		ForeignDataWrapper	   *fdw;
-		FdwRoutine			   *fdwfns;
 		Oid		fservId;
 
 		fservId = get_foreign_server_oid(cfts->servername, false);
 		fdw = GetForeignDataWrapper(fservId);
-		fdwfns = GetFdwRoutine(fdw->fdwhandler);
-		if (fdwfns->PlanForeignScan == pgstrom_plan_foreign_scan)
+		if (GetFdwRoutine(fdw->fdwhandler) == &pgstromFdwHandlerData)
 		   	pgstrom_process_post_create(cfts->base.relation);
 	}
 	else if (IsA(stmt, AlterObjectSchemaStmt))

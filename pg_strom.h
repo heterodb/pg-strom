@@ -74,7 +74,7 @@ pgboost_end_foreign_scan(ForeignScanState *fss);
  * pg_strom.c
  */
 #ifdef POSTGRES_H
-extern bool pgstrom_fdw_handler_is_called;
+extern FdwRoutine pgstromFdwHandlerData;
 extern Datum pgstrom_fdw_handler(PG_FUNCTION_ARGS);
 extern Datum pgstrom_fdw_validator(PG_FUNCTION_ARGS);
 #endif
