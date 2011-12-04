@@ -20,6 +20,7 @@
 #include "commands/sequence.h"
 #include "fmgr.h"
 #include "miscadmin.h"
+#include "utils/array.h"
 #include "utils/errcodes.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
@@ -29,27 +30,23 @@
 #include "pg_strom.h"
 
 typedef struct {
+	AttrNumber	nattrs;
 	int64		rowid;
 	VarBit	   *usemap;
-	int16		nattrs;
-	int16	   *attlen;
-	bool	   *attbyval;
 	bool	  **nulls;
 	void	  **values;
 } CStoreChunkData;
 typedef CStoreChunkData *CStoreChunk;
 
 static CStoreChunk
-pgstrom_cschunk_alloc(Relation base_rel, Bitmapset *valid_cols)
+pgstrom_cschunk_alloc(Relation base_rel)
 {
 	CStoreChunk	chunk;
 	AttrNumber	i;
 
 	chunk = palloc0(sizeof(CStoreChunkData));
-	chunk->usemap = palloc0(VARBITTOTALLEN(PGSTROM_CHUNK_SIZE));
 	chunk->nattrs = RelationGetNumberOfAttributes(base_rel);
-	chunk->attlen = palloc0(sizeof(int16) * chunk->nattrs);
-	chunk->attbyval = palloc0(sizeof(bool) * chunk->nattrs);
+	chunk->usemap = palloc0(VARBITTOTALLEN(PGSTROM_CHUNK_SIZE));
 	chunk->nulls = palloc0(sizeof(bool *) * chunk->nattrs);
 	chunk->values = palloc0(sizeof(void *) * chunk->nattrs);
 
@@ -58,11 +55,6 @@ pgstrom_cschunk_alloc(Relation base_rel, Bitmapset *valid_cols)
 		Form_pg_attribute	attr
 			= RelationGetDescr(base_rel)->attrs[i];
 
-		if (valid_cols && !bms_is_member(attr->attnum, valid_cols))
-			continue;
-
-		chunk->attlen[i] = attr->attlen;
-		chunk->attbyval[i] = attr->attbyval;
 		chunk->nulls[i] = palloc0(sizeof(bool) * PGSTROM_CHUNK_SIZE);
 		if (attr->attlen > 0)
 			chunk->values[i] = palloc0(attr->attlen * PGSTROM_CHUNK_SIZE);
@@ -79,67 +71,13 @@ pgstrom_cschunk_free(CStoreChunk chunk)
 
 	for (i=0; i < chunk->nattrs; i++)
 	{
-		if (chunk->nulls[i])
-			pfree(chunk->nulls[i]);
-		if (chunk->values[i])
-			pfree(chunk->values[i]);
+		pfree(chunk->nulls[i]);
+		pfree(chunk->values[i]);
 	}
 	pfree(chunk->values);
 	pfree(chunk->nulls);
-	pfree(chunk->attbyval);
-	pfree(chunk->attlen);
 	pfree(chunk->usemap);
 	pfree(chunk);
-}
-
-/*
- * do_cschunk_insert_one
- *
- *
- *
- */
-static void
-do_cschunk_insert_one(Relation csrel, CatalogIndexState csidx,
-					  int attlen, int nitems,
-					  int64 cs_rowid, VarBit *cs_nulls, bytea *cs_values)
-{
-	HeapTuple	tuple;
-	Datum		values[3];
-	bool		nulls[3];
-	Datum		temp1;
-	Datum		temp2;
-
-	memset(values, 0, sizeof(values));
-	memset(nulls, false, sizeof(values));
-
-	/* "rowid" of column store  */
-	values[0] = Int64GetDatum(cs_rowid);
-
-	/* "nulls" of column store */
-	VARBITLEN(cs_nulls) = nitems;
-	SET_VARSIZE(cs_nulls, VARBITTOTALLEN(attlen));
-	values[1] = PointerGetDatum(cs_nulls);
-	temp1 = toast_compress_datum(values[1]);
-	if (DatumGetPointer(temp1) != NULL)
-		values[1] = temp1;
-
-	/* "values" of column store */
-	SET_VARSIZE(cs_values, VARHDRSZ + nitems * attlen);
-	values[2] = PointerGetDatum(cs_values);
-	temp2 = toast_compress_datum(values[2]);
-	if (DatumGetPointer(temp2) != NULL)
-		values[2] = temp2;
-
-	tuple = heap_form_tuple(RelationGetDescr(csrel), values, nulls);
-
-	simple_heap_insert(csrel, tuple);
-	CatalogIndexInsert(csidx, tuple);
-
-	heap_freetuple(tuple);
-	if (DatumGetPointer(temp1))
-		pfree(DatumGetPointer(temp1));
-	if (DatumGetPointer(temp2))
-		pfree(DatumGetPointer(temp2));
 }
 
 static void
@@ -149,8 +87,8 @@ pgstrom_cschunk_insert(RelationSet relset, CStoreChunk chunk, int nitems)
 	TupleDesc	tupdesc;
 	HeapTuple	tuple;
 	Datum		temp;
-	Datum		values[3];
-	bool		nulls[3];
+	Datum		values[2];
+	bool		nulls[2];
 	int			j, index;
 	Oid			save_userid;
 	int			save_sec_context;
@@ -195,58 +133,87 @@ pgstrom_cschunk_insert(RelationSet relset, CStoreChunk chunk, int nitems)
 	Assert(chunk->nattrs == RelationGetNumberOfAttributes(relset->base_rel));
 	for (j=0; j < chunk->nattrs; j++)
 	{
-		if (!chunk->values)
-			continue;
+		Form_pg_attribute	attr
+			= RelationGetDescr(relset->base_rel)->attrs[j];
 
-		if (chunk->attlen[j] > 0)
+		if (attr->attlen > 0)
 		{
-			VarBit *cs_nulls;
-			bytea  *cs_values;
-			int		cs_unitsz = PGSTROM_CHUNK_SIZE / chunk->attlen[j];
-			int		cs_base;
-			int		cs_offset;
+			int			cs_unitsz = PGSTROM_CHUNK_SIZE / attr->attlen;
+			ArrayType  *cs_value;
+			int			cs_base;
+			int			cs_limit;
+			int			cs_count;
+			bool		cs_hasnull;
+			bool		cs_hasvalid;
 
-			cs_nulls = palloc0(VARBITTOTALLEN(cs_unitsz));
-			cs_values = palloc0(VARHDRSZ + PGSTROM_CHUNK_SIZE);
+			cs_value = palloc0(ARR_OVERHEAD_WITHNULLS(1, cs_unitsz) +
+							   PGSTROM_CHUNK_SIZE);
 
-			for (index=0, cs_base=0, cs_offset=0;
-				 index < nitems;
-				 index++, cs_offset = index - cs_base)
+			for (cs_base = 0; cs_base < nitems; cs_base += cs_unitsz)
 			{
-				if (cs_offset == cs_unitsz)
-				{
-					do_cschunk_insert_one(relset->column_rel[j],
-										  relset->column_idx[j],
-										  chunk->attlen[j],
-										  cs_offset,
-										  rowid + cs_base,
-										  cs_nulls, cs_values);
-					cs_base += cs_unitsz;
-					cs_offset = 0;
-					memset(cs_nulls, 0, VARBITTOTALLEN(cs_unitsz));
-					memset(cs_values, 0, VARHDRSZ + PGSTROM_CHUNK_SIZE);
-				}
+				bits8  *nullmap;
 
-				if (chunk->nulls[j][index])
-					VARBITS(cs_nulls)[cs_offset >> 3] |= (1<<(cs_offset & 7));
-				else
+				cs_limit = cs_base + cs_unitsz;
+				if (cs_limit > nitems)
+					cs_limit = nitems;
+				cs_count = (cs_limit - cs_base);
+
+				/* set up an array */
+				cs_hasnull = false;
+				cs_hasvalid = false;
+				cs_value->ndim = 1;
+				cs_value->dataoffset = ARR_OVERHEAD_WITHNULLS(1, cs_count);
+				cs_value->elemtype = attr->atttypid;
+				ARR_DIMS(cs_value)[0] = cs_count;
+				ARR_LBOUND(cs_value)[0] = 0;
+
+				/* set up nullmap, if needed */
+				nullmap = ARR_NULLBITMAP(cs_value);
+				memset(nullmap, 0, (cs_count + 7) / 8);
+				for (index = cs_base; index < cs_limit; index++)
 				{
-					void   *psrc = ((char *)chunk->values[j] +
-									index * chunk->attlen[j]);
-					void   *pdst = (VARDATA(cs_values) +
-									cs_offset * chunk->attlen[j]);
-					memcpy(pdst, psrc, chunk->attlen[j]);
+					if (chunk->nulls[j][index])
+					{
+						nullmap[(index - cs_base) >> 3]
+							|= (1 << ((index - cs_base) & 7));
+						cs_hasnull = true;
+					}
+					else
+						cs_hasvalid = true;
 				}
+				/* if no valid items, no need to write this array */
+				if (!cs_hasvalid)
+					continue;
+				/* if no null, we remove nullbitmap from array */
+				if (!cs_hasnull)
+					cs_value->dataoffset = 0;
+
+				/* data copy */
+				memcpy(ARR_DATA_PTR(cs_value),
+					   ((char *)chunk->values[j] + cs_base * attr->attlen),
+					   cs_count * attr->attlen);
+				SET_VARSIZE(cs_value,
+							(ARR_HASNULL(cs_value) ?
+							 ARR_OVERHEAD_WITHNULLS(1, cs_count) :
+							 ARR_OVERHEAD_NONULLS(1)) +
+							cs_count * attr->attlen);
+
+				memset(nulls, false, sizeof(nulls));
+				values[0] = Int64GetDatum(rowid + cs_base);
+				values[1] = PointerGetDatum(cs_value);
+				temp = toast_compress_datum(values[1]);
+				if (DatumGetPointer(temp) != NULL)
+					values[1] = temp;
+
+				tuple = heap_form_tuple(tupdesc, values, nulls);
+				simple_heap_insert(relset->column_rel[j], tuple);
+				CatalogIndexInsert(relset->column_idx[j], tuple);
+				heap_freetuple(tuple);
+
+				if (DatumGetPointer(temp) != NULL)
+					pfree(DatumGetPointer(temp));
 			}
-			if (cs_offset > 0)
-				do_cschunk_insert_one(relset->column_rel[j],
-									  relset->column_idx[j],
-									  chunk->attlen[j],
-									  cs_offset,
-									  rowid + cs_base,
-									  cs_nulls, cs_values);
-			pfree(cs_nulls);
-			pfree(cs_values);
+			pfree(cs_value);
 		}
 		else
 		{
@@ -257,11 +224,10 @@ pgstrom_cschunk_insert(RelationSet relset, CStoreChunk chunk, int nitems)
 					continue;
 
 				values[0] = Int64GetDatum(rowid + index);
-				nulls[1] = true;
-				values[2] = ((Datum *)chunk->values[j])[index];
+				values[1] = ((Datum *)chunk->values[j])[index];
 				temp = toast_compress_datum(values[2]);
 				if (DatumGetPointer(temp) != NULL)
-					values[2] = temp;
+					values[1] = temp;
 
 				tuple = heap_form_tuple(tupdesc, values, nulls);
 				simple_heap_insert(relset->column_rel[j], tuple);
@@ -287,18 +253,11 @@ pgstrom_data_load_internal(RelationSet relset,
 	bool		   *nulls;
 	AttrNumber		i, j;
 	int				index = 0;
-	Bitmapset	   *valid_cols;
 
 	tupdesc = RelationGetDescr(source);
 	values = palloc(sizeof(Datum) * tupdesc->natts);
 	nulls  = palloc(sizeof(bool)  * tupdesc->natts);
-
-	for (i=0, valid_cols = NULL; i < tupdesc->natts; i++)
-	{
-		if ((j = attmap[i]) > InvalidAttrNumber)
-			valid_cols = bms_add_member(valid_cols, j);
-	}
-	chunk = pgstrom_cschunk_alloc(relset->base_rel, valid_cols);
+	chunk = pgstrom_cschunk_alloc(relset->base_rel);
 
 	/*
 	 * Scan the source relation
@@ -320,16 +279,19 @@ pgstrom_data_load_internal(RelationSet relset,
 				chunk->nulls[j][index] = true;
 			else
 			{
+				Form_pg_attribute	attr
+					= RelationGetDescr(relset->base_rel)->attrs[j];
+
 				chunk->nulls[j][index] = false;
 
-				if (chunk->attlen[j] > 0)
+				if (attr->attlen > 0)
 				{
 					void   *pdst = ((char *)chunk->values[j] +
-									index * chunk->attlen[j]);
-					void   *psrc = (chunk->attbyval[j] ?
+									index * attr->attlen);
+					void   *psrc = (attr->attbyval ?
 									DatumGetPointer(&values[i]) :
 									DatumGetPointer(values[i]));
-					memcpy(pdst, psrc, chunk->attlen[j]);
+					memcpy(pdst, psrc, attr->attlen);
 				}
 				else
 				{
@@ -344,13 +306,14 @@ pgstrom_data_load_internal(RelationSet relset,
 			pgstrom_cschunk_insert(relset, chunk, index);
 			for (j=0; j < chunk->nattrs; j++)
 			{
-				if (chunk->nulls[j])
-					memset(chunk->nulls[j], false, PGSTROM_CHUNK_SIZE);
-				if (chunk->values[j])
-					memset(chunk->values[j], 0,
-						   chunk->attlen[j] > 0 ?
-						   chunk->attlen[j] * PGSTROM_CHUNK_SIZE :
-						   sizeof(void *) * PGSTROM_CHUNK_SIZE);
+				Form_pg_attribute	attr
+					= RelationGetDescr(relset->base_rel)->attrs[j];
+
+				memset(chunk->nulls[j], false, PGSTROM_CHUNK_SIZE);
+				memset(chunk->values[j], 0,
+					   attr->attlen > 0 ?
+					   attr->attlen * PGSTROM_CHUNK_SIZE :
+					   sizeof(void *) * PGSTROM_CHUNK_SIZE);
 			}
 			index = 0;
 		}

@@ -29,6 +29,7 @@
 #include "nodes/pg_list.h"
 #include "miscadmin.h"
 #include "tcop/utility.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "pg_strom.h"
@@ -241,22 +242,38 @@ pgstrom_create_column_store(Oid namespaceId, Relation base_rel,
 				(errcode(ERRCODE_NAME_TOO_LONG),
 				 errmsg("Name of shadow table: \"%s\" too long", store_name)));
 
-	tupdesc = CreateTemplateTupleDesc(3, false);
+	tupdesc = CreateTemplateTupleDesc(2, false);
 	TupleDescInitEntry(tupdesc,
 					   (AttrNumber) 1,
 					   "rowid",
 					   INT8OID,
 					   -1, 0);
-	TupleDescInitEntry(tupdesc,
-					   (AttrNumber) 2,
-					   "nulls",
-					   VARBITOID,
-					   -1, 0);
-	TupleDescInitEntry(tupdesc,
-					   (AttrNumber) 3,
-					   "values",
-					   BYTEAOID,
-					   -1, 0);
+	if (attform->attlen > 0)
+	{
+		Oid		array_oid = get_array_type(attform->atttypid);
+
+		if (!OidIsValid(array_oid))
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("could not find array type for data type %s",
+							format_type_be(attform->atttypid))));
+
+		TupleDescInitEntry(tupdesc,
+						   (AttrNumber) 2,
+						   "value",
+						   array_oid,
+						   -1, 1);
+	}
+	else
+	{
+		TupleDescInitEntry(tupdesc,
+						   (AttrNumber) 2,
+						   "value",
+						   attform->atttypid,
+						   attform->atttypmod,
+						   attform->attndims);
+	}
+
 	/*
 	 * Pg_strom want to keep varlena data being inlined; never uses external
 	 * toast relation due to the performance reason. So, we override the
@@ -264,7 +281,6 @@ pgstrom_create_column_store(Oid namespaceId, Relation base_rel,
 	 */
 	tupdesc->attrs[0]->attstorage = 'p';
 	tupdesc->attrs[1]->attstorage = 'm';
-	tupdesc->attrs[2]->attstorage = 'm';
 
 	store_oid = heap_create_with_catalog(store_name,
 										 namespaceId,
