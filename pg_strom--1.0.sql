@@ -15,7 +15,19 @@ CREATE FOREIGN DATA WRAPPER pg_strom
   HANDLER pgstrom_fdw_handler
   VALIDATOR pgstrom_fdw_validator;
 
-CREATE FUNCTION pgstrom_blkload(regclass, reclass)
+CREATE SERVER pg_strom FOREIGN DATA WRAPPER pg_strom;
+
+CREATE FUNCTION pgstrom_data_load(regclass, regclass)
+  RETURNS bool
+  AS 'MODULE_PATHNAME'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom_data_clear(regclass)
+  RETURNS bool
+  AS 'MODULE_PATHNAME'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom_data_compaction(regclass)
   RETURNS bool
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;

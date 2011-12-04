@@ -43,6 +43,13 @@ pgstrom_fdw_handler(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(&pgstromFdwHandlerData);
 }
 
+/****/
+Datum
+pgstrom_fdw_validator(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_VOID();
+}
+
 /*
  * pgstrom_log_device_info
  *

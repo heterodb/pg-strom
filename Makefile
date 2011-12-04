@@ -7,9 +7,12 @@ CUDAROOT := /usr/local/cuda
 NVCC := $(shell which nvcc 2>/dev/null || echo $(CUDAROOT)/bin/nvcc)
 PG_CONFIG = pg_config
 
+PG_SHAREDIR	:= $(shell $(PG_CONFIG) --sharedir)
+PG_LIBDIR	:= $(shell $(PG_CONFIG) --pkglibdir)
+
 NVCFLAGS  := -O2 --shared -I. -D_GNU_SOURCE
 NVCFLAGS  += -I$(shell $(PG_CONFIG) --includedir-server)
-NVCFLAGS  += -Xcompiler=-Wall -Xcompiler=-g -Xcompiler=-fpic
+NVCFLAGS  += -g -Xcompiler=-Wall -Xcompiler=-g -Xcompiler=-fpic
 NVLDFLAGS := -Xlinker=--as-needed
 NVLDFLAGS += -Xlinker=-rpath,$(shell $(PG_CONFIG) --libdir)
 NVLDFLAGS += -Xlinker=-rpath,$(CUDAROOT)/lib64
@@ -18,7 +21,11 @@ NVLDFLAGS += -Xlinker=-rpath,$(CUDAROOT)/lib
 all: $(MODULE).so
 
 install: $(MODULE).so
-	install -m 755 $^ $(shell $(PG_CONFIG) --pkglibdir)
+	mkdir -p $(PG_SHAREDIR)/extension
+	mkdir -p $(PG_LIBDIR)
+	install -m 644 pg_strom--1.0.sql $(PG_SHAREDIR)/extension
+	install -m 644 pg_strom.control $(PG_SHAREDIR)/extension
+	install -m 755 $^ $(PG_LIBDIR)
 
 clean:
 	rm -f $(MODULE).so $(OBJS)
@@ -28,5 +35,5 @@ $(MODULE).so: $(OBJS)
 .c.o:
 	$(NVCC) $(NVCFLAGS) -c $< $(NVLDFLAGS)
 .cu.o:
-	$(NVCC) $(NVCFLAGS) -c $< $(NVLDFLAGS)
+	$(NVCC) --x=c $(NVCFLAGS) -c $< $(NVLDFLAGS)
 .SUFFIXES: .c .cu .o

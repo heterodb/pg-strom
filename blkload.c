@@ -55,12 +55,12 @@ pgstrom_cschunk_alloc(Relation base_rel, Bitmapset *valid_cols)
 
 	for (i=0; i < chunk->nattrs; i++)
 	{
-		Form_pg_attribute	attr;
+		Form_pg_attribute	attr
+			= RelationGetDescr(base_rel)->attrs[i];
 
-		if (valid_cols && !bms_is_member(i, valid_cols))
+		if (valid_cols && !bms_is_member(attr->attnum, valid_cols))
 			continue;
 
-		attr = RelationGetDescr(base_rel)->attrs[i];
 		chunk->attlen[i] = attr->attlen;
 		chunk->attbyval[i] = attr->attbyval;
 		chunk->nulls[i] = palloc0(sizeof(bool) * PGSTROM_CHUNK_SIZE);
@@ -293,9 +293,9 @@ pgstrom_data_load_internal(RelationSet relset,
 	values = palloc(sizeof(Datum) * tupdesc->natts);
 	nulls  = palloc(sizeof(bool)  * tupdesc->natts);
 
-	for (i=0, valid_cols = NULL; tupdesc->natts; i++)
+	for (i=0, valid_cols = NULL; i < tupdesc->natts; i++)
 	{
-		if ((j = attmap[i]) >= 0)
+		if ((j = attmap[i]) > InvalidAttrNumber)
 			valid_cols = bms_add_member(valid_cols, j);
 	}
 	chunk = pgstrom_cschunk_alloc(relset->base_rel, valid_cols);
@@ -306,10 +306,10 @@ pgstrom_data_load_internal(RelationSet relset,
 	scan = heap_beginscan(source, SnapshotNow, 0, NULL);
 	while (HeapTupleIsValid(tuple = heap_getnext(scan, ForwardScanDirection)))
 	{
-		heap_deformtuple(tuple, tupdesc, values, nulls);
+		heap_deform_tuple(tuple, tupdesc, values, nulls);
 
 		/* set usemap */
-		chunk->usemap->bit_dat[index >> 3] |= (1 << (index & 0x07));
+		VARBITS(chunk->usemap)[index >> 3] |= (1 << (index & 0x07));
 
 		for (i=0; i < tupdesc->natts; i++)
 		{
@@ -501,7 +501,7 @@ pgstrom_data_load(PG_FUNCTION_ARGS)
 		if (attr1->attisdropped)
 			continue;
 
-		tuple = SearchSysCacheAttName(RelationGetRelid(srel),
+		tuple = SearchSysCacheAttName(RelationGetRelid(drelset->base_rel),
 									  NameStr(attr1->attname));
 		if (!HeapTupleIsValid(tuple))
 			ereport(ERROR,
@@ -530,6 +530,8 @@ pgstrom_data_load(PG_FUNCTION_ARGS)
 				attr1->attnum - FirstLowInvalidHeapAttributeNumber);
 		drte->modifiedCols = bms_add_member(drte->modifiedCols,
 				attr2->attnum - FirstLowInvalidHeapAttributeNumber);
+
+		ReleaseSysCache(tuple);
 	}
 
 	/*
@@ -559,3 +561,7 @@ pgstrom_data_compaction(PG_FUNCTION_ARGS)
 			 errmsg("%s is not supported yet", __FUNCTION__)));
 	PG_RETURN_BOOL(true);
 }
+
+PG_FUNCTION_INFO_V1(pgstrom_data_load);
+PG_FUNCTION_INFO_V1(pgstrom_data_clear);
+PG_FUNCTION_INFO_V1(pgstrom_data_compaction);

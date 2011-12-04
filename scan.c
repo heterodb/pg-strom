@@ -95,7 +95,7 @@ pgstrom_open_relation_set(Oid base_relid, LOCKMODE lockmode)
 	 */
 	snprintf(namebuf, sizeof(namebuf), "%s.%s.seq",
 			 base_schema, RelationGetRelationName(base_rel));
-	relset->sequence_id = RangeVarGetRelid(range, NoLock, false, false);
+	relset->sequence_id = RangeVarGetRelid(range, NoLock, false);
 
 	return relset;
 }

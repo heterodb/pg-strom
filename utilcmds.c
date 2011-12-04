@@ -297,14 +297,15 @@ pgstrom_create_column_store(Oid namespaceId, Relation base_rel,
     store_rel = heap_open(store_oid, ShareLock);
 
 	/* Create a unique index on the rowid */
-	pgstrom_create_rowid_index(base_rel, NULL, store_rel, (AttrNumber) 1);
+	pgstrom_create_rowid_index(base_rel, NameStr(attform->attname),
+							   store_rel, (AttrNumber) 1);
 
 	heap_close(store_rel, NoLock);
 
 	/* Register dependency between base and shadow tables */
 	base_address.classId  = RelationRelationId;
 	base_address.objectId =	RelationGetRelid(base_rel);
-	base_address.objectSubId = 0;
+	base_address.objectSubId = attform->attnum;
 	store_address.classId = RelationRelationId;
 	store_address.objectId = store_oid;
 	store_address.objectSubId = 0;
@@ -449,11 +450,11 @@ pgstrom_process_utility_command(Node *stmt,
 	if (IsA(stmt, CreateForeignTableStmt))
 	{
 		CreateForeignTableStmt *cfts = (CreateForeignTableStmt *)stmt;
-		ForeignDataWrapper	   *fdw;
-		Oid		fservId;
+		ForeignServer	   *fs;
+		ForeignDataWrapper *fdw;
 
-		fservId = get_foreign_server_oid(cfts->servername, false);
-		fdw = GetForeignDataWrapper(fservId);
+		fs = GetForeignServerByName(cfts->servername, false);
+		fdw = GetForeignDataWrapper(fs->fdwid);
 		if (GetFdwRoutine(fdw->fdwhandler) == &pgstromFdwHandlerData)
 		   	pgstrom_process_post_create(cfts->base.relation);
 	}
