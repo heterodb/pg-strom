@@ -1,7 +1,7 @@
 # pg_rapid Makefile
 
 MODULE = pg_strom
-OBJS = pg_strom.o utilcmds.o blkload.o plan.o scan.o cuda.o
+OBJS = pg_strom.o utilcmds.o blkload.o plan.o scan.o cuda_api.o
 
 CUDAROOT := /usr/local/cuda
 NVCC := $(shell which nvcc 2>/dev/null || echo $(CUDAROOT)/bin/nvcc)

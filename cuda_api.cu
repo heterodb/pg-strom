@@ -1,5 +1,5 @@
 /*
- * cuda.c
+ * cuda_api.cu
  *
  * A set of simple wrappers to CUDA runtime APIs, because some of basic
  * declarations are conflicts between PostgreSQL and CUDA, thus we need
@@ -13,7 +13,7 @@
  * modify it under the terms of the 'LICENSE' included within
  * this package.
  */
-#include "pg_strom.h"
+#include "pg_strom_cuda.h"
 #include <cuda_runtime.h>
 
 const char *
@@ -26,6 +26,18 @@ cudaError_t
 pgcuda_get_device_count(int *count)
 {
 	return cudaGetDeviceCount(count);
+}	
+
+cudaError_t
+pgcuda_set_device(int device)
+{
+	return cudaSetDevice(device);
+}
+
+cudaError_t
+pgcuda_get_device(int *device)
+{
+	return cudaGetDevice(device);
 }
 
 cudaError_t

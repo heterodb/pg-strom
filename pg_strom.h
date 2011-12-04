@@ -13,17 +13,11 @@
 #ifndef PG_STROM_H
 #define PG_STROM_H
 
-/*
- * XXX - Some of naming scheme conflicts between PostgreSQL and
- * CUDA, so we make declarations of PostgreSQL side invisible in
- * the case when npp.h was included.
- */
-#ifdef POSTGRES_H
+#include "catalog/indexing.h"
 #include "commands/explain.h"
 #include "fmgr.h"
 #include "foreign/fdwapi.h"
-#endif
-#include <driver_types.h>
+#include "pg_strom_cuda.h"
 
 #define PGSTROM_SCHEMA_NAME		"pg_strom"
 
@@ -32,34 +26,43 @@
 /*
  * utilcmds.c
  */
-#ifdef POSTGRES_H
-extern void	pgstrom_utilcmds_init(void);
+extern void
+pgstrom_utilcmds_init(void);
 
-#endif
 /*
  * blkload.c
  */
-#ifdef POSTGRES_H
-extern Datum pgstrom_fdw_handler(PG_FUNCTION_ARGS);
-
-
-#endif
+extern Datum pgstrom_data_load(PG_FUNCTION_ARGS);
+extern Datum pgstrom_data_clear(PG_FUNCTION_ARGS);
+extern Datum pgstrom_data_compaction(PG_FUNCTION_ARGS);
 
 /*
  * plan.c
  */
-#ifdef POSTGRES_H
 extern FdwPlan *
 pgstrom_plan_foreign_scan(Oid foreignTblOid,
-						  PlannerInfo *root, RelOptInfo *baserel);
+			  PlannerInfo *root, RelOptInfo *baserel);
 extern void
 pgstrom_explain_foreign_scan(ForeignScanState *node, ExplainState *es);
-#endif
 
 /*
  * scan.c
  */
-#ifdef POSTGRES_H
+typedef struct {
+	Relation	base_rel;
+	Relation	usemap_rel;
+	Relation   *column_rel;
+	CatalogIndexState	usemap_idx;
+	CatalogIndexState  *column_idx;
+	Oid			sequence_id;
+} RelationSetData;
+typedef RelationSetData *RelationSet;
+
+extern RelationSet
+pgstrom_open_relation_set(Oid base_relid, LOCKMODE lockmode);
+extern void
+pgstrom_close_relation_set(RelationSet relset, LOCKMODE lockmode);
+
 extern void
 pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags);
 extern TupleTableSlot*
@@ -68,25 +71,12 @@ extern void
 pgboost_rescan_foreign_scan(ForeignScanState *fss);
 extern void
 pgboost_end_foreign_scan(ForeignScanState *fss);
-#endif
 
 /*
  * pg_strom.c
  */
-#ifdef POSTGRES_H
 extern FdwRoutine pgstromFdwHandlerData;
 extern Datum pgstrom_fdw_handler(PG_FUNCTION_ARGS);
 extern Datum pgstrom_fdw_validator(PG_FUNCTION_ARGS);
-#endif
-
-/*
- * cuda.c
- */
-extern const char *
-pgcuda_get_error_string(cudaError_t error);
-extern cudaError_t
-pgcuda_get_device_count(int *count);
-extern cudaError_t
-pgcuda_get_device_properties(struct cudaDeviceProp *prop, int device);
 
 #endif	/* PG_STROM_H */
