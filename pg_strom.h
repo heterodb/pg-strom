@@ -22,6 +22,7 @@
 #define PGSTROM_SCHEMA_NAME		"pg_strom"
 
 #define PGSTROM_CHUNK_SIZE		(2400 * (BLCKSZ / 8192))
+#define PGSTROM_VARLENA_UNITSZ	(PGSTROM_CHUNK_SIZE / 100)
 
 /*
  * utilcmds.c

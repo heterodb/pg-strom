@@ -229,6 +229,7 @@ pgstrom_create_column_store(Oid namespaceId, Relation base_rel,
 	Oid				store_oid;
 	Relation		store_rel;
 	TupleDesc		tupdesc;
+	Oid				array_oid;
 	ObjectAddress	base_address;
 	ObjectAddress	store_address;
 
@@ -242,38 +243,26 @@ pgstrom_create_column_store(Oid namespaceId, Relation base_rel,
 				(errcode(ERRCODE_NAME_TOO_LONG),
 				 errmsg("Name of shadow table: \"%s\" too long", store_name)));
 
+	if (attform->attndims == 0)
+		array_oid = get_array_type(attform->atttypid);
+	else
+		array_oid = get_array_type(BYTEAOID);
+	if (!OidIsValid(array_oid))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("could not find array type for data type %s",
+						format_type_be(attform->atttypid))));
 	tupdesc = CreateTemplateTupleDesc(2, false);
 	TupleDescInitEntry(tupdesc,
 					   (AttrNumber) 1,
 					   "rowid",
 					   INT8OID,
 					   -1, 0);
-	if (attform->attlen > 0)
-	{
-		Oid		array_oid = get_array_type(attform->atttypid);
-
-		if (!OidIsValid(array_oid))
-			ereport(ERROR,
-					(errcode(ERRCODE_UNDEFINED_OBJECT),
-					 errmsg("could not find array type for data type %s",
-							format_type_be(attform->atttypid))));
-
-		TupleDescInitEntry(tupdesc,
-						   (AttrNumber) 2,
-						   "value",
-						   array_oid,
-						   -1, 1);
-	}
-	else
-	{
-		TupleDescInitEntry(tupdesc,
-						   (AttrNumber) 2,
-						   "value",
-						   attform->atttypid,
-						   attform->atttypmod,
-						   attform->attndims);
-	}
-
+	TupleDescInitEntry(tupdesc,
+					   (AttrNumber) 2,
+					   "values",
+					   array_oid,
+					   -1, 1);
 	/*
 	 * Pg_strom want to keep varlena data being inlined; never uses external
 	 * toast relation due to the performance reason. So, we override the
