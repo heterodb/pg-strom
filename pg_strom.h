@@ -22,7 +22,10 @@
 #define PGSTROM_SCHEMA_NAME		"pg_strom"
 
 #define PGSTROM_CHUNK_SIZE		(2400 * (BLCKSZ / 8192))
-#define PGSTROM_VARLENA_UNITSZ	(PGSTROM_CHUNK_SIZE / 100)
+#define PGSTROM_UNIT_SIZE(attr)								\
+	(((attr)->attlen > 0 ?									\
+	  (PGSTROM_CHUNK_SIZE / (attr)->attlen) :				\
+	  (PGSTROM_CHUNK_SIZE / 100)) & ~(BITS_PER_BYTE - 1))
 
 /*
  * utilcmds.c
@@ -51,16 +54,17 @@ pgstrom_explain_foreign_scan(ForeignScanState *node, ExplainState *es);
  */
 typedef struct {
 	Relation	base_rel;
-	Relation	usemap_rel;
-	Relation   *column_rel;
-	CatalogIndexState	usemap_idx;
-	CatalogIndexState  *column_idx;
-	Oid			sequence_id;
+	Relation	rowid_rel;
+	Relation	rowid_idx;
+	Relation   *cs_rel;
+	Relation   *cs_idx;
+	Oid			rowid_seqid;
 } RelationSetData;
 typedef RelationSetData *RelationSet;
 
 extern RelationSet
-pgstrom_open_relation_set(Oid base_relid, LOCKMODE lockmode);
+pgstrom_open_relation_set(Relation base_rel,
+						  LOCKMODE lockmode, bool with_index);
 extern void
 pgstrom_close_relation_set(RelationSet relset, LOCKMODE lockmode);
 

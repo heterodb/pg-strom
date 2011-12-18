@@ -119,14 +119,14 @@ pgstrom_create_rowid_index(Relation base_rel, const char *attname,
 }
 
 /*
- * pgstrom_create_usemap_store
+ * pgstrom_create_rowid_map
  *
- * create "<base_schema>.<base_rel>.usemap" table of pg_strom schema
- * that has "rowid(int8)" and "usemap(VarBit)" to track which rowid
+ * create "<base_schema>.<base_rel>.rowid" table of pg_strom schema
+ * that has "rowid(int8)" and "rowid_map(VarBit)" to track which rowid
  * has been in use.
  */
 static void
-pgstrom_create_usemap_store(Oid namespaceId, Relation base_rel)
+pgstrom_create_rowid_map(Oid namespaceId, Relation base_rel)
 {
 	char		   *nsp_name;
 	char			store_name[NAMEDATALEN * 2 + 20];
@@ -137,7 +137,7 @@ pgstrom_create_usemap_store(Oid namespaceId, Relation base_rel)
 	ObjectAddress	store_address;
 
 	nsp_name = get_namespace_name(RelationGetForm(base_rel)->relnamespace);
-	snprintf(store_name, sizeof(store_name), "%s.%s.usemap",
+	snprintf(store_name, sizeof(store_name), "%s.%s.rowid",
 			 nsp_name, RelationGetRelationName(base_rel));
 	if (strlen(store_name) >= NAMEDATALEN - 1)
 		ereport(ERROR,
@@ -152,7 +152,7 @@ pgstrom_create_usemap_store(Oid namespaceId, Relation base_rel)
 					   -1, 0);
 	TupleDescInitEntry(tupdesc,
 					   (AttrNumber) 2,
-					   "usemap",
+					   "rowid_map",
 					   VARBITOID,
 					   -1, 0);
 	/*
@@ -215,7 +215,7 @@ pgstrom_create_usemap_store(Oid namespaceId, Relation base_rel)
 /*
  * pgstrom_create_column_store
  *
- * create "<base_schema>.<base_rel>.<column>.col" table of pg_strom
+ * create "<base_schema>.<base_rel>.<column>.cs" table of pg_strom
  * schema that has "rowid(int8)", "nulls(VarBit)" and "values(bytes)"
  * to store the values of original columns. The maximum number of
  * values being stored in a tuple depends on length of unit data.
@@ -234,7 +234,7 @@ pgstrom_create_column_store(Oid namespaceId, Relation base_rel,
 	ObjectAddress	store_address;
 
 	nsp_name = get_namespace_name(RelationGetForm(base_rel)->relnamespace);
-	snprintf(store_name, sizeof(store_name), "%s.%s.%s.col",
+	snprintf(store_name, sizeof(store_name), "%s.%s.%s.cs",
 			 nsp_name,
 			 RelationGetRelationName(base_rel),
 			 NameStr(attform->attname));
@@ -322,14 +322,14 @@ pgstrom_create_column_store(Oid namespaceId, Relation base_rel,
 }
 
 /*
- * pgstrom_create_usemap_seq
+ * pgstrom_create_rowid_seq
  *
  * create "<base_schema>.<base_rel>.seq" sequence of pg_strom schema
  * that enables to generate unique number between 0 to 2^48-1 by
  * PGSTROM_CHUNK_SIZE.
  */
 static void
-pgstrom_create_usemap_seq(Oid namespaceId, Relation base_rel)
+pgstrom_create_rowid_seq(Oid namespaceId, Relation base_rel)
 {
 	CreateSeqStmt  *seq_stmt;
 	char		   *nsp_name;
@@ -338,7 +338,7 @@ pgstrom_create_usemap_seq(Oid namespaceId, Relation base_rel)
 	List		   *rowid_namelist;
 
 	nsp_name = get_namespace_name(RelationGetForm(base_rel)->relnamespace);
-	snprintf(rel_name, sizeof(rel_name), "%s.%s.usemap",
+	snprintf(rel_name, sizeof(rel_name), "%s.%s.rowid",
 			 nsp_name, RelationGetRelationName(base_rel));
 	snprintf(seq_name, sizeof(seq_name), "%s.%s.seq",
 			 nsp_name, RelationGetRelationName(base_rel));
@@ -396,10 +396,10 @@ pgstrom_process_post_create(RangeVar *base_range)
 	GetUserIdAndSecContext(&save_userid, &save_sec_context);
 	SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID, save_sec_context);
 
-	/* create pg_strom.<base_schema>_<base_rel>.map */
-	pgstrom_create_usemap_store(namespaceId, base_rel);
+	/* create pg_strom.<base_schema>.<base_rel>.rowid */
+	pgstrom_create_rowid_map(namespaceId, base_rel);
 
-	/* create pg_strom.<base_schema>_<base_rel>_<column> */
+	/* create pg_strom.<base_schema>.<base_rel>.<column> */
 	for (attnum = 0;
 		 attnum < RelationGetNumberOfAttributes(base_rel);
 		 attnum++)
@@ -408,8 +408,8 @@ pgstrom_process_post_create(RangeVar *base_range)
 									RelationGetDescr(base_rel)->attrs[attnum]);
 	}
 
-	/* create pg_strom.<base_schema>_<base_rel>.seq */
-	pgstrom_create_usemap_seq(namespaceId, base_rel);
+	/* create pg_strom.<base_schema>.<base_rel>.seq */
+	pgstrom_create_rowid_seq(namespaceId, base_rel);
 
 
 	/* restore security setting and close the base relation */

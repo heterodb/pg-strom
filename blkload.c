@@ -42,7 +42,7 @@ pgstrom_cschunk_insert(RelationSet relset, VarBit *cs_usemap,
 	bool		nulls[2];
 	Oid			save_userid;
 	int			save_sec_context;
-	int			j, index;
+	int			colidx, nattrs, index;
 
 	/*
 	 * Acquire a row-id of the head of this chunk
@@ -51,7 +51,7 @@ pgstrom_cschunk_insert(RelationSet relset, VarBit *cs_usemap,
 	SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID,
 						   save_sec_context | SECURITY_LOCAL_USERID_CHANGE);
 	temp = DirectFunctionCall1(nextval_oid,
-							   ObjectIdGetDatum(relset->sequence_id));
+							   ObjectIdGetDatum(relset->rowid_seqid));
 	rowid = DatumGetInt64(temp);
 	SetUserIdAndSecContext(save_userid, save_sec_context);
 
@@ -69,10 +69,10 @@ pgstrom_cschunk_insert(RelationSet relset, VarBit *cs_usemap,
 	if (DatumGetPointer(temp) != NULL)
 		values[1] = temp;
 
-	tupdesc = RelationGetDescr(relset->usemap_rel);
+	tupdesc = RelationGetDescr(relset->rowid_rel);
 	tuple = heap_form_tuple(tupdesc, values, nulls);
-	simple_heap_insert(relset->usemap_rel, tuple);
-	CatalogIndexInsert(relset->usemap_idx, tuple);
+	simple_heap_insert(relset->rowid_rel, tuple);
+	CatalogUpdateIndexes(relset->rowid_rel, tuple);
 
 	heap_freetuple(tuple);
 	if (DatumGetPointer(temp) != NULL)
@@ -81,10 +81,11 @@ pgstrom_cschunk_insert(RelationSet relset, VarBit *cs_usemap,
 	/*
 	 * Insert into column store
 	 */
-	for (j=0; j < RelationGetNumberOfAttributes(relset->base_rel); j++)
+	nattrs = RelationGetNumberOfAttributes(relset->base_rel);
+	for (colidx=0; colidx < nattrs; colidx++)
 	{
 		Form_pg_attribute	attr
-			= RelationGetDescr(relset->base_rel)->attrs[j];
+			= RelationGetDescr(relset->base_rel)->attrs[colidx];
 		int			cs_unitsz;
 		int			cs_base;
 		int			cs_limit;
@@ -92,10 +93,7 @@ pgstrom_cschunk_insert(RelationSet relset, VarBit *cs_usemap,
 		int			cs_dims[1];
 		int			cs_lbound[1];
 
-		if (attr->attlen > 0)
-			cs_unitsz = PGSTROM_CHUNK_SIZE / attr->attlen;
-		else
-			cs_unitsz = PGSTROM_VARLENA_UNITSZ;
+		cs_unitsz = PGSTROM_UNIT_SIZE(attr);
 
 		for (cs_base = 0; cs_base < nitems; cs_base += cs_unitsz)
 		{
@@ -109,7 +107,7 @@ pgstrom_cschunk_insert(RelationSet relset, VarBit *cs_usemap,
 			 */
 			for (index = cs_base; index < cs_limit; index++)
 			{
-				if (!cs_nulls[j][index])
+				if (!cs_nulls[colidx][index])
 					break;
 			}
 			if (index == cs_limit)
@@ -120,8 +118,8 @@ pgstrom_cschunk_insert(RelationSet relset, VarBit *cs_usemap,
 			 */
 			cs_dims[0] = cs_limit - cs_base;
 			cs_lbound[0] = 0;
-			cs_array = construct_md_array(cs_values[j] + cs_base,
-										  cs_nulls[j] + cs_base,
+			cs_array = construct_md_array(cs_values[colidx] + cs_base,
+										  cs_nulls[colidx] + cs_base,
 										  1,
 										  cs_dims,
 										  cs_lbound,
@@ -139,12 +137,12 @@ pgstrom_cschunk_insert(RelationSet relset, VarBit *cs_usemap,
 			if (DatumGetPointer(temp) != NULL)
 			{
 				values[1] = temp;
-				elog(NOTICE, "%s: data compress %u => %u (%f%%)", RelationGetRelationName(relset->column_rel[j]), VARSIZE(cs_array), VARSIZE(temp), ((float)VARSIZE(temp)) / ((float)VARSIZE(cs_array)));
+				elog(NOTICE, "%s: data compress %u => %u (%f%%)", RelationGetRelationName(relset->cs_rel[colidx]), VARSIZE(cs_array), VARSIZE(temp), ((float)VARSIZE(temp)) / ((float)VARSIZE(cs_array)));
 			}
-			tupdesc = RelationGetDescr(relset->column_rel[j]);
+			tupdesc = RelationGetDescr(relset->cs_rel[colidx]);
 			tuple = heap_form_tuple(tupdesc, values, nulls);
-			simple_heap_insert(relset->column_rel[j], tuple);
-			CatalogIndexInsert(relset->column_idx[j], tuple);
+			simple_heap_insert(relset->cs_rel[colidx], tuple);
+			CatalogUpdateIndexes(relset->cs_rel[colidx], tuple);
 			heap_freetuple(tuple);
 
 			if (DatumGetPointer(temp) != NULL)
@@ -250,12 +248,12 @@ pgstrom_data_clear_internal(RelationSet relset)
 	AttrNumber		i, nattrs;
 
 	/* clear the usemap table */
-	scan = heap_beginscan(relset->usemap_rel,
+	scan = heap_beginscan(relset->rowid_rel,
 						  SnapshotNow, 0, NULL);
 	while (HeapTupleIsValid(tuple = heap_getnext(scan, ForwardScanDirection)))
 	{
-		simple_heap_delete(relset->usemap_rel, &tuple->t_self);
-		CatalogIndexInsert(relset->usemap_idx, tuple);
+		simple_heap_delete(relset->rowid_rel, &tuple->t_self);
+		CatalogUpdateIndexes(relset->rowid_rel, tuple);
 	}
 	heap_endscan(scan);
 
@@ -263,15 +261,15 @@ pgstrom_data_clear_internal(RelationSet relset)
 	nattrs = RelationGetNumberOfAttributes(relset->base_rel);
 	for (i=0; i < nattrs; i++)
 	{
-		scan = heap_beginscan(relset->column_rel[i],
+		scan = heap_beginscan(relset->cs_rel[i],
 							  SnapshotNow, 0, NULL);
 		while (HeapTupleIsValid(tuple = heap_getnext(scan,
 													 ForwardScanDirection)))
 		{
-			if (!relset->column_rel[i])
+			if (!relset->cs_rel[i])
 				continue;
-			simple_heap_delete(relset->column_rel[i], &tuple->t_self);
-			CatalogIndexInsert(relset->column_idx[i], tuple);
+			simple_heap_delete(relset->cs_rel[i], &tuple->t_self);
+			CatalogUpdateIndexes(relset->cs_rel[i], tuple);
 		}
 		heap_endscan(scan);
 	}
@@ -287,13 +285,15 @@ pgstrom_data_clear_internal(RelationSet relset)
 Datum
 pgstrom_data_clear(PG_FUNCTION_ARGS)
 {
+	Relation		base_rel;
 	RelationSet		relset;
 	RangeTblEntry  *rte;
 
 	/*
 	 * Open the destination relation set
 	 */
-	relset = pgstrom_open_relation_set(PG_GETARG_OID(1), RowExclusiveLock);
+	base_rel = relation_open(PG_GETARG_OID(1), RowExclusiveLock);
+	relset = pgstrom_open_relation_set(base_rel, RowExclusiveLock, false);
 
 	/*
 	 * Set up RangeTblEntry for permission checks
@@ -315,6 +315,7 @@ pgstrom_data_clear(PG_FUNCTION_ARGS)
 	 * Close the relation
 	 */
 	pgstrom_close_relation_set(relset, NoLock);
+	relation_close(base_rel, NoLock);
 
 	PG_RETURN_BOOL(true);
 }
@@ -328,6 +329,7 @@ Datum
 pgstrom_data_load(PG_FUNCTION_ARGS)
 {
 	Relation		srel;
+	Relation		base_rel;
 	RelationSet		drelset;
 	RangeTblEntry  *srte;
 	RangeTblEntry  *drte;
@@ -346,7 +348,8 @@ pgstrom_data_load(PG_FUNCTION_ARGS)
 	/*
 	 * Open the destination relation set
 	 */
-	drelset = pgstrom_open_relation_set(PG_GETARG_OID(1), RowExclusiveLock);
+	base_rel = relation_open(PG_GETARG_OID(1), RowExclusiveLock);
+	drelset = pgstrom_open_relation_set(base_rel, RowExclusiveLock, false);
 
 	/*
 	 * Set up RangeTblEntry for permission checks
@@ -427,6 +430,7 @@ pgstrom_data_load(PG_FUNCTION_ARGS)
 	 * Close the relation
 	 */
 	pgstrom_close_relation_set(drelset, NoLock);
+	relation_close(base_rel, NoLock);
 	relation_close(srel, AccessShareLock);
 
 	PG_RETURN_BOOL(true);

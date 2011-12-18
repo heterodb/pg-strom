@@ -19,14 +19,30 @@ pgstrom_plan_foreign_scan(Oid foreignTblOid,
 						  RelOptInfo *baserel)
 {
 	FdwPlan	   *fdwplan;
-
-	fdwplan = makeNode(FdwPlan);
+	List	   *private = NIL;
+	DefElem	   *defel;
+	AttrNumber	i;
 
 	/*
-	 * XXX - we need actual cost estimation
+	 * Save the referenced columns
 	 */
+	for (i = baserel->min_attr; i <= baserel->max_attr; i++)
+	{
+		if (bms_is_empty(baserel->attr_needed[i - baserel->min_attr]))
+			continue;
+
+		defel = makeDefElem("cols_needed",
+							(Node *) makeInteger(i - baserel->min_attr));
+		private = lappend(private, (Node *) defel);
+	}
+
+	/*
+	 * Set up FdwPlan
+	 */
+	fdwplan = makeNode(FdwPlan);
 	fdwplan->startup_cost = 1.0;
 	fdwplan->startup_cost = 2.0;
+	fdwplan->fdw_private = private;
 
 	return fdwplan;
 }
@@ -35,5 +51,7 @@ void
 pgstrom_explain_foreign_scan(ForeignScanState *node,
 							 ExplainState *es)
 {
-	ExplainPropertyText("Foreign File", "pg_strom (-o-;)", es);
+	Relation	rel = node->ss.ss_currentRelation;
+
+	ExplainPropertyText("Stream Relation", RelationGetRelationName(rel), es);
 }
