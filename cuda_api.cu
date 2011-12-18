@@ -45,3 +45,59 @@ pgcuda_get_device_properties(struct cudaDeviceProp *prop, int device)
 {
 	return cudaGetDeviceProperties(prop, device);
 }
+
+cudaError_t
+pgcuda_malloc(void **devptr, size_t size)
+{
+	return cudaMalloc(devptr, size);
+}
+
+cudaError_t
+pgcuda_free(void *devptr)
+{
+	return pgcuda_free(devptr);
+}
+
+cudaError_t
+pgcuda_malloc_host(void **ptr, size_t size)
+{
+	return cudaMallocHost(ptr, size);
+}
+
+cudaError_t
+pgcuda_free_host(void *ptr)
+{
+	return cudaFreeHost(ptr);
+}
+
+cudaError_t
+pgcuda_memcpy(void *dst, const void *src, size_t count,
+			  enum cudaMemcpyKind kind)
+{
+	return cudaMemcpy(dst, src, count, kind);
+}
+
+cudaError_t
+pgcuda_memcpy_async(void *dst, const void *src, size_t count,
+					enum cudaMemcpyKind kind, cudaStream_t stream)
+{
+	return cudaMemcpyAsync(dst, src, count, kind, stream);
+}
+
+cudaError_t
+pgcuda_stream_create(cudaStream_t *p_stream)
+{
+	return cudaStreamCreate(p_stream);
+}
+
+cudaError_t
+pgcuda_stream_destroy(cudaStream_t stream)
+{
+	return cudaStreamDestroy(stream);
+}
+
+cudaError_t
+pgcuda_stream_synchronize(cudaStream_t stream)
+{
+	return cudaStreamSynchronize(stream);
+}
