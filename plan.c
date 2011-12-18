@@ -11,6 +11,8 @@
  * this package.
  */
 #include "postgres.h"
+#include "nodes/makefuncs.h"
+#include "utils/rel.h"
 #include "pg_strom.h"
 
 FdwPlan *
