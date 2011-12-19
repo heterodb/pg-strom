@@ -193,7 +193,7 @@ pgstrom_data_load_internal(RelationSet relset,
 		heap_deform_tuple(rs_tuples[index], tupdesc, rs_values, rs_nulls);
 
 		/* set usemap */
-		VARBITS(cs_usemap)[index >> 3] |= (1 << (index & 0x07));
+		VARBITS(cs_usemap)[index >> 3] |= (1 << (index & (BITS_PER_BYTE-1)));
 
 		for (i=0; i < tupdesc->natts; i++)
 		{

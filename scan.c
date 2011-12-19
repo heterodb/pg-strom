@@ -14,6 +14,7 @@
 #include "access/relscan.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_type.h"
 #include "foreign/foreign.h"
 #include "nodes/makefuncs.h"
 #include "utils/array.h"
@@ -149,11 +150,10 @@ pgstrom_close_relation_set(RelationSet relset, LOCKMODE lockmode)
 		if (relset->cs_idx[i])
 			relation_close(relset->cs_idx[i], lockmode);
 	}
-	pfree(relset->cs_rel[i]);
-	pfree(relset->cs_idx[i]);
+	pfree(relset->cs_rel);
+	pfree(relset->cs_idx);
 	pfree(relset);
 }
-
 
 
 typedef struct {
@@ -170,7 +170,9 @@ typedef struct {
 	Bitmapset	   *cols_needed;
 	bool			with_syscols;
 
-	HeapScanDesc	rowid_scan;
+	Snapshot		es_snapshot;
+	HeapScanDesc	es_scan;
+	MemoryContext	es_context;
 
 	List		   *chunk_list;
 	ListCell	   *chunk_curr;
@@ -178,21 +180,17 @@ typedef struct {
 } PgStromExecState;
 
 static void
-pgstrom_release_chunk_buffer(ResourceReleasePhase phase,
-							 bool isCommit,
-							 bool isTopLevel,
-							 void *arg)
+pgstrom_release_chunk_buffer(PgStromChunkBuf *chunk)
 {
-	PgStromChunkBuf *chunk = (PgStromChunkBuf *) arg;
-	int		csidx;
+	int		i;
 
 	pfree(chunk->rowmap);
-	for (csidx = 0; chunk->nattrs; csidx++)
+	for (i=0; i < chunk->nattrs; i++)
 	{
-		if (chunk->cs_nulls[csidx])
-			pfree(chunk->cs_nulls[csidx]);
-		if (chunk->cs_values[csidx])
-			pfree(chunk->cs_values[csidx]);
+		if (chunk->cs_nulls[i])
+			pfree(chunk->cs_nulls[i]);
+		if (chunk->cs_values[i])
+			pfree(chunk->cs_values[i]);
 	}
 	pfree(chunk->cs_nulls);
 	pfree(chunk->cs_values);
@@ -206,7 +204,6 @@ pgstrom_read_chunk_buffer_cs(PgStromExecState *sestate,
 {
 	Form_pg_attribute	attr
 		= RelationGetDescr(sestate->relset->base_rel)->attrs[csidx];
-	Snapshot		snapshot = sestate->rowid_scan->rs_snapshot;
 	IndexScanDesc	iscan;
 	ScanKeyData		skeys[2];
 	HeapTuple		tup;
@@ -215,9 +212,11 @@ pgstrom_read_chunk_buffer_cs(PgStromExecState *sestate,
 	/*
 	 * XXX - should be pinned memory for async memory transfer
 	 */
-	chunk->cs_values[csidx] = palloc0(PGSTROM_CHUNK_SIZE *
-									  (attr->attlen > 0 ?
-									   attr->attlen : sizeof(bytea *)));
+	chunk->cs_values[csidx]
+		= MemoryContextAllocZero(sestate->es_context,
+								 PGSTROM_CHUNK_SIZE *
+								 (attr->attlen > 0 ?
+								  attr->attlen : sizeof(bytea *)));
 	/*
 	 * Try to scan column store with cs_rowid betweem rowid and
 	 * (rowid + PGSTROM_CHUNK_SIZE)
@@ -233,7 +232,7 @@ pgstrom_read_chunk_buffer_cs(PgStromExecState *sestate,
 
 	iscan = index_beginscan(sestate->relset->cs_rel[csidx],
 							sestate->relset->cs_idx[csidx],
-							snapshot, 2, 0);
+							sestate->es_snapshot, 2, 0);
 	index_rescan(iscan, skeys, 2, NULL, 0);
 
 	while (HeapTupleIsValid(tup = index_getnext(iscan, ForwardScanDirection)))
@@ -269,8 +268,9 @@ pgstrom_read_chunk_buffer_cs(PgStromExecState *sestate,
 		 */
 		nullbitmap = ARR_NULLBITMAP(cs_array);
 		if (nullbitmap && !chunk->cs_nulls[csidx])
-			chunk->cs_nulls[csidx] = palloc0(PGSTROM_CHUNK_SIZE
-											  / BITS_PER_BYTE);
+			chunk->cs_nulls[csidx]
+				= MemoryContextAllocZero(sestate->es_context,
+										 PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
 		nitems = ARR_DIMS(cs_array)[0];
 		if (attr->attlen > 0)
 		{
@@ -284,20 +284,27 @@ pgstrom_read_chunk_buffer_cs(PgStromExecState *sestate,
 		}
 		else
 		{
-			/* only fixed-length value is on pinned buffer */
+			char		   *vlptr = ARR_DATA_PTR(cs_array);
+			MemoryContext	oldctx
+				= MemoryContextSwitchTo(sestate->es_context);
+
 			for (i=0; i < nitems; i++)
 			{
-				if (nullbitmap &&
-					(nullbitmap[i>>3] & (1<<(i & (BITS_PER_BYTE - 1)))) != 0)
+				if (!nullbitmap ||
+					(nullbitmap[i>>3] && (1 << (i & (BITS_PER_BYTE-1)))) == 0)
+				{
+					((bytea **)chunk->cs_values[csidx])[offset + i]
+						= PG_DETOAST_DATUM_COPY((struct varlena *) vlptr);
+					vlptr = att_addlength_pointer(vlptr, attr->attlen, vlptr);
+					vlptr = (char *)att_align_nominal(vlptr, attr->attalign);
+				}
+				else
 				{
 					chunk->cs_nulls[csidx][offset + i]
 						|= (1 << ((offset + i) & (BITS_PER_BYTE - 1)));
-					continue;
 				}
-				((bytea **)chunk->cs_values[csidx])[offset + i]
-					= PG_DETOAST_DATUM_COPY(ARR_DATA_PTR(cs_array) +
-											i * sizeof(bytea *));
 			}
+			MemoryContextSwitchTo(oldctx);
 		}
 	}
 
@@ -319,7 +326,10 @@ pgstrom_read_chunk_buffer(PgStromExecState *sestate,
 						  int64 rowid, VarBit *rowmap)
 {
 	PgStromChunkBuf	   *chunk;
+	MemoryContext		oldcxt;
 	int		csidx;
+
+	oldcxt = MemoryContextSwitchTo(sestate->es_context);
 
 	chunk = palloc(sizeof(PgStromChunkBuf));
 	chunk->nattrs = RelationGetNumberOfAttributes(sestate->relset->base_rel);
@@ -330,15 +340,11 @@ pgstrom_read_chunk_buffer(PgStromExecState *sestate,
 	chunk->cs_values = palloc0(sizeof(void *) * chunk->nattrs);
 	chunk->cs_pinned = palloc0(sizeof(bool) * chunk->nattrs);
 
-	/*
-	 * XXX - pinned buffer is not released automatically, so we need
-	 * to release them explicitly.
-	 */
-	RegisterResourceReleaseCallback(pgstrom_release_chunk_buffer, chunk);
+	MemoryContextSwitchTo(oldcxt);
 
 	for (csidx = 0; csidx < chunk->nattrs; csidx++)
 	{
-		if (!bms_is_member(csidx + 1, sestate->cols_needed))
+		if (!bms_is_member(csidx, sestate->cols_needed))
 			continue;
 
 		pgstrom_read_chunk_buffer_cs(sestate, chunk, rowid, csidx);
@@ -353,20 +359,31 @@ pgstrom_load_next_chunk_buffer(PgStromExecState *sestate)
 	HeapTuple	tuple;
 	Datum		values[2];
 	bool		nulls[2];
+	int64		cs_rowid;
+	VarBit	   *cs_rowmap;
+	MemoryContext oldctx;
 	PgStromChunkBuf *chunk;
 
-	tuple = heap_getnext(sestate->rowid_scan, ForwardScanDirection);
+	tuple = heap_getnext(sestate->es_scan, ForwardScanDirection);
 	if (!HeapTupleIsValid(tuple))
 		return false;
 
 	tupdesc = RelationGetDescr(sestate->relset->rowid_rel);
 	heap_deform_tuple(tuple, tupdesc, values, nulls);
+	Assert(!nulls[0] && !nulls[1]);
 
-	chunk = pgstrom_read_chunk_buffer(sestate,
-									  DatumGetInt64(values[0]),
-									  DatumGetVarBitPCopy(values[1]));
+	oldctx = MemoryContextSwitchTo(sestate->es_context);
 
+	cs_rowid = DatumGetInt64(values[0]);
+	cs_rowmap = DatumGetVarBitPCopy(values[1]);
+
+	MemoryContextSwitchTo(oldctx);
+
+	chunk = pgstrom_read_chunk_buffer(sestate, cs_rowid, cs_rowmap);
+
+	oldctx = MemoryContextSwitchTo(sestate->es_context);
 	sestate->chunk_list = lappend(sestate->chunk_list, chunk);
+	MemoryContextSwitchTo(oldctx);
 
 	return true;
 }
@@ -388,9 +405,9 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 
 		if (strcmp(defel->defname, "cols_needed") == 0)
 		{
-			int		csidx = (intVal(defel->arg - 1));
+			int		csidx = (intVal(defel->arg) - 1);
 
-			if (csidx < 1)
+			if (csidx < 0)
 			{
 				Assert(fscan->fsSystemCol);
 				continue;
@@ -427,9 +444,11 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 	/*
 	 * Begin the rowid scan 
 	 */
-	sestate->rowid_scan = heap_beginscan(sestate->relset->rowid_rel,
-										 fss->ss.ps.state->es_snapshot,
-										 0, NULL);
+	sestate->es_snapshot = fss->ss.ps.state->es_snapshot;
+	sestate->es_context = fss->ss.ps.state->es_query_cxt;
+	sestate->es_scan = heap_beginscan(sestate->relset->rowid_rel,
+									  sestate->es_snapshot,
+									  0, NULL);
 	fss->fdw_state = sestate;
 }
 
@@ -481,11 +500,13 @@ retry:
 				Form_pg_attribute	attr
 					= slot->tts_tupleDescriptor->attrs[csidx];
 				slot->tts_isnull[csidx] = false;
-				slot->tts_values[csidx]
-					= fetchatt(attr,
-							   (char *)chunk->cs_values[csidx] +
-							   index * (attr->attlen > 0 ?
-										attr->attlen : sizeof(bytea *)));
+				if (attr->attlen > 0)
+					slot->tts_values[csidx] =
+						fetchatt(attr, ((char *)chunk->cs_values[csidx] +
+										index * attr->attlen));
+				else
+					slot->tts_values[csidx] =
+						(Datum)(((bytea **)chunk->cs_values[csidx])[index]);
 			}
 			else
 			{
@@ -518,17 +539,22 @@ pgboost_end_foreign_scan(ForeignScanState *fss)
 {
 	PgStromExecState   *sestate = (PgStromExecState *)fss->fdw_state;
 	PgStromChunkBuf	   *chunk;
-	ListCell   *l;
+	ListCell		   *cell;
+
+	/* if sestate is NULL, we are in EXPLAIN; nothing to do */
+	if (!sestate)
+		return;
 
 	/*
 	 * End the rowid scan
 	 */
-	heap_endscan(sestate->rowid_scan);
+	heap_endscan(sestate->es_scan);
 
-	foreach (l, sestate->chunk_list)
+	foreach (cell, sestate->chunk_list)
 	{
-		chunk = (PgStromChunkBuf *) lfirst(l);
+		chunk = (PgStromChunkBuf *) lfirst(cell);
 
-		// we should release buffer here
+		pgstrom_release_chunk_buffer(chunk);
 	}
+	pgstrom_close_relation_set(sestate->relset, AccessShareLock);
 }

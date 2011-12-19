@@ -33,8 +33,7 @@ pgstrom_plan_foreign_scan(Oid foreignTblOid,
 		if (bms_is_empty(baserel->attr_needed[i - baserel->min_attr]))
 			continue;
 
-		defel = makeDefElem("cols_needed",
-							(Node *) makeInteger(i - baserel->min_attr));
+		defel = makeDefElem("cols_needed", (Node *) makeInteger(i));
 		private = lappend(private, (Node *) defel);
 	}
 
