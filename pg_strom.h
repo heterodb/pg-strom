@@ -17,7 +17,6 @@
 #include "commands/explain.h"
 #include "fmgr.h"
 #include "foreign/fdwapi.h"
-#include "pg_strom_cuda.h"
 #include <CL/cl.h>
 #include <CL/cl_ext.h>
 
