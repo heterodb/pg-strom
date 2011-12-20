@@ -18,6 +18,8 @@
 #include "fmgr.h"
 #include "foreign/fdwapi.h"
 #include "pg_strom_cuda.h"
+#include <CL/cl.h>
+#include <CL/cl_ext.h>
 
 #define PGSTROM_SCHEMA_NAME		"pg_strom"
 
@@ -76,6 +78,12 @@ extern void
 pgboost_rescan_foreign_scan(ForeignScanState *fss);
 extern void
 pgboost_end_foreign_scan(ForeignScanState *fss);
+
+/*
+ * devinfo.c
+ */
+extern List *pgstrom_device_into_list;
+extern void pgstrom_device_info_init(void);
 
 /*
  * pg_strom.c
