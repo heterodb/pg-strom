@@ -15,6 +15,14 @@
 #include "utils/rel.h"
 #include "pg_strom.h"
 
+
+
+
+
+
+
+
+
 FdwPlan *
 pgstrom_plan_foreign_scan(Oid foreignTblOid,
 						  PlannerInfo *root,

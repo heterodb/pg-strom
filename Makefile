@@ -1,6 +1,6 @@
 # Makefile of pg_strom
 MODULE_big = pg_strom
-OBJS = pg_strom.o utilcmds.o blkload.o plan.o scan.o devinfo.o
+OBJS = pg_strom.o utilcmds.o blkload.o plan.o scan.o devinfo.o catalog.o
 
 PG_CPPFLAGS = -I/usr/local/cuda/include
 SHLIB_LINK := -lOpenCL
