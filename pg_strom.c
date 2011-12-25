@@ -164,5 +164,5 @@ _PG_init(void)
 	pgstrom_utilcmds_init();
 
 	/* Collect properties of GPU devices */
-	pgstrom_device_info_init();
+	pgstrom_devinfo_init();
 }

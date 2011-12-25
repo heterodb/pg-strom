@@ -168,6 +168,8 @@ typedef struct {
 typedef struct {
 	RelationSet		relset;
 	Bitmapset	   *cols_needed;
+	Bitmapset	   *device_columns;
+	const char	   *device_source;
 	bool			with_syscols;
 
 	Snapshot		es_snapshot;
@@ -403,7 +405,20 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	{
 		DefElem	   *defel = (DefElem *)lfirst(l);
 
-		if (strcmp(defel->defname, "cols_needed") == 0)
+		if (strcmp(defel->defname, "device_source") == 0)
+		{
+			sestate->device_source = strVal(defel->arg);
+		}
+		else if (strcmp(defel->defname, "device_column") == 0)
+		{
+			int		csidx = (intVal(defel->arg) - 1);
+
+			Assert(csidx >= 0);
+
+			sestate->device_columns
+				= bms_add_member(sestate->device_columns, csidx);
+		}
+		else if (strcmp(defel->defname, "cols_needed") == 0)
 		{
 			int		csidx = (intVal(defel->arg) - 1);
 
@@ -412,7 +427,8 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 				Assert(fscan->fsSystemCol);
 				continue;
 			}
-			sestate->cols_needed = bms_add_member(sestate->cols_needed, csidx);
+			sestate->cols_needed
+				= bms_add_member(sestate->cols_needed, csidx);
 		}
 		else
 			elog(ERROR, "pg_strom: unexpected private plan information: %s",

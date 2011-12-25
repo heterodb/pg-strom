@@ -47,8 +47,6 @@ extern Datum pgstrom_data_compaction(PG_FUNCTION_ARGS);
 extern FdwPlan *
 pgstrom_plan_foreign_scan(Oid foreignTblOid,
 			  PlannerInfo *root, RelOptInfo *baserel);
-extern void
-pgstrom_explain_foreign_scan(ForeignScanState *node, ExplainState *es);
 
 /*
  * scan.c
@@ -77,76 +75,67 @@ extern void
 pgboost_rescan_foreign_scan(ForeignScanState *fss);
 extern void
 pgboost_end_foreign_scan(ForeignScanState *fss);
+extern void
+pgstrom_explain_foreign_scan(ForeignScanState *node, ExplainState *es);
 
 /*
  * devinfo.c
- */
-extern List *pgstrom_device_into_list;
-extern void pgstrom_device_info_init(void);
-
-/*
- * catalog.c
- */
-/*
- * data types supported by pg_strom
  */
 typedef struct {
 	Oid			type_oid;
 	const char *type_ident;
 	const char *type_source;
-} PgStromTypeCatalog;
+} PgStromDevTypeInfo;
 
 typedef struct {
-	/* oid of pg_proc catalog */
 	Oid			func_oid;
-
-	/*
-	 * 'c' : function by device const
-	 * 'l' : function by device left-operator
-	 * 'r' : function by device right-operator
-	 * 'b' : function by device both-operator
-	 * 'f' : function by device function
-	 */
-	char		func_kind;
-
-	/* number of arguments */
-	int16		func_nargs;
-
-	/* identifier of device function */
+	char		func_kind;			/* 'c', 'b', 'l', 'r' or 'f' */
 	const char *func_ident;
-
-	/* declaration of device function, or NULL */
 	const char *func_source;
-
-	/*
-	 * this argmap allows to switch order of arguments.
-	 * e.g) SQL func(a,b,c) -> DEV func(c,a,b)
-	 *      func_argmap should be {3,1,2}
-	 */
-	int16		func_argmap[0];
-} PgStromFuncCatalog;
-
-typedef struct {
-	Oid			oper_oid;
-	char		oper_kind;
-	int16		oper_nargs;
-	const char *oper_ident;
-	const char *oper_source;
-	int16		oper_argmap[2];
-} PgStromOperCatalog;
+	int16		func_nargs;			/* copy from pg_proc.pronargs */
+	Oid			func_argtypes[0];	/* copy from pg_proc.proargtypes */
+} PgStromDevFuncInfo;
 
 typedef struct {
 	Oid			cast_source;
 	Oid			cast_target;
-	const char *cast_func;
-} PgStromCastCatalog;
+	const char *func_ident;
+	const char *func_source;
+} PgStromDevCastInfo;
 
-extern PgStromTypeCatalog *pgstrom_type_catalog_lookup(Oid type_oid);
-extern PgStromFuncCatalog *pgstrom_func_catalog_lookup(Oid func_oid);
-extern PgStromCastCatalog *pgstrom_cast_catalog_lookup(Oid source_typeid,
-													   Oid target_typeid);
-extern PgStromOperCatalog *pgstrom_oper_catalog_lookup(Oid oper_oid);
-extern void				   pgstrom_catalog_init(void);
+typedef struct {
+	cl_platform_id				pf_id;
+	cl_device_id				dev_id;
+	cl_bool						dev_compiler_available;
+	cl_device_fp_config			dev_double_fp_config;
+	cl_device_exec_capabilities	dev_execution_capabilities;
+	cl_ulong					dev_global_mem_cache_size;
+	cl_device_mem_cache_type	dev_global_mem_cache_type;
+	cl_ulong					dev_global_mem_size;
+	cl_ulong					dev_local_mem_size;
+	cl_device_local_mem_type	dev_local_mem_type;
+	cl_uint						dev_max_clock_frequency;
+	cl_uint						dev_max_compute_units;
+	cl_uint						dev_max_constant_args;
+	cl_ulong					dev_max_constant_buffer_size;
+	cl_ulong					dev_max_mem_alloc_size;
+	size_t						dev_max_parameter_size;
+	size_t						dev_max_work_group_size;
+	size_t						dev_max_work_item_dimensions;
+	size_t						dev_max_work_item_sizes[3];
+	char						dev_name[256];
+	char						dev_version[256];
+	char						dev_profile[24];
+} PgStromDeviceInfo;
+
+extern List *pgstrom_devinfo_list;
+extern void pgstrom_devtype_format(StringInfo str,
+								   Oid type_oid, Datum value);
+extern PgStromDevTypeInfo *pgstrom_devtype_lookup(Oid type_oid);
+extern PgStromDevFuncInfo *pgstrom_devfunc_lookup(Oid func_oid);
+extern PgStromDevCastInfo *pgstrom_devcast_lookup(Oid source_typeid,
+												  Oid target_typeid);
+extern void pgstrom_devinfo_init(void);
 
 /*
  * pg_strom.c
