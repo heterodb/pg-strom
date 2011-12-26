@@ -15,18 +15,24 @@
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
+#include "storage/ipc.h"
 #include "utils/memutils.h"
 #include "utils/syscache.h"
 #include "pg_strom.h"
 
 /*
- * Static declarations
+ * Declarations
  */
 #define PGSTROM_UNSUPPORTED_CAST_INTO	((void *)-1)
 static List			   *devtype_info_slot[512];
 static List			   *devfunc_info_slot[1024];
 static List			   *devcast_info_slot[256];
 static MemoryContext	devinfo_memcxt;
+
+cl_uint					pgstrom_num_devices;
+cl_device_id		   *pgstrom_device_id;
+PgStromDeviceInfo	  **pgstrom_device_info;
+cl_context				pgstrom_device_context = NULL;
 
 /* ------------------------------------------------------------
  *
@@ -35,9 +41,9 @@ static MemoryContext	devinfo_memcxt;
  * ------------------------------------------------------------
  */
 static struct {
-	Oid			type_oid;
-	const char *type_ident;
-	const char *type_source;
+	Oid		type_oid;
+	char   *type_ident;
+	char   *type_source;
 } device_type_catalog[] = {
 	{ BOOLOID,		"bool_t",	"typedef char  bool_t" },
 	{ INT2OID,		"int2_t",	"typedef short int2_t" },
@@ -126,15 +132,12 @@ pgstrom_devtype_lookup(Oid type_oid)
 	if (typeForm->typnamespace != PG_CATALOG_NAMESPACE)
 		goto out;
 
+	/* FLOAT8 is not available on device without FP64bit support */
 	if (type_oid == FLOAT8OID)
 	{
-		/*
-		 * In the case of double-fp, device must support it.
-		 */
-		foreach (cell, pgstrom_devinfo_list)
+		for (i=0; i < pgstrom_num_devices; i++)
 		{
-			PgStromDeviceInfo *dev_info = lfirst(cell);
-			if (!dev_info->dev_double_fp_config)
+			if (!pgstrom_device_info[i]->dev_double_fp_config)
 				goto out;
 		}
 	}
@@ -163,10 +166,10 @@ out:
  * ------------------------------------------------------------
  */
 static struct {
-	Oid			cast_source;
-	Oid			cast_target;
-	const char *func_ident;
-	const char *func_source;
+	Oid		cast_source;
+	Oid		cast_target;
+	char   *func_ident;
+	char   *func_source;
 } device_cast_by_func_catalog[] = {
 };
 
@@ -282,7 +285,7 @@ out:
 	"    if ((isinf(rc) && !isinf(x) && !isinf(y)) ||\n"			\
 	"        (rc == 0.0 && x != 0.0))\n"							\
 	"    if (y == -1 && x < 0 && rc <= 0)\n"						\
-	"        *error |= DEVERR_NUMERIC_VALUE_OUT_OF_RANGE\n"			\
+	"        *error |= DEVERR_VALUE_OUT_OF_RANGE\n"					\
 	"    return rc;\n"												\
 	"}\n"
 
@@ -295,12 +298,12 @@ out:
 	"}\n"
 
 static struct {
-	const char *func_name;
-	int			func_nargs;
-	Oid			func_argtypes[2];
-	char		func_kind;	/* 'f', 'l', 'r', 'b' or 'c' */
-	const char *func_ident;
-	const char *func_source;
+	char   *func_name;
+	int		func_nargs;
+	Oid		func_argtypes[2];
+	char	func_kind;	/* 'f', 'l', 'r', 'b' or 'c' */
+	char   *func_ident;
+	char   *func_source;
 } device_func_catalog[] = {
 	/* '+'  : add operators */
 	{ "int2pl",	 2, {INT2OID, INT2OID}, 'b', "+", NULL },
@@ -355,24 +358,24 @@ static struct {
 	{ "int28div", 2, {INT2OID, INT8OID}, 'f', "int28div",
 	  DEVFUNC_INTxDIV_TEMPLATE(int28div, int8_t, int2_t, int8_t) },
 	{ "int42div", 2, {INT4OID, INT2OID}, 'f', "int42div",
-	  DEVFUNC_INTxDIV_TEMPLATE(int2div,  int4_t, int4_t, int2_t) },
+	  DEVFUNC_INTxDIV_TEMPLATE(int42div,  int4_t, int4_t, int2_t) },
 	{ "int4div",  2, {INT4OID, INT4OID}, 'f', "int4div",
-	  DEVFUNC_INTxDIV_TEMPLATE(int24div, int4_t, int4_t, int4_t) },
+	  DEVFUNC_INTxDIV_TEMPLATE(int4div, int4_t, int4_t, int4_t) },
 	{ "int48div", 2, {INT4OID, INT8OID}, 'f', "int48div",
-	  DEVFUNC_INTxDIV_TEMPLATE(int28div, int8_t, int4_t, int8_t) },
+	  DEVFUNC_INTxDIV_TEMPLATE(int48div, int8_t, int4_t, int8_t) },
 	{ "int82div", 2, {INT8OID, INT2OID}, 'f', "int82div",
-	  DEVFUNC_INTxDIV_TEMPLATE(int2div,  int8_t, int8_t, int2_t) },
+	  DEVFUNC_INTxDIV_TEMPLATE(int82div,  int8_t, int8_t, int2_t) },
 	{ "int84div", 2, {INT8OID, INT4OID}, 'f', "int84div",
-	  DEVFUNC_INTxDIV_TEMPLATE(int24div, int8_t, int8_t, int4_t) },
+	  DEVFUNC_INTxDIV_TEMPLATE(int84div, int8_t, int8_t, int4_t) },
 	{ "int8div",  2, {INT8OID, INT8OID}, 'f', "int8div",
-	  DEVFUNC_INTxDIV_TEMPLATE(int28div, int8_t, int8_t, int8_t) },
+	  DEVFUNC_INTxDIV_TEMPLATE(int8div, int8_t, int8_t, int8_t) },
 	{ "float4div", 2, {FLOAT4OID, FLOAT4OID}, 'f', "float4div",
 	  DEVFUNC_FPxDIV_TEMPLATE(float4div, float, float, float) },
-	{ "float48div", 2, {FLOAT4OID, FLOAT4OID}, 'f', "float4div",
+	{ "float48div", 2, {FLOAT4OID, FLOAT8OID}, 'f', "float4div",
 	  DEVFUNC_FPxDIV_TEMPLATE(float48div, double, float, double) },
-	{ "float84div", 2, {FLOAT4OID, FLOAT4OID}, 'f', "float4div",
+	{ "float84div", 2, {FLOAT8OID, FLOAT4OID}, 'f', "float4div",
 	  DEVFUNC_FPxDIV_TEMPLATE(float84div, double, double, float) },
-	{ "float8div", 2, {FLOAT4OID, FLOAT4OID}, 'f', "float4div",
+	{ "float8div", 2, {FLOAT8OID, FLOAT8OID}, 'f', "float4div",
 	  DEVFUNC_FPxDIV_TEMPLATE(float8div, double, double, double) },
 
 	/* '%'  : reminder operators */
@@ -596,26 +599,15 @@ out:
 	return (!entry->func_ident ? NULL : entry);
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-List   *pgstrom_devinfo_list = NIL;
+/*
+ * cleanup opencl resources on process exit time
+ */
+static void
+pgstrom_devinfo_on_exit(int code, Datum arg)
+{
+	if (pgstrom_device_context)
+		clReleaseContext(pgstrom_device_context);
+}
 
 void
 pgstrom_devinfo_init(void)
@@ -626,6 +618,7 @@ pgstrom_devinfo_init(void)
 	cl_uint				num_platforms;
 	cl_uint				num_devices;
 	cl_int				ret, pi, di;
+	int					nitems = 10;
 	MemoryContext		oldctx;
 
 	devinfo_memcxt = AllocSetContextCreate(TopMemoryContext,
@@ -638,6 +631,10 @@ pgstrom_devinfo_init(void)
 	memset(devcast_info_slot, 0, sizeof(devcast_info_slot));
 
 	oldctx = MemoryContextSwitchTo(devinfo_memcxt);
+
+	pgstrom_num_devices = 0;	
+	pgstrom_device_id = palloc(sizeof(cl_device_id) * nitems);
+	pgstrom_device_info = palloc(sizeof(PgStromDeviceInfo *) * nitems);
 
 	ret = clGetPlatformIDs(lengthof(platform_ids),
 						   platform_ids, &num_platforms);
@@ -794,8 +791,47 @@ pgstrom_devinfo_init(void)
 				 (dev_info->dev_double_fp_config ?
 				  ", 64bit-FP supported" : ""));
 
-			pgstrom_devinfo_list = lappend(pgstrom_devinfo_list, dev_info);
+			if (pgstrom_num_devices == nitems)
+			{
+				cl_device_id       *id_temp
+					= palloc(sizeof(cl_device_id) * (nitems + 10));
+				PgStromDeviceInfo **info_temp
+					= palloc(sizeof(PgStromDeviceInfo *) * (nitems + 10));
+
+				memcpy(id_temp, pgstrom_device_id,
+					   sizeof(cl_device_id) * nitems);
+				memcpy(info_temp, pgstrom_device_info,
+					   sizeof(PgStromDeviceInfo *) * nitems);
+
+				pfree(pgstrom_device_id);
+				pfree(pgstrom_device_info);
+
+				pgstrom_device_id = id_temp;
+				pgstrom_device_info = info_temp;
+
+				nitems += 10;
+			}
+			pgstrom_device_id[pgstrom_num_devices] = device_ids[di];
+			pgstrom_device_info[pgstrom_num_devices] = dev_info;
+			pgstrom_num_devices++;
 		}
 	}
 	MemoryContextSwitchTo(oldctx);
+
+	/*
+	 * Create an OpenCL context
+	 */
+	if (pgstrom_num_devices > 0)
+	{
+		pgstrom_device_context = clCreateContext(NULL,
+												 pgstrom_num_devices,
+												 pgstrom_device_id,
+												 NULL, NULL, &ret);
+		if (ret != CL_SUCCESS)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("OpenCL failed to create execute context: %d", ret)));
+		/* Clean up handler */
+		on_proc_exit(pgstrom_devinfo_on_exit, 0);
+    }
 }

@@ -167,9 +167,15 @@ typedef struct {
 
 typedef struct {
 	RelationSet		relset;
-	Bitmapset	   *cols_needed;
-	Bitmapset	   *device_columns;
-	const char	   *device_source;
+
+	/* parameters come from planner */
+	int				predictable;	/* is the result set predictable? */
+	Bitmapset	   *required_cols;	/* columns being returned to executor */
+	Bitmapset	   *clause_cols;	/* columns being copied to device */
+	const char	   *device_kernel;	/* kernel part of device code */
+
+
+
 	bool			with_syscols;
 
 	Snapshot		es_snapshot;
@@ -179,6 +185,10 @@ typedef struct {
 	List		   *chunk_list;
 	ListCell	   *chunk_curr;
 	int				chunk_index;
+
+	/* opencl related stuff */
+	cl_program			device_program;
+	cl_command_queue	device_command_queue[0];
 } PgStromExecState;
 
 static void
@@ -346,7 +356,7 @@ pgstrom_read_chunk_buffer(PgStromExecState *sestate,
 
 	for (csidx = 0; csidx < chunk->nattrs; csidx++)
 	{
-		if (!bms_is_member(csidx, sestate->cols_needed))
+		if (!bms_is_member(csidx, sestate->required_cols))
 			continue;
 
 		pgstrom_read_chunk_buffer_cs(sestate, chunk, rowid, csidx);
@@ -396,29 +406,37 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	ForeignScan		   *fscan = (ForeignScan *) fss->ss.ps.plan;
 	PgStromExecState   *sestate;
 	ListCell		   *l;
+	cl_int				i, ret;
 
-	sestate = palloc0(sizeof(PgStromExecState));
-	sestate->cols_needed = NULL;
+	sestate = palloc0(sizeof(PgStromExecState) +
+					  sizeof(cl_command_queue) * pgstrom_num_devices);
 	sestate->with_syscols = fscan->fsSystemCol;
 
 	foreach (l, fscan->fdwplan->fdw_private)
 	{
 		DefElem	   *defel = (DefElem *)lfirst(l);
 
-		if (strcmp(defel->defname, "device_source") == 0)
+		if (strcmp(defel->defname, "predictable") == 0)
 		{
-			sestate->device_source = strVal(defel->arg);
+			if (intVal(defel->arg) == TRUE)
+				sestate->predictable = 1;	/* all the tuples are visible */
+			else
+				sestate->predictable = -1;	/* all the tuples are invisible */
 		}
-		else if (strcmp(defel->defname, "device_column") == 0)
+		else if (strcmp(defel->defname, "device_kernel") == 0)
+		{
+			sestate->device_kernel = strVal(defel->arg);
+		}
+		else if (strcmp(defel->defname, "clause_cols") == 0)
 		{
 			int		csidx = (intVal(defel->arg) - 1);
 
 			Assert(csidx >= 0);
 
-			sestate->device_columns
-				= bms_add_member(sestate->device_columns, csidx);
+			sestate->clause_cols
+				= bms_add_member(sestate->clause_cols, csidx);
 		}
-		else if (strcmp(defel->defname, "cols_needed") == 0)
+		else if (strcmp(defel->defname, "required_cols") == 0)
 		{
 			int		csidx = (intVal(defel->arg) - 1);
 
@@ -427,14 +445,90 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 				Assert(fscan->fsSystemCol);
 				continue;
 			}
-			sestate->cols_needed
-				= bms_add_member(sestate->cols_needed, csidx);
+			sestate->required_cols
+				= bms_add_member(sestate->required_cols, csidx);
 		}
 		else
 			elog(ERROR, "pg_strom: unexpected private plan information: %s",
 				 defel->defname);
 	}
 
+	/*
+	 * Skip stuff related to OpenCL, if the query is predictable
+	 */
+	if (sestate->predictable)
+		goto skip_opencl;
+
+	/*
+	 * Build kernel function to binary representation
+	 */
+	Assert(pgstrom_device_context != NULL);
+	sestate->device_program
+		= clCreateProgramWithSource(pgstrom_device_context,
+									1, &sestate->device_kernel,
+									NULL, &ret);
+	if (ret != CL_SUCCESS)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("OpenCL failed to create program with source: %d", ret)));
+
+	ret = clBuildProgram(sestate->device_program,
+						 0, NULL,		/* for all the devices */
+						 NULL,			/* no build options */
+						 NULL, NULL);	/* no callback, so synchronous build */
+	if (ret != CL_SUCCESS)
+	{
+		cl_build_status	status;
+		char			logbuf[4096];
+
+		for (i=0; i < pgstrom_num_devices; i++)
+		{
+			clGetProgramBuildInfo(sestate->device_program,
+								  pgstrom_device_id[i],
+								  CL_PROGRAM_BUILD_STATUS,
+								  sizeof(status),
+								  &status,
+								  NULL);
+			if (status != CL_BUILD_ERROR)
+				continue;
+
+			clGetProgramBuildInfo(sestate->device_program,
+								  pgstrom_device_id[i],
+								  CL_PROGRAM_BUILD_LOG,
+								  sizeof(logbuf),
+								  logbuf,
+								  NULL);
+			elog(NOTICE, "%s", logbuf);
+		}
+		clReleaseProgram(sestate->device_program);
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("OpenCL failed to build program: %d", ret)));
+	}
+
+	/*
+	 * Create command queues for each devices
+	 */
+	for (i=0; i < pgstrom_num_devices; i++)
+	{
+		sestate->device_command_queue[i]
+			= clCreateCommandQueue(pgstrom_device_context,
+								   pgstrom_device_id[i],
+								   0,	/* no out-of-order, no profiling */
+								   &ret);
+		if (ret != CL_SUCCESS)
+		{
+			while (i > 0)
+				clReleaseCommandQueue(sestate->device_command_queue[--i]);
+			clReleaseProgram(sestate->device_program);
+
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("OpenCL failed to create command queue: %d", ret)));
+		}
+	}
+
+skip_opencl:
 	sestate->chunk_list = NIL;
 	sestate->chunk_curr = NULL;
 	sestate->chunk_index = 0;
@@ -573,4 +667,16 @@ pgboost_end_foreign_scan(ForeignScanState *fss)
 		pgstrom_release_chunk_buffer(chunk);
 	}
 	pgstrom_close_relation_set(sestate->relset, AccessShareLock);
+
+	/*
+	 * Release device program and command queue
+	 */
+	if (sestate->device_program)
+	{
+		int		i;
+
+		for (i=0; i < pgstrom_num_devices; i++)
+			clReleaseCommandQueue(sestate->device_command_queue[i]);
+		clReleaseProgram(sestate->device_program);
+	}
 }

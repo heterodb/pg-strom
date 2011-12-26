@@ -82,25 +82,25 @@ pgstrom_explain_foreign_scan(ForeignScanState *node, ExplainState *es);
  * devinfo.c
  */
 typedef struct {
-	Oid			type_oid;
-	const char *type_ident;
-	const char *type_source;
+	Oid		type_oid;
+	char   *type_ident;
+	char   *type_source;
 } PgStromDevTypeInfo;
 
 typedef struct {
-	Oid			func_oid;
-	char		func_kind;			/* 'c', 'b', 'l', 'r' or 'f' */
-	const char *func_ident;
-	const char *func_source;
-	int16		func_nargs;			/* copy from pg_proc.pronargs */
-	Oid			func_argtypes[0];	/* copy from pg_proc.proargtypes */
+	Oid		func_oid;
+	char	func_kind;			/* 'c', 'b', 'l', 'r' or 'f' */
+	char   *func_ident;
+	char   *func_source;
+	int16	func_nargs;			/* copy from pg_proc.pronargs */
+	Oid		func_argtypes[0];	/* copy from pg_proc.proargtypes */
 } PgStromDevFuncInfo;
 
 typedef struct {
-	Oid			cast_source;
-	Oid			cast_target;
-	const char *func_ident;
-	const char *func_source;
+	Oid		cast_source;
+	Oid		cast_target;
+	char   *func_ident;
+	char   *func_source;
 } PgStromDevCastInfo;
 
 typedef struct {
@@ -128,7 +128,11 @@ typedef struct {
 	char						dev_profile[24];
 } PgStromDeviceInfo;
 
-extern List *pgstrom_devinfo_list;
+extern cl_uint				pgstrom_num_devices;
+extern cl_device_id		   *pgstrom_device_id;
+extern PgStromDeviceInfo  **pgstrom_device_info;
+extern cl_context			pgstrom_device_context;
+
 extern void pgstrom_devtype_format(StringInfo str,
 								   Oid type_oid, Datum value);
 extern PgStromDevTypeInfo *pgstrom_devtype_lookup(Oid type_oid);

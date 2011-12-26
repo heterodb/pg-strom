@@ -25,12 +25,15 @@ make_device_qual_code(Node *node, StringInfo qual_source,
 
 static bool
 make_device_function_code(Oid func_oid, List *args,
+						  Oid func_resulttype,
 						  StringInfo qual_source,
 						  Oid base_relid,
 						  List **type_decl, List **func_decl)
 {
 	PgStromDevFuncInfo *fdev = pgstrom_devfunc_lookup(func_oid);
+	PgStromDevTypeInfo *tdev;
 	ListCell   *cell;
+	int			i;
 
    	switch (fdev->func_kind)
 	{
@@ -92,6 +95,20 @@ make_device_function_code(Oid func_oid, List *args,
 				 fdev->func_kind, fdev->func_ident);
 			break;
 	}
+	if (fdev->func_source)
+		*func_decl = list_append_unique_ptr(*func_decl,
+											fdev->func_source);
+	tdev = pgstrom_devtype_lookup(func_resulttype);
+	if (tdev->type_source)
+		*type_decl = list_append_unique_ptr(*type_decl,
+											tdev->type_source);
+	for (i=0; i < fdev->func_nargs; i++)
+	{
+		tdev = pgstrom_devtype_lookup(fdev->func_argtypes[i]);
+		if (tdev->type_source)
+			*type_decl = list_append_unique_ptr(*type_decl,
+												tdev->type_source);
+	}
 	return true;
 }
 
@@ -105,37 +122,53 @@ make_device_qual_code(Node *node, StringInfo qual_source,
 
 	if (IsA(node, Const))
 	{
+		PgStromDevTypeInfo *tdev;
 		Const  *c = (Const *) node;
 
 		if (c->constisnull)
 			return false;
-		else
-			pgstrom_devtype_format(qual_source,
-								   c->consttype,
-								   c->constvalue);
+
+		pgstrom_devtype_format(qual_source,
+							   c->consttype,
+							   c->constvalue);
+		tdev = pgstrom_devtype_lookup(c->consttype);
+		if (tdev->type_source)
+			*type_decl = list_append_unique_ptr(*type_decl,
+												tdev->type_source);
 	}
 	else if (IsA(node, Var))
 	{
+		PgStromDevTypeInfo *tdev;
 		Var *v = (Var *) node;
+
 		appendStringInfo(qual_source, "%s_cs[offset]",
 						 get_relid_attribute_name(base_relid, v->varattno));
+		tdev = pgstrom_devtype_lookup(v->vartype);
+		if (tdev->type_source)
+			*type_decl = list_append_unique_ptr(*type_decl,
+												tdev->type_source);
 	}
 	else if (IsA(node, FuncExpr))
 	{
 		FuncExpr		   *f = (FuncExpr *) node;
 
-		make_device_function_code(f->funcid, f->args,
-								  qual_source, base_relid,
-								  type_decl, func_decl);
+		if (!make_device_function_code(f->funcid, f->args,
+									   f->funcresulttype,
+									   qual_source, base_relid,
+									   type_decl, func_decl))
+			return false;
 	}
 	else if (IsA(node, OpExpr) ||
 			 IsA(node, DistinctExpr))
 	{
 		OpExpr *op = (OpExpr *) node;
+		Oid		funcid = get_opcode(op->opno);
 
-		make_device_function_code(get_opcode(op->opno), op->args,
-								  qual_source, base_relid,
-								  type_decl, func_decl);
+		if (!make_device_function_code(funcid, op->args,
+									   op->opresulttype,
+									   qual_source, base_relid,
+									   type_decl, func_decl))
+			return false;
 	}
 	else if (IsA(node, RelabelType))
 	{}
@@ -210,24 +243,28 @@ make_device_qual_code(Node *node, StringInfo qual_source,
 	return true;
 }
 
-static char *
-make_device_source(Oid base_relid, List *device_quals, Relids *columns)
+static void
+make_device_source(Oid base_relid, List *device_quals, List **private)
 {
-	StringInfoData	source;
-	StringInfoData	qualsrc;
-	StringInfoData	subblk1;
-	StringInfoData	subblk2;
+	StringInfoData	kern;
+	StringInfoData	decl;
+	StringInfoData	qual;
+	StringInfoData	blk1;
+	StringInfoData	blk2;
+	Relids		columns = NULL;
 	Relids		tempset;
 	AttrNumber	attnum;
+	DefElem	   *defel;
 	ListCell   *cell;
 	List	   *qual_list = NIL;
 	List	   *type_decl = NIL;
 	List	   *func_decl = NIL;
 
-	initStringInfo(&source);
-	initStringInfo(&qualsrc);
-	initStringInfo(&subblk1);
-	initStringInfo(&subblk2);
+	initStringInfo(&kern);
+	initStringInfo(&decl);
+	initStringInfo(&qual);
+	initStringInfo(&blk1);
+	initStringInfo(&blk2);
 
 	/*
 	 * Kernel function shall be declared as follows:
@@ -271,7 +308,7 @@ make_device_source(Oid base_relid, List *device_quals, Relids *columns)
 
 		Assert(IsA(rinfo, RestrictInfo));
 
-		*columns = bms_union(*columns, pull_varnos((Node *)rinfo->clause));
+		columns = bms_union(columns, pull_varnos((Node *)rinfo->clause));
 
 		qual_list = lappend(qual_list, rinfo->clause);
 	}
@@ -279,57 +316,73 @@ make_device_source(Oid base_relid, List *device_quals, Relids *columns)
 	switch (list_length(qual_list))
 	{
 		case 0:
-			return NULL;		/* no need to check */
+			/* all the tuples should be visible */
+			defel = makeDefElem("predictable",
+								(Node *)makeInteger(TRUE));
+			*private = lappend(*private, (Node *) defel);
+			return;
 		case 1:
 			if (!make_device_qual_code(linitial(qual_list),
-									   &qualsrc, base_relid,
+									   &qual, base_relid,
 									   &type_decl, &func_decl))
-				return NULL;	/* no need to run */
+			{
+				/* all the tuples should be invisible */
+				defel = makeDefElem("predictable",
+									(Node *)makeInteger(FALSE));
+				*private = lappend(*private, (Node *) defel);
+				return;
+			}
 			break;
 		default:
 			if (!make_device_qual_code((Node *) makeBoolExpr(AND_EXPR,
 															 qual_list, 0),
-									   &qualsrc, base_relid,
+									   &qual, base_relid,
 									   &type_decl, &func_decl))
-				return NULL;	/* no need to run */
+			{
+				/* all the tuples should be invisible */
+				defel = makeDefElem("predictable",
+									(Node *)makeInteger(FALSE));
+				*private = lappend(*private, (Node *) defel);
+				return;
+			}
 			break;
 	}
 
-	appendStringInfo(&source,
+	appendStringInfo(&kern,
 					 "__kernel void\n"
 					 "pgstrom_qual(long rowid,\n"
 					 "             __global uchar *rowmap");
-	appendStringInfo(&subblk1,
+	appendStringInfo(&blk1,
 					 "    int   offset = get_global_id(0) << 3;\n"
 					 "    uchar result = rowmap[offset];\n");
-	appendStringInfo(&subblk2,
+	appendStringInfo(&blk2,
 					 "    for (bitmask = 1; bitmask < 256; bitmask <<= 1)\n"
 					 "    {\n"
 					 "        int error = 0;\n"
 					 "        if ((result & bitmask) &&\n");
 
-	tempset = bms_copy(*columns);
+	tempset = bms_copy(columns);
 	while ((attnum = bms_first_member(tempset)) > 0)
 	{
 		PgStromDevTypeInfo *tinfo
 			= pgstrom_devtype_lookup(get_atttype(base_relid, attnum));
 		const char	   *attname = get_attname(base_relid, attnum);
 
-		appendStringInfo(&source, ",\n"
+		appendStringInfo(&kern, ",\n"
 						 "             __global %s *%s_cs,\n"
 						 "             __global uchar *%s_nl",
 						 tinfo->type_ident,
 						 attname, attname);
-		appendStringInfo(&subblk1,
+		appendStringInfo(&blk1,
 						 "    uchar %s_isnull = (%s_nl ? %s_nl[offset] : 0);\n",
 						 attname, attname, attname);
-		appendStringInfo(&subblk2,
+		appendStringInfo(&blk2,
 						 "            (%s_isnull & bitmask) == 0 &&\n",
 						 attname);
 	}
 	bms_free(tempset);
 
-	appendStringInfo(&source, ")\n"
+	appendStringInfo(&kern, ")\n"
 					 "{\n"
 					 "%s"
 					 "    int   bitmask;\n"
@@ -341,13 +394,42 @@ make_device_source(Oid base_relid, List *device_quals, Relids *columns)
 					 "    }\n"
 					 "    rowmap[get_global_id(0) << 3] = result;\n"
 					 "}\n",
-					 subblk1.data, subblk2.data, qualsrc.data);
+					 blk1.data, blk2.data, qual.data);
+	/*
+	 * Declaration of const, type and functions
+	 */
+	appendStringInfo(&decl, "/* Error code of pg_strom */\n");
+	appendStringInfo(&decl, "#define DEVERR_DIVISION_BY_ZERO    0x0001\n");
+	appendStringInfo(&decl, "#define DEVERR_VALUE_OUT_OF_RANGE  0x0002\n");
+	appendStringInfo(&decl, "\n");
 
-	pfree(subblk1.data);
-	pfree(subblk2.data);
-	pfree(qualsrc.data);
+	foreach (cell, type_decl)
+		appendStringInfo(&decl, "%s;\n", (char *) lfirst(cell));
+	if (type_decl != NIL)
+		appendStringInfo(&decl, "\n");
+	foreach (cell, func_decl)
+		appendStringInfo(&decl, "%s\n", (char *) lfirst(cell));
 
-	return source.data;
+	/* kernel function follows by declaration part */
+	appendStringInfo(&decl, "%s", kern.data);
+
+	/*
+	 * Set up private members being referenced in executor stage
+	 */
+	defel = makeDefElem("device_kernel", (Node *) makeString(decl.data));
+	*private = lappend(*private, (Node *)defel);
+
+	while ((attnum = bms_first_member(columns)) > 0)
+	{
+		defel = makeDefElem("clause_cols",
+							(Node *) makeInteger(attnum));
+		*private = lappend(*private, (Node *)defel);
+	}
+
+	pfree(blk1.data);
+	pfree(blk2.data);
+	pfree(qual.data);
+	pfree(kern.data);
 }
 
 static bool
@@ -450,7 +532,7 @@ pgstrom_plan_foreign_scan(Oid foreignTblOid,
 		if (bms_is_empty(baserel->attr_needed[i - baserel->min_attr]))
 			continue;
 
-		defel = makeDefElem("cols_needed", (Node *) makeInteger(i));
+		defel = makeDefElem("required_cols", (Node *) makeInteger(i));
 		private = lappend(private, (Node *) defel);
 	}
 
@@ -461,7 +543,8 @@ pgstrom_plan_foreign_scan(Oid foreignTblOid,
 	{
 		RestrictInfo   *rinfo = lfirst(cell);
 
-		if (is_device_executable_qual(baserel, rinfo))
+		if (pgstrom_num_devices > 0 &&
+			is_device_executable_qual(baserel, rinfo))
 			device_quals = lappend(device_quals, rinfo);
 		else
 			host_quals = lappend(host_quals, rinfo);
@@ -469,22 +552,11 @@ pgstrom_plan_foreign_scan(Oid foreignTblOid,
 
 	baserel->baserestrictinfo = host_quals;
 	if (device_quals != NIL)
+		make_device_source(foreignTblOid, device_quals, &private);
+	else
 	{
-		Relids	columns = NULL;
-		char   *device_source;
-
-		device_source = make_device_source(foreignTblOid,
-										   device_quals,
-										   &columns);
-		defel = makeDefElem("device_source",
-							(Node *) makeString(device_source));
+		defel = makeDefElem("predictable", (Node *) makeInteger(TRUE));
 		private = lappend(private, (Node *) defel);
-
-		while ((i = bms_first_member(columns)) > 0)
-		{
-			defel = makeDefElem("device_column", (Node *) makeInteger(i));
-			private = lappend(private, (Node *) defel);
-		}
 	}
 
 	/*
@@ -506,28 +578,87 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 	ForeignScan	   *fscan = (ForeignScan *) fss->ss.ps.plan;
 	Relation		rel = fss->ss.ss_currentRelation;
 	ListCell	   *cell;
-
-	ExplainPropertyText("Stream Relation", RelationGetRelationName(rel), es);
+	DefElem		   *predictable = NULL;
+	DefElem		   *device_kernel = NULL;
+	Relids			device_columns = NULL;
+	Relids			required_cols = NULL;
+	StringInfoData	str;
+	AttrNumber		attnum;
+	Form_pg_attribute	attr;
 
 	foreach (cell, fscan->fdwplan->fdw_private)
 	{
 		DefElem	   *defel = (DefElem *)lfirst(cell);
+
+		if (strcmp(defel->defname, "predictable") == 0)
+			predictable = defel;
+		else if (strcmp(defel->defname, "device_kernel") == 0)
+			device_kernel = defel;
+		else if (strcmp(defel->defname, "clause_cols") == 0)
+		{
+			device_columns = bms_add_member(device_columns,
+											intVal(defel->arg));
+		}
+		else if (strcmp(defel->defname, "required_cols") == 0)
+		{
+			required_cols = bms_add_member(required_cols,
+										   intVal(defel->arg));
+		}
+	}
+
+	if (!bms_is_empty(required_cols))
+	{
+		initStringInfo(&str);
+		while ((attnum = bms_first_member(required_cols)) > 0)
+		{
+			attr = RelationGetDescr(rel)->attrs[attnum - 1];
+			appendStringInfo(&str, "%s%s",
+							 (str.len > 0 ? ", " : ""),
+							 NameStr(attr->attname));
+		}
+		ExplainPropertyText(" Required Cols ", str.data, es);
+		pfree(str.data);
+	}
+
+	if (!bms_is_empty(device_columns) && !predictable)
+	{
+		initStringInfo(&str);
+		while ((attnum = bms_first_member(device_columns)) > 0)
+		{
+			attr = RelationGetDescr(rel)->attrs[attnum - 1];
+			appendStringInfo(&str, "%s%s",
+							 (str.len > 0 ? ", " : ""),
+							 NameStr(attr->attname));
+		}
+		ExplainPropertyText("Used in clause ", str.data, es);
+		pfree(str.data);
+	}
+
+	if (predictable)
+	{
+		if (intVal(predictable->arg) == TRUE)
+			ExplainPropertyText("   Predictable ", "Any tuples are visible", es);
+		else
+			ExplainPropertyText("   Predictable ", "NO tuples are visible", es);
+	}
+	else if (device_kernel)
+	{
 		char	   *buf, *p1, *p2;
 
-		if (strcmp(defel->defname, "device_source") != 0)
-			continue;
-
-		buf = pstrdup(strVal(defel->arg));
-
-		for (p1=buf; *p1 != '\0'; p1 = p2)
+		buf = pstrdup(strVal(device_kernel->arg));
+		for (p1=p2=buf; *p2 != '\0'; p2++)
 		{
-			p2 = strchr(p1, '\n');
-			if (!p2)
-				break;
-			*p2++ = '\0';
-			ExplainPropertyText("  ", p1, es);
+			if (*p2 != '\n')
+				continue;
+			*p2 = '\0';
+			if (p1 == buf)
+				ExplainPropertyText("   Device code ", p1, es);
+			else
+				ExplainPropertyText("               ", p1, es);
+			p1 = p2 + 1;
 		}
+		if (p1 != p2)
+			ExplainPropertyText("               ", p1, es);
 		pfree(buf);
-		break;
 	}
 }
