@@ -51,6 +51,9 @@ pgstrom_plan_foreign_scan(Oid foreignTblOid,
 /*
  * scan.c
  */
+extern int	pgstrom_max_async_chunks;
+extern int	pgstrom_work_group_size;
+
 typedef struct {
 	Relation	base_rel;
 	Relation	rowid_rel;

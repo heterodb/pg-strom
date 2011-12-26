@@ -13,6 +13,7 @@
 #include "postgres.h"
 #include "foreign/fdwapi.h"
 #include "miscadmin.h"
+#include "utils/guc.h"
 #include "pg_strom.h"
 
 PG_MODULE_MAGIC;
@@ -49,102 +50,43 @@ pgstrom_fdw_validator(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_VOID();
 }
-#if 0
-/*
- * pgstrom_log_device_info
- *
- * Logs name and properties of installed GPU devices.
- */
+
 static void
-pgstrom_log_device_info(void)
+check_guc_work_group_size(int newval, void *extra)
 {
-	cl_platform_id	platform_ids[64];
-	cl_device_id	device_ids[128];
-	cl_uint			num_platforms;
-	cl_uint			num_devices;
-	cl_int			ret, pi, di;
+	if ((PGSTROM_CHUNK_SIZE / BITS_PER_BYTE) % newval != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
+				 errmsg("chunk size (%d/8) must be multiple number of %s",
+						PGSTROM_CHUNK_SIZE,
+						"pg_strom.work_group_size")));
+}
 
-	ret = clGetPlatformIDs(lengthof(platform_ids),
-						   platform_ids, &num_platforms);
-	if (ret != CL_SUCCESS)
-		elog(ERROR, "openCL: failed to get number of platforms");
+static void
+pgstrom_guc_init(void)
+{
+	DefineCustomIntVariable("pg_strom.max_async_chunks",
+							"max number of concurrency to exec async kernels",
+							NULL,
+							&pgstrom_max_async_chunks,
+							32,
+							1,
+							1024,
+							PGC_USERSET,
+							0,
+							NULL, NULL, NULL);
 
-	for (pi=0; pi < num_platforms; pi++)
-	{
-		char	pf_name[255];
-		char	pf_version[64];
-		char	pf_vendor[64];
-		size_t	retsize;
-
-		ret = clGetPlatformInfo(platform_ids[pi], CL_PLATFORM_NAME,
-								sizeof(pf_name), &pf_name, &retsize);
-		if (ret != CL_SUCCESS)
-			elog(ERROR, "openCL: failed to get platform name");
-
-		ret = clGetPlatformInfo(platform_ids[pi], CL_PLATFORM_VERSION,
-								sizeof(pf_version), &pf_version, &retsize);
-		if (ret != CL_SUCCESS)
-			elog(ERROR, "openCL: failed to get platform version");
-
-		ret = clGetPlatformInfo(platform_ids[pi], CL_PLATFORM_VENDOR,
-								sizeof(pf_vendor), &pf_vendor, &retsize);
-		if (ret != CL_SUCCESS)
-			elog(ERROR, "openCL: failed to get platform vendor");
-
-		ret = clGetDeviceIDs(platform_ids[pi],
-							 CL_DEVICE_TYPE_DEFAULT,
-							 lengthof(device_ids),
-							 device_ids, &num_devices);
-		if (ret != CL_SUCCESS)
-			elog(ERROR, "openCL: failed to get number of devices");
-
-		for (di=0; di < num_devices; di++)
-		{
-			char	dev_name[128];
-			char	dev_version[64];
-
-			ret = clGetDeviceInfo(device_ids[di], CL_DEVICE_NAME,
-								  sizeof(dev_name), &dev_name, &retsize);
-			if (ret != CL_SUCCESS)
-				elog(ERROR, "openCL: failed to get device name");
-
-			ret = clGetDeviceInfo(device_ids[di], CL_DEVICE_VERSION,
-								  sizeof(dev_version), &dev_version, &retsize);
-			if (ret != CL_SUCCESS)
-				elog(ERROR, "openCL: failed to get device version");
-
-			elog(LOG, "pg_strom: %s, %s by %s (%s/%s)",
-				 pf_name, pf_version, pf_vendor,
-				 dev_name, dev_version);
-		}
-	}
-
-	struct cudaDeviceProp prop;
-	cudaError_t	rc;
-	int			i, ngpus;
-
-	rc = pgcuda_get_device_count(&ngpus);
-	if (rc != cudaSuccess)
-		elog(ERROR, "Failed to get number of GPUs : %s",
-			 pgcuda_get_error_string(rc));
-
-	for (i = 0; i < ngpus; i++)
-	{
-		rc = pgcuda_get_device_properties(&prop, i);
-		if (rc != cudaSuccess)
-			elog(ERROR, "Failed to get properties of GPU(%d) : %s",
-				 i, pgcuda_get_error_string(rc));
-
-		elog(LOG,
-			 "GPU(%d) : %s (capability v%d.%d), "
-			 "%d of MP (WarpSize: %d, %dMHz), "
-			 "Device Memory %luMB (%dMHz, %dbits)",
-			 i, prop.name, prop.major, prop.minor,
-			 prop.multiProcessorCount, prop.warpSize, prop.clockRate / 1000,
-			 prop.totalGlobalMem / (1024 *1024),
-			 prop.memoryClockRate / 1000, prop.memoryBusWidth);
-	}
-#endif
+	DefineCustomIntVariable("pg_strom.work_group_size",
+							"size of work group on execution of kernel code",
+							NULL,
+							&pgstrom_work_group_size,
+							32,
+							1,
+							PGSTROM_CHUNK_SIZE / BITS_PER_BYTE,
+							PGC_USERSET,
+							0,
+							NULL, check_guc_work_group_size, NULL);
+}
 
 /*
  * Entrypoint of the pg_strom module
@@ -159,6 +101,9 @@ _PG_init(void)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 		errmsg("pg_strom must be loaded via shared_preload_libraries")));
+
+	/* Register GUC variables */
+	pgstrom_guc_init();
 
 	/* Register Hooks of PostgreSQL */
 	pgstrom_utilcmds_init();
