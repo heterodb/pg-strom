@@ -108,7 +108,6 @@ typedef struct {
 	cl_device_id				dev_id;
 	cl_bool						dev_compiler_available;
 	cl_device_fp_config			dev_double_fp_config;
-	cl_device_exec_capabilities	dev_execution_capabilities;
 	cl_ulong					dev_global_mem_cache_size;
 	cl_device_mem_cache_type	dev_global_mem_cache_type;
 	cl_ulong					dev_global_mem_size;
@@ -140,6 +139,7 @@ extern PgStromDevFuncInfo *pgstrom_devfunc_lookup(Oid func_oid);
 extern PgStromDevCastInfo *pgstrom_devcast_lookup(Oid source_typeid,
 												  Oid target_typeid);
 extern void pgstrom_devinfo_init(void);
+extern const char *opencl_error_to_string(cl_int errcode);
 
 /*
  * pg_strom.c

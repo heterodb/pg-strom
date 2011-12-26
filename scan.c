@@ -470,7 +470,8 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	if (ret != CL_SUCCESS)
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("OpenCL failed to create program with source: %d", ret)));
+				 errmsg("OpenCL failed to create program with source: %s",
+						opencl_error_to_string(ret))));
 
 	ret = clBuildProgram(sestate->device_program,
 						 0, NULL,		/* for all the devices */
@@ -503,7 +504,8 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 		clReleaseProgram(sestate->device_program);
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("OpenCL failed to build program: %d", ret)));
+				 errmsg("OpenCL failed to build program: %s",
+						opencl_error_to_string(ret))));
 	}
 
 	/*
@@ -524,7 +526,8 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 
 			ereport(ERROR,
 					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("OpenCL failed to create command queue: %d", ret)));
+					 errmsg("OpenCL failed to create command queue: %s",
+							opencl_error_to_string(ret))));
 		}
 	}
 

@@ -600,6 +600,121 @@ out:
 }
 
 /*
+ * Error code to string representation
+ */
+const char *
+opencl_error_to_string(cl_int errcode)
+{
+	char	buf[256];
+
+	switch (errcode)
+	{
+		case CL_SUCCESS:
+			return "success";
+		case CL_DEVICE_NOT_FOUND:
+			return "device not found";
+		case CL_DEVICE_NOT_AVAILABLE:
+			return "device not available";
+		case CL_COMPILER_NOT_AVAILABLE:
+			return "compiler not available";
+		case CL_MEM_OBJECT_ALLOCATION_FAILURE:
+			return "mem object allocation faulure";
+		case CL_OUT_OF_RESOURCES:
+			return "out of resources";
+		case CL_OUT_OF_HOST_MEMORY:
+			return "out of host memory";
+		case CL_PROFILING_INFO_NOT_AVAILABLE:
+			return "profiling info not available";
+		case CL_MEM_COPY_OVERLAP:
+			return "mem copy overlap";
+		case CL_IMAGE_FORMAT_MISMATCH:
+			return "image format mismatch";
+		case CL_IMAGE_FORMAT_NOT_SUPPORTED:
+			return "image format not supported";
+		case CL_BUILD_PROGRAM_FAILURE:
+			return "build program failure";
+		case CL_MAP_FAILURE:
+			return "map failure";
+		case CL_MISALIGNED_SUB_BUFFER_OFFSET:
+			return "misaligned sub buffer offset";
+		case CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST:
+			return "exec status error for events in wait list";
+		case CL_INVALID_VALUE:
+			return "invalid value";
+		case CL_INVALID_DEVICE_TYPE:
+			return "invalid device type";
+		case CL_INVALID_PLATFORM:
+			return "invalid platform";
+		case CL_INVALID_DEVICE:
+			return "invalid device";
+		case CL_INVALID_CONTEXT:
+			return "invalid context";
+		case CL_INVALID_QUEUE_PROPERTIES:
+			return "invalid queue properties";
+		case CL_INVALID_COMMAND_QUEUE:
+			return "invalid command queue";
+		case CL_INVALID_HOST_PTR:
+			return "invalid host pointer";
+		case CL_INVALID_MEM_OBJECT:
+			return "invalid memory object";
+		case CL_INVALID_IMAGE_FORMAT_DESCRIPTOR:
+			return "invalid image format descriptor";
+		case CL_INVALID_IMAGE_SIZE:
+			return "invalid image size";
+		case CL_INVALID_SAMPLER:
+			return "invalid sampler";
+		case CL_INVALID_BINARY:
+			return "invalid binary";
+		case CL_INVALID_BUILD_OPTIONS:
+			return "invalid build options";
+		case CL_INVALID_PROGRAM:
+			return "invalid program";
+		case CL_INVALID_PROGRAM_EXECUTABLE:
+			return "invalid program executable";
+		case CL_INVALID_KERNEL_NAME:
+			return "invalid kernel name";
+		case CL_INVALID_KERNEL_DEFINITION:
+			return "invalid kernel definition";
+		case CL_INVALID_KERNEL:
+			return "invalid kernel";
+		case CL_INVALID_ARG_INDEX:
+			return "invalid argument index";
+		case CL_INVALID_ARG_VALUE:
+			return "invalid argument value";
+		case CL_INVALID_ARG_SIZE:
+			return "invalid argument size";
+		case CL_INVALID_KERNEL_ARGS:
+			return "invalid kernel arguments";
+		case CL_INVALID_WORK_DIMENSION:
+			return "invalid work dimension";
+		case CL_INVALID_WORK_GROUP_SIZE:
+			return "invalid work group size";
+		case CL_INVALID_WORK_ITEM_SIZE:
+			return "invalid work item size";
+		case CL_INVALID_GLOBAL_OFFSET:
+			return "invalid global offset";
+		case CL_INVALID_EVENT_WAIT_LIST:
+			return "invalid event wait list";
+		case CL_INVALID_EVENT:
+			return "invalid event";
+		case CL_INVALID_OPERATION:
+			return "invalid operation";
+		case CL_INVALID_GL_OBJECT:
+			return "invalid GL object";
+		case CL_INVALID_BUFFER_SIZE:
+			return "invalid buffer size";
+		case CL_INVALID_MIP_LEVEL:
+			return "invalid MIP level";
+		case CL_INVALID_GLOBAL_WORK_SIZE:
+			return "invalid global work size";
+		case CL_INVALID_PROPERTY:
+			return "invalid property";
+	}
+	snprintf(buf, sizeof(buf), "unknown error code: %d", errcode);
+	return pstrdup(buf);
+}
+
+/*
  * cleanup opencl resources on process exit time
  */
 static void
@@ -639,7 +754,8 @@ pgstrom_devinfo_init(void)
 	ret = clGetPlatformIDs(lengthof(platform_ids),
 						   platform_ids, &num_platforms);
 	if (ret != CL_SUCCESS)
-		elog(ERROR, "OpenCL: filed to get number of platforms");
+		elog(ERROR, "OpenCL: filed to get number of platforms: %s",
+			 opencl_error_to_string(ret));
 
 	for (pi=0; pi < num_platforms; pi++)
 	{
@@ -648,18 +764,20 @@ pgstrom_devinfo_init(void)
 							 lengthof(device_ids),
 							 device_ids, &num_devices);
 		if (ret != CL_SUCCESS)
-			elog(ERROR, "OpenCL: filed to get number of devices");
+			elog(ERROR, "OpenCL: filed to get number of devices: %s",
+				 opencl_error_to_string(ret));
 
 		for (di=0; di < num_devices; di++)
 		{
 			cl_bool		dev_available;
 
-			if (clGetDeviceInfo(device_ids[di],
-								CL_DEVICE_AVAILABLE,
-								sizeof(dev_available),
-								&dev_available,
-								NULL) != CL_SUCCESS)
-				elog(ERROR, "OpenCL: failed to get properties of device");
+			if ((ret = clGetDeviceInfo(device_ids[di],
+									  CL_DEVICE_AVAILABLE,
+									  sizeof(dev_available),
+									  &dev_available,
+									   NULL)) != CL_SUCCESS)
+				elog(ERROR, "OpenCL: failed to get properties of device: %s",
+					 opencl_error_to_string(ret));
 
 			if (!dev_available)
 				continue;
@@ -669,108 +787,104 @@ pgstrom_devinfo_init(void)
 			dev_info->pf_id = platform_ids[pi];
 			dev_info->dev_id = device_ids[di];
 
-			if (clGetDeviceInfo(dev_info->dev_id,
-								CL_DEVICE_COMPILER_AVAILABLE,
-								sizeof(dev_info->dev_compiler_available),
-								&dev_info->dev_compiler_available,
-								NULL) != CL_SUCCESS ||
-				clGetDeviceInfo(dev_info->dev_id,
-								CL_DEVICE_DOUBLE_FP_CONFIG,
-								sizeof(dev_info->dev_double_fp_config),
-								&dev_info->dev_double_fp_config,
-								NULL) != CL_SUCCESS ||
-				clGetDeviceInfo(dev_info->dev_id,
-								CL_DEVICE_EXECUTION_CAPABILITIES,
-								sizeof(dev_info->dev_execution_capabilities),
-								&dev_info->dev_execution_capabilities,
-								NULL) != CL_SUCCESS ||
-				clGetDeviceInfo(dev_info->dev_id,
-								CL_DEVICE_GLOBAL_MEM_CACHE_TYPE,
-								sizeof(dev_info->dev_global_mem_cache_type),
-								&dev_info->dev_global_mem_cache_type,
-								NULL) != CL_SUCCESS ||
+			if ((ret = clGetDeviceInfo(dev_info->dev_id,
+									   CL_DEVICE_COMPILER_AVAILABLE,
+									   sizeof(dev_info->dev_compiler_available),
+									   &dev_info->dev_compiler_available,
+									   NULL)) != CL_SUCCESS ||
+				(ret = clGetDeviceInfo(dev_info->dev_id,
+									   CL_DEVICE_DOUBLE_FP_CONFIG,
+									   sizeof(dev_info->dev_double_fp_config),
+									   &dev_info->dev_double_fp_config,
+									   NULL)) != CL_SUCCESS ||
+				(ret = clGetDeviceInfo(dev_info->dev_id,
+									   CL_DEVICE_GLOBAL_MEM_CACHE_TYPE,
+									   sizeof(dev_info->dev_global_mem_cache_type),
+									   &dev_info->dev_global_mem_cache_type,
+									   NULL)) != CL_SUCCESS ||
 				(dev_info->dev_global_mem_cache_type != CL_NONE &&
-				 clGetDeviceInfo(dev_info->dev_id,
-								 CL_DEVICE_GLOBAL_MEM_CACHE_SIZE,
-								 sizeof(dev_info->dev_global_mem_cache_size),
-								 &dev_info->dev_global_mem_cache_size,
-								 NULL) != CL_SUCCESS) ||
-				clGetDeviceInfo(dev_info->dev_id,
-								CL_DEVICE_GLOBAL_MEM_SIZE,
-								sizeof(dev_info->dev_global_mem_size),
-								&dev_info->dev_global_mem_size,
-								NULL) != CL_SUCCESS ||
-				clGetDeviceInfo(dev_info->dev_id,
-								CL_DEVICE_LOCAL_MEM_SIZE,
-								sizeof(dev_info->dev_local_mem_size),
-								&dev_info->dev_local_mem_size,
-								NULL) != CL_SUCCESS ||
-				clGetDeviceInfo(dev_info->dev_id,
-								CL_DEVICE_LOCAL_MEM_TYPE,
-								sizeof(dev_info->dev_local_mem_type),
-								&dev_info->dev_local_mem_type,
-								NULL) != CL_SUCCESS ||
-				clGetDeviceInfo(dev_info->dev_id,
-								CL_DEVICE_MAX_CLOCK_FREQUENCY,
-								sizeof(dev_info->dev_max_clock_frequency),
-								&dev_info->dev_max_clock_frequency,
-								NULL) != CL_SUCCESS ||
-				clGetDeviceInfo(dev_info->dev_id,
-								CL_DEVICE_MAX_COMPUTE_UNITS,
-								sizeof(dev_info->dev_max_compute_units),
-								&dev_info->dev_max_compute_units,
-								NULL) != CL_SUCCESS ||
-				clGetDeviceInfo(dev_info->dev_id,
-								CL_DEVICE_MAX_CONSTANT_ARGS,
-								sizeof(dev_info->dev_max_constant_args),
-								&dev_info->dev_max_constant_args,
-								NULL) != CL_SUCCESS ||
-				clGetDeviceInfo(dev_info->dev_id,
-								CL_DEVICE_MAX_CONSTANT_BUFFER_SIZE,
-								sizeof(dev_info->dev_max_constant_buffer_size),
-								&dev_info->dev_max_constant_buffer_size,
-								NULL) != CL_SUCCESS ||
-				clGetDeviceInfo(dev_info->dev_id,
-								CL_DEVICE_MAX_MEM_ALLOC_SIZE,
-								sizeof(dev_info->dev_max_mem_alloc_size),
-								&dev_info->dev_max_mem_alloc_size,
-								NULL) != CL_SUCCESS ||
-				clGetDeviceInfo(dev_info->dev_id,
-								CL_DEVICE_MAX_PARAMETER_SIZE,
-								sizeof(dev_info->dev_max_parameter_size),
-								&dev_info->dev_max_parameter_size,
-								NULL) != CL_SUCCESS ||
-				clGetDeviceInfo(dev_info->dev_id,
-								CL_DEVICE_MAX_WORK_GROUP_SIZE,
-								sizeof(dev_info->dev_max_work_group_size),
-								&dev_info->dev_max_work_group_size,
-								NULL) != CL_SUCCESS ||
-				clGetDeviceInfo(dev_info->dev_id,
-								CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS,
-								sizeof(dev_info->dev_max_work_item_dimensions),
-								&dev_info->dev_max_work_item_dimensions,
-								NULL) != CL_SUCCESS ||
-				clGetDeviceInfo(dev_info->dev_id,
-								CL_DEVICE_MAX_WORK_ITEM_SIZES,
-								sizeof(dev_info->dev_max_work_item_sizes),
-								dev_info->dev_max_work_item_sizes,
-								NULL) != CL_SUCCESS ||
-				clGetDeviceInfo(dev_info->dev_id,
-								CL_DEVICE_NAME,
-								sizeof(dev_info->dev_name),
-								dev_info->dev_name,
-								NULL) != CL_SUCCESS ||
-				clGetDeviceInfo(dev_info->dev_id,
-								CL_DEVICE_VERSION,
-								sizeof(dev_info->dev_version),
-								&dev_info->dev_version,
-								NULL) != CL_SUCCESS ||
-				clGetDeviceInfo(dev_info->dev_id,
-								CL_DEVICE_PROFILE,
-								sizeof(dev_info->dev_profile),
-								dev_info->dev_profile,
-								NULL) != CL_SUCCESS)
-				elog(ERROR, "OpenCL: failed to get properties of device");
+				 (ret = clGetDeviceInfo(dev_info->dev_id,
+										CL_DEVICE_GLOBAL_MEM_CACHE_SIZE,
+										sizeof(dev_info->dev_global_mem_cache_size),
+										&dev_info->dev_global_mem_cache_size,
+										NULL)) != CL_SUCCESS) ||
+				(ret = clGetDeviceInfo(dev_info->dev_id,
+									   CL_DEVICE_GLOBAL_MEM_SIZE,
+									   sizeof(dev_info->dev_global_mem_size),
+									   &dev_info->dev_global_mem_size,
+									   NULL)) != CL_SUCCESS ||
+				(ret = clGetDeviceInfo(dev_info->dev_id,
+									   CL_DEVICE_LOCAL_MEM_SIZE,
+									   sizeof(dev_info->dev_local_mem_size),
+									   &dev_info->dev_local_mem_size,
+									   NULL)) != CL_SUCCESS ||
+				(ret = clGetDeviceInfo(dev_info->dev_id,
+									   CL_DEVICE_LOCAL_MEM_TYPE,
+									   sizeof(dev_info->dev_local_mem_type),
+									   &dev_info->dev_local_mem_type,
+									   NULL)) != CL_SUCCESS ||
+				(ret = clGetDeviceInfo(dev_info->dev_id,
+									   CL_DEVICE_MAX_CLOCK_FREQUENCY,
+									   sizeof(dev_info->dev_max_clock_frequency),
+									   &dev_info->dev_max_clock_frequency,
+									   NULL)) != CL_SUCCESS ||
+				(ret = clGetDeviceInfo(dev_info->dev_id,
+									   CL_DEVICE_MAX_COMPUTE_UNITS,
+									   sizeof(dev_info->dev_max_compute_units),
+									   &dev_info->dev_max_compute_units,
+									   NULL)) != CL_SUCCESS ||
+				(ret = clGetDeviceInfo(dev_info->dev_id,
+									   CL_DEVICE_MAX_CONSTANT_ARGS,
+									   sizeof(dev_info->dev_max_constant_args),
+									   &dev_info->dev_max_constant_args,
+									   NULL)) != CL_SUCCESS ||
+				(ret = clGetDeviceInfo(dev_info->dev_id,
+									   CL_DEVICE_MAX_CONSTANT_BUFFER_SIZE,
+									   sizeof(dev_info->dev_max_constant_buffer_size),
+									   &dev_info->dev_max_constant_buffer_size,
+									   NULL)) != CL_SUCCESS ||
+				(ret = clGetDeviceInfo(dev_info->dev_id,
+									   CL_DEVICE_MAX_MEM_ALLOC_SIZE,
+									   sizeof(dev_info->dev_max_mem_alloc_size),
+									   &dev_info->dev_max_mem_alloc_size,
+									   NULL)) != CL_SUCCESS ||
+				(ret = clGetDeviceInfo(dev_info->dev_id,
+									   CL_DEVICE_MAX_PARAMETER_SIZE,
+									   sizeof(dev_info->dev_max_parameter_size),
+									   &dev_info->dev_max_parameter_size,
+									   NULL)) != CL_SUCCESS ||
+				(ret = clGetDeviceInfo(dev_info->dev_id,
+									   CL_DEVICE_MAX_WORK_GROUP_SIZE,
+									   sizeof(dev_info->dev_max_work_group_size),
+									   &dev_info->dev_max_work_group_size,
+									   NULL)) != CL_SUCCESS ||
+				(ret = clGetDeviceInfo(dev_info->dev_id,
+									   CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS,
+									   sizeof(dev_info->dev_max_work_item_dimensions),
+									   &dev_info->dev_max_work_item_dimensions,
+									   NULL)) != CL_SUCCESS ||
+				(ret = clGetDeviceInfo(dev_info->dev_id,
+									   CL_DEVICE_MAX_WORK_ITEM_SIZES,
+									   sizeof(dev_info->dev_max_work_item_sizes),
+									   dev_info->dev_max_work_item_sizes,
+									   NULL)) != CL_SUCCESS ||
+				(ret = clGetDeviceInfo(dev_info->dev_id,
+									   CL_DEVICE_NAME,
+									   sizeof(dev_info->dev_name),
+									   dev_info->dev_name,
+									   NULL)) != CL_SUCCESS ||
+				(ret = clGetDeviceInfo(dev_info->dev_id,
+									   CL_DEVICE_VERSION,
+									   sizeof(dev_info->dev_version),
+									   &dev_info->dev_version,
+									   NULL)) != CL_SUCCESS ||
+				(ret = clGetDeviceInfo(dev_info->dev_id,
+									   CL_DEVICE_PROFILE,
+									   sizeof(dev_info->dev_profile),
+									   dev_info->dev_profile,
+									   NULL)) != CL_SUCCESS)
+				elog(ERROR, "OpenCL: failed to get properties of device: %s",
+					 opencl_error_to_string(ret));
 
 			/*
 			 * Print properties of the device into log
@@ -830,7 +944,8 @@ pgstrom_devinfo_init(void)
 		if (ret != CL_SUCCESS)
 			ereport(ERROR,
 					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("OpenCL failed to create execute context: %d", ret)));
+					 errmsg("OpenCL failed to create execute context: %s",
+							opencl_error_to_string(ret))));
 		/* Clean up handler */
 		on_proc_exit(pgstrom_devinfo_on_exit, 0);
     }
