@@ -16,7 +16,6 @@
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "storage/ipc.h"
-#include "utils/memutils.h"
 #include "utils/syscache.h"
 #include "pg_strom.h"
 
@@ -27,12 +26,10 @@
 static List			   *devtype_info_slot[512];
 static List			   *devfunc_info_slot[1024];
 static List			   *devcast_info_slot[256];
-static MemoryContext	devinfo_memcxt;
 
 cl_uint					pgstrom_num_devices;
 cl_device_id		   *pgstrom_device_id;
 PgStromDeviceInfo	  **pgstrom_device_info;
-cl_context				pgstrom_device_context = NULL;
 
 /* ------------------------------------------------------------
  *
@@ -125,7 +122,7 @@ pgstrom_devtype_lookup(Oid type_oid)
 		elog(ERROR, "cache lookup failed for type %u", type_oid);
 	typeForm = (Form_pg_type) GETSTRUCT(tuple);
 
-	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
 
 	entry = palloc0(sizeof(PgStromDevTypeInfo));
 	entry->type_oid = type_oid;
@@ -204,7 +201,7 @@ pgstrom_devcast_lookup(Oid source_typeid, Oid target_typeid)
 		}
 	}
 
-	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
 
 	entry = palloc0(sizeof(PgStromDevCastInfo));
 	entry->cast_source = source_typeid;
@@ -554,7 +551,7 @@ pgstrom_devfunc_lookup(Oid func_oid)
 		elog(ERROR, "cache lookup failed for function %u", func_oid);
 	procForm = (Form_pg_proc) GETSTRUCT(tuple);
 
-	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
 
 	entry = palloc0(sizeof(PgStromDevFuncInfo) +
 					sizeof(Oid) * procForm->pronargs);
@@ -714,16 +711,6 @@ opencl_error_to_string(cl_int errcode)
 	return pstrdup(buf);
 }
 
-/*
- * cleanup opencl resources on process exit time
- */
-static void
-pgstrom_devinfo_on_exit(int code, Datum arg)
-{
-	if (pgstrom_device_context)
-		clReleaseContext(pgstrom_device_context);
-}
-
 void
 pgstrom_devinfo_init(void)
 {
@@ -736,16 +723,11 @@ pgstrom_devinfo_init(void)
 	int					nitems = 10;
 	MemoryContext		oldctx;
 
-	devinfo_memcxt = AllocSetContextCreate(TopMemoryContext,
-										   "pg_strom device info",
-										   ALLOCSET_DEFAULT_MINSIZE,
-										   ALLOCSET_DEFAULT_INITSIZE,
-										   ALLOCSET_DEFAULT_MAXSIZE);
 	memset(devtype_info_slot, 0, sizeof(devtype_info_slot));
 	memset(devfunc_info_slot, 0, sizeof(devfunc_info_slot));
 	memset(devcast_info_slot, 0, sizeof(devcast_info_slot));
 
-	oldctx = MemoryContextSwitchTo(devinfo_memcxt);
+	oldctx = MemoryContextSwitchTo(TopMemoryContext);
 
 	pgstrom_num_devices = 0;	
 	pgstrom_device_id = palloc(sizeof(cl_device_id) * nitems);
@@ -931,22 +913,4 @@ pgstrom_devinfo_init(void)
 		}
 	}
 	MemoryContextSwitchTo(oldctx);
-
-	/*
-	 * Create an OpenCL context
-	 */
-	if (pgstrom_num_devices > 0)
-	{
-		pgstrom_device_context = clCreateContext(NULL,
-												 pgstrom_num_devices,
-												 pgstrom_device_id,
-												 NULL, NULL, &ret);
-		if (ret != CL_SUCCESS)
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("OpenCL failed to create execute context: %s",
-							opencl_error_to_string(ret))));
-		/* Clean up handler */
-		on_proc_exit(pgstrom_devinfo_on_exit, 0);
-    }
 }

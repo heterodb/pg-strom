@@ -270,8 +270,7 @@ make_device_source(Oid base_relid, List *device_quals, List **private)
 	 * Kernel function shall be declared as follows:
 	 *
 	 *
-	 * __kernel void pgstrom_qual(long rowid,
-	 *                            __global uchar *rowmap,
+	 * __kernel void pgstrom_qual(__global uchar *rowmap,
 	 *                            __global <atttype> *<attname>_cs,
 	 *                            __global uchar *<attname>_nulls,
 	 *                                    :
@@ -350,11 +349,10 @@ make_device_source(Oid base_relid, List *device_quals, List **private)
 
 	appendStringInfo(&kern,
 					 "__kernel void\n"
-					 "pgstrom_qual(long rowid,\n"
-					 "             __global uchar *rowmap");
+					 "pgstrom_qual(__global uchar *rowmap");
 	appendStringInfo(&blk1,
 					 "    int   offset = get_global_id(0) << 3;\n"
-					 "    uchar result = rowmap[offset];\n");
+					 "    uchar result = rowmap[get_global_id(0)];\n");
 	appendStringInfo(&blk2,
 					 "    for (bitmask = 1; bitmask < 256; bitmask <<= 1)\n"
 					 "    {\n"
@@ -374,8 +372,8 @@ make_device_source(Oid base_relid, List *device_quals, List **private)
 						 tinfo->type_ident,
 						 attname, attname);
 		appendStringInfo(&blk1,
-						 "    uchar %s_isnull = (%s_nl ? %s_nl[offset] : 0);\n",
-						 attname, attname, attname);
+						 "    uchar %s_isnull = %s_nl[get_global_id(0)];\n",
+						 attname, attname);
 		appendStringInfo(&blk2,
 						 "            (%s_isnull & bitmask) == 0 &&\n",
 						 attname);
@@ -392,7 +390,7 @@ make_device_source(Oid base_relid, List *device_quals, List **private)
 					 "            result &= ~bitmask;\n"
 					 "        offset++;\n"
 					 "    }\n"
-					 "    rowmap[get_global_id(0) << 3] = result;\n"
+					 "    rowmap[get_global_id(0)] = result;\n"
 					 "}\n",
 					 blk1.data, blk2.data, qual.data);
 	/*

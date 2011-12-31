@@ -17,8 +17,14 @@
 #include "commands/explain.h"
 #include "fmgr.h"
 #include "foreign/fdwapi.h"
+#include "utils/memutils.h"
+#ifdef __APPLE__
+#include <OpenCL/cl.h>
+#include <OpenCL/cl_ext.h>
+#else
 #include <CL/cl.h>
 #include <CL/cl_ext.h>
+#endif
 
 #define PGSTROM_SCHEMA_NAME		"pg_strom"
 
@@ -31,8 +37,22 @@
 /*
  * utilcmds.c
  */
-extern void
-pgstrom_utilcmds_init(void);
+typedef struct {
+	Relation	base_rel;
+	Relation	rowid_rel;
+	Relation	rowid_idx;
+	Relation   *cs_rel;
+	Relation   *cs_idx;
+	Oid			rowid_seqid;
+} RelationSetData;
+typedef RelationSetData *RelationSet;
+
+extern RelationSet	pgstrom_open_relation_set(Relation base_rel,
+											  LOCKMODE lockmode,
+											  bool with_index);
+extern void	pgstrom_close_relation_set(RelationSet relset,
+									   LOCKMODE lockmode);
+extern void	pgstrom_utilcmds_init(void);
 
 /*
  * blkload.c
@@ -44,42 +64,20 @@ extern Datum pgstrom_data_compaction(PG_FUNCTION_ARGS);
 /*
  * plan.c
  */
-extern FdwPlan *
-pgstrom_plan_foreign_scan(Oid foreignTblOid,
-			  PlannerInfo *root, RelOptInfo *baserel);
+extern FdwPlan *pgstrom_plan_foreign_scan(Oid foreignTblOid,
+										  PlannerInfo *root,
+										  RelOptInfo *baserel);
+extern void		pgstrom_explain_foreign_scan(ForeignScanState *node,
+											 ExplainState *es);
 
 /*
  * scan.c
  */
-extern int	pgstrom_max_async_chunks;
-extern int	pgstrom_work_group_size;
-
-typedef struct {
-	Relation	base_rel;
-	Relation	rowid_rel;
-	Relation	rowid_idx;
-	Relation   *cs_rel;
-	Relation   *cs_idx;
-	Oid			rowid_seqid;
-} RelationSetData;
-typedef RelationSetData *RelationSet;
-
-extern RelationSet
-pgstrom_open_relation_set(Relation base_rel,
-						  LOCKMODE lockmode, bool with_index);
-extern void
-pgstrom_close_relation_set(RelationSet relset, LOCKMODE lockmode);
-
-extern void
-pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags);
-extern TupleTableSlot*
-pgstrom_iterate_foreign_scan(ForeignScanState *fss);
-extern void
-pgboost_rescan_foreign_scan(ForeignScanState *fss);
-extern void
-pgboost_end_foreign_scan(ForeignScanState *fss);
-extern void
-pgstrom_explain_foreign_scan(ForeignScanState *node, ExplainState *es);
+extern void	pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags);
+extern TupleTableSlot *pgstrom_iterate_foreign_scan(ForeignScanState *fss);
+extern void	pgstrom_rescan_foreign_scan(ForeignScanState *fss);
+extern void	pgstrom_end_foreign_scan(ForeignScanState *fss);
+extern void pgstrom_scan_init(void);
 
 /*
  * devinfo.c
@@ -133,7 +131,6 @@ typedef struct {
 extern cl_uint				pgstrom_num_devices;
 extern cl_device_id		   *pgstrom_device_id;
 extern PgStromDeviceInfo  **pgstrom_device_info;
-extern cl_context			pgstrom_device_context;
 
 extern void pgstrom_devtype_format(StringInfo str,
 								   Oid type_oid, Datum value);

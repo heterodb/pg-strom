@@ -19,6 +19,7 @@
 #include "nodes/makefuncs.h"
 #include "utils/array.h"
 #include "utils/fmgroids.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/resowner.h"
@@ -28,140 +29,9 @@
 /*
  * Declarations
  */
-int		pgstrom_max_async_chunks;
-int		pgstrom_work_group_size;
-
-
-RelationSet
-pgstrom_open_relation_set(Relation base_rel,
-						  LOCKMODE lockmode, bool with_index)
-{
-	RelationSet	relset;
-	AttrNumber	i, nattrs;
-	RangeVar   *range;
-	char	   *base_schema;
-	char		namebuf[NAMEDATALEN * 3 + 20];
-
-	/*
-	 * The base relation must be a foreign table being managed by
-	 * pg_strom foreign data wrapper.
-	 */
-	if (RelationGetForm(base_rel)->relkind != RELKIND_FOREIGN_TABLE)
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not a foreign table",
-						RelationGetRelationName(base_rel))));
-	else
-	{
-		ForeignTable	   *ft = GetForeignTable(RelationGetRelid(base_rel));
-		ForeignServer	   *fs = GetForeignServer(ft->serverid);
-		ForeignDataWrapper *fdw = GetForeignDataWrapper(fs->fdwid);
-
-		if (GetFdwRoutine(fdw->fdwhandler) != &pgstromFdwHandlerData)
-			ereport(ERROR,
-					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-					 errmsg("\"%s\" is not managed by pg_strom",
-							RelationGetRelationName(base_rel))));
-	}
-
-	/*
-	 * Setting up RelationSet
-	 */
-	nattrs = RelationGetNumberOfAttributes(base_rel);
-	relset = palloc0(sizeof(RelationSetData));
-	relset->cs_rel = palloc0(sizeof(Relation) * nattrs);
-	relset->cs_idx = palloc0(sizeof(Relation) * nattrs);
-	relset->base_rel = base_rel;
-
-	/*
-	 * Open the underlying tables and corresponding indexes
-	 */
-	range = makeRangeVar(PGSTROM_SCHEMA_NAME, namebuf, -1);
-	base_schema = get_namespace_name(RelationGetForm(base_rel)->relnamespace);
-
-	snprintf(namebuf, sizeof(namebuf), "%s.%s.rowid",
-			 base_schema, RelationGetRelationName(base_rel));
-	relset->rowid_rel = relation_openrv(range, lockmode);
-	if (RelationGetForm(relset->rowid_rel)->relkind != RELKIND_RELATION)
-		ereport(ERROR,
-                (errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not a regular table",
-						RelationGetRelationName(relset->rowid_rel))));
-	if (with_index)
-	{
-		snprintf(namebuf, sizeof(namebuf), "%s.%s.idx",
-				 base_schema, RelationGetRelationName(base_rel));
-		relset->rowid_idx = relation_openrv(range, lockmode);
-		if (RelationGetForm(relset->rowid_idx)->relkind != RELKIND_INDEX)
-			ereport(ERROR,
-					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-					 errmsg("\"%s\" is not an index",
-							RelationGetRelationName(relset->rowid_idx))));
-	}
-
-	for (i = 0; i < nattrs; i++)
-	{
-		Form_pg_attribute attr = RelationGetDescr(base_rel)->attrs[i];
-
-		if (attr->attisdropped)
-			continue;
-
-		snprintf(namebuf, sizeof(namebuf), "%s.%s.%s.cs",
-				 base_schema,
-                 RelationGetRelationName(base_rel),
-                 NameStr(attr->attname));
-		relset->cs_rel[i] = relation_openrv(range, lockmode);
-		if (RelationGetForm(relset->cs_rel[i])->relkind != RELKIND_RELATION)
-			ereport(ERROR,
-					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-					 errmsg("\"%s\" is not a regular table",
-							RelationGetRelationName(relset->cs_rel[i]))));
-		if (with_index)
-		{
-			snprintf(namebuf, sizeof(namebuf), "%s.%s.%s.idx",
-					 base_schema,
-					 RelationGetRelationName(base_rel),
-					 NameStr(attr->attname));
-			relset->cs_idx[i] = relation_openrv(range, lockmode);
-			if (RelationGetForm(relset->cs_idx[i])->relkind != RELKIND_INDEX)
-				ereport(ERROR,
-						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-						 errmsg("\"%s\" is not an index",
-								RelationGetRelationName(relset->cs_idx[i]))));
-		}
-	}
-
-	/*
-	 * Also, solve the sequence name
-	 */
-	snprintf(namebuf, sizeof(namebuf), "%s.%s.seq",
-			 base_schema, RelationGetRelationName(base_rel));
-	relset->rowid_seqid = RangeVarGetRelid(range, NoLock, false);
-
-	return relset;
-}
-
-void
-pgstrom_close_relation_set(RelationSet relset, LOCKMODE lockmode)
-{
-	AttrNumber	i, nattrs = RelationGetNumberOfAttributes(relset->base_rel);
-
-	relation_close(relset->rowid_rel, lockmode);
-	if (relset->rowid_idx)
-		relation_close(relset->rowid_idx, lockmode);
-
-	for (i=0; i < nattrs; i++)
-	{
-		if (relset->cs_rel[i])
-			relation_close(relset->cs_rel[i], lockmode);
-		if (relset->cs_idx[i])
-			relation_close(relset->cs_idx[i], lockmode);
-	}
-	pfree(relset->cs_rel);
-	pfree(relset->cs_idx);
-	pfree(relset);
-}
-
+static cl_context	pgstrom_device_context = NULL;
+static int			pgstrom_max_async_chunks;
+static int			pgstrom_work_group_size;
 
 typedef struct {
 	int			nattrs;
@@ -169,13 +39,7 @@ typedef struct {
 	VarBit	   *rowmap;
 	bits8	  **cs_nulls;
 	void	  **cs_values;
-
-	cl_mem		dgm_rowmap;			/* device global mem of rowmap */
-	cl_mem	   *dgm_nulls;			/* device global mem of nulls */
-	cl_mem	   *dgm_values;			/* device global mem of values */
-	cl_event   *ev_copy_to_dev;		/* event to copy from host to device */
-	cl_event	ev_kern_exec;		/* event to exec kernel function */
-	cl_event	ev_copy_from_dev;	/* event to copy from device to host */
+	cl_event	dev_event;
 } PgStromChunkBuf;
 
 typedef struct {
@@ -188,8 +52,10 @@ typedef struct {
 	const char	   *device_kernel;	/* kernel part of device code */
 
 	/* copy from EState */
-	Snapshot		es_snapshot;
-	MemoryContext	es_context;
+	Relation		es_relation;	/* copy from ScanState */
+	Snapshot		es_snapshot;	/* copy from EState */
+	MemoryContext	es_memcxt;		/* per-query memory context */
+	//ErrorContextCallback es_errcxt;	/* callback context on error */
 
 	/* scan descriptors */
 	HeapScanDesc	ri_scan;		/* scan on rowid map */
@@ -206,26 +72,29 @@ typedef struct {
 	int				curr_index;
 
 	/* opencl related stuff */
-	cl_program			device_program;
-	cl_command_queue	device_command_queue[0];
+	//size_t				dev_global_mem_required;
+	cl_context			dev_context;
+	cl_program			dev_program;
+	cl_int				dev_command_queue_index;
+	cl_command_queue	dev_command_queue[0];
 } PgStromExecState;
 
 static void
-pgstrom_release_chunk_buffer(PgStromChunkBuf *chunk)
+pgstrom_cleanup_exec_state(PgStromExecState *sestate)
 {
-	int		i;
+	elog(NOTICE, "pgstrom_release_exec_state called: %p", sestate);
 
-	pfree(chunk->rowmap);
-	for (i=0; i < chunk->nattrs; i++)
+	if (sestate->dev_program)
 	{
-		if (chunk->cs_nulls[i])
-			pfree(chunk->cs_nulls[i]);
-		if (chunk->cs_values[i])
-			pfree(chunk->cs_values[i]);
+		int		i;
+
+		for (i=0; i < pgstrom_num_devices; i++)
+		{
+			if (sestate->dev_command_queue[i])
+				clReleaseCommandQueue(sestate->dev_command_queue[i]);
+		}
+		clReleaseProgram(sestate->dev_program);
 	}
-	pfree(chunk->cs_nulls);
-	pfree(chunk->cs_values);
-	pfree(chunk);
 }
 
 static void
@@ -237,7 +106,6 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 	ScanKeyData		skeys[2];
 	HeapTuple		tup;
 	int				csidx = attnum - 1;
-	bool			found = false;
 
 	/*
 	 * XXX - Because this column shall be copied to device to execute
@@ -248,8 +116,18 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 	Assert(attr->attlen > 0);
 
 	chunk->cs_values[csidx]
-		= MemoryContextAllocZero(sestate->es_context,
+		= MemoryContextAllocZero(sestate->es_memcxt,
 								 PGSTROM_CHUNK_SIZE * attr->attlen);
+
+	/*
+	 * null-bitmap shall be initialized as if all the values are NULL.
+	 */
+	chunk->cs_nulls[csidx]
+		= MemoryContextAlloc(sestate->es_memcxt,
+							 PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
+	memset(chunk->cs_nulls[csidx], -1,
+		   PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
+
 	/*
 	 * Try to scan column store with cs_rowid betweem rowid and
 	 * (rowid + PGSTROM_CHUNK_SIZE)
@@ -279,8 +157,6 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 		int			offset;
 		int			nitems;
 
-		found = true;
-
 		tupdesc = RelationGetDescr(sestate->relset->cs_rel[csidx]);
 		heap_deform_tuple(tup, tupdesc, values, nulls);
 		Assert(!nulls[0] && !nulls[1]);
@@ -295,46 +171,314 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 		Assert(ARR_LBOUND(cur_array)[0] == 0);
 		Assert(ARR_ELEMTYPE(cur_array) == attr->atttypid);
 
-		/*
-		 * XXX - nullbitmap shall be acquired on demand. If NULL, it means
-		 * this chunk has no null valus in this column-store.
-		 */
-		nullbitmap = ARR_NULLBITMAP(cur_array);
-		if (nullbitmap && !chunk->cs_nulls[csidx])
-			chunk->cs_nulls[csidx]
-				= MemoryContextAllocZero(sestate->es_context,
-										 PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
-
 		nitems = ARR_DIMS(cur_array)[0];
 		memcpy(((char *)chunk->cs_values[csidx]) + offset * attr->attlen,
 			   ARR_DATA_PTR(cur_array),
 			   nitems * attr->attlen);
+		nullbitmap = ARR_NULLBITMAP(cur_array);
 		if (nullbitmap)
+		{
+			// XXX - nitems also should be multiple-number of 8
 			memcpy(chunk->cs_nulls[csidx] + offset / BITS_PER_BYTE,
 				   nullbitmap,
 				   (nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+		}
+		else
+		{
+			/* clear nullbitmap, if all items are not null */
+			memset(chunk->cs_nulls[csidx] + offset / BITS_PER_BYTE,
+				   0,
+				   (nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+		}
+	}
+	index_endscan(iscan);
+}
+
+static bool
+pgstrom_exec_kernel_qual(PgStromExecState *sestate, PgStromChunkBuf *chunk)
+{
+	Form_pg_attribute	attr;
+	MemoryContext		oldcxt;
+	cl_buffer_region	region;
+	cl_kernel	dev_kernel;
+	size_t		dbuf_global_size;
+	cl_mem		dbuf_global_mem;
+	cl_mem		sbuf_rowmap;
+	cl_mem	   *sbuf_values = alloca(sizeof(cl_mem) * chunk->nattrs);
+	cl_mem	   *sbuf_nulls = alloca(sizeof(cl_mem) * chunk->nattrs);
+	cl_mem		sbuf_null_buffer = NULL;
+	cl_event	ev_exec_kernel;
+	cl_event   *ev_copy_to_dev
+		= alloca(sizeof(cl_event) * (2 * chunk->nattrs + 1));
+	cl_int		dev_index;
+	cl_int		n_events = 0;
+	cl_int		n_args = 0;
+	cl_int		ret;
+	size_t		global_work_size;
+	size_t		local_work_size;
+	int			csidx;
+
+	/*
+	 * XXX - currently, we use all the GPU devices with round-robin
+	 * storategy. However, it should be configurable in the future.
+	 */
+	dev_index = sestate->dev_command_queue_index++ % pgstrom_num_devices;
+
+	/*
+	 * Create kernel object
+	 */
+	dev_kernel = clCreateKernel(sestate->dev_program,
+								"pgstrom_qual",
+								&ret);
+	Assert(ret == CL_SUCCESS);
+
+	/*
+	 * Estimate required global memory size
+	 */
+	dbuf_global_size = PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
+	for (csidx=0; csidx < chunk->nattrs; csidx++)
+	{
+		attr = RelationGetDescr(sestate->es_relation)->attrs[csidx];
+
+		if (chunk->cs_values[csidx])
+			dbuf_global_size += PGSTROM_CHUNK_SIZE * attr->attlen;
+		if (chunk->cs_nulls[csidx])
+			dbuf_global_size += PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
 	}
 
 	/*
-	 * If we could not found any values between chunk->cs_rowid and
-	 * (chunk->cs_rowid + PGSTROM_CHUNK_SIZE - 1), we initialize all
-	 * the items as null.
+	 * Allocate global device memory
 	 */
-	if (!found)
-	{
-		chunk->cs_nulls[csidx]
-			= MemoryContextAlloc(sestate->es_context,
-								 PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
-		memset(chunk->cs_nulls[csidx], -1,
-			   PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
+	dbuf_global_mem = clCreateBuffer(pgstrom_device_context,
+									 CL_MEM_READ_WRITE,
+									 dbuf_global_size,
+									 NULL,
+									 &ret);
+	Assert(ret == CL_SUCCESS);
+
+	/*
+	 * Divide the global device memory into sub-buffers, set up argument
+	 * of the kernel, and enqueue task to copy.
+	 */
+	region.origin = 0;
+	region.size = PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
+	sbuf_rowmap = clCreateSubBuffer(dbuf_global_mem,
+									CL_MEM_READ_WRITE,
+									CL_BUFFER_CREATE_TYPE_REGION,
+									&region,
+									&ret);
+	Assert(ret == CL_SUCCESS);
+
+	ret = clSetKernelArg(dev_kernel, n_args++,
+						 sizeof(cl_mem), &sbuf_rowmap);
+	Assert(ret == CL_SUCCESS);
+
+	ret = clEnqueueWriteBuffer(sestate->dev_command_queue[dev_index],
+							   sbuf_rowmap,
+							   CL_FALSE,
+							   0, (VARBITLEN(chunk->rowmap) + 7) / 8,
+							   VARBITS(chunk->rowmap),
+                               0, NULL,
+							   &ev_copy_to_dev[n_events++]);
+	Assert(ret == CL_SUCCESS);
+
+	memset(sbuf_values, 0, sizeof(cl_mem) * chunk->nattrs);
+	memset(sbuf_nulls, 0, sizeof(cl_mem) * chunk->nattrs);
+
+	for (csidx=0; csidx < chunk->nattrs; csidx++)
+    {
+		attr = RelationGetDescr(sestate->es_relation)->attrs[csidx];
+
+		if (!chunk->cs_values[csidx])
+			continue;
+
+		region.origin += region.size;
+		region.size = PGSTROM_CHUNK_SIZE * attr->attlen;
+		sbuf_values[csidx] = clCreateSubBuffer(dbuf_global_mem,
+											   CL_MEM_READ_WRITE,
+											   CL_BUFFER_CREATE_TYPE_REGION,
+											   &region,
+											   &ret);
+		Assert(ret == CL_SUCCESS);
+
+		ret = clSetKernelArg(dev_kernel, n_args++,
+							 sizeof(cl_mem), &sbuf_values[csidx]);
+		Assert(ret == CL_SUCCESS);
+
+		ret = clEnqueueWriteBuffer(sestate->dev_command_queue[dev_index],
+								   sbuf_values[csidx],
+								   CL_FALSE,
+								   0, region.size,
+								   chunk->cs_values[csidx],
+								   0, NULL,
+								   &ev_copy_to_dev[n_events++]);
+		Assert(ret == CL_SUCCESS);
+
+		Assert(chunk->cs_nulls[csidx] != NULL);
+		region.origin += region.size;
+		region.size = PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
+		sbuf_nulls[csidx] = clCreateSubBuffer(dbuf_global_mem,
+											  CL_MEM_READ_WRITE,
+											  CL_BUFFER_CREATE_TYPE_REGION,
+											  &region,
+											  &ret);
+		Assert(ret == CL_SUCCESS);
+
+		ret = clSetKernelArg(dev_kernel, n_args++,
+							 sizeof(cl_mem), &sbuf_nulls[csidx]);
+		Assert(ret == CL_SUCCESS);
+
+		ret = clEnqueueWriteBuffer(sestate->dev_command_queue[dev_index],
+								   sbuf_nulls[csidx],
+								   CL_FALSE,
+								   0, region.size,
+								   chunk->cs_nulls[csidx],
+								   0, NULL,
+								   &ev_copy_to_dev[n_events++]);
+		Assert(ret == CL_SUCCESS);
 	}
-	index_endscan(iscan);
+	/*
+	 * Enqueue async-kernel execution
+	 */
+	global_work_size = PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
+	local_work_size = 30;
+	ret = clEnqueueNDRangeKernel(sestate->dev_command_queue[dev_index],
+								 dev_kernel,
+								 1,
+								 NULL,
+								 &global_work_size,
+                                 &local_work_size,
+								 n_events, ev_copy_to_dev,
+								 &ev_exec_kernel);
+	Assert(ret == CL_SUCCESS);
+
+	/*
+	 * Enqueue copy back to the host
+	 */
+	ret = clEnqueueReadBuffer(sestate->dev_command_queue[dev_index],
+							  sbuf_rowmap,
+							  CL_FALSE,
+							  0, (VARBITLEN(chunk->rowmap) + 7) / 8,
+							  VARBITS(chunk->rowmap),
+							  1, &ev_exec_kernel,
+							  &chunk->dev_event);
+	Assert(ret == CL_SUCCESS);
+
+	/*
+	 * Decrement reference counter of event/memory objects
+	 */
+	clReleaseMemObject(sbuf_rowmap);
+	for (csidx=0; csidx < chunk->nattrs; csidx++)
+	{
+		if (sbuf_values[csidx])
+			clReleaseMemObject(sbuf_values[csidx]);
+		if (sbuf_nulls[csidx])
+			clReleaseMemObject(sbuf_nulls[csidx]);
+	}
+	clReleaseMemObject(dbuf_global_mem);
+
+	while (n_events > 0)
+		clReleaseEvent(ev_copy_to_dev[--n_events]);
+	clReleaseEvent(ev_exec_kernel);
+
+	clReleaseKernel(dev_kernel);
+
+	/*
+	 * Append this chunk to chunk_exec_list
+	 */
+	oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
+	sestate->chunk_exec_list
+		= lappend(sestate->chunk_exec_list, chunk);
+	MemoryContextSwitchTo(oldcxt);
+
+	return true;
+}
+
+/*
+ * pgstrom_sync_kernel_qual
+ *
+ * This routine waits for one of the asynchronous events completed.
+ * If true was returned, it means a chunk is in chunk_ready_list.
+ */
+static void
+pgstrom_sync_kernel_qual(PgStromExecState *sestate)
+{
+	int	num_got_ready = 0;
+
+	while (num_got_ready == 0)
+	{
+		ListCell   *cell;
+		ListCell   *prev;
+		ListCell   *next;
+		cl_event	event = NULL;
+
+		if (sestate->chunk_exec_list == NIL)
+			return;
+
+		prev = NULL;
+		for (cell = list_head(sestate->chunk_exec_list);
+			 cell != NULL;
+			 cell = next)
+		{
+			PgStromChunkBuf	*chunk = lfirst(cell);
+			MemoryContext	 oldcxt;
+			cl_int	ev_status;
+			cl_int	ret;
+
+			next = lnext(cell);
+
+			ret = clGetEventInfo(chunk->dev_event,
+								 CL_EVENT_COMMAND_EXECUTION_STATUS,
+								 sizeof(ev_status), &ev_status, NULL);
+			Assert(ret == CL_SUCCESS);
+
+			if (ev_status == CL_COMPLETE)
+			{
+				oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
+
+				sestate->chunk_exec_list 
+					= list_delete_cell(sestate->chunk_exec_list, cell, prev);
+
+				sestate->chunk_ready_list
+					= lappend(sestate->chunk_ready_list, chunk);
+
+				num_got_ready++;
+
+				MemoryContextSwitchTo(oldcxt);
+
+				/* Decrement event object's refcount */
+				clReleaseEvent(chunk->dev_event);
+			}
+			else if (ev_status < 0)
+			{
+				/* Decrement event object's refcount */
+				clReleaseEvent(chunk->dev_event);
+
+				elog(ERROR, "OpenCL events return error : %s",
+					 opencl_error_to_string(ev_status));
+			}
+			else
+			{
+				if (event == NULL)
+					event = chunk->dev_event;
+				prev = cell;
+			}
+		}
+		/*
+		 * XXX - we temtatively assume first-event will complete first.
+		 */
+		if (num_got_ready == 0 && event != NULL)
+			clWaitForEvents(1, &event);
+	}
 }
 
 static int
 pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 {
 	int		loaded_chunks;
+
+	if (sestate->ri_scan == NULL)
+		return -1;
 
 	for (loaded_chunks = 0; loaded_chunks < num_chunks; loaded_chunks++)
 	{
@@ -347,21 +491,25 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 
 		tuple = heap_getnext(sestate->ri_scan, ForwardScanDirection);
 		if (!HeapTupleIsValid(tuple))
+		{
+			/* No any tuples, close the sequential rowid scan */
+			heap_endscan(sestate->ri_scan);
+			sestate->ri_scan = NULL;
 			break;
+		}
 
 		tupdesc = RelationGetDescr(sestate->relset->rowid_rel);
 		heap_deform_tuple(tuple, tupdesc, values, nulls);
 		Assert(!nulls[0] && !nulls[1]);
 
-		oldcxt = MemoryContextSwitchTo(sestate->es_context);
+		oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 
 		chunk = palloc0(sizeof(PgStromChunkBuf));
-		chunk->nattrs = tupdesc->natts;
 		chunk->rowid = DatumGetInt64(values[0]);
 		chunk->rowmap = DatumGetVarBitPCopy(values[1]);
+		chunk->nattrs = RelationGetNumberOfAttributes(sestate->es_relation);
 		chunk->cs_nulls = palloc0(sizeof(bool *) * chunk->nattrs);
 		chunk->cs_values = palloc0(sizeof(void *) * chunk->nattrs);
-
 		MemoryContextSwitchTo(oldcxt);
 
 		if (!sestate->predictable)
@@ -380,18 +528,17 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 			/*
 			 * Exec kernel on this chunk asynchronously
 			 */
-			// if bufalloc or others failed, exec_pending_list
-
-			sestate->chunk_ready_list
-				= lappend(sestate->chunk_ready_list, chunk);
+			pgstrom_exec_kernel_qual(sestate, chunk);
 		}
 		else
 		{
 			/*
 			 * In predictable query, chunks are ready to scan using rowid.
 			 */
+			oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 			sestate->chunk_ready_list
 				= lappend(sestate->chunk_ready_list, chunk);
+			MemoryContextSwitchTo(oldcxt);
 		}
 	}
 	return loaded_chunks;
@@ -445,7 +592,7 @@ pgstrom_scan_column_store(PgStromExecState *sestate,
 				heap_deform_tuple(tuple, tupdesc, values, nulls);
 				Assert(!nulls[0] && !nulls[1]);
 
-				oldcxt = MemoryContextSwitchTo(sestate->es_context);
+				oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 				cur_rowid = Int64GetDatum(values[0]);
 				cur_values = DatumGetArrayTypePCopy(values[1]);
 				MemoryContextSwitchTo(oldcxt);
@@ -459,7 +606,7 @@ pgstrom_scan_column_store(PgStromExecState *sestate,
 					sestate->cs_cur_values[csidx] = cur_values;
 					sestate->cs_cur_rowid_min[csidx] = cur_rowid;
 					sestate->cs_cur_rowid_max[csidx]
-						= cur_rowid + ARR_DIMS(cur_values)[0];
+						= cur_rowid + ARR_DIMS(cur_values)[0] - 1;
 
 					goto out;
 				}
@@ -501,7 +648,7 @@ pgstrom_scan_column_store(PgStromExecState *sestate,
 		heap_deform_tuple(tuple, tupdesc, values, nulls);
 		Assert(!nulls[0] && !nulls[1]);
 
-		oldcxt = MemoryContextSwitchTo(sestate->es_context);
+		oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 		cur_rowid = Int64GetDatum(values[0]);
 		cur_values = DatumGetArrayTypePCopy(values[1]);
 		MemoryContextSwitchTo(oldcxt);
@@ -509,7 +656,7 @@ pgstrom_scan_column_store(PgStromExecState *sestate,
 		sestate->cs_cur_values[csidx] = cur_values;
 		sestate->cs_cur_rowid_min[csidx] = cur_rowid;
 		sestate->cs_cur_rowid_max[csidx]
-			= cur_rowid + ARR_DIMS(cur_values)[0];
+			= cur_rowid + ARR_DIMS(cur_values)[0] - 1;
 
 		Assert(rowid >= sestate->cs_cur_rowid_min[csidx] &&
 			   rowid <= sestate->cs_cur_rowid_max[csidx]);
@@ -525,14 +672,14 @@ pgstrom_scan_column_store(PgStromExecState *sestate,
 		index_rescan(sestate->cs_scan[csidx], &skey, 1, NULL, 0);
 	}
 out:
-	attr  = slot->tts_tupleDescriptor->attrs[csidx];
+	attr = slot->tts_tupleDescriptor->attrs[csidx];
 	index = rowid - sestate->cs_cur_rowid_min[csidx];
 	slot->tts_values[csidx] = array_ref(sestate->cs_cur_values[csidx],
 										1,
 										&index,
 										-1,	/* varlena array */
 										attr->attlen,
-										attr->atttypid,
+										attr->attbyval,
 										attr->attalign,
 										&slot->tts_isnull[csidx]);
 }
@@ -592,7 +739,6 @@ pgstrom_scan_chunk_buffer(PgStromExecState *sestate, TupleTableSlot *slot)
 				}
 				continue;
 			}
-
 			/*
 			 * Elsewhere, we scan the column-store with the current
 			 * rowid.
@@ -600,6 +746,8 @@ pgstrom_scan_chunk_buffer(PgStromExecState *sestate, TupleTableSlot *slot)
 			pgstrom_scan_column_store(sestate, csidx, rowid, slot);
 		}
 		ExecStoreVirtualTuple(slot);
+		/* update next index to be fetched */
+		sestate->curr_index = index + 1;
 		return true;
 	}
 	return false;	/* end of chunk, need next chunk! */
@@ -614,6 +762,18 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	AttrNumber			nattrs;
 	cl_int				i, ret;
 
+#if 0
+	if (!pgstrom_device_context)
+	{
+		pgstrom_device_context = clCreateContext(NULL,
+												 pgstrom_num_devices,
+												 pgstrom_device_id,
+												 NULL, NULL, &ret);
+		elog(NOTICE, "clCreateContext : %s", opencl_error_to_string(ret));
+		Assert(ret == CL_SUCCESS);
+	}
+#endif
+
 	nattrs = RelationGetNumberOfAttributes(fss->ss.ss_currentRelation);
 	sestate = palloc0(sizeof(PgStromExecState) +
 					  sizeof(cl_command_queue) * pgstrom_num_devices);
@@ -621,6 +781,11 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	sestate->cs_cur_values = palloc0(sizeof(ArrayType *) * nattrs);
 	sestate->cs_cur_rowid_min = palloc0(sizeof(int64) * nattrs);
 	sestate->cs_cur_rowid_max = palloc0(sizeof(int64) * nattrs);
+
+	//sestate->dev_global_mem_required = PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
+	sestate->es_relation = fss->ss.ss_currentRelation;
+    sestate->es_snapshot = fss->ss.ps.state->es_snapshot;
+	sestate->es_memcxt = fss->ss.ps.ps_ExprContext->ecxt_per_query_memory;
 
 	foreach (l, fscan->fdwplan->fdw_private)
 	{
@@ -639,12 +804,17 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 		}
 		else if (strcmp(defel->defname, "clause_cols") == 0)
 		{
+			//Form_pg_attribute	attr;
 			int		csidx = (intVal(defel->arg));
 
 			Assert(csidx > 0);
 
 			sestate->clause_cols
 				= bms_add_member(sestate->clause_cols, csidx);
+			//attr = RelationGetDescr(sestate->es_relation)->attrs[csidx];
+			//sestate->dev_global_mem_required
+			//	+= (PGSTROM_CHUNK_SIZE / BITS_PER_BYTE +
+			//		PGSTROM_CHUNK_SIZE * attr->attlen);
 		}
 		else if (strcmp(defel->defname, "required_cols") == 0)
 		{
@@ -669,11 +839,21 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	if (sestate->predictable)
 		goto skip_opencl;
 
+
+
+		pgstrom_device_context = clCreateContext(NULL,
+												 pgstrom_num_devices,
+												 pgstrom_device_id,
+												 NULL, NULL, &ret);
+		elog(NOTICE, "clCreateContext : %s", opencl_error_to_string(ret));
+		Assert(ret == CL_SUCCESS);
+
+
 	/*
 	 * Build kernel function to binary representation
 	 */
 	Assert(pgstrom_device_context != NULL);
-	sestate->device_program
+	sestate->dev_program
 		= clCreateProgramWithSource(pgstrom_device_context,
 									1, &sestate->device_kernel,
 									NULL, &ret);
@@ -683,7 +863,7 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 				 errmsg("OpenCL failed to create program with source: %s",
 						opencl_error_to_string(ret))));
 
-	ret = clBuildProgram(sestate->device_program,
+	ret = clBuildProgram(sestate->dev_program,
 						 0, NULL,		/* for all the devices */
 						 NULL,			/* no build options */
 						 NULL, NULL);	/* no callback, so synchronous build */
@@ -694,7 +874,7 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 
 		for (i=0; i < pgstrom_num_devices; i++)
 		{
-			clGetProgramBuildInfo(sestate->device_program,
+			clGetProgramBuildInfo(sestate->dev_program,
 								  pgstrom_device_id[i],
 								  CL_PROGRAM_BUILD_STATUS,
 								  sizeof(status),
@@ -703,7 +883,7 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 			if (status != CL_BUILD_ERROR)
 				continue;
 
-			clGetProgramBuildInfo(sestate->device_program,
+			clGetProgramBuildInfo(sestate->dev_program,
 								  pgstrom_device_id[i],
 								  CL_PROGRAM_BUILD_LOG,
 								  sizeof(logbuf),
@@ -711,7 +891,7 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 								  NULL);
 			elog(NOTICE, "%s", logbuf);
 		}
-		clReleaseProgram(sestate->device_program);
+		clReleaseProgram(sestate->dev_program);
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("OpenCL failed to build program: %s",
@@ -723,7 +903,7 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	 */
 	for (i=0; i < pgstrom_num_devices; i++)
 	{
-		sestate->device_command_queue[i]
+		sestate->dev_command_queue[i]
 			= clCreateCommandQueue(pgstrom_device_context,
 								   pgstrom_device_id[i],
 								   0,	/* no out-of-order, no profiling */
@@ -731,8 +911,8 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 		if (ret != CL_SUCCESS)
 		{
 			while (i > 0)
-				clReleaseCommandQueue(sestate->device_command_queue[--i]);
-			clReleaseProgram(sestate->device_program);
+				clReleaseCommandQueue(sestate->dev_command_queue[--i]);
+			clReleaseProgram(sestate->dev_program);
 
 			ereport(ERROR,
 					(errcode(ERRCODE_INTERNAL_ERROR),
@@ -742,8 +922,10 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	}
 
 skip_opencl:
-    sestate->es_snapshot = fss->ss.ps.state->es_snapshot;
-    sestate->es_context = fss->ss.ps.state->es_query_cxt;
+	//sestate->es_errcxt.callback = pgstrom_release_exec_state;
+	//sestate->es_errcxt.arg = (void *) sestate;
+	//sestate->es_errcxt.previous = error_context_stack;
+	//error_context_stack = &sestate->es_errcxt;
 
 	sestate->chunk_exec_pending_list = NIL;
 	sestate->chunk_exec_list = NIL;
@@ -778,6 +960,7 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 	sestate->ri_scan = heap_beginscan(sestate->relset->rowid_rel,
 									  sestate->es_snapshot,
 									  0, NULL);
+
 	tempset = bms_copy(sestate->required_cols);
 	while ((attnum = bms_first_member(tempset)) > 0)
 	{
@@ -791,7 +974,7 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 		sestate->cs_scan[attnum - 1]
 			= index_beginscan(sestate->relset->cs_rel[attnum - 1],
 							  sestate->relset->cs_idx[attnum - 1],
-							  sestate->es_snapshot, 2, 0);
+							  sestate->es_snapshot, 1, 0);
 	}
 	bms_free(tempset);
 
@@ -814,75 +997,61 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 	{
 		num_chunks = (pgstrom_max_async_chunks -
 					  list_length(sestate->chunk_exec_list));
-		if (pgstrom_load_chunk_buffer(sestate, num_chunks) == 0)
+		if (pgstrom_load_chunk_buffer(sestate, num_chunks) < 1)
 			return slot;
-		/*
-		 * XXX - pgstrom_sync_exec_kernel() here
-		 */
+
+		pgstrom_sync_kernel_qual(sestate);
 		Assert(sestate->chunk_ready_list != NIL);
 		sestate->curr_chunk = list_head(sestate->chunk_ready_list);
 		sestate->curr_index = 0;
 	}
 retry:
-	//chunk = lfirst(sestate->curr_chunk);
 	if (!pgstrom_scan_chunk_buffer(sestate, slot))
 	{
-		/*
-		 * XXX - check status of chunks in exec_list, and move them ready
-		 */
+		sestate->chunk_ready_list
+			= list_delete(sestate->chunk_ready_list,
+						  lfirst(sestate->curr_chunk));
 
-		/*
-		 * XXX - if exec_pending is here, try it again
-		 */
+		pgstrom_sync_kernel_qual(sestate);
 
-		/*
-		 * 
-		 */
 		num_chunks = (pgstrom_max_async_chunks -
 					  list_length(sestate->chunk_exec_list));
-		pgstrom_load_chunk_buffer(sestate, num_chunks);
+		num_chunks = pgstrom_load_chunk_buffer(sestate, num_chunks);
+		if (sestate->chunk_ready_list == NIL)
+			pgstrom_sync_kernel_qual(sestate);
 
-		while (lnext(sestate->curr_chunk) == NULL)
-		{
-			/*
-			 * No opportunity to read tuples any more
-			 */
-			if (sestate->chunk_exec_list == NIL &&
-				sestate->chunk_exec_pending_list == NIL)
-				return slot;
-
-			/*
-			 * XXX - pgstrom_sync_exec_kernel() here
-			 */
-
-			/*
-			 * XXX - move exec chunk into ready
-			 */
-
-
-		}
-		/*
-		 * XXX - release older buffer
-		 */
-		sestate->curr_chunk = lnext(sestate->curr_chunk);
-		sestate->curr_index = 0;
+		/* no more chunks any more */
+		if (sestate->chunk_ready_list == NIL)
+			return slot;
+        sestate->curr_chunk = list_head(sestate->chunk_ready_list);
+        sestate->curr_index = 0;
 		goto retry;
 	}
 	return slot;
 }
 
 void
-pgboost_rescan_foreign_scan(ForeignScanState *fss)
+pgstrom_rescan_foreign_scan(ForeignScanState *fss)
 {
 	PgStromExecState   *sestate = (PgStromExecState *)fss->fdw_state;
 
+	/* Rewind rowid scan */
+	if (sestate->ri_scan != NULL)
+		heap_endscan(sestate->ri_scan);
+	sestate->ri_scan = heap_beginscan(sestate->relset->rowid_rel,
+									  sestate->es_snapshot,
+									  0, NULL);
 	/*
-	 * XXX - To be implemented
+	 * XXX - chunk buffers to be relased
 	 */
+
+	/* Clear current chunk pointer */
+	sestate->curr_chunk = NULL;
+	sestate->curr_index = 0;
 }
 
 void
-pgboost_end_foreign_scan(ForeignScanState *fss)
+pgstrom_end_foreign_scan(ForeignScanState *fss)
 {
 	PgStromExecState   *sestate = (PgStromExecState *)fss->fdw_state;
 	PgStromChunkBuf	   *chunk;
@@ -902,27 +1071,46 @@ pgboost_end_foreign_scan(ForeignScanState *fss)
 		if (sestate->cs_scan[i])
 			index_endscan(sestate->cs_scan[i]);
 	}
-	heap_endscan(sestate->ri_scan);
+	if (sestate->ri_scan != NULL)
+		heap_endscan(sestate->ri_scan);
 
-#if 0 // to be implemented
-	foreach (cell, sestate->chunk_list)
-	{
-		chunk = (PgStromChunkBuf *) lfirst(cell);
-
-		pgstrom_release_chunk_buffer(chunk);
-	}
-#endif
 	pgstrom_close_relation_set(sestate->relset, AccessShareLock);
 
 	/*
-	 * Release device program and command queue
+	 * cleanup stuff related to OpenCL to prevent leaks
 	 */
-	if (sestate->device_program)
-	{
-		int		i;
+	while (sestate->chunk_exec_list != NIL)
+		pgstrom_sync_kernel_qual(sestate);
+	pgstrom_cleanup_exec_state(sestate);
+}
 
-		for (i=0; i < pgstrom_num_devices; i++)
-			clReleaseCommandQueue(sestate->device_command_queue[i]);
-		clReleaseProgram(sestate->device_program);
-	}
+/*
+ * pgstrom_scan_init
+ *
+ * Initialize stuff related to scan.c
+ */
+void
+pgstrom_scan_init(void)
+{
+	DefineCustomIntVariable("pg_strom.max_async_chunks",
+							"max number of concurrency to exec async kernels",
+							NULL,
+							&pgstrom_max_async_chunks,
+							32,
+							1,
+							1024,
+							PGC_USERSET,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pg_strom.work_group_size",
+							"size of work group on execution of kernel code",
+							NULL,
+							&pgstrom_work_group_size,
+							32,
+							1,
+							PGSTROM_CHUNK_SIZE / BITS_PER_BYTE,
+							PGC_USERSET,
+							0,
+							NULL, NULL, NULL);
 }

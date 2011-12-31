@@ -13,7 +13,6 @@
 #include "postgres.h"
 #include "foreign/fdwapi.h"
 #include "miscadmin.h"
-#include "utils/guc.h"
 #include "pg_strom.h"
 
 PG_MODULE_MAGIC;
@@ -29,8 +28,8 @@ FdwRoutine	pgstromFdwHandlerData = {
 	.ExplainForeignScan	= pgstrom_explain_foreign_scan,
 	.BeginForeignScan	= pgstrom_begin_foreign_scan,
 	.IterateForeignScan	= pgstrom_iterate_foreign_scan,
-	.ReScanForeignScan	= pgboost_rescan_foreign_scan,
-	.EndForeignScan		= pgboost_end_foreign_scan,
+	.ReScanForeignScan	= pgstrom_rescan_foreign_scan,
+	.EndForeignScan		= pgstrom_end_foreign_scan,
 };
 
 /*
@@ -51,43 +50,6 @@ pgstrom_fdw_validator(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
-static void
-check_guc_work_group_size(int newval, void *extra)
-{
-	if ((PGSTROM_CHUNK_SIZE / BITS_PER_BYTE) % newval != 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
-				 errmsg("chunk size (%d/8) must be multiple number of %s",
-						PGSTROM_CHUNK_SIZE,
-						"pg_strom.work_group_size")));
-}
-
-static void
-pgstrom_guc_init(void)
-{
-	DefineCustomIntVariable("pg_strom.max_async_chunks",
-							"max number of concurrency to exec async kernels",
-							NULL,
-							&pgstrom_max_async_chunks,
-							32,
-							1,
-							1024,
-							PGC_USERSET,
-							0,
-							NULL, NULL, NULL);
-
-	DefineCustomIntVariable("pg_strom.work_group_size",
-							"size of work group on execution of kernel code",
-							NULL,
-							&pgstrom_work_group_size,
-							32,
-							1,
-							PGSTROM_CHUNK_SIZE / BITS_PER_BYTE,
-							PGC_USERSET,
-							0,
-							NULL, check_guc_work_group_size, NULL);
-}
-
 /*
  * Entrypoint of the pg_strom module
  */
@@ -102,12 +64,12 @@ _PG_init(void)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 		errmsg("pg_strom must be loaded via shared_preload_libraries")));
 
-	/* Register GUC variables */
-	pgstrom_guc_init();
-
 	/* Register Hooks of PostgreSQL */
 	pgstrom_utilcmds_init();
 
-	/* Collect properties of GPU devices */
+	/* Initialize stuff related to GPU devices */
 	pgstrom_devinfo_init();
+
+	/* Initialize stuff related to scan.c */
+	pgstrom_scan_init();
 }

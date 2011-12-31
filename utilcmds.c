@@ -40,6 +40,146 @@
 static ProcessUtility_hook_type next_process_utility_hook = NULL;
 
 /*
+ * pgstrom_open_relation_set
+ *
+ * Open the relation set with/without related indexes
+ */
+RelationSet
+pgstrom_open_relation_set(Relation base_rel,
+						  LOCKMODE lockmode, bool with_index)
+{
+	RelationSet	relset;
+	AttrNumber	i, nattrs;
+	RangeVar   *range;
+	char	   *base_schema;
+	char		namebuf[NAMEDATALEN * 3 + 20];
+
+	/*
+	 * The base relation must be a foreign table being managed by
+	 * pg_strom foreign data wrapper.
+	 */
+	if (RelationGetForm(base_rel)->relkind != RELKIND_FOREIGN_TABLE)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not a foreign table",
+						RelationGetRelationName(base_rel))));
+	else
+	{
+		ForeignTable	   *ft = GetForeignTable(RelationGetRelid(base_rel));
+		ForeignServer	   *fs = GetForeignServer(ft->serverid);
+		ForeignDataWrapper *fdw = GetForeignDataWrapper(fs->fdwid);
+
+		if (GetFdwRoutine(fdw->fdwhandler) != &pgstromFdwHandlerData)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("\"%s\" is not managed by pg_strom",
+							RelationGetRelationName(base_rel))));
+	}
+
+	/*
+	 * Setting up RelationSet
+	 */
+	nattrs = RelationGetNumberOfAttributes(base_rel);
+	relset = palloc0(sizeof(RelationSetData));
+	relset->cs_rel = palloc0(sizeof(Relation) * nattrs);
+	relset->cs_idx = palloc0(sizeof(Relation) * nattrs);
+	relset->base_rel = base_rel;
+
+	/*
+	 * Open the underlying tables and corresponding indexes
+	 */
+	range = makeRangeVar(PGSTROM_SCHEMA_NAME, namebuf, -1);
+	base_schema = get_namespace_name(RelationGetForm(base_rel)->relnamespace);
+
+	snprintf(namebuf, sizeof(namebuf), "%s.%s.rowid",
+			 base_schema, RelationGetRelationName(base_rel));
+	relset->rowid_rel = relation_openrv(range, lockmode);
+	if (RelationGetForm(relset->rowid_rel)->relkind != RELKIND_RELATION)
+		ereport(ERROR,
+                (errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not a regular table",
+						RelationGetRelationName(relset->rowid_rel))));
+	if (with_index)
+	{
+		snprintf(namebuf, sizeof(namebuf), "%s.%s.idx",
+				 base_schema, RelationGetRelationName(base_rel));
+		relset->rowid_idx = relation_openrv(range, lockmode);
+		if (RelationGetForm(relset->rowid_idx)->relkind != RELKIND_INDEX)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("\"%s\" is not an index",
+							RelationGetRelationName(relset->rowid_idx))));
+	}
+
+	for (i = 0; i < nattrs; i++)
+	{
+		Form_pg_attribute attr = RelationGetDescr(base_rel)->attrs[i];
+
+		if (attr->attisdropped)
+			continue;
+
+		snprintf(namebuf, sizeof(namebuf), "%s.%s.%s.cs",
+				 base_schema,
+                 RelationGetRelationName(base_rel),
+                 NameStr(attr->attname));
+		relset->cs_rel[i] = relation_openrv(range, lockmode);
+		if (RelationGetForm(relset->cs_rel[i])->relkind != RELKIND_RELATION)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("\"%s\" is not a regular table",
+							RelationGetRelationName(relset->cs_rel[i]))));
+		if (with_index)
+		{
+			snprintf(namebuf, sizeof(namebuf), "%s.%s.%s.idx",
+					 base_schema,
+					 RelationGetRelationName(base_rel),
+					 NameStr(attr->attname));
+			relset->cs_idx[i] = relation_openrv(range, lockmode);
+			if (RelationGetForm(relset->cs_idx[i])->relkind != RELKIND_INDEX)
+				ereport(ERROR,
+						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+						 errmsg("\"%s\" is not an index",
+								RelationGetRelationName(relset->cs_idx[i]))));
+		}
+	}
+
+	/*
+	 * Also, solve the sequence name
+	 */
+	snprintf(namebuf, sizeof(namebuf), "%s.%s.seq",
+			 base_schema, RelationGetRelationName(base_rel));
+	relset->rowid_seqid = RangeVarGetRelid(range, NoLock, false);
+
+	return relset;
+}
+
+/*
+ * pgstrom_close_relation_set
+ *
+ * Close the set of relations
+ */
+void
+pgstrom_close_relation_set(RelationSet relset, LOCKMODE lockmode)
+{
+	AttrNumber	i, nattrs = RelationGetNumberOfAttributes(relset->base_rel);
+
+	relation_close(relset->rowid_rel, lockmode);
+	if (relset->rowid_idx)
+		relation_close(relset->rowid_idx, lockmode);
+
+	for (i=0; i < nattrs; i++)
+	{
+		if (relset->cs_rel[i])
+			relation_close(relset->cs_rel[i], lockmode);
+		if (relset->cs_idx[i])
+			relation_close(relset->cs_idx[i], lockmode);
+	}
+	pfree(relset->cs_rel);
+	pfree(relset->cs_idx);
+	pfree(relset);
+}
+
+/*
  * pgstrom_create_rowid_index
  *
  * create "<base_schema>.<base_rel>.(<column>.)idx" index of pg_strom
