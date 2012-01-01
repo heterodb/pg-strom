@@ -29,7 +29,7 @@
 /*
  * Declarations
  */
-static cl_context	pgstrom_device_context = NULL;
+//static cl_context	pgstrom_device_context = NULL;
 static int			pgstrom_max_async_chunks;
 static int			pgstrom_work_group_size;
 
@@ -83,6 +83,9 @@ static void
 pgstrom_cleanup_exec_state(PgStromExecState *sestate)
 {
 	elog(NOTICE, "pgstrom_release_exec_state called: %p", sestate);
+
+	if (sestate->dev_context)
+		clReleaseContext(sestate->dev_context);
 
 	if (sestate->dev_program)
 	{
@@ -249,7 +252,7 @@ pgstrom_exec_kernel_qual(PgStromExecState *sestate, PgStromChunkBuf *chunk)
 	/*
 	 * Allocate global device memory
 	 */
-	dbuf_global_mem = clCreateBuffer(pgstrom_device_context,
+	dbuf_global_mem = clCreateBuffer(sestate->dev_context,
 									 CL_MEM_READ_WRITE,
 									 dbuf_global_size,
 									 NULL,
@@ -839,22 +842,22 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	if (sestate->predictable)
 		goto skip_opencl;
 
-
-
-		pgstrom_device_context = clCreateContext(NULL,
-												 pgstrom_num_devices,
-												 pgstrom_device_id,
-												 NULL, NULL, &ret);
-		elog(NOTICE, "clCreateContext : %s", opencl_error_to_string(ret));
-		Assert(ret == CL_SUCCESS);
-
+	/*
+	 * Create a context to run async kernel code
+	 */
+	sestate->dev_context = clCreateContext(NULL,
+										   pgstrom_num_devices,
+										   pgstrom_device_id,
+										   NULL, NULL, &ret);
+	elog(NOTICE, "clCreateContext : %s", opencl_error_to_string(ret));
+	Assert(ret == CL_SUCCESS);
 
 	/*
 	 * Build kernel function to binary representation
 	 */
-	Assert(pgstrom_device_context != NULL);
+	Assert(sestate->dev_context != NULL);
 	sestate->dev_program
-		= clCreateProgramWithSource(pgstrom_device_context,
+		= clCreateProgramWithSource(sestate->dev_context,
 									1, &sestate->device_kernel,
 									NULL, &ret);
 	if (ret != CL_SUCCESS)
@@ -904,7 +907,7 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	for (i=0; i < pgstrom_num_devices; i++)
 	{
 		sestate->dev_command_queue[i]
-			= clCreateCommandQueue(pgstrom_device_context,
+			= clCreateCommandQueue(sestate->dev_context,
 								   pgstrom_device_id[i],
 								   0,	/* no out-of-order, no profiling */
 								   &ret);
