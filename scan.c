@@ -16,6 +16,7 @@
 #include "catalog/pg_class.h"
 #include "catalog/pg_type.h"
 #include "foreign/foreign.h"
+#include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "utils/array.h"
 #include "utils/fmgroids.h"
@@ -30,8 +31,9 @@
  * Declarations
  */
 //static cl_context	pgstrom_device_context = NULL;
-static int			pgstrom_max_async_chunks;
-static int			pgstrom_work_group_size;
+static char	   *pgstrom_nvcc_command;
+static int		pgstrom_max_async_chunks;
+static int		pgstrom_work_group_size;
 
 typedef struct {
 	int			nattrs;
@@ -39,17 +41,17 @@ typedef struct {
 	VarBit	   *rowmap;
 	bits8	  **cs_nulls;
 	void	  **cs_values;
-	cl_event	dev_event;
+	CUstream	stream;
 } PgStromChunkBuf;
 
 typedef struct {
 	RelationSet		relset;
 
 	/* parameters come from planner */
-	int				predictable;	/* is the result set predictable? */
+	bool			nevermatch;		/* true, if no items shall be matched */
 	Bitmapset	   *required_cols;	/* columns being returned to executor */
 	Bitmapset	   *clause_cols;	/* columns being copied to device */
-	const char	   *device_kernel;	/* kernel part of device code */
+	const char	   *kernel_source;	/* source of kernel code */
 
 	/* copy from EState */
 	Relation		es_relation;	/* copy from ScanState */
@@ -65,18 +67,14 @@ typedef struct {
 	int64		   *cs_cur_rowid_max;
 
 	/* list of the chunk */
-	List		   *chunk_exec_pending_list; /* chunk being pending to exec */
-	List		   *chunk_exec_list;	/* chunks under kernel execution */
-	List		   *chunk_ready_list;	/* chunks being ready to 2nd scan */
+	List		   *chunk_exec_list;	/* chunks in device execution */
+	List		   *chunk_ready_list;	/* chunks in ready to scaning */
 	ListCell	   *curr_chunk;
 	int				curr_index;
 
-	/* opencl related stuff */
-	//size_t				dev_global_mem_required;
-	cl_context			dev_context;
-	cl_program			dev_program;
-	cl_int				dev_command_queue_index;
-	cl_command_queue	dev_command_queue[0];
+	/* CUDA related stuff */
+	CUmodule		dev_module;
+	CUfunction		dev_function;
 } PgStromExecState;
 
 static void
@@ -84,31 +82,18 @@ pgstrom_cleanup_exec_state(PgStromExecState *sestate)
 {
 	elog(NOTICE, "pgstrom_release_exec_state called: %p", sestate);
 
-	if (sestate->dev_context)
-		clReleaseContext(sestate->dev_context);
-
-	if (sestate->dev_program)
-	{
-		int		i;
-
-		for (i=0; i < pgstrom_num_devices; i++)
-		{
-			if (sestate->dev_command_queue[i])
-				clReleaseCommandQueue(sestate->dev_command_queue[i]);
-		}
-		clReleaseProgram(sestate->dev_program);
-	}
+	if (sestate->dev_module)
+		cuModuleUnload(sestate->dev_module);
 }
 
 static void
 pgstrom_load_column_store(PgStromExecState *sestate,
-						  PgStromChunkBuf *chunk, AttrNumber attnum)
+						  PgStromChunkBuf *chunk, int csidx)
 {
 	Form_pg_attribute	attr;
 	IndexScanDesc	iscan;
 	ScanKeyData		skeys[2];
 	HeapTuple		tup;
-	int				csidx = attnum - 1;
 
 	/*
 	 * XXX - Because this column shall be copied to device to execute
@@ -197,6 +182,7 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 	index_endscan(iscan);
 }
 
+#if 0
 static bool
 pgstrom_exec_kernel_qual(PgStromExecState *sestate, PgStromChunkBuf *chunk)
 {
@@ -474,6 +460,7 @@ pgstrom_sync_kernel_qual(PgStromExecState *sestate)
 			clWaitForEvents(1, &event);
 	}
 }
+#endif
 
 static int
 pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
@@ -515,28 +502,32 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 		chunk->cs_values = palloc0(sizeof(void *) * chunk->nattrs);
 		MemoryContextSwitchTo(oldcxt);
 
-		if (!sestate->predictable)
+		if (sestate->dev_function)
 		{
 			Bitmapset  *temp;
-			AttrNumber	attnum;
+			int			csidx;
 
 			/*
 			 * Load necessary column store
 			 */
 			temp = bms_copy(sestate->clause_cols);
-			while ((attnum = bms_first_member(temp)) > 0)
-				pgstrom_load_column_store(sestate, chunk, attnum);
+			while ((csidx = bms_first_member(temp)) > 0)
+				pgstrom_load_column_store(sestate, chunk, csidx);
 			bms_free(temp);
 
 			/*
-			 * Exec kernel on this chunk asynchronously
+			 * XXX - exec kernel code on this chunk asynchronously
 			 */
-			pgstrom_exec_kernel_qual(sestate, chunk);
+			oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
+            sestate->chunk_ready_list
+                = lappend(sestate->chunk_ready_list, chunk);
+            MemoryContextSwitchTo(oldcxt);
 		}
 		else
 		{
 			/*
-			 * In predictable query, chunks are ready to scan using rowid.
+			 * In the case when the supplied plan has no qualifier,
+			 * all the chunks are ready to scan using rowid.
 			 */
 			oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 			sestate->chunk_ready_list
@@ -756,6 +747,99 @@ pgstrom_scan_chunk_buffer(PgStromExecState *sestate, TupleTableSlot *slot)
 	return false;	/* end of chunk, need next chunk! */
 }
 
+static void
+pgstrom_build_kernel_source(PgStromExecState *sestate)
+{
+#define TEMPFILE_FMT	"/tmp/.pgstrom-%u-qual%s"
+	StringInfoData	str;
+	FILE		   *filp;
+	int				code;
+	CUresult		ret;
+
+	/*
+	 * XXX - should put cache lookup to reduce compile time
+	 */
+
+	/*
+	 * Write source code to temporary file
+	 */
+	initStringInfo(&str);
+	appendStringInfo(&str, TEMPFILE_FMT, MyProcPid, ".gpu");
+	filp = AllocateFile(str.data, PG_BINARY_W);
+	if (filp == NULL)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open temporary file \"%s\" : %m",
+						str.data)));
+	if (fputs(sestate->kernel_source, filp) < 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not write out source code : %m")));
+	FreeFile(filp);
+
+	/*
+	 * Execute nvcc compiler
+	 */
+	resetStringInfo(&str);
+	appendStringInfo(&str,
+					 "'%s' -fatbin '" TEMPFILE_FMT "' "
+					 "-o '" TEMPFILE_FMT "' 2>'" TEMPFILE_FMT "'",
+					 pgstrom_nvcc_command,
+					 MyProcPid, ".gpu",
+					 MyProcPid, ".fatbin",
+					 MyProcPid, ".log");
+	if (system(str.data) != 0)
+	{
+		resetStringInfo(&str);
+		appendStringInfo(&str, TEMPFILE_FMT, MyProcPid, ".log");
+		filp = AllocateFile(str.data, PG_BINARY_R);
+		if (filp != NULL)
+		{
+			resetStringInfo(&str);
+			while ((code = fgetc(filp)) != EOF)
+			{
+				if (code == '\n')
+				{
+					elog(LOG, "%s", str.data);
+					resetStringInfo(&str);
+				}
+				else
+					appendStringInfoChar(&str, code);
+			}
+			FreeFile(filp);
+		}
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("could not compile the supplied source")));
+	}
+
+	/*
+	 * Load the built module
+	 */
+	resetStringInfo(&str);
+	appendStringInfo(&str, TEMPFILE_FMT, MyProcPid, ".fatbin");
+
+	ret = cuModuleLoad(&sestate->dev_module, str.data);
+	if (ret != CUDA_SUCCESS)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to load device executable code \"%s\" : %s",
+						str.data, cuda_error_to_string(ret))));
+
+	ret = cuModuleGetFunction(&sestate->dev_function,
+							  sestate->dev_module,
+							  "pgstrom_qual");
+	if (ret != CUDA_SUCCESS)
+	{
+		cuModuleUnload(sestate->dev_module);
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to get device function handle : %s",
+						cuda_error_to_string(ret))));
+	}
+	pfree(str.data);
+}
+
 static PgStromExecState *
 pgstrom_init_exec_state(ForeignScanState *fss)
 {
@@ -763,29 +847,14 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	PgStromExecState   *sestate;
 	ListCell		   *l;
 	AttrNumber			nattrs;
-	cl_int				i, ret;
-
-#if 0
-	if (!pgstrom_device_context)
-	{
-		pgstrom_device_context = clCreateContext(NULL,
-												 pgstrom_num_devices,
-												 pgstrom_device_id,
-												 NULL, NULL, &ret);
-		elog(NOTICE, "clCreateContext : %s", opencl_error_to_string(ret));
-		Assert(ret == CL_SUCCESS);
-	}
-#endif
 
 	nattrs = RelationGetNumberOfAttributes(fss->ss.ss_currentRelation);
-	sestate = palloc0(sizeof(PgStromExecState) +
-					  sizeof(cl_command_queue) * pgstrom_num_devices);
+	sestate = palloc0(sizeof(PgStromExecState));
 	sestate->cs_scan = palloc0(sizeof(IndexScanDesc) * nattrs);
 	sestate->cs_cur_values = palloc0(sizeof(ArrayType *) * nattrs);
 	sestate->cs_cur_rowid_min = palloc0(sizeof(int64) * nattrs);
 	sestate->cs_cur_rowid_max = palloc0(sizeof(int64) * nattrs);
 
-	//sestate->dev_global_mem_required = PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
 	sestate->es_relation = fss->ss.ss_currentRelation;
     sestate->es_snapshot = fss->ss.ps.state->es_snapshot;
 	sestate->es_memcxt = fss->ss.ps.ps_ExprContext->ecxt_per_query_memory;
@@ -794,143 +863,51 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	{
 		DefElem	   *defel = (DefElem *)lfirst(l);
 
-		if (strcmp(defel->defname, "predictable") == 0)
+		if (strcmp(defel->defname, "nevermatch") == 0)
 		{
-			if (intVal(defel->arg) == TRUE)
-				sestate->predictable = 1;	/* all the tuples are visible */
-			else
-				sestate->predictable = -1;	/* all the tuples are invisible */
+			sestate->nevermatch = intVal(defel->arg);
 		}
-		else if (strcmp(defel->defname, "device_kernel") == 0)
+		else if (strcmp(defel->defname, "kernel_source") == 0)
 		{
-			sestate->device_kernel = strVal(defel->arg);
+			sestate->kernel_source = strVal(defel->arg);
 		}
 		else if (strcmp(defel->defname, "clause_cols") == 0)
 		{
-			//Form_pg_attribute	attr;
 			int		csidx = (intVal(defel->arg));
 
 			Assert(csidx > 0);
 
 			sestate->clause_cols
 				= bms_add_member(sestate->clause_cols, csidx);
-			//attr = RelationGetDescr(sestate->es_relation)->attrs[csidx];
-			//sestate->dev_global_mem_required
-			//	+= (PGSTROM_CHUNK_SIZE / BITS_PER_BYTE +
-			//		PGSTROM_CHUNK_SIZE * attr->attlen);
 		}
 		else if (strcmp(defel->defname, "required_cols") == 0)
 		{
 			int		csidx = (intVal(defel->arg));
 
-			if (csidx < 1)
-			{
+			if (csidx > 0)
+				sestate->required_cols
+					= bms_add_member(sestate->required_cols, csidx);
+			else
 				Assert(fscan->fsSystemCol);
-				continue;
-			}
-			sestate->required_cols
-				= bms_add_member(sestate->required_cols, csidx);
 		}
 		else
 			elog(ERROR, "pg_strom: unexpected private plan information: %s",
 				 defel->defname);
 	}
 
-	/*
-	 * Skip stuff related to OpenCL, if the query is predictable
-	 */
-	if (sestate->predictable)
-		goto skip_opencl;
-
-	/*
-	 * Create a context to run async kernel code
-	 */
-	sestate->dev_context = clCreateContext(NULL,
-										   pgstrom_num_devices,
-										   pgstrom_device_id,
-										   NULL, NULL, &ret);
-	elog(NOTICE, "clCreateContext : %s", opencl_error_to_string(ret));
-	Assert(ret == CL_SUCCESS);
-
-	/*
-	 * Build kernel function to binary representation
-	 */
-	Assert(sestate->dev_context != NULL);
-	sestate->dev_program
-		= clCreateProgramWithSource(sestate->dev_context,
-									1, &sestate->device_kernel,
-									NULL, &ret);
-	if (ret != CL_SUCCESS)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("OpenCL failed to create program with source: %s",
-						opencl_error_to_string(ret))));
-
-	ret = clBuildProgram(sestate->dev_program,
-						 0, NULL,		/* for all the devices */
-						 NULL,			/* no build options */
-						 NULL, NULL);	/* no callback, so synchronous build */
-	if (ret != CL_SUCCESS)
+	if (!sestate->nevermatch &&
+		sestate->kernel_source != NULL)
 	{
-		cl_build_status	status;
-		char			logbuf[4096];
+		/*
+		 * XXX - we should handle multiple GPU devices
+		 */
+		pgstrom_set_device_context(0);
 
-		for (i=0; i < pgstrom_num_devices; i++)
-		{
-			clGetProgramBuildInfo(sestate->dev_program,
-								  pgstrom_device_id[i],
-								  CL_PROGRAM_BUILD_STATUS,
-								  sizeof(status),
-								  &status,
-								  NULL);
-			if (status != CL_BUILD_ERROR)
-				continue;
-
-			clGetProgramBuildInfo(sestate->dev_program,
-								  pgstrom_device_id[i],
-								  CL_PROGRAM_BUILD_LOG,
-								  sizeof(logbuf),
-								  logbuf,
-								  NULL);
-			elog(NOTICE, "%s", logbuf);
-		}
-		clReleaseProgram(sestate->dev_program);
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("OpenCL failed to build program: %s",
-						opencl_error_to_string(ret))));
+		/*
+		 * Build the kernel source code
+		 */
+		pgstrom_build_kernel_source(sestate);
 	}
-
-	/*
-	 * Create command queues for each devices
-	 */
-	for (i=0; i < pgstrom_num_devices; i++)
-	{
-		sestate->dev_command_queue[i]
-			= clCreateCommandQueue(sestate->dev_context,
-								   pgstrom_device_id[i],
-								   0,	/* no out-of-order, no profiling */
-								   &ret);
-		if (ret != CL_SUCCESS)
-		{
-			while (i > 0)
-				clReleaseCommandQueue(sestate->dev_command_queue[--i]);
-			clReleaseProgram(sestate->dev_program);
-
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("OpenCL failed to create command queue: %s",
-							opencl_error_to_string(ret))));
-		}
-	}
-
-skip_opencl:
-	//sestate->es_errcxt.callback = pgstrom_release_exec_state;
-	//sestate->es_errcxt.arg = (void *) sestate;
-	//sestate->es_errcxt.previous = error_context_stack;
-	//error_context_stack = &sestate->es_errcxt;
-
-	sestate->chunk_exec_pending_list = NIL;
 	sestate->chunk_exec_list = NIL;
 	sestate->chunk_ready_list = NIL;
 	sestate->curr_chunk = NULL;
@@ -992,7 +969,7 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 	int					num_chunks;
 
 	ExecClearTuple(slot);
-	if (sestate->predictable < 0)
+	if (sestate->nevermatch)
 		return slot;
 
 	/* Is it the first call? */
@@ -1003,7 +980,7 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 		if (pgstrom_load_chunk_buffer(sestate, num_chunks) < 1)
 			return slot;
 
-		pgstrom_sync_kernel_qual(sestate);
+		//pgstrom_sync_kernel_qual(sestate);
 		Assert(sestate->chunk_ready_list != NIL);
 		sestate->curr_chunk = list_head(sestate->chunk_ready_list);
 		sestate->curr_index = 0;
@@ -1015,13 +992,13 @@ retry:
 			= list_delete(sestate->chunk_ready_list,
 						  lfirst(sestate->curr_chunk));
 
-		pgstrom_sync_kernel_qual(sestate);
+		//pgstrom_sync_kernel_qual(sestate);
 
 		num_chunks = (pgstrom_max_async_chunks -
 					  list_length(sestate->chunk_exec_list));
 		num_chunks = pgstrom_load_chunk_buffer(sestate, num_chunks);
-		if (sestate->chunk_ready_list == NIL)
-			pgstrom_sync_kernel_qual(sestate);
+		//if (sestate->chunk_ready_list == NIL)
+		//	pgstrom_sync_kernel_qual(sestate);
 
 		/* no more chunks any more */
 		if (sestate->chunk_ready_list == NIL)
@@ -1082,8 +1059,8 @@ pgstrom_end_foreign_scan(ForeignScanState *fss)
 	/*
 	 * cleanup stuff related to OpenCL to prevent leaks
 	 */
-	while (sestate->chunk_exec_list != NIL)
-		pgstrom_sync_kernel_qual(sestate);
+	//while (sestate->chunk_exec_list != NIL)
+	//	pgstrom_sync_kernel_qual(sestate);
 	pgstrom_cleanup_exec_state(sestate);
 }
 
@@ -1116,4 +1093,12 @@ pgstrom_scan_init(void)
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);
+	DefineCustomStringVariable("pg_strom.nvcc_command",
+							   "full path of the nvcc command",
+							   NULL,
+							   &pgstrom_nvcc_command,
+							   "/usr/local/cuda/bin/nvcc",
+							   PGC_SIGHUP,
+							   0,
+							   NULL, NULL, NULL);
 }

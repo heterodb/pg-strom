@@ -541,7 +541,7 @@ pgstrom_plan_foreign_scan(Oid foreignTblOid,
 	{
 		RestrictInfo   *rinfo = lfirst(cell);
 
-		if (pgstrom_num_devices > 0 &&
+		if (pgstrom_get_num_devices() > 0 &&
 			is_device_executable_qual(baserel, rinfo))
 			device_quals = lappend(device_quals, rinfo);
 		else

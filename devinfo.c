@@ -19,17 +19,32 @@
 #include "utils/syscache.h"
 #include "pg_strom.h"
 
+typedef struct {
+	CUdevice	device;
+	char		dev_name[256];
+	int			dev_major;
+	int			dev_minor;
+	int			dev_proc_nums;
+	int			dev_proc_warp_sz;
+	int			dev_proc_clock;
+	size_t		dev_global_mem_sz;
+	int			dev_global_mem_width;
+	int			dev_global_mem_clock;
+	int			dev_global_mem_cache_sz;
+	int			dev_shared_mem_sz;
+} PgStromDeviceInfo;
+
 /*
  * Declarations
  */
 #define PGSTROM_UNSUPPORTED_CAST_INTO	((void *)-1)
-static List			   *devtype_info_slot[512];
-static List			   *devfunc_info_slot[1024];
-static List			   *devcast_info_slot[256];
+static List		   *devtype_info_slot[512];
+static List		   *devfunc_info_slot[1024];
+static List		   *devcast_info_slot[256];
 
-cl_uint					pgstrom_num_devices;
-cl_device_id		   *pgstrom_device_id;
-PgStromDeviceInfo	  **pgstrom_device_info;
+static int			pgstrom_num_devices;
+static PgStromDeviceInfo  *pgstrom_device_info;
+static CUcontext   *pgstrom_device_context;
 
 /* ------------------------------------------------------------
  *
@@ -128,16 +143,6 @@ pgstrom_devtype_lookup(Oid type_oid)
 	entry->type_oid = type_oid;
 	if (typeForm->typnamespace != PG_CATALOG_NAMESPACE)
 		goto out;
-
-	/* FLOAT8 is not available on device without FP64bit support */
-	if (type_oid == FLOAT8OID)
-	{
-		for (i=0; i < pgstrom_num_devices; i++)
-		{
-			if (!pgstrom_device_info[i]->dev_double_fp_config)
-				goto out;
-		}
-	}
 
 	for (i=0; i < lengthof(device_type_catalog); i++)
 	{
@@ -600,317 +605,153 @@ out:
  * Error code to string representation
  */
 const char *
-opencl_error_to_string(cl_int errcode)
+cuda_error_to_string(CUresult result)
 {
 	char	buf[256];
 
-	switch (errcode)
+	switch (result)
 	{
-		case CL_SUCCESS:
-			return "success";
-		case CL_DEVICE_NOT_FOUND:
-			return "device not found";
-		case CL_DEVICE_NOT_AVAILABLE:
-			return "device not available";
-		case CL_COMPILER_NOT_AVAILABLE:
-			return "compiler not available";
-		case CL_MEM_OBJECT_ALLOCATION_FAILURE:
-			return "mem object allocation faulure";
-		case CL_OUT_OF_RESOURCES:
-			return "out of resources";
-		case CL_OUT_OF_HOST_MEMORY:
-			return "out of host memory";
-		case CL_PROFILING_INFO_NOT_AVAILABLE:
-			return "profiling info not available";
-		case CL_MEM_COPY_OVERLAP:
-			return "mem copy overlap";
-		case CL_IMAGE_FORMAT_MISMATCH:
-			return "image format mismatch";
-		case CL_IMAGE_FORMAT_NOT_SUPPORTED:
-			return "image format not supported";
-		case CL_BUILD_PROGRAM_FAILURE:
-			return "build program failure";
-		case CL_MAP_FAILURE:
-			return "map failure";
-		case CL_MISALIGNED_SUB_BUFFER_OFFSET:
-			return "misaligned sub buffer offset";
-		case CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST:
-			return "exec status error for events in wait list";
-		case CL_INVALID_VALUE:
+		case CUDA_SUCCESS:
+			return "cuccess";
+		case CUDA_ERROR_INVALID_VALUE:
 			return "invalid value";
-		case CL_INVALID_DEVICE_TYPE:
-			return "invalid device type";
-		case CL_INVALID_PLATFORM:
-			return "invalid platform";
-		case CL_INVALID_DEVICE:
-			return "invalid device";
-		case CL_INVALID_CONTEXT:
-			return "invalid context";
-		case CL_INVALID_QUEUE_PROPERTIES:
-			return "invalid queue properties";
-		case CL_INVALID_COMMAND_QUEUE:
-			return "invalid command queue";
-		case CL_INVALID_HOST_PTR:
-			return "invalid host pointer";
-		case CL_INVALID_MEM_OBJECT:
-			return "invalid memory object";
-		case CL_INVALID_IMAGE_FORMAT_DESCRIPTOR:
-			return "invalid image format descriptor";
-		case CL_INVALID_IMAGE_SIZE:
-			return "invalid image size";
-		case CL_INVALID_SAMPLER:
-			return "invalid sampler";
-		case CL_INVALID_BINARY:
-			return "invalid binary";
-		case CL_INVALID_BUILD_OPTIONS:
-			return "invalid build options";
-		case CL_INVALID_PROGRAM:
-			return "invalid program";
-		case CL_INVALID_PROGRAM_EXECUTABLE:
-			return "invalid program executable";
-		case CL_INVALID_KERNEL_NAME:
-			return "invalid kernel name";
-		case CL_INVALID_KERNEL_DEFINITION:
-			return "invalid kernel definition";
-		case CL_INVALID_KERNEL:
-			return "invalid kernel";
-		case CL_INVALID_ARG_INDEX:
-			return "invalid argument index";
-		case CL_INVALID_ARG_VALUE:
-			return "invalid argument value";
-		case CL_INVALID_ARG_SIZE:
-			return "invalid argument size";
-		case CL_INVALID_KERNEL_ARGS:
-			return "invalid kernel arguments";
-		case CL_INVALID_WORK_DIMENSION:
-			return "invalid work dimension";
-		case CL_INVALID_WORK_GROUP_SIZE:
-			return "invalid work group size";
-		case CL_INVALID_WORK_ITEM_SIZE:
-			return "invalid work item size";
-		case CL_INVALID_GLOBAL_OFFSET:
-			return "invalid global offset";
-		case CL_INVALID_EVENT_WAIT_LIST:
-			return "invalid event wait list";
-		case CL_INVALID_EVENT:
-			return "invalid event";
-		case CL_INVALID_OPERATION:
-			return "invalid operation";
-		case CL_INVALID_GL_OBJECT:
-			return "invalid GL object";
-		case CL_INVALID_BUFFER_SIZE:
-			return "invalid buffer size";
-		case CL_INVALID_MIP_LEVEL:
-			return "invalid MIP level";
-		case CL_INVALID_GLOBAL_WORK_SIZE:
-			return "invalid global work size";
-		case CL_INVALID_PROPERTY:
-			return "invalid property";
+		case CUDA_ERROR_OUT_OF_MEMORY:
+			return "out of memory";
+		case CUDA_ERROR_NOT_INITIALIZED:
+			return "not initialized";
+		case CUDA_ERROR_DEINITIALIZED:
+			return "deinitialized";
+		case CUDA_ERROR_PROFILER_DISABLED:
+			return "profiler disabled";
+		default:
+			break;
 	}
-	snprintf(buf, sizeof(buf), "unknown error code: %d", errcode);
+	snprintf(buf, sizeof(buf), "cuda error code: %d", result);
 	return pstrdup(buf);
+}
+
+int
+pgstrom_get_num_devices(void)
+{
+	return pgstrom_num_devices;
+}
+
+void
+pgstrom_set_device_context(int dev_index)
+{
+	CUresult	ret;
+
+	Assert(dev_index < pgstrom_num_devices);
+	if (!pgstrom_device_context[dev_index])
+	{
+		ret = cuCtxCreate(&pgstrom_device_context[dev_index],
+						  0,
+						  pgstrom_device_info[dev_index].device);
+		if (ret != CUDA_SUCCESS)
+			elog(ERROR, "cuda: failed to create device context: %s",
+				 cuda_error_to_string(ret));
+	}
+	ret = cuCtxSetCurrent(pgstrom_device_context[dev_index]);
+	if (ret != CUDA_SUCCESS)
+		elog(ERROR, "cuda: failed to set device context: %s",
+			 cuda_error_to_string(ret));
 }
 
 void
 pgstrom_devinfo_init(void)
 {
-	PgStromDeviceInfo  *dev_info;
-	cl_platform_id		platform_ids[32];
-	cl_device_id		device_ids[64];
-	cl_uint				num_platforms;
-	cl_uint				num_devices;
-	cl_int				ret, pi, di;
-	int					nitems = 10;
-	MemoryContext		oldctx;
+	PgStromDeviceInfo  *devinfo;
+	CUresult	ret;
+	int			i, j;
 
 	memset(devtype_info_slot, 0, sizeof(devtype_info_slot));
 	memset(devfunc_info_slot, 0, sizeof(devfunc_info_slot));
 	memset(devcast_info_slot, 0, sizeof(devcast_info_slot));
 
-	oldctx = MemoryContextSwitchTo(TopMemoryContext);
+	ret = cuInit(0);
+	if (ret != CUDA_SUCCESS)
+		elog(ERROR, "cuda: failed to initialize driver API: %s",
+			 cuda_error_to_string(ret));
 
-	pgstrom_num_devices = 0;	
-	pgstrom_device_id = palloc(sizeof(cl_device_id) * nitems);
-	pgstrom_device_info = palloc(sizeof(PgStromDeviceInfo *) * nitems);
+	ret = cuDeviceGetCount(&pgstrom_num_devices);
+	if (ret != CUDA_SUCCESS)
+		elog(ERROR, "cuda: failed to get number of devices: %s",
+			 cuda_error_to_string(ret));
 
-	ret = clGetPlatformIDs(lengthof(platform_ids),
-						   platform_ids, &num_platforms);
-	if (ret != CL_SUCCESS)
-		elog(ERROR, "OpenCL: filed to get number of platforms: %s",
-			 opencl_error_to_string(ret));
+	pgstrom_device_info
+		= MemoryContextAllocZero(TopMemoryContext,
+								 sizeof(PgStromDeviceInfo) *
+								 pgstrom_num_devices);
+	pgstrom_device_context
+		= MemoryContextAllocZero(TopMemoryContext,
+								 sizeof(CUcontext) *
+								 pgstrom_num_devices);
 
-	for (pi=0; pi < num_platforms; pi++)
+	for (i=0; i < pgstrom_num_devices; i++)
 	{
-		ret = clGetDeviceIDs(platform_ids[pi],
-							 CL_DEVICE_TYPE_DEFAULT,
-							 lengthof(device_ids),
-							 device_ids, &num_devices);
-		if (ret != CL_SUCCESS)
-			elog(ERROR, "OpenCL: filed to get number of devices: %s",
-				 opencl_error_to_string(ret));
+		static struct {
+			size_t				offset;
+			CUdevice_attribute	attribute;
+		} dev_attributes[] = {
+			{ offsetof(PgStromDeviceInfo, dev_proc_nums),
+			  CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT },
+			{ offsetof(PgStromDeviceInfo, dev_proc_warp_sz),
+			  CU_DEVICE_ATTRIBUTE_WARP_SIZE },
+			{ offsetof(PgStromDeviceInfo, dev_proc_clock),
+			  CU_DEVICE_ATTRIBUTE_CLOCK_RATE },
+			{ offsetof(PgStromDeviceInfo, dev_global_mem_width),
+			  CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH },
+			{ offsetof(PgStromDeviceInfo, dev_global_mem_clock),
+			  CU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE },
+			{ offsetof(PgStromDeviceInfo, dev_global_mem_cache_sz),
+			  CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE },
+			{ offsetof(PgStromDeviceInfo, dev_shared_mem_sz),
+			  CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK },
+		};
 
-		for (di=0; di < num_devices; di++)
+		devinfo = &pgstrom_device_info[i];
+
+		ret = cuDeviceGet(&devinfo->device, i);
+		if (ret != CUDA_SUCCESS)
+			elog(ERROR, "cuda: failed to get handle of GPU device: %s",
+				 cuda_error_to_string(ret));
+
+		if ((ret = cuDeviceGetName(devinfo->dev_name,
+								   sizeof(devinfo->dev_name),
+								   devinfo->device)) ||
+			(ret = cuDeviceComputeCapability(&devinfo->dev_major,
+											 &devinfo->dev_minor,
+											 devinfo->device)) ||
+			(ret = cuDeviceTotalMem(&devinfo->dev_global_mem_sz,
+									devinfo->device)))
+			elog(ERROR, "cuda: failed to get attribute of GPU device : %s",
+				 cuda_error_to_string(ret));
+		for (j=0; j < lengthof(dev_attributes); j++)
 		{
-			cl_bool		dev_available;
-
-			if ((ret = clGetDeviceInfo(device_ids[di],
-									  CL_DEVICE_AVAILABLE,
-									  sizeof(dev_available),
-									  &dev_available,
-									   NULL)) != CL_SUCCESS)
-				elog(ERROR, "OpenCL: failed to get properties of device: %s",
-					 opencl_error_to_string(ret));
-
-			if (!dev_available)
-				continue;
-
-
-			dev_info = palloc0(sizeof(PgStromDeviceInfo));
-			dev_info->pf_id = platform_ids[pi];
-			dev_info->dev_id = device_ids[di];
-
-			if ((ret = clGetDeviceInfo(dev_info->dev_id,
-									   CL_DEVICE_COMPILER_AVAILABLE,
-									   sizeof(dev_info->dev_compiler_available),
-									   &dev_info->dev_compiler_available,
-									   NULL)) != CL_SUCCESS ||
-				(ret = clGetDeviceInfo(dev_info->dev_id,
-									   CL_DEVICE_DOUBLE_FP_CONFIG,
-									   sizeof(dev_info->dev_double_fp_config),
-									   &dev_info->dev_double_fp_config,
-									   NULL)) != CL_SUCCESS ||
-				(ret = clGetDeviceInfo(dev_info->dev_id,
-									   CL_DEVICE_GLOBAL_MEM_CACHE_TYPE,
-									   sizeof(dev_info->dev_global_mem_cache_type),
-									   &dev_info->dev_global_mem_cache_type,
-									   NULL)) != CL_SUCCESS ||
-				(dev_info->dev_global_mem_cache_type != CL_NONE &&
-				 (ret = clGetDeviceInfo(dev_info->dev_id,
-										CL_DEVICE_GLOBAL_MEM_CACHE_SIZE,
-										sizeof(dev_info->dev_global_mem_cache_size),
-										&dev_info->dev_global_mem_cache_size,
-										NULL)) != CL_SUCCESS) ||
-				(ret = clGetDeviceInfo(dev_info->dev_id,
-									   CL_DEVICE_GLOBAL_MEM_SIZE,
-									   sizeof(dev_info->dev_global_mem_size),
-									   &dev_info->dev_global_mem_size,
-									   NULL)) != CL_SUCCESS ||
-				(ret = clGetDeviceInfo(dev_info->dev_id,
-									   CL_DEVICE_LOCAL_MEM_SIZE,
-									   sizeof(dev_info->dev_local_mem_size),
-									   &dev_info->dev_local_mem_size,
-									   NULL)) != CL_SUCCESS ||
-				(ret = clGetDeviceInfo(dev_info->dev_id,
-									   CL_DEVICE_LOCAL_MEM_TYPE,
-									   sizeof(dev_info->dev_local_mem_type),
-									   &dev_info->dev_local_mem_type,
-									   NULL)) != CL_SUCCESS ||
-				(ret = clGetDeviceInfo(dev_info->dev_id,
-									   CL_DEVICE_MAX_CLOCK_FREQUENCY,
-									   sizeof(dev_info->dev_max_clock_frequency),
-									   &dev_info->dev_max_clock_frequency,
-									   NULL)) != CL_SUCCESS ||
-				(ret = clGetDeviceInfo(dev_info->dev_id,
-									   CL_DEVICE_MAX_COMPUTE_UNITS,
-									   sizeof(dev_info->dev_max_compute_units),
-									   &dev_info->dev_max_compute_units,
-									   NULL)) != CL_SUCCESS ||
-				(ret = clGetDeviceInfo(dev_info->dev_id,
-									   CL_DEVICE_MAX_CONSTANT_ARGS,
-									   sizeof(dev_info->dev_max_constant_args),
-									   &dev_info->dev_max_constant_args,
-									   NULL)) != CL_SUCCESS ||
-				(ret = clGetDeviceInfo(dev_info->dev_id,
-									   CL_DEVICE_MAX_CONSTANT_BUFFER_SIZE,
-									   sizeof(dev_info->dev_max_constant_buffer_size),
-									   &dev_info->dev_max_constant_buffer_size,
-									   NULL)) != CL_SUCCESS ||
-				(ret = clGetDeviceInfo(dev_info->dev_id,
-									   CL_DEVICE_MAX_MEM_ALLOC_SIZE,
-									   sizeof(dev_info->dev_max_mem_alloc_size),
-									   &dev_info->dev_max_mem_alloc_size,
-									   NULL)) != CL_SUCCESS ||
-				(ret = clGetDeviceInfo(dev_info->dev_id,
-									   CL_DEVICE_MAX_PARAMETER_SIZE,
-									   sizeof(dev_info->dev_max_parameter_size),
-									   &dev_info->dev_max_parameter_size,
-									   NULL)) != CL_SUCCESS ||
-				(ret = clGetDeviceInfo(dev_info->dev_id,
-									   CL_DEVICE_MAX_WORK_GROUP_SIZE,
-									   sizeof(dev_info->dev_max_work_group_size),
-									   &dev_info->dev_max_work_group_size,
-									   NULL)) != CL_SUCCESS ||
-				(ret = clGetDeviceInfo(dev_info->dev_id,
-									   CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS,
-									   sizeof(dev_info->dev_max_work_item_dimensions),
-									   &dev_info->dev_max_work_item_dimensions,
-									   NULL)) != CL_SUCCESS ||
-				(ret = clGetDeviceInfo(dev_info->dev_id,
-									   CL_DEVICE_MAX_WORK_ITEM_SIZES,
-									   sizeof(dev_info->dev_max_work_item_sizes),
-									   dev_info->dev_max_work_item_sizes,
-									   NULL)) != CL_SUCCESS ||
-				(ret = clGetDeviceInfo(dev_info->dev_id,
-									   CL_DEVICE_NAME,
-									   sizeof(dev_info->dev_name),
-									   dev_info->dev_name,
-									   NULL)) != CL_SUCCESS ||
-				(ret = clGetDeviceInfo(dev_info->dev_id,
-									   CL_DEVICE_VERSION,
-									   sizeof(dev_info->dev_version),
-									   &dev_info->dev_version,
-									   NULL)) != CL_SUCCESS ||
-				(ret = clGetDeviceInfo(dev_info->dev_id,
-									   CL_DEVICE_PROFILE,
-									   sizeof(dev_info->dev_profile),
-									   dev_info->dev_profile,
-									   NULL)) != CL_SUCCESS)
-				elog(ERROR, "OpenCL: failed to get properties of device: %s",
-					 opencl_error_to_string(ret));
-
-			/*
-			 * Print properties of the device into log
-			 */
-			elog(LOG,
-				 "pg_strom: device %s (%s), %u of compute units (%uMHz), "
-				 "%luMB of device memory (%luKB cache), "
-				 "%luKB of local memory%s%s",
-				 dev_info->dev_name,
-				 dev_info->dev_version,
-				 dev_info->dev_max_compute_units,
-				 dev_info->dev_max_clock_frequency,
-				 dev_info->dev_global_mem_size / (1024 * 1024),
-				 dev_info->dev_global_mem_cache_size / 1024,
-				 dev_info->dev_local_mem_size / 1024,
-				 (dev_info->dev_compiler_available ?
-				  ", runtime compiler available" : ""),
-				 (dev_info->dev_double_fp_config ?
-				  ", 64bit-FP supported" : ""));
-
-			if (pgstrom_num_devices == nitems)
-			{
-				cl_device_id       *id_temp
-					= palloc(sizeof(cl_device_id) * (nitems + 10));
-				PgStromDeviceInfo **info_temp
-					= palloc(sizeof(PgStromDeviceInfo *) * (nitems + 10));
-
-				memcpy(id_temp, pgstrom_device_id,
-					   sizeof(cl_device_id) * nitems);
-				memcpy(info_temp, pgstrom_device_info,
-					   sizeof(PgStromDeviceInfo *) * nitems);
-
-				pfree(pgstrom_device_id);
-				pfree(pgstrom_device_info);
-
-				pgstrom_device_id = id_temp;
-				pgstrom_device_info = info_temp;
-
-				nitems += 10;
-			}
-			pgstrom_device_id[pgstrom_num_devices] = device_ids[di];
-			pgstrom_device_info[pgstrom_num_devices] = dev_info;
-			pgstrom_num_devices++;
+			ret = cuDeviceGetAttribute((int *)((uintptr_t) devinfo +
+											   dev_attributes[j].offset),
+									   dev_attributes[j].attribute,
+									   devinfo->device);
+			if (ret != CUDA_SUCCESS)
+				elog(ERROR, "cuda: failed to get attribute of GPU device : %s",
+					 cuda_error_to_string(ret));
 		}
+
+		elog(LOG,
+			 "pg_strom: %s (capability v%d.%d), "
+			 "%d of processor units (%d of wraps/unit, %dMHz), "
+			 "%luMB of global memory (%dbits, %dMHz, %dKB of L2 cache), "
+			 "%dKB of shared memory",
+			 devinfo->dev_name,
+			 devinfo->dev_major,
+			 devinfo->dev_minor,
+			 devinfo->dev_proc_nums,
+			 devinfo->dev_proc_warp_sz,
+			 devinfo->dev_proc_clock / 1000,
+			 devinfo->dev_global_mem_sz / (1024 * 1024),
+			 devinfo->dev_global_mem_width,
+			 devinfo->dev_global_mem_clock / 1000,
+			 devinfo->dev_global_mem_cache_sz / 1024,
+			 devinfo->dev_shared_mem_sz / 1024);
 	}
-	MemoryContextSwitchTo(oldctx);
 }

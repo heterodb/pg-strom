@@ -18,13 +18,7 @@
 #include "fmgr.h"
 #include "foreign/fdwapi.h"
 #include "utils/memutils.h"
-#ifdef __APPLE__
-#include <OpenCL/cl.h>
-#include <OpenCL/cl_ext.h>
-#else
-#include <CL/cl.h>
-#include <CL/cl_ext.h>
-#endif
+#include <cuda.h>
 
 #define PGSTROM_SCHEMA_NAME		"pg_strom"
 
@@ -104,42 +98,16 @@ typedef struct {
 	char   *func_source;
 } PgStromDevCastInfo;
 
-typedef struct {
-	cl_platform_id				pf_id;
-	cl_device_id				dev_id;
-	cl_bool						dev_compiler_available;
-	cl_device_fp_config			dev_double_fp_config;
-	cl_ulong					dev_global_mem_cache_size;
-	cl_device_mem_cache_type	dev_global_mem_cache_type;
-	cl_ulong					dev_global_mem_size;
-	cl_ulong					dev_local_mem_size;
-	cl_device_local_mem_type	dev_local_mem_type;
-	cl_uint						dev_max_clock_frequency;
-	cl_uint						dev_max_compute_units;
-	cl_uint						dev_max_constant_args;
-	cl_ulong					dev_max_constant_buffer_size;
-	cl_ulong					dev_max_mem_alloc_size;
-	size_t						dev_max_parameter_size;
-	size_t						dev_max_work_group_size;
-	size_t						dev_max_work_item_dimensions;
-	size_t						dev_max_work_item_sizes[3];
-	char						dev_name[256];
-	char						dev_version[256];
-	char						dev_profile[24];
-} PgStromDeviceInfo;
-
-extern cl_uint				pgstrom_num_devices;
-extern cl_device_id		   *pgstrom_device_id;
-extern PgStromDeviceInfo  **pgstrom_device_info;
-
 extern void pgstrom_devtype_format(StringInfo str,
 								   Oid type_oid, Datum value);
 extern PgStromDevTypeInfo *pgstrom_devtype_lookup(Oid type_oid);
 extern PgStromDevFuncInfo *pgstrom_devfunc_lookup(Oid func_oid);
 extern PgStromDevCastInfo *pgstrom_devcast_lookup(Oid source_typeid,
 												  Oid target_typeid);
+extern void pgstrom_set_device_context(int dev_index);
+extern int	pgstrom_get_num_devices(void);
 extern void pgstrom_devinfo_init(void);
-extern const char *opencl_error_to_string(cl_int errcode);
+extern const char *cuda_error_to_string(CUresult result);
 
 /*
  * pg_strom.c
