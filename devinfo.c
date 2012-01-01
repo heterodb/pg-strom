@@ -265,38 +265,39 @@ out:
  *
  * ------------------------------------------------------------
  */
-#define DEVFUNC_INTxDIV_TEMPLATE(name,rtype,xtype,ytype)			\
-	#rtype " " #name "(int *error, " #xtype " x, " #ytype " y)\n"	\
-	"{\n"															\
-	"    " #rtype " rc;\n"											\
-	"    if (y == 0)\n"												\
-	"        *error |= DEVERR_DIVISION_BY_ZERO;\n"					\
-	"    rc = x / y;\n"												\
-	"    if (y == -1 && x < 0 && rc <= 0)\n"						\
-	"        *error |= DEVERR_NUMERIC_VALUE_OUT_OF_RANGE\n"			\
-	"    return rc;\n"												\
+#define DEVFUNC_INTxDIV_TEMPLATE(name,rtype,xtype,ytype)				\
+	#rtype " " #name "(unsigned char *errors, unsigned char bitmap, "	\
+	#xtype " x, " #ytype " y)\n"										\
+	"{\n"																\
+	"    " #rtype " result;\n"											\
+	"    if (y == 0)\n"													\
+	"        *errors |= bitmap;\n"										\
+	"    result = x / y;\n"												\
+	"    if (y == -1 && x < 0 && result <= 0)\n"						\
+	"        *errors |= bitmap;\n"										\
+	"    return result;\n"												\
 	"}\n"
 
-#define DEVFUNC_FPxDIV_TEMPLATE(name,rtype,xtype,ytype)				\
-	#rtype " " #name "(int *error, " #xtype " x, " #ytype " y)\n"	\
-	"{\n"															\
-	"    " #rtype " rc;\n"											\
-	"    if (y == 0)\n"												\
-	"        *error |= DEVERR_DIVISION_BY_ZERO;\n"					\
-	"    rc = x / y;\n"												\
-	"    if ((isinf(rc) && !isinf(x) && !isinf(y)) ||\n"			\
-	"        (rc == 0.0 && x != 0.0))\n"							\
-	"    if (y == -1 && x < 0 && rc <= 0)\n"						\
-	"        *error |= DEVERR_VALUE_OUT_OF_RANGE\n"					\
-	"    return rc;\n"												\
+#define DEVFUNC_FPxDIV_TEMPLATE(name,rtype,xtype,ytype)					\
+	#rtype " " #name "(unsigned char *errors, unsigned char bitmap, "	\
+	#xtype " x, " #ytype " y)\n"										\
+	"{\n"																\
+	"    " #rtype " result;\n"											\
+	"    if (y == 0)\n"													\
+	"        *errors |= bitmap;\n"										\
+	"    result = x / y;\n"												\
+	"    if (isinf(result) && !isinf(x) && !isinf(y))\n"				\
+	"        *errors |= bitmap;\n"										\
+	"    return result;\n"												\
 	"}\n"
 
-#define DEVFUN_INTxREMIND_TEMPLATE(name,rtype,xtype,ytype)			\
-	#rtype " " #name "(int *error, " #xtype " x, " #ytype " y)\n"	\
-	"{\n"															\
-	"    if (y == 0)\n"												\
-	"        *error |= DEVERR_DIVISION_BY_ZERO;\n"					\
-	"    return x % y;\n"											\
+#define DEVFUN_INTxREMIND_TEMPLATE(name,rtype,xtype,ytype)			   \
+	#rtype " " #name "(unsigned char *errors, unsigned char bitmap, "  \
+	#xtype " x, " #ytype " y)\n"									   \
+	"{\n"															   \
+	"    if (y == 0)\n"												   \
+	"        *errors |= bitmap;\n"									   \
+	"    return x % y;\n"											   \
 	"}\n"
 
 static struct {
@@ -640,6 +641,8 @@ void
 pgstrom_set_device_context(int dev_index)
 {
 	CUresult	ret;
+
+	cuInit(0);
 
 	Assert(dev_index < pgstrom_num_devices);
 	if (!pgstrom_device_context[dev_index])

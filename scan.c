@@ -505,14 +505,14 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 		if (sestate->dev_function)
 		{
 			Bitmapset  *temp;
-			int			csidx;
+			AttrNumber	attnum;
 
 			/*
 			 * Load necessary column store
 			 */
 			temp = bms_copy(sestate->clause_cols);
-			while ((csidx = bms_first_member(temp)) > 0)
-				pgstrom_load_column_store(sestate, chunk, csidx);
+			while ((attnum = bms_first_member(temp)) > 0)
+				pgstrom_load_column_store(sestate, chunk, attnum-1);
 			bms_free(temp);
 
 			/*

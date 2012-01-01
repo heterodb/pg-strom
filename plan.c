@@ -78,11 +78,12 @@ make_device_function_code(Oid func_oid, List *args,
 			break;
 
 		case 'f':	/* function as device function */
-			appendStringInfo(qual_source, "%s(", fdev->func_ident);
+			appendStringInfo(qual_source,
+							 "%s(&errors, bitmask",
+							 fdev->func_ident);
 			foreach (cell, args)
 			{
-				if (cell != list_head(args))
-					appendStringInfo(qual_source, ", ");
+				appendStringInfo(qual_source, ", ");
 				if (!make_device_qual_code((Node *) lfirst(cell),
 										   qual_source, base_relid,
 										   type_decl, func_decl))
@@ -141,8 +142,11 @@ make_device_qual_code(Node *node, StringInfo qual_source,
 		PgStromDevTypeInfo *tdev;
 		Var *v = (Var *) node;
 
-		appendStringInfo(qual_source, "%s_cs[offset]",
-						 get_relid_attribute_name(base_relid, v->varattno));
+		appendStringInfo(qual_source,
+						 "((cn%d & bitmask) "
+						 "? (errors |= bitmask, cv%d) "
+						 ": cv%d)",
+						 v->varattno, v->varattno, v->varattno);
 		tdev = pgstrom_devtype_lookup(v->vartype);
 		if (tdev->type_source)
 			*type_decl = list_append_unique_ptr(*type_decl,
@@ -267,38 +271,6 @@ make_device_source(Oid base_relid, List *device_quals, List **private)
 	initStringInfo(&blk2);
 
 	/*
-	 * Kernel function shall be declared as follows:
-	 *
-	 *
-	 * __kernel void pgstrom_qual(__global uchar *rowmap,
-	 *                            __global <atttype> *<attname>_cs,
-	 *                            __global uchar *<attname>_nulls,
-	 *                                    :
-	 *                            __global <atttype> *<attname>_cs,
-	 *                            __global uchar *<attname>_nulls)
-	 * {
-	 *     int offset = get_global_id(0);
-	 *     uchar result = rowmap[offset];
-	 *     uchar <attname>_isnull = (<attname>_nl ? <attname>_nl[offset] : 0);
-	 *             :
-	 *     uchar <attname>_isnull = (<attname>_nl ? <attname>_nl[offset] : 0);
-	 *     int   bitmask;
-	 *
-	 *     for (bitmask = 1; bitmask < 256; bitmask <<= 1)
-	 *     {
-	 *         if ((result & bitmask) &&
-	 *             (<attname>_isnull & bitmask) == 0 &&
-	 *                :
-	 *             (<attname>_isnull & bitmask) == 0 &&
-	 *             (!(qual) || error))
-	 *             result &= ~bitmask;
-	 *         offset++;
-	 *     }
-	 *     rowmap[get_global_id(0)] = result;
-	 * }
-	 */
-
-	/*
 	 * Enumelate all the variables being referenced
 	 */
 	foreach (cell, device_quals)
@@ -315,19 +287,18 @@ make_device_source(Oid base_relid, List *device_quals, List **private)
 	switch (list_length(qual_list))
 	{
 		case 0:
-			/* all the tuples should be visible */
-			defel = makeDefElem("predictable",
-								(Node *)makeInteger(TRUE));
-			*private = lappend(*private, (Node *) defel);
+			/*
+			 * All the tuples shall be visible without execute qualifier
+			 */
 			return;
 		case 1:
 			if (!make_device_qual_code(linitial(qual_list),
 									   &qual, base_relid,
 									   &type_decl, &func_decl))
 			{
-				/* all the tuples should be invisible */
-				defel = makeDefElem("predictable",
-									(Node *)makeInteger(FALSE));
+				/* All the tuples shall be invisible */
+				defel = makeDefElem("nevermatch",
+									(Node *)makeInteger(TRUE));
 				*private = lappend(*private, (Node *) defel);
 				return;
 			}
@@ -338,9 +309,9 @@ make_device_source(Oid base_relid, List *device_quals, List **private)
 									   &qual, base_relid,
 									   &type_decl, &func_decl))
 			{
-				/* all the tuples should be invisible */
-				defel = makeDefElem("predictable",
-									(Node *)makeInteger(FALSE));
+				/* All the tuples shall be invisible */
+				defel = makeDefElem("nevermatch",
+									(Node *)makeInteger(TRUE));
 				*private = lappend(*private, (Node *) defel);
 				return;
 			}
@@ -348,59 +319,55 @@ make_device_source(Oid base_relid, List *device_quals, List **private)
 	}
 
 	appendStringInfo(&kern,
-					 "__kernel void\n"
-					 "pgstrom_qual(__global uchar *rowmap");
+					 "__global__ void\n"
+					 "pgstrom_qual(unsigned char rowmap[]");
 	appendStringInfo(&blk1,
-					 "    int   offset = get_global_id(0) << 3;\n"
-					 "    uchar result = rowmap[get_global_id(0)];\n");
+					 "    int offset_base = blockIdx.x * blockDim.x + threadIdx.x;\n"
+					 "    int offset = offset_base * 8;\n"
+					 "    unsigned char result = rowmap[offset_base];\n"
+					 "    unsigned char errors = 0;\n");
 	appendStringInfo(&blk2,
-					 "    for (bitmask = 1; bitmask < 256; bitmask <<= 1)\n"
-					 "    {\n"
-					 "        int error = 0;\n"
-					 "        if ((result & bitmask) &&\n");
+					 "    for (bitmask=1; bitmask < 256; bitmask <<= 1)\n"
+					 "    {\n");
 
 	tempset = bms_copy(columns);
 	while ((attnum = bms_first_member(tempset)) > 0)
 	{
 		PgStromDevTypeInfo *tinfo
 			= pgstrom_devtype_lookup(get_atttype(base_relid, attnum));
-		const char	   *attname = get_attname(base_relid, attnum);
 
 		appendStringInfo(&kern, ",\n"
-						 "             __global %s *%s_cs,\n"
-						 "             __global uchar *%s_nl",
-						 tinfo->type_ident,
-						 attname, attname);
+						 "             %s c%d_values[],\n"
+						 "             unsigned char c%d_nulls[]",
+						 tinfo->type_ident, attnum, attnum);
 		appendStringInfo(&blk1,
-						 "    uchar %s_isnull = %s_nl[get_global_id(0)];\n",
-						 attname, attname);
+						 "    unsigned char cn%d = c%d_nulls[offset_base];\n",
+						 attnum, attnum);
 		appendStringInfo(&blk2,
-						 "            (%s_isnull & bitmask) == 0 &&\n",
-						 attname);
+						 "        %s cv%d = c%d_values[offset];\n",
+						 tinfo->type_ident, attnum, attnum);
 	}
-	bms_free(tempset);
-
 	appendStringInfo(&kern, ")\n"
 					 "{\n"
 					 "%s"
-					 "    int   bitmask;\n"
+					 "    int bitmask;\n"
 					 "\n"
 					 "%s"
-					 "            (!%s || error))\n"
+					 "\n"
+					 "        if ((result & bitmask) && !%s)\n"
 					 "            result &= ~bitmask;\n"
 					 "        offset++;\n"
 					 "    }\n"
-					 "    rowmap[get_global_id(0)] = result;\n"
-					 "}\n",
-					 blk1.data, blk2.data, qual.data);
+					 "    rowmap[offset_base] = (result & ~errors);\n"
+					 "}", blk1.data, blk2.data, qual.data);
 	/*
-	 * Declaration of const, type and functions
+	 * Declarations
 	 */
-	appendStringInfo(&decl, "/* Error code of pg_strom */\n");
-	appendStringInfo(&decl, "#define DEVERR_DIVISION_BY_ZERO    0x0001\n");
-	appendStringInfo(&decl, "#define DEVERR_VALUE_OUT_OF_RANGE  0x0002\n");
-	appendStringInfo(&decl, "\n");
-
+	appendStringInfo(&decl,
+					 "typedef unsigned long size_t;\n"
+					 "typedef long __clock_t;\n"
+					 "typedef __clock_t clock_t;\n"
+					 "#include \"crt/device_runtime.h\"\n\n");
 	foreach (cell, type_decl)
 		appendStringInfo(&decl, "%s;\n", (char *) lfirst(cell));
 	if (type_decl != NIL)
@@ -414,7 +381,7 @@ make_device_source(Oid base_relid, List *device_quals, List **private)
 	/*
 	 * Set up private members being referenced in executor stage
 	 */
-	defel = makeDefElem("device_kernel", (Node *) makeString(decl.data));
+	defel = makeDefElem("kernel_source", (Node *) makeString(decl.data));
 	*private = lappend(*private, (Node *)defel);
 
 	while ((attnum = bms_first_member(columns)) > 0)
@@ -423,6 +390,7 @@ make_device_source(Oid base_relid, List *device_quals, List **private)
 							(Node *) makeInteger(attnum));
 		*private = lappend(*private, (Node *)defel);
 	}
+	bms_free(columns);
 
 	pfree(blk1.data);
 	pfree(blk2.data);
@@ -551,11 +519,6 @@ pgstrom_plan_foreign_scan(Oid foreignTblOid,
 	baserel->baserestrictinfo = host_quals;
 	if (device_quals != NIL)
 		make_device_source(foreignTblOid, device_quals, &private);
-	else
-	{
-		defel = makeDefElem("predictable", (Node *) makeInteger(TRUE));
-		private = lappend(private, (Node *) defel);
-	}
 
 	/*
 	 * Set up FdwPlan
@@ -576,9 +539,9 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 	ForeignScan	   *fscan = (ForeignScan *) fss->ss.ps.plan;
 	Relation		rel = fss->ss.ss_currentRelation;
 	ListCell	   *cell;
-	DefElem		   *predictable = NULL;
-	DefElem		   *device_kernel = NULL;
-	Relids			device_columns = NULL;
+	DefElem		   *nevermatch = NULL;
+	DefElem		   *kernel_source = NULL;
+	Relids			clause_cols = NULL;
 	Relids			required_cols = NULL;
 	StringInfoData	str;
 	AttrNumber		attnum;
@@ -588,14 +551,14 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 	{
 		DefElem	   *defel = (DefElem *)lfirst(cell);
 
-		if (strcmp(defel->defname, "predictable") == 0)
-			predictable = defel;
-		else if (strcmp(defel->defname, "device_kernel") == 0)
-			device_kernel = defel;
+		if (strcmp(defel->defname, "nevermatch") == 0)
+			nevermatch = defel;
+		else if (strcmp(defel->defname, "kernel_source") == 0)
+			kernel_source = defel;
 		else if (strcmp(defel->defname, "clause_cols") == 0)
 		{
-			device_columns = bms_add_member(device_columns,
-											intVal(defel->arg));
+			clause_cols = bms_add_member(clause_cols,
+										 intVal(defel->arg));
 		}
 		else if (strcmp(defel->defname, "required_cols") == 0)
 		{
@@ -603,10 +566,11 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 										   intVal(defel->arg));
 		}
 	}
+	initStringInfo(&str);
 
 	if (!bms_is_empty(required_cols))
 	{
-		initStringInfo(&str);
+		resetStringInfo(&str);
 		while ((attnum = bms_first_member(required_cols)) > 0)
 		{
 			attr = RelationGetDescr(rel)->attrs[attnum - 1];
@@ -615,48 +579,48 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 							 NameStr(attr->attname));
 		}
 		ExplainPropertyText(" Required Cols ", str.data, es);
-		pfree(str.data);
 	}
 
-	if (!bms_is_empty(device_columns) && !predictable)
+	if (nevermatch && intVal(nevermatch->arg) == TRUE)
 	{
-		initStringInfo(&str);
-		while ((attnum = bms_first_member(device_columns)) > 0)
+		ExplainPropertyText("  Filter", "false", es);
+	}
+	else if (kernel_source)
+	{
+		char   *p;
+		char	temp[24];
+		int		lineno = 1;
+
+		if (!bms_is_empty(clause_cols))
 		{
-			attr = RelationGetDescr(rel)->attrs[attnum - 1];
-			appendStringInfo(&str, "%s%s",
-							 (str.len > 0 ? ", " : ""),
-							 NameStr(attr->attname));
+			resetStringInfo(&str);
+			while ((attnum = bms_first_member(clause_cols)) > 0)
+			{
+				attr = RelationGetDescr(rel)->attrs[attnum - 1];
+				appendStringInfo(&str, "%s%s",
+								 (str.len > 0 ? ", " : ""),
+								 NameStr(attr->attname));
+			}
+			ExplainPropertyText("Used in clause ", str.data, es);
 		}
-		ExplainPropertyText("Used in clause ", str.data, es);
-		pfree(str.data);
-	}
 
-	if (predictable)
-	{
-		if (intVal(predictable->arg) == TRUE)
-			ExplainPropertyText("   Predictable ", "Any tuples are visible", es);
-		else
-			ExplainPropertyText("   Predictable ", "NO tuples are visible", es);
-	}
-	else if (device_kernel)
-	{
-		char	   *buf, *p1, *p2;
-
-		buf = pstrdup(strVal(device_kernel->arg));
-		for (p1=p2=buf; *p2 != '\0'; p2++)
+		resetStringInfo(&str);
+		for (p = strVal(kernel_source->arg); *p != '\0'; p++)
 		{
-			if (*p2 != '\n')
-				continue;
-			*p2 = '\0';
-			if (p1 == buf)
-				ExplainPropertyText("   Device code ", p1, es);
+			if (*p == '\n')
+			{
+				snprintf(temp, sizeof(temp), "% 4d", lineno++);
+				ExplainPropertyText(temp, str.data, es);
+				resetStringInfo(&str);
+			}
 			else
-				ExplainPropertyText("               ", p1, es);
-			p1 = p2 + 1;
+				appendStringInfoChar(&str, *p);
 		}
-		if (p1 != p2)
-			ExplainPropertyText("               ", p1, es);
-		pfree(buf);
+		if (str.len > 0)
+		{
+			snprintf(temp, sizeof(temp), "% 4d", lineno++);
+			ExplainPropertyText(temp, str.data, es);
+		}
 	}
+	pfree(str.data);
 }
