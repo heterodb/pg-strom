@@ -80,6 +80,7 @@ typedef struct {
 	Oid		type_oid;
 	char   *type_ident;
 	char   *type_source;
+	char   *type_varref;
 } PgStromDevTypeInfo;
 
 typedef struct {

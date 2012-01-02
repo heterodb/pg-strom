@@ -52,17 +52,33 @@ static CUcontext   *pgstrom_device_context;
  *
  * ------------------------------------------------------------
  */
+#define DEVFUNC_VARREF_TEMPLATE(vtype)									\
+	#vtype " varref_" #vtype "(unsigned char *errors, "					\
+	"unsigned char bitmask, unsigned char isnull, " #vtype " value)\n"	\
+	"{\n"																\
+	"    if (bitmask & isnull)\n"										\
+	"        *errors |= bitmask;\n"										\
+	"    return value;\n"												\
+	"}\n"
+
 static struct {
 	Oid		type_oid;
 	char   *type_ident;
 	char   *type_source;
+	char   *type_varref;
 } device_type_catalog[] = {
-	{ BOOLOID,		"bool_t",	"typedef char  bool_t" },
-	{ INT2OID,		"int2_t",	"typedef short int2_t" },
-	{ INT4OID,		"int4_t",	"typedef int   int4_t" },
-	{ INT8OID,		"int8_t",	"typedef long  int8_t" },
-	{ FLOAT4OID,	"float",	NULL },
-	{ FLOAT8OID,	"double",	NULL },
+	{ BOOLOID,		"bool_t",	"typedef char  bool_t",
+	  DEVFUNC_VARREF_TEMPLATE(bool_t) },
+	{ INT2OID,		"int2_t",	"typedef short int2_t",
+	  DEVFUNC_VARREF_TEMPLATE(int2_t) },
+	{ INT4OID,		"int4_t",	"typedef int   int4_t",
+	  DEVFUNC_VARREF_TEMPLATE(int4_t) },
+	{ INT8OID,		"int8_t",	"typedef long  int8_t",
+	  DEVFUNC_VARREF_TEMPLATE(int8_t) },
+	{ FLOAT4OID,	"float",	NULL,
+	  DEVFUNC_VARREF_TEMPLATE(float) },
+	{ FLOAT8OID,	"double",	NULL,
+	  DEVFUNC_VARREF_TEMPLATE(double) },
 };
 
 void
@@ -150,6 +166,7 @@ pgstrom_devtype_lookup(Oid type_oid)
 		{
 			entry->type_ident  = device_type_catalog[i].type_ident;
 			entry->type_source = device_type_catalog[i].type_source;
+			entry->type_varref = device_type_catalog[i].type_varref;
 			break;
 		}
 	}
@@ -516,9 +533,9 @@ static struct {
 	{ "int8xor", 2, {INT8OID, INT8OID}, 'b', "^", NULL },
 
 	/* '~'  : bitwise not operators */
-	{ "int2not", 1, {INT2OID}, 'l', "!", NULL },
-	{ "int4not", 1, {INT4OID}, 'l', "!", NULL },
-	{ "int8not", 1, {INT8OID}, 'l', "!", NULL },
+	{ "int2not", 1, {INT2OID}, 'l', "~", NULL },
+	{ "int4not", 1, {INT4OID}, 'l', "~", NULL },
+	{ "int8not", 1, {INT8OID}, 'l', "~", NULL },
 
 	/* '>>' : right shift */
 	{ "int2shr", 2, {INT2OID,INT4OID}, 'b', ">>", NULL },

@@ -142,15 +142,16 @@ make_device_qual_code(Node *node, StringInfo qual_source,
 		PgStromDevTypeInfo *tdev;
 		Var *v = (Var *) node;
 
-		appendStringInfo(qual_source,
-						 "((cn%d & bitmask) "
-						 "? (errors |= bitmask, cv%d) "
-						 ": cv%d)",
-						 v->varattno, v->varattno, v->varattno);
 		tdev = pgstrom_devtype_lookup(v->vartype);
 		if (tdev->type_source)
 			*type_decl = list_append_unique_ptr(*type_decl,
 												tdev->type_source);
+		if (tdev->type_varref)
+			*func_decl = list_append_unique_ptr(*func_decl,
+												tdev->type_varref);
+		appendStringInfo(qual_source,
+						 "varref_%s(&errors, bitmask, cn%d, cv%d)",
+						 tdev->type_ident, v->varattno, v->varattno);
 	}
 	else if (IsA(node, FuncExpr))
 	{
