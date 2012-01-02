@@ -35,9 +35,10 @@ static int		pgstrom_max_async_chunks;
 static int		pgstrom_work_group_size;
 
 typedef struct {
-	int			nattrs;
 	int64		rowid;
-	VarBit	   *rowmap;
+	int			nattrs;
+	int			cs_rownums;
+	bits8	   *cs_rowmap;
 	bits8	  **cs_nulls;
 	void	  **cs_values;
 	CUstream	stream;
@@ -107,21 +108,13 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 	 * kernel function, variable length value should not be appeared
 	 * in this stage.
 	 */
-	attr = RelationGetDescr(sestate->relset->base_rel)->attrs[csidx];
+	attr = RelationGetDescr(sestate->es_relation)->attrs[csidx];
 	Assert(attr->attlen > 0);
 
-	chunk->cs_values[csidx]
-		= MemoryContextAllocZero(sestate->es_memcxt,
-								 PGSTROM_CHUNK_SIZE * attr->attlen);
-
 	/*
-	 * null-bitmap shall be initialized as if all the values are NULL.
+	 * Null-bitmap shall be initialized as if all the values are NULL
 	 */
-	chunk->cs_nulls[csidx]
-		= MemoryContextAlloc(sestate->es_memcxt,
-							 PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
-	memset(chunk->cs_nulls[csidx], -1,
-		   PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
+	memset(chunk->cs_nulls[csidx], -1, PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
 
 	/*
 	 * Try to scan column store with cs_rowid betweem rowid and
@@ -483,6 +476,8 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 		HeapTuple	tuple;
 		Datum		values[2];
 		bool		nulls[2];
+		int			rowid;
+		VarBit	   *rowmap;
 		MemoryContext oldcxt;
 		PgStromChunkBuf	*chunk;
 
@@ -499,11 +494,12 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 		heap_deform_tuple(tuple, tupdesc, values, nulls);
 		Assert(!nulls[0] && !nulls[1]);
 
-		oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
+		rowid = DatumGetInt64(values[0]);
+		rowmap = DatumGetVarBitP(values[1]);
 
+		oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 		chunk = palloc0(sizeof(PgStromChunkBuf));
-		chunk->rowid = DatumGetInt64(values[0]);
-		chunk->rowmap = DatumGetVarBitPCopy(values[1]);
+		chunk->rowid = rowid;
 		chunk->nattrs = RelationGetNumberOfAttributes(sestate->es_relation);
 		chunk->cs_nulls = palloc0(sizeof(bool *) * chunk->nattrs);
 		chunk->cs_values = palloc0(sizeof(void *) * chunk->nattrs);
@@ -513,22 +509,69 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 		{
 			Bitmapset  *temp;
 			AttrNumber	attnum;
+			uint16		attlen;
+			char	   *dma_buffer;
+			size_t		dma_size;
+			size_t		dma_offset;
+			CUresult	ret;
 
+			/*
+			 * Compute and allocate required size of column store
+			 */
+			dma_size = PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
+
+			tupdesc = RelationGetDescr(sestate->es_relation);
+			temp = bms_copy(sestate->clause_cols);
+			while ((attnum = bms_first_member(temp)) > 0)
+			{
+				attlen = tupdesc->attrs[attnum - 1]->attlen;
+				Assert(attlen > 0);
+
+				dma_size += (PGSTROM_CHUNK_SIZE / BITS_PER_BYTE +
+							 PGSTROM_CHUNK_SIZE * attlen);
+			}
+			bms_free(temp);
+			ret = cuMemAllocHost((void **)&dma_buffer, dma_size);
+			if (ret != CUDA_SUCCESS)
+				ereport(ERROR,
+						(errcode(ERRCODE_OUT_OF_MEMORY),
+						 errmsg("cuda: failed to page-locked memory : %s",
+								cuda_error_to_string(ret))));
 			/*
 			 * Load necessary column store
 			 */
+			chunk->cs_rowmap = (uint8 *)dma_buffer;
+			chunk->cs_rownums = VARBITLEN(rowmap);
+			if (VARBITLEN(rowmap) != PGSTROM_CHUNK_SIZE)
+				memset(chunk->cs_rowmap, 0,
+					   PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
+			memcpy(chunk->cs_rowmap, VARBITS(rowmap), VARBITBYTES(rowmap));
+			dma_offset = PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
+
+			tupdesc = RelationGetDescr(sestate->es_relation);
 			temp = bms_copy(sestate->clause_cols);
 			while ((attnum = bms_first_member(temp)) > 0)
+			{
+				attlen = tupdesc->attrs[attnum-1]->attlen;
+				Assert(attlen > 0);
+
+				chunk->cs_values[attnum-1] = dma_buffer + dma_offset;
+				dma_offset += PGSTROM_CHUNK_SIZE * attlen;
+				chunk->cs_nulls[attnum-1] = (bits8 *)(dma_buffer + dma_offset);
+				dma_offset += PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
+				Assert(dma_offset <= dma_size);
+
 				pgstrom_load_column_store(sestate, chunk, attnum-1);
+			}
 			bms_free(temp);
 
 			/*
 			 * XXX - exec kernel code on this chunk asynchronously
 			 */
 			oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
-            sestate->chunk_ready_list
-                = lappend(sestate->chunk_ready_list, chunk);
-            MemoryContextSwitchTo(oldcxt);
+			sestate->chunk_ready_list
+				= lappend(sestate->chunk_ready_list, chunk);
+			MemoryContextSwitchTo(oldcxt);
 		}
 		else
 		{
@@ -537,6 +580,10 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 			 * all the chunks are ready to scan using rowid.
 			 */
 			oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
+			chunk->cs_rownums = VARBITLEN(rowmap);
+			chunk->cs_rowmap = palloc(PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
+			memcpy(chunk->cs_rowmap, VARBITS(rowmap),
+				   PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
 			sestate->chunk_ready_list
 				= lappend(sestate->chunk_ready_list, chunk);
 			MemoryContextSwitchTo(oldcxt);
@@ -659,6 +706,8 @@ pgstrom_scan_column_store(PgStromExecState *sestate,
 		sestate->cs_cur_rowid_max[csidx]
 			= cur_rowid + ARR_DIMS(cur_values)[0] - 1;
 
+		elog(NOTICE, "csidx = %d rowid = %lu min = %lu max = %lu", csidx, rowid, sestate->cs_cur_rowid_min[csidx], sestate->cs_cur_rowid_max[csidx]);
+
 		Assert(rowid >= sestate->cs_cur_rowid_min[csidx] &&
 			   rowid <= sestate->cs_cur_rowid_max[csidx]);
 
@@ -691,16 +740,14 @@ pgstrom_scan_chunk_buffer(PgStromExecState *sestate, TupleTableSlot *slot)
 	PgStromChunkBuf	*chunk = lfirst(sestate->curr_chunk);
 	int		index;
 
-	for (index = sestate->curr_index;
-		 index < VARBITLEN(chunk->rowmap);
-		 index++)
+	for (index = sestate->curr_index; index < chunk->cs_rownums; index++)
 	{
 		int		index_h = (index / BITS_PER_BYTE);
 		int		index_l = (index & (BITS_PER_BYTE - 1));
 		int		csidx;
 		int64	rowid;
 
-		if ((VARBITS(chunk->rowmap)[index_h] & (1 << index_l)) == 0)
+		if ((chunk->cs_rowmap[index_h] & (1 << index_l)) == 0)
 			continue;
 
 		rowid = chunk->rowid + index;
@@ -924,9 +971,20 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 retry:
 	if (!pgstrom_scan_chunk_buffer(sestate, slot))
 	{
+		PgStromChunkBuf	*chunk = lfirst(sestate->curr_chunk);
+
 		sestate->chunk_ready_list
-			= list_delete(sestate->chunk_ready_list,
-						  lfirst(sestate->curr_chunk));
+			= list_delete(sestate->chunk_ready_list, chunk);
+		/*
+		 * release chunk being scanned already
+		 */
+		if (sestate->dev_function)
+			cuMemFreeHost(chunk->cs_rowmap);
+		else
+			pfree(chunk->cs_rowmap);
+		pfree(chunk->cs_nulls);
+		pfree(chunk->cs_values);
+		pfree(chunk);
 
 		//pgstrom_sync_kernel_qual(sestate);
 
@@ -939,8 +997,8 @@ retry:
 		/* no more chunks any more */
 		if (sestate->chunk_ready_list == NIL)
 			return slot;
-        sestate->curr_chunk = list_head(sestate->chunk_ready_list);
-        sestate->curr_index = 0;
+		sestate->curr_chunk = list_head(sestate->chunk_ready_list);
+		sestate->curr_index = 0;
 		goto retry;
 	}
 	return slot;
