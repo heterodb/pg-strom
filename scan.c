@@ -38,11 +38,17 @@ typedef struct {
 	int64		rowid;
 	int			nattrs;
 	int			cs_rownums;
-	bits8	   *cs_rowmap;
-	bits8	  **cs_nulls;
-	void	  **cs_values;
+	bits8	   *cs_rowmap;	/* also, head of the page locked memory */
+	int		   *cs_nulls;	/* offset from the cs_rowmap, or 0 */
+	int		   *cs_values;	/* offset from the cs_rowmap, or 0 */
+	CUdeviceptr	devmem;
 	CUstream	stream;
 } PgStromChunkBuf;
+
+#define chunk_cs_nulls(chunk,csidx)		\
+	((bits8 *)((chunk)->cs_rowmap + (chunk)->cs_nulls[(csidx)]))
+#define chunk_cs_values(chunk,csidx)	\
+	((char *)((chunk)->cs_rowmap + (chunk)->cs_values[(csidx)]))
 
 typedef struct {
 	RelationSet		relset;
@@ -114,7 +120,8 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 	/*
 	 * Null-bitmap shall be initialized as if all the values are NULL
 	 */
-	memset(chunk->cs_nulls[csidx], -1, PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
+	memset(chunk_cs_nulls(chunk,csidx), -1,
+		   PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
 
 	/*
 	 * Try to scan column store with cs_rowid betweem rowid and
@@ -157,24 +164,24 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 		Assert((offset & (BITS_PER_BYTE - 1)) == 0);
 		Assert(ARR_NDIM(cur_array) == 1);
 		Assert(ARR_LBOUND(cur_array)[0] == 0);
+		Assert((ARR_DIMS(cur_array)[0] & (BITS_PER_BYTE - 1)) == 0);
 		Assert(ARR_ELEMTYPE(cur_array) == attr->atttypid);
 
 		nitems = ARR_DIMS(cur_array)[0];
-		memcpy(((char *)chunk->cs_values[csidx]) + offset * attr->attlen,
+		memcpy(chunk_cs_values(chunk,csidx) + offset * attr->attlen,
 			   ARR_DATA_PTR(cur_array),
 			   nitems * attr->attlen);
 		nullbitmap = ARR_NULLBITMAP(cur_array);
 		if (nullbitmap)
 		{
-			// XXX - nitems also should be multiple-number of 8
-			memcpy(chunk->cs_nulls[csidx] + offset / BITS_PER_BYTE,
+			memcpy(chunk_cs_nulls(chunk,csidx) + offset / BITS_PER_BYTE,
 				   nullbitmap,
 				   (nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
 		}
 		else
 		{
-			/* clear nullbitmap, if all items are not null */
-			memset(chunk->cs_nulls[csidx] + offset / BITS_PER_BYTE,
+			/* Clear nullbitmap, if all items are not NULL */
+			memset(chunk_cs_nulls(chunk,csidx) + offset / BITS_PER_BYTE,
 				   0,
 				   (nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
 		}
@@ -182,285 +189,21 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 	index_endscan(iscan);
 }
 
-#if 0
-static bool
+static CUresult
 pgstrom_exec_kernel_qual(PgStromExecState *sestate, PgStromChunkBuf *chunk)
 {
-	Form_pg_attribute	attr;
-	MemoryContext		oldcxt;
-	cl_buffer_region	region;
-	cl_kernel	dev_kernel;
-	size_t		dbuf_global_size;
-	cl_mem		dbuf_global_mem;
-	cl_mem		sbuf_rowmap;
-	cl_mem	   *sbuf_values = alloca(sizeof(cl_mem) * chunk->nattrs);
-	cl_mem	   *sbuf_nulls = alloca(sizeof(cl_mem) * chunk->nattrs);
-	cl_mem		sbuf_null_buffer = NULL;
-	cl_event	ev_exec_kernel;
-	cl_event   *ev_copy_to_dev
-		= alloca(sizeof(cl_event) * (2 * chunk->nattrs + 1));
-	cl_int		dev_index;
-	cl_int		n_events = 0;
-	cl_int		n_args = 0;
-	cl_int		ret;
-	size_t		global_work_size;
-	size_t		local_work_size;
-	int			csidx;
+	CUresult	ret;
 
-	/*
-	 * XXX - currently, we use all the GPU devices with round-robin
-	 * storategy. However, it should be configurable in the future.
-	 */
-	dev_index = sestate->dev_command_queue_index++ % pgstrom_num_devices;
+	//ret = cuStreamCreate(&chunk->stream, 0);
+	//if (ret != CUDA_SUCCESS)
+	//	return ret;
 
-	/*
-	 * Create kernel object
-	 */
-	dev_kernel = clCreateKernel(sestate->dev_program,
-								"pgstrom_qual",
-								&ret);
-	Assert(ret == CL_SUCCESS);
+	
 
-	/*
-	 * Estimate required global memory size
-	 */
-	dbuf_global_size = PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
-	for (csidx=0; csidx < chunk->nattrs; csidx++)
-	{
-		attr = RelationGetDescr(sestate->es_relation)->attrs[csidx];
 
-		if (chunk->cs_values[csidx])
-			dbuf_global_size += PGSTROM_CHUNK_SIZE * attr->attlen;
-		if (chunk->cs_nulls[csidx])
-			dbuf_global_size += PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
-	}
 
-	/*
-	 * Allocate global device memory
-	 */
-	dbuf_global_mem = clCreateBuffer(sestate->dev_context,
-									 CL_MEM_READ_WRITE,
-									 dbuf_global_size,
-									 NULL,
-									 &ret);
-	Assert(ret == CL_SUCCESS);
-
-	/*
-	 * Divide the global device memory into sub-buffers, set up argument
-	 * of the kernel, and enqueue task to copy.
-	 */
-	region.origin = 0;
-	region.size = PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
-	sbuf_rowmap = clCreateSubBuffer(dbuf_global_mem,
-									CL_MEM_READ_WRITE,
-									CL_BUFFER_CREATE_TYPE_REGION,
-									&region,
-									&ret);
-	Assert(ret == CL_SUCCESS);
-
-	ret = clSetKernelArg(dev_kernel, n_args++,
-						 sizeof(cl_mem), &sbuf_rowmap);
-	Assert(ret == CL_SUCCESS);
-
-	ret = clEnqueueWriteBuffer(sestate->dev_command_queue[dev_index],
-							   sbuf_rowmap,
-							   CL_FALSE,
-							   0, (VARBITLEN(chunk->rowmap) + 7) / 8,
-							   VARBITS(chunk->rowmap),
-                               0, NULL,
-							   &ev_copy_to_dev[n_events++]);
-	Assert(ret == CL_SUCCESS);
-
-	memset(sbuf_values, 0, sizeof(cl_mem) * chunk->nattrs);
-	memset(sbuf_nulls, 0, sizeof(cl_mem) * chunk->nattrs);
-
-	for (csidx=0; csidx < chunk->nattrs; csidx++)
-    {
-		attr = RelationGetDescr(sestate->es_relation)->attrs[csidx];
-
-		if (!chunk->cs_values[csidx])
-			continue;
-
-		region.origin += region.size;
-		region.size = PGSTROM_CHUNK_SIZE * attr->attlen;
-		sbuf_values[csidx] = clCreateSubBuffer(dbuf_global_mem,
-											   CL_MEM_READ_WRITE,
-											   CL_BUFFER_CREATE_TYPE_REGION,
-											   &region,
-											   &ret);
-		Assert(ret == CL_SUCCESS);
-
-		ret = clSetKernelArg(dev_kernel, n_args++,
-							 sizeof(cl_mem), &sbuf_values[csidx]);
-		Assert(ret == CL_SUCCESS);
-
-		ret = clEnqueueWriteBuffer(sestate->dev_command_queue[dev_index],
-								   sbuf_values[csidx],
-								   CL_FALSE,
-								   0, region.size,
-								   chunk->cs_values[csidx],
-								   0, NULL,
-								   &ev_copy_to_dev[n_events++]);
-		Assert(ret == CL_SUCCESS);
-
-		Assert(chunk->cs_nulls[csidx] != NULL);
-		region.origin += region.size;
-		region.size = PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
-		sbuf_nulls[csidx] = clCreateSubBuffer(dbuf_global_mem,
-											  CL_MEM_READ_WRITE,
-											  CL_BUFFER_CREATE_TYPE_REGION,
-											  &region,
-											  &ret);
-		Assert(ret == CL_SUCCESS);
-
-		ret = clSetKernelArg(dev_kernel, n_args++,
-							 sizeof(cl_mem), &sbuf_nulls[csidx]);
-		Assert(ret == CL_SUCCESS);
-
-		ret = clEnqueueWriteBuffer(sestate->dev_command_queue[dev_index],
-								   sbuf_nulls[csidx],
-								   CL_FALSE,
-								   0, region.size,
-								   chunk->cs_nulls[csidx],
-								   0, NULL,
-								   &ev_copy_to_dev[n_events++]);
-		Assert(ret == CL_SUCCESS);
-	}
-	/*
-	 * Enqueue async-kernel execution
-	 */
-	global_work_size = PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
-	local_work_size = 30;
-	ret = clEnqueueNDRangeKernel(sestate->dev_command_queue[dev_index],
-								 dev_kernel,
-								 1,
-								 NULL,
-								 &global_work_size,
-                                 &local_work_size,
-								 n_events, ev_copy_to_dev,
-								 &ev_exec_kernel);
-	Assert(ret == CL_SUCCESS);
-
-	/*
-	 * Enqueue copy back to the host
-	 */
-	ret = clEnqueueReadBuffer(sestate->dev_command_queue[dev_index],
-							  sbuf_rowmap,
-							  CL_FALSE,
-							  0, (VARBITLEN(chunk->rowmap) + 7) / 8,
-							  VARBITS(chunk->rowmap),
-							  1, &ev_exec_kernel,
-							  &chunk->dev_event);
-	Assert(ret == CL_SUCCESS);
-
-	/*
-	 * Decrement reference counter of event/memory objects
-	 */
-	clReleaseMemObject(sbuf_rowmap);
-	for (csidx=0; csidx < chunk->nattrs; csidx++)
-	{
-		if (sbuf_values[csidx])
-			clReleaseMemObject(sbuf_values[csidx]);
-		if (sbuf_nulls[csidx])
-			clReleaseMemObject(sbuf_nulls[csidx]);
-	}
-	clReleaseMemObject(dbuf_global_mem);
-
-	while (n_events > 0)
-		clReleaseEvent(ev_copy_to_dev[--n_events]);
-	clReleaseEvent(ev_exec_kernel);
-
-	clReleaseKernel(dev_kernel);
-
-	/*
-	 * Append this chunk to chunk_exec_list
-	 */
-	oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
-	sestate->chunk_exec_list
-		= lappend(sestate->chunk_exec_list, chunk);
-	MemoryContextSwitchTo(oldcxt);
-
-	return true;
+	return CUDA_SUCCESS;
 }
-
-/*
- * pgstrom_sync_kernel_qual
- *
- * This routine waits for one of the asynchronous events completed.
- * If true was returned, it means a chunk is in chunk_ready_list.
- */
-static void
-pgstrom_sync_kernel_qual(PgStromExecState *sestate)
-{
-	int	num_got_ready = 0;
-
-	while (num_got_ready == 0)
-	{
-		ListCell   *cell;
-		ListCell   *prev;
-		ListCell   *next;
-		cl_event	event = NULL;
-
-		if (sestate->chunk_exec_list == NIL)
-			return;
-
-		prev = NULL;
-		for (cell = list_head(sestate->chunk_exec_list);
-			 cell != NULL;
-			 cell = next)
-		{
-			PgStromChunkBuf	*chunk = lfirst(cell);
-			MemoryContext	 oldcxt;
-			cl_int	ev_status;
-			cl_int	ret;
-
-			next = lnext(cell);
-
-			ret = clGetEventInfo(chunk->dev_event,
-								 CL_EVENT_COMMAND_EXECUTION_STATUS,
-								 sizeof(ev_status), &ev_status, NULL);
-			Assert(ret == CL_SUCCESS);
-
-			if (ev_status == CL_COMPLETE)
-			{
-				oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
-
-				sestate->chunk_exec_list 
-					= list_delete_cell(sestate->chunk_exec_list, cell, prev);
-
-				sestate->chunk_ready_list
-					= lappend(sestate->chunk_ready_list, chunk);
-
-				num_got_ready++;
-
-				MemoryContextSwitchTo(oldcxt);
-
-				/* Decrement event object's refcount */
-				clReleaseEvent(chunk->dev_event);
-			}
-			else if (ev_status < 0)
-			{
-				/* Decrement event object's refcount */
-				clReleaseEvent(chunk->dev_event);
-
-				elog(ERROR, "OpenCL events return error : %s",
-					 opencl_error_to_string(ev_status));
-			}
-			else
-			{
-				if (event == NULL)
-					event = chunk->dev_event;
-				prev = cell;
-			}
-		}
-		/*
-		 * XXX - we temtatively assume first-event will complete first.
-		 */
-		if (num_got_ready == 0 && event != NULL)
-			clWaitForEvents(1, &event);
-	}
-}
-#endif
 
 static int
 pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
@@ -501,8 +244,8 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 		chunk = palloc0(sizeof(PgStromChunkBuf));
 		chunk->rowid = rowid;
 		chunk->nattrs = RelationGetNumberOfAttributes(sestate->es_relation);
-		chunk->cs_nulls = palloc0(sizeof(bool *) * chunk->nattrs);
-		chunk->cs_values = palloc0(sizeof(void *) * chunk->nattrs);
+		chunk->cs_nulls = palloc0(sizeof(int) * chunk->nattrs);
+		chunk->cs_values = palloc0(sizeof(int) * chunk->nattrs);
 		MemoryContextSwitchTo(oldcxt);
 
 		if (sestate->dev_function)
@@ -511,27 +254,28 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 			AttrNumber	attnum;
 			uint16		attlen;
 			char	   *dma_buffer;
-			size_t		dma_size;
 			size_t		dma_offset;
 			CUresult	ret;
 
 			/*
 			 * Compute and allocate required size of column store
 			 */
-			dma_size = PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
+			dma_offset = PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
 
 			tupdesc = RelationGetDescr(sestate->es_relation);
 			temp = bms_copy(sestate->clause_cols);
 			while ((attnum = bms_first_member(temp)) > 0)
 			{
-				attlen = tupdesc->attrs[attnum - 1]->attlen;
+				attlen = tupdesc->attrs[attnum-1]->attlen;
 				Assert(attlen > 0);
 
-				dma_size += (PGSTROM_CHUNK_SIZE / BITS_PER_BYTE +
-							 PGSTROM_CHUNK_SIZE * attlen);
+				chunk->cs_values[attnum-1] = dma_offset;
+				dma_offset += PGSTROM_CHUNK_SIZE * attlen;
+				chunk->cs_nulls[attnum-1] = dma_offset;
+				dma_offset += PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
 			}
 			bms_free(temp);
-			ret = cuMemAllocHost((void **)&dma_buffer, dma_size);
+			ret = cuMemAllocHost((void **)&dma_buffer, dma_offset);
 			if (ret != CUDA_SUCCESS)
 				ereport(ERROR,
 						(errcode(ERRCODE_OUT_OF_MEMORY),
@@ -548,25 +292,27 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 			memcpy(chunk->cs_rowmap, VARBITS(rowmap), VARBITBYTES(rowmap));
 			dma_offset = PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
 
-			tupdesc = RelationGetDescr(sestate->es_relation);
 			temp = bms_copy(sestate->clause_cols);
 			while ((attnum = bms_first_member(temp)) > 0)
-			{
-				attlen = tupdesc->attrs[attnum-1]->attlen;
-				Assert(attlen > 0);
-
-				chunk->cs_values[attnum-1] = dma_buffer + dma_offset;
-				dma_offset += PGSTROM_CHUNK_SIZE * attlen;
-				chunk->cs_nulls[attnum-1] = (bits8 *)(dma_buffer + dma_offset);
-				dma_offset += PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
-				Assert(dma_offset <= dma_size);
-
 				pgstrom_load_column_store(sestate, chunk, attnum-1);
-			}
 			bms_free(temp);
 
 			/*
-			 * XXX - exec kernel code on this chunk asynchronously
+			 * Asynchronous execution of kernel code on this chunk
+			 */
+			ret = pgstrom_exec_kernel_qual(sestate, chunk);
+			if (ret != CUDA_SUCCESS)
+			{
+				cuMemFreeHost(chunk->cs_rowmap);
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("cuda: failed to execute kernel code : %s",
+								cuda_error_to_string(ret))));
+			}
+
+			/*
+			 * XXX - Do we need to pay attention of the case when
+			 * lappend raises an error?
 			 */
 			oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 			sestate->chunk_ready_list
@@ -706,8 +452,6 @@ pgstrom_scan_column_store(PgStromExecState *sestate,
 		sestate->cs_cur_rowid_max[csidx]
 			= cur_rowid + ARR_DIMS(cur_values)[0] - 1;
 
-		elog(NOTICE, "csidx = %d rowid = %lu min = %lu max = %lu", csidx, rowid, sestate->cs_cur_rowid_min[csidx], sestate->cs_cur_rowid_max[csidx]);
-
 		Assert(rowid >= sestate->cs_cur_rowid_min[csidx] &&
 			   rowid <= sestate->cs_cur_rowid_max[csidx]);
 
@@ -768,18 +512,19 @@ pgstrom_scan_chunk_buffer(PgStromExecState *sestate, TupleTableSlot *slot)
 			 * already loaded on the previous stage. All we need to do
 			 * is pick up an appropriate value from chunk buffer.
 			 */
-			if (chunk->cs_values[csidx])
+			if (chunk->cs_values[csidx] > 0)
 			{
-				if (!chunk->cs_nulls[csidx] ||
-					(chunk->cs_nulls[csidx][index_h] & (1<<index_l)) == 0)
+				bits8  *nullbitmap = chunk_cs_nulls(chunk,csidx);
+
+				if ((nullbitmap[index_h] & (1 << index_l)) == 0)
 				{
 					Form_pg_attribute	attr
 						= slot->tts_tupleDescriptor->attrs[csidx];
 					slot->tts_isnull[csidx] = false;
 					slot->tts_values[csidx] =
-						fetchatt(attr, ((char *)chunk->cs_values[csidx] +
+						fetchatt(attr, (chunk_cs_values(chunk,csidx) +
 										index * attr->attlen));
-					}
+				}
 				else
 				{
 					slot->tts_isnull[csidx] = true;
