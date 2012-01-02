@@ -27,13 +27,6 @@
 #include "utils/varbit.h"
 #include "pg_strom.h"
 
-/*
- * Declarations
- */
-//static cl_context	pgstrom_device_context = NULL;
-static int		pgstrom_max_async_chunks;
-static int		pgstrom_work_group_size;
-
 typedef struct {
 	int64		rowid;
 	int			nattrs;
@@ -64,7 +57,6 @@ typedef struct {
 	Relation		es_relation;	/* copy from ScanState */
 	Snapshot		es_snapshot;	/* copy from EState */
 	MemoryContext	es_memcxt;		/* per-query memory context */
-	//ErrorContextCallback es_errcxt;	/* callback context on error */
 
 	/* scan descriptors */
 	HeapScanDesc	ri_scan;		/* scan on rowid map */
@@ -84,11 +76,14 @@ typedef struct {
 	CUfunction		dev_function;
 } PgStromExecState;
 
+/*
+ * Declarations
+ */
+static int		pgstrom_max_async_chunks;
+
 static void
 pgstrom_cleanup_exec_state(PgStromExecState *sestate)
 {
-	elog(NOTICE, "pgstrom_release_exec_state called: %p", sestate);
-
 	if (sestate->dev_module)
 		cuModuleUnload(sestate->dev_module);
 }
@@ -943,17 +938,6 @@ pgstrom_scan_init(void)
 							32,
 							1,
 							1024,
-							PGC_USERSET,
-							0,
-							NULL, NULL, NULL);
-
-	DefineCustomIntVariable("pg_strom.work_group_size",
-							"size of work group on execution of kernel code",
-							NULL,
-							&pgstrom_work_group_size,
-							32,
-							1,
-							PGSTROM_CHUNK_SIZE / BITS_PER_BYTE,
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);
