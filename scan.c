@@ -31,7 +31,6 @@
  * Declarations
  */
 //static cl_context	pgstrom_device_context = NULL;
-static char	   *pgstrom_nvcc_command;
 static int		pgstrom_max_async_chunks;
 static int		pgstrom_work_group_size;
 
@@ -76,6 +75,14 @@ typedef struct {
 	CUmodule		dev_module;
 	CUfunction		dev_function;
 } PgStromExecState;
+
+
+
+
+
+
+
+
 
 static void
 pgstrom_cleanup_exec_state(PgStromExecState *sestate)
@@ -747,99 +754,6 @@ pgstrom_scan_chunk_buffer(PgStromExecState *sestate, TupleTableSlot *slot)
 	return false;	/* end of chunk, need next chunk! */
 }
 
-static void
-pgstrom_build_kernel_source(PgStromExecState *sestate)
-{
-#define TEMPFILE_FMT	"/tmp/.pgstrom-%u-qual%s"
-	StringInfoData	str;
-	FILE		   *filp;
-	int				code;
-	CUresult		ret;
-
-	/*
-	 * XXX - should put cache lookup to reduce compile time
-	 */
-
-	/*
-	 * Write source code to temporary file
-	 */
-	initStringInfo(&str);
-	appendStringInfo(&str, TEMPFILE_FMT, MyProcPid, ".gpu");
-	filp = AllocateFile(str.data, PG_BINARY_W);
-	if (filp == NULL)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open temporary file \"%s\" : %m",
-						str.data)));
-	if (fputs(sestate->kernel_source, filp) < 0)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not write out source code : %m")));
-	FreeFile(filp);
-
-	/*
-	 * Execute nvcc compiler
-	 */
-	resetStringInfo(&str);
-	appendStringInfo(&str,
-					 "'%s' -fatbin '" TEMPFILE_FMT "' "
-					 "-o '" TEMPFILE_FMT "' 2>'" TEMPFILE_FMT "'",
-					 pgstrom_nvcc_command,
-					 MyProcPid, ".gpu",
-					 MyProcPid, ".fatbin",
-					 MyProcPid, ".log");
-	if (system(str.data) != 0)
-	{
-		resetStringInfo(&str);
-		appendStringInfo(&str, TEMPFILE_FMT, MyProcPid, ".log");
-		filp = AllocateFile(str.data, PG_BINARY_R);
-		if (filp != NULL)
-		{
-			resetStringInfo(&str);
-			while ((code = fgetc(filp)) != EOF)
-			{
-				if (code == '\n')
-				{
-					elog(LOG, "%s", str.data);
-					resetStringInfo(&str);
-				}
-				else
-					appendStringInfoChar(&str, code);
-			}
-			FreeFile(filp);
-		}
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("could not compile the supplied source")));
-	}
-
-	/*
-	 * Load the built module
-	 */
-	resetStringInfo(&str);
-	appendStringInfo(&str, TEMPFILE_FMT, MyProcPid, ".fatbin");
-
-	ret = cuModuleLoad(&sestate->dev_module, str.data);
-	if (ret != CUDA_SUCCESS)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to load device executable code \"%s\" : %s",
-						str.data, cuda_error_to_string(ret))));
-
-	ret = cuModuleGetFunction(&sestate->dev_function,
-							  sestate->dev_module,
-							  "pgstrom_qual");
-	if (ret != CUDA_SUCCESS)
-	{
-		cuModuleUnload(sestate->dev_module);
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to get device function handle : %s",
-						cuda_error_to_string(ret))));
-	}
-	pfree(str.data);
-}
-
 static PgStromExecState *
 pgstrom_init_exec_state(ForeignScanState *fss)
 {
@@ -898,6 +812,9 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	if (!sestate->nevermatch &&
 		sestate->kernel_source != NULL)
 	{
+		CUresult	ret;
+		void	   *image;
+
 		/*
 		 * XXX - we should handle multiple GPU devices
 		 */
@@ -906,7 +823,26 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 		/*
 		 * Build the kernel source code
 		 */
-		pgstrom_build_kernel_source(sestate);
+		image = pgstrom_nvcc_kernel_build(sestate->kernel_source);
+
+		ret = cuModuleLoadData(&sestate->dev_module, image);
+		if (ret != CUDA_SUCCESS)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("cuda: failed to load executable module : %s",
+							cuda_error_to_string(ret))));
+
+		ret = cuModuleGetFunction(&sestate->dev_function,
+								  sestate->dev_module,
+								  "pgstrom_qual");
+		if (ret != CUDA_SUCCESS)
+		{
+			cuModuleUnload(sestate->dev_module);
+			ereport(ERROR,
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("cuda: failed to get device function : %s",
+							cuda_error_to_string(ret))));
+		}
 	}
 	sestate->chunk_exec_list = NIL;
 	sestate->chunk_ready_list = NIL;
@@ -1093,12 +1029,4 @@ pgstrom_scan_init(void)
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);
-	DefineCustomStringVariable("pg_strom.nvcc_command",
-							   "full path of the nvcc command",
-							   NULL,
-							   &pgstrom_nvcc_command,
-							   "/usr/local/cuda/bin/nvcc",
-							   PGC_SIGHUP,
-							   0,
-							   NULL, NULL, NULL);
 }

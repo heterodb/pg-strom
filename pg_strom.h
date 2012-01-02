@@ -111,6 +111,12 @@ extern void pgstrom_devinfo_init(void);
 extern const char *cuda_error_to_string(CUresult result);
 
 /*
+ * nvcc.c
+ */
+extern void *pgstrom_nvcc_kernel_build(const char *kernel_source);
+extern void pgstrom_nvcc_init(void);
+
+/*
  * pg_strom.c
  */
 extern FdwRoutine pgstromFdwHandlerData;

@@ -72,4 +72,7 @@ _PG_init(void)
 
 	/* Initialize stuff related to scan.c */
 	pgstrom_scan_init();
+
+	/* Initialize stuff related to just-in-time compile */
+	pgstrom_nvcc_init();
 }
