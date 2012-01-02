@@ -41,6 +41,7 @@ typedef struct {
 	bits8	   *cs_rowmap;	/* also, head of the page locked memory */
 	int		   *cs_nulls;	/* offset from the cs_rowmap, or 0 */
 	int		   *cs_values;	/* offset from the cs_rowmap, or 0 */
+	size_t		devmem_size;
 	CUdeviceptr	devmem;
 	CUstream	stream;
 } PgStromChunkBuf;
@@ -83,14 +84,6 @@ typedef struct {
 	CUfunction		dev_function;
 } PgStromExecState;
 
-
-
-
-
-
-
-
-
 static void
 pgstrom_cleanup_exec_state(PgStromExecState *sestate)
 {
@@ -98,6 +91,132 @@ pgstrom_cleanup_exec_state(PgStromExecState *sestate)
 
 	if (sestate->dev_module)
 		cuModuleUnload(sestate->dev_module);
+}
+
+static CUresult
+pgstrom_exec_kernel_qual(PgStromExecState *sestate, PgStromChunkBuf *chunk)
+{
+	CUdeviceptr	   *kernel_data;
+	void		  **kernel_args;
+	CUresult		ret;
+	int				i, j;
+
+	ret = cuStreamCreate(&chunk->stream, 0);
+	if (ret != CUDA_SUCCESS)
+		goto error_1;
+
+	ret = cuMemAlloc(&chunk->devmem, chunk->devmem_size);
+	if (ret != CUDA_SUCCESS)
+		goto error_2;
+
+	ret = cuMemcpyHtoDAsync(chunk->devmem,
+							chunk->cs_rowmap,
+							chunk->devmem_size,
+							chunk->stream);
+	if (ret != CUDA_SUCCESS)
+        goto error_3;
+
+	kernel_data = alloca((1 + 2 * chunk->nattrs) * sizeof(CUdeviceptr));
+	kernel_args = alloca((1 + 2 * chunk->nattrs) * sizeof(void *));
+	kernel_data[0] = chunk->devmem;
+	kernel_args[0] = &kernel_data[0];
+	for (i=0, j=1; i < chunk->nattrs; i++)
+	{
+		if (chunk->cs_values[i] > 0)
+		{
+			kernel_data[j] = chunk->devmem + chunk->cs_values[i];
+			kernel_data[j+1] = chunk->devmem + chunk->cs_nulls[i];
+			Assert(chunk->cs_nulls[i] > 0);
+			kernel_args[j] = &kernel_data[j];
+			kernel_args[j+1] = &kernel_data[j+1];
+			j += 2;
+		}
+	}
+	ret = cuLaunchKernel(sestate->dev_function,
+						 (chunk->cs_rownums / BITS_PER_BYTE + 29) / 30,
+						 1,
+						 1,
+						 30,
+						 1,
+						 1,
+						 0,
+						 chunk->stream,
+						 kernel_args,
+						 NULL);
+	if (ret != CUDA_SUCCESS)
+        goto error_4;
+
+	ret = cuMemcpyDtoHAsync(chunk->cs_rowmap,
+							chunk->devmem,
+							PGSTROM_CHUNK_SIZE / BITS_PER_BYTE,
+							chunk->stream);
+	if (ret != CUDA_SUCCESS)
+		goto error_4;
+
+	return CUDA_SUCCESS;
+
+error_4:
+	cuStreamSynchronize(chunk->stream);
+error_3:
+	cuMemFree(chunk->devmem);
+error_2:
+	cuStreamDestroy(chunk->stream);
+error_1:
+	return ret;
+}
+
+static void
+pgstrom_sync_kernel_exec(PgStromExecState *sestate)
+{
+	ListCell   *cell;
+	ListCell   *next;
+	ListCell   *prev;
+	CUstream	first_stream = NULL;
+	CUresult	ret;
+
+	if (sestate->chunk_exec_list == NIL)
+		return;
+
+retry:
+	prev = NULL;
+	for (cell = list_head(sestate->chunk_exec_list); cell; cell = next)
+	{
+		PgStromChunkBuf	*chunk = lfirst(cell);
+
+		next = lnext(cell);
+
+		ret = cuStreamQuery(chunk->stream);
+		if (ret == CUDA_SUCCESS)
+		{
+			MemoryContext	oldcxt;
+
+			sestate->chunk_exec_list
+				= list_delete_cell(sestate->chunk_exec_list, cell, prev);
+			oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
+			sestate->chunk_ready_list
+				= lappend(sestate->chunk_ready_list, chunk);
+			MemoryContextSwitchTo(oldcxt);
+		}
+		else if (ret == CUDA_ERROR_NOT_READY)
+		{
+			if (!first_stream)
+				first_stream = chunk->stream;
+		}
+		else
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("cuda: failed on query status of stream : %s",
+							cuda_error_to_string(ret))));
+		}
+	}
+
+	if (sestate->chunk_ready_list == NIL)
+	{
+		Assert(first_stream != NULL);
+		cuStreamSynchronize(first_stream);
+		goto retry;
+	}
 }
 
 static void
@@ -189,22 +308,6 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 	index_endscan(iscan);
 }
 
-static CUresult
-pgstrom_exec_kernel_qual(PgStromExecState *sestate, PgStromChunkBuf *chunk)
-{
-	CUresult	ret;
-
-	//ret = cuStreamCreate(&chunk->stream, 0);
-	//if (ret != CUDA_SUCCESS)
-	//	return ret;
-
-	
-
-
-
-	return CUDA_SUCCESS;
-}
-
 static int
 pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 {
@@ -281,6 +384,8 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 						(errcode(ERRCODE_OUT_OF_MEMORY),
 						 errmsg("cuda: failed to page-locked memory : %s",
 								cuda_error_to_string(ret))));
+			chunk->devmem_size = dma_offset;
+
 			/*
 			 * Load necessary column store
 			 */
@@ -290,7 +395,6 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 				memset(chunk->cs_rowmap, 0,
 					   PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
 			memcpy(chunk->cs_rowmap, VARBITS(rowmap), VARBITBYTES(rowmap));
-			dma_offset = PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
 
 			temp = bms_copy(sestate->clause_cols);
 			while ((attnum = bms_first_member(temp)) > 0)
@@ -315,8 +419,8 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 			 * lappend raises an error?
 			 */
 			oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
-			sestate->chunk_ready_list
-				= lappend(sestate->chunk_ready_list, chunk);
+			sestate->chunk_exec_list
+				= lappend(sestate->chunk_exec_list, chunk);
 			MemoryContextSwitchTo(oldcxt);
 		}
 		else
@@ -635,6 +739,17 @@ pgstrom_init_exec_state(ForeignScanState *fss)
                      errmsg("cuda: failed to get device function : %s",
 							cuda_error_to_string(ret))));
 		}
+
+		ret = cuFuncSetCacheConfig(sestate->dev_function,
+								   CU_FUNC_CACHE_PREFER_L1);
+		if (ret != CUDA_SUCCESS)
+        {
+			cuModuleUnload(sestate->dev_module);
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("cuda: failed to set L1 cache setting : %s",
+                            cuda_error_to_string(ret))));
+		}
 	}
 	sestate->chunk_exec_list = NIL;
 	sestate->chunk_ready_list = NIL;
@@ -705,10 +820,14 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 	{
 		num_chunks = (pgstrom_max_async_chunks -
 					  list_length(sestate->chunk_exec_list));
+
 		if (pgstrom_load_chunk_buffer(sestate, num_chunks) < 1)
 			return slot;
 
-		//pgstrom_sync_kernel_qual(sestate);
+		pgstrom_sync_kernel_exec(sestate);
+		/*
+		 * XXX - at least one chunk should be synchronized.
+		 */
 		Assert(sestate->chunk_ready_list != NIL);
 		sestate->curr_chunk = list_head(sestate->chunk_ready_list);
 		sestate->curr_index = 0;
@@ -718,11 +837,11 @@ retry:
 	{
 		PgStromChunkBuf	*chunk = lfirst(sestate->curr_chunk);
 
+		/*
+		 * Release the current chunk being already scanned
+		 */
 		sestate->chunk_ready_list
 			= list_delete(sestate->chunk_ready_list, chunk);
-		/*
-		 * release chunk being scanned already
-		 */
 		if (sestate->dev_function)
 			cuMemFreeHost(chunk->cs_rowmap);
 		else
@@ -731,17 +850,23 @@ retry:
 		pfree(chunk->cs_values);
 		pfree(chunk);
 
-		//pgstrom_sync_kernel_qual(sestate);
+		/*
+		 * Is the concurrent chunks ready now?
+		 */
+		pgstrom_sync_kernel_exec(sestate);
 
 		num_chunks = (pgstrom_max_async_chunks -
 					  list_length(sestate->chunk_exec_list));
 		num_chunks = pgstrom_load_chunk_buffer(sestate, num_chunks);
-		//if (sestate->chunk_ready_list == NIL)
-		//	pgstrom_sync_kernel_qual(sestate);
 
-		/* no more chunks any more */
 		if (sestate->chunk_ready_list == NIL)
-			return slot;
+		{
+			if (num_chunks < 1)
+				return slot;
+			else
+				pgstrom_sync_kernel_exec(sestate);
+		}
+		Assert(sestate->chunk_ready_list != NIL);
 		sestate->curr_chunk = list_head(sestate->chunk_ready_list);
 		sestate->curr_index = 0;
 		goto retry;
