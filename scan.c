@@ -84,7 +84,7 @@ typedef struct {
 static MemoryContext	pgstrom_scan_memcxt;
 static List	   *pgstrom_exec_state_list = NIL;
 static int		pgstrom_max_async_chunks;
-
+static size_t	pgstrom_locked_mem_usage;
 
 static void
 pgstrom_release_chunk_buffer(PgStromExecState *sestate,
@@ -101,10 +101,15 @@ pgstrom_release_chunk_buffer(PgStromExecState *sestate,
 			cuStreamSynchronize(chunk->stream);
 		cuStreamDestroy(chunk->stream);
 	}
-	if (sestate->dev_module)
-		cuMemFreeHost(chunk->cs_rowmap);
-	else
+	if (chunk->devmem)
+		cuMemFree(chunk->devmem);
+	if (!sestate->dev_module)
 		pfree(chunk->cs_rowmap);
+	else
+	{
+		cuMemFreeHost(chunk->cs_rowmap);
+		pgstrom_locked_mem_usage -= chunk->devmem_size;
+	}
 	pfree(chunk->cs_nulls);
 	pfree(chunk->cs_values);
 	pfree(chunk);
@@ -208,10 +213,11 @@ pgstrom_exec_kernel_qual(PgStromExecState *sestate, PgStromChunkBuf *chunk)
 		}
 	}
 	ret = cuLaunchKernel(sestate->dev_function,
-						 (chunk->cs_rownums / BITS_PER_BYTE + 29) / 30,
+						 PGSTROM_CHUNK_SIZE /
+						 (BITS_PER_BYTE * PGSTROM_THREADS_PER_BLOCK),
 						 1,
 						 1,
-						 30,
+						 PGSTROM_THREADS_PER_BLOCK,
 						 1,
 						 1,
 						 0,
@@ -459,6 +465,7 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 						(errcode(ERRCODE_OUT_OF_MEMORY),
 						 errmsg("cuda: failed to page-locked memory : %s",
 								cuda_error_to_string(ret))));
+			pgstrom_locked_mem_usage += dma_offset;
 			chunk->devmem_size = dma_offset;
 
 			/*
@@ -483,6 +490,7 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 			if (ret != CUDA_SUCCESS)
 			{
 				cuMemFreeHost(chunk->cs_rowmap);
+				pgstrom_locked_mem_usage -= dma_offset;
 				ereport(ERROR,
 						(errcode(ERRCODE_INTERNAL_ERROR),
 						 errmsg("cuda: failed to execute kernel code : %s",
@@ -952,14 +960,14 @@ retry:
 			num_chunks = (pgstrom_max_async_chunks -
 						  list_length(sestate->chunk_exec_list));
 			num_chunks = pgstrom_load_chunk_buffer(sestate, num_chunks);
-		}
 
-		if (sestate->chunk_ready_list == NIL)
-		{
-			if (num_chunks < 1)
-				return slot;
-			else
-				pgstrom_sync_kernel_exec(sestate);
+			if (sestate->chunk_ready_list == NIL)
+			{
+				if (num_chunks < 1)
+					return slot;
+				else
+					pgstrom_sync_kernel_exec(sestate);
+			}
 		}
 		Assert(sestate->chunk_ready_list != NIL);
 		sestate->curr_chunk = list_head(sestate->chunk_ready_list);
@@ -1025,6 +1033,42 @@ pgstrom_end_foreign_scan(ForeignScanState *fss)
 
 	pgstrom_close_relation_set(sestate->relset, AccessShareLock);
 	pgstrom_release_exec_state(sestate);
+}
+
+List *
+pgstrom_scan_debug_info(List *debug_info_list)
+{
+	DefElem	*defel;
+	char	key[128];
+	char	val[128];
+	int		i, n;
+
+	/* locked_mem_usage */
+	snprintf(val, sizeof(val), "%lu KB", pgstrom_locked_mem_usage / 1024);
+	defel = makeDefElem("Page-locked memory usage",
+						(Node *)makeString(pstrdup(val)));
+	debug_info_list = lappend(debug_info_list, defel);
+
+	/* device memory usage */
+	n = pgstrom_get_num_devices();
+	for (i=0; i < n; i++)
+	{
+		size_t	free_mem;
+		size_t	total_mem;
+
+		pgstrom_set_device_context(i);
+
+		if (cuMemGetInfo(&free_mem, &total_mem) != CUDA_SUCCESS)
+			continue;
+
+		snprintf(key, sizeof(key), "Device (%d) memory usage", i);
+		snprintf(val, sizeof(val), "%lu KB",
+				 (total_mem - free_mem) / 1024);
+		defel = makeDefElem(pstrdup(key),
+							(Node *)makeString(pstrdup(val)));
+		debug_info_list = lappend(debug_info_list, defel);
+	}
+	return debug_info_list;
 }
 
 /*

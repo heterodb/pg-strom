@@ -69,6 +69,7 @@ extern void	pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags);
 extern TupleTableSlot *pgstrom_iterate_foreign_scan(ForeignScanState *fss);
 extern void	pgstrom_rescan_foreign_scan(ForeignScanState *fss);
 extern void	pgstrom_end_foreign_scan(ForeignScanState *fss);
+extern List *pgstrom_scan_debug_info(List *debug_info_list);
 extern void pgstrom_scan_init(void);
 
 /*
@@ -120,5 +121,6 @@ extern void pgstrom_nvcc_init(void);
 extern FdwRoutine pgstromFdwHandlerData;
 extern Datum pgstrom_fdw_handler(PG_FUNCTION_ARGS);
 extern Datum pgstrom_fdw_validator(PG_FUNCTION_ARGS);
+extern Datum pgstrom_debug_info(PG_FUNCTION_ARGS);
 
 #endif	/* PG_STROM_H */
