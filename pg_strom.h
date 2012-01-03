@@ -22,11 +22,9 @@
 
 #define PGSTROM_SCHEMA_NAME		"pg_strom"
 
-#define PGSTROM_CHUNK_SIZE		(2400 * (BLCKSZ / 8192))
-#define PGSTROM_UNIT_SIZE(attr)								\
-	(((attr)->attlen > 0 ?									\
-	  (PGSTROM_CHUNK_SIZE / (attr)->attlen) :				\
-	  (PGSTROM_CHUNK_SIZE / 100)) & ~(BITS_PER_BYTE - 1))
+#define PGSTROM_THREADS_PER_BLOCK	32
+#define PGSTROM_CHUNK_SIZE			\
+	(BLCKSZ - PGSTROM_THREADS_PER_BLOCK * BITS_PER_BYTE)
 
 /*
  * utilcmds.c

@@ -249,7 +249,8 @@ make_device_qual_code(Node *node, StringInfo qual_source,
 }
 
 static void
-make_device_source(Oid base_relid, List *device_quals, List **private)
+make_device_source(Oid base_relid, List *device_quals,
+				   Bitmapset *clause_cols, List **private)
 {
 	StringInfoData	kern;
 	StringInfoData	decl;
@@ -279,8 +280,6 @@ make_device_source(Oid base_relid, List *device_quals, List **private)
 		RestrictInfo   *rinfo = lfirst(cell);
 
 		Assert(IsA(rinfo, RestrictInfo));
-
-		columns = bms_union(columns, pull_varnos((Node *)rinfo->clause));
 
 		qual_list = lappend(qual_list, rinfo->clause);
 	}
@@ -331,7 +330,7 @@ make_device_source(Oid base_relid, List *device_quals, List **private)
 					 "    for (bitmask=1; bitmask < 256; bitmask <<= 1)\n"
 					 "    {\n");
 
-	tempset = bms_copy(columns);
+	tempset = bms_copy(clause_cols);
 	while ((attnum = bms_first_member(tempset)) > 0)
 	{
 		PgStromDevTypeInfo *tinfo
@@ -385,7 +384,7 @@ make_device_source(Oid base_relid, List *device_quals, List **private)
 	defel = makeDefElem("kernel_source", (Node *) makeString(decl.data));
 	*private = lappend(*private, (Node *)defel);
 
-	while ((attnum = bms_first_member(columns)) > 0)
+	while ((attnum = bms_first_member(clause_cols)) > 0)
 	{
 		defel = makeDefElem("clause_cols",
 							(Node *) makeInteger(attnum));
@@ -413,8 +412,10 @@ is_device_executable_qual_walker(Node *node, void *context)
 	}
 	else if (IsA(node, Var))
 	{
-		RelOptInfo *baserel = (RelOptInfo *)context;
-		Var	*v = (Var *)node;
+		Var		   *v = (Var *)node;
+		void	  **context_args = (void **)context;
+		RelOptInfo *baserel = context_args[0];
+		Bitmapset **clause_cols = context_args[1];
 
 		if (v->varno != baserel->relid)
 			return true;	/* should not be happen... */
@@ -424,6 +425,8 @@ is_device_executable_qual_walker(Node *node, void *context)
 			return true;	/* system columns are not supported */
 		if (!pgstrom_devtype_lookup(v->vartype))
 			return true;	/* unsupported data type? */
+
+		*clause_cols = bms_add_member(*clause_cols, v->varattno);
 	}
 	else if (IsA(node, FuncExpr))
 	{
@@ -469,13 +472,19 @@ is_device_executable_qual_walker(Node *node, void *context)
 }
 
 static bool
-is_device_executable_qual(RelOptInfo *baserel, RestrictInfo *rinfo)
+is_device_executable_qual(RelOptInfo *baserel, RestrictInfo *rinfo,
+						  Bitmapset **clause_cols)
 {
+	void   *context[2];
+
 	if (!bms_singleton_member(rinfo->required_relids))
 		return false;
 
+	context[0] = baserel;
+	context[1] = clause_cols;
+
 	return !is_device_executable_qual_walker((Node *) rinfo->clause,
-											 (void *) baserel);
+											 (void *) &context);
 }
 
 FdwPlan *
@@ -487,6 +496,7 @@ pgstrom_plan_foreign_scan(Oid foreignTblOid,
 	List	   *private = NIL;
 	List	   *host_quals = NIL;
 	List	   *device_quals = NIL;
+	Bitmapset  *clause_cols = NULL;
 	ListCell   *cell;
 	DefElem	   *defel;
 	AttrNumber	i;
@@ -511,7 +521,7 @@ pgstrom_plan_foreign_scan(Oid foreignTblOid,
 		RestrictInfo   *rinfo = lfirst(cell);
 
 		if (pgstrom_get_num_devices() > 0 &&
-			is_device_executable_qual(baserel, rinfo))
+			is_device_executable_qual(baserel, rinfo, &clause_cols))
 			device_quals = lappend(device_quals, rinfo);
 		else
 			host_quals = lappend(host_quals, rinfo);
@@ -519,7 +529,7 @@ pgstrom_plan_foreign_scan(Oid foreignTblOid,
 
 	baserel->baserestrictinfo = host_quals;
 	if (device_quals != NIL)
-		make_device_source(foreignTblOid, device_quals, &private);
+		make_device_source(foreignTblOid, device_quals, clause_cols, &private);
 
 	/*
 	 * Set up FdwPlan

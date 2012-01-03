@@ -102,8 +102,8 @@ pgstrom_devtype_format(StringInfo str, Oid type_oid, Datum value)
 		case FLOAT4OID:
 			{
 				double	num = (type_oid == FLOAT4OID ?
-							   Float4GetDatum(value) :
-							   Float8GetDatum(value));
+							   DatumGetFloat4(value) :
+							   DatumGetFloat8(value));
 				if (isnan(num))
 					appendStringInfo(str, "NAN");
 				else

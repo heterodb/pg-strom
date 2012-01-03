@@ -946,9 +946,13 @@ retry:
 		 */
 		pgstrom_sync_kernel_exec(sestate);
 
-		num_chunks = (pgstrom_max_async_chunks -
-					  list_length(sestate->chunk_exec_list));
-		num_chunks = pgstrom_load_chunk_buffer(sestate, num_chunks);
+		if (list_length(sestate->chunk_ready_list) +
+			list_length(sestate->chunk_exec_list) < pgstrom_max_async_chunks)
+		{
+			num_chunks = (pgstrom_max_async_chunks -
+						  list_length(sestate->chunk_exec_list));
+			num_chunks = pgstrom_load_chunk_buffer(sestate, num_chunks);
+		}
 
 		if (sestate->chunk_ready_list == NIL)
 		{
