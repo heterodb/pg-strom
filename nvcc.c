@@ -318,7 +318,7 @@ static void
 pgstrom_nvcc_shmem_init(void)
 {
 	PgStromNvccCache   *cache;
-	uint32		limit = (pgstrom_nvcc_cache_size << 20);
+	uint32		limit = (pgstrom_nvcc_cache_size * 1024);
 	uint32		offset;
 	bool		found;
 
@@ -329,7 +329,7 @@ pgstrom_nvcc_shmem_init(void)
 		Assert(!found);
 
 		pgstrom_nvcc_hash->lock = LWLockAssign();
-		pgstrom_nvcc_hash->hash_sz = pgstrom_nvcc_cache_size * 64;
+		pgstrom_nvcc_hash->hash_sz = pgstrom_nvcc_cache_size / 8;
 		pgstrom_nvcc_hash->free_list = 0;
 		memset(pgstrom_nvcc_hash->slots, 0,
 			   sizeof(uint32) * pgstrom_nvcc_hash->hash_sz);
@@ -363,9 +363,9 @@ pgstrom_nvcc_init(void)
 							"size of shmem to cache compiled queries",
 							NULL,
 							&pgstrom_nvcc_cache_size,
-							32,
-							2,
 							2048,
+							512,
+							256 * 1024,
 							PGC_SIGHUP,
 							0,
 							NULL, NULL, NULL);
@@ -379,14 +379,7 @@ pgstrom_nvcc_init(void)
 							   NULL, NULL, NULL);
 
 	/* acquire shared memory segment for query cache */
-	RequestAddinShmemSpace(pgstrom_nvcc_cache_size << 20);
+	RequestAddinShmemSpace(pgstrom_nvcc_cache_size * 1024);
 	shmem_startup_hook_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_nvcc_shmem_init;
 }
-
-#if 0
-static void
-pgstrom_build_kernel_source(PgStromExecState *sestate)
-{
-}
-#endif
