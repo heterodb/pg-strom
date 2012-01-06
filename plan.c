@@ -16,13 +16,23 @@
 #include "optimizer/var.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/syscache.h"
 #include "pg_strom.h"
 
+/*
+ * static declarations
+ */
 static bool
 make_device_qual_code(Node *node, StringInfo qual_source,
 					  Oid base_relid,
 					  List **type_decl, List **func_decl);
 
+/*
+ * make_device_function_code
+ *
+ * Helper function of make_device_qual_code; that generate source code to
+ * invoke a device function or use a device operator.
+ */
 static bool
 make_device_function_code(Oid func_oid, List *args,
 						  Oid func_resulttype,
@@ -30,21 +40,21 @@ make_device_function_code(Oid func_oid, List *args,
 						  Oid base_relid,
 						  List **type_decl, List **func_decl)
 {
-	PgStromDevFuncInfo *fdev = pgstrom_devfunc_lookup(func_oid);
-	PgStromDevTypeInfo *tdev;
+	PgStromDevFuncInfo *dfunc = pgstrom_devfunc_lookup(func_oid);
+	PgStromDevTypeInfo *dtype;
 	ListCell   *cell;
 	int			i;
 
-   	switch (fdev->func_kind)
+   	switch (dfunc->func_kind)
 	{
 		case 'c':	/* function as constant */
 			Assert(list_length(args) == 0);
-			appendStringInfo(qual_source, "%s", fdev->func_ident);
+			appendStringInfo(qual_source, "%s", dfunc->func_ident);
 			break;
 
 		case 'l':	/* function as left-operator */
 			Assert(list_length(args) == 1);
-			appendStringInfo(qual_source, "(%s", fdev->func_ident);
+			appendStringInfo(qual_source, "(%s", dfunc->func_ident);
 			if (!make_device_qual_code((Node *) linitial(args),
 									   qual_source, base_relid,
 									   type_decl, func_decl))
@@ -59,7 +69,7 @@ make_device_function_code(Oid func_oid, List *args,
 									   qual_source, base_relid,
 									   type_decl, func_decl))
 				return false;
-			appendStringInfo(qual_source, "%s)", fdev->func_ident);
+			appendStringInfo(qual_source, "%s)", dfunc->func_ident);
 			break;
 
 		case 'b':	/* function as left-right-operator */
@@ -69,7 +79,7 @@ make_device_function_code(Oid func_oid, List *args,
 									   qual_source, base_relid,
 									   type_decl, func_decl))
 				return false;
-			appendStringInfo(qual_source, " %s ", fdev->func_ident);
+			appendStringInfo(qual_source, " %s ", dfunc->func_ident);
 			if (!make_device_qual_code((Node *) lsecond(args),
 									   qual_source, base_relid,
 									   type_decl, func_decl))
@@ -80,7 +90,7 @@ make_device_function_code(Oid func_oid, List *args,
 		case 'f':	/* function as device function */
 			appendStringInfo(qual_source,
 							 "%s(&errors, bitmask",
-							 fdev->func_ident);
+							 dfunc->func_ident);
 			foreach (cell, args)
 			{
 				appendStringInfo(qual_source, ", ");
@@ -93,26 +103,158 @@ make_device_function_code(Oid func_oid, List *args,
 			break;
 		default:
 			elog(ERROR, "unexpected func_kind : %c of \"%s\"",
-				 fdev->func_kind, fdev->func_ident);
+				 dfunc->func_kind, dfunc->func_ident);
 			break;
 	}
-	if (fdev->func_source)
+	if (dfunc->func_source)
 		*func_decl = list_append_unique_ptr(*func_decl,
-											fdev->func_source);
-	tdev = pgstrom_devtype_lookup(func_resulttype);
-	if (tdev->type_source)
+											dfunc->func_source);
+	dtype = pgstrom_devtype_lookup(func_resulttype);
+	if (dtype->type_source)
 		*type_decl = list_append_unique_ptr(*type_decl,
-											tdev->type_source);
-	for (i=0; i < fdev->func_nargs; i++)
+											dtype->type_source);
+	for (i=0; i < dfunc->func_nargs; i++)
 	{
-		tdev = pgstrom_devtype_lookup(fdev->func_argtypes[i]);
-		if (tdev->type_source)
+		dtype = pgstrom_devtype_lookup(dfunc->func_argtypes[i]);
+		if (dtype->type_source)
 			*type_decl = list_append_unique_ptr(*type_decl,
-												tdev->type_source);
+												dtype->type_source);
 	}
 	return true;
 }
 
+/*
+ * make_device_var_code
+ *
+ * Helper function of make_device_qual_code; that generate references
+ * to a particular variable.
+ */
+static bool
+make_device_var_code(Var *var, StringInfo qual_source,
+					 Oid base_relid,
+					 List **type_decl, List **func_decl)
+{
+	PgStromDevTypeInfo *dtype;
+	Form_pg_attribute	attr;
+	HeapTuple	tup;
+
+	dtype = pgstrom_devtype_lookup(var->vartype);
+	if (dtype->type_source)
+		*type_decl = list_append_unique_ptr(*type_decl,
+											dtype->type_source);
+	/*
+	 * A trivial optimization with NOT NULL constraint; if we can make
+	 * sure all the values being valid, no need to use varref_* device
+	 * function to set a bit of "errors" due to null values.
+	 */
+	tup = SearchSysCache2(ATTNUM,
+						  ObjectIdGetDatum(base_relid),
+						  Int16GetDatum(var->varattno));
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for attribute %d of relation %u",
+			 var->varattno, base_relid);
+	attr = (Form_pg_attribute) GETSTRUCT(tup);
+
+	if (attr->attnotnull)
+		appendStringInfo(qual_source, "cv%d", var->varattno);
+	else
+	{
+		if (dtype->type_varref)
+			*func_decl = list_append_unique_ptr(*func_decl,
+												dtype->type_varref);
+	   	appendStringInfo(qual_source,
+						 "varref_%s(&errors, bitmask, cn%d, cv%d)",
+						 dtype->type_ident, var->varattno, var->varattno);
+	}
+	ReleaseSysCache(tup);
+
+	return true;
+}
+
+static bool
+make_device_bool_code(BoolExpr *b, StringInfo qual_source,
+					  Oid base_relid,
+					  List **type_decl, List **func_decl)
+{
+	StringInfoData	temp;
+	ListCell	   *cell;
+	int				count;
+
+	switch (b->boolop)
+	{
+		case AND_EXPR:
+			appendStringInfo(qual_source, "(");
+			foreach (cell, b->args)
+			{
+				if (cell != list_head(b->args))
+					appendStringInfo(qual_source, " && ");
+				if (!make_device_qual_code((Node *)lfirst(cell),
+										   qual_source,
+										   base_relid,
+										   type_decl, func_decl))
+					return false;
+				appendStringInfo(qual_source, ")");
+			}
+			break;
+
+		case OR_EXPR:
+			initStringInfo(&temp);
+			count = 0;
+
+			foreach (cell, b->args)
+			{
+				List	   *type_decl_temp = NIL;
+				List	   *func_decl_temp = NIL;
+				ListCell   *l;
+
+				resetStringInfo(&temp);
+
+				if (make_device_qual_code((Node *) lfirst(cell),
+										  &temp,
+										  base_relid,
+										  &type_decl_temp,
+										  &func_decl_temp))
+				{
+					if (count++ == 0)
+						appendStringInfo(qual_source, "(%s", temp.data);
+					else
+						appendStringInfo(qual_source, " || %s", temp.data);
+
+					foreach (l, type_decl_temp)
+						*type_decl = lappend(*type_decl, lfirst(l));
+					foreach (l, func_decl_temp)
+						*func_decl = lappend(*func_decl, lfirst(l));
+				}
+			}
+			if (count == 0)
+				return false;
+			appendStringInfo(qual_source, ")");
+			break;
+
+		case NOT_EXPR:
+			Assert(list_length(b->args) == 1);
+			appendStringInfo(qual_source, "!");
+			if (!make_device_qual_code((Node *) linitial(b->args),
+									   qual_source,
+									   base_relid,
+									   type_decl, func_decl))
+				return false;
+			break;
+
+		default:
+			elog(ERROR, "unexpected operation of BoolExpr: %d", b->boolop);
+			break;
+	}
+	return true;
+}
+
+/*
+ * make_device_qual_code
+ *
+ * It generate source code on the device corresponding to the supplied
+ * qualifier. It assumes the qualifier already passes all the checks in
+ * the is_device_executable_qual()
+ */
 static bool
 make_device_qual_code(Node *node, StringInfo qual_source,
 					  Oid base_relid,
@@ -139,19 +281,10 @@ make_device_qual_code(Node *node, StringInfo qual_source,
 	}
 	else if (IsA(node, Var))
 	{
-		PgStromDevTypeInfo *tdev;
-		Var *v = (Var *) node;
-
-		tdev = pgstrom_devtype_lookup(v->vartype);
-		if (tdev->type_source)
-			*type_decl = list_append_unique_ptr(*type_decl,
-												tdev->type_source);
-		if (tdev->type_varref)
-			*func_decl = list_append_unique_ptr(*func_decl,
-												tdev->type_varref);
-		appendStringInfo(qual_source,
-						 "varref_%s(&errors, bitmask, cn%d, cv%d)",
-						 tdev->type_ident, v->varattno, v->varattno);
+		if (!make_device_var_code((Var *)node, qual_source,
+								  base_relid,
+								  type_decl, func_decl))
+			return false;
 	}
 	else if (IsA(node, FuncExpr))
 	{
@@ -175,72 +308,12 @@ make_device_qual_code(Node *node, StringInfo qual_source,
 									   type_decl, func_decl))
 			return false;
 	}
-	else if (IsA(node, RelabelType))
-	{}
-	else if (IsA(node, CoerceViaIO))
-	{}
 	else if (IsA(node, BoolExpr))
 	{
-		BoolExpr   *b = (BoolExpr *)node;
-		ListCell   *cell;
-
-		switch (b->boolop)
-		{
-			case AND_EXPR:
-				appendStringInfo(qual_source, "(");
-				foreach (cell, b->args)
-				{
-					if (cell != list_head(b->args))
-						appendStringInfo(qual_source, " && ");
-					if (!make_device_qual_code((Node *)lfirst(cell),
-											   qual_source,
-											   base_relid,
-											   type_decl, func_decl))
-						return false;
-				}
-				appendStringInfo(qual_source, ")");
-				break;
-			case OR_EXPR:
-				{
-					StringInfoData	temp_src;
-					int		count = 0;
-
-					foreach (cell, b->args)
-					{
-						initStringInfo(&temp_src);
-
-						if (make_device_qual_code((Node *) lfirst(cell),
-												  &temp_src, base_relid,
-												  type_decl, func_decl))
-						{
-							if (count++ == 0)
-								appendStringInfo(qual_source, "(%s",
-												 temp_src.data);
-							else
-								appendStringInfo(qual_source, " || %s",
-												 temp_src.data);
-						}
-						pfree(temp_src.data);
-					}
-
-					if (count == 0)
-						appendStringInfo(qual_source, "false");
-					else
-						appendStringInfo(qual_source, ")");
-				}
-				break;
-			case NOT_EXPR:
-				Assert(list_length(b->args) == 1);
-				appendStringInfo(qual_source, "!");
-				if (!make_device_qual_code((Node *) linitial(b->args),
-										   qual_source,
-										   base_relid,
-										   type_decl, func_decl))
-					return false;
-				break;
-			default:
-				break;
-		}
+		if (!make_device_bool_code((BoolExpr *)node,
+								   qual_source, base_relid,
+								   type_decl, func_decl))
+			return false;
 	}
 	else
 		elog(ERROR, "unexpected node: %s", nodeToString(node));
@@ -398,6 +471,14 @@ make_device_source(Oid base_relid, List *device_quals,
 	pfree(kern.data);
 }
 
+/*
+ * is_device_executable_qual
+ *
+ * It checks whether the supplied qualifier is available to run on GPU
+ * device, or not. All the executable functions, operators are listed
+ * on devinfo.c. If the qualifier contains any unlisted node, it is
+ * not executable on device.
+ */
 static bool
 is_device_executable_qual_walker(Node *node, void *context)
 {
@@ -447,6 +528,7 @@ is_device_executable_qual_walker(Node *node, void *context)
 	{
 		/* any bool expr acceptable */
 	}
+#if 0
 	else if (IsA(node, RelabelType))
 	{
 		RelabelType	*rl = (RelabelType *)node;
@@ -463,6 +545,7 @@ is_device_executable_qual_walker(Node *node, void *context)
 									cv->resulttype))
 			return true;
 	}
+#endif
 	else
 		return true;
 
@@ -487,6 +570,11 @@ is_device_executable_qual(RelOptInfo *baserel, RestrictInfo *rinfo,
 											 (void *) &context);
 }
 
+/*
+ * pgstrom_plan_foreign_scan
+ *
+ * FDW handler to generate execute plan of PG-Strom.
+ */
 FdwPlan *
 pgstrom_plan_foreign_scan(Oid foreignTblOid,
 						  PlannerInfo *root,
@@ -533,16 +621,22 @@ pgstrom_plan_foreign_scan(Oid foreignTblOid,
 
 	/*
 	 * Set up FdwPlan
+	 *
+	 * TODO: more pratical information shall be returned to the planner.
 	 */
 	fdwplan = makeNode(FdwPlan);
-	fdwplan->startup_cost = 1.0;
-	fdwplan->startup_cost = 2.0;
+	fdwplan->startup_cost = 0.0;
+	fdwplan->total_cost = 0.0;
 	fdwplan->fdw_private = private;
 
 	return fdwplan;
 }
 
-
+/*
+ * pgstrom_explain_foreign_scan 
+ *
+ * FDW handler to generate the result of EXPLAIN statement
+ */
 void
 pgstrom_explain_foreign_scan(ForeignScanState *fss,
 							 ExplainState *es)

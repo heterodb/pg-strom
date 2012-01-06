@@ -89,19 +89,10 @@ typedef struct {
 	Oid		func_argtypes[0];	/* copy from pg_proc.proargtypes */
 } PgStromDevFuncInfo;
 
-typedef struct {
-	Oid		cast_source;
-	Oid		cast_target;
-	char   *func_ident;
-	char   *func_source;
-} PgStromDevCastInfo;
-
 extern void pgstrom_devtype_format(StringInfo str,
 								   Oid type_oid, Datum value);
 extern PgStromDevTypeInfo *pgstrom_devtype_lookup(Oid type_oid);
 extern PgStromDevFuncInfo *pgstrom_devfunc_lookup(Oid func_oid);
-extern PgStromDevCastInfo *pgstrom_devcast_lookup(Oid source_typeid,
-												  Oid target_typeid);
 extern void pgstrom_set_device_context(int dev_index);
 extern int	pgstrom_get_num_devices(void);
 extern void pgstrom_devinfo_init(void);

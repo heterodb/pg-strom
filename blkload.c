@@ -268,6 +268,15 @@ pgstrom_data_load_internal(RelationSet relset, uint32 chunk_size,
 
 			if (rs_nulls[attno])
 			{
+				Form_pg_attribute	attr
+					= RelationGetDescr(relset->base_rel)->attrs[attno];
+
+				if (attr->attnotnull)
+					ereport(ERROR,
+							(errcode(ERRCODE_NOT_NULL_VIOLATION),
+							 errmsg("null value in column \"%s\" violates "
+									"not-null constraint",
+									NameStr(attr->attname))));
 				cs_nulls[csidx][index] = true;
 				cs_values[csidx][index] = (Datum) 0;
 			}
@@ -313,11 +322,11 @@ pgstrom_data_load_internal(RelationSet relset, uint32 chunk_size,
 	{
 		if ((csidx = attmap[attno] - 1) < 0)
 			continue;
-		elog(NOTICE, "column \"%s\" was compressed (%luKB => %luKB), %.2f%%",
+		elog(INFO, "column \"%s\" was compressed (%luKB => %luKB), %.2f%%",
 			 NameStr(tupdesc->attrs[attno]->attname),
 			 cs_rawlen[csidx] / 1024,
 			 cs_complen[csidx] / 1024,
-			 ((double) cs_complen[csidx]) / ((double) cs_rawlen[csidx]));
+			 100.0 * ((double)cs_complen[csidx]) / ((double)cs_rawlen[csidx]));
 	}
 }
 

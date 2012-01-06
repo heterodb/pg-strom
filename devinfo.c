@@ -37,10 +37,8 @@ typedef struct {
 /*
  * Declarations
  */
-#define PGSTROM_UNSUPPORTED_CAST_INTO	((void *)-1)
 static List		   *devtype_info_slot[512];
 static List		   *devfunc_info_slot[1024];
-static List		   *devcast_info_slot[256];
 
 static int			pgstrom_num_devices;
 static PgStromDeviceInfo  *pgstrom_device_info;
@@ -180,104 +178,6 @@ out:
 
 /* ------------------------------------------------------------
  *
- * Catalog of supported device casts
- *
- * ------------------------------------------------------------
- */
-static struct {
-	Oid		cast_source;
-	Oid		cast_target;
-	char   *func_ident;
-	char   *func_source;
-} device_cast_by_func_catalog[] = {
-};
-
-static Oid	device_cast_by_inline_catalog[] = {
-	BOOLOID,
-	INT2OID,
-	INT4OID,
-	INT8OID,
-	FLOAT4OID,
-	FLOAT8OID,
-};
-
-PgStromDevCastInfo *
-pgstrom_devcast_lookup(Oid source_typeid, Oid target_typeid)
-{
-	PgStromDevCastInfo *entry;
-	MemoryContext		oldcxt;
-	ListCell		   *cell;
-	int					i, j, hash;
-
-	hash = hash_uint32((uint32)(source_typeid ^ target_typeid))
-		% lengthof(devcast_info_slot);
-	foreach (cell, devcast_info_slot[hash])
-	{
-		entry = lfirst(cell);
-		if (entry->cast_source == source_typeid &&
-			entry->cast_target == target_typeid)
-		{
-			if (entry->func_ident == PGSTROM_UNSUPPORTED_CAST_INTO)
-				return NULL;
-			return entry;
-		}
-	}
-
-	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
-
-	entry = palloc0(sizeof(PgStromDevCastInfo));
-	entry->cast_source = source_typeid;
-	entry->cast_target = target_typeid;
-	entry->func_ident  = PGSTROM_UNSUPPORTED_CAST_INTO;
-	entry->func_source = NULL;
-
-	if (!pgstrom_devtype_lookup(source_typeid) ||
-		!pgstrom_devtype_lookup(target_typeid))
-		goto out;
-
-	/*
-	 * Lookup cast by function catalog
-	 */
-	for (i=0; i < lengthof(device_cast_by_func_catalog); i++)
-	{
-		if (device_cast_by_func_catalog[i].cast_source == source_typeid &&
-			device_cast_by_func_catalog[i].cast_target == target_typeid)
-		{
-			entry->func_ident  = device_cast_by_func_catalog[i].func_ident;
-			entry->func_source = device_cast_by_func_catalog[i].func_source;
-			goto out;
-		}
-	}
-
-	/*
-	 * Lookup cast by inline catalog
-	 */
-	for (i=0, j=0; i < lengthof(device_cast_by_inline_catalog); i++)
-	{
-		if (device_cast_by_inline_catalog[i] == source_typeid)
-			j |= 1;
-		if (device_cast_by_inline_catalog[i] == target_typeid)
-			j |= 2;
-		if (j == 3)
-		{
-			entry->func_ident = NULL;
-			entry->func_source = NULL;
-			break;
-		}
-	}
-out:
-	devcast_info_slot[hash]
-		= lappend(devcast_info_slot[hash], entry);
-
-	MemoryContextSwitchTo(oldcxt);
-
-	if (entry->func_ident == PGSTROM_UNSUPPORTED_CAST_INTO)
-		return NULL;
-	return entry;
-}
-
-/* ------------------------------------------------------------
- *
  * Catalog of supported device functions
  *
  * ------------------------------------------------------------
@@ -325,6 +225,33 @@ static struct {
 	char   *func_ident;
 	char   *func_source;
 } device_func_catalog[] = {
+	/*
+	 * cast of data types
+	 *
+	 * XXX - note that inline cast is writable using left-operator
+	 * manner, like (uint2_t)X.
+	 */
+	{ "int2", 1, {INT4OID},   'l', "(int2_t)", NULL },
+	{ "int2", 1, {INT8OID},   'l', "(int2_t)", NULL },
+	{ "int2", 1, {FLOAT4OID}, 'l', "(int2_t)", NULL },
+	{ "int2", 1, {FLOAT8OID}, 'l', "(int2_t)", NULL },
+	{ "int4", 1, {INT2OID},   'l', "(int4_t)", NULL },
+	{ "int4", 1, {INT8OID},   'l', "(int4_t)", NULL },
+	{ "int4", 1, {FLOAT4OID}, 'l', "(int4_t)", NULL },
+	{ "int4", 1, {FLOAT8OID}, 'l', "(int4_t)", NULL },
+	{ "int8", 1, {INT2OID},   'l', "(int8_t)", NULL },
+	{ "int8", 1, {INT4OID},   'l', "(int8_t)", NULL },
+	{ "int8", 1, {FLOAT4OID}, 'l', "(int8_t)", NULL },
+	{ "int8", 1, {FLOAT8OID}, 'l', "(int8_t)", NULL },
+	{ "float4", 1, {INT2OID},   'l', "(float)",  NULL },
+	{ "float4", 1, {INT4OID},   'l', "(float)",  NULL },
+	{ "float4", 1, {INT8OID},   'l', "(float)",  NULL },
+	{ "float4", 1, {FLOAT8OID}, 'l', "(float)",  NULL },
+	{ "float8", 1, {INT2OID},   'l', "(double)",  NULL },
+	{ "float8", 1, {INT4OID},   'l', "(double)",  NULL },
+	{ "float8", 1, {INT8OID},   'l', "(double)",  NULL },
+	{ "float8", 1, {FLOAT4OID}, 'l', "(double)",  NULL },
+
 	/* '+'  : add operators */
 	{ "int2pl",	 2, {INT2OID, INT2OID}, 'b', "+", NULL },
 	{ "int24pl", 2, {INT2OID, INT4OID}, 'b', "+", NULL },
@@ -686,7 +613,6 @@ pgstrom_devinfo_init(void)
 
 	memset(devtype_info_slot, 0, sizeof(devtype_info_slot));
 	memset(devfunc_info_slot, 0, sizeof(devfunc_info_slot));
-	memset(devcast_info_slot, 0, sizeof(devcast_info_slot));
 
 	ret = cuInit(0);
 	if (ret != CUDA_SUCCESS)

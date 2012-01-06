@@ -254,7 +254,7 @@ pgstrom_create_rowid_index(Relation base_rel, const char *attname,
 				 false,				/* skip_build */
 				 false);			/* concurrent */
 
-	elog(NOTICE, "pg_strom implicitly created a shadow index: \"%s.%s\"",
+	elog(INFO, "pg_strom created a shadow index: \"%s.%s\"",
 		 PGSTROM_SCHEMA_NAME, index_name);
 }
 
@@ -324,7 +324,7 @@ pgstrom_create_rowid_map(Oid namespaceId, Relation base_rel)
 										 false);
 	Assert(OidIsValid(store_oid));
 
-	elog(NOTICE, "pg_strom implicitly created a shadow table: \"%s.%s\"",
+	elog(INFO, "pg_strom created a shadow table: \"%s.%s\"",
 		 PGSTROM_SCHEMA_NAME, store_name);
 
 	/* make the shadow table visible */
@@ -370,6 +370,7 @@ pgstrom_create_column_store(Oid namespaceId, Relation base_rel,
 	Relation		store_rel;
 	TupleDesc		tupdesc;
 	Oid				array_oid;
+	int32			atttypmod = -1;
 	ObjectAddress	base_address;
 	ObjectAddress	store_address;
 
@@ -383,10 +384,13 @@ pgstrom_create_column_store(Oid namespaceId, Relation base_rel,
 				(errcode(ERRCODE_NAME_TOO_LONG),
 				 errmsg("Name of shadow table: \"%s\" too long", store_name)));
 
-	if (attform->attndims == 0)
-		array_oid = get_array_type(attform->atttypid);
-	else
+	if (attform->attndims > 0)
 		array_oid = get_array_type(BYTEAOID);
+	else
+	{
+		array_oid = get_array_type(attform->atttypid);
+		atttypmod = attform->atttypmod;
+	}
 	if (!OidIsValid(array_oid))
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
@@ -402,7 +406,7 @@ pgstrom_create_column_store(Oid namespaceId, Relation base_rel,
 					   (AttrNumber) 2,
 					   "values",
 					   array_oid,
-					   -1, 1);
+					   atttypmod, 1);
 	/*
 	 * Pg_strom want to keep varlena data being inlined; never uses external
 	 * toast relation due to the performance reason. So, we override the
@@ -432,7 +436,7 @@ pgstrom_create_column_store(Oid namespaceId, Relation base_rel,
 										 false);
 	Assert(OidIsValid(store_oid));
 
-	elog(NOTICE, "pg_strom implicitly created a shadow table: \"%s.%s\"",
+	elog(INFO, "pg_strom created a shadow table: \"%s.%s\"",
 		 PGSTROM_SCHEMA_NAME, store_name);
 
 	/* make the shadow table visible */
@@ -497,7 +501,7 @@ pgstrom_create_rowid_seq(Oid namespaceId, Relation base_rel)
 
 	DefineSequence(seq_stmt);
 
-	elog(NOTICE, "pg_strom implicitly created a shadow table: \"%s.%s\"",
+	elog(INFO, "pg_strom created a shadow table: \"%s.%s\"",
 		 PGSTROM_SCHEMA_NAME, seq_name);
 }
 
