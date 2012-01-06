@@ -20,9 +20,11 @@
 #include "commands/sequence.h"
 #include "fmgr.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
 #include "utils/array.h"
 #include "utils/errcodes.h"
 #include "utils/rel.h"
+#include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "utils/tqual.h"
 #include "utils/varbit.h"
@@ -31,8 +33,10 @@
 
 
 static void
-pgstrom_cschunk_insert(RelationSet relset, VarBit *cs_usemap,
-					   Datum **cs_values, bool **cs_nulls, int nitems)
+pgstrom_cschunk_insert(RelationSet relset, int chunk_size,
+					   VarBit *cs_usemap,
+					   Datum **cs_values, bool **cs_nulls,
+					   size_t *cs_rawlen, size_t *cs_complen)
 {
 	int64		rowid;
 	TupleDesc	tupdesc;
@@ -43,6 +47,8 @@ pgstrom_cschunk_insert(RelationSet relset, VarBit *cs_usemap,
 	Oid			save_userid;
 	int			save_sec_context;
 	AttrNumber	csidx, nattrs;
+
+	Assert(chunk_size % BITS_PER_BYTE == 0);
 
 	/*
 	 * Acquire a row-id of the head of this chunk
@@ -62,8 +68,8 @@ pgstrom_cschunk_insert(RelationSet relset, VarBit *cs_usemap,
 	memset(nulls, false, sizeof(nulls));
 
 	values[0] = Int64GetDatum(rowid);
-	VARBITLEN(cs_usemap) = PGSTROM_CHUNK_SIZE;
-	SET_VARSIZE(cs_usemap, VARBITTOTALLEN(PGSTROM_CHUNK_SIZE));
+	VARBITLEN(cs_usemap) = chunk_size;
+	SET_VARSIZE(cs_usemap, VARBITTOTALLEN(chunk_size));
 	values[1] = PointerGetDatum(cs_usemap);
 	temp = toast_compress_datum(values[1]);
 	if (DatumGetPointer(temp) != NULL)
@@ -92,23 +98,22 @@ pgstrom_cschunk_insert(RelationSet relset, VarBit *cs_usemap,
 		int			cs_dims[1];
 		int			cs_lbound[1];
 
-		for (rs_base=0; rs_base < nitems; rs_base += rs_unitsz)
+		for (rs_base=0; rs_base < chunk_size; rs_base += rs_unitsz)
 		{
 			int		index;
 
 			/*
-			 * compute length of array; fixed length shall be applied
-			 * in the case when attlen > 0; that can be handled by GPU.
-			 * otherwise, we try to put varlena data into a single chunk
-			 * as much as possible we can.
+			 * XXX - We assume 50% of BLCKSZ is a watermark to put data
+			 * into an array of values. It is just a heuristics, so it
+			 * may be changed in the future release.
 			 */
 			if (attr->attlen > 0)
-				rs_unitsz = PGSTROM_CHUNK_SIZE / attr->attlen;
+				rs_unitsz = (BLCKSZ / 2) / attr->attlen;
 			else
 			{
 				int		total_length = 0;
 
-				for (rs_unitsz=0; rs_base+rs_unitsz < nitems; rs_unitsz++)
+				for (rs_unitsz=0; rs_base+rs_unitsz < chunk_size; rs_unitsz++)
 				{
 					index = rs_base+rs_unitsz;
 
@@ -123,7 +128,7 @@ pgstrom_cschunk_insert(RelationSet relset, VarBit *cs_usemap,
 					temp = (Datum)PG_DETOAST_DATUM(cs_values[csidx][index]);
 					cs_values[csidx][index] = temp;
 
-					if (total_length + VARSIZE(temp) > PGSTROM_CHUNK_SIZE)
+					if (total_length + VARSIZE(temp) > (BLCKSZ / 2))
 						break;
 
 					total_length += VARSIZE(temp);
@@ -137,8 +142,8 @@ pgstrom_cschunk_insert(RelationSet relset, VarBit *cs_usemap,
 				if (rs_unitsz == 0)
 					rs_unitsz = 1;
 			}
-			if (rs_base + rs_unitsz > nitems)
-				rs_unitsz = nitems - rs_base;
+			if (rs_base + rs_unitsz > chunk_size)
+				rs_unitsz = chunk_size - rs_base;
 
 			/*
 			 * In the case when column-store does not contain any valid
@@ -157,7 +162,7 @@ pgstrom_cschunk_insert(RelationSet relset, VarBit *cs_usemap,
 			/*
 			 * Set up an array
 			 */
-			Assert(rs_unitsz > 0 && rs_unitsz <= PGSTROM_CHUNK_SIZE);
+			Assert(rs_unitsz > 0 && rs_unitsz <= chunk_size);
 			cs_dims[0] = rs_unitsz;
 			cs_lbound[0] = 0;
 			cs_array = construct_md_array(&cs_values[csidx][rs_base],
@@ -175,9 +180,11 @@ pgstrom_cschunk_insert(RelationSet relset, VarBit *cs_usemap,
 			memset(nulls, false, sizeof(nulls));
 			values[0] = Int64GetDatum(rowid + rs_base);
 			values[1] = PointerGetDatum(cs_array);
+			cs_rawlen[csidx] += VARSIZE(values[1]);
 			temp = toast_compress_datum(values[1]);
 			if (DatumGetPointer(temp) != NULL)
 				values[1] = temp;
+			cs_complen[csidx] += VARSIZE(values[1]);
 
 			tupdesc = RelationGetDescr(relset->cs_rel[csidx]);
 			tuple = heap_form_tuple(tupdesc, values, nulls);
@@ -193,7 +200,7 @@ pgstrom_cschunk_insert(RelationSet relset, VarBit *cs_usemap,
 }
 
 static void
-pgstrom_data_load_internal(RelationSet relset,
+pgstrom_data_load_internal(RelationSet relset, uint32 chunk_size,
 						   Relation source, AttrNumber *attmap)
 {
 	TupleDesc		tupdesc;
@@ -205,9 +212,11 @@ pgstrom_data_load_internal(RelationSet relset,
 	VarBit		   *cs_usemap;
 	Datum		  **cs_values;
 	bool		  **cs_nulls;
+	size_t		   *cs_rawlen;
+	size_t		   *cs_complen;
 	MemoryContext	cs_memcxt;
 	MemoryContext	oldcxt;
-	AttrNumber		i, j, nattrs;
+	AttrNumber		attno, csidx, nattrs;
 	int				index = 0;
 
 	tupdesc = RelationGetDescr(source);
@@ -215,16 +224,18 @@ pgstrom_data_load_internal(RelationSet relset,
 	rs_nulls  = palloc(sizeof(bool)  * tupdesc->natts);
 
 	nattrs = RelationGetNumberOfAttributes(relset->base_rel);
-	cs_usemap = palloc0(VARBITTOTALLEN(PGSTROM_CHUNK_SIZE));
+	cs_usemap = palloc0(sizeof(bool) * chunk_size);
+
 	cs_values = palloc(sizeof(Datum *) * nattrs);
 	cs_nulls = palloc(sizeof(bool *) * nattrs);
-	for (j=0; j < nattrs; j++)
+	for (csidx = 0; csidx < nattrs; csidx++)
 	{
-		cs_values[j] = palloc(sizeof(Datum) * PGSTROM_CHUNK_SIZE);
-		cs_nulls[j] = palloc(sizeof(bool) * PGSTROM_CHUNK_SIZE);
+		cs_values[csidx] = palloc(sizeof(Datum) * chunk_size);
+		cs_nulls[csidx] = palloc(sizeof(bool) * chunk_size);
 	}
-	rs_tuples = palloc(sizeof(HeapTuple) * PGSTROM_CHUNK_SIZE);
-
+	cs_rawlen = palloc0(sizeof(size_t) * nattrs);
+	cs_complen = palloc0(sizeof(size_t) * nattrs);
+	rs_tuples = palloc(sizeof(HeapTuple) * chunk_size);
 
 	/*
 	 * Create a temp memory context to prevent possible memory leak
@@ -250,51 +261,64 @@ pgstrom_data_load_internal(RelationSet relset,
 		VARBITS(cs_usemap)[index / BITS_PER_BYTE]
 			|= (1 << (index % BITS_PER_BYTE));
 
-		for (i=0; i < tupdesc->natts; i++)
+		for (attno=0; attno < tupdesc->natts; attno++)
 		{
-			if ((j = attmap[i] - 1) < 0)
+			if ((csidx = attmap[attno] - 1) < 0)
 				continue;
 
-			if (rs_nulls[i])
-				cs_nulls[j][index] = true;
+			if (rs_nulls[attno])
+			{
+				cs_nulls[csidx][index] = true;
+				cs_values[csidx][index] = (Datum) 0;
+			}
 			else
 			{
-				cs_nulls[j][index] = false;
-				cs_values[j][index] = rs_values[i];
+				cs_nulls[csidx][index] = false;
+				cs_values[csidx][index] = rs_values[attno];
 			}
 		}
-		if (++index == PGSTROM_CHUNK_SIZE)
+		if (++index == chunk_size)
 		{
-			pgstrom_cschunk_insert(relset, cs_usemap,
-								   cs_values, cs_nulls, index);
-			/* reset to head of the chunk */
+			pgstrom_cschunk_insert(relset, index,
+								   cs_usemap, cs_values, cs_nulls,
+								   cs_rawlen, cs_complen);
+			/*
+			 * index shall be rewinded to the head, and release
+			 * all the per-chunk memory.
+			 */
 			index = 0;
+			memset(cs_usemap, 0, chunk_size / BITS_PER_BYTE);
 			MemoryContextReset(cs_memcxt);
 		}
 	}
 	if (index > 0)
 	{
-		pgstrom_cschunk_insert(relset, cs_usemap,
-							   cs_values, cs_nulls, index);
+		/* index being round up to multiple number of 8 */
+		index = (index + BITS_PER_BYTE - 1) & ~(BITS_PER_BYTE - 1);
+		Assert(index <= chunk_size);
+		pgstrom_cschunk_insert(relset, index,
+							   cs_usemap, cs_values, cs_nulls,
+							   cs_rawlen, cs_complen);
 	}
-	MemoryContextSwitchTo(oldcxt);
-
 	heap_endscan(scan);
+
+	MemoryContextSwitchTo(oldcxt);
 
 	MemoryContextDelete(cs_memcxt);
 
-	/* release chunk memory */
-	for (j=0; j < nattrs; j++)
+	/*
+	 * Logs rate of data compression
+	 */
+	for (attno=0; attno < tupdesc->natts; attno++)
 	{
-		pfree(cs_nulls[j]);
-		pfree(cs_values[j]);
+		if ((csidx = attmap[attno] - 1) < 0)
+			continue;
+		elog(NOTICE, "column \"%s\" was compressed (%luKB => %luKB), %.2f%%",
+			 NameStr(tupdesc->attrs[attno]->attname),
+			 cs_rawlen[csidx] / 1024,
+			 cs_complen[csidx] / 1024,
+			 ((double) cs_complen[csidx]) / ((double) cs_rawlen[csidx]));
 	}
-	pfree(cs_nulls);
-	pfree(cs_values);
-	pfree(cs_usemap);
-	pfree(rs_tuples);
-	pfree(rs_nulls);
-	pfree(rs_values);
 }
 
 static void
@@ -378,25 +402,29 @@ pgstrom_data_clear(PG_FUNCTION_ARGS)
 }
 
 /*
- * bool pgstrom_data_load(regclass source_rel,
- *                        regclass dest_rel);
- *
+ * bool
+ * pgstrom_data_load(regclass dest_rel,
+ *                   regclass src_rel,
+ *                   int chunk_size)
  */
 Datum
 pgstrom_data_load(PG_FUNCTION_ARGS)
 {
 	Relation		srel;
-	Relation		base_rel;
+	Relation		drel;
 	RelationSet		drelset;
+	HeapScanDesc	scan;
+	HeapTuple		tuple;
 	RangeTblEntry  *srte;
 	RangeTblEntry  *drte;
+	uint32			chunk_size = PG_GETARG_UINT32(2);
 	AttrNumber		i, nattrs;
 	AttrNumber	   *attmap;
 
 	/*
 	 * Open the source relation
 	 */
-	srel = relation_open(PG_GETARG_OID(0), AccessShareLock);
+	srel = relation_open(PG_GETARG_OID(1), AccessShareLock);
 	if (RelationGetForm(srel)->relkind != RELKIND_RELATION)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
@@ -405,8 +433,68 @@ pgstrom_data_load(PG_FUNCTION_ARGS)
 	/*
 	 * Open the destination relation set
 	 */
-	base_rel = relation_open(PG_GETARG_OID(1), RowExclusiveLock);
-	drelset = pgstrom_open_relation_set(base_rel, RowExclusiveLock, false);
+	drel = relation_open(PG_GETARG_OID(0), RowExclusiveLock);
+	drelset = pgstrom_open_relation_set(drel, RowExclusiveLock, false);
+
+	/*
+	 * Check correctness of the chunk-size
+	 */
+	scan = heap_beginscan(drelset->rowid_rel, SnapshotNow, 0, NULL);
+
+	tuple = heap_getnext(scan, ForwardScanDirection);
+	if (HeapTupleIsValid(tuple))
+	{
+		TupleDesc	tupdesc = RelationGetDescr(drelset->rowid_rel);
+		Datum		values[2];
+		bool		nulls[2];
+		VarBit	   *rowmap;
+
+		heap_deform_tuple(tuple, tupdesc, values, nulls);
+		Assert(!nulls[0] && !nulls[1]);
+
+		rowmap = DatumGetVarBitPCopy(values[1]);
+		if (chunk_size == 0)
+			chunk_size = VARBITLEN(rowmap);
+		else if (VARBITLEN(rowmap) != chunk_size)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+					 errmsg("chunk size must be same with existing data")));
+	}
+	else
+	{
+		AlterSeqStmt   *stmt;
+		Oid		save_userid;
+		int		save_sec_context;
+		uint32	temp;
+
+		for (temp = 2048; temp <= BLCKSZ * BITS_PER_BYTE; temp <<= 1)
+		{
+			if (temp == chunk_size)
+				break;
+		}
+		if (temp > BLCKSZ * BITS_PER_BYTE)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+					 errmsg("chunk size must be power of 2 between %u and %u",
+							1024, BLCKSZ * BITS_PER_BYTE)));
+		/*
+		 * Reset sequence to adjust the supplied chunk->nitems
+		 */
+		stmt = makeNode(AlterSeqStmt);
+		stmt->sequence = makeRangeVar(PGSTROM_SCHEMA_NAME,
+									  get_rel_name(drelset->rowid_seqid), -1);
+		stmt->options = list_make2(
+			makeDefElem("increment", (Node *)makeInteger(chunk_size)),
+			makeDefElem("restart",   (Node *)makeInteger(0)));
+
+		GetUserIdAndSecContext(&save_userid, &save_sec_context);
+		SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID, save_sec_context);
+
+		AlterSequence(stmt);
+
+		SetUserIdAndSecContext(save_userid, save_sec_context);
+	}
+	heap_endscan(scan);
 
 	/*
 	 * Set up RangeTblEntry for permission checks
@@ -481,13 +569,13 @@ pgstrom_data_load(PG_FUNCTION_ARGS)
 	/*
 	 * Loada data
 	 */
-	pgstrom_data_load_internal(drelset, srel, attmap);
+	pgstrom_data_load_internal(drelset, chunk_size, srel, attmap);
 
 	/*
 	 * Close the relation
 	 */
 	pgstrom_close_relation_set(drelset, NoLock);
-	relation_close(base_rel, NoLock);
+	relation_close(drel, NoLock);
 	relation_close(srel, AccessShareLock);
 
 	PG_RETURN_BOOL(true);

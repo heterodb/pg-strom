@@ -23,8 +23,6 @@
 #define PGSTROM_SCHEMA_NAME		"pg_strom"
 
 #define PGSTROM_THREADS_PER_BLOCK	32
-#define PGSTROM_CHUNK_SIZE			\
-	(BLCKSZ - PGSTROM_THREADS_PER_BLOCK * BITS_PER_BYTE)
 
 /*
  * utilcmds.c

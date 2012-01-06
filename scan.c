@@ -31,7 +31,7 @@
 typedef struct {
 	int64		rowid;
 	int			nattrs;
-	int			cs_rownums;
+	int			nitems;		/* number of items */
 	bits8	   *cs_rowmap;	/* also, head of the page locked memory */
 	int		   *cs_nulls;	/* offset from the cs_rowmap, or 0 */
 	int		   *cs_values;	/* offset from the cs_rowmap, or 0 */
@@ -179,6 +179,8 @@ pgstrom_exec_kernel_qual(PgStromExecState *sestate, PgStromChunkBuf *chunk)
 	CUdeviceptr	   *kernel_data;
 	void		  **kernel_args;
 	CUresult		ret;
+	unsigned int	n_blocks;
+	unsigned int	n_threads;
 	int				i, j;
 
 	ret = cuStreamCreate(&chunk->stream, 0);
@@ -196,6 +198,9 @@ pgstrom_exec_kernel_qual(PgStromExecState *sestate, PgStromChunkBuf *chunk)
 	if (ret != CUDA_SUCCESS)
         goto error_3;
 
+	/*
+	 * Setup kernel arguments
+	 */
 	kernel_data = alloca((1 + 2 * chunk->nattrs) * sizeof(CUdeviceptr));
 	kernel_args = alloca((1 + 2 * chunk->nattrs) * sizeof(void *));
 	kernel_data[0] = chunk->devmem;
@@ -212,12 +217,17 @@ pgstrom_exec_kernel_qual(PgStromExecState *sestate, PgStromChunkBuf *chunk)
 			j += 2;
 		}
 	}
+	/*
+	 * Launch kernel function
+	 */
+	n_threads = PGSTROM_THREADS_PER_BLOCK;
+	n_blocks = (chunk->nitems + n_threads * BITS_PER_BYTE - 1)
+		/ (BITS_PER_BYTE * n_threads);
 	ret = cuLaunchKernel(sestate->dev_function,
-						 PGSTROM_CHUNK_SIZE /
-						 (BITS_PER_BYTE * PGSTROM_THREADS_PER_BLOCK),
+						 n_blocks,
 						 1,
 						 1,
-						 PGSTROM_THREADS_PER_BLOCK,
+						 n_threads,
 						 1,
 						 1,
 						 0,
@@ -229,7 +239,7 @@ pgstrom_exec_kernel_qual(PgStromExecState *sestate, PgStromChunkBuf *chunk)
 
 	ret = cuMemcpyDtoHAsync(chunk->cs_rowmap,
 							chunk->devmem,
-							PGSTROM_CHUNK_SIZE / BITS_PER_BYTE,
+							chunk->nitems / BITS_PER_BYTE,
 							chunk->stream);
 	if (ret != CUDA_SUCCESS)
 		goto error_4;
@@ -320,12 +330,11 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 	/*
 	 * Null-bitmap shall be initialized as if all the values are NULL
 	 */
-	memset(chunk_cs_nulls(chunk,csidx), -1,
-		   PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
+	memset(chunk_cs_nulls(chunk,csidx), -1, chunk->nitems / BITS_PER_BYTE);
 
 	/*
 	 * Try to scan column store with cs_rowid betweem rowid and
-	 * (rowid + PGSTROM_CHUNK_SIZE)
+	 * (rowid + chunk->nitems)
 	 */
 	ScanKeyInit(&skeys[0],
 				(AttrNumber) 1,
@@ -334,7 +343,7 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 	ScanKeyInit(&skeys[1],
 				(AttrNumber) 1,
 				BTLessStrategyNumber, F_INT8LT,
-				Int64GetDatum(chunk->rowid + PGSTROM_CHUNK_SIZE));
+				Int64GetDatum(chunk->rowid + chunk->nitems));
 
 	iscan = index_beginscan(sestate->relset->cs_rel[csidx],
 							sestate->relset->cs_idx[csidx],
@@ -359,15 +368,14 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 		cur_rowid = Int64GetDatum(values[0]);
 		cur_array = DatumGetArrayTypeP(values[1]);
 
-		offset = cur_rowid - chunk->rowid;
-		Assert(offset >= 0 && offset < PGSTROM_CHUNK_SIZE);
-		Assert((offset & (BITS_PER_BYTE - 1)) == 0);
 		Assert(ARR_NDIM(cur_array) == 1);
 		Assert(ARR_LBOUND(cur_array)[0] == 0);
 		Assert((ARR_DIMS(cur_array)[0] & (BITS_PER_BYTE - 1)) == 0);
 		Assert(ARR_ELEMTYPE(cur_array) == attr->atttypid);
 
+		offset = cur_rowid - chunk->rowid;
 		nitems = ARR_DIMS(cur_array)[0];
+
 		memcpy(chunk_cs_values(chunk,csidx) + offset * attr->attlen,
 			   ARR_DATA_PTR(cur_array),
 			   nitems * attr->attlen);
@@ -376,14 +384,14 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 		{
 			memcpy(chunk_cs_nulls(chunk,csidx) + offset / BITS_PER_BYTE,
 				   nullbitmap,
-				   (nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+				   nitems / BITS_PER_BYTE);
 		}
 		else
 		{
 			/* Clear nullbitmap, if all items are not NULL */
 			memset(chunk_cs_nulls(chunk,csidx) + offset / BITS_PER_BYTE,
 				   0,
-				   (nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+				   nitems / BITS_PER_BYTE);
 		}
 	}
 	index_endscan(iscan);
@@ -428,14 +436,16 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 		chunk = palloc0(sizeof(PgStromChunkBuf));
 		chunk->rowid = rowid;
 		chunk->nattrs = RelationGetNumberOfAttributes(sestate->es_relation);
+		chunk->nitems = VARBITLEN(rowmap);
 		chunk->cs_nulls = palloc0(sizeof(int) * chunk->nattrs);
 		chunk->cs_values = palloc0(sizeof(int) * chunk->nattrs);
 		MemoryContextSwitchTo(oldcxt);
+		Assert(chunk->nitems % BITS_PER_BYTE == 0);
 
 		if (sestate->dev_module)
 		{
 			Bitmapset  *temp;
-			AttrNumber	attnum;
+			AttrNumber	csidx;
 			uint16		attlen;
 			char	   *dma_buffer;
 			size_t		dma_offset;
@@ -444,19 +454,19 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 			/*
 			 * Compute and allocate required size of column store
 			 */
-			dma_offset = PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
+			dma_offset = (chunk->nitems / BITS_PER_BYTE);
 
 			tupdesc = RelationGetDescr(sestate->es_relation);
 			temp = bms_copy(sestate->clause_cols);
-			while ((attnum = bms_first_member(temp)) > 0)
+			while ((csidx = (bms_first_member(temp)-1)) >= 0)
 			{
-				attlen = tupdesc->attrs[attnum-1]->attlen;
+				attlen = tupdesc->attrs[csidx]->attlen;
 				Assert(attlen > 0);
 
-				chunk->cs_values[attnum-1] = dma_offset;
-				dma_offset += PGSTROM_CHUNK_SIZE * attlen;
-				chunk->cs_nulls[attnum-1] = dma_offset;
-				dma_offset += PGSTROM_CHUNK_SIZE / BITS_PER_BYTE;
+				chunk->cs_values[csidx] = dma_offset;
+				dma_offset += chunk->nitems * attlen;
+				chunk->cs_nulls[csidx] = dma_offset;
+				dma_offset += chunk->nitems / BITS_PER_BYTE;
 			}
 			bms_free(temp);
 			ret = cuMemAllocHost((void **)&dma_buffer, dma_offset);
@@ -472,15 +482,11 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 			 * Load necessary column store
 			 */
 			chunk->cs_rowmap = (uint8 *)dma_buffer;
-			chunk->cs_rownums = VARBITLEN(rowmap);
-			if (VARBITLEN(rowmap) != PGSTROM_CHUNK_SIZE)
-				memset(chunk->cs_rowmap, 0,
-					   PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
 			memcpy(chunk->cs_rowmap, VARBITS(rowmap), VARBITBYTES(rowmap));
 
 			temp = bms_copy(sestate->clause_cols);
-			while ((attnum = bms_first_member(temp)) > 0)
-				pgstrom_load_column_store(sestate, chunk, attnum-1);
+			while ((csidx = (bms_first_member(temp)-1)) >= 0)
+				pgstrom_load_column_store(sestate, chunk, csidx);
 			bms_free(temp);
 
 			/*
@@ -512,10 +518,9 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 			 * In the case when the supplied plan has no qualifier,
 			 * all the chunks are ready to scan using rowid.
 			 */
-			chunk->cs_rownums = VARBITLEN(rowmap);
 			chunk->cs_rowmap
 				= MemoryContextAllocZero(pgstrom_scan_memcxt,
-										 PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
+										 chunk->nitems / BITS_PER_BYTE);
 			memcpy(chunk->cs_rowmap, VARBITS(rowmap), VARBITBYTES(rowmap));
 
 			oldcxt = MemoryContextSwitchTo(pgstrom_scan_memcxt);
@@ -667,21 +672,34 @@ out:
 										&slot->tts_isnull[csidx]);
 }
 
+#define BITS_PER_DATUM		(sizeof(Datum) * BITS_PER_BYTE)
 static bool
 pgstrom_scan_chunk_buffer(PgStromExecState *sestate, TupleTableSlot *slot)
 {
 	PgStromChunkBuf	*chunk = lfirst(sestate->curr_chunk);
 	int		index;
 
-	for (index = sestate->curr_index; index < chunk->cs_rownums; index++)
+	index = sestate->curr_index;
+	while (index < chunk->nitems)
 	{
-		int		index_h = (index / BITS_PER_BYTE);
-		int		index_l = (index & (BITS_PER_BYTE - 1));
+		int		index_h;
+		int		index_l;
 		int		csidx;
 		int64	rowid;
 
-		if ((chunk->cs_rowmap[index_h] & (1 << index_l)) == 0)
+		if ((index & (BITS_PER_DATUM - 1)) == 0 &&
+			((Datum *)chunk->cs_rowmap)[index / BITS_PER_DATUM] == 0)
+		{
+			index += BITS_PER_DATUM;
 			continue;
+		}
+		index_h = index / BITS_PER_BYTE;
+		index_l = index % BITS_PER_BYTE;
+		if ((chunk->cs_rowmap[index_h] & (1 << index_l)) == 0)
+		{
+			index++;
+			continue;
+		}
 
 		rowid = chunk->rowid + index;
 		for (csidx=0; csidx < chunk->nattrs; csidx++)
