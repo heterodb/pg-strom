@@ -87,7 +87,21 @@ make_device_function_code(Oid func_oid, List *args,
 			appendStringInfo(qual_source, ")");
 			break;
 
-		case 'f':	/* function as device function */
+		case 'F':	/* function as built-in device function */
+			appendStringInfo(qual_source, "%s(", dfunc->func_ident);
+			foreach (cell, args)
+			{
+				if (cell != list_head(args))
+					appendStringInfo(qual_source, ", ");
+				if (!make_device_qual_code((Node *) lfirst(cell),
+										   qual_source, base_relid,
+										   type_decl, func_decl))
+					return false;
+			}
+			appendStringInfo(qual_source, ")");
+			break;
+
+		case 'f':	/* function as self-defined device function */
 			appendStringInfo(qual_source,
 							 "%s(&errors, bitmask",
 							 dfunc->func_ident);
@@ -101,6 +115,7 @@ make_device_function_code(Oid func_oid, List *args,
 			}
 			appendStringInfo(qual_source, ")");
 			break;
+
 		default:
 			elog(ERROR, "unexpected func_kind : %c of \"%s\"",
 				 dfunc->func_kind, dfunc->func_ident);
@@ -392,16 +407,16 @@ make_device_source(Oid base_relid, List *device_quals,
 	}
 
 	appendStringInfo(&kern,
-					 "__global__ void\n"
-					 "pgstrom_qual(unsigned char rowmap[]");
+			 "__global__ void\n"
+			 "pgstrom_qual(unsigned char rowmap[]");
 	appendStringInfo(&blk1,
-					 "    int offset_base = blockIdx.x * blockDim.x + threadIdx.x;\n"
-					 "    int offset = offset_base * 8;\n"
-					 "    unsigned char result = rowmap[offset_base];\n"
-					 "    unsigned char errors = 0;\n");
+			 "    int offset_base = blockIdx.x * blockDim.x + threadIdx.x;\n"
+			 "    int offset = offset_base * 8;\n"
+			 "    unsigned char result = rowmap[offset_base];\n"
+			 "    unsigned char errors = 0;\n");
 	appendStringInfo(&blk2,
-					 "    for (bitmask=1; bitmask < 256; bitmask <<= 1)\n"
-					 "    {\n");
+			 "    for (bitmask=1; bitmask < 256; bitmask <<= 1)\n"
+			 "    {\n");
 
 	tempset = bms_copy(clause_cols);
 	while ((attnum = bms_first_member(tempset)) > 0)

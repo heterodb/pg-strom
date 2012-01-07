@@ -78,16 +78,21 @@ typedef struct {
 	char   *type_ident;
 	char   *type_source;
 	char   *type_varref;
+	uint32	type_flags;			/* set of DEVINFO_FLAGS_* */
 } PgStromDevTypeInfo;
 
 typedef struct {
 	Oid		func_oid;
-	char	func_kind;			/* 'c', 'b', 'l', 'r' or 'f' */
-	char   *func_ident;
-	char   *func_source;
+	char	func_kind;			/* see the comments in devinfo.c */
+	char   *func_ident;			/* identifier of device function */
+	char   *func_source;		/* definition of device function, if needed */
+	uint32	func_flags;			/* set of DEVINFO_FLAGS_* */
 	int16	func_nargs;			/* copy from pg_proc.pronargs */
 	Oid		func_argtypes[0];	/* copy from pg_proc.proargtypes */
 } PgStromDevFuncInfo;
+
+#define DEVINFO_FLAGS_DOUBLE_FP				0x0001
+#define DEVINFO_FLAGS_INC_MATHFUNC_H		0x0002
 
 extern void pgstrom_devtype_format(StringInfo str,
 								   Oid type_oid, Datum value);

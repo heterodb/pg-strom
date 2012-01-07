@@ -64,19 +64,21 @@ static struct {
 	char   *type_ident;
 	char   *type_source;
 	char   *type_varref;
+	uint32	type_flags;
 } device_type_catalog[] = {
-	{ BOOLOID,		"bool_t",	"typedef char  bool_t",
-	  DEVFUNC_VARREF_TEMPLATE(bool_t) },
-	{ INT2OID,		"int2_t",	"typedef short int2_t",
-	  DEVFUNC_VARREF_TEMPLATE(int2_t) },
-	{ INT4OID,		"int4_t",	"typedef int   int4_t",
-	  DEVFUNC_VARREF_TEMPLATE(int4_t) },
-	{ INT8OID,		"int8_t",	"typedef long  int8_t",
-	  DEVFUNC_VARREF_TEMPLATE(int8_t) },
+	{ BOOLOID,		"char",		NULL,
+	  DEVFUNC_VARREF_TEMPLATE(char), 0 },
+	{ INT2OID,		"short",	NULL,
+	  DEVFUNC_VARREF_TEMPLATE(short), 0 },
+	{ INT4OID,		"int",		NULL,
+	  DEVFUNC_VARREF_TEMPLATE(int), 0 },
+	{ INT8OID,		"long",		NULL,
+	  DEVFUNC_VARREF_TEMPLATE(long), 0 },
 	{ FLOAT4OID,	"float",	NULL,
-	  DEVFUNC_VARREF_TEMPLATE(float) },
+	  DEVFUNC_VARREF_TEMPLATE(float), 0 },
 	{ FLOAT8OID,	"double",	NULL,
-	  DEVFUNC_VARREF_TEMPLATE(double) },
+	  DEVFUNC_VARREF_TEMPLATE(double),
+	  DEVINFO_FLAGS_DOUBLE_FP },
 };
 
 void
@@ -165,6 +167,7 @@ pgstrom_devtype_lookup(Oid type_oid)
 			entry->type_ident  = device_type_catalog[i].type_ident;
 			entry->type_source = device_type_catalog[i].type_source;
 			entry->type_varref = device_type_catalog[i].type_varref;
+			entry->type_flags  = device_type_catalog[i].type_flags;
 			break;
 		}
 	}
@@ -208,7 +211,7 @@ out:
 	"    return result;\n"												\
 	"}\n"
 
-#define DEVFUN_INTxREMIND_TEMPLATE(name,rtype,xtype,ytype)			   \
+#define DEVFUNC_INTxREMIND_TEMPLATE(name,rtype,xtype,ytype)			   \
 	#rtype " " #name "(unsigned char *errors, unsigned char bitmap, "  \
 	#xtype " x, " #ytype " y)\n"									   \
 	"{\n"															   \
@@ -217,13 +220,75 @@ out:
 	"    return x % y;\n"											   \
 	"}\n"
 
+#define DEVFUNC_FPSIGN_TEMPLATE(vtype)				\
+	#vtype " sign_" #vtype "(" #vtype " value)\n"	\
+	"{\n"											\
+	"    if (value > 0.0)\n"						\
+	"        return 1.0;\n"							\
+	"    if (value < 0.0)\n"						\
+	"        return -1.0;\n"						\
+	"    return 0.0;\n"								\
+	"}\n"
+
+#define DEVFUNC_FPCOT_TEMPLATE(vtype)				\
+	#vtype " cot_" #vtype "(" #vtype " value)\n"	\
+	"{\n"											\
+	"    return 1.0 / tan(value);\n"				\
+	"}\n"
+
 static struct {
+	/*
+	 * Name and argument types of SQL function enables to identify
+	 * a particular built-in function; The reason why we don't put
+	 * F_XXX label here is some of functions does not have its own
+	 * label.
+	 */
 	char   *func_name;
 	int		func_nargs;
 	Oid		func_argtypes[2];
+
+	/*
+	 * The func_kind is one of the following character:
+	 *   'c', 'l', 'r', 'b', 'f' or 'F'.
+	 *
+	 * 'c' means SQL function is executable as a constant value on device.
+	 *
+	 * 'l' means SQL function is executable as a left-operator on device.
+	 * It shall be extracted on the source code as:
+	 *   <func_ident> <arg>  (e.g, -value)
+	 * One special case is inline type-cast. It shall be described according
+	 * to the manner of left-operator, such as: (double) value
+	 *
+	 * 'r' means SQL function is executable as a right-operator on device.
+	 *
+	 * 'b' means SQL function is executable as a both-operator on device.
+	 * It shall be extracted on the source code as:
+	 *   (<arg 1> <func_ident> <arg 2>)  (e.g, (v1 * v2))
+	 *
+	 * 'f' and 'F' means SQL function is also executable as device function
+	 * on device. The only difference of them is whether it takes "errors"
+	 * and "bitmask" for the first two arguments, or not.
+	 * It is used to return an error status by self-defined functions, but
+	 * nonsense towards built-in functions.
+	 * The 'f' means a device function WITHOUT these two special arguments,
+	 * and 'F' means one WITH these two special arguments
+	 */
 	char	func_kind;	/* 'f', 'l', 'r', 'b' or 'c' */
+
+	/*
+	 * identifier of function, operator or constant value
+	 */
 	char   *func_ident;
+
+	/*
+	 * declaration part of self-defined function, if exist.
+	 */
 	char   *func_source;
+
+	/*
+	 * set of DEVINFO_FLAGS_*
+	 */
+	uint32	func_flags;
 } device_func_catalog[] = {
 	/*
 	 * cast of data types
@@ -231,248 +296,335 @@ static struct {
 	 * XXX - note that inline cast is writable using left-operator
 	 * manner, like (uint2_t)X.
 	 */
-	{ "int2", 1, {INT4OID},   'l', "(int2_t)", NULL },
-	{ "int2", 1, {INT8OID},   'l', "(int2_t)", NULL },
-	{ "int2", 1, {FLOAT4OID}, 'l', "(int2_t)", NULL },
-	{ "int2", 1, {FLOAT8OID}, 'l', "(int2_t)", NULL },
-	{ "int4", 1, {INT2OID},   'l', "(int4_t)", NULL },
-	{ "int4", 1, {INT8OID},   'l', "(int4_t)", NULL },
-	{ "int4", 1, {FLOAT4OID}, 'l', "(int4_t)", NULL },
-	{ "int4", 1, {FLOAT8OID}, 'l', "(int4_t)", NULL },
-	{ "int8", 1, {INT2OID},   'l', "(int8_t)", NULL },
-	{ "int8", 1, {INT4OID},   'l', "(int8_t)", NULL },
-	{ "int8", 1, {FLOAT4OID}, 'l', "(int8_t)", NULL },
-	{ "int8", 1, {FLOAT8OID}, 'l', "(int8_t)", NULL },
-	{ "float4", 1, {INT2OID},   'l', "(float)",  NULL },
-	{ "float4", 1, {INT4OID},   'l', "(float)",  NULL },
-	{ "float4", 1, {INT8OID},   'l', "(float)",  NULL },
-	{ "float4", 1, {FLOAT8OID}, 'l', "(float)",  NULL },
-	{ "float8", 1, {INT2OID},   'l', "(double)",  NULL },
-	{ "float8", 1, {INT4OID},   'l', "(double)",  NULL },
-	{ "float8", 1, {INT8OID},   'l', "(double)",  NULL },
-	{ "float8", 1, {FLOAT4OID}, 'l', "(double)",  NULL },
+	{ "int2", 1, {INT4OID},   'l', "(short)", NULL, 0 },
+	{ "int2", 1, {INT8OID},   'l', "(short)", NULL, 0 },
+	{ "int2", 1, {FLOAT4OID}, 'l', "(short)", NULL, 0 },
+	{ "int2", 1, {FLOAT8OID}, 'l', "(short)", NULL, 0 },
+	{ "int4", 1, {INT2OID},   'l', "(int)", NULL, 0 },
+	{ "int4", 1, {INT8OID},   'l', "(int)", NULL, 0 },
+	{ "int4", 1, {FLOAT4OID}, 'l', "(int)", NULL, 0 },
+	{ "int4", 1, {FLOAT8OID}, 'l', "(int)", NULL, 0 },
+	{ "int8", 1, {INT2OID},   'l', "(long)", NULL, 0 },
+	{ "int8", 1, {INT4OID},   'l', "(long)", NULL, 0 },
+	{ "int8", 1, {FLOAT4OID}, 'l', "(long)", NULL, 0 },
+	{ "int8", 1, {FLOAT8OID}, 'l', "(long)", NULL, 0 },
+	{ "float4", 1, {INT2OID},   'l', "(float)",  NULL, 0 },
+	{ "float4", 1, {INT4OID},   'l', "(float)",  NULL, 0 },
+	{ "float4", 1, {INT8OID},   'l', "(float)",  NULL, 0 },
+	{ "float4", 1, {FLOAT8OID}, 'l', "(float)",  NULL, 0 },
+	{ "float8", 1, {INT2OID},   'l', "(double)",  NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float8", 1, {INT4OID},   'l', "(double)",  NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float8", 1, {INT8OID},   'l', "(double)",  NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float8", 1, {FLOAT4OID}, 'l', "(double)",  NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
 
 	/* '+'  : add operators */
-	{ "int2pl",	 2, {INT2OID, INT2OID}, 'b', "+", NULL },
-	{ "int24pl", 2, {INT2OID, INT4OID}, 'b', "+", NULL },
-	{ "int28pl", 2, {INT2OID, INT8OID}, 'b', "+", NULL },
-	{ "int42pl", 2, {INT4OID, INT2OID}, 'b', "+", NULL },
-	{ "int4pl",  2, {INT4OID, INT4OID}, 'b', "+", NULL },
-	{ "int48pl", 2, {INT4OID, INT8OID}, 'b', "+", NULL },
-	{ "int82pl", 2, {INT8OID, INT2OID}, 'b', "+", NULL },
-	{ "int84pl", 2, {INT8OID, INT4OID}, 'b', "+", NULL },
-	{ "int8pl",  2, {INT8OID, INT8OID}, 'b', "+", NULL },
-	{ "float4pl",  2, {FLOAT4OID, FLOAT4OID}, 'b', "+", NULL },
-	{ "float48pl", 2, {FLOAT4OID, FLOAT8OID}, 'b', "+", NULL },
-	{ "float84pl", 2, {FLOAT8OID, FLOAT4OID}, 'b', "+", NULL },
-	{ "float8pl",  2, {FLOAT8OID, FLOAT8OID}, 'b', "+", NULL },
+	{ "int2pl",	 2, {INT2OID, INT2OID}, 'b', "+", NULL, 0 },
+	{ "int24pl", 2, {INT2OID, INT4OID}, 'b', "+", NULL, 0 },
+	{ "int28pl", 2, {INT2OID, INT8OID}, 'b', "+", NULL, 0 },
+	{ "int42pl", 2, {INT4OID, INT2OID}, 'b', "+", NULL, 0 },
+	{ "int4pl",  2, {INT4OID, INT4OID}, 'b', "+", NULL, 0 },
+	{ "int48pl", 2, {INT4OID, INT8OID}, 'b', "+", NULL, 0 },
+	{ "int82pl", 2, {INT8OID, INT2OID}, 'b', "+", NULL, 0 },
+	{ "int84pl", 2, {INT8OID, INT4OID}, 'b', "+", NULL, 0 },
+	{ "int8pl",  2, {INT8OID, INT8OID}, 'b', "+", NULL, 0 },
+	{ "float4pl",  2, {FLOAT4OID, FLOAT4OID}, 'b', "+", NULL, 0 },
+	{ "float48pl", 2, {FLOAT4OID, FLOAT8OID}, 'b', "+", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float84pl", 2, {FLOAT8OID, FLOAT4OID}, 'b', "+", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float8pl",  2, {FLOAT8OID, FLOAT8OID}, 'b', "+", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
 
 	/* '-'  : subtract operators */
-	{ "int2mi",	 2, {INT2OID, INT2OID}, 'b', "-", NULL },
-	{ "int24mi", 2, {INT2OID, INT4OID}, 'b', "-", NULL },
-	{ "int28mi", 2, {INT2OID, INT8OID}, 'b', "-", NULL },
-	{ "int42mi", 2, {INT4OID, INT2OID}, 'b', "-", NULL },
-	{ "int4mi",  2, {INT4OID, INT4OID}, 'b', "-", NULL },
-	{ "int48mi", 2, {INT4OID, INT8OID}, 'b', "-", NULL },
-	{ "int82mi", 2, {INT8OID, INT2OID}, 'b', "-", NULL },
-	{ "int84mi", 2, {INT8OID, INT4OID}, 'b', "-", NULL },
-	{ "int8mi",  2, {INT8OID, INT8OID}, 'b', "-", NULL },
-	{ "float4mi",  2, {FLOAT4OID, FLOAT4OID}, 'b', "-", NULL },
-	{ "float48mi", 2, {FLOAT4OID, FLOAT8OID}, 'b', "-", NULL },
-	{ "float84mi", 2, {FLOAT8OID, FLOAT4OID}, 'b', "-", NULL },
-	{ "float8mi",  2, {FLOAT8OID, FLOAT8OID}, 'b', "-", NULL },
+	{ "int2mi",	 2, {INT2OID, INT2OID}, 'b', "-", NULL, 0 },
+	{ "int24mi", 2, {INT2OID, INT4OID}, 'b', "-", NULL, 0 },
+	{ "int28mi", 2, {INT2OID, INT8OID}, 'b', "-", NULL, 0 },
+	{ "int42mi", 2, {INT4OID, INT2OID}, 'b', "-", NULL, 0 },
+	{ "int4mi",  2, {INT4OID, INT4OID}, 'b', "-", NULL, 0 },
+	{ "int48mi", 2, {INT4OID, INT8OID}, 'b', "-", NULL, 0 },
+	{ "int82mi", 2, {INT8OID, INT2OID}, 'b', "-", NULL, 0 },
+	{ "int84mi", 2, {INT8OID, INT4OID}, 'b', "-", NULL, 0 },
+	{ "int8mi",  2, {INT8OID, INT8OID}, 'b', "-", NULL, 0 },
+	{ "float4mi",  2, {FLOAT4OID, FLOAT4OID}, 'b', "-", NULL, 0 },
+	{ "float48mi", 2, {FLOAT4OID, FLOAT8OID}, 'b', "-", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float84mi", 2, {FLOAT8OID, FLOAT4OID}, 'b', "-", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float8mi",  2, {FLOAT8OID, FLOAT8OID}, 'b', "-", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
 
 	/* '*'  : mutiply operators */
-	{ "int2mul",  2, {INT2OID, INT2OID}, 'b', "*", NULL },
-	{ "int24mul", 2, {INT2OID, INT4OID}, 'b', "*", NULL },
-	{ "int28mul", 2, {INT2OID, INT8OID}, 'b', "*", NULL },
-	{ "int42mul", 2, {INT4OID, INT2OID}, 'b', "*", NULL },
-	{ "int4mul",  2, {INT4OID, INT4OID}, 'b', "*", NULL },
-	{ "int48mul", 2, {INT4OID, INT8OID}, 'b', "*", NULL },
-	{ "int82mul", 2, {INT8OID, INT2OID}, 'b', "*", NULL },
-	{ "int84mul", 2, {INT8OID, INT4OID}, 'b', "*", NULL },
-	{ "int8mul",  2, {INT8OID, INT8OID}, 'b', "*", NULL },
-	{ "float4mul",  2, {FLOAT4OID, FLOAT4OID}, 'b', "*", NULL },
-	{ "float48mul", 2, {FLOAT4OID, FLOAT8OID}, 'b', "*", NULL },
-	{ "float84mul", 2, {FLOAT8OID, FLOAT4OID}, 'b', "*", NULL },
-	{ "float8mul",  2, {FLOAT8OID, FLOAT8OID}, 'b', "*", NULL },
+	{ "int2mul",  2, {INT2OID, INT2OID}, 'b', "*", NULL, 0 },
+	{ "int24mul", 2, {INT2OID, INT4OID}, 'b', "*", NULL, 0 },
+	{ "int28mul", 2, {INT2OID, INT8OID}, 'b', "*", NULL, 0 },
+	{ "int42mul", 2, {INT4OID, INT2OID}, 'b', "*", NULL, 0 },
+	{ "int4mul",  2, {INT4OID, INT4OID}, 'b', "*", NULL, 0 },
+	{ "int48mul", 2, {INT4OID, INT8OID}, 'b', "*", NULL, 0 },
+	{ "int82mul", 2, {INT8OID, INT2OID}, 'b', "*", NULL, 0 },
+	{ "int84mul", 2, {INT8OID, INT4OID}, 'b', "*", NULL, 0 },
+	{ "int8mul",  2, {INT8OID, INT8OID}, 'b', "*", NULL, 0 },
+	{ "float4mul",  2, {FLOAT4OID, FLOAT4OID}, 'b', "*", NULL, 0 },
+	{ "float48mul", 2, {FLOAT4OID, FLOAT8OID}, 'b', "*", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float84mul", 2, {FLOAT8OID, FLOAT4OID}, 'b', "*", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float8mul",  2, {FLOAT8OID, FLOAT8OID}, 'b', "*", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
 
 	/* '/'  : divide operators */
-	{ "int2div",  2, {INT2OID, INT2OID}, 'f', "int2div",
-	  DEVFUNC_INTxDIV_TEMPLATE(int2div,  int2_t, int2_t, int2_t) },
-	{ "int24div", 2, {INT2OID, INT4OID}, 'f', "int24div",
-	  DEVFUNC_INTxDIV_TEMPLATE(int24div, int4_t, int2_t, int4_t) },
-	{ "int28div", 2, {INT2OID, INT8OID}, 'f', "int28div",
-	  DEVFUNC_INTxDIV_TEMPLATE(int28div, int8_t, int2_t, int8_t) },
-	{ "int42div", 2, {INT4OID, INT2OID}, 'f', "int42div",
-	  DEVFUNC_INTxDIV_TEMPLATE(int42div,  int4_t, int4_t, int2_t) },
-	{ "int4div",  2, {INT4OID, INT4OID}, 'f', "int4div",
-	  DEVFUNC_INTxDIV_TEMPLATE(int4div, int4_t, int4_t, int4_t) },
-	{ "int48div", 2, {INT4OID, INT8OID}, 'f', "int48div",
-	  DEVFUNC_INTxDIV_TEMPLATE(int48div, int8_t, int4_t, int8_t) },
-	{ "int82div", 2, {INT8OID, INT2OID}, 'f', "int82div",
-	  DEVFUNC_INTxDIV_TEMPLATE(int82div,  int8_t, int8_t, int2_t) },
-	{ "int84div", 2, {INT8OID, INT4OID}, 'f', "int84div",
-	  DEVFUNC_INTxDIV_TEMPLATE(int84div, int8_t, int8_t, int4_t) },
-	{ "int8div",  2, {INT8OID, INT8OID}, 'f', "int8div",
-	  DEVFUNC_INTxDIV_TEMPLATE(int8div, int8_t, int8_t, int8_t) },
-	{ "float4div", 2, {FLOAT4OID, FLOAT4OID}, 'f', "float4div",
-	  DEVFUNC_FPxDIV_TEMPLATE(float4div, float, float, float) },
-	{ "float48div", 2, {FLOAT4OID, FLOAT8OID}, 'f', "float4div",
-	  DEVFUNC_FPxDIV_TEMPLATE(float48div, double, float, double) },
-	{ "float84div", 2, {FLOAT8OID, FLOAT4OID}, 'f', "float4div",
-	  DEVFUNC_FPxDIV_TEMPLATE(float84div, double, double, float) },
-	{ "float8div", 2, {FLOAT8OID, FLOAT8OID}, 'f', "float4div",
-	  DEVFUNC_FPxDIV_TEMPLATE(float8div, double, double, double) },
+	{ "int2div",  2, {INT2OID, INT2OID}, 'F', "int2div",
+	  DEVFUNC_INTxDIV_TEMPLATE(int2div,  short, short, short), 0},
+	{ "int24div", 2, {INT2OID, INT4OID}, 'F', "int24div",
+	  DEVFUNC_INTxDIV_TEMPLATE(int24div, int, short, int), 0},
+	{ "int28div", 2, {INT2OID, INT8OID}, 'F', "int28div",
+	  DEVFUNC_INTxDIV_TEMPLATE(int28div, long, short, long), 0},
+	{ "int42div", 2, {INT4OID, INT2OID}, 'F', "int42div",
+	  DEVFUNC_INTxDIV_TEMPLATE(int42div,  int, int, short), 0},
+	{ "int4div",  2, {INT4OID, INT4OID}, 'F', "int4div",
+	  DEVFUNC_INTxDIV_TEMPLATE(int4div, int, int, int), 0},
+	{ "int48div", 2, {INT4OID, INT8OID}, 'F', "int48div",
+	  DEVFUNC_INTxDIV_TEMPLATE(int48div, long, int, long), 0},
+	{ "int82div", 2, {INT8OID, INT2OID}, 'F', "int82div",
+	  DEVFUNC_INTxDIV_TEMPLATE(int82div,  long, long, short), 0},
+	{ "int84div", 2, {INT8OID, INT4OID}, 'F', "int84div",
+	  DEVFUNC_INTxDIV_TEMPLATE(int84div, long, long, int), 0},
+	{ "int8div",  2, {INT8OID, INT8OID}, 'F', "int8div",
+	  DEVFUNC_INTxDIV_TEMPLATE(int8div, long, long, long), 0},
+	{ "float4div", 2, {FLOAT4OID, FLOAT4OID},  'F', "float4div",
+	  DEVFUNC_FPxDIV_TEMPLATE(float4div, float, float, float), 0},
+	{ "float48div", 2, {FLOAT4OID, FLOAT8OID}, 'F', "float48div",
+	  DEVFUNC_FPxDIV_TEMPLATE(float48div, double, float, double),
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float84div", 2, {FLOAT8OID, FLOAT4OID}, 'F', "float84div",
+	  DEVFUNC_FPxDIV_TEMPLATE(float84div, double, double, float),
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float8div", 2, {FLOAT8OID, FLOAT8OID},  'F', "float4div",
+	  DEVFUNC_FPxDIV_TEMPLATE(float8div, double, double, double),
+	  DEVINFO_FLAGS_DOUBLE_FP },
 
 	/* '%'  : reminder operators */
-	{ "int2mod", 2, {INT2OID, INT2OID}, 'f', "int2mod",
-	  DEVFUN_INTxREMIND_TEMPLATE(int2mod, int2_t, int2_t, int2_t) },
-	{ "int4mod", 2, {INT4OID, INT4OID}, 'f', "int4mod",
-	  DEVFUN_INTxREMIND_TEMPLATE(int4mod, int4_t, int4_t, int4_t) },
-	{ "int8mod", 2, {INT8OID, INT8OID}, 'f', "int8mod",
-	  DEVFUN_INTxREMIND_TEMPLATE(int8mod, int8_t, int8_t, int8_t) },
+	{ "int2mod", 2, {INT2OID, INT2OID}, 'F', "int2mod",
+	  DEVFUNC_INTxREMIND_TEMPLATE(int2mod, short, short, short), 0 },
+	{ "int4mod", 2, {INT4OID, INT4OID}, 'F', "int4mod",
+	  DEVFUNC_INTxREMIND_TEMPLATE(int4mod, int, int, int), 0 },
+	{ "int8mod", 2, {INT8OID, INT8OID}, 'F', "int8mod",
+	  DEVFUNC_INTxREMIND_TEMPLATE(int8mod, long, long, long), 0 },
 
 	/* '+'  : unary plus operators */
-	{ "int2up", 1, {INT2OID}, 'l', "+", NULL },
-	{ "int4up", 1, {INT4OID}, 'l', "+", NULL },
-	{ "int8up", 1, {INT8OID}, 'l', "+", NULL },
-	{ "float4up", 1, {FLOAT4OID}, 'l', "+", NULL },
-	{ "float8up", 1, {FLOAT8OID}, 'l', "+", NULL },
+	{ "int2up", 1, {INT2OID}, 'l', "+", NULL, 0 },
+	{ "int4up", 1, {INT4OID}, 'l', "+", NULL, 0 },
+	{ "int8up", 1, {INT8OID}, 'l', "+", NULL, 0 },
+	{ "float4up", 1, {FLOAT4OID}, 'l', "+", NULL, 0 },
+	{ "float8up", 1, {FLOAT8OID}, 'l', "+", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
 
 	/* '-'  : unary minus operators */
-	{ "int2um", 1, {INT2OID}, 'l', "-", NULL },
-	{ "int4um", 1, {INT4OID}, 'l', "-", NULL },
-	{ "int8um", 1, {INT8OID}, 'l', "-", NULL },
-	{ "float4um", 1, {FLOAT4OID}, 'l', "-", NULL },
-	{ "float8um", 1, {FLOAT8OID}, 'l', "-", NULL },
+	{ "int2um", 1, {INT2OID}, 'l', "-", NULL, 0 },
+	{ "int4um", 1, {INT4OID}, 'l', "-", NULL, 0 },
+	{ "int8um", 1, {INT8OID}, 'l', "-", NULL, 0 },
+	{ "float4um", 1, {FLOAT4OID}, 'l', "-", NULL, 0 },
+	{ "float8um", 1, {FLOAT8OID}, 'l', "-", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
 
 	/* '@'  : absolute value operators */
-	{ "int2abs", 1, {INT2OID}, 'f', "abs", NULL },
-	{ "int4abs", 1, {INT2OID}, 'f', "abs", NULL },
-	{ "int8abs", 1, {INT2OID}, 'f', "abs", NULL },
-	{ "float4abs", 1, {FLOAT4OID}, 'f', "fabs", NULL },
-	{ "float8abs", 1, {FLOAT4OID}, 'f', "fabs", NULL },
+	{ "int2abs", 1, {INT2OID}, 'f', "abs", NULL, 0 },
+	{ "int4abs", 1, {INT2OID}, 'f', "abs", NULL, 0 },
+	{ "int8abs", 1, {INT2OID}, 'f', "abs", NULL, 0 },
+	{ "float4abs", 1, {FLOAT4OID}, 'f', "fabs", NULL, 0 },
+	{ "float8abs", 1, {FLOAT4OID}, 'f', "fabs", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
 
 	/* '='  : equal operators */
-	{ "int2eq",  2, {INT2OID,INT2OID}, 'b', "==", NULL },
-	{ "int24eq", 2, {INT2OID,INT4OID}, 'b', "==", NULL },
-	{ "int28eq", 2, {INT2OID,INT8OID}, 'b', "==", NULL },
-	{ "int42eq", 2, {INT4OID,INT2OID}, 'b', "==", NULL },
-	{ "int4eq",  2, {INT4OID,INT4OID}, 'b', "==", NULL },
-	{ "int48eq", 2, {INT4OID,INT8OID}, 'b', "==", NULL },
-	{ "int82eq", 2, {INT8OID,INT2OID}, 'b', "==", NULL },
-	{ "int84eq", 2, {INT8OID,INT4OID}, 'b', "==", NULL },
-	{ "int8eq" , 2, {INT8OID,INT8OID}, 'b', "==", NULL },
-	{ "float4eq",  2, {FLOAT4OID, FLOAT4OID}, 'b', "==", NULL },
-	{ "float48eq", 2, {FLOAT4OID, FLOAT8OID}, 'b', "==", NULL },
-	{ "float84eq", 2, {FLOAT8OID, FLOAT4OID}, 'b', "==", NULL },
-	{ "float8eq",  2, {FLOAT8OID, FLOAT8OID}, 'b', "==", NULL },
+	{ "int2eq",  2, {INT2OID,INT2OID}, 'b', "==", NULL, 0 },
+	{ "int24eq", 2, {INT2OID,INT4OID}, 'b', "==", NULL, 0 },
+	{ "int28eq", 2, {INT2OID,INT8OID}, 'b', "==", NULL, 0 },
+	{ "int42eq", 2, {INT4OID,INT2OID}, 'b', "==", NULL, 0 },
+	{ "int4eq",  2, {INT4OID,INT4OID}, 'b', "==", NULL, 0 },
+	{ "int48eq", 2, {INT4OID,INT8OID}, 'b', "==", NULL, 0 },
+	{ "int82eq", 2, {INT8OID,INT2OID}, 'b', "==", NULL, 0 },
+	{ "int84eq", 2, {INT8OID,INT4OID}, 'b', "==", NULL, 0 },
+	{ "int8eq" , 2, {INT8OID,INT8OID}, 'b', "==", NULL, 0 },
+	{ "float4eq",  2, {FLOAT4OID, FLOAT4OID}, 'b', "==", NULL, 0 },
+	{ "float48eq", 2, {FLOAT4OID, FLOAT8OID}, 'b', "==", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float84eq", 2, {FLOAT8OID, FLOAT4OID}, 'b', "==", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float8eq",  2, {FLOAT8OID, FLOAT8OID}, 'b', "==", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
 
 	/* '<>' : not equal operators */
-	{ "int2ne",  2, {INT2OID,INT2OID}, 'b', "!=", NULL },
-	{ "int24ne", 2, {INT2OID,INT4OID}, 'b', "!=", NULL },
-	{ "int28ne", 2, {INT2OID,INT8OID}, 'b', "!=", NULL },
-	{ "int42ne", 2, {INT4OID,INT2OID}, 'b', "!=", NULL },
-	{ "int4ne",  2, {INT4OID,INT4OID}, 'b', "!=", NULL },
-	{ "int48ne", 2, {INT4OID,INT8OID}, 'b', "!=", NULL },
-	{ "int82ne", 2, {INT8OID,INT2OID}, 'b', "!=", NULL },
-	{ "int84ne", 2, {INT8OID,INT4OID}, 'b', "!=", NULL },
-	{ "int8ne" , 2, {INT8OID,INT8OID}, 'b', "!=", NULL },
-	{ "float4ne",  2, {FLOAT4OID, FLOAT4OID}, 'b', "!=", NULL },
-	{ "float48ne", 2, {FLOAT4OID, FLOAT8OID}, 'b', "!=", NULL },
-	{ "float84ne", 2, {FLOAT8OID, FLOAT4OID}, 'b', "!=", NULL },
-	{ "float8ne",  2, {FLOAT8OID, FLOAT8OID}, 'b', "!=", NULL },
+	{ "int2ne",  2, {INT2OID,INT2OID}, 'b', "!=", NULL, 0 },
+	{ "int24ne", 2, {INT2OID,INT4OID}, 'b', "!=", NULL, 0 },
+	{ "int28ne", 2, {INT2OID,INT8OID}, 'b', "!=", NULL, 0 },
+	{ "int42ne", 2, {INT4OID,INT2OID}, 'b', "!=", NULL, 0 },
+	{ "int4ne",  2, {INT4OID,INT4OID}, 'b', "!=", NULL, 0 },
+	{ "int48ne", 2, {INT4OID,INT8OID}, 'b', "!=", NULL, 0 },
+	{ "int82ne", 2, {INT8OID,INT2OID}, 'b', "!=", NULL, 0 },
+	{ "int84ne", 2, {INT8OID,INT4OID}, 'b', "!=", NULL, 0 },
+	{ "int8ne" , 2, {INT8OID,INT8OID}, 'b', "!=", NULL, 0 },
+	{ "float4ne",  2, {FLOAT4OID, FLOAT4OID}, 'b', "!=", NULL, 0 },
+	{ "float48ne", 2, {FLOAT4OID, FLOAT8OID}, 'b', "!=", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float84ne", 2, {FLOAT8OID, FLOAT4OID}, 'b', "!=", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float8ne",  2, {FLOAT8OID, FLOAT8OID}, 'b', "!=", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
 
 	/* '>'  : relational greater-than */
-	{ "int2gt",  2, {INT2OID,INT2OID}, 'b', ">", NULL },
-	{ "int24gt", 2, {INT2OID,INT4OID}, 'b', ">", NULL },
-	{ "int28gt", 2, {INT2OID,INT8OID}, 'b', ">", NULL },
-	{ "int42gt", 2, {INT4OID,INT2OID}, 'b', ">", NULL },
-	{ "int4gt",  2, {INT4OID,INT4OID}, 'b', ">", NULL },
-	{ "int48gt", 2, {INT4OID,INT8OID}, 'b', ">", NULL },
-	{ "int82gt", 2, {INT8OID,INT2OID}, 'b', ">", NULL },
-	{ "int84gt", 2, {INT8OID,INT4OID}, 'b', ">", NULL },
-	{ "int8gt" , 2, {INT8OID,INT8OID}, 'b', ">", NULL },
-	{ "float4gt",  2, {FLOAT4OID, FLOAT4OID}, 'b', ">", NULL },
-	{ "float48gt", 2, {FLOAT4OID, FLOAT8OID}, 'b', ">", NULL },
-	{ "float84gt", 2, {FLOAT8OID, FLOAT4OID}, 'b', ">", NULL },
-	{ "float8gt",  2, {FLOAT8OID, FLOAT8OID}, 'b', ">", NULL },
+	{ "int2gt",  2, {INT2OID,INT2OID}, 'b', ">", NULL, 0 },
+	{ "int24gt", 2, {INT2OID,INT4OID}, 'b', ">", NULL, 0 },
+	{ "int28gt", 2, {INT2OID,INT8OID}, 'b', ">", NULL, 0 },
+	{ "int42gt", 2, {INT4OID,INT2OID}, 'b', ">", NULL, 0 },
+	{ "int4gt",  2, {INT4OID,INT4OID}, 'b', ">", NULL, 0 },
+	{ "int48gt", 2, {INT4OID,INT8OID}, 'b', ">", NULL, 0 },
+	{ "int82gt", 2, {INT8OID,INT2OID}, 'b', ">", NULL, 0 },
+	{ "int84gt", 2, {INT8OID,INT4OID}, 'b', ">", NULL, 0 },
+	{ "int8gt" , 2, {INT8OID,INT8OID}, 'b', ">", NULL, 0 },
+	{ "float4gt",  2, {FLOAT4OID, FLOAT4OID}, 'b', ">", NULL, 0 },
+	{ "float48gt", 2, {FLOAT4OID, FLOAT8OID}, 'b', ">", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float84gt", 2, {FLOAT8OID, FLOAT4OID}, 'b', ">", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float8gt",  2, {FLOAT8OID, FLOAT8OID}, 'b', ">", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
 
 	/* '<'  : relational less-than */
-	{ "int2lt",  2, {INT2OID,INT2OID}, 'b', "<", NULL },
-	{ "int24lt", 2, {INT2OID,INT4OID}, 'b', "<", NULL },
-	{ "int28lt", 2, {INT2OID,INT8OID}, 'b', "<", NULL },
-	{ "int42lt", 2, {INT4OID,INT2OID}, 'b', "<", NULL },
-	{ "int4lt",  2, {INT4OID,INT4OID}, 'b', "<", NULL },
-	{ "int48lt", 2, {INT4OID,INT8OID}, 'b', "<", NULL },
-	{ "int82lt", 2, {INT8OID,INT2OID}, 'b', "<", NULL },
-	{ "int84lt", 2, {INT8OID,INT4OID}, 'b', "<", NULL },
-	{ "int8lt" , 2, {INT8OID,INT8OID}, 'b', "<", NULL },
-	{ "float4lt",  2, {FLOAT4OID, FLOAT4OID}, 'b', "<", NULL },
-	{ "float48lt", 2, {FLOAT4OID, FLOAT8OID}, 'b', "<", NULL },
-	{ "float84lt", 2, {FLOAT8OID, FLOAT4OID}, 'b', "<", NULL },
-	{ "float8lt",  2, {FLOAT8OID, FLOAT8OID}, 'b', "<", NULL },
+	{ "int2lt",  2, {INT2OID,INT2OID}, 'b', "<", NULL, 0 },
+	{ "int24lt", 2, {INT2OID,INT4OID}, 'b', "<", NULL, 0 },
+	{ "int28lt", 2, {INT2OID,INT8OID}, 'b', "<", NULL, 0 },
+	{ "int42lt", 2, {INT4OID,INT2OID}, 'b', "<", NULL, 0 },
+	{ "int4lt",  2, {INT4OID,INT4OID}, 'b', "<", NULL, 0 },
+	{ "int48lt", 2, {INT4OID,INT8OID}, 'b', "<", NULL, 0 },
+	{ "int82lt", 2, {INT8OID,INT2OID}, 'b', "<", NULL, 0 },
+	{ "int84lt", 2, {INT8OID,INT4OID}, 'b', "<", NULL, 0 },
+	{ "int8lt" , 2, {INT8OID,INT8OID}, 'b', "<", NULL, 0 },
+	{ "float4lt",  2, {FLOAT4OID, FLOAT4OID}, 'b', "<", NULL, 0 },
+	{ "float48lt", 2, {FLOAT4OID, FLOAT8OID}, 'b', "<", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float84lt", 2, {FLOAT8OID, FLOAT4OID}, 'b', "<", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float8lt",  2, {FLOAT8OID, FLOAT8OID}, 'b', "<", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
 
 	/* '>=' : relational greater-than or equal-to */
-	{ "int2ge",  2, {INT2OID,INT2OID}, 'b', ">=", NULL },
-	{ "int24ge", 2, {INT2OID,INT4OID}, 'b', ">=", NULL },
-	{ "int28ge", 2, {INT2OID,INT8OID}, 'b', ">=", NULL },
-	{ "int42ge", 2, {INT4OID,INT2OID}, 'b', ">=", NULL },
-	{ "int4ge",  2, {INT4OID,INT4OID}, 'b', ">=", NULL },
-	{ "int48ge", 2, {INT4OID,INT8OID}, 'b', ">=", NULL },
-	{ "int82ge", 2, {INT8OID,INT2OID}, 'b', ">=", NULL },
-	{ "int84ge", 2, {INT8OID,INT4OID}, 'b', ">=", NULL },
-	{ "int8ge" , 2, {INT8OID,INT8OID}, 'b', ">=", NULL },
-	{ "float4ge",  2, {FLOAT4OID, FLOAT4OID}, 'b', ">=", NULL },
-	{ "float48ge", 2, {FLOAT4OID, FLOAT8OID}, 'b', ">=", NULL },
-	{ "float84ge", 2, {FLOAT8OID, FLOAT4OID}, 'b', ">=", NULL },
-	{ "float8ge",  2, {FLOAT8OID, FLOAT8OID}, 'b', ">=", NULL },
+	{ "int2ge",  2, {INT2OID,INT2OID}, 'b', ">=", NULL, 0 },
+	{ "int24ge", 2, {INT2OID,INT4OID}, 'b', ">=", NULL, 0 },
+	{ "int28ge", 2, {INT2OID,INT8OID}, 'b', ">=", NULL, 0 },
+	{ "int42ge", 2, {INT4OID,INT2OID}, 'b', ">=", NULL, 0 },
+	{ "int4ge",  2, {INT4OID,INT4OID}, 'b', ">=", NULL, 0 },
+	{ "int48ge", 2, {INT4OID,INT8OID}, 'b', ">=", NULL, 0 },
+	{ "int82ge", 2, {INT8OID,INT2OID}, 'b', ">=", NULL, 0 },
+	{ "int84ge", 2, {INT8OID,INT4OID}, 'b', ">=", NULL, 0 },
+	{ "int8ge" , 2, {INT8OID,INT8OID}, 'b', ">=", NULL, 0 },
+	{ "float4ge",  2, {FLOAT4OID, FLOAT4OID}, 'b', ">=", NULL, 0 },
+	{ "float48ge", 2, {FLOAT4OID, FLOAT8OID}, 'b', ">=", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float84ge", 2, {FLOAT8OID, FLOAT4OID}, 'b', ">=", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float8ge",  2, {FLOAT8OID, FLOAT8OID}, 'b', ">=", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
 
 	/* '<=' : relational less-than or equal to */
-	{ "int2le",  2, {INT2OID,INT2OID}, 'b', "<=", NULL },
-	{ "int24le", 2, {INT2OID,INT4OID}, 'b', "<=", NULL },
-	{ "int28le", 2, {INT2OID,INT8OID}, 'b', "<=", NULL },
-	{ "int42le", 2, {INT4OID,INT2OID}, 'b', "<=", NULL },
-	{ "int4le",  2, {INT4OID,INT4OID}, 'b', "<=", NULL },
-	{ "int48le", 2, {INT4OID,INT8OID}, 'b', "<=", NULL },
-	{ "int82le", 2, {INT8OID,INT2OID}, 'b', "<=", NULL },
-	{ "int84le", 2, {INT8OID,INT4OID}, 'b', "<=", NULL },
-	{ "int8le" , 2, {INT8OID,INT8OID}, 'b', "<=", NULL },
-	{ "float4le",  2, {FLOAT4OID, FLOAT4OID}, 'b', "<=", NULL },
-	{ "float48le", 2, {FLOAT4OID, FLOAT8OID}, 'b', "<=", NULL },
-	{ "float84le", 2, {FLOAT8OID, FLOAT4OID}, 'b', "<=", NULL },
-	{ "float8le",  2, {FLOAT8OID, FLOAT8OID}, 'b', "<=", NULL },
+	{ "int2le",  2, {INT2OID,INT2OID}, 'b', "<=", NULL, 0 },
+	{ "int24le", 2, {INT2OID,INT4OID}, 'b', "<=", NULL, 0 },
+	{ "int28le", 2, {INT2OID,INT8OID}, 'b', "<=", NULL, 0 },
+	{ "int42le", 2, {INT4OID,INT2OID}, 'b', "<=", NULL, 0 },
+	{ "int4le",  2, {INT4OID,INT4OID}, 'b', "<=", NULL, 0 },
+	{ "int48le", 2, {INT4OID,INT8OID}, 'b', "<=", NULL, 0 },
+	{ "int82le", 2, {INT8OID,INT2OID}, 'b', "<=", NULL, 0 },
+	{ "int84le", 2, {INT8OID,INT4OID}, 'b', "<=", NULL, 0 },
+	{ "int8le" , 2, {INT8OID,INT8OID}, 'b', "<=", NULL, 0 },
+	{ "float4le",  2, {FLOAT4OID, FLOAT4OID}, 'b', "<=", NULL, 0 },
+	{ "float48le", 2, {FLOAT4OID, FLOAT8OID}, 'b', "<=", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float84le", 2, {FLOAT8OID, FLOAT4OID}, 'b', "<=", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
+	{ "float8le",  2, {FLOAT8OID, FLOAT8OID}, 'b', "<=", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP },
 
 	/* '&'  : bitwise and */
-	{ "int2and", 2, {INT2OID, INT2OID}, 'b', "&", NULL },
-	{ "int4and", 2, {INT4OID, INT4OID}, 'b', "&", NULL },
-	{ "int8and", 2, {INT8OID, INT8OID}, 'b', "&", NULL },
+	{ "int2and", 2, {INT2OID, INT2OID}, 'b', "&", NULL, 0 },
+	{ "int4and", 2, {INT4OID, INT4OID}, 'b', "&", NULL, 0 },
+	{ "int8and", 2, {INT8OID, INT8OID}, 'b', "&", NULL, 0 },
 
 	/* '|'  : bitwise or */
-	{ "int2or", 2, {INT2OID, INT2OID}, 'b', "|", NULL },
-	{ "int4or", 2, {INT4OID, INT4OID}, 'b', "|", NULL },
-	{ "int8or", 2, {INT8OID, INT8OID}, 'b', "|", NULL },
+	{ "int2or", 2, {INT2OID, INT2OID}, 'b', "|", NULL, 0 },
+	{ "int4or", 2, {INT4OID, INT4OID}, 'b', "|", NULL, 0 },
+	{ "int8or", 2, {INT8OID, INT8OID}, 'b', "|", NULL, 0 },
 
 	/* '#'  : bitwise xor */
-	{ "int2xor", 2, {INT2OID, INT2OID}, 'b', "^", NULL },
-	{ "int4xor", 2, {INT4OID, INT4OID}, 'b', "^", NULL },
-	{ "int8xor", 2, {INT8OID, INT8OID}, 'b', "^", NULL },
+	{ "int2xor", 2, {INT2OID, INT2OID}, 'b', "^", NULL, 0 },
+	{ "int4xor", 2, {INT4OID, INT4OID}, 'b', "^", NULL, 0 },
+	{ "int8xor", 2, {INT8OID, INT8OID}, 'b', "^", NULL, 0 },
 
 	/* '~'  : bitwise not operators */
-	{ "int2not", 1, {INT2OID}, 'l', "~", NULL },
-	{ "int4not", 1, {INT4OID}, 'l', "~", NULL },
-	{ "int8not", 1, {INT8OID}, 'l', "~", NULL },
+	{ "int2not", 1, {INT2OID}, 'l', "~", NULL, 0 },
+	{ "int4not", 1, {INT4OID}, 'l', "~", NULL, 0 },
+	{ "int8not", 1, {INT8OID}, 'l', "~", NULL, 0 },
 
 	/* '>>' : right shift */
-	{ "int2shr", 2, {INT2OID,INT4OID}, 'b', ">>", NULL },
-	{ "int4shr", 2, {INT4OID,INT4OID}, 'b', ">>", NULL },
-	{ "int4shr", 2, {INT8OID,INT4OID}, 'b', ">>", NULL },
+	{ "int2shr", 2, {INT2OID,INT4OID}, 'b', ">>", NULL, 0 },
+	{ "int4shr", 2, {INT4OID,INT4OID}, 'b', ">>", NULL, 0 },
+	{ "int4shr", 2, {INT8OID,INT4OID}, 'b', ">>", NULL, 0 },
 
 	/* '<<' : left shift */
-	{ "int2shl", 2, {INT2OID,INT4OID}, 'b', "<<", NULL },
-	{ "int4shl", 2, {INT4OID,INT4OID}, 'b', "<<", NULL },
-	{ "int4shl", 2, {INT8OID,INT4OID}, 'b', "<<", NULL },
+	{ "int2shl", 2, {INT2OID,INT4OID}, 'b', "<<", NULL, 0 },
+	{ "int4shl", 2, {INT4OID,INT4OID}, 'b', "<<", NULL, 0 },
+	{ "int4shl", 2, {INT8OID,INT4OID}, 'b', "<<", NULL, 0 },
+
+	/*
+	 * Mathmatical functions
+	 */
+	{ "cbrt",	1, {FLOAT8OID}, 'f', "cbrt",	NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
+	{ "ceil",	1, {FLOAT8OID}, 'f', "ceil",	NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
+	{ "exp",	1, {FLOAT8OID}, 'f', "exp",		NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
+	{ "floor",	1, {FLOAT8OID}, 'f', "floor",	NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
+	{ "ln",		1, {FLOAT8OID}, 'f', "log",		NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
+	{ "log",	1, {FLOAT8OID}, 'f', "log10",	NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
+	{ "pi",		0, {}, 'c',	"CUDART_PI", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
+	{ "power",	1, {FLOAT8OID,FLOAT8OID}, 'f',  "pow", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
+	{ "round",	1, {FLOAT8OID}, 'f', "round",	NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
+	{ "sign",	1, {FLOAT8OID}, 'f', "sign_double",
+	  DEVFUNC_FPSIGN_TEMPLATE(double),
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
+	{ "sqrt",	1, {FLOAT8OID}, 'f', "sqrt", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
+	{ "trunc",	1, {FLOAT8OID}, 'f', "trunc", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
+
+	/*
+	 * Trigonometric function
+	 */
+	{ "acos",	1, {FLOAT8OID}, 'f', "acos", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
+	{ "asin",	1, {FLOAT8OID}, 'f', "asin", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
+	{ "atan",	1, {FLOAT8OID}, 'f', "atan", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
+	{ "atan2",	2, {FLOAT8OID,FLOAT8OID}, 'f', "atan2", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
+	{ "cos",	1, {FLOAT8OID}, 'f', "cos", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
+	{ "cot",	1, {FLOAT8OID}, 'f', "cot_double",
+	  DEVFUNC_FPCOT_TEMPLATE(double),
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
+	{ "sin",	1, {FLOAT8OID}, 'f', "sin", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
+	{ "tan",	1, {FLOAT8OID}, 'f', "tan", NULL,
+	  DEVINFO_FLAGS_DOUBLE_FP | DEVINFO_FLAGS_INC_MATHFUNC_H },
 };
 
 PgStromDevFuncInfo *
@@ -530,6 +682,7 @@ pgstrom_devfunc_lookup(Oid func_oid)
 			entry->func_kind   = device_func_catalog[i].func_kind;
 			entry->func_ident  = device_func_catalog[i].func_ident;
 			entry->func_source = device_func_catalog[i].func_source;
+			entry->func_flags  = device_func_catalog[i].func_flags;
 			entry->func_nargs  = device_func_catalog[i].func_nargs;
 			memcpy(entry->func_argtypes,
 				   device_func_catalog[i].func_argtypes,
