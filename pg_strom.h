@@ -103,6 +103,7 @@ extern void pgstrom_set_device_context(int dev_index);
 extern int	pgstrom_get_num_devices(void);
 extern void pgstrom_devinfo_init(void);
 extern const char *cuda_error_to_string(CUresult result);
+extern Datum pgstrom_device_properties(PG_FUNCTION_ARGS);
 
 /*
  * nvcc.c

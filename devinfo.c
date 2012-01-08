@@ -15,34 +15,12 @@
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
+#include "funcapi.h"
 #include "storage/ipc.h"
+#include "utils/array.h"
+#include "utils/builtins.h"
 #include "utils/syscache.h"
 #include "pg_strom.h"
-
-typedef struct {
-	CUdevice	device;
-	char		dev_name[256];
-	int			dev_major;
-	int			dev_minor;
-	int			dev_proc_nums;
-	int			dev_proc_warp_sz;
-	int			dev_proc_clock;
-	size_t		dev_global_mem_sz;
-	int			dev_global_mem_width;
-	int			dev_global_mem_clock;
-	int			dev_global_mem_cache_sz;
-	int			dev_shared_mem_sz;
-} PgStromDeviceInfo;
-
-/*
- * Declarations
- */
-static List		   *devtype_info_slot[512];
-static List		   *devfunc_info_slot[1024];
-
-static int			pgstrom_num_devices;
-static PgStromDeviceInfo  *pgstrom_device_info;
-static CUcontext   *pgstrom_device_context;
 
 /* ------------------------------------------------------------
  *
@@ -65,6 +43,8 @@ static CUcontext   *pgstrom_device_context;
 	"#define conref_" #vtype "(conval)  __int_as_float((int)(conval))\n"
 #define DEVFUNC_CONREF_FP64(vtype)										\
 	"#define conref_" #vtype "(conval)  __longlong_as_double(conval)\n"
+
+static List		   *devtype_info_slot[512];
 
 static struct {
 	Oid		type_oid;
@@ -204,6 +184,8 @@ out:
 	"{\n"											\
 	"    return 1.0 / tan(value);\n"				\
 	"}\n"
+
+static List		   *devfunc_info_slot[1024];
 
 static struct {
 	/*
@@ -678,8 +660,304 @@ out:
 	return (!entry->func_ident ? NULL : entry);
 }
 
+/* ------------------------------------------------------------
+ *
+ * Routines to obtain properties of devices
+ *
+ * ------------------------------------------------------------
+ */
+typedef struct {
+	CUdevice	device;
+	CUcontext	context;
+	char		dev_name[256];
+	int			dev_major;
+	int			dev_minor;
+	int			dev_proc_nums;
+	int			dev_proc_warp_sz;
+	int			dev_proc_clock;
+	size_t		dev_global_mem_sz;
+	int			dev_global_mem_width;
+	int			dev_global_mem_clock;
+	int			dev_shared_mem_sz;
+	int			dev_l2_cache_sz;
+	int			dev_const_mem_sz;
+	int			dev_max_block_dim_x;
+	int			dev_max_block_dim_y;
+	int			dev_max_block_dim_z;
+	int			dev_max_grid_dim_x;
+	int			dev_max_grid_dim_y;
+	int			dev_max_grid_dim_z;
+	int			dev_integrated;
+	int			dev_unified_addr;
+	int			dev_concurrent_kernel;
+} PgStromDeviceInfo;
+
+static int					pgstrom_num_devices;
+static PgStromDeviceInfo   *pgstrom_device_info = NULL;
+
 /*
- * Error code to string representation
+ * pgstrom_cuda_device_init 
+ *
+ * This routine invokes cuInit() to initialize cuda stuff at the first
+ * call. Although the behavior is uncertain, it seems to us child process
+ * has to call it again, even if we already called it on preload-share-
+ * library timing.
+ */
+static void
+pgstrom_init_devices(void)
+{
+	PgStromDeviceInfo   *temp_device_info;
+	size_t		device_info_length;
+	CUresult	ret;
+	int			i, j;
+
+	if (pgstrom_device_info)
+		return;		/* already initialized */
+
+	/*
+	 * CUDA APIs initialization
+	 */
+	ret = cuInit(0);
+	if (ret != CUDA_SUCCESS)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("cuda: failed to initialized APIs : %s",
+						cuda_error_to_string(ret))));
+
+	/*
+	 * Collect properties of installed devices
+	 */
+	ret = cuDeviceGetCount(&pgstrom_num_devices);
+	if (ret != CUDA_SUCCESS)
+		elog(ERROR, "cuda: failed to get number of devices : %s",
+			 cuda_error_to_string(ret));
+
+	device_info_length = sizeof(PgStromDeviceInfo) * pgstrom_num_devices;
+	temp_device_info = alloca(device_info_length);
+	memset(temp_device_info, 0, device_info_length);
+
+	for (i=0; i < pgstrom_num_devices; i++)
+	{
+		PgStromDeviceInfo  *devinfo;
+		static struct {
+			size_t				offset;
+			CUdevice_attribute	attribute;
+		} device_attrs[] = {
+			{ offsetof(PgStromDeviceInfo, dev_proc_nums),
+			  CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT },
+			{ offsetof(PgStromDeviceInfo, dev_proc_warp_sz),
+			  CU_DEVICE_ATTRIBUTE_WARP_SIZE },
+			{ offsetof(PgStromDeviceInfo, dev_proc_clock),
+			  CU_DEVICE_ATTRIBUTE_CLOCK_RATE },
+			{ offsetof(PgStromDeviceInfo, dev_global_mem_width),
+			  CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH },
+			{ offsetof(PgStromDeviceInfo, dev_global_mem_clock),
+			  CU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE },
+			{ offsetof(PgStromDeviceInfo, dev_shared_mem_sz),
+			  CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK },
+			{ offsetof(PgStromDeviceInfo, dev_l2_cache_sz),
+			  CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE },
+			{ offsetof(PgStromDeviceInfo, dev_const_mem_sz),
+			  CU_DEVICE_ATTRIBUTE_TOTAL_CONSTANT_MEMORY },
+			{ offsetof(PgStromDeviceInfo, dev_max_block_dim_x),
+			  CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X },
+			{ offsetof(PgStromDeviceInfo, dev_max_block_dim_y),
+			  CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Y },
+			{ offsetof(PgStromDeviceInfo, dev_max_block_dim_z),
+			  CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Z },
+			{ offsetof(PgStromDeviceInfo, dev_max_grid_dim_x),
+			  CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X },
+			{ offsetof(PgStromDeviceInfo, dev_max_grid_dim_y),
+			  CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y },
+			{ offsetof(PgStromDeviceInfo, dev_max_grid_dim_z),
+			  CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z },
+			{ offsetof(PgStromDeviceInfo, dev_integrated),
+			  CU_DEVICE_ATTRIBUTE_INTEGRATED },
+			{ offsetof(PgStromDeviceInfo, dev_unified_addr),
+			  CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING },
+			{ offsetof(PgStromDeviceInfo, dev_concurrent_kernel),
+			  CU_DEVICE_ATTRIBUTE_CONCURRENT_KERNELS },
+		};
+
+		devinfo = &temp_device_info[i];
+
+		ret = cuDeviceGet(&devinfo->device, i);
+		if (ret != CUDA_SUCCESS)
+			elog(ERROR, "cuda: failed to get handle of GPU device: %s",
+				 cuda_error_to_string(ret));
+
+		if ((ret = cuDeviceGetName(devinfo->dev_name,
+								   sizeof(devinfo->dev_name),
+								   devinfo->device)) ||
+			(ret = cuDeviceComputeCapability(&devinfo->dev_major,
+											 &devinfo->dev_minor,
+											 devinfo->device)) ||
+			(ret = cuDeviceTotalMem(&devinfo->dev_global_mem_sz,
+									devinfo->device)))
+			elog(ERROR, "cuda: failed to get attribute of GPU device : %s",
+				 cuda_error_to_string(ret));
+		for (j=0; j < lengthof(device_attrs); j++)
+		{
+			ret = cuDeviceGetAttribute((int *)((uintptr_t) devinfo +
+											   device_attrs[j].offset),
+									   device_attrs[j].attribute,
+									   devinfo->device);
+			if (ret != CUDA_SUCCESS)
+				elog(ERROR, "cuda: failed to get attribute of GPU device : %s",
+					 cuda_error_to_string(ret));
+		}
+	}
+	pgstrom_device_info = MemoryContextAlloc(TopMemoryContext,
+											 device_info_length);
+	memcpy(pgstrom_device_info, temp_device_info, device_info_length);
+}
+
+Datum
+pgstrom_device_properties(PG_FUNCTION_ARGS)
+{
+	FuncCallContext	   *funcctx;
+	PgStromDeviceInfo  *devinfo;
+	HeapTuple	tuple;
+	Datum		values[18];
+	bool		nulls[18];
+	ArrayType  *block_dim;
+	ArrayType  *grid_dim;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		TupleDesc		tupdesc;
+		MemoryContext	oldcxt;
+
+		pgstrom_init_devices();
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcxt = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(18, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "index",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "name",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "major",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "minor",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "proc_nums",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 6, "proc_warp_size",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 7, "proc_clock",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 8, "global_mem_size",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 9, "global_mem_width",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber)10, "global_mem_clock",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber)11, "shared_mem_size",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber)12, "L2_cache_size",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber)13, "const_mem_size",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber)14, "max_block_dim",
+						   INT4ARRAYOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber)15, "max_grid_dim",
+						   INT4ARRAYOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber)16, "integrated",
+						   BOOLOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber)17, "unified_addr",
+						   BOOLOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber)18, "concurrent_kernel",
+						   BOOLOID, -1, 0);
+		funcctx->tuple_desc = BlessTupleDesc(tupdesc);
+		funcctx->user_fctx = NULL;
+
+		MemoryContextSwitchTo(oldcxt);
+	}
+	funcctx = SRF_PERCALL_SETUP();
+
+	Assert(funcctx->multi_call_memory_ctx != NULL);
+
+	if (funcctx->call_cntr >= pgstrom_num_devices)
+		SRF_RETURN_DONE(funcctx);
+
+	devinfo = &pgstrom_device_info[funcctx->call_cntr];
+
+	values[0] = Int32GetDatum(devinfo->dev_max_block_dim_x);
+	values[1] = Int32GetDatum(devinfo->dev_max_block_dim_y);
+	values[2] = Int32GetDatum(devinfo->dev_max_block_dim_z);
+	block_dim = construct_array(values, 3, INT4OID, sizeof(int), true, 'i');
+
+	values[0] = Int32GetDatum(devinfo->dev_max_grid_dim_x);
+	values[1] = Int32GetDatum(devinfo->dev_max_grid_dim_x);
+	values[2] = Int32GetDatum(devinfo->dev_max_grid_dim_x);
+	grid_dim = construct_array(values, 3, INT4OID, sizeof(int), true, 'i');
+
+	memset(nulls, false, sizeof(nulls));
+	values[0] = Int32GetDatum(funcctx->call_cntr);
+	values[1] = CStringGetTextDatum(devinfo->dev_name);
+	values[2] = Int32GetDatum(devinfo->dev_major);
+	values[3] = Int32GetDatum(devinfo->dev_minor);
+	values[4] = Int32GetDatum(devinfo->dev_proc_nums);
+	values[5] = Int32GetDatum(devinfo->dev_proc_warp_sz);
+	values[6] = Int32GetDatum(devinfo->dev_proc_clock);
+	values[7] = Int64GetDatum(devinfo->dev_global_mem_sz);
+	values[8] = Int32GetDatum(devinfo->dev_global_mem_width);
+	values[9] = Int32GetDatum(devinfo->dev_global_mem_clock);
+	values[10] = Int32GetDatum(devinfo->dev_shared_mem_sz);
+	values[11] = Int32GetDatum(devinfo->dev_l2_cache_sz);
+	values[12] = Int32GetDatum(devinfo->dev_const_mem_sz);
+	values[13] = PointerGetDatum(block_dim);
+	values[14] = PointerGetDatum(grid_dim);
+	values[15] = BoolGetDatum(devinfo->dev_integrated ? TRUE : FALSE);
+	values[16] = BoolGetDatum(devinfo->dev_unified_addr ? TRUE : FALSE);
+	values[17] = BoolGetDatum(devinfo->dev_concurrent_kernel ? TRUE : FALSE);
+
+	tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+
+	SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+}
+PG_FUNCTION_INFO_V1(pgstrom_device_properties);
+
+int
+pgstrom_get_num_devices(void)
+{
+	pgstrom_init_devices();
+	return pgstrom_num_devices;
+}
+
+void
+pgstrom_set_device_context(int dev_index)
+{
+	CUresult	ret;
+
+	pgstrom_init_devices();
+	Assert(dev_index < pgstrom_num_devices);
+	if (!pgstrom_device_info[dev_index].context)
+	{
+		ret = cuCtxCreate(&pgstrom_device_info[dev_index].context,
+						  0,
+						  pgstrom_device_info[dev_index].device);
+		if (ret != CUDA_SUCCESS)
+			elog(ERROR, "cuda: failed to create device context: %s",
+				 cuda_error_to_string(ret));
+	}
+	ret = cuCtxSetCurrent(pgstrom_device_info[dev_index].context);
+	if (ret != CUDA_SUCCESS)
+		elog(ERROR, "cuda: failed to switch device context: %s",
+			 cuda_error_to_string(ret));
+}
+
+void
+pgstrom_devinfo_init(void)
+{
+	memset(devtype_info_slot, 0, sizeof(devtype_info_slot));
+	memset(devfunc_info_slot, 0, sizeof(devfunc_info_slot));
+}
+
+/*
+ * For coding convinient, translation from an error code to cstring.
  */
 const char *
 cuda_error_to_string(CUresult result)
@@ -777,131 +1055,4 @@ cuda_error_to_string(CUresult result)
 	}
 	snprintf(buf, sizeof(buf), "cuda error code: %d", result);
 	return pstrdup(buf);
-}
-
-int
-pgstrom_get_num_devices(void)
-{
-	return pgstrom_num_devices;
-}
-
-void
-pgstrom_set_device_context(int dev_index)
-{
-	CUresult	ret;
-
-	cuInit(0);
-
-	Assert(dev_index < pgstrom_num_devices);
-	if (!pgstrom_device_context[dev_index])
-	{
-		ret = cuCtxCreate(&pgstrom_device_context[dev_index],
-						  0,
-						  pgstrom_device_info[dev_index].device);
-		if (ret != CUDA_SUCCESS)
-			elog(ERROR, "cuda: failed to create device context: %s",
-				 cuda_error_to_string(ret));
-	}
-	ret = cuCtxSetCurrent(pgstrom_device_context[dev_index]);
-	if (ret != CUDA_SUCCESS)
-		elog(ERROR, "cuda: failed to set device context: %s",
-			 cuda_error_to_string(ret));
-}
-
-void
-pgstrom_devinfo_init(void)
-{
-	PgStromDeviceInfo  *devinfo;
-	CUresult	ret;
-	int			i, j;
-
-	memset(devtype_info_slot, 0, sizeof(devtype_info_slot));
-	memset(devfunc_info_slot, 0, sizeof(devfunc_info_slot));
-
-	ret = cuInit(0);
-	if (ret != CUDA_SUCCESS)
-		elog(ERROR, "cuda: failed to initialize driver API: %s",
-			 cuda_error_to_string(ret));
-
-	ret = cuDeviceGetCount(&pgstrom_num_devices);
-	if (ret != CUDA_SUCCESS)
-		elog(ERROR, "cuda: failed to get number of devices: %s",
-			 cuda_error_to_string(ret));
-
-	pgstrom_device_info
-		= MemoryContextAllocZero(TopMemoryContext,
-								 sizeof(PgStromDeviceInfo) *
-								 pgstrom_num_devices);
-	pgstrom_device_context
-		= MemoryContextAllocZero(TopMemoryContext,
-								 sizeof(CUcontext) *
-								 pgstrom_num_devices);
-
-	for (i=0; i < pgstrom_num_devices; i++)
-	{
-		static struct {
-			size_t				offset;
-			CUdevice_attribute	attribute;
-		} dev_attributes[] = {
-			{ offsetof(PgStromDeviceInfo, dev_proc_nums),
-			  CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT },
-			{ offsetof(PgStromDeviceInfo, dev_proc_warp_sz),
-			  CU_DEVICE_ATTRIBUTE_WARP_SIZE },
-			{ offsetof(PgStromDeviceInfo, dev_proc_clock),
-			  CU_DEVICE_ATTRIBUTE_CLOCK_RATE },
-			{ offsetof(PgStromDeviceInfo, dev_global_mem_width),
-			  CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH },
-			{ offsetof(PgStromDeviceInfo, dev_global_mem_clock),
-			  CU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE },
-			{ offsetof(PgStromDeviceInfo, dev_global_mem_cache_sz),
-			  CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE },
-			{ offsetof(PgStromDeviceInfo, dev_shared_mem_sz),
-			  CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK },
-		};
-
-		devinfo = &pgstrom_device_info[i];
-
-		ret = cuDeviceGet(&devinfo->device, i);
-		if (ret != CUDA_SUCCESS)
-			elog(ERROR, "cuda: failed to get handle of GPU device: %s",
-				 cuda_error_to_string(ret));
-
-		if ((ret = cuDeviceGetName(devinfo->dev_name,
-								   sizeof(devinfo->dev_name),
-								   devinfo->device)) ||
-			(ret = cuDeviceComputeCapability(&devinfo->dev_major,
-											 &devinfo->dev_minor,
-											 devinfo->device)) ||
-			(ret = cuDeviceTotalMem(&devinfo->dev_global_mem_sz,
-									devinfo->device)))
-			elog(ERROR, "cuda: failed to get attribute of GPU device : %s",
-				 cuda_error_to_string(ret));
-		for (j=0; j < lengthof(dev_attributes); j++)
-		{
-			ret = cuDeviceGetAttribute((int *)((uintptr_t) devinfo +
-											   dev_attributes[j].offset),
-									   dev_attributes[j].attribute,
-									   devinfo->device);
-			if (ret != CUDA_SUCCESS)
-				elog(ERROR, "cuda: failed to get attribute of GPU device : %s",
-					 cuda_error_to_string(ret));
-		}
-
-		elog(LOG,
-			 "pg_strom: %s (capability v%d.%d), "
-			 "%d of processor units (%d of wraps/unit, %dMHz), "
-			 "%luMB of global memory (%dbits, %dMHz, %dKB of L2 cache), "
-			 "%dKB of shared memory",
-			 devinfo->dev_name,
-			 devinfo->dev_major,
-			 devinfo->dev_minor,
-			 devinfo->dev_proc_nums,
-			 devinfo->dev_proc_warp_sz,
-			 devinfo->dev_proc_clock / 1000,
-			 devinfo->dev_global_mem_sz / (1024 * 1024),
-			 devinfo->dev_global_mem_width,
-			 devinfo->dev_global_mem_clock / 1000,
-			 devinfo->dev_global_mem_cache_sz / 1024,
-			 devinfo->dev_shared_mem_sz / 1024);
-	}
 }
