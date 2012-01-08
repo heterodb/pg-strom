@@ -59,73 +59,41 @@ static CUcontext   *pgstrom_device_context;
 	"    return value;\n"												\
 	"}\n"
 
+#define DEVFUNC_CONREF_INT(vtype)										\
+	"#define conref_" #vtype "(conval)  ((" #vtype ")(conval))\n"
+#define DEVFUNC_CONREF_FP32(vtype)										\
+	"#define conref_" #vtype "(conval)  __int_as_float((int)(conval))\n"
+#define DEVFUNC_CONREF_FP64(vtype)										\
+	"#define conref_" #vtype "(conval)  __longlong_as_double(conval)\n"
+
 static struct {
 	Oid		type_oid;
 	char   *type_ident;
 	char   *type_source;
 	char   *type_varref;
+	char   *type_conref;
 	uint32	type_flags;
 } device_type_catalog[] = {
 	{ BOOLOID,		"char",		NULL,
-	  DEVFUNC_VARREF_TEMPLATE(char), 0 },
+	  DEVFUNC_VARREF_TEMPLATE(char),
+	  DEVFUNC_CONREF_INT(char), 0 },
 	{ INT2OID,		"short",	NULL,
-	  DEVFUNC_VARREF_TEMPLATE(short), 0 },
+	  DEVFUNC_VARREF_TEMPLATE(short),
+	  DEVFUNC_CONREF_INT(short), 0 },
 	{ INT4OID,		"int",		NULL,
-	  DEVFUNC_VARREF_TEMPLATE(int), 0 },
+	  DEVFUNC_VARREF_TEMPLATE(int),
+	  DEVFUNC_CONREF_INT(int), 0 },
 	{ INT8OID,		"long",		NULL,
-	  DEVFUNC_VARREF_TEMPLATE(long), 0 },
+	  DEVFUNC_VARREF_TEMPLATE(long),
+	  DEVFUNC_CONREF_INT(long), 0 },
 	{ FLOAT4OID,	"float",	NULL,
-	  DEVFUNC_VARREF_TEMPLATE(float), 0 },
+	  DEVFUNC_VARREF_TEMPLATE(float),
+	  DEVFUNC_CONREF_FP32(float), 0 },
 	{ FLOAT8OID,	"double",	NULL,
 	  DEVFUNC_VARREF_TEMPLATE(double),
+	  DEVFUNC_CONREF_FP64(double),
 	  DEVINFO_FLAGS_DOUBLE_FP },
 };
-
-void
-pgstrom_devtype_format(StringInfo str, Oid type_oid, Datum value)
-{
-	switch (type_oid)
-	{
-		case BOOLOID:
-			appendStringInfo(str, "%d", DatumGetChar(value));
-			break;
-		case INT2OID:
-			appendStringInfo(str, "%d", DatumGetInt16(value));
-			break;
-		case INT4OID:
-			appendStringInfo(str, "%d", DatumGetInt32(value));
-			break;
-		case INT8OID:
-			appendStringInfo(str, "%ld", DatumGetInt64(value));
-			break;
-		case FLOAT8OID:
-		case FLOAT4OID:
-			{
-				double	num = (type_oid == FLOAT4OID ?
-							   DatumGetFloat4(value) :
-							   DatumGetFloat8(value));
-				if (isnan(num))
-					appendStringInfo(str, "NAN");
-				else
-					switch (isinf(num))
-					{
-						case 1:
-							appendStringInfo(str, "INFINITY");
-							break;
-						case -1:
-							appendStringInfo(str, "-INFINITY");
-							break;
-						default:
-							appendStringInfo(str, "%.*g", FLT_DIG, num);
-							break;
-					}
-			}
-			break;
-		default:
-			elog(ERROR, "unexpected type value being formatted %u", type_oid);
-			break;
-	}
-}
 
 PgStromDevTypeInfo *
 pgstrom_devtype_lookup(Oid type_oid)
@@ -167,11 +135,12 @@ pgstrom_devtype_lookup(Oid type_oid)
 			entry->type_ident  = device_type_catalog[i].type_ident;
 			entry->type_source = device_type_catalog[i].type_source;
 			entry->type_varref = device_type_catalog[i].type_varref;
+			entry->type_conref = device_type_catalog[i].type_conref;
 			entry->type_flags  = device_type_catalog[i].type_flags;
 			break;
 		}
 	}
-out:
+out:	
 	devtype_info_slot[hash] = lappend(devtype_info_slot[hash], entry);
 	MemoryContextSwitchTo(oldcxt);
 	ReleaseSysCache(tuple);
@@ -703,7 +672,6 @@ pgstrom_devfunc_lookup(Oid func_oid)
 	}
 out:
 	devfunc_info_slot[hash] = lappend(devfunc_info_slot[hash], entry);
-
 	MemoryContextSwitchTo(oldcxt);
 	ReleaseSysCache(tuple);
 

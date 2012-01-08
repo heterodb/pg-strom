@@ -22,6 +22,7 @@
 #include "utils/array.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
+#include "utils/int8.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/resowner.h"
@@ -580,8 +581,8 @@ pgstrom_scan_column_store(PgStromExecState *sestate,
 				heap_deform_tuple(tuple, tupdesc, values, nulls);
 				Assert(!nulls[0] && !nulls[1]);
 
-				oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 				cur_rowid = Int64GetDatum(values[0]);
+				oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 				cur_values = DatumGetArrayTypePCopy(values[1]);
 				MemoryContextSwitchTo(oldcxt);
 
@@ -598,9 +599,6 @@ pgstrom_scan_column_store(PgStromExecState *sestate,
 
 					goto out;
 				}
-#ifndef USE_FLOAT8_BYVAL
-				pfree(cur_rowid);
-#endif
 				pfree(cur_values);
 			}
 		}
@@ -763,6 +761,7 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	MemoryContext		oldcxt;
 	bool				nevermatch = false;
 	char			   *kernel_source = NULL;
+	List			   *const_values = NIL;
 	Bitmapset		   *clause_cols = NULL;
 	Bitmapset		   *required_cols = NULL;
 
@@ -779,6 +778,10 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 		else if (strcmp(defel->defname, "kernel_source") == 0)
 		{
 			kernel_source = strVal(defel->arg);
+		}
+		else if (strcmp(defel->defname, "const_values") == 0)
+		{
+			const_values = (List *)defel->arg;
 		}
 		else if (strcmp(defel->defname, "clause_cols") == 0)
 		{
@@ -860,23 +863,61 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 								  sestate->dev_module,
 								  "pgstrom_qual");
 		if (ret != CUDA_SUCCESS)
-		{
-			cuModuleUnload(sestate->dev_module);
 			ereport(ERROR,
                     (errcode(ERRCODE_INTERNAL_ERROR),
                      errmsg("cuda: failed to get device function : %s",
 							cuda_error_to_string(ret))));
-		}
 
 		ret = cuFuncSetCacheConfig(sestate->dev_function,
 								   CU_FUNC_CACHE_PREFER_L1);
 		if (ret != CUDA_SUCCESS)
-        {
-			cuModuleUnload(sestate->dev_module);
 			ereport(ERROR,
 					(errcode(ERRCODE_INTERNAL_ERROR),
 					 errmsg("cuda: failed to set L1 cache setting : %s",
                             cuda_error_to_string(ret))));
+
+		if (const_values != NIL)
+		{
+			CUdeviceptr	const_ptr;
+			size_t		const_size;
+			int			const_idx = 0;
+			int64	   *const_buffer = alloca(sizeof(int64) *
+											  list_length(const_values));
+			foreach (cell, const_values)
+			{
+				Assert(IsA(lfirst(cell), Integer) ||
+					   IsA(lfirst(cell), String));
+
+				if (IsA(lfirst(cell), Integer))
+					const_buffer[const_idx++] = intVal(lfirst(cell));
+				else
+				{
+					Datum	temp = CStringGetDatum(strVal(lfirst(cell)));
+					const_buffer[const_idx++] =
+						DatumGetInt64(DirectFunctionCall1(int8in, temp));
+				}
+			}
+
+			ret = cuModuleGetGlobal(&const_ptr, &const_size,
+									sestate->dev_module, "constval");
+			if (ret != CUDA_SUCCESS)
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("failed to lookup symbol \"constval\" : %s",
+								cuda_error_to_string(ret))));
+
+			if (const_size != sizeof(int64) * list_length(const_values))
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("constval has unexpected size (%lu)",
+								const_size)));
+
+			ret = cuMemcpyHtoD(const_ptr, const_buffer, const_size);
+			if (ret != CUDA_SUCCESS)
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("failed to put constant values : %s",
+								cuda_error_to_string(ret))));
 		}
 	}
 	return sestate;

@@ -78,6 +78,7 @@ typedef struct {
 	char   *type_ident;
 	char   *type_source;
 	char   *type_varref;
+	char   *type_conref;
 	uint32	type_flags;			/* set of DEVINFO_FLAGS_* */
 } PgStromDevTypeInfo;
 

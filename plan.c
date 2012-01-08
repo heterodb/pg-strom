@@ -11,9 +11,12 @@
  * this package.
  */
 #include "postgres.h"
+#include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/var.h"
+#include "utils/builtins.h"
+#include "utils/int8.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
@@ -23,6 +26,7 @@ typedef struct {
 	Oid			base_relid;
 	List	   *type_decl;
 	List	   *func_decl;
+	List	   *const_decl;
 	Bitmapset  *clause_cols;
 } MakeDeviceQualContext;
 
@@ -138,9 +142,64 @@ make_device_function_code(Oid func_oid, List *args,
 }
 
 /*
+ * make_device_const_code
+ *
+ * Helper function of make_device_qual_code; that generates a reference
+ * to a particular variable.
+ * We deliver constance values to GPU device using constant memory of the
+ * device, instead of putting them on the generated source code directly,
+ * because it allows to reduce times to compile GPU binary on run-time.
+ */
+static bool
+make_device_const_code(Const *con, StringInfo qual_source,
+					   MakeDeviceQualContext *context)
+{
+	PgStromDevTypeInfo *dtype;
+
+	if (con->constisnull)
+		return false;
+
+	dtype = pgstrom_devtype_lookup(con->consttype);
+   	if (dtype->type_source)
+		context->type_decl =
+			list_append_unique_ptr(context->type_decl,
+								   dtype->type_source);
+	if (dtype->type_conref)
+		context->func_decl =
+			list_append_unique_ptr(context->func_decl,
+								   dtype->type_conref);
+
+	appendStringInfo(qual_source, "conref_%s(constval[%d])",
+					 dtype->type_ident,
+					 list_length(context->const_decl));
+
+	if (get_typbyval(con->consttype))
+	{
+		context->const_decl = lappend(context->const_decl,
+									  makeInteger(con->constvalue));
+	}
+	else
+	{
+		/*
+		 * XXX - 64bit const value is not available to pack with
+		 * makeInteger on 32bit platform, so move it as string.
+		 */
+		char   *temp;
+
+		Assert(con->consttype == INT8OID || con->consttype == FLOAT8OID);
+
+		temp = DatumGetCString(DirectFunctionCall1(int8out,
+												   con->constvalue));
+		context->const_decl = lappend(context->const_decl,
+									  makeString(temp));
+	}
+	return true;
+}
+
+/*
  * make_device_var_code
  *
- * Helper function of make_device_qual_code; that generate references
+ * Helper function of make_device_qual_code; that generates a reference
  * to a particular variable.
  */
 static bool
@@ -193,6 +252,12 @@ make_device_var_code(Var *var, StringInfo qual_source,
 	return true;
 }
 
+/*
+ * make_device_bool_code
+ *
+ * Helper function of make_device_qual_code; that generate a conjunction
+ * of multiple qualifiers with AND, OR or NOT operators.
+ */
 static bool
 make_device_bool_code(BoolExpr *b, StringInfo qual_source,
 					  MakeDeviceQualContext *context)
@@ -288,21 +353,8 @@ make_device_qual_code(Node *node, StringInfo qual_source,
 
 	if (IsA(node, Const))
 	{
-		PgStromDevTypeInfo *dtype;
-		Const  *c = (Const *) node;
-
-		if (c->constisnull)
+		if (!make_device_const_code((Const *)node, qual_source, context))
 			return false;
-
-		// to be replaced by parametalized arguments
-		pgstrom_devtype_format(qual_source,
-							   c->consttype,
-							   c->constvalue);
-		dtype = pgstrom_devtype_lookup(c->consttype);
-		if (dtype->type_source)
-			context->type_decl
-				= list_append_unique_ptr(context->type_decl,
-										 dtype->type_source);
 	}
 	else if (IsA(node, Var))
 	{
@@ -351,10 +403,7 @@ make_device_qual_source(Oid base_relid, List *device_quals,
 	StringInfoData	qual;
 	StringInfoData	blk1;
 	StringInfoData	blk2;
-//	Bitmapset	   *clause_cols = NULL;
 	Bitmapset	   *tempset;
-//	Relids		columns = NULL;
-//	Relids		tempset;
 	AttrNumber	attnum;
 	DefElem	   *defel;
 	ListCell   *cell;
@@ -381,6 +430,7 @@ make_device_qual_source(Oid base_relid, List *device_quals,
 	cxt.base_relid = base_relid;
 	cxt.type_decl = NIL;
 	cxt.func_decl = NIL;
+	cxt.const_decl = NIL;
 	cxt.clause_cols = NULL;
 
 	switch (list_length(qual_list))
@@ -477,8 +527,14 @@ make_device_qual_source(Oid base_relid, List *device_quals,
 		appendStringInfo(&decl, "\n");
 	foreach (cell, cxt.func_decl)
 		appendStringInfo(&decl, "%s\n", (char *) lfirst(cell));
-	if (cxt.func_decl != NIL)
-		appendStringInfo(&decl, "\n");
+	if (cxt.const_decl != NIL)
+	{
+		appendStringInfo(&decl, "__constant__ long constval[%d];\n\n",
+						 list_length(cxt.const_decl));
+		*private = lappend(*private,
+						   makeDefElem("const_values",
+									   (Node *)cxt.const_decl));
+	}
 
 	/* kernel function follows by declaration part */
 	appendStringInfo(&decl, "%s", kern.data);
@@ -701,6 +757,7 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 	ListCell	   *cell;
 	DefElem		   *nevermatch = NULL;
 	DefElem		   *kernel_source = NULL;
+	DefElem		   *const_values = NULL;
 	Relids			clause_cols = NULL;
 	Relids			required_cols = NULL;
 	StringInfoData	str;
@@ -715,6 +772,8 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 			nevermatch = defel;
 		else if (strcmp(defel->defname, "kernel_source") == 0)
 			kernel_source = defel;
+		else if (strcmp(defel->defname, "const_values") == 0)
+			const_values = defel;
 		else if (strcmp(defel->defname, "clause_cols") == 0)
 		{
 			clause_cols = bms_add_member(clause_cols,
@@ -748,7 +807,7 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 	else if (kernel_source)
 	{
 		char   *p;
-		char	temp[24];
+		char	temp[64];
 		int		lineno = 1;
 
 		if (!bms_is_empty(clause_cols))
@@ -762,6 +821,31 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 								 NameStr(attr->attname));
 			}
 			ExplainPropertyText("Used in clause ", str.data, es);
+		}
+
+		if (const_values)
+		{
+			List   *const_values_list = (List *)const_values->arg;
+			char	const_buf[64];
+			int		const_idx = 0;
+
+			foreach (cell, const_values_list)
+			{
+				Assert(IsA(lfirst(cell), Integer) ||
+					   IsA(lfirst(cell), String));
+
+				if (IsA(lfirst(cell), Integer))
+				{
+					pg_lltoa((int64) intVal(lfirst(cell)), const_buf);
+					snprintf(temp, sizeof(temp), "constval[%d]", const_idx++);
+					ExplainPropertyText(temp, const_buf, es);
+				}
+				else
+				{
+					snprintf(temp, sizeof(temp), "constval[%d]", const_idx++);
+					ExplainPropertyText(temp, strVal(lfirst(cell)), es);
+				}
+			}
 		}
 
 		resetStringInfo(&str);
