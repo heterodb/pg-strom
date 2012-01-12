@@ -502,11 +502,12 @@ make_device_qual_source(Oid base_relid, List *device_quals,
 					 "\n"
 					 "%s"
 					 "\n"
-					 "        if ((result & bitmask) && !%s)\n"
-					 "            result &= ~bitmask;\n"
+					 "        if ((result & bitmask) == 0 &&\n"
+					 "            !%s)\n"
+					 "            result |= bitmask;\n"
 					 "        offset++;\n"
 					 "    }\n"
-					 "    rowmap[offset_base] = (result & ~errors);\n"
+					 "    rowmap[offset_base] = (result | errors);\n"
 					 "}", blk1.data, blk2.data, qual.data);
 	/*
 	 * Declarations

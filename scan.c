@@ -24,6 +24,7 @@
 #include "utils/guc.h"
 #include "utils/int8.h"
 #include "utils/lsyscache.h"
+#include "utils/pg_lzcompress.h"
 #include "utils/rel.h"
 #include "utils/resowner.h"
 #include "utils/varbit.h"
@@ -47,9 +48,7 @@ typedef struct {
 	((char *)((chunk)->cs_rowmap + (chunk)->cs_values[(csidx)]))
 
 typedef struct {
-	RelationSet		relset;
-
-	/* parameters come from planner */
+	/* Parameters come from planner */
 	bool			nevermatch;		/* true, if no items shall be matched */
 	Bitmapset	   *required_cols;	/* columns being returned to executor */
 	Bitmapset	   *clause_cols;	/* columns being copied to device */
@@ -61,10 +60,16 @@ typedef struct {
 	Snapshot		es_snapshot;	/* copy from EState */
 	MemoryContext	es_memcxt;		/* per-query memory context */
 
+	/* shadow tables and indexes */
+	Relation		id_rel;			/* shadow rowid table */
+	Relation	   *cs_rels;		/* shadow column-store table */
+	Relation	   *cs_idxs;		/* shadow column-store index */
+
 	/* scan descriptors */
-	HeapScanDesc	ri_scan;		/* scan on rowid map */
+	HeapScanDesc	id_scan;		/* scan on rowid map */
 	IndexScanDesc  *cs_scan;		/* scan on column store */
-	ArrayType	  **cs_cur_values;
+	bytea		  **cs_cur_isnull;
+	bytea		  **cs_cur_values;
 	int64		   *cs_cur_rowid_min;
 	int64		   *cs_cur_rowid_max;
 
@@ -312,11 +317,31 @@ retry:
 }
 
 static void
+deconstruct_cs_bytea(void *dest, Datum cs_bytea, uint32 length_be)
+{
+	bytea  *temp = (bytea *)DatumGetPointer(cs_bytea);
+
+	/* we don't allow to save contents of column-store externally */
+	Assert(!VARATT_IS_EXTERNAL(temp));
+
+	if (VARATT_IS_COMPRESSED(temp))
+	{
+		PGLZ_Header *lzhd = (PGLZ_Header *) temp;
+		Assert(PGLZ_RAW_SIZE(lzhd) == length_be);
+		pglz_decompress(lzhd, dest);
+	}
+	else
+	{
+		Assert(VARSIZE_ANY_EXHDR(temp) == length_be);
+		memcpy(dest, VARDATA_ANY(temp), VARSIZE_ANY_EXHDR(temp));
+	}
+}
+
+static void
 pgstrom_load_column_store(PgStromExecState *sestate,
 						  PgStromChunkBuf *chunk, int csidx)
 {
 	Form_pg_attribute	attr;
-	IndexScanDesc	iscan;
 	ScanKeyData		skeys[2];
 	HeapTuple		tup;
 
@@ -346,56 +371,53 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 				BTLessStrategyNumber, F_INT8LT,
 				Int64GetDatum(chunk->rowid + chunk->nitems));
 
-	iscan = index_beginscan(sestate->relset->cs_rel[csidx],
-							sestate->relset->cs_idx[csidx],
-							sestate->es_snapshot, 2, 0);
-	index_rescan(iscan, skeys, 2, NULL, 0);
+	index_rescan(sestate->cs_scan[csidx], skeys, 2, NULL, 0);
 
-	while (HeapTupleIsValid(tup = index_getnext(iscan, ForwardScanDirection)))
+	while (HeapTupleIsValid(tup = index_getnext(sestate->cs_scan[csidx],
+												ForwardScanDirection)))
 	{
 		TupleDesc	tupdesc;
-		Datum		values[2];
-		bool		nulls[2];
+		Datum		values[Natts_pg_strom];
+		bool		isnull[Natts_pg_strom];
 		int64		cur_rowid;
-		ArrayType  *cur_array;
-		bits8	   *nullbitmap;
-		int			offset;
-		int			nitems;
+		uint32		cur_nitems;
+		int64		offset;
 
-		tupdesc = RelationGetDescr(sestate->relset->cs_rel[csidx]);
-		heap_deform_tuple(tup, tupdesc, values, nulls);
-		Assert(!nulls[0] && !nulls[1]);
+		tupdesc = RelationGetDescr(sestate->cs_rels[csidx]);
+		heap_deform_tuple(tup, tupdesc, values, isnull);
+		Assert(!isnull[Anum_pg_strom_rowid - 1] &&
+			   !isnull[Anum_pg_strom_nitems - 1] &&
+			   !isnull[Anum_pg_strom_values - 1]);
 
-		cur_rowid = Int64GetDatum(values[0]);
-		cur_array = DatumGetArrayTypeP(values[1]);
-
-		Assert(ARR_NDIM(cur_array) == 1);
-		Assert(ARR_LBOUND(cur_array)[0] == 0);
-		Assert((ARR_DIMS(cur_array)[0] & (BITS_PER_BYTE - 1)) == 0);
-		Assert(ARR_ELEMTYPE(cur_array) == attr->atttypid);
-
+		cur_rowid = DatumGetInt64(values[Anum_pg_strom_rowid-1]);
+		cur_nitems = DatumGetUInt32(values[Anum_pg_strom_nitems-1]);
 		offset = cur_rowid - chunk->rowid;
-		nitems = ARR_DIMS(cur_array)[0];
 
-		memcpy(chunk_cs_values(chunk,csidx) + offset * attr->attlen,
-			   ARR_DATA_PTR(cur_array),
-			   nitems * attr->attlen);
-		nullbitmap = ARR_NULLBITMAP(cur_array);
-		if (nullbitmap)
+		Assert(cur_nitems % BITS_PER_BYTE == 0);
+	    Assert(offset + cur_nitems <= chunk->nitems);
+
+		if (!isnull[Anum_pg_strom_isnull - 1])
 		{
-			memcpy(chunk_cs_nulls(chunk,csidx) + offset / BITS_PER_BYTE,
-				   nullbitmap,
-				   nitems / BITS_PER_BYTE);
+			deconstruct_cs_bytea(chunk_cs_nulls(chunk,csidx) +
+								 offset / BITS_PER_BYTE,
+								 values[Anum_pg_strom_isnull - 1],
+								 cur_nitems / BITS_PER_BYTE);
 		}
 		else
 		{
-			/* Clear nullbitmap, if all items are not NULL */
+			/*
+			 * 'isnull' == NULL means; all the items within 'values' array
+			 * is not null, so clear the corresponding scope of null bitmap.
+			 */
 			memset(chunk_cs_nulls(chunk,csidx) + offset / BITS_PER_BYTE,
 				   0,
-				   nitems / BITS_PER_BYTE);
+				   cur_nitems / BITS_PER_BYTE);
 		}
+		deconstruct_cs_bytea(chunk_cs_values(chunk,csidx) +
+							 offset * attr->attlen,
+							 values[Anum_pg_strom_values - 1],
+							 cur_nitems * attr->attlen);
 	}
-	index_endscan(iscan);
 }
 
 static int
@@ -403,41 +425,43 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 {
 	int		loaded_chunks;
 
-	if (sestate->ri_scan == NULL)
+	if (sestate->id_scan == NULL)
 		return -1;
 
 	for (loaded_chunks = 0; loaded_chunks < num_chunks; loaded_chunks++)
 	{
 		TupleDesc	tupdesc;
 		HeapTuple	tuple;
-		Datum		values[2];
-		bool		nulls[2];
-		int			rowid;
-		VarBit	   *rowmap;
+		Datum		values[Natts_pg_strom];
+		bool		isnull[Natts_pg_strom];
+		int64		rowid;
+		uint32		nitems;
 		MemoryContext oldcxt;
 		PgStromChunkBuf	*chunk;
 
-		tuple = heap_getnext(sestate->ri_scan, ForwardScanDirection);
+		tuple = heap_getnext(sestate->id_scan, ForwardScanDirection);
 		if (!HeapTupleIsValid(tuple))
 		{
 			/* No any tuples, close the sequential rowid scan */
-			heap_endscan(sestate->ri_scan);
-			sestate->ri_scan = NULL;
+			heap_endscan(sestate->id_scan);
+			sestate->id_scan = NULL;
 			break;
 		}
 
-		tupdesc = RelationGetDescr(sestate->relset->rowid_rel);
-		heap_deform_tuple(tuple, tupdesc, values, nulls);
-		Assert(!nulls[0] && !nulls[1]);
+		tupdesc = RelationGetDescr(sestate->id_rel);
+		heap_deform_tuple(tuple, tupdesc, values, isnull);
+		Assert(!isnull[Anum_pg_strom_rowid - 1] &&
+			   !isnull[Anum_pg_strom_nitems - 1] &&
+			   !isnull[Anum_pg_strom_isnull - 1]);
 
-		rowid = DatumGetInt64(values[0]);
-		rowmap = DatumGetVarBitP(values[1]);
+		rowid = DatumGetInt64(values[Anum_pg_strom_rowid - 1]);
+		nitems = DatumGetUInt32(values[Anum_pg_strom_nitems - 1]);
 
 		oldcxt = MemoryContextSwitchTo(pgstrom_scan_memcxt);
 		chunk = palloc0(sizeof(PgStromChunkBuf));
 		chunk->rowid = rowid;
 		chunk->nattrs = RelationGetNumberOfAttributes(sestate->es_relation);
-		chunk->nitems = VARBITLEN(rowmap);
+		chunk->nitems = nitems;
 		chunk->cs_nulls = palloc0(sizeof(int) * chunk->nattrs);
 		chunk->cs_values = palloc0(sizeof(int) * chunk->nattrs);
 		MemoryContextSwitchTo(oldcxt);
@@ -483,7 +507,9 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 			 * Load necessary column store
 			 */
 			chunk->cs_rowmap = (uint8 *)dma_buffer;
-			memcpy(chunk->cs_rowmap, VARBITS(rowmap), VARBITBYTES(rowmap));
+			deconstruct_cs_bytea(chunk->cs_rowmap,
+								 values[Anum_pg_strom_isnull - 1],
+								 chunk->nitems / BITS_PER_BYTE);
 
 			temp = bms_copy(sestate->clause_cols);
 			while ((csidx = (bms_first_member(temp)-1)) >= 0)
@@ -516,15 +542,14 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 		else
 		{
 			/*
-			 * In the case when the supplied plan has no qualifier,
+			 * In case of the supplied plan without no qualifiers,
 			 * all the chunks are ready to scan using rowid.
 			 */
-			chunk->cs_rowmap
-				= MemoryContextAllocZero(pgstrom_scan_memcxt,
-										 chunk->nitems / BITS_PER_BYTE);
-			memcpy(chunk->cs_rowmap, VARBITS(rowmap), VARBITBYTES(rowmap));
-
 			oldcxt = MemoryContextSwitchTo(pgstrom_scan_memcxt);
+			chunk->cs_rowmap = palloc0(chunk->nitems / BITS_PER_BYTE);
+			deconstruct_cs_bytea(chunk->cs_rowmap,
+								 values[Anum_pg_strom_isnull - 1],
+								 chunk->nitems / BITS_PER_BYTE);
 			sestate->chunk_ready_list
 				= lappend(sestate->chunk_ready_list, chunk);
 			MemoryContextSwitchTo(oldcxt);
@@ -538,16 +563,16 @@ pgstrom_scan_column_store(PgStromExecState *sestate,
 						  int csidx, int64 rowid,
 						  TupleTableSlot *slot)
 {
-	ScanKeyData		skey;
-	TupleDesc		tupdesc;
-	HeapTuple		tuple;
-	Datum			values[2];
-	bool			nulls[2];
-	int64			cur_rowid;
-	ArrayType	   *cur_values;
-	int				index;
+	ScanKeyData	skey;
+	TupleDesc	tupdesc;
+	HeapTuple	tuple;
+	Datum		values[Natts_pg_strom];
+	bool		isnull[Natts_pg_strom];
+	int64		cur_rowid;
+	uint32		cur_nitems;
+	uint8	   *nullmap;
+	int			index;
 	MemoryContext	oldcxt;
-	Form_pg_attribute	attr;
 
 	if (!sestate->cs_cur_values[csidx] ||
 		rowid < sestate->cs_cur_rowid_min[csidx] ||
@@ -568,7 +593,7 @@ pgstrom_scan_column_store(PgStromExecState *sestate,
 					 2 * (sestate->cs_cur_rowid_max[csidx] -
 						  sestate->cs_cur_rowid_min[csidx])))
 		{
-			int		count = 2;
+			int		count = 2;	/* try twice at maximun */
 
 			while (count-- > 0)
 			{
@@ -577,44 +602,58 @@ pgstrom_scan_column_store(PgStromExecState *sestate,
 				if (!HeapTupleIsValid(tuple))
 					break;
 
-				tupdesc = RelationGetDescr(sestate->relset->cs_rel[csidx]);
-				heap_deform_tuple(tuple, tupdesc, values, nulls);
-				Assert(!nulls[0] && !nulls[1]);
+				tupdesc = RelationGetDescr(sestate->cs_rels[csidx]);
+				heap_deform_tuple(tuple, tupdesc, values, isnull);
+				Assert(!isnull[Anum_pg_strom_rowid - 1] &&
+					   !isnull[Anum_pg_strom_nitems - 1] &&
+					   !isnull[Anum_pg_strom_values - 1]);
 
-				cur_rowid = Int64GetDatum(values[0]);
-				oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
-				cur_values = DatumGetArrayTypePCopy(values[1]);
-				MemoryContextSwitchTo(oldcxt);
+				cur_rowid = DatumGetInt64(values[Anum_pg_strom_rowid - 1]);
+				cur_nitems = DatumGetUInt32(values[Anum_pg_strom_nitems - 1]);
 
 				/* Hit! */
 				if (rowid >= cur_rowid &&
-					rowid <= cur_rowid + ARR_DIMS(cur_values)[0])
+					rowid <= cur_rowid + cur_nitems - 1)
 				{
-					pfree(sestate->cs_cur_values[csidx]);
+					Datum	cur_isnull = values[Anum_pg_strom_isnull - 1];
+					Datum	cur_values = values[Anum_pg_strom_values - 1];
 
-					sestate->cs_cur_values[csidx] = cur_values;
+					if (sestate->cs_cur_isnull[csidx])
+						pfree(sestate->cs_cur_isnull[csidx]);
+					if (sestate->cs_cur_values[csidx])
+						pfree(sestate->cs_cur_values[csidx]);
+
+					oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
+					sestate->cs_cur_isnull[csidx]
+						= (!isnull[Anum_pg_strom_isnull - 1] ?
+						   PG_DETOAST_DATUM_COPY(cur_isnull) : NULL);
+					sestate->cs_cur_values[csidx]
+						= PG_DETOAST_DATUM_COPY(cur_values);
+					MemoryContextSwitchTo(oldcxt);
 					sestate->cs_cur_rowid_min[csidx] = cur_rowid;
 					sestate->cs_cur_rowid_max[csidx]
-						= cur_rowid + ARR_DIMS(cur_values)[0] - 1;
-
+						= cur_rowid + cur_nitems - 1;
 					goto out;
 				}
-				pfree(cur_values);
 			}
 		}
 
-		/*
-		 * Rewind the index scan again, the fetch tuple that contains
-		 * the supplied rowid.
-		 */
+		/* Reset cached values */
 		if (sestate->cs_cur_values[csidx])
 		{
+			if (sestate->cs_cur_isnull[csidx])
+				pfree(sestate->cs_cur_isnull[csidx]);
 			pfree(sestate->cs_cur_values[csidx]);
+			sestate->cs_cur_isnull[csidx] = NULL;
 			sestate->cs_cur_values[csidx] = NULL;
 			sestate->cs_cur_rowid_min[csidx] = -1;
 			sestate->cs_cur_rowid_max[csidx] = -1;
 		}
 
+		/*
+		 * Rewind the current index scan to fetch a cs-tuple with
+		 * required rowid.
+		 */
 		ScanKeyInit(&skey,
 					(AttrNumber) 1,
 					BTLessEqualStrategyNumber, F_INT8LE,
@@ -630,19 +669,29 @@ pgstrom_scan_column_store(PgStromExecState *sestate,
 			return;
 		}
 
-		tupdesc = RelationGetDescr(sestate->relset->cs_rel[csidx]);
-		heap_deform_tuple(tuple, tupdesc, values, nulls);
-		Assert(!nulls[0] && !nulls[1]);
+		tupdesc = RelationGetDescr(sestate->cs_rels[csidx]);
+		heap_deform_tuple(tuple, tupdesc, values, isnull);
+		Assert(!isnull[Anum_pg_strom_rowid - 1] &&
+			   !isnull[Anum_pg_strom_nitems - 1] &&
+			   !isnull[Anum_pg_strom_values - 1]);
 
+		cur_rowid = DatumGetInt64(values[Anum_pg_strom_rowid - 1]);
+		cur_nitems = DatumGetUInt32(values[Anum_pg_strom_nitems - 1]);
+		if (rowid < cur_rowid || rowid >= cur_rowid + cur_nitems)
+		{
+			slot->tts_isnull[csidx] = true;
+			slot->tts_values[csidx] = (Datum) 0;
+			return;
+		}
 		oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
-		cur_rowid = Int64GetDatum(values[0]);
-		cur_values = DatumGetArrayTypePCopy(values[1]);
-		MemoryContextSwitchTo(oldcxt);
-
-		sestate->cs_cur_values[csidx] = cur_values;
+		sestate->cs_cur_isnull[csidx] =
+			(!isnull[Anum_pg_strom_isnull - 1] ?
+			 PG_DETOAST_DATUM_COPY(values[Anum_pg_strom_isnull - 1]) : NULL);
+		sestate->cs_cur_values[csidx] =
+			PG_DETOAST_DATUM_COPY(values[Anum_pg_strom_values - 1]);
 		sestate->cs_cur_rowid_min[csidx] = cur_rowid;
-		sestate->cs_cur_rowid_max[csidx]
-			= cur_rowid + ARR_DIMS(cur_values)[0] - 1;
+		sestate->cs_cur_rowid_max[csidx] = cur_rowid + cur_nitems - 1;
+		MemoryContextSwitchTo(oldcxt);
 
 		Assert(rowid >= sestate->cs_cur_rowid_min[csidx] &&
 			   rowid <= sestate->cs_cur_rowid_max[csidx]);
@@ -658,19 +707,37 @@ pgstrom_scan_column_store(PgStromExecState *sestate,
 		index_rescan(sestate->cs_scan[csidx], &skey, 1, NULL, 0);
 	}
 out:
-	attr = slot->tts_tupleDescriptor->attrs[csidx];
 	index = rowid - sestate->cs_cur_rowid_min[csidx];
-	slot->tts_values[csidx] = array_ref(sestate->cs_cur_values[csidx],
-										1,
-										&index,
-										-1,	/* varlena array */
-										attr->attlen,
-										attr->attbyval,
-										attr->attalign,
-										&slot->tts_isnull[csidx]);
+	nullmap = (!sestate->cs_cur_isnull[csidx] ?
+			   NULL : (uint8 *)VARDATA(sestate->cs_cur_isnull[csidx]));
+	if (!nullmap ||
+		(nullmap[index / BITS_PER_BYTE] & (1<<(index % BITS_PER_BYTE))) == 0)
+	{
+		Form_pg_attribute	attr = slot->tts_tupleDescriptor->attrs[csidx];
+
+		if (attr->attlen > 0)
+			slot->tts_values[csidx]
+				= fetch_att(VARDATA(sestate->cs_cur_values[csidx]) +
+							attr->attlen * index,
+							attr->attbyval, attr->attlen);
+		else
+		{
+			char   *temp = VARDATA(sestate->cs_cur_values[csidx]);
+			int		offset = ((uint16 *)temp)[index];
+
+			Assert(offset > 0);
+			slot->tts_values[csidx] = PointerGetDatum(temp + offset);
+		}
+		slot->tts_isnull[csidx] = false;
+	}
+	else
+	{
+		slot->tts_isnull[csidx] = true;
+		slot->tts_values[csidx] = (Datum) 0;
+	}
 }
 
-#define BITS_PER_DATUM		(sizeof(Datum) * BITS_PER_BYTE)
+#define BITS_PER_DATUM	(sizeof(Datum) * BITS_PER_BYTE)
 static bool
 pgstrom_scan_chunk_buffer(PgStromExecState *sestate, TupleTableSlot *slot)
 {
@@ -686,14 +753,14 @@ pgstrom_scan_chunk_buffer(PgStromExecState *sestate, TupleTableSlot *slot)
 		int64	rowid;
 
 		if ((index & (BITS_PER_DATUM - 1)) == 0 &&
-			((Datum *)chunk->cs_rowmap)[index / BITS_PER_DATUM] == 0)
+			((Datum *)chunk->cs_rowmap)[index / BITS_PER_DATUM] == -1)
 		{
 			index += BITS_PER_DATUM;
 			continue;
 		}
 		index_h = index / BITS_PER_BYTE;
 		index_l = index % BITS_PER_BYTE;
-		if ((chunk->cs_rowmap[index_h] & (1 << index_l)) == 0)
+		if ((chunk->cs_rowmap[index_h] & (1 << index_l)) != 0)
 		{
 			index++;
 			continue;
@@ -823,8 +890,12 @@ pgstrom_init_exec_state(ForeignScanState *fss)
     sestate->es_snapshot = fss->ss.ps.state->es_snapshot;
 	sestate->es_memcxt = fss->ss.ps.ps_ExprContext->ecxt_per_query_memory;
 
+	sestate->cs_rels = palloc0(sizeof(Relation) * nattrs);
+	sestate->cs_idxs = palloc0(sizeof(Relation) * nattrs);
+
 	sestate->cs_scan = palloc0(sizeof(IndexScanDesc) * nattrs);
-	sestate->cs_cur_values = palloc0(sizeof(ArrayType *) * nattrs);
+	sestate->cs_cur_isnull = palloc0(sizeof(bytea *) * nattrs);
+	sestate->cs_cur_values = palloc0(sizeof(bytea *) * nattrs);
 	sestate->cs_cur_rowid_min = palloc0(sizeof(int64) * nattrs);
 	sestate->cs_cur_rowid_max = palloc0(sizeof(int64) * nattrs);
 
@@ -940,28 +1011,53 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 	sestate = pgstrom_init_exec_state(fss);
 
 	/*
+	 * Open the required relation, but kept close for unused relations
+	 */
+	sestate->id_rel = pgstrom_open_shadow_table(base_rel,
+												InvalidAttrNumber,
+												AccessShareLock);
+	tempset = bms_union(sestate->required_cols,
+						sestate->clause_cols);
+	while ((attnum = bms_first_member(tempset)) > 0)
+	{
+		sestate->cs_rels[attnum - 1]
+			= pgstrom_open_shadow_table(base_rel, attnum, AccessShareLock);
+		sestate->cs_idxs[attnum - 1]
+			= pgstrom_open_shadow_index(base_rel, attnum, AccessShareLock);
+	}
+	bms_free(tempset);
+
+	/*
 	 * Begin the scan
 	 */
-	sestate->relset = pgstrom_open_relation_set(base_rel,
-												AccessShareLock, true);
-	sestate->ri_scan = heap_beginscan(sestate->relset->rowid_rel,
+	sestate->id_scan = heap_beginscan(sestate->id_rel,
 									  sestate->es_snapshot,
 									  0, NULL);
 
-	tempset = bms_copy(sestate->required_cols);
+	tempset = bms_union(sestate->required_cols,
+						sestate->clause_cols);
 	while ((attnum = bms_first_member(tempset)) > 0)
 	{
 		/*
-		 * Clause cols should be loaded prior to scan, so no need to
-		 * scan it again using rowid.
+		 * Columns used in qualifier-clause needs two keys on index-scan;
+		 * both lower and higher limit of rowid.
+		 * Columns only referenced to upper layer needs one key on
+		 * its index-scan.
 		 */
 		if (bms_is_member(attnum, sestate->clause_cols))
-			continue;
-
-		sestate->cs_scan[attnum - 1]
-			= index_beginscan(sestate->relset->cs_rel[attnum - 1],
-							  sestate->relset->cs_idx[attnum - 1],
-							  sestate->es_snapshot, 1, 0);
+		{
+			sestate->cs_scan[attnum - 1]
+				= index_beginscan(sestate->cs_rels[attnum - 1],
+								  sestate->cs_idxs[attnum - 1],
+								  sestate->es_snapshot, 2, 0);
+		}
+		else
+		{
+			sestate->cs_scan[attnum - 1]
+				= index_beginscan(sestate->cs_rels[attnum - 1],
+								  sestate->cs_idxs[attnum - 1],
+								  sestate->es_snapshot, 1, 0);
+		}
 	}
 	bms_free(tempset);
 
@@ -1045,9 +1141,9 @@ pgstrom_rescan_foreign_scan(ForeignScanState *fss)
 	/*
 	 * Rewind rowid scan
 	 */
-	if (sestate->ri_scan != NULL)
-		heap_endscan(sestate->ri_scan);
-	sestate->ri_scan = heap_beginscan(sestate->relset->rowid_rel,
+	if (sestate->id_scan != NULL)
+		heap_endscan(sestate->id_scan);
+	sestate->id_scan = heap_beginscan(sestate->id_rel,
 									  sestate->es_snapshot,
 									  0, NULL);
 	/*
@@ -1087,10 +1183,17 @@ pgstrom_end_foreign_scan(ForeignScanState *fss)
 		if (sestate->cs_scan[i])
 			index_endscan(sestate->cs_scan[i]);
 	}
-	if (sestate->ri_scan != NULL)
-		heap_endscan(sestate->ri_scan);
+	if (sestate->id_scan != NULL)
+		heap_endscan(sestate->id_scan);
 
-	pgstrom_close_relation_set(sestate->relset, AccessShareLock);
+	for (i=0; i < nattrs; i++)
+	{
+		if (sestate->cs_rels[i])
+			relation_close(sestate->cs_rels[i], AccessShareLock);
+		if (sestate->cs_idxs[i])
+			relation_close(sestate->cs_idxs[i], AccessShareLock);
+	}
+	relation_close(sestate->id_rel, AccessShareLock);
 	pgstrom_release_exec_state(sestate);
 }
 

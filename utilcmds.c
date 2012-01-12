@@ -40,6 +40,112 @@
 static ProcessUtility_hook_type next_process_utility_hook = NULL;
 
 /*
+ * Utility functions to open shadow tables/indexes
+ */
+static Relation
+pgstrom_open_shadow_relation(Relation base_rel, AttrNumber attnum,
+							 LOCKMODE lockmode, bool is_index)
+{
+	char	   *nsp_name;
+	char		rel_name[NAMEDATALEN * 2 + 20];
+	RangeVar   *range;
+	Relation	relation;
+
+	/*
+	 * The base relation must be a foreign table being managed by
+	 * pg_strom foreign data wrapper.
+	 */
+	if (RelationGetForm(base_rel)->relkind != RELKIND_FOREIGN_TABLE)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not a foreign table",
+						RelationGetRelationName(base_rel))));
+	else
+	{
+		ForeignTable	   *ft = GetForeignTable(RelationGetRelid(base_rel));
+		ForeignServer	   *fs = GetForeignServer(ft->serverid);
+		ForeignDataWrapper *fdw = GetForeignDataWrapper(fs->fdwid);
+
+		if (GetFdwRoutine(fdw->fdwhandler) != &pgstromFdwHandlerData)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("\"%s\" is not managed by pg_strom",
+							RelationGetRelationName(base_rel))));
+	}
+
+	nsp_name = get_namespace_name(RelationGetForm(base_rel)->relnamespace);
+	if (attnum == InvalidAttrNumber)
+		snprintf(rel_name, sizeof(rel_name), "%s.%s.%s",
+				 nsp_name, RelationGetRelationName(base_rel),
+				 (!is_index ? "rowid" : "idx"));
+	else
+		snprintf(rel_name, sizeof(rel_name), "%s.%s.%s.%s",
+				 nsp_name, RelationGetRelationName(base_rel),
+				 NameStr(RelationGetDescr(base_rel)->attrs[attnum-1]->attname),
+				 (!is_index ? "cs" : "idx"));
+	if (strlen(rel_name) >= NAMEDATALEN)
+		ereport(ERROR,
+				(errcode(ERRCODE_NAME_TOO_LONG),
+				 errmsg("Name of shadow index: \"%s\" too long", rel_name)));
+	pfree(nsp_name);
+
+	range = makeRangeVar(PGSTROM_SCHEMA_NAME, rel_name, -1);
+	relation = relation_openrv(range, lockmode);
+	pfree(range);
+
+	return relation;
+}
+
+Relation
+pgstrom_open_shadow_table(Relation base_rel,
+						  AttrNumber attnum,
+						  LOCKMODE lockmode)
+{
+	Relation	relation;
+
+	relation = pgstrom_open_shadow_relation(base_rel, attnum, lockmode, false);
+	if (RelationGetForm(relation)->relkind != RELKIND_RELATION)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not a table",
+						RelationGetRelationName(relation))));
+	return relation;
+}
+
+Relation
+pgstrom_open_shadow_index(Relation base_rel,
+						  AttrNumber attnum,
+						  LOCKMODE lockmode)
+{
+	Relation	relation;
+
+	relation = pgstrom_open_shadow_relation(base_rel, attnum, lockmode, true);
+	if (RelationGetForm(relation)->relkind != RELKIND_INDEX)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not an index",
+						RelationGetRelationName(relation))));
+	return relation;
+}
+
+RangeVar *
+pgstrom_lookup_shadow_sequence(Relation base_rel)
+{
+	char	   *nsp_name;
+	char		seq_name[NAMEDATALEN * 2 + 20];
+	RangeVar   *range;
+
+	nsp_name = get_namespace_name(RelationGetForm(base_rel)->relnamespace);
+	snprintf(seq_name, sizeof(seq_name), "%s.%s.seq",
+			 nsp_name, RelationGetRelationName(base_rel));
+	range = makeRangeVar(PGSTROM_SCHEMA_NAME, pstrdup(seq_name), -1);
+
+	pfree(nsp_name);
+
+	return range;
+}
+
+/*
  * pgstrom_open_relation_set
  *
  * Open the relation set with/without related indexes
@@ -179,72 +285,63 @@ pgstrom_close_relation_set(RelationSet relset, LOCKMODE lockmode)
 	pfree(relset);
 }
 
-/*
- * pgstrom_create_rowid_index
- *
- * create "<base_schema>.<base_rel>.(<column>.)idx" index of pg_strom
- * schema to find-up a tuple that contains a particular rowid.
- */
 static void
-pgstrom_create_rowid_index(Relation base_rel, const char *attname,
-						   Relation store_rel, AttrNumber indexed_anum)
+pgstrom_create_shadow_index(Relation base_rel, Relation cs_rel,
+							Form_pg_attribute attr)
 {
 	char	   *nsp_name;
-	char		index_name[3 * NAMEDATALEN + 20];
-	char	   *indexed_attname;
-	IndexInfo  *index_info;
-	Oid			collationObjectId[1];
-	Oid			classObjectId[1];
-	int16		coloptions[1];
+	char		idx_name[NAMEDATALEN * 2 + 20];
+	IndexInfo  *idx_info;
+	Oid			collationOid[1];
+    Oid         opclassOid[1];
+    int16       colOptions[1];
 
 	nsp_name = get_namespace_name(RelationGetForm(base_rel)->relnamespace);
-	if (!attname)
-		snprintf(index_name, sizeof(index_name), "%s.%s.idx",
+	if (!attr)
+		snprintf(idx_name, sizeof(idx_name), "%s.%s.idx",
 				 nsp_name, RelationGetRelationName(base_rel));
 	else
-		snprintf(index_name, sizeof(index_name), "%s.%s.%s.idx",
-				 nsp_name, RelationGetRelationName(base_rel), attname);
+		snprintf(idx_name, sizeof(idx_name), "%s.%s.%s.idx",
+				 nsp_name, RelationGetRelationName(base_rel),
+				 NameStr(attr->attname));
 
-	if (strlen(index_name) >= NAMEDATALEN - 1)
+	if (strlen(idx_name) >= NAMEDATALEN)
 		ereport(ERROR,
-				(errcode(ERRCODE_NAME_TOO_LONG),
-				 errmsg("Name of shadow index: \"%s\" too long", index_name)));
+                (errcode(ERRCODE_NAME_TOO_LONG),
+                 errmsg("Name of shadow index: \"%s\" too long", idx_name)));
 
-	indexed_attname =
-		NameStr(store_rel->rd_att->attrs[indexed_anum - 1]->attname);
+	idx_info = makeNode(IndexInfo);
+	idx_info->ii_NumIndexAttrs = 1;
+	idx_info->ii_KeyAttrNumbers[0] = Anum_pg_strom_rowid;
+	idx_info->ii_Expressions = NIL;
+	idx_info->ii_ExpressionsState = NIL;
+	idx_info->ii_Predicate = NIL;
+	idx_info->ii_PredicateState = NIL;
+	idx_info->ii_ExclusionOps = NULL;
+	idx_info->ii_ExclusionProcs = NULL;
+	idx_info->ii_ExclusionStrats = NULL;
+	idx_info->ii_Unique = true;
+	idx_info->ii_ReadyForInserts = true;
+	idx_info->ii_Concurrent = false;
+	idx_info->ii_BrokenHotChain = false;
 
-	index_info = makeNode(IndexInfo);
-	index_info->ii_NumIndexAttrs = 1;
-	index_info->ii_KeyAttrNumbers[0] = indexed_anum;
-	index_info->ii_Expressions = NIL;
-	index_info->ii_ExpressionsState = NIL;
-	index_info->ii_Predicate = NIL;
-	index_info->ii_PredicateState = NIL;
-	index_info->ii_ExclusionOps = NULL;
-	index_info->ii_ExclusionProcs = NULL;
-	index_info->ii_ExclusionStrats = NULL;
-	index_info->ii_Unique = true;
-	index_info->ii_ReadyForInserts = true;
-	index_info->ii_Concurrent = false;
-	index_info->ii_BrokenHotChain = false;
+	collationOid[0] = InvalidOid;
+    opclassOid[0] = GetDefaultOpClass(INT8OID, BTREE_AM_OID);
+    if (!OidIsValid(opclassOid[0]))
+		elog(ERROR, "no default operator class found on (int8, btree)");
+	colOptions[0] = 0;
 
-	collationObjectId[0] = InvalidOid;
-	coloptions[0] = 0;
-	classObjectId[0] = GetDefaultOpClass(INT8OID, BTREE_AM_OID);
-	if (!OidIsValid(classObjectId[0]))
-		elog(ERROR, "defaule operator class was not found: {int8, btree}");
-
-	index_create(store_rel,			/* heapRelation */
-				 index_name,		/* indexRelationName */
+	index_create(cs_rel,			/* heapRelation */
+				 idx_name,			/* indexRelationName */
 				 InvalidOid,		/* indexRelationId */
 				 InvalidOid,		/* relFileNode */
-				 index_info,		/* indexInfo */
-				 list_make1(indexed_attname),	/* indexColNames */
+				 idx_info,			/* indexInfo */
+				 list_make1("rowid"),	/* indexColNames */
 				 BTREE_AM_OID,		/* accessMethodObjectId */
-				 store_rel->rd_rel->reltablespace, /* tableSpaceId */
-				 collationObjectId,	/* collationObjectId */
-				 classObjectId,		/* OpClassObjectId */
-				 coloptions,		/* coloptions */
+				 cs_rel->rd_rel->reltablespace,	/* tableSpaceId */
+				 collationOid,		/* collationObjectId */
+				 opclassOid,		/* OpClassObjectId */
+				 colOptions,		/* coloptions */
 				 (Datum) 0,			/* reloptions */
 				 false,				/* isprimary */
 				 false,				/* isconstraint */
@@ -253,217 +350,112 @@ pgstrom_create_rowid_index(Relation base_rel, const char *attname,
 				 false,				/* allow_system_table_mods */
 				 false,				/* skip_build */
 				 false);			/* concurrent */
-
-	elog(INFO, "pg_strom created a shadow index: \"%s.%s\"",
-		 PGSTROM_SCHEMA_NAME, index_name);
 }
 
-/*
- * pgstrom_create_rowid_map
- *
- * create "<base_schema>.<base_rel>.rowid" table of pg_strom schema
- * that has "rowid(int8)" and "rowid_map(VarBit)" to track which rowid
- * has been in use.
- */
 static void
-pgstrom_create_rowid_map(Oid namespaceId, Relation base_rel)
+pgstrom_create_shadow_table(Oid namespaceId, Relation base_rel,
+							Form_pg_attribute attr)
 {
-	char		   *nsp_name;
-	char			store_name[NAMEDATALEN * 2 + 20];
-	Oid				store_oid;
-	Relation		store_rel;
-	TupleDesc		tupdesc;
+	char	   *nsp_name;
+	char		cs_name[NAMEDATALEN * 2 + 20];
+	TupleDesc	tupdesc;
+	Oid			cs_relid;
+	Relation	cs_rel;
 	ObjectAddress	base_address;
-	ObjectAddress	store_address;
+	ObjectAddress	cs_address;
 
 	nsp_name = get_namespace_name(RelationGetForm(base_rel)->relnamespace);
-	snprintf(store_name, sizeof(store_name), "%s.%s.rowid",
-			 nsp_name, RelationGetRelationName(base_rel));
-	if (strlen(store_name) >= NAMEDATALEN - 1)
+	if (!attr)
+		snprintf(cs_name, sizeof(cs_name), "%s.%s.rowid",
+				 nsp_name, RelationGetRelationName(base_rel));
+	else
+		snprintf(cs_name, sizeof(cs_name), "%s.%s.%s.cs",
+				 nsp_name, RelationGetRelationName(base_rel),
+				 NameStr(attr->attname));
+
+	if (strlen(cs_name) >= NAMEDATALEN)
 		ereport(ERROR,
 				(errcode(ERRCODE_NAME_TOO_LONG),
-				 errmsg("Name of shadow table: \"%s\" too long", store_name)));
+				 errmsg("Name of shadow table: \"%s\" too long", cs_name)));
+	pfree(nsp_name);
 
-	tupdesc = CreateTemplateTupleDesc(2, false);
-	TupleDescInitEntry(tupdesc,
-					   (AttrNumber) 1,
-					   "rowid",
-					   INT8OID,
-					   -1, 0);
-	TupleDescInitEntry(tupdesc,
-					   (AttrNumber) 2,
-					   "rowid_map",
-					   VARBITOID,
-					   -1, 0);
-	/*
-	 * Pg_strom want to keep varlena data being inlined; never uses external
-	 * toast relation due to the performance reason. So, we override the
-	 * default setting of pg_type definitions.
-	 */
-	tupdesc->attrs[0]->attstorage = 'p';
-	tupdesc->attrs[1]->attstorage = 'm';
-
-	store_oid = heap_create_with_catalog(store_name,
-										 namespaceId,
-										 InvalidOid,
-										 InvalidOid,
-										 InvalidOid,
-										 InvalidOid,
-										 base_rel->rd_rel->relowner,
-										 tupdesc,
-										 NIL,
-										 RELKIND_RELATION,
-										 base_rel->rd_rel->relpersistence,
-										 false,
-										 false,
-										 true,
-										 0,
-										 ONCOMMIT_NOOP,
-										 (Datum) 0,
-										 false,
-										 false);
-	Assert(OidIsValid(store_oid));
-
-	elog(INFO, "pg_strom created a shadow table: \"%s.%s\"",
-		 PGSTROM_SCHEMA_NAME, store_name);
-
-	/* make the shadow table visible */
-	CommandCounterIncrement();
-
-	/* ShareLock is not really needed here, but take it anyway */
-    store_rel = heap_open(store_oid, ShareLock);
-
-	/* Create a unique index on the rowid */
-	pgstrom_create_rowid_index(base_rel, NULL, store_rel, (AttrNumber) 1);
-
-	heap_close(store_rel, NoLock);
-
-	/* Register dependency between base and shadow tables */
-	base_address.classId  = RelationRelationId;
-	base_address.objectId =	RelationGetRelid(base_rel);
-	base_address.objectSubId = 0;
-	store_address.classId = RelationRelationId;
-	store_address.objectId = store_oid;
-	store_address.objectSubId = 0;
-
-	recordDependencyOn(&store_address, &base_address, DEPENDENCY_INTERNAL);
-
-	/* Make changes visible */
-	CommandCounterIncrement();
-}
-
-/*
- * pgstrom_create_column_store
- *
- * create "<base_schema>.<base_rel>.<column>.cs" table of pg_strom
- * schema that has "rowid(int8)", "nulls(VarBit)" and "values(bytes)"
- * to store the values of original columns. The maximum number of
- * values being stored in a tuple depends on length of unit data.
- */
-static void
-pgstrom_create_column_store(Oid namespaceId, Relation base_rel,
-							Form_pg_attribute attform)
-{
-	char		   *nsp_name;
-	char			store_name[NAMEDATALEN * 3 + 20];
-	Oid				store_oid;
-	Relation		store_rel;
-	TupleDesc		tupdesc;
-	Oid				array_oid;
-	int32			atttypmod = -1;
-	ObjectAddress	base_address;
-	ObjectAddress	store_address;
-
-	nsp_name = get_namespace_name(RelationGetForm(base_rel)->relnamespace);
-	snprintf(store_name, sizeof(store_name), "%s.%s.%s.cs",
-			 nsp_name,
-			 RelationGetRelationName(base_rel),
-			 NameStr(attform->attname));
-	if (strlen(store_name) >= NAMEDATALEN - 1)
-		ereport(ERROR,
-				(errcode(ERRCODE_NAME_TOO_LONG),
-				 errmsg("Name of shadow table: \"%s\" too long", store_name)));
-
-	if (attform->attndims > 0)
-		array_oid = get_array_type(BYTEAOID);
+	if (!attr)
+	{
+		tupdesc = CreateTemplateTupleDesc(Natts_pg_strom - 1, false);
+		TupleDescInitEntry(tupdesc, Anum_pg_strom_rowid,
+						   "rowid",  INT8OID,  -1, 0);
+		TupleDescInitEntry(tupdesc, Anum_pg_strom_nitems,
+						   "nitems", INT4OID,  -1, 0);
+		TupleDescInitEntry(tupdesc, Anum_pg_strom_isnull,
+						   "isnull", BYTEAOID, -1, 0);
+		tupdesc->attrs[Anum_pg_strom_isnull - 1]->attstorage = 'p';
+	}
 	else
 	{
-		array_oid = get_array_type(attform->atttypid);
-		atttypmod = attform->atttypmod;
+		tupdesc = CreateTemplateTupleDesc(Natts_pg_strom, false);
+		TupleDescInitEntry(tupdesc, Anum_pg_strom_rowid,
+						   "rowid",  INT8OID,  -1, 0);
+		TupleDescInitEntry(tupdesc, Anum_pg_strom_nitems,
+						   "nitems", INT4OID,  -1, 0);
+		TupleDescInitEntry(tupdesc, Anum_pg_strom_isnull,
+						   "isnull", BYTEAOID, -1, 0);
+		TupleDescInitEntry(tupdesc, Anum_pg_strom_values,
+						   "valued", BYTEAOID, -1, 0);
+		/*
+		 * PG-Strom wants to keep varlena value being inlined, and never
+		 * uses external toast relation due to the performance reason.
+		 * So, we override the default setting of type definitions.
+		 */
+		tupdesc->attrs[Anum_pg_strom_isnull - 1]->attstorage = 'p';
+		tupdesc->attrs[Anum_pg_strom_values - 1]->attstorage = 'p';
 	}
-	if (!OidIsValid(array_oid))
-		ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_OBJECT),
-				 errmsg("could not find array type for data type %s",
-						format_type_be(attform->atttypid))));
-	tupdesc = CreateTemplateTupleDesc(2, false);
-	TupleDescInitEntry(tupdesc,
-					   (AttrNumber) 1,
-					   "rowid",
-					   INT8OID,
-					   -1, 0);
-	TupleDescInitEntry(tupdesc,
-					   (AttrNumber) 2,
-					   "values",
-					   array_oid,
-					   atttypmod, 1);
-	/*
-	 * Pg_strom want to keep varlena data being inlined; never uses external
-	 * toast relation due to the performance reason. So, we override the
-	 * default setting of pg_type definitions.
-	 */
-	tupdesc->attrs[0]->attstorage = 'p';
-	tupdesc->attrs[1]->attstorage = 'm';
 
-	store_oid = heap_create_with_catalog(store_name,
-										 namespaceId,
-										 InvalidOid,
-										 InvalidOid,
-										 InvalidOid,
-										 InvalidOid,
-										 base_rel->rd_rel->relowner,
-										 tupdesc,
-										 NIL,
-										 RELKIND_RELATION,
-										 base_rel->rd_rel->relpersistence,
-										 false,
-										 false,
-										 true,
-										 0,
-										 ONCOMMIT_NOOP,
-										 (Datum) 0,
-										 false,
-										 false);
-	Assert(OidIsValid(store_oid));
+	cs_relid = heap_create_with_catalog(cs_name,
+										namespaceId,
+										InvalidOid,
+										InvalidOid,
+										InvalidOid,
+										InvalidOid,
+										base_rel->rd_rel->relowner,
+										tupdesc,
+										NIL,
+										RELKIND_RELATION,
+										base_rel->rd_rel->relpersistence,
+										false,
+										false,
+										true,
+										0,
+										ONCOMMIT_NOOP,
+										(Datum) 0,
+										false,
+										false);
+    Assert(OidIsValid(cs_relid));
 
-	elog(INFO, "pg_strom created a shadow table: \"%s.%s\"",
-		 PGSTROM_SCHEMA_NAME, store_name);
-
-	/* make the shadow table visible */
+	/* make the new shadow table visible */
 	CommandCounterIncrement();
 
 	/* ShareLock is not really needed here, but take it anyway */
-    store_rel = heap_open(store_oid, ShareLock);
+	cs_rel = heap_open(cs_relid, ShareLock);
 
-	/* Create a unique index on the rowid */
-	pgstrom_create_rowid_index(base_rel, NameStr(attform->attname),
-							   store_rel, (AttrNumber) 1);
+	/* Create a unique index on the rowid column */
+	pgstrom_create_shadow_index(base_rel, cs_rel, attr);
 
-	heap_close(store_rel, NoLock);
+	heap_close(cs_rel, NoLock);
 
 	/* Register dependency between base and shadow tables */
+	cs_address.classId = RelationRelationId;
+	cs_address.objectId = cs_relid;
+	cs_address.objectSubId = 0;
 	base_address.classId  = RelationRelationId;
-	base_address.objectId =	RelationGetRelid(base_rel);
-	base_address.objectSubId = attform->attnum;
-	store_address.classId = RelationRelationId;
-	store_address.objectId = store_oid;
-	store_address.objectSubId = 0;
+	base_address.objectId = RelationGetRelid(base_rel);
+	base_address.objectSubId = (!attr ? 0 : attr->attnum);
 
-	recordDependencyOn(&store_address, &base_address, DEPENDENCY_INTERNAL);
+	recordDependencyOn(&cs_address, &base_address, DEPENDENCY_INTERNAL);
 
-	/* Make changes visible */
-	CommandCounterIncrement();
+    /* Make changes visible */
+    CommandCounterIncrement();
 }
+
 
 /*
  * pgstrom_create_rowid_seq
@@ -473,7 +465,7 @@ pgstrom_create_column_store(Oid namespaceId, Relation base_rel,
  * PGSTROM_CHUNK_SIZE.
  */
 static void
-pgstrom_create_rowid_seq(Oid namespaceId, Relation base_rel)
+pgstrom_create_shadow_sequence(Oid namespaceId, Relation base_rel)
 {
 	CreateSeqStmt  *seq_stmt;
 	char		   *nsp_name;
@@ -500,9 +492,6 @@ pgstrom_create_rowid_seq(Oid namespaceId, Relation base_rel)
 	seq_stmt->ownerId = RelationGetForm(base_rel)->relowner;
 
 	DefineSequence(seq_stmt);
-
-	elog(INFO, "pg_strom created a shadow table: \"%s.%s\"",
-		 PGSTROM_SCHEMA_NAME, seq_name);
 }
 
 static void
@@ -539,21 +528,16 @@ pgstrom_process_post_create(RangeVar *base_range)
 	GetUserIdAndSecContext(&save_userid, &save_sec_context);
 	SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID, save_sec_context);
 
-	/* create pg_strom.<base_schema>.<base_rel>.rowid */
-	pgstrom_create_rowid_map(namespaceId, base_rel);
-
-	/* create pg_strom.<base_schema>.<base_rel>.<column> */
-	for (attnum = 0;
-		 attnum < RelationGetNumberOfAttributes(base_rel);
-		 attnum++)
+	/* create shadow table and corresponding index */
+	pgstrom_create_shadow_table(namespaceId, base_rel, NULL);
+	for (attnum=0; attnum < RelationGetNumberOfAttributes(base_rel); attnum++)
 	{
-		pgstrom_create_column_store(namespaceId, base_rel,
-									RelationGetDescr(base_rel)->attrs[attnum]);
+		Form_pg_attribute	attr
+			= RelationGetDescr(base_rel)->attrs[attnum];
+		pgstrom_create_shadow_table(namespaceId, base_rel, attr);
 	}
-
-	/* create pg_strom.<base_schema>.<base_rel>.seq */
-	pgstrom_create_rowid_seq(namespaceId, base_rel);
-
+	/* create a sequence to generate rowid */
+	pgstrom_create_shadow_sequence(namespaceId, base_rel);
 
 	/* restore security setting and close the base relation */
 	SetUserIdAndSecContext(save_userid, save_sec_context);

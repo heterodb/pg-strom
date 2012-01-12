@@ -21,6 +21,11 @@
 #include <cuda.h>
 
 #define PGSTROM_SCHEMA_NAME		"pg_strom"
+#define Natts_pg_strom			4
+#define Anum_pg_strom_rowid		1
+#define Anum_pg_strom_nitems	2
+#define Anum_pg_strom_isnull	3
+#define Anum_pg_strom_values	4
 
 #define PGSTROM_THREADS_PER_BLOCK	32
 
@@ -36,6 +41,14 @@ typedef struct {
 	Oid			rowid_seqid;
 } RelationSetData;
 typedef RelationSetData *RelationSet;
+
+extern Relation pgstrom_open_shadow_table(Relation base_rel,
+										  AttrNumber attnum,
+										  LOCKMODE lockmode);
+extern Relation pgstrom_open_shadow_index(Relation base_rel,
+										  AttrNumber attnum,
+										  LOCKMODE lockmode);
+extern RangeVar *pgstrom_lookup_shadow_sequence(Relation base_rel);
 
 extern RelationSet	pgstrom_open_relation_set(Relation base_rel,
 											  LOCKMODE lockmode,
