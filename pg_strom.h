@@ -32,16 +32,6 @@
 /*
  * utilcmds.c
  */
-typedef struct {
-	Relation	base_rel;
-	Relation	rowid_rel;
-	Relation	rowid_idx;
-	Relation   *cs_rel;
-	Relation   *cs_idx;
-	Oid			rowid_seqid;
-} RelationSetData;
-typedef RelationSetData *RelationSet;
-
 extern Relation pgstrom_open_shadow_table(Relation base_rel,
 										  AttrNumber attnum,
 										  LOCKMODE lockmode);
@@ -50,11 +40,6 @@ extern Relation pgstrom_open_shadow_index(Relation base_rel,
 										  LOCKMODE lockmode);
 extern RangeVar *pgstrom_lookup_shadow_sequence(Relation base_rel);
 
-extern RelationSet	pgstrom_open_relation_set(Relation base_rel,
-											  LOCKMODE lockmode,
-											  bool with_index);
-extern void	pgstrom_close_relation_set(RelationSet relset,
-									   LOCKMODE lockmode);
 extern void	pgstrom_utilcmds_init(void);
 
 /*

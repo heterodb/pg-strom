@@ -400,91 +400,12 @@ pgstrom_data_load_internal(Relation srel,
 	MemoryContextDelete(cs_memcxt);
 }
 
-static void
-pgstrom_data_clear_internal(RelationSet relset)
-{
-	HeapScanDesc	scan;
-	HeapTuple		tuple;
-	AttrNumber		i, nattrs;
-
-	/* clear the usemap table */
-	scan = heap_beginscan(relset->rowid_rel,
-						  SnapshotNow, 0, NULL);
-	while (HeapTupleIsValid(tuple = heap_getnext(scan, ForwardScanDirection)))
-	{
-		simple_heap_delete(relset->rowid_rel, &tuple->t_self);
-		CatalogUpdateIndexes(relset->rowid_rel, tuple);
-	}
-	heap_endscan(scan);
-
-	/* clear the column stores */
-	nattrs = RelationGetNumberOfAttributes(relset->base_rel);
-	for (i=0; i < nattrs; i++)
-	{
-		scan = heap_beginscan(relset->cs_rel[i],
-							  SnapshotNow, 0, NULL);
-		while (HeapTupleIsValid(tuple = heap_getnext(scan,
-													 ForwardScanDirection)))
-		{
-			if (!relset->cs_rel[i])
-				continue;
-			simple_heap_delete(relset->cs_rel[i], &tuple->t_self);
-			CatalogUpdateIndexes(relset->cs_rel[i], tuple);
-		}
-		heap_endscan(scan);
-	}
-}
-
-/*
- * bool pgstrom_data_clear(regclass)
- *
- *
- *
- *
- */
-Datum
-pgstrom_data_clear(PG_FUNCTION_ARGS)
-{
-	Relation		base_rel;
-	RelationSet		relset;
-	RangeTblEntry  *rte;
-
-	/*
-	 * Open the destination relation set
-	 */
-	base_rel = relation_open(PG_GETARG_OID(1), RowExclusiveLock);
-	relset = pgstrom_open_relation_set(base_rel, RowExclusiveLock, false);
-
-	/*
-	 * Set up RangeTblEntry for permission checks
-	 */
-	rte = makeNode(RangeTblEntry);
-	rte->rtekind = RTE_RELATION;
-	rte->relid = RelationGetRelid(relset->base_rel);
-	rte->relkind = RelationGetForm(relset->base_rel)->relkind;
-	rte->requiredPerms = ACL_DELETE;
-
-	ExecCheckRTPerms(list_make1(rte), true);
-
-	/*
-	 * Clear data
-	 */
-	pgstrom_data_clear_internal(relset);
-
-	/*
-	 * Close the relation
-	 */
-	pgstrom_close_relation_set(relset, NoLock);
-	relation_close(base_rel, NoLock);
-
-	PG_RETURN_BOOL(true);
-}
-
 /*
  * bool
- * pgstrom_data_load(regclass dest_rel,
- *                   regclass src_rel,
- *                   int chunk_size)
+ * pgstrom_data_load(regclass dest, regclass source, uint32 chunk_size)
+ *
+ * This function loads the contents of source table into the destination
+ * foreign table managed by PG-Strom; with the supplied chunk_size.
  */
 Datum
 pgstrom_data_load(PG_FUNCTION_ARGS)
@@ -680,6 +601,97 @@ pgstrom_data_load(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(true);
 }
+PG_FUNCTION_INFO_V1(pgstrom_data_load);
+
+/*
+ * bool pgstrom_data_clear(regclass)
+ *
+ * This function clears contents of the foreign table managed by PG-Strom.
+ */
+Datum
+pgstrom_data_clear(PG_FUNCTION_ARGS)
+{
+	Relation		base_rel;
+	Relation		id_rel;
+	Relation	   *cs_rels;
+	RangeTblEntry  *rte;
+    HeapScanDesc	scan;
+    HeapTuple		tuple;	
+	AttrNumber		csidx, nattrs;
+
+	/*
+	 * Open the destination relation set
+	 */
+	base_rel = relation_open(PG_GETARG_OID(1), RowExclusiveLock);
+	id_rel = pgstrom_open_shadow_table(base_rel, InvalidAttrNumber,
+									   RowExclusiveLock);
+	nattrs = RelationGetNumberOfAttributes(base_rel);
+	cs_rels = palloc0(sizeof(Relation) * nattrs);
+	for (csidx = 0; csidx < nattrs; csidx++)
+	{
+		Form_pg_attribute	attr
+			= RelationGetDescr(base_rel)->attrs[csidx];
+
+		if (attr->attisdropped)
+			continue;
+
+		cs_rels[csidx] = pgstrom_open_shadow_table(base_rel, attr->attnum,
+												   RowExclusiveLock);
+	}
+
+	/*
+	 * Set up RangeTblEntry for permission checks
+	 */
+	rte = makeNode(RangeTblEntry);
+	rte->rtekind = RTE_RELATION;
+	rte->relid = RelationGetRelid(base_rel);
+	rte->relkind = RelationGetForm(base_rel)->relkind;
+	rte->requiredPerms = ACL_DELETE;
+
+	ExecCheckRTPerms(list_make1(rte), true);
+
+	/*
+	 * Clear the rowid map
+	 */
+	scan = heap_beginscan(id_rel, SnapshotNow, 0, NULL);
+	while (HeapTupleIsValid(tuple = heap_getnext(scan, ForwardScanDirection)))
+	{
+		simple_heap_delete(id_rel, &tuple->t_self);
+		CatalogUpdateIndexes(id_rel, tuple);
+	}
+	heap_endscan(scan);
+
+	/*
+	 * Clear the column stores
+	 */
+	for (csidx = 0; csidx < nattrs; csidx++)
+	{
+		scan = heap_beginscan(cs_rels[csidx], SnapshotNow, 0, NULL);
+		while (HeapTupleIsValid(tuple = heap_getnext(scan,
+													 ForwardScanDirection)))
+		{
+			if (!cs_rels[csidx])
+				continue;
+			simple_heap_delete(cs_rels[csidx], &tuple->t_self);
+			CatalogUpdateIndexes(cs_rels[csidx], tuple);
+		}
+		heap_endscan(scan);
+	}
+
+	/*
+	 * Close the relation
+	 */
+	for (csidx = 0; csidx < nattrs; csidx++)
+	{
+		if (cs_rels[csidx])
+			relation_close(cs_rels[csidx], NoLock);
+	}
+	relation_close(id_rel, NoLock);
+	relation_close(base_rel, NoLock);
+
+	PG_RETURN_BOOL(true);
+}
+PG_FUNCTION_INFO_V1(pgstrom_data_clear);
 
 Datum
 pgstrom_data_compaction(PG_FUNCTION_ARGS)
@@ -689,7 +701,4 @@ pgstrom_data_compaction(PG_FUNCTION_ARGS)
 			 errmsg("%s is not supported yet", __FUNCTION__)));
 	PG_RETURN_BOOL(true);
 }
-
-PG_FUNCTION_INFO_V1(pgstrom_data_load);
-PG_FUNCTION_INFO_V1(pgstrom_data_clear);
 PG_FUNCTION_INFO_V1(pgstrom_data_compaction);
