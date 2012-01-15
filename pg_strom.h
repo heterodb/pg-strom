@@ -161,6 +161,5 @@ extern void pgstrom_nvcc_init(void);
 extern FdwRoutine pgstromFdwHandlerData;
 extern Datum pgstrom_fdw_handler(PG_FUNCTION_ARGS);
 extern Datum pgstrom_fdw_validator(PG_FUNCTION_ARGS);
-extern Datum pgstrom_debug_info(PG_FUNCTION_ARGS);
 
 #endif	/* PG_STROM_H */

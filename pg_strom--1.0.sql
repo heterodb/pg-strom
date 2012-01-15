@@ -32,12 +32,6 @@ CREATE FUNCTION pgstrom_data_compaction(regclass)
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
 
-CREATE TYPE __pgstrom_debug_info AS (key text, value text);
-CREATE FUNCTION pgstrom_debug_info()
-  RETURNS SETOF __pgstrom_debug_info
-  AS 'MODULE_PATHNAME'
-  LANGUAGE C STRICT;
-
 CREATE TYPE __pgstrom_device_info AS
   (devid int, name text, value text);
 

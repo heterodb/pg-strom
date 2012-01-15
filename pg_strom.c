@@ -56,64 +56,6 @@ pgstrom_fdw_validator(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_fdw_validator);
 
 /*
- * pgstrom_debug_info
- *
- * shows user's debug information
- */
-Datum
-pgstrom_debug_info(PG_FUNCTION_ARGS)
-{
-	FuncCallContext	   *fncxt;
-	MemoryContext		oldcxt;
-	ListCell   *cell;
-	DefElem	   *defel;
-	Datum		values[2];
-	bool		isnull[2];
-	HeapTuple	tuple;
-
-	if (SRF_IS_FIRSTCALL())
-	{
-		TupleDesc	tupdesc;
-		List	   *debug_info_list = NIL;
-
-		fncxt = SRF_FIRSTCALL_INIT();
-
-		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
-
-		tupdesc = CreateTemplateTupleDesc(2, false);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "key",
-						   TEXTOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "value",
-						   TEXTOID, -1, 0);
-
-		debug_info_list = pgstrom_scan_debug_info(debug_info_list);
-
-		fncxt->user_fctx = (void *) debug_info_list;
-		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
-
-		MemoryContextSwitchTo(oldcxt);
-	}
-	fncxt = SRF_PERCALL_SETUP();
-	cell = list_head((List *)fncxt->user_fctx);
-	if (!cell)
-		SRF_RETURN_DONE(fncxt);
-
-	defel = lfirst(cell);
-	Assert(IsA(defel, DefElem));
-
-	memset(isnull, false, sizeof(isnull));
-	values[0] = CStringGetTextDatum(defel->defname);
-	values[1] = CStringGetTextDatum(strVal(defel->arg));
-
-	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
-
-	fncxt->user_fctx = list_delete_ptr((List *)fncxt->user_fctx,
-									   lfirst(cell));
-	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
-}
-PG_FUNCTION_INFO_V1(pgstrom_debug_info);
-
-/*
  * Entrypoint of the pg_strom module
  */
 void

@@ -1320,44 +1320,6 @@ pgstrom_end_foreign_scan(ForeignScanState *fss)
 	pgstrom_release_exec_state(sestate);
 }
 
-List *
-pgstrom_scan_debug_info(List *debug_info_list)
-{
-	DefElem	*defel;
-	char	key[128];
-	char	val[128];
-	int		i, n;
-
-	/* locked_mem_usage */
-#if 0
-	snprintf(val, sizeof(val), "%lu KB", pgstrom_locked_mem_usage / 1024);
-	defel = makeDefElem("Page-locked memory usage",
-						(Node *)makeString(pstrdup(val)));
-	debug_info_list = lappend(debug_info_list, defel);
-#endif
-
-	/* device memory usage */
-	n = pgstrom_get_num_devices();
-	for (i=0; i < n; i++)
-	{
-		size_t	free_mem;
-		size_t	total_mem;
-
-		pgstrom_set_device_context(i);
-
-		if (cuMemGetInfo(&free_mem, &total_mem) != CUDA_SUCCESS)
-			continue;
-
-		snprintf(key, sizeof(key), "Device (%d) memory usage", i);
-		snprintf(val, sizeof(val), "%lu KB",
-				 (total_mem - free_mem) / 1024);
-		defel = makeDefElem(pstrdup(key),
-							(Node *)makeString(pstrdup(val)));
-		debug_info_list = lappend(debug_info_list, defel);
-	}
-	return debug_info_list;
-}
-
 /*
  * pgstrom_scan_init
  *
