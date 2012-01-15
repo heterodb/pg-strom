@@ -363,11 +363,11 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 	 * (rowid + chunk->nitems)
 	 */
 	ScanKeyInit(&skeys[0],
-				(AttrNumber) 1,
+				Anum_pg_strom_rowid,
 				BTGreaterEqualStrategyNumber, F_INT8GE,
 				Int64GetDatum(chunk->rowid));
 	ScanKeyInit(&skeys[1],
-				(AttrNumber) 1,
+				Anum_pg_strom_rowid,
 				BTLessStrategyNumber, F_INT8LT,
 				Int64GetDatum(chunk->rowid + chunk->nitems));
 

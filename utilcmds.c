@@ -517,7 +517,7 @@ pgstrom_post_alter_schema(AlterObjectSchemaStmt *stmt,
 				ObjectIdGetDatum(base_relid));
 	ScanKeyInit(&skey[1],
 				Anum_pg_attribute_attnum,
-				BTGreaterEqualStrategyNumber, F_INT2GE,
+				BTGreaterEqualStrategyNumber, F_INT2GT,
 				Int16GetDatum(InvalidAttrNumber));
 
 	scan = systable_beginscan(pg_attr, AttributeRelidNumIndexId, true,
@@ -617,7 +617,7 @@ pgstrom_post_rename_schema(RenameStmt *stmt, Oid namespaceId)
 					ObjectIdGetDatum(HeapTupleGetOid(tuple)));
 		ScanKeyInit(&akey[1],
 					Anum_pg_attribute_attnum,
-					BTGreaterEqualStrategyNumber, F_INT2GE,
+					BTGreaterEqualStrategyNumber, F_INT2GT,
 					Int16GetDatum(InvalidAttrNumber));
 
 		ascan = systable_beginscan(pg_attr, AttributeRelidNumIndexId, true,
@@ -700,7 +700,7 @@ pgstrom_post_rename_table(RenameStmt *stmt, Oid base_relid)
 				ObjectIdGetDatum(base_relid));
 	ScanKeyInit(&skey[1],
 				Anum_pg_attribute_attnum,
-				BTGreaterEqualStrategyNumber, F_INT2GE,
+				BTGreaterEqualStrategyNumber, F_INT2GT,
 				Int16GetDatum(InvalidAttrNumber));
 
 	scan = systable_beginscan(pg_attr, AttributeRelidNumIndexId, true,
@@ -776,6 +776,178 @@ pgstrom_post_rename_column(RenameStmt *stmt, Oid base_relid)
 }
 
 /*
+ * pgstrom_post_change_owner
+ *
+ * It is a post-fixup routine to handle ALTER TABLE ... OWNER TO on
+ * the foreign table managed by PG-Strom. It also changes ownership
+ * of the shadow relations according to the new owner of base relation.
+ */
+static void
+pgstrom_post_change_owner(Oid base_relid, AlterTableCmd *cmd,
+						  LOCKMODE lockmode)
+{
+	Oid			namespace_id;
+	char	   *base_nspname;
+	char	   *base_relname;
+	Oid			base_owner;
+	char		namebuf[NAMEDATALEN * 3 + 20];
+	Oid			shadow_relid;
+	Relation	pg_attr;
+	ScanKeyData	skey[2];
+	SysScanDesc	scan;
+	HeapTuple	tuple;
+	Form_pg_class	classForm;
+
+	namespace_id = get_namespace_oid(PGSTROM_SCHEMA_NAME, false);
+
+	tuple =  SearchSysCache1(RELOID, ObjectIdGetDatum(base_relid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for relation %u", base_relid);
+	classForm = (Form_pg_class) GETSTRUCT(tuple);
+
+	base_nspname = get_namespace_name(classForm->relnamespace);
+	base_relname = pstrdup(NameStr(classForm->relname));
+	base_owner = classForm->relowner;
+
+	ReleaseSysCache(tuple);
+
+	/*
+	 * change owner of rowid table, index and sequence
+	 */
+	snprintf(namebuf, sizeof(namebuf), "%s.%s.rowid",
+			 base_nspname, base_relname);
+	shadow_relid = get_relname_relid(namebuf, namespace_id);
+	if (!OidIsValid(shadow_relid))
+		elog(ERROR, "cache lookup failed for relation \"%s\"", namebuf);
+	ATExecChangeOwner(shadow_relid, base_owner, true, lockmode);
+
+	/*
+	 * change owner of column-store table and index
+	 */
+	pg_attr = heap_open(AttributeRelationId, AccessShareLock);
+
+	ScanKeyInit(&skey[0],
+				Anum_pg_attribute_attrelid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(base_relid));
+    ScanKeyInit(&skey[1],
+                Anum_pg_attribute_attnum,
+				BTGreaterEqualStrategyNumber, F_INT2GT,
+                Int16GetDatum(InvalidAttrNumber));
+
+	scan = systable_beginscan(pg_attr, AttributeRelidNumIndexId, true,
+							  SnapshotNow, 2, skey);
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		Form_pg_attribute   attr = (Form_pg_attribute) GETSTRUCT(tuple);
+
+		if (attr->attisdropped)
+			continue;
+
+		snprintf(namebuf, sizeof(namebuf), "%s.%s.%s.cs",
+				 base_nspname, base_relname, NameStr(attr->attname));
+		shadow_relid = get_relname_relid(namebuf, namespace_id);
+		if (!OidIsValid(shadow_relid))
+			elog(ERROR, "cache lookup failed for relation \"%s\"", namebuf);
+
+		ATExecChangeOwner(shadow_relid, base_owner, true, lockmode);
+	}
+	systable_endscan(scan);
+    heap_close(pg_attr, AccessShareLock);
+}
+
+/*
+ * pgstrom_post_add_column
+ *
+ * It is a post-fixup routine to handle ALTER TABLE ... ADD COLUMN on
+ * the foreign table managed by PG-Strom. It adds a new shadow column-
+ * store and its index.
+ */
+static void
+pgstrom_post_add_column(Oid base_relid, AlterTableCmd *cmd, LOCKMODE lockmode)
+{
+	Relation	base_rel;
+	HeapTuple	tuple;
+
+	base_rel = heap_open(base_relid, lockmode);
+
+	tuple =  SearchSysCache2(ATTNAME,
+							 ObjectIdGetDatum(base_relid),
+							 CStringGetDatum(cmd->name));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for column \"%s\" of relation \"%s\"",
+			 cmd->name, RelationGetRelationName(base_rel));
+
+	pgstrom_create_shadow_table(RelationGetForm(base_rel)->relnamespace,
+								base_rel,
+								(Form_pg_attribute) GETSTRUCT(tuple));
+	ReleaseSysCache(tuple);
+	heap_close(base_rel, NoLock);
+}
+
+/*
+ * pgstrom_post_drop_column
+ *
+ * It is a post-fixup routine to handle ALTER TABLE ... DROP COLUMN on
+ * the foreign table managed by PG-Strom. It also drops the shadow column-
+ * store and its index associated with the removed column.
+ */
+static void
+pgstrom_post_drop_column(Oid base_relid, AlterTableCmd *cmd, LOCKMODE lockmode)
+{
+	Relation	base_rel;
+	Oid			base_nspid;
+	Oid			namespace_id;
+	Oid			shadow_relid;
+	char		namebuf[NAMEDATALEN * 2 + 20];
+
+	namespace_id = get_namespace_oid(PGSTROM_SCHEMA_NAME, false);
+
+	base_rel = heap_open(base_relid, lockmode);
+
+	base_nspid = RelationGetForm(base_rel)->relnamespace;
+
+	snprintf(namebuf, sizeof(namebuf), "%s.%s.%s.cs",
+			 get_namespace_name(base_nspid),
+			 RelationGetRelationName(base_rel),
+			 cmd->name);
+
+	shadow_relid = get_relname_relid(namebuf, namespace_id);
+	heap_drop_with_catalog(shadow_relid);
+
+	heap_close(base_rel, NoLock);
+}
+
+/*
+ * pgstrom_post_set_notnull
+ *
+ * It is a post-fixup routine to handle ALTER TABLE ... SET NOT NULL on
+ * column of the foreign table managed by PG-Strom. It checks whether the
+ * shadow column-store contains a NULL value, or not.
+ * If found, this routine prevent this operation.
+ */
+static void
+pgstrom_post_set_notnull(Oid base_relid, AlterTableCmd *cmd, LOCKMODE lockmode)
+{
+	elog(ERROR, "Not supported yet");
+}
+
+/*
+ * pgstrom_post_alter_column_type
+ *
+ * It is a post-fixup routine to handle ALTER TABLE ... ALTER COLUMN TYPE
+ * on column of the foreign table managed by PG-Strom. It re-construct
+ * data array of the shadow column-store performing behaind of the modified
+ * column.
+ */
+static void
+pgstrom_post_alter_column_type(Oid base_relid, AlterTableCmd *cmd,
+							   LOCKMODE lockmode)
+{
+	elog(ERROR, "Not supported yet");
+}
+
+/*
  * pgstrom_process_utility_command
  *
  * Entrypoint of the ProcessUtility hook; that handles post DDL operations.
@@ -791,8 +963,9 @@ pgstrom_process_utility_command(Node *parsetree,
 	ForeignTable	   *ft;
 	ForeignServer	   *fs;
 	ForeignDataWrapper *fdw;
-	Oid		base_nspid = InvalidOid;
-	Oid		base_relid = InvalidOid;
+	Oid			base_nspid = InvalidOid;
+	Oid			base_relid = InvalidOid;
+	LOCKMODE	lockmode = NoLock;
 
 	/*
 	 * XXX - Preparation of ProcessUtility; Some of operation will changes
@@ -829,6 +1002,12 @@ pgstrom_process_utility_command(Node *parsetree,
 			break;
 
 		case T_AlterTableStmt:
+			{
+				AlterTableStmt *stmt = (AlterTableStmt *)parsetree;
+
+				lockmode = AlterTableGetLockLevel(stmt->cmds);
+				base_relid = RangeVarGetRelid(stmt->relation, lockmode, true);
+			}
 			break;
 
 		default:
@@ -903,6 +1082,57 @@ pgstrom_process_utility_command(Node *parsetree,
 			break;
 
 		case T_AlterTableStmt:
+			{
+				AlterTableStmt *stmt = (AlterTableStmt *)parsetree;
+				ListCell	   *cell;
+
+				if (!OidIsValid(base_relid))
+					break;
+
+				ft = GetForeignTable(base_relid);
+				fs = GetForeignServer(ft->serverid);
+				fdw = GetForeignDataWrapper(fs->fdwid);
+				if (GetFdwRoutine(fdw->fdwhandler) != &pgstromFdwHandlerData)
+					break;
+
+				foreach (cell, stmt->cmds)
+				{
+					AlterTableCmd *cmd = lfirst(cell);
+
+					switch (cmd->subtype)
+					{
+						case AT_ChangeOwner:
+							pgstrom_post_change_owner(base_relid, cmd,
+													  lockmode);
+							break;
+
+						case AT_AddColumn:
+							pgstrom_post_add_column(base_relid, cmd,
+													lockmode);
+							break;
+
+						case AT_DropColumn:
+							pgstrom_post_drop_column(base_relid, cmd,
+													 lockmode);
+							break;
+
+						case AT_SetNotNull:
+							pgstrom_post_set_notnull(base_relid, cmd,
+													 lockmode);
+							break;
+
+						case AT_AlterColumnType:
+							pgstrom_post_alter_column_type(base_relid,
+														   cmd, lockmode);
+							break;
+						default:
+							/* do nothing elsewhere */
+							break;
+					}
+				}
+			}
+			break;
+
 		default:
 			/* do nothing */
 			break;
