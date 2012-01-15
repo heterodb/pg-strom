@@ -1,7 +1,8 @@
 /*
- * devfuncs.c
+ * devinfo.c
  *
- * Catalog of device functions and types.
+ * Routines to reference properties of GPU devices, and catalog of
+ * device functions and types.
  *
  * --
  * Copyright 2011-2012 (c) KaiGai Kohei <kaigai@kaigai.gr.jp>
