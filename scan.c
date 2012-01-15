@@ -48,11 +48,18 @@ typedef struct {
 	((char *)((chunk)->cs_rowmap + (chunk)->cs_values[(csidx)]))
 
 typedef struct {
+	int			dev_index;
+	CUmodule	dev_module;
+	CUfunction	dev_function;
+	uint32		dev_grid_sz;
+	uint32		dev_block_sz;
+} PgStromDevContext;
+
+typedef struct {
 	/* Parameters come from planner */
 	bool			nevermatch;		/* true, if no items shall be matched */
 	Bitmapset	   *required_cols;	/* columns being returned to executor */
 	Bitmapset	   *clause_cols;	/* columns being copied to device */
-	char		   *kernel_source;	/* source of kernel code */
 
 	/* copy from EState */
 	ResourceOwner	es_owner;		/* copy from CurrentResourceOwner */
@@ -80,8 +87,8 @@ typedef struct {
 	int				curr_index;
 
 	/* CUDA related stuff */
-	CUmodule		dev_module;
-	CUfunction		dev_function;
+	List		   *dev_list;		/* list of PgStromDevContext */
+	ListCell	   *dev_curr;		/* currently used item of dev_list */
 } PgStromExecState;
 
 /*
@@ -90,7 +97,6 @@ typedef struct {
 static MemoryContext	pgstrom_scan_memcxt;
 static List	   *pgstrom_exec_state_list = NIL;
 static int		pgstrom_max_async_chunks;
-static size_t	pgstrom_locked_mem_usage;
 
 static void
 pgstrom_release_chunk_buffer(PgStromExecState *sestate,
@@ -109,13 +115,10 @@ pgstrom_release_chunk_buffer(PgStromExecState *sestate,
 	}
 	if (chunk->devmem)
 		cuMemFree(chunk->devmem);
-	if (!sestate->dev_module)
-		pfree(chunk->cs_rowmap);
-	else
-	{
+	if (sestate->dev_list != NIL)
 		cuMemFreeHost(chunk->cs_rowmap);
-		pgstrom_locked_mem_usage -= chunk->devmem_size;
-	}
+	else
+		pfree(chunk->cs_rowmap);
 	pfree(chunk->cs_nulls);
 	pfree(chunk->cs_values);
 	pfree(chunk);
@@ -137,14 +140,16 @@ pgstrom_release_exec_state(PgStromExecState *sestate)
 		pgstrom_release_chunk_buffer(sestate, lfirst(cell));
 	list_free(sestate->chunk_ready_list);
 
-	if (sestate->dev_module)
-		cuModuleUnload(sestate->dev_module);
+	foreach (cell, sestate->dev_list)
+	{
+		PgStromDevContext *dev_cxt = lfirst(cell);
+		if (dev_cxt->dev_module)
+			cuModuleUnload(dev_cxt->dev_module);
+	}
 	if (sestate->required_cols)
 		bms_free(sestate->required_cols);
 	if (sestate->clause_cols)
 		bms_free(sestate->clause_cols);
-	if (sestate->kernel_source)
-		pfree(sestate->kernel_source);
 	if (sestate->cs_scan)
 		pfree(sestate->cs_scan);
 	if (sestate->cs_cur_values)
@@ -179,8 +184,8 @@ pgstrom_release_resources(ResourceReleasePhase phase,
 	}
 }
 
-static CUresult
-pgstrom_exec_kernel_qual(PgStromExecState *sestate, PgStromChunkBuf *chunk)
+static void
+pgstrom_exec_kernel_qual(PgStromDevContext *dev_cxt, PgStromChunkBuf *chunk)
 {
 	CUdeviceptr	   *kernel_data;
 	void		  **kernel_args;
@@ -191,18 +196,39 @@ pgstrom_exec_kernel_qual(PgStromExecState *sestate, PgStromChunkBuf *chunk)
 
 	ret = cuStreamCreate(&chunk->stream, 0);
 	if (ret != CUDA_SUCCESS)
-		goto error_1;
+	{
+		cuMemFreeHost(chunk->cs_rowmap);
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Failed to create a stream: %s",
+						cuda_error_to_string(ret))));
+	}
 
 	ret = cuMemAlloc(&chunk->devmem, chunk->devmem_size);
 	if (ret != CUDA_SUCCESS)
-		goto error_2;
+	{
+		cuStreamDestroy(chunk->stream);
+		cuMemFreeHost(chunk->cs_rowmap);
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Failed to alloc device memory: %s",
+						cuda_error_to_string(ret))));
+	}
 
 	ret = cuMemcpyHtoDAsync(chunk->devmem,
 							chunk->cs_rowmap,
 							chunk->devmem_size,
 							chunk->stream);
 	if (ret != CUDA_SUCCESS)
-        goto error_3;
+	{
+		cuStreamDestroy(chunk->stream);
+		cuMemFreeHost(chunk->cs_rowmap);
+		cuMemFree(chunk->devmem);
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Failed to enqueue asynchronous memcpy: %s",
+						cuda_error_to_string(ret))));
+	}
 
 	/*
 	 * Setup kernel arguments
@@ -229,37 +255,43 @@ pgstrom_exec_kernel_qual(PgStromExecState *sestate, PgStromChunkBuf *chunk)
 	n_threads = PGSTROM_THREADS_PER_BLOCK;
 	n_blocks = (chunk->nitems + n_threads * BITS_PER_BYTE - 1)
 		/ (BITS_PER_BYTE * n_threads);
-	ret = cuLaunchKernel(sestate->dev_function,
-						 n_blocks,
-						 1,
-						 1,
-						 n_threads,
-						 1,
-						 1,
+	ret = cuLaunchKernel(dev_cxt->dev_function,
+						 n_blocks, 1, 1,
+						 n_threads, 1, 1,
 						 0,
 						 chunk->stream,
 						 kernel_args,
 						 NULL);
 	if (ret != CUDA_SUCCESS)
-        goto error_4;
+	{
+		cuStreamSynchronize(chunk->stream);
+		cuStreamDestroy(chunk->stream);
+		cuMemFreeHost(chunk->cs_rowmap);
+		cuMemFree(chunk->devmem);
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Failed to enqueue kernel execution: %s",
+						cuda_error_to_string(ret))));
+	}
 
+	/*
+	 * Writing back results bitmap
+	 */
 	ret = cuMemcpyDtoHAsync(chunk->cs_rowmap,
 							chunk->devmem,
 							chunk->nitems / BITS_PER_BYTE,
 							chunk->stream);
 	if (ret != CUDA_SUCCESS)
-		goto error_4;
-
-	return CUDA_SUCCESS;
-
-error_4:
-	cuStreamSynchronize(chunk->stream);
-error_3:
-	cuMemFree(chunk->devmem);
-error_2:
-	cuStreamDestroy(chunk->stream);
-error_1:
-	return ret;
+	{
+		cuStreamSynchronize(chunk->stream);
+		cuStreamDestroy(chunk->stream);
+		cuMemFreeHost(chunk->cs_rowmap);
+		cuMemFree(chunk->devmem);
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Failed to enqueue asynchronous memcpy: %s",
+						cuda_error_to_string(ret))));
+	}
 }
 
 static void
@@ -467,14 +499,27 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 		MemoryContextSwitchTo(oldcxt);
 		Assert(chunk->nitems % BITS_PER_BYTE == 0);
 
-		if (sestate->dev_module)
+		if (sestate->dev_list != NIL)
 		{
+			PgStromDevContext *dev_cxt;
 			Bitmapset  *temp;
 			AttrNumber	csidx;
 			uint16		attlen;
 			char	   *dma_buffer;
 			size_t		dma_offset;
 			CUresult	ret;
+
+			/*
+			 * Switch to the next GPU device to be used
+			 */
+			do {
+				if (!sestate->dev_curr)
+					sestate->dev_curr = list_head(sestate->dev_list);
+				else
+					sestate->dev_curr = lnext(sestate->dev_curr);
+			} while (!sestate->dev_curr);
+			dev_cxt = lfirst(sestate->dev_curr);
+			pgstrom_set_device_context(dev_cxt->dev_index);
 
 			/*
 			 * Compute and allocate required size of column store
@@ -500,7 +545,6 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 						(errcode(ERRCODE_OUT_OF_MEMORY),
 						 errmsg("cuda: failed to page-locked memory : %s",
 								cuda_error_to_string(ret))));
-			pgstrom_locked_mem_usage += dma_offset;
 			chunk->devmem_size = dma_offset;
 
 			/*
@@ -519,16 +563,7 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 			/*
 			 * Asynchronous execution of kernel code on this chunk
 			 */
-			ret = pgstrom_exec_kernel_qual(sestate, chunk);
-			if (ret != CUDA_SUCCESS)
-			{
-				cuMemFreeHost(chunk->cs_rowmap);
-				pgstrom_locked_mem_usage -= dma_offset;
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("cuda: failed to execute kernel code : %s",
-								cuda_error_to_string(ret))));
-			}
+			pgstrom_exec_kernel_qual(dev_cxt, chunk);
 
 			/*
 			 * XXX - Do we need to pay attention of the case when
@@ -818,6 +853,129 @@ pgstrom_scan_chunk_buffer(PgStromExecState *sestate, TupleTableSlot *slot)
 	return false;	/* end of chunk, need next chunk! */
 }
 
+static PgStromDevContext *
+pgstrom_init_exec_device(void *image, int dev_index,
+						 const int64 const_buffer[], int const_nums)
+{
+	const PgStromDeviceInfo *dev_info = pgstrom_get_device_info(dev_index);
+	PgStromDevContext  *dev_cxt;
+	CUresult	ret;
+	int			n_threads;
+
+	/*
+	 * Allocate PgStromDevCtx for each GPU devices
+	 */
+	dev_cxt = palloc0(sizeof(PgStromDevContext));
+	dev_cxt->dev_index = dev_index;
+
+	/*
+	 * Switch the current GPU device
+	 */
+	pgstrom_set_device_context(dev_index);
+
+	/*
+	 * Load the module to GPU device
+	 */
+	ret = cuModuleLoadData(&dev_cxt->dev_module, image);
+	if (ret != CUDA_SUCCESS)
+	{
+		pfree(dev_cxt);
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Failed to load device executable module: %s",
+						cuda_error_to_string(ret))));
+	}
+
+	/*
+	 * Lookup function to execute the supplied qualifer
+	 */
+	ret = cuModuleGetFunction(&dev_cxt->dev_function,
+							  dev_cxt->dev_module,
+							  "pgstrom_qual");
+	if (ret != CUDA_SUCCESS)
+	{
+		cuModuleUnload(dev_cxt->dev_module);
+		pfree(dev_cxt);
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Failed to get device function \"%s\": %s",
+						"pgstrom_qual", cuda_error_to_string(ret))));
+	}
+
+	/*
+	 * Switch L1 cache config -- Because qualifier does not use shared
+	 * memory anyway, so larger L1 cache will give us performance gain.
+	 */
+	ret = cuFuncSetCacheConfig(dev_cxt->dev_function,
+							   CU_FUNC_CACHE_PREFER_L1);
+	if (ret != CUDA_SUCCESS)
+	{
+		cuModuleUnload(dev_cxt->dev_module);
+		pfree(dev_cxt);
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Failed to switch L1 cache configuration: %s",
+						cuda_error_to_string(ret))));
+	}
+
+	/*
+	 * Set up constant values, if exists
+	 */
+	if (const_nums > 0)
+	{
+		CUdeviceptr	const_ptr;
+		size_t		const_size;
+
+		ret = cuModuleGetGlobal(&const_ptr, &const_size,
+								dev_cxt->dev_module, "constval");
+		if (ret != CUDA_SUCCESS)
+		{
+			cuModuleUnload(dev_cxt->dev_module);
+			pfree(dev_cxt);
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("Failed to lookup constant value symbol: %s",
+							cuda_error_to_string(ret))));
+		}
+		if (const_size != sizeof(int64) * const_nums)
+		{
+			cuModuleUnload(dev_cxt->dev_module);
+			pfree(dev_cxt);
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("Unexpected constant size %lu, but %lu expected",
+							const_size, sizeof(int64) * const_nums)));
+		}
+		ret = cuMemcpyHtoD(const_ptr, const_buffer, const_size);
+		if (ret != CUDA_SUCCESS)
+		{
+			cuModuleUnload(dev_cxt->dev_module);
+			pfree(dev_cxt);
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("Failed to copy constant values: %s",
+							cuda_error_to_string(ret))));
+		}
+	}
+
+	/*
+	 * Compute an optimized number of threads and blocks
+	 */
+	ret = cuFuncGetAttribute(&n_threads,
+							 CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+							 dev_cxt->dev_function);
+	if (ret != CUDA_SUCCESS)
+	{
+		cuModuleUnload(dev_cxt->dev_module);
+		pfree(dev_cxt);
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Failed to reference number of registers: %s",
+						cuda_error_to_string(ret))));
+	}
+	return dev_cxt;
+}
+
 static PgStromExecState *
 pgstrom_init_exec_state(ForeignScanState *fss)
 {
@@ -882,8 +1040,6 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	sestate->nevermatch = nevermatch;
 	sestate->required_cols = bms_copy(required_cols);
 	sestate->clause_cols = bms_copy(clause_cols);
-	if (kernel_source)
-		sestate->kernel_source = pstrdup(kernel_source);
 
 	sestate->es_owner = CurrentResourceOwner;
 	sestate->es_relation = fss->ss.ss_currentRelation;
@@ -906,91 +1062,58 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 
 	pgstrom_exec_state_list
 		= lappend(pgstrom_exec_state_list, sestate);
-	MemoryContextSwitchTo(oldcxt);
 
-	if (!sestate->nevermatch && sestate->kernel_source != NULL)
+	if (!sestate->nevermatch && kernel_source != NULL)
 	{
-		CUresult	ret;
-		void	   *image;
-
-		/*
-		 * XXX - we should handle multiple GPU devices
-		 */
-		pgstrom_set_device_context(0);
+		void   *image;
+		int64  *const_buffer = NULL;
+		int		const_nums = 0;
+		int		dev_index;
+		int		dev_nums;
 
 		/*
 		 * Build the kernel source code
 		 */
-		image = pgstrom_nvcc_kernel_build(sestate->kernel_source);
+		image = pgstrom_nvcc_kernel_build(kernel_source);
 
-		ret = cuModuleLoadData(&sestate->dev_module, image);
-		if (ret != CUDA_SUCCESS)
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("cuda: failed to load executable module : %s",
-							cuda_error_to_string(ret))));
-
-		ret = cuModuleGetFunction(&sestate->dev_function,
-								  sestate->dev_module,
-								  "pgstrom_qual");
-		if (ret != CUDA_SUCCESS)
-			ereport(ERROR,
-                    (errcode(ERRCODE_INTERNAL_ERROR),
-                     errmsg("cuda: failed to get device function : %s",
-							cuda_error_to_string(ret))));
-
-		ret = cuFuncSetCacheConfig(sestate->dev_function,
-								   CU_FUNC_CACHE_PREFER_L1);
-		if (ret != CUDA_SUCCESS)
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("cuda: failed to set L1 cache setting : %s",
-                            cuda_error_to_string(ret))));
-
+		/*
+		 * Set up constant values, if exist
+		 */
 		if (const_values != NIL)
 		{
-			CUdeviceptr	const_ptr;
-			size_t		const_size;
-			int			const_idx = 0;
-			int64	   *const_buffer = alloca(sizeof(int64) *
-											  list_length(const_values));
+			const_buffer = alloca(sizeof(int64) * list_length(const_values));
+
 			foreach (cell, const_values)
 			{
 				Assert(IsA(lfirst(cell), Integer) ||
 					   IsA(lfirst(cell), String));
-
 				if (IsA(lfirst(cell), Integer))
-					const_buffer[const_idx++] = intVal(lfirst(cell));
+					const_buffer[const_nums++] = intVal(lfirst(cell));
 				else
 				{
 					Datum	temp = CStringGetDatum(strVal(lfirst(cell)));
-					const_buffer[const_idx++] =
+					const_buffer[const_nums++] =
 						DatumGetInt64(DirectFunctionCall1(int8in, temp));
 				}
 			}
-
-			ret = cuModuleGetGlobal(&const_ptr, &const_size,
-									sestate->dev_module, "constval");
-			if (ret != CUDA_SUCCESS)
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("failed to lookup symbol \"constval\" : %s",
-								cuda_error_to_string(ret))));
-
-			if (const_size != sizeof(int64) * list_length(const_values))
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("constval has unexpected size (%lu)",
-								const_size)));
-
-			ret = cuMemcpyHtoD(const_ptr, const_buffer, const_size);
-			if (ret != CUDA_SUCCESS)
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("failed to put constant values : %s",
-								cuda_error_to_string(ret))));
 		}
+
+		/*
+		 * Set up device execution schedule
+		 */
+		dev_nums = pgstrom_get_num_devices();
+		for (dev_index=0; dev_index < dev_nums; dev_index++)
+		{
+			sestate->dev_list
+				= lappend(sestate->dev_list,
+						  pgstrom_init_exec_device(image, dev_index,
+												   const_buffer,
+												   const_nums));
+		}
+		sestate->dev_curr = NULL;
 	}
+	MemoryContextSwitchTo(oldcxt);
+
 	return sestate;
 }
 
@@ -1206,10 +1329,12 @@ pgstrom_scan_debug_info(List *debug_info_list)
 	int		i, n;
 
 	/* locked_mem_usage */
+#if 0
 	snprintf(val, sizeof(val), "%lu KB", pgstrom_locked_mem_usage / 1024);
 	defel = makeDefElem("Page-locked memory usage",
 						(Node *)makeString(pstrdup(val)));
 	debug_info_list = lappend(debug_info_list, defel);
+#endif
 
 	/* device memory usage */
 	n = pgstrom_get_num_devices();

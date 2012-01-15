@@ -69,7 +69,7 @@ extern List *pgstrom_scan_debug_info(List *debug_info_list);
 extern void pgstrom_scan_init(void);
 
 /*
- * devfuncs.c
+ * devinfo.c
  */
 typedef struct {
 	Oid		type_oid;
@@ -95,7 +95,49 @@ typedef struct {
 
 extern PgStromDevTypeInfo *pgstrom_devtype_lookup(Oid type_oid);
 extern PgStromDevFuncInfo *pgstrom_devfunc_lookup(Oid func_oid);
-extern void pgstrom_devfuncs_init(void);
+
+/*
+ * PgStromDeviceInfo
+ *
+ * Properties of GPU device. Every fields are initialized at server starting
+ * up time; except for device and context. CUDA context shall be switched
+ * via pgstrom_set_device_context().
+ */
+typedef struct {
+	CUdevice	device;
+	CUcontext	context;
+	char		dev_name[256];
+	int			dev_major;
+	int			dev_minor;
+	int			dev_proc_nums;
+	int			dev_proc_warp_sz;
+	int			dev_proc_clock;
+	size_t		dev_global_mem_sz;
+	int			dev_global_mem_width;
+	int			dev_global_mem_clock;
+	int			dev_shared_mem_sz;
+	int			dev_l2_cache_sz;
+	int			dev_const_mem_sz;
+	int			dev_max_block_dim_x;
+	int			dev_max_block_dim_y;
+	int			dev_max_block_dim_z;
+	int			dev_max_grid_dim_x;
+	int			dev_max_grid_dim_y;
+	int			dev_max_grid_dim_z;
+	int			dev_max_threads_per_proc;
+	int			dev_max_regs_per_block;
+	int			dev_integrated;
+	int			dev_unified_addr;
+	int			dev_can_map_hostmem;
+	int			dev_concurrent_kernel;
+	int			dev_concurrent_memcpy;
+	int			dev_pci_busid;
+	int			dev_pci_deviceid;
+} PgStromDeviceInfo;
+
+extern const PgStromDeviceInfo *pgstrom_get_device_info(int dev_index);
+extern void pgstrom_set_device_context(int dev_index);
+extern void pgstrom_devinfo_init(void);
 extern const char *cuda_error_to_string(CUresult result);
 
 /*
