@@ -69,7 +69,7 @@ extern List *pgstrom_scan_debug_info(List *debug_info_list);
 extern void pgstrom_scan_init(void);
 
 /*
- * devinfo.c
+ * devfuncs.c
  */
 typedef struct {
 	Oid		type_oid;
@@ -93,15 +93,19 @@ typedef struct {
 #define DEVINFO_FLAGS_DOUBLE_FP				0x0001
 #define DEVINFO_FLAGS_INC_MATHFUNC_H		0x0002
 
-extern void pgstrom_devtype_format(StringInfo str,
-								   Oid type_oid, Datum value);
 extern PgStromDevTypeInfo *pgstrom_devtype_lookup(Oid type_oid);
 extern PgStromDevFuncInfo *pgstrom_devfunc_lookup(Oid func_oid);
+extern void pgstrom_devfuncs_init(void);
+extern const char *cuda_error_to_string(CUresult result);
+
+/*
+ * devsched.c
+ */
 extern void pgstrom_set_device_context(int dev_index);
 extern int	pgstrom_get_num_devices(void);
-extern void pgstrom_devinfo_init(void);
-extern const char *cuda_error_to_string(CUresult result);
-extern Datum pgstrom_device_properties(PG_FUNCTION_ARGS);
+
+extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
+extern void pgstrom_devsched_init(void);
 
 /*
  * nvcc.c

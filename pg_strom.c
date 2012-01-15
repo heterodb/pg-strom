@@ -130,8 +130,11 @@ _PG_init(void)
 	/* Register Hooks of PostgreSQL */
 	pgstrom_utilcmds_init();
 
-	/* Initialize stuff related to GPU devices */
-	pgstrom_devinfo_init();
+	/* Initialize catalog of device functions/types */
+	pgstrom_devfuncs_init();
+
+	/* Initialize device computing scheduler */
+	pgstrom_devsched_init();
 
 	/* Initialize stuff related to scan.c */
 	pgstrom_scan_init();

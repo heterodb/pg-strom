@@ -1,6 +1,7 @@
 # Makefile of pg_strom
 MODULE_big = pg_strom
-OBJS = pg_strom.o utilcmds.o blkload.o plan.o scan.o devinfo.o nvcc.o
+OBJS = pg_strom.o utilcmds.o blkload.o plan.o scan.o nvcc.o \
+       devfuncs.o devsched.o
 
 CUDA_DIR := /usr/local/cuda
 
