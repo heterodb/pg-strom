@@ -64,7 +64,7 @@ typedef struct {
 	ResourceOwner	es_owner;		/* copy from CurrentResourceOwner */
 	Relation		es_relation;	/* copy from ScanState */
 	Snapshot		es_snapshot;	/* copy from EState */
-	MemoryContext	es_memcxt;		/* per-query memory context */
+	MemoryContext	es_memcxt;		/* memory context contains this object */
 
 	/* shadow tables and indexes */
 	Relation		id_rel;			/* shadow rowid table */
@@ -101,13 +101,13 @@ static void
 pgstrom_release_chunk_buffer(PgStromExecState *sestate,
 							 PgStromChunkBuf *chunk)
 {
+	/*
+	 * If the supplied chunk buffer is under execution of kernel code,
+	 * we need to synchronize its completion, then release its resources,
+	 * because asynchronous memory copy may be ready to run...
+	 */
 	if (chunk->stream != NULL)
 	{
-		/*
-		 * If the supplied chunk buffer is under execution of kernel code,
-		 * we try to synchronize its completion, then release its resources,
-		 * because asynchronous memory copy may be ready to run...
-		 */
 		if (cuStreamQuery(chunk->stream) == CUDA_ERROR_NOT_READY)
 			cuStreamSynchronize(chunk->stream);
 		cuStreamDestroy(chunk->stream);
@@ -133,11 +133,9 @@ pgstrom_release_exec_state(PgStromExecState *sestate)
 
 	foreach (cell, sestate->chunk_exec_list)
 		pgstrom_release_chunk_buffer(sestate, lfirst(cell));
-	list_free(sestate->chunk_exec_list);
 
 	foreach (cell, sestate->chunk_ready_list)
 		pgstrom_release_chunk_buffer(sestate, lfirst(cell));
-	list_free(sestate->chunk_ready_list);
 
 	foreach (cell, sestate->dev_list)
 	{
@@ -145,19 +143,7 @@ pgstrom_release_exec_state(PgStromExecState *sestate)
 		if (dev_cxt->dev_module)
 			cuModuleUnload(dev_cxt->dev_module);
 	}
-	if (sestate->required_cols)
-		bms_free(sestate->required_cols);
-	if (sestate->clause_cols)
-		bms_free(sestate->clause_cols);
-	if (sestate->cs_scan)
-		pfree(sestate->cs_scan);
-	if (sestate->cs_cur_values)
-		pfree(sestate->cs_cur_values);
-	if (sestate->cs_cur_rowid_min)
-		pfree(sestate->cs_cur_rowid_min);
-	if ( sestate->cs_cur_rowid_max)
-		pfree( sestate->cs_cur_rowid_max);
-	pfree(sestate);
+	MemoryContextDelete(sestate->es_memcxt);
 }
 
 static void
@@ -322,7 +308,7 @@ retry:
 
 			sestate->chunk_exec_list
 				= list_delete_cell(sestate->chunk_exec_list, cell, prev);
-			oldcxt = MemoryContextSwitchTo(pgstrom_scan_memcxt);
+			oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 			sestate->chunk_ready_list
 				= lappend(sestate->chunk_ready_list, chunk);
 			MemoryContextSwitchTo(oldcxt);
@@ -490,7 +476,7 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 		rowid = DatumGetInt64(values[Anum_pg_strom_rowid - 1]);
 		nitems = DatumGetUInt32(values[Anum_pg_strom_nitems - 1]);
 
-		oldcxt = MemoryContextSwitchTo(pgstrom_scan_memcxt);
+		oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 		chunk = palloc0(sizeof(PgStromChunkBuf));
 		chunk->rowid = rowid;
 		chunk->nattrs = RelationGetNumberOfAttributes(sestate->es_relation);
@@ -570,7 +556,7 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 			 * XXX - Do we need to pay attention of the case when
 			 * lappend raises an error?
 			 */
-			oldcxt = MemoryContextSwitchTo(pgstrom_scan_memcxt);
+			oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 			sestate->chunk_exec_list
 				= lappend(sestate->chunk_exec_list, chunk);
 			MemoryContextSwitchTo(oldcxt);
@@ -581,7 +567,7 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 			 * In case of the supplied plan without no qualifiers,
 			 * all the chunks are ready to scan using rowid.
 			 */
-			oldcxt = MemoryContextSwitchTo(pgstrom_scan_memcxt);
+			oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 			chunk->cs_rowmap = palloc0(chunk->nitems / BITS_PER_BYTE);
 			deconstruct_cs_bytea(chunk->cs_rowmap,
 								 values[Anum_pg_strom_isnull - 1],
@@ -1009,6 +995,7 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	PgStromExecState   *sestate;
 	ListCell		   *cell;
 	AttrNumber			nattrs;
+	MemoryContext		newcxt;
 	MemoryContext		oldcxt;
 	bool				nevermatch = false;
 	char			   *kernel_source = NULL;
@@ -1057,20 +1044,45 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	}
 
 	/*
-	 * Allocate PgStromExecState object within pgstrom_scan_memcxt
+	 * Create per-scan memory context
 	 */
-	oldcxt = MemoryContextSwitchTo(pgstrom_scan_memcxt);
+	newcxt = AllocSetContextCreate(pgstrom_scan_memcxt,
+                                   "PG-Strom Exec Status",
+                                   ALLOCSET_DEFAULT_MINSIZE,
+                                   ALLOCSET_DEFAULT_INITSIZE,
+                                   ALLOCSET_DEFAULT_MAXSIZE);
+	PG_TRY();
+	{
+		sestate = MemoryContextAllocZero(newcxt, sizeof(PgStromExecState));
+		sestate->es_owner = CurrentResourceOwner;
+		sestate->es_relation = fss->ss.ss_currentRelation;
+		sestate->es_snapshot = fss->ss.ps.state->es_snapshot;
+		sestate->es_memcxt = newcxt;
 
-	sestate = palloc0(sizeof(PgStromExecState));
+		/*
+		 * The new sestate should be linked to the pgstrom_exec_state_list
+		 * at first; to prevent unexpected memory leak on errors.
+		 */
+		oldcxt = MemoryContextSwitchTo(pgstrom_scan_memcxt);
+		pgstrom_exec_state_list
+			= lappend(pgstrom_exec_state_list, sestate);
+		MemoryContextSwitchTo(oldcxt);
+	}
+	PG_CATCH();
+	{
+		MemoryContextDelete(newcxt);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	/*
+	 * Initialization of rest of fields
+	 */
+	oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 
 	sestate->nevermatch = nevermatch;
 	sestate->required_cols = bms_copy(required_cols);
 	sestate->clause_cols = bms_copy(clause_cols);
-
-	sestate->es_owner = CurrentResourceOwner;
-	sestate->es_relation = fss->ss.ss_currentRelation;
-    sestate->es_snapshot = fss->ss.ps.state->es_snapshot;
-	sestate->es_memcxt = fss->ss.ps.ps_ExprContext->ecxt_per_query_memory;
 
 	sestate->cs_rels = palloc0(sizeof(Relation) * nattrs);
 	sestate->cs_idxs = palloc0(sizeof(Relation) * nattrs);
@@ -1086,8 +1098,7 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	sestate->curr_chunk = NULL;
 	sestate->curr_index = 0;
 
-	pgstrom_exec_state_list
-		= lappend(pgstrom_exec_state_list, sestate);
+	MemoryContextSwitchTo(oldcxt);
 
 	if (!sestate->nevermatch && kernel_source != NULL)
 	{
@@ -1128,17 +1139,19 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 		 * Set up device execution schedule
 		 */
 		dev_nums = pgstrom_get_num_devices();
+
+		oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 		for (dev_index=0; dev_index < dev_nums; dev_index++)
 		{
-			sestate->dev_list
-				= lappend(sestate->dev_list,
-						  pgstrom_init_exec_device(image, dev_index,
-												   const_buffer,
-												   const_nums));
+			PgStromDevContext *dev_cxt
+				= pgstrom_init_exec_device(image, dev_index,
+										   const_buffer, const_nums);
+			sestate->dev_list = lappend(sestate->dev_list, dev_cxt);
 		}
+		MemoryContextSwitchTo(oldcxt);
+
 		sestate->dev_curr = NULL;
 	}
-	MemoryContextSwitchTo(oldcxt);
 
 	return sestate;
 }
