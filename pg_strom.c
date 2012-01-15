@@ -11,6 +11,7 @@
  * this package.
  */
 #include "postgres.h"
+#include "access/reloptions.h"
 #include "catalog/pg_type.h"
 #include "foreign/fdwapi.h"
 #include "funcapi.h"
@@ -38,7 +39,7 @@ FdwRoutine	pgstromFdwHandlerData = {
 /*
  * pgstrom_fdw_handler
  *
- * FDW Handler function of pg_strom
+ * FDW Handler function of PG-Strom
  */
 Datum
 pgstrom_fdw_handler(PG_FUNCTION_ARGS)
@@ -47,10 +48,27 @@ pgstrom_fdw_handler(PG_FUNCTION_ARGS)
 }
 PG_FUNCTION_INFO_V1(pgstrom_fdw_handler);
 
-/****/
+/*
+ * pgstrom_fdw_validator
+ *
+ * FDW option validator of PG-Strom
+ */
 Datum
 pgstrom_fdw_validator(PG_FUNCTION_ARGS)
 {
+	Datum		rawopts = PG_GETARG_DATUM(0);
+	List	   *options_list;
+	ListCell   *cell;
+
+	options_list = untransformRelOptions(rawopts);
+	foreach (cell, options_list)
+	{
+		DefElem *defel = lfirst(cell);
+
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+				 errmsg("invalid option \"%s\"", defel->defname)));
+	}
 	PG_RETURN_VOID();
 }
 PG_FUNCTION_INFO_V1(pgstrom_fdw_validator);

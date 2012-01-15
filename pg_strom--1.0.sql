@@ -17,7 +17,7 @@ CREATE FOREIGN DATA WRAPPER pg_strom
 
 CREATE SERVER pg_strom FOREIGN DATA WRAPPER pg_strom;
 
-CREATE FUNCTION pgstrom_data_load(regclass, regclass,int4)
+CREATE FUNCTION pgstrom_data_load(regclass, regclass)
   RETURNS bool
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;

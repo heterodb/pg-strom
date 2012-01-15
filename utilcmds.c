@@ -350,10 +350,11 @@ pgstrom_create_shadow_sequence(Oid namespaceId, Relation base_rel)
 	rowid_namelist = list_make3(makeString(PGSTROM_SCHEMA_NAME),
 								makeString(rel_name),
 								makeString("rowid"));
-	seq_stmt->options = list_make3(
-		makeDefElem("minvalue", (Node *)makeInteger(0)),
-		makeDefElem("maxvalue", (Node *)makeInteger((1UL<<48) - 1)),
-		makeDefElem("owned_by", (Node *)rowid_namelist));
+	seq_stmt->options = list_make4(
+		makeDefElem("increment", (Node *)makeInteger(PGSTROM_CHUNK_SIZE)),
+		makeDefElem("minvalue",  (Node *)makeInteger(0)),
+		makeDefElem("maxvalue",  (Node *)makeInteger((1UL<<48) - 1)),
+		makeDefElem("owned_by",  (Node *)rowid_namelist));
 	seq_stmt->ownerId = RelationGetForm(base_rel)->relowner;
 
 	DefineSequence(seq_stmt);

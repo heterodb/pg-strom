@@ -51,8 +51,7 @@ typedef struct {
 	int			dev_index;
 	CUmodule	dev_module;
 	CUfunction	dev_function;
-	uint32		dev_grid_sz;
-	uint32		dev_block_sz;
+	uint32		dev_nthreads;
 } PgStromDevContext;
 
 typedef struct {
@@ -233,11 +232,13 @@ pgstrom_exec_kernel_qual(PgStromDevContext *dev_cxt, PgStromChunkBuf *chunk)
 	/*
 	 * Setup kernel arguments
 	 */
-	kernel_data = alloca((1 + 2 * chunk->nattrs) * sizeof(CUdeviceptr));
-	kernel_args = alloca((1 + 2 * chunk->nattrs) * sizeof(void *));
-	kernel_data[0] = chunk->devmem;
+	kernel_data = alloca((2 + 2 * chunk->nattrs) * sizeof(CUdeviceptr));
+	kernel_args = alloca((2 + 2 * chunk->nattrs) * sizeof(void *));
+	kernel_data[0] = chunk->nitems;
 	kernel_args[0] = &kernel_data[0];
-	for (i=0, j=1; i < chunk->nattrs; i++)
+	kernel_data[1] = chunk->devmem;
+	kernel_args[1] = &kernel_data[1];
+	for (i=0, j=2; i < chunk->nattrs; i++)
 	{
 		if (chunk->cs_values[i] > 0)
 		{
@@ -252,7 +253,7 @@ pgstrom_exec_kernel_qual(PgStromDevContext *dev_cxt, PgStromChunkBuf *chunk)
 	/*
 	 * Launch kernel function
 	 */
-	n_threads = PGSTROM_THREADS_PER_BLOCK;
+	n_threads = dev_cxt->dev_nthreads;
 	n_blocks = (chunk->nitems + n_threads * BITS_PER_BYTE - 1)
 		/ (BITS_PER_BYTE * n_threads);
 	ret = cuLaunchKernel(dev_cxt->dev_function,
@@ -973,6 +974,31 @@ pgstrom_init_exec_device(void *image, int dev_index,
 				 errmsg("Failed to reference number of registers: %s",
 						cuda_error_to_string(ret))));
 	}
+
+	/*
+	 * Larger number of threads within a particular block is better
+	 * strategy as long as it can be executable; from the perspective
+	 * that increase occupacy of streaming processor.
+	 */
+	n_threads = (n_threads - (n_threads % dev_info->dev_proc_warp_sz));
+
+	/*
+	 * However, it is not desirable the number of threads are too large
+	 * not to utilize all the streaming processors concurrently.
+	 * In this case, we adjust number of threads to appropriate level.
+	 */
+	if (PGSTROM_CHUNK_SIZE / n_threads < dev_info->dev_proc_nums)
+	{
+		n_threads = PGSTROM_CHUNK_SIZE / dev_info->dev_proc_nums;
+		n_threads -= (n_threads % dev_info->dev_proc_warp_sz);
+	}
+	dev_cxt->dev_nthreads = n_threads;
+
+	/*
+	 * TODO: maximun number of concurrent chunks also shoukd be modified
+	 * to avoid over-consumption of device memory.
+	 */
+
 	return dev_cxt;
 }
 

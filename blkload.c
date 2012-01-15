@@ -134,7 +134,6 @@ construct_cs_values(Datum cs_values[], bool cs_isnull[], int nitems,
 static void
 pgstrom_one_chunk_insert(Relation srel,
 						 Oid    seqid,
-						 uint32	chunk_size,
 						 uint32 nitems,
 						 Relation id_rel,
 						 Relation cs_rels[],
@@ -153,8 +152,6 @@ pgstrom_one_chunk_insert(Relation srel,
 	int			save_sec_context;
 	AttrNumber	attno, nattrs;
 
-	Assert(chunk_size % BITS_PER_BYTE == 0);
-
 	/*
 	 * Acquire a row-id of the head of this chunk
 	 */
@@ -167,17 +164,13 @@ pgstrom_one_chunk_insert(Relation srel,
 
 	/*
 	 * Insert rowid-map of this chunk.
-	 *
-	 * XXX - note that its 'nitems' is always chunk_size to make clear
-	 * between rowid and (rowid + nitems - 1) are occupied.
 	 */
 	memset(values, 0, sizeof(values));
 	memset(isnull, 0, sizeof(isnull));
 
 	values[Anum_pg_strom_rowid - 1] = Int64GetDatum(rowid);
-	values[Anum_pg_strom_nitems - 1] = Int32GetDatum(chunk_size);
-	values[Anum_pg_strom_isnull - 1] =
-		construct_cs_isnull(cs_rowid, chunk_size);
+	values[Anum_pg_strom_nitems - 1] = Int32GetDatum(nitems);
+	values[Anum_pg_strom_isnull - 1] = construct_cs_isnull(cs_rowid, nitems);
 
 	tupdesc = RelationGetDescr(id_rel);
 	tuple = heap_form_tuple(tupdesc, values, isnull);
@@ -289,8 +282,7 @@ pgstrom_data_load_internal(Relation srel,
 						   Oid		seqid,
 						   Relation id_rel,
 						   Relation cs_rels[],
-						   Form_pg_attribute cs_attrs[],
-						   uint32 chunk_size)
+						   Form_pg_attribute cs_attrs[])
 {
 	TupleDesc		tupdesc;
 	HeapScanDesc	scan;
@@ -309,15 +301,15 @@ pgstrom_data_load_internal(Relation srel,
 	rs_values = palloc0(sizeof(Datum) * tupdesc->natts);
 	rs_isnull = palloc0(sizeof(bool)  * tupdesc->natts);
 
-	cs_rowmap = palloc0(sizeof(bool) * chunk_size);
+	cs_rowmap = palloc0(sizeof(bool) * PGSTROM_CHUNK_SIZE);
 	cs_values = palloc0(sizeof(Datum *) * tupdesc->natts);
 	cs_isnull = palloc0(sizeof(bool *) * tupdesc->natts);
 	for (attno = 0; attno < tupdesc->natts; attno++)
 	{
 		if (!cs_rels[attno])
 			continue;
-		cs_values[attno] = palloc(sizeof(Datum) * chunk_size);
-		cs_isnull[attno] = palloc(sizeof(bool) * chunk_size);
+		cs_values[attno] = palloc(sizeof(Datum) * PGSTROM_CHUNK_SIZE);
+		cs_isnull[attno] = palloc(sizeof(bool) * PGSTROM_CHUNK_SIZE);
 	}
 
 	/*
@@ -337,7 +329,7 @@ pgstrom_data_load_internal(Relation srel,
 	oldcxt = MemoryContextSwitchTo(cs_memcxt);
 
 	index = 0;
-	memset(cs_rowmap, -1, sizeof(bool) * chunk_size);
+	memset(cs_rowmap, -1, sizeof(bool) * PGSTROM_CHUNK_SIZE);
 
 	while (HeapTupleIsValid(tuple = heap_getnext(scan, ForwardScanDirection)))
 	{
@@ -369,9 +361,9 @@ pgstrom_data_load_internal(Relation srel,
 			}
 		}
 
-		if (++index == chunk_size)
+		if (++index == PGSTROM_CHUNK_SIZE)
 		{
-			pgstrom_one_chunk_insert(srel, seqid, chunk_size, index,
+			pgstrom_one_chunk_insert(srel, seqid, index,
 									 id_rel, cs_rels, cs_attrs,
 									 cs_rowmap, cs_isnull, cs_values);
 			/*
@@ -379,7 +371,13 @@ pgstrom_data_load_internal(Relation srel,
 			 * the per-chunk memory
 			 */
 			index = 0;
-			memset(cs_rowmap, -1, sizeof(bool) * chunk_size);
+			memset(cs_rowmap, -1, sizeof(bool) * PGSTROM_CHUNK_SIZE);
+			for (attno = 0; attno < tupdesc->natts; attno++)
+			{
+				if (cs_rels[attno])
+					memset(cs_isnull[attno], -1,
+						   sizeof(bool)*PGSTROM_CHUNK_SIZE);
+			}
 			MemoryContextReset(cs_memcxt);
 		}
 	}
@@ -387,9 +385,9 @@ pgstrom_data_load_internal(Relation srel,
 	{
 		/* index should be round up to multiple number of 8 */
 		index = (index + BITS_PER_BYTE - 1) & ~(BITS_PER_BYTE - 1);
-		Assert(index <= chunk_size);
+		Assert(index <= PGSTROM_CHUNK_SIZE);
 
-		pgstrom_one_chunk_insert(srel, seqid, chunk_size, index,
+		pgstrom_one_chunk_insert(srel, seqid, index,
 								 id_rel, cs_rels, cs_attrs,
 								 cs_rowmap, cs_isnull, cs_values);
 	}
@@ -402,7 +400,7 @@ pgstrom_data_load_internal(Relation srel,
 
 /*
  * bool
- * pgstrom_data_load(regclass dest, regclass source, uint32 chunk_size)
+ * pgstrom_data_load(regclass dest, regclass source)
  *
  * This function loads the contents of source table into the destination
  * foreign table managed by PG-Strom; with the supplied chunk_size.
@@ -419,12 +417,10 @@ pgstrom_data_load(PG_FUNCTION_ARGS)
 	Bitmapset	   *dcols = NULL;
 	RangeTblEntry  *srte;
 	RangeTblEntry  *drte;
-	HeapScanDesc	scan;
 	HeapTuple		tuple;
 	RangeVar	   *range;
 	Oid				nspid;
 	Oid				seqid;
-	uint32			chunk_size = PG_GETARG_UINT32(2);
 	AttrNumber		i, nattrs;
 
 	/*
@@ -506,62 +502,6 @@ pgstrom_data_load(PG_FUNCTION_ARGS)
 	}
 
 	/*
-	 * Check correctness of the chunk-size
-	 */
-	scan = heap_beginscan(id_rel, SnapshotNow, 0, NULL);
-	tuple = heap_getnext(scan, ForwardScanDirection);
-	if (HeapTupleIsValid(tuple))
-	{
-		TupleDesc	tupdesc = RelationGetDescr(id_rel);
-		Datum		values[Natts_pg_strom - 1];
-		bool		isnull[Natts_pg_strom - 1];
-		uint32		nitems;
-
-		heap_deform_tuple(tuple, tupdesc, values, isnull);
-		Assert(!isnull[0] && !isnull[1]);
-
-		nitems = DatumGetInt32(values[Anum_pg_strom_nitems - 1]);
-		if (chunk_size == 0)
-			chunk_size = nitems;
-		else if (chunk_size != nitems)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-					 errmsg("chunk size must be same with existing data")));
-	}
-	else
-	{
-		AlterSeqStmt   *stmt;
-		Oid		save_userid;
-		int		save_sec_context;
-
-		if (chunk_size == 0)
-			chunk_size = BLCKSZ * BITS_PER_BYTE / 2; /* default */
-		else if ((chunk_size & (chunk_size - 1)) != 0)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-					 errmsg("chunk size must be a power of 2")));
-		else if (chunk_size < 4096 || chunk_size > BLCKSZ * BITS_PER_BYTE)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-					 errmsg("chunk size is out of range")));
-
-		/* Reset sequence object to fit the supplied chunk size */
-		stmt = makeNode(AlterSeqStmt);
-		stmt->sequence = pgstrom_lookup_shadow_sequence(drel);
-		stmt->options = list_make2(
-			makeDefElem("increment", (Node *)makeInteger(chunk_size)),
-			makeDefElem("restart",   (Node *)makeInteger(0)));
-
-		GetUserIdAndSecContext(&save_userid, &save_sec_context);
-		SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID, save_sec_context);
-
-		AlterSequence(stmt);
-
-		SetUserIdAndSecContext(save_userid, save_sec_context);
-	}
-	heap_endscan(scan);
-
-	/*
 	 * Set up RangeTblEntry, then Permission checks
 	 */
 	srte = makeNode(RangeTblEntry);
@@ -583,9 +523,7 @@ pgstrom_data_load(PG_FUNCTION_ARGS)
 	/*
 	 * Load data
 	 */
-	pgstrom_data_load_internal(srel, seqid, id_rel,
-							   cs_rels, cs_attrs,
-							   chunk_size);
+	pgstrom_data_load_internal(srel, seqid, id_rel, cs_rels, cs_attrs);
 
 	/*
 	 * Close the relation

@@ -466,7 +466,8 @@ make_device_qual_source(Oid base_relid, List *device_quals,
 
 	appendStringInfo(&kern,
 			 "__global__ void\n"
-			 "pgstrom_qual(unsigned char rowmap[]");
+			 "pgstrom_qual(unsigned int nitems,\n"
+			 "             unsigned char rowmap[]");
 	appendStringInfo(&blk1,
 			 "    int offset_base = blockIdx.x * blockDim.x + threadIdx.x;\n"
 			 "    int offset = offset_base * 8;\n"
@@ -500,6 +501,8 @@ make_device_qual_source(Oid base_relid, List *device_quals,
 					 "%s"
 					 "    int bitmask;\n"
 					 "\n"
+					 "    if (offset >= nitems)\n"
+					 "        return;\n"
 					 "%s"
 					 "\n"
 					 "        if ((result & bitmask) == 0 &&\n"

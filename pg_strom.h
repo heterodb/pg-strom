@@ -20,14 +20,14 @@
 #include "utils/memutils.h"
 #include <cuda.h>
 
+#define PGSTROM_CHUNK_SIZE		(BLCKSZ * BITS_PER_BYTE / 2)
+
 #define PGSTROM_SCHEMA_NAME		"pg_strom"
 #define Natts_pg_strom			4
 #define Anum_pg_strom_rowid		1
 #define Anum_pg_strom_nitems	2
 #define Anum_pg_strom_isnull	3
 #define Anum_pg_strom_values	4
-
-#define PGSTROM_THREADS_PER_BLOCK	32
 
 /*
  * utilcmds.c
