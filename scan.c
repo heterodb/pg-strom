@@ -40,6 +40,7 @@ typedef struct {
 	size_t		devmem_size;
 	CUdeviceptr	devmem;
 	CUstream	stream;
+	CUevent		events[4];
 } PgStromChunkBuf;
 
 #define chunk_cs_nulls(chunk,csidx)		\
@@ -88,7 +89,20 @@ typedef struct {
 	/* CUDA related stuff */
 	List		   *dev_list;		/* list of PgStromDevContext */
 	ListCell	   *dev_curr;		/* currently used item of dev_list */
+
+	/* Profiling stuff [us] */
+	uint64			pf_pgstrom_total;	/* total time in this module */
+	uint64			pf_jit_compile;		/* time to jit compile */
+	uint64			pf_device_init;		/* time to device initialization */
+	uint64			pf_async_memcpy;	/* time to async memcpy */
+	uint64			pf_async_kernel;	/* time to async kernel exec */
+	uint64			pf_synchronization;	/* time to synchronization */
+	uint64			pf_load_chunk;		/* time to load chunks */
 } PgStromExecState;
+
+#define TIMEVAL_ELAPSED(tv1,tv2)					\
+	(((tv2)->tv_sec  - (tv1)->tv_sec) * 1000000 +	\
+	 ((tv2)->tv_usec - (tv1)->tv_usec))
 
 /*
  * Declarations
@@ -96,6 +110,7 @@ typedef struct {
 static MemoryContext	pgstrom_scan_memcxt;
 static List	   *pgstrom_exec_state_list = NIL;
 static int		pgstrom_max_async_chunks;
+static bool		pgstrom_exec_profile;
 
 static void
 pgstrom_release_chunk_buffer(PgStromExecState *sestate,
@@ -179,106 +194,159 @@ pgstrom_exec_kernel_qual(PgStromDevContext *dev_cxt, PgStromChunkBuf *chunk)
 	unsigned int	n_threads;
 	int				i, j;
 
-	ret = cuStreamCreate(&chunk->stream, 0);
-	if (ret != CUDA_SUCCESS)
+	PG_TRY();
 	{
-		cuMemFreeHost(chunk->cs_rowmap);
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("Failed to create a stream: %s",
-						cuda_error_to_string(ret))));
-	}
+		ret = cuStreamCreate(&chunk->stream, 0);
+		if (ret != CUDA_SUCCESS)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("Failed to create a stream: %s",
+							cuda_error_to_string(ret))));
 
-	ret = cuMemAlloc(&chunk->devmem, chunk->devmem_size);
-	if (ret != CUDA_SUCCESS)
-	{
-		cuStreamDestroy(chunk->stream);
-		cuMemFreeHost(chunk->cs_rowmap);
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("Failed to alloc device memory: %s",
-						cuda_error_to_string(ret))));
-	}
-
-	ret = cuMemcpyHtoDAsync(chunk->devmem,
-							chunk->cs_rowmap,
-							chunk->devmem_size,
-							chunk->stream);
-	if (ret != CUDA_SUCCESS)
-	{
-		cuStreamDestroy(chunk->stream);
-		cuMemFreeHost(chunk->cs_rowmap);
-		cuMemFree(chunk->devmem);
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("Failed to enqueue asynchronous memcpy: %s",
-						cuda_error_to_string(ret))));
-	}
-
-	/*
-	 * Setup kernel arguments
-	 */
-	kernel_data = alloca((2 + 2 * chunk->nattrs) * sizeof(CUdeviceptr));
-	kernel_args = alloca((2 + 2 * chunk->nattrs) * sizeof(void *));
-	kernel_data[0] = chunk->nitems;
-	kernel_args[0] = &kernel_data[0];
-	kernel_data[1] = chunk->devmem;
-	kernel_args[1] = &kernel_data[1];
-	for (i=0, j=2; i < chunk->nattrs; i++)
-	{
-		if (chunk->cs_values[i] > 0)
+		ret = cuMemAlloc(&chunk->devmem, chunk->devmem_size);
+		if (ret != CUDA_SUCCESS)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("Failed to alloc device memory: %s",
+							cuda_error_to_string(ret))));
+		/*
+		 * Create event object to track elapsed time
+		 */
+		if (pgstrom_exec_profile)
 		{
-			kernel_data[j] = chunk->devmem + chunk->cs_values[i];
-			kernel_data[j+1] = chunk->devmem + chunk->cs_nulls[i];
-			Assert(chunk->cs_nulls[i] > 0);
-			kernel_args[j] = &kernel_data[j];
-			kernel_args[j+1] = &kernel_data[j+1];
-			j += 2;
+			int		i;
+
+			for (i = 0; i < lengthof(chunk->events); i++)
+			{
+				ret = cuEventCreate(&chunk->events[i], CU_EVENT_DEFAULT);
+				if (ret != CUDA_SUCCESS)
+					ereport(ERROR,
+							(errcode(ERRCODE_INTERNAL_ERROR),
+							 errmsg("Failed to create CUDA event: %s",
+									cuda_error_to_string(ret))));
+			}
+		}
+
+		/*
+		 * Arguments copy from host to device
+		 */
+		if (pgstrom_exec_profile)
+		{
+			ret = cuEventRecord(chunk->events[0], chunk->stream);
+			if (ret != CUDA_SUCCESS)
+				elog(ERROR, "Failed to enqueue an event: %s",
+					 cuda_error_to_string(ret));
+		}
+
+		ret = cuMemcpyHtoDAsync(chunk->devmem,
+								chunk->cs_rowmap,
+								chunk->devmem_size,
+								chunk->stream);
+		if (ret != CUDA_SUCCESS)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("Failed to enqueue asynchronous memcpy: %s",
+							cuda_error_to_string(ret))));
+
+		if (pgstrom_exec_profile)
+		{
+			ret = cuEventRecord(chunk->events[1], chunk->stream);
+			if (ret != CUDA_SUCCESS)
+				elog(ERROR, "Failed to enqueue an event: %s",
+					 cuda_error_to_string(ret));
+		}
+
+		/*
+		 * Setup kernel arguments
+		 */
+		kernel_data = alloca((2 + 2 * chunk->nattrs) * sizeof(CUdeviceptr));
+		kernel_args = alloca((2 + 2 * chunk->nattrs) * sizeof(void *));
+		kernel_data[0] = chunk->nitems;
+		kernel_args[0] = &kernel_data[0];
+		kernel_data[1] = chunk->devmem;
+		kernel_args[1] = &kernel_data[1];
+		for (i=0, j=2; i < chunk->nattrs; i++)
+		{
+			if (chunk->cs_values[i] > 0)
+			{
+				kernel_data[j] = chunk->devmem + chunk->cs_values[i];
+				kernel_data[j+1] = chunk->devmem + chunk->cs_nulls[i];
+				Assert(chunk->cs_nulls[i] > 0);
+				kernel_args[j] = &kernel_data[j];
+				kernel_args[j+1] = &kernel_data[j+1];
+				j += 2;
+			}
+		}
+
+		/*
+		 * Launch kernel function
+		 */
+		n_threads = dev_cxt->dev_nthreads;
+		n_blocks = (chunk->nitems + n_threads * BITS_PER_BYTE - 1)
+			/ (BITS_PER_BYTE * n_threads);
+		ret = cuLaunchKernel(dev_cxt->dev_function,
+							 n_blocks, 1, 1,
+							 n_threads, 1, 1,
+							 0,
+							 chunk->stream,
+							 kernel_args,
+							 NULL);
+		if (ret != CUDA_SUCCESS)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("Failed to enqueue kernel execution: %s",
+							cuda_error_to_string(ret))));
+
+		/*
+		 * Write back the result from device to host
+		 */
+		if (pgstrom_exec_profile)
+		{
+			ret = cuEventRecord(chunk->events[2], chunk->stream);
+			if (ret != CUDA_SUCCESS)
+				elog(ERROR, "Failed to enqueue an event: %s",
+					 cuda_error_to_string(ret));
+		}
+
+		ret = cuMemcpyDtoHAsync(chunk->cs_rowmap,
+								chunk->devmem,
+								chunk->nitems / BITS_PER_BYTE,
+								chunk->stream);
+		if (ret != CUDA_SUCCESS)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("Failed to enqueue asynchronous memcpy: %s",
+							cuda_error_to_string(ret))));
+
+		if (pgstrom_exec_profile)
+		{
+			ret = cuEventRecord(chunk->events[3], chunk->stream);
+			if (ret != CUDA_SUCCESS)
+				elog(ERROR, "Failed to enqueue an event: %s",
+					 cuda_error_to_string(ret));
 		}
 	}
-	/*
-	 * Launch kernel function
-	 */
-	n_threads = dev_cxt->dev_nthreads;
-	n_blocks = (chunk->nitems + n_threads * BITS_PER_BYTE - 1)
-		/ (BITS_PER_BYTE * n_threads);
-	ret = cuLaunchKernel(dev_cxt->dev_function,
-						 n_blocks, 1, 1,
-						 n_threads, 1, 1,
-						 0,
-						 chunk->stream,
-						 kernel_args,
-						 NULL);
-	if (ret != CUDA_SUCCESS)
+	PG_CATCH();
 	{
-		cuStreamSynchronize(chunk->stream);
-		cuStreamDestroy(chunk->stream);
-		cuMemFreeHost(chunk->cs_rowmap);
-		cuMemFree(chunk->devmem);
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("Failed to enqueue kernel execution: %s",
-						cuda_error_to_string(ret))));
-	}
+		int		i;
 
-	/*
-	 * Writing back results bitmap
-	 */
-	ret = cuMemcpyDtoHAsync(chunk->cs_rowmap,
-							chunk->devmem,
-							chunk->nitems / BITS_PER_BYTE,
-							chunk->stream);
-	if (ret != CUDA_SUCCESS)
-	{
-		cuStreamSynchronize(chunk->stream);
-		cuStreamDestroy(chunk->stream);
+		if (chunk->stream)
+		{
+			cuStreamSynchronize(chunk->stream);
+			cuStreamDestroy(chunk->stream);
+		}
+		for (i = 0; i < lengthof(chunk->events); i++)
+		{
+			if (chunk->events[i])
+				cuEventDestroy(chunk->events[i]);
+		}
+		if (chunk->devmem)
+			cuMemFree(chunk->devmem);
 		cuMemFreeHost(chunk->cs_rowmap);
-		cuMemFree(chunk->devmem);
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("Failed to enqueue asynchronous memcpy: %s",
-						cuda_error_to_string(ret))));
+
+		PG_RE_THROW();
 	}
+	PG_END_TRY();
 }
 
 static void
@@ -308,6 +376,40 @@ retry:
 
 			sestate->chunk_exec_list
 				= list_delete_cell(sestate->chunk_exec_list, cell, prev);
+
+			if (pgstrom_exec_profile)
+			{
+				float	elapsed;
+
+				Assert(chunk->events[0] != NULL &&
+					   chunk->events[1] != NULL &&
+					   chunk->events[2] != NULL &&
+					   chunk->events[3] != NULL);
+
+				ret = cuEventElapsedTime(&elapsed,
+										 chunk->events[0],
+										 chunk->events[1]);
+				if (ret != CUDA_SUCCESS)
+					elog(ERROR, "Failed to get elapsed time: %s",
+						 cuda_error_to_string(ret));
+				sestate->pf_async_memcpy += (uint64)(elapsed * 1000.0);
+
+				ret = cuEventElapsedTime(&elapsed,
+										 chunk->events[1],
+										 chunk->events[2]);
+				if (ret != CUDA_SUCCESS)
+					elog(ERROR, "Failed to get elapsed time: %s",
+						 cuda_error_to_string(ret));
+				sestate->pf_async_kernel += (uint64)(elapsed * 1000.0);
+
+				ret = cuEventElapsedTime(&elapsed,
+										 chunk->events[2],
+										 chunk->events[3]);
+				if (ret != CUDA_SUCCESS)
+					elog(ERROR, "Failed to get elapsed time: %s",
+						 cuda_error_to_string(ret));
+				sestate->pf_async_memcpy += (uint64)(elapsed * 1000.0);
+			}
 			oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 			sestate->chunk_ready_list
 				= lappend(sestate->chunk_ready_list, chunk);
@@ -329,8 +431,19 @@ retry:
 
 	if (sestate->chunk_ready_list == NIL)
 	{
+		struct timeval tv1, tv2;
+
 		Assert(first_stream != NULL);
+		if (pgstrom_exec_profile)
+			gettimeofday(&tv1, NULL);
+
 		cuStreamSynchronize(first_stream);
+
+		if (pgstrom_exec_profile)
+		{
+			gettimeofday(&tv2, NULL);
+			sestate->pf_synchronization += TIMEVAL_ELAPSED(&tv1, &tv2);
+		}
 		goto retry;
 	}
 }
@@ -457,6 +570,10 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 		uint32		nitems;
 		MemoryContext oldcxt;
 		PgStromChunkBuf	*chunk;
+		struct timeval tv1, tv2;
+
+		if (pgstrom_exec_profile)
+			gettimeofday(&tv1, NULL);
 
 		tuple = heap_getnext(sestate->id_scan, ForwardScanDirection);
 		if (!HeapTupleIsValid(tuple))
@@ -547,6 +664,12 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 				pgstrom_load_column_store(sestate, chunk, csidx);
 			bms_free(temp);
 
+			if (pgstrom_exec_profile)
+			{
+				gettimeofday(&tv2, NULL);
+				sestate->pf_load_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
+			}
+
 			/*
 			 * Asynchronous execution of kernel code on this chunk
 			 */
@@ -572,6 +695,11 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
 			deconstruct_cs_bytea(chunk->cs_rowmap,
 								 values[Anum_pg_strom_isnull - 1],
 								 chunk->nitems / BITS_PER_BYTE);
+			if (pgstrom_exec_profile)
+			{
+				gettimeofday(&tv2, NULL);
+				sestate->pf_load_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
+			}
 			sestate->chunk_ready_list
 				= lappend(sestate->chunk_ready_list, chunk);
 			MemoryContextSwitchTo(oldcxt);
@@ -791,6 +919,8 @@ pgstrom_scan_chunk_buffer(PgStromExecState *sestate, TupleTableSlot *slot)
 		rowid = chunk->rowid + index;
 		for (csidx=0; csidx < chunk->nattrs; csidx++)
 		{
+			struct timeval	tv1, tv2;
+
 			/*
 			 * No need to back actual value of unreferenced column.
 			 */
@@ -830,7 +960,16 @@ pgstrom_scan_chunk_buffer(PgStromExecState *sestate, TupleTableSlot *slot)
 			 * Elsewhere, we scan the column-store with the current
 			 * rowid.
 			 */
+			if (pgstrom_exec_profile)
+				gettimeofday(&tv1, NULL);
+
 			pgstrom_scan_column_store(sestate, csidx, rowid, slot);
+
+			if (pgstrom_exec_profile)
+			{
+				gettimeofday(&tv2, NULL);
+				sestate->pf_load_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
+			}
 		}
 		ExecStoreVirtualTuple(slot);
 		/* update next index to be fetched */
@@ -1107,11 +1246,19 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 		int		const_nums = 0;
 		int		dev_index;
 		int		dev_nums;
+		struct timeval tv1, tv2;
 
 		/*
 		 * Build the kernel source code
 		 */
+		if (pgstrom_exec_profile)
+			gettimeofday(&tv1, NULL);
 		image = pgstrom_nvcc_kernel_build(kernel_source);
+		if (pgstrom_exec_profile)
+		{
+			gettimeofday(&tv2, NULL);
+			sestate->pf_jit_compile += TIMEVAL_ELAPSED(&tv1, &tv2);
+		}
 
 		/*
 		 * Set up constant values, if exist
@@ -1138,6 +1285,9 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 		/*
 		 * Set up device execution schedule
 		 */
+		if (pgstrom_exec_profile)
+			gettimeofday(&tv1, NULL);
+
 		dev_nums = pgstrom_get_num_devices();
 
 		oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
@@ -1150,9 +1300,13 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 		}
 		MemoryContextSwitchTo(oldcxt);
 
+		if (pgstrom_exec_profile)
+		{
+			gettimeofday(&tv2, NULL);
+            sestate->pf_device_init += TIMEVAL_ELAPSED(&tv1, &tv2);
+        }
 		sestate->dev_curr = NULL;
 	}
-
 	return sestate;
 }
 
@@ -1163,12 +1317,16 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 	PgStromExecState   *sestate;
 	Bitmapset		   *tempset;
 	AttrNumber			attnum;
+	struct timeval		tv1, tv2;
 
 	/*
 	 * Do nothing for EXPLAIN or ANALYZE cases
 	 */
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return;
+
+	if (pgstrom_exec_profile)
+		gettimeofday(&tv1, NULL);
 
 	sestate = pgstrom_init_exec_state(fss);
 
@@ -1224,6 +1382,12 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 	bms_free(tempset);
 
 	fss->fdw_state = sestate;
+
+	if (pgstrom_exec_profile)
+	{
+		gettimeofday(&tv2, NULL);
+		sestate->pf_pgstrom_total += TIMEVAL_ELAPSED(&tv1, &tv2);
+	}
 }
 
 TupleTableSlot*
@@ -1232,10 +1396,14 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 	PgStromExecState   *sestate = (PgStromExecState *)fss->fdw_state;
 	TupleTableSlot	   *slot = fss->ss.ss_ScanTupleSlot;
 	int					num_chunks;
+	struct timeval		tv1, tv2;
+
+	if (pgstrom_exec_profile)
+		gettimeofday(&tv1, NULL);
 
 	ExecClearTuple(slot);
 	if (sestate->nevermatch)
-		return slot;
+		goto out;
 
 	/* Is it the first call? */
 	if (sestate->curr_chunk == NULL)
@@ -1244,7 +1412,7 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 					  list_length(sestate->chunk_exec_list));
 
 		if (pgstrom_load_chunk_buffer(sestate, num_chunks) < 1)
-			return slot;
+			goto out;
 
 		pgstrom_sync_kernel_exec(sestate);
 		/*
@@ -1281,7 +1449,7 @@ retry:
 			if (sestate->chunk_ready_list == NIL)
 			{
 				if (num_chunks < 1)
-					return slot;
+					goto out;
 				else
 					pgstrom_sync_kernel_exec(sestate);
 			}
@@ -1291,6 +1459,12 @@ retry:
 		sestate->curr_index = 0;
 		goto retry;
 	}
+out:
+	if (pgstrom_exec_profile)
+	{
+		gettimeofday(&tv2, NULL);
+		sestate->pf_pgstrom_total += TIMEVAL_ELAPSED(&tv1, &tv2);
+	}
 	return slot;
 }
 
@@ -1299,6 +1473,10 @@ pgstrom_rescan_foreign_scan(ForeignScanState *fss)
 {
 	PgStromExecState   *sestate = (PgStromExecState *)fss->fdw_state;
 	ListCell		   *cell;
+	struct timeval		tv1, tv2;
+
+	if (pgstrom_exec_profile)
+		gettimeofday(&tv1, NULL);
 
 	/*
 	 * Rewind rowid scan
@@ -1324,6 +1502,12 @@ pgstrom_rescan_foreign_scan(ForeignScanState *fss)
 	 */
 	sestate->curr_chunk = NULL;
 	sestate->curr_index = 0;
+
+	if (pgstrom_exec_profile)
+	{
+		gettimeofday(&tv2, NULL);
+		sestate->pf_pgstrom_total += TIMEVAL_ELAPSED(&tv1, &tv2);
+	}
 }
 
 void
@@ -1331,10 +1515,14 @@ pgstrom_end_foreign_scan(ForeignScanState *fss)
 {
 	PgStromExecState   *sestate = (PgStromExecState *)fss->fdw_state;
 	int					nattrs, i;
+	struct timeval		tv1, tv2;
 
 	/* if sestate is NULL, we are in EXPLAIN; nothing to do */
 	if (!sestate)
 		return;
+
+	if (pgstrom_exec_profile)
+		gettimeofday(&tv1, NULL);
 
 	/*
 	 * End the rowid scan
@@ -1356,6 +1544,27 @@ pgstrom_end_foreign_scan(ForeignScanState *fss)
 			relation_close(sestate->cs_idxs[i], AccessShareLock);
 	}
 	relation_close(sestate->id_rel, AccessShareLock);
+
+	if (pgstrom_exec_profile)
+	{
+		gettimeofday(&tv2, NULL);
+		sestate->pf_pgstrom_total += TIMEVAL_ELAPSED(&tv1, &tv2);
+
+		elog(INFO, "Total PG-Strom consumed time: %.3f ms",
+			 ((double)sestate->pf_pgstrom_total) / 1000.0);
+		elog(INFO, "Time to JIT GPU comple:       %.3f ms",
+			 ((double)sestate->pf_jit_compile) / 1000.0);
+		elog(INFO, "Time to initialize devices:   %.3f ms",
+			 ((double)sestate->pf_device_init) / 1000.0);
+		elog(INFO, "Time of Async memcpy:         %.3f ms",
+			 ((double)sestate->pf_async_memcpy) / 1000.0);
+		elog(INFO, "Time of Async kernel exec:    %.3f ms",
+			 ((double)sestate->pf_async_kernel) / 1000.0);
+		elog(INFO, "Time of GPU Synchronization:  %.3f ms",
+			 ((double)sestate->pf_synchronization) / 1000.0);
+		elog(INFO, "Time of Load column-stores:   %.3f ms",
+			 ((double)sestate->pf_load_chunk) / 1000.0);
+	}
 	pgstrom_release_exec_state(sestate);
 }
 
@@ -1388,4 +1597,12 @@ pgstrom_scan_init(void)
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);
+	DefineCustomBoolVariable("pg_strom.exec_profile",
+							 "print execution profile information",
+							 NULL,
+							 &pgstrom_exec_profile,
+							 false,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
 }
