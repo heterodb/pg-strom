@@ -1550,6 +1550,8 @@ pgstrom_end_foreign_scan(ForeignScanState *fss)
 		gettimeofday(&tv2, NULL);
 		sestate->pf_pgstrom_total += TIMEVAL_ELAPSED(&tv1, &tv2);
 
+		elog(INFO, "PG-Strom Exec Profile on \"%s\"",
+			 RelationGetRelationName(sestate->es_relation));
 		elog(INFO, "Total PG-Strom consumed time: %.3f ms",
 			 ((double)sestate->pf_pgstrom_total) / 1000.0);
 		elog(INFO, "Time to JIT GPU comple:       %.3f ms",
