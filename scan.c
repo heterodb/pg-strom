@@ -110,6 +110,8 @@ typedef struct {
 static MemoryContext	pgstrom_scan_memcxt;
 static List	   *pgstrom_exec_state_list = NIL;
 static int		pgstrom_max_async_chunks;
+static int		pgstrom_min_async_chunks;
+static int		pgstrom_num_burst_chunks;
 static bool		pgstrom_exec_profile;
 
 static void
@@ -349,8 +351,8 @@ pgstrom_exec_kernel_qual(PgStromDevContext *dev_cxt, PgStromChunkBuf *chunk)
 	PG_END_TRY();
 }
 
-static void
-pgstrom_sync_kernel_exec(PgStromExecState *sestate)
+static int
+pgstrom_sync_kernel_exec(PgStromExecState *sestate, bool blocking)
 {
 	ListCell   *cell;
 	ListCell   *next;
@@ -359,7 +361,7 @@ pgstrom_sync_kernel_exec(PgStromExecState *sestate)
 	CUresult	ret;
 
 	if (sestate->chunk_exec_list == NIL)
-		return;
+		return list_length(sestate->chunk_ready_list);
 
 retry:
 	prev = NULL;
@@ -374,8 +376,12 @@ retry:
 		{
 			MemoryContext	oldcxt;
 
+			oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 			sestate->chunk_exec_list
 				= list_delete_cell(sestate->chunk_exec_list, cell, prev);
+			sestate->chunk_ready_list
+				= lappend(sestate->chunk_ready_list, chunk);
+			MemoryContextSwitchTo(oldcxt);
 
 			if (pgstrom_exec_profile)
 			{
@@ -410,10 +416,6 @@ retry:
 						 cuda_error_to_string(ret));
 				sestate->pf_async_memcpy += (uint64)(elapsed * 1000.0);
 			}
-			oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
-			sestate->chunk_ready_list
-				= lappend(sestate->chunk_ready_list, chunk);
-			MemoryContextSwitchTo(oldcxt);
 		}
 		else if (ret == CUDA_ERROR_NOT_READY)
 		{
@@ -429,7 +431,7 @@ retry:
 		}
 	}
 
-	if (sestate->chunk_ready_list == NIL)
+	if (blocking && sestate->chunk_ready_list == NIL)
 	{
 		struct timeval tv1, tv2;
 
@@ -446,6 +448,7 @@ retry:
 		}
 		goto retry;
 	}
+	return list_length(sestate->chunk_ready_list);
 }
 
 static void
@@ -552,160 +555,160 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 	}
 }
 
-static int
-pgstrom_load_chunk_buffer(PgStromExecState *sestate, int num_chunks)
+static bool
+pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 {
-	int		loaded_chunks;
+	TupleDesc	tupdesc;
+	HeapTuple	tuple;
+	Datum		values[Natts_pg_strom];
+	bool		isnull[Natts_pg_strom];
+	int64		rowid;
+	uint32		nitems;
+	MemoryContext oldcxt;
+	PgStromChunkBuf	*chunk;
+	struct timeval tv1, tv2;
 
 	if (sestate->id_scan == NULL)
-		return -1;
+		return false;
 
-	for (loaded_chunks = 0; loaded_chunks < num_chunks; loaded_chunks++)
+	if (pgstrom_exec_profile)
+		gettimeofday(&tv1, NULL);
+
+	tuple = heap_getnext(sestate->id_scan, ForwardScanDirection);
+
+	/* If no chunks remained, close the sequential rowid scan */
+	if (!HeapTupleIsValid(tuple))
 	{
-		TupleDesc	tupdesc;
-		HeapTuple	tuple;
-		Datum		values[Natts_pg_strom];
-		bool		isnull[Natts_pg_strom];
-		int64		rowid;
-		uint32		nitems;
-		MemoryContext oldcxt;
-		PgStromChunkBuf	*chunk;
-		struct timeval tv1, tv2;
+		heap_endscan(sestate->id_scan);
+		sestate->id_scan = NULL;
+		if (pgstrom_exec_profile)
+		{
+			gettimeofday(&tv2, NULL);
+			sestate->pf_load_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
+		}
+		return false;
+	}
+	tupdesc = RelationGetDescr(sestate->id_rel);
+	heap_deform_tuple(tuple, tupdesc, values, isnull);
+	Assert(!isnull[Anum_pg_strom_rowid - 1] &&
+		   !isnull[Anum_pg_strom_nitems - 1] &&
+		   !isnull[Anum_pg_strom_isnull - 1]);
+
+	rowid = DatumGetInt64(values[Anum_pg_strom_rowid - 1]);
+	nitems = DatumGetUInt32(values[Anum_pg_strom_nitems - 1]);
+
+	oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
+	chunk = palloc0(sizeof(PgStromChunkBuf));
+	chunk->rowid = rowid;
+	chunk->nattrs = RelationGetNumberOfAttributes(sestate->es_relation);
+	chunk->nitems = nitems;
+	chunk->cs_nulls = palloc0(sizeof(int) * chunk->nattrs);
+	chunk->cs_values = palloc0(sizeof(int) * chunk->nattrs);
+	MemoryContextSwitchTo(oldcxt);
+	Assert(chunk->nitems % BITS_PER_BYTE == 0);
+
+	if (sestate->dev_list != NIL)
+	{
+		PgStromDevContext *dev_cxt;
+		Bitmapset  *temp;
+		AttrNumber	csidx;
+		uint16		attlen;
+		char	   *dma_buffer;
+		size_t		dma_offset;
+		CUresult	ret;
+
+		/*
+		 * Switch to the next GPU device to be used
+		 */
+		do {
+			if (!sestate->dev_curr)
+				sestate->dev_curr = list_head(sestate->dev_list);
+			else
+				sestate->dev_curr = lnext(sestate->dev_curr);
+		} while (!sestate->dev_curr);
+		dev_cxt = lfirst(sestate->dev_curr);
+		pgstrom_set_device_context(dev_cxt->dev_index);
+
+		/*
+		 * Compute and allocate required size of column store
+		 */
+		dma_offset = (chunk->nitems / BITS_PER_BYTE);
+
+		tupdesc = RelationGetDescr(sestate->es_relation);
+		temp = bms_copy(sestate->clause_cols);
+		while ((csidx = (bms_first_member(temp)-1)) >= 0)
+		{
+			attlen = tupdesc->attrs[csidx]->attlen;
+			Assert(attlen > 0);
+
+			chunk->cs_values[csidx] = dma_offset;
+			dma_offset += chunk->nitems * attlen;
+			chunk->cs_nulls[csidx] = dma_offset;
+			dma_offset += chunk->nitems / BITS_PER_BYTE;
+		}
+		bms_free(temp);
+		ret = cuMemAllocHost((void **)&dma_buffer, dma_offset);
+		if (ret != CUDA_SUCCESS)
+			ereport(ERROR,
+					(errcode(ERRCODE_OUT_OF_MEMORY),
+					 errmsg("cuda: failed to page-locked memory : %s",
+							cuda_error_to_string(ret))));
+		chunk->devmem_size = dma_offset;
+
+		/*
+		 * Load necessary column store
+		 */
+		chunk->cs_rowmap = (uint8 *)dma_buffer;
+		deconstruct_cs_bytea(chunk->cs_rowmap,
+							 values[Anum_pg_strom_isnull - 1],
+							 chunk->nitems / BITS_PER_BYTE);
+
+		temp = bms_copy(sestate->clause_cols);
+		while ((csidx = (bms_first_member(temp)-1)) >= 0)
+			pgstrom_load_column_store(sestate, chunk, csidx);
+		bms_free(temp);
 
 		if (pgstrom_exec_profile)
-			gettimeofday(&tv1, NULL);
-
-		tuple = heap_getnext(sestate->id_scan, ForwardScanDirection);
-		if (!HeapTupleIsValid(tuple))
 		{
-			/* No any tuples, close the sequential rowid scan */
-			heap_endscan(sestate->id_scan);
-			sestate->id_scan = NULL;
-			break;
+			gettimeofday(&tv2, NULL);
+			sestate->pf_load_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
 		}
 
-		tupdesc = RelationGetDescr(sestate->id_rel);
-		heap_deform_tuple(tuple, tupdesc, values, isnull);
-		Assert(!isnull[Anum_pg_strom_rowid - 1] &&
-			   !isnull[Anum_pg_strom_nitems - 1] &&
-			   !isnull[Anum_pg_strom_isnull - 1]);
+		/*
+		 * Asynchronous execution of kernel code on this chunk
+		 */
+		pgstrom_exec_kernel_qual(dev_cxt, chunk);
 
-		rowid = DatumGetInt64(values[Anum_pg_strom_rowid - 1]);
-		nitems = DatumGetUInt32(values[Anum_pg_strom_nitems - 1]);
-
+		/*
+		 * XXX - Do we need to pay attention of the case when
+		 * lappend raises an error?
+		 */
 		oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
-		chunk = palloc0(sizeof(PgStromChunkBuf));
-		chunk->rowid = rowid;
-		chunk->nattrs = RelationGetNumberOfAttributes(sestate->es_relation);
-		chunk->nitems = nitems;
-		chunk->cs_nulls = palloc0(sizeof(int) * chunk->nattrs);
-		chunk->cs_values = palloc0(sizeof(int) * chunk->nattrs);
+		sestate->chunk_exec_list
+			= lappend(sestate->chunk_exec_list, chunk);
 		MemoryContextSwitchTo(oldcxt);
-		Assert(chunk->nitems % BITS_PER_BYTE == 0);
-
-		if (sestate->dev_list != NIL)
-		{
-			PgStromDevContext *dev_cxt;
-			Bitmapset  *temp;
-			AttrNumber	csidx;
-			uint16		attlen;
-			char	   *dma_buffer;
-			size_t		dma_offset;
-			CUresult	ret;
-
-			/*
-			 * Switch to the next GPU device to be used
-			 */
-			do {
-				if (!sestate->dev_curr)
-					sestate->dev_curr = list_head(sestate->dev_list);
-				else
-					sestate->dev_curr = lnext(sestate->dev_curr);
-			} while (!sestate->dev_curr);
-			dev_cxt = lfirst(sestate->dev_curr);
-			pgstrom_set_device_context(dev_cxt->dev_index);
-
-			/*
-			 * Compute and allocate required size of column store
-			 */
-			dma_offset = (chunk->nitems / BITS_PER_BYTE);
-
-			tupdesc = RelationGetDescr(sestate->es_relation);
-			temp = bms_copy(sestate->clause_cols);
-			while ((csidx = (bms_first_member(temp)-1)) >= 0)
-			{
-				attlen = tupdesc->attrs[csidx]->attlen;
-				Assert(attlen > 0);
-
-				chunk->cs_values[csidx] = dma_offset;
-				dma_offset += chunk->nitems * attlen;
-				chunk->cs_nulls[csidx] = dma_offset;
-				dma_offset += chunk->nitems / BITS_PER_BYTE;
-			}
-			bms_free(temp);
-			ret = cuMemAllocHost((void **)&dma_buffer, dma_offset);
-			if (ret != CUDA_SUCCESS)
-				ereport(ERROR,
-						(errcode(ERRCODE_OUT_OF_MEMORY),
-						 errmsg("cuda: failed to page-locked memory : %s",
-								cuda_error_to_string(ret))));
-			chunk->devmem_size = dma_offset;
-
-			/*
-			 * Load necessary column store
-			 */
-			chunk->cs_rowmap = (uint8 *)dma_buffer;
-			deconstruct_cs_bytea(chunk->cs_rowmap,
-								 values[Anum_pg_strom_isnull - 1],
-								 chunk->nitems / BITS_PER_BYTE);
-
-			temp = bms_copy(sestate->clause_cols);
-			while ((csidx = (bms_first_member(temp)-1)) >= 0)
-				pgstrom_load_column_store(sestate, chunk, csidx);
-			bms_free(temp);
-
-			if (pgstrom_exec_profile)
-			{
-				gettimeofday(&tv2, NULL);
-				sestate->pf_load_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
-			}
-
-			/*
-			 * Asynchronous execution of kernel code on this chunk
-			 */
-			pgstrom_exec_kernel_qual(dev_cxt, chunk);
-
-			/*
-			 * XXX - Do we need to pay attention of the case when
-			 * lappend raises an error?
-			 */
-			oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
-			sestate->chunk_exec_list
-				= lappend(sestate->chunk_exec_list, chunk);
-			MemoryContextSwitchTo(oldcxt);
-		}
-		else
-		{
-			/*
-			 * In case of the supplied plan without no qualifiers,
-			 * all the chunks are ready to scan using rowid.
-			 */
-			oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
-			chunk->cs_rowmap = palloc0(chunk->nitems / BITS_PER_BYTE);
-			deconstruct_cs_bytea(chunk->cs_rowmap,
-								 values[Anum_pg_strom_isnull - 1],
-								 chunk->nitems / BITS_PER_BYTE);
-			if (pgstrom_exec_profile)
-			{
-				gettimeofday(&tv2, NULL);
-				sestate->pf_load_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
-			}
-			sestate->chunk_ready_list
-				= lappend(sestate->chunk_ready_list, chunk);
-			MemoryContextSwitchTo(oldcxt);
-		}
 	}
-	return loaded_chunks;
+	else
+	{
+		/*
+		 * In case of the supplied plan without no qualifiers,
+		 * all the chunks are ready to scan using rowid.
+		 */
+		oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
+		chunk->cs_rowmap = palloc0(chunk->nitems / BITS_PER_BYTE);
+		deconstruct_cs_bytea(chunk->cs_rowmap,
+							 values[Anum_pg_strom_isnull - 1],
+							 chunk->nitems / BITS_PER_BYTE);
+		if (pgstrom_exec_profile)
+		{
+			gettimeofday(&tv2, NULL);
+			sestate->pf_load_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
+		}
+		sestate->chunk_ready_list
+			= lappend(sestate->chunk_ready_list, chunk);
+		MemoryContextSwitchTo(oldcxt);
+	}
+	return true;
 }
 
 static void
@@ -1395,8 +1398,10 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 {
 	PgStromExecState   *sestate = (PgStromExecState *)fss->fdw_state;
 	TupleTableSlot	   *slot = fss->ss.ss_ScanTupleSlot;
-	int					num_chunks;
 	struct timeval		tv1, tv2;
+	int		num_loaded;
+	int		max_loaded;
+	int		cur_loaded;
 
 	if (pgstrom_exec_profile)
 		gettimeofday(&tv1, NULL);
@@ -1408,22 +1413,40 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 	/* Is it the first call? */
 	if (sestate->curr_chunk == NULL)
 	{
-		num_chunks = (pgstrom_max_async_chunks -
-					  list_length(sestate->chunk_exec_list));
+		max_loaded = (pgstrom_max_async_chunks
+					  - list_length(sestate->chunk_ready_list)
+					  - list_length(sestate->chunk_exec_list));
+		for (num_loaded = 0; num_loaded < max_loaded; num_loaded++)
+		{
+			if (!pgstrom_load_chunk_buffer(sestate))
+				break;
 
-		if (pgstrom_load_chunk_buffer(sestate, num_chunks) < 1)
-			goto out;
+			/*
+			 * XXX - In case of num of chunks being in-exec overs
+			 * pg_strom.min_async_chunks, we checks whether any chunks
+			 * being completed, or not. If one chunks are getting ready.
+			 * we break the data load soon.
+			 */
+			cur_loaded = list_length(sestate->chunk_exec_list);
+			if (cur_loaded >= pgstrom_min_async_chunks &&
+				pgstrom_sync_kernel_exec(sestate, false) > 0)
+				break;
+		}
 
-		pgstrom_sync_kernel_exec(sestate);
-		/*
-		 * XXX - at least one chunk should be synchronized.
-		 */
+		if (list_length(sestate->chunk_ready_list) == 0)
+		{
+			if (list_length(sestate->chunk_exec_list) == 0)
+				goto out;
+
+			cur_loaded = pgstrom_sync_kernel_exec(sestate, true);
+			Assert(cur_loaded > 0);
+		}
 		Assert(sestate->chunk_ready_list != NIL);
 		sestate->curr_chunk = list_head(sestate->chunk_ready_list);
 		sestate->curr_index = 0;
 	}
-retry:
-	if (!pgstrom_scan_chunk_buffer(sestate, slot))
+
+	while (!pgstrom_scan_chunk_buffer(sestate, slot))
 	{
 		PgStromChunkBuf	*chunk = lfirst(sestate->curr_chunk);
 
@@ -1435,29 +1458,53 @@ retry:
 		pgstrom_release_chunk_buffer(sestate, chunk);
 
 		/*
-		 * Is the concurrent chunks ready now?
+		 * Any chunks being ready now?
 		 */
-		pgstrom_sync_kernel_exec(sestate);
-
-		if (list_length(sestate->chunk_ready_list) +
-			list_length(sestate->chunk_exec_list) < pgstrom_max_async_chunks)
+		if (pgstrom_sync_kernel_exec(sestate, false) > 0)
 		{
-			num_chunks = (pgstrom_max_async_chunks -
-						  list_length(sestate->chunk_exec_list));
-			num_chunks = pgstrom_load_chunk_buffer(sestate, num_chunks);
+			sestate->curr_chunk = list_head(sestate->chunk_ready_list);
+			sestate->curr_index = 0;
 
-			if (sestate->chunk_ready_list == NIL)
+			/*
+			 * Try to keep # of exec chunk > pgstrom_min_async_chunks
+			 */
+			max_loaded = (pgstrom_max_async_chunks
+						  - list_length(sestate->chunk_ready_list)
+						  - list_length(sestate->chunk_exec_list));
+			for (num_loaded = 0; num_loaded < max_loaded; num_loaded++)
 			{
-				if (num_chunks < 1)
-					goto out;
-				else
-					pgstrom_sync_kernel_exec(sestate);
+				cur_loaded = list_length(sestate->chunk_exec_list);
+				if (cur_loaded > pgstrom_min_async_chunks)
+					break;
+				if (!pgstrom_load_chunk_buffer(sestate))
+					break;
 			}
 		}
-		Assert(sestate->chunk_ready_list != NIL);
-		sestate->curr_chunk = list_head(sestate->chunk_ready_list);
-		sestate->curr_index = 0;
-		goto retry;
+		else
+		{
+			/*
+			 * If no chunks are ready now, we have to wait for completion
+			 * of one of chunks being under execution.
+			 */
+			while (pgstrom_sync_kernel_exec(sestate, true) == 0)
+			{
+				/*
+				 * If no ready chunks alhought blocking synchronization,
+				 * we try to load the next chunks then wait for them.
+				 */
+				do {
+					/*
+					 * If no more chunks, we reached end of table.
+					 */
+					if (!pgstrom_load_chunk_buffer(sestate))
+						goto out;
+					cur_loaded = list_length(sestate->chunk_exec_list);
+				} while (cur_loaded < pgstrom_min_async_chunks);
+			}
+			Assert(sestate->chunk_ready_list != NIL);
+			sestate->curr_chunk = list_head(sestate->chunk_ready_list);
+			sestate->curr_index = 0;
+		}
 	}
 out:
 	if (pgstrom_exec_profile)
@@ -1590,12 +1637,32 @@ pgstrom_scan_init(void)
 	RegisterResourceReleaseCallback(pgstrom_release_resources, NULL);
 
 	DefineCustomIntVariable("pg_strom.max_async_chunks",
-							"max number of concurrency to exec async kernels",
+							"max number of concurrent chunks being asynchronously executed",
 							NULL,
 							&pgstrom_max_async_chunks,
-							32,
+							3 * pgstrom_get_num_devices(),
 							1,
 							1024,
+							PGC_USERSET,
+							0,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("pg_strom.min_async_chunks",
+							"min number of chunks being kept in async exec",
+							NULL,
+							&pgstrom_min_async_chunks,
+							pgstrom_get_num_devices(),
+							1,
+							1024,
+							PGC_USERSET,
+							0,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("pg_strom.num_burst_chunks",
+							"number of chunks being processed together",
+							NULL,
+							&pgstrom_num_burst_chunks,
+							1,
+							1,
+							64,
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);
