@@ -75,6 +75,7 @@ typedef struct {
 	/* scan descriptors */
 	HeapScanDesc	id_scan;		/* scan on rowid map */
 	IndexScanDesc  *cs_scan;		/* scan on column store */
+	HeapTuple		id_tup;			/* prefetched rowid tuple, if exist */
 	bytea		  **cs_cur_isnull;
 	bytea		  **cs_cur_values;
 	int64		   *cs_cur_rowid_min;
@@ -634,6 +635,8 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 	bool		isnull[Natts_pg_strom];
 	int64		rowid;
 	uint32		nitems;
+	bytea	  **rowmaps;
+	uint32	   *rowofs;
 	MemoryContext oldcxt;
 	PgStromChunkBuf	*chunk;
 	struct timeval tv1, tv2;
@@ -644,19 +647,27 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 	if (pgstrom_exec_profile)
 		gettimeofday(&tv1, NULL);
 
-	tuple = heap_getnext(sestate->id_scan, ForwardScanDirection);
-
-	/* If no chunks remained, close the sequential rowid scan */
-	if (!HeapTupleIsValid(tuple))
+	if (HeapTupleIsValid(sestate->id_tup))
 	{
-		heap_endscan(sestate->id_scan);
-		sestate->id_scan = NULL;
-		if (pgstrom_exec_profile)
+		tuple = sestate->id_tup;
+		sestate->id_tup = NULL;
+	}
+	else
+	{
+		tuple = heap_getnext(sestate->id_scan, ForwardScanDirection);
+
+		/* If no chunks to read, close the sequential rowid scan */
+		if (!HeapTupleIsValid(tuple))
 		{
-			gettimeofday(&tv2, NULL);
-			sestate->pf_load_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
+			heap_endscan(sestate->id_scan);
+			sestate->id_scan = NULL;
+			if (pgstrom_exec_profile)
+			{
+				gettimeofday(&tv2, NULL);
+				sestate->pf_load_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
+			}
+			return false;
 		}
-		return false;
 	}
 	tupdesc = RelationGetDescr(sestate->id_rel);
 	heap_deform_tuple(tuple, tupdesc, values, isnull);
@@ -666,6 +677,10 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 
 	rowid = DatumGetInt64(values[Anum_pg_strom_rowid - 1]);
 	nitems = DatumGetUInt32(values[Anum_pg_strom_nitems - 1]);
+	rowmaps = alloca(sizeof(bytea *) * pgstrom_num_burst_chunks);
+	rowmaps[0] = DatumGetByteaPCopy(values[Anum_pg_strom_isnull - 1]);
+	rowofs = alloca(sizeof(uint32) * pgstrom_num_burst_chunks);
+	rowofs[0] = 0;
 
 	oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 	chunk = palloc0(sizeof(PgStromChunkBuf));
@@ -686,6 +701,7 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 		char	   *dma_buffer;
 		size_t		dma_offset;
 		CUresult	ret;
+		int			idx, num_burst_chunks;
 
 		/*
 		 * Switch to the next GPU device to be used
@@ -698,6 +714,54 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 		} while (!sestate->dev_curr);
 		dev_cxt = lfirst(sestate->dev_curr);
 		pgstrom_set_device_context(dev_cxt->dev_index);
+
+		/*
+		 * We try adaptive readahead according to pgstrom_num_burst_chunks.
+		 * If we have multiple chunks with continuous rowid, these should
+		 * be transfered to GPU device at once.
+		 */
+		for (num_burst_chunks = 1;
+			 num_burst_chunks < pgstrom_num_burst_chunks;
+			 num_burst_chunks++)
+		{
+			tuple = heap_getnext(sestate->id_scan, ForwardScanDirection);
+			/*
+			 * If we reached the end of table, of course, it is unavailable
+			 * to merge unexist ones as burst chunks, so, we break this
+			 * burst scan here. And, also close the sequential rowid scan.
+			 */
+			if (!HeapTupleIsValid(tuple))
+			{
+				heap_endscan(sestate->id_scan);
+				sestate->id_scan = NULL;
+				break;
+			}
+			tupdesc = RelationGetDescr(sestate->id_rel);
+			heap_deform_tuple(tuple, tupdesc, values, isnull);
+			Assert(!isnull[Anum_pg_strom_rowid - 1] &&
+				   !isnull[Anum_pg_strom_nitems - 1] &&
+				   !isnull[Anum_pg_strom_isnull - 1]);
+
+			/*
+			 * If the next chunk does not have continuous rowid, it is
+			 * unavailable to merge as a burst chunk, so, the fetched
+			 * tuple is cached, and only previous ones are merged.
+			 */
+			rowid = DatumGetInt64(values[Anum_pg_strom_rowid - 1]);
+			nitems = DatumGetUInt32(values[Anum_pg_strom_nitems - 1]);
+			if (chunk->rowid + chunk->nitems != rowid)
+			{
+				sestate->id_tup = tuple;
+				break;
+			}
+			/*
+			 * OK, continuous chunks can be merged.
+			 */
+			rowofs[num_burst_chunks] = rowofs[num_burst_chunks - 1] + nitems;
+			rowmaps[num_burst_chunks]
+				= DatumGetByteaPCopy(values[Anum_pg_strom_isnull - 1]);
+			chunk->nitems += nitems;
+		}
 
 		/*
 		 * Compute and allocate required size of column store
@@ -729,9 +793,15 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 		 * Load necessary column store
 		 */
 		chunk->cs_rowmap = (uint8 *)dma_buffer;
-		deconstruct_cs_bytea(chunk->cs_rowmap,
-							 values[Anum_pg_strom_isnull - 1],
-							 chunk->nitems / BITS_PER_BYTE);
+		memset(chunk->cs_rowmap, -1, chunk->nitems / BITS_PER_BYTE);
+		Assert(chunk->nitems == PGSTROM_CHUNK_SIZE * num_burst_chunks);
+		for (idx = 0; idx < num_burst_chunks; idx++)
+		{
+			memcpy(chunk->cs_rowmap + rowofs[idx] / BITS_PER_BYTE,
+				   VARDATA_ANY(rowmaps[idx]),
+				   VARSIZE_ANY_EXHDR(rowmaps[idx]));
+			pfree(rowmaps[idx]);
+		}
 
 		temp = bms_copy(sestate->clause_cols);
 		while ((csidx = (bms_first_member(temp)-1)) >= 0)
