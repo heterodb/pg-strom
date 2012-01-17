@@ -114,6 +114,13 @@ static int		pgstrom_min_async_chunks;
 static int		pgstrom_num_burst_chunks;
 static bool		pgstrom_exec_profile;
 
+/*
+ * pgstrom_release_chunk_buffer
+ *
+ * It releases all the resources acquired by the supplied chunk buffer.
+ * This rouint is not called on table scan only, but error handler also,
+ * so, we shall release memory acquired from sestate->es_memcxt.
+ */
 static void
 pgstrom_release_chunk_buffer(PgStromExecState *sestate,
 							 PgStromChunkBuf *chunk)
@@ -140,6 +147,15 @@ pgstrom_release_chunk_buffer(PgStromExecState *sestate,
 	pfree(chunk);
 }
 
+/*
+ * pgstrom_release_exec_state
+ *
+ * This routine releases all the resource acquired with the supplied
+ * PgStromExecState. All the invocation paths of this routines are
+ * either error handler or end-of-scan, so, it is a good design to
+ * delete memory context of this exec state, instead of individual
+ * pfree operations.
+ */
 static void
 pgstrom_release_exec_state(PgStromExecState *sestate)
 {
@@ -163,11 +179,17 @@ pgstrom_release_exec_state(PgStromExecState *sestate)
 	MemoryContextDelete(sestate->es_memcxt);
 }
 
+/*
+ * pgstrom_release_resources
+ *
+ * An error handler of the executor of PG-Strom. All the exec-state related
+ * to the current resource owner should be released.
+ */
 static void
 pgstrom_release_resources(ResourceReleasePhase phase,
-						   bool isCommit,
-						   bool isTopLevel,
-						   void *arg)
+						  bool isCommit,
+						  bool isTopLevel,
+						  void *arg)
 {
 	ListCell   *cell;
 	ListCell   *next;
@@ -186,6 +208,14 @@ pgstrom_release_resources(ResourceReleasePhase phase,
 	}
 }
 
+/*
+ * pgstrom_exec_kernel_qual
+ *
+ * It kicks asynchronous memory copy between host and device, and execution
+ * of kernel code on device side; with the supplied chunk buffer.
+ * A launched memcpy and kernel execution is associated with chunk->stream,
+ * then it shall be linked to sestate->chunk_exec_list.
+ */
 static void
 pgstrom_exec_kernel_qual(PgStromDevContext *dev_cxt, PgStromChunkBuf *chunk)
 {
@@ -351,6 +381,13 @@ pgstrom_exec_kernel_qual(PgStromDevContext *dev_cxt, PgStromChunkBuf *chunk)
 	PG_END_TRY();
 }
 
+/*
+ * pgstrom_sync_kernel_exec
+ *
+ * It tries to synchronize concurrent kernel execution. If 'blocking' is
+ * true, it does not return to the called until one chunk getting ready.
+ * It returns the number of chunks being ready to reference.
+ */
 static int
 pgstrom_sync_kernel_exec(PgStromExecState *sestate, bool blocking)
 {
@@ -359,9 +396,13 @@ pgstrom_sync_kernel_exec(PgStromExecState *sestate, bool blocking)
 	ListCell   *prev;
 	CUstream	first_stream = NULL;
 	CUresult	ret;
+	struct timeval tv1, tv2;
 
 	if (sestate->chunk_exec_list == NIL)
 		return list_length(sestate->chunk_ready_list);
+
+	if (pgstrom_exec_profile)
+		gettimeofday(&tv1, NULL);
 
 retry:
 	prev = NULL;
@@ -440,24 +481,31 @@ retry:
 
 	if (blocking && sestate->chunk_ready_list == NIL)
 	{
-		struct timeval tv1, tv2;
-
 		Assert(first_stream != NULL);
-		if (pgstrom_exec_profile)
-			gettimeofday(&tv1, NULL);
 
 		cuStreamSynchronize(first_stream);
 
-		if (pgstrom_exec_profile)
-		{
-			gettimeofday(&tv2, NULL);
-			sestate->pf_synchronization += TIMEVAL_ELAPSED(&tv1, &tv2);
-		}
 		goto retry;
+	}
+
+	if (pgstrom_exec_profile)
+	{
+		gettimeofday(&tv2, NULL);
+		sestate->pf_synchronization += TIMEVAL_ELAPSED(&tv1, &tv2);
 	}
 	return list_length(sestate->chunk_ready_list);
 }
 
+/*
+ * deconstruct_cs_bytea
+ *
+ * It deconstruct the supplied bytea varlena data on the supplied
+ * destination address. In case of the varlena being compressed,
+ * this routine also decompress the source data.
+ * Unlike pg_detoast_datum(), it does not require a buffer to
+ * decompress, so it allows to extract the compressed array on
+ * page-locked buffer that is available to copy by DMA.
+ */
 static void
 deconstruct_cs_bytea(void *dest, Datum cs_bytea, uint32 length_be)
 {
@@ -479,6 +527,15 @@ deconstruct_cs_bytea(void *dest, Datum cs_bytea, uint32 length_be)
 	}
 }
 
+/*
+ * pgstrom_load_column_store
+ *
+ * This routine loads the contents of column-store being required by
+ * GPU calculations on the chunk buffer; prior to kernel executions.
+ * Since we assume variable-length varlena data are not executable on
+ * GPU device, so all the datum being loaded on this stage is assumed
+ * fixed-length array values.
+ */
 static void
 pgstrom_load_column_store(PgStromExecState *sestate,
 						  PgStromChunkBuf *chunk, int csidx)
@@ -562,6 +619,12 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 	}
 }
 
+/*
+ * pgstrom_load_chunk_buffer
+ *
+ * This routine set up a next chunk being loaded, then attaches it on
+ * chunk_exec_list or chunk_ready_list if not qualifiers are given.
+ */
 static bool
 pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 {
@@ -718,6 +781,14 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 	return true;
 }
 
+/*
+ * pgstrom_scan_column_store
+ *
+ * It tries to scan the column store to fetch a datum with the supplied
+ * rowid. In most cases, we assume the required value exists within the
+ * fetched array in last time, so lookup the last value first, then tries
+ * to index-scan next.
+ */
 static void
 pgstrom_scan_column_store(PgStromExecState *sestate,
 						  int csidx, int64 rowid,
@@ -897,12 +968,23 @@ out:
 	}
 }
 
+/*
+ * pgstrom_scan_chunk_buffer
+ *
+ * It set up values and nulls of the supplied TupleTableSlot from the
+ * currently focused chunk. If no rows are here, it returns false, then
+ * the caller shall move the current focus to the next one.
+ */
 #define BITS_PER_DATUM	(sizeof(Datum) * BITS_PER_BYTE)
 static bool
 pgstrom_scan_chunk_buffer(PgStromExecState *sestate, TupleTableSlot *slot)
 {
 	PgStromChunkBuf	*chunk = lfirst(sestate->curr_chunk);
+	struct timeval	tv1, tv2;
 	int		index;
+
+	if (pgstrom_exec_profile)
+		gettimeofday(&tv1, NULL);
 
 	index = sestate->curr_index;
 	while (index < chunk->nitems)
@@ -929,8 +1011,6 @@ pgstrom_scan_chunk_buffer(PgStromExecState *sestate, TupleTableSlot *slot)
 		rowid = chunk->rowid + index;
 		for (csidx=0; csidx < chunk->nattrs; csidx++)
 		{
-			struct timeval	tv1, tv2;
-
 			/*
 			 * No need to back actual value of unreferenced column.
 			 */
@@ -970,25 +1050,35 @@ pgstrom_scan_chunk_buffer(PgStromExecState *sestate, TupleTableSlot *slot)
 			 * Elsewhere, we scan the column-store with the current
 			 * rowid.
 			 */
-			if (pgstrom_exec_profile)
-				gettimeofday(&tv1, NULL);
-
 			pgstrom_scan_column_store(sestate, csidx, rowid, slot);
-
-			if (pgstrom_exec_profile)
-			{
-				gettimeofday(&tv2, NULL);
-				sestate->pf_load_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
-			}
 		}
 		ExecStoreVirtualTuple(slot);
 		/* update next index to be fetched */
 		sestate->curr_index = index + 1;
+
+		if (pgstrom_exec_profile)
+		{
+			gettimeofday(&tv2, NULL);
+			sestate->pf_load_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
+		}
 		return true;
+	}
+
+	if (pgstrom_exec_profile)
+	{
+		gettimeofday(&tv2, NULL);
+		sestate->pf_load_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
 	}
 	return false;	/* end of chunk, need next chunk! */
 }
 
+/*
+ * pgstrom_init_exec_device
+ *
+ * This rouine initialize miscalleous things needed to execute device
+ * code; like switch current device context, load module & function,
+ * and set up constant memory region.
+ */
 static PgStromDevContext *
 pgstrom_init_exec_device(void *image, int dev_index,
 						 const int64 const_buffer[], int const_nums)
@@ -1137,6 +1227,13 @@ pgstrom_init_exec_device(void *image, int dev_index,
 	return dev_cxt;
 }
 
+/*
+ * pgstrom_init_exec_state
+ *
+ * This routine initialize PgStromExecState object according to
+ * the execution plan. If needed, it also initialize GPU devices
+ * to run the supplied qualifier.
+ */
 static PgStromExecState *
 pgstrom_init_exec_state(ForeignScanState *fss)
 {
@@ -1320,6 +1417,11 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	return sestate;
 }
 
+/*
+ * pgstrom_begin_foreign_scan
+ *
+ * This routine is BeginForeignScan handler of FDW.
+ */
 void
 pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 {
@@ -1400,6 +1502,11 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 	}
 }
 
+/*
+ * pgstrom_iterate_foreign_scan
+ *
+ * This routine is IterateForeignScan handler of FDW.
+ */
 TupleTableSlot*
 pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 {
@@ -1522,6 +1629,11 @@ out:
 	return slot;
 }
 
+/*
+ * pgstrom_rescan_foreign_scan
+ *
+ * This routine is ReScanForeignScan handler of FDW.
+ */
 void
 pgstrom_rescan_foreign_scan(ForeignScanState *fss)
 {
@@ -1564,6 +1676,11 @@ pgstrom_rescan_foreign_scan(ForeignScanState *fss)
 	}
 }
 
+/*
+ * pgstrom_end_foreign_scan
+ *
+ * This routine is EndForeignScan handler of FDW
+ */
 void
 pgstrom_end_foreign_scan(ForeignScanState *fss)
 {
