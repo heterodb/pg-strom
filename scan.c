@@ -377,11 +377,18 @@ retry:
 			MemoryContext	oldcxt;
 
 			oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
-			sestate->chunk_exec_list
-				= list_delete_cell(sestate->chunk_exec_list, cell, prev);
 			sestate->chunk_ready_list
 				= lappend(sestate->chunk_ready_list, chunk);
+			sestate->chunk_exec_list
+				= list_delete_cell(sestate->chunk_exec_list, cell, prev);
 			MemoryContextSwitchTo(oldcxt);
+
+			/*
+			 * Device memory should be released as soon as possible we can,
+			 * because it is quite rarer than host memory.
+			 */
+			cuMemFree(chunk->devmem);
+			chunk->devmem = 0;
 
 			if (pgstrom_exec_profile)
 			{
