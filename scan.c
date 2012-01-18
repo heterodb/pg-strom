@@ -794,7 +794,6 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 		 */
 		chunk->cs_rowmap = (uint8 *)dma_buffer;
 		memset(chunk->cs_rowmap, -1, chunk->nitems / BITS_PER_BYTE);
-		Assert(chunk->nitems == PGSTROM_CHUNK_SIZE * num_burst_chunks);
 		for (idx = 0; idx < num_burst_chunks; idx++)
 		{
 			memcpy(chunk->cs_rowmap + rowofs[idx] / BITS_PER_BYTE,
