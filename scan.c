@@ -31,6 +31,19 @@
 #include "pg_strom.h"
 
 typedef struct {
+	int			dev_index;
+	CUmodule	dev_module;
+	CUfunction	dev_function;
+	uint32		dev_nthreads;
+
+	/* device run-time profiles */
+	int			pf_dev_num_regs;	/* num of registers per thread */
+	int			pf_dev_const_mem;	/* usage of constant memory */
+	size_t		pg_dev_cur_usage;	/* current device memory usage */
+	size_t		pg_dev_mem_usage;	/* maximun device memory usage */
+} PgStromDevContext;
+
+typedef struct {
 	int64		rowid;
 	int			nattrs;
 	int			nitems;		/* number of items */
@@ -41,19 +54,13 @@ typedef struct {
 	CUdeviceptr	devmem;
 	CUstream	stream;
 	CUevent		events[4];
+	PgStromDevContext  *dev_cxt;
 } PgStromChunkBuf;
 
 #define chunk_cs_nulls(chunk,csidx)		\
 	((bits8 *)((chunk)->cs_rowmap + (chunk)->cs_nulls[(csidx)]))
 #define chunk_cs_values(chunk,csidx)	\
 	((char *)((chunk)->cs_rowmap + (chunk)->cs_values[(csidx)]))
-
-typedef struct {
-	int			dev_index;
-	CUmodule	dev_module;
-	CUfunction	dev_function;
-	uint32		dev_nthreads;
-} PgStromDevContext;
 
 typedef struct {
 	/* Parameters come from planner */
@@ -98,7 +105,9 @@ typedef struct {
 	uint64			pf_async_memcpy;	/* time to async memcpy */
 	uint64			pf_async_kernel;	/* time to async kernel exec */
 	uint64			pf_synchronization;	/* time to synchronization */
+	uint64			pf_fetch_tuples;	/* time to fetch tuples */
 	uint64			pf_load_chunk;		/* time to load chunks */
+	uint64			pf_scan_chunk;		/* time to scan chunks */
 } PgStromExecState;
 
 #define TIMEVAL_ELAPSED(tv1,tv2)					\
@@ -138,7 +147,11 @@ pgstrom_release_chunk_buffer(PgStromExecState *sestate,
 		cuStreamDestroy(chunk->stream);
 	}
 	if (chunk->devmem)
+	{
 		cuMemFree(chunk->devmem);
+		if (pgstrom_exec_profile)
+			chunk->dev_cxt->pg_dev_cur_usage -= chunk->devmem_size;
+	}
 	if (sestate->dev_list != NIL)
 		cuMemFreeHost(chunk->cs_rowmap);
 	else
@@ -218,8 +231,9 @@ pgstrom_release_resources(ResourceReleasePhase phase,
  * then it shall be linked to sestate->chunk_exec_list.
  */
 static void
-pgstrom_exec_kernel_qual(PgStromDevContext *dev_cxt, PgStromChunkBuf *chunk)
+pgstrom_exec_kernel_qual(PgStromChunkBuf *chunk)
 {
+	PgStromDevContext  *dev_cxt = chunk->dev_cxt;
 	CUdeviceptr	   *kernel_data;
 	void		  **kernel_args;
 	CUresult		ret;
@@ -242,6 +256,13 @@ pgstrom_exec_kernel_qual(PgStromDevContext *dev_cxt, PgStromChunkBuf *chunk)
 					(errcode(ERRCODE_INTERNAL_ERROR),
 					 errmsg("Failed to alloc device memory: %s",
 							cuda_error_to_string(ret))));
+		if (pgstrom_exec_profile)
+		{
+			dev_cxt->pg_dev_cur_usage += chunk->devmem_size;
+			if (dev_cxt->pg_dev_cur_usage > dev_cxt->pg_dev_mem_usage)
+				dev_cxt->pg_dev_mem_usage = dev_cxt->pg_dev_cur_usage;
+		}
+
 		/*
 		 * Create event object to track elapsed time
 		 */
@@ -374,7 +395,11 @@ pgstrom_exec_kernel_qual(PgStromDevContext *dev_cxt, PgStromChunkBuf *chunk)
 				cuEventDestroy(chunk->events[i]);
 		}
 		if (chunk->devmem)
+		{
 			cuMemFree(chunk->devmem);
+			if (pgstrom_exec_profile)
+				chunk->dev_cxt->pg_dev_cur_usage -= chunk->devmem_size;
+		}
 		cuMemFreeHost(chunk->cs_rowmap);
 
 		PG_RE_THROW();
@@ -430,6 +455,8 @@ retry:
 			 * because it is quite rarer than host memory.
 			 */
 			cuMemFree(chunk->devmem);
+			if (pgstrom_exec_profile)
+				chunk->dev_cxt->pg_dev_cur_usage -= chunk->devmem_size;
 			chunk->devmem = 0;
 
 			if (pgstrom_exec_profile)
@@ -493,6 +520,7 @@ retry:
 	{
 		gettimeofday(&tv2, NULL);
 		sestate->pf_synchronization += TIMEVAL_ELAPSED(&tv1, &tv2);
+		sestate->pf_fetch_tuples -= TIMEVAL_ELAPSED(&tv1, &tv2);
 	}
 	return list_length(sestate->chunk_ready_list);
 }
@@ -694,7 +722,6 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 
 	if (sestate->dev_list != NIL)
 	{
-		PgStromDevContext *dev_cxt;
 		Bitmapset  *temp;
 		AttrNumber	csidx;
 		uint16		attlen;
@@ -712,8 +739,8 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 			else
 				sestate->dev_curr = lnext(sestate->dev_curr);
 		} while (!sestate->dev_curr);
-		dev_cxt = lfirst(sestate->dev_curr);
-		pgstrom_set_device_context(dev_cxt->dev_index);
+		chunk->dev_cxt = lfirst(sestate->dev_curr);
+		pgstrom_set_device_context(chunk->dev_cxt->dev_index);
 
 		/*
 		 * We try adaptive readahead according to pgstrom_num_burst_chunks.
@@ -811,12 +838,13 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 		{
 			gettimeofday(&tv2, NULL);
 			sestate->pf_load_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
+			sestate->pf_fetch_tuples -= TIMEVAL_ELAPSED(&tv1, &tv2);
 		}
 
 		/*
 		 * Asynchronous execution of kernel code on this chunk
 		 */
-		pgstrom_exec_kernel_qual(dev_cxt, chunk);
+		pgstrom_exec_kernel_qual(chunk);
 
 		/*
 		 * XXX - Do we need to pay attention of the case when
@@ -842,6 +870,7 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 		{
 			gettimeofday(&tv2, NULL);
 			sestate->pf_load_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
+			sestate->pf_fetch_tuples -= TIMEVAL_ELAPSED(&tv1, &tv2);
 		}
 		sestate->chunk_ready_list
 			= lappend(sestate->chunk_ready_list, chunk);
@@ -1128,7 +1157,8 @@ pgstrom_scan_chunk_buffer(PgStromExecState *sestate, TupleTableSlot *slot)
 		if (pgstrom_exec_profile)
 		{
 			gettimeofday(&tv2, NULL);
-			sestate->pf_load_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
+			sestate->pf_scan_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
+			sestate->pf_fetch_tuples -= TIMEVAL_ELAPSED(&tv1, &tv2);
 		}
 		return true;
 	}
@@ -1136,7 +1166,7 @@ pgstrom_scan_chunk_buffer(PgStromExecState *sestate, TupleTableSlot *slot)
 	if (pgstrom_exec_profile)
 	{
 		gettimeofday(&tv2, NULL);
-		sestate->pf_load_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
+		sestate->pf_scan_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
 	}
 	return false;	/* end of chunk, need next chunk! */
 }
@@ -1292,6 +1322,16 @@ pgstrom_init_exec_device(void *image, int dev_index,
 	 * TODO: maximun number of concurrent chunks also shoukd be modified
 	 * to avoid over-consumption of device memory.
 	 */
+
+	if (pgstrom_exec_profile)
+	{
+		cuFuncGetAttribute(&dev_cxt->pf_dev_num_regs,
+						   CU_FUNC_ATTRIBUTE_NUM_REGS,
+						   dev_cxt->dev_function);
+		cuFuncGetAttribute(&dev_cxt->pf_dev_const_mem,
+						   CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES,
+						   dev_cxt->dev_function);
+	}
 
 	return dev_cxt;
 }
@@ -1694,6 +1734,7 @@ out:
 	{
 		gettimeofday(&tv2, NULL);
 		sestate->pf_pgstrom_total += TIMEVAL_ELAPSED(&tv1, &tv2);
+		sestate->pf_fetch_tuples += TIMEVAL_ELAPSED(&tv1, &tv2);
 	}
 	return slot;
 }
@@ -1787,6 +1828,8 @@ pgstrom_end_foreign_scan(ForeignScanState *fss)
 
 	if (pgstrom_exec_profile)
 	{
+		ListCell   *cell;
+
 		gettimeofday(&tv2, NULL);
 		sestate->pf_pgstrom_total += TIMEVAL_ELAPSED(&tv1, &tv2);
 
@@ -1794,18 +1837,34 @@ pgstrom_end_foreign_scan(ForeignScanState *fss)
 			 RelationGetRelationName(sestate->es_relation));
 		elog(INFO, "Total PG-Strom consumed time: %.3f ms",
 			 ((double)sestate->pf_pgstrom_total) / 1000.0);
-		elog(INFO, "Time to JIT GPU comple:       %.3f ms",
+		elog(INFO, "Time to JIT Compile GPU code: %.3f ms",
 			 ((double)sestate->pf_jit_compile) / 1000.0);
 		elog(INFO, "Time to initialize devices:   %.3f ms",
 			 ((double)sestate->pf_device_init) / 1000.0);
+		elog(INFO, "Time to Load column-stores:   %.3f ms",
+			 ((double)sestate->pf_load_chunk) / 1000.0);
+		elog(INFO, "Time to Scan column-stores:   %.3f ms",
+			 ((double)sestate->pf_scan_chunk) / 1000.0);
+		elog(INFO, "Time to Fetch virtual tuples: %.3f ms",
+			 ((double)sestate->pf_fetch_tuples) / 1000.0);
+		elog(INFO, "Time of GPU Synchronization:  %.3f ms",
+			 ((double)sestate->pf_synchronization) / 1000.0);
 		elog(INFO, "Time of Async memcpy:         %.3f ms",
 			 ((double)sestate->pf_async_memcpy) / 1000.0);
 		elog(INFO, "Time of Async kernel exec:    %.3f ms",
 			 ((double)sestate->pf_async_kernel) / 1000.0);
-		elog(INFO, "Time of GPU Synchronization:  %.3f ms",
-			 ((double)sestate->pf_synchronization) / 1000.0);
-		elog(INFO, "Time of Load column-stores:   %.3f ms",
-			 ((double)sestate->pf_load_chunk) / 1000.0);
+
+		foreach (cell, sestate->dev_list)
+		{
+			PgStromDevContext  *dev_cxt = lfirst(cell);
+
+			elog(INFO, "Num of registers/thread [%d]:  %u",
+				 dev_cxt->dev_index, dev_cxt->pf_dev_num_regs);
+			elog(INFO, "Constant memory usage [%d]:    %u byte",
+				 dev_cxt->dev_index, dev_cxt->pf_dev_const_mem);
+			elog(INFO, "Max device memory usage[%d]:   %lu KB",
+				 dev_cxt->dev_index, dev_cxt->pg_dev_mem_usage / 1024);
+		}
 	}
 	pgstrom_release_exec_state(sestate);
 }
