@@ -11,6 +11,7 @@
  * this package.
  */
 #include "postgres.h"
+#include "access/sysattr.h"
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -699,21 +700,10 @@ pgstrom_plan_foreign_scan(Oid foreignTblOid,
 	List	   *host_quals = NIL;
 	List	   *device_quals = NIL;
 	uint32		devinfo_flags = 0;
+	Bitmapset  *required_cols = NULL;
 	ListCell   *cell;
 	DefElem	   *defel;
 	AttrNumber	i;
-
-	/*
-	 * Save the referenced columns
-	 */
-	for (i = baserel->min_attr; i <= baserel->max_attr; i++)
-	{
-		if (bms_is_empty(baserel->attr_needed[i - baserel->min_attr]))
-			continue;
-
-		defel = makeDefElem("required_cols", (Node *) makeInteger(i));
-		private = lappend(private, (Node *) defel);
-	}
 
 	/*
 	 * Check whether device computable qualifier
@@ -726,13 +716,35 @@ pgstrom_plan_foreign_scan(Oid foreignTblOid,
 			is_device_executable_qual(baserel, rinfo, &devinfo_flags))
 			device_quals = lappend(device_quals, rinfo);
 		else
+		{
+			pull_varattnos(rinfo->clause, baserel->relid, &required_cols);
 			host_quals = lappend(host_quals, rinfo);
+		}
 	}
-
 	baserel->baserestrictinfo = host_quals;
 	if (device_quals != NIL)
 		make_device_qual_source(foreignTblOid, device_quals,
 								devinfo_flags, &private);
+
+	/*
+	 * Save the referenced columns by both of targelist and host quals
+	 */
+	for (i = baserel->min_attr; i <= baserel->max_attr; i++)
+	{
+		if (!bms_is_empty(baserel->attr_needed[i - baserel->min_attr]))
+			required_cols = bms_add_member(required_cols,
+								i - FirstLowInvalidHeapAttributeNumber);
+	}
+
+	while ((i = bms_first_member(required_cols)) > 0)
+	{
+		i += FirstLowInvalidHeapAttributeNumber;
+		if (i > InvalidAttrNumber)
+		{
+			defel = makeDefElem("required_cols", (Node *) makeInteger(i));
+			private = lappend(private, (Node *) defel);
+		}
+	}
 
 	/*
 	 * Set up FdwPlan
