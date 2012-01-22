@@ -1049,7 +1049,8 @@ pgstrom_process_utility_command(Node *parsetree,
 				AlterObjectSchemaStmt *stmt
 					= (AlterObjectSchemaStmt *)parsetree;
 
-				if (!OidIsValid(base_relid))
+				if (!OidIsValid(base_relid) ||
+					get_rel_relkind(base_relid) != RELKIND_FOREIGN_TABLE)
 					break;
 
 				ft = GetForeignTable(base_relid);
@@ -1066,7 +1067,8 @@ pgstrom_process_utility_command(Node *parsetree,
 
 				if (OidIsValid(base_nspid))
 					pgstrom_post_rename_schema(stmt, base_nspid);
-				else if (OidIsValid(base_relid))
+				else if (OidIsValid(base_relid) &&
+						 get_rel_relkind(base_relid) == RELKIND_FOREIGN_TABLE)
 				{
 					ft = GetForeignTable(base_relid);
 					fs = GetForeignServer(ft->serverid);
@@ -1087,7 +1089,8 @@ pgstrom_process_utility_command(Node *parsetree,
 				AlterTableStmt *stmt = (AlterTableStmt *)parsetree;
 				ListCell	   *cell;
 
-				if (!OidIsValid(base_relid))
+				if (!OidIsValid(base_relid) ||
+					get_rel_relkind(base_relid) != RELKIND_FOREIGN_TABLE)
 					break;
 
 				ft = GetForeignTable(base_relid);
