@@ -717,7 +717,8 @@ pgstrom_plan_foreign_scan(Oid foreignTblOid,
 			device_quals = lappend(device_quals, rinfo);
 		else
 		{
-			pull_varattnos(rinfo->clause, baserel->relid, &required_cols);
+			pull_varattnos((Node *)rinfo->clause,
+						   baserel->relid, &required_cols);
 			host_quals = lappend(host_quals, rinfo);
 		}
 	}
