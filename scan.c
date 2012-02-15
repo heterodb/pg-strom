@@ -121,7 +121,6 @@ static MemoryContext	pgstrom_scan_memcxt;
 static List	   *pgstrom_exec_state_list = NIL;
 static int		pgstrom_max_async_chunks;
 static int		pgstrom_min_async_chunks;
-static int		pgstrom_num_burst_chunks;
 static bool		pgstrom_exec_profile;
 
 /*
@@ -663,8 +662,7 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 	bool		isnull[Natts_pg_strom];
 	int64		rowid;
 	uint32		nitems;
-	bytea	  **rowmaps;
-	uint32	   *rowofs;
+	Datum		rowmap;
 	MemoryContext oldcxt;
 	PgStromChunkBuf	*chunk;
 	struct timeval tv1, tv2;
@@ -705,10 +703,9 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 
 	rowid = DatumGetInt64(values[Anum_pg_strom_rowid - 1]);
 	nitems = DatumGetUInt32(values[Anum_pg_strom_nitems - 1]);
-	rowmaps = alloca(sizeof(bytea *) * pgstrom_num_burst_chunks);
-	rowmaps[0] = DatumGetByteaPCopy(values[Anum_pg_strom_isnull - 1]);
-	rowofs = alloca(sizeof(uint32) * pgstrom_num_burst_chunks);
-	rowofs[0] = 0;
+	rowmap = values[Anum_pg_strom_isnull - 1];
+
+	Assert(nitems % BITS_PER_BYTE == 0);
 
 	oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 	chunk = palloc0(sizeof(PgStromChunkBuf));
@@ -718,7 +715,6 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 	chunk->cs_nulls = palloc0(sizeof(int) * chunk->nattrs);
 	chunk->cs_values = palloc0(sizeof(int) * chunk->nattrs);
 	MemoryContextSwitchTo(oldcxt);
-	Assert(chunk->nitems % BITS_PER_BYTE == 0);
 
 	if (sestate->dev_list != NIL)
 	{
@@ -728,7 +724,6 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 		char	   *dma_buffer;
 		size_t		dma_offset;
 		CUresult	ret;
-		int			idx, num_burst_chunks;
 
 		/*
 		 * Switch to the next GPU device to be used
@@ -743,57 +738,9 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 		pgstrom_set_device_context(chunk->dev_cxt->dev_index);
 
 		/*
-		 * We try adaptive readahead according to pgstrom_num_burst_chunks.
-		 * If we have multiple chunks with continuous rowid, these should
-		 * be transfered to GPU device at once.
-		 */
-		for (num_burst_chunks = 1;
-			 num_burst_chunks < pgstrom_num_burst_chunks;
-			 num_burst_chunks++)
-		{
-			tuple = heap_getnext(sestate->id_scan, ForwardScanDirection);
-			/*
-			 * If we reached the end of table, of course, it is unavailable
-			 * to merge unexist ones as burst chunks, so, we break this
-			 * burst scan here. And, also close the sequential rowid scan.
-			 */
-			if (!HeapTupleIsValid(tuple))
-			{
-				heap_endscan(sestate->id_scan);
-				sestate->id_scan = NULL;
-				break;
-			}
-			tupdesc = RelationGetDescr(sestate->id_rel);
-			heap_deform_tuple(tuple, tupdesc, values, isnull);
-			Assert(!isnull[Anum_pg_strom_rowid - 1] &&
-				   !isnull[Anum_pg_strom_nitems - 1] &&
-				   !isnull[Anum_pg_strom_isnull - 1]);
-
-			/*
-			 * If the next chunk does not have continuous rowid, it is
-			 * unavailable to merge as a burst chunk, so, the fetched
-			 * tuple is cached, and only previous ones are merged.
-			 */
-			rowid = DatumGetInt64(values[Anum_pg_strom_rowid - 1]);
-			nitems = DatumGetUInt32(values[Anum_pg_strom_nitems - 1]);
-			if (chunk->rowid + chunk->nitems != rowid)
-			{
-				sestate->id_tup = tuple;
-				break;
-			}
-			/*
-			 * OK, continuous chunks can be merged.
-			 */
-			rowofs[num_burst_chunks] = rowofs[num_burst_chunks - 1] + nitems;
-			rowmaps[num_burst_chunks]
-				= DatumGetByteaPCopy(values[Anum_pg_strom_isnull - 1]);
-			chunk->nitems += nitems;
-		}
-
-		/*
 		 * Compute and allocate required size of column store
 		 */
-		dma_offset = (chunk->nitems / BITS_PER_BYTE);
+		dma_offset = chunk->nitems / BITS_PER_BYTE;
 
 		tupdesc = RelationGetDescr(sestate->es_relation);
 		temp = bms_copy(sestate->clause_cols);
@@ -808,6 +755,7 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 			dma_offset += chunk->nitems / BITS_PER_BYTE;
 		}
 		bms_free(temp);
+
 		ret = cuMemAllocHost((void **)&dma_buffer, dma_offset);
 		if (ret != CUDA_SUCCESS)
 			ereport(ERROR,
@@ -820,15 +768,8 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 		 * Load necessary column store
 		 */
 		chunk->cs_rowmap = (uint8 *)dma_buffer;
-		memset(chunk->cs_rowmap, -1, chunk->nitems / BITS_PER_BYTE);
-		for (idx = 0; idx < num_burst_chunks; idx++)
-		{
-			memcpy(chunk->cs_rowmap + rowofs[idx] / BITS_PER_BYTE,
-				   VARDATA_ANY(rowmaps[idx]),
-				   VARSIZE_ANY_EXHDR(rowmaps[idx]));
-			pfree(rowmaps[idx]);
-		}
-
+		deconstruct_cs_bytea(chunk->cs_rowmap,
+							 rowmap, chunk->nitems / BITS_PER_BYTE);
 		temp = bms_copy(sestate->clause_cols);
 		while ((csidx = (bms_first_member(temp)-1)) >= 0)
 			pgstrom_load_column_store(sestate, chunk, csidx);
@@ -864,8 +805,7 @@ pgstrom_load_chunk_buffer(PgStromExecState *sestate)
 		oldcxt = MemoryContextSwitchTo(sestate->es_memcxt);
 		chunk->cs_rowmap = palloc0(chunk->nitems / BITS_PER_BYTE);
 		deconstruct_cs_bytea(chunk->cs_rowmap,
-							 values[Anum_pg_strom_isnull - 1],
-							 chunk->nitems / BITS_PER_BYTE);
+							 rowmap, chunk->nitems / BITS_PER_BYTE);
 		if (pgstrom_exec_profile)
 		{
 			gettimeofday(&tv2, NULL);
@@ -1889,7 +1829,7 @@ pgstrom_scan_init(void)
 	RegisterResourceReleaseCallback(pgstrom_release_resources, NULL);
 
 	DefineCustomIntVariable("pg_strom.max_async_chunks",
-							"max number of concurrent chunks being asynchronously executed",
+							"max number of chunk to be executed concurrently",
 							NULL,
 							&pgstrom_max_async_chunks,
 							3 * pgstrom_get_num_devices(),
@@ -1899,22 +1839,12 @@ pgstrom_scan_init(void)
 							0,
 							NULL, NULL, NULL);
 	DefineCustomIntVariable("pg_strom.min_async_chunks",
-							"min number of chunks being kept in async exec",
+							"min number of chunks to be kept in execution",
 							NULL,
 							&pgstrom_min_async_chunks,
 							pgstrom_get_num_devices(),
 							1,
 							1024,
-							PGC_USERSET,
-							0,
-							NULL, NULL, NULL);
-	DefineCustomIntVariable("pg_strom.num_burst_chunks",
-							"number of chunks being processed together",
-							NULL,
-							&pgstrom_num_burst_chunks,
-							1,
-							1,
-							64,
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);
