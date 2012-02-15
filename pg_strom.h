@@ -13,6 +13,7 @@
 #ifndef PG_STROM_H
 #define PG_STROM_H
 
+#include "access/tuptoaster.h"
 #include "catalog/indexing.h"
 #include "commands/explain.h"
 #include "fmgr.h"
@@ -20,7 +21,7 @@
 #include "utils/memutils.h"
 #include <cuda.h>
 
-#define PGSTROM_CHUNK_SIZE		(BLCKSZ * BITS_PER_BYTE / 2)
+#define PGSTROM_CHUNK_SIZE		(MaximumBytesPerTuple(1) * BITS_PER_BYTE)
 
 #define PGSTROM_SCHEMA_NAME		"pg_strom"
 #define Natts_pg_strom			4
