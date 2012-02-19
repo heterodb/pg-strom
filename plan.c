@@ -686,6 +686,23 @@ is_device_executable_qual(RelOptInfo *baserel,
 }
 
 /*
+ * pgstrom_cost_estimation
+ *
+ * Estimate query execution cost, and set them
+ */
+static void
+pgstrom_cost_estimation(FdwPlan *fdwplan, RelOptInfo *baserel,
+						Oid ftableOid, List *host_quals, List *device_quals)
+{
+	/* TODO: more practical cost estimation */
+	fdwplan->startup_cost = 100.0;
+	fdwplan->total_cost = 0.0;
+
+	baserel->rows = 20000000.0;
+	baserel->width = 64;
+}
+
+/*
  * pgstrom_plan_foreign_scan
  *
  * FDW handler to generate execute plan of PG-Strom.
@@ -748,14 +765,12 @@ pgstrom_plan_foreign_scan(Oid foreignTblOid,
 	}
 
 	/*
-	 * Set up FdwPlan
-	 *
-	 * TODO: more pratical information shall be returned to the planner.
+	 * Construct FdwPlan object
 	 */
 	fdwplan = makeNode(FdwPlan);
-	fdwplan->startup_cost = 0.0;
-	fdwplan->total_cost = 0.0;
 	fdwplan->fdw_private = private;
+	pgstrom_cost_estimation(fdwplan, baserel, foreignTblOid,
+							host_quals, device_quals);
 
 	return fdwplan;
 }
