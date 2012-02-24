@@ -12,7 +12,57 @@
  */
 #ifndef PG_STROM_H
 #define PG_STROM_H
+#include "storage/shmem.h"
+#include <pthread.h>
 
+
+
+/*
+ * shmseg.c
+ */
+extern SHM_QUEUE   *pgstrom_shmqueue_create(void);
+extern void		pgstrom_shmqueue_retain(SHM_QUEUE *shmqhead);
+extern void		pgstrom_shmqueue_release(SHM_QUEUE *shmqhead);
+extern bool		pgstrom_shmqueue_enqueue(SHM_QUEUE *shmqhead, SHM_QUEUE *item);
+extern SHM_QUEUE   *pgstrom_shmqueue_dequeue(SHM_QUEUE *shmqhead, bool wait);
+
+extern void	   *pgstrom_shmseg_create(Size size);
+extern void		pgstrom_shmseg_retain(void *ptr);
+extern void		pgstrom_shmseg_release(void *ptr);
+extern void		pgstrom_shmseg_init(void);
+
+/*
+ * opencl_catalog.c
+ */
+typedef struct {
+	Oid			type_oid;
+	bool		type_x2regs;
+	bool		type_fp64;
+	uint32		type_varref;	/* cmd code to reference type variable */
+	uint32		type_conref;	/* cmd code to reference type constant */
+} GpuTypeInfo;
+
+typedef struct {
+	Oid			func_oid;
+	uint32		func_cmd;		/* cmd code of this function */
+	uint16		func_nargs;		/* number of arguments */
+	Oid			func_rettype;		/* return type of function */
+	Oid			func_argtypes[0];	/* argument types of function */
+} GpuFuncInfo;
+
+GpuTypeInfo  *pgstrom_gpu_type_lookup(Oid typeOid);
+GpuFuncInfo  *pgstrom_gpu_func_lookup(Oid funcOid);
+
+
+/*
+ * opencl_serv.c
+ */
+extern void		pgstrom_opencl_startup(void *shmptr, Size shmsize);
+
+
+
+
+#if 0
 #include "access/tuptoaster.h"
 #include "catalog/indexing.h"
 #include "commands/explain.h"
@@ -162,5 +212,6 @@ extern void pgstrom_nvcc_init(void);
 extern FdwRoutine pgstromFdwHandlerData;
 extern Datum pgstrom_fdw_handler(PG_FUNCTION_ARGS);
 extern Datum pgstrom_fdw_validator(PG_FUNCTION_ARGS);
+#endif
 
 #endif	/* PG_STROM_H */

@@ -11,6 +11,166 @@
  * this package.
  */
 #include "postgres.h"
+#include "pg_strom.h"
+
+
+
+static bool
+is_gpu_executable_qual_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Const))
+	{
+		Const  *c = (Const *) node;
+
+		/* is it a supported data type by GPU? */
+		if (!pgstrom_gpu_type_lookup(c->consttype))
+			return true;
+	}
+	else if (IsA(node, Var))
+	{
+		RelOptInfo *baserel = (RelOptInfo *) context;
+		Var		   *v = (Var *) node;
+
+		if (v->varno != baserel->relid)
+			return true;	/* should not happen */
+		if (v->varlevelsup != 0)
+			return true;	/* should not happen */
+		if (v->varattno < 1)
+			return true;	/* system columns are not supported */
+
+		/* is it a supported data type by GPU? */
+		if (!pgstrom_gpu_type_lookup(v->vartype))
+			return true;
+	}
+	else if (IsA(node, FuncExpr))
+	{
+		FuncExpr   *f = (FuncExpr *) node;
+
+		/* is it a supported function/operator? */
+		if (!pgstrom_gpu_func_lookup(f->funcid))
+			return true;
+	}
+	else if (IsA(node, OpExpr) ||
+			 IsA(node, DistinctExpr))
+	{
+		OpExpr	   *op = (OpExpr *) node;
+
+		/* is it a supported function/operator? */
+		if (pgstrom_gpufunc_lookup(get_opcode(op->opno)))
+			return true;
+	}
+	else if (IsA(node, BoolExpr))
+	{
+		BoolExpr   *b = (BoolExpr *) node;
+
+		if (b->boolop != AND_EXPR &&
+			b->boolop != OR_EXPR &&
+			b->boolop != NOT_EXPR)
+			return true;
+	}
+	else if (IsA(node, CaseExpr))
+	{}
+	else if (IsA(node, CaseWhen))
+	{}
+	else
+		return true;
+
+	return expression_tree_walker(node,
+								  is_gpu_executable_qual_walker,
+								  context);
+}
+
+static bool
+is_gpu_executable_qual(RelOptInfo *baserel, RestrictInfo *rinfo)
+{
+	if (bms_membership(rinfo->clause_relids) == BMS_MULTIPLE)
+		return false;	/* should not happen */
+
+	if (is_gpu_executable_qual_walker((Node *) rinfo->clause,
+									  (void *) baserel))
+		return false;
+
+	return true;
+}
+
+static char *
+make_gpu_commands(Oid ftableOid, List *gpu_quals)
+{}
+
+static bool
+is_cpu_executable_qual(RelOptInfo *baserel, RestrictInfo *rinfo)
+{
+	return false;
+}
+
+static char *
+make_cpu_commands(Oid ftableOid, List *cpu_quals)
+{
+	return NULL;
+}
+
+FdwPlan *
+pgstrom_plan_foreign_scan(Oid ftableOid,
+						  PlannerInfo *root,
+						  RelOptInfo *baserel)
+{
+	FdwPlan	   *fdwplan;
+	List	   *host_quals = NIL;
+	List	   *gpu_quals = NIL;
+	List	   *cpu_quals = NIL;
+	char	   *gpu_cmds = NULL;
+	char	   *cpu_cmds = NULL;
+	ListCell   *cell;
+
+	/*
+	 * check whether GPU/CPU executable qualifier, or not
+	 */
+	foreach (cell, baserel->baserestrictinfo)
+	{
+		RestrictInfo   *rinfo = lfirst(cell);
+
+		if (is_gpu_executable_qual(baserel, rinfo))
+			gpu_quals = lappend(gpu_quals, rinfo);
+		else if (is_cpu_executable_qual(baserel, rinfo))
+			cpu_quals = lappend(cpu_quals, rinfo);
+		else
+			host_quals = lappend(host_quals, rinfo);
+	}
+	baserel->baserestrictinfo = host_quals;
+
+	if (gpu_quals)
+		gpu_cmds = make_gpu_commands(ftableOid, gpu_quals);
+	if (cpu_quals)
+		cpu_cmds = make_cpu_commands(ftableOid, cpu_quals);
+
+
+
+
+
+
+
+
+}
+
+
+void
+pgstrom_explain_foreign_scan(ForeignScanState *fss,
+							 ExplainState *es)
+{
+
+
+
+
+}
+
+
+
+
+
+#if 0
+#include "postgres.h"
 #include "access/sysattr.h"
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
@@ -900,3 +1060,4 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 	}
 	pfree(str.data);
 }
+#endif
