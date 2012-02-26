@@ -21,7 +21,25 @@ PG_MODULE_MAGIC;
  */
 void		_PG_init(void);
 
+FdwRoutine	PgStromFdwHandlerData = {
+	.type				= T_FdwRoutine,
+	.PlanForeignScan	= pgstrom_plan_foreign_scan,
+	.ExplainForeignScan	= pgstrom_explain_foreign_scan,
+	.BeginForeignScan	= pgstrom_begin_foreign_scan,
+	.IterateForeignScan	= pgstrom_iterate_foreign_scan,
+	.ReScanForeignScan	= pgstrom_rescan_foreign_scan,
+	.EndForeignScan		= pgstrom_end_foreign_scan,
+};
 
+/*
+ * pgstrom_fdw_handler - FDW Handler function of PG-Strom
+ */
+Datum
+pgstrom_fdw_handler(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_POINTER(&PgStromFdwHandlerData);
+}
+PG_FUNCTION_INFO_V1(pgstrom_fdw_handler);
 
 void
 _PG_init(void)

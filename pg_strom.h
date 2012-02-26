@@ -12,7 +12,9 @@
  */
 #ifndef PG_STROM_H
 #define PG_STROM_H
+#include "commands/explain.h"
 #include "storage/shmem.h"
+#include "foreign/fdwapi.h"
 #include <pthread.h>
 
 
@@ -50,14 +52,39 @@ typedef struct {
 	Oid			func_argtypes[0];	/* argument types of function */
 } GpuFuncInfo;
 
-GpuTypeInfo  *pgstrom_gpu_type_lookup(Oid typeOid);
-GpuFuncInfo  *pgstrom_gpu_func_lookup(Oid funcOid);
-
+extern GpuTypeInfo  *pgstrom_gpu_type_lookup(Oid typeOid);
+extern GpuFuncInfo  *pgstrom_gpu_func_lookup(Oid funcOid);
+extern int	pgstrom_gpu_command_string(Oid ftableOid, int cmds[],
+									   char *buf, size_t buflen);
 
 /*
  * opencl_serv.c
  */
 extern void		pgstrom_opencl_startup(void *shmptr, Size shmsize);
+
+
+/*
+ * plan.c
+ */
+extern FdwPlan *pgstrom_plan_foreign_scan(Oid ftableOid,
+										  PlannerInfo *root,
+										  RelOptInfo *baserel);
+extern void		pgstrom_explain_foreign_scan(ForeignScanState *fss,
+											 ExplainState *es);
+
+/*
+ * exec.c
+ */
+extern void pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags);
+extern TupleTableSlot *pgstrom_iterate_foreign_scan(ForeignScanState *fss);
+extern void pgstrom_rescan_foreign_scan(ForeignScanState *fss);
+extern void pgstrom_end_foreign_scan(ForeignScanState *fss);
+
+/*
+ * main.c
+ */
+extern FdwRoutine PgStromFdwHandlerData;
+extern Datum pgstrom_fdw_handler(PG_FUNCTION_ARGS);
 
 
 

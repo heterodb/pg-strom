@@ -15,6 +15,7 @@
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/syscache.h"
 #include "pg_strom.h"
@@ -138,6 +139,7 @@ pgstrom_gpu_type_lookup(Oid type_oid)
 
 	if (entry->type_varref != 0 && entry->type_conref != 0)
 		return entry;
+	elog(INFO, "unsupported type: %u", entry->type_oid);
 	return NULL;
 }
 
@@ -179,6 +181,14 @@ static struct {
 	{ GPUCMD_CAST_FLOAT8_TO_INT4,	"int4",		1, {FLOAT8OID} },
 	{ GPUCMD_CAST_FLOAT8_TO_INT8,	"int8",		1, {FLOAT8OID} },
 	{ GPUCMD_CAST_FLOAT8_TO_FLOAT4,	"float4",	1, {FLOAT8OID} },
+
+
+	/* tentative */
+	{ GPUCMD_OPER_FLOAT8_LT,		"float8lt", 2, {FLOAT8OID, FLOAT8OID} },
+	{ GPUCMD_OPER_FLOAT8_MI,		"float8mi", 2, {FLOAT8OID, FLOAT8OID} },
+	{ GPUCMD_OPER_FLOAT8_PL,		"float8pl", 2, {FLOAT8OID, FLOAT8OID} },
+	{ GPUCMD_FUNC_POWER,			"dpow",		2, {FLOAT8OID, FLOAT8OID} },
+
 };
 
 static List	   *gpu_func_info_slot[512];
@@ -262,5 +272,123 @@ out:
 
 	if (entry->func_cmd != 0)
 		return entry;
+	elog(INFO, "unsupported function: %u", entry->func_oid);
 	return NULL;
+}
+
+/*
+ * pgstrom_gpu_command_string
+ *
+ * It returns text representation of the supplied GPU command series
+ */
+int
+pgstrom_gpu_command_string(Oid ftableOid, int cmds[],
+						   char *buf, size_t buflen)
+{
+	switch (cmds[0])
+	{
+		/*
+		 * Constraint reference
+		 */
+		case GPUCMD_TERMINAL_COMMAND:
+			snprintf(buf, buflen, "end;");
+			return -1;
+
+		case GPUCMD_CONREF_NULL:
+			snprintf(buf, buflen, "reg%d = null;", cmds[1]);
+			return 2;
+
+		case GPUCMD_CONREF_BOOL:
+			snprintf(buf, buflen, "reg%d = %u::bool", cmds[1], cmds[2]);
+			return 3;
+
+		case GPUCMD_CONREF_INT2:
+			snprintf(buf, buflen, "reg%d = %u::int2", cmds[1], cmds[2]);
+			return 3;
+
+		case GPUCMD_CONREF_INT4:
+			snprintf(buf, buflen, "reg%d = %u::int4", cmds[1], cmds[2]);
+			return 3;
+
+		case GPUCMD_CONREF_INT8:
+			snprintf(buf, buflen, "xreg%d = %lu::int8",
+					 cmds[1], *((int64 *)&cmds[2]));
+			return 4;
+
+		case GPUCMD_CONREF_FLOAT4:
+			snprintf(buf, buflen, "reg%d = %f::float",
+					 cmds[1], *((float *)&cmds[2]));
+			return 3;
+
+		case GPUCMD_CONREF_FLOAT8:
+			snprintf(buf, buflen, "xreg%d = %f::double",
+					 cmds[1], *((double *)&cmds[2]));
+			return 4;
+
+		/*
+		 * Variable References
+		 */
+		case GPUCMD_VARREF_BOOL:
+		case GPUCMD_VARREF_INT2:
+		case GPUCMD_VARREF_INT4:
+		case GPUCMD_VARREF_FLOAT4:
+			snprintf(buf, buflen, "reg%d = ${%s}",
+					 cmds[1], get_attname(ftableOid, cmds[2]));
+			return 3;
+
+		case GPUCMD_VARREF_INT8:
+		case GPUCMD_VARREF_FLOAT8:
+			snprintf(buf, buflen, "xreg%d = ${%s}",
+					 cmds[1], get_attname(ftableOid, cmds[2]));
+			return 3;
+
+			/*
+			 * Cast operation should be here
+			 */
+
+
+
+		/*
+		 * Boolean operations
+		 */
+		case GPUCMD_BOOLOP_AND:
+			snprintf(buf, buflen, "reg%d = reg%d & reg%d",
+					 cmds[1], cmds[1], cmds[2]);
+			return 3;
+
+		case GPUCMD_BOOLOP_OR:
+			snprintf(buf, buflen, "reg%d = reg%d | reg%d",
+					 cmds[1], cmds[1], cmds[2]);
+			return 3;
+
+		case GPUCMD_BOOLOP_NOT:
+			snprintf(buf, buflen, "reg%d = ! reg%d", cmds[1], cmds[1]);
+			return 3;
+
+		/*
+		 * Tentative for Testing
+		 */
+		case GPUCMD_OPER_FLOAT8_LT:
+			snprintf(buf, buflen, "reg%d = (xreg%d < xreg%d)",
+					 cmds[1], cmds[2], cmds[3]);
+			return 4;
+
+		case GPUCMD_OPER_FLOAT8_MI:
+			snprintf(buf, buflen, "xreg%d = (xreg%d - xreg%d)",
+					 cmds[1], cmds[2], cmds[3]);
+			return 4;
+
+		case GPUCMD_OPER_FLOAT8_PL:
+			snprintf(buf, buflen, "xreg%d = (xreg%d + xreg%d)",
+					 cmds[1], cmds[2], cmds[3]);
+			return 4;
+
+		case GPUCMD_FUNC_POWER:
+			snprintf(buf, buflen, "xreg%d = pow(xreg%d, xreg%d)",
+					 cmds[1], cmds[2], cmds[3]);
+			return 4;
+
+		default:
+			elog(ERROR, "unexpected GPU command: %d", cmds[0]);
+	}
 }

@@ -8,12 +8,15 @@
 #ifndef PGSTROM_OPENCL_CATALOG_H
 #define PGSTROM_OPENCL_CATALOG_H
 
-enum {
-	GPUCMD_INVALID = 0,	/* end of commands */
+#define PGSTROM_GPU_NUM_REGS	120
+
+enum GpuCmds {
+	GPUCMD_TERMINAL_COMMAND = 0,	/* End of command series */
 
 	/*
 	 * Const References
 	 */
+	GPUCMD_CONREF_NULL,
 	GPUCMD_CONREF_BOOL,
 	GPUCMD_CONREF_INT2,
 	GPUCMD_CONREF_INT4,
@@ -55,14 +58,27 @@ enum {
 	GPUCMD_CAST_FLOAT8_TO_INT8,
 	GPUCMD_CAST_FLOAT8_TO_FLOAT4,
 
+	/*
+	 * Boolean operations
+	 */
+	GPUCMD_BOOLOP_AND,
+	GPUCMD_BOOLOP_OR,
+	GPUCMD_BOOLOP_NOT,
 
-
+	/*
+	 * Tentative for Testing
+	 */
+	GPUCMD_OPER_FLOAT8_LT,
+	GPUCMD_OPER_FLOAT8_MI,
+	GPUCMD_OPER_FLOAT8_PL,
+	GPUCMD_FUNC_POWER,
+	
 
 
 	
 	
 	
 	
-} GpuCmds;
+};
 
 #endif	/* PGSTROM_OPENCL_CATALOG_H */
