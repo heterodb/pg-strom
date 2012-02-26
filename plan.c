@@ -100,6 +100,32 @@ is_gpu_executable_qual(RelOptInfo *baserel, RestrictInfo *rinfo)
 static void make_gpu_commands_walker(Node *node, StringInfo cmds, int regidx,
 									 Bitmapset **gpu_cols);
 
+static void push_cmd1(StringInfo cmds, int cmd1)
+{
+	appendBinaryStringInfo(cmds, (const char *)&cmd1, sizeof(cmd1));
+}
+
+static void push_cmd2(StringInfo cmds, int cmd1, int cmd2)
+{
+	appendBinaryStringInfo(cmds, (const char *)&cmd1, sizeof(cmd1));
+	appendBinaryStringInfo(cmds, (const char *)&cmd2, sizeof(cmd2));
+}
+
+static void push_cmd3(StringInfo cmds, int cmd1, int cmd2, int cmd3)
+{
+	appendBinaryStringInfo(cmds, (const char *)&cmd1, sizeof(cmd1));
+	appendBinaryStringInfo(cmds, (const char *)&cmd2, sizeof(cmd2));
+	appendBinaryStringInfo(cmds, (const char *)&cmd3, sizeof(cmd3));
+}
+
+static void push_cmd4(StringInfo cmds, int cmd1, int cmd2, int cmd3, int cmd4)
+{
+	appendBinaryStringInfo(cmds, (const char *)&cmd1, sizeof(cmd1));
+	appendBinaryStringInfo(cmds, (const char *)&cmd2, sizeof(cmd2));
+	appendBinaryStringInfo(cmds, (const char *)&cmd3, sizeof(cmd3));
+	appendBinaryStringInfo(cmds, (const char *)&cmd4, sizeof(cmd4));
+}
+
 static void
 make_gpu_func_commands(Oid func_oid, List *func_args,
 					   StringInfo cmds, int regidx, Bitmapset **gpu_cols)
@@ -135,9 +161,9 @@ make_gpu_func_commands(Oid func_oid, List *func_args,
 	}
 	Assert(gfunc->func_nargs == i - 1);
 
-	appendStringInfo(cmds, "%08x", gfunc->func_cmd);
+	push_cmd1(cmds, gfunc->func_cmd);
 	for (i=0; i <= gfunc->func_nargs; i++)
-		appendStringInfo(cmds, "%08x", regargs[i]);
+		push_cmd1(cmds, regargs[i]);
 }
 
 static void
@@ -146,6 +172,10 @@ make_gpu_commands_walker(Node *node, StringInfo cmds, int regidx,
 {
 	GpuTypeInfo	   *gtype;
 	ListCell	   *cell;
+	union {
+		uint32	reg32[2];
+		uint64	reg64;
+	} xreg;
 
 	if (node == NULL)
 		return;
@@ -157,22 +187,17 @@ make_gpu_commands_walker(Node *node, StringInfo cmds, int regidx,
 		Assert(gtype != NULL);
 
 		if (c->constisnull)
-			appendStringInfo(cmds, "%08x%08x", GPUCMD_CONREF_NULL, regidx);
+			push_cmd2(cmds, GPUCMD_CONREF_NULL, regidx);
 		else if (!gtype->type_x2regs)
-			appendStringInfo(cmds, "%08x%08x%08x",
-							 gtype->type_conref, regidx,
-							 DatumGetInt32(c->constvalue));
+			push_cmd3(cmds,
+					  gtype->type_conref, regidx,
+					  DatumGetInt32(c->constvalue));
 		else
 		{
-			union {
-				uint32	reg32[2];
-				uint64	reg64;
-			} temp;
-
-			temp.reg64 = DatumGetInt64(c->constvalue);
-			appendStringInfo(cmds, "%08x%08x%08x%08x",
-							 gtype->type_conref, regidx,
-							 temp.reg32[0], temp.reg32[1]);
+			xreg.reg64 = DatumGetInt64(c->constvalue);
+			push_cmd4(cmds,
+					  gtype->type_conref, regidx,
+					  xreg.reg32[0], xreg.reg32[1]);
 		}
 	}
 	else if (IsA(node, Var))
@@ -182,8 +207,8 @@ make_gpu_commands_walker(Node *node, StringInfo cmds, int regidx,
 		gtype = pgstrom_gpu_type_lookup(v->vartype);
 		Assert(gtype != NULL);
 
-		appendStringInfo(cmds, "%08x%08x%08x",
-						 gtype->type_varref, regidx, v->varattno);
+		push_cmd3(cmds,
+				  gtype->type_varref, regidx, v->varattno);
 		*gpu_cols = bms_add_member(*gpu_cols, v->varattno);
 	}
 	else if (IsA(node, FuncExpr))
@@ -211,7 +236,7 @@ make_gpu_commands_walker(Node *node, StringInfo cmds, int regidx,
 
 			make_gpu_commands_walker(linitial(bx->args), cmds, regidx+1,
 									 gpu_cols);
-			appendStringInfo(cmds, "%08x%08x", GPUCMD_BOOLOP_NOT, regidx);
+			push_cmd2(cmds, GPUCMD_BOOLOP_NOT, regidx);
 		}
 		else if (bx->boolop == AND_EXPR || bx->boolop == OR_EXPR)
 		{
@@ -229,10 +254,10 @@ make_gpu_commands_walker(Node *node, StringInfo cmds, int regidx,
 			Assert(list_length(bx->args) == shift);
 			while (shift >= 2)
 			{
-				appendStringInfo(cmds, "%08x%08x%08x",
-								 (bx->boolop == AND_EXPR ?
-								  GPUCMD_BOOLOP_AND : GPUCMD_BOOLOP_OR),
-								 regidx + shift - 2, regidx + shift - 1);
+				push_cmd3(cmds,
+						  (bx->boolop == AND_EXPR ?
+						   GPUCMD_BOOLOP_AND : GPUCMD_BOOLOP_OR),
+						  regidx + shift - 2, regidx + shift - 1);
 				shift--;
 			}			
 		}
@@ -243,13 +268,15 @@ make_gpu_commands_walker(Node *node, StringInfo cmds, int regidx,
 		elog(ERROR, "PG-Strom: unexpected node type: %d", nodeTag(node));
 }
 
-static char *
+static bytea *
 make_gpu_commands(List *gpu_quals, Bitmapset **gpu_cols)
 {
 	StringInfoData	cmds;
 	RestrictInfo   *rinfo;
+	int				code;
 
 	initStringInfo(&cmds);
+	appendStringInfoSpaces(&cmds, VARHDRSZ);
 
 	Assert(list_length(gpu_quals) > 0);
 	if (list_length(gpu_quals) == 1)
@@ -270,8 +297,10 @@ make_gpu_commands(List *gpu_quals, Bitmapset **gpu_cols)
 		make_gpu_commands_walker((Node *)makeBoolExpr(AND_EXPR, quals, -1),
 								 &cmds, 0, gpu_cols);
 	}
-	appendStringInfo(&cmds, "%08x", GPUCMD_TERMINAL_COMMAND);
-	return cmds.data;
+	code = GPUCMD_TERMINAL_COMMAND;
+	appendBinaryStringInfo(&cmds, (const char *)&code, sizeof(code));
+	SET_VARSIZE(cmds.data, cmds.len);
+	return (bytea *)cmds.data;
 }
 
 static bool
@@ -280,7 +309,7 @@ is_cpu_executable_qual(RelOptInfo *baserel, RestrictInfo *rinfo)
 	return false;
 }
 
-static char *
+static bytea *
 make_cpu_commands(List *cpu_quals, Bitmapset **cpu_cols)
 {
 	return NULL;
@@ -299,7 +328,8 @@ pgstrom_plan_foreign_scan(Oid ftableOid,
 	Bitmapset  *required_cols = NULL;
 	ListCell   *cell;
 	AttrNumber	attno;
-	char	   *cmdstr;
+	bytea	   *cmds_bytea;
+	Const	   *cmds_const;
 	DefElem	   *defel;
 
 	/*
@@ -329,8 +359,12 @@ pgstrom_plan_foreign_scan(Oid ftableOid,
 	{
 		Bitmapset  *gpu_cols = NULL;
 
-		cmdstr = make_gpu_commands(gpu_quals, &gpu_cols);
-		defel = makeDefElem("gpu_cmds", (Node *) makeString(cmdstr));
+		cmds_bytea = make_gpu_commands(gpu_quals, &gpu_cols);
+		cmds_const = makeConst(BYTEAOID, -1, InvalidOid,
+							   VARSIZE(cmds_bytea),
+							   PointerGetDatum(cmds_bytea),
+							   false, false);
+		defel = makeDefElem("gpu_cmds", (Node *) cmds_const);
 		private = lappend(private, defel);
 
 		while ((attno = bms_first_member(gpu_cols)) >= 0)
@@ -344,8 +378,12 @@ pgstrom_plan_foreign_scan(Oid ftableOid,
 	{
 		Bitmapset  *cpu_cols = NULL;
 
-		cmdstr = make_cpu_commands(cpu_quals, &cpu_cols);
-		defel = makeDefElem("cpu_cmds", (Node *) makeString(cmdstr));
+		cmds_bytea = make_cpu_commands(cpu_quals, &cpu_cols);
+		cmds_const = makeConst(BYTEAOID, -1, InvalidOid,
+							   VARSIZE(cmds_bytea),
+							   PointerGetDatum(cmds_bytea),
+							   false, false);
+		defel = makeDefElem("cpu_cmds", (Node *) cmds_const);
 		private = lappend(private, defel);
 
 		while ((attno = bms_first_member(cpu_cols)) >= 0)
@@ -391,8 +429,8 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 {
 	ForeignScan	   *fscan = (ForeignScan *) fss->ss.ps.plan;
 	Relation		relation = fss->ss.ss_currentRelation;
-	char		   *gpu_cmds = NULL;
-	char		   *cpu_cmds = NULL;
+	Const		   *gpu_cmds = NULL;
+	Const		   *cpu_cmds = NULL;
 	Bitmapset	   *gpu_cols = NULL;
 	Bitmapset	   *cpu_cols = NULL;
 	Bitmapset	   *required_cols = NULL;
@@ -406,9 +444,9 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 		DefElem	   *defel = (DefElem *) lfirst(cell);
 
 		if (strcmp(defel->defname, "gpu_cmds") == 0)
-			gpu_cmds = strVal(defel->arg);
+			gpu_cmds = (Const *) defel->arg;
 		else if (strcmp(defel->defname, "cpu_cmds") == 0)
-			cpu_cmds = strVal(defel->arg);
+			cpu_cmds = (Const *) defel->arg;
 		else if (strcmp(defel->defname, "gpu_cols") == 0)
 			gpu_cols = bms_add_member(gpu_cols, intVal(defel->arg));
 		else if (strcmp(defel->defname, "cpu_cols") == 0)
@@ -461,25 +499,14 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 
 	if (gpu_cmds != NULL)
 	{
-		int	   *cmds;
-		char   *p;
 		char	temp[1024];
+		int	   *cmds;
 		int		skip;
 		bool	first = true;
 
-		resetStringInfo(&str);
-		for (p = gpu_cmds; *p != '\0'; p += 8)
-		{
-			int		code;
+		Assert(IsA(gpu_cmds, Const));
 
-			strncpy(temp, p, 8);
-			temp[8] = '\0';
-
-			sscanf(temp, "%x", &code);
-			appendBinaryStringInfo(&str, (const char *)&code, sizeof(int));
-		}
-		cmds = (int *)str.data;
-
+		cmds = (int *)VARDATA((bytea *)(gpu_cmds->constvalue));
 		for (skip = 0; skip >= 0; cmds += skip)
 		{
 			skip = pgstrom_gpu_command_string(RelationGetRelid(relation),
