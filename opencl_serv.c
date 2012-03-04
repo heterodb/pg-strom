@@ -19,17 +19,6 @@
 #include <pthread.h>
 #include <unistd.h>
 
-typedef struct {
-	SHM_QUEUE  *send_cmdq;	/* dual-linked list of GPU/CPU/Recv queue */
-	SHM_QUEUE  *recv_cmdq;	/* pointer to the response queue */
-	uint32	   *gpu_cmds;	/* command array handled by GPU */
-	uint32	   *cpu_cmds;	/* command array handled by CPU */
-	int			nattrs;		/* number of columns */
-	int			nitems;		/* number of rows */
-	bits8	   *cs_rowmap;	/* rowmap of CS, also base address of buffer */
-	int		   *cs_isnull;	/* offset from the cs_rowmap, or 0 */
-	int		   *cs_values;	/* offset from the cs_rowmap, or 0 */
-} ChunkBuffer;
 
 
 
@@ -51,7 +40,7 @@ static DeviceInfo  *pgstrom_device_info;
 static cl_context	pgstrom_cl_context;
 static cl_mem		pgstrom_cl_shmbuf;
 static cl_program	pgstrom_cl_program;
-static SHM_QUEUE   *pgstrom_gpu_cmdq;
+static ShmsegQueue *pgstrom_gpu_cmdq;
 static pthread_t	pgstrom_opencl_thread;
 
 
@@ -62,7 +51,7 @@ pgstrom_opencl_server(void *arg)
 
 	while (true)
 	{
-		item = pgstrom_shmqueue_dequeue(pgstrom_gpu_cmdq, true);
+		item = pgstrom_shmqueue_dequeue(pgstrom_gpu_cmdq);
 		Assert(item != NULL);
 
 
@@ -211,8 +200,20 @@ pgstrom_opencl_device_init(void)
 							 sizeof(size_t) * num_devices,
 							 prog_binsz,
 							 NULL) == CL_SUCCESS)
-			elog(LOG, "binary size = %u kB", prog_binsz[0] / 1024);
+			elog(LOG, "binary size = %lu kB", prog_binsz[0] / 1024);
 	}
+}
+
+int
+pgstrom_opencl_num_devices(void)
+{
+	return pgstrom_num_devices;
+}
+
+bool
+pgstrom_opencl_fp64_supported(void)
+{
+	return true;	/* tentasive */
 }
 
 void
@@ -235,18 +236,16 @@ pgstrom_opencl_startup(void *shmptr, Size shmsize)
 						pgstrom_opencl_error_string(ret))));
 
 	/* Create a command queue of GPU device */
-	pgstrom_gpu_cmdq = pgstrom_shmqueue_create();
+	pgstrom_gpu_cmdq = pgstrom_shmseg_alloc(sizeof(ShmsegQueue));
 	if (!pgstrom_gpu_cmdq)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("PG-Strom: failed to create command queue")));
+		elog(ERROR, "PG-Strom: out of shared memory");
+	if (!pgstrom_shmqueue_init(pgstrom_gpu_cmdq))
+		elog(ERROR, "PG-Strom: failed to init shmqueue");
 
 	/* Launch computing server thread of GPU */
 	if (pthread_create(&pgstrom_opencl_thread, NULL,
 					   pgstrom_opencl_server, NULL) != 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("PG-Strom: failed to launch GPU computing server")));
+		elog(ERROR, "PG-Strom: failed to launch GPU computing server");
 }
 
 static const char *

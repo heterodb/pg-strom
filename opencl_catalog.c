@@ -390,5 +390,6 @@ pgstrom_gpu_command_string(Oid ftableOid, int cmds[],
 
 		default:
 			elog(ERROR, "unexpected GPU command: %d", cmds[0]);
+			return 0;	/* be compiler quiet */
 	}
 }

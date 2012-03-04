@@ -15,31 +15,67 @@
 #include "commands/explain.h"
 #include "storage/shmem.h"
 #include "foreign/fdwapi.h"
+#include "utils/relcache.h"
 #include <pthread.h>
-
-
+#include <semaphore.h>
 
 /*
- * shmseg.c
+ * Schema of shadow tables
  */
-extern SHM_QUEUE   *pgstrom_shmqueue_create(void);
-extern void		pgstrom_shmqueue_retain(SHM_QUEUE *shmqhead);
-extern void		pgstrom_shmqueue_release(SHM_QUEUE *shmqhead);
-extern bool		pgstrom_shmqueue_enqueue(SHM_QUEUE *shmqhead, SHM_QUEUE *item);
-extern SHM_QUEUE   *pgstrom_shmqueue_dequeue(SHM_QUEUE *shmqhead, bool wait);
+#define PGSTROM_CHUNK_SIZE		(BLCKSZ / 2)
 
-extern void	   *pgstrom_shmseg_create(Size size);
-extern void		pgstrom_shmseg_retain(void *ptr);
-extern void		pgstrom_shmseg_release(void *ptr);
-extern void		pgstrom_shmseg_init(void);
+#define PGSTROM_SCHEMA_NAME		"pg_strom"
+
+#define Natts_pg_strom_rmap			3
+#define Anum_pg_strom_rmap_rowid	1
+#define Anum_pg_strom_rmap_nitems	2
+#define Anum_pg_strom_rmap_rowmap	3
+
+#define Natts_pg_strom_cs			4
+#define Anum_pg_strom_cs_rowid		1
+#define	Anum_pg_strom_cs_nitems		2
+#define Anum_pg_strom_cs_isnull		3
+#define Anum_pg_strom_cs_values		4
+
 
 /*
- * opencl_catalog.c
+ * Data Structures
  */
 typedef struct {
+	SHM_QUEUE		qhead;
+	pthread_mutex_t	qlock;
+	sem_t			qsem;
+} ShmsegQueue;
+
+#define CHUNKBUF_STATUS_FREE		1
+#define CHUNKBUF_STATUS_EXEC		2
+#define CHUNKBUF_STATUS_READY		3
+#define CHUNKBUF_STATUS_ERROR		4
+
+typedef struct {
+	SHM_QUEUE		chain;		/* dual-linked list to be chained */
+	ShmsegQueue	   *recv_cmdq;	/* reference to the response queue */
+	uint32		   *gpu_cmds;	/* command array handled by GPU */
+	uint32		   *cpu_cmds;	/* command array handled by CPU */
+	int				status;		/* status of this chunk-buffer */
+	int				nattrs;		/* number of columns */
+	int64			rowid;		/* the first row-id of this chunk */
+	int				nitems;		/* number of rows */
+	Size			dma_length;	/* length to be translated with DMA */
+	bits8		   *cs_rowmap;	/* rowmap of the column store */
+	int			   *cs_isnull;	/* offsets from the cs_rowmap, or 0 */
+	int			   *cs_values;	/* offsets from the cs_rowmap, or 0 */
+} ChunkBuffer;
+
+#define chunk_cs_isnull(chunk, attno)			\
+	((bits8 *)((chunk)->cs_rowmap + (chunk)->cs_isnull[(attno) - 1]))
+#define chunk_cs_values(chunk, attno)			\
+	((char *)((chunk)->cs_rowmap + (chunk)->cs_values[(attno) - 1]))
+
+typedef struct {
 	Oid			type_oid;
-	bool		type_x2regs;
-	bool		type_fp64;
+	bool		type_x2regs;	/* type uses dual 32bit registers? */
+	bool		type_fp64;		/* type needs double */
 	uint32		type_varref;	/* cmd code to reference type variable */
 	uint32		type_conref;	/* cmd code to reference type constant */
 } GpuTypeInfo;
@@ -52,6 +88,26 @@ typedef struct {
 	Oid			func_argtypes[0];	/* argument types of function */
 } GpuFuncInfo;
 
+/*
+ * shmseg.c
+ */
+extern bool		pgstrom_shmqueue_init(ShmsegQueue *shmq);
+extern void		pgstrom_shmqueue_destroy(ShmsegQueue *shmq);
+extern int		pgstrom_shmqueue_nitems(ShmsegQueue *shmq);
+extern void		pgstrom_shmqueue_enqueue(ShmsegQueue *shmq, SHM_QUEUE *item);
+extern SHM_QUEUE   *pgstrom_shmqueue_dequeue(ShmsegQueue *shmq);
+extern SHM_QUEUE   *pgstrom_shmqueue_trydequeue(ShmsegQueue *shmq);
+
+#define container_of(ptr, type, field)			\
+	((void *)((uintptr_t)(ptr) - offsetof(type, field)))
+
+extern void	   *pgstrom_shmseg_alloc(Size size);
+extern void		pgstrom_shmseg_free(void *ptr);
+extern void		pgstrom_shmseg_init(void);
+
+/*
+ * opencl_catalog.c
+ */
 extern GpuTypeInfo  *pgstrom_gpu_type_lookup(Oid typeOid);
 extern GpuFuncInfo  *pgstrom_gpu_func_lookup(Oid funcOid);
 extern int	pgstrom_gpu_command_string(Oid ftableOid, int cmds[],
@@ -60,8 +116,10 @@ extern int	pgstrom_gpu_command_string(Oid ftableOid, int cmds[],
 /*
  * opencl_serv.c
  */
-extern void		pgstrom_opencl_startup(void *shmptr, Size shmsize);
-
+extern void	pgstrom_opencl_startup(void *shmptr, Size shmsize);
+extern bool pgstrom_opencl_enqueue_chunk(ChunkBuffer *chunk);
+extern int	pgstrom_opencl_num_devices(void);
+extern bool	pgstrom_opencl_fp64_supported(void);
 
 /*
  * plan.c
@@ -79,6 +137,16 @@ extern void pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags);
 extern TupleTableSlot *pgstrom_iterate_foreign_scan(ForeignScanState *fss);
 extern void pgstrom_rescan_foreign_scan(ForeignScanState *fss);
 extern void pgstrom_end_foreign_scan(ForeignScanState *fss);
+extern void pgstrom_executor_init(void);
+
+/*
+ * utilcmds.c
+ */
+extern Relation pgstrom_open_rowid_map(Relation base, LOCKMODE lockmode);
+extern Relation pgstrom_open_cs_table(Relation base, AttrNumber attno,
+									  LOCKMODE lockmode);
+extern Relation pgstrom_open_cs_index(Relation base, AttrNumber attno,
+									  LOCKMODE lockmode);
 
 /*
  * main.c

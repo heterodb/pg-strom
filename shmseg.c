@@ -18,7 +18,8 @@
 #include <semaphore.h>
 #include <unistd.h>
 
-#define SHMSEG_BLOCK_MAGIC		0xdeadbeaf
+#define SHMSEG_BLOCK_MAGIC_FREE		0xF9EEA9EA
+#define SHMSEG_BLOCK_MAGIC_USED		0xA110CEDF
 
 typedef struct ShmsegBlock {
 	uint32		magic;
@@ -26,7 +27,6 @@ typedef struct ShmsegBlock {
 	struct ShmsegBlock  *next_block;	/* end block, if null */
 	SHM_QUEUE	list;		/* list entry of free_list or used_list */
 	Size		size;		/* size of this block includes header */
-	int			refcnt;		/* free block, if refcnt == 0 */
 	Datum		data[0];
 } ShmsegBlock;
 
@@ -40,16 +40,6 @@ typedef struct {
 	ShmsegBlock		block[0];
 } ShmsegHead;
 
-typedef struct {
-	int				refcnt;
-	sem_t			qsem;
-	pthread_mutex_t	qlock;
-	SHM_QUEUE		qhead;
-} ShmsegQueue;
-
-#define container_of(ptr, type, field)			\
-	((void *)((uintptr_t)(ptr) - offsetof(type, field)))
-
 /*
  * Local declaration
  */
@@ -58,101 +48,93 @@ static ShmsegHead			   *shmseg_head;
 static pthread_mutexattr_t		shmseg_mutex_attr;
 static shmem_startup_hook_type	shmem_startup_hook_next;
 
-SHM_QUEUE *
-pgstrom_shmqueue_create(void)
+bool
+pgstrom_shmqueue_init(ShmsegQueue *shmq)
 {
-	ShmsegQueue	*shmq;
-
-	shmq = pgstrom_shmseg_create(sizeof(ShmsegQueue));
-	if (!shmq)
-		return NULL;
-
-	shmq->refcnt = 1;
-	if (sem_init(&shmq->qsem, 1, 0) != 0)
-		goto error_1;
-	if (pthread_mutex_init(&shmq->qlock, &shmseg_mutex_attr) != 0)
-		goto error_2;
 	SHMQueueInit(&shmq->qhead);
 
-	return &shmq->qhead;
+	if (sem_init(&shmq->qsem, 1, 0) != 0)
+		return false;
 
-error_2:
-	sem_destroy(&shmq->qsem);
-error_1:
-	pgstrom_shmseg_release(shmq);
-	return NULL;
-}
-
-void
-pgstrom_shmqueue_retain(SHM_QUEUE *shmqhead)
-{
-	ShmsegQueue *shmq = container_of(shmqhead, ShmsegQueue, qhead);
-
-	Assert(shmqhead == &shmq->qhead);
-	pthread_mutex_lock(&shmq->qlock);
-	shmq->refcnt++;
-	pthread_mutex_unlock(&shmq->qlock);
-}
-
-void
-pgstrom_shmqueue_release(SHM_QUEUE *shmqhead)
-{
-	ShmsegQueue *shmq = container_of(shmqhead, ShmsegQueue, qhead);
-
-	Assert(shmqhead == &shmq->qhead);
-	pthread_mutex_lock(&shmq->qlock);
-	if (--shmq->refcnt == 0)
+	if (pthread_mutex_init(&shmq->qlock, &shmseg_mutex_attr) != 0)
 	{
-		
-		
-		
-		
+		sem_destroy(&shmq->qsem);
+		return false;
 	}
-	pthread_mutex_unlock(&shmq->qlock);
-}
-
-bool
-pgstrom_shmqueue_enqueue(SHM_QUEUE *shmqhead, SHM_QUEUE *item)
-{
-	ShmsegQueue *shmq = container_of(shmqhead, ShmsegQueue, qhead);
-
-	Assert(shmqhead == &shmq->qhead);
-	pthread_mutex_lock(&shmq->qlock);
-	SHMQueueInsertBefore(&shmq->qhead, item);
-	sem_post(&shmq->qsem);
-	pthread_mutex_unlock(&shmq->qlock);
+	SHMQueueInit(&shmq->qhead);
 
 	return true;
 }
 
-SHM_QUEUE *
-pgstrom_shmqueue_dequeue(SHM_QUEUE *shmqhead, bool wait)
+void
+pgstrom_shmqueue_destroy(ShmsegQueue *shmq)
 {
-	ShmsegQueue	*shmq = container_of(shmqhead, ShmsegQueue, qhead);
-	SHM_QUEUE	*item;
+	sem_destroy(&shmq->qsem);
+	pthread_mutex_destroy(&shmq->qlock);
+}
 
-	Assert(shmqhead == &shmq->qhead);
-retry:
-	if ((wait ?
-		 sem_wait(&shmq->qsem) :
-		 sem_trywait(&shmq->qsem)) == 0)
+void
+pgstrom_shmqueue_enqueue(ShmsegQueue *shmq, SHM_QUEUE *item)
+{
+	pthread_mutex_lock(&shmq->qlock);
+	SHMQueueInsertBefore(&shmq->qhead, item);
+	sem_post(&shmq->qsem);
+	pthread_mutex_unlock(&shmq->qlock);
+}
+
+int
+pgstrom_shmqueue_nitems(ShmsegQueue *shmq)
+{
+	int		rc, value;
+
+	rc = sem_getvalue(&shmq->qsem, &value);
+	Assert(rc == 0);
+
+	return value;
+}
+
+SHM_QUEUE *
+pgstrom_shmqueue_dequeue(ShmsegQueue *shmq)
+{
+	SHM_QUEUE  *item;
+
+	do {
+		if (sem_wait(&shmq->qsem) == 0)
+		{
+			pthread_mutex_lock(&shmq->qlock);
+			Assert(!SHMQueueEmpty(&shmq->qhead));
+			item = shmq->qhead.next;
+			SHMQueueDelete(item);
+			pthread_mutex_unlock(&shmq->qlock);
+		}
+		else
+			item = NULL;
+	} while (item == NULL && errno == EINTR);
+
+	return item;
+}
+
+SHM_QUEUE *
+pgstrom_shmqueue_trydequeue(ShmsegQueue *shmq)
+{
+	SHM_QUEUE  *item;
+
+	if (sem_trywait(&shmq->qsem) == 0)
 	{
 		pthread_mutex_lock(&shmq->qlock);
 		Assert(!SHMQueueEmpty(&shmq->qhead));
 		item = shmq->qhead.next;
 		SHMQueueDelete(item);
 		pthread_mutex_unlock(&shmq->qlock);
-
-		return item;
 	}
-	else if (errno == EINTR)
-		goto retry;
+	else
+		item = NULL;
 
-	return NULL;
+	return item;
 }
 
 void *
-pgstrom_shmseg_create(Size size)
+pgstrom_shmseg_alloc(Size size)
 {
 	ShmsegBlock	   *block;
 	ShmsegBlock	   *block_new;
@@ -165,7 +147,7 @@ pgstrom_shmseg_create(Size size)
 										offsetof(ShmsegBlock, list));
 	while (block)
 	{
-		Assert(block->refcnt == 0);
+		Assert(block->magic == SHMSEG_BLOCK_MAGIC_FREE);
 
 		/*
 		 * Size of the current free block is not enough to assign a shared
@@ -190,7 +172,7 @@ pgstrom_shmseg_create(Size size)
 		if (block->size <= required + getpagesize() / 2)
 		{
 			SHMQueueDelete(&block->list);
-			block->refcnt = 1;
+			block->magic = SHMSEG_BLOCK_MAGIC_USED;
 			SHMQueueInsertAfter(&shmseg_head->used_list, &block->list);
 
 			shmseg_head->used_size += block->size;
@@ -201,18 +183,17 @@ pgstrom_shmseg_create(Size size)
 			SHMQueueDelete(&block->list);
 
 			block_new = (ShmsegBlock *)(((uintptr_t) block) + required);
-			block_new->magic = SHMSEG_BLOCK_MAGIC;
+			block_new->magic = SHMSEG_BLOCK_MAGIC_FREE;
 			block_new->prev_block = block;
 			block_new->next_block = block->next_block;
 			if (block_new->next_block)
 				block_new->next_block->prev_block = block_new;
 			block_new->size = block->size - required;
-			block_new->refcnt = 0;
 			SHMQueueInsertAfter(&shmseg_head->free_list, &block_new->list);
 
+			block->magic = SHMSEG_BLOCK_MAGIC_USED;
 			block->next_block = block_new;
 			block->size = required;
-			block->refcnt = 1;
 			SHMQueueInsertAfter(&shmseg_head->used_list, &block->list);
 
 			shmseg_head->used_size += required;
@@ -226,61 +207,48 @@ pgstrom_shmseg_create(Size size)
 }
 
 void
-pgstrom_shmseg_retain(void *ptr)
-{
-	ShmsegBlock	*block = container_of(ptr, ShmsegBlock, data);
-
-	Assert(block->magic == SHMSEG_BLOCK_MAGIC);
-	pthread_mutex_lock(&shmseg_head->lock);
-	block->refcnt++;
-	pthread_mutex_unlock(&shmseg_head->lock);
-}
-
-void
-pgstrom_shmseg_release(void *ptr)
+pgstrom_shmseg_free(void *ptr)
 {
 	ShmsegBlock *temp;
 	ShmsegBlock	*block = container_of(ptr, ShmsegBlock, data);
 
-	Assert(block->magic == SHMSEG_BLOCK_MAGIC);
+	Assert(block->magic == SHMSEG_BLOCK_MAGIC_USED);
 	pthread_mutex_lock(&shmseg_head->lock);
-	if (--block->refcnt == 0)
+
+	SHMQueueDelete(&block->list);
+	shmseg_head->used_size -= block->size;
+	shmseg_head->free_size += block->size;
+
+	/*
+	 * Does the neighboring blocks available to merge?
+	 */
+	temp = block->next_block;
+	if (temp && temp->magic == SHMSEG_BLOCK_MAGIC_FREE)
 	{
-		SHMQueueDelete(&block->list);
-		shmseg_head->used_size -= block->size;
-		shmseg_head->free_size += block->size;
+		SHMQueueDelete(&temp->list);
 
-		/*
-		 * Does the neighboring blocks available to merge?
-		 */
-		temp = block->next_block;
-		if (temp && temp->refcnt == 0)
-		{
-			SHMQueueDelete(&temp->list);
-
-			Assert(temp->prev_block == block);
-			block->next_block = temp->next_block;
-			if (temp->next_block)
-				temp->next_block->prev_block = block;
-			block->size += temp->size;
-		}
-
-		temp = block->prev_block;
-		if (temp && temp->refcnt == 0)
-		{
-			SHMQueueDelete(&temp->list);
-
-			Assert(temp->next_block == block);
-			temp->next_block = block->next_block;
-			if (block->next_block)
-				block->next_block->prev_block = temp;
-			temp->size += block->size;
-
-			block = temp;
-		}
-
-		SHMQueueInsertAfter(&shmseg_head->free_list, &block->list);
+		Assert(temp->prev_block == block);
+		block->next_block = temp->next_block;
+		if (temp->next_block)
+			temp->next_block->prev_block = block;
+		block->size += temp->size;
 	}
+
+	temp = block->prev_block;
+	if (temp && temp->magic == SHMSEG_BLOCK_MAGIC_FREE)
+	{
+		SHMQueueDelete(&temp->list);
+
+		Assert(temp->next_block == block);
+		temp->next_block = block->next_block;
+		if (block->next_block)
+			block->next_block->prev_block = temp;
+		temp->size += block->size;
+		
+		block = temp;
+	}
+	SHMQueueInsertAfter(&shmseg_head->free_list, &block->list);
+
 	pthread_mutex_unlock(&shmseg_head->lock);
 }
 
@@ -306,11 +274,11 @@ pgstrom_shmseg_startup(void)
 
 	/* Init ShmsegBlock as an empty big block */
 	block = &shmseg_head->block[0];
+	block->magic = SHMSEG_BLOCK_MAGIC_FREE;
 	block->prev_block = NULL;
 	block->next_block = NULL;
 	SHMQueueInsertAfter(&shmseg_head->free_list, &block->list);
 	block->size = chunk_bufsz - offsetof(ShmsegHead, block);
-	block->refcnt = 0;
 
 	/* launch OpenCL computing server */
 	pgstrom_opencl_startup(block, chunk_bufsz);
