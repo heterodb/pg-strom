@@ -71,7 +71,7 @@ pgstrom_open_shadow_relation(Relation base_rel, AttrNumber attnum,
 		ForeignServer	   *fs = GetForeignServer(ft->serverid);
 		ForeignDataWrapper *fdw = GetForeignDataWrapper(fs->fdwid);
 
-		if (GetFdwRoutine(fdw->fdwhandler) != &pgstromFdwHandlerData)
+		if (GetFdwRoutine(fdw->fdwhandler) != &PgStromFdwHandlerData)
 			ereport(ERROR,
 					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 					 errmsg("\"%s\" is not managed by pg_strom",
@@ -102,13 +102,12 @@ pgstrom_open_shadow_relation(Relation base_rel, AttrNumber attnum,
 }
 
 Relation
-pgstrom_open_shadow_table(Relation base_rel,
-						  AttrNumber attnum,
-						  LOCKMODE lockmode)
+pgstrom_open_rowid_map(Relation base_rel, LOCKMODE lockmode)
 {
 	Relation	relation;
 
-	relation = pgstrom_open_shadow_relation(base_rel, attnum, lockmode, false);
+	relation = pgstrom_open_shadow_relation(base_rel, InvalidAttrNumber,
+											lockmode, false);
 	if (RelationGetForm(relation)->relkind != RELKIND_RELATION)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
@@ -118,13 +117,27 @@ pgstrom_open_shadow_table(Relation base_rel,
 }
 
 Relation
-pgstrom_open_shadow_index(Relation base_rel,
-						  AttrNumber attnum,
-						  LOCKMODE lockmode)
+pgstrom_open_cs_table(Relation base_rel, AttrNumber attno, LOCKMODE lockmode)
 {
 	Relation	relation;
 
-	relation = pgstrom_open_shadow_relation(base_rel, attnum, lockmode, true);
+	relation = pgstrom_open_shadow_relation(base_rel, attno,
+											lockmode, false);
+	if (RelationGetForm(relation)->relkind != RELKIND_RELATION)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not a table",
+						RelationGetRelationName(relation))));
+	return relation;
+}
+
+Relation
+pgstrom_open_cs_index(Relation base, AttrNumber attno, LOCKMODE lockmode)
+{
+	Relation	relation;
+
+	relation = pgstrom_open_shadow_relation(base, attno,
+											lockmode, true);
 	if (RelationGetForm(relation)->relkind != RELKIND_INDEX)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
@@ -134,7 +147,7 @@ pgstrom_open_shadow_index(Relation base_rel,
 }
 
 RangeVar *
-pgstrom_lookup_shadow_sequence(Relation base_rel)
+pgstrom_lookup_sequence(Relation base_rel)
 {
 	char	   *nsp_name;
 	char		seq_name[NAMEDATALEN * 2 + 20];
@@ -177,7 +190,8 @@ pgstrom_create_shadow_index(Relation base_rel, Relation cs_rel,
 
 	idx_info = makeNode(IndexInfo);
 	idx_info->ii_NumIndexAttrs = 1;
-	idx_info->ii_KeyAttrNumbers[0] = Anum_pg_strom_rowid;
+	idx_info->ii_KeyAttrNumbers[0]
+		= (!attr ? Anum_pg_strom_rmap_rowid : Anum_pg_strom_cs_rowid);
 	idx_info->ii_Expressions = NIL;
 	idx_info->ii_ExpressionsState = NIL;
 	idx_info->ii_Predicate = NIL;
@@ -246,33 +260,33 @@ pgstrom_create_shadow_table(Oid namespaceId, Relation base_rel,
 
 	if (!attr)
 	{
-		tupdesc = CreateTemplateTupleDesc(Natts_pg_strom - 1, false);
-		TupleDescInitEntry(tupdesc, Anum_pg_strom_rowid,
+		tupdesc = CreateTemplateTupleDesc(Natts_pg_strom_rmap, false);
+		TupleDescInitEntry(tupdesc, Anum_pg_strom_rmap_rowid,
 						   "rowid",  INT8OID,  -1, 0);
-		TupleDescInitEntry(tupdesc, Anum_pg_strom_nitems,
+		TupleDescInitEntry(tupdesc, Anum_pg_strom_rmap_nitems,
 						   "nitems", INT4OID,  -1, 0);
-		TupleDescInitEntry(tupdesc, Anum_pg_strom_isnull,
-						   "isnull", BYTEAOID, -1, 0);
-		tupdesc->attrs[Anum_pg_strom_isnull - 1]->attstorage = 'p';
+		TupleDescInitEntry(tupdesc, Anum_pg_strom_rmap_rowmap,
+						   "rowmap", BYTEAOID, -1, 0);
+		tupdesc->attrs[Anum_pg_strom_rmap_rowmap - 1]->attstorage = 'p';
 	}
 	else
 	{
-		tupdesc = CreateTemplateTupleDesc(Natts_pg_strom, false);
-		TupleDescInitEntry(tupdesc, Anum_pg_strom_rowid,
+		tupdesc = CreateTemplateTupleDesc(Natts_pg_strom_cs, false);
+		TupleDescInitEntry(tupdesc, Anum_pg_strom_cs_rowid,
 						   "rowid",  INT8OID,  -1, 0);
-		TupleDescInitEntry(tupdesc, Anum_pg_strom_nitems,
+		TupleDescInitEntry(tupdesc, Anum_pg_strom_cs_nitems,
 						   "nitems", INT4OID,  -1, 0);
-		TupleDescInitEntry(tupdesc, Anum_pg_strom_isnull,
+		TupleDescInitEntry(tupdesc, Anum_pg_strom_cs_isnull,
 						   "isnull", BYTEAOID, -1, 0);
-		TupleDescInitEntry(tupdesc, Anum_pg_strom_values,
+		TupleDescInitEntry(tupdesc, Anum_pg_strom_cs_values,
 						   "valued", BYTEAOID, -1, 0);
 		/*
 		 * PG-Strom wants to keep varlena value being inlined, and never
 		 * uses external toast relation due to the performance reason.
 		 * So, we override the default setting of type definitions.
 		 */
-		tupdesc->attrs[Anum_pg_strom_isnull - 1]->attstorage = 'p';
-		tupdesc->attrs[Anum_pg_strom_values - 1]->attstorage = 'p';
+		tupdesc->attrs[Anum_pg_strom_cs_isnull - 1]->attstorage = 'p';
+		tupdesc->attrs[Anum_pg_strom_cs_values - 1]->attstorage = 'p';
 	}
 
 	cs_relid = heap_create_with_catalog(cs_name,
@@ -596,7 +610,7 @@ pgstrom_post_rename_schema(RenameStmt *stmt, Oid namespaceId)
 		SysScanDesc		ascan;
 		HeapTuple		atup;
 
-		if (GetFdwRoutine(fdw->fdwhandler) != &pgstromFdwHandlerData)
+		if (GetFdwRoutine(fdw->fdwhandler) != &PgStromFdwHandlerData)
 			continue;
 
 		cur_relname = NameStr(((Form_pg_class) GETSTRUCT(tuple))->relname);
@@ -1039,7 +1053,7 @@ pgstrom_process_utility_command(Node *parsetree,
 				/* Is a foreign table managed by PG-Strom? */
 				fs = GetForeignServerByName(stmt->servername, false);
 				fdw = GetForeignDataWrapper(fs->fdwid);
-				if (GetFdwRoutine(fdw->fdwhandler) == &pgstromFdwHandlerData)
+				if (GetFdwRoutine(fdw->fdwhandler) == &PgStromFdwHandlerData)
 					pgstrom_post_create_foreign_table(stmt);
 			}
 			break;
@@ -1056,7 +1070,7 @@ pgstrom_process_utility_command(Node *parsetree,
 				ft = GetForeignTable(base_relid);
 				fs = GetForeignServer(ft->serverid);
 				fdw = GetForeignDataWrapper(fs->fdwid);
-				if (GetFdwRoutine(fdw->fdwhandler) == &pgstromFdwHandlerData)
+				if (GetFdwRoutine(fdw->fdwhandler) == &PgStromFdwHandlerData)
 					pgstrom_post_alter_schema(stmt, base_nspid, base_relid);
 			}
 			break;
@@ -1073,7 +1087,7 @@ pgstrom_process_utility_command(Node *parsetree,
 					ft = GetForeignTable(base_relid);
 					fs = GetForeignServer(ft->serverid);
 					fdw = GetForeignDataWrapper(fs->fdwid);
-					if (GetFdwRoutine(fdw->fdwhandler)==&pgstromFdwHandlerData)
+					if (GetFdwRoutine(fdw->fdwhandler)==&PgStromFdwHandlerData)
 					{
 						if (stmt->renameType == OBJECT_FOREIGN_TABLE)
 							pgstrom_post_rename_table(stmt, base_relid);
@@ -1096,7 +1110,7 @@ pgstrom_process_utility_command(Node *parsetree,
 				ft = GetForeignTable(base_relid);
 				fs = GetForeignServer(ft->serverid);
 				fdw = GetForeignDataWrapper(fs->fdwid);
-				if (GetFdwRoutine(fdw->fdwhandler) != &pgstromFdwHandlerData)
+				if (GetFdwRoutine(fdw->fdwhandler) != &PgStromFdwHandlerData)
 					break;
 
 				foreach (cell, stmt->cmds)

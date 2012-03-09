@@ -54,4 +54,13 @@ _PG_init(void)
 
 	/* initialize shared memory segment */
 	pgstrom_shmseg_init();
+
+	/* initialize openCL related stuff */
+	pgstrom_opencl_init();
+
+	/* initialize executor related stuff */
+	pgstrom_executor_init();
+
+	/* register utility commands hooks */
+	pgstrom_utilcmds_init();
 }

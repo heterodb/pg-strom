@@ -1,6 +1,7 @@
 # Makefile of pg_strom
 MODULE_big = pg_strom
-OBJS = main.o shmseg.o plan.o exec.o opencl_serv.o opencl_catalog.o
+OBJS = main.o shmseg.o plan.o exec.o utilcmds.o blkload.o \
+		opencl_serv.o opencl_catalog.o openmp_serv.o
 
 DATA_built = opencl_kernel
 

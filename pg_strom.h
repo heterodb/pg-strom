@@ -37,12 +37,16 @@
 #define Anum_pg_strom_cs_isnull		3
 #define Anum_pg_strom_cs_values		4
 
-
 /*
  * Data Structures
  */
+typedef struct ShmsegList {
+	struct ShmsegList  *prev;
+	struct ShmsegList  *next;
+} ShmsegList; 
+
 typedef struct {
-	SHM_QUEUE		qhead;
+	ShmsegList		qhead;
 	pthread_mutex_t	qlock;
 	sem_t			qsem;
 } ShmsegQueue;
@@ -53,10 +57,10 @@ typedef struct {
 #define CHUNKBUF_STATUS_ERROR		4
 
 typedef struct {
-	SHM_QUEUE		chain;		/* dual-linked list to be chained */
+	ShmsegList		chain;		/* dual-linked list to be chained */
 	ShmsegQueue	   *recv_cmdq;	/* reference to the response queue */
-	uint32		   *gpu_cmds;	/* command array handled by GPU */
-	uint32		   *cpu_cmds;	/* command array handled by CPU */
+	Const		   *gpu_cmds;	/* command sequence of OpenCL */
+	Const		   *cpu_cmds;	/* command sequence of OpenMP */
 	int				status;		/* status of this chunk-buffer */
 	int				nattrs;		/* number of columns */
 	int64			rowid;		/* the first row-id of this chunk */
@@ -91,15 +95,32 @@ typedef struct {
 /*
  * shmseg.c
  */
-extern bool		pgstrom_shmqueue_init(ShmsegQueue *shmq);
-extern void		pgstrom_shmqueue_destroy(ShmsegQueue *shmq);
-extern int		pgstrom_shmqueue_nitems(ShmsegQueue *shmq);
-extern void		pgstrom_shmqueue_enqueue(ShmsegQueue *shmq, SHM_QUEUE *item);
-extern SHM_QUEUE   *pgstrom_shmqueue_dequeue(ShmsegQueue *shmq);
-extern SHM_QUEUE   *pgstrom_shmqueue_trydequeue(ShmsegQueue *shmq);
-
-#define container_of(ptr, type, field)			\
+#define container_of(ptr, type, field)						\
 	((void *)((uintptr_t)(ptr) - offsetof(type, field)))
+
+#define pgstrom_shmseg_list_foreach(item, field, list)					\
+	for (item = container_of((list)->next, typeof(*item), field);		\
+		 &item->field != (list);										\
+		 item = container_of(item->field.next, typeof(*item), field))
+
+#define pgstrom_shmseg_list_foreach_safe(item, temp, field, list)		\
+	for (item = container_of((list)->next, typeof(*item), field),		\
+		 temp = container_of(item->field.next, typeof(*item), field);	\
+		 &item->field != (list);										\
+		 item = temp,													\
+		 temp = container_of(temp->field.next, typeof(*temp), field))
+
+extern void	pgstrom_shmseg_list_init(ShmsegList *list);
+extern bool	pgstrom_shmseg_list_empty(ShmsegList *list);
+extern void pgstrom_shmseg_list_delete(ShmsegList *list);
+extern void pgstrom_shmseg_list_add(ShmsegList *list, ShmsegList *item);
+
+extern bool	pgstrom_shmqueue_init(ShmsegQueue *shmq);
+extern void	pgstrom_shmqueue_destroy(ShmsegQueue *shmq);
+extern int	pgstrom_shmqueue_nitems(ShmsegQueue *shmq);
+extern void	pgstrom_shmqueue_enqueue(ShmsegQueue *shmq, ShmsegList *item);
+extern ShmsegList *pgstrom_shmqueue_dequeue(ShmsegQueue *shmq);
+extern ShmsegList *pgstrom_shmqueue_trydequeue(ShmsegQueue *shmq);
 
 extern void	   *pgstrom_shmseg_alloc(Size size);
 extern void		pgstrom_shmseg_free(void *ptr);
@@ -116,10 +137,16 @@ extern int	pgstrom_gpu_command_string(Oid ftableOid, int cmds[],
 /*
  * opencl_serv.c
  */
+extern void	pgstrom_opencl_init(void);
 extern void	pgstrom_opencl_startup(void *shmptr, Size shmsize);
-extern bool pgstrom_opencl_enqueue_chunk(ChunkBuffer *chunk);
+extern void pgstrom_opencl_enqueue_chunk(ChunkBuffer *chunk);
 extern int	pgstrom_opencl_num_devices(void);
 extern bool	pgstrom_opencl_fp64_supported(void);
+
+/*
+ * openmp_serv.c
+ */
+extern void pgstrom_openmp_enqueue_chunk(ChunkBuffer *chunk);
 
 /*
  * plan.c
@@ -147,6 +174,15 @@ extern Relation pgstrom_open_cs_table(Relation base, AttrNumber attno,
 									  LOCKMODE lockmode);
 extern Relation pgstrom_open_cs_index(Relation base, AttrNumber attno,
 									  LOCKMODE lockmode);
+extern RangeVar *pgstrom_lookup_sequence(Relation base);
+extern void		pgstrom_utilcmds_init(void);
+
+/*
+ * blkload.c
+ */
+extern Datum pgstrom_data_load(PG_FUNCTION_ARGS);
+extern Datum pgstrom_data_clear(PG_FUNCTION_ARGS);
+extern Datum pgstrom_data_compaction(PG_FUNCTION_ARGS);
 
 /*
  * main.c

@@ -26,6 +26,7 @@
 #include "utils/errcodes.h"
 #include "utils/rel.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/syscache.h"
 #include "utils/tqual.h"
 #include "utils/varbit.h"
@@ -146,8 +147,8 @@ pgstrom_one_chunk_insert(Relation srel,
 	TupleDesc	tupdesc;
 	HeapTuple	tuple;
 	Datum		temp;
-	Datum		values[Natts_pg_strom];
-	bool		isnull[Natts_pg_strom];
+	Datum		values[Natts_pg_strom_cs];
+	bool		isnull[Natts_pg_strom_cs];
 	Oid			save_userid;
 	int			save_sec_context;
 	AttrNumber	attno, nattrs;
@@ -168,9 +169,10 @@ pgstrom_one_chunk_insert(Relation srel,
 	memset(values, 0, sizeof(values));
 	memset(isnull, 0, sizeof(isnull));
 
-	values[Anum_pg_strom_rowid - 1] = Int64GetDatum(rowid);
-	values[Anum_pg_strom_nitems - 1] = Int32GetDatum(nitems);
-	values[Anum_pg_strom_isnull - 1] = construct_cs_isnull(cs_rowid, nitems);
+	values[Anum_pg_strom_rmap_rowid - 1] = Int64GetDatum(rowid);
+	values[Anum_pg_strom_rmap_nitems - 1] = Int32GetDatum(nitems);
+	values[Anum_pg_strom_rmap_rowmap - 1]
+		= construct_cs_isnull(cs_rowid, nitems);
 
 	tupdesc = RelationGetDescr(id_rel);
 	tuple = heap_form_tuple(tupdesc, values, isnull);
@@ -254,16 +256,18 @@ pgstrom_one_chunk_insert(Relation srel,
 			 * Set up a tuple of column store
 			 */
 			memset(isnull, false, sizeof(isnull));
-			values[Anum_pg_strom_rowid - 1] = Int64GetDatum(rowid + rs_base);
-			values[Anum_pg_strom_nitems - 1] = Int32GetDatum(rs_unitsz);
+			values[Anum_pg_strom_cs_rowid - 1]
+				= Int64GetDatum(rowid + rs_base);
+			values[Anum_pg_strom_cs_nitems - 1]
+				= Int32GetDatum(rs_unitsz);
 			if (num_nulls == 0)
-				isnull[Anum_pg_strom_isnull - 1] = true;
+				isnull[Anum_pg_strom_cs_isnull - 1] = true;
 			else
-				values[Anum_pg_strom_isnull - 1]
+				values[Anum_pg_strom_cs_isnull - 1]
 					= construct_cs_isnull(&cs_isnull[attno][rs_base],
 										  rs_unitsz);
 
-			values[Anum_pg_strom_values - 1]
+			values[Anum_pg_strom_cs_values - 1]
 				= construct_cs_values(&cs_values[attno][rs_base],
 									  &cs_isnull[attno][rs_base],
 									  rs_unitsz, attr);
@@ -436,8 +440,7 @@ pgstrom_data_load(PG_FUNCTION_ARGS)
 	 * Open the destination relation and rowid store
 	 */
 	drel = relation_open(PG_GETARG_OID(0), RowExclusiveLock);
-	id_rel = pgstrom_open_shadow_table(drel, InvalidAttrNumber,
-									   RowExclusiveLock);
+	id_rel = pgstrom_open_rowid_map(drel, RowExclusiveLock);
 	cs_rels = palloc0(sizeof(Relation) *
 					  RelationGetNumberOfAttributes(srel));
 	cs_attrs = palloc0(sizeof(Form_pg_attribute) *
@@ -446,7 +449,7 @@ pgstrom_data_load(PG_FUNCTION_ARGS)
 	/*
 	 * Lookup the Oid of rowid sequencial generator
 	 */
-	range = pgstrom_lookup_shadow_sequence(drel);
+	range = pgstrom_lookup_sequence(drel);
 	nspid = get_namespace_oid(range->schemaname, false);
 	seqid = get_relname_relid(range->relname, nspid);
 	if (!OidIsValid(seqid))
@@ -491,8 +494,8 @@ pgstrom_data_load(PG_FUNCTION_ARGS)
 							RelationGetRelationName(drel))));
 
 		cs_attrs[i] = attr2;
-		cs_rels[i]  = pgstrom_open_shadow_table(drel, attr2->attnum,
-												RowExclusiveLock);
+		cs_rels[i]  = pgstrom_open_cs_table(drel, attr2->attnum,
+											RowExclusiveLock);
 		scols = bms_add_member(scols,
 					attr1->attnum - FirstLowInvalidHeapAttributeNumber);
 		dcols = bms_add_member(dcols,
@@ -561,8 +564,7 @@ pgstrom_data_clear(PG_FUNCTION_ARGS)
 	 * Open the destination relation set
 	 */
 	base_rel = relation_open(PG_GETARG_OID(1), RowExclusiveLock);
-	id_rel = pgstrom_open_shadow_table(base_rel, InvalidAttrNumber,
-									   RowExclusiveLock);
+	id_rel = pgstrom_open_rowid_map(base_rel, RowExclusiveLock);
 	nattrs = RelationGetNumberOfAttributes(base_rel);
 	cs_rels = palloc0(sizeof(Relation) * nattrs);
 	for (csidx = 0; csidx < nattrs; csidx++)
@@ -573,8 +575,8 @@ pgstrom_data_clear(PG_FUNCTION_ARGS)
 		if (attr->attisdropped)
 			continue;
 
-		cs_rels[csidx] = pgstrom_open_shadow_table(base_rel, attr->attnum,
-												   RowExclusiveLock);
+		cs_rels[csidx] = pgstrom_open_cs_table(base_rel, attr->attnum,
+											   RowExclusiveLock);
 	}
 
 	/*

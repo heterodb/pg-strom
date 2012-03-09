@@ -16,7 +16,7 @@
 
 typedef struct {
 	int				chkbh_exec_cnt;	/* counter of in-exec chunks */
-	SHM_QUEUE		chkbh_chain;	/* chain to local_chunk_buffer_head */
+	ShmsegList		chkbh_chain;	/* chain to local_chunk_buffer_head */
 	ShmsegQueue		chkbh_recvq;	/* receive queue of this scan */
 	ResourceOwner	chkbh_owner;	/* resource owner of this scan */
 } ChunkBufferHead;
@@ -39,8 +39,8 @@ typedef struct {
 	MemoryContext	es_qrycxt;		/* per-query memory context */
 
 	ChunkBufferHead	*chkb_head;		/* reference to shared memory object */
-	SHM_QUEUE		chkb_ready_list;/* local link to ready chunks */
-	SHM_QUEUE		chkb_free_list;	/* local link to free chunks */
+	ShmsegList		chkb_ready_list;/* local link to ready chunks */
+	ShmsegList		chkb_free_list;	/* local link to free chunks */
 
 	/* stuff related to scan */
 	ChunkBuffer	   *curr_chunk;
@@ -54,7 +54,7 @@ typedef struct {
 /*
  * Local declarations
  */
-static SHM_QUEUE	local_chunk_buffer_head;
+static ShmsegList	local_chunk_buffer_head;
 static int			pgstrom_max_async_chunks;
 static int			pgstrom_min_async_chunks;
 static bool			pgstrom_exec_profile;
@@ -75,27 +75,19 @@ pgstrom_release_resources(ResourceReleasePhase phase,
 	if (phase != RESOURCE_RELEASE_AFTER_LOCKS)
 		return;
 
-	curr = (ChunkBufferHead *)
-		SHMQueueNext(&local_chunk_buffer_head,
-					 &local_chunk_buffer_head,
-					 offsetof(ChunkBufferHead, chkbh_chain));
-	while (curr)
+	pgstrom_shmseg_list_foreach_safe(curr, next, chkbh_chain,
+									 &local_chunk_buffer_head)
 	{
-		next = (ChunkBufferHead *)
-			SHMQueueNext(&local_chunk_buffer_head,
-						 &curr->chkbh_chain,
-						 offsetof(ChunkBufferHead, chkbh_chain));
 		if (curr->chkbh_owner == CurrentResourceOwner)
 		{
-			SHMQueueDelete(&curr->chkbh_chain);
+			pgstrom_shmseg_list_delete(&curr->chkbh_chain);
 
 			if (curr->chkbh_exec_cnt > 0)
 			{
-				/* TODO: completion of in_exec chunks */
+				/* TODO: completion of in-exec chunks */
 			}
 			pgstrom_shmseg_free(curr);
 		}
-		curr = next;
 	}
 }
 
@@ -175,7 +167,6 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 		heap_deform_tuple(tup, tupdesc, values, isnull);
 		Assert(!isnull[Anum_pg_strom_cs_rowid - 1] &&
 			   !isnull[Anum_pg_strom_cs_nitems - 1] &&
-			   !isnull[Anum_pg_strom_cs_isnull - 1] &&
 			   !isnull[Anum_pg_strom_cs_values - 1]);
 
 		curr_rowid = DatumGetInt64(values[Anum_pg_strom_cs_rowid - 1]);
@@ -185,10 +176,23 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 		Assert(curr_nitems % BITS_PER_BYTE == 0);
 		Assert(offset + curr_nitems <= chunk->nitems);
 
-		deconstruct_cs_bytea(chunk_cs_isnull(chunk, attno)
-							 + offset / BITS_PER_BYTE,
-							 values[Anum_pg_strom_cs_isnull - 1],
-							 curr_nitems / BITS_PER_BYTE);
+		if (!isnull[Anum_pg_strom_cs_isnull - 1])
+		{
+			deconstruct_cs_bytea(chunk_cs_isnull(chunk, attno)
+								 + offset / BITS_PER_BYTE,
+								 values[Anum_pg_strom_cs_isnull - 1],
+								 curr_nitems / BITS_PER_BYTE);
+		}
+		else
+		{
+			/*
+			 * In case of 'isnull' == NULL, it means all the items
+			 * in the 'values' are valid, so we clear the related
+			 * scope of ths null-bitmap.
+			 */
+			memset(chunk_cs_isnull(chunk, attno) + offset / BITS_PER_BYTE,
+				   0, curr_nitems / BITS_PER_BYTE);
+		}
 		deconstruct_cs_bytea(chunk_cs_values(chunk, attno)
 							 + offset * attlen,
 							 values[Anum_pg_strom_cs_values - 1],
@@ -237,21 +241,15 @@ pgstrom_load_chunk(PgStromExecState *sestate)
 	Assert(nitems % BITS_PER_BYTE == 0);
 
 	/* caller must not invoke this routine without free chunks */
-	chunk = (ChunkBuffer *) SHMQueueNext(&sestate->chkb_free_list,
-										 &sestate->chkb_free_list,
-										 offsetof(ChunkBuffer, chain));
-	Assert(chunk != NULL);
-	SHMQueueDelete(&chunk->chain);
+	Assert(!pgstrom_shmseg_list_empty(&sestate->chkb_free_list));
+	chunk = container_of(sestate->chkb_free_list.next, ChunkBuffer, chain);
+	pgstrom_shmseg_list_delete(&chunk->chain);
 
 	/*
 	 * Setup chunk buffer
 	 */
 	Assert(chunk->status == CHUNKBUF_STATUS_FREE);
 	chunk->recv_cmdq = &sestate->chkb_head->chkbh_recvq;
-	if (chunk->gpu_cmds)
-		chunk->gpu_cmds[0] = nitems;
-	if (chunk->cpu_cmds)
-		chunk->cpu_cmds[0] = nitems;
 	chunk->nattrs = RelationGetNumberOfAttributes(sestate->ft_rel);
 	chunk->rowid = rowid;
 	chunk->nitems = nitems;
@@ -259,6 +257,7 @@ pgstrom_load_chunk(PgStromExecState *sestate)
 	memset(chunk->cs_isnull, 0, sizeof(int) * chunk->nattrs);
 	memset(chunk->cs_values, 0, sizeof(int) * chunk->nattrs);
 
+	tupdesc = RelationGetDescr(sestate->ft_rel);
 	offset = MAXALIGN(chunk->nitems / BITS_PER_BYTE);
 	tempset = bms_copy(sestate->gpu_cols);
 	while ((attno = bms_first_member(tempset)) > 0)
@@ -304,9 +303,23 @@ pgstrom_load_chunk(PgStromExecState *sestate)
 	/*
 	 * Enqueue the chunk-buffer for asynchronous execution
 	 */
-	chunk->status = CHUNKBUF_STATUS_EXEC;
-	sestate->chkb_head->chkbh_exec_cnt++;
-	pgstrom_opencl_enqueue_chunk(chunk);
+	if (chunk->gpu_cmds)
+	{
+		chunk->status = CHUNKBUF_STATUS_EXEC;
+		sestate->chkb_head->chkbh_exec_cnt++;
+		pgstrom_opencl_enqueue_chunk(chunk);
+	}
+	else if (chunk->cpu_cmds)
+	{
+		chunk->status = CHUNKBUF_STATUS_EXEC;
+        sestate->chkb_head->chkbh_exec_cnt++;
+		pgstrom_openmp_enqueue_chunk(chunk);
+	}
+	else
+	{
+		chunk->status = CHUNKBUF_STATUS_READY;
+		pgstrom_shmseg_list_add(&sestate->chkb_ready_list, &chunk->chain);
+	}
 
 	return true;
 }
@@ -344,13 +357,15 @@ pgstrom_scan_column_store(PgStromExecState *sestate, TupleTableSlot *slot,
 		 * Reset cached values
 		 */
 		if (sestate->curr_cs_values[attno-1])
+		{
 			pfree(sestate->curr_cs_values[attno-1]);
-		if (sestate->curr_cs_isnull[attno-1])
-			pfree(sestate->curr_cs_isnull[attno-1]);
-		sestate->curr_cs_values[attno-1] = NULL;
-		sestate->curr_cs_isnull[attno-1] = NULL;
-		sestate->curr_cs_rowid_min[attno-1] = -1;
-		sestate->curr_cs_rowid_max[attno-1] = -1;
+			if (sestate->curr_cs_isnull[attno-1])
+				pfree(sestate->curr_cs_isnull[attno-1]);
+			sestate->curr_cs_values[attno-1] = NULL;
+			sestate->curr_cs_isnull[attno-1] = NULL;
+			sestate->curr_cs_rowid_min[attno-1] = -1;
+			sestate->curr_cs_rowid_max[attno-1] = -1;
+		}
 
 		/*
 		 * Rewind the current index scan to fetch a tuple of column-store
@@ -375,7 +390,6 @@ pgstrom_scan_column_store(PgStromExecState *sestate, TupleTableSlot *slot,
 		heap_deform_tuple(tuple, tupdesc, values, isnull);
 		Assert(!isnull[Anum_pg_strom_cs_rowid - 1] &&
 			   !isnull[Anum_pg_strom_cs_nitems - 1] &&
-			   !isnull[Anum_pg_strom_cs_isnull - 1] &&
 			   !isnull[Anum_pg_strom_cs_values - 1]);
 
 		curr_rowid = DatumGetInt64(values[Anum_pg_strom_cs_rowid - 1]);
@@ -391,8 +405,11 @@ pgstrom_scan_column_store(PgStromExecState *sestate, TupleTableSlot *slot,
 		 * Found the required tuple, so save it on the exec-state
 		 */
 		oldcxt = MemoryContextSwitchTo(sestate->es_qrycxt);
-		sestate->curr_cs_isnull[attno-1] =
-			PG_DETOAST_DATUM_COPY(values[Anum_pg_strom_cs_isnull - 1]);
+		if (!isnull[Anum_pg_strom_cs_isnull - 1])
+			sestate->curr_cs_isnull[attno-1] =
+				PG_DETOAST_DATUM_COPY(values[Anum_pg_strom_cs_isnull - 1]);
+		else
+			sestate->curr_cs_isnull[attno-1] = NULL;
 		sestate->curr_cs_values[attno-1] =
 			PG_DETOAST_DATUM_COPY(values[Anum_pg_strom_cs_values - 1]);
 		sestate->curr_cs_rowid_min[attno-1] = curr_rowid;
@@ -409,8 +426,12 @@ pgstrom_scan_column_store(PgStromExecState *sestate, TupleTableSlot *slot,
 	index_h = index >> SHIFT_PER_DATUM;
 	index_l = index & ((1 << SHIFT_PER_DATUM) - 1);
 
-	nullmap = (Datum *)VARDATA(sestate->curr_cs_isnull[attno-1]);
-	if ((nullmap[index_h] & (1 << index_l)) == 0)
+	if (sestate->curr_cs_isnull[attno-1])
+		nullmap = (Datum *)VARDATA(sestate->curr_cs_isnull[attno-1]);
+	else
+		nullmap = NULL;
+
+	if (nullmap == NULL || (nullmap[index_h] & (1 << index_l)) == 0)
 	{
 		Form_pg_attribute	attr
 			= slot->tts_tupleDescriptor->attrs[attno-1];
@@ -524,32 +545,30 @@ pgstrom_init_chunk_buffers(PgStromExecState *sestate)
 	ChunkBufferHead	*chunk_head;
 	AttrNumber	attno, nattrs;
 	Bitmapset  *tempset;
-	Size		dma_sz;
+	Size		buffer_sz;
 	Size		chunk_sz;
 	Size		offset;
 	int			i, num_chunks = pgstrom_max_async_chunks;
 
 	chunk_sz = MAXALIGN(sizeof(ChunkBuffer));
 	if (sestate->gpu_cmds)
-		chunk_sz +=
-			MAXALIGN(VARSIZE_ANY_EXHDR(sestate->gpu_cmds) + sizeof(int));
+		chunk_sz += MAXALIGN(VARSIZE(sestate->gpu_cmds));
 	if (sestate->cpu_cmds)
-		chunk_sz +=
-			MAXALIGN(VARSIZE_ANY_EXHDR(sestate->cpu_cmds) + sizeof(int));
+		chunk_sz += MAXALIGN(VARSIZE(sestate->cpu_cmds));
 	nattrs = RelationGetNumberOfAttributes(sestate->ft_rel);
 	chunk_sz += 2 * MAXALIGN(sizeof(int) * nattrs);
 
-	dma_sz = MAXALIGN(PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
+	buffer_sz = MAXALIGN(PGSTROM_CHUNK_SIZE / BITS_PER_BYTE);
 	tempset = bms_union(sestate->gpu_cols, sestate->cpu_cols);
 	while ((attno = bms_first_member(tempset)) > 0)
 	{
 		Form_pg_attribute	attr
 			= RelationGetDescr(sestate->ft_rel)->attrs[attno - 1];
 		Assert(attr->attlen > 0);
-		dma_sz += MAXALIGN(attr->attlen * PGSTROM_CHUNK_SIZE);
+		buffer_sz += MAXALIGN(attr->attlen * PGSTROM_CHUNK_SIZE);
 	}
 	bms_free(tempset);
-	chunk_sz += dma_sz;
+	chunk_sz += buffer_sz;
 
 	chunk_head = pgstrom_shmseg_alloc(MAXALIGN(sizeof(ChunkBufferHead)) +
 									  MAXALIGN(chunk_sz) * num_chunks);
@@ -565,8 +584,8 @@ pgstrom_init_chunk_buffers(PgStromExecState *sestate)
 
 	sestate->chkb_head = chunk_head;
 
-	SHMQueueInsertBefore(&local_chunk_buffer_head,
-						 &chunk_head->chkbh_chain);
+	pgstrom_shmseg_list_add(&local_chunk_buffer_head,
+							&chunk_head->chkbh_chain);
 
 	offset = MAXALIGN(sizeof(ChunkBufferHead));
 	for (i = 0; i < num_chunks; i++)
@@ -576,28 +595,29 @@ pgstrom_init_chunk_buffers(PgStromExecState *sestate)
 
 		if (sestate->gpu_cmds)
 		{
-			chunk->gpu_cmds = (uint32 *) p;
-			memcpy(chunk->gpu_cmds + 1, VARDATA_ANY(sestate->gpu_cmds),
-				   VARSIZE_ANY_EXHDR(sestate->gpu_cmds));
-			p += MAXALIGN(VARSIZE_ANY_EXHDR(sestate->gpu_cmds) + sizeof(int));
+			chunk->gpu_cmds = (Const *) p;
+			memcpy(chunk->gpu_cmds, sestate->gpu_cmds,
+				   VARSIZE(sestate->gpu_cmds));
+			p += MAXALIGN(VARSIZE(chunk->gpu_cmds));
 		}
 		else
 			chunk->gpu_cmds = NULL;
 
 		if (sestate->cpu_cmds)
 		{
-			chunk->cpu_cmds = (uint32 *) p;
-			memcpy(chunk->cpu_cmds + 1, VARDATA_ANY(sestate->cpu_cmds),
-				   VARSIZE_ANY_EXHDR(sestate->cpu_cmds));
-			p += MAXALIGN(VARSIZE_ANY_EXHDR(sestate->cpu_cmds) + sizeof(int));
+			chunk->cpu_cmds = (Const *) p;
+			memcpy(chunk->cpu_cmds, sestate->cpu_cmds,
+				   VARSIZE(sestate->cpu_cmds));
+			p += MAXALIGN(VARSIZE(chunk->cpu_cmds));
 		}
 		else
 			chunk->cpu_cmds = NULL;
 
 		chunk->status = CHUNKBUF_STATUS_FREE;
 		chunk->nattrs = nattrs;
-		chunk->rowid = -1;		/* should be set later */
-		chunk->nitems = -1;		/* should be set later */
+		chunk->rowid = -1;
+		chunk->nitems = -1;
+		chunk->dma_length = -1;
 
 		chunk->cs_isnull = (int *) p;
 		p += sizeof(int) * nattrs;
@@ -606,9 +626,9 @@ pgstrom_init_chunk_buffers(PgStromExecState *sestate)
 		p += sizeof(int) * nattrs;
 
 		chunk->cs_rowmap = p;
-		p += dma_sz;
+		p += buffer_sz;
 
-		SHMQueueInsertBefore(&sestate->chkb_free_list, &chunk->chain);
+		pgstrom_shmseg_list_add(&sestate->chkb_free_list, &chunk->chain);
 
 		offset += MAXALIGN(chunk_sz);
 		Assert(((uintptr_t) p) <= ((uintptr_t) chunk_head) + offset);
@@ -676,8 +696,8 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	bms_free(tempset);
 
 	sestate->chkb_head = NULL;		/* should be set later */
-	SHMQueueInit(&sestate->chkb_ready_list);
-	SHMQueueInit(&sestate->chkb_free_list);
+	pgstrom_shmseg_list_init(&sestate->chkb_ready_list);
+	pgstrom_shmseg_list_init(&sestate->chkb_free_list);
 
 	sestate->curr_chunk = NULL;
 	sestate->curr_index = 0;
@@ -748,7 +768,7 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 	{
 		ShmsegQueue	*recvq = &sestate->chkb_head->chkbh_recvq;
 		ChunkBuffer	*chunk;
-		SHM_QUEUE	*q;
+		ShmsegList	*q;
 
 		/*
 		 * Release the current chunk-buffer already scanned
@@ -756,11 +776,11 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 		if (sestate->curr_chunk)
 		{
 			sestate->curr_chunk->status = CHUNKBUF_STATUS_FREE;
-			SHMQueueInsertBefore(&sestate->chkb_free_list,
-								 &sestate->curr_chunk->chain);
+			pgstrom_shmseg_list_add(&sestate->chkb_free_list,
+									&sestate->curr_chunk->chain);
 			sestate->curr_chunk = NULL;			
 		}
-		Assert(!SHMQueueEmpty(&sestate->chkb_free_list));
+		Assert(!pgstrom_shmseg_list_empty(&sestate->chkb_free_list));
 
 		/*
 		 * Move any chunks being already complete its execution
@@ -771,7 +791,7 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 			Assert(chunk->status == CHUNKBUF_STATUS_READY);
 
 			sestate->chkb_head->chkbh_exec_cnt--;
-			SHMQueueInsertBefore(&sestate->chkb_ready_list, &chunk->chain);
+			pgstrom_shmseg_list_add(&sestate->chkb_ready_list, &chunk->chain);
 		}
 		Assert(sestate->chkb_head->chkbh_exec_cnt >= 0);
 
@@ -780,13 +800,13 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 		 * pgstrom_min_async_chunks
 		 */
 		while (sestate->id_scan != NULL &&
-			   !SHMQueueEmpty(&sestate->chkb_free_list))
+			   !pgstrom_shmseg_list_empty(&sestate->chkb_free_list))
 		{
 			/*
 			 * If we still have ready chunks and num of chunks in execution
 			 * exceeds pgstrom_min_async_chunks, break the chunk load.
 			 */
-			if (!SHMQueueEmpty(&sestate->chkb_ready_list) &&
+			if (!pgstrom_shmseg_list_empty(&sestate->chkb_ready_list) &&
 				sestate->chkb_head->chkbh_exec_cnt >= pgstrom_min_async_chunks)
 				break;
 
@@ -797,14 +817,13 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 				break;
 		}
 
-		chunk = (ChunkBuffer *) SHMQueueNext(&sestate->chkb_ready_list,
-											 &sestate->chkb_ready_list,
-											 offsetof(ChunkBuffer, chain));
+		chunk = container_of(sestate->chkb_ready_list.next,
+							 ChunkBuffer, chain);
 		if (chunk)
 		{
 			Assert(chunk->status == CHUNKBUF_STATUS_READY);
 
-			SHMQueueDelete(&chunk->chain);
+			pgstrom_shmseg_list_delete(&chunk->chain);
 			sestate->curr_chunk = chunk;
 		}
 		else if (sestate->chkb_head->chkbh_exec_cnt > 0)
@@ -826,18 +845,53 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 void
 pgstrom_rescan_foreign_scan(ForeignScanState *fss)
 {
+	/* TODO: implement it later */
 }
 
 void
 pgstrom_end_foreign_scan(ForeignScanState *fss)
 {
+	PgStromExecState   *sestate = (PgStromExecState *)fss->fdw_state;
+	AttrNumber			i, nattrs;
+
+	/* if sestate is NULL, we are in EXPLAIN; nothing to do */
+	if (!sestate)
+		return;
+
+	/*
+	 * Close the scan descriptor and relation
+	 */
+	nattrs = RelationGetNumberOfAttributes(sestate->ft_rel);
+	for (i=0; i < nattrs; i++)
+	{
+		if (sestate->cs_scan[i])
+			index_endscan(sestate->cs_scan[i]);
+	}
+	if (sestate->id_scan)
+		heap_endscan(sestate->id_scan);
+
+	/* TODO: Wait for completion of in-exec chunks */
+
+	pgstrom_shmseg_free(sestate->chkb_head);
+	if (sestate->gpu_cols)
+		pfree(sestate->gpu_cols);
+	if (sestate->cpu_cols)
+		pfree(sestate->cpu_cols);
+	if (sestate->required_cols)
+		pfree(sestate->required_cols);
+	bms_free(sestate->gpu_cols);
+	bms_free(sestate->cpu_cols);
+	pfree(sestate->cs_rels);
+	pfree(sestate->cs_idxs);
+	pfree(sestate->cs_scan);
+	pfree(sestate);
 }
 
 void
 pgstrom_executor_init(void)
 {
 	/* resource cleanup hook towards shared memory segment */
-	SHMQueueInit(&local_chunk_buffer_head);
+	pgstrom_shmseg_list_init(&local_chunk_buffer_head);
 	RegisterResourceReleaseCallback(pgstrom_release_resources, NULL);
 
 	DefineCustomIntVariable("pg_strom.max_async_chunks",
@@ -854,7 +908,7 @@ pgstrom_executor_init(void)
 							"min number of chunks to be kept in execution",
 							NULL,
 							&pgstrom_min_async_chunks,
-							pgstrom_opencl_num_devices(),
+							1 * pgstrom_opencl_num_devices(),
 							1,
 							8,
 							PGC_USERSET,
