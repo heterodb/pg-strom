@@ -22,7 +22,7 @@
 /*
  * Schema of shadow tables
  */
-#define PGSTROM_CHUNK_SIZE		(BLCKSZ / 2)
+#define PGSTROM_CHUNK_SIZE		(BITS_PER_BYTE * BLCKSZ / 2)
 
 #define PGSTROM_SCHEMA_NAME		"pg_strom"
 
@@ -59,16 +59,20 @@ typedef struct {
 typedef struct {
 	ShmsegList		chain;		/* dual-linked list to be chained */
 	ShmsegQueue	   *recv_cmdq;	/* reference to the response queue */
-	Const		   *gpu_cmds;	/* command sequence of OpenCL */
-	Const		   *cpu_cmds;	/* command sequence of OpenMP */
-	int				status;		/* status of this chunk-buffer */
-	int				nattrs;		/* number of columns */
-	int64			rowid;		/* the first row-id of this chunk */
-	int				nitems;		/* number of rows */
-	Size			dma_length;	/* length to be translated with DMA */
-	bits8		   *cs_rowmap;	/* rowmap of the column store */
-	int			   *cs_isnull;	/* offsets from the cs_rowmap, or 0 */
-	int			   *cs_values;	/* offsets from the cs_rowmap, or 0 */
+	int		   *gpu_cmds;		/* command sequence of GPU */
+	int		   *cpu_cmds;		/* command sequence of CPU */
+	int			gpu_cmds_len;	/* length of GPU command sequence */
+	int			cpu_cmds_len;	/* length of CPU command sequence */
+	int			status;			/* CHUNKBUF_STATUS_* */
+	int			nattrs;			/* number of columns in this chunk */
+	int64		rowid;			/* base rowid of this chunk */
+	int			nitems;			/* nitems of this chunk */
+	size_t		dma_length;		/* length to be copied using DMA */
+	char	   *dma_buffer;		/* base address to be copied using DMA */
+	char	   *cs_rowmap;		/* rowmap of this chunk */
+	int		   *cs_isnull;		/* offset from cs_rowmap, or 0 */
+	int		   *cs_values;		/* offset from cs_rowmap, or 0 */
+	char		error_msg[256];	/* error message if CHUNKBUF_STATUS_ERROR */
 } ChunkBuffer;
 
 #define chunk_cs_isnull(chunk, attno)			\
@@ -127,21 +131,17 @@ extern void		pgstrom_shmseg_free(void *ptr);
 extern void		pgstrom_shmseg_init(void);
 
 /*
- * opencl_catalog.c
+ * cuda_serv.c
  */
-extern GpuTypeInfo  *pgstrom_gpu_type_lookup(Oid typeOid);
-extern GpuFuncInfo  *pgstrom_gpu_func_lookup(Oid funcOid);
+extern void pgstrom_gpu_init(void);
+extern void pgstrom_gpu_startup(void *shmptr, Size shmsize);
+extern void pgstrom_gpu_enqueue_chunk(ChunkBuffer *chunk);
+extern int	pgstrom_gpu_num_devices(void);
+
+extern GpuTypeInfo *pgstrom_gpu_type_lookup(Oid typeOid);
+extern GpuFuncInfo *pgstrom_gpu_func_lookup(Oid funcOid);
 extern int	pgstrom_gpu_command_string(Oid ftableOid, int cmds[],
 									   char *buf, size_t buflen);
-
-/*
- * opencl_serv.c
- */
-extern void	pgstrom_opencl_init(void);
-extern void	pgstrom_opencl_startup(void *shmptr, Size shmsize);
-extern void pgstrom_opencl_enqueue_chunk(ChunkBuffer *chunk);
-extern int	pgstrom_opencl_num_devices(void);
-extern bool	pgstrom_opencl_fp64_supported(void);
 
 /*
  * openmp_serv.c

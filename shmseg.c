@@ -80,9 +80,9 @@ pgstrom_shmseg_list_add(ShmsegList *list, ShmsegList *item)
 {
 	ShmsegList *tail_elem = list->prev;
 
+	item->prev = list->prev;
+	item->next = tail_elem->next;
 	list->prev = item;
-	item->prev = tail_elem;
-	item->next = list;
 	tail_elem->next = item;
 }
 
@@ -291,8 +291,10 @@ pgstrom_shmseg_startup(void)
 	Size	chunk_bufsz = (pgstrom_chunk_buffer_size << 20);
 	bool	found;
 
-	shmseg_head = ShmemInitStruct("Shared chunk buffer of PG-Strom",
-								  sizeof(ShmsegHead) + chunk_bufsz, &found);
+	shmseg_head = ShmemInitStruct("Chunk Buffer of PG-Strom",
+								  sizeof(ShmsegHead) +
+								  chunk_bufsz + getpagesize(),
+								  &found);
 	Assert(!found);
 
 	/* Init PgStromShmsegHead field */
@@ -312,8 +314,8 @@ pgstrom_shmseg_startup(void)
 	pgstrom_shmseg_list_add(&shmseg_head->free_list, &block->list);
 	block->size = chunk_bufsz - offsetof(ShmsegHead, block);
 
-	/* launch OpenCL computing server */
-	pgstrom_opencl_startup(block, chunk_bufsz);
+	/* Launch CUDA computing server */
+	pgstrom_gpu_startup(block, chunk_bufsz);
 }
 
 void
@@ -338,7 +340,9 @@ pgstrom_shmseg_init(void)
 							NULL, NULL, NULL);
 
 	/* Acquire share memory segment for chunk buffer */
-	RequestAddinShmemSpace((pgstrom_chunk_buffer_size << 20) + getpagesize());
+	RequestAddinShmemSpace((pgstrom_chunk_buffer_size << 20)
+						   + sizeof(ShmsegHead)
+						   + getpagesize());
 	shmem_startup_hook_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_shmseg_startup;
 }

@@ -19,7 +19,7 @@
 #include "utils/rel.h"
 #include "optimizer/var.h"
 #include "pg_strom.h"
-#include "opencl_catalog.h"
+#include "cuda_cmds.h"
 
 static bool
 is_gpu_executable_qual_walker(Node *node, void *context)
@@ -140,21 +140,38 @@ make_gpu_func_commands(Oid func_oid, List *func_args,
 	Assert(gfunc != NULL);
 
 	regargs = alloca(sizeof(int) * (1 + gfunc->func_nargs));
-	regargs[i++] = regidx;
 
 	gtype = pgstrom_gpu_type_lookup(gfunc->func_rettype);
 	Assert(gtype != NULL);
-	regidx += (gtype->type_x2regs ? 2 : 1);
+
+	/*
+	 * XXX - 64bit variables have to be stored on the virtual registed
+	 * indexed with even number, because unaligned access makes run-
+	 * time error on device side.
+	 */
+	if (gtype->type_x2regs)
+	{
+		regidx = (regidx + 1) & ~(0x0001);
+		regargs[i++] = regidx;
+		regidx += 2;
+	}
+	else
+	{
+		regargs[i++] = regidx;
+		regidx++;
+	}
 
 	i = 1;
 	foreach (cell, func_args)
 	{
+		Assert(exprType(lfirst(cell)) == gfunc->func_argtypes[i-1]);
+		gtype = pgstrom_gpu_type_lookup(exprType(lfirst(cell)));
+		Assert(gtype != NULL);
+		if (gtype->type_x2regs)
+			regidx = (regidx + 1) & ~(0x0001);
+
 		make_gpu_commands_walker(lfirst(cell), cmds, regidx, gpu_cols);
 		regargs[i] = regidx;
-
-		Assert(exprType(lfirst(cell)) == gfunc->func_argtypes[i-1]);
-		gtype = pgstrom_gpu_type_lookup(gfunc->func_argtypes[i-1]);
-		Assert(gtype != NULL);
 
 		regidx += (gtype->type_x2regs ? 2 : 1);
 		i++;
@@ -208,7 +225,7 @@ make_gpu_commands_walker(Node *node, StringInfo cmds, int regidx,
 		Assert(gtype != NULL);
 
 		push_cmd3(cmds,
-				  gtype->type_varref, regidx, v->varattno);
+				  gtype->type_varref, regidx, v->varattno - 1);
 		*gpu_cols = bms_add_member(*gpu_cols, v->varattno);
 	}
 	else if (IsA(node, FuncExpr))
@@ -468,7 +485,7 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 							 str.len > 0 ? ", " : "",
 							 NameStr(attr->attname));
 		}
-		ExplainPropertyText("required cols ", str.data, es);
+		ExplainPropertyText("Required cols ", str.data, es);
 	}
 
 	if (!bms_is_empty(gpu_cols))
@@ -512,7 +529,7 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 			skip = pgstrom_gpu_command_string(RelationGetRelid(relation),
 											  cmds, temp, sizeof(temp));
 			if (first)
-				ExplainPropertyText("OpenCL command", temp, es);
+				ExplainPropertyText("CUDA commands ", temp, es);
 			else
 				ExplainPropertyText("              ", temp, es);
 			first = false;

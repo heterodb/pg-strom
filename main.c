@@ -55,8 +55,8 @@ _PG_init(void)
 	/* initialize shared memory segment */
 	pgstrom_shmseg_init();
 
-	/* initialize openCL related stuff */
-	pgstrom_opencl_init();
+	/* initialize CUDA related stuff */
+	pgstrom_gpu_init();
 
 	/* initialize executor related stuff */
 	pgstrom_executor_init();

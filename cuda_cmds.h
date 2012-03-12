@@ -1,14 +1,14 @@
 /*
- * opencl_catalog.h
- *
+ * cuda_cmds.h
+  *
  * 
  *
  *
  */
-#ifndef PGSTROM_OPENCL_CATALOG_H
-#define PGSTROM_OPENCL_CATALOG_H
+#ifndef PGSTROM_CUDA_CMDS_H
+#define PGSTROM_CUDA_CMDS_H
 
-#define PGSTROM_GPU_NUM_REGS	120
+#define PGSTROM_GPU_NUM_VREGS	120
 
 enum GpuCmds {
 	GPUCMD_TERMINAL_COMMAND = 0,	/* End of command series */
@@ -81,4 +81,4 @@ enum GpuCmds {
 	
 };
 
-#endif	/* PGSTROM_OPENCL_CATALOG_H */
+#endif	/* PGSTROM_CUDA_CMDS_H */
