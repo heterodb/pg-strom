@@ -147,18 +147,24 @@ pgstrom_open_cs_index(Relation base, AttrNumber attno, LOCKMODE lockmode)
 }
 
 RangeVar *
-pgstrom_lookup_sequence(Relation base_rel)
+pgstrom_lookup_sequence(Oid base_relid)
 {
+	Oid			nsp_oid;
 	char	   *nsp_name;
+	char	   *rel_name;
 	char		seq_name[NAMEDATALEN * 2 + 20];
 	RangeVar   *range;
 
-	nsp_name = get_namespace_name(RelationGetForm(base_rel)->relnamespace);
+	nsp_oid = get_rel_namespace(base_relid);
+	nsp_name = get_namespace_name(nsp_oid);
+	rel_name = get_rel_name(base_relid);
+
 	snprintf(seq_name, sizeof(seq_name), "%s.%s.seq",
-			 nsp_name, RelationGetRelationName(base_rel));
+			 nsp_name, rel_name);
 	range = makeRangeVar(PGSTROM_SCHEMA_NAME, pstrdup(seq_name), -1);
 
 	pfree(nsp_name);
+	pfree(rel_name);
 
 	return range;
 }
@@ -394,7 +400,7 @@ pgstrom_post_create_foreign_table(CreateForeignTableStmt *stmt)
 	if (!OidIsValid(namespaceId))
 	{
 		namespaceId = NamespaceCreate(PGSTROM_SCHEMA_NAME,
-									  BOOTSTRAP_SUPERUSERID);
+									  BOOTSTRAP_SUPERUSERID, false);
 		CommandCounterIncrement();
 	}
 

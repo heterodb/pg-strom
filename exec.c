@@ -680,7 +680,7 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	ListCell	   *cell;
 	PgStromExecState   *sestate;
 
-	foreach (cell, fscan->fdwplan->fdw_private)
+	foreach (cell, fscan->fdw_private)
 	{
 		DefElem	   *defel = (DefElem *) lfirst(cell);
 
@@ -920,6 +920,7 @@ pgstrom_end_foreign_scan(ForeignScanState *fss)
 
 	/* TODO: Wait for completion of in-exec chunks */
 
+	pgstrom_shmseg_list_delete(&sestate->chkb_head->chkbh_chain);
 	pgstrom_shmseg_free(sestate->chkb_head);
 	bms_free(sestate->gpu_cols);
 	bms_free(sestate->cpu_cols);

@@ -13,10 +13,16 @@
 #include "postgres.h"
 #include "access/sysattr.h"
 #include "catalog/pg_type.h"
+#include "commands/sequence.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/syscache.h"
+#include "optimizer/cost.h"
+#include "optimizer/planmain.h"
+#include "optimizer/pathnode.h"
+#include "optimizer/restrictinfo.h"
 #include "optimizer/var.h"
 #include "pg_strom.h"
 #include "cuda_cmds.h"
@@ -332,12 +338,34 @@ make_cpu_commands(List *cpu_quals, Bitmapset **cpu_cols)
 	return NULL;
 }
 
-FdwPlan *
-pgstrom_plan_foreign_scan(Oid ftableOid,
-						  PlannerInfo *root,
-						  RelOptInfo *baserel)
+
+void
+pgstrom_get_foreign_rel_size(PlannerInfo *root,
+							 RelOptInfo *baserel,
+							 Oid ftableOid)
 {
-	FdwPlan	   *fdwplan;
+	AttrNumber	attno;
+	int			width = 0;
+
+	for (attno = baserel->min_attr; attno <= baserel->max_attr; attno++)
+	{
+		int		index = attno - baserel->min_attr;
+
+		if (attno > 0 && !bms_is_empty(baserel->attr_needed[index]))
+		{
+			width += get_attavgwidth(ftableOid, attno);
+		}
+	}
+	/* need more practical estimation */
+	baserel->rows = 10000.0;
+	baserel->width = width;
+}
+
+void
+pgstrom_get_foreign_paths(PlannerInfo *root,
+						  RelOptInfo *baserel,
+						  Oid foreigntableid)
+{
 	List	   *host_quals = NIL;
 	List	   *gpu_quals = NIL;
 	List	   *cpu_quals = NIL;
@@ -347,7 +375,12 @@ pgstrom_plan_foreign_scan(Oid ftableOid,
 	AttrNumber	attno;
 	bytea	   *cmds_bytea;
 	Const	   *cmds_const;
+	int			gpu_cmds_len = 0;
+	int			cpu_cmds_len = 0;
 	DefElem	   *defel;
+	Cost		startup_cost;
+	Cost		total_cost;
+	ForeignPath *fdwpath;
 
 	/*
 	 * check whether GPU/CPU executable qualifier, or not
@@ -384,6 +417,8 @@ pgstrom_plan_foreign_scan(Oid ftableOid,
 		defel = makeDefElem("gpu_cmds", (Node *) cmds_const);
 		private = lappend(private, defel);
 
+		gpu_cmds_len = VARSIZE_ANY_EXHDR(cmds_bytea) / sizeof(int);
+
 		while ((attno = bms_first_member(gpu_cols)) >= 0)
 		{
 			defel = makeDefElem("gpu_cols", (Node *) makeInteger(attno));
@@ -402,6 +437,8 @@ pgstrom_plan_foreign_scan(Oid ftableOid,
 							   false, false);
 		defel = makeDefElem("cpu_cmds", (Node *) cmds_const);
 		private = lappend(private, defel);
+
+		cpu_cmds_len = VARSIZE_ANY_EXHDR(cmds_bytea) / sizeof(int);
 
 		while ((attno = bms_first_member(cpu_cols)) >= 0)
 		{
@@ -432,14 +469,67 @@ pgstrom_plan_foreign_scan(Oid ftableOid,
 	bms_free(required_cols);
 
 	/*
-	 * Construct FdwPlan object
+	 * Cost estimations
+	 *
+	 * TODO: this logic should be revised later
 	 */
-	fdwplan = makeNode(FdwPlan);
-	fdwplan->fdw_private = private;
+	cost_qual_eval(&baserel->baserestrictcost,
+				   baserel->baserestrictinfo, root);
 
-	return fdwplan;
+	startup_cost = baserel->baserestrictcost.startup;
+	total_cost = baserel->baserestrictcost.per_tuple * baserel->rows
+		+ 0.01 * gpu_cmds_len * baserel->rows / PGSTROM_CHUNK_SIZE
+		+ 0.01 * cpu_cmds_len * baserel->rows / PGSTROM_CHUNK_SIZE;
+
+	/*
+	 * Construct Plan object
+	 */
+	fdwpath = create_foreignscan_path(root, baserel,
+									  baserel->rows,
+									  startup_cost,
+									  total_cost,
+									  NIL,
+									  NULL,
+									  NIL,
+									  private);
+	add_path(baserel, (Path *) fdwpath);
 }
 
+ForeignScan *
+pgstrom_get_foreign_plan(PlannerInfo *root,
+						 RelOptInfo *baserel,
+						 Oid foreigntableid,
+						 ForeignPath *best_path,
+						 List *tlist,
+						 List *scan_clauses)
+{
+	Index	scan_relid = baserel->relid;
+
+	/* it should be a base rel... */
+	Assert(scan_relid > 0);
+	Assert(best_path->path.parent->rtekind == RTE_RELATION);
+
+	/*
+	 * Reduce RestrictInfo list to bare expressions;
+	 * ignore pseudoconstants
+	 */
+	scan_clauses = extract_actual_clauses(scan_clauses, false);
+
+	/* Create the ForeignScan node */
+	return make_foreignscan(tlist,
+							scan_clauses,
+							scan_relid,
+							NIL,
+							best_path->fdw_private);
+}
+
+/*
+ * pgstrom_explain_foreign_scan
+ *
+ *
+ *
+ *
+ */
 void
 pgstrom_explain_foreign_scan(ForeignScanState *fss,
 							 ExplainState *es)
@@ -456,7 +546,7 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 	AttrNumber		attno;
 	Form_pg_attribute attr;
 
-	foreach (cell, fscan->fdwplan->fdw_private)
+	foreach (cell, fscan->fdw_private)
 	{
 		DefElem	   *defel = (DefElem *) lfirst(cell);
 

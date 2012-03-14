@@ -279,6 +279,7 @@ pgstrom_shmseg_free(void *ptr)
 
 		block = temp;
 	}
+	block->magic = SHMSEG_BLOCK_MAGIC_FREE;
 	pgstrom_shmseg_list_add(&shmseg_head->free_list, &block->list);
 
 	pthread_mutex_unlock(&shmseg_head->lock);

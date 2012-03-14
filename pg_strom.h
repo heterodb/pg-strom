@@ -151,11 +151,20 @@ extern void pgstrom_openmp_enqueue_chunk(ChunkBuffer *chunk);
 /*
  * plan.c
  */
-extern FdwPlan *pgstrom_plan_foreign_scan(Oid ftableOid,
-										  PlannerInfo *root,
-										  RelOptInfo *baserel);
-extern void		pgstrom_explain_foreign_scan(ForeignScanState *fss,
-											 ExplainState *es);
+extern void	pgstrom_get_foreign_rel_size(PlannerInfo *root,
+										 RelOptInfo *baserel,
+										 Oid foreigntableid);
+extern void	pgstrom_get_foreign_paths(PlannerInfo *root,
+									  RelOptInfo *baserel,
+									  Oid foreigntableid);
+extern ForeignScan *pgstrom_get_foreign_plan(PlannerInfo *root,
+											 RelOptInfo *baserel,
+											 Oid foreigntableid,
+											 ForeignPath *best_path,
+											 List *tlist,
+											 List *scan_clauses);
+extern void	pgstrom_explain_foreign_scan(ForeignScanState *fss,
+										 ExplainState *es);
 
 /*
  * exec.c
@@ -174,7 +183,7 @@ extern Relation pgstrom_open_cs_table(Relation base, AttrNumber attno,
 									  LOCKMODE lockmode);
 extern Relation pgstrom_open_cs_index(Relation base, AttrNumber attno,
 									  LOCKMODE lockmode);
-extern RangeVar *pgstrom_lookup_sequence(Relation base);
+extern RangeVar *pgstrom_lookup_sequence(Oid base_relid);
 extern void		pgstrom_utilcmds_init(void);
 
 /*

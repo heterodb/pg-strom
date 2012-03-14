@@ -23,7 +23,9 @@ void		_PG_init(void);
 
 FdwRoutine	PgStromFdwHandlerData = {
 	.type				= T_FdwRoutine,
-	.PlanForeignScan	= pgstrom_plan_foreign_scan,
+	.GetForeignRelSize	= pgstrom_get_foreign_rel_size,
+	.GetForeignPaths	= pgstrom_get_foreign_paths,
+	.GetForeignPlan		= pgstrom_get_foreign_plan,
 	.ExplainForeignScan	= pgstrom_explain_foreign_scan,
 	.BeginForeignScan	= pgstrom_begin_foreign_scan,
 	.IterateForeignScan	= pgstrom_iterate_foreign_scan,

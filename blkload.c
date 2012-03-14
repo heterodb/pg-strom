@@ -449,7 +449,7 @@ pgstrom_data_load(PG_FUNCTION_ARGS)
 	/*
 	 * Lookup the Oid of rowid sequencial generator
 	 */
-	range = pgstrom_lookup_sequence(drel);
+	range = pgstrom_lookup_sequence(RelationGetRelid(drel));
 	nspid = get_namespace_oid(range->schemaname, false);
 	seqid = get_relname_relid(range->relname, nspid);
 	if (!OidIsValid(seqid))
