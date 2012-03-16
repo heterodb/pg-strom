@@ -16,7 +16,182 @@ typedef __clock_t		clock_t;
 	*((type *)(cs_rowmap + cs_values[(attno)] + sizeof(type) * index))
 #define REG_REF(type, regidx)		*((type *)(&regs[(regidx)]))
 
+#define VARREF_TEMPLATE(cmd, vtype)									\
+	do {															\
+		if (VAR_IS_NULL(cmd[2]))									\
+			errors |= bitmask;										\
+		else														\
+			REG_REF(vtype, cmd[1]) = VAR_REF(vtype, cmd[2]);		\
+		cmd += 3;													\
+	} while(0)
 
+#define TYPE_CAST_TEMPLATE(cmd, stype, dtype)						\
+	do {															\
+		REG_REF(dtype, cmd[1]) = (dtype) REG_REF(stype, cmd[2]);	\
+		cmd += 3;													\
+	} while(0)
+
+#define OPER_ADD_TEMPLATE(cmd, dtype, ltype, rtype)			\
+	do {													\
+		REG_REF(dtype, cmd[1]) =							\
+			(dtype)((dtype)REG_REF(ltype, cmd[2]) +			\
+					(dtype)REG_REF(rtype, cmd[3]));			\
+		cmd += 4;											\
+	} while(0)
+
+#define OPER_SUB_TEMPLATE(cmd, dtype, ltype, rtype)			\
+	do {													\
+		REG_REF(dtype, cmd[1]) =							\
+			(dtype)((dtype)REG_REF(ltype, cmd[2]) -			\
+					(dtype)REG_REF(rtype, cmd[3]));			\
+		cmd += 4;											\
+	} while(0)
+
+#define OPER_MUL_TEMPLATE(cmd, dtype, ltype, rtype)			\
+	do {													\
+		REG_REF(dtype, cmd[1]) =							\
+			(dtype)((dtype)REG_REF(ltype, cmd[2]) *			\
+					(dtype)REG_REF(rtype, cmd[3]));			\
+		cmd += 4;											\
+	} while(0)
+
+#define OPER_DIV_TEMPLATE(cmd, dtype, ltype, rtype)			\
+	do {													\
+		if ((dtype)REG_REF(rtype, cmd[3]) == (dtype)0)		\
+			errors |= bitmask;								\
+		else												\
+			REG_REF(dtype, cmd[1]) =						\
+				(dtype)((dtype)REG_REF(ltype, cmd[2]) /		\
+						(dtype)REG_REF(rtype, cmd[3]));		\
+		cmd += 4;											\
+	} while(0)
+
+#define OPER_MOD_TEMPLATE(cmd, dtype, ltype, rtype)			\
+	do {													\
+		if ((dtype)REG_REF(rtype, cmd[3]) == (dtype)0)		\
+			errors |= bitmask;								\
+		else												\
+			REG_REF(dtype, cmd[1]) =						\
+				(dtype)((dtype)REG_REF(ltype, cmd[2]) %		\
+						(dtype)REG_REF(rtype, cmd[3]));		\
+		cmd += 4;											\
+	} while(0)
+
+#define OPER_UNARY_PLUS_TEMPLATE(cmd, vtype)				\
+	do {													\
+		REG_REF(vtype, cmd[1]) = REG_REF(vtype, cmd[2]);	\
+		cmd += 3;											\
+	} while(0)
+
+#define OPER_UNARY_MINUS_TEMPLATE(cmd, vtype)				\
+	do {													\
+		REG_REF(vtype, cmd[1]) = -REG_REF(vtype, cmd[2]);	\
+		cmd += 3;											\
+	} while(0)
+
+#define OPER_ABS_TEMPLATE(cmd, vtype)						\
+	do {													\
+		REG_REF(vtype, cmd[1]) =							\
+			abs((vtype)REG_REF(vtype, cmd[2]));				\
+		cmd += 3;											\
+	} while(0)
+
+#define OPER_EQ_TEMPLATE(cmd, vtype, ltype, rtype)			\
+	do {													\
+		REG_REF(int, cmd[1]) =								\
+			(int)((vtype)REG_REF(vtype, cmd[2]) ==			\
+				  (vtype)REG_REF(vtype, cmd[3]));			\
+		cmd += 4;											\
+	} while(0)
+
+#define OPER_NE_TEMPLATE(cmd, vtype, ltype, rtype)			\
+	do {													\
+		REG_REF(int, cmd[1]) =								\
+			(int)((vtype)REG_REF(vtype, cmd[2]) !=			\
+				  (vtype)REG_REF(vtype, cmd[3]));			\
+		cmd += 4;											\
+	} while(0)
+
+#define OPER_GT_TEMPLATE(cmd, vtype, ltype, rtype)			\
+	do {													\
+		REG_REF(int, cmd[1]) =								\
+			(int)((vtype)REG_REF(vtype, cmd[2]) >			\
+				  (vtype)REG_REF(vtype, cmd[3]));			\
+		cmd += 4;											\
+	} while(0)
+
+#define OPER_LT_TEMPLATE(cmd, vtype, ltype, rtype)			\
+	do {													\
+		REG_REF(int, cmd[1]) =								\
+			(int)((vtype)REG_REF(vtype, cmd[2]) <			\
+				  (vtype)REG_REF(vtype, cmd[3]));			\
+		cmd += 4;											\
+	} while(0)
+
+#define OPER_GE_TEMPLATE(cmd, vtype, ltype, rtype)			\
+	do {													\
+		REG_REF(int, cmd[1]) =								\
+			(int)((vtype)REG_REF(vtype, cmd[2]) >=			\
+				  (vtype)REG_REF(vtype, cmd[3]));			\
+		cmd += 4;											\
+	} while(0)
+
+#define OPER_LE_TEMPLATE(cmd, vtype, ltype, rtype)			\
+	do {													\
+		REG_REF(int, cmd[1]) =								\
+			(int)((vtype)REG_REF(vtype, cmd[2]) <=			\
+				  (vtype)REG_REF(vtype, cmd[3]));			\
+		cmd += 4;											\
+	} while(0)
+
+#define OPER_BIT_AND_TEMPLATE(cmd, vtype)					\
+	do {													\
+		REG_REF(vtype, cmd[1]) = (REG_REF(vtype, cmd[2]) &	\
+								  REG_REF(vtype, cmd[3]));	\
+		cmd += 4;											\
+	} while(0)
+
+#define OPER_BIT_OR_TEMPLATE(cmd, vtype)					\
+	do {													\
+		REG_REF(vtype, cmd[1]) = (REG_REF(vtype, cmd[2]) |	\
+								  REG_REF(vtype, cmd[3]));	\
+		cmd += 4;											\
+	} while(0)
+
+#define OPER_BIT_XOR_TEMPLATE(cmd, vtype)					\
+	do {													\
+		REG_REF(vtype, cmd[1]) = (REG_REF(vtype, cmd[2]) ^	\
+								  REG_REF(vtype, cmd[3]));	\
+		cmd += 4;											\
+	} while(0)
+
+#define OPER_BIT_NOT_TEMPLATE(cmd, vtype)					\
+	do {													\
+		REG_REF(vtype, cmd[1]) = ~(REG_REF(vtype, cmd[2]));	\
+		cmd += 3;											\
+	} while(0)
+
+#define OPER_BIT_SHR_TEMPLATE(cmd, vtype)					\
+	do {													\
+		REG_REF(vtype, cmd[1]) = (REG_REF(vtype, cmd[2]) >>	\
+								  REG_REF(int, cmd[3]));	\
+			cmd += 4;										\
+	} while(0)
+
+#define OPER_BIT_SHL_TEMPLATE(cmd, vtype)					\
+	do {													\
+		REG_REF(vtype, cmd[1]) = (REG_REF(vtype, cmd[2]) <<	\
+								  REG_REF(int, cmd[3]));	\
+			cmd += 4;										\
+	} while(0)
+
+/*
+ * kernel_qual
+ *
+ * This routine is an implementation of the qualifier on GPU side.
+ * It executes the supplied commands, and write back the results on
+ * the cs_rowmap bitmap.
+ */
 __global__ __var_used__
 void kernel_qual(const int nitems,
 				 const int commands[],
@@ -73,74 +248,33 @@ void kernel_qual(const int nitems,
 					cmd += 4;
 					break;
 
-					/*
-					 * Reference to variables
-					 */
+				/*
+				 * Reference to variables
+				 */
 				case GPUCMD_VARREF_BOOL:
 					/* reference to 8bits-variable */
-					if (VAR_IS_NULL(*(cmd+2)))
-						errors |= bitmask;
-					else
-						regs[*(cmd+1)] = VAR_REF(uchar, *(cmd+2));
-					cmd += 3;
+					VARREF_TEMPLATE(cmd, uchar);
 					break;
 
 				case GPUCMD_VARREF_INT2:
 					/* reference to 16bits-variable */
-					if (VAR_IS_NULL(*(cmd+2)))
-						errors |= bitmask;
-					else
-						regs[*(cmd+1)] = VAR_REF(ushort, *(cmd+2));
-					cmd += 3;
+					VARREF_TEMPLATE(cmd, ushort);
 					break;
 
 				case GPUCMD_VARREF_INT4:
 				case GPUCMD_VARREF_FLOAT4:
 					/* reference to 32bits-variable */
-					if (VAR_IS_NULL(*(cmd+2)))
-						errors |= bitmask;
-					else
-						regs[*(cmd+1)] = VAR_REF(uint, *(cmd+2));
-					cmd += 3;
+					VARREF_TEMPLATE(cmd, uint);
 					break;
 
 				case GPUCMD_VARREF_INT8:
 				case GPUCMD_VARREF_FLOAT8:
 					/* reference to 64bits-variable */
-					if (VAR_IS_NULL(*(cmd+2)))
-						errors |= bitmask;
-					else
-						REG_REF(ulong, *(cmd+1)) = VAR_REF(ulong, *(cmd+2));
-					cmd += 3;
+					VARREF_TEMPLATE(cmd, ulong);
 					break;
-#if 0
+
 				/*
-				 * Cast of Data Types
-				 */
-				case GPUCMD_CAST_INT2_TO_INT4:
-				case GPUCMD_CAST_INT2_TO_INT8:
-				case GPUCMD_CAST_INT2_TO_FLOAT4:
-				case GPUCMD_CAST_INT2_TO_FLOAT8:
-				case GPUCMD_CAST_INT4_TO_INT2:
-				case GPUCMD_CAST_INT4_TO_INT8:
-				case GPUCMD_CAST_INT4_TO_FLOAT4:
-				case GPUCMD_CAST_INT4_TO_FLOAT8:
-				case GPUCMD_CAST_INT8_TO_INT2:
-				case GPUCMD_CAST_INT8_TO_INT4:
-				case GPUCMD_CAST_INT8_TO_FLOAT4:
-				case GPUCMD_CAST_INT8_TO_FLOAT8:
-				case GPUCMD_CAST_FLOAT4_TO_INT2:
-				case GPUCMD_CAST_FLOAT4_TO_INT4:
-				case GPUCMD_CAST_FLOAT4_TO_INT8:
-				case GPUCMD_CAST_FLOAT4_TO_FLOAT8:
-				case GPUCMD_CAST_FLOAT8_TO_INT2:
-				case GPUCMD_CAST_FLOAT8_TO_INT4:
-				case GPUCMD_CAST_FLOAT8_TO_INT8:
-				case GPUCMD_CAST_FLOAT8_TO_FLOAT4:
-					break;
-#endif
-				/*
-				 *  Boolean operations
+				 *  Bool operations
 				 */
 				case GPUCMD_BOOLOP_AND:
 					regs[*(cmd+1)] = regs[*(cmd+1)] & regs[*(cmd+2)];
@@ -156,34 +290,780 @@ void kernel_qual(const int nitems,
 					regs[*(cmd+1)] = !regs[*(cmd+1)];
 					cmd += 2;
 					break;
-#if 0
-				case GPUCMD_OPER_FLOAT8_LT:
-					regs[*(cmd+1)] = (int)(REG_REF(double, *(cmd+2))
-										   < REG_REF(double, *(cmd+3)));
-					cmd += 4;
+
+				/*
+				 * Cast of data types
+				 */
+				case GPUCMD_CAST_INT2_TO_INT4:
+					TYPE_CAST_TEMPLATE(cmd, ushort, uint);
+					break;
+				case GPUCMD_CAST_INT2_TO_INT8:
+					TYPE_CAST_TEMPLATE(cmd, ushort, ulong);
+					break;
+				case GPUCMD_CAST_INT2_TO_FLOAT4:
+					TYPE_CAST_TEMPLATE(cmd, ushort, float);
+					break;
+				case GPUCMD_CAST_INT2_TO_FLOAT8:
+					TYPE_CAST_TEMPLATE(cmd, ushort, double);
+					break;
+				case GPUCMD_CAST_INT4_TO_INT2:
+					TYPE_CAST_TEMPLATE(cmd, uint, ushort);
+					break;
+				case GPUCMD_CAST_INT4_TO_INT8:
+					TYPE_CAST_TEMPLATE(cmd, uint, ulong);
+					break;
+				case GPUCMD_CAST_INT4_TO_FLOAT4:
+					TYPE_CAST_TEMPLATE(cmd, uint, float);
+					break;
+				case GPUCMD_CAST_INT4_TO_FLOAT8:
+					TYPE_CAST_TEMPLATE(cmd, uint, double);
+					break;
+				case GPUCMD_CAST_INT8_TO_INT2:
+					TYPE_CAST_TEMPLATE(cmd, ulong, ushort);
+					break;
+				case GPUCMD_CAST_INT8_TO_INT4:
+					TYPE_CAST_TEMPLATE(cmd, ulong, uint);
+					break;
+				case GPUCMD_CAST_INT8_TO_FLOAT4:
+					TYPE_CAST_TEMPLATE(cmd, ulong, float);
+					break;
+				case GPUCMD_CAST_INT8_TO_FLOAT8:
+					TYPE_CAST_TEMPLATE(cmd, ulong, double);
+					break;
+				case GPUCMD_CAST_FLOAT4_TO_INT2:
+					TYPE_CAST_TEMPLATE(cmd, float, ushort);
+					break;
+				case GPUCMD_CAST_FLOAT4_TO_INT4:
+					TYPE_CAST_TEMPLATE(cmd, float, uint);
+					break;
+				case GPUCMD_CAST_FLOAT4_TO_INT8:
+					TYPE_CAST_TEMPLATE(cmd, float, ulong);
+					break;
+				case GPUCMD_CAST_FLOAT4_TO_FLOAT8:
+					TYPE_CAST_TEMPLATE(cmd, float, double);
+					break;
+				case GPUCMD_CAST_FLOAT8_TO_INT2:
+					TYPE_CAST_TEMPLATE(cmd, double, ushort);
+					break;
+				case GPUCMD_CAST_FLOAT8_TO_INT4:
+					TYPE_CAST_TEMPLATE(cmd, double, uint);
+					break;
+				case GPUCMD_CAST_FLOAT8_TO_INT8:
+					TYPE_CAST_TEMPLATE(cmd, double, ulong);
+					break;
+				case GPUCMD_CAST_FLOAT8_TO_FLOAT4:
+					TYPE_CAST_TEMPLATE(cmd, double, float);
 					break;
 
-				case GPUCMD_OPER_FLOAT8_MI:
-					REG_REF(double, *(cmd+1))
-						= (REG_REF(double, *(cmd+2))
-						   - REG_REF(double, *(cmd+3)));
-					cmd += 4;
+				/*
+				 * '+' : add operators
+				 */
+				case GPUCMD_OPER_INT2_PL:
+					OPER_ADD_TEMPLATE(cmd, short, short, short);
 					break;
-
+				case GPUCMD_OPER_INT24_PL:
+					OPER_ADD_TEMPLATE(cmd, int, short, int);
+					break;
+				case GPUCMD_OPER_INT28_PL:
+					OPER_ADD_TEMPLATE(cmd, long, short, long);
+					break;
+				case GPUCMD_OPER_INT42_PL:
+					OPER_ADD_TEMPLATE(cmd, int, int, short);
+					break;
+				case GPUCMD_OPER_INT4_PL:
+					OPER_ADD_TEMPLATE(cmd, int, int, int);
+					break;
+				case GPUCMD_OPER_INT48_PL:
+					OPER_ADD_TEMPLATE(cmd, long, int, long);
+					break;
+				case GPUCMD_OPER_INT8_PL:
+					OPER_ADD_TEMPLATE(cmd, long, long, long);
+					break;
+				case GPUCMD_OPER_INT82_PL:
+					OPER_ADD_TEMPLATE(cmd, long, long, short);
+					break;
+				case GPUCMD_OPER_INT84_PL:
+					OPER_ADD_TEMPLATE(cmd, long, long, int);
+					break;
+				case GPUCMD_OPER_FLOAT4_PL:
+					OPER_ADD_TEMPLATE(cmd, float, float, float);
+					break;
+				case GPUCMD_OPER_FLOAT48_PL:
+					OPER_ADD_TEMPLATE(cmd, double, float, double);
+					break;
+				case GPUCMD_OPER_FLOAT84_PL:
+					OPER_ADD_TEMPLATE(cmd, double, double, float);
+					break;
 				case GPUCMD_OPER_FLOAT8_PL:
-					REG_REF(double, *(cmd+1))
-						= (REG_REF(double, *(cmd+2))
-						   + REG_REF(double, *(cmd+3)));
+					OPER_ADD_TEMPLATE(cmd, double, double, double);
+					break;
+
+				/*
+				 * '-' : subtract operators
+				 */
+				case GPUCMD_OPER_INT2_MI:
+					OPER_SUB_TEMPLATE(cmd, short, short, short);
+					break;
+				case GPUCMD_OPER_INT24_MI:
+					OPER_SUB_TEMPLATE(cmd, int, short, int);
+					break;
+				case GPUCMD_OPER_INT28_MI:
+					OPER_SUB_TEMPLATE(cmd, long, short, long);
+					break;
+				case GPUCMD_OPER_INT42_MI:
+					OPER_SUB_TEMPLATE(cmd, int, int, short);
+					break;
+				case GPUCMD_OPER_INT4_MI:
+					OPER_SUB_TEMPLATE(cmd, int, int, int);
+					break;
+				case GPUCMD_OPER_INT48_MI:
+					OPER_SUB_TEMPLATE(cmd, long, int, long);
+					break;
+				case GPUCMD_OPER_INT8_MI:
+					OPER_SUB_TEMPLATE(cmd, long, long, long);
+					break;
+				case GPUCMD_OPER_INT82_MI:
+					OPER_SUB_TEMPLATE(cmd, long, long, short);
+					break;
+				case GPUCMD_OPER_INT84_MI:
+					OPER_SUB_TEMPLATE(cmd, long, long, int);
+					break;
+				case GPUCMD_OPER_FLOAT4_MI:
+					OPER_SUB_TEMPLATE(cmd, float, float, float);
+					break;
+				case GPUCMD_OPER_FLOAT48_MI:
+					OPER_SUB_TEMPLATE(cmd, double, float, double);
+					break;
+				case GPUCMD_OPER_FLOAT84_MI:
+					OPER_SUB_TEMPLATE(cmd, double, double, float);
+					break;
+				case GPUCMD_OPER_FLOAT8_MI:
+					OPER_SUB_TEMPLATE(cmd, double, double, double);
+					break;
+
+				/*
+				 * '*' : mutiply operators
+				 */
+				case GPUCMD_OPER_INT2_MUL:
+					OPER_MUL_TEMPLATE(cmd, short, short, short);
+					break;
+				case GPUCMD_OPER_INT24_MUL:
+					OPER_MUL_TEMPLATE(cmd, int, short, int);
+					break;
+				case GPUCMD_OPER_INT28_MUL:
+					OPER_MUL_TEMPLATE(cmd, long, short, long);
+					break;
+				case GPUCMD_OPER_INT42_MUL:
+					OPER_MUL_TEMPLATE(cmd, int, int, short);
+					break;
+				case GPUCMD_OPER_INT4_MUL:
+					OPER_MUL_TEMPLATE(cmd, int, int, int);
+					break;
+				case GPUCMD_OPER_INT48_MUL:
+					OPER_MUL_TEMPLATE(cmd, long, int, long);
+					break;
+				case GPUCMD_OPER_INT8_MUL:
+					OPER_MUL_TEMPLATE(cmd, long, long, long);
+					break;
+				case GPUCMD_OPER_INT82_MUL:
+					OPER_MUL_TEMPLATE(cmd, long, long, short);
+					break;
+				case GPUCMD_OPER_INT84_MUL:
+					OPER_MUL_TEMPLATE(cmd, long, long, int);
+					break;
+				case GPUCMD_OPER_FLOAT4_MUL:
+					OPER_MUL_TEMPLATE(cmd, float, float, float);
+					break;
+				case GPUCMD_OPER_FLOAT48_MUL:
+					OPER_MUL_TEMPLATE(cmd, double, float, double);
+					break;
+				case GPUCMD_OPER_FLOAT84_MUL:
+					OPER_MUL_TEMPLATE(cmd, double, double, float);
+					break;
+				case GPUCMD_OPER_FLOAT8_MUL:
+					OPER_MUL_TEMPLATE(cmd, double, double, double);
+					break;
+
+				/*
+				 * '/' : divide operators
+				 */
+				case GPUCMD_OPER_INT2_DIV:
+					OPER_DIV_TEMPLATE(cmd, short, short, short);
+					break;
+				case GPUCMD_OPER_INT24_DIV:
+					OPER_DIV_TEMPLATE(cmd, int, short, int);
+					break;
+				case GPUCMD_OPER_INT28_DIV:
+					OPER_DIV_TEMPLATE(cmd, long, short, long);
+					break;
+				case GPUCMD_OPER_INT42_DIV:
+					OPER_DIV_TEMPLATE(cmd, int, int, short);
+					break;
+				case GPUCMD_OPER_INT4_DIV:
+					OPER_DIV_TEMPLATE(cmd, int, int, int);
+					break;
+				case GPUCMD_OPER_INT48_DIV:
+					OPER_DIV_TEMPLATE(cmd, long, int, long);
+					break;
+				case GPUCMD_OPER_INT8_DIV:
+					OPER_DIV_TEMPLATE(cmd, long, long, long);
+					break;
+				case GPUCMD_OPER_INT82_DIV:
+					OPER_DIV_TEMPLATE(cmd, long, long, short);
+					break;
+				case GPUCMD_OPER_INT84_DIV:
+					OPER_DIV_TEMPLATE(cmd, long, long, int);
+					break;
+				case GPUCMD_OPER_FLOAT4_DIV:
+					OPER_DIV_TEMPLATE(cmd, float, float, float);
+					break;
+				case GPUCMD_OPER_FLOAT48_DIV:
+					OPER_DIV_TEMPLATE(cmd, double, float, double);
+					break;
+				case GPUCMD_OPER_FLOAT84_DIV:
+					OPER_DIV_TEMPLATE(cmd, double, double, float);
+					break;
+				case GPUCMD_OPER_FLOAT8_DIV:
+					OPER_DIV_TEMPLATE(cmd, double, double, double);
+					break;
+
+				/*
+				 * '%' : reminder operators
+				 */
+				case GPUCMD_OPER_INT2_MOD:
+					OPER_MOD_TEMPLATE(cmd, short, short, short);
+					break;
+				case GPUCMD_OPER_INT4_MOD:
+					OPER_MOD_TEMPLATE(cmd, int, int, int);
+					break;
+				case GPUCMD_OPER_INT8_MOD:
+					OPER_MOD_TEMPLATE(cmd, long, long, long);
+					break;
+
+				/*
+				 * '+' : unary plus operators
+				 */
+				case GPUCMD_OPER_INT2_UP:
+					OPER_UNARY_PLUS_TEMPLATE(cmd, short);
+					break;
+				case GPUCMD_OPER_INT4_UP:
+					OPER_UNARY_PLUS_TEMPLATE(cmd, int);
+					break;
+				case GPUCMD_OPER_INT8_UP:
+					OPER_UNARY_PLUS_TEMPLATE(cmd, long);
+					break;
+				case GPUCMD_OPER_FLOAT4_UP:
+					OPER_UNARY_PLUS_TEMPLATE(cmd, float);
+					break;
+				case GPUCMD_OPER_FLOAT8_UP:
+					OPER_UNARY_PLUS_TEMPLATE(cmd, double);
+					break;
+
+				/*
+				 * '-' : unary minus operators
+				 */
+				case GPUCMD_OPER_INT2_UM:
+					OPER_UNARY_MINUS_TEMPLATE(cmd, short);
+					break;
+				case GPUCMD_OPER_INT4_UM:
+					OPER_UNARY_MINUS_TEMPLATE(cmd, int);
+					break;
+				case GPUCMD_OPER_INT8_UM:
+					OPER_UNARY_MINUS_TEMPLATE(cmd, long);
+					break;
+				case GPUCMD_OPER_FLOAT4_UM:
+					OPER_UNARY_MINUS_TEMPLATE(cmd, float);
+					break;
+				case GPUCMD_OPER_FLOAT8_UM:
+					OPER_UNARY_MINUS_TEMPLATE(cmd, double);
+					break;
+
+				/*
+				 * '@' : absolute value operators
+				 */
+				case GPUCMD_OPER_INT2_ABS:
+					OPER_ABS_TEMPLATE(cmd, short);
+					break;
+				case GPUCMD_OPER_INT4_ABS:
+					OPER_ABS_TEMPLATE(cmd, int);
+					break;
+				case GPUCMD_OPER_INT8_ABS:
+					OPER_ABS_TEMPLATE(cmd, long);
+					break;
+				case GPUCMD_OPER_FLOAT4_ABS:
+					OPER_ABS_TEMPLATE(cmd, float);
+					break;
+				case GPUCMD_OPER_FLOAT8_ABS:
+					OPER_ABS_TEMPLATE(cmd, double);
+					break;
+
+				/*
+				 * '=' : equal operators
+				 */
+				case GPUCMD_OPER_INT2_EQ:
+					OPER_EQ_TEMPLATE(cmd, short, short, short);
+					break;
+				case GPUCMD_OPER_INT24_EQ:
+					OPER_EQ_TEMPLATE(cmd, int, short, int);
+					break;
+				case GPUCMD_OPER_INT28_EQ:
+					OPER_EQ_TEMPLATE(cmd, long, short, long);
+					break;
+				case GPUCMD_OPER_INT42_EQ:
+					OPER_EQ_TEMPLATE(cmd, int, int, short);
+					break;
+				case GPUCMD_OPER_INT4_EQ:
+					OPER_EQ_TEMPLATE(cmd, int, int, int);
+					break;
+				case GPUCMD_OPER_INT48_EQ:
+					OPER_EQ_TEMPLATE(cmd, long, int, long);
+					break;
+				case GPUCMD_OPER_INT82_EQ:
+					OPER_EQ_TEMPLATE(cmd, long, long, short);
+					break;
+				case GPUCMD_OPER_INT84_EQ:
+					OPER_EQ_TEMPLATE(cmd, long, long, int);
+					break;
+				case GPUCMD_OPER_INT8_EQ:
+					OPER_EQ_TEMPLATE(cmd, long, long, long);
+					break;
+				case GPUCMD_OPER_FLOAT4_EQ:
+					OPER_EQ_TEMPLATE(cmd, float, float, float);
+					break;
+				case GPUCMD_OPER_FLOAT48_EQ:
+					OPER_EQ_TEMPLATE(cmd, double, float, double);
+					break;
+				case GPUCMD_OPER_FLOAT84_EQ:
+					OPER_EQ_TEMPLATE(cmd, double, double, float);
+					break;
+				case GPUCMD_OPER_FLOAT8_EQ:
+					OPER_EQ_TEMPLATE(cmd, double, double, double);
+					break;
+
+				/*
+				 * '<>' : not equal operators
+				 */
+				case GPUCMD_OPER_INT2_NE:
+					OPER_NE_TEMPLATE(cmd, short, short, short);
+					break;
+				case GPUCMD_OPER_INT24_NE:
+					OPER_NE_TEMPLATE(cmd, int, short, int);
+					break;
+				case GPUCMD_OPER_INT28_NE:
+					OPER_NE_TEMPLATE(cmd, long, short, long);
+					break;
+				case GPUCMD_OPER_INT42_NE:
+					OPER_NE_TEMPLATE(cmd, int, int, short);
+					break;
+				case GPUCMD_OPER_INT4_NE:
+					OPER_NE_TEMPLATE(cmd, int, int, int);
+					break;
+				case GPUCMD_OPER_INT48_NE:
+					OPER_NE_TEMPLATE(cmd, long, int, long);
+					break;
+				case GPUCMD_OPER_INT82_NE:
+					OPER_NE_TEMPLATE(cmd, long, long, short);
+					break;
+				case GPUCMD_OPER_INT84_NE:
+					OPER_NE_TEMPLATE(cmd, long, long, int);
+					break;
+				case GPUCMD_OPER_INT8_NE:
+					OPER_NE_TEMPLATE(cmd, long, long, long);
+					break;
+				case GPUCMD_OPER_FLOAT4_NE:
+					OPER_NE_TEMPLATE(cmd, float, float, float);
+					break;
+				case GPUCMD_OPER_FLOAT48_NE:
+					OPER_NE_TEMPLATE(cmd, double, float, double);
+					break;
+				case GPUCMD_OPER_FLOAT84_NE:
+					OPER_NE_TEMPLATE(cmd, double, double, float);
+					break;
+				case GPUCMD_OPER_FLOAT8_NE:
+					OPER_NE_TEMPLATE(cmd, double, double, doubke);
+					break;
+
+				/*
+				 * '>' : equal operators
+				 */
+				case GPUCMD_OPER_INT2_GT:
+					OPER_GT_TEMPLATE(cmd, short, short, short);
+					break;
+				case GPUCMD_OPER_INT24_GT:
+					OPER_GT_TEMPLATE(cmd, int, short, int);
+					break;
+				case GPUCMD_OPER_INT28_GT:
+					OPER_GT_TEMPLATE(cmd, long, short, long);
+					break;
+				case GPUCMD_OPER_INT42_GT:
+					OPER_GT_TEMPLATE(cmd, int, int, short);
+					break;
+				case GPUCMD_OPER_INT4_GT:
+					OPER_GT_TEMPLATE(cmd, int, int, int);
+					break;
+				case GPUCMD_OPER_INT48_GT:
+					OPER_GT_TEMPLATE(cmd, long, int, long);
+					break;
+				case GPUCMD_OPER_INT82_GT:
+					OPER_GT_TEMPLATE(cmd, long, long, short);
+					break;
+				case GPUCMD_OPER_INT84_GT:
+					OPER_GT_TEMPLATE(cmd, long, long, int);
+					break;
+				case GPUCMD_OPER_INT8_GT:
+					OPER_GT_TEMPLATE(cmd, long, long, long);
+					break;
+				case GPUCMD_OPER_FLOAT4_GT:
+					OPER_GT_TEMPLATE(cmd, float, float, float);
+					break;
+				case GPUCMD_OPER_FLOAT48_GT:
+					OPER_GT_TEMPLATE(cmd, double, float, double);
+					break;
+				case GPUCMD_OPER_FLOAT84_GT:
+					OPER_GT_TEMPLATE(cmd, double, double, float);
+					break;
+				case GPUCMD_OPER_FLOAT8_GT:
+					OPER_GT_TEMPLATE(cmd, double, double, doubke);
+					break;
+
+				/*
+				 * '<' : equal operators
+				 */
+				case GPUCMD_OPER_INT2_LT:
+					OPER_LT_TEMPLATE(cmd, short, short, short);
+					break;
+				case GPUCMD_OPER_INT24_LT:
+					OPER_LT_TEMPLATE(cmd, int, short, int);
+					break;
+				case GPUCMD_OPER_INT28_LT:
+					OPER_LT_TEMPLATE(cmd, long, short, long);
+					break;
+				case GPUCMD_OPER_INT42_LT:
+					OPER_LT_TEMPLATE(cmd, int, int, short);
+					break;
+				case GPUCMD_OPER_INT4_LT:
+					OPER_LT_TEMPLATE(cmd, int, int, int);
+					break;
+				case GPUCMD_OPER_INT48_LT:
+					OPER_LT_TEMPLATE(cmd, long, int, long);
+					break;
+				case GPUCMD_OPER_INT82_LT:
+					OPER_LT_TEMPLATE(cmd, long, long, short);
+					break;
+				case GPUCMD_OPER_INT84_LT:
+					OPER_LT_TEMPLATE(cmd, long, long, int);
+					break;
+				case GPUCMD_OPER_INT8_LT:
+					OPER_LT_TEMPLATE(cmd, long, long, long);
+					break;
+				case GPUCMD_OPER_FLOAT4_LT:
+					OPER_LT_TEMPLATE(cmd, float, float, float);
+					break;
+				case GPUCMD_OPER_FLOAT48_LT:
+					OPER_LT_TEMPLATE(cmd, double, float, double);
+					break;
+				case GPUCMD_OPER_FLOAT84_LT:
+					OPER_LT_TEMPLATE(cmd, double, double, float);
+					break;
+				case GPUCMD_OPER_FLOAT8_LT:
+					OPER_LT_TEMPLATE(cmd, double, double, double);
+					break;
+
+				/*
+				 * '>=' : relational greater-than or equal-to
+				 */
+				case GPUCMD_OPER_INT2_GE:
+					OPER_GE_TEMPLATE(cmd, short, short, short);
+					break;
+				case GPUCMD_OPER_INT24_GE:
+					OPER_GE_TEMPLATE(cmd, int, short, int);
+					break;
+				case GPUCMD_OPER_INT28_GE:
+					OPER_GE_TEMPLATE(cmd, long, short, long);
+					break;
+				case GPUCMD_OPER_INT42_GE:
+					OPER_GE_TEMPLATE(cmd, int, int, short);
+					break;
+				case GPUCMD_OPER_INT4_GE:
+					OPER_GE_TEMPLATE(cmd, int, int, int);
+					break;
+				case GPUCMD_OPER_INT48_GE:
+					OPER_GE_TEMPLATE(cmd, long, int, long);
+					break;
+				case GPUCMD_OPER_INT82_GE:
+					OPER_GE_TEMPLATE(cmd, long, long, short);
+					break;
+				case GPUCMD_OPER_INT84_GE:
+					OPER_GE_TEMPLATE(cmd, long, long, int);
+					break;
+				case GPUCMD_OPER_INT8_GE:
+					OPER_GE_TEMPLATE(cmd, long, long, long);
+					break;
+				case GPUCMD_OPER_FLOAT4_GE:
+					OPER_GE_TEMPLATE(cmd, float, float, float);
+					break;
+				case GPUCMD_OPER_FLOAT48_GE:
+					OPER_GE_TEMPLATE(cmd, double, float, double);
+					break;
+				case GPUCMD_OPER_FLOAT84_GE:
+					OPER_GE_TEMPLATE(cmd, double, double, float);
+					break;
+				case GPUCMD_OPER_FLOAT8_GE:
+					OPER_GE_TEMPLATE(cmd, double, double, double);
+					break;
+
+				/*
+				 * '<=' : relational greater-than or equal-to
+				 */
+				case GPUCMD_OPER_INT2_LE:
+					OPER_LE_TEMPLATE(cmd, short, short, short);
+					break;
+				case GPUCMD_OPER_INT24_LE:
+					OPER_LE_TEMPLATE(cmd, int, short, int);
+					break;
+				case GPUCMD_OPER_INT28_LE:
+					OPER_LE_TEMPLATE(cmd, long, short, long);
+					break;
+				case GPUCMD_OPER_INT42_LE:
+					OPER_LE_TEMPLATE(cmd, int, int, short);
+					break;
+				case GPUCMD_OPER_INT4_LE:
+					OPER_LE_TEMPLATE(cmd, int, int, int);
+					break;
+				case GPUCMD_OPER_INT48_LE:
+					OPER_LE_TEMPLATE(cmd, long, int, long);
+					break;
+				case GPUCMD_OPER_INT82_LE:
+					OPER_LE_TEMPLATE(cmd, long, long, short);
+					break;
+				case GPUCMD_OPER_INT84_LE:
+					OPER_LE_TEMPLATE(cmd, long, long, int);
+					break;
+				case GPUCMD_OPER_INT8_LE:
+					OPER_LE_TEMPLATE(cmd, long, long, long);
+					break;
+				case GPUCMD_OPER_FLOAT4_LE:
+					OPER_LE_TEMPLATE(cmd, float, float, float);
+					break;
+				case GPUCMD_OPER_FLOAT48_LE:
+					OPER_LE_TEMPLATE(cmd, double, float, double);
+					break;
+				case GPUCMD_OPER_FLOAT84_LE:
+					OPER_LE_TEMPLATE(cmd, double, double, float);
+					break;
+				case GPUCMD_OPER_FLOAT8_LE:
+					OPER_LE_TEMPLATE(cmd, double, double, double);
+					break;
+
+				/*
+				 * '&' : bitwise and
+				 */
+				case GPUCMD_OPER_INT2_AND:
+					OPER_BIT_AND_TEMPLATE(cmd, short);
+					break;
+				case GPUCMD_OPER_INT4_AND:
+					OPER_BIT_AND_TEMPLATE(cmd, int);
+					break;
+				case GPUCMD_OPER_INT8_AND:
+					OPER_BIT_AND_TEMPLATE(cmd, long);
+					break;
+
+				/*
+				 * '|'  : bitwise or
+				 */
+				case GPUCMD_OPER_INT2_OR:
+					OPER_BIT_OR_TEMPLATE(cmd, short);
+					break;
+				case GPUCMD_OPER_INT4_OR:
+					OPER_BIT_OR_TEMPLATE(cmd, int);
+					break;
+				case GPUCMD_OPER_INT8_OR:
+					OPER_BIT_OR_TEMPLATE(cmd, long);
+					break;
+
+				/*
+				 * '#'  : bitwise xor
+				 */
+				case GPUCMD_OPER_INT2_XOR:
+					OPER_BIT_XOR_TEMPLATE(cmd, short);
+					break;
+				case GPUCMD_OPER_INT4_XOR:
+					OPER_BIT_XOR_TEMPLATE(cmd, int);
+					break;
+				case GPUCMD_OPER_INT8_XOR:
+					OPER_BIT_XOR_TEMPLATE(cmd, long);
+					break;
+
+				/*
+				 * '~'  : bitwise not operators
+				 */
+				case GPUCMD_OPER_INT2_NOT:
+					OPER_BIT_NOT_TEMPLATE(cmd, short);
+					break;
+				case GPUCMD_OPER_INT4_NOT:
+					OPER_BIT_NOT_TEMPLATE(cmd, int);
+					break;
+				case GPUCMD_OPER_INT8_NOT:
+					OPER_BIT_NOT_TEMPLATE(cmd, long);
+					break;
+
+				/*
+				 * '>>' : right shift
+				 */
+				case GPUCMD_OPER_INT2_SHR:
+					OPER_BIT_SHR_TEMPLATE(cmd, short);
+					break;
+				case GPUCMD_OPER_INT4_SHR:
+					OPER_BIT_SHR_TEMPLATE(cmd, int);
+					break;
+				case GPUCMD_OPER_INT8_SHR:
+					OPER_BIT_SHR_TEMPLATE(cmd, long);
+					break;
+
+				/*
+				 * '<<' : left shift
+				 */
+				case GPUCMD_OPER_INT2_SHL:
+					OPER_BIT_SHR_TEMPLATE(cmd, short);
+					break;
+				case GPUCMD_OPER_INT4_SHL:
+					OPER_BIT_SHR_TEMPLATE(cmd, int);
+					break;
+				case GPUCMD_OPER_INT8_SHL:
+					OPER_BIT_SHR_TEMPLATE(cmd, long);
+					break;
+
+				/*
+				 * Mathmatical functions
+			   	 */
+				case GPUCMD_FUNC_FLOAT8_CBRT:
+					REG_REF(double, cmd[1])
+						= cbrt(REG_REF(double, cmd[2]));
+					cmd += 3;
+					break;
+
+				case GPUCMD_FUNC_FLOAT8_CEIL:
+					REG_REF(double, cmd[1])
+						= ceil(REG_REF(double, cmd[2]));
+					cmd += 3;
+					break;
+
+				case GPUCMD_FUNC_FLOAT8_EXP:
+					REG_REF(double, cmd[1])
+						= exp(REG_REF(double, cmd[2]));
+					cmd += 3;
+					break;
+
+				case GPUCMD_FUNC_FLOAT8_FLOOR:
+					REG_REF(double, cmd[1])
+						= floor(REG_REF(double, cmd[2]));
+					cmd += 3;
+					break;
+
+				case GPUCMD_FUNC_FLOAT8_LOG:
+					REG_REF(double, cmd[1])
+						= log(REG_REF(double, cmd[2]));
+					cmd += 3;
+					break;
+
+				case GPUCMD_FUNC_FLOAT8_LOG10:
+					REG_REF(double, cmd[1])
+						= log10(REG_REF(double, cmd[2]));
+					cmd += 3;
+					break;
+
+				case GPUCMD_FUNC_FLOAT8_PI:
+					REG_REF(double, cmd[1]) = CUDART_PI;
+					cmd += 2;
+					break;
+
+				case GPUCMD_FUNC_FLOAT8_POWER:
+					REG_REF(double, cmd[1])
+						= pow(REG_REF(double, cmd[2]),
+							  REG_REF(double, cmd[3]));
 					cmd += 4;
 					break;
 
-				case GPUCMD_FUNC_POWER:
-					REG_REF(double, *(cmd+1))
-						= pow(REG_REF(double, *(cmd+2)),
-							  REG_REF(double, *(cmd+3)));
+				case GPUCMD_FUNC_FLOAT8_ROUND:
+					REG_REF(double, cmd[1])
+						= round(REG_REF(double, cmd[2]));
+					cmd += 3;
+					break;
+
+				case GPUCMD_FUNC_FLOAT8_SIGN:
+					if (REG_REF(double, cmd[2]) > 0)
+						REG_REF(double, cmd[1]) = 1.0;
+					else if (REG_REF(double, cmd[2]) < 0)
+						REG_REF(double, cmd[1]) = -1.0;
+					else
+						REG_REF(double, cmd[1]) = 0.0;
+					cmd += 2;
+					break;
+
+				case GPUCMD_FUNC_FLOAT8_SQRT:
+					REG_REF(double, cmd[1])
+						= sqrt(REG_REF(double, cmd[2]));
+					cmd += 3;
+					break;
+
+				case GPUCMD_FUNC_FLOAT8_TRUNC:
+					REG_REF(double, cmd[1])
+						= trunc(REG_REF(double, cmd[2]));
+					cmd += 3;
+					break;
+
+				/*
+				 * Trigonometric function
+				 */
+				case GPUCMD_FUNC_FLOAT8_ACOS:
+					REG_REF(double, cmd[1])
+						= acos(REG_REF(double, cmd[2]));
+					cmd += 3;
+					break;
+
+				case GPUCMD_FUNC_FLOAT8_ASIN:
+					REG_REF(double, cmd[1])
+						= asin(REG_REF(double, cmd[2]));
+					cmd += 3;
+					break;
+
+				case GPUCMD_FUNC_FLOAT8_ATAN:
+					REG_REF(double, cmd[1])
+						= atan(REG_REF(double, cmd[2]));
+					cmd += 3;
+					break;
+
+				case GPUCMD_FUNC_FLOAT8_ATAN2:
+					REG_REF(double, cmd[1])
+						= atan2(REG_REF(double, cmd[2]),
+								REG_REF(double, cmd[3]));
 					cmd += 4;
 					break;
-#endif
+
+				case GPUCMD_FUNC_FLOAT8_COS:
+					REG_REF(double, cmd[1])
+						= cos(REG_REF(double, cmd[2]));
+					cmd += 3;
+					break;
+
+				case GPUCMD_FUNC_FLOAT8_COT:
+					REG_REF(double, cmd[1])
+						= 1.0 / tan(REG_REF(double, cmd[2]));
+					cmd += 3;
+					break;
+
+				case GPUCMD_FUNC_FLOAT8_SIN:
+					REG_REF(double, cmd[1])
+						= sin(REG_REF(double, cmd[2]));
+					cmd += 3;
+					break;
+
+				case GPUCMD_FUNC_FLOAT8_TAN:
+					REG_REF(double, cmd[1])
+						= tan(REG_REF(double, cmd[2]));
+					cmd += 3;
+					break;
+
 				default:
 					errors |= bitmask;
 					goto out;
