@@ -997,7 +997,7 @@ void kernel_qual(const int nitems,
 						REG_REF(double, cmd[1]) = -1.0;
 					else
 						REG_REF(double, cmd[1]) = 0.0;
-					cmd += 2;
+					cmd += 3;
 					break;
 
 				case GPUCMD_FUNC_FLOAT8_SQRT:

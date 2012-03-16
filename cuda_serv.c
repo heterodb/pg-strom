@@ -1080,10 +1080,10 @@ static struct {
 	{ GPUCMD_FUNC_FLOAT8_FLOOR,	"floor",	1, {FLOAT8OID}, "f:floor" },
 	{ GPUCMD_FUNC_FLOAT8_LOG,	"ln",		1, {FLOAT8OID}, "f:log" },
 	{ GPUCMD_FUNC_FLOAT8_LOG10,	"log",		1, {FLOAT8OID}, "f:log10" },
-	{ GPUCMD_FUNC_FLOAT8_PI,	"pi",		1, {FLOAT8OID}, "f:pi" },
-	{ GPUCMD_FUNC_FLOAT8_POWER,	"power",	1, {FLOAT8OID}, "f:pow" },
-	{ GPUCMD_FUNC_FLOAT8_POWER,	"pow",		1, {FLOAT8OID}, "f:pow" },
-	{ GPUCMD_FUNC_FLOAT8_POWER,	"dpow",		1, {FLOAT8OID}, "f:pow" },
+	{ GPUCMD_FUNC_FLOAT8_PI,	"pi",		0, {}, "f:pi" },
+	{ GPUCMD_FUNC_FLOAT8_POWER,	"power", 2, {FLOAT8OID,FLOAT8OID}, "f:pow" },
+	{ GPUCMD_FUNC_FLOAT8_POWER,	"pow",	 2, {FLOAT8OID,FLOAT8OID}, "f:pow" },
+	{ GPUCMD_FUNC_FLOAT8_POWER,	"dpow",	 2, {FLOAT8OID,FLOAT8OID}, "f:pow" },
 	{ GPUCMD_FUNC_FLOAT8_ROUND,	"round",	1, {FLOAT8OID}, "f:round" },
 	{ GPUCMD_FUNC_FLOAT8_SIGN,	"sign",		1, {FLOAT8OID}, "f:sign" },
 	{ GPUCMD_FUNC_FLOAT8_SQRT,	"sqrt",		1, {FLOAT8OID}, "f:sqrt" },
@@ -1097,7 +1097,7 @@ static struct {
 	{ GPUCMD_FUNC_FLOAT8_ACOS,	"acos",		1, {FLOAT8OID}, "f:acos" },
 	{ GPUCMD_FUNC_FLOAT8_ASIN,	"asin",		1, {FLOAT8OID}, "f:asin" },
 	{ GPUCMD_FUNC_FLOAT8_ATAN,	"atan",		1, {FLOAT8OID}, "f:atan" },
-	{ GPUCMD_FUNC_FLOAT8_ATAN2,	"atan2",	1, {FLOAT8OID}, "f:atan2" },
+	{ GPUCMD_FUNC_FLOAT8_ATAN2,	"atan2", 1, {FLOAT8OID,FLOAT8OID}, "f:atan2" },
 	{ GPUCMD_FUNC_FLOAT8_COS,	"cos",		1, {FLOAT8OID}, "f:cos" },
 	{ GPUCMD_FUNC_FLOAT8_COT,  "cot_double",1, {FLOAT8OID}, "f:cot" },
 	{ GPUCMD_FUNC_FLOAT8_SIN,	"sin",		1, {FLOAT8OID}, "f:sin" },
@@ -1177,7 +1177,9 @@ out:
 
 	if (entry->func_cmd != 0)
 		return entry;
-	elog(INFO, "unsupported function: %u", entry->func_oid);
+
+	elog(DEBUG1, "PG-Strom: %s is not supported function",
+		 format_procedure(entry->func_oid));
 	return NULL;
 }
 
