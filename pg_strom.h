@@ -82,6 +82,7 @@ typedef struct {
 
 typedef struct {
 	Oid			type_oid;
+	const char *type_explain;	/* symbol in EXPLAIN statement */
 	bool		type_x2regs;	/* type uses dual 32bit registers? */
 	bool		type_fp64;		/* type needs double */
 	uint32		type_varref;	/* cmd code to reference type variable */
@@ -90,6 +91,7 @@ typedef struct {
 
 typedef struct {
 	Oid			func_oid;
+	const char *func_explain;	/* symbol in EXPLAIN statement */
 	uint32		func_cmd;		/* cmd code of this function */
 	uint16		func_nargs;		/* number of arguments */
 	Oid			func_rettype;		/* return type of function */
