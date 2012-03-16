@@ -734,8 +734,10 @@ pgstrom_init_exec_state(ForeignScanState *fss)
 	sestate->curr_index = 0;
 	sestate->curr_cs_isnull = palloc0(sizeof(bytea *) * nattrs);
 	sestate->curr_cs_values = palloc0(sizeof(bytea *) * nattrs);
-	sestate->curr_cs_rowid_min = palloc0(sizeof(int64) * nattrs);
-	sestate->curr_cs_rowid_max = palloc0(sizeof(int64) * nattrs);
+	sestate->curr_cs_rowid_min = palloc(sizeof(int64) * nattrs);
+	memset(sestate->curr_cs_rowid_min, -1, sizeof(int64) * nattrs);
+	sestate->curr_cs_rowid_max = palloc(sizeof(int64) * nattrs);
+	memset(sestate->curr_cs_rowid_max, -1, sizeof(int64) * nattrs);
 
 	/*
 	 * Allocate chunk buffers on shared memory

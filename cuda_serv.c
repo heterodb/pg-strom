@@ -952,19 +952,19 @@ static struct {
 	{ GPUCMD_OPER_FLOAT8_ABS,	"float8abs",1, {FLOAT8OID}, "f:abs" },
 
 	/* '=' : equal operators */
-	{ GPUCMD_OPER_INT2_EQ,		"int2eq",	2, {INT2OID,INT2OID}, "b:=" },
-	{ GPUCMD_OPER_INT24_EQ,		"int24eq",	2, {INT2OID,INT4OID}, "b:=" },
-	{ GPUCMD_OPER_INT28_EQ,		"int28eq",	2, {INT2OID,INT8OID}, "b:=" },
-	{ GPUCMD_OPER_INT42_EQ,		"int42eq",	2, {INT4OID,INT2OID}, "b:=" },
-	{ GPUCMD_OPER_INT4_EQ,		"int4eq",	2, {INT4OID,INT4OID}, "b:=" },
-	{ GPUCMD_OPER_INT48_EQ,		"int48eq",	2, {INT4OID,INT8OID}, "b:=" },
-	{ GPUCMD_OPER_INT82_EQ,		"int82eq",	2, {INT8OID,INT2OID}, "b:=" },
-	{ GPUCMD_OPER_INT84_EQ,		"int84eq",	2, {INT8OID,INT4OID}, "b:=" },
-	{ GPUCMD_OPER_INT8_EQ,		"int8eq",	2, {INT8OID,INT8OID}, "b:=" },
-	{ GPUCMD_OPER_FLOAT4_EQ,	"float4eq",	2, {FLOAT4OID,FLOAT4OID}, "b:=" },
-	{ GPUCMD_OPER_FLOAT48_EQ,	"float48eq",2, {FLOAT4OID,FLOAT8OID}, "b:=" },
-	{ GPUCMD_OPER_FLOAT84_EQ,	"float84eq",2, {FLOAT8OID,FLOAT4OID}, "b:=" },
-	{ GPUCMD_OPER_FLOAT8_EQ,	"float8eq",	2, {FLOAT8OID,FLOAT8OID}, "b:=" },
+	{ GPUCMD_OPER_INT2_EQ,		"int2eq",	2, {INT2OID,INT2OID}, "b:==" },
+	{ GPUCMD_OPER_INT24_EQ,		"int24eq",	2, {INT2OID,INT4OID}, "b:==" },
+	{ GPUCMD_OPER_INT28_EQ,		"int28eq",	2, {INT2OID,INT8OID}, "b:==" },
+	{ GPUCMD_OPER_INT42_EQ,		"int42eq",	2, {INT4OID,INT2OID}, "b:==" },
+	{ GPUCMD_OPER_INT4_EQ,		"int4eq",	2, {INT4OID,INT4OID}, "b:==" },
+	{ GPUCMD_OPER_INT48_EQ,		"int48eq",	2, {INT4OID,INT8OID}, "b:==" },
+	{ GPUCMD_OPER_INT82_EQ,		"int82eq",	2, {INT8OID,INT2OID}, "b:==" },
+	{ GPUCMD_OPER_INT84_EQ,		"int84eq",	2, {INT8OID,INT4OID}, "b:==" },
+	{ GPUCMD_OPER_INT8_EQ,		"int8eq",	2, {INT8OID,INT8OID}, "b:==" },
+	{ GPUCMD_OPER_FLOAT4_EQ,	"float4eq",	2, {FLOAT4OID,FLOAT4OID}, "b:==" },
+	{ GPUCMD_OPER_FLOAT48_EQ,	"float48eq",2, {FLOAT4OID,FLOAT8OID}, "b:==" },
+	{ GPUCMD_OPER_FLOAT84_EQ,	"float84eq",2, {FLOAT8OID,FLOAT4OID}, "b:==" },
+	{ GPUCMD_OPER_FLOAT8_EQ,	"float8eq",	2, {FLOAT8OID,FLOAT8OID}, "b:==" },
 
 	/* '<>' : not equal operators */
 	{ GPUCMD_OPER_INT2_NE,		"int2ne",	2, {INT2OID,INT2OID}, "b:!=" },
@@ -1330,7 +1330,7 @@ pgstrom_gpu_command_string(Oid ftableOid, int cmds[],
 			else if (strncmp(gfunc->func_explain, "b:", 2) == 0)
 			{
 				Assert(gfunc->func_nargs == 2);
-				snprintf(buf, buflen, "%sreg%d =  %sreg%d %s %sreg%d",
+				snprintf(buf, buflen, "%sreg%d =  (%sreg%d %s %sreg%d)",
 						 gtype[0]->type_x2regs ? "x" : "", cmds[1],
 						 gtype[1]->type_x2regs ? "x" : "", cmds[2],
 						 gfunc->func_explain + 2,
