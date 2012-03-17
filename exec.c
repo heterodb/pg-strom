@@ -49,6 +49,16 @@ typedef struct {
 	bytea		  **curr_cs_values;
 	int64		   *curr_cs_rowid_min;
 	int64		   *curr_cs_rowid_max;
+
+	/* Profiling stuff [us] */
+	uint64			pf_pgstrom_total;	/* total time consumed */
+	uint64			pf_async_memcpy;	/* time to async memcpy */
+	uint64			pf_async_kernel;	/* time to async kernel exec */
+	uint64			pf_queue_wait;		/* time to chunks in queue */
+	uint64			pf_fetch_vtuple;	/* time to fetch virtual tuple */
+	uint64			pf_sync_chunk;		/* time to synchronize chunks */
+	uint64			pf_load_chunk;		/* time to load chunks */
+	uint64			pf_scan_chunk;		/* time to scan chunks */
 } PgStromExecState;
 
 /*
@@ -215,16 +225,26 @@ pgstrom_load_chunk(PgStromExecState *sestate)
 	AttrNumber	attno;
 	int			attlen;
 	ChunkBuffer	*chunk;
+	struct timeval tv1, tv2;
 
 	/* no chunks to read any more */
 	if (!sestate->id_scan)
 		return false;
+
+	if (pgstrom_exec_profile)
+		gettimeofday(&tv1, NULL);
 
 	tuple = heap_getnext(sestate->id_scan, ForwardScanDirection);
 	if (!HeapTupleIsValid(tuple))
 	{
 		heap_endscan(sestate->id_scan);
 		sestate->id_scan = NULL;
+		if (pgstrom_exec_profile)
+		{
+			gettimeofday(&tv2, NULL);
+			sestate->pf_load_chunk += TIMEVAL_ELAPSED(&tv1,&tv2);
+			sestate->pf_fetch_vtuple -= TIMEVAL_ELAPSED(&tv1,&tv2);
+		}
 		return false;
 	}
 
@@ -306,6 +326,21 @@ pgstrom_load_chunk(PgStromExecState *sestate)
 	bms_free(tempset);
 
 	/*
+	 * Init profiling stuff
+	 */
+	if (pgstrom_exec_profile)
+    {
+		chunk->pf_enabled = true;
+		chunk->pf_async_memcpy = 0;
+		chunk->pf_async_kernel = 0;
+		chunk->pf_queue_wait = 0;
+		gettimeofday(&chunk->pf_timeval, NULL);
+	}
+	else
+		chunk->pf_enabled = false;
+
+
+	/*
 	 * Enqueue the chunk-buffer for asynchronous execution
 	 */
 	if (chunk->gpu_cmds)
@@ -326,6 +361,12 @@ pgstrom_load_chunk(PgStromExecState *sestate)
 		pgstrom_shmseg_list_add(&sestate->chkb_ready_list, &chunk->chain);
 	}
 
+	if (pgstrom_exec_profile)
+	{
+		gettimeofday(&tv2, NULL);
+		sestate->pf_load_chunk += TIMEVAL_ELAPSED(&tv1,&tv2);
+		sestate->pf_fetch_vtuple -= TIMEVAL_ELAPSED(&tv1,&tv2);
+	}
 	return true;
 }
 
@@ -467,12 +508,16 @@ pgstrom_scan_column_store(PgStromExecState *sestate, TupleTableSlot *slot,
 static bool
 pgstrom_scan_chunk(PgStromExecState *sestate, TupleTableSlot *slot)
 {
-	ChunkBuffer	*chunk = sestate->curr_chunk;
-	int			index;
-	int			index_h;
-	int			index_l;
-	Datum		rowmap;
-	AttrNumber	attno;
+	ChunkBuffer	   *chunk = sestate->curr_chunk;
+	int				index;
+	int				index_h;
+	int				index_l;
+	Datum			rowmap;
+	AttrNumber		attno;
+	struct timeval	tv1, tv2;
+
+	if (pgstrom_exec_profile)
+		gettimeofday(&tv1, NULL);
 
 	while (sestate->curr_index < chunk->nitems)
 	{
@@ -489,7 +534,7 @@ pgstrom_scan_chunk(PgStromExecState *sestate, TupleTableSlot *slot)
 		}
 		index = (index_h << SHIFT_PER_DATUM) | (index_l - 1);
 		if (index >= chunk->nitems)
-			return false;
+			break;
 #else
 		index = sestate->curr_index;
 		if ((rowmap & (1UL << index_l)) != 0)
@@ -548,7 +593,21 @@ pgstrom_scan_chunk(PgStromExecState *sestate, TupleTableSlot *slot)
 
 		/* update next index to be fetched */
 		sestate->curr_index = index + 1;
+
+		if (pgstrom_exec_profile)
+		{
+			gettimeofday(&tv2, NULL);
+			sestate->pf_scan_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
+			sestate->pf_fetch_vtuple -= TIMEVAL_ELAPSED(&tv1, &tv2);
+		}
 		return true;
+	}
+
+	if (pgstrom_exec_profile)
+	{
+		gettimeofday(&tv2, NULL);
+		sestate->pf_scan_chunk += TIMEVAL_ELAPSED(&tv1, &tv2);
+		sestate->pf_fetch_vtuple -= TIMEVAL_ELAPSED(&tv1, &tv2);
 	}
 	return false;
 }
@@ -753,10 +812,14 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 	Snapshot	snapshot = fss->ss.ps.state->es_snapshot;
 	AttrNumber	attno, nattrs;
 	PgStromExecState *sestate;
+	struct timeval tv1, tv2;
 
 	/* Do nothing for EXPLAIN or ANALYZE cases */
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return;
+
+	if (pgstrom_exec_profile)
+		gettimeofday(&tv1, NULL);
 
 	sestate = pgstrom_init_exec_state(fss);
 
@@ -786,6 +849,11 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 		}
 	}
     fss->fdw_state = sestate;
+	if (pgstrom_exec_profile)
+	{
+		gettimeofday(&tv2, NULL);
+		sestate->pf_pgstrom_total += TIMEVAL_ELAPSED(&tv1, &tv2);
+	}
 }
 
 TupleTableSlot*
@@ -793,6 +861,10 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 {
 	PgStromExecState   *sestate = (PgStromExecState *)fss->fdw_state;
 	TupleTableSlot	   *slot = fss->ss.ss_ScanTupleSlot;
+	struct timeval		tv1, tv2;
+
+	if (pgstrom_exec_profile)
+		gettimeofday(&tv1, NULL);
 
 	ExecClearTuple(slot);
 
@@ -821,6 +893,12 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 		while ((q = pgstrom_shmqueue_trydequeue(recvq)) != NULL)
 		{
 			chunk = container_of(q, ChunkBuffer, chain);
+			if (pgstrom_exec_profile)
+			{
+				sestate->pf_async_memcpy += chunk->pf_async_memcpy;
+				sestate->pf_async_kernel += chunk->pf_async_kernel;
+				sestate->pf_queue_wait   += chunk->pf_queue_wait;
+			}
 			Assert(chunk->status == CHUNKBUF_STATUS_READY ||
 				   chunk->status == CHUNKBUF_STATUS_ERROR);
 			sestate->chkb_head->chkbh_exec_cnt--;
@@ -865,10 +943,24 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 		}
 		else if (sestate->chkb_head->chkbh_exec_cnt > 0)
 		{
+			struct timeval _tv1, _tv2;
+
+			if (pgstrom_exec_profile)
+				gettimeofday(&_tv1, NULL);
+
 			q = pgstrom_shmqueue_dequeue(recvq);
 
 			chunk = container_of(q, ChunkBuffer, chain);
+			if (pgstrom_exec_profile)
+			{
+				gettimeofday(&_tv2, NULL);
 
+				sestate->pf_sync_chunk += TIMEVAL_ELAPSED(&_tv1, &_tv2);
+
+				sestate->pf_async_memcpy += chunk->pf_async_memcpy;
+				sestate->pf_async_kernel += chunk->pf_async_kernel;
+				sestate->pf_queue_wait   += chunk->pf_queue_wait;
+			}
 			Assert(chunk->status == CHUNKBUF_STATUS_READY ||
 				   chunk->status == CHUNKBUF_STATUS_ERROR);
 			sestate->chkb_head->chkbh_exec_cnt--;
@@ -879,6 +971,13 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 		}
 		else
 			break;
+	}
+
+	if (pgstrom_exec_profile)
+	{
+		gettimeofday(&tv2, NULL);
+		sestate->pf_pgstrom_total += TIMEVAL_ELAPSED(&tv1, &tv2);
+		sestate->pf_fetch_vtuple += TIMEVAL_ELAPSED(&tv1, &tv2);
 	}
 	return slot;
 }
@@ -893,11 +992,15 @@ void
 pgstrom_end_foreign_scan(ForeignScanState *fss)
 {
 	PgStromExecState   *sestate = (PgStromExecState *)fss->fdw_state;
-	AttrNumber			i, nattrs;
+	AttrNumber		i, nattrs;
+	struct timeval	tv1, tv2;
 
 	/* if sestate is NULL, we are in EXPLAIN; nothing to do */
 	if (!sestate)
 		return;
+
+	if (pgstrom_exec_profile)
+		gettimeofday(&tv1, NULL);
 
 	/*
 	 * Close the scan descriptor and relation
@@ -922,6 +1025,28 @@ pgstrom_end_foreign_scan(ForeignScanState *fss)
 
 	/* TODO: Wait for completion of in-exec chunks */
 
+	if (pgstrom_exec_profile)
+    {
+		gettimeofday(&tv2, NULL);
+		sestate->pf_pgstrom_total += TIMEVAL_ELAPSED(&tv1, &tv2);
+
+		elog(INFO, "PG-Strom Exec Profile on \"%s\"",
+			 RelationGetRelationName(sestate->ft_rel));
+		elog(INFO, "Total PG-Strom consumed time: %.3f ms",
+			 ((double)sestate->pf_pgstrom_total) / 1000.0);
+		elog(INFO, "Time of Async memory copy   : %.3f ms",
+			 ((double)sestate->pf_async_memcpy) / 1000.0);
+		elog(INFO, "Time of Async exec kernel   : %.3f ms",
+			 ((double)sestate->pf_async_kernel) / 1000.0);
+		elog(INFO, "Time of Chunks in Queue   : %.3f ms",
+             ((double)sestate->pf_queue_wait) / 1000.0);
+		elog(INFO, "Time to Sync chunk buffers:   %.3f ms",
+			 ((double)sestate->pf_sync_chunk) / 1000.0);
+		elog(INFO, "Time to Load chunk buffers:   %.3f ms",
+			 ((double)sestate->pf_load_chunk) / 1000.0);
+		elog(INFO, "Time to Scan chunk buffers:   %.3f ms",
+			 ((double)sestate->pf_scan_chunk) / 1000.0);
+	}
 	pgstrom_shmseg_list_delete(&sestate->chkb_head->chkbh_chain);
 	pgstrom_shmseg_free(sestate->chkb_head);
 	bms_free(sestate->gpu_cols);

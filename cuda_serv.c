@@ -46,7 +46,7 @@ typedef struct {
 	CUfunction	kernel_qual;	/* reference to GpuDevState */
 	CUstream	stream;
 	CUdeviceptr	devmem;
-//	CUevent		ev[5];
+	CUevent		events[4];
 } GpuExecState;
 
 /*
@@ -73,6 +73,8 @@ pgstrom_gpu_poll_serv(void *argv)
 	ChunkBuffer	   *chunk;
 	ShmsegList	   *item;
 	CUcontext		dummy;
+	int				index;
+	float			elapsed;
 	CUresult		ret;
 
 	while ((item = pgstrom_shmqueue_dequeue(&gpu_poll_cmdq)) != NULL)
@@ -91,6 +93,7 @@ pgstrom_gpu_poll_serv(void *argv)
 		 * It is an idea to increase number of threads for chunk-poller.
 		 */
 		ret = cuStreamSynchronize(gexec->stream);
+
 		if (ret != CUDA_SUCCESS)
 		{
 			snprintf(chunk->error_msg, sizeof(chunk->error_msg),
@@ -99,12 +102,47 @@ pgstrom_gpu_poll_serv(void *argv)
 			chunk->status = CHUNKBUF_STATUS_ERROR;
 		}
 		else
+		{
 			chunk->status = CHUNKBUF_STATUS_READY;
+#if 0
+			if (chunk->pf_enabled)
+			{
+				fprintf(stderr, "%s:%d now!\n\n", __FUNCTION__, __LINE__);
+				ret = cuEventElapsedTime(&elapsed,
+										 gexec->events[0],
+										 gexec->events[1]);
+				chunk->pf_async_memcpy = (uint64)(elapsed * 1000.0);
 
+				fprintf(stderr, "%s:%d now!\n\n", __FUNCTION__, __LINE__);
+				ret = cuEventElapsedTime(&elapsed,
+										 gexec->events[1],
+										 gexec->events[2]);
+				chunk->pf_async_kernel = (uint64)(elapsed * 1000.0);
+
+				fprintf(stderr, "%s:%d now!\n\n", __FUNCTION__, __LINE__);
+				ret = cuEventElapsedTime(&elapsed,
+										 gexec->events[2],
+										 gexec->events[3]);
+				chunk->pf_async_memcpy += (uint64)(elapsed * 1000.0);
+				fprintf(stderr, "%s:%d now!\n\n", __FUNCTION__, __LINE__);
+			}
+#endif
+		}
 		ret = cuMemFree(gexec->devmem);
 		Assert(ret == CUDA_SUCCESS);
+#if 0
+		if (chunk->pf_enabled)
+		{
+			for (index=0; index < lengthof(gexec->events); index++)
+			{
+				ret = cuEventDestroy(gexec->events[index]);
+				Assert(ret == CUDA_SUCCESS);
+			}
+		}
+#endif
 		ret = cuStreamDestroy(gexec->stream);
 		Assert(ret == CUDA_SUCCESS);
+
 		cuCtxPopCurrent(&dummy);
 
 		/*
@@ -149,6 +187,7 @@ pgstrom_gpu_exec_kernel(ChunkBuffer *chunk)
 				 "PG-Strom: failed on GpuExecState allocation");
 		goto error_0;
 	}
+	memset(gexec, 0, sizeof(GpuExecState));
 	gexec->chunk = chunk;
 
 	index = pgstrom_gpu_schedule(chunk);
@@ -172,16 +211,54 @@ pgstrom_gpu_exec_kernel(ChunkBuffer *chunk)
 				 pgstrom_gpu_error_string(ret));
 		goto error_2;
 	}
+#if 0
+	if (chunk->pf_enabled)
+	{
+		for (index=0; index < lengthof(gexec->events); index++)
+		{
+			ret = cuEventCreate(&gexec->events[index], CU_EVENT_DEFAULT);
+			if (ret != CUDA_SUCCESS)
+			{
+				while (--index >= 0)
+					cuEventDestroy(gexec->events[index]);
+				snprintf(chunk->error_msg, sizeof(chunk->error_msg),
+						 "cuda: failed on create event object (%s)",
+						 pgstrom_gpu_error_string(ret));
+				goto error_3;
+			}
+		}
+	}
+#endif
 
+	/*
+	 * Allocation of the device memory
+	 */
 	ret = cuMemAlloc(&gexec->devmem, chunk->dma_length);
 	if (ret != CUDA_SUCCESS)
 	{
 		snprintf(chunk->error_msg, sizeof(chunk->error_msg),
 				 "cuda: failed on allocate device memory (%s)",
 				 pgstrom_gpu_error_string(ret));
-		goto error_3;
+		goto error_4;
 	}
 
+	/*
+	 * Asynchronous copy of chunk buffer from host to device
+	 */
+#if 0
+	if (chunk->pf_enabled)
+	{
+		ret = cuEventRecord(gexec->events[0], gexec->stream);
+		if (ret != CUDA_SUCCESS)
+		{
+			snprintf(chunk->error_msg, sizeof(chunk->error_msg),
+					 "cuda: failed on enqueue prep HtoD copy event (%s)",
+					 pgstrom_gpu_error_string(ret));
+			goto error_5;
+		}
+	}
+#endif
+#if 1
 	ret = cuMemcpyHtoDAsync(gexec->devmem,
 							chunk->dma_buffer,
 							chunk->dma_length,
@@ -191,9 +268,25 @@ pgstrom_gpu_exec_kernel(ChunkBuffer *chunk)
 		snprintf(chunk->error_msg, sizeof(chunk->error_msg),
 				 "cuda: failed on enqueue cuMemcpyHtoDAsync (%s)",
 				 pgstrom_gpu_error_string(ret));
-		goto error_4;
+		goto error_5;
 	}
-
+#endif
+#if 0
+	if (chunk->pf_enabled)
+	{
+		ret = cuEventRecord(gexec->events[1], gexec->stream);
+		if (ret != CUDA_SUCCESS)
+		{
+			snprintf(chunk->error_msg, sizeof(chunk->error_msg),
+					 "cuda: failed on enqueue post HtoD copy event (%s)",
+					 pgstrom_gpu_error_string(ret));
+			goto error_5;
+		}
+	}
+#endif
+	/*
+	 * Asynchronous kernel execution on this chunk buffer
+	 */
 	ret = cuFuncGetAttribute(&n_threads,
 							 CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
 							 gexec->kernel_qual);
@@ -202,7 +295,7 @@ pgstrom_gpu_exec_kernel(ChunkBuffer *chunk)
 		snprintf(chunk->error_msg, sizeof(chunk->error_msg),
 				 "cuda: failed to obtain max threads / block ratio (%s)",
 				 pgstrom_gpu_error_string(ret));
-		goto error_5;
+		goto error_6;
 	}
 
 	kernel_data[0] = chunk->nitems;			/* int nitems */
@@ -235,9 +328,25 @@ pgstrom_gpu_exec_kernel(ChunkBuffer *chunk)
 				 "cuda: failed on enqueue an execution of kernel "
 				 "(n_block=%u, b_threads=%u) : %s", n_blocks, n_threads,
 				 pgstrom_gpu_error_string(ret));
-		goto error_5;
+		goto error_6;
 	}
 
+	/*
+	 * Write back of the result
+	 */
+#if 0
+	if (chunk->pf_enabled)
+	{
+		ret = cuEventRecord(gexec->events[2], gexec->stream);
+		if (ret != CUDA_SUCCESS)
+		{
+			snprintf(chunk->error_msg, sizeof(chunk->error_msg),
+					 "cuda: failed on enqueue prep DtoH copy event (%s)",
+					 pgstrom_gpu_error_string(ret));
+			goto error_5;
+		}
+	}
+#endif
 	ret = cuMemcpyDtoHAsync(chunk->cs_rowmap,
 							gexec->devmem + (uintptr_t)(chunk->cs_rowmap -
 														chunk->dma_buffer),
@@ -248,9 +357,21 @@ pgstrom_gpu_exec_kernel(ChunkBuffer *chunk)
 		snprintf(chunk->error_msg, sizeof(chunk->error_msg),
 				 "cuda: failed on enqueue cuMemcpyDtoHAsync (%s)",
 				 pgstrom_gpu_error_string(ret));
-		goto error_5;
+		goto error_6;
 	}
-
+#if 0
+	if (chunk->pf_enabled)
+	{
+		ret = cuEventRecord(gexec->events[3], gexec->stream);
+		if (ret != CUDA_SUCCESS)
+		{
+			snprintf(chunk->error_msg, sizeof(chunk->error_msg),
+					 "cuda: failed on enqueue post DtoH copy event (%s)",
+					 pgstrom_gpu_error_string(ret));
+			goto error_5;
+		}
+	}
+#endif
 	/*
 	 * A series of sequence were successfully enqueued, so we'll wait
 	 * for completion of the commands by chunk-poller server.
@@ -261,10 +382,18 @@ pgstrom_gpu_exec_kernel(ChunkBuffer *chunk)
 
 	return true;
 
-error_5:
+error_6:
 	cuStreamSynchronize(gexec->stream);	
-error_4:
+error_5:
 	cuMemFree(gexec->devmem);
+error_4:
+#if 0
+	if (chunk->pf_enabled)
+	{
+		for (index=0; index < lengthof(gexec->events); index++)
+			cuEventDestroy(gexec->events[index]);
+	}
+#endif
 error_3:
 	cuStreamDestroy(gexec->stream);
 error_2:
@@ -280,6 +409,7 @@ pgstrom_gpu_load_serv(void *argv)
 {
 	ChunkBuffer	   *chunk;
 	ShmsegList	   *item;
+	struct timeval	tv;
 
 	while ((item = pgstrom_shmqueue_dequeue(gpu_load_cmdq)) != NULL)
 	{
@@ -299,6 +429,11 @@ pgstrom_gpu_load_serv(void *argv)
 		Assert((char *)chunk->cs_values - (char *)chunk->dma_buffer < chunk->dma_length);
 		Assert((char *)chunk->cs_rowmap - (char *)chunk->dma_buffer >= 0);
 		Assert((char *)chunk->cs_rowmap - (char *)chunk->dma_buffer < chunk->dma_length);
+		if (chunk->pf_enabled)
+		{
+			gettimeofday(&tv, NULL);
+			chunk->pf_queue_wait += TIMEVAL_ELAPSED(&chunk->pf_timeval, &tv);
+		}
 
 		if (!pgstrom_gpu_exec_kernel(chunk))
 		{
@@ -486,7 +621,7 @@ void pgstrom_gpu_init(void)
 							"number of servers to load chunks to devices",
 							NULL,
 							&gpu_num_load_servs,
-							1,
+							2,
 							1,
 							MAX_NUM_LOAD_SERVS,
 							PGC_POSTMASTER,
