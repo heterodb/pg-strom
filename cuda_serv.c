@@ -1,10 +1,15 @@
 /*
  * cuda_serv.c
  *
+ * The background computing engine stick on the CUDA infrastructure.
+ * In addition, it also provide catalog of supported type and functions.
  *
+ * --
+ * Copyright 2011-2012 (c) KaiGai Kohei <kaigai@kaigai.gr.jp>
  *
- *
- *
+ * This software is an extension of PostgreSQL; You can use, copy,
+ * modify or distribute it under the terms of 'LICENSE' included
+ * within this package.
  */
 #include "postgres.h"
 #include "access/hash.h"
@@ -54,7 +59,7 @@ typedef struct {
  */
 #define MAX_NUM_LOAD_SERVS	32
 #define MAX_NUM_POLL_SERVS	4
-static const char *pgstrom_gpu_error_string(CUresult errcode);
+static const char  *pgstrom_gpu_error_string(CUresult errcode);
 static int			gpu_device_nums;
 static GpuDevState *gpu_device_state;
 static int			gpu_num_load_servs;

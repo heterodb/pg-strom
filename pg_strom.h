@@ -107,6 +107,9 @@ typedef struct {
 	Oid			func_argtypes[0];	/* argument types of function */
 } GpuFuncInfo;
 
+typedef GpuTypeInfo	CpuTypeInfo;
+typedef GpuFuncInfo	CpuFuncInfo;
+
 /*
  * shmseg.c
  */
@@ -153,11 +156,16 @@ extern GpuTypeInfo *pgstrom_gpu_type_lookup(Oid typeOid);
 extern GpuFuncInfo *pgstrom_gpu_func_lookup(Oid funcOid);
 extern int	pgstrom_gpu_command_string(Oid ftableOid, int cmds[],
 									   char *buf, size_t buflen);
-
 /*
  * openmp_serv.c
  */
-extern void pgstrom_openmp_enqueue_chunk(ChunkBuffer *chunk);
+extern void pgstrom_cpu_init(void);
+extern void pgstrom_cpu_startup(void *shmptr, Size shmsize);
+extern void pgstrom_cpu_enqueue_chunk(ChunkBuffer *chunk);
+extern CpuTypeInfo *pgstrom_cpu_type_lookup(Oid typeOid);
+extern CpuFuncInfo *pgstrom_cpu_func_lookup(Oid funcOid);
+extern int	pgstrom_cpu_command_string(Oid ftableOid, int cmds[],
+									   char *buf, size_t buflen);
 
 /*
  * plan.c

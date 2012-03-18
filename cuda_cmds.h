@@ -1,9 +1,14 @@
 /*
  * cuda_cmds.h
-  *
- * 
  *
+ * definition of the pseudo GPU commands being executed on device.
  *
+ * --
+ * Copyright 2011-2012 (c) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ *
+ * This software is an extension of PostgreSQL; You can use, copy,
+ * modify or distribute it under the terms of 'LICENSE' included
+ * within this package.
  */
 #ifndef PGSTROM_CUDA_CMDS_H
 #define PGSTROM_CUDA_CMDS_H

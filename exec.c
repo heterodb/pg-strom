@@ -3,8 +3,12 @@
  *
  * Executor routines of PG-Strom
  *
+ * --
+ * Copyright 2011-2012 (c) KaiGai Kohei <kaigai@kaigai.gr.jp>
  *
- *
+ * This software is an extension of PostgreSQL; You can use, copy,
+ * modify or distribute it under the terms of 'LICENSE' included
+ * within this package.
  */
 #include "postgres.h"
 #include "utils/fmgroids.h"
@@ -59,6 +63,8 @@ typedef struct {
 	uint64			pf_sync_chunk;		/* time to synchronize chunks */
 	uint64			pf_load_chunk;		/* time to load chunks */
 	uint64			pf_scan_chunk;		/* time to scan chunks */
+	uint64			pf_num_chunks;		/* num of chunks executed */
+	uint64			pf_num_syncs;
 } PgStromExecState;
 
 /*
@@ -92,9 +98,10 @@ pgstrom_release_resources(ResourceReleasePhase phase,
 		{
 			pgstrom_shmseg_list_delete(&curr->chkbh_chain);
 
-			if (curr->chkbh_exec_cnt > 0)
+			while (curr->chkbh_exec_cnt > 0)
 			{
-				/* TODO: completion of in-exec chunks */
+				pgstrom_shmqueue_dequeue(&curr->chkbh_recvq);
+				curr->chkbh_exec_cnt--;
 			}
 			pgstrom_shmseg_free(curr);
 		}
@@ -339,7 +346,6 @@ pgstrom_load_chunk(PgStromExecState *sestate)
 	else
 		chunk->pf_enabled = false;
 
-
 	/*
 	 * Enqueue the chunk-buffer for asynchronous execution
 	 */
@@ -353,7 +359,7 @@ pgstrom_load_chunk(PgStromExecState *sestate)
 	{
 		chunk->status = CHUNKBUF_STATUS_EXEC;
         sestate->chkb_head->chkbh_exec_cnt++;
-		pgstrom_openmp_enqueue_chunk(chunk);
+		pgstrom_cpu_enqueue_chunk(chunk);
 	}
 	else
 	{
@@ -525,8 +531,8 @@ pgstrom_scan_chunk(PgStromExecState *sestate, TupleTableSlot *slot)
 		index_l = (sestate->curr_index & ((1 << SHIFT_PER_DATUM) - 1));
 
 		rowmap = ((Datum *)chunk->cs_rowmap)[index_h];
-#if 0
-		index_l = ffsl(~(rowmap | ((1 << index_l) - 1)));
+
+		index_l = ffsl(~(rowmap | ((1UL << index_l) - 1)));
 		if (index_l == 0)
 		{
 			sestate->curr_index = (index_h + 1) << SHIFT_PER_DATUM;
@@ -535,15 +541,6 @@ pgstrom_scan_chunk(PgStromExecState *sestate, TupleTableSlot *slot)
 		index = (index_h << SHIFT_PER_DATUM) | (index_l - 1);
 		if (index >= chunk->nitems)
 			break;
-#else
-		index = sestate->curr_index;
-		if ((rowmap & (1UL << index_l)) != 0)
-		{
-			sestate->curr_index++;
-			continue;
-		}
-		//elog(INFO, "chunk = %p index = %d rowmap = %016lx", chunk, sestate->curr_index, rowmap);
-#endif
 
 		for (attno = 1; attno <= chunk->nattrs; attno++)
 		{
@@ -898,6 +895,7 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 				sestate->pf_async_memcpy += chunk->pf_async_memcpy;
 				sestate->pf_async_kernel += chunk->pf_async_kernel;
 				sestate->pf_queue_wait   += chunk->pf_queue_wait;
+				sestate->pf_num_chunks++;
 			}
 			Assert(chunk->status == CHUNKBUF_STATUS_READY ||
 				   chunk->status == CHUNKBUF_STATUS_ERROR);
@@ -916,8 +914,8 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 			   !pgstrom_shmseg_list_empty(&sestate->chkb_free_list))
 		{
 			/*
-			 * If we still have ready chunks and num of chunks in execution
-			 * exceeds pgstrom_min_async_chunks, break the chunk load.
+			 * If we already have enough number of chunks being in execution,
+			 * and a chunk being ready at least, we move to the next stage.
 			 */
 			if (!pgstrom_shmseg_list_empty(&sestate->chkb_ready_list) &&
 				sestate->chkb_head->chkbh_exec_cnt >= pgstrom_min_async_chunks)
@@ -928,6 +926,29 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 			 */
 			if (!pgstrom_load_chunk(sestate))
 				break;
+
+			/*
+			 * Moves chunks being done during load-chunks
+			 */
+			while ((q = pgstrom_shmqueue_trydequeue(recvq)) != NULL)
+			{
+				chunk = container_of(q, ChunkBuffer, chain);
+				if (pgstrom_exec_profile)
+				{
+					sestate->pf_async_memcpy += chunk->pf_async_memcpy;
+					sestate->pf_async_kernel += chunk->pf_async_kernel;
+					sestate->pf_queue_wait   += chunk->pf_queue_wait;
+					sestate->pf_num_chunks++;
+				}
+				Assert(chunk->status == CHUNKBUF_STATUS_READY ||
+					   chunk->status == CHUNKBUF_STATUS_ERROR);
+				sestate->chkb_head->chkbh_exec_cnt--;
+				if (chunk->status == CHUNKBUF_STATUS_ERROR)
+					elog(ERROR, "%s", chunk->error_msg);
+				pgstrom_shmseg_list_add(&sestate->chkb_ready_list,
+										&chunk->chain);
+			}
+			Assert(sestate->chkb_head->chkbh_exec_cnt >= 0);
 		}
 
 		if (!pgstrom_shmseg_list_empty(&sestate->chkb_ready_list))
@@ -956,10 +977,13 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 				gettimeofday(&_tv2, NULL);
 
 				sestate->pf_sync_chunk += TIMEVAL_ELAPSED(&_tv1, &_tv2);
+				sestate->pf_fetch_vtuple -= TIMEVAL_ELAPSED(&_tv1, &_tv2);
+				sestate->pf_num_syncs++;
 
 				sestate->pf_async_memcpy += chunk->pf_async_memcpy;
 				sestate->pf_async_kernel += chunk->pf_async_kernel;
 				sestate->pf_queue_wait   += chunk->pf_queue_wait;
+				sestate->pf_num_chunks++;
 			}
 			Assert(chunk->status == CHUNKBUF_STATUS_READY ||
 				   chunk->status == CHUNKBUF_STATUS_ERROR);
@@ -985,7 +1009,54 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 void
 pgstrom_rescan_foreign_scan(ForeignScanState *fss)
 {
-	/* TODO: implement it later */
+	PgStromExecState   *sestate = (PgStromExecState *)fss->fdw_state;
+	Snapshot		snapshot = fss->ss.ps.state->es_snapshot;
+	ChunkBuffer	   *chunk;
+	ShmsegList	   *q;
+	struct timeval	tv1, tv2;
+
+	if (pgstrom_exec_profile)
+		gettimeofday(&tv1, NULL);
+
+	/*
+	 * Synchronize chunk buffers being already in execution
+	 */
+	while (sestate->chkb_head->chkbh_exec_cnt > 0)
+	{
+		q = pgstrom_shmqueue_dequeue(&sestate->chkb_head->chkbh_recvq);
+		chunk = container_of(q, ChunkBuffer, chain);
+		if (pgstrom_exec_profile)
+		{
+			sestate->pf_async_memcpy += chunk->pf_async_memcpy;
+			sestate->pf_async_kernel += chunk->pf_async_kernel;
+			sestate->pf_queue_wait   += chunk->pf_queue_wait;
+			sestate->pf_num_chunks++;
+		}
+		Assert(chunk->status == CHUNKBUF_STATUS_READY ||
+			   chunk->status == CHUNKBUF_STATUS_ERROR);
+		sestate->chkb_head->chkbh_exec_cnt--;
+		if (chunk->status == CHUNKBUF_STATUS_ERROR)
+			elog(ERROR, "%s", chunk->error_msg);
+
+		chunk->status = CHUNKBUF_STATUS_FREE;
+		pgstrom_shmseg_list_add(&sestate->chkb_free_list, &chunk->chain);
+	}
+
+	/*
+	 * Rewind the rowid scan
+	 */
+	if (sestate->id_scan != NULL)
+		heap_endscan(sestate->id_scan);
+
+	sestate->id_scan = heap_beginscan(sestate->id_rel, snapshot, 0, NULL);
+	sestate->curr_chunk = NULL;
+    sestate->curr_index = 0;
+
+	if (pgstrom_exec_profile)
+	{
+		gettimeofday(&tv2, NULL);
+		sestate->pf_pgstrom_total += TIMEVAL_ELAPSED(&tv1, &tv2);
+	}
 }
 
 void
@@ -1023,8 +1094,18 @@ pgstrom_end_foreign_scan(ForeignScanState *fss)
 	}
 	relation_close(sestate->id_rel, AccessShareLock);
 
-	/* TODO: Wait for completion of in-exec chunks */
+	/*
+	 * Synchronization of the chunk-buffers in execution
+	 */
+	while (sestate->chkb_head->chkbh_exec_cnt > 0)
+	{
+		pgstrom_shmqueue_dequeue(&sestate->chkb_head->chkbh_recvq);
+		sestate->chkb_head->chkbh_exec_cnt--;
+	}
 
+	/*
+	 * Output execution profile
+	 */
 	if (pgstrom_exec_profile)
     {
 		gettimeofday(&tv2, NULL);
@@ -1032,20 +1113,29 @@ pgstrom_end_foreign_scan(ForeignScanState *fss)
 
 		elog(INFO, "PG-Strom Exec Profile on \"%s\"",
 			 RelationGetRelationName(sestate->ft_rel));
-		elog(INFO, "Total PG-Strom consumed time: %.3f ms",
+		elog(INFO, "Total PG-Strom consumed time: % 8.3f ms",
 			 ((double)sestate->pf_pgstrom_total) / 1000.0);
-		elog(INFO, "Time of Async memory copy   : %.3f ms",
+#if 0
+		elog(INFO, "Time of Async memory copy:    % 8.3f ms",
 			 ((double)sestate->pf_async_memcpy) / 1000.0);
-		elog(INFO, "Time of Async exec kernel   : %.3f ms",
+		elog(INFO, "Time of Async exec kernel:    % 8.3f ms",
 			 ((double)sestate->pf_async_kernel) / 1000.0);
-		elog(INFO, "Time of Chunks in Queue   : %.3f ms",
-             ((double)sestate->pf_queue_wait) / 1000.0);
-		elog(INFO, "Time to Sync chunk buffers:   %.3f ms",
+#endif
+		elog(INFO, "Avg time of Chunks in Queue:  % 8.3f ms",
+             (((double)sestate->pf_queue_wait) /
+			  ((double)sestate->pf_num_chunks)) / 1000.0);
+		elog(INFO, "Time to Fetch virtual tuples: % 8.3f ms",
+			 ((double)sestate->pf_fetch_vtuple) / 1000.0);
+		elog(INFO, "Time to Sync chunk buffers:   % 8.3f ms",
 			 ((double)sestate->pf_sync_chunk) / 1000.0);
-		elog(INFO, "Time to Load chunk buffers:   %.3f ms",
+		elog(INFO, "Time to Load chunk buffers:   % 8.3f ms",
 			 ((double)sestate->pf_load_chunk) / 1000.0);
-		elog(INFO, "Time to Scan chunk buffers:   %.3f ms",
+		elog(INFO, "Time to Scan chunk buffers:   % 8.3f ms",
 			 ((double)sestate->pf_scan_chunk) / 1000.0);
+		elog(INFO, "Total number of chunks:       % 8d",
+			 (int)sestate->pf_num_chunks);
+		elog(INFO, "Total times to sync GPU/CPU:  % 8d",
+			 (int)sestate->pf_num_syncs);
 	}
 	pgstrom_shmseg_list_delete(&sestate->chkb_head->chkbh_chain);
 	pgstrom_shmseg_free(sestate->chkb_head);
@@ -1069,9 +1159,9 @@ pgstrom_executor_init(void)
 							"max number of chunk to be executed concurrently",
 							NULL,
 							&pgstrom_max_async_chunks,
-							6 * pgstrom_gpu_num_devices(),
+							8 * pgstrom_gpu_num_devices(),
 							1,
-							32,
+							128,
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);
@@ -1079,9 +1169,9 @@ pgstrom_executor_init(void)
 							"min number of chunks to be kept in execution",
 							NULL,
 							&pgstrom_min_async_chunks,
-							1 * pgstrom_gpu_num_devices(),
+							2 * pgstrom_gpu_num_devices(),
 							1,
-							8,
+							32,
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);

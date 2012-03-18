@@ -1,13 +1,14 @@
 /*
  * main.c
  *
- * Entrypoint of the PG-Strom module
- * --
- * Copyright 2012 (c) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Entrypoint of the PG-Strom extension
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the 'LICENSE' included within
- * this package.
+ * --
+ * Copyright 2011-2012 (c) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ *
+ * This software is an extension of PostgreSQL; You can use, copy,
+ * modify or distribute it under the terms of 'LICENSE' included
+ * within this package.
  */
 #include "postgres.h"
 #include "fmgr.h"
@@ -59,6 +60,9 @@ _PG_init(void)
 
 	/* initialize CUDA related stuff */
 	pgstrom_gpu_init();
+
+	/* initialize OpenMP related stuff */
+	pgstrom_cpu_init();
 
 	/* initialize executor related stuff */
 	pgstrom_executor_init();

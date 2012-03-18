@@ -1,3 +1,15 @@
+/*
+ * cuda_kernel.gpu
+ *
+ * routines on GPU device side
+ *
+ * --
+ * Copyright 2011-2012 (c) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ *
+ * This software is an extension of PostgreSQL; You can use, copy,
+ * modify or distribute it under the terms of 'LICENSE' included
+ * within this package.
+ */
 typedef unsigned char	uchar;
 typedef unsigned short	ushort;
 typedef unsigned int	uint;
@@ -16,19 +28,20 @@ typedef __clock_t		clock_t;
 	*((type *)(cs_rowmap + cs_values[(attno)] + sizeof(type) * index))
 #define REG_REF(type, regidx)		*((type *)(&regs[(regidx)]))
 
-#define VARREF_TEMPLATE(cmd, vtype)									\
-	do {															\
-		if (VAR_IS_NULL(cmd[2]))									\
-			errors |= bitmask;										\
-		else														\
-			REG_REF(vtype, cmd[1]) = VAR_REF(vtype, cmd[2]);		\
-		cmd += 3;													\
+#define VARREF_TEMPLATE(cmd, vtype)							\
+	do {													\
+		if (VAR_IS_NULL(cmd[2]))							\
+			errors |= bitmask;								\
+		else												\
+			REG_REF(vtype, cmd[1]) = VAR_REF(vtype, cmd[2]);\
+		cmd += 3;											\
 	} while(0)
 
-#define TYPE_CAST_TEMPLATE(cmd, stype, dtype)						\
-	do {															\
-		REG_REF(dtype, cmd[1]) = (dtype) REG_REF(stype, cmd[2]);	\
-		cmd += 3;													\
+#define TYPE_CAST_TEMPLATE(cmd, stype, dtype)				\
+	do {													\
+		REG_REF(dtype, cmd[1]) =							\
+			(dtype) REG_REF(stype, cmd[2]);					\
+		cmd += 3;											\
 	} while(0)
 
 #define OPER_ADD_TEMPLATE(cmd, dtype, ltype, rtype)			\

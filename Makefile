@@ -19,7 +19,4 @@ PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
 cuda_kernel.ptx: cuda_kernel.gpu cuda_cmds.h
-	$(CUDA_NVCC) -ptx -arch=sm_20 $< -o $@
-
-#opencl_kernel: opencl_kernel.cl opencl_catalog.h
-#	$(CC) -E -xc $< -o $@
+	$(CUDA_NVCC) -ptx -arch=compute_20 $< -o $@
