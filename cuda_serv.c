@@ -16,6 +16,7 @@
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
+#include "funcapi.h"
 #include "miscadmin.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
@@ -42,6 +43,26 @@ typedef struct {
 	int			dev_proc_warp_sz;
 	int			dev_proc_clock;
 	size_t		dev_global_mem_sz;
+	int			dev_global_mem_width;
+	int			dev_global_mem_clock;
+	int			dev_shared_mem_size;
+	int			dev_const_mem_size;
+	int			dev_l2_cache_size;
+	int			dev_max_block_dim_x;
+	int			dev_max_block_dim_y;
+	int			dev_max_block_dim_z;
+	int			dev_max_grid_dim_x;
+	int			dev_max_grid_dim_y;
+	int			dev_max_grid_dim_z;
+	int			dev_max_threads_per_proc;
+	int			dev_max_regs_per_block;
+	int			dev_integrated;
+	int			dev_unified_addr;
+	int			dev_can_map_hostmem;
+	int			dev_concurrent_kernel;
+	int			dev_concurrent_memcpy;
+	int			dev_pci_busid;
+	int			dev_pci_deviceid;
 } GpuDevState;
 
 typedef struct {
@@ -676,6 +697,44 @@ void pgstrom_gpu_init(void)
 			  CU_DEVICE_ATTRIBUTE_WARP_SIZE },
 			{ offsetof(GpuDevState, dev_proc_clock),
 			  CU_DEVICE_ATTRIBUTE_CLOCK_RATE },
+			{ offsetof(GpuDevState, dev_global_mem_clock),
+			  CU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE },
+			{ offsetof(GpuDevState, dev_shared_mem_size),
+			  CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK },
+			{ offsetof(GpuDevState, dev_const_mem_size),
+			  CU_DEVICE_ATTRIBUTE_TOTAL_CONSTANT_MEMORY },
+			{ offsetof(GpuDevState, dev_l2_cache_size),
+			  CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE },
+			{ offsetof(GpuDevState, dev_max_block_dim_x),
+			  CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X },
+			{ offsetof(GpuDevState, dev_max_block_dim_y),
+			  CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Y },
+			{ offsetof(GpuDevState, dev_max_block_dim_z),
+			  CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Z },
+			{ offsetof(GpuDevState, dev_max_grid_dim_x),
+			  CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X },
+			{ offsetof(GpuDevState, dev_max_grid_dim_y),
+			  CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y },
+			{ offsetof(GpuDevState, dev_max_grid_dim_z),
+			  CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z },
+			{ offsetof(GpuDevState, dev_max_regs_per_block),
+			  CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_BLOCK },
+			{ offsetof(GpuDevState, dev_max_threads_per_proc),
+			  CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR },
+			{ offsetof(GpuDevState, dev_integrated ),
+			  CU_DEVICE_ATTRIBUTE_INTEGRATED },
+			{ offsetof(GpuDevState, dev_unified_addr),
+			  CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING },
+			{ offsetof(GpuDevState, dev_can_map_hostmem),
+			  CU_DEVICE_ATTRIBUTE_CAN_MAP_HOST_MEMORY },
+			{ offsetof(GpuDevState, dev_concurrent_kernel),
+			  CU_DEVICE_ATTRIBUTE_CONCURRENT_KERNELS},
+			{ offsetof(GpuDevState, dev_concurrent_memcpy),
+			  CU_DEVICE_ATTRIBUTE_GPU_OVERLAP },
+			{ offsetof(GpuDevState, dev_pci_busid),
+			  CU_DEVICE_ATTRIBUTE_PCI_BUS_ID },
+			{ offsetof(GpuDevState, dev_pci_deviceid),
+			CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID },
 		};
 
 		ret = cuDeviceGet(&devstate->device, i);
@@ -729,6 +788,194 @@ void pgstrom_gpu_init(void)
 	}
 }
 
+/*
+ * pgstrom_gpu_info(int dindex)
+ *
+ * This function shows properties of installed GPU devices.
+ * If dev_index is null, it shows properties of all the devices.
+ */
+Datum
+pgstrom_gpu_info(PG_FUNCTION_ARGS)
+{
+	FuncCallContext	*fncxt;
+	GpuDevState	   *dev;
+	StringInfoData	str;
+	uint32			devindex;
+	uint32			property;
+	HeapTuple		tuple;
+	Datum			values[3];
+	bool			isnull[3];
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		TupleDesc		tupdesc;
+		MemoryContext	oldcxt;
+
+		fncxt = SRF_FIRSTCALL_INIT();
+		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(3, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "device_id",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "attribute",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "value",
+						   TEXTOID, -1, 0);
+		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
+		fncxt->user_fctx = NULL;
+
+		MemoryContextSwitchTo(oldcxt);
+	}
+	fncxt = SRF_PERCALL_SETUP();
+
+	if (PG_GETARG_INT32(0) < 0)
+	{
+		devindex = fncxt->call_cntr / 22;
+		property = fncxt->call_cntr % 22;
+
+		if (devindex >= gpu_device_nums)
+			SRF_RETURN_DONE(fncxt);
+	}
+	else
+	{
+		devindex = PG_GETARG_INT32(0);
+
+		if (devindex >= gpu_device_nums)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("GPU device %d does not exist", devindex)));
+
+		if (fncxt->call_cntr >= 22)
+			SRF_RETURN_DONE(fncxt);
+		property = fncxt->call_cntr;
+	}
+
+	dev = &gpu_device_state[devindex];
+	initStringInfo(&str);
+
+	memset(isnull, false, sizeof(isnull));
+	values[0] = Int32GetDatum(devindex);
+
+	switch (property)
+	{
+		case 0:
+			values[1] = CStringGetTextDatum("name");
+			appendStringInfo(&str, "%s", dev->dev_name);
+			break;
+		case 1:
+			values[1] = CStringGetTextDatum("capability");
+			appendStringInfo(&str, "%d.%d", dev->dev_major, dev->dev_minor);
+			break;
+		case 2:
+			values[1] = CStringGetTextDatum("num of procs");
+			appendStringInfo(&str, "%d", dev->dev_proc_nums);
+			break;
+		case 3:
+			values[1] = CStringGetTextDatum("wrap per proc");
+			appendStringInfo(&str, "%d", dev->dev_proc_warp_sz);
+			break;
+		case 4:
+			values[1] = CStringGetTextDatum("clock of proc");
+			appendStringInfo(&str, "%d MHz", dev->dev_proc_clock / 1000);
+			break;
+		case 5:
+			values[1] = CStringGetTextDatum("global mem size");
+			appendStringInfo(&str, "%lu MB", (dev->dev_global_mem_sz >> 20));
+			break;
+		case 6:
+			values[1] = CStringGetTextDatum("global mem width");
+			appendStringInfo(&str, "%d bits", dev->dev_global_mem_width);
+			break;
+		case 7:
+			values[1] = CStringGetTextDatum("global mem clock");
+			appendStringInfo(&str, "%d MHz", dev->dev_global_mem_clock / 1000);
+			break;
+		case 8:
+			values[1] = CStringGetTextDatum("shared mem size");
+			appendStringInfo(&str, "%d KB", dev->dev_shared_mem_size / 1024);
+			break;
+		case 9:
+			values[1] = CStringGetTextDatum("const mem size");
+			appendStringInfo(&str, "%d KB", dev->dev_const_mem_size / 1024);
+			break;
+		case 10:
+			values[1] = CStringGetTextDatum("L2 cache size");
+			appendStringInfo(&str, "%d KB", dev->dev_l2_cache_size / 1024);
+			break;
+		case 11:
+			values[1] = CStringGetTextDatum("max block size");
+			appendStringInfo(&str, "{%d, %d, %d}",
+							 dev->dev_max_block_dim_x,
+							 dev->dev_max_block_dim_y,
+							 dev->dev_max_block_dim_z);
+			break;
+		case 12:
+			values[1] = CStringGetTextDatum("max grid size");
+			appendStringInfo(&str, "{%d, %d, %d}",
+							 dev->dev_max_grid_dim_x,
+							 dev->dev_max_grid_dim_y,
+							 dev->dev_max_grid_dim_z);
+			break;
+		case 13:
+			values[1] = CStringGetTextDatum("max threads per proc");
+			appendStringInfo(&str, "%d", dev->dev_max_threads_per_proc);
+			break;
+		case 14:
+			values[1] = CStringGetTextDatum("max registers per block");
+			appendStringInfo(&str, "%d", dev->dev_max_regs_per_block);
+			break;
+		case 15:
+			values[1] = CStringGetTextDatum("integrated memory");
+			appendStringInfo(&str, "%s",
+							 (dev->dev_integrated ? "yes" : "no"));
+			break;
+		case 16:
+			values[1] = CStringGetTextDatum("unified address");
+			appendStringInfo(&str, "%s",
+							 (dev->dev_unified_addr ? "yes" : "no"));
+			break;
+		case 17:
+			values[1] = CStringGetTextDatum("map host memory");
+			appendStringInfo(&str, "%s",
+							 (dev->dev_can_map_hostmem ? "yes" : "no"));
+			break;
+		case 18:
+			values[1] = CStringGetTextDatum("concurrent kernel");
+			appendStringInfo(&str, "%s",
+							 (dev->dev_concurrent_kernel ? "yes" : "no"));
+			break;
+		case 19:
+			values[1] = CStringGetTextDatum("concurrent memcpy");
+			appendStringInfo(&str, "%s",
+							 (dev->dev_concurrent_memcpy ? "yes" : "no"));
+			break;
+		case 20:
+			values[1] = CStringGetTextDatum("pci bus-id");
+			appendStringInfo(&str, "%d", dev->dev_pci_busid);
+			break;
+		case 21:
+			values[1] = CStringGetTextDatum("pci device-id");
+			appendStringInfo(&str, "%d", dev->dev_pci_deviceid);
+			break;
+		default:
+			elog(ERROR, "unexpected property : %d", property);
+			break;
+	}
+	values[2] = CStringGetTextDatum(str.data);
+
+	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
+
+	pfree(str.data);
+
+	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
+}
+PG_FUNCTION_INFO_V1(pgstrom_gpu_info);
+
+/*
+ * pgstrom_gpu_error_string
+ *
+ * returns a text representation of the supplied cuda error.
+ */
 static const char *
 pgstrom_gpu_error_string(CUresult errcode)
 {

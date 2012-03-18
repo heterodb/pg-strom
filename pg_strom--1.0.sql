@@ -32,15 +32,14 @@ CREATE FUNCTION pgstrom_data_compaction(regclass)
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
 
---CREATE TYPE __pgstrom_device_info AS
---  (devid int, name text, value text);
+CREATE TYPE __pgstrom_gpu_info AS
+  (gpuid int, attr text, value text);
+CREATE FUNCTION pgstrom_gpu_info(int default = -1)
+  RETURNS SETOF __pgstrom_gpu_info
+  AS 'MODULE_PATHNAME'
+  LANGUAGE C STRICT;
 
---CREATE FUNCTION pgstrom_device_info(int)
---  RETURNS SETOF __pgstrom_device_info
---  AS 'MODULE_PATHNAME'
---  LANGUAGE C STRICT;
-
---CREATE VIEW pgstrom_shadow_relation AS
---  SELECT oid, relname, relkind, pg_relation_size(oid) AS relsize
---  FROM pg_class WHERE relnamespace IN
---    (SELECT oid FROM pg_namespace WHERE nspname = 'pg_strom');
+CREATE VIEW pgstrom_shadow_relations AS
+  SELECT oid, relname, relkind, pg_relation_size(oid) AS relsize
+  FROM pg_class WHERE relnamespace IN
+    (SELECT oid FROM pg_namespace WHERE nspname = 'pg_strom');

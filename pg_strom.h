@@ -156,6 +156,8 @@ extern GpuTypeInfo *pgstrom_gpu_type_lookup(Oid typeOid);
 extern GpuFuncInfo *pgstrom_gpu_func_lookup(Oid funcOid);
 extern int	pgstrom_gpu_command_string(Oid ftableOid, int cmds[],
 									   char *buf, size_t buflen);
+extern Datum	pgstrom_gpu_info(PG_FUNCTION_ARGS);
+
 /*
  * openmp_serv.c
  */
