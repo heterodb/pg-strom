@@ -98,6 +98,10 @@ pgstrom_release_resources(ResourceReleasePhase phase,
 		{
 			pgstrom_shmseg_list_delete(&curr->chkbh_chain);
 
+			/*
+			 * Synchronize completion of chunk buffers being
+			 * still under execution.
+			 */
 			while (curr->chkbh_exec_cnt > 0)
 			{
 				pgstrom_shmqueue_dequeue(&curr->chkbh_recvq);
@@ -139,6 +143,11 @@ deconstruct_cs_bytea(void *dest, Datum cs_bytea, uint32 length_be)
 	}
 }
 
+/*
+ * pgstrom_load_column_store
+ *
+ * It loads contents of the particular column store on the supplied chunk.
+ */
 static void
 pgstrom_load_column_store(PgStromExecState *sestate,
 						  ChunkBuffer *chunk, AttrNumber attno)
@@ -148,6 +157,9 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 	HeapTuple	tup;
 	int			attlen;
 
+	/*
+	 * XXX - only fixed-length variables are supported right now. 
+	 */
 	attlen = RelationGetDescr(sestate->ft_rel)->attrs[attno - 1]->attlen;
 	Assert(attlen > 0);
 
@@ -217,6 +229,12 @@ pgstrom_load_column_store(PgStromExecState *sestate,
 	}
 }
 
+/*
+ * pgstrom_load_chunk
+ *
+ * Loads the required column-stores of the next chunk, then enqueue it
+ * towards computing server.
+ */
 static bool
 pgstrom_load_chunk(PgStromExecState *sestate)
 {
@@ -241,6 +259,7 @@ pgstrom_load_chunk(PgStromExecState *sestate)
 	if (pgstrom_exec_profile)
 		gettimeofday(&tv1, NULL);
 
+	/* Fetch rowmap of the next chunk */
 	tuple = heap_getnext(sestate->id_scan, ForwardScanDirection);
 	if (!HeapTupleIsValid(tuple))
 	{
@@ -273,7 +292,49 @@ pgstrom_load_chunk(PgStromExecState *sestate)
 	pgstrom_shmseg_list_delete(&chunk->chain);
 
 	/*
-	 * Setup chunk buffer
+	 * The following diaglam shows whole of the ChunkBuffer format.
+	 * All the pointer variables are carefully set to reference the subsequent
+	 * region, because it has to be also visible for the calculation server
+	 * processes when it would be enqueued.
+	 * All the data to be referenced by GPU devices are gpu_cmds, cs_isnull,
+	 * cs_values, cs_rowmap and nullmap/values of the referenced columns
+	 * with the qualifiers. It gives us performance benefit to minimize
+	 * DMA operations, so we deployed these values within a continuous region.
+	 * Thus, the field between gpu_cmds and earlier part of the column stores.
+	 *
+	 * +-----------------------+
+	 * | struct ChunkBuffer    |
+	 * |                       |
+	 * | int   *gpu_cmds; --------------+
+	 * | int   *cpu_cmds;      |        |
+	 * |     :                 |        |
+	 * | int    cs_isnull[]; --------+  |
+	 * | int    cs_values[]; ------+ |  |
+	 * |     :                 |   | |  |
+	 * |     :                 |   | |  |
+	 * +-----------------------+   | |  |
+	 * | region for cpu_cmds   |   | |  |
+	 * |                       |   | |  |
+	 * +-----------------------+ <------+  ---
+	 * | region for gpu_cmds   |   | |      ^
+	 * |                       |   | |      |
+	 * +-----------------------+ <---+      |
+	 * | offset of nullmap     |   |        |
+	 * |  for each column      |   |        |
+	 * +-----------------------+ <-+    zone to be
+	 * | offset of values      |         copied to
+	 * |  for each column   -------+      the GPU
+	 * +-----------------------+   |      device
+	 * | contents of cs_rowmap |   |        |
+	 * |      :                |   |        |
+	 * |                       |   |        |
+	 * +-----------------------+   |        |
+	 * | contents of the       |   |        |
+	 * | column stores      <------+        |
+	 * |      :                |            v
+	 * =                       =           ---
+	 * |                       |
+	 * +-----------------------+
 	 */
 	Assert(chunk->status == CHUNKBUF_STATUS_FREE);
 	chunk->recv_cmdq = &sestate->chkb_head->chkbh_recvq;
@@ -286,8 +347,15 @@ pgstrom_load_chunk(PgStromExecState *sestate)
 
 	tupdesc = RelationGetDescr(sestate->ft_rel);
 
+	/* region for cs_rowmap */
 	offset = MAXALIGN(chunk->nitems / BITS_PER_BYTE);
 
+	/*
+	 * contents of the column store being referenced within GPU calculation
+	 * should be located on the earlier half to optimize asynchronous memory
+	 * copy to GPU device from Host.
+	 * CPU calculation server has no preference on its deployment.
+	 */
 	tempset = bms_copy(sestate->gpu_cols);
 	while ((attno = bms_first_member(tempset)) > 0)
 	{
@@ -306,6 +374,10 @@ pgstrom_load_chunk(PgStromExecState *sestate)
 		MAXALIGN(sizeof(int) * chunk->nattrs) +
 		MAXALIGN(offset);
 
+	/*
+	 * contents of the column store reference by CPU, without GPU, shall
+	 * be located on the later region of the buffer; to optimize DMA.
+	 */
 	tempset = bms_copy(sestate->cpu_cols);
 	while ((attno = bms_first_member(tempset)) > 0)
 	{

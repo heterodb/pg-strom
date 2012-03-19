@@ -338,7 +338,6 @@ make_cpu_commands(List *cpu_quals, Bitmapset **cpu_cols)
 	return NULL;
 }
 
-
 void
 pgstrom_get_foreign_rel_size(PlannerInfo *root,
 							 RelOptInfo *baserel,
@@ -356,7 +355,9 @@ pgstrom_get_foreign_rel_size(PlannerInfo *root,
 			width += get_attavgwidth(ftableOid, attno);
 		}
 	}
-	/* need more practical estimation */
+	/*
+	 * TODO: need more practical estimation
+	 */
 	baserel->rows = 10000.0;
 	baserel->width = width;
 }
@@ -526,9 +527,7 @@ pgstrom_get_foreign_plan(PlannerInfo *root,
 /*
  * pgstrom_explain_foreign_scan
  *
- *
- *
- *
+ * implementation of EXPLAIN
  */
 void
 pgstrom_explain_foreign_scan(ForeignScanState *fss,
@@ -628,6 +627,8 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 
 	if (cpu_cmds != NULL)
 	{
-		/* add cpu command output */
+		/*
+		 * XXX - add OpenMP commands
+		 */
 	}
 }

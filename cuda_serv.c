@@ -482,14 +482,10 @@ pgstrom_gpu_num_devices(void)
 	return gpu_device_nums;
 }
 
-
-
-
-
 /*
+ * pgstrom_gpu_startup
  *
- *
- *
+ * A callback routine just after shared memory segment was attached.
  *
  */
 void
@@ -628,9 +624,9 @@ pgstrom_gpu_startup(void *shmptr, Size shmsize)
 }
 
 /*
+ * pgstrom_gpu_init
  *
- *
- *
+ * init routine of cuda calculation server
  */
 void pgstrom_gpu_init(void)
 {
