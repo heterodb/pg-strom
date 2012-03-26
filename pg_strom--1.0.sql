@@ -34,7 +34,7 @@ CREATE FUNCTION pgstrom_data_compaction(regclass)
 
 CREATE TYPE __pgstrom_gpu_info AS
   (gpuid int, attr text, value text);
-CREATE FUNCTION pgstrom_gpu_info(int default = -1)
+CREATE FUNCTION pgstrom_gpu_info(int default -1)
   RETURNS SETOF __pgstrom_gpu_info
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
