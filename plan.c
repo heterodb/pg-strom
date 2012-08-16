@@ -491,7 +491,6 @@ pgstrom_get_foreign_paths(PlannerInfo *root,
 									  total_cost,
 									  NIL,
 									  NULL,
-									  NIL,
 									  private);
 	add_path(baserel, (Path *) fdwpath);
 }
