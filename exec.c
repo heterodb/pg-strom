@@ -11,6 +11,7 @@
  * within this package.
  */
 #include "postgres.h"
+#include "access/tupmacs.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/pg_lzcompress.h"

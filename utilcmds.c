@@ -11,6 +11,7 @@
  * within this package.
  */
 #include "postgres.h"
+#include "access/htup_details.h"
 #include "access/xact.h"
 #include "catalog/dependency.h"
 #include "catalog/heap.h"
@@ -977,9 +978,9 @@ static void
 pgstrom_process_utility_command(Node *parsetree,
 								const char *queryString,
 								ParamListInfo params,
-								bool isTopLevel,
 								DestReceiver *dest,
-								char *completionTag)
+								char *completionTag,
+								ProcessUtilityContext context)
 {
 	ForeignTable	   *ft;
 	ForeignServer	   *fs;
@@ -1041,10 +1042,10 @@ pgstrom_process_utility_command(Node *parsetree,
 	 */
 	if (next_process_utility_hook)
 		(*next_process_utility_hook)(parsetree, queryString, params,
-									 isTopLevel, dest, completionTag);
+									 dest, completionTag, context);
 	else
 		standard_ProcessUtility(parsetree, queryString, params,
-								isTopLevel, dest, completionTag);
+								dest, completionTag, context);
 
 	/*
 	 * Post ProcessUtility Stuffs
