@@ -235,7 +235,8 @@ pgstrom_create_shadow_index(Relation base_rel, Relation cs_rel,
 				 false,				/* initdeferred */
 				 false,				/* allow_system_table_mods */
 				 false,				/* skip_build */
-				 false);			/* concurrent */
+				 false,				/* concurrent */
+				 true);				/* is_internal */
 }
 
 static void
@@ -314,7 +315,8 @@ pgstrom_create_shadow_table(Oid namespaceId, Relation base_rel,
 										ONCOMMIT_NOOP,
 										(Datum) 0,
 										false,
-										false);
+										false,
+										true);
     Assert(OidIsValid(cs_relid));
 
 	/* make the new shadow table visible */
