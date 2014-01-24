@@ -1,10 +1,10 @@
 /*
  * main.c
  *
- * Entrypoint of the PG-Strom extension
- *
- * --
- * Copyright 2011-2012 (c) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * The entrypoint of PG-Strom extension.
+ * ----
+ * Copyright 2011-2014 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014 (C) The PG-Strom Development Team
  *
  * This software is an extension of PostgreSQL; You can use, copy,
  * modify or distribute it under the terms of 'LICENSE' included
@@ -17,36 +17,10 @@
 
 PG_MODULE_MAGIC;
 
-/*
- * Local declarations
- */
-void		_PG_init(void);
-
-FdwRoutine	PgStromFdwHandlerData = {
-	.type				= T_FdwRoutine,
-	.GetForeignRelSize	= pgstrom_get_foreign_rel_size,
-	.GetForeignPaths	= pgstrom_get_foreign_paths,
-	.GetForeignPlan		= pgstrom_get_foreign_plan,
-	.ExplainForeignScan	= pgstrom_explain_foreign_scan,
-	.BeginForeignScan	= pgstrom_begin_foreign_scan,
-	.IterateForeignScan	= pgstrom_iterate_foreign_scan,
-	.ReScanForeignScan	= pgstrom_rescan_foreign_scan,
-	.EndForeignScan		= pgstrom_end_foreign_scan,
-};
-
-/*
- * pgstrom_fdw_handler - FDW Handler function of PG-Strom
- */
-Datum
-pgstrom_fdw_handler(PG_FUNCTION_ARGS)
-{
-	PG_RETURN_POINTER(&PgStromFdwHandlerData);
-}
-PG_FUNCTION_INFO_V1(pgstrom_fdw_handler);
-
 void
 _PG_init(void)
 {
+#if 0
 	/*
 	 * PG-Strom has to be loaded using shared_preload_libraries option
 	 */
@@ -54,19 +28,10 @@ _PG_init(void)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 		errmsg("PG-Strom must be loaded via shared_preload_libraries")));
+#endif
+	/* load OpenCL runtime and initialize entrypoints */
+	pgstrom_init_opencl_entry();
 
-	/* initialize shared memory segment */
-	pgstrom_shmseg_init();
 
-	/* initialize CUDA related stuff */
-	pgstrom_gpu_init();
 
-	/* initialize OpenMP related stuff */
-	pgstrom_cpu_init();
-
-	/* initialize executor related stuff */
-	pgstrom_executor_init();
-
-	/* register utility commands hooks */
-	pgstrom_utilcmds_init();
 }
