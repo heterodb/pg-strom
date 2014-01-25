@@ -20,7 +20,6 @@ PG_MODULE_MAGIC;
 void
 _PG_init(void)
 {
-#if 0
 	/*
 	 * PG-Strom has to be loaded using shared_preload_libraries option
 	 */
@@ -28,10 +27,12 @@ _PG_init(void)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 		errmsg("PG-Strom must be loaded via shared_preload_libraries")));
-#endif
+
 	/* load OpenCL runtime and initialize entrypoints */
 	pgstrom_init_opencl_entry();
 
+	/* initialize shared memory segment and slab subsystem */
+	pgstrom_init_shmem();
 
 
 }

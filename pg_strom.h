@@ -24,4 +24,13 @@ extern void pgstrom_init_opencl_entry(void);
  */
 extern void _PG_init(void);
 
+/*
+ * shmem.c
+ */
+extern Datum pgstrom_system_slabinfo(PG_FUNCTION_ARGS);
+extern Size pgstrom_shmem_get_blocksize(void);
+extern void *pgstrom_shmem_block_alloc(void);
+extern void pgstrom_shmem_block_free(void *address);
+extern void pgstrom_init_shmem(void);
+
 #endif	/* PG_STROM_H */
