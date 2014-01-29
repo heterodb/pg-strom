@@ -11,337 +11,544 @@
  * within this package.
  */
 #include "postgres.h"
-#include "fmgr.h"
 #include "lib/ilist.h"
 #include "libpq/md5.h"
 #include "storage/ipc.h"
 #include "storage/shmem.h"
 #include "storage/spin.h"
 #include "utils/guc.h"
+#include "utils/memutils.h"
 #include "pg_strom.h"
 #include <limits.h>
 
-typedef struct
+#define SHMEM_BLOCKSZ_BITS_MAX	34			/* 16GB */
+#define SHMEM_BLOCKSZ_BITS		22			/*  4MB */
+#define SHMEM_BLOCKSZ			(1UL << SHMEM_BLOCKSZ_BITS_MIN)
+#define SHMEM_BLOCK_MAGIC		0xDEADBEAF
+
+typedef union
 {
-	slock_t			lock;
-	dlist_head		free_list;
-	Size			curr_usage;
-	Size			max_usage;
-	void		   *base_address;
-	dlist_node		blocks[FLEXIBLE_ARRAY_MEMBER];
-} pgstrom_shmem_head;
+	dlist_node		chain;		/* to be chained free_list of shmem_zone */
+	struct {
+		void	   *nullmark;	/* NULL if active block */
+		Size		size;		/* size of allocation block */
+	} active;
+} shmem_block;
 
 typedef struct
 {
-	slock_t			lock;
-	dlist_head		vacancy_blocks;
-	dlist_head		full_blocks;
-	char			name[NAMEDATALEN];
-	char			magic[16];	/* MD5 digest */
-	Size			unit_size;
-	long			num_allocated;	/* objects already allocated */
-	long			num_active;		/* active objects in this block */
-} pgstrom_shmem_slab;
+	slock_t		lock;
+	long		num_blocks;		/* number of total blocks */
+	long		num_active;		/* number of active blocks */
+	dlist_head	free_list[SHMEM_BLOCKSZ_BITS_MAX - SHMEM_BLOCKSZ_BITS + 1];
+	void	   *base_address;
+	void	   *private;
+	shmem_block	blocks[FLEXIBLE_ARRAY_MEMBER];
+} shmem_zone;
 
 typedef struct
 {
-	char			magic[16];	/* MD5 digest */
-	pgstrom_shmem_slab *slab;
-	long			num_active;	/* active objects in this block */
+	bool		is_ready;
+	int			num_zones;
+	shmem_zone	zones[FLEXIBLE_ARRAY_MEMBER];
+} shmem_head;
+
+
+#define SHMCHUNK_MAGIC_FREE		0xF9EEA9EA
+#define SHMCHUNK_MAGIC_ACTIVE	0xAC715AEA
+
+typedef struct
+{
+	pid_t		owner;
+	slock_t		lock;
+	dlist_head	block_list;
+	Size		total_active;
+	Size		total_alloc;
+	long		num_chunks;
+	char		md5[16];
+	char		name[FLEXIBLE_ARRAY_MEMBER];
+} shmem_context;
+
+typedef struct
+{
+	shmem_context  *context;
+	char			md5[16];
 	dlist_node		chain;
+	dlist_head		chunk_list;
 	dlist_head		free_list;
-	dlist_node		objects[FLEXIBLE_ARRAY_MEMBER];
-} pgstrom_shmem_slab_block;
 
+	dlist_node		first_chunk;
+} shmem_bunch;
+
+typedef struct
+{
+	dlist_node		chunk_chain;	/* linked to chunk_list */
+	union {
+		dlist_node	free_chain;		/* linked to free_list */
+		struct {
+			void   *nullmark;
+			Size	size;
+		} active;
+	};
+	char			userdata[FLEXIBLE_ARRAY_MEMBER];
+} shmem_chunk;
+
+#define SHMEM_CHUNK_MAGIC(chunk)										\
+	*((uint32 *)(!(chunk)->active.nullmark								\
+				 ? (char *)(chunk) + (chunk)->active.size				\
+				 : (char *)(chunk)->chunk_chain.next - sizeof(uint32))
+
+/* static variables */
 static shmem_startup_hook_type shmem_startup_hook_next;
-static int	pgstrom_shmem_numblocks;
-static Size	pgstrom_shmem_blocksize;
-static Size pgstrom_shmem_totalsize;
+static Size		pgstrom_shmem_totalsize;
+static int		pgstrom_shmem_maxzones;
 static pgstrom_shmem_head  *shmem_head;
 
+pgstrom_shmem_context  *TopShmemContext = NULL;
 
-#define SLAB_NUM_OBJECTS_PER_BLOCK(slab)					\
-	((pgstrom_shmem_blocksize -								\
-	  offsetof(pgstrom_shmem_slab_block, objects[0])) /		\
-	 (sizeof(dlist_node) + MAXALIGN((slab)->unit_size)))
-
-static void
-pgstrom_slab_init(pgstrom_shmem_slab *slab, const char *name, Size size)
+pgstrom_shmem_context *
+pgstrom_shmem_context_create(const char *name)
 {
-	if (strlen(name) >= NAMEDATALEN)
-		elog(ERROR, "%s: slab name (\"%s\") too long", __FUNCTION__, name);
+	pgstrom_shmem_context  *context;
+	int		namelen = strlen(name);
 
-	SpinLockInit(&slab->lock);
-	dlist_init(&slab->vacancy_blocks);
-	dlist_init(&slab->full_blocks);
-	strncpy(slab->name, name, NAMEDATALEN);
-	pg_md5_binary(slab->name, strlen(slab->name), slab->magic);
-	slab->unit_size = size;
-	slab->num_allocated = 0;
-	slab->num_active = 0;
-}
+	context = pgstrom_shmem_alloc(TopShmemContext, 
+								  sizeof(pgstrom_shmem_context) +
+								  Max(namelen+1, NAMEDATALEN));
+	if (!context)
+		return NULL;
 
-static void *
-pgstrom_slab_alloc(pgstrom_shmem_slab *slab)
-{
-	pgstrom_shmem_slab_block *sblock;
-	dlist_node *dnode;
-	int			i, nobjects = SLAB_NUM_OBJECTS_PER_BLOCK(slab);
-	Size		baseaddr;
-	void	   *result = NULL;
+	context->owner = getpid();
+	SpinLockInit(&context->lock);
+	dlist_init(&context->block_list);
+	context->num_chunks = 0;
+	context->num_blocks = 0;
+	pg_md5_binary(name, namelen, context->md5);
+	strcpy(context->name, name);
 
-	SpinLockAcquire(&slab->lock);
-	if (dlist_is_empty(&slab->vacancy_blocks))
-	{
-		Assert(slab->num_active == slab->num_allocated);
-		sblock = pgstrom_shmem_block_alloc();
-		if (!sblock)
-			goto out_unlock;
-
-		memcpy(sblock->magic, slab->magic, sizeof(sblock->magic));
-		sblock->slab = slab;
-		sblock->num_active = 0;
-		for (i=0; i < nobjects; i++)
-			dlist_push_tail(&sblock->free_list, &sblock->objects[i]);
-
-		dlist_push_tail(&slab->vacancy_blocks, &sblock->chain);
-		slab->num_allocated += nobjects;
-	}
-
-	/* pick up a block from vacancy_blocks */
-	sblock = dlist_container(pgstrom_shmem_slab_block, chain,
-							 dlist_head_node(&slab->vacancy_blocks));
-	Assert(memcmp(slab->magic, sblock->magic, sizeof(slab->magic)) == 0);
-	Assert(!dlist_is_empty(&sblock->free_list));
-
-	dnode = dlist_pop_head_node(&sblock->free_list);
-	i = dnode - &sblock->objects[0];
-	baseaddr = (Size)&sblock->objects[nobjects];
-
-	result = (void *)(baseaddr + MAXALIGN(slab->unit_size) * i);
-	slab->num_active++;
-	sblock->num_active++;
-
-	/*
-	 * Move the slab_block to the list of blocks that has no room to
-	 * allocate objects towards upcoming request.
-	 */
-	if (dlist_is_empty(&sblock->free_list))
-	{
-		dlist_delete(&sblock->chain);
-		dlist_push_tail(&slab->full_blocks, &sblock->chain);
-	}
-
-	Assert(slab->num_active <= slab->num_allocated);
-out_unlock:
-	SpinLockRelease(&slab->lock);
-
-	return result;
-}
-
-static void
-pgstrom_slab_free(void *object)
-{
-	pgstrom_shmem_slab		   *slab;
-	pgstrom_shmem_slab_block   *sblock;
-	int			i, nobjects;
-	bool		full_block;
-	Size		baseaddr;
-
-	/*
-	 * All the shared memory block is aligned to pgstrom_shmem_blocksize.
-	 * So, clearing lower bits allows to get pgstrom_shmem_slab_block that
-	 * owns the slab object being supplied.
-	 */
-	sblock = (pgstrom_shmem_slab_block *)
-		((Size)object & ~(pgstrom_shmem_blocksize - 1));
-	slab = sblock->slab;
-	Assert(memcmp(slab->magic, sblock->magic, sizeof(slab->magic)) == 0);
-
-	nobjects = SLAB_NUM_OBJECTS_PER_BLOCK(slab);
-	baseaddr = (Size)&sblock->objects[nobjects];
-	i = ((Size)object - baseaddr) / MAXALIGN(slab->unit_size);
-
-	SpinLockAcquire(&slab->lock);
-	full_block = dlist_is_empty(&sblock->free_list);
-
-	dlist_push_head(&sblock->free_list, &sblock->objects[i]);
-	sblock->num_active--;
-	slab->num_active--;
-
-	/*
-	 * If this release makes this block from full to vacancy, it also needs
-	 * to be re-chained to find out free slab object on the next allocation
-	 * request.
-	 */
-	if (full_block)
-	{
-		dlist_delete(&sblock->chain);
-		dlist_push_head(&slab->vacancy_blocks, &sblock->chain);
-	}
-
-	/*
-	 * If this release makes all the objects in this block free status, we
-	 * release this block itself.
-	 */
-	if (sblock->num_active == 0)
-	{
-		dlist_delete(&sblock->chain);
-		pgstrom_shmem_block_free(sblock);
-		slab->num_allocated -= nobjects;
-	}
-	SpinLockRelease(&slab->lock);
-}
-
-Datum
-pgstrom_system_slabinfo(PG_FUNCTION_ARGS)
-{
-
-	PG_RETURN_NULL();
-}
-PG_FUNCTION_INFO_V1(pgstrom_system_slabinfo);
-
-Size
-pgstrom_shmem_get_blocksize(void)
-{
-	return pgstrom_shmem_blocksize;
+	return context;
 }
 
 void *
-pgstrom_shmem_block_alloc(void)
+pgstrom_shmem_alloc(pgstrom_shmem_context *context, size)
 {
-	dlist_node *dnode = NULL;
+	pgstrom_shmem_bunch	*sbunch;
+	pgstrom_shmem_chunk *schunk;
+	dlist_node *dnode;
+	dlist_iter	iter1;
+	dlist_iter	iter2;
+	Size		length;
+	Size		required;
+	void	   *address = NULL;
+
+	required = MAXALIGN(offsetof(pgstrom_shmem_chunk,
+								 userdata[0]) + size + sizeof(uint32));
+	SpinLockAcquire(&context->lock);
+retry:
+	dlist_foreach(iter1, &context->block_list)
+	{
+		sbunch = dlist_container(pgstrom_shmem_bunch, chain, iter1.cur);
+
+		Assert((Size)sbunch % SHMEM_BLOCKSZ == 0);
+		Assert(memcmp(context->md5, sbunch->md5, 16) == 0);
+
+		dlist_foreach(iter2, &sbunch->free_list)
+		{
+			int		padlen;
+
+			schunk = dlist_container(pgstrom_shmem_chunk, free_chain,
+									 iter2.cur);
+			dnode = dlist_next_node(&sbunch->chunk_list,
+									&schunk->chunk_chain);
+			length = (char *)dnode - (char *)schunk->userdata;
+			Assert(*((uint32 *)dnode - 1) == SHMCHUNK_MAGIC_FREE);
+
+			/* Is this free chunk has enough space to store it? */
+			if (length < required)
+				continue;
+			/* Split this chunk, if it has enough space to store */
+			padlen = MAXALIGN(offsetof(pgstrom_shmem_chunk,
+									   userdata[0]) + sizeof(uint32));
+			if (length >= required + padlen)
+			{
+				pgstrom_shmem_chunk	*nchunk
+					= (pgstrom_shmem_chunk *)((char *)schunk + required);
+				dlist_insert_after(&schunk->chunk_chain,
+								   &nchunk->chunk_chain);
+			}
+			dlist_delete(&schunk->free_chain);
+			schunk->nullmark = NULL;
+			schunk->size = size;
+			*((uint32 *)(&schunk->userdata[size])) = SHMEM_MAGIC_ACTIVE_CHUNK;
+
+			address = schunk->userdata;
+			goto out_unlock;
+		}
+	}
+	/* no room to allocate a chunk, assign a new block */
+	cbunch = pgstrom_shmem_block_alloc(offsetof(pgstrom_shmem_bunch,
+												first_chunk) +
+									   required +
+									   sizeof(dlist_node));
+	if (!cbunch)
+		goto out_unlock;
+	/* XXX - need to get block size */
+	/* make a large free block */
+
+
+	memcpy(chead->md5, context->md5, 16);
+	dlist_init(&chead->chunk_list);
+	dlist_init(&chead->free_list);
+
+	/* first free chunk for whole of the block */
+	schunk = (pgstrom_shmem_chunk *) &chead->first_chunk;
+	dlist_push_head(&chead->chunk_list, &schunk->chunk_chain);
+	dlist_push_head(&chead->free_list, &schunk->free_chain);
+
+	/* terminate marker */
+	dnode = (dlist_node *)((char *)chead + SHMEM_BLOCKSZ - sizeof(dlist_node));
+	*((uint32 *)((char *)dnode - sizeof(uint32))) = SHMEM_MAGIC_FREE_CHUNK;
+	dlist_insert_after(&schunk->chunk_chain, dnode);
+
+	dlist_push_tail(&context->block_list, &chead->chain);
+
+	goto retry;
+
+out_unlock:
+	SpinLockRelease(&context->lock);
+
+	return address;
+}
+
+void
+pgstrom_shmem_free(void *address)
+{
+	pgstrom_shmem_context  *context;
+	pgstrom_shmem_chunk_head *chead
+		= (pgstrom_shmem_chunk_head *)((Size)address & ~(SHMEM_BLOCKSZ - 1));
+
+	
+
+
+}
+
+void
+pgstrom_shmem_context_reset(pgstrom_shmem_context *context)
+{
+	dlist_mutable_iter iter;
+
+	SpinLockAcquire(&context->lock);
+	dlist_foreach_modify(iter, &context->block_list)
+	{
+		pgstrom_shmem_chunk_head   *chead
+			= dlist_container(pgstrom_shmem_chunk_head, chain, iter.cur);
+
+		Assert(memcmp(context->md5, chead->md5, 16) == 0);
+		dlist_delete(&chead->chain);
+		pgstrom_shmem_block_free(chead);
+	}
+	Assert(dlist_is_empty(&context->block_list));
+	SpinLockRelease(&context->lock);
+}
+
+void
+pgstrom_shmem_context_delete(pgstrom_shmem_context *context)
+{
+	pgstrom_shmem_context_reset(context);
+	pgstrom_shmem_free(context);
+}
+
+
+/*
+ * find_least_pot
+ *
+ * It looks up the least power of two that is equal or larger than
+ * the provided size.
+ */
+static __inline__ int
+find_least_pot(Size size)
+{
+	int		bit = 0;
+
+#ifdef __builtin_clzl
+	bit = sizeof(unsigned long) * BITS_PER_BYTE * __builtin_clzl(size - 1);
+#else
+	size--;
+#if sizeof(Size) == 8
+	if ((size & 0xffffffff00000000UL) != 0)
+	{
+		size >>= 32;
+		bit += 32;
+	}
+#endif
+	if ((size & 0xffff0000UL) != 0)
+	{
+		size >>= 16;
+		bit += 16;
+	}
+	if ((size & 0x0000ff00UL) != 0)
+	{
+		size >>= 8;
+		bit += 8;
+	}
+	if ((size & 0x000000f0UL) != 0)
+	{
+		size >>= 4;
+		bit += 4;
+	}
+	if ((size & 0x0000000cUL) != 0)
+	{
+		size >> 2;
+		bit += 2;
+	}
+	if ((size & 0x00000002UL) != 0)
+	{
+		size >> 1;
+		bit += 1;
+	}
+#endif
+	return Max(bit, SHMEM_BLOCKSZ_BITS) - SHMEM_BLOCKSZ_BITS;
+}
+
+static bool
+pgstrom_shmem_block_divide(int shift)
+{
+	pgstrom_shmem_block	*sblock;
+	dlist_node	   *dnode;
+
+	if (dlist_is_empty(&shmem_head->free_list[shift]))
+	{
+		if (shift == SHMEM_BLOCKSZ_BITS_MAX - SHMEM_BLOCKSZ_BITS ||
+			!pgstrom_shmem_block_divide(shift + 1))
+			return false;
+	}
+	Assert(!dlist_is_empty(&shmem_head->free_list[shift]));
+
+	dnode = dlist_pop_head_node(&shmem_head->free_list[shift]);
+	sblock = dlist_container(pgstrom_shmem_block, chain, dnode);
+
+	/* sblock must be aligned to (1 << shift)'s block */
+	Assert(((sblock - &shmem_head->blocks[0]) & ((1 << shift) - 1)) == 0);
+	dlist_push_tail(&shmem_head->free_list[shift - 1], &sblock->chain);
+
+	sblock = sblock + (1 << (shift - 1));
+	dlist_push_tail(&shmem_head->free_list[shift - 1], &sblock->chain);
+
+	return true;
+}
+
+static void *
+pgstrom_shmem_block_alloc(Size size)
+{
+	pgstrom_shmem_block	*sblock;
+	dlist_node	   *dnode;
+	int				shift;
+	int				index;
+	void		   *address = NULL;
+
+	if (size == 0)
+		elog(ERROR, "unable to allocate 0 byte");
+	if (size > (1UL << SHMEM_BLOCKSZ_BITS_MAX))
+		elog(ERROR, "too large memory requirement (%lu)", size);
 
 	SpinLockAcquire(&shmem_head->lock);
-	if (!dlist_is_empty(&shmem_head->free_list))
+	shift = find_least_pot(size + sizeof(uint32));
+	if (dlist_is_empty(&shmem_head->free_list[shift]))
 	{
-		dnode = dlist_pop_head_node(&shmem_head->free_list);
-		shmem_head->curr_usage += pgstrom_shmem_blocksize;
-		shmem_head->max_usage = Max(shmem_head->max_usage,
-									shmem_head->curr_usage);
+		if (!pgstrom_shmem_block_divide(shift + 1))
+			goto out_unlock;
 	}
+	Assert(!dlist_is_empty(&shmem_head->free_list[shift]));
+
+	dnode = dlist_pop_head_node(&shmem_head->free_list[shift]);
+	sblock = dlist_container(pgstrom_shmem_block, chain, dnode);
+	sblock->nullmark = NULL;
+	sblock->size = size;
+
+	index = sblock - &shmem_head->blocks[0];
+	address = (void *)((Size)shmem_head->base_address + index * SHMEM_BLOCKSZ);
+	/* put a sentry to detect overrun */
+	*((uint32 *)((char *)address + size)) = SHMEM_BLOCK_MAGIC;
+	shmem_head->curr_usage += (1 << shift);
+	shmem_head->max_usage = Max(shmem_head->max_usage,
+								shmem_head->curr_usage);
+out_unlock:
 	SpinLockRelease(&shmem_head->lock);
 
-	if (dnode)
-	{
-		int		index = dnode - shmem_head->blocks;
-
-		dnode->prev = dnode->next = NULL;
-		return (void *)((Size)shmem_head->base_address +
-						index * pgstrom_shmem_blocksize);
-	}
-	return NULL;
+	return address;	
 }
 
 void
 pgstrom_shmem_block_free(void *address)
 {
-	dlist_node *dnode;
+	pgstrom_shmem_block	*sblock;
 	int			index;
+	int			shift;
 
-	Assert((Size)address % pgstrom_shmem_blocksize == 0);
-	index = (((Size)address - (Size)shmem_head->base_address)
-			 / pgstrom_shmem_blocksize);
+	Assert((Size)address % SHMEM_BLOCKSZ == 0);
+	index = (((Size)address - (Size)shmem_head->base_address) / SHMEM_BLOCKSZ);
 	Assert(index >= 0 && index < pgstrom_shmem_numblocks);
 
-	dnode = &shmem_head->blocks[index];
-	Assert(!dnode->prev && !dnode->next);
+	sblock = &shmem_head->blocks[index];
+	Assert(sblock->active.nullmark == NULL);
+	Assert(*((uint32 *)((char *)shmem_head->base_address +
+						index * SHMEM_BLOCKSZ +
+						sblock->active.size)) == SHMEM_BLOCK_MAGIC);
+
+	shift = find_least_pot(sblock->size + sizeof(uint32));
 
 	SpinLockAcquire(&shmem_head->lock);
-	dlist_push_head(&shmem_head->free_list, dnode);
-	shmem_head->curr_usage -= pgstrom_shmem_blocksize;
+
+	shmem_head->curr_usage -= (1 << shift);
+
+	/* try to merge if buddy block is also free */
+	while (shift < SHMEM_BLOCKSZ_BITS_MAX - SHMEM_BLOCKSZ_BITS)
+	{
+		pgstrom_shmem_block	*buddy;
+		int		buddy_index = index ~ (1 << shift);
+
+		buddy = &shmem_head->blocks[buddy_index];
+		if (buddy->active.nullmark == NULL)
+			break;
+
+		dlist_delete(&buddy->dnode);
+		if (buddy_index < index)
+		{
+			sblock = buddy;
+			index = buddy_index;
+		}
+		shift++;
+	}
+	dlist_push_head(&shmem_head->free_list[shift], &sblock->dnode);
 	SpinLockRelease(&shmem_head->lock);
+}
+
+void
+pgstrom_construct_shmem(Size zone_length,
+						void *(*callback)(void *address, Size length))
+{
+	shmem_zone *zone;
+	Size		curr_size = 0;
+	Size		next_size;
+
+	zone = ShmemInitStruct("PG-Strom: shmem_zone",
+						   pgstrom_shmem_totalsize, &found);
+	Assert(!found);
+
+	zone_length = TYPEALIGN(SHMEM_BLOCKSZ, zone_length);
+	while (curr_size < pgstrom_shmem_totalsize)
+	{
+		if (curr_size + zone_length < pgstrom_shmem_totalsize)
+			next_size = zone_length;
+		else
+			next_size = pgstrom_shmem_totalsize - curr_size;
+
+		Assert(next_size % SHMEM_BLOCKSZ == 0);
+
+
+
+		zone = ShmemInitStruct
+
+
+
+
+
 }
 
 static void
 pgstrom_setup_shmem(void)
 {
-	int		i;
+	Size	length;
 	bool	found;
 
-	shmem_head = ShmemInitStruct("PG-Strom: shared memory segment",
-								 offsetof(pgstrom_shmem_head,
-										  blocks[pgstrom_shmem_numblocks]) +
-								 pgstrom_shmem_totalsize +
-								 pgstrom_shmem_blocksize,
-								 &found);
+	length = offsetof(shmem_head, zones[pgstrom_shmem_maxzones]);
+	shmem_head = ShmemInitStruct("PG-Strom: shmem_head",
+								 length, &found);
 	Assert(!found);
 
+	memset(shmem_head, 0, length);
+}
+#if 0
 	/* init pgstrom_shmem_head fields */
 	SpinLockInit(&shmem_head->lock);
-	dlist_init(&shmem_head->free_list);
+	for (i=0; i <= SHMEM_BLOCKSZ_BITS_MAX; i++)
+		dlist_init(&shmem_head->free_list[i - SHMEM_BLOCKSZ_BITS]);
+
 	shmem_head->curr_usage = 0;
 	shmem_head->max_usage = 0;
 	shmem_head->base_address
-		= (void *)TYPEALIGN(pgstrom_shmem_blocksize,
+		= (void *)TYPEALIGN(SHMEM_BLOCKSZ,
 							&shmem_head->blocks[pgstrom_shmem_numblocks]);
-	for (i=0; i < pgstrom_shmem_numblocks; i++)
-		dlist_push_tail(&shmem_head->free_list, &shmem_head->blocks[i]);
 
+	memset(shmem_head->blocks, 0,
+		   sizeof(pgstrom_shmem_block) * pgstrom_shmem_numblocks);
+	i = 0;
+	j = SHMEM_BLOCKSZ_BITS_MAX - SHMEM_BLOCKSZ_BITS;
+	while (i < pgstrom_shmem_numblocks)
+	{
+		int		nblocks = (1 << j);
+
+		if (i + nblocks < pgstrom_shmem_numblocks)
+		{
+			dlist_push_tail(&shmem_head->free_list[j],
+							&shmem_head->blocks[i].chain);
+			i += nblocks;
+		}
+		else if (j > 0)
+			j--;
+	}
 	/*
-	 *
-	 * TODO: initialize slab allocator
-	 *
+	 * TODO: setup memory context on shmem segment
 	 */
-
-
-
-
-
 }
+#endif
 
 void
 pgstrom_init_shmem(void)
 {
-	static int	shmem_blocksize;
 	static int	shmem_totalsize;
+	Size		length;
 
 	/*
 	 * Definition of GUC variables for shared memory management
 	 */
-	DefineCustomIntVariable("pgstrom.shmem_blocksize",
-							"size per shared memory allocation block [MB]",
-							NULL,
-							&shmem_blocksize,
-							4,	/* 4MB */
-							1,	/* 1MB */
-							INT_MAX,
-							PGC_SIGHUP,
-							GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
-	if ((shmem_blocksize & ~(shmem_blocksize - 1)) != 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("\"pgstrom.shmem_blocksize\" must be power of 2")));
-
 	DefineCustomIntVariable("pgstrom.shmem_totalsize",
-							"total size of shared memory segment block [MB]",
+							"total size of shared memory segment for PG-Strom",
 							NULL,
 							&shmem_totalsize,
-							2048,		/* 2GB */
-							64,			/* 64MB */
+							SHMEM_BLOCKSZ * 1024,	/* 2GB */
+							SHMEM_BLOCKSZ * 128,
+							INT_MAX,
+							PGC_SIGHUP,
+							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
+							NULL, NULL, NULL);
+	if ((shmem_totalsize % (SHMEM_BLOCKSZ >> 10)) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+		errmsg("\"pgstrom.shmem_totalsize\" must be multiple of block size")));
+
+	DefineCustomIntVariable("pgstrom.shmem_maxzones",
+							"max number of shared memory zones for PG-Strom",
+							NULL,
+							&pgstrom_shmem_maxzones,
+							256,
+							1,
 							INT_MAX,
 							PGC_SIGHUP,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
-	if (shmem_totalsize < shmem_blocksize * 128)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("\"pgstrom.shmem_totalsize\" too small")));
-	if (shmem_totalsize % shmem_blocksize != 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("\"pgstrom.shmem_totalsize\" must be multiple of \"pgstrom.shmem_blocksize\"")));
 
-	pgstrom_shmem_numblocks = shmem_totalsize / shmem_blocksize;
-	pgstrom_shmem_blocksize = shmem_blocksize << 20;
-	pgstrom_shmem_totalsize = shmem_totalsize << 20;
+	pgstrom_shmem_totalsize = ((Size)shmem_totalsize) << 10;
 
 	/* Acquire shared memory segment */
-	RequestAddinShmemSpace(offsetof(pgstrom_shmem_head,
-									blocks[pgstrom_shmem_numblocks]) +
-						   pgstrom_shmem_totalsize +
-						   pgstrom_shmem_blocksize);
+	length = offsetof(shmem_head, zones[pgstrom_shmem_maxzones]);
+	RequestAddinShmemSpace(MAXALIGN(length));
+	/*
+	 * XXX - to be replaced with dynamic shared memory or system
+	 *       mmap(2) on hugetlbfs in the future.
+	 */
+	RequestAddinShmemSpace(pgstrom_shmem_totalsize + SHMEM_BLOCKSZ);
+
 	shmem_startup_hook_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_setup_shmem;
 }

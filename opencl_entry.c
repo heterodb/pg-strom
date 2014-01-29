@@ -1183,9 +1183,118 @@ pgstrom_init_opencl_entry(void)
 	PG_END_TRY();
 }
 
+/*
+ * utility function to generate text form of OpenCL error code
+ */
+const char *
+opencl_strerror(cl_int errcode)
+{
+	static char		unknown_buf[256];
 
-
-
-
-
-
+	switch (errcode)
+	{
+		case CL_SUCCESS:
+			return "success";
+		case CL_DEVICE_NOT_FOUND:
+			return "device not found";
+		case CL_DEVICE_NOT_AVAILABLE:
+			return "device not available";
+		case CL_COMPILER_NOT_AVAILABLE:
+			return "compiler not available";
+		case CL_MEM_OBJECT_ALLOCATION_FAILURE:
+			return "memory object allocation failure";
+		case CL_OUT_OF_RESOURCES:
+			return "out of resources";
+		case CL_OUT_OF_HOST_MEMORY:
+			return "out of host memory";
+		case CL_PROFILING_INFO_NOT_AVAILABLE:
+			return "profiling info not available";
+		case CL_MEM_COPY_OVERLAP:
+			return "memory copy overlap";
+		case CL_IMAGE_FORMAT_MISMATCH:
+			return "image format mismatch";
+		case CL_IMAGE_FORMAT_NOT_SUPPORTED:
+			return "image format not supported";
+		case CL_BUILD_PROGRAM_FAILURE:
+			return "build program failure";
+		case CL_MAP_FAILURE:
+			return "map failure";
+		case CL_MISALIGNED_SUB_BUFFER_OFFSET:
+			return "misaligned sub-buffer offset";
+		case CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST:
+			return "execution status error for event in wait list";
+		case CL_INVALID_VALUE:
+			return "invalid value";
+		case CL_INVALID_DEVICE_TYPE:
+			return "invalid device type";
+		case CL_INVALID_PLATFORM:
+			return "invalid platform";
+		case CL_INVALID_DEVICE:
+			return "invalid device";
+		case CL_INVALID_CONTEXT:
+			return "invalid context";
+		case CL_INVALID_QUEUE_PROPERTIES:
+			return "invalid queue properties";
+		case CL_INVALID_COMMAND_QUEUE:
+			return "invalid command queue";
+		case CL_INVALID_HOST_PTR:
+			return "invalid host pointer";
+		case CL_INVALID_MEM_OBJECT:
+			return "invalid memory object";
+		case CL_INVALID_IMAGE_FORMAT_DESCRIPTOR:
+			return "invalid image format descriptor";
+		case CL_INVALID_IMAGE_SIZE:
+			return "invalid image size";
+		case CL_INVALID_SAMPLER:
+			return "invalid sampler";
+		case CL_INVALID_BINARY:
+			return "invalid binary";
+		case CL_INVALID_BUILD_OPTIONS:
+			return "invalid build options";
+		case CL_INVALID_PROGRAM:
+			return "invalid program";
+		case CL_INVALID_PROGRAM_EXECUTABLE:
+			return "invalid program executable";
+		case CL_INVALID_KERNEL_NAME:
+			return "invalid kernel name";
+		case CL_INVALID_KERNEL_DEFINITION:
+			return "invalid kernel definition";
+		case CL_INVALID_KERNEL:
+			return "invalid kernel";
+		case CL_INVALID_ARG_INDEX:
+			return "invalid argument index";
+		case CL_INVALID_ARG_VALUE:
+			return "invalid argument value";
+		case CL_INVALID_ARG_SIZE:
+			return "invalid argument size";
+		case CL_INVALID_KERNEL_ARGS:
+			return "invalid kernel arguments";
+		case CL_INVALID_WORK_DIMENSION:
+			return "invalid work dimension";
+		case CL_INVALID_WORK_GROUP_SIZE:
+			return "invalid group size";
+		case CL_INVALID_WORK_ITEM_SIZE:
+			return "invalid item size";
+		case CL_INVALID_GLOBAL_OFFSET:
+			return "invalid global offset";
+		case CL_INVALID_EVENT_WAIT_LIST:
+			return "invalid wait list";
+		case CL_INVALID_EVENT:
+			return "invalid event";
+		case CL_INVALID_OPERATION:
+			return "invalid operation";
+		case CL_INVALID_GL_OBJECT:
+			return "invalid GL object";
+		case CL_INVALID_BUFFER_SIZE:
+			return "invalid buffer size";
+		case CL_INVALID_MIP_LEVEL:
+			return "invalid MIP level";
+		case CL_INVALID_GLOBAL_WORK_SIZE:
+			return "invalid global work size";
+		case CL_INVALID_PROPERTY:
+			return "invalid property";
+	}
+	snprintf(unknown_buf, sizeof(unknown_buf),
+			 "unknown opencl error (%d)", errcode);
+	return unknown_buf;
+}
