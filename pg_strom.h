@@ -110,10 +110,15 @@ extern void _PG_init(void);
 /*
  * shmem.c
  */
-extern Datum pgstrom_system_slabinfo(PG_FUNCTION_ARGS);
-extern Size pgstrom_shmem_get_blocksize(void);
-extern void *pgstrom_shmem_block_alloc(void);
-extern void pgstrom_shmem_block_free(void *address);
+typedef struct shmem_context shmem_context;
+
+extern shmem_context *pgstrom_shmem_context_create(const char *name);
+extern void pgstrom_shmem_context_reset(shmem_context *context);
+extern void pgstrom_shmem_context_delete(shmem_context *context);
+extern void *pgstrom_shmem_alloc(shmem_context *contetx, Size size);
+extern void pgstrom_shmem_free(void *address);
+
+extern void pgstrom_setup_shmem(void);
 extern void pgstrom_init_shmem(void);
 
 #endif	/* PG_STROM_H */
