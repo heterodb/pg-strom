@@ -33,6 +33,4 @@ _PG_init(void)
 
 	/* initialize shared memory segment and slab subsystem */
 	pgstrom_init_shmem();
-
-
 }

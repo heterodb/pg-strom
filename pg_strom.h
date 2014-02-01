@@ -14,7 +14,16 @@
 #ifndef PG_STROM_H
 #define PG_STROM_H
 #include "fmgr.h"
+#include "lib/ilist.h"
 #include <CL/cl.h>
+
+#ifndef PG_USE_INLINE
+#define IF_INLINE	inline
+#else
+#define IF_INLINE
+#endif
+
+
 
 typedef struct {
 	dlist_node	chain;
@@ -118,7 +127,12 @@ extern void pgstrom_shmem_context_delete(shmem_context *context);
 extern void *pgstrom_shmem_alloc(shmem_context *contetx, Size size);
 extern void pgstrom_shmem_free(void *address);
 
-extern void pgstrom_setup_shmem(void);
+extern void pgstrom_setup_shmem(Size zone_length,
+								void *(*callback)(void *address,
+												  Size length));
 extern void pgstrom_init_shmem(void);
+
+extern Datum pgstrom_shmem_block_info(PG_FUNCTION_ARGS);
+extern Datum pgstrom_shmem_context_info(PG_FUNCTION_ARGS);
 
 #endif	/* PG_STROM_H */
