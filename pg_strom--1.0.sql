@@ -1,45 +1,36 @@
 --
 -- pg_strom installation queries
 --
-CREATE FUNCTION pgstrom_fdw_handler()
-  RETURNS fdw_handler
+CREATE TYPE __pgstrom_shmem_block_info AS (
+  zone    int4,
+  size    text,
+  active  int8,
+  free    int8
+);
+CREATE FUNCTION pgstrom_shmem_block_info()
+  RETURNS SETOF __pgstrom_shmem_block_info
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
 
---CREATE FUNCTION pgstrom_fdw_validator(text[], oid)
---  RETURNS void
---  AS 'MODULE_PATHNAME'
---  LANGUAGE C STRICT;
+CREATE TYPE __pgstrom_shmem_context_info AS (
+  name        text,
+  owner       int4,
+  usage       int8,
+  alloc       int8,
+  num_chunks  int8,
+  md5sum      text
+);
+CREATE FUNCTION pgstrom_shmem_context_info()
+  RETURNS SETOF __pgstrom_shmem_context_info
+  AS 'MODULE_PATHNAME'
+  LANGUAGE C STRICT;
 
-CREATE FOREIGN DATA WRAPPER pg_strom
-  HANDLER pgstrom_fdw_handler;
---  VALIDATOR pgstrom_fdw_validator;
+CREATE FUNCTION pgstrom_shmem_alloc(int8)
+  RETURNS int8
+  AS 'MODULE_PATHNAME', 'pgstrom_shmem_alloc_func'
+  LANGUAGE C STRICT;
 
-CREATE SERVER pg_strom FOREIGN DATA WRAPPER pg_strom;
-
-CREATE FUNCTION pgstrom_data_load(regclass, regclass)
+CREATE FUNCTION pgstrom_shmem_free(int8)
   RETURNS bool
-  AS 'MODULE_PATHNAME'
+  AS 'MODULE_PATHNAME', 'pgstrom_shmem_free_func'
   LANGUAGE C STRICT;
-
-CREATE FUNCTION pgstrom_data_clear(regclass)
-  RETURNS bool
-  AS 'MODULE_PATHNAME'
-  LANGUAGE C STRICT;
-
-CREATE FUNCTION pgstrom_data_compaction(regclass)
-  RETURNS bool
-  AS 'MODULE_PATHNAME'
-  LANGUAGE C STRICT;
-
-CREATE TYPE __pgstrom_gpu_info AS
-  (gpuid int, attr text, value text);
-CREATE FUNCTION pgstrom_gpu_info(int default -1)
-  RETURNS SETOF __pgstrom_gpu_info
-  AS 'MODULE_PATHNAME'
-  LANGUAGE C STRICT;
-
-CREATE VIEW pgstrom_shadow_relations AS
-  SELECT oid, relname, relkind, pg_relation_size(oid) AS relsize
-  FROM pg_class WHERE relnamespace IN
-    (SELECT oid FROM pg_namespace WHERE nspname = 'pg_strom');

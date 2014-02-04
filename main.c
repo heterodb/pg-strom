@@ -33,4 +33,7 @@ _PG_init(void)
 
 	/* initialize shared memory segment and slab subsystem */
 	pgstrom_init_shmem();
+
+	/* registration of OpenCL background worker process */
+	//pgstrom_init_opencl_server();
 }

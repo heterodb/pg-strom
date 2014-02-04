@@ -108,6 +108,7 @@ extern const char *opencl_strerror(cl_int errcode);
 /*
  * opencl_serv.c
  */
+Datum pgstrom_opencl_device_info(PG_FUNCTION_ARGS);
 extern void pgstrom_init_opencl_server(void);
 
 
@@ -128,11 +129,12 @@ extern void *pgstrom_shmem_alloc(shmem_context *contetx, Size size);
 extern void pgstrom_shmem_free(void *address);
 
 extern void pgstrom_setup_shmem(Size zone_length,
-								void *(*callback)(void *address,
-												  Size length));
+								void *(*callback)(void *address, Size length));
 extern void pgstrom_init_shmem(void);
 
 extern Datum pgstrom_shmem_block_info(PG_FUNCTION_ARGS);
 extern Datum pgstrom_shmem_context_info(PG_FUNCTION_ARGS);
+extern Datum pgstrom_shmem_alloc_func(PG_FUNCTION_ARGS);
+extern Datum pgstrom_shmem_free_func(PG_FUNCTION_ARGS);
 
 #endif	/* PG_STROM_H */
