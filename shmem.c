@@ -75,6 +75,10 @@ typedef struct
 	slock_t		context_lock;
 	dlist_head	context_list;
 
+	/* for device management */
+	int			device_num;
+	pgstrom_device_info	**device_info;
+
 	/* for zone management */
 	bool		is_ready;
 	int			num_zones;
@@ -466,29 +470,6 @@ pgstrom_shmem_free(void *address)
 
 	SpinLockRelease(&context->lock);
 }
-
-Datum
-pgstrom_shmem_alloc_func(PG_FUNCTION_ARGS)
-{
-	Size	size = PG_GETARG_INT64(0);
-	void   *address;
-
-	address = pgstrom_shmem_alloc(TopShmemContext, size);
-
-	PG_RETURN_INT64((Size) address);
-}
-PG_FUNCTION_INFO_V1(pgstrom_shmem_alloc_func);
-
-Datum
-pgstrom_shmem_free_func(PG_FUNCTION_ARGS)
-{
-	void		   *address = (void *) PG_GETARG_INT64(0);
-
-	pgstrom_shmem_free(address);
-
-	PG_RETURN_BOOL(true);
-}
-PG_FUNCTION_INFO_V1(pgstrom_shmem_free_func);
 
 /*
  *
@@ -1092,4 +1073,77 @@ pgstrom_init_shmem(void)
 
 	shmem_startup_hook_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_shmem;
+}
+
+/*
+ * Routines to get device properties.
+ */
+int
+pgstrom_get_device_nums(void)
+{
+	pg_memory_barrier();
+	return pgstrom_shmem_head->device_num;
+}
+
+pgstrom_device_info *
+pgstrom_get_device_info(int index)
+{
+	pg_memory_barrier();
+	if (index < 0 || index >= pgstrom_shmem_head->device_num)
+		return NULL;
+	return pgstrom_shmem_head->device_info[index];
+}
+
+#define DEVINFO_SHIFT(dest,src,field)						\
+	(dest)->field = (char *)(dest) + ((src)->field - (char *)(src))
+
+void
+pgstrom_register_device_info(List *dev_list)
+{
+	pgstrom_device_info **dev_array;
+	ListCell   *cell;
+	Size		length;
+	int			index;
+
+	Assert(pgstrom_shmem_head->device_num == 0);
+	Assert(TopShmemContext != NULL);
+
+	length = sizeof(pgstrom_device_info *) * list_length(dev_list);
+	dev_array = pgstrom_shmem_alloc(TopShmemContext, length);
+	if (!dev_array)
+		elog(ERROR, "out of shared memory");
+
+	index = 0;
+	foreach (cell, dev_list)
+	{
+		pgstrom_device_info	*dev_info = lfirst(cell);
+		pgstrom_device_info *dest;
+
+		length = offsetof(pgstrom_device_info, buffer[dev_info->buflen]);
+		dest = pgstrom_shmem_alloc(TopShmemContext, length);
+		if (!dest)
+			elog(ERROR, "out of shared memory");
+		memcpy(dest, dev_info, length);
+
+		/* cstring fields needs to be adjusted */
+		DEVINFO_SHIFT(dest, dev_info, pl_profile);
+		DEVINFO_SHIFT(dest, dev_info, pl_version);
+		DEVINFO_SHIFT(dest, dev_info, pl_name);
+		DEVINFO_SHIFT(dest, dev_info, pl_vendor);
+		DEVINFO_SHIFT(dest, dev_info, pl_extensions);
+		DEVINFO_SHIFT(dest, dev_info, dev_built_in_kernels);
+		DEVINFO_SHIFT(dest, dev_info, dev_device_extensions);
+		DEVINFO_SHIFT(dest, dev_info, dev_name);
+		DEVINFO_SHIFT(dest, dev_info, dev_opencl_c_version);
+		DEVINFO_SHIFT(dest, dev_info, dev_profile);
+		DEVINFO_SHIFT(dest, dev_info, dev_vendor);
+		DEVINFO_SHIFT(dest, dev_info, dev_version);
+		DEVINFO_SHIFT(dest, dev_info, driver_version);
+
+		dev_array[index++] = dest;
+	}
+	Assert(index == list_length(dev_list));
+
+	pgstrom_shmem_head->device_info = dev_array;
+	pgstrom_shmem_head->device_num = index;
 }
