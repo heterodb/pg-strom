@@ -1,7 +1,7 @@
 # Makefile of pg_strom
 MODULE_big = pg_strom
 OBJS  = main.o shmem.o debug.o \
-	opencl_entry.o opencl_serv.o
+	opencl_entry.o opencl_serv.o opencl_devinfo.o
 
 PG_CPPFLAGS = -Werror -Wall -O0 -DPGSTROM_DEBUG
 

@@ -35,5 +35,5 @@ _PG_init(void)
 	pgstrom_init_shmem();
 
 	/* registration of OpenCL background worker process */
-	//pgstrom_init_opencl_server();
+	pgstrom_init_opencl_server();
 }

@@ -15,6 +15,7 @@
 #define PG_STROM_H
 #include "fmgr.h"
 #include "lib/ilist.h"
+#include "nodes/pg_list.h"
 #include <CL/cl.h>
 
 #ifndef PG_USE_INLINE
@@ -98,10 +99,11 @@ typedef struct {
 
 
 /*
- * opencl_device.c
+ * opencl_devinfo.c
  */
 extern pgstrom_device_info *pgstrom_get_opencl_device_info(int index);
 extern int	pgstrom_get_opencl_device_num(void);
+extern void pgstrom_init_opencl_device_info(void);
 
 /*
  * opencl_entry.c
