@@ -913,7 +913,10 @@ construct_shmem_top_context(const char *name, shmem_zone *zone)
 
 void
 pgstrom_setup_shmem(Size zone_length,
-					void *(*callback)(void *address, Size length))
+					void *(*callback)(void *address,
+									  Size length,
+									  void *callback_private),
+					void *callback_private)
 {
 	shmem_zone	   *zone;
 	long			zone_index;
@@ -997,13 +1000,6 @@ pgstrom_setup_shmem(Size zone_length,
 
 	/* OK, now ready to use shared memory segment */
 	pgstrom_shmem_head->is_ready = true;
-	pg_memory_barrier();
-}
-
-static void *hoge(void *address, Size length)
-{
-	elog(LOG, "zone: address = %p length = %zu", address, length);
-    return NULL;
 }
 
 static void
@@ -1020,9 +1016,6 @@ pgstrom_startup_shmem(void)
 	Assert(!found);
 
 	memset(pgstrom_shmem_head, 0, length);
-
-	// for debugging
-	pgstrom_setup_shmem(512 << 20, hoge);
 }
 
 void
@@ -1131,7 +1124,6 @@ pgstrom_register_device_info(List *dev_list)
 		DEVINFO_SHIFT(dest, dev_info, pl_name);
 		DEVINFO_SHIFT(dest, dev_info, pl_vendor);
 		DEVINFO_SHIFT(dest, dev_info, pl_extensions);
-		DEVINFO_SHIFT(dest, dev_info, dev_built_in_kernels);
 		DEVINFO_SHIFT(dest, dev_info, dev_device_extensions);
 		DEVINFO_SHIFT(dest, dev_info, dev_name);
 		DEVINFO_SHIFT(dest, dev_info, dev_opencl_c_version);

@@ -25,6 +25,17 @@ CREATE FUNCTION pgstrom_shmem_context_info()
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
 
+CREATE TYPE __pgstrom_opencl_device_info AS (
+  dnum      int4,
+  pnum		int4,
+  property	text,
+  value		text
+);
+CREATE FUNCTION pgstrom_opencl_device_info()
+  RETURNS SETOF __pgstrom_opencl_device_info
+  AS 'MODULE_PATHNAME'
+  LANGUAGE C STRICT;
+
 CREATE FUNCTION pgstrom_shmem_alloc(int8)
   RETURNS int8
   AS 'MODULE_PATHNAME', 'pgstrom_shmem_alloc_func'

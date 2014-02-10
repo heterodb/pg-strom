@@ -24,10 +24,10 @@
  */
 #define CLPF_PARAM(param,field,is_cstring)								\
 	{ (param), sizeof(((pgstrom_device_info *) NULL)->field),			\
-			offsetof(pgstrom_device_info, field), true, (is_cstring) }
+	  offsetof(pgstrom_device_info, field), true,  (is_cstring) }
 #define CLDEV_PARAM(param,field,is_cstring)								\
 	{ (param), sizeof(((pgstrom_device_info *) NULL)->field),			\
-			offsetof(pgstrom_device_info, field), false, (is_cstring)}
+	  offsetof(pgstrom_device_info, field), false, (is_cstring) }
 
 static pgstrom_device_info *
 init_opencl_device_info(cl_platform_id platform, cl_device_id device)
@@ -52,8 +52,6 @@ init_opencl_device_info(cl_platform_id platform, cl_device_id device)
 					dev_address_bits, false),
 		CLDEV_PARAM(CL_DEVICE_AVAILABLE,
 					dev_available, false),
-		CLDEV_PARAM(CL_DEVICE_BUILT_IN_KERNELS,
-					dev_built_in_kernels, true),
 		CLDEV_PARAM(CL_DEVICE_COMPILER_AVAILABLE,
 					dev_compiler_available, false),
 		CLDEV_PARAM(CL_DEVICE_DOUBLE_FP_CONFIG,
@@ -76,8 +74,6 @@ init_opencl_device_info(cl_platform_id platform, cl_device_id device)
 					dev_global_mem_size, false),
 		CLDEV_PARAM(CL_DEVICE_HOST_UNIFIED_MEMORY,
 					dev_host_unified_memory, false),
-		CLDEV_PARAM(CL_DEVICE_LINKER_AVAILABLE,
-					dev_linker_available, false),
 		CLDEV_PARAM(CL_DEVICE_LOCAL_MEM_SIZE,
 					dev_local_mem_size, false),
 		CLDEV_PARAM(CL_DEVICE_LOCAL_MEM_TYPE,
@@ -132,10 +128,6 @@ init_opencl_device_info(cl_platform_id platform, cl_device_id device)
 					dev_preferred_vector_width_float, false),
 		CLDEV_PARAM(CL_DEVICE_PREFERRED_VECTOR_WIDTH_DOUBLE,
 					dev_preferred_vector_width_double, false),
-		CLDEV_PARAM(CL_DEVICE_PRINTF_BUFFER_SIZE,
-					dev_printf_buffer_size, false),
-		CLDEV_PARAM(CL_DEVICE_PREFERRED_INTEROP_USER_SYNC,
-					dev_preferred_interop_user_sync, false),
 		CLDEV_PARAM(CL_DEVICE_PROFILE,
 					dev_profile, true),
 		CLDEV_PARAM(CL_DEVICE_PROFILING_TIMER_RESOLUTION,
@@ -205,6 +197,8 @@ init_opencl_device_info(cl_platform_id platform, cl_device_id device)
 		if (catalog[i].is_cstring)
 		{
 			((char *)param_addr)[param_retsz] = '\0';
+			*((char **)((char *)devinfo + catalog[i].offset))
+				= &devinfo->buffer[offset];
 			offset += MAXALIGN(param_retsz);
 		}
 	}
@@ -306,14 +300,13 @@ init_opencl_platform_info(cl_platform_id platform)
 }
 
 /*
- * pgstrom_init_opencl_device_info
+ * pgstrom_collect_opencl_device_info
  *
- * It gathers properties of OpenCL devices. It should be called once, by
- * the worker process that manages OpenCL interactions.
- *
+ * It collects properties of all the OpenCL devices. It shall be called once
+ * by the OpenCL management worker process, prior to any other backends.
  */
-void
-pgstrom_init_opencl_device_info(void)
+List *
+pgstrom_collect_opencl_device_info(void)
 {
 	cl_platform_id	platforms[32];
 	cl_uint			n_platform;
@@ -333,9 +326,7 @@ pgstrom_init_opencl_device_info(void)
 
 		result = list_concat(result, temp);
 	}
-	pgstrom_register_device_info(result);
-
-	list_free_deep(result);
+	return result;
 }
 
 /*
@@ -371,8 +362,8 @@ Datum
 pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 {
 	FuncCallContext	*fncxt;
-	Datum		values[3];
-	bool		isnull[3];
+	Datum		values[4];
+	bool		isnull[4];
 	HeapTuple	tuple;
 	uint32		dindex;
 	uint32		pindex;
@@ -390,12 +381,14 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 		fncxt = SRF_FIRSTCALL_INIT();
 		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
 
-		tupdesc = CreateTemplateTupleDesc(3, false);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "index",
+		tupdesc = CreateTemplateTupleDesc(4, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "dnum",
 						   INT4OID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "property",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "pnum",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "property",
 						   TEXTOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "value",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "value",
 						   TEXTOID, -1, 0);
 		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
 
@@ -405,8 +398,8 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 	}
 	fncxt = SRF_PERCALL_SETUP();
 
-	dindex = fncxt->call_cntr / 100;
-	pindex = fncxt->call_cntr % 100;
+	dindex = fncxt->call_cntr / 55;
+	pindex = fncxt->call_cntr % 55;
 
 	if (dindex == pgstrom_get_device_nums())
 		SRF_RETURN_DONE(fncxt);
@@ -449,26 +442,22 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 			value = devinfo->dev_available ? "yes" : "no";
 			break;
 		case 8:
-			key = "built in kernels";
-			value = devinfo->dev_built_in_kernels;
-			break;
-		case 9:
 			key = "compiler available";
 			value = devinfo->dev_compiler_available ? "yes" : "no";
 			break;
-		case 10:
+		case 9:
 			key = "double fp config";
 			value = fp_config_to_cstring(devinfo->dev_double_fp_config);
 			break;
-		case 11:
+		case 10:
 			key = "little endian";
 			value = devinfo->dev_endian_little ? "yes" : "no";
 			break;
-		case 12:
+		case 11:
 			key = "error correction support";
 			value = devinfo->dev_error_correction_support ? "yes" : "no";
 			break;
-		case 13:
+		case 12:
 			key = "execution capabilities";
 			if (devinfo->dev_execution_capabilities & CL_EXEC_KERNEL)
 				ofs += sprintf(buf + ofs, "OpenCL");
@@ -476,15 +465,15 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 				ofs += sprintf(buf + ofs, "%sNative", ofs > 0 ? ", " : "");
 			value = buf;
 			break;
-		case 14:
+		case 13:
 			key = "device extensions";
 			value = devinfo->dev_device_extensions;
 			break;
-		case 15:
+		case 14:
 			key = "global mem cache size";
 			value = psprintf("%lu", devinfo->dev_global_mem_cache_size);
 			break;
-		case 16:
+		case 15:
 			key = "global mem cache type";
 			switch (devinfo->dev_global_mem_cache_type)
 			{
@@ -502,27 +491,23 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 					break;
 			}
 			break;
-		case 17:
+		case 16:
 			key = "global mem cacheline size";
 			value = psprintf("%u", devinfo->dev_global_mem_cacheline_size);
 			break;
-		case 18:
+		case 17:
 			key = "global mem size";
 			value = psprintf("%lu", devinfo->dev_global_mem_size);
 			break;
-		case 19:
+		case 18:
 			key = "host unified memory";
 			value = devinfo->dev_host_unified_memory ? "yes" : "no";
 			break;
-		case 20:
-			key = "linker available";
-			value = devinfo->dev_linker_available ? "yes" : "no";
-			break;
-		case 21:
+		case 19:
 			key = "local mem size";
 			value = psprintf("%lu", devinfo->dev_local_mem_size);
 			break;
-		case 22:
+		case 20:
 			key = "local mem type";
 			switch (devinfo->dev_local_mem_type)
 			{
@@ -540,126 +525,118 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 					break;
 			}
 			break;
-		case 23:
+		case 21:
 			key = "max clock frequency";
 			value = psprintf("%u", devinfo->dev_max_clock_frequency);
 			break;
-		case 24:
+		case 22:
 			key = "max compute units";
 			value = psprintf("%u", devinfo->dev_max_compute_units);
 			break;
-		case 25:
+		case 23:
 			key = "max constant args";
 			value = psprintf("%u", devinfo->dev_max_constant_args);
 			break;
-		case 26:
+		case 24:
 			key = "max constant buffer size";
 			value = psprintf("%lu", devinfo->dev_max_constant_buffer_size);
 			break;
-		case 27:
+		case 25:
 			key = "max mem alloc size";
 			value = psprintf("%lu", devinfo->dev_max_mem_alloc_size);
 			break;
-		case 28:
+		case 26:
 			key = "max parameter size";
 			value = psprintf("%lu", devinfo->dev_max_parameter_size);
 			break;
-		case 29:
+		case 27:
 			key = "max samplers";
 			value = psprintf("%u", devinfo->dev_max_samplers);
 			break;
-		case 30:
+		case 28:
 			key = "max work group size";
 			value = psprintf("%zu", devinfo->dev_max_work_group_size);
 			break;
-		case 31:
+		case 29:
 			key = "max work group dimensions";
 			value = psprintf("%u", devinfo->dev_max_work_item_dimensions);
 			break;
-		case 32:
+		case 30:
 			key = "max work item sizes";
 			value = psprintf("{%zu, %zu, %zu}",
 							 devinfo->dev_max_work_item_sizes[0],
 							 devinfo->dev_max_work_item_sizes[1],
 							 devinfo->dev_max_work_item_sizes[2]);
 			break;
-		case 33:
+		case 31:
 			key = "mem base address align";
 			value = psprintf("%u", devinfo->dev_mem_base_addr_align);
 			break;
-		case 34:
+		case 32:
 			key = "device name";
 			value = devinfo->dev_name;
 			break;
-		case 35:
+		case 33:
 			key = "native vector width (char)";
 			value = psprintf("%u", devinfo->dev_native_vector_width_char);
 			break;
-		case 36:
+		case 34:
 			key = "native vector width (short)";
 			value = psprintf("%u", devinfo->dev_native_vector_width_short);
 			break;
-		case 37:
+		case 35:
 			key = "native vector width (int)";
 			value = psprintf("%u", devinfo->dev_native_vector_width_int);
 			break;
-		case 38:
+		case 36:
 			key = "native vector width (long)";
 			value = psprintf("%u", devinfo->dev_native_vector_width_long);
 			break;
-		case 39:
+		case 37:
 			key = "native vector width (float)";
 			value = psprintf("%u", devinfo->dev_native_vector_width_float);
 			break;
-		case 40:
+		case 38:
 			key = "native vector width (double)";
 			value = psprintf("%u", devinfo->dev_native_vector_width_double);
 			break;
-		case 41:
+		case 39:
 			key = "opencl c version";
 			value = devinfo->dev_opencl_c_version;
 			break;
-		case 42:
+		case 40:
 			key = "preferred vector width (char)";
 			value = psprintf("%u", devinfo->dev_preferred_vector_width_char);
 			break;
-		case 43:
+		case 41:
 			key = "preferred vector width (short)";
 			value = psprintf("%u", devinfo->dev_preferred_vector_width_short);
 			break;
-		case 44:
+		case 42:
 			key = "preferred vector width (int)";
 			value = psprintf("%u", devinfo->dev_preferred_vector_width_int);
 			break;
-		case 45:
+		case 43:
 			key = "preferred vector width (long)";
 			value = psprintf("%u", devinfo->dev_preferred_vector_width_long);
 			break;
-		case 46:
+		case 44:
 			key = "preferred vector width (float)";
 			value = psprintf("%u", devinfo->dev_preferred_vector_width_float);
 			break;
-		case 47:
+		case 45:
 			key = "preferred vector width (double)";
 			value = psprintf("%u", devinfo->dev_preferred_vector_width_double);
 			break;
-		case 48:
-			key = "printf buffer size";
-			value = psprintf("%zu", devinfo->dev_printf_buffer_size);
-			break;
-		case 49:
-			key = "preferred interop user sync";
-			value = devinfo->dev_preferred_interop_user_sync ? "yes" : "no";
-			break;
-		case 50:
+		case 46:
 			key = "device profile";
 			value = devinfo->dev_profile;
 			break;
-		case 51:
+		case 47:
 			key = "profiling timer resolution";
 			value = psprintf("%zu", devinfo->dev_profiling_timer_resolution);
 			break;
-		case 52:
+		case 48:
 			key = "command queue properties";
 			if (devinfo->dev_queue_properties &
 				CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE)
@@ -668,11 +645,11 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 				ofs += sprintf(buf, "%sprofiling", ofs > 0 ? ", " : "");
 			value = buf;
 			break;
-		case 53:
+		case 49:
 			key = "single fp config";
 			value = fp_config_to_cstring(devinfo->dev_single_fp_config);
 			break;
-		case 54:
+		case 50:
 			key = "device type";
 			if (devinfo->dev_type & CL_DEVICE_TYPE_CPU)
 				ofs += sprintf(buf, "%scpu", ofs > 0 ? ", " : "");
@@ -686,19 +663,19 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 				ofs += sprintf(buf, "%scustom", ofs > 0 ? ", " : "");
 			value = buf;
 			break;
-		case 55:
+		case 51:
 			key = "device vendor";
 			value = devinfo->dev_vendor;
 			break;
-		case 56:
+		case 52:
 			key = "device vendor id";
 			value = psprintf("%u", devinfo->dev_vendor_id);
 			break;
-		case 57:
+		case 53:
 			key = "device version";
 			value = devinfo->dev_version;
 			break;
-		case 58:
+		case 54:
 			key = "driver version";
 			value = devinfo->driver_version;
 			break;
@@ -708,8 +685,9 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 	}
 	memset(isnull, 0, sizeof(isnull));
 	values[0] = Int32GetDatum(dindex);
-	values[1] = CStringGetTextDatum(key);
-	values[2] = CStringGetTextDatum(value);
+	values[1] = Int32GetDatum(pindex);
+	values[2] = CStringGetTextDatum(key);
+	values[3] = CStringGetTextDatum(value);
 
 	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
 

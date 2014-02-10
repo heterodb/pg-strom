@@ -1107,7 +1107,7 @@ pgstrom_init_opencl_entry(void)
 	{
 		/* Query Platform Info */
 		LOOKUP_OPENCL_FUNCTION(clGetPlatformIDs);
-		LOOKUP_OPENCL_FUNCTION(clGetPlatformIDs);
+		LOOKUP_OPENCL_FUNCTION(clGetPlatformInfo);
 		/* Query Devices */
 		LOOKUP_OPENCL_FUNCTION(clGetDeviceIDs);
 		LOOKUP_OPENCL_FUNCTION(clGetDeviceInfo);

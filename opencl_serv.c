@@ -38,39 +38,51 @@ pgstrom_opencl_sighup(SIGNAL_ARGS)
 	got_signal = true;
 }
 
-
 /*
- * get_shmem_zone_length
+ * on_shmem_zone_callback
  *
- * It calculate length of the shared memory zone; that should be the smallest
- * max memory allocation size in all of the OpenCL devices.
+ * It is a callback function for each zone on shared memory segment
+ * initialization. It assigns a buffer object of OpenCL for each zone
+ * for asynchronous memory transfer later.
  */
-static Size
-get_shmem_zone_length(void)
-{
-	int		i, n = pgstrom_get_opencl_device_num();
-	Size	length = LONG_MAX;
-
-	for (i=0; i < n; i++)
-	{
-		pgstrom_device_info	*devinfo
-			= pgstrom_get_opencl_device_info(i);
-
-		if (length < devinfo->dev_max_mem_alloc_size)
-			length = devinfo->dev_max_mem_alloc_size;
-	}
-	return length;
-}
-
 static void *
-on_shmem_zone_callback(void *address, Size length)
+on_shmem_zone_callback(void *address, Size length, void *cb_private)
 {
+	//List   *devList = cb_private;
+
 	elog(LOG, "zone: address = %p length = %zu", address, length);
 	return NULL;
 }
 
+static void
+init_opencl_devices_and_shmem(void)
+{
+	Size		zone_length = LONG_MAX;
+	List	   *devList;
+	ListCell   *cell;
+	int			index = 0;
 
+	devList = pgstrom_collect_opencl_device_info();
+	foreach (cell, devList)
+	{
+		pgstrom_device_info	*devinfo = lfirst(cell);
 
+		elog(LOG, "PG-Strom: device[%d] %s (RAM: %luMB, Units: %uMHz x%u)",
+			 index, devinfo->dev_name,
+			 devinfo->dev_global_mem_size >> 20,
+			 devinfo->dev_max_clock_frequency,
+			 devinfo->dev_max_compute_units);
+
+		if (zone_length > devinfo->dev_max_mem_alloc_size)
+			zone_length = devinfo->dev_max_mem_alloc_size;
+		index++;
+	}
+	elog(LOG, "PG-Strom: setting up shared memory (zone length=%zu)",
+		 zone_length);
+	pgstrom_setup_shmem(zone_length, on_shmem_zone_callback, devList);
+
+	pgstrom_register_device_info(devList);
+}
 
 static void
 pgstrom_opencl_main(Datum main_arg)
@@ -82,13 +94,10 @@ pgstrom_opencl_main(Datum main_arg)
     /* We're now ready to receive signals */
     BackgroundWorkerUnblockSignals();
 
-	/* Gather any properties of OpenCL devices */
-	pgstrom_init_opencl_device_info();
+	/* initialize opencl devices and shared memory segment */
+	init_opencl_devices_and_shmem();
 
 	elog(LOG, "Starting PG-Strom OpenCL Server");
-
-	pgstrom_setup_shmem(get_shmem_zone_length(),
-						on_shmem_zone_callback);
 
 	while (!got_signal)
 	{

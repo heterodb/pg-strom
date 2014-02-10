@@ -24,8 +24,15 @@
 #define IF_INLINE
 #endif
 
-
-
+/*
+ * pgstrom_device_info
+ *
+ * Properties of opencl devices. Usually, it shall be collected on the
+ * starting up time once, then kept on the shared memory segment.
+ * Note that the properties below are supported on opencl 1.1, because
+ * older driver (even if front one support 1.1) cannot understand newer
+ * parameter name appeared in 1.2.
+ */
 typedef struct {
 	/* Platform properties */
 	cl_platform_id	platform;		/* available only OpenCL server */
@@ -39,7 +46,6 @@ typedef struct {
 	cl_device_id	device;			/* available only OpenCL server */
 	cl_uint		dev_address_bits;
 	cl_bool		dev_available;
-	char	   *dev_built_in_kernels;
 	cl_bool		dev_compiler_available;
 	cl_device_fp_config	dev_double_fp_config;
 	cl_bool		dev_endian_little;
@@ -51,7 +57,6 @@ typedef struct {
 	cl_uint		dev_global_mem_cacheline_size;
 	cl_ulong	dev_global_mem_size;
 	cl_bool		dev_host_unified_memory;
-	cl_bool		dev_linker_available;
 	cl_ulong	dev_local_mem_size;
 	cl_device_local_mem_type	dev_local_mem_type;
 	cl_uint		dev_max_clock_frequency;
@@ -79,8 +84,6 @@ typedef struct {
 	cl_uint		dev_preferred_vector_width_long;
 	cl_uint		dev_preferred_vector_width_float;
 	cl_uint		dev_preferred_vector_width_double;
-	size_t		dev_printf_buffer_size;
-	cl_bool		dev_preferred_interop_user_sync;
 	char	   *dev_profile;
 	size_t		dev_profiling_timer_resolution;
 	cl_command_queue_properties	dev_queue_properties;
@@ -103,7 +106,7 @@ typedef struct {
  */
 extern pgstrom_device_info *pgstrom_get_opencl_device_info(int index);
 extern int	pgstrom_get_opencl_device_num(void);
-extern void pgstrom_init_opencl_device_info(void);
+extern List *pgstrom_collect_opencl_device_info(void);
 
 /*
  * opencl_entry.c
@@ -137,7 +140,10 @@ extern void *pgstrom_shmem_alloc(shmem_context *contetx, Size size);
 extern void pgstrom_shmem_free(void *address);
 
 extern void pgstrom_setup_shmem(Size zone_length,
-								void *(*callback)(void *address, Size length));
+								void *(*callback)(void *address,
+												  Size length,
+												  void *cb_private),
+								void *cb_private);
 extern void pgstrom_init_shmem(void);
 
 extern Datum pgstrom_shmem_block_info(PG_FUNCTION_ARGS);
