@@ -18,6 +18,7 @@
 #include "nodes/pg_list.h"
 #include "postmaster/bgworker.h"
 #include "utils/builtins.h"
+#include "utils/memutils.h"
 #include "pg_strom.h"
 #include <limits.h>
 #include <signal.h>
@@ -48,10 +49,34 @@ pgstrom_opencl_sighup(SIGNAL_ARGS)
 static void *
 on_shmem_zone_callback(void *address, Size length, void *cb_private)
 {
-	//List   *devList = cb_private;
+	List	   *dev_list = cb_private;
+	ListCell   *cell;
+	int			n_devices = list_length(dev_list);
+	int			index = 0;
+	cl_mem	   *host_mems;
+	cl_int		rc;
 
-	elog(LOG, "zone: address = %p length = %zu", address, length);
-	return NULL;
+	host_mems = MemoryContextAllocZero(TopMemoryContext,
+								 sizeof(cl_mem) * n_devices);
+	index = 0;
+	foreach(cell, dev_list)
+	{
+		pgstrom_device_info	*devinfo = lfirst(cell);
+
+		host_mems[index] = clCreateBuffer(devinfo->context,
+										  CL_MEM_READ_WRITE |
+										  CL_MEM_USE_HOST_PTR,
+										  length,
+										  address,
+										  &rc);
+		if (rc != CL_SUCCESS)
+			elog(ERROR, "clCreateBuffer failed on host memory (%p-%p): %s",
+				 address, (char *)address + length - 1, opencl_strerror(rc));
+		index++;
+	}
+	elog(LOG, "PG-Strom: zone %p-%p was mapped (len: %luMB)",
+		 address, (char *)address + length - 1, length >> 20);
+	return host_mems;
 }
 
 static void
@@ -67,11 +92,11 @@ init_opencl_devices_and_shmem(void)
 	{
 		pgstrom_device_info	*devinfo = lfirst(cell);
 
-		elog(LOG, "PG-Strom: device[%d] %s (RAM: %luMB, Units: %uMHz x%u)",
+		elog(LOG, "PG-Strom: device[%d] %s (%uMHz x %uunits, %luMB)",
 			 index, devinfo->dev_name,
-			 devinfo->dev_global_mem_size >> 20,
 			 devinfo->dev_max_clock_frequency,
-			 devinfo->dev_max_compute_units);
+			 devinfo->dev_max_compute_units,
+			 devinfo->dev_global_mem_size >> 20);
 
 		if (zone_length > devinfo->dev_max_mem_alloc_size)
 			zone_length = devinfo->dev_max_mem_alloc_size;

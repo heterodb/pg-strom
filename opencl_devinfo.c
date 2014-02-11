@@ -30,7 +30,7 @@
 	  offsetof(pgstrom_device_info, field), false, (is_cstring) }
 
 static pgstrom_device_info *
-init_opencl_device_info(cl_platform_id platform, cl_device_id device)
+init_opencl_device_info(cl_platform_id platform_id, cl_device_id device_id)
 {
 	pgstrom_device_info *devinfo;
 	Size		offset = 0;
@@ -171,7 +171,7 @@ init_opencl_device_info(cl_platform_id platform, cl_device_id device)
 
 		if (catalog[i].is_platform)
 		{
-			rc = clGetPlatformInfo(platform,
+			rc = clGetPlatformInfo(platform_id,
 								   catalog[i].param,
 								   param_size,
 								   param_addr,
@@ -183,7 +183,7 @@ init_opencl_device_info(cl_platform_id platform, cl_device_id device)
 		}
 		else
 		{
-			rc = clGetDeviceInfo(device,
+			rc = clGetDeviceInfo(device_id,
 								 catalog[i].param,
 								 param_size,
 								 param_addr,
@@ -265,6 +265,9 @@ init_opencl_device_info(cl_platform_id platform, cl_device_id device)
 			devinfo->dev_name);
 		goto out_clean;
 	}
+	devinfo->platform_id = platform_id;
+	devinfo->device_id = device_id;
+
 	return devinfo;
 
 out_clean:
@@ -273,29 +276,52 @@ out_clean:
 }
 
 static List *
-init_opencl_platform_info(cl_platform_id platform)
+init_opencl_platform_info(cl_platform_id platform_id)
 {
 	pgstrom_device_info *devinfo;
-	cl_device_id	devices[128];
+	cl_device_id	device_ids[128];
+	cl_context		context;
 	cl_uint			n_device;
 	cl_int			i, rc;
 	List		   *result = NIL;
 
-	rc = clGetDeviceIDs(platform,
+	rc = clGetDeviceIDs(platform_id,
 						CL_DEVICE_TYPE_DEFAULT,
-						lengthof(devices),
-						devices,
+						lengthof(device_ids),
+						device_ids,
 						&n_device);
 	if (rc != CL_SUCCESS)
 		elog(ERROR, "clGetDeviceIDs failed (%s)", opencl_strerror(rc));
 
+	context = clCreateContext(NULL,
+							  n_device,
+							  device_ids,
+							  NULL,
+							  NULL,
+							  &rc);
+	if (rc != CL_SUCCESS)
+		elog(ERROR, "clCreateContext failed: %s", opencl_strerror(rc));
+
 	for (i=0; i < n_device; i++)
 	{
-		devinfo = init_opencl_device_info(platform, devices[i]);
+		devinfo = init_opencl_device_info(platform_id, device_ids[i]);
 
 		if (devinfo)
+		{
+			rc = clRetainContext(context);
+			if (rc != CL_SUCCESS)
+				elog(ERROR, "clRetainContext failed: %s", opencl_strerror(rc));
+
+			Assert(rc == CL_SUCCESS);
+			devinfo->context = context;
+
 			result = lappend(result, devinfo);
+		}
 	}
+	rc = clReleaseContext(context);
+	if (rc != CL_SUCCESS)
+		elog(ERROR, "clReleaseContext failed: %s", opencl_strerror(rc));
+
 	return result;
 }
 

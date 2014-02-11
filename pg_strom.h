@@ -35,7 +35,7 @@
  */
 typedef struct {
 	/* Platform properties */
-	cl_platform_id	platform;		/* available only OpenCL server */
+	cl_platform_id	platform_id;	/* valid only OpenCL server */
 	cl_uint		pl_index;
 	char	   *pl_profile;
 	char	   *pl_version;
@@ -43,7 +43,8 @@ typedef struct {
 	char	   *pl_vendor;
 	char	   *pl_extensions;
 	/* Device properties */
-	cl_device_id	device;			/* available only OpenCL server */
+	cl_device_id	device_id;		/* valid only OpenCL server */
+	cl_context		context;		/* valid only OpenCL server */
 	cl_uint		dev_address_bits;
 	cl_bool		dev_available;
 	cl_bool		dev_compiler_available;

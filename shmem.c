@@ -359,7 +359,6 @@ pgstrom_shmem_alloc(shmem_context *context, Size size)
 
 		shift = find_least_pot(bunch_len);
 		dnode = (dlist_node *)((char *)bunch + (1 << shift)) - 1;
-		elog(INFO, "bunch = %p dnode = %p", bunch, dnode);
 		dlist_push_tail(&bunch->chunk_list, dnode);
 		SHMEM_CHUNK_MAGIC(chunk) = SHMCHUNK_MAGIC_FREE;
 
@@ -409,7 +408,7 @@ pgstrom_shmem_free(void *address)
 	Assert(memcmp(bunch->md5, context->md5, 16) == 0);
 
 	SpinLockAcquire(&context->lock);
-#ifdef USE_ASSERT_CHECKING
+#ifdef PGSTROM_DEBUG
 	do {
 		dlist_iter	iter;
 		bool		found = false;
@@ -502,7 +501,7 @@ pgstrom_shmem_zone_block_split(shmem_zone *zone, int shift)
 	block += (1 << (shift - 1));
 	dlist_push_tail(&zone->free_list[shift-1], &block->chain);
 
-	zone->num_free[shift] += 2;
+	zone->num_free[shift-1] += 2;
 
 	return true;
 }
@@ -640,6 +639,85 @@ typedef struct
 	int		num_free;
 } shmem_block_info;
 
+static List *
+collect_shmem_block_info(shmem_zone *zone, int zone_index)
+{
+	List	   *results = NIL;
+	long		num_active[SHMEM_BLOCKSZ_BITS_RANGE + 1];
+	long		num_free[SHMEM_BLOCKSZ_BITS_RANGE + 1];
+	long		i;
+
+	/*
+	 * For debugging, we don't trust statistical information. Even though
+	 * it takes block counting under the execlusive lock, we try to pick
+	 * up raw data.
+	 * Elsewhere, we just pick up statistical data.
+	 */
+#ifdef PGSTROM_DEBUG
+	memset(num_active, 0, sizeof(num_active));
+	memset(num_free, 0, sizeof(num_free));
+
+	i = 0;
+	while (i < zone->num_blocks)
+	{
+		shmem_block	*block = &zone->blocks[i];
+		dlist_node	*dnode;
+
+		if (!block->active.nullmark)
+		{
+			Assert(block->active.nshift < SHMEM_BLOCKSZ_BITS_RANGE + 1);
+			num_active[block->active.nshift]++;
+			i += (1 << block->active.nshift);
+		}
+		else
+		{
+			Size addr_min = (Size)(zone->free_list);
+			Size addr_max = (Size)(zone->free_list +
+								   SHMEM_BLOCKSZ_BITS_RANGE + 1);
+			dnode = &block->chain;
+			while (true)
+			{
+				if ((Size)dnode >= addr_min && (Size)dnode < addr_max)
+				{
+					int		j;
+
+					for (j=0; j <= SHMEM_BLOCKSZ_BITS_RANGE; j++)
+					{
+						if (dnode == &zone->free_list[j].head)
+						{
+							num_free[j]++;
+							i += (1 << j);
+							break;
+						}
+					}
+					Assert(j <= SHMEM_BLOCKSZ_BITS_RANGE);
+					break;
+				}
+				dnode = dnode->next;
+				Assert(dnode != &block->chain);
+			}
+		}
+	}
+	Assert(memcmp(num_active, zone->num_active, sizeof(num_active)) == 0);
+	Assert(memcmp(num_free, zone->num_free, sizeof(num_free)) == 0);
+#else
+	memcpy(num_active, zone->num_active, sizeof(num_active));
+	memcpy(num_free, zone->num_free, sizeof(num_free));
+#endif
+	for (i=0; i <= SHMEM_BLOCKSZ_BITS_RANGE; i++)
+	{
+		shmem_block_info *block_info
+			= palloc(sizeof(shmem_block_info));
+		block_info->zone = zone_index;
+		block_info->shift = i;
+		block_info->num_active = zone->num_active[i];
+		block_info->num_free = zone->num_free[i];
+
+		results = lappend(results, block_info);
+	}
+	return results;
+}
+
 Datum
 pgstrom_shmem_block_info(PG_FUNCTION_ARGS)
 {
@@ -656,8 +734,8 @@ pgstrom_shmem_block_info(PG_FUNCTION_ARGS)
 		TupleDesc		tupdesc;
 		MemoryContext	oldcxt;
 		shmem_zone	   *zone;
-		List		   *temp = NIL;
-		int				i, j;
+		List		   *block_info_list = NIL;
+		int				i;
 
 		fncxt = SRF_FIRSTCALL_INIT();
 		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
@@ -680,16 +758,9 @@ pgstrom_shmem_block_info(PG_FUNCTION_ARGS)
 			SpinLockAcquire(&zone->lock);
 			PG_TRY();
 			{
-				for (j=0; j < SHMEM_BLOCKSZ_BITS_RANGE + 1; j++)
-				{
-					block_info = palloc(sizeof(shmem_block_info));
-					block_info->zone = i;
-					block_info->shift = j;
-					block_info->num_active = zone->num_active[j];
-					block_info->num_free = zone->num_free[j];
+				List   *temp = collect_shmem_block_info(zone, i);
 
-					temp = lappend(temp, block_info);
-				}
+				block_info_list = list_concat(block_info_list, temp);
 			}
 			PG_CATCH();
 			{
@@ -699,7 +770,7 @@ pgstrom_shmem_block_info(PG_FUNCTION_ARGS)
 			PG_END_TRY();
 			SpinLockRelease(&zone->lock);
 		}
-		fncxt->user_fctx = temp;
+			fncxt->user_fctx = block_info_list;
 
 		MemoryContextSwitchTo(oldcxt);
 	}
@@ -715,13 +786,13 @@ pgstrom_shmem_block_info(PG_FUNCTION_ARGS)
 	values[0] = Int32GetDatum(block_info->zone);
 	shift = block_info->shift + SHMEM_BLOCKSZ_BITS;
 	if (shift < 20)
-		snprintf(buf, sizeof(buf), "%zuKb", 1UL << (shift - 10));
+		snprintf(buf, sizeof(buf), "%zuK", 1UL << (shift - 10));
 	else if (shift < 30)
-		snprintf(buf, sizeof(buf), "%zuMb", 1UL << (shift - 20));
+		snprintf(buf, sizeof(buf), "%zuM", 1UL << (shift - 20));
 	else if (shift < 40)
-		snprintf(buf, sizeof(buf), "%zuGb", 1UL << (shift - 30));
+		snprintf(buf, sizeof(buf), "%zuG", 1UL << (shift - 30));
 	else
-		snprintf(buf, sizeof(buf), "%zuTb", 1UL << (shift - 40));
+		snprintf(buf, sizeof(buf), "%zuT", 1UL << (shift - 40));
 	values[1] = CStringGetTextDatum(buf);
 	values[2] = Int64GetDatum(block_info->num_active);
 	values[3] = Int64GetDatum(block_info->num_free);
@@ -872,7 +943,6 @@ construct_shmem_top_context(const char *name, shmem_zone *zone)
 		offsetof(shmem_chunk, userdata[0]) +
 		offsetof(shmem_context, name[name_len + 1]);
 	context = (shmem_context *)chunk1->userdata;
-	elog(LOG, "chunk1 = %p size = %lu", chunk1, chunk1->active.size);
 	dlist_push_tail(&bunch->chunk_list, &chunk1->chunk_chain);
 
 	/* 2nd free chunk */
@@ -880,7 +950,6 @@ construct_shmem_top_context(const char *name, shmem_zone *zone)
 		((char *)chunk1 + MAXALIGN(chunk1->active.size + sizeof(uint32)));
 	dlist_push_tail(&bunch->free_list, &chunk2->free_chain);
 	dlist_push_tail(&bunch->chunk_list, &chunk2->chunk_chain);
-	elog(LOG, "chunk2 = %p len = %lu", chunk2, (char *)chunk2 - (char *)chunk1);
 
 	/* End of bunch marker */
 	dnode = (dlist_node *)
@@ -986,6 +1055,10 @@ pgstrom_setup_shmem(Size zone_length,
 			else if (shift > 0)
 				shift--;
 		}
+		/* per zone initialization */
+		(*callback)(zone->block_baseaddr,
+					zone->num_blocks * SHMEM_BLOCKSZ, 
+					callback_private);
 		/* put zone on the pgstrom_shmem_head */
 		pgstrom_shmem_head->zones[zone_index] = zone;
 		offset += length;
