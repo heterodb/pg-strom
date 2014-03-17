@@ -87,10 +87,58 @@ typedef struct
 	shmem_zone *zones[FLEXIBLE_ARRAY_MEMBER];
 } shmem_head;
 
-
+/*
+ * shmem_context / shmem_bunch / shmem_chunk
+ *
+ * It is a mechanism to allocate smaller fraction of shared memory than
+ * SHMEM_BLOCKSZ. A shmem_context is a set of shmem_bunch that can contain
+ * multiple shmem_chunk objects.
+ * The shmem_bunch is assigned on the head of blocks, and assigned a certain
+ * shmem_context being linked to context->block_list. It shall be allocated
+ * as the following diagram.
+ * 
+ * shmem_bunch
+ * +-----------------------+
+ * |                       |
+ * |  [shmem_bunch]        |
+ * |                       |
+ * +-----------------------+ <-- &bunch->first_chain
+ * |  [shmem_chunk]        |
+ * |   chunk_chain      O------+
+ * |   free_fain / active  |   | dual linked list towards the neighbor's chunk
+ * |   userdata[]          |   |
+ * |       :               |   |
+ * |       :               |   |
+ * |   magic(uint32)       |   |
+ * +-----------------------+   |
+ * |  [shmem_chunk]        |   |
+ * |   chunk_chain      <------+
+ * |   free_fain / active  |
+ * |   userdata[]          |
+ * |       :               |
+ * |       :               |
+ * |   magic(uint32)       |
+ * +-----------------------+
+ * |                       |
+ * /                       /   :
+ * /                       /   :
+ * |                       |   |
+ * |   magic(uint32)       |   |
+ * +-----------------------+   |
+ * |   dlist_node       <------+ terminator of the dual linked list.
+ * +-----------------------+
+ *
+ * The chunk_chain of shmem_chunk is a dual linked list, so it allows to walk on
+ * the chunks being located on the neighbor. A dlist_node is put on the end of
+ * shmem_bunch block, so you can check termination of shmem_chunk chain using
+ * dlist_has_next().
+ * If allocation request is enough small towards the size of free chunk,
+ * allocator will split a free chunk into two chunks; one for active, and the
+ * remaining one for still free.
+ */
 typedef struct shmem_context
 {
-	dlist_node	chain;		/* to be lined shmem_head->context_list */
+	dlist_node	chain;		/* to be linked shmem_head->context_list */
 
 	pid_t		owner;
 	slock_t		lock;
@@ -99,7 +147,7 @@ typedef struct shmem_context
 	long		num_blocks;
 	long		num_chunks;
 	char		md5[16];
-	char		name[FLEXIBLE_ARRAY_MEMBER];
+	char		name[NAMEDATALEN];
 } shmem_context;
 
 typedef struct
@@ -209,11 +257,11 @@ shmem_context *
 pgstrom_shmem_context_create(const char *name)
 {
 	shmem_context  *context;
-	int		namelen = strlen(name);
 
-	context = pgstrom_shmem_alloc(TopShmemContext,
-								  offsetof(shmem_context,
-										   name[namelen+1]));
+	if (strlen(name) >= NAMEDATALEN - 1)
+		return NULL;	/* name too long */
+
+	context = pgstrom_shmem_alloc(TopShmemContext, sizeof(shmem_context));
 	if (!context)
 		return NULL;
 
@@ -276,8 +324,8 @@ pgstrom_shmem_alloc(shmem_context *context, Size size)
 	int			shift;
 	void	   *address = NULL;
 
-	required = MAXALIGN(offsetof(shmem_chunk, userdata[0]) +
-						size + sizeof(uint32));
+	required = MAXALIGN(offsetof(shmem_chunk, userdata[size + sizeof(uint32)]));
+
 	SpinLockAcquire(&context->lock);
 	while (true)
 	{
@@ -308,13 +356,14 @@ pgstrom_shmem_alloc(shmem_context *context, Size size)
 				/* is this free chunk has enough space to store it? */
 				if (required > chunk_len)
 					continue;
+
 				/*
-				 * split this chunk, if it has enough space to store.
-				 * "NAMEDATALEN" is just a threshold to avoid too small free
-				 * chunk that shall not be able to allocate any more
+				 * Split this chunk, if the later portion has enough space to
+				 * perform as a free chunk being longer than "NAMEDATALEN" just
+				 * for threshold to avoid too small fraction.
 				 */
-				padding = MAXALIGN(offsetof(shmem_chunk, userdata[0]) +
-								   NAMEDATALEN + sizeof(uint32));
+				padding = MAXALIGN(offsetof(shmem_chunk,
+											userdata[NAMEDATALEN + sizeof(uint32)]));
 				if (required + padding < chunk_len)
 				{
 					shmem_chunk	   *nchunk
@@ -323,6 +372,7 @@ pgstrom_shmem_alloc(shmem_context *context, Size size)
 									   &nchunk->chunk_chain);
 					dlist_insert_after(&chunk->free_chain,
 									   &nchunk->free_chain);
+					SHMEM_CHUNK_MAGIC(nchunk) = SHMCHUNK_MAGIC_FREE;
 					context->num_chunks++;
 				}
 				dlist_delete(&chunk->free_chain);
@@ -342,8 +392,10 @@ pgstrom_shmem_alloc(shmem_context *context, Size size)
 		/*
 		 * No free space in the existing blocks, so allocate a new one.
 		 */
-		bunch_len = (offsetof(shmem_bunch, first_chunk) +
-					 required + sizeof(dlist_node));
+		bunch_len = (offsetof(shmem_bunch, first_chunk) +			/* shmem_bunch */
+					 offsetof(shmem_chunk, userdata[required]) +	/* shmem_chunk */
+					 sizeof(uint32) +		/* SHMEM_CHUNK_MAGIC */
+					 sizeof(dlist_node));	/* terminator */
 		bunch = pgstrom_shmem_block_alloc(bunch_len);
 		if (!bunch)
 			goto out_unlock;
@@ -418,16 +470,16 @@ pgstrom_shmem_free(void *address)
 			chunk = dlist_container(shmem_chunk, chunk_chain, iter.cur);
 
 			if (chunk->userdata == address)
-			{
 				found = true;
-				break;
-			}
+			Assert(chunk->active.nullmark ?
+				   SHMEM_CHUNK_MAGIC(chunk) == SHMCHUNK_MAGIC_FREE :
+				   SHMEM_CHUNK_MAGIC(chunk) == SHMCHUNK_MAGIC_ACTIVE);
 		}
 		Assert(found);
 	} while(0);
 #endif
-	chunk = (shmem_chunk *)((Size)address -
-							offsetof(shmem_chunk, userdata[0]));
+	chunk = (shmem_chunk *)((Size)address - offsetof(shmem_chunk,
+													 userdata[0]));
 	/* adjust statistics */
 	dnode = dlist_next_node(&bunch->chunk_list,
 							&chunk->chunk_chain);
@@ -452,6 +504,7 @@ pgstrom_shmem_free(void *address)
 
 	/*
 	 * merge with next chunk, if it is also free.
+	 * note that we need to confirm the dnode is not terminator of bunch
 	 */
 	dnode = dlist_next_node(&bunch->chunk_list, &chunk->chunk_chain);
 	if (dlist_has_next(&bunch->chunk_list, dnode))
@@ -575,6 +628,14 @@ pgstrom_shmem_zone_block_free(shmem_zone *zone, void *address)
 	dlist_push_head(&zone->free_list[shift], &block->chain);
 }
 
+/*
+ * pgstrom_shmem_block_alloc
+ *
+ * It is an internal API; that allocates a continuous 2^N blocks from a particular
+ * shared memory zone. It tries to split a larger memory blocks if suitable memory
+ * blocks are not free. If no memory blocks are available, it goes into another
+ * zone to allocate memory.
+ */
 static void *
 pgstrom_shmem_block_alloc(Size size)
 {
@@ -631,6 +692,13 @@ pgstrom_shmem_block_free(void *address)
 	SpinLockRelease(&zone->lock);
 }
 
+/*
+ * collect_shmem_block_info
+ *
+ * It collects statistical information of shared memory zone.
+ * Note that it does not trust statistical values if debug build, thus it may
+ * take longer time because of walking of shared memory zone.
+ */
 typedef struct
 {
 	int		zone;
@@ -1160,12 +1228,13 @@ pgstrom_get_device_info(int index)
 	return pgstrom_shmem_head->device_info[index];
 }
 
-#define DEVINFO_SHIFT(dest,src,field)						\
+#define PLDEVINFO_SHIFT(dest,src,field)						\
 	(dest)->field = (char *)(dest) + ((src)->field - (char *)(src))
 
 void
 pgstrom_register_device_info(List *dev_list)
 {
+	pgstrom_platform_info  *pl_info;
 	pgstrom_device_info **dev_array;
 	ListCell   *cell;
 	Size		length;
@@ -1174,6 +1243,20 @@ pgstrom_register_device_info(List *dev_list)
 	Assert(pgstrom_shmem_head->device_num == 0);
 	Assert(TopShmemContext != NULL);
 
+	/* copy platform info into shared memory segment */
+	pl_info = ((pgstrom_platform_info *) linitial(dev_list))->pl_info;
+	length = offsetof(pgstrom_platform_info, buffer[pl_info->buflen]);
+	pl_info_sh = pgstrom_shmem_alloc(TopShmemContext, length);
+	if (!pl_info_sh)
+		elog(ERROR, "out of shared memory");
+	memcpy(pl_info_sh, pl_info, length);
+	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_profile);
+	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_version);
+	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_name);
+	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_vendor);
+	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_extensions);
+
+	/* copy device info into shared memory segment */
 	length = sizeof(pgstrom_device_info *) * list_length(dev_list);
 	dev_array = pgstrom_shmem_alloc(TopShmemContext, length);
 	if (!dev_array)
@@ -1191,19 +1274,15 @@ pgstrom_register_device_info(List *dev_list)
 			elog(ERROR, "out of shared memory");
 		memcpy(dest, dev_info, length);
 
-		/* cstring fields needs to be adjusted */
-		DEVINFO_SHIFT(dest, dev_info, pl_profile);
-		DEVINFO_SHIFT(dest, dev_info, pl_version);
-		DEVINFO_SHIFT(dest, dev_info, pl_name);
-		DEVINFO_SHIFT(dest, dev_info, pl_vendor);
-		DEVINFO_SHIFT(dest, dev_info, pl_extensions);
-		DEVINFO_SHIFT(dest, dev_info, dev_device_extensions);
-		DEVINFO_SHIFT(dest, dev_info, dev_name);
-		DEVINFO_SHIFT(dest, dev_info, dev_opencl_c_version);
-		DEVINFO_SHIFT(dest, dev_info, dev_profile);
-		DEVINFO_SHIFT(dest, dev_info, dev_vendor);
-		DEVINFO_SHIFT(dest, dev_info, dev_version);
-		DEVINFO_SHIFT(dest, dev_info, driver_version);
+		/* pointer adjustment */
+		dest->pl_info = pl_info_sh;
+		PLDEVINFO_SHIFT(dest, dev_info, dev_device_extensions);
+		PLDEVINFO_SHIFT(dest, dev_info, dev_name);
+		PLDEVINFO_SHIFT(dest, dev_info, dev_opencl_c_version);
+		PLDEVINFO_SHIFT(dest, dev_info, dev_profile);
+		PLDEVINFO_SHIFT(dest, dev_info, dev_vendor);
+		PLDEVINFO_SHIFT(dest, dev_info, dev_version);
+		PLDEVINFO_SHIFT(dest, dev_info, driver_version);
 
 		dev_array[index++] = dest;
 	}
@@ -1211,4 +1290,5 @@ pgstrom_register_device_info(List *dev_list)
 
 	pgstrom_shmem_head->device_info = dev_array;
 	pgstrom_shmem_head->device_num = index;
+	pg_memory_barrier();
 }

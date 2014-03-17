@@ -18,6 +18,7 @@
 #include "nodes/pg_list.h"
 #include "postmaster/bgworker.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/memutils.h"
 #include "pg_strom.h"
 #include <limits.h>
@@ -26,6 +27,7 @@
 
 /* flags set by signal handlers */
 static volatile sig_atomic_t got_signal = false;
+static int		opencl_platform_index;
 
 static void
 pgstrom_opencl_sigterm(SIGNAL_ARGS)
@@ -49,34 +51,22 @@ pgstrom_opencl_sighup(SIGNAL_ARGS)
 static void *
 on_shmem_zone_callback(void *address, Size length, void *cb_private)
 {
-	List	   *dev_list = cb_private;
-	ListCell   *cell;
-	int			n_devices = list_length(dev_list);
-	int			index = 0;
-	cl_mem	   *host_mems;
+	pgstrom_platform_info *pl_info = cb_private;
+	cl_mem		host_mem;
 	cl_int		rc;
 
-	host_mems = MemoryContextAllocZero(TopMemoryContext,
-								 sizeof(cl_mem) * n_devices);
-	index = 0;
-	foreach(cell, dev_list)
-	{
-		pgstrom_device_info	*devinfo = lfirst(cell);
-
-		host_mems[index] = clCreateBuffer(devinfo->context,
-										  CL_MEM_READ_WRITE |
-										  CL_MEM_USE_HOST_PTR,
-										  length,
-										  address,
-										  &rc);
-		if (rc != CL_SUCCESS)
-			elog(ERROR, "clCreateBuffer failed on host memory (%p-%p): %s",
-				 address, (char *)address + length - 1, opencl_strerror(rc));
-		index++;
-	}
+	host_mem = clCreateBuffer(pl_info->context,
+							  CL_MEM_READ_WRITE |
+							  CL_MEM_USE_HOST_PTR,
+							  length,
+							  address,
+							  &rc);
+	if (rc != CL_SUCCESS)
+		elog(ERROR, "clCreateBuffer failed on host memory (%p-%p): %s",
+			 address, (char *)address + length - 1, opencl_strerror(rc));
 	elog(LOG, "PG-Strom: zone %p-%p was mapped (len: %luMB)",
 		 address, (char *)address + length - 1, length >> 20);
-	return host_mems;
+	return host_mem;
 }
 
 static void
@@ -87,25 +77,22 @@ init_opencl_devices_and_shmem(void)
 	ListCell   *cell;
 	int			index = 0;
 
-	devList = pgstrom_collect_opencl_device_info();
+	devList = pgstrom_collect_opencl_device_info(opencl_platform_index);
+	if (devList == NIL)
+		elog(ERROR, "PG-Strom: unavailable to use any OpenCL devices");
+
 	foreach (cell, devList)
 	{
 		pgstrom_device_info	*devinfo = lfirst(cell);
 
-		elog(LOG, "PG-Strom: device[%d] %s (%uMHz x %uunits, %luMB)",
-			 index, devinfo->dev_name,
-			 devinfo->dev_max_clock_frequency,
-			 devinfo->dev_max_compute_units,
-			 devinfo->dev_global_mem_size >> 20);
-
 		if (zone_length > devinfo->dev_max_mem_alloc_size)
 			zone_length = devinfo->dev_max_mem_alloc_size;
-		index++;
+		pl_info = dev_info->pl_info;
 	}
 	elog(LOG, "PG-Strom: setting up shared memory (zone length=%zu)",
 		 zone_length);
-	pgstrom_setup_shmem(zone_length, on_shmem_zone_callback, devList);
-
+	pgstrom_setup_shmem(zone_length, on_shmem_zone_callback,
+						((pgstrom_platform_info *)linitial(devList))->pl_info);
 	pgstrom_register_device_info(devList);
 }
 
@@ -134,6 +121,18 @@ void
 pgstrom_init_opencl_server(void)
 {
 	BackgroundWorker	worker;
+
+	/* selection of opencl platform */
+	DefineCustomIntVariable("pgstrom.opencl_platform",
+							"selection of OpenCL platform to be used",
+							NULL,
+							&opencl_platform_index,
+							-1,		/* auto selection */
+							-1,
+							INT_MAX,
+							PGC_POSTMASTER,
+                            GUC_NOT_IN_SAMPLE,
+                            NULL, NULL, NULL);
 
 	/* launch a background worker process */	
 	memset(&worker, 0, sizeof(BackgroundWorker));

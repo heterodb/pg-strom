@@ -23,16 +23,16 @@
  * Registration of OpenCL device info.
  */
 #define CLPF_PARAM(param,field,is_cstring)								\
-	{ (param), sizeof(((pgstrom_device_info *) NULL)->field),			\
-	  offsetof(pgstrom_device_info, field), true,  (is_cstring) }
+	{ (param), sizeof(((pgstrom_platform_info *) NULL)->field),			\
+	  offsetof(pgstrom_platform_info, field), (is_cstring) }
 #define CLDEV_PARAM(param,field,is_cstring)								\
 	{ (param), sizeof(((pgstrom_device_info *) NULL)->field),			\
-	  offsetof(pgstrom_device_info, field), false, (is_cstring) }
+	  offsetof(pgstrom_device_info, field), (is_cstring) }
 
 static pgstrom_device_info *
-init_opencl_device_info(cl_platform_id platform_id, cl_device_id device_id)
+init_opencl_device_info(pgstrom_platform_info *pl_info, cl_device_id device_id)
 {
-	pgstrom_device_info *devinfo;
+	pgstrom_device_info *dev_info;
 	Size		offset = 0;
 	Size		buflen = 10240;
 	cl_int		i, rc;
@@ -40,14 +40,8 @@ init_opencl_device_info(cl_platform_id platform_id, cl_device_id device_id)
 		cl_uint		param;
 		size_t		size;
 		size_t		offset;
-		bool		is_platform;
 		bool		is_cstring;
 	} catalog[] = {
-		CLPF_PARAM(CL_PLATFORM_PROFILE, pl_profile, true),
-		CLPF_PARAM(CL_PLATFORM_VERSION, pl_version, true),
-		CLPF_PARAM(CL_PLATFORM_NAME, pl_name, true),
-		CLPF_PARAM(CL_PLATFORM_VENDOR, pl_vendor, true),
-		CLPF_PARAM(CL_PLATFORM_EXTENSIONS, pl_extensions, true),
 		CLDEV_PARAM(CL_DEVICE_ADDRESS_BITS,
 					dev_address_bits, false),
 		CLDEV_PARAM(CL_DEVICE_AVAILABLE,
@@ -148,19 +142,152 @@ init_opencl_device_info(cl_platform_id platform_id, cl_device_id device_id)
 					driver_version, true)
 	};
 
-	devinfo = palloc(offsetof(pgstrom_device_info, buffer[buflen]));
-	memset(devinfo, 0, sizeof(pgstrom_device_info));
+	dev_info = palloc(offsetof(pgstrom_device_info, buffer[buflen]));
+	memset(dev_info, 0, sizeof(pgstrom_device_info));
 
 	for (i=0; i < lengthof(catalog); i++)
 	{
 		size_t	param_size;
 		size_t	param_retsz;
-		void   *param_addr;
+		char   *param_addr;
 
 		if (!catalog[i].is_cstring)
 		{
 			param_size = catalog[i].size;
-			param_addr = (char *)devinfo + catalog[i].offset;
+			param_addr = (char *)dev_info + catalog[i].offset;
+		}
+		else
+		{
+			Assert(catalog[i].size == sizeof(char *));
+			param_size = buflen - offset;
+			param_addr = &dev_info->buffer[offset];
+		}
+
+		rc = clGetDeviceInfo(device_id,
+							 catalog[i].param,
+							 param_size,
+							 param_addr,
+							 &param_retsz);
+		if (rc != CL_SUCCESS)
+			elog(ERROR, "failed on clGetDeviceInfo (param=%d, %s)",
+				 catalog[i].param, opencl_strerror(rc));
+		Assert(param_size == param_retsz || catalog[i].is_cstring);
+
+		if (catalog[i].is_cstring)
+		{
+			param_addr[param_retsz] = '\0';
+			*((char **)((char *)dev_info + catalog[i].offset)) = param_addr;
+			offset += MAXALIGN(param_retsz);
+		}
+	}
+	dev_info->buflen = offset;
+
+	/*
+	 * Check device capability is enough to run PG-Strom
+	 */
+	if (strcmp(dev_info->dev_profile, "FULL_PROFILE") != 0)
+	{
+		elog(LOG, "Profile of OpenCL device \"%s\" is \"%s\", skipped",
+			 dev_info->dev_name, dev_info->dev_profile);
+		goto out_clean;
+	}
+	if ((dev_info->dev_type & (CL_DEVICE_TYPE_CPU |
+							   CL_DEVICE_TYPE_GPU |
+							   CL_DEVICE_TYPE_ACCELERATOR)) == 0)
+	{
+		elog(LOG, "Only CPU, GPU or Accelerator are supported, skipped");
+		goto out_clean;
+	}
+	if (!dev_info->dev_available)
+	{
+		elog(LOG, "OpenCL device \"%s\" is not available, skipped",
+			 dev_info->dev_name);
+		goto out_clean;
+	}
+	if (!dev_info->dev_compiler_available)
+	{
+		elog(LOG, "OpenCL compiler of device \"%s\" is not available, skipped",
+			 dev_info->dev_name);
+		goto out_clean;
+	}
+#ifdef WORDS_BIGENDIAN
+	if (dev_info->dev_endian_little)
+	{
+		elog(LOG, "OpenCL device \"%s\" has little endian, unlike host",
+			 dev_info->dev_name);
+		goto out_clean;
+	}
+#else
+	if (!dev_info->dev_endian_little)
+	{
+		elog(LOG, "OpenCL device \"%s\" has big endian, unlike host",
+			 dev_info->dev_name);
+		goto out_clean;
+	}
+#endif
+	if (sscanf(dev_info->dev_opencl_c_version, "OpenCL C %d.%d ",
+			   &major, &minor) != 2 ||
+		major < 1 || (major == 1 && minor < 1))
+	{
+		elog(LOG, "OpenCL C version of \"%s\"is too old \"%s\", skipped",
+			 dev_info->dev_name, dev_info->dev_opencl_c_version);
+		goto out_clean;
+	}
+
+	if (dev_info->dev_max_work_item_dimensions != 3)
+	{
+		elog(LOG, "OpenCL device \"%s\" has work item dimensions larger than 3, skipped",
+			dev_info->dev_name);
+		goto out_clean;
+	}
+	dev_info->pl_info = pl_info;
+	dev_info->device_id = device_id;
+
+	return dev_info;
+
+out_clean:
+	pfree(dev_info);
+	return NULL;
+}
+
+static List *
+init_opencl_platform_info(cl_platform_id platform_id)
+{
+	pgstrom_platform_info *pl_info;
+	cl_device_id device_ids[128];
+	cl_uint		n_device;
+	Size		offset = 0;
+	Size		buflen = 10240;
+	cl_int		i, rc;
+	int			major, minor;
+	List	   *result = NIL;
+	static struct {
+		cl_uint		param;
+		size_t		size;
+		size_t		offset;
+		bool		is_cstring;
+	} catalog[] = {
+		CLPF_PARAM(CL_PLATFORM_PROFILE, pl_profile, true),
+        CLPF_PARAM(CL_PLATFORM_VERSION, pl_version, true),
+        CLPF_PARAM(CL_PLATFORM_NAME, pl_name, true),
+        CLPF_PARAM(CL_PLATFORM_VENDOR, pl_vendor, true),
+        CLPF_PARAM(CL_PLATFORM_EXTENSIONS, pl_extensions, true),
+	};
+
+	pl_info = palloc(offsetof(pgstrom_platform_info, buffer[buflen]));
+	memset(pl_info, 0, sizeof(pgstrom_platform_info));
+
+	/* collect platform properties */
+	for (i=0; i < lengthof(catalog); i++)
+	{
+		size_t	param_size;
+		size_t	param_retsz;
+		char   *param_addr;
+
+		if (!catalog[i].is_cstring)
+		{
+			param_size = catalog[i].size;
+			param_addr = (char *)pl_info + catalog[i].offset;
 		}
 		else
 		{
@@ -169,121 +296,40 @@ init_opencl_device_info(cl_platform_id platform_id, cl_device_id device_id)
 			param_addr = &devinfo->buffer[offset];
 		}
 
-		if (catalog[i].is_platform)
-		{
-			rc = clGetPlatformInfo(platform_id,
-								   catalog[i].param,
-								   param_size,
-								   param_addr,
-								   &param_retsz);
-			if (rc != CL_SUCCESS)
-				elog(ERROR, "failed on clGetPlatformInfo (param=%d, %s)",
-					 catalog[i].param, opencl_strerror(rc));
-			Assert(param_size == param_retsz || catalog[i].is_cstring);
-		}
-		else
-		{
-			rc = clGetDeviceInfo(device_id,
-								 catalog[i].param,
-								 param_size,
-								 param_addr,
-								 &param_retsz);
-			if (rc != CL_SUCCESS)
-				elog(ERROR, "failed on clGetDeviceInfo (param=%d, %s)",
-					 catalog[i].param, opencl_strerror(rc));
-			Assert(param_size == param_retsz || catalog[i].is_cstring);
-		}
+		rc = clGetPlatformInfo(platform_id,
+							   catalog[i].param,
+							   param_size,
+							   param_addr,
+							   &param_retsz);
+		if (rc != CL_SUCCESS)
+			elog(ERROR, "failed on clGetPlatformInfo (param=%d, %s)",
+				 catalog[i].param, opencl_strerror(rc));
+		Assert(param_size == param_retsz || catalog[i].is_cstring);
 
 		if (catalog[i].is_cstring)
 		{
-			((char *)param_addr)[param_retsz] = '\0';
-			*((char **)((char *)devinfo + catalog[i].offset))
-				= &devinfo->buffer[offset];
+			param_addr[param_retsz] = '\0';
+			*((char **)((char *)pl_info + catalog[i].offset)) = param_addr;
 			offset += MAXALIGN(param_retsz);
 		}
 	}
-	devinfo->buflen = offset;
+	pl_info->buflen = offset;
+	pl_info->platform_id = platform_id;
 
-	/*
-	 * Check whether the detected device has enough capability we expect
-	 */
-	if (strcmp(devinfo->pl_profile, "FULL_PROFILE") != 0)
+	if (strcmp(pl_info->pl_name, "FULL_PROFILE") != 0)
 	{
 		elog(LOG, "Profile of OpenCL driver \"%s\" is \"%s\", skipped",
-			 devinfo->pl_name, devinfo->pl_profile);
+			 pl_info->pl_name, pl_info->pl_profile);
 		goto out_clean;
 	}
-	if (!strstr(devinfo->pl_extensions, "cl_khr_icd"))
-	{
-		elog(LOG, "OpenCL driver \"%s\" does not support \"cl_khr_icd\" extension to control multiple drivers (extensions: %s), skipped",
-			 devinfo->pl_name, devinfo->pl_extensions);
-		goto out_clean;
-	}
-	if (strcmp(devinfo->dev_profile, "FULL_PROFILE") != 0)
-	{
-		elog(LOG, "Profile of OpenCL device \"%s\" is \"%s\", skipped",
-			 devinfo->dev_name, devinfo->dev_profile);
-		goto out_clean;
-	}
-	if ((devinfo->dev_type & (CL_DEVICE_TYPE_CPU |
-							  CL_DEVICE_TYPE_GPU |
-							  CL_DEVICE_TYPE_ACCELERATOR)) == 0)
-	{
-		elog(LOG, "Only CPU, GPU or Accelerator are supported, skipped");
-		goto out_clean;
-	}
-	if (!devinfo->dev_available)
-	{
-		elog(LOG, "OpenCL device \"%s\" is not available, skipped",
-			 devinfo->dev_name);
-		goto out_clean;
-	}
-	if (!devinfo->dev_compiler_available)
-	{
-		elog(LOG, "OpenCL compiler of device \"%s\" is not available, skipped",
-			 devinfo->dev_name);
-		goto out_clean;
-	}
-#ifdef WORDS_BIGENDIAN
-	if (devinfo->dev_endian_little)
-	{
-		elog(LOG, "OpenCL device \"%s\" has little endian, unlike host",
-			 devinfo->dev_name);
-		goto out_clean;
-	}
-#else
-	if (!devinfo->dev_endian_little)
-	{
-		elog(LOG, "OpenCL device \"%s\" has big endian, unlike host",
-			 devinfo->dev_name);
-		goto out_clean;
-	}
-#endif
-	if (devinfo->dev_max_work_item_dimensions != 3)
-	{
-		elog(LOG, "OpenCL device \"%s\" has work item dimensions larger than 3, skipped",
-			devinfo->dev_name);
-		goto out_clean;
-	}
-	devinfo->platform_id = platform_id;
-	devinfo->device_id = device_id;
 
-	return devinfo;
-
-out_clean:
-	pfree(devinfo);
-	return NULL;
-}
-
-static List *
-init_opencl_platform_info(cl_platform_id platform_id)
-{
-	pgstrom_device_info *devinfo;
-	cl_device_id	device_ids[128];
-	cl_context		context;
-	cl_uint			n_device;
-	cl_int			i, rc;
-	List		   *result = NIL;
+	if (sscanf(pl_info->pl_version, "OpenCL %d.%d ", &major, &minor) != 2 ||
+		major < 1 || (major == 1 && minor < 1))
+	{
+		elog(LOG, "OpenCL version of \"%s\" is too old \"%s\", skipped",
+			 pl_info->pl_version);
+		goto out_clean;
+	}
 
 	rc = clGetDeviceIDs(platform_id,
 						CL_DEVICE_TYPE_DEFAULT,
@@ -293,36 +339,20 @@ init_opencl_platform_info(cl_platform_id platform_id)
 	if (rc != CL_SUCCESS)
 		elog(ERROR, "clGetDeviceIDs failed (%s)", opencl_strerror(rc));
 
-	context = clCreateContext(NULL,
-							  n_device,
-							  device_ids,
-							  NULL,
-							  NULL,
-							  &rc);
-	if (rc != CL_SUCCESS)
-		elog(ERROR, "clCreateContext failed: %s", opencl_strerror(rc));
-
 	for (i=0; i < n_device; i++)
 	{
-		devinfo = init_opencl_device_info(platform_id, device_ids[i]);
+		pgstrom_device_info	   *devinfo
+			= init_opencl_device_info(pl_info, device_ids[i]);
 
 		if (devinfo)
-		{
-			rc = clRetainContext(context);
-			if (rc != CL_SUCCESS)
-				elog(ERROR, "clRetainContext failed: %s", opencl_strerror(rc));
-
-			Assert(rc == CL_SUCCESS);
-			devinfo->context = context;
-
 			result = lappend(result, devinfo);
-		}
 	}
-	rc = clReleaseContext(context);
-	if (rc != CL_SUCCESS)
-		elog(ERROR, "clReleaseContext failed: %s", opencl_strerror(rc));
+	if (result != NIL)
+		return result;
 
-	return result;
+out_clean:
+	pfree(pl_info);
+	return NIL;
 }
 
 /*
@@ -332,12 +362,14 @@ init_opencl_platform_info(cl_platform_id platform_id)
  * by the OpenCL management worker process, prior to any other backends.
  */
 List *
-pgstrom_collect_opencl_device_info(void)
+pgstrom_collect_opencl_device_info(int pl_index)
 {
 	cl_platform_id	platforms[32];
 	cl_uint			n_platform;
 	cl_int			i, rc;
+	int				score_max = -1;
 	List		   *result = NIL;
+	ListCell	   *cell;
 
 	rc = clGetPlatformIDs(lengthof(platforms),
 						  platforms,
@@ -347,10 +379,90 @@ pgstrom_collect_opencl_device_info(void)
 
 	for (i=0; i < n_platform; i++)
 	{
-		List   *temp
-			= init_opencl_platform_info(platforms[i]);
+		pgstrom_platform_info  *pl_info;
+		pgstrom_device_info	   *dev_info;
+		List	   *temp;
+		int			score = 0;
 
-		result = list_concat(result, temp);
+		temp = init_opencl_platform_info(platforms[i]);
+		if (temp == NIL)
+			continue;
+
+		dev_info = linitial(temp);
+		pl_info = dev_info->pl_info;
+		
+		elog(LOG, "PG-Strom: [%d] OpenCL Platform - \"%s\"", i, pl_info->pl_name);
+		if (pl_index < 0)
+		{
+			int		score = 0;
+
+			foreach (cell, temp)
+			{
+				dev_info = lfirst(cell);
+
+				score += (dev_info->dev_max_compute_units *
+						  dev_info->dev_max_clock_frequency *
+						  (dev_info->dev_type & CL_DEVICE_TYPE_GPU != 0 ? 32 : 1));
+			}
+			if (score > score_max)
+			{
+				score_max = score;
+				result = temp;
+			}
+		}
+		else if (pl_index == i)
+			result = temp;
+
+		/* shows device properties */
+		foreach (cell, temp)
+		{
+			elog(LOG, "PG-Strom: %c device %s (%uMHz x %uunits, %luMB)"
+				 cell != llast(temp) ? '+' : '`',
+				 devinfo->dev_name,
+                 devinfo->dev_max_clock_frequency,
+                 devinfo->dev_max_compute_units,
+                 devinfo->dev_global_mem_size >> 20);
+		}
+	}
+
+	if (result != NIL)
+	{
+		cl_device_id   *devices = alloca(list_length(result));
+		cl_context		context;
+		cl_context_properties properties[2];
+
+		/*
+		 * Create an OpenCL context
+		 */
+		i = 0;
+		foreach (cell, result)
+		{
+			pgstrom_device_info	   *dev_info = lfirst(cell);
+			devices[i++] = dev_info->device_id;
+		}
+		context = clCreateContext(i, devices, NULL, NULL, &rc);
+		if (rc != CL_SUCCESS)
+			elog(ERROR, "clCreateContext failed: %s", opencl_strerror(rc));
+
+		/*
+		 * Create an OpenCL command queue for each device
+		 */
+		foreach (cell, result)
+		{
+			pgstrom_device_info	   *dev_info = lfirst(cell);
+			pgstrom_platform_info  *pl_info = dev_info->pl_info;
+
+			pl_info->context = context;
+			dev_info->cmdq =
+				clCreateCommandQueue(context,
+									 dev_info->device_id,
+									 CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE |
+									 CL_QUEUE_PROFILING_ENABLE,
+									 &rc);
+			if (rc != CL_SUCCESS)
+				elog(ERROR, "clCreateCommandQueue failed on \"%s\": %s",
+					 dev_info->dev_name, opencl_strerror(rc));
+		}
 	}
 	return result;
 }

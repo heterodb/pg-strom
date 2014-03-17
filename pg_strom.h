@@ -35,17 +35,23 @@
  * parameter name appeared in 1.2.
  */
 typedef struct {
-	/* Platform properties */
-	cl_platform_id	platform_id;	/* valid only OpenCL server */
+	cl_platform_id platform_id;		/* valid only OpenCL server */
+	cl_context	context;			/* valid only OpenCL server */
 	cl_uint		pl_index;
 	char	   *pl_profile;
 	char	   *pl_version;
 	char	   *pl_name;
 	char	   *pl_vendor;
 	char	   *pl_extensions;
+	Size		buflen;
+	char		buffer[FLEXIBLE_ARRAY_MEMBER];
+} pgstrom_platform_info;
+
+typedef struct {
+	pgstrom_platform_info *pl_info;
 	/* Device properties */
 	cl_device_id	device_id;		/* valid only OpenCL server */
-	cl_context		context;		/* valid only OpenCL server */
+	cl_command_queue	cmdq;		/* valid only OpenCL server */
 	cl_uint		dev_address_bits;
 	cl_bool		dev_available;
 	cl_bool		dev_compiler_available;
