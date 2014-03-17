@@ -16,6 +16,7 @@
 #include "fmgr.h"
 #include "lib/ilist.h"
 #include "nodes/pg_list.h"
+#include <pthread.h>
 #include <CL/cl.h>
 
 #ifndef PG_USE_INLINE
@@ -100,7 +101,31 @@ typedef struct {
 
 
 
+typedef struct {
+	pthread_mutex_t	lock;
+	pthread_cond_t	cond;
+	dlist_head		qhead;
+	bool			closed;
+} pgstrom_queue;
 
+typedef struct {
+	int				type;
+	dlist_node		chain;
+	pgstrom_queue  *recvq;
+} pgstrom_queue_item;
+
+/*
+ * ipc.c
+ */
+extern bool pgstrom_queue_init(pgstrom_queue *queue);
+extern bool pgstrom_enqueue_item(pgstrom_queue *queue,
+								 pgstrom_queue_item *qitem);
+extern pgstrom_queue_item *pgstrom_dequeue_item(pgstrom_queue *queue);
+extern pgstrom_queue_item *pgstrom_try_dequeue(pgstrom_queue *queue);
+extern pgstrom_queue_item *pgstrom_dequeue_timeout(pgstrom_queue *queue,
+												   long wait_usec);
+extern void	pgstrom_close_queue(pgstrom_queue *queue);
+extern void	pgstrom_ipc_init(void);
 
 /*
  * opencl_devinfo.c

@@ -1,6 +1,6 @@
 # Makefile of pg_strom
 MODULE_big = pg_strom
-OBJS  = main.o shmem.o debug.o \
+OBJS  = main.o shmem.o mqueue.o debug.o \
 	opencl_entry.o opencl_serv.o opencl_devinfo.o
 
 EXTENSION = pg_strom

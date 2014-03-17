@@ -31,6 +31,9 @@ _PG_init(void)
 	/* load OpenCL runtime and initialize entrypoints */
 	pgstrom_init_opencl_entry();
 
+	/* preparation to use ipc objects */
+	pgstrom_init_ipc();
+
 	/* initialize shared memory segment and slab subsystem */
 	pgstrom_init_shmem();
 
