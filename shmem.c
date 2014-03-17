@@ -79,6 +79,9 @@ typedef struct
 	int			device_num;
 	pgstrom_device_info	**device_info;
 
+	/* for message queues */
+	shmem_context  *mqueue_context;
+
 	/* for zone management */
 	bool		is_ready;
 	int			num_zones;
@@ -1293,4 +1296,20 @@ pgstrom_register_device_info(List *dev_list)
 	pgstrom_shmem_head->device_info = dev_array;
 	pgstrom_shmem_head->device_num = index;
 	pg_memory_barrier();
+}
+
+/*
+ * shared facility for message queue
+ */
+shmem_context *
+pgstrom_get_mqueue_context(void)
+{
+	return pgstrom_shmem_head->mqueue_context;
+}
+
+void
+pgstrom_register_mqueue_context(shmem_context *context)
+{
+	Assert(pgstrom_shmem_head->mqueue_context == NULL);
+	pgstrom_shmem_head->mqueue_context = context;
 }

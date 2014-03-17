@@ -107,6 +107,9 @@ pgstrom_opencl_main(Datum main_arg)
 	/* initialize opencl devices and shared memory segment */
 	init_opencl_devices_and_shmem();
 
+	/* initialize message queue stuff */
+	pgstrom_setup_mqueue();
+
 	elog(LOG, "Starting PG-Strom OpenCL Server");
 
 	while (!got_signal)

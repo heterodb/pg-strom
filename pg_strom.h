@@ -107,6 +107,10 @@ typedef struct {
 
 
 
+
+/*
+ * mqueue.c
+ */
 typedef struct {
 	pthread_mutex_t	lock;
 	pthread_cond_t	cond;
@@ -121,10 +125,6 @@ typedef struct {
 	pgstrom_queue  *respq;	/* queue for response message */
 } pgstrom_message;
 
-/*
- * mqueue.c
- */
-extern void pgstrom_init_mqueue(void);
 extern pgstrom_queue *pgstrom_create_queue(bool persistent);
 extern bool pgstrom_enqueue_message(pgstrom_queue *queue,
 									pgstrom_message *message);
@@ -133,6 +133,9 @@ extern pgstrom_message *pgstrom_try_dequeue_message(pgstrom_queue *queue);
 extern pgstrom_message *pgstrom_dequeue_message_timeout(pgstrom_queue *queue,
 														long wait_usec);
 extern void pgstrom_close_queue(pgstrom_queue *queue);
+
+extern void pgstrom_setup_mqueue(void);
+extern void pgstrom_init_mqueue(void);
 
 /*
  * opencl_devinfo.c
@@ -185,6 +188,9 @@ extern Datum pgstrom_shmem_context_info(PG_FUNCTION_ARGS);
 extern int	pgstrom_get_device_nums(void);
 extern pgstrom_device_info *pgstrom_get_device_info(int index);
 extern void pgstrom_register_device_info(List *dev_list);
+
+extern shmem_context *pgstrom_get_mqueue_context(void);
+extern void pgstrom_register_mqueue_context(shmem_context *context);
 
 /*
  * debug.c
