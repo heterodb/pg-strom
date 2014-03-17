@@ -111,34 +111,35 @@ typedef struct {
 	pthread_mutex_t	lock;
 	pthread_cond_t	cond;
 	dlist_head		qhead;
+	int				refcnt;
 	bool			closed;
 } pgstrom_queue;
 
 typedef struct {
 	int				type;
 	dlist_node		chain;
-	pgstrom_queue  *recvq;
-} pgstrom_queue_item;
+	pgstrom_queue  *respq;	/* queue for response message */
+} pgstrom_message;
 
 /*
- * ipc.c
+ * mqueue.c
  */
-extern bool pgstrom_queue_init(pgstrom_queue *queue);
-extern bool pgstrom_enqueue_item(pgstrom_queue *queue,
-								 pgstrom_queue_item *qitem);
-extern pgstrom_queue_item *pgstrom_dequeue_item(pgstrom_queue *queue);
-extern pgstrom_queue_item *pgstrom_try_dequeue(pgstrom_queue *queue);
-extern pgstrom_queue_item *pgstrom_dequeue_timeout(pgstrom_queue *queue,
-												   long wait_usec);
-extern void	pgstrom_close_queue(pgstrom_queue *queue);
-extern void	pgstrom_ipc_init(void);
+extern void pgstrom_init_mqueue(void);
+extern pgstrom_queue *pgstrom_create_queue(bool persistent);
+extern bool pgstrom_enqueue_message(pgstrom_queue *queue,
+									pgstrom_message *message);
+extern pgstrom_message *pgstrom_dequeue_message(pgstrom_queue *queue);
+extern pgstrom_message *pgstrom_try_dequeue_message(pgstrom_queue *queue);
+extern pgstrom_message *pgstrom_dequeue_message_timeout(pgstrom_queue *queue,
+														long wait_usec);
+extern void pgstrom_close_queue(pgstrom_queue *queue);
 
 /*
  * opencl_devinfo.c
  */
 extern pgstrom_device_info *pgstrom_get_opencl_device_info(int index);
 extern int	pgstrom_get_opencl_device_num(void);
-extern List *pgstrom_collect_opencl_device_info(void);
+extern List *pgstrom_collect_opencl_device_info(int platform_index);
 
 /*
  * opencl_entry.c

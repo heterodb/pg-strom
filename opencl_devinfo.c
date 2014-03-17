@@ -36,6 +36,7 @@ init_opencl_device_info(pgstrom_platform_info *pl_info, cl_device_id device_id)
 	Size		offset = 0;
 	Size		buflen = 10240;
 	cl_int		i, rc;
+	int			major, minor;
 	static struct {
 		cl_uint		param;
 		size_t		size;
@@ -293,7 +294,7 @@ init_opencl_platform_info(cl_platform_id platform_id)
 		{
 			Assert(catalog[i].size == sizeof(char *));
 			param_size = buflen - offset;
-			param_addr = &devinfo->buffer[offset];
+			param_addr = &pl_info->buffer[offset];
 		}
 
 		rc = clGetPlatformInfo(platform_id,
@@ -316,7 +317,7 @@ init_opencl_platform_info(cl_platform_id platform_id)
 	pl_info->buflen = offset;
 	pl_info->platform_id = platform_id;
 
-	if (strcmp(pl_info->pl_name, "FULL_PROFILE") != 0)
+	if (strcmp(pl_info->pl_profile, "FULL_PROFILE") != 0)
 	{
 		elog(LOG, "Profile of OpenCL driver \"%s\" is \"%s\", skipped",
 			 pl_info->pl_name, pl_info->pl_profile);
@@ -327,7 +328,7 @@ init_opencl_platform_info(cl_platform_id platform_id)
 		major < 1 || (major == 1 && minor < 1))
 	{
 		elog(LOG, "OpenCL version of \"%s\" is too old \"%s\", skipped",
-			 pl_info->pl_version);
+			 pl_info->pl_name, pl_info->pl_version);
 		goto out_clean;
 	}
 
@@ -382,7 +383,6 @@ pgstrom_collect_opencl_device_info(int pl_index)
 		pgstrom_platform_info  *pl_info;
 		pgstrom_device_info	   *dev_info;
 		List	   *temp;
-		int			score = 0;
 
 		temp = init_opencl_platform_info(platforms[i]);
 		if (temp == NIL)
@@ -391,7 +391,7 @@ pgstrom_collect_opencl_device_info(int pl_index)
 		dev_info = linitial(temp);
 		pl_info = dev_info->pl_info;
 		
-		elog(LOG, "PG-Strom: [%d] OpenCL Platform - \"%s\"", i, pl_info->pl_name);
+		elog(LOG, "PG-Strom: [%d] OpenCL Platform: %s", i, pl_info->pl_name);
 		if (pl_index < 0)
 		{
 			int		score = 0;
@@ -400,10 +400,14 @@ pgstrom_collect_opencl_device_info(int pl_index)
 			{
 				dev_info = lfirst(cell);
 
-				score += (dev_info->dev_max_compute_units *
-						  dev_info->dev_max_clock_frequency *
-						  (dev_info->dev_type & CL_DEVICE_TYPE_GPU != 0 ? 32 : 1));
+				if ((dev_info->dev_type & CL_DEVICE_TYPE_GPU) != 0)
+					score += 32 * (dev_info->dev_max_compute_units *
+								   dev_info->dev_max_clock_frequency);
+				else
+					score += (dev_info->dev_max_compute_units *
+							  dev_info->dev_max_clock_frequency);
 			}
+
 			if (score > score_max)
 			{
 				score_max = score;
@@ -416,20 +420,28 @@ pgstrom_collect_opencl_device_info(int pl_index)
 		/* shows device properties */
 		foreach (cell, temp)
 		{
-			elog(LOG, "PG-Strom: %c device %s (%uMHz x %uunits, %luMB)"
-				 cell != llast(temp) ? '+' : '`',
-				 devinfo->dev_name,
-                 devinfo->dev_max_clock_frequency,
-                 devinfo->dev_max_compute_units,
-                 devinfo->dev_global_mem_size >> 20);
+			pgstrom_device_info	*dev_info = lfirst(cell);
+
+			elog(LOG, "PG-Strom:  + device %s (%uMHz x %uunits, %luMB)",
+				 dev_info->dev_name,
+                 dev_info->dev_max_clock_frequency,
+                 dev_info->dev_max_compute_units,
+                 dev_info->dev_global_mem_size >> 20);
 		}
+	}
+
+	/* show platform name if auto-selection */
+	if (pl_index < 0 && result != NIL)
+	{
+		pgstrom_platform_info *pl_info
+			= ((pgstrom_device_info *) linitial(result))->pl_info;
+		elog(LOG, "PG-Strom: auto platform selection: %s", pl_info->pl_name);
 	}
 
 	if (result != NIL)
 	{
 		cl_device_id   *devices = alloca(list_length(result));
 		cl_context		context;
-		cl_context_properties properties[2];
 
 		/*
 		 * Create an OpenCL context
@@ -440,7 +452,7 @@ pgstrom_collect_opencl_device_info(int pl_index)
 			pgstrom_device_info	   *dev_info = lfirst(cell);
 			devices[i++] = dev_info->device_id;
 		}
-		context = clCreateContext(i, devices, NULL, NULL, &rc);
+		context = clCreateContext(NULL, i, devices, NULL, NULL, &rc);
 		if (rc != CL_SUCCESS)
 			elog(ERROR, "clCreateContext failed: %s", opencl_strerror(rc));
 
@@ -505,7 +517,7 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 	HeapTuple	tuple;
 	uint32		dindex;
 	uint32		pindex;
-	pgstrom_device_info *devinfo;
+	pgstrom_device_info *dinfo;
 	const char *key;
 	const char *value;
 	char		buf[256];
@@ -542,78 +554,78 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 	if (dindex == pgstrom_get_device_nums())
 		SRF_RETURN_DONE(fncxt);
 
-	devinfo = pgstrom_get_device_info(dindex);
-	Assert(devinfo != NULL);
+	dinfo = pgstrom_get_device_info(dindex);
+	Assert(dinfo != NULL);
 
 	switch (pindex)
 	{
 		case 0:
 			key = "platform index";
-			value = psprintf("%u", devinfo->pl_index);
+			value = psprintf("%u", dinfo->pl_info->pl_index);
 			break;
 		case 1:
 			key = "platform profile";
-			value = devinfo->pl_profile;
+			value = dinfo->pl_info->pl_profile;
 			break;
 		case 2:
 			key = "platform version";
-			value = devinfo->pl_version;
+			value = dinfo->pl_info->pl_version;
 			break;
 		case 3:
 			key = "platform name";
-			value = devinfo->pl_name;
+			value = dinfo->pl_info->pl_name;
 			break;
 		case 4:
 			key = "platform vendor";
-			value = devinfo->pl_vendor;
+			value = dinfo->pl_info->pl_vendor;
 			break;
 		case 5:
 			key = "platform extensions";
-			value = devinfo->pl_extensions;
+			value = dinfo->pl_info->pl_extensions;
 			break;
 		case 6:
 			key = "address bits";
-			value = psprintf("%u", devinfo->dev_address_bits);
+			value = psprintf("%u", dinfo->dev_address_bits);
 			break;
 		case 7:
 			key = "device available";
-			value = devinfo->dev_available ? "yes" : "no";
+			value = dinfo->dev_available ? "yes" : "no";
 			break;
 		case 8:
 			key = "compiler available";
-			value = devinfo->dev_compiler_available ? "yes" : "no";
+			value = dinfo->dev_compiler_available ? "yes" : "no";
 			break;
 		case 9:
 			key = "double fp config";
-			value = fp_config_to_cstring(devinfo->dev_double_fp_config);
+			value = fp_config_to_cstring(dinfo->dev_double_fp_config);
 			break;
 		case 10:
 			key = "little endian";
-			value = devinfo->dev_endian_little ? "yes" : "no";
+			value = dinfo->dev_endian_little ? "yes" : "no";
 			break;
 		case 11:
 			key = "error correction support";
-			value = devinfo->dev_error_correction_support ? "yes" : "no";
+			value = dinfo->dev_error_correction_support ? "yes" : "no";
 			break;
 		case 12:
 			key = "execution capabilities";
-			if (devinfo->dev_execution_capabilities & CL_EXEC_KERNEL)
+			if (dinfo->dev_execution_capabilities & CL_EXEC_KERNEL)
 				ofs += sprintf(buf + ofs, "OpenCL");
-			if (devinfo->dev_execution_capabilities & CL_EXEC_NATIVE_KERNEL)
+			if (dinfo->dev_execution_capabilities & CL_EXEC_NATIVE_KERNEL)
 				ofs += sprintf(buf + ofs, "%sNative", ofs > 0 ? ", " : "");
 			value = buf;
 			break;
 		case 13:
 			key = "device extensions";
-			value = devinfo->dev_device_extensions;
+			value = dinfo->dev_device_extensions;
 			break;
 		case 14:
 			key = "global mem cache size";
-			value = psprintf("%lu", devinfo->dev_global_mem_cache_size);
+			value = psprintf("%lu", dinfo->dev_global_mem_cache_size);
 			break;
 		case 15:
 			key = "global mem cache type";
-			switch (devinfo->dev_global_mem_cache_type)
+			switch (dinfo->dev_global_mem_cache_type)
 			{
 				case CL_NONE:
 					value = "none";
@@ -631,23 +643,23 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 			break;
 		case 16:
 			key = "global mem cacheline size";
-			value = psprintf("%u", devinfo->dev_global_mem_cacheline_size);
+			value = psprintf("%u", dinfo->dev_global_mem_cacheline_size);
 			break;
 		case 17:
 			key = "global mem size";
-			value = psprintf("%lu", devinfo->dev_global_mem_size);
+			value = psprintf("%lu", dinfo->dev_global_mem_size);
 			break;
 		case 18:
 			key = "host unified memory";
-			value = devinfo->dev_host_unified_memory ? "yes" : "no";
+			value = dinfo->dev_host_unified_memory ? "yes" : "no";
 			break;
 		case 19:
 			key = "local mem size";
-			value = psprintf("%lu", devinfo->dev_local_mem_size);
+			value = psprintf("%lu", dinfo->dev_local_mem_size);
 			break;
 		case 20:
 			key = "local mem type";
-			switch (devinfo->dev_local_mem_type)
+			switch (dinfo->dev_local_mem_type)
 			{
 				case CL_LOCAL:
 					value = "local";
@@ -665,157 +677,157 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 			break;
 		case 21:
 			key = "max clock frequency";
-			value = psprintf("%u", devinfo->dev_max_clock_frequency);
+			value = psprintf("%u", dinfo->dev_max_clock_frequency);
 			break;
 		case 22:
 			key = "max compute units";
-			value = psprintf("%u", devinfo->dev_max_compute_units);
+			value = psprintf("%u", dinfo->dev_max_compute_units);
 			break;
 		case 23:
 			key = "max constant args";
-			value = psprintf("%u", devinfo->dev_max_constant_args);
+			value = psprintf("%u", dinfo->dev_max_constant_args);
 			break;
 		case 24:
 			key = "max constant buffer size";
-			value = psprintf("%lu", devinfo->dev_max_constant_buffer_size);
+			value = psprintf("%lu", dinfo->dev_max_constant_buffer_size);
 			break;
 		case 25:
 			key = "max mem alloc size";
-			value = psprintf("%lu", devinfo->dev_max_mem_alloc_size);
+			value = psprintf("%lu", dinfo->dev_max_mem_alloc_size);
 			break;
 		case 26:
 			key = "max parameter size";
-			value = psprintf("%lu", devinfo->dev_max_parameter_size);
+			value = psprintf("%lu", dinfo->dev_max_parameter_size);
 			break;
 		case 27:
 			key = "max samplers";
-			value = psprintf("%u", devinfo->dev_max_samplers);
+			value = psprintf("%u", dinfo->dev_max_samplers);
 			break;
 		case 28:
 			key = "max work group size";
-			value = psprintf("%zu", devinfo->dev_max_work_group_size);
+			value = psprintf("%zu", dinfo->dev_max_work_group_size);
 			break;
 		case 29:
 			key = "max work group dimensions";
-			value = psprintf("%u", devinfo->dev_max_work_item_dimensions);
+			value = psprintf("%u", dinfo->dev_max_work_item_dimensions);
 			break;
 		case 30:
 			key = "max work item sizes";
 			value = psprintf("{%zu, %zu, %zu}",
-							 devinfo->dev_max_work_item_sizes[0],
-							 devinfo->dev_max_work_item_sizes[1],
-							 devinfo->dev_max_work_item_sizes[2]);
+							 dinfo->dev_max_work_item_sizes[0],
+							 dinfo->dev_max_work_item_sizes[1],
+							 dinfo->dev_max_work_item_sizes[2]);
 			break;
 		case 31:
 			key = "mem base address align";
-			value = psprintf("%u", devinfo->dev_mem_base_addr_align);
+			value = psprintf("%u", dinfo->dev_mem_base_addr_align);
 			break;
 		case 32:
 			key = "device name";
-			value = devinfo->dev_name;
+			value = dinfo->dev_name;
 			break;
 		case 33:
 			key = "native vector width (char)";
-			value = psprintf("%u", devinfo->dev_native_vector_width_char);
+			value = psprintf("%u", dinfo->dev_native_vector_width_char);
 			break;
 		case 34:
 			key = "native vector width (short)";
-			value = psprintf("%u", devinfo->dev_native_vector_width_short);
+			value = psprintf("%u", dinfo->dev_native_vector_width_short);
 			break;
 		case 35:
 			key = "native vector width (int)";
-			value = psprintf("%u", devinfo->dev_native_vector_width_int);
+			value = psprintf("%u", dinfo->dev_native_vector_width_int);
 			break;
 		case 36:
 			key = "native vector width (long)";
-			value = psprintf("%u", devinfo->dev_native_vector_width_long);
+			value = psprintf("%u", dinfo->dev_native_vector_width_long);
 			break;
 		case 37:
 			key = "native vector width (float)";
-			value = psprintf("%u", devinfo->dev_native_vector_width_float);
+			value = psprintf("%u", dinfo->dev_native_vector_width_float);
 			break;
 		case 38:
 			key = "native vector width (double)";
-			value = psprintf("%u", devinfo->dev_native_vector_width_double);
+			value = psprintf("%u", dinfo->dev_native_vector_width_double);
 			break;
 		case 39:
 			key = "opencl c version";
-			value = devinfo->dev_opencl_c_version;
+			value = dinfo->dev_opencl_c_version;
 			break;
 		case 40:
 			key = "preferred vector width (char)";
-			value = psprintf("%u", devinfo->dev_preferred_vector_width_char);
+			value = psprintf("%u", dinfo->dev_preferred_vector_width_char);
 			break;
 		case 41:
 			key = "preferred vector width (short)";
-			value = psprintf("%u", devinfo->dev_preferred_vector_width_short);
+			value = psprintf("%u", dinfo->dev_preferred_vector_width_short);
 			break;
 		case 42:
 			key = "preferred vector width (int)";
-			value = psprintf("%u", devinfo->dev_preferred_vector_width_int);
+			value = psprintf("%u", dinfo->dev_preferred_vector_width_int);
 			break;
 		case 43:
 			key = "preferred vector width (long)";
-			value = psprintf("%u", devinfo->dev_preferred_vector_width_long);
+			value = psprintf("%u", dinfo->dev_preferred_vector_width_long);
 			break;
 		case 44:
 			key = "preferred vector width (float)";
-			value = psprintf("%u", devinfo->dev_preferred_vector_width_float);
+			value = psprintf("%u", dinfo->dev_preferred_vector_width_float);
 			break;
 		case 45:
 			key = "preferred vector width (double)";
-			value = psprintf("%u", devinfo->dev_preferred_vector_width_double);
+			value = psprintf("%u", dinfo->dev_preferred_vector_width_double);
 			break;
 		case 46:
 			key = "device profile";
-			value = devinfo->dev_profile;
+			value = dinfo->dev_profile;
 			break;
 		case 47:
 			key = "profiling timer resolution";
-			value = psprintf("%zu", devinfo->dev_profiling_timer_resolution);
+			value = psprintf("%zu", dinfo->dev_profiling_timer_resolution);
 			break;
 		case 48:
 			key = "command queue properties";
-			if (devinfo->dev_queue_properties &
+			if (dinfo->dev_queue_properties &
 				CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE)
 				ofs += sprintf(buf, "%sout of order", ofs > 0 ? ", " : "");
-			if (devinfo->dev_queue_properties & CL_QUEUE_PROFILING_ENABLE)
+			if (dinfo->dev_queue_properties & CL_QUEUE_PROFILING_ENABLE)
 				ofs += sprintf(buf, "%sprofiling", ofs > 0 ? ", " : "");
 			value = buf;
 			break;
 		case 49:
 			key = "single fp config";
-			value = fp_config_to_cstring(devinfo->dev_single_fp_config);
+			value = fp_config_to_cstring(dinfo->dev_single_fp_config);
 			break;
 		case 50:
 			key = "device type";
-			if (devinfo->dev_type & CL_DEVICE_TYPE_CPU)
+			if (dinfo->dev_type & CL_DEVICE_TYPE_CPU)
 				ofs += sprintf(buf, "%scpu", ofs > 0 ? ", " : "");
-			if (devinfo->dev_type & CL_DEVICE_TYPE_GPU)
+			if (dinfo->dev_type & CL_DEVICE_TYPE_GPU)
 				ofs += sprintf(buf, "%sgpu", ofs > 0 ? ", " : "");
-			if (devinfo->dev_type & CL_DEVICE_TYPE_ACCELERATOR)
+			if (dinfo->dev_type & CL_DEVICE_TYPE_ACCELERATOR)
 				ofs += sprintf(buf, "%saccelerator", ofs > 0 ? ", " : "");
-			if (devinfo->dev_type & CL_DEVICE_TYPE_DEFAULT)
+			if (dinfo->dev_type & CL_DEVICE_TYPE_DEFAULT)
 				ofs += sprintf(buf, "%sdefault", ofs > 0 ? ", " : "");
-			if (devinfo->dev_type & CL_DEVICE_TYPE_CUSTOM)
+			if (dinfo->dev_type & CL_DEVICE_TYPE_CUSTOM)
 				ofs += sprintf(buf, "%scustom", ofs > 0 ? ", " : "");
 			value = buf;
 			break;
 		case 51:
 			key = "device vendor";
-			value = devinfo->dev_vendor;
+			value = dinfo->dev_vendor;
 			break;
 		case 52:
 			key = "device vendor id";
-			value = psprintf("%u", devinfo->dev_vendor_id);
+			value = psprintf("%u", dinfo->dev_vendor_id);
 			break;
 		case 53:
 			key = "device version";
-			value = devinfo->dev_version;
+			value = dinfo->dev_version;
 			break;
 		case 54:
 			key = "driver version";
-			value = devinfo->driver_version;
+			value = dinfo->driver_version;
 			break;
 		default:
 			elog(ERROR, "unexpected property index");

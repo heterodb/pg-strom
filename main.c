@@ -32,7 +32,7 @@ _PG_init(void)
 	pgstrom_init_opencl_entry();
 
 	/* preparation to use ipc objects */
-	pgstrom_init_ipc();
+	//pgstrom_init_mqueue();
 
 	/* initialize shared memory segment and slab subsystem */
 	pgstrom_init_shmem();

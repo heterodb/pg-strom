@@ -75,7 +75,6 @@ init_opencl_devices_and_shmem(void)
 	Size		zone_length = LONG_MAX;
 	List	   *devList;
 	ListCell   *cell;
-	int			index = 0;
 
 	devList = pgstrom_collect_opencl_device_info(opencl_platform_index);
 	if (devList == NIL)
@@ -83,16 +82,15 @@ init_opencl_devices_and_shmem(void)
 
 	foreach (cell, devList)
 	{
-		pgstrom_device_info	*devinfo = lfirst(cell);
+		pgstrom_device_info	*dev_info = lfirst(cell);
 
-		if (zone_length > devinfo->dev_max_mem_alloc_size)
-			zone_length = devinfo->dev_max_mem_alloc_size;
-		pl_info = dev_info->pl_info;
+		if (zone_length > dev_info->dev_max_mem_alloc_size)
+			zone_length = dev_info->dev_max_mem_alloc_size;
 	}
 	elog(LOG, "PG-Strom: setting up shared memory (zone length=%zu)",
 		 zone_length);
 	pgstrom_setup_shmem(zone_length, on_shmem_zone_callback,
-						((pgstrom_platform_info *)linitial(devList))->pl_info);
+						((pgstrom_device_info *)linitial(devList))->pl_info);
 	pgstrom_register_device_info(devList);
 }
 

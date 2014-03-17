@@ -64,7 +64,7 @@ typedef struct
 	long		num_active[SHMEM_BLOCKSZ_BITS_RANGE + 1];
 	long		num_free[SHMEM_BLOCKSZ_BITS_RANGE + 1];
 	dlist_head	free_list[SHMEM_BLOCKSZ_BITS_RANGE + 1];
-	void	   *private;
+	void	   *private;		/* cl_mem being mapped (Only OpenCL server) */
 	void	   *block_baseaddr;
 	shmem_block	blocks[FLEXIBLE_ARRAY_MEMBER];
 } shmem_zone;
@@ -257,8 +257,9 @@ shmem_context *
 pgstrom_shmem_context_create(const char *name)
 {
 	shmem_context  *context;
+	Size			namelen = strlen(name);
 
-	if (strlen(name) >= NAMEDATALEN - 1)
+	if (namelen >= NAMEDATALEN - 1)
 		return NULL;	/* name too long */
 
 	context = pgstrom_shmem_alloc(TopShmemContext, sizeof(shmem_context));
@@ -1235,6 +1236,7 @@ void
 pgstrom_register_device_info(List *dev_list)
 {
 	pgstrom_platform_info  *pl_info;
+	pgstrom_platform_info  *pl_info_sh;
 	pgstrom_device_info **dev_array;
 	ListCell   *cell;
 	Size		length;
@@ -1244,7 +1246,7 @@ pgstrom_register_device_info(List *dev_list)
 	Assert(TopShmemContext != NULL);
 
 	/* copy platform info into shared memory segment */
-	pl_info = ((pgstrom_platform_info *) linitial(dev_list))->pl_info;
+	pl_info = ((pgstrom_device_info *) linitial(dev_list))->pl_info;
 	length = offsetof(pgstrom_platform_info, buffer[pl_info->buflen]);
 	pl_info_sh = pgstrom_shmem_alloc(TopShmemContext, length);
 	if (!pl_info_sh)
