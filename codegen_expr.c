@@ -52,13 +52,10 @@ static struct {
 	{ DATEOID,			"cl_int" },
 	{ TIMEOID,			"cl_long" },
 	{ TIMESTAMPOID,		"cl_long" },
-	{ ABSTIMEOID,		"cl_int" },
-	{ RELTIMEOID,		"cl_int" },
-	{ TIMESTAMPOID,		"cl_long" },
 	{ TIMESTAMPTZOID,	"cl_long" },
 
 	/* variable length datatypes */
-	{ CHAROID,			"varlena" },
+	{ BPCHAROID,		"varlena" },
 	{ VARCHAROID,		"varlena" },
 	{ NUMERICOID,		"varlena" },
 	{ BYTEAOID,			"varlena" },
@@ -147,45 +144,313 @@ typedef struct devfunc_info {
 	const char *func_implementation;
 } devfunc_info;
 
-static struct {
+typedef struct {
 	const char *func_name;
 	int			func_nargs;
 	Oid			func_argtypes[4];
 	const char *func_template;	/* a template string if simple function */
 	void	  (*func_callback)(devfunc_info *devfunc, Form_pg_proc proc);
-} devfunc_catalog[] = {
-	/*
-	 * Type case functions
-	 */
+} devfunc_catalog_t;
 
+devfunc_catalog_t devfunc_common_catalog[] = {
+	/* Type cast functions */
+	{ "int2", 1, {INT4OID}, "c:", NULL },
+	{ "int2", 1, {INT8OID}, "c:", NULL },
+	{ "int2", 1, {FLOAT4OID}, "c:", NULL },
+	{ "int2", 1, {FLOAT8OID}, "c:", NULL },
 
+	{ "int4", 1, {BOOLOID}, "c:", NULL },
+	{ "int4", 1, {INT2OID}, "c:", NULL },
+	{ "int4", 1, {INT8OID}, "c:", NULL },
+	{ "int4", 1, {FLOAT4OID}, "c:", NULL },
+	{ "int4", 1, {FLOAT8OID}, "c:", NULL },
+
+	{ "int8", 1, {INT2OID}, "c:", NULL },
+	{ "int8", 1, {INT4OID}, "c:", NULL },
+	{ "int8", 1, {FLOAT4OID}, "c:", NULL },
+	{ "int8", 1, {FLOAT8OID}, "c:", NULL },
+
+	{ "float4", 1, {INT2OID}, "c:", NULL },
+	{ "float4", 1, {INT4OID}, "c:", NULL },
+	{ "float4", 1, {INT8OID}, "c:", NULL },
+	{ "float4", 1, {FLOAT8OID}, "c:", NULL },
+
+	{ "float8", 1, {INT2OID}, "c:", NULL },
+	{ "float8", 1, {INT4OID}, "c:", NULL },
+	{ "float8", 1, {INT8OID}, "c:", NULL },
+	{ "float8", 1, {FLOAT4OID}, "c:", NULL },
 
 	/* '+' : add operators */
+	{ "int2pl",  2, {INT2OID, INT2OID}, "b:+", NULL },
+	{ "int24pl", 2, {INT2OID, INT4OID}, "b:+", NULL },
+	{ "int28pl", 2, {INT2OID, INT8OID}, "b:+", NULL },
+	{ "int42pl", 2, {INT4OID, INT2OID}, "b:+", NULL },
+	{ "int4pl",  2, {INT4OID, INT4OID}, "b:+", NULL },
+	{ "int48pl", 2, {INT4OID, INT8OID}, "b:+", NULL },
+	{ "int82pl", 2, {INT8OID, INT2OID}, "b:+", NULL },
+	{ "int84pl", 2, {INT8OID, INT4OID}, "b:+", NULL },
+	{ "int8pl",  2, {INT8OID, INT8OID}, "b:+", NULL },
+	{ "float4pl",  2, {FLOAT4OID, FLOAT4OID}, "b:+", NULL },
+	{ "float48pl", 2, {FLOAT4OID, FLOAT8OID}, "b:+", NULL },
+	{ "float84pl", 2, {FLOAT4OID, FLOAT4OID}, "b:+", NULL },
+	{ "float8pl",  2, {FLOAT8OID, FLOAT8OID}, "b:+", NULL },
+
 	/* '-' : subtract operators */
+	{ "int2mi",  2, {INT2OID, INT2OID}, "b:-", NULL },
+	{ "int24mi", 2, {INT2OID, INT4OID}, "b:-", NULL },
+	{ "int28mi", 2, {INT2OID, INT8OID}, "b:-", NULL },
+	{ "int42mi", 2, {INT4OID, INT2OID}, "b:-", NULL },
+	{ "int4mi",  2, {INT4OID, INT4OID}, "b:-", NULL },
+	{ "int48mi", 2, {INT4OID, INT8OID}, "b:-", NULL },
+	{ "int82mi", 2, {INT8OID, INT2OID}, "b:-", NULL },
+	{ "int84mi", 2, {INT8OID, INT4OID}, "b:-", NULL },
+	{ "int8mi",  2, {INT8OID, INT8OID}, "b:-", NULL },
+	{ "float4mi",  2, {FLOAT4OID, FLOAT4OID}, "b:-", NULL },
+	{ "float48mi", 2, {FLOAT4OID, FLOAT8OID}, "b:-", NULL },
+	{ "float84mi", 2, {FLOAT4OID, FLOAT4OID}, "b:-", NULL },
+	{ "float8mi",  2, {FLOAT8OID, FLOAT8OID}, "b:-", NULL },
+
 	/* '*' : mutiply operators */
+	{ "int2mul",  2, {INT2OID, INT2OID}, "b:*", NULL },
+	{ "int24mul", 2, {INT2OID, INT4OID}, "b:*", NULL },
+	{ "int28mul", 2, {INT2OID, INT8OID}, "b:*", NULL },
+	{ "int42mul", 2, {INT4OID, INT2OID}, "b:*", NULL },
+	{ "int4mul",  2, {INT4OID, INT4OID}, "b:*", NULL },
+	{ "int48mul", 2, {INT4OID, INT8OID}, "b:*", NULL },
+	{ "int82mul", 2, {INT8OID, INT2OID}, "b:*", NULL },
+	{ "int84mul", 2, {INT8OID, INT4OID}, "b:*", NULL },
+	{ "int8mul",  2, {INT8OID, INT8OID}, "b:*", NULL },
+	{ "float4mul",  2, {FLOAT4OID, FLOAT4OID}, "b:*", NULL },
+	{ "float48mul", 2, {FLOAT4OID, FLOAT8OID}, "b:*", NULL },
+	{ "float84mul", 2, {FLOAT4OID, FLOAT4OID}, "b:*", NULL },
+	{ "float8mul",  2, {FLOAT8OID, FLOAT8OID}, "b:*", NULL },
+
 	/* '/' : divide operators */
+	{ "int2div",  2, {INT2OID, INT2OID}, NULL, make_div_oper },
+	{ "int24div", 2, {INT2OID, INT4OID}, NULL, make_div_oper },
+	{ "int28div", 2, {INT2OID, INT8OID}, NULL, make_div_oper },
+	{ "int42div", 2, {INT4OID, INT2OID}, NULL, make_div_oper },
+	{ "int4div",  2, {INT4OID, INT4OID}, NULL, make_div_oper },
+	{ "int48div", 2, {INT4OID, INT8OID}, NULL, make_div_oper },
+	{ "int82div", 2, {INT8OID, INT2OID}, NULL, make_div_oper },
+	{ "int84div", 2, {INT8OID, INT4OID}, NULL, make_div_oper },
+	{ "int8div",  2, {INT8OID, INT8OID}, NULL, make_div_oper },
+	{ "float4div",  2, {FLOAT4OID, FLOAT4OID}, NULL, make_div_oper },
+	{ "float48div", 2, {FLOAT4OID, FLOAT8OID}, NULL, make_div_oper },
+	{ "float84div", 2, {FLOAT4OID, FLOAT4OID}, NULL, make_div_oper },
+	{ "float8div",  2, {FLOAT8OID, FLOAT8OID}, NULL, make_div_oper },
+
 	/* '%' : reminder operators */
+	{ "int2mod", 2, {INT2OID, INT2OID}, "b:%", NULL },
+	{ "int4mod", 2, {INT4OID, INT4OID}, "b:%", NULL },
+	{ "int8mod", 2, {INT8OID, INT8OID}, "b:%", NULL },
+
 	/* '+' : unary plus operators */
+	{ "int2up", 1, {INT2OID}, "l:+", NULL },
+	{ "int4up", 1, {INT4OID}, "l:+", NULL },
+	{ "int8up", 1, {INT8OID}, "l:+", NULL },
+	{ "float4up", 1, {FLOAT4OID}, "l:+", NULL },
+	{ "float8up", 1, {FLOAT8OID}, "l:+", NULL },
+
 	/* '-' : unary minus operators */
+	{ "int2mi", 1, {INT2OID}, "l:-", NULL },
+	{ "int4mi", 1, {INT4OID}, "l:-", NULL },
+	{ "int8mi", 1, {INT8OID}, "l:-", NULL },
+	{ "float4mi", 1, {FLOAT4OID}, "l:-", NULL },
+	{ "float8mi", 1, {FLOAT8OID}, "l:-", NULL },
+
 	/* '@' : absolute value operators */
+	{ "int2abs", 1, {INT2OID}, "f:abs", NULL },
+	{ "int4abs", 1, {INT4OID}, "f:abs", NULL },
+	{ "int8abs", 1, {INT8OID}, "f:abs", NULL },
+	{ "float4abs", 1, {FLOAT4OID}, "l:fabs", NULL },
+	{ "float8abs", 1, {FLOAT8OID}, "l:fabs", NULL },
+
 	/* '=' : equal operators */
+	{ "int2eq",  2, {INT2OID, INT2OID}, "b:==", NULL },
+	{ "int24eq", 2, {INT2OID, INT4OID}, "b:==", NULL },
+	{ "int28eq", 2, {INT2OID, INT8OID}, "b:==", NULL },
+	{ "int42eq", 2, {INT4OID, INT2OID}, "b:==", NULL },
+	{ "int4eq",  2, {INT4OID, INT4OID}, "b:==", NULL },
+	{ "int48eq", 2, {INT4OID, INT8OID}, "b:==", NULL },
+	{ "int82eq", 2, {INT8OID, INT2OID}, "b:==", NULL },
+	{ "int84eq", 2, {INT8OID, INT4OID}, "b:==", NULL },
+	{ "int8eq",  2, {INT8OID, INT8OID}, "b:==", NULL },
+	{ "float4eq",  2, {FLOAT4OID, FLOAT4OID}, "b:==", NULL },
+	{ "float48eq", 2, {FLOAT4OID, FLOAT8OID}, "b:==", NULL },
+	{ "float84eq", 2, {FLOAT4OID, FLOAT4OID}, "b:==", NULL },
+	{ "float8eq",  2, {FLOAT8OID, FLOAT8OID}, "b:==", NULL },
+
 	/* '<>' : not equal operators */
+	{ "int2ne",  2, {INT2OID, INT2OID}, "b:!=", NULL },
+	{ "int24ne", 2, {INT2OID, INT4OID}, "b:!=", NULL },
+	{ "int28ne", 2, {INT2OID, INT8OID}, "b:!=", NULL },
+	{ "int42ne", 2, {INT4OID, INT2OID}, "b:!=", NULL },
+	{ "int4ne",  2, {INT4OID, INT4OID}, "b:!=", NULL },
+	{ "int48ne", 2, {INT4OID, INT8OID}, "b:!=", NULL },
+	{ "int82ne", 2, {INT8OID, INT2OID}, "b:!=", NULL },
+	{ "int84ne", 2, {INT8OID, INT4OID}, "b:!=", NULL },
+	{ "int8ne",  2, {INT8OID, INT8OID}, "b:!=", NULL },
+	{ "float4ne",  2, {FLOAT4OID, FLOAT4OID}, "b:!=", NULL },
+	{ "float48ne", 2, {FLOAT4OID, FLOAT8OID}, "b:!=", NULL },
+	{ "float84ne", 2, {FLOAT4OID, FLOAT4OID}, "b:!=", NULL },
+	{ "float8ne",  2, {FLOAT8OID, FLOAT8OID}, "b:!=", NULL },
+
 	/* '>' : equal operators */
+	{ "int2gt",  2, {INT2OID, INT2OID}, "b:>", NULL },
+	{ "int24gt", 2, {INT2OID, INT4OID}, "b:>", NULL },
+	{ "int28gt", 2, {INT2OID, INT8OID}, "b:>", NULL },
+	{ "int42gt", 2, {INT4OID, INT2OID}, "b:>", NULL },
+	{ "int4gt",  2, {INT4OID, INT4OID}, "b:>", NULL },
+	{ "int48gt", 2, {INT4OID, INT8OID}, "b:>", NULL },
+	{ "int82gt", 2, {INT8OID, INT2OID}, "b:>", NULL },
+	{ "int84gt", 2, {INT8OID, INT4OID}, "b:>", NULL },
+	{ "int8gt",  2, {INT8OID, INT8OID}, "b:>", NULL },
+	{ "float4gt",  2, {FLOAT4OID, FLOAT4OID}, "b:>", NULL },
+	{ "float48gt", 2, {FLOAT4OID, FLOAT8OID}, "b:>", NULL },
+	{ "float84gt", 2, {FLOAT4OID, FLOAT4OID}, "b:>", NULL },
+	{ "float8gt",  2, {FLOAT8OID, FLOAT8OID}, "b:>", NULL },
+
 	/* '<' : equal operators */
+	{ "int2lt",  2, {INT2OID, INT2OID}, "b:<", NULL },
+	{ "int24lt", 2, {INT2OID, INT4OID}, "b:<", NULL },
+	{ "int28lt", 2, {INT2OID, INT8OID}, "b:<", NULL },
+	{ "int42lt", 2, {INT4OID, INT2OID}, "b:<", NULL },
+	{ "int4lt",  2, {INT4OID, INT4OID}, "b:<", NULL },
+	{ "int48lt", 2, {INT4OID, INT8OID}, "b:<", NULL },
+	{ "int82lt", 2, {INT8OID, INT2OID}, "b:<", NULL },
+	{ "int84lt", 2, {INT8OID, INT4OID}, "b:<", NULL },
+	{ "int8lt",  2, {INT8OID, INT8OID}, "b:<", NULL },
+	{ "float4lt",  2, {FLOAT4OID, FLOAT4OID}, "b:<", NULL },
+	{ "float48lt", 2, {FLOAT4OID, FLOAT8OID}, "b:<", NULL },
+	{ "float84lt", 2, {FLOAT4OID, FLOAT4OID}, "b:<", NULL },
+	{ "float8lt",  2, {FLOAT8OID, FLOAT8OID}, "b:<", NULL },
+
 	/* '>=' : relational greater-than or equal-to */
+	{ "int2ge",  2, {INT2OID, INT2OID}, "b:>=", NULL },
+	{ "int24ge", 2, {INT2OID, INT4OID}, "b:>=", NULL },
+	{ "int28ge", 2, {INT2OID, INT8OID}, "b:>=", NULL },
+	{ "int42ge", 2, {INT4OID, INT2OID}, "b:>=", NULL },
+	{ "int4ge",  2, {INT4OID, INT4OID}, "b:>=", NULL },
+	{ "int48ge", 2, {INT4OID, INT8OID}, "b:>=", NULL },
+	{ "int82ge", 2, {INT8OID, INT2OID}, "b:>=", NULL },
+	{ "int84ge", 2, {INT8OID, INT4OID}, "b:>=", NULL },
+	{ "int8ge",  2, {INT8OID, INT8OID}, "b:>=", NULL },
+	{ "float4ge",  2, {FLOAT4OID, FLOAT4OID}, "b:>=", NULL },
+	{ "float48ge", 2, {FLOAT4OID, FLOAT8OID}, "b:>=", NULL },
+	{ "float84ge", 2, {FLOAT4OID, FLOAT4OID}, "b:>=", NULL },
+	{ "float8ge",  2, {FLOAT8OID, FLOAT8OID}, "b:>=", NULL },
+
 	/* '<=' : relational greater-than or equal-to */
+	{ "int2le",  2, {INT2OID, INT2OID}, "b:<=", NULL },
+	{ "int24le", 2, {INT2OID, INT4OID}, "b:<=", NULL },
+	{ "int28le", 2, {INT2OID, INT8OID}, "b:<=", NULL },
+	{ "int42le", 2, {INT4OID, INT2OID}, "b:<=", NULL },
+	{ "int4le",  2, {INT4OID, INT4OID}, "b:<=", NULL },
+	{ "int48le", 2, {INT4OID, INT8OID}, "b:<=", NULL },
+	{ "int82le", 2, {INT8OID, INT2OID}, "b:<=", NULL },
+	{ "int84le", 2, {INT8OID, INT4OID}, "b:<=", NULL },
+	{ "int8le",  2, {INT8OID, INT8OID}, "b:<=", NULL },
+	{ "float4le",  2, {FLOAT4OID, FLOAT4OID}, "b:<=", NULL },
+	{ "float48le", 2, {FLOAT4OID, FLOAT8OID}, "b:<=", NULL },
+	{ "float84le", 2, {FLOAT4OID, FLOAT4OID}, "b:<=", NULL },
+	{ "float8le",  2, {FLOAT8OID, FLOAT8OID}, "b:<=", NULL },
+
 	/* '&' : bitwise and */
+	{ "int2and", 2, {INT2OID, INT2OID}, "b:&", NULL },
+	{ "int4and", 2, {INT4OID, INT4OID}, "b:&", NULL },
+	{ "int8and", 2, {INT8OID, INT8OID}, "b:&", NULL },
+
 	/* '|'  : bitwise or */
+	{ "int2or", 2, {INT2OID, INT2OID}, "b:|", NULL },
+	{ "int4or", 2, {INT4OID, INT4OID}, "b:|", NULL },
+	{ "int8or", 2, {INT8OID, INT8OID}, "b:|", NULL },
+
 	/* '#'  : bitwise xor */
+	{ "int2xor", 2, {INT2OID, INT2OID}, "b:^", NULL },
+	{ "int4xor", 2, {INT4OID, INT4OID}, "b:^", NULL },
+	{ "int8xor", 2, {INT8OID, INT8OID}, "b:^", NULL },
+
 	/* '~'  : bitwise not operators */
+	{ "int2not", 1, {INT2OID}, "b:~", NULL },
+	{ "int4not", 1, {INT4OID}, "b:~", NULL },
+	{ "int8not", 1, {INT8OID}, "b:~", NULL },
+
 	/* '>>' : right shift */
+	{ "int2shr", 2, {INT2OID, INT4OID}, "b:>>", NULL },
+	{ "int4shr", 2, {INT4OID, INT4OID}, "b:>>", NULL },
+	{ "int8shr", 2, {INT8OID, INT4OID}, "b:>>", NULL },
+
 	/* '<<' : left shift */
+	{ "int2shl", 2, {INT2OID, INT4OID}, "b:<<", NULL },
+	{ "int4shl", 2, {INT4OID, INT4OID}, "b:<<", NULL },
+	{ "int8shl", 2, {INT8OID, INT4OID}, "b:<<", NULL },
+
 	/*
      * Mathmatical functions
      */
 	/*
      * Trigonometric function
      */
+
+};
+
+devfunc_catalog_t devfunc_numericlib_catalog[] = {
+	/* Type cast functions */
+	{ "int2",    1, {NUMERICOID}, "f:pg_numeric_int2",   NULL },
+	{ "int4",    1, {NUMERICOID}, "f:pg_numeric_int4",   NULL },
+	{ "int8",    1, {NUMERICOID}, "f:pg_numeric_int8",   NULL },
+	{ "float4",  1, {NUMERICOID}, "f:pg_numeric_float4", NULL },
+	{ "float8",  1, {NUMERICOID}, "f:pg_numeric_float8", NULL },
+	{ "numeric", 1, {INT2OID},    "f:pg_int2_numeric",   NULL },
+	{ "numeric", 1, {INT4OID},    "f:pg_int4_numeric",   NULL },
+	{ "numeric", 1, {INT8OID},    "f:pg_int8_numeric",   NULL },
+	{ "numeric", 1, {FLOAT4OID},  "f:pg_float4_numeric", NULL },
+	{ "numeric", 1, {FLOAT8OID},  "f:pg_float8_numeric", NULL },
+	/* numeric operators */
+	{ "numeric_add", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_add", NULL },
+	{ "numeric_sub", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_sub", NULL },
+	{ "numeric_mul", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_mul", NULL },
+	{ "numeric_div", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_div", NULL },
+	{ "numeric_mod", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_mod", NULL },
+	{ "numeric_power", 2,{NUMERICOID, NUMERICOID},"f:pg_numeric_power", NULL},
+	{ "numeric_uplus",  1, {NUMERICOID}, "f:pg_numeric_uplus", NULL },
+	{ "numeric_uminus", 1, {NUMERICOID}, "f:pg_numeric_uminus", NULL },
+	{ "numeric_abs",    1, {NUMERICOID}, "f:pg_numeric_abs", NULL },
+	{ "numeric_eq", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_add", NULL },
+	{ "numeric_ne", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_add", NULL },
+	{ "numeric_lt", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_add", NULL },
+	{ "numeric_le", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_add", NULL },
+	{ "numeric_gt", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_add", NULL },
+	{ "numeric_ge", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_add", NULL },
+};
+
+devfunc_catalog_t devfunc_timelib_catalog[] = {
+	/* Type cast functions */
+	{ "date", 1, {DATEOID}, "c:", NULL },
+	{ "date", 1, {TIMESTAMPOID}, "f:pg_timestamp_date", NULL },
+	{ "date", 1, {TIMESTAMPTZOID}, "f:pg_timestamptz_date", NULL },
+	{ "time", 1, {TIMESTAMPOID}, "f:pg_timestamp_time", NULL },
+	{ "time", 1, {TIMESTAMPTZOID}, "f:pg_timestamptz_time", NULL },
+	{ "time", 1, {TIMEOID}, "c:", NULL },
+	{ "timestamp", 1, {TIMESTAMPOID}, "c:", NULL },
+	{ "timestamp", 1, {TIMESTAMPTZOID}, "f:pg_timestamptz_timestamp", NULL },
+	{ "timestamp", 1, {DATEOID}, "f:pg_date_timestamp", NULL },
+	{ "timestamptz", 1, {TIMESTAMPOID}, "f:pg_timestamp_timestamptz", NULL },
+	{ "timestamptz", 1, {TIMESTAMPTZOID}, "c:", NULL },
+	{ "timestamptz", 1, {DATEOID}, "f:pg_date_timestamptz", NULL },
+	/* timedata operators */
+	{ "datetime_pl", 2, {DATEOID, TIMEOID}, "f:pg_datetime_pl", NULL },
+	{ "timedate_pl", 2, {TIMEOID, DATEOID}, "f:pg_timedata_pl", NULL },
+	{ "date_pli", 2, {DATEOID, INT4OID}, "f:pg_date_pli", NULL },
+	{ "integer_pl_date", 2, {INT4OID, DATEOID}, "f:integer_pl_date", NULL },
+	{ "date_mii", 2, {DATEOID, INT4OID}, "f:pg_date_mii", NULL },
+};
+
+devfunc_catalog_t devfunc_textlib_catalog[] = {
+	/* Type cast functions */
+	{   }
+
 
 };
 
