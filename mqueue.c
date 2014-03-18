@@ -11,30 +11,31 @@
  * within this package.
  */
 #include "postgres.h"
-
+#include "miscadmin.h"
 #include "pg_strom.h"
 
 static pthread_mutexattr_t	mutex_attr;
 static pthread_rwlockattr_t	rwlock_attr;
 static pthread_condattr_t	cond_attr;
+static int		pgstrom_mqueue_timeout;
 
-typedef struct {
-	pthread_mutex_t	lock;
-	pthread_cond_t	cond;
-	dlist_head		qhead;
-	int				refcnt;
-	bool			closed;
-} pgstrom_queue;
-
-typedef struct {
-	int				type;
-	dlist_node		chain;
-	pgstrom_queue  *respq;	/* queue for response message */
-} pgstrom_message;
-
-
+/*
+ * pgstrom_create_queue
+ *
+ * It creates a message queue of PG-Strom. Here is two types of message
+ * queues; one is for OpenCL background server, the other is for backend
+ * process to be used to receive response messages.
+ * A message queue for the background server is controled with reference-
+ * counter. It shall be incremented when backend enqueues a message to
+ * OpenCL server, then decremented when backend dequeued a message, the
+ * server tried to enqueue a message to "closed" queue, or the message
+ * queue is closed.
+ * It is needed for error handling in the backend side, because PostgreSQL
+ * adopts exception-catch style error handling, it may lose the messages
+ * being executed asynchronously.
+ */
 pgstrom_queue *
-pgstrom_create_queue(bool persistent)
+pgstrom_create_queue(bool is_server)
 {
 	shmem_context  *context = pgstrom_get_mqueue_context();
 	pgstrom_queue  *queue;
@@ -64,101 +65,260 @@ error:
 	return NULL;
 }
 
+/*
+ * pgstrom_enqueue
+ *
+ * It allows the backend to enqueue a message towards OpenCL background
+ * server.
+ */
 bool
-pgstrom_enqueue_message(pgstrom_queue *queue,
-						pgstrom_message *message)
+pgstrom_enqueue_message(pgstrom_queue *queue, pgstrom_message *message)
 {
+	pgstrom_queue *respq;
 	bool	result;
 	int		rc;
 
 	pthread_mutex_lock(&queue->lock);
 	if (queue->closed)
-		result = false;
-	else
 	{
-		if (message->respq)
-		{
-			pgstrom_queue  *respq = message->respq;
-
-			pthread_mutex_lock(&respq->lock);
-			if (respq->refcnt >= 0)
-				respq->refcnt++;
-			pthread_mutex_unlock(&respq->lock);
-		}
-		dlist_push_tail(&queue->qhead, &qitem->chain);
-		rc = pthread_cond_signal(&queue->cond);
-		Assert(rc == 0);
-		result = true;
+		pthread_mutex_unlock(&queue->lock);
+		return false;
 	}
+	/*
+	 * NOTE: we assume the sender gives a response queue that has refcnt
+	 * more than 0 at this function call, and the core backend never
+	 * performs multi-threading. So, it is safe to acquire the response
+	 * queue after the unlocking of this queue.
+	 */
+	respq = message->respq;
+
+	/* enqueue this message */
+	Assert(queue->refcnt < 0);
+	dlist_push_tail(&queue->qhead, &message->chain);
+	rc = pthread_cond_signal(&queue->cond);
+	Assert(rc == 0);
 	pthread_mutex_unlock(&queue->lock);
 
+	/*
+	 * Increment expected number of response messages, because we cannot
+	 * drop the response message queue until all the messages in execution
+	 * got returned.
+	 * A message queue is constructed with refcnt=1, and pgstrom_close_queue
+	 * decrements the reference count. Usually, it drops the message queue
+	 * itself, however, asynchronouse execution messages will still need
+	 * the response queue to back execution status or drop message itself.
+	 */
+	Assert(respq != NULL);
+
+	pthread_mutex_lock(&respq->lock);
+	Assert(respq->refcnt > 0);
+	respq->refcnt++;
+	pthread_mutex_unlock(&respq->lock);
+
+	return true;
+}
+
+/*
+ * pgstrom_reply_message
+ *
+ * It enqueues a response message by the OpenCL background server.
+ * It shouldn't be called by backend processes.
+ */
+void
+pgstrom_reply_message(pgstrom_message *message)
+{
+	pgstrom_queue  *respq = message->respq;
+	bool	queue_free = false;
+	bool	message_free = false;
+
+	pthread_mutex_lock(&respq->lock);
+	if (respq->closed)
+		message_free = true;
+	else
+	{
+		/* reply this message */
+		Assert(queue->refcnt > 0);
+		dlist_push_tail(&respq->qhead, &message->chain);
+		rc = pthread_cond_signal(&respq->cond);
+		Assert(rc == 0);
+	}
+	if (--respq->refcnt == 0)
+	{
+		Assert(respq->closed);
+		queue_free = true;
+	}
+	pthread_mutex_unlock(&respq->lock);
+
+	/*
+	 * Release message and response queue, if the backend already aborted
+	 * and nobody can receive the response messages.
+	 */
+	if (message_free)
+	{
+		if (message->cb_release)
+			message->cb_release(message);
+		pgstrom_shmem_free(message);
+	}
+
+	if (queue_free)
+	{
+		pthread_cond_destroy(&respq->cond);
+		pthread_mutex_destroy(&respq->lock);
+		pgstrom_shmem_free(respq);
+	}
+}
+
+/*
+ * pgstrom_dequeue_message
+ *
+ * It fetches a message from the message queue. If empty, it waits for new
+ * messages will come, or returns NULL if it exceeds timeout or it got
+ * a signal being pending.
+ */
+pgstrom_message *
+pgstrom_dequeue_message(pgstrom_queue *queue)
+{
+#define POOLING_INTERVAL	200000000	/* 0.2msec */
+	pgstrom_message *result = NULL;
+	struct timeval	basetv;
+	struct timespec	timeout;
+	ulong	timeleft = ((ulong)pgstrom_mqueue_timeout) * 1000000UL;
+	bool	queue_release = false;
+	int		rc;
+
+	rc = gettimeofday(&basetv, NULL);
+	Assert(rc == 0);
+	timeout.tv_sec = basetv.tv_sec;
+	timeout.tv_nsec = basetv.tv_usec * 1000;
+
+	for (;;)
+	{
+		pthread_mutex_lock(&queue->lock);
+		/* dequeue a message from the message queue */
+		if (!dlist_is_empty(&queue->qhead))
+		{
+			dlist_node *dnode
+				= dlist_pop_head_node(&queue->qhead);
+
+			result = dlist_container(pgstrom_message, chain, dnode);
+			if (queue->refcnt > 0)
+			{
+				if (--queue->refcnt == 0)
+					queue_release = true;
+			}
+			pthread_mutex_unlock(&queue->lock);
+			break;
+		}
+		else if (timeleft == 0)
+		{
+			pthread_mutex_unlock(&queue->lock);
+			break;
+		}
+		else
+		{
+			/* setting up the next timeout */
+			if (timeleft > POOLING_INTERVAL)
+			{
+				timeout.tv_nsec += POOLING_INTERVAL;
+				timeleft -= POOLING_INTERVAL;
+			}
+			else
+			{
+				timeout.tv_nsec += timeleft;
+				timeleft = 0;
+			}
+			rc = pthread_cond_timedwait(&queue->cond, &queue->lock, &timeout);
+			Assert(rc == 0 || rc == ETIMEDOUT);
+
+			/* signal will break waiting loop */
+			if (InterruptPending)
+				timeleft = 0;
+		}
+	}
+	/*
+	 * If this queue is already closed and no messages will come,
+	 * the queue shall be dropped.
+	 */
+	if (queue_release)
+	{
+		Assert(respq->
+		pthread_cond_destroy(&queue->cond);
+		pthread_mutex_destroy(&queue->lock);
+		pgstrom_shmem_free(queue);
+	}
 	return result;
 }
 
-pgstrom_message *
-pgstrom_dequeue_message(pgstrom_queue *queue)
-{}
-
+/*
+ * pgstrom_try_dequeue_message
+ *
+ * It is almost equivalent to pgstrom_dequeue_message(), however, it never
+ * wait for new messages, will return immediately.
+ */
 pgstrom_message *
 pgstrom_try_dequeue_message(pgstrom_queue *queue)
-{}
-
-pgstrom_message *
-pgstrom_dequeue_message_timeout(pgstrom_queue *queue, long wait_usec)
-{}
-
-void
-pgstrom_close_queue(pgstrom_queue *queue)
-{}
-
-
-bool
-pgstrom_enqueue_item(pgstrom_queue *queue, pgstrom_queue_item *qitem)
 {
-}
-
-pgstrom_queue_item *
-pgstrom_dequeue_item(pgstrom_queue *queue)
-{
-	pgstrom_queue_item *qitem;
-	dlist_node	   *dnode;
+	pgstrom_message *result = NULL;
+	bool	queue_release = false;
+	int		rc;
 
 	pthread_mutex_lock(&queue->lock);
-	if (dlist_is_empty(&queue->qhead))
+	if (!dlist_is_empty(&queue->qhead))
 	{
-		rc = pthread_cond_wait(&queue->cond, &queue->lock);
-		Assert(rc == 0);
+		dlist_node *dnode
+			= dlist_pop_head_node(&queue->qhead);
 
-		if (dlist_is_empty(&queue->qhead))
+		result = dlist_container(pgstrom_message, chain, dnode);
+		if (queue->refcnt > 0)
 		{
-			pthread_mutex_unlock(&queue->unlock);
-
-			return NULL;
+			if (--queue->refcnt == 0)
+				queue_release = true;
 		}
 	}
-	dnode = dlist_pop_head_node(&queue->qhead);
-	qitem = dlist_container(pgstrom_queue_item, chain, dnode);
+	pthread_mutex_unlock(&queue->lock);
 
-	pthread_mutex_unlock(&queue->unlock);
-
-	return qitem;
+	/*
+	 * If this queue is already closed and no messages will come,
+	 * the queue shall be dropped.
+	 */
+	if (queue_release)
+	{
+		pthread_cond_destroy(&queue->cond);
+		pthread_mutex_destroy(&queue->lock);
+		pgstrom_shmem_free(queue);
+	}
+	return result;
 }
 
-pgstrom_queue_item *
-pgstrom_try_dequeue(pgstrom_queue *queue)
-{}
-
-pgstrom_queue_item *
-pgstrom_dequeue_timeout(pgstrom_queue *queue, long wait_usec)
-{}
-
+/*
+ * pgstrom_close_queue
+ *
+ * It closes this message queue. Once a message queue got closed, it does not
+ * accept any new messages and the queue will be dropped when last message
+ * is dequeued or last expected message is tried to enqueue.
+ */
 void
 pgstrom_close_queue(pgstrom_queue *queue)
 {
+	bool	release_queue = false;
+
 	pthread_mutex_lock(&queue->lock);
-	if (!queue->closed)
-		queue->closed = true;
+	Assert(!queue->closed);
+	queue->closed = true;
+
+	if (queue->refcnt > 0)
+	{
+		if (--queue->refcnt == 0)
+			release_queue = true;
+	}
 	pthread_mutex_unlock(&queue->unlock);
+
+	if (queue_release)
+	{
+		pthread_cond_destroy(&queue->cond);
+		pthread_mutex_destroy(&queue->lock);
+		pgstrom_shmem_free(queue);
+	}
 }
 
 /*
@@ -186,6 +346,18 @@ void
 pgstrom_mqueue_init(void)
 {
 	int		rc;
+
+	/* timeout configuration of the message queue feature */
+	DefineCustomIntVariable("pgstrom.mqueue_timeout",
+							"timeout of PG-Strom's message queue in msec",
+							NULL,
+							&pgstrom_mqueue_timeout,
+							60 * 1000,	/* 60 sec */
+							1,
+							INT_MAX,
+							PGC_POSTMASTER,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
 
 	/* initialization of mutex_attr */
 	rc = pthread_mutexattr_init(&mutex_attr);

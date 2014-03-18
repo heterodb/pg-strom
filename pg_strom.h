@@ -119,19 +119,19 @@ typedef struct {
 	bool			closed;
 } pgstrom_queue;
 
-typedef struct {
+typedef struct pgstrom_message {
 	int				type;
 	dlist_node		chain;
 	pgstrom_queue  *respq;	/* queue for response message */
+	/* destructor of this message if needed */
+	void			(*cb_release)(struct pgstrom_message *message);
 } pgstrom_message;
 
-extern pgstrom_queue *pgstrom_create_queue(bool persistent);
+extern pgstrom_queue *pgstrom_create_queue(bool is_server);
 extern bool pgstrom_enqueue_message(pgstrom_queue *queue,
 									pgstrom_message *message);
 extern pgstrom_message *pgstrom_dequeue_message(pgstrom_queue *queue);
-extern pgstrom_message *pgstrom_try_dequeue_message(pgstrom_queue *queue);
-extern pgstrom_message *pgstrom_dequeue_message_timeout(pgstrom_queue *queue,
-														long wait_usec);
+extern pgstrom_message *pgstrom_try_dequeue(pgstrom_queue *queue);
 extern void pgstrom_close_queue(pgstrom_queue *queue);
 
 extern void pgstrom_setup_mqueue(void);

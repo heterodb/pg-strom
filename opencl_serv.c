@@ -32,6 +32,7 @@ static int		opencl_platform_index;
 static void
 pgstrom_opencl_sigterm(SIGNAL_ARGS)
 {
+	/* need to update "InterruptPending" to break queue wait */
 	got_signal = true;
 }
 
