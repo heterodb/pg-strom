@@ -193,6 +193,38 @@ extern shmem_context *pgstrom_get_mqueue_context(void);
 extern void pgstrom_register_mqueue_context(shmem_context *context);
 
 /*
+ * codegen_expr.c
+ */
+#define DEVINFO_IS_NEGATIVE			0x0001
+#define DEVTYPE_IS_VARLENA			0x0002
+#define DEVFUNC_NEEDS_TIMELIB		0x0004
+#define DEVFUNC_NEEDS_TEXTLIB		0x0008
+#define DEVFUNC_NEEDS_NUMERICLIB	0x0010
+
+typedef struct devtype_info {
+	Oid			type_oid;
+	uint32		type_flags;
+	char	   *type_ident;
+	char	   *type_base;
+	char	   *type_decl;
+} devtype_info;
+
+typedef struct devfunc_info {
+	Oid			func_oid;
+	int32		func_flags;
+	const char *func_ident;
+	List	   *func_args;	/* list of devtype_info */
+	devtype_info *func_rettype;
+	const char *func_decl;	/* declaration of function */
+	const char *func_impl;	/* implementation of function */
+} devfunc_info;
+
+extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
+extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid);
+extern void pgstrom_codegen_expr_init(void);
+
+
+/*
  * debug.c
  */
 extern Datum pgstrom_shmem_alloc_func(PG_FUNCTION_ARGS);
