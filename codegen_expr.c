@@ -30,6 +30,7 @@ typedef struct devtype_info {
 
 #define DEVINFO_IS_NEGATIVE			0x0001
 #define DEVTYPE_IS_VARLENA			0x0002
+#define DEVTYPE_COMPARABLE
 #define DEVFUNC_NEEDS_TIMELIB		0x0004
 #define DEVFUNC_NEEDS_TEXTLIB		0x0008
 #define DEVFUNC_NEEDS_NUMERICLIB	0x0010
@@ -53,7 +54,6 @@ static struct {
 	{ TIMEOID,			"cl_long" },
 	{ TIMESTAMPOID,		"cl_long" },
 	{ TIMESTAMPTZOID,	"cl_long" },
-
 	/* variable length datatypes */
 	{ BPCHAROID,		"varlena" },
 	{ VARCHAROID,		"varlena" },
@@ -402,12 +402,12 @@ devfunc_catalog_t devfunc_numericlib_catalog[] = {
 	{ "int8",    1, {NUMERICOID}, "f:pg_numeric_int8",   NULL },
 	{ "float4",  1, {NUMERICOID}, "f:pg_numeric_float4", NULL },
 	{ "float8",  1, {NUMERICOID}, "f:pg_numeric_float8", NULL },
-	{ "numeric", 1, {INT2OID},    "f:pg_int2_numeric",   NULL },
-	{ "numeric", 1, {INT4OID},    "f:pg_int4_numeric",   NULL },
-	{ "numeric", 1, {INT8OID},    "f:pg_int8_numeric",   NULL },
-	{ "numeric", 1, {FLOAT4OID},  "f:pg_float4_numeric", NULL },
-	{ "numeric", 1, {FLOAT8OID},  "f:pg_float8_numeric", NULL },
 	/* numeric operators */
+#if 0
+	/*
+	 * Right now, functions that return variable-length field are not
+	 * supported.
+	 */
 	{ "numeric_add", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_add", NULL },
 	{ "numeric_sub", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_sub", NULL },
 	{ "numeric_mul", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_mul", NULL },
@@ -417,12 +417,13 @@ devfunc_catalog_t devfunc_numericlib_catalog[] = {
 	{ "numeric_uplus",  1, {NUMERICOID}, "f:pg_numeric_uplus", NULL },
 	{ "numeric_uminus", 1, {NUMERICOID}, "f:pg_numeric_uminus", NULL },
 	{ "numeric_abs",    1, {NUMERICOID}, "f:pg_numeric_abs", NULL },
-	{ "numeric_eq", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_add", NULL },
-	{ "numeric_ne", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_add", NULL },
-	{ "numeric_lt", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_add", NULL },
-	{ "numeric_le", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_add", NULL },
-	{ "numeric_gt", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_add", NULL },
-	{ "numeric_ge", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_add", NULL },
+#endif
+	{ "numeric_eq", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_eq", NULL },
+	{ "numeric_ne", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_ne", NULL },
+	{ "numeric_lt", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_lt", NULL },
+	{ "numeric_le", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_le", NULL },
+	{ "numeric_gt", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_gt", NULL },
+	{ "numeric_ge", 2, {NUMERICOID, NUMERICOID}, "f:pg_numeric_ge", NULL },
 };
 
 devfunc_catalog_t devfunc_timelib_catalog[] = {
@@ -448,10 +449,18 @@ devfunc_catalog_t devfunc_timelib_catalog[] = {
 };
 
 devfunc_catalog_t devfunc_textlib_catalog[] = {
-	/* Type cast functions */
-	{   }
-
-
+	{ "bpchareq", 2, {BPCHAROID,BPCHAROID}, "pg_bpchareq", NULL },
+	{ "bpcharne", 2, {BPCHAROID,BPCHAROID}, "pg_bpcharne", NULL },
+	{ "bpcharlt", 2, {BPCHAROID,BPCHAROID}, "pg_bpcharlt", NULL },
+	{ "bpcharle", 2, {BPCHAROID,BPCHAROID}, "pg_bpcharle", NULL },
+	{ "bpchargt", 2, {BPCHAROID,BPCHAROID}, "pg_bpchargt", NULL },
+	{ "bpcharge", 2, {BPCHAROID,BPCHAROID}, "pg_bpcharge", NULL },
+	{ "texteq", 2, {TEXTOID, TEXTOID}. "f:pg_texteq", NULL  },
+	{ "textne", 2, {TEXTOID, TEXTOID}. "f:pg_textne", NULL  },
+	{ "textlt", 2, {TEXTOID, TEXTOID}. "f:pg_textlt", NULL  },
+	{ "textle", 2, {TEXTOID, TEXTOID}. "f:pg_textle", NULL  },
+	{ "textgt", 2, {TEXTOID, TEXTOID}. "f:pg_textgt", NULL  },
+	{ "textge", 2, {TEXTOID, TEXTOID}. "f:pg_textge", NULL  },
 };
 
 devfunc_info *
