@@ -219,8 +219,16 @@ typedef struct devfunc_info {
 	const char *func_impl;	/* implementation of function */
 } devfunc_info;
 
+typedef struct {
+	List	   *type_defs;	/* list of devtype_info in use */
+	List	   *func_defs;	/* list of devfunc_info in use */
+	int			incl_flagss;/* external libraries to be included */
+} codegen_context;
+
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid);
+extern char *pgstrom_codegen_expression(Expr *expr, codegen_context *context);
+extern char *pgstrom_codegen_declarations(codegen_context *context);
 extern void pgstrom_codegen_expr_init(void);
 
 

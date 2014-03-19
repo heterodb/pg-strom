@@ -784,6 +784,19 @@ out:
 
 
 
+
+
+
+
+
+char *
+pgstrom_codegen_expression(Expr *expr, codegen_context *context)
+{}
+
+char *
+pgstrom_codegen_declarations(codegen_context *context)
+{}
+
 static void
 codegen_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 {
