@@ -237,7 +237,7 @@ typedef struct {
 
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid);
-extern char *pgstrom_codegen_expression(Expr *expr, codegen_context *context);
+extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern char *pgstrom_codegen_declarations(codegen_context *context);
 extern void pgstrom_codegen_expr_init(void);
 

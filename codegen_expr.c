@@ -1151,7 +1151,7 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 }
 
 char *
-pgstrom_codegen_expression(Expr *expr, codegen_context *context)
+pgstrom_codegen_expression(Node *expr, codegen_context *context)
 {
 	codegen_walker_context	walker_context;
 
@@ -1162,7 +1162,7 @@ pgstrom_codegen_expression(Expr *expr, codegen_context *context)
 	walker_context.used_vars = context->used_vars;
 	walker_context.incl_flags = context->incl_flags;
 
-	if (codegen_expression_walker((Node *) expr, &walker_context))
+	if (codegen_expression_walker(expr, &walker_context))
 		return NULL;
 
 	context->type_defs = walker_context.type_defs;
