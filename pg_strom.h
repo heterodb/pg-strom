@@ -200,6 +200,11 @@ extern void pgstrom_register_mqueue_context(shmem_context *context);
 #define DEVFUNC_NEEDS_TIMELIB		0x0004
 #define DEVFUNC_NEEDS_TEXTLIB		0x0008
 #define DEVFUNC_NEEDS_NUMERICLIB	0x0010
+#define DEVFUNC_INCL_FLAGS			\
+	(DEVFUNC_NEEDS_TIMELIB | DEVFUNC_NEEDS_TEXTLIB | DEVFUNC_NEEDS_NUMERICLIB)
+
+struct devtype_info;
+struct devfunc_info;
 
 typedef struct devtype_info {
 	Oid			type_oid;
@@ -207,22 +212,27 @@ typedef struct devtype_info {
 	char	   *type_ident;
 	char	   *type_base;
 	char	   *type_decl;
+	struct devfunc_info *type_is_null_fn;
+	struct devfunc_info	*type_is_not_null_fn;
 } devtype_info;
 
 typedef struct devfunc_info {
-	Oid			func_oid;
+	const char *func_name;
+	Oid			func_namespace;
+	Oid		   *func_argtypes;
 	int32		func_flags;
-	const char *func_ident;
+	const char *func_ident;	/* identifier of device function */
 	List	   *func_args;	/* list of devtype_info */
 	devtype_info *func_rettype;
 	const char *func_decl;	/* declaration of function */
-	const char *func_impl;	/* implementation of function */
 } devfunc_info;
 
 typedef struct {
 	List	   *type_defs;	/* list of devtype_info in use */
 	List	   *func_defs;	/* list of devfunc_info in use */
-	int			incl_flagss;/* external libraries to be included */
+	List	   *used_params;/* list of Const/Param in use */
+	List	   *used_vars;	/* list of Var in use */
+	int			incl_flags;	/* external libraries to be included */
 } codegen_context;
 
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);

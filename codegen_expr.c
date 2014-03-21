@@ -16,8 +16,11 @@
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
+#include "nodes/nodeFuncs.h"
+#include "nodes/pg_list.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
+#include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "pg_strom.h"
 
@@ -29,28 +32,77 @@ static List	   *devfunc_info_slot[1024];
  * Catalog of data types supported by device code
  */
 static struct {
-	Oid			type_oid;
-	const char *type_base;
+	Oid				type_oid;
+	const char	   *type_base;
+	bool			type_is_builtin;	/* true, if no need to redefine */
 } devtype_catalog[] = {
 	/* basic datatypes */
-	{ BOOLOID,			"cl_bool" },
-	{ INT2OID,			"cl_short" },
-	{ INT4OID,			"cl_int" },
-	{ INT8OID,			"cl_long" },
-	{ FLOAT4OID,		"cl_float" },
-	{ FLOAT8OID,		"cl_double" },
+	{ BOOLOID,			"cl_bool",	true },
+	{ INT2OID,			"cl_short",	false },
+	{ INT4OID,			"cl_int",	false },
+	{ INT8OID,			"cl_long",	false },
+	{ FLOAT4OID,		"cl_float",	false },
+	{ FLOAT8OID,		"cl_double",false },
 	/* date and time datatypes */
-	{ DATEOID,			"cl_int" },
-	{ TIMEOID,			"cl_long" },
-	{ TIMESTAMPOID,		"cl_long" },
-	{ TIMESTAMPTZOID,	"cl_long" },
+	{ DATEOID,			"cl_int",	false },
+	{ TIMEOID,			"cl_long",	false },
+	{ TIMESTAMPOID,		"cl_long",	false },
+	{ TIMESTAMPTZOID,	"cl_long",	false },
 	/* variable length datatypes */
-	{ BPCHAROID,		"varlena" },
-	{ VARCHAROID,		"varlena" },
-	{ NUMERICOID,		"varlena" },
-	{ BYTEAOID,			"varlena" },
-	{ TEXTOID,			"varlena" },
+	{ BPCHAROID,		"varlena",	false },
+	{ VARCHAROID,		"varlena",	false },
+	{ NUMERICOID,		"varlena",	false },
+	{ BYTEAOID,			"varlena",	false },
+	{ TEXTOID,			"varlena",	false },
 };
+
+static void
+make_devtype_is_null_fn(devtype_info *dtype)
+{
+	devfunc_info   *dfunc;
+
+	dfunc = palloc0(sizeof(devfunc_info));
+	dfunc->func_ident = psprintf("%s_is_null", dtype->type_ident);
+	dfunc->func_args = list_make1(dtype);
+	dfunc->func_rettype = pgstrom_devtype_lookup(BOOLOID);
+	dfunc->func_decl =
+		psprintf("static %s %s(%s arg)\n"
+				 "{\n"
+				 "  %s result;\n\n"
+				 "  result.isnull = false;\n"
+				 "  result.value = arg.isnull;\n"
+				 "  return result;\n"
+				 "}\n",
+				 dfunc->func_rettype->type_ident,
+				 dfunc->func_ident,
+				 dtype->type_ident,
+				 dfunc->func_rettype->type_ident);
+	dtype->type_is_null_fn = dfunc;
+}
+
+static void
+make_devtype_is_not_null_fn(devtype_info *dtype)
+{
+	devfunc_info   *dfunc;
+
+	dfunc = palloc0(sizeof(devfunc_info));
+	dfunc->func_ident = psprintf("%s_is_not_null", dtype->type_ident);
+	dfunc->func_args = list_make1(dtype);
+	dfunc->func_rettype = pgstrom_devtype_lookup(BOOLOID);
+	dfunc->func_decl =
+		psprintf("static %s %s(%s arg)\n"
+				 "{\n"
+				 "  %s result;\n\n"
+				 "  result.isnull = false;\n"
+				 "  result.value = !arg.isnull;\n"
+				 "  return result;\n"
+				 "}\n",
+				 dfunc->func_rettype->type_ident,
+				 dfunc->func_ident,
+				 dtype->type_ident,
+				 dfunc->func_rettype->type_ident);
+	dtype->type_is_not_null_fn = dfunc;
+}
 
 devtype_info *
 pgstrom_devtype_lookup(Oid type_oid)
@@ -117,6 +169,13 @@ pgstrom_devtype_lookup(Oid type_oid)
 			entry->type_flags |= DEVINFO_IS_NEGATIVE;
 	}
 	devtype_info_slot[hash] = lappend(devtype_info_slot[hash], entry);
+
+	/*
+	 * Misc support functions associated with device type
+	 */
+	make_devtype_is_null_fn(entry);
+	make_devtype_is_not_null_fn(entry);
+
 	MemoryContextSwitchTo(oldcxt);
 	ReleaseSysCache(tuple);
 
@@ -134,16 +193,13 @@ typedef struct devfunc_catalog_t {
 	Oid			func_argtypes[4];
 	const char *func_template;	/* a template string if simple function */
 	void	  (*func_callback)(devfunc_info *dfunc,
-							   Form_pg_proc proc,
 							   struct devfunc_catalog_t *procat);
 } devfunc_catalog_t;
 
 static void devfunc_setup_div_oper(devfunc_info *entry,
-								   Form_pg_proc proc,
 								   devfunc_catalog_t *procat);
 
-
-devfunc_catalog_t devfunc_common_catalog[] = {
+static devfunc_catalog_t devfunc_common_catalog[] = {
 	/* Type cast functions */
 	{ "int2", 1, {INT4OID}, "c:", NULL },
 	{ "int2", 1, {INT8OID}, "c:", NULL },
@@ -386,7 +442,7 @@ devfunc_catalog_t devfunc_common_catalog[] = {
 
 };
 
-devfunc_catalog_t devfunc_numericlib_catalog[] = {
+static devfunc_catalog_t devfunc_numericlib_catalog[] = {
 	/* Type cast functions */
 	{ "int2",    1, {NUMERICOID}, "F:pg_numeric_int2",   NULL },
 	{ "int4",    1, {NUMERICOID}, "F:pg_numeric_int4",   NULL },
@@ -417,7 +473,7 @@ devfunc_catalog_t devfunc_numericlib_catalog[] = {
 	{ "numeric_ge", 2, {NUMERICOID, NUMERICOID}, "F:pg_numeric_ge", NULL },
 };
 
-devfunc_catalog_t devfunc_timelib_catalog[] = {
+static devfunc_catalog_t devfunc_timelib_catalog[] = {
 	/* Type cast functions */
 	{ "date", 1, {DATEOID}, "c:", NULL },
 	{ "date", 1, {TIMESTAMPOID}, "F:pg_timestamp_date", NULL },
@@ -439,7 +495,7 @@ devfunc_catalog_t devfunc_timelib_catalog[] = {
 	{ "date_mii", 2, {DATEOID, INT4OID}, "F:pg_date_mii", NULL },
 };
 
-devfunc_catalog_t devfunc_textlib_catalog[] = {
+static devfunc_catalog_t devfunc_textlib_catalog[] = {
 	{ "bpchareq", 2, {BPCHAROID,BPCHAROID}, "F:pg_bpchareq", NULL },
 	{ "bpcharne", 2, {BPCHAROID,BPCHAROID}, "F:pg_bpcharne", NULL },
 	{ "bpcharlt", 2, {BPCHAROID,BPCHAROID}, "F:pg_bpcharlt", NULL },
@@ -455,9 +511,7 @@ devfunc_catalog_t devfunc_textlib_catalog[] = {
 };
 
 static void
-devfunc_setup_div_oper(devfunc_info *entry,
-					   Form_pg_proc proc, devfunc_catalog_t *procat)
-
+devfunc_setup_div_oper(devfunc_info *entry, devfunc_catalog_t *procat)
 {
 	devtype_info   *dtype1 = linitial(entry->func_args);
 	devtype_info   *dtype2 = lsecond(entry->func_args);
@@ -465,16 +519,9 @@ devfunc_setup_div_oper(devfunc_info *entry,
 	Assert(procat->func_nargs == 2);
 	entry->func_ident = psprintf("pg_%s", procat->func_name);
 	entry->func_decl
-		= psprintf("static %s %s(%s arg1, %s arg2)",
-				   entry->func_rettype->type_ident,
-				   entry->func_ident,
-				   dtype1->type_ident,
-				   dtype2->type_ident);
-	entry->func_impl
-		= psprintf("%s\n"
+		= psprintf("static %s %s(%s arg1, %s arg2)\n"
 				   "{\n"
 				   "    %s result;\n"
-				   "\n"
 				   "    if (arg2 == %s)\n"
 				   "    {\n"
 				   "        result.isnull = true;\n"
@@ -487,41 +534,39 @@ devfunc_setup_div_oper(devfunc_info *entry,
 				   "    }\n"
 				   "    return result;\n"
 				   "}\n",
-				   entry->func_decl,
 				   entry->func_rettype->type_ident,
-				   procat->func_template,
+				   entry->func_ident,
+				   dtype1->type_ident,
+				   dtype2->type_ident,
+				   entry->func_rettype->type_ident,
+				   procat->func_template,	/* 0 or 0.0 */
 				   entry->func_rettype->type_base);
 }
 
 static void
-devfunc_setup_cast(devfunc_info *entry,
-				   Form_pg_proc proc, devfunc_catalog_t *procat)
+devfunc_setup_cast(devfunc_info *entry, devfunc_catalog_t *procat)
 {
 	devtype_info   *dtype = linitial(entry->func_args);
 
 	Assert(procat->func_nargs == 1);
 	entry->func_ident = psprintf("pg_%s", procat->func_name);
 	entry->func_decl
-		= psprintf("static %s %s(%s arg)",
-				   entry->func_rettype->type_ident,
-				   entry->func_ident,
-				   dtype->type_ident);
-	entry->func_impl
-		= psprintf("%s\n"
+		= psprintf("static %s %s(%s arg)\n"
 				   "{\n"
 				   "    %s result;\n"
 				   "    result.value  = (%s)arg.value;\n"
 				   "    result.isnull = arg.isnull;\n"
 				   "    return result;\n"
 				   "}\n",
-				   entry->func_decl,
+				   entry->func_rettype->type_ident,
+				   entry->func_ident,
+				   dtype->type_ident,
 				   entry->func_rettype->type_ident,
 				   entry->func_rettype->type_base);
 }
 
 static void
-devfunc_setup_oper_both(devfunc_info *entry,
-						Form_pg_proc proc, devfunc_catalog_t *procat)
+devfunc_setup_oper_both(devfunc_info *entry, devfunc_catalog_t *procat)
 {
 	devtype_info   *dtype1 = linitial(entry->func_args);
 	devtype_info   *dtype2 = lsecond(entry->func_args);
@@ -529,28 +574,24 @@ devfunc_setup_oper_both(devfunc_info *entry,
 	Assert(procat->func_nargs == 2);
 	entry->func_ident = psprintf("pg_%s", procat->func_name);
 	entry->func_decl
-		= psprintf("static %s %s(%s arg1, %s arg2)",
-				   entry->func_rettype->type_ident,
-				   entry->func_ident,
-				   dtype1->type_ident,
-				   dtype2->type_ident);
-	entry->func_impl
-		= psprintf("%s\n"
+		= psprintf("static %s %s(%s arg1, %s arg2)\n"
 				   "{\n"
 				   "    %s result;\n"
 				   "    result.value = (%s)(arg1 %s arg2);\n"
 				   "    result.isnull = arg1.isnull | arg2.isnull;\n"
 				   "    return result;\n"
 				   "}\n",
-				   entry->func_decl,
+				   entry->func_rettype->type_ident,
+				   entry->func_ident,
+				   dtype1->type_ident,
+				   dtype2->type_ident,
 				   entry->func_rettype->type_ident,
 				   entry->func_rettype->type_base,
 				   procat->func_template + 2);
 }
 
 static void
-devfunc_setup_oper_either(devfunc_info *entry,
-						  Form_pg_proc proc, devfunc_catalog_t *procat)
+devfunc_setup_oper_either(devfunc_info *entry, devfunc_catalog_t *procat)
 {
 	devtype_info   *dtype = linitial(entry->func_args);
 	const char	   *templ = procat->func_template;
@@ -558,19 +599,16 @@ devfunc_setup_oper_either(devfunc_info *entry,
 	Assert(procat->func_nargs == 1);
 	entry->func_ident = psprintf("pg_%s", procat->func_name);
 	entry->func_decl
-		= psprintf("static %s %s(%s arg)",
-				   entry->func_rettype->type_ident,
-				   entry->func_ident,
-				   dtype->type_ident);
-	entry->func_impl
-		= psprintf("%s\n"
+		= psprintf("static %s %s(%s arg)\n"
 				   "{\n"
 				   "    %s result;\n"
 				   "    result.value = (%s)(%sarg%s);\n"
 				   "    result.isnull = arg.isnull;\n"
 				   "    return result;\n"
 				   "}\n",
-				   entry->func_decl,
+				   entry->func_rettype->type_ident,
+				   entry->func_ident,
+				   dtype->type_ident,
 				   entry->func_rettype->type_ident,
 				   entry->func_rettype->type_base,
 				   strncmp(templ, "l:", 2) == 0 ? templ + 2 : "",
@@ -578,20 +616,12 @@ devfunc_setup_oper_either(devfunc_info *entry,
 }
 
 static void
-devfunc_setup_func(devfunc_info *entry,
-				   Form_pg_proc proc, devfunc_catalog_t *procat)
+devfunc_setup_func(devfunc_info *entry, devfunc_catalog_t *procat)
 {
 	StringInfoData	str;
 	ListCell	   *cell;
 	int				index;
 	const char	   *templ = procat->func_template;
-
-	/* in case of function without re-definition */
-	if (strncmp(templ, "F:", 2) == 0)
-	{
-		entry->func_ident = pstrdup(templ + 2);
-		return;
-	}
 
 	entry->func_ident = psprintf("pg_%s", procat->func_name);
 	/* declaration */
@@ -609,28 +639,11 @@ devfunc_setup_func(devfunc_info *entry,
 						 dtype->type_ident,
 						 index++);
 	}
-	appendStringInfoChar(&str, ')');
-	entry->func_decl = pstrdup(str.data);
-
-	/* function implementation */
-	resetStringInfo(&str);
-	appendStringInfo(&str, "%s\n"
+	appendStringInfo(&str, ")\n"
 					 "{\n"
 					 "    %s result;\n"
-					 "    result.value = (%s) %s(",
-					 entry->func_decl,
-					 entry->func_rettype->type_ident,
-					 entry->func_rettype->type_base,
-					 templ + 2);
-	index = 1;
-	foreach (cell, entry->func_args)
-	{
-		appendStringInfo(&str, "%sarg%d.value",
-						 cell == list_head(entry->func_args) ? "" : ", ",
-						 index++);
-	}
-	appendStringInfo(&str, ");\n"
-					 "    result.isnull = ");
+					 "    result.isnull = ",
+					 entry->func_rettype->type_ident);
 	if (entry->func_args == NIL)
 		appendStringInfo(&str, "false");
 	else
@@ -644,158 +657,560 @@ devfunc_setup_func(devfunc_info *entry,
 		}
 	}
 	appendStringInfo(&str, ";\n"
-					 "return result;\n");
-	entry->func_decl = pstrdup(str.data);
-
-	pfree(str.data);
+					 "    if (!result.isnull)\n"
+					 "        result.value = (%s) %s(",
+					 entry->func_rettype->type_base,
+					 templ + 2);
+	index = 1;
+	foreach (cell, entry->func_args)
+	{
+		appendStringInfo(&str, "%sarg%d.value",
+						 cell == list_head(entry->func_args) ? "" : ", ",
+						 index++);
+	}
+	appendStringInfo(&str, ");\n"
+					 "    return result;\n"
+					 "}\n");
+	entry->func_decl = str.data;
 }
 
-static bool
-devfunc_catalog_matched(Form_pg_proc proform, devfunc_catalog_t *procat)
+static devfunc_info *
+devfunc_setup_boolop(BoolExprType boolop, const char *fn_name, int fn_nargs)
 {
-	if (strcmp(procat->func_name, NameStr(proform->proname)) == 0 &&
-		procat->func_nargs == proform->pronargs &&
-		memcmp(procat->func_argtypes,
-			   proform->proargtypes.values,
-			   sizeof(Oid) * procat->func_nargs) == 0)
-		return true;
-	return false;
+	devfunc_info   *entry = palloc0(sizeof(devfunc_info));
+	devtype_info   *dtype = pgstrom_devtype_lookup(BOOLOID);
+	StringInfoData	str;
+	int		i;
+
+	initStringInfo(&str);
+
+	for (i=0; i < fn_nargs; i++)
+		entry->func_args = lappend(entry->func_args, dtype);
+	entry->func_rettype = dtype;
+	entry->func_ident = pstrdup(fn_name);
+	appendStringInfo(&str, "static %s %s(", dtype->type_ident, fn_name);
+	for (i=0; i < fn_nargs; i++)
+		appendStringInfo(&str, "%s%s arg%u",
+						 (i > 0 ? ", " : ""),
+						 dtype->type_ident, i+1);
+	appendStringInfo(&str, ")\n"
+					 "{\n"
+					 "  %s result;\n"
+					 "  result.isnull = ",
+					 dtype->type_ident);
+	for (i=0; i < fn_nargs; i++)
+		appendStringInfo(&str, "%sarg%u.isnull",
+						 (i > 0 ? " | " : ""), i+1);
+	appendStringInfo(&str, ";\n"
+					 "  result.value = ");
+	for (i=0; i < fn_nargs; i++)
+	{
+		if (boolop == AND_EXPR)
+			appendStringInfo(&str, "%sarg%u.value", (i > 0 ? " & " : ""), i+1);
+		else
+			appendStringInfo(&str, "%sarg%u.value", (i > 0 ? " | " : ""), i+1);
+	}
+	appendStringInfo(&str, ";\n"
+					 "  return result;\n"
+					 "}\n");
+	entry->func_decl = str.data;
+
+	return entry;
 }
 
-devfunc_info *
-pgstrom_devfunc_lookup(Oid func_oid)
+static devfunc_info *
+pgstrom_devfunc_lookup_by_name(const char *func_name,
+							   Oid func_namespace,
+							   int func_nargs,
+							   Oid func_argtypes[],
+							   Oid func_rettype)
 {
 	devfunc_info   *entry;
 	ListCell	   *cell;
-	HeapTuple		tuple;
-	Form_pg_proc	procform;
 	MemoryContext	oldcxt;
 	int32			flags = 0;
-	int				i, hash;
+	int				i, j, k, hash;
 	devfunc_catalog_t *procat = NULL;
 
-	hash = hash_uint32((uint32) func_oid) & lengthof(devfunc_info_slot);
+	hash = (hash_any((void *)func_name, strlen(func_name)) ^
+			hash_any((void *)func_argtypes, sizeof(Oid) * func_nargs))
+		% lengthof(devfunc_info_slot);
+
 	foreach (cell, devfunc_info_slot[hash])
 	{
 		entry = lfirst(cell);
-		if (entry->func_oid == func_oid)
+		if (func_namespace == entry->func_namespace &&
+			strcmp(func_name, entry->func_name) == 0 &&
+			func_nargs == list_length(entry->func_args) &&
+			memcmp(func_argtypes, entry->func_argtypes,
+				   sizeof(Oid) * func_nargs) == 0)
 		{
+			Assert(entry->func_rettype->type_oid == func_rettype);
 			if (entry->func_flags & DEVINFO_IS_NEGATIVE)
 				return NULL;
 			return entry;
 		}
 	}
+	/* the function not found */
 
 	/*
-	 * Not found, insert a new entry
+	 * We may have device-only functions that has no namespace.
+	 * The caller has to be responsible to add these function entries
+	 * into the cache.
 	 */
-	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
-	if (!HeapTupleIsValid(tuple))
-		elog(ERROR, "cache lookup failed for function %u", func_oid);
-	procform = (Form_pg_proc) GETSTRUCT(tuple);
+	if (func_namespace == InvalidOid)
+		return NULL;
 
+	/* Elsewhere, let's walk on the function catalog */
 	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
 
 	entry = palloc0(sizeof(devfunc_info));
-	entry->func_oid = func_oid;
+	entry->func_name = pstrdup(func_name);
+	entry->func_namespace = func_namespace;
+	entry->func_argtypes = palloc(sizeof(Oid) * func_nargs);
+	memcpy(entry->func_argtypes, func_argtypes, sizeof(Oid) * func_nargs);
 
-	if (procform->pronamespace == PG_CATALOG_NAMESPACE)
+	if (func_namespace == PG_CATALOG_NAMESPACE)
 	{
-		flags = 0;
-		for (i=0; i < lengthof(devfunc_common_catalog); i++)
-		{
-			procat = &devfunc_common_catalog[i];
-			if (devfunc_catalog_matched(procform, procat))
-				goto out;
-		}
+		static struct {
+			devfunc_catalog_t *catalog;
+			int		nitems;
+			int		flags;
+		} catalog_array[] = {
+			{ devfunc_common_catalog,
+			  lengthof(devfunc_common_catalog),
+			  0 },
+			{ devfunc_numericlib_catalog,
+			  lengthof(devfunc_numericlib_catalog),
+			  DEVFUNC_NEEDS_NUMERICLIB },
+			{ devfunc_timelib_catalog,
+			  lengthof(devfunc_timelib_catalog),
+			  DEVFUNC_NEEDS_TIMELIB },
+			{ devfunc_textlib_catalog,
+			  lengthof(devfunc_textlib_catalog),
+			  DEVFUNC_NEEDS_TEXTLIB },
+		};
 
-		flags = DEVFUNC_NEEDS_NUMERICLIB;
-		for (i=0; i < lengthof(devfunc_numericlib_catalog); i++)
+		for (i=0; i < lengthof(catalog_array); i++)
 		{
-			procat = &devfunc_numericlib_catalog[i];
-			if (devfunc_catalog_matched(procform, procat))
-				goto out;
-		}
+			flags = catalog_array[i].flags;
+			for (j=0; j < catalog_array[i].nitems; j++)
+			{
+				procat = &catalog_array[i].catalog[j];
 
-		flags = DEVFUNC_NEEDS_TIMELIB;
-		for (i=0; i < lengthof(devfunc_timelib_catalog); i++)
-		{
-			procat = &devfunc_timelib_catalog[i];
-			if (devfunc_catalog_matched(procform, procat))
-				goto out;
-		}
+				if (strcmp(procat->func_name, func_name) == 0 &&
+					procat->func_nargs == func_nargs &&
+					memcmp(procat->func_argtypes, func_argtypes,
+						   sizeof(Oid) * func_nargs) == 0)
+				{
+					entry->func_flags = flags;
+					entry->func_rettype = pgstrom_devtype_lookup(func_rettype);
+					Assert(entry->func_rettype != NULL);
 
-		flags = DEVFUNC_NEEDS_TEXTLIB;
-		for (i=0; i < lengthof(devfunc_textlib_catalog); i++)
-		{
-			procat = &devfunc_textlib_catalog[i];
-			if (devfunc_catalog_matched(procform, procat))
-				goto out;
+					for (k=0; k < func_nargs; k++)
+					{
+						devtype_info   *dtype
+							= pgstrom_devtype_lookup(func_argtypes[i]);
+						Assert(dtype != NULL);
+						entry->func_args = lappend(entry->func_args, dtype);
+					}
+
+					if (procat->func_callback)
+						procat->func_callback(entry, procat);
+					else if (strncmp(procat->func_template, "c:", 2) == 0)
+						devfunc_setup_cast(entry, procat);
+					else if (strncmp(procat->func_template, "b:", 2) == 0)
+						devfunc_setup_oper_both(entry, procat);
+					else if (strncmp(procat->func_template, "l:", 2) == 0 ||
+							 strncmp(procat->func_template, "r:", 2) == 0)
+						devfunc_setup_oper_either(entry, procat);
+					else if (strncmp(procat->func_template, "f:", 2) == 0)
+						devfunc_setup_func(entry, procat);
+					else if (strncmp(procat->func_template, "F:", 2) == 0)
+						entry->func_ident = pstrdup(procat->func_template + 2);
+					else
+						entry->func_flags = DEVINFO_IS_NEGATIVE;
+
+					goto out;
+				}
+			}
 		}
-		procat = NULL;
 	}
+	entry->func_flags = DEVINFO_IS_NEGATIVE;
 out:
-	if (!procat)
-		entry->func_flags = DEVINFO_IS_NEGATIVE;
-	else
-	{
-		entry->func_flags = flags;
-		entry->func_rettype = pgstrom_devtype_lookup(procform->prorettype);
-		Assert(entry->func_rettype != NULL);
-
-		for (i=0; i < procat->func_nargs; i++)
-		{
-			devtype_info   *dtype
-				= pgstrom_devtype_lookup(procat->func_argtypes[i]);
-
-			Assert(dtype != NULL);
-			entry->func_args = lappend(entry->func_args, dtype);
-		}
-
-		if (procat->func_callback)
-			procat->func_callback(entry, procform, procat);
-		else
-		{
-			Assert(procat->func_template != NULL);
-
-			if (strncmp(procat->func_template, "c:", 2) == 0)
-				devfunc_setup_cast(entry, procform, procat);
-			else if (strncmp(procat->func_template, "b:", 2) == 0)
-				devfunc_setup_oper_both(entry, procform, procat);
-			else if (strncmp(procat->func_template, "l:", 2) == 0 ||
-					 strncmp(procat->func_template, "r:", 2) == 0)
-				devfunc_setup_oper_either(entry, procform, procat);
-			else if (strncmp(procat->func_template, "f:", 2) == 0 ||
-					 strncmp(procat->func_template, "F:", 2) == 0)
-				devfunc_setup_func(entry, procform, procat);
-			else
-				entry->func_flags = DEVINFO_IS_NEGATIVE;
-		}
-	}
 	devfunc_info_slot[hash] = lappend(devfunc_info_slot[hash], entry);
 
 	MemoryContextSwitchTo(oldcxt);
-	ReleaseSysCache(tuple);
 
 	if (entry->func_flags & DEVINFO_IS_NEGATIVE)
 		return NULL;
 	return entry;
 }
 
+devfunc_info *
+pgstrom_devfunc_lookup(Oid func_oid)
+{
+	Form_pg_proc	proc;
+	HeapTuple		tuple;
+	devfunc_info   *dfunc;
 
+	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for function %u", func_oid);
+	proc = (Form_pg_proc) GETSTRUCT(tuple);
 
+	dfunc = pgstrom_devfunc_lookup_by_name(NameStr(proc->proname),
+										   proc->pronamespace,
+										   proc->pronargs,
+										   proc->proargtypes.values,
+										   proc->prorettype);
+	ReleaseSysCache(tuple);
 
+	return dfunc;
+}
 
+typedef struct
+{
+	StringInfoData	str;
+	List	   *type_defs;		/* list of devtype_info */
+	List	   *func_defs;		/* list of devfunc_info */
+	List	   *used_params;	/* list of Const or Param nodes */
+	List	   *used_vars;		/* list of Var nodes */
+	int			incl_flags;
+} codegen_walker_context;
 
+static devtype_info *
+devtype_lookup_and_track(Oid type_oid, codegen_walker_context *context)
+{
+	devtype_info   *dtype = pgstrom_devtype_lookup(type_oid);
+	if (dtype)
+		context->type_defs = list_append_unique(context->type_defs, dtype);
+	return dtype;
+}
 
+static devfunc_info *
+devfunc_lookup_and_track(Oid func_oid, codegen_walker_context *context)
+{
+	devfunc_info   *dfunc = pgstrom_devfunc_lookup(func_oid);
+	if (dfunc)
+	{
+		context->func_defs = list_append_unique(context->func_defs, dfunc);
+		context->incl_flags |= (dfunc->func_flags & DEVFUNC_INCL_FLAGS);
+	}
+	return dfunc;
+}
+
+static bool
+codegen_expression_walker(Node *node, codegen_walker_context *context)
+{
+	devtype_info   *dtype;
+	devfunc_info   *dfunc;
+	ListCell	   *cell;
+
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Const))
+	{
+		Const  *con = (Const *) node;
+		int		index = 1;
+
+		if (!devtype_lookup_and_track(con->consttype, context))
+			return true;
+
+		foreach (cell, context->used_params)
+		{
+			if (equal(node, lfirst(cell)))
+			{
+				appendStringInfo(&context->str, "KPARAM_%d", index);
+				return false;
+			}
+			index++;
+		}
+		context->used_params = lappend(context->used_params,
+									   copyObject(node));
+		appendStringInfo(&context->str, "KPARAM_%d",
+						 list_length(context->used_params));
+		return false;
+	}
+	else if (IsA(node, Param))
+	{
+		Param  *param = (Param *) node;
+		int		index = 1;
+
+		if (!devtype_lookup_and_track(param->paramtype, context))
+			return true;
+
+		foreach (cell, context->used_params)
+		{
+			if (equal(node, lfirst(cell)))
+			{
+				appendStringInfo(&context->str, "KPARAM_%u", index);
+				return false;
+			}
+			index++;
+		}
+		context->used_params = lappend(context->used_params,
+									   copyObject(node));
+		appendStringInfo(&context->str, "KPARAM_%u",
+						 list_length(context->used_params));
+		return false;
+	}
+	else if (IsA(node, Var))
+	{
+		Var	   *var = (Var *) node;
+		int		index = 1;
+
+		if (!devtype_lookup_and_track(var->vartype, context))
+			return true;
+
+		foreach (cell, context->used_vars)
+		{
+			if (equal(node, lfirst(cell)))
+			{
+				appendStringInfo(&context->str, "KVAR_%u", index);
+				return false;
+			}
+			index++;
+		}
+		context->used_vars = lappend(context->used_vars,
+									 copyObject(node));
+		appendStringInfo(&context->str, "KVAR_%u", index);
+		return false;
+	}
+	else if (IsA(node, FuncExpr))
+	{
+		FuncExpr   *func = (FuncExpr *) node;
+
+		dfunc = devfunc_lookup_and_track(func->funcid, context);
+		if (!func)
+			return true;
+		appendStringInfo(&context->str, "%s(", dfunc->func_ident);
+
+		foreach (cell, func->args)
+		{
+			if (cell != list_head(func->args))
+				appendStringInfo(&context->str, ", ");
+			if (codegen_expression_walker(lfirst(cell), context))
+				return true;
+		}
+		appendStringInfoChar(&context->str, ')');
+
+		return false;
+	}
+	else if (IsA(node, OpExpr) ||
+			 IsA(node, DistinctExpr))
+	{
+		OpExpr	   *op = (OpExpr *) node;
+
+		dfunc = devfunc_lookup_and_track(get_opcode(op->opno), context);
+		if (!dfunc)
+			return true;
+		appendStringInfo(&context->str, "%s(", dfunc->func_ident);
+
+		foreach (cell, op->args)
+		{
+			if (cell != list_head(op->args))
+				appendStringInfo(&context->str, ", ");
+			if (codegen_expression_walker(lfirst(cell), context))
+				return true;
+		}
+		appendStringInfoChar(&context->str, ')');
+
+		return false;
+	}
+	else if (IsA(node, NullTest))
+	{
+		NullTest   *nulltest = (NullTest *) node;
+		const char *func_ident;
+
+		if (nulltest->argisrow)
+			return true;
+
+		dtype = pgstrom_devtype_lookup(exprType((Node *)nulltest->arg));
+		if (!dtype)
+			return true;
+
+		switch (nulltest->nulltesttype)
+		{
+			case IS_NULL:
+				func_ident = dtype->type_is_null_fn->func_ident;
+				break;
+			case IS_NOT_NULL:
+				func_ident = dtype->type_is_not_null_fn->func_ident;
+				break;
+			default:
+				elog(ERROR, "unrecognized nulltesttype: %d",
+					 (int)nulltest->nulltesttype);
+				break;
+		}
+		appendStringInfo(&context->str, "%s(", func_ident);
+		if (codegen_expression_walker((Node *) nulltest->arg, context))
+			return true;
+		appendStringInfoChar(&context->str, ')');
+
+		return false;
+	}
+	else if (IsA(node, BooleanTest))
+	{
+		BooleanTest	   *booltest = (BooleanTest *) node;
+		const char	   *func_ident;
+
+		if (exprType((Node *)booltest->arg) != BOOLOID)
+			elog(ERROR, "argument of BooleanTest is not bool");
+
+		/* choose one of built-in functions */
+		switch (booltest->booltesttype)
+		{
+			case IS_TRUE:
+				func_ident = "pg_bool_is_true";
+				break;
+			case IS_NOT_TRUE:
+				func_ident = "pg_bool_is_not_true";
+				break;
+			case IS_FALSE:
+				func_ident = "pg_bool_is_false";
+				break;
+			case IS_NOT_FALSE:
+				func_ident = "pg_bool_is_not_false";
+				break;
+			case IS_UNKNOWN:
+				func_ident = "pg_bool_is_unknown";
+				break;
+			case IS_NOT_UNKNOWN:
+				func_ident = "pg_bool_is_not_unknown";
+				break;
+			default:
+				elog(ERROR, "unrecognized booltesttype: %d",
+					 (int)booltest->booltesttype);
+				break;
+		}
+		appendStringInfo(&context->str, "%s(", func_ident);
+		if (codegen_expression_walker((Node *) booltest->arg, context))
+			return true;
+		appendStringInfoChar(&context->str, ')');
+		return false;
+	}
+	else if (IsA(node, BoolExpr))
+	{
+		BoolExpr   *b = (BoolExpr *) node;
+
+		if (b->boolop == NOT_EXPR)
+		{
+			Assert(list_length(b->args) == 1);
+			appendStringInfo(&context->str, "pg_boolop_not(");
+			if (codegen_expression_walker(linitial(b->args), context))
+				return true;
+			appendStringInfoChar(&context->str, ')');
+		}
+		else if (b->boolop == AND_EXPR || b->boolop == OR_EXPR)
+		{
+			char	namebuf[NAMEDATALEN];
+			int		nargs = list_length(b->args);
+			Oid	   *argtypes = alloca(sizeof(Oid) * nargs);
+			int		i;
+
+			if (b->boolop == AND_EXPR)
+				snprintf(namebuf, sizeof(namebuf), "pg_boolop_and_%u", nargs);
+			else
+				snprintf(namebuf, sizeof(namebuf), "pg_boolop_or_%u", nargs);
+
+			for (i=0; i < nargs; i++)
+				argtypes[i] = BOOLOID;
+
+			/*
+			 * AND/OR Expr is device only functions, so no catalog entries
+			 * and needs to set up here.
+			 */
+			dfunc = pgstrom_devfunc_lookup_by_name(namebuf,
+												   InvalidOid,
+												   nargs,
+												   argtypes,
+												   BOOLOID);
+			if (!dfunc)
+				dfunc = devfunc_setup_boolop(b->boolop, namebuf, nargs);
+			context->func_defs = list_append_unique(context->func_defs, dfunc);
+			context->incl_flags |= (dfunc->func_flags & DEVFUNC_INCL_FLAGS);
+
+			appendStringInfo(&context->str, "%s(", dfunc->func_ident);
+			foreach (cell, b->args)
+			{
+				Assert(exprType(lfirst(cell)) == BOOLOID);
+				if (cell != list_head(b->args))
+					appendStringInfo(&context->str, ", ");
+				if (codegen_expression_walker(lfirst(cell), context))
+					return true;
+			}
+			appendStringInfoChar(&context->str, ')');
+		}
+		else
+			elog(ERROR, "unrecognized boolop: %d", (int) b->boolop);
+		return false;
+	}
+	return true;
+}
 
 char *
 pgstrom_codegen_expression(Expr *expr, codegen_context *context)
-{}
+{
+	codegen_walker_context	walker_context;
+
+	initStringInfo(&walker_context.str);
+	walker_context.type_defs = context->type_defs;
+	walker_context.func_defs = context->func_defs;
+	walker_context.used_params = context->used_params;
+	walker_context.used_vars = context->used_vars;
+	walker_context.incl_flags = context->incl_flags;
+
+	if (codegen_expression_walker((Node *) expr, &walker_context))
+		return NULL;
+
+	context->type_defs = walker_context.type_defs;
+	context->func_defs = walker_context.func_defs;
+	context->used_params = walker_context.used_params;
+	context->used_vars = walker_context.used_vars;
+	context->incl_flags = walker_context.incl_flags;
+
+	return walker_context.str.data;
+}
 
 char *
 pgstrom_codegen_declarations(codegen_context *context)
-{}
+{
+	StringInfoData	str;
+	ListCell	   *cell;
+
+	initStringInfo(&str);
+	appendStringInfo(&str, "#include \"opencl_common.h\"\n");
+	if (context->incl_flags & DEVFUNC_NEEDS_TIMELIB)
+		appendStringInfo(&str, "#include \"opencl_timelib.h\"\n");
+	if (context->incl_flags & DEVFUNC_NEEDS_TEXTLIB)
+		appendStringInfo(&str, "#include \"opencl_textlib.h\"\n");
+	if (context->incl_flags & DEVFUNC_NEEDS_NUMERICLIB)
+		appendStringInfo(&str, "#include \"opencl_numericlib.h\"\n");
+	appendStringInfoChar(&str, '\n');
+
+	foreach (cell, context->type_defs)
+	{
+		devtype_info   *dtype = lfirst(cell);
+
+		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
+			appendStringInfo(&str, "STROMCL_VARLENA_TYPE_TEMPLATE(%s)\n",
+							 dtype->type_ident);
+		else
+			appendStringInfo(&str, "STROMCL_SIMPLE_TYPE_TEMPLATE(%s,%s)\n",
+							 dtype->type_ident, dtype->type_base);
+	}
+	appendStringInfoChar(&str, '\n');
+
+	foreach (cell, context->func_defs)
+	{
+		devfunc_info   *dfunc = lfirst(cell);
+
+		appendStringInfo(&str, "%s\n", dfunc->func_decl);
+	}
+	return str.data;
+}
 
 static void
 codegen_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)

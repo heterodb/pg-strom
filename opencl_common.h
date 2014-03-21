@@ -109,6 +109,71 @@ typedef struct {
 	STROMCL_VARLENA_VARREF_TEMPLATE(NAME)		\
 	STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)
 
+/* Built-in types */
+STROMCL_SIMPLE_TYPE_TEMPLATE(bool, bool)
+
+/*
+ * Functions for BooleanTest
+ */
+static inline pg_bool_t
+pg_bool_is_true(pg_bool_t result)
+{
+	result.value = (!result.isnull && result.value);
+	result.isnull = false;
+	return result;
+}
+
+static inline pg_bool_t
+pg_bool_is_not_true(pg_bool_t result)
+{
+	result.value = (result.isnull || !result.value);
+	result.isnull = false;
+	return result;
+}
+
+static inline pg_bool_t
+pg_bool_is_false(pg_bool_t result)
+{
+	result.value = (!result.isnull && !result.value);
+	result.isnull = false;
+	return result;
+}
+
+static inline pg_bool_t
+pg_bool_is_not_false(pg_bool_t result)
+{
+	result.value = (result.isnull || result.value);
+	result.isnull = false;
+	return result;
+}
+
+static inline pg_bool_t
+pg_bool_is_unknown(pg_bool_t result)
+{
+	result.value = result.isnull;
+	result.isnull = false;
+	return result;
+}
+
+static inline pg_bool_t
+pg_bool_is_not_unknown(pg_bool_t result)
+{
+	result.value = !result.isnull;
+	result.isnull = false;
+	return result;
+}
+
+/*
+ * Functions for BoolOp (EXPR_AND and EXPR_OR shall be constructed on demand)
+ */
+static inline pg_bool_t
+pg_boolop_not(pg_bool_t result)
+{
+	result.value = !result.value;
+	/* if null is given, result is also null */
+	return arg;
+}
+
 #endif
 
 
