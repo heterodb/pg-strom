@@ -322,6 +322,50 @@ pgstrom_close_queue(pgstrom_queue *queue)
 }
 
 /*
+ * pgstrom_get_queue
+ *
+ * increment reference counter of the queue
+ */
+void
+pgstrom_get_queue(pgstrom_queue *queue)
+{
+	pthread_mutex_lock(&queue->lock);
+	Assert(queue->refcnt > 0);
+	queue->refcnt++;
+	pthread_mutex_unlock(&queue->lock);
+}
+
+/*
+ * pgstrom_put_queue
+ *
+ * decrement reference counter of the queue
+ */
+void
+pgstrom_put_queue(pgstrom_queue *queue)
+{
+	bool	release_queue = false;
+
+	pthread_mutex_lock(&queue->lock);
+	if (queue->refcnt > 0)
+	{
+		if (--queue->refcnt == 0)
+		{
+			/* only closed queue should become refcnt==0 */
+			Assert(queue->closed);
+			release_queue = true;
+		}
+	}
+	pthread_mutex_unlock(&queue->unlock);
+
+	if (queue_release)
+	{
+		pthread_cond_destroy(&queue->cond);
+		pthread_mutex_destroy(&queue->lock);
+		pgstrom_shmem_free(queue);
+	}
+}
+
+/*
  * pgstrom_mqueue_setup
  *
  * initialization post shared memory setting up
