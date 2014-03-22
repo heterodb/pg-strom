@@ -15,7 +15,6 @@
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "lib/ilist.h"
-#include "libpq/md5.h"
 #include "storage/barrier.h"
 #include "storage/ipc.h"
 #include "storage/shmem.h"
@@ -23,6 +22,7 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
+#include "utils/pg_crc.h"
 #include "pg_strom.h"
 #include <limits.h>
 #include <unistd.h>
@@ -81,6 +81,7 @@ typedef struct
 
 	/* for message queues */
 	shmem_context  *mqueue_context;
+	pgstrom_queue  *mqueue_server;
 
 	/* for zone management */
 	bool		is_ready;
@@ -149,40 +150,34 @@ typedef struct shmem_context
 	Size		total_active;
 	long		num_blocks;
 	long		num_chunks;
-	char		md5[16];
+	pg_crc32	magic_active;
+	pg_crc32	magic_free;
 	char		name[NAMEDATALEN];
 } shmem_context;
 
 typedef struct
 {
 	shmem_context  *context;
-	char			md5[16];
-	dlist_node		chain;
-	dlist_head		chunk_list;
-	dlist_head		free_list;
-
+	Size			nblocks;		/* number of blocks allocated */
+	dlist_node		chain;			/* lined of block_list of shmem_context */
+	dlist_head		chunk_list;		/* list of chunks in this bunch */
+	dlist_head		free_list;		/* list of free chunks in this bunch */
 	dlist_node		first_chunk;
 } shmem_bunch;
 
 typedef struct
 {
-	dlist_node		chunk_chain;	/* linked to chunk_list */
+	dlist_node		chunk_chain;	/* linked to chunk_list of bunch */
+	shmem_bunch	   *bunch;			/* back pointer to shmem_bunch */
+	Size			chunk_sz;		/* length of this chunk */
 	union {
-		dlist_node	free_chain;		/* linked to free_list */
-		struct {
-			void   *nullmark;
-			Size	size;
-		} active;
+		dlist_node	free_chain;
+		char		userdata[1];
 	};
-	char			userdata[FLEXIBLE_ARRAY_MEMBER];
 } shmem_chunk;
 
-#define SHMCHUNK_MAGIC_FREE			0xF9EEA9EA
-#define SHMCHUNK_MAGIC_ACTIVE		0xAC715AEA
-#define SHMEM_CHUNK_MAGIC(chunk)										\
-	*((uint32 *)(!(chunk)->active.nullmark ?							\
-				 (char *)(chunk) + (chunk)->active.size :				\
-				 (char *)(chunk)->chunk_chain.next - sizeof(uint32)))
+#define SHMEM_CHUNK_MAGIC(chunk)				\
+	*((pg_crc32 *)(((char *)(chunk)) + (chunk)->chunk_sz - sizeof(pg_crc32)))
 
 #define ADDRESS_IN_SHMEM(address)										\
 	((Size)(address) >= (Size)pgstrom_shmem_head->zone_baseaddr &&		\
@@ -261,6 +256,7 @@ pgstrom_shmem_context_create(const char *name)
 {
 	shmem_context  *context;
 	Size			namelen = strlen(name);
+	pg_crc32		crc;
 
 	if (namelen >= NAMEDATALEN - 1)
 		return NULL;	/* name too long */
@@ -275,7 +271,11 @@ pgstrom_shmem_context_create(const char *name)
 	context->total_active = 0;
 	context->num_blocks = 0;
 	context->num_chunks = 0;
-	pg_md5_binary(name, namelen, context->md5);
+	INIT_CRC32(crc);
+	COMP_CRC32(crc, name, strlen(name));
+	FIN_CRC32(crc);
+	context->magic_active = crc;
+	context->magic_free = crc ^ 0xaaaaaaaa;
 	strcpy(context->name, name);
 
 	SpinLockAcquire(&pgstrom_shmem_head->context_lock);
@@ -286,21 +286,33 @@ pgstrom_shmem_context_create(const char *name)
 	return context;
 }
 
-void
-pgstrom_shmem_context_reset(shmem_context *context)
+/*
+ * NOTE: caller must hold a lock on this context
+ */
+static void
+pgstrom_shmem_context_reset_nolock(shmem_context *context)
 {
 	dlist_mutable_iter	iter;
 
-	SpinLockAcquire(&context->lock);
 	dlist_foreach_modify(iter, &context->block_list)
 	{
 		shmem_bunch *bunch = dlist_container(shmem_bunch, chain, iter.cur);
 
-		Assert(memcmp(context->md5, bunch->md5, 16) == 0);
+		Assert(bunch->context == context);
 		dlist_delete(&bunch->chain);
 		pgstrom_shmem_block_free(bunch);
 	}
 	Assert(dlist_is_empty(&context->block_list));
+	context->total_active = 0;
+	context->num_blocks = 0;
+	context->num_chunks = 0;
+}
+
+void
+pgstrom_shmem_context_reset(shmem_context *context)
+{
+	SpinLockAcquire(&context->lock);
+	pgstrom_shmem_context_reset_nolock(context);
 	SpinLockRelease(&context->lock);
 }
 
@@ -309,13 +321,16 @@ pgstrom_shmem_context_delete(shmem_context *context)
 {
 	Assert(context != TopShmemContext);
 
-	/* remove from the global list */
 	SpinLockAcquire(&context->lock);
+	/* remove from the global list */
+	SpinLockAcquire(&pgstrom_shmem_head->context_lock);
 	dlist_delete(&context->chain);
+	SpinLockRelease(&pgstrom_shmem_head->context_lock);
+
+	/* then, release all */
+	pgstrom_shmem_context_reset_nolock(context);
 	SpinLockRelease(&context->lock);
 
-	/* then. release all */
-	pgstrom_shmem_context_reset(context);
 	pgstrom_shmem_free(context);
 }
 
@@ -325,40 +340,35 @@ pgstrom_shmem_alloc(shmem_context *context, Size size)
 	dlist_iter	iter1;
 	dlist_iter	iter2;
 	Size		required;
-	int			shift;
 	void	   *address = NULL;
 
-	required = MAXALIGN(offsetof(shmem_chunk, userdata[size + sizeof(uint32)]));
+	required = MAXALIGN(offsetof(shmem_chunk,
+								 userdata[size + sizeof(pg_crc32)]));
 
 	SpinLockAcquire(&context->lock);
-	while (true)
+	for (;;)
 	{
 		shmem_bunch	   *bunch;
+		shmem_chunk	   *cchunk;
 		Size			bunch_len;
-		shmem_chunk	   *chunk;
-		Size			chunk_len;
-		dlist_node	   *dnode;
+		Size			threshold;
 
 		dlist_foreach(iter1, &context->block_list)
 		{
 			bunch = dlist_container(shmem_bunch, chain, iter1.cur);
 
 			Assert((Size)bunch % SHMEM_BLOCKSZ == 0);
-			Assert(memcmp(bunch->md5, context->md5, 16) == 0);
+			Assert(bunch->context == context);
 
 			dlist_foreach(iter2, &bunch->free_list)
 			{
-				Size			padding;
+				cchunk = dlist_container(shmem_chunk, free_chain, iter2.cur);
 
-				chunk = dlist_container(shmem_chunk, free_chain, iter2.cur);
-				dnode = dlist_next_node(&bunch->chunk_list,
-										&chunk->chunk_chain);
-				chunk_len = (char *)dnode - (char *)chunk;
+				Assert(cchunk->bunch == bunch);
+				Assert(SHMEM_CHUNK_MAGIC(cchunk) == context->magic_free);
 
-				Assert(SHMEM_CHUNK_MAGIC(chunk) == SHMCHUNK_MAGIC_FREE);
-
-				/* is this free chunk has enough space to store it? */
-				if (required > chunk_len)
+				/* is this free chunk has enough space to allocate it? */
+				if (required > cchunk->chunk_sz)
 					continue;
 
 				/*
@@ -366,60 +376,64 @@ pgstrom_shmem_alloc(shmem_context *context, Size size)
 				 * perform as a free chunk being longer than "NAMEDATALEN" just
 				 * for threshold to avoid too small fraction.
 				 */
-				padding = MAXALIGN(offsetof(shmem_chunk,
-											userdata[NAMEDATALEN + sizeof(uint32)]));
-				if (required + padding < chunk_len)
+				threshold = MAXALIGN(offsetof(shmem_chunk,
+											  userdata[NAMEDATALEN +
+													   sizeof(pg_crc32)]));
+				if (required + threshold <= cchunk->chunk_sz)
 				{
 					shmem_chunk	   *nchunk
-						= (shmem_chunk *)((char *)chunk + required);
-					dlist_insert_after(&chunk->chunk_chain,
+						= (shmem_chunk *)((char *)cchunk + required);
+
+					nchunk->bunch = cchunk->bunch;
+					nchunk->chunk_sz = cchunk->chunk_sz - required;
+					cchunk->chunk_sz = required;
+					SHMEM_CHUNK_MAGIC(nchunk) = context->magic_free;
+					SHMEM_CHUNK_MAGIC(cchunk) = context->magic_active;
+					dlist_insert_after(&cchunk->chunk_chain,
 									   &nchunk->chunk_chain);
-					dlist_insert_after(&chunk->free_chain,
+					dlist_insert_after(&cchunk->free_chain,
 									   &nchunk->free_chain);
-					SHMEM_CHUNK_MAGIC(nchunk) = SHMCHUNK_MAGIC_FREE;
+					dlist_delete(&cchunk->free_chain);
+
 					context->num_chunks++;
 				}
-				dlist_delete(&chunk->free_chain);
-				chunk->active.nullmark = NULL;
-				chunk->active.size = size;
-				SHMEM_CHUNK_MAGIC(chunk) = SHMCHUNK_MAGIC_ACTIVE;
-
-				address = chunk->userdata;
+				else
+				{
+					dlist_delete(&cchunk->free_chain);
+					SHMEM_CHUNK_MAGIC(cchunk) = context->magic_active;
+				}
+				address = cchunk->userdata;
 
 				/* adjust statistic */
-				dnode = dlist_next_node(&bunch->chunk_list,
-										&chunk->chunk_chain);
-				context->total_active += (char *)dnode - (char *)chunk;
+				context->total_active += cchunk->chunk_sz;
 				goto out_unlock;
 			}
 		}
 		/*
 		 * No free space in the existing blocks, so allocate a new one.
 		 */
-		bunch_len = (offsetof(shmem_bunch, first_chunk) +			/* shmem_bunch */
-					 offsetof(shmem_chunk, userdata[required]) +	/* shmem_chunk */
-					 sizeof(uint32) +		/* SHMEM_CHUNK_MAGIC */
-					 sizeof(dlist_node));	/* terminator */
+		bunch_len = (offsetof(shmem_bunch, first_chunk) +
+					 offsetof(shmem_chunk, userdata[required +
+													sizeof(pg_crc32)]));
 		bunch = pgstrom_shmem_block_alloc(bunch_len);
 		if (!bunch)
 			goto out_unlock;
 
 		bunch->context = context;
-		memcpy(bunch->md5, context->md5, 16);
+		bunch->nblocks = (1 << find_least_pot(bunch_len));
 		dlist_init(&bunch->chunk_list);
 		dlist_init(&bunch->free_list);
-
-		chunk = (shmem_chunk *) &bunch->first_chunk;
-		dlist_push_tail(&bunch->chunk_list, &chunk->chunk_chain);
-		dlist_push_tail(&bunch->free_list, &chunk->free_chain);
-
-		shift = find_least_pot(bunch_len);
-		dnode = (dlist_node *)((char *)bunch + (1 << shift)) - 1;
-		dlist_push_tail(&bunch->chunk_list, dnode);
-		SHMEM_CHUNK_MAGIC(chunk) = SHMCHUNK_MAGIC_FREE;
-
 		dlist_push_tail(&context->block_list, &bunch->chain);
-		context->num_blocks += (1 << shift);
+
+		cchunk = (shmem_chunk *) &bunch->first_chunk;
+		cchunk->bunch = bunch;
+		cchunk->chunk_sz = (SHMEM_BLOCKSZ * bunch->nblocks -
+							offsetof(shmem_bunch, first_chunk));
+		SHMEM_CHUNK_MAGIC(cchunk) = context->magic_free;
+		dlist_push_tail(&bunch->chunk_list, &cchunk->chunk_chain);
+		dlist_push_tail(&bunch->free_list, &cchunk->free_chain);
+
+		context->num_blocks += bunch->nblocks;
 	}
 out_unlock:
 	SpinLockRelease(&context->lock);
@@ -430,38 +444,21 @@ out_unlock:
 void
 pgstrom_shmem_free(void *address)
 {
-	shmem_zone	   *zone;
-	shmem_block	   *block;
-	shmem_bunch	   *bunch;
 	shmem_context  *context;
-	shmem_chunk	   *chunk;
+	shmem_bunch	   *bunch;
+	shmem_chunk	   *cchunk;
 	shmem_chunk	   *pchunk;
 	shmem_chunk	   *nchunk;
-	int				index;
-	int				nshift;
 	dlist_node	   *dnode;
 
-	/* pull a zone that contains the address */
 	Assert(ADDRESS_IN_SHMEM(address));
-	index = ((Size)address - (Size)pgstrom_shmem_head->zone_baseaddr)
-		/ pgstrom_shmem_head->zone_length;
-	zone = pgstrom_shmem_head->zones[index];
+	cchunk = (shmem_chunk *)((Size)address -
+							 offsetof(shmem_chunk, userdata[0]));
+	bunch = cchunk->bunch;
+	Assert((Size)bunch == ((Size)address & ~((1UL << bunch->nblocks) - 1)));
 
-	/* pull blocksize of the block that contains the address */
-	Assert(ADDRESS_IN_SHMEM_ZONE(zone, address));
-	index = ((Size)address - (Size)zone->block_baseaddr) / SHMEM_BLOCKSZ;
-	block = &zone->blocks[index];
-	SpinLockAcquire(&zone->lock);
-	Assert(!block->active.nullmark);
-	nshift = block->active.nshift + SHMEM_BLOCKSZ_BITS;
-	SpinLockRelease(&zone->lock);
-
-	/* ok, we could pull a bunch that contains the supplied address  */
-	bunch = (shmem_bunch *)((Size)address & ~((1UL << nshift) - 1));
 	context = bunch->context;
-
-	Assert(ADDRESS_IN_SHMEM(context));
-	Assert(memcmp(bunch->md5, context->md5, 16) == 0);
+	Assert(SHMEM_CHUNK_MAGIC(cchunk) == context->magic_free);
 
 	SpinLockAcquire(&context->lock);
 #ifdef PGSTROM_DEBUG
@@ -471,59 +468,71 @@ pgstrom_shmem_free(void *address)
 
 		dlist_foreach(iter, &bunch->chunk_list)
 		{
-			chunk = dlist_container(shmem_chunk, chunk_chain, iter.cur);
+			cchunk = dlist_container(shmem_chunk, chunk_chain, iter.cur);
 
-			if (chunk->userdata == address)
+			if (cchunk->userdata == address)
 				found = true;
-			Assert(chunk->active.nullmark ?
-				   SHMEM_CHUNK_MAGIC(chunk) == SHMCHUNK_MAGIC_FREE :
-				   SHMEM_CHUNK_MAGIC(chunk) == SHMCHUNK_MAGIC_ACTIVE);
+			Assert(SHMEM_CHUNK_MAGIC(cchunk) == context->magic_free ||
+				   SHMEM_CHUNK_MAGIC(cchunk) == context->magic_active);
 		}
 		Assert(found);
 	} while(0);
 #endif
-	chunk = (shmem_chunk *)((Size)address - offsetof(shmem_chunk,
-													 userdata[0]));
 	/* adjust statistics */
-	dnode = dlist_next_node(&bunch->chunk_list,
-							&chunk->chunk_chain);
-	context->total_active -= (char *)dnode - (char *)chunk;
+	context->total_active -= cchunk->chunk_sz;
 
 	/*
 	 * merge with previous chunk, if it is also free.
 	 */
-	if (dlist_has_prev(&bunch->chunk_list, &chunk->chunk_chain))
+	if (dlist_has_prev(&bunch->chunk_list, &cchunk->chunk_chain))
 	{
-		dnode = dlist_prev_node(&bunch->chunk_list, &chunk->chunk_chain);
+		dnode = dlist_prev_node(&bunch->chunk_list, &cchunk->chunk_chain);
 		pchunk = dlist_container(shmem_chunk, chunk_chain, dnode);
 
-		if (pchunk->active.nullmark)
+		if (SHMEM_CHUNK_MAGIC(pchunk) == context->magic_free)
 		{
 			context->num_chunks--;
-			dlist_delete(&chunk->chunk_chain);
+			dlist_delete(&cchunk->chunk_chain);
+			pchunk->chunk_sz += cchunk->chunk_sz;
 			dlist_delete(&pchunk->free_chain);
-			chunk = pchunk;
+			cchunk = pchunk;
 		}
 	}
 
 	/*
 	 * merge with next chunk, if it is also free.
-	 * note that we need to confirm the dnode is not terminator of bunch
 	 */
-	dnode = dlist_next_node(&bunch->chunk_list, &chunk->chunk_chain);
-	if (dlist_has_next(&bunch->chunk_list, dnode))
+	if (dlist_has_next(&bunch->chunk_list, &cchunk->chunk_chain))
 	{
+		dnode = dlist_next_node(&bunch->chunk_list, &cchunk->chunk_chain);
 		nchunk = dlist_container(shmem_chunk, chunk_chain, dnode);
 
-		if (nchunk->active.nullmark)
+		if (SHMEM_CHUNK_MAGIC(nchunk) == context->magic_free)
 		{
 			context->num_chunks--;
+			cchunk->chunk_sz += nchunk->chunk_sz;
 			dlist_delete(&nchunk->chunk_chain);
 			dlist_delete(&nchunk->free_chain);
 		}
 	}
-	dlist_push_head(&bunch->free_list, &chunk->free_chain);
 
+	/* mark it as free chunk */
+	SHMEM_CHUNK_MAGIC(cchunk) = context->magic_free;
+	dlist_push_head(&bunch->free_list, &cchunk->free_chain);
+
+	/*
+	 * In case when this chunk is the last one in this bunch and
+	 * became free, it it time to release this bunch also.
+	 */
+	if (dlist_head_node(&bunch->chunk_list) == &cchunk->chunk_chain &&
+		!dlist_has_next(&bunch->chunk_list, &cchunk->chunk_chain))
+	{
+		Assert((void *)&bunch->first_chunk == (void *)&cchunk->chunk_chain);
+		dlist_delete(&bunch->chain);
+		context->num_blocks -= bunch->nblocks;
+		context->num_chunks--;
+		pgstrom_shmem_block_free(bunch);
+	}
 	SpinLockRelease(&context->lock);
 }
 
@@ -882,25 +891,8 @@ typedef struct
 	int64		usage;
 	int64		alloc;
 	int64		num_chunks;
-	text	   *md5sum;
+	text	   *crc32;
 } shmem_context_info;
-
-static text *
-md5_to_text(const char md5[16])
-{
-	static const char *hex = "0123456789abcdef";
-	char	buf[33];
-	int		q, w;
-
-	for (q = 0, w = 0; q < 16; q++)
-	{
-		buf[w++] = hex[(md5[q] >> 4) & 0x0F];
-		buf[w++] = hex[md5[q] & 0x0F];
-	}
-	buf[w] = '\0';
-
-	return cstring_to_text(buf);
-}
 
 Datum
 pgstrom_shmem_context_info(PG_FUNCTION_ARGS)
@@ -929,9 +921,9 @@ pgstrom_shmem_context_info(PG_FUNCTION_ARGS)
 						   INT8OID, -1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "alloc",
 						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "num_chunks",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "n_chunks",
 						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 6, "md5sum",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 6, "crc32",
 						   TEXTOID, -1, 0);
 		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
 
@@ -951,8 +943,10 @@ pgstrom_shmem_context_info(PG_FUNCTION_ARGS)
 				cxt_info->usage = context->total_active;
 				cxt_info->alloc = context->num_blocks * SHMEM_BLOCKSZ;
 				cxt_info->num_chunks = context->num_chunks;
-				cxt_info->md5sum = md5_to_text(context->md5);
-
+				cxt_info->crc32
+					= cstring_to_text(psprintf("%08x,%08x",
+											   context->magic_active,
+											   context->magic_free));
 				cxt_list = lappend(cxt_list, cxt_info);
 			}
 		}
@@ -982,7 +976,7 @@ pgstrom_shmem_context_info(PG_FUNCTION_ARGS)
 	values[2] = Int64GetDatum(cxt_info->usage);
 	values[3] = Int64GetDatum(cxt_info->alloc);
 	values[4] = Int64GetDatum(cxt_info->num_chunks);
-	values[5] = PointerGetDatum(cxt_info->md5sum);
+	values[5] = PointerGetDatum(cxt_info->crc32);
 
 	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
 
@@ -996,54 +990,54 @@ construct_shmem_top_context(const char *name, shmem_zone *zone)
 	shmem_bunch	   *bunch;
 	shmem_chunk	   *chunk1;
 	shmem_chunk	   *chunk2;
-	dlist_node	   *dnode;
 	shmem_context  *context;
-	Size			name_len = strlen(name);
+	Size			length;
 
 	/* allocate a block */
 	bunch = pgstrom_shmem_zone_block_alloc(zone, SHMEM_BLOCKSZ);
 	if (!bunch)
 		elog(ERROR, "out of shared memory");
 
+	/* setup a bunch */
+	bunch->nblocks = 1;
 	dlist_init(&bunch->chunk_list);
 	dlist_init(&bunch->free_list);
 
-	/* 1st active chunk */
+	/* 1st active chunk for top shared memory context */
+	length = MAXALIGN(offsetof(shmem_chunk, userdata[sizeof(shmem_context) +
+													 sizeof(pg_crc32)]));
 	chunk1 = (shmem_chunk *)&bunch->first_chunk;
-	chunk1->active.nullmark = NULL;
-	chunk1->active.size =
-		offsetof(shmem_chunk, userdata[0]) +
-		offsetof(shmem_context, name[name_len + 1]);
+	chunk1->bunch = bunch;
+	chunk1->chunk_sz = length;
+
+	/* contents of chunk1 is memory context */
 	context = (shmem_context *)chunk1->userdata;
-	dlist_push_tail(&bunch->chunk_list, &chunk1->chunk_chain);
-
-	/* 2nd free chunk */
-	chunk2 = (shmem_chunk *)
-		((char *)chunk1 + MAXALIGN(chunk1->active.size + sizeof(uint32)));
-	dlist_push_tail(&bunch->free_list, &chunk2->free_chain);
-	dlist_push_tail(&bunch->chunk_list, &chunk2->chunk_chain);
-
-	/* End of bunch marker */
-	dnode = (dlist_node *)
-		 ((char *)bunch + SHMEM_BLOCKSZ - sizeof(dlist_node));
-	dlist_push_tail(&bunch->chunk_list, dnode);
-
-	SHMEM_CHUNK_MAGIC(chunk1) = SHMCHUNK_MAGIC_ACTIVE;
-	SHMEM_CHUNK_MAGIC(chunk2) = SHMCHUNK_MAGIC_FREE;
-
-	/* initialize the context */
 	context->owner = getpid();
 	SpinLockInit(&context->lock);
 	dlist_init(&context->block_list);
-	context->total_active = (char *)chunk2 - (char *)chunk1;
-	context->num_blocks = 1;
+	context->total_active = chunk1->chunk_sz;
+	context->num_blocks = bunch->nblocks;
 	context->num_chunks = 2;
-	pg_md5_binary(name, name_len, context->md5);
-	strcpy(context->name, name);
+	strcpy(context->name, "Top Shared Memory Context");
+	INIT_CRC32(context->magic_active);
+	COMP_CRC32(context->magic_active, context->name, strlen(context->name));
+	FIN_CRC32(context->magic_active);
+	context->magic_free = context->magic_active ^ 0xaaaaaaaa;
 
-	bunch->context = context;
-	memcpy(bunch->md5, context->md5, 16);
 	dlist_push_head(&context->block_list, &bunch->chain);
+
+	SHMEM_CHUNK_MAGIC(chunk1) = context->magic_active;
+	dlist_push_tail(&bunch->chunk_list, &chunk1->chunk_chain);
+
+	/* 2nd free chunk */
+	chunk2 = (shmem_chunk *)((char *)chunk1 + chunk1->chunk_sz);
+	chunk2->bunch = bunch;
+	chunk2->chunk_sz = (SHMEM_BLOCKSZ * bunch->nblocks -
+						offsetof(shmem_bunch, first_chunk) -
+						chunk1->chunk_sz);
+	SHMEM_CHUNK_MAGIC(chunk2) = context->magic_free;
+	dlist_push_tail(&bunch->free_list, &chunk2->free_chain);
+    dlist_push_tail(&bunch->chunk_list, &chunk2->chunk_chain);
 
 	SpinLockAcquire(&pgstrom_shmem_head->context_lock);
 	dlist_push_tail(&pgstrom_shmem_head->context_list, &context->chain);
@@ -1304,12 +1298,28 @@ pgstrom_register_device_info(List *dev_list)
 shmem_context *
 pgstrom_get_mqueue_context(void)
 {
+	Assert(pgstrom_shmem_head->mqueue_context != NULL);
 	return pgstrom_shmem_head->mqueue_context;
 }
 
-void
-pgstrom_register_mqueue_context(shmem_context *context)
+pgstrom_queue *
+pgstrom_get_server_mqueue(void)
 {
+	Assert(pgstrom_shmem_head->mqueue_server != NULL);
+	return pgstrom_shmem_head->mqueue_server;
+}
+
+void
+pgstrom_shmem_mqueue_setup(void)
+{
+	shmem_context  *context;
+
+	context = pgstrom_shmem_context_create("PG-Strom Message Queue");
+	if (!context)
+		elog(ERROR, "failed to create shared memory context");
 	Assert(pgstrom_shmem_head->mqueue_context == NULL);
 	pgstrom_shmem_head->mqueue_context = context;
+
+	/* create a message queue for OpenCL background server */
+	pgstrom_shmem_head->mqueue_server = pgstrom_create_queue(true);
 }

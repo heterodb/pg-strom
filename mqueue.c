@@ -12,6 +12,9 @@
  */
 #include "postgres.h"
 #include "miscadmin.h"
+#include "utils/guc.h"
+#include <limits.h>
+#include <sys/time.h>
 #include "pg_strom.h"
 
 static pthread_mutexattr_t	mutex_attr;
@@ -39,7 +42,6 @@ pgstrom_create_queue(bool is_server)
 {
 	shmem_context  *context = pgstrom_get_mqueue_context();
 	pgstrom_queue  *queue;
-	int		rc;
 
 	Assert(context != NULL);
 	queue = pgstrom_shmem_alloc(context, sizeof(pgstrom_queue));
@@ -51,7 +53,7 @@ pgstrom_create_queue(bool is_server)
 	if (pthread_cond_init(&queue->cond, &cond_attr) != 0)
 		goto error;
 	dlist_init(&queue->qhead);
-	if (persistent)
+	if (is_server)
 		queue->refcnt = -1;
 	else
 		queue->refcnt = 1;
@@ -75,7 +77,6 @@ bool
 pgstrom_enqueue_message(pgstrom_queue *queue, pgstrom_message *message)
 {
 	pgstrom_queue *respq;
-	bool	result;
 	int		rc;
 
 	pthread_mutex_lock(&queue->lock);
@@ -130,6 +131,7 @@ pgstrom_reply_message(pgstrom_message *message)
 	pgstrom_queue  *respq = message->respq;
 	bool	queue_free = false;
 	bool	message_free = false;
+	int		rc;
 
 	pthread_mutex_lock(&respq->lock);
 	if (respq->closed)
@@ -137,7 +139,7 @@ pgstrom_reply_message(pgstrom_message *message)
 	else
 	{
 		/* reply this message */
-		Assert(queue->refcnt > 0);
+		Assert(respq->refcnt > 0);
 		dlist_push_tail(&respq->qhead, &message->chain);
 		rc = pthread_cond_signal(&respq->cond);
 		Assert(rc == 0);
@@ -241,7 +243,7 @@ pgstrom_dequeue_message(pgstrom_queue *queue)
 	 */
 	if (queue_release)
 	{
-		Assert(respq->
+		Assert(queue->closed);
 		pthread_cond_destroy(&queue->cond);
 		pthread_mutex_destroy(&queue->lock);
 		pgstrom_shmem_free(queue);
@@ -260,7 +262,6 @@ pgstrom_try_dequeue_message(pgstrom_queue *queue)
 {
 	pgstrom_message *result = NULL;
 	bool	queue_release = false;
-	int		rc;
 
 	pthread_mutex_lock(&queue->lock);
 	if (!dlist_is_empty(&queue->qhead))
@@ -300,7 +301,7 @@ pgstrom_try_dequeue_message(pgstrom_queue *queue)
 void
 pgstrom_close_queue(pgstrom_queue *queue)
 {
-	bool	release_queue = false;
+	bool	queue_release = false;
 
 	pthread_mutex_lock(&queue->lock);
 	Assert(!queue->closed);
@@ -309,9 +310,9 @@ pgstrom_close_queue(pgstrom_queue *queue)
 	if (queue->refcnt > 0)
 	{
 		if (--queue->refcnt == 0)
-			release_queue = true;
+			queue_release = true;
 	}
-	pthread_mutex_unlock(&queue->unlock);
+	pthread_mutex_unlock(&queue->lock);
 
 	if (queue_release)
 	{
@@ -343,7 +344,7 @@ pgstrom_get_queue(pgstrom_queue *queue)
 void
 pgstrom_put_queue(pgstrom_queue *queue)
 {
-	bool	release_queue = false;
+	bool	queue_release = false;
 
 	pthread_mutex_lock(&queue->lock);
 	if (queue->refcnt > 0)
@@ -352,10 +353,10 @@ pgstrom_put_queue(pgstrom_queue *queue)
 		{
 			/* only closed queue should become refcnt==0 */
 			Assert(queue->closed);
-			release_queue = true;
+			queue_release = true;
 		}
 	}
-	pthread_mutex_unlock(&queue->unlock);
+	pthread_mutex_unlock(&queue->lock);
 
 	if (queue_release)
 	{
@@ -366,28 +367,12 @@ pgstrom_put_queue(pgstrom_queue *queue)
 }
 
 /*
- * pgstrom_mqueue_setup
- *
- * initialization post shared memory setting up
- */
-void
-pgstrom_mqueue_setup(void)
-{
-	shmem_context  *context = pgstrom_shmem_context_create("message queue");
-
-	if (!context)
-		elog(ERROR, "failed to create shared memory context");
-
-	pgstrom_register_mqueue_context(context);
-}
-
-/*
- * pgstrom_mqueue_init
+ * pgstrom_init_mqueue
  *
  * initialization at library loading
  */
 void
-pgstrom_mqueue_init(void)
+pgstrom_init_mqueue(void)
 {
 	int		rc;
 

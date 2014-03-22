@@ -131,10 +131,13 @@ extern pgstrom_queue *pgstrom_create_queue(bool is_server);
 extern bool pgstrom_enqueue_message(pgstrom_queue *queue,
 									pgstrom_message *message);
 extern pgstrom_message *pgstrom_dequeue_message(pgstrom_queue *queue);
-extern pgstrom_message *pgstrom_try_dequeue(pgstrom_queue *queue);
+extern pgstrom_message *pgstrom_try_dequeue_message(pgstrom_queue *queue);
 extern void pgstrom_close_queue(pgstrom_queue *queue);
+extern void pgstrom_reply_message(pgstrom_message *message);
+extern void pgstrom_get_queue(pgstrom_queue *queue);
+extern void pgstrom_put_queue(pgstrom_queue *queue);
 
-extern void pgstrom_setup_mqueue(void);
+extern void pgstrom_shmem_mqueue_setup(void);
 extern void pgstrom_init_mqueue(void);
 
 /*
@@ -190,6 +193,7 @@ extern pgstrom_device_info *pgstrom_get_device_info(int index);
 extern void pgstrom_register_device_info(List *dev_list);
 
 extern shmem_context *pgstrom_get_mqueue_context(void);
+extern pgstrom_queue *pgstrom_get_server_mqueue(void);
 extern void pgstrom_register_mqueue_context(shmem_context *context);
 
 /*
