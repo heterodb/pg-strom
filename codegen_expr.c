@@ -163,6 +163,8 @@ pgstrom_devtype_lookup(Oid type_oid)
 				decl = psprintf("STROMCL_VRALENA_TYPE_TEMPLATE(%s)",
 								entry->type_ident);
 			entry->type_decl = decl;
+			if (devtype_catalog[i].type_is_builtin)
+				entry->type_flags |= DEVTYPE_IS_BUILTIN;
 			break;
 		}
 		if (i == lengthof(devtype_catalog))
@@ -493,6 +495,25 @@ static devfunc_catalog_t devfunc_timelib_catalog[] = {
 	{ "date_pli", 2, {DATEOID, INT4OID}, "F:pg_date_pli", NULL },
 	{ "integer_pl_date", 2, {INT4OID, DATEOID}, "F:pg_integer_pl_date", NULL },
 	{ "date_mii", 2, {DATEOID, INT4OID}, "F:pg_date_mii", NULL },
+	/* timedate comparison */
+	{ "date_eq", 2, {DATEOID, DATEOID}, "b:==", NULL },
+	{ "date_ne", 2, {DATEOID, DATEOID}, "b:!=", NULL },
+	{ "date_lt", 2, {DATEOID, DATEOID}, "b:<", NULL },
+	{ "date_le", 2, {DATEOID, DATEOID}, "b:<=", NULL },
+	{ "date_gt", 2, {DATEOID, DATEOID}, "b:>", NULL },
+	{ "date_ge", 2, {DATEOID, DATEOID}, "b:>=", NULL },
+	{ "time_eq", 2, {TIMEOID, TIMEOID}, "b:==", NULL },
+	{ "time_ne", 2, {TIMEOID, TIMEOID}, "b:!=", NULL },
+	{ "time_lt", 2, {TIMEOID, TIMEOID}, "b:<", NULL },
+	{ "time_le", 2, {TIMEOID, TIMEOID}, "b:<=", NULL },
+	{ "time_gt", 2, {TIMEOID, TIMEOID}, "b:>", NULL },
+	{ "time_ge", 2, {TIMEOID, TIMEOID}, "b:>=", NULL },
+	{ "timestamp_eq", 2, {TIMESTAMPOID, TIMESTAMPOID}, "F:pg_timestamp_eq", NULL },
+	{ "timestamp_ne", 2, {TIMESTAMPOID, TIMESTAMPOID}, "F:pg_timestamp_ne", NULL },
+	{ "timestamp_lt", 2, {TIMESTAMPOID, TIMESTAMPOID}, "F:pg_timestamp_lt", NULL },
+	{ "timestamp_le", 2, {TIMESTAMPOID, TIMESTAMPOID}, "F:pg_timestamp_le", NULL },
+	{ "timestamp_gt", 2, {TIMESTAMPOID, TIMESTAMPOID}, "F:pg_timestamp_gt", NULL },
+	{ "timestamp_ge", 2, {TIMESTAMPOID, TIMESTAMPOID}, "F:pg_timestamp_ge", NULL },
 };
 
 static devfunc_catalog_t devfunc_textlib_catalog[] = {

@@ -16,6 +16,7 @@
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "nodes/pg_list.h"
+#include "miscadmin.h"
 #include "postmaster/bgworker.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
@@ -32,13 +33,14 @@ static int		opencl_platform_index;
 static void
 pgstrom_opencl_sigterm(SIGNAL_ARGS)
 {
-	/* need to update "InterruptPending" to break queue wait */
+	InterruptPending = true;
 	got_signal = true;
 }
 
 static void
 pgstrom_opencl_sighup(SIGNAL_ARGS)
 {
+	InterruptPending = true;
 	got_signal = true;
 }
 
