@@ -94,7 +94,7 @@ init_opencl_devices_and_shmem(void)
 		 zone_length);
 	pgstrom_setup_shmem(zone_length, on_shmem_zone_callback,
 						((pgstrom_device_info *)linitial(devList))->pl_info);
-	pgstrom_register_device_info(devList);
+	pgstrom_setup_opencl_devinfo(devList);
 }
 
 static void
@@ -110,8 +110,8 @@ pgstrom_opencl_main(Datum main_arg)
 	/* initialize opencl devices and shared memory segment */
 	init_opencl_devices_and_shmem();
 
-	/* initialize message queue stuff */
-	pgstrom_shmem_mqueue_setup();
+	/* final setup of message queue */
+	pgstrom_setup_mqueue();
 
 	elog(LOG, "Starting PG-Strom OpenCL Server");
 

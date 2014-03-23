@@ -31,10 +31,13 @@ _PG_init(void)
 	/* load OpenCL runtime and initialize entrypoints */
 	pgstrom_init_opencl_entry();
 
-	/* preparation to use ipc objects */
-	//pgstrom_init_mqueue();
+	/* initialization of device info on postmaster stage */
+	pgstrom_init_opencl_devinfo();
 
-	/* initialize shared memory segment and slab subsystem */
+	/* initialization of message queue on postmaster stage */
+	pgstrom_init_mqueue();
+
+	/* initialize shared memory segment and memory context stuff */
 	pgstrom_init_shmem();
 
 	/* registration of OpenCL background worker process */

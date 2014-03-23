@@ -16,8 +16,18 @@
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "nodes/pg_list.h"
+#include "storage/barrier.h"
+#include "storage/ipc.h"
+#include "storage/shmem.h"
 #include "utils/builtins.h"
 #include "pg_strom.h"
+
+/* variables to be located on shared memory segment */
+static shmem_startup_hook_type shmem_startup_hook_next;
+static struct {
+	int		num_devices;
+	pgstrom_device_info **devinfo_array;
+} *devinfo_shm_values;
 
 /*
  * Registration of OpenCL device info.
@@ -517,7 +527,7 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 	HeapTuple	tuple;
 	uint32		dindex;
 	uint32		pindex;
-	pgstrom_device_info *dinfo;
+	const pgstrom_device_info *dinfo;
 	const char *key;
 	const char *value;
 	char		buf[256];
@@ -844,3 +854,115 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
 }
 PG_FUNCTION_INFO_V1(pgstrom_opencl_device_info);
+
+
+
+
+/*
+ * Routines to get device properties.
+ */
+int
+pgstrom_get_device_nums(void)
+{
+	pg_memory_barrier();
+	return devinfo_shm_values->num_devices;
+}
+
+const pgstrom_device_info *
+pgstrom_get_device_info(unsigned int index)
+{
+	pg_memory_barrier();
+	if (index < devinfo_shm_values->num_devices)
+		return devinfo_shm_values->devinfo_array[index];
+	return NULL;
+}
+
+#define PLDEVINFO_SHIFT(dest,src,field)						\
+	(dest)->field = (char *)(dest) + ((src)->field - (char *)(src))
+
+void
+pgstrom_setup_opencl_devinfo(List *dev_list)
+{
+	pgstrom_platform_info  *pl_info;
+	pgstrom_platform_info  *pl_info_sh;
+	pgstrom_device_info **dev_array;
+	ListCell   *cell;
+	Size		length;
+	int			index;
+
+	Assert(devinfo_shm_values->num_devices == 0);
+	Assert(TopShmemContext != NULL);
+
+	/* copy platform info into shared memory segment */
+	pl_info = ((pgstrom_device_info *) linitial(dev_list))->pl_info;
+	length = offsetof(pgstrom_platform_info, buffer[pl_info->buflen]);
+	pl_info_sh = pgstrom_shmem_alloc(TopShmemContext, length);
+	if (!pl_info_sh)
+		elog(ERROR, "out of shared memory");
+	memcpy(pl_info_sh, pl_info, length);
+	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_profile);
+	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_version);
+	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_name);
+	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_vendor);
+	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_extensions);
+
+	/* copy device info into shared memory segment */
+	length = sizeof(pgstrom_device_info *) * list_length(dev_list);
+	dev_array = pgstrom_shmem_alloc(TopShmemContext, length);
+	if (!dev_array)
+		elog(ERROR, "out of shared memory");
+
+	index = 0;
+	foreach (cell, dev_list)
+	{
+		pgstrom_device_info	*dev_info = lfirst(cell);
+		pgstrom_device_info *dest;
+
+		length = offsetof(pgstrom_device_info, buffer[dev_info->buflen]);
+		dest = pgstrom_shmem_alloc(TopShmemContext, length);
+		if (!dest)
+			elog(ERROR, "out of shared memory");
+		memcpy(dest, dev_info, length);
+
+		/* pointer adjustment */
+		dest->pl_info = pl_info_sh;
+		PLDEVINFO_SHIFT(dest, dev_info, dev_device_extensions);
+		PLDEVINFO_SHIFT(dest, dev_info, dev_name);
+		PLDEVINFO_SHIFT(dest, dev_info, dev_opencl_c_version);
+		PLDEVINFO_SHIFT(dest, dev_info, dev_profile);
+		PLDEVINFO_SHIFT(dest, dev_info, dev_vendor);
+		PLDEVINFO_SHIFT(dest, dev_info, dev_version);
+		PLDEVINFO_SHIFT(dest, dev_info, driver_version);
+
+		dev_array[index++] = dest;
+	}
+	Assert(index == list_length(dev_list));
+
+	devinfo_shm_values->devinfo_array = dev_array;
+	devinfo_shm_values->num_devices = index;
+	pg_memory_barrier();
+}
+
+static void
+pgstrom_startup_opencl_devinfo(void)
+{
+	bool	found;
+
+	if (shmem_startup_hook_next)
+		(*shmem_startup_hook_next)();
+
+	devinfo_shm_values = ShmemInitStruct("devinfo_shm_values",
+										 MAXALIGN(sizeof(*devinfo_shm_values)),
+										 &found);
+	Assert(!found);
+	memset(devinfo_shm_values, 0, sizeof(*devinfo_shm_values));
+}
+
+void
+pgstrom_init_opencl_devinfo(void)
+{
+	/* aquires shared memory region */
+	RequestAddinShmemSpace(MAXALIGN(sizeof(*devinfo_shm_values)));
+	shmem_startup_hook_next = shmem_startup_hook;
+	shmem_startup_hook = pgstrom_startup_opencl_devinfo;
+}

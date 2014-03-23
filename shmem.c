@@ -75,14 +75,6 @@ typedef struct
 	slock_t		context_lock;
 	dlist_head	context_list;
 
-	/* for device management */
-	int			device_num;
-	pgstrom_device_info	**device_info;
-
-	/* for message queues */
-	shmem_context  *mqueue_context;
-	pgstrom_queue  *mqueue_server;
-
 	/* for zone management */
 	bool		is_ready;
 	int			num_zones;
@@ -342,6 +334,14 @@ pgstrom_shmem_alloc(shmem_context *context, Size size)
 	Size		required;
 	void	   *address = NULL;
 
+	/*
+	 * NOTE: if required size is less than sizeof(free_list), it makes
+	 * problem when cut off an active chunk from a bigger free chunk.
+	 * So, we expand the required size to the least length.
+	 */
+	if (size < sizeof(dlist_node))
+		size = sizeof(dlist_node);
+
 	required = MAXALIGN(offsetof(shmem_chunk,
 								 userdata[size + sizeof(pg_crc32)]));
 
@@ -386,6 +386,8 @@ pgstrom_shmem_alloc(shmem_context *context, Size size)
 
 					nchunk->bunch = cchunk->bunch;
 					nchunk->chunk_sz = cchunk->chunk_sz - required;
+
+				   
 					cchunk->chunk_sz = required;
 					SHMEM_CHUNK_MAGIC(nchunk) = context->magic_free;
 					SHMEM_CHUNK_MAGIC(cchunk) = context->magic_active;
@@ -1024,6 +1026,8 @@ construct_shmem_top_context(const char *name, shmem_zone *zone)
 	FIN_CRC32(context->magic_active);
 	context->magic_free = context->magic_active ^ 0xaaaaaaaa;
 
+	bunch->context = context;
+
 	dlist_push_head(&context->block_list, &bunch->chain);
 
 	SHMEM_CHUNK_MAGIC(chunk1) = context->magic_active;
@@ -1147,6 +1151,9 @@ pgstrom_startup_shmem(void)
 	Size	length;
 	bool	found;
 
+	if (shmem_startup_hook_next)
+		(*shmem_startup_hook_next)();
+
 	length = MAXALIGN(offsetof(shmem_head, zones[pgstrom_shmem_maxzones])) +
 		pgstrom_shmem_totalsize + SHMEM_BLOCKSZ;
 
@@ -1205,121 +1212,4 @@ pgstrom_init_shmem(void)
 
 	shmem_startup_hook_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_shmem;
-}
-
-/*
- * Routines to get device properties.
- */
-int
-pgstrom_get_device_nums(void)
-{
-	pg_memory_barrier();
-	return pgstrom_shmem_head->device_num;
-}
-
-pgstrom_device_info *
-pgstrom_get_device_info(int index)
-{
-	pg_memory_barrier();
-	if (index < 0 || index >= pgstrom_shmem_head->device_num)
-		return NULL;
-	return pgstrom_shmem_head->device_info[index];
-}
-
-#define PLDEVINFO_SHIFT(dest,src,field)						\
-	(dest)->field = (char *)(dest) + ((src)->field - (char *)(src))
-
-void
-pgstrom_register_device_info(List *dev_list)
-{
-	pgstrom_platform_info  *pl_info;
-	pgstrom_platform_info  *pl_info_sh;
-	pgstrom_device_info **dev_array;
-	ListCell   *cell;
-	Size		length;
-	int			index;
-
-	Assert(pgstrom_shmem_head->device_num == 0);
-	Assert(TopShmemContext != NULL);
-
-	/* copy platform info into shared memory segment */
-	pl_info = ((pgstrom_device_info *) linitial(dev_list))->pl_info;
-	length = offsetof(pgstrom_platform_info, buffer[pl_info->buflen]);
-	pl_info_sh = pgstrom_shmem_alloc(TopShmemContext, length);
-	if (!pl_info_sh)
-		elog(ERROR, "out of shared memory");
-	memcpy(pl_info_sh, pl_info, length);
-	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_profile);
-	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_version);
-	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_name);
-	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_vendor);
-	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_extensions);
-
-	/* copy device info into shared memory segment */
-	length = sizeof(pgstrom_device_info *) * list_length(dev_list);
-	dev_array = pgstrom_shmem_alloc(TopShmemContext, length);
-	if (!dev_array)
-		elog(ERROR, "out of shared memory");
-
-	index = 0;
-	foreach (cell, dev_list)
-	{
-		pgstrom_device_info	*dev_info = lfirst(cell);
-		pgstrom_device_info *dest;
-
-		length = offsetof(pgstrom_device_info, buffer[dev_info->buflen]);
-		dest = pgstrom_shmem_alloc(TopShmemContext, length);
-		if (!dest)
-			elog(ERROR, "out of shared memory");
-		memcpy(dest, dev_info, length);
-
-		/* pointer adjustment */
-		dest->pl_info = pl_info_sh;
-		PLDEVINFO_SHIFT(dest, dev_info, dev_device_extensions);
-		PLDEVINFO_SHIFT(dest, dev_info, dev_name);
-		PLDEVINFO_SHIFT(dest, dev_info, dev_opencl_c_version);
-		PLDEVINFO_SHIFT(dest, dev_info, dev_profile);
-		PLDEVINFO_SHIFT(dest, dev_info, dev_vendor);
-		PLDEVINFO_SHIFT(dest, dev_info, dev_version);
-		PLDEVINFO_SHIFT(dest, dev_info, driver_version);
-
-		dev_array[index++] = dest;
-	}
-	Assert(index == list_length(dev_list));
-
-	pgstrom_shmem_head->device_info = dev_array;
-	pgstrom_shmem_head->device_num = index;
-	pg_memory_barrier();
-}
-
-/*
- * shared facility for message queue
- */
-shmem_context *
-pgstrom_get_mqueue_context(void)
-{
-	Assert(pgstrom_shmem_head->mqueue_context != NULL);
-	return pgstrom_shmem_head->mqueue_context;
-}
-
-pgstrom_queue *
-pgstrom_get_server_mqueue(void)
-{
-	Assert(pgstrom_shmem_head->mqueue_server != NULL);
-	return pgstrom_shmem_head->mqueue_server;
-}
-
-void
-pgstrom_shmem_mqueue_setup(void)
-{
-	shmem_context  *context;
-
-	context = pgstrom_shmem_context_create("PG-Strom Message Queue");
-	if (!context)
-		elog(ERROR, "failed to create shared memory context");
-	Assert(pgstrom_shmem_head->mqueue_context == NULL);
-	pgstrom_shmem_head->mqueue_context = context;
-
-	/* create a message queue for OpenCL background server */
-	pgstrom_shmem_head->mqueue_server = pgstrom_create_queue(true);
 }

@@ -128,16 +128,15 @@ typedef struct pgstrom_message {
 } pgstrom_message;
 
 extern pgstrom_queue *pgstrom_create_queue(bool is_server);
-extern bool pgstrom_enqueue_message(pgstrom_queue *queue,
-									pgstrom_message *message);
+extern bool pgstrom_enqueue_message(pgstrom_message *message);
+extern void pgstrom_reply_message(pgstrom_message *message);
 extern pgstrom_message *pgstrom_dequeue_message(pgstrom_queue *queue);
 extern pgstrom_message *pgstrom_try_dequeue_message(pgstrom_queue *queue);
+extern pgstrom_message *pgstrom_dequeue_server_message(void);
 extern void pgstrom_close_queue(pgstrom_queue *queue);
-extern void pgstrom_reply_message(pgstrom_message *message);
 extern void pgstrom_get_queue(pgstrom_queue *queue);
 extern void pgstrom_put_queue(pgstrom_queue *queue);
-
-extern void pgstrom_shmem_mqueue_setup(void);
+extern void pgstrom_setup_mqueue(void);
 extern void pgstrom_init_mqueue(void);
 
 /*
@@ -146,6 +145,11 @@ extern void pgstrom_init_mqueue(void);
 extern pgstrom_device_info *pgstrom_get_opencl_device_info(int index);
 extern int	pgstrom_get_opencl_device_num(void);
 extern List *pgstrom_collect_opencl_device_info(int platform_index);
+
+extern int	pgstrom_get_device_nums(void);
+extern const pgstrom_device_info *pgstrom_get_device_info(unsigned int index);
+extern void pgstrom_setup_opencl_devinfo(List *dev_list);
+extern void pgstrom_init_opencl_devinfo(void);
 
 /*
  * opencl_entry.c
@@ -187,14 +191,6 @@ extern void pgstrom_init_shmem(void);
 
 extern Datum pgstrom_shmem_block_info(PG_FUNCTION_ARGS);
 extern Datum pgstrom_shmem_context_info(PG_FUNCTION_ARGS);
-
-extern int	pgstrom_get_device_nums(void);
-extern pgstrom_device_info *pgstrom_get_device_info(int index);
-extern void pgstrom_register_device_info(List *dev_list);
-
-extern shmem_context *pgstrom_get_mqueue_context(void);
-extern pgstrom_queue *pgstrom_get_server_mqueue(void);
-extern void pgstrom_register_mqueue_context(shmem_context *context);
 
 /*
  * codegen_expr.c

@@ -12,6 +12,8 @@
  */
 #include "postgres.h"
 #include "miscadmin.h"
+#include "storage/ipc.h"
+#include "storage/shmem.h"
 #include "utils/guc.h"
 #include <limits.h>
 #include <sys/time.h>
@@ -21,6 +23,13 @@ static pthread_mutexattr_t	mutex_attr;
 static pthread_rwlockattr_t	rwlock_attr;
 static pthread_condattr_t	cond_attr;
 static int		pgstrom_mqueue_timeout;
+
+/* variables related to shared memory segment */
+static shmem_startup_hook_type shmem_startup_hook_next;
+static struct {
+	shmem_context  *shmcontext;		/* shred memory context for mqueue */
+	pgstrom_queue  *serv_mqueue;	/* queue for OpenCL background server */
+} *mqueue_shm_values;
 
 /*
  * pgstrom_create_queue
@@ -40,7 +49,7 @@ static int		pgstrom_mqueue_timeout;
 pgstrom_queue *
 pgstrom_create_queue(bool is_server)
 {
-	shmem_context  *context = pgstrom_get_mqueue_context();
+	shmem_context  *context = mqueue_shm_values->shmcontext;
 	pgstrom_queue  *queue;
 
 	Assert(context != NULL);
@@ -74,15 +83,16 @@ error:
  * server.
  */
 bool
-pgstrom_enqueue_message(pgstrom_queue *queue, pgstrom_message *message)
+pgstrom_enqueue_message(pgstrom_message *message)
 {
-	pgstrom_queue *respq;
+	pgstrom_queue  *mqueue = mqueue_shm_values->serv_mqueue;
+	pgstrom_queue  *respq;
 	int		rc;
 
-	pthread_mutex_lock(&queue->lock);
-	if (queue->closed)
+	pthread_mutex_lock(&mqueue->lock);
+	if (mqueue->closed)
 	{
-		pthread_mutex_unlock(&queue->lock);
+		pthread_mutex_unlock(&mqueue->lock);
 		return false;
 	}
 	/*
@@ -94,11 +104,11 @@ pgstrom_enqueue_message(pgstrom_queue *queue, pgstrom_message *message)
 	respq = message->respq;
 
 	/* enqueue this message */
-	Assert(queue->refcnt < 0);
-	dlist_push_tail(&queue->qhead, &message->chain);
-	rc = pthread_cond_signal(&queue->cond);
+	Assert(mqueue->refcnt < 0);
+	dlist_push_tail(&mqueue->qhead, &message->chain);
+	rc = pthread_cond_signal(&mqueue->cond);
 	Assert(rc == 0);
-	pthread_mutex_unlock(&queue->lock);
+	pthread_mutex_unlock(&mqueue->lock);
 
 	/*
 	 * Increment expected number of response messages, because we cannot
@@ -292,6 +302,17 @@ pgstrom_try_dequeue_message(pgstrom_queue *queue)
 }
 
 /*
+ * pgstrom_dequeue_server_message
+ *
+ * dequeue a message from the server message queue
+ */
+pgstrom_message *
+pgstrom_dequeue_server_message(void)
+{
+	return pgstrom_dequeue_message(mqueue_shm_values->serv_mqueue);
+}
+
+/*
  * pgstrom_close_queue
  *
  * It closes this message queue. Once a message queue got closed, it does not
@@ -367,6 +388,51 @@ pgstrom_put_queue(pgstrom_queue *queue)
 }
 
 /*
+ * pgstrom_setup_mqueue
+ *
+ * final initialization after the shared memory context got available
+ */
+void
+pgstrom_setup_mqueue(void)
+{
+	shmem_context  *context;
+	pgstrom_queue  *mqueue;
+
+	context = pgstrom_shmem_context_create("PG-Strom Message Queue");
+	if (!context)
+		elog(ERROR, "failed to create shared memory context");
+	mqueue_shm_values->shmcontext = context;
+
+	mqueue = pgstrom_create_queue(true);
+	if (!mqueue)
+		elog(ERROR, "failed to create PG-Strom server message queue");
+	mqueue_shm_values->serv_mqueue = pgstrom_create_queue(true);
+
+	elog(LOG, "PG-Strom: Message Queue (context=%p, server mqueue=%p)",
+		 context, mqueue);
+}
+
+/*
+ * pgstrom_startup_mqueue
+ *
+ * allocation of shared memory for message queue
+ */
+static void
+pgstrom_startup_mqueue(void)
+{
+	bool	found;
+
+	if (shmem_startup_hook_next)
+		(*shmem_startup_hook_next)();
+
+	mqueue_shm_values = ShmemInitStruct("mqueue_shm_values",
+										MAXALIGN(sizeof(*mqueue_shm_values)),
+										&found);
+	Assert(!found);
+	memset(mqueue_shm_values, 0, sizeof(*mqueue_shm_values));
+}
+
+/*
  * pgstrom_init_mqueue
  *
  * initialization at library loading
@@ -417,4 +483,9 @@ pgstrom_init_mqueue(void)
 	if (rc != 0)
 		elog(ERROR, "failed on pthread_condattr_setpshared: %s",
 			 strerror(rc));
+
+	/* aquires shared memory region */
+	RequestAddinShmemSpace(MAXALIGN(sizeof(*mqueue_shm_values)));
+	shmem_startup_hook_next = shmem_startup_hook;
+	shmem_startup_hook = pgstrom_startup_mqueue;
 }
