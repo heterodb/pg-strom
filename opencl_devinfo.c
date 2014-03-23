@@ -367,13 +367,13 @@ out_clean:
 }
 
 /*
- * pgstrom_collect_opencl_device_info
+ * pgstrom_collect_device_info
  *
  * It collects properties of all the OpenCL devices. It shall be called once
  * by the OpenCL management worker process, prior to any other backends.
  */
 List *
-pgstrom_collect_opencl_device_info(int pl_index)
+pgstrom_collect_device_info(int pl_index)
 {
 	cl_platform_id	platforms[32];
 	cl_uint			n_platform;

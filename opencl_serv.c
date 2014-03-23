@@ -79,7 +79,7 @@ init_opencl_devices_and_shmem(void)
 	List	   *devList;
 	ListCell   *cell;
 
-	devList = pgstrom_collect_opencl_device_info(opencl_platform_index);
+	devList = pgstrom_collect_device_info(opencl_platform_index);
 	if (devList == NIL)
 		elog(ERROR, "PG-Strom: unavailable to use any OpenCL devices");
 
@@ -112,6 +112,7 @@ pgstrom_opencl_main(Datum main_arg)
 
 	/* final setup of message queue */
 	pgstrom_setup_mqueue();
+	pgstrom_setup_opencl_devprog();
 
 	elog(LOG, "Starting PG-Strom OpenCL Server");
 

@@ -33,6 +33,7 @@ _PG_init(void)
 
 	/* initialization of device info on postmaster stage */
 	pgstrom_init_opencl_devinfo();
+	pgstrom_init_opencl_devprog();
 
 	/* initialization of message queue on postmaster stage */
 	pgstrom_init_mqueue();

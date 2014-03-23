@@ -142,14 +142,22 @@ extern void pgstrom_init_mqueue(void);
 /*
  * opencl_devinfo.c
  */
-extern pgstrom_device_info *pgstrom_get_opencl_device_info(int index);
-extern int	pgstrom_get_opencl_device_num(void);
-extern List *pgstrom_collect_opencl_device_info(int platform_index);
-
+extern List *pgstrom_collect_device_info(int platform_index);
 extern int	pgstrom_get_device_nums(void);
 extern const pgstrom_device_info *pgstrom_get_device_info(unsigned int index);
 extern void pgstrom_setup_opencl_devinfo(List *dev_list);
 extern void pgstrom_init_opencl_devinfo(void);
+
+/*
+ * opencl_devprog.c
+ */
+extern cl_program pgstrom_lookup_opencl_devprog(Datum dprog_key);
+extern Datum pgstrom_create_opencl_devprog(const char *source,
+										   int32 extra_libs);
+extern void pgstrom_get_opencl_devprog(Datum dprog_key);
+extern void pgstrom_put_opencl_devprog(Datum dprog_key);
+extern void pgstrom_setup_opencl_devprog(void);
+extern void pgstrom_init_opencl_devprog(void);
 
 /*
  * opencl_entry.c
