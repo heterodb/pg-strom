@@ -43,12 +43,17 @@ typedef struct {
 	int			refcnt;	/* opencl_devprog_shm_values->lock */
 	slock_t		lock;
 	pg_crc32	crc;
-	int			status;
+	int			status;		/* one of the DEVPROG_STATUS_* */
 	cl_program	program;	/* valid only OpenCL background server */
 	char	   *errmsg;		/* error message if build error */
 	int32		extra_libs;	/* set of DEVFUNC_NEEDS_* */
 	Size		source_len;
-	char		source[FLEXIBLE_ARRAY_MEMBER];
+	char	   *source;
+	int			num_param_attrs;
+	int			num_value_attrs;
+	simple_pg_attribute	*param_attrs;
+	simple_pg_attribute	*value_attrs;
+	char		data[FLEXIBLE_ARRAY_MEMBER];
 } devprog_entry;
 
 cl_program

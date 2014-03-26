@@ -47,6 +47,59 @@ typedef struct {
 #define VARSIZE(PTR)		(((varlena *)(PTR))->vl_len)
 #define VARSIZE_EXHDR(PTR)	(VARSIZE(PTR) - VARHDRSZ)
 
+/*
+ * row-format related stuff
+ */
+typedef struct {
+	struct {
+		cl_ushort	bi_hi;
+		cl_ushort	bi_lo;
+	} ip_blkid;
+	cl_ushort		ip_posid;
+} ItemPointerData;
+
+typedef struct {
+	union {
+		struct {
+			cl_uint	t_xmin;		/* inserting xact ID */
+			cl_uint	t_xmax;		/* deleting or locking xact ID */
+			union {
+				cl_uint	t_cid;	/* inserting or deleting command ID, or both */
+				cl_uint	t_xvac;	/* old-style VACUUM FULL xact ID */
+			} t_field3;
+		} t_heap;
+		struct {
+			cl_uint	datum_len_;	/* varlena header (do not touch directly!) */
+			cl_uint	datum_typmod;	/* -1, or identifier of a record type */
+			cl_uint	datum_typeid;	/* composite type OID, or RECORDOID */
+		} t_datum;
+	} t_choice;
+
+	ItemPointerData	t_ctid;			/* current TID of this or newer tuple */
+
+	cl_ushort		t_infomask2;	/* number of attributes + various flags */
+	cl_ushort		t_infomask;		/* various flag bits, see below */
+	cl_uchar		t_hoff;			/* sizeof header incl. bitmap, padding */
+	/* ^ - 23 bytes - ^ */
+	cl_uchar		t_bits[1];		/* bitmap of NULLs -- VARIABLE LENGTH */
+} HeapTupleHeaderData;
+
+/*
+ * information stored in t_infomask:
+ */
+#define HEAP_HASNULL            0x0001  /* has null attribute(s) */
+#define HEAP_HASVARWIDTH        0x0002  /* has variable-width attribute(s) */
+#define HEAP_HASEXTERNAL        0x0004  /* has external stored attribute(s) */
+#define HEAP_HASOID             0x0008  /* has an object-id field */
+#define HEAP_XMAX_KEYSHR_LOCK   0x0010  /* xmax is a key-shared locker */
+#define HEAP_COMBOCID           0x0020  /* t_cid is a combo cid */
+#define HEAP_XMAX_EXCL_LOCK     0x0040  /* xmax is exclusive locker */
+#define HEAP_XMAX_LOCK_ONLY     0x0080  /* xmax, if valid, is only a locker */
+
+
+
+
+
 /* template for native types */
 #define STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)	\
 	typedef struct {								\
@@ -183,19 +236,30 @@ pg_boolop_not(pg_bool_t result)
  * device to understand the data format given by host.
  */
 typedef struct {
-	cl_uint		attrelid;
 	cl_uint		atttypid;
 	cl_short	attlen
 	cl_short	attnum;
 	cl_int		attndims;
 	cl_int		attcacheoff;
 	cl_int		atttypmod;
+	cl_bool		attnotnull;
 	cl_bool		attbyval;
 	cl_char		attalign;
-	cl_bool		attnotnull;
-} SimpleFormData_pg_attribute;
+} simple_pg_attribute;
 
-typedef SimpleFormData_pg_attribute *SimpleForm_pg_attribute;
-
+/*
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ */
+typedef struct {
+	cl_uint				t_len;
+	ItemPointerData		t_self;
+	HeapTupleHeaderData	t_data;
+} rs_tuple;
 
 #endif	/* OPENCL_COMMON_H */
