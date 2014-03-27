@@ -112,21 +112,22 @@ typedef struct {
 	bool			closed;
 } pgstrom_queue;
 
+/* message class identifiers */
+#define StromMsg_ParamBuf		2001
+#define StromMsg_RowStore		2002
+#define StromMsg_ColumnStore	2003
+#define StromMsg_GpuScan		3001
 
-
-
-typedef enum {
-	StromMsg_GpuScan = 2001,
-	StromMsg_ParamBuf,
-	StromMsg_RowStore,
-	StromMsg_ColumnStore,
+typedef struct {
+	cl_uint			type;		/* one of StromMsg_* */
+	cl_uint			length;		/* total length of this message */
 } MessageTag;
 
 
 
 
 typedef struct pgstrom_message {
-	MessageTag		type;
+	MessageTag		mtag;
 	dlist_node		chain;
 	pgstrom_queue  *respq;	/* queue for response message */
 	/* destructor of this message if needed */
@@ -135,9 +136,15 @@ typedef struct pgstrom_message {
 
 /* max number of items to be placed on a row/column store */
 #define PGSTROM_CHUNKSZ		65536
+typedef struct {
+	MessageTag		mtag;	/* StromMsg_ParamBuf */
+	cl_uint			nparams;
+	cl_uint			refcnt;
+	cl_uint			params[FLEXIBLE_ARRAY_MEMBER];	/* offset of params */
+} pgstrom_parambuf;
 
 typedef struct {
-	MessageTag		type;	/* StromMsg_RowStore */
+	MessageTag		mtag;	/* StromMsg_RowStore */
 	dlist_node		chain;	/* to be chained to subject node */
 	cl_uint			nrows;	/* number of records in this store */
 	cl_uint			length;	/* length of this row-store */
@@ -146,20 +153,13 @@ typedef struct {
 } pgstrom_row_store;
 
 typedef struct {
-	MessageTag		type;	/* StromMsg_ColumnStore */
+	MessageTag		mtag;	/* StromMsg_ColumnStore */
+	cl_uint			length;	/* total length of this column-store */
 	dlist_node		chain;	/* to be chained to subject node */
 	cl_uint			nrows;	/* number of records in this store */
 	cl_uint			length;	/* length of this column-store */
-
-
 } pgstrom_column_store;
 
-typedef struct {
-	MessageTag		type;	/* StromMsg_ParamBuf */
-	cl_uint			nparams;
-	cl_uint			length;
-	cl_uint			params[FLEXIBLE_ARRAY_MEMBER];	/* offset of params */
-} pgstrom_parambuf;
 
 typedef struct {
 	MessageTag		type;	/* StromMsg_GpuScan */
