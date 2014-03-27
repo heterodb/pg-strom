@@ -1177,10 +1177,10 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	codegen_walker_context	walker_context;
 
 	initStringInfo(&walker_context.str);
-	walker_context.type_defs = context->type_defs;
-	walker_context.func_defs = context->func_defs;
-	walker_context.used_params = context->used_params;
-	walker_context.used_vars = context->used_vars;
+	walker_context.type_defs = list_copy(context->type_defs);
+	walker_context.func_defs = list_copy(context->func_defs);
+	walker_context.used_params = list_copy(context->used_params);
+	walker_context.used_vars = list_copy(context->used_vars);
 	walker_context.incl_flags = context->incl_flags;
 
 	if (codegen_expression_walker(expr, &walker_context))

@@ -89,12 +89,6 @@ extern const char *opencl_strerror(cl_int errcode);
 Datum pgstrom_opencl_device_info(PG_FUNCTION_ARGS);
 extern void pgstrom_init_opencl_server(void);
 
-
-/*
- * main.c
- */
-extern void _PG_init(void);
-
 /*
  * shmem.c
  */
@@ -166,6 +160,15 @@ extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern char *pgstrom_codegen_declarations(codegen_context *context);
 extern void pgstrom_codegen_expr_init(void);
 
+/*
+ * gpuscan.c
+ */
+extern void pgstrom_init_gpuscan(void);
+
+/*
+ * main.c
+ */
+extern void _PG_init(void);
 
 /*
  * debug.c
