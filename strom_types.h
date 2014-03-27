@@ -25,8 +25,6 @@
  * in v1.2.
  */
 typedef struct {
-	cl_platform_id platform_id;		/* valid only OpenCL server */
-	cl_context	context;			/* valid only OpenCL server */
 	cl_uint		pl_index;
 	char	   *pl_profile;
 	char	   *pl_version;
@@ -44,9 +42,7 @@ typedef struct {
  */
 typedef struct {
 	pgstrom_platform_info *pl_info;
-	/* Device properties */
-	cl_device_id	device_id;		/* valid only OpenCL server */
-	cl_command_queue	cmdq;		/* valid only OpenCL server */
+	cl_uint		dev_index;
 	cl_uint		dev_address_bits;
 	cl_bool		dev_available;
 	cl_bool		dev_compiler_available;

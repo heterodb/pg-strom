@@ -124,15 +124,15 @@ typedef struct
  * |   dlist_node       <------+ terminator of the dual linked list.
  * +-----------------------+
  *
- * The chunk_chain of shmem_chunk is a dual linked list, so it allows to walk on
- * the chunks being located on the neighbor. A dlist_node is put on the end of
- * shmem_bunch block, so you can check termination of shmem_chunk chain using
- * dlist_has_next().
+ * The chunk_chain of shmem_chunk is a dual linked list, so it allows to walk
+ * on the chunks being located on the neighbor. A dlist_node is put on the end
+ * of shmem_bunch block, so you can check termination of shmem_chunk chain
+ * using dlist_has_next().
  * If allocation request is enough small towards the size of free chunk,
  * allocator will split a free chunk into two chunks; one for active, and the
  * remaining one for still free.
  */
-typedef struct shmem_context
+struct shmem_context
 {
 	dlist_node	chain;		/* to be linked shmem_head->context_list */
 
@@ -145,7 +145,7 @@ typedef struct shmem_context
 	pg_crc32	magic_active;
 	pg_crc32	magic_free;
 	char		name[NAMEDATALEN];
-} shmem_context;
+};
 
 typedef struct
 {
@@ -1052,10 +1052,7 @@ construct_shmem_top_context(const char *name, shmem_zone *zone)
 
 void
 pgstrom_setup_shmem(Size zone_length,
-					void *(*callback)(void *address,
-									  Size length,
-									  void *callback_private),
-					void *callback_private)
+					void *(*callback)(void *address, Size length))
 {
 	shmem_zone	   *zone;
 	long			zone_index;
@@ -1127,8 +1124,7 @@ pgstrom_setup_shmem(Size zone_length,
 		}
 		/* per zone initialization */
 		(*callback)(zone->block_baseaddr,
-					zone->num_blocks * SHMEM_BLOCKSZ, 
-					callback_private);
+					zone->num_blocks * SHMEM_BLOCKSZ);
 		/* put zone on the pgstrom_shmem_head */
 		pgstrom_shmem_head->zones[zone_index] = zone;
 		offset += length;

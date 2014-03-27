@@ -110,7 +110,11 @@ pgstrom_create_opencl_devprog(const char *source, int32 extra_libs)
 	 * Not found! so, create a new one
 	 */
 	context = opencl_devprog_shm_values->shm_context;
-	length = offsetof(devprog_entry, source[source_len + 1]);
+	/*
+	 * XXX FIXME - need to allocate area for kernel source, param attrs,
+	 * var attrs
+	 */
+	length = sizeof(devprog_entry);
 
 	dprog = pgstrom_shmem_alloc(context, length);
 	if (!dprog)

@@ -226,7 +226,9 @@ pg_boolop_not(pg_bool_t result)
 	/* if null is given, result is also null */
 	return arg;
 }
-
+#else	/* OPENCL_DEVICE_CODE */
+#include "access/htup_details.h"
+#include "storage/itemptr.h"
 #endif
 
 
@@ -237,7 +239,7 @@ pg_boolop_not(pg_bool_t result)
  */
 typedef struct {
 	cl_uint		atttypid;
-	cl_short	attlen
+	cl_short	attlen;
 	cl_short	attnum;
 	cl_int		attndims;
 	cl_int		attcacheoff;

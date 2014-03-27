@@ -39,8 +39,8 @@ static struct {
 	{ (param), sizeof(((pgstrom_device_info *) NULL)->field),			\
 	  offsetof(pgstrom_device_info, field), (is_cstring) }
 
-static pgstrom_device_info *
-init_opencl_device_info(pgstrom_platform_info *pl_info, cl_device_id device_id)
+pgstrom_device_info *
+collect_opencl_device_info(cl_device_id device_id)
 {
 	pgstrom_device_info *dev_info;
 	Size		offset = 0;
@@ -251,9 +251,6 @@ init_opencl_device_info(pgstrom_platform_info *pl_info, cl_device_id device_id)
 			dev_info->dev_name);
 		goto out_clean;
 	}
-	dev_info->pl_info = pl_info;
-	dev_info->device_id = device_id;
-
 	return dev_info;
 
 out_clean:
@@ -261,17 +258,14 @@ out_clean:
 	return NULL;
 }
 
-static List *
-init_opencl_platform_info(cl_platform_id platform_id)
+pgstrom_platform_info *
+collect_opencl_platform_info(cl_platform_id platform_id)
 {
 	pgstrom_platform_info *pl_info;
-	cl_device_id device_ids[128];
-	cl_uint		n_device;
 	Size		offset = 0;
 	Size		buflen = 10240;
 	cl_int		i, rc;
 	int			major, minor;
-	List	   *result = NIL;
 	static struct {
 		cl_uint		param;
 		size_t		size;
@@ -325,7 +319,6 @@ init_opencl_platform_info(cl_platform_id platform_id)
 		}
 	}
 	pl_info->buflen = offset;
-	pl_info->platform_id = platform_id;
 
 	if (strcmp(pl_info->pl_profile, "FULL_PROFILE") != 0)
 	{
@@ -341,152 +334,11 @@ init_opencl_platform_info(cl_platform_id platform_id)
 			 pl_info->pl_name, pl_info->pl_version);
 		goto out_clean;
 	}
-
-	rc = clGetDeviceIDs(platform_id,
-						CL_DEVICE_TYPE_DEFAULT,
-						lengthof(device_ids),
-						device_ids,
-						&n_device);
-	if (rc != CL_SUCCESS)
-		elog(ERROR, "clGetDeviceIDs failed (%s)", opencl_strerror(rc));
-
-	for (i=0; i < n_device; i++)
-	{
-		pgstrom_device_info	   *devinfo
-			= init_opencl_device_info(pl_info, device_ids[i]);
-
-		if (devinfo)
-			result = lappend(result, devinfo);
-	}
-	if (result != NIL)
-		return result;
+	return pl_info;
 
 out_clean:
 	pfree(pl_info);
-	return NIL;
-}
-
-/*
- * pgstrom_collect_device_info
- *
- * It collects properties of all the OpenCL devices. It shall be called once
- * by the OpenCL management worker process, prior to any other backends.
- */
-List *
-pgstrom_collect_device_info(int pl_index)
-{
-	cl_platform_id	platforms[32];
-	cl_uint			n_platform;
-	cl_int			i, rc;
-	int				score_max = -1;
-	List		   *result = NIL;
-	ListCell	   *cell;
-
-	rc = clGetPlatformIDs(lengthof(platforms),
-						  platforms,
-						  &n_platform);
-	if (rc != CL_SUCCESS)
-		elog(ERROR, "clGetPlatformIDs failed (%s)", opencl_strerror(rc));
-
-	for (i=0; i < n_platform; i++)
-	{
-		pgstrom_platform_info  *pl_info;
-		pgstrom_device_info	   *dev_info;
-		List	   *temp;
-
-		temp = init_opencl_platform_info(platforms[i]);
-		if (temp == NIL)
-			continue;
-
-		dev_info = linitial(temp);
-		pl_info = dev_info->pl_info;
-		
-		elog(LOG, "PG-Strom: [%d] OpenCL Platform: %s", i, pl_info->pl_name);
-		if (pl_index < 0)
-		{
-			int		score = 0;
-
-			foreach (cell, temp)
-			{
-				dev_info = lfirst(cell);
-
-				if ((dev_info->dev_type & CL_DEVICE_TYPE_GPU) != 0)
-					score += 32 * (dev_info->dev_max_compute_units *
-								   dev_info->dev_max_clock_frequency);
-				else
-					score += (dev_info->dev_max_compute_units *
-							  dev_info->dev_max_clock_frequency);
-			}
-
-			if (score > score_max)
-			{
-				score_max = score;
-				result = temp;
-			}
-		}
-		else if (pl_index == i)
-			result = temp;
-
-		/* shows device properties */
-		foreach (cell, temp)
-		{
-			pgstrom_device_info	*dev_info = lfirst(cell);
-
-			elog(LOG, "PG-Strom:  + device %s (%uMHz x %uunits, %luMB)",
-				 dev_info->dev_name,
-                 dev_info->dev_max_clock_frequency,
-                 dev_info->dev_max_compute_units,
-                 dev_info->dev_global_mem_size >> 20);
-		}
-	}
-
-	/* show platform name if auto-selection */
-	if (pl_index < 0 && result != NIL)
-	{
-		pgstrom_platform_info *pl_info
-			= ((pgstrom_device_info *) linitial(result))->pl_info;
-		elog(LOG, "PG-Strom: auto platform selection: %s", pl_info->pl_name);
-	}
-
-	if (result != NIL)
-	{
-		cl_device_id   *devices = alloca(list_length(result));
-		cl_context		context;
-
-		/*
-		 * Create an OpenCL context
-		 */
-		i = 0;
-		foreach (cell, result)
-		{
-			pgstrom_device_info	   *dev_info = lfirst(cell);
-			devices[i++] = dev_info->device_id;
-		}
-		context = clCreateContext(NULL, i, devices, NULL, NULL, &rc);
-		if (rc != CL_SUCCESS)
-			elog(ERROR, "clCreateContext failed: %s", opencl_strerror(rc));
-
-		/*
-		 * Create an OpenCL command queue for each device
-		 */
-		foreach (cell, result)
-		{
-			pgstrom_device_info	   *dev_info = lfirst(cell);
-			pgstrom_platform_info  *pl_info = dev_info->pl_info;
-
-			pl_info->context = context;
-			dev_info->cmdq =
-				clCreateCommandQueue(context,
-									 dev_info->device_id,
-									 CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE |
-									 CL_QUEUE_PROFILING_ENABLE,
-									 &rc);
-			if (rc != CL_SUCCESS)
-				elog(ERROR, "clCreateCommandQueue failed on \"%s\": %s",
-					 dev_info->dev_name, opencl_strerror(rc));
-		}
-	}
-	return result;
+	return NULL;
 }
 
 /*
@@ -854,9 +706,6 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
 }
 PG_FUNCTION_INFO_V1(pgstrom_opencl_device_info);
-
-
-
 
 /*
  * Routines to get device properties.

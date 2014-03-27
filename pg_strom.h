@@ -56,7 +56,11 @@ extern void pgstrom_init_mqueue(void);
 /*
  * opencl_devinfo.c
  */
-extern List *pgstrom_collect_device_info(int platform_index);
+extern pgstrom_platform_info *
+collect_opencl_platform_info(cl_platform_id platform);
+extern pgstrom_device_info *
+collect_opencl_device_info(cl_device_id device);
+
 extern int	pgstrom_get_device_nums(void);
 extern const pgstrom_device_info *pgstrom_get_device_info(unsigned int index);
 extern void pgstrom_setup_opencl_devinfo(List *dev_list);
@@ -106,9 +110,7 @@ extern void pgstrom_shmem_free(void *address);
 
 extern void pgstrom_setup_shmem(Size zone_length,
 								void *(*callback)(void *address,
-												  Size length,
-												  void *cb_private),
-								void *cb_private);
+												  Size length));
 extern void pgstrom_init_shmem(void);
 
 extern Datum pgstrom_shmem_block_info(PG_FUNCTION_ARGS);
