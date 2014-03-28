@@ -113,39 +113,6 @@ extern Datum pgstrom_shmem_context_info(PG_FUNCTION_ARGS);
 /*
  * codegen_expr.c
  */
-#define DEVINFO_IS_NEGATIVE			0x0001
-#define DEVTYPE_IS_VARLENA			0x0002
-#define DEVTYPE_IS_BUILTIN			0x0004
-#define DEVFUNC_NEEDS_TIMELIB		0x0008
-#define DEVFUNC_NEEDS_TEXTLIB		0x0010
-#define DEVFUNC_NEEDS_NUMERICLIB	0x0020
-#define DEVFUNC_INCL_FLAGS			\
-	(DEVFUNC_NEEDS_TIMELIB | DEVFUNC_NEEDS_TEXTLIB | DEVFUNC_NEEDS_NUMERICLIB)
-
-struct devtype_info;
-struct devfunc_info;
-
-typedef struct devtype_info {
-	Oid			type_oid;
-	uint32		type_flags;
-	char	   *type_ident;
-	char	   *type_base;
-	char	   *type_decl;
-	struct devfunc_info *type_is_null_fn;
-	struct devfunc_info	*type_is_not_null_fn;
-} devtype_info;
-
-typedef struct devfunc_info {
-	const char *func_name;
-	Oid			func_namespace;
-	Oid		   *func_argtypes;
-	int32		func_flags;
-	const char *func_ident;	/* identifier of device function */
-	List	   *func_args;	/* list of devtype_info */
-	devtype_info *func_rettype;
-	const char *func_decl;	/* declaration of function */
-} devfunc_info;
-
 typedef struct {
 	List	   *type_defs;	/* list of devtype_info in use */
 	List	   *func_defs;	/* list of devfunc_info in use */
@@ -158,6 +125,7 @@ extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid);
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern char *pgstrom_codegen_declarations(codegen_context *context);
+extern bool pgstrom_codegen_available_expression(Expr *expr);
 extern void pgstrom_codegen_expr_init(void);
 
 /*

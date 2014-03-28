@@ -1233,6 +1233,82 @@ pgstrom_codegen_declarations(codegen_context *context)
 	return str.data;
 }
 
+/*
+ * codegen_available_expression
+ *
+ * It shows a quick decision whether the provided expression tree is
+ * available to run on OpenCL device, or not.
+ */
+bool
+pgstrom_codegen_available_expression(Expr *expr)
+{
+	if (node == NULL)
+		return true;
+	if (IsA(node, List))
+	{
+		ListCell   *cell;
+
+		foreach (cell, (List *) node)
+		{
+			if (!pgstrom_device_executable_expression(lfirst(cell)))
+				return false;
+		}
+		return true;
+	}
+	else if (IsA(node, Const))
+	{
+		if (pgstrom_devtype_lookup(((Const *) node)->consttype))
+			return true;
+		return false;
+	}
+	else if (IsA(node, Pram))
+	{
+		if (pgstrom_devtype_lookup(((Param *) node)->paramtype))
+			return true;
+		return false;
+	}
+	else if (IsA(node, Var))
+	{
+		if (pgstrom_devtype_lookup(((Var *) node)->vartype))
+			return true;
+		return false;
+	}
+	else if (IsA(node, FuncExpr))
+	{
+		FuncExpr   *func = (FuncExpr *) node;
+
+		if (pgstrom_devfunc_lookup(func->funcid))
+			return true;
+		return pgstrom_device_executable_expression((Node *) func->args);
+	}
+	else if (IsA(node, OpExpr) || IsA(node, DistinctExpr))
+	{
+		OpExpr	   *op = (OpExpr *) node;
+
+		if (pgstrom_devfunc_lookup(get_opcode(op->opno)))
+			return true;
+		return pgstrom_device_executable_expression((Node *) op->args);
+	}
+	else if (IsA(node, NullTest))
+	{
+		NullTest   *nulltest = (NullTest *) node;
+
+		if (nulltest->argisrow)
+			return false;
+		return pgstrom_device_executable_expression((Node *) nulltest->arg);
+	}
+	else if (IsA(node, BooleanTest))
+	{
+		BooleanTest	   *booltest = (BooleanTest *) node;
+
+		return pgstrom_device_executable_expression((Node *) booltest->arg);
+	}
+	return false;
+}
+
+
+
+
 static void
 codegen_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 {

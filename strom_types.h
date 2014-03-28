@@ -112,17 +112,6 @@ typedef struct {
 	bool			closed;
 } pgstrom_queue;
 
-/* message class identifiers */
-#define StromMsg_ParamBuf		2001
-#define StromMsg_RowStore		2002
-#define StromMsg_ColumnStore	2003
-#define StromMsg_GpuScan		3001
-
-typedef struct {
-	cl_uint			type;		/* one of StromMsg_* */
-	cl_uint			length;		/* total length of this message */
-} MessageTag;
-
 
 
 
@@ -134,20 +123,21 @@ typedef struct pgstrom_message {
 	void			(*cb_release)(struct pgstrom_message *message);
 } pgstrom_message;
 
-/* max number of items to be placed on a row/column store */
-#define PGSTROM_CHUNKSZ		65536
+/* maximum number of items to be placed on a row/column store */
+#define NITEMS_PER_CHUNK	(1 << 18)
+
 typedef struct {
 	MessageTag		mtag;	/* StromMsg_ParamBuf */
-	cl_uint			nparams;
 	cl_uint			refcnt;
+	cl_uint			nparams;
 	cl_uint			params[FLEXIBLE_ARRAY_MEMBER];	/* offset of params */
 } pgstrom_parambuf;
 
 typedef struct {
 	MessageTag		mtag;	/* StromMsg_RowStore */
 	dlist_node		chain;	/* to be chained to subject node */
+	cl_uint			usage;	/* usage; tuple body */
 	cl_uint			nrows;	/* number of records in this store */
-	cl_uint			length;	/* length of this row-store */
 	cl_uint			usage;	/* usage; tuple body is put from the tail */
 	cl_uint			tuples[FLEXIBLE_ARRAY_MEMBER];	/* offset of tuples */
 } pgstrom_row_store;
@@ -160,16 +150,57 @@ typedef struct {
 	cl_uint			length;	/* length of this column-store */
 } pgstrom_column_store;
 
+typedef kern_toastbuf	pgstrom_toastbuf;
 
 typedef struct {
 	MessageTag		type;	/* StromMsg_GpuScan */
 	Datum			program_id;
-	dlist_head		store_list;	/* row or column store; only one store */
+	union {
+		MessageTag			   *head;
+		pgstrom_row_store	   *rs;
+		pgstrom_column_store   *cs;
+	} store;
+	cl_int			errcode;
+	cl_int			nrows;
 	cl_int			results[FLEXIBLE_ARRAY_MEMBER];
 } pgstrom_gpuscan;
 
 
+/*
+ * Type declarations for code generator
+ */
+#define DEVINFO_IS_NEGATIVE			0x0001
+#define DEVTYPE_IS_VARLENA			0x0002
+#define DEVTYPE_IS_BUILTIN			0x0004
+#define DEVFUNC_NEEDS_TIMELIB		0x0008
+#define DEVFUNC_NEEDS_TEXTLIB		0x0010
+#define DEVFUNC_NEEDS_NUMERICLIB	0x0020
+#define DEVFUNC_INCL_FLAGS			\
+	(DEVFUNC_NEEDS_TIMELIB | DEVFUNC_NEEDS_TEXTLIB | DEVFUNC_NEEDS_NUMERICLIB)
 
+struct devtype_info;
+struct devfunc_info;
+
+typedef struct devtype_info {
+	Oid			type_oid;
+	uint32		type_flags;
+	char	   *type_ident;
+	char	   *type_base;
+	char	   *type_decl;
+	struct devfunc_info *type_is_null_fn;
+	struct devfunc_info	*type_is_not_null_fn;
+} devtype_info;
+
+typedef struct devfunc_info {
+	const char *func_name;
+	Oid			func_namespace;
+	Oid		   *func_argtypes;
+	int32		func_flags;
+	const char *func_ident;	/* identifier of device function */
+	List	   *func_args;	/* list of devtype_info */
+	devtype_info *func_rettype;
+	const char *func_decl;	/* declaration of function */
+} devfunc_info;
 
 
 
