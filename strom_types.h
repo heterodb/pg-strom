@@ -126,29 +126,20 @@ typedef struct pgstrom_message {
 /* maximum number of items to be placed on a row/column store */
 #define NITEMS_PER_CHUNK	(1 << 18)
 
-typedef struct {
-	MessageTag		mtag;	/* StromMsg_ParamBuf */
-	cl_uint			refcnt;
-	cl_uint			nparams;
-	cl_uint			params[FLEXIBLE_ARRAY_MEMBER];	/* offset of params */
-} pgstrom_parambuf;
+/*
+ * Kernel Param/Const buffer
+ */
+typedef kern_parambuf		pgstrom_parambuf;
 
-typedef struct {
-	MessageTag		mtag;	/* StromMsg_RowStore */
-	dlist_node		chain;	/* to be chained to subject node */
-	cl_uint			usage;	/* usage; tuple body */
-	cl_uint			nrows;	/* number of records in this store */
-	cl_uint			usage;	/* usage; tuple body is put from the tail */
-	cl_uint			tuples[FLEXIBLE_ARRAY_MEMBER];	/* offset of tuples */
-} pgstrom_row_store;
+/*
+ * Row-format data store
+ */
+typedef kern_row_store		pgstrom_row_store;
 
-typedef struct {
-	MessageTag		mtag;	/* StromMsg_ColumnStore */
-	cl_uint			length;	/* total length of this column-store */
-	dlist_node		chain;	/* to be chained to subject node */
-	cl_uint			nrows;	/* number of records in this store */
-	cl_uint			length;	/* length of this column-store */
-} pgstrom_column_store;
+/*
+ * Column-format data store
+ */
+typedef kern_column_store	pgstrom_column_store;
 
 typedef kern_toastbuf	pgstrom_toastbuf;
 
@@ -201,8 +192,5 @@ typedef struct devfunc_info {
 	devtype_info *func_rettype;
 	const char *func_decl;	/* declaration of function */
 } devfunc_info;
-
-
-
 
 #endif	/* STROM_TYPES_H */

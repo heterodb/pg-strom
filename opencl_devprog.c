@@ -49,10 +49,10 @@ typedef struct {
 	int32		extra_libs;	/* set of DEVFUNC_NEEDS_* */
 	Size		source_len;
 	char	   *source;
-	int			num_param_attrs;
-	int			num_value_attrs;
-	simple_pg_attribute	*param_attrs;
-	simple_pg_attribute	*value_attrs;
+	int			num_params;
+	int			num_variables;
+	Oid		   *oid_params;
+	Oid		   *ois_variables;
 	char		data[FLEXIBLE_ARRAY_MEMBER];
 } devprog_entry;
 

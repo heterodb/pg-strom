@@ -221,21 +221,12 @@ collect_opencl_device_info(cl_device_id device_id)
 			 dev_info->dev_name);
 		goto out_clean;
 	}
-#ifdef WORDS_BIGENDIAN
-	if (dev_info->dev_endian_little)
-	{
-		elog(LOG, "OpenCL device \"%s\" has little endian, unlike host",
-			 dev_info->dev_name);
-		goto out_clean;
-	}
-#else
 	if (!dev_info->dev_endian_little)
 	{
-		elog(LOG, "OpenCL device \"%s\" has big endian, unlike host",
+		elog(LOG, "OpenCL device \"%s\" has big endian, not supported",
 			 dev_info->dev_name);
 		goto out_clean;
 	}
-#endif
 	if (sscanf(dev_info->dev_opencl_c_version, "OpenCL C %d.%d ",
 			   &major, &minor) != 2 ||
 		major < 1 || (major == 1 && minor < 1))

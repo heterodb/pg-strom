@@ -1003,6 +1003,10 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 	{
 		FuncExpr   *func = (FuncExpr *) node;
 
+		/* no collation support */
+		if (OidIsValid(func->funccollid) || OidIsValid(func->inputcollid))
+			return true;
+
 		dfunc = devfunc_lookup_and_track(func->funcid, context);
 		if (!func)
 			return true;
@@ -1023,6 +1027,10 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 			 IsA(node, DistinctExpr))
 	{
 		OpExpr	   *op = (OpExpr *) node;
+
+		/* no collation support */
+		if (OidIsValid(op->opcollid) || OidIsValid(op->inputcollid))
+			return true;
 
 		dfunc = devfunc_lookup_and_track(get_opcode(op->opno), context);
 		if (!dfunc)
@@ -1242,66 +1250,74 @@ pgstrom_codegen_declarations(codegen_context *context)
 bool
 pgstrom_codegen_available_expression(Expr *expr)
 {
-	if (node == NULL)
+	if (expr == NULL)
 		return true;
-	if (IsA(node, List))
+	if (IsA(expr, List))
 	{
 		ListCell   *cell;
 
-		foreach (cell, (List *) node)
+		foreach (cell, (List *) expr)
 		{
-			if (!pgstrom_device_executable_expression(lfirst(cell)))
+			if (!pgstrom_codegen_available_expression(lfirst(cell)))
 				return false;
 		}
 		return true;
 	}
-	else if (IsA(node, Const))
+	else if (IsA(expr, Const))
 	{
-		if (pgstrom_devtype_lookup(((Const *) node)->consttype))
+		if (pgstrom_devtype_lookup(((Const *) expr)->consttype))
 			return true;
 		return false;
 	}
-	else if (IsA(node, Pram))
+	else if (IsA(expr, Param))
 	{
-		if (pgstrom_devtype_lookup(((Param *) node)->paramtype))
+		if (pgstrom_devtype_lookup(((Param *) expr)->paramtype))
 			return true;
 		return false;
 	}
-	else if (IsA(node, Var))
+	else if (IsA(expr, Var))
 	{
-		if (pgstrom_devtype_lookup(((Var *) node)->vartype))
+		if (pgstrom_devtype_lookup(((Var *) expr)->vartype))
 			return true;
 		return false;
 	}
-	else if (IsA(node, FuncExpr))
+	else if (IsA(expr, FuncExpr))
 	{
-		FuncExpr   *func = (FuncExpr *) node;
+		FuncExpr   *func = (FuncExpr *) expr;
+
+		/* no collation support */
+		if (OidIsValid(func->funccollid) || OidIsValid(func->inputcollid))
+			return false;
 
 		if (pgstrom_devfunc_lookup(func->funcid))
 			return true;
-		return pgstrom_device_executable_expression((Node *) func->args);
+		return pgstrom_codegen_available_expression((Expr *) func->args);
 	}
-	else if (IsA(node, OpExpr) || IsA(node, DistinctExpr))
+	else if (IsA(expr, OpExpr) || IsA(expr, DistinctExpr))
 	{
-		OpExpr	   *op = (OpExpr *) node;
+		OpExpr	   *op = (OpExpr *) expr;
+
+		/* no collation support */
+		if (OidIsValid(op->opcollid) || OidIsValid(op->inputcollid))
+			return false;
 
 		if (pgstrom_devfunc_lookup(get_opcode(op->opno)))
 			return true;
-		return pgstrom_device_executable_expression((Node *) op->args);
+		return pgstrom_codegen_available_expression((Expr *) op->args);
 	}
-	else if (IsA(node, NullTest))
+	else if (IsA(expr, NullTest))
 	{
-		NullTest   *nulltest = (NullTest *) node;
+		NullTest   *nulltest = (NullTest *) expr;
 
 		if (nulltest->argisrow)
 			return false;
-		return pgstrom_device_executable_expression((Node *) nulltest->arg);
+		return pgstrom_codegen_available_expression((Expr *) nulltest->arg);
 	}
-	else if (IsA(node, BooleanTest))
+	else if (IsA(expr, BooleanTest))
 	{
-		BooleanTest	   *booltest = (BooleanTest *) node;
+		BooleanTest	   *booltest = (BooleanTest *) expr;
 
-		return pgstrom_device_executable_expression((Node *) booltest->arg);
+		return pgstrom_codegen_available_expression((Expr *) booltest->arg);
 	}
 	return false;
 }
