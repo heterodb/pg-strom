@@ -19,7 +19,7 @@
  * only OpenCL device code.
  */
 #ifdef OPENCL_DEVICE_CODE
-#pragma OPENCL EXTENSION cl_khr_fp64 : enable
+#pragma OPENCL EXTENSION all : enable
 
 /* NULL definition */
 #define NULL	((void *) 0UL)
@@ -178,10 +178,11 @@ kern_get_stmt_error(void)
  * Write back row-indexes that has no error condition or to be re-checked.
  */
 static cl_int
-kern_writeback_row_results(cl_uint offset, __global cl_int *results)
+kern_writeback_row_results(__global cl_int *results)
 {
 	cl_uint		wkgrp_sz = get_local_size(0);
 	cl_uint		wkgrp_id = get_local_id(0);
+	cl_uint		get_group_id(0) * get_local_size(0);
 	cl_int		i = 0;
 
 	kern_local_error_work[wkgrp_id]
@@ -234,21 +235,27 @@ kern_writeback_row_results(cl_uint offset, __global cl_int *results)
  * In-kernel mutex mechanism
  *
  */
+#endif /* OPENCL_DEVICE_CODE */
 typedef cl_int		kern_lock_t;
+#ifdef OPENCL_DEVICE_CODE
 
 static inline void
 kern_lock(volatile __global kern_lock_t *lock)
 {
-	while (atomic_cmpxchg(lock, 0, 1) != 0);
+	if (get_local_id(0) == 0)
+		while (atomic_cmpxchg(lock, 0, 1) != 0);
+	barrier(CLK_GLOBAL_MEM_FENCE);
 }
 
 static inline void
 kern_unlock(__global volatile kern_lock *lock)
 {
-	atomic_and(lock, 0);
+	if (get_local_id(0) == 0)
+		atomic_and(lock, 0);
+	barrier(CLK_GLOBAL_MEM_FENCE);
 }
 
-#endif
+#endif /* OPENCL_DEVICE_CODE */
 
 
 
@@ -518,6 +525,34 @@ typedef struct {
 	cl_uint			ncols;
 	cl_uint			coldir[FLEXIBLE_ARRAY_MEMBER];
 } kern_toastbuf;
+
+/*
+ * Sequential Scan using GPU/MIC acceleration
+ *
+ *
+ *
+ *
+ */
+typedef struct {
+	kern_lock_t		lock;			/* must be initialized to 0 */
+	cl_int			errcode_wkgrp;	/* must be initialized to INT_MAX */
+	cl_int			errcode;		/* must be initialized to 0 */
+	cl_int			nrows;
+	cl_int			results[FLEXIBLE_ARRAY_MEMBER];
+} kern_gpuscan;
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #ifdef OPENCL_DEVICE_CODE
 

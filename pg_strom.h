@@ -16,6 +16,7 @@
 #include "fmgr.h"
 #include "lib/ilist.h"
 #include "nodes/pg_list.h"
+#include "nodes/primnodes.h"
 #include <pthread.h>
 #include <CL/cl.h>
 #include "opencl_common.h"

@@ -151,9 +151,7 @@ typedef struct {
 		pgstrom_row_store	   *rs;
 		pgstrom_column_store   *cs;
 	} store;
-	cl_int			errcode;
-	cl_int			nrows;
-	cl_int			results[FLEXIBLE_ARRAY_MEMBER];
+	kern_gpuscan	kern;
 } pgstrom_gpuscan;
 
 

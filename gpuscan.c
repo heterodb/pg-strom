@@ -189,27 +189,46 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					  codegen_context *context)
 {
 	StringInfoData	str;
+	ListCell	   *cell;
 
 	initStringInfo(&str);
+	// Add Param definitions here
+	// ADD Var definitions here
+
 	appendStringInfo
 		(&str,
-		 "void gpuscan_qual()\n"
-		 "{\n"
-		 "}\n"
-		 "\n"
-		 "__kernel void"
-		 "gpuscan_qual_cs(__global kern_parambuf *kparam,\n"
-		 "                __global kern_column_store *kcs,\n"
-		 "                __global kern_toastbuf *ktoast,\n"
-		 "                __global kern_gpuscan *kgscan)\n"
-		 "{}\n"
 		 "__kernel void\n"
-		 "gpuscan_qual_rs()\n"
-		 "{}\n"
-
-
-
+		 "gpuscan_qual_rs(__global kern_parambuf *kparam,\n"
+		 "				__global kern_row_store *krs,\n"
+		 "				__global kern_gpuscan,\n"
+		 "				__local cl_int *kern_local_buf)\n"
+		 "{\n"
+		 "  pg_bool_t   rc;\n"
+		 "  cl_int      errcode;\n"
+		 "  cl_int      offset;\n"
+		 "\n"
+		 "  kern_init_error(kern_local_buf);\n"
+		 "  rc = %s;\n"
+		 "  if (!rc.isnull && rc.value != 0)\n"
+		 "    kern_set_error(StromError_Success);\n"
+		 "  else\n"
+		 "    kern_set_error(StromError_RowFiltered);\n"
+		 "  errcode = kern_get_stmt_error();\n"
+		 "\n"
+		 "  kern_lock(&krs->lock);\n"
+		 "  if (StromErrorIsStmtLevel(errcode) &&\n"
+		 "    get_group_id(0) < krs->errcode_wkgrp)\n"
+		 "  {\n"
+		 "    krs->errcode_wkgrp = get_group_id(0);\n"
+		 "    krs->errcode = errcode;\n"
+		 "  }\n"
+		 "  krs->nrows += kern_writeback_row_results(krs->results +\n"
+		 "                                           krs->nrows);\n"
+		 "  kern_unlock(&krs->lock);\n"
+		 "}\n", ADD Expression here);
 }
+
+
 
 static CustomPlan *
 gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
