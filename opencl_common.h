@@ -95,171 +95,15 @@ typedef struct {
 #endif
 
 /*
- * Error information on device kernel
- *
- * The kern_error shall be allocated on __local memory, then written back to
- * the global memory at end of the kernel execution.
- * The caller on host has to assign local memory with length of
- * sizeof(cl_int) * 2 * get_local_size(0) on its invocation
- * on its invocation.
+ * Error code definition
  */
 #define StromError_Success				0	/* OK */
 #define StromError_RowFiltered			1	/* Row-clause was false */
 #define StromError_RowReCheck			2	/* To be checked on the host */
 #define StromError_DivisionByZero		100	/* Division by zero */
 
-#define StromErrorIsStmtLevel(errcode)	((errcode) >= 100)
-
-#ifdef OPENCL_DEVICE_CODE
-static __local cl_int  *kern_local_error;
-static __local cl_int  *kern_local_error_work;
-
-/*
- * NOTE: all the kernel function has to call at the begining
- */
-static inline void
-kern_init_error(__local cl_int *karg_local_buffer)
-{
-	kern_local_error = karg_local_buffer;
-	kern_local_error_work = kern_local_error + get_local_size(0);
-	kern_local_error[get_local_id(0)] = StromError_Success;
-}
-
-/*
- * It sets an error code unless no statement level error code is already
- * set. Also, RowReCheck has higher priority than RowFiltered because
- * RowReCheck implies device cannot run the given expression completely.
- * (Usually, due to compressed or external varlena datum)
- */
-static inline void
-kern_set_error(cl_int errcode)
-{
-	cl_int	oldcode = kern_local_error[get_local_id(0)];
-
-	if (StromErrorIsStmtLevel(errcode))
-	{
-		if (!StromErrorIsStmtLevel(oldcode))
-			error_code[get_local_id(0)] = errcode;
-	}
-	else if (errcode > oldcode)
-		error_code[get_local_id(0)] = errcode;
-}
-
-/*
- * Get an error code to be returned in statement level
- */
-static cl_int
-kern_get_stmt_error(void)
-{
-	cl_uint		wkgrp_sz = get_local_size(0);
-	cl_uint		wkgrp_id = get_local_id(0);
-	cl_uint		i = 0;
-
-	kern_local_error_work[wkgrp_id] = kern_local_error[wkgrp_id];
-	while (wkgrp_sz != 0)
-	{
-		if (wkgrp_id & ((1<<(i+1))-1) == 0)
-		{
-			cl_int	errcode1 = kern_local_error_work[wkgrp_id];
-			cl_int	errcode2 = kern_local_error_work[wkgrp_id + (1<<i)];
-
-			if (!StromErrorIsStmtLevel(errcode1) &&
-				StromErrorIsStmtLevel(errcode2))
-				kern_local_error_work[wkgrp_id] = errcode2;
-		}
-		wkgrp_sz >>= 1;
-		i++;
-		barrier(CLK_LOCAL_MEM_FENCE);
-	}
-	return kern_local_error_work[0];
-}
-
-/*
- * Write back row-indexes that has no error condition or to be re-checked.
- */
-static cl_int
-kern_writeback_row_results(__global cl_int *results)
-{
-	cl_uint		wkgrp_sz = get_local_size(0);
-	cl_uint		wkgrp_id = get_local_id(0);
-	cl_uint		get_group_id(0) * get_local_size(0);
-	cl_int		i = 0;
-
-	kern_local_error_work[wkgrp_id]
-		= (kern_local_error[wkgrp_id] == StromError_Success ||
-		   kern_local_error[wkgrp_id] == StromError_RowReCheck ? 1 : 0);
-	/*
-	 * NOTE: At the begining, kern_local_error_work has either 1 or 0
-	 * according to the row-level error code. This logic tries to count
-	 * number of elements with 1,
-	 * example)
-	 * X[0] - 1 -> 1 (X[0])      -> 1 (X[0])   -> 1 (X[0])   -> 1 *
-	 * X[1] - 0 -> 1 (X[0]+X[1]) -> 1 (X[0-1]) -> 1 (X[0-1]) -> 1
-	 * X[2] - 0 -> 0 (X[2])      -> 1 (X[0-2]) -> 1 (X[0-2]) -> 1
-	 * X[3] - 1 -> 1 (X[2]+X[3]) -> 2 (X[0-3]) -> 2 (X[0-3]) -> 2 *
-	 * X[4] - 0 -> 0 (X[4])      -> 0 (X[4])   -> 2 (X[0-4]) -> 2
-	 * X[5] - 0 -> 0 (X[4]+X[5]) -> 0 (X[4-5]) -> 2 (X[0-5]) -> 2
-	 * X[6] - 1 -> 1 (X[6])      -> 1 (X[4-6]) -> 3 (X[0-6]) -> 3 *
-	 * X[7] - 1 -> 2 (X[6]+X[7]) -> 2 (X[4-7]) -> 4 (X[0-7]) -> 4 *
-	 * X[8] - 0 -> 0 (X[8])      -> 0 (X[7])   -> 0 (X[7])   -> 4
-	 * X[9] - 1 -> 1 (X[8]+X[9]) -> 1 (X[7-8]) -> 1 (X7-8])  -> 5 *
-	 */
-	while (wkgrp_sz != 0)
-	{
-		if (wkgrp_id & (1 << i) != 0)
-		{
-			cl_int	i_source = (wkgrp_id & ~(1 << i)) | ((1 << i) - 1);
-
-			kern_local_error_work[wkgrp_id] += kern_local_error_work[i_source];
-		}
-		wkgrp_sz >>= 1;
-		i++;
-		barrier(CLK_LOCAL_MEM_FENCE);
-	}
-
-	/*
-	 * After the loop, kern_local_error_work[wkgrp_id] should be an index
-	 * to be written back. Let's put its row-index
-	 */
-	if (kern_local_error[wkgrp_id] == StromError_Success ||
-		kern_local_error[wkgrp_id] == StromError_RowReCheck)
-	{
-		i = kern_local_error_work[wkgrp_id];
-
-		results[i-1] = offset + wkgrp_id;
-	}
-	return kern_local_error_work[get_local_size(0) - 1];
-}
-
-/*
- * In-kernel mutex mechanism
- *
- */
-#endif /* OPENCL_DEVICE_CODE */
-typedef cl_int		kern_lock_t;
-#ifdef OPENCL_DEVICE_CODE
-
-static inline void
-kern_lock(volatile __global kern_lock_t *lock)
-{
-	if (get_local_id(0) == 0)
-		while (atomic_cmpxchg(lock, 0, 1) != 0);
-	barrier(CLK_GLOBAL_MEM_FENCE);
-}
-
-static inline void
-kern_unlock(__global volatile kern_lock *lock)
-{
-	if (get_local_id(0) == 0)
-		atomic_and(lock, 0);
-	barrier(CLK_GLOBAL_MEM_FENCE);
-}
-
-#endif /* OPENCL_DEVICE_CODE */
-
-
-
-
+/* significant error; that abort transaction on the host code */
+#define StromErrorIsSignificant(errcode)	((errcode) >= 100)
 
 /*
  * Message class identifiers
@@ -525,33 +369,6 @@ typedef struct {
 	cl_uint			ncols;
 	cl_uint			coldir[FLEXIBLE_ARRAY_MEMBER];
 } kern_toastbuf;
-
-/*
- * Sequential Scan using GPU/MIC acceleration
- *
- *
- *
- *
- */
-typedef struct {
-	kern_lock_t		lock;			/* must be initialized to 0 */
-	cl_int			errcode_wkgrp;	/* must be initialized to INT_MAX */
-	cl_int			errcode;		/* must be initialized to 0 */
-	cl_int			nrows;
-	cl_int			results[FLEXIBLE_ARRAY_MEMBER];
-} kern_gpuscan;
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 #ifdef OPENCL_DEVICE_CODE

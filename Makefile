@@ -3,7 +3,7 @@ MODULE_big = pg_strom
 OBJS  = main.o shmem.o codegen_expr.o mqueue.o \
 	gpuscan.o \
 	opencl_entry.o opencl_serv.o opencl_devinfo.o opencl_devprog.o \
-	opencl_common.o
+	opencl_common.o opencl_gpuscan.o
 
 EXTENSION = pg_strom
 DATA = pg_strom--1.0.sql
@@ -16,7 +16,13 @@ PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
 opencl_common.c: opencl_common.h
-	(echo "const char *pgstrom_opencl_common_head ="; \
+	(echo "const char *pgstrom_opencl_common_code ="; \
+	 sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
+	     -e 's/^/  "/g' -e 's/$$/\\n"/g'< $^; \
+	 echo ";") > $@
+
+opencl_gpuscan.c: opencl_gpuscan.h
+	(echo "const char *pgstrom_opencl_gpuscan_code ="; \
 	 sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
 	     -e 's/^/  "/g' -e 's/$$/\\n"/g'< $^; \
 	 echo ";") > $@

@@ -143,18 +143,6 @@ typedef kern_column_store	pgstrom_column_store;
 
 typedef kern_toastbuf	pgstrom_toastbuf;
 
-typedef struct {
-	MessageTag		type;	/* StromMsg_GpuScan */
-	Datum			program_id;
-	union {
-		MessageTag			   *head;
-		pgstrom_row_store	   *rs;
-		pgstrom_column_store   *cs;
-	} store;
-	kern_gpuscan	kern;
-} pgstrom_gpuscan;
-
-
 /*
  * Type declarations for code generator
  */
@@ -164,8 +152,10 @@ typedef struct {
 #define DEVFUNC_NEEDS_TIMELIB		0x0008
 #define DEVFUNC_NEEDS_TEXTLIB		0x0010
 #define DEVFUNC_NEEDS_NUMERICLIB	0x0020
-#define DEVFUNC_INCL_FLAGS			\
-	(DEVFUNC_NEEDS_TIMELIB | DEVFUNC_NEEDS_TEXTLIB | DEVFUNC_NEEDS_NUMERICLIB)
+#define DEVFUNC_INCL_FLAGS			0x0038
+#define DEVKERNEL_NEEDS_GPUSCAN		0x0100
+#define DEVKERNEL_NEEDS_GPUSORT		0x0200
+#define DEVKERNEL_NEEDS_HASHJOIN	0x0400
 
 struct devtype_info;
 struct devfunc_info;
