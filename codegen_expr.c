@@ -929,45 +929,23 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 	ListCell	   *cell;
 
 	if (node == NULL)
-		return false;
+		return true;
 
 	if (IsA(node, Const))
 	{
 		Const  *con = (Const *) node;
 		int		index = 1;
 
-		if (!devtype_lookup_and_track(con->consttype, context))
-			return true;
-
-		foreach (cell, context->used_params)
-		{
-			if (equal(node, lfirst(cell)))
-			{
-				appendStringInfo(&context->str, "KPARAM_%d", index);
-				return false;
-			}
-			index++;
-		}
-		context->used_params = lappend(context->used_params,
-									   copyObject(node));
-		appendStringInfo(&context->str, "KPARAM_%d",
-						 list_length(context->used_params));
-		return false;
-	}
-	else if (IsA(node, Param))
-	{
-		Param  *param = (Param *) node;
-		int		index = 1;
-
-		if (!devtype_lookup_and_track(param->paramtype, context))
-			return true;
+		if (!OidIsValid(con->constcollid) ||
+			!devtype_lookup_and_track(con->consttype, context))
+			return false;
 
 		foreach (cell, context->used_params)
 		{
 			if (equal(node, lfirst(cell)))
 			{
 				appendStringInfo(&context->str, "KPARAM_%u", index);
-				return false;
+				return true;
 			}
 			index++;
 		}
@@ -975,29 +953,54 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 									   copyObject(node));
 		appendStringInfo(&context->str, "KPARAM_%u",
 						 list_length(context->used_params));
-		return false;
+		return true;
+	}
+	else if (IsA(node, Param))
+	{
+		Param  *param = (Param *) node;
+		int		index = 1;
+
+		if (!OidIsValid(param->paramcollid) ||
+			!devtype_lookup_and_track(param->paramtype, context))
+			return false;
+
+		foreach (cell, context->used_params)
+		{
+			if (equal(node, lfirst(cell)))
+			{
+				appendStringInfo(&context->str, "KPARAM_%u", index);
+				return true;
+			}
+			index++;
+		}
+		context->used_params = lappend(context->used_params,
+									   copyObject(node));
+		appendStringInfo(&context->str, "KPARAM_%u",
+						 list_length(context->used_params));
+		return true;
 	}
 	else if (IsA(node, Var))
 	{
 		Var	   *var = (Var *) node;
 		int		index = 1;
 
-		if (!devtype_lookup_and_track(var->vartype, context))
-			return true;
+		if (!OidIsValid(var->varcollid) ||
+			!devtype_lookup_and_track(var->vartype, context))
+			return false;
 
 		foreach (cell, context->used_vars)
 		{
 			if (equal(node, lfirst(cell)))
 			{
 				appendStringInfo(&context->str, "KVAR_%u", index);
-				return false;
+				return true;
 			}
 			index++;
 		}
 		context->used_vars = lappend(context->used_vars,
 									 copyObject(node));
 		appendStringInfo(&context->str, "KVAR_%u", index);
-		return false;
+		return true;
 	}
 	else if (IsA(node, FuncExpr))
 	{
@@ -1005,23 +1008,23 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 
 		/* no collation support */
 		if (OidIsValid(func->funccollid) || OidIsValid(func->inputcollid))
-			return true;
+			return false;
 
 		dfunc = devfunc_lookup_and_track(func->funcid, context);
 		if (!func)
-			return true;
+			return false;
 		appendStringInfo(&context->str, "%s(", dfunc->func_ident);
 
 		foreach (cell, func->args)
 		{
 			if (cell != list_head(func->args))
 				appendStringInfo(&context->str, ", ");
-			if (codegen_expression_walker(lfirst(cell), context))
-				return true;
+			if (!codegen_expression_walker(lfirst(cell), context))
+				return false;
 		}
 		appendStringInfoChar(&context->str, ')');
 
-		return false;
+		return true;
 	}
 	else if (IsA(node, OpExpr) ||
 			 IsA(node, DistinctExpr))
@@ -1030,23 +1033,23 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 
 		/* no collation support */
 		if (OidIsValid(op->opcollid) || OidIsValid(op->inputcollid))
-			return true;
+			return false;
 
 		dfunc = devfunc_lookup_and_track(get_opcode(op->opno), context);
 		if (!dfunc)
-			return true;
+			return false;
 		appendStringInfo(&context->str, "%s(", dfunc->func_ident);
 
 		foreach (cell, op->args)
 		{
 			if (cell != list_head(op->args))
 				appendStringInfo(&context->str, ", ");
-			if (codegen_expression_walker(lfirst(cell), context))
-				return true;
+			if (!codegen_expression_walker(lfirst(cell), context))
+				return false;
 		}
 		appendStringInfoChar(&context->str, ')');
 
-		return false;
+		return true;
 	}
 	else if (IsA(node, NullTest))
 	{
@@ -1054,11 +1057,11 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 		const char *func_ident;
 
 		if (nulltest->argisrow)
-			return true;
+			return false;
 
 		dtype = pgstrom_devtype_lookup(exprType((Node *)nulltest->arg));
 		if (!dtype)
-			return true;
+			return false;
 
 		switch (nulltest->nulltesttype)
 		{
@@ -1074,11 +1077,11 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 				break;
 		}
 		appendStringInfo(&context->str, "%s(", func_ident);
-		if (codegen_expression_walker((Node *) nulltest->arg, context))
-			return true;
+		if (!codegen_expression_walker((Node *) nulltest->arg, context))
+			return false;
 		appendStringInfoChar(&context->str, ')');
 
-		return false;
+		return true;
 	}
 	else if (IsA(node, BooleanTest))
 	{
@@ -1115,10 +1118,10 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 				break;
 		}
 		appendStringInfo(&context->str, "%s(", func_ident);
-		if (codegen_expression_walker((Node *) booltest->arg, context))
-			return true;
+		if (!codegen_expression_walker((Node *) booltest->arg, context))
+			return false;
 		appendStringInfoChar(&context->str, ')');
-		return false;
+		return true;
 	}
 	else if (IsA(node, BoolExpr))
 	{
@@ -1128,8 +1131,8 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 		{
 			Assert(list_length(b->args) == 1);
 			appendStringInfo(&context->str, "pg_boolop_not(");
-			if (codegen_expression_walker(linitial(b->args), context))
-				return true;
+			if (!codegen_expression_walker(linitial(b->args), context))
+				return false;
 			appendStringInfoChar(&context->str, ')');
 		}
 		else if (b->boolop == AND_EXPR || b->boolop == OR_EXPR)
@@ -1167,16 +1170,16 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 				Assert(exprType(lfirst(cell)) == BOOLOID);
 				if (cell != list_head(b->args))
 					appendStringInfo(&context->str, ", ");
-				if (codegen_expression_walker(lfirst(cell), context))
-					return true;
+				if (!codegen_expression_walker(lfirst(cell), context))
+					return false;
 			}
 			appendStringInfoChar(&context->str, ')');
 		}
 		else
 			elog(ERROR, "unrecognized boolop: %d", (int) b->boolop);
-		return false;
+		return true;
 	}
-	return true;
+	return false;
 }
 
 char *
@@ -1191,7 +1194,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	walker_context.used_vars = list_copy(context->used_vars);
 	walker_context.incl_flags = context->incl_flags;
 
-	if (codegen_expression_walker(expr, &walker_context))
+	if (!codegen_expression_walker(expr, &walker_context))
 		return NULL;
 
 	context->type_defs = walker_context.type_defs;

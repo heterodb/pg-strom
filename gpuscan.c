@@ -184,16 +184,71 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	add_paths(rel, &pathnode->cpath.path);
 }
 
-static void
+static char *
 gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					  codegen_context *context)
 {
 	StringInfoData	str;
 	ListCell	   *cell;
+	int				index;
+	devtype_info   *dtype;
+	char		   *expr_code;
+
+	memset(context, 0, sizeof(codegen_context));
+	expr_code = pgstrom_codegen_expression((Node *)dev_quals, context);
+
+	Assert(expr_code != NULL);
 
 	initStringInfo(&str);
-	// Add Param definitions here
-	// ADD Var definitions here
+
+	/* Put param/const definitions */
+	index = 1;
+	foreach (cell, context->used_params)
+	{
+		if (IsA(lfirst(cell), Const))
+		{
+			Const  *con = lfirst(cell);
+
+			dtype = pgstrom_devtype_lookup(con->consttype);
+			Assert(dtype != NULL);
+
+			appendStringInfo(&str,
+							 "#define KPARAM_%u\t"
+							 "pg_%s_param(kparams,%d)\n",
+							 index, dtype->type_ident, index);
+		}
+		else if (IsA(lfirst(cell), Param))
+		{
+			Param  *param = lfirst(cell);
+
+			dtype = pgstrom_devtype_lookup(param->paramtype);
+			Assert(dtype != NULL);
+
+			appendStringInfo(&str,
+							 "#define KPARAM_%u\t"
+							 "pg_%s_param(kparams,%d)\n",
+							 index, dtype->type_ident, index);
+		}
+		else
+			elog(ERROR, "unexpected node: %s", nodeToString(lfirst(cell)));
+		index++;
+	}
+
+	/* Put Var definition for row-store */
+	index = 1;
+	foreach (cell, context->used_vars)
+	{
+		Var	   *var = lfirst(cell);
+
+		dtype = pgstrom_devtype_lookup(var->vartype);
+		Assert(dtype != NULL);
+
+		appendStringInfo(&str,
+						 "#define KVAR_%u\t"
+						 "pg_%s_vref_rs(krs,%u,get_global_id(0))\n",
+						 index, dtype->type_ident, var->varattno);
+		index++;
+	}
 
 	/* qualifier definition with row-store */
 	appendStringInfo(&str,
@@ -212,7 +267,30 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					 "                 ? StromError_Success\n"
 					 "                 : StromError_RowFiltered);\n"
 					 "  gpuscan_writeback_result(gpuscan);\n"
-					 "}\n\n");
+					 "}\n\n", expr_code);
+
+	/* Put Var definition for column-store */
+	index = 1;
+	foreach (cell, context->used_vars)
+	{
+		Var	   *var = lfirst(cell);
+
+		dtype = pgstrom_devtype_lookup(var->vartype);
+		Assert(dtype != NULL);
+
+		appendStringInfo(&str, "#undef KVAR_%u\n", index);
+		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
+			appendStringInfo(&str,
+							 "#define KVAR_%u\t"
+							 "pg_%s_vref_cs(krs,toast,%u,get_global_id(0))\n",
+							 index, dtype->type_ident, var->varattno);
+		else
+			appendStringInfo(&str,
+							 "#define KVAR_%u\t"
+							 "pg_%s_vref_cs(krs,%u,get_global_id(0))\n",
+							 index, dtype->type_ident, var->varattno);
+		index++;
+	}
 
 	/* qualifier definition with column-store */
 	appendStringInfo(&str,
@@ -220,7 +298,7 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					 "gpuscan_qual_cs(__global kern_parambuf *kparams,\n"
 					 "                __global kern_column_store *kcs,\n"
 					 "                __global kern_gpuscan *gpuscan,\n"
-					 "                __global kern_toastbuf *toastbuf,\n"
+					 "                __global kern_toastbuf *toast,\n"
 					 "                __local cl_int *karg_local_buf)\n"
 					 "{\n"
 					 "  pg_bool_t   rc;\n"
@@ -232,7 +310,8 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					 "                 ? StromError_Success\n"
 					 "                 : StromError_RowFiltered);\n"
 					 "  gpuscan_writeback_result(gpuscan);\n"
-					 "}\n");
+					 "}\n", expr_code);
+	return str.data;
 }
 
 
@@ -245,6 +324,7 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 	GpuScanPlan	   *gscan;
 	List		   *tlist;
 	List		   *scan_clause;
+	char		   *kern_source;
 	codegen_context	context;
 
 	/*
@@ -286,7 +366,7 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 	 * This design is optimized to process column-oriented data format on
 	 * the relation cache.
 	 */
-	gpuscan_codegen_quals(gpath->dev_quals, &context);
+	kern_source = gpuscan_codegen_quals(gpath->dev_quals, &context);
 
 
 

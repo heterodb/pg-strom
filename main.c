@@ -43,6 +43,9 @@ _PG_init(void)
 
 	/* registration of OpenCL background worker process */
 	pgstrom_init_opencl_server();
+
+	/* registration of custom-plan providers */
+	pgstrom_init_gpuscan();
 }
 
 /* ------------------------------------------------------------

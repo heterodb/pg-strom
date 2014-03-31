@@ -46,13 +46,7 @@ extern void pgstrom_init_mqueue(void);
 /*
  * gpuscan.c
  */
-
-
-
-
-
-
-
+extern void pgstrom_init_gpuscan(void);
 
 /*
  * opencl_devinfo.c
