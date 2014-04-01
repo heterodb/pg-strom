@@ -34,11 +34,12 @@ static int		opencl_platform_index;
 /* OpenCL resources for quick reference */
 #define MAX_NUM_DEVICES		128
 
-static cl_platform_id		opencl_platform_id;
-static cl_context			opencl_context;
-static cl_uint				opencl_num_devices;
-static cl_device_id			opencl_devices[MAX_NUM_DEVICES];
-static cl_command_queue		opencl_cmdq[MAX_NUM_DEVICES];
+/* quick references */
+cl_platform_id		opencl_platform_id;
+cl_context			opencl_context;
+cl_uint				opencl_num_devices;
+cl_device_id		opencl_devices[MAX_NUM_DEVICES];
+cl_command_queue	opencl_cmdq[MAX_NUM_DEVICES];
 
 static void
 pgstrom_opencl_sigterm(SIGNAL_ARGS)
