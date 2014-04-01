@@ -47,7 +47,7 @@ static struct {
  * being executed asynchronously.
  */
 pgstrom_queue *
-pgstrom_create_queue(bool is_server)
+pgstrom_create_queue(void)
 {
 	shmem_context  *context = mqueue_shm_values->shmcontext;
 	pgstrom_queue  *queue;
@@ -62,11 +62,7 @@ pgstrom_create_queue(bool is_server)
 	if (pthread_cond_init(&queue->cond, &cond_attr) != 0)
 		goto error;
 	dlist_init(&queue->qhead);
-	if (is_server)
-		queue->refcnt = -1;
-	else
-		queue->refcnt = 1;
-
+	queue->refcnt = 1;
 	queue->closed = false;
 
 	return queue;
@@ -85,8 +81,7 @@ error:
 bool
 pgstrom_enqueue_message(pgstrom_message *message)
 {
-	pgstrom_queue  *mqueue = mqueue_shm_values->serv_mqueue;
-	pgstrom_queue  *respq;
+	pgstrom_queue *mqueue = mqueue_shm_values->serv_mqueue;
 	int		rc;
 
 	pthread_mutex_lock(&mqueue->lock);
@@ -95,36 +90,11 @@ pgstrom_enqueue_message(pgstrom_message *message)
 		pthread_mutex_unlock(&mqueue->lock);
 		return false;
 	}
-	/*
-	 * NOTE: we assume the sender gives a response queue that has refcnt
-	 * more than 0 at this function call, and the core backend never
-	 * performs multi-threading. So, it is safe to acquire the response
-	 * queue after the unlocking of this queue.
-	 */
-	respq = message->respq;
-
 	/* enqueue this message */
-	Assert(mqueue->refcnt < 0);
 	dlist_push_tail(&mqueue->qhead, &message->chain);
 	rc = pthread_cond_signal(&mqueue->cond);
 	Assert(rc == 0);
 	pthread_mutex_unlock(&mqueue->lock);
-
-	/*
-	 * Increment expected number of response messages, because we cannot
-	 * drop the response message queue until all the messages in execution
-	 * got returned.
-	 * A message queue is constructed with refcnt=1, and pgstrom_close_queue
-	 * decrements the reference count. Usually, it drops the message queue
-	 * itself, however, asynchronouse execution messages will still need
-	 * the response queue to back execution status or drop message itself.
-	 */
-	Assert(respq != NULL);
-
-	pthread_mutex_lock(&respq->lock);
-	Assert(respq->refcnt > 0);
-	respq->refcnt++;
-	pthread_mutex_unlock(&respq->lock);
 
 	return true;
 }
@@ -145,7 +115,17 @@ pgstrom_reply_message(pgstrom_message *message)
 
 	pthread_mutex_lock(&respq->lock);
 	if (respq->closed)
+	{
+		/*
+		 * If reply queue is already closed, it means nobody waits for
+		 * the reply-message enqueued. So, server side decrements the
+		 * reference count of the message queue instead of the backend,
+		 * and release the message queue if no longer used.
+		 */
+		if (--respq->refcnt == 0)
+			queue_free = true;
 		message_free = true;
+	}
 	else
 	{
 		/* reply this message */
@@ -153,11 +133,6 @@ pgstrom_reply_message(pgstrom_message *message)
 		dlist_push_tail(&respq->qhead, &message->chain);
 		rc = pthread_cond_signal(&respq->cond);
 		Assert(rc == 0);
-	}
-	if (--respq->refcnt == 0)
-	{
-		Assert(respq->closed);
-		queue_free = true;
 	}
 	pthread_mutex_unlock(&respq->lock);
 
@@ -213,11 +188,8 @@ pgstrom_dequeue_message(pgstrom_queue *queue)
 				= dlist_pop_head_node(&queue->qhead);
 
 			result = dlist_container(pgstrom_message, chain, dnode);
-			if (queue->refcnt > 0)
-			{
-				if (--queue->refcnt == 0)
-					queue_release = true;
-			}
+			if (--queue->refcnt == 0)
+				queue_release = true;
 			pthread_mutex_unlock(&queue->lock);
 			break;
 		}
@@ -247,11 +219,12 @@ pgstrom_dequeue_message(pgstrom_queue *queue)
 				timeleft = 0;
 		}
 	}
+
 	/*
-	 * If this queue is already closed and no messages will come,
-	 * the queue shall be dropped.
+	 * If this queue (except for server mqueue) is already closed and
+	 * no message will come further, the queue shall be dropped.
 	 */
-	if (queue_release)
+	if (queue_release && queue != mqueue_shm_values->serv_mqueue)
 	{
 		Assert(queue->closed);
 		pthread_cond_destroy(&queue->cond);
@@ -280,20 +253,18 @@ pgstrom_try_dequeue_message(pgstrom_queue *queue)
 			= dlist_pop_head_node(&queue->qhead);
 
 		result = dlist_container(pgstrom_message, chain, dnode);
-		if (queue->refcnt > 0)
-		{
-			if (--queue->refcnt == 0)
-				queue_release = true;
-		}
+		if (--queue->refcnt == 0)
+			queue_release = true;
 	}
 	pthread_mutex_unlock(&queue->lock);
 
 	/*
-	 * If this queue is already closed and no messages will come,
-	 * the queue shall be dropped.
+	 * If this queue (except for server mqueue) is already closed and
+	 * no message will come further, the queue shall be dropped.
 	 */
-	if (queue_release)
+	if (queue_release && queue != mqueue_shm_values->serv_mqueue)
 	{
+		Assert(queue->closed);
 		pthread_cond_destroy(&queue->cond);
 		pthread_mutex_destroy(&queue->lock);
 		pgstrom_shmem_free(queue);
@@ -328,14 +299,11 @@ pgstrom_close_queue(pgstrom_queue *queue)
 	Assert(!queue->closed);
 	queue->closed = true;
 
-	if (queue->refcnt > 0)
-	{
-		if (--queue->refcnt == 0)
-			queue_release = true;
-	}
+	if (--queue->refcnt == 0)
+		queue_release = true;
 	pthread_mutex_unlock(&queue->lock);
 
-	if (queue_release)
+	if (queue_release && queue != mqueue_shm_values->serv_mqueue)
 	{
 		pthread_cond_destroy(&queue->cond);
 		pthread_mutex_destroy(&queue->lock);
@@ -344,47 +312,28 @@ pgstrom_close_queue(pgstrom_queue *queue)
 }
 
 /*
- * pgstrom_get_queue
+ * pgstrom_init_message
  *
- * increment reference counter of the queue
+ * It initializes the supplied message header, and increments the reference
+ * counter of response message queue. It has to be incremented to avoid
+ * unexpected destruction.
  */
 void
-pgstrom_get_queue(pgstrom_queue *queue)
+pgstrom_init_message(pgstrom_message *msg,
+					 MessageTag mtag,
+					 pgstrom_queue *respq,
+					 void (*cb_release)(pgstrom_message *msg))
 {
-	pthread_mutex_lock(&queue->lock);
-	Assert(queue->refcnt > 0);
-	queue->refcnt++;
-	pthread_mutex_unlock(&queue->lock);
-}
-
-/*
- * pgstrom_put_queue
- *
- * decrement reference counter of the queue
- */
-void
-pgstrom_put_queue(pgstrom_queue *queue)
-{
-	bool	queue_release = false;
-
-	pthread_mutex_lock(&queue->lock);
-	if (queue->refcnt > 0)
+	msg->mtag = mtag;
+	if (respq)
 	{
-		if (--queue->refcnt == 0)
-		{
-			/* only closed queue should become refcnt==0 */
-			Assert(queue->closed);
-			queue_release = true;
-		}
+		pthread_mutex_lock(&respq->lock);
+		Assert(respq->refcnt > 0);
+		respq->refcnt++;
+		pthread_mutex_unlock(&respq->lock);
 	}
-	pthread_mutex_unlock(&queue->lock);
-
-	if (queue_release)
-	{
-		pthread_cond_destroy(&queue->cond);
-		pthread_mutex_destroy(&queue->lock);
-		pgstrom_shmem_free(queue);
-	}
+	msg->respq = respq;
+	msg->cb_release = cb_release;
 }
 
 /*
@@ -403,10 +352,10 @@ pgstrom_setup_mqueue(void)
 		elog(ERROR, "failed to create shared memory context");
 	mqueue_shm_values->shmcontext = context;
 
-	mqueue = pgstrom_create_queue(true);
+	mqueue = pgstrom_create_queue();
 	if (!mqueue)
 		elog(ERROR, "failed to create PG-Strom server message queue");
-	mqueue_shm_values->serv_mqueue = pgstrom_create_queue(true);
+	mqueue_shm_values->serv_mqueue = mqueue;
 
 	elog(LOG, "PG-Strom: Message Queue (context=%p, server mqueue=%p)",
 		 context, mqueue);

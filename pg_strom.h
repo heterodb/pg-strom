@@ -31,15 +31,17 @@
 /*
  * mqueue.c
  */
-extern pgstrom_queue *pgstrom_create_queue(bool is_server);
+extern pgstrom_queue *pgstrom_create_queue(void);
 extern bool pgstrom_enqueue_message(pgstrom_message *message);
 extern void pgstrom_reply_message(pgstrom_message *message);
 extern pgstrom_message *pgstrom_dequeue_message(pgstrom_queue *queue);
 extern pgstrom_message *pgstrom_try_dequeue_message(pgstrom_queue *queue);
 extern pgstrom_message *pgstrom_dequeue_server_message(void);
 extern void pgstrom_close_queue(pgstrom_queue *queue);
-extern void pgstrom_get_queue(pgstrom_queue *queue);
-extern void pgstrom_put_queue(pgstrom_queue *queue);
+extern void pgstrom_init_message(pgstrom_message *msg,
+								 MessageTag mtag,
+								 pgstrom_queue *respq,
+								 void (*cb_release)(pgstrom_message *msg));
 extern void pgstrom_setup_mqueue(void);
 extern void pgstrom_init_mqueue(void);
 
@@ -64,11 +66,12 @@ extern void pgstrom_init_opencl_devinfo(void);
 /*
  * opencl_devprog.c
  */
-extern cl_program pgstrom_lookup_opencl_devprog(Datum dprog_key);
-extern Datum pgstrom_create_opencl_devprog(const char *source,
-										   int32 extra_libs);
-extern void pgstrom_get_opencl_devprog(Datum dprog_key);
-extern void pgstrom_put_opencl_devprog(Datum dprog_key);
+#define BAD_OPENCL_PROGRAM		((void *) ~0UL)
+extern cl_program clserv_lookup_device_program(Datum dprog_key,
+											   pgstrom_message *msg);
+extern Datum pgstrom_get_devprog_key(const char *source, int32 extra_libs);
+extern void pgstrom_put_devprog_key(Datum dprog_key);
+extern void pgstrom_retain_devprog_key(Datum dprog_key);
 extern void pgstrom_setup_opencl_devprog(void);
 extern void pgstrom_init_opencl_devprog(void);
 
@@ -84,8 +87,8 @@ extern const char *opencl_strerror(cl_int errcode);
 extern cl_platform_id		opencl_platform_id;
 extern cl_context			opencl_context;
 extern cl_uint				opencl_num_devices;
-extern cl_device_id		   *opencl_devices;
-extern cl_command_queue	   *opencl_cmdq;
+extern cl_device_id			opencl_devices[];
+extern cl_command_queue		opencl_cmdq[];
 
 extern Datum pgstrom_opencl_device_info(PG_FUNCTION_ARGS);
 extern bool pgstrom_is_opencl_server(void);
@@ -103,7 +106,6 @@ extern void pgstrom_shmem_context_reset(shmem_context *context);
 extern void pgstrom_shmem_context_delete(shmem_context *context);
 extern void *pgstrom_shmem_alloc(shmem_context *contetx, Size size);
 extern void pgstrom_shmem_free(void *address);
-
 extern void pgstrom_setup_shmem(Size zone_length,
 								void *(*callback)(void *address,
 												  Size length));
@@ -139,11 +141,13 @@ extern void pgstrom_init_gpuscan(void);
  * main.c
  */
 extern void _PG_init(void);
-
-/*
- * debug.c
- */
 extern Datum pgstrom_shmem_alloc_func(PG_FUNCTION_ARGS);
 extern Datum pgstrom_shmem_free_func(PG_FUNCTION_ARGS);
+
+/*
+ * opencl_*.h
+ */
+extern const char *pgstrom_opencl_common_code;
+extern const char *pgstrom_opencl_gpuscan_code;
 
 #endif	/* PG_STROM_H */

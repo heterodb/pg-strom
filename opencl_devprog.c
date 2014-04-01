@@ -11,6 +11,7 @@
  * within this package.
  */
 #include "postgres.h"
+#include "storage/barrier.h"
 #include "storage/ipc.h"
 #include "storage/shmem.h"
 #include "storage/spin.h"
@@ -44,7 +45,7 @@ typedef struct {
 	dlist_head	waitq;		/* wait queue of program build */
 	cl_program	program;	/* valid only OpenCL intermediator */
 	bool		build_running;	/* true, if async build is running */
-	const char *errmsg;		/* error message if build error */
+	char	   *errmsg;		/* error message if build error */
 
 	/* The fields below are read-only once constructed */
 	pg_crc32	crc;
@@ -54,6 +55,59 @@ typedef struct {
 } devprog_entry;
 
 /*
+ * pgstrom_reclaim_devprog
+ *
+ * It reclaims device program entries being no longer used according to LRU
+ * algorism, but never tries to keep the total usage less than
+ * reclaim_threshold, just release the least-recently-used one if total
+ * usage is larger than the threshold.
+ */
+static void
+pgstrom_reclaim_devprog(void)
+{
+	dlist_iter	iter;
+	Size		length;
+
+	/*
+	 * this logic may involves clReleaseProgram(), so only OpenCL
+	 * intermediation server can handle reclaiming
+	 */
+	Assert(pgstrom_is_opencl_server());
+
+	SpinLockAcquire(&opencl_devprog_shm_values->lock);
+	/* concurrent task already reclaimed it? */
+	if (opencl_devprog_shm_values->usage < reclaim_threshold)
+	{
+		SpinLockRelease(&opencl_devprog_shm_values->lock);
+		return;
+	}
+
+	dlist_reverse_foreach(iter, &opencl_devprog_shm_values->lru_list)
+	{
+		devprog_entry  *dprog
+			= dlist_container(devprog_entry, lru_chain, iter.cur);
+
+		if (dprog->refcnt > 0)
+			continue;
+
+		Assert(dprog->refcnt == 0);
+		dlist_delete(&dprog->hash_chain);
+		dlist_delete(&dprog->lru_chain);
+
+		length = offsetof(devprog_entry, source[dprog->source_len]);
+		if (dprog->errmsg)
+		{
+			length += strlen(dprog->errmsg);
+			pgstrom_shmem_free(dprog->errmsg);
+		}
+		clReleaseProgram(dprog->program);
+		opencl_devprog_shm_values->usage -= length;
+		break;
+	}
+	SpinLockRelease(&opencl_devprog_shm_values->lock);
+}
+
+/*
  * clserv_devprog_build_callback
  *
  * callback function for clBuildProgram; that enqueues the waiting messages
@@ -61,12 +115,13 @@ typedef struct {
  * correctly.
  */
 static void
-clserv_devprog_build_callback(cl_program *program, devprog_entry *dprog)
+clserv_devprog_build_callback(cl_program program, void *cb_private)
 {
+	devprog_entry *dprog = (devprog_entry *) cb_private;
 	cl_build_status	status;
-	const char *errmsg = NULL;
-	cl_int		rc;
-	int			i;
+	dlist_mutable_iter iter;
+	char	   *errmsg = NULL;
+	cl_int		i, rc;
 
 	/* check program build status */
 	for (i=0; i < opencl_num_devices; i++)
@@ -75,7 +130,7 @@ clserv_devprog_build_callback(cl_program *program, devprog_entry *dprog)
 								   opencl_devices[i],
 								   CL_PROGRAM_BUILD_STATUS,
 								   sizeof(cl_build_status),
-								   &cl_build_status,
+								   &status,
 								   NULL);
 		if (rc != CL_SUCCESS)
 		{
@@ -123,17 +178,41 @@ clserv_devprog_build_callback(cl_program *program, devprog_entry *dprog)
 			goto out_error;
 		}
 	}
+	/*
+	 * OK, source build was successfully done for all the devices
+	 */
+	SpinLockAcquire(&dprog->lock);
+	Assert(dprog->program == program);
+	dlist_foreach_modify(iter, &dprog->waitq)
+	{
+		pgstrom_message	*msg
+			= dlist_container(pgstrom_message, chain, iter.cur);
 
+		dlist_delete(&msg->chain);
+		pgstrom_enqueue_message(msg);
+	}
+	dprog->build_running = false;
+	SpinLockRelease(&dprog->lock);
+	return;
 
 
 out_error:
-	
+	SpinLockAcquire(&dprog->lock);
+	Assert(dprog->program == program);
+	dlist_foreach_modify(iter, &dprog->waitq)
+	{
+		pgstrom_message *msg
+			= dlist_container(pgstrom_message, chain, iter.cur);
 
-
+		dlist_delete(&msg->chain);
+        pgstrom_enqueue_message(msg);
+    }
+	dprog->build_running = false;
+	rc = clReleaseProgram(program);
+	Assert(rc == CL_SUCCESS);
+	dprog->program = BAD_OPENCL_PROGRAM;
+	SpinLockRelease(&dprog->lock);
 }
-
-
-
 
 /*
  * clserv_lookup_device_program
@@ -157,6 +236,17 @@ cl_program
 clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 {
 	devprog_entry  *dprog = (devprog_entry *)DatumGetPointer(dprog_key);
+	cl_int		rc;
+
+	/*
+	 * In case when shared memory usage of device program table exceeds
+	 * threshold, we try to reclaim it. Any programs being required to
+	 * run are already refcnt > 0, so no need to worry about unexpected
+	 * destruction.
+	 */
+	pg_memory_barrier();
+	if (opencl_devprog_shm_values->usage >= reclaim_threshold)
+		pgstrom_reclaim_devprog();
 
 	SpinLockAcquire(&dprog->lock);
 	if (!dprog->program)
@@ -165,7 +255,6 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 		const char *sources[32];
 		size_t		lengths[32];
 		cl_uint		count = 0;
-		cl_int		rc;
 
 		/* common opencl header */
 		sources[count] = pgstrom_opencl_common_code;
@@ -254,6 +343,8 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 	}
 	else if (dprog->program != BAD_OPENCL_PROGRAM)
 	{
+		cl_program	program;
+
 		/*
 		 * If valid program build process is still running, we chain the
 		 * message object onto waiting queue of this device program.
@@ -286,55 +377,6 @@ out_unlock:
 }
 
 /*
- * pgstrom_reclaim_devprog
- *
- * It reclaims device program entries being no longer used according to LRU
- * algorism, but never tries to keep the total usage less than
- * reclaim_threshold, just release the least-recently-used one if total
- * usage is larger than the threshold.
- *
- * NOTE: This routine is assumed that opencl_devprog_shm_values->lock is
- * already held on the caller side, and OpenCL intermediation server calls.
- */
-static void
-pgstrom_reclaim_devprog(void)
-{
-	dlist_iter	iter;
-
-	/*
-	 * this logic may involves clReleaseProgram(), so only OpenCL
-	 * intermediation server can handle reclaiming
-	 */
-	Assert(pgstrom_is_opencl_server(void));
-
-	if (opencl_devprog_shm_values->usage < reclaim_threshold)
-		return;
-
-	dlist_reverse_foreach(iter, &opencl_devprog_shm_values->lru_list)
-	{
-		devprog_entry  *dprog
-			= dlist_container(devprog_entry, lru_chain, iter.cur);
-
-		if (dprog->refcnt > 0)
-			continue;
-
-		Assert(dprog->refcnt == 0);
-		dlist_delete(&dprog->hash_chain);
-		dlist_delete(&dprog->lru_chain);
-
-		length = offsetof(devprog_entry, source[dprog->source_len]);
-		if (dprog->errmsg)
-		{
-			length += strlen(dprog->errmsg);
-			pgstrom_shmem_free(dprog->errmsg);
-		}
-		clReleaseProgram(dprog->program);
-		opencl_devprog_shm_values->usage -= length;
-		break;
-	}
-}
-
-/*
  * pgstrom_get_devprog_key
  *
  * It returns a devprog-key that holds the given source and extra_libs.
@@ -349,13 +391,15 @@ pgstrom_get_devprog_key(const char *source, int32 extra_libs)
 	devprog_entry *dprog = NULL;
     shmem_context *context;
 	Size		source_len = strlen(source);
+	Size		alloc_len;
+	int			index;
+	dlist_iter	iter;
 	pg_crc32	crc;
-	ListCell   *cell;
 
 	/* calculate a hash value */
 	INIT_CRC32(crc);
 	COMP_CRC32(crc, &extra_libs, sizeof(int32));
-	COMP_CRC32(crc, kernel_source, kernel_length);
+	COMP_CRC32(crc, source, source_len);
 	FIN_CRC32(crc);
 
 retry:
@@ -364,14 +408,14 @@ retry:
 	dlist_foreach (iter, &opencl_devprog_shm_values->slot[index])
 	{
 		devprog_entry *entry
-			= dlist_container(devprog_entry, chain, iter.cur);
+			= dlist_container(devprog_entry, hash_chain, iter.cur);
 
 		if (entry->crc == crc &&
 			entry->extra_libs == extra_libs &&
 			entry->source_len == source_len &&
 			strcmp(entry->source, source) == 0)
 		{
-			dlist_move_head(opencl_devprog_shm_values->lru_list,
+			dlist_move_head(&opencl_devprog_shm_values->lru_list,
 							&entry->lru_chain);
 			SpinLockAcquire(&entry->lock);
 			entry->refcnt++;
@@ -403,8 +447,8 @@ retry:
 	/* OK, create a new device program entry */
 	context = opencl_devprog_shm_values->shm_context;
 
-	length = offsetof(devprog_entry, source[source_len]);
-	dprog = pgstrom_shmem_alloc(context, length);
+	alloc_len = offsetof(devprog_entry, source[source_len]);
+	dprog = pgstrom_shmem_alloc(context, alloc_len);
 	if (!dprog)
 		elog(ERROR, "out of shared memory");
 
@@ -418,7 +462,7 @@ retry:
 	dprog->extra_libs = extra_libs;
 	dprog->source_len = source_len;
 	strcpy(dprog->source, source);
-	opencl_devprog_shm_values->usage += length;
+	opencl_devprog_shm_values->usage += alloc_len;
 
 	goto retry;
 }
