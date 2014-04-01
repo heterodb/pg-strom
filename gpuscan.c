@@ -261,6 +261,8 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					 "  pg_bool_t   rc;\n"
 					 "  cl_int      errcode;\n"
 					 "\n"
+					 "  if (get_global_id(0) >= krs->nros)\n"
+					 "    return;\n"
 					 "  gpuscan_local_init(karg_local_buf);\n"
 					 "  rc = %s;\n"
 					 "  kern_set_error(!rc.isnull && rc.value != 0\n"
@@ -304,6 +306,8 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					 "  pg_bool_t   rc;\n"
 					 "  cl_int      errcode;\n"
 					 "\n"
+					 "  if (get_global_id(0) >= kcs->nrows)\n"
+					 "    return;\n"
 					 "  gpuscan_local_init(karg_local_buf);\n"
 					 "  rc = %s;\n"
 					 "  kern_set_error(!rc.isnull && rc.value != 0\n"
@@ -314,7 +318,53 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 	return str.data;
 }
 
+static Datum
+gpuscan_lookup_devprog(const char *kernel_source, int incl_flags,
+					   List *used_params, TupleDesc tupdesc)
+{
+	ListCell   *cell;
+	Oid		   *old_params;
+	Oid		   *old_vars;
+	int			index;
+	pg_crc32	crc;
 
+	/* setting up parameter's oid array */
+	oid_params = palloc(sizeof(Oid) * list_length(used_params));
+	index = 0;
+	foreach (cell, used_params)
+	{
+		Node   *node = lfirst(cell);
+
+		if (IsA(node, Const))
+			oid_params[index] = ((Const *) node)->consttype;
+		else if (IsA(node, Param))
+			oid_params[index] = ((Param *) node)->paramtype;
+		else
+			elog(ERROR, "unexpected node: %s", nodeToString(node));
+		index++;
+	}
+
+	/* setting up relation's oid array */
+	oid_vars = palloc(sizeof(Oid) * tupdesc->natts);
+	for (index=0; index < tupdesc->natts; index++)
+	{
+		Form_pg_attribute	attr = tupdesc->attrs[index];
+
+		oid_vars[index] = attr->atttypid;
+	}
+
+	/* setting up crc code of kernel source */
+	INIT_CRC32(crc);
+	COMP_CRC32(crc, &incl_flags, sizeof(int));
+	COMP_CRC32(crc, kernel_source, strlen(kernel_source));
+	FIN_CRC32(crc);
+
+
+
+
+
+	
+}
 
 static CustomPlan *
 gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)

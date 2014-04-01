@@ -1,4 +1,4 @@
-/*
+32;100;2c/*
  * opencl_devprog.c
  *
  * Routines to manage device programs/kernels
@@ -33,31 +33,39 @@ static struct {
 	dlist_head	slot[DEVPROG_HASH_SIZE];
 } *opencl_devprog_shm_values;
 
-#define DEVPROG_STATUS_NOT_BUILT			1
-#define DEVPROG_STATUS_BUILD_IN_PROGRESS	2
-#define DEVPROG_STATUS_BUILT_READY			3
-#define DEVPROG_STATUS_BUILT_ERROR			4
-
 typedef struct {
-	dlist_node	chain;	/* NOTE: chain and refcnt is protected by */
-	int			refcnt;	/* opencl_devprog_shm_values->lock */
-	slock_t		lock;
+	dlist_node	hash_chain;
+	dlist_node	lru_chain;
+	/*
+	 * NOTE: above members are protected by opencl_devprog_shm_values->lock.
+	 */
+	slock_t		lock;		/* protection of the fields below */
+	int			refcnt;		/* reference counter of this device program */
+	dlist_head	waitq;		/* wait queue of program build */
+	cl_program	program;	/* valid only OpenCL intermediator */
+	const char *errmsg;		/* error message if build error */
+
+	/* The fields below are read-only once constructed */
 	pg_crc32	crc;
-	int			status;		/* one of the DEVPROG_STATUS_* */
-	cl_program	program;	/* valid only OpenCL background server */
-	char	   *errmsg;		/* error message if build error */
 	int32		extra_libs;	/* set of DEVFUNC_NEEDS_* */
 	Size		source_len;
-	char	   *source;
-	int			num_params;
-	int			num_variables;
-	Oid		   *oid_params;
-	Oid		   *ois_variables;
-	char		data[FLEXIBLE_ARRAY_MEMBER];
+	char		source[FLEXIBLE_ARRAY_MEMBER];
 } devprog_entry;
 
+/*
+ * clserv_lookup_device_program
+ *
+ * It assumes OpenCL intermediation server calls this routine.
+ * According to the given program key, it returns a cl_program object if it
+ * is already built and ready. The source code kept in this entry was not
+ * built yet, it kicks the built-in compiler asynchronously. In this case,
+ * the supplied MessageTag is linked to the waitq until this asynchronous
+ * built getting finished, then enqueued 
+ *
+ *
+ */
 cl_program
-pgstrom_lookup_opencl_devprog(Datum dprog_key)
+clserv_lookup_device_program(Datum dprog_key, MessageTag *mtag)
 {
 
 
@@ -66,132 +74,182 @@ pgstrom_lookup_opencl_devprog(Datum dprog_key)
 }
 
 /*
- * pgstrom_create_opencl_devprog
+ * pgstrom_reclaim_devprog
  *
- * It creates a device program entry on the shared memory region, if identical
- * one is not here. Elsewhere, it just increments reference counter of the
- * identical entry.
- * It is intended to be called by backend processes, not OpenCL server.
+ * It reclaims device program entries being no longer used according to LRU
+ * algorism, but never tries to keep the total usage less than
+ * reclaim_threshold, just release the least-recently-used one if total
+ * usage is larger than the threshold.
+ *
+ * NOTE: This routine is assumed that opencl_devprog_shm_values->lock is
+ * already held on the caller side, and OpenCL intermediation server calls.
  */
-Datum
-pgstrom_create_opencl_devprog(const char *source, int32 extra_libs)
+static void
+pgstrom_reclaim_devprog(void)
 {
-	devprog_entry *dprog;
-	shmem_context *context;
-	Size		source_len = strlen(source);
-	pg_crc32	crc;
-	int			index;
-	Size		length;
 	dlist_iter	iter;
 
+	/*
+	 * this logic may involves clReleaseProgram(), so only OpenCL
+	 * intermediation server can handle reclaiming
+	 */
+	Assert(pgstrom_is_opencl_server(void));
+
+	if (opencl_devprog_shm_values->usage < reclaim_threshold)
+		return;
+
+	dlist_reverse_foreach(iter, &opencl_devprog_shm_values->lru_list)
+	{
+		devprog_entry  *dprog
+			= dlist_container(devprog_entry, lru_chain, iter.cur);
+
+		if (dprog->refcnt > 0)
+			continue;
+
+		Assert(dprog->refcnt == 0);
+		dlist_delete(&dprog->hash_chain);
+		dlist_delete(&dprog->lru_chain);
+
+		length = offsetof(devprog_entry, source[dprog->source_len]);
+		if (dprog->errmsg)
+		{
+			length += strlen(dprog->errmsg);
+			pgstrom_shmem_free(dprog->errmsg);
+		}
+		clReleaseProgram(dprog->program);
+		opencl_devprog_shm_values->usage -= length;
+		break;
+	}
+}
+
+/*
+ * pgstrom_get_devprog_key
+ *
+ * It returns a devprog-key that holds the given source and extra_libs.
+ * If not found on the device program table, it also create a new one
+ * and insert it, then returns its key.
+ *
+ * TODO: add a resource tracking here to ensure device program is released.
+ */
+Datum
+pgstrom_get_devprog_key(const char *source, int32 extra_libs)
+{
+	devprog_entry *dprog = NULL;
+    shmem_context *context;
+	Size		source_len = strlen(source);
+	pg_crc32	crc;
+	ListCell   *cell;
+
+	/* calculate a hash value */
 	INIT_CRC32(crc);
 	COMP_CRC32(crc, &extra_libs, sizeof(int32));
-	COMP_CRC32(crc, source, source_len);
+	COMP_CRC32(crc, kernel_source, kernel_length);
 	FIN_CRC32(crc);
 
+retry:
 	index = crc % DEVPROG_HASH_SIZE;
 	SpinLockAcquire(&opencl_devprog_shm_values->lock);
 	dlist_foreach (iter, &opencl_devprog_shm_values->slot[index])
 	{
-		dprog = dlist_container(devprog_entry, chain, iter.cur);
+		devprog_entry *entry
+			= dlist_container(devprog_entry, chain, iter.cur);
 
-		if (dprog->crc == crc &&
-			dprog->extra_libs == extra_libs &&
-			strcmp(dprog->source, source) == 0)
+		if (entry->crc == crc &&
+			entry->extra_libs == extra_libs &&
+			entry->source_len == source_len &&
+			strcmp(entry->source, source) == 0)
 		{
-			dprog->refcnt++;
+			dlist_move_head(opencl_devprog_shm_values->lru_list,
+							&entry->lru_chain);
+			SpinLockAcquire(&entry->lock);
+			entry->refcnt++;
+			SpinLockRelease(&entry->lock);
 			SpinLockRelease(&opencl_devprog_shm_values->lock);
-			return PointerGetDatum(dprog);
+			if (dprog)
+				pgstrom_shmem_free(dprog);
+			return PointerGetDatum(entry);
 		}
+	}
+	/* !Not found on the existing cache! */
+
+	/*
+	 * If it is second trial, we could ensure no identical kernel source
+	 * was inserted concurrently.
+	 */
+	if (dprog)
+	{
+		dlist_push_tail(&opencl_devprog_shm_values->slot[index],
+						&dprog->hash_chain);
+		dlist_push_head(&opencl_devprog_shm_values->lru_list,
+						&dprog->lru_chain);
+		SpinLockRelease(&opencl_devprog_shm_values->lock);
+
+		return PointerGetDatum(dprog);
 	}
 	SpinLockRelease(&opencl_devprog_shm_values->lock);
 
-	/*
-	 * Not found! so, create a new one
-	 */
+	/* OK, create a new device program entry */
 	context = opencl_devprog_shm_values->shm_context;
-	/*
-	 * XXX FIXME - need to allocate area for kernel source, param attrs,
-	 * var attrs
-	 */
-	length = sizeof(devprog_entry);
 
+	length = offsetof(devprog_entry, source[source_len]);
 	dprog = pgstrom_shmem_alloc(context, length);
 	if (!dprog)
 		elog(ERROR, "out of shared memory");
 
-	dprog->refcnt = 2;
+	dprog->refcnt = 1;
 	SpinLockInit(&dprog->lock);
-	dprog->crc = crc;
-	dprog->status = DEVPROG_STATUS_NOT_BUILT;
 	dprog->program = NULL;
-	dprog->errmsg = NULL;
+    dprog->errmsg = NULL;
+	dprog->crc = crc;
 	dprog->extra_libs = extra_libs;
 	dprog->source_len = source_len;
 	strcpy(dprog->source, source);
-
-	/* ensure concurrent job does not add same device program */
-	SpinLockAcquire(&opencl_devprog_shm_values->lock);
-	dlist_foreach (iter, &opencl_devprog_shm_values->slot[index])
-	{
-		devprog_entry *temp = dlist_container(devprog_entry, chain, iter.cur);
-
-		if (temp->crc == dprog->crc &&
-			temp->extra_libs == dprog->extra_libs &&
-			strcmp(temp->source, dprog->source) == 0)
-		{
-			pgstrom_shmem_free(dprog);
-			temp->refcnt++;
-			SpinLockRelease(&opencl_devprog_shm_values->lock);
-			return PointerGetDatum(temp);
-		}
-	}
-	if (opencl_devprog_shm_values->usage + length >= reclaim_threshold)
-		/* do cache reclaiming here */ ;
-
-	dlist_push_tail(&opencl_devprog_shm_values->slot[index], &dprog->chain);
 	opencl_devprog_shm_values->usage += length;
 
+	goto retry;
+}
+
+/*
+ * pgstrom_put_devprog_key
+ *
+ * It decrements reference counter of the given device program.
+ * Note that refcnt==0 does not mean immediate object release, for further
+ * reusing. If it actually overuses shared memory segment, OpenCL server
+ * will reclaim it.
+ */
+void
+pgstrom_put_devprog_key(Datum dprog_key)
+{
+	devprog_entry  *dprog = (devprog_entry *) DatumGetPointer(dprog_key);
+
+	SpinLockAcquire(&opencl_devprog_shm_values->lock);
+	dprog->refcnt--;
+	Assert(dprog->refcnt >= 0);
 	SpinLockRelease(&opencl_devprog_shm_values->lock);
-	return PointerGetDatum(dprog);
 }
 
+/*
+ * pgstrom_retain_devprog_key
+ *
+ * It increments reference counter of the given device program, to avoid
+ * unexpected program destruction.
+ */
 void
-pgstrom_get_opencl_devprog(Datum dprog_key)
+pgstrom_retain_devprog_key(Datum dprog_key)
 {
 	devprog_entry  *dprog = (devprog_entry *) DatumGetPointer(dprog_key);
 
-	SpinLockAcquire(&dprog->lock);
-	Assert(dprog->refcnt > 0);
+	SpinLockAcquire(&opencl_devprog_shm_values->lock);
+	Assert(dprog->refcnt >= 0);
 	dprog->refcnt++;
-	SpinLockRelease(&dprog->lock);
+	SpinLockRelease(&opencl_devprog_shm_values->lock);
 }
 
-void
-pgstrom_put_opencl_devprog(Datum dprog_key)
-{
-	devprog_entry  *dprog = (devprog_entry *) DatumGetPointer(dprog_key);
-	cl_int		rc;
-
-	SpinLockAcquire(&dprog->lock);
-	Assert(dprog->refcnt > 0);
-	if (--dprog->refcnt == 0)
-	{
-
-		SpinLockAcquire(&opencl_devprog_shm_values->lock);
-		dlist_delete(&dprog->chain);
-		SpinLockRelease(&opencl_devprog_shm_values->lock);
-
-		rc = clReleaseProgram(dprog->program);
-		Assert(rc == CL_SUCCESS);
-
-		if (dprog->errmsg)
-			pgstrom_shmem_free(dprog->errmsg);
-		pgstrom_shmem_free(dprog);
-	}
-	SpinLockRelease(&dprog->lock);
-}
-
+/*
+ * pgstrom_setup_opencl_devprog
+ *
+ * callback post shared memory context getting ready
+ */
 void
 pgstrom_setup_opencl_devprog(void)
 {
@@ -203,6 +261,11 @@ pgstrom_setup_opencl_devprog(void)
 	opencl_devprog_shm_values->shm_context = context;
 }
 
+/*
+ * pgstrom_startup_opencl_devprog
+ *
+ * callback for shared memory allocation
+ */
 static void
 pgstrom_startup_opencl_devprog(void)
 {
@@ -226,6 +289,11 @@ pgstrom_startup_opencl_devprog(void)
 		dlist_init(&opencl_devprog_shm_values->slot[i]);
 }
 
+/*
+ * pgstrom_init_opencl_devprog
+ *
+ * entrypoint of this module
+ */
 void
 pgstrom_init_opencl_devprog(void)
 {

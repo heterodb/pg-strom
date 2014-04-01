@@ -82,6 +82,7 @@ extern const char *opencl_strerror(cl_int errcode);
  * opencl_serv.c
  */
 Datum pgstrom_opencl_device_info(PG_FUNCTION_ARGS);
+extern bool pgstrom_is_opencl_server(void);
 extern void pgstrom_init_opencl_server(void);
 
 /*

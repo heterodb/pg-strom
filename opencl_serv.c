@@ -28,6 +28,7 @@
 
 /* flags set by signal handlers */
 static volatile sig_atomic_t got_signal = false;
+static volatile bool is_opencl_server = false;
 static int		opencl_platform_index;
 
 /* OpenCL resources for quick reference */
@@ -51,6 +52,18 @@ pgstrom_opencl_sighup(SIGNAL_ARGS)
 {
 	InterruptPending = true;
 	got_signal = true;
+}
+
+/*
+ * pgstrom_is_opencl_server
+ *
+ * It tells whether this process is opencl server or not.
+ * All the opencl functions have to be handled by OpenCL intermediation server.
+ */
+bool
+pgstrom_is_opencl_server(void)
+{
+	return is_opencl_server;
 }
 
 
@@ -231,6 +244,9 @@ init_opencl_devices_and_shmem(void)
 static void
 pgstrom_opencl_main(Datum main_arg)
 {
+	/* mark this process is OpenCL intermediator */
+	is_opencl_server = true;
+
 	/* Establish signal handlers before unblocking signals. */
     pqsignal(SIGHUP, pgstrom_opencl_sighup);
     pqsignal(SIGTERM, pgstrom_opencl_sigterm);
