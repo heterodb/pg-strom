@@ -26,3 +26,15 @@ opencl_gpuscan.c: opencl_gpuscan.h
 	 sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
 	     -e 's/^/  "/g' -e 's/$$/\\n"/g'< $^; \
 	 echo ";") > $@
+
+opencl_gpusort.c: opencl_gpusort.h
+	(echo "const char *pgstrom_opencl_gpusort_code ="; \
+	 sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
+	     -e 's/^/  "/g' -e 's/$$/\\n"/g'< $^; \
+	 echo ";") > $@
+
+opencl_hashjoin.c: opencl_hashjoin.h
+	(echo "const char *pgstrom_opencl_hashjoin_code ="; \
+	 sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
+	     -e 's/^/  "/g' -e 's/$$/\\n"/g'< $^; \
+	 echo ";") > $@

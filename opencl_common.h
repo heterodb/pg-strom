@@ -113,6 +113,8 @@ typedef struct {
 #define StromMsg_ColumnStore	2003
 #define StromMsg_ToastBuf		2004
 #define StromMsg_GpuScan		3001
+#define StromMsg_GpuSort		3002
+#define StromMsg_HashJoin		3003
 
 typedef struct {
 	cl_uint			type;		/* one of StromMsg_* */
