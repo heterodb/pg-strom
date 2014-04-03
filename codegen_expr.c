@@ -897,7 +897,7 @@ typedef struct
 	List	   *func_defs;		/* list of devfunc_info */
 	List	   *used_params;	/* list of Const or Param nodes */
 	List	   *used_vars;		/* list of Var nodes */
-	int			incl_flags;
+	int			extra_flags;
 } codegen_walker_context;
 
 static devtype_info *
@@ -916,7 +916,7 @@ devfunc_lookup_and_track(Oid func_oid, codegen_walker_context *context)
 	if (dfunc)
 	{
 		context->func_defs = list_append_unique(context->func_defs, dfunc);
-		context->incl_flags |= (dfunc->func_flags & DEVFUNC_INCL_FLAGS);
+		context->extra_flags |= (dfunc->func_flags & DEVFUNC_INCL_FLAGS);
 	}
 	return dfunc;
 }
@@ -934,7 +934,7 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 	if (IsA(node, Const))
 	{
 		Const  *con = (Const *) node;
-		int		index = 1;
+		int		index = 0;
 
 		if (!OidIsValid(con->constcollid) ||
 			!devtype_lookup_and_track(con->consttype, context))
@@ -958,7 +958,7 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 	else if (IsA(node, Param))
 	{
 		Param  *param = (Param *) node;
-		int		index = 1;
+		int		index = 0;
 
 		if (!OidIsValid(param->paramcollid) ||
 			!devtype_lookup_and_track(param->paramtype, context))
@@ -982,7 +982,7 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 	else if (IsA(node, Var))
 	{
 		Var	   *var = (Var *) node;
-		int		index = 1;
+		int		index = 0;
 
 		if (!OidIsValid(var->varcollid) ||
 			!devtype_lookup_and_track(var->vartype, context))
@@ -1162,7 +1162,7 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 			if (!dfunc)
 				dfunc = devfunc_setup_boolop(b->boolop, namebuf, nargs);
 			context->func_defs = list_append_unique(context->func_defs, dfunc);
-			context->incl_flags |= (dfunc->func_flags & DEVFUNC_INCL_FLAGS);
+			context->extra_flags |= (dfunc->func_flags & DEVFUNC_INCL_FLAGS);
 
 			appendStringInfo(&context->str, "%s(", dfunc->func_ident);
 			foreach (cell, b->args)
@@ -1192,7 +1192,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	walker_context.func_defs = list_copy(context->func_defs);
 	walker_context.used_params = list_copy(context->used_params);
 	walker_context.used_vars = list_copy(context->used_vars);
-	walker_context.incl_flags = context->incl_flags;
+	walker_context.extra_flags = context->extra_flags;
 
 	if (!codegen_expression_walker(expr, &walker_context))
 		return NULL;
@@ -1201,7 +1201,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	context->func_defs = walker_context.func_defs;
 	context->used_params = walker_context.used_params;
 	context->used_vars = walker_context.used_vars;
-	context->incl_flags = walker_context.incl_flags;
+	context->extra_flags = walker_context.extra_flags;
 
 	return walker_context.str.data;
 }
@@ -1214,11 +1214,11 @@ pgstrom_codegen_declarations(codegen_context *context)
 
 	initStringInfo(&str);
 	appendStringInfo(&str, "#include \"opencl_common.h\"\n");
-	if (context->incl_flags & DEVFUNC_NEEDS_TIMELIB)
+	if (context->extra_flags & DEVFUNC_NEEDS_TIMELIB)
 		appendStringInfo(&str, "#include \"opencl_timelib.h\"\n");
-	if (context->incl_flags & DEVFUNC_NEEDS_TEXTLIB)
+	if (context->extra_flags & DEVFUNC_NEEDS_TEXTLIB)
 		appendStringInfo(&str, "#include \"opencl_textlib.h\"\n");
-	if (context->incl_flags & DEVFUNC_NEEDS_NUMERICLIB)
+	if (context->extra_flags & DEVFUNC_NEEDS_NUMERICLIB)
 		appendStringInfo(&str, "#include \"opencl_numericlib.h\"\n");
 	appendStringInfoChar(&str, '\n');
 

@@ -20,7 +20,7 @@ static CustomPlanMethods		gpuscan_plan_methods;
 static bool						enable_gpuscan;
 
 typedef struct {
-	CustomPath	cplan;
+	CustomPath	cpath;
 	List	   *dev_quals;		/* RestrictInfo run on device */
 	List	   *host_quals;		/* RestrictInfo run on host */
 	Bitmapset  *dev_attrs;		/* attrs referenced in device */
@@ -30,16 +30,21 @@ typedef struct {
 typedef struct {
 	CustomPlan	cplan;
 	Index		scanrelid;		/* index of the range table */
-	List	   *type_defs;		/* list of devtype_info in use */
-	List	   *func_defs;		/* list of devfunc_info in use */
 	List	   *used_params;	/* list of Const/Param in use */
 	List	   *used_vars;		/* list of Var in use */
-	List	   *dev_quals;		/* RestrictInfo run on device */
-	List	   *host_quals;		/* RestrictInfo run on host */
+	int			extra_flags;	/* extra libraries to be included */
+	List	   *dev_clauses;	/* clauses to be run on device */
 	Bitmapset  *dev_attrs;		/* attrs referenced in device */
 	Bitmapset  *host_attrs;		/* attrs referenced in host */
-	int			incl_flags;		/* external libraries to be included */
 } GpuScanPlan;
+
+typedef struct {
+	PlanState	ps;
+	Relation	rel;
+	
+
+} GpuScanState;
+
 
 static void
 cost_gpuscan(GpuScanPath *gpu_path, PlannerInfo *root,
@@ -203,7 +208,7 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 	initStringInfo(&str);
 
 	/* Put param/const definitions */
-	index = 1;
+	index = 0;
 	foreach (cell, context->used_params)
 	{
 		if (IsA(lfirst(cell), Const))
@@ -236,7 +241,7 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 	}
 
 	/* Put Var definition for row-store */
-	index = 1;
+	index = 0;
 	foreach (cell, context->used_vars)
 	{
 		Var	   *var = lfirst(cell);
@@ -244,127 +249,81 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 		dtype = pgstrom_devtype_lookup(var->vartype);
 		Assert(dtype != NULL);
 
-		appendStringInfo(&str,
-						 "#define KVAR_%u\t"
-						 "pg_%s_vref_rs(krs,%u,get_global_id(0))\n",
-						 index, dtype->type_ident, var->varattno);
+		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
+			appendStringInfo(&str,
+					 "#define KVAR_%u\t"
+							 "pg_%s_vref(kcs,toast,%u,get_global_id(0))\n",
+							 index, dtype->type_ident, index);
+		else
+			appendStringInfo(&str,
+							 "#define KVAR_%u\t"
+							 "pg_%s_vref(kcs,%u,get_global_id(0))\n",
+							 index, dtype->type_ident, index);
 		index++;
 	}
+
+	/* columns to be referenced */
+	appendStringInfo(&str,
+					 "\n"
+					 "static __constant cl_ushort pg_used_vars[]={");
+	foreach (cell, context->used_vars)
+	{
+		Var	   *var = lfirst(cell);
+
+		appendStringInfo(&str, "%s%u",
+						 cell == list_head(context->used_vars) ? "" : ", ",
+						 var->varattno);
+	}
+	appendStringInfo(&str, "};\n\n");
 
 	/* qualifier definition with row-store */
 	appendStringInfo(&str,
 					 "__kernel void\n"
-					 "gpuscan_qual_rs(__global kern_parambuf *kparams,\n"
-					 "                __global kern_row_store *krs,\n"
-					 "                __global kern_gpuscan *gpuscan,\n"
-					 "                __local cl_int *karg_local_buf)\n"
-					 "{\n"
-					 "  pg_bool_t   rc;\n"
-					 "  cl_int      errcode;\n"
-					 "\n"
-					 "  if (get_global_id(0) >= krs->nros)\n"
-					 "    return;\n"
-					 "  gpuscan_local_init(karg_local_buf);\n"
-					 "  rc = %s;\n"
-					 "  kern_set_error(!rc.isnull && rc.value != 0\n"
-					 "                 ? StromError_Success\n"
-					 "                 : StromError_RowFiltered);\n"
-					 "  gpuscan_writeback_result(gpuscan);\n"
-					 "}\n\n", expr_code);
-
-	/* Put Var definition for column-store */
-	index = 1;
-	foreach (cell, context->used_vars)
-	{
-		Var	   *var = lfirst(cell);
-
-		dtype = pgstrom_devtype_lookup(var->vartype);
-		Assert(dtype != NULL);
-
-		appendStringInfo(&str, "#undef KVAR_%u\n", index);
-		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
-			appendStringInfo(&str,
-							 "#define KVAR_%u\t"
-							 "pg_%s_vref_cs(krs,toast,%u,get_global_id(0))\n",
-							 index, dtype->type_ident, var->varattno);
-		else
-			appendStringInfo(&str,
-							 "#define KVAR_%u\t"
-							 "pg_%s_vref_cs(krs,%u,get_global_id(0))\n",
-							 index, dtype->type_ident, var->varattno);
-		index++;
-	}
-
-	/* qualifier definition with column-store */
-	appendStringInfo(&str,
-					 "__kernel void\n"
-					 "gpuscan_qual_cs(__global kern_parambuf *kparams,\n"
+					 "gpuscan_qual_cs(__global kern_gpuscan *gpuscan,\n"
+					 "                __global kern_parambuf *kparams,\n"
 					 "                __global kern_column_store *kcs,\n"
-					 "                __global kern_gpuscan *gpuscan,\n"
 					 "                __global kern_toastbuf *toast,\n"
-					 "                __local cl_int *karg_local_buf)\n"
+					 "                __local void *local_workmem)\n"
 					 "{\n"
 					 "  pg_bool_t   rc;\n"
 					 "  cl_int      errcode;\n"
 					 "\n"
-					 "  if (get_global_id(0) >= kcs->nrows)\n"
-					 "    return;\n"
-					 "  gpuscan_local_init(karg_local_buf);\n"
-					 "  rc = %s;\n"
+					 "  gpuscan_local_init(local_workmem);\n"
+					 "  if (get_global_id(0) < kcs->nrows)\n"
+					 "    rc = %s;\n"
+					 "  else\n"
+					 "    rc.isnull = CL_TRUE;\n"
 					 "  kern_set_error(!rc.isnull && rc.value != 0\n"
 					 "                 ? StromError_Success\n"
 					 "                 : StromError_RowFiltered);\n"
 					 "  gpuscan_writeback_result(gpuscan);\n"
+					 "}\n"
+					 "\n"
+					 "__kernel void\n"
+					 "gpuscan_qual_rs_prep(__global kern_row_store *krs,\n"
+					 "                     __global kern_column_store *kcs)\n"
+					 "{\n"
+					 "  kern_row_to_column_prep(krs,kcs,\n"
+					 "                          lengthof(used_vars),\n"
+					 "                          used_vars);\n"
+					 "}\n"
+					 "\n"
+					 "__kernel void\n"
+					 "gpuscan_qual_rs(__global kern_gpuscan *gpuscan,\n"
+					 "                __global kern_parambuf *kparams,\n"
+					 "                __global kern_row_store *krs,\n"
+					 "                __global kern_column_store *kcs,\n"
+					 "                __local void *local_workmem)\n"
+					 "{\n"
+					 "  kern_row_to_column(krs,kcs,\n"
+					 "                     lengthof(used_vars),\n"
+					 "                     used_vars,\n"
+					 "                     local_workmem);\n"
+					 "  gpuscan_qual_cs(gpuscan,kparams,kcs,\n"
+					 "                  (kern_toastbuf *)krs,\n"
+					 "                  local_workmem);\n"
 					 "}\n", expr_code);
 	return str.data;
-}
-
-static Datum
-gpuscan_lookup_devprog(const char *kernel_source, int incl_flags,
-					   List *used_params, TupleDesc tupdesc)
-{
-	ListCell   *cell;
-	Oid		   *old_params;
-	Oid		   *old_vars;
-	int			index;
-	pg_crc32	crc;
-
-	/* setting up parameter's oid array */
-	oid_params = palloc(sizeof(Oid) * list_length(used_params));
-	index = 0;
-	foreach (cell, used_params)
-	{
-		Node   *node = lfirst(cell);
-
-		if (IsA(node, Const))
-			oid_params[index] = ((Const *) node)->consttype;
-		else if (IsA(node, Param))
-			oid_params[index] = ((Param *) node)->paramtype;
-		else
-			elog(ERROR, "unexpected node: %s", nodeToString(node));
-		index++;
-	}
-
-	/* setting up relation's oid array */
-	oid_vars = palloc(sizeof(Oid) * tupdesc->natts);
-	for (index=0; index < tupdesc->natts; index++)
-	{
-		Form_pg_attribute	attr = tupdesc->attrs[index];
-
-		oid_vars[index] = attr->atttypid;
-	}
-
-	/* setting up crc code of kernel source */
-	INIT_CRC32(crc);
-	COMP_CRC32(crc, &incl_flags, sizeof(int));
-	COMP_CRC32(crc, kernel_source, strlen(kernel_source));
-	FIN_CRC32(crc);
-
-
-
-
-
-	
 }
 
 static CustomPlan *
@@ -374,8 +333,10 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 	GpuScanPath	   *gpath = (GpuScanPath *)best_path;
 	GpuScanPlan	   *gscan;
 	List		   *tlist;
-	List		   *scan_clause;
+	List		   *host_clauses;
+	List		   *dev_clauses;
 	char		   *kern_source;
+	Datum			dprog_key;
 	codegen_context	context;
 
 	/*
@@ -396,16 +357,20 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 	Assert(rel->relkind == RTE_RELATION);
 
 	/* Sort clauses into best execution order */
-	scan_clauses = order_qual_clauses(root, gpath->host_quals);
+	host_clauses = order_qual_clauses(root, gpath->host_quals);
+	dev_clauses = order_qual_clauses(root, gpath->dev_quals);
 
 	/* Reduce RestrictInfo list to bare expressions; ignore pseudoconstants */
-	scan_clauses = extract_actual_clauses(scan_clauses, false);
+	host_clauses = extract_actual_clauses(host_clauses, false);
+	dev_clauses = extract_actual_clauses(dev_clauses, false);
 
 	/* Replace any outer-relation variables with nestloop params */
 	if (best_path->path.param_info)
 	{
-		scan_clauses = (List *)
-			replace_nestloop_params(root, (Node *) scan_clauses);
+		host_clauses = (List *)
+			replace_nestloop_params(root, (Node *) host_clauses);
+		dev_clauses = (List *)
+			replace_nestloop_params(root, (Node *) dev_clauses);
 	}
 
 	/*
@@ -418,72 +383,99 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 	 * the relation cache.
 	 */
 	kern_source = gpuscan_codegen_quals(gpath->dev_quals, &context);
-
-
+	dprog_key = pgstrom_get_devprog_key(kern_source, context->incl_flags);
 
 	/*
-	 * XXX - now construct a kernel code in text form
+	 * Construction of GpuScanPlan node; on top of CustomPlan node
 	 */
-
-
-
 	gscan = palloc0(sizeof(GpuScanPlan));
 	gscan->cplan.plan.type = T_CustomPlan;
 	gscan->cplan.plan.targetlist = tlist;
-	gscan->cplan.plan.qual = scan_clauses;
+	gscan->cplan.plan.qual = host_clauses;
 	gscan->cplan.plan.lefttree = NULL;
 	gscan->cplan.plan.righttree = NULL;
 
 	gscan->scanrelid = rel->relid;
-
-
-
-
-	gscan->scanrelid = rel->relid;
-	gscan->type_defs = gpath->type_defs;
-	gscan->func_defs = gpath->func_defs;
-	gscan->used_params = gpath->used_params;
-	gscan->used_vars = gpath->used_vars;
+	gscan->used_params = context->used_params;
+	gscan->used_vars = context->used_vars;
+	gscan->extra_flags = context->extra_flags;
+	gscan->dev_clauses = dev_clauses;
 	gscan->dev_attrs = gpath->dev_attrs;
 	gscan->host_attrs = gpath->host_attrs;
 
-	gscan->dev_quals = gpath->dev_quals;
+	return &gscan->cplan;
+}
 
+/* copy from outfuncs.c */
+static void
+_outBitmapset(StringInfo str, const Bitmapset *bms)
+{
+	Bitmapset  *tmpset;
+	int			x;
 
-
-
-
-typedef struct {
-	CustomPlan	cplan;
-	Index		scanrelid;
-	List	   *type_defs;		/* list of devtype_info in use */
-	List	   *func_defs;		/* list of devfunc_info in use */
-	List	   *used_params;	/* list of Const/Param in use */
-	List	   *used_vars;		/* list of Var in use */
-	List	   *dev_quals;		/* RestrictInfo run on device */
-	List	   *host_quals;		/* RestrictInfo run on host */
-	Bitmapset  *dev_attrs;		/* attrs referenced in device */
-	Bitmapset  *host_attrs;		/* attrs referenced in host */
-	int			incl_flags;		/* external libraries to be included */
-} GpuScanPlan;
-
+	appendStringInfoChar(str, '(');
+	appendStringInfoChar(str, 'b');
+	tmpset = bms_copy(bms);
+	while ((x = bms_first_member(tmpset)) >= 0)
+		appendStringInfo(str, " %d", x);
+	bms_free(tmpset);
+	appendStringInfoChar(str, ')');
 }
 
 static void
 gpuscan_textout_path(StringInfo str, Node *node)
 {
 	GpuScanPath	   *pathnode = (GpuScanPath *) node;
+	Bitmapset	   *tempset;
+	char		   *temp;
+	int				x;
+
+	/* dev_quals */
+	temp = nodeToString(pathnode->dev_quals);
+	appendStringInfo(str, " :dev_quals %s", temp);
+	pfree(tmep);
+
+	/* host_quals */
+	temp = nodeToString(pathnode->host_quals);
+	appendStringInfo(str, " :host_quals %s", temp);
+	pfree(temp);
+
+	/* dev_attrs */
+	appendStringInfo(str, " :dev_attrs");
+	_outBitmapset(str, pathnode->dev_attrs);
+
+	/* host_attrs */
+	appendStringInfo(str, " :host_attrs");
+	_outBitmapset(str, pathnode->host_attrs);
 }
 
 static void
 gpuscan_set_plan_ref(PlannerInfo *root,
 					 CustomPlan *custom_plan,
 					 int rtoffset)
-{}
+{
+	GpuScanPlan	   *gscan = (GpuScanPlan *)custom_plan;
+
+	gscan->scanrelid += rtoffset;
+	gscan->cplan.plan.targetlist = (List *)
+		fix_scan_expr(root, (List *)gscan->cplan.plan.targetlist, rtoffset);
+	gscan->cplan.plan.qual = (List *)
+		fix_scan_expr(root, (List *)gscan->cplan.plan.qual, rtoffset);
+	gscan->used_vars = (List *)
+		fix_scan_expr(root, (List *)gscan->used_vars, rtoffset);
+	gscan->dev_clauses = (List *)
+		fix_scan_expr(root, (List *)gscan->dev_clauses, rtoffset);
+}
 
 static void
-gpuscan_finalize_plan(CustomPlan *custom_plan)
-{}
+gpuscan_finalize_plan(PlannerInfo *root,
+					  CustomPlan *custom_plan,
+					  Bitmapset **paramids,
+					  Bitmapset **valid_params,
+					  Bitmapset **scan_params)
+{
+	*paramids = bms_add_members(*paramids, *scan_params);
+}
 
 static  CustomPlanState *
 gpuscan_begin(CustomPlan *custom_plan, EState *estate, int eflags)
@@ -519,11 +511,49 @@ gpuscan_get_relids(CustomPlanState *node)
 
 static void
 gpuscan_textout_plan(StringInfo str, const CustomPlan *node)
-{}
+{
+	GpuScanPlan	   *plannode = (GpuScanPlan *)node;
+	char		   *temp;
+
+	appendStringInfoChar(str, " :scanrelid %u", plannode->scanrelid);
+
+	temp = nodeToString(plannode->used_params);
+	appendStringInfo(str, " :used_params %s", temp);
+	pfree(temp);
+
+	temp = nodeToString(plannode->used_vars);
+	appendStringInfo(str, " :used_vars %s", temp);
+	pfree(temp);
+
+	appendStringInfo(str, " :extra_flags %u", plannode->scanrelid);
+
+	temp = nodeToString(plannode->dev_clauses);
+	appendStringInfo(str, " :dev_clauses %s", temp);
+	pfree(temp);
+
+	appendStringInfo(str, " :dev_attrs ");
+	_outBitmapset(str, plannode->dev_attrs);
+
+	appendStringInfo(str, " :host_attrs ");
+	_outBitmapset(str, plannode->host_attrs);
+}
 
 static CustomPlan *
 gpuscan_copy_plan(const CustomPlan *from)
-{}
+{
+	GpuScanPlan	   *newnode = palloc(sizeof(GpuScanPlan));
+
+	CopyCustomPlanCommon(from, newnode);
+	newnode->scanrelid = from->scanrelid;
+	newnode->used_params = copyObject(from->used_params);
+	newnode->used_vars = copyObject(from->used_vars);
+	newnode->extra_flags = from->extra_flags;
+	newnode->dev_clauses = from->dev_clauses;
+	newnode->dev_attrs = bms_copy(from->dev_attrs);
+	newnode->host_attrs = bms_copy(from->host_attrs);
+
+	return &newnode->cplan;
+}
 
 void
 pgstrom_init_gpuscan(void)
