@@ -122,7 +122,7 @@ typedef struct {
 	List	   *func_defs;	/* list of devfunc_info in use */
 	List	   *used_params;/* list of Const/Param in use */
 	List	   *used_vars;	/* list of Var in use */
-	int			incl_flags;	/* external libraries to be included */
+	int			extra_flags;/* external libraries to be included */
 } codegen_context;
 
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
