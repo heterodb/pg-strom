@@ -11,6 +11,7 @@
  * within this package.
  */
 #include "postgres.h"
+#include "node/relation.h"
 #include "pg_strom.h"
 
 static add_scan_path_hook_type	add_scan_path_next;
