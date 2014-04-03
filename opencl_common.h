@@ -26,6 +26,8 @@
 
 /* Misc definitions */
 #define FLEXIBLE_ARRAY_MEMBER
+#define offsetof(TYPE, FIELD)   ((uintptr_t) &((TYPE *)0)->FIELD)
+#define lengthof(ARRAY)			(sizeof(ARRAY) / sizeof((ARRAY)[0]))
 
 /* basic type definitions */
 typedef bool		cl_bool;
@@ -318,7 +320,7 @@ typedef struct {
  * | +---------------|
  * | | Nulls map     | If colmeta[j].atthasnull is TRUE, a bitmap shall be
  * | |               | put in front of the column array. Its length is aligned
- * | +---------------| to KERN_COLSTORE_ALIGN.
+ * | +---------------| to STROMALIGN_LEN
  * | | array of      |
  * | | column-1      |
  * | |               |
@@ -330,7 +332,8 @@ typedef struct {
  * | for column-(M-1)|
  * +-----------------+
  */
-#define KERN_COLSTORE_ALIGN		64
+#define STROMALIGN_LEN		16
+#define STROMALIGN(LEN)		TYPEALIGN(STROMALIGN_LEN,LEN)
 
 typedef struct {
 	MessageTag		mtag;   /* StromMsg_ColumnStore */
@@ -385,37 +388,14 @@ typedef struct {
 #define STROMCL_VARLENA_DATATYPE_TEMPLACE(NAME)		\
 	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME, __global varlena *)
 
-#define STROMCL_SIMPLE_VARREF_RS_TEMPLATE(NAME,BASE)				\
-	static pg_##NAME##_t											\
-	pg_##NAME##_vref_rs(__global kern_row_store *krs,				\
-						cl_uint attnum,								\
-						cl_uint rowidx)								\
-	{																\
-		pg_##NAME##_t result;										\
-		__global rs_tuple *tup = rs_get_tuple(krs,rowidx);			\
-																	\
-		if (!tup)													\
-		{															\
-			result.isnull = true;									\
-		}															\
-		else														\
-		{															\
-			BASE   *ptr = rs_tuple_getattr(krs,tup,attnum);			\
-																	\
-			result.isnull = false;									\
-			result.value = *ptr;									\
-		}															\
-		return result;												\
-	}
-
-#define STROMCL_SIMPLE_VARREF_CS_TEMPLATE(NAME,BASE)				\
+#define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)				\
 	static pg_##NAME##_t											\
 	pg_##NAME##_vref_cs(__global kern_column_store *kcs,			\
-						cl_uint attnum,								\
+						cl_uint colidx,								\
 						cl_uint rowidx)								\
 	{																\
 		pg_##NAME##_t result;										\
-		__global BASE *addr = cs_getattr(kcs,attnum,rowidx);		\
+		__global BASE *addr = kern_get_datum(kcs,colidx,rowidx);	\
 																	\
 		if (!addr)													\
 			result.isnull = true;									\
@@ -427,45 +407,27 @@ typedef struct {
 		return result;												\
 	}
 
-#define STROMCL_VARLENA_VARREF_RS_TEMPLATE(NAME)					\
+#define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)
 	static pg_##NAME##_t											\
-	pg_##NAME##_vref_rs(__global kern_row_store *krs,				\
-						cl_uint attnum,								\
+	pg_##NAME##_vref_cs(__global kern_column_store *kcs,			\
+						__global MessageTag *vlbuf,					\
+						cl_uint colidx,								\
 						cl_uint rowidx)								\
 	{																\
 		pg_##NAME##_t result;										\
-		__global rs_tuple *tup = rs_get_tuple(krs,rowidx);			\
+		__global cl_uint *p_offset									\
+			= kern_get_datum(kcs,colidx,rowidx);					\
 																	\
-		if (!tup)													\
-		{															\
-			result.isnull = true;									\
-		}															\
-		else														\
-		{															\
-			result.isnull = false;									\
-			result.value =  rs_tuple_getattr(krs,tup,attnum);		\
-		}															\
-		return result;												\
-	}
-
-#define STROMCL_VARLENA_VARREF_CS_TEMPLATE(NAME)
-	static pg_##NAME##_t											\
-	pg_##NAME##_vref_cs(__global kern_column_store *kcs,			\
-						__global kern_toastbuf *toast,				\
-						cl_uint attnum,								\
-						cl_uint rowidx)								\
-	{																\
-		pg_##NAME##_t result;										 \
-		__global cl_uint *vl_offset	= cs_getattr(kcs,attnum,rowidx); \
-																	 \
 		if (!vl_offset)												\
 			result.isnull = true;									\
 		else														\
 		{															\
+			cl_uint	offset = *p_offset;								\
+																	\
+			if (vlbuf->type == StromMsg_ToastBuf)					\
+				offset += ((kern_toastbuf *)vlbuf)->coldir[colidx];	\
 			result.isnull = false;									\
-			result.value = (varlena *)((char *)toast +				\
-									   toast->coldir[attnum-1] +	\
-									   *vl_offset);					\
+			result.value = (varlena *)((char *)vlbuf + offset);		\
 		}															\
 		return result;												\
 	}
@@ -515,17 +477,15 @@ typedef struct {
 
 #define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)		\
-	STROMCL_SIMPLE_VARREF_RS_TEMPLATE(NAME,BASE)	\
-	STROMCL_SIMPLE_VARREF_CS_TEMPLATE(NAME,BASE)	\
+	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)
 
 #define STROMCL_VRALENA_TYPE_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)			\
-	STROMCL_VARLENA_VARREF_RS_TEMPLATE(NAME)		\
-	STROMCL_VARLENA_VARREF_CS_TEMPLATE(NAME)		\
+	STROMCL_VARLENA_VARREF_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)
 
-/* Built-in types */
+/* pg_bool_t is a built-in type */
 STROMCL_SIMPLE_TYPE_TEMPLATE(bool, bool)
 
 /*
@@ -591,111 +551,202 @@ pg_boolop_not(pg_bool_t result)
 }
 
 /*
- * Functions to reference row-format data
+ * Functions to translate row-store into column-store.
+ *
+ * Row to column translation takes a preparation step prior to the main
+ * kernel invocation, to initialize kern_column_store data structure on
+ * the global memory region. Because of OpenCL API limitation; that does
+ * not support inter-workgroup synchronization, the host code has to call
+ * kern_row_to_column_prep, for more correctness, a kernel function that
+ * calls this function.
  */
-static inline __global rs_tuple *
-rs_get_tuple(__global kern_row_store *krs,
-			 __private cl_uint rowidx)
+static void
+kern_row_to_column_prep(__global kern_row_store *krs,
+						__global kern_column_store *kcs,
+						cl_ushort ncols,
+						__constant cl_ushort *attnums)
 {
-	if (rowidx < krs->nrows)
-	{
-		__global cl_uint   *tuple_offset_array
-			= (cl_uint *)&krs->colmeta[krs->ncols];
+	cl_uint		offset;
+	cl_uint		nrows;
 
-		return (rs_tuple *)((char *)krs + tuple_offset_array[rowidx]);
+	if (get_global_id(0) > 0)
+		return;
+
+	nrows = krs->nrows;
+	offset = STROMALIGN(offsetof(kern_column_store, colmeta[ncols]));
+	for (i=0; i < ncols; i++)
+	{
+		cl_int		anum = attnums[i];
+
+		kcs->colmeta[i] = krs->colmeta[anum];
+		kcs->colmeta[i].atthasnull = true;	/* force to have nullmap */
+		kcs->colmeta[i].attofs = offset;
+		/* for null bitmap */
+		offset += STROMALIGN((nrows + 7) / 8);
+		/* for data body */
+		offset += STROMALIGN(nrows * (kcs->colmeta[i].attlen > 0
+									  ? kcs->colmeta[i].attlen
+									  : sizeof(cl_uint)));
 	}
-	return NULL;
+	kcs->mtag.type = StromMsg_ColumnStore;
+	kcs->mtag.length = offset;
+	kcs->nrows = nrows;
+	kcs->ncols = ncols;
+
+	barrier(CLK_GLOBAL_MEM_FENCE);	/* is it really needed? */
 }
 
-static __global void *
-rs_tuple_getattr(__global kern_row_store *krs,
-				 __global rs_tuple *rs_tup,
-				 __private cl_int attnum)
+/*
+ * kern_row_to_column
+ *
+ * It is main part of row-store to column-store translation; it assumes
+ * total number of work-items is larger than nrows and each work-item
+ * extract a row-format into column-format.
+ * We can assume the header field of kern_column_store is correctly
+ * initialized by kern_row_to_column_prep, or host code itself.
+ *
+ * 'nullmap_workbuf' has to have sizeof(cl_char) * get_local_size(0)
+ */
+static void
+kern_row_to_column(__global kern_row_store *krs,
+				   __global kern_column_store *kcs,
+				   cl_uint ncols,
+				   __constant cl_ushort *attnums,
+				   __local cl_char *nullmap_workbuf)
 {
-	__global void *result;
+	__global cl_uint   *p_offset;
+	__global rs_tuple  *rs_tup;
+	size_t		local_id = get_local_id(0);
+	cl_uint		maxatt = attnums[ncols - 1];
+	cl_uint		offset;
+	cl_uint		i, j;
 
-	/*
-	 * This logic is simplified nocachegetattr(). It uses attribute offset
-	 * cache if tuple contains no NULL and offset cache is available.
-	 * Elsewhere, it falls slow path regardless of attribute AFTER/BEFORE
-	 * null or variable-length field.
-	 */
-	if (rs_tup->data.t_infomask & HEAP_HASNULL == 0 &&
-		krs->colmeta[attnum-1].attofs >= 0)
-	{
-		result = ((char *)&rs_tup->data +
-				  rs_tup->data.t_hoff +
-				  krs->colmeta[attnum-1].attofs);
-	}
-	else if (att_isnull(attnum-1, rs_tup->data.t_bits))
-		result = NULL;
+	/* fetch a rs_tuple */
+	p_offset = (cl_uint *)&krs->colmeta[krs->ncols];
+	if (get_global_id(0) < krs->nrows)
+		rs_tup = (rs_tuple *)((char *)krs + p_offset[get_global_id(0)]);
 	else
+		rs_tup = NULL;
+
+	offset = rs_tup->data.t_hoff;
+	for (i=0, j=0; i < maxatt; i++)
 	{
-		/*
-		 * Undesirable case, we need to walk on the tuple from the first
-		 * attribute, if tuple has either NULL or variable length field.
-		 */
-		__global kern_colmeta *colmeta;
-		cl_uint			i, off = 0;
-		cl_char		   *tp = (cl_char *)&rs_tup->data + rs_tup->data.t_hoff;
+		cl_bool	isnull;
 
-		attnum--;
-		for (i=0; ; i++)
+		if (!rs_tup || (rs_tup->data.t_infomask & HEAP_HASNULL != 0 &&
+						att_isnull(i, rs_tup->data.t_bits)))
+			isnull = CL_TRUE;
+		else
 		{
-			if (rs_tup->data.t_infomask & HEAP_HASNULL != 0 &&
-				att_isnull(i, rs_tup->data.t_bits))
-				continue;
+			__global kern_colmeta  *colmeta = &krs->colmeta[i];
 
-			colmeta = &krs->colmeta[i];
-			if (colmeta->attlen < 0)
+			isnull = CL_FALSE;
+			if (colmeta->attlen > 0)
+				offset = TYPEALIGN(colmeta->attalign, offset);
+			else if (VARATT_NOT_PAD_BYTE(result + offset))
+				offset = TYPEALIGN(colmeta->attalign, offset);
+
+			if (i == attnums[j])
 			{
-				if (VARATT_NOT_PAD_BYTE(result + off))
-					off = TYPEALIGN(colmeta->attalign, off);
+				__global char  *src = ((cl_char *)&rs_tup->data) + offset;
+				__global char  *dest
+					= ((char *)kcs) + kcs->colmeta[j].attofs
+					+ STROMALIGN((get_global_size(0) + 7) / 8)	/* nullmap */
+					+ (get_global_id(0) * (colmeta->attlen > 0	/* column- */
+										   ? colmeta->attlen	/* array */
+										   : sizeof(cl_uint)));
+				/*
+				 * Copy a datum from a field of rs_tuple into column-array
+				 * of kern_column_store. In case of variable length-field,
+				 * column-array will have offset to body of the variable
+				 * length field in the toast buffer. The source row-store
+				 * will also perform as a toast buffer after the translation.
+				 *
+				 * NOTE: Also note that we assume fixed length variable has
+				 * 1, 2, 4, 8 or 16-bytes length. Elsewhere, it should be
+				 * a variable length field.
+				 */
+				switch (colmeta->attlen)
+				{
+					case 1:
+						*((cl_char *)dest) = *((cl_char *)src);
+						break;
+					case 2:
+						*((cl_short *)dest) = *((cl_short *)src);
+						break;
+					case 4:
+						*((cl_int *)dest) = *((cl_int *)src);
+						break;
+					case 8:
+						*((cl_long *)dest) = *((cl_long *)src);
+						break;
+					case 16:
+						*((cl_long *)dest) = *((cl_long *)src);
+						*(((cl_long *)dest) + 1) = *(((cl_long *)src) + 1);
+						break;
+					default:
+						*((cl_uint *)dest) = (cl_uint)((uintptr_t)src -
+													   (uintptr_t)rs_tup);
+						break;
+				}
 			}
-			else
-				off = TYPEALIGN(colmeta->attalign, off);
-
-			if (i == attnum)
-				break;
-			/*
-			 * Add length of this field
-			 * (att_addlength_pointer in host code)
-			 */
-			off += (colmeta->attlen < 0 ?
-					VARSIZE_ANY(result + off) :
-					colmeta->attlen);
 		}
-		result = tp + off;
+
+		/*
+		 * Calculation of nullmap if this column is the target to be moved.
+		 * Because it takes per bit operation using interaction with neighbor
+		 * work-item, we use local working memory for reduction.
+		 */
+		if (i == attnums[j])
+		{
+			nullmap_workbuf[local_id]
+				= (isnull ? (1 << (local_id & 0x07)) : 0);
+			barrier(CLK_LOCAL_MEM_FENCE);
+			if ((local_id & 0x01) == 0)
+				nullmap_workbuf[local_id] |= nullmap_workbuf[local_id + 1];
+			barrier(CLK_LOCAL_MEM_FENCE);
+			if ((local_id & 0x03) == 0)
+				nullmap_workbuf[local_id] |= nullmap_workbuf[local_id + 2];
+			barrier(CLK_LOCAL_MEM_FENCE);
+			if ((local_id & 0x07) == 0)
+				nullmap_workbuf[local_id] |= nullmap_workbuf[local_id + 4];
+			barrier(CLK_LOCAL_MEM_FENCE);
+			/* put a nullmap */
+			if ((local_id & 0x07) == 0 && get_global_id(0) < krs->nrows)
+			{
+				*((cl_char *)kcs +
+				  kcs->colmeta[j].attofs +
+				  (get_global_id(0) >> 3)) == nullmap_workbuf[local_id];
+			}
+			j++;
+		}
 	}
-	return result;
 }
 
 static __global void *
-cs_getattr(__global kern_column_store *kcs,
-		   cl_uint attnum,
-		   cl_uint rowidx)
+kern_get_datum(__global kern_column_store *kcs,
+			   cl_uint colidx,
+			   cl_uint rowidx)
 {
-	__global char  *result;
-	cl_uint			offset;
+	cl_uint		offset;
 
-	if (attnum > kcs->ncols || rowidx >= kcs->nrows)
+	if (colidx >= kcs->ncols || rowidx >= kcs->nrows)
 		return NULL;
 
-	offset = kcs->colmeta[attnum - 1].attofs;
-	if (kcs->colmeta[attnum - 1].atthasnull)
+	offset = kcs->colmeta[colidx].attofs;
+	if (kcs->colmeta[colidx].atthasnull)
 	{
-		__global cl_char *nullmap = (char *)kcs + offset;
+		__global cl_char   *nullmap = (char *)kcs + offset;
 
 		if ((nullmap[rowidx >> 3] & (1 << (rowidx & 0x07))) != 0)
 			return NULL;
-
 		offset += TYPEALIGN(KERN_COLSTORE_ALIGN, kcs->nrows >> 3);
 	}
 
-	if (kcs->colmeta[attnum - 1].attlen < 0)
-		offset += sizeof(cl_uint) * rowidx;
+	if (kcs->colmeta[colidx].attlen > 0)
+		offset += kcs->colmeta[colidx].attlen * rowidx;
 	else
-		offset += kcs->colmeta[attnum - 1].attlen * rowidx;
+		offset += sizeof(cl_uint) * rowidx;
 
 	return (void *)((char *)kcs + offset);
 }
