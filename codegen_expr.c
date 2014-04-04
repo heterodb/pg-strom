@@ -961,6 +961,7 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 		int		index = 0;
 
 		if (!OidIsValid(param->paramcollid) ||
+			param->paramkind != PARAM_EXTERN ||
 			!devtype_lookup_and_track(param->paramtype, context))
 			return false;
 
@@ -1268,44 +1269,50 @@ pgstrom_codegen_available_expression(Expr *expr)
 	}
 	else if (IsA(expr, Const))
 	{
-		if (pgstrom_devtype_lookup(((Const *) expr)->consttype))
-			return true;
-		return false;
+		Const  *con = (Const *) expr;
+
+		if (OidIsValid(con->constcollid) ||
+			!pgstrom_devtype_lookup(con->consttype))
+			return false;
+		return true;
 	}
 	else if (IsA(expr, Param))
 	{
-		if (pgstrom_devtype_lookup(((Param *) expr)->paramtype))
-			return true;
-		return false;
+		Param  *param = (Param *) expr;
+
+		if (OidIsValid(param->paramcollid) ||
+			param->paramkind != PARAM_EXTERN ||
+			!pgstrom_devtype_lookup(param->paramtype))
+			return false;
+		return true;
 	}
 	else if (IsA(expr, Var))
 	{
-		if (pgstrom_devtype_lookup(((Var *) expr)->vartype))
-			return true;
-		return false;
+		Var	   *var = (Var *) expr;
+
+		if (OidIsValid(var->varcollid) ||
+			!pgstrom_devtype_lookup(var->vartype))
+			return false;
+		return true;
 	}
 	else if (IsA(expr, FuncExpr))
 	{
 		FuncExpr   *func = (FuncExpr *) expr;
 
-		/* no collation support */
 		if (OidIsValid(func->funccollid) || OidIsValid(func->inputcollid))
 			return false;
-
-		if (pgstrom_devfunc_lookup(func->funcid))
-			return true;
+		if (!pgstrom_devfunc_lookup(func->funcid))
+			return false;
 		return pgstrom_codegen_available_expression((Expr *) func->args);
 	}
 	else if (IsA(expr, OpExpr) || IsA(expr, DistinctExpr))
 	{
 		OpExpr	   *op = (OpExpr *) expr;
 
-		/* no collation support */
 		if (OidIsValid(op->opcollid) || OidIsValid(op->inputcollid))
 			return false;
-
-		if (pgstrom_devfunc_lookup(get_opcode(op->opno)))
-			return true;
+		if (!pgstrom_devfunc_lookup(get_opcode(op->opno)))
+			return false;
 		return pgstrom_codegen_available_expression((Expr *) op->args);
 	}
 	else if (IsA(expr, NullTest))
@@ -1324,9 +1331,6 @@ pgstrom_codegen_available_expression(Expr *expr)
 	}
 	return false;
 }
-
-
-
 
 static void
 codegen_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)

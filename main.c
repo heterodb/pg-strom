@@ -65,7 +65,7 @@ pgstrom_shmem_alloc_func(PG_FUNCTION_ARGS)
 
 	PG_RETURN_INT64((Size) address);
 #else
-	elog(ERROR, "%s is not implemented for production release");
+	elog(ERROR, "%s is not implemented for production release", __FUNCTION__);
 
 	PG_RETURN_NULL();
 #endif
@@ -82,7 +82,7 @@ pgstrom_shmem_free_func(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(true);
 #else
-	elog(ERROR, "%s is not implemented for production release");
+	elog(ERROR, "%s is not implemented for production release", __FUNCTION__);
 
 	PG_RETURN_NULL();
 #endif

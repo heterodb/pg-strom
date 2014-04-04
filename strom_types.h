@@ -123,25 +123,56 @@ typedef struct pgstrom_message {
 	void			(*cb_release)(struct pgstrom_message *message);
 } pgstrom_message;
 
-/* maximum number of items to be placed on a row/column store */
-#define NITEMS_PER_CHUNK	(1 << 18)
+/*
+ * Message class identifiers
+ */
+#define StromMsg_ParamBuf		2001
+#define StromMsg_RowStore		2002
+#define StromMsg_ColumnStore	2003
+#define StromMsg_ToastBuf		2004
+#define StromMsg_GpuScan		3001
+#define StromMsg_GpuSort		3002
+#define StromMsg_HashJoin		3003
+
+typedef struct {
+	cl_uint			type;		/* one of StromMsg_* */
+	cl_uint			length;		/* total length of this message */
+} MessageTag;
 
 /*
  * Kernel Param/Const buffer
  */
-typedef kern_parambuf		pgstrom_parambuf;
+typedef struct {
+	MessageTag		mtag;
+	s_lock			lock;
+	cl_uint			refcnt;
+	kern_parambuf	kern;
+} pgstrom_parambuf;
 
 /*
  * Row-format data store
  */
-typedef kern_row_store		pgstrom_row_store;
+typedef struct {
+	MessageTag		mtag;
+	cl_uint			usage;
+	kern_row_store	kern;
+} pgstrom_row_store;
 
 /*
  * Column-format data store
  */
-typedef kern_column_store	pgstrom_column_store;
+typedef struct {
+	MessageTag		mtag;
+	dlist_head		toast;	/* list of toast buffers */
+	kern_column_store kern;
+} pgstrom_column_store;
 
-typedef kern_toastbuf	pgstrom_toastbuf;
+typedef struct {
+	MessageTag		mtag;
+	dlist_node		chain;
+
+	kern_toastbuf	kern;
+} pgstrom_toastbuf;
 
 /*
  * Type declarations for code generator

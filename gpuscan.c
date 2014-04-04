@@ -30,19 +30,50 @@ typedef struct {
 typedef struct {
 	CustomPlan	cplan;
 	Index		scanrelid;		/* index of the range table */
+	const char *kern_source;	/* source of opencl kernel */
+	int			extra_flags;	/* extra libraries to be included */
 	List	   *used_params;	/* list of Const/Param in use */
 	List	   *used_vars;		/* list of Var in use */
-	int			extra_flags;	/* extra libraries to be included */
 	List	   *dev_clauses;	/* clauses to be run on device */
 	Bitmapset  *dev_attrs;		/* attrs referenced in device */
 	Bitmapset  *host_attrs;		/* attrs referenced in host */
 } GpuScanPlan;
 
-typedef struct {
-	PlanState	ps;
-	Relation	rel;
-	
+/*
+ * Gpuscan has three strategy to scan a relation.
+ * a) cache-only scan, if all the variables being referenced in target-list
+ *    and scan-qualifiers are on the t-tree columnar cache.
+ *    It is capable to return a columner-store, instead of individual rows,
+ *    if upper plan node is also managed by PG-Strom.
+ * b) hybrid-scan, if Var references by scan-qualifiers are on cache, but
+ *    ones by target-list are not. It runs first screening by device, then
+ *    fetch a tuple from the shared buffers.
+ * c) heap-only scan, if all the variables in scan-qualifier are not on
+ *    the cache, all we can do is read tuples from shared-buffer to the
+ *    row-store, then picking it up.
+ * In case of (a) and (b), gpuscan needs to be responsible to MVCC checks;
+ * that is not done on the first evaluation timing.
+ * In case of (c), it may construct a columnar cache entry that caches the
+ * required columns.
+ */
+#define GpuScanMode_CacheOnlyScan	0x0001
+#define GpuScanMode_HybridScan		0x0002
+#define GpuScanMode_HeapOnlyScan	0x0003
+#define GpuScanMode_CreateCache		0x0004
 
+
+typedef struct {
+	CustomPlanState		cps;
+	Relation			scan_rel;
+	HeapScanDesc		scan_desc;
+	TupleTableSlot	   *scan_slot;
+	int					scan_mode;
+	shmem_context	   *shmcontext;
+	pgstrom_queue	   *mqueue;
+	pgstrom_parambuf   *parambuf;
+	Datum				dprog_key;
+	dlist_head			ready_chunks;
+	dlist_head			free_chunks;
 } GpuScanState;
 
 
@@ -201,6 +232,9 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 	char		   *expr_code;
 
 	memset(context, 0, sizeof(codegen_context));
+	if (dev_quals == NIL)
+		return NULL;
+
 	expr_code = pgstrom_codegen_expression((Node *)dev_quals, context);
 
 	Assert(expr_code != NULL);
@@ -336,7 +370,6 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 	List		   *host_clauses;
 	List		   *dev_clauses;
 	char		   *kern_source;
-	Datum			dprog_key;
 	codegen_context	context;
 
 	/*
@@ -383,7 +416,6 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 	 * the relation cache.
 	 */
 	kern_source = gpuscan_codegen_quals(gpath->dev_quals, &context);
-	dprog_key = pgstrom_get_devprog_key(kern_source, context->incl_flags);
 
 	/*
 	 * Construction of GpuScanPlan node; on top of CustomPlan node
@@ -396,9 +428,10 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 	gscan->cplan.plan.righttree = NULL;
 
 	gscan->scanrelid = rel->relid;
+	gscan->kern_source = kern_source;
+	gscan->extra_flags = context->extra_flags;
 	gscan->used_params = context->used_params;
 	gscan->used_vars = context->used_vars;
-	gscan->extra_flags = context->extra_flags;
 	gscan->dev_clauses = dev_clauses;
 	gscan->dev_attrs = gpath->dev_attrs;
 	gscan->host_attrs = gpath->host_attrs;
@@ -420,6 +453,39 @@ _outBitmapset(StringInfo str, const Bitmapset *bms)
 		appendStringInfo(str, " %d", x);
 	bms_free(tmpset);
 	appendStringInfoChar(str, ')');
+}
+
+/* copy from outfuncs.c */
+static void
+_outToken(StringInfo str, const char *s)
+{
+	if (s == NULL || *s == '\0')
+	{
+		appendStringInfoString(str, "<>");
+		return;
+	}
+
+	/*
+	 * Look for characters or patterns that are treated specially by read.c
+	 * (either in pg_strtok() or in nodeRead()), and therefore need a
+	 * protective backslash.
+	 */
+	/* These characters only need to be quoted at the start of the string */
+	if (*s == '<' ||
+		*s == '\"' ||
+		isdigit((unsigned char) *s) ||
+		((*s == '+' || *s == '-') &&
+		 (isdigit((unsigned char) s[1]) || s[1] == '.')))
+		appendStringInfoChar(str, '\\');
+	while (*s)
+	{
+		/* These chars must be backslashed anywhere in the string */
+		if (*s == ' ' || *s == '\n' || *s == '\t' ||
+			*s == '(' || *s == ')' || *s == '{' || *s == '}' ||
+			*s == '\\')
+			appendStringInfoChar(str, '\\');
+		appendStringInfoChar(str, *s++);
+	}
 }
 
 static void
@@ -478,8 +544,110 @@ gpuscan_finalize_plan(PlannerInfo *root,
 }
 
 static  CustomPlanState *
-gpuscan_begin(CustomPlan *custom_plan, EState *estate, int eflags)
-{}
+gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
+{
+	GpuScanPlan	   *gsplan = (GpuScanPlan *) node;
+	Index			scanrelid = gsplan->scanrelid;
+	GpuScanState   *gss;
+	TupleDesc		tupdesc;
+	char			namebuf[NAMEDATALEN+1];
+
+	/* gpuscan should not have inner/outer plan now */
+	Assert(outerPlan(custom_plan) == NULL);
+    Assert(innerPlan(custom_plan) == NULL);
+
+	/*
+	 * create a state structure
+	 */
+	gss = palloc0(sizeof(GpuScanState));
+	gss.cps.ps.type = T_CustomPlanState;
+	gss.cps.ps.plan = (Plan *) node;
+	gss.cps.ps.state = estate;
+
+	/*
+	 * create expression context
+	 */
+	ExecAssignExprContext(estate, &gss->cps.ps);
+
+	/*
+	 * initialize child expressions
+	 */
+	gss->cps.ps.targetlist = (List *)
+		ExecInitExpr((Expr *) node->plan.targetlist, &gss->cps.ps);
+	gss->cps.ps.qual = (List *)
+		ExecInitExpr((Expr *) node->plan.qual, &gss->cps.ps);
+
+	/*
+	 * tuple table initialization
+	 */
+	ExecInitResultTupleSlot(estate, &gss->cps.ps);
+	gss->scan_slot = ExecAllocTableSlot(&estate->es_tupleTable); // needed?
+
+	/*
+	 * initialize scan relation
+	 */
+	gss->scan_rel = ExecOpenScanRelation(estate, scanrelid, eflags);
+	gss->scan_desc = heap_beginscan(gss->scan_rel,
+									estate->es_snapshot,
+									0,
+									NULL);
+	tupdesc = RelationGetDescr(gss->scan_rel);
+	ExecSetSlotDescriptor(gss->scan_slot, tupdesc);
+
+	/*
+	 * Initialize result tuple type and projection info.
+	 */
+	ExecAssignResultTypeFromTL(&gss->cps.ps);
+	if (tlist_matches_tupdesc(&gss->cps.ps,
+							  node->plan.targetlist,
+							  scanrelid,
+							  tupdesc))
+		gss->cps.ps.ps_ProjInfo = NULL;
+	else
+		ExecAssignProjectionInfo(&gss->cps.ps, tupdesc);
+
+	/*
+	 * OK, initialization of common part is over.
+	 * Let's have GPU stuff initialization
+	 */
+	gss->scan_mode = GpuScanMode_HeapOnlyScan;
+	snprintf(namebuf, sizeof(namebuf),
+			 "gpuscan(pid:%u, datoid:%u, reloid:%u, rtindex:%u",
+			 MyProcPid, MyDatabaseId,
+			 RelationGetRelid(gss->scan_rel),
+			 scanrelid);
+	gss->shmcontext = pgstrom_shmem_context_create(namebuf);
+	if (!gss->shmcontext)
+		ereport(ERROR,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("failed to create shared memory context")));
+	// TODO: add resource tracking here
+
+	gss->mqueue = pgstrom_create_queue();
+	if (!gss->mqueue)
+		ereport(ERROR,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("failed to create message queue")));
+	// TODO: add resource tracking here
+
+	gss->parambuf = pgstrom_create_parambuf(gss->shmcontext, ...);
+
+	if (gsplan->kern_source)
+		gss->dprog_key = pgstrom_get_devprog_key(gsplan->kern_source,
+												 gsplan->extra_flags);
+	else
+		gss->dprog_key = 0;
+	// TODO: add resource tracking here
+
+
+
+
+
+
+
+
+	return &gss->cps;
+}
 
 static TupleTableSlot *
 gpuscan_exec(CustomPlanState *node)
@@ -487,7 +655,9 @@ gpuscan_exec(CustomPlanState *node)
 
 static Node *
 gpuscan_exec_multi(CustomPlanState *node)
-{}
+{
+	elog(ERROR, "not implemented yet");
+}
 
 static void
 gpuscan_end(CustomPlanState *node)
@@ -495,7 +665,9 @@ gpuscan_end(CustomPlanState *node)
 
 static void
 gpuscan_rescan(CustomPlanState *node)
-{}
+{
+	elog(ERROR, "not implemented yet");
+}
 
 static void
 gpuscan_explain_rel(CustomPlanState *node, ExplainState *es)
@@ -507,7 +679,11 @@ gpuscan_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 
 static Bitmapset *
 gpuscan_get_relids(CustomPlanState *node)
-{}
+{
+	GpuScanPlan	   *gsp = (GpuScanPlan *)node->cps.ps.plan;
+
+	return bms_make_singleton(gsp->scanrelid);
+}
 
 static void
 gpuscan_textout_plan(StringInfo str, const CustomPlan *node)
@@ -517,6 +693,11 @@ gpuscan_textout_plan(StringInfo str, const CustomPlan *node)
 
 	appendStringInfoChar(str, " :scanrelid %u", plannode->scanrelid);
 
+	appendStringInfoChar(str, " :kern_source ");
+	_outToken(str, plannode->kern_source);
+
+	appendStringInfo(str, " :extra_flags %u", plannode->scanrelid);
+
 	temp = nodeToString(plannode->used_params);
 	appendStringInfo(str, " :used_params %s", temp);
 	pfree(temp);
@@ -524,8 +705,6 @@ gpuscan_textout_plan(StringInfo str, const CustomPlan *node)
 	temp = nodeToString(plannode->used_vars);
 	appendStringInfo(str, " :used_vars %s", temp);
 	pfree(temp);
-
-	appendStringInfo(str, " :extra_flags %u", plannode->scanrelid);
 
 	temp = nodeToString(plannode->dev_clauses);
 	appendStringInfo(str, " :dev_clauses %s", temp);

@@ -108,22 +108,6 @@ typedef struct {
 #define StromErrorIsSignificant(errcode)	((errcode) >= 100)
 
 /*
- * Message class identifiers
- */
-#define StromMsg_ParamBuf		2001
-#define StromMsg_RowStore		2002
-#define StromMsg_ColumnStore	2003
-#define StromMsg_ToastBuf		2004
-#define StromMsg_GpuScan		3001
-#define StromMsg_GpuSort		3002
-#define StromMsg_HashJoin		3003
-
-typedef struct {
-	cl_uint			type;		/* one of StromMsg_* */
-	cl_uint			length;		/* total length of this message */
-} MessageTag;
-
-/*
  * kern_parambuf
  *
  * Const and Parameter buffer. It stores constant values during a particular
@@ -131,8 +115,6 @@ typedef struct {
  * less than constant memory (NOTE: not implemented yet).
  */
 typedef struct {
-	MessageTag		mtag;	/* StromMsg_ParamBuf */
-	cl_uint			refcnt;	/* !HOST ONLY! reference counter */
 	cl_uint			nparams;/* number of parameters */
 	cl_uint			poffset[FLEXIBLE_ARRAY_MEMBER];	/* offset of params */
 } kern_parambuf;
@@ -233,24 +215,20 @@ typedef struct {
  * It stores records in row-format.
  *
  * +-----------------+ o--+
- * | MessageTag      |    | The array of tuple offset begins from colmeta[N].
- * +-----------------+    | It points a particular variable length region
- * | nrows           |    | from the tail.
- * +-----------------+    | 
- * | ncols           |    |
- * +-----------------+    |
- * | usage           |    |
+ * | ncols (= M)     |    | The array of tuple offset begins from colmeta[N].
+ * +-----------------+    | It points a particular variable length region 
+ * | nrows (= N)     |    | from the tail.
  * +-----------------+    |
  * | colmeta[0]      |    |
  * | colmeta[1]      |    |
  * |    :            |    |
- * | colmeta[N-1]    |    |
+ * | colmeta[M-1]    |    |
  * +-----------------+ <--+
  * | tuples[0]       |
  * | tuples[1]       |
  * | tuples[2] o----------+ offset from the head of this row-store
  * |    :            |    |
- * | tuples[nrows-1] |    |
+ * | tuples[N-1]     |    |
  * +-----------------+    |
  * |      :          |    |
  * | free area       |    |
@@ -271,10 +249,8 @@ typedef struct {
  * +-----------------+
  */
 typedef struct {
-    MessageTag      mtag;   /* StromMsg_RowStore */
-	cl_uint			nrows;	/* number of rows in this store */
 	cl_uint			ncols;	/* number of columns in the source relation */
-	cl_uint			usage;	/* usage of this store */
+	cl_uint			nrows;	/* number of rows in this store */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];	/* metadata of columns */
 } kern_row_store;
 
@@ -301,11 +277,9 @@ typedef struct {
  *
  * It stores arrays in column-format
  * +-----------------+
- * | MessageTag      |
+ * | ncols (=M)      |
  * +-----------------+
  * | nrows (=N)      |
- * +-----------------+
- * | ncols (=M)      |
  * +-----------------+
  * | colmeta[0]      |
  * | colmeta[1]   o-------+ colmeta[j].attofs points an offset of the column-
@@ -336,9 +310,8 @@ typedef struct {
 #define STROMALIGN(LEN)		TYPEALIGN(STROMALIGN_LEN,LEN)
 
 typedef struct {
-	MessageTag		mtag;   /* StromMsg_ColumnStore */
-	cl_uint			nrows;  /* number of records in this store */
 	cl_uint			ncols;	/* number of columns in this store */
+	cl_uint			nrows;  /* number of records in this store */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_column_store;
 
@@ -351,6 +324,8 @@ typedef struct {
  *
  * +--------------+
  * | ncols        | number of columns in this buffer
+ * +--------------+
+ * | magic        | magic number of toastbuf
  * +--------------+
  * | coldir[0]    |
  * | coldir[1]  o-------+ In case when a varlena reference (offset=120) of
@@ -368,13 +343,12 @@ typedef struct {
  * |   :          |
  * +--------------+
  */
+#define TOASTBUF_MAGIC		0xffffffff	/* should not be number of rows */
 typedef struct {
-	MessageTag		mtag;
-	dlist_node		chain;	/* !HOST ONLY! linked to column store */
 	cl_uint			ncols;
+	cl_uint			magic;	/* = TOASTBUF_MAGIC */
 	cl_uint			coldir[FLEXIBLE_ARRAY_MEMBER];
 } kern_toastbuf;
-
 
 #ifdef OPENCL_DEVICE_CODE
 
@@ -410,7 +384,7 @@ typedef struct {
 #define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)
 	static pg_##NAME##_t											\
 	pg_##NAME##_vref_cs(__global kern_column_store *kcs,			\
-						__global MessageTag *vlbuf,					\
+						__global kern_toastbuf *toast,				\
 						cl_uint colidx,								\
 						cl_uint rowidx)								\
 	{																\
@@ -424,10 +398,10 @@ typedef struct {
 		{															\
 			cl_uint	offset = *p_offset;								\
 																	\
-			if (vlbuf->type == StromMsg_ToastBuf)					\
-				offset += ((kern_toastbuf *)vlbuf)->coldir[colidx];	\
+			if (toast->magic == TOASTBUF_MAGIC)						\
+				offset += toast->coldir[colidx];					\
 			result.isnull = false;									\
-			result.value = (varlena *)((char *)vlbuf + offset);		\
+			result.value = (varlena *)((char *)toast + offset);		\
 		}															\
 		return result;												\
 	}
