@@ -39,9 +39,10 @@ extern pgstrom_message *pgstrom_try_dequeue_message(pgstrom_queue *queue);
 extern pgstrom_message *pgstrom_dequeue_server_message(void);
 extern void pgstrom_close_queue(pgstrom_queue *queue);
 extern void pgstrom_init_message(pgstrom_message *msg,
-								 MessageTag mtag,
+								 StromTag stag,
 								 pgstrom_queue *respq,
 								 void (*cb_release)(pgstrom_message *msg));
+extern void pgstrom_put_message(pgstrom_message *msg);
 extern void pgstrom_setup_mqueue(void);
 extern void pgstrom_init_mqueue(void);
 

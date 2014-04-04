@@ -13,6 +13,7 @@
  */
 #ifndef STROM_TYPES_H
 #define STROM_TYPES_H
+#include "storage/spin.h"
 
 /*
  * pgstrom_platform_info
@@ -97,6 +98,20 @@ typedef struct {
 } pgstrom_device_info;
 
 /*
+ * Tag of shared memory object classes
+ */
+typedef enum {
+	StromTag_MsgQueue	= 1001,
+	StromTag_ParamBuf,
+	StromTag_RowStore,
+	StromTag_ColumnStore,
+	StromTag_ToastBuf,
+	StromTag_GpuScan,
+	StromTag_GpuSort,
+	StromTag_HashJoin,
+} StromTag;
+
+/*
  * pgstrom_queue
  *
  * A message queue allocated on shared memory, to send messages to/from
@@ -105,47 +120,28 @@ typedef struct {
  * to be returned
  */
 typedef struct {
+	StromTag		stag;
+	int				refcnt;
 	pthread_mutex_t	lock;
 	pthread_cond_t	cond;
 	dlist_head		qhead;
-	int				refcnt;
 	bool			closed;
 } pgstrom_queue;
 
-
-
-
 typedef struct pgstrom_message {
-	MessageTag		mtag;
+	StromTag		stag;
+	slock_t			lock;	/* protection for reference counter */
+	cl_int			refcnt;
 	dlist_node		chain;
-	pgstrom_queue  *respq;	/* queue for response message */
-	/* destructor of this message if needed */
-	void			(*cb_release)(struct pgstrom_message *message);
+	pgstrom_queue  *respq;	/* mqueue for response message */
+	void	(*cb_release)(struct pgstrom_message *message);
 } pgstrom_message;
-
-/*
- * Message class identifiers
- */
-#define StromMsg_ParamBuf		2001
-#define StromMsg_RowStore		2002
-#define StromMsg_ColumnStore	2003
-#define StromMsg_ToastBuf		2004
-#define StromMsg_GpuScan		3001
-#define StromMsg_GpuSort		3002
-#define StromMsg_HashJoin		3003
-
-typedef struct {
-	cl_uint			type;		/* one of StromMsg_* */
-	cl_uint			length;		/* total length of this message */
-} MessageTag;
 
 /*
  * Kernel Param/Const buffer
  */
 typedef struct {
-	MessageTag		mtag;
-	s_lock			lock;
-	cl_uint			refcnt;
+	pgstrom_message	msg;
 	kern_parambuf	kern;
 } pgstrom_parambuf;
 
@@ -153,7 +149,7 @@ typedef struct {
  * Row-format data store
  */
 typedef struct {
-	MessageTag		mtag;
+	StromTag		stag;
 	cl_uint			usage;
 	kern_row_store	kern;
 } pgstrom_row_store;
@@ -162,15 +158,15 @@ typedef struct {
  * Column-format data store
  */
 typedef struct {
-	MessageTag		mtag;
+	StromTag		stag;
 	dlist_head		toast;	/* list of toast buffers */
 	kern_column_store kern;
 } pgstrom_column_store;
 
 typedef struct {
-	MessageTag		mtag;
+	StromTag		stag;
 	dlist_node		chain;
-
+	cl_uint			usage;
 	kern_toastbuf	kern;
 } pgstrom_toastbuf;
 

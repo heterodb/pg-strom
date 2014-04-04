@@ -57,12 +57,13 @@ pgstrom_create_queue(void)
 	if (!queue)
 		return NULL;
 
+	queue->stag = StromTag_MsgQueue;
+	queue->refcnt = 1;
 	if (pthread_mutex_init(&queue->lock, &mutex_attr) != 0)
 		goto error;
 	if (pthread_cond_init(&queue->cond, &cond_attr) != 0)
 		goto error;
 	dlist_init(&queue->qhead);
-	queue->refcnt = 1;
 	queue->closed = false;
 
 	return queue;
@@ -73,10 +74,9 @@ error:
 }
 
 /*
- * pgstrom_enqueue
+ * pgstrom_enqueue_message
  *
- * It allows the backend to enqueue a message towards OpenCL background
- * server.
+ * It enqueues a message towardss OpenCL intermediation server.
  */
 bool
 pgstrom_enqueue_message(pgstrom_message *message)
@@ -90,8 +90,28 @@ pgstrom_enqueue_message(pgstrom_message *message)
 		pthread_mutex_unlock(&mqueue->lock);
 		return false;
 	}
-	/* enqueue this message */
+
+	/*
+	 * We assume the message being enqueued in the server message-queue is
+	 * already acquired by the server process, not only backend process.
+	 * So, we ensure the messages shall not be released during server jobs.
+	 * Increment of reference counter prevent unexpected resource free by
+	 * elog(ERROR, ...).
+	 * 
+	 * Please note that the server process may enqueue messages again.
+	 * In this case, we don't need to increment reference counter of the
+	 * message again (because server process already acquires this message!).
+	 * So, it shall be increment only when backend process tries to enqueue
+	 * a message.
+	 */
+	SpinLockAcquire(&message->lock);
+	Assert(message->refcnt > 0);
+	if (!pgstrom_is_opencl_server())
+		message->refcnt++;
 	dlist_push_tail(&mqueue->qhead, &message->chain);
+	SpinLockRelease(&message->lock);
+
+	/* notification to waiter */
 	rc = pthread_cond_signal(&mqueue->cond);
 	Assert(rc == 0);
 	pthread_mutex_unlock(&mqueue->lock);
@@ -102,56 +122,85 @@ pgstrom_enqueue_message(pgstrom_message *message)
 /*
  * pgstrom_reply_message
  *
- * It enqueues a response message by the OpenCL background server.
- * It shouldn't be called by backend processes.
+ * It allows OpenCL intermediation server to enqueue a response message
+ * towards the backend process, shouldn't be called by backend itself.
  */
 void
 pgstrom_reply_message(pgstrom_message *message)
 {
 	pgstrom_queue  *respq = message->respq;
-	bool	queue_free = false;
-	bool	message_free = false;
+	bool	release_message = false;
 	int		rc;
 
+	Assert(pgstrom_is_opencl_server());
 	pthread_mutex_lock(&respq->lock);
 	if (respq->closed)
 	{
+		pthread_mutex_unlock(&respq->lock);
+
 		/*
-		 * If reply queue is already closed, it means nobody waits for
-		 * the reply-message enqueued. So, server side decrements the
-		 * reference count of the message queue instead of the backend,
-		 * and release the message queue if no longer used.
+		 * In case when response queue is closed, it means nobody waits for
+		 * response message, and reference counter of message might be
+		 * already decremented by error handler. If current context is the
+		 * last one who put this message, we have to release messages.
 		 */
-		if (--respq->refcnt == 0)
-			queue_free = true;
-		message_free = true;
+		SpinLockAcquire(&message->lock);
+		Assert(message->refcnt > 0);
+		if (--message->refcnt == 0)
+			release_message = true;
+		SpinLockRelease(&message->lock);
+
+		if (release_message)
+		{
+			bool	release_queue = false;
+
+			if (message->cb_release)
+				(*message->cb_release)(message);
+			else
+				pgstrom_shmem_free(message);
+
+			/*
+			 * Once a message got released, reference counter of the
+			 * corresponding response queue shall be decremented, and
+			 * it may become refcnt == 0. It means no message will be
+			 * replied to this response queue anymore, so release it.
+			 */
+			pthread_mutex_lock(&respq->lock);
+			if (--respq->refcnt == 0)
+			{
+				Assert(respq->closed);
+				release_queue = true;
+			}
+			pthread_mutex_unlock(&respq->lock);
+
+			/* release it */
+			if (release_queue)
+			{
+				pthread_cond_destroy(&respq->cond);
+				pthread_mutex_destroy(&respq->lock);
+				pgstrom_shmem_free(respq);
+			}
+		}
 	}
 	else
 	{
-		/* reply this message */
-		Assert(respq->refcnt > 0);
+		SpinLockAcquire(&message->lock);
+		/*
+		 * Error handler always close the response queue first, then
+		 * decrements reference counter of the messages in progress.
+		 * So, we can assume the message is acquired by both of backend
+		 * and server at the timing when OpenCL server tried to enqueue
+		 * response message into an open queue.
+		 */
+		Assert(message->refcnt > 1);
+		message->refcnt--;	/* So, we never call on_release handler */
 		dlist_push_tail(&respq->qhead, &message->chain);
+		SpinLockRelease(&message->lock);
+
+		/* notification towards waiter */
 		rc = pthread_cond_signal(&respq->cond);
 		Assert(rc == 0);
-	}
-	pthread_mutex_unlock(&respq->lock);
-
-	/*
-	 * Release message and response queue, if the backend already aborted
-	 * and nobody can receive the response messages.
-	 */
-	if (message_free)
-	{
-		if (message->cb_release)
-			message->cb_release(message);
-		pgstrom_shmem_free(message);
-	}
-
-	if (queue_free)
-	{
-		pthread_cond_destroy(&respq->cond);
-		pthread_mutex_destroy(&respq->lock);
-		pgstrom_shmem_free(respq);
+		pthread_mutex_unlock(&respq->lock);
 	}
 }
 
@@ -170,7 +219,6 @@ pgstrom_dequeue_message(pgstrom_queue *queue)
 	struct timeval	basetv;
 	struct timespec	timeout;
 	ulong	timeleft = ((ulong)pgstrom_mqueue_timeout) * 1000000UL;
-	bool	queue_release = false;
 	int		rc;
 
 	rc = gettimeofday(&basetv, NULL);
@@ -188,8 +236,6 @@ pgstrom_dequeue_message(pgstrom_queue *queue)
 				= dlist_pop_head_node(&queue->qhead);
 
 			result = dlist_container(pgstrom_message, chain, dnode);
-			if (--queue->refcnt == 0)
-				queue_release = true;
 			pthread_mutex_unlock(&queue->lock);
 			break;
 		}
@@ -219,18 +265,6 @@ pgstrom_dequeue_message(pgstrom_queue *queue)
 				timeleft = 0;
 		}
 	}
-
-	/*
-	 * If this queue (except for server mqueue) is already closed and
-	 * no message will come further, the queue shall be dropped.
-	 */
-	if (queue_release && queue != mqueue_shm_values->serv_mqueue)
-	{
-		Assert(queue->closed);
-		pthread_cond_destroy(&queue->cond);
-		pthread_mutex_destroy(&queue->lock);
-		pgstrom_shmem_free(queue);
-	}
 	return result;
 }
 
@@ -244,7 +278,6 @@ pgstrom_message *
 pgstrom_try_dequeue_message(pgstrom_queue *queue)
 {
 	pgstrom_message *result = NULL;
-	bool	queue_release = false;
 
 	pthread_mutex_lock(&queue->lock);
 	if (!dlist_is_empty(&queue->qhead))
@@ -253,22 +286,9 @@ pgstrom_try_dequeue_message(pgstrom_queue *queue)
 			= dlist_pop_head_node(&queue->qhead);
 
 		result = dlist_container(pgstrom_message, chain, dnode);
-		if (--queue->refcnt == 0)
-			queue_release = true;
 	}
 	pthread_mutex_unlock(&queue->lock);
 
-	/*
-	 * If this queue (except for server mqueue) is already closed and
-	 * no message will come further, the queue shall be dropped.
-	 */
-	if (queue_release && queue != mqueue_shm_values->serv_mqueue)
-	{
-		Assert(queue->closed);
-		pthread_cond_destroy(&queue->cond);
-		pthread_mutex_destroy(&queue->lock);
-		pgstrom_shmem_free(queue);
-	}
 	return result;
 }
 
@@ -320,20 +340,72 @@ pgstrom_close_queue(pgstrom_queue *queue)
  */
 void
 pgstrom_init_message(pgstrom_message *msg,
-					 MessageTag mtag,
+					 StromTag stag,
 					 pgstrom_queue *respq,
 					 void (*cb_release)(pgstrom_message *msg))
 {
-	msg->mtag = mtag;
-	if (respq)
-	{
-		pthread_mutex_lock(&respq->lock);
-		Assert(respq->refcnt > 0);
-		respq->refcnt++;
-		pthread_mutex_unlock(&respq->lock);
-	}
+	msg->stag = stag;
+	SpinLockInit(&msg->lock);
+	msg->refcnt = 1;
+	/* acquire this response queue */
+	pthread_mutex_lock(&respq->lock);
+	Assert(respq->refcnt > 0);
+	respq->refcnt++;
+	pthread_mutex_unlock(&respq->lock);
 	msg->respq = respq;
 	msg->cb_release = cb_release;
+}
+
+/*
+ * pgstrom_put_message
+ *
+ * It decrements reference counter of message, and may also decrements
+ * reference counter of response queue being attached, if this message
+ * got released.
+ */
+void
+pgstrom_put_message(pgstrom_message *message)
+{
+	bool	release_message = false;
+	bool	release_queue = false;
+
+	SpinLockAcquire(&message->lock);
+	Assert(message->refcnt > 0);
+	if (--message->refcnt == 0)
+		release_message = true;
+	SpinLockRelease(&message->lock);
+
+	if (release_message)
+	{
+		pgstrom_queue  *respq = message->respq;
+
+		if (message->cb_release)
+			(*message->cb_release)(message);
+		else
+			pgstrom_shmem_free(message);
+
+		/*
+		 * Once a message got released, reference counter of the
+		 * corresponding response queue shall be decremented, and
+		 * it may become refcnt == 0. It means no message will be
+		 * replied to this response queue anymore, so release it.
+		 */
+		pthread_mutex_lock(&respq->lock);
+		if (--respq->refcnt == 0)
+		{
+			Assert(respq->closed);
+			release_queue = true;
+		}
+		pthread_mutex_unlock(&respq->lock);
+
+		/* release it */
+		if (release_queue)
+		{
+			pthread_cond_destroy(&respq->cond);
+			pthread_mutex_destroy(&respq->lock);
+			pgstrom_shmem_free(respq);
+		}
+	}
 }
 
 /*
