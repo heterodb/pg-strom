@@ -15,7 +15,7 @@
 #define PG_STROM_H
 #include "fmgr.h"
 #include "lib/ilist.h"
-#include "nodes/pg_list.h"
+#include "nodes/execnodes.h"
 #include "nodes/primnodes.h"
 #include <pthread.h>
 #include <CL/cl.h>
@@ -27,6 +27,27 @@
 #else
 #define IF_INLINE
 #endif
+
+/*
+ * shmem.c
+ */
+typedef struct shmem_context shmem_context;
+
+extern shmem_context *TopShmemContext;
+
+extern shmem_context *pgstrom_shmem_context_create(const char *name);
+extern void pgstrom_shmem_context_reset(shmem_context *context);
+extern void pgstrom_shmem_context_delete(shmem_context *context);
+extern void pgstrom_shmem_context_detach(shmem_context *context);
+extern void *pgstrom_shmem_alloc(shmem_context *contetx, Size size);
+extern void pgstrom_shmem_free(void *address);
+extern void pgstrom_setup_shmem(Size zone_length,
+								void *(*callback)(void *address,
+												  Size length));
+extern void pgstrom_init_shmem(void);
+
+extern Datum pgstrom_shmem_block_info(PG_FUNCTION_ARGS);
+extern Datum pgstrom_shmem_context_info(PG_FUNCTION_ARGS);
 
 /*
  * mqueue.c
@@ -45,6 +66,24 @@ extern void pgstrom_init_message(pgstrom_message *msg,
 extern void pgstrom_put_message(pgstrom_message *msg);
 extern void pgstrom_setup_mqueue(void);
 extern void pgstrom_init_mqueue(void);
+
+/*
+ * datastore.c
+ */
+extern pgstrom_parambuf *
+pgstrom_create_param_buffer(shmem_context *shm_context,
+							List *used_params,
+							ExprContext *econtext);
+extern void pgstrom_get_param_buffer(pgstrom_parambuf *parambuf);
+extern void pgstrom_put_param_buffer(pgstrom_parambuf *parambuf);
+
+/*
+ * restrack.c
+ */
+extern void pgstrom_track_object(StromTag *stag);
+extern void pgstrom_untrack_object(StromTag *stag);
+extern bool pgstrom_object_is_tracked(StromTag *stag);
+extern void pgstrom_init_restrack(void);
 
 /*
  * gpuscan.c
@@ -96,27 +135,7 @@ extern bool pgstrom_is_opencl_server(void);
 extern void pgstrom_init_opencl_server(void);
 
 /*
- * shmem.c
- */
-typedef struct shmem_context shmem_context;
-
-extern shmem_context *TopShmemContext;
-
-extern shmem_context *pgstrom_shmem_context_create(const char *name);
-extern void pgstrom_shmem_context_reset(shmem_context *context);
-extern void pgstrom_shmem_context_delete(shmem_context *context);
-extern void *pgstrom_shmem_alloc(shmem_context *contetx, Size size);
-extern void pgstrom_shmem_free(void *address);
-extern void pgstrom_setup_shmem(Size zone_length,
-								void *(*callback)(void *address,
-												  Size length));
-extern void pgstrom_init_shmem(void);
-
-extern Datum pgstrom_shmem_block_info(PG_FUNCTION_ARGS);
-extern Datum pgstrom_shmem_context_info(PG_FUNCTION_ARGS);
-
-/*
- * codegen_expr.c
+ * codegen.c
  */
 typedef struct {
 	List	   *type_defs;	/* list of devtype_info in use */
@@ -131,7 +150,7 @@ extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid);
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern char *pgstrom_codegen_declarations(codegen_context *context);
 extern bool pgstrom_codegen_available_expression(Expr *expr);
-extern void pgstrom_codegen_expr_init(void);
+extern void pgstrom_codegen_init(void);
 
 /*
  * gpuscan.c

@@ -11,8 +11,28 @@
  * within this package.
  */
 #include "postgres.h"
-#include "node/relation.h"
+#include "access/sysattr.h"
+#include "commands/explain.h"
+#include "miscadmin.h"
+#include "nodes/bitmapset.h"
+#include "nodes/execnodes.h"
+#include "nodes/plannodes.h"
+#include "nodes/relation.h"
+#include "optimizer/cost.h"
+#include "optimizer/pathnode.h"
+#include "optimizer/paths.h"
+#include "optimizer/plancat.h"
+#include "optimizer/planmain.h"
+#include "optimizer/restrictinfo.h"
+#include "optimizer/var.h"
+#include "parser/parsetree.h"
+#include "utils/builtins.h"
+#include "utils/guc.h"
+#include "utils/lsyscache.h"
+#include "utils/rel.h"
+#include "utils/spccache.h"
 #include "pg_strom.h"
+#include "opencl_gpuscan.h"
 
 static add_scan_path_hook_type	add_scan_path_next;
 static CustomPathMethods		gpuscan_path_methods;
@@ -72,6 +92,8 @@ typedef struct {
 	pgstrom_queue	   *mqueue;
 	pgstrom_parambuf   *parambuf;
 	Datum				dprog_key;
+	List			   *dev_columns;
+	kern_colmeta	   *dev_colmeta;
 	dlist_head			ready_chunks;
 	dlist_head			free_chunks;
 } GpuScanState;
@@ -82,6 +104,7 @@ cost_gpuscan(GpuScanPath *gpu_path, PlannerInfo *root,
 			 RelOptInfo *baserel, ParamPathInfo *param_info,
 			 List *dev_quals, List *host_quals)
 {
+	Path	   *path = &gpu_path->cpath.path;
 	Cost		startup_cost = 0;
 	Cost		run_cost = 0;
 	double		spc_seq_page_cost;
@@ -165,7 +188,6 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	List		   *host_quals = NIL;
 	Bitmapset	   *dev_attrs = NULL;
 	Bitmapset	   *host_attrs = NULL;
-	bool			has_sysattr = false;
 	ListCell	   *cell;
 	codegen_context	context;
 
@@ -177,18 +199,23 @@ gpuscan_add_scan_path(PlannerInfo *root,
 
 		if (pgstrom_codegen_available_expression(rinfo->clause))
 		{
-			pull_varattnos(rinfo->clause, &dev_attrs);
+			pull_varattnos((Node *)rinfo->clause,
+						   baserel->relid,
+						   &dev_attrs);
 			dev_quals = lappend(dev_quals, rinfo);
 		}
 		else
 		{
-			pull_varattnos(rinfo->clause, &host_attrs);
+			pull_varattnos((Node *)rinfo->clause,
+						   baserel->relid,
+						   &host_attrs);
 			host_quals = lappend(host_quals, rinfo);
 		}
 	}
 	/* also, picks up Var nodes in the target list */
-	pull_varattnos(baserel->reltargetlist, &host_attrs);
-
+	pull_varattnos((Node *)baserel->reltargetlist,
+				   baserel->relid,
+				   &host_attrs);
 	/*
 	 * FIXME: needs to pay attention for projection cost.
 	 * It may make sense to use build_physical_tlist, if host_attrs
@@ -201,16 +228,16 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	/*
 	 * Construction of a custom-plan node.
 	 */
-	pathnode = palloc0(GpuScanPath);
+	pathnode = palloc0(sizeof(GpuScanPath));
 	pathnode->cpath.path.type = T_CustomPath;
 	pathnode->cpath.path.pathtype = T_CustomPlan;
 	pathnode->cpath.path.parent = baserel;
 	pathnode->cpath.path.param_info
-		= get_baserel_parampathinfo(root, rel, rel->lateral_relids);
+		= get_baserel_parampathinfo(root, baserel, baserel->lateral_relids);
 	pathnode->cpath.path.pathkeys = NIL;	/* gpuscan has unsorted result */
 
-	cost_gpuscan(pathnode, root, rel,
-				 pathnode->cpath.path->param_info,
+	cost_gpuscan(pathnode, root, baserel,
+				 pathnode->cpath.path.param_info,
 				 dev_quals, host_quals);
 
 	pathnode->dev_quals = dev_quals;
@@ -218,7 +245,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	pathnode->dev_attrs = dev_attrs;
 	pathnode->host_attrs = host_attrs;
 
-	add_paths(rel, &pathnode->cpath.path);
+	add_path(baserel, &pathnode->cpath.path);
 }
 
 static char *
@@ -380,14 +407,14 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 	{
 		tlist = build_physical_tlist(root, rel);
 		if (tlist == NIL)
-			tlist = build_path_tlist(root, best_path);
+			tlist = build_path_tlist(root, &best_path->path);
 	}
 	else
-		tlist = build_path_tlist(root, best_path);
+		tlist = build_path_tlist(root, &best_path->path);
 
 	/* it should be a base relation */
 	Assert(rel->relid > 0);
-	Assert(rel->relkind == RTE_RELATION);
+	Assert(rel->rtekind == RTE_RELATION);
 
 	/* Sort clauses into best execution order */
 	host_clauses = order_qual_clauses(root, gpath->host_quals);
@@ -415,7 +442,7 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 	 * This design is optimized to process column-oriented data format on
 	 * the relation cache.
 	 */
-	kern_source = gpuscan_codegen_quals(gpath->dev_quals, &context);
+	kern_source = gpuscan_codegen_quals(root, gpath->dev_quals, &context);
 
 	/*
 	 * Construction of GpuScanPlan node; on top of CustomPlan node
@@ -429,9 +456,9 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 
 	gscan->scanrelid = rel->relid;
 	gscan->kern_source = kern_source;
-	gscan->extra_flags = context->extra_flags;
-	gscan->used_params = context->used_params;
-	gscan->used_vars = context->used_vars;
+	gscan->extra_flags = context.extra_flags;
+	gscan->used_params = context.used_params;
+	gscan->used_vars = context.used_vars;
 	gscan->dev_clauses = dev_clauses;
 	gscan->dev_attrs = gpath->dev_attrs;
 	gscan->host_attrs = gpath->host_attrs;
@@ -492,14 +519,12 @@ static void
 gpuscan_textout_path(StringInfo str, Node *node)
 {
 	GpuScanPath	   *pathnode = (GpuScanPath *) node;
-	Bitmapset	   *tempset;
 	char		   *temp;
-	int				x;
 
 	/* dev_quals */
 	temp = nodeToString(pathnode->dev_quals);
 	appendStringInfo(str, " :dev_quals %s", temp);
-	pfree(tmep);
+	pfree(temp);
 
 	/* host_quals */
 	temp = nodeToString(pathnode->host_quals);
@@ -524,13 +549,13 @@ gpuscan_set_plan_ref(PlannerInfo *root,
 
 	gscan->scanrelid += rtoffset;
 	gscan->cplan.plan.targetlist = (List *)
-		fix_scan_expr(root, (List *)gscan->cplan.plan.targetlist, rtoffset);
+		fix_scan_expr(root, (Node *)gscan->cplan.plan.targetlist, rtoffset);
 	gscan->cplan.plan.qual = (List *)
-		fix_scan_expr(root, (List *)gscan->cplan.plan.qual, rtoffset);
+		fix_scan_expr(root, (Node *)gscan->cplan.plan.qual, rtoffset);
 	gscan->used_vars = (List *)
-		fix_scan_expr(root, (List *)gscan->used_vars, rtoffset);
+		fix_scan_expr(root, (Node *)gscan->used_vars, rtoffset);
 	gscan->dev_clauses = (List *)
-		fix_scan_expr(root, (List *)gscan->dev_clauses, rtoffset);
+		fix_scan_expr(root, (Node *)gscan->dev_clauses, rtoffset);
 }
 
 static void
@@ -551,18 +576,20 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	GpuScanState   *gss;
 	TupleDesc		tupdesc;
 	char			namebuf[NAMEDATALEN+1];
+	Bitmapset	   *tempset;
+	AttrNumber		anum;
 
 	/* gpuscan should not have inner/outer plan now */
-	Assert(outerPlan(custom_plan) == NULL);
-    Assert(innerPlan(custom_plan) == NULL);
+	Assert(outerPlan(node) == NULL);
+    Assert(innerPlan(node) == NULL);
 
 	/*
 	 * create a state structure
 	 */
 	gss = palloc0(sizeof(GpuScanState));
-	gss.cps.ps.type = T_CustomPlanState;
-	gss.cps.ps.plan = (Plan *) node;
-	gss.cps.ps.state = estate;
+	gss->cps.ps.type = T_CustomPlanState;
+	gss->cps.ps.plan = (Plan *) node;
+	gss->cps.ps.state = estate;
 
 	/*
 	 * create expression context
@@ -617,41 +644,56 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 			 RelationGetRelid(gss->scan_rel),
 			 scanrelid);
 	gss->shmcontext = pgstrom_shmem_context_create(namebuf);
-	if (!gss->shmcontext)
-		ereport(ERROR,
-				(errcode(ERRCODE_OUT_OF_MEMORY),
-				 errmsg("failed to create shared memory context")));
-	// TODO: add resource tracking here
-
 	gss->mqueue = pgstrom_create_queue();
-	if (!gss->mqueue)
-		ereport(ERROR,
-				(errcode(ERRCODE_OUT_OF_MEMORY),
-				 errmsg("failed to create message queue")));
-	// TODO: add resource tracking here
-
-	gss->parambuf = pgstrom_create_parambuf(gss->shmcontext, ...);
-
+	gss->parambuf = pgstrom_create_param_buffer(gss->shmcontext,
+												gsplan->used_params,
+												gss->cps.ps.ps_ExprContext);
 	if (gsplan->kern_source)
 		gss->dprog_key = pgstrom_get_devprog_key(gsplan->kern_source,
 												 gsplan->extra_flags);
 	else
 		gss->dprog_key = 0;
-	// TODO: add resource tracking here
 
+	tempset = bms_copy(gsplan->dev_attrs);
+	while ((anum = bms_first_member(tempset)) >= 0)
+	{
+		anum += FirstLowInvalidHeapAttributeNumber;
 
+		Assert(anum > 0);
+		gss->dev_columns = lappend_int(gss->dev_columns, anum);
+	}
 
+	gss->dev_colmeta = palloc(sizeof(kern_colmeta) * tupdesc->natts);
+	for (anum=0; anum < tupdesc->natts; anum++)
+	{
+		Form_pg_attribute attr = tupdesc->attrs[anum];
+		kern_colmeta   *colmeta = &gss->dev_colmeta[anum];
 
-
-
-
+		colmeta->atthasnull = attr->attnotnull;
+		if (attr->attalign == 'c')
+			colmeta->attalign = sizeof(cl_char);
+		else if (attr->attalign == 's')
+			colmeta->attalign = sizeof(cl_short);
+		else if (attr->attalign == 'i')
+			colmeta->attalign = sizeof(cl_int);
+		else if (attr->attalign == 'd')
+			colmeta->attalign = sizeof(cl_long);
+		else
+			elog(ERROR, "unexpected attribute alignment: %c", attr->attalign);
+		colmeta->attlen = attr->attlen;
+		colmeta->cs_ofs = -1;	/* to be calculated for each row_store */
+	}
+	dlist_init(&gss->ready_chunks);
+	dlist_init(&gss->free_chunks);
 
 	return &gss->cps;
 }
 
 static TupleTableSlot *
 gpuscan_exec(CustomPlanState *node)
-{}
+{
+	return NULL;
+}
 
 static Node *
 gpuscan_exec_multi(CustomPlanState *node)
@@ -661,7 +703,31 @@ gpuscan_exec_multi(CustomPlanState *node)
 
 static void
 gpuscan_end(CustomPlanState *node)
-{}
+{
+	GpuScanState   *gss = (GpuScanState *)node;
+
+	if (gss->dprog_key)
+		pgstrom_put_devprog_key(gss->dprog_key);
+	pgstrom_close_queue(gss->mqueue);
+	pgstrom_shmem_context_detach(gss->shmcontext);
+
+	/*
+	 * Free the exprcontext
+	 */
+	ExecFreeExprContext(&gss->cps.ps);
+
+	/*
+	 * clean out the tuple table
+	 */
+	ExecClearTuple(gss->cps.ps.ps_ResultTupleSlot);
+	ExecClearTuple(gss->scan_slot);
+
+	/*
+	 * close heap scan and relation
+	 */
+	heap_endscan(gss->scan_desc);
+	heap_close(gss->scan_rel, NoLock);
+}
 
 static void
 gpuscan_rescan(CustomPlanState *node)
@@ -671,7 +737,45 @@ gpuscan_rescan(CustomPlanState *node)
 
 static void
 gpuscan_explain_rel(CustomPlanState *node, ExplainState *es)
-{}
+{
+	GpuScanState   *gss = (GpuScanState *)node;
+	GpuScanPlan	   *gsplan = (GpuScanPlan *)gss->cps.ps.plan;
+	Relation		rel = gss->scan_rel;
+	RangeTblEntry  *rte;
+	char		   *refname;
+	char		   *objectname;
+	char		   *namespace = NULL;
+
+	rte = rt_fetch(gsplan->scanrelid, es->rtable);
+	refname = (char *) list_nth(es->rtable_names,
+								gsplan->scanrelid - 1);
+	if (refname == NULL)
+		refname = rte->eref->aliasname;
+
+	Assert(rte->rtekind == RTE_RELATION);
+	objectname = RelationGetRelationName(rel);
+	if (es->verbose)
+		namespace = get_namespace_name(RelationGetNamespace(rel));
+
+	if (es->format == EXPLAIN_FORMAT_TEXT)
+	{
+		appendStringInfoString(es->str, " on");
+		if (namespace != NULL)
+			appendStringInfo(es->str, " %s.%s",
+							 quote_identifier(namespace),
+							 quote_identifier(objectname));
+		else
+			appendStringInfo(es->str, " %s",
+							 quote_identifier(objectname));
+	}
+	else
+	{
+		ExplainPropertyText("Relation Name", objectname, es);
+		if (namespace != NULL)
+			ExplainPropertyText("Schema", namespace, es);
+		ExplainPropertyText("Alias", refname, es);
+	}
+}
 
 static void
 gpuscan_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
@@ -680,7 +784,7 @@ gpuscan_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 static Bitmapset *
 gpuscan_get_relids(CustomPlanState *node)
 {
-	GpuScanPlan	   *gsp = (GpuScanPlan *)node->cps.ps.plan;
+	GpuScanPlan	   *gsp = (GpuScanPlan *)node->ps.plan;
 
 	return bms_make_singleton(gsp->scanrelid);
 }
@@ -691,9 +795,9 @@ gpuscan_textout_plan(StringInfo str, const CustomPlan *node)
 	GpuScanPlan	   *plannode = (GpuScanPlan *)node;
 	char		   *temp;
 
-	appendStringInfoChar(str, " :scanrelid %u", plannode->scanrelid);
+	appendStringInfo(str, " :scanrelid %u", plannode->scanrelid);
 
-	appendStringInfoChar(str, " :kern_source ");
+	appendStringInfo(str, " :kern_source ");
 	_outToken(str, plannode->kern_source);
 
 	appendStringInfo(str, " :extra_flags %u", plannode->scanrelid);
@@ -720,16 +824,17 @@ gpuscan_textout_plan(StringInfo str, const CustomPlan *node)
 static CustomPlan *
 gpuscan_copy_plan(const CustomPlan *from)
 {
+	GpuScanPlan	   *oldnode = (GpuScanPlan *)from;
 	GpuScanPlan	   *newnode = palloc(sizeof(GpuScanPlan));
 
-	CopyCustomPlanCommon(from, newnode);
-	newnode->scanrelid = from->scanrelid;
-	newnode->used_params = copyObject(from->used_params);
-	newnode->used_vars = copyObject(from->used_vars);
-	newnode->extra_flags = from->extra_flags;
-	newnode->dev_clauses = from->dev_clauses;
-	newnode->dev_attrs = bms_copy(from->dev_attrs);
-	newnode->host_attrs = bms_copy(from->host_attrs);
+	CopyCustomPlanCommon((Node *)from, (Node *)newnode);
+	newnode->scanrelid = oldnode->scanrelid;
+	newnode->used_params = copyObject(oldnode->used_params);
+	newnode->used_vars = copyObject(oldnode->used_vars);
+	newnode->extra_flags = oldnode->extra_flags;
+	newnode->dev_clauses = oldnode->dev_clauses;
+	newnode->dev_attrs = bms_copy(oldnode->dev_attrs);
+	newnode->host_attrs = bms_copy(oldnode->host_attrs);
 
 	return &newnode->cplan;
 }

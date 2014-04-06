@@ -101,7 +101,9 @@ typedef struct {
  * Tag of shared memory object classes
  */
 typedef enum {
-	StromTag_MsgQueue	= 1001,
+	StromTag_ShmContext = 1001,
+	StromTag_DevProgram,
+	StromTag_MsgQueue,
 	StromTag_ParamBuf,
 	StromTag_RowStore,
 	StromTag_ColumnStore,
@@ -141,7 +143,9 @@ typedef struct pgstrom_message {
  * Kernel Param/Const buffer
  */
 typedef struct {
-	pgstrom_message	msg;
+	StromTag		stag;
+	slock_t			lock;
+	int				refcnt;
 	kern_parambuf	kern;
 } pgstrom_parambuf;
 

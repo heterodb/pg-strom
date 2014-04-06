@@ -196,17 +196,11 @@ typedef struct {
 	/* zero, if column has no NULLs */
 	cl_bool			atthasnull;
 	/* alignment; 1,2,4 or 8, not characters in pg_attribute */
-	cl_char			attaligh;
+	cl_char			attalign;
 	/* length of attribute */
 	cl_short		attlen;
-	/*
-	 * It has double meaning according to the store type.
-	 * In case of row-store, it holds an offset from the head of tuple if
-	 * it has no NULLs and no variable length field.
-	 * In case of column-store, it holds an offset of the column array from
-	 * head of the column-store itself.
-	 */
-	cl_int			attofs;
+	/* offset to null-map and column-array from the head of column-store */
+	cl_uint			cs_ofs;
 } kern_colmeta;
 
 /*
@@ -282,10 +276,10 @@ typedef struct {
  * | nrows (=N)      |
  * +-----------------+
  * | colmeta[0]      |
- * | colmeta[1]   o-------+ colmeta[j].attofs points an offset of the column-
+ * | colmeta[1]   o-------+ colmeta[j].cs_ofs points an offset of the column-
  * |    :            |    | array in this store.
  * | colmeta[M-1]    |    |
- * +-----------------+    | (char *)(kcs) + colmeta[j].attofs points is
+ * +-----------------+    | (char *)(kcs) + colmeta[j].cs_ofs points is
  * |   <padding>     |    | the address of column array.
  * +-----------------+    |
  * | column array    |    |
@@ -554,7 +548,7 @@ kern_row_to_column_prep(__global kern_row_store *krs,
 
 		kcs->colmeta[i] = krs->colmeta[anum];
 		kcs->colmeta[i].atthasnull = true;	/* force to have nullmap */
-		kcs->colmeta[i].attofs = offset;
+		kcs->colmeta[i].cs_ofs = offset;
 		/* for null bitmap */
 		offset += STROMALIGN((nrows + 7) / 8);
 		/* for data body */
@@ -624,7 +618,7 @@ kern_row_to_column(__global kern_row_store *krs,
 			{
 				__global char  *src = ((cl_char *)&rs_tup->data) + offset;
 				__global char  *dest
-					= ((char *)kcs) + kcs->colmeta[j].attofs
+					= ((char *)kcs) + kcs->colmeta[j].cs_ofs
 					+ STROMALIGN((get_global_size(0) + 7) / 8)	/* nullmap */
 					+ (get_global_id(0) * (colmeta->attlen > 0	/* column- */
 										   ? colmeta->attlen	/* array */
@@ -689,7 +683,7 @@ kern_row_to_column(__global kern_row_store *krs,
 			if ((local_id & 0x07) == 0 && get_global_id(0) < krs->nrows)
 			{
 				*((cl_char *)kcs +
-				  kcs->colmeta[j].attofs +
+				  kcs->colmeta[j].cs_ofs +
 				  (get_global_id(0) >> 3)) == nullmap_workbuf[local_id];
 			}
 			j++;
@@ -707,7 +701,7 @@ kern_get_datum(__global kern_column_store *kcs,
 	if (colidx >= kcs->ncols || rowidx >= kcs->nrows)
 		return NULL;
 
-	offset = kcs->colmeta[colidx].attofs;
+	offset = kcs->colmeta[colidx].cs_ofs;
 	if (kcs->colmeta[colidx].atthasnull)
 	{
 		__global cl_char   *nullmap = (char *)kcs + offset;

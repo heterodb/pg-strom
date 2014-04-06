@@ -196,10 +196,10 @@ gpuscan_writeback_result(__global kern_gpuscan *gpuscan)
  * to be processed, in addition to the kern_gpuscan buffer.
  */
 typedef struct {
-	MessageTag		type;	/* StromMsg_GpuScan */
+	StromTag		stag;	/* = StromTag_GpuScan */
 	Datum			program_id;
 	union {
-		MessageTag			   *head;
+		StromTag			   *stag;
 		pgstrom_row_store	   *rs;
 		pgstrom_column_store   *cs;
 	} store;

@@ -1,7 +1,7 @@
 /*
- * codegen_expr.c
+ * codegen.c
  *
- * Routines for OpenCL code generator for expression nodes
+ * Routines for OpenCL code generator
  * ----
  * Copyright 2011-2014 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014 (C) The PG-Strom Development Team
@@ -1341,7 +1341,7 @@ codegen_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 }
 
 void
-pgstrom_codegen_expr_init(void)
+pgstrom_codegen_init(void)
 {
 	memset(devtype_info_slot, 0, sizeof(devtype_info_slot));
 	memset(devfunc_info_slot, 0, sizeof(devfunc_info_slot));

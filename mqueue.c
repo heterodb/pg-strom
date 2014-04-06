@@ -129,7 +129,6 @@ void
 pgstrom_reply_message(pgstrom_message *message)
 {
 	pgstrom_queue  *respq = message->respq;
-	bool	release_message = false;
 	int		rc;
 
 	Assert(pgstrom_is_opencl_server());
@@ -144,43 +143,7 @@ pgstrom_reply_message(pgstrom_message *message)
 		 * already decremented by error handler. If current context is the
 		 * last one who put this message, we have to release messages.
 		 */
-		SpinLockAcquire(&message->lock);
-		Assert(message->refcnt > 0);
-		if (--message->refcnt == 0)
-			release_message = true;
-		SpinLockRelease(&message->lock);
-
-		if (release_message)
-		{
-			bool	release_queue = false;
-
-			if (message->cb_release)
-				(*message->cb_release)(message);
-			else
-				pgstrom_shmem_free(message);
-
-			/*
-			 * Once a message got released, reference counter of the
-			 * corresponding response queue shall be decremented, and
-			 * it may become refcnt == 0. It means no message will be
-			 * replied to this response queue anymore, so release it.
-			 */
-			pthread_mutex_lock(&respq->lock);
-			if (--respq->refcnt == 0)
-			{
-				Assert(respq->closed);
-				release_queue = true;
-			}
-			pthread_mutex_unlock(&respq->lock);
-
-			/* release it */
-			if (release_queue)
-			{
-				pthread_cond_destroy(&respq->cond);
-				pthread_mutex_destroy(&respq->lock);
-				pgstrom_shmem_free(respq);
-			}
-		}
+		pgstrom_put_message(message);
 	}
 	else
 	{

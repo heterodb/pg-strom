@@ -134,10 +134,12 @@ typedef struct
  */
 struct shmem_context
 {
+	StromTag	stag;		/* StromTag_ShmContext */
 	dlist_node	chain;		/* to be linked shmem_head->context_list */
 
 	pid_t		owner;
 	slock_t		lock;
+	bool		autodelete;
 	dlist_head	block_list;
 	Size		total_active;
 	long		num_blocks;
@@ -251,14 +253,22 @@ pgstrom_shmem_context_create(const char *name)
 	pg_crc32		crc;
 
 	if (namelen >= NAMEDATALEN - 1)
-		return NULL;	/* name too long */
+		ereport(ERROR,
+				(errcode(ERRCODE_NAME_TOO_LONG),
+				 errmsg("name of shared memory context too long: %s",
+						name)));
 
 	context = pgstrom_shmem_alloc(TopShmemContext, sizeof(shmem_context));
 	if (!context)
-		return NULL;
+		ereport(ERROR,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("failed to create shared memory context: %s",
+						name)));
 
+	context->stag = StromTag_ShmContext;
 	context->owner = getpid();
 	SpinLockInit(&context->lock);
+	context->autodelete = false;
 	dlist_init(&context->block_list);
 	context->total_active = 0;
 	context->num_blocks = 0;
@@ -274,6 +284,9 @@ pgstrom_shmem_context_create(const char *name)
 	dlist_push_tail(&pgstrom_shmem_head->context_list,
 					&context->chain);
 	SpinLockRelease(&pgstrom_shmem_head->context_lock);
+
+	/* local resource tracking */
+	pgstrom_track_object(&context->stag);
 
 	return context;
 }
@@ -300,18 +313,55 @@ pgstrom_shmem_context_reset_nolock(shmem_context *context)
 	context->num_chunks = 0;
 }
 
+/*
+ * pgstrom_shmem_context_reset
+ *
+ * It releases all the memory block in the supplied shared-memory context,
+ * but context itself is remain without any allocated blocks.
+ * An exception is a case when 'autodelete' = true. Reset is equivalent to
+ * free all the chunks, so it also kicks auto-deletion.
+ */
 void
 pgstrom_shmem_context_reset(shmem_context *context)
 {
 	SpinLockAcquire(&context->lock);
 	pgstrom_shmem_context_reset_nolock(context);
+	if (context->autodelete)
+	{
+		/*
+		 * NOTE: no needs to untrack this context again, because
+		 * autodelete=true means this context was already tracked
+		 * and on-error callback detached it.
+		 */
+		Assert(!pgstrom_object_is_tracked(&context->stag));
+
+		/* remove from the global list */
+		SpinLockAcquire(&pgstrom_shmem_head->context_lock);
+		dlist_delete(&context->chain);
+		SpinLockRelease(&pgstrom_shmem_head->context_lock);
+
+		/* delete the shared-memory context */
+		SpinLockRelease(&context->lock);
+		pgstrom_shmem_free(context);
+
+		return;
+	}
 	SpinLockRelease(&context->lock);
 }
 
+/*
+ * pgstrom_shmem_context_delete
+ *
+ * Unlike pgstrom_shmem_context_reset(), it releases all the memory blocks
+ * in the supplied shared-memory context and delete the context itself.
+ */
 void
 pgstrom_shmem_context_delete(shmem_context *context)
 {
 	Assert(context != TopShmemContext);
+
+	/* untrack local resources */
+	pgstrom_untrack_object(&context->stag);
 
 	SpinLockAcquire(&context->lock);
 	/* remove from the global list */
@@ -324,6 +374,35 @@ pgstrom_shmem_context_delete(shmem_context *context)
 	SpinLockRelease(&context->lock);
 
 	pgstrom_shmem_free(context);
+}
+
+/*
+ * 'autodelete' flag shall be usually set on error handler to delete
+ * memory context when all the memory block in the context have gone
+ * away. It shall be deleted in explicit way in usual code path, but
+ * it is hard to track them in error code path. (Note that this memory
+ * block might be used in asynchronous job in the OpenCL server)
+ */
+void
+pgstrom_shmem_context_detach(shmem_context *context)
+{
+	SpinLockAcquire(&context->lock);
+	context->autodelete = true;
+	if (context->num_chunks == 0)
+	{
+		/* remove from the global list */
+		SpinLockAcquire(&pgstrom_shmem_head->context_lock);
+		dlist_delete(&context->chain);
+		SpinLockRelease(&pgstrom_shmem_head->context_lock);
+		/* then, release all the shmem_bunch ... */
+		pgstrom_shmem_context_reset_nolock(context);
+		SpinLockRelease(&context->lock);
+		/* ...and, shred-memory context itself */
+		pgstrom_shmem_free(context);
+
+		return;
+	}
+	SpinLockRelease(&context->lock);
 }
 
 void *
@@ -464,6 +543,7 @@ pgstrom_shmem_free(void *address)
 
 	SpinLockAcquire(&context->lock);
 #ifdef PGSTROM_DEBUG
+	/* sanity checks */
 	do {
 		dlist_iter	iter;
 		bool		found = false;
@@ -534,6 +614,32 @@ pgstrom_shmem_free(void *address)
 		context->num_blocks -= bunch->nblocks;
 		context->num_chunks--;
 		pgstrom_shmem_block_free(bunch);
+	}
+
+	/*
+	 * Once a shared memory context is detached, to free the last chunk
+	 * also means deletion of the shared memory context.
+	 */
+	if (context->autodelete && context->num_chunks == 0)
+	{
+		Assert(dlist_is_empty(&context->block_list));
+
+		/*
+		 * NOTE: no needs to untrack this context again, because
+		 * autodelete=true means this context was already tracked
+		 * and on-error callback detached it.
+		 */
+		Assert(!pgstrom_object_is_tracked(&context->stag));
+
+		/* remove from the global list */
+        SpinLockAcquire(&pgstrom_shmem_head->context_lock);
+        dlist_delete(&context->chain);
+        SpinLockRelease(&pgstrom_shmem_head->context_lock);
+		/* delete the shared-memory context */
+		SpinLockRelease(&context->lock);
+		pgstrom_shmem_free(context);
+
+		return;
 	}
 	SpinLockRelease(&context->lock);
 }
@@ -646,10 +752,10 @@ pgstrom_shmem_zone_block_free(shmem_zone *zone, void *address)
 /*
  * pgstrom_shmem_block_alloc
  *
- * It is an internal API; that allocates a continuous 2^N blocks from a particular
- * shared memory zone. It tries to split a larger memory blocks if suitable memory
- * blocks are not free. If no memory blocks are available, it goes into another
- * zone to allocate memory.
+ * It is an internal API; that allocates a continuous 2^N blocks from
+ * a particular shared memory zone. It tries to split a larger memory blocks
+ * if suitable memory blocks are not free. If no memory blocks are available,
+ * it goes into another zone to allocate memory.
  */
 static void *
 pgstrom_shmem_block_alloc(Size size)
@@ -1014,8 +1120,10 @@ construct_shmem_top_context(const char *name, shmem_zone *zone)
 
 	/* contents of chunk1 is memory context */
 	context = (shmem_context *)chunk1->userdata;
+	context->stag = StromTag_ShmContext;
 	context->owner = getpid();
 	SpinLockInit(&context->lock);
+	context->autodelete = false;
 	dlist_init(&context->block_list);
 	context->total_active = chunk1->chunk_sz;
 	context->num_blocks = bunch->nblocks;
@@ -1048,6 +1156,11 @@ construct_shmem_top_context(const char *name, shmem_zone *zone)
 	SpinLockRelease(&pgstrom_shmem_head->context_lock);
 
 	TopShmemContext = context;
+
+	/*
+	 * NOTE: TopShmemContext shall never be released, so we don't register
+	 * the resource-tracker this shared-memory context.
+	 */
 }
 
 void

@@ -35,6 +35,7 @@ static struct {
 } *opencl_devprog_shm_values;
 
 typedef struct {
+	StromTag	stag;		/* = StromTag_DevProgram */
 	dlist_node	hash_chain;
 	dlist_node	lru_chain;
 	/*
@@ -423,6 +424,8 @@ retry:
 			SpinLockRelease(&opencl_devprog_shm_values->lock);
 			if (dprog)
 				pgstrom_shmem_free(dprog);
+			/* local resource tracking */
+			pgstrom_track_object(&entry->stag);
 			return PointerGetDatum(entry);
 		}
 	}
@@ -439,7 +442,8 @@ retry:
 		dlist_push_head(&opencl_devprog_shm_values->lru_list,
 						&dprog->lru_chain);
 		SpinLockRelease(&opencl_devprog_shm_values->lock);
-
+		/* local resource tracking */
+		pgstrom_track_object(&dprog->stag);
 		return PointerGetDatum(dprog);
 	}
 	SpinLockRelease(&opencl_devprog_shm_values->lock);
@@ -452,6 +456,7 @@ retry:
 	if (!dprog)
 		elog(ERROR, "out of shared memory");
 
+	dprog->stag = StromTag_DevProgram;
 	SpinLockInit(&dprog->lock);
 	dprog->refcnt = 1;
 	dlist_init(&dprog->waitq);
@@ -480,6 +485,10 @@ pgstrom_put_devprog_key(Datum dprog_key)
 {
 	devprog_entry  *dprog = (devprog_entry *) DatumGetPointer(dprog_key);
 
+	/* local resource untracking */
+	Assert(!pgstrom_is_opencl_server());
+	pgstrom_untrack_object(&dprog->stag);
+
 	SpinLockAcquire(&opencl_devprog_shm_values->lock);
 	dprog->refcnt--;
 	Assert(dprog->refcnt >= 0);
@@ -496,6 +505,10 @@ void
 pgstrom_retain_devprog_key(Datum dprog_key)
 {
 	devprog_entry  *dprog = (devprog_entry *) DatumGetPointer(dprog_key);
+
+	/* local resource tracking */
+	Assert(!pgstrom_is_opencl_server());
+	pgstrom_track_object(&dprog->stag);
 
 	SpinLockAcquire(&opencl_devprog_shm_values->lock);
 	Assert(dprog->refcnt >= 0);

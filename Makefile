@@ -1,9 +1,9 @@
 # Makefile of pg_strom
 MODULE_big = pg_strom
-OBJS  = main.o shmem.o codegen_expr.o mqueue.o \
-	gpuscan.o \
+OBJS  = main.o shmem.o codegen.o mqueue.o restrack.o \
 	opencl_entry.o opencl_serv.o opencl_devinfo.o opencl_devprog.o \
-	opencl_common.o opencl_gpuscan.o
+	opencl_common.o opencl_gpuscan.o gpuscan.o
+
 
 EXTENSION = pg_strom
 DATA = pg_strom--1.0.sql

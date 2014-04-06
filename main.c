@@ -38,6 +38,9 @@ _PG_init(void)
 	/* initialization of message queue on postmaster stage */
 	pgstrom_init_mqueue();
 
+	/* initialization of resource tracking subsystem */
+	pgstrom_init_restrack();
+
 	/* initialize shared memory segment and memory context stuff */
 	pgstrom_init_shmem();
 

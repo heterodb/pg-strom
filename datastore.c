@@ -119,8 +119,7 @@ pgstrom_create_param_buffer(shmem_context *shm_context,
 				(errcode(ERRCODE_OUT_OF_MEMORY),
 				 errmsg("out of shared memory")));
 
-	parambuf->mtag.type = StromMsg_ParamBuf;
-	parambuf->mtag.length = length;
+	parambuf->stag = StromMsg_ParamBuf;
 	SpinLockInit(&parambuf->lock);
 	parambuf->refcnt = 1;
 
@@ -141,14 +140,14 @@ pgstrom_create_param_buffer(shmem_context *shm_context,
 				parambuf->kern.poffset[index] = offset;
 				if (con->constlen > 0)
 				{
-					memcpy((char *)parambuf + offset,
+					memcpy((char *)parambuf.kern + offset,
 						   &con->constvalue,
 						   con->constlen);
 					offset += STROMALIGN(con->constlen);
 				}
 				else
 				{
-					memcpy((char *)parambuf + offset,
+					memcpy((char *)parambuf.kern + offset,
 						   DatumGetPointer(con->constvalue),
 						   VARSIZE(con->constvalue));
 					offset += STROMALIGN(VARSIZE(con->constvalue));
@@ -177,14 +176,14 @@ pgstrom_create_param_buffer(shmem_context *shm_context,
 					parambuf->kern.poffset[index] = offset;
 					if (typlen > 0)
 					{
-						memcpy((char *)parambuf + offset,
+						memcpy((char *)parambuf.kern + offset,
 							   &prm->value,
 							   typlen);
 						offset += STROMALIGN(typlen);
 					}
 					else
 					{
-						memcpy((char *)parambuf + offset,
+						memcpy((char *)parambuf.kern + offset,
 							   DatumGetPointer(prm->value),
 							   VARSIZE(prm->value));
 						offset += STROMALIGN(VARSIZE(prm->value));
@@ -204,6 +203,9 @@ pgstrom_create_param_buffer(shmem_context *shm_context,
 	Assert(offset == length);
 	parambuf->kern.nparams = index;
 
+	/* local resource tracking */
+	pgstrom_track_object(&parambuf->stag);
+
 	return parambuf;
 }
 
@@ -216,6 +218,9 @@ pgstrom_get_param_buffer(pgstrom_parambuf *parambuf)
 	SpinLockAcquire(&parambuf->lock);
 	parambuf->refcnt++;
 	SpinLockFree(&parambuf->lock);
+
+	/* local resource tracking */
+	pgstrom_track_object(&parambuf->stag);
 }
 
 /*
@@ -225,6 +230,9 @@ void
 pgstrom_put_param_buffer(pgstrom_parambuf *parambuf)
 {
 	bool	do_release = false;
+
+	/* untrack this param buffer */
+	pgstrom_untrack_object(&parambuf->stag);
 
 	SpinLockAcquire(&parambuf->lock);
 	if (--parambuf->refcnt == 0)
