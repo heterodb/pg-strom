@@ -43,17 +43,18 @@
  */
 
 #define SHMEM_BLOCKSZ_BITS_MAX	34			/* 16GB */
-#define SHMEM_BLOCKSZ_BITS		22			/*  4MB */
+#define SHMEM_BLOCKSZ_BITS		13			/*  8KB */
 #define SHMEM_BLOCKSZ_BITS_RANGE	\
 	(SHMEM_BLOCKSZ_BITS_MAX - SHMEM_BLOCKSZ_BITS)
 #define SHMEM_BLOCKSZ			(1UL << SHMEM_BLOCKSZ_BITS)
+#define SHMEM_BLOCK_MAGIC		0xdeadbeaf
 
 typedef union
 {
 	dlist_node		chain;		/* to be chained free_list of shmem_zone */
 	struct {
 		void	   *nullmark;	/* NULL if active block */
-		uint32		nshift;		/* 2^nshift blocks were allocated */
+		Size		allocsz;	/* allocated memory block size */
 	} active;
 } shmem_block;
 
@@ -83,6 +84,7 @@ typedef struct
 	shmem_zone *zones[FLEXIBLE_ARRAY_MEMBER];
 } shmem_head;
 
+#if 0
 /*
  * shmem_context / shmem_bunch / shmem_chunk
  *
@@ -172,6 +174,7 @@ typedef struct
 
 #define SHMEM_CHUNK_MAGIC(chunk)				\
 	*((pg_crc32 *)(((char *)(chunk)) + (chunk)->chunk_sz - sizeof(pg_crc32)))
+#endif
 
 #define ADDRESS_IN_SHMEM(address)										\
 	((Size)(address) >= (Size)pgstrom_shmem_head->zone_baseaddr &&		\
@@ -181,9 +184,6 @@ typedef struct
 	((Size)(address) >= (Size)(zone)->block_baseaddr &&		\
 	 (Size)(address) < ((Size)(zone)->block_baseaddr +		\
 						(zone)->num_blocks) * SHMEM_BLOCKSZ)
-/* static functions */
-static void *pgstrom_shmem_block_alloc(Size size);
-static void  pgstrom_shmem_block_free(void *address);
 
 /* static variables */
 static shmem_startup_hook_type shmem_startup_hook_next;
@@ -191,8 +191,10 @@ static Size			pgstrom_shmem_totalsize;
 static int			pgstrom_shmem_maxzones;
 static shmem_head  *pgstrom_shmem_head;
 
+#if 0
 /* top-level shared memory context */
 shmem_context  *TopShmemContext = NULL;
+#endif
 
 /*
  * find_least_pot
@@ -245,6 +247,7 @@ find_least_pot(Size size)
 	return Max(shift, SHMEM_BLOCKSZ_BITS) - SHMEM_BLOCKSZ_BITS;
 }
 
+#if 0
 shmem_context *
 pgstrom_shmem_context_create(const char *name)
 {
@@ -643,6 +646,7 @@ pgstrom_shmem_free(void *address)
 	}
 	SpinLockRelease(&context->lock);
 }
+#endif
 
 /*
  *
@@ -685,7 +689,7 @@ pgstrom_shmem_zone_block_alloc(shmem_zone *zone, Size size)
 {
 	shmem_block	*sblock;
 	dlist_node	*dnode;
-	int		shift = find_least_pot(size);
+	int		shift = find_least_pot(size + sizeof(cl_uint));
 	int		index;
 	void   *address;
 
@@ -699,12 +703,15 @@ pgstrom_shmem_zone_block_alloc(shmem_zone *zone, Size size)
 	dnode = dlist_pop_head_node(&zone->free_list[shift]);
 	sblock = dlist_container(shmem_block, chain, dnode);
 	sblock->active.nullmark = NULL;
-	sblock->active.nshift = shift;
+	sblock->active.allocsz = size;
 
 	index = sblock - &zone->blocks[0];
 	address = (void *)((Size)zone->block_baseaddr + index * SHMEM_BLOCKSZ);
 	zone->num_free[shift]--;
 	zone->num_active[shift]++;
+
+	/* to detect overrun */
+	*((cl_uint *)((uintptr_t)address + size)) = SHMEM_BLOCK_MAGIC;
 
 	return address;
 }
@@ -722,8 +729,13 @@ pgstrom_shmem_zone_block_free(shmem_zone *zone, void *address)
 	index = ((Size)address - (Size)zone->block_baseaddr) / SHMEM_BLOCKSZ;
 	block = &zone->blocks[index];
 	Assert(block->active.nullmark == NULL);
-	Assert(block->active.nshift <= SHMEM_BLOCKSZ_BITS_RANGE);
-	shift = block->active.nshift;
+
+	/* detect overrun */
+	Assert(*((cl_uint *)((uintptr_t)address +
+						 block->active.allocsz)) == SHMEM_BLOCK_MAGIC);
+
+	shift = find_least_pot(block->active.allocsz + sizeof(cl_uint));
+	Assert(shift <= SHMEM_BLOCKSZ_BITS_RANGE);
 
 	zone->num_active[shift]--;
 
@@ -757,8 +769,13 @@ pgstrom_shmem_zone_block_free(shmem_zone *zone, void *address)
  * if suitable memory blocks are not free. If no memory blocks are available,
  * it goes into another zone to allocate memory.
  */
+#if 0
 static void *
 pgstrom_shmem_block_alloc(Size size)
+#endif
+
+void *
+pgstrom_shmem_alloc(Size size)
 {
 	static int	zone_index = 0;
 	int			start;
@@ -793,9 +810,12 @@ pgstrom_shmem_block_alloc(Size size)
 
 	return address;	
 }
-
+#if 0
 static void
 pgstrom_shmem_block_free(void *address)
+#endif
+void
+	pgstrom_shmem_free(void *address)
 {
 	shmem_zone *zone;
 	void	   *zone_baseaddr = pgstrom_shmem_head->zone_baseaddr;
@@ -854,9 +874,13 @@ collect_shmem_block_info(shmem_zone *zone, int zone_index)
 
 		if (!block->active.nullmark)
 		{
-			Assert(block->active.nshift < SHMEM_BLOCKSZ_BITS_RANGE + 1);
-			num_active[block->active.nshift]++;
-			i += (1 << block->active.nshift);
+			int		nshift;
+
+			nshift = find_least_pot(block->active.allocsz + sizeof(cl_uint));
+
+			Assert(nshift <= SHMEM_BLOCKSZ_BITS_RANGE);
+			num_active[nshift]++;
+			i += (1 << nshift);
 		}
 		else
 		{
@@ -992,6 +1016,7 @@ pgstrom_shmem_block_info(PG_FUNCTION_ARGS)
 }
 PG_FUNCTION_INFO_V1(pgstrom_shmem_block_info);
 
+#if 0
 typedef struct
 {
 	text	   *name;
@@ -1091,7 +1116,8 @@ pgstrom_shmem_context_info(PG_FUNCTION_ARGS)
 	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
 }
 PG_FUNCTION_INFO_V1(pgstrom_shmem_context_info);
-
+#endif
+#if 0
 static void
 construct_shmem_top_context(const char *name, shmem_zone *zone)
 {
@@ -1162,6 +1188,7 @@ construct_shmem_top_context(const char *name, shmem_zone *zone)
 	 * the resource-tracker this shared-memory context.
 	 */
 }
+#endif
 
 void
 pgstrom_setup_shmem(Size zone_length,
@@ -1245,11 +1272,11 @@ pgstrom_setup_shmem(Size zone_length,
 
 	Assert(zone_index == num_zones);
 	pgstrom_shmem_head->num_zones = num_zones;
-
+#if 0
 	/* construct TopShmemContext */
 	construct_shmem_top_context("Top Shmem Context",
 								pgstrom_shmem_head->zones[0]);
-
+#endif
 	/* OK, now ready to use shared memory segment */
 	pgstrom_shmem_head->is_ready = true;
 }
@@ -1292,10 +1319,12 @@ pgstrom_init_shmem(void)
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
+#if 0
 	if ((shmem_totalsize % (SHMEM_BLOCKSZ >> 20)) != 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 		errmsg("\"pgstrom.shmem_totalsize\" must be multiple of block size")));
+#endif
 
 	DefineCustomIntVariable("pgstrom.shmem_maxzones",
 							"max number of shared memory zones for PG-Strom",

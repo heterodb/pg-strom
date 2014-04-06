@@ -31,6 +31,7 @@
 /*
  * shmem.c
  */
+#if 0
 typedef struct shmem_context shmem_context;
 
 extern shmem_context *TopShmemContext;
@@ -40,6 +41,9 @@ extern void pgstrom_shmem_context_reset(shmem_context *context);
 extern void pgstrom_shmem_context_delete(shmem_context *context);
 extern void pgstrom_shmem_context_detach(shmem_context *context);
 extern void *pgstrom_shmem_alloc(shmem_context *contetx, Size size);
+extern void pgstrom_shmem_free(void *address);
+#endif
+extern void *pgstrom_shmem_alloc(Size size);
 extern void pgstrom_shmem_free(void *address);
 extern void pgstrom_setup_shmem(Size zone_length,
 								void *(*callback)(void *address,
@@ -71,8 +75,7 @@ extern void pgstrom_init_mqueue(void);
  * datastore.c
  */
 extern pgstrom_parambuf *
-pgstrom_create_param_buffer(shmem_context *shm_context,
-							List *used_params,
+pgstrom_create_param_buffer(List *used_params,
 							ExprContext *econtext);
 extern void pgstrom_get_param_buffer(pgstrom_parambuf *parambuf);
 extern void pgstrom_put_param_buffer(pgstrom_parambuf *parambuf);
