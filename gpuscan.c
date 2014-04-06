@@ -81,7 +81,6 @@ typedef struct {
 #define GpuScanMode_HeapOnlyScan	0x0003
 #define GpuScanMode_CreateCache		0x0004
 
-
 typedef struct {
 	CustomPlanState		cps;
 	Relation			scan_rel;
@@ -94,10 +93,10 @@ typedef struct {
 	Datum				dprog_key;
 	List			   *dev_columns;
 	kern_colmeta	   *dev_colmeta;
-	dlist_head			ready_chunks;
+	pgstrom_gpuscan	   *curr_chunk;
 	dlist_head			free_chunks;
+	dlist_head			ready_chunks;
 } GpuScanState;
-
 
 static void
 cost_gpuscan(GpuScanPath *gpu_path, PlannerInfo *root,
@@ -683,16 +682,91 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		colmeta->attlen = attr->attlen;
 		colmeta->cs_ofs = -1;	/* to be calculated for each row_store */
 	}
+	gss->curr_chunk = NULL;
 	dlist_init(&gss->ready_chunks);
 	dlist_init(&gss->free_chunks);
 
 	return &gss->cps;
 }
 
+
+pgstrom_row_store *
+pgstrom_create_row_store(shmem_context *context,
+						 int ncols, kern_colmeta *colmeta)
+{
+	pgstrom_row_store  *rstore;
+
+	rstore = pgstrom_shmem_alloc(context, ROWSTORE_DEFAULT_SIZE);
+	if (!rstore)
+		return NULL;
+
+	rstore->stag = StromTag_RowStore;
+	rstore->usage = ROWSTORE_DEFAULT_SIZE - offsetof(pgstrom_row_store, kern);
+	rstore->kern.ncols = ncols;
+	rstore->kern.nrows = 0;
+	memcpy(rstore->kern.colmeta, colmeta, sizeof(kern_colmeta) * ncols);
+
+	return rstore;
+}
+
+static bool
+gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
+{
+
+
+}
+
 static TupleTableSlot *
 gpuscan_exec(CustomPlanState *node)
 {
-	return NULL;
+	GpuScanState   *gss = (GpuScanState *) node;
+	TupleTableSlot *slot = gss->cps.scan_slot;
+
+	ExecClearTuple(slot);
+
+	while (!gss->curr_chunk ||
+		   !gpuscan_next_tuple(gss, slot))
+	{
+		/*
+		 * Release the current gpuscan chunk being already scanned
+		 */
+		if (!gss->curr_chunk)
+		{
+			dlist_push_head(&gss->free_chunks,
+							&gss->curr_chunk->msg.chain);
+			gss->curr_chunk = NULL;
+		}
+
+		/*
+		 * Dequeue the current gpuscan chunks being already processed
+		 */
+		while ((msg = pgstrom_try_dequeue_message(gss->mqueue)) != NULL)
+			dlist_push_head(&gss->ready_chunks, &msg->chain);
+
+		/*
+		 * Try to keep number of windows that are asynchronously executed
+		 * unless number of background windows does not exceed limitation
+		 * or OpenCL server does not respond.
+		 */
+		while (gss->scan_desc != NULL &&
+			   
+
+
+
+		/*
+		 * Picks up next available window, if exist
+		 */
+
+
+		/*
+		 * Elsewhere, try to synchronize completion
+		 */
+
+
+
+
+	}
+	return slot;
 }
 
 static Node *

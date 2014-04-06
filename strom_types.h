@@ -154,15 +154,24 @@ typedef struct {
  */
 typedef struct {
 	StromTag		stag;
+	dlist_node		chain;
 	cl_uint			usage;
 	kern_row_store	kern;
 } pgstrom_row_store;
+
+/*
+ * NOTE: when shmem.c allocate a shared memory chunk, it takes additional
+ * management area, so a little bit adjustment shall be decremented from
+ * the target size (= 8MB)
+ */
+#define ROWSTORE_DEFAULT_SIZE	(8 * 1024 * 1024 - 128)
 
 /*
  * Column-format data store
  */
 typedef struct {
 	StromTag		stag;
+	dlist_node		chain;
 	dlist_head		toast;	/* list of toast buffers */
 	kern_column_store kern;
 } pgstrom_column_store;

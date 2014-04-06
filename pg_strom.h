@@ -160,6 +160,8 @@ extern void pgstrom_init_gpuscan(void);
 /*
  * main.c
  */
+extern int	pgstrom_max_async_chunks;
+extern int	pgstrom_min_async_chunks;
 extern void _PG_init(void);
 extern Datum pgstrom_shmem_alloc_func(PG_FUNCTION_ARGS);
 extern Datum pgstrom_shmem_free_func(PG_FUNCTION_ARGS);

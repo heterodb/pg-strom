@@ -13,9 +13,48 @@
 #include "postgres.h"
 #include "fmgr.h"
 #include "miscadmin.h"
+#include "utils/guc.h"
+#include <limits.h>
 #include "pg_strom.h"
 
 PG_MODULE_MAGIC;
+
+/*
+ * miscellaneous GUC parameters
+ */
+int		pgstrom_max_async_chunks;
+int		pgstrom_min_async_chunks;
+
+static void
+pgstrom_init_misc_guc(void)
+{
+	/* GUC variables according to the device information */
+
+	DefineCustomIntVariable("pg_strom.min_async_chunks",
+							"least number of chunks to be run asynchronously",
+							NULL,
+							&pgstrom_min_async_chunks,
+							2,
+							2,
+							INT_MAX,
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("pg_strom.max_async_chunks",
+							"max number of chunk to be run asynchronously",
+							NULL,
+							&pgstrom_max_async_chunks,
+							32,
+							pgstrom_min_async_chunks + 1,
+							INT_MAX,
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+	if (pgstrom_max_async_chunks <= pgstrom_min_async_chunks)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("\"pg_strom.max_async_chunks\" must be larger than \"pg_strom.min_async_chunks\"")));
+}
 
 void
 _PG_init(void)
@@ -49,6 +88,9 @@ _PG_init(void)
 
 	/* registration of custom-plan providers */
 	pgstrom_init_gpuscan();
+
+	/* miscellaneous GUC init above */
+	pgstrom_init_misc_guc();
 }
 
 /* ------------------------------------------------------------
