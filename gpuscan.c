@@ -926,16 +926,24 @@ gpuscan_exec(CustomPlanState *node)
 		 */
 		if (kresult->errcode != StromError_Success)
 		{
-			const char   *hintmsg = NULL;
-
 			if (kresult->errcode == StromError_ProgramCompile)
-				hintmsg = pgstrom_get_devprog_errmsg(gscan->dprog_key);
+			{
+				const char *buildlog
+					= pgstrom_get_devprog_errmsg(gscan->dprog_key);
 
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("PG-Strom: OpenCL execution error (%s)",
-							pgstrom_strerror(kresult->errcode)),
-					 errhint(hintmsg)));
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("PG-Strom: OpenCL execution error (%s)",
+								pgstrom_strerror(kresult->errcode)),
+						 errdetail("%s", buildlog)));
+			}
+			else
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("PG-Strom: OpenCL execution error (%s)",
+								pgstrom_strerror(kresult->errcode))));
+			}
 		}
 		gss->curr_chunk = gscan;
 		gss->curr_index = 0;

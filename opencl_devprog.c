@@ -521,6 +521,7 @@ const char *
 pgstrom_get_devprog_errmsg(Datum dprog_key)
 {
 	devprog_entry  *dprog = (devprog_entry *) DatumGetPointer(dprog_key);
+	const char	   *errmsg;
 
 	SpinLockAcquire(&opencl_devprog_shm_values->lock);
 	Assert(dprog->refcnt >= 0);

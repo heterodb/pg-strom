@@ -726,42 +726,52 @@ pgstrom_setup_opencl_devinfo(List *dev_list)
 	pgstrom_platform_info  *pl_info;
 	pgstrom_platform_info  *pl_info_sh;
 	pgstrom_device_info **dev_array;
+	char	   *shmbase;
 	ListCell   *cell;
 	Size		length;
 	int			index;
 
 	Assert(devinfo_shm_values->num_devices == 0);
-	Assert(TopShmemContext != NULL);
+	pl_info = ((pgstrom_device_info *) linitial(dev_list))->pl_info;
+
+	/* calculate length of shared memory to be acquired */
+	length = MAXALIGN(offsetof(pgstrom_platform_info,
+							   buffer[pl_info->buflen]));
+	length += MAXALIGN(sizeof(pgstrom_device_info *) *
+					   list_length(dev_list));
+	foreach (cell, dev_list)
+	{
+		pgstrom_device_info *dev_info = lfirst(cell);
+		length += MAXALIGN(offsetof(pgstrom_device_info,
+									buffer[dev_info->buflen]));
+	}
+	shmbase = pgstrom_shmem_alloc(length);
+	if (!shmbase)
+		elog(ERROR, "out of shared memory");
 
 	/* copy platform info into shared memory segment */
-	pl_info = ((pgstrom_device_info *) linitial(dev_list))->pl_info;
+	pl_info_sh = (pgstrom_platform_info *) shmbase;
 	length = offsetof(pgstrom_platform_info, buffer[pl_info->buflen]);
-	pl_info_sh = pgstrom_shmem_alloc(TopShmemContext, length);
-	if (!pl_info_sh)
-		elog(ERROR, "out of shared memory");
-	memcpy(pl_info_sh, pl_info, length);
 	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_profile);
 	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_version);
 	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_name);
 	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_vendor);
 	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_extensions);
+	memcpy(pl_info_sh, pl_info, length);
+	shmbase += MAXALIGN(length);
 
 	/* copy device info into shared memory segment */
-	length = sizeof(pgstrom_device_info *) * list_length(dev_list);
-	dev_array = pgstrom_shmem_alloc(TopShmemContext, length);
-	if (!dev_array)
-		elog(ERROR, "out of shared memory");
-
+	dev_array = (pgstrom_device_info **)shmbase;
+	shmbase += MAXALIGN(sizeof(pgstrom_device_info *) *
+						list_length(dev_list));
 	index = 0;
 	foreach (cell, dev_list)
 	{
 		pgstrom_device_info	*dev_info = lfirst(cell);
 		pgstrom_device_info *dest;
 
+		dest = (pgstrom_device_info *)shmbase;
 		length = offsetof(pgstrom_device_info, buffer[dev_info->buflen]);
-		dest = pgstrom_shmem_alloc(TopShmemContext, length);
-		if (!dest)
-			elog(ERROR, "out of shared memory");
 		memcpy(dest, dev_info, length);
 
 		/* pointer adjustment */
@@ -773,8 +783,9 @@ pgstrom_setup_opencl_devinfo(List *dev_list)
 		PLDEVINFO_SHIFT(dest, dev_info, dev_vendor);
 		PLDEVINFO_SHIFT(dest, dev_info, dev_version);
 		PLDEVINFO_SHIFT(dest, dev_info, driver_version);
-
 		dev_array[index++] = dest;
+
+		shmbase += MAXALIGN(length);
 	}
 	Assert(index == list_length(dev_list));
 

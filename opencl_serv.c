@@ -218,6 +218,23 @@ on_shmem_zone_callback(void *address, Size length)
 	return host_mem;
 }
 
+/*
+ * init_opencl_devices_and_shmem
+ *
+ * We can have performance gain using asynchronous DMA transfer when data
+ * chunk it moved to OpenCL device from host machine, however, it requires
+ * preparations to ensure the memory region to be copied to/from is pinned
+ * on RAM; not swapped out. OpenCL provides an interface to map a certain
+ * host address area as pinned buffer object, even though its size is
+ * restricted to CL_DEVICE_MAX_MEM_ALLOC_SIZE parameter. Usually, it is
+ * much less than size of shared memory to be assigned to PG-Strom, around
+ * 500MB - 2GB in typical GPU/MIC device. So, we need to split a flat
+ * continuous memory into several 'zones' to pin it using OpenCL interface.
+ * Because it is a job of OpenCL intermediation server to collect properties
+ * of devices, and this server shall be launched post initialization stage,
+ * we also have to acquire and pin the shared memory region in the context
+ * of OpenCL intermediation server, not postmaster itself.
+ */
 static void
 init_opencl_devices_and_shmem(void)
 {
@@ -257,10 +274,6 @@ pgstrom_opencl_main(Datum main_arg)
 
 	/* initialize opencl devices and shared memory segment */
 	init_opencl_devices_and_shmem();
-
-	/* final setup of message queue */
-	pgstrom_setup_mqueue();
-	pgstrom_setup_opencl_devprog();
 
 	elog(LOG, "Starting PG-Strom OpenCL Server");
 

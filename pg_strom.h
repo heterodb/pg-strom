@@ -60,7 +60,6 @@ extern void pgstrom_close_queue(pgstrom_queue *queue);
 extern pgstrom_queue *pgstrom_get_queue(pgstrom_queue *mqueue);
 extern void pgstrom_put_queue(pgstrom_queue *mqueue);
 extern void pgstrom_put_message(pgstrom_message *msg);
-extern void pgstrom_setup_mqueue(void);
 extern void pgstrom_init_mqueue(void);
 
 /*
