@@ -93,6 +93,36 @@ _PG_init(void)
 	pgstrom_init_misc_guc();
 }
 
+/*
+ * pgstrom_strerror
+ *
+ * translation from StromError_* to human readable form
+ */
+const char *
+pgstrom_strerror(cl_int errcode)
+{
+	static char		unknown_buf[256];
+
+	switch (errcode)
+	{
+		case StromError_Success:
+			return "success";
+		case StromError_RowFiltered:
+			return "row is filtered";
+		case StromError_RowReCheck:
+			return "row should be rechecked";
+		case StromError_ProgramCompile:
+			return "";
+		case StromError_DivisionByZero:
+			return "division by zero";
+		default:
+			snprintf(unknown_buf, sizeof(unknown_buf),
+					 "undefined strom error (code: %d)", errcode);
+			break;
+	}
+	return unknown_buf;
+}
+
 /* ------------------------------------------------------------
  *
  * Routines for debugging
@@ -106,7 +136,7 @@ pgstrom_shmem_alloc_func(PG_FUNCTION_ARGS)
 	Size	size = PG_GETARG_INT64(0);
 	void   *address;
 
-	address = pgstrom_shmem_alloc(TopShmemContext, size);
+	address = pgstrom_shmem_alloc(size);
 
 	PG_RETURN_INT64((Size) address);
 #else

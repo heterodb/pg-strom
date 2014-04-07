@@ -87,14 +87,14 @@ typedef struct {
 	HeapScanDesc		scan_desc;
 	TupleTableSlot	   *scan_slot;
 	int					scan_mode;
-	shmem_context	   *shmcontext;
 	pgstrom_queue	   *mqueue;
-	pgstrom_parambuf   *parambuf;
+	kern_parambuf	   *kparambuf;
 	Datum				dprog_key;
 	List			   *dev_columns;
 	kern_colmeta	   *dev_colmeta;
 	pgstrom_gpuscan	   *curr_chunk;
-	dlist_head			free_chunks;
+	uint32				curr_index;
+	int					num_running;
 	dlist_head			ready_chunks;
 } GpuScanState;
 
@@ -340,13 +340,14 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 	appendStringInfo(&str,
 					 "__kernel void\n"
 					 "gpuscan_qual_cs(__global kern_gpuscan *gpuscan,\n"
-					 "                __global kern_parambuf *kparams,\n"
 					 "                __global kern_column_store *kcs,\n"
 					 "                __global kern_toastbuf *toast,\n"
 					 "                __local void *local_workmem)\n"
 					 "{\n"
 					 "  pg_bool_t   rc;\n"
 					 "  cl_int      errcode;\n"
+					 "  __global kern_parambuf *kparams = (kern_parambuf *)\n"
+					 "    ((uintptr_t)gpuscan + gpuscan->param_ofs);\n"
 					 "\n"
 					 "  gpuscan_local_init(local_workmem);\n"
 					 "  if (get_global_id(0) < kcs->nrows)\n"
@@ -370,7 +371,6 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					 "\n"
 					 "__kernel void\n"
 					 "gpuscan_qual_rs(__global kern_gpuscan *gpuscan,\n"
-					 "                __global kern_parambuf *kparams,\n"
 					 "                __global kern_row_store *krs,\n"
 					 "                __global kern_column_store *kcs,\n"
 					 "                __local void *local_workmem)\n"
@@ -574,7 +574,6 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	Index			scanrelid = gsplan->scanrelid;
 	GpuScanState   *gss;
 	TupleDesc		tupdesc;
-	char			namebuf[NAMEDATALEN+1];
 	Bitmapset	   *tempset;
 	AttrNumber		anum;
 
@@ -637,21 +636,14 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	 * Let's have GPU stuff initialization
 	 */
 	gss->scan_mode = GpuScanMode_HeapOnlyScan;
-	snprintf(namebuf, sizeof(namebuf),
-			 "gpuscan(pid:%u, datoid:%u, reloid:%u, rtindex:%u",
-			 MyProcPid, MyDatabaseId,
-			 RelationGetRelid(gss->scan_rel),
-			 scanrelid);
-	gss->shmcontext = pgstrom_shmem_context_create(namebuf);
 	gss->mqueue = pgstrom_create_queue();
-	gss->parambuf = pgstrom_create_param_buffer(gss->shmcontext,
-												gsplan->used_params,
-												gss->cps.ps.ps_ExprContext);
+	gss->kparambuf = pgstrom_create_kern_parambuf(gsplan->used_params,
+												  gss->cps.ps.ps_ExprContext);
 	if (gsplan->kern_source)
 		gss->dprog_key = pgstrom_get_devprog_key(gsplan->kern_source,
 												 gsplan->extra_flags);
 	else
-		gss->dprog_key = 0;
+		gss->dprog_key = 0;	/* it might happen if tc-cache got supported */
 
 	tempset = bms_copy(gsplan->dev_attrs);
 	while ((anum = bms_first_member(tempset)) >= 0)
@@ -683,88 +675,270 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		colmeta->cs_ofs = -1;	/* to be calculated for each row_store */
 	}
 	gss->curr_chunk = NULL;
+	gss->curr_index = 0;
+	gss->num_running = 0;
 	dlist_init(&gss->ready_chunks);
-	dlist_init(&gss->free_chunks);
 
 	return &gss->cps;
 }
 
-
-pgstrom_row_store *
-pgstrom_create_row_store(shmem_context *context,
-						 int ncols, kern_colmeta *colmeta)
+/*
+ * pgstrom_put_gpuscan_row
+ *
+ * Callback handler when reference counter of gpuscan is decreased.
+ * It also unlinks a device program and release row-store being
+ * associated.
+ */
+static void
+pgstrom_put_gpuscan_row(pgstrom_message *msg)
 {
-	pgstrom_row_store  *rstore;
+	pgstrom_gpuscan	   *gscan = (pgstrom_gpuscan *)msg;
+	bool				gpuscan_release = false;
 
-	rstore = pgstrom_shmem_alloc(context, ROWSTORE_DEFAULT_SIZE);
+	SpinLockAcquire(&msg->lock);
+	if (--gscan->msg.refcnt == 0)
+		gpuscan_release = true;
+	SpinLockRelease(&msg->lock);
+
+	/* untrack local resource */
+	pgstrom_untrack_object(&gscan->msg.stag);
+
+	if (gpuscan_release)
+	{
+		dlist_mutable_iter	iter;
+
+		pgstrom_put_devprog_key(gscan->dprog_key);
+
+		dlist_foreach_modify(iter, &gscan->rc_store)
+		{
+			pgstrom_row_store  *rstore
+				= dlist_container(pgstrom_row_store, chain, iter.cur);
+			Assert(rstore->stag == StromTag_RowStore);
+			pgstrom_shmem_free(rstore);
+		}
+		pgstrom_shmem_free(gscan);
+	}
+}
+
+static pgstrom_gpuscan *
+pgstrom_load_gpuscan_row(GpuScanState *gss)
+{
+	pgstrom_gpuscan	   *gscan;
+	pgstrom_row_store  *rstore;
+	kern_result		   *kresult;
+	HeapTuple		tuple;
+	Size			offset;
+	Size			usage;
+	Size			length;
+	int				ncols = RelationGetNumberOfAttributes(gss->scan_rel);
+	ScanDirection	direction = gss->cps.ps.state->es_direction;
+
+	rstore = pgstrom_shmem_alloc(ROWSTORE_DEFAULT_SIZE);
 	if (!rstore)
-		return NULL;
+		elog(ERROR, "out of shared memory");
 
 	rstore->stag = StromTag_RowStore;
-	rstore->usage = ROWSTORE_DEFAULT_SIZE - offsetof(pgstrom_row_store, kern);
 	rstore->kern.ncols = ncols;
 	rstore->kern.nrows = 0;
-	memcpy(rstore->kern.colmeta, colmeta, sizeof(kern_colmeta) * ncols);
+	memcpy(rstore->kern.colmeta,
+		   gss->dev_colmeta,
+		   sizeof(kern_colmeta) * ncols);
+	offset = offsetof(kern_row_store, colmeta[ncols]);
+	usage = ROWSTORE_DEFAULT_SIZE - offsetof(pgstrom_row_store, kern);
 
-	return rstore;
+	while (HeapTupleIsValid(tuple = heap_getnext(gss->scan_desc, direction)))
+	{
+		Size	length = HEAPTUPLESIZE + MAXALIGN(tuple->t_len);
+		rs_tuple *rs_tup;
+
+		if (usage - length < offset + sizeof(cl_uint))
+		{
+			/* rewind the heap-tuple */
+			heap_getnext(gss->scan_desc, -direction);
+			break;
+		}
+		usage -= length;
+		rs_tup = (rs_tuple *)((uintptr_t)&rstore->kern + usage);
+		memcpy(&rs_tup->htup, tuple, sizeof(HeapTupleData));
+		rs_tup->htup.t_data = &rs_tup->data;
+		memcpy(&rs_tup->data, tuple->t_data, tuple->t_len);
+
+		*(cl_uint *)((uintptr_t)&rstore->kern + offset) = usage;
+		offset += sizeof(cl_uint);
+
+		rstore->kern.nrows++;
+	}
+	/* if table scan reached end of the relation, close the ScanDesc */
+	if (!HeapTupleIsValid(tuple))
+	{
+		heap_endscan(gss->scan_desc);
+		gss->scan_desc = NULL;
+	}
+
+	/* OK, fill-up a row-store, then create a gpuscan object */
+	length = offsetof(pgstrom_gpuscan, kern.kparam) +
+		STROMALIGN(gss->kparambuf->length) +
+		STROMALIGN(offsetof(kern_result, results[rstore->kern.nrows]));
+	gscan = pgstrom_shmem_alloc(length);
+	if (!gscan)
+	{
+		pgstrom_shmem_free(rstore);
+		elog(ERROR, "out of shared memory");
+	}
+
+	gscan->msg.stag = StromTag_GpuScan;
+	SpinLockInit(&gscan->msg.lock);
+	gscan->msg.refcnt = 1;
+	gscan->msg.respq = pgstrom_get_queue(gss->mqueue);
+	gscan->msg.cb_release = pgstrom_put_gpuscan_row;
+	gscan->dprog_key = pgstrom_retain_devprog_key(gss->dprog_key);
+	dlist_init(&gscan->rc_store);
+	dlist_push_head(&gscan->rc_store, &rstore->chain);
+	gscan->kern.roffset = (offsetof(pgstrom_gpuscan, kern.kparam) +
+						   STROMALIGN(gss->kparambuf->length));
+	memcpy(&gscan->kern.kparam, gss->kparambuf, gss->kparambuf->length);
+	kresult = (kern_result *)((uintptr_t)gscan + gscan->kern.roffset);
+	kresult->nitems = 0;
+	kresult->errcode = 0;
+
+	/* track local object */
+	pgstrom_track_object(&gscan->msg.stag);
+
+	return gscan;
 }
 
 static bool
-gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
+gpuscan_next_tuple_row(GpuScanState *gss, TupleTableSlot *slot)
 {
+	pgstrom_gpuscan	*gscan = gss->curr_chunk;
+	kern_result		*kresult;
+	rs_tuple		*rs_tup;
+	cl_int			 index;
 
+	if (!gscan)
+		return false;
 
+	kresult = pgstrom_gpuscan_kresult(gscan);
+	if (gss->curr_index < kresult->nitems)
+	{
+		pgstrom_row_store *rstore
+			= dlist_container(pgstrom_row_store, chain,
+							  dlist_head_node(&gscan->rc_store));
+		Assert(rstore->stag == StromTag_RowStore);
+
+		index = kresult->results[gss->curr_index++];
+		Assert(index < rstore->kern.nrows);
+
+		rs_tup = pgstrom_row_store_rstuple(rstore, index);
+		ExecStoreTuple(&rs_tup->htup, slot, InvalidBuffer, false);
+		return true;
+	}
+	return false;
 }
 
 static TupleTableSlot *
 gpuscan_exec(CustomPlanState *node)
 {
 	GpuScanState   *gss = (GpuScanState *) node;
-	TupleTableSlot *slot = gss->cps.scan_slot;
+	TupleTableSlot *slot = gss->scan_slot;
 
 	ExecClearTuple(slot);
 
-	while (!gss->curr_chunk ||
-		   !gpuscan_next_tuple(gss, slot))
+	while (!gss->curr_chunk || !gpuscan_next_tuple_row(gss, slot))
 	{
+		pgstrom_message	   *msg;
+		pgstrom_gpuscan	   *gscan;
+		kern_result		   *kresult;
+
 		/*
 		 * Release the current gpuscan chunk being already scanned
 		 */
-		if (!gss->curr_chunk)
+		if (gss->curr_chunk)
 		{
-			dlist_push_head(&gss->free_chunks,
-							&gss->curr_chunk->msg.chain);
+			pgstrom_put_gpuscan_row(&gss->curr_chunk->msg);
 			gss->curr_chunk = NULL;
+			gss->curr_index = 0;
 		}
 
 		/*
 		 * Dequeue the current gpuscan chunks being already processed
 		 */
 		while ((msg = pgstrom_try_dequeue_message(gss->mqueue)) != NULL)
+		{
+			Assert(gss->num_running > 0);
+			gss->num_running--;
 			dlist_push_head(&gss->ready_chunks, &msg->chain);
+		}
 
 		/*
-		 * Try to keep number of windows that are asynchronously executed
-		 * unless number of background windows does not exceed limitation
-		 * or OpenCL server does not respond.
+		 * Try to keep number of gpuscan chunks being asynchronously executed
+		 * larger than minimum multiplicity, unless it does not exceed
+		 * maximum one and OpenCL server does not return a new response.
 		 */
 		while (gss->scan_desc != NULL &&
-			   
+			   gss->num_running <= pgstrom_max_async_chunks)
+		{
+			pgstrom_gpuscan	*gscan = pgstrom_load_gpuscan_row(gss);
 
+			if (!pgstrom_enqueue_message(&gscan->msg))
+			{
+				pgstrom_put_gpuscan_row(&gscan->msg);
+				elog(ERROR, "failed to enqueue pgstrom_gpuscan message");
+			}
+			gss->num_running++;
 
+			if (gss->num_running > pgstrom_min_async_chunks &&
+				(msg = pgstrom_try_dequeue_message(gss->mqueue)) != NULL)
+			{
+				gss->num_running--;
+				dlist_push_head(&gss->ready_chunks, &msg->chain);
+				break;
+			}
+		}
 
 		/*
-		 * Picks up next available window, if exist
+		 * Wait for server's response if no available chunks were replied.
 		 */
+		if (dlist_is_empty(&gss->ready_chunks))
+		{
+			/* OK, no more chunks to be scanned */
+			if (gss->num_running == 0)
+				break;
 
+			msg = pgstrom_dequeue_message(gss->mqueue);
+			if (!msg)
+				elog(ERROR, "message queue wait timeout");
+			gss->num_running--;
+			dlist_push_head(&gss->ready_chunks, &msg->chain);
+		}
 
 		/*
-		 * Elsewhere, try to synchronize completion
+		 * Picks up next available chunks if any
 		 */
+		Assert(!dlist_is_empty(&gss->ready_chunks));
+		gscan = dlist_container(pgstrom_gpuscan, msg.chain,
+								dlist_pop_head_node(&gss->ready_chunks));
+		Assert(gscan->msg.stag == StromTag_GpuScan);
 
+		kresult = pgstrom_gpuscan_kresult(gscan);
+		/*
+		 * Raise an error, if chunk-level error was reported.
+		 */
+		if (kresult->errcode != StromError_Success)
+		{
+			const char   *hintmsg = NULL;
 
+			if (kresult->errcode == StromError_ProgramCompile)
+				hintmsg = pgstrom_get_devprog_errmsg(gscan->dprog_key);
 
-
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("PG-Strom: OpenCL execution error (%s)",
+							pgstrom_strerror(kresult->errcode)),
+					 errhint(hintmsg)));
+		}
+		gss->curr_chunk = gscan;
+		gss->curr_index = 0;
 	}
 	return slot;
 }
@@ -783,7 +957,6 @@ gpuscan_end(CustomPlanState *node)
 	if (gss->dprog_key)
 		pgstrom_put_devprog_key(gss->dprog_key);
 	pgstrom_close_queue(gss->mqueue);
-	pgstrom_shmem_context_detach(gss->shmcontext);
 
 	/*
 	 * Free the exprcontext

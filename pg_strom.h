@@ -31,18 +31,12 @@
 /*
  * shmem.c
  */
-#if 0
-typedef struct shmem_context shmem_context;
+#define SHMEM_BLOCKSZ_BITS_MAX	34			/* 16GB */
+#define SHMEM_BLOCKSZ_BITS		13			/*  8KB */
+#define SHMEM_BLOCKSZ_BITS_RANGE	\
+	(SHMEM_BLOCKSZ_BITS_MAX - SHMEM_BLOCKSZ_BITS)
+#define SHMEM_BLOCKSZ			(1UL << SHMEM_BLOCKSZ_BITS)
 
-extern shmem_context *TopShmemContext;
-
-extern shmem_context *pgstrom_shmem_context_create(const char *name);
-extern void pgstrom_shmem_context_reset(shmem_context *context);
-extern void pgstrom_shmem_context_delete(shmem_context *context);
-extern void pgstrom_shmem_context_detach(shmem_context *context);
-extern void *pgstrom_shmem_alloc(shmem_context *contetx, Size size);
-extern void pgstrom_shmem_free(void *address);
-#endif
 extern void *pgstrom_shmem_alloc(Size size);
 extern void pgstrom_shmem_free(void *address);
 extern void pgstrom_setup_shmem(Size zone_length,
@@ -63,10 +57,8 @@ extern pgstrom_message *pgstrom_dequeue_message(pgstrom_queue *queue);
 extern pgstrom_message *pgstrom_try_dequeue_message(pgstrom_queue *queue);
 extern pgstrom_message *pgstrom_dequeue_server_message(void);
 extern void pgstrom_close_queue(pgstrom_queue *queue);
-extern void pgstrom_init_message(pgstrom_message *msg,
-								 StromTag stag,
-								 pgstrom_queue *respq,
-								 void (*cb_release)(pgstrom_message *msg));
+extern pgstrom_queue *pgstrom_get_queue(pgstrom_queue *mqueue);
+extern void pgstrom_put_queue(pgstrom_queue *mqueue);
 extern void pgstrom_put_message(pgstrom_message *msg);
 extern void pgstrom_setup_mqueue(void);
 extern void pgstrom_init_mqueue(void);
@@ -74,11 +66,9 @@ extern void pgstrom_init_mqueue(void);
 /*
  * datastore.c
  */
-extern pgstrom_parambuf *
-pgstrom_create_param_buffer(List *used_params,
-							ExprContext *econtext);
-extern void pgstrom_get_param_buffer(pgstrom_parambuf *parambuf);
-extern void pgstrom_put_param_buffer(pgstrom_parambuf *parambuf);
+extern kern_parambuf *
+pgstrom_create_kern_parambuf(List *used_params,
+                             ExprContext *econtext);
 
 /*
  * restrack.c
@@ -114,8 +104,8 @@ extern cl_program clserv_lookup_device_program(Datum dprog_key,
 											   pgstrom_message *msg);
 extern Datum pgstrom_get_devprog_key(const char *source, int32 extra_libs);
 extern void pgstrom_put_devprog_key(Datum dprog_key);
-extern void pgstrom_retain_devprog_key(Datum dprog_key);
-extern void pgstrom_setup_opencl_devprog(void);
+extern Datum pgstrom_retain_devprog_key(Datum dprog_key);
+extern const char *pgstrom_get_devprog_errmsg(Datum dprog_key);
 extern void pgstrom_init_opencl_devprog(void);
 
 /*
@@ -166,6 +156,7 @@ extern void pgstrom_init_gpuscan(void);
 extern int	pgstrom_max_async_chunks;
 extern int	pgstrom_min_async_chunks;
 extern void _PG_init(void);
+extern const char *pgstrom_strerror(cl_int errcode);
 extern Datum pgstrom_shmem_alloc_func(PG_FUNCTION_ARGS);
 extern Datum pgstrom_shmem_free_func(PG_FUNCTION_ARGS);
 

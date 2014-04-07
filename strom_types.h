@@ -101,8 +101,7 @@ typedef struct {
  * Tag of shared memory object classes
  */
 typedef enum {
-	StromTag_ShmContext = 1001,
-	StromTag_DevProgram,
+	StromTag_DevProgram = 1001,
 	StromTag_MsgQueue,
 	StromTag_ParamBuf,
 	StromTag_RowStore,
@@ -123,6 +122,7 @@ typedef enum {
  */
 typedef struct {
 	StromTag		stag;
+	dlist_node		chain;	/* link to active/free queues in mqueue.c */
 	int				refcnt;
 	pthread_mutex_t	lock;
 	pthread_cond_t	cond;
@@ -155,16 +155,18 @@ typedef struct {
 typedef struct {
 	StromTag		stag;
 	dlist_node		chain;
-	cl_uint			usage;
 	kern_row_store	kern;
 } pgstrom_row_store;
+#define pgstrom_row_store_rstuple(rstore,index)					\
+	((rs_tuple *)(((uintptr_t)(&(rstore)->kern)) +				\
+				  ((cl_uint *)((rstore)->kern.colmeta +			\
+							   (rstore)->kern.ncols))[(index)]))
 
 /*
- * NOTE: when shmem.c allocate a shared memory chunk, it takes additional
- * management area, so a little bit adjustment shall be decremented from
- * the target size (= 8MB)
+ * NOTE: shmem.c put a magic number to detect shared memory usage overrun.
+ * So, we have a little adjustment for this padding.
  */
-#define ROWSTORE_DEFAULT_SIZE	(8 * 1024 * 1024 - 128)
+#define ROWSTORE_DEFAULT_SIZE	(8 * 1024 * 1024 - sizeof(cl_uint))
 
 /*
  * Column-format data store

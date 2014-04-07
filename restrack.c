@@ -40,8 +40,6 @@ typedef struct {
 
 #define IS_TRACKABLE_OBJECT(stag)					\
 	(*((StromTag *)stag) == StromTag_MsgQueue ||	\
-	 *((StromTag *)stag) == StromTag_ShmContext ||	\
-	 *((StromTag *)stag) == StromTag_DevProgram ||	\
 	 *((StromTag *)stag) == StromTag_ParamBuf ||	\
 	 *((StromTag *)stag) == StromTag_GpuScan ||		\
 	 *((StromTag *)stag) == StromTag_GpuSort ||		\
@@ -86,46 +84,9 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 	}
 
 	/*
-	 * First of all, we close the tracked message queue and detach shared
-	 * memory context; these objects shall be released when last (another)
-	 * object that uses this queue or context got released.
-	 */
-	for (i=0; i < RESTRACK_HASHSZ; i++)
-	{
-		dlist_mutable_iter	miter;
-
-		dlist_foreach_modify(miter, &tracker_slot[i])
-		{
-			entry = dlist_container(tracker_entry, chain, miter.cur);
-
-			if (entry->owner != CurrentResourceOwner)
-				continue;
-			if (*entry->object == StromTag_MsgQueue ||
-				*entry->object == StromTag_ShmContext ||
-				*entry->object == StromTag_DevProgram)
-			{
-				dlist_delete(&entry->chain);
-				if (*entry->object == StromTag_MsgQueue)
-				{
-					pgstrom_queue  *queue = (pgstrom_queue *)entry->object;
-					pgstrom_close_queue(queue);
-				}
-				else if (*entry->object == StromTag_ShmContext)
-				{
-					shmem_context  *context = (shmem_context *)entry->object;
-					pgstrom_shmem_context_detach(context);
-				}
-				else if (*entry->object == StromTag_DevProgram)
-				{
-					pgstrom_put_devprog_key(PointerGetDatum(entry->object));
-				}
-				dlist_push_head(&tracker_free, &entry->chain);
-			}
-		}
-	}
-
-	/*
-	 * Next, we put other message objects being tracked now
+	 * In case of transaction abort, we decrement reference counter of
+	 * tracked objects. Some of them are released immediately, or some
+	 * other will be released later by OpenCL server.
 	 */
 	for (i=0; i < RESTRACK_HASHSZ; i++)
 	{
@@ -139,16 +100,16 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 				continue;
 
 			dlist_delete(&entry->chain);
-			if (*entry->object == StromTag_ParamBuf)
-				pgstrom_put_param_buffer((pgstrom_parambuf *) entry->object);
-			else if (*entry->object == StromTag_GpuScan ||
-					 *entry->object == StromTag_GpuSort ||
-					 *entry->object == StromTag_HashJoin)
-				pgstrom_put_message((pgstrom_message *) entry->object);
+			if (*entry->object == StromTag_MsgQueue)
+			{
+				pgstrom_queue  *mqueue = (pgstrom_queue *)entry->object;
+				pgstrom_close_queue(mqueue);
+			}
 			else
-				elog(LOG, "Bug? unexpected object is tracked (%d)",
-					 (int)(*entry->object));
-
+			{
+				Assert(IS_TRACKABLE_OBJECT(entry->object));
+				pgstrom_put_message((pgstrom_message *) entry->object);
+			}
 			dlist_push_head(&tracker_free, &entry->chain);
 		}
 	}
@@ -181,12 +142,6 @@ pgstrom_track_object(StromTag *stag)
 		{
 			if (*stag == StromTag_MsgQueue)
 				pgstrom_close_queue((pgstrom_queue *)stag);
-			else if (*stag == StromTag_ShmContext)
-				pgstrom_shmem_context_detach((shmem_context *)stag);
-			else if (*stag == StromTag_DevProgram)
-				pgstrom_put_devprog_key(PointerGetDatum(stag));
-			else if (*stag == StromTag_ParamBuf)
-				pgstrom_put_param_buffer((pgstrom_parambuf *)stag);
 			else
 				pgstrom_put_message((pgstrom_message *)stag);
 			PG_RE_THROW();

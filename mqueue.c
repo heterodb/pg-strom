@@ -27,8 +27,11 @@ static int		pgstrom_mqueue_timeout;
 /* variables related to shared memory segment */
 static shmem_startup_hook_type shmem_startup_hook_next;
 static struct {
-	shmem_context  *shmcontext;		/* shred memory context for mqueue */
-	pgstrom_queue  *serv_mqueue;	/* queue for OpenCL background server */
+	slock_t			lock;
+	dlist_head		free_queue_list;
+	uint32			num_free;
+	uint32			num_active;
+	pgstrom_queue	serv_mqueue;	/* queue to OpenCL server */
 } *mqueue_shm_values;
 
 /*
@@ -49,28 +52,60 @@ static struct {
 pgstrom_queue *
 pgstrom_create_queue(void)
 {
-	shmem_context  *context = mqueue_shm_values->shmcontext;
-	pgstrom_queue  *queue;
+	pgstrom_queue  *mqueue;
+	dlist_node	   *dnode;
 
-	Assert(context != NULL);
-	queue = pgstrom_shmem_alloc(context, sizeof(pgstrom_queue));
-	if (!queue)
-		return NULL;
+	SpinLockAcquire(&mqueue_shm_values->lock);
+	if (dlist_is_empty(&mqueue_shm_values->free_queue_list))
+	{
+		pgstrom_queue  *queues;
+		int		i, numq;
 
-	queue->stag = StromTag_MsgQueue;
-	queue->refcnt = 1;
-	if (pthread_mutex_init(&queue->lock, &mutex_attr) != 0)
+		numq = (SHMEM_BLOCKSZ - sizeof(cl_uint)) / sizeof(pgstrom_queue);
+		queues = pgstrom_shmem_alloc(sizeof(pgstrom_queue) * numq);
+		if (!queues)
+		{
+			SpinLockRelease(&mqueue_shm_values->lock);
+			ereport(ERROR,
+					(errcode(ERRCODE_OUT_OF_MEMORY),
+					 errmsg("out of shared memory")));
+		}
+
+		for (i=0; i < numq; i++)
+		{
+			dlist_push_tail(&mqueue_shm_values->free_queue_list,
+							&queues[i].chain);
+		}
+		mqueue_shm_values->num_free += numq;
+	}
+	Assert(mqueue_shm_values->num_free > 0);
+	mqueue_shm_values->num_free--;
+	mqueue_shm_values->num_active++;
+	dnode = dlist_pop_head_node(&mqueue_shm_values->free_queue_list);
+	mqueue = dlist_container(pgstrom_queue, chain, dnode);
+	SpinLockRelease(&mqueue_shm_values->lock);
+
+	/* initialize the queue as new one */
+	mqueue->stag = StromTag_MsgQueue;
+	mqueue->chain.next = mqueue->chain.prev = NULL;
+	mqueue->refcnt = 1;
+	if (pthread_mutex_init(&mqueue->lock, &mutex_attr) != 0)
 		goto error;
-	if (pthread_cond_init(&queue->cond, &cond_attr) != 0)
+	if (pthread_cond_init(&mqueue->cond, &cond_attr) != 0)
 		goto error;
-	dlist_init(&queue->qhead);
-	queue->closed = false;
+	dlist_init(&mqueue->qhead);
+	mqueue->closed = false;
 
-	return queue;
+	return mqueue;
 
 error:
-	pgstrom_shmem_free(queue);
-	return NULL;
+	SpinLockAcquire(&mqueue_shm_values->lock);
+	dlist_push_tail(&mqueue_shm_values->free_queue_list, &mqueue->chain);
+	mqueue_shm_values->num_free++;
+    mqueue_shm_values->num_active--;	
+	SpinLockRelease(&mqueue_shm_values->lock);
+	elog(ERROR, "failed on initialization of message queue");
+	return NULL;	/* be compiler quiet */
 }
 
 /*
@@ -81,7 +116,7 @@ error:
 bool
 pgstrom_enqueue_message(pgstrom_message *message)
 {
-	pgstrom_queue *mqueue = mqueue_shm_values->serv_mqueue;
+	pgstrom_queue *mqueue = &mqueue_shm_values->serv_mqueue;
 	int		rc;
 
 	pthread_mutex_lock(&mqueue->lock);
@@ -175,7 +210,7 @@ pgstrom_reply_message(pgstrom_message *message)
  * a signal being pending.
  */
 pgstrom_message *
-pgstrom_dequeue_message(pgstrom_queue *queue)
+pgstrom_dequeue_message(pgstrom_queue *mqueue)
 {
 #define POOLING_INTERVAL	200000000	/* 0.2msec */
 	pgstrom_message *result = NULL;
@@ -191,20 +226,20 @@ pgstrom_dequeue_message(pgstrom_queue *queue)
 
 	for (;;)
 	{
-		pthread_mutex_lock(&queue->lock);
+		pthread_mutex_lock(&mqueue->lock);
 		/* dequeue a message from the message queue */
-		if (!dlist_is_empty(&queue->qhead))
+		if (!dlist_is_empty(&mqueue->qhead))
 		{
 			dlist_node *dnode
-				= dlist_pop_head_node(&queue->qhead);
+				= dlist_pop_head_node(&mqueue->qhead);
 
 			result = dlist_container(pgstrom_message, chain, dnode);
-			pthread_mutex_unlock(&queue->lock);
+			pthread_mutex_unlock(&mqueue->lock);
 			break;
 		}
 		else if (timeleft == 0)
 		{
-			pthread_mutex_unlock(&queue->lock);
+			pthread_mutex_unlock(&mqueue->lock);
 			break;
 		}
 		else
@@ -220,7 +255,9 @@ pgstrom_dequeue_message(pgstrom_queue *queue)
 				timeout.tv_nsec += timeleft;
 				timeleft = 0;
 			}
-			rc = pthread_cond_timedwait(&queue->cond, &queue->lock, &timeout);
+			rc = pthread_cond_timedwait(&mqueue->cond,
+										&mqueue->lock,
+										&timeout);
 			Assert(rc == 0 || rc == ETIMEDOUT);
 
 			/* signal will break waiting loop */
@@ -238,19 +275,19 @@ pgstrom_dequeue_message(pgstrom_queue *queue)
  * wait for new messages, will return immediately.
  */
 pgstrom_message *
-pgstrom_try_dequeue_message(pgstrom_queue *queue)
+pgstrom_try_dequeue_message(pgstrom_queue *mqueue)
 {
 	pgstrom_message *result = NULL;
 
-	pthread_mutex_lock(&queue->lock);
-	if (!dlist_is_empty(&queue->qhead))
+	pthread_mutex_lock(&mqueue->lock);
+	if (!dlist_is_empty(&mqueue->qhead))
 	{
 		dlist_node *dnode
-			= dlist_pop_head_node(&queue->qhead);
+			= dlist_pop_head_node(&mqueue->qhead);
 
 		result = dlist_container(pgstrom_message, chain, dnode);
 	}
-	pthread_mutex_unlock(&queue->lock);
+	pthread_mutex_unlock(&mqueue->lock);
 
 	return result;
 }
@@ -263,7 +300,7 @@ pgstrom_try_dequeue_message(pgstrom_queue *queue)
 pgstrom_message *
 pgstrom_dequeue_server_message(void)
 {
-	return pgstrom_dequeue_message(mqueue_shm_values->serv_mqueue);
+	return pgstrom_dequeue_message(&mqueue_shm_values->serv_mqueue);
 }
 
 /*
@@ -274,49 +311,79 @@ pgstrom_dequeue_server_message(void)
  * is dequeued or last expected message is tried to enqueue.
  */
 void
-pgstrom_close_queue(pgstrom_queue *queue)
+pgstrom_close_queue(pgstrom_queue *mqueue)
 {
 	bool	queue_release = false;
 
-	pthread_mutex_lock(&queue->lock);
-	Assert(!queue->closed);
-	queue->closed = true;
+	pthread_mutex_lock(&mqueue->lock);
+	Assert(!mqueue->closed);
+	mqueue->closed = true;
 
-	if (--queue->refcnt == 0)
+	if (--mqueue->refcnt == 0)
 		queue_release = true;
-	pthread_mutex_unlock(&queue->lock);
+	pthread_mutex_unlock(&mqueue->lock);
 
-	if (queue_release && queue != mqueue_shm_values->serv_mqueue)
+	if (queue_release && mqueue != &mqueue_shm_values->serv_mqueue)
 	{
-		pthread_cond_destroy(&queue->cond);
-		pthread_mutex_destroy(&queue->lock);
-		pgstrom_shmem_free(queue);
+		pthread_cond_destroy(&mqueue->cond);
+		pthread_mutex_destroy(&mqueue->lock);
+		pgstrom_shmem_free(mqueue);
 	}
 }
 
 /*
- * pgstrom_init_message
+ * pgstrom_get_queue
  *
- * It initializes the supplied message header, and increments the reference
- * counter of response message queue. It has to be incremented to avoid
- * unexpected destruction.
+ * It increases reference counter of the supplied message queue.
+ */
+pgstrom_queue *
+pgstrom_get_queue(pgstrom_queue *mqueue)
+{
+	pthread_mutex_lock(&mqueue->lock);
+	Assert(mqueue->refcnt > 0);
+	mqueue->refcnt++;
+	pthread_mutex_unlock(&mqueue->lock);
+
+	return mqueue;
+}
+
+/*
+ * pgstrom_put_queue
+ *
+ * It decrements reference counter of the supplied message queue,
+ * and releases the message queue if it is already closed and
+ * nobody will reference this queue any more.
  */
 void
-pgstrom_init_message(pgstrom_message *msg,
-					 StromTag stag,
-					 pgstrom_queue *respq,
-					 void (*cb_release)(pgstrom_message *msg))
+pgstrom_put_queue(pgstrom_queue *mqueue)
 {
-	msg->stag = stag;
-	SpinLockInit(&msg->lock);
-	msg->refcnt = 1;
-	/* acquire this response queue */
-	pthread_mutex_lock(&respq->lock);
-	Assert(respq->refcnt > 0);
-	respq->refcnt++;
-	pthread_mutex_unlock(&respq->lock);
-	msg->respq = respq;
-	msg->cb_release = cb_release;
+	bool	queue_release = false;
+
+	pthread_mutex_lock(&mqueue->lock);
+	if (--mqueue->refcnt == 0)
+	{
+		/*
+		 * Someone should close the message queue prior to close
+		 * the reference counter reaches to zero.
+		 */
+		Assert(mqueue->closed);
+		queue_release = true;
+	}
+	pthread_mutex_unlock(&mqueue->lock);
+
+	/*
+	 * Once a message queue got refcnt == 0, it is free to reuse, so we
+	 * link this queue to the common free_queue_list for later reusing.
+	 */
+	if (queue_release)
+	{
+		pthread_cond_destroy(&mqueue->cond);
+		pthread_mutex_destroy(&mqueue->lock);
+		SpinLockAcquire(&mqueue_shm_values->lock);
+		dlist_push_tail(&mqueue_shm_values->free_queue_list,
+						&mqueue->chain);
+		SpinLockRelease(&mqueue_shm_values->lock);
+	}
 }
 
 /*
@@ -330,7 +397,6 @@ void
 pgstrom_put_message(pgstrom_message *message)
 {
 	bool	release_message = false;
-	bool	release_queue = false;
 
 	SpinLockAcquire(&message->lock);
 	Assert(message->refcnt > 0);
@@ -338,62 +404,17 @@ pgstrom_put_message(pgstrom_message *message)
 		release_message = true;
 	SpinLockRelease(&message->lock);
 
+	/*
+	 * Any classes that delivered from pgstrom_message type is responsible
+	 * to implement 'cb_release' method to release itself. This handler
+	 * also has to unlink message queue being associated with the message
+	 * object.
+	 */
 	if (release_message)
 	{
-		pgstrom_queue  *respq = message->respq;
-
-		if (message->cb_release)
-			(*message->cb_release)(message);
-		else
-			pgstrom_shmem_free(message);
-
-		/*
-		 * Once a message got released, reference counter of the
-		 * corresponding response queue shall be decremented, and
-		 * it may become refcnt == 0. It means no message will be
-		 * replied to this response queue anymore, so release it.
-		 */
-		pthread_mutex_lock(&respq->lock);
-		if (--respq->refcnt == 0)
-		{
-			Assert(respq->closed);
-			release_queue = true;
-		}
-		pthread_mutex_unlock(&respq->lock);
-
-		/* release it */
-		if (release_queue)
-		{
-			pthread_cond_destroy(&respq->cond);
-			pthread_mutex_destroy(&respq->lock);
-			pgstrom_shmem_free(respq);
-		}
+		Assert(message->cb_release != NULL);
+		(*message->cb_release)(message);
 	}
-}
-
-/*
- * pgstrom_setup_mqueue
- *
- * final initialization after the shared memory context got available
- */
-void
-pgstrom_setup_mqueue(void)
-{
-	shmem_context  *context;
-	pgstrom_queue  *mqueue;
-
-	context = pgstrom_shmem_context_create("PG-Strom Message Queue");
-	if (!context)
-		elog(ERROR, "failed to create shared memory context");
-	mqueue_shm_values->shmcontext = context;
-
-	mqueue = pgstrom_create_queue();
-	if (!mqueue)
-		elog(ERROR, "failed to create PG-Strom server message queue");
-	mqueue_shm_values->serv_mqueue = mqueue;
-
-	elog(LOG, "PG-Strom: Message Queue (context=%p, server mqueue=%p)",
-		 context, mqueue);
 }
 
 /*
@@ -404,6 +425,7 @@ pgstrom_setup_mqueue(void)
 static void
 pgstrom_startup_mqueue(void)
 {
+	pgstrom_queue  *mqueue;
 	bool	found;
 
 	if (shmem_startup_hook_next)
@@ -414,6 +436,18 @@ pgstrom_startup_mqueue(void)
 										&found);
 	Assert(!found);
 	memset(mqueue_shm_values, 0, sizeof(*mqueue_shm_values));
+	SpinLockInit(&mqueue_shm_values->lock);
+	dlist_init(&mqueue_shm_values->free_queue_list);
+
+	mqueue = &mqueue_shm_values->serv_mqueue;
+	mqueue->stag = StromTag_MsgQueue;
+	mqueue->refcnt = 0;
+	if (pthread_mutex_init(&mqueue->lock, &mutex_attr) != 0)
+		elog(ERROR, "failed on pthread_mutex_init for server mqueue");
+    if (pthread_cond_init(&mqueue->cond, &cond_attr) != 0)
+        elog(ERROR, "failed on pthread_cond_init for server mqueue");
+    dlist_init(&mqueue->qhead);
+    mqueue->closed = false;
 }
 
 /*

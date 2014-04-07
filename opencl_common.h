@@ -102,7 +102,8 @@ typedef struct {
 #define StromError_Success				0	/* OK */
 #define StromError_RowFiltered			1	/* Row-clause was false */
 #define StromError_RowReCheck			2	/* To be checked on the host */
-#define StromError_DivisionByZero		100	/* Division by zero */
+#define StromError_ProgramCompile		100	/* Failed on program compile */
+#define StromError_DivisionByZero		101	/* Division by zero */
 
 /* significant error; that abort transaction on the host code */
 #define StromErrorIsSignificant(errcode)	((errcode) >= 100)
@@ -115,10 +116,23 @@ typedef struct {
  * less than constant memory (NOTE: not implemented yet).
  */
 typedef struct {
-	cl_uint			nparams;/* number of parameters */
-	cl_uint			poffset[FLEXIBLE_ARRAY_MEMBER];	/* offset of params */
+	cl_uint		length;		/* total length of parambuf */
+	cl_uint		nparams;	/* number of parameters */
+	cl_uint		poffset[FLEXIBLE_ARRAY_MEMBER];	/* offset of params */
 } kern_parambuf;
 
+/*
+ * kern_result
+ *
+ * Output buffer to write back calculation results on a parciular chunk.
+ * 'errcode' informs a significant error that shall raise an error on
+ * host side and abort transactions. 'results' informs row-level status.
+ */
+typedef struct {
+	cl_uint		nitems;		/* number of results being written */
+	cl_int		errcode;	/* chunk-level error */
+	cl_int		results[FLEXIBLE_ARRAY_MEMBER];
+} kern_result;
 
 /*
  * Data type definitions for row oriented data format
@@ -247,6 +261,11 @@ typedef struct {
 	cl_uint			nrows;	/* number of rows in this store */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];	/* metadata of columns */
 } kern_row_store;
+
+#define kern_row_store_rstuple(rstore,index)				\
+	(rs_tuple *)((cl_char *)(rstore) +						\
+				 (((cl_uint *)((rstore)->colmeta +			\
+							   (rstore)->ncols))[index]))
 
 /*
  * rs_tuple

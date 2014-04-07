@@ -26,7 +26,6 @@ static int reclaim_threshold;
 #define DEVPROG_HASH_SIZE	2048
 
 static struct {
-	shmem_context *shm_context;	/* memory context for device programs */
 	slock_t		lock;
 	int			refcnt;
 	Size		usage;
@@ -146,7 +145,6 @@ clserv_devprog_build_callback(cl_program program, void *cb_private)
 		 */
 		if (status == CL_BUILD_ERROR)
 		{
-			shmem_context *context;
 			char	buffer[128 * 1024];	/* 128KB */
 			size_t	buflen;
 
@@ -163,8 +161,7 @@ clserv_devprog_build_callback(cl_program program, void *cb_private)
 						 opencl_strerror(rc));
 				buflen = strlen(buffer);
 			}
-			context = opencl_devprog_shm_values->shm_context;
-			errmsg = pgstrom_shmem_alloc(context, buflen + 1);
+			errmsg = pgstrom_shmem_alloc(buflen + 1);
 			if (errmsg)
 			{
 				opencl_devprog_shm_values->usage += buflen + 1;
@@ -390,7 +387,6 @@ Datum
 pgstrom_get_devprog_key(const char *source, int32 extra_libs)
 {
 	devprog_entry *dprog = NULL;
-    shmem_context *context;
 	Size		source_len = strlen(source);
 	Size		alloc_len;
 	int			index;
@@ -449,10 +445,8 @@ retry:
 	SpinLockRelease(&opencl_devprog_shm_values->lock);
 
 	/* OK, create a new device program entry */
-	context = opencl_devprog_shm_values->shm_context;
-
 	alloc_len = offsetof(devprog_entry, source[source_len]);
-	dprog = pgstrom_shmem_alloc(context, alloc_len);
+	dprog = pgstrom_shmem_alloc(alloc_len);
 	if (!dprog)
 		elog(ERROR, "out of shared memory");
 
@@ -501,35 +495,39 @@ pgstrom_put_devprog_key(Datum dprog_key)
  * It increments reference counter of the given device program, to avoid
  * unexpected program destruction.
  */
-void
+Datum
 pgstrom_retain_devprog_key(Datum dprog_key)
 {
 	devprog_entry  *dprog = (devprog_entry *) DatumGetPointer(dprog_key);
-
-	/* local resource tracking */
-	Assert(!pgstrom_is_opencl_server());
-	pgstrom_track_object(&dprog->stag);
 
 	SpinLockAcquire(&opencl_devprog_shm_values->lock);
 	Assert(dprog->refcnt >= 0);
 	dprog->refcnt++;
 	SpinLockRelease(&opencl_devprog_shm_values->lock);
+
+	return dprog_key;
 }
 
 /*
- * pgstrom_setup_opencl_devprog
+ * pgstrom_get_devprog_errmsg
  *
- * callback post shared memory context getting ready
+ * It returns saved error message if OpenCL built-in compiler raised
+ * compile error during clBuildProgram().
+ * Note that we assume this devprog_entry is already acquired by the
+ * caller, thus returned pointer is safe to reference unless it is not
+ * unreferenced by pgstrom_put_devprog_key().
  */
-void
-pgstrom_setup_opencl_devprog(void)
+const char *
+pgstrom_get_devprog_errmsg(Datum dprog_key)
 {
-	shmem_context  *context;
+	devprog_entry  *dprog = (devprog_entry *) DatumGetPointer(dprog_key);
 
-	context = pgstrom_shmem_context_create("PG-Strom device programs");
-	if (!context)
-		elog(ERROR, "failed to create shared memory context");
-	opencl_devprog_shm_values->shm_context = context;
+	SpinLockAcquire(&opencl_devprog_shm_values->lock);
+	Assert(dprog->refcnt >= 0);
+	errmsg = dprog->errmsg;
+	SpinLockRelease(&opencl_devprog_shm_values->lock);
+
+	return errmsg;
 }
 
 /*
@@ -552,7 +550,6 @@ pgstrom_startup_opencl_devprog(void)
 						  &found);
 	Assert(!found);
 
-	opencl_devprog_shm_values->shm_context = NULL;	/* to be set later */
 	SpinLockInit(&opencl_devprog_shm_values->lock);
 	opencl_devprog_shm_values->usage = 0;
 	dlist_init(&opencl_devprog_shm_values->lru_list);
