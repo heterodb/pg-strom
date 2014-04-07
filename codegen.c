@@ -200,6 +200,8 @@ typedef struct devfunc_catalog_t {
 
 static void devfunc_setup_div_oper(devfunc_info *entry,
 								   devfunc_catalog_t *procat);
+static void devfunc_setup_const(devfunc_info *entry,
+								devfunc_catalog_t *procat);
 
 static devfunc_catalog_t devfunc_common_catalog[] = {
 	/* Type cast functions */
@@ -438,10 +440,48 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	/*
      * Mathmatical functions
      */
+	{ "abs", 1, {INT2OID}, "f:abs", NULL },
+	{ "abs", 1, {INT4OID}, "f:abs", NULL },
+	{ "abs", 1, {INT8OID}, "f:abs", NULL },
+	{ "abs", 1, {FLOAT4OID}, "f:fabs", NULL },
+	{ "abs", 1, {FLOAT8OID}, "f:fabs", NULL },
+	{ "cbrt",  1, {FLOAT4OID}, "f:cbrt", NULL },
+	{ "dcbrt", 1, {FLOAT8OID}, "f:cbrt", NULL },
+	{ "ceil", 1, {FLOAT8OID}, "f:ceil", NULL },
+	{ "ceiling", 1, {FLOAT8OID}, "f:ceil", NULL },
+	{ "exp", 1, {FLOAT8OID}, "f:exp", NULL },
+	{ "dexp", 1, {FLOAT8OID}, "f:exp", NULL },
+	{ "floor", 1, {FLOAT8OID}, "f:dfloor", NULL },
+	{ "ln", 1, {FLOAT8OID}, "f:log", NULL },
+	{ "dlog1", 1, {FLOAT8OID}, "f:log", NULL },
+	{ "log", 1, {FLOAT8OID}, "f:log10", NULL },
+	{ "dlog10", 1, {FLOAT8OID}, "f:log10", NULL },
+	{ "pi", 0, {}, "f:M_PI", devfunc_setup_const },
+	{ "power", 2, {FLOAT8OID, FLOAT8OID}, "f:pow" },
+	{ "pow", 2, {FLOAT8OID, FLOAT8OID}, "f:pow" },
+	{ "dpow", 2, {FLOAT8OID, FLOAT8OID}, "f:pow" },
+	{ "round", 1, {FLOAT8OID}, "f:round", NULL },
+	{ "dround", 1, {FLOAT8OID}, "f:round", NULL },
+	{ "sign", 1, {FLOAT8OID}, "f:sign", NULL },
+	{ "sqrt", 1, {FLOAT8OID}, "f:sqrt", NULL },
+	{ "dsqrt", 1, {FLOAT8OID}, "f:sqrt", NULL },
+	{ "trunc", 1, {FLOAT8OID}, "f:trunc", NULL },
+	{ "dtrunc", 1, {FLOAT8OID}, "f:trunc", NULL },
+
 	/*
      * Trigonometric function
      */
-
+	{ "degrees", 1, {FLOAT4OID}, "f:degrees", NULL },
+	{ "degrees", 1, {FLOAT8OID}, "f:degrees", NULL },
+	{ "radians", 1, {FLOAT8OID}, "f:radians", NULL },
+	{ "acos",    1, {FLOAT8OID}, "f:acos", NULL },
+	{ "asin",    1, {FLOAT8OID}, "f:asin", NULL },
+	{ "atan",    1, {FLOAT8OID}, "f:atan", NULL },
+	{ "atan2",   2, {FLOAT8OID, FLOAT8OID}, "f:atan2", NULL },
+	{ "cos",     1, {FLOAT8OID}, "f:cos", NULL },
+	//{ "cot",     1, {FLOAT8OID}, "f:", NULL }, /* not supported in opencl */
+	{ "sin",     1, {FLOAT8OID}, "f:sin", NULL },
+	{ "tan",     1, {FLOAT8OID}, "f:tan", NULL },
 };
 
 static devfunc_catalog_t devfunc_numericlib_catalog[] = {
@@ -562,6 +602,25 @@ devfunc_setup_div_oper(devfunc_info *entry, devfunc_catalog_t *procat)
 				   entry->func_rettype->type_ident,
 				   procat->func_template,	/* 0 or 0.0 */
 				   entry->func_rettype->type_base);
+}
+
+static void
+devfunc_setup_const(devfunc_info *entry, devfunc_catalog_t *procat)
+{
+	Assert(procat->func_nargs == 0);
+	entry->func_ident = psprintf("pg_%s", procat->func_name);
+	entry->func_decl
+		= psprintf("static %s %s(void)\n"
+				   "{\n"
+				   "  %s result;\n"
+				   "  result.isnull = false;\n"
+				   "  result.value = %s;\n"
+				   "  return result;\n"
+				   "}\n",
+				   entry->func_rettype->type_ident,
+				   entry->func_ident,
+				   entry->func_rettype->type_ident,
+				   procat->func_template);
 }
 
 static void
