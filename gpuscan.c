@@ -43,8 +43,8 @@ typedef struct {
 	CustomPath	cpath;
 	List	   *dev_quals;		/* RestrictInfo run on device */
 	List	   *host_quals;		/* RestrictInfo run on host */
-	Bitmapset  *dev_attrs;		/* attrs referenced in device */
-	Bitmapset  *host_attrs;		/* attrs referenced in host */
+	Bitmapset  *dev_attnums;	/* attrs referenced in device */
+	Bitmapset  *host_attnums;	/* attrs referenced in host */
 } GpuScanPath;
 
 typedef struct {
@@ -55,8 +55,8 @@ typedef struct {
 	List	   *used_params;	/* list of Const/Param in use */
 	List	   *used_vars;		/* list of Var in use */
 	List	   *dev_clauses;	/* clauses to be run on device */
-	Bitmapset  *dev_attrs;		/* attrs referenced in device */
-	Bitmapset  *host_attrs;		/* attrs referenced in host */
+	Bitmapset  *dev_attnums;	/* attrs referenced in device */
+	Bitmapset  *host_attnums;	/* attrs referenced in host */
 } GpuScanPlan;
 
 /*
@@ -193,8 +193,8 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	GpuScanPath	   *pathnode;
 	List		   *dev_quals = NIL;
 	List		   *host_quals = NIL;
-	Bitmapset	   *dev_attrs = NULL;
-	Bitmapset	   *host_attrs = NULL;
+	Bitmapset	   *dev_attnums = NULL;
+	Bitmapset	   *host_attnums = NULL;
 	ListCell	   *cell;
 	codegen_context	context;
 
@@ -212,25 +212,25 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		{
 			pull_varattnos((Node *)rinfo->clause,
 						   baserel->relid,
-						   &dev_attrs);
+						   &dev_attnums);
 			dev_quals = lappend(dev_quals, rinfo);
 		}
 		else
 		{
 			pull_varattnos((Node *)rinfo->clause,
 						   baserel->relid,
-						   &host_attrs);
+						   &host_attnums);
 			host_quals = lappend(host_quals, rinfo);
 		}
 	}
 	/* also, picks up Var nodes in the target list */
 	pull_varattnos((Node *)baserel->reltargetlist,
 				   baserel->relid,
-				   &host_attrs);
+				   &host_attnums);
 	/*
 	 * FIXME: needs to pay attention for projection cost.
-	 * It may make sense to use build_physical_tlist, if host_attrs
-	 * are much wider than dev_attrs.
+	 * It may make sense to use build_physical_tlist, if host_attnums
+	 * are much wider than dev_attnums.
 	 * Anyway, it needs investigation of the actual behavior.
 	 */
 
@@ -253,8 +253,8 @@ gpuscan_add_scan_path(PlannerInfo *root,
 
 	pathnode->dev_quals = dev_quals;
 	pathnode->host_quals = host_quals;
-	pathnode->dev_attrs = dev_attrs;
-	pathnode->host_attrs = host_attrs;
+	pathnode->dev_attnums = dev_attnums;
+	pathnode->host_attnums = host_attnums;
 
 	add_path(baserel, &pathnode->cpath.path);
 }
@@ -351,15 +351,15 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 	/* qualifier definition with row-store */
 	appendStringInfo(&str,
 					 "__kernel void\n"
-					 "gpuscan_qual_cs(__global kern_gpuscan *gpuscan,\n"
+					 "gpuscan_qual_cs(__global kern_gpuscan *kgscan,\n"
 					 "                __global kern_column_store *kcs,\n"
 					 "                __global kern_toastbuf *toast,\n"
 					 "                __local void *local_workmem)\n"
 					 "{\n"
 					 "  pg_bool_t   rc;\n"
 					 "  cl_int      errcode;\n"
-					 "  __global kern_parambuf *kparams = (kern_parambuf *)\n"
-					 "    ((uintptr_t)gpuscan + gpuscan->param_ofs);\n"
+					 "  __global kern_parambuf *kparams\n"
+					 "    = KERN_GPUSCAN_PARAMBUF(kgscan);\n"
 					 "\n"
 					 "  gpuscan_local_init(local_workmem);\n"
 					 "  if (get_global_id(0) < kcs->nrows)\n"
@@ -370,15 +370,6 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					 "                 ? StromError_Success\n"
 					 "                 : StromError_RowFiltered);\n"
 					 "  gpuscan_writeback_result(gpuscan);\n"
-					 "}\n"
-					 "\n"
-					 "__kernel void\n"
-					 "gpuscan_qual_rs_prep(__global kern_row_store *krs,\n"
-					 "                     __global kern_column_store *kcs)\n"
-					 "{\n"
-					 "  kern_row_to_column_prep(krs,kcs,\n"
-					 "                          lengthof(used_vars),\n"
-					 "                          used_vars);\n"
 					 "}\n"
 					 "\n"
 					 "__kernel void\n"
@@ -471,8 +462,8 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 	gscan->used_params = context.used_params;
 	gscan->used_vars = context.used_vars;
 	gscan->dev_clauses = dev_clauses;
-	gscan->dev_attrs = gpath->dev_attrs;
-	gscan->host_attrs = gpath->host_attrs;
+	gscan->dev_attnums = gpath->dev_attnums;
+	gscan->host_attnums = gpath->host_attnums;
 
 	return &gscan->cplan;
 }
@@ -542,13 +533,13 @@ gpuscan_textout_path(StringInfo str, Node *node)
 	appendStringInfo(str, " :host_quals %s", temp);
 	pfree(temp);
 
-	/* dev_attrs */
-	appendStringInfo(str, " :dev_attrs");
-	_outBitmapset(str, pathnode->dev_attrs);
+	/* dev_attnums */
+	appendStringInfo(str, " :dev_attnums");
+	_outBitmapset(str, pathnode->dev_attnums);
 
-	/* host_attrs */
-	appendStringInfo(str, " :host_attrs");
-	_outBitmapset(str, pathnode->host_attrs);
+	/* host_attnums */
+	appendStringInfo(str, " :host_attnums");
+	_outBitmapset(str, pathnode->host_attnums);
 }
 
 static void
@@ -667,7 +658,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 
 		if (attr->attnotnull)
 			colmeta->flags |= KERN_COLMETA_ATTNOTNULL;
-		if (bms_is_member(attidx, gsplan->dev_attrs))
+		if (bms_is_member(attidx, gsplan->dev_attnums))
 			colmeta->flags |= KERN_COLMETA_ATTREFERENCED;
 
 		if (attr->attalign == 'c')
@@ -683,6 +674,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		colmeta->attlen = attr->attlen;
 		colmeta->cs_ofs = -1;	/* to be calculated for each row_store */
 	}
+	gss->dev_attnums = gsplan->dev_attnums;
 	gss->curr_chunk = NULL;
 	gss->curr_index = 0;
 	gss->num_running = 0;
@@ -697,39 +689,52 @@ pgstrom_load_gpuscan_row(GpuScanState *gss)
 	pgstrom_gpuscan	   *gscan;
 	pgstrom_row_store  *rstore;
 	kern_result		   *kresult;
+	kern_column_store  *kcs_head;
 	ListCell		   *cell;
-	HeapTuple		tuple;
-	Size			offset;
-	Size			usage;
-	Size			length;
-	int				index;
-	int				ncols = RelationGetNumberOfAttributes(gss->scan_rel);
-	int				nrows;
-	ScanDirection	direction = gss->cps.ps.state->es_direction;
+	HeapTuple	tuple;
+	Size		offset;
+	Size		usage;
+	Size		length;
+	int			index;
+	int			anum;
+	int			ncols = RelationGetNumberOfAttributes(gss->scan_rel);
+	int			nrows;
+	Bitmapset  *tempset;
+	ScanDirection direction = gss->cps.ps.state->es_direction;
 
 	rstore = pgstrom_shmem_alloc(ROWSTORE_DEFAULT_SIZE);
 	if (!rstore)
 		elog(ERROR, "out of shared memory");
 
+	/*
+	 * We put header portion of kern_column_store next to the kern_row_store
+	 * as source of copy for in-kernel column store. It has offset of column
+	 * array, but contents shall be set up by kernel prior to evaluation of
+	 * qualifier expression.
+	 */
 	rstore->stag = StromTag_RowStore;
-	rstore->kern_len = (ROWSTORE_DEFAULT_SIZE -
-						offsetof(pgstrom_row_store, kern));
-	rstore->kern.ncols = ncols;
+	rstore->kern_len =
+		STROMALIGN_DOWN(ROWSTORE_DEFAULT_SIZE -
+						offsetof(pgstrom_row_store, kern) -
+						offsetof(pgstrom_column_store, colmeta[cs_ncols]));
+	rstore->kern.ncols = rs_ncols;
 	rstore->kern.nrows = 0;
 	memcpy(rstore->kern.colmeta,
 		   gss->dev_colmeta,
-		   sizeof(kern_colmeta) * ncols);
+		   sizeof(kern_colmeta) * rs_ncols);
 
-	/* OK, load tuples and put it on the row-store */
-
-	/* offset array of rs_tuples are located next to the column metadata. */
+	/*
+	 * OK, load tuples and put it on the row-store.
+	 * Offset array of rs_tuples begins from the column-metadata
+	 */
 	offset = offsetof(kern_row_store, colmeta[ncols]);
-	usage = STROMALIGN_DOWN(rstore->kern_len);
+	usage = rstore->kern_len;
 
 	while (HeapTupleIsValid(tuple = heap_getnext(gss->scan_desc, direction)))
 	{
 		Size		length = HEAPTUPLESIZE + MAXALIGN(tuple->t_len);
 		rs_tuple   *rs_tup;
+		cl_uint	   *rs_ofs;
 
 		if (usage - length < offset + sizeof(cl_uint))
 		{
@@ -743,11 +748,14 @@ pgstrom_load_gpuscan_row(GpuScanState *gss)
 		rs_tup->htup.t_data = &rs_tup->data;
 		memcpy(&rs_tup->data, tuple->t_data, tuple->t_len);
 
-		*(cl_uint *)((uintptr_t)&rstore->kern + offset) = usage;
+		rs_ofs = (cl_uint *)((uintptr_t)&rstore->kern + offset);
+		*rs_ofs = usage;
 		offset += sizeof(cl_uint);
 
 		rstore->kern.nrows++;
 	}
+	nrows = rstore->kern.nrows;
+
 	/* if table scan reached end of the relation, close the ScanDesc */
 	if (!HeapTupleIsValid(tuple))
 	{
@@ -755,8 +763,42 @@ pgstrom_load_gpuscan_row(GpuScanState *gss)
 		gss->scan_desc = NULL;
 	}
 
-	/* OK, fill-up a row-store, then create a gpuscan object */
-	nrows = rstore->kern.nrows;
+	/*
+	 * On tail of the shared-memory block, we put header portion of
+	 * the kern_column_store; to be copied to in-kernel structure.
+	 */
+	kcs_head = (kern_column_store *)((char *)(&rstore->kern) +
+									 rstore->kern_len);
+	kcs_head->ncols = bms_num_members(gss->dev_attnums);
+	kcs_head->nrows = nrows;
+
+	index = 0;
+	offset = offsetof(kern_column_store, colmeta[kcs_head->ncols]);
+	tempset = bms_copy(gss->dev_attnums);
+	while ((anum = bms_first_member(tempset)) >= 0)
+	{
+		kern_colmeta   *colmeta;
+
+		anum += FirstLowInvalidHeapAttributeNumber;
+		Assert(anum > 0 && anum <= ncols);
+
+		colmeta = &kcs_head->colmeta[index];
+		memcpy(colmeta, &rstore->kern.colmeta[anum-1], sizeof(kern_colmeta));
+		colmeta->cs_ofs = offset;
+		if ((colmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
+			offset += STROMALIGN((nrows + 7) / 8);
+		offset += STROMALIGN(nrows * (colmeta->attlen > 0
+									  ? colmeta->attlen
+									  : sizeof(cl_uint)));
+		index++;
+	}
+	bmc_free(tempset);
+	Assert(index == kcs_head->ncols);
+
+	/*
+	 * OK, pgstrom_row_store was fully setup.
+	 * Let's create a gpuscan object with the row-store.
+	 */
 	length = offsetof(pgstrom_gpuscan, kern.kparam) +
 		STROMALIGN(gss->kparambuf->length) +
 		STROMALIGN(offsetof(kern_result, results[nrows]));
@@ -1056,11 +1098,11 @@ gpuscan_textout_plan(StringInfo str, const CustomPlan *node)
 	appendStringInfo(str, " :dev_clauses %s", temp);
 	pfree(temp);
 
-	appendStringInfo(str, " :dev_attrs ");
-	_outBitmapset(str, plannode->dev_attrs);
+	appendStringInfo(str, " :dev_attnums ");
+	_outBitmapset(str, plannode->dev_attnums);
 
-	appendStringInfo(str, " :host_attrs ");
-	_outBitmapset(str, plannode->host_attrs);
+	appendStringInfo(str, " :host_attnums ");
+	_outBitmapset(str, plannode->host_attnums);
 }
 
 static CustomPlan *
@@ -1075,8 +1117,8 @@ gpuscan_copy_plan(const CustomPlan *from)
 	newnode->used_vars = copyObject(oldnode->used_vars);
 	newnode->extra_flags = oldnode->extra_flags;
 	newnode->dev_clauses = oldnode->dev_clauses;
-	newnode->dev_attrs = bms_copy(oldnode->dev_attrs);
-	newnode->host_attrs = bms_copy(oldnode->host_attrs);
+	newnode->dev_attnums = bms_copy(oldnode->dev_attnums);
+	newnode->host_attnums = bms_copy(oldnode->host_attnums);
 
 	return &newnode->cplan;
 }
@@ -1133,16 +1175,15 @@ pgstrom_init_gpuscan(void)
 
 typedef struct
 {
+	pgstrom_message	*msg;
 	cl_program		program;
-	cl_kernel		kernel_prep;
-	cl_kernel		kernel_main;
+	cl_kernel		kernel;
 	cl_mem			m_gpuscan;
 	cl_mem			m_rstore;
 	cl_mem			m_cstore;
 
 	kern_gpuscan   *kgscan;
 	kern_row_store *krstore;
-	cl_int			i_event;
 	cl_event		events[FLEXIBLE_ARRAY_MEMBER];
 } clstate_gpuscan_row;
 
@@ -1178,6 +1219,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 		return;
 	}
 	memset(clgss, 0, sizeof(clstate_gpuscan_row));
+	clgss->msg = &gscan->msg;
 	clgss->kgscan  = &gscan->kern;
 	clgss->krstore = &rstore->kern;
 
@@ -1206,19 +1248,13 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 		goto error;
 
 	/*
-	 * gpuscan + row-store takes twice kernel invocation to initialize
-	 * temporary column-store and main calculation. So, we need to pull
-	 * two kernel object from the program object.
+	 * In this case, we use a kernel for row-store; that internally
+	 * translate row-format into column-format, then evaluate the
+	 * supplied qualifier.
 	 */
-	clgss->kernel_prep = clCreateKernel(clgss->program,
-										"gpuscan_qual_rs_prep",
-										&rc);
-	if (rc != CL_SUCCESS)
-		goto error;
-
-	clgss->kernel_qual = clCreateKernel(clgss->program,
-										"gpuscan_qual_rs",
-										&rc);
+	clgss->kernel = clCreateKernel(clgss->program,
+								   "gpuscan_qual_rs",
+								   &rc);
 	if (rc != CL_SUCCESS)
 		goto error;
 
