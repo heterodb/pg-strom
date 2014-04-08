@@ -111,8 +111,16 @@ pgstrom_strerror(cl_int errcode)
 			return "row is filtered";
 		case StromError_RowReCheck:
 			return "row should be rechecked";
+		case StromError_ServerNotReady:
+			return "OpenCL server is not ready";
+		case StromError_BadRequestMessage:
+			return "request message is bad";
 		case StromError_ProgramCompile:
-			return "";
+			return "program compile error";
+		case StromError_OutOfMemory:
+			return "out of memory";
+		case StromError_OutOfSharedMemory:
+			return "out of shared memory";
 		case StromError_DivisionByZero:
 			return "division by zero";
 		default:

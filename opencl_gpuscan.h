@@ -39,7 +39,7 @@
  * | | Const values |         |      |
  * | |     :        |         |      |
  * +-+--------------+  -----  |  <---+
- * | kern_result    |    ^    |
+ * | kern_resultbuf |    ^    |
  * | +--------------+    |    |  Area to be sent to OpenCL device.
  * | | nitems       |    |    |  Forward DMA shall be issued here.
  * | +--------------+    |    |
@@ -57,6 +57,13 @@ typedef struct {
 	cl_uint			roffset;	/* offset to kern_result */
 	kern_parambuf	kparam __attribute__((aligned(STROMALIGN_LEN)));
 } kern_gpuscan;
+
+#define KERN_GPUSCAN_PARAMBUF(kgscan)			\
+	((kern_parambuf *)(&(kgscan)->kparam))
+#define KERN_GPUSCAN_RESULTBUF(kgscan)			\
+	((kern_resultbuf *)((uintptr_t)(&(kgscan)) + (kgscan)->roffset))
+#define KERN_GPUSCAN_LENGTH(kgscan,nrows)		\
+	((kgscan)->roffset + offsetof(kern_result, results[(nrows)]))
 
 #ifdef OPENCL_DEVICE_CODE
 /* macro for error setting */

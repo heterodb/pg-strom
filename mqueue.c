@@ -304,6 +304,32 @@ pgstrom_dequeue_server_message(void)
 }
 
 /*
+ * pgstrom_close_server_queue
+ *
+ * close the server message queue not to receive message any more,
+ * and clean-up queued messages.
+ */
+void
+pgstrom_close_server_queue(void)
+{
+	pgstrom_queue	*svqueue = &mqueue_shm_values->serv_mqueue;
+	pgstrom_message	*msg;
+
+	Assert(pgstrom_is_opencl_server());
+
+	pgstrom_close_queue(svqueue);
+	/*
+	 * Once server message queue is closed, messages being already queued
+	 * are immediately replied to the backend with error code.
+	 */
+	while ((msg = pgstrom_try_dequeue_message(svqueue)) != NULL)
+	{
+		msg->errcode = StromError_ServerNotReady;
+		pgstrom_reply_message(msg);
+	}
+}
+
+/*
  * pgstrom_close_queue
  *
  * It closes this message queue. Once a message queue got closed, it does not

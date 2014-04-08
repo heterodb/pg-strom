@@ -67,8 +67,25 @@ pgstrom_is_opencl_server(void)
 	return is_opencl_server;
 }
 
+/*
+ * pgstrom_opencl_event_loop
+ *
+ * main loop of OpenCL intermediation server. each message class has its own
+ * processing logic, so all we do here is just call the callback routine.
+ */
+static void
+pgstrom_opencl_event_loop(void)
+{
+	pgstrom_message	   *msg;
 
-
+	while (!got_signal)
+	{
+		msg = pgstrom_dequeue_server_message();
+		if (!msg)
+			continue;
+		msg->cb_process(msg);
+	}
+}
 
 /*
  * pgstrom_collect_device_info
@@ -259,6 +276,13 @@ init_opencl_devices_and_shmem(void)
 	pgstrom_setup_opencl_devinfo(devList);
 }
 
+/*
+ * pgstrom_opencl_main
+ *
+ * Main routine of opencl intermediation server.
+ *
+ * TODO: enhancement to use multi-threaded message handler.
+ */
 static void
 pgstrom_opencl_main(Datum main_arg)
 {
@@ -277,10 +301,17 @@ pgstrom_opencl_main(Datum main_arg)
 
 	elog(LOG, "Starting PG-Strom OpenCL Server");
 
-	while (!got_signal)
-	{
-		sleep(2);
-	}
+	/* XXX - to be handled with multi-threading in the future */
+	pgstrom_opencl_event_loop();
+
+	/*
+	 * close the server queue and returns unprocessed message with error.
+	 *
+	 * XXX - here is possible bug if server got signals during program
+	 *       building; that holds some messages and callback enqueues
+	 *       the messages again.
+	 */
+	pgstrom_close_server_queue();
 }
 
 void

@@ -102,8 +102,13 @@ typedef struct {
 #define StromError_Success				0	/* OK */
 #define StromError_RowFiltered			1	/* Row-clause was false */
 #define StromError_RowReCheck			2	/* To be checked on the host */
-#define StromError_ProgramCompile		100	/* Failed on program compile */
-#define StromError_DivisionByZero		101	/* Division by zero */
+#define StromError_ServerNotReady		100	/* OpenCL server is not ready */
+#define StromError_BadRequestMessage	101	/* Bad request message */
+#define StromError_OpenCLInterface		102	/* OpenCL interface error */
+#define StromError_ProgramCompile		103	/* Failed on program compile */
+#define StromError_OutOfMemory			104	/* out of memory */
+#define StromError_OutOfSharedMemory	105	/* out of shared memory */
+#define StromError_DivisionByZero		200	/* Division by zero */
 
 /* significant error; that abort transaction on the host code */
 #define StromErrorIsSignificant(errcode)	((errcode) >= 100)
@@ -122,7 +127,7 @@ typedef struct {
 } kern_parambuf;
 
 /*
- * kern_result
+ * kern_resultbuf
  *
  * Output buffer to write back calculation results on a parciular chunk.
  * 'errcode' informs a significant error that shall raise an error on
@@ -132,7 +137,7 @@ typedef struct {
 	cl_uint		nitems;		/* number of results being written */
 	cl_int		errcode;	/* chunk-level error */
 	cl_int		results[FLEXIBLE_ARRAY_MEMBER];
-} kern_result;
+} kern_resultbuf;
 
 /*
  * Data type definitions for row oriented data format
@@ -206,9 +211,11 @@ typedef struct {
  * It stores metadata of columns being on row-store because tuple with NULL
  * values does not have always constant 
  */
+#define KERN_COLMETA_ATTNOTNULL			0x01
+#define KERN_COLMETA_ATTREFERENCED		0x02
 typedef struct {
-	/* zero, if column has no NULLs */
-	cl_bool			atthasnull;
+	/* set of KERN_COLMETA_* flags */
+	cl_uchar		flags;
 	/* alignment; 1,2,4 or 8, not characters in pg_attribute */
 	cl_char			attalign;
 	/* length of attribute */
@@ -261,6 +268,9 @@ typedef struct {
 	cl_uint			nrows;	/* number of rows in this store */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];	/* metadata of columns */
 } kern_row_store;
+
+#define KRSTORE_GET_RSTUPLE(rstore,index)
+
 
 #define kern_row_store_rstuple(rstore,index)				\
 	(rs_tuple *)((cl_char *)(rstore) +						\
@@ -319,8 +329,9 @@ typedef struct {
  * | for column-(M-1)|
  * +-----------------+
  */
-#define STROMALIGN_LEN		16
-#define STROMALIGN(LEN)		TYPEALIGN(STROMALIGN_LEN,LEN)
+#define STROMALIGN_LEN			16
+#define STROMALIGN(LEN)			TYPEALIGN(STROMALIGN_LEN,LEN)
+#define STROMALIGN_DOWN(LEN)	TYPEALIGN_DOWN(STROMALIGN_LEN,LEN)
 
 typedef struct {
 	cl_uint			ncols;	/* number of columns in this store */

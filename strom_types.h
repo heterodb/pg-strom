@@ -136,6 +136,7 @@ typedef struct pgstrom_message {
 	cl_int			refcnt;
 	dlist_node		chain;
 	pgstrom_queue  *respq;	/* mqueue for response message */
+	void	(*cb_process)(struct pgstrom_message *message);
 	void	(*cb_release)(struct pgstrom_message *message);
 } pgstrom_message;
 
@@ -155,12 +156,9 @@ typedef struct {
 typedef struct {
 	StromTag		stag;
 	dlist_node		chain;
+	cl_uint			kern_len;
 	kern_row_store	kern;
 } pgstrom_row_store;
-#define pgstrom_row_store_rstuple(rstore,index)					\
-	((rs_tuple *)(((uintptr_t)(&(rstore)->kern)) +				\
-				  ((cl_uint *)((rstore)->kern.colmeta +			\
-							   (rstore)->kern.ncols))[(index)]))
 
 /*
  * NOTE: shmem.c put a magic number to detect shared memory usage overrun.

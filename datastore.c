@@ -32,22 +32,16 @@ pgstrom_create_kern_parambuf(List *used_params,
 	char		padding[STROMALIGN_LEN];
 	ListCell   *cell;
 	Size		offset;
-	int			index;
-	int			nparams;
+	int			index = 0;
+	int			nparams = list_length(used_params);;
+	Size		offset = STROMALIGN(offsetof(kern_parambuf,
+											 poffset[nparams]));
 
-	/* no constant/params; an obvious case */
-	if (used_params == NIL)
-		return NULL;
-
-	index = 0;
-	nparams = list_length(used_params);
-	offset = STROMALIGN(offsetof(kern_parambuf, poffset[nparams]));
-	memset(padding, 0, sizeof(padding));
-
+	/* seek to the head of variable length field */
 	initStringInfo(&str);
 	enlargeStringInfo(&str, offset);
 	str.len = offset;
-
+	/* walks on the Para/Const list */
 	foreach (cell, used_params)
 	{
 		Node   *node = lfirst(cell);
@@ -124,8 +118,9 @@ pgstrom_create_kern_parambuf(List *used_params,
 			elog(ERROR, "unexpected node: %s", nodeToString(node));
 
 		/* alignment */
-		appendBinaryStringInfo(&str, padding,
-							   STROMALIGN(str.len) - str.len);
+		if (STROMALIGN(str.len) != str.len)
+			appendBinaryStringInfo(&str, padding,
+								   STROMALIGN(str.len) - str.len);
 		index++;
 	}
 	kpbuf = (kern_parambuf *)str.data;

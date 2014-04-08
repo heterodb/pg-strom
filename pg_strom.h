@@ -55,6 +55,7 @@ extern void pgstrom_reply_message(pgstrom_message *message);
 extern pgstrom_message *pgstrom_dequeue_message(pgstrom_queue *queue);
 extern pgstrom_message *pgstrom_try_dequeue_message(pgstrom_queue *queue);
 extern pgstrom_message *pgstrom_dequeue_server_message(void);
+extern void pgstrom_close_server_queue(void);
 extern void pgstrom_close_queue(pgstrom_queue *queue);
 extern pgstrom_queue *pgstrom_get_queue(pgstrom_queue *mqueue);
 extern void pgstrom_put_queue(pgstrom_queue *mqueue);
