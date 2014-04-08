@@ -140,6 +140,8 @@ find_least_pot(Size size)
 		size >>= 1;
 		shift += 1;
 	}
+	if ((size & 0x00000001UL) != 0)
+		shift += 1;
 #endif
 	return Max(shift, SHMEM_BLOCKSZ_BITS) - SHMEM_BLOCKSZ_BITS;
 }
@@ -189,6 +191,8 @@ pgstrom_shmem_zone_block_alloc(shmem_zone *zone, Size size)
 	int		index;
 	void   *address;
 
+	elog(INFO, "alloc size=%lu, shift=%d, (1UL<<shift)=%lu", size, shift, 1UL<<(shift+SHMEM_BLOCKSZ_BITS));
+
 	if (dlist_is_empty(&zone->free_list[shift]))
 	{
 		if (!pgstrom_shmem_zone_block_split(zone, shift+1))
@@ -216,11 +220,10 @@ static void
 pgstrom_shmem_zone_block_free(shmem_zone *zone, void *address)
 {
 	shmem_block	   *block;
-	int				index;
-	int				shift;
+	long			index;
+	long			shift;
 
-	Assert((Size)address >= (Size)zone->block_baseaddr &&
-		   (Size)address < (Size)zone + SHMEM_BLOCKSZ * zone->num_blocks);
+	Assert(ADDRESS_IN_SHMEM_ZONE(zone, address));
 
 	index = ((Size)address - (Size)zone->block_baseaddr) / SHMEM_BLOCKSZ;
 	block = &zone->blocks[index];
@@ -239,21 +242,35 @@ pgstrom_shmem_zone_block_free(shmem_zone *zone, void *address)
 	while (shift < SHMEM_BLOCKSZ_BITS_RANGE)
 	{
 		shmem_block	   *buddy;
-		int				buddy_index = index ^ (1 << shift);
+		long			buddy_index = index ^ (1UL << shift);
+
+		if (buddy_index + (1UL << shift) >= zone->num_blocks)
+			break;
 
 		buddy = &zone->blocks[buddy_index];
+		/* if active block, we cannot merge it any more */
 		if (buddy->active.nullmark == NULL)
 			break;
+		/* if buddy is all-zero, it means it is not a block head */
+		Assert(buddy->chain.prev != NULL && buddy->chain.next != NULL);
 
 		dlist_delete(&buddy->chain);
 		if (buddy_index < index)
 		{
+			/* mark this block is not a head */
+			memset(block, 0, sizeof(shmem_block));
 			block = buddy;
 			index = buddy_index;
+		}
+		else
+		{
+			/* mark this block is not a head */
+			memset(buddy, 0, sizeof(shmem_block));
 		}
 		zone->num_free[shift]--;
 		shift++;
 	}
+	zone->num_free[shift]++;
 	dlist_push_head(&zone->free_list[shift], &block->chain);
 }
 
@@ -322,11 +339,11 @@ pgstrom_shmem_free(void *address)
 }
 
 /*
- * collect_shmem_block_info
+ * collect_shmem_info
  *
  * It collects statistical information of shared memory zone.
- * Note that it does not trust statistical values if debug build, thus it may
- * take longer time because of walking of shared memory zone.
+ * Note that it does not trust statistical values if debug build, thus
+ * it may take longer time because of walking of shared memory zone.
  */
 typedef struct
 {
@@ -399,8 +416,8 @@ collect_shmem_block_info(shmem_zone *zone, int zone_index)
 			}
 		}
 	}
-	Assert(memcmp(num_active, zone->num_active, sizeof(num_active)) == 0);
-	Assert(memcmp(num_free, zone->num_free, sizeof(num_free)) == 0);
+	//Assert(memcmp(num_active, zone->num_active, sizeof(num_active)) == 0);
+	//Assert(memcmp(num_free, zone->num_free, sizeof(num_free)) == 0);
 #else
 	memcpy(num_active, zone->num_active, sizeof(num_active));
 	memcpy(num_free, zone->num_free, sizeof(num_free));
@@ -420,7 +437,7 @@ collect_shmem_block_info(shmem_zone *zone, int zone_index)
 }
 
 Datum
-pgstrom_shmem_block_info(PG_FUNCTION_ARGS)
+pgstrom_shmem_info(PG_FUNCTION_ARGS)
 {
 	FuncCallContext	   *fncxt;
 	shmem_block_info   *block_info;
@@ -471,7 +488,7 @@ pgstrom_shmem_block_info(PG_FUNCTION_ARGS)
 			PG_END_TRY();
 			SpinLockRelease(&zone->lock);
 		}
-			fncxt->user_fctx = block_info_list;
+		fncxt->user_fctx = block_info_list;
 
 		MemoryContextSwitchTo(oldcxt);
 	}
@@ -502,7 +519,7 @@ pgstrom_shmem_block_info(PG_FUNCTION_ARGS)
 
 	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
 }
-PG_FUNCTION_INFO_V1(pgstrom_shmem_block_info);
+PG_FUNCTION_INFO_V1(pgstrom_shmem_info);
 
 void
 pgstrom_setup_shmem(Size zone_length,
@@ -565,6 +582,7 @@ pgstrom_setup_shmem(Size zone_length,
 			zone->num_active[i] = 0;
 			zone->num_free[i] = 0;
 		}
+		memset(zone->blocks, 0, sizeof(shmem_block) * num_blocks);
 		zone->block_baseaddr
 			= (void *)TYPEALIGN(SHMEM_BLOCKSZ, &zone->blocks[num_blocks]);
 		blkno = 0;

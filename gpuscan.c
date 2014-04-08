@@ -190,6 +190,10 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	ListCell	   *cell;
 	codegen_context	context;
 
+	/* only base relation we can handle */
+	if (baserel->rtekind != RTE_RELATION || baserel->relid == 0)
+		return;
+
 	/* check whether qualifier can run on GPU device */
 	memset(&context, 0, sizeof(codegen_context));
 	foreach (cell, baserel->baserestrictinfo)

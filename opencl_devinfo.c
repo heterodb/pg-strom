@@ -361,6 +361,20 @@ fp_config_to_cstring(cl_device_fp_config fp_conf)
 	return pstrdup(buf);
 }
 
+static char *
+memsize_to_cstring(Size memsize)
+{
+	if (memsize > 1UL << 43)
+		return psprintf("%luTB", memsize >> 40);
+	else if (memsize > 1UL << 33)
+		return psprintf("%luGB", memsize >> 30);
+	else if (memsize > 1UL << 23)
+		return psprintf("%luMB", memsize >> 20);
+	else if (memsize > 1UL << 13)
+		return psprintf("%luKB", memsize >> 10);
+	return psprintf("%lu", memsize);
+}
+
 Datum
 pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 {
@@ -496,11 +510,11 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 			break;
 		case 16:
 			key = "global mem cacheline size";
-			value = psprintf("%u", dinfo->dev_global_mem_cacheline_size);
+			value = memsize_to_cstring(dinfo->dev_global_mem_cacheline_size);
 			break;
 		case 17:
 			key = "global mem size";
-			value = psprintf("%lu", dinfo->dev_global_mem_size);
+			value = memsize_to_cstring(dinfo->dev_global_mem_size);
 			break;
 		case 18:
 			key = "host unified memory";
@@ -508,7 +522,7 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 			break;
 		case 19:
 			key = "local mem size";
-			value = psprintf("%lu", dinfo->dev_local_mem_size);
+			value = memsize_to_cstring(dinfo->dev_local_mem_size);
 			break;
 		case 20:
 			key = "local mem type";
@@ -542,11 +556,11 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 			break;
 		case 24:
 			key = "max constant buffer size";
-			value = psprintf("%lu", dinfo->dev_max_constant_buffer_size);
+			value = memsize_to_cstring(dinfo->dev_max_constant_buffer_size);
 			break;
 		case 25:
 			key = "max mem alloc size";
-			value = psprintf("%lu", dinfo->dev_max_mem_alloc_size);
+			value = memsize_to_cstring(dinfo->dev_max_mem_alloc_size);
 			break;
 		case 26:
 			key = "max parameter size";
@@ -643,9 +657,9 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 			key = "command queue properties";
 			if (dinfo->dev_queue_properties &
 				CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE)
-				ofs += sprintf(buf, "%sout of order", ofs > 0 ? ", " : "");
+				ofs += sprintf(buf+ofs, "%sout-of-order", ofs > 0 ? ", " : "");
 			if (dinfo->dev_queue_properties & CL_QUEUE_PROFILING_ENABLE)
-				ofs += sprintf(buf, "%sprofiling", ofs > 0 ? ", " : "");
+				ofs += sprintf(buf+ofs, "%sprofiling", ofs > 0 ? ", " : "");
 			value = buf;
 			break;
 		case 49:
@@ -725,7 +739,7 @@ pgstrom_setup_opencl_devinfo(List *dev_list)
 {
 	pgstrom_platform_info  *pl_info;
 	pgstrom_platform_info  *pl_info_sh;
-	pgstrom_device_info **dev_array;
+	pgstrom_device_info	  **dev_array;
 	char	   *shmbase;
 	ListCell   *cell;
 	Size		length;

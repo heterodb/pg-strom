@@ -44,8 +44,7 @@ extern void pgstrom_setup_shmem(Size zone_length,
 												  Size length));
 extern void pgstrom_init_shmem(void);
 
-extern Datum pgstrom_shmem_block_info(PG_FUNCTION_ARGS);
-extern Datum pgstrom_shmem_context_info(PG_FUNCTION_ARGS);
+extern Datum pgstrom_shmem_info(PG_FUNCTION_ARGS);
 
 /*
  * mqueue.c
