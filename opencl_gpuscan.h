@@ -61,7 +61,7 @@ typedef struct {
 #define KERN_GPUSCAN_PARAMBUF(kgscan)			\
 	((kern_parambuf *)(&(kgscan)->kparam))
 #define KERN_GPUSCAN_RESULTBUF(kgscan)			\
-	((kern_resultbuf *)((uintptr_t)(&(kgscan)) + (kgscan)->roffset))
+	((kern_resultbuf *)((uintptr_t)(kgscan) + (kgscan)->roffset))
 #define KERN_GPUSCAN_LENGTH(kgscan,nrows)		\
 	((kgscan)->roffset + offsetof(kern_result, results[(nrows)]))
 

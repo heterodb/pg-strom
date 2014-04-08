@@ -1199,7 +1199,6 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	cl_uint				ncols;
 	cl_uint				i;
 	size_t				length;
-	size_t				wkgrp_sz;
 	size_t				gwork_ofs;
 	size_t				gwork_sz;
 	size_t				lwork_sz;
@@ -1305,8 +1304,8 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	rc = clGetKernelWorkGroupInfo(clgss->kernel_qual,
 								  opencl_devices[dindex],
 								  CL_KERNEL_WORK_GROUP_SIZE,
-								  sizeof(wkgrp_sz),
-								  &wkgrp_sz,
+								  sizeof(lwork_sz),
+								  &lwork_sz,
 								  NULL);
 	if (rc != CL_SUCCESS)
 	{
@@ -1319,40 +1318,14 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	 * OK, all the device memory and kernel objects acquired.
 	 * Let's prepare kernel invocation.
 	 *
-	 * The first call is:
-	 * __kernel void
-	 * gpuscan_qual_rs_prep(__global kern_row_store *krs,
-	 *                      __global kern_column_store *kcs)
+	 * The kernel call is:
+	 *   __kernel void
+	 *   gpuscan_qual_rs(__global kern_gpuscan *gpuscan,
+	 *                   __global kern_row_store *krs,
+	 *                   __global kern_column_store *kcs,
+	 *                   __local void *local_workmem)
 	 */
-	rc = clSetKernelArg(clgss->kernel_prep,
-						0,	/* kern_row_store * */
-						sizeof(cl_mem),
-						&clgss->m_rstore);
-	if (rc != CL_SUCCESS)
-	{
-		elog(LOG, "failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	rc = clSetKernelArg(clgss->kernel_prep,
-						1,	/* kern_column_store */
-						sizeof(cl_mem),
-						&clgss->m_cstore);
-	if (rc != CL_SUCCESS)
-	{
-		elog(LOG, "failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	/*
-	 * The second call is:
-	 * __kernel void
-	 * gpuscan_qual_rs(__global kern_gpuscan *gpuscan,
-	 *                 __global kern_row_store *krs,
-	 *                 __global kern_column_store *kcs,
-	 *                 __local void *local_workmem)
-	 */
-	rc = clSetKernelArg(clgss->kernel_qual,
+	rc = clSetKernelArg(clgss->kernel,
 						0,	/* kern_gpuscan * */
 						sizeof(cl_mem),
 						&clgss->m_gpuscan);
@@ -1362,7 +1335,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 		goto error;
 	}
 
-	rc = clSetKernelArg(clgss->kernel_qual,
+	rc = clSetKernelArg(clgss->kernel,
 						1,	/* kern_row_store */
 						sizeof(cl_mem),
 						&clgss->m_rstore);
@@ -1372,7 +1345,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 		goto error;
 	}
 
-	rc = clSetKernelArg(clgss->kernel_qual,
+	rc = clSetKernelArg(clgss->kernel,
 						2,	/* kern_column_store */
 						sizeof(cl_mem),
 						&clgss->m_cstore);
@@ -1382,7 +1355,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 		goto error;
 	}
 
-	rc = clSetKernelArg(clgss->kernel_qual,
+	rc = clSetKernelArg(clgss->kernel,
 						3,	/* local_workmem */
 						2 * sizeof(cl_uint) * lwork_sz,
 						NULL);
@@ -1396,9 +1369,8 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	 * OK, enqueue DMA transfer, kernel execution x2, then DMA writeback.
 	 *
 	 * (1) gpuscan and row_store shall be copied from host to device
-	 * (2) kernel_prep shall be launched
-	 * (3) kernel_qual shall be launched
-	 * (4) kern_result shall be written back
+	 * (2) kernel shall be launched
+	 * (3) kern_result shall be written back
 	 */
 	length = clgss->kgscan.roffset + offsetof(kern_result, results[0]);
 	rc = clEnqueueWriteBuffer(opencl_cmdq[dindex],
@@ -1433,14 +1405,13 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	}
 
 	/*
-	 * Kick gpuscan_qual_rs_prep() call
+	 * Kick gpuscan_qual_rs() call
 	 */
 	gwork_ofs = 0;
-	gwork_sz = 1;
-	lwork_sz = 1;
+	gwork_sz = (nrows + lwork_sz - 1) / lwork_sz;
 
 	rc = clEnqueueNDRangeKernel(opencl_cmdq[dindex],
-								clgss->kernel_prep,
+								clgss->kernel_qual,
 								1,
 								&gwork_ofs,
 								&gwork_sz,
@@ -1455,46 +1426,23 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	}
 
 	/*
-	 * Kick gpuscan_qual_rs() call
-	 */
-	gwork_ofs = 0;
-	gwork_sz = (nrows + wkgrp_sz - 1) / wkgrp_sz;
-	lwork_sz = wkgrp_sz;
-
-	rc = clEnqueueNDRangeKernel(opencl_cmdq[dindex],
-								clgss->kernel_qual,
-								1,
-								&gwork_ofs,
-								&gwork_sz,
-								&lwork_sz,
-								1,
-								&clgss->events[2],
-								&clgss->events[3]);
-	if (rc != CL_SUCCESS)
-	{
-		elog(LOG, "failed on clEnqueueNDRangeKernel: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	/*
 	 * Write back the result-buffer
 	 */
-	length = clgss->kgscan.roffset + offsetof(kern_result, results[0]);
 	rc = clEnqueueReadBuffer(opencl_cmdq[dindex],
 							 clgss->m_gpuscan,
 							 CL_FALSE,
 							 clgss->kgscan.roffset,
 							 offsetof(kern_result, results[nrows]),
-							 (char *)clgss->kgscan + clgss->kgscan.roffset,
+							 KERN_GPUSCAN_RESULTBUF(clgss->kgscan),
 							 1,
-							 &clgss->events[3],
-							 &clgss->events[4]);
+							 &clgss->events[2],
+							 &clgss->events[3]);
 
 	/*
 	 * Last, registers a callback routine that replies the message
 	 * to the backend
 	 */
-	rc = clSetEventCallback(clgss->events[4],
+	rc = clSetEventCallback(clgss->events[3],
 							CL_COMPLETE,
 							my_callback,
 							clgss);
