@@ -43,8 +43,8 @@ typedef struct {
 	CustomPath	cpath;
 	List	   *dev_quals;		/* RestrictInfo run on device */
 	List	   *host_quals;		/* RestrictInfo run on host */
-	Bitmapset  *dev_attnums;	/* attrs referenced in device */
-	Bitmapset  *host_attnums;	/* attrs referenced in host */
+	List	   *dev_attnums;	/* attnums referenced in device */
+	List	   *host_attnums;	/* attnums referenced in host */
 } GpuScanPath;
 
 typedef struct {
@@ -55,8 +55,8 @@ typedef struct {
 	List	   *used_params;	/* list of Const/Param in use */
 	List	   *used_vars;		/* list of Var in use */
 	List	   *dev_clauses;	/* clauses to be run on device */
-	Bitmapset  *dev_attnums;	/* attrs referenced in device */
-	Bitmapset  *host_attnums;	/* attrs referenced in host */
+	List	   *dev_attnums;	/* attnums referenced in device */
+	List	   *host_attnums;	/* attnums referenced in host */
 } GpuScanPlan;
 
 /*
@@ -195,6 +195,8 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	List		   *host_quals = NIL;
 	Bitmapset	   *dev_attnums = NULL;
 	Bitmapset	   *host_attnums = NULL;
+	Bitmapset	   *tempset;
+	AttrNumber		attnum;
 	ListCell	   *cell;
 	codegen_context	context;
 
@@ -253,8 +255,25 @@ gpuscan_add_scan_path(PlannerInfo *root,
 
 	pathnode->dev_quals = dev_quals;
 	pathnode->host_quals = host_quals;
-	pathnode->dev_attnums = dev_attnums;
-	pathnode->host_attnums = host_attnums;
+
+	pathnode->dev_attnums = NIL;
+	tempset = bms_copy(dev_attnums);
+	while ((anum = bms_first_member(tempset)) >= 0)
+	{
+		anum += FirstLowInvalidHeapAttributeNumber;
+		Assert(anum > 0);	/* device cannot reference system columns */
+		pathnode->dev_attnums = lappend_int(pathnode->dev_attnums, anum);
+	}
+	bms_free(tempset);
+
+	pathnode->host_attnums = NIL;
+	tempset = bms_copy(host_attnums);
+	while ((anum = bms_first_member(tempset)) >= 0)
+	{
+		anum += FirstLowInvalidHeapAttributeNumber;
+		pathnode->host_attnums = lappend_int(pathnode->host_attnums, anum);
+	}
+	bms_free(tempset);
 
 	add_path(baserel, &pathnode->cpath.path);
 }
@@ -470,22 +489,6 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 
 /* copy from outfuncs.c */
 static void
-_outBitmapset(StringInfo str, const Bitmapset *bms)
-{
-	Bitmapset  *tmpset;
-	int			x;
-
-	appendStringInfoChar(str, '(');
-	appendStringInfoChar(str, 'b');
-	tmpset = bms_copy(bms);
-	while ((x = bms_first_member(tmpset)) >= 0)
-		appendStringInfo(str, " %d", x);
-	bms_free(tmpset);
-	appendStringInfoChar(str, ')');
-}
-
-/* copy from outfuncs.c */
-static void
 _outToken(StringInfo str, const char *s)
 {
 	if (s == NULL || *s == '\0')
@@ -534,12 +537,14 @@ gpuscan_textout_path(StringInfo str, Node *node)
 	pfree(temp);
 
 	/* dev_attnums */
-	appendStringInfo(str, " :dev_attnums");
-	_outBitmapset(str, pathnode->dev_attnums);
+	temp = nodeToString(pathnode->dev_attnums);
+	appendStringInfo(str, " :dev_attnums %s", temp);
+	pfree(temp);
 
 	/* host_attnums */
-	appendStringInfo(str, " :host_attnums");
-	_outBitmapset(str, pathnode->host_attnums);
+	temp = nodeToString(pathnode->host_attnums);
+	appendStringInfo(str, " :host_attnums %s", temp);
+	pfree(temp);
 }
 
 static void
@@ -579,6 +584,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	TupleDesc		tupdesc;
 	Bitmapset	   *tempset;
 	AttrNumber		anum;
+	ListCell	   *cell;
 
 	/* gpuscan should not have inner/outer plan now */
 	Assert(outerPlan(node) == NULL);
@@ -649,17 +655,19 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		gss->dprog_key = 0;	/* it might happen if tc-cache got supported */
 
 	gss->dev_colmeta = palloc(sizeof(kern_colmeta) * tupdesc->natts);
+	cell = list_head(gsplan->dev_attnums);
 	for (anum=0; anum < tupdesc->natts; anum++)
 	{
 		Form_pg_attribute attr = tupdesc->attrs[anum];
 		kern_colmeta   *colmeta = &gss->dev_colmeta[anum];
-		AttrNumber		attidx
-			= attr->attnum - FirstLowInvalidHeapAttributeNumber;
 
 		if (attr->attnotnull)
 			colmeta->flags |= KERN_COLMETA_ATTNOTNULL;
-		if (bms_is_member(attidx, gsplan->dev_attnums))
+		if (cell && attr->attnum == lfirst_int(cell))
+		{
 			colmeta->flags |= KERN_COLMETA_ATTREFERENCED;
+			cell = lnext(cell);
+		}
 
 		if (attr->attalign == 'c')
 			colmeta->attalign = sizeof(cl_char);
@@ -674,6 +682,8 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		colmeta->attlen = attr->attlen;
 		colmeta->cs_ofs = -1;	/* to be calculated for each row_store */
 	}
+	Assert(cell == NULL);
+
 	gss->dev_attnums = gsplan->dev_attnums;
 	gss->curr_chunk = NULL;
 	gss->curr_index = 0;
@@ -690,125 +700,39 @@ pgstrom_load_gpuscan_row(GpuScanState *gss)
 	pgstrom_row_store  *rstore;
 	kern_result		   *kresult;
 	kern_column_store  *kcs_head;
-	ListCell		   *cell;
-	HeapTuple	tuple;
-	Size		offset;
-	Size		usage;
-	Size		length;
-	int			index;
-	int			anum;
-	int			ncols = RelationGetNumberOfAttributes(gss->scan_rel);
-	int			nrows;
-	Bitmapset  *tempset;
-	ScanDirection direction = gss->cps.ps.state->es_direction;
-
-	rstore = pgstrom_shmem_alloc(ROWSTORE_DEFAULT_SIZE);
-	if (!rstore)
-		elog(ERROR, "out of shared memory");
+	cl_uint		length;
+	cl_uint		nrows;
 
 	/*
-	 * We put header portion of kern_column_store next to the kern_row_store
-	 * as source of copy for in-kernel column store. It has offset of column
-	 * array, but contents shall be set up by kernel prior to evaluation of
-	 * qualifier expression.
+	 * First of all, allocate a row-store buffer and fill it up
+	 * with regular tuples read from the heap.
 	 */
-	rstore->stag = StromTag_RowStore;
-	rstore->kern_len =
-		STROMALIGN_DOWN(ROWSTORE_DEFAULT_SIZE -
-						offsetof(pgstrom_row_store, kern) -
-						offsetof(pgstrom_column_store, colmeta[cs_ncols]));
-	rstore->kern.ncols = rs_ncols;
-	rstore->kern.nrows = 0;
-	memcpy(rstore->kern.colmeta,
-		   gss->dev_colmeta,
-		   sizeof(kern_colmeta) * rs_ncols);
-
-	/*
-	 * OK, load tuples and put it on the row-store.
-	 * Offset array of rs_tuples begins from the column-metadata
-	 */
-	offset = offsetof(kern_row_store, colmeta[ncols]);
-	usage = rstore->kern_len;
-
-	while (HeapTupleIsValid(tuple = heap_getnext(gss->scan_desc, direction)))
-	{
-		Size		length = HEAPTUPLESIZE + MAXALIGN(tuple->t_len);
-		rs_tuple   *rs_tup;
-		cl_uint	   *rs_ofs;
-
-		if (usage - length < offset + sizeof(cl_uint))
-		{
-			/* rewind the heap-tuple */
-			heap_getnext(gss->scan_desc, -direction);
-			break;
-		}
-		usage -= length;
-		rs_tup = (rs_tuple *)((uintptr_t)&rstore->kern + usage);
-		memcpy(&rs_tup->htup, tuple, sizeof(HeapTupleData));
-		rs_tup->htup.t_data = &rs_tup->data;
-		memcpy(&rs_tup->data, tuple->t_data, tuple->t_len);
-
-		rs_ofs = (cl_uint *)((uintptr_t)&rstore->kern + offset);
-		*rs_ofs = usage;
-		offset += sizeof(cl_uint);
-
-		rstore->kern.nrows++;
-	}
-	nrows = rstore->kern.nrows;
-
-	/* if table scan reached end of the relation, close the ScanDesc */
-	if (!HeapTupleIsValid(tuple))
+	rstore = pgstrom_load_row_store_heap(gss->scan_rel,
+										 gss->cps.ps.state->es_direction,
+										 gss->dev_attnums,
+										 &scan_done);
+	if (scan_done)
 	{
 		heap_endscan(gss->scan_desc);
 		gss->scan_desc = NULL;
 	}
 
 	/*
-	 * On tail of the shared-memory block, we put header portion of
-	 * the kern_column_store; to be copied to in-kernel structure.
+	 * OK, let's create a pgstrom_gpuscan structure according to
+	 * the pgstrom_row_store being allocated above.
 	 */
-	kcs_head = (kern_column_store *)((char *)(&rstore->kern) +
-									 rstore->kern_len);
-	kcs_head->ncols = bms_num_members(gss->dev_attnums);
-	kcs_head->nrows = nrows;
-
-	index = 0;
-	offset = offsetof(kern_column_store, colmeta[kcs_head->ncols]);
-	tempset = bms_copy(gss->dev_attnums);
-	while ((anum = bms_first_member(tempset)) >= 0)
-	{
-		kern_colmeta   *colmeta;
-
-		anum += FirstLowInvalidHeapAttributeNumber;
-		Assert(anum > 0 && anum <= ncols);
-
-		colmeta = &kcs_head->colmeta[index];
-		memcpy(colmeta, &rstore->kern.colmeta[anum-1], sizeof(kern_colmeta));
-		colmeta->cs_ofs = offset;
-		if ((colmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
-			offset += STROMALIGN((nrows + 7) / 8);
-		offset += STROMALIGN(nrows * (colmeta->attlen > 0
-									  ? colmeta->attlen
-									  : sizeof(cl_uint)));
-		index++;
-	}
-	bmc_free(tempset);
-	Assert(index == kcs_head->ncols);
-
-	/*
-	 * OK, pgstrom_row_store was fully setup.
-	 * Let's create a gpuscan object with the row-store.
-	 */
-	length = offsetof(pgstrom_gpuscan, kern.kparam) +
-		STROMALIGN(gss->kparambuf->length) +
-		STROMALIGN(offsetof(kern_result, results[nrows]));
+	nrows = rstore->kern.nrows;
+	length = (STROMALIGN(offsetof(pgstrom_gpuscan, kern.kparam)) +
+			  STROMALIGN(gss->kparambuf->length) +
+			  STROMALIGN(offsetof(kern_result, results[nrows])));
 	gscan = pgstrom_shmem_alloc(length);
 	if (!gscan)
 	{
 		pgstrom_shmem_free(rstore);
 		elog(ERROR, "out of shared memory");
 	}
-	/* fields of pgstrom_gpuscan */
+
+	/* Fields of pgstrom_gpuscan */
 	gscan->msg.stag = StromTag_GpuScan;
 	SpinLockInit(&gscan->msg.lock);
 	gscan->msg.refcnt = 1;
@@ -818,14 +742,16 @@ pgstrom_load_gpuscan_row(GpuScanState *gss)
 	gscan->dprog_key = pgstrom_retain_devprog_key(gss->dprog_key);
 	dlist_init(&gscan->rc_store);
 	dlist_push_head(&gscan->rc_store, &rstore->chain);
-	/* kern_parambuf part */
+	/* kern_parambuf portion */
 	memcpy(&gscan->kern.kparam, gss->kparambuf, gss->kparambuf->length);
 	gscan->kern.roffset = STROMALIGN(gss->kparambuf->length);
-	/* kern_resultbuf part */
+	/* kern_resultbuf portion */
 	kresult = (kern_resultbuf *)((uintptr_t)&gscan->kern +
 								 gscan->kern.roffset);
 	kresult->nitems = 0;
 	kresult->errcode = 0;
+
+	Assert(pgstrom_shmem_sanitycheck(gscan));
 
 	/* track local object */
 	pgstrom_track_object(&gscan->msg.stag);
@@ -1098,11 +1024,13 @@ gpuscan_textout_plan(StringInfo str, const CustomPlan *node)
 	appendStringInfo(str, " :dev_clauses %s", temp);
 	pfree(temp);
 
-	appendStringInfo(str, " :dev_attnums ");
-	_outBitmapset(str, plannode->dev_attnums);
+	temp = nodeToString(plannode->dev_attnums);
+	appendStringInfo(str, " :dev_attnums %s", temp);
+	pfree(temp);
 
-	appendStringInfo(str, " :host_attnums ");
-	_outBitmapset(str, plannode->host_attnums);
+	temp = nodeToString(plannode->host_attnums);
+	appendStringInfo(str, " :host_attnums %s", temp);
+	pfree(temp);
 }
 
 static CustomPlan *
@@ -1117,8 +1045,8 @@ gpuscan_copy_plan(const CustomPlan *from)
 	newnode->used_vars = copyObject(oldnode->used_vars);
 	newnode->extra_flags = oldnode->extra_flags;
 	newnode->dev_clauses = oldnode->dev_clauses;
-	newnode->dev_attnums = bms_copy(oldnode->dev_attnums);
-	newnode->host_attnums = bms_copy(oldnode->host_attnums);
+	newnode->dev_attnums = copyObject(oldnode->dev_attnums);
+	newnode->host_attnums = copyObject(oldnode->host_attnums);
 
 	return &newnode->cplan;
 }
@@ -1184,9 +1112,18 @@ typedef struct
 
 	kern_gpuscan   *kgscan;
 	kern_row_store *krstore;
+	kern_column_store *kcstore;
 	cl_event		events[FLEXIBLE_ARRAY_MEMBER];
 } clstate_gpuscan_row;
 
+static void
+clserv_respond_gpuscan_row(cl_event event, cl_int ev_status, void *private)
+{
+	clstate_gpuscan_row	*clgss = private;
+
+	elog(LOG, "%s is called", __FUNCTION__);
+
+}
 
 static void
 clserv_process_gpuscan_row(pgstrom_message *msg)
@@ -1198,6 +1135,8 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	cl_uint				nrows;
 	cl_uint				ncols;
 	cl_uint				i;
+	int					dindex;
+	int					eindex = 0;
 	size_t				length;
 	size_t				gwork_ofs;
 	size_t				gwork_sz;
@@ -1221,6 +1160,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	clgss->msg = &gscan->msg;
 	clgss->kgscan  = &gscan->kern;
 	clgss->krstore = &rstore->kern;
+	clgss->kcstore = rstore->kcs_head;
 
 	nrows = clgss->krstore->nrows;
 	ncols = clgss->krstore->ncols;
@@ -1257,6 +1197,11 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	if (rc != CL_SUCCESS)
 		goto error;
 
+	/*
+	 * Choose a device to execute this kernel
+	 */
+	dindex = pgstrom_opencl_device_schedule(msg);
+
 	/* allocation of device memory for kern_gpuscan argument */
 	length = STROMALIGN(KERN_GPUSCAN_LENGTH(clgss->kgscan, nrows));
 	clgss->m_gpuscan = clCreateBuffer(opencl_context,
@@ -1268,30 +1213,18 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 		goto error;
 
 	/* allocation of device memory for kern_row_store argument */
-	length = STROMALIGN(KERN_ROWSTORE_LENGTH(rstore));
 	clgss->m_rstore = clCreateBuffer(opencl_context,
 									 CL_MEM_READ_WRITE,
-									 length,
+									 clgss->krstore.length,
 									 NULL,
 									 &rc);
 	if (rc != CL_SUCCESS)
 		goto error;
 
 	/* allocation of device memory for kern_column_store argument */
-	length = STROMALIGN(offsetof(kern_column_store, colmeta[ncols]));
-	for (i=0; i < ncols; i++)
-	{
-		kern_colmeta   *colmeta = &clgss->krstore->colmeta[i];
-
-		if (colmeta->flags & KERN_COLMETA_ATTREFERENCED)
-			length += (STROMALIGN((nrows + 7) / 8) +
-					   STROMALIGN(nrows * (colmeta->attlen > 0
-										   ? colmeta->attlen
-										   : sizeof(cl_uint))));
-	}
 	clgss->m_cstore = clCreateBuffer(opencl_context,
 									 CL_MEM_READ_WRITE,
-									 length,
+									 clgss->kcstore.length,
 									 NULL,
 									 &rc);
 	if (rc != CL_SUCCESS)
@@ -1368,7 +1301,8 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	/*
 	 * OK, enqueue DMA transfer, kernel execution x2, then DMA writeback.
 	 *
-	 * (1) gpuscan and row_store shall be copied from host to device
+	 * (1) gpuscan, row_store and header portion of column_store shall be
+	 *     copied to the device memory from the kernel
 	 * (2) kernel shall be launched
 	 * (3) kern_result shall be written back
 	 */
@@ -1381,23 +1315,38 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 							  clgss->kgscan,
 							  0,
 							  NULL,
-							  &clgss->events[0]);
+							  &clgss->events[eindex++]);
 	if (rc != CL_SUCCESS)
 	{
 		elog(LOG, "failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
 		goto error;
 	}
 
-	length = KERN_ROWSTORE_LENGTH(rstore);
 	rc = clEnqueueWriteBuffer(opencl_cmdq[dindex],
 							  clgss->m_rstore,
 							  CL_FALSE,
 							  0,
-							  length,
+							  clgss->krstore.length,
 							  clgss->krstore,
 							  0,
 							  NULL,
-							  &clgss->events[1]);
+							  &clgss->events[eindex++]);
+	if (rc != CL_SUCCESS)
+	{
+		elog(LOG, "failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
+		goto error;
+	}
+
+	length = offsetof(kern_column_store, colmeta[clgss->kcstore->ncols]);
+	rc = clEnqueueWriteBuffer(opencl_cmdq[dindex],
+							  clgss->m_cstore,
+							  CL_FALSE,
+							  0,
+							  length,
+							  clgss->kcstore,
+							  0,
+							  NULL,
+							  &clgss->events[eindex++]);
 	if (rc != CL_SUCCESS)
 	{
 		elog(LOG, "failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
@@ -1416,9 +1365,9 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 								&gwork_ofs,
 								&gwork_sz,
 								&lwork_sz,
-								2,
-								&clgss->events[0],
-								&clgss->events[2]);
+								3,
+								&clgss->events[eindex - 3],
+								&clgss->events[eindex++]);
 	if (rc != CL_SUCCESS)
 	{
 		elog(LOG, "failed on clEnqueueNDRangeKernel: %s", opencl_strerror(rc));
@@ -1435,16 +1384,16 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 							 offsetof(kern_result, results[nrows]),
 							 KERN_GPUSCAN_RESULTBUF(clgss->kgscan),
 							 1,
-							 &clgss->events[2],
-							 &clgss->events[3]);
+							 &clgss->events[eindex - 1],
+							 &clgss->events[eindex++]);
 
 	/*
 	 * Last, registers a callback routine that replies the message
 	 * to the backend
 	 */
-	rc = clSetEventCallback(clgss->events[3],
+	rc = clSetEventCallback(clgss->events[eindex],
 							CL_COMPLETE,
-							my_callback,
+							clserv_respond_gpuscan_row,
 							clgss);
 	if (rc != CL_SUCCESS)
 	{
@@ -1457,6 +1406,8 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 
 	}
 	return;
+
+error_sync:
 
 error:
 

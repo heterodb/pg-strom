@@ -39,6 +39,7 @@
 
 extern void *pgstrom_shmem_alloc(Size size);
 extern void pgstrom_shmem_free(void *address);
+extern bool pgstrom_shmem_sanitycheck(const void *address);
 extern void pgstrom_setup_shmem(Size zone_length,
 								void *(*callback)(void *address,
 												  Size length));
@@ -68,6 +69,12 @@ extern void pgstrom_init_mqueue(void);
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
+extern pgstrom_row_store *
+pgstrom_load_row_store_heap(HeapScanDesc scan,
+							ScanDirection direction,
+                            List *dev_attnums,
+							bool *scan_done);
+
 
 /*
  * restrack.c
@@ -121,6 +128,8 @@ extern cl_context			opencl_context;
 extern cl_uint				opencl_num_devices;
 extern cl_device_id			opencl_devices[];
 extern cl_command_queue		opencl_cmdq[];
+
+extern int pgstrom_opencl_device_schedule(pgstrom_message *message);
 
 extern Datum pgstrom_opencl_device_info(PG_FUNCTION_ARGS);
 extern bool pgstrom_is_opencl_server(void);

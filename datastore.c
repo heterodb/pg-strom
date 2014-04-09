@@ -129,3 +129,129 @@ pgstrom_create_kern_parambuf(List *used_params,
 
 	return kpbuf;
 }
+
+/*
+ * pgstrom_load_row_store_heap
+ *
+ * It creates a new row-store and loads tuples from the supplied heap.
+ */
+pgstrom_row_store *
+pgstrom_load_row_store_heap(HeapScanDesc scan, ScanDirection direction,
+							List *dev_attnums, bool *scan_done)
+{
+	Relation	rel = scan->rs_rd;
+	AttrNumber	rs_ncols = RelationGetNumberOfAttributes(rel);
+	AttrNumber	cs_ncols = list_length(dev_attnums);
+	cl_uint		nrows;
+	cl_uint		usage_head;
+	cl_uint		usage_tail;
+	cl_uint	   *p_offset;
+	ListCell   *cell;
+	int			index;
+
+	Assert(direction != 0);
+
+	rstore = pgstrom_shmem_alloc(ROWSTORE_DEFAULT_SIZE);
+	if (!rstore)
+		elog(ERROR, "out of shared memory");
+
+	/*
+	 * We put header portion of kern_column_store next to the kern_row_store
+	 * as source of copy for in-kernel column store. It has offset of column
+	 * array, but contents shall be set up by kernel prior to evaluation of
+	 * qualifier expression.
+	 */
+	rstore->stag = StromTag_RowStore;
+	rstore->kern.length =
+		STROMALIGN_DOWN(ROWSTORE_DEFAULT_SIZE -
+						STROMALIGN(offsetof(pgstrom_column_store,
+											colmeta[cs_ncols])))
+		- offsetof(pgstrom_row_store, kern);
+	rstore->kern.ncols = rs_ncols;
+	rstore->kern.nrows = 0;
+	memcpy(rstore->kern.colmeta,
+		   gss->dev_colmeta,
+		   sizeof(kern_colmeta) * rs_ncols);
+
+	/*
+	 * OK, load tuples and put them onto the row-store.
+	 * The offset array of rs_tuple begins next to the column-metadata.
+	 */
+	p_offset = (cl_uint *)(&rstore->kern.colmeta[rs_ncols]);
+	usage_head = offsetof(kern_row_store, colmeta[rs_ncols]);
+	usage_tail = rstore->kern.length;
+	nrows = 0;
+
+	while (HeapTupleIsValid(tuple = heap_getnext(scan, direction)))
+	{
+		Size		length = HEAPTUPLESIZE + MAXALIGN(tuple->t_len);
+		rs_tuple   *rs_tup;
+
+		if (usage_tail - length < sizeof(cl_uint) + usage_head)
+		{
+			/*
+			 * if we have no room to put the fetched tuple on the row-store,
+			 * we rewind the tuple (to be read on the next time) and break
+			 * the loop.
+			 */
+			heap_getnext(scan, -direction);
+			break;
+		}
+		usage_tail -= length;
+		usage_head += sizeof(cl_uint);
+		rs_tup = (rs_tuple *)((char *)&rstore->kern + usage);
+		memcpy(&rs_tup->htup, tuple, sizeof(HeapTupleData));
+		rs_tup->htup.t_data = &rs_tup->data;
+		memcpy(&rs_tup->data, tuple->t_data, tuple->t_len);
+
+		p_offset[nrows++] = usage_tail;
+	}
+	Assert(nrows > 0);
+	rstore->kern.nrows = nrows;
+
+	/* needs to inform where heap-scan reached to end of the relation */
+	if (!HeapTupleIsValid(tuple))
+		*scan_done = true;
+	else
+		*scan_done = false;
+
+	/*
+	 * Header portion of the kern_column_store is put on the tail of
+	 * shared memory block; to be copied to in-kernel data structure.
+	 */
+	kcs_head = (kern_column_store *)((char *)(&rstore->kern) +
+									 rstore->kern_len);
+	kcs_head->ncols = cs_ncols;
+	kcs_head->nrows = nrows;
+
+	index = 0;
+	offset = STROMALIGN(offsetof(kern_column_store, colmeta[cs_ncols]));
+	foreach (cell, dev_attnums)
+	{
+		kern_colmeta   *colmeta;
+		AttrNumber		anum = lfirst_int(cell);
+
+		Assert(anum > 0 && anum <= rs_ncols);
+		colmeta = &rstore->kern.colmeta[anum - 1];
+		memcpy(&kcs_head->colmeta[index], colmeta, sizeof(kern_colmeta));
+		colmeta->cs_ofs = offset;
+		if ((colmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
+			offset += STROMALIGN((nrows + 7) / 8);
+		offset += STROMALIGN(nrows * (colmeta->attlen > 0
+									  ? colmeta->attlen
+									  : sizeof(cl_uint)));
+		index++;
+	}
+	kcs_head->length = offset;
+	Assert(pgstrom_shmem_sanitycheck(rstore));
+	return rstore;
+}
+
+#if 0
+pgstrom_row_store *
+pgstrom_load_row_store_subplan(void)
+{
+	elog(ERROR, "not implemented now");
+	return NULL;
+}
+#endif

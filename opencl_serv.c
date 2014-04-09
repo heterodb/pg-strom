@@ -88,6 +88,22 @@ pgstrom_opencl_event_loop(void)
 }
 
 /*
+ * pgstrom_opencl_device_schedule
+ *
+ * It suggests which opencl device shall be the target of kernel execution.
+ * We plan to select an optimal device according to NUMA characteristics
+ * and current waiting queue length, however, it is simple round robin
+ * right now.
+ */
+int
+pgstrom_opencl_device_schedule(pgstrom_message *message)
+{
+	static int index = 0;
+
+	return index++ % opencl_num_devices;
+}
+
+/*
  * pgstrom_collect_device_info
  *
  * It collects properties of all the OpenCL devices. It shall be called once

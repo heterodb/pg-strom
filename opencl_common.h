@@ -206,6 +206,13 @@ typedef struct {
 #endif
 
 /*
+ * alignment for pg-strom
+ */
+#define STROMALIGN_LEN			16
+#define STROMALIGN(LEN)			TYPEALIGN(STROMALIGN_LEN,LEN)
+#define STROMALIGN_DOWN(LEN)	TYPEALIGN_DOWN(STROMALIGN_LEN,LEN)
+
+/*
  * kern_colmeta
  *
  * It stores metadata of columns being on row-store because tuple with NULL
@@ -229,6 +236,8 @@ typedef struct {
  *
  * It stores records in row-format.
  *
+ * +-----------------+
+ * | length          |
  * +-----------------+ o--+
  * | ncols (= M)     |    | The array of tuple offset begins from colmeta[N].
  * +-----------------+    | It points a particular variable length region 
@@ -264,18 +273,11 @@ typedef struct {
  * +-----------------+
  */
 typedef struct {
+	cl_uint			length;	/* length of this kernel row_store */
 	cl_uint			ncols;	/* number of columns in the source relation */
 	cl_uint			nrows;	/* number of rows in this store */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];	/* metadata of columns */
 } kern_row_store;
-
-#define KRSTORE_GET_RSTUPLE(rstore,index)
-
-
-#define kern_row_store_rstuple(rstore,index)				\
-	(rs_tuple *)((cl_char *)(rstore) +						\
-				 (((cl_uint *)((rstore)->colmeta +			\
-							   (rstore)->ncols))[index]))
 
 /*
  * rs_tuple
@@ -290,6 +292,14 @@ typedef struct {
 	HeapTupleHeaderData	data;
 } rs_tuple;
 
+
+#define kern_row_store_rstuple(rstore,index)				\
+	(rs_tuple *)((cl_char *)(rstore) +						\
+				 (((cl_uint *)((rstore)->colmeta +			\
+							   (rstore)->ncols))[index]))
+
+
+
 /*
  * Data type definitions for column oriented data format
  * ---------------------------------------------------
@@ -300,6 +310,8 @@ typedef struct {
  *
  * It stores arrays in column-format
  * +-----------------+
+ * | length          |
+ * +-----------------+
  * | ncols (=M)      |
  * +-----------------+
  * | nrows (=N)      |
@@ -309,9 +321,7 @@ typedef struct {
  * |    :            |    | array in this store.
  * | colmeta[M-1]    |    |
  * +-----------------+    | (char *)(kcs) + colmeta[j].cs_ofs points is
- * |   <padding>     |    | the address of column array.
- * +-----------------+    |
- * | column array    |    |
+ * | column array    |    | the address of column array.
  * | for column-0    |    |
  * +-----------------+ <--+
  * | +---------------|
@@ -329,11 +339,8 @@ typedef struct {
  * | for column-(M-1)|
  * +-----------------+
  */
-#define STROMALIGN_LEN			16
-#define STROMALIGN(LEN)			TYPEALIGN(STROMALIGN_LEN,LEN)
-#define STROMALIGN_DOWN(LEN)	TYPEALIGN_DOWN(STROMALIGN_LEN,LEN)
-
 typedef struct {
+	cl_uint			length;	/* length of this kernel column-store */
 	cl_uint			ncols;	/* number of columns in this store */
 	cl_uint			nrows;  /* number of records in this store */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
@@ -347,9 +354,9 @@ typedef struct {
  * from the head of kern_toastbuf.
  *
  * +--------------+
+ * | magic        | magic number; a value that should not be a length of
+ * +--------------+ other buffer object (like, row- or column-store)
  * | ncols        | number of columns in this buffer
- * +--------------+
- * | magic        | magic number of toastbuf
  * +--------------+
  * | coldir[0]    |
  * | coldir[1]  o-------+ In case when a varlena reference (offset=120) of
@@ -367,10 +374,11 @@ typedef struct {
  * |   :          |
  * +--------------+
  */
-#define TOASTBUF_MAGIC		0xffffffff	/* should not be number of rows */
+#define TOASTBUF_MAGIC		0xffffffff	/* should not be length of buffers */
+
 typedef struct {
-	cl_uint			ncols;
 	cl_uint			magic;	/* = TOASTBUF_MAGIC */
+	cl_uint			ncols;
 	cl_uint			coldir[FLEXIBLE_ARRAY_MEMBER];
 } kern_toastbuf;
 

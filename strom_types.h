@@ -156,7 +156,6 @@ typedef struct {
 typedef struct {
 	StromTag		stag;
 	dlist_node		chain;
-	cl_uint			kern_len;
 	kern_column_store *kcs_head;	/* template of in-kernel column store */
 	kern_row_store	kern;
 } pgstrom_row_store;

@@ -339,6 +339,42 @@ pgstrom_shmem_free(void *address)
 }
 
 /*
+ * pgstrom_shmem_sanitycheck
+ *
+ * it checks whether magic number of the supplied shared-memory block is
+ * still valid, or not. If someone overuses the block, magic number should
+ * be broken and we can detect it.
+ */
+bool
+pgstrom_shmem_sanitycheck(const void *address)
+{
+	shmem_zone	   *zone;
+	shmem_block	   *block;
+	void		   *zone_baseaddr = pgstrom_shmem_head->zone_baseaddr;
+	Size			zone_length = pgstrom_shmem_head->zone_length;
+	int				zone_index;
+	int				block_index;
+	cl_uint		   *p_magic;
+
+	Assert((Size)address % SHMEM_BLOCKSZ == 0);
+
+	zone_index = ((Size)address - (Size)zone_baseaddr) / zone_length;
+	Assert(zone_index >= 0 && zone_index < pgstrom_shmem_head->num_zones);
+
+	zone = pgstrom_shmem_head->zones[zone_index];
+	Assert(ADDRESS_IN_SHMEM_ZONE(zone, address));
+
+	block_index = ((Size)address -
+				   (Size)zone->block_baseaddr) / SHMEM_BLOCKSZ;
+	block = &zone->blocks[block_index];
+	Assert(block->active.nullmark == NULL);
+
+	p_magic = (cl_uint *)((uintptr_t)address + block->active.allocsz);
+
+	return (*p_magic == SHMEM_BLOCK_MAGIC ? true : false);
+}
+
+/*
  * collect_shmem_info
  *
  * It collects statistical information of shared memory zone.
