@@ -22,7 +22,7 @@
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
 
 /* NULL definition */
-#define NULL	((void *) 0UL)
+#define NULL	((__global void *) 0UL)
 
 /* Misc definitions */
 #define FLEXIBLE_ARRAY_MEMBER

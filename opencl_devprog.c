@@ -27,7 +27,6 @@ static int reclaim_threshold;
 
 static struct {
 	slock_t		lock;
-	int			refcnt;
 	Size		usage;
 	dlist_head	lru_list;
 	dlist_head	slot[DEVPROG_HASH_SIZE];
@@ -324,7 +323,22 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 			dprog->program = BAD_OPENCL_PROGRAM;
 			goto out_unlock;
 		}
-		/* Next, launch an asynchronous program build process */
+		dprog->program = program;
+		dprog->build_running = true;
+		if (message)
+			dlist_push_tail(&dprog->waitq, &message->chain);
+
+		/*
+		 * NOTE: clBuildProgram() kicks kernel build asynchronously or
+		 * synchronously depending on the OpenCL driver. In our trial,
+		 * intel's driver performs asynchronously, however, nvidia's
+		 * driver has synchronous manner.
+		 * Its callback function on build completion acquires the lock
+		 * of device-program, we have to release it prior to the call of
+		 * clBuildProgram().
+		 */
+		SpinLockRelease(&dprog->lock);
+
 		build_opts = "-DOPENCL_DEVICE_CODE"
 #if SIZEOF_VOID_P == 8
 			" -DHOSTPTRLEN=8"
@@ -343,17 +357,56 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 							dprog);
 		if (rc != CL_SUCCESS)
 		{
+			dlist_mutable_iter iter;
+
 			elog(LOG, "clBuildProgram failed: %s", opencl_strerror(rc));
-			rc = clReleaseProgram(program);
-			Assert(rc != CL_SUCCESS);
+
+			SpinLockAcquire(&dprog->lock);
+			/*
+			 * We need to pay attention both cases when synchronous build-
+			 * failure or asynchronous build job input failure.
+			 * In the first case, cl_program object is already released on
+			 * the callback handler, so we have nothing to do anymore.
+			 * Elsewhere, it is asynchronous job input failure, so we have
+			 * to clean up cl_program object and mark this entry as a bad-
+			 * program.
+			 */
+
+			/*
+			 * NOTE: In case of synchronous build failure, program-build
+			 * callback is already called; that makes response message
+			 * with error code, so this message should be no longer handled
+			 * by OpenCL server. (This callback clears 'build_running').
+			 * In this case, we returns the caller NULL, to break its
+			 * cb_process handler immediately, without duplicated message
+			 * queuing.
+			 */
+			if (!dprog->build_running)
+			{
+				Assert(dlist_is_empty(&dprog->waitq));
+				SpinLockRelease(&dprog->lock);
+				return NULL;
+			}
+
+			/*
+			 * otherwise, all the waiting messages shall be enqueued again
+			 * to generate error response messages.
+			 */
+			dprog->build_running = false;
 			dprog->program = BAD_OPENCL_PROGRAM;
+			rc = clReleaseProgram(program);
+			Assert(rc == CL_SUCCESS);
+
+			dlist_foreach_modify(iter, &dprog->waitq)
+			{
+				pgstrom_message *msg
+					= dlist_container(pgstrom_message, chain, iter.cur);
+
+				dlist_delete(&msg->chain);
+				pgstrom_enqueue_message(msg);
+			}
 			goto out_unlock;
 		}
-		dprog->program = program;
-		dprog->build_running = true;
-		if (message)
-			dlist_push_tail(&dprog->waitq, &message->chain);
-		SpinLockRelease(&dprog->lock);
 		return NULL;
 	}
 	else if (dprog->program != BAD_OPENCL_PROGRAM)

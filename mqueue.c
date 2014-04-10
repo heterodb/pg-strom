@@ -167,6 +167,7 @@ pgstrom_reply_message(pgstrom_message *message)
 	int		rc;
 
 	Assert(pgstrom_i_am_clserv);
+	Assert(respq != &mqueue_shm_values->serv_mqueue);
 	pthread_mutex_lock(&respq->lock);
 	if (respq->closed)
 	{

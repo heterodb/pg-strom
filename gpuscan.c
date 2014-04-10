@@ -817,6 +817,7 @@ gpuscan_exec(CustomPlanState *node)
 		{
 			pgstrom_message	   *msg = &gss->curr_chunk->msg;
 
+			Assert(msg->refcnt == 1);
 			msg->cb_release(msg);
 			gss->curr_chunk = NULL;
 			gss->curr_index = 0;
@@ -1119,7 +1120,7 @@ typedef struct
 	cl_mem			m_rstore;
 	cl_mem			m_cstore;
 	cl_int			ev_index;
-	cl_event		events[FLEXIBLE_ARRAY_MEMBER];
+	cl_event		events[5];
 } clstate_gpuscan_row;
 
 static void
@@ -1127,8 +1128,6 @@ clserv_respond_gpuscan_row(cl_event event, cl_int ev_status, void *private)
 {
 	clstate_gpuscan_row	*clgss = private;
 	pgstrom_gpuscan		*gscan = (pgstrom_gpuscan *)clgss->msg;
-
-	elog(LOG, "called");
 
 	/* put error code */
 	if (ev_status != CL_COMPLETE)
@@ -1162,14 +1161,11 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	pgstrom_gpuscan	   *gscan = (pgstrom_gpuscan *)msg;
 	pgstrom_row_store  *rstore;
 	clstate_gpuscan_row *clgss;
-	kern_parambuf	   *kparam;
-	kern_resultbuf	   *kresult;
 	kern_row_store	   *krstore;
 	kern_column_store  *kcstore_head;
 	cl_device_id		kdevice;
 	cl_command_queue	kcmdq;
 	cl_uint				nrows;
-	cl_uint				ncols;
 	cl_uint				i;
 	cl_int				rc;
 	size_t				gwork_ofs;
@@ -1191,13 +1187,10 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	}
 	memset(clgss, 0, sizeof(clstate_gpuscan_row));
 	clgss->msg = &gscan->msg;
-	kparam = KERN_GPUSCAN_PARAMBUF(&gscan->kern);
-	kresult = KERN_GPUSCAN_RESULTBUF(&gscan->kern);
 	krstore = &rstore->kern;
 	kcstore_head = rstore->kcs_head;
 
 	nrows = krstore->nrows;
-	ncols = krstore->ncols;
 
 	/*
 	 * First of all, it looks up a program object to be run on
@@ -1380,12 +1373,13 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 							  krstore,
 							  0,
 							  NULL,
-							  &clgss->events[clgss->ev_index++]);
+							  &clgss->events[clgss->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
 		elog(LOG, "failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
 		goto error_sync;
 	}
+	clgss->ev_index++;
 
 	rc = clEnqueueWriteBuffer(kcmdq,
 							  clgss->m_cstore,
@@ -1396,12 +1390,13 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 							  kcstore_head,
 							  0,
 							  NULL,
-							  &clgss->events[clgss->ev_index++]);
+							  &clgss->events[clgss->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
 		elog(LOG, "failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
 		goto error_sync;
 	}
+	clgss->ev_index++;
 
 	/*
 	 * Kick gpuscan_qual_rs() call
@@ -1416,13 +1411,14 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 								&gwork_sz,
 								&lwork_sz,
 								3,
-								&clgss->events[clgss->ev_index-3],
-								&clgss->events[clgss->ev_index++]);
+								&clgss->events[clgss->ev_index - 3],
+								&clgss->events[clgss->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
 		elog(LOG, "failed on clEnqueueNDRangeKernel: %s", opencl_strerror(rc));
 		goto error_sync;
 	}
+	clgss->ev_index++;
 
 	/*
 	 * Write back the result-buffer
@@ -1435,13 +1431,14 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 							 offsetof(kern_resultbuf, results[nrows]),
 							 KERN_GPUSCAN_RESULTBUF(&gscan->kern),
 							 1,
-							 &clgss->events[clgss->ev_index-1],
-							 &clgss->events[clgss->ev_index++]);
+							 &clgss->events[clgss->ev_index - 1],
+							 &clgss->events[clgss->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
 		elog(LOG, "failed on clEnqueueReadBuffer: %s", opencl_strerror(rc));
 		goto error_sync;
 	}
+	clgss->ev_index++;
 
 	/*
 	 * Last, registers a callback routine that replies the message
@@ -1456,6 +1453,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 		elog(LOG, "failed on clSetEventCallback: %s", opencl_strerror(rc));
 		goto error_sync;
 	}
+	Assert(clgss->ev_index == 5);
 	return;
 
 error_sync:
