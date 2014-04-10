@@ -18,6 +18,7 @@
 #include "nodes/pg_list.h"
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
+#include "storage/ipc.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
@@ -27,8 +28,6 @@
 #include <unistd.h>
 
 /* flags set by signal handlers */
-static volatile sig_atomic_t got_signal = false;
-static volatile bool is_opencl_server = false;
 static int		opencl_platform_index;
 
 /* OpenCL resources for quick reference */
@@ -41,30 +40,25 @@ cl_uint				opencl_num_devices;
 cl_device_id		opencl_devices[MAX_NUM_DEVICES];
 cl_command_queue	opencl_cmdq[MAX_NUM_DEVICES];
 
+/* signal flag */
+volatile bool		pgstrom_clserv_exit_pending = false;
+/* true, if OpenCL intermidiation server */
+volatile bool		pgstrom_i_am_clserv = false;
+
 static void
 pgstrom_opencl_sigterm(SIGNAL_ARGS)
 {
-	InterruptPending = true;
-	got_signal = true;
+	pgstrom_clserv_exit_pending = true;
+	pgstrom_cancel_server_loop();
+	elog(LOG, "got sigterm");
 }
 
 static void
 pgstrom_opencl_sighup(SIGNAL_ARGS)
 {
-	InterruptPending = true;
-	got_signal = true;
-}
-
-/*
- * pgstrom_is_opencl_server
- *
- * It tells whether this process is opencl server or not.
- * All the opencl functions have to be handled by OpenCL intermediation server.
- */
-bool
-pgstrom_is_opencl_server(void)
-{
-	return is_opencl_server;
+	pgstrom_clserv_exit_pending = true;
+	pgstrom_cancel_server_loop();
+	elog(LOG, "got sighup");
 }
 
 /*
@@ -78,8 +72,9 @@ pgstrom_opencl_event_loop(void)
 {
 	pgstrom_message	   *msg;
 
-	while (!got_signal)
+	while (!pgstrom_clserv_exit_pending)
 	{
+		CHECK_FOR_INTERRUPTS();
 		msg = pgstrom_dequeue_server_message();
 		if (!msg)
 			continue;
@@ -303,11 +298,12 @@ static void
 pgstrom_opencl_main(Datum main_arg)
 {
 	/* mark this process is OpenCL intermediator */
-	is_opencl_server = true;
+	pgstrom_i_am_clserv = true;
 
 	/* Establish signal handlers before unblocking signals. */
     pqsignal(SIGHUP, pgstrom_opencl_sighup);
     pqsignal(SIGTERM, pgstrom_opencl_sigterm);
+	ImmediateInterruptOK = false;
 
     /* We're now ready to receive signals */
     BackgroundWorkerUnblockSignals();
@@ -322,6 +318,9 @@ pgstrom_opencl_main(Datum main_arg)
 #endif
 	/* XXX - to be handled with multi-threading in the future */
 	pgstrom_opencl_event_loop();
+
+	/* got a signal to stop background worker process */
+	elog(LOG, "Stopping PG-Strom OpenCL Server");
 
 	/*
 	 * close the server queue and returns unprocessed message with error.

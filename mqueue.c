@@ -141,7 +141,7 @@ pgstrom_enqueue_message(pgstrom_message *message)
 	 */
 	SpinLockAcquire(&message->lock);
 	Assert(message->refcnt > 0);
-	if (!pgstrom_is_opencl_server())
+	if (!pgstrom_i_am_clserv)
 		message->refcnt++;
 	dlist_push_tail(&mqueue->qhead, &message->chain);
 	SpinLockRelease(&message->lock);
@@ -166,7 +166,7 @@ pgstrom_reply_message(pgstrom_message *message)
 	pgstrom_queue  *respq = message->respq;
 	int		rc;
 
-	Assert(pgstrom_is_opencl_server());
+	Assert(pgstrom_i_am_clserv);
 	pthread_mutex_lock(&respq->lock);
 	if (respq->closed)
 	{
@@ -212,7 +212,7 @@ pgstrom_reply_message(pgstrom_message *message)
 pgstrom_message *
 pgstrom_dequeue_message(pgstrom_queue *mqueue)
 {
-#define POOLING_INTERVAL	200000000	/* 0.2msec */
+#define POOLING_INTERVAL	200000000	/* 200msec */
 	pgstrom_message *result = NULL;
 	struct timeval	basetv;
 	struct timespec	timeout;
@@ -222,11 +222,11 @@ pgstrom_dequeue_message(pgstrom_queue *mqueue)
 	rc = gettimeofday(&basetv, NULL);
 	Assert(rc == 0);
 	timeout.tv_sec = basetv.tv_sec;
-	timeout.tv_nsec = basetv.tv_usec * 1000;
+	timeout.tv_nsec = basetv.tv_usec * 1000UL;
 
+	pthread_mutex_lock(&mqueue->lock);
 	for (;;)
 	{
-		pthread_mutex_lock(&mqueue->lock);
 		/* dequeue a message from the message queue */
 		if (!dlist_is_empty(&mqueue->qhead))
 		{
@@ -255,13 +255,23 @@ pgstrom_dequeue_message(pgstrom_queue *mqueue)
 				timeout.tv_nsec += timeleft;
 				timeleft = 0;
 			}
+			if (timeout.tv_nsec >= 1000000000)
+			{
+				timeout.tv_sec += timeout.tv_nsec / 1000000000;
+				timeout.tv_nsec = timeout.tv_nsec % 1000000000;
+			}
 			rc = pthread_cond_timedwait(&mqueue->cond,
 										&mqueue->lock,
 										&timeout);
 			Assert(rc == 0 || rc == ETIMEDOUT);
 
-			/* signal will break waiting loop */
-			if (InterruptPending)
+			/*
+			 * XXX - we need to have detailed investigation here,
+			 * whether this implementation is best design or not.
+			 * It assumes backend side blocks until all the messages
+			 * are backed.
+			 */
+			if (pgstrom_i_am_clserv && pgstrom_clserv_exit_pending)
 				timeleft = 0;
 		}
 	}
@@ -304,6 +314,20 @@ pgstrom_dequeue_server_message(void)
 }
 
 /*
+ * pgstrom_cancel_server_loop
+ *
+ * It shall be called by signal handler of OpenCL server to cancel
+ * server loop to wait messages.
+ */
+void
+pgstrom_cancel_server_loop(void)
+{
+	pgstrom_queue  *mqueue = &mqueue_shm_values->serv_mqueue;
+
+	pthread_cond_broadcast(&mqueue->cond);
+}
+
+/*
  * pgstrom_close_server_queue
  *
  * close the server message queue not to receive message any more,
@@ -315,7 +339,7 @@ pgstrom_close_server_queue(void)
 	pgstrom_queue	*svqueue = &mqueue_shm_values->serv_mqueue;
 	pgstrom_message	*msg;
 
-	Assert(pgstrom_is_opencl_server());
+	Assert(pgstrom_i_am_clserv);
 
 	pgstrom_close_queue(svqueue);
 	/*

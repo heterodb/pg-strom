@@ -72,7 +72,7 @@ pgstrom_reclaim_devprog(void)
 	 * this logic may involves clReleaseProgram(), so only OpenCL
 	 * intermediation server can handle reclaiming
 	 */
-	Assert(pgstrom_is_opencl_server());
+	Assert(pgstrom_i_am_clserv);
 
 	SpinLockAcquire(&opencl_devprog_shm_values->lock);
 	/* concurrent task already reclaimed it? */
@@ -480,7 +480,7 @@ pgstrom_put_devprog_key(Datum dprog_key)
 	devprog_entry  *dprog = (devprog_entry *) DatumGetPointer(dprog_key);
 
 	/* local resource untracking */
-	Assert(!pgstrom_is_opencl_server());
+	Assert(!pgstrom_i_am_clserv);
 	pgstrom_untrack_object(&dprog->stag);
 
 	SpinLockAcquire(&opencl_devprog_shm_values->lock);

@@ -99,7 +99,7 @@ static shmem_head  *pgstrom_shmem_head;
  * It looks up the least power of two that is equal or larger than
  * the provided size.
  */
-static IF_INLINE int
+static inline int
 find_least_pot(Size size)
 {
 	int		shift = 0;

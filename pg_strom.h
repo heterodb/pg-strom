@@ -51,6 +51,7 @@ extern pgstrom_message *pgstrom_dequeue_message(pgstrom_queue *queue);
 extern pgstrom_message *pgstrom_try_dequeue_message(pgstrom_queue *queue);
 extern pgstrom_message *pgstrom_dequeue_server_message(void);
 extern void pgstrom_close_server_queue(void);
+extern void pgstrom_cancel_server_loop(void);
 extern void pgstrom_close_queue(pgstrom_queue *queue);
 extern pgstrom_queue *pgstrom_get_queue(pgstrom_queue *mqueue);
 extern void pgstrom_put_queue(pgstrom_queue *mqueue);
@@ -108,6 +109,7 @@ extern void pgstrom_put_devprog_key(Datum dprog_key);
 extern Datum pgstrom_retain_devprog_key(Datum dprog_key);
 extern const char *pgstrom_get_devprog_errmsg(Datum dprog_key);
 extern void pgstrom_init_opencl_devprog(void);
+extern Datum pgstrom_opencl_device_info(PG_FUNCTION_ARGS);
 
 /*
  * opencl_entry.c
@@ -123,11 +125,10 @@ extern cl_context			opencl_context;
 extern cl_uint				opencl_num_devices;
 extern cl_device_id			opencl_devices[];
 extern cl_command_queue		opencl_cmdq[];
+extern volatile bool		pgstrom_clserv_exit_pending;
+extern volatile bool		pgstrom_i_am_clserv;
 
 extern int pgstrom_opencl_device_schedule(pgstrom_message *message);
-
-extern Datum pgstrom_opencl_device_info(PG_FUNCTION_ARGS);
-extern bool pgstrom_is_opencl_server(void);
 extern void pgstrom_init_opencl_server(void);
 
 /*
