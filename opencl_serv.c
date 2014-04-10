@@ -319,6 +319,11 @@ pgstrom_opencl_main(Datum main_arg)
 	/* XXX - to be handled with multi-threading in the future */
 	pgstrom_opencl_event_loop();
 
+#ifdef PGSTROM_DEBUG
+	/* revert setting */
+	Log_error_verbosity = PGERROR_DEFAULT;
+#endif
+
 	/* got a signal to stop background worker process */
 	elog(LOG, "Stopping PG-Strom OpenCL Server");
 

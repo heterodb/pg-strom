@@ -249,6 +249,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	pathnode->cpath.path.param_info
 		= get_baserel_parampathinfo(root, baserel, baserel->lateral_relids);
 	pathnode->cpath.path.pathkeys = NIL;	/* gpuscan has unsorted result */
+	pathnode->cpath.methods = &gpuscan_path_methods;
 
 	cost_gpuscan(pathnode, root, baserel,
 				 pathnode->cpath.path.param_info,
@@ -294,13 +295,15 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 		return NULL;
 
 	expr_code = pgstrom_codegen_expression((Node *)dev_quals, context);
-
 	Assert(expr_code != NULL);
 
 	initStringInfo(&str);
 
+	/* Put declarations of device types and functions in use */
+	appendStringInfo(&str, "%s\n", pgstrom_codegen_declarations(context,
+																false));
 	/* Put param/const definitions */
-	index = 0;
+	index = 1;
 	foreach (cell, context->used_params)
 	{
 		if (IsA(lfirst(cell), Const))
@@ -313,7 +316,7 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 			appendStringInfo(&str,
 							 "#define KPARAM_%u\t"
 							 "pg_%s_param(kparams,%d)\n",
-							 index, dtype->type_ident, index);
+							 index, dtype->type_name, index);
 		}
 		else if (IsA(lfirst(cell), Param))
 		{
@@ -325,7 +328,7 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 			appendStringInfo(&str,
 							 "#define KPARAM_%u\t"
 							 "pg_%s_param(kparams,%d)\n",
-							 index, dtype->type_ident, index);
+							 index, dtype->type_name, index);
 		}
 		else
 			elog(ERROR, "unexpected node: %s", nodeToString(lfirst(cell)));
@@ -333,7 +336,7 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 	}
 
 	/* Put Var definition for row-store */
-	index = 0;
+	index = 1;
 	foreach (cell, context->used_vars)
 	{
 		Var	   *var = lfirst(cell);
@@ -345,12 +348,12 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 			appendStringInfo(&str,
 					 "#define KVAR_%u\t"
 							 "pg_%s_vref(kcs,toast,%u,get_global_id(0))\n",
-							 index, dtype->type_ident, index);
+							 index, dtype->type_name, index);
 		else
 			appendStringInfo(&str,
 							 "#define KVAR_%u\t"
 							 "pg_%s_vref(kcs,%u,get_global_id(0))\n",
-							 index, dtype->type_ident, index);
+							 index, dtype->type_name, index);
 		index++;
 	}
 
@@ -381,29 +384,30 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					 "  __global kern_parambuf *kparams\n"
 					 "    = KERN_GPUSCAN_PARAMBUF(kgscan);\n"
 					 "\n"
-					 "  gpuscan_local_init(local_workmem);\n"
+					 "  gpuscan_workmem_init(local_workmem);\n"
 					 "  if (get_global_id(0) < kcs->nrows)\n"
 					 "    rc = %s;\n"
 					 "  else\n"
-					 "    rc.isnull = CL_TRUE;\n"
-					 "  kern_set_error(!rc.isnull && rc.value != 0\n"
-					 "                 ? StromError_Success\n"
-					 "                 : StromError_RowFiltered);\n"
-					 "  gpuscan_writeback_result(gpuscan);\n"
+					 "    rc.isnull = true;\n"
+					 "  gpuscan_set_error(!rc.isnull && rc.value != 0\n"
+					 "                    ? StromError_Success\n"
+					 "                    : StromError_RowFiltered,\n"
+					 "                    local_workmem);\n"
+					 "  gpuscan_writeback_result(kgscan, local_workmem);\n"
 					 "}\n"
 					 "\n"
 					 "__kernel void\n"
-					 "gpuscan_qual_rs(__global kern_gpuscan *gpuscan,\n"
+					 "gpuscan_qual_rs(__global kern_gpuscan *kgscan,\n"
 					 "                __global kern_row_store *krs,\n"
 					 "                __global kern_column_store *kcs,\n"
 					 "                __local void *local_workmem)\n"
 					 "{\n"
 					 "  kern_row_to_column(krs,kcs,\n"
-					 "                     lengthof(used_vars),\n"
-					 "                     used_vars,\n"
+					 "                     lengthof(pg_used_vars),\n"
+					 "                     pg_used_vars,\n"
 					 "                     local_workmem);\n"
-					 "  gpuscan_qual_cs(gpuscan,kparams,kcs,\n"
-					 "                  (kern_toastbuf *)krs,\n"
+					 "  gpuscan_qual_cs(kgscan,kcs,\n"
+					 "                  (__global kern_toastbuf *)krs,\n"
 					 "                  local_workmem);\n"
 					 "}\n", expr_code);
 	return str.data;
@@ -464,7 +468,7 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 	 * This design is optimized to process column-oriented data format on
 	 * the relation cache.
 	 */
-	kern_source = gpuscan_codegen_quals(root, gpath->dev_quals, &context);
+	kern_source = gpuscan_codegen_quals(root, dev_clauses, &context);
 
 	/*
 	 * Construction of GpuScanPlan node; on top of CustomPlan node
@@ -475,10 +479,11 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 	gscan->cplan.plan.qual = host_clauses;
 	gscan->cplan.plan.lefttree = NULL;
 	gscan->cplan.plan.righttree = NULL;
+	gscan->cplan.methods = &gpuscan_plan_methods;
 
 	gscan->scanrelid = rel->relid;
 	gscan->kern_source = kern_source;
-	gscan->extra_flags = context.extra_flags;
+	gscan->extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSCAN;
 	gscan->used_params = context.used_params;
 	gscan->used_vars = context.used_vars;
 	gscan->dev_clauses = dev_clauses;
@@ -597,6 +602,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	gss->cps.ps.type = T_CustomPlanState;
 	gss->cps.ps.plan = (Plan *) node;
 	gss->cps.ps.state = estate;
+	gss->cps.methods = &gpuscan_plan_methods;
 
 	/*
 	 * create expression context
@@ -881,15 +887,18 @@ gpuscan_exec(CustomPlanState *node)
          */
 		if (gscan->msg.errcode != StromError_Success)
 		{
-			if (gscan->msg.errcode == StromError_ProgramCompile)
+			if (gscan->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
 			{
 				const char *buildlog
 					= pgstrom_get_devprog_errmsg(gscan->dprog_key);
+				const char *kern_source
+					= ((GpuScanPlan *)gss->cps.ps.plan)->kern_source;
 
 				ereport(ERROR,
 						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("PG-Strom: OpenCL execution error (%s)",
-								pgstrom_strerror(gscan->msg.errcode)),
+						 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
+								pgstrom_strerror(gscan->msg.errcode),
+								kern_source),
 						 errdetail("%s", buildlog)));
 			}
 			else

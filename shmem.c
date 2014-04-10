@@ -191,8 +191,6 @@ pgstrom_shmem_zone_block_alloc(shmem_zone *zone, Size size)
 	int		index;
 	void   *address;
 
-	elog(INFO, "alloc size=%lu, shift=%d, (1UL<<shift)=%lu", size, shift, 1UL<<(shift+SHMEM_BLOCKSZ_BITS));
-
 	if (dlist_is_empty(&zone->free_list[shift]))
 	{
 		if (!pgstrom_shmem_zone_block_split(zone, shift+1))

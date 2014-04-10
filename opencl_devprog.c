@@ -164,7 +164,7 @@ clserv_devprog_build_callback(cl_program program, void *cb_private)
 			errmsg = pgstrom_shmem_alloc(buflen + 1);
 			if (errmsg)
 			{
-				opencl_devprog_shm_values->usage += buflen + 1;
+				opencl_devprog_shm_values->usage += buflen;
 				strcpy(errmsg, buffer);
 			}
 			goto out_error;
@@ -197,6 +197,7 @@ clserv_devprog_build_callback(cl_program program, void *cb_private)
 out_error:
 	SpinLockAcquire(&dprog->lock);
 	Assert(dprog->program == program);
+	dprog->errmsg = errmsg;
 	dlist_foreach_modify(iter, &dprog->waitq)
 	{
 		pgstrom_message *msg
@@ -250,6 +251,7 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 	if (!dprog->program)
 	{
 		cl_program	program;
+		const char *build_opts;
 		const char *sources[32];
 		size_t		lengths[32];
 		cl_uint		count = 0;
@@ -304,6 +306,11 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 			count++;
 		}
 #endif
+		/* source code of this program */
+		sources[count] = dprog->source;
+		lengths[count] = dprog->source_len;
+		count++;
+
 		/* OK, construct a program object */
 		program = clCreateProgramWithSource(opencl_context,
 											count,
@@ -318,10 +325,20 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 			goto out_unlock;
 		}
 		/* Next, launch an asynchronous program build process */
+		build_opts = "-DOPENCL_DEVICE_CODE"
+#if SIZEOF_VOID_P == 8
+			" -DHOSTPTRLEN=8"
+#else
+			" -DHOSTPTRLEN=4"
+#endif
+#ifdef PGSTROM_DEBUG
+			" -Werror"
+#endif
+			;
 		rc = clBuildProgram(program,
 							opencl_num_devices,
 							opencl_devices,
-							"-DOPENCL_DEVICE_CODE -Werror",
+							build_opts,
 							clserv_devprog_build_callback,
 							dprog);
 		if (rc != CL_SUCCESS)
@@ -420,8 +437,7 @@ retry:
 			SpinLockRelease(&opencl_devprog_shm_values->lock);
 			if (dprog)
 				pgstrom_shmem_free(dprog);
-			/* local resource tracking */
-			pgstrom_track_object(&entry->stag);
+
 			return PointerGetDatum(entry);
 		}
 	}
@@ -438,8 +454,7 @@ retry:
 		dlist_push_head(&opencl_devprog_shm_values->lru_list,
 						&dprog->lru_chain);
 		SpinLockRelease(&opencl_devprog_shm_values->lock);
-		/* local resource tracking */
-		pgstrom_track_object(&dprog->stag);
+
 		return PointerGetDatum(dprog);
 	}
 	SpinLockRelease(&opencl_devprog_shm_values->lock);
@@ -478,10 +493,6 @@ void
 pgstrom_put_devprog_key(Datum dprog_key)
 {
 	devprog_entry  *dprog = (devprog_entry *) DatumGetPointer(dprog_key);
-
-	/* local resource untracking */
-	Assert(!pgstrom_i_am_clserv);
-	pgstrom_untrack_object(&dprog->stag);
 
 	SpinLockAcquire(&opencl_devprog_shm_values->lock);
 	dprog->refcnt--;

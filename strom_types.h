@@ -204,19 +204,18 @@ struct devfunc_info;
 typedef struct devtype_info {
 	Oid			type_oid;
 	uint32		type_flags;
-	char	   *type_ident;
-	char	   *type_base;
+	char	   *type_name;	/* name of device type; same of SQL's type */
+	char	   *type_base;	/* base name of this type (like varlena) */
 	char	   *type_decl;
 	struct devfunc_info *type_is_null_fn;
 	struct devfunc_info	*type_is_not_null_fn;
 } devtype_info;
 
 typedef struct devfunc_info {
-	const char *func_name;
+	int32		func_flags;
 	Oid			func_namespace;
 	Oid		   *func_argtypes;
-	int32		func_flags;
-	const char *func_ident;	/* identifier of device function */
+	const char *func_name;	/* name of device function; same of SQL's func */
 	List	   *func_args;	/* list of devtype_info */
 	devtype_info *func_rettype;
 	const char *func_decl;	/* declaration of function */

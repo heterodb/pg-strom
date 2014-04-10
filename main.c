@@ -89,8 +89,9 @@ _PG_init(void)
 	/* registration of custom-plan providers */
 	pgstrom_init_gpuscan();
 
-	/* miscellaneous GUC init above */
+	/* miscellaneous initializations */
 	pgstrom_init_misc_guc();
+	pgstrom_codegen_init();
 }
 
 /*
@@ -118,10 +119,8 @@ pgstrom_strerror(cl_int errcode)
 			return "OpenCL server is not ready";
 		case StromError_BadRequestMessage:
 			return "request message is bad";
-		case StromError_ProgramCompile:
-			return "program compile error";
-		case StromError_OutOfMemory:
-			return "out of memory";
+		case StromError_OpenCLInternal:
+			return "OpenCL internal error";
 		case StromError_OutOfSharedMemory:
 			return "out of shared memory";
 		case StromError_DivisionByZero:
