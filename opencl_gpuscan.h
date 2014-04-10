@@ -264,35 +264,3 @@ typedef struct {
 
 #endif	/* OPENCL_DEVICE_CODE */
 #endif	/* OPENCL_GPUSCAN_H */
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
