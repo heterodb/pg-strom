@@ -104,7 +104,7 @@ typedef struct {
 #define StromError_RowReCheck			2	/* To be checked on the host */
 #define StromError_ServerNotReady		100	/* OpenCL server is not ready */
 #define StromError_BadRequestMessage	101	/* Bad request message */
-#define StromError_OpenCLInterface		102	/* OpenCL interface error */
+#define StromError_OpenCLInternal		102	/* OpenCL internal error */
 #define StromError_ProgramCompile		103	/* Failed on program compile */
 #define StromError_OutOfMemory			104	/* out of memory */
 #define StromError_OutOfSharedMemory	105	/* out of shared memory */
@@ -292,13 +292,18 @@ typedef struct {
 	HeapTupleHeaderData	data;
 } rs_tuple;
 
+static inline rs_tuple *
+kern_rowstore_get_tuple(kern_row_store *krstore, cl_uint rindex)
+{
+	cl_uint	   *p_offset;
 
-#define kern_row_store_rstuple(rstore,index)				\
-	(rs_tuple *)((cl_char *)(rstore) +						\
-				 (((cl_uint *)((rstore)->colmeta +			\
-							   (rstore)->ncols))[index]))
-
-
+	if (rindex >= krstore->nrows)
+		return NULL;
+	p_offset = (cl_uint *)(&krstore->colmeta[krstore->ncols]);
+	if (p_offset[rindex] == 0)
+		return NULL;
+	return (rs_tuple *)((char *)krstore + p_offset[rindex]);
+}
 
 /*
  * Data type definitions for column oriented data format

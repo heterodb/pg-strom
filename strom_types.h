@@ -134,6 +134,7 @@ typedef struct pgstrom_message {
 	StromTag		stag;
 	slock_t			lock;	/* protection for reference counter */
 	cl_int			refcnt;
+	cl_int			errcode;
 	dlist_node		chain;
 	pgstrom_queue  *respq;	/* mqueue for response message */
 	void	(*cb_process)(struct pgstrom_message *message);

@@ -12,8 +12,10 @@
  * within this package.
  */
 #include "postgres.h"
+#include "access/relscan.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "pg_strom.h"
 
 /*
@@ -33,11 +35,10 @@ pgstrom_create_kern_parambuf(List *used_params,
 	ListCell   *cell;
 	Size		offset;
 	int			index = 0;
-	int			nparams = list_length(used_params);;
-	Size		offset = STROMALIGN(offsetof(kern_parambuf,
-											 poffset[nparams]));
+	int			nparams = list_length(used_params);
 
 	/* seek to the head of variable length field */
+	offset = STROMALIGN(offsetof(kern_parambuf, poffset[nparams]));
 	initStringInfo(&str);
 	enlargeStringInfo(&str, offset);
 	str.len = offset;
@@ -123,6 +124,7 @@ pgstrom_create_kern_parambuf(List *used_params,
 								   STROMALIGN(str.len) - str.len);
 		index++;
 	}
+	Assert(STROMALIGN(str.len) == str.len);
 	kpbuf = (kern_parambuf *)str.data;
 	kpbuf->length = str.len;
 	kpbuf->nparams = nparams;
@@ -137,15 +139,20 @@ pgstrom_create_kern_parambuf(List *used_params,
  */
 pgstrom_row_store *
 pgstrom_load_row_store_heap(HeapScanDesc scan, ScanDirection direction,
-							List *dev_attnums, bool *scan_done)
+							kern_colmeta *rs_colmeta, List *dev_attnums,
+							bool *scan_done)
 {
+	pgstrom_row_store *rstore;
 	Relation	rel = scan->rs_rd;
 	AttrNumber	rs_ncols = RelationGetNumberOfAttributes(rel);
 	AttrNumber	cs_ncols = list_length(dev_attnums);
+	HeapTuple	tuple;
 	cl_uint		nrows;
 	cl_uint		usage_head;
 	cl_uint		usage_tail;
+	cl_uint		offset;
 	cl_uint	   *p_offset;
+	kern_column_store *kcs_head;
 	ListCell   *cell;
 	int			index;
 
@@ -162,15 +169,15 @@ pgstrom_load_row_store_heap(HeapScanDesc scan, ScanDirection direction,
 	 * qualifier expression.
 	 */
 	rstore->stag = StromTag_RowStore;
-	rstore->kern.length =
-		STROMALIGN_DOWN(ROWSTORE_DEFAULT_SIZE -
-						STROMALIGN(offsetof(pgstrom_column_store,
-											colmeta[cs_ncols])))
-		- offsetof(pgstrom_row_store, kern);
+	rstore->kern.length
+		= STROMALIGN_DOWN(ROWSTORE_DEFAULT_SIZE -
+						  STROMALIGN(offsetof(kern_column_store,
+											  colmeta[cs_ncols])) -
+						  offsetof(pgstrom_row_store, kern));
 	rstore->kern.ncols = rs_ncols;
 	rstore->kern.nrows = 0;
 	memcpy(rstore->kern.colmeta,
-		   gss->dev_colmeta,
+		   rs_colmeta,
 		   sizeof(kern_colmeta) * rs_ncols);
 
 	/*
@@ -199,7 +206,7 @@ pgstrom_load_row_store_heap(HeapScanDesc scan, ScanDirection direction,
 		}
 		usage_tail -= length;
 		usage_head += sizeof(cl_uint);
-		rs_tup = (rs_tuple *)((char *)&rstore->kern + usage);
+		rs_tup = (rs_tuple *)((char *)&rstore->kern + usage_tail);
 		memcpy(&rs_tup->htup, tuple, sizeof(HeapTupleData));
 		rs_tup->htup.t_data = &rs_tup->data;
 		memcpy(&rs_tup->data, tuple->t_data, tuple->t_len);
@@ -220,7 +227,7 @@ pgstrom_load_row_store_heap(HeapScanDesc scan, ScanDirection direction,
 	 * shared memory block; to be copied to in-kernel data structure.
 	 */
 	kcs_head = (kern_column_store *)((char *)(&rstore->kern) +
-									 rstore->kern_len);
+									 rstore->kern.length);
 	kcs_head->ncols = cs_ncols;
 	kcs_head->nrows = nrows;
 
@@ -243,6 +250,7 @@ pgstrom_load_row_store_heap(HeapScanDesc scan, ScanDirection direction,
 		index++;
 	}
 	kcs_head->length = offset;
+	rstore->kcs_head = kcs_head;
 	Assert(pgstrom_shmem_sanitycheck(rstore));
 	return rstore;
 }

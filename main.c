@@ -103,6 +103,9 @@ pgstrom_strerror(cl_int errcode)
 {
 	static char		unknown_buf[256];
 
+	if (errcode < 0)
+		return opencl_strerror(errcode);
+
 	switch (errcode)
 	{
 		case StromError_Success:

@@ -314,9 +314,12 @@ pgstrom_opencl_main(Datum main_arg)
 
 	/* initialize opencl devices and shared memory segment */
 	init_opencl_devices_and_shmem();
-
 	elog(LOG, "Starting PG-Strom OpenCL Server");
 
+#ifdef PGSTROM_DEBUG
+	/* force to set error log to verbose mode */
+	Log_error_verbosity = PGERROR_VERBOSE;
+#endif
 	/* XXX - to be handled with multi-threading in the future */
 	pgstrom_opencl_event_loop();
 

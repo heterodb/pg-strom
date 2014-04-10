@@ -19,17 +19,15 @@
  * It packs a kern_parambuf and kern_result structure within a continuous
  * memory ares, to transfer (usually) small chunk by one DMA call.
  *
- * +----------------+
- * | roffset  o----------------------+ An offset value from the head of
- * +----------------+       -----    | kern_gpuscan structure, to point
- * | kern_parambuf  |         ^      | kern_result area.
- * | +--------------+         |      |
- * | | length       |         |      |
- * | +--------------+         |      |
- * | | nparams      |         |      |
- * | +--------------+         |      |
- * | | poffset[0]   |         |      |
- * | | poffset[1]   |         |      |
+ * +----------------+       -----
+ * | kern_parambuf  |         ^
+ * | +--------------+         |
+ * | | length   o--------------------+
+ * | +--------------+         |      | kern_resultbuf is located just after
+ * | | nparams      |         |      | the kern_parambuf (because of DMA
+ * | +--------------+         |      | optimization), so head address of
+ * | | poffset[0]   |         |      | kern_gpuscan + parambuf.length
+ * | | poffset[1]   |         |      | points kern_resultbuf.
  * | |    :         |         |      |
  * | | poffset[M-1] |         |      |
  * | +--------------+         |      |
@@ -54,16 +52,22 @@
  * Gpuscan kernel code assumes all the fields shall be initialized to zero.
  */
 typedef struct {
-	cl_uint			roffset;	/* offset to kern_result */
-	kern_parambuf	kparam __attribute__((aligned(STROMALIGN_LEN)));
+	kern_parambuf	kparam;
+	/*
+	 * as above, kern_resultbuf shall be located next to the parambuf
+	 */
 } kern_gpuscan;
 
 #define KERN_GPUSCAN_PARAMBUF(kgscan)			\
 	((kern_parambuf *)(&(kgscan)->kparam))
 #define KERN_GPUSCAN_RESULTBUF(kgscan)			\
-	((kern_resultbuf *)((uintptr_t)(kgscan) + (kgscan)->roffset))
+	((kern_resultbuf *)((char *)(kgscan) + (kgscan)->kparam.length))
 #define KERN_GPUSCAN_LENGTH(kgscan,nrows)		\
-	((kgscan)->roffset + offsetof(kern_result, results[(nrows)]))
+	(offsetof(kern_gpuscan, kparam) +			\
+	 (kgscan)->kparam.length +					\
+	 offsetof(kern_resultbuf, results[(nrows)]))
+#define KERN_GPUSCAN_DMA_LENGTH(kgscan)			\
+	KERN_GPUSCAN_LENGTH(kgscan,0)
 
 #ifdef OPENCL_DEVICE_CODE
 /* macro for error setting */

@@ -22,12 +22,6 @@
 #include "opencl_common.h"
 #include "strom_types.h"
 
-#ifndef PG_USE_INLINE
-#define IF_INLINE	inline
-#else
-#define IF_INLINE
-#endif
-
 /*
  * shmem.c
  */
@@ -72,6 +66,7 @@ pgstrom_create_kern_parambuf(List *used_params,
 extern pgstrom_row_store *
 pgstrom_load_row_store_heap(HeapScanDesc scan,
 							ScanDirection direction,
+							kern_colmeta *rs_colmeta,
                             List *dev_attnums,
 							bool *scan_done);
 
