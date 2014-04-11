@@ -140,16 +140,100 @@ typedef struct {
  * host side and abort transactions. 'results' informs row-level status.
  */
 typedef struct {
+	cl_uint		nrooms;		/* max number of results rooms */
 	cl_uint		nitems;		/* number of results being written */
+	cl_uint		debug_usage;/* current usage of debug buffer */
 	cl_int		errcode;	/* chunk-level error */
 	cl_int		results[FLEXIBLE_ARRAY_MEMBER];
 } kern_resultbuf;
 
 /*
+ * kern_debug
+ *
+ * When pg_strom.kernel_debug is enabled, KERNEL_DEBUG_BUFSIZE bytes of
+ * debug buffer is allocated on the behind of kern_resultbuf.
+ * Usually, it shall be written back to the host with kernel execution
+ * results, and will be dumped to the console.
+ */
+#define KERNEL_DEBUG_BUFSIZE	(2048 * 1024)	/* 2MB */
+
+typedef struct {
+	cl_uint		length;		/* length of this entry; 4-bytes aligned */
+	cl_ushort	global_ofs;
+	cl_ushort	global_sz;
+	cl_ushort	global_id;
+	cl_ushort	local_sz;
+	cl_ushort	local_id;
+	cl_ushort	v_class;
+	union {
+		cl_char		v_char;		/* = 'c' */
+		cl_uchar	v_uchar;	/* = 'C' */
+		cl_short	v_short;	/* = 's' */
+		cl_ushort	v_ushort;	/* = 'S' */
+		cl_int		v_int;		/* = 'i' */
+		cl_uint		v_uint;		/* = 'I' */
+		cl_long		v_long;		/* = 'l' */
+		cl_ulong	v_ulong;	/* = 'L' */
+		cl_float	v_float;	/* = 'f' */
+		cl_double	v_double;	/* = 'd' */
+	} value;
+	cl_char		label[FLEXIBLE_ARRAY_MEMBER];
+} kern_debug;
+
+#ifdef OPENCL_DEVICE_CODE
+
+#ifdef PGSTROM_KERNEL_DEBUG
+#define PG_KERN_DEBUG_TEMPLATE(BASETYPE, V_CLASS)						\
+	static inline void													\
+	pg_kern_debug(__global kern_result *kresult,						\
+				  __constant char *label,								\
+				  size_t label_sz,										\
+				  cl_##BASETYPE## value)								\
+	{																	\
+		__global kern_debug *kdebug;									\
+		cl_uint	offset;													\
+		cl_uint length = offset(kern_debug, label) + label_sz;			\
+		cl_uint i;														\
+																		\
+		length = TYPEALIGN(sizeof(cl_uint), length);					\
+		offset = atomic_add(&kresult->debug_usage, lenght);				\
+																		\
+		kdebug = (__global kern_debug *)								\
+			&kresult->results[kresult->nrooms];							\
+		kdebug->lenght = length;										\
+		kdebug->global_ofs = get_global_offset(0);						\
+		kdebug->global_sz = get_global_size(0);							\
+		kdebug->global_id = get_global_id(0);							\
+		kdebug->local_sz = get_local_size(0);							\
+		kdebug->local_id = get_local_id(0);								\
+		kdebug->v_class = V_CLASS;										\
+		kdebug->value.v_##BASETYPE## = value;							\
+		for (i=0; i < length; i++)										\
+			kdebug->label[i] = label[i];								\
+	}
+
+PG_KERN_DEBUG_TEMPLATE(char,   'c')
+PG_KERN_DEBUG_TEMPLATE(uchar,  'C')
+PG_KERN_DEBUG_TEMPLATE(short,  's')
+PG_KERN_DEBUG_TEMPLATE(ushort, 'S')
+PG_KERN_DEBUG_TEMPLATE(int,    'i')
+PG_KERN_DEBUG_TEMPLATE(uint,   'I')
+PG_KERN_DEBUG_TEMPLATE(long,   'l')
+PG_KERN_DEBUG_TEMPLATE(ulong,  'L')
+PG_KERN_DEBUG_TEMPLATE(float,  'f')
+PG_KERN_DEBUG_TEMPLATE(double, 'd')
+
+#define KDEBUG(kresult, label, value)	\
+	pg_kern_debug((kresult), (label), sizeof(label), (value))
+#else
+#define KDEBUG(kresult, label, value)	do {} while(0)
+#endif /* PGSTROM_KERNEL_DEBUG */
+
+/*
  * Data type definitions for row oriented data format
  * ---------------------------------------------------
  */
-#ifdef OPENCL_DEVICE_CODE
+
 /*
  * we need to e-define HeapTupleData and HeapTupleHeaderData and
  * t_infomask related stuff

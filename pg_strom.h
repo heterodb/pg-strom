@@ -102,12 +102,14 @@ extern void pgstrom_init_opencl_devinfo(void);
  * opencl_devprog.c
  */
 #define BAD_OPENCL_PROGRAM		((void *) ~0UL)
+extern bool pgstrom_kernel_debug;
 extern cl_program clserv_lookup_device_program(Datum dprog_key,
 											   pgstrom_message *msg);
 extern Datum pgstrom_get_devprog_key(const char *source, int32 extra_libs);
 extern void pgstrom_put_devprog_key(Datum dprog_key);
 extern Datum pgstrom_retain_devprog_key(Datum dprog_key);
 extern const char *pgstrom_get_devprog_errmsg(Datum dprog_key);
+extern void pgstrom_dump_kernel_debug(kern_resultbuf *kresult);
 extern void pgstrom_init_opencl_devprog(void);
 extern Datum pgstrom_opencl_device_info(PG_FUNCTION_ARGS);
 

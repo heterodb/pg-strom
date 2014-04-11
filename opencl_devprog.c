@@ -21,7 +21,8 @@
 #include "pg_strom.h"
 
 static shmem_startup_hook_type shmem_startup_hook_next;
-static int reclaim_threshold;
+static int	reclaim_threshold;
+bool		pgstrom_kernel_debug;
 
 #define DEVPROG_HASH_SIZE	2048
 
@@ -48,7 +49,7 @@ typedef struct {
 
 	/* The fields below are read-only once constructed */
 	pg_crc32	crc;
-	int32		extra_libs;	/* set of DEVFUNC_NEEDS_* */
+	int32		extra_flags;	/* set of DEVFUNC_NEEDS_* */
 	Size		source_len;
 	char		source[FLEXIBLE_ARRAY_MEMBER];
 } devprog_entry;
@@ -250,9 +251,9 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 	if (!dprog->program)
 	{
 		cl_program	program;
-		const char *build_opts;
 		const char *sources[32];
 		size_t		lengths[32];
+		char		build_opts[256];
 		cl_uint		count = 0;
 
 		/* common opencl header */
@@ -261,21 +262,21 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 		count++;
 #if 0
 		/* opencl timelib */
-		if (dprog->extra_libs & DEVFUNC_NEEDS_TIMELIB)
+		if (dprog->extra_flags & DEVFUNC_NEEDS_TIMELIB)
 		{
 			sources[count] = pgstrom_opencl_timelib_code;
 			lengths[count] = strlen(pgstrom_opencl_timelib_code);
 			count++;
 		}
 		/* opencl textlib */
-		if (dprog->extra_libs & DEVFUNC_NEEDS_TEXTLIB)
+		if (dprog->extra_flags & DEVFUNC_NEEDS_TEXTLIB)
 		{
 			sources[count] = pgstrom_opencl_textlib_code;
 			lengths[count] = strlen(pgstrom_opencl_textlib_code);
 			count++;
 		}
 		/* opencl numericlib */
-		if (dprog->extra_libs & DEVFUNC_NEEDS_NUMERICLIB)
+		if (dprog->extra_flags & DEVFUNC_NEEDS_NUMERICLIB)
 		{
 			sources[count] = pgstrom_opencl_numericlib_code;
 			lengths[count] = strlen(pgstrom_opencl_numericlib_code);
@@ -283,7 +284,7 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 		}
 #endif
 		/* gpuscan device implementation */
-		if (dprog->extra_libs & DEVKERNEL_NEEDS_GPUSCAN)
+		if (dprog->extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
 		{
 			sources[count] = pgstrom_opencl_gpuscan_code;
 			lengths[count] = strlen(pgstrom_opencl_gpuscan_code);
@@ -291,14 +292,14 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 		}
 #if 0
 		/* gpusort device implementation */
-		if (dprog->extra_libs & DEVKERNEL_NEEDS_GPUSORT)
+		if (dprog->extra_flags & DEVKERNEL_NEEDS_GPUSORT)
 		{
 			sources[count] = pgstrom_opencl_gpusort_code;
 			lengths[count] = strlen(pgstrom_opencl_gpusort_code);
 			count++;
 		}
 		/* hashjoin device implementation */
-		if (dprog->extra_libs & DEVKERNEL_NEEDS_HASHJOIN)
+		if (dprog->extra_flags & DEVKERNEL_NEEDS_HASHJOIN)
 		{
 			sources[count] = pgstrom_opencl_hashjoin_code;
 			lengths[count] = strlen(pgstrom_opencl_hashjoin_code);
@@ -339,16 +340,16 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 		 */
 		SpinLockRelease(&dprog->lock);
 
-		build_opts = "-DOPENCL_DEVICE_CODE"
-#if SIZEOF_VOID_P == 8
-			" -DHOSTPTRLEN=8"
-#else
-			" -DHOSTPTRLEN=4"
-#endif
+		Assert(SIZEOF_VOID_P == 8 || SIZEOF_VOID_P == 4);
+		snprintf(build_opts, sizeof(build_opts),
+				 "-DOPENCL_DEVICE_CODE -DHOSTPTRLEN=%u %s"
 #ifdef PGSTROM_DEBUG
-			" -Werror"
+				 "-Werror -cl-opt-disable"
 #endif
-			;
+				 , SIZEOF_VOID_P,
+				 ((dprog->extra_flags & DEVKERNEL_NEEDS_DEBUG) != 0
+				  ? "-DPGSTROM_KERNEL_DEBUG=1 " : ""));
+
 		rc = clBuildProgram(program,
 							opencl_num_devices,
 							opencl_devices,
@@ -447,14 +448,14 @@ out_unlock:
 /*
  * pgstrom_get_devprog_key
  *
- * It returns a devprog-key that holds the given source and extra_libs.
+ * It returns a devprog-key that holds the given source and extra_flags.
  * If not found on the device program table, it also create a new one
  * and insert it, then returns its key.
  *
  * TODO: add a resource tracking here to ensure device program is released.
  */
 Datum
-pgstrom_get_devprog_key(const char *source, int32 extra_libs)
+pgstrom_get_devprog_key(const char *source, int32 extra_flags)
 {
 	devprog_entry *dprog = NULL;
 	Size		source_len = strlen(source);
@@ -463,9 +464,13 @@ pgstrom_get_devprog_key(const char *source, int32 extra_libs)
 	dlist_iter	iter;
 	pg_crc32	crc;
 
+	/* only backend will call this routine */
+	if (pgstrom_kernel_debug)
+		extra_flags |= pgstrom_kernel_debug;
+
 	/* calculate a hash value */
 	INIT_CRC32(crc);
-	COMP_CRC32(crc, &extra_libs, sizeof(int32));
+	COMP_CRC32(crc, &extra_flags, sizeof(int32));
 	COMP_CRC32(crc, source, source_len);
 	FIN_CRC32(crc);
 
@@ -478,7 +483,7 @@ retry:
 			= dlist_container(devprog_entry, hash_chain, iter.cur);
 
 		if (entry->crc == crc &&
-			entry->extra_libs == extra_libs &&
+			entry->extra_flags == extra_flags &&
 			entry->source_len == source_len &&
 			strcmp(entry->source, source) == 0)
 		{
@@ -526,7 +531,7 @@ retry:
 	dprog->build_running = false;
     dprog->errmsg = NULL;
 	dprog->crc = crc;
-	dprog->extra_libs = extra_libs;
+	dprog->extra_flags = extra_flags;
 	dprog->source_len = source_len;
 	strcpy(dprog->source, source);
 	opencl_devprog_shm_values->usage += alloc_len;
@@ -596,6 +601,89 @@ pgstrom_get_devprog_errmsg(Datum dprog_key)
 }
 
 /*
+ * pgstrom_dump_kernel_debug
+ *
+ * It dumps all the debug message during kernel execution, if any.
+ */
+void
+pgstrom_dump_kernel_debug(kern_resultbuf *kresult)
+{
+	kern_debug *kdebug;
+	char	   *baseptr;
+	cl_uint		offset = 0;
+
+	if (kresult->debug_usage == 0)
+		return;
+
+	baseptr = (char *)&kresult->results[kresult->nrooms];
+	while (offset < kresult->debug_usage)
+	{
+		char		buf[1024];
+		cl_uint		i;
+
+		kdebug = (kern_debug *)(baseptr + offset);
+		i = snprintf(buf, sizeof(buf),
+					 "Global(%u/%u+%u) Local (%u/%u) %s = ",
+					 kdebug->global_id,
+					 kdebug->global_sz,
+					 kdebug->global_ofs,
+					 kdebug->local_id,
+					 kdebug->local_sz,
+					 kdebug->label);
+		switch (kdebug->v_class)
+		{
+			case 'c':
+				snprintf(buf + i, sizeof(buf) - i,
+						 "%hhd", kdebug->value.v_char);
+				break;
+			case 'C':
+				snprintf(buf + i, sizeof(buf) - i,
+						 "%hhu", kdebug->value.v_uchar);
+				break;
+			case 's':
+				snprintf(buf + i, sizeof(buf) - i,
+						 "%hd", kdebug->value.v_short);
+				break;
+			case 'S':
+				snprintf(buf + i, sizeof(buf) - i,
+						 "%hu", kdebug->value.v_ushort);
+				break;
+			case 'i':
+				snprintf(buf + i, sizeof(buf) - i,
+						 "%d", kdebug->value.v_int);
+				break;
+			case 'I':
+				snprintf(buf + i, sizeof(buf) - i,
+						 "%u", kdebug->value.v_uint);
+				break;
+			case 'l':
+				snprintf(buf + i, sizeof(buf) - i,
+						 "%ld", kdebug->value.v_long);
+				break;
+			case 'L':
+				snprintf(buf + i, sizeof(buf) - i,
+						 "%lu", kdebug->value.v_ulong);
+				break;
+			case 'f':
+				snprintf(buf + i, sizeof(buf) - i,
+						 "%f", (cl_double)kdebug->value.v_float);
+				break;
+			case 'd':
+				snprintf(buf + i, sizeof(buf) - i,
+						 "%f", kdebug->value.v_double);
+				break;
+			default:
+				snprintf(buf + i, sizeof(buf) - i,
+						 "0x%016lx (unknown class)", kdebug->value.v_long);
+				break;
+		}
+		elog(INFO, "kdebug: %s", buf);
+
+		offset += kdebug->length;
+	}
+}
+
+/*
  * pgstrom_startup_opencl_devprog
  *
  * callback for shared memory allocation
@@ -641,6 +729,17 @@ pgstrom_init_opencl_devprog(void)
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
+
+	/* turn on/off kernel device debug support */
+	DefineCustomBoolVariable("pg_strom.kernel_debug",
+							 "turn on/off kernel debug support",
+							 NULL,
+							 &pgstrom_kernel_debug,
+							 false,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
 	/* aquires shared memory region */
 	RequestAddinShmemSpace(MAXALIGN(sizeof(*opencl_devprog_shm_values)));
 	shmem_startup_hook_next = shmem_startup_hook;

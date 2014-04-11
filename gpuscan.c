@@ -732,7 +732,8 @@ pgstrom_load_gpuscan_row(GpuScanState *gss)
 	nrows = rstore->kern.nrows;
 	length = (STROMALIGN(offsetof(pgstrom_gpuscan, kern.kparam)) +
 			  STROMALIGN(gss->kparambuf->length) +
-			  STROMALIGN(offsetof(kern_resultbuf, results[nrows])));
+			  STROMALIGN(offsetof(kern_resultbuf, results[nrows])) +
+			  (pgstrom_kernel_debug ? KERNEL_DEBUG_BUFSIZE : 0));
 	gscan = pgstrom_shmem_alloc(length);
 	if (!gscan)
 	{
@@ -757,7 +758,9 @@ pgstrom_load_gpuscan_row(GpuScanState *gss)
 
 	/* kern_resultbuf portion */
 	kresult = KERN_GPUSCAN_RESULTBUF(&gscan->kern);
+	kresult->nrooms = nrows;
 	kresult->nitems = 0;
+	kresult->debug_usage = 0;
 	kresult->errcode = 0;
 
 	Assert(pgstrom_shmem_sanitycheck(gscan));
