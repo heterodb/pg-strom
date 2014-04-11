@@ -89,6 +89,7 @@ typedef struct {
 	int					scan_mode;
 	pgstrom_queue	   *mqueue;
 	kern_parambuf	   *kparambuf;
+	int32				extra_flags;
 	Datum				dprog_key;
 	List			   *dev_attnums;
 	kern_colmeta	   *dev_colmeta;
@@ -654,9 +655,12 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	gss->mqueue = pgstrom_create_queue();
 	gss->kparambuf = pgstrom_create_kern_parambuf(gsplan->used_params,
 												  gss->cps.ps.ps_ExprContext);
+	gss->extra_flags = gsplan->extra_flags;
+	if (pgstrom_kernel_debug)
+		gss->extra_flags |= DEVKERNEL_NEEDS_DEBUG;
 	if (gsplan->kern_source)
 		gss->dprog_key = pgstrom_get_devprog_key(gsplan->kern_source,
-												 gsplan->extra_flags);
+												 gss->extra_flags);
 	else
 		gss->dprog_key = 0;	/* it might happen if tc-cache got supported */
 
@@ -709,6 +713,15 @@ pgstrom_load_gpuscan_row(GpuScanState *gss)
 	cl_uint		length;
 	cl_uint		nrows;
 	bool		scan_done;
+	bool		kernel_debug;
+
+	/*
+	 * check status of pg_strom.kernel_debug
+	 */
+	if ((gss->extra_flags & DEVKERNEL_NEEDS_DEBUG) != 0)
+		kernel_debug = true;
+	else
+		kernel_debug = false;
 
 	/*
 	 * First of all, allocate a row-store buffer and fill it up
@@ -733,7 +746,7 @@ pgstrom_load_gpuscan_row(GpuScanState *gss)
 	length = (STROMALIGN(offsetof(pgstrom_gpuscan, kern.kparam)) +
 			  STROMALIGN(gss->kparambuf->length) +
 			  STROMALIGN(offsetof(kern_resultbuf, results[nrows])) +
-			  (pgstrom_kernel_debug ? KERNEL_DEBUG_BUFSIZE : 0));
+			  (kernel_debug ? KERNEL_DEBUG_BUFSIZE : 0));
 	gscan = pgstrom_shmem_alloc(length);
 	if (!gscan)
 	{
@@ -760,7 +773,7 @@ pgstrom_load_gpuscan_row(GpuScanState *gss)
 	kresult = KERN_GPUSCAN_RESULTBUF(&gscan->kern);
 	kresult->nrooms = nrows;
 	kresult->nitems = 0;
-	kresult->debug_usage = 0;
+	kresult->debug_usage = (kernel_debug ? 0 : KERN_DEBUG_UNAVAILABLE);
 	kresult->errcode = 0;
 
 	Assert(pgstrom_shmem_sanitycheck(gscan));
@@ -1244,7 +1257,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	/* allocation of device memory for kern_gpuscan argument */
 	clgss->m_gpuscan = clCreateBuffer(opencl_context,
 									  CL_MEM_READ_WRITE,
-									  KERN_GPUSCAN_LENGTH(&gscan->kern, nrows),
+									  KERN_GPUSCAN_LENGTH(&gscan->kern),
 									  NULL,
 									  &rc);
 	if (rc != CL_SUCCESS)
@@ -1293,6 +1306,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 			 opencl_strerror(rc));
 		goto error6;
 	}
+	elog(LOG, "result of CL_KERNEL_WORK_GROUP_SIZE = %lu", lwork_sz);
 
 	/*
 	 * OK, all the device memory and kernel objects acquired.
@@ -1357,7 +1371,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 							  clgss->m_gpuscan,
 							  CL_FALSE,
 							  0,
-							  KERN_GPUSCAN_DMA_LENGTH(&gscan->kern),
+							  KERN_GPUSCAN_DMA_SENDLEN(&gscan->kern),
 							  &gscan->kern,
 							  0,
 							  NULL,
@@ -1405,7 +1419,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	 * Kick gpuscan_qual_rs() call
 	 */
 	gwork_ofs = 0;
-	gwork_sz = (nrows + lwork_sz - 1) / lwork_sz;
+	gwork_sz = ((nrows + lwork_sz - 1) / lwork_sz) * lwork_sz;
 
 	rc = clEnqueueNDRangeKernel(kcmdq,
 								clgss->kernel,
@@ -1431,7 +1445,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 							 CL_FALSE,
 							 ((uintptr_t)KERN_GPUSCAN_RESULTBUF(&gscan->kern) -
 							  (uintptr_t)(&gscan->kern)),
-							 offsetof(kern_resultbuf, results[nrows]),
+							 KERN_GPUSCAN_DMA_RECVLEN(&gscan->kern),
 							 KERN_GPUSCAN_RESULTBUF(&gscan->kern),
 							 1,
 							 &clgss->events[clgss->ev_index - 1],

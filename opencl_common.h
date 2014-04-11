@@ -138,7 +138,11 @@ typedef struct {
  * Output buffer to write back calculation results on a parciular chunk.
  * 'errcode' informs a significant error that shall raise an error on
  * host side and abort transactions. 'results' informs row-level status.
+ *
+ * if 'debug_usage' is not initialized to zero, it means this result-
+ * buffer does not have debug buffer.
  */
+#define KERN_DEBUG_UNAVAILABLE	0xffffffff
 typedef struct {
 	cl_uint		nrooms;		/* max number of results rooms */
 	cl_uint		nitems;		/* number of results being written */
@@ -155,7 +159,7 @@ typedef struct {
  * Usually, it shall be written back to the host with kernel execution
  * results, and will be dumped to the console.
  */
-#define KERNEL_DEBUG_BUFSIZE	(2048 * 1024)	/* 2MB */
+#define KERNEL_DEBUG_BUFSIZE	(4 * 1024 * 1024)	/* 4MB */
 
 typedef struct {
 	cl_uint		length;		/* length of this entry; 4-bytes aligned */

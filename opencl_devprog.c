@@ -464,10 +464,6 @@ pgstrom_get_devprog_key(const char *source, int32 extra_flags)
 	dlist_iter	iter;
 	pg_crc32	crc;
 
-	/* only backend will call this routine */
-	if (pgstrom_kernel_debug)
-		extra_flags |= pgstrom_kernel_debug;
-
 	/* calculate a hash value */
 	INIT_CRC32(crc);
 	COMP_CRC32(crc, &extra_flags, sizeof(int32));

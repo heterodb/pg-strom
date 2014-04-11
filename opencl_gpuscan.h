@@ -39,7 +39,11 @@
  * +-+--------------+  -----  |  <---+
  * | kern_resultbuf |    ^    |
  * | +--------------+    |    |  Area to be sent to OpenCL device.
- * | | nitems       |    |    |  Forward DMA shall be issued here.
+ * | | nrooms       |    |    |  Forward DMA shall be issued here.
+ * | +--------------+    |    |
+ * | | nitems       |    |    |
+ * | +--------------+    |    |
+ * | | debug_usage  |    |    |
  * | +--------------+    |    |
  * | | errcode      |    |    V
  * | +--------------+    |  -----
@@ -47,6 +51,11 @@
  * | | results[1]   |    |  Area to be written back from OpenCL device.
  * | |     :        |    |  Reverse DMA shall be issued here.
  * | | results[N-1] |    V
+ * | +--------------+  --+--
+ * | | debug buffer |    |
+ * | /  (if used)   /    |
+ * | /              /    |
+ * | |              |    V
  * +-+--------------+  -----
  *
  * Gpuscan kernel code assumes all the fields shall be initialized to zero.
@@ -62,12 +71,22 @@ typedef struct {
 	((__global kern_parambuf *)(&(kgscan)->kparam))
 #define KERN_GPUSCAN_RESULTBUF(kgscan)			\
 	((__global kern_resultbuf *)((char *)(kgscan) + (kgscan)->kparam.length))
-#define KERN_GPUSCAN_LENGTH(kgscan,nrows)		\
-	(offsetof(kern_gpuscan, kparam) +			\
-	 (kgscan)->kparam.length +					\
-	 offsetof(kern_resultbuf, results[(nrows)]))
-#define KERN_GPUSCAN_DMA_LENGTH(kgscan)			\
-	KERN_GPUSCAN_LENGTH(kgscan,0)
+#define KERN_GPUSCAN_LENGTH(kgscan)										\
+	(offsetof(kern_gpuscan, kparam) +									\
+	 (kgscan)->kparam.length +											\
+	 offsetof(kern_resultbuf,											\
+			  results[KERN_GPUSCAN_RESULTBUF(kgscan)->nrooms]) +		\
+	 (KERN_GPUSCAN_RESULTBUF(kgscan)->debug_usage == KERN_DEBUG_UNAVAILABLE ? \
+	  0 : KERNEL_DEBUG_BUFSIZE))
+#define KERN_GPUSCAN_DMA_SENDLEN(kgscan)		\
+	((kgscan)->kparam.length +					\
+	 offsetof(kern_resultbuf, results[0]))
+
+#define KERN_GPUSCAN_DMA_RECVLEN(kgscan)								\
+	(offsetof(kern_resultbuf,											\
+			  results[KERN_GPUSCAN_RESULTBUF(kgscan)->nrooms]) +		\
+	 (KERN_GPUSCAN_RESULTBUF(kgscan)->debug_usage == KERN_DEBUG_UNAVAILABLE ? \
+	  0 : KERNEL_DEBUG_BUFSIZE))
 
 #ifdef OPENCL_DEVICE_CODE
 /* macro for error setting */
