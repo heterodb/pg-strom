@@ -378,7 +378,10 @@ pgstrom_close_queue(pgstrom_queue *mqueue)
 	{
 		pthread_cond_destroy(&mqueue->cond);
 		pthread_mutex_destroy(&mqueue->lock);
-		pgstrom_shmem_free(mqueue);
+		SpinLockAcquire(&mqueue_shm_values->lock);
+        dlist_push_tail(&mqueue_shm_values->free_queue_list,
+                        &mqueue->chain);
+        SpinLockRelease(&mqueue_shm_values->lock);
 	}
 }
 

@@ -961,7 +961,8 @@ gpuscan_end(CustomPlanState *node)
 	/*
 	 * close heap scan and relation
 	 */
-	heap_endscan(gss->scan_desc);
+	if (gss->scan_desc)
+		heap_endscan(gss->scan_desc);
 	heap_close(gss->scan_rel, NoLock);
 }
 
