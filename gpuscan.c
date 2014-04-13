@@ -368,7 +368,7 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 
 		appendStringInfo(&str, "%s%u",
 						 cell == list_head(context->used_vars) ? "" : ", ",
-						 var->varattno);
+						 var->varattno - 1);
 	}
 	appendStringInfo(&str, "};\n\n");
 
@@ -407,6 +407,7 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					 "                     lengthof(pg_used_vars),\n"
 					 "                     pg_used_vars,\n"
 					 "                     local_workmem);\n"
+					 "  return;\n"
 					 "  gpuscan_qual_cs(kgscan,kcs,\n"
 					 "                  (__global kern_toastbuf *)krs,\n"
 					 "                  local_workmem);\n"
@@ -672,6 +673,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		Form_pg_attribute attr = tupdesc->attrs[anum];
 		kern_colmeta   *colmeta = &gss->dev_colmeta[anum];
 
+		colmeta->flags = 0;
 		if (attr->attnotnull)
 			colmeta->flags |= KERN_COLMETA_ATTNOTNULL;
 		if (cell && attr->attnum == lfirst_int(cell))
@@ -1190,6 +1192,9 @@ clserv_respond_gpuscan_row(cl_event event, cl_int ev_status, void *private)
 {
 	clstate_gpuscan_row	*clgss = private;
 	pgstrom_gpuscan		*gscan = (pgstrom_gpuscan *)clgss->msg;
+#ifdef PGSTROM_DEBUG
+	cl_uint		refcnt;
+#endif
 
 	/* put error code */
 	if (ev_status != CL_COMPLETE)
@@ -1205,7 +1210,15 @@ clserv_respond_gpuscan_row(cl_event event, cl_int ev_status, void *private)
 
 	/* release opencl objects */
 	while (clgss->ev_index > 0)
+	{
+#ifdef PGSTROM_DEBUG
+		clGetEventInfo(clgss->events[clgss->ev_index - 1],
+					   CL_EVENT_REFERENCE_COUNT,
+					   sizeof(refcnt), &refcnt, NULL);
+		Assert(refcnt == 1);
+#endif
 		clReleaseEvent(clgss->events[--clgss->ev_index]);
+	}
 	clReleaseMemObject(clgss->m_cstore);
 	clReleaseMemObject(clgss->m_rstore);
 	clReleaseMemObject(clgss->m_gpuscan);
@@ -1225,12 +1238,10 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	clstate_gpuscan_row *clgss;
 	kern_row_store	   *krstore;
 	kern_column_store  *kcstore_head;
-	cl_device_id		kdevice;
 	cl_command_queue	kcmdq;
 	cl_uint				nrows;
 	cl_uint				i;
 	cl_int				rc;
-	size_t				gwork_ofs;
 	size_t				gwork_sz;
 	size_t				lwork_sz;
 
@@ -1250,7 +1261,18 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	memset(clgss, 0, sizeof(clstate_gpuscan_row));
 	clgss->msg = &gscan->msg;
 	krstore = &rstore->kern;
+
 	kcstore_head = rstore->kcs_head;
+	if (true)
+	{
+		elog(LOG, "kcs {length=%u ncols=%u nrows=%u", kcstore_head->length, kcstore_head->ncols, kcstore_head->nrows);
+		for (i=0; i < kcstore_head->ncols; i++)
+		{
+			kern_colmeta *colmeta = &kcstore_head->colmeta[i];
+
+			elog(LOG, "col(%d) flags=%02x align=%d attlen=%d ofs=%u", i, colmeta->flags, colmeta->attalign, colmeta->attlen, colmeta->cs_ofs);
+		}
+	}
 
 	nrows = krstore->nrows;
 
@@ -1297,8 +1319,11 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	 * Choose a device to execute this kernel
 	 */
 	i = pgstrom_opencl_device_schedule(&gscan->msg);
-	kdevice = opencl_devices[i];
 	kcmdq = opencl_cmdq[i];
+
+	/* and, compute an optimal workgroup-size of this kernel */
+	lwork_sz = clserv_compute_workgroup_size(clgss->kernel, i, nrows,
+											 2 * sizeof(cl_uint));
 
 	/* allocation of device memory for kern_gpuscan argument */
 	clgss->m_gpuscan = clCreateBuffer(opencl_context,
@@ -1335,24 +1360,6 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 		elog(LOG, "failed on clCreateBuffer: %s", opencl_strerror(rc));
 		goto error5;
 	}
-
-	/*
-	 * Calculate an optimized workgroup-size for the main logic.
-	 * (Note that kernel_prep shall run single-threaded)
-	 */
-	rc = clGetKernelWorkGroupInfo(clgss->kernel,
-								  kdevice,
-								  CL_KERNEL_WORK_GROUP_SIZE,
-								  sizeof(lwork_sz),
-								  &lwork_sz,
-								  NULL);
-	if (rc != CL_SUCCESS)
-	{
-		elog(LOG, "failed on clGetKernelWorkGroupInfo: %s",
-			 opencl_strerror(rc));
-		goto error6;
-	}
-	elog(LOG, "result of CL_KERNEL_WORK_GROUP_SIZE = %lu", lwork_sz);
 
 	/*
 	 * OK, all the device memory and kernel objects acquired.
@@ -1464,13 +1471,12 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	/*
 	 * Kick gpuscan_qual_rs() call
 	 */
-	gwork_ofs = 0;
 	gwork_sz = ((nrows + lwork_sz - 1) / lwork_sz) * lwork_sz;
 
 	rc = clEnqueueNDRangeKernel(kcmdq,
 								clgss->kernel,
 								1,
-								&gwork_ofs,
+								NULL,
 								&gwork_sz,
 								&lwork_sz,
 								3,

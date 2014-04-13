@@ -72,7 +72,6 @@ pgstrom_load_row_store_heap(HeapScanDesc scan,
                             List *dev_attnums,
 							bool *scan_done);
 
-
 /*
  * restrack.c
  */
@@ -98,6 +97,11 @@ extern int	pgstrom_get_device_nums(void);
 extern const pgstrom_device_info *pgstrom_get_device_info(unsigned int index);
 extern void pgstrom_setup_opencl_devinfo(List *dev_list);
 extern void pgstrom_init_opencl_devinfo(void);
+
+extern size_t clserv_compute_workgroup_size(cl_kernel kernel,
+											int dev_index,
+											size_t num_threads,
+											size_t local_memsz_per_thread);
 
 /*
  * opencl_devprog.c

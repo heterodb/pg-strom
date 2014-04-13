@@ -831,3 +831,101 @@ pgstrom_init_opencl_devinfo(void)
 	shmem_startup_hook_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_opencl_devinfo;
 }
+
+/*
+ * clserv_compute_workgroup_size
+ *
+ * It estimates an optimal workgroup size for the supplied kernel
+ */
+size_t
+clserv_compute_workgroup_size(cl_kernel kernel, int dev_index,
+							  size_t num_threads,
+							  size_t local_memsz_per_thread)
+{
+	pgstrom_device_info *devinfo;
+	cl_device_id kdevice;
+	size_t		workgroup_sz;
+	size_t		kern_local_usage;
+	size_t		preferred_basesz;
+	cl_ulong	kern_local_memsz;
+	cl_int		rc;
+
+	Assert(pgstrom_i_am_clserv);
+
+	kdevice = opencl_devices[dev_index];
+
+	/* get a hint based on register/static local memory usage */
+	rc = clGetKernelWorkGroupInfo(kernel,
+								  kdevice,
+								  CL_KERNEL_WORK_GROUP_SIZE,
+								  sizeof(workgroup_sz),
+								  &workgroup_sz,
+								  NULL);
+	if (rc != CL_SUCCESS)
+	{
+		elog(LOG, "failed on clGetKernelWorkGroupInfo: %s",
+			 opencl_strerror(rc));
+		return 0;
+	}
+	elog(LOG, "CL_KERNEL_WORK_GROUP_SIZE = %lu", workgroup_sz);
+
+	/* preferred multiple of workgroup size for launch. */
+	rc = clGetKernelWorkGroupInfo(kernel,
+								  kdevice,
+								  CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE,
+								  sizeof(preferred_basesz),
+								  &preferred_basesz,
+								  NULL);
+	if (rc != CL_SUCCESS)
+	{
+		elog(LOG, "failed on clGetKernelWorkGroupInfo: %s",
+			 opencl_strerror(rc));
+		return 0;
+	}
+	elog(LOG, "CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE = %lu", preferred_basesz);
+#if 0
+	/* PG-Strom requires at least 32, for workgroup-size */
+	if (preferred_basesz < 32)
+		preferred_basesz = 32;
+#endif
+
+	num_threads = ((num_threads + preferred_basesz - 1)
+				   / preferred_basesz) * preferred_basesz;
+	if (workgroup_sz > num_threads)
+		workgroup_sz = num_threads;
+
+	/*
+	 * Do we need to adjust workgroup size according to the consumption of
+	 * local memory usage.
+	 */
+	rc = clGetKernelWorkGroupInfo(kernel,
+								  kdevice,
+								  CL_KERNEL_LOCAL_MEM_SIZE,
+								  sizeof(kern_local_usage),
+								  &kern_local_usage,
+								  NULL);
+	if (rc != CL_SUCCESS)
+	{
+		elog(LOG, "failed on clGetKernelWorkGroupInfo: %s",
+			 opencl_strerror(rc));
+		return 0;
+	}
+	elog(LOG, "CL_KERNEL_LOCAL_MEM_SIZE = %lu", kern_local_usage);
+
+	devinfo = devinfo_shm_values->devinfo_array[dev_index];
+	if (kern_local_usage > devinfo->dev_local_mem_size)
+	{
+		elog(LOG, "static local memory of kernel is too large to run");
+		return 0;
+	}
+	if (local_memsz_per_thread == 0)
+		return workgroup_sz;
+
+	kern_local_memsz = devinfo->dev_local_mem_size - kern_local_usage;
+	if (local_memsz_per_thread * workgroup_sz > kern_local_memsz)
+	{
+		workgroup_sz = kern_local_memsz / local_memsz_per_thread;
+		workgroup_sz -= (workgroup_sz % preferred_basesz);
+	}
+	return workgroup_sz;
+}

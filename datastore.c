@@ -241,7 +241,7 @@ pgstrom_load_row_store_heap(HeapScanDesc scan, ScanDirection direction,
 		Assert(anum > 0 && anum <= rs_ncols);
 		colmeta = &rstore->kern.colmeta[anum - 1];
 		memcpy(&kcs_head->colmeta[index], colmeta, sizeof(kern_colmeta));
-		colmeta->cs_ofs = offset;
+		kcs_head->colmeta[index].cs_ofs = offset;
 		if ((colmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
 			offset += STROMALIGN((nrows + 7) / 8);
 		offset += STROMALIGN(nrows * (colmeta->attlen > 0

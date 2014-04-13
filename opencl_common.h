@@ -696,7 +696,6 @@ kern_row_to_column(__global kern_row_store *krs,
 				}
 			}
 		}
-
 		/*
 		 * Calculation of nullmap if this column is the target to be moved.
 		 * Because it takes per bit operation using interaction with neighbor
@@ -709,6 +708,7 @@ kern_row_to_column(__global kern_row_store *krs,
 
 			if ((colmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
 			{
+#if 0
 				workbuf[local_id]
 					= (isnull ? (1 << (local_id & 0x07)) : 0);
 				barrier(CLK_LOCAL_MEM_FENCE);
@@ -728,6 +728,7 @@ kern_row_to_column(__global kern_row_store *krs,
 					  colmeta->cs_ofs +
 					  (get_global_id(0) >> 3)) = workbuf[local_id];
 				}
+#endif
 			}
 			j++;
 		}
