@@ -13,6 +13,7 @@
  */
 #ifndef PG_STROM_H
 #define PG_STROM_H
+#include "commands/explain.h"
 #include "fmgr.h"
 #include "lib/ilist.h"
 #include "nodes/execnodes.h"
@@ -147,8 +148,7 @@ typedef struct {
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid);
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
-extern char *pgstrom_codegen_declarations(codegen_context *context,
-										  bool is_explain);
+extern char *pgstrom_codegen_declarations(codegen_context *context);
 extern bool pgstrom_codegen_available_expression(Expr *expr);
 extern void pgstrom_codegen_init(void);
 
@@ -164,6 +164,13 @@ extern int	pgstrom_max_async_chunks;
 extern int	pgstrom_min_async_chunks;
 extern void _PG_init(void);
 extern const char *pgstrom_strerror(cl_int errcode);
+extern void show_scan_qual(List *qual, const char *qlabel,
+						   PlanState *planstate, List *ancestors,
+						   ExplainState *es);
+extern void show_instrumentation_count(const char *qlabel, int which,
+									   PlanState *planstate, ExplainState *es);
+extern void show_device_kernel(const char *device_kernel, int32 extra_flags,
+							   ExplainState *es);
 extern Datum pgstrom_shmem_alloc_func(PG_FUNCTION_ARGS);
 extern Datum pgstrom_shmem_free_func(PG_FUNCTION_ARGS);
 

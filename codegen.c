@@ -1293,36 +1293,12 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 }
 
 char *
-pgstrom_codegen_declarations(codegen_context *context, bool is_explain)
+pgstrom_codegen_declarations(codegen_context *context)
 {
 	StringInfoData	str;
 	ListCell	   *cell;
 
 	initStringInfo(&str);
-
-	/*
-	 * In case of EXPLAIN command context, we show the built-in logics
-	 * like a usual #include preprocessor command.
-	 * Practically, clCreateProgramWithSource() accepts multiple cstrings
-	 * as if external files are included.
-	 */
-	if (is_explain)
-	{
-		appendStringInfo(&str, "#include \"opencl_common.h\"\n");
-		if (context->extra_flags & DEVFUNC_NEEDS_TIMELIB)
-			appendStringInfo(&str, "#include \"opencl_timelib.h\"\n");
-		if (context->extra_flags & DEVFUNC_NEEDS_TEXTLIB)
-			appendStringInfo(&str, "#include \"opencl_textlib.h\"\n");
-		if (context->extra_flags & DEVFUNC_NEEDS_NUMERICLIB)
-			appendStringInfo(&str, "#include \"opencl_numericlib.h\"\n");
-		if (context->extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
-			appendStringInfo(&str, "#include \"opencl_gpuscan.h\"\n");
-		if (context->extra_flags & DEVKERNEL_NEEDS_GPUSORT)
-			appendStringInfo(&str, "#include \"opencl_gpusort.h\"\n");
-		if (context->extra_flags & DEVKERNEL_NEEDS_HASHJOIN)
-			appendStringInfo(&str, "#include \"opencl_hashjoin.h\"\n");
-		appendStringInfoChar(&str, '\n');
-	}
 
 	/* Put declarations of device types */
 	foreach (cell, context->type_defs)

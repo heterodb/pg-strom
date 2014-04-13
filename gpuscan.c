@@ -301,8 +301,8 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 	initStringInfo(&str);
 
 	/* Put declarations of device types and functions in use */
-	appendStringInfo(&str, "%s\n", pgstrom_codegen_declarations(context,
-																false));
+	appendStringInfo(&str, "%s\n", pgstrom_codegen_declarations(context));
+
 	/* Put param/const definitions */
 	index = 1;
 	foreach (cell, context->used_params)
@@ -1016,7 +1016,52 @@ gpuscan_explain_rel(CustomPlanState *node, ExplainState *es)
 
 static void
 gpuscan_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
-{}
+{
+	GpuScanState   *gss = (GpuScanState *) node;
+	GpuScanPlan	   *gsplan = (GpuScanPlan *) gss->cps.ps.plan;
+	Relation		rel = gss->scan_rel;
+	TupleDesc		tupdesc = RelationGetDescr(rel);
+	ListCell	   *cell;
+	StringInfoData	str;
+
+	initStringInfo(&str);
+	foreach (cell, gsplan->host_attnums)
+	{
+		Form_pg_attribute attr = tupdesc->attrs[lfirst_int(cell) - 1];
+
+		appendStringInfo(&str, "%s%s",
+						 cell == list_head(gsplan->host_attnums) ? "" : ", ",
+						 NameStr(attr->attname));
+	}
+	ExplainPropertyText("Host References", str.data, es);
+
+	resetStringInfo(&str);
+	foreach (cell, gsplan->dev_attnums)
+	{
+		Form_pg_attribute attr = tupdesc->attrs[lfirst_int(cell) - 1];
+
+		appendStringInfo(&str, "%s%s",
+						 cell == list_head(gsplan->dev_attnums) ? "" : ", ",
+						 NameStr(attr->attname));
+	}
+	ExplainPropertyText("Device References", str.data, es);
+
+	if (gsplan->cplan.plan.qual != NIL)
+	{
+		show_scan_qual(gsplan->cplan.plan.qual,
+					   "Filter", &gss->cps.ps, ancestors, es);
+		show_instrumentation_count("Rows Removed by Filter",
+								   1, &gss->cps.ps, es);
+	}
+	if (gsplan->dev_clauses != NIL)
+	{
+		show_scan_qual(gsplan->dev_clauses,
+					   "Device Filter", &gss->cps.ps, ancestors, es);
+		show_instrumentation_count("Rows Removed by Device Fileter",
+								   2, &gss->cps.ps, es);
+	}
+	show_device_kernel(gsplan->kern_source, gss->extra_flags, es);
+}
 
 static Bitmapset *
 gpuscan_get_relids(CustomPlanState *node)
