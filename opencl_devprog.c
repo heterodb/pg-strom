@@ -608,7 +608,8 @@ pgstrom_dump_kernel_debug(kern_resultbuf *kresult)
 	char	   *baseptr;
 	cl_uint		offset = 0;
 
-	if (kresult->debug_usage == 0)
+	if (kresult->debug_usage == 0 ||
+		kresult->debug_usage == KERN_DEBUG_UNAVAILABLE)
 		return;
 
 	baseptr = (char *)&kresult->results[kresult->nrooms];

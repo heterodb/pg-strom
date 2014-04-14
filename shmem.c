@@ -288,6 +288,14 @@ pgstrom_shmem_alloc(Size size)
 	shmem_zone *zone;
 	void	   *address;
 
+	/* does shared memory segment already set up? */
+	if (!pgstrom_shmem_head->is_ready)
+	{
+		elog(LOG, "PG-Strom's shared memory segment has not been ready");
+		return NULL;
+	}
+
+
 	/* unable to allocate 0-byte or too large */
 	if (size == 0 || size > (1UL << SHMEM_BLOCKSZ_BITS_MAX))
 		return NULL;

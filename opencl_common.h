@@ -105,6 +105,15 @@ typedef struct {
 #endif
 
 /*
+ * For kernel coding simplification, PG-Strom expects size of workgroup is
+ * multiplexer of 32. It allows to consolidate calculation results by each
+ * core into a 32bit register.
+ * NOTE: kernel code assumes this unit-size is 32 (also 2^N), so it is not
+ * sufficient to update this definition, if different unit size is applied.
+ */
+#define		PGSTROM_WORKGROUP_UNITSZ	32
+
+/*
  * Error code definition
  */
 #define StromError_Success				0	/* OK */
@@ -189,43 +198,52 @@ typedef struct {
 #ifdef PGSTROM_KERNEL_DEBUG
 #define PG_KERN_DEBUG_TEMPLATE(BASETYPE, V_CLASS)						\
 	static inline void													\
-	pg_kern_debug(__global kern_result *kresult,						\
+	pg_kern_debug(__global kern_resultbuf *kresult,						\
 				  __constant char *label,								\
 				  size_t label_sz,										\
-				  cl_##BASETYPE## value)								\
+				  cl_##BASETYPE value)									\
 	{																	\
 		__global kern_debug *kdebug;									\
 		cl_uint	offset;													\
-		cl_uint length = offset(kern_debug, label) + label_sz;			\
+		cl_uint length = offsetof(kern_debug, label) + label_sz;		\
 		cl_uint i;														\
 																		\
 		length = TYPEALIGN(sizeof(cl_uint), length);					\
-		offset = atomic_add(&kresult->debug_usage, lenght);				\
+		offset = atomic_add(&kresult->debug_usage, length);				\
 																		\
 		kdebug = (__global kern_debug *)								\
 			&kresult->results[kresult->nrooms];							\
-		kdebug->lenght = length;										\
+																		\
+		/* no more to write anything! */								\
+		if (offset + sizeof(cl_uint) >= KERNEL_DEBUG_BUFSIZE)			\
+			return;														\
+		kdebug->length = length;										\
+		if (offset + length >= KERNEL_DEBUG_BUFSIZE)					\
+			return;														\
 		kdebug->global_ofs = get_global_offset(0);						\
 		kdebug->global_sz = get_global_size(0);							\
 		kdebug->global_id = get_global_id(0);							\
 		kdebug->local_sz = get_local_size(0);							\
 		kdebug->local_id = get_local_id(0);								\
 		kdebug->v_class = V_CLASS;										\
-		kdebug->value.v_##BASETYPE## = value;							\
+		kdebug->value.v_##BASETYPE = value;								\
 		for (i=0; i < length; i++)										\
 			kdebug->label[i] = label[i];								\
 	}
-
+#if 0
 PG_KERN_DEBUG_TEMPLATE(char,   'c')
 PG_KERN_DEBUG_TEMPLATE(uchar,  'C')
 PG_KERN_DEBUG_TEMPLATE(short,  's')
 PG_KERN_DEBUG_TEMPLATE(ushort, 'S')
+#endif
 PG_KERN_DEBUG_TEMPLATE(int,    'i')
+#if 0
 PG_KERN_DEBUG_TEMPLATE(uint,   'I')
 PG_KERN_DEBUG_TEMPLATE(long,   'l')
 PG_KERN_DEBUG_TEMPLATE(ulong,  'L')
 PG_KERN_DEBUG_TEMPLATE(float,  'f')
 PG_KERN_DEBUG_TEMPLATE(double, 'd')
+#endif
 
 #define KDEBUG(kresult, label, value)	\
 	pg_kern_debug((kresult), (label), sizeof(label), (value))
@@ -606,10 +624,10 @@ typedef struct {
  * 1. The caller must set up header portion of kern_column_store prior to
  *    kernel invocation. This function assumes each kern_colmeta entry has
  *    appropriate offset from the head.
- * 2. The caller must allocate sizeof(cl_uchar) * get_local_size(0) bytes
+ * 2. The caller must allocate sizeof(cl_uint) * get_local_size(0) bytes
  *    of local memory, and gives it as the last argument. Null-bitmap takes
  *    bit-operation depending on the neighbor thread.
- * 3. Local work-group size has to be multiplexer of 8.
+ * 3. Local work-group size has to be multiplexer of 32.
  */
 static void
 kern_row_to_column(__global kern_row_store *krs,
@@ -619,15 +637,16 @@ kern_row_to_column(__global kern_row_store *krs,
 				   __local cl_char *workbuf)
 {
 	__global rs_tuple  *rs_tup;
+	size_t		global_id = get_global_id(0);
 	size_t		local_id = get_local_id(0);
 	cl_uint		maxatt = attnums[ncols - 1];
 	cl_uint		offset;
 	cl_uint		i, j;
 
 	/* fetch a rs_tuple on the row-store */
-	rs_tup = kern_rowstore_get_tuple(krs, get_global_id(0));
+	rs_tup = kern_rowstore_get_tuple(krs, global_id);
+	offset = (rs_tup != 0 ? rs_tup->data.t_hoff : 0);
 
-	offset = rs_tup->data.t_hoff;
 	for (i=0, j=0; i < maxatt; i++)
 	{
 		cl_bool	isnull;
@@ -704,13 +723,11 @@ kern_row_to_column(__global kern_row_store *krs,
 		if (i == attnums[j])
 		{
 			__global kern_colmeta *colmeta = &kcs->colmeta[j];
-			__global cl_uchar *p_nullmap;
 
 			if ((colmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
 			{
-#if 0
 				workbuf[local_id]
-					= (isnull ? (1 << (local_id & 0x07)) : 0);
+					= (isnull ? (1 << (local_id & 0x1f)) : 0);
 				barrier(CLK_LOCAL_MEM_FENCE);
 				if ((local_id & 0x01) == 0)
 					workbuf[local_id] |= workbuf[local_id + 1];
@@ -721,14 +738,22 @@ kern_row_to_column(__global kern_row_store *krs,
 				if ((local_id & 0x07) == 0)
 					workbuf[local_id] |= workbuf[local_id + 4];
 				barrier(CLK_LOCAL_MEM_FENCE);
+				if ((local_id & 0x0f) == 0)
+					workbuf[local_id] |= workbuf[local_id + 8];
+				barrier(CLK_LOCAL_MEM_FENCE);
+				if ((local_id & 0x1f) == 0)
+					workbuf[local_id] |= workbuf[local_id + 16];
+				barrier(CLK_LOCAL_MEM_FENCE);
+
 				/* put a nullmap */
-				if ((local_id & 0x07) == 0 && get_global_id(0) < krs->nrows)
+				if ((local_id & 0x1f) == 0 && global_id < krs->nrows)
 				{
-					*((cl_uchar *)kcs +
-					  colmeta->cs_ofs +
-					  (get_global_id(0) >> 3)) = workbuf[local_id];
+					__global cl_uint *p_nullmap
+						= (__global cl_uint *)((uintptr_t)kcs +
+											   colmeta->cs_ofs);
+
+					p_nullmap[global_id >> 5] = workbuf[local_id];
 				}
-#endif
 			}
 			j++;
 		}
@@ -757,9 +782,10 @@ kern_get_datum(__global kern_column_store *kcs,
 	offset = colmeta->cs_ofs;
 	if ((colmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
 	{
-		__global cl_uchar  *p_nullmap = (__global cl_uchar *)kcs + offset;
+		__global cl_uint   *p_nullmap
+			= (__global cl_uint *)((uintptr_t)kcs + offset);
 
-		if ((p_nullmap[rowidx >> 3] & (1 << (rowidx & 0x07))) != 0)
+		if ((p_nullmap[rowidx >> 5] & (1 << (rowidx & 0x1f))) != 0)
 			return NULL;
 		offset += STROMALIGN((kcs->nrows + 7) >> 3);
 	}

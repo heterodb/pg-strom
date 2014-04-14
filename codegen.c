@@ -1010,7 +1010,7 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 	if (IsA(node, Const))
 	{
 		Const  *con = (Const *) node;
-		int		index = 1;
+		cl_uint	index = 0;
 
 		if (OidIsValid(con->constcollid) ||
 			!devtype_lookup_and_track(con->consttype, context))
@@ -1028,7 +1028,7 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 		context->used_params = lappend(context->used_params,
 									   copyObject(node));
 		appendStringInfo(&context->str, "KPARAM_%u",
-						 list_length(context->used_params));
+						 list_length(context->used_params) - 1);
 		return true;
 	}
 	else if (IsA(node, Param))
@@ -1039,7 +1039,7 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 		if (OidIsValid(param->paramcollid) ||
 			param->paramkind != PARAM_EXTERN ||
 			!devtype_lookup_and_track(param->paramtype, context))
-			Assert(false); //return false;
+			return false;
 
 		foreach (cell, context->used_params)
 		{
@@ -1053,13 +1053,13 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 		context->used_params = lappend(context->used_params,
 									   copyObject(node));
 		appendStringInfo(&context->str, "KPARAM_%u",
-						 list_length(context->used_params));
+						 list_length(context->used_params) - 1);
 		return true;
 	}
 	else if (IsA(node, Var))
 	{
 		Var	   *var = (Var *) node;
-		int		index = 1;
+		cl_uint	index = 0;
 
 		if (OidIsValid(var->varcollid) ||
 			!devtype_lookup_and_track(var->vartype, context))
@@ -1076,7 +1076,8 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 		}
 		context->used_vars = lappend(context->used_vars,
 									 copyObject(node));
-		appendStringInfo(&context->str, "KVAR_%u", index);
+		appendStringInfo(&context->str, "KVAR_%u",
+						 list_length(context->used_vars) - 1);
 		return true;
 	}
 	else if (IsA(node, FuncExpr))
@@ -1296,14 +1297,17 @@ char *
 pgstrom_codegen_declarations(codegen_context *context)
 {
 	StringInfoData	str;
+	devtype_info   *dtype;
+	devfunc_info   *dfunc;
 	ListCell	   *cell;
+	cl_uint			index;
 
 	initStringInfo(&str);
 
 	/* Put declarations of device types */
 	foreach (cell, context->type_defs)
 	{
-		devtype_info   *dtype = lfirst(cell);
+		dtype = lfirst(cell);
 
 		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
 			appendStringInfo(&str, "STROMCL_VARLENA_TYPE_TEMPLATE(%s)\n",
@@ -1317,9 +1321,64 @@ pgstrom_codegen_declarations(codegen_context *context)
 	/* Put declarations of device functions */
 	foreach (cell, context->func_defs)
 	{
-		devfunc_info   *dfunc = lfirst(cell);
+		dfunc = lfirst(cell);
 
 		appendStringInfo(&str, "%s\n", dfunc->func_decl);
+	}
+
+	/* Put param/const definitions */
+	index = 0;
+	foreach (cell, context->used_params)
+	{
+		if (IsA(lfirst(cell), Const))
+		{
+			Const  *con = lfirst(cell);
+
+			dtype = pgstrom_devtype_lookup(con->consttype);
+			Assert(dtype != NULL);
+
+			appendStringInfo(&str,
+							 "#define KPARAM_%u\t"
+							 "pg_%s_param(kparams,%d)\n",
+							 index, dtype->type_name, index);
+		}
+		else if (IsA(lfirst(cell), Param))
+		{
+			Param  *param = lfirst(cell);
+
+			dtype = pgstrom_devtype_lookup(param->paramtype);
+			Assert(dtype != NULL);
+
+			appendStringInfo(&str,
+							 "#define KPARAM_%u\t"
+							 "pg_%s_param(kparams,%d)\n",
+							 index, dtype->type_name, index);
+		}
+		else
+			elog(ERROR, "unexpected node: %s", nodeToString(lfirst(cell)));
+		index++;
+	}
+
+	/* Put Var definition for row-store */
+	index = 0;
+	foreach (cell, context->used_vars)
+	{
+		Var	   *var = lfirst(cell);
+
+		dtype = pgstrom_devtype_lookup(var->vartype);
+		Assert(dtype != NULL);
+
+		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
+			appendStringInfo(&str,
+					 "#define KVAR_%u\t"
+							 "pg_%s_vref(kcs,toast,%u,get_global_id(0))\n",
+							 index, dtype->type_name, index);
+		else
+			appendStringInfo(&str,
+							 "#define KVAR_%u\t"
+							 "pg_%s_vref(kcs,%u,get_global_id(0))\n",
+							 index, dtype->type_name, index);
+		index++;
 	}
 	return str.data;
 }

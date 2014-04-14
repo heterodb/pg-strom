@@ -287,8 +287,6 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 {
 	StringInfoData	str;
 	ListCell	   *cell;
-	int				index;
-	devtype_info   *dtype;
 	char		   *expr_code;
 
 	memset(context, 0, sizeof(codegen_context));
@@ -300,63 +298,10 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 
 	initStringInfo(&str);
 
-	/* Put declarations of device types and functions in use */
+	/*
+	 * Put declarations of device types, functions and macro definitions
+	 */
 	appendStringInfo(&str, "%s\n", pgstrom_codegen_declarations(context));
-
-	/* Put param/const definitions */
-	index = 1;
-	foreach (cell, context->used_params)
-	{
-		if (IsA(lfirst(cell), Const))
-		{
-			Const  *con = lfirst(cell);
-
-			dtype = pgstrom_devtype_lookup(con->consttype);
-			Assert(dtype != NULL);
-
-			appendStringInfo(&str,
-							 "#define KPARAM_%u\t"
-							 "pg_%s_param(kparams,%d)\n",
-							 index, dtype->type_name, index);
-		}
-		else if (IsA(lfirst(cell), Param))
-		{
-			Param  *param = lfirst(cell);
-
-			dtype = pgstrom_devtype_lookup(param->paramtype);
-			Assert(dtype != NULL);
-
-			appendStringInfo(&str,
-							 "#define KPARAM_%u\t"
-							 "pg_%s_param(kparams,%d)\n",
-							 index, dtype->type_name, index);
-		}
-		else
-			elog(ERROR, "unexpected node: %s", nodeToString(lfirst(cell)));
-		index++;
-	}
-
-	/* Put Var definition for row-store */
-	index = 1;
-	foreach (cell, context->used_vars)
-	{
-		Var	   *var = lfirst(cell);
-
-		dtype = pgstrom_devtype_lookup(var->vartype);
-		Assert(dtype != NULL);
-
-		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
-			appendStringInfo(&str,
-					 "#define KVAR_%u\t"
-							 "pg_%s_vref(kcs,toast,%u,get_global_id(0))\n",
-							 index, dtype->type_name, index);
-		else
-			appendStringInfo(&str,
-							 "#define KVAR_%u\t"
-							 "pg_%s_vref(kcs,%u,get_global_id(0))\n",
-							 index, dtype->type_name, index);
-		index++;
-	}
 
 	/* columns to be referenced */
 	appendStringInfo(&str,
@@ -407,7 +352,6 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					 "                     lengthof(pg_used_vars),\n"
 					 "                     pg_used_vars,\n"
 					 "                     local_workmem);\n"
-					 "  return;\n"
 					 "  gpuscan_qual_cs(kgscan,kcs,\n"
 					 "                  (__global kern_toastbuf *)krs,\n"
 					 "                  local_workmem);\n"
@@ -1207,6 +1151,8 @@ clserv_respond_gpuscan_row(cl_event event, cl_int ev_status, void *private)
 	{
 		gscan->msg.errcode = KERN_GPUSCAN_RESULTBUF(&gscan->kern)->errcode;
 	}
+	/* dump debug messages */
+	pgstrom_dump_kernel_debug(KERN_GPUSCAN_RESULTBUF(&gscan->kern));
 
 	/* release opencl objects */
 	while (clgss->ev_index > 0)
@@ -1265,12 +1211,12 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	kcstore_head = rstore->kcs_head;
 	if (true)
 	{
-		elog(LOG, "kcs {length=%u ncols=%u nrows=%u", kcstore_head->length, kcstore_head->ncols, kcstore_head->nrows);
+		elog(LOG, "kcs {length=%u ncols=%u nrows=%u}", kcstore_head->length, kcstore_head->ncols, kcstore_head->nrows);
 		for (i=0; i < kcstore_head->ncols; i++)
 		{
 			kern_colmeta *colmeta = &kcstore_head->colmeta[i];
 
-			elog(LOG, "col(%d) flags=%02x align=%d attlen=%d ofs=%u", i, colmeta->flags, colmeta->attalign, colmeta->attlen, colmeta->cs_ofs);
+			elog(LOG, "col(%d) flags=%02x align=%d attlen=%d ofs=%u}", i, colmeta->flags, colmeta->attalign, colmeta->attlen, colmeta->cs_ofs);
 		}
 	}
 
@@ -1472,6 +1418,8 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	 * Kick gpuscan_qual_rs() call
 	 */
 	gwork_sz = ((nrows + lwork_sz - 1) / lwork_sz) * lwork_sz;
+
+	elog(LOG, "global worksz=%lu, local worksz=%lu", gwork_sz, lwork_sz);
 
 	rc = clEnqueueNDRangeKernel(kcmdq,
 								clgss->kernel,

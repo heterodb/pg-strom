@@ -835,7 +835,15 @@ pgstrom_init_opencl_devinfo(void)
 /*
  * clserv_compute_workgroup_size
  *
- * It estimates an optimal workgroup size for the supplied kernel
+ * It computes an optimal workgroup size for the supplied kernel object.
+ * Usually, larger workgroup size is better but resource consumption
+ * (like, registers, local memory, ...) is another restriction.
+ * One other restrition is alignment of workgroup size. PG-Strom expects
+ * workgroup size is multiplexer of 32 (= PGSTROM_WORKGROUP_UNITSZ)
+ * because of coding simplification when kernel logic handles bitmap data.
+ * Please imagine each core processes a record and writes bask computation
+ * result using bitmap form; We like to ensure every workgroup is aligned
+ * to 32.
  */
 size_t
 clserv_compute_workgroup_size(cl_kernel kernel, int dev_index,
@@ -845,16 +853,18 @@ clserv_compute_workgroup_size(cl_kernel kernel, int dev_index,
 	pgstrom_device_info *devinfo;
 	cl_device_id kdevice;
 	size_t		workgroup_sz;
+	size_t		workgroup_unitsz;
 	size_t		kern_local_usage;
-	size_t		preferred_basesz;
 	cl_ulong	kern_local_memsz;
 	cl_int		rc;
 
 	Assert(pgstrom_i_am_clserv);
 
 	kdevice = opencl_devices[dev_index];
-
-	/* get a hint based on register/static local memory usage */
+	/*
+	 * Get a hint based on hardware restriction and register/static
+	 * local memory usage.
+	 */
 	rc = clGetKernelWorkGroupInfo(kernel,
 								  kdevice,
 								  CL_KERNEL_WORK_GROUP_SIZE,
@@ -867,14 +877,18 @@ clserv_compute_workgroup_size(cl_kernel kernel, int dev_index,
 			 opencl_strerror(rc));
 		return 0;
 	}
-	elog(LOG, "CL_KERNEL_WORK_GROUP_SIZE = %lu", workgroup_sz);
 
-	/* preferred multiple of workgroup size for launch. */
+	/*
+	 * Get a preferred unit size of workgroup to be launched.
+	 * It's a performance hint. PG-Strom expects workgroup size is
+	 * multiplexer of PGSTROM_WORKGROUP_UNITSZ, so it has to be
+	 * adjusted if needed.
+	 */
 	rc = clGetKernelWorkGroupInfo(kernel,
 								  kdevice,
 								  CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE,
-								  sizeof(preferred_basesz),
-								  &preferred_basesz,
+								  sizeof(workgroup_unitsz),
+								  &workgroup_unitsz,
 								  NULL);
 	if (rc != CL_SUCCESS)
 	{
@@ -882,17 +896,21 @@ clserv_compute_workgroup_size(cl_kernel kernel, int dev_index,
 			 opencl_strerror(rc));
 		return 0;
 	}
-	elog(LOG, "CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE = %lu", preferred_basesz);
-#if 0
-	/* PG-Strom requires at least 32, for workgroup-size */
-	if (preferred_basesz < 32)
-		preferred_basesz = 32;
-#endif
+	workgroup_unitsz = TYPEALIGN(PGSTROM_WORKGROUP_UNITSZ, workgroup_unitsz);
+	if (workgroup_unitsz == 0)
+		workgroup_unitsz = PGSTROM_WORKGROUP_UNITSZ;
+	/* workgroup size must be multiplexer of unit-size */
+	workgroup_sz -= (workgroup_sz % workgroup_unitsz);
 
-	num_threads = ((num_threads + preferred_basesz - 1)
-				   / preferred_basesz) * preferred_basesz;
-	if (workgroup_sz > num_threads)
-		workgroup_sz = num_threads;
+	/*
+	 * if number of threads are less then workgroup size, we don't need
+	 * to have such a large number
+	 */
+	if (num_threads < workgroup_sz)
+	{
+		workgroup_sz = num_threads + workgroup_unitsz - 1;
+		workgroup_sz -= (workgroup_sz % workgroup_unitsz);
+	}
 
 	/*
 	 * Do we need to adjust workgroup size according to the consumption of
@@ -910,7 +928,6 @@ clserv_compute_workgroup_size(cl_kernel kernel, int dev_index,
 			 opencl_strerror(rc));
 		return 0;
 	}
-	elog(LOG, "CL_KERNEL_LOCAL_MEM_SIZE = %lu", kern_local_usage);
 
 	devinfo = devinfo_shm_values->devinfo_array[dev_index];
 	if (kern_local_usage > devinfo->dev_local_mem_size)
@@ -918,14 +935,15 @@ clserv_compute_workgroup_size(cl_kernel kernel, int dev_index,
 		elog(LOG, "static local memory of kernel is too large to run");
 		return 0;
 	}
-	if (local_memsz_per_thread == 0)
-		return workgroup_sz;
 
-	kern_local_memsz = devinfo->dev_local_mem_size - kern_local_usage;
-	if (local_memsz_per_thread * workgroup_sz > kern_local_memsz)
+	if (local_memsz_per_thread > 0)
 	{
-		workgroup_sz = kern_local_memsz / local_memsz_per_thread;
-		workgroup_sz -= (workgroup_sz % preferred_basesz);
+		kern_local_memsz = devinfo->dev_local_mem_size - kern_local_usage;
+		if (local_memsz_per_thread * workgroup_sz > kern_local_memsz)
+		{
+			workgroup_sz = kern_local_memsz / local_memsz_per_thread;
+			workgroup_sz -= (workgroup_sz % workgroup_unitsz);
+		}
 	}
 	return workgroup_sz;
 }

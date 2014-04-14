@@ -106,6 +106,7 @@ gpuscan_workmem_init(__local void *workmem)
 	__local cl_int *local_error = workmem;
 
 	local_error[get_local_id(0)] = StromError_Success;
+	barrier(CLK_LOCAL_MEM_FENCE);
 }
 
 /*
@@ -138,27 +139,31 @@ gpuscan_writeback_statement_error(__global kern_resultbuf *kresbuf,
 {
 	__local cl_int *local_error = workmem;
 	__local cl_int *local_temp = local_error + get_local_size(0);
-	cl_uint		wkgrp_sz = get_local_size(0);
 	cl_uint		wkgrp_id = get_local_id(0);
-	cl_uint		mask;
+	cl_uint		wkgrp_sz;
 	cl_int		errcode1;
 	cl_int		errcode2;
 	cl_int		i = 0;
 
 	local_temp[wkgrp_id] = local_error[wkgrp_id];
-	while (wkgrp_sz != 0)
+	barrier(CLK_LOCAL_MEM_FENCE);
+
+	for (i=0, wkgrp_sz = get_local_size(0) - 1;
+		 wkgrp_sz != 0;
+		 i++, wkgrp_sz >>= 1)
 	{
+		/* if least (i+1) bits of this wkgrp_id are zero? */
 		if ((wkgrp_id & ((1<<(i+1))-1)) == 0)
 		{
 			errcode1 = local_temp[wkgrp_id];
-			errcode2 = local_temp[wkgrp_id + (1<<i)];
+			errcode2 = (wkgrp_id + (1<<i) < get_local_size(0)
+						? local_temp[wkgrp_id + (1<<i)]
+						: StromError_Success);
 
 			if (!StromErrorIsSignificant(errcode1) &&
 				StromErrorIsSignificant(errcode2))
 				local_temp[wkgrp_id] = errcode2;
 		}
-		wkgrp_sz >>= 1;
-		i++;
 		barrier(CLK_LOCAL_MEM_FENCE);
 	}
 
@@ -170,7 +175,10 @@ gpuscan_writeback_statement_error(__global kern_resultbuf *kresbuf,
 	 */
 	errcode1 = local_temp[0];
 	if (get_local_id(0) == 0 && StromErrorIsSignificant(errcode1))
+	{
+		KDEBUG(kresbuf, "errcode", errcode1);
 		atomic_cmpxchg(&kresbuf->errcode, StromError_Success, errcode1);
+	}
 }
 
 /*
@@ -188,7 +196,7 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
 	cl_uint		wkgrp_id = get_local_id(0);
 	cl_uint		offset;
 	cl_uint		nrooms;
-	cl_int		i = 0;
+	cl_int		i;
 
 	/*
 	 * NOTE: At the begining, kern_local_error_work has either 1 or 0
@@ -207,10 +215,11 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
 	 * X[9] - 1 -> 1 (X[8]+X[9]) -> 1 (X[7-8]) -> 1 (X7-8])  -> 5 *
 	 */
 	local_temp[wkgrp_id]
-		= (local_temp[wkgrp_id] == StromError_Success ||
-		   local_temp[wkgrp_id] == StromError_RowReCheck ? 1 : 0);
+		= (local_error[wkgrp_id] == StromError_Success ||
+		   local_error[wkgrp_id] == StromError_RowReCheck ? 1 : 0);
+	barrier(CLK_LOCAL_MEM_FENCE);
 
-	while (wkgrp_sz != 0)
+	for (i=0; wkgrp_sz != 0; i++, wkgrp_sz >>= 1)
 	{
 		if ((wkgrp_id & (1 << i)) != 0)
 		{
@@ -218,8 +227,6 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
 
 			local_temp[wkgrp_id] += local_temp[i_source];
 		}
-		wkgrp_sz >>= 1;
-		i++;
 		barrier(CLK_LOCAL_MEM_FENCE);
 	}
 
