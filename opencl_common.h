@@ -407,11 +407,11 @@ typedef struct {
 static inline __global rs_tuple *
 kern_rowstore_get_tuple(__global kern_row_store *krstore, cl_uint rindex)
 {
-	cl_uint	   *p_offset;
+	__global cl_uint   *p_offset;
 
 	if (rindex >= krstore->nrows)
 		return NULL;
-	p_offset = (cl_uint *)(&krstore->colmeta[krstore->ncols]);
+	p_offset = (__global cl_uint *)(&krstore->colmeta[krstore->ncols]);
 	if (p_offset[rindex] == 0)
 		return NULL;
 	return (__global rs_tuple *)((uintptr_t)krstore + p_offset[rindex]);
@@ -693,24 +693,31 @@ kern_row_to_column(__global kern_row_store *krs,
 				switch (colmeta->attlen)
 				{
 					case 1:
-						*((cl_char *)dest) = *((cl_char *)src);
+						*((__global cl_char *)dest)
+							= *((__global cl_char *)src);
 						break;
 					case 2:
-						*((cl_short *)dest) = *((cl_short *)src);
+						*((__global cl_short *)dest)
+							= *((__global cl_short *)src);
 						break;
 					case 4:
-						*((cl_int *)dest) = *((cl_int *)src);
+						*((__global cl_int *)dest)
+							= *((__global cl_int *)src);
 						break;
 					case 8:
-						*((cl_long *)dest) = *((cl_long *)src);
+						*((__global cl_long *)dest)
+							= *((__global cl_long *)src);
 						break;
 					case 16:
-						*((cl_long *)dest) = *((cl_long *)src);
-						*(((cl_long *)dest) + 1) = *(((cl_long *)src) + 1);
+						*((__global cl_long *)dest)
+							= *((__global cl_long *)src);
+						*(((__global cl_long *)dest) + 1)
+							= *(((__global cl_long *)src) + 1);
 						break;
 					default:
-						*((cl_uint *)dest) = (cl_uint)((uintptr_t)src -
-													   (uintptr_t)rs_tup);
+						*((__global cl_uint *)dest)
+							= (cl_uint)((uintptr_t)src -
+										(uintptr_t)rs_tup);
 						break;
 				}
 			}

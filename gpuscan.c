@@ -352,6 +352,7 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					 "                     lengthof(pg_used_vars),\n"
 					 "                     pg_used_vars,\n"
 					 "                     local_workmem);\n"
+					 "  return;\n"
 					 "  gpuscan_qual_cs(kgscan,kcs,\n"
 					 "                  (__global kern_toastbuf *)krs,\n"
 					 "                  local_workmem);\n"
@@ -1207,18 +1208,25 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	memset(clgss, 0, sizeof(clstate_gpuscan_row));
 	clgss->msg = &gscan->msg;
 	krstore = &rstore->kern;
+#if 0
+	elog(LOG, "krs {length=%u ncols=%u nrows=%u}", krstore->length, krstore->ncols, krstore->nrows);
+	for (i=0; i < krstore->ncols; i++)
+	{
+		kern_colmeta *colmeta = &krstore->colmeta[i];
+		elog(LOG, "rcol(%d) {flags=%02x align=%d attlen=%d ofs=%u}", i, colmeta->flags, colmeta->attalign, colmeta->attlen, colmeta->cs_ofs);
+	}
+#endif
 
 	kcstore_head = rstore->kcs_head;
-	if (true)
+#if 0
+	elog(LOG, "kcs {length=%u ncols=%u nrows=%u}", kcstore_head->length, kcstore_head->ncols, kcstore_head->nrows);
+	for (i=0; i < kcstore_head->ncols; i++)
 	{
-		elog(LOG, "kcs {length=%u ncols=%u nrows=%u}", kcstore_head->length, kcstore_head->ncols, kcstore_head->nrows);
-		for (i=0; i < kcstore_head->ncols; i++)
-		{
-			kern_colmeta *colmeta = &kcstore_head->colmeta[i];
+		kern_colmeta *colmeta = &kcstore_head->colmeta[i];
 
-			elog(LOG, "col(%d) flags=%02x align=%d attlen=%d ofs=%u}", i, colmeta->flags, colmeta->attalign, colmeta->attlen, colmeta->cs_ofs);
-		}
+		elog(LOG, "col(%d) flags=%02x align=%d attlen=%d ofs=%u}", i, colmeta->flags, colmeta->attalign, colmeta->attlen, colmeta->cs_ofs);
 	}
+#endif
 
 	nrows = krstore->nrows;
 
@@ -1419,7 +1427,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	 */
 	gwork_sz = ((nrows + lwork_sz - 1) / lwork_sz) * lwork_sz;
 
-	elog(LOG, "global worksz=%lu, local worksz=%lu", gwork_sz, lwork_sz);
+	//elog(LOG, "global worksz=%lu, local worksz=%lu", gwork_sz, lwork_sz);
 
 	rc = clEnqueueNDRangeKernel(kcmdq,
 								clgss->kernel,
