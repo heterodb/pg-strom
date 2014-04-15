@@ -192,11 +192,11 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
 {
 	__local cl_int *local_error = workmem;
 	__local cl_int *local_temp = local_error + get_local_size(0);
-	cl_uint		wkgrp_sz = get_local_size(0);
+	cl_uint		wkgrp_sz = get_local_size(0) - 1;
 	cl_uint		wkgrp_id = get_local_id(0);
 	cl_uint		offset;
-	cl_uint		nrooms;
-	cl_int		i;
+	cl_uint		nitems;
+	cl_uint		i;
 
 	/*
 	 * NOTE: At the begining, kern_local_error_work has either 1 or 0
@@ -215,8 +215,8 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
 	 * X[9] - 1 -> 1 (X[8]+X[9]) -> 1 (X[7-8]) -> 1 (X7-8])  -> 5 *
 	 */
 	local_temp[wkgrp_id]
-		= (local_error[wkgrp_id] == StromError_Success ||
-		   local_error[wkgrp_id] == StromError_RowReCheck ? 1 : 0);
+		= ((local_error[wkgrp_id] == StromError_Success ||
+			local_error[wkgrp_id] == StromError_RowReCheck) ? 1 : 0);
 	barrier(CLK_LOCAL_MEM_FENCE);
 
 	for (i=0; wkgrp_sz != 0; i++, wkgrp_sz >>= 1)
@@ -238,23 +238,37 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
 	 * back (because it it sum(0..N-1)), so we acquire this number of rooms
 	 * with atomic operation, then write them back.
 	 */
-	nrooms = local_temp[get_local_size(0) - 1];
-	offset = atomic_add(&kresbuf->nitems, nrooms);
+	nitems = local_temp[get_local_size(0) - 1];
+
+	i = local_temp[0];
+	barrier(CLK_LOCAL_MEM_FENCE);
+	if (get_local_id(0) == 0)
+	{
+		offset = atomic_add(&kresbuf->nitems, nitems);
+		local_temp[0] += offset;
+	}
+	barrier(CLK_LOCAL_MEM_FENCE);
+	if (get_local_id(0) != 0)
+		local_temp[get_local_id(0)] += local_temp[0] - i;
+	barrier(CLK_LOCAL_MEM_FENCE);
 
 	/*
 	 * Write back the row-index that passed evaluation of the qualifier,
 	 * or needs re-check on the host side. In case of re-check, row-index
 	 * shall be a negative number.
 	 */
+	if (get_global_id(0) >= kresbuf->nrooms)
+		return;
+
 	if (local_error[wkgrp_id] == StromError_Success)
 	{
 		i = local_temp[wkgrp_id];
-		kresbuf->results[offset + i - 1] = (get_global_id(0) + 1);
+		kresbuf->results[i - 1] = (get_global_id(0) + 1);
 	}
 	else if (local_error[wkgrp_id] == StromError_RowReCheck)
 	{
 		i = local_temp[wkgrp_id];
-		kresbuf->results[offset + i - 1] = -(get_global_id(0) + 1);
+		kresbuf->results[i - 1] = -(get_global_id(0) + 1);
 	}
 }
 

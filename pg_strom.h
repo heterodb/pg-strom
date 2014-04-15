@@ -19,6 +19,7 @@
 #include "nodes/execnodes.h"
 #include "nodes/primnodes.h"
 #include <pthread.h>
+#include <unistd.h>
 #include <CL/cl.h>
 #include "opencl_common.h"
 #include "strom_types.h"
@@ -71,6 +72,12 @@ pgstrom_load_row_store_heap(HeapScanDesc scan,
 							kern_colmeta *rs_colmeta,
                             List *dev_attnums,
 							bool *scan_done);
+#ifdef USE_ASSERT_CHECKING
+extern void SanityCheck_kern_column_store(kern_row_store *krs,
+										  kern_column_store *kcs);
+#else
+#define SanityCheck_kern_column_store(X,Y)
+#endif /* USE_ASSERT_CHECKING */
 
 /*
  * restrack.c

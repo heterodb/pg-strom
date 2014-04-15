@@ -286,7 +286,6 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					  codegen_context *context)
 {
 	StringInfoData	str;
-	ListCell	   *cell;
 	char		   *expr_code;
 
 	memset(context, 0, sizeof(codegen_context));
@@ -302,20 +301,6 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 	 * Put declarations of device types, functions and macro definitions
 	 */
 	appendStringInfo(&str, "%s\n", pgstrom_codegen_declarations(context));
-
-	/* columns to be referenced */
-	appendStringInfo(&str,
-					 "\n"
-					 "static __constant cl_ushort pg_used_vars[]={");
-	foreach (cell, context->used_vars)
-	{
-		Var	   *var = lfirst(cell);
-
-		appendStringInfo(&str, "%s%u",
-						 cell == list_head(context->used_vars) ? "" : ", ",
-						 var->varattno - 1);
-	}
-	appendStringInfo(&str, "};\n\n");
 
 	/* qualifier definition with row-store */
 	appendStringInfo(&str,
@@ -348,11 +333,7 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					 "                __global kern_column_store *kcs,\n"
 					 "                __local void *local_workmem)\n"
 					 "{\n"
-					 "  kern_row_to_column(krs,kcs,\n"
-					 "                     lengthof(pg_used_vars),\n"
-					 "                     pg_used_vars,\n"
-					 "                     local_workmem);\n"
-					 "  return;\n"
+					 "  kern_row_to_column(krs,kcs,local_workmem);\n"
 					 "  gpuscan_qual_cs(kgscan,kcs,\n"
 					 "                  (__global kern_toastbuf *)krs,\n"
 					 "                  local_workmem);\n"
@@ -1129,7 +1110,7 @@ typedef struct
 	cl_mem			m_rstore;
 	cl_mem			m_cstore;
 	cl_int			ev_index;
-	cl_event		events[5];
+	cl_event		events[10];
 } clstate_gpuscan_row;
 
 static void
@@ -1183,12 +1164,15 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	pgstrom_gpuscan	   *gscan = (pgstrom_gpuscan *)msg;
 	pgstrom_row_store  *rstore;
 	clstate_gpuscan_row *clgss;
+	kern_parambuf	   *kparams;
+	//kern_resultbuf	   *kresults;
 	kern_row_store	   *krstore;
 	kern_column_store  *kcstore_head;
 	cl_command_queue	kcmdq;
 	cl_uint				nrows;
 	cl_uint				i;
 	cl_int				rc;
+	size_t				length;
 	size_t				gwork_sz;
 	size_t				lwork_sz;
 
@@ -1374,11 +1358,14 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	 * (2) kernel shall be launched
 	 * (3) kern_result shall be written back
 	 */
+	kparams = &gscan->kern.kparam;
+	length = kparams->length + offsetof(kern_resultbuf, results[0]);
+
 	rc = clEnqueueWriteBuffer(kcmdq,
 							  clgss->m_gpuscan,
 							  CL_FALSE,
 							  0,
-							  KERN_GPUSCAN_DMA_SENDLEN(&gscan->kern),
+							  length,
 							  &gscan->kern,
 							  0,
 							  NULL,
@@ -1427,8 +1414,6 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	 */
 	gwork_sz = ((nrows + lwork_sz - 1) / lwork_sz) * lwork_sz;
 
-	//elog(LOG, "global worksz=%lu, local worksz=%lu", gwork_sz, lwork_sz);
-
 	rc = clEnqueueNDRangeKernel(kcmdq,
 								clgss->kernel,
 								1,
@@ -1469,7 +1454,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	 * Last, registers a callback routine that replies the message
 	 * to the backend
 	 */
-	rc = clSetEventCallback(clgss->events[clgss->ev_index-1],
+	rc = clSetEventCallback(clgss->events[clgss->ev_index - 1],
 							CL_COMPLETE,
 							clserv_respond_gpuscan_row,
 							clgss);
@@ -1478,7 +1463,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 		elog(LOG, "failed on clSetEventCallback: %s", opencl_strerror(rc));
 		goto error_sync;
 	}
-	Assert(clgss->ev_index == 5);
+	//Assert(clgss->ev_index == 5);
 	return;
 
 error_sync:

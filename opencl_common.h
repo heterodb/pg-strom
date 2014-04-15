@@ -542,7 +542,7 @@ typedef struct {
 		__global cl_uint *p_offset							\
 			= kern_get_datum(kcs,colidx,rowidx);			\
 															\
-		if (!vl_offset)										\
+		if (!p_offset)										\
 			result.isnull = true;							\
 		else												\
 		{													\
@@ -632,23 +632,23 @@ typedef struct {
 static void
 kern_row_to_column(__global kern_row_store *krs,
 				   __global kern_column_store *kcs,
-				   cl_uint ncols,
-				   __constant cl_ushort *attnums,
 				   __local cl_char *workbuf)
 {
 	__global rs_tuple  *rs_tup;
 	size_t		global_id = get_global_id(0);
 	size_t		local_id = get_local_id(0);
-	cl_uint		maxatt = attnums[ncols - 1];
+	cl_uint		ncols = krs->ncols;
 	cl_uint		offset;
 	cl_uint		i, j;
 
 	/* fetch a rs_tuple on the row-store */
 	rs_tup = kern_rowstore_get_tuple(krs, global_id);
-	offset = (rs_tup != 0 ? rs_tup->data.t_hoff : 0);
+	offset = (rs_tup != NULL ? rs_tup->data.t_hoff : 0);
 
-	for (i=0, j=0; i < maxatt; i++)
+	for (i=0, j=0; i < ncols; i++)
 	{
+		__global kern_colmeta  *rcmeta = &krs->colmeta[i];
+		__global kern_colmeta  *ccmeta;
 		cl_bool	isnull;
 
 		if (!rs_tup || ((rs_tup->data.t_infomask & HEAP_HASNULL) != 0 &&
@@ -656,28 +656,26 @@ kern_row_to_column(__global kern_row_store *krs,
 			isnull = true;
 		else
 		{
-			__global kern_colmeta  *colmeta = &krs->colmeta[i];
-
 			isnull = false;
-			if (colmeta->attlen > 0)
-				offset = TYPEALIGN(colmeta->attalign, offset);
-			else if (VARATT_NOT_PAD_BYTE((char *)&rs_tup->data + offset))
-				offset = TYPEALIGN(colmeta->attalign, offset);
+			if (rcmeta->attlen > 0)
+				offset = TYPEALIGN(rcmeta->attalign, offset);
+			else if (!VARATT_NOT_PAD_BYTE((char *)&rs_tup->data + offset))
+				offset = TYPEALIGN(rcmeta->attalign, offset);
 
-			if (i == attnums[j])
+			if ((rcmeta->flags & KERN_COLMETA_ATTREFERENCED) != 0)
 			{
-				__global kern_colmeta *colmeta = &kcs->colmeta[j];
 				__global char  *src;
 				__global char  *dest;
 
+				ccmeta = &kcs->colmeta[j];
 				src = ((__global char *)&rs_tup->data) + offset;
-				dest = ((__global char *)kcs) + colmeta->cs_ofs;
+				dest = ((__global char *)kcs) + ccmeta->cs_ofs;
 				/* adjust destination address by nullmap, if needed */
-				if ((colmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
-					dest += STROMALIGN((get_global_size(0) + 7) / 8);
+				if ((ccmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
+					dest += STROMALIGN((kcs->nrows + 7) >> 3);
 				/* adjust destination address for exact slot on column-array */
-				dest += get_global_id(0) * (colmeta->attlen > 0
-											? colmeta->attlen
+				dest += get_global_id(0) * (ccmeta->attlen > 0
+											? ccmeta->attlen
 											: sizeof(cl_uint));
 				/*
 				 * Copy a datum from a field of rs_tuple into column-array
@@ -690,7 +688,7 @@ kern_row_to_column(__global kern_row_store *krs,
 				 * 1, 2, 4, 8 or 16-bytes length. Elsewhere, it should be
 				 * a variable length field.
 				 */
-				switch (colmeta->attlen)
+				switch (ccmeta->attlen)
 				{
 					case 1:
 						*((__global cl_char *)dest)
@@ -727,14 +725,14 @@ kern_row_to_column(__global kern_row_store *krs,
 		 * Because it takes per bit operation using interaction with neighbor
 		 * work-item, we use local working memory for reduction.
 		 */
-		if (i == attnums[j])
+		if ((rcmeta->flags & KERN_COLMETA_ATTREFERENCED) != 0)
 		{
-			__global kern_colmeta *colmeta = &kcs->colmeta[j];
+			ccmeta = &kcs->colmeta[j];
 
-			if ((colmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
+			if ((ccmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
 			{
 				workbuf[local_id]
-					= (isnull ? (1 << (local_id & 0x1f)) : 0);
+					= (!isnull ? (1 << (local_id & 0x1f)) : 0);
 				barrier(CLK_LOCAL_MEM_FENCE);
 				if ((local_id & 0x01) == 0)
 					workbuf[local_id] |= workbuf[local_id + 1];
@@ -757,7 +755,7 @@ kern_row_to_column(__global kern_row_store *krs,
 				{
 					__global cl_uint *p_nullmap
 						= (__global cl_uint *)((uintptr_t)kcs +
-											   colmeta->cs_ofs);
+											   ccmeta->cs_ofs);
 
 					p_nullmap[global_id >> 5] = workbuf[local_id];
 				}
@@ -789,10 +787,7 @@ kern_get_datum(__global kern_column_store *kcs,
 	offset = colmeta->cs_ofs;
 	if ((colmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
 	{
-		__global cl_uint   *p_nullmap
-			= (__global cl_uint *)((uintptr_t)kcs + offset);
-
-		if ((p_nullmap[rowidx >> 5] & (1 << (rowidx & 0x1f))) != 0)
+		if (att_isnull(rowidx, (__global char *)kcs + offset))
 			return NULL;
 		offset += STROMALIGN((kcs->nrows + 7) >> 3);
 	}

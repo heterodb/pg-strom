@@ -263,3 +263,84 @@ pgstrom_load_row_store_subplan(void)
 	return NULL;
 }
 #endif
+
+#ifdef USE_ASSERT_CHECKING
+/*
+ * SanityCheck_kern_column_store
+ *
+ * It applies sanity check on the supplied column-store being generated
+ * in the device kern_row_to_column() function.
+ */
+void
+SanityCheck_kern_column_store(kern_row_store *krs,		/* source */
+							  kern_column_store *kcs)	/* generated */
+{
+	int		i, j, k;
+
+	Assert(krs->nrows == kcs->nrows);
+
+	for (i=0; i < krs->nrows; i++)
+	{
+		rs_tuple   *rs_tup = kern_rowstore_get_tuple(krs, i);
+		size_t		rs_ofs = (rs_tup != NULL ? rs_tup->data.t_hoff : 0);
+
+		for (j=0, k=0; j < krs->ncols; j++)
+		{
+			kern_colmeta   *rcmeta = &krs->colmeta[j];
+			kern_colmeta   *ccmeta;
+
+			/* is it columnized? */
+			if ((rcmeta->flags & KERN_COLMETA_ATTREFERENCED) == 0)
+				continue;
+
+			ccmeta = &kcs->colmeta[k];
+			Assert(rcmeta->flags == ccmeta->flags);
+			Assert(rcmeta->attalign == ccmeta->attalign);
+			Assert(rcmeta->attlen == ccmeta->attlen);
+
+			/* is this cell on the row-store null? */
+			if (!rs_tup || ((rs_tup->data.t_infomask & HEAP_HASNULL) != 0 &&
+							att_isnull(j, rs_tup->data.t_bits)))
+			{
+				/* must be null in the column store also */
+				Assert((ccmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0);
+				Assert(att_isnull(i, (char *)kcs + ccmeta->cs_ofs));
+			}
+			else
+			{
+				size_t	cs_ofs = ccmeta->cs_ofs;
+
+				/* must not be null in the column store also */
+				if ((ccmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
+				{
+					Assert(!att_isnull(i, (char *)kcs + cs_ofs));
+					cs_ofs += STROMALIGN((kcs->nrows + 7) >> 3);
+				}
+				if (rcmeta->attlen > 0)
+					rs_ofs = TYPEALIGN(rcmeta->attalign, rs_ofs);
+				else if (!VARATT_NOT_PAD_BYTE((char *)&rs_tup->data + rs_ofs))
+					rs_ofs = TYPEALIGN(rcmeta->attalign, rs_ofs);
+
+				cs_ofs += (ccmeta->attlen > 0
+						   ? ccmeta->attlen
+						   : sizeof(cl_uint)) * i;
+				if (rcmeta->attlen > 0)
+				{
+					Assert(memcmp((char *)&rs_tup->data + rs_ofs,
+								  (char *)kcs + cs_ofs,
+								  ccmeta->attlen) == 0);
+				}
+				else
+				{
+					cl_uint		vl_ofs = *((cl_uint *)((char *)kcs + cs_ofs));
+
+					Assert(((uintptr_t)(&rs_tup->data + rs_ofs) -
+							(uintptr_t)(krs)) == vl_ofs);
+				}
+			}
+			k++;
+		}
+		Assert(kcs->ncols == k);
+	}
+}
+#endif /* USE_ASSERT_CHECKING */
