@@ -192,7 +192,7 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
 {
 	__local cl_int *local_error = workmem;
 	__local cl_int *local_temp = local_error + get_local_size(0);
-	cl_uint		wkgrp_sz = get_local_size(0) - 1;
+	cl_uint		wkgrp_sz = get_local_size(0);
 	cl_uint		wkgrp_id = get_local_id(0);
 	cl_uint		offset;
 	cl_uint		nitems;
@@ -215,8 +215,9 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
 	 * X[9] - 1 -> 1 (X[8]+X[9]) -> 1 (X[7-8]) -> 1 (X7-8])  -> 5 *
 	 */
 	local_temp[wkgrp_id]
-		= ((local_error[wkgrp_id] == StromError_Success ||
-			local_error[wkgrp_id] == StromError_RowReCheck) ? 1 : 0);
+		= (get_global_id(0) < kresbuf->nrooms &&
+		   (local_error[wkgrp_id] == StromError_Success ||
+			local_error[wkgrp_id] == StromError_RowReCheck)) ? 1 : 0;
 	barrier(CLK_LOCAL_MEM_FENCE);
 
 	for (i=0; wkgrp_sz != 0; i++, wkgrp_sz >>= 1)
@@ -240,16 +241,13 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
 	 */
 	nitems = local_temp[get_local_size(0) - 1];
 
-	i = local_temp[0];
 	barrier(CLK_LOCAL_MEM_FENCE);
 	if (get_local_id(0) == 0)
 	{
 		offset = atomic_add(&kresbuf->nitems, nitems);
-		local_temp[0] += offset;
+		for (i=0; i < get_local_size(0); i++)
+			local_temp[i] += offset;
 	}
-	barrier(CLK_LOCAL_MEM_FENCE);
-	if (get_local_id(0) != 0)
-		local_temp[get_local_id(0)] += local_temp[0] - i;
 	barrier(CLK_LOCAL_MEM_FENCE);
 
 	/*
@@ -296,11 +294,6 @@ typedef struct {
 	dlist_head		rc_store;	/* a row- or column store */
 	kern_gpuscan	kern;
 } pgstrom_gpuscan;
-
-#define pgstrom_gpuscan_kparam(gscan)			\
-	(&(gscan)->kern.kparam)
-#define pgstrom_gpuscan_kresult(gscan)			\
-	((kern_result *)((uintptr_t)(&(gscan)->kern) + (gscan)->kern.roffset))
 
 #endif	/* OPENCL_DEVICE_CODE */
 #endif	/* OPENCL_GPUSCAN_H */

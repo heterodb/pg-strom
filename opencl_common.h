@@ -71,27 +71,95 @@ typedef cl_uint		hostptr_t;
  * length of these values, unlike contents.
  */
 typedef struct {
-	int		vl_len;
-	char	vl_dat[1];
+	cl_int		vl_len;
+	cl_char		vl_dat[1];
 } varlena;
 #define VARHDRSZ			((int) sizeof(cl_int))
-#define VARDATA(PTR)		(((varlena *)(PTR))->vl_dat)
-#define VARSIZE(PTR)		(((varlena *)(PTR))->vl_len)
+#define VARDATA(PTR)		(((__global varlena *)(PTR))->vl_dat)
+#define VARSIZE(PTR)		(((__global varlena *)(PTR))->vl_len)
 #define VARSIZE_EXHDR(PTR)	(VARSIZE(PTR) - VARHDRSZ)
+
+typedef union
+{
+	struct						/* Normal varlena (4-byte length) */
+	{
+		cl_uint		va_header;
+		cl_char		va_data[1];
+    }		va_4byte;
+	struct						/* Compressed-in-line format */
+	{
+		cl_uint		va_header;
+		cl_uint		va_rawsize;	/* Original data size (excludes header) */
+		cl_char		va_data[1];	/* Compressed data */
+	}		va_compressed;
+} varattrib_4b;
+
+typedef struct
+{
+	cl_uchar	va_header;
+	cl_char		va_data[1];		/* Data begins here */
+} varattrib_1b;
+
+/* inline portion of a short varlena pointing to an external resource */
+typedef struct
+{
+	cl_uchar    va_header;		/* Always 0x80 or 0x01 */
+	cl_uchar	va_tag;			/* Type of datum */
+	cl_char		va_data[1];		/* Data (of the type indicated by va_tag) */
+} varattrib_1b_e;
+
+typedef enum vartag_external
+{
+	VARTAG_INDIRECT = 1,
+	VARTAG_ONDISK = 18
+} vartag_external;
+
+typedef struct varatt_external
+{
+	cl_int		va_rawsize;		/* Original data size (includes header) */
+	cl_int		va_extsize;		/* External saved size (doesn't) */
+	cl_int		va_valueid;		/* Unique ID of value within TOAST table */
+	cl_int		va_toastrelid;	/* RelID of TOAST table containing it */
+} varatt_external;
+
+typedef struct varatt_indirect
+{
+	hostptr_t	pointer;	/* Host pointer to in-memory varlena */
+} varatt_indirect;
+
+#define VARTAG_SIZE(tag) \
+	((tag) == VARTAG_INDIRECT ? sizeof(varatt_indirect) :	\
+	 (tag) == VARTAG_ONDISK ? sizeof(varatt_external) :		\
+	 0 /* should not happen */)
+
+
+#define VARHDRSZ_EXTERNAL		offsetof(varattrib_1b_e, va_data)
+#define VARTAG_EXTERNAL(PTR)	VARTAG_1B_E(PTR)
+#define VARSIZE_EXTERNAL(PTR)	\
+	(VARHDRSZ_EXTERNAL + VARTAG_SIZE(VARTAG_EXTERNAL(PTR)))
 
 
 #define VARATT_IS_4B(PTR) \
-	((((varattrib_1b *) (PTR))->va_header & 0x01) == 0x00)
+	((((__global varattrib_1b *) (PTR))->va_header & 0x01) == 0x00)
 #define VARATT_IS_4B_U(PTR) \
-	((((varattrib_1b *) (PTR))->va_header & 0x03) == 0x00)
+	((((__global varattrib_1b *) (PTR))->va_header & 0x03) == 0x00)
 #define VARATT_IS_4B_C(PTR) \
-	((((varattrib_1b *) (PTR))->va_header & 0x03) == 0x02)
+	((((__global varattrib_1b *) (PTR))->va_header & 0x03) == 0x02)
 #define VARATT_IS_1B(PTR) \
-	((((varattrib_1b *) (PTR))->va_header & 0x01) == 0x01)
+	((((__global varattrib_1b *) (PTR))->va_header & 0x01) == 0x01)
 #define VARATT_IS_1B_E(PTR) \
-	((((varattrib_1b *) (PTR))->va_header) == 0x01)
+	((((__global varattrib_1b *) (PTR))->va_header) == 0x01)
+#define VARATT_IS_COMPRESSED(PTR)		VARATT_IS_4B_C(PTR)
+#define VARATT_IS_EXTERNAL(PTR)			VARATT_IS_1B_E(PTR)
 #define VARATT_NOT_PAD_BYTE(PTR) \
-	(*((cl_uchar *) (PTR)) != 0)
+	(*((__global cl_uchar *) (PTR)) != 0)
+
+#define VARSIZE_4B(PTR) \
+	(((__global varattrib_4b *) (PTR))->va_4byte.va_header & 0x3FFFFFFF)
+#define VARSIZE_1B(PTR) \
+	(((__global varattrib_1b *) (PTR))->va_header & 0x7F)
+#define VARTAG_1B_E(PTR) \
+	(((__global varattrib_1b_e *) (PTR))->va_tag)
 
 #define VARSIZE_ANY(PTR)							\
 	(VARATT_IS_1B_E(PTR) ? VARSIZE_EXTERNAL(PTR) :	\
@@ -155,6 +223,7 @@ typedef struct {
 typedef struct {
 	cl_uint		nrooms;		/* max number of results rooms */
 	cl_uint		nitems;		/* number of results being written */
+	cl_uint		debug_nums;	/* number of debug messages */
 	cl_uint		debug_usage;/* current usage of debug buffer */
 	cl_int		errcode;	/* chunk-level error */
 	cl_int		results[FLEXIBLE_ARRAY_MEMBER];
@@ -172,11 +241,11 @@ typedef struct {
 
 typedef struct {
 	cl_uint		length;		/* length of this entry; 4-bytes aligned */
-	cl_ushort	global_ofs;
-	cl_ushort	global_sz;
-	cl_ushort	global_id;
-	cl_ushort	local_sz;
-	cl_ushort	local_id;
+	cl_uint		global_ofs;
+	cl_uint		global_sz;
+	cl_uint		global_id;
+	cl_uint		local_sz;
+	cl_uint		local_id;
 	cl_ushort	v_class;
 	union {
 		cl_char		v_char;		/* = 'c' */
@@ -211,15 +280,12 @@ typedef struct {
 		length = TYPEALIGN(sizeof(cl_uint), length);					\
 		offset = atomic_add(&kresult->debug_usage, length);				\
 																		\
-		kdebug = (__global kern_debug *)								\
-			&kresult->results[kresult->nrooms];							\
-																		\
-		/* no more to write anything! */								\
-		if (offset + sizeof(cl_uint) >= KERNEL_DEBUG_BUFSIZE)			\
-			return;														\
-		kdebug->length = length;										\
 		if (offset + length >= KERNEL_DEBUG_BUFSIZE)					\
 			return;														\
+																		\
+		kdebug = (__global kern_debug *)								\
+			((uintptr_t)&kresult->results[kresult->nrooms] + offset);	\
+		kdebug->length = length;										\
 		kdebug->global_ofs = get_global_offset(0);						\
 		kdebug->global_sz = get_global_size(0);							\
 		kdebug->global_id = get_global_id(0);							\
@@ -227,8 +293,9 @@ typedef struct {
 		kdebug->local_id = get_local_id(0);								\
 		kdebug->v_class = V_CLASS;										\
 		kdebug->value.v_##BASETYPE = value;								\
-		for (i=0; i < length; i++)										\
+		for (i=0; i < label_sz; i++)									\
 			kdebug->label[i] = label[i];								\
+		atomic_add(&kresult->debug_nums, 1);							\
 	}
 #if 0
 PG_KERN_DEBUG_TEMPLATE(char,   'c')
@@ -657,9 +724,10 @@ kern_row_to_column(__global kern_row_store *krs,
 		else
 		{
 			isnull = false;
+
 			if (rcmeta->attlen > 0)
 				offset = TYPEALIGN(rcmeta->attalign, offset);
-			else if (!VARATT_NOT_PAD_BYTE((char *)&rs_tup->data + offset))
+			else if (!VARATT_NOT_PAD_BYTE((uintptr_t)&rs_tup->data + offset))
 				offset = TYPEALIGN(rcmeta->attalign, offset);
 
 			if ((rcmeta->flags & KERN_COLMETA_ATTREFERENCED) != 0)
@@ -677,6 +745,14 @@ kern_row_to_column(__global kern_row_store *krs,
 				dest += get_global_id(0) * (ccmeta->attlen > 0
 											? ccmeta->attlen
 											: sizeof(cl_uint));
+				/*
+				 * Increment offset, according to the logic of
+				 * att_addlength_pointer but no cstring support in kernel
+				 */
+				offset += (ccmeta->attlen > 0
+						   ? ccmeta->attlen
+						   : VARSIZE_ANY(src));
+
 				/*
 				 * Copy a datum from a field of rs_tuple into column-array
 				 * of kern_column_store. In case of variable length-field,
@@ -715,7 +791,7 @@ kern_row_to_column(__global kern_row_store *krs,
 					default:
 						*((__global cl_uint *)dest)
 							= (cl_uint)((uintptr_t)src -
-										(uintptr_t)rs_tup);
+										(uintptr_t)krs);
 						break;
 				}
 			}

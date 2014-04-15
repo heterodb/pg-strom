@@ -316,6 +316,9 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					 "    = KERN_GPUSCAN_PARAMBUF(kgscan);\n"
 					 "\n"
 					 "  gpuscan_workmem_init(local_workmem);\n"
+					 "  if (get_global_id(0) == 0) {"
+					 "  KDEBUG(KERN_GPUSCAN_RESULTBUF(kgscan), \"cs_ofs1\", kcs->colmeta[0].cs_ofs);"
+					 "  KDEBUG(KERN_GPUSCAN_RESULTBUF(kgscan), \"cs_ofs2\", kcs->colmeta[1].cs_ofs); }"
 					 "  if (get_global_id(0) < kcs->nrows)\n"
 					 "    rc = %s;\n"
 					 "  else\n"
@@ -701,6 +704,7 @@ pgstrom_load_gpuscan_row(GpuScanState *gss)
 	kresult = KERN_GPUSCAN_RESULTBUF(&gscan->kern);
 	kresult->nrooms = nrows;
 	kresult->nitems = 0;
+	kresult->debug_nums = 0;
 	kresult->debug_usage = (kernel_debug ? 0 : KERN_DEBUG_UNAVAILABLE);
 	kresult->errcode = 0;
 
@@ -732,9 +736,12 @@ gpuscan_next_tuple_row(GpuScanState *gss, TupleTableSlot *slot)
 		Assert(rstore->stag == StromTag_RowStore);
 
 		rs_index = kresult->results[gss->curr_index++];
-		Assert(rs_index < rstore->kern.nrows);
+		/*
+		 * TODO: if rs_index is negative, we need to recheck on CPU side.
+		 */
+		Assert(rs_index > 0 && rs_index <= rstore->kern.nrows);
 
-		rs_tup = kern_rowstore_get_tuple(&rstore->kern, rs_index);
+		rs_tup = kern_rowstore_get_tuple(&rstore->kern, rs_index - 1);
 		ExecStoreTuple(&rs_tup->htup, slot, InvalidBuffer, false);
 		return true;
 	}
@@ -1118,9 +1125,8 @@ clserv_respond_gpuscan_row(cl_event event, cl_int ev_status, void *private)
 {
 	clstate_gpuscan_row	*clgss = private;
 	pgstrom_gpuscan		*gscan = (pgstrom_gpuscan *)clgss->msg;
-#ifdef PGSTROM_DEBUG
-	cl_uint		refcnt;
-#endif
+	kern_resultbuf		*kresult = KERN_GPUSCAN_RESULTBUF(&gscan->kern);
+	int		i;
 
 	/* put error code */
 	if (ev_status != CL_COMPLETE)
@@ -1131,22 +1137,17 @@ clserv_respond_gpuscan_row(cl_event event, cl_int ev_status, void *private)
 	}
 	else
 	{
-		gscan->msg.errcode = KERN_GPUSCAN_RESULTBUF(&gscan->kern)->errcode;
+		gscan->msg.errcode = kresult->errcode;
 	}
 	/* dump debug messages */
 	pgstrom_dump_kernel_debug(KERN_GPUSCAN_RESULTBUF(&gscan->kern));
 
+	for (i=0; i < kresult->nitems; i++)
+		elog(LOG, "res[%d] = %d", i, kresult->results[i]);
+
 	/* release opencl objects */
 	while (clgss->ev_index > 0)
-	{
-#ifdef PGSTROM_DEBUG
-		clGetEventInfo(clgss->events[clgss->ev_index - 1],
-					   CL_EVENT_REFERENCE_COUNT,
-					   sizeof(refcnt), &refcnt, NULL);
-		Assert(refcnt == 1);
-#endif
 		clReleaseEvent(clgss->events[--clgss->ev_index]);
-	}
 	clReleaseMemObject(clgss->m_cstore);
 	clReleaseMemObject(clgss->m_rstore);
 	clReleaseMemObject(clgss->m_gpuscan);

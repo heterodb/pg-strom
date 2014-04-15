@@ -231,21 +231,27 @@ pgstrom_load_row_store_heap(HeapScanDesc scan, ScanDirection direction,
 	kcs_head->ncols = cs_ncols;
 	kcs_head->nrows = nrows;
 
+	elog(LOG, "kcs->nrows = %u", nrows);
+
 	index = 0;
 	offset = STROMALIGN(offsetof(kern_column_store, colmeta[cs_ncols]));
 	foreach (cell, dev_attnums)
 	{
-		kern_colmeta   *colmeta;
+		kern_colmeta   *rcmeta;
+		kern_colmeta   *ccmeta;
 		AttrNumber		anum = lfirst_int(cell);
 
 		Assert(anum > 0 && anum <= rs_ncols);
-		colmeta = &rstore->kern.colmeta[anum - 1];
-		memcpy(&kcs_head->colmeta[index], colmeta, sizeof(kern_colmeta));
-		kcs_head->colmeta[index].cs_ofs = offset;
-		if ((colmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
+		rcmeta = &rstore->kern.colmeta[anum - 1];
+		Assert((rcmeta->flags & KERN_COLMETA_ATTREFERENCED) != 0);
+		ccmeta = &kcs_head->colmeta[index];
+		memcpy(ccmeta, rcmeta, sizeof(kern_colmeta));
+		ccmeta->cs_ofs = offset;
+
+		if ((ccmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
 			offset += STROMALIGN((nrows + 7) / 8);
-		offset += STROMALIGN(nrows * (colmeta->attlen > 0
-									  ? colmeta->attlen
+		offset += STROMALIGN(nrows * (ccmeta->attlen > 0
+									  ? ccmeta->attlen
 									  : sizeof(cl_uint)));
 		index++;
 	}
