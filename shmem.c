@@ -47,13 +47,13 @@ typedef struct
 	Size			blocksz;	/* block size in bytes if head */
 } shmem_block;
 
-#define BLOCK_IS_ACTICE(block)			\
-	((block)->chain.next == NULL &&		\
-	 (block)->chain.prev == NULL && 	\
+#define BLOCK_IS_ACTIVE(block)			\
+	(((block)->chain.next == NULL  &&	\
+	  (block)->chain.prev == NULL) && 	\
 	 (block)->blocksz > 0)
 #define BLOCK_IS_FREE(block)			\
-	((block)->chain.next != NULL ||		\
-	 (block)->chain.prev != NULL		\
+	(((block)->chain.next != NULL  ||	\
+	  (block)->chain.prev != NULL) &&	\
 	 (block)->blocksz > 0)
 
 typedef struct
@@ -173,16 +173,17 @@ pgstrom_shmem_zone_block_split(shmem_zone *zone, int shift)
 	zone->num_free[shift]--;
 
 	block = dlist_container(shmem_block, chain, dnode);
+	block->blocksz = (1 << (shift-1)) * SHMEM_BLOCKSZ;
 	index = block - &zone->blocks[0];
-	Assert((index & ((1 << shift) - 1)) == 0);
+	Assert((index & ((1UL << shift) - 1)) == 0);
 	dlist_push_tail(&zone->free_list[shift-1], &block->chain);
 
 	/* is it exactly block head? */
 	for (i=1; i < (1 << shift); i++)
-		Assert((block+i)->chain.prev == NULL &&
-			   (block+i)->chain.next == NULL);
+		Assert(!BLOCK_IS_ACTIVE(block+i) && !BLOCK_IS_FREE(block+i));
 
 	block += (1 << (shift - 1));
+	block->blocksz = (1 << (shift-1)) * SHMEM_BLOCKSZ;
 	dlist_push_tail(&zone->free_list[shift-1], &block->chain);
 
 	zone->num_free[shift-1] += 2;
@@ -193,7 +194,7 @@ pgstrom_shmem_zone_block_split(shmem_zone *zone, int shift)
 static void *
 pgstrom_shmem_zone_block_alloc(shmem_zone *zone, Size size)
 {
-	shmem_block	*sblock;
+	shmem_block	*block;
 	dlist_node	*dnode;
 	int		shift = find_least_pot(size + sizeof(cl_uint));
 	int		index;
@@ -208,16 +209,17 @@ pgstrom_shmem_zone_block_alloc(shmem_zone *zone, Size size)
 	Assert(!dlist_is_empty(&zone->free_list[shift]));
 
 	dnode = dlist_pop_head_node(&zone->free_list[shift]);
-	sblock = dlist_container(shmem_block, chain, dnode);
-	sblock->active.nullmark = NULL;
-	sblock->active.allocsz = size;
+	block = dlist_container(shmem_block, chain, dnode);
+	Assert(block->blocksz == (1UL << shift) * SHMEM_BLOCKSZ);
+
+	memset(&block->chain, 0, sizeof(dlist_node));
+	block->blocksz = size;
 
 	/* non-head block are zero cleared? */
 	for (i=1; i < (1 << shift); i++)
-		Assert((sblock+i)->chain.prev == NULL &&
-			   (sblock+i)->chain.next == NULL);
+		Assert(!BLOCK_IS_ACTIVE(block+i) && !BLOCK_IS_FREE(block+i));
 
-	index = sblock - &zone->blocks[0];
+	index = block - &zone->blocks[0];
 	address = (void *)((Size)zone->block_baseaddr + index * SHMEM_BLOCKSZ);
 	zone->num_free[shift]--;
 	zone->num_active[shift]++;
@@ -239,16 +241,12 @@ pgstrom_shmem_zone_block_free(shmem_zone *zone, void *address)
 
 	index = ((Size)address - (Size)zone->block_baseaddr) / SHMEM_BLOCKSZ;
 	block = &zone->blocks[index];
-	Assert(block->active.nullmark == NULL);
-
+	Assert(BLOCK_IS_ACTIVE(block));
 	/* detect overrun */
 	Assert(*((cl_uint *)((uintptr_t)address +
-						 block->active.allocsz)) == SHMEM_BLOCK_MAGIC);
-
-	shift = find_least_pot(block->active.allocsz + sizeof(cl_uint));
+						 block->blocksz)) == SHMEM_BLOCK_MAGIC);
+	shift = find_least_pot(block->blocksz + sizeof(cl_uint));
 	Assert(shift <= SHMEM_BLOCKSZ_BITS_RANGE);
-	if ((index & ~((1UL << shift) - 1) ) != index)
-		elog(INFO, "index=%ld shift=%ld", index, shift);
 	Assert((index & ~((1UL << shift) - 1)) == index);
 
 	zone->num_active[shift]--;
@@ -263,11 +261,14 @@ pgstrom_shmem_zone_block_free(shmem_zone *zone, void *address)
 			break;
 
 		buddy = &zone->blocks[buddy_index];
-		/* if active block, we cannot merge it any more */
-		if (buddy->active.nullmark == NULL)
+		/*
+		 * The buddy block can be merged if it is also free and same size.
+		 */
+		if (BLOCK_IS_ACTIVE(buddy) ||
+			buddy->blocksz != (1UL << shift) * SHMEM_BLOCKSZ)
 			break;
-		/* if buddy is all-zero, it means it is not a block head */
-		Assert(buddy->chain.prev != NULL && buddy->chain.next != NULL);
+		/* ensure buddy is block head */
+		Assert(BLOCK_IS_FREE(buddy));
 
 		dlist_delete(&buddy->chain);
 		if (buddy_index < index)
@@ -286,6 +287,7 @@ pgstrom_shmem_zone_block_free(shmem_zone *zone, void *address)
 		shift++;
 	}
 	zone->num_free[shift]++;
+	block->blocksz = (1UL << shift) * SHMEM_BLOCKSZ;
 	dlist_push_head(&zone->free_list[shift], &block->chain);
 }
 
@@ -361,8 +363,6 @@ pgstrom_shmem_free(void *address)
 	SpinLockRelease(&zone->lock);
 }
 
-//TODO needs to rework above
-
 /*
  * pgstrom_shmem_sanitycheck
  *
@@ -436,7 +436,6 @@ collect_shmem_block_info(shmem_zone *zone, int zone_index)
 	while (i < zone->num_blocks)
 	{
 		shmem_block	*block = &zone->blocks[i];
-		dlist_node	*dnode;
 
 		if (BLOCK_IS_ACTIVE(block))
 		{
