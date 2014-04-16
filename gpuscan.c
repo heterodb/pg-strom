@@ -315,10 +315,9 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					 "  __global kern_parambuf *kparams\n"
 					 "    = KERN_GPUSCAN_PARAMBUF(kgscan);\n"
 					 "\n"
+					 "  KDEBUG_INIT(KERN_GPUSCAN_RESULTBUF(kgscan));\n"
+					 "\n"
 					 "  gpuscan_workmem_init(local_workmem);\n"
-					 "  if (get_global_id(0) == 0) {"
-					 "  KDEBUG(KERN_GPUSCAN_RESULTBUF(kgscan), \"cs_ofs1\", kcs->colmeta[0].cs_ofs);"
-					 "  KDEBUG(KERN_GPUSCAN_RESULTBUF(kgscan), \"cs_ofs2\", kcs->colmeta[1].cs_ofs); }"
 					 "  if (get_global_id(0) < kcs->nrows)\n"
 					 "    rc = %s;\n"
 					 "  else\n"
@@ -336,6 +335,8 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					 "                __global kern_column_store *kcs,\n"
 					 "                __local void *local_workmem)\n"
 					 "{\n"
+					 "  KDEBUG_INIT(KERN_GPUSCAN_RESULTBUF(kgscan));\n"
+					 "\n"
 					 "  kern_row_to_column(krs,kcs,local_workmem);\n"
 					 "  gpuscan_qual_cs(kgscan,kcs,\n"
 					 "                  (__global kern_toastbuf *)krs,\n"
@@ -769,6 +770,7 @@ gpuscan_exec(CustomPlanState *node)
 			pgstrom_message	   *msg = &gss->curr_chunk->msg;
 
 			Assert(msg->refcnt == 1);
+			pgstrom_untrack_object(&msg->stag);
 			msg->cb_release(msg);
 			gss->curr_chunk = NULL;
 			gss->curr_index = 0;
@@ -1126,7 +1128,6 @@ clserv_respond_gpuscan_row(cl_event event, cl_int ev_status, void *private)
 	clstate_gpuscan_row	*clgss = private;
 	pgstrom_gpuscan		*gscan = (pgstrom_gpuscan *)clgss->msg;
 	kern_resultbuf		*kresult = KERN_GPUSCAN_RESULTBUF(&gscan->kern);
-	int		i;
 
 	/* put error code */
 	if (ev_status != CL_COMPLETE)
@@ -1141,9 +1142,6 @@ clserv_respond_gpuscan_row(cl_event event, cl_int ev_status, void *private)
 	}
 	/* dump debug messages */
 	pgstrom_dump_kernel_debug(LOG, KERN_GPUSCAN_RESULTBUF(&gscan->kern));
-
-	for (i=0; i < kresult->nitems; i++)
-		elog(LOG, "res[%d] = %d", i, kresult->results[i]);
 
 	/* release opencl objects */
 	while (clgss->ev_index > 0)
@@ -1494,38 +1492,28 @@ error0:
 /*
  * clserv_put_gpuscan_row
  *
- * Callback handler when reference counter of gpuscan is decreased.
- * It also unlinks a device program and release row-store being
- * associated.
- * Also note that this routine might be invoked by OpenCL server.
+ * Callback handler when reference counter of pgstrom_gpuscan object
+ * reached to zero, due to pgstrom_put_message.
+ * It also unlinks associated device program and release row-store.
+ * Also note that this routine can be called under the OpenCL server
+ * context.
  */
 static void
 clserv_put_gpuscan_row(pgstrom_message *msg)
 {
 	pgstrom_gpuscan	   *gscan = (pgstrom_gpuscan *)msg;
-	bool				gpuscan_release = false;
+	dlist_mutable_iter	iter;
 
-	SpinLockAcquire(&msg->lock);
-	if (--gscan->msg.refcnt == 0)
-		gpuscan_release = true;
-	SpinLockRelease(&msg->lock);
+	/* unlink device program */
+	pgstrom_put_devprog_key(gscan->dprog_key);
 
-	/* untrack local resource */
-	pgstrom_untrack_object(&gscan->msg.stag);
-
-	if (gpuscan_release)
+	/* release row-store */
+	dlist_foreach_modify(iter, &gscan->rc_store)
 	{
-		dlist_mutable_iter	iter;
-
-		pgstrom_put_devprog_key(gscan->dprog_key);
-
-		dlist_foreach_modify(iter, &gscan->rc_store)
-		{
-			pgstrom_row_store  *rstore
-				= dlist_container(pgstrom_row_store, chain, iter.cur);
-			Assert(rstore->stag == StromTag_RowStore);
-			pgstrom_shmem_free(rstore);
-		}
-		pgstrom_shmem_free(gscan);
+		pgstrom_row_store  *rstore
+			= dlist_container(pgstrom_row_store, chain, iter.cur);
+		Assert(rstore->stag == StromTag_RowStore);
+		pgstrom_shmem_free(rstore);
 	}
+	pgstrom_shmem_free(gscan);
 }

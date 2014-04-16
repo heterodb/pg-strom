@@ -246,18 +246,10 @@ typedef struct {
 	cl_uint		global_id;
 	cl_uint		local_sz;
 	cl_uint		local_id;
-	cl_ushort	v_class;
+	cl_char		v_class;
 	union {
-		cl_char		v_char;		/* = 'c' */
-		cl_uchar	v_uchar;	/* = 'C' */
-		cl_short	v_short;	/* = 's' */
-		cl_ushort	v_ushort;	/* = 'S' */
-		cl_int		v_int;		/* = 'i' */
-		cl_uint		v_uint;		/* = 'I' */
-		cl_long		v_long;		/* = 'l' */
-		cl_ulong	v_ulong;	/* = 'L' */
-		cl_float	v_float;	/* = 'f' */
-		cl_double	v_double;	/* = 'd' */
+		cl_ulong	v_int;
+		cl_double	v_fp;
 	} value;
 	cl_char		label[FLEXIBLE_ARRAY_MEMBER];
 } kern_debug;
@@ -265,57 +257,87 @@ typedef struct {
 #ifdef OPENCL_DEVICE_CODE
 
 #ifdef PGSTROM_KERNEL_DEBUG
-#define PG_KERN_DEBUG_TEMPLATE(BASETYPE, V_CLASS)						\
-	static inline void													\
-	pg_kern_debug(__global kern_resultbuf *kresult,						\
-				  __constant char *label,								\
-				  size_t label_sz,										\
-				  cl_##BASETYPE value)									\
-	{																	\
-		__global kern_debug *kdebug;									\
-		cl_uint	offset;													\
-		cl_uint length = offsetof(kern_debug, label) + label_sz;		\
-		cl_uint i;														\
-																		\
-		length = TYPEALIGN(sizeof(cl_uint), length);					\
-		offset = atomic_add(&kresult->debug_usage, length);				\
-																		\
-		if (offset + length >= KERNEL_DEBUG_BUFSIZE)					\
-			return;														\
-																		\
-		kdebug = (__global kern_debug *)								\
-			((uintptr_t)&kresult->results[kresult->nrooms] + offset);	\
-		kdebug->length = length;										\
-		kdebug->global_ofs = get_global_offset(0);						\
-		kdebug->global_sz = get_global_size(0);							\
-		kdebug->global_id = get_global_id(0);							\
-		kdebug->local_sz = get_local_size(0);							\
-		kdebug->local_id = get_local_id(0);								\
-		kdebug->v_class = V_CLASS;										\
-		kdebug->value.v_##BASETYPE = value;								\
-		for (i=0; i < label_sz; i++)									\
-			kdebug->label[i] = label[i];								\
-		atomic_add(&kresult->debug_nums, 1);							\
-	}
-#if 0
-PG_KERN_DEBUG_TEMPLATE(char,   'c')
-PG_KERN_DEBUG_TEMPLATE(uchar,  'C')
-PG_KERN_DEBUG_TEMPLATE(short,  's')
-PG_KERN_DEBUG_TEMPLATE(ushort, 'S')
-#endif
-PG_KERN_DEBUG_TEMPLATE(int,    'i')
-#if 0
-PG_KERN_DEBUG_TEMPLATE(uint,   'I')
-PG_KERN_DEBUG_TEMPLATE(long,   'l')
-PG_KERN_DEBUG_TEMPLATE(ulong,  'L')
-PG_KERN_DEBUG_TEMPLATE(float,  'f')
-PG_KERN_DEBUG_TEMPLATE(double, 'd')
-#endif
+static void
+pg_kern_debug_int(__global kern_resultbuf *kresult,
+				  __constant char *label, size_t label_sz,
+				  cl_ulong value, size_t value_sz)
+{
+	__global kern_debug *kdebug;
+	cl_uint		offset;
+	cl_uint		length = offsetof(kern_debug, label) + label_sz;
+	cl_uint		i;
 
-#define KDEBUG(kresult, label, value)	\
-	pg_kern_debug((kresult), (label), sizeof(label), (value))
+	if (!kresult)
+		return;
+
+	length = TYPEALIGN(sizeof(cl_uint), length);
+	offset = atomic_add(&kresult->debug_usage, length);
+	if (offset + length >= KERNEL_DEBUG_BUFSIZE)
+		return;
+
+	kdebug = (__global kern_debug *)
+		((uintptr_t)&kresult->results[kresult->nrooms] + offset);
+	kdebug->length = length;                                        \
+	kdebug->global_ofs = get_global_offset(0);
+	kdebug->global_sz = get_global_size(0);
+	kdebug->global_id = get_global_id(0);
+	kdebug->local_sz = get_local_size(0);
+	kdebug->local_id = get_local_id(0);
+	kdebug->v_class = (value_sz == sizeof(cl_char) ? 'c' :
+					   (value_sz == sizeof(cl_short) ? 's' :
+						(value_sz == sizeof(cl_int) ? 'i' : 'l')));
+	kdebug->value.v_int = value;
+	for (i=0; i < label_sz; i++)
+		kdebug->label[i] = label[i];
+	atomic_add(&kresult->debug_nums, 1);
+}
+
+static void
+pg_kern_debug_fp(__global kern_resultbuf *kresult,
+				 __constant char *label, size_t label_sz,
+				 cl_double value, size_t value_sz)
+{
+	__global kern_debug *kdebug;
+	cl_uint		offset;
+	cl_uint		length = offsetof(kern_debug, label) + label_sz;
+	cl_uint		i;
+
+	if (!kresult)
+		return;
+
+	length = TYPEALIGN(sizeof(cl_uint), length);
+	offset = atomic_add(&kresult->debug_usage, length);
+	if (offset + length >= KERNEL_DEBUG_BUFSIZE)
+		return;
+
+	kdebug = (__global kern_debug *)
+		((uintptr_t)&kresult->results[kresult->nrooms] + offset);
+	kdebug->length = length;                                        \
+	kdebug->global_ofs = get_global_offset(0);
+	kdebug->global_sz = get_global_size(0);
+	kdebug->global_id = get_global_id(0);
+	kdebug->local_sz = get_local_size(0);
+	kdebug->local_id = get_local_id(0);
+	kdebug->v_class = (value_sz == sizeof(cl_float) ? 'f' : 'd');
+	kdebug->value.v_fp = value;
+	for (i=0; i < label_sz; i++)
+		kdebug->label[i] = label[i];
+	atomic_add(&kresult->debug_nums, 1);
+}
+__global kern_resultbuf *pgstrom_kresult_buffer = NULL;
+
+#define KDEBUG_INT(label, value)	\
+	pg_kern_debug_int(pgstrom_kresult_buffer, \
+					  (label), sizeof(label), (value), sizeof(value))
+#define KDEBUG_FP(label, value)	\
+	pg_kern_debug_fp(pgstrom_kresult_buffer, \
+					 (label), sizeof(label), (value), sizeof(value))
+#define KDEBUG_INIT(kresult)	\
+	do { pgstrom_kresult_buffer = (kresult); } while (0)
 #else
-#define KDEBUG(kresult, label, value)	do {} while(0)
+#define KDEBUG_INT(label, value)	do {} while(0)
+#define KDEBUG_FP(label, value)		do {} while(0)
+#define KDEBUG_INIT(kresult)		do {} while(0)
 #endif /* PGSTROM_KERNEL_DEBUG */
 
 /*
@@ -723,21 +745,32 @@ kern_row_to_column(__global kern_row_store *krs,
 			isnull = true;
 		else
 		{
+			__global char  *src;
+
 			isnull = false;
 
 			if (rcmeta->attlen > 0)
 				offset = TYPEALIGN(rcmeta->attalign, offset);
 			else if (!VARATT_NOT_PAD_BYTE((uintptr_t)&rs_tup->data + offset))
 				offset = TYPEALIGN(rcmeta->attalign, offset);
+			src = ((__global char *)&rs_tup->data) + offset;
+
+			/*
+			 * Increment offset, according to the logic of
+			 * att_addlength_pointer but no cstring support in kernel
+			 */
+			offset += (rcmeta->attlen > 0 ?
+					   rcmeta->attlen :
+					   VARSIZE_ANY(src));
 
 			if ((rcmeta->flags & KERN_COLMETA_ATTREFERENCED) != 0)
 			{
-				__global char  *src;
 				__global char  *dest;
 
 				ccmeta = &kcs->colmeta[j];
-				src = ((__global char *)&rs_tup->data) + offset;
+
 				dest = ((__global char *)kcs) + ccmeta->cs_ofs;
+
 				/* adjust destination address by nullmap, if needed */
 				if ((ccmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
 					dest += STROMALIGN((kcs->nrows + 7) >> 3);
@@ -745,14 +778,6 @@ kern_row_to_column(__global kern_row_store *krs,
 				dest += get_global_id(0) * (ccmeta->attlen > 0
 											? ccmeta->attlen
 											: sizeof(cl_uint));
-				/*
-				 * Increment offset, according to the logic of
-				 * att_addlength_pointer but no cstring support in kernel
-				 */
-				offset += (ccmeta->attlen > 0
-						   ? ccmeta->attlen
-						   : VARSIZE_ANY(src));
-
 				/*
 				 * Copy a datum from a field of rs_tuple into column-array
 				 * of kern_column_store. In case of variable length-field,
@@ -839,6 +864,7 @@ kern_row_to_column(__global kern_row_store *krs,
 			j++;
 		}
 	}
+	barrier(CLK_GLOBAL_MEM_FENCE);
 }
 
 /*

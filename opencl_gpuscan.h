@@ -176,7 +176,7 @@ gpuscan_writeback_statement_error(__global kern_resultbuf *kresbuf,
 	errcode1 = local_temp[0];
 	if (get_local_id(0) == 0 && StromErrorIsSignificant(errcode1))
 	{
-		KDEBUG(kresbuf, "errcode", errcode1);
+		KDEBUG_INT("errcode", errcode1);
 		atomic_cmpxchg(&kresbuf->errcode, StromError_Success, errcode1);
 	}
 }

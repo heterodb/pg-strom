@@ -50,48 +50,29 @@ pgstrom_dump_kernel_debug(int elevel, kern_resultbuf *kresult)
 		switch (kdebug->v_class)
 		{
 			case 'c':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%hhd", kdebug->value.v_char);
-				break;
-			case 'C':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%hhu", kdebug->value.v_uchar);
+				snprintf(buf + j, sizeof(buf) - j, "%hhd",
+						 (cl_char)(kdebug->value.v_int & 0x000000ff));
 				break;
 			case 's':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%hd", kdebug->value.v_short);
-				break;
-			case 'S':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%hu", kdebug->value.v_ushort);
+				snprintf(buf + j, sizeof(buf) - j, "%hd",
+						 (cl_short)(kdebug->value.v_int & 0x0000ffff));
 				break;
 			case 'i':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%d", kdebug->value.v_int);
-				break;
-			case 'I':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%u", kdebug->value.v_uint);
+				snprintf(buf + j, sizeof(buf) - j, "%d",
+						 (cl_int)(kdebug->value.v_int & 0xffffffff));
 				break;
 			case 'l':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%ld", kdebug->value.v_long);
-				break;
-			case 'L':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%lu", kdebug->value.v_ulong);
+				snprintf(buf + j, sizeof(buf) - j, "%ld",
+						 (cl_long)kdebug->value.v_int);
 				break;
 			case 'f':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%f", (cl_double)kdebug->value.v_float);
-				break;
 			case 'd':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%f", kdebug->value.v_double);
+				snprintf(buf + j, sizeof(buf) - j, "%f",
+						 (cl_double)kdebug->value.v_fp);
 				break;
 			default:
 				snprintf(buf + j, sizeof(buf) - j,
-						 "0x%016lx (unknown class)", kdebug->value.v_long);
+						 "0x%016lx (unknown class)", kdebug->value.v_int);
 				break;
 		}
 		elog(elevel, "kdebug: %s", buf);
