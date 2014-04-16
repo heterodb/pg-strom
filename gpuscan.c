@@ -43,8 +43,8 @@ typedef struct {
 	CustomPath	cpath;
 	List	   *dev_quals;		/* RestrictInfo run on device */
 	List	   *host_quals;		/* RestrictInfo run on host */
-	List	   *dev_attnums;	/* attnums referenced in device */
-	List	   *host_attnums;	/* attnums referenced in host */
+	Bitmapset  *dev_attnums;	/* attnums referenced in device */
+	Bitmapset  *host_attnums;	/* attnums referenced in host */
 } GpuScanPath;
 
 typedef struct {
@@ -55,8 +55,8 @@ typedef struct {
 	List	   *used_params;	/* list of Const/Param in use */
 	List	   *used_vars;		/* list of Var in use */
 	List	   *dev_clauses;	/* clauses to be run on device */
-	List	   *dev_attnums;	/* attnums referenced in device */
-	List	   *host_attnums;	/* attnums referenced in host */
+	Bitmapset  *dev_attnums;	/* attnums referenced in device */
+	Bitmapset  *host_attnums;	/* attnums referenced in host */
 } GpuScanPlan;
 
 /*
@@ -86,13 +86,18 @@ typedef struct {
 	Relation			scan_rel;
 	HeapScanDesc		scan_desc;
 	TupleTableSlot	   *scan_slot;
-	int					scan_mode;
+	List			   *dev_quals;
+
+	int					scan_mode;	/* one of GpuScanMode_* */
 	pgstrom_queue	   *mqueue;
-	kern_parambuf	   *kparambuf;
 	int32				extra_flags;
 	Datum				dprog_key;
-	List			   *dev_attnums;
-	kern_colmeta	   *dev_colmeta;
+
+	kern_parambuf	   *kparambuf;
+	kern_colmeta	   *rs_colmeta;
+	kern_colmeta	   *cs_colmeta;
+	int					cs_colnums;
+
 	pgstrom_gpuscan	   *curr_chunk;
 	uint32				curr_index;
 	int					num_running;
@@ -197,10 +202,16 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	List		   *host_quals = NIL;
 	Bitmapset	   *dev_attnums = NULL;
 	Bitmapset	   *host_attnums = NULL;
-	Bitmapset	   *tempset;
-	AttrNumber		anum;
 	ListCell	   *cell;
 	codegen_context	context;
+
+	/* call the secondary hook */
+	if (add_scan_path_next)
+		add_scan_path_next(root, baserel, rte);
+
+	/* Is PG-Strom enabled? */
+	if (!pgstrom_enabled)
+		return;
 
 	/* only base relation we can handle */
 	if (baserel->rtekind != RTE_RELATION || baserel->relid == 0)
@@ -258,25 +269,8 @@ gpuscan_add_scan_path(PlannerInfo *root,
 
 	pathnode->dev_quals = dev_quals;
 	pathnode->host_quals = host_quals;
-
-	pathnode->dev_attnums = NIL;
-	tempset = bms_copy(dev_attnums);
-	while ((anum = bms_first_member(tempset)) >= 0)
-	{
-		anum += FirstLowInvalidHeapAttributeNumber;
-		Assert(anum > 0);	/* device cannot reference system columns */
-		pathnode->dev_attnums = lappend_int(pathnode->dev_attnums, anum);
-	}
-	bms_free(tempset);
-
-	pathnode->host_attnums = NIL;
-	tempset = bms_copy(host_attnums);
-	while ((anum = bms_first_member(tempset)) >= 0)
-	{
-		anum += FirstLowInvalidHeapAttributeNumber;
-		pathnode->host_attnums = lappend_int(pathnode->host_attnums, anum);
-	}
-	bms_free(tempset);
+	pathnode->dev_attnums = dev_attnums;
+	pathnode->host_attnums = host_attnums;
 
 	add_path(baserel, &pathnode->cpath.path);
 }
@@ -458,6 +452,22 @@ _outToken(StringInfo str, const char *s)
 	}
 }
 
+/* copied from outfuncs.c */
+static void
+_outBitmapset(StringInfo str, const Bitmapset *bms)
+{
+	Bitmapset  *tmpset;
+	int			x;
+
+	appendStringInfoChar(str, '(');
+	appendStringInfoChar(str, 'b');
+	tmpset = bms_copy(bms);
+	while ((x = bms_first_member(tmpset)) >= 0)
+		appendStringInfo(str, " %d", x);
+	bms_free(tmpset);
+	appendStringInfoChar(str, ')');
+}
+
 static void
 gpuscan_textout_path(StringInfo str, Node *node)
 {
@@ -475,14 +485,12 @@ gpuscan_textout_path(StringInfo str, Node *node)
 	pfree(temp);
 
 	/* dev_attnums */
-	temp = nodeToString(pathnode->dev_attnums);
-	appendStringInfo(str, " :dev_attnums %s", temp);
-	pfree(temp);
+	appendStringInfo(str, " :dev_attnums ");
+	_outBitmapset(str, pathnode->dev_attnums);
 
 	/* host_attnums */
-	temp = nodeToString(pathnode->host_attnums);
-	appendStringInfo(str, " :host_attnums %s", temp);
-	pfree(temp);
+	appendStringInfo(str, " :host_attnums ");
+	_outBitmapset(str, pathnode->host_attnums);
 }
 
 static void
@@ -520,8 +528,8 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	Index			scanrelid = gsplan->scanrelid;
 	GpuScanState   *gss;
 	TupleDesc		tupdesc;
+	int32			extra_flags;
 	AttrNumber		anum;
-	ListCell	   *cell;
 
 	/* gpuscan should not have inner/outer plan now */
 	Assert(outerPlan(node) == NULL);
@@ -548,6 +556,8 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		ExecInitExpr((Expr *) node->plan.targetlist, &gss->cps.ps);
 	gss->cps.ps.qual = (List *)
 		ExecInitExpr((Expr *) node->plan.qual, &gss->cps.ps);
+	gss->dev_quals = (List *)
+		ExecInitExpr((Expr *) gsplan->dev_clauses, &gss->cps.ps);
 
 	/*
 	 * tuple table initialization
@@ -586,30 +596,30 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	gss->mqueue = pgstrom_create_queue();
 	gss->kparambuf = pgstrom_create_kern_parambuf(gsplan->used_params,
 												  gss->cps.ps.ps_ExprContext);
-	gss->extra_flags = gsplan->extra_flags;
+	extra_flags = gsplan->extra_flags;
 	if (pgstrom_kernel_debug)
-		gss->extra_flags |= DEVKERNEL_NEEDS_DEBUG;
+		extra_flags |= DEVKERNEL_NEEDS_DEBUG;
 	if (gsplan->kern_source)
 		gss->dprog_key = pgstrom_get_devprog_key(gsplan->kern_source,
-												 gss->extra_flags);
+												 extra_flags);
 	else
 		gss->dprog_key = 0;	/* it might happen if tc-cache got supported */
 
-	gss->dev_attnums = gsplan->dev_attnums;
-	gss->dev_colmeta = palloc(sizeof(kern_colmeta) * tupdesc->natts);
-	cell = list_head(gsplan->dev_attnums);
+	gss->rs_colmeta = palloc(sizeof(kern_colmeta) * tupdesc->natts);
+	gss->cs_colnums = 0;
 	for (anum=0; anum < tupdesc->natts; anum++)
 	{
 		Form_pg_attribute attr = tupdesc->attrs[anum];
-		kern_colmeta   *colmeta = &gss->dev_colmeta[anum];
+		kern_colmeta   *colmeta = &gss->rs_colmeta[anum];
 
 		colmeta->flags = 0;
 		if (attr->attnotnull)
 			colmeta->flags |= KERN_COLMETA_ATTNOTNULL;
-		if (cell && attr->attnum == lfirst_int(cell))
+		if (bms_is_member(attr->attnum - FirstLowInvalidHeapAttributeNumber,
+						  gsplan->dev_attnums))
 		{
 			colmeta->flags |= KERN_COLMETA_ATTREFERENCED;
-			cell = lnext(cell);
+			gss->cs_colnums++;
 		}
 
 		if (attr->attalign == 'c')
@@ -625,7 +635,26 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		colmeta->attlen = attr->attlen;
 		colmeta->cs_ofs = -1;	/* to be calculated for each row_store */
 	}
-	Assert(cell == NULL);
+
+	if (gss->cs_colnums > 0)
+	{
+		Bitmapset  *tempset;
+		int		i;
+
+		gss->cs_colmeta = palloc(sizeof(kern_colmeta) * gss->cs_colnums);
+		tempset = bms_copy(gsplan->dev_attnums);
+		for (i=0; (anum = bms_first_member(tempset)) >= 0; i++)
+		{
+			anum += FirstLowInvalidHeapAttributeNumber;
+			Assert(anum > 0 && anum <= tupdesc->natts);
+
+			memcpy(&gss->cs_colmeta[i],
+				   &gss->rs_colmeta[anum - 1],
+				   sizeof(kern_colmeta));
+		}
+		Assert(i == gss->cs_colnums);
+		bms_free(tempset);
+	}
 
 	gss->curr_chunk = NULL;
 	gss->curr_index = 0;
@@ -642,6 +671,7 @@ pgstrom_load_gpuscan_row(GpuScanState *gss)
 	pgstrom_row_store  *rstore;
 	kern_parambuf	   *kparam;
 	kern_resultbuf	   *kresult;
+	int			extra_flags;
 	cl_uint		length;
 	cl_uint		nrows;
 	bool		scan_done;
@@ -650,7 +680,8 @@ pgstrom_load_gpuscan_row(GpuScanState *gss)
 	/*
 	 * check status of pg_strom.kernel_debug
 	 */
-	if ((gss->extra_flags & DEVKERNEL_NEEDS_DEBUG) != 0)
+	extra_flags = pgstrom_get_devprog_extra_flags(gss->dprog_key);
+	if ((extra_flags & DEVKERNEL_NEEDS_DEBUG) != 0)
 		kernel_debug = true;
 	else
 		kernel_debug = false;
@@ -661,8 +692,9 @@ pgstrom_load_gpuscan_row(GpuScanState *gss)
 	 */
 	rstore = pgstrom_load_row_store_heap(gss->scan_desc,
 										 gss->cps.ps.state->es_direction,
-										 gss->dev_colmeta,
-										 gss->dev_attnums,
+										 gss->rs_colmeta,
+										 gss->cs_colmeta,
+										 gss->cs_colnums,
 										 &scan_done);
 	if (scan_done)
 	{
@@ -957,30 +989,39 @@ gpuscan_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 	GpuScanState   *gss = (GpuScanState *) node;
 	GpuScanPlan	   *gsplan = (GpuScanPlan *) gss->cps.ps.plan;
 	Relation		rel = gss->scan_rel;
-	TupleDesc		tupdesc = RelationGetDescr(rel);
-	ListCell	   *cell;
+	Bitmapset	   *tempset;
+	Oid				relid = RelationGetRelid(rel);
+	AttrNumber		anum;
+	bool			is_first;
 	StringInfoData	str;
 
 	initStringInfo(&str);
-	foreach (cell, gsplan->host_attnums)
+	tempset = bms_copy(gsplan->host_attnums);
+	is_first = true;
+	while ((anum = bms_first_member(tempset)) >= 0)
 	{
-		Form_pg_attribute attr = tupdesc->attrs[lfirst_int(cell) - 1];
+		anum += FirstLowInvalidHeapAttributeNumber;
 
 		appendStringInfo(&str, "%s%s",
-						 cell == list_head(gsplan->host_attnums) ? "" : ", ",
-						 NameStr(attr->attname));
+						 is_first ? "" : " ,",
+						 get_relid_attribute_name(relid, anum));
+		is_first = false;
 	}
+	bms_free(tempset);
 	ExplainPropertyText("Host References", str.data, es);
 
-	resetStringInfo(&str);
-	foreach (cell, gsplan->dev_attnums)
+	tempset = bms_copy(gsplan->dev_attnums);
+	is_first = true;
+	while ((anum = bms_first_member(tempset)) >= 0)
 	{
-		Form_pg_attribute attr = tupdesc->attrs[lfirst_int(cell) - 1];
+		anum += FirstLowInvalidHeapAttributeNumber;
 
 		appendStringInfo(&str, "%s%s",
-						 cell == list_head(gsplan->dev_attnums) ? "" : ", ",
-						 NameStr(attr->attname));
+						 is_first ? "" : " ,",
+						 get_relid_attribute_name(relid, anum));
+		is_first = false;
 	}
+	bms_free(tempset);
 	ExplainPropertyText("Device References", str.data, es);
 
 	if (gsplan->cplan.plan.qual != NIL)
@@ -1033,13 +1074,11 @@ gpuscan_textout_plan(StringInfo str, const CustomPlan *node)
 	appendStringInfo(str, " :dev_clauses %s", temp);
 	pfree(temp);
 
-	temp = nodeToString(plannode->dev_attnums);
-	appendStringInfo(str, " :dev_attnums %s", temp);
-	pfree(temp);
+	appendStringInfo(str, " :dev_attnums ");
+	_outBitmapset(str, plannode->dev_attnums);
 
-	temp = nodeToString(plannode->host_attnums);
-	appendStringInfo(str, " :host_attnums %s", temp);
-	pfree(temp);
+	appendStringInfo(str, " :host_attnums ");
+	_outBitmapset(str, plannode->host_attnums);
 }
 
 static CustomPlan *
@@ -1054,8 +1093,8 @@ gpuscan_copy_plan(const CustomPlan *from)
 	newnode->used_vars = copyObject(oldnode->used_vars);
 	newnode->extra_flags = oldnode->extra_flags;
 	newnode->dev_clauses = oldnode->dev_clauses;
-	newnode->dev_attnums = copyObject(oldnode->dev_attnums);
-	newnode->host_attnums = copyObject(oldnode->host_attnums);
+	newnode->dev_attnums = bms_copy(oldnode->dev_attnums);
+	newnode->host_attnums = bms_copy(oldnode->host_attnums);
 
 	return &newnode->cplan;
 }

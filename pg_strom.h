@@ -68,10 +68,11 @@ pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
 extern pgstrom_row_store *
 pgstrom_load_row_store_heap(HeapScanDesc scan,
-							ScanDirection direction,
-							kern_colmeta *rs_colmeta,
-                            List *dev_attnums,
-							bool *scan_done);
+                            ScanDirection direction,
+                            kern_colmeta *rs_colmeta,
+                            kern_colmeta *cs_colmeta,
+                            int cs_colnums,
+                            bool *scan_done);
 #ifdef USE_ASSERT_CHECKING
 extern void SanityCheck_kern_column_store(kern_row_store *krs,
 										  kern_column_store *kcs);
@@ -121,6 +122,8 @@ extern Datum pgstrom_get_devprog_key(const char *source, int32 extra_libs);
 extern void pgstrom_put_devprog_key(Datum dprog_key);
 extern Datum pgstrom_retain_devprog_key(Datum dprog_key);
 extern const char *pgstrom_get_devprog_errmsg(Datum dprog_key);
+extern int32 pgstrom_get_devprog_extra_flags(Datum dprog_key);
+extern const char *pgstrom_get_devprog_kernel_source(Datum dprog_key);
 extern void pgstrom_init_opencl_devprog(void);
 extern Datum pgstrom_opencl_device_info(PG_FUNCTION_ARGS);
 
@@ -170,6 +173,7 @@ extern void pgstrom_init_gpuscan(void);
 /*
  * main.c
  */
+extern bool	pgstrom_enabled;
 extern int	pgstrom_max_async_chunks;
 extern int	pgstrom_min_async_chunks;
 extern void _PG_init(void);

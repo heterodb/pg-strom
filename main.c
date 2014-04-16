@@ -24,6 +24,7 @@ PG_MODULE_MAGIC;
 /*
  * miscellaneous GUC parameters
  */
+bool	pgstrom_enabled;
 int		pgstrom_max_async_chunks;
 int		pgstrom_min_async_chunks;
 
@@ -31,7 +32,14 @@ static void
 pgstrom_init_misc_guc(void)
 {
 	/* GUC variables according to the device information */
-
+	DefineCustomBoolVariable("pg_strom.enabled",
+							 "Enables the planner's use of PG-Strom",
+							 NULL,
+							 &pgstrom_enabled,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	DefineCustomIntVariable("pg_strom.min_async_chunks",
 							"least number of chunks to be run asynchronously",
 							NULL,

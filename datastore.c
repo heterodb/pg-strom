@@ -138,14 +138,16 @@ pgstrom_create_kern_parambuf(List *used_params,
  * It creates a new row-store and loads tuples from the supplied heap.
  */
 pgstrom_row_store *
-pgstrom_load_row_store_heap(HeapScanDesc scan, ScanDirection direction,
-							kern_colmeta *rs_colmeta, List *dev_attnums,
+pgstrom_load_row_store_heap(HeapScanDesc scan,
+							ScanDirection direction,
+							kern_colmeta *rs_colmeta,
+							kern_colmeta *cs_colmeta,
+							int cs_colnums,
 							bool *scan_done)
 {
 	pgstrom_row_store *rstore;
 	Relation	rel = scan->rs_rd;
 	AttrNumber	rs_ncols = RelationGetNumberOfAttributes(rel);
-	AttrNumber	cs_ncols = list_length(dev_attnums);
 	HeapTuple	tuple;
 	cl_uint		nrows;
 	cl_uint		usage_head;
@@ -153,7 +155,6 @@ pgstrom_load_row_store_heap(HeapScanDesc scan, ScanDirection direction,
 	cl_uint		offset;
 	cl_uint	   *p_offset;
 	kern_column_store *kcs_head;
-	ListCell   *cell;
 	int			index;
 
 	Assert(direction != 0);
@@ -172,7 +173,7 @@ pgstrom_load_row_store_heap(HeapScanDesc scan, ScanDirection direction,
 	rstore->kern.length
 		= STROMALIGN_DOWN(ROWSTORE_DEFAULT_SIZE -
 						  STROMALIGN(offsetof(kern_column_store,
-											  colmeta[cs_ncols])) -
+											  colmeta[cs_colnums])) -
 						  offsetof(pgstrom_row_store, kern));
 	rstore->kern.ncols = rs_ncols;
 	rstore->kern.nrows = 0;
@@ -228,32 +229,23 @@ pgstrom_load_row_store_heap(HeapScanDesc scan, ScanDirection direction,
 	 */
 	kcs_head = (kern_column_store *)((char *)(&rstore->kern) +
 									 rstore->kern.length);
-	kcs_head->ncols = cs_ncols;
+	kcs_head->ncols = cs_colnums;
 	kcs_head->nrows = nrows;
+	memcpy(kcs_head->colmeta, cs_colmeta,
+		   sizeof(kern_colmeta) * cs_colnums);
 
-	elog(LOG, "kcs->nrows = %u", nrows);
-
-	index = 0;
-	offset = STROMALIGN(offsetof(kern_column_store, colmeta[cs_ncols]));
-	foreach (cell, dev_attnums)
+	offset = STROMALIGN(offsetof(kern_column_store, colmeta[cs_colnums]));
+	for (index=0; index < cs_colnums; index++)
 	{
-		kern_colmeta   *rcmeta;
-		kern_colmeta   *ccmeta;
-		AttrNumber		anum = lfirst_int(cell);
+		kern_colmeta   *ccmeta = &kcs_head->colmeta[index];
 
-		Assert(anum > 0 && anum <= rs_ncols);
-		rcmeta = &rstore->kern.colmeta[anum - 1];
-		Assert((rcmeta->flags & KERN_COLMETA_ATTREFERENCED) != 0);
-		ccmeta = &kcs_head->colmeta[index];
-		memcpy(ccmeta, rcmeta, sizeof(kern_colmeta));
+		Assert((ccmeta->flags & KERN_COLMETA_ATTREFERENCED) != 0);
 		ccmeta->cs_ofs = offset;
-
 		if ((ccmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
 			offset += STROMALIGN((nrows + 7) / 8);
 		offset += STROMALIGN(nrows * (ccmeta->attlen > 0
 									  ? ccmeta->attlen
 									  : sizeof(cl_uint)));
-		index++;
 	}
 	kcs_head->length = offset;
 	rstore->kcs_head = kcs_head;

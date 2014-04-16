@@ -596,6 +596,38 @@ pgstrom_get_devprog_errmsg(Datum dprog_key)
 }
 
 /*
+ * pgstrom_get_devprog_extra_flags
+ *
+ * it returns extra flags of device program
+ */
+int32
+pgstrom_get_devprog_extra_flags(Datum dprog_key)
+{
+	devprog_entry  *dprog = (devprog_entry *) DatumGetPointer(dprog_key);
+
+	if (!dprog)
+		return 0;
+	/* no need to acquire lock because of read-only field once constructed */
+	return dprog->extra_flags;
+}
+
+/*
+ * pgstrom_get_devprog_kernel_source
+ *
+ * it returns kernel source of device program
+ */
+const char *
+pgstrom_get_devprog_kernel_source(Datum dprog_key)
+{
+	devprog_entry  *dprog = (devprog_entry *) DatumGetPointer(dprog_key);
+
+	if (!dprog)
+		return 0;
+	/* no need to acquire lock because of read-only field once constructed */
+	return dprog->source;
+}
+
+/*
  * pgstrom_startup_opencl_devprog
  *
  * callback for shared memory allocation
