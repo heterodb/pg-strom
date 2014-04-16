@@ -121,7 +121,6 @@ extern Datum pgstrom_get_devprog_key(const char *source, int32 extra_libs);
 extern void pgstrom_put_devprog_key(Datum dprog_key);
 extern Datum pgstrom_retain_devprog_key(Datum dprog_key);
 extern const char *pgstrom_get_devprog_errmsg(Datum dprog_key);
-extern void pgstrom_dump_kernel_debug(kern_resultbuf *kresult);
 extern void pgstrom_init_opencl_devprog(void);
 extern Datum pgstrom_opencl_device_info(PG_FUNCTION_ARGS);
 
@@ -182,8 +181,20 @@ extern void show_instrumentation_count(const char *qlabel, int which,
 									   PlanState *planstate, ExplainState *es);
 extern void show_device_kernel(const char *device_kernel, int32 extra_flags,
 							   ExplainState *es);
+
+/*
+ * debug.c
+ */
+extern void pgstrom_dump_kernel_debug(int elevel, kern_resultbuf *kresult);
 extern Datum pgstrom_shmem_alloc_func(PG_FUNCTION_ARGS);
 extern Datum pgstrom_shmem_free_func(PG_FUNCTION_ARGS);
+extern Datum pgstrom_create_queue_func(PG_FUNCTION_ARGS);
+extern Datum pgstrom_close_queue_func(PG_FUNCTION_ARGS);
+extern Datum pgstrom_create_testmsg_func(PG_FUNCTION_ARGS);
+extern Datum pgstrom_enqueue_testmsg_func(PG_FUNCTION_ARGS);
+extern Datum pgstrom_dequeue_testmsg_func(PG_FUNCTION_ARGS);
+extern Datum pgstrom_release_testmsg_func(PG_FUNCTION_ARGS);
+extern void pgstrom_init_debug(void);
 
 /*
  * opencl_*.h

@@ -1140,7 +1140,7 @@ clserv_respond_gpuscan_row(cl_event event, cl_int ev_status, void *private)
 		gscan->msg.errcode = kresult->errcode;
 	}
 	/* dump debug messages */
-	pgstrom_dump_kernel_debug(KERN_GPUSCAN_RESULTBUF(&gscan->kern));
+	pgstrom_dump_kernel_debug(LOG, KERN_GPUSCAN_RESULTBUF(&gscan->kern));
 
 	for (i=0; i < kresult->nitems; i++)
 		elog(LOG, "res[%d] = %d", i, kresult->results[i]);

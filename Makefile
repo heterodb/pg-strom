@@ -1,12 +1,13 @@
 # Makefile of pg_strom
+EXTENSION = pg_strom
+DATA = pg_strom--1.0.sql
+
 MODULE_big = pg_strom
-OBJS  = main.o shmem.o codegen.o mqueue.o restrack.o \
+OBJS  = main.o shmem.o codegen.o mqueue.o restrack.o debug.o \
 	datastore.o gpuscan.o \
 	opencl_entry.o opencl_serv.o opencl_devinfo.o opencl_devprog.o \
 	opencl_common.o opencl_gpuscan.o
 
-EXTENSION = pg_strom
-DATA = pg_strom--1.0.sql
 
 PG_CONFIG = pg_config
 PGSTROM_DEBUG := $(shell $(PG_CONFIG) --configure | grep -q "'--enable-debug'" && echo "-Werror -Wall -O0 -DPGSTROM_DEBUG=1")

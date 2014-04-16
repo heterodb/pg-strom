@@ -40,10 +40,10 @@ typedef struct {
 
 #define IS_TRACKABLE_OBJECT(stag)					\
 	(*((StromTag *)stag) == StromTag_MsgQueue ||	\
-	 *((StromTag *)stag) == StromTag_ParamBuf ||	\
 	 *((StromTag *)stag) == StromTag_GpuScan ||		\
 	 *((StromTag *)stag) == StromTag_GpuSort ||		\
-	 *((StromTag *)stag) == StromTag_HashJoin)		\
+	 *((StromTag *)stag) == StromTag_HashJoin||		\
+	 *((StromTag *)stag) == StromTag_TestMessage)
 
 static dlist_head		tracker_free;
 static dlist_head		tracker_slot[RESTRACK_HASHSZ];

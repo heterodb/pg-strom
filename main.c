@@ -93,6 +93,7 @@ _PG_init(void)
 
 	/* miscellaneous initializations */
 	pgstrom_init_misc_guc();
+	pgstrom_init_debug();
 	pgstrom_codegen_init();
 }
 
@@ -242,44 +243,3 @@ show_device_kernel(const char *kernel_source,int32 extra_flags,
 
 	pfree(str.data);
 }
-
-/* ------------------------------------------------------------
- *
- * Routines for debugging
- *
- * ------------------------------------------------------------
- */
-Datum
-pgstrom_shmem_alloc_func(PG_FUNCTION_ARGS)
-{
-#ifdef PGSTROM_DEBUG
-	Size	size = PG_GETARG_INT64(0);
-	void   *address;
-
-	address = pgstrom_shmem_alloc(size);
-
-	PG_RETURN_INT64((Size) address);
-#else
-	elog(ERROR, "%s is not implemented for production release", __FUNCTION__);
-
-	PG_RETURN_NULL();
-#endif
-}
-PG_FUNCTION_INFO_V1(pgstrom_shmem_alloc_func);
-
-Datum
-pgstrom_shmem_free_func(PG_FUNCTION_ARGS)
-{
-#ifdef PGSTROM_DEBUG
-	void		   *address = (void *) PG_GETARG_INT64(0);
-
-	pgstrom_shmem_free(address);
-
-	PG_RETURN_BOOL(true);
-#else
-	elog(ERROR, "%s is not implemented for production release", __FUNCTION__);
-
-	PG_RETURN_NULL();
-#endif
-}
-PG_FUNCTION_INFO_V1(pgstrom_shmem_free_func);

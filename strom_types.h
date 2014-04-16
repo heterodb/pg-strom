@@ -110,6 +110,7 @@ typedef enum {
 	StromTag_GpuScan,
 	StromTag_GpuSort,
 	StromTag_HashJoin,
+	StromTag_TestMessage,
 } StromTag;
 
 /*

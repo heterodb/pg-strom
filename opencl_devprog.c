@@ -22,7 +22,6 @@
 
 static shmem_startup_hook_type shmem_startup_hook_next;
 static int	reclaim_threshold;
-bool		pgstrom_kernel_debug;
 
 #define DEVPROG_HASH_SIZE	2048
 
@@ -597,89 +596,6 @@ pgstrom_get_devprog_errmsg(Datum dprog_key)
 }
 
 /*
- * pgstrom_dump_kernel_debug
- *
- * It dumps all the debug message during kernel execution, if any.
- */
-void
-pgstrom_dump_kernel_debug(kern_resultbuf *kresult)
-{
-	kern_debug *kdebug;
-	char	   *baseptr;
-	cl_uint		i, j, offset = 0;
-
-	if (kresult->debug_usage == KERN_DEBUG_UNAVAILABLE ||
-		kresult->debug_nums == 0)
-		return;
-
-	baseptr = (char *)&kresult->results[kresult->nrooms];
-	for (i=0; i < kresult->debug_nums; i++)
-	{
-		char		buf[1024];
-
-		kdebug = (kern_debug *)(baseptr + offset);
-		j = snprintf(buf, sizeof(buf),
-					 "Global(%u/%u+%u) Local (%u/%u) %s = ",
-					 kdebug->global_id,
-					 kdebug->global_sz,
-					 kdebug->global_ofs,
-					 kdebug->local_id,
-					 kdebug->local_sz,
-					 kdebug->label);
-		switch (kdebug->v_class)
-		{
-			case 'c':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%hhd", kdebug->value.v_char);
-				break;
-			case 'C':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%hhu", kdebug->value.v_uchar);
-				break;
-			case 's':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%hd", kdebug->value.v_short);
-				break;
-			case 'S':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%hu", kdebug->value.v_ushort);
-				break;
-			case 'i':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%d", kdebug->value.v_int);
-				break;
-			case 'I':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%u", kdebug->value.v_uint);
-				break;
-			case 'l':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%ld", kdebug->value.v_long);
-				break;
-			case 'L':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%lu", kdebug->value.v_ulong);
-				break;
-			case 'f':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%f", (cl_double)kdebug->value.v_float);
-				break;
-			case 'd':
-				snprintf(buf + j, sizeof(buf) - j,
-						 "%f", kdebug->value.v_double);
-				break;
-			default:
-				snprintf(buf + j, sizeof(buf) - j,
-						 "0x%016lx (unknown class)", kdebug->value.v_long);
-				break;
-		}
-		elog(LOG, "kdebug: %s", buf);
-
-		offset += kdebug->length;
-	}
-}
-
-/*
  * pgstrom_startup_opencl_devprog
  *
  * callback for shared memory allocation
@@ -725,16 +641,6 @@ pgstrom_init_opencl_devprog(void)
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
-
-	/* turn on/off kernel device debug support */
-	DefineCustomBoolVariable("pg_strom.kernel_debug",
-							 "turn on/off kernel debug support",
-							 NULL,
-							 &pgstrom_kernel_debug,
-							 false,
-							 PGC_SUSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
 
 	/* aquires shared memory region */
 	RequestAddinShmemSpace(MAXALIGN(sizeof(*opencl_devprog_shm_values)));
