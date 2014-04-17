@@ -59,6 +59,7 @@ extern pgstrom_queue *pgstrom_get_queue(pgstrom_queue *mqueue);
 extern void pgstrom_put_queue(pgstrom_queue *mqueue);
 extern void pgstrom_put_message(pgstrom_message *msg);
 extern void pgstrom_init_mqueue(void);
+extern Datum pgstrom_mqueue_info(PG_FUNCTION_ARGS);
 
 /*
  * datastore.c

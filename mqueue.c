@@ -11,9 +11,12 @@
  * within this package.
  */
 #include "postgres.h"
+#include "catalog/pg_type.h"
+#include "funcapi.h"
 #include "miscadmin.h"
 #include "storage/ipc.h"
 #include "storage/shmem.h"
+#include "utils/builtins.h"
 #include "utils/guc.h"
 #include <limits.h>
 #include <sys/time.h>
@@ -28,11 +31,17 @@ static int		pgstrom_mqueue_timeout;
 static shmem_startup_hook_type shmem_startup_hook_next;
 static struct {
 	slock_t			lock;
+	dlist_head		blocks_list;
 	dlist_head		free_queue_list;
 	uint32			num_free;
 	uint32			num_active;
 	pgstrom_queue	serv_mqueue;	/* queue to OpenCL server */
 } *mqueue_shm_values;
+
+/* number of message queues per block */
+#define MQUEUES_PER_BLOCK								\
+	((SHMEM_BLOCKSZ - sizeof(cl_uint)					\
+	  - sizeof(dlist_node))	/ sizeof(pgstrom_queue))
 
 /*
  * pgstrom_create_queue
@@ -58,54 +67,58 @@ pgstrom_create_queue(void)
 	SpinLockAcquire(&mqueue_shm_values->lock);
 	if (dlist_is_empty(&mqueue_shm_values->free_queue_list))
 	{
-		pgstrom_queue  *queues;
-		int		i, numq;
+		dlist_node	   *block;
+		pgstrom_queue  *mqueues;
+		int		i;
 
-		numq = (SHMEM_BLOCKSZ - sizeof(cl_uint)) / sizeof(pgstrom_queue);
-		queues = pgstrom_shmem_alloc(sizeof(pgstrom_queue) * numq);
-		if (!queues)
+		block = pgstrom_shmem_alloc(sizeof(dlist_node) +
+									sizeof(pgstrom_queue) *
+									MQUEUES_PER_BLOCK);
+		if (!block)
 		{
 			SpinLockRelease(&mqueue_shm_values->lock);
 			ereport(ERROR,
 					(errcode(ERRCODE_OUT_OF_MEMORY),
 					 errmsg("out of shared memory")));
 		}
+		dlist_push_tail(&mqueue_shm_values->blocks_list, block);
 
-		for (i=0; i < numq; i++)
+		mqueues = (pgstrom_queue *)(block + 1);
+		for (i=0; i < MQUEUES_PER_BLOCK; i++)
 		{
+			if (pthread_mutex_init(&mqueues[i].lock, &mutex_attr) != 0 ||
+				pthread_cond_init(&mqueues[i].cond, &cond_attr) != 0)
+			{
+				/* recovery when initialization got failed on the way */
+				while (--i >= 0)
+					dlist_delete(&mqueues[i].chain);
+				dlist_delete(block);
+				SpinLockRelease(&mqueue_shm_values->lock);
+				pgstrom_shmem_free(block);
+				elog(ERROR, "failed on initialization of message queue");
+			}
+			mqueues[i].stag = StromTag_MsgQueue;
 			dlist_push_tail(&mqueue_shm_values->free_queue_list,
-							&queues[i].chain);
+							&mqueues[i].chain);
 		}
-		mqueue_shm_values->num_free += numq;
+		mqueue_shm_values->num_free += MQUEUES_PER_BLOCK;
 	}
 	Assert(mqueue_shm_values->num_free > 0);
 	mqueue_shm_values->num_free--;
 	mqueue_shm_values->num_active++;
 	dnode = dlist_pop_head_node(&mqueue_shm_values->free_queue_list);
 	mqueue = dlist_container(pgstrom_queue, chain, dnode);
-	SpinLockRelease(&mqueue_shm_values->lock);
 
-	/* initialize the queue as new one */
-	mqueue->stag = StromTag_MsgQueue;
-	mqueue->chain.next = mqueue->chain.prev = NULL;
+	/* mark it as active one */
+	Assert(mqueue->stag == StromTag_MsgQueue);
+	memset(&mqueue->chain, 0, sizeof(dlist_node));
+	mqueue->owner = getpid();
 	mqueue->refcnt = 1;
-	if (pthread_mutex_init(&mqueue->lock, &mutex_attr) != 0)
-		goto error;
-	if (pthread_cond_init(&mqueue->cond, &cond_attr) != 0)
-		goto error;
 	dlist_init(&mqueue->qhead);
 	mqueue->closed = false;
+	SpinLockRelease(&mqueue_shm_values->lock);
 
 	return mqueue;
-
-error:
-	SpinLockAcquire(&mqueue_shm_values->lock);
-	dlist_push_tail(&mqueue_shm_values->free_queue_list, &mqueue->chain);
-	mqueue_shm_values->num_free++;
-    mqueue_shm_values->num_active--;	
-	SpinLockRelease(&mqueue_shm_values->lock);
-	elog(ERROR, "failed on initialization of message queue");
-	return NULL;	/* be compiler quiet */
 }
 
 /*
@@ -371,14 +384,17 @@ pgstrom_close_queue(pgstrom_queue *mqueue)
 	mqueue->closed = true;
 
 	if (--mqueue->refcnt == 0)
+	{
 		queue_release = true;
+		mqueue->owner = 0;
+	}
 	pthread_mutex_unlock(&mqueue->lock);
 
 	if (queue_release && mqueue != &mqueue_shm_values->serv_mqueue)
 	{
-		pthread_cond_destroy(&mqueue->cond);
-		pthread_mutex_destroy(&mqueue->lock);
 		SpinLockAcquire(&mqueue_shm_values->lock);
+		mqueue_shm_values->num_active--;
+		mqueue_shm_values->num_free++;
         dlist_push_tail(&mqueue_shm_values->free_queue_list,
                         &mqueue->chain);
         SpinLockRelease(&mqueue_shm_values->lock);
@@ -422,6 +438,7 @@ pgstrom_put_queue(pgstrom_queue *mqueue)
 		 */
 		Assert(mqueue->closed);
 		queue_release = true;
+		mqueue->owner = 0;
 	}
 	pthread_mutex_unlock(&mqueue->lock);
 
@@ -431,8 +448,6 @@ pgstrom_put_queue(pgstrom_queue *mqueue)
 	 */
 	if (queue_release)
 	{
-		pthread_cond_destroy(&mqueue->cond);
-		pthread_mutex_destroy(&mqueue->lock);
 		SpinLockAcquire(&mqueue_shm_values->lock);
 		dlist_push_tail(&mqueue_shm_values->free_queue_list,
 						&mqueue->chain);
@@ -472,6 +487,121 @@ pgstrom_put_message(pgstrom_message *message)
 }
 
 /*
+ * pgstrom_mqueue_info
+ *
+ * shows all the message queues being already acquired as SQL funcion
+ */
+typedef struct {
+	void	   *mqueue;
+	pid_t		owner;
+	char		state;	/* 'a' = active, 'c' = closed, 'f' = free*/
+	int			refcnt;
+} mqueue_info;
+
+Datum
+pgstrom_mqueue_info(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *fncxt;
+	mqueue_info	   *mq_info;
+	HeapTuple		tuple;
+	Datum			values[4];
+	bool			isnull[4];
+	char			buf[256];
+	int				i;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		TupleDesc		tupdesc;
+		MemoryContext	oldcxt;
+		dlist_iter		iter;
+		List		   *mq_list = NIL;
+
+		fncxt = SRF_FIRSTCALL_INIT();
+		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(4, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "mqueue",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "owner",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "state",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "refcnt",
+						   INT4OID, -1, 0);
+		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
+
+		SpinLockAcquire(&mqueue_shm_values->lock);
+		PG_TRY();
+		{
+			/* server mqueue */
+			mq_info = palloc(sizeof(mqueue_info));
+			mq_info->mqueue = &mqueue_shm_values->serv_mqueue;
+			mq_info->owner = mqueue_shm_values->serv_mqueue.owner;
+			mq_info->state = mqueue_shm_values->serv_mqueue.closed ? 'c' : 'a';
+			mq_info->refcnt = mqueue_shm_values->serv_mqueue.refcnt;
+			mq_list = lappend(mq_list, mq_info);
+
+			/* backend mqueues */
+			dlist_foreach(iter, &mqueue_shm_values->blocks_list)
+			{
+				pgstrom_queue  *mqueues = (pgstrom_queue *)(iter.cur + 1);
+
+				for (i=0; i < MQUEUES_PER_BLOCK; i++)
+				{
+					mq_info = palloc(sizeof(mqueue_info));
+					mq_info->mqueue = &mqueues[i];
+					mq_info->owner = mqueues[i].owner;
+					if (!mqueues[i].chain.prev || !mqueues[i].chain.next)
+						mq_info->state = (mqueues[i].closed ? 'c' : 'a');
+					else
+						mq_info->state = 'f';
+
+					pthread_mutex_lock(&mqueues[i].lock);
+					mq_info->refcnt = mqueues[i].refcnt;
+					pthread_mutex_unlock(&mqueues[i].lock);
+
+					mq_list = lappend(mq_list, mq_info);
+				}
+			}
+		}
+		PG_CATCH();
+		{
+			SpinLockRelease(&mqueue_shm_values->lock);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		SpinLockRelease(&mqueue_shm_values->lock);
+
+		fncxt->user_fctx = mq_list;
+
+		MemoryContextSwitchTo(oldcxt);
+	}
+	fncxt = SRF_PERCALL_SETUP();
+
+	if (fncxt->user_fctx == NIL)
+		SRF_RETURN_DONE(fncxt);
+
+	mq_info = linitial((List *) fncxt->user_fctx);
+	fncxt->user_fctx = list_delete_first((List *)fncxt->user_fctx);
+
+	memset(isnull, 0, sizeof(isnull));
+	snprintf(buf, sizeof(buf), "%p", mq_info->mqueue);
+	values[0] = CStringGetTextDatum(buf);
+	values[1] = Int32GetDatum(mq_info->owner);
+	snprintf(buf, sizeof(buf), "%s",
+			 (mq_info->state == 'a' ? "active" :
+			  (mq_info->state == 'c' ? "closed" :
+			   (mq_info->state == 'f' ? "free" : "unknown"))));
+	values[2] = CStringGetTextDatum(buf);
+	values[3] = Int32GetDatum(mq_info->refcnt);
+
+	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
+
+	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
+}
+PG_FUNCTION_INFO_V1(pgstrom_mqueue_info);
+
+/*
  * pgstrom_startup_mqueue
  *
  * allocation of shared memory for message queue
@@ -494,8 +624,9 @@ pgstrom_startup_mqueue(void)
 	dlist_init(&mqueue_shm_values->free_queue_list);
 
 	mqueue = &mqueue_shm_values->serv_mqueue;
+	memset(mqueue, 0, sizeof(pgstrom_queue));
 	mqueue->stag = StromTag_MsgQueue;
-	mqueue->refcnt = 0;
+	mqueue->owner = -1;
 	if (pthread_mutex_init(&mqueue->lock, &mutex_attr) != 0)
 		elog(ERROR, "failed on pthread_mutex_init for server mqueue");
     if (pthread_cond_init(&mqueue->cond, &cond_attr) != 0)

@@ -1543,6 +1543,9 @@ clserv_put_gpuscan_row(pgstrom_message *msg)
 	pgstrom_gpuscan	   *gscan = (pgstrom_gpuscan *)msg;
 	dlist_mutable_iter	iter;
 
+	/* unlink message queue */
+	pgstrom_put_queue(msg->respq);
+
 	/* unlink device program */
 	pgstrom_put_devprog_key(gscan->dprog_key);
 

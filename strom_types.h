@@ -123,7 +123,8 @@ typedef enum {
  */
 typedef struct {
 	StromTag		stag;
-	dlist_node		chain;	/* link to active/free queues in mqueue.c */
+	dlist_node		chain;	/* link to free queues list in mqueue.c */
+	pid_t			owner;
 	int				refcnt;
 	pthread_mutex_t	lock;
 	pthread_cond_t	cond;
