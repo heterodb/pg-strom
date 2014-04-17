@@ -136,9 +136,10 @@ typedef enum {
  */
 typedef struct {
 	cl_bool		enabled;
+	cl_uint		num_samples;
 	cl_ulong	time_to_load;	/* time to load data from heap/cache/subplan */
 	cl_ulong	time_in_sendq;	/* waiting time in the server mqueue */
-	cl_ulong	time_kern_build;/* time to build opencl kernel */
+	cl_ulong	time_kern_build;/* max time to build opencl kernel */
 	cl_ulong	time_dma_send;	/* time to send host=>device data */
 	cl_ulong	time_kern_exec;	/* time to execute kernel */
 	cl_ulong	time_dma_recv;	/* time to receive device=>host data */
@@ -148,35 +149,7 @@ typedef struct {
 
 #define timeval_diff(tv1,tv2)						\
 	(((tv2)->tv_sec * 1000000L + (tv2)->tv_usec) -	\
-	 ((tv1)->tv_sec) * 1000000L + (tv1)->tv_usec)
-
-#define PERFMON_ADD(pfm_sum,pfm_item)								\
-	do {															\
-		(pfm_sum)->time_to_load += (pfm_item)->time_to_load;		\
-		(pfm_sum)->time_in_sendq += (pfm_item)->time_in_sendq;		\
-		(pfm_sum)->time_kern_build += (pfm_item)->time_kern_build;	\
-		(pfm_sum)->time_dma_send += (pfm_item)->time_dma_send;		\
-		(pfm_sum)->time_kern_exec += (pfm_item)->time_kern_exec;	\
-		(pfm_sum)->time_dma_recv += (pfm_item)->time_dma_recv;		\
-		(pfm_sum)->time_in_recvq += (pfm_item)->time_in_recvq;		\
-	} while(0)
-#define PERFMON_EXPLAIN(pfm,es)					\
-	do {										\
-		ExplainPropertyFloat("time to load",							\
-					 (double)(pfm)->time_to_load / 1000.0, 3, (es));	\
-		ExplainPropertyFloat("time in send-mq",							\
-					 (double)(pfm)->time_in_sendq / 1000.0, 3, (es));	\
-		ExplainPropertyFloat("time to build kernel",					\
-					 (double)(pfm)->time_kern_build / 1000.0, 3, (es)); \
-		ExplainPropertyFloat("time of DMA send",						\
-					 (double)(pfm)->time_dma_send / 1000.0, 3, (es)); 	\
-		ExplainPropertyFloat("time of kernel exec",						\
-					 (double)(pfm)->time_kern_exec / 1000.0, 3, (es));	\
-		ExplainPropertyFloat("time of DMA recv",						\
-					 (double)(pfm)->time_dma_recv / 1000.0, 3, (es));	\
-		ExplainPropertyFloat("time in recv-mq",							\
-					 (double)(pfm)->time_in_recvq / 1000.0, 3, (es));	\
-	} while(0)
+	 ((tv1)->tv_sec * 1000000L + (tv1)->tv_usec))
 
 /*
  * pgstrom_queue
@@ -460,6 +433,10 @@ extern void show_scan_qual(List *qual, const char *qlabel,
 extern void show_instrumentation_count(const char *qlabel, int which,
 									   PlanState *planstate, ExplainState *es);
 extern void show_device_kernel(Datum dprog_key, ExplainState *es);
+extern void pgstrom_perfmon_add(pgstrom_perfmon *pfm_sum,
+								pgstrom_perfmon *pfm_item);
+extern void pgstrom_perfmon_explain(pgstrom_perfmon *pfm,
+									ExplainState *es);
 
 /*
  * debug.c

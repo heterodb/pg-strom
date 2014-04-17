@@ -264,3 +264,71 @@ show_device_kernel(Datum dprog_key, ExplainState *es)
 
 	pfree(str.data);
 }
+
+void
+pgstrom_perfmon_add(pgstrom_perfmon *pfm_sum, pgstrom_perfmon *pfm_item)
+{
+	if (!pfm_sum->enabled)
+		return;
+
+	pfm_sum->num_samples++;
+	pfm_sum->time_to_load	+= pfm_item->time_to_load;
+	pfm_sum->time_in_sendq	+= pfm_item->time_in_sendq;
+	pfm_sum->time_kern_build
+		= Max(pfm_sum->time_kern_build,
+			  pfm_item->time_kern_build);
+	pfm_sum->time_dma_send	+= pfm_item->time_dma_send;
+	pfm_sum->time_kern_exec	+= pfm_item->time_kern_exec;
+	pfm_sum->time_dma_recv	+= pfm_item->time_dma_recv;
+	pfm_sum->time_in_recvq	+= pfm_item->time_in_recvq;
+}
+
+void
+pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
+{
+	double	n = (double)pfm->num_samples;
+	char	buf[256];
+
+	if (!pfm->enabled)
+		return;
+
+	snprintf(buf, sizeof(buf), "%.3f ms",
+			 (double)pfm->time_to_load / 1000.0);
+	ExplainPropertyText("Total time to load", buf, es);
+
+	snprintf(buf, sizeof(buf), "%.3f ms",
+			 (double)pfm->time_in_sendq / n / 1000.0);
+	ExplainPropertyText("Avg time in send-mq", buf, es);
+
+	snprintf(buf, sizeof(buf), "%.3f ms",
+			 (double)pfm->time_kern_build / 1000.0);
+	ExplainPropertyText("Max time to build kernel", buf, es);
+
+	snprintf(buf, sizeof(buf), "%.3f ms",
+			 (double)pfm->time_dma_send / n / 1000.0);
+	ExplainPropertyText("Avg time of DMA send", buf, es);
+
+	snprintf(buf, sizeof(buf), "%.3f ms",
+			 (double)pfm->time_dma_send / 1000.0);
+	ExplainPropertyText("Total time of DMA send", buf, es);
+
+	snprintf(buf, sizeof(buf), "%.3f ms",
+			 (double)pfm->time_kern_exec / n / 1000.0);
+	ExplainPropertyText("Avg time of kernel exec", buf, es);
+
+	snprintf(buf, sizeof(buf), "%.3f ms",
+			 (double)pfm->time_kern_exec / 1000.0);
+	ExplainPropertyText("Total time of kernel exec", buf, es);
+
+	snprintf(buf, sizeof(buf), "%.3f ms",
+			 (double)pfm->time_dma_recv / n / 1000.0);
+	ExplainPropertyText("Avg time of DMA recv", buf, es);
+
+	snprintf(buf, sizeof(buf), "%.3f ms",
+			 (double)pfm->time_dma_recv / 1000.0);
+	ExplainPropertyText("Total time of DMA recv", buf, es);
+
+	snprintf(buf, sizeof(buf), "%.3f ms",
+			 (double)pfm->time_in_recvq / n / 1000.0);
+	ExplainPropertyText("Avg time in recv-mq", buf, es);
+}

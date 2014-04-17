@@ -417,9 +417,10 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 				dlist_delete(&msg->chain);
 				if (msg->pfm.enabled)
 				{
-					gettimeofday(&msg->pfm.tv, NULL);
+					gettimeofday(&tv, NULL);
 					msg->pfm.time_kern_build
 						+= timeval_diff(&msg->pfm.tv, &tv);
+					gettimeofday(&msg->pfm.tv, NULL);
 				}
 				pgstrom_enqueue_message(msg);
 			}

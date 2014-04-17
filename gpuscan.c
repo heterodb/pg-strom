@@ -815,7 +815,7 @@ gpuscan_exec(CustomPlanState *node)
 			pgstrom_message	   *msg = &gss->curr_chunk->msg;
 
 			if (msg->pfm.enabled)
-				PERFMON_ADD(&gss->pfm, &msg->pfm);
+				pgstrom_perfmon_add(&gss->pfm, &msg->pfm);
 			Assert(msg->refcnt == 1);
 			pgstrom_untrack_object(&msg->stag);
 			msg->cb_release(msg);
@@ -1056,7 +1056,7 @@ gpuscan_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 	show_device_kernel(gss->dprog_key, es);
 
 	if (es->analyze && gss->pfm.enabled)
-		PERFMON_EXPLAIN(&gss->pfm, es);
+		pgstrom_perfmon_explain(&gss->pfm, es);
 }
 
 static Bitmapset *
