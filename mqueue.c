@@ -129,7 +129,7 @@ pgstrom_create_queue(void)
 bool
 pgstrom_enqueue_message(pgstrom_message *message)
 {
-	pgstrom_queue *mqueue = &mqueue_shm_values->serv_mqueue;
+	pgstrom_queue  *mqueue = &mqueue_shm_values->serv_mqueue;
 	int		rc;
 
 	pthread_mutex_lock(&mqueue->lock);
@@ -138,6 +138,10 @@ pgstrom_enqueue_message(pgstrom_message *message)
 		pthread_mutex_unlock(&mqueue->lock);
 		return false;
 	}
+
+	/* performance monitoring */
+	if (message->pfm.enabled)
+		gettimeofday(&message->pfm.tv, NULL);
 
 	/*
 	 * We assume the message being enqueued in the server message-queue is
@@ -196,6 +200,10 @@ pgstrom_reply_message(pgstrom_message *message)
 	}
 	else
 	{
+		/* performance monitoring */
+		if (message->pfm.enabled)
+			gettimeofday(&message->pfm.tv, NULL);
+
 		SpinLockAcquire(&message->lock);
 		/*
 		 * Error handler always close the response queue first, then
@@ -217,14 +225,14 @@ pgstrom_reply_message(pgstrom_message *message)
 }
 
 /*
- * pgstrom_dequeue_message
+ * pgstrom_sync_dequeue_message
  *
  * It fetches a message from the message queue. If empty, it waits for new
  * messages will come, or returns NULL if it exceeds timeout or it got
  * a signal being pending.
  */
-pgstrom_message *
-pgstrom_dequeue_message(pgstrom_queue *mqueue)
+static pgstrom_message *
+pgstrom_sync_dequeue_message(pgstrom_queue *mqueue)
 {
 #define POOLING_INTERVAL	200000000	/* 200msec */
 	pgstrom_message *result = NULL;
@@ -293,6 +301,48 @@ pgstrom_dequeue_message(pgstrom_queue *mqueue)
 }
 
 /*
+ * pgstrom_dequeue_message
+ *
+ * dequeue a message from backend responding queue
+ */
+pgstrom_message *
+pgstrom_dequeue_message(pgstrom_queue *mqueue)
+{
+	pgstrom_message	   *msg;
+	struct timeval		tv;
+
+	Assert(!pgstrom_i_am_clserv);
+	msg = pgstrom_sync_dequeue_message(mqueue);
+	if (msg && msg->pfm.enabled)
+	{
+		gettimeofday(&tv, NULL);
+		msg->pfm.time_in_recvq += timeval_diff(&msg->pfm.tv, &tv);
+	}
+	return msg;
+}
+
+/*
+ * pgstrom_dequeue_server_message
+ *
+ * dequeue a message from the server message queue
+ */
+pgstrom_message *
+pgstrom_dequeue_server_message(void)
+{
+	pgstrom_message	   *msg;
+	struct timeval		tv;
+
+	Assert(pgstrom_i_am_clserv);
+	msg = pgstrom_sync_dequeue_message(&mqueue_shm_values->serv_mqueue);
+	if (msg && msg->pfm.enabled)
+	{
+		gettimeofday(&tv, NULL);
+		msg->pfm.time_in_sendq += timeval_diff(&msg->pfm.tv, &tv);
+	}
+	return msg;
+}
+
+/*
  * pgstrom_try_dequeue_message
  *
  * It is almost equivalent to pgstrom_dequeue_message(), however, it never
@@ -314,17 +364,6 @@ pgstrom_try_dequeue_message(pgstrom_queue *mqueue)
 	pthread_mutex_unlock(&mqueue->lock);
 
 	return result;
-}
-
-/*
- * pgstrom_dequeue_server_message
- *
- * dequeue a message from the server message queue
- */
-pgstrom_message *
-pgstrom_dequeue_server_message(void)
-{
-	return pgstrom_dequeue_message(&mqueue_shm_values->serv_mqueue);
 }
 
 /*

@@ -114,6 +114,25 @@ typedef enum {
 } StromTag;
 
 /*
+ * Performance monitor structure
+ */
+typedef struct {
+	cl_bool		enabled;
+	cl_ulong	time_to_load;	/* time to load data from heap/cache/subplan */
+	cl_ulong	time_in_sendq;	/* waiting time in the server mqueue */
+	cl_ulong	time_kern_build;/* time to build opencl kernel */
+	cl_ulong	time_dma_send;	/* time to send host=>device data */
+	cl_ulong	time_kern_exec;	/* time to execute kernel */
+	cl_ulong	time_dma_recv;	/* time to receive device=>host data */
+	cl_ulong	time_in_recvq;	/* waiting time in the response mqueue */
+	struct timeval	tv;	/* result of gettimeofday(2) when enqueued */
+} pgstrom_perfmon;
+
+#define timeval_diff(tv1,tv2)						\
+	(((tv2)->tv_sec - (tv1)->tv_sec) * 1000000L +	\
+	 ((tv2)->tv_usec - (tv1)->tv_usec))
+
+/*
  * pgstrom_queue
  *
  * A message queue allocated on shared memory, to send messages to/from
@@ -141,6 +160,7 @@ typedef struct pgstrom_message {
 	pgstrom_queue  *respq;	/* mqueue for response message */
 	void	(*cb_process)(struct pgstrom_message *message);
 	void	(*cb_release)(struct pgstrom_message *message);
+	pgstrom_perfmon	pfm;
 } pgstrom_message;
 
 /*

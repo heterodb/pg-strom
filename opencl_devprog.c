@@ -119,8 +119,9 @@ clserv_devprog_build_callback(cl_program program, void *cb_private)
 	devprog_entry *dprog = (devprog_entry *) cb_private;
 	cl_build_status	status;
 	dlist_mutable_iter iter;
-	char	   *errmsg = NULL;
-	cl_int		i, rc;
+	struct timeval	tv;
+	char		   *errmsg = NULL;
+	cl_int			i, rc;
 
 	/* check program build status */
 	for (i=0; i < opencl_num_devices; i++)
@@ -186,6 +187,12 @@ clserv_devprog_build_callback(cl_program program, void *cb_private)
 			= dlist_container(pgstrom_message, chain, iter.cur);
 
 		dlist_delete(&msg->chain);
+
+		if (msg->pfm.enabled)
+		{
+			gettimeofday(&tv, NULL);
+			msg->pfm.time_kern_build += timeval_diff(&msg->pfm.tv, &tv);
+		}
 		pgstrom_enqueue_message(msg);
 	}
 	dprog->build_running = false;
@@ -234,7 +241,12 @@ cl_program
 clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 {
 	devprog_entry  *dprog = (devprog_entry *)DatumGetPointer(dprog_key);
+	struct timeval	tv;
 	cl_int		rc;
+
+	/* performance monitor */
+	if (message->pfm.enabled)
+		gettimeofday(&message->pfm.tv, NULL);
 
 	/*
 	 * In case when shared memory usage of device program table exceeds
@@ -403,6 +415,12 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 					= dlist_container(pgstrom_message, chain, iter.cur);
 
 				dlist_delete(&msg->chain);
+				if (msg->pfm.enabled)
+				{
+					gettimeofday(&msg->pfm.tv, NULL);
+					msg->pfm.time_kern_build
+						+= timeval_diff(&msg->pfm.tv, &tv);
+				}
 				pgstrom_enqueue_message(msg);
 			}
 			goto out_unlock;
@@ -423,6 +441,14 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 				dlist_push_tail(&dprog->waitq, &message->chain);
 			SpinLockRelease(&dprog->lock);
 			return NULL;
+		}
+
+		/* nealy zero seconds for kernel build, even if perfmon is enabled */
+		if (message->pfm.enabled)
+		{
+			gettimeofday(&tv, NULL);
+			message->pfm.time_kern_build
+				+= timeval_diff(&message->pfm.tv, &tv);
 		}
 
 		/*

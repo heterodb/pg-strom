@@ -90,7 +90,6 @@ typedef struct {
 
 	int					scan_mode;	/* one of GpuScanMode_* */
 	pgstrom_queue	   *mqueue;
-	int32				extra_flags;
 	Datum				dprog_key;
 
 	kern_parambuf	   *kparambuf;
@@ -102,6 +101,8 @@ typedef struct {
 	uint32				curr_index;
 	int					num_running;
 	dlist_head			ready_chunks;
+
+	pgstrom_perfmon		pfm;	/* sum of performance counter */
 } GpuScanState;
 
 /* static functions */
@@ -661,6 +662,9 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	gss->num_running = 0;
 	dlist_init(&gss->ready_chunks);
 
+	/* Is perfmon needed? */
+	gss->pfm.enabled = pgstrom_perfmon_enabled;
+
 	return &gss->cps;
 }
 
@@ -676,6 +680,7 @@ pgstrom_load_gpuscan_row(GpuScanState *gss)
 	cl_uint		nrows;
 	bool		scan_done;
 	bool		kernel_debug;
+	struct timeval tv1, tv2;
 
 	/*
 	 * check status of pg_strom.kernel_debug
@@ -690,6 +695,8 @@ pgstrom_load_gpuscan_row(GpuScanState *gss)
 	 * First of all, allocate a row-store buffer and fill it up
 	 * with regular tuples read from the heap.
 	 */
+	if (gss->pfm.enabled)
+		gettimeofday(&tv1, NULL);
 	rstore = pgstrom_load_row_store_heap(gss->scan_desc,
 										 gss->cps.ps.state->es_direction,
 										 gss->rs_colmeta,
@@ -701,6 +708,8 @@ pgstrom_load_gpuscan_row(GpuScanState *gss)
 		heap_endscan(gss->scan_desc);
 		gss->scan_desc = NULL;
 	}
+	if (gss->pfm.enabled)
+		gettimeofday(&tv2, NULL);
 
 	/*
 	 * OK, let's create a pgstrom_gpuscan structure according to
@@ -718,12 +727,16 @@ pgstrom_load_gpuscan_row(GpuScanState *gss)
 		elog(ERROR, "out of shared memory");
 	}
 	/* Fields of pgstrom_gpuscan */
+	memset(gscan, 0, sizeof(pgstrom_gpuscan));
 	gscan->msg.stag = StromTag_GpuScan;
 	SpinLockInit(&gscan->msg.lock);
 	gscan->msg.refcnt = 1;
 	gscan->msg.respq = pgstrom_get_queue(gss->mqueue);
 	gscan->msg.cb_process = clserv_process_gpuscan_row;
 	gscan->msg.cb_release = clserv_put_gpuscan_row;
+	gscan->msg.pfm.enabled = gss->pfm.enabled;
+	if (gscan->msg.pfm.enabled)
+		gscan->msg.pfm.time_to_load += timeval_diff(&tv1, &tv2);
 	gscan->dprog_key = pgstrom_retain_devprog_key(gss->dprog_key);
 	dlist_init(&gscan->rc_store);
 	dlist_push_head(&gscan->rc_store, &rstore->chain);
@@ -801,6 +814,8 @@ gpuscan_exec(CustomPlanState *node)
 		{
 			pgstrom_message	   *msg = &gss->curr_chunk->msg;
 
+			if (msg->pfm.enabled)
+				PERFMON_ADD(&gss->pfm, &msg->pfm);
 			Assert(msg->refcnt == 1);
 			pgstrom_untrack_object(&msg->stag);
 			msg->cb_release(msg);
@@ -1003,7 +1018,7 @@ gpuscan_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 		anum += FirstLowInvalidHeapAttributeNumber;
 
 		appendStringInfo(&str, "%s%s",
-						 is_first ? "" : " ,",
+						 is_first ? "" : ", ",
 						 get_relid_attribute_name(relid, anum));
 		is_first = false;
 	}
@@ -1017,7 +1032,7 @@ gpuscan_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 		anum += FirstLowInvalidHeapAttributeNumber;
 
 		appendStringInfo(&str, "%s%s",
-						 is_first ? "" : " ,",
+						 is_first ? "" : ", ",
 						 get_relid_attribute_name(relid, anum));
 		is_first = false;
 	}
@@ -1038,7 +1053,10 @@ gpuscan_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 		show_instrumentation_count("Rows Removed by Device Fileter",
 								   2, &gss->cps.ps, es);
 	}
-	show_device_kernel(gsplan->kern_source, gss->extra_flags, es);
+	show_device_kernel(gss->dprog_key, es);
+
+	if (es->analyze && gss->pfm.enabled)
+		PERFMON_EXPLAIN(&gss->pfm, es);
 }
 
 static Bitmapset *
@@ -1179,6 +1197,123 @@ clserv_respond_gpuscan_row(cl_event event, cl_int ev_status, void *private)
 	{
 		gscan->msg.errcode = kresult->errcode;
 	}
+	/* collect performance statistics */
+	if (gscan->msg.pfm.enabled)
+	{
+		cl_ulong	dma_send_begin0;
+		cl_ulong	dma_send_begin1;
+		cl_ulong	dma_send_begin2;
+		cl_ulong	dma_send_end0;
+		cl_ulong	dma_send_end1;
+		cl_ulong	dma_send_end2;
+		cl_ulong	kern_exec_begin;
+		cl_ulong	kern_exec_end;
+		cl_ulong	dma_recv_begin;
+		cl_ulong	dma_recv_end;
+		cl_int		rc;
+
+		rc = clGetEventProfilingInfo(clgss->events[0],
+									 CL_PROFILING_COMMAND_START,
+									 sizeof(cl_ulong),
+									 &dma_send_begin0,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+
+		rc = clGetEventProfilingInfo(clgss->events[1],
+									 CL_PROFILING_COMMAND_START,
+									 sizeof(cl_ulong),
+									 &dma_send_begin1,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+
+		rc = clGetEventProfilingInfo(clgss->events[2],
+									 CL_PROFILING_COMMAND_START,
+									 sizeof(cl_ulong),
+									 &dma_send_begin2,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+
+		rc = clGetEventProfilingInfo(clgss->events[0],
+									 CL_PROFILING_COMMAND_END,
+									 sizeof(cl_ulong),
+									 &dma_send_end0,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+
+		rc = clGetEventProfilingInfo(clgss->events[1],
+									 CL_PROFILING_COMMAND_END,
+									 sizeof(cl_ulong),
+									 &dma_send_end1,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+
+		rc = clGetEventProfilingInfo(clgss->events[2],
+									 CL_PROFILING_COMMAND_END,
+									 sizeof(cl_ulong),
+									 &dma_send_end2,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+
+		dma_send_begin0 = Min(dma_send_begin0,
+							  Min(dma_send_begin1,
+								  dma_send_begin2));
+		dma_send_end0 = Max(dma_send_end0,
+							Max(dma_send_end1,
+								dma_send_end2));
+
+		rc = clGetEventProfilingInfo(clgss->events[3],
+									 CL_PROFILING_COMMAND_START,
+									 sizeof(cl_ulong),
+									 &kern_exec_begin,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+
+		rc = clGetEventProfilingInfo(clgss->events[3],
+									 CL_PROFILING_COMMAND_END,
+									 sizeof(cl_ulong),
+									 &kern_exec_end,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+
+		rc = clGetEventProfilingInfo(clgss->events[4],
+									 CL_PROFILING_COMMAND_START,
+									 sizeof(cl_ulong),
+									 &dma_recv_begin,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+
+		rc = clGetEventProfilingInfo(clgss->events[4],
+									 CL_PROFILING_COMMAND_END,
+									 sizeof(cl_ulong),
+									 &dma_recv_end,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+
+		gscan->msg.pfm.time_dma_send
+			+= (dma_send_end0 - dma_send_begin0) / 1000;
+		gscan->msg.pfm.time_kern_exec
+			+= (kern_exec_end - kern_exec_begin) / 1000;
+		gscan->msg.pfm.time_dma_recv
+			+= (dma_recv_end - dma_recv_begin) / 1000;
+
+	skip_perfmon:
+		if (rc != CL_SUCCESS)
+		{
+			elog(LOG, "failed on clGetEventProfilingInfo (%s)",
+				 opencl_strerror(rc));
+			gscan->msg.pfm.enabled = false;	/* turn off profiling */
+		}
+	}
 	/* dump debug messages */
 	pgstrom_dump_kernel_debug(LOG, KERN_GPUSCAN_RESULTBUF(&gscan->kern));
 
@@ -1230,26 +1365,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	memset(clgss, 0, sizeof(clstate_gpuscan_row));
 	clgss->msg = &gscan->msg;
 	krstore = &rstore->kern;
-#if 0
-	elog(LOG, "krs {length=%u ncols=%u nrows=%u}", krstore->length, krstore->ncols, krstore->nrows);
-	for (i=0; i < krstore->ncols; i++)
-	{
-		kern_colmeta *colmeta = &krstore->colmeta[i];
-		elog(LOG, "rcol(%d) {flags=%02x align=%d attlen=%d ofs=%u}", i, colmeta->flags, colmeta->attalign, colmeta->attlen, colmeta->cs_ofs);
-	}
-#endif
-
 	kcstore_head = rstore->kcs_head;
-#if 0
-	elog(LOG, "kcs {length=%u ncols=%u nrows=%u}", kcstore_head->length, kcstore_head->ncols, kcstore_head->nrows);
-	for (i=0; i < kcstore_head->ncols; i++)
-	{
-		kern_colmeta *colmeta = &kcstore_head->colmeta[i];
-
-		elog(LOG, "col(%d) flags=%02x align=%d attlen=%d ofs=%u}", i, colmeta->flags, colmeta->attalign, colmeta->attlen, colmeta->cs_ofs);
-	}
-#endif
-
 	nrows = krstore->nrows;
 
 	/*
@@ -1270,7 +1386,10 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	clgss->program = clserv_lookup_device_program(gscan->dprog_key,
 												  &gscan->msg);
 	if (!clgss->program)
-		return;
+	{
+		free(clgss);
+		return;		/* message is in waitq, retry it! */
+	}
 	if (clgss->program == BAD_OPENCL_PROGRAM)
 	{
 		rc = CL_BUILD_PROGRAM_FAILURE;

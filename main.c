@@ -25,6 +25,7 @@ PG_MODULE_MAGIC;
  * miscellaneous GUC parameters
  */
 bool	pgstrom_enabled;
+bool	pgstrom_perfmon_enabled;
 int		pgstrom_max_async_chunks;
 int		pgstrom_min_async_chunks;
 
@@ -37,6 +38,14 @@ pgstrom_init_misc_guc(void)
 							 NULL,
 							 &pgstrom_enabled,
 							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	DefineCustomBoolVariable("pg_strom.perfmon",
+							 "Enables the performance monitor of PG-Strom",
+							 NULL,
+							 &pgstrom_perfmon_enabled,
+							 false,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
@@ -214,13 +223,17 @@ show_instrumentation_count(const char *qlabel, int which,
 }
 
 void
-show_device_kernel(const char *kernel_source,int32 extra_flags,
-				   ExplainState *es)
+show_device_kernel(Datum dprog_key, ExplainState *es)
 {
 	StringInfoData	str;
+	const char *kernel_source;
+	int32		extra_flags;
 
 	if (!es->verbose)
 		return;
+
+	kernel_source = pgstrom_get_devprog_kernel_source(dprog_key);
+	extra_flags = pgstrom_get_devprog_extra_flags(dprog_key);
 
 	initStringInfo(&str);
 	/*
