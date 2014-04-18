@@ -146,6 +146,7 @@ static void
 pgstrom_release_testmsg(pgstrom_message *msg)
 {
 	elog(INFO, "test message %p is released", msg);
+	pgstrom_put_queue(msg->respq);
 	pgstrom_shmem_free(msg);
 }
 #endif
@@ -222,7 +223,6 @@ pgstrom_create_testmsg_func(PG_FUNCTION_ARGS)
 	tmsg->seconds = seconds;
 	strcpy(tmsg->label, test_label);
 
-	pgstrom_track_object(&tmsg->msg.stag);
 	PG_RETURN_INT64((Size)tmsg);
 #else
 	elog(ERROR, "%s is not implemented for production release", __FUNCTION__);
@@ -269,10 +269,7 @@ pgstrom_dequeue_testmsg_func(PG_FUNCTION_ARGS)
 	if (!tmsg)
 		elog(INFO, "pgstrom_dequeue_message timeout!");
 	else
-	{
-		elog(INFO, "tmsg {refcnt=%d}", tmsg->msg.refcnt);
-		pgstrom_untrack_object(&tmsg->msg.stag);
-	}
+		elog(INFO, "tmsg {refcnt=%d, label=%s}", tmsg->msg.refcnt, tmsg->label);
 	PG_RETURN_INT64((Size)tmsg);
 #else
 	elog(ERROR, "%s is not implemented for production release", __FUNCTION__);
