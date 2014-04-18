@@ -29,6 +29,7 @@
 
 /* flags set by signal handlers */
 static int		opencl_platform_index;
+static int		opencl_num_threads;
 
 /* OpenCL resources for quick reference */
 #define MAX_NUM_DEVICES		128
@@ -67,8 +68,8 @@ pgstrom_opencl_sighup(SIGNAL_ARGS)
  * main loop of OpenCL intermediation server. each message class has its own
  * processing logic, so all we do here is just call the callback routine.
  */
-static void
-pgstrom_opencl_event_loop(void)
+static void *
+pgstrom_opencl_event_loop(void *arg)
 {
 	pgstrom_message	   *msg;
 
@@ -80,6 +81,7 @@ pgstrom_opencl_event_loop(void)
 			continue;
 		msg->cb_process(msg);
 	}
+	return NULL;
 }
 
 /*
@@ -297,6 +299,9 @@ init_opencl_devices_and_shmem(void)
 static void
 pgstrom_opencl_main(Datum main_arg)
 {
+	pthread_t  *threads;
+	int			i;
+
 	/* mark this process is OpenCL intermediator */
 	pgstrom_i_am_clserv = true;
 
@@ -316,8 +321,49 @@ pgstrom_opencl_main(Datum main_arg)
 	/* force to set error log to verbose mode */
 	Log_error_verbosity = PGERROR_VERBOSE;
 #endif
-	/* XXX - to be handled with multi-threading in the future */
-	pgstrom_opencl_event_loop();
+
+	/*
+	 * OK, ready to launch server thread. In the default, it creates
+	 * same number with online CPUs, but user can give an explicit
+	 * number using "pgstrom.opencl_num_threads" parameter.
+	 *
+	 * NOTE: sysconf(_SC_NPROCESSORS_ONLN) may not be portable.
+	 */
+	if (opencl_num_threads == 0)
+		opencl_num_threads = sysconf(_SC_NPROCESSORS_ONLN);
+	Assert(opencl_num_threads > 0);
+
+	threads = malloc(sizeof(pthread_t) * opencl_num_threads);
+	if (!threads)
+	{
+		elog(LOG, "out of memory");
+		return;
+	}
+
+	for (i=0; i < opencl_num_threads; i++)
+	{
+		if (pthread_create(&threads[i],
+						   NULL,
+						   pgstrom_opencl_event_loop,
+						   NULL) != 0)
+			break;
+	}
+
+	/*
+	 * In case of any failure during pthread_create(), worker threads
+	 * will be terminated soon, then we can wait for thread joining.
+	 */
+	if (i < opencl_num_threads)
+	{
+		elog(LOG, "failed to create server threads");
+		pgstrom_clserv_exit_pending = true;
+		pgstrom_cancel_server_loop();
+	}
+	else
+		elog(LOG, "PG-Strom: %d of server threads are up", opencl_num_threads);
+
+	while (--i >= 0)
+		pthread_join(threads[i], NULL);
 
 #ifdef PGSTROM_DEBUG
 	/* revert setting */
@@ -353,6 +399,17 @@ pgstrom_init_opencl_server(void)
 							PGC_POSTMASTER,
                             GUC_NOT_IN_SAMPLE,
                             NULL, NULL, NULL);
+	/* number of opencl server threads */
+	DefineCustomIntVariable("pgstrom.opencl_num_threads",
+							"number of opencl server threads",
+							NULL,
+							&opencl_num_threads,
+							0,		/* auto selection */
+							0,
+							INT_MAX,
+							PGC_POSTMASTER,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
 
 	/* launch a background worker process */	
 	memset(&worker, 0, sizeof(BackgroundWorker));

@@ -40,6 +40,7 @@ typedef struct {
 
 #define IS_TRACKABLE_OBJECT(stag)					\
 	(*((StromTag *)stag) == StromTag_MsgQueue ||	\
+	 *((StromTag *)stag) == StromTag_DevProgram ||	\
 	 *((StromTag *)stag) == StromTag_GpuScan ||		\
 	 *((StromTag *)stag) == StromTag_GpuSort ||		\
 	 *((StromTag *)stag) == StromTag_HashJoin||		\
@@ -104,6 +105,12 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 			{
 				pgstrom_queue  *mqueue = (pgstrom_queue *)entry->object;
 				pgstrom_close_queue(mqueue);
+			}
+			else if (*entry->object == StromTag_DevProgram)
+			{
+				Datum	dprog_key = PointerGetDatum(entry->object);
+
+				pgstrom_put_devprog_key(dprog_key);
 			}
 			else
 			{

@@ -595,14 +595,19 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	 */
 	gss->scan_mode = GpuScanMode_HeapOnlyScan;
 	gss->mqueue = pgstrom_create_queue();
+	pgstrom_track_object(&gss->mqueue->stag);
+
 	gss->kparambuf = pgstrom_create_kern_parambuf(gsplan->used_params,
 												  gss->cps.ps.ps_ExprContext);
 	extra_flags = gsplan->extra_flags;
 	if (pgstrom_kernel_debug)
 		extra_flags |= DEVKERNEL_NEEDS_DEBUG;
 	if (gsplan->kern_source)
+	{
 		gss->dprog_key = pgstrom_get_devprog_key(gsplan->kern_source,
 												 extra_flags);
+		pgstrom_track_object((StromTag *)gss->dprog_key);
+	}
 	else
 		gss->dprog_key = 0;	/* it might happen if tc-cache got supported */
 
@@ -928,7 +933,11 @@ gpuscan_end(CustomPlanState *node)
 	GpuScanState   *gss = (GpuScanState *)node;
 
 	if (gss->dprog_key)
+	{
 		pgstrom_put_devprog_key(gss->dprog_key);
+		pgstrom_untrack_object((StromTag *)gss->dprog_key);
+	}
+	pgstrom_untrack_object(&gss->mqueue->stag);
 	pgstrom_close_queue(gss->mqueue);
 
 	/*

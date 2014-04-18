@@ -124,9 +124,6 @@ pgstrom_create_queue(void)
 	mqueue->closed = false;
 	SpinLockRelease(&mqueue_shm_values->lock);
 
-	/* track message queue object locally */
-	pgstrom_track_object(&mqueue->stag);
-
 	return mqueue;
 }
 
