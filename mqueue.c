@@ -64,6 +64,12 @@ pgstrom_create_queue(void)
 	pgstrom_queue  *mqueue;
 	dlist_node	   *dnode;
 
+	/*
+	 * server should not create a message queue. it is constructed on
+	 * starting-up time
+	 */
+	Assert(!pgstrom_i_am_clserv);
+
 	SpinLockAcquire(&mqueue_shm_values->lock);
 	if (dlist_is_empty(&mqueue_shm_values->free_queue_list))
 	{
@@ -117,6 +123,9 @@ pgstrom_create_queue(void)
 	dlist_init(&mqueue->qhead);
 	mqueue->closed = false;
 	SpinLockRelease(&mqueue_shm_values->lock);
+
+	/* track message queue object locally */
+	pgstrom_track_object(&mqueue->stag);
 
 	return mqueue;
 }
@@ -205,22 +214,34 @@ pgstrom_reply_message(pgstrom_message *message)
 			gettimeofday(&message->pfm.tv, NULL);
 
 		SpinLockAcquire(&message->lock);
-		/*
-		 * Error handler always close the response queue first, then
-		 * decrements reference counter of the messages in progress.
-		 * So, we can assume the message is acquired by both of backend
-		 * and server at the timing when OpenCL server tried to enqueue
-		 * response message into an open queue.
-		 */
-		Assert(message->refcnt > 1);
-		message->refcnt--;	/* So, we never call on_release handler */
-		dlist_push_tail(&respq->qhead, &message->chain);
-		SpinLockRelease(&message->lock);
+		if (message->refcnt > 1)
+		{
+			message->refcnt--;	/* we never call on_release handler here */
+			dlist_push_tail(&respq->qhead, &message->chain);
+			SpinLockRelease(&message->lock);
 
-		/* notification towards waiter */
-		rc = pthread_cond_signal(&respq->cond);
-		Assert(rc == 0);
-		pthread_mutex_unlock(&respq->lock);
+			/* notification towards the waiter process */
+			rc = pthread_cond_signal(&respq->cond);
+			Assert(rc == 0);
+			pthread_mutex_unlock(&respq->lock);
+		}
+		else
+		{
+			message->refcnt--;
+			Assert(message->refcnt == 0);
+			SpinLockRelease(&message->lock);
+
+			pthread_mutex_unlock(&respq->lock);
+			/*
+			 * Usually, release handler of message object will detach
+			 * a response message queue also. It needs to acquire a lock
+			 * on the message queue to touch reference counter, so we
+			 * have to release the lock prior to invocation of release
+			 * handler.
+			 */
+			Assert(message->cb_release != NULL);
+			(*message->cb_release)(message);
+		}
 	}
 }
 
@@ -497,9 +518,12 @@ pgstrom_put_queue(pgstrom_queue *mqueue)
 /*
  * pgstrom_put_message
  *
- * It decrements reference counter of message, and may also decrements
- * reference counter of response queue being attached, if this message
- * got released.
+ * It decrements reference counter of the message, and calls its release
+ * handle if this reference counter got reached to zero.
+ * We assume the release handler also decrements reference counter of
+ * the response queue being attached; that eventually releases the queue
+ * also.
+ * It returns true, if message was actually released.
  */
 void
 pgstrom_put_message(pgstrom_message *message)
