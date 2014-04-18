@@ -353,6 +353,7 @@ extern int	pgstrom_get_device_nums(void);
 extern const pgstrom_device_info *pgstrom_get_device_info(unsigned int index);
 extern void pgstrom_setup_opencl_devinfo(List *dev_list);
 extern void pgstrom_init_opencl_devinfo(void);
+extern Datum pgstrom_opencl_device_info(PG_FUNCTION_ARGS);
 
 extern size_t clserv_compute_workgroup_size(cl_kernel kernel,
 											int dev_index,
@@ -373,7 +374,7 @@ extern const char *pgstrom_get_devprog_errmsg(Datum dprog_key);
 extern int32 pgstrom_get_devprog_extra_flags(Datum dprog_key);
 extern const char *pgstrom_get_devprog_kernel_source(Datum dprog_key);
 extern void pgstrom_init_opencl_devprog(void);
-extern Datum pgstrom_opencl_device_info(PG_FUNCTION_ARGS);
+extern Datum pgstrom_opencl_program_info(PG_FUNCTION_ARGS);
 
 /*
  * opencl_entry.c

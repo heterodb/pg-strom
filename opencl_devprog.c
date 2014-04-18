@@ -11,10 +11,13 @@
  * within this package.
  */
 #include "postgres.h"
+#include "catalog/pg_type.h"
+#include "funcapi.h"
 #include "storage/barrier.h"
 #include "storage/ipc.h"
 #include "storage/shmem.h"
 #include "storage/spin.h"
+#include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/pg_crc.h"
 #include <limits.h>
@@ -653,6 +656,142 @@ pgstrom_get_devprog_kernel_source(Datum dprog_key)
 	/* no need to acquire lock because of read-only field once constructed */
 	return dprog->source;
 }
+
+/*
+ * pgstrom_opencl_program_info
+ *
+ * shows all the device programs being on the program cache
+ */
+typedef struct {
+	Datum		key;
+	int			refcnt;
+	int			state;	/* 'b' = build running, 'e' = error, 'r' = ready */
+	pg_crc32	crc;
+	int32		flags;
+	Size		length;
+	text	   *source;
+	text	   *errmsg;
+} devprog_info;
+
+Datum
+pgstrom_opencl_program_info(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *fncxt;
+	devprog_info	*dp_info;
+	HeapTuple		tuple;
+	Datum			values[8];
+	bool			isnull[8];
+	char			buf[256];
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		TupleDesc		tupdesc;
+		MemoryContext	oldcxt;
+		List		   *dp_list = NIL;
+
+		fncxt = SRF_FIRSTCALL_INIT();
+		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(8, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "key",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "refcnt",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "state",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "crc",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "flags",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 6, "length",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 7, "source",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 8, "errmsg",
+						   TEXTOID, -1, 0);
+		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
+
+		SpinLockAcquire(&opencl_devprog_shm_values->lock);
+		PG_TRY();
+		{
+			dlist_iter	iter;
+			int			i;
+
+			for (i=0; i < DEVPROG_HASH_SIZE; i++)
+			{
+				dlist_foreach (iter, &opencl_devprog_shm_values->slot[i])
+				{
+					devprog_entry *entry
+						= dlist_container(devprog_entry, hash_chain, iter.cur);
+
+					dp_info = palloc0(sizeof(devprog_info));
+					dp_info->key = PointerGetDatum(entry);
+					SpinLockAcquire(&entry->lock);
+					dp_info->refcnt = entry->refcnt;
+					if (!entry->program)
+						dp_info->state = 'n';	/* not built */
+					else if (entry->program == BAD_OPENCL_PROGRAM)
+						dp_info->state = 'e';	/* build error */
+					else if (entry->build_running)
+						dp_info->state = 'b';	/* build running */
+					else
+						dp_info->state = 'r';	/* program is ready */
+					SpinLockRelease(&entry->lock);
+					dp_info->crc = entry->crc;
+					dp_info->flags = entry->extra_flags;
+					dp_info->length = entry->source_len;
+					dp_info->source = cstring_to_text(entry->source);
+					if (entry->errmsg)
+						dp_info->errmsg = cstring_to_text(entry->errmsg);
+
+					dp_list = lappend(dp_list, dp_info);
+				}
+			}
+		}
+		PG_CATCH();
+		{
+			SpinLockRelease(&opencl_devprog_shm_values->lock);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		SpinLockRelease(&opencl_devprog_shm_values->lock);
+
+		fncxt->user_fctx = dp_list;
+
+		MemoryContextSwitchTo(oldcxt);
+	}
+	fncxt = SRF_PERCALL_SETUP();
+
+	if (fncxt->user_fctx == NIL)
+        SRF_RETURN_DONE(fncxt);
+
+	dp_info = linitial((List *) fncxt->user_fctx);
+	fncxt->user_fctx = list_delete_first((List *)fncxt->user_fctx);
+
+	memset(isnull, 0, sizeof(isnull));
+	snprintf(buf, sizeof(buf), "%p", (void *)dp_info->key);
+	values[0] = CStringGetTextDatum(buf);
+	values[1] = Int32GetDatum(dp_info->refcnt);
+	snprintf(buf, sizeof(buf), "%s",
+			 (dp_info->state == 'n' ? "not built" :
+			  (dp_info->state == 'e' ? "build error" :
+			   (dp_info->state == 'b' ? "build running" : "program ready"))));
+	values[2] = CStringGetTextDatum(buf);
+	snprintf(buf, sizeof(buf), "0x%08x", dp_info->crc);
+	values[3] = CStringGetTextDatum(buf);
+	values[4] = Int32GetDatum(dp_info->flags);
+	values[5] = Int32GetDatum(dp_info->length);
+	values[6] = PointerGetDatum(dp_info->source);
+	if (dp_info->errmsg)
+		values[7] = PointerGetDatum(dp_info->errmsg);
+	else
+		isnull[7] = true;
+
+	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
+
+	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
+}
+PG_FUNCTION_INFO_V1(pgstrom_opencl_program_info);
 
 /*
  * pgstrom_startup_opencl_devprog

@@ -23,6 +23,21 @@ CREATE FUNCTION pgstrom_opencl_device_info()
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
 
+CREATE TYPE __pgstrom_opencl_program_info AS (
+  key  		text,
+  refcnt	int4,
+  state		text,
+  crc		text,
+  flags		int4,
+  length	int4,
+  source	text,
+  errmsg	text
+);
+CREATE FUNCTION pgstrom_opencl_program_info()
+  RETURNS SETOF __pgstrom_opencl_program_info
+  AS 'MODULE_PATHNAME'
+  LANGUAGE C STRICT;
+
 CREATE TYPE __pgstrom_mqueue_info AS (
   mqueue	text,
   owner		int4,
