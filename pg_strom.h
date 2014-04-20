@@ -21,6 +21,7 @@
 #include "storage/spin.h"
 #include <pthread.h>
 #include <unistd.h>
+#include <limits.h>
 #include <sys/time.h>
 #include <CL/cl.h>
 #include "opencl_common.h"
@@ -264,6 +265,89 @@ typedef struct devfunc_info {
 } devfunc_info;
 
 /*
+ * T-Tree Columner Cache
+ */
+
+
+/*
+ * tcache_row_store - cached data in row format
+ */
+typedef struct {
+
+	kern_row_store		kcs;
+} tcache_row_store;
+
+/*
+ * tcache_column_store - cached data in columnar format
+ */
+typedef struct {
+
+	kern_column_store	kcs;
+} tcache_column_store;
+
+/*
+ * tcache_node - a node or leaf entity of t-tree columnar cache tree.
+ */
+struct tcache_node {
+	dlist_node			chain;
+	slock_t				lock;
+	int					refcnt;
+	ItemPointerData		ip_max;
+	ItemPointerData		ip_min;
+	struct tcache_node *right;	/* larger */
+	struct tcache_node *left;	/* smaller */
+	tcache_column_store *tcs;
+};
+typedef struct tcache_node tcache_node;
+
+#define TCACHE_NODE_PER_BLOCK						\
+	((SHMEM_BLOCKSZ - sizeof(cl_uint)				\
+	  - sizeof(dlist_node)) / sizeof(tcache_node))
+
+/*
+ * tcache_head - a cache entry of individual relations
+ */
+#define TCACHE_MAX_ATTRS		200
+
+#define TC_STATE_FREE			0
+#define TC_STATE_NOT_BUILD		1
+#define TC_STATE_BUILD_NOW		2
+#define TC_STATE_READY			3
+
+struct tcache_head {
+	dlist_node	chain;			/* link to the hash or free list */
+	dlist_node	lru_chain;		/* link to the LRU list */
+	dlist_node	pending_chain;	/* link to the pending list */
+	int			refcnt;
+	/* above fields are protected by tc_common->lock */
+
+	LWLock			lock;
+	int				state;		/* one of TC_STATE_* above */
+	dlist_head		free_list;	/* list of free tcache_node */
+	dlist_head		block_list;	/* list of blocks for tcache_node */
+
+	tcache_node	   *root_node;	/* root node of this cache */
+	dlist_head		trs_list;	/* list of row-store already filled */
+	tcache_row_store *trs_curr;	/* current row-store to be written */
+
+	/* fields below are read-only once constructed */
+	Oid			datoid;			/* database oid of this cache */
+	Oid			reloid;			/* relation oid of this cache */
+	int			nattrs;			/* number of attributes being cached */
+	struct {
+		int16	attlen;
+		int16	attnum;
+		int16	attalign;
+		bool	attbyval;
+		bool	attnotnull;
+	} attrs [TCACHE_MAX_ATTRS];	/* simplified Form_pg_attribute */
+};
+typedef struct tcache_head tcache_head;
+#define TCACHE_HEAD_PER_BLOCK						\
+	((SHMEM_BLOCKSZ - sizeof(cl_uint)				\
+	  - sizeof(dlist_node)) / sizeof(tcache_head))
+
+/*
  * --------------------------------------------------------------------
  *
  * Function Declarations
@@ -418,6 +502,15 @@ extern void pgstrom_codegen_init(void);
  * gpuscan.c
  */
 extern void pgstrom_init_gpuscan(void);
+
+/*
+ * tcache.c
+ */
+extern void pgstrom_put_tcache(tcache_head *tc_head);
+extern tcache_head *pgstrom_get_tcache(Oid reloid, Bitmapset *required,
+									   bool create_on_demand);
+extern void pgstrom_init_tcache(void);
+
 
 /*
  * main.c
