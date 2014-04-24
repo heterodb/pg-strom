@@ -344,6 +344,29 @@ pgstrom_shmem_alloc(Size size)
 	return address;	
 }
 
+/*
+ * pgstrom_shmem_alloc_alap
+ *
+ * pgstrom_shmem_alloc "as large as possible"
+ * It is unavoidable to make unused memory area in buddy memory allocation
+ * algorithm. In case when we want to acquire a memory block larget than
+ * a particular size, likely toast buffer, best storategy is to allocate
+ * least 2^N block larger than required size.
+ * This function round up the required size into the best-fit one.
+ */
+void *
+pgstrom_shmem_alloc_alap(Size required, Size *allocated)
+{
+	int		shift = find_least_pot(required + sizeof(cl_uint));
+	void   *result;
+
+	required = (1UL << (shift + SHMEM_BLOCKSZ_BITS)) - sizeof(cl_uint);
+	result = pgstrom_shmem_alloc(required);
+	if (result && allocated)
+		*allocated = required;
+	return result;
+}
+
 void
 pgstrom_shmem_free(void *address)
 {

@@ -125,6 +125,9 @@ typedef enum {
 	StromTag_ParamBuf,
 	StromTag_RowStore,
 	StromTag_ColumnStore,
+	StromTag_TCacheHead,
+	StromTag_TCacheRowStore,
+	StromTag_TCacheColumnStore,
 	StromTag_ToastBuf,
 	StromTag_GpuScan,
 	StromTag_GpuSort,
@@ -267,85 +270,153 @@ typedef struct devfunc_info {
 /*
  * T-Tree Columner Cache
  */
-
+struct tcache_head;
 
 /*
- * tcache_row_store - cached data in row format
+ * tcache_row_store - uncolumnized data buffer in row-format
  */
 typedef struct {
-
-	kern_row_store		kcs;
+	StromTag		stag;	/* StromTag_TCacheRowNode */
+	slock_t			lock;
+	int				refcnt;
+	dlist_node		chain;
+	ItemPointerData	ip_max;
+	ItemPointerData	ip_min;
+	kern_row_store	krs;
 } tcache_row_store;
 
 /*
- * tcache_column_store - cached data in columnar format
+ * tcache_toastbuf - toast buffer for each varlena column
  */
 typedef struct {
+	slock_t			refcnt_lock;
+	int				refcnt;
+	cl_uint			tbuf_length;
+	cl_uint			tbuf_usage;
+	cl_uint			tbuf_junk;
+	char			data[FLEXIBLE_ARRAY_MEMBER];
+} tcache_toastbuf;
 
-	kern_column_store	kcs;
-} tcache_column_store;
+#define TCACHE_TOASTBUF_INITSIZE	((32 << 20) - sizeof(cl_uint))	/* 32MB */
 
 /*
- * tcache_node - a node or leaf entity of t-tree columnar cache tree.
+ * tcache_column_store - a node or leaf entity of t-tree columnar cache
+ */
+typedef struct {
+	StromTag		stag;	/* StromTag_TCacheRowNode */
+	slock_t			refcnt_lock;
+	int				refcnt;
+	int				ncols;	/* copy of tc_head->ncols */
+	int				nrows;	/* number of rows being cached */
+	int				njunks;	/* number of junk rows to be removed later */
+	bool			is_sorted;
+	ItemPointerData	ip_max;
+	ItemPointerData	ip_min;
+	ItemPointerData		*ctids;
+	HeapTupleHeaderData	*theads;
+	struct {
+		uint8	   *isnull;		/* nullmap, if NOT NULL is not set */
+		char	   *values;		/* array of values in columnar format */
+		tcache_toastbuf *toast;	/* toast buffer, if varlena variable */
+	} cdata[FLEXIBLE_ARRAY_MEMBER];
+} tcache_column_store;
+
+#define NUM_ROWS_PER_COLSTORE	(1 << 18)	/* 256K records */
+
+/*
+ * tcache_node - leaf or 
  */
 struct tcache_node {
-	dlist_node			chain;
-	slock_t				lock;
-	int					refcnt;
-	ItemPointerData		ip_max;
-	ItemPointerData		ip_min;
-	struct tcache_node *right;	/* larger */
-	struct tcache_node *left;	/* smaller */
-	tcache_column_store *tcs;
+	StromTag		stag;	/* = StromTag_TCacheNode */
+	dlist_node		chain;
+	struct timeval	tv;		/* time being enqueued */
+	struct tcache_node *right;	/* node with greater ctids */
+	struct tcache_node *left;	/* node with less ctids */
+	int				r_depth;
+	int				l_depth;
+	/* above fields are protected by lwlock of tc_head */
+
+	slock_t			lock;
+	tcache_column_store	*tcs;
 };
 typedef struct tcache_node tcache_node;
-
-#define TCACHE_NODE_PER_BLOCK						\
-	((SHMEM_BLOCKSZ - sizeof(cl_uint)				\
-	  - sizeof(dlist_node)) / sizeof(tcache_node))
 
 /*
  * tcache_head - a cache entry of individual relations
  */
-#define TCACHE_MAX_ATTRS		200
-
 #define TC_STATE_FREE			0
-#define TC_STATE_NOT_BUILD		1
-#define TC_STATE_BUILD_NOW		2
+#define TC_STATE_NOT_BUILT		1
+#define TC_STATE_NOW_BUILD		2
 #define TC_STATE_READY			3
 
-struct tcache_head {
+typedef struct {
+	StromTag	stag;			/* StromTag_TCacheHead */
 	dlist_node	chain;			/* link to the hash or free list */
 	dlist_node	lru_chain;		/* link to the LRU list */
 	dlist_node	pending_chain;	/* link to the pending list */
 	int			refcnt;
 	/* above fields are protected by tc_common->lock */
 
-	LWLock			lock;
-	int				state;		/* one of TC_STATE_* above */
+	/*
+	 * NOTE: regarding to locking
+	 *
+	 * tcache_head contains two types of stores; row and column.
+	 * Usually, newly written tuples are put on the row-store, then
+	 * it shall be moved to column-store by columnizer background
+	 * worker process.
+	 * To simplifies the implementation, we right now adopt a giant-
+	 * lock approach; regular backend code takes shared-lock during
+	 * its execution, but columnizer process takes exclusive-lock
+	 * during its translation. Usually, row -> column translation
+	 * shall be done chunk-by-chunk, so this shared lock does not
+	 * take so long time.
+	 * Also note that an writer operation within a particular row-
+	 * or column- store is protected by its individual spinlock,
+	 * but it never takes giant locks.
+	 */
+	LWLock			lwlock;		/* read-write lock per execution (long) */
+	tcache_node	   *tcs_root;	/* root node of this cache */
+	
+
+	slock_t			lock;		/* short term locking for fields below */
+	int				state;
 	dlist_head		free_list;	/* list of free tcache_node */
-	dlist_head		block_list;	/* list of blocks for tcache_node */
+	dlist_head		block_list;	/* list of blocks of tcache_node */
+	dlist_head		pending_list; /* list of columnizer pending tcahe_node */
+	dlist_head		trs_list;	/* list of tcache_row_store */
 
-	tcache_node	   *root_node;	/* root node of this cache */
-	dlist_head		trs_list;	/* list of row-store already filled */
-	tcache_row_store *trs_curr;	/* current row-store to be written */
+	/* fields below are read-only once constructed (no lock needed) */
+	Oid			datoid;		/* database oid of this cache */
+	Oid			reloid;		/* relation oid of this cache */
+	int			ncols;		/* number of columns being cached */
+	AttrNumber *i_cached;	/* index of tupdesc->attrs for cached columns */
+	TupleDesc	tupdesc;	/* duplication of TupleDesc of underlying table.
+							 * all the values, except for constr, are on
+							 * the shared memory region, so its visible to
+							 * all processes including columnizer.
+							 */
+	char		data[FLEXIBLE_ARRAY_MEMBER];
+} tcache_head;
 
-	/* fields below are read-only once constructed */
-	Oid			datoid;			/* database oid of this cache */
-	Oid			reloid;			/* relation oid of this cache */
-	int			nattrs;			/* number of attributes being cached */
-	struct {
-		int16	attlen;
-		int16	attnum;
-		int16	attalign;
-		bool	attbyval;
-		bool	attnotnull;
-	} attrs [TCACHE_MAX_ATTRS];	/* simplified Form_pg_attribute */
-};
-typedef struct tcache_head tcache_head;
-#define TCACHE_HEAD_PER_BLOCK						\
+#define TCACHE_NODE_PER_BLOCK(row_natts, col_natts)						\
+	((SHMEM_BLOCKSZ - sizeof(cl_uint) -									\
+	  MAXALIGN(offsetof(tcache_head, attrs[(row_natts)])) -				\
+	  MAXALIGN(sizeof(AttrNumber) * (col_natts))) / sizeof(tcache_node))
+#define TCACHE_NODE_PER_BLOCK_BARE					\
 	((SHMEM_BLOCKSZ - sizeof(cl_uint)				\
-	  - sizeof(dlist_node)) / sizeof(tcache_head))
+	  - sizeof(dlist_node)) / sizeof(tcache_node))
+
+/*
+ * tcache_scandesc - 
+ */
+typedef struct {
+	Relation		rel;
+	HeapScanDesc	heapscan;	/* valid, if state == TC_STATE_NOW_BUILD */
+	tcache_head	   *tc_head;
+	tcache_column_store	*curr_tcs;
+	tcache_row_store	*curr_trs;
+	int				curr_index;
+} tcache_scandesc;
 
 /*
  * --------------------------------------------------------------------
@@ -365,6 +436,7 @@ typedef struct tcache_head tcache_head;
 #define SHMEM_BLOCKSZ			(1UL << SHMEM_BLOCKSZ_BITS)
 
 extern void *pgstrom_shmem_alloc(Size size);
+extern void *pgstrom_shmem_alloc_alap(Size required, Size *allocated);
 extern void pgstrom_shmem_free(void *address);
 extern bool pgstrom_shmem_sanitycheck(const void *address);
 extern void pgstrom_setup_shmem(Size zone_length,
@@ -506,6 +578,7 @@ extern void pgstrom_init_gpuscan(void);
 /*
  * tcache.c
  */
+extern StromTag *pgstrom_tcache_next_chunk();
 extern void pgstrom_put_tcache(tcache_head *tc_head);
 extern tcache_head *pgstrom_get_tcache(Oid reloid, Bitmapset *required,
 									   bool create_on_demand);
