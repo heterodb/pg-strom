@@ -543,7 +543,7 @@ retry:
 	SpinLockRelease(&opencl_devprog_shm_values->lock);
 
 	/* OK, create a new device program entry */
-	alloc_len = offsetof(devprog_entry, source[source_len]);
+	alloc_len = offsetof(devprog_entry, source[source_len + 1]);
 	dprog = pgstrom_shmem_alloc(alloc_len);
 	if (!dprog)
 		elog(ERROR, "out of shared memory");
