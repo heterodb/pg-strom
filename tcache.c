@@ -46,6 +46,8 @@ typedef struct {
  * static variables
  */
 static shmem_startup_hook_type shmem_startup_hook_next;
+static object_access_hook_type object_access_hook_next;
+static heap_page_prune_hook_type heap_page_prune_hook_next;
 static tcache_common  *tc_common = NULL;
 static int	num_columnizers;
 
@@ -70,18 +72,33 @@ static void tcache_put_toast_buffer(tcache_toastbuf *tbuf);
 static inline bool
 TCacheHeadLockedByMe(tcache_head *tc_head, bool be_exclusive)
 {
-	bool	result = true;
-
 	if (!LWLockHeldByMe(&tc_head->lwlock))
 		return false;
 	if (be_exclusive)
 	{
+		char	exclusive;
+
 		SpinLockAcquire(&tc_head->lwlock.mutex);
-		if (tc_head->lwlock.exclusive == 0)
-			result = false;
+		exclusive = tc_head->lwlock.exclusive;
 		SpinLockRelease(&tc_head->lwlock.mutex);
+
+		if (exclusive == 0)
+			return false;
 	}
-	return result;
+	return true;
+}
+
+static inline int
+tcache_hash_index(Oid datoid, Oid reloid)
+{
+	pg_crc32	crc;
+
+	INIT_CRC32(crc);
+	COMP_CRC32(crc, &datoid, sizeof(Oid));
+	COMP_CRC32(crc, &reloid, sizeof(Oid));
+	FIN_CRC32(crc);
+
+	return crc % TCACHE_HASH_SIZE;
 }
 
 static inline void
@@ -179,7 +196,6 @@ bitcopy(uint8 *dstmap, int dindex, uint8 *srcmap, int sindex)
 	else
 		dstmap[dindex >> 3] &= ~(1 << (dindex & 7));
 }
-
 
 
 
@@ -512,6 +528,121 @@ tcache_free_node(tcache_head *tc_head, tcache_node *tc_node)
 	tcache_free_node_nolock(tc_head, tc_node);
 	SpinLockRelease(&tc_head->lock);
 }
+
+/*
+ * tcache_find_next_record
+ *
+ * It finds a record with the least item-pointer greater than supplied
+ * ctid, within a particular tcache_column_store.
+ * If found, it return an index value [0 ... tcs->nrows - 1]. Elsewhere,
+ * it returns a negative value.
+ * Note that it may take linear time if tcache_column_store is not sorted.
+ */
+static int
+tcache_find_next_record(tcache_column_store *tcs, ItemPointer ctid)
+{
+	int		index = -1;
+
+	if (tcs->nrows == 0)
+		return -1;	/* no records are cached */
+	if (ItemPointerCompare(&tcs->ip_max, ctid) < 0)
+		return -1;	/* ctid is greater than ip_max, so no candidate is here */
+
+	if (tcs->is_sorted)
+	{
+		int		i_min = 0;
+		int		i_max = tcs->nrows;
+
+		while (i_min < i_max)
+		{
+			int	i_mid = (i_min + i_max) / 2;
+
+			if (ItemPointerCompare(&tcs->ctids[i_mid], ctid) > 0)
+				i_max = i_mid;
+			else
+				i_min = i_mid + 1;
+		}
+		Assert(i_min == i_max);
+		if (i_min >= 0 && i_min < tcs->nrows)
+			index = i_min;
+	}
+	else
+	{
+		ItemPointerData	curr_ip;
+		int		i;
+
+		ItemPointerSet(&curr_ip, MaxBlockNumber, MaxOffsetNumber);
+		for (i=0; i < tcs->nrows; i++)
+		{
+			if (ItemPointerCompare(&tcs->ctids[i], ctid) > 0 &&
+				ItemPointerCompare(&tcs->ctids[i], &curr_ip) < 0)
+			{
+				ItemPointerCopy(&tcs->ctids[i], &curr_ip);
+				index = i;
+			}
+		}
+	}
+	return index;
+}
+
+/*
+ * tcache_find_prev_record
+ *
+ * It finds a record with the greater item-pointer less than supplied
+ * ctid, within a particular tcache_column_store.
+ * If found, it return an index value [0 ... tcs->nrows - 1]. Elsewhere,
+ * it returns a negative value.
+ * Note that it may take linear time if tcache_column_store is not sorted.
+ */
+static int
+tcache_find_prev_record(tcache_column_store *tcs, ItemPointer ctid)
+{
+	int		index = -1;
+
+	if (tcs->nrows == 0)
+		return -1;	/* no records are cached */
+	if (ItemPointerCompare(&tcs->ip_max, ctid) < 0)
+		return -1;	/* ctid is greater than ip_max, so no candidate is here */
+
+	if (tcs->is_sorted)
+	{
+		int		i_min = -1;
+		int		i_max = tcs->nrows - 1;
+
+		while (i_min < i_max)
+		{
+			int	i_mid = (i_min + i_max + 1) / 2;
+
+			if (ItemPointerCompare(&tcs->ctids[i_mid], ctid) >= 0)
+				i_max = i_mid - 1;
+			else
+				i_min = i_mid;
+		}
+		Assert(i_min == i_max);
+		if (i_min > 0 && i_min < tcs->nrows)
+			index = i_min;
+	}
+	else
+	{
+		ItemPointerData	curr_ip;
+		int		i;
+
+		ItemPointerSet(&curr_ip, 0, InvalidOffsetNumber);
+		for (i=0; i < tcs->nrows; i++)
+		{
+			if (ItemPointerCompare(&tcs->ctids[i], ctid) < 0 &&
+				ItemPointerCompare(&tcs->ctids[i], &curr_ip) > 0)
+			{
+				ItemPointerCopy(&tcs->ctids[i], &curr_ip);
+				index = i;
+			}
+		}
+	}
+	return index;
+}
+
+
+
 
 /*
  * tcache_find_least_colstore
@@ -981,30 +1112,47 @@ tcache_split_tcnode(tcache_head *tc_head, tcache_node *tc_node_old)
 	tcache_compaction_tcnode(tc_head, tc_node_old);
 }
 
+/*
+ * tcache_rebalance_tree
+ *
+ * It rebalances the t-tree structure if supplied 'tc_node' was not
+ * a balanced tree.
+ */
+#define TCACHE_NODE_DEPTH(tc_node) \
+	(!(tc_node) ? 0 : Max((tc_node)->l_depth, (tc_node)->r_depth))
+
 static void
 tcache_rebalance_tree(tcache_head *tc_head, tcache_node *tc_node,
-					  tcache_node **p_tc_node)
+					  tcache_node **p_upper)
 {
 	Assert(TCacheHeadLockedByMe(tc_head, true));
 
 	if (tc_node->l_depth + 1 < tc_node->r_depth)
 	{
-		tcache_node	*tc_lnode;
-
-
 		/* anticlockwise rotation */
+		tcache_node *r_node = tc_node->right;
 
+		tc_node->right = r_node->left;
+		r_node->left = tc_node;
+
+		tc_node->r_depth = TCACHE_NODE_DEPTH(tc_node->right);
+		r_node->l_depth = TCACHE_NODE_DEPTH(r_node);
+
+		*p_upper = r_node;
 	}
 	else if (tc_node->l_depth > tc_node->r_depth + 1)
 	{
 		/* clockwise rotation */
+		tcache_node	*l_node = tc_node->left;
 
+		tc_node->left = l_node->right;
+		l_node->right = tc_node;
+
+		tc_node->l_depth = TCACHE_NODE_DEPTH(tc_node->left);
+		l_node->r_depth = TCACHE_NODE_DEPTH(l_node);
+
+		*p_upper = l_node;
 	}
-
-
-
-
-
 }
 
 /*
@@ -1129,11 +1277,8 @@ do_insert_record(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 static void
 tcache_insert_tuple(tcache_head *tc_head,
 					tcache_node *tc_node,
-					tcache_node **p_this_node,
 					HeapTuple tuple)
 {
-	bool	needs_rebalance = false;
-
 	/* NOTE: we assume exclusive lwlock is acquired */
 	Assert(TCacheHeadLockedByMe(tc_head, true));
 
@@ -1142,7 +1287,7 @@ tcache_insert_tuple(tcache_head *tc_head,
 	if (tcs->nrows == 0)
 	{
 		do_insert_record(tc_head, tc_node, tuple);
-		return;
+		return false;	/* no rebalance needed */
 	}
 
 retry:
@@ -1153,12 +1298,13 @@ retry:
 		else
 		{
 			if (!tc_node->left)
+			{
 				tc_node->left = tcache_alloc_tcnode(tc_head);
-
-			tcache_insert_record(tc_head, tc_node->left,
-								 ctid, thead, values, isnull);
-			tc_node->l_depth = TCACHE_DEPTH(tc_node->left);
-			needs_rebalance = true;
+				tc_node->l_depth = 1;
+			}
+			tcache_insert_record(tc_head, tc_node->left, tuple);
+			tc_node->l_depth = TCACHE_NODE_DEPTH(tc_node->left);
+			tcache_rebalance_tree(tc_head, tc_node->left, &tc_node->left);
 		}
 	}
 	else if (ItemPointerCompare(ctid, &tcs->max_ctid) > 0)
@@ -1168,12 +1314,13 @@ retry:
 		else
 		{
 			if (!tcs->right)
+			{
 				tcs->right = tcache_alloc_tcnode(tc_head);
-
-			tcache_insert_record(tc_head, tc_node->right,
-								 ctid, thead, values, isnull);
-			tc_node->r_depth = TCACHE_DEPTH(tc_node->right);
-			needs_rebalance = true;
+				tcs->r_depth = 1;
+			}
+			tcache_insert_record(tc_head, tc_node->right, tuple);
+			tc_node->r_depth = TCACHE_NODE_DEPTH(tc_node->right);
+			tcache_rebalance_tree(tc_head, tc_node->right, &tc_node->right);
 		}
 	}
 	else
@@ -1182,41 +1329,47 @@ retry:
 			do_insert_record(tc_head, tc_node, tuple);
 		else
 		{
-			/* split this chunk into two */
+			/*
+			 * split this chunk into two portions; larger half shall be
+			 * moved to the new node and chained as right node.
+			 */
 			tcache_split_tcnode(tc_head, tc_node);
-			needs_rebalance = true;
 			goto retry;
 		}
 	}
-
-	/*
-	 * Rebalance the t-tree cache, if needed
-	 */
-	if (needs_rebalance)
-		tcache_rebalance_tree(tc_head, tc_node, p_this_node);
 }
 
-static bool
+/*
+ * tcache_build_main
+ *
+ * main routine to construct columnar cache. It fully scans the heap
+ * and insert the record into in-memory cache structure.
+ */
+static void
 tcache_build_main(tcache_head *tc_head, HeapScanDesc scan)
 {
 	Relation	relation = scan->rs_rd;
 	TupleDesc	tupdesc = RelationGetDescr(relation);
-	Datum	   *values = palloc(sizeof(Datum) * tupdesc->natts);
-	bool	   *isnull = palloc(sizeof(bool) * tupdesc->natts);
 	HeapTuple	tuple;
 
-	while (HeapTupleIsValid(tuple = heap_getnext(tc_head->heapscan,
-												 ForwardScanDirection)))
+	Assert(TCacheHeadLockedByMe(tc_head, true));
+
+	while (true)
 	{
-		heap_deform_tuple(tuple, tupdesc, values, isnull);
+		tuple = heap_getnext(tc_head->heapscan, ForwardScanDirection);
+		if (!HeapTupleIsValid(tuple))
+			break;
 
-		/* insert a tuple into a column-store */
+		tcache_insert_tuple(tc_head, tc_head->tcs_root, tuple);
+		tcache_rebalance_tree(tc_head,
+							  tc_head->tcs_root,
+							  &tc_head->tcs_root);
 	}
-	pfree(values);
-	pfree(isnull);
-
-	return true;
 }
+
+
+
+
 
 
 
@@ -1606,15 +1759,7 @@ tcache_get_tchead(Oid reloid, Bitmapset *required,
 	dlist_iter		iter;
 	tcache_head	   *tc_head = NULL;
 	tcache_head	   *tc_old = NULL;
-	pg_crc32		crc;
-	int				hindex;
-
-	/* calculate hash index */
-	INIT_CRC32(crc);
-	COMP_CRC32(crc, &MyDatabaseId, sizeof(Oid));
-	COMP_CRC32(crc, &reloid, sizeof(Oid));
-	FIN_CRC32(crc);
-	hindex = crc % TCACHE_HASH_SIZE;
+	int				hindex = tcache_hash_index(MyDatabaseId, reloid);
 
 	SpinLockAcquire(&tc_common->lock);
 	PG_TRY();
@@ -1733,48 +1878,6 @@ tcache_get_tchead(Oid reloid, Bitmapset *required,
 
 
 /*
- * tcache_on_page_prune
- *
- * 
- *
- *
- */
-static void
-tcache_on_page_prune(Relation relation,
-					 Buffer buffer,
-					 int ndeleted,
-					 TransactionId OldestXmin,
-					 TransactionId latestRemovedXid)
-{
-	/* lock if we don't have lwlock because heap-scan may kick vacuuming */
-
-
-
-
-}
-
-/*
- * tcache_on_object_access
- *
- * It invalidates an existing columnar-cache if cached tables were altered
- * or dropped. Also, it enforces to assign synchronizer trigger on new table
- * creation/
- */
-static void
-tcache_on_object_access(ObjectAccessType access,
-						Oid classId,
-						Oid objectId,
-						int subId,
-						void *arg)
-{
-
-}
-
-
-
-
-
-/*
  * pgstrom_tcache_synchronizer
  *
  *
@@ -1804,6 +1907,177 @@ pgstrom_tcache_synchronizer(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_tcache_synchronizer);
 
 /*
+ *
+ *
+ *
+ *
+ *
+ *
+ */
+static void
+pgstrom_assign_synchronizer(Oid reloid)
+{
+	Relation	class_rel;
+	Relation	tgrel;
+	ScanKeyData	skey;
+	SysScanDesc	sscan;
+	Datum		values[Natts_pg_trigger];
+	bool		isnull[Natts_pg_trigger];
+	HeapTuple	tuple;
+	HeapTuple	tgtup;
+	Oid			funcoid;
+	Oid			tgoid;
+	ObjectAddress myself;
+	ObjectAddress referenced;
+	const char *funcname = "pgstrom_tcache_synchronizer";
+	const char *tgname_s = "pgstrom_tcache_sync_stmt";
+	const char *tgname_r = "pgstrom_tcache_sync_row";
+
+	/*
+	 * Fetch a relation tuple (probably) needs to be updated
+	 *
+	 * TODO: add description the reason why to use inplace_update
+	 *
+	 *
+	 */
+	class_rel = heap_open(RelationRelationId, RowExclusiveLock);
+
+	ScanKeyInit(&skey,
+				ObjectIdAttributeNumber,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(reloid));
+
+	sscan = systable_beginscan(rel, ClassOidIndexId, true,
+							   SnapshotSelf, 1, &skey);
+	tuple = systable_getnext(sscan);
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "catalog lookup failed for relation %u", reloid);
+	class_form = (Form_pg_class) GETSTRUCT(tuple);
+
+	/* only regular (none-toast) relation has synchronizer */
+	if (class_form->relkind != RELKIND_RELATION)
+		goto skip_make_trigger;
+	/* we don't support synchronizer on system tables */
+	if (class_form->relnamespace == PG_CATALOG_NAMESPACE)
+		goto skip_make_trigger;
+
+	/* OK, this relation should have tcache synchronizer */
+
+
+	/* Lookup synchronizer function */
+	funcoid = GetSysCacheOid3(PROCNAMEARGSNSP,
+							  PointerGetDatum(funcname),
+							  PointerGetDatum(buildoidvector(NULL, 0)),
+							  ObjectIdGetDatum(PG_PUBLIC_NAMESPACE));
+	if (!OidIsValid(funcoid))
+		elog(ERROR, "cache lookup failed for trigger function: %s", funcname);
+
+	/*
+	 * OK, let's construct trigger definitions
+	 */
+	tgrel = heap_open(TriggerRelationId, RowExclusiveLock);
+
+	/*
+	 * construct a tuple of statement level synchronizer
+	 */
+	memset(isnull, 0, sizeof(isnull));
+	values[Anum_pg_trigger_tgrelid - 1] = ObjectIdGetDatum(reloid);
+	values[Anum_pg_trigger_tgname - 1]
+		= DirectFunctionCall1(namein, CStringGetDatum(tgname_s));
+	values[Anum_pg_trigger_tgfoid - 1] = ObjectIdGetDatum(funcoid);
+	values[Anum_pg_trigger_tgtype - 1]
+		= Int16GetDatum(TRIGGER_TYPE_TRUNCATE);
+	values[Anum_pg_trigger_tgenabled - 1]
+		= CharGetDatum(TRIGGER_FIRES_ON_ORIGIN);
+	values[Anum_pg_trigger_tgisinternal - 1] = BoolGetDatum(true);
+	values[Anum_pg_trigger_tgconstrrelid - 1] = ObjectIdGetDatum(InvalidOid);
+	values[Anum_pg_trigger_tgconstrindid - 1] = ObjectIdGetDatum(InvalidOid);
+	values[Anum_pg_trigger_tgconstraint - 1] = ObjectIdGetDatum(InvalidOid);
+	/*
+	 * XXX - deferrable trigger may make sense for cache invalidation
+	 * because transaction might be aborted later, In this case, it is
+	 * waste of time to re-construct columnar-cache again.
+	 */
+	values[Anum_pg_trigger_tgdeferrable - 1] = BoolGetDatum(false);
+	values[Anum_pg_trigger_tginitdeferred - 1] = BoolGetDatum(false);
+
+	values[Anum_pg_trigger_tgnargs - 1] = Int16GetDatum(0);
+	values[Anum_pg_trigger_tgargs - 1]
+		= DirectFunctionCall1(byteain, CStringGetDatum(""));
+	values[Anum_pg_trigger_tgattr - 1]
+		= PointerGetDatum(buildint2vector(NULL, 0));
+	isnull[Anum_pg_trigger_tgqual - 1] = true;
+
+	tgtup = heap_form_tuple(tgrel->rd_att, values, isnull);
+	tgoid = simple_heap_insert(tgrel, tgtup);
+	CatalogUpdateIndexes(tgrel, tgtup);
+
+	/* record dependency on the statement-level trigger */
+	myself.classId = TriggerRelationId;
+	myself.objectId = tgoid;
+	myself.objectSubId = 0;
+
+	referenced.classId = ProcedureRelationId;
+	referenced.objectId = funcoid;
+	referenced.objectSubId = 0;
+	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
+
+	referenced.classId = RelationRelationId;
+	referenced.objectId = reloid;
+	referenced.objectSubId = 0;
+	recordDependencyOn(&myself, &referenced, DEPENDENCY_AUTO);
+
+	heap_freetuple(tgtup);
+
+	heap_close(tgrel, NoLock);
+
+	/*
+	 * also, a tuple for row-level synchronizer
+	 */
+	values[Anum_pg_trigger_tgname - 1]
+		= DirectFunctionCall1(namein, CStringGetDatum(tgname_r));
+	values[Anum_pg_trigger_tgtype - 1]
+		= Int16GetDatum(TRIGGER_TYPE_ROW |
+						TRIGGER_TYPE_INSERT |
+						TRIGGER_TYPE_DELETE |
+						TRIGGER_TYPE_UPDATE);
+	tgtup = heap_form_tuple(tgrel->rd_att, values, isnull);
+	tgoid = simple_heap_insert(tgrel, tgtup_r);
+	CatalogUpdateIndexes(tgrel, tgtup_r);
+
+	/* record dependency on the row-level trigger */
+	myself.classId = TriggerRelationId;
+	myself.objectId = tgoid;
+	myself.objectSubId = 0;
+
+	referenced.classId = ProcedureRelationId;
+	referenced.objectId = funcoid;
+	referenced.objectSubId = 0;
+	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
+
+	referenced.classId = RelationRelationId;
+	referenced.objectId = reloid;
+	referenced.objectSubId = 0;
+	recordDependencyOn(&myself, &referenced, DEPENDENCY_AUTO);
+
+	/*
+	 * We also need to put a flag of 'relhastriggers'. This is new relation
+	 * uncommitted, so it is obvious that nobody touched this catalog.
+	 * So, we can apply heap_inplace_update(), instead of the regular
+	 * operations.
+	 */
+	if (!class_form->relhastriggers)
+	{
+		class_form->relhastriggers = true;
+		heap_inplace_update(class_rel, tuple);
+		CatalogUpdateIndexes(class_rel, tuple);
+	}
+skip_make_trigger:
+	systable_endscan(sscan);
+	heap_close(class_rel, NoLock);
+}
+
+/*
  * pgstrom_relation_has_synchronizer
  *
  * A table that can have columnar-cache also needs to have trigger to
@@ -1814,7 +2088,6 @@ PG_FUNCTION_INFO_V1(pgstrom_tcache_synchronizer);
 bool
 pgstrom_relation_has_synchronizer(Relation rel)
 {
-
 	int		i, numtriggers;
 	bool	has_on_insert_synchronizer = false;
 	bool	has_on_update_synchronizer = false;
@@ -1894,6 +2167,196 @@ pgstrom_relation_has_synchronizer(Relation rel)
 		has_on_truncate_synchronizer)
 		return true;
 	return false;
+}
+
+/*
+ * tcache_vacuum_heappage
+ *
+ * callback function for each heap-page. Caller should already acquires
+ * shared-lock on the tcache_head, so it is prohibited to modify tree-
+ * structure. All we can do is mark particular records as junk.
+ */
+static void
+tcache_vacuum_heappage(tcache_head *tc_head, Buffer buffer)
+{
+	BlockNumber		blknum = BufferGetBlockNumber(buffer);
+	OffsetNumber	offnum = InvalidOffsetNumber;
+	Page			page = BufferGetPage(buffer);
+	ItemPointerData	ctid;
+	tcache_node	   *tc_node;
+	tcache_column_store *tcs;
+
+next:
+	ItemPointerSet(&ctid, blknum, offnum);
+	tc_node = tcache_find_next_node(tc_head, &ctid);
+	if (tc_node)
+	{
+		SpinLockAcquire(&tc_node->lock);
+
+		if (!tc_node->tcs->is_sorted)
+			tcache_sort_tcnode(tc_head, tc_node, false);
+		tcs = tc_node->tcs;
+		Assert(tcs->is_sorted);
+
+		/*
+		 * find a record that larger than ctid.
+		 */
+		tcache_find_next_record(tcs, &ctid);
+
+
+
+
+
+		SpinLockRelease(&tc_node->lock);
+
+
+		tcache_sort_tcnode(tc_head
+
+
+		tcache_column_store *tcs = tc_node->tcs;
+
+		if (!tcs->is_sorted)
+			
+
+
+
+
+
+
+
+		goto next; /* ? */
+	}
+
+	/* walks on row-store chain */
+
+
+
+
+
+
+}
+
+/*
+ * tcache_on_page_prune
+ *
+ * 
+ *
+ *
+ */
+static void
+tcache_on_page_prune(Relation relation,
+					 Buffer buffer,
+					 int ndeleted,
+					 TransactionId OldestXmin,
+					 TransactionId latestRemovedXid)
+{
+	tcache_head	   *tc_head;
+
+	if (heap_page_prune_hook_next)
+		heap_page_prune_hook_next(relation, buffer, ndeleted,
+								  OldestXmin, latestRemovedXid);
+
+	tc_head = tcache_get_tchead(RelationGetRelid(relation), NULL, false);
+	if (tc_head)
+	{
+		bool		has_lwlock = TCacheHeadLockedByMe(tc_head, false);
+
+		/*
+		 * At least, we need to acquire shared-lwlock on the tcache_head,
+		 * but no need for exclusive-lwlock because vacuum page never
+		 * create or drop tcache_nodes. Per node level spinlock is
+		 * sufficient to do.
+		 * Note that, vacuumed records are marked as junk, then columnizer
+		 * actually removes them from the cache later, under the exclusive
+		 * lock.
+		 */
+		if (!has_lwlock)
+			LWLockAcquire(&tc_head->lwlock, LW_SHARED);
+
+		tcache_vacuum_heappage(tc_head, buffer);
+
+		if (!has_lwlock)
+			LWLockRelease(&tc_head->lwlock);
+	}
+}
+
+/*
+ * tcache_on_object_access
+ *
+ * It invalidates an existing columnar-cache if cached tables were altered
+ * or dropped. Also, it enforces to assign synchronizer trigger on new table
+ * creation/
+ */
+static void
+tcache_on_object_access(ObjectAccessType access,
+						Oid classId,
+						Oid objectId,
+						int subId,
+						void *arg)
+{
+
+	if (object_access_hook_next)
+		object_access_hook_next(access, classId, objectId, subId, arg);
+
+	/*
+	 * Only relations, we are interested in
+	 */
+	if (classId == RelationRelationId)
+	{
+		if (access == OAT_POST_CREATE)
+		{
+			/*
+			 * We consider to assign synchronizer trigger on statement-
+			 * and row-level. It is needed to synchronize / invalidate
+			 * cached object being constructed.
+			 */
+			pgstrom_assign_synchronizer(objectId);
+		}
+		else if (access == OAT_DROP || access == OAT_POST_ALTER)
+		{
+			/*
+			 * Existing columnar-cache is no longer available across
+			 * DROP or ALTER command (TODO: it's depend on the context.
+			 * it may possible to have existing cache, if ALTER command
+			 * does not change something related to the cached columns).
+			 * So, we simply unlink the tcache_head associated with this
+			 * relation, eventually someone who decrement its reference
+			 * counter into zero releases the cache.
+			 */
+			int		hindex = tcache_hash_index(MyDatabaseId, objectId);
+
+			SpinLockAcquire(&tc_common->lock);
+			PG_TRY();
+			{
+				dlist_mutable_iter	iter;
+
+				dlist_foreach_modify(iter, &tc_common->slot[hindex])
+				{
+					tcache_head	   *tc_head
+						= dlist_container(tcache_head, chain, iter.cur);
+
+					/* XXX - usually, only one cache per relation is linked */
+					if (tc_head->datoid == MyDatabaseId &&
+						tc_head->reloid == objectId)
+					{
+						dlist_delete(&tc_head->chain);
+						dlist_delete(&tc_head->lru_chain);
+						memset(&tc_head->chain, 0, sizeof(dlist_node));
+						memset(&tc_head->lru_chain, 0, sizeof(dlist_node));
+
+						tcache_put_tchead_nolock(tc_head);
+					}
+				}
+			}
+			PG_CATCH();
+			{
+				SpinLockRelease(&tc_common->lock);
+				PG_RE_THROW();
+			}
+			PG_END_TRY();
+			SpinLockRelease(&tc_common->lock);
+		}
+	}
 }
 
 
@@ -2001,6 +2464,14 @@ pgstrom_init_tcache(void)
 		worker.bgw_main_arg = i;
 		RegisterBackgroundWorker(&worker);
 	}
+
+	/* callback on vacuum-pages for cache invalidation */
+	heap_page_prune_hook_next = heap_page_prune_hook;
+	heap_page_prune_hook = tcache_on_page_prune;
+
+	/* callback on object-access for cache invalidation */
+	object_access_hook_next = object_access_hook;
+	object_access_hook = tcache_on_object_access;
 
 	/* aquires shared memory region */
 	length = offsetof(tcache_common, columnizers[num_columnizers]);
