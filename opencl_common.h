@@ -480,6 +480,12 @@ typedef struct {
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];	/* metadata of columns */
 } kern_row_store;
 
+static inline __global cl_uint *
+kern_rowstore_get_offset(__global kern_row_store *krs)
+{
+	return ((__global cl_uint *)(&krs->colmeta[krs->ncols]));
+}
+
 /*
  * rs_tuple
  *
@@ -494,16 +500,16 @@ typedef struct {
 } rs_tuple;
 
 static inline __global rs_tuple *
-kern_rowstore_get_tuple(__global kern_row_store *krstore, cl_uint rindex)
+kern_rowstore_get_tuple(__global kern_row_store *krs, cl_uint rindex)
 {
 	__global cl_uint   *p_offset;
 
-	if (rindex >= krstore->nrows)
+	if (rindex >= krs->nrows)
 		return NULL;
-	p_offset = (__global cl_uint *)(&krstore->colmeta[krstore->ncols]);
+	p_offset = (__global cl_uint *)(&krs->colmeta[krs->ncols]);
 	if (p_offset[rindex] == 0)
 		return NULL;
-	return (__global rs_tuple *)((uintptr_t)krstore + p_offset[rindex]);
+	return (__global rs_tuple *)((uintptr_t)krs + p_offset[rindex]);
 }
 
 /*

@@ -11,7 +11,12 @@
  * within this package.
  */
 #include "postgres.h"
+#include "access/heapam.h"
 #include "access/sysattr.h"
+#include "catalog/objectaccess.h"
+#include "catalog/objectaddress.h"
+#include "catalog/pg_class.h"
+#include "catalog/pg_trigger.h"
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
 #include "storage/ipc.h"
@@ -189,16 +194,52 @@ memcopy(void *dest, void *source, Size len)
 }
 
 static inline void
-bitcopy(uint8 *dstmap, int dindex, uint8 *srcmap, int sindex)
+bitmapcopy(uint8 *dstmap, int dindex, uint8 *srcmap, int sindex, int nbits)
 {
-	if ((srcmap[sindex >> 3] & (1 << (sindex & 7))) != 0)
-		dstmap[dindex >> 3] |=  (1 << (dindex & 7));
-	else
-		dstmap[dindex >> 3] &= ~(1 << (dindex & 7));
+	int		width = sizeof(Datum) * BITS_PER_BYTE;
+	uint8  *temp;
+	Datum  *dst;
+	Datum  *src;
+	int		dmod;
+	int		smod;
+
+	/* adjust alignment (destination) */
+	temp = dstmap + dindex / BITS_PER_BYTE;
+	dst = (Datum *)TYPEALIGN_DOWN(sizeof(Datum), temp);
+	dmod = ((uintptr_t)temp -
+			(uintptr_t)dst) * BITS_PER_BYTE + dindex % BITS_PER_BYTE;
+	if (dmod >= width)
+	{
+		dst += dmod / width;
+		dmod = dmod % width;
+	}
+
+	/* adjust alignment (source) */
+	temp = srcmap + dindex / BITS_PER_BYTE;
+	src = (Datum *)TYPEALIGN_DOWN(sizeof(Datum), temp);
+	smod = ((uintptr_t)temp -
+			(uintptr_t)src) * BITS_PER_BYTE + sindex % BITS_PER_BYTE;
+	if (smod >= width)
+	{
+		src += smod / width;
+		smod = smod % width;
+	}
+
+	/* ok, copy the bitmap */
+	for (i=0, j=0; j < nbits; i++, j += (i==0 ? width - dmod : width))
+	{
+		Datum	mask1 = (i==0 ? ((1UL << dmod) - 1) : 0);
+		Datum	mask2 = (j + width < nbits ? 0 : ~((1UL << (nbits - j)) - 1));
+		Datum	bitmap;
+
+		bitmap = dst[i] & mask1;
+		if (smod > dmod)
+			bitmap |= (src[i] >> (dmod - dmod)) & ~mask1;
+		else
+			bitmap |= (src[i] << (dmod - smod)) & ~mask1;
+		dst[i] = (bitmap & ~mask2) | (dst[i] & mask2);
+	}
 }
-
-
-
 
 
 
@@ -440,6 +481,121 @@ tcache_put_toast_buffer(tcache_toastbuf *tbuf)
 		pgstrom_shmem_free(tbuf);
 }
 
+
+
+
+
+
+/*
+ * tcache_create_row_store
+ *
+ *
+ *
+ *
+ */
+tcache_row_store *
+tcache_create_row_store(TupleDesc tupdesc, int ncols, AttrNumber *i_cached)
+{
+	tcache_row_store   *trs;
+	int			i, j;
+
+	trs = pgstrom_shmem_alloc(ROWSTORE_DEFAULT_SIZE);
+	if (!trs)
+		elog(ERROR, "out of shared memory");
+
+	/*
+	 * We put header portion of kern_column_store next to the kern_row_store
+	 * as source of copy for in-kernel column store. It has offset of column
+	 * array, but contents shall be set up by kernel prior to evaluation of
+	 * qualifier expression.
+	 */
+	trs->stag = StromTag_TCacheRowStore;
+	SpinLockInit(&trs->refcnt_lock);
+	trs->refcnt = 1;
+	memset(&trs->chain, 0, sizeof(dlist_node));
+	trs->usage
+		= STROMALIGN_DOWN(ROWSTORE_DEFAULT_SIZE -
+						  STROMALIGN(offsetof(kern_column_store,
+											  colmeta[ncols])) -
+						  offsetof(tcache_row_store, kern));
+	trs->blkno_max = 0;
+	trs->blkno_min = MaxBlockNumber;
+	trs->kern.length = trs->usage;
+	trs->kern.ncols = tupdesc->natts;
+	trs->kern.nrows = 0;
+	trs->kcs_head = (kern_column_store *)
+		((char *)&trs->kern + trs->kern.length);
+
+	/* construct colmeta structure */
+	for (i=0, j=0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = tupdesc->attrs[i];
+		kern_colmeta	colmeta;
+
+		memset(&colmeta, 0, sizeof(kern_colmeta));
+		if (i == i_cached[j])
+			colmeta.flags |= KERN_COLMETA_ATTREFERENCED;
+		if (attr->attnotnull)
+			colmeta.flags |= KERN_COLMETA_ATTNOTNULL;
+		if (attr->attalign == 'c')
+			colmeta.attalign = sizeof(cl_char);
+		else if (attr->attalign == 's')
+			colmeta.attalign = sizeof(cl_short);
+		else if (attr->attalign == 'i')
+			colmeta.attalign = sizeof(cl_int);
+		else
+		{
+			Assert(attr->attalign == 'd');
+			colmeta.attalign = sizeof(cl_long);
+		}
+		colmeta.attlen = attr->attlen;
+		colmeta.cs_ofs = -1;	/* to be set later */
+
+		if (i == i_cached[j])
+		{
+			memcpy(&trs->kcs_head->colmeta[j],
+				   &colmeta,
+				   sizeof(kern_colmeta));
+			j++;
+		}
+		memcpy(&trs->kern.colmeta[i],
+			   &colmeta,
+			   sizeof(kern_colmeta));
+	}
+	return trs;
+}
+
+tcache_row_store *
+tcache_get_row_store(tcache_row_store *trs)
+{
+	SpinLockAcquire(&trs->refcnt_lock);
+	Assert(trs->refcnt > 0);
+	trs->refcnt++;
+	SpinLockRelease(&trs->refcnt_lock);
+
+	return tcs;
+}
+
+void
+tcache_put_row_store(tcache_row_store *trs)
+{
+	bool	do_release = false;
+
+	SpinLockAcquire(&trs->refcnt_lock);
+	Assert(trs->refcnt > 0);
+	if (--trs->refcnt == 0)
+		do_release = true;
+	SpinLockRelease(&trs->refcntlock);
+
+	if (do_release)
+		pgstrom_shmem_free(trs);
+}
+
+
+
+
+
+
 /*
  * tcache_alloc_tcnode
  *
@@ -541,12 +697,13 @@ tcache_free_node(tcache_head *tc_head, tcache_node *tc_node)
 static int
 tcache_find_next_record(tcache_column_store *tcs, ItemPointer ctid)
 {
-	int		index = -1;
+	BlockNumber	blkno_cur = ItemPointerGetBlockNumber(ctid);
+	int			index = -1;
 
 	if (tcs->nrows == 0)
 		return -1;	/* no records are cached */
-	if (ItemPointerCompare(&tcs->ip_max, ctid) < 0)
-		return -1;	/* ctid is greater than ip_max, so no candidate is here */
+	if (blkno_cur > tcs->blkno_max)
+		return -1;	/* ctid points higher block, so no candidate is here */
 
 	if (tcs->is_sorted)
 	{
@@ -557,7 +714,7 @@ tcache_find_next_record(tcache_column_store *tcs, ItemPointer ctid)
 		{
 			int	i_mid = (i_min + i_max) / 2;
 
-			if (ItemPointerCompare(&tcs->ctids[i_mid], ctid) > 0)
+			if (ItemPointerCompare(&tcs->ctids[i_mid], ctid) >= 0)
 				i_max = i_mid;
 			else
 				i_min = i_mid + 1;
@@ -568,16 +725,16 @@ tcache_find_next_record(tcache_column_store *tcs, ItemPointer ctid)
 	}
 	else
 	{
-		ItemPointerData	curr_ip;
+		ItemPointerData	ip_cur;
 		int		i;
 
-		ItemPointerSet(&curr_ip, MaxBlockNumber, MaxOffsetNumber);
+		ItemPointerSet(&ip_cur, MaxBlockNumber, MaxOffsetNumber);
 		for (i=0; i < tcs->nrows; i++)
 		{
-			if (ItemPointerCompare(&tcs->ctids[i], ctid) > 0 &&
-				ItemPointerCompare(&tcs->ctids[i], &curr_ip) < 0)
+			if (ItemPointerCompare(&tcs->ctids[i], ctid) >= 0 &&
+				ItemPointerCompare(&tcs->ctids[i], &ip_cur) < 0)
 			{
-				ItemPointerCopy(&tcs->ctids[i], &curr_ip);
+				ItemPointerCopy(&tcs->ctids[i], &ip_cur);
 				index = i;
 			}
 		}
@@ -586,74 +743,18 @@ tcache_find_next_record(tcache_column_store *tcs, ItemPointer ctid)
 }
 
 /*
- * tcache_find_prev_record
- *
- * It finds a record with the greater item-pointer less than supplied
- * ctid, within a particular tcache_column_store.
- * If found, it return an index value [0 ... tcs->nrows - 1]. Elsewhere,
- * it returns a negative value.
- * Note that it may take linear time if tcache_column_store is not sorted.
- */
-static int
-tcache_find_prev_record(tcache_column_store *tcs, ItemPointer ctid)
-{
-	int		index = -1;
-
-	if (tcs->nrows == 0)
-		return -1;	/* no records are cached */
-	if (ItemPointerCompare(&tcs->ip_max, ctid) < 0)
-		return -1;	/* ctid is greater than ip_max, so no candidate is here */
-
-	if (tcs->is_sorted)
-	{
-		int		i_min = -1;
-		int		i_max = tcs->nrows - 1;
-
-		while (i_min < i_max)
-		{
-			int	i_mid = (i_min + i_max + 1) / 2;
-
-			if (ItemPointerCompare(&tcs->ctids[i_mid], ctid) >= 0)
-				i_max = i_mid - 1;
-			else
-				i_min = i_mid;
-		}
-		Assert(i_min == i_max);
-		if (i_min > 0 && i_min < tcs->nrows)
-			index = i_min;
-	}
-	else
-	{
-		ItemPointerData	curr_ip;
-		int		i;
-
-		ItemPointerSet(&curr_ip, 0, InvalidOffsetNumber);
-		for (i=0; i < tcs->nrows; i++)
-		{
-			if (ItemPointerCompare(&tcs->ctids[i], ctid) < 0 &&
-				ItemPointerCompare(&tcs->ctids[i], &curr_ip) > 0)
-			{
-				ItemPointerCopy(&tcs->ctids[i], &curr_ip);
-				index = i;
-			}
-		}
-	}
-	return index;
-}
-
-
-
-
-/*
- * tcache_find_least_colstore
+ * tcache_find_next_node
+ * tcache_find_next_column_store
  *
  * It tried to find least column-store that can contain any records larger
  * than the supplied 'ctid'. Usually, this routine is aplied to forward scan.
  */
-static tcache_column_store *
-internal_find_least_column_store(tcache_node *tc_node, ItemPointer ctid)
+static void *
+tcache_find_next_internal(tcache_node *tc_node, BlockNumber blkno_cur,
+						  bool column_store)
 {
-	tcache_column_store *tcs;
+	tcache_column_store *tcs = NULL;
+	void	   *temp;
 
 	SpinLockAcquire(&tc_node->lock);
 	if (tc_node->nrows == 0)
@@ -662,60 +763,85 @@ internal_find_least_column_store(tcache_node *tc_node, ItemPointer ctid)
 		return NULL;
 	}
 
-	if (ItemPointerCompare(ctid, &tc_node->tcs.ip_max) >= 0)
+	if (blkno_cur > tc_node->tcs.blkno_max)
 	{
 		/*
-		 * if citd <= ip_max of this node, this node is obviously not a one
-		 * to be fetched on the next. So, we try to walks on the next right
-		 * node or stop walking if no more larger ones.
+		 * if current blockno is larger then or equal to the 'blkno_max',
+		 * it is obvious that this node is not a one to be fetched on the
+		 * next. So, we try to walk on the next right branch.
 		 */
 		SpinLockRelease(&tc_node->lock);
 
 		if (!tc_node->right)
 			return NULL;
-		return internal_find_least_column_store(tc_node->right, ctid);
+		return tcache_find_next_internal(tc_node->right, blkno_cur,
+										 column_store);
 	}
-	/*
-	 * no candidate that can contain less ctid than current node
-	 */
-	if (!tc_node->left)
+	else if (!tc_node->left || blkno_cur >= tc_node->tcs.blkno_min)
 	{
-		tcs = tcache_get_column_store(tc_node->tcs);
+		/*
+		 * Unlike above, this case is obvious that this chunk has records
+		 * larger than required item-pointer.
+		 */
+		if (column_store)
+			tcs = tcache_get_column_store(tc_node->tcs);
 		SpinLockRelease(&tc_node->lock);
-		return tcs;
+
+		return !tcs ? tc_node : tcs;
 	}
+	SpinLockRelease(&tc_node->lock);
 
 	/*
-	 * try to walks on the left node, and get thid node if not suitable
+	 * Even if ctid is less than ip_min and left-node is here, we need
+	 * to pay attention on the case when ctid is larger than ip_max of
+	 * left node tree. In this case, this tc_node shall still be a node
+	 * to be fetched.
 	 */
-	SpinLockRelease(&tc_node->lock);
-	tcs = internal_find_least_column_store(tc_node->left, ctid);
-	if (!tcs)
+	if ((temp = tcache_find_next_internal(tc_node->left, blkno_cur,
+										  column_store)) != NULL)
+		return temp;
+
+	/* if no left node is suitable, this node should be fetched */
+	if (column_store)
 	{
 		SpinLockAcquire(&tc_node->lock);
 		tcs = tcache_get_column_store(tc_node->tcs);
 		SpinLockRelease(&tc_node->lock);
 	}
-	return tcs;
+	return !tcs ? tc_node : tcs;
 }
-static tcache_column_store *
-tcache_find_least_column_store(tcache_head *tc_head, ItemPointer ctid)
+
+tcache_node *
+tcache_find_next_node(tcache_head *tc_head, BlockNumber blkno_cur)
 {
+	Assert(TCacheHeadLockedByMe(tc_head, false));
 	if (!tc_head->tcs_root)
 		return NULL;
-	return internal_find_least_column_store(tc_head->tcs_root, ctid);
+	return tcache_find_next_internal(tc_head->tcs_root, blkno_cur, false);
+}
+
+tcache_column_store *
+tcache_find_next_column_store(tcache_head *tc_head, BlockNumber blkno_cur)
+{
+	Assert(TCacheHeadLockedByMe(tc_head, false));
+	if (!tc_head->tcs_root)
+		return NULL;
+	return tcache_find_next_internal(tc_head->tcs_root, blkno_cur, true);
 }
 
 /*
- * tcache_find_greatest_colstore
+ * tcache_find_prev_node
+ * tcache_find_prev_column_store
  *
- * It tried to find greatest column-store that can contain any records less
- * than the supplied 'ctid'. Usually, this routine is aplied to backward scan.
+ *
+ *
  */
-static tcache_column_store *
-internal_find_greatest_column_store(tcache_node *tc_node, ItemPointer ctid)
+static void *
+tcache_find_prev_internal(tcache_node *tc_node, BlockNumber blkno_cur,
+						  bool column_store)
 {
-	tcache_column_store *tcs;
+	tcache_column_store *tcs = NULL;
+	void	   *temp;
 
 	SpinLockAcquire(&tc_node->lock);
 	if (tc_node->nrows == 0)
@@ -724,49 +850,70 @@ internal_find_greatest_column_store(tcache_node *tc_node, ItemPointer ctid)
 		return NULL;
 	}
 
-	if (ItemPointerCompare(ctid, &tc_node->tcs.ip_min) <= 0)
+	if (blkno_cur < tc_node->tcs.blkno_min)
 	{
 		/*
-		 * if ctid <= min ctid of this node, this node is obviously not
-		 * a one to be fetched on the next. So, we try to walk on the
-		 * next left node or stop walking down if no more smaller ones.
+		 * it is obvious that this chunk cannot be a candidate to be
+		 * fetched as previous one.
 		 */
 		SpinLockRelease(&tc_node->lock);
 
 		if (!tc_node->left)
 			return NULL;
-		return internal_find_greatest_column_store(tc_node->left, ctid);
+		return tcache_find_prev_internal(tc_node->left, blkno_cur,
+										 column_store);
 	}
-	/*
-	 * no candidate that can contain less ctid than current node
-	 */
-	if (!tc_node->right)
+	else if (!tc_node->right || blkno_cur <= tc_node->tcs.blkno_max)
 	{
-		tcs = tcache_get_column_store(tc_node->tcs);
+		/*
+		 * If ctid is less than ip_max but greater than or equal to ip_min,
+		 * or tc_node has no left node, this node shall be fetched on the
+		 * next.
+		 */
+		if (column_store)
+			tcs = tcache_get_column_store(tc_node->tcs);
 		SpinLockRelease(&tc_node->lock);
-		return tcs;
+
+		return !tcs ? tc_node : tcs;
 	}
+	SpinLockRelease(&tc_node->lock);
 
 	/*
-	 * try to walks on the left node, and get thid node if not suitable
+	 * Even if ctid is less than ip_min and left-node is here, we need
+	 * to pay attention on the case when ctid is larger than ip_max of
+	 * left node tree. In this case, this tc_node shall still be a node
+	 * to be fetched.
 	 */
-	SpinLockRelease(&tc_node->lock);
-	tcs = internal_find_greatest_column_store(tc_node->right, ctid);
-	if (!tcs)
+	if ((temp = tcache_find_prev_internal(tc_node->right, blkno_cur,
+										  column_store)) != NULL)
+		return temp;
+
+	/* if no left node is suitable, this node should be fetched */
+	if (column_store)
 	{
 		SpinLockAcquire(&tc_node->lock);
 		tcs = tcache_get_column_store(tc_node->tcs);
 		SpinLockRelease(&tc_node->lock);
 	}
-	return tcs;
+	return !tcs ? tc_node : tcs;
 }
 
-static tcache_column_store *
-tcache_find_greatest_column_store(tcache_head *tc_head, ItemPointer ctid)
+tcache_node *
+tcache_find_prev_node(tcache_head *tc_head, BlockNumber blkno_cur)
 {
+	Assert(TCacheHeadLockedByMe(tc_head, false));
 	if (!tc_head->tcs_root)
 		return NULL;
-	return internal_find_greatest_column_store(tc_head->tcs_root, ctid);
+	return internal_find_prev_node(tc_head->tcs_root, blkno_cur, false);
+}
+
+tcache_column_store *
+tcache_find_prev_column_store(tcache_head *tc_head, ItemPointer ctid)
+{
+	Assert(TCacheHeadLockedByMe(tc_head, false));
+	if (!tc_head->tcs_root)
+		return NULL;
+	return internal_find_prev_node(tc_head->tcs_root, blkno_cur, true);
 }
 
 /*
@@ -851,6 +998,48 @@ tcache_sort_tcnode(tcache_head *tc_head, tcache_node *tc_node, bool is_inplace)
 }
 
 /*
+ * tcache_copy_cs_varlena
+ *
+ *
+ *
+ */
+static void
+tcache_copy_cs_varlena(tcache_column_store *tcs_dst, int base_dst,
+					   tcache_column_store *tcs_src, int base_src,
+					   int attidx, int nitems)
+{
+	tcache_toastbuf *tbuf_src = tcs_src->cdata[attidx].toast;
+	tcache_toastbuf *tbuf_dst = tcs_dst->cdata[attidx].toast;
+
+	vpos = (cl_uint *)(tcs_src->cdata[attidx].values);
+	for (i=0; i < nitems; i++)
+	{
+		if (vpos[base_src + i] == 0)
+			new_pos = 0;
+		else
+		{
+			vptr = (char *)tbuf_src + vpos[base_src + i];
+			vsize = VARSIZE(vptr);
+
+			if (tbuf_dst->tbuf_usage + MAXALIGN(vsize) < tbuf_dst->tbuf_length)
+			{
+				tcs_dst->cdata[attidx].toast
+					= tcache_create_toast_buffer(2 * tbuf_dst->tbuf_length);
+				tbuf_dst = tcs_dst->cdata[attidx].toast;
+			}
+			memcpy((char *)tbuf_dst + tbuf_dst->tbuf_usage,
+				   vptr,
+				   VARSIZE(vptr));
+			new_pos = tbuf_new->tbuf_usage;
+			tbuf_new->tbuf_usage += MAXALIGN(VARSIZE(vptr));
+		}
+	}
+}
+
+
+
+
+/*
  * tcache_compaction_tcnode
  *
  *
@@ -884,13 +1073,14 @@ tcache_compaction_tcnode(tcache_head *tc_head, tcache_node *tc_node)
 		 * It ensures ip_max/ip_min shall be updated during the loop
 		 * below, not a bug that miscopies min <-> max.
 		 */
-		ItemPointerSet(&tcs_new->ip_max, &tcs_old->ip_min);
-		ItemPointerSet(&tcs_new->ip_min, &tcs_old->ip_max);
+		&tcs_new->blkno_min = tcs_old->blkno_max;
+		&tcs_new->blkno_max = tcs_old->blkno_min;
 
 		/* OK, let's make it compacted */
 		for (i=0, j=0; i < tcs_old->nrows; i++)
 		{
-			TransactionId		xmax;
+			TransactionId	xmax;
+			BlockNumber		blkno_cur;
 
 			/*
 			 * Once a record on the column-store is vacuumed, it will have
@@ -905,16 +1095,16 @@ tcache_compaction_tcnode(tcache_head *tc_head, tcache_node *tc_node)
 			 * Data copy
 			 */
 			memcopy(&tcs_new->ctids[j],
-					&tcs_old->ctids[j],
+					&tcs_old->ctids[i],
 					sizeof(ItemPointerData));
 			memcopy(&tcs_new->theads[j],
-					&tcs_old->theads[j],
+					&tcs_old->theads[i],
 					sizeof(HeapTupleHeaderData));
-
-			if (ItemPointerCompare(&tcs_new->ctids[j], &tcs_new->ip_max) > 0)
-				ItemPointerCopy(&tcs_new->ctids[j], &tcs_new->ip_max);
-			if (ItemPointerCompare(&tcs_new->ctids[j], &tcs_new->ip_min) < 0)
-				ItemPointerCopy(&tcs_new->ctids[j], &tcs_new->ip_min);
+			blkno_cur = ItemPointerGetBlockNumber(&tcs_new->ctids[j]);
+			if (blkno_cur > tcs_new->blkno_max)
+				tcs_new->blkno_max = blkno_cur;
+			if (blkno_cur < tcs_new->blkno_min)
+				tcs_new->blkno_min = blkno_cur;
 
 			for (k=0; k < tcs_old->ncols; k++)
 			{
@@ -923,8 +1113,8 @@ tcache_compaction_tcnode(tcache_head *tc_head, tcache_node *tc_node)
 
 				/* nullmap */
 				if (tcs_old->cdata[k].isnull)
-					bitcopy(tcs_new->cdata[k].isnull, j,
-							tcs_old->cdata[k].isnull, i);
+					bitmapcopy(tcs_new->cdata[k].isnull, j,
+							   tcs_old->cdata[k].isnull, i, 1);
 				/* values */
 				if (attlen > 0)
 					memcopy(tcs_new->cdata[k].values + attlen * j,
@@ -932,18 +1122,8 @@ tcache_compaction_tcnode(tcache_head *tc_head, tcache_node *tc_node)
 							attlen);
 				else
 				{
-					tcache_toastbuf	*tbuf_old = tcs_old->cdata[k].toast;
-					tcache_toastbuf *tbuf_new = tcs_new->cdata[k].toast;
-					char			*vptr;
-
-					vptr = (char *)tbuf_old +
-						((cl_uint *)tcs_old->cdata[k].values)[i];
-					memcopy((char *)tbuf_new + tbuf_new->tbuf_usage,
-							vptr,
-							VARSIZE(vptr));
-					((cl_uint *)tcs_new->cdata[k].values)[j]
-						= tbuf_new->tbuf_usage;
-					tbuf_new->tbuf_usage += MAXALIGN(VARSIZE(vptr));
+					tcache_copy_cs_varlena(tcs_new, j,
+										   tcs_old, i, k, 1);
 				}
 			}
 			j++;
@@ -970,12 +1150,133 @@ tcache_compaction_tcnode(tcache_head *tc_head, tcache_node *tc_node)
 	PG_END_TRY();
 }
 
+/*
+ * tcache_try_merge_tcnode
+ *
+ *
+ *
+ */
+static void
+do_try_merge_tcnode(tcache_node *tc_node, bool with_left_node)
+{
+	tcache_node *child = (with_left_node ? tc_node->left : tc_node->right);
+
+	if (tc_node->tcs.nrows < NUM_ROWS_PER_COLSTORE / 2 &&
+		child->tcs.nrows < NUM_ROWS_PER_COLSTORE / 2 &&
+		(tc_node->tcs.nrows +
+		 child->tcs.nrows) < ((2 * NUM_ROWS_PER_COLSTORE) / 3))
+	{
+		tcache_column_store *tcs_src = child->tcs;
+		tcache_column_store *tcs_dst = tc_node->tcs;
+		int		base = tc_node->tcs.nrows;
+		int		nmoved = child->tcs.nrows;
+		int		i, j, k;
+
+		memcpy(tcs_dst->ctids + base,
+			   tcs_src->ctids,
+			   sizeof(ItemPointerData) * nmoved);
+		memcpy(tcs_dst->theads + base,
+			   tcs_src->theads,
+			   sizeof(HeapTupleHeaderData) * nmoved);
+		for (i=0; i < tcs_dst->ncols; i++)
+		{
+			Form_pg_attribute	attr;
+
+			j = tc_head->i_cached[i];
+			attr = tc_head->tupdesc->attrs[j];
+
+			if (!attr->attnotnull)
+			{
+				/* move bitmap */
+
+			}
+
+			if (attr->attlen > 0)
+			{
+				memcpy(tcs_dst->cdata[i].values + attr->attlen * base,
+					   tcs_src->cdata[i].values,
+					   attr->attlen * nmoved);
+			}
+			else
+			{
+				tcache_toastbuf *tbuf_dst = tcs_dst->cdata[k].toast;
+				tcache_toastbuf *tbuf_src = tcs_src->cdata[k].toast;
+				cl_uint		new_pos;
+				cl_uint	   *vpos;
+				char	   *vptr;
+
+				for (k=0; k < nmoved; k++)
+				{
+					vpos = ((cl_uint *)tcs_src->cdata[k].values);
+					if (vpos[k] == 0)
+						new_pos = 0;
+					else
+					{
+						vptr = (char *)tbuf_src + vpos[k];
+						memcpy(
+
+
+					cl_uint	offset;
+
+
+
+
+				}
+
+
+
+
+
+
+
+			}
+		}
+	}
+}
+
+static void
+tcache_try_merge_recurse(tcache_node *tc_node,
+						 tcache_node *candidate,
+						 tcache_node *target)
+{
+	if (tc_node->tcs->blkno_min > target->tcs->blkno_max)
+	{
+		Assert(tc_node->left != NULL);
+		tcache_try_merge_recurse(tc_node->left, target);
+		if (tc_node->left == target)
+			do_try_merge_tcnode(tc_node, tc_node->left, NULL);
+	}
+	else if (tc_node->tcs->blkno_max < target->tcs->blkno_min)
+	{
+		Assert(tc_node->right != NULL);
+		tcache_try_merge_recurse(tc_node->right, target);
+
+
+		do_try_merge_tcnode(tc_node->right, target);
+	}
+	else
+	{
+		Assert(tc_node == target);
+		if (tc_node->left)
+			do_try_merge_tcnode(tc_node, true);
+		if (tc_node->right)
+			do_try_merge_tcnode(tc_node, false);
+	}
+}
+
+static void
+tcache_try_merge_tcnode(tcache_head *tc_head, tcache_node *tc_node)
+{
+	Assert(TCacheHeadLockedByMe(tc_head, true));
+
+	tcache_try_merge_recurse(tc_head->tcs_root, NULL, rc_node);
+}
 
 /*
  * tcache_split_tcnode
  *
- * it creates a new tcache_node and move half of the records;
- * includes varlena datum.
+ * It creates a new tcache_node and move the largest one block of the records;
+ * including varlena datum.
  *
  * NOTE: caller must hold exclusive lwlock on tc_head.
  */
@@ -993,11 +1294,10 @@ tcache_split_tcnode(tcache_head *tc_head, tcache_node *tc_node_old)
 	PG_TRY();
 	{
 		Form_pg_attribute attr;
-		/* 'nremain' must be multiplexer because of nullmap alignment. */
-		int		nremain = TYPEALIGN_DOWN(BITS_PER_BYTE, tcs_old->nrows / 2);
-		int		nmoved = tcs_old->nrows - nremain;
+		BlockNumber blkno;
+		int		nremain;
+		int		nmoved;
 		int		i, j, k;
-		
 
 		/* assign toast buffers first */
 		for (i=0; i < tcs_old->ncols; i++)
@@ -1016,6 +1316,25 @@ tcache_split_tcnode(tcache_head *tc_head, tcache_node *tc_node_old)
 		 */
 		if (!tcs_old->is_sorted)
 			tcache_sort_tcnode(tc_head, tc_node, true);
+
+		/*
+		 * Find number of records to be moved into the new one.
+		 * Usually, a column-store being filled caches contents of
+		 * multiple heap-pages. So, block-number of ip_min and ip_max
+		 * should be different.
+		 */
+		Assert(tcs_old->blkno_min != tcs_old->blkno_max);
+
+		for (nremain = tcs_old->nrows; nremain > 0; nremain--)
+		{
+			BlockNumber	blkno_cur
+				= ItemPointerGetBlockNumber(&tcs_old->ctids[nremain - 1]);
+
+			if (blkno_cur != &tcs_old->blkno_max)
+				break;
+		}
+		nmoved = tcs_old->nrows - nremain;
+		Assert(nremain > 0 && nmoved > 0);
 
 		/*
 		 * copy item-pointers; also update ip_min/ip_max
@@ -1042,10 +1361,23 @@ tcache_split_tcnode(tcache_head *tc_head, tcache_node *tc_node_old)
 			/* nullmap */
 			if (!attr->attnotnull)
 			{
-				Assert(nremain % BITS_PER_BYTE == 0);
-				memcpy(tcs_new->cdata[i].isnull,
-					   tcs_old->cdata[i].isnull + nremain / BITS_PER_BYTE,
-					   (nmoved + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+				uint8  *srcmap;
+				uint8  *dstmap;
+				uint8	bitmap;
+				int		rshift;
+				int		lshift;
+
+				srcmap = tcs_old->cdata[i].isnull + nremain / BITS_PER_BYTE;
+				dstmap = tcs_new->cdata[i].isnull;
+				rshift = nremain % BITS_PER_BYTE;
+				lshift = BITS_PER_BYTE - rshift;
+				for (k=0; k < nmoved; k += BITS_PER_BYTE)
+				{
+					uint8	bitmap
+						= ((srcmap[k / BITS_PER_BYTE] >> rshift) |
+						   (srcmap[k / BITS_PER_BYTE + 1] << lshift));
+					dstmap[k / BITS_PER_BYTE] = bitmap;
+				}
 			}
 
 			/* regular columns */
@@ -1061,24 +1393,34 @@ tcache_split_tcnode(tcache_head *tc_head, tcache_node *tc_node_old)
 				{
 					tcache_toastbuf *tbuf_old = tcs_old->cdata[i].toast;
 					tcache_toastbuf	*tbuf_new = tcs_new->cdata[i].toast;
-					char			*vptr;
+					cl_uint		new_pos;
+					cl_uint	   *vpos;
+					char	   *vptr;
 
-					vptr = (char *)tbuf_old +
-						((cl_uint *)tcs_old->cdata[i].values)[k + nremain];
-					memcpy((char *)tbuf_new + tbuf_new->tbuf_usage,
-						   vptr,
-						   VARSIZE(vptr));
-					((cl_uint *)tcs_new->cdata[i].values)[k]
-						= tbuf_new->tbuf_usage;
-					tbuf_new->tbuf_usage += MAXALIGN(VARSIZE(vptr));
+					vpos = ((cl_uint *)tcs_old->cdata[i].values);
+					if (vpos[k + nremain] == 0)
+						new_pos = 0;
+					else
+					{
+						vptr = (char *)tbuf_old + vofs[k + nremain];
+						memcpy((char *)tbuf_new + tbuf_new->tbuf_usage,
+							   vptr,
+							   VARSIZE(vptr));
+						new_pos = tbuf_new->tbuf_usage;
+						tbuf_new->tbuf_usage += MAXALIGN(VARSIZE(vptr));
+					}
+					((cl_uint *)tcs_new->cdata[i].values)[k] = new_pos;
 				}
 			}
 		}
 		tcs_new->nrows = nmoved;
 		tcs_new->njunks = 0;
 		tcs_new->is_sorted = true;
-		tcs_new->ip_min = tcs_new->ctids[0];
-		tcs_new->ip_max = tcs_new->ctids[nmoved - 1];
+		tcs_new->blkno_min
+			= ItemPointerGetBlockNumber(&tcs_new->ctids[0]);
+		tcs_new->blkno_max
+			= ItemPointerGetBlockNumber(&tcs_new->ctids[nmoved - 1]);
+		Assert(tcs_new->blkno_min == tcs_new->blkno_max);
 
 		/*
 		 * OK, tc_node_new is ready to chain as larger half of
@@ -1090,7 +1432,8 @@ tcache_split_tcnode(tcache_head *tc_head, tcache_node *tc_node_old)
 		tc_node_old->r_depth = tc_node_new->r_depth + 1;
 
 		tcs_old->nrows = nremain;
-		tcs_old->ip_max = tcs_old->ctids[nremain - 1];
+		tcs_old->blkno_max
+			= ItemPointerGetBlockNumber(tcs_old->ctids[nremain - 1]);
 	}
 	PG_CATCH();
 	{
@@ -1155,6 +1498,179 @@ tcache_rebalance_tree(tcache_head *tc_head, tcache_node *tc_node,
 	}
 }
 
+
+/*
+ * tcache_insert_tuple_row
+ *
+ *
+ *
+ *
+ *
+ */
+bool
+tcache_row_store_insert_tuple(tcache_row_store *trs, HeapTuple tuple)
+{
+	bool		result = false;
+	cl_uint	   *tupoffset;
+	Size		usage_head;
+	Size		usage_tail;
+	Size		required;
+
+	required = MAXALIGN(sizeof(HeapTupleData)) + MAXALIGN(tuple->t_len);
+	tupoffset = kern_rowstore_get_tupoffset(&trs->kern);
+	usage_head = ((uintptr_t)&tupoffset[trs->kern.nrows + 1] -
+				  (uintptr_t)&trs->kern);
+	usage_tail = trs->usage - required;
+	if (usage_head < usage_tail)
+	{
+		rs_tuple   *rs_tup = (rs_tuple *)((char *)&trs->kern + usage_tail);
+
+		memcpy(&rs_tup->htup, tuple, sizeof(HeapTupleData));
+		rs_tup->htup.t_data = &rs_tup->data;
+		memcpy(&rs_tup->data, tuple->t_data, tuple->t_len);
+
+		tupffset[trs->kern.nrows++] = usage_tail;
+		trs->usage = usage_tail;
+		if (trs->blkno_max < ItemPointerGetBlockNumber(&tuple->t_self))
+			trs->blkno_max = ItemPointerGetBlockNumber(&tuple->t_self);
+		if (trs->blkno_min > ItemPointerGetBlockNumber(&tuple->t_self))
+			trs->blkno_min = ItemPointerGetBlockNumber(&tuple->t_self);
+		result = true;
+	}
+
+	return result;
+}
+
+static void
+tcache_insert_tuple_row(tcache_head *tc_head, HeapTuple tuple)
+{
+	tcache_row_store *trs = NULL;
+	Size		required
+		= MAXALIGN(sizeof(HeapTupleData)) + MAXALIGN(tuple->t_len);
+
+	/* shared lwlock is sufficient to insert */
+	Assert(TCacheHeadLockedByMe(tc_head, false));
+	SpinLockAcquire(&tc_head->lock);
+	PG_TRY();
+	{
+	retry:
+		if (tc_head->trs_curr)
+			trs = tcache_get_row_store(tc_head->trs_curr);
+		else
+		{
+			tc_head->trs_curr = tcache_create_row_store(tc_head->tupdesc,
+														tc_head->ncols,
+														tc_head->i_cached);
+			trs = tcache_get_row_store(tc_head->trs);
+		}
+
+		if (!tcache_row_store_insert_tuple(trs, tuple))
+		{
+			/*
+			 * No more space to put tuples any more. So, move this trs into
+			 * columnizer pending list (if nobody do it), them retry again.
+			 */
+			dlist_push_head(&tc_head->trs_list, &trs->chain);
+			tcache_put_row_store(trs);
+			tc_head->trs_curr = trs = NULL;
+			tcache_wakeup_columnizer();
+			goto retry;
+		}
+	}
+	PG_CATCH();
+	{
+		SpinLockRelease(&tc_head->lock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	SpinLockRelease(&tc_head->lock);
+}
+
+/*
+ *
+ *
+ *
+ *
+ */
+static bool
+tcache_update_tuple_hints_rowstore(tcache_row_store *trs, HeapTuple tuple)
+{
+	int			index;
+
+	if (ItemPointerGetBlockNumber(&tuple->t_self) > trs->blkno_max ||
+		ItemPointerGetBlockNumber(&tuple->t_self) < trs->blkno_min)
+		return false;
+
+	for (index=0; index < trs->kern.nrows; index++)
+	{
+		rs_tuple   *rs_tup
+			= kern_rowstore_get_tuple(&trs->kern, index);
+
+		if (!rs_tup)
+			continue;
+		if (ItemPointerEquals(&rs_tup->htup.t_self, &tuple->t_self))
+		{
+			memcpy(&rs_tup->data, tuple->t_data, sizeof(HeapTupleHeaderData));
+			return true;
+		}
+	}
+	return false;
+}
+
+static void
+tcache_update_tuple_hints(tcache_head *tc_head, HeapTuple tuple)
+{
+	BlockNumber		blkno = ItemPointerGetBlockNumber(&tuple->t_self);
+	tcache_node	   *tc_node;
+	bool			hit_on_tcs = false;
+
+	Assert(TCacheHeadLockedByMe(tc_head, false));
+
+	tc_node = tcache_find_next_node(tc_head, blkno);
+	if (tc_node)
+	{
+		tcache_column_store *tcs;
+		int		index;
+
+		SpinLockAcquire(&tc_node->lock);
+		tcs = tc_node->tcs;
+		index = tcache_find_next_record(tcs, &tuple->t_self);
+		if (index >= 0)
+		{
+			HeapTupleHeader	htup;
+
+			Assert(index < tcs->nrows);
+			htup = &tcs->theads[index];
+			Assert(HeapTupleHeaderGetRawXmax(htup) < FirstNormalTransactionId);
+			memcpy(htup, tuple->t_data, sizeof(HeapTupleHeaderData));
+			hit_on_tcs = true;
+		}
+		SpinLockRelease(&tc_node->lock);
+	}
+
+	/* if no entries in column-store, try to walk on row-store */
+	if (!hit_on_tcs)
+	{
+		tcache_row_store   *trs;
+
+		SpinLockAcquire(&tc_head->lock);
+		if (tc_head->trs_curr &&
+			tcache_update_tuple_hints_rowstore(tc_head->trs_curr, tuple))
+			goto out;
+
+		dlist_foreach(iter, &tc_head->trs_list)
+		{
+			tcache_row_store   *trs
+				= dlist_container(tcache_row_store, chain, iter.curr);
+
+			if (tcache_update_tuple_hints_rowstore(trs, tuple))
+				break;
+		}
+	out:		
+		SpinLockRelease(&tc_head->lock);
+	}
+}
+
 /*
  * tcache_insert_tuple
  *
@@ -1173,7 +1689,10 @@ do_insert_record(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 	int			i, j, k;
 
 	Assert(TCacheHeadLockedByMe(tc_head, true));
-	Assert(tcs->nrows >= 0 && tcs->nrows < NUM_ROWS_PER_COLSTORE);
+	Assert(tcs->nrows < NUM_ROWS_PER_COLSTORE);
+	Assert(tcs->nrows == 0 ||
+		   (ItemPointerGetBlockNumber(&tuple->t_self) >= tcs->blkno_min &&
+			ItemPointerGetBlockNumber(&tuple->t_self) <= tcs->blkno_max));
 
 	heap_deform_tuple(tuple, tupdesc, values, isnull);
 
@@ -1236,19 +1755,20 @@ do_insert_record(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 			tbuf->tbuf_usage += MAXALIGN(vsize);
 		}
 	}
-	/* update ip_max and ip_min, if needed */
+
+	/*
+	 * update ip_max and ip_min, if needed
+	 */
 	if (tcs->nrows == 0)
 	{
-		tcs->ip_min = tuple->t_self;
-		tcs->ip_max = tuple->t_self;
+		tcs->blkno_min = ItemPointerGetBlockNumber(&tuple->t_self);
+		tcs->blkno_max = ItemPointerGetBlockNumber(&tuple->t_self);
 		tcs->is_sorted = true;	/* it is obviously sorted! */
 	}
 	else if (tcs->is_sorted)
 	{
-		if (ItemPointerCompare(&tuple->t_self, &tcs->ip_max) > 0)
-		{
-			tcs->ip_max = tuple->t_self;
-		}
+		if (ItemPointerCompare(&tuple->t_self, &tcs->ctids[tcs->nrows-1]) > 0)
+			tcs->blkno_max = ItemPointerGetBlockNumber(&tuple->t_self);
 		else
 		{
 			/*
@@ -1258,16 +1778,16 @@ do_insert_record(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 			 * It may take sorting again in the future.
 			 */
 			tcs->is_sorted = false;
-			if (ItemPointerCompare(&tuple->t_self, &tcs->ip_min) < 0)
-				tcs->ip_min = tuple->t_self;
+			if (ItemPointerGetBlockNumber(&tuple->t_self) < tcs->blkno_min)
+				tcs->blkno_min = ItemPointerGetBlockNumber(&tuple->t_self);
 		}
 	}
 	else
 	{
-		if (ItemPointerCompare(&tuple->t_self, &tcs->ip_min) < 0)
-			tcs->ip_min = tuple->t_self;
-		if (ItemPointerCompare(&tuple->t_self, &tcs->ip_max) > 0)
-			tcs->ip_max = tuple->t_self;
+		if (ItemPointerGetBlockNumber(&tuple->t_self) > tcs->blkno_max)
+			tcs->blkno_max = ItemPointerGetBlockNumber(&tuple->t_self);
+		if (ItemPointerGetBlockNumber(&tuple->t_self) < tcs->blkno_min)
+			tcs->blkno_mi = ItemPointerGetBlockNumber(&tuple->t_self);
 	}
 	/* all valid, so increment nrows */
 	pg_memory_barrier();
@@ -1279,10 +1799,10 @@ tcache_insert_tuple(tcache_head *tc_head,
 					tcache_node *tc_node,
 					HeapTuple tuple)
 {
-	/* NOTE: we assume exclusive lwlock is acquired */
-	Assert(TCacheHeadLockedByMe(tc_head, true));
-
 	tcache_column_store *tcs = tc_node->tcs;
+	BlockNumber		blkno_cur = ItemPointerGetBlockNumber(&tuple->t_self);
+
+	Assert(TCacheHeadLockedByMe(tc_head, true));
 
 	if (tcs->nrows == 0)
 	{
@@ -1291,7 +1811,7 @@ tcache_insert_tuple(tcache_head *tc_head,
 	}
 
 retry:
-	if (ItemPointerCompare(ctid, &tcs->ip_min) < 0)
+	if (blkno_cur < tcs->blkno_min)
 	{
 		if (!tc_node->left && tcs->nrows < NUM_ROWS_PER_COLSTORE)
 			do_insert_record(tc_head, tc_node, tuple);
@@ -1307,7 +1827,7 @@ retry:
 			tcache_rebalance_tree(tc_head, tc_node->left, &tc_node->left);
 		}
 	}
-	else if (ItemPointerCompare(ctid, &tcs->max_ctid) > 0)
+	else if (blkno_cur > tcs->blkno_max)
 	{
 		if (!tc_node->right && tcs->nrows < NUM_ROWS_PER_COLSTORE)
 			do_insert_record(tc_head, tc_node, tuple);
@@ -1333,7 +1853,7 @@ retry:
 			 * split this chunk into two portions; larger half shall be
 			 * moved to the new node and chained as right node.
 			 */
-			tcache_split_tcnode(tc_head, tc_node);
+			tcache_split_tcnode(tc_head, tc_node, &tuple->t_self);
 			goto retry;
 		}
 	}
@@ -1367,6 +1887,27 @@ tcache_build_main(tcache_head *tc_head, HeapScanDesc scan)
 	}
 }
 
+/*
+ * tcache_move_row_to_column
+ *
+ * it moves tuples on the row-store into column-store
+ *
+ *
+ */
+static void
+tcache_move_row_to_column(tcache_head *tc_head, tcache_row_store *trs)
+{
+	int		index;
+
+	for (index=0; index < trs->kern.nros; index++)
+	{
+		rs_tuple   *rs_tup
+			= kern_rowstore_get_tuple(&trs->kern, index);
+
+		if (rs_tup)
+			tcache_insert_tuple(tc_head, tc_head->tcs_root, &rs_tup->htup);
+	}
+}
 
 
 
@@ -1381,11 +1922,11 @@ tcache_begin_scan(Relation rel, Bitmapset *required)
 {
 	tcache_scandesc	   *tc_scan;
 	tcache_head		   *tc_head;
-	bool		has_wrlock = false;
+	bool				has_wrlock = false;
 
 	tc_scan = palloc0(sizeof(tcache_scandesc));
 	tc_scan->rel = rel;
-	tc_head = tcache_get(RelationGetRelid(rel), required, true);
+	tc_head = tcache_get_tchead(RelationGetRelid(rel), required, true);
 	if (!tc_head)
 		elog(ERROR, "out of shared memory");
 	pgstrom_track_object(&tc_head->stag);
@@ -1692,6 +2233,9 @@ tcache_create_tchead(Oid reloid, Bitmapset *required,
 			dlist_push_tail(&tc_head->free_list, &tc_node->chain);
 			offset += MAXALIGN(tcache_node);
 		}
+
+		/* also, allocate first empty tcache node as root */
+		tc_head->tcs_root = tcache_alloc_tcnode(tc_head);
 	}
 	PG_CATCH();
 	{
@@ -1749,6 +2293,42 @@ tcache_put_tchead(tcache_head *tc_head)
 {
 	SpinLockAcquire(&tc_common->lock);
 	tcache_put_tchead_nolock(tc_head);
+	SpinLockRelease(&tc_common->lock);
+}
+
+/*
+ * tcache_unlink_tchead(_nolock)
+ *
+ * It unlinks tcache_head from the global hash table and decrements
+ * reference counter of supplied object. This routine has to be
+ * called within same critical section that looked up this object
+ * on the hash table.
+ */
+static void
+tcache_unlink_tchead_nolock(tcache_head *tc_head)
+{
+	Assert(tc_head->chain.prev != NULL && tc_head->chain.next != NULL);
+	dlist_delete(&tc_head->chain);
+	dlist_delete(&tc_head->lru_chain);
+	memset(&tc_head->chain, 0, sizeof(dlist_node));
+	memset(&tc_head->lru_chain, 0, sizeof(dlist_node));
+
+	tcache_put_tchead_nolock(tc_head);
+}
+
+void
+tcache_unlink_tchead(tcache_head *tc_head)
+{
+	/*
+	 * NOTE: we need to check whether tc_head is still linked to the global
+	 * hash table actually, or not. If concurrent task already unlinked,
+	 * nothing to do anymore.
+	 */
+	SpinLockAcquire(&tc_common->lock);
+	if (!tc_head->chain.prev && !tc_head->chain.next)
+		tcache_unlink_tchead_nolock(tc_head);
+	else
+		tcache_put_tchead_nolock(tc_head);
 	SpinLockRelease(&tc_common->lock);
 }
 
@@ -1896,13 +2476,66 @@ pgstrom_tcache_synchronizer(PG_FUNCTION_ARGS)
 		elog(ERROR, "%s: not fired by trigger manager", __FUNCTION__);
 
 	trigdata = (TriggerData *) fcinfo->context;
-	rel = trigdata->tg_relation;
-	tuple = trigdata->tg_trigtuple;
-	newtup = trigdata->tg_newtuple;
+	tc_head = tcache_get_tchead(RelationGetRelid(trigdata->tg_relation),
+								NULL, false);
+	if (!tc_head)
+		return PointerGetDatum(trigdata->tg_newtuple);
 
+	PG_TRY();
+	{
+		TriggerEvent	tg_event = trigdata->tg_event;
 
+		/*
+		 * TODO: it may make sense if we can add this tuple into column-
+		 * store directly, in case when column-store has at least one
+		 * slot to store the new tuple.
+		 */
+		LWLockAcquire(&tc_head->lwlock, LW_SHARED);
 
+		if (TRIGGER_FIRED_AFTER(tg_event) &&
+			TRIGGER_FIRED_FOR_ROW(tg_event) &&
+			TRIGGER_FIRED_BY_INSERT(tg_event))
+		{
+			/* after insert for each row */
+			tcache_insert_tuple_row(tc_head, trigdata->tg_trigtuple);
+		}
+		else if (TRIGGER_FIRED_AFTER(tg_event) &&
+				 TRIGGER_FIRED_FOR_ROW(tg_event) &&
+				 TRIGGER_FIRED_BY_UPDATE(tg_event))
+		{
+			/* after update for each row */
+			tcache_update_tuple_hints(tc_head, trigdata->tg_trigtuple);
+			tcache_insert_tuple_row(tc_head, trigdata->tg_newtuple);
+		}
+		else if (TRIGGER_FIRED_AFTER(tg_event) &&
+				 TRIGGER_FIRED_FOR_ROW(tg_event) &&
+				 TRIGGER_FIRED_BY_DELETE(tg_event))
+        {
+			/* after delete for each row */
+			tcache_update_tuple_hints(tc_head, trigdata->tg_trigtuple);
+		}
+		else if (TRIGGER_FIRED_AFTER(tg_event) &&
+				 TRIGGER_FIRED_FOR_STATEMENT(tg_event) &&
+				 TRIGGER_FIRED_BY_TRUNCATE(tg_event))
+		{
+			/* after truncate for statement */
+			tcache_unlink_tchead(tc_head);
+		}
+		else
+			elog(ERROR, "%s: fired on unexpected context (%08x)",
+				 trigdata->tg_trigger->tgname, tg_event);
+	}
+	PG_CATCH();
+	{
+		LWLockRelease(&tcache->lwlock);
+		tcache_put_tcache(tcache);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	LWLockRelease(&tcache->lwlock);
+	tcache_put_tcache(tcache);
 
+	PG_RETURN_POINTER(result);
 }
 PG_FUNCTION_INFO_V1(pgstrom_tcache_synchronizer);
 
@@ -2170,14 +2803,14 @@ pgstrom_relation_has_synchronizer(Relation rel)
 }
 
 /*
- * tcache_vacuum_heappage
+ * tcache_vacuum_heappage_column
  *
  * callback function for each heap-page. Caller should already acquires
  * shared-lock on the tcache_head, so it is prohibited to modify tree-
  * structure. All we can do is mark particular records as junk.
  */
 static void
-tcache_vacuum_heappage(tcache_head *tc_head, Buffer buffer)
+tcache_vacuum_column_store(tcache_head *tc_head, Buffer buffer)
 {
 	BlockNumber		blknum = BufferGetBlockNumber(buffer);
 	OffsetNumber	offnum = InvalidOffsetNumber;
@@ -2186,54 +2819,135 @@ tcache_vacuum_heappage(tcache_head *tc_head, Buffer buffer)
 	tcache_node	   *tc_node;
 	tcache_column_store *tcs;
 
-next:
-	ItemPointerSet(&ctid, blknum, offnum);
-	tc_node = tcache_find_next_node(tc_head, &ctid);
-	if (tc_node)
+	tc_node = tcache_find_next_node(tc_head, blknum);
+	if (!tc_node)
+		return;
+
+	SpinLockAcquire(&tc_node->lock);
+	if (!tc_node->tcs->is_sorted)
+		tcache_sort_tcnode(tc_head, tc_node, false);
+	tcs = tcache_get_column_store(tc_node->tcs);
+	Assert(tcs->is_sorted);
+
+	ItemPointerSet(&ctid, blknum, FirstOffsetNumber);
+	index = tcache_find_next_record(tcs, &ctid);
+	if (index < 0)
 	{
-		SpinLockAcquire(&tc_node->lock);
-
-		if (!tc_node->tcs->is_sorted)
-			tcache_sort_tcnode(tc_head, tc_node, false);
-		tcs = tc_node->tcs;
-		Assert(tcs->is_sorted);
-
-		/*
-		 * find a record that larger than ctid.
-		 */
-		tcache_find_next_record(tcs, &ctid);
-
-
-
-
-
+		tcache_put_column_store(tcs);
 		SpinLockRelease(&tc_node->lock);
-
-
-		tcache_sort_tcnode(tc_head
-
-
-		tcache_column_store *tcs = tc_node->tcs;
-
-		if (!tcs->is_sorted)
-			
-
-
-
-
-
-
-
-		goto next; /* ? */
+		return;
 	}
 
-	/* walks on row-store chain */
+	while (index < tcs->nrows &&
+		   ItemPointerGetBlockNumber(&tcs->ctids[index]) == blknum)
+	{
+		offnum = ItemPointerGetOffsetNumber(&tcs->ctids[index]);
+		itemid = PageGetItemId(page, offnum);
 
+		if (!ItemIdIsNormal(itemid))
+		{
+			/* find an actual item-pointer, if redirected */
+			while (ItemIdIsRedirected(itemid))
+				itemid = PageGetItemId(page, ItemIdGetRedirect(itemid));
 
+			if (ItemIdIsNormal(itemid))
+			{
+				/* needs to update item-pointer */
+				ItemPointerSetOffsetNumber(&tcs->ctids[index],
+										   ItemIdGetOffset(itemid));
+				/*
+				 * if this offset update breaks pre-sorted array,
+				 * we have to set is_sorted = false;
+				 */
+				if (tcs->is_sorted &&
+					((index > 0 &&
+					  ItemPointerCompare(&tcs->ctids[index - 1],
+										 &tcs->ctids[index]) > 0) ||
+					 (index < tcs->nrows &&
+					  ItemPointerCompare(&tcs->ctids[index + 1],
+										 &tcs->ctids[index]) < 0)))
+					tcs->is_sorted = false;
+			}
+			else
+			{
+				/* remove this record from the column-store */
+				HeapTupleHeaderSetXmax(&tcs->theads[index],
+									   FrozenTransactionId);
+			}
+		}
+		index++;
+	}
+}
 
+/*
+ * tcache_vacuum_row_store
+ *
+ *
+ *
+ */
+static void
+do_vacuum_row_store(tcache_row_store *trs, Buffer buffer)
+{
+	BlockNumber		blknum = BufferGetBlockNumber(buffer);
+	OffsetNumber	offnum;
+	Page			page;
+	cl_uint			index;
 
+	if (blknum < trs->blkno_min || trs->blkno_max > blknum)
+		return;
 
+	page = BufferGetPage(buffer);
+	for (index=0; index < trs->kern.nrows; index++)
+	{
+		rs_tuple   *rs_tup
+			= kern_rowstore_get_tuple(&trs->kern, index);
 
+		if (!rs_tup ||
+			ItemPointerGetBlockNumber(&rs_tup->htup.t_self) != blknum)
+			continue;
+
+		offnum = ItemPointerGetOffsetNumber(&rs_tup->htup.t_self);
+		itemid = PageGetItemId(page, offnum);
+
+		if (!ItemIdIsNormal(itemid))
+		{
+			/* find an actual item-pointer, if redirected */
+			while (ItemIdIsRedirected(itemid))
+				itemid = PageGetItemId(page, ItemIdGetRedirect(itemid));
+
+			if (ItemIdIsNormal(itemid))
+			{
+				/* needs to update item-pointer */
+				ItemPointerSetOffsetNumber(&rs_tup->htup.t_self,
+										   ItemIdGetOffset(itemid));
+			}
+			else
+			{
+				/* remove this record from the column store */
+				cl_uint	   *tupoffset
+					= kern_rowstore_get_tupoffset(&trs->kern);
+
+				tupoffset[index] = 0;
+			}
+		}
+	}
+}
+
+static void
+tcache_vacuum_row_store(tcache_head *tc_head, Buffer buffer)
+{
+	dlist_iter	iter;
+
+	SpinLockAcquire(&tc_head->lock);
+	if (tc_head->trs_curr)
+		do_vacuum_row_store(tc_head->trs_curr, buffer);
+	dlist_foreach(iter, &tc_head->trs_list)
+	{
+		tcache_row_store *trs
+			= dlist_container(tcache_row_store, chain, iter.cur);
+		do_vacuum_row_store(trs, buffer);
+	}
+	SpinLockRelease(&tc_head->lock);
 }
 
 /*
@@ -2273,7 +2987,8 @@ tcache_on_page_prune(Relation relation,
 		if (!has_lwlock)
 			LWLockAcquire(&tc_head->lwlock, LW_SHARED);
 
-		tcache_vacuum_heappage(tc_head, buffer);
+		tcache_vacuum_row_store(tc_head, buffer);
+		tcache_vacuum_column_store(tc_head, buffer);
 
 		if (!has_lwlock)
 			LWLockRelease(&tc_head->lwlock);
@@ -2338,14 +3053,7 @@ tcache_on_object_access(ObjectAccessType access,
 					/* XXX - usually, only one cache per relation is linked */
 					if (tc_head->datoid == MyDatabaseId &&
 						tc_head->reloid == objectId)
-					{
-						dlist_delete(&tc_head->chain);
-						dlist_delete(&tc_head->lru_chain);
-						memset(&tc_head->chain, 0, sizeof(dlist_node));
-						memset(&tc_head->lru_chain, 0, sizeof(dlist_node));
-
-						tcache_put_tchead_nolock(tc_head);
-					}
+						tcache_unlink_tchead_nolock(tc_head);
 				}
 			}
 			PG_CATCH();
@@ -2374,6 +3082,7 @@ static void
 pgstrom_columnizer_main(Datum index)
 {
 	tcache_columnizer  *columnizer;
+	int		rc;
 
 	Assert(tc_common != NULL);
 	Assert(index < num_columnizers);
@@ -2386,6 +3095,77 @@ pgstrom_columnizer_main(Datum index)
 	SpinLockAcquire(&tc_common->lock);
 	dlist_push_tail(&tc_common->inactive_list, &columnizer->chain);
 	SpinLockRelease(&tc_common->lock);
+
+	while (true)
+	{
+		tcache_head		   *tc_head = NULL;
+		tcache_node		   *tc_node;
+		tcache_row_store   *trs;
+		dlist_node	*dnode;
+
+		rc = WaitLatch(&MyProc->procLatch,
+					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+					   15 * 1000);	/* wake up per 15s at least */
+		if (rc & WL_POSTMASTER_DEATH)
+			return;
+
+		SpinLockAcquire(&tc_common->lock);
+		if (!dlist_is_empty(&tc_common->pending_list))
+		{
+			dnode = dlist_pop_head_node(&tc_common->pending_list);
+			tc_head = dlist_container(tcache_head, pending_chain, dnode);
+			tc_head->refcnt++;
+			columnizer->datoid = tc_head->datoid;
+			columnizer->reloid = tc_head->reloid;
+		}
+		SpinLockRelease(&tc_common->lock);
+
+		if (!tc_head)
+			continue;
+
+		/*
+		 * TODO: add error handler routine
+		 */
+		LWLockAcquire(&tc_head->lwlock, LW_EXCLUSIVE);
+		// SpinLockAcquire(&tc_head->lock);	/* probably unneeded */
+		PG_TRY();
+		{
+			if (!dlist_is_empty(&tc_head->trs_list))
+			{
+				dnode = dlist_pop_head_node(&tc_head->trs_list);
+				trs = dlist_container(tcache_row_store, pending_chain, dnode);
+				memset(&trs->pending_chain, 0, sizeof(dlist_node));
+
+				/* XXX - move row store to column store */
+
+				tcache_put_row_store(trs);
+
+			}
+			else if (!dlist_is_empty(&tc_head->pending_list))
+			{
+				dnode = dlist_pop_head_node(&tc_head->pending_list);
+				tc_node = dlist_container(tcache_node, chain, dnode);
+				memset(&tc_node->chain, 0, sizeof(dlist_node));
+
+				tcache_compaction_tcnode(tc_head, tc_node);
+				tcache_try_merge_tcnode(tc_head, tc_node);
+			}
+		}
+		PG_CATCH();
+		{
+			LWLockRelease(&tc_head->lwlock);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+
+		/* OK, release this tcache_head */
+		SpinLockAcquire(&tc_common->lock);
+		columnizer->datoid = InvalidOid;
+		columnizer->reloid = InvalidOid;
+		tcache_put_tchead_nolock(tc_head);
+		SpinLockRelease(&tc_common->lock);
+	}
+
 
 	/* pending now */
 

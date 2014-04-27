@@ -277,12 +277,14 @@ struct tcache_head;
  */
 typedef struct {
 	StromTag		stag;	/* StromTag_TCacheRowNode */
-	slock_t			lock;
+	slock_t			refcnt_lock;
 	int				refcnt;
 	dlist_node		chain;
-	ItemPointerData	ip_max;
-	ItemPointerData	ip_min;
-	kern_row_store	krs;
+	cl_uint			usage;
+	BlockNumber		blkno_max;
+	BlockNumber		blkno_min;
+	kern_column_store *kcs_head; /* template of in-kernel column store */
+	kern_row_store	kern;
 } tcache_row_store;
 
 /*
@@ -306,12 +308,12 @@ typedef struct {
 	StromTag		stag;	/* StromTag_TCacheRowNode */
 	slock_t			refcnt_lock;
 	int				refcnt;
-	int				ncols;	/* copy of tc_head->ncols */
-	int				nrows;	/* number of rows being cached */
-	int				njunks;	/* number of junk rows to be removed later */
+	uint32			ncols;	/* copy of tc_head->ncols */
+	uint32			nrows;	/* number of rows being cached */
+	uint32			njunks;	/* number of junk rows to be removed later */
 	bool			is_sorted;
-	ItemPointerData	ip_max;
-	ItemPointerData	ip_min;
+	BlockNumber		blkno_max;
+	BlockNumber		blkno_min;
 	ItemPointerData		*ctids;
 	HeapTupleHeaderData	*theads;
 	struct {
@@ -382,8 +384,9 @@ typedef struct {
 	int				state;
 	dlist_head		free_list;	/* list of free tcache_node */
 	dlist_head		block_list;	/* list of blocks of tcache_node */
-	dlist_head		pending_list; /* list of columnizer pending tcahe_node */
-	dlist_head		trs_list;	/* list of tcache_row_store */
+	dlist_head		pending_list; /* list of pending tcahe_node */
+	dlist_head		trs_list; /* list of pending tcache_row_store */
+	tcache_row_store *trs_curr;	/* current available row-store */
 
 	/* fields below are read-only once constructed (no lock needed) */
 	Oid			datoid;		/* database oid of this cache */
