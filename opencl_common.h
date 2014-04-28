@@ -506,7 +506,7 @@ kern_rowstore_get_tuple(__global kern_row_store *krs, cl_uint rindex)
 
 	if (rindex >= krs->nrows)
 		return NULL;
-	p_offset = (__global cl_uint *)(&krs->colmeta[krs->ncols]);
+	p_offset = kern_rowstore_get_offset(krs);
 	if (p_offset[rindex] == 0)
 		return NULL;
 	return (__global rs_tuple *)((uintptr_t)krs + p_offset[rindex]);

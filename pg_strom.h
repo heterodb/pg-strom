@@ -346,10 +346,10 @@ typedef struct tcache_node tcache_node;
 /*
  * tcache_head - a cache entry of individual relations
  */
-#define TC_STATE_FREE			0
-#define TC_STATE_NOT_BUILT		1
-#define TC_STATE_NOW_BUILD		2
-#define TC_STATE_READY			3
+#define TCACHE_STATE_FREE			0
+#define TCACHE_STATE_NOT_BUILT		1
+#define TCACHE_STATE_NOW_BUILD		2
+#define TCACHE_STATE_READY			3
 
 typedef struct {
 	StromTag	stag;			/* StromTag_TCacheHead */
@@ -416,9 +416,9 @@ typedef struct {
 	Relation		rel;
 	HeapScanDesc	heapscan;	/* valid, if state == TC_STATE_NOW_BUILD */
 	tcache_head	   *tc_head;
-	tcache_column_store	*curr_tcs;
-	tcache_row_store	*curr_trs;
-	int				curr_index;
+	tcache_column_store	*tcs_curr;
+	tcache_row_store	*trs_curr;
+	int				index_curr;
 } tcache_scandesc;
 
 /*
@@ -581,10 +581,37 @@ extern void pgstrom_init_gpuscan(void);
 /*
  * tcache.c
  */
-extern StromTag *pgstrom_tcache_next_chunk();
-extern void pgstrom_put_tcache(tcache_head *tc_head);
-extern tcache_head *pgstrom_get_tcache(Oid reloid, Bitmapset *required,
-									   bool create_on_demand);
+extern tcache_scandesc *tcache_begin_scan(Relation rel, Bitmapset *required);
+extern StromTag *tcache_scan_next(tcache_scandesc *tc_scan);
+extern StromTag *tcache_scan_prev(tcache_scandesc *tc_scan);
+extern void tcache_end_scan(tcache_scandesc *tc_scan);
+extern void tcache_rescan(tcache_scandesc *tc_scan);
+
+
+extern tcache_head *tcache_get_tchead(Oid reloid, Bitmapset *required,
+									  bool create_on_demand);
+extern void tcache_put_tchead(tcache_head *tc_head);
+
+
+extern tcache_row_store *tcache_create_row_store(TupleDesc tupdesc,
+												 int ncols,
+												 AttrNumber *i_cached);
+extern tcache_row_store *tcache_get_row_store(tcache_row_store *trs);
+extern void tcache_put_row_store(tcache_row_store *trs);
+extern bool tcache_row_store_insert_tuple(tcache_row_store *trs,
+										  HeapTuple tuple);
+
+extern bool pgstrom_relation_has_synchronizer(Relation rel);
+extern Datum pgstrom_tcache_synchronizer(PG_FUNCTION_ARGS);
+
+
+
+
+
+
+
+
+
 extern void pgstrom_init_tcache(void);
 
 
