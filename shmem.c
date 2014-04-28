@@ -209,11 +209,14 @@ pgstrom_shmem_zone_block_alloc(shmem_zone *zone,
 	shmem_block	*block;
 	shmem_body	*body;
 	dlist_node	*dnode;
-	int		shift = find_least_pot(size + sizeof(cl_uint));
+	Size	total_size;
+	int		shift;
 	int		index;
 	void   *address;
 	int		i;
 
+	total_size = size + offsetof(shmem_body, data[0]) + sizeof(cl_uint);
+	shift = find_least_pot(total_size);
 	if (dlist_is_empty(&zone->free_list[shift]))
 	{
 		if (!pgstrom_shmem_zone_block_split(zone, shift+1))
@@ -253,21 +256,24 @@ pgstrom_shmem_zone_block_alloc(shmem_zone *zone,
 }
 
 static void
-pgstrom_shmem_zone_block_free(shmem_zone *zone, void *address)
+pgstrom_shmem_zone_block_free(shmem_zone *zone, shmem_body *body)
 {
 	shmem_block	   *block;
 	long			index;
 	long			shift;
 
-	Assert(ADDRESS_IN_SHMEM_ZONE(zone, address));
+	Assert(ADDRESS_IN_SHMEM_ZONE(zone, body));
 
-	index = ((Size)address - (Size)zone->block_baseaddr) / SHMEM_BLOCKSZ;
+	index = ((uintptr_t)body -
+			 (uintptr_t)zone->block_baseaddr) / SHMEM_BLOCKSZ;
 	block = &zone->blocks[index];
 	Assert(BLOCK_IS_ACTIVE(block));
 	/* detect overrun */
-	Assert(*((cl_uint *)((uintptr_t)address +
+	Assert(*((cl_uint *)((uintptr_t)body->data +
 						 block->blocksz)) == SHMEM_BLOCK_MAGIC);
-	shift = find_least_pot(block->blocksz + sizeof(cl_uint));
+	shift = find_least_pot(block->blocksz +
+						   offsetof(shmem_body, data[0]) +
+						   sizeof(cl_uint));
 	Assert(shift <= SHMEM_BLOCKSZ_BITS_RANGE);
 	Assert((index & ~((1UL << shift) - 1)) == index);
 
@@ -436,7 +442,7 @@ pgstrom_shmem_sanitycheck(const void *address)
 	body = (shmem_body *)((char *)address -
 						  offsetof(shmem_body, data[0]));
 	Assert((uintptr_t)body % SHMEM_BLOCKSZ == 0);
-	Assert(body->magic == SHMEM_BLOCK_MAGIC);
+	Assert(body->magic == SHMEM_BODY_MAGIC);
 
 	zone_index = ((uintptr_t)body - (uintptr_t)zone_baseaddr) / zone_length;
 	Assert(zone_index >= 0 && zone_index < pgstrom_shmem_head->num_zones);
