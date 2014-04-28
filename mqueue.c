@@ -40,7 +40,7 @@ static struct {
 
 /* number of message queues per block */
 #define MQUEUES_PER_BLOCK								\
-	((SHMEM_BLOCKSZ - sizeof(cl_uint)					\
+	((SHMEM_BLOCKSZ - SHMEM_ALLOC_COST					\
 	  - sizeof(dlist_node))	/ sizeof(pgstrom_queue))
 
 /*

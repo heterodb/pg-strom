@@ -210,7 +210,7 @@ typedef struct {
  * NOTE: shmem.c put a magic number to detect shared memory usage overrun.
  * So, we have a little adjustment for this padding.
  */
-#define ROWSTORE_DEFAULT_SIZE	(8 * 1024 * 1024 - sizeof(cl_uint))
+#define ROWSTORE_DEFAULT_SIZE	(8 * 1024 * 1024 - SHMEM_ALLOC_COST)
 
 /*
  * Column-format data store
@@ -402,11 +402,11 @@ typedef struct {
 } tcache_head;
 
 #define TCACHE_NODE_PER_BLOCK(row_natts, col_natts)						\
-	((SHMEM_BLOCKSZ - sizeof(cl_uint) -									\
+	((SHMEM_BLOCKSZ - SHMEM_ALLOC_COST -								\
 	  MAXALIGN(offsetof(tcache_head, attrs[(row_natts)])) -				\
 	  MAXALIGN(sizeof(AttrNumber) * (col_natts))) / sizeof(tcache_node))
 #define TCACHE_NODE_PER_BLOCK_BARE					\
-	((SHMEM_BLOCKSZ - sizeof(cl_uint)				\
+	((SHMEM_BLOCKSZ - SHMEM_ALLOC_COST				\
 	  - sizeof(dlist_node)) / sizeof(tcache_node))
 
 /*
@@ -437,9 +437,16 @@ typedef struct {
 #define SHMEM_BLOCKSZ_BITS_RANGE	\
 	(SHMEM_BLOCKSZ_BITS_MAX - SHMEM_BLOCKSZ_BITS)
 #define SHMEM_BLOCKSZ			(1UL << SHMEM_BLOCKSZ_BITS)
+#define SHMEM_ALLOC_COST		48
 
-extern void *pgstrom_shmem_alloc(Size size);
-extern void *pgstrom_shmem_alloc_alap(Size required, Size *allocated);
+extern void *__pgstrom_shmem_alloc(const char *filename, int lineno,
+								   Size size);
+extern void *__pgstrom_shmem_alloc_alap(const char *filename, int lineno,
+										Size required, Size *allocated);
+#define pgstrom_shmem_alloc(size)					\
+	__pgstrom_shmem_alloc(__FILE__,__LINE__,(size))
+#define pgstrom_shmem_alloc_alap(size,allocated)	\
+	__pgstrom_shmem_alloc_alap(__FILE__,__LINE__,(size),(allocated))
 extern void pgstrom_shmem_free(void *address);
 extern bool pgstrom_shmem_sanitycheck(const void *address);
 extern void pgstrom_setup_shmem(Size zone_length,
@@ -448,6 +455,8 @@ extern void pgstrom_setup_shmem(Size zone_length,
 extern void pgstrom_init_shmem(void);
 
 extern Datum pgstrom_shmem_info(PG_FUNCTION_ARGS);
+extern Datum pgstrom_shmem_active_info(PG_FUNCTION_ARGS);
+
 
 /*
  * mqueue.c

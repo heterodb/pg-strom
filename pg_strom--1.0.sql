@@ -12,6 +12,21 @@ CREATE FUNCTION pgstrom_shmem_info()
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
 
+CREATE TYPE __pgstrom_shmem_active_info AS (
+  zone      int4,
+  address   int8,
+  size      int4,
+  owner     int4,
+  location  text,
+  tracked   bool,
+  broken    bool,
+  overrun   bool
+);
+CREATE FUNCTION pgstrom_shmem_active_info()
+  RETURNS SETOF __pgstrom_shmem_active_info
+  AS 'MODULE_PATHNAME'
+  LANGUAGE C STRICT;
+
 CREATE TYPE __pgstrom_opencl_device_info AS (
   dnum      int4,
   pnum		int4,

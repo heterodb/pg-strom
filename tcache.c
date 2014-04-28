@@ -664,7 +664,7 @@ tcache_alloc_tcnode(tcache_head *tc_head)
 			dlist_node *block;
 			int			i;
 
-			block = pgstrom_shmem_alloc(SHMEM_BLOCKSZ - sizeof(cl_uint));
+			block = pgstrom_shmem_alloc(SHMEM_BLOCKSZ - SHMEM_ALLOC_COST);
 			if (!block)
 				elog(ERROR, "out of shared memory");
 			dlist_push_tail(&tc_head->block_list, block);

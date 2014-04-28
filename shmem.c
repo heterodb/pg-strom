@@ -82,6 +82,17 @@ typedef struct
 	shmem_zone *zones[FLEXIBLE_ARRAY_MEMBER];
 } shmem_head;
 
+typedef struct {
+	uint32		magic;			/* = SHMEM_BODY_MAGIC */
+	pid_t		owner;
+	const char *filename;
+	uint32		lineno;
+	dlist_node	restrack;		/* for local resource tracker */
+	Datum		data[FLEXIBLE_ARRAY_MEMBER];
+} shmem_body;
+/* XXX - we need to ensure SHMEM_ALLOC_COST is enough large */
+
+#define SHMEM_BODY_MAGIC		0xabadcafe
 #define SHMEM_BLOCK_MAGIC		0xdeadbeaf
 
 #define ADDRESS_IN_SHMEM(address)										\
@@ -192,9 +203,11 @@ pgstrom_shmem_zone_block_split(shmem_zone *zone, int shift)
 }
 
 static void *
-pgstrom_shmem_zone_block_alloc(shmem_zone *zone, Size size)
+pgstrom_shmem_zone_block_alloc(shmem_zone *zone,
+							   const char *filename, int lineno, Size size)
 {
 	shmem_block	*block;
+	shmem_body	*body;
 	dlist_node	*dnode;
 	int		shift = find_least_pot(size + sizeof(cl_uint));
 	int		index;
@@ -220,9 +233,18 @@ pgstrom_shmem_zone_block_alloc(shmem_zone *zone, Size size)
 		Assert(!BLOCK_IS_ACTIVE(block+i) && !BLOCK_IS_FREE(block+i));
 
 	index = block - &zone->blocks[0];
-	address = (void *)((Size)zone->block_baseaddr + index * SHMEM_BLOCKSZ);
+	body = (shmem_body *)((char *)zone->block_baseaddr +
+						  index * SHMEM_BLOCKSZ);
 	zone->num_free[shift]--;
 	zone->num_active[shift]++;
+
+	/* tracking info */
+	body->magic = SHMEM_BODY_MAGIC;
+	body->owner = getpid();
+	body->filename = filename;	/* must be static cstring! */
+	body->lineno = lineno;
+	memset(&body->restrack, 0, sizeof(dlist_node));
+	address = (void *)body->data;
 
 	/* to detect overrun */
 	*((cl_uint *)((uintptr_t)address + size)) = SHMEM_BLOCK_MAGIC;
@@ -300,7 +322,7 @@ pgstrom_shmem_zone_block_free(shmem_zone *zone, void *address)
  * it goes into another zone to allocate memory.
  */
 void *
-pgstrom_shmem_alloc(Size size)
+__pgstrom_shmem_alloc(const char *filename, int lineno, Size size)
 {
 	static int	zone_index = 0;
 	int			start;
@@ -331,7 +353,7 @@ pgstrom_shmem_alloc(Size size)
 		zone = pgstrom_shmem_head->zones[zone_index];
 		SpinLockAcquire(&zone->lock);
 
-		address = pgstrom_shmem_zone_block_alloc(zone, size);
+		address = pgstrom_shmem_zone_block_alloc(zone, filename, lineno, size);
 
 		SpinLockRelease(&zone->lock);
 
@@ -355,13 +377,16 @@ pgstrom_shmem_alloc(Size size)
  * This function round up the required size into the best-fit one.
  */
 void *
-pgstrom_shmem_alloc_alap(Size required, Size *allocated)
+__pgstrom_shmem_alloc_alap(const char *filename, int lineno,
+						   Size required, Size *allocated)
 {
 	int		shift = find_least_pot(required + sizeof(cl_uint));
 	void   *result;
 
-	required = (1UL << (shift + SHMEM_BLOCKSZ_BITS)) - sizeof(cl_uint);
-	result = pgstrom_shmem_alloc(required);
+	required = (1UL << (shift + SHMEM_BLOCKSZ_BITS))
+		- offsetof(shmem_body, data[0])
+		- sizeof(cl_uint);
+	result = __pgstrom_shmem_alloc(filename, lineno, required);
 	if (result && allocated)
 		*allocated = required;
 	return result;
@@ -371,18 +396,21 @@ void
 pgstrom_shmem_free(void *address)
 {
 	shmem_zone *zone;
+	shmem_body *body;
 	void	   *zone_baseaddr = pgstrom_shmem_head->zone_baseaddr;
 	Size		zone_length = pgstrom_shmem_head->zone_length;
 	int			zone_index;
 
-	Assert((Size)address % SHMEM_BLOCKSZ == 0);
+	Assert(pgstrom_shmem_sanitycheck(address));
+	body = (shmem_body *)((char *)address -
+						  offsetof(shmem_body, data[0]));
 
-	zone_index = ((Size)address - (Size)zone_baseaddr) / zone_length;
+	zone_index = ((uintptr_t)body - (uintptr_t)zone_baseaddr) / zone_length;
 	Assert(zone_index >= 0 && zone_index < pgstrom_shmem_head->num_zones);
 
 	zone = pgstrom_shmem_head->zones[zone_index];
 	SpinLockAcquire(&zone->lock);
-	pgstrom_shmem_zone_block_free(zone, address);
+	pgstrom_shmem_zone_block_free(zone, body);
 	SpinLockRelease(&zone->lock);
 }
 
@@ -398,26 +426,30 @@ pgstrom_shmem_sanitycheck(const void *address)
 {
 	shmem_zone	   *zone;
 	shmem_block	   *block;
+	shmem_body	   *body;
 	void		   *zone_baseaddr = pgstrom_shmem_head->zone_baseaddr;
 	Size			zone_length = pgstrom_shmem_head->zone_length;
 	int				zone_index;
 	int				block_index;
 	cl_uint		   *p_magic;
 
-	Assert((Size)address % SHMEM_BLOCKSZ == 0);
+	body = (shmem_body *)((char *)address -
+						  offsetof(shmem_body, data[0]));
+	Assert((uintptr_t)body % SHMEM_BLOCKSZ == 0);
+	Assert(body->magic == SHMEM_BLOCK_MAGIC);
 
-	zone_index = ((Size)address - (Size)zone_baseaddr) / zone_length;
+	zone_index = ((uintptr_t)body - (uintptr_t)zone_baseaddr) / zone_length;
 	Assert(zone_index >= 0 && zone_index < pgstrom_shmem_head->num_zones);
 
 	zone = pgstrom_shmem_head->zones[zone_index];
-	Assert(ADDRESS_IN_SHMEM_ZONE(zone, address));
+	Assert(ADDRESS_IN_SHMEM_ZONE(zone, body));
 
-	block_index = ((Size)address -
-				   (Size)zone->block_baseaddr) / SHMEM_BLOCKSZ;
+	block_index = ((uintptr_t)body -
+				   (uintptr_t)zone->block_baseaddr) / SHMEM_BLOCKSZ;
 	block = &zone->blocks[block_index];
 	Assert(BLOCK_IS_ACTIVE(block));
 
-	p_magic = (cl_uint *)((uintptr_t)address + block->blocksz);
+	p_magic = (cl_uint *)((char *)address + block->blocksz);
 
 	return (*p_magic == SHMEM_BLOCK_MAGIC ? true : false);
 }
@@ -583,6 +615,159 @@ pgstrom_shmem_info(PG_FUNCTION_ARGS)
 	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
 }
 PG_FUNCTION_INFO_V1(pgstrom_shmem_info);
+
+typedef struct
+{
+	int			zone;
+	void	   *address;
+	cl_uint		size;
+	pid_t		owner;
+	const char *filename;
+	int			lineno;
+	bool		tracked;
+	bool		broken;
+	bool		overrun;
+} shmem_active_info;
+
+static List *
+collect_shmem_active_info(shmem_zone *zone, int zone_index)
+{
+	List	   *results = NIL;
+	shmem_body *body;
+	long		i;
+
+	i = 0;
+	while (i < zone->num_blocks)
+	{
+		shmem_block	*block = &zone->blocks[i];
+
+		if (BLOCK_IS_ACTIVE(block))
+		{
+			shmem_active_info *sainfo;
+			cl_uint	   *p_magic;
+			int			nshift = find_least_pot(block->blocksz +
+												SHMEM_ALLOC_COST);
+
+			body = (shmem_body *)((char *)zone->block_baseaddr +
+								  i * SHMEM_BLOCKSZ);
+			sainfo = palloc0(sizeof(shmem_active_info));
+			sainfo->zone = zone_index;
+			sainfo->address = body->data;
+			sainfo->size = block->blocksz;
+			sainfo->owner = body->owner;
+			sainfo->filename = body->filename;
+			sainfo->lineno = body->lineno;
+			sainfo->tracked = !(!body->restrack.next || !body->restrack.prev);
+			if (body->magic != SHMEM_BODY_MAGIC)
+				sainfo->broken = true;
+			p_magic = (cl_uint *)((char *)body->data + block->blocksz);
+			if (*p_magic != SHMEM_BLOCK_MAGIC)
+				sainfo->overrun = true;
+			results = lappend(results, sainfo);
+
+			Assert(nshift <= SHMEM_BLOCKSZ_BITS_RANGE);
+			i += (1 << nshift);
+		}
+		else if (BLOCK_IS_FREE(block))
+		{
+			int		nshift = find_least_pot(block->blocksz);
+
+			Assert(nshift <= SHMEM_BLOCKSZ_BITS_RANGE);
+			i += (1 << nshift);
+		}
+		else
+			elog(ERROR, "block %ld is neither active nor free", i);
+	}
+	return results;
+}
+
+Datum
+pgstrom_shmem_active_info(PG_FUNCTION_ARGS)
+{
+	FuncCallContext	   *fncxt;
+	shmem_active_info  *sainfo;
+	HeapTuple	tuple;
+	Datum		values[8];
+	bool		isnull[8];
+	char		buf[256];
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		TupleDesc		tupdesc;
+		MemoryContext	oldcxt;
+		shmem_zone	   *zone;
+		List		   *active_info_list = NIL;
+		int				i;
+
+		fncxt = SRF_FIRSTCALL_INIT();
+		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(8, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "zone",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "address",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "size",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "owner",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "location",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 6, "tracked",
+						   BOOLOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 7, "broken",
+						   BOOLOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 8, "overrun",
+						   BOOLOID, -1, 0);
+		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
+
+		for (i=0; i < pgstrom_shmem_head->num_zones; i++)
+		{
+			zone = pgstrom_shmem_head->zones[i];
+
+			SpinLockAcquire(&zone->lock);
+			PG_TRY();
+			{
+				List   *temp = collect_shmem_active_info(zone, i);
+
+				active_info_list = list_concat(active_info_list, temp);
+			}
+			PG_CATCH();
+			{
+				SpinLockRelease(&zone->lock);
+				PG_RE_THROW();
+			}
+			PG_END_TRY();
+			SpinLockRelease(&zone->lock);
+		}
+		fncxt->user_fctx = active_info_list;
+
+		MemoryContextSwitchTo(oldcxt);
+	}
+	fncxt = SRF_PERCALL_SETUP();
+
+	if (fncxt->user_fctx == NIL)
+		SRF_RETURN_DONE(fncxt);
+
+	sainfo = linitial((List *) fncxt->user_fctx);
+	fncxt->user_fctx = list_delete_first((List *)fncxt->user_fctx);
+
+	memset(isnull, 0, sizeof(isnull));
+	values[0] = Int32GetDatum(sainfo->zone);
+	values[1] = Int64GetDatum(sainfo->address);
+	values[2] = Int32GetDatum(sainfo->size);
+	values[3] = Int32GetDatum(sainfo->owner);
+	snprintf(buf, sizeof(buf), "%s:%d", sainfo->filename, sainfo->lineno);
+	values[4] = CStringGetTextDatum(buf);
+	values[5] = BoolGetDatum(sainfo->tracked);
+	values[6] = BoolGetDatum(sainfo->broken);
+	values[7] = BoolGetDatum(sainfo->overrun);
+
+	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
+
+	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
+}
+PG_FUNCTION_INFO_V1(pgstrom_shmem_active_info);
 
 void
 pgstrom_setup_shmem(Size zone_length,
