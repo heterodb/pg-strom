@@ -233,58 +233,56 @@ memcopy(void *dest, void *source, Size len)
 }
 
 static inline void
-bitmapcopy(uint8 *dstmap, int dindex, uint8 *srcmap, int sindex, int nbits)
+bitmapcopy(uint8 *dstmap, size_t dindex,
+		   uint8 *srcmap, size_t sindex, size_t nbits)
 {
-	int		width = sizeof(Datum) * BITS_PER_BYTE;
-	uint8  *temp;
-	Datum  *dst;
-	Datum  *src;
-	int		dmod;
-	int		smod;
-	int		i, j;
+    int     width = sizeof(Datum) * BITS_PER_BYTE;
+    uint8  *temp;
+    Datum  *dst;
+    Datum  *src;
+    int		dmod;
+	int     smod;
+    int     i, j;
 
-	/* adjust alignment (destination) */
-	temp = dstmap + dindex / BITS_PER_BYTE;
-	dst = (Datum *)TYPEALIGN_DOWN(sizeof(Datum), temp);
-	dmod = ((uintptr_t)temp -
-			(uintptr_t)dst) * BITS_PER_BYTE + dindex % BITS_PER_BYTE;
-	Assert(dmod < width);
+    /* adjust alignment (destination) */
+    temp = dstmap + dindex / BITS_PER_BYTE;
+    dst = (Datum *)TYPEALIGN_DOWN(sizeof(Datum), temp);
+    dmod = ((uintptr_t)temp -
+            (uintptr_t)dst) * BITS_PER_BYTE + dindex % BITS_PER_BYTE;
+    Assert(dmod < width);
 
-	/* adjust alignment (source) */
-	temp = srcmap + sindex / BITS_PER_BYTE;
-	src = (Datum *)TYPEALIGN_DOWN(sizeof(Datum), temp);
-	smod = ((uintptr_t)temp -
+    /* adjust alignment (source) */
+    temp = srcmap + sindex / BITS_PER_BYTE;
+    src = (Datum *)TYPEALIGN_DOWN(sizeof(Datum), temp);
+    smod = ((uintptr_t)temp -
 			(uintptr_t)src) * BITS_PER_BYTE + sindex % BITS_PER_BYTE;
 	Assert(smod < width);
 
-	/* ok, copy the bitmap */
-	for (i=0, j=0; j < nbits; i++, j += (i==0 ? width - dmod : width))
-	{
-		Datum	mask1 = (1UL << dmod) - 1;	/* first dmod bits are 1 */
-		Datum	mask2 = (j + width < nbits ? 0 : ~((1UL << (nbits - j)) - 1));
-		Datum	bitmap = 0;
+	nbits += dmod;
 
-		/* mask1 set 1 on the first lower 'dmod' bits */
-		if (i==0)
-			bitmap |= dst[i] & mask1;
+    /* ok, copy the bitmap */
+    for (i=0, j=0; j < nbits; i++, j += width)
+    {
+		Datum	mask;
+		Datum	bitmap;
+
+		mask = ((i==0 ? ((1UL << dmod) - 1) : 0) |
+				(j + width > nbits ? ~((1UL << (nbits - j)) - 1) : 0));
+		if (dmod > smod)
+		{
+			bitmap = src[i] << (dmod - smod);
+			if (i > 0)
+				bitmap |= src[i-1] >> (width - (dmod - smod));
+		}
 		else
-			bitmap |= (src[i-1] >> (width - dmod)) & mask1;
-
-		if (smod > dmod)
-			bitmap |= (src[i] >> (smod - dmod)) & ~mask1;
-		else
-			bitmap |= (src[i] << (dmod - smod)) & ~mask1;
-
-		dst[i] = (bitmap & ~mask2) | (dst[i] & mask2);
+		{
+			bitmap = (src[i] >> (smod - dmod));
+			if (smod - dmod > 0)
+				bitmap |= (src[i+1] << (width - (smod - dmod)));
+		}
+		dst[i] = (dst[i] & mask) | (bitmap & ~mask);
 	}
 }
-
-
-
-
-
-
-
 
 /*
  * 
