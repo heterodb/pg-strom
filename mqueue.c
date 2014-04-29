@@ -103,7 +103,8 @@ pgstrom_create_queue(void)
 				pgstrom_shmem_free(block);
 				elog(ERROR, "failed on initialization of message queue");
 			}
-			mqueues[i].stag = StromTag_MsgQueue;
+			mqueues[i].sobj.stag = StromTag_MsgQueue;
+			memset(&mqueues[i].sobj.tracker, 0, sizeof(dlist_node));
 			dlist_push_tail(&mqueue_shm_values->free_queue_list,
 							&mqueues[i].chain);
 		}
@@ -116,7 +117,7 @@ pgstrom_create_queue(void)
 	mqueue = dlist_container(pgstrom_queue, chain, dnode);
 
 	/* mark it as active one */
-	Assert(mqueue->stag == StromTag_MsgQueue);
+	Assert(StromTagIs(mqueue, MsgQueue));
 	memset(&mqueue->chain, 0, sizeof(dlist_node));
 	mqueue->owner = getpid();
 	mqueue->refcnt = 1;
@@ -685,7 +686,8 @@ pgstrom_startup_mqueue(void)
 
 	mqueue = &mqueue_shm_values->serv_mqueue;
 	memset(mqueue, 0, sizeof(pgstrom_queue));
-	mqueue->stag = StromTag_MsgQueue;
+	mqueue->sobj.stag = StromTag_MsgQueue;
+	memset(&mqueue->sobj.tracker, 0, sizeof(dlist_node));
 	mqueue->owner = -1;
 	if (pthread_mutex_init(&mqueue->lock, &mutex_attr) != 0)
 		elog(ERROR, "failed on pthread_mutex_init for server mqueue");

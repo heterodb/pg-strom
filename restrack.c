@@ -12,6 +12,7 @@
  */
 #include "postgres.h"
 #include "utils/memutils.h"
+#include "utils/pg_crc.h"
 #include "utils/resowner.h"
 #include "pg_strom.h"
 
@@ -28,27 +29,75 @@
 typedef struct {
 	dlist_node		chain;
 	ResourceOwner	owner;
-	StromTag	   *object;
+	ResourceReleasePhase phase;
+	dlist_head		objects;
 } tracker_entry;
 
-#define RESTRACK_HASHSZ		1051
-#if SIZEOF_VOID_P < 8
-#define tracker_hash(msg)	(((uintptr_t)msg >> 2) % RESTRACK_HASHSZ)
-#else
-#define tracker_hash(msg)	(((uintptr_t)msg >> 3) % RESTRACK_HASHSZ)
-#endif
+#define RESTRACK_HASHSZ		100
 
-#define IS_TRACKABLE_OBJECT(stag)					\
-	(*((StromTag *)stag) == StromTag_MsgQueue ||	\
-	 *((StromTag *)stag) == StromTag_DevProgram ||	\
-	 *((StromTag *)stag) == StromTag_GpuScan ||		\
-	 *((StromTag *)stag) == StromTag_GpuSort ||		\
-	 *((StromTag *)stag) == StromTag_HashJoin||		\
-	 *((StromTag *)stag) == StromTag_TestMessage)
+#define IS_TRACKABLE_OBJECT(sobject)				\
+	((sobject)->stag == StromTag_MsgQueue ||		\
+	 (sobject)->stag == StromTag_DevProgram ||		\
+	 (sobject)->stag == StromTag_GpuScan ||			\
+	 (sobject)->stag == StromTag_GpuSort ||			\
+	 (sobject)->stag == StromTag_HashJoin)
 
 static dlist_head		tracker_free;
 static dlist_head		tracker_slot[RESTRACK_HASHSZ];
 static MemoryContext	ResTrackContext;
+
+static inline int
+restrack_hash_index(ResourceOwner resource_owner,
+					ResourceReleasePhase phase)
+{
+	pg_crc32	crc;
+
+	INIT_CRC32(crc);
+	COMP_CRC32(crc, resource_owner, sizeof(ResourceOwner));
+	COMP_CRC32(crc, &phase, sizeof(ResourceReleasePhase));
+	FIN_CRC32(crc);
+
+    return crc % RESTRACK_HASHSZ;
+}
+
+static tracker_entry *
+restrack_get_entry(ResourceOwner resource_owner,
+				   ResourceReleasePhase phase,
+				   bool create_on_demand)
+{
+	tracker_entry  *entry = NULL;
+	dlist_iter		iter;
+	int		i;
+
+	i = restrack_hash_index(resource_owner, phase);
+	dlist_foreach(iter, &tracker_slot[i])
+	{
+		entry = dlist_container(tracker_entry, chain, iter.cur);
+
+		if (entry->owner == CurrentResourceOwner &&
+			entry->phase == phase)
+			return entry;
+	}
+	if (!create_on_demand)
+		return NULL;
+
+	if (dlist_is_empty(&tracker_free))
+	{
+		entry = MemoryContextAllocZero(ResTrackContext,
+									   sizeof(tracker_entry));
+	}
+	else
+	{
+		dlist_node *dnode = dlist_pop_head_node(&tracker_free);
+		entry = dlist_container(tracker_entry, chain, dnode);
+	}
+	dlist_push_head(&tracker_slot[i], &entry->chain);
+	entry->owner = resource_owner;
+	entry->phase = phase;
+	dlist_init(&entry->objects);
+
+	return entry;
+}
 
 static void
 pgstrom_restrack_callback(ResourceReleasePhase phase,
@@ -56,69 +105,53 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 						  bool is_toplevel,
 						  void *arg)
 {
-	tracker_entry  *entry;
-	int		i;
+	tracker_entry  *entry
+		= restrack_get_entry(CurrentResourceOwner, phase, false);
 
-	if (phase != RESOURCE_RELEASE_AFTER_LOCKS)
-		return;
-
-	if (is_commit)
+	if (entry)
 	{
-#ifdef PGSTROM_DEBUG
+		dlist_mutable_iter miter;
+
 		/*
-		 * If transaction is committed as usual, shared objects shall be
-		 * released in the regular code path. So, we should not need to
-		 * release these objects in the resource-release callback.
+		 * In case of normal transaction commit, all the tracked objects
+		 * shall be untracked by regular code path, so we should not have
+		 * any valid objects in resource tracker.
 		 */
-		for (i=0; i < RESTRACK_HASHSZ; i++)
+		Assert(!is_commit || dlist_is_empty(&entry->objects));
+
+		/*
+		 * In case of transaction abort, we decrement reference counter of
+		 * tracked objects, then eventually they are released (even if
+		 * OpenCL server still grabed it).
+		 */
+		dlist_foreach_modify(miter, &entry->objects)
 		{
-			dlist_iter	iter;
+			StromObject *sobject
+				= dlist_container(StromObject, tracker, miter.cur);
 
-			dlist_foreach(iter, &tracker_slot[i])
+			dlist_delete(&sobject->tracker);
+			memset(&sobject->tracker, 0, sizeof(dlist_node));
+
+			if (StromTagIs(sobject, MsgQueue))
 			{
-				entry = dlist_container(tracker_entry, chain, iter.cur);
-				Assert(entry->owner != CurrentResourceOwner);
-			}
-		}
-#endif
-		return;
-	}
-
-	/*
-	 * In case of transaction abort, we decrement reference counter of
-	 * tracked objects. Some of them are released immediately, or some
-	 * other will be released later by OpenCL server.
-	 */
-	for (i=0; i < RESTRACK_HASHSZ; i++)
-	{
-		dlist_mutable_iter	miter;
-
-		dlist_foreach_modify(miter, &tracker_slot[i])
-		{
-			entry = dlist_container(tracker_entry, chain, miter.cur);
-
-			if (entry->owner != CurrentResourceOwner)
-				continue;
-
-			dlist_delete(&entry->chain);
-			if (*entry->object == StromTag_MsgQueue)
-			{
-				pgstrom_queue  *mqueue = (pgstrom_queue *)entry->object;
+				pgstrom_queue  *mqueue = (pgstrom_queue *) sobject;
 				pgstrom_close_queue(mqueue);
 			}
-			else if (*entry->object == StromTag_DevProgram)
+			else if (StromTagIs(sobject, DevProgram))
 			{
-				Datum	dprog_key = PointerGetDatum(entry->object);
+				Datum	dprog_key = PointerGetDatum(sobject);
 
 				pgstrom_put_devprog_key(dprog_key);
 			}
 			else
 			{
-				Assert(IS_TRACKABLE_OBJECT(entry->object));
-				pgstrom_put_message((pgstrom_message *) entry->object);
+				Assert(IS_TRACKABLE_OBJECT(sobject));
+				pgstrom_put_message((pgstrom_message *) sobject);
 			}
-			dlist_push_head(&tracker_free, &entry->chain);
 		}
+		dlist_delete(&entry->chain);
+		memset(entry, 0, sizeof(tracker_entry));
+		dlist_push_head(&tracker_free, &entry->chain);
 	}
 }
 
@@ -128,37 +161,31 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
  * registers a shared object as one acquired by this backend.
  */
 void
-pgstrom_track_object(StromTag *stag)
+pgstrom_track_object(StromObject *sobject)
 {
-	tracker_entry *entry;
-	int		i;
+	Assert(IS_TRACKABLE_OBJECT(sobject));
 
-	Assert(IS_TRACKABLE_OBJECT(stag));
-
-	if (!dlist_is_empty(&tracker_free))
-		entry = dlist_container(tracker_entry, chain,
-								dlist_pop_head_node(&tracker_free));
-	else
+	PG_TRY();
 	{
-		PG_TRY();
-		{
-			entry = MemoryContextAlloc(ResTrackContext,
-									   sizeof(tracker_entry));
-		}
-		PG_CATCH();
-		{
-			if (*stag == StromTag_MsgQueue)
-				pgstrom_close_queue((pgstrom_queue *)stag);
-			else
-				pgstrom_put_message((pgstrom_message *)stag);
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
+		tracker_entry *entry;
+
+		/* XXX - right now all the object class uses after-locks */
+		entry = restrack_get_entry(CurrentResourceOwner,
+								   RESOURCE_RELEASE_AFTER_LOCKS,
+								   true);
+		dlist_push_head(&entry->objects, &sobject->tracker);
 	}
-	i = tracker_hash(stag);
-	entry->object = stag;
-	entry->owner = CurrentResourceOwner;
-	dlist_push_head(&tracker_slot[i], &entry->chain);
+	PG_CATCH();
+	{
+		if (StromTagIs(sobject, MsgQueue))
+			pgstrom_close_queue((pgstrom_queue *)sobject);
+		else if (StromTagIs(sobject, DevProgram))
+			pgstrom_put_devprog_key((Datum)sobject);
+		else
+			pgstrom_put_message((pgstrom_message *)sobject);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 }
 
 /*
@@ -167,49 +194,12 @@ pgstrom_track_object(StromTag *stag)
  * unregister the supplied object from tracking table
  */
 void
-pgstrom_untrack_object(StromTag *stag)
+pgstrom_untrack_object(StromObject *sobject)
 {
-	dlist_iter	iter;
-	int			index;
-
-	Assert(IS_TRACKABLE_OBJECT(stag));
-
-	index = tracker_hash(stag);
-	dlist_foreach(iter, &tracker_slot[index])
-	{
-		tracker_entry  *entry
-			= dlist_container(tracker_entry, chain, iter.cur);
-
-		if (entry->object == stag)
-		{
-			entry->object = NULL;
-			dlist_delete(&entry->chain);
-			dlist_push_head(&tracker_free, &entry->chain);
-			return;
-		}
-	}
-	elog(LOG, "Bug? untracked message %p (stag: %d)was not tracked",
-		 stag, *stag);
-}
-
-bool
-pgstrom_object_is_tracked(StromTag *stag)
-{
-	dlist_iter	iter;
-	int			index;
-
-	Assert(IS_TRACKABLE_OBJECT(stag));
-
-	index = tracker_hash(stag);
-	dlist_foreach(iter, &tracker_slot[index])
-	{
-		tracker_entry  *entry
-			= dlist_container(tracker_entry, chain, iter.cur);
-
-		if (entry->object == stag)
-			return true;
-	}
-	return false;
+	Assert(IS_TRACKABLE_OBJECT(sobject));
+	Assert(sobject->tracker.prev != NULL && sobject->tracker.next != NULL);
+	dlist_delete(&sobject->tracker);
+	memset(&sobject->tracker, 0, sizeof(dlist_node));
 }
 
 void

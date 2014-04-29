@@ -87,7 +87,6 @@ typedef struct {
 	pid_t		owner;
 	const char *filename;
 	uint32		lineno;
-	dlist_node	restrack;		/* for local resource tracker */
 	Datum		data[FLEXIBLE_ARRAY_MEMBER];
 } shmem_body;
 /* XXX - we need to ensure SHMEM_ALLOC_COST is enough large */
@@ -246,7 +245,6 @@ pgstrom_shmem_zone_block_alloc(shmem_zone *zone,
 	body->owner = getpid();
 	body->filename = filename;	/* must be static cstring! */
 	body->lineno = lineno;
-	memset(&body->restrack, 0, sizeof(dlist_node));
 	address = (void *)body->data;
 
 	/* to detect overrun */
@@ -630,7 +628,6 @@ typedef struct
 	pid_t		owner;
 	const char *filename;
 	int			lineno;
-	bool		tracked;
 	bool		broken;
 	bool		overrun;
 } shmem_active_info;
@@ -663,7 +660,6 @@ collect_shmem_active_info(shmem_zone *zone, int zone_index)
 			sainfo->owner = body->owner;
 			sainfo->filename = body->filename;
 			sainfo->lineno = body->lineno;
-			sainfo->tracked = !(!body->restrack.next || !body->restrack.prev);
 			if (body->magic != SHMEM_BODY_MAGIC)
 				sainfo->broken = true;
 			p_magic = (cl_uint *)((char *)body->data + block->blocksz);
@@ -708,7 +704,7 @@ pgstrom_shmem_active_info(PG_FUNCTION_ARGS)
 		fncxt = SRF_FIRSTCALL_INIT();
 		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
 
-		tupdesc = CreateTemplateTupleDesc(8, false);
+		tupdesc = CreateTemplateTupleDesc(7, false);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "zone",
 						   INT4OID, -1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "address",
@@ -719,11 +715,9 @@ pgstrom_shmem_active_info(PG_FUNCTION_ARGS)
 						   INT4OID, -1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "location",
 						   TEXTOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 6, "tracked",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 6, "broken",
 						   BOOLOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 7, "broken",
-						   BOOLOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 8, "overrun",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 7, "overrun",
 						   BOOLOID, -1, 0);
 		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
 
@@ -765,9 +759,8 @@ pgstrom_shmem_active_info(PG_FUNCTION_ARGS)
 	values[3] = Int32GetDatum(sainfo->owner);
 	snprintf(buf, sizeof(buf), "%s:%d", sainfo->filename, sainfo->lineno);
 	values[4] = CStringGetTextDatum(buf);
-	values[5] = BoolGetDatum(sainfo->tracked);
-	values[6] = BoolGetDatum(sainfo->broken);
-	values[7] = BoolGetDatum(sainfo->overrun);
+	values[5] = BoolGetDatum(sainfo->broken);
+	values[6] = BoolGetDatum(sainfo->overrun);
 
 	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
 

@@ -132,6 +132,7 @@ pgstrom_create_kern_parambuf(List *used_params,
 	return kpbuf;
 }
 
+#if 0
 /*
  * pgstrom_load_row_store_heap
  *
@@ -252,7 +253,7 @@ pgstrom_load_row_store_heap(HeapScanDesc scan,
 	Assert(pgstrom_shmem_sanitycheck(rstore));
 	return rstore;
 }
-
+#endif
 #if 0
 pgstrom_row_store *
 pgstrom_load_row_store_subplan(void)

@@ -36,7 +36,7 @@ static struct {
 } *opencl_devprog_shm_values;
 
 typedef struct {
-	StromTag	stag;		/* = StromTag_DevProgram */
+	StromObject	sobj;		/* = StromTag_DevProgram */
 	dlist_node	hash_chain;
 	dlist_node	lru_chain;
 	/*
@@ -548,7 +548,8 @@ retry:
 	if (!dprog)
 		elog(ERROR, "out of shared memory");
 
-	dprog->stag = StromTag_DevProgram;
+	dprog->sobj.stag = StromTag_DevProgram;
+	memset(&dprog->sobj.tracker, 0, sizeof(dlist_node));
 	SpinLockInit(&dprog->lock);
 	dprog->refcnt = 1;
 	dlist_init(&dprog->waitq);

@@ -323,7 +323,7 @@ tcache_create_column_store(tcache_head *tc_head)
 		elog(ERROR, "out of shared memory");
 	memset(tcs, 0, sizeof(tcache_column_store));
 
-	tcs->stag = StromTag_TCacheColumnStore;
+	tcs->sobj.stag = StromTag_TCacheColumnStore;
 	SpinLockInit(&tcs->refcnt_lock);
 	tcs->refcnt = 1;
 	tcs->ncols = tc_head->ncols;
@@ -558,7 +558,8 @@ tcache_create_row_store(TupleDesc tupdesc, int ncols, AttrNumber *i_cached)
 	 * array, but contents shall be set up by kernel prior to evaluation of
 	 * qualifier expression.
 	 */
-	trs->stag = StromTag_TCacheRowStore;
+	memset(trs, 0, sizeof(StromObject));
+	trs->sobj.stag = StromTag_TCacheRowStore;
 	SpinLockInit(&trs->refcnt_lock);
 	trs->refcnt = 1;
 	memset(&trs->chain, 0, sizeof(dlist_node));
@@ -611,6 +612,10 @@ tcache_create_row_store(TupleDesc tupdesc, int ncols, AttrNumber *i_cached)
 			   &colmeta,
 			   sizeof(kern_colmeta));
 	}
+	trs->kcs_head->length = -1;	/* to be set later */
+	trs->kcs_head->ncols = j;
+	trs->kcs_head->nrows = -1;	/* to be set later */
+
 	return trs;
 }
 
@@ -1664,8 +1669,39 @@ tcache_row_store_insert_tuple(tcache_row_store *trs, HeapTuple tuple)
 			trs->blkno_min = ItemPointerGetBlockNumber(&tuple->t_self);
 		result = true;
 	}
-
 	return result;
+}
+
+/*
+ * cs_ofs of kern_colmeta shall be calculated according to the number
+ * of rows, so we need to calculate correct offset after the row-store
+ * got filled by heap tuples.
+ */
+void
+tcache_row_store_fixup_tcs_head(tcache_row_store *trs)
+{
+	kern_column_store *kcs = trs->kcs_head;
+	Size	offset;
+	int		i;
+
+	offset = STROMALIGN(offsetof(kern_column_store,
+								 colmeta[kcs->ncols]));
+	kcs->nrows = trs->kern.nrows;
+	for (i=0; i < kcs->ncols; i++)
+	{
+		kern_colmeta   *kcmeta = &kcs->colmeta[i];
+
+		Assert((kcmeta->flags & KERN_COLMETA_ATTREFERENCED) != 0);
+		kcmeta->cs_ofs = offset;
+
+		if ((kcmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
+			offset += STROMALIGN((kcs->nrows + BITS_PER_BYTE - 1)
+								 / BITS_PER_BYTE);
+		offset += STROMALIGN(kcs->nrows * (kcmeta->attlen > 0
+										   ? kcmeta->attlen
+										   : sizeof(cl_uint)));
+	}
+	kcs->length = offset;
 }
 
 static void
@@ -2027,7 +2063,7 @@ tcache_begin_scan(Relation rel, Bitmapset *required)
 	tc_head = tcache_get_tchead(RelationGetRelid(rel), required, true);
 	if (!tc_head)
 		elog(ERROR, "out of shared memory");
-	pgstrom_track_object(&tc_head->stag);
+	pgstrom_track_object(&tc_head->sobj);
 	tc_scan->tc_head = tc_head;
 
 	LWLockAcquire(&tc_head->lwlock, LW_SHARED);
@@ -2063,7 +2099,7 @@ retry:
 	return tc_scan;
 }
 
-StromTag *
+StromObject *
 tcache_scan_next(tcache_scandesc *tc_scan)
 {
 	tcache_head		   *tc_head = tc_scan->tc_head;
@@ -2095,7 +2131,7 @@ tcache_scan_next(tcache_scandesc *tc_scan)
 		if (tcs_prev)
 			tcache_put_column_store(tcs_prev);
 		if (tc_scan->tcs_curr)
-			return &tc_scan->tcs_curr->stag;
+			return &tc_scan->tcs_curr->sobj;
 	}
 	/* no column-store entries, we also walks on row-stores */
 	trs_prev = tc_scan->trs_curr;
@@ -2133,11 +2169,11 @@ tcache_scan_next(tcache_scandesc *tc_scan)
 	SpinLockRelease(&tc_head->lock);
 
 	if (tc_scan->trs_curr)
-		return &tc_scan->trs_curr->stag;
+		return &tc_scan->trs_curr->sobj;
 	return NULL;
 }
 
-StromTag *
+StromObject *
 tcache_scan_prev(tcache_scandesc *tc_scan)
 {
 	tcache_head		   *tc_head = tc_scan->tc_head;
@@ -2211,7 +2247,7 @@ tcache_scan_prev(tcache_scandesc *tc_scan)
 
 		/* if we have a row-store, return it */
 		if (tc_scan->trs_curr)
-			return &tc_scan->trs_curr->stag;
+			return &tc_scan->trs_curr->sobj;
 	}
 	/* if we have no row-store, we also walks on column-stores */
 	tcs_prev = tc_scan->tcs_curr;
@@ -2230,7 +2266,7 @@ tcache_scan_prev(tcache_scandesc *tc_scan)
 	if (tcs_prev)
 		tcache_put_column_store(tcs_prev);
 	if (tc_scan->tcs_curr)
-		return &tc_scan->tcs_curr->stag;
+		return &tc_scan->tcs_curr->sobj;
 	return NULL;
 }
 
@@ -2365,7 +2401,7 @@ tcache_create_tchead(Oid reloid, Bitmapset *required,
 
 		memset(tc_head, 0, sizeof(tcache_head));
 
-		tc_head->stag = StromTag_TCacheHead;
+		tc_head->sobj.stag = StromTag_TCacheHead;
 		tc_head->refcnt = 1;
 
 		LWLockInitialize(&tc_head->lwlock, 0);

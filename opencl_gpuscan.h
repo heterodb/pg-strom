@@ -291,7 +291,7 @@ gpuscan_writeback_result(__global kern_gpuscan *kgpuscan,
 typedef struct {
 	pgstrom_message	msg;	/* = StromTag_GpuScan */
 	Datum			dprog_key;	/* key of device program */
-	dlist_head		rc_store;	/* a row- or column store */
+	StromObject	   *rc_store;	/* = StromTag_TCache(Row|Column)Store */
 	kern_gpuscan	kern;
 } pgstrom_gpuscan;
 

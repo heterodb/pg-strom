@@ -18,7 +18,6 @@ CREATE TYPE __pgstrom_shmem_active_info AS (
   size      int4,
   owner     int4,
   location  text,
-  tracked   bool,
   broken    bool,
   overrun   bool
 );
@@ -72,34 +71,4 @@ CREATE FUNCTION pgstrom_shmem_alloc(int8)
 CREATE FUNCTION pgstrom_shmem_free(int8)
   RETURNS bool
   AS 'MODULE_PATHNAME', 'pgstrom_shmem_free_func'
-  LANGUAGE C STRICT;
-
-CREATE FUNCTION pgstrom_create_queue()
-  RETURNS int8
-  AS 'MODULE_PATHNAME', 'pgstrom_create_queue_func'
-  LANGUAGE C STRICT;
-
-CREATE FUNCTION pgstrom_close_queue(int8)
-  RETURNS bool
-  AS 'MODULE_PATHNAME', 'pgstrom_close_queue_func'
-  LANGUAGE C STRICT;
-
-CREATE FUNCTION pgstrom_create_testmsg(int8,int4,text)
-  RETURNS int8
-  AS 'MODULE_PATHNAME', 'pgstrom_create_testmsg_func'
-  LANGUAGE C STRICT;
-
-CREATE FUNCTION pgstrom_enqueue_testmsg(int8)
-  RETURNS bool
-  AS 'MODULE_PATHNAME', 'pgstrom_enqueue_testmsg_func'
-  LANGUAGE C STRICT;
-
-CREATE FUNCTION pgstrom_dequeue_testmsg(int8)
-  RETURNS bool
-  AS 'MODULE_PATHNAME', 'pgstrom_dequeue_testmsg_func'
-  LANGUAGE C STRICT;
-
-CREATE FUNCTION pgstrom_release_testmsg(int8)
-  RETURNS bool
-  AS 'MODULE_PATHNAME', 'pgstrom_release_testmsg_func'
   LANGUAGE C STRICT;

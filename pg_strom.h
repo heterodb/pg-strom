@@ -123,17 +123,25 @@ typedef enum {
 	StromTag_DevProgram = 1001,
 	StromTag_MsgQueue,
 	StromTag_ParamBuf,
-	StromTag_RowStore,
-	StromTag_ColumnStore,
+//	StromTag_RowStore,
+//	StromTag_ColumnStore,
 	StromTag_TCacheHead,
 	StromTag_TCacheRowStore,
 	StromTag_TCacheColumnStore,
-	StromTag_ToastBuf,
+	StromTag_TCacheToastBuf,
 	StromTag_GpuScan,
 	StromTag_GpuSort,
 	StromTag_HashJoin,
 	StromTag_TestMessage,
 } StromTag;
+
+typedef struct {
+	StromTag	stag;			/* StromTag_* */
+	dlist_node	tracker;		/* Used by resource tracker */
+} StromObject;
+
+#define StromTagIs(PTR,IDENT) \
+	(((StromObject *)(PTR))->stag == StromTag_##IDENT)
 
 /*
  * Performance monitor structure
@@ -164,7 +172,7 @@ typedef struct {
  * to be returned
  */
 typedef struct {
-	StromTag		stag;
+	StromObject		sobj;
 	dlist_node		chain;	/* link to free queues list in mqueue.c */
 	pid_t			owner;
 	int				refcnt;
@@ -175,7 +183,7 @@ typedef struct {
 } pgstrom_queue;
 
 typedef struct pgstrom_message {
-	StromTag		stag;
+	StromObject		sobj;
 	slock_t			lock;	/* protection for reference counter */
 	cl_int			refcnt;
 	cl_int			errcode;
@@ -190,12 +198,13 @@ typedef struct pgstrom_message {
  * Kernel Param/Const buffer
  */
 typedef struct {
-	StromTag		stag;
+	StromObject		sobj;
 	slock_t			lock;
 	int				refcnt;
 	kern_parambuf	kern;
 } pgstrom_parambuf;
 
+#if 0
 /*
  * Row-format data store
  */
@@ -228,6 +237,8 @@ typedef struct {
 	cl_uint			usage;
 	kern_toastbuf	kern;
 } pgstrom_toastbuf;
+
+#endif
 
 /*
  * Type declarations for code generator
@@ -276,7 +287,7 @@ struct tcache_head;
  * tcache_row_store - uncolumnized data buffer in row-format
  */
 typedef struct {
-	StromTag		stag;	/* StromTag_TCacheRowNode */
+	StromObject		sobj;	/* =StromTag_TCacheRowStore */
 	slock_t			refcnt_lock;
 	int				refcnt;
 	dlist_node		chain;
@@ -286,6 +297,12 @@ typedef struct {
 	kern_column_store *kcs_head; /* template of in-kernel column store */
 	kern_row_store	kern;
 } tcache_row_store;
+
+/*
+ * NOTE: shmem.c put a magic number to detect shared memory usage overrun.
+ * So, we have a little adjustment for this padding.
+ */
+#define ROWSTORE_DEFAULT_SIZE	(8 * 1024 * 1024 - SHMEM_ALLOC_COST)
 
 /*
  * tcache_toastbuf - toast buffer for each varlena column
@@ -305,7 +322,7 @@ typedef struct {
  * tcache_column_store - a node or leaf entity of t-tree columnar cache
  */
 typedef struct {
-	StromTag		stag;	/* StromTag_TCacheRowNode */
+	StromObject		sobj;	/* StromTag_TCacheColumnStore */
 	slock_t			refcnt_lock;
 	int				refcnt;
 	uint32			ncols;	/* copy of tc_head->ncols */
@@ -329,7 +346,7 @@ typedef struct {
  * tcache_node - leaf or 
  */
 struct tcache_node {
-	StromTag		stag;	/* = StromTag_TCacheNode */
+	StromObject		sobj;	/* = StromTag_TCacheNode */
 	dlist_node		chain;
 	struct timeval	tv;		/* time being enqueued */
 	struct tcache_node *right;	/* node with greater ctids */
@@ -352,11 +369,11 @@ typedef struct tcache_node tcache_node;
 #define TCACHE_STATE_READY			3
 
 typedef struct {
-	StromTag	stag;			/* StromTag_TCacheHead */
-	dlist_node	chain;			/* link to the hash or free list */
-	dlist_node	lru_chain;		/* link to the LRU list */
-	dlist_node	pending_chain;	/* link to the pending list */
-	int			refcnt;
+	StromObject		sobj;			/* StromTag_TCacheHead */
+	dlist_node		chain;			/* link to the hash or free list */
+	dlist_node		lru_chain;		/* link to the LRU list */
+	dlist_node		pending_chain;	/* link to the pending list */
+	int				refcnt;
 	/* above fields are protected by tc_common->lock */
 
 	/*
@@ -482,13 +499,7 @@ extern Datum pgstrom_mqueue_info(PG_FUNCTION_ARGS);
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
-extern pgstrom_row_store *
-pgstrom_load_row_store_heap(HeapScanDesc scan,
-                            ScanDirection direction,
-                            kern_colmeta *rs_colmeta,
-                            kern_colmeta *cs_colmeta,
-                            int cs_colnums,
-                            bool *scan_done);
+
 #ifdef USE_ASSERT_CHECKING
 extern void SanityCheck_kern_column_store(kern_row_store *krs,
 										  kern_column_store *kcs);
@@ -499,9 +510,9 @@ extern void SanityCheck_kern_column_store(kern_row_store *krs,
 /*
  * restrack.c
  */
-extern void pgstrom_track_object(StromTag *stag);
-extern void pgstrom_untrack_object(StromTag *stag);
-extern bool pgstrom_object_is_tracked(StromTag *stag);
+extern void pgstrom_track_object(StromObject *sobject);
+extern void pgstrom_untrack_object(StromObject *sobject);
+extern bool pgstrom_object_is_tracked(StromObject *sobject);
 extern void pgstrom_init_restrack(void);
 
 /*
@@ -591,8 +602,8 @@ extern void pgstrom_init_gpuscan(void);
  * tcache.c
  */
 extern tcache_scandesc *tcache_begin_scan(Relation rel, Bitmapset *required);
-extern StromTag *tcache_scan_next(tcache_scandesc *tc_scan);
-extern StromTag *tcache_scan_prev(tcache_scandesc *tc_scan);
+extern StromObject *tcache_scan_next(tcache_scandesc *tc_scan);
+extern StromObject *tcache_scan_prev(tcache_scandesc *tc_scan);
 extern void tcache_end_scan(tcache_scandesc *tc_scan);
 extern void tcache_rescan(tcache_scandesc *tc_scan);
 
@@ -609,6 +620,7 @@ extern tcache_row_store *tcache_get_row_store(tcache_row_store *trs);
 extern void tcache_put_row_store(tcache_row_store *trs);
 extern bool tcache_row_store_insert_tuple(tcache_row_store *trs,
 										  HeapTuple tuple);
+extern void tcache_row_store_fixup_tcs_head(tcache_row_store *trs);
 
 extern bool pgstrom_relation_has_synchronizer(Relation rel);
 extern Datum pgstrom_tcache_synchronizer(PG_FUNCTION_ARGS);
