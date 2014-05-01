@@ -76,9 +76,6 @@ static tcache_column_store *tcache_create_column_store(tcache_head *tc_head);
 static tcache_column_store *tcache_duplicate_column_store(tcache_head *tc_head,
 												  tcache_column_store *tcs_old,
 												  bool duplicate_toastbuf);
-static tcache_column_store *tcache_get_column_store(tcache_column_store *tcs);
-static void tcache_put_column_store(tcache_column_store *tcs);
-
 
 static tcache_toastbuf *tcache_create_toast_buffer(Size required);
 static tcache_toastbuf *tcache_duplicate_toast_buffer(tcache_toastbuf *tbuf,
@@ -427,7 +424,7 @@ tcache_duplicate_column_store(tcache_head *tc_head,
 	return tcs_new;
 }
 
-static tcache_column_store *
+tcache_column_store *
 tcache_get_column_store(tcache_column_store *tcs)
 {
 	SpinLockAcquire(&tcs->refcnt_lock);
@@ -438,7 +435,7 @@ tcache_get_column_store(tcache_column_store *tcs)
 	return tcs;
 }
 
-static void
+void
 tcache_put_column_store(tcache_column_store *tcs)
 {
 	bool	do_release = false;
@@ -543,8 +540,7 @@ tcache_put_toast_buffer(tcache_toastbuf *tbuf)
 tcache_row_store *
 tcache_create_row_store(TupleDesc tupdesc, int ncols, AttrNumber *i_cached)
 {
-	tcache_row_store   *trs;
-	int			i, j;
+	tcache_row_store *trs;
 
 	trs = pgstrom_shmem_alloc(ROWSTORE_DEFAULT_SIZE);
 	if (!trs)
@@ -563,14 +559,15 @@ tcache_create_row_store(TupleDesc tupdesc, int ncols, AttrNumber *i_cached)
 	memset(&trs->chain, 0, sizeof(dlist_node));
 	trs->usage
 		= STROMALIGN_DOWN(ROWSTORE_DEFAULT_SIZE -
-						  STROMALIGN(offsetof(kern_column_store,
-											  colmeta[ncols])) -
+//						  STROMALIGN(offsetof(kern_column_store,
+//											  colmeta[ncols])) -
 						  offsetof(tcache_row_store, kern));
 	trs->blkno_max = 0;
 	trs->blkno_min = MaxBlockNumber;
 	trs->kern.length = trs->usage;
 	trs->kern.ncols = tupdesc->natts;
 	trs->kern.nrows = 0;
+#if 0
 	trs->kcs_head = (kern_column_store *)
 		((char *)&trs->kern + trs->kern.length);
 
@@ -613,7 +610,7 @@ tcache_create_row_store(TupleDesc tupdesc, int ncols, AttrNumber *i_cached)
 	trs->kcs_head->length = -1;	/* to be set later */
 	trs->kcs_head->ncols = j;
 	trs->kcs_head->nrows = -1;	/* to be set later */
-
+#endif
 	return trs;
 }
 
@@ -1670,38 +1667,6 @@ tcache_row_store_insert_tuple(tcache_row_store *trs, HeapTuple tuple)
 	return result;
 }
 
-/*
- * cs_ofs of kern_colmeta shall be calculated according to the number
- * of rows, so we need to calculate correct offset after the row-store
- * got filled by heap tuples.
- */
-void
-tcache_row_store_fixup_tcs_head(tcache_row_store *trs)
-{
-	kern_column_store *kcs = trs->kcs_head;
-	Size	offset;
-	int		i;
-
-	offset = STROMALIGN(offsetof(kern_column_store,
-								 colmeta[kcs->ncols]));
-	kcs->nrows = trs->kern.nrows;
-	for (i=0; i < kcs->ncols; i++)
-	{
-		kern_colmeta   *kcmeta = &kcs->colmeta[i];
-
-		Assert((kcmeta->flags & KERN_COLMETA_ATTREFERENCED) != 0);
-		kcmeta->cs_ofs = offset;
-
-		if ((kcmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
-			offset += STROMALIGN((kcs->nrows + BITS_PER_BYTE - 1)
-								 / BITS_PER_BYTE);
-		offset += STROMALIGN(kcs->nrows * (kcmeta->attlen > 0
-										   ? kcmeta->attlen
-										   : sizeof(cl_uint)));
-	}
-	kcs->length = offset;
-}
-
 static void
 tcache_insert_tuple_row(tcache_head *tc_head, HeapTuple tuple)
 {
@@ -2046,30 +2011,36 @@ tcache_build_main(tcache_head *tc_head, HeapScanDesc heapscan)
 }
 
 
-
-
-
+/*
+ *
+ * NOTE: this operation does not increment reference counter of tcache_head,
+ * so caller must be responsible to get and track it.
+ */
 tcache_scandesc *
-tcache_begin_scan(Relation rel, Bitmapset *required)
+tcache_begin_scan(tcache_head *tc_head, Relation heap_rel)
 {
 	tcache_scandesc	   *tc_scan;
-	tcache_head		   *tc_head;
 	bool				has_wrlock = false;
 
 	tc_scan = palloc0(sizeof(tcache_scandesc));
-	tc_scan->rel = rel;
-	tc_head = tcache_get_tchead(RelationGetRelid(rel), required, true);
-	if (!tc_head)
-		elog(ERROR, "out of shared memory");
-	pgstrom_track_object(&tc_head->sobj);
+	tc_scan->rel = heap_rel;
 	tc_scan->tc_head = tc_head;
+	tc_scan->tcs_blkno_min = InvalidBlockNumber;
+	tc_scan->tcs_blkno_max = InvalidBlockNumber;
+	tc_scan->trs_curr = NULL;
 
 	LWLockAcquire(&tc_head->lwlock, LW_SHARED);
 retry:
 	SpinLockAcquire(&tc_head->lock);
 	if (tc_head->state == TCACHE_STATE_NOT_BUILT)
 	{
-		if (!has_wrlock)
+		if (!heap_rel)
+		{
+			SpinLockRelease(&tc_head->lock);
+			pfree(tc_scan);
+			return NULL;
+		}
+		else if (!has_wrlock)
 		{
 			SpinLockRelease(&tc_head->lock);
 			LWLockRelease(&tc_head->lwlock);
@@ -2077,12 +2048,18 @@ retry:
 			has_wrlock = true;
 			goto retry;
 		}
+		/* OMG! I have to build up this tcache */
 		tc_head->state = TCACHE_STATE_NOW_BUILD;
 		SpinLockRelease(&tc_head->lock);
-		tc_scan->heapscan = heap_beginscan(rel, SnapshotAny, 0, NULL);
+		tc_scan->heapscan = heap_beginscan(heap_rel, SnapshotAny, 0, NULL);
 	}
 	else if (has_wrlock)
 	{
+		/*
+		 * Only a process who builds up this tcache hold exclusive lwlock
+		 * on the tcache. If it was not actually needed, we should degrade
+		 * the lock.
+		 */
 		SpinLockRelease(&tc_head->lock);
 		LWLockRelease(&tc_head->lwlock);
 		LWLockAcquire(&tc_head->lwlock, LW_SHARED);
@@ -2121,20 +2098,28 @@ tcache_scan_next(tcache_scandesc *tc_scan)
 
 	if (!tc_scan->trs_curr)
 	{
-		tcache_column_store *tcs_prev = tc_scan->tcs_curr;
-		BlockNumber		blkno = (tcs_prev ? tcs_prev->blkno_max + 1 : 0);
+		tcache_column_store *tcs;
+		BlockNumber		blkno;
 
-		tc_scan->tcs_curr
-			= tcache_find_next_column_store(tc_head, blkno);
-		if (tcs_prev)
-			tcache_put_column_store(tcs_prev);
-		if (tc_scan->tcs_curr)
-			return &tc_scan->tcs_curr->sobj;
+		if (tc_scan->tcs_blkno_max == InvalidBlockNumber)
+			blkno = 0;
+		else
+			blkno = Min(tc_scan->tcs_blkno_max + 1, MaxBlockNumber);
+
+		tcs = tcache_find_next_column_store(tc_head, blkno);
+		if (tcs)
+		{
+			tc_scan->tcs_blkno_min = tcs->blkno_min;
+			tc_scan->tcs_blkno_max = tcs->blkno_max;
+			return &tcs->sobj;
+		}
 	}
-	/* no column-store entries, we also walks on row-stores */
-	trs_prev = tc_scan->trs_curr;
+	tc_scan->tcs_blkno_min = InvalidBlockNumber;
+	tc_scan->tcs_blkno_max = InvalidBlockNumber;
 
+	/* no column-store entries, we also walks on row-stores */
 	SpinLockAcquire(&tc_head->lock);
+	trs_prev = tc_scan->trs_curr;
 	if (!trs_prev)
 	{
 		if (!dlist_is_empty(&tc_head->trs_list))
@@ -2154,7 +2139,6 @@ tcache_scan_next(tcache_scandesc *tc_scan)
 		dnode = dlist_next_node(&tc_head->trs_list, &trs_prev->chain);
 		trs_curr = dlist_container(tcache_row_store, chain, dnode);
 		tc_scan->trs_curr = tcache_get_row_store(trs_curr);
-		tcache_put_row_store(trs_prev);
 	}
 	else
 	{
@@ -2162,7 +2146,6 @@ tcache_scan_next(tcache_scandesc *tc_scan)
 			tc_scan->trs_curr = tcache_get_row_store(tc_head->trs_curr);
 		else
 			tc_scan->trs_curr = NULL;
-		tcache_put_row_store(trs_prev);
 	}
 	SpinLockRelease(&tc_head->lock);
 
@@ -2175,7 +2158,7 @@ StromObject *
 tcache_scan_prev(tcache_scandesc *tc_scan)
 {
 	tcache_head		   *tc_head = tc_scan->tc_head;
-	tcache_column_store *tcs_prev;
+	tcache_column_store *tcs;
 	BlockNumber		blkno;
 	dlist_node	   *dnode;
 
@@ -2193,7 +2176,7 @@ tcache_scan_prev(tcache_scandesc *tc_scan)
 	/* at least, we have to hold shared-lwlock on tc_head here */
 	Assert(TCacheHeadLockedByMe(tc_head, false));
 
-	if (!tc_scan->tcs_curr)
+	if (tc_scan->tcs_blkno_min == InvalidBlockNumber)
 	{
 		tcache_row_store *trs_prev = tc_scan->trs_curr;
 		tcache_row_store *trs_curr;
@@ -2225,7 +2208,6 @@ tcache_scan_prev(tcache_scandesc *tc_scan)
 			}
 			else
 				trs_curr = NULL;
-			tcache_put_row_store(trs_prev);
 		}
 		else
 		{
@@ -2238,7 +2220,6 @@ tcache_scan_prev(tcache_scandesc *tc_scan)
 			}
 			else
 				trs_curr = NULL;
-			tcache_put_row_store(trs_prev);
 		}
 		tc_scan->trs_curr = trs_curr;
 		SpinLockRelease(&tc_head->lock);
@@ -2248,28 +2229,32 @@ tcache_scan_prev(tcache_scandesc *tc_scan)
 			return &tc_scan->trs_curr->sobj;
 	}
 	/* if we have no row-store, we also walks on column-stores */
-	tcs_prev = tc_scan->tcs_curr;
 
 	/* it's obvious we have no more column-store in this direction */
-	if (tcs_prev->blkno_min == 0)
+	if (tc_scan->tcs_blkno_min == 0)
 	{
-		tc_scan->tcs_curr = NULL;
-		tcache_put_column_store(tcs_prev);
+		tc_scan->tcs_blkno_min = InvalidBlockNumber;
+		tc_scan->tcs_blkno_max = InvalidBlockNumber;
 		return NULL;
 	}
-	Assert(tcs_prev->blkno_min > 0);
-	blkno = (tcs_prev ? tcs_prev->blkno_min - 1 : MaxBlockNumber);
-	tc_scan->tcs_curr
-		= tcache_find_prev_column_store(tc_head, blkno);
-	if (tcs_prev)
-		tcache_put_column_store(tcs_prev);
-	if (tc_scan->tcs_curr)
-		return &tc_scan->tcs_curr->sobj;
+	Assert(tc_scan->tcs_blkno_min > 0);
+	if (tc_scan->tcs_blkno_min == InvalidBlockNumber)
+		blkno = MaxBlockNumber;
+	else
+		blkno = tc_scan->tcs_blkno_min - 1;
+
+	tcs = tcache_find_prev_column_store(tc_head, blkno);
+	if (tcs)
+	{
+		tc_scan->tcs_blkno_min = tcs->blkno_min;
+		tc_scan->tcs_blkno_max = tcs->blkno_max;
+		return &tcs->sobj;
+	}
 	return NULL;
 }
 
 void
-tcache_end_scan(tcache_scandesc *tc_scan)
+tcache_end_scan(tcache_scandesc *tc_scan, bool put_tc_head)
 {
 	tcache_head	   *tc_head = tc_scan->tc_head;
 
@@ -2277,35 +2262,35 @@ tcache_end_scan(tcache_scandesc *tc_scan)
 	 * If scan is already reached end of the relation, tc_scan->scan shall
 	 * be already closed. If not, it implies scan is aborted in the middle.
 	 */
-	SpinLockAcquire(&tc_common->lock);
+	SpinLockAcquire(&tc_head->lock);
 	if (tc_scan->heapscan)
 	{
-		/*
-		 * tc_scan->heapscan should be already closed, if tcache is
-		 * successfully constructed. Elsewhere, it is under construction.
-		 */
+		Assert(tc_head->state == TCACHE_STATE_NOW_BUILD);
 		tcache_free_node_recurse(tc_head, tc_head->tcs_root);
-		SpinLockRelease(&tc_common->lock);
+		tc_head->state = TCACHE_STATE_NOT_BUILT;
+		SpinLockRelease(&tc_head->lock);
 
 		heap_endscan(tc_scan->heapscan);
 	}
 	else if (tc_head->state == TCACHE_STATE_NOW_BUILD)
 	{
 		/* OK, cache was successfully built */
-		tc_head->state = TCACHE_STATE_READY;
-		SpinLockRelease(&tc_common->lock);
+        tc_head->state = TCACHE_STATE_READY;
+		SpinLockRelease(&tc_head->lock);
 	}
 	else
 	{
 		Assert(tc_head->state == TCACHE_STATE_READY);
-		SpinLockRelease(&tc_common->lock);
+		SpinLockRelease(&tc_head->lock);
 	}
-	if (tc_scan->tcs_curr)
-		tcache_put_column_store(tc_scan->tcs_curr);
-	if (tc_scan->trs_curr)
-		tcache_put_row_store(tc_scan->trs_curr);
 
-	tcache_put_tchead(tc_head);
+	/*
+	 * NOTE: caller is responsible to put row- and column- store,
+	 * but tcache_head can be put if put_tc_head
+	 */
+	if (put_tc_head)
+		tcache_put_tchead(tc_head);
+
 	pfree(tc_scan);
 }
 
@@ -2314,11 +2299,8 @@ tcache_rescan(tcache_scandesc *tc_scan)
 {
 	tcache_head	   *tc_head = tc_scan->tc_head;
 
-	if (tc_scan->tcs_curr)
-		tcache_put_column_store(tc_scan->tcs_curr);
-	tc_scan->tcs_curr = NULL;
-	if (tc_scan->trs_curr)
-		tcache_put_row_store(tc_scan->trs_curr);
+	tc_scan->tcs_blkno_min = InvalidBlockNumber;
+	tc_scan->tcs_blkno_max = InvalidBlockNumber;
 	tc_scan->trs_curr = NULL;
 
 	SpinLockAcquire(&tc_head->lock);

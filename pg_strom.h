@@ -204,42 +204,6 @@ typedef struct {
 	kern_parambuf	kern;
 } pgstrom_parambuf;
 
-#if 0
-/*
- * Row-format data store
- */
-typedef struct {
-	StromTag		stag;
-	dlist_node		chain;
-	kern_column_store *kcs_head;	/* template of in-kernel column store */
-	kern_row_store	kern;
-} pgstrom_row_store;
-
-/*
- * NOTE: shmem.c put a magic number to detect shared memory usage overrun.
- * So, we have a little adjustment for this padding.
- */
-#define ROWSTORE_DEFAULT_SIZE	(8 * 1024 * 1024 - SHMEM_ALLOC_COST)
-
-/*
- * Column-format data store
- */
-typedef struct {
-	StromTag		stag;
-	dlist_node		chain;
-	dlist_head		toast;	/* list of toast buffers */
-	kern_column_store kern;
-} pgstrom_column_store;
-
-typedef struct {
-	StromTag		stag;
-	dlist_node		chain;
-	cl_uint			usage;
-	kern_toastbuf	kern;
-} pgstrom_toastbuf;
-
-#endif
-
 /*
  * Type declarations for code generator
  */
@@ -294,7 +258,7 @@ typedef struct {
 	cl_uint			usage;
 	BlockNumber		blkno_max;
 	BlockNumber		blkno_min;
-	kern_column_store *kcs_head; /* template of in-kernel column store */
+	//kern_column_store *kcs_head; /* template of in-kernel column store */
 	kern_row_store	kern;
 } tcache_row_store;
 
@@ -433,9 +397,9 @@ typedef struct {
 	Relation		rel;
 	HeapScanDesc	heapscan;	/* valid, if state == TC_STATE_NOW_BUILD */
 	tcache_head	   *tc_head;
-	tcache_column_store	*tcs_curr;
-	tcache_row_store	*trs_curr;
-	int				index_curr;
+	BlockNumber		tcs_blkno_min;
+	BlockNumber		tcs_blkno_max;
+	tcache_row_store *trs_curr;
 } tcache_scandesc;
 
 /*
@@ -601,10 +565,11 @@ extern void pgstrom_init_gpuscan(void);
 /*
  * tcache.c
  */
-extern tcache_scandesc *tcache_begin_scan(Relation rel, Bitmapset *required);
+extern tcache_scandesc *tcache_begin_scan(tcache_head *tc_head,
+										  Relation heap_rel);
 extern StromObject *tcache_scan_next(tcache_scandesc *tc_scan);
 extern StromObject *tcache_scan_prev(tcache_scandesc *tc_scan);
-extern void tcache_end_scan(tcache_scandesc *tc_scan);
+extern void tcache_end_scan(tcache_scandesc *tc_scan, bool put_tc_head);
 extern void tcache_rescan(tcache_scandesc *tc_scan);
 
 
@@ -621,6 +586,9 @@ extern void tcache_put_row_store(tcache_row_store *trs);
 extern bool tcache_row_store_insert_tuple(tcache_row_store *trs,
 										  HeapTuple tuple);
 extern void tcache_row_store_fixup_tcs_head(tcache_row_store *trs);
+
+extern tcache_column_store *tcache_get_column_store(tcache_column_store *tcs);
+extern void tcache_put_column_store(tcache_column_store *tcs);
 
 extern bool pgstrom_relation_has_synchronizer(Relation rel);
 extern Datum pgstrom_tcache_synchronizer(PG_FUNCTION_ARGS);
