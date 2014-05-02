@@ -569,14 +569,13 @@ extern tcache_scandesc *tcache_begin_scan(tcache_head *tc_head,
 										  Relation heap_rel);
 extern StromObject *tcache_scan_next(tcache_scandesc *tc_scan);
 extern StromObject *tcache_scan_prev(tcache_scandesc *tc_scan);
-extern void tcache_end_scan(tcache_scandesc *tc_scan, bool put_tc_head);
+extern void tcache_end_scan(tcache_scandesc *tc_scan);
 extern void tcache_rescan(tcache_scandesc *tc_scan);
 
 
 extern tcache_head *tcache_get_tchead(Oid reloid, Bitmapset *required,
 									  bool create_on_demand);
 extern void tcache_put_tchead(tcache_head *tc_head);
-
 
 extern tcache_row_store *tcache_create_row_store(TupleDesc tupdesc,
 												 int ncols,
@@ -593,6 +592,9 @@ extern void tcache_put_column_store(tcache_column_store *tcs);
 extern bool pgstrom_relation_has_synchronizer(Relation rel);
 extern Datum pgstrom_tcache_synchronizer(PG_FUNCTION_ARGS);
 
+
+extern Datum pgstrom_tcache_info(PG_FUNCTION_ARGS);
+extern Datum pgstrom_tcache_node_info(PG_FUNCTION_ARGS);
 
 
 

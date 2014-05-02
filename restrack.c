@@ -35,12 +35,15 @@ typedef struct {
 
 #define RESTRACK_HASHSZ		100
 
-#define IS_TRACKABLE_OBJECT(sobject)				\
-	((sobject)->stag == StromTag_MsgQueue ||		\
-	 (sobject)->stag == StromTag_DevProgram ||		\
-	 (sobject)->stag == StromTag_GpuScan ||			\
-	 (sobject)->stag == StromTag_GpuSort ||			\
-	 (sobject)->stag == StromTag_HashJoin)
+#define IS_TRACKABLE_OBJECT(sobject)			\
+	(StromTagIs(sobject,MsgQueue) ||			\
+	 StromTagIs(sobject,DevProgram) ||			\
+	 StromTagIs(sobject,TCacheHead) ||			\
+	 StromTagIs(sobject,TCacheRowStore) ||		\
+	 StromTagIs(sobject,TCacheColumnStore) ||	\
+	 StromTagIs(sobject,GpuScan)	||			\
+	 StromTagIs(sobject,GpuSort) ||				\
+	 StromTagIs(sobject,HashJoin))
 
 static dlist_head		tracker_free;
 static dlist_head		tracker_slot[RESTRACK_HASHSZ];
@@ -133,16 +136,15 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 			memset(&sobject->tracker, 0, sizeof(dlist_node));
 
 			if (StromTagIs(sobject, MsgQueue))
-			{
-				pgstrom_queue  *mqueue = (pgstrom_queue *) sobject;
-				pgstrom_close_queue(mqueue);
-			}
+				pgstrom_close_queue((pgstrom_queue *)sobject);
 			else if (StromTagIs(sobject, DevProgram))
-			{
-				Datum	dprog_key = PointerGetDatum(sobject);
-
-				pgstrom_put_devprog_key(dprog_key);
-			}
+				pgstrom_put_devprog_key(PointerGetDatum(sobject));
+			else if (StromTagIs(sobject, TCacheHead))
+				tcache_put_tchead((tcache_head *)sobject);
+			else if (StromTagIs(sobject, TCacheRowStore))
+				tcache_put_row_store((tcache_row_store *)sobject);
+			else if (StromTagIs(sobject, TCacheColumnStore))
+				tcache_put_column_store((tcache_column_store *)sobject);
 			else
 			{
 				Assert(IS_TRACKABLE_OBJECT(sobject));
@@ -181,6 +183,12 @@ pgstrom_track_object(StromObject *sobject)
 			pgstrom_close_queue((pgstrom_queue *)sobject);
 		else if (StromTagIs(sobject, DevProgram))
 			pgstrom_put_devprog_key((Datum)sobject);
+		else if (StromTagIs(sobject, TCacheHead))
+			tcache_put_tchead((tcache_head *)sobject);
+		else if (StromTagIs(sobject, TCacheRowStore))
+			tcache_put_row_store((tcache_row_store *)sobject);
+		else if (StromTagIs(sobject, TCacheColumnStore))
+			tcache_put_column_store((tcache_column_store *)sobject);
 		else
 			pgstrom_put_message((pgstrom_message *)sobject);
 		PG_RE_THROW();

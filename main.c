@@ -108,6 +108,9 @@ _PG_init(void)
 	/* registration of custom-plan providers */
 	pgstrom_init_gpuscan();
 
+	/* initialization of tcache & registration of columnizer */
+	pgstrom_init_tcache();
+
 	/* miscellaneous initializations */
 	pgstrom_init_misc_guc();
 	pgstrom_init_debug();

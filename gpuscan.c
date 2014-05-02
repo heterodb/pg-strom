@@ -86,6 +86,7 @@ typedef struct {
 	List			   *dev_quals;
 	tcache_head		   *tc_head;
 	tcache_scandesc	   *tc_scan;
+	bool				tcache_build;
 	bool				hybrid_scan;
 
 	pgstrom_queue	   *mqueue;
@@ -605,6 +606,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	{
 		/* perfect! we don't need to touch heap-pages in this scan */
 		pgstrom_track_object(&tc_head->sobj);
+		gss->tc_head = tc_head;
 		gss->tc_scan = tcache_begin_scan(tc_head, gss->scan_rel);
 	}
 	else
@@ -618,6 +620,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		if (tc_head)
 		{
 			pgstrom_track_object(&tc_head->sobj);
+			gss->tc_head = tc_head;
 			gss->tc_scan = tcache_begin_scan(tc_head, gss->scan_rel);
 			gss->hybrid_scan = true;
 		}
@@ -631,6 +634,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 			if (tc_head)
 			{
 				pgstrom_track_object(&tc_head->sobj);
+				gss->tc_head = tc_head;
 				gss->tc_scan = tcache_begin_scan(tc_head, gss->scan_rel);
 			}
 			else
@@ -648,6 +652,14 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 			}
 		}
 	}
+
+	/*
+	 * NOTE: in case when we have to build tcache structure, it needs
+	 * special treatment at end of the scan. (we have to revert the
+	 * state and contents if tcache-build is aborted under the way.)
+	 */
+	if (gss->tc_scan && gss->tc_scan->heapscan)
+		gss->tcache_build = true;
 
 	/*
 	 * Setting up kernel program, if needed
@@ -777,6 +789,10 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	bool		kernel_debug;
 	struct timeval tv1, tv2;
 
+	/* no more records to read! */
+	if (!gss->scan_desc && !gss->tc_scan)
+		return NULL;
+
 	/*
 	 * check status of pg_strom.kernel_debug
 	 */
@@ -823,12 +839,21 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 					break;
 				}
 			}
-			if (!HeapTupleIsValid(tuple))
+
+			if (HeapTupleIsValid(tuple))
+				sobject = &trs->sobj;
+			else
 			{
 				heap_endscan(gss->scan_desc);
 				gss->scan_desc = NULL;
+				if (trs->kern.nrows > 0)
+					sobject = &trs->sobj;
+				else
+				{
+					tcache_put_row_store(trs);
+					sobject = NULL;
+				}
 			}
-			sobject = &trs->sobj;
 		}
 		else
 		{
@@ -836,84 +861,100 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 				sobject = tcache_scan_next(gss->tc_scan);
 			else
 				sobject = tcache_scan_prev(gss->tc_scan);
+
+			if (!sobject)
+			{
+				tcache_end_scan(gss->tc_scan);
+				gss->tc_scan = NULL;
+			}
 		}
 		if (gss->pfm.enabled)
 			gettimeofday(&tv2, NULL);
 
-		/*
-		 * OK, let's create a pgstrom_gpuscan structure according to
-		 * the pgstrom_row_store being allocated above.
-		 */
-		if (StromTagIs(sobject, TCacheRowStore))
-			nrows = ((tcache_row_store *)sobject)->kern.nrows;
-		else
-			nrows = ((tcache_column_store *)sobject)->nrows;
-
-		length = (STROMALIGN(offsetof(pgstrom_gpuscan, kern.kparam)) +
-				  STROMALIGN(gss->kparambuf->length) +
-				  STROMALIGN(Max(offsetof(kern_resultbuf,
-										  results[nrows]),
-								 offsetof(kern_resultbuf,
-										  results[0]) +
-								 offsetof(kern_column_store,
-										  colmeta[gss->cs_attnums]) +
-								 offsetof(kern_toastbuf,
-										  coldir[gss->cs_attnums]) +
-								 sizeof(cl_int) * gss->cs_attnums)) +
-				  (kernel_debug ? KERNEL_DEBUG_BUFSIZE : 0));
-		gpuscan = pgstrom_shmem_alloc(length);
-		if (!gpuscan)
-			elog(ERROR, "out of shared memory");
-
-		/* Fields of pgstrom_gpuscan */
-		memset(gpuscan, 0, sizeof(pgstrom_gpuscan));
-		gpuscan->msg.sobj.stag = StromTag_GpuScan;
-		SpinLockInit(&gpuscan->msg.lock);
-		gpuscan->msg.refcnt = 1;
-		gpuscan->msg.respq = pgstrom_get_queue(gss->mqueue);
-		gpuscan->msg.cb_process = (StromTagIs(sobject, TCacheRowStore)
-								   ? clserv_process_gpuscan_row
-								   : clserv_process_gpuscan_column);
-		gpuscan->msg.cb_release = clserv_put_gpuscan;
-		gpuscan->msg.pfm.enabled = gss->pfm.enabled;
-		if (gpuscan->msg.pfm.enabled)
-			gpuscan->msg.pfm.time_to_load += timeval_diff(&tv1, &tv2);
-		gpuscan->dprog_key = pgstrom_retain_devprog_key(gss->dprog_key);
-		gpuscan->rc_store = sobject;
-
-		/* kern_parambuf */
-		kparam = &gpuscan->kern.kparam;
-		memcpy(kparam, gss->kparambuf, gss->kparambuf->length);
-		Assert(gss->kparambuf->length == STROMALIGN(gss->kparambuf->length));
-
-		/* kern_resultbuf portion */
-		kresult = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
-		kresult->nrooms = nrows;
-		kresult->nitems = 0;
-		kresult->debug_nums = 0;
-		kresult->debug_usage = (kernel_debug ? 0 : KERN_DEBUG_UNAVAILABLE);
-		kresult->errcode = 0;
-
-		/*
-		 * In case of no device program is valid, it expects all the
-		 * filtering jobs are done on host side later, so we modify
-		 * the result array as if all the records are visible according
-		 * to opencl kernel.
-		 * Elsewhere, result array of kern_resultbuf has another usage.
-		 * It is never used until writeback-dma happen, so we can use
-		 * this region as a source of the header portion of
-		 * kern_column_store structure.
-		 */
-		if (gss->dprog_key == 0)
+		if (sobject)
 		{
-			for (i=0; i < kresult->nrooms; i++)
-				kresult->results[i] = i;
-			kresult->nitems = kresult->nrooms;
+			/*
+			 * OK, let's create a pgstrom_gpuscan structure according to
+			 * the pgstrom_row_store being allocated above.
+			 */
+			if (StromTagIs(sobject, TCacheRowStore))
+				nrows = ((tcache_row_store *)sobject)->kern.nrows;
+			else
+				nrows = ((tcache_column_store *)sobject)->nrows;
+
+			length = (STROMALIGN(offsetof(pgstrom_gpuscan, kern.kparam)) +
+					  STROMALIGN(gss->kparambuf->length) +
+					  STROMALIGN(Max(offsetof(kern_resultbuf,
+											  results[nrows]),
+									 offsetof(kern_resultbuf,
+											  results[0]) +
+									 offsetof(kern_column_store,
+											  colmeta[gss->cs_attnums]) +
+									 offsetof(kern_toastbuf,
+											  coldir[gss->cs_attnums]) +
+									 sizeof(cl_int) * gss->cs_attnums)) +
+					  (kernel_debug ? KERNEL_DEBUG_BUFSIZE : 0));
+			gpuscan = pgstrom_shmem_alloc(length);
+			if (!gpuscan)
+				elog(ERROR, "out of shared memory");
+
+			/* Fields of pgstrom_gpuscan */
+			memset(gpuscan, 0, sizeof(pgstrom_gpuscan));
+			gpuscan->msg.sobj.stag = StromTag_GpuScan;
+			SpinLockInit(&gpuscan->msg.lock);
+			gpuscan->msg.refcnt = 1;
+			if (gss->dprog_key != 0)
+			{
+				gpuscan->msg.respq = pgstrom_get_queue(gss->mqueue);
+				gpuscan->dprog_key
+					= pgstrom_retain_devprog_key(gss->dprog_key);
+			}
+			gpuscan->msg.cb_process = (StromTagIs(sobject, TCacheRowStore)
+									   ? clserv_process_gpuscan_row
+									   : clserv_process_gpuscan_column);
+			gpuscan->msg.cb_release = clserv_put_gpuscan;
+			gpuscan->msg.pfm.enabled = gss->pfm.enabled;
+			if (gpuscan->msg.pfm.enabled)
+				gpuscan->msg.pfm.time_to_load += timeval_diff(&tv1, &tv2);
+			gpuscan->rc_store = sobject;
+
+			/* kern_parambuf */
+			kparam = &gpuscan->kern.kparam;
+			memcpy(kparam, gss->kparambuf, gss->kparambuf->length);
+			Assert(gss->kparambuf->length
+				   == STROMALIGN(gss->kparambuf->length));
+
+			/* kern_resultbuf portion */
+			kresult = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
+			kresult->nrooms = nrows;
+			kresult->nitems = 0;
+			kresult->debug_nums = 0;
+			kresult->debug_usage = (kernel_debug ? 0 : KERN_DEBUG_UNAVAILABLE);
+			kresult->errcode = 0;
+
+			/*
+			 * In case of no device program is valid, it expects all the
+			 * filtering jobs are done on host side later, so we modify
+			 * the result array as if all the records are visible according
+			 * to opencl kernel.
+			 * Elsewhere, result array of kern_resultbuf has another usage.
+			 * It is never used until writeback-dma happen, so we can use
+			 * this region as a source of the header portion of
+			 * kern_column_store structure.
+			 */
+			if (gss->dprog_key == 0)
+			{
+				for (i=0; i < kresult->nrooms; i++)
+					kresult->results[i] = i + 1;
+				kresult->nitems = kresult->nrooms;
+			}
+			else
+				pgstrom_setup_kern_colstore_head(gss, kresult);
+
+			Assert(pgstrom_shmem_sanitycheck(gpuscan));
 		}
 		else
-			pgstrom_setup_kern_colstore_head(gss, kresult);
-
-		Assert(pgstrom_shmem_sanitycheck(gpuscan));
+			gpuscan = NULL;
 	}
 	PG_CATCH();
 	{
@@ -926,7 +967,8 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	PG_END_TRY();
 
 	/* track local object */
-	pgstrom_track_object(&gpuscan->msg.sobj);
+	if (gpuscan)
+		pgstrom_track_object(&gpuscan->msg.sobj);
 
 	return gpuscan;
 }
@@ -1086,15 +1128,11 @@ gpuscan_fetch_tuple(CustomPlanState *node)
 		if (gss->curr_chunk)
 		{
 			pgstrom_message	   *msg = &gss->curr_chunk->msg;
-			StromObject		   *sobject = gss->curr_chunk->rc_store;
+			//StromObject		   *sobject = gss->curr_chunk->rc_store;
 
 			if (msg->pfm.enabled)
 				pgstrom_perfmon_add(&gss->pfm, &msg->pfm);
 			Assert(msg->refcnt == 1);
-			if (StromTagIs(sobject, TCacheRowStore))
-				tcache_put_row_store((tcache_row_store *)sobject);
-			else
-				tcache_put_column_store((tcache_column_store *)sobject);
 			pgstrom_untrack_object(&msg->sobj);
 			msg->cb_release(msg);
 			gss->curr_chunk = NULL;
@@ -1111,7 +1149,9 @@ gpuscan_fetch_tuple(CustomPlanState *node)
 		{
 			gss->curr_chunk = pgstrom_load_gpuscan(gss);
 			gss->curr_index = 0;
-			continue;
+			if (gss->curr_chunk)
+				continue;
+			break;
 		}
 		Assert(gss->mqueue != NULL);
 
@@ -1130,10 +1170,13 @@ gpuscan_fetch_tuple(CustomPlanState *node)
 		 * larger than minimum multiplicity, unless it does not exceed
 		 * maximum one and OpenCL server does not return a new response.
 		 */
-		while (gss->scan_desc != NULL &&
+		while ((gss->scan_desc || gss->tc_scan) &&
 			   gss->num_running <= pgstrom_max_async_chunks)
 		{
 			pgstrom_gpuscan	*gpuscan = pgstrom_load_gpuscan(gss);
+
+			if (!gpuscan)
+				break;	/* scan reached end of the relation */
 
 			if (!pgstrom_enqueue_message(&gpuscan->msg))
 			{
@@ -1346,11 +1389,30 @@ gpuscan_end(CustomPlanState *node)
 
 	if (gss->dprog_key)
 	{
-		pgstrom_put_devprog_key(gss->dprog_key);
 		pgstrom_untrack_object((StromObject *)gss->dprog_key);
+		pgstrom_put_devprog_key(gss->dprog_key);
 	}
-	pgstrom_untrack_object(&gss->mqueue->sobj);
-	pgstrom_close_queue(gss->mqueue);
+
+	if (gss->mqueue)
+	{
+		pgstrom_untrack_object(&gss->mqueue->sobj);
+		pgstrom_close_queue(gss->mqueue);
+	}
+
+	if (gss->tc_scan)
+	{
+		Assert(gss->tc_head);
+		tcache_end_scan(gss->tc_scan);
+
+		pgstrom_untrack_object(&gss->tc_head->sobj);
+		tcache_put_tchead(gss->tc_head);
+	}
+	else if (gss->tc_head)
+	{
+		pgstrom_untrack_object(&gss->tc_head->sobj);
+		if (!gss->tcache_build)
+			tcache_put_tchead(gss->tc_head);
+	}
 
 	/*
 	 * Free the exprcontext
@@ -1446,6 +1508,7 @@ gpuscan_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 	bms_free(tempset);
 	ExplainPropertyText("Host References", str.data, es);
 
+	resetStringInfo(&str);
 	tempset = bms_copy(gsplan->dev_attnums);
 	is_first = true;
 	while ((anum = bms_first_member(tempset)) >= 0)
@@ -2554,11 +2617,13 @@ clserv_put_gpuscan(pgstrom_message *msg)
 {
 	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *)msg;
 
-	/* unlink message queue */
-	pgstrom_put_queue(msg->respq);
+	/* unlink message queue (if exist) */
+	if (msg->respq)
+		pgstrom_put_queue(msg->respq);
 
-	/* unlink device program */
-	pgstrom_put_devprog_key(gpuscan->dprog_key);
+	/* unlink device program (if exist) */
+	if (gpuscan->dprog_key != 0)
+		pgstrom_put_devprog_key(gpuscan->dprog_key);
 
 	/* release row-store */
 	if (gpuscan->rc_store)

@@ -22,7 +22,9 @@
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_trigger.h"
+#include "catalog/pg_type.h"
 #include "commands/trigger.h"
+#include "funcapi.h"
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
 #include "storage/barrier.h"
@@ -72,6 +74,8 @@ static int	num_columnizers;
 /*
  * static declarations
  */
+static void tcache_reset_tchead(tcache_head *tc_head);
+
 static tcache_column_store *tcache_create_column_store(tcache_head *tc_head);
 static tcache_column_store *tcache_duplicate_column_store(tcache_head *tc_head,
 												  tcache_column_store *tcs_old,
@@ -97,9 +101,24 @@ static void tcache_copy_cs_varlena(tcache_column_store *tcs_dst, int base_dst,
 								   int attidx, int nitems);
 static void tcache_rebalance_tree(tcache_head *tc_head,
 								  tcache_node *tc_node,
-								  tcache_node **p_upper);
+								  tcache_node *tc_upper);
 
 static void pgstrom_wakeup_columnizer(bool wakeup_all);
+
+/*
+ * NOTE: we usually put NULLs on 'prev' and 'next' of dlist_node to
+ * mark this node is not linked.
+ */
+#define dnode_is_linked(dnode)		((dnode)->prev && (dnode)->next)
+
+/*
+ * NOTE: we cannot make a tcache_node compact under shared-lwlock,
+ * we set a special mark (FrozenTransactionId on xmax) on vacuumed
+ * tuples. These tuples are eventually released by columnizer process
+ * under the exclusive-lock.
+ */
+#define CachedTupleIsVacuumed(htup)				\
+	(HeapTupleHeaderGetRawXmax(htup) == FrozenTransactionId)
 
 /*
  * Misc utility functions
@@ -122,12 +141,6 @@ TCacheHeadLockedByMe(tcache_head *tc_head, bool be_exclusive)
 	}
 	return true;
 }
-
-/*
- * NOTE: we usually put NULLs on 'prev' and 'next' of dlist_node to
- * mark this node is not linked.
- */
-#define dnode_is_linked(dnode)		(!(dnode)->prev || !(dnode)->next)
 
 static inline int
 tcache_hash_index(Oid datoid, Oid reloid)
@@ -280,6 +293,56 @@ bitmapcopy(uint8 *dstmap, size_t dindex,
 		dst[i] = (dst[i] & mask) | (bitmap & ~mask);
 	}
 }
+
+static inline int
+tcache_get_tchead_state(tcache_head *tc_head)
+{
+	int		state;
+
+	SpinLockAcquire(&tc_head->lock);
+	state = tc_head->state;
+	SpinLockRelease(&tc_head->lock);
+
+	return state;
+}
+
+/*
+ * bms_fixup_sysattrs
+ *
+ * It fixes up the supplied bitmap to fix usual tcache manner.
+ * - system columns: dropped from the bitmap
+ * - whole row reference: expanded to all the regular columns
+ */
+static inline Bitmapset *
+bms_fixup_sysattrs(int nattrs, Bitmapset *required)
+{
+	Bitmapset  *result;
+	bitmapword	mask;
+	int			i, j;
+
+	if (!required)
+		return NULL;
+
+	mask = (bitmapword)(~((1UL << (1-FirstLowInvalidHeapAttributeNumber))- 1));
+	result = bms_copy(required);
+	if ((result->words[0] & mask) != result->words[0])
+	{
+		if (bms_is_member(-FirstLowInvalidHeapAttributeNumber, required))
+		{
+			for (i=1; i <= nattrs; i++)
+			{
+				j = i - FirstLowInvalidHeapAttributeNumber;
+				result = bms_add_member(result, j);
+			}
+		}
+		result->words[0] &= mask;
+	}
+	return result;
+}
+
+
+
+
 
 /*
  * 
@@ -675,7 +738,7 @@ tcache_alloc_tcnode(tcache_head *tc_head)
 		}
 		dnode = dlist_pop_head_node(&tc_head->free_list);
 		tc_node = dlist_container(tcache_node, chain, dnode);
-		memset(&tc_node, 0, sizeof(tcache_node));
+		memset(tc_node, 0, sizeof(tcache_node));
 
 		SpinLockInit(&tc_node->lock);
 		tc_node->tcs = tcache_create_column_store(tc_head);
@@ -716,6 +779,8 @@ static void
 tcache_free_node_recurse(tcache_head *tc_head, tcache_node *tc_node)
 {
 	/* NOTE: caller must be responsible to hold tc_head->lock */
+
+	elog(INFO, "tcache_free_node_recurse is called on %p", tc_node);
 
 	if (tc_node->right)
 		tcache_free_node_recurse(tc_head, tc_node->right);
@@ -1144,7 +1209,6 @@ tcache_compaction_tcnode(tcache_head *tc_head, tcache_node *tc_node)
 		/* OK, let's make it compacted */
 		for (i=0, j=0; i < tcs_old->nrows; i++)
 		{
-			TransactionId	xmax;
 			BlockNumber		blkno_cur;
 
 			/*
@@ -1152,8 +1216,7 @@ tcache_compaction_tcnode(tcache_head *tc_head, tcache_node *tc_node)
 			 * FrozenTransactionId less than FirstNormalTransactionId.
 			 * Nobody will never see the record, so we can skip it.
 			 */
-			xmax = HeapTupleHeaderGetRawXmax(&tcs_old->theads[i]);
-			if (xmax < FirstNormalTransactionId)
+			if (CachedTupleIsVacuumed(&tcs_old->theads[i]))
 				continue;
 
 			/*
@@ -1353,7 +1416,7 @@ tcache_try_merge_recurse(tcache_head *tc_head,
 		{
 			tc_node->l_depth = Max(tc_node->left->l_depth,
 								   tc_node->left->r_depth) + 1;
-			tcache_rebalance_tree(tc_head, tc_node->left, &tc_node->left);
+			tcache_rebalance_tree(tc_head, tc_node->left, tc_node);
 		}
 	}
 	else if (tc_node->tcs->blkno_max < target->tcs->blkno_min)
@@ -1374,7 +1437,7 @@ tcache_try_merge_recurse(tcache_head *tc_head,
 		{
 			tc_node->r_depth = Max(tc_node->right->l_depth,
 								   tc_node->right->r_depth) + 1;
-			tcache_rebalance_tree(tc_head, tc_node->right, &tc_node->right);
+			tcache_rebalance_tree(tc_head, tc_node->right, tc_node);
 		}
 	}
 	else
@@ -1427,7 +1490,7 @@ tcache_try_merge_tcnode(tcache_head *tc_head, tcache_node *tc_node)
 								 NULL,
 								 NULL,
 								 tc_node);
-		tcache_rebalance_tree(tc_head, tc_head->tcs_root, &tc_head->tcs_root);
+		tcache_rebalance_tree(tc_head, tc_head->tcs_root, NULL);
 	}
 }
 
@@ -1580,6 +1643,16 @@ tcache_split_tcnode(tcache_head *tc_head, tcache_node *tc_node_old)
 	 * also, not only toast-buffers. Usually, it may be expensive.
 	 */
 	tcache_compaction_tcnode(tc_head, tc_node_old);
+
+	/*
+	 * NOTE - Even once we split a node into two portion, we may need to
+	 * merge them again because of over-compaction, if chunk has many
+	 * junk records.
+	 * 
+	 * TODO - Is it possible to determine necessity of node split, prior
+	 * to actual jobs.
+	 */
+	tcache_try_merge_tcnode(tc_head, tc_node_old);
 }
 
 /*
@@ -1589,13 +1662,24 @@ tcache_split_tcnode(tcache_head *tc_head, tcache_node *tc_node_old)
  * a balanced tree.
  */
 #define TCACHE_NODE_DEPTH(tc_node) \
-	(!(tc_node) ? 0 : Max((tc_node)->l_depth, (tc_node)->r_depth))
+	(!(tc_node) ? 0 : Max((tc_node)->l_depth, (tc_node)->r_depth) + 1)
 
 static void
-tcache_rebalance_tree(tcache_head *tc_head, tcache_node *tc_node,
-					  tcache_node **p_upper)
+tcache_rebalance_tree(tcache_head *tc_head,
+					  tcache_node *tc_node,
+					  tcache_node *tc_upper)
 {
+	int		branch;
+
 	Assert(TCacheHeadLockedByMe(tc_head, true));
+	Assert(!tc_upper || (tc_upper->left == tc_node ||
+						 tc_upper->right == tc_node));
+	if (!tc_upper)
+		branch = 0;
+	else if (tc_upper->left == tc_node)
+		branch = -1;
+	else
+		branch = 1;
 
 	if (tc_node->l_depth + 1 < tc_node->r_depth)
 	{
@@ -1606,9 +1690,20 @@ tcache_rebalance_tree(tcache_head *tc_head, tcache_node *tc_node,
 		r_node->left = tc_node;
 
 		tc_node->r_depth = TCACHE_NODE_DEPTH(tc_node->right);
-		r_node->l_depth = TCACHE_NODE_DEPTH(r_node);
+		r_node->l_depth = TCACHE_NODE_DEPTH(tc_node);
 
-		*p_upper = r_node;
+		if (branch > 0)
+		{
+			tc_upper->right = r_node;
+			tc_upper->r_depth = TCACHE_NODE_DEPTH(r_node);
+		}
+		else if (branch < 0)
+		{
+			tc_upper->left = r_node;
+			tc_upper->l_depth = TCACHE_NODE_DEPTH(r_node);
+		}
+		else
+			tc_head->tcs_root = r_node;
 	}
 	else if (tc_node->l_depth > tc_node->r_depth + 1)
 	{
@@ -1619,9 +1714,20 @@ tcache_rebalance_tree(tcache_head *tc_head, tcache_node *tc_node,
 		l_node->right = tc_node;
 
 		tc_node->l_depth = TCACHE_NODE_DEPTH(tc_node->left);
-		l_node->r_depth = TCACHE_NODE_DEPTH(l_node);
+		l_node->r_depth = TCACHE_NODE_DEPTH(tc_node);
 
-		*p_upper = l_node;
+		if (branch > 0)
+		{
+			tc_upper->right = l_node;
+			tc_upper->r_depth = TCACHE_NODE_DEPTH(l_node);
+		}
+		else if (branch < 0)
+		{
+			tc_upper->left = l_node;
+			tc_upper->l_depth = TCACHE_NODE_DEPTH(l_node);
+		}
+		else
+			tc_head->tcs_root = l_node;
 	}
 }
 
@@ -1813,9 +1919,6 @@ do_insert_tuple(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 
 	Assert(TCacheHeadLockedByMe(tc_head, true));
 	Assert(tcs->nrows < NUM_ROWS_PER_COLSTORE);
-	Assert(tcs->nrows == 0 ||
-		   (ItemPointerGetBlockNumber(&tuple->t_self) >= tcs->blkno_min &&
-			ItemPointerGetBlockNumber(&tuple->t_self) <= tcs->blkno_max));
 
 	heap_deform_tuple(tuple, tupdesc, values, isnull);
 
@@ -1849,7 +1952,12 @@ do_insert_tuple(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 			tcache_toastbuf	*tbuf = tcs->cdata[i].toast;
 			Size		vsize = VARSIZE_ANY(values[j]);
 
-			if (tbuf->tbuf_usage + MAXALIGN(vsize) < tbuf->tbuf_length)
+			if (!tbuf)
+			{
+				/* assign a toast buffer with default size */
+				tcs->cdata[i].toast = tbuf = tcache_create_toast_buffer(0);
+			}
+			else if (tbuf->tbuf_usage + MAXALIGN(vsize) < tbuf->tbuf_length)
 			{
 				tcache_toastbuf	*tbuf_new;
 
@@ -1915,6 +2023,9 @@ do_insert_tuple(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 	/* all valid, so increment nrows */
 	pg_memory_barrier();
 	tcs->nrows++;
+
+	Assert(ItemPointerGetBlockNumber(&tuple->t_self) >= tcs->blkno_min &&
+		   ItemPointerGetBlockNumber(&tuple->t_self) <= tcs->blkno_max);
 }
 
 static void
@@ -1946,9 +2057,9 @@ retry:
 				tc_node->left = tcache_alloc_tcnode(tc_head);
 				tc_node->l_depth = 1;
 			}
-			do_insert_tuple(tc_head, tc_node->left, tuple);
+			tcache_insert_tuple(tc_head, tc_node->left, tuple);
 			tc_node->l_depth = TCACHE_NODE_DEPTH(tc_node->left);
-			tcache_rebalance_tree(tc_head, tc_node->left, &tc_node->left);
+			tcache_rebalance_tree(tc_head, tc_node->left, tc_node);
 		}
 	}
 	else if (blkno_cur > tcs->blkno_max)
@@ -1962,9 +2073,9 @@ retry:
 				tc_node->right = tcache_alloc_tcnode(tc_head);
 				tc_node->r_depth = 1;
 			}
-			do_insert_tuple(tc_head, tc_node->right, tuple);
+			tcache_insert_tuple(tc_head, tc_node->right, tuple);
 			tc_node->r_depth = TCACHE_NODE_DEPTH(tc_node->right);
-			tcache_rebalance_tree(tc_head, tc_node->right, &tc_node->right);
+			tcache_rebalance_tree(tc_head, tc_node->right, tc_node);
 		}
 	}
 	else
@@ -2004,9 +2115,7 @@ tcache_build_main(tcache_head *tc_head, HeapScanDesc heapscan)
 			break;
 
 		tcache_insert_tuple(tc_head, tc_head->tcs_root, tuple);
-		tcache_rebalance_tree(tc_head,
-							  tc_head->tcs_root,
-							  &tc_head->tcs_root);
+		tcache_rebalance_tree(tc_head, tc_head->tcs_root, NULL);
 	}
 }
 
@@ -2028,6 +2137,11 @@ tcache_begin_scan(tcache_head *tc_head, Relation heap_rel)
 	tc_scan->tcs_blkno_min = InvalidBlockNumber;
 	tc_scan->tcs_blkno_max = InvalidBlockNumber;
 	tc_scan->trs_curr = NULL;
+
+	/*
+	 * TODO: returns NULL, if concurrent session builds a tcache, to avoid
+	 * problems around unlink.
+	 */
 
 	LWLockAcquire(&tc_head->lwlock, LW_SHARED);
 retry:
@@ -2071,6 +2185,7 @@ retry:
 		Assert(tc_head->state == TCACHE_STATE_READY);
 		SpinLockRelease(&tc_head->lock);
 	}
+	elog(INFO, "tc_scan->heapscan = %p", tc_scan->heapscan);
 	return tc_scan;
 }
 
@@ -2089,7 +2204,9 @@ tcache_scan_next(tcache_scandesc *tc_scan)
 	 */
 	if (tc_scan->heapscan)
 	{
+		elog(INFO, "now doing cache build");
 		tcache_build_main(tc_head, tc_scan->heapscan);
+		elog(INFO, "cache build done");
 		heap_endscan(tc_scan->heapscan);
 		tc_scan->heapscan = NULL;
 	}
@@ -2254,7 +2371,7 @@ tcache_scan_prev(tcache_scandesc *tc_scan)
 }
 
 void
-tcache_end_scan(tcache_scandesc *tc_scan, bool put_tc_head)
+tcache_end_scan(tcache_scandesc *tc_scan)
 {
 	tcache_head	   *tc_head = tc_scan->tc_head;
 
@@ -2262,34 +2379,24 @@ tcache_end_scan(tcache_scandesc *tc_scan, bool put_tc_head)
 	 * If scan is already reached end of the relation, tc_scan->scan shall
 	 * be already closed. If not, it implies scan is aborted in the middle.
 	 */
-	SpinLockAcquire(&tc_head->lock);
 	if (tc_scan->heapscan)
 	{
-		Assert(tc_head->state == TCACHE_STATE_NOW_BUILD);
-		tcache_free_node_recurse(tc_head, tc_head->tcs_root);
-		tc_head->state = TCACHE_STATE_NOT_BUILT;
-		SpinLockRelease(&tc_head->lock);
-
+		Assert(tcache_get_tchead_state(tc_head) == TCACHE_STATE_NOW_BUILD);
+		tcache_reset_tchead(tc_head);
 		heap_endscan(tc_scan->heapscan);
 	}
 	else if (tc_head->state == TCACHE_STATE_NOW_BUILD)
 	{
 		/* OK, cache was successfully built */
+		SpinLockAcquire(&tc_head->lock);
         tc_head->state = TCACHE_STATE_READY;
 		SpinLockRelease(&tc_head->lock);
 	}
 	else
 	{
-		Assert(tc_head->state == TCACHE_STATE_READY);
-		SpinLockRelease(&tc_head->lock);
+		Assert(tcache_get_tchead_state(tc_head) == TCACHE_STATE_READY);
 	}
-
-	/*
-	 * NOTE: caller is responsible to put row- and column- store,
-	 * but tcache_head can be put if put_tc_head
-	 */
-	if (put_tc_head)
-		tcache_put_tchead(tc_head);
+	LWLockRelease(&tc_head->lwlock);
 
 	pfree(tc_scan);
 }
@@ -2395,7 +2502,7 @@ tcache_create_tchead(Oid reloid, Bitmapset *required,
 		tc_head->datoid = MyDatabaseId;
 		tc_head->reloid = reloid;
 
-		tempset = bms_copy(required);
+		tempset = bms_fixup_sysattrs(relform->relnatts, required);
 		if (tcache_old)
 		{
 			for (i=0; i < tcache_old->ncols; i++)
@@ -2479,14 +2586,20 @@ tcache_put_tchead_nolock(tcache_head *tc_head)
 	 *
 	 * Also, it has to be done prior to release locking.
 	 */
-
-
 	if (--tc_head->refcnt == 0)
 	{
 		dlist_mutable_iter iter;
 
-		Assert(!dnode_is_linked(&tc_head->chain));
-		Assert(!dnode_is_linked(&tc_head->lru_chain));
+		if (dnode_is_linked(&tc_head->chain))
+		{
+			dlist_delete(&tc_head->chain);
+			memset(&tc_head->chain, 0, sizeof(dlist_node));
+		}
+		if (dnode_is_linked(&tc_head->lru_chain))
+		{
+			dlist_delete(&tc_head->lru_chain);
+			memset(&tc_head->lru_chain, 0, sizeof(dlist_node));
+		}
 
 		/* release tcache_node root recursively */
 		tcache_free_node_recurse(tc_head, tc_head->tcs_root);
@@ -2524,42 +2637,6 @@ tcache_put_tchead(tcache_head *tc_head)
 	SpinLockRelease(&tc_common->lock);
 }
 
-/*
- * tcache_unlink_tchead(_nolock)
- *
- * It unlinks tcache_head from the global hash table and decrements
- * reference counter of supplied object. This routine has to be
- * called within same critical section that looked up this object
- * on the hash table.
- */
-static void
-tcache_unlink_tchead_nolock(tcache_head *tc_head)
-{
-	Assert(tc_head->chain.prev != NULL && tc_head->chain.next != NULL);
-	dlist_delete(&tc_head->chain);
-	dlist_delete(&tc_head->lru_chain);
-	memset(&tc_head->chain, 0, sizeof(dlist_node));
-	memset(&tc_head->lru_chain, 0, sizeof(dlist_node));
-
-	tcache_put_tchead_nolock(tc_head);
-}
-
-static void
-tcache_unlink_tchead(tcache_head *tc_head)
-{
-	/*
-	 * NOTE: we need to check whether tc_head is still linked to the global
-	 * hash table actually, or not. If concurrent task already unlinked,
-	 * nothing to do anymore.
-	 */
-	SpinLockAcquire(&tc_common->lock);
-	if (!tc_head->chain.prev && !tc_head->chain.next)
-		tcache_unlink_tchead_nolock(tc_head);
-	else
-		tcache_put_tchead_nolock(tc_head);
-	SpinLockRelease(&tc_common->lock);
-}
-
 tcache_head *
 tcache_get_tchead(Oid reloid, Bitmapset *required,
 				  bool create_on_demand)
@@ -2580,52 +2657,34 @@ tcache_get_tchead(Oid reloid, Bitmapset *required,
 			if (temp->datoid == MyDatabaseId &&
 				temp->reloid == reloid)
 			{
-				Bitmapset  *tempset = bms_copy(required);
-				int			i, j = 0;
-				int			k, l;
+				Bitmapset  *tempset;
+				int			i, j, k;
 
+				tempset = bms_fixup_sysattrs(temp->tupdesc->natts,
+											 required);
+				j = 0;
 				while ((i = bms_first_member(tempset)) >= 0 &&
 					   j < temp->tupdesc->natts)
 				{
 					i += FirstLowInvalidHeapAttributeNumber;
 
-					/* all the system attributes are cached in the default */
-					if (i < 0)
-						continue;
-
 					/*
-					 * whole row reference is equivalent to references to
-					 * all the valid (none dropped) columns.
-					 * also, row reference shall apear prior to all the
-					 * regular columns because of its attribute number
+					 * All the system attributes and whole-row reference
+					 * are already handled in bms_fixup_sysattrs.
 					 */
-					if (i == InvalidAttrNumber)
-					{
-						for (k=0; k < temp->tupdesc->natts; k++)
-						{
-							if (temp->tupdesc->attrs[k]->attisdropped)
-								continue;
+					Assert(i > 0);
 
-							l = k - FirstLowInvalidHeapAttributeNumber;
-							tempset = bms_add_member(tempset, l);
-						}
-						continue;
-					}
-
-					/*
-					 * Is this regular column cached?
-					 */
+					/* Is this column cached? */
 					while (j < temp->ncols)
 					{
-						k = temp->i_cached[j];
-						if (temp->tupdesc->attrs[k]->attnum != i)
+						k = temp->i_cached[j++];
+						if (temp->tupdesc->attrs[k]->attnum == i)
 							break;
-						j++;
 					}
 				}
 				bms_free(tempset);
 
-				if (j < temp->ncols)
+				if (j <= temp->ncols)
 				{
 					/*
 					 * Perfect! Cache of the target relation exists and all
@@ -2674,14 +2733,64 @@ tcache_get_tchead(Oid reloid, Bitmapset *required,
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+	SpinLockRelease(&tc_common->lock);
 
 	return tc_head;
 }
 
+static void
+tcache_reset_tchead(tcache_head *tc_head)
+{
+	dlist_mutable_iter	iter;
+	tcache_node		   *tc_node;
+	tcache_column_store *tcs;
+	int					i;
 
+	Assert(TCacheHeadLockedByMe(tc_head, false));
 
+	SpinLockAcquire(&tc_common->lock);
+	if (dnode_is_linked(&tc_head->pending_chain))
+	{
+		dlist_delete(&tc_head->pending_chain);
+		memset(&tc_head->pending_chain, 0, sizeof(dlist_node));
+	}
+	SpinLockRelease(&tc_common->lock);
 
+	SpinLockAcquire(&tc_head->lock);
+	tc_node = tc_head->tcs_root;
+	if (tc_node->right)
+		tcache_free_node_recurse(tc_head, tc_node->right);
+	if (tc_node->left)
+		tcache_free_node_recurse(tc_head, tc_node->left);
+	tcs = tc_node->tcs;
+	tcs->nrows = 0;
+	tcs->njunks = 0;
+	for (i=0; i < tcs->ncols; i++)
+	{
+		tcache_toastbuf *tbuf = tcs->cdata[i].toast;
 
+		if (tbuf)
+		{
+			tbuf->tbuf_usage = offsetof(tcache_toastbuf, data[0]);
+			tbuf->tbuf_junk = 0;
+		}
+	}
+
+	dlist_foreach_modify(iter, &tc_head->trs_list)
+	{
+		tcache_row_store   *trs
+			= dlist_container(tcache_row_store, chain, iter.cur);
+		dlist_delete(&trs->chain);
+		tcache_put_row_store(trs);
+	}
+	Assert(dlist_is_empty(&tc_head->trs_list));
+	if (tc_head->trs_curr)
+		tcache_put_row_store(tc_head->trs_curr);
+
+	/* reset status of tc_head */
+	tc_head->state = TCACHE_STATE_NOT_BUILT;
+	SpinLockRelease(&tc_head->lock);
+}
 
 
 
@@ -2749,7 +2858,7 @@ pgstrom_tcache_synchronizer(PG_FUNCTION_ARGS)
 				 TRIGGER_FIRED_BY_TRUNCATE(tg_event))
 		{
 			/* after truncate for statement */
-			tcache_unlink_tchead(tc_head);
+			tcache_put_tchead(tc_head);
 		}
 		else
 			elog(ERROR, "%s: fired on unexpected context (%08x)",
@@ -2936,7 +3045,7 @@ pgstrom_assign_synchronizer(Oid reloid)
 	{
 		class_form->relhastriggers = true;
 		heap_inplace_update(class_rel, tuple);
-		CatalogUpdateIndexes(class_rel, tuple);
+		//CatalogUpdateIndexes(class_rel, tuple);
 	}
 skip_make_trigger:
 	systable_endscan(sscan);
@@ -3289,7 +3398,7 @@ tcache_on_object_access(ObjectAccessType access,
 					/* XXX - usually, only one cache per relation is linked */
 					if (tc_head->datoid == MyDatabaseId &&
 						tc_head->reloid == objectId)
-						tcache_unlink_tchead_nolock(tc_head);
+						tcache_put_tchead_nolock(tc_head);
 				}
 			}
 			PG_CATCH();
@@ -3345,6 +3454,9 @@ pgstrom_columnizer_main(Datum index)
 	dlist_push_tail(&tc_common->inactive_list, &columnizer->chain);
 	SpinLockRelease(&tc_common->lock);
 
+	/* We're now ready to receive signals */
+	BackgroundWorkerUnblockSignals();
+
 	while (true)
 	{
 		tcache_head		   *tc_head = NULL;
@@ -3352,20 +3464,30 @@ pgstrom_columnizer_main(Datum index)
 		tcache_row_store   *trs;
 		dlist_node	*dnode;
 
-		rc = WaitLatch(&MyProc->procLatch,
-					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-					   15 * 1000);	/* wake up per 15s at least */
-		if (rc & WL_POSTMASTER_DEATH)
-			return;
-
+	retry:
 		SpinLockAcquire(&tc_common->lock);
-		if (!dlist_is_empty(&tc_common->pending_list))
+		if (dlist_is_empty(&tc_common->pending_list))
+		{
+			dlist_push_tail(&tc_common->inactive_list, &columnizer->chain);
+			SpinLockRelease(&tc_common->lock);
+
+			ResetLatch(&MyProc->procLatch);
+			rc = WaitLatch(&MyProc->procLatch,
+						   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+						   15 * 1000);  /* wake up per 15s at least */
+			if (rc & WL_POSTMASTER_DEATH)
+				return;
+			goto retry;
+		}
+		else
 		{
 			dnode = dlist_pop_head_node(&tc_common->pending_list);
 			tc_head = dlist_container(tcache_head, pending_chain, dnode);
 			tc_head->refcnt++;
 			columnizer->datoid = tc_head->datoid;
 			columnizer->reloid = tc_head->reloid;
+
+			dlist_delete(&columnizer->chain);
 		}
 		SpinLockRelease(&tc_common->lock);
 
@@ -3507,3 +3629,390 @@ pgstrom_init_tcache(void)
 	shmem_startup_hook_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_tcache;
 }
+
+/*
+ *
+ * Utility functions to dump internal status
+ *
+ */
+typedef struct
+{
+	Oid		datoid;
+	Oid		reloid;
+	int2vector *cached;
+	int		refcnt;
+	int		state;
+	int		lwlock;	/* 0: unlocked, 1: shared locked, 2: exclusice locked */
+} tcache_head_info;
+
+Datum
+pgstrom_tcache_info(PG_FUNCTION_ARGS)
+{
+	FuncCallContext	   *fncxt;
+	tcache_head_info   *tchead_info;
+	HeapTuple	tuple;
+	Datum		values[6];
+	bool		isnull[6];
+	char		buf[100];
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		TupleDesc		tupdesc;
+		MemoryContext	oldcxt;
+		List		   *info_list = NIL;
+
+		fncxt = SRF_FIRSTCALL_INIT();
+		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(6, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "datoid",
+						   OIDOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "reloid",
+						   OIDOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "cached",
+						   INT2VECTOROID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "refcnt",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "state",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 6, "lwlock",
+						   TEXTOID, -1, 0);
+		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
+		SpinLockAcquire(&tc_common->lock);
+		PG_TRY();
+		{
+			dlist_iter	iter;
+			int			i;
+
+			for (i=0; i < TCACHE_HASH_SIZE; i++)
+			{
+				dlist_foreach(iter, &tc_common->slot[i])
+				{
+					tcache_head *tc_head
+						= dlist_container(tcache_head, chain, iter.cur);
+
+					tchead_info = palloc(sizeof(tcache_head_info));
+					tchead_info->datoid = tc_head->datoid;
+					tchead_info->reloid = tc_head->reloid;
+					tchead_info->cached = buildint2vector(tc_head->i_cached,
+														   tc_head->ncols);
+					tchead_info->refcnt = tc_head->refcnt;
+					SpinLockAcquire(&tc_head->lock);
+					tchead_info->state = tc_head->state;
+					SpinLockRelease(&tc_head->lock);
+					SpinLockAcquire(&tc_head->lwlock.mutex);
+					if (tc_head->lwlock.exclusive > 0)
+						tchead_info->lwlock = 2;
+					else if (tc_head->lwlock.shared > 0)
+						tchead_info->lwlock = 1;
+					else
+						tchead_info->lwlock = 0;
+					SpinLockRelease(&tc_head->lwlock.mutex);
+					info_list = lappend(info_list, tchead_info);
+				}
+			}
+		}
+		PG_CATCH();
+		{
+			SpinLockRelease(&tc_common->lock);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		SpinLockRelease(&tc_common->lock);
+
+		fncxt->user_fctx = info_list;
+
+		MemoryContextSwitchTo(oldcxt);
+	}
+	fncxt = SRF_PERCALL_SETUP();
+
+	if (fncxt->user_fctx == NIL)
+		SRF_RETURN_DONE(fncxt);
+
+	tchead_info = linitial((List *) fncxt->user_fctx);
+	fncxt->user_fctx = list_delete_first((List *)fncxt->user_fctx);
+
+	memset(isnull, 0, sizeof(isnull));
+	values[0] = ObjectIdGetDatum(tchead_info->datoid);
+	values[1] = ObjectIdGetDatum(tchead_info->reloid);
+	values[2] = PointerGetDatum(tchead_info->cached);
+	values[3] = Int32GetDatum(tchead_info->refcnt);
+	if (tchead_info->state == TCACHE_STATE_NOT_BUILT)
+		snprintf(buf, sizeof(buf), "not built");
+	else if (tchead_info->state == TCACHE_STATE_NOW_BUILD)
+		snprintf(buf, sizeof(buf), "now build");
+	else if (tchead_info->state == TCACHE_STATE_READY)
+		snprintf(buf, sizeof(buf), "ready");
+	else
+		snprintf(buf, sizeof(buf), "unexpected (%d)", tchead_info->state);
+	values[4] = CStringGetTextDatum(buf);
+
+	if (tchead_info->lwlock == 2)
+		snprintf(buf, sizeof(buf), "exclusive");
+	else if (tchead_info->lwlock == 1)
+		snprintf(buf, sizeof(buf), "shared");
+	else
+		snprintf(buf, sizeof(buf), "unlocked");
+	values[5] = CStringGetTextDatum(buf);
+
+	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
+
+	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
+}
+PG_FUNCTION_INFO_V1(pgstrom_tcache_info);
+
+typedef struct
+{
+	bool		row_store;
+	void	   *addr;
+	void	   *r_node;
+	void	   *l_node;
+	int			r_depth;
+	int			l_depth;
+	int			refcnt;
+	int			nrows;
+	size_t		usage;
+	size_t		length;
+	BlockNumber	blkno_min;
+	BlockNumber	blkno_max;
+} tcache_node_info;
+
+static List *
+collect_tcache_column_node_info(tcache_head *tc_head,
+								tcache_node *tc_node,
+								List *info_list)
+{
+	tcache_node_info    *tcnode_info;
+	tcache_column_store *tcs;
+	Form_pg_attribute	 attr;
+	int			i, j;
+
+	tcnode_info = palloc0(sizeof(tcache_node_info));
+	tcnode_info->row_store = false;
+	tcnode_info->addr = tc_node;
+	tcnode_info->r_node = tc_node->right;
+	tcnode_info->l_node = tc_node->left;
+	tcnode_info->r_depth = tc_node->r_depth;
+	tcnode_info->l_depth = tc_node->l_depth;
+
+	SpinLockAcquire(&tc_node->lock);
+    tcs = tc_node->tcs;
+	SpinLockAcquire(&tcs->refcnt_lock);
+	tcnode_info->refcnt = tcs->refcnt;
+	SpinLockRelease(&tcs->refcnt_lock);
+	tcnode_info->nrows = tcs->nrows;
+	tcnode_info->usage =
+		(STROMALIGN(offsetof(tcache_column_store, cdata[tcs->ncols])) +
+		 STROMALIGN(sizeof(ItemPointerData) * tcs->nrows) +
+		 STROMALIGN(sizeof(HeapTupleHeaderData) * tcs->nrows));
+	tcnode_info->length =
+		(STROMALIGN(offsetof(tcache_column_store, cdata[tcs->ncols])) +
+		 STROMALIGN(sizeof(ItemPointerData) * NUM_ROWS_PER_COLSTORE) +
+		 STROMALIGN(sizeof(HeapTupleHeaderData) * NUM_ROWS_PER_COLSTORE));
+	for (i=0; i < tcs->ncols; i++)
+	{
+		j = tc_head->i_cached[i];
+
+		attr = tc_head->tupdesc->attrs[j];
+		if (!attr->attnotnull)
+		{
+			Assert(tcs->cdata[i].isnull != NULL);
+			tcnode_info->usage +=
+				STROMALIGN((tcs->nrows + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+			tcnode_info->length +=
+				STROMALIGN(NUM_ROWS_PER_COLSTORE / BITS_PER_BYTE);
+		}
+		if (attr->attlen > 0)
+		{
+			tcnode_info->usage += STROMALIGN(attr->attlen * tcs->nrows);
+			tcnode_info->length += STROMALIGN(attr->attlen *
+											  NUM_ROWS_PER_COLSTORE);
+		}
+		else
+		{
+			tcnode_info->usage += STROMALIGN(sizeof(cl_uint) * tcs->nrows);
+			tcnode_info->length += STROMALIGN(sizeof(cl_uint) *
+											  NUM_ROWS_PER_COLSTORE);
+			if (tcs->cdata[i].toast)
+			{
+				tcnode_info->usage += tcs->cdata[i].toast->tbuf_usage;
+				tcnode_info->length += tcs->cdata[i].toast->tbuf_length;
+			}
+		}
+	}
+	tcnode_info->blkno_min = tcs->blkno_min;
+	tcnode_info->blkno_max = tcs->blkno_max;
+	SpinLockRelease(&tc_node->lock);
+
+	info_list = lappend(info_list, tcnode_info);
+
+	if (tc_node->right)
+		info_list = collect_tcache_column_node_info(tc_head,
+													tc_node->right,
+													info_list);
+	if (tc_node->left)
+		info_list = collect_tcache_column_node_info(tc_head,
+													tc_node->left,
+													info_list);
+	return info_list;
+}
+
+static List *
+collect_tcache_row_node_info(tcache_head *tc_head,
+							 tcache_row_store *trs,
+							 List *info_list)
+{
+	tcache_node_info   *tcnode_info = palloc0(sizeof(tcache_node_info));
+
+	tcnode_info->row_store = true;
+	tcnode_info->addr = trs;
+	SpinLockAcquire(&trs->refcnt_lock);
+	tcnode_info->refcnt = trs->refcnt;
+	SpinLockRelease(&trs->refcnt_lock);
+	tcnode_info->nrows = trs->kern.nrows;
+	tcnode_info->usage = ROWSTORE_DEFAULT_SIZE;
+	tcnode_info->blkno_min = trs->blkno_min;
+	tcnode_info->blkno_max = trs->blkno_max;
+
+	return lappend(info_list, tcnode_info);
+}
+
+static List *
+collect_tcache_node_info(tcache_head *tc_head)
+{
+	List   *info_list = NIL;
+
+	if (tc_head->tcs_root)
+		info_list = collect_tcache_column_node_info(tc_head,
+													tc_head->tcs_root,
+													info_list);
+	SpinLockAcquire(&tc_head->lock);
+	PG_TRY();
+	{
+		tcache_row_store *trs;
+		dlist_iter	iter;
+
+		dlist_foreach(iter, &tc_head->trs_list)
+		{
+			trs = dlist_container(tcache_row_store, chain, iter.cur);
+
+			info_list = collect_tcache_row_node_info(tc_head, trs, info_list);
+		}
+		if (tc_head->trs_curr)
+			info_list = collect_tcache_row_node_info(tc_head, trs, info_list);
+	}
+	PG_CATCH();
+	{
+		SpinLockRelease(&tc_head->lock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	SpinLockRelease(&tc_head->lock);
+
+	return info_list;
+}
+
+Datum
+pgstrom_tcache_node_info(PG_FUNCTION_ARGS)
+{
+	Oid			reloid = PG_GETARG_OID(0);
+	FuncCallContext *fncxt;
+	tcache_node_info *tcnode_info;
+	HeapTuple	tuple;
+	Datum		values[12];
+	bool		isnull[12];
+
+	if (SRF_IS_FIRSTCALL())
+    {
+		TupleDesc		tupdesc;
+		MemoryContext	oldcxt;
+		tcache_head	   *tc_head;
+		List		   *info_list = NIL;
+
+		fncxt = SRF_FIRSTCALL_INIT();
+		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(12, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "type",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "addr",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "l_node",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "r_node",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "l_depth",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 6, "r_depth",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 7, "refcnt",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 8, "nrows",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 9, "usage",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 10, "length",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 11, "blkno_min",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 12, "blkno_max",
+						   INT4OID, -1, 0);
+		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
+
+		tc_head = tcache_get_tchead(reloid, NULL, false);
+		if (tc_head)
+		{
+			LWLockAcquire(&tc_head->lwlock, LW_SHARED);
+			PG_TRY();
+			{
+				info_list = collect_tcache_node_info(tc_head);
+			}
+			PG_CATCH();
+			{
+				LWLockRelease(&tc_head->lwlock);
+				tcache_put_tchead(tc_head);
+				PG_RE_THROW();
+			}
+			PG_END_TRY();
+			LWLockRelease(&tc_head->lwlock);
+			tcache_put_tchead(tc_head);
+		}
+		fncxt->user_fctx = info_list;
+
+		MemoryContextSwitchTo(oldcxt);
+	}
+	fncxt = SRF_PERCALL_SETUP();
+
+	if (fncxt->user_fctx == NIL)
+		SRF_RETURN_DONE(fncxt);
+
+	tcnode_info = linitial((List *) fncxt->user_fctx);
+	fncxt->user_fctx = list_delete_first((List *)fncxt->user_fctx);
+
+	memset(isnull, 0, sizeof(isnull));
+	if (tcnode_info->row_store)
+		values[0] = CStringGetTextDatum("row");
+	else
+		values[0] = CStringGetTextDatum("column");
+	values[1] = Int64GetDatum(tcnode_info->addr);
+	if (tcnode_info->row_store)
+		isnull[2] = isnull[3] = isnull[4] = isnull[5] = true;
+	else
+	{
+		values[2] = Int64GetDatum(tcnode_info->l_node);
+		values[3] = Int64GetDatum(tcnode_info->r_node);
+		values[4] = Int32GetDatum(tcnode_info->l_depth);
+		values[5] = Int32GetDatum(tcnode_info->r_depth);
+	}
+	values[6] = Int32GetDatum(tcnode_info->refcnt);
+	values[7] = Int32GetDatum(tcnode_info->nrows);
+	values[8] = Int64GetDatum(tcnode_info->usage);
+	values[9] = Int64GetDatum(tcnode_info->length);
+	values[10] = Int32GetDatum(tcnode_info->blkno_min);
+	values[11] = Int32GetDatum(tcnode_info->blkno_max);
+
+	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
+
+	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
+}
+PG_FUNCTION_INFO_V1(pgstrom_tcache_node_info);
