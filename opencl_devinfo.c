@@ -25,6 +25,7 @@
 /* variables to be located on shared memory segment */
 static shmem_startup_hook_type shmem_startup_hook_next;
 static struct {
+	LWLock	serial_lock;
 	int		num_devices;
 	pgstrom_device_info **devinfo_array;
 } *devinfo_shm_values;
@@ -821,6 +822,7 @@ pgstrom_startup_opencl_devinfo(void)
 										 &found);
 	Assert(!found);
 	memset(devinfo_shm_values, 0, sizeof(*devinfo_shm_values));
+	LWLockInitialize(&devinfo_shm_values->serial_lock, 0);
 }
 
 void
@@ -830,6 +832,25 @@ pgstrom_init_opencl_devinfo(void)
 	RequestAddinShmemSpace(MAXALIGN(sizeof(*devinfo_shm_values)));
 	shmem_startup_hook_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_opencl_devinfo;
+}
+
+/*
+ * clserv_serialize_(begin|end)
+ *
+ * opencl server works in (usually) multi-threads, however, it leads
+ * problems when we use routines in PostgreSQL; that is designed to
+ * single threaded. So, we use routines below to serialize these calls.
+ */
+void
+clserv_serialize_begin(void)
+{
+	LWLockAcquire(&devinfo_shm_values->serial_lock, LW_EXCLUSIVE);
+}
+
+void
+clserv_serialize_end(void)
+{
+	LWLockRelease(&devinfo_shm_values->serial_lock);
 }
 
 /*

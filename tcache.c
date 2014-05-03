@@ -779,9 +779,6 @@ static void
 tcache_free_node_recurse(tcache_head *tc_head, tcache_node *tc_node)
 {
 	/* NOTE: caller must be responsible to hold tc_head->lock */
-
-	elog(INFO, "tcache_free_node_recurse is called on %p", tc_node);
-
 	if (tc_node->right)
 		tcache_free_node_recurse(tc_head, tc_node->right);
 	if (tc_node->left)

@@ -2120,6 +2120,7 @@ clserv_respond_gpuscan_column(cl_event event, cl_int ev_status, void *private)
 	clstate_gpuscan_column *clgsc = private;
 	pgstrom_gpuscan		   *gpuscan = (pgstrom_gpuscan *)clgsc->msg;
 	kern_resultbuf		   *kresult = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
+	cl_int	status, rc;
 
 	/* put error code */
 	if (ev_status != CL_COMPLETE)
@@ -2132,6 +2133,7 @@ clserv_respond_gpuscan_column(cl_event event, cl_int ev_status, void *private)
 	{
 		gpuscan->msg.errcode = kresult->errcode;
 	}
+
 	/* collect performance statistics */
 	if (gpuscan->msg.pfm.enabled)
 	{
@@ -2154,7 +2156,7 @@ clserv_respond_gpuscan_column(cl_event event, cl_int ev_status, void *private)
 										 NULL);
 			if (rc != CL_SUCCESS)
 				goto skip_perfmon;
-			if (i==0 || dma_send_begin < temp)
+			if (i==0 || dma_send_begin > temp)
 				dma_send_begin = temp;
 
 			rc = clGetEventProfilingInfo(clgsc->events[i],
@@ -2164,9 +2166,10 @@ clserv_respond_gpuscan_column(cl_event event, cl_int ev_status, void *private)
 										 NULL);
 			if (rc != CL_SUCCESS)
 				goto skip_perfmon;
-			if (i==0 || dma_send_end > temp)
+			if (i==0 || dma_send_end < temp)
 				dma_send_end = temp;
 		}
+
 		rc = clGetEventProfilingInfo(clgsc->events[clgsc->ev_index - 2],
 									 CL_PROFILING_COMMAND_START,
 									 sizeof(cl_ulong),
@@ -2214,6 +2217,14 @@ clserv_respond_gpuscan_column(cl_event event, cl_int ev_status, void *private)
 			gpuscan->msg.pfm.enabled = false;	/* turn off profiling */
 		}
 	}
+
+	rc = clGetEventInfo(clgsc->events[clgsc->ev_index - 2],
+						CL_EVENT_COMMAND_EXECUTION_STATUS,
+						sizeof(cl_int),
+						&status,
+						NULL);
+	Assert(rc == CL_SUCCESS);
+
 	/* dump debug messages */
 	pgstrom_dump_kernel_debug(LOG, KERN_GPUSCAN_RESULTBUF(&gpuscan->kern));
 
@@ -2265,6 +2276,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 		goto error0;
 	}
 	memset(clgsc, 0, sizeof(clstate_gpuscan_column));
+	clgsc->msg = &gpuscan->msg;
 	kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
 	kcs_head = (kern_column_store *)kresults->results;
 	ncols = kcs_head->ncols;
@@ -2382,6 +2394,58 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 	else
 	{
 		clgsc->m_toast = NULL;
+	}
+
+    /*
+     * OK, all the device memory and kernel objects acquired.
+     * Let's prepare kernel invocation.
+     *
+     * The kernel call is:
+	 *
+	 *   __kernel void
+	 *   gpuscan_qual_cs(__global kern_gpuscan *kgscan,
+	 *                   __global kern_column_store *kcs,
+	 *                   __global kern_toastbuf *toast,
+	 *                   __local void *local_workmem)
+	 */
+	rc = clSetKernelArg(clgsc->kernel,
+						0,	/* kern_gpuscan * */
+						sizeof(cl_mem),
+						&clgsc->m_gpuscan);
+	if (rc != CL_SUCCESS)
+	{
+		elog(LOG, "failed on clSetKernelArg: %s", opencl_strerror(rc));
+		goto error6;
+	}
+
+	rc = clSetKernelArg(clgsc->kernel,
+						1,	/* kern_column_store */
+						sizeof(cl_mem),
+						&clgsc->m_cstore);
+	if (rc != CL_SUCCESS)
+	{
+		elog(LOG, "failed on clSetKernelArg: %s", opencl_strerror(rc));
+		goto error6;
+	}
+
+	rc = clSetKernelArg(clgsc->kernel,
+						2,	/* kern_column_store */
+						sizeof(cl_mem),
+						&clgsc->m_toast);
+	if (rc != CL_SUCCESS)
+	{
+		elog(LOG, "failed on clSetKernelArg: %s", opencl_strerror(rc));
+		goto error6;
+	}
+
+	rc = clSetKernelArg(clgsc->kernel,
+						3,	/* local_workmem */
+						2 * sizeof(cl_uint) * lwork_sz,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		elog(LOG, "failed on clSetKernelArg: %s", opencl_strerror(rc));
+		goto error6;
 	}
 
 	/*

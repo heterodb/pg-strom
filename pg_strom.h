@@ -123,8 +123,6 @@ typedef enum {
 	StromTag_DevProgram = 1001,
 	StromTag_MsgQueue,
 	StromTag_ParamBuf,
-//	StromTag_RowStore,
-//	StromTag_ColumnStore,
 	StromTag_TCacheHead,
 	StromTag_TCacheRowStore,
 	StromTag_TCacheColumnStore,
@@ -538,6 +536,15 @@ extern volatile bool		pgstrom_i_am_clserv;
 
 extern int pgstrom_opencl_device_schedule(pgstrom_message *message);
 extern void pgstrom_init_opencl_server(void);
+
+extern void clserv_serialize_begin(void);
+extern void clserv_serialize_end(void);
+#define clserv_log(fmt,...)											\
+	do {															\
+		clserv_serialize_begin();									\
+		elog(LOG, "%s:%d " fmt, __FILE__, __LINE__, __VAR_ARGS__);	\
+		clserv_serialize_end();					\
+	} while(0)
 
 /*
  * codegen.c
