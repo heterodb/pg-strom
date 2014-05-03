@@ -16,19 +16,24 @@
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "nodes/pg_list.h"
-#include "storage/barrier.h"
-#include "storage/ipc.h"
-#include "storage/shmem.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
+#include "utils/memutils.h"
 #include "pg_strom.h"
 
-/* variables to be located on shared memory segment */
-static shmem_startup_hook_type shmem_startup_hook_next;
-static struct {
-	LWLock	serial_lock;
-	int		num_devices;
-	pgstrom_device_info **devinfo_array;
-} *devinfo_shm_values;
+/* GUC variables */
+static int opencl_platform_index;
+
+/* OpenCL resources for quick reference */
+#define MAX_NUM_DEVICES		128
+
+/* quick references */
+cl_platform_id		opencl_platform_id = NULL;
+cl_context			opencl_context;
+cl_uint				opencl_num_devices;
+cl_device_id		opencl_devices[MAX_NUM_DEVICES];
+cl_command_queue	opencl_cmdq[MAX_NUM_DEVICES];
+pgstrom_device_info *opencl_device_info[MAX_NUM_DEVICES];
 
 /*
  * Registration of OpenCL device info.
@@ -419,10 +424,10 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 	dindex = fncxt->call_cntr / 55;
 	pindex = fncxt->call_cntr % 55;
 
-	if (dindex == pgstrom_get_device_nums())
+	if (dindex == opencl_num_devices)
 		SRF_RETURN_DONE(fncxt);
 
-	dinfo = pgstrom_get_device_info(dindex);
+	dinfo = opencl_device_info[dindex];
 	Assert(dinfo != NULL);
 
 	switch (pindex)
@@ -716,141 +721,143 @@ PG_FUNCTION_INFO_V1(pgstrom_opencl_device_info);
 /*
  * Routines to get device properties.
  */
-int
-pgstrom_get_device_nums(void)
-{
-	pg_memory_barrier();
-	return devinfo_shm_values->num_devices;
-}
-
-const pgstrom_device_info *
-pgstrom_get_device_info(unsigned int index)
-{
-	pg_memory_barrier();
-	if (index < devinfo_shm_values->num_devices)
-		return devinfo_shm_values->devinfo_array[index];
-	return NULL;
-}
-
-#define PLDEVINFO_SHIFT(dest,src,field)						\
-	(dest)->field = (char *)(dest) + ((src)->field - (char *)(src))
-
-void
-pgstrom_setup_opencl_devinfo(List *dev_list)
-{
-	pgstrom_platform_info  *pl_info;
-	pgstrom_platform_info  *pl_info_sh;
-	pgstrom_device_info	  **dev_array;
-	char	   *shmbase;
-	ListCell   *cell;
-	Size		length;
-	int			index;
-
-	Assert(devinfo_shm_values->num_devices == 0);
-	pl_info = ((pgstrom_device_info *) linitial(dev_list))->pl_info;
-
-	/* calculate length of shared memory to be acquired */
-	length = MAXALIGN(offsetof(pgstrom_platform_info,
-							   buffer[pl_info->buflen]));
-	length += MAXALIGN(sizeof(pgstrom_device_info *) *
-					   list_length(dev_list));
-	foreach (cell, dev_list)
-	{
-		pgstrom_device_info *dev_info = lfirst(cell);
-		length += MAXALIGN(offsetof(pgstrom_device_info,
-									buffer[dev_info->buflen]));
-	}
-	shmbase = pgstrom_shmem_alloc(length);
-	if (!shmbase)
-		elog(ERROR, "out of shared memory");
-
-	/* copy platform info into shared memory segment */
-	pl_info_sh = (pgstrom_platform_info *) shmbase;
-	length = offsetof(pgstrom_platform_info, buffer[pl_info->buflen]);
-	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_profile);
-	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_version);
-	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_name);
-	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_vendor);
-	PLDEVINFO_SHIFT(pl_info_sh, pl_info, pl_extensions);
-	memcpy(pl_info_sh, pl_info, length);
-	shmbase += MAXALIGN(length);
-
-	/* copy device info into shared memory segment */
-	dev_array = (pgstrom_device_info **)shmbase;
-	shmbase += MAXALIGN(sizeof(pgstrom_device_info *) *
-						list_length(dev_list));
-	index = 0;
-	foreach (cell, dev_list)
-	{
-		pgstrom_device_info	*dev_info = lfirst(cell);
-		pgstrom_device_info *dest;
-
-		dest = (pgstrom_device_info *)shmbase;
-		length = offsetof(pgstrom_device_info, buffer[dev_info->buflen]);
-		memcpy(dest, dev_info, length);
-
-		/* pointer adjustment */
-		dest->pl_info = pl_info_sh;
-		PLDEVINFO_SHIFT(dest, dev_info, dev_device_extensions);
-		PLDEVINFO_SHIFT(dest, dev_info, dev_name);
-		PLDEVINFO_SHIFT(dest, dev_info, dev_opencl_c_version);
-		PLDEVINFO_SHIFT(dest, dev_info, dev_profile);
-		PLDEVINFO_SHIFT(dest, dev_info, dev_vendor);
-		PLDEVINFO_SHIFT(dest, dev_info, dev_version);
-		PLDEVINFO_SHIFT(dest, dev_info, driver_version);
-		dev_array[index++] = dest;
-
-		shmbase += MAXALIGN(length);
-	}
-	Assert(index == list_length(dev_list));
-
-	devinfo_shm_values->devinfo_array = dev_array;
-	devinfo_shm_values->num_devices = index;
-	pg_memory_barrier();
-}
-
 static void
-pgstrom_startup_opencl_devinfo(void)
+construct_opencl_device_info(void)
 {
-	bool	found;
+	cl_platform_id	platforms[32];
+	cl_device_id	devices[MAX_NUM_DEVICES];
+	cl_uint			n_platform;
+	cl_uint			n_devices;
+	MemoryContext	oldcxt;
+	pgstrom_platform_info *pl_info;
+	pgstrom_device_info	*dev_info;
+	cl_int			i, j, rc;
+	long			score_max = -1;
+	List		   *result = NIL;
 
-	if (shmem_startup_hook_next)
-		(*shmem_startup_hook_next)();
+	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 
-	devinfo_shm_values = ShmemInitStruct("devinfo_shm_values",
-										 MAXALIGN(sizeof(*devinfo_shm_values)),
-										 &found);
-	Assert(!found);
-	memset(devinfo_shm_values, 0, sizeof(*devinfo_shm_values));
-	LWLockInitialize(&devinfo_shm_values->serial_lock, 0);
+	rc = clGetPlatformIDs(lengthof(platforms),
+						  platforms,
+						  &n_platform);
+	if (rc != CL_SUCCESS)
+		elog(ERROR, "clGetPlatformIDs failed (%s)", opencl_strerror(rc));
+	if (n_platform == 0)
+		elog(ERROR, "No OpenCL platforms available");
+
+	for (i=0; i < n_platform; i++)
+	{
+		long		score = 0;
+		List	   *temp = NIL;
+		ListCell   *cell;
+
+		pl_info = collect_opencl_platform_info(platforms[i]);
+		pl_info->pl_index = i;
+
+		elog(LOG, "PG-Strom: [%d] OpenCL Platform: %s", i, pl_info->pl_name);
+		if (opencl_platform_index >= 0 && opencl_platform_index != i)
+		{
+			pfree(pl_info);
+			continue;
+		}
+
+		/* Get list of device ids */
+		rc = clGetDeviceIDs(platforms[i],
+							CL_DEVICE_TYPE_CPU |
+							CL_DEVICE_TYPE_GPU |
+							CL_DEVICE_TYPE_ACCELERATOR,
+							lengthof(devices),
+							devices,
+							&n_devices);
+		if (rc != CL_SUCCESS)
+			elog(ERROR, "clGetDeviceIDs failed (%s)", opencl_strerror(rc));
+
+		/* any devices available on this platform? */
+		if (n_devices == 0)
+		{
+			if (i == opencl_platform_index)
+				elog(ERROR, "no device available on platform \"%s\"",
+					 pl_info->pl_name);
+			pfree(pl_info);
+			continue;
+		}
+
+		for (j=0; j < n_devices; j++)
+		{
+			dev_info = collect_opencl_device_info(devices[j]);
+			dev_info->pl_info = pl_info;
+			dev_info->dev_index = j;
+
+			elog(LOG, "PG-Strom:  + device %s (%uMHz x %uunits, %luMB)",
+				 dev_info->dev_name,
+				 dev_info->dev_max_clock_frequency,
+				 dev_info->dev_max_compute_units,
+				 dev_info->dev_global_mem_size >> 20);
+
+			/* rough estimation about computing power */
+			if ((dev_info->dev_type & CL_DEVICE_TYPE_GPU) != 0)
+				score += 32 * (dev_info->dev_max_compute_units *
+							   dev_info->dev_max_clock_frequency);
+			else
+				score += (dev_info->dev_max_compute_units *
+						  dev_info->dev_max_clock_frequency);
+
+			temp = lappend(temp, dev_info);
+		}
+
+		if (opencl_platform_index == i ||
+			(opencl_platform_index < 0 && score > score_max))
+		{
+			opencl_platform_id = platforms[i];
+			opencl_num_devices = n_devices;
+			memcpy(opencl_devices, devices, sizeof(cl_device_id) * n_devices);
+			foreach(cell, temp)
+			{
+				dev_info = lfirst(cell);
+				opencl_device_info[dev_info->dev_index] = dev_info;
+			}
+			score_max = score;
+			result = temp;
+		}
+		else
+		{
+			pl_info = ((pgstrom_device_info *) linitial(result))->pl_info;
+			pfree(pl_info);
+			list_free_deep(temp);
+		}
+	}
+
+	/* show platform name if auto-selection */
+	if (!opencl_platform_id)
+		elog(ERROR,
+			 "PG-Strom: No OpenCL device available. "
+			 "Please check \"pgstrom.opencl_platform\" parameter");
+
+	/* OK, opencl_device_info was successfully built */
+	pl_info = ((pgstrom_device_info *) linitial(result))->pl_info;
+	elog(LOG, "PG-Strom is ready to run with OpenCL platform \"%s\"",
+		 pl_info->pl_name);
+
+	MemoryContextSwitchTo(oldcxt);
 }
 
 void
 pgstrom_init_opencl_devinfo(void)
 {
-	/* aquires shared memory region */
-	RequestAddinShmemSpace(MAXALIGN(sizeof(*devinfo_shm_values)));
-	shmem_startup_hook_next = shmem_startup_hook;
-	shmem_startup_hook = pgstrom_startup_opencl_devinfo;
-}
+	/* selection of opencl platform */
+	DefineCustomIntVariable("pgstrom.opencl_platform",
+							"selection of OpenCL platform to be used",
+							NULL,
+							&opencl_platform_index,
+							-1,		/* auto selection */
+							-1,
+							INT_MAX,
+							PGC_POSTMASTER,
+                            GUC_NOT_IN_SAMPLE,
+                            NULL, NULL, NULL);
 
-/*
- * clserv_serialize_(begin|end)
- *
- * opencl server works in (usually) multi-threads, however, it leads
- * problems when we use routines in PostgreSQL; that is designed to
- * single threaded. So, we use routines below to serialize these calls.
- */
-void
-clserv_serialize_begin(void)
-{
-	LWLockAcquire(&devinfo_shm_values->serial_lock, LW_EXCLUSIVE);
-}
-
-void
-clserv_serialize_end(void)
-{
-	LWLockRelease(&devinfo_shm_values->serial_lock);
+	/* construct list of opencl devices */
+	construct_opencl_device_info();
 }
 
 /*
@@ -950,7 +957,7 @@ clserv_compute_workgroup_size(cl_kernel kernel, int dev_index,
 		return 0;
 	}
 
-	devinfo = devinfo_shm_values->devinfo_array[dev_index];
+	devinfo = opencl_device_info[dev_index];
 	if (kern_local_usage > devinfo->dev_local_mem_size)
 	{
 		elog(LOG, "static local memory of kernel is too large to run");

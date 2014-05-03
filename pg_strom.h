@@ -531,6 +531,7 @@ extern cl_context			opencl_context;
 extern cl_uint				opencl_num_devices;
 extern cl_device_id			opencl_devices[];
 extern cl_command_queue		opencl_cmdq[];
+extern pgstrom_device_info *opencl_device_info[];
 extern volatile bool		pgstrom_clserv_exit_pending;
 extern volatile bool		pgstrom_i_am_clserv;
 
@@ -542,8 +543,8 @@ extern void clserv_serialize_end(void);
 #define clserv_log(fmt,...)											\
 	do {															\
 		clserv_serialize_begin();									\
-		elog(LOG, "%s:%d " fmt, __FILE__, __LINE__, __VAR_ARGS__);	\
-		clserv_serialize_end();					\
+		elog(LOG, "%s:%d " fmt, __FILE__, __LINE__, ##__VA_ARGS__);	\
+		clserv_serialize_end();										\
 	} while(0)
 
 /*

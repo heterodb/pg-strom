@@ -1673,8 +1673,8 @@ clserv_respond_gpuscan_row(cl_event event, cl_int ev_status, void *private)
 	/* put error code */
 	if (ev_status != CL_COMPLETE)
 	{
-		elog(LOG, "unexpected CL_EVENT_COMMAND_EXECUTION_STATUS: %d",
-			 ev_status);
+		clserv_log("unexpected CL_EVENT_COMMAND_EXECUTION_STATUS: %d",
+				   ev_status);
 		gpuscan->msg.errcode = StromError_OpenCLInternal;
 	}
 	else
@@ -1757,8 +1757,8 @@ clserv_respond_gpuscan_row(cl_event event, cl_int ev_status, void *private)
 	skip_perfmon:
 		if (rc != CL_SUCCESS)
 		{
-			elog(LOG, "failed on clGetEventProfilingInfo (%s)",
-				 opencl_strerror(rc));
+			clserv_log("failed on clGetEventProfilingInfo (%s)",
+					   opencl_strerror(rc));
 			gpuscan->msg.pfm.enabled = false;	/* turn off profiling */
 		}
 	}
@@ -1853,7 +1853,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 								   &rc);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clCreateBuffer: %s", opencl_strerror(rc));
+		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
 		goto error2;
 	}
 
@@ -1875,7 +1875,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 									  &rc);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clCreateBuffer: %s", opencl_strerror(rc));
+		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
 		goto error3;
 	}
 
@@ -1887,7 +1887,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 									 &rc);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clCreateBuffer: %s", opencl_strerror(rc));
+		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
 		goto error4;
 	}
 
@@ -1899,7 +1899,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 									 &rc);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clCreateBuffer: %s", opencl_strerror(rc));
+		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
 		goto error5;
 	}
 
@@ -1920,7 +1920,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 						&clgss->m_gpuscan);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clSetKernelArg: %s", opencl_strerror(rc));
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
 		goto error6;
 	}
 
@@ -1930,7 +1930,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 						&clgss->m_rstore);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clSetKernelArg: %s", opencl_strerror(rc));
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
 		goto error6;
 	}
 
@@ -1940,7 +1940,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 						&clgss->m_cstore);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clSetKernelArg: %s", opencl_strerror(rc));
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
 		goto error6;
 	}
 
@@ -1950,7 +1950,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 						NULL);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clSetKernelArg: %s", opencl_strerror(rc));
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
 		goto error6;
 	}
 
@@ -1976,7 +1976,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 							  &clgss->events[clgss->ev_index++]);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
+		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
 		goto error6;
 	}
 
@@ -1991,7 +1991,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 							  &clgss->events[clgss->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
+		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
 		goto error_sync;
 	}
 	clgss->ev_index++;
@@ -2008,7 +2008,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 							  &clgss->events[clgss->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
+		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
 		goto error_sync;
 	}
 	clgss->ev_index++;
@@ -2029,7 +2029,8 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 								&clgss->events[clgss->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clEnqueueNDRangeKernel: %s", opencl_strerror(rc));
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
 		goto error_sync;
 	}
 	clgss->ev_index++;
@@ -2049,7 +2050,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 							 &clgss->events[clgss->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clEnqueueReadBuffer: %s", opencl_strerror(rc));
+		clserv_log("failed on clEnqueueReadBuffer: %s", opencl_strerror(rc));
 		goto error_sync;
 	}
 	clgss->ev_index++;
@@ -2064,10 +2065,9 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 							clgss);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clSetEventCallback: %s", opencl_strerror(rc));
+		clserv_log("failed on clSetEventCallback: %s", opencl_strerror(rc));
 		goto error_sync;
 	}
-	//Assert(clgss->ev_index == 5);
 	return;
 
 error_sync:
@@ -2125,8 +2125,8 @@ clserv_respond_gpuscan_column(cl_event event, cl_int ev_status, void *private)
 	/* put error code */
 	if (ev_status != CL_COMPLETE)
 	{
-		elog(LOG, "unexpected CL_EVENT_COMMAND_EXECUTION_STATUS: %d",
-			 ev_status);
+		clserv_log("unexpected CL_EVENT_COMMAND_EXECUTION_STATUS: %d",
+				   ev_status);
 		gpuscan->msg.errcode = StromError_OpenCLInternal;
 	}
 	else
@@ -2212,8 +2212,8 @@ clserv_respond_gpuscan_column(cl_event event, cl_int ev_status, void *private)
 	skip_perfmon:
 		if (rc != CL_SUCCESS)
 		{
-			elog(LOG, "failed on clGetEventProfilingInfo (%s)",
-				 opencl_strerror(rc));
+			clserv_log("failed on clGetEventProfilingInfo (%s)",
+					   opencl_strerror(rc));
 			gpuscan->msg.pfm.enabled = false;	/* turn off profiling */
 		}
 	}
@@ -2321,7 +2321,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 								   &rc);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clCreateBuffer: %s", opencl_strerror(rc));
+		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
 		goto error2;
 	}
 
@@ -2343,7 +2343,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 									  &rc);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clCreateBuffer: %s", opencl_strerror(rc));
+		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
 		goto error3;
 	}
 
@@ -2355,7 +2355,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 									 &rc);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clCreateBuffer: %s", opencl_strerror(rc));
+		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
 		goto error4;
 	}
 
@@ -2387,7 +2387,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 										&rc);
 		if (rc != CL_SUCCESS)
 		{
-			elog(LOG, "failed on clCreateBuffer: %s", opencl_strerror(rc));
+			clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
 			goto error5;
 		}
 	}
@@ -2414,7 +2414,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 						&clgsc->m_gpuscan);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clSetKernelArg: %s", opencl_strerror(rc));
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
 		goto error6;
 	}
 
@@ -2424,7 +2424,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 						&clgsc->m_cstore);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clSetKernelArg: %s", opencl_strerror(rc));
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
 		goto error6;
 	}
 
@@ -2434,7 +2434,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 						&clgsc->m_toast);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clSetKernelArg: %s", opencl_strerror(rc));
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
 		goto error6;
 	}
 
@@ -2444,7 +2444,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 						NULL);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clSetKernelArg: %s", opencl_strerror(rc));
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
 		goto error6;
 	}
 
@@ -2471,7 +2471,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 							  &clgsc->events[clgsc->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
+		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
 		goto error6;
 	}
 	clgsc->ev_index++;
@@ -2489,7 +2489,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 							  &clgsc->events[clgsc->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
+		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
 		goto error_sync;
 	}
 	clgsc->ev_index++;
@@ -2509,8 +2509,8 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 								  &clgsc->events[clgsc->ev_index]);
 		if (rc != CL_SUCCESS)
 		{
-			elog(LOG, "failed on clEnqueueWriteBuffer: %s",
-				 opencl_strerror(rc));
+			clserv_log("failed on clEnqueueWriteBuffer: %s",
+					   opencl_strerror(rc));
 			goto error_sync;
 		}
 		clgsc->ev_index++;
@@ -2537,8 +2537,8 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 									  &clgsc->events[clgsc->ev_index]);
 			if (rc != CL_SUCCESS)
 			{
-				elog(LOG, "failed on clEnqueueWriteBuffer: %s",
-					 opencl_strerror(rc));
+				clserv_log("failed on clEnqueueWriteBuffer: %s",
+						   opencl_strerror(rc));
 				goto error_sync;
 			}
 			clgsc->ev_index++;
@@ -2559,8 +2559,8 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 								  &clgsc->events[clgsc->ev_index]);
 		if (rc != CL_SUCCESS)
 		{
-			elog(LOG, "failed on clEnqueueWriteBuffer: %s",
-				 opencl_strerror(rc));
+			clserv_log("failed on clEnqueueWriteBuffer: %s",
+					   opencl_strerror(rc));
 			goto error_sync;
 		}
 		clgsc->ev_index++;
@@ -2579,8 +2579,8 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 									  &clgsc->events[clgsc->ev_index]);
 			if (rc != CL_SUCCESS)
 			{
-				elog(LOG, "failed on clEnqueueWriteBuffer: %s",
-					 opencl_strerror(rc));
+				clserv_log("failed on clEnqueueWriteBuffer: %s",
+						   opencl_strerror(rc));
 				goto error_sync;
 			}
 			clgsc->ev_index++;
@@ -2603,7 +2603,8 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 								&clgsc->events[clgsc->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clEnqueueNDRangeKernel: %s", opencl_strerror(rc));
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
 		goto error_sync;
 	}
 	clgsc->ev_index++;
@@ -2623,7 +2624,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 							 &clgsc->events[clgsc->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clEnqueueReadBuffer: %s", opencl_strerror(rc));
+		clserv_log("failed on clEnqueueReadBuffer: %s", opencl_strerror(rc));
 		goto error_sync;
 	}
 	clgsc->ev_index++;
@@ -2638,7 +2639,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 							clgsc);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clSetEventCallback: %s", opencl_strerror(rc));
+		clserv_log("failed on clSetEventCallback: %s", opencl_strerror(rc));
 		goto error_sync;
 	}
 	return;
