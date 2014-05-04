@@ -2518,42 +2518,31 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 
 	for (i=0; i < ncols; i++)
 	{
+		void   *baseaddr;
+
 		j = i_refcols[i];
 
 		offset = kcs_head->colmeta[i].cs_ofs;
 		if ((kcs_head->colmeta[i].flags & KERN_COLMETA_ATTNOTNULL) == 0)
 		{
 			Assert(tcs->cdata[j].isnull != NULL);
-			length = (nrows + BITS_PER_BYTE - 1) / BITS_PER_BYTE;
-
-			rc = clEnqueueWriteBuffer(kcmdq,
-									  clgsc->m_cstore,
-									  CL_FALSE,
-									  offset,
-									  length,
-									  tcs->cdata[j].isnull,
-									  0,
-									  NULL,
-									  &clgsc->events[clgsc->ev_index]);
-			if (rc != CL_SUCCESS)
-			{
-				clserv_log("failed on clEnqueueWriteBuffer: %s",
-						   opencl_strerror(rc));
-				goto error_sync;
-			}
-			clgsc->ev_index++;
-			offset += STROMALIGN(length);
+			baseaddr = tcs->cdata[j].isnull;
+			length = STROMALIGN((nrows + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
 		}
-
-		length = (kcs_head->colmeta[i].attlen > 0
-				  ? kcs_head->colmeta[i].attlen
-				  : sizeof(cl_uint)) * nrows;
+		else
+		{
+			baseaddr = tcs->cdata[j].values;
+			length = 0;
+		}
+		length += (kcs_head->colmeta[i].attlen > 0
+				   ? kcs_head->colmeta[i].attlen
+				   : sizeof(cl_uint)) * nrows;
 		rc = clEnqueueWriteBuffer(kcmdq,
 								  clgsc->m_cstore,
 								  CL_FALSE,
 								  offset,
 								  length,
-								  tcs->cdata[j].values,
+								  baseaddr,
 								  0,
 								  NULL,
 								  &clgsc->events[clgsc->ev_index]);

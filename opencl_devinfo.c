@@ -973,5 +973,9 @@ clserv_compute_workgroup_size(cl_kernel kernel, int dev_index,
 			workgroup_sz -= (workgroup_sz % workgroup_unitsz);
 		}
 	}
+	/*
+	 * TODO: needs to put optimal workgroup size for each
+	 * GPU models. Kernel execution time is affected so much.
+	 */
 	return workgroup_sz;
 }
