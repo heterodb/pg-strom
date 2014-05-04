@@ -18,21 +18,24 @@
 #include "nodes/pg_list.h"
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
+#include "postmaster/syslogger.h"
 #include "storage/ipc.h"
 #include "storage/shmem.h"
+#include "tcop/tcopprot.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
 #include "pg_strom.h"
 #include <limits.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <unistd.h>
 
 /* static variables */
 static int		opencl_num_threads;
 static shmem_startup_hook_type shmem_startup_hook_next;
 static struct {
-	LWLock		serial_lock;
+	slock_t		serial_lock;
 } *opencl_serv_shm_values;
 
 /* signal flag */
@@ -267,23 +270,81 @@ pgstrom_opencl_main(Datum main_arg)
 }
 
 /*
- * clserv_serialize_(begin|end)
+ * __clserv_log
  *
- * opencl server works in (usually) multi-threads, however, it leads
- * problems when we use routines in PostgreSQL; that is designed to
- * single threaded. So, we use routines below to serialize these calls.
+ * Thread-safed error reporting.
  */
-void
-clserv_serialize_begin(void)
-{
-	LWLockAcquire(&opencl_serv_shm_values->serial_lock, LW_EXCLUSIVE);
-}
+extern bool redirection_done;
 
 void
-clserv_serialize_end(void)
+__clserv_log(const char *funcname,
+			 const char *filename, int lineno,
+			 const char *fmt, ...)
 {
-	LWLockRelease(&opencl_serv_shm_values->serial_lock);
+	va_list	ap;
+	size_t	ofs = 0;
+	char	buf[8192];	/* usually enough size */
+
+	/* setting up log message */
+	if (Log_error_verbosity == PGERROR_VERBOSE)
+		ofs += snprintf(buf+ofs, sizeof(buf)-ofs,
+						"LOG: (%s:%d, %s) ", filename, lineno, funcname);
+	else
+		ofs += snprintf(buf+ofs, sizeof(buf)-ofs,
+						"LOG: (%s:%d) ", filename, lineno);
+	va_start(ap, fmt);
+	ofs += vsnprintf(buf+ofs, sizeof(buf)-ofs, fmt, ap);
+	va_end(ap);
+	ofs += snprintf(buf+ofs, sizeof(buf)-ofs, "\n");
+
+#ifdef HAVE_SYSLOG
+	/* to be implemented later */
+#endif
+
+	/*
+	 * write to the console (logic copied from write_pipe_chunks)
+	 */
+	if ((Log_destination & LOG_DESTINATION_STDERR) ||
+		whereToSendOutput == DestDebug)
+	{
+		size_t	len = strlen(buf);
+		int		fd = fileno(stderr);
+		int		rc;
+
+		if (redirection_done && !am_syslogger)
+		{
+			PipeProtoChunk	p;
+			char   *data = buf;
+
+			memset(&p, 0, sizeof(p.proto));
+			p.proto.pid = MyProcPid;
+
+			/* write all but the last chunk */
+			while (len > PIPE_MAX_PAYLOAD)
+			{
+				p.proto.is_last = 'f';
+				p.proto.len = PIPE_MAX_PAYLOAD;
+				memcpy(p.proto.data, data, PIPE_MAX_PAYLOAD);
+				rc = write(fd, &p, PIPE_HEADER_SIZE + PIPE_MAX_PAYLOAD);
+				Assert(rc == PIPE_HEADER_SIZE + PIPE_MAX_PAYLOAD);
+				data += PIPE_MAX_PAYLOAD;
+				len -= PIPE_MAX_PAYLOAD;
+			}
+
+			/* write the last chunk */
+			p.proto.is_last = 'f';
+			p.proto.len = len;
+			memcpy(&p.proto.is_last + 1, data, len);
+			rc = write(fd, &p, PIPE_HEADER_SIZE + len);
+			Assert(rc == PIPE_HEADER_SIZE + len);
+		}
+		else
+		{
+			rc = write(fd, buf, len);
+		}
+	}
 }
+
 
 static void
 pgstrom_startup_opencl_server(void)
@@ -300,7 +361,7 @@ pgstrom_startup_opencl_server(void)
 	Assert(!found);
 
 	memset(opencl_serv_shm_values, 0, sizeof(*opencl_serv_shm_values));
-	LWLockInitialize(&opencl_serv_shm_values->serial_lock, 0);
+	SpinLockInit(&opencl_serv_shm_values->serial_lock);
 }
 
 void

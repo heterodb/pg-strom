@@ -538,14 +538,12 @@ extern volatile bool		pgstrom_i_am_clserv;
 extern int pgstrom_opencl_device_schedule(pgstrom_message *message);
 extern void pgstrom_init_opencl_server(void);
 
-extern void clserv_serialize_begin(void);
-extern void clserv_serialize_end(void);
-#define clserv_log(fmt,...)											\
-	do {															\
-		clserv_serialize_begin();									\
-		elog(LOG, "%s:%d " fmt, __FILE__, __LINE__, ##__VA_ARGS__);	\
-		clserv_serialize_end();										\
-	} while(0)
+extern void __clserv_log(const char *funcname,
+						 const char *filename, int lineno,
+						 const char *fmt, ...)
+	__attribute__((format(PG_PRINTF_ATTRIBUTE, 4, 5)));
+#define clserv_log(...)						\
+	__clserv_log(__FUNCTION__,__FILE__,__LINE__,__VA_ARGS__)
 
 /*
  * codegen.c
