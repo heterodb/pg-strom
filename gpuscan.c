@@ -2284,8 +2284,6 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 	ktoast = (kern_toastbuf *)&kcs_head[ncols];
 	i_refcols = (cl_uint *)&ktoast->coldir[ncols];
 
-	clserv_log("ncols=%u nrows=%u", ncols, nrows);
-
 	/*
 	 * First of all, it looks up a program object to be run on
 	 * the supplied row-store. We may have three cases.
@@ -2431,7 +2429,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 	}
 
 	rc = clSetKernelArg(clgsc->kernel,
-						2,	/* kern_column_store */
+						2,	/* kern_toastbuf */
 						sizeof(cl_mem),
 						&clgsc->m_toast);
 	if (rc != CL_SUCCESS)

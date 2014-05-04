@@ -1932,6 +1932,20 @@ do_insert_tuple(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 		Assert(j >= 0 && j < tupdesc->natts);
 		attr = tupdesc->attrs[j];
 
+		if (!tcs->cdata[i].isnull)
+			Assert(!isnull[j]);
+		else
+		{
+			uint8  *nullmap = tcs->cdata[i].isnull;
+
+			if (!isnull[j])
+				nullmap[tcs->nrows / BITS_PER_BYTE]
+					|= (1 << (tcs->nrows % BITS_PER_BYTE));
+			else
+				nullmap[tcs->nrows / BITS_PER_BYTE]
+					&= ~(1 << (tcs->nrows % BITS_PER_BYTE));
+		}
+
 		if (attr->attlen > 0)
 		{
 			/* fixed-length variable is simple to put */
