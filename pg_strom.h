@@ -135,7 +135,7 @@ typedef enum {
 
 typedef struct {
 	StromTag	stag;			/* StromTag_* */
-	dlist_node	tracker;		/* Used by resource tracker */
+	//dlist_node	tracker;		/* Used by resource tracker */
 } StromObject;
 
 #define StromTagIs(PTR,IDENT) \

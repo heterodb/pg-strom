@@ -549,7 +549,6 @@ retry:
 		elog(ERROR, "out of shared memory");
 
 	dprog->sobj.stag = StromTag_DevProgram;
-	memset(&dprog->sobj.tracker, 0, sizeof(dlist_node));
 	SpinLockInit(&dprog->lock);
 	dprog->refcnt = 1;
 	dlist_init(&dprog->waitq);
