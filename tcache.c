@@ -2215,9 +2215,14 @@ tcache_scan_next(tcache_scandesc *tc_scan)
 	 */
 	if (tc_scan->heapscan)
 	{
-		elog(INFO, "now doing cache build");
+		struct timeval	tv1, tv2;
+
+		elog(INFO, "now building tcache...");
+		gettimeofday(&tv1, NULL);
 		tcache_build_main(tc_head, tc_scan->heapscan);
-		elog(INFO, "cache build done");
+		gettimeofday(&tv2, NULL);
+		tc_scan->time_tcache_build = timeval_diff(&tv1, &tv2);
+		elog(INFO, "tcache build done...");
 		heap_endscan(tc_scan->heapscan);
 		tc_scan->heapscan = NULL;
 	}
@@ -3910,7 +3915,9 @@ collect_tcache_node_info(tcache_head *tc_head)
 			info_list = collect_tcache_row_node_info(tc_head, trs, info_list);
 		}
 		if (tc_head->trs_curr)
-			info_list = collect_tcache_row_node_info(tc_head, trs, info_list);
+			info_list = collect_tcache_row_node_info(tc_head,
+													 tc_head->trs_curr,
+													 info_list);
 	}
 	PG_CATCH();
 	{

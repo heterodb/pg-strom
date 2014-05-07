@@ -1070,6 +1070,7 @@ gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
 							= PointerGetDatum((char *)tcs->cdata[i].toast +
 											  cs_offset[k]);
 					}
+					slot->tts_isnull[j] = false;
 				}
 			}
 			else
@@ -1128,7 +1129,6 @@ gpuscan_fetch_tuple(CustomPlanState *node)
 		if (gss->curr_chunk)
 		{
 			pgstrom_message	   *msg = &gss->curr_chunk->msg;
-			//StromObject		   *sobject = gss->curr_chunk->rc_store;
 
 			if (msg->pfm.enabled)
 				pgstrom_perfmon_add(&gss->pfm, &msg->pfm);
@@ -1402,12 +1402,11 @@ gpuscan_end(CustomPlanState *node)
 	if (gss->tc_scan)
 	{
 		Assert(gss->tc_head);
+		gss->pfm.time_tcache_build = gss->tc_scan->time_tcache_build;
 		tcache_end_scan(gss->tc_scan);
-
-		pgstrom_untrack_object(&gss->tc_head->sobj);
-		tcache_put_tchead(gss->tc_head);
 	}
-	else if (gss->tc_head)
+
+	if (gss->tc_head)
 	{
 		pgstrom_untrack_object(&gss->tc_head->sobj);
 		if (!gss->tcache_build)

@@ -148,6 +148,7 @@ typedef struct {
 	cl_bool		enabled;
 	cl_uint		num_samples;
 	cl_ulong	time_to_load;	/* time to load data from heap/cache/subplan */
+	cl_ulong	time_tcache_build;	/* time to build tcache */
 	cl_ulong	time_in_sendq;	/* waiting time in the server mqueue */
 	cl_ulong	time_kern_build;/* max time to build opencl kernel */
 	cl_ulong	time_dma_send;	/* time to send host=>device data */
@@ -394,6 +395,7 @@ typedef struct {
 typedef struct {
 	Relation		rel;
 	HeapScanDesc	heapscan;	/* valid, if state == TC_STATE_NOW_BUILD */
+	cl_ulong		time_tcache_build;
 	tcache_head	   *tc_head;
 	BlockNumber		tcs_blkno_min;
 	BlockNumber		tcs_blkno_max;

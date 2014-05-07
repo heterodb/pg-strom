@@ -295,9 +295,15 @@ pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 	if (!pfm->enabled)
 		return;
 
+	ExplainPropertyInteger("Number of chunks", pfm->num_samples, es);
+
 	snprintf(buf, sizeof(buf), "%.3f ms",
 			 (double)pfm->time_to_load / 1000.0);
 	ExplainPropertyText("Total time to load", buf, es);
+
+	snprintf(buf, sizeof(buf), "%.3f ms",
+			 (double)pfm->time_tcache_build / 1000.0);
+	ExplainPropertyText("Time to build tcache", buf, es);
 
 	snprintf(buf, sizeof(buf), "%.3f ms",
 			 (double)pfm->time_in_sendq / n / 1000.0);
