@@ -358,9 +358,9 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 		snprintf(build_opts, sizeof(build_opts),
 				 "-DOPENCL_DEVICE_CODE -DHOSTPTRLEN=%u %s"
 #ifdef PGSTROM_DEBUG
-				 "-Werror -cl-opt-disable"
+				 "-Werror"
 #endif
-				 , SIZEOF_VOID_P,
+				 ,SIZEOF_VOID_P,
 				 ((dprog->extra_flags & DEVKERNEL_NEEDS_DEBUG) != 0
 				  ? "-DPGSTROM_KERNEL_DEBUG=1 " : ""));
 
