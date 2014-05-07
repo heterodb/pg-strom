@@ -164,7 +164,7 @@ init_opencl_context_and_shmem(void)
 	 */
 	for (i=0; i < opencl_num_devices; i++)
 	{
-		pgstrom_device_info *dev_info = opencl_device_info[i];
+		const pgstrom_device_info *dev_info = pgstrom_get_device_info(i);
 
 		opencl_cmdq[i] =
 			clCreateCommandQueue(opencl_context,
@@ -208,6 +208,9 @@ pgstrom_opencl_main(Datum main_arg)
 
     /* We're now ready to receive signals */
     BackgroundWorkerUnblockSignals();
+
+	/* collect opencl platform/device info */
+	construct_opencl_device_info();
 
 	/* initialize opencl context and shared memory segment */
 	init_opencl_context_and_shmem();

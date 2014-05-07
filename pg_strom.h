@@ -485,14 +485,9 @@ extern void pgstrom_init_gpuscan(void);
 /*
  * opencl_devinfo.c
  */
-extern pgstrom_platform_info *
-collect_opencl_platform_info(cl_platform_id platform);
-extern pgstrom_device_info *
-collect_opencl_device_info(cl_device_id device);
-
 extern int	pgstrom_get_device_nums(void);
 extern const pgstrom_device_info *pgstrom_get_device_info(unsigned int index);
-extern void pgstrom_setup_opencl_devinfo(List *dev_list);
+extern void construct_opencl_device_info(void);
 extern void pgstrom_init_opencl_devinfo(void);
 extern Datum pgstrom_opencl_device_info(PG_FUNCTION_ARGS);
 
@@ -531,7 +526,6 @@ extern cl_context			opencl_context;
 extern cl_uint				opencl_num_devices;
 extern cl_device_id			opencl_devices[];
 extern cl_command_queue		opencl_cmdq[];
-extern pgstrom_device_info *opencl_device_info[];
 extern volatile bool		pgstrom_clserv_exit_pending;
 extern volatile bool		pgstrom_i_am_clserv;
 
