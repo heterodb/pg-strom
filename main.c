@@ -249,18 +249,18 @@ show_device_kernel(Datum dprog_key, ExplainState *es)
 		appendStringInfo(&str, "#define PGSTROM_KERNEL_DEBUG 1\n");
 
 	appendStringInfo(&str, "#include \"opencl_common.h\"\n");
-	if (extra_flags & DEVFUNC_NEEDS_TIMELIB)
-		appendStringInfo(&str, "#include \"opencl_timelib.h\"\n");
-	if (extra_flags & DEVFUNC_NEEDS_TEXTLIB)
-		appendStringInfo(&str, "#include \"opencl_textlib.h\"\n");
-	if (extra_flags & DEVFUNC_NEEDS_NUMERICLIB)
-		appendStringInfo(&str, "#include \"opencl_numericlib.h\"\n");
 	if (extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
 		appendStringInfo(&str, "#include \"opencl_gpuscan.h\"\n");
 	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT)
 		appendStringInfo(&str, "#include \"opencl_gpusort.h\"\n");
 	if (extra_flags & DEVKERNEL_NEEDS_HASHJOIN)
 		appendStringInfo(&str, "#include \"opencl_hashjoin.h\"\n");
+	if (extra_flags & DEVFUNC_NEEDS_TIMELIB)
+		appendStringInfo(&str, "#include \"opencl_timelib.h\"\n");
+	if (extra_flags & DEVFUNC_NEEDS_TEXTLIB)
+		appendStringInfo(&str, "#include \"opencl_textlib.h\"\n");
+	if (extra_flags & DEVFUNC_NEEDS_NUMERICLIB)
+		appendStringInfo(&str, "#include \"opencl_numericlib.h\"\n");
 	appendStringInfo(&str, "\n%s", kernel_source);
 
 	ExplainPropertyText("Kernel Source", str.data, es);

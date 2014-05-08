@@ -918,7 +918,10 @@ kern_get_datum(__global kern_column_store *kcs,
 /*
  * pg_bool_t is built-in data type
  */
+#ifndef PG_BOOL_TYPE_DEFINED
+#define PG_BOOL_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(bool, bool)
+#endif
 
 /*
  * Functions for BooleanTest

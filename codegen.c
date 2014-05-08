@@ -20,8 +20,9 @@
 #include "nodes/pg_list.h"
 #include "optimizer/clauses.h"
 #include "utils/inval.h"
-#include "utils/memutils.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
+#include "utils/pg_locale.h"
 #include "utils/syscache.h"
 #include "pg_strom.h"
 
@@ -38,26 +39,25 @@ static List	   *devfunc_info_slot[1024];
 static struct {
 	Oid				type_oid;
 	const char	   *type_base;
-	bool			type_is_builtin;	/* true, if no need to redefine */
 } devtype_catalog[] = {
 	/* basic datatypes */
-	{ BOOLOID,			"cl_bool",	true },
-	{ INT2OID,			"cl_short",	false },
-	{ INT4OID,			"cl_int",	false },
-	{ INT8OID,			"cl_long",	false },
-	{ FLOAT4OID,		"cl_float",	false },
-	{ FLOAT8OID,		"cl_double",false },
+	{ BOOLOID,			"cl_bool" },
+	{ INT2OID,			"cl_short" },
+	{ INT4OID,			"cl_int" },
+	{ INT8OID,			"cl_long" },
+	{ FLOAT4OID,		"cl_float" },
+	{ FLOAT8OID,		"cl_double" },
 	/* date and time datatypes */
-	{ DATEOID,			"cl_int",	false },
-	{ TIMEOID,			"cl_long",	false },
-	{ TIMESTAMPOID,		"cl_long",	false },
-	{ TIMESTAMPTZOID,	"cl_long",	false },
+	{ DATEOID,			"cl_int" },
+	{ TIMEOID,			"cl_long" },
+	{ TIMESTAMPOID,		"cl_long" },
+	{ TIMESTAMPTZOID,	"cl_long" },
 	/* variable length datatypes */
-	{ BPCHAROID,		"varlena",	false },
-	{ VARCHAROID,		"varlena",	false },
-	{ NUMERICOID,		"varlena",	false },
-	{ BYTEAOID,			"varlena",	false },
-	{ TEXTOID,			"varlena",	false },
+	{ BPCHAROID,		"varlena" },
+	{ VARCHAROID,		"varlena" },
+	{ NUMERICOID,		"varlena" },
+	{ BYTEAOID,			"varlena" },
+	{ TEXTOID,			"varlena" },
 };
 
 static void
@@ -148,8 +148,6 @@ pgstrom_devtype_lookup(Oid type_oid)
 		entry->type_flags |= DEVINFO_IS_NEGATIVE;
 	else
 	{
-		char	   *decl;
-
 		for (i=0; i < lengthof(devtype_catalog); i++)
 		{
 			if (devtype_catalog[i].type_oid != type_oid)
@@ -157,16 +155,6 @@ pgstrom_devtype_lookup(Oid type_oid)
 
 			entry->type_name = pstrdup(NameStr(typeform->typname));
 			entry->type_base = pstrdup(devtype_catalog[i].type_base);
-			if (entry->type_flags & DEVTYPE_IS_VARLENA)
-				decl = psprintf("STROMCL_SIMPLE_TYPE_TEMPLATE(%s,%s)",
-								entry->type_name,
-								devtype_catalog[i].type_base);
-			else
-				decl = psprintf("STROMCL_VRALENA_TYPE_TEMPLATE(%s)",
-								entry->type_name);
-			entry->type_decl = decl;
-			if (devtype_catalog[i].type_is_builtin)
-				entry->type_flags |= DEVTYPE_IS_BUILTIN;
 			break;
 		}
 		if (i == lengthof(devtype_catalog))
@@ -186,6 +174,25 @@ pgstrom_devtype_lookup(Oid type_oid)
 	if (entry->type_flags & DEVINFO_IS_NEGATIVE)
 		return NULL;
 	return entry;
+}
+
+/*
+ * collation checks - device does not understand text locale,
+ * so all the locale we can handle is the binary comparable ones.
+ * we have to ensure the collation is binary comparable.
+ */
+static bool
+devtype_runnable_collation(Oid collation)
+{
+	/*
+	 * Usually, core backend looks up a particular collation id,
+	 * if it is varlena data type. (If failed to lookup, an error
+	 * shall be reported). Elsewhere, it shall be a fixed-length
+	 * datum that has no collation anyway.
+	 */
+	if (!OidIsValid(collation))
+		return true;
+	return lc_collate_is_c(collation);
 }
 
 /*
@@ -581,10 +588,10 @@ static devfunc_catalog_t devfunc_textlib_catalog[] = {
 	{ "bpcharge", 2, {BPCHAROID,BPCHAROID}, "F:bpcharge", NULL },
 	{ "texteq", 2, {TEXTOID, TEXTOID}, "F:texteq", NULL  },
 	{ "textne", 2, {TEXTOID, TEXTOID}, "F:textne", NULL  },
-	{ "textlt", 2, {TEXTOID, TEXTOID}, "F:textlt", NULL  },
-	{ "textle", 2, {TEXTOID, TEXTOID}, "F:textle", NULL  },
-	{ "textgt", 2, {TEXTOID, TEXTOID}, "F:textgt", NULL  },
-	{ "textge", 2, {TEXTOID, TEXTOID}, "F:textge", NULL  },
+	{ "text_lt", 2, {TEXTOID, TEXTOID}, "F:text_lt", NULL  },
+	{ "text_le", 2, {TEXTOID, TEXTOID}, "F:text_le", NULL  },
+	{ "text_gt", 2, {TEXTOID, TEXTOID}, "F:text_gt", NULL  },
+	{ "text_ge", 2, {TEXTOID, TEXTOID}, "F:text_ge", NULL  },
 };
 
 static void
@@ -602,7 +609,7 @@ devfunc_setup_div_oper(devfunc_info *entry, devfunc_catalog_t *procat)
 				   "    if (arg2 == %s)\n"
 				   "    {\n"
 				   "        result.isnull = true;\n"
-				   "        PG_ERRORSET(ERRCODE_DIVISION_BY_ZERO);\n"
+				   "        STROM_SET_ERROR(StromError_RowReCheck);\n"
 				   "    }\n"
 				   "    else\n"
 				   "    {\n"
@@ -907,7 +914,7 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 					for (k=0; k < func_nargs; k++)
 					{
 						devtype_info   *dtype
-							= pgstrom_devtype_lookup(func_argtypes[i]);
+							= pgstrom_devtype_lookup(func_argtypes[k]);
 						Assert(dtype != NULL);
 						entry->func_args = lappend(entry->func_args, dtype);
 					}
@@ -989,10 +996,19 @@ static devfunc_info *
 devfunc_lookup_and_track(Oid func_oid, codegen_walker_context *context)
 {
 	devfunc_info   *dfunc = pgstrom_devfunc_lookup(func_oid);
+	ListCell	   *cell;
+
 	if (dfunc)
 	{
 		context->func_defs = list_append_unique_ptr(context->func_defs, dfunc);
 		context->extra_flags |= (dfunc->func_flags & DEVFUNC_INCL_FLAGS);
+
+		/* track function arguments and result type */
+		context->type_defs = list_append_unique_ptr(context->type_defs,
+													dfunc->func_rettype);
+		foreach (cell, dfunc->func_args)
+			context->type_defs = list_append_unique_ptr(context->type_defs,
+														lfirst(cell));
 	}
 	return dfunc;
 }
@@ -1012,7 +1028,7 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 		Const  *con = (Const *) node;
 		cl_uint	index = 0;
 
-		if (OidIsValid(con->constcollid) ||
+		if (!devtype_runnable_collation(con->constcollid) ||
 			!devtype_lookup_and_track(con->consttype, context))
 			return false;
 
@@ -1036,7 +1052,7 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 		Param  *param = (Param *) node;
 		int		index = 0;
 
-		if (OidIsValid(param->paramcollid) ||
+		if (!devtype_runnable_collation(param->paramcollid) ||
 			param->paramkind != PARAM_EXTERN ||
 			!devtype_lookup_and_track(param->paramtype, context))
 			return false;
@@ -1061,7 +1077,7 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 		Var	   *var = (Var *) node;
 		cl_uint	index = 0;
 
-		if (OidIsValid(var->varcollid) ||
+		if (!devtype_runnable_collation(var->varcollid) ||
 			!devtype_lookup_and_track(var->vartype, context))
 			return false;
 
@@ -1085,8 +1101,9 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 		FuncExpr   *func = (FuncExpr *) node;
 
 		/* no collation support */
-		if (OidIsValid(func->funccollid) || OidIsValid(func->inputcollid))
-			Assert(false); //return false;
+		if (!devtype_runnable_collation(func->funccollid) ||
+			!devtype_runnable_collation(func->inputcollid))
+			return false;
 
 		dfunc = devfunc_lookup_and_track(func->funcid, context);
 		if (!func)
@@ -1110,7 +1127,8 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 		OpExpr	   *op = (OpExpr *) node;
 
 		/* no collation support */
-		if (OidIsValid(op->opcollid) || OidIsValid(op->inputcollid))
+		if (!devtype_runnable_collation(op->opcollid) ||
+			!devtype_runnable_collation(op->inputcollid))
 			return false;
 
 		dfunc = devfunc_lookup_and_track(get_opcode(op->opno), context);
@@ -1307,7 +1325,16 @@ pgstrom_codegen_declarations(codegen_context *context)
 	/* Put declarations of device types */
 	foreach (cell, context->type_defs)
 	{
+		int		i, n;
+
 		dtype = lfirst(cell);
+
+		/* prevent duplicated definition by built-in functions */
+		appendStringInfo(&str, "#ifndef PG_");
+		n = strlen(dtype->type_name);
+		for (i=0; i < n; i++)
+			appendStringInfoChar(&str, toupper(dtype->type_name[i]));
+		appendStringInfo(&str, "_TYPE_DEFINED\n");
 
 		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
 			appendStringInfo(&str, "STROMCL_VARLENA_TYPE_TEMPLATE(%s)\n",
@@ -1315,6 +1342,7 @@ pgstrom_codegen_declarations(codegen_context *context)
 		else
 			appendStringInfo(&str, "STROMCL_SIMPLE_TYPE_TEMPLATE(%s,%s)\n",
 							 dtype->type_name, dtype->type_base);
+		appendStringInfo(&str, "#endif\n");
 	}
 	appendStringInfoChar(&str, '\n');
 
@@ -1323,7 +1351,8 @@ pgstrom_codegen_declarations(codegen_context *context)
 	{
 		dfunc = lfirst(cell);
 
-		appendStringInfo(&str, "%s\n", dfunc->func_decl);
+		if (dfunc->func_decl)
+			appendStringInfo(&str, "%s\n", dfunc->func_decl);
 	}
 
 	/* Put param/const definitions */
@@ -1401,7 +1430,7 @@ pgstrom_codegen_available_expression(Expr *expr)
 		foreach (cell, (List *) expr)
 		{
 			if (!pgstrom_codegen_available_expression(lfirst(cell)))
-				return false;
+				Assert(false); //return false;
 		}
 		return true;
 	}
@@ -1409,48 +1438,50 @@ pgstrom_codegen_available_expression(Expr *expr)
 	{
 		Const  *con = (Const *) expr;
 
-		if (OidIsValid(con->constcollid) ||
+		if (!devtype_runnable_collation(con->constcollid) ||
 			!pgstrom_devtype_lookup(con->consttype))
-			return false;
+			Assert(false); //return false;
 		return true;
 	}
 	else if (IsA(expr, Param))
 	{
 		Param  *param = (Param *) expr;
 
-		if (OidIsValid(param->paramcollid) ||
+		if (!devtype_runnable_collation(param->paramcollid) ||
 			param->paramkind != PARAM_EXTERN ||
 			!pgstrom_devtype_lookup(param->paramtype))
-			return false;
+			Assert(false); //return false;
 		return true;
 	}
 	else if (IsA(expr, Var))
 	{
 		Var	   *var = (Var *) expr;
 
-		if (OidIsValid(var->varcollid) ||
+		if (!devtype_runnable_collation(var->varcollid) ||
 			!pgstrom_devtype_lookup(var->vartype))
-			return false;
+			Assert(false); //return false;
 		return true;
 	}
 	else if (IsA(expr, FuncExpr))
 	{
 		FuncExpr   *func = (FuncExpr *) expr;
 
-		if (OidIsValid(func->funccollid) || OidIsValid(func->inputcollid))
-			return false;
+		if (!devtype_runnable_collation(func->funccollid) ||
+			!devtype_runnable_collation(func->inputcollid))
+			Assert(false); //return false;
 		if (!pgstrom_devfunc_lookup(func->funcid))
-			return false;
+			Assert(false); //return false;
 		return pgstrom_codegen_available_expression((Expr *) func->args);
 	}
 	else if (IsA(expr, OpExpr) || IsA(expr, DistinctExpr))
 	{
 		OpExpr	   *op = (OpExpr *) expr;
 
-		if (OidIsValid(op->opcollid) || OidIsValid(op->inputcollid))
-			return false;
+		if (!devtype_runnable_collation(op->opcollid) ||
+			!devtype_runnable_collation(op->inputcollid))
+			Assert(false); //return false;
 		if (!pgstrom_devfunc_lookup(get_opcode(op->opno)))
-			return false;
+			Assert(false); //return false;
 		return pgstrom_codegen_available_expression((Expr *) op->args);
 	}
 	else if (IsA(expr, NullTest))
@@ -1458,7 +1489,7 @@ pgstrom_codegen_available_expression(Expr *expr)
 		NullTest   *nulltest = (NullTest *) expr;
 
 		if (nulltest->argisrow)
-			return false;
+			Assert(false); //return false;
 		return pgstrom_codegen_available_expression((Expr *) nulltest->arg);
 	}
 	else if (IsA(expr, BooleanTest))

@@ -274,29 +274,11 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 		sources[count] = pgstrom_opencl_common_code;
 		lengths[count] = strlen(pgstrom_opencl_common_code);
 		count++;
-#if 0
-		/* opencl timelib */
-		if (dprog->extra_flags & DEVFUNC_NEEDS_TIMELIB)
-		{
-			sources[count] = pgstrom_opencl_timelib_code;
-			lengths[count] = strlen(pgstrom_opencl_timelib_code);
-			count++;
-		}
-		/* opencl textlib */
-		if (dprog->extra_flags & DEVFUNC_NEEDS_TEXTLIB)
-		{
-			sources[count] = pgstrom_opencl_textlib_code;
-			lengths[count] = strlen(pgstrom_opencl_textlib_code);
-			count++;
-		}
-		/* opencl numericlib */
-		if (dprog->extra_flags & DEVFUNC_NEEDS_NUMERICLIB)
-		{
-			sources[count] = pgstrom_opencl_numericlib_code;
-			lengths[count] = strlen(pgstrom_opencl_numericlib_code);
-			count++;
-		}
-#endif
+
+		/*
+		 * main logic for each GPU task (scan, sort, join)
+		 */
+
 		/* gpuscan device implementation */
 		if (dprog->extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
 		{
@@ -317,6 +299,34 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 		{
 			sources[count] = pgstrom_opencl_hashjoin_code;
 			lengths[count] = strlen(pgstrom_opencl_hashjoin_code);
+			count++;
+		}
+#endif
+		/*
+		 * Supplemental OpenCL Libraries
+		 */
+#if 0
+		/* opencl timelib */
+		if (dprog->extra_flags & DEVFUNC_NEEDS_TIMELIB)
+		{
+			sources[count] = pgstrom_opencl_timelib_code;
+			lengths[count] = strlen(pgstrom_opencl_timelib_code);
+			count++;
+		}
+#endif
+		/* opencl textlib */
+		if (dprog->extra_flags & DEVFUNC_NEEDS_TEXTLIB)
+		{
+			sources[count] = pgstrom_opencl_textlib_code;
+			lengths[count] = strlen(pgstrom_opencl_textlib_code);
+			count++;
+		}
+#if 0
+		/* opencl numericlib */
+		if (dprog->extra_flags & DEVFUNC_NEEDS_NUMERICLIB)
+		{
+			sources[count] = pgstrom_opencl_numericlib_code;
+			lengths[count] = strlen(pgstrom_opencl_numericlib_code);
 			count++;
 		}
 #endif

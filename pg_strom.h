@@ -226,7 +226,6 @@ typedef struct devtype_info {
 	uint32		type_flags;
 	char	   *type_name;	/* name of device type; same of SQL's type */
 	char	   *type_base;	/* base name of this type (like varlena) */
-	char	   *type_decl;
 	struct devfunc_info *type_is_null_fn;
 	struct devfunc_info	*type_is_not_null_fn;
 } devtype_info;
@@ -647,5 +646,6 @@ extern void pgstrom_init_debug(void);
  */
 extern const char *pgstrom_opencl_common_code;
 extern const char *pgstrom_opencl_gpuscan_code;
+extern const char *pgstrom_opencl_textlib_code;
 
 #endif	/* PG_STROM_H */
