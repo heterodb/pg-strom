@@ -166,10 +166,17 @@ typedef struct varatt_indirect
 	 (VARATT_IS_1B(PTR) ? VARSIZE_1B(PTR) :			\
 	  VARSIZE_4B(PTR)))
 
+#define VARDATA_4B(PTR)		(((varattrib_4b *) (PTR))->va_4byte.va_data)
+#define VARDATA_1B(PTR)		(((varattrib_1b *) (PTR))->va_data)
+#define VARDATA_ANY(PTR) \
+	(VARATT_IS_1B(PTR) ? VARDATA_1B(PTR) : VARDATA_4B(PTR))
+
 #else	/* OPENCL_DEVICE_CODE */
 #include "access/htup_details.h"
 #include "storage/itemptr.h"
 #define __global	/* address space qualifier is noise on host */
+#define __local		/* address space qualifier is noise on host */
+#define __private	/* address space qualifier is noise on host */
 #endif
 
 /*
@@ -195,6 +202,28 @@ typedef struct varatt_indirect
 
 /* significant error; that abort transaction on the host code */
 #define StromErrorIsSignificant(errcode)	((errcode) >= 100 || (errcode) < 0)
+
+#ifdef OPENCL_DEVICE_CODE
+/*
+ * It sets an error code unless no significant error code is already set.
+ * Also, RowReCheck has higher priority than RowFiltered because RowReCheck
+ * implies device cannot run the given expression completely.
+ * (Usually, due to compressed or external varlena datum)
+ */
+static inline void
+STROM_SET_ERROR(__private cl_int *p_error, cl_int errcode)
+{
+	cl_int	oldcode = *p_error;
+
+	if (StromErrorIsSignificant(errcode))
+	{
+		if (!StromErrorIsSignificant(oldcode))
+			*p_error = errcode;
+	}
+	else if (errcode > oldcode)
+		*p_error = errcode;
+}
+#endif	/* OPENCL_DEVICE_CODE */
 
 /*
  * kern_parambuf
@@ -927,7 +956,7 @@ STROMCL_SIMPLE_TYPE_TEMPLATE(bool, bool)
  * Functions for BooleanTest
  */
 static inline pg_bool_t
-pgfn_bool_is_true(pg_bool_t result)
+pgfn_bool_is_true(__private cl_int *errcode, pg_bool_t result)
 {
 	result.value = (!result.isnull && result.value);
 	result.isnull = false;
@@ -935,7 +964,7 @@ pgfn_bool_is_true(pg_bool_t result)
 }
 
 static inline pg_bool_t
-pgfn_bool_is_not_true(pg_bool_t result)
+pgfn_bool_is_not_true(__private cl_int *errcode, pg_bool_t result)
 {
 	result.value = (result.isnull || !result.value);
 	result.isnull = false;
@@ -943,7 +972,7 @@ pgfn_bool_is_not_true(pg_bool_t result)
 }
 
 static inline pg_bool_t
-pgfn_bool_is_false(pg_bool_t result)
+pgfn_bool_is_false(__private cl_int *errcode, pg_bool_t result)
 {
 	result.value = (!result.isnull && !result.value);
 	result.isnull = false;
@@ -951,7 +980,7 @@ pgfn_bool_is_false(pg_bool_t result)
 }
 
 static inline pg_bool_t
-pgfn_bool_is_not_false(pg_bool_t result)
+pgfn_bool_is_not_false(__private cl_int *errcode, pg_bool_t result)
 {
 	result.value = (result.isnull || result.value);
 	result.isnull = false;
@@ -959,7 +988,7 @@ pgfn_bool_is_not_false(pg_bool_t result)
 }
 
 static inline pg_bool_t
-pgfn_bool_is_unknown(pg_bool_t result)
+pgfn_bool_is_unknown(__private cl_int *errcode, pg_bool_t result)
 {
 	result.value = result.isnull;
 	result.isnull = false;
@@ -967,7 +996,7 @@ pgfn_bool_is_unknown(pg_bool_t result)
 }
 
 static inline pg_bool_t
-pgfn_bool_is_not_unknown(pg_bool_t result)
+pgfn_bool_is_not_unknown(__private cl_int *errcode, pg_bool_t result)
 {
 	result.value = !result.isnull;
 	result.isnull = false;
@@ -978,7 +1007,7 @@ pgfn_bool_is_not_unknown(pg_bool_t result)
  * Functions for BoolOp (EXPR_AND and EXPR_OR shall be constructed on demand)
  */
 static inline pg_bool_t
-pgfn_boolop_not(pg_bool_t result)
+pgfn_boolop_not(__private cl_int *errcode, pg_bool_t result)
 {
 	result.value = !result.value;
 	/* if null is given, result is also null */

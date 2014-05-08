@@ -534,7 +534,7 @@ tcache_create_toast_buffer(Size required)
 
 	tbuf = pgstrom_shmem_alloc_alap(required, &allocated);
 	if (!tbuf)
-		elog(ERROR, "out of shared memory");
+		Assert(false); //elog(ERROR, "out of shared memory");
 
 	SpinLockInit(&tbuf->refcnt_lock);
 	tbuf->refcnt = 1;
@@ -1144,8 +1144,8 @@ tcache_copy_cs_varlena(tcache_column_store *tcs_dst, int base_dst,
 		else
 		{
 			vptr = (char *)tbuf_src + src_ofs[base_src + i];
-			vsize = VARSIZE(vptr);
-			if (tbuf_dst->tbuf_usage + MAXALIGN(vsize) < tbuf_dst->tbuf_length)
+			vsize = VARSIZE_ANY(vptr);
+			if (tbuf_dst->tbuf_length < tbuf_dst->tbuf_usage + MAXALIGN(vsize))
 			{
 				tcs_dst->cdata[attidx].toast
 					= tcache_duplicate_toast_buffer(tbuf_dst,
@@ -1585,7 +1585,6 @@ tcache_split_tcnode(tcache_head *tc_head, tcache_node *tc_node_old)
 						   tcs_old->cdata[i].isnull, nremain,
 						   nmoved);
 			}
-
 			/* regular columns */
 			if (attr->attlen > 0)
 			{
@@ -1600,6 +1599,7 @@ tcache_split_tcnode(tcache_head *tc_head, tcache_node *tc_node_old)
 									   i, nmoved);
 			}
 		}
+
 		tcs_new->nrows = nmoved;
 		tcs_new->njunks = 0;
 		tcs_new->is_sorted = true;
@@ -1962,27 +1962,24 @@ do_insert_tuple(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 			 */
 			tcache_toastbuf	*tbuf = tcs->cdata[i].toast;
 			Size		vsize = VARSIZE_ANY(values[j]);
+			cl_uint	   *cs_ofs = (cl_uint *)tcs->cdata[i].values;
 
 			if (!tbuf)
 			{
 				/* assign a toast buffer with default size */
 				tcs->cdata[i].toast = tbuf = tcache_create_toast_buffer(0);
 			}
-			else if (tbuf->tbuf_usage + MAXALIGN(vsize) < tbuf->tbuf_length)
+			else if (tbuf->tbuf_length < tbuf->tbuf_usage + MAXALIGN(vsize))
 			{
 				tcache_toastbuf	*tbuf_new;
+				Size	new_len = 2 * tbuf->tbuf_length;
 
 				/*
 				 * Needs to expand toast-buffer if no more room exist
 				 * to store new varlenas. Usually, twice amount of
 				 * toast buffer is best choice for buddy allocator.
 				 */
-				tbuf_new = tcache_create_toast_buffer(2 * tbuf->tbuf_length);
-				memcpy(tbuf_new->data,
-					   tbuf->data,
-					   tbuf->tbuf_usage - offsetof(tcache_toastbuf, data[0]));
-				tbuf_new->tbuf_usage = tbuf->tbuf_usage;
-				tbuf_new->tbuf_junk = tbuf->tbuf_junk;
+				tbuf_new = tcache_duplicate_toast_buffer(tbuf, new_len);
 
 				/* replace older buffer by new (larger) one */
 				tcache_put_toast_buffer(tbuf);
@@ -1990,7 +1987,7 @@ do_insert_tuple(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 			}
 			Assert(tbuf->tbuf_usage + MAXALIGN(vsize) < tbuf->tbuf_length);
 
-			((cl_uint *)tcs->cdata[i].values)[tcs->nrows] = tbuf->tbuf_usage;
+			cs_ofs[tcs->nrows] = tbuf->tbuf_usage;
 			memcpy((char *)tbuf + tbuf->tbuf_usage,
 				   DatumGetPointer(values[j]),
 				   vsize);

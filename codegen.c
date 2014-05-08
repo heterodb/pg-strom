@@ -70,7 +70,7 @@ make_devtype_is_null_fn(devtype_info *dtype)
 	dfunc->func_args = list_make1(dtype);
 	dfunc->func_rettype = pgstrom_devtype_lookup(BOOLOID);
 	dfunc->func_decl =
-		psprintf("static pg_%s_t pgfn_%s(pg_%s_t arg)\n"
+		psprintf("static pg_%s_t pgfn_%s(__private int *errcode, pg_%s_t arg)\n"
 				 "{\n"
 				 "  pg_%s_t result;\n\n"
 				 "  result.isnull = false;\n"
@@ -94,7 +94,7 @@ make_devtype_is_not_null_fn(devtype_info *dtype)
 	dfunc->func_args = list_make1(dtype);
 	dfunc->func_rettype = pgstrom_devtype_lookup(BOOLOID);
 	dfunc->func_decl =
-		psprintf("static pg_%s_t pgfn_%s(pg_%s_t arg)\n"
+		psprintf("static pg_%s_t pgfn_%s(__private int *errcode, pg_%s_t arg)\n"
 				 "{\n"
 				 "  pg_%s_t result;\n\n"
 				 "  result.isnull = false;\n"
@@ -603,13 +603,15 @@ devfunc_setup_div_oper(devfunc_info *entry, devfunc_catalog_t *procat)
 	Assert(procat->func_nargs == 2);
 	entry->func_name = pstrdup(procat->func_name);
 	entry->func_decl
-		= psprintf("static pg_%s_t pgfn_%s(pg_%s_t arg1, pg_%s_t arg2)\n"
+		= psprintf("static pg_%s_t pgfn_%s"
+				   "(__private int *errcode,"
+				   " pg_%s_t arg1, pg_%s_t arg2)\n"
 				   "{\n"
 				   "    pg_%s_t result;\n"
 				   "    if (arg2 == %s)\n"
 				   "    {\n"
 				   "        result.isnull = true;\n"
-				   "        STROM_SET_ERROR(StromError_RowReCheck);\n"
+				   "        STROM_SET_ERROR(errcode, StromError_RowReCheck);\n"
 				   "    }\n"
 				   "    else\n"
 				   "    {\n"
@@ -633,7 +635,7 @@ devfunc_setup_const(devfunc_info *entry, devfunc_catalog_t *procat)
 	Assert(procat->func_nargs == 0);
 	entry->func_name = pstrdup(procat->func_name);
 	entry->func_decl
-		= psprintf("static pg_%s_t pgfn_%s(void)\n"
+		= psprintf("static pg_%s_t pgfn_%s(__private int *errcode)\n"
 				   "{\n"
 				   "  pg_%s_t result;\n"
 				   "  result.isnull = false;\n"
@@ -654,7 +656,8 @@ devfunc_setup_cast(devfunc_info *entry, devfunc_catalog_t *procat)
 	Assert(procat->func_nargs == 1);
 	entry->func_name = pstrdup(procat->func_name);
 	entry->func_decl
-		= psprintf("static pg_%s_t pgfn_%s(pg_%s_t arg)\n"
+		= psprintf("static pg_%s_t pgfn_%s"
+				   "(__private int *errcode, pg_%s_t arg)\n"
 				   "{\n"
 				   "    pg_%s_t result;\n"
 				   "    result.value  = (%s)arg.value;\n"
@@ -677,7 +680,8 @@ devfunc_setup_oper_both(devfunc_info *entry, devfunc_catalog_t *procat)
 	Assert(procat->func_nargs == 2);
 	entry->func_name = pstrdup(procat->func_name);
 	entry->func_decl
-		= psprintf("static pg_%s_t pgfn_%s(pg_%s_t arg1, pg_%s_t arg2)\n"
+		= psprintf("static pg_%s_t pgfn_%s"
+				   "(__private int *errcode, pg_%s_t arg1, pg_%s_t arg2)\n"
 				   "{\n"
 				   "    pg_%s_t result;\n"
 				   "    result.value = (%s)(arg1.value %s arg2.value);\n"
@@ -702,7 +706,8 @@ devfunc_setup_oper_either(devfunc_info *entry, devfunc_catalog_t *procat)
 	Assert(procat->func_nargs == 1);
 	entry->func_name = pstrdup(procat->func_name);
 	entry->func_decl
-		= psprintf("static pg_%s_t pgfn_%s(pg_%s_t arg)\n"
+		= psprintf("static pg_%s_t pgfn_%s"
+				   "(__private int *errcode, pg_%s_t arg)\n"
 				   "{\n"
 				   "    pg_%s_t result;\n"
 				   "    result.value = (%s)(%sarg%s);\n"
@@ -732,13 +737,13 @@ devfunc_setup_func(devfunc_info *entry, devfunc_catalog_t *procat)
 	appendStringInfo(&str, "static pg_%s_t pgfn_%s(",
 					 entry->func_rettype->type_name,
 					 entry->func_name);
+	appendStringInfo(&str, "__private int *errcode");
 	index = 1;
 	foreach (cell, entry->func_args)
 	{
 		devtype_info   *dtype = lfirst(cell);
 
-		appendStringInfo(&str, "%spg_%s_t arg%d",
-						 cell == list_head(entry->func_args) ? "" : ", ",
+		appendStringInfo(&str, ", pg_%s_t arg%d",
 						 dtype->type_name,
 						 index++);
 	}
@@ -791,11 +796,11 @@ devfunc_setup_boolop(BoolExprType boolop, const char *fn_name, int fn_nargs)
 		entry->func_args = lappend(entry->func_args, dtype);
 	entry->func_rettype = dtype;
 	entry->func_name = pstrdup(fn_name);
-	appendStringInfo(&str, "static pg_%s_t pgfn_%s(",
+	appendStringInfo(&str, "static pg_%s_t pgfn_%s("
+					 "__private int *errcode",
 					 dtype->type_name, fn_name);
 	for (i=0; i < fn_nargs; i++)
-		appendStringInfo(&str, "%spg_%s_t arg%u",
-						 (i > 0 ? ", " : ""),
+		appendStringInfo(&str, ", pg_%s_t arg%u",
 						 dtype->type_name, i+1);
 	appendStringInfo(&str, ")\n"
 					 "{\n"
@@ -1108,12 +1113,12 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 		dfunc = devfunc_lookup_and_track(func->funcid, context);
 		if (!func)
 			return false;
-		appendStringInfo(&context->str, "pgfn_%s(", dfunc->func_name);
+		appendStringInfo(&context->str,
+						 "pgfn_%s(&errcode", dfunc->func_name);
 
 		foreach (cell, func->args)
 		{
-			if (cell != list_head(func->args))
-				appendStringInfo(&context->str, ", ");
+			appendStringInfo(&context->str, ", ");
 			if (!codegen_expression_walker(lfirst(cell), context))
 				return false;
 		}
@@ -1134,12 +1139,12 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 		dfunc = devfunc_lookup_and_track(get_opcode(op->opno), context);
 		if (!dfunc)
 			return false;
-		appendStringInfo(&context->str, "pgfn_%s(", dfunc->func_name);
+		appendStringInfo(&context->str,
+						 "pgfn_%s(&errcode", dfunc->func_name);
 
 		foreach (cell, op->args)
 		{
-			if (cell != list_head(op->args))
-				appendStringInfo(&context->str, ", ");
+			appendStringInfo(&context->str, ", ");
 			if (!codegen_expression_walker(lfirst(cell), context))
 				return false;
 		}
@@ -1172,7 +1177,7 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 					 (int)nulltest->nulltesttype);
 				break;
 		}
-		appendStringInfo(&context->str, "pgfn_%s(", func_name);
+		appendStringInfo(&context->str, "pgfn_%s(&errcode, ", func_name);
 		if (!codegen_expression_walker((Node *) nulltest->arg, context))
 			return false;
 		appendStringInfoChar(&context->str, ')');
@@ -1213,7 +1218,7 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 					 (int)booltest->booltesttype);
 				break;
 		}
-		appendStringInfo(&context->str, "pgfn_%s(", func_name);
+		appendStringInfo(&context->str, "pgfn_%s(&errcode, ", func_name);
 		if (!codegen_expression_walker((Node *) booltest->arg, context))
 			return false;
 		appendStringInfoChar(&context->str, ')');
@@ -1226,7 +1231,7 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 		if (b->boolop == NOT_EXPR)
 		{
 			Assert(list_length(b->args) == 1);
-			appendStringInfo(&context->str, "pg_boolop_not(");
+			appendStringInfo(&context->str, "pg_boolop_not(&errcode, ");
 			if (!codegen_expression_walker(linitial(b->args), context))
 				return false;
 			appendStringInfoChar(&context->str, ')');
@@ -1261,12 +1266,12 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 														dfunc);
 			context->extra_flags |= (dfunc->func_flags & DEVFUNC_INCL_FLAGS);
 
-			appendStringInfo(&context->str, "pgfn_%s(", dfunc->func_name);
+			appendStringInfo(&context->str, "pgfn_%s(&errcode",
+							 dfunc->func_name);
 			foreach (cell, b->args)
 			{
 				Assert(exprType(lfirst(cell)) == BOOLOID);
-				if (cell != list_head(b->args))
-					appendStringInfo(&context->str, ", ");
+				appendStringInfo(&context->str, ", ");
 				if (!codegen_expression_walker(lfirst(cell), context))
 					return false;
 			}

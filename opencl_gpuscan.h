@@ -89,63 +89,22 @@ typedef struct {
 	  0 : KERNEL_DEBUG_BUFSIZE))
 
 #ifdef OPENCL_DEVICE_CODE
-/* macro for error setting */
-#define STROM_SET_ERROR(errcode)				\
-	gpuscan_set_error(errcode,local_workmem)
-
-/*
- * Usage of local memory on gpuscan logic.
- * 
- * Gpuscan requires to allocate 2 * sizeof(cl_int) * get_local_size(0) length
- * of local memory on its invocation, to handle tuple's visibility and error
- * status during evaluation of qualifiers.
- */
-static inline void
-gpuscan_workmem_init(__local void *workmem)
-{
-	__local cl_int *local_error = workmem;
-
-	local_error[get_local_id(0)] = StromError_Success;
-	barrier(CLK_LOCAL_MEM_FENCE);
-}
-
-/*
- * It sets an error code unless no significant error code is already set.
- * Also, RowReCheck has higher priority than RowFiltered because RowReCheck
- * implies device cannot run the given expression completely.
- * (Usually, due to compressed or external varlena datum)
- */
-static inline void
-gpuscan_set_error(cl_int errcode, __local void *workmem)
-{
-	__local cl_int *local_error = workmem;
-	cl_int	oldcode = local_error[get_local_id(0)];
-
-	if (StromErrorIsSignificant(errcode))
-	{
-		if (!StromErrorIsSignificant(oldcode))
-			local_error[get_local_id(0)] = errcode;
-	}
-	else if (errcode > oldcode)
-		local_error[get_local_id(0)] = errcode;
-}
-
 /*
  * Get an error code to be returned in statement level
  */
 static void
 gpuscan_writeback_statement_error(__global kern_resultbuf *kresbuf,
+								  int errcode,
 								  __local void *workmem)
 {
 	__local cl_int *local_error = workmem;
-	__local cl_int *local_temp = local_error + get_local_size(0);
 	cl_uint		wkgrp_id = get_local_id(0);
 	cl_uint		wkgrp_sz;
 	cl_int		errcode1;
 	cl_int		errcode2;
 	cl_int		i = 0;
 
-	local_temp[wkgrp_id] = local_error[wkgrp_id];
+	local_error[wkgrp_id] = errcode;
 	barrier(CLK_LOCAL_MEM_FENCE);
 
 	for (i=0, wkgrp_sz = get_local_size(0) - 1;
@@ -155,14 +114,14 @@ gpuscan_writeback_statement_error(__global kern_resultbuf *kresbuf,
 		/* if least (i+1) bits of this wkgrp_id are zero? */
 		if ((wkgrp_id & ((1<<(i+1))-1)) == 0)
 		{
-			errcode1 = local_temp[wkgrp_id];
+			errcode1 = local_error[wkgrp_id];
 			errcode2 = (wkgrp_id + (1<<i) < get_local_size(0)
-						? local_temp[wkgrp_id + (1<<i)]
+						? local_error[wkgrp_id + (1<<i)]
 						: StromError_Success);
 
 			if (!StromErrorIsSignificant(errcode1) &&
 				StromErrorIsSignificant(errcode2))
-				local_temp[wkgrp_id] = errcode2;
+				local_error[wkgrp_id] = errcode2;
 		}
 		barrier(CLK_LOCAL_MEM_FENCE);
 	}
@@ -173,7 +132,7 @@ gpuscan_writeback_statement_error(__global kern_resultbuf *kresbuf,
 	 * This atomic operation set an error code, if it is still
 	 * StromError_Success.
 	 */
-	errcode1 = local_temp[0];
+	errcode1 = local_error[0];
 	if (get_local_id(0) == 0 && StromErrorIsSignificant(errcode1))
 	{
 		KDEBUG_INT("errcode", errcode1);
@@ -188,10 +147,10 @@ gpuscan_writeback_statement_error(__global kern_resultbuf *kresbuf,
  */
 static void
 gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
+							int errcode,
 							__local void *workmem)
 {
 	__local cl_int *local_error = workmem;
-	__local cl_int *local_temp = local_error + get_local_size(0);
 	cl_uint		wkgrp_sz = get_local_size(0);
 	cl_uint		wkgrp_id = get_local_id(0);
 	cl_uint		offset;
@@ -199,9 +158,9 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
 	cl_uint		i;
 
 	/*
-	 * NOTE: At the begining, kern_local_error_work has either 1 or 0
-	 * according to the row-level error code. This logic tries to count
-	 * number of elements with 1,
+	 * NOTE: At the begining, local_error has either 1 or 0 according
+	 * to the row-level error code. This logic tries to count number
+	 * of elements with 1,
 	 * example)
 	 * X[0] - 1 -> 1 (X[0])      -> 1 (X[0])   -> 1 (X[0])   -> 1 *
 	 * X[1] - 0 -> 1 (X[0]+X[1]) -> 1 (X[0-1]) -> 1 (X[0-1]) -> 1
@@ -214,10 +173,10 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
 	 * X[8] - 0 -> 0 (X[8])      -> 0 (X[7])   -> 0 (X[7])   -> 4
 	 * X[9] - 1 -> 1 (X[8]+X[9]) -> 1 (X[7-8]) -> 1 (X7-8])  -> 5 *
 	 */
-	local_temp[wkgrp_id]
+	local_error[wkgrp_id]
 		= (get_global_id(0) < kresbuf->nrooms &&
-		   (local_error[wkgrp_id] == StromError_Success ||
-			local_error[wkgrp_id] == StromError_RowReCheck)) ? 1 : 0;
+		   (errcode == StromError_Success ||
+			errcode == StromError_RowReCheck)) ? 1 : 0;
 	barrier(CLK_LOCAL_MEM_FENCE);
 
 	for (i=0; wkgrp_sz != 0; i++, wkgrp_sz >>= 1)
@@ -226,7 +185,7 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
 		{
 			cl_int	i_source = (wkgrp_id & ~(1 << i)) | ((1 << i) - 1);
 
-			local_temp[wkgrp_id] += local_temp[i_source];
+			local_error[wkgrp_id] += local_error[i_source];
 		}
 		barrier(CLK_LOCAL_MEM_FENCE);
 	}
@@ -239,15 +198,16 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
 	 * back (because it it sum(0..N-1)), so we acquire this number of rooms
 	 * with atomic operation, then write them back.
 	 */
-	nitems = local_temp[get_local_size(0) - 1];
+	nitems = local_error[get_local_size(0) - 1];
 
 	barrier(CLK_LOCAL_MEM_FENCE);
 	if (get_local_id(0) == 0)
 	{
 		offset = atomic_add(&kresbuf->nitems, nitems);
-		for (i=0; i < get_local_size(0); i++)
-			local_temp[i] += offset;
+		local_error[get_local_size(0)] = offset;
 	}
+	barrier(CLK_LOCAL_MEM_FENCE);
+	local_error[get_local_id(0)] += local_error[get_local_size(0)];
 	barrier(CLK_LOCAL_MEM_FENCE);
 
 	/*
@@ -258,26 +218,26 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
 	if (get_global_id(0) >= kresbuf->nrooms)
 		return;
 
-	if (local_error[wkgrp_id] == StromError_Success)
+	if (errcode == StromError_Success)
 	{
-		i = local_temp[wkgrp_id];
+		i = local_error[wkgrp_id];
 		kresbuf->results[i - 1] = (get_global_id(0) + 1);
 	}
-	else if (local_error[wkgrp_id] == StromError_RowReCheck)
+	else if (errcode == StromError_RowReCheck)
 	{
-		i = local_temp[wkgrp_id];
+		i = local_error[wkgrp_id];
 		kresbuf->results[i - 1] = -(get_global_id(0) + 1);
 	}
 }
 
 static inline void
-gpuscan_writeback_result(__global kern_gpuscan *kgpuscan,
+gpuscan_writeback_result(__global kern_gpuscan *kgpuscan, int errcode,
 						 __local void *local_workmem)
 {
 	__global kern_resultbuf *kresbuf = KERN_GPUSCAN_RESULTBUF(kgpuscan);
 
-	gpuscan_writeback_statement_error(kresbuf, local_workmem);
-	gpuscan_writeback_row_error(kresbuf, local_workmem);
+	gpuscan_writeback_statement_error(kresbuf, errcode, local_workmem);
+	gpuscan_writeback_row_error(kresbuf, errcode, local_workmem);
 }
 
 #else	/* OPENCL_DEVICE_CODE */

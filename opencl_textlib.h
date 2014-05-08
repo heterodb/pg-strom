@@ -21,10 +21,10 @@ varlena_cmp(__global varlena *arg1, __global varlena *arg2)
 		STROM_SET_ERROR(StromError_RowReCheck);
 	else
 	{
-		cl_char	   *s1 = VARDATA(arg1);
-		cl_char	   *s2 = VARDATA(arg2);
-		cl_int		len1 = VARSIZE_EXHDR(arg1);
-		cl_int		len2 = VARSIZE_EXHDR(arg2);
+		cl_char	   *s1 = VARDATA_ANY(arg1);
+		cl_char	   *s2 = VARDATA_ANY(arg2);
+		cl_int		len1 = VARSIZE_ANY(arg1);
+		cl_int		len2 = VARSIZE_ANY(arg2);
 		cl_int		len = min(len1, len2);
 		cl_uint		v1;
 		cl_uint		v2;
@@ -63,7 +63,7 @@ STROMCL_VRALENA_TYPE_TEMPLATE(bpchar)
 #endif
 
 static pg_bool
-pgfn_bpchareq(pg_bpchar arg1, pg_bpchar arg2)
+pgfn_bpchareq(__private cl_int *errno, pg_bpchar arg1, pg_bpchar arg2)
 {
 	pg_bool	result;
 
@@ -74,7 +74,7 @@ pgfn_bpchareq(pg_bpchar arg1, pg_bpchar arg2)
 }
 
 static pg_bool
-pgfn_bpcharne(pg_bpchar arg1, pg_bpchar arg2)
+pgfn_bpcharne(__private cl_int *errno, pg_bpchar arg1, pg_bpchar arg2)
 {
 	pg_bool	result;
 
@@ -85,7 +85,7 @@ pgfn_bpcharne(pg_bpchar arg1, pg_bpchar arg2)
 }
 
 static pg_bool
-pgfn_bpcharlt(pg_bpchar arg1, pg_bpchar arg2)
+pgfn_bpcharlt(__private cl_int *errno, pg_bpchar arg1, pg_bpchar arg2)
 {
 	pg_bool	result;
 
@@ -96,7 +96,7 @@ pgfn_bpcharlt(pg_bpchar arg1, pg_bpchar arg2)
 }
 
 static pg_bool
-pgfn_bpcharle(pg_bpchar arg1, pg_bpchar arg2)
+pgfn_bpcharle(__private cl_int *errno, pg_bpchar arg1, pg_bpchar arg2)
 {
 	pg_bool	result;
 
@@ -107,7 +107,7 @@ pgfn_bpcharle(pg_bpchar arg1, pg_bpchar arg2)
 }
 
 static pg_bool
-pgfn_bpchargt(pg_bpchar arg1, pg_bpchar arg2)
+pgfn_bpchargt(__private cl_int *errno, pg_bpchar arg1, pg_bpchar arg2)
 {
 	pg_bool	result;
 
@@ -118,7 +118,7 @@ pgfn_bpchargt(pg_bpchar arg1, pg_bpchar arg2)
 }
 
 static pg_bool
-pgfn_bpcharge(pg_bpchar arg1, pg_bpchar arg2)
+pgfn_bpcharge(__private cl_int *errno, pg_bpchar arg1, pg_bpchar arg2)
 {
 	pg_bool	result;
 
@@ -134,7 +134,7 @@ STROMCL_VRALENA_TYPE_TEMPLATE(text)
 #endif
 
 static pg_bool
-pgfn_texteq(pg_text arg1, pg_text arg2)
+pgfn_texteq(__private cl_int *errno, pg_text arg1, pg_text arg2)
 {
 	pg_bool	result;
 
@@ -145,7 +145,7 @@ pgfn_texteq(pg_text arg1, pg_text arg2)
 }
 
 static pg_bool
-pgfn_textne(pg_text arg1, pg_text arg2)
+pgfn_textne(__private cl_int *errno, pg_text arg1, pg_text arg2)
 {
 	pg_bool	result;
 
@@ -156,7 +156,7 @@ pgfn_textne(pg_text arg1, pg_text arg2)
 }
 
 static pg_bool
-pgfn_textlt(pg_text arg1, pg_text arg2)
+pgfn_textlt(__private cl_int *errno, pg_text arg1, pg_text arg2)
 {
 	pg_bool	result;
 
@@ -167,7 +167,7 @@ pgfn_textlt(pg_text arg1, pg_text arg2)
 }
 
 static pg_bool
-pgfn_textle(pg_text arg1, pg_text arg2)
+pgfn_textle(__private cl_int *errno, pg_text arg1, pg_text arg2)
 {
 	pg_bool	result;
 
@@ -178,7 +178,7 @@ pgfn_textle(pg_text arg1, pg_text arg2)
 }
 
 static pg_bool
-pgfn_textgt(pg_text arg1, pg_text arg2)
+pgfn_textgt(__private cl_int *errno, pg_text arg1, pg_text arg2)
 {
 	pg_bool	result;
 
@@ -189,7 +189,7 @@ pgfn_textgt(pg_text arg1, pg_text arg2)
 }
 
 static pg_bool
-pgfn_textge(pg_text arg1, pg_text arg2)
+pgfn_textge(__private cl_int *errno, pg_text arg1, pg_text arg2)
 {
 	pg_bool	result;
 
