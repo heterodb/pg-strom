@@ -751,7 +751,7 @@ pgstrom_setup_kern_colstore_head(GpuScanState *gss, kern_resultbuf *kresult)
 		kcmeta->cs_ofs = offset;
 
 		if ((kcmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
-			offset += STROMALIGN((nrows+BITS_PER_BYTE-1) / BITS_PER_BYTE);
+			offset += STROMALIGN((nrows + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
 		offset += STROMALIGN(nrows * (attr->attlen > 0
 									  ? attr->attlen
 									  : sizeof(cl_uint)));
@@ -2517,31 +2517,41 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 
 	for (i=0; i < ncols; i++)
 	{
-		void   *baseaddr;
-
 		j = i_refcols[i];
 
 		offset = kcs_head->colmeta[i].cs_ofs;
 		if ((kcs_head->colmeta[i].flags & KERN_COLMETA_ATTNOTNULL) == 0)
 		{
 			Assert(tcs->cdata[j].isnull != NULL);
-			baseaddr = tcs->cdata[j].isnull;
 			length = STROMALIGN((nrows + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+			rc = clEnqueueWriteBuffer(kcmdq,
+									  clgsc->m_cstore,
+									  CL_FALSE,
+									  offset,
+									  length,
+									  tcs->cdata[j].isnull,
+									  0,
+									  NULL,
+									  &clgsc->events[clgsc->ev_index]);
+			if (rc != CL_SUCCESS)
+			{
+				clserv_log("failed on clEnqueueWriteBuffer: %s",
+						   opencl_strerror(rc));
+				goto error_sync;
+			}
+			clgsc->ev_index++;
+
+			offset += length;
 		}
-		else
-		{
-			baseaddr = tcs->cdata[j].values;
-			length = 0;
-		}
-		length += (kcs_head->colmeta[i].attlen > 0
-				   ? kcs_head->colmeta[i].attlen
-				   : sizeof(cl_uint)) * nrows;
+		length = (kcs_head->colmeta[i].attlen > 0
+				  ? kcs_head->colmeta[i].attlen
+				  : sizeof(cl_uint)) * nrows;
 		rc = clEnqueueWriteBuffer(kcmdq,
 								  clgsc->m_cstore,
 								  CL_FALSE,
 								  offset,
 								  length,
-								  baseaddr,
+								  tcs->cdata[j].values,
 								  0,
 								  NULL,
 								  &clgsc->events[clgsc->ev_index]);
@@ -2555,6 +2565,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 
 		if (tcs->cdata[j].toast)
 		{
+			Assert(kcs_head->colmeta[i].attlen < 0);
 			Assert(clgsc->m_toast);
 			rc = clEnqueueWriteBuffer(kcmdq,
 									  clgsc->m_toast,
