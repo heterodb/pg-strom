@@ -49,9 +49,11 @@ static struct {
 	{ FLOAT8OID,		"cl_double" },
 	/* date and time datatypes */
 	{ DATEOID,			"cl_int" },
+#ifdef HAVE_INT64_TIMESTAMP
 	{ TIMEOID,			"cl_long" },
 	{ TIMESTAMPOID,		"cl_long" },
 	{ TIMESTAMPTZOID,	"cl_long" },
+#endif
 	/* variable length datatypes */
 	{ BPCHAROID,		"varlena" },
 	{ VARCHAROID,		"varlena" },
@@ -70,7 +72,8 @@ make_devtype_is_null_fn(devtype_info *dtype)
 	dfunc->func_args = list_make1(dtype);
 	dfunc->func_rettype = pgstrom_devtype_lookup(BOOLOID);
 	dfunc->func_decl =
-		psprintf("static pg_%s_t pgfn_%s(__private int *errcode, pg_%s_t arg)\n"
+		psprintf("static pg_%s_t pgfn_%s"
+				 "(__private int *errcode, pg_%s_t arg)\n"
 				 "{\n"
 				 "  pg_%s_t result;\n\n"
 				 "  result.isnull = false;\n"
@@ -94,7 +97,8 @@ make_devtype_is_not_null_fn(devtype_info *dtype)
 	dfunc->func_args = list_make1(dtype);
 	dfunc->func_rettype = pgstrom_devtype_lookup(BOOLOID);
 	dfunc->func_decl =
-		psprintf("static pg_%s_t pgfn_%s(__private int *errcode, pg_%s_t arg)\n"
+		psprintf("static pg_%s_t pgfn_%s"
+				 "(__private int *errcode, pg_%s_t arg)\n"
 				 "{\n"
 				 "  pg_%s_t result;\n\n"
 				 "  result.isnull = false;\n"

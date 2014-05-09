@@ -7,7 +7,7 @@ OBJS  = main.o shmem.o codegen.o mqueue.o restrack.o debug.o \
 	tcache.o datastore.o gpuscan.o \
 	opencl_entry.o opencl_serv.o opencl_devinfo.o opencl_devprog.o \
 	opencl_common.o opencl_gpuscan.o \
-	opencl_textlib.o
+	opencl_textlib.o opencl_timelib.o
 
 
 PG_CONFIG = pg_config
@@ -44,6 +44,12 @@ opencl_hashjoin.c: opencl_hashjoin.h
 	 echo ";") > $@
 
 opencl_textlib.c: opencl_textlib.h
+	(echo "const char *pgstrom_opencl_textlib_code ="; \
+	 sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
+	     -e 's/^/  "/g' -e 's/$$/\\n"/g'< $^; \
+	 echo ";") > $@
+
+opencl_timelib.c: opencl_timelib.h
 	(echo "const char *pgstrom_opencl_textlib_code ="; \
 	 sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
 	     -e 's/^/  "/g' -e 's/$$/\\n"/g'< $^; \
