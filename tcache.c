@@ -327,6 +327,11 @@ bms_fixup_sysattrs(int nattrs, Bitmapset *required)
 	result = bms_copy(required);
 	if ((result->words[0] & mask) != result->words[0])
 	{
+		/*
+		 * If whole-row-reference is required, it is equivalent to
+		 * reference all the user columns. So, we expand the bitmap
+		 * first, then turn of the bits of system columns.
+		 */
 		if (bms_is_member(-FirstLowInvalidHeapAttributeNumber, required))
 		{
 			for (i=1; i <= nattrs; i++)
@@ -2657,7 +2662,7 @@ tcache_get_tchead(Oid reloid, Bitmapset *required,
 	dlist_iter		iter;
 	tcache_head	   *tc_head = NULL;
 	tcache_head	   *tc_old = NULL;
-	int				hindex = tcache_hash_index(MyDatabaseId, reloid);
+	int				i, j, hindex = tcache_hash_index(MyDatabaseId, reloid);
 
 	SpinLockAcquire(&tc_common->lock);
 	PG_TRY();
@@ -2670,34 +2675,23 @@ tcache_get_tchead(Oid reloid, Bitmapset *required,
 			if (temp->datoid == MyDatabaseId &&
 				temp->reloid == reloid)
 			{
-				Bitmapset  *tempset;
-				int			i, j, k;
+				Bitmapset  *cached = NULL;
+				Bitmapset  *referenced
+					= bms_fixup_sysattrs(temp->tupdesc->natts, required);
 
-				tempset = bms_fixup_sysattrs(temp->tupdesc->natts,
-											 required);
-				j = 0;
-				while ((i = bms_first_member(tempset)) >= 0 &&
-					   j < temp->tupdesc->natts)
+				for (i=0; i < temp->ncols; i++)
 				{
-					i += FirstLowInvalidHeapAttributeNumber;
-
+					j = (temp->i_cached[i] + 1 -
+						 FirstLowInvalidHeapAttributeNumber);
 					/*
-					 * All the system attributes and whole-row reference
-					 * are already handled in bms_fixup_sysattrs.
+					 * All the system attribute and whole-row reference
+					 * shall be dropped on cache creation time.
 					 */
-					Assert(i > 0);
+					Assert(j > -FirstLowInvalidHeapAttributeNumber);
 
-					/* Is this column cached? */
-					while (j < temp->ncols)
-					{
-						k = temp->i_cached[j++];
-						if (temp->tupdesc->attrs[k]->attnum == i)
-							break;
-					}
+					cached = bms_add_member(cached, j);
 				}
-				bms_free(tempset);
-
-				if (j <= temp->ncols)
+				if (bms_is_subset(referenced, cached))
 				{
 					/*
 					 * Perfect! Cache of the target relation exists and all
@@ -2715,6 +2709,8 @@ tcache_get_tchead(Oid reloid, Bitmapset *required,
 					 */
 					tc_old = temp;
 				}
+				bms_free(cached);
+				bms_free(referenced);
 				break;
 			}
 		}
