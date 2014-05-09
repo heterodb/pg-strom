@@ -539,7 +539,7 @@ tcache_create_toast_buffer(Size required)
 
 	tbuf = pgstrom_shmem_alloc_alap(required, &allocated);
 	if (!tbuf)
-		Assert(false); //elog(ERROR, "out of shared memory");
+		elog(ERROR, "out of shared memory");
 
 	SpinLockInit(&tbuf->refcnt_lock);
 	tbuf->refcnt = 1;

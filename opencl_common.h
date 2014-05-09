@@ -632,12 +632,13 @@ typedef struct {
 		bool	isnull;								\
 	} pg_##NAME##_t;
 
-#define STROMCL_VARLENA_DATATYPE_TEMPLACE(NAME)		\
-	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME, __global varlena *)
+#define STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)		\
+	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,__global varlena *)
 
 #define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)			\
 	static pg_##NAME##_t									\
 	pg_##NAME##_vref(__global kern_column_store *kcs,		\
+					 __private int *p_errcode,				\
 					 cl_uint colidx,						\
 					 cl_uint rowidx)						\
 	{														\
@@ -659,6 +660,7 @@ typedef struct {
 	static pg_##NAME##_t									\
 	pg_##NAME##_vref(__global kern_column_store *kcs,		\
 					 __global kern_toastbuf *toast,			\
+					 __private int *p_errcode,				\
 					 cl_uint colidx,						\
 					 cl_uint rowidx)						\
 	{														\
@@ -671,12 +673,23 @@ typedef struct {
 		else												\
 		{													\
 			cl_uint	offset = *p_offset;						\
+			__global varlena *val;							\
 															\
 			if (toast->magic == TOASTBUF_MAGIC)				\
 				offset += toast->coldir[colidx];			\
-			result.isnull = false;							\
-			result.value = ((__global varlena *)			\
-							((uintptr_t)toast + offset));	\
+			val = ((__global varlena *)						\
+				   ((char *)toast + offset));				\
+			if (VARATT_IS_4B_U(val) || VARATT_IS_1B(val))	\
+			{												\
+				result.isnull = false;						\
+				result.value = val;							\
+			}												\
+			else											\
+			{												\
+				result.isnull = true;						\
+				STROM_SET_ERROR(p_errcode,					\
+								StromError_RowReCheck);		\
+			}												\
 		}													\
 		return result;										\
 	}
@@ -684,6 +697,7 @@ typedef struct {
 #define STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)			\
 	static pg_##NAME##_t									\
 	pg_##NAME##_param(__global kern_parambuf *kparam,		\
+					  __private int *p_errcode,				\
 					  cl_uint param_id)						\
 	{														\
 		pg_##NAME##_t result;								\
@@ -706,6 +720,7 @@ typedef struct {
 #define STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)				\
 	static pg_##NAME##_t									\
 	pg_##NAME##_param(__global kern_parambuf *kparam,		\
+					  __private int *p_errcode,				\
 					  cl_uint param_id)						\
 	{														\
 		pg_##NAME##_t result;								\
@@ -714,9 +729,19 @@ typedef struct {
 		if (param_id < kparam->nparams &&					\
 			kparam->poffset[param_id] > 0)					\
 		{													\
-			result.value = (__global varlena *)				\
-				((uintptr_t)kparam + kparam->poffset[param_id]); \
-			result.isnull = false;							\
+			__global varlena *val =	(__global varlena *)	\
+				((char *)kparam + kparam->poffset[param_id]); \
+			if (VARATT_IS_4B_U(val) || VARATT_IS_1B(val))	\
+			{												\
+				result.value = val;							\
+				result.isnull = false;						\
+			}												\
+			else											\
+			{												\
+				result.isnull = true;						\
+				STROM_SET_ERROR(p_errcode,                  \
+								StromError_RowReCheck);     \
+			}												\
 		}													\
 		else												\
 			result.isnull = true;							\

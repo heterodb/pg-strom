@@ -1373,7 +1373,7 @@ pgstrom_codegen_declarations(codegen_context *context)
 
 			appendStringInfo(&str,
 							 "#define KPARAM_%u\t"
-							 "pg_%s_param(kparams,%d)\n",
+							 "pg_%s_param(kparams,&errcode,%d)\n",
 							 index, dtype->type_name, index);
 		}
 		else if (IsA(lfirst(cell), Param))
@@ -1385,7 +1385,7 @@ pgstrom_codegen_declarations(codegen_context *context)
 
 			appendStringInfo(&str,
 							 "#define KPARAM_%u\t"
-							 "pg_%s_param(kparams,%d)\n",
+							 "pg_%s_param(kparams,&errcode,%d)\n",
 							 index, dtype->type_name, index);
 		}
 		else
@@ -1405,12 +1405,12 @@ pgstrom_codegen_declarations(codegen_context *context)
 		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
 			appendStringInfo(&str,
 					 "#define KVAR_%u\t"
-							 "pg_%s_vref(kcs,toast,%u,get_global_id(0))\n",
+					 "pg_%s_vref(kcs,toast,&errcode,%u,get_global_id(0))\n",
 							 index, dtype->type_name, index);
 		else
 			appendStringInfo(&str,
-							 "#define KVAR_%u\t"
-							 "pg_%s_vref(kcs,%u,get_global_id(0))\n",
+					 "#define KVAR_%u\t"
+					 "pg_%s_vref(kcs,&errcode,%u,get_global_id(0))\n",
 							 index, dtype->type_name, index);
 		index++;
 	}

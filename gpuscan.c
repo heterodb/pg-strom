@@ -568,7 +568,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	 * tuple table initialization
 	 */
 	ExecInitResultTupleSlot(estate, &gss->cps.ps);
-	gss->scan_slot = ExecAllocTableSlot(&estate->es_tupleTable); // needed?
+	gss->scan_slot = ExecAllocTableSlot(&estate->es_tupleTable);
 
 	/*
 	 * initialize scan relation
@@ -1101,8 +1101,11 @@ gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
 
 		if (do_recheck)
 		{
+			ExprContext *econtext = gss->cps.ps.ps_ExprContext;
+
 			Assert(gss->dev_quals != NULL);
-			if (!ExecQual(gss->dev_quals, gss->cps.ps.ps_ExprContext, false))
+			econtext->ecxt_scantuple = gss->scan_slot;
+			if (!ExecQual(gss->dev_quals, econtext, false))
 				continue;
 		}
 		return true;
