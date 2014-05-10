@@ -305,7 +305,7 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 		/*
 		 * Supplemental OpenCL Libraries
 		 */
-#if 0
+
 		/* opencl timelib */
 		if (dprog->extra_flags & DEVFUNC_NEEDS_TIMELIB)
 		{
@@ -313,7 +313,7 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 			lengths[count] = strlen(pgstrom_opencl_timelib_code);
 			count++;
 		}
-#endif
+
 		/* opencl textlib */
 		if (dprog->extra_flags & DEVFUNC_NEEDS_TEXTLIB)
 		{

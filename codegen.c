@@ -52,7 +52,6 @@ static struct {
 #ifdef HAVE_INT64_TIMESTAMP
 	{ TIMEOID,			"cl_long" },
 	{ TIMESTAMPOID,		"cl_long" },
-	{ TIMESTAMPTZOID,	"cl_long" },
 #endif
 	/* variable length datatypes */
 	{ BPCHAROID,		"varlena" },
@@ -546,22 +545,19 @@ static devfunc_catalog_t devfunc_timelib_catalog[] = {
 	/* Type cast functions */
 	{ "date", 1, {DATEOID}, "c:", NULL },
 	{ "date", 1, {TIMESTAMPOID}, "F:timestamp_date", NULL },
-	{ "date", 1, {TIMESTAMPTZOID}, "F:timestamptz_date", NULL },
 	{ "time", 1, {TIMESTAMPOID}, "F:timestamp_time", NULL },
-	{ "time", 1, {TIMESTAMPTZOID}, "F:timestamptz_time", NULL },
 	{ "time", 1, {TIMEOID}, "c:", NULL },
 	{ "timestamp", 1, {TIMESTAMPOID}, "c:", NULL },
-	{ "timestamp", 1, {TIMESTAMPTZOID}, "F:timestamptz_timestamp", NULL },
 	{ "timestamp", 1, {DATEOID}, "F:date_timestamp", NULL },
-	{ "timestamptz", 1, {TIMESTAMPOID}, "F:timestamp_timestamptz", NULL },
-	{ "timestamptz", 1, {TIMESTAMPTZOID}, "c:", NULL },
-	{ "timestamptz", 1, {DATEOID}, "F:date_timestamptz", NULL },
 	/* timedata operators */
-	{ "datetime_pl", 2, {DATEOID, TIMEOID}, "F:datetime_pl", NULL },
-	{ "timedate_pl", 2, {TIMEOID, DATEOID}, "F:timedata_pl", NULL },
 	{ "date_pli", 2, {DATEOID, INT4OID}, "F:date_pli", NULL },
-	{ "integer_pl_date", 2, {INT4OID, DATEOID}, "F:integer_pl_date", NULL },
 	{ "date_mii", 2, {DATEOID, INT4OID}, "F:date_mii", NULL },
+	{ "date_mi", 2, {DATEOID, DATEOID}, "F:date_mi", NULL },
+	{ "datetime_pl", 2, {DATEOID, TIMEOID}, "F:datetime_pl", NULL },
+	{ "integer_pl_date", 2, {INT4OID, DATEOID}, "F:integer_pl_date", NULL },
+	//{ "time_mi_time", 2, {TIMEOID, TIMEOID}, "F:time_mi_time", NULL },
+	{ "timedate_pl", 2, {TIMEOID, DATEOID}, "F:timedata_pl", NULL },
+	//{ "timestamp_mi", 2, {TIMESTAMPOID, TIMESTAMPOID}, "", NULL },
 	/* timedate comparison */
 	{ "date_eq", 2, {DATEOID, DATEOID}, "b:==", NULL },
 	{ "date_ne", 2, {DATEOID, DATEOID}, "b:!=", NULL },
@@ -569,18 +565,42 @@ static devfunc_catalog_t devfunc_timelib_catalog[] = {
 	{ "date_le", 2, {DATEOID, DATEOID}, "b:<=", NULL },
 	{ "date_gt", 2, {DATEOID, DATEOID}, "b:>", NULL },
 	{ "date_ge", 2, {DATEOID, DATEOID}, "b:>=", NULL },
+	{ "date_eq_timestamp", 2, {DATEOID, TIMESTAMPOID},
+	  "F:date_eq_timestamp", NULL },
+	{ "date_ne_timestamp", 2, {DATEOID, TIMESTAMPOID},
+	  "F:date_ne_timestamp", NULL },
+	{ "date_lt_timestamp", 2, {DATEOID, TIMESTAMPOID},
+	  "F:date_lt_timestamp", NULL },
+	{ "date_le_timestamp", 2, {DATEOID, TIMESTAMPOID},
+	  "F:date_le_timestamp", NULL },
+	{ "date_gt_timestamp", 2, {DATEOID, TIMESTAMPOID},
+	  "F:date_gt_timestamp", NULL },
+	{ "date_ge_timestamp", 2, {DATEOID, TIMESTAMPOID},
+	  "F:date_ge_timestamp", NULL },
 	{ "time_eq", 2, {TIMEOID, TIMEOID}, "b:==", NULL },
 	{ "time_ne", 2, {TIMEOID, TIMEOID}, "b:!=", NULL },
 	{ "time_lt", 2, {TIMEOID, TIMEOID}, "b:<", NULL },
 	{ "time_le", 2, {TIMEOID, TIMEOID}, "b:<=", NULL },
 	{ "time_gt", 2, {TIMEOID, TIMEOID}, "b:>", NULL },
 	{ "time_ge", 2, {TIMEOID, TIMEOID}, "b:>=", NULL },
-	{ "timestamp_eq", 2, {TIMESTAMPOID, TIMESTAMPOID}, "F:timestamp_eq", NULL},
-	{ "timestamp_ne", 2, {TIMESTAMPOID, TIMESTAMPOID}, "F:timestamp_ne", NULL},
-	{ "timestamp_lt", 2, {TIMESTAMPOID, TIMESTAMPOID}, "F:timestamp_lt", NULL},
-	{ "timestamp_le", 2, {TIMESTAMPOID, TIMESTAMPOID}, "F:timestamp_le", NULL},
-	{ "timestamp_gt", 2, {TIMESTAMPOID, TIMESTAMPOID}, "F:timestamp_gt", NULL},
-	{ "timestamp_ge", 2, {TIMESTAMPOID, TIMESTAMPOID}, "F:timestamp_ge", NULL},
+	{ "timestamp_eq", 2, {TIMESTAMPOID, TIMESTAMPOID}, "b:==", NULL},
+	{ "timestamp_ne", 2, {TIMESTAMPOID, TIMESTAMPOID}, "b:!=", NULL},
+	{ "timestamp_lt", 2, {TIMESTAMPOID, TIMESTAMPOID}, "b:<", NULL},
+	{ "timestamp_le", 2, {TIMESTAMPOID, TIMESTAMPOID}, "b:<=", NULL},
+	{ "timestamp_gt", 2, {TIMESTAMPOID, TIMESTAMPOID}, "b:>", NULL},
+	{ "timestamp_ge", 2, {TIMESTAMPOID, TIMESTAMPOID}, "b:>=", NULL},
+	{ "timestamp_eq_date", 2, {TIMESTAMPOID, DATEOID},
+	  "F:timestamp_eq_date", NULL},
+	{ "timestamp_ne_date", 2, {TIMESTAMPOID, DATEOID},
+	  "F:timestamp_ne_date", NULL},
+	{ "timestamp_lt_date", 2, {TIMESTAMPOID, DATEOID},
+	  "F:timestamp_lt_date", NULL},
+	{ "timestamp_le_date", 2, {TIMESTAMPOID, DATEOID},
+	  "F:timestamp_le_date", NULL},
+	{ "timestamp_gt_date", 2, {TIMESTAMPOID, DATEOID},
+	  "F:timestamp_gt_date", NULL},
+	{ "timestamp_ge_date", 2, {TIMESTAMPOID, DATEOID},
+	  "F:timestamp_ge_date", NULL},
 };
 
 static devfunc_catalog_t devfunc_textlib_catalog[] = {
@@ -1439,7 +1459,7 @@ pgstrom_codegen_available_expression(Expr *expr)
 		foreach (cell, (List *) expr)
 		{
 			if (!pgstrom_codegen_available_expression(lfirst(cell)))
-				Assert(false); //return false;
+				return false;
 		}
 		return true;
 	}
@@ -1449,7 +1469,7 @@ pgstrom_codegen_available_expression(Expr *expr)
 
 		if (!devtype_runnable_collation(con->constcollid) ||
 			!pgstrom_devtype_lookup(con->consttype))
-			Assert(false); //return false;
+			return false;
 		return true;
 	}
 	else if (IsA(expr, Param))
@@ -1459,7 +1479,7 @@ pgstrom_codegen_available_expression(Expr *expr)
 		if (!devtype_runnable_collation(param->paramcollid) ||
 			param->paramkind != PARAM_EXTERN ||
 			!pgstrom_devtype_lookup(param->paramtype))
-			Assert(false); //return false;
+			return false;
 		return true;
 	}
 	else if (IsA(expr, Var))
@@ -1468,7 +1488,7 @@ pgstrom_codegen_available_expression(Expr *expr)
 
 		if (!devtype_runnable_collation(var->varcollid) ||
 			!pgstrom_devtype_lookup(var->vartype))
-			Assert(false); //return false;
+			return false;
 		return true;
 	}
 	else if (IsA(expr, FuncExpr))
@@ -1477,9 +1497,9 @@ pgstrom_codegen_available_expression(Expr *expr)
 
 		if (!devtype_runnable_collation(func->funccollid) ||
 			!devtype_runnable_collation(func->inputcollid))
-			Assert(false); //return false;
+			return false;
 		if (!pgstrom_devfunc_lookup(func->funcid))
-			Assert(false); //return false;
+			return false;
 		return pgstrom_codegen_available_expression((Expr *) func->args);
 	}
 	else if (IsA(expr, OpExpr) || IsA(expr, DistinctExpr))
@@ -1488,9 +1508,9 @@ pgstrom_codegen_available_expression(Expr *expr)
 
 		if (!devtype_runnable_collation(op->opcollid) ||
 			!devtype_runnable_collation(op->inputcollid))
-			Assert(false); //return false;
+			return false;
 		if (!pgstrom_devfunc_lookup(get_opcode(op->opno)))
-			Assert(false); //return false;
+			return false;
 		return pgstrom_codegen_available_expression((Expr *) op->args);
 	}
 	else if (IsA(expr, NullTest))
@@ -1498,7 +1518,7 @@ pgstrom_codegen_available_expression(Expr *expr)
 		NullTest   *nulltest = (NullTest *) expr;
 
 		if (nulltest->argisrow)
-			Assert(false); //return false;
+			return false;
 		return pgstrom_codegen_available_expression((Expr *) nulltest->arg);
 	}
 	else if (IsA(expr, BooleanTest))

@@ -647,5 +647,6 @@ extern void pgstrom_init_debug(void);
 extern const char *pgstrom_opencl_common_code;
 extern const char *pgstrom_opencl_gpuscan_code;
 extern const char *pgstrom_opencl_textlib_code;
+extern const char *pgstrom_opencl_timelib_code;
 
 #endif	/* PG_STROM_H */

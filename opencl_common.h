@@ -49,6 +49,9 @@ typedef cl_uint		hostptr_t;
 #error unexpected host pointer length
 #endif	/* HOSTPTRLEN */
 
+#define INT64CONST(x)	((cl_long) x##L)
+#define UINT64CONST(x)	((cl_ulong) x##UL)
+
 /*
  * Alignment macros
  */
