@@ -280,10 +280,45 @@ pgstrom_perfmon_add(pgstrom_perfmon *pfm_sum, pgstrom_perfmon *pfm_item)
 	pfm_sum->time_kern_build
 		= Max(pfm_sum->time_kern_build,
 			  pfm_item->time_kern_build);
+	pfm_sum->bytes_dma_send += pfm_item->bytes_dma_send;
+	pfm_sum->bytes_dma_recv += pfm_item->bytes_dma_recv;
+	pfm_sum->num_dma_send	+= pfm_item->num_dma_send;
+	pfm_sum->num_dma_recv	+= pfm_item->num_dma_recv;
 	pfm_sum->time_dma_send	+= pfm_item->time_dma_send;
 	pfm_sum->time_kern_exec	+= pfm_item->time_kern_exec;
 	pfm_sum->time_dma_recv	+= pfm_item->time_dma_recv;
 	pfm_sum->time_in_recvq	+= pfm_item->time_in_recvq;
+}
+
+static void
+snprintf_dma_bandwidth(char *buf, size_t buflen,
+					   cl_ulong length, cl_uint num, cl_ulong usec)
+{
+	double	band = (double)length / ((double)usec / 1000000.0);
+	Size	unitsz = length / num;
+	int		ofs;
+
+	if (band > (double)(1UL << 43))
+		ofs = snprintf(buf, buflen, "%.1fTB/s", band / (double)(1UL<<40));
+	else if (band > (double)(1UL << 33))
+		ofs = snprintf(buf, buflen, "%.1fGB/s", band / (double)(1UL<<30));
+	else if (band > (double)(1UL << 23))
+		ofs = snprintf(buf, buflen, "%.1fMB/s", band / (double)(1UL<<20));
+	else if (band > (double)(1UL << 13))
+		ofs = snprintf(buf, buflen, "%.1fKB/s", band / (double)(1UL<<10));
+	else
+		ofs = snprintf(buf, buflen, "%.1f bytes/s", band);
+
+	if (unitsz > (1UL << 43))
+		snprintf(buf+ofs, buflen-ofs, ", unitsz %luTB", unitsz >> 40);
+	else if (unitsz > (1UL << 33))
+		snprintf(buf+ofs, buflen-ofs, ", unitsz %luGB", unitsz >> 30);
+	else if (unitsz > (1UL << 23))
+		snprintf(buf+ofs, buflen-ofs, ", unitsz %luMB", unitsz >> 20);
+	else if (unitsz > (1UL << 13))
+		snprintf(buf+ofs, buflen-ofs, ", unitsz %luKB", unitsz >> 10);
+	else
+		snprintf(buf+ofs, buflen-ofs, ", unitsz %lu bytes/s", unitsz);
 }
 
 void
@@ -313,29 +348,32 @@ pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 			 (double)pfm->time_kern_build / 1000.0);
 	ExplainPropertyText("Max time to build kernel", buf, es);
 
-	snprintf(buf, sizeof(buf), "%.3f ms",
+	snprintf(buf, sizeof(buf), "total %.3f ms, avg %.3f ms",
+			 (double)pfm->time_dma_send / 1000.0,
 			 (double)pfm->time_dma_send / n / 1000.0);
-	ExplainPropertyText("Avg time of DMA send", buf, es);
+	ExplainPropertyText("DMA send time", buf, es);
 
-	snprintf(buf, sizeof(buf), "%.3f ms",
-			 (double)pfm->time_dma_send / 1000.0);
-	ExplainPropertyText("Total time of DMA send", buf, es);
+	snprintf_dma_bandwidth(buf, sizeof(buf),
+						   pfm->bytes_dma_send,
+						   pfm->num_dma_send,
+						   pfm->time_dma_send);
+	ExplainPropertyText("DMA send band", buf, es);
 
-	snprintf(buf, sizeof(buf), "%.3f ms",
+	snprintf(buf, sizeof(buf), "total %.3f ms, avg %.3f ms",
+			 (double)pfm->time_kern_exec / 1000.0,
 			 (double)pfm->time_kern_exec / n / 1000.0);
-	ExplainPropertyText("Avg time of kernel exec", buf, es);
+	ExplainPropertyText("Kernel exec time", buf, es);
 
-	snprintf(buf, sizeof(buf), "%.3f ms",
-			 (double)pfm->time_kern_exec / 1000.0);
-	ExplainPropertyText("Total time of kernel exec", buf, es);
-
-	snprintf(buf, sizeof(buf), "%.3f ms",
+	snprintf(buf, sizeof(buf), "total %.3f ms, avg %.3f ms",
+			 (double)pfm->time_dma_recv / 1000.0,
 			 (double)pfm->time_dma_recv / n / 1000.0);
-	ExplainPropertyText("Avg time of DMA recv", buf, es);
+	ExplainPropertyText("DMA recv time", buf, es);
 
-	snprintf(buf, sizeof(buf), "%.3f ms",
-			 (double)pfm->time_dma_recv / 1000.0);
-	ExplainPropertyText("Total time of DMA recv", buf, es);
+	snprintf_dma_bandwidth(buf, sizeof(buf),
+						   pfm->bytes_dma_recv,
+						   pfm->num_dma_recv,
+						   pfm->time_dma_recv);
+	ExplainPropertyText("DMA recv band", buf, es);
 
 	snprintf(buf, sizeof(buf), "%.3f ms",
 			 (double)pfm->time_in_recvq / n / 1000.0);

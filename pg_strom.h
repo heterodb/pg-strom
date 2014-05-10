@@ -151,6 +151,10 @@ typedef struct {
 	cl_ulong	time_tcache_build;	/* time to build tcache */
 	cl_ulong	time_in_sendq;	/* waiting time in the server mqueue */
 	cl_ulong	time_kern_build;/* max time to build opencl kernel */
+	cl_ulong	bytes_dma_send;	/* bytes of DMA send */
+	cl_ulong	bytes_dma_recv;	/* bytes of DMA receive */
+	cl_uint		num_dma_send;	/* number of DMA send request */
+	cl_uint		num_dma_recv;	/* number of DMA receive request */
 	cl_ulong	time_dma_send;	/* time to send host=>device data */
 	cl_ulong	time_kern_exec;	/* time to execute kernel */
 	cl_ulong	time_dma_recv;	/* time to receive device=>host data */

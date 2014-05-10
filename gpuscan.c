@@ -1795,6 +1795,8 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	cl_uint				nrows;
 	cl_uint				i;
 	cl_int				rc;
+	Size				bytes_dma_send = 0;
+	Size				bytes_dma_recv = 0;
 	size_t				length;
 	size_t				gwork_sz;
 	size_t				lwork_sz;
@@ -1975,12 +1977,14 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 							  &gpuscan->kern,
 							  0,
 							  NULL,
-							  &clgss->events[clgss->ev_index++]);
+							  &clgss->events[clgss->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
 		goto error6;
 	}
+	clgss->ev_index++;
+	bytes_dma_send += length;
 
 	rc = clEnqueueWriteBuffer(kcmdq,
 							  clgss->m_rstore,
@@ -1997,6 +2001,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 		goto error_sync;
 	}
 	clgss->ev_index++;
+	bytes_dma_send += krs->length;
 
 	rc = clEnqueueWriteBuffer(kcmdq,
 							  clgss->m_cstore,
@@ -2014,6 +2019,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 		goto error_sync;
 	}
 	clgss->ev_index++;
+	bytes_dma_send += offsetof(kern_column_store, colmeta[kcs_head->ncols]);
 
 	/*
 	 * Kick gpuscan_qual_rs() call
@@ -2056,6 +2062,16 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 		goto error_sync;
 	}
 	clgss->ev_index++;
+	bytes_dma_recv += ((Size)KERN_GPUSCAN_RESULTBUF(&gpuscan->kern) -
+					   (Size)(&gpuscan->kern));
+	/* update performance counter */
+	if (gpuscan->msg.pfm.enabled)
+	{
+		gpuscan->msg.pfm.bytes_dma_send = bytes_dma_send;
+		gpuscan->msg.pfm.bytes_dma_recv = bytes_dma_recv;
+		gpuscan->msg.pfm.num_dma_send = 3;
+		gpuscan->msg.pfm.num_dma_recv = 1;
+	}
 
 	/*
 	 * Last, registers a callback routine that replies the message
@@ -2260,6 +2276,8 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 	cl_uint				nrows;
 	cl_uint				i, j;
 	cl_int				rc;
+	Size				bytes_dma_send = 0;
+	Size				bytes_dma_recv = 0;
 	Size				length;
 	Size				offset;
 	size_t				gwork_sz;
@@ -2477,6 +2495,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 		goto error6;
 	}
 	clgsc->ev_index++;
+	bytes_dma_send += length;
 
 	/* header of kern_column_store */
 	rc = clEnqueueWriteBuffer(kcmdq,
@@ -2495,6 +2514,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 		goto error_sync;
 	}
 	clgsc->ev_index++;
+	bytes_dma_send += offsetof(kern_column_store, colmeta[ncols]);
 
 	/* header of toast buffer */
 	if (clgsc->m_toast)
@@ -2516,6 +2536,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 			goto error_sync;
 		}
 		clgsc->ev_index++;
+		bytes_dma_send += offsetof(kern_toastbuf, coldir[ncols]);
 	}
 
 	for (i=0; i < ncols; i++)
@@ -2543,6 +2564,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 				goto error_sync;
 			}
 			clgsc->ev_index++;
+			bytes_dma_send += length;
 
 			offset += length;
 		}
@@ -2565,6 +2587,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 			goto error_sync;
 		}
 		clgsc->ev_index++;
+		bytes_dma_send += length;
 
 		if (tcs->cdata[j].toast)
 		{
@@ -2586,6 +2609,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 				goto error_sync;
 			}
 			clgsc->ev_index++;
+			bytes_dma_send += tcs->cdata[j].toast->tbuf_usage;
 		}
 	}
 
@@ -2630,6 +2654,16 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 		goto error_sync;
 	}
 	clgsc->ev_index++;
+	bytes_dma_recv += KERN_GPUSCAN_DMA_RECVLEN(&gpuscan->kern);
+
+	/* update performance counter */
+	if (gpuscan->msg.pfm.enabled)
+	{
+		gpuscan->msg.pfm.bytes_dma_send = bytes_dma_send;
+		gpuscan->msg.pfm.bytes_dma_recv = bytes_dma_recv;
+		gpuscan->msg.pfm.num_dma_send = clgsc->ev_index - 2;
+		gpuscan->msg.pfm.num_dma_recv = 1;
+	}
 
 	/*
 	 * Last, registers a callback routine that replies the message
