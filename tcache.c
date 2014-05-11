@@ -609,6 +609,7 @@ tcache_row_store *
 tcache_create_row_store(TupleDesc tupdesc, int ncols, AttrNumber *i_cached)
 {
 	tcache_row_store *trs;
+	int		i, j;
 
 	trs = pgstrom_shmem_alloc(ROWSTORE_DEFAULT_SIZE);
 	if (!trs)
@@ -627,19 +628,14 @@ tcache_create_row_store(TupleDesc tupdesc, int ncols, AttrNumber *i_cached)
 	memset(&trs->chain, 0, sizeof(dlist_node));
 	trs->usage
 		= STROMALIGN_DOWN(ROWSTORE_DEFAULT_SIZE -
-//						  STROMALIGN(offsetof(kern_column_store,
-//											  colmeta[ncols])) -
 						  offsetof(tcache_row_store, kern));
 	trs->blkno_max = 0;
 	trs->blkno_min = MaxBlockNumber;
 	trs->kern.length = trs->usage;
 	trs->kern.ncols = tupdesc->natts;
 	trs->kern.nrows = 0;
-#if 0
-	trs->kcs_head = (kern_column_store *)
-		((char *)&trs->kern + trs->kern.length);
-
-	/* construct colmeta structure */
+	/* construct colmeta structure for row-store */
+	/* XXX - to be done on gpuscan_begin()? */
 	for (i=0, j=0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute attr = tupdesc->attrs[i];
@@ -647,7 +643,10 @@ tcache_create_row_store(TupleDesc tupdesc, int ncols, AttrNumber *i_cached)
 
 		memset(&colmeta, 0, sizeof(kern_colmeta));
 		if (i == i_cached[j])
+		{
 			colmeta.flags |= KERN_COLMETA_ATTREFERENCED;
+			j++;
+		}
 		if (attr->attnotnull)
 			colmeta.flags |= KERN_COLMETA_ATTNOTNULL;
 		if (attr->attalign == 'c')
@@ -662,23 +661,12 @@ tcache_create_row_store(TupleDesc tupdesc, int ncols, AttrNumber *i_cached)
 			colmeta.attalign = sizeof(cl_long);
 		}
 		colmeta.attlen = attr->attlen;
-		colmeta.cs_ofs = -1;	/* to be set later */
+		colmeta.cs_ofs = -1;	/* not in use for row-store */
 
-		if (i == i_cached[j])
-		{
-			memcpy(&trs->kcs_head->colmeta[j],
-				   &colmeta,
-				   sizeof(kern_colmeta));
-			j++;
-		}
 		memcpy(&trs->kern.colmeta[i],
 			   &colmeta,
 			   sizeof(kern_colmeta));
 	}
-	trs->kcs_head->length = -1;	/* to be set later */
-	trs->kcs_head->ncols = j;
-	trs->kcs_head->nrows = -1;	/* to be set later */
-#endif
 	return trs;
 }
 
@@ -2252,11 +2240,25 @@ tcache_scan_next(tcache_scandesc *tc_scan)
 	tc_scan->tcs_blkno_min = InvalidBlockNumber;
 	tc_scan->tcs_blkno_max = InvalidBlockNumber;
 
-	/* no column-store entries, we also walks on row-stores */
+	/*
+	 * OK, we have no column-store any more, so we also walks on row-stores
+	 * being not columnized yet.
+	 * A tcache has one active (that means "writable") row-store by
+	 * synchronizer trigger, and can also have multiple columnization
+	 * pending row-stores. We also pay attention that concurrent job may
+	 * write new tuples on the active row-store, then it can be linked
+	 * to the pending list. So, we needs to check whether the previous
+	 * row-store is connected to the list or not. If we already scanned
+	 * a row-store that is not connected, it means we are now end of scan.
+	 */
 	SpinLockAcquire(&tc_head->lock);
 	trs_prev = tc_scan->trs_curr;
 	if (!trs_prev)
 	{
+		/*
+		 * First choice. If we have empty pending list, let's pick up
+		 * a row-store from the active one (maybe NULL).
+		 */
 		if (!dlist_is_empty(&tc_head->trs_list))
 		{
 			dnode = dlist_head_node(&tc_head->trs_list);
@@ -2268,19 +2270,34 @@ tcache_scan_next(tcache_scandesc *tc_scan)
 		if (trs_curr)
 			tc_scan->trs_curr = tcache_get_row_store(trs_curr);
 	}
-	else if (dnode_is_linked(&trs_prev->chain) &&
-			 dlist_has_next(&tc_head->trs_list, &trs_prev->chain))
+	else if (dnode_is_linked(&trs_prev->chain))
 	{
-		dnode = dlist_next_node(&tc_head->trs_list, &trs_prev->chain);
-		trs_curr = dlist_container(tcache_row_store, chain, dnode);
-		tc_scan->trs_curr = tcache_get_row_store(trs_curr);
+		/*
+		 * In case when the previous row-store is one of pending list,
+		 * we try to pick up the next one in the pending list. If no
+		 * row-stores any more, we can pick up the active one.
+		 */
+		if (dlist_has_next(&tc_head->trs_list, &trs_prev->chain))
+		{
+			dnode = dlist_next_node(&tc_head->trs_list, &trs_prev->chain);
+			trs_curr = dlist_container(tcache_row_store, chain, dnode);
+			tc_scan->trs_curr = tcache_get_row_store(trs_curr);
+		}
+		else
+		{
+			if (tc_head->trs_curr)
+				tc_scan->trs_curr = tcache_get_row_store(tc_head->trs_curr);
+			else
+				tc_scan->trs_curr = NULL;
+		}
 	}
 	else
 	{
-		if (tc_head->trs_curr)
-			tc_scan->trs_curr = tcache_get_row_store(tc_head->trs_curr);
-		else
-			tc_scan->trs_curr = NULL;
+		/*
+		 * OK, the previous one is the active row-store, so now we are
+		 * end of the scan.
+		 */
+		tc_scan->trs_curr = NULL;
 	}
 	SpinLockRelease(&tc_head->lock);
 

@@ -39,7 +39,6 @@
 static add_scan_path_hook_type	add_scan_path_next;
 static CustomPathMethods		gpuscan_path_methods;
 static CustomPlanMethods		gpuscan_plan_methods;
-static bool						enable_gpuscan;
 
 typedef struct {
 	CustomPath	cpath;
@@ -138,9 +137,6 @@ cost_gpuscan(GpuScanPath *gpu_path, PlannerInfo *root,
 		path->rows = param_info->ppi_rows;
 	else
 		path->rows = baserel->rows;
-
-	if (!enable_gpuscan)
-		startup_cost += disable_cost;
 
 	/* fetch estimated page cost for tablespace containing table */
 	get_tablespace_page_costs(baserel->reltablespace,
@@ -820,11 +816,11 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 		{
 			TupleDesc	tupdesc = RelationGetDescr(gss->scan_rel);
 			HeapTuple	tuple;
+			int		i;
 
 			trs = tcache_create_row_store(tupdesc,
 										  gss->cs_attnums,
 										  gss->cs_attidxs);
-
 			while (HeapTupleIsValid(tuple = heap_getnext(gss->scan_desc,
 														 direction)))
 			{
@@ -1606,16 +1602,6 @@ gpuscan_copy_plan(const CustomPlan *from)
 void
 pgstrom_init_gpuscan(void)
 {
-	/* GUC definition */
-	DefineCustomBoolVariable("pgstrom.enable_gpuscan",
-							 "Enables the planner's use of GPU-scan plans.",
-							 NULL,
-							 &enable_gpuscan,
-							 true,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-
 	/* setup path methods */
 	gpuscan_path_methods.CustomName			= "GpuScan";
 	gpuscan_path_methods.CreateCustomPlan	= gpuscan_create_plan;
