@@ -506,6 +506,28 @@ pgfn_date_ge_timestamp(__private cl_int *errcode,
 	return result;
 }
 
+static pg_int4_t
+date_cmp_timestamp(__private cl_int *errcode,
+				   pg_date_t arg1, pg_timestamp_t arg2)
+{
+	pg_int4_t		result;
+	pg_timestamp_t	dt1 = pgfn_date_timestamp(errcode, arg1);
+
+	if (dt1.isnull || arg2.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		if (dt1.value > arg2.value)
+			result.value = 1;
+		else if (dt1.value < arg2.value)
+			result.value = -1;
+		else
+			result.value = 0;
+	}
+	return result;
+}
+
 /*
  * Timestamp comparison
  */
@@ -607,6 +629,28 @@ pgfn_timestamp_ge_date(__private cl_int *errcode,
 	{
 		result.isnull = false;
 		result.value = (cl_bool)(arg1.value >= dt2.value);
+	}
+	return result;
+}
+
+static pg_int4_t
+pgfn_timestamp_cmp_date(__private cl_int *errcode,
+						pg_timestamp_t arg1, pg_date_t arg2)
+{
+	pg_int4_t		result;
+	pg_timestamp_t	dt2 = pgfn_date_timestamp(errcode, arg2);
+
+	if (arg1.isnull || dt2.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		if (arg1.value > dt2.value)
+			result.value = 1;
+		else if (arg1.value < dt2.value)
+			result.value = -1;
+		else
+			result.value = 0;
 	}
 	return result;
 }

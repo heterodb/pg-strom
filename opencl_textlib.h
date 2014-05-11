@@ -124,6 +124,17 @@ pgfn_bpcharge(__private cl_int *errcode, pg_bpchar_t arg1, pg_bpchar_t arg2)
 	return result;
 }
 
+static pg_int4_t
+pgfn_bpcharcmp(__private cl_int *errcode, pg_bpchar_t arg1, pg_bpchar_t arg2)
+{
+	pg_int4_t	result;
+
+	result.isnull = (arg1.isnull | arg2.isnull);
+	if (!result.isnull)
+		result.value = varlena_cmp(errcode, arg1.value, arg2.value);
+	return result;
+}
+
 #ifndef PG_TEXT_TYPE_DEFINED
 #define PG_TEXT_TYPE_DEFINED
 STROMCL_VRALENA_TYPE_TEMPLATE(text)
@@ -204,6 +215,17 @@ pgfn_text_ge(__private cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
 		result.value = (bool)(varlena_cmp(errcode,
 										  arg1.value,
 										  arg2.value) >= 0);
+	return result;
+}
+
+static pg_int4_t
+pgfn_text_cmp(__private cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
+{
+	pg_int4_t	result;
+
+	result.isnull = (arg1.isnull | arg2.isnull);
+	if (!result.isnull)
+		result.value = varlena_cmp(errcode, arg1.value, arg2.value);
 	return result;
 }
 

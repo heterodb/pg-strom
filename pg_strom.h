@@ -17,6 +17,7 @@
 #include "fmgr.h"
 #include "lib/ilist.h"
 #include "nodes/execnodes.h"
+#include "nodes/plannodes.h"
 #include "nodes/primnodes.h"
 #include "storage/spin.h"
 #include <pthread.h>
@@ -488,6 +489,11 @@ extern void pgstrom_init_restrack(void);
 extern void pgstrom_init_gpuscan(void);
 
 /*
+ * gpusort.c
+ */
+extern CustomPlan *pgstrom_create_gpusort(Sort *original, List *rtable);
+
+/*
  * opencl_devinfo.c
  */
 extern int	pgstrom_get_device_nums(void);
@@ -552,6 +558,7 @@ typedef struct {
 	List	   *func_defs;	/* list of devfunc_info in use */
 	List	   *used_params;/* list of Const/Param in use */
 	List	   *used_vars;	/* list of Var in use */
+	const char *row_index;	/* label to reference row-index, if exist */
 	int			extra_flags;/* external libraries to be included */
 } codegen_context;
 
@@ -560,12 +567,7 @@ extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid);
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern char *pgstrom_codegen_declarations(codegen_context *context);
 extern bool pgstrom_codegen_available_expression(Expr *expr);
-extern void pgstrom_codegen_init(void);
-
-/*
- * gpuscan.c
- */
-extern void pgstrom_init_gpuscan(void);
+extern void pgstrom_init_codegen(void);
 
 /*
  * tcache.c
@@ -601,13 +603,6 @@ extern Datum pgstrom_tcache_synchronizer(PG_FUNCTION_ARGS);
 extern Datum pgstrom_tcache_info(PG_FUNCTION_ARGS);
 extern Datum pgstrom_tcache_node_info(PG_FUNCTION_ARGS);
 
-
-
-
-
-
-
-
 extern void pgstrom_init_tcache(void);
 
 
@@ -630,6 +625,10 @@ extern void pgstrom_perfmon_add(pgstrom_perfmon *pfm_sum,
 								pgstrom_perfmon *pfm_item);
 extern void pgstrom_perfmon_explain(pgstrom_perfmon *pfm,
 									ExplainState *es);
+/*
+ * grafter.c
+ */
+extern void pgstrom_init_grafter(void);
 
 /*
  * debug.c

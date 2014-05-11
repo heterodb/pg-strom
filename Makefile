@@ -3,10 +3,10 @@ EXTENSION = pg_strom
 DATA = pg_strom--1.0.sql
 
 MODULE_big = pg_strom
-OBJS  = main.o shmem.o codegen.o mqueue.o restrack.o debug.o \
-	tcache.o datastore.o gpuscan.o \
+OBJS  = main.o shmem.o codegen.o mqueue.o restrack.o debug.o grafter.o \
+	tcache.o datastore.o gpuscan.o gpusort.o \
 	opencl_entry.o opencl_serv.o opencl_devinfo.o opencl_devprog.o \
-	opencl_common.o opencl_gpuscan.o \
+	opencl_common.o opencl_gpuscan.o opencl_gpusort.o \
 	opencl_textlib.o opencl_timelib.o
 
 

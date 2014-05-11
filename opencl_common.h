@@ -973,11 +973,19 @@ kern_get_datum(__global kern_column_store *kcs,
  */
 
 /*
- * pg_bool_t is built-in data type
+ * pg_bool_t is a built-in data type
  */
 #ifndef PG_BOOL_TYPE_DEFINED
 #define PG_BOOL_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(bool, bool)
+#endif
+
+/*
+ * pg_int4_t is a built-in data type
+ */
+#ifndef PG_INT4_TYPE_DEFINED
+#define PG_INT4_TYPE_DEFINED
+STROMCL_SIMPLE_TYPE_TEMPLATE(int4, cl_int)
 #endif
 
 /*

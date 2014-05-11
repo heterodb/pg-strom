@@ -114,7 +114,8 @@ _PG_init(void)
 	/* miscellaneous initializations */
 	pgstrom_init_misc_guc();
 	pgstrom_init_debug();
-	pgstrom_codegen_init();
+	pgstrom_init_codegen();
+	pgstrom_init_grafter();
 }
 
 /*

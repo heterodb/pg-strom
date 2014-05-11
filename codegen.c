@@ -228,6 +228,8 @@ static void devfunc_setup_div_oper(devfunc_info *entry,
 								   devfunc_catalog_t *procat);
 static void devfunc_setup_const(devfunc_info *entry,
 								devfunc_catalog_t *procat);
+static void devfunc_setup_comp(devfunc_info *entry,
+							   devfunc_catalog_t *procat);
 
 static devfunc_catalog_t devfunc_common_catalog[] = {
 	/* Type cast functions */
@@ -463,6 +465,22 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "int4shl", 2, {INT4OID, INT4OID}, "b:<<", NULL },
 	{ "int8shl", 2, {INT8OID, INT4OID}, "b:<<", NULL },
 
+	/* comparison functions */
+	{ "btboolcmp",  2, {BOOLOID, BOOLOID}, NULL, devfunc_setup_comp },
+	{ "btint2cmp",  2, {INT2OID, INT2OID}, NULL, devfunc_setup_comp },
+	{ "btint24cmp", 2, {INT2OID, INT4OID}, NULL, devfunc_setup_comp },
+	{ "btint28cmp", 2, {INT2OID, INT8OID}, NULL, devfunc_setup_comp },
+	{ "btint42cmp", 2, {INT4OID, INT2OID}, NULL, devfunc_setup_comp },
+	{ "btint4cmp",  2, {INT4OID, INT4OID}, NULL, devfunc_setup_comp },
+	{ "btint48cmp", 2, {INT4OID, INT8OID}, NULL, devfunc_setup_comp },
+	{ "btint82cmp", 2, {INT8OID, INT2OID}, NULL, devfunc_setup_comp },
+	{ "btint84cmp", 2, {INT8OID, INT4OID}, NULL, devfunc_setup_comp },
+	{ "btint8cmp",  2, {INT8OID, INT8OID}, NULL, devfunc_setup_comp },
+	{ "btfloat4cmp",  2, {FLOAT4OID, FLOAT4OID}, NULL, devfunc_setup_comp },
+	{ "btfloat48cmp", 2, {FLOAT4OID, FLOAT8OID}, NULL, devfunc_setup_comp },
+	{ "btfloat84cmp", 2, {FLOAT8OID, FLOAT4OID}, NULL, devfunc_setup_comp },
+	{ "btfloat8cmp",  2, {FLOAT8OID, FLOAT8OID}, NULL, devfunc_setup_comp },
+
 	/*
      * Mathmatical functions
      */
@@ -558,13 +576,15 @@ static devfunc_catalog_t devfunc_timelib_catalog[] = {
 	//{ "time_mi_time", 2, {TIMEOID, TIMEOID}, "F:time_mi_time", NULL },
 	{ "timedate_pl", 2, {TIMEOID, DATEOID}, "F:timedata_pl", NULL },
 	//{ "timestamp_mi", 2, {TIMESTAMPOID, TIMESTAMPOID}, "", NULL },
-	/* timedate comparison */
+	/* comparison between date */
 	{ "date_eq", 2, {DATEOID, DATEOID}, "b:==", NULL },
 	{ "date_ne", 2, {DATEOID, DATEOID}, "b:!=", NULL },
 	{ "date_lt", 2, {DATEOID, DATEOID}, "b:<", NULL },
 	{ "date_le", 2, {DATEOID, DATEOID}, "b:<=", NULL },
 	{ "date_gt", 2, {DATEOID, DATEOID}, "b:>", NULL },
 	{ "date_ge", 2, {DATEOID, DATEOID}, "b:>=", NULL },
+	{ "date_cmp", 2, {DATEOID, DATEOID}, NULL, devfunc_setup_comp },
+	/* comparison of date and timestamp */
 	{ "date_eq_timestamp", 2, {DATEOID, TIMESTAMPOID},
 	  "F:date_eq_timestamp", NULL },
 	{ "date_ne_timestamp", 2, {DATEOID, TIMESTAMPOID},
@@ -577,18 +597,26 @@ static devfunc_catalog_t devfunc_timelib_catalog[] = {
 	  "F:date_gt_timestamp", NULL },
 	{ "date_ge_timestamp", 2, {DATEOID, TIMESTAMPOID},
 	  "F:date_ge_timestamp", NULL },
+	{ "date_cmp_timestamp", 2, {DATEOID, TIMESTAMPOID},
+	  "F:date_cmp_timestamp", NULL },
+	/* comparion between time */
 	{ "time_eq", 2, {TIMEOID, TIMEOID}, "b:==", NULL },
 	{ "time_ne", 2, {TIMEOID, TIMEOID}, "b:!=", NULL },
 	{ "time_lt", 2, {TIMEOID, TIMEOID}, "b:<", NULL },
 	{ "time_le", 2, {TIMEOID, TIMEOID}, "b:<=", NULL },
 	{ "time_gt", 2, {TIMEOID, TIMEOID}, "b:>", NULL },
 	{ "time_ge", 2, {TIMEOID, TIMEOID}, "b:>=", NULL },
+	{ "time_cmp", 2, {TIMEOID, TIMEOID}, NULL, devfunc_setup_comp },
+	/* comparison between timestamp */
 	{ "timestamp_eq", 2, {TIMESTAMPOID, TIMESTAMPOID}, "b:==", NULL},
 	{ "timestamp_ne", 2, {TIMESTAMPOID, TIMESTAMPOID}, "b:!=", NULL},
 	{ "timestamp_lt", 2, {TIMESTAMPOID, TIMESTAMPOID}, "b:<", NULL},
 	{ "timestamp_le", 2, {TIMESTAMPOID, TIMESTAMPOID}, "b:<=", NULL},
 	{ "timestamp_gt", 2, {TIMESTAMPOID, TIMESTAMPOID}, "b:>", NULL},
 	{ "timestamp_ge", 2, {TIMESTAMPOID, TIMESTAMPOID}, "b:>=", NULL},
+	{ "timestamp_cmp", 2, {TIMESTAMPOID, TIMESTAMPOID},
+	  NULL, devfunc_setup_comp },
+	/* comparison of timestamp and date */
 	{ "timestamp_eq_date", 2, {TIMESTAMPOID, DATEOID},
 	  "F:timestamp_eq_date", NULL},
 	{ "timestamp_ne_date", 2, {TIMESTAMPOID, DATEOID},
@@ -601,6 +629,8 @@ static devfunc_catalog_t devfunc_timelib_catalog[] = {
 	  "F:timestamp_gt_date", NULL},
 	{ "timestamp_ge_date", 2, {TIMESTAMPOID, DATEOID},
 	  "F:timestamp_ge_date", NULL},
+	{ "timestamp_cmp_date", 2, {TIMESTAMPOID, DATEOID},
+	  "F:timestamp_cmp_date", NULL},
 };
 
 static devfunc_catalog_t devfunc_textlib_catalog[] = {
@@ -610,12 +640,14 @@ static devfunc_catalog_t devfunc_textlib_catalog[] = {
 	{ "bpcharle", 2, {BPCHAROID,BPCHAROID}, "F:bpcharle", NULL },
 	{ "bpchargt", 2, {BPCHAROID,BPCHAROID}, "F:bpchargt", NULL },
 	{ "bpcharge", 2, {BPCHAROID,BPCHAROID}, "F:bpcharge", NULL },
+	{ "bpcharcmp", 2, {BPCHAROID, BPCHAROID}, "F:bpcharcmp", NULL },
 	{ "texteq", 2, {TEXTOID, TEXTOID}, "F:texteq", NULL  },
 	{ "textne", 2, {TEXTOID, TEXTOID}, "F:textne", NULL  },
 	{ "text_lt", 2, {TEXTOID, TEXTOID}, "F:text_lt", NULL  },
 	{ "text_le", 2, {TEXTOID, TEXTOID}, "F:text_le", NULL  },
 	{ "text_gt", 2, {TEXTOID, TEXTOID}, "F:text_gt", NULL  },
 	{ "text_ge", 2, {TEXTOID, TEXTOID}, "F:text_ge", NULL  },
+	{ "bttextcmp",   2, {TEXTOID, TEXTOID}, "F:text_cmp", NULL },
 };
 
 static void
@@ -670,6 +702,49 @@ devfunc_setup_const(devfunc_info *entry, devfunc_catalog_t *procat)
 				   entry->func_name,
 				   entry->func_rettype->type_name,
 				   procat->func_template);
+}
+
+/*
+ * devfunc_setup_comp
+ *
+ * constructor of compare-function for binary comparable data types
+ */
+static void
+devfunc_setup_comp(devfunc_info *entry, devfunc_catalog_t *procat)
+{
+	devtype_info   *dtype1;
+	devtype_info   *dtype2;
+
+	Assert(procat->func_nargs == 2);
+	dtype1 = linitial(entry->func_args);
+	dtype2 = lsecond(entry->func_args);
+
+	entry->func_name = pstrdup(procat->func_name);
+	entry->func_decl
+		= psprintf("static pg_%s_t\n"
+				   "pgfn_%s(__private int *errcode,\n"
+				   "        pg_%s_t arg1, pg_%s_t arg2)\n"
+                   "{\n"
+                   "  pg_%s_t result;\n"
+				   "  if (arg1.isnull || arg2.isnull)\n"
+				   "    result.isnull = true;\n"
+				   "  else\n"
+				   "  {\n"
+                   "    result.isnull = false;\n"
+				   "    if (arg1.value > arg2.value)\n"
+				   "      result.value = 1;\n"
+				   "    else if (arg1.value < arg2.value)\n"
+				   "      result.value = -1;\n"
+				   "    else\n"
+				   "      result.value = 0;\n"
+				   "  }\n"
+				   "  return result;\n"
+				   "}\n",
+				   entry->func_rettype->type_name,
+				   entry->func_name,
+				   dtype1->type_name,
+				   dtype2->type_name,
+				   entry->func_rettype->type_name);
 }
 
 static void
@@ -1009,6 +1084,7 @@ typedef struct
 	List	   *func_defs;		/* list of devfunc_info */
 	List	   *used_params;	/* list of Const or Param nodes */
 	List	   *used_vars;		/* list of Var nodes */
+	const char *row_index;		/* label to reference row-index, if exist */
 	int			extra_flags;
 } codegen_walker_context;
 
@@ -1115,6 +1191,9 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 			if (equal(node, lfirst(cell)))
 			{
 				appendStringInfo(&context->str, "KVAR_%u", index);
+				if (context->row_index)
+					appendStringInfo(&context->str, "(%s)",
+									 context->row_index);
 				return true;
 			}
 			index++;
@@ -1123,6 +1202,9 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 									 copyObject(node));
 		appendStringInfo(&context->str, "KVAR_%u",
 						 list_length(context->used_vars) - 1);
+		if (context->row_index)
+			appendStringInfo(&context->str, "(%s)",
+							 context->row_index);
 		return true;
 	}
 	else if (IsA(node, FuncExpr))
@@ -1319,6 +1401,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	walker_context.func_defs = list_copy(context->func_defs);
 	walker_context.used_params = list_copy(context->used_params);
 	walker_context.used_vars = list_copy(context->used_vars);
+	walker_context.row_index = context->row_index;
 	walker_context.extra_flags = context->extra_flags;
 
 	if (IsA(expr, List))
@@ -1539,7 +1622,7 @@ codegen_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 }
 
 void
-pgstrom_codegen_init(void)
+pgstrom_init_codegen(void)
 {
 	memset(devtype_info_slot, 0, sizeof(devtype_info_slot));
 	memset(devfunc_info_slot, 0, sizeof(devfunc_info_slot));
