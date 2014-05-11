@@ -38,6 +38,7 @@ static struct {
 /* quick references */
 cl_platform_id		opencl_platform_id = NULL;
 cl_context			opencl_context;
+cl_device_type		opencl_device_types = 0;
 cl_uint				opencl_num_devices;
 cl_device_id		opencl_devices[MAX_NUM_DEVICES];
 cl_command_queue	opencl_cmdq[MAX_NUM_DEVICES];
@@ -882,17 +883,15 @@ construct_opencl_device_info(void)
 
 		/* Get list of device ids */
 		rc = clGetDeviceIDs(platforms[i],
-							CL_DEVICE_TYPE_CPU |
-							CL_DEVICE_TYPE_GPU |
-							CL_DEVICE_TYPE_ACCELERATOR,
+							opencl_device_types,
 							lengthof(devices),
 							devices,
 							&n_devices);
-		if (rc != CL_SUCCESS)
+		if (rc != CL_SUCCESS && rc != CL_DEVICE_NOT_FOUND)
 			elog(ERROR, "clGetDeviceIDs failed (%s)", opencl_strerror(rc));
 
 		/* any devices available on this platform? */
-		if (n_devices == 0)
+		if (rc == CL_DEVICE_NOT_FOUND || n_devices == 0)
 		{
 			if (i == opencl_platform_index)
 				elog(ERROR, "no device available on platform \"%s\"",
@@ -954,6 +953,10 @@ construct_opencl_device_info(void)
 void
 pgstrom_init_opencl_devinfo(void)
 {
+	static char	*devtype_strings;
+	char		*token;
+	char		*pos;
+
 	/* selection of opencl platform */
 	DefineCustomIntVariable("pgstrom.opencl_platform",
 							"selection of OpenCL platform to be used",
@@ -965,6 +968,40 @@ pgstrom_init_opencl_devinfo(void)
 							PGC_POSTMASTER,
                             GUC_NOT_IN_SAMPLE,
                             NULL, NULL, NULL);
+
+	/* selection of opencl device types */
+	DefineCustomStringVariable("pgstrom.opencl_device_types",
+							   "selection of OpenCL device types to be used",
+							   NULL,
+							   &devtype_strings,
+							   "gpu,accelerator",
+							   PGC_POSTMASTER,
+							   GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
+	token = strtok_r(devtype_strings, ", ", &pos);
+	while (token != NULL)
+	{
+		if (strcmp(token, "cpu") == 0)
+			opencl_device_types |= CL_DEVICE_TYPE_CPU;
+		else if (strcmp(token, "gpu") == 0)
+			opencl_device_types |= CL_DEVICE_TYPE_GPU;
+		else if (strcmp(token, "accelerator") == 0 ||
+				 strcmp(token, "mic") == 0)
+			opencl_device_types |= CL_DEVICE_TYPE_ACCELERATOR;
+		else if (strcmp(token, "any") == 0)
+			opencl_device_types |= CL_DEVICE_TYPE_ALL;
+		else
+			ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("invalid pgstrom.opencl_device_types option: %s",
+							pos)));
+		token = strtok_r(NULL, ", ", &pos);
+	}
+	if (opencl_device_types == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("no valid opencl device types are specified")));
+
 	/*
 	 * speculative shared memory requirement, but no shmem_startup_hook
 	 * setting because this area shall be allocated by opencl server.
