@@ -196,6 +196,8 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 				tcache_put_row_store((tcache_row_store *)sobject);
 			else if (StromTagIs(sobject, TCacheColumnStore))
 				tcache_put_column_store((tcache_column_store *)sobject);
+			else if (StromTagIs(sobject, TCacheScanDesc))
+				tcache_abort_scan((tcache_scandesc *)sobject);
 			else
 			{
 				Assert(IS_TRACKABLE_OBJECT(sobject));
@@ -249,7 +251,7 @@ pgstrom_track_object(StromObject *sobject)
 		else if (StromTagIs(sobject, TCacheColumnStore))
 			tcache_put_column_store((tcache_column_store *)sobject);
 		else if (StromTagIs(sobject, TCacheScanDesc))
-			tcache_end_scan((tcache_scandesc *)sobject);
+			tcache_abort_scan((tcache_scandesc *)sobject);
 		else
 			pgstrom_put_message((pgstrom_message *)sobject);
 
@@ -272,7 +274,6 @@ pgstrom_untrack_object(StromObject *sobject)
 {
 	dlist_mutable_iter	miter;
 	sobject_entry	   *so_entry;
-	Datum				result;
 	int					i;
 
 	Assert(IS_TRACKABLE_OBJECT(sobject));

@@ -13,6 +13,7 @@
 #include "postgres.h"
 #include "access/heapam.h"
 #include "access/sysattr.h"
+#include "access/xact.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
 #include "catalog/objectaccess.h"
@@ -2216,6 +2217,8 @@ tcache_begin_scan(tcache_head *tc_head, Relation heap_rel)
 
 				goto retry;
 			}
+			else
+				SpinLockRelease(&tc_head->lock);
 		}
 		else
 		{
@@ -2237,8 +2240,6 @@ tcache_begin_scan(tcache_head *tc_head, Relation heap_rel)
 			pfree(tc_scan);
 			tc_scan = NULL;
 		}
-		if (tc_scan)
-			pgstrom_track_object(&tc_scan->sobj);
 	}
 	PG_CATCH();
 	{
@@ -2450,6 +2451,18 @@ tcache_scan_prev(tcache_scandesc *tc_scan)
 		return &tcs->sobj;
 	}
 	return NULL;
+}
+
+void
+tcache_abort_scan(tcache_scandesc *tc_scan)
+{
+	tcache_head	   *tc_head = tc_scan->tc_head;
+
+	if (!tc_scan->heapscan)
+		return;
+
+	Assert(!check_tcache_is_ready(tc_head));
+	tcache_reset_tchead(tc_head);
 }
 
 void
@@ -2823,7 +2836,12 @@ tcache_reset_tchead(tcache_head *tc_head)
 	tcache_column_store *tcs;
 	int					i;
 
-	Assert(TCacheHeadLockedByMe(tc_head, true));
+	/*
+	 * XXX - POSSIBLE BUG - AbortTransaction() calls LWLockReleaseAll()
+	 * prior to ResourceOwnerRelease(), so we may run this routine
+	 * without writer locks. LWLock might not be a ideal locking here.
+	 */
+	//Assert(TCacheHeadLockedByMe(tc_head, true));
 
 	/* no need to columnize any more! */
 	SpinLockAcquire(&tc_common->lock);

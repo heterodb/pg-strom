@@ -583,6 +583,7 @@ extern tcache_scandesc *tcache_begin_scan(tcache_head *tc_head,
 extern StromObject *tcache_scan_next(tcache_scandesc *tc_scan);
 extern StromObject *tcache_scan_prev(tcache_scandesc *tc_scan);
 extern void tcache_end_scan(tcache_scandesc *tc_scan);
+extern void tcache_abort_scan(tcache_scandesc *tc_scan);
 extern void tcache_rescan(tcache_scandesc *tc_scan);
 
 extern tcache_head *tcache_try_create_tchead(Oid reloid,
