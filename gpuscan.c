@@ -83,9 +83,9 @@ typedef struct {
 	HeapScanDesc		scan_desc;
 	TupleTableSlot	   *scan_slot;
 	List			   *dev_quals;
-	tcache_head		   *tc_head;
+//	tcache_head		   *tc_head;
 	tcache_scandesc	   *tc_scan;
-	bool				tcache_build;
+	bool				tc_creator;
 	bool				hybrid_scan;
 
 	pgstrom_queue	   *mqueue;
@@ -518,19 +518,114 @@ gpuscan_finalize_plan(PlannerInfo *root,
 	*paramids = bms_add_members(*paramids, *scan_params);
 }
 
+static bool
+gpuscan_begin_tcache_scan(GpuScanState *gss,
+						  Bitmapset *host_attnums,
+						  Bitmapset *dev_attnums)
+{
+	Relation		scan_rel = gss->scan_rel;
+	Oid				scan_reloid = RelationGetRelid(scan_rel);
+	tcache_head	   *tc_head = NULL;
+	tcache_scandesc	*tc_scan = NULL;
+	Bitmapset	   *tempset;
+	bool			hybrid_scan = false;
+	bool			tc_creator = false;
+	bool			found;
+
+	/*
+	 * First of all, we try the plan-a; that uses cache-only scan
+	 * if both of reference columns by host and by device are on
+	 * the tcache.
+	 */
+	tempset = bms_union(host_attnums, dev_attnums);
+	PG_TRY();
+	{
+		tc_head = tcache_get_tchead(scan_reloid, tempset);
+		if (tc_head)
+		{
+			/* perfect! we don't need to touch heap in this scan */
+			tc_scan = tcache_begin_scan(tc_head, scan_rel);
+			goto out;
+		}
+
+		/*
+		 * As a second best, we try hybrid approach that uses tcache
+		 * for computation in device, but host-side fetches tuples
+		 * from the heap pages according to item-pointers.
+		 */
+		if (!bms_equal(dev_attnums, tempset))
+		{
+			tc_head = tcache_get_tchead(scan_reloid, dev_attnums);
+			if (tc_head)
+			{
+				tc_scan = tcache_begin_scan(tc_head, scan_rel);
+				hybrid_scan = true;
+				goto out;
+			}
+		}
+
+		/*
+		 * In case when we have no suitable tcache, let's get
+		 * the short end of the stick.
+		 */
+		tc_head = tcache_try_create_tchead(scan_reloid, tempset, &found);
+		if (tc_head)
+		{
+			tc_scan = tcache_begin_scan(tc_head, scan_rel);
+			tc_creator = !found;
+		}
+
+	out:
+		if (tc_scan)
+		{
+			pgstrom_track_object(&tc_scan->sobj);
+			gss->tc_scan = tc_scan;
+			tc_scan = NULL;
+
+			pgstrom_track_object(&tc_head->sobj);
+			tc_head = NULL;
+
+			gss->hybrid_scan = hybrid_scan;
+			gss->tc_creator = tc_creator;
+		}
+		else
+		{
+			/*
+			 * Even if we could get tcache_head, we might fail to begin
+			 * tcache-scan because of concurrent cache build. In this
+			 * case, we take usual heap scan using row-store.
+			 */
+			if (tc_head)
+			{
+				tcache_put_tchead(tc_head);
+				tc_head = NULL;
+			}
+		}
+	}
+	PG_CATCH();
+	{
+		if (tc_scan)
+			tcache_end_scan(tc_scan);
+		if (tc_head)
+			tcache_put_tchead(tc_head);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	/* true, if tcache-scan is available */
+	return (!gss->tc_scan ? false : true);
+}
+
 static  CustomPlanState *
 gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 {
 	GpuScanPlan	   *gsplan = (GpuScanPlan *) node;
 	Index			scanrelid = gsplan->scanrelid;
 	Oid				reloid;
-	tcache_head	   *tc_head;
 	GpuScanState   *gss;
 	TupleDesc		tupdesc;
 	int32			extra_flags;
 	AttrNumber		anum;
-	Bitmapset	   *tempset;
-	bool			retried = false;
 
 	/* gpuscan should not have inner/outer plan now */
 	Assert(outerPlan(node) == NULL);
@@ -590,72 +685,21 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	 * OK, initialization of common part is over.
 	 * Let's have GPU stuff initialization
 	 */
-
-	/*
-	 * First of all, we try the plan-a; that uses cache-only scan
-	 * if both of reference columns by host and by device are on
-	 * the tcache.
-	 */
-	tempset = bms_union(gsplan->host_attnums, gsplan->dev_attnums);
-	tc_head = tcache_get_tchead(reloid, tempset, retried);
-	if (tc_head)
-	{
-		/* perfect! we don't need to touch heap-pages in this scan */
-		pgstrom_track_object(&tc_head->sobj);
-		gss->tc_head = tc_head;
-		gss->tc_scan = tcache_begin_scan(tc_head, gss->scan_rel);
-	}
-	else
+	if (!gpuscan_begin_tcache_scan(gss,
+								   gsplan->host_attnums,
+								   gsplan->dev_attnums))
 	{
 		/*
-		 * As a second best, we try hybrid approach that uses tcache
-		 * for computation in device, but host-side fetches tuples
-		 * from the heap pages according to item-pointers.
+		 * Oops, someone concurrently build a tcache.
+		 * We will move on the regular heap scan as fallback.
+		 * One (small) benefit in this option is that MVCC
+		 * check is already done in heap_fetch()
 		 */
-		tc_head = tcache_get_tchead(reloid, gsplan->dev_attnums, false);
-		if (tc_head)
-		{
-			pgstrom_track_object(&tc_head->sobj);
-			gss->tc_head = tc_head;
-			gss->tc_scan = tcache_begin_scan(tc_head, gss->scan_rel);
-			gss->hybrid_scan = true;
-		}
-		else
-		{
-			/*
-			 * In case when we have no suitable tcache, let's get
-			 * the short end of the stick.
-			 */
-			tc_head = tcache_get_tchead(reloid, tempset, true);
-			if (tc_head)
-			{
-				pgstrom_track_object(&tc_head->sobj);
-				gss->tc_head = tc_head;
-				gss->tc_scan = tcache_begin_scan(tc_head, gss->scan_rel);
-			}
-			else
-			{
-				/*
-				 * Oops, someone concurrently build a tcache.
-				 * We will move on the regular heap scan as fallback.
-				 * One (small) benefit in this option is that MVCC
-				 * check is already done in heap_fetch()
-				 */
-				gss->scan_desc = heap_beginscan(gss->scan_rel,
-												estate->es_snapshot,
-												0,
-												NULL);
-			}
-		}
+		gss->scan_desc = heap_beginscan(gss->scan_rel,
+										estate->es_snapshot,
+										0,
+										NULL);
 	}
-
-	/*
-	 * NOTE: in case when we have to build tcache structure, it needs
-	 * special treatment at end of the scan. (we have to revert the
-	 * state and contents if tcache-build is aborted under the way.)
-	 */
-	if (gss->tc_scan && gss->tc_scan->heapscan)
-		gss->tcache_build = true;
 
 	/*
 	 * Setting up kernel program, if needed
@@ -816,7 +860,6 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 		{
 			TupleDesc	tupdesc = RelationGetDescr(gss->scan_rel);
 			HeapTuple	tuple;
-			int		i;
 
 			trs = tcache_create_row_store(tupdesc,
 										  gss->cs_attnums,
@@ -857,7 +900,6 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 				sobject = tcache_scan_next(gss->tc_scan);
 			else
 				sobject = tcache_scan_prev(gss->tc_scan);
-
 			if (!sobject)
 			{
 				tcache_end_scan(gss->tc_scan);
@@ -1015,7 +1057,8 @@ gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
 		}
 		else if (StromTagIs(sobject, TCacheColumnStore))
 		{
-			tcache_head			*tc_head = gss->tc_head;
+			tcache_scandesc		*tc_scan = gss->tc_scan;
+			tcache_head			*tc_head = tc_scan->tc_head;
 			tcache_column_store *tcs = (tcache_column_store *)sobject;
 			Form_pg_attribute	attr;
 			HeapTupleData		htup;
@@ -1400,16 +1443,21 @@ gpuscan_end(CustomPlanState *node)
 
 	if (gss->tc_scan)
 	{
-		Assert(gss->tc_head);
-		gss->pfm.time_tcache_build = gss->tc_scan->time_tcache_build;
-		tcache_end_scan(gss->tc_scan);
-	}
+		tcache_head	   *tc_head = gss->tc_scan->tc_head;
 
-	if (gss->tc_head)
-	{
-		pgstrom_untrack_object(&gss->tc_head->sobj);
-		if (!gss->tcache_build)
-			tcache_put_tchead(gss->tc_head);
+		Assert(tc_head != NULL);
+		gss->pfm.time_tcache_build = gss->tc_scan->time_tcache_build;
+		pgstrom_untrack_object(&gss->tc_scan->sobj);
+		tcache_end_scan(gss->tc_scan);
+
+		/*
+		 * In case when this scan is the creator context of this tcache
+		 * and its build is successfully done, we keep this tc_head
+		 * object without putting.
+		 */
+		pgstrom_untrack_object(&tc_head->sobj);
+        if (!gss->tc_creator)
+            tcache_put_tchead(tc_head);
 	}
 
 	/*

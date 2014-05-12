@@ -115,7 +115,7 @@ _PG_init(void)
 	pgstrom_init_misc_guc();
 	pgstrom_init_debug();
 	pgstrom_init_codegen();
-	pgstrom_init_grafter();
+	//pgstrom_init_grafter();
 }
 
 /*

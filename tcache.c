@@ -36,6 +36,7 @@
 #include "utils/bytea.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
+#include "utils/memutils.h"
 #include "utils/pg_crc.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
@@ -54,7 +55,7 @@ typedef struct {
 typedef struct {
 	slock_t		lock;
 	dlist_head	lru_list;		/* LRU list of tc_head */
-	dlist_head	pending_list;	/* list of tc_head pending for columnization */
+	dlist_head	pending_list;	/* list of columnizer pending tc_head */
 	dlist_head	slot[TCACHE_HASH_SIZE];
 
 	/* properties of columnizers */
@@ -70,6 +71,7 @@ static object_access_hook_type object_access_hook_next;
 static heap_page_prune_hook_type heap_page_prune_hook_next;
 static tcache_common  *tc_common = NULL;
 static int	num_columnizers;
+static MemoryContext ScanDescMemContext;
 
 /*
  * static declarations
@@ -294,17 +296,19 @@ bitmapcopy(uint8 *dstmap, size_t dindex,
 	}
 }
 
+#ifdef USE_ASSERT_CHECKING
 static inline int
-tcache_get_tchead_state(tcache_head *tc_head)
+check_tcache_is_ready(tcache_head *tc_head)
 {
-	int		state;
+	bool	is_ready;
 
 	SpinLockAcquire(&tc_head->lock);
-	state = tc_head->state;
+	is_ready = tc_head->is_ready;
 	SpinLockRelease(&tc_head->lock);
 
-	return state;
+	return is_ready;
 }
+#endif
 
 /*
  * bms_fixup_sysattrs
@@ -2103,12 +2107,18 @@ retry:
  * and insert the record into in-memory cache structure.
  */
 static void
-tcache_build_main(tcache_head *tc_head, HeapScanDesc heapscan)
+tcache_build_main(tcache_scandesc *tc_scan)
 {
-	HeapTuple	tuple;
+	tcache_head	   *tc_head = tc_scan->tc_head;
+	HeapScanDesc	heapscan = tc_scan->heapscan;
+	HeapTuple		tuple;
+	struct timeval	tv1, tv2;
 
 	Assert(TCacheHeadLockedByMe(tc_head, true));
+	Assert(heapscan != NULL);
 
+	elog(INFO, "now building tcache...");
+	gettimeofday(&tv1, NULL);
 	while (true)
 	{
 		tuple = heap_getnext(heapscan, ForwardScanDirection);
@@ -2118,6 +2128,16 @@ tcache_build_main(tcache_head *tc_head, HeapScanDesc heapscan)
 		tcache_insert_tuple(tc_head, tc_head->tcs_root, tuple);
 		tcache_rebalance_tree(tc_head, tc_head->tcs_root, NULL);
 	}
+	gettimeofday(&tv2, NULL);
+	tc_scan->time_tcache_build = timeval_diff(&tv1, &tv2);
+	elog(INFO, "tcache build done...");
+
+	SpinLockAcquire(&tc_head->lock);
+	tc_head->is_ready = true;
+	SpinLockRelease(&tc_head->lock);
+
+	heap_endscan(heapscan);
+	tc_scan->heapscan = NULL;
 }
 
 
@@ -2130,63 +2150,103 @@ tcache_scandesc *
 tcache_begin_scan(tcache_head *tc_head, Relation heap_rel)
 {
 	tcache_scandesc	   *tc_scan;
-	bool				has_wrlock = false;
 
-	tc_scan = palloc0(sizeof(tcache_scandesc));
+	tc_scan = MemoryContextAllocZero(ScanDescMemContext,
+									 sizeof(tcache_scandesc));
+	tc_scan->sobj.stag = StromTag_TCacheScanDesc;
 	tc_scan->rel = heap_rel;
+	tc_scan->heapscan = NULL;
 	tc_scan->tc_head = tc_head;
 	tc_scan->tcs_blkno_min = InvalidBlockNumber;
 	tc_scan->tcs_blkno_max = InvalidBlockNumber;
 	tc_scan->trs_curr = NULL;
 
-	/*
-	 * TODO: returns NULL, if concurrent session builds a tcache, to avoid
-	 * problems around unlink.
-	 */
+	PG_TRY();
+	{
+		bool	has_wrlock = false;
 
-	LWLockAcquire(&tc_head->lwlock, LW_SHARED);
-retry:
-	SpinLockAcquire(&tc_head->lock);
-	if (tc_head->state == TCACHE_STATE_NOT_BUILT)
-	{
-		if (!heap_rel)
+		if (LWLockConditionalAcquire(&tc_head->lwlock, LW_SHARED))
 		{
-			SpinLockRelease(&tc_head->lock);
+		retry:
+			SpinLockAcquire(&tc_head->lock);
+			if (!tc_head->is_ready)
+			{
+				if (!heap_rel)
+				{
+					/* A relation handler must be given for build */
+					SpinLockRelease(&tc_head->lock);
+					LWLockRelease(&tc_head->lwlock);
+					pfree(tc_scan);
+					tc_scan = NULL;
+				}
+				else if (!has_wrlock)
+				{
+					SpinLockRelease(&tc_head->lock);
+					LWLockRelease(&tc_head->lwlock);
+					/*
+					 * XXX - A worst scenario - if many concurrent jobs are
+					 * launched towards unbuilt tcache, concurrent jobs try
+					 * to acquire exclusive lock at same time, and none-
+					 * builder process has to wait, although it is rare.
+					 */
+					LWLockAcquire(&tc_head->lwlock, LW_EXCLUSIVE);
+					has_wrlock = true;
+					goto retry;
+				}
+				else
+				{
+					/* OMG! I have to build up this tcache */
+					SpinLockRelease(&tc_head->lock);
+					tc_scan->heapscan = heap_beginscan(heap_rel,
+													   SnapshotAny,
+													   0, NULL);
+				}
+			}
+			else if (has_wrlock)
+			{
+				/*
+				 * Only a process who is building up this tcache can hold
+				 * exclusive lwlock of the tcache. If it was not actually
+				 * needed, we should degrade the lock.
+				 */
+				SpinLockRelease(&tc_head->lock);
+				LWLockRelease(&tc_head->lwlock);
+				LWLockAcquire(&tc_head->lwlock, LW_SHARED);
+				has_wrlock = false;
+
+				goto retry;
+			}
+		}
+		else
+		{
+			/*
+			 * In case when we cannot acquire the shared-lwlock, it implies
+			 * there is a concurrent writer job (either columnizer or backend
+			 * building cache). Usually, columnizer's job will end in a short
+			 * term, so we put a short delay then retry to get a lock.
+			 */
+			pg_usleep(50000L);	/* 50msec */
+
+			if (LWLockConditionalAcquire(&tc_head->lwlock, LW_SHARED))
+				goto retry;
+
+			/*
+			 * If unavailable to get lwlock after the short delay above,
+			 * probably, cache building is in-progress. So, give it up.
+			 */
 			pfree(tc_scan);
-			return NULL;
+			tc_scan = NULL;
 		}
-		else if (!has_wrlock)
-		{
-			SpinLockRelease(&tc_head->lock);
-			LWLockRelease(&tc_head->lwlock);
-			LWLockAcquire(&tc_head->lwlock, LW_EXCLUSIVE);
-			has_wrlock = true;
-			goto retry;
-		}
-		/* OMG! I have to build up this tcache */
-		tc_head->state = TCACHE_STATE_NOW_BUILD;
-		SpinLockRelease(&tc_head->lock);
-		tc_scan->heapscan = heap_beginscan(heap_rel, SnapshotAny, 0, NULL);
+		if (tc_scan)
+			pgstrom_track_object(&tc_scan->sobj);
 	}
-	else if (has_wrlock)
+	PG_CATCH();
 	{
-		/*
-		 * Only a process who builds up this tcache hold exclusive lwlock
-		 * on the tcache. If it was not actually needed, we should degrade
-		 * the lock.
-		 */
-		SpinLockRelease(&tc_head->lock);
-		LWLockRelease(&tc_head->lwlock);
-		LWLockAcquire(&tc_head->lwlock, LW_SHARED);
-		has_wrlock = false;
-		goto retry;
+		pfree(tc_scan);
+		PG_RE_THROW();
 	}
-	else
-	{
-		Assert(tc_head->state == TCACHE_STATE_READY);
-		SpinLockRelease(&tc_head->lock);
-	}
-	elog(INFO, "tc_scan->heapscan = %p", tc_scan->heapscan);
+	PG_END_TRY();
+
 	return tc_scan;
 }
 
@@ -2204,18 +2264,8 @@ tcache_scan_next(tcache_scandesc *tc_scan)
 	 * load contents of the heap once, then move to 
 	 */
 	if (tc_scan->heapscan)
-	{
-		struct timeval	tv1, tv2;
+		tcache_build_main(tc_scan);
 
-		elog(INFO, "now building tcache...");
-		gettimeofday(&tv1, NULL);
-		tcache_build_main(tc_head, tc_scan->heapscan);
-		gettimeofday(&tv2, NULL);
-		tc_scan->time_tcache_build = timeval_diff(&tv1, &tv2);
-		elog(INFO, "tcache build done...");
-		heap_endscan(tc_scan->heapscan);
-		tc_scan->heapscan = NULL;
-	}
 	/* at least, we have to hold shared-lwlock on tc_head here */
 	Assert(TCacheHeadLockedByMe(tc_head, false));
 
@@ -2320,11 +2370,8 @@ tcache_scan_prev(tcache_scandesc *tc_scan)
 	 * load contents of the heap once, then move to 
 	 */
 	if (tc_scan->heapscan)
-	{
-		tcache_build_main(tc_head, tc_scan->heapscan);
-		heap_endscan(tc_scan->heapscan);
-		tc_scan->heapscan = NULL;
-	}
+		tcache_build_main(tc_scan);
+
 	/* at least, we have to hold shared-lwlock on tc_head here */
 	Assert(TCacheHeadLockedByMe(tc_head, false));
 
@@ -2410,27 +2457,23 @@ tcache_end_scan(tcache_scandesc *tc_scan)
 {
 	tcache_head	   *tc_head = tc_scan->tc_head;
 
-	/*
-	 * If scan is already reached end of the relation, tc_scan->scan shall
-	 * be already closed. If not, it implies scan is aborted in the middle.
-	 */
 	if (tc_scan->heapscan)
 	{
-		Assert(tcache_get_tchead_state(tc_head) == TCACHE_STATE_NOW_BUILD);
+		/*
+		 * If heapscan is already reached to end of the relation,
+		 * tc_scan->heapscan shall be already closed. If not, it implies
+		 * transaction was aborted in the middle.
+		 */
+		Assert(!check_tcache_is_ready(tc_head));
 		tcache_reset_tchead(tc_head);
 		heap_endscan(tc_scan->heapscan);
 	}
-	else if (tc_head->state == TCACHE_STATE_NOW_BUILD)
-	{
-		/* OK, cache was successfully built */
-		SpinLockAcquire(&tc_head->lock);
-        tc_head->state = TCACHE_STATE_READY;
-		SpinLockRelease(&tc_head->lock);
-	}
 	else
 	{
-		Assert(tcache_get_tchead_state(tc_head) == TCACHE_STATE_READY);
+		/* cache should be already available */
+		Assert(check_tcache_is_ready(tc_head));
 	}
+	/* release either exclusive or shared lock */
 	LWLockRelease(&tc_head->lwlock);
 
 	pfree(tc_scan);
@@ -2445,31 +2488,17 @@ tcache_rescan(tcache_scandesc *tc_scan)
 	tc_scan->tcs_blkno_max = InvalidBlockNumber;
 	tc_scan->trs_curr = NULL;
 
-	SpinLockAcquire(&tc_head->lock);
-	if (tc_head->state == TCACHE_STATE_NOW_BUILD)
-	{
-		/* XXX - how to handle half constructed cache? */
-		tcache_free_node_recurse(tc_head, tc_head->tcs_root);
-	}
-	SpinLockRelease(&tc_head->lock);
-
 	if (tc_scan->heapscan)
+	{
+		/*
+		 * XXX - right now, we have no way to recovery a half-built cache,
+		 * so, we reset the current cache once, then rebuild it again.
+		 */
+		Assert(!check_tcache_is_ready(tc_head));
+		tcache_reset_tchead(tc_head);
 		heap_rescan(tc_scan->heapscan, NULL);
+	}
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -2529,7 +2558,7 @@ tcache_create_tchead(Oid reloid, Bitmapset *required,
 		LWLockInitialize(&tc_head->lwlock, 0);
 
 		SpinLockInit(&tc_head->lock);
-		tc_head->state = TCACHE_STATE_NOT_BUILT;
+		tc_head->is_ready = false;
 		dlist_init(&tc_head->free_list);
 		dlist_init(&tc_head->block_list);
 		dlist_init(&tc_head->pending_list);
@@ -2664,26 +2693,22 @@ tcache_put_tchead_nolock(tcache_head *tc_head)
 	}
 }
 
-void
-tcache_put_tchead(tcache_head *tc_head)
-{
-	SpinLockAcquire(&tc_common->lock);
-	tcache_put_tchead_nolock(tc_head);
-	SpinLockRelease(&tc_common->lock);
-}
-
-tcache_head *
-tcache_get_tchead(Oid reloid, Bitmapset *required,
-				  bool create_on_demand)
+static tcache_head *
+tcache_get_tchead_internal(Oid datoid, Oid reloid,
+						   Bitmapset *required,
+						   bool create_on_demand,
+						   bool *tcache_found)
 {
 	dlist_iter		iter;
 	tcache_head	   *tc_head = NULL;
 	tcache_head	   *tc_old = NULL;
-	int				i, j, hindex = tcache_hash_index(MyDatabaseId, reloid);
+	int				hindex = tcache_hash_index(MyDatabaseId, reloid);
+	int				i, j;
 
-	SpinLockAcquire(&tc_common->lock);
 	PG_TRY();
 	{
+		*tcache_found = false;
+
 		dlist_foreach(iter, &tc_common->slot[hindex])
 		{
 			tcache_head	   *temp
@@ -2717,6 +2742,7 @@ tcache_get_tchead(Oid reloid, Bitmapset *required,
 					temp->refcnt++;
 					dlist_move_head(&tc_common->lru_list, &temp->lru_chain);
 					tc_head = temp;
+					*tcache_found = true;
 				}
 				else
 				{
@@ -2764,6 +2790,31 @@ tcache_get_tchead(Oid reloid, Bitmapset *required,
 	return tc_head;
 }
 
+tcache_head *
+tcache_get_tchead(Oid reloid, Bitmapset *required)
+{
+	bool	found;
+
+	return tcache_get_tchead_internal(MyDatabaseId,
+									  reloid, required, false, &found);
+}
+
+tcache_head *
+tcache_try_create_tchead(Oid reloid, Bitmapset *required, bool *found)
+{
+	Assert(found != NULL);
+	return tcache_get_tchead_internal(MyDatabaseId,
+									  reloid, required, true, found);
+}
+
+void
+tcache_put_tchead(tcache_head *tc_head)
+{
+	SpinLockAcquire(&tc_common->lock);
+	tcache_put_tchead_nolock(tc_head);
+	SpinLockRelease(&tc_common->lock);
+}
+
 static void
 tcache_reset_tchead(tcache_head *tc_head)
 {
@@ -2772,8 +2823,9 @@ tcache_reset_tchead(tcache_head *tc_head)
 	tcache_column_store *tcs;
 	int					i;
 
-	Assert(TCacheHeadLockedByMe(tc_head, false));
+	Assert(TCacheHeadLockedByMe(tc_head, true));
 
+	/* no need to columnize any more! */
 	SpinLockAcquire(&tc_common->lock);
 	if (dnode_is_linked(&tc_head->pending_chain))
 	{
@@ -2782,12 +2834,16 @@ tcache_reset_tchead(tcache_head *tc_head)
 	}
 	SpinLockRelease(&tc_common->lock);
 
-	SpinLockAcquire(&tc_head->lock);
+	/* release column store tree, except for the root */
 	tc_node = tc_head->tcs_root;
 	if (tc_node->right)
 		tcache_free_node_recurse(tc_head, tc_node->right);
 	if (tc_node->left)
 		tcache_free_node_recurse(tc_head, tc_node->left);
+	tc_node->right = NULL;
+	tc_node->left = NULL;
+
+	/* reset root node */
 	tcs = tc_node->tcs;
 	tcs->nrows = 0;
 	tcs->njunks = 0;
@@ -2802,6 +2858,8 @@ tcache_reset_tchead(tcache_head *tc_head)
 		}
 	}
 
+	/* row-store should be also released */
+	SpinLockAcquire(&tc_head->lock);
 	dlist_foreach_modify(iter, &tc_head->trs_list)
 	{
 		tcache_row_store   *trs
@@ -2812,9 +2870,10 @@ tcache_reset_tchead(tcache_head *tc_head)
 	Assert(dlist_is_empty(&tc_head->trs_list));
 	if (tc_head->trs_curr)
 		tcache_put_row_store(tc_head->trs_curr);
+	tc_head->trs_curr = NULL;
 
-	/* reset status of tc_head */
-	tc_head->state = TCACHE_STATE_NOT_BUILT;
+	/* all clear, this cache become 'not ready' again */
+	tc_head->is_ready = false;
 	SpinLockRelease(&tc_head->lock);
 }
 
@@ -2831,6 +2890,7 @@ Datum
 pgstrom_tcache_synchronizer(PG_FUNCTION_ARGS)
 {
 	TriggerData    *trigdata;
+	Oid				tgrel_oid;
 	HeapTuple		result = NULL;
 	tcache_head	   *tc_head;
 
@@ -2838,8 +2898,8 @@ pgstrom_tcache_synchronizer(PG_FUNCTION_ARGS)
 		elog(ERROR, "%s: not fired by trigger manager", __FUNCTION__);
 
 	trigdata = (TriggerData *) fcinfo->context;
-	tc_head = tcache_get_tchead(RelationGetRelid(trigdata->tg_relation),
-								NULL, false);
+	tgrel_oid = RelationGetRelid(trigdata->tg_relation);
+	tc_head = tcache_get_tchead(tgrel_oid, NULL);
 	if (!tc_head)
 		return PointerGetDatum(trigdata->tg_newtuple);
 
@@ -3341,7 +3401,7 @@ tcache_on_page_prune(Relation relation,
 		heap_page_prune_hook_next(relation, buffer, ndeleted,
 								  OldestXmin, latestRemovedXid);
 
-	tc_head = tcache_get_tchead(RelationGetRelid(relation), NULL, false);
+	tc_head = tcache_get_tchead(RelationGetRelid(relation), NULL);
 	if (tc_head)
 	{
 		bool		has_lwlock = TCacheHeadLockedByMe(tc_head, false);
@@ -3615,6 +3675,13 @@ pgstrom_init_tcache(void)
 	Size	length;
 	int		i;
 
+	/* create a memory context for tcache_scandesc */
+	ScanDescMemContext = AllocSetContextCreate(CacheMemoryContext,
+											   "TCache scan descriptor",
+											   ALLOCSET_DEFAULT_MINSIZE,
+											   ALLOCSET_DEFAULT_INITSIZE,
+											   ALLOCSET_DEFAULT_MAXSIZE);
+
 	/* number of columnizer worker processes */
 	DefineCustomIntVariable("pgstrom.num_columnizers",
 							"number of columnizer worker processes",
@@ -3667,7 +3734,7 @@ typedef struct
 	Oid		reloid;
 	int2vector *cached;
 	int		refcnt;
-	int		state;
+	bool	is_ready;
 	int		lwlock;	/* 0: unlocked, 1: shared locked, 2: exclusice locked */
 } tcache_head_info;
 
@@ -3724,7 +3791,7 @@ pgstrom_tcache_info(PG_FUNCTION_ARGS)
 														   tc_head->ncols);
 					tchead_info->refcnt = tc_head->refcnt;
 					SpinLockAcquire(&tc_head->lock);
-					tchead_info->state = tc_head->state;
+					tchead_info->is_ready = tc_head->is_ready;
 					SpinLockRelease(&tc_head->lock);
 					SpinLockAcquire(&tc_head->lwlock.mutex);
 					if (tc_head->lwlock.exclusive > 0)
@@ -3763,15 +3830,15 @@ pgstrom_tcache_info(PG_FUNCTION_ARGS)
 	values[1] = ObjectIdGetDatum(tchead_info->reloid);
 	values[2] = PointerGetDatum(tchead_info->cached);
 	values[3] = Int32GetDatum(tchead_info->refcnt);
-	if (tchead_info->state == TCACHE_STATE_NOT_BUILT)
-		snprintf(buf, sizeof(buf), "not built");
-	else if (tchead_info->state == TCACHE_STATE_NOW_BUILD)
-		snprintf(buf, sizeof(buf), "now build");
-	else if (tchead_info->state == TCACHE_STATE_READY)
-		snprintf(buf, sizeof(buf), "ready");
+	if (!tchead_info->is_ready)
+	{
+		if (tchead_info->lwlock == 2)
+			values[4] = CStringGetTextDatum("building");
+		else
+			values[4] = CStringGetTextDatum("not built");
+	}
 	else
-		snprintf(buf, sizeof(buf), "unexpected (%d)", tchead_info->state);
-	values[4] = CStringGetTextDatum(buf);
+		values[4] = CStringGetTextDatum("ready");
 
 	if (tchead_info->lwlock == 2)
 		snprintf(buf, sizeof(buf), "exclusive");
@@ -3987,7 +4054,7 @@ pgstrom_tcache_node_info(PG_FUNCTION_ARGS)
 						   INT4OID, -1, 0);
 		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
 
-		tc_head = tcache_get_tchead(reloid, NULL, false);
+		tc_head = tcache_get_tchead(reloid, NULL);
 		if (tc_head)
 		{
 			LWLockAcquire(&tc_head->lwlock, LW_SHARED);
