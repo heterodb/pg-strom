@@ -128,6 +128,7 @@ typedef enum {
 	StromTag_TCacheRowStore,
 	StromTag_TCacheColumnStore,
 	StromTag_TCacheToastBuf,
+	StromTag_TCacheScanDesc,
 	StromTag_GpuScan,
 	StromTag_GpuSort,
 	StromTag_HashJoin,
@@ -335,6 +336,10 @@ typedef struct tcache_node tcache_node;
 #define TCACHE_STATE_NOW_BUILD		2
 #define TCACHE_STATE_READY			3
 
+/* flags for resource tracker */
+#define TRACKER_TCHEAD__IS_CREATOR		0x0001
+#define TRACKER_TCHEAD__IS_BUILDER		0x0002
+
 typedef struct {
 	StromObject		sobj;			/* StromTag_TCacheHead */
 	dlist_node		chain;			/* link to the hash or free list */
@@ -365,7 +370,7 @@ typedef struct {
 	
 
 	slock_t			lock;		/* short term locking for fields below */
-	int				state;
+	bool			is_ready;	/* true, if tcache is already built */
 	dlist_head		free_list;	/* list of free tcache_node */
 	dlist_head		block_list;	/* list of blocks of tcache_node */
 	dlist_head		pending_list; /* list of pending tcahe_node */
@@ -397,6 +402,7 @@ typedef struct {
  * tcache_scandesc - 
  */
 typedef struct {
+	StromObject		sobj;		/* =StromTag_TCacheScanDesc */
 	Relation		rel;
 	HeapScanDesc	heapscan;	/* valid, if state == TC_STATE_NOW_BUILD */
 	cl_ulong		time_tcache_build;
@@ -579,9 +585,10 @@ extern StromObject *tcache_scan_prev(tcache_scandesc *tc_scan);
 extern void tcache_end_scan(tcache_scandesc *tc_scan);
 extern void tcache_rescan(tcache_scandesc *tc_scan);
 
-
-extern tcache_head *tcache_get_tchead(Oid reloid, Bitmapset *required,
-									  bool create_on_demand);
+extern tcache_head *tcache_try_create_tchead(Oid reloid,
+											 Bitmapset *required,
+											 bool *found);
+extern tcache_head *tcache_get_tchead(Oid reloid, Bitmapset *required);
 extern void tcache_put_tchead(tcache_head *tc_head);
 
 extern tcache_row_store *tcache_create_row_store(TupleDesc tupdesc,
