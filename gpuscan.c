@@ -85,7 +85,6 @@ typedef struct {
 	List			   *dev_quals;
 	tcache_head		   *tc_head;
 	tcache_scandesc	   *tc_scan;
-	bool				tc_creator;
 	bool				hybrid_scan;
 
 	pgstrom_queue	   *mqueue;
@@ -528,75 +527,85 @@ gpuscan_begin_tcache_scan(GpuScanState *gss,
 	tcache_head	   *tc_head = NULL;
 	tcache_scandesc	*tc_scan = NULL;
 	Bitmapset	   *tempset;
-	bool			hybrid_scan;
-	bool			tc_creator;
+	bool			hybrid_scan = false;
+	Datum			tr_flags = 0;
 
-	/*
-	 * First of all, we try the plan-a; that uses cache-only scan
-	 * if both of reference columns by host and by device are on
-	 * the tcache.
-	 */
-	hybrid_scan = false;
-	tc_creator = false;
 	tempset = bms_union(host_attnums, dev_attnums);
-
-	tc_head = tcache_get_tchead(scan_reloid, tempset);
-	if (tc_head)
-	{
-		/* perfect! we don't need to touch heap in this scan */
-		pgstrom_track_object(&tc_head->sobj);
-	}
-	else if (!bms_equal(dev_attnums, tempset))
+	PG_TRY();
 	{
 		/*
-		 * As a second best, we try hybrid approach that uses tcache
-		 * for computation in device, but host-side fetches tuples
-		 * from the heap pages according to item-pointers.
+		 * First of all, we try the plan-a; that uses cache-only scan
+		 * if both of reference columns by host and by device are on
+		 * the tcache.
+		 * If found, it's perfect. We don't need to touch heap in
+		 * this scan.
 		 */
-		tc_head = tcache_get_tchead(scan_reloid, dev_attnums);
+		tc_head = tcache_get_tchead(scan_reloid, tempset);
+		if (!tc_head)
+		{
+			if (!bms_equal(dev_attnums, tempset))
+			{
+				/*
+				 * As a second best, we try hybrid approach that uses tcache
+				 * for computation in device, but host-side fetches tuples
+				 * from the heap pages according to item-pointers.
+				 */
+				tc_head = tcache_get_tchead(scan_reloid, dev_attnums);
+				if (tc_head)
+					hybrid_scan = true;
+			}
+			/*
+			 * In case when we have no suitable tcache anyway,
+			 * Let's create a new one and build up it.
+			 */
+			if (!tc_head)
+			{
+				bool	found;
+
+				tc_head = tcache_try_create_tchead(scan_reloid, tempset,
+												   &found);
+				if (tc_head)
+					tr_flags |= TRACKED_TCHEAD__IS_CREATOR;
+			}
+		}
+		/* OK, let's try to make tcache-scan handler */
 		if (tc_head)
 		{
-			pgstrom_track_object(&tc_head->sobj);
-			hybrid_scan = true;
+			tc_scan = tcache_begin_scan(tc_head, scan_rel);
+			if (!tc_scan)
+			{
+				/*
+				 * Even if we could get tcache_head, we might fail to begin
+				 * tcache-scan because of concurrent cache build. In this
+				 * case, we take usual heap scan using row-store.
+				 */
+				tcache_put_tchead(tc_head);
+				tc_head = NULL;
+			}
+			else if (tc_scan->heapscan)
+			{
+				/*
+				 * In case when tcache_begin_scan returns a tcache_scandesc,
+				 * it means this scan also performs as tcache builder.
+				 */
+				tr_flags |= TRACKED_TCHEAD__IS_BUILDER;
+			}
 		}
 	}
-	/*
-	 * In case when we have no suitable tcache, let's create and
-	 * build a new one
-	 */
-	if (!tc_head)
+	PG_CATCH();
 	{
-		bool	found;
-
-		tc_head = tcache_try_create_tchead(scan_reloid, tempset, &found);
 		if (tc_head)
-		{
-			pgstrom_track_object(&tc_head->sobj);
-			tc_creator = !found;
-		}
+			tcache_put_tchead(tc_head);
 	}
+	PG_END_TRY();
 
-	/* Hmm... we have to fall back to heap-scan unless valid tcache */
 	if (!tc_head)
 		return false;
 
-	/* OK, let's try to make tcache-scan handler */
-	tc_scan = tcache_begin_scan(tc_head, scan_rel);
-	if (!tc_scan)
-	{
-		/*
-		 * Even if we could get tcache_head, we might fail to begin
-		 * tcache-scan because of concurrent cache build. In this
-		 * case, we take usual heap scan using row-store.
-		 */
-		pgstrom_untrack_object(&tc_head->sobj);
-		return false;
-	}
-	pgstrom_track_object(&tc_scan->sobj);
+	pgstrom_track_object(&tc_head->sobj, tr_flags);
 	gss->tc_head = tc_head;
 	gss->tc_scan = tc_scan;
 	gss->hybrid_scan = hybrid_scan;
-	gss->tc_creator = tc_creator;
 
 	return true;
 }
@@ -694,11 +703,11 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	{
 		gss->dprog_key = pgstrom_get_devprog_key(gsplan->kern_source,
 												 extra_flags);
-		pgstrom_track_object((StromObject *)gss->dprog_key);
+		pgstrom_track_object((StromObject *)gss->dprog_key, 0);
 
 		/* also, message queue */
 		gss->mqueue = pgstrom_create_queue();
-		pgstrom_track_object(&gss->mqueue->sobj);
+		pgstrom_track_object(&gss->mqueue->sobj, 0);
 	}
 
 	/* template for kern_parambuf */
@@ -886,8 +895,8 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 			if (!sobject)
 			{
 				tcache_scandesc	*tc_scan = gss->tc_scan;
+
 				gss->pfm.time_tcache_build = tc_scan->time_tcache_build;
-				pgstrom_untrack_object(&tc_scan->sobj);
 				tcache_end_scan(tc_scan);
 				gss->tc_scan = NULL;
 			}
@@ -992,7 +1001,7 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 
 	/* track local object */
 	if (gpuscan)
-		pgstrom_track_object(&gpuscan->msg.sobj);
+		pgstrom_track_object(&gpuscan->msg.sobj, 0);
 
 	return gpuscan;
 }
@@ -1433,21 +1442,23 @@ gpuscan_end(CustomPlanState *node)
 		 * If not, it implies this scan didn't reach to the tail.
 		 */
 		gss->pfm.time_tcache_build = gss->tc_scan->time_tcache_build;
-		pgstrom_untrack_object(&gss->tc_scan->sobj);
 		tcache_end_scan(gss->tc_scan);
 	}
 
 	if (gss->tc_head)
 	{
 		tcache_head	*tc_head = gss->tc_head;
+		Datum		tr_flags;
+
+		tr_flags = pgstrom_untrack_object(&tc_head->sobj);
+
 		/*
 		 * In case when this scan is the creator context of this tcache
 		 * and its build is successfully done, we keep this tc_head
 		 * object without putting.
 		 */
-		pgstrom_untrack_object(&tc_head->sobj);
-        if (!gss->tc_creator)
-            tcache_put_tchead(tc_head);
+		if ((tr_flags & TRACKED_TCHEAD__IS_CREATOR) == 0)
+			tcache_put_tchead(tc_head);
 	}
 
 	/*

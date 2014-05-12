@@ -128,7 +128,6 @@ typedef enum {
 	StromTag_TCacheRowStore,
 	StromTag_TCacheColumnStore,
 	StromTag_TCacheToastBuf,
-	StromTag_TCacheScanDesc,
 	StromTag_GpuScan,
 	StromTag_GpuSort,
 	StromTag_HashJoin,
@@ -137,7 +136,6 @@ typedef enum {
 
 typedef struct {
 	StromTag	stag;			/* StromTag_* */
-	//dlist_node	tracker;		/* Used by resource tracker */
 } StromObject;
 
 #define StromTagIs(PTR,IDENT) \
@@ -331,15 +329,6 @@ typedef struct tcache_node tcache_node;
 /*
  * tcache_head - a cache entry of individual relations
  */
-#define TCACHE_STATE_FREE			0
-#define TCACHE_STATE_NOT_BUILT		1
-#define TCACHE_STATE_NOW_BUILD		2
-#define TCACHE_STATE_READY			3
-
-/* flags for resource tracker */
-#define TRACKER_TCHEAD__IS_CREATOR		0x0001
-#define TRACKER_TCHEAD__IS_BUILDER		0x0002
-
 typedef struct {
 	StromObject		sobj;			/* StromTag_TCacheHead */
 	dlist_node		chain;			/* link to the hash or free list */
@@ -389,6 +378,10 @@ typedef struct {
 							 */
 	char		data[FLEXIBLE_ARRAY_MEMBER];
 } tcache_head;
+
+/* flags kept in resource tracker's private */
+#define TRACKED_TCHEAD__IS_CREATOR		0x0001
+#define TRACKED_TCHEAD__IS_BUILDER		0x0002
 
 #define TCACHE_NODE_PER_BLOCK(row_natts, col_natts)						\
 	((SHMEM_BLOCKSZ - SHMEM_ALLOC_COST -								\
@@ -484,8 +477,8 @@ extern void SanityCheck_kern_column_store(kern_row_store *krs,
 /*
  * restrack.c
  */
-extern void pgstrom_track_object(StromObject *sobject);
-extern void pgstrom_untrack_object(StromObject *sobject);
+extern void pgstrom_track_object(StromObject *sobject, Datum private);
+extern Datum pgstrom_untrack_object(StromObject *sobject);
 extern bool pgstrom_object_is_tracked(StromObject *sobject);
 extern void pgstrom_init_restrack(void);
 
@@ -591,6 +584,9 @@ extern tcache_head *tcache_try_create_tchead(Oid reloid,
 											 bool *found);
 extern tcache_head *tcache_get_tchead(Oid reloid, Bitmapset *required);
 extern void tcache_put_tchead(tcache_head *tc_head);
+extern void tcache_abort_tchead(tcache_head *tc_head, Datum tr_flags);
+extern bool tcache_state_is_ready(tcache_head *tc_head);
+
 
 extern tcache_row_store *tcache_create_row_store(TupleDesc tupdesc,
 												 int ncols,

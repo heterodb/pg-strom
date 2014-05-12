@@ -38,6 +38,7 @@ typedef struct {
 	dlist_node		ptrmap_chain;
 	ResourceOwner	owner;
 	StromObject	   *sobject;
+	Datum			private;
 } sobject_entry;
 
 #define IS_TRACKABLE_OBJECT(sobject)			\
@@ -46,7 +47,6 @@ typedef struct {
 	 StromTagIs(sobject,TCacheHead) ||			\
 	 StromTagIs(sobject,TCacheRowStore) ||		\
 	 StromTagIs(sobject,TCacheColumnStore) ||	\
-	 StromTagIs(sobject,TCacheScanDesc) ||		\
 	 StromTagIs(sobject,GpuScan)	||			\
 	 StromTagIs(sobject,GpuSort) ||				\
 	 StromTagIs(sobject,HashJoin))
@@ -128,7 +128,8 @@ restrack_get_entry(ResourceOwner resource_owner,
 }
 
 static sobject_entry *
-sobject_get_entry(ResourceOwner resource_owner, StromObject *sobject)
+sobject_get_entry(ResourceOwner resource_owner,
+				  StromObject *sobject, Datum private)
 {
 	sobject_entry  *so_entry;
 	int		i;
@@ -147,6 +148,7 @@ sobject_get_entry(ResourceOwner resource_owner, StromObject *sobject)
 	dlist_push_head(&ptrmap_slot[i], &so_entry->ptrmap_chain);
 	so_entry->owner = resource_owner;
 	so_entry->sobject = sobject;
+	so_entry->private = private;
 
 	return so_entry;
 }
@@ -178,26 +180,28 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 		 */
 		dlist_foreach_modify(miter, &tracker->sobject_list)
 		{
+			sobject_entry  *so_entry;
 			StromObject	   *sobject;
-			sobject_entry  *so_entry
-				= dlist_container(sobject_entry, tracker_chain, miter.cur);
+			Datum			private;
 
+			so_entry = dlist_container(sobject_entry,
+									   tracker_chain,
+									   miter.cur);
 			dlist_delete(&so_entry->tracker_chain);
 			dlist_delete(&so_entry->ptrmap_chain);
 			sobject = so_entry->sobject;
+			private = so_entry->private;
 
 			if (StromTagIs(sobject, MsgQueue))
 				pgstrom_close_queue((pgstrom_queue *)sobject);
 			else if (StromTagIs(sobject, DevProgram))
 				pgstrom_put_devprog_key(PointerGetDatum(sobject));
 			else if (StromTagIs(sobject, TCacheHead))
-				tcache_put_tchead((tcache_head *)sobject);
+				tcache_abort_tchead((tcache_head *)sobject, private);
 			else if (StromTagIs(sobject, TCacheRowStore))
 				tcache_put_row_store((tcache_row_store *)sobject);
 			else if (StromTagIs(sobject, TCacheColumnStore))
 				tcache_put_column_store((tcache_column_store *)sobject);
-			else if (StromTagIs(sobject, TCacheScanDesc))
-				tcache_abort_scan((tcache_scandesc *)sobject);
 			else
 			{
 				Assert(IS_TRACKABLE_OBJECT(sobject));
@@ -218,7 +222,7 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
  * registers a shared object as one acquired by this backend.
  */
 void
-pgstrom_track_object(StromObject *sobject)
+pgstrom_track_object(StromObject *sobject, Datum private)
 {
 	tracker_entry  *tracker = NULL;
 	sobject_entry  *so_entry = NULL;
@@ -228,13 +232,13 @@ pgstrom_track_object(StromObject *sobject)
 	{
 		ResourceReleasePhase	phase;
 
-		if (StromTagIs(sobject, TCacheScanDesc))
+		if (StromTagIs(sobject, TCacheHead))
 			phase = RESOURCE_RELEASE_BEFORE_LOCKS;
 		else
 			phase = RESOURCE_RELEASE_AFTER_LOCKS;
 
 		tracker = restrack_get_entry(CurrentResourceOwner, phase, true);
-		so_entry = sobject_get_entry(CurrentResourceOwner, sobject);
+		so_entry = sobject_get_entry(CurrentResourceOwner, sobject, private);
 		dlist_push_head(&tracker->sobject_list,
 						&so_entry->tracker_chain);
 	}
@@ -245,13 +249,11 @@ pgstrom_track_object(StromObject *sobject)
 		else if (StromTagIs(sobject, DevProgram))
 			pgstrom_put_devprog_key((Datum)sobject);
 		else if (StromTagIs(sobject, TCacheHead))
-			tcache_put_tchead((tcache_head *)sobject);
+			tcache_abort_tchead((tcache_head *)sobject, private);
 		else if (StromTagIs(sobject, TCacheRowStore))
 			tcache_put_row_store((tcache_row_store *)sobject);
 		else if (StromTagIs(sobject, TCacheColumnStore))
 			tcache_put_column_store((tcache_column_store *)sobject);
-		else if (StromTagIs(sobject, TCacheScanDesc))
-			tcache_abort_scan((tcache_scandesc *)sobject);
 		else
 			pgstrom_put_message((pgstrom_message *)sobject);
 
@@ -269,11 +271,12 @@ pgstrom_track_object(StromObject *sobject)
  *
  * unregister the supplied object from tracking table
  */
-void
+Datum
 pgstrom_untrack_object(StromObject *sobject)
 {
 	dlist_mutable_iter	miter;
 	sobject_entry	   *so_entry;
+	Datum				private;
 	int					i;
 
 	Assert(IS_TRACKABLE_OBJECT(sobject));
@@ -289,10 +292,11 @@ pgstrom_untrack_object(StromObject *sobject)
 
 		dlist_delete(&so_entry->tracker_chain);
 		dlist_delete(&so_entry->ptrmap_chain);
+		private = so_entry->private;
 		memset(so_entry, 0, sizeof(sobject_entry));
 		dlist_push_head(&sobject_free_list, &so_entry->ptrmap_chain);
 
-		return;
+		return private;
 	}
 	elog(ERROR, "StromObject %p (tag=%d) is not tracked",
 		 sobject, (int)sobject->stag);

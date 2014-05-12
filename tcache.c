@@ -72,7 +72,6 @@ static object_access_hook_type object_access_hook_next;
 static heap_page_prune_hook_type heap_page_prune_hook_next;
 static tcache_common  *tc_common = NULL;
 static int	num_columnizers;
-static MemoryContext ScanDescMemContext;
 
 /*
  * static declarations
@@ -296,20 +295,6 @@ bitmapcopy(uint8 *dstmap, size_t dindex,
 		dst[i] = (dst[i] & mask) | (bitmap & ~mask);
 	}
 }
-
-#ifdef USE_ASSERT_CHECKING
-static inline int
-check_tcache_is_ready(tcache_head *tc_head)
-{
-	bool	is_ready;
-
-	SpinLockAcquire(&tc_head->lock);
-	is_ready = tc_head->is_ready;
-	SpinLockRelease(&tc_head->lock);
-
-	return is_ready;
-}
-#endif
 
 /*
  * bms_fixup_sysattrs
@@ -2141,7 +2126,6 @@ tcache_build_main(tcache_scandesc *tc_scan)
 	tc_scan->heapscan = NULL;
 }
 
-
 /*
  *
  * NOTE: this operation does not increment reference counter of tcache_head,
@@ -2152,9 +2136,7 @@ tcache_begin_scan(tcache_head *tc_head, Relation heap_rel)
 {
 	tcache_scandesc	   *tc_scan;
 
-	tc_scan = MemoryContextAllocZero(ScanDescMemContext,
-									 sizeof(tcache_scandesc));
-	tc_scan->sobj.stag = StromTag_TCacheScanDesc;
+	tc_scan = palloc(sizeof(tcache_scandesc));
 	tc_scan->rel = heap_rel;
 	tc_scan->heapscan = NULL;
 	tc_scan->tc_head = tc_head;
@@ -2454,18 +2436,6 @@ tcache_scan_prev(tcache_scandesc *tc_scan)
 }
 
 void
-tcache_abort_scan(tcache_scandesc *tc_scan)
-{
-	tcache_head	   *tc_head = tc_scan->tc_head;
-
-	if (!tc_scan->heapscan)
-		return;
-
-	Assert(!check_tcache_is_ready(tc_head));
-	tcache_reset_tchead(tc_head);
-}
-
-void
 tcache_end_scan(tcache_scandesc *tc_scan)
 {
 	tcache_head	   *tc_head = tc_scan->tc_head;
@@ -2477,14 +2447,14 @@ tcache_end_scan(tcache_scandesc *tc_scan)
 		 * tc_scan->heapscan shall be already closed. If not, it implies
 		 * transaction was aborted in the middle.
 		 */
-		Assert(!check_tcache_is_ready(tc_head));
+		Assert(!tcache_state_is_ready(tc_head));
 		tcache_reset_tchead(tc_head);
 		heap_endscan(tc_scan->heapscan);
 	}
 	else
 	{
 		/* cache should be already available */
-		Assert(check_tcache_is_ready(tc_head));
+		Assert(tcache_state_is_ready(tc_head));
 	}
 	/* release either exclusive or shared lock */
 	LWLockRelease(&tc_head->lwlock);
@@ -2507,7 +2477,7 @@ tcache_rescan(tcache_scandesc *tc_scan)
 		 * XXX - right now, we have no way to recovery a half-built cache,
 		 * so, we reset the current cache once, then rebuild it again.
 		 */
-		Assert(!check_tcache_is_ready(tc_head));
+		Assert(!tcache_state_is_ready(tc_head));
 		tcache_reset_tchead(tc_head);
 		heap_rescan(tc_scan->heapscan, NULL);
 	}
@@ -2654,15 +2624,10 @@ tcache_create_tchead(Oid reloid, Bitmapset *required,
 	return tc_head;
 }
 
+
 static void
 tcache_put_tchead_nolock(tcache_head *tc_head)
 {
-	/*
-	 * TODO: needs to check tc_head->state.
-	 * If TC_STATE_NOW_BUILD, we have to release it and revert the status
-	 *
-	 * Also, it has to be done prior to release locking.
-	 */
 	if (--tc_head->refcnt == 0)
 	{
 		dlist_mutable_iter iter;
@@ -2828,6 +2793,41 @@ tcache_put_tchead(tcache_head *tc_head)
 	SpinLockRelease(&tc_common->lock);
 }
 
+void
+tcache_abort_tchead(tcache_head *tc_head, Datum tr_flags)
+{
+	/*
+	 * If this scan is tcache builder but tcache was not built at
+	 * this timing, it means this tcache is still half-constructed.
+	 * We have, right now, no way to recover / utilize these kind
+	 * of tcache. So, simply reset it.
+	 */
+	if ((tr_flags & TRACKED_TCHEAD__IS_BUILDER) != 0 &&
+		!tcache_state_is_ready(tc_head))
+		tcache_reset_tchead(tc_head);
+
+	SpinLockAcquire(&tc_common->lock);
+	tcache_put_tchead_nolock(tc_head);
+	SpinLockRelease(&tc_common->lock);
+}
+
+/*
+ * tcache_state_is_ready
+ *
+ * it asks tcache state; whether it is ready or not.
+ */
+bool
+tcache_state_is_ready(tcache_head *tc_head)
+{
+	bool	is_ready;
+
+	SpinLockAcquire(&tc_head->lock);
+	is_ready = tc_head->is_ready;
+	SpinLockRelease(&tc_head->lock);
+
+	return is_ready;
+}
+
 static void
 tcache_reset_tchead(tcache_head *tc_head)
 {
@@ -2860,6 +2860,8 @@ tcache_reset_tchead(tcache_head *tc_head)
 		tcache_free_node_recurse(tc_head, tc_node->left);
 	tc_node->right = NULL;
 	tc_node->left = NULL;
+	tc_node->r_depth = 0;
+	tc_node->l_depth = 0;
 
 	/* reset root node */
 	tcs = tc_node->tcs;
@@ -3692,13 +3694,6 @@ pgstrom_init_tcache(void)
 	BackgroundWorker	worker;
 	Size	length;
 	int		i;
-
-	/* create a memory context for tcache_scandesc */
-	ScanDescMemContext = AllocSetContextCreate(CacheMemoryContext,
-											   "TCache scan descriptor",
-											   ALLOCSET_DEFAULT_MINSIZE,
-											   ALLOCSET_DEFAULT_INITSIZE,
-											   ALLOCSET_DEFAULT_MAXSIZE);
 
 	/* number of columnizer worker processes */
 	DefineCustomIntVariable("pgstrom.num_columnizers",
