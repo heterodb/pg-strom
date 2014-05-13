@@ -3260,7 +3260,7 @@ pgstrom_relation_has_synchronizer(Relation rel)
 			probin = TextDatumGetCString(value);
 
 			if (strcmp(prosrc, "pgstrom_tcache_synchronizer") == 0 &&
-				strcmp(probin, "$libdir/cache_scan") == 0)
+				strcmp(probin, "$libdir/pg_strom") == 0)
 			{
 				int16       tgtype = trig->tgtype;
 

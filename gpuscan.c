@@ -12,6 +12,7 @@
  */
 #include "postgres.h"
 #include "access/sysattr.h"
+#include "catalog/pg_namespace.h"
 #include "commands/explain.h"
 #include "miscadmin.h"
 #include "nodes/bitmapset.h"
@@ -194,6 +195,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 					  RangeTblEntry *rte)
 {
 	GpuScanPath	   *pathnode;
+	Relation		rel;
 	List		   *dev_quals = NIL;
 	List		   *host_quals = NIL;
 	Bitmapset	   *dev_attnums = NULL;
@@ -212,6 +214,20 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	/* only base relation we can handle */
 	if (baserel->rtekind != RTE_RELATION || baserel->relid == 0)
 		return;
+
+	/* system catalog is not supported */
+	if (get_rel_namespace(rte->relid) == PG_CATALOG_NAMESPACE)
+		return;
+
+	/* also, relation has to have synchronizer trigger */
+	rel = heap_open(rte->relid, NoLock);
+	if (!pgstrom_relation_has_synchronizer(rel))
+	{
+		heap_close(rel, NoLock);
+		elog(INFO, "no synchronizer!");
+		return;
+	}
+	heap_close(rel, NoLock);
 
 	/* check whether qualifier can run on GPU device */
 	memset(&context, 0, sizeof(codegen_context));
