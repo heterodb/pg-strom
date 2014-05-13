@@ -19,6 +19,7 @@
 #include "nodes/execnodes.h"
 #include "nodes/plannodes.h"
 #include "nodes/primnodes.h"
+#include "storage/lock.h"
 #include "storage/spin.h"
 #include <pthread.h>
 #include <unistd.h>
@@ -354,7 +355,7 @@ typedef struct {
 	 * or column- store is protected by its individual spinlock,
 	 * but it never takes giant locks.
 	 */
-	LWLock			lwlock;		/* read-write lock per execution (long) */
+	LOCKTAG			locktag;	/* locktag of per execution (long) lock */
 	tcache_node	   *tcs_root;	/* root node of this cache */
 	
 
@@ -398,6 +399,7 @@ typedef struct {
 	StromObject		sobj;		/* =StromTag_TCacheScanDesc */
 	Relation		rel;
 	HeapScanDesc	heapscan;	/* valid, if state == TC_STATE_NOW_BUILD */
+	bool			has_exlock;	/* true, if this scan hold exclusive lock */
 	cl_ulong		time_tcache_build;
 	tcache_head	   *tc_head;
 	BlockNumber		tcs_blkno_min;

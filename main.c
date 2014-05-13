@@ -63,7 +63,7 @@ pgstrom_init_misc_guc(void)
 							"max number of chunk to be run asynchronously",
 							NULL,
 							&pgstrom_max_async_chunks,
-							32,
+							3,
 							pgstrom_min_async_chunks + 1,
 							INT_MAX,
 							PGC_USERSET,
@@ -115,7 +115,7 @@ _PG_init(void)
 	pgstrom_init_misc_guc();
 	pgstrom_init_debug();
 	pgstrom_init_codegen();
-	//pgstrom_init_grafter();
+	pgstrom_init_grafter();
 }
 
 /*

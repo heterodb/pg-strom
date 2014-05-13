@@ -789,7 +789,7 @@ kern_row_to_column(__global kern_row_store *krs,
 	__global rs_tuple  *rs_tup;
 	size_t		global_id = get_global_id(0);
 	size_t		local_id = get_local_id(0);
-	cl_uint		ncols = krs->ncols;
+	cl_uint		ncols = kcs->ncols;
 	cl_uint		offset;
 	cl_uint		i, j;
 
@@ -797,10 +797,10 @@ kern_row_to_column(__global kern_row_store *krs,
 	rs_tup = kern_rowstore_get_tuple(krs, global_id);
 	offset = (rs_tup != NULL ? rs_tup->data.t_hoff : 0);
 
-	for (i=0, j=0; i < ncols; i++)
+	for (i=0, j=0; j < ncols; i++)
 	{
-		__global kern_colmeta  *rcmeta = &krs->colmeta[i];
-		__global kern_colmeta  *ccmeta;
+		kern_colmeta	rcmeta = krs->colmeta[i];
+		kern_colmeta	ccmeta;
 		cl_bool	isnull;
 
 		if (!rs_tup || ((rs_tup->data.t_infomask & HEAP_HASNULL) != 0 &&
@@ -812,35 +812,36 @@ kern_row_to_column(__global kern_row_store *krs,
 
 			isnull = false;
 
-			if (rcmeta->attlen > 0)
-				offset = TYPEALIGN(rcmeta->attalign, offset);
+			if (rcmeta.attlen > 0)
+				offset = TYPEALIGN(rcmeta.attalign, offset);
 			else if (!VARATT_NOT_PAD_BYTE((uintptr_t)&rs_tup->data + offset))
-				offset = TYPEALIGN(rcmeta->attalign, offset);
+				offset = TYPEALIGN(rcmeta.attalign, offset);
 			src = ((__global char *)&rs_tup->data) + offset;
 
 			/*
 			 * Increment offset, according to the logic of
 			 * att_addlength_pointer but no cstring support in kernel
 			 */
-			offset += (rcmeta->attlen > 0 ?
-					   rcmeta->attlen :
+			offset += (rcmeta.attlen > 0 ?
+					   rcmeta.attlen :
 					   VARSIZE_ANY(src));
 
-			if ((rcmeta->flags & KERN_COLMETA_ATTREFERENCED) != 0)
+			if ((rcmeta.flags & KERN_COLMETA_ATTREFERENCED) != 0)
 			{
 				__global char  *dest;
 
-				ccmeta = &kcs->colmeta[j];
+				ccmeta = kcs->colmeta[j];
 
-				dest = ((__global char *)kcs) + ccmeta->cs_ofs;
+				dest = ((__global char *)kcs) + ccmeta.cs_ofs;
 
 				/* adjust destination address by nullmap, if needed */
-				if ((ccmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
+				if ((ccmeta.flags & KERN_COLMETA_ATTNOTNULL) == 0)
 					dest += STROMALIGN((kcs->nrows + 7) >> 3);
+
 				/* adjust destination address for exact slot on column-array */
-				dest += get_global_id(0) * (ccmeta->attlen > 0
-											? ccmeta->attlen
-											: sizeof(cl_uint));
+				dest += global_id * (ccmeta.attlen > 0
+									 ? ccmeta.attlen
+									 : sizeof(cl_uint));
 				/*
 				 * Copy a datum from a field of rs_tuple into column-array
 				 * of kern_column_store. In case of variable length-field,
@@ -852,7 +853,7 @@ kern_row_to_column(__global kern_row_store *krs,
 				 * 1, 2, 4, 8 or 16-bytes length. Elsewhere, it should be
 				 * a variable length field.
 				 */
-				switch (ccmeta->attlen)
+				switch (ccmeta.attlen)
 				{
 					case 1:
 						*((__global cl_char *)dest)
@@ -889,11 +890,10 @@ kern_row_to_column(__global kern_row_store *krs,
 		 * Because it takes per bit operation using interaction with neighbor
 		 * work-item, we use local working memory for reduction.
 		 */
-		if ((rcmeta->flags & KERN_COLMETA_ATTREFERENCED) != 0)
+		if ((rcmeta.flags & KERN_COLMETA_ATTREFERENCED) != 0)
 		{
-			ccmeta = &kcs->colmeta[j];
-
-			if ((ccmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
+			ccmeta = kcs->colmeta[j];
+			if ((ccmeta.flags & KERN_COLMETA_ATTNOTNULL) == 0)
 			{
 				workbuf[local_id]
 					= (!isnull ? (1 << (local_id & 0x1f)) : 0);
@@ -915,11 +915,10 @@ kern_row_to_column(__global kern_row_store *krs,
 				barrier(CLK_LOCAL_MEM_FENCE);
 
 				/* put a nullmap */
-				if ((local_id & 0x1f) == 0 && global_id < krs->nrows)
+				if ((local_id & 0x1f) == 0 && global_id < kcs->nrows)
 				{
 					__global cl_uint *p_nullmap
-						= (__global cl_uint *)((uintptr_t)kcs +
-											   ccmeta->cs_ofs);
+						= (__global cl_uint *)((uintptr_t)kcs + ccmeta.cs_ofs);
 
 					p_nullmap[global_id >> 5] = workbuf[local_id];
 				}

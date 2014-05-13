@@ -2067,8 +2067,8 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 								NULL,
 								&gwork_sz,
 								&lwork_sz,
-								3,
-								&clgss->events[clgss->ev_index - 3],
+								clgss->ev_index,
+								&clgss->events[0],
 								&clgss->events[clgss->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
