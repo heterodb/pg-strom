@@ -769,6 +769,7 @@ pgstrom_setup_kern_colstore_head(GpuScanState *gss, kern_resultbuf *kresult)
 
 	kcs_head->ncols = ncols;
 	kcs_head->nrows = nrows;
+	kcs_head->nrooms = nrows;	/* we create a tightly fit kcs */
 	ktoast = (kern_toastbuf *)&kcs_head[ncols];
     i_refcols = (cl_uint *)&ktoast->coldir[ncols];
 

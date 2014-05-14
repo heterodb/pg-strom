@@ -587,6 +587,7 @@ typedef struct {
 	cl_uint			length;	/* length of this kernel column-store */
 	cl_uint			ncols;	/* number of columns in this store */
 	cl_uint			nrows;  /* number of records in this store */
+	cl_uint			nrooms;	/* max number of records can be stored */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_column_store;
 

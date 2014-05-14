@@ -157,13 +157,14 @@ gpusort_single(__global kern_gpusort *kgsort,
 static void
 run_gpusort_multi(__global kern_parambuf *kparams,
 				  __global kern_column_store *x_chunk,
-				  __global kern_toastbuf     *x_chunk,
+				  __global kern_toastbuf     *x_toast,
 				  __global kern_column_store *y_chunk,
-				  __global kern_toastbuf     *y_chunk,
+				  __global kern_toastbuf     *y_toast,
 				  __global kern_column_store *z_chunk1,
-				  __global kern_toastbuf     *z_chunk1,
+				  __global kern_toastbuf     *z_toast1,
 				  __global kern_column_store *z_chunk2,
-				  __global kern_toastbuf     *z_chunk2,
+				  __global kern_toastbuf     *z_toast2,
+				  __private cl_int *errcode,
 				  __local void *local_workbuf)
 {
 	/*
@@ -174,20 +175,30 @@ run_gpusort_multi(__global kern_parambuf *kparams,
 }
 
 __kernel void
-gpusort_multi(__global kern_gpusort *in_kgsort_1,
-			  __global kern_gpusort *in_kgsort_2,
-			  __global kern_gpusort *out_kgsort_1,
-			  __global kern_gpusort *out_kgsort2)
+gpusort_multi(__global kern_gpusort *kgsort_x,
+			  __global kern_gpusort *kgsort_y,
+			  __global kern_gpusort *kgsort_z1,
+			  __global kern_gpusort *kgsort_z2,
+			  __local void *local_workbuf)
 {
-	__global kern_parambuf *kparams		= KERN_GPUSORT_PARAMBUF(in_kgsort_1);
-	__global kern_column_store *in_chunk1 = KERN_GPUSORT_CHUNK(in_kgsort_1);
-	__global kern_column_store *y_chunk;
+	__global kern_parambuf *kparams		= KERN_GPUSORT_PARAMBUF(kgsort_x);
+	__global kern_column_store *x_chunk = KERN_GPUSORT_CHUNK(kgsort_x);
+	__global kern_column_store *y_chunk = KERN_GPUSORT_CHUNK(kgsort_y);
+	__global kern_column_store *z_chunk1 = KERN_GPUSORT_CHUNK(kgsort_z1);
+	__global kern_column_store *z_chunk2 = KERN_GPUSORT_CHUNK(kgsort_z2);
+	__global kern_toastbuf *x_toast = KERN_GPUSORT_TOASTBUF(kgsort_x);
+	__global kern_toastbuf *y_toast = KERN_GPUSORT_TOASTBUF(kgsort_y);
+	__global kern_toastbuf *z_toast1 = KERN_GPUSORT_TOASTBUF(kgsort_z1);
+	__global kern_toastbuf *z_toast2 = KERN_GPUSORT_TOASTBUF(kgsort_z2);
+	cl_int		errcode = StromError_Success;
 
-
+	run_gpusort_multi(kparams,
+					  x_chunk, x_toast,
+					  y_chunk, y_toast,
+					  z_chunk1, z_toast1,
+					  z_chunk2, z_toast2,
+					  &errcode, local_workbuf);
 }
-
-
-
 
 kernel void
 gpusort_setup_chunk_rs(__global kern_gpusort *kgsort,
