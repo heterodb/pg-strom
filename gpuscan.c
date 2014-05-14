@@ -27,6 +27,7 @@
 #include "optimizer/restrictinfo.h"
 #include "optimizer/var.h"
 #include "parser/parsetree.h"
+#include "storage/bufmgr.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -87,6 +88,7 @@ typedef struct {
 	tcache_head		   *tc_head;
 	tcache_scandesc	   *tc_scan;
 	bool				hybrid_scan;
+	HeapTupleData		hybrid_htup;
 
 	pgstrom_queue	   *mqueue;
 	Datum				dprog_key;
@@ -1035,7 +1037,7 @@ gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
 		return false;
 
 	kresult = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
-	while (gss->curr_index < kresult->nitems)
+   	while (gss->curr_index < kresult->nitems)
 	{
 		StromObject	   *sobject = gpuscan->rc_store;
 
@@ -1071,19 +1073,20 @@ gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
 			tcache_head			*tc_head = gss->tc_head;
 			tcache_column_store *tcs = (tcache_column_store *)sobject;
 			Form_pg_attribute	attr;
-			HeapTupleData		htup;
 			int		i, j, k = i_result - 1;
 
 			Assert(tc_head != NULL);
 
-			/* A dummy HeapTuple */
-			htup.t_len = tcs->theads[k].t_hoff;
-			htup.t_self = tcs->ctids[k];
-			htup.t_tableOid = RelationGetRelid(gss->scan_rel);
-			htup.t_data = &tcs->theads[k];
-
 			if (!gss->hybrid_scan)
 			{
+				HeapTupleData		htup;
+
+				/* A dummy HeapTuple to check visibility */
+				htup.t_len = tcs->theads[k].t_hoff;
+				htup.t_self = tcs->ctids[k];
+				htup.t_tableOid = RelationGetRelid(gss->scan_rel);
+				htup.t_data = &tcs->theads[k];
+
 				if (!HeapTupleSatisfiesVisibility(&htup,
 												  snapshot,
 												  InvalidBuffer))
@@ -1129,19 +1132,23 @@ gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
 				 * to the item-pointer
 				 */
 				Buffer		buffer = InvalidBuffer;
-				HeapTuple	temp;
 
+				gss->hybrid_htup.t_self = tcs->ctids[k];
 				if (!heap_fetch(gss->scan_rel,
 								gss->cps.ps.state->es_snapshot,
-								&htup,
+								&gss->hybrid_htup,
 								&buffer,
 								false,
 								NULL))
 					continue;
+				ExecStoreTuple(&gss->hybrid_htup, slot, buffer, false);
 
-				temp = palloc(sizeof(HeapTupleData));
-				memcpy(temp, &htup, sizeof(HeapTupleData));
-				ExecStoreTuple(temp, slot, buffer, true);
+				/*
+				 * At this point we have an extra pin on the buffer, because
+				 * ExecStoreTuple incremented the pin count.
+				 * Drop our local pin
+				 */
+				ReleaseBuffer(buffer);
 			}
 		}
 		else
