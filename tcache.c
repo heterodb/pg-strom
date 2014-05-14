@@ -640,7 +640,7 @@ tcache_put_toast_buffer(tcache_toastbuf *tbuf)
  *
  */
 tcache_row_store *
-tcache_create_row_store(TupleDesc tupdesc, int ncols, AttrNumber *i_cached)
+tcache_create_row_store(TupleDesc tupdesc) //, int ncols, AttrNumber *i_cached)
 {
 	tcache_row_store *trs;
 	int		i, j;
@@ -668,38 +668,29 @@ tcache_create_row_store(TupleDesc tupdesc, int ncols, AttrNumber *i_cached)
 	trs->kern.length = trs->usage;
 	trs->kern.ncols = tupdesc->natts;
 	trs->kern.nrows = 0;
-	/* construct colmeta structure for row-store */
-	/* XXX - to be done on gpuscan_begin()? */
+
+	/* construct colmeta structure for this row-store */
 	for (i=0, j=0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute attr = tupdesc->attrs[i];
 		kern_colmeta	colmeta;
 
 		memset(&colmeta, 0, sizeof(kern_colmeta));
-		if (i == i_cached[j])
-		{
-			colmeta.flags |= KERN_COLMETA_ATTREFERENCED;
-			j++;
-		}
-		if (attr->attnotnull)
-			colmeta.flags |= KERN_COLMETA_ATTNOTNULL;
+		colmeta.attnotnull = attr->attnotnull;
 		if (attr->attalign == 'c')
 			colmeta.attalign = sizeof(cl_char);
 		else if (attr->attalign == 's')
 			colmeta.attalign = sizeof(cl_short);
 		else if (attr->attalign == 'i')
 			colmeta.attalign = sizeof(cl_int);
-		else
-		{
-			Assert(attr->attalign == 'd');
+		else if (attr->attalign == 'd')
 			colmeta.attalign = sizeof(cl_long);
-		}
+		else
+			elog(ERROR, "unexpected attalign");
 		colmeta.attlen = attr->attlen;
 		colmeta.cs_ofs = -1;	/* not in use for row-store */
 
-		memcpy(&trs->kern.colmeta[i],
-			   &colmeta,
-			   sizeof(kern_colmeta));
+		memcpy(&trs->kern.colmeta[i], &colmeta, sizeof(kern_colmeta));
 	}
 	return trs;
 }
@@ -1816,9 +1807,7 @@ tcache_insert_tuple_row(tcache_head *tc_head, HeapTuple tuple)
 			trs = tcache_get_row_store(tc_head->trs_curr);
 		else
 		{
-			tc_head->trs_curr = tcache_create_row_store(tc_head->tupdesc,
-														tc_head->ncols,
-														tc_head->i_cached);
+			tc_head->trs_curr = tcache_create_row_store(tc_head->tupdesc);
 			trs = tcache_get_row_store(tc_head->trs_curr);
 		}
 
@@ -2601,9 +2590,11 @@ tcache_create_tchead(Oid reloid, Bitmapset *required,
 				tempset = bms_add_member(tempset, j);
 			}
 		}
-		for (i=0; i < tempset->nwords; i++)
-			attxor ^= tempset->words[i];
-
+		if (tempset)
+		{
+			for (i=0; i < tempset->nwords; i++)
+				attxor ^= tempset->words[i];
+		}
 		tc_head->ncols = bms_num_members(tempset);
 		tc_head->i_cached = (AttrNumber *)((char *)tc_head + offset);
 		offset += MAXALIGN(sizeof(AttrNumber) * relform->relnatts);
@@ -2736,6 +2727,8 @@ tcache_get_tchead_internal(Oid datoid, Oid reloid,
 	tcache_head	   *tc_old = NULL;
 	int				hindex = tcache_hash_index(MyDatabaseId, reloid);
 	int				i, j;
+
+	return NULL;
 
 	PG_TRY();
 	{

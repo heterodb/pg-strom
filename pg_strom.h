@@ -469,13 +469,6 @@ extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
 
-#ifdef USE_ASSERT_CHECKING
-extern void SanityCheck_kern_column_store(kern_row_store *krs,
-										  kern_column_store *kcs);
-#else
-#define SanityCheck_kern_column_store(X,Y)
-#endif /* USE_ASSERT_CHECKING */
-
 /*
  * restrack.c
  */
@@ -590,9 +583,7 @@ extern void tcache_abort_tchead(tcache_head *tc_head, Datum tr_flags);
 extern bool tcache_state_is_ready(tcache_head *tc_head);
 
 
-extern tcache_row_store *tcache_create_row_store(TupleDesc tupdesc,
-												 int ncols,
-												 AttrNumber *i_cached);
+extern tcache_row_store *tcache_create_row_store(TupleDesc tupdesc);
 extern tcache_row_store *tcache_get_row_store(tcache_row_store *trs);
 extern void tcache_put_row_store(tcache_row_store *trs);
 extern bool tcache_row_store_insert_tuple(tcache_row_store *trs,

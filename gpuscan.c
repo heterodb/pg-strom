@@ -12,11 +12,13 @@
  */
 #include "postgres.h"
 #include "access/sysattr.h"
+#include "catalog/pg_type.h"
 #include "catalog/pg_namespace.h"
 #include "commands/explain.h"
 #include "miscadmin.h"
 #include "nodes/bitmapset.h"
 #include "nodes/execnodes.h"
+#include "nodes/makefuncs.h"
 #include "nodes/plannodes.h"
 #include "nodes/relation.h"
 #include "optimizer/cost.h"
@@ -300,6 +302,21 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 	if (dev_quals == NIL)
 		return NULL;
 
+	/*
+	 * A dummy constant - KPARAM_0 is an array of bool to show referenced
+	 * columns, in GpuScan.
+	 * Just a placeholder here. Set it up later.
+	 */
+	context->used_params = list_make1(makeConst(BYTEAOID,
+												-1,
+												InvalidOid,
+												-1,
+												PointerGetDatum(NULL),
+												true,
+												false));
+	context->type_defs = list_make1(pgstrom_devtype_lookup(BYTEAOID));
+
+	/* OK, let's walk on the device expression tree */
 	expr_code = pgstrom_codegen_expression((Node *)dev_quals, context);
 	Assert(expr_code != NULL);
 
@@ -343,9 +360,18 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					 "                __global kern_column_store *kcs,\n"
 					 "                __local void *local_workmem)\n"
 					 "{\n"
+					 "  pg_bytea_t	      kparam_0;\n"
+					 "  __global cl_char *attrefs;\n"
+					 "  __global kern_parambuf *kparams\n"
+					 "    = KERN_GPUSCAN_PARAMBUF(kgscan);\n"
+					 "  cl_int			errcode = StromError_Success;\n"
+					 "\n"
 					 "  KDEBUG_INIT(KERN_GPUSCAN_RESULTBUF(kgscan));\n"
 					 "\n"
-					 "  kern_row_to_column(krs,kcs,local_workmem);\n"
+					 "  kparam_0 = KPARAM_0;\n"
+					 "  attrefs = (__global cl_char *)\n"
+					 "                      VARDATA(kparam_0.value);\n"
+					 "  kern_row_to_column(attrefs,krs,kcs,local_workmem);\n"
 					 "  gpuscan_qual_cs(kgscan,kcs,\n"
 					 "                  (__global kern_toastbuf *)krs,\n"
 					 "                  local_workmem);\n"
@@ -635,6 +661,8 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	Index			scanrelid = gsplan->scanrelid;
 	GpuScanState   *gss;
 	TupleDesc		tupdesc;
+	bytea		   *attrefs;
+	Const		   *kparam_0;
 	int32			extra_flags;
 	AttrNumber		anum;
 
@@ -728,11 +756,10 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		pgstrom_track_object(&gss->mqueue->sobj, 0);
 	}
 
-	/* template for kern_parambuf */
-	gss->kparambuf = pgstrom_create_kern_parambuf(gsplan->used_params,
-												  gss->cps.ps.ps_ExprContext);
-
 	/* construct an index of attributes being referenced in device */
+	attrefs = palloc0(VARHDRSZ + sizeof(cl_bool) * tupdesc->natts);
+	SET_VARSIZE(attrefs, VARHDRSZ + sizeof(bool) * tupdesc->natts);
+	elog(INFO, "attrefs = %p", attrefs);
 	gss->cs_attidxs = palloc0(sizeof(AttrNumber) * tupdesc->natts);
 	gss->cs_attnums = 0;
 	for (anum=0; anum < tupdesc->natts; anum++)
@@ -741,9 +768,29 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		int		x = attr->attnum - FirstLowInvalidHeapAttributeNumber;
 
 		if (bms_is_member(x, gsplan->dev_attnums))
+		{
 			gss->cs_attidxs[gss->cs_attnums++] = anum;
+			((bool *)VARDATA(attrefs))[anum] = true;
+		}
 	}
 
+	/*
+	 * template of kern_parambuf.
+	 * NOTE: KPARAM_0 is reserved to have referenced attributes
+	 */
+	if (gsplan->kern_source)
+	{
+		Assert(list_length(gsplan->used_params) > 0);
+		kparam_0 = (Const *)linitial(gsplan->used_params);
+		Assert(IsA(kparam_0, Const) &&
+			   kparam_0->consttype == BYTEAOID &&
+			   kparam_0->constisnull);
+		kparam_0->constvalue = PointerGetDatum(attrefs);
+		kparam_0->constisnull = false;
+	}
+	gss->kparambuf = pgstrom_create_kern_parambuf(gsplan->used_params,
+												  gss->cps.ps.ps_ExprContext);
+	/* rest of run-time parameters */
 	gss->curr_chunk = NULL;
 	gss->curr_index = 0;
 	gss->num_running = 0;
@@ -770,8 +817,8 @@ pgstrom_setup_kern_colstore_head(GpuScanState *gss, kern_resultbuf *kresult)
 	kcs_head->ncols = ncols;
 	kcs_head->nrows = nrows;
 	kcs_head->nrooms = nrows;	/* we create a tightly fit kcs */
-	ktoast = (kern_toastbuf *)&kcs_head[ncols];
-    i_refcols = (cl_uint *)&ktoast->coldir[ncols];
+	ktoast = (kern_toastbuf *)&kcs_head->colmeta[ncols];
+	i_refcols = (cl_uint *)&ktoast->coldir[ncols];
 
 	offset = STROMALIGN(offsetof(kern_column_store,
 								 colmeta[gss->cs_attnums]));
@@ -784,31 +831,29 @@ pgstrom_setup_kern_colstore_head(GpuScanState *gss, kern_resultbuf *kresult)
 		attr = tupdesc->attrs[j];
 
 		memset(kcmeta, 0, sizeof(kern_colmeta));
-		kcmeta->flags |= KERN_COLMETA_ATTREFERENCED;
-		if (attr->attnotnull)
-			kcmeta->flags |= KERN_COLMETA_ATTNOTNULL;
+		kcmeta->attnotnull = attr->attnotnull;
 		if (attr->attalign == 'c')
 			kcmeta->attalign = sizeof(cl_char);
 		else if (attr->attalign == 's')
 			kcmeta->attalign = sizeof(cl_short);
 		else if (attr->attalign == 'i')
 			kcmeta->attalign = sizeof(cl_int);
-		else
-		{
-			Assert(attr->attalign == 'd');
+		else if (attr->attalign == 'd')
 			kcmeta->attalign = sizeof(cl_long);
-		}
+		else
+			elog(ERROR, "unexpected attalign '%c'", attr->attalign);
+
 		kcmeta->attlen = attr->attlen;
 		kcmeta->cs_ofs = offset;
 
-		if ((kcmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
+		if (!kcmeta->attnotnull)
 			offset += STROMALIGN((nrows + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
 		offset += STROMALIGN(nrows * (attr->attlen > 0
 									  ? attr->attlen
 									  : sizeof(cl_uint)));
 		if (gss->tc_scan)
 		{
-			tcache_head	*tc_head = gss->tc_scan->tc_head;
+			tcache_head	*tc_head = gss->tc_head;
 
 			while (k < tc_head->ncols)
 			{
@@ -823,6 +868,7 @@ pgstrom_setup_kern_colstore_head(GpuScanState *gss, kern_resultbuf *kresult)
 				elog(ERROR, "Bug? uncached columns are referenced");
 		}
 	}
+	elog(INFO, "kcs_head->length=%lu", offset);
 	kcs_head->length = offset;
 }
 
@@ -872,9 +918,7 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 			TupleDesc	tupdesc = RelationGetDescr(gss->scan_rel);
 			HeapTuple	tuple;
 
-			trs = tcache_create_row_store(tupdesc,
-										  gss->cs_attnums,
-										  gss->cs_attidxs);
+			trs = tcache_create_row_store(tupdesc);
 			while (HeapTupleIsValid(tuple = heap_getnext(gss->scan_desc,
 														 direction)))
 			{
@@ -2360,8 +2404,11 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 	kcs_head = (kern_column_store *)kresults->results;
 	ncols = kcs_head->ncols;
 	nrows = kcs_head->nrows;
-	ktoast = (kern_toastbuf *)&kcs_head[ncols];
+	ktoast = (kern_toastbuf *)&kcs_head->colmeta[ncols];
 	i_refcols = (cl_uint *)&ktoast->coldir[ncols];
+
+	clserv_log("tcs {ncols=%d nrows=%u}", tcs->ncols, tcs->nrows);
+	clserv_log("kcs {ncols=%d nrows=%u}", ncols, nrows);
 
 	/*
 	 * First of all, it looks up a program object to be run on
@@ -2603,7 +2650,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 		j = i_refcols[i];
 
 		offset = kcs_head->colmeta[i].cs_ofs;
-		if ((kcs_head->colmeta[i].flags & KERN_COLMETA_ATTNOTNULL) == 0)
+		if (!kcs_head->colmeta[i].attnotnull)
 		{
 			Assert(tcs->cdata[j].isnull != NULL);
 			length = STROMALIGN((nrows + BITS_PER_BYTE - 1) / BITS_PER_BYTE);

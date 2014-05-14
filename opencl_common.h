@@ -451,11 +451,9 @@ typedef struct {
  * It stores metadata of columns being on row-store because tuple with NULL
  * values does not have always constant 
  */
-#define KERN_COLMETA_ATTNOTNULL			0x01
-#define KERN_COLMETA_ATTREFERENCED		0x02
 typedef struct {
-	/* set of KERN_COLMETA_* flags */
-	cl_uchar		flags;
+	/* true, if column never has NULL (thus, no nullmap required) */
+	cl_bool			attnotnull;
 	/* alignment; 1,2,4 or 8, not characters in pg_attribute */
 	cl_char			attalign;
 	/* length of attribute */
@@ -758,7 +756,7 @@ typedef struct {
 	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)
 
-#define STROMCL_VRALENA_TYPE_TEMPLATE(NAME)			\
+#define STROMCL_VARLENA_TYPE_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_VARREF_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)
@@ -783,7 +781,8 @@ typedef struct {
  * 3. Local work-group size has to be multiplexer of 32.
  */
 static void
-kern_row_to_column(__global kern_row_store *krs,
+kern_row_to_column(__global cl_char *attreferenced,
+				   __global kern_row_store *krs,
 				   __global kern_column_store *kcs,
 				   __local cl_char *workbuf)
 {
@@ -806,7 +805,10 @@ kern_row_to_column(__global kern_row_store *krs,
 
 		if (!rs_tup || ((rs_tup->data.t_infomask & HEAP_HASNULL) != 0 &&
 						att_isnull(i, rs_tup->data.t_bits)))
+		{
 			isnull = true;
+			return;
+		}
 		else
 		{
 			__global char  *src;
@@ -827,7 +829,7 @@ kern_row_to_column(__global kern_row_store *krs,
 					   rcmeta.attlen :
 					   VARSIZE_ANY(src));
 
-			if ((rcmeta.flags & KERN_COLMETA_ATTREFERENCED) != 0)
+			if (attreferenced[i])
 			{
 				__global char  *dest;
 
@@ -836,7 +838,7 @@ kern_row_to_column(__global kern_row_store *krs,
 				dest = ((__global char *)kcs) + ccmeta.cs_ofs;
 
 				/* adjust destination address by nullmap, if needed */
-				if ((ccmeta.flags & KERN_COLMETA_ATTNOTNULL) == 0)
+				if (!ccmeta.attnotnull)
 					dest += STROMALIGN((kcs->nrows + 7) >> 3);
 
 				/* adjust destination address for exact slot on column-array */
@@ -891,10 +893,10 @@ kern_row_to_column(__global kern_row_store *krs,
 		 * Because it takes per bit operation using interaction with neighbor
 		 * work-item, we use local working memory for reduction.
 		 */
-		if ((rcmeta.flags & KERN_COLMETA_ATTREFERENCED) != 0)
+		if (attreferenced[i])
 		{
 			ccmeta = kcs->colmeta[j];
-			if ((ccmeta.flags & KERN_COLMETA_ATTNOTNULL) == 0)
+			if (!ccmeta.attnotnull)
 			{
 				workbuf[local_id]
 					= (!isnull ? (1 << (local_id & 0x1f)) : 0);
@@ -942,23 +944,23 @@ kern_get_datum(__global kern_column_store *kcs,
 			   cl_uint colidx,
 			   cl_uint rowidx)
 {
-	__global kern_colmeta *colmeta;
+	kern_colmeta colmeta;
 	cl_uint		offset;
 
 	if (colidx >= kcs->ncols || rowidx >= kcs->nrows)
 		return NULL;
 
-	colmeta = &kcs->colmeta[colidx];
-	offset = colmeta->cs_ofs;
-	if ((colmeta->flags & KERN_COLMETA_ATTNOTNULL) == 0)
+	colmeta = kcs->colmeta[colidx];
+	offset = colmeta.cs_ofs;
+	if (!colmeta.attnotnull)
 	{
 		if (att_isnull(rowidx, (__global char *)kcs + offset))
 			return NULL;
 		offset += STROMALIGN((kcs->nrows + 7) >> 3);
 	}
 
-	if (colmeta->attlen > 0)
-		offset += colmeta->attlen * rowidx;
+	if (colmeta.attlen > 0)
+		offset += colmeta.attlen * rowidx;
 	else
 		offset += sizeof(cl_uint) * rowidx;
 
@@ -986,6 +988,14 @@ STROMCL_SIMPLE_TYPE_TEMPLATE(bool, bool)
 #ifndef PG_INT4_TYPE_DEFINED
 #define PG_INT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int4, cl_int)
+#endif
+
+/*
+ * pg_bytea_t is also a built-in data type
+ */
+#ifndef PG_BYTEA_TYPE_DEFINED
+#define PG_BYTEA_TYPE_DEFINED
+STROMCL_VARLENA_TYPE_TEMPLATE(bytea)
 #endif
 
 /*

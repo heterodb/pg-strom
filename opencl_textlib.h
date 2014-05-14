@@ -55,7 +55,7 @@ varlena_cmp(__private cl_int *errcode,
 
 #ifndef PG_BPCHAR_TYPE_DEFINED
 #define PG_BPCHAR_TYPE_DEFINED
-STROMCL_VRALENA_TYPE_TEMPLATE(bpchar)
+STROMCL_VARLENA_TYPE_TEMPLATE(bpchar)
 #endif
 
 static pg_bool_t
@@ -137,7 +137,7 @@ pgfn_bpcharcmp(__private cl_int *errcode, pg_bpchar_t arg1, pg_bpchar_t arg2)
 
 #ifndef PG_TEXT_TYPE_DEFINED
 #define PG_TEXT_TYPE_DEFINED
-STROMCL_VRALENA_TYPE_TEMPLATE(text)
+STROMCL_VARLENA_TYPE_TEMPLATE(text)
 #endif
 
 static pg_bool_t
