@@ -759,7 +759,6 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	/* construct an index of attributes being referenced in device */
 	attrefs = palloc0(VARHDRSZ + sizeof(cl_bool) * tupdesc->natts);
 	SET_VARSIZE(attrefs, VARHDRSZ + sizeof(bool) * tupdesc->natts);
-	elog(INFO, "attrefs = %p", attrefs);
 	gss->cs_attidxs = palloc0(sizeof(AttrNumber) * tupdesc->natts);
 	gss->cs_attnums = 0;
 	for (anum=0; anum < tupdesc->natts; anum++)
@@ -868,7 +867,6 @@ pgstrom_setup_kern_colstore_head(GpuScanState *gss, kern_resultbuf *kresult)
 				elog(ERROR, "Bug? uncached columns are referenced");
 		}
 	}
-	elog(INFO, "kcs_head->length=%lu", offset);
 	kcs_head->length = offset;
 }
 
@@ -2406,9 +2404,6 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 	nrows = kcs_head->nrows;
 	ktoast = (kern_toastbuf *)&kcs_head->colmeta[ncols];
 	i_refcols = (cl_uint *)&ktoast->coldir[ncols];
-
-	clserv_log("tcs {ncols=%d nrows=%u}", tcs->ncols, tcs->nrows);
-	clserv_log("kcs {ncols=%d nrows=%u}", ncols, nrows);
 
 	/*
 	 * First of all, it looks up a program object to be run on

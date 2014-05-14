@@ -640,10 +640,10 @@ tcache_put_toast_buffer(tcache_toastbuf *tbuf)
  *
  */
 tcache_row_store *
-tcache_create_row_store(TupleDesc tupdesc) //, int ncols, AttrNumber *i_cached)
+tcache_create_row_store(TupleDesc tupdesc)
 {
 	tcache_row_store *trs;
-	int		i, j;
+	int		i;
 
 	trs = pgstrom_shmem_alloc(ROWSTORE_DEFAULT_SIZE);
 	if (!trs)
@@ -670,7 +670,7 @@ tcache_create_row_store(TupleDesc tupdesc) //, int ncols, AttrNumber *i_cached)
 	trs->kern.nrows = 0;
 
 	/* construct colmeta structure for this row-store */
-	for (i=0, j=0; i < tupdesc->natts; i++)
+	for (i=0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute attr = tupdesc->attrs[i];
 		kern_colmeta	colmeta;
@@ -1762,34 +1762,32 @@ tcache_rebalance_tree(tcache_head *tc_head,
 bool
 tcache_row_store_insert_tuple(tcache_row_store *trs, HeapTuple tuple)
 {
-	bool		result = false;
 	cl_uint	   *tupoffset;
-	Size		usage_head;
-	Size		usage_tail;
 	Size		required;
+	rs_tuple   *rs_tup;
 
 	required = MAXALIGN(sizeof(HeapTupleData)) + MAXALIGN(tuple->t_len);
 	tupoffset = kern_rowstore_get_offset(&trs->kern);
-	usage_head = ((uintptr_t)&tupoffset[trs->kern.nrows + 1] -
-				  (uintptr_t)&trs->kern);
-	usage_tail = trs->usage - required;
-	if (usage_head < usage_tail)
-	{
-		rs_tuple   *rs_tup = (rs_tuple *)((char *)&trs->kern + usage_tail);
 
-		memcpy(&rs_tup->htup, tuple, sizeof(HeapTupleData));
-		rs_tup->htup.t_data = &rs_tup->data;
-		memcpy(&rs_tup->data, tuple->t_data, tuple->t_len);
+	/* Do we have a space to put one more tuple? */
+	if ((uintptr_t)(&tupoffset[trs->kern.nrows + 1]) >=
+		(uintptr_t)((char *)&trs->kern + trs->usage - required))
+		return false;
 
-		tupoffset[trs->kern.nrows++] = usage_tail;
-		trs->usage = usage_tail;
-		if (trs->blkno_max < ItemPointerGetBlockNumber(&tuple->t_self))
-			trs->blkno_max = ItemPointerGetBlockNumber(&tuple->t_self);
-		if (trs->blkno_min > ItemPointerGetBlockNumber(&tuple->t_self))
-			trs->blkno_min = ItemPointerGetBlockNumber(&tuple->t_self);
-		result = true;
-	}
-	return result;
+	/* OK, this row-store still has space to hold this tuple */
+	trs->usage -= required;
+	rs_tup = (rs_tuple *)((char *)&trs->kern + trs->usage);
+
+	memcpy(&rs_tup->htup, tuple, sizeof(HeapTupleData));
+	rs_tup->htup.t_data = &rs_tup->data;
+	memcpy(&rs_tup->data, tuple->t_data, tuple->t_len);
+
+	tupoffset[trs->kern.nrows++] = trs->usage;
+	if (trs->blkno_max < ItemPointerGetBlockNumber(&tuple->t_self))
+		trs->blkno_max = ItemPointerGetBlockNumber(&tuple->t_self);
+	if (trs->blkno_min > ItemPointerGetBlockNumber(&tuple->t_self))
+		trs->blkno_min = ItemPointerGetBlockNumber(&tuple->t_self);
+	return true;
 }
 
 static void
@@ -2727,8 +2725,6 @@ tcache_get_tchead_internal(Oid datoid, Oid reloid,
 	tcache_head	   *tc_old = NULL;
 	int				hindex = tcache_hash_index(MyDatabaseId, reloid);
 	int				i, j;
-
-	return NULL;
 
 	PG_TRY();
 	{

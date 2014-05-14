@@ -78,8 +78,8 @@ typedef struct {
 	cl_char		vl_dat[1];
 } varlena;
 #define VARHDRSZ			((int) sizeof(cl_int))
-#define VARDATA(PTR)		(((__global varlena *)(PTR))->vl_dat)
-#define VARSIZE(PTR)		(((__global varlena *)(PTR))->vl_len)
+#define VARDATA(PTR)		VARDATA_4B(PTR)
+#define VARSIZE(PTR)		VARSIZE_4B(PTR)
 #define VARSIZE_EXHDR(PTR)	(VARSIZE(PTR) - VARHDRSZ)
 
 typedef union
@@ -158,9 +158,9 @@ typedef struct varatt_indirect
 	(*((__global cl_uchar *) (PTR)) != 0)
 
 #define VARSIZE_4B(PTR) \
-	(((__global varattrib_4b *) (PTR))->va_4byte.va_header & 0x3FFFFFFF)
+	((((__global varattrib_4b *) (PTR))->va_4byte.va_header >> 2) & 0x3FFFFFFF)
 #define VARSIZE_1B(PTR) \
-	(((__global varattrib_1b *) (PTR))->va_header & 0x7F)
+	((((__global varattrib_1b *) (PTR))->va_header >> 1) & 0x7F)
 #define VARTAG_1B_E(PTR) \
 	(((__global varattrib_1b_e *) (PTR))->va_tag)
 
@@ -169,8 +169,8 @@ typedef struct varatt_indirect
 	 (VARATT_IS_1B(PTR) ? VARSIZE_1B(PTR) :			\
 	  VARSIZE_4B(PTR)))
 
-#define VARDATA_4B(PTR)		(((varattrib_4b *) (PTR))->va_4byte.va_data)
-#define VARDATA_1B(PTR)		(((varattrib_1b *) (PTR))->va_data)
+#define VARDATA_4B(PTR)	(((__global varattrib_4b *) (PTR))->va_4byte.va_data)
+#define VARDATA_1B(PTR)	(((__global varattrib_1b *) (PTR))->va_data)
 #define VARDATA_ANY(PTR) \
 	(VARATT_IS_1B(PTR) ? VARDATA_1B(PTR) : VARDATA_4B(PTR))
 
@@ -453,7 +453,7 @@ typedef struct {
  */
 typedef struct {
 	/* true, if column never has NULL (thus, no nullmap required) */
-	cl_bool			attnotnull;
+	cl_char			attnotnull;
 	/* alignment; 1,2,4 or 8, not characters in pg_attribute */
 	cl_char			attalign;
 	/* length of attribute */
@@ -805,10 +805,7 @@ kern_row_to_column(__global cl_char *attreferenced,
 
 		if (!rs_tup || ((rs_tup->data.t_infomask & HEAP_HASNULL) != 0 &&
 						att_isnull(i, rs_tup->data.t_bits)))
-		{
 			isnull = true;
-			return;
-		}
 		else
 		{
 			__global char  *src;
@@ -828,7 +825,6 @@ kern_row_to_column(__global cl_char *attreferenced,
 			offset += (rcmeta.attlen > 0 ?
 					   rcmeta.attlen :
 					   VARSIZE_ANY(src));
-
 			if (attreferenced[i])
 			{
 				__global char  *dest;
@@ -896,6 +892,7 @@ kern_row_to_column(__global cl_char *attreferenced,
 		if (attreferenced[i])
 		{
 			ccmeta = kcs->colmeta[j];
+
 			if (!ccmeta.attnotnull)
 			{
 				workbuf[local_id]
