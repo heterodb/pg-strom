@@ -27,6 +27,17 @@
  * Our expectation is, our supported OpenCL device can load 4-5 chunks
  * simultaneously at leas, and each chunk has 50MB-100MB capacity.
  * 
+ * Preprocess
+ * ----------
+ * Even though a chunk has 50MB-100MB capacity, it is much larger than
+ * the size of usual data unit that PG-Strom performs on. (Also, column-
+ * store contains "junk" records to be filtered on scan stage. We need
+ * to remove them prior to sorting),
+ * So, we takes a preprocess step that construct a larger column-store
+ * (here, we call it sort-chunk), prior to main sort logic. It copies
+ * the contents of usual row- and column- stores into the sort-chunk,
+ * and set up index array; being used in the in-chunk sorting below.
+ *
  * In-chunk sorting
  * ----------------
  * Prior to inter-chunks sorting, we sort the items within a particular
@@ -51,40 +62,61 @@
  */
 
 
+
+
+
+
 /*
- * Layout of kern_parambuf
- *
- *
- * +----------------+    -----
- * | kern_parambuf  |      ^
- * | +--------------+      |
- * | | length   o-------+  | GpuSort will store its results on the
- * | +--------------+   |  | kern_column_store unlike GpuScan, so
- * | | nparams      |   |  | it does not have kern_resultbuf here.
- * | +--------------+   |  | 
- * | | poffset[0]   |   |  | 
- * | | poffset[1]   |   |  | 
- * | |    :         |   |  | 
- * | | poffset[M-1] |   |  | 
- * | +--------------+   |  | Area to be sent to OpenCL device.
- * | | variable     |   |  | Forward DMA shall be issued here.
- * | | length field |   |  | 
- * | | for Param /  |   |  | 
- * | | Const values |   |  | 
- * | |     :        |   V  V 
- * +----------------+ -------
- * |                |   |
- * /  Debug Buffer  /   |  Area to be written back from OpenCL device.
- * /   (If used)    /   |  Reverse DMA shall be issued here.
- * | |              |   V
- * +-+--------------+ -----
+ * kern_gpusort packs three structures but not explicitly shows because of
+ * variable length fields.
+ * The kern_parambuf (a structure for Param/Const values) is located on
+ * the head of kern_gpusort structure.
+ * Then, kern_column_store should be located on the next, and
+ * kern_toastbuf should be last. We allocate toastbuf anyway.
  */
 typedef struct
 {
-	kern_parambuf	kparam;
+	kern_parambuf		kparam;
 
-
+	/*
+	 * variable length fields below
+	 * -----------------------------
+	 * kern_column_store	kchunk
+	 * cl_int				status
+	 * kern_toastbuf		ktoast
+	 *
+	 * On gpusort_setup_chunk_(rs|cs), whole of the kern_gpusort shall
+	 * be written back.
+	 * On gpusort_single, result buffer (a part of kchunk) and status
+	 * shall be written back.
+	 * On gpusort_multi, whole of the kern_gpusort shall be written
+	 * back.
+	 */
 } kern_gpusort;
+
+/* macro definitions to reference packed values */
+#define KERN_GPUSORT_PARAMBUF(kgpusort)				\
+	((__global kern_parambuf *)(&(kgpusort)->kparam))
+
+#define KERN_GPUSORT_CHUNK(kgpusort)						\
+	((__global kern_column_store *)							\
+	 ((__global char *)(kgpusort) +							\
+	  STROMALIGN((kgpusort)->kparam.length)))
+
+#define KERN_GPUSORT_TOASTBUF(kgpusort)						\
+	((__global kern_toastbuf *)								\
+	 ((__global char *)(kgpusort) +							\
+	  STROMALIGN((kgpusort)->kparam.length) +				\
+	  STROMALIGN(KERN_GPUSORT_CHUNK(kgpusort)->length) +	\
+	  STROMALIGN(sizeof(cl_int))))
+
+/* last column of kchunk is index array of the chunk */
+#define KERN_GPUSORT_RESULT_INDEX(kchunk)					\
+	((__global cl_int *)									\
+	 ((__global char *)(kchunk) +							\
+	  (kchunk)->colmeta[(kchunk)->ncols - 1].cs_ofs))
+
+
 
 
 
@@ -92,38 +124,102 @@ typedef struct
 #if 0
 /* expected kernel prototypes */
 static void
-gpusort_bitonic_single(__global kern_parambuf *kparams,
-					   __global kern_column_store *kcs,
-					   __global kern_toastbuf *toast,
-					   __private cl_int *errcode,
-					   __global cl_int *results,
-					   __lobal void *workbuf)
+run_gpusort_single(__global kern_parambuf *kparams,
+				   __global kern_column_store *kchunk,	/* in */
+				   __global kern_toastbuf *ktoast,		/* in */
+				   __private cl_int *errcode,			/* out */
+				   __local void *local_workbuf)
 {
+	__global cl_int	*results = KERN_GPUSORT_RESULT_INDEX(kchunk);
 
-	
+	/*
+	 * sort the supplied kchunk according to the supplied
+	 * compare function, then it put index of sorted array
+	 * on the rindex buffer.
+	 * (rindex array has the least 2^N capacity larger than nrows)
+	 */
 }
 
 __kernel void
-gpusort_bitonic_cs(__global kern_gpusort *kgsort,
-				   __global kern_column_store *kcs,
-				   __global kern_toastbuf *toast,
-				   __lobal void *workbuf)
+gpusort_single(__global kern_gpusort *kgsort,
+			   __local void *local_workbuf)
 {
+	__global kern_parambuf *kparams		= KERN_GPUSORT_PARAMBUF(kgsort);
+	__global kern_column_store *kchunk	= KERN_GPUSORT_CHUNK(kgsort);
+	__global kern_toastbuf *ktoast		= KERN_GPUSORT_TOASTBUF(kgsort);
+	__global cl_int		   *results		= KERN_GPUSORT_RESULT_INDEX(kchunk);
 	cl_int		errcode = StromError_Success;
-	__global kern_parambuf *kparams
-		= KERN_GPUSORT_PARAMBUF(kgsort);
-	__global cl_uint   *results
-		= KERN_COLSTORE_VALUES(kcs->ncols);
 
-	gpusort_bitonic_single(kparams, kcs, toast, &errcode, results, workbuf);
+	run_gpusort_single(kparams, kchunk, ktoast, &errcode, local_workbuf);
+}
+
+
+static void
+run_gpusort_multi(__global kern_parambuf *kparams,
+				  __global kern_column_store *x_chunk,
+				  __global kern_toastbuf     *x_chunk,
+				  __global kern_column_store *y_chunk,
+				  __global kern_toastbuf     *y_chunk,
+				  __global kern_column_store *z_chunk1,
+				  __global kern_toastbuf     *z_chunk1,
+				  __global kern_column_store *z_chunk2,
+				  __global kern_toastbuf     *z_chunk2,
+				  __local void *local_workbuf)
+{
+	/*
+	 * Run merge sort logic on the supplied x_chunk and y_chunk.
+	 * Its results shall be stored into z_chunk1 and z_chunk2,
+	 *
+	 */
+}
+
+__kernel void
+gpusort_multi(__global kern_gpusort *in_kgsort_1,
+			  __global kern_gpusort *in_kgsort_2,
+			  __global kern_gpusort *out_kgsort_1,
+			  __global kern_gpusort *out_kgsort2)
+{
+	__global kern_parambuf *kparams		= KERN_GPUSORT_PARAMBUF(in_kgsort_1);
+	__global kern_column_store *in_chunk1 = KERN_GPUSORT_CHUNK(in_kgsort_1);
+	__global kern_column_store *y_chunk;
+
+
 }
 
 
 
 
+kernel void
+gpusort_setup_chunk_rs(__global kern_gpusort *kgsort,
+					   __global kern_row_store *krs,
+					   __local void *local_workmem)
+{
+	/*
+	 * This routine move records from usual row-store (smaller) into
+	 * sorting chunk (a larger column store).
+	 * Note: get_global_offset(1) shows index of row-store on host.
+	 *
+	 * The first column of the sorting chunk (cl_long) is identifier
+	 * of individual rows on the host side. The last column of the
+	 * sorting chunk (cl_uint) can be used as index of array.
+	 * Usually, this index is initialized to a sequential number,
+	 * then gpusort_single modifies this index array later.
+	 */
+}
 
-
-
+kernel void
+gpusort_setup_chunk_cs(__global kern_gpusort *kgsort,
+					   __global kern_column_store *kcs,
+					   __global kern_toastbuf *ktoast,
+					   __local void *local_workmem)
+{
+	/*
+	 * This routine moves records from usual column-store (smaller)
+	 * into sorting chunk (a larger column store), as a preprocess
+	 * of GPU sorting.
+	 * Note: get_global_offset(1) shows index of row-store on host.
+	 */
+}
 
 #endif
 
