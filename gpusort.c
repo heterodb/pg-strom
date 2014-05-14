@@ -12,6 +12,8 @@
  */
 #include "postgres.h"
 #include "access/nbtree.h"
+#include "catalog/pg_type.h"
+#include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/cost.h"
 #include "parser/parsetree.h"
@@ -19,6 +21,29 @@
 #include "pg_strom.h"
 #include "opencl_gpusort.h"
 #include <math.h>
+
+/* static variables */
+static CustomPlanMethods		gpusort_plan_methods;
+
+typedef struct
+{
+	CustomPlan	cplan;
+	const char *kern_source;	/* source of opencl kernel */
+	int			extra_flags;	/* extra libraries to be included */
+} GpuSortPlan;
+
+typedef struct
+{
+	CustomPlanState	cps;
+
+	pgstrom_queue  *mqueue;
+	Datum			dprog_key;
+	kern_parambuf  *kparambuf;
+
+
+} GpuSortState;
+
+
 
 /*
  * get_compare_function
@@ -106,6 +131,35 @@ gpusort_codegen_comparison(Sort *sort, List **used_params, List **used_vars)
 	initStringInfo(&body);
 
 	memset(&context, 0, sizeof(codegen_context));
+	if (0)
+	{
+		ListCell   *lc;
+
+		i = 0;
+		foreach (lc, sort->plan.targetlist)
+		{
+			TargetEntry *tle = lfirst(lc);
+
+			elog(INFO, "tle[%d] %s", i, nodeToString(tle));
+			i++;
+		}
+	}
+
+	/*
+	 * A dummy constant - KPARAM_0 is an array of bool to show referenced
+	 * columns, in GpuSort. Just a placeholder here. Actual values shall
+	 * be set up later in executor stage.
+	 */
+	context.used_params = list_make1(makeConst(BYTEAOID,
+											   -1,
+											   InvalidOid,
+											   -1,
+											   PointerGetDatum(NULL),
+											   true,
+											   false));
+	context.type_defs = list_make1(pgstrom_devtype_lookup(BYTEAOID));
+
+
 	for (i=0; i < sort->numCols; i++)
 	{
 		TargetEntry *tle = get_tle_by_resno(sort->plan.targetlist,
@@ -115,9 +169,18 @@ gpusort_codegen_comparison(Sort *sort, List **used_params, List **used_vars)
 		Oid		sort_func;
 		Oid		sort_type;
 		bool	is_reverse;
+		Var	   *tvar;
+//		Expr   *expr;
 		char   *temp;
 		devtype_info   *dtype;
 		devfunc_info   *dfunc;
+
+		Assert(IsA(tle->expr, Var));
+		tvar = (Var *)tle->expr;
+		Assert(tvar->varno == OUTER_VAR);
+
+		elog(INFO, "sortcolidx = %d", sort->sortColIdx[i]);
+		elog(INFO, "tle->expr = %s", nodeToString(tle));
 
 		/* type for comparison */
 		sort_type = exprType((Node *)tle->expr);
@@ -131,32 +194,34 @@ gpusort_codegen_comparison(Sort *sort, List **used_params, List **used_vars)
 		Assert(dfunc != NULL);
 
 		appendStringInfo(&decl,
-						 "  pg_%s_t keyval_%ua;\n"
-						 "  pg_%s_t keyval_%ub;\n",
+						 "  pg_%s_t keyval_x%u;\n"
+						 "  pg_%s_t keyval_y%u;\n",
 						 dtype->type_name, i+1,
 						 dtype->type_name, i+1);
+		appendStringInfo(&decl,
+						 "  pg_int4_t comp;\n");
 
-		context.row_index = "r1";
+		context.row_index = "x_index";
 		temp = pgstrom_codegen_expression((Node *)tle->expr, &context);
-		appendStringInfo(&body, "  keyval_%ub = %s;\n", i+1, temp);
+		appendStringInfo(&body, "  keyval_x%u = %s;\n", i+1, temp);
 		pfree(temp);
 
-		context.row_index = "r2";
+		context.row_index = "y_index";
 		temp = pgstrom_codegen_expression((Node *)tle->expr, &context);
-		appendStringInfo(&body, "  keyval_%ub = %s;\n", i+1, temp);
+		appendStringInfo(&body, "  keyval_y%u = %s;\n", i+1, temp);
 		pfree(temp);
 
 		appendStringInfo(
 			&body,
-			"  if (!keyval_%ua.isnull && !keyval_%ub.isnull)\n"
+			"  if (!keyval_x%u.isnull && !keyval_y%u.isnull)\n"
 			"  {\n"
-			"    compval = pgfn_%s(errcode, keyval_%ua, keyval_%ub);\n"
+			"    comp = pgfn_%s(errcode, keyval_x%u, keyval_y%u);\n"
 			"    if (comp.value != 0)\n"
 			"      return %s;\n"
 			"  }\n"
-			"  else if (keyval_%ua.isnull && !keyval_%ub.isnull)\n"
+			"  else if (keyval_x%u.isnull && !keyval_y%u.isnull)\n"
 			"    return %d;\n"
-			"  else if (!keyval_%ua.isnull && keyval_%ub.isnull)\n"
+			"  else if (!keyval_x%u.isnull && keyval_y%u.isnull)\n"
 			"    return %d;\n"
 			"\n",
 			i+1, i+1,
@@ -172,11 +237,15 @@ gpusort_codegen_comparison(Sort *sort, List **used_params, List **used_vars)
 		"%s\n"	/* type function declarations */
 		"static cl_int\n"
 		"gpusort_comp(__global kern_gpusort *kgsort,\n"
-		"             __global kern_column_store *kcs,\n"
-		"             __global kern_toastbuf *toast,\n"
-		"             __private int *errcode, cl_uint r1, cl_uint r2)\n"
+		"             __private int *errcode,\n"
+		"             __global kern_column_store *kcs_x,\n"
+		"             __global kern_toastbuf *ktoast_x,\n"
+		"             __private cl_int x_index,\n"
+		"             __global kern_column_store *kcs_y,\n"
+		"             __global kern_toastbuf *ktoast_y,\n"
+		"             __private cl_int y_index)\n"
 		"{\n"
-		"%s\n"	/* key variable declarations */
+		"%s"	/* key variable declarations */
 		"\n"
 		"%s"	/* comparison body */
 		"  return 0;\n"
@@ -252,4 +321,134 @@ pgstrom_create_gpusort(Sort *sort, List *rtable)
 	}
 
 	return NULL;
+}
+
+static void
+gpusort_set_plan_ref(PlannerInfo *root,
+					 CustomPlan *custom_plan,
+					 int rtoffset)
+{
+	/* logic copied from set_dummy_tlist_references */
+	Plan	   *plan = &custom_plan->plan;
+	List	   *output_targetlist;
+	ListCell   *l;
+
+	output_targetlist = NIL;
+	foreach(l, plan->targetlist)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(l);
+		Var		   *oldvar = (Var *) tle->expr;
+		Var		   *newvar;
+
+		newvar = makeVar(OUTER_VAR,
+						 tle->resno,
+						 exprType((Node *) oldvar),
+						 exprTypmod((Node *) oldvar),
+						 exprCollation((Node *) oldvar),
+						 0);
+		if (IsA(oldvar, Var))
+		{
+			newvar->varnoold = oldvar->varno + rtoffset;
+			newvar->varoattno = oldvar->varattno;
+		}
+		else
+		{
+			newvar->varnoold = 0;		/* wasn't ever a plain Var */
+			newvar->varoattno = 0;
+		}
+
+		tle = flatCopyTargetEntry(tle);
+		tle->expr = (Expr *) newvar;
+		output_targetlist = lappend(output_targetlist, tle);
+	}
+	plan->targetlist = output_targetlist;
+
+	/* We don't touch plan->qual here */
+}
+
+static void
+gpusort_finalize_plan(PlannerInfo *root,
+					  CustomPlan *custom_plan,
+					  Bitmapset **paramids,
+					  Bitmapset **valid_params,
+					  Bitmapset **scan_params)
+{
+	/* nothing to do */
+}
+
+static CustomPlanState *
+gpusort_begin(CustomPlan *custom_plan, EState *estate, int eflags)
+{
+
+	return NULL;
+}
+
+static TupleTableSlot *
+gpusort_exec(CustomPlanState *node)
+{
+	return NULL;
+}
+
+static Node *
+gpusort_exec_multi(CustomPlanState *node)
+{
+	elog(ERROR, "Not supported yet");
+	return NULL;
+}
+
+static void
+gpusort_end(CustomPlanState *node)
+{}
+
+static void
+gpusort_rescan(CustomPlanState *node)
+{}
+
+static Bitmapset *
+gpusort_get_relids(CustomPlanState *node)
+{
+	/*
+	 * Backend recursively walks down the outerPlanState
+	 */
+	return NULL;
+}
+
+static void
+gpusort_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
+{
+	
+}
+
+static void
+gpusort_textout_plan(StringInfo str, const CustomPlan *node)
+{}
+
+static CustomPlan *
+gpusort_copy_plan(const CustomPlan *from)
+{
+	return NULL;
+}
+
+/*
+ * initialization of GpuSort
+ */
+void
+pgstrom_init_gpusort(void)
+{
+	/* initialization of plan method table */
+	gpusort_plan_methods.CustomName = "GpuSort";
+	gpusort_plan_methods.SetCustomPlanRef = gpusort_set_plan_ref;
+	gpusort_plan_methods.SupportBackwardScan = NULL;
+	gpusort_plan_methods.FinalizeCustomPlan	= gpusort_finalize_plan;
+	gpusort_plan_methods.BeginCustomPlan	= gpusort_begin;
+	gpusort_plan_methods.ExecCustomPlan		= gpusort_exec;
+	gpusort_plan_methods.MultiExecCustomPlan = gpusort_exec_multi;
+	gpusort_plan_methods.EndCustomPlan		= gpusort_end;
+	gpusort_plan_methods.ReScanCustomPlan	= gpusort_rescan;
+	gpusort_plan_methods.ExplainCustomPlanTargetRel = NULL;
+	gpusort_plan_methods.ExplainCustomPlan	= gpusort_explain;
+	gpusort_plan_methods.GetRelidsCustomPlan= gpusort_get_relids;
+	gpusort_plan_methods.GetSpecialCustomVar = NULL;
+	gpusort_plan_methods.TextOutCustomPlan	= gpusort_textout_plan;
+	gpusort_plan_methods.CopyCustomPlan		= gpusort_copy_plan;
 }

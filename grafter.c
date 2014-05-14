@@ -34,7 +34,7 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan *plan)
 				CustomPlan *altplan
 					= pgstrom_create_gpusort((Sort *)plan, pstmt->rtable);
 
-				if (altplan && altplan->plan.total_cost < plan->total_cost)
+				if (altplan)
 					newnode = &altplan->plan;
 			}
 			break;

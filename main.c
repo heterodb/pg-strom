@@ -107,6 +107,7 @@ _PG_init(void)
 
 	/* registration of custom-plan providers */
 	pgstrom_init_gpuscan();
+	pgstrom_init_gpusort();
 
 	/* initialization of tcache & registration of columnizer */
 	pgstrom_init_tcache();
