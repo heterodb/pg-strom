@@ -459,55 +459,6 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 	return &gscan->cplan;
 }
 
-/* copy from outfuncs.c */
-static void
-_outToken(StringInfo str, const char *s)
-{
-	if (s == NULL || *s == '\0')
-	{
-		appendStringInfoString(str, "<>");
-		return;
-	}
-
-	/*
-	 * Look for characters or patterns that are treated specially by read.c
-	 * (either in pg_strtok() or in nodeRead()), and therefore need a
-	 * protective backslash.
-	 */
-	/* These characters only need to be quoted at the start of the string */
-	if (*s == '<' ||
-		*s == '\"' ||
-		isdigit((unsigned char) *s) ||
-		((*s == '+' || *s == '-') &&
-		 (isdigit((unsigned char) s[1]) || s[1] == '.')))
-		appendStringInfoChar(str, '\\');
-	while (*s)
-	{
-		/* These chars must be backslashed anywhere in the string */
-		if (*s == ' ' || *s == '\n' || *s == '\t' ||
-			*s == '(' || *s == ')' || *s == '{' || *s == '}' ||
-			*s == '\\')
-			appendStringInfoChar(str, '\\');
-		appendStringInfoChar(str, *s++);
-	}
-}
-
-/* copied from outfuncs.c */
-static void
-_outBitmapset(StringInfo str, const Bitmapset *bms)
-{
-	Bitmapset  *tmpset;
-	int			x;
-
-	appendStringInfoChar(str, '(');
-	appendStringInfoChar(str, 'b');
-	tmpset = bms_copy(bms);
-	while ((x = bms_first_member(tmpset)) >= 0)
-		appendStringInfo(str, " %d", x);
-	bms_free(tmpset);
-	appendStringInfoChar(str, ')');
-}
-
 static void
 gpuscan_textout_path(StringInfo str, Node *node)
 {

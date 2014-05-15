@@ -16,6 +16,7 @@
 #include "commands/explain.h"
 #include "fmgr.h"
 #include "lib/ilist.h"
+#include "lib/stringinfo.h"
 #include "nodes/execnodes.h"
 #include "nodes/plannodes.h"
 #include "nodes/primnodes.h"
@@ -131,6 +132,7 @@ typedef enum {
 	StromTag_TCacheToastBuf,
 	StromTag_GpuScan,
 	StromTag_GpuSort,
+	StromTag_GpuSortMulti,
 	StromTag_HashJoin,
 	StromTag_TestMessage,
 } StromTag;
@@ -485,7 +487,7 @@ extern void pgstrom_init_gpuscan(void);
 /*
  * gpusort.c
  */
-extern CustomPlan *pgstrom_create_gpusort(Sort *original, List *rtable);
+extern CustomPlan *pgstrom_create_gpusort_plan(Sort *original);
 extern void pgstrom_init_gpusort(void);
 
 /*
@@ -623,6 +625,9 @@ extern void pgstrom_perfmon_add(pgstrom_perfmon *pfm_sum,
 								pgstrom_perfmon *pfm_item);
 extern void pgstrom_perfmon_explain(pgstrom_perfmon *pfm,
 									ExplainState *es);
+extern void _outToken(StringInfo str, const char *s);
+extern void _outBitmapset(StringInfo str, const Bitmapset *bms);
+
 /*
  * grafter.c
  */

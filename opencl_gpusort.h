@@ -239,14 +239,31 @@ gpusort_setup_chunk_cs(__global kern_gpusort *kgsort,
 
 #else	/* OPENCL_DEVICE_CODE */
 
-
 typedef struct
 {
 	pgstrom_message	msg;	/* = StromTag_GpuSort */
 	Datum			dprog_key;
-	
+	dlist_node		chain;	/* be linked to pgstrom_gpusort_multi */
+	dlist_head		rcstore_list;
+	cl_uint			rcstore_index;
+	cl_uint			rcstore_nums;
 	kern_gpusort	kern;
 } pgstrom_gpusort;
+
+typedef struct
+{
+	pgstrom_message	msg;	/* = StromTag_GpuSortMulti */
+	Datum			dprog_key;
+	dlist_node		chain;	/* be linked to free list */
+	dlist_head		in_chunk1;	/* sorted chunks to be merged */
+	dlist_head		in_chunk2;	/* sorted chunks to be merged */
+	dlist_head		out_chunk;	/* merged chunks, but we links two free
+								 * chunks for working area */
+} pgstrom_gpusort_multi;
+
+#define GPUSORT_MULTI_PER_BLOCK				\
+	((SHMEM_BLOCKSZ - SHMEM_ALLOC_COST		\
+	  - sizeof(dlist_node)) / sizeof(pgstrom_gpusort_multi))
 
 #endif	/* !OPENCL_DEVICE_CODE */
 #endif	/* OPENCL_GPUSORT_H */

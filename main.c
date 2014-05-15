@@ -381,3 +381,65 @@ pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 			 (double)pfm->time_in_recvq / n / 1000.0);
 	ExplainPropertyText("Avg time in recv-mq", buf, es);
 }
+
+/*
+ * XXX - copied from outfuncs.c
+ *
+ * _outToken
+ *	  Convert an ordinary string (eg, an identifier) into a form that
+ *	  will be decoded back to a plain token by read.c's functions.
+ *
+ *	  If a null or empty string is given, it is encoded as "<>".
+ */
+void
+_outToken(StringInfo str, const char *s)
+{
+	if (s == NULL || *s == '\0')
+	{
+		appendStringInfoString(str, "<>");
+		return;
+	}
+
+	/*
+	 * Look for characters or patterns that are treated specially by read.c
+	 * (either in pg_strtok() or in nodeRead()), and therefore need a
+	 * protective backslash.
+	 */
+	/* These characters only need to be quoted at the start of the string */
+	if (*s == '<' ||
+		*s == '\"' ||
+		isdigit((unsigned char) *s) ||
+		((*s == '+' || *s == '-') &&
+		 (isdigit((unsigned char) s[1]) || s[1] == '.')))
+		appendStringInfoChar(str, '\\');
+	while (*s)
+	{
+		/* These chars must be backslashed anywhere in the string */
+		if (*s == ' ' || *s == '\n' || *s == '\t' ||
+			*s == '(' || *s == ')' || *s == '{' || *s == '}' ||
+			*s == '\\')
+			appendStringInfoChar(str, '\\');
+		appendStringInfoChar(str, *s++);
+	}
+}
+
+/*
+ * _outBitmapset -
+ *	   converts a bitmap set of integers
+ *
+ * Note: the output format is "(b int int ...)", similar to an integer List.
+ */
+void
+_outBitmapset(StringInfo str, const Bitmapset *bms)
+{
+	Bitmapset  *tmpset;
+	int			x;
+
+	appendStringInfoChar(str, '(');
+	appendStringInfoChar(str, 'b');
+	tmpset = bms_copy(bms);
+	while ((x = bms_first_member(tmpset)) >= 0)
+		appendStringInfo(str, " %d", x);
+	bms_free(tmpset);
+	appendStringInfoChar(str, ')');
+}

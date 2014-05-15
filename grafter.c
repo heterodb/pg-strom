@@ -32,7 +32,7 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan *plan)
 		case T_Sort:
 			{
 				CustomPlan *altplan
-					= pgstrom_create_gpusort((Sort *)plan, pstmt->rtable);
+					= pgstrom_create_gpusort_plan((Sort *)plan);
 
 				if (altplan)
 					newnode = &altplan->plan;
