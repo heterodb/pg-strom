@@ -2568,7 +2568,13 @@ tcache_create_tchead(Oid reloid, Bitmapset *required,
 		memset(tc_head, 0, sizeof(tcache_head));
 
 		tc_head->sobj.stag = StromTag_TCacheHead;
-		tc_head->refcnt = 1;
+		/*
+		 * This refcnt shall be decremented when tc_head was put and
+		 * unlinked from the hash table. Initially, tc_head is acquired
+		 * by this context and linked to the hash. So, refcnt should be
+		 * initialized to '2'.
+		 */
+		tc_head->refcnt = 2;
 		SpinLockInit(&tc_head->lock);
 		tc_head->is_ready = false;
 		dlist_init(&tc_head->free_list);
@@ -2717,8 +2723,7 @@ tcache_put_tchead_nolock(tcache_head *tc_head)
 static tcache_head *
 tcache_get_tchead_internal(Oid datoid, Oid reloid,
 						   Bitmapset *required,
-						   bool create_on_demand,
-						   bool *tcache_found)
+						   bool create_on_demand)
 {
 	dlist_iter		iter;
 	tcache_head	   *tc_head = NULL;
@@ -2726,10 +2731,9 @@ tcache_get_tchead_internal(Oid datoid, Oid reloid,
 	int				hindex = tcache_hash_index(MyDatabaseId, reloid);
 	int				i, j;
 
+	SpinLockAcquire(&tc_common->lock);
 	PG_TRY();
 	{
-		*tcache_found = false;
-
 		dlist_foreach(iter, &tc_common->slot[hindex])
 		{
 			tcache_head	   *temp
@@ -2763,7 +2767,6 @@ tcache_get_tchead_internal(Oid datoid, Oid reloid,
 					temp->refcnt++;
 					dlist_move_head(&tc_common->lru_list, &temp->lru_chain);
 					tc_head = temp;
-					*tcache_found = true;
 				}
 				else
 				{
@@ -2814,18 +2817,13 @@ tcache_get_tchead_internal(Oid datoid, Oid reloid,
 tcache_head *
 tcache_get_tchead(Oid reloid, Bitmapset *required)
 {
-	bool	found;
-
-	return tcache_get_tchead_internal(MyDatabaseId,
-									  reloid, required, false, &found);
+	return tcache_get_tchead_internal(MyDatabaseId, reloid, required, false);
 }
 
 tcache_head *
-tcache_try_create_tchead(Oid reloid, Bitmapset *required, bool *found)
+tcache_try_create_tchead(Oid reloid, Bitmapset *required)
 {
-	Assert(found != NULL);
-	return tcache_get_tchead_internal(MyDatabaseId,
-									  reloid, required, true, found);
+	return tcache_get_tchead_internal(MyDatabaseId, reloid, required, true);
 }
 
 void
@@ -2837,21 +2835,22 @@ tcache_put_tchead(tcache_head *tc_head)
 }
 
 void
-tcache_abort_tchead(tcache_head *tc_head, Datum tr_flags)
+tcache_abort_tchead(tcache_head *tc_head, Datum private)
 {
+	bool	is_builder = DatumGetBool(private);
+
 	/*
-	 * If this scan is tcache builder but tcache was not built at
-	 * this timing, it means this tcache is still half-constructed.
-	 * We have, right now, no way to recover / utilize these kind
-	 * of tcache. So, simply reset it.
+	 * In case when a builder process got aborted until tcache
+	 * build does not become ready, it means this tcache has
+	 * "half-constructed" state. We have, right now, no way to
+	 * continue tcache building using the half-constructed cache,
+	 * so we simply reset it, then someone later will re-built
+	 * it again, from the scratch.
 	 */
-	if ((tr_flags & TRACKED_TCHEAD__IS_BUILDER) != 0 &&
-		!tcache_state_is_ready(tc_head))
+	if (is_builder && !tcache_state_is_ready(tc_head))
 		tcache_reset_tchead(tc_head);
 
-	SpinLockAcquire(&tc_common->lock);
-	tcache_put_tchead_nolock(tc_head);
-	SpinLockRelease(&tc_common->lock);
+	tcache_put_tchead(tc_head);
 }
 
 /*

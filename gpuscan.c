@@ -523,7 +523,7 @@ gpuscan_begin_tcache_scan(GpuScanState *gss,
 	tcache_scandesc	*tc_scan = NULL;
 	Bitmapset	   *tempset;
 	bool			hybrid_scan = false;
-	Datum			tr_flags = 0;
+	Datum			tr_private = 0;
 
 	tempset = bms_union(host_attnums, dev_attnums);
 	PG_TRY();
@@ -550,18 +550,11 @@ gpuscan_begin_tcache_scan(GpuScanState *gss,
 					hybrid_scan = true;
 			}
 			/*
-			 * In case when we have no suitable tcache anyway,
-			 * Let's create a new one and build up it.
+			 * In case when we have no suitable tcache anyway, let's
+			 * create a new one and build up it.
 			 */
 			if (!tc_head)
-			{
-				bool	found;
-
-				tc_head = tcache_try_create_tchead(scan_reloid, tempset,
-												   &found);
-				if (tc_head)
-					tr_flags |= TRACKED_TCHEAD__IS_CREATOR;
-			}
+				tc_head = tcache_try_create_tchead(scan_reloid, tempset);
 		}
 		/* OK, let's try to make tcache-scan handler */
 		if (tc_head)
@@ -580,10 +573,11 @@ gpuscan_begin_tcache_scan(GpuScanState *gss,
 			else if (tc_scan->heapscan)
 			{
 				/*
-				 * In case when tcache_begin_scan returns a tcache_scandesc,
-				 * it means this scan also performs as tcache builder.
+				 * In case when tcache_begin_scan returns a tcache_scandesc
+				 * with a valid heapscan, it means this scan also performs
+				 * as a tcache builder.
 				 */
-				tr_flags |= TRACKED_TCHEAD__IS_BUILDER;
+				tr_private = BoolGetDatum(true);
 			}
 		}
 	}
@@ -597,7 +591,7 @@ gpuscan_begin_tcache_scan(GpuScanState *gss,
 	if (!tc_head)
 		return false;
 
-	pgstrom_track_object(&tc_head->sobj, tr_flags);
+	pgstrom_track_object(&tc_head->sobj, tr_private);
 	gss->tc_head = tc_head;
 	gss->tc_scan = tc_scan;
 	gss->hybrid_scan = hybrid_scan;
@@ -1456,7 +1450,9 @@ gpuscan_end(CustomPlanState *node)
 	{
 		/*
 		 * Usually, tc_scan should be already released during scan.
-		 * If not, it implies this scan didn't reach to the tail.
+		 * If not, it implies this scan didn't reach to the relation end.
+		 * tcache_end_scan() will release all the tc_node recursively,
+		 * if tcache is not ready.
 		 */
 		gss->pfm.time_tcache_build = gss->tc_scan->time_tcache_build;
 		tcache_end_scan(gss->tc_scan);
@@ -1465,17 +1461,11 @@ gpuscan_end(CustomPlanState *node)
 	if (gss->tc_head)
 	{
 		tcache_head	*tc_head = gss->tc_head;
-		Datum		tr_flags;
+		Datum		tr_private;
 
-		tr_flags = pgstrom_untrack_object(&tc_head->sobj);
+		tr_private = pgstrom_untrack_object(&tc_head->sobj);
 
-		/*
-		 * In case when this scan is the creator context of this tcache
-		 * and its build is successfully done, we keep this tc_head
-		 * object without putting.
-		 */
-		if ((tr_flags & TRACKED_TCHEAD__IS_CREATOR) == 0)
-			tcache_put_tchead(tc_head);
+		tcache_put_tchead(tc_head);
 	}
 
 	/*

@@ -382,10 +382,6 @@ typedef struct {
 	char		data[FLEXIBLE_ARRAY_MEMBER];
 } tcache_head;
 
-/* flags kept in resource tracker's private */
-#define TRACKED_TCHEAD__IS_CREATOR		0x0001
-#define TRACKED_TCHEAD__IS_BUILDER		0x0002
-
 #define TCACHE_NODE_PER_BLOCK(row_natts, col_natts)						\
 	((SHMEM_BLOCKSZ - SHMEM_ALLOC_COST -								\
 	  MAXALIGN(offsetof(tcache_head, attrs[(row_natts)])) -				\
@@ -577,12 +573,10 @@ extern void tcache_end_scan(tcache_scandesc *tc_scan);
 extern void tcache_abort_scan(tcache_scandesc *tc_scan);
 extern void tcache_rescan(tcache_scandesc *tc_scan);
 
-extern tcache_head *tcache_try_create_tchead(Oid reloid,
-											 Bitmapset *required,
-											 bool *found);
+extern tcache_head *tcache_try_create_tchead(Oid reloid, Bitmapset *required);
 extern tcache_head *tcache_get_tchead(Oid reloid, Bitmapset *required);
 extern void tcache_put_tchead(tcache_head *tc_head);
-extern void tcache_abort_tchead(tcache_head *tc_head, Datum tr_flags);
+extern void tcache_abort_tchead(tcache_head *tc_head, Datum private);
 extern bool tcache_state_is_ready(tcache_head *tc_head);
 
 
