@@ -20,6 +20,7 @@
 #include "optimizer/var.h"
 #include "parser/parsetree.h"
 #include "storage/ipc.h"
+#include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "pg_strom.h"
@@ -33,7 +34,8 @@ typedef struct
 	const char *kern_source;	/* source of opencl kernel */
 	int			extra_flags;	/* extra libraries to be included */
 	List	   *used_params;	/* list of Const/Param being referenced */
-	List	   *used_vars;		/* list of Var nodes being referenced */
+	Bitmapset  *sortkey_resnums;/* resource numbers of sortkey */
+	Size		sortkey_width;	/* width of sortkey */
 
 	/* delivered from original Sort */
 	int			numCols;		/* number of sort-key columns */
@@ -51,13 +53,18 @@ typedef struct
 	pgstrom_queue  *mqueue;
 	Datum			dprog_key;
 	kern_parambuf  *kparambuf;
-	Bitmapset	   *dev_attnums;
+	List		   *sortkey_resnums;	/* list of resno of sortkeys */
+	Size			sortkey_width;
+	Size			gpusort_chunksz;
+	cl_uint			nrows_per_chunk;
 	bool			sort_done;
 
 	/* row-/column- stores being read */
 	cl_uint			rcs_nums;	/* number of row-/column-stores in use */
 	cl_uint			rcs_size;	/* size of row-/column-store slot */
 	StromObject	  **rcs_slot;	/* slot of row-/column-stores */
+
+	pgstrom_perfmon	pfm;		/* sum of performance counter */
 } GpuSortState;
 
 /* static variables */
@@ -137,16 +144,22 @@ get_next_pow2(Size size)
 	if ((size & 0x00000001UL) != 0)
 		shift += 1;
 #endif	/* !__GNUC__ */
-	return shift;
+	return (1UL << shift);
 }
 
-
+/*
+ * get_gpusort_chunksize
+ *
+ * A chunk (including kern_parambuf, kern_column_store and kern_toastbuf)
+ * has to be smaller than the least "max memory allocation size" of the
+ * installed device. It gives a preferred size of gpusort chunk according
+ * to the device properties and GUC configuration.
+ */
 static inline Size
 get_gpusort_chunksize(void)
 {
 	static Size	device_restriction = 0;
 	Size		chunk_sz;
-	int			shift = 0;
 
 	if (!device_restriction)
 	{
@@ -206,6 +219,70 @@ get_compare_function(Oid opno, bool *is_reverse)
 	*is_reverse = (strategy == BTGreaterStrategyNumber);
 	return sort_func;
 }
+
+/*
+ * expected_key_width
+ *
+ * It computes an expected (average) key width; to estimate number of rows
+ * we can put of a gpusort chunk.
+ */
+static int
+expected_key_width(TargetEntry *tle, Plan *subplan, List *rtable)
+{
+	Oid		type_oid = exprType((Node *)tle->expr);
+	int		type_len = get_typlen(type_oid);
+	int		type_mod;
+
+	/* fixed-length variables are an obvious case */
+	if (type_len > 0)
+	{
+		elog(INFO, "type_len = %d", type_len);
+		return type_len;
+	}
+
+	/* we may be able to utilize statistical information */
+	if (IsA(tle->expr, Var) && (IsA(subplan, SeqScan) ||
+								IsA(subplan, IndexScan) ||
+								IsA(subplan, IndexOnlyScan) ||
+								IsA(subplan, BitmapHeapScan) ||
+								IsA(subplan, TidScan) ||
+								IsA(subplan, ForeignScan)))
+	{
+		Var	   *var = (Var *)tle->expr;
+		Index	scanrelid = ((Scan *)subplan)->scanrelid;
+		RangeTblEntry *rte = rt_fetch(scanrelid, rtable);
+
+		Assert(var->varno == OUTER_VAR);
+		Assert(rte->rtekind == RTE_RELATION && OidIsValid(rte->relid));
+
+		type_len = get_attavgwidth(rte->relid, var->varattno);
+		if (type_len > 0)
+		{
+			elog(INFO, "type_len(s) = %d", type_len);
+			return sizeof(cl_uint) + MAXALIGN(type_len);
+		}
+	}
+	/*
+	 * Uh... we have no idea how to estimate average length of
+	 * key variable if target-entry is not Var nor underlying
+	 * plan is not a usual relation scan.
+	 */
+	type_mod = exprTypmod((Node *)tle->expr);
+
+	type_len = get_typavgwidth(type_oid, type_mod);
+
+	elog(INFO, "type_len(t) = %d", type_len);
+	return sizeof(cl_uint) + MAXALIGN(type_len);
+}
+
+
+
+
+
+
+
+
+
 
 /*
  * cost_gpusort
@@ -386,11 +463,13 @@ gpusort_codegen_comparison(Sort *sort, codegen_context *context)
  * suggest an alternative sort using GPU devices
  */
 CustomPlan *
-pgstrom_create_gpusort_plan(Sort *sort)
+pgstrom_create_gpusort_plan(Sort *sort, List *rtable)
 {
 	GpuSortPlan *gsort;
 	List	   *tlist = sort->plan.targetlist;
-	Plan	   *subplan = sort->plan.lefttree;
+	Plan	   *subplan = outerPlan(sort);
+	Size		sortkey_width = 0;
+	Bitmapset  *sortkey_resnums = NULL;
 	Cost		startup_cost;
 	Cost		total_cost;
 	codegen_context context;
@@ -415,6 +494,12 @@ pgstrom_create_gpusort_plan(Sort *sort)
 		if (!OidIsValid(sort_func) ||
 			!pgstrom_devfunc_lookup(sort_func))
 			return NULL;
+
+		/* also, estimate average key length */
+		sortkey_width += expected_key_width(tle, subplan, rtable);
+		pull_varattnos((Node *)tle->expr,
+					   OUTER_VAR,
+					   &sortkey_resnums);
 	}
 
 	/* next, cost estimation by GPU sort */
@@ -437,7 +522,11 @@ pgstrom_create_gpusort_plan(Sort *sort)
 	gsort->cplan.methods = &gpusort_plan_methods;
 
 	gsort->kern_source = gpusort_codegen_comparison(sort, &context);
-	gsort->extra_flags = context.extra_flags;
+	gsort->extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSORT;
+	gsort->used_params = context.used_params;
+	gsort->sortkey_resnums = sortkey_resnums;
+	gsort->sortkey_width = sortkey_width;
+
 	gsort->numCols = sort->numCols;
 	gsort->sortColIdx = pmemcpy(sort->sortColIdx, sizeof(AttrNumber) * n);
 	gsort->sortOperators = pmemcpy(sort->sortOperators, sizeof(Oid) * n);
@@ -505,38 +594,147 @@ gpusort_finalize_plan(PlannerInfo *root,
 static void
 pgstrom_release_gpusort(pgstrom_message *msg)
 {
-	pgstrom_gpusort	   *bgsort = (pgstrom_gpusort *)msg;
+	pgstrom_gpusort	   *gs_chunk = (pgstrom_gpusort *)msg;
 
-	/* unlink message queue and device program (should always exists) */
-	pgstrom_put_queue(msg->respq);
-	pgstrom_put_devprog_key(bgsort->dprog_key);
-
+	/*
+	 * Unlink message queue and device program. These should exist
+	 * unless this object is not linked to pgstrom_gpusort_multi.
+	 */
+	if (msg->respq)
+		pgstrom_put_queue(msg->respq);
+	if (gs_chunk->dprog_key != 0)
+		pgstrom_put_devprog_key(gs_chunk->dprog_key);
+	/* let's free it */
+	pgstrom_shmem_free(gs_chunk);
 }
 
 static pgstrom_gpusort *
-pgstrom_create_gpusort(TupleDesc tupdesc, Bitmapset *dev_attnums)
+pgstrom_create_gpusort(GpuSortState *gsortstate)
 {
+	TupleDesc		tupdesc = gsortstate->scan_slot->tts_tupleDescriptor;
+	Size			allocated;
+	pgstrom_gpusort *gs_chunk;
+	kern_parambuf  *kparam;
+	kern_column_store *kcs;
+	cl_int		   *kstatus;
+	kern_toastbuf  *ktoast;
+	ListCell	   *cell;
+	Size			offset;
+	cl_int			i_col = 0;
+	bool			needs_toast = false;
 
+	/* allocation of a shared memory block */
+	gs_chunk = pgstrom_shmem_alloc_alap(gsortstate->gpusort_chunksz,
+										&allocated);
+	if (!gs_chunk)
+		elog(ERROR, "out of shared memory");
 
+	/* initialize fields in pgstrom_gpusort */
+	memset(gs_chunk, 0, sizeof(pgstrom_gpusort));
+	gs_chunk->msg.sobj.stag = StromTag_GpuSort;
+	SpinLockInit(&gs_chunk->msg.lock);
+	gs_chunk->msg.refcnt = 1;
+	gs_chunk->msg.errcode = StromError_Success;
+	gs_chunk->msg.respq = pgstrom_get_queue(gsortstate->mqueue);
+	gs_chunk->msg.cb_process = clserv_process_gpusort;
+	gs_chunk->msg.cb_release = pgstrom_release_gpusort;
+	gs_chunk->dprog_key = pgstrom_retain_devprog_key(gsortstate->dprog_key);
 
+	/* next, initialization of kern_gpusort */
+	kparam = KERN_GPUSORT_PARAMBUF(&gs_chunk->kern);
+	memcpy(kparam, gsortstate->kparambuf, gsortstate->kparambuf->length);
+	Assert(kparam->length == STROMALIGN(kparam->length));
 
-static typedef struct
-{
-    pgstrom_message msg;    /* = StromTag_GpuSort */
-    Datum           dprog_key;
-    dlist_node      chain;  /* be linked to pgstrom_gpusort_multi */
-    dlist_head      rcstore_list;
-    cl_uint         rcstore_index;
-    cl_uint         rcstore_nums;
-    kern_gpusort    kern;
-} pgstrom_gpusort;
-static tcache_column_store *
-gpusort_create
+	/* next, initialization of kern_column_store */
+	kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
+	kcs->ncols = list_length(gsortstate->sortkey_resnums) + 2;
+	kcs->nrows = 0;
+	kcs->nrooms = gsortstate->nrows_per_chunk;
+	offset = STROMALIGN(offsetof(kern_column_store,
+								 colmeta[kcs->ncols]));
+	/*
+	 * First column is reserved by GpuSort - fixed-length integer as
+	 * identifier of unsorted tuples, not null.
+	 */
+	kcs->colmeta[0].attnotnull = true;
+	kcs->colmeta[0].attalign = sizeof(cl_long);
+	kcs->colmeta[0].attlen = sizeof(cl_long);
+	kcs->colmeta[0].cs_ofs = offset;
+	offset += STROMALIGN(sizeof(cl_long) * kcs->nrooms);
+	i_col++;
 
+	/* regular sortkeys */
+	foreach(cell, gsortstate->sortkey_resnums)
+	{
+		Form_pg_attribute	attr;
+		int		resno = lfirst_int(cell);
 
+		Assert(resno > 0 && resno <= tupdesc->natts);
+		attr = tupdesc->attrs[resno - 1];
 
+		kcs->colmeta[i_col].attnotnull = attr->attnotnull;
+		if (attr->attalign == 'c')
+			kcs->colmeta[i_col].attalign = sizeof(cl_char);
+		else if (attr->attalign == 's')
+			kcs->colmeta[i_col].attalign = sizeof(cl_short);
+		else if (attr->attalign == 'i')
+			kcs->colmeta[i_col].attalign = sizeof(cl_int);
+		else if (attr->attalign == 'd')
+			kcs->colmeta[i_col].attalign = sizeof(cl_long);
+		else
+			elog(ERROR, "unexpected attalign '%c'", attr->attalign);
+		kcs->colmeta[i_col].attlen = attr->attlen;
+		kcs->colmeta[i_col].cs_ofs = offset;
+		if (!attr->attnotnull)
+			offset += STROMALIGN(kcs->nrooms / BITS_PER_BYTE);
+		if (attr->attlen > 0)
+			offset += STROMALIGN(attr->attlen * kcs->nrooms);
+		else
+		{
+			offset += STROMALIGN(sizeof(cl_uint) * kcs->nrooms);
+			needs_toast = true;
+		}
+		i_col++;
+	}
 
-	return NULL;
+	/*
+	 * Last column is reserved by GpuSort - fixed-length integer as
+	 * index of sorted tuples, not null.
+	 * Note that this field has to be aligned to 2^N length, to
+	 * simplify kernel implementation.
+	 */
+	kcs->colmeta[i_col].attnotnull = true;
+	kcs->colmeta[i_col].attalign = sizeof(cl_int);
+	kcs->colmeta[i_col].attlen = sizeof(cl_int);
+	kcs->colmeta[i_col].cs_ofs = offset;
+	offset += STROMALIGN(sizeof(cl_int) * get_next_pow2(kcs->nrooms));
+    i_col++;
+	Assert(i_col == kcs->ncols);
+
+	kcs->length = offset;
+
+	/* next, initialization of kernel execution status field */
+	kstatus = KERN_GPUSORT_STATUS(&gs_chunk->kern);
+	*kstatus = StromError_Success;
+
+	/* last, initialization of toast buffer in flat-mode */
+	ktoast = KERN_GPUSORT_TOASTBUF(&gs_chunk->kern);
+	if (!needs_toast)
+	{
+		ktoast->length = 0;
+		ktoast->usage = 0;
+	}
+	else
+	{
+		ktoast->length =
+			STROMALIGN_DOWN(allocated -
+							((uintptr_t)ktoast -
+							 (uintptr_t)(&gs_chunk->kern)));
+		ktoast->usage = offsetof(kern_toastbuf, coldir[0]);
+	}
+
+	/* OK, initialized */
+	return gs_chunk;
 }
 
 /*
@@ -643,6 +841,27 @@ pgstrom_create_gpusort_multi(pgstrom_queue *respq, Datum dprog_key)
 	return mgsort;
 }
 
+/*
+ * gpusort_preload_chunk
+ *
+ * It loads row-store (or column-store if available) from the underlying
+ * relation scan, and enqueue a gpusort-chunk with them into OpenCL
+ * server process. If a chunk can be successfully enqueued, it returns
+ * reference of this chunk. Elsewhere, NULL shall be returns; that implies
+ * all the records in the underlying relation were already read.
+ */
+static pgstrom_gpusort *
+gpusort_preload_chunk(GpuSortState *gsortstate)
+{
+	pgstrom_gpusort	   *gs_chunk = pgstrom_create_gpusort(gsortstate);
+
+
+
+	return gs_chunk;
+}
+
+
+
 
 
 
@@ -659,7 +878,8 @@ gpusort_begin(CustomPlan *node, EState *estate, int eflags)
 	GpuSortState   *gsortstate;
 	TupleDesc		tupdesc;
 	int				extra_flags;
-	Bitmapset	   *dev_attnums;
+	List		   *sortkey_resnums = NIL;
+	Bitmapset	   *tempset;
 	bytea		   *rs_attrefs;
 	AttrNumber		anum;
 	Const		   *kparam_0;
@@ -732,18 +952,17 @@ gpusort_begin(CustomPlan *node, EState *estate, int eflags)
 	Assert(list_length(gsortplan->used_params) > 1);
 	used_params = copyObject(gsortplan->used_params);
 
-	pull_varattnos((Node *)gsortplan->used_vars,
-				   OUTER_VAR,
-				   &dev_attnums);
 	rs_attrefs = palloc0(VARHDRSZ + sizeof(cl_char) * tupdesc->natts);
 	SET_VARSIZE(rs_attrefs, VARHDRSZ + sizeof(cl_char) * tupdesc->natts);
-	for (anum=0; anum < tupdesc->natts; anum++)
-	{
-		Form_pg_attribute attr = tupdesc->attrs[anum];
-		int		x = attr->attnum - FirstLowInvalidHeapAttributeNumber;
 
-		if (bms_is_member(x, dev_attnums))
-			((bool *)VARDATA(rs_attrefs))[anum] = true;
+	tempset = bms_copy(gsortplan->sortkey_resnums);
+	while ((anum = bms_first_member(tempset)) >= 0)
+	{
+		anum += FirstLowInvalidHeapAttributeNumber;
+		Assert(anum > 0 && anum <= tupdesc->natts);
+
+		((bool *)VARDATA(rs_attrefs))[anum - 1] = true;
+		sortkey_resnums = lappend_int(sortkey_resnums, anum);
 	}
 	kparam_0 = (Const *)linitial(used_params);
 	Assert(IsA(kparam_0, Const) &&
@@ -763,15 +982,29 @@ gpusort_begin(CustomPlan *node, EState *estate, int eflags)
 	 * so kparam_1 == NULL is delivered to the kernel.
 	 */
 	gsortstate->kparambuf = pgstrom_create_kern_parambuf(used_params, NULL);
-	gsortstate->dev_attnums = dev_attnums;
+	gsortstate->sortkey_resnums = sortkey_resnums;
+	gsortstate->sortkey_width = gsortplan->sortkey_width;
+	gsortstate->gpusort_chunksz = get_gpusort_chunksize();
+	gsortstate->nrows_per_chunk =
+		(gsortstate->gpusort_chunksz -
+		 STROMALIGN(gsortstate->kparambuf->length) -
+		 STROMALIGN(offsetof(kern_column_store,
+							 colmeta[gsortplan->numCols + 2])) -
+		 STROMALIGN(sizeof(cl_int)) -
+		 STROMALIGN(offsetof(kern_toastbuf, coldir[0])))
+		/ (sizeof(cl_ulong) + gsortstate->sortkey_width + 2 * sizeof(cl_uint));
+	gsortstate->nrows_per_chunk &= ~32UL;
 
 	/* allocate a certain amount of row-/column-store slot */
 	gsortstate->rcs_nums = 0;
 	gsortstate->rcs_size = 256;
 	gsortstate->rcs_slot = palloc0(sizeof(StromObject *) *
 								   gsortstate->rcs_size);
-	return NULL;
+	return &gsortstate->cps;
 }
+
+
+
 
 
 
@@ -801,7 +1034,26 @@ gpusort_exec_multi(CustomPlanState *node)
 
 static void
 gpusort_end(CustomPlanState *node)
-{}
+{
+	GpuSortState   *gsortstate = (GpuSortState *) node;
+
+	/*
+	 * Release PG-Strom shared objects
+	 */
+	pgstrom_untrack_object((StromObject *)gsortstate->dprog_key);
+	pgstrom_untrack_object(&gsortstate->mqueue->sobj);
+
+	/*
+     * clean out the tuple table
+     */
+    ExecClearTuple(gsortstate->scan_slot);
+    ExecClearTuple(node->ps.ps_ResultTupleSlot);
+
+	/*
+     * shut down the subplan
+     */
+    ExecEndNode(outerPlanState(node));
+}
 
 static void
 gpusort_rescan(CustomPlanState *node)
@@ -819,7 +1071,43 @@ gpusort_get_relids(CustomPlanState *node)
 static void
 gpusort_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 {
-	
+	GpuSortState   *gsortstate = (GpuSortState *) node;
+	List		   *context;
+	bool			useprefix;
+	List		   *tlist = gsortstate->cps.ps.plan->targetlist;
+	List		   *sort_keys = NIL;
+	ListCell	   *cell;
+
+	/* logic copied from show_sort_group_keys */
+	context = deparse_context_for_planstate((Node *) gsortstate,
+											ancestors,
+											es->rtable,
+											es->rtable_names);
+	useprefix = (list_length(es->rtable) > 1 || es->verbose);
+
+	foreach(cell, gsortstate->sortkey_resnums)
+	{
+		TargetEntry	*tle = get_tle_by_resno(tlist, lfirst_int(cell));
+		char		*exprstr;
+
+		if (!tle)
+			elog(ERROR, "no tlist entry for key %d", lfirst_int(cell));
+
+		/* Deparse the expression, showing any top-level cast */
+		exprstr = deparse_expression((Node *) tle->expr, context,
+									 useprefix, true);
+		sort_keys = lappend(sort_keys, exprstr);
+	}
+
+	ExplainPropertyList("Sort keys", sort_keys, es);
+
+	ExplainPropertyInteger("Sort keys width", gsortstate->sortkey_width, es);
+	ExplainPropertyInteger("Rows per chunk", gsortstate->nrows_per_chunk, es);
+
+	show_device_kernel(gsortstate->dprog_key, es);
+
+	if (es->analyze && gsortstate->pfm.enabled)
+		pgstrom_perfmon_explain(&gsortstate->pfm, es);
 }
 
 static void
@@ -839,9 +1127,12 @@ gpusort_textout_plan(StringInfo str, const CustomPlan *node)
 	appendStringInfo(str, " :used_params %s", temp);
 	pfree(temp);
 
-	temp = nodeToString(plannode->used_vars);
-	appendStringInfo(str, " :used_vars %s", temp);
+	temp = nodeToString(plannode->sortkey_resnums);
+	appendStringInfo(str, " :sortkey_resnums %s", temp);
 	pfree(temp);
+
+	appendStringInfo(str, " :sortkey_width %zu",
+					 plannode->sortkey_width);
 
 	appendStringInfo(str, " :numCols %d", plannode->numCols);
 
@@ -874,7 +1165,9 @@ gpusort_copy_plan(const CustomPlan *from)
 	newnode->kern_source = pstrdup(oldnode->kern_source);
 	newnode->extra_flags = oldnode->extra_flags;
 	newnode->used_params = copyObject(oldnode->used_params);
-	newnode->used_vars   = copyObject(oldnode->used_vars);
+	newnode->sortkey_resnums = copyObject(oldnode->sortkey_resnums);
+	newnode->sortkey_width = oldnode->sortkey_width;
+
 	newnode->numCols     = oldnode->numCols;
 	newnode->sortColIdx = pmemcpy(oldnode->sortColIdx, sizeof(AttrNumber) * n);
 	newnode->sortOperators = pmemcpy(oldnode->sortOperators, sizeof(Oid) * n);
@@ -961,7 +1254,7 @@ clserv_respond_gpusort(cl_event event, cl_int ev_status, void *private)
 static void
 clserv_process_gpusort(pgstrom_message *msg)
 {
-	pgstrom_gpusort		   *bgsort = (pgstrom_gpusort *) msg;
+	//pgstrom_gpusort		   *bgsort = (pgstrom_gpusort *) msg;
 }
 
 
@@ -974,6 +1267,6 @@ clserv_respond_gpusort_multi(cl_event event, cl_int ev_status, void *private)
 static void
 clserv_process_gpusort_multi(pgstrom_message *msg)
 {
-	pgstrom_gpusort_multi  *mgsort = (pgstrom_gpusort_multi *) msg;
+	//pgstrom_gpusort_multi  *mgsort = (pgstrom_gpusort_multi *) msg;
 
 }

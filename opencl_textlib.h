@@ -18,8 +18,8 @@ static int
 varlena_cmp(__private cl_int *errcode,
 			__global varlena *arg1, __global varlena *arg2)
 {
-	cl_char	   *s1 = VARDATA_ANY(arg1);
-	cl_char	   *s2 = VARDATA_ANY(arg2);
+	__global cl_char *s1 = VARDATA_ANY(arg1);
+	__global cl_char *s2 = VARDATA_ANY(arg2);
 	cl_int		len1 = VARSIZE_ANY(arg1);
 	cl_int		len2 = VARSIZE_ANY(arg2);
 	cl_int		len = min(len1, len2);

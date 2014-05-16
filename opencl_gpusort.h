@@ -95,20 +95,31 @@ typedef struct
 } kern_gpusort;
 
 /* macro definitions to reference packed values */
-#define KERN_GPUSORT_PARAMBUF(kgpusort)				\
+#define KERN_GPUSORT_PARAMBUF(kgpusort)						\
 	((__global kern_parambuf *)(&(kgpusort)->kparam))
+#define KERN_GPUSORT_PARAMBUF_LENGTH(kgpusort)				\
+	STROMALIGN(KERN_GPUSORT_PARAMBUF(kgpusort)->length)
 
 #define KERN_GPUSORT_CHUNK(kgpusort)						\
 	((__global kern_column_store *)							\
-	 ((__global char *)(kgpusort) +							\
-	  STROMALIGN((kgpusort)->kparam.length)))
+	 ((__global char *)KERN_GPUSORT_PARAMBUF(kgpusort) +	\
+	  KERN_GPUSORT_PARAMBUF_LENGTH(kgpusort)))
+#define KERN_GPUSORT_CHUNK_LENGTH(kgpusort)					\
+	STROMALIGN(KERN_GPUSORT_CHUNK(kgpusort)->length)
+
+#define KERN_GPUSORT_STATUS(kgpusort)						\
+	((__global cl_int *)									\
+	 ((__global char *)KERN_GPUSORT_CHUNK(kgpusort) +		\
+	  KERN_GPUSORT_CHUNK_LENGTH(kgpusort)))
+#define KERN_GPUSORT_STATUS_LENGTH(kgpusort)				\
+	STROMALIGN(sizeof(cl_int))
 
 #define KERN_GPUSORT_TOASTBUF(kgpusort)						\
 	((__global kern_toastbuf *)								\
-	 ((__global char *)(kgpusort) +							\
-	  STROMALIGN((kgpusort)->kparam.length) +				\
-	  STROMALIGN(KERN_GPUSORT_CHUNK(kgpusort)->length) +	\
-	  STROMALIGN(sizeof(cl_int))))
+	 ((__global char *)KERN_GPUSORT_STATUS(kgpusort) +		\
+	  KERN_GPUSORT_STATUS_LENGTH(kgpusort)))
+#define KERN_GPUSORT_TOASTBUF_LENGTH(kgpusort)				\
+	STROMALIGN(KERN_GPUSORT_TOASTBUF_LENGTH(kgpusort)->length)
 
 /* last column of kchunk is index array of the chunk */
 #define KERN_GPUSORT_RESULT_INDEX(kchunk)					\

@@ -234,7 +234,7 @@ show_device_kernel(Datum dprog_key, ExplainState *es)
 	const char *kernel_source;
 	int32		extra_flags;
 
-	if (!es->verbose)
+	if (!dprog_key || !es->verbose)
 		return;
 
 	kernel_source = pgstrom_get_devprog_kernel_source(dprog_key);

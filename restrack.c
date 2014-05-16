@@ -167,13 +167,6 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 		dlist_mutable_iter miter;
 
 		/*
-		 * In case of normal transaction commit, all the tracked objects
-		 * shall be untracked by regular code path, so we should not have
-		 * any valid objects in resource tracker.
-		 */
-		Assert(!is_commit || dlist_is_empty(&tracker->sobject_list));
-
-		/*
 		 * In case of transaction abort, we decrement reference counter of
 		 * tracked objects, then eventually they are released (even if
 		 * OpenCL server still grabed it).
@@ -191,6 +184,13 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 			dlist_delete(&so_entry->ptrmap_chain);
 			sobject = so_entry->sobject;
 			private = so_entry->private;
+
+			/*
+			 * In case of normal transaction commit, all the tracked
+			 * objects should be untracked by regular code path, so
+			 * we should not have any valid objects in resource tracker.
+			 */
+			Assert(!is_commit);
 
 			if (StromTagIs(sobject, MsgQueue))
 				pgstrom_close_queue((pgstrom_queue *)sobject);

@@ -17,6 +17,7 @@
 #include "funcapi.h"
 #include "nodes/pg_list.h"
 #include "storage/barrier.h"
+#include "storage/ipc.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
@@ -28,12 +29,15 @@ static int opencl_platform_index;
 /* OpenCL resources for quick reference */
 #define MAX_NUM_DEVICES		128
 
-#define OPENCL_DEVINFO_SHM_REQUEST	(64 * 1024)	/* usually sufficient */
+#define OPENCL_DEVINFO_SHM_LENGTH	(64 * 1024)	/* usually sufficient */
 static struct {
 	cl_uint			num_devices;
 	pgstrom_platform_info  *pl_info;
 	pgstrom_device_info	   *dev_info[FLEXIBLE_ARRAY_MEMBER];
 } *opencl_devinfo_shm_values = NULL;
+
+/* shmem call chain */
+static shmem_startup_hook_type shmem_startup_hook_next;
 
 /* quick references */
 cl_platform_id		opencl_platform_id = NULL;
@@ -769,13 +773,12 @@ disclose_opencl_device_info(List *devinfo_list)
 	ListCell   *cell;
 	Size		length;
 	Size		offset;
-	bool		found;
 	cl_uint		i = 0;
-	void	   *temp;
 
 	num_devices = list_length(devinfo_list);
 
-	length = (Size)(opencl_devinfo_shm_values->dev_info + num_devices);
+	length = ((Size)(opencl_devinfo_shm_values->dev_info + num_devices) -
+			  (Size)(opencl_devinfo_shm_values));
 	offset = length;
 	foreach (cell, devinfo_list)
 	{
@@ -790,16 +793,9 @@ disclose_opencl_device_info(List *devinfo_list)
 		length += MAXALIGN(offsetof(pgstrom_device_info,
 									buffer[dev_info->buflen]));
 	}
-	if (length >= OPENCL_DEVINFO_SHM_REQUEST)
+	if (length >= OPENCL_DEVINFO_SHM_LENGTH)
 		elog(ERROR, "usage of pgstrom_platform/device_info too large: %lu",
 			 length);
-
-	/* OK, assign zero cleared shmem on opencl_devinfo_shm_values */
-	temp = ShmemInitStruct("opencl_devinfo_shm_values", length, &found);
-	Assert(!found);
-	memset(temp, 0, sizeof(*opencl_devinfo_shm_values));
-	pg_memory_barrier();
-	opencl_devinfo_shm_values = temp;
 
 	/* copy platform/device info */
 	foreach (cell, devinfo_list)
@@ -812,7 +808,8 @@ disclose_opencl_device_info(List *devinfo_list)
 
 			length = offsetof(pgstrom_platform_info,
 							  buffer[pl_info->buflen]);
-			memcpy((char *)temp + offset, pl_info, length);
+			memcpy((char *)opencl_devinfo_shm_values + offset,
+				   pl_info, length);
 			opencl_devinfo_shm_values->pl_info = (pgstrom_platform_info *)
 				((char *)opencl_devinfo_shm_values + offset);
 			offset += MAXALIGN(length);
@@ -824,7 +821,8 @@ disclose_opencl_device_info(List *devinfo_list)
 		}
 		length = offsetof(pgstrom_device_info,
 						  buffer[dev_info->buflen]);
-		memcpy((char *)temp + offset, dev_info, length);
+		memcpy((char *)opencl_devinfo_shm_values + offset,
+			   dev_info, length);
 		opencl_devinfo_shm_values->dev_info[i] = (pgstrom_device_info *)
 			((char *)opencl_devinfo_shm_values + offset);
 		offset += MAXALIGN(length);
@@ -950,6 +948,22 @@ construct_opencl_device_info(void)
 	disclose_opencl_device_info(result);
 }
 
+static void
+pgstrom_startup_opencl_devinfo(void)
+{
+	bool	found;
+
+	if (shmem_startup_hook_next)
+		(*shmem_startup_hook_next)();
+
+	/* reserved area for opencl device info */
+	opencl_devinfo_shm_values = ShmemInitStruct("opencl_devinfo_shm_values",
+												OPENCL_DEVINFO_SHM_LENGTH,
+												&found);
+	Assert(!found);
+	memset(opencl_devinfo_shm_values, 0, sizeof(*opencl_devinfo_shm_values));
+}
+
 void
 pgstrom_init_opencl_devinfo(void)
 {
@@ -1002,11 +1016,10 @@ pgstrom_init_opencl_devinfo(void)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("no valid opencl device types are specified")));
 
-	/*
-	 * speculative shared memory requirement, but no shmem_startup_hook
-	 * setting because this area shall be allocated by opencl server.
-	 */
-	RequestAddinShmemSpace(OPENCL_DEVINFO_SHM_REQUEST);
+	/* shared memory request to store device info */
+	RequestAddinShmemSpace(OPENCL_DEVINFO_SHM_LENGTH);
+	shmem_startup_hook_next = shmem_startup_hook;
+	shmem_startup_hook = pgstrom_startup_opencl_devinfo;
 }
 
 /*

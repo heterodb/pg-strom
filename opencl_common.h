@@ -617,11 +617,14 @@ typedef struct {
  * |   :          |
  * +--------------+
  */
-#define TOASTBUF_MAGIC		0xffffffff	/* should not be length of buffers */
+#define TOASTBUF_MAGIC		0xffffffff	/* should not be length of buffer */
 
 typedef struct {
-	cl_uint			magic;	/* = TOASTBUF_MAGIC */
-	cl_uint			ncols;
+	cl_uint			length;	/* = TOASTBUF_MAGIC, if coldir should be added */
+	union {
+		cl_uint		ncols;	/* number of coldir entries, if exists */
+		cl_uint		usage;	/* usage counter of this toastbuf */
+	};
 	cl_uint			coldir[FLEXIBLE_ARRAY_MEMBER];
 } kern_toastbuf;
 
@@ -677,10 +680,10 @@ typedef struct {
 			cl_uint	offset = *p_offset;						\
 			__global varlena *val;							\
 															\
-			if (toast->magic == TOASTBUF_MAGIC)				\
+			if (toast->length == TOASTBUF_MAGIC)			\
 				offset += toast->coldir[colidx];			\
 			val = ((__global varlena *)						\
-				   ((char *)toast + offset));				\
+				   ((__global char *)toast + offset));		\
 			if (VARATT_IS_4B_U(val) || VARATT_IS_1B(val))	\
 			{												\
 				result.isnull = false;						\
@@ -732,7 +735,8 @@ typedef struct {
 			kparam->poffset[param_id] > 0)					\
 		{													\
 			__global varlena *val =	(__global varlena *)	\
-				((char *)kparam + kparam->poffset[param_id]); \
+				((__global char *)kparam +					\
+				 kparam->poffset[param_id]);				\
 			if (VARATT_IS_4B_U(val) || VARATT_IS_1B(val))	\
 			{												\
 				result.value = val;							\

@@ -483,7 +483,7 @@ extern void pgstrom_init_gpuscan(void);
 /*
  * gpusort.c
  */
-extern CustomPlan *pgstrom_create_gpusort_plan(Sort *original);
+extern CustomPlan *pgstrom_create_gpusort_plan(Sort *original, List *rtable);
 extern void pgstrom_init_gpusort(void);
 
 /*

@@ -360,17 +360,17 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					 "                __global kern_column_store *kcs,\n"
 					 "                __local void *local_workmem)\n"
 					 "{\n"
-					 "  pg_bytea_t	      kparam_0;\n"
+					 "  pg_bytea_t        kparam_0;\n"
 					 "  __global cl_char *attrefs;\n"
 					 "  __global kern_parambuf *kparams\n"
 					 "    = KERN_GPUSCAN_PARAMBUF(kgscan);\n"
-					 "  cl_int			errcode = StromError_Success;\n"
+					 "  cl_int            errcode = StromError_Success;\n"
 					 "\n"
 					 "  KDEBUG_INIT(KERN_GPUSCAN_RESULTBUF(kgscan));\n"
 					 "\n"
 					 "  kparam_0 = KPARAM_0;\n"
 					 "  attrefs = (__global cl_char *)\n"
-					 "                      VARDATA(kparam_0.value);\n"
+					 "      VARDATA(kparam_0.value);\n"
 					 "  kern_row_to_column(attrefs,krs,kcs,local_workmem);\n"
 					 "  gpuscan_qual_cs(kgscan,kcs,\n"
 					 "                  (__global kern_toastbuf *)krs,\n"
@@ -2424,6 +2424,8 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 	/* allocation of device memory for kern_toastbuf argument */
 	with_toast = false;
 	length = STROMALIGN(offsetof(kern_toastbuf, coldir[ncols]));
+	ktoast->length = TOASTBUF_MAGIC;
+	ktoast->ncols = ncols;
 	for (i=0; i < ncols; i++)
 	{
 		tcache_toastbuf *tc_toast;
