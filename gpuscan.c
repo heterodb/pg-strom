@@ -1461,9 +1461,8 @@ gpuscan_end(CustomPlanState *node)
 	if (gss->tc_head)
 	{
 		tcache_head	*tc_head = gss->tc_head;
-		Datum		tr_private;
 
-		tr_private = pgstrom_untrack_object(&tc_head->sobj);
+		pgstrom_untrack_object(&tc_head->sobj);
 
 		tcache_put_tchead(tc_head);
 	}

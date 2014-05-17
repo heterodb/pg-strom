@@ -419,6 +419,69 @@ pgstrom_shmem_free(void *address)
 }
 
 /*
+ * pgstrom_shmem_realloc
+ *
+ * It allocate a shared memory block, and copy the contents in the supplied
+ * oldaddr to the new one, then release shared memory block.
+ */
+void *
+__pgstrom_shmem_realloc(const char *filename, int lineno,
+						void *oldaddr, Size newsize)
+{
+	void   *newaddr;
+
+	newaddr = __pgstrom_shmem_alloc(filename, lineno, newsize);
+	if (!newaddr)
+		return NULL;
+	if (oldaddr)
+	{
+		Size	oldsize = pgstrom_shmem_getsize(oldaddr);
+
+		memcpy(newaddr, oldaddr, Min(newsize, oldsize));
+		pgstrom_shmem_free(oldaddr);
+	}
+	return newaddr;
+}
+
+/*
+ * pgstrom_shmem_getsize
+ *
+ * It returns size of the supplied active block
+ */
+Size
+pgstrom_shmem_getsize(void *address)
+{
+	shmem_zone *zone;
+	shmem_body *body;
+	shmem_block *block;
+	void	   *zone_baseaddr = pgstrom_shmem_head->zone_baseaddr;
+	Size		zone_length = pgstrom_shmem_head->zone_length;
+	Size		blocksz;
+	long		index;
+
+	/* find a zone on which address belongs to */
+	Assert(pgstrom_shmem_sanitycheck(address));
+	body = (shmem_body *)((char *)address -
+						  offsetof(shmem_body, data[0]));
+	index = ((uintptr_t)body -
+			 (uintptr_t)zone_baseaddr) / zone_length;
+	Assert(index >= 0 && index < pgstrom_shmem_head->num_zones);
+	zone = pgstrom_shmem_head->zones[index];
+
+	/* find shmem_block and get its status */
+	SpinLockAcquire(&zone->lock);
+	index = ((uintptr_t)body -
+			 (uintptr_t)zone->block_baseaddr) / SHMEM_BLOCKSZ;
+	block = &zone->blocks[index];
+	Assert(BLOCK_IS_ACTIVE(block));
+	blocksz = block->blocksz;
+    pgstrom_shmem_zone_block_free(zone, body);
+    SpinLockRelease(&zone->lock);
+
+	return blocksz;
+}
+
+/*
  * pgstrom_shmem_sanitycheck
  *
  * it checks whether magic number of the supplied shared-memory block is

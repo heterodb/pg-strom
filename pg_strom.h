@@ -263,7 +263,6 @@ typedef struct {
 	cl_uint			usage;
 	BlockNumber		blkno_max;
 	BlockNumber		blkno_min;
-	//kern_column_store *kcs_head; /* template of in-kernel column store */
 	kern_row_store	kern;
 } tcache_row_store;
 
@@ -427,11 +426,16 @@ extern void *__pgstrom_shmem_alloc(const char *filename, int lineno,
 								   Size size);
 extern void *__pgstrom_shmem_alloc_alap(const char *filename, int lineno,
 										Size required, Size *allocated);
+extern void *__pgstrom_shmem_realloc(const char *filename, int lineno,
+									 void *oldaddr, Size newsize);
 #define pgstrom_shmem_alloc(size)					\
 	__pgstrom_shmem_alloc(__FILE__,__LINE__,(size))
 #define pgstrom_shmem_alloc_alap(size,allocated)	\
 	__pgstrom_shmem_alloc_alap(__FILE__,__LINE__,(size),(allocated))
+#define pgstrom_shmem_realloc(addr,size)		\
+	__pgstrom_shmem_realloc(__FILE__,__LINE__,(addr),(size))
 extern void pgstrom_shmem_free(void *address);
+extern Size pgstrom_shmem_getsize(void *address);
 extern bool pgstrom_shmem_sanitycheck(const void *address);
 extern void pgstrom_setup_shmem(Size zone_length,
 								void *(*callback)(void *address,

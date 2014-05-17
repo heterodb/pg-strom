@@ -130,6 +130,10 @@ typedef struct
 
 
 
+#ifdef OPENCL_DEVICE_CODE
+/*
+ * device only code below
+ */
 
 
 #if 0
@@ -246,30 +250,29 @@ gpusort_setup_chunk_cs(__global kern_gpusort *kgsort,
 #endif
 
 
-#ifdef OPENCL_DEVICE_CODE
 
 #else	/* OPENCL_DEVICE_CODE */
 
 typedef struct
 {
-	pgstrom_message	msg;	/* = StromTag_GpuSort */
-	Datum			dprog_key;
-	dlist_node		chain;	/* be linked to pgstrom_gpusort_multi */
-	dlist_head		rcstore_list;
-	cl_uint			rcstore_index;
-	cl_uint			rcstore_nums;
+	pgstrom_message	msg;		/* = StromTag_GpuSort */
+	Datum			dprog_key;	/* key of device program object */
+	dlist_node		chain;		/* be linked to pgstrom_gpusort_multi */
+	StromObject	  **rcs_slot;	/* array of underlying row/column-store */
+	cl_uint			rcs_slotsz;	/* length of the array */
+	cl_uint			rcs_nums;	/* current usage of the array */
 	kern_gpusort	kern;
 } pgstrom_gpusort;
 
 typedef struct
 {
-	pgstrom_message	msg;	/* = StromTag_GpuSortMulti */
-	Datum			dprog_key;
-	dlist_node		chain;	/* be linked to free list */
+	pgstrom_message	msg;		/* = StromTag_GpuSortMulti */
+	Datum			dprog_key;	/* key of device program object */
+	dlist_node		chain;		/* be linked to free list */
 	dlist_head		in_chunk1;	/* sorted chunks to be merged */
 	dlist_head		in_chunk2;	/* sorted chunks to be merged */
-	dlist_head		out_chunk;	/* merged chunks, but we links two free
-								 * chunks for working area */
+	dlist_head		out_chunk;	/* merged output chunks */
+	dlist_head		work_chunk;	/* working buffer during merge sort */
 } pgstrom_gpusort_multi;
 
 #define GPUSORT_MULTI_PER_BLOCK				\
