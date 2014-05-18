@@ -1035,10 +1035,15 @@ pgstrom_init_opencl_devinfo(void)
  * result using bitmap form; We like to ensure every workgroup is aligned
  * to 32.
  */
-size_t
-clserv_compute_workgroup_size(cl_kernel kernel, int dev_index,
+bool
+clserv_compute_workgroup_size(cl_uint ndim,
+							  size_t *gwork_sz,
+							  size_t *lwork_sz,
+							  cl_kernel kernel,
+							  int dev_index,
 							  size_t num_threads,
-							  size_t local_memsz_per_thread)
+							  size_t local_memsz_per_thread,
+							  size_t local_memsz_per_call)
 {
 	const pgstrom_device_info *devinfo;
 	cl_device_id kdevice;
@@ -1046,9 +1051,10 @@ clserv_compute_workgroup_size(cl_kernel kernel, int dev_index,
 	size_t		workgroup_unitsz;
 	size_t		kern_local_usage;
 	cl_ulong	kern_local_memsz;
-	cl_int		rc;
+	cl_int		i, rc;
 
 	Assert(pgstrom_i_am_clserv);
+	Assert(ndim > 0 && ndim <= 3);
 
 	kdevice = opencl_devices[dev_index];
 	/*
@@ -1063,9 +1069,9 @@ clserv_compute_workgroup_size(cl_kernel kernel, int dev_index,
 								  NULL);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clGetKernelWorkGroupInfo: %s",
-			 opencl_strerror(rc));
-		return 0;
+		clserv_log("failed on clGetKernelWorkGroupInfo: %s",
+				   opencl_strerror(rc));
+		return false;
 	}
 
 	/*
@@ -1082,9 +1088,9 @@ clserv_compute_workgroup_size(cl_kernel kernel, int dev_index,
 								  NULL);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clGetKernelWorkGroupInfo: %s",
-			 opencl_strerror(rc));
-		return 0;
+		clserv_log("failed on clGetKernelWorkGroupInfo: %s",
+				   opencl_strerror(rc));
+		return false;
 	}
 	workgroup_unitsz = TYPEALIGN(PGSTROM_WORKGROUP_UNITSZ, workgroup_unitsz);
 	if (workgroup_unitsz == 0)
@@ -1114,30 +1120,42 @@ clserv_compute_workgroup_size(cl_kernel kernel, int dev_index,
 								  NULL);
 	if (rc != CL_SUCCESS)
 	{
-		elog(LOG, "failed on clGetKernelWorkGroupInfo: %s",
-			 opencl_strerror(rc));
-		return 0;
+		clserv_log("failed on clGetKernelWorkGroupInfo: %s",
+				   opencl_strerror(rc));
+		return false;
 	}
 
 	devinfo = pgstrom_get_device_info(dev_index);
 	if (kern_local_usage > devinfo->dev_local_mem_size)
 	{
-		elog(LOG, "static local memory of kernel is too large to run");
-		return 0;
+		clserv_log("static local memory of kernel is too large to run (%zu)",
+				   kern_local_usage);
+		return false;
 	}
 
-	if (local_memsz_per_thread > 0)
+	/* needs adjust, if local memory usage exceeds device limitation */
+	if (local_memsz_per_thread * workgroup_sz +
+		local_memsz_per_call > devinfo->dev_local_mem_size - kern_local_usage)
 	{
-		kern_local_memsz = devinfo->dev_local_mem_size - kern_local_usage;
-		if (local_memsz_per_thread * workgroup_sz > kern_local_memsz)
-		{
-			workgroup_sz = kern_local_memsz / local_memsz_per_thread;
-			workgroup_sz -= (workgroup_sz % workgroup_unitsz);
-		}
+		kern_local_memsz = (devinfo->dev_local_mem_size -
+							kern_local_usage -
+							local_memsz_per_call);
+		workgroup_sz = kern_local_memsz / local_memsz_per_thread;
+		workgroup_sz -= (workgroup_sz % workgroup_unitsz);
 	}
+
+	lwork_sz[0] = workgroup_sz;
+	gwork_sz[0] = ((num_threads +
+					workgroup_sz - 1) / workgroup_sz) * workgroup_sz;
+	for (i=1; i < ndim; i++)
+	{
+		lwork_sz[i] = 1;
+		gwork_sz[i] = 1;
+	}
+
 	/*
 	 * TODO: needs to put optimal workgroup size for each
 	 * GPU models. Kernel execution time is affected so much.
 	 */
-	return workgroup_sz;
+	return true;
 }

@@ -1909,8 +1909,11 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	kcmdq = opencl_cmdq[i];
 
 	/* and, compute an optimal workgroup-size of this kernel */
-	lwork_sz = clserv_compute_workgroup_size(clgss->kernel, i, nrows,
-											 2 * sizeof(cl_uint));
+	if (!clserv_compute_workgroup_size(1, &gwork_sz, &lwork_sz,
+									   clgss->kernel, i, nrows,
+									   sizeof(cl_uint),
+									   sizeof(cl_uint)))
+		goto error3;
 
 	/* allocation of device memory for kern_gpuscan argument */
 	clgss->m_gpuscan = clCreateBuffer(opencl_context,
@@ -2065,8 +2068,6 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	/*
 	 * Kick gpuscan_qual_rs() call
 	 */
-	gwork_sz = ((nrows + lwork_sz - 1) / lwork_sz) * lwork_sz;
-
 	rc = clEnqueueNDRangeKernel(kcmdq,
 								clgss->kernel,
 								1,
@@ -2393,8 +2394,10 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 	kcmdq = opencl_cmdq[i];
 
 	/* and, compute an optimal workgroup-size of this kernel */
-	lwork_sz = clserv_compute_workgroup_size(clgsc->kernel, i, nrows,
-											 2 * sizeof(cl_uint));
+	if (!clserv_compute_workgroup_size(1, &gwork_sz, &lwork_sz,
+									   clgsc->kernel, i, nrows,
+									   sizeof(cl_uint), sizeof(cl_uint)))
+		goto error3;
 
 	/* allocation of device memory for kern_gpuscan argument */
 	clgsc->m_gpuscan = clCreateBuffer(opencl_context,
@@ -2659,8 +2662,6 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 	/*
 	 * Kick gpuscan_qual_cs() call
 	 */
-	gwork_sz = ((nrows + lwork_sz - 1) / lwork_sz) * lwork_sz;
-
 	rc = clEnqueueNDRangeKernel(kcmdq,
 								clgsc->kernel,
 								1,

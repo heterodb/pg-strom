@@ -119,7 +119,7 @@ typedef struct
 	 ((__global char *)KERN_GPUSORT_STATUS(kgpusort) +		\
 	  KERN_GPUSORT_STATUS_LENGTH(kgpusort)))
 #define KERN_GPUSORT_TOASTBUF_LENGTH(kgpusort)				\
-	STROMALIGN(KERN_GPUSORT_TOASTBUF_LENGTH(kgpusort)->length)
+	STROMALIGN(KERN_GPUSORT_TOASTBUF(kgpusort)->length)
 
 /* last column of kchunk is index array of the chunk */
 #define KERN_GPUSORT_RESULT_INDEX(kchunk)					\
@@ -127,16 +127,12 @@ typedef struct
 	 ((__global char *)(kchunk) +							\
 	  (kchunk)->colmeta[(kchunk)->ncols - 1].cs_ofs))
 
-
-
-
 #ifdef OPENCL_DEVICE_CODE
 /*
  * device only code below
  */
 
 
-#if 0
 /* expected kernel prototypes */
 static void
 run_gpusort_single(__global kern_parambuf *kparams,
@@ -154,20 +150,6 @@ run_gpusort_single(__global kern_parambuf *kparams,
 	 * (rindex array has the least 2^N capacity larger than nrows)
 	 */
 }
-
-__kernel void
-gpusort_single(__global kern_gpusort *kgsort,
-			   __local void *local_workbuf)
-{
-	__global kern_parambuf *kparams		= KERN_GPUSORT_PARAMBUF(kgsort);
-	__global kern_column_store *kchunk	= KERN_GPUSORT_CHUNK(kgsort);
-	__global kern_toastbuf *ktoast		= KERN_GPUSORT_TOASTBUF(kgsort);
-	__global cl_int		   *results		= KERN_GPUSORT_RESULT_INDEX(kchunk);
-	cl_int		errcode = StromError_Success;
-
-	run_gpusort_single(kparams, kchunk, ktoast, &errcode, local_workbuf);
-}
-
 
 static void
 run_gpusort_multi(__global kern_parambuf *kparams,
@@ -187,6 +169,24 @@ run_gpusort_multi(__global kern_parambuf *kparams,
 	 * Its results shall be stored into z_chunk1 and z_chunk2,
 	 *
 	 */
+}
+
+
+
+
+
+
+__kernel void
+gpusort_single(__global kern_gpusort *kgsort,
+			   __local void *local_workbuf)
+{
+	__global kern_parambuf *kparams		= KERN_GPUSORT_PARAMBUF(kgsort);
+	__global kern_column_store *kchunk	= KERN_GPUSORT_CHUNK(kgsort);
+	__global kern_toastbuf *ktoast		= KERN_GPUSORT_TOASTBUF(kgsort);
+	__global cl_int		   *results		= KERN_GPUSORT_RESULT_INDEX(kchunk);
+	cl_int		errcode = StromError_Success;
+
+	run_gpusort_single(kparams, kchunk, ktoast, &errcode, local_workbuf);
 }
 
 __kernel void
@@ -247,10 +247,6 @@ gpusort_setup_chunk_cs(__global kern_gpusort *kgsort,
 	 */
 }
 
-#endif
-
-
-
 #else	/* OPENCL_DEVICE_CODE */
 
 typedef struct
@@ -261,6 +257,7 @@ typedef struct
 	StromObject	  **rcs_slot;	/* array of underlying row/column-store */
 	cl_uint			rcs_slotsz;	/* length of the array */
 	cl_uint			rcs_nums;	/* current usage of the array */
+	cl_uint			rcs_global_index;	/* starting offset in GpuSortState */
 	kern_gpusort	kern;
 } pgstrom_gpusort;
 

@@ -499,11 +499,14 @@ extern void construct_opencl_device_info(void);
 extern void pgstrom_init_opencl_devinfo(void);
 extern Datum pgstrom_opencl_device_info(PG_FUNCTION_ARGS);
 
-extern size_t clserv_compute_workgroup_size(cl_kernel kernel,
-											int dev_index,
-											size_t num_threads,
-											size_t local_memsz_per_thread);
-
+extern bool clserv_compute_workgroup_size(cl_uint ndim,
+										  size_t *gwork_sz,
+										  size_t *lwork_sz,
+										  cl_kernel kernel,
+										  int dev_index,
+										  size_t num_threads,
+										  size_t local_memsz_per_thread,
+										  size_t local_memsz_per_call);
 /*
  * opencl_devprog.c
  */
