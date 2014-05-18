@@ -26,7 +26,11 @@
 #include <unistd.h>
 #include <limits.h>
 #include <sys/time.h>
+#ifdef __APPLE__
+#include <OpenCL/opencl.h>
+#else
 #include <CL/cl.h>
+#endif
 #include "opencl_common.h"
 
 /*
