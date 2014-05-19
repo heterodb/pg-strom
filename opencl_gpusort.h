@@ -136,6 +136,8 @@ typedef struct
 /* expected kernel prototypes */
 static void
 run_gpusort_single(__global kern_parambuf *kparams,
+				   cl_bool reversing,					/* in */
+				   cl_uint unitsz,						/* in */
 				   __global kern_column_store *kchunk,	/* in */
 				   __global kern_toastbuf *ktoast,		/* in */
 				   __private cl_int *errcode,			/* out */
@@ -177,13 +179,18 @@ run_gpusort_multi(__global kern_parambuf *kparams,
 
 
 __kernel void
-gpusort_single(__global kern_gpusort *kgsort,
+gpusort_single(cl_int bitonic_unitsz,
+			   __global kern_gpusort *kgsort,
 			   __local void *local_workbuf)
 {
 	__global kern_parambuf *kparams		= KERN_GPUSORT_PARAMBUF(kgsort);
 	__global kern_column_store *kchunk	= KERN_GPUSORT_CHUNK(kgsort);
 	__global kern_toastbuf *ktoast		= KERN_GPUSORT_TOASTBUF(kgsort);
 	__global cl_int		   *results		= KERN_GPUSORT_RESULT_INDEX(kchunk);
+	cl_bool		reversing = (bitonic_unitsz < 0 ? true : false);
+	cl_uint		unitsz = (bitonic_unitsz < 0
+						  ? -bitonic_unitsz
+						  : bitonic_unitsz)
 	cl_int		errcode = StromError_Success;
 
 	run_gpusort_single(kparams, kchunk, ktoast, &errcode, local_workbuf);
@@ -215,8 +222,9 @@ gpusort_multi(__global kern_gpusort *kgsort_x,
 					  &errcode, local_workbuf);
 }
 
-kernel void
-gpusort_setup_chunk_rs(__global kern_gpusort *kgsort,
+__kernel void
+gpusort_setup_chunk_rs(cl_uint rcs_global_index,
+					   __global kern_gpusort *kgsort,
 					   __global kern_row_store *krs,
 					   __local void *local_workmem)
 {
@@ -233,7 +241,7 @@ gpusort_setup_chunk_rs(__global kern_gpusort *kgsort,
 	 */
 }
 
-kernel void
+__kernel void
 gpusort_setup_chunk_cs(__global kern_gpusort *kgsort,
 					   __global kern_column_store *kcs,
 					   __global kern_toastbuf *ktoast,
@@ -251,26 +259,25 @@ gpusort_setup_chunk_cs(__global kern_gpusort *kgsort,
 
 typedef struct
 {
-	pgstrom_message	msg;		/* = StromTag_GpuSort */
-	Datum			dprog_key;	/* key of device program object */
-	dlist_node		chain;		/* be linked to pgstrom_gpusort_multi */
+	dlist_node		chain;		/* to be linked to pgstrom_gpusort */
 	StromObject	  **rcs_slot;	/* array of underlying row/column-store */
 	cl_uint			rcs_slotsz;	/* length of the array */
 	cl_uint			rcs_nums;	/* current usage of the array */
 	cl_uint			rcs_global_index;	/* starting offset in GpuSortState */
 	kern_gpusort	kern;
-} pgstrom_gpusort;
+} pgstrom_gpusort_chunk;
 
 typedef struct
 {
-	pgstrom_message	msg;		/* = StromTag_GpuSortMulti */
+	pgstrom_message	msg;		/* = StromTag_GpuSort */
 	Datum			dprog_key;	/* key of device program object */
+	bool			is_multi;	/* true, if multi-chunks merge sorting */
 	dlist_node		chain;		/* be linked to free list */
 	dlist_head		in_chunk1;	/* sorted chunks to be merged */
 	dlist_head		in_chunk2;	/* sorted chunks to be merged */
 	dlist_head		out_chunk;	/* merged output chunks */
 	dlist_head		work_chunk;	/* working buffer during merge sort */
-} pgstrom_gpusort_multi;
+} pgstrom_gpusort;
 
 #define GPUSORT_MULTI_PER_BLOCK				\
 	((SHMEM_BLOCKSZ - SHMEM_ALLOC_COST		\

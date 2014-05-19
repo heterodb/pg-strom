@@ -1909,7 +1909,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	kcmdq = opencl_cmdq[i];
 
 	/* and, compute an optimal workgroup-size of this kernel */
-	if (!clserv_compute_workgroup_size(1, &gwork_sz, &lwork_sz,
+	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
 									   clgss->kernel, i, nrows,
 									   sizeof(cl_uint),
 									   sizeof(cl_uint)))
@@ -2394,9 +2394,10 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 	kcmdq = opencl_cmdq[i];
 
 	/* and, compute an optimal workgroup-size of this kernel */
-	if (!clserv_compute_workgroup_size(1, &gwork_sz, &lwork_sz,
+	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
 									   clgsc->kernel, i, nrows,
-									   sizeof(cl_uint), sizeof(cl_uint)))
+									   sizeof(cl_uint),
+									   sizeof(cl_uint)))
 		goto error3;
 
 	/* allocation of device memory for kern_gpuscan argument */

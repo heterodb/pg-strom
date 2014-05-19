@@ -1047,8 +1047,7 @@ pgstrom_init_opencl_devinfo(void)
  * to 32.
  */
 bool
-clserv_compute_workgroup_size(cl_uint ndim,
-							  size_t *gwork_sz,
+clserv_compute_workgroup_size(size_t *gwork_sz,
 							  size_t *lwork_sz,
 							  cl_kernel kernel,
 							  int dev_index,
@@ -1058,32 +1057,13 @@ clserv_compute_workgroup_size(cl_uint ndim,
 {
 	const pgstrom_device_info *devinfo;
 	cl_device_id kdevice;
-	size_t		workgroup_sz;
-	size_t		workgroup_unitsz;
+	size_t		blocksz;
 	size_t		kern_local_usage;
-	cl_ulong	kern_local_memsz;
-	cl_int		i, rc;
+	cl_int		rc;
 
 	Assert(pgstrom_i_am_clserv);
-	Assert(ndim > 0 && ndim <= 3);
 
 	kdevice = opencl_devices[dev_index];
-	/*
-	 * Get a hint based on hardware restriction and register/static
-	 * local memory usage.
-	 */
-	rc = clGetKernelWorkGroupInfo(kernel,
-								  kdevice,
-								  CL_KERNEL_WORK_GROUP_SIZE,
-								  sizeof(workgroup_sz),
-								  &workgroup_sz,
-								  NULL);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clGetKernelWorkGroupInfo: %s",
-				   opencl_strerror(rc));
-		return false;
-	}
 
 	/*
 	 * Get a preferred unit size of workgroup to be launched.
@@ -1094,29 +1074,14 @@ clserv_compute_workgroup_size(cl_uint ndim,
 	rc = clGetKernelWorkGroupInfo(kernel,
 								  kdevice,
 								  CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE,
-								  sizeof(workgroup_unitsz),
-								  &workgroup_unitsz,
+								  sizeof(blocksz),
+								  &blocksz,
 								  NULL);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clGetKernelWorkGroupInfo: %s",
 				   opencl_strerror(rc));
 		return false;
-	}
-	workgroup_unitsz = TYPEALIGN(PGSTROM_WORKGROUP_UNITSZ, workgroup_unitsz);
-	if (workgroup_unitsz == 0)
-		workgroup_unitsz = PGSTROM_WORKGROUP_UNITSZ;
-	/* workgroup size must be multiplexer of unit-size */
-	workgroup_sz -= (workgroup_sz % workgroup_unitsz);
-
-	/*
-	 * if number of threads are less then workgroup size, we don't need
-	 * to have such a large number
-	 */
-	if (num_threads < workgroup_sz)
-	{
-		workgroup_sz = num_threads + workgroup_unitsz - 1;
-		workgroup_sz -= (workgroup_sz % workgroup_unitsz);
 	}
 
 	/*
@@ -1136,33 +1101,27 @@ clserv_compute_workgroup_size(cl_uint ndim,
 		return false;
 	}
 
+	/*
+	 * If blocksz takes over-consumption of local memory, we will adjust
+	 * blocksz small enough to assign local memory.
+	 */
 	devinfo = pgstrom_get_device_info(dev_index);
-	if (kern_local_usage > devinfo->dev_local_mem_size)
+	if (local_memsz_per_thread * blocksz +
+		local_memsz_per_call > devinfo->dev_local_mem_size - kern_local_usage)
 	{
-		clserv_log("static local memory of kernel is too large to run (%zu)",
-				   kern_local_usage);
+		blocksz = (devinfo->dev_local_mem_size -
+				   kern_local_usage -
+				   local_memsz_per_call) / local_memsz_per_thread;
+		blocksz = TYPEALIGN(PGSTROM_WORKGROUP_UNITSZ, blocksz);
+	}
+	if (blocksz == 0)
+	{
+		clserv_log("local memory consumption by kernel too large");
 		return false;
 	}
 
-	/* needs adjust, if local memory usage exceeds device limitation */
-	if (local_memsz_per_thread * workgroup_sz +
-		local_memsz_per_call > devinfo->dev_local_mem_size - kern_local_usage)
-	{
-		kern_local_memsz = (devinfo->dev_local_mem_size -
-							kern_local_usage -
-							local_memsz_per_call);
-		workgroup_sz = kern_local_memsz / local_memsz_per_thread;
-		workgroup_sz -= (workgroup_sz % workgroup_unitsz);
-	}
-
-	lwork_sz[0] = workgroup_sz;
-	gwork_sz[0] = ((num_threads +
-					workgroup_sz - 1) / workgroup_sz) * workgroup_sz;
-	for (i=1; i < ndim; i++)
-	{
-		lwork_sz[i] = 1;
-		gwork_sz[i] = 1;
-	}
+	*lwork_sz = blocksz;
+	*gwork_sz = ((num_threads + blocksz - 1) / blocksz) * blocksz;
 
 	/*
 	 * TODO: needs to put optimal workgroup size for each

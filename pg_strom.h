@@ -503,8 +503,7 @@ extern void construct_opencl_device_info(void);
 extern void pgstrom_init_opencl_devinfo(void);
 extern Datum pgstrom_opencl_device_info(PG_FUNCTION_ARGS);
 
-extern bool clserv_compute_workgroup_size(cl_uint ndim,
-										  size_t *gwork_sz,
+extern bool clserv_compute_workgroup_size(size_t *gwork_sz,
 										  size_t *lwork_sz,
 										  cl_kernel kernel,
 										  int dev_index,
@@ -657,6 +656,7 @@ extern void pgstrom_init_debug(void);
  */
 extern const char *pgstrom_opencl_common_code;
 extern const char *pgstrom_opencl_gpuscan_code;
+extern const char *pgstrom_opencl_gpusort_code;
 extern const char *pgstrom_opencl_textlib_code;
 extern const char *pgstrom_opencl_timelib_code;
 

@@ -122,6 +122,18 @@ static void pgstrom_wakeup_columnizer(bool wakeup_all);
 	(HeapTupleHeaderGetRawXmax(htup) == FrozenTransactionId)
 
 /*
+ * NOTE: Default ItemPointerGetBlockNumber and ItemPointerGetOffsetNumber
+ * internally have assertion checks. It may cause undesirable assertion
+ * failure if these macros are called towards virtual tuples.
+ */
+#define ItemPointerGetBlockNumberNoAssert(ip)	\
+	(((ip)->ip_blkid.bi_hi << 16) | (uint16)((ip)->ip_blkid.bi_lo))
+
+#define ItemPointerGetOffsetNumberNoAssert(ip)	\
+	((ip)->ip_posid)
+
+
+/*
  * Misc utility functions
  */
 static inline int
@@ -1783,10 +1795,13 @@ tcache_row_store_insert_tuple(tcache_row_store *trs, HeapTuple tuple)
 	memcpy(&rs_tup->data, tuple->t_data, tuple->t_len);
 
 	tupoffset[trs->kern.nrows++] = trs->usage;
-	if (trs->blkno_max < ItemPointerGetBlockNumber(&tuple->t_self))
-		trs->blkno_max = ItemPointerGetBlockNumber(&tuple->t_self);
-	if (trs->blkno_min > ItemPointerGetBlockNumber(&tuple->t_self))
-		trs->blkno_min = ItemPointerGetBlockNumber(&tuple->t_self);
+	/*
+	 * NOTE: can be called to store virtual tuples.
+	 */
+	if (trs->blkno_max < ItemPointerGetBlockNumberNoAssert(&tuple->t_self))
+		trs->blkno_max = ItemPointerGetBlockNumberNoAssert(&tuple->t_self);
+	if (trs->blkno_min > ItemPointerGetBlockNumberNoAssert(&tuple->t_self))
+		trs->blkno_min = ItemPointerGetBlockNumberNoAssert(&tuple->t_self);
 	return true;
 }
 

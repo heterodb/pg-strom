@@ -49,6 +49,7 @@ typedef struct {
 	 StromTagIs(sobject,TCacheColumnStore) ||	\
 	 StromTagIs(sobject,GpuScan)	||			\
 	 StromTagIs(sobject,GpuSort) ||				\
+	 StromTagIs(sobject,GpuSortMulti) ||		\
 	 StromTagIs(sobject,HashJoin))
 
 #define RESTRACK_HASHSZ		100
