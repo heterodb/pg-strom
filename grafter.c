@@ -38,7 +38,6 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan *plan)
 					newnode = &altplan->plan;
 			}
 			break;
-
 		case T_ModifyTable:
 			{
 				ModifyTable *mtplan = (ModifyTable *) newnode;

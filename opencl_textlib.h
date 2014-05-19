@@ -23,30 +23,23 @@ varlena_cmp(__private cl_int *errcode,
 	cl_int		len1 = VARSIZE_ANY(arg1);
 	cl_int		len2 = VARSIZE_ANY(arg2);
 	cl_int		len = min(len1, len2);
-	cl_uint		v1;
-	cl_uint		v2;
-	cl_uint		mask;
 
 	/* XXX - to be revised to GPU style */
 	while (len > 0)
 	{
-		v1 = *((__global cl_uint *)s1);
-		v2 = *((__global cl_uint *)s2);
-		mask = v1 ^ v2;
-		if (mask != 0)
-		{
-			if (len > 0 && (mask & 0x000000ffU) != 0)
-				return ((v1 & 0x000000ffU) > (v2 & 0x000000ffU) ? 1 : -1);
-			else if (len > 1 && (mask & 0x0000ff00U) != 0)
-				return ((v1 & 0x0000ff00U) > (v2 & 0x0000ff00U) ? 1 : -1);
-			else if (len > 2 && (mask & 0x00ff0000U) != 0)
-				return ((v1 & 0x00ff0000U) > (v2 & 0x00ff0000U) ? 1 : -1);
-			else if (len > 3)
-				return ((v1 & 0xff000000U) > (v2 & 0xff000000U) ? 1 : -1);
-		}
-		s1 += sizeof(cl_uint);
-		s2 += sizeof(cl_uint);
-		len -= sizeof(cl_uint);
+#if 1
+		/*
+		 * XXX - to be revised for more GPU/MIC reasonable design
+		 */
+		if (*s1 < *s2)
+			return -1;
+		if (*s1 > *s2)
+			return 1;
+
+		s1++;
+		s2++;
+		len--;
+#endif
 	}
 	if (len1 != len2)
 		return (len1 > len2 ? 1 : -1);

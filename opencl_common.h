@@ -19,7 +19,9 @@
  * only OpenCL device code.
  */
 #ifdef OPENCL_DEVICE_CODE
+
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
+#pragma OPENCL EXTENSION cl_khr_byte_addressable_store : enable
 
 /* NULL definition */
 #define NULL	((__global void *) 0UL)
@@ -965,7 +967,7 @@ kern_get_datum(__global kern_column_store *kcs,
 	else
 		offset += sizeof(cl_uint) * rowidx;
 
-	return (__global void *)((uintptr_t)kcs + offset);
+	return (__global void *)((__global char *)kcs + offset);
 }
 
 /* ------------------------------------------------------------

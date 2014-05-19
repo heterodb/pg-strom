@@ -227,6 +227,17 @@ collect_opencl_device_info(cl_device_id device_id)
 		elog(LOG, "Only CPU, GPU or Accelerator are supported, skipped");
 		goto out_clean;
 	}
+	if (!strstr(dev_info->dev_device_extensions, "cl_khr_fp64"))
+	{
+		elog(LOG, "OpenCL device has to support cl_khr_fp64 extension");
+		goto out_clean;
+	}
+	if (!strstr(dev_info->dev_device_extensions,
+				"cl_khr_byte_addressable_store"))
+	{
+		elog(LOG, "OpenCL device has to support cl_khr_byte_addressable_store extension");
+		goto out_clean;
+	}
 	if (!dev_info->dev_available)
 	{
 		elog(LOG, "OpenCL device \"%s\" is not available, skipped",
