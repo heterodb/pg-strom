@@ -227,7 +227,7 @@ pgstrom_shmem_zone_block_alloc(shmem_zone *zone,
 	block = dlist_container(shmem_block, chain, dnode);
 	Assert(block->blocksz == (1UL << shift) * SHMEM_BLOCKSZ);
 
-	memset(&block->chain, 0, sizeof(dlist_node));
+	memset(block, 0, sizeof(shmem_block));
 	block->blocksz = size;
 
 	/* non-head block are zero cleared? */
@@ -561,8 +561,9 @@ collect_shmem_block_info(shmem_zone *zone, int zone_index)
 
 		if (BLOCK_IS_ACTIVE(block))
 		{
-			int		nshift = find_least_pot(block->blocksz + sizeof(cl_uint));
-
+			int		nshift = find_least_pot(offsetof(shmem_body, data[0]) +
+											block->blocksz +
+											sizeof(cl_uint));
 			Assert(nshift <= SHMEM_BLOCKSZ_BITS_RANGE);
 			num_active[nshift]++;
 			i += (1 << nshift);
@@ -578,8 +579,6 @@ collect_shmem_block_info(shmem_zone *zone, int zone_index)
 		else
 			elog(ERROR, "block %ld is neither active nor free", i);
 	}
-	//Assert(memcmp(num_active, zone->num_active, sizeof(num_active)) == 0);
-	//Assert(memcmp(num_free, zone->num_free, sizeof(num_free)) == 0);
 #else
 	memcpy(num_active, zone->num_active, sizeof(num_active));
 	memcpy(num_free, zone->num_free, sizeof(num_free));
@@ -711,8 +710,9 @@ collect_shmem_active_info(shmem_zone *zone, int zone_index)
 		{
 			shmem_active_info *sainfo;
 			cl_uint	   *p_magic;
-			int			nshift = find_least_pot(block->blocksz +
-												SHMEM_ALLOC_COST);
+			int		nshift = find_least_pot(offsetof(shmem_body, data[0]) +
+											block->blocksz +
+											sizeof(cl_uint));
 
 			body = (shmem_body *)((char *)zone->block_baseaddr +
 								  i * SHMEM_BLOCKSZ);
@@ -741,7 +741,7 @@ collect_shmem_active_info(shmem_zone *zone, int zone_index)
 			i += (1 << nshift);
 		}
 		else
-			elog(ERROR, "block %ld is neither active nor free", i);
+			elog(ERROR, "block %ld is neither active nor free");
 	}
 	return results;
 }
