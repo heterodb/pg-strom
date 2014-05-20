@@ -119,6 +119,9 @@ typedef enum vartag_external
 	VARTAG_ONDISK = 18
 } vartag_external;
 
+#define VARHDRSZ_SHORT			offsetof(varattrib_1b, va_data)
+#define VARATT_SHORT_MAX		0x7F
+
 typedef struct varatt_external
 {
 	cl_int		va_rawsize;		/* Original data size (includes header) */
@@ -143,7 +146,6 @@ typedef struct varatt_indirect
 #define VARSIZE_EXTERNAL(PTR)	\
 	(VARHDRSZ_EXTERNAL + VARTAG_SIZE(VARTAG_EXTERNAL(PTR)))
 
-
 #define VARATT_IS_4B(PTR) \
 	((((__global varattrib_1b *) (PTR))->va_header & 0x01) == 0x00)
 #define VARATT_IS_4B_U(PTR) \
@@ -165,6 +167,11 @@ typedef struct varatt_indirect
 	((((__global varattrib_1b *) (PTR))->va_header >> 1) & 0x7F)
 #define VARTAG_1B_E(PTR) \
 	(((__global varattrib_1b_e *) (PTR))->va_tag)
+
+#define VARSIZE_ANY_EXHDR(PTR) \
+	(VARATT_IS_1B_E(PTR) ? VARSIZE_EXTERNAL(PTR)-VARHDRSZ_EXTERNAL : \
+	 (VARATT_IS_1B(PTR) ? VARSIZE_1B(PTR)-VARHDRSZ_SHORT :			 \
+	  VARSIZE_4B(PTR)-VARHDRSZ))
 
 #define VARSIZE_ANY(PTR)							\
 	(VARATT_IS_1B_E(PTR) ? VARSIZE_EXTERNAL(PTR) :	\

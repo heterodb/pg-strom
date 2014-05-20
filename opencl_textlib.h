@@ -20,17 +20,18 @@ varlena_cmp(__private cl_int *errcode,
 {
 	__global cl_char *s1 = VARDATA_ANY(arg1);
 	__global cl_char *s2 = VARDATA_ANY(arg2);
-	cl_int		len1 = VARSIZE_ANY(arg1);
-	cl_int		len2 = VARSIZE_ANY(arg2);
+	cl_int		len1 = VARSIZE_ANY_EXHDR(arg1);
+	cl_int		len2 = VARSIZE_ANY_EXHDR(arg2);
 	cl_int		len = min(len1, len2);
 
-	/* XXX - to be revised to GPU style */
+	/*
+	 * XXX - to be revised for more GPU/MIC confortable coding style.
+	 * Once thing you need to pay attention is varlena variables may
+	 * be unaligned if short format, thus it leads unaligned data
+	 * access, then eventually leads kernel crash.
+	 */
 	while (len > 0)
 	{
-#if 1
-		/*
-		 * XXX - to be revised for more GPU/MIC reasonable design
-		 */
 		if (*s1 < *s2)
 			return -1;
 		if (*s1 > *s2)
@@ -39,7 +40,6 @@ varlena_cmp(__private cl_int *errcode,
 		s1++;
 		s2++;
 		len--;
-#endif
 	}
 	if (len1 != len2)
 		return (len1 > len2 ? 1 : -1);
