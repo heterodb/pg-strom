@@ -151,6 +151,31 @@ run_gpusort_single(__global kern_parambuf *kparams,
 	 * on the rindex buffer.
 	 * (rindex array has the least 2^N capacity larger than nrows)
 	 */
+
+	cl_int	threadID		= get_global_id(0);
+	cl_int	nrows			= (kchunk)->nrows;
+	cl_int	halfUnitSize	= unitsz / 2;
+	cl_int	unitMask		= unitsz - 1;
+
+	cl_int	idx0			= (threaadID / halfUnitSize) * unitSize + threadID % halfUnitSize;
+	cl_int	idx1			= reversing ? ((idx0 & ~unitMask) | (~idx0 & unitMask)) : (idx0 + halfUnitSize);
+
+	if(nrows <= idx1) {
+	  return;
+	}
+
+	cl_int	pos0			= results[idx0];
+	cl_int	pos1			= results[idx1];
+	cl_int	rv;
+
+	rv = gpusort_comp(&errcode, kchunk, ktoast, pos0, kchunk, ktoast, pos1);
+	if(0 < rv) {
+	  // swap
+	  results[idx0] = pos1;
+	  results[idx1] = pos0;
+	}
+
+	return;
 }
 
 static void
