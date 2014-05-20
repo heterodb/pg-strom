@@ -199,6 +199,8 @@ run_gpusort_single(__global kern_parambuf *kparams,
 
 static void
 run_gpusort_multi(__global kern_parambuf *kparams,
+				  cl_bool reversing,		/* in */
+				  cl_uint unitsz,			/* out */
 				  __global kern_column_store *x_chunk,
 				  __global kern_toastbuf     *x_toast,
 				  __global kern_column_store *y_chunk,
