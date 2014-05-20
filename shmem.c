@@ -741,7 +741,7 @@ collect_shmem_active_info(shmem_zone *zone, int zone_index)
 			i += (1 << nshift);
 		}
 		else
-			elog(ERROR, "block %ld is neither active nor free");
+			elog(ERROR, "block %ld is neither active nor free", i);
 	}
 	return results;
 }
