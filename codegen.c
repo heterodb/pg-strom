@@ -1077,19 +1077,8 @@ pgstrom_devfunc_lookup(Oid func_oid)
 	return dfunc;
 }
 
-typedef struct
-{
-	StringInfoData	str;
-	List	   *type_defs;		/* list of devtype_info */
-	List	   *func_defs;		/* list of devfunc_info */
-	List	   *used_params;	/* list of Const or Param nodes */
-	List	   *used_vars;		/* list of Var nodes */
-	const char *row_index;		/* label to reference row-index, if exist */
-	int			extra_flags;
-} codegen_walker_context;
-
-static devtype_info *
-devtype_lookup_and_track(Oid type_oid, codegen_walker_context *context)
+devtype_info *
+pgstrom_devtype_lookup_and_track(Oid type_oid, codegen_context *context)
 {
 	devtype_info   *dtype = pgstrom_devtype_lookup(type_oid);
 	if (dtype)
@@ -1097,8 +1086,8 @@ devtype_lookup_and_track(Oid type_oid, codegen_walker_context *context)
 	return dtype;
 }
 
-static devfunc_info *
-devfunc_lookup_and_track(Oid func_oid, codegen_walker_context *context)
+devfunc_info *
+pgstrom_devfunc_lookup_and_track(Oid func_oid, codegen_context *context)
 {
 	devfunc_info   *dfunc = pgstrom_devfunc_lookup(func_oid);
 	ListCell	   *cell;
@@ -1119,7 +1108,7 @@ devfunc_lookup_and_track(Oid func_oid, codegen_walker_context *context)
 }
 
 static bool
-codegen_expression_walker(Node *node, codegen_walker_context *context)
+codegen_expression_walker(Node *node, codegen_context *context)
 {
 	devtype_info   *dtype;
 	devfunc_info   *dfunc;
@@ -1134,22 +1123,33 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 		cl_uint	index = 0;
 
 		if (!devtype_runnable_collation(con->constcollid) ||
-			!devtype_lookup_and_track(con->consttype, context))
+			!pgstrom_devtype_lookup_and_track(con->consttype, context))
 			return false;
 
 		foreach (cell, context->used_params)
 		{
 			if (equal(node, lfirst(cell)))
 			{
-				appendStringInfo(&context->str, "KPARAM_%u", index);
+				if (context->on_kvar_callback)
+					context->on_kvar_callback(&context->str, false,
+											  index, (Var *)node,
+											  context->private);
+				else
+					appendStringInfo(&context->str, "KPARAM_%u", index);
 				return true;
 			}
 			index++;
 		}
 		context->used_params = lappend(context->used_params,
 									   copyObject(node));
-		appendStringInfo(&context->str, "KPARAM_%u",
-						 list_length(context->used_params) - 1);
+		index = list_length(context->used_params) - 1;
+		if (context->on_kvar_callback)
+			context->on_kvar_callback(&context->str, false,
+									  index, (Var *)node,
+									  context->private);
+		else
+			appendStringInfo(&context->str, "KPARAM_%u",
+							 list_length(context->used_params) - 1);
 		return true;
 	}
 	else if (IsA(node, Param))
@@ -1159,22 +1159,30 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 
 		if (!devtype_runnable_collation(param->paramcollid) ||
 			param->paramkind != PARAM_EXTERN ||
-			!devtype_lookup_and_track(param->paramtype, context))
+			!pgstrom_devtype_lookup_and_track(param->paramtype, context))
 			return false;
 
 		foreach (cell, context->used_params)
 		{
 			if (equal(node, lfirst(cell)))
 			{
-				appendStringInfo(&context->str, "KPARAM_%u", index);
+				if (context->on_kparam_callback)
+					context->on_kparam_callback(&context->str, false,
+												index, node, context->private);
+				else
+					appendStringInfo(&context->str, "KPARAM_%u", index);
 				return true;
 			}
 			index++;
 		}
 		context->used_params = lappend(context->used_params,
 									   copyObject(node));
-		appendStringInfo(&context->str, "KPARAM_%u",
-						 list_length(context->used_params) - 1);
+		index = list_length(context->used_params) - 1;
+		if (context->on_kparam_callback)
+			context->on_kparam_callback(&context->str, false,
+										index, node, context->private);
+		else
+			appendStringInfo(&context->str, "KPARAM_%u", index);
 		return true;
 	}
 	else if (IsA(node, Var))
@@ -1183,28 +1191,32 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 		cl_uint	index = 0;
 
 		if (!devtype_runnable_collation(var->varcollid) ||
-			!devtype_lookup_and_track(var->vartype, context))
+			!pgstrom_devtype_lookup_and_track(var->vartype, context))
 			return false;
 
 		foreach (cell, context->used_vars)
 		{
 			if (equal(node, lfirst(cell)))
 			{
-				appendStringInfo(&context->str, "KVAR_%u", index);
-				if (context->row_index)
-					appendStringInfo(&context->str, "(%s)",
-									 context->row_index);
+				if (context->on_kvar_callback)
+					context->on_kvar_callback(&context->str, false,
+											  index, (Var *)node,
+											  context->private);
+				else
+					appendStringInfo(&context->str, "KVAR_%u", index);
 				return true;
 			}
 			index++;
 		}
 		context->used_vars = lappend(context->used_vars,
 									 copyObject(node));
-		appendStringInfo(&context->str, "KVAR_%u",
-						 list_length(context->used_vars) - 1);
-		if (context->row_index)
-			appendStringInfo(&context->str, "(%s)",
-							 context->row_index);
+		index = list_length(context->used_vars) - 1;
+		if (context->on_kvar_callback)
+			context->on_kvar_callback(&context->str, false,
+									  index, (Var *)node,
+									  context->private);
+		else
+			appendStringInfo(&context->str, "KVAR_%u", index);
 		return true;
 	}
 	else if (IsA(node, FuncExpr))
@@ -1216,7 +1228,7 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 			!devtype_runnable_collation(func->inputcollid))
 			return false;
 
-		dfunc = devfunc_lookup_and_track(func->funcid, context);
+		dfunc = pgstrom_devfunc_lookup_and_track(func->funcid, context);
 		if (!func)
 			return false;
 		appendStringInfo(&context->str,
@@ -1242,7 +1254,8 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 			!devtype_runnable_collation(op->inputcollid))
 			return false;
 
-		dfunc = devfunc_lookup_and_track(get_opcode(op->opno), context);
+		dfunc = pgstrom_devfunc_lookup_and_track(get_opcode(op->opno),
+												 context);
 		if (!dfunc)
 			return false;
 		appendStringInfo(&context->str,
@@ -1394,15 +1407,17 @@ codegen_expression_walker(Node *node, codegen_walker_context *context)
 char *
 pgstrom_codegen_expression(Node *expr, codegen_context *context)
 {
-	codegen_walker_context	walker_context;
+	codegen_context	walker_context;
 
 	initStringInfo(&walker_context.str);
 	walker_context.type_defs = list_copy(context->type_defs);
 	walker_context.func_defs = list_copy(context->func_defs);
 	walker_context.used_params = list_copy(context->used_params);
 	walker_context.used_vars = list_copy(context->used_vars);
-	walker_context.row_index = context->row_index;
 	walker_context.extra_flags = context->extra_flags;
+	walker_context.on_kparam_callback = context->on_kparam_callback;
+	walker_context.on_kvar_callback = context->on_kvar_callback;
+	walker_context.private = context->private;
 
 	if (IsA(expr, List))
 	{
@@ -1471,7 +1486,12 @@ pgstrom_codegen_declarations(codegen_context *context)
 	index = 0;
 	foreach (cell, context->used_params)
 	{
-		if (IsA(lfirst(cell), Const))
+		if (context->on_kparam_callback)
+		{
+			context->on_kparam_callback(&str, true, index, lfirst(cell),
+										context->private);
+		}
+		else if (IsA(lfirst(cell), Const))
 		{
 			Const  *con = lfirst(cell);
 
@@ -1506,19 +1526,31 @@ pgstrom_codegen_declarations(codegen_context *context)
 	{
 		Var	   *var = lfirst(cell);
 
-		dtype = pgstrom_devtype_lookup(var->vartype);
-		Assert(dtype != NULL);
-
-		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
-			appendStringInfo(&str,
-					 "#define KVAR_%u\t"
-					 "pg_%s_vref(kcs,toast,&errcode,%u,get_global_id(0))\n",
-							 index, dtype->type_name, index);
+		if (context->on_kvar_callback)
+			context->on_kvar_callback(&str, true, index, var,
+									  context->private);
 		else
-			appendStringInfo(&str,
-					 "#define KVAR_%u\t"
-					 "pg_%s_vref(kcs,&errcode,%u,get_global_id(0))\n",
-							 index, dtype->type_name, index);
+		{
+			dtype = pgstrom_devtype_lookup(var->vartype);
+			Assert(dtype != NULL);
+
+			if (dtype->type_flags & DEVTYPE_IS_VARLENA)
+				appendStringInfo(&str,
+								 "#define KVAR_%u\t"
+								 "pg_%s_vref(kcs,toast,&errcode,%u,%s)\n",
+								 index,
+								 dtype->type_name,
+								 index,
+								 "get_global_id(0)");
+			else
+				appendStringInfo(&str,
+								 "#define KVAR_%u\t"
+								 "pg_%s_vref(kcs,&errcode,%u,%s)\n",
+								 index,
+								 dtype->type_name,
+								 index,
+								 "get_global_id(0)");
+		}
 		index++;
 	}
 	return str.data;

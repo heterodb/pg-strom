@@ -557,16 +557,26 @@ extern void __clserv_log(const char *funcname,
  * codegen.c
  */
 typedef struct {
+	StringInfoData	str;
 	List	   *type_defs;	/* list of devtype_info in use */
 	List	   *func_defs;	/* list of devfunc_info in use */
 	List	   *used_params;/* list of Const/Param in use */
 	List	   *used_vars;	/* list of Var in use */
 	const char *row_index;	/* label to reference row-index, if exist */
 	int			extra_flags;/* external libraries to be included */
+	void	  (*on_kparam_callback)(StringInfo str, bool is_declare,
+									int index, Node *node, void *private);
+	void	  (*on_kvar_callback)(StringInfo str, bool is_declare,
+								  int index, Var *var, void *private);
+	void	   *private;
 } codegen_context;
 
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid);
+extern devtype_info *pgstrom_devtype_lookup_and_track(Oid type_oid,
+											  codegen_context *context);
+extern devfunc_info *pgstrom_devfunc_lookup_and_track(Oid func_oid,
+											  codegen_context *context);
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern char *pgstrom_codegen_declarations(codegen_context *context);
 extern bool pgstrom_codegen_available_expression(Expr *expr);
