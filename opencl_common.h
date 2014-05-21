@@ -59,6 +59,10 @@ typedef cl_uint		hostptr_t;
  */
 #define TYPEALIGN(ALIGNVAL,LEN)	\
 	(((uintptr_t) (LEN) + ((ALIGNVAL) - 1)) & ~((uintptr_t) ((ALIGNVAL) - 1)))
+#define INTALIGN(LEN)			TYPEALIGN(sizeof(cl_int), (LEN))
+#define INTALIGN_DOWN(LEN)		TYPEALIGN_DOWN(sizeof(cl_int), (LEN))
+#define LONGALIGN(LEN)          TYPEALIGN(sizeof(cl_long), (LEN))
+#define LONGALIGN_DOWN(LEN)     TYPEALIGN_DOWN(sizeof(cl_long), (LEN))
 
 /*
  * Simplified varlena support.
@@ -211,6 +215,9 @@ typedef struct varatt_indirect
 #define StromError_OpenCLInternal		102	/* OpenCL internal error */
 #define StromError_OutOfSharedMemory	105	/* out of shared memory */
 #define StromError_DivisionByZero		200	/* Division by zero */
+#define StromError_DataStoreCorruption	300	/* Row/Column Store Corrupted */
+#define StromError_DataStoreNoSpace		301	/* No Space in Row/Column Store */
+#define StromError_DataStoreOutOfRange	302	/* Out of range in Data Store */
 
 /* significant error; that abort transaction on the host code */
 #define StromErrorIsSignificant(errcode)	((errcode) >= 100 || (errcode) < 0)
@@ -774,6 +781,270 @@ typedef struct {
 	STROMCL_VARLENA_VARREF_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)
 
+/*
+ * memcpy implementation for OpenCL kernel usage
+ */
+static __global void *
+memcpy(__global void *__dst, __global const void *__src, size_t len)
+{
+	__global char		*dst = __dst;
+	__global const char	*src = __src;
+	cl_int		rshift;
+	cl_int		lshift;
+	cl_ulong	curr;
+	cl_ulong	next;
+
+	/* an obvious case that we don't need to take a copy */
+	if (dst == src || len == 0)
+		return dst;
+
+	/* just a charm */
+	prefetch(src, len);
+	/* adjust alignment */
+	while (((uintptr_t)dst & (sizeof(cl_ulong) - 1)) != 0 && len > 0)
+	{
+		*dst++ = *src++;
+		len--;
+	}
+	rshift = ((uintptr_t)src & (sizeof(cl_ulong) - 1));
+	lshift = sizeof(cl_ulong) - rshift;
+	src -= rshift;	/* aligned */
+	rshift <<= 8;	/* adjustment for right bit shift */
+	lshift <<= 8;	/* adjustment for left bit shift */
+
+	next = *((__global cl_ulong *)src);
+	src += sizeof(cl_ulong);
+	while (len >= sizeof(cl_ulong))
+	{
+		curr = next;
+		next = (len > sizeof(cl_ulong) ? *((__global cl_ulong *)src) : 0);
+		*((__global cl_ulong *)dst) = ((curr >> (8 * rshift)) |
+									   (next << (8 * lshift)));
+		src += sizeof(cl_ulong);
+		dst += sizeof(cl_ulong);
+		len -= sizeof(cl_ulong);
+	}
+	/* special treatment on the last one word */
+	curr = next;
+	next = (len > lshift ? *((__global cl_ulong *)src) : 0);
+
+	curr = (curr >> (8 * rshift)) | (next << (8 * lshift));
+	if (len >= sizeof(cl_uint))
+	{
+		*((__global cl_uint *)dst) = (cl_uint)(curr & 0xffffffffUL);
+		dst += sizeof(cl_uint);
+		len -= sizeof(cl_uint);
+	}
+	if (len >= sizeof(cl_ushort))
+	{
+		*((__global cl_ushort *)dst) = (cl_ushort)(curr & 0x0000ffffUL);
+		dst += sizeof(cl_ushort);
+		len -= sizeof(cl_ushort);
+	}
+	if (len >= sizeof(cl_uchar))
+	{
+		*((__global cl_uchar *)dst) = (cl_uchar)(curr & 0x000000ffUL);
+		len -= sizeof(cl_uchar);
+	}
+	return dst;
+}
+
+/*
+ * kern_column_to_column
+ *
+ * A common routine to copy a record in column store into another column-store
+ * It copies a record specified by index_src in the source column-store into
+ * the location pointed by index_dst in the destination column-store.
+ *
+ * We assume the destination column-store must:
+ * - have same number of same typed columns, with same not-null restriction
+ * - have enough rooms to store the record.
+ *  (usually, kcs_src and kcs_dst have same number of rooms to store values)
+ * - have enough capacity to store variable-length values.
+ *
+ * If unable to copy a record into one, it set an error code to inform the
+ * host code the problem, to recover it.
+ */
+static void
+kern_column_to_column(__private int *errcode,
+					  __global kern_column_store *kcs_dst,
+					  __global kern_toastbuf *ktoast_dst,
+					  cl_uint index_dst,
+					  __global kern_column_store *kcs_src,
+					  __global kern_toastbuf *ktoast_src,
+					  cl_uint index_src,
+					  __local void *workbuf)
+{
+	kern_colmeta	scmeta;
+	kern_colmeta	dcmeta;
+	cl_int			i, j, ncols = kcs_src->ncols;
+
+#ifdef PGSTROM_KERNEL_DEBUG
+	/* number of columns shall be identical */
+	if (kcs_src->ncols != kcs_dst->ncols)
+	{
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
+		return;
+	}
+
+	/* index towards the record has to be in the room of column-store */
+	if (index_src >= kcs_src->nrooms || index_dst >= kcs_dst->nrooms)
+	{
+		STROM_SET_ERROR(errcode, StromError_DataStoreOutOfRange);
+		return;
+	}
+#endif /* PGSTROM_KERNEL_DEBUG */
+
+	for (i=0; i < ncols; i++)
+	{
+		kern_colmeta	scmeta = kcs_src->colmeta[i];
+	    kern_colmeta	dcmeta = kcs_dst->colmeta[i];
+		__global char  *saddr;
+		__global char  *daddr;
+		cl_bool			isnull;
+
+#ifdef PGSTROM_KERNEL_DEBUG
+		/*
+		 * attalign and attlen must be identical, but attnotnull can be
+		 * handled during data copy, and may have different cs_ofs
+		 * according to nrooms of the column-store
+		 */
+		if (scmeta.attalign != dcmeta.attalign ||
+			scmeta.attlen   != dcmeta.attlen)
+		{
+			STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
+			return;
+		}
+#endif
+		saddr = (__global char *)kcs_src + scmeta.cs_ofs;
+		daddr = (__global char *)kcs_dst + dcmeta.cs_ofs;
+
+		if (scmeta.attnotnull)
+			isnull = false;
+		else
+		{
+			isnull = att_isnull(index_src, saddr);
+			saddr += STROMALIGN((kcs_src->nrooms + 7) >> 3);
+		}
+		/* XXX - we may need to adjust alignment */
+		saddr += (scmeta.attlen > 0
+				  ? scmeta.attlen
+				  : sizeof(cl_uint)) * index_src;
+
+		/*
+		 * set NULL bit, if needed.
+		 *
+		 * XXX - I'm concern it takes atomic operation on DRAM, however,
+		 * we have no way to avoid because here is no predication about
+		 * dindex to be supplied.
+		 */
+		if (!dcmeta.attnotnull)
+		{
+			if (isnull)
+				atomic_or((__global cl_uint *)(daddr + (index_dst >> 5)),
+						  ~(1 << (index_dst & 0x001f)));
+			else
+				atomic_and((__global cl_uint *)(daddr + (index_dst >> 5)),
+						   ~(1 << (index_dst & 0x001f)));
+			/* adjust offset for nullmap */
+			daddr += STROMALIGN((kcs_dst->nrooms + 7) >> 3);
+		}
+		else if (isnull)
+		{
+			/* cannot set a NULL on column with attnotnull attribute */
+			STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
+			return;
+		}
+		/* XXX - we may need to adjust alignment */
+		daddr += (dcmeta.attlen > 0
+				  ? dcmeta.attlen
+				  : sizeof(cl_uint)) * index_dst;
+
+		/*
+		 * Right now, we have only 8, 4, 2 and 1 bytes width for
+		 * fixed length variables
+		 */
+		if (dcmeta.attlen == sizeof(cl_ulong))
+			*((__global cl_ulong *)daddr) = *((__global cl_ulong *)saddr);
+		else if (dcmeta.attlen == sizeof(cl_uint))
+			*((__global cl_uint *)daddr) = *((__global cl_uint *)saddr);
+		else if (dcmeta.attlen == sizeof(cl_ushort))
+			*((__global cl_ushort *)daddr) = *((__global cl_ushort *)saddr);
+		else if (dcmeta.attlen == sizeof(cl_uchar))
+			*((__global cl_uchar *)daddr) = *((__global cl_uchar *)saddr);
+		else if (dcmeta.attlen > 0)
+			memcpy(daddr, saddr, dcmeta.attlen);
+		else
+		{
+			/* Oh, it's variable length field; takes toast buffer */
+			__local cl_uint		base;
+			__local cl_uint	   *vl_ofs = workbuf;
+			size_t				wkgrp_sz = get_local_size(0);
+			cl_uint				src_pos = *((__global cl_uint *)saddr);
+			cl_uint				dst_pos;
+			cl_uint				vl_len;
+
+			if (!isnull)
+				vl_len = VARSIZE_ANY((__global char *)ktoast_src + src_pos);
+			else
+				vl_len = 0;
+
+			/*
+			 * To avoid storm of atomic_add on the ktoast_dst->usage,
+			 * we once calculate required total length of toast buffer
+			 * on local memory, then increment ktoast_dst->usage using
+			 * atomic_add. Then, if still toast buffer is available, 
+			 * we will copy the varlena variable.
+			 */
+			vl_ofs[get_local_id(0)] = INTALIGN(vl_len);
+			barrier(CLK_LOCAL_MEM_FENCE);
+
+			for (j=0; wkgrp_sz > 0; j++, wkgrp_sz >>= 1)
+			{
+				if ((get_local_id(0) & (1 << j)) != 0)
+				{
+					cl_int	k = (get_local_id(0) & ~(1 << j)) | ((1 << j) - 1);
+
+					vl_ofs[get_local_id(0)]
+						+= (k < get_local_size(0) ? vl_ofs[k] : 0);
+				}
+				barrier(CLK_LOCAL_MEM_FENCE);
+			}
+
+			if (get_local_id(0) == 0)
+			{
+				cl_uint	toast_len = vl_ofs[get_local_size(0) - 1];
+
+				/* avoid atomic_add if obviously unavailable */
+				if (ktoast_dst->usage + toast_len <= ktoast_dst->length)
+				{
+					base = atomic_add(&ktoast_dst->usage, toast_len);
+					if (base + toast_len > toast_len)
+						base = 0;	/* overflow! */
+				}
+			}
+			barrier(CLK_LOCAL_MEM_FENCE);
+
+			if (isnull)
+				*((__global cl_uint *)daddr) = 0;
+			else
+			{
+				if (base == 0)
+				{
+					STROM_SET_ERROR(errcode, StromError_DataStoreNoSpace);
+					return;
+				}
+
+				cl_uint	dst_pos = vl_ofs[get_local_id(0)] + base;
+
+				*((__global cl_uint *)daddr) = dst_pos;
+				memcpy((__global char *)ktoast_dst + dst_pos,
+					   (__global char *)ktoast_src + src_pos,
+					   INTALIGN(vl_len));
+			}
+		}
+	}
+}
 
 /*
  * Common function to translate a row-store into column-store.

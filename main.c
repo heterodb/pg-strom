@@ -150,6 +150,12 @@ pgstrom_strerror(cl_int errcode)
 			return "out of shared memory";
 		case StromError_DivisionByZero:
 			return "division by zero";
+		case StromError_DataStoreCorruption:
+			return "row/column store is corrupted";
+		case StromError_DataStoreNoSpace:
+			return "row/column store has no space";
+		case StromError_DataStoreOutOfRange:
+			return "out of range in row/column store";
 		default:
 			snprintf(unknown_buf, sizeof(unknown_buf),
 					 "undefined strom error (code: %d)", errcode);
