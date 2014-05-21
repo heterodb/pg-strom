@@ -29,6 +29,7 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan *plan)
 
 	switch (nodeTag(plan))
 	{
+#if 0
 		case T_Sort:
 			{
 				CustomPlan *altplan
@@ -38,6 +39,7 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan *plan)
 					newnode = &altplan->plan;
 			}
 			break;
+#endif
 		case T_ModifyTable:
 			{
 				ModifyTable *mtplan = (ModifyTable *) newnode;
