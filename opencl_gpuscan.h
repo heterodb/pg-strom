@@ -90,57 +90,6 @@ typedef struct {
 
 #ifdef OPENCL_DEVICE_CODE
 /*
- * Get an error code to be returned in statement level
- */
-static void
-gpuscan_writeback_statement_error(__global kern_resultbuf *kresbuf,
-								  int errcode,
-								  __local void *workmem)
-{
-	__local cl_int *local_error = workmem;
-	cl_uint		wkgrp_id = get_local_id(0);
-	cl_uint		wkgrp_sz;
-	cl_int		errcode1;
-	cl_int		errcode2;
-	cl_int		i = 0;
-
-	local_error[wkgrp_id] = errcode;
-	barrier(CLK_LOCAL_MEM_FENCE);
-
-	for (i=0, wkgrp_sz = get_local_size(0) - 1;
-		 wkgrp_sz != 0;
-		 i++, wkgrp_sz >>= 1)
-	{
-		/* if least (i+1) bits of this wkgrp_id are zero? */
-		if ((wkgrp_id & ((1<<(i+1))-1)) == 0)
-		{
-			errcode1 = local_error[wkgrp_id];
-			errcode2 = (wkgrp_id + (1<<i) < get_local_size(0)
-						? local_error[wkgrp_id + (1<<i)]
-						: StromError_Success);
-
-			if (!StromErrorIsSignificant(errcode1) &&
-				StromErrorIsSignificant(errcode2))
-				local_error[wkgrp_id] = errcode2;
-		}
-		barrier(CLK_LOCAL_MEM_FENCE);
-	}
-
-	/*
-	 * It writes back a statement level error, unless no other workgroup
-	 * put a significant statement-level error.
-	 * This atomic operation set an error code, if it is still
-	 * StromError_Success.
-	 */
-	errcode1 = local_error[0];
-	if (get_local_id(0) == 0 && StromErrorIsSignificant(errcode1))
-	{
-		KDEBUG_INT("errcode", errcode1);
-		atomic_cmpxchg(&kresbuf->errcode, StromError_Success, errcode1);
-	}
-}
-
-/*
  * gpuscan_writeback_row_error
  *
  * It writes back the calculation result of gpuscan.
@@ -236,7 +185,7 @@ gpuscan_writeback_result(__global kern_gpuscan *kgpuscan, int errcode,
 {
 	__global kern_resultbuf *kresbuf = KERN_GPUSCAN_RESULTBUF(kgpuscan);
 
-	gpuscan_writeback_statement_error(kresbuf, errcode, local_workmem);
+	kern_writeback_error_status(&kresbuf->errcode, errcode, local_workmem);
 	gpuscan_writeback_row_error(kresbuf, errcode, local_workmem);
 }
 

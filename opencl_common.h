@@ -1356,6 +1356,64 @@ kern_get_datum(__global kern_column_store *kcs,
 	return (__global void *)((__global char *)kcs + offset);
 }
 
+/*
+ * kern_writeback_error_status
+ *
+ * It set thread-local error code on the variable on global memory.
+ * 
+ *
+ *
+ */
+static void
+kern_writeback_error_status(__global cl_int *error_status,
+							int own_errcode,
+							__local void *workmem)
+{
+	__local cl_int *error_temp = workmem;
+	size_t		wkgrp_sz;
+	size_t		mask;
+	size_t		buddy;
+	cl_int		errcode_0;
+	cl_int		errcode_1;
+	cl_int		i;
+
+	error_temp[get_local_id(0)] = own_errcode;
+	barrier(CLK_LOCAL_MEM_FENCE);
+
+	for (i=1, wkgrp_sz = get_local_size(0);
+		 wkgrp_sz > 0;
+		 i++, wkgrp_sz >>= 1)
+	{
+		mask = (1 << i) - 1;
+
+		if ((get_local_id(0) & mask) == 0)
+		{
+			buddy = get_local_id(0) + (1 << (i - 1));
+
+			errcode_0 = error_temp[get_local_id(0)];
+			errcode_1 = (buddy < get_local_size(0)
+						 ? error_temp[buddy]
+						 : StromError_Success);
+			if (!StromErrorIsSignificant(errcode_0) &&
+				StromErrorIsSignificant(errcode_1))
+				error_temp[get_local_id(0)] = errcode_1;
+		}
+		barrier(CLK_LOCAL_MEM_FENCE);
+	}
+
+	/*
+	 * It writes back a statement level error, unless no other workgroup
+	 * put a significant error status.
+	 * This atomic operation set an error code, if it is still
+	 * StromError_Success.
+	 */
+	errcode_0 = error_temp[0];
+	if (get_local_id(0) == 0 && StromErrorIsSignificant(errcode_0))
+	{
+		atomic_cmpxchg(error_status, StromError_Success, errcode_0);
+	}
+}
+
 /* ------------------------------------------------------------
  *
  * Declarations of common built-in types and functions

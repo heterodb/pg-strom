@@ -339,7 +339,7 @@ gpusort_setup_chunk_rs(cl_uint rcs_global_index,
 	else
 		errcode = StromError_DataStoreNoSpace;
 
-	// TODO: put kern_writeback_status
+	kern_writeback_error_status(kstatus, errcode, local_workmem);
 }
 
 __kernel void
