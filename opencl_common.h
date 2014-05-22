@@ -910,6 +910,80 @@ arithmetic_stairlike_add(uint my_value, __local cl_uint *items,
 	return items[get_local_size(0) - 1];
 }
 
+/*
+ * kern_varlena_to_toast
+ *
+ * A common routine to copy the supplied varlena variable into another
+ * column-store and toast buffer.
+ * We assume the supplied toast buffer is valid and flat (that means
+ * this toast buffer does not have coldir), then usage of toast-buffer
+ * shall be increased according to the usage.
+ * ktoast->usage is one of the hottest point for atomic operation, so
+ * we try to assign all the needed region at once, thus, this routine
+ * internally takes reduction arithmetic, but unavailable to call
+ * under if-block.
+ * It returns an offset value from the head of supplied ktoast buffer,
+ * or 0 if NULL or any other errors.
+ */
+static cl_uint
+kern_varlena_to_toast(__private int *errcode,
+					  __global kern_toastbuf *ktoast,
+					  __global varlena *vl_datum,
+					  __local void *workbuf)
+{
+	__local cl_uint	base;
+	cl_uint			vl_ofs;
+	cl_uint			vl_len;
+	cl_uint			toast_len;
+
+	if (vl_datum)
+		vl_len = VARSIZE_ANY(vl_len);
+	else
+		vl_len = 0;	/* null value */
+
+	/*
+	 * To avoid storm of atomic_add on the ktoast_dst->usage,
+	 * we once calculate required total length of toast buffer
+	 * on local memory, then increment ktoast_dst->usage using
+	 * atomic_add. Then, if still toast buffer is available, 
+	 * we will copy the varlena variable.
+	 */
+	vl_ofs = arithmetic_stairlike_add(INTALIGN(vl_len),
+									  workbuf, &toast_len);
+	if (get_local_id(0) == 0)
+	{
+		/*
+		 * to avoid overflow, we check current toast usage
+		 * prior to atomic_add, and skip and set error if
+		 * toast buffer obviously has no space any more.
+		 */
+		if (ktoast->usage + toast_len <= ktoast->length)
+		{
+			base = atomic_add(&ktoast->usage, toast_len);
+			if (base + toast_len > ktoast->length)
+				base = 0;	/* it's overflow! */
+		}
+		base = 0;
+	}
+	barrier(CLK_LOCAL_MEM_FENCE);
+
+	if (!vl_datum)
+		return 0;
+	if (base == 0)
+	{
+		/*
+		 * unable to set non-NULL value on the ktoast-buffer
+		 * being overflowed.
+		 */
+		STROM_SET_ERROR(errcode, StromError_DataStoreNoSpace);
+		return 0;
+	}
+	vl_ofs += base;
+
+	memcpy((__global char *)ktoast + vl_ofs, vl_datum, INTALIGN(vl_len));
+
+	return vl_ofs;
+}
 
 /*
  * kern_column_to_column
@@ -1038,62 +1112,13 @@ kern_column_to_column(__private int *errcode,
 			memcpy(daddr, saddr, dcmeta.attlen);
 		else
 		{
-			/* Oh, it's variable length field; takes toast buffer */
-			__local cl_uint		base;
-			cl_uint				src_pos = *((__global cl_uint *)saddr);
-			cl_uint				dst_pos;
-			cl_uint				vl_len;
-			cl_uint				toast_len;
-
-			if (!isnull)
-				vl_len = VARSIZE_ANY((__global char *)ktoast_src + src_pos);
-			else
-				vl_len = 0;
-
-			/*
-			 * To avoid storm of atomic_add on the ktoast_dst->usage,
-			 * we once calculate required total length of toast buffer
-			 * on local memory, then increment ktoast_dst->usage using
-			 * atomic_add. Then, if still toast buffer is available, 
-			 * we will copy the varlena variable.
-			 */
-			dst_pos = arithmetic_stairlike_add(vl_len, workbuf, &toast_len);
-			if (get_local_id(0) == 0)
-			{
-				/*
-				 * to avoid overflow on atomic_add, we check toast usage
-				 * preliminary
-				 */
-				if (ktoast_dst->usage + toast_len <= ktoast_dst->length)
-				{
-					base = atomic_add(&ktoast_dst->usage, toast_len);
-					if (base + toast_len > ktoast_dst->length)
-						base = 0;	/* overflow! */
-				}
-				else
-					base = 0;
-			}
-			barrier(CLK_LOCAL_MEM_FENCE);
-
-			if (isnull)
-				*((__global cl_uint *)daddr) = 0;
-			else
-			{
-				if (base == 0)
-				{
-					/*
-					 * unable to set non-NULL value on the ktoast-buffer
-					 * being overflowed.
-					 */
-					STROM_SET_ERROR(errcode, StromError_DataStoreNoSpace);
-					return;
-				}
-				dst_pos += base;
-				*((__global cl_uint *)daddr) = dst_pos;
-				memcpy((__global char *)ktoast_dst + dst_pos,
-					   (__global char *)ktoast_src + src_pos,
-					   INTALIGN(vl_len));
-			}
+			__global varlena   *vl_datum
+				= (__global varlena *)((__global char *)ktoast_src +
+									   *((__global cl_uint *)saddr));
+			*((__global cl_uint *)daddr) = kern_varlena_to_toast(errcode,
+																 ktoast_dst,
+																 vl_datum,
+																 workbuf);
 		}
 	}
 }
@@ -1117,7 +1142,8 @@ kern_column_to_column(__private int *errcode,
  * 3. Local work-group size has to be multiplexer of 32.
  */
 static void
-kern_row_to_column(__global cl_char *attreferenced,
+kern_row_to_column(__private cl_int *errcode,
+				   __global cl_char *attreferenced,
 				   __global kern_row_store *krs,
 				   __global kern_column_store *kcs,
 				   __global kern_toastbuf *ktoast,
@@ -1137,7 +1163,10 @@ kern_row_to_column(__global cl_char *attreferenced,
 	for (i=0, j=0; j < ncols; i++)
 	{
 		kern_colmeta	rcmeta = krs->colmeta[i];
-		kern_colmeta	ccmeta;
+		kern_colmeta	ccmeta = kcs->colmeta[j];
+		__global char  *dest = NULL;
+		__global char  *src = NULL;
+		cl_bool	ktoast_copy = false;
 		cl_bool	isnull;
 
 		if (!rs_tup || ((rs_tup->data.t_infomask & HEAP_HASNULL) != 0 &&
@@ -1145,8 +1174,6 @@ kern_row_to_column(__global cl_char *attreferenced,
 			isnull = true;
 		else
 		{
-			__global char  *src;
-
 			isnull = false;
 
 			if (rcmeta.attlen > 0)
@@ -1164,10 +1191,6 @@ kern_row_to_column(__global cl_char *attreferenced,
 					   VARSIZE_ANY(src));
 			if (attreferenced[i])
 			{
-				__global char  *dest;
-
-				ccmeta = kcs->colmeta[j];
-
 				dest = ((__global char *)kcs) + ccmeta.cs_ofs;
 
 				/* adjust destination address by nullmap, if needed */
@@ -1189,38 +1212,45 @@ kern_row_to_column(__global cl_char *attreferenced,
 				 * 1, 2, 4, 8 or 16-bytes length. Elsewhere, it should be
 				 * a variable length field.
 				 */
-				switch (ccmeta.attlen)
-				{
-					case 1:
-						*((__global cl_char *)dest)
-							= *((__global cl_char *)src);
-						break;
-					case 2:
-						*((__global cl_short *)dest)
-							= *((__global cl_short *)src);
-						break;
-					case 4:
-						*((__global cl_int *)dest)
-							= *((__global cl_int *)src);
-						break;
-					case 8:
-						*((__global cl_long *)dest)
-							= *((__global cl_long *)src);
-						break;
-					case 16:
-						*((__global cl_long *)dest)
-							= *((__global cl_long *)src);
-						*(((__global cl_long *)dest) + 1)
-							= *(((__global cl_long *)src) + 1);
-						break;
-					default:
-						*((__global cl_uint *)dest)
-							= (cl_uint)((uintptr_t)src -
-										(uintptr_t)krs);
-						break;
-				}
+				if (ccmeta.attlen == sizeof(cl_char))
+					*((__global cl_char *)dest)
+						= *((__global cl_char *)src);
+				else if (ccmeta.attlen == sizeof(cl_short))
+					*((__global cl_short *)dest)
+                        = *((__global cl_short *)src);
+				else if (ccmeta.attlen == sizeof(cl_int))
+					*((__global cl_int *)dest)
+                        = *((__global cl_int *)src);
+				else if (ccmeta.attlen == sizeof(cl_long))
+					*((__global cl_long *)dest)
+                        = *((__global cl_long *)src);
+				else if (ccmeta.attlen > 0)
+					memcpy(dest, src, ccmeta.attlen);
+				else if (!ktoast)
+					*((__global cl_uint *)dest)
+						= (cl_uint)((uintptr_t)src -
+									(uintptr_t)krs);
+				else
+					ktoast_copy = true;	/* do it below */
 			}
 		}
+
+		/*
+		 * If caller wants to copy the reference variable length field
+		 * into the supplied kern_toastbuf buffer, let's do it below.
+		 * Because 
+		 *
+		 */
+		if (ktoast_copy)
+		{
+			cl_uint		vl_ofs
+				= kern_varlena_to_toast(errcode,
+										ktoast,
+										(__global varlena *)src,
+										workbuf);
+			*((__global cl_uint *)dest) = vl_ofs;
+		}
+
 		/*
 		 * Calculation of nullmap if this column is the target to be moved.
 		 * Because it takes per bit operation using interaction with neighbor
@@ -1228,8 +1258,6 @@ kern_row_to_column(__global cl_char *attreferenced,
 		 */
 		if (attreferenced[i])
 		{
-			ccmeta = kcs->colmeta[j];
-
 			if (!ccmeta.attnotnull)
 			{
 				cl_uint	shift = (kcs_index & 0x001f);
