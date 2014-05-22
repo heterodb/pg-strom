@@ -850,6 +850,68 @@ memcpy(__global void *__dst, __global const void *__src, size_t len)
 }
 
 /*
+ * arithmetic_stairlike_add
+ *
+ * A utility routine to calculate sum of values when we have N items and 
+ * want to know sum of items[i=0...k] (k < N) for each k, using reduction
+ * algorithm on local memory (so, it takes log2(N) + 1 steps)
+ *
+ * The 'my_value' argument is a value to be set on the items[get_local_id(0)].
+ * Then, these are calculate as follows:
+ *
+ *           init   1st      2nd         3rd         4th
+ *           state  step     step        step        step
+ * items[0] = X0 -> X0    -> X0       -> X0       -> X0
+ * items[1] = X1 -> X0+X1 -> X0+X1    -> X0+X1    -> X0+X1
+ * items[2] = X2 -> X2    -> X0+...X2 -> X0+...X2 -> X0+...X2
+ * items[3] = X3 -> X2+X3 -> X0+...X3 -> X0+...X3 -> X0+...X3
+ * items[4] = X4 -> X4    -> X4       -> X0+...X4 -> X0+...X4
+ * items[5] = X5 -> X4+X5 -> X4+X5    -> X0+...X5 -> X0+...X5
+ * items[6] = X6 -> X6    -> X4+...X6 -> X0+...X6 -> X0+...X6
+ * items[7] = X7 -> X6+X7 -> X4+...X7 -> X0+...X7 -> X0+...X7
+ * items[8] = X8 -> X8    -> X8       -> X8       -> X0+...X8
+ * items[9] = X9 -> X8+X9 -> X8+9     -> X8+9     -> X0+...X9
+ *
+ * In Nth step, we split the array into 2^N blocks. In 1st step, a unit
+ * containt odd and even indexed items, and this logic adds the last value
+ * of the earlier half onto each item of later half. In 2nd step, you can
+ * also see the last item of the earlier half (item[1] or item[5]) shall
+ * be added to each item of later half (item[2] and item[3], or item[6]
+ * and item[7]). Then, iterate this step until 2^(# of steps) less than N.
+ *
+ * Note that supplied items[] must have at least sizeof(cl_uint) *
+ * get_local_size(0), and its contents shall be destroyed.
+ * Also note that this function internally use barrier(), so unable to
+ * use within if-blocks.
+ */
+static cl_uint
+arithmetic_stairlike_add(uint my_value, __local cl_uint *items,
+						 __private cl_uint *total_sum)
+{
+	size_t		wkgrp_sz = get_local_size(0);
+	cl_int		i, j;
+
+	/* set initial value */
+	items[get_local_id(0)] = my_value;
+	barrier(CLK_LOCAL_MEM_FENCE);
+
+	for (i=1; wkgrp_sz > 0; i++, wkgrp_sz >>= 1)
+	{
+		/* index of last item in the earlier half of each 2^i unit */
+		j = (get_local_id(0) & ~((1 << i) - 1)) | ((1 << (i-1)) - 1);
+
+		/* add item[j] if it is later half in the 2^i unit */
+		if ((get_local_id(0) & (1 << (i - 1))) != 0)
+			items[get_local_id(0)] += items[j];
+		barrier(CLK_LOCAL_MEM_FENCE);
+	}
+	if (total_sum)
+		*total_sum = items[get_local_size(0) - 1];
+	return items[get_local_size(0) - 1];
+}
+
+
+/*
  * kern_column_to_column
  *
  * A common routine to copy a record in column store into another column-store
@@ -978,11 +1040,10 @@ kern_column_to_column(__private int *errcode,
 		{
 			/* Oh, it's variable length field; takes toast buffer */
 			__local cl_uint		base;
-			__local cl_uint	   *vl_ofs = workbuf;
-			size_t				wkgrp_sz = get_local_size(0);
 			cl_uint				src_pos = *((__global cl_uint *)saddr);
 			cl_uint				dst_pos;
 			cl_uint				vl_len;
+			cl_uint				toast_len;
 
 			if (!isnull)
 				vl_len = VARSIZE_ANY((__global char *)ktoast_src + src_pos);
@@ -996,32 +1057,21 @@ kern_column_to_column(__private int *errcode,
 			 * atomic_add. Then, if still toast buffer is available, 
 			 * we will copy the varlena variable.
 			 */
-			vl_ofs[get_local_id(0)] = INTALIGN(vl_len);
-			barrier(CLK_LOCAL_MEM_FENCE);
-
-			for (j=0; wkgrp_sz > 0; j++, wkgrp_sz >>= 1)
-			{
-				if ((get_local_id(0) & (1 << j)) != 0)
-				{
-					cl_int	k = (get_local_id(0) & ~(1 << j)) | ((1 << j) - 1);
-
-					vl_ofs[get_local_id(0)]
-						+= (k < get_local_size(0) ? vl_ofs[k] : 0);
-				}
-				barrier(CLK_LOCAL_MEM_FENCE);
-			}
-
+			dst_pos = arithmetic_stairlike_add(vl_len, workbuf, &toast_len);
 			if (get_local_id(0) == 0)
 			{
-				cl_uint	toast_len = vl_ofs[get_local_size(0) - 1];
-
-				/* avoid atomic_add if obviously unavailable */
+				/*
+				 * to avoid overflow on atomic_add, we check toast usage
+				 * preliminary
+				 */
 				if (ktoast_dst->usage + toast_len <= ktoast_dst->length)
 				{
 					base = atomic_add(&ktoast_dst->usage, toast_len);
-					if (base + toast_len > toast_len)
+					if (base + toast_len > ktoast_dst->length)
 						base = 0;	/* overflow! */
 				}
+				else
+					base = 0;
 			}
 			barrier(CLK_LOCAL_MEM_FENCE);
 
@@ -1031,12 +1081,14 @@ kern_column_to_column(__private int *errcode,
 			{
 				if (base == 0)
 				{
+					/*
+					 * unable to set non-NULL value on the ktoast-buffer
+					 * being overflowed.
+					 */
 					STROM_SET_ERROR(errcode, StromError_DataStoreNoSpace);
 					return;
 				}
-
-				cl_uint	dst_pos = vl_ofs[get_local_id(0)] + base;
-
+				dst_pos += base;
 				*((__global cl_uint *)daddr) = dst_pos;
 				memcpy((__global char *)ktoast_dst + dst_pos,
 					   (__global char *)ktoast_src + src_pos,
@@ -1068,17 +1120,18 @@ static void
 kern_row_to_column(__global cl_char *attreferenced,
 				   __global kern_row_store *krs,
 				   __global kern_column_store *kcs,
-				   __local cl_char *workbuf)
+				   __global kern_toastbuf *ktoast,
+				   size_t kcs_offset,
+				   __local cl_uint *workbuf)
 {
 	__global rs_tuple  *rs_tup;
-	size_t		global_id = get_global_id(0);
-	size_t		local_id = get_local_id(0);
+	size_t		kcs_index = kcs_offset + get_global_id(0);
 	cl_uint		ncols = kcs->ncols;
 	cl_uint		offset;
-	cl_uint		i, j;
+	cl_uint		i, j, k;
 
 	/* fetch a rs_tuple on the row-store */
-	rs_tup = kern_rowstore_get_tuple(krs, global_id);
+	rs_tup = kern_rowstore_get_tuple(krs, kcs_index);
 	offset = (rs_tup != NULL ? rs_tup->data.t_hoff : 0);
 
 	for (i=0, j=0; j < ncols; i++)
@@ -1119,10 +1172,10 @@ kern_row_to_column(__global cl_char *attreferenced,
 
 				/* adjust destination address by nullmap, if needed */
 				if (!ccmeta.attnotnull)
-					dest += STROMALIGN((kcs->nrows + 7) >> 3);
+					dest += STROMALIGN((kcs->nrooms + 7) >> 3);
 
 				/* adjust destination address for exact slot on column-array */
-				dest += global_id * (ccmeta.attlen > 0
+				dest += kcs_index * (ccmeta.attlen > 0
 									 ? ccmeta.attlen
 									 : sizeof(cl_uint));
 				/*
@@ -1179,32 +1232,59 @@ kern_row_to_column(__global cl_char *attreferenced,
 
 			if (!ccmeta.attnotnull)
 			{
-				workbuf[local_id]
-					= (!isnull ? (1 << (local_id & 0x1f)) : 0);
-				barrier(CLK_LOCAL_MEM_FENCE);
-				if ((local_id & 0x01) == 0)
-					workbuf[local_id] |= workbuf[local_id + 1];
-				barrier(CLK_LOCAL_MEM_FENCE);
-				if ((local_id & 0x03) == 0)
-					workbuf[local_id] |= workbuf[local_id + 2];
-				barrier(CLK_LOCAL_MEM_FENCE);
-				if ((local_id & 0x07) == 0)
-					workbuf[local_id] |= workbuf[local_id + 4];
-				barrier(CLK_LOCAL_MEM_FENCE);
-				if ((local_id & 0x0f) == 0)
-					workbuf[local_id] |= workbuf[local_id + 8];
-				barrier(CLK_LOCAL_MEM_FENCE);
-				if ((local_id & 0x1f) == 0)
-					workbuf[local_id] |= workbuf[local_id + 16];
-				barrier(CLK_LOCAL_MEM_FENCE);
+				cl_uint	shift = (kcs_index & 0x001f);
 
-				/* put a nullmap */
-				if ((local_id & 0x1f) == 0 && global_id < kcs->nrows)
+				/* reduction to calculate nullmap with 32bit width */
+				workbuf[get_local_id(0)]
+					= (!isnull ? (1 << (get_local_id(0) & 0x001f)) : 0);
+				barrier(CLK_LOCAL_MEM_FENCE);
+				for (k=2; k <= 32; k <<= 1)
 				{
-					__global cl_uint *p_nullmap
-						= (__global cl_uint *)((uintptr_t)kcs + ccmeta.cs_ofs);
+					if ((get_local_id(0) & (k-1)) == 0)
+						workbuf[get_local_id(0)]
+							|= workbuf[get_local_id(0) + (k>>1)];
+					barrier(CLK_LOCAL_MEM_FENCE);
+				}
+				/* responsible thread put calculated nullmap */
+				if (kcs_index + shift < kcs->nrooms &&
+					(get_local_id(0) == 0 ||
+					 (get_local_id(0) & 0x001f) == shift))
+				{
+					__global cl_uint *p_nullmap;
+					cl_uint		bitmap;
+					cl_uint		mask;
 
-					p_nullmap[global_id >> 5] = workbuf[local_id];
+					k = get_local_id(0) & ~0x001f;
+					bitmap = workbuf[k];
+					p_nullmap = (__global cl_uint *)
+						((__global char *)kcs + ccmeta.cs_ofs);
+					p_nullmap += kcs_index >> 5;
+
+					if (shift > 0 && get_local_id(0) == 0)
+					{
+						/* special treatment if unaligned head */
+						mask = ~((1 << shift) - 1);
+						atomic_and(p_nullmap, mask);
+                        atomic_or(p_nullmap, (bitmap << shift) & mask);
+					}
+					else if (shift > 0 &&
+							 get_local_id(0) + 32 >= get_local_size(0))
+					{
+						/* special treatment if unaligned tail */
+						mask = (1 << shift - 1);
+						atomic_and(p_nullmap, mask);
+						atomic_or(p_nullmap, (bitmap >> (32 - shift)) & mask);
+					}
+					else
+					{
+						/* usual case; no atomic operation needed */
+						if (shift > 0)
+						{
+							bitmap >>= (32 - shift);
+							bitmap |= workbuf[k + 32] << shift;
+						}
+						*p_nullmap = bitmap;
+					}
 				}
 			}
 			j++;
