@@ -937,7 +937,7 @@ kern_varlena_to_toast(__private int *errcode,
 	cl_uint			toast_len;
 
 	if (vl_datum)
-		vl_len = VARSIZE_ANY(vl_len);
+		vl_len = VARSIZE_ANY(vl_datum);
 	else
 		vl_len = 0;	/* null value */
 

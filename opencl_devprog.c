@@ -178,6 +178,24 @@ clserv_devprog_build_callback(cl_program program, void *cb_private)
 				 (int) status, i);
 			goto out_error;
 		}
+#ifdef PGSTROM_DEBUG
+		else
+		{
+			char	buffer[128 * 1024];	/* 128KB */
+			size_t	buflen;
+
+			if (clGetProgramBuildInfo(program,
+									  opencl_devices[i],
+									  CL_PROGRAM_BUILD_LOG,
+									  sizeof(buffer),
+									  buffer,
+									  &buflen) == CL_SUCCESS)
+			{
+				buffer[buflen] = '\0';
+				clserv_log("opencl build log:\n%s", buffer);
+			}
+		}
+#endif
 	}
 	/*
 	 * OK, source build was successfully done for all the devices
