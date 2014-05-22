@@ -244,7 +244,8 @@ gpusort_single(cl_int bitonic_unitsz,
 }
 
 __kernel void
-gpusort_multi(__global kern_gpusort *kgsort_x,
+gpusort_multi(cl_int mergesort_unitsz,
+			  __global kern_gpusort *kgsort_x,
 			  __global kern_gpusort *kgsort_y,
 			  __global kern_gpusort *kgsort_z1,
 			  __global kern_gpusort *kgsort_z2,
@@ -259,9 +260,14 @@ gpusort_multi(__global kern_gpusort *kgsort_x,
 	__global kern_toastbuf *y_toast = KERN_GPUSORT_TOASTBUF(kgsort_y);
 	__global kern_toastbuf *z_toast1 = KERN_GPUSORT_TOASTBUF(kgsort_z1);
 	__global kern_toastbuf *z_toast2 = KERN_GPUSORT_TOASTBUF(kgsort_z2);
+	cl_bool		reversing = (mergesort_unitsz < 0 ? true : false);
+	cl_int		unitsz = (mergesort_unitsz < 0
+						  ? 1U << -mergesort_unitsz
+						  : 1U << mergesort_unitsz);
 	cl_int		errcode = StromError_Success;
 
 	run_gpusort_multi(kparams,
+					  reversing, unitsz,
 					  x_chunk, x_toast,
 					  y_chunk, y_toast,
 					  z_chunk1, z_toast1,
@@ -269,23 +275,71 @@ gpusort_multi(__global kern_gpusort *kgsort_x,
 					  &errcode, local_workbuf);
 }
 
+/*
+ * gpusort_setup_chunk_rs
+ *
+ * This routine move records from usual row-store (smaller) into
+ * sorting chunk (a larger column store).
+ *
+ * The first column of the sorting chunk (cl_long) is identifier
+ * of individual rows on the host side. The last column of the
+ * sorting chunk (cl_uint) can be used as index of array.
+ * Usually, this index is initialized to a sequential number,
+ * then gpusort_single modifies this index array later.
+ */
 __kernel void
 gpusort_setup_chunk_rs(cl_uint rcs_global_index,
-					   __global kern_gpusort *kgsort,
+					   __global kern_gpusort *kgpusort,
 					   __global kern_row_store *krs,
 					   __local void *local_workmem)
 {
-	/*
-	 * This routine move records from usual row-store (smaller) into
-	 * sorting chunk (a larger column store).
-	 * Note: get_global_offset(1) shows index of row-store on host.
-	 *
-	 * The first column of the sorting chunk (cl_long) is identifier
-	 * of individual rows on the host side. The last column of the
-	 * sorting chunk (cl_uint) can be used as index of array.
-	 * Usually, this index is initialized to a sequential number,
-	 * then gpusort_single modifies this index array later.
-	 */
+	__global kern_parambuf	   *kparams = KERN_GPUSORT_PARAMBUF(kgpusort);
+	__global kern_column_store  *kcs = KERN_GPUSORT_CHUNK(kgpusort);
+	__global kern_toastbuf	   *ktoast = KERN_GPUSORT_TOASTBUF(kgpusort);
+	__global cl_int			   *kstatus = KERN_GPUSORT_STATUS(kgpusort);
+	__global cl_char		   *attrefs;
+	__local size_t				kcs_usage;
+	pg_bytea_t					kparam_0;
+	cl_int						errcode = StromError_Success;
+
+	if (get_global_id(0) == 0)
+		kcs_usage = atomic_and(&kcs->nrows, krs->nrows);
+	barrier(CLK_LOCAL_MEM_FENCE);
+
+	/* flag of referenced columns */
+	kparam_0 = pg_bytea_param(kparams, &errcode, 0);
+	attrefs = (__global cl_char *)VARDATA(kparam_0.value);
+
+	if (kcs_usage + krs->nrows <= kcs->nrooms)
+	{
+		cl_uint		ncols = kcs->ncols;
+		cl_uint		rindex = kcs_usage + get_global_id(0);
+		cl_ulong	grecid = ((cl_ulong)rcs_global_index << 32 |
+							  get_global_id(0));
+		__global cl_char   *addr;
+
+		kern_row_to_column(&errcode,
+						   attrefs,
+						   krs,
+						   kcs,
+						   ktoast,
+						   kcs->nrows,
+						   local_workmem);
+
+		if (get_global_id(0) < krs->nrows)
+		{
+			/* second last column is global record-id */
+			addr = kern_get_datum(kcs, ncols - 2, rindex);
+			*((__global cl_ulong *)addr) = grecid;
+			/* last column is index number within a chunk */
+			addr = kern_get_datum(kcs, ncols - 1, rindex);
+			*((__global cl_uint *)addr) = rindex;
+		}
+	}
+	else
+		errcode = StromError_DataStoreNoSpace;
+
+	// TODO: put kern_writeback_status
 }
 
 __kernel void

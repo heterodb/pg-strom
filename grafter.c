@@ -29,7 +29,7 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan *plan)
 
 	switch (nodeTag(plan))
 	{
-#if 0
+#if 1
 		case T_Sort:
 			{
 				CustomPlan *altplan

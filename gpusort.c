@@ -759,17 +759,6 @@ pgstrom_create_gpusort_chunk(GpuSortState *gsortstate)
 	kcs->nrooms = gsortstate->nrows_per_chunk;
 	offset = STROMALIGN(offsetof(kern_column_store,
 								 colmeta[kcs->ncols]));
-	/*
-	 * First column is reserved by GpuSort - fixed-length integer as
-	 * identifier of unsorted tuples, not null.
-	 */
-	kcs->colmeta[0].attnotnull = true;
-	kcs->colmeta[0].attalign = sizeof(cl_long);
-	kcs->colmeta[0].attlen = sizeof(cl_long);
-	kcs->colmeta[0].cs_ofs = offset;
-	offset += STROMALIGN(sizeof(cl_long) * kcs->nrooms);
-	i_col++;
-
 	/* regular sortkeys */
 	foreach(cell, gsortstate->sortkey_resnums)
 	{
@@ -803,6 +792,17 @@ pgstrom_create_gpusort_chunk(GpuSortState *gsortstate)
 		}
 		i_col++;
 	}
+
+	/*
+	 * The second last column is reserved by GpuSort - fixed-length integer
+	 * as identifier of unsorted tuples, not null.
+	 */
+	kcs->colmeta[i_col].attnotnull = true;
+	kcs->colmeta[i_col].attalign = sizeof(cl_long);
+	kcs->colmeta[i_col].attlen = sizeof(cl_long);
+	kcs->colmeta[i_col].cs_ofs = offset;
+	offset += STROMALIGN(sizeof(cl_long) * kcs->nrooms);
+	i_col++;
 
 	/*
 	 * Last column is reserved by GpuSort - fixed-length integer as
