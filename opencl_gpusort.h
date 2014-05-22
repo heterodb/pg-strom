@@ -190,10 +190,84 @@ run_gpusort_single(__global kern_parambuf *kparams,
 	rv = gpusort_comp(errcode, kchunk, ktoast, pos0, kchunk, ktoast, pos1);
 	if(0 < rv)
 	{
-		// swap
+		/* Swap */
 		results[idx0] = pos1;
 		results[idx1] = pos0;
 	}
+	return;
+}
+
+static void
+gpusort_set_record(__global kern_parambuf		*kparams,
+				   cl_int			 			index,
+				   cl_int						N,
+				   cl_int						nrowsDst0,
+				   __global kern_column_store	*chunkDst0,
+				   __global kern_toastbuf		*toastDst0,
+				   __global kern_column_store	*chunkDst1,
+				   __global kern_toastbuf		*toastDst1,
+				   __global kern_column_store	*chunkSrc0,
+				   __global kern_toastbuf		*toastSrc0,
+				   __global kern_column_store	*chunkSrc1,
+				   __global kern_toastbuf		*toastSrc1,
+				   __global cl_int				*result0,
+				   __global cl_int				*result1,
+				   __private cl_int				*errcode,
+				   __local void				 	*local_workbuf)
+{
+	cl_int N2			= N / 2;
+	cl_int posDst		= index;
+	cl_int posSrc 		= (index < N2) ? result0[index] : result1[index - N2];
+	cl_int chunkPosDst	= (posDst < nrowsDst0) : posDst : posDst - nrowsDst0;
+	cl_int chunkPosSrc	= (posSrc < N2) : posSrc : posSrc - N2;
+
+
+	// set nrows
+	if(chunkPosDst == N2 - 1  &&  posSrc < N)
+		(chunkDst)->nrows = N2;
+
+	else if(N <= posSrc)
+	{
+		cl_int flagLastPlus1 = true;
+
+		if(0 < chunkPosDst)
+		{
+			cl_int indexPrev = index - 1;
+			cl_int posPrev	 = ((indexPrev < N2)
+								? result0[indexPrev]
+								: result1[indexPrev - N2]);
+			if(N <= posPrev)
+			  flagLastPlus1 = false;
+		}
+
+		if(flagLastPlus1 == true)
+			(chunkDst)->nrows = chunkPosDst;
+	}
+
+
+	// set index
+	__global cl_int *resultDst = KERN_GPUSORT_RESULT_INDEX(chunkDst);
+	resultDst[chunkPosDst]     = (posSrc < N) ? chunkPosDst : N;
+
+
+	// set row data
+	if(posSrc  < N)
+	{
+		__global kern_column_store *chunkDst;
+		__global kern_column_store *chunkSrc;
+		__global kern_toastbuf     *toastDst;
+		__global kern_toastbuf     *toastSrc;
+
+		chunkDst = (posDst < nrowsDst0) ? chunkDst0 : chunkDst1;
+		toastDst = (posDst < nrowsDst0) ? toastDst0 : toastDst1;
+		chunkSrc = (posSrc < N2) ? chunkSrc0 : chunkSrc1;
+		toastSrc = (posSrc < N2) ? toastSrc0 : toastSrc1;
+
+		kern_column_to_column(errcode,
+							  chunkDst, toastDst, chunkPosDst,
+							  chunkSrc, toastSrc, chunkPosSrc, local_workbuf);
+	}
+
 	return;
 }
 
@@ -205,18 +279,115 @@ run_gpusort_multi(__global kern_parambuf *kparams,
 				  __global kern_toastbuf     *x_toast,
 				  __global kern_column_store *y_chunk,
 				  __global kern_toastbuf     *y_toast,
+				  __global kern_column_store *z_chunk0,
+				  __global kern_toastbuf     *z_toast0,
 				  __global kern_column_store *z_chunk1,
 				  __global kern_toastbuf     *z_toast1,
-				  __global kern_column_store *z_chunk2,
-				  __global kern_toastbuf     *z_toast2,
 				  __private cl_int *errcode,
 				  __local void *local_workbuf)
 {
+	__global cl_int	*x_results = KERN_GPUSORT_RESULT_INDEX(x_chunk);
+	__global cl_int	*y_results = KERN_GPUSORT_RESULT_INDEX(y_chunk);
+
 	/*
 	 * Run merge sort logic on the supplied x_chunk and y_chunk.
-	 * Its results shall be stored into z_chunk1 and z_chunk2,
+	 * Its results shall be stored into z_chunk0 and z_chunk1,
 	 *
 	 */
+
+	cl_int	threadID		= get_global_id(0);
+	cl_int  x_nrows			= (x_chunk)->nrows;
+	cl_int	y_nrows			= (y_chunk)->nrows;
+	cl_int	halfUnitSize	= unitsz / 2;
+	cl_int	unitMask		= unitsz - 1;
+	cl_int	idx0;
+	cl_int	idx1;
+
+	idx0 = (threaadID / halfUnitSize) * unitsz + threadID % halfUnitSize;
+	idx1 = (reversing
+			? ((idx0 & ~unitMask) | (~idx0 & unitMask))
+			: (idx0 + halfUnitSize));
+
+	cl_int	N;
+
+	for(int i=1; i<x_nrows+y_nrows; i<<=1) {
+	}
+
+	cl_int	N2	= N / 2; /* Starting index number of y_chunk */
+	if(N2 <= threadID)
+		return;
+
+	/* Re-numbering the index at first times. */
+	if(reversing)
+	{
+		if(x_nrows <= threadID)
+			x_result[threadID] = N;
+
+		y_results[idx1 - N2] = ((idx1 - N2 < y_nrows)
+								? (y_results[idx1 - N2] + N2)
+								: N);
+	}
+
+
+	__global cl_int	*results0;
+	__global cl_int	*results1;
+
+	results0 = (idx0 < N2) ? &x_results[idx0] : &y_results[idx0 - N2];
+	results1 = (idx1 < N2) ? &x_results[idx1] : &y_results[idx1 - N2];
+
+	cl_int	pos0	= *result0;
+	cl_int	pos1	= *result1;
+
+	if(N <= pos1)
+	{
+		/* pos1 is empry(maximum) */
+	}
+
+	else if (N <= pos0)
+	{
+		/* swap, pos0 is empry(maximum) */
+		*result0 = pos1;
+		*result1 = pos0;
+	}
+
+	else
+	{
+		/* sorting by data */
+		__global kern_column_store	*chunk0 = (pos0 < N2) ? x_chunk : y_chunk;
+		__global kern_column_store	*chunk1 = (pos1 < N2) ? x_chunk : y_chunk;
+		__global kern_toastbuf		*toast0 = (pos0 < N2) ? x_toast : y_toast;
+		__global kern_toastbuf		*toast1 = (pos1 < N2) ? x_toast : y_toast;
+		cl_int						chkPos0 = (pos0 < N2) ? pos0 : (pos0 - N2);
+		cl_int						chkPos1 = (pos1 < N2) ? pos1 : (pos1 - N2);
+
+		cl_int rv = gpusort_comp(errcode,
+								 chunk0, toast0, chkPos0,
+								 chunk1, toast1, chkPos1);
+		if(0 < rv)
+		{
+			/* swap */
+			*result0 = pos1;
+			*result1 = pos0;
+		}
+	}
+
+	/* Update output chunk at last kernel. */
+	if(unitsz == 2)
+	{
+		gpusort_set_record(kparams, idx0, N, N2,
+						   z_chunk0, z_toast0, z_chunk1, z_toast1,
+						   x_chunk, x_toast, y_chunk, y_toast,
+						   x_result, y_result,
+						   errcode, local_workbuf);
+
+		gpusort_set_record(kparams, idx1, N, N2,
+						   z_chunk0, z_toast0, z_chunk1, z_toast1,
+						   x_chunk, x_toast, y_chunk, y_toast,
+						   x_result, y_result,
+						   errcode, local_workbuf);
+	}
+
+	return;
 }
 
 
