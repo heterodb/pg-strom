@@ -2087,7 +2087,6 @@ tcache_insert_tuple(tcache_head *tc_head,
 
 	if (tcs->nrows == 0)
 	{
-		Assert(tc_head->tcs_root == tc_node);
 		do_insert_tuple(tc_head, tc_node, tuple);
 		/* no rebalance is needed obviously */
 		return;
