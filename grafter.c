@@ -126,8 +126,9 @@ pgstrom_grafter_entrypoint(Query *parse,
 	else
 		result = standard_planner(parse, cursorOptions, boundParams);
 
-	result->planTree = grafter_try_replace_recurse(result, result->planTree);
-
+	if (pgstrom_enabled)
+		result->planTree = grafter_try_replace_recurse(result,
+													   result->planTree);
 	return result;
 }
 

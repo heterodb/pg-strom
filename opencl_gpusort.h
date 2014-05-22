@@ -196,7 +196,7 @@ run_gpusort_single(__global kern_parambuf *kparams,
 	}
 	return;
 }
-
+#if 0
 static void
 gpusort_set_record(__global kern_parambuf		*kparams,
 				   cl_int			 			index,
@@ -393,7 +393,7 @@ run_gpusort_multi(__global kern_parambuf *kparams,
 
 
 
-
+#endif
 
 __kernel void
 gpusort_single(cl_int bitonic_unitsz,
@@ -414,6 +414,7 @@ gpusort_single(cl_int bitonic_unitsz,
 					   kchunk, ktoast, &errcode, local_workbuf);
 }
 
+#if 0
 __kernel void
 gpusort_multi(cl_int mergesort_unitsz,
 			  __global kern_gpusort *kgsort_x,
@@ -445,6 +446,7 @@ gpusort_multi(cl_int mergesort_unitsz,
 					  z_chunk2, z_toast2,
 					  &errcode, local_workbuf);
 }
+#endif
 
 /*
  * gpusort_setup_chunk_rs
@@ -471,7 +473,7 @@ gpusort_setup_chunk_rs(cl_uint rcs_global_index,
 	__global cl_char		   *attrefs;
 	__local size_t				kcs_usage;
 	pg_bytea_t					kparam_0;
-	cl_int						errcode = StromError_Success;
+	cl_int						errcode = StromError_DataStoreNoSpace; //StromError_Success;
 
 	if (get_global_id(0) == 0)
 		kcs_usage = atomic_and(&kcs->nrows, krs->nrows);

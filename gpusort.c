@@ -892,6 +892,51 @@ pgstrom_release_gpusort(pgstrom_message *msg)
 }
 
 /*
+ * pgstrom_sanitycheck_gpusort_chunk
+ *
+ * It checks whether the gpusort-chunk being replied from OpenCL server
+ * is sanity, or not.
+ */
+static void
+pgstrom_sanitycheck_gpusort_chunk(GpuSortState *gsortstate,
+								  pgstrom_gpusort_chunk *gs_chunk)
+{
+	kern_column_store  *kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
+	kern_toastbuf	   *ktoast = KERN_GPUSORT_TOASTBUF(&gs_chunk->kern);
+	cl_int			   *kstatus = KERN_GPUSORT_STATUS(&gs_chunk->kern);
+	cl_uint				nrows;
+	cl_int				i;
+
+	if (*kstatus != StromError_Success)
+		elog(INFO, "chunk: status %d (%s)",
+			 *kstatus, pgstrom_strerror(*kstatus));
+
+	nrows = 0;
+	for (i=0; i < gs_chunk->rcs_nums; i++)
+	{
+		StromObject	   *sobject = gs_chunk->rcs_slot[i];
+
+		if (StromTagIs(sobject, TCacheRowStore))
+		{
+			tcache_row_store *trs = (tcache_row_store *)sobject;
+
+			nrows += trs->kern.nrows;
+		}
+		else if (StromTagIs(sobject, TCacheColumnStore))
+		{
+			tcache_column_store *tcs = (tcache_column_store *)sobject;
+
+			nrows += tcs->nrows;
+			elog(INFO, "chunk: rcs_slot[%d] is column store", i);
+		}
+		else
+			elog(INFO, "chunk: rcs_slot[%d] corrupted (stag: %d)",
+				 i, sobject->stag);
+	}
+	elog(INFO, "chunk: nrows = %u (expected: %u)", kcs->nrows, nrows);
+}
+
+/*
  * pgstrom_create_gpusort
  *
  * constructor of pgstrom_gpusort object.
@@ -1415,6 +1460,9 @@ retry:
 	dnode = dlist_head_node(&gpusort->in_chunk1);
 	gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain, dnode);
 	kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
+
+	/* for debugging */
+	pgstrom_sanitycheck_gpusort_chunk(gsortstate, gs_chunk);
 
 	if (gsortstate->curr_index < kcs->nrows)
 	{
@@ -2290,7 +2338,7 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 			goto error_sync;
 		}
 	}
-
+#if 0
 	/*
 	 * OK, preparation was done. Let's launch gpusort_single kernel
 	 * to sort key values within a gpusort-chunk.
@@ -2308,7 +2356,7 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 			clgss->sort_kernel[k++] = sort_kernel;
 		}
 	}
-
+#endif
 	/*
 	 * Write back the gpusort chunk being prepared
 	 */
