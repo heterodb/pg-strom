@@ -1299,7 +1299,7 @@ kern_row_to_column(__private cl_int *errcode,
 							 get_local_id(0) + 32 >= get_local_size(0))
 					{
 						/* special treatment if unaligned tail */
-						mask = (1 << shift - 1);
+						mask = ((1 << shift) - 1);
 						atomic_and(p_nullmap, mask);
 						atomic_or(p_nullmap, (bitmap >> (32 - shift)) & mask);
 					}
