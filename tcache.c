@@ -1985,13 +1985,11 @@ do_insert_tuple(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 		if (attr->attlen > 0)
 		{
 			if (attr->attbyval)
-				memcopy(tcs->cdata[i].values +
-						attr->attlen * tcs->nrows,
+				memcopy(cs_values + attr->attlen * tcs->nrows,
 						&values[j],
 						attr->attlen);
 			else
-				memcpy(tcs->cdata[i].values +
-					   attr->attlen * tcs->nrows,
+				memcpy(cs_values + attr->attlen * tcs->nrows,
 					   DatumGetPointer(values[j]),
 					   attr->attlen);
 		}
