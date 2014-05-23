@@ -1194,7 +1194,7 @@ tcache_copy_cs_varlena(tcache_column_store *tcs_dst, int base_dst,
 
 			vptr = (char *)tbuf_src + src_ofs[si];
 			vsize = VARSIZE_ANY(vptr);
-			if (tbuf_dst->tbuf_length < tbuf_dst->tbuf_usage + MAXALIGN(vsize))
+			if (tbuf_dst->tbuf_length < tbuf_dst->tbuf_usage + INTALIGN(vsize))
 			{
 				tcs_dst->cdata[attidx].toast
 					= tcache_duplicate_toast_buffer(tbuf_dst,
@@ -1205,7 +1205,7 @@ tcache_copy_cs_varlena(tcache_column_store *tcs_dst, int base_dst,
 				   vptr,
 				   vsize);
 			vpos = tbuf_dst->tbuf_usage;
-			tbuf_dst->tbuf_usage += MAXALIGN(vsize);
+			tbuf_dst->tbuf_usage += INTALIGN(vsize);
 		}
 		dst_ofs[di] = vpos;
 	}
@@ -2031,7 +2031,7 @@ do_insert_tuple(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 				/* assign a toast buffer with default size */
 				tcs->cdata[i].toast = tbuf = tcache_create_toast_buffer(0);
 			}
-			else if (tbuf->tbuf_length < tbuf->tbuf_usage + MAXALIGN(vsize))
+			else if (tbuf->tbuf_length < tbuf->tbuf_usage + INTALIGN(vsize))
 			{
 				tcache_toastbuf	*tbuf_new;
 				Size	new_len = 2 * tbuf->tbuf_length;
@@ -2047,13 +2047,13 @@ do_insert_tuple(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 				tcache_put_toast_buffer(tbuf);
 				tcs->cdata[i].toast = tbuf = tbuf_new;
 			}
-			Assert(tbuf->tbuf_usage + MAXALIGN(vsize) < tbuf->tbuf_length);
+			Assert(tbuf->tbuf_usage + INTALIGN(vsize) < tbuf->tbuf_length);
 
 			cs_ofs[tcs->nrows] = tbuf->tbuf_usage;
 			memcpy((char *)tbuf + tbuf->tbuf_usage,
 				   DatumGetPointer(values[j]),
 				   vsize);
-			tbuf->tbuf_usage += MAXALIGN(vsize);
+			tbuf->tbuf_usage += INTALIGN(vsize);
 		}
 	}
 
