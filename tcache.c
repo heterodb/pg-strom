@@ -1960,23 +1960,26 @@ do_insert_tuple(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 	for (i=0; i < tcs->ncols; i++)
 	{
 		Form_pg_attribute	attr;
+		uint8	   *cs_isnull = tcs->cdata[i].isnull;
+		char	   *cs_values = tcs->cdata[i].values;
 
 		j = tc_head->i_cached[i];
 		Assert(j >= 0 && j < tupdesc->natts);
 		attr = tupdesc->attrs[j];
 
-		if (!tcs->cdata[i].isnull)
-			Assert(!isnull[j]);
+		if (!cs_isnull)
+			Assert(!isnull[j]);	/* should be always not null */
 		else
 		{
-			uint8  *nullmap = tcs->cdata[i].isnull;
-
 			if (!isnull[j])
-				nullmap[tcs->nrows / BITS_PER_BYTE]
+				cs_isnull[tcs->nrows / BITS_PER_BYTE]
 					|= (1 << (tcs->nrows % BITS_PER_BYTE));
 			else
-				nullmap[tcs->nrows / BITS_PER_BYTE]
+			{
+				cs_isnull[tcs->nrows / BITS_PER_BYTE]
 					&= ~(1 << (tcs->nrows % BITS_PER_BYTE));
+				continue;	/* no need to put values any more */
+			}
 		}
 
 		if (attr->attlen > 0)
