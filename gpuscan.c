@@ -1889,7 +1889,6 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 	/* and, compute an optimal workgroup-size of this kernel */
 	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
 									   clgss->kernel, i, nrows,
-									   sizeof(cl_uint),
 									   sizeof(cl_uint)))
 		goto error3;
 
@@ -2374,7 +2373,6 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 	/* and, compute an optimal workgroup-size of this kernel */
 	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
 									   clgsc->kernel, i, nrooms,
-									   sizeof(cl_uint),
 									   sizeof(cl_uint)))
 		goto error3;
 

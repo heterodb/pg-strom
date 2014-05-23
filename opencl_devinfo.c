@@ -1052,8 +1052,7 @@ clserv_compute_workgroup_size(size_t *gwork_sz,
 							  cl_kernel kernel,
 							  int dev_index,
 							  size_t num_threads,
-							  size_t local_memsz_per_thread,
-							  size_t local_memsz_per_call)
+							  size_t local_memsz_per_thread)
 {
 	const pgstrom_device_info *devinfo;
 	cl_device_id kdevice;
@@ -1107,11 +1106,10 @@ clserv_compute_workgroup_size(size_t *gwork_sz,
 	 */
 	devinfo = pgstrom_get_device_info(dev_index);
 	if (local_memsz_per_thread * blocksz +
-		local_memsz_per_call > devinfo->dev_local_mem_size - kern_local_usage)
+		kern_local_usage > devinfo->dev_local_mem_size)
 	{
 		blocksz = (devinfo->dev_local_mem_size -
-				   kern_local_usage -
-				   local_memsz_per_call) / local_memsz_per_thread;
+				   kern_local_usage) / local_memsz_per_thread;
 		blocksz = TYPEALIGN(PGSTROM_WORKGROUP_UNITSZ, blocksz);
 	}
 	if (blocksz == 0)
@@ -1119,7 +1117,6 @@ clserv_compute_workgroup_size(size_t *gwork_sz,
 		clserv_log("local memory consumption by kernel too large");
 		return false;
 	}
-
 	*lwork_sz = blocksz;
 	*gwork_sz = ((num_threads + blocksz - 1) / blocksz) * blocksz;
 

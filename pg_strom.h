@@ -508,8 +508,7 @@ extern bool clserv_compute_workgroup_size(size_t *gwork_sz,
 										  cl_kernel kernel,
 										  int dev_index,
 										  size_t num_threads,
-										  size_t local_memsz_per_thread,
-										  size_t local_memsz_per_call);
+										  size_t local_memsz_per_thread);
 /*
  * opencl_devprog.c
  */

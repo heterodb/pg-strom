@@ -1943,7 +1943,6 @@ clserv_launch_gpusort_setup_row(clstate_gpusort_single *clgss,
 									   prep_kernel,
 									   clgss->dindex,
 									   trs->kern.nrows,
-									   sizeof(cl_uint),
 									   sizeof(cl_uint)))
 		goto error_2;
 
@@ -2103,7 +2102,6 @@ clserv_launch_gpusort_bitonic(clstate_gpusort_single *clgss,
 									   sort_kernel,
 									   clgss->dindex,
 									   (nrooms + 1 / 2),
-									   sizeof(cl_uint),
 									   sizeof(cl_uint)))
 		goto error_1;
 
