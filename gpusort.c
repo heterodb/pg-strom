@@ -909,7 +909,8 @@ pgstrom_sanitycheck_gpusort_chunk(GpuSortState *gsortstate,
 	kern_toastbuf	   *ktoast = KERN_GPUSORT_TOASTBUF(&gs_chunk->kern);
 	cl_int			   *kstatus = KERN_GPUSORT_STATUS(&gs_chunk->kern);
 	cl_uint				nrows;
-	cl_int				i;
+	cl_int				i, j;
+	ListCell		   *cell;
 
 	if (*kstatus != StromError_Success)
 		elog(INFO, "chunk: status %d (%s)",
@@ -923,8 +924,32 @@ pgstrom_sanitycheck_gpusort_chunk(GpuSortState *gsortstate,
 		if (StromTagIs(sobject, TCacheRowStore))
 		{
 			tcache_row_store *trs = (tcache_row_store *)sobject;
+			TupleDesc	tupdesc
+				= gsortstate->scan_slot->tts_tupleDescriptor;
 
-			nrows += trs->kern.nrows;
+			for (j=0; j < trs->kern.nrows; j++)
+			{
+				rs_tuple   *rs_tup = kern_rowstore_get_tuple(&trs->kern, j);
+				HeapTuple	tup = &rs_tup->htup;
+				Datum		rs_value;
+				bool		rs_isnull;
+				void	   *cs_value;
+				int			i_col = 0;
+
+				foreach (cell, gsortstate->sortkey_resnums)
+				{
+					AttrNumber	anum = lfirst_int(cell);
+
+					rs_value = heap_getattr(tup, anum, tupdesc, &rs_isnull);
+
+					cs_value = kern_get_datum(kcs, i_col, nrows);
+
+					if ((!rs_isnull && !cs_value) || (rs_isnull && cs_value))
+						elog(ERROR, "gs_chunk corrupted (null status)");
+
+				}
+				nrows++;
+			}
 		}
 		else if (StromTagIs(sobject, TCacheColumnStore))
 		{
@@ -937,7 +962,8 @@ pgstrom_sanitycheck_gpusort_chunk(GpuSortState *gsortstate,
 			elog(INFO, "chunk: rcs_slot[%d] corrupted (stag: %d)",
 				 i, sobject->stag);
 	}
-	elog(INFO, "chunk: nrows = %u (expected: %u)", kcs->nrows, nrows);
+	if (kcs->nrows != nrows)
+		elog(INFO, "chunk: nrows = %u (expected: %u)", kcs->nrows, nrows);
 }
 
 /*
@@ -1478,29 +1504,32 @@ retry:
 	if (gsortstate->curr_index < kcs->nrows)
 	{
 		cl_uint		   *rindex;
-		cl_ulong	   *tupids;
-		cl_uint			tup_gid;
-		cl_uint			tup_lid;
-		cl_int			i = gsortstate->curr_index;
+		cl_ulong	   *rowids;
+		cl_uint			growid;
+		cl_uint			lrowid;
+		cl_int			i, j;
 		StromObject	   *sobject;
 
+		i = gsortstate->curr_index;
+		rowids = (cl_ulong *)((char *)kcs +
+							  kcs->colmeta[kcs->ncols - 2].cs_ofs);
 		rindex = (cl_uint *)((char *)kcs +
 							 kcs->colmeta[kcs->ncols - 1].cs_ofs);
-		tupids = (cl_ulong *)((char *)kcs + kcs->colmeta[0].cs_ofs);
 		Assert(rindex[i] >= 0 && rindex[i] < kcs->nrows);
+		j = rindex[i];
 
-		tup_gid = ((tupids[rindex[i]] >> 32) & 0xffffffff);
-		tup_lid = (tupids[rindex[i]] & 0xffffffff);
-		Assert(tup_gid < gsortstate->rcs_nums);
+		growid = ((rowids[j] >> 32) & 0xffffffff);
+		lrowid= (rowids[j] & 0xffffffff);
+		Assert(growid < gsortstate->rcs_nums);
 
-		sobject = gsortstate->rcs_slot[tup_gid];
+		sobject = gsortstate->rcs_slot[growid];
 		if (StromTagIs(sobject, TCacheRowStore))
 		{
 			tcache_row_store *trs = (tcache_row_store *)sobject;
 			rs_tuple   *rs_tup;
 
-			Assert(tup_lid < trs->kern.nrows);
-			rs_tup = kern_rowstore_get_tuple(&trs->kern, tup_lid);
+			Assert(lrowid < trs->kern.nrows);
+			rs_tup = kern_rowstore_get_tuple(&trs->kern, lrowid);
 
 			ExecStoreTuple(&rs_tup->htup, slot, InvalidBuffer, false);
 		}
