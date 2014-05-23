@@ -1154,7 +1154,7 @@ kern_row_to_column(__private cl_int *errcode,
 {
 	__global rs_tuple  *rs_tup;
 	size_t		kcs_index = kcs_offset + get_local_id(0);
-	cl_uint		ncols = kcs->ncols;
+	cl_uint		ncols = krs->ncols;
 	cl_uint		offset;
 	cl_uint		i, j, k;
 
@@ -1165,12 +1165,13 @@ kern_row_to_column(__private cl_int *errcode,
 		rs_tup = NULL;
 	offset = (rs_tup != NULL ? rs_tup->data.t_hoff : 0);
 
-	for (i=0, j=0; j < ncols; i++)
+	for (i=0, j=0; i < ncols; i++)
 	{
 		kern_colmeta	rcmeta = krs->colmeta[i];
 		kern_colmeta	ccmeta = kcs->colmeta[j];
 		__global char  *dest;
 		__global char  *src;
+		cl_char			is_referenced;
 
 		if (!rs_tup || ((rs_tup->data.t_infomask & HEAP_HASNULL) != 0 &&
 						att_isnull(i, rs_tup->data.t_bits)))
@@ -1193,8 +1194,10 @@ kern_row_to_column(__private cl_int *errcode,
 					   rcmeta.attlen :
 					   VARSIZE_ANY(src));
 		}
-		/* ok, go on the next column */
-		if (!attreferenced[i])
+
+		/* Move to the next column unless it is not actually referenced. */
+		is_referenced = attreferenced[i];
+		if (!is_referenced)
 			continue;
 
 		/*
@@ -1348,6 +1351,18 @@ kern_row_to_column(__private cl_int *errcode,
 				}
 			}
 		}
+
+		/*
+		 * NOTE: end of reference marker - if attreferenced[i] has negative
+		 * value, neither zero nor positive, it means no more columns are
+		 * referenced in this row. so, we can break the loop earlier.
+		 * Also note that gpuXXX implementation may append columns for
+		 * internal usage, like rindex of sort, thus j != kcs->ncols is
+		 * not a good condition to break the loop.
+		 */
+		if (is_referenced < 0)
+			break;
+
 		j++;
 	}
 	barrier(CLK_GLOBAL_MEM_FENCE);

@@ -1246,6 +1246,7 @@ gpusort_begin(CustomPlan *node, EState *estate, int eflags)
 	Bitmapset	   *tempset;
 	bytea		   *rs_attrefs;
 	AttrNumber		anum;
+	AttrNumber		anum_last;
 	Const		   *kparam_0;
 	List		   *used_params;
 
@@ -1320,16 +1321,22 @@ gpusort_begin(CustomPlan *node, EState *estate, int eflags)
 	SET_VARSIZE(rs_attrefs, VARHDRSZ + sizeof(cl_char) * tupdesc->natts);
 
 	tempset = bms_copy(gsortplan->sortkey_resnums);
+	anum_last = -1;
 	while ((anum = bms_first_member(tempset)) >= 0)
 	{
 		anum += FirstLowInvalidHeapAttributeNumber;
 		Assert(anum > 0 && anum <= tupdesc->natts);
 
-		((bool *)VARDATA(rs_attrefs))[anum - 1] = true;
+		((cl_char *)VARDATA(rs_attrefs))[anum - 1] = 1;
 		sortkey_resnums = lappend_int(sortkey_resnums, anum);
 		if (tupdesc->attrs[anum - 1]->attlen < 0)
 			sortkey_toast = lappend_int(sortkey_toast, anum);
+		anum_last = anum - 1;
 	}
+	/* negative value is end of referenced columns marker */
+	if (anum_last >= 0)
+		((cl_char *)VARDATA(rs_attrefs))[anum_last] = -1;
+
 	kparam_0 = (Const *)linitial(used_params);
 	Assert(IsA(kparam_0, Const) &&
 		   kparam_0->consttype == BYTEAOID &&
@@ -2270,6 +2277,18 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 	/* kparam + header of kern_column_store */
 	length = (KERN_GPUSORT_PARAMBUF_LENGTH(&gs_chunk->kern) +
 			  STROMALIGN(offsetof(kern_column_store, colmeta[kcs->ncols])));
+	do {
+		kern_column_store *kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
+		int i;
+
+		for (i=0; i < kcs->ncols; i++)
+		{
+			kern_colmeta cm = kcs->colmeta[i];
+
+			clserv_log("colmeta {attnotnull=%d, attalign=%d, attlen=%d, cs_ofs=%u}", cm.attnotnull, cm.attalign, cm.attlen, cm.cs_ofs);
+
+		}
+	} while(0);
 	rc = clEnqueueWriteBuffer(kcmdq,
 							  clgss->m_chunk,
 							  CL_FALSE,

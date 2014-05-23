@@ -579,6 +579,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	Const		   *kparam_0;
 	int32			extra_flags;
 	AttrNumber		anum;
+	AttrNumber		anum_last;
 
 	/* gpuscan should not have inner/outer plan now */
 	Assert(outerPlan(node) == NULL);
@@ -675,6 +676,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	SET_VARSIZE(attrefs, VARHDRSZ + sizeof(bool) * tupdesc->natts);
 	gss->cs_attidxs = palloc0(sizeof(AttrNumber) * tupdesc->natts);
 	gss->cs_attnums = 0;
+	anum_last = -1;
 	for (anum=0; anum < tupdesc->natts; anum++)
 	{
 		Form_pg_attribute attr = tupdesc->attrs[anum];
@@ -683,9 +685,13 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		if (bms_is_member(x, gsplan->dev_attnums))
 		{
 			gss->cs_attidxs[gss->cs_attnums++] = anum;
-			((bool *)VARDATA(attrefs))[anum] = true;
+			((cl_char *)VARDATA(attrefs))[anum] = 1;
+			anum_last = anum;
 		}
 	}
+	/* negative value is end of referenced columns marker */
+	if (anum_last >= 0)
+		((cl_char *)VARDATA(attrefs))[anum_last] = -1;
 
 	/*
 	 * template of kern_parambuf.
