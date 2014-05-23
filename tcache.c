@@ -1163,21 +1163,36 @@ tcache_copy_cs_varlena(tcache_column_store *tcs_dst, int base_dst,
 {
 	tcache_toastbuf *tbuf_src = tcs_src->cdata[attidx].toast;
 	tcache_toastbuf *tbuf_dst = tcs_dst->cdata[attidx].toast;
+	uint8	   *src_isnull;
+	uint8	   *dst_isnull;
 	cl_uint	   *src_ofs;
 	cl_uint	   *dst_ofs;
 	cl_uint		vpos;
 	cl_uint		vsize;
 	char	   *vptr;
-	int			i;
+	int			i, si, di;
 
+	src_isnull = tcs_src->cdata[attidx].isnull;
+	dst_isnull = tcs_dst->cdata[attidx].isnull;
 	src_ofs = (cl_uint *)(tcs_src->cdata[attidx].values);
+	dst_ofs = (cl_uint *)(tcs_dst->cdata[attidx].values);
 	for (i=0; i < nitems; i++)
 	{
-		if (src_ofs[base_src + i] == 0)
+		si = base_src + i;
+		di = base_dst + i;
+
+		if (src_isnull && att_isnull(si, src_isnull))
+		{
+			Assert(dst_isnull);
+			dst_isnull[di / BITS_PER_BYTE] &= ~(1 << (di % BITS_PER_BYTE));
 			vpos = 0;
+		}
 		else
 		{
-			vptr = (char *)tbuf_src + src_ofs[base_src + i];
+			if (dst_isnull)
+				dst_isnull[di / BITS_PER_BYTE] |= (1 << (di % BITS_PER_BYTE));
+
+			vptr = (char *)tbuf_src + src_ofs[si];
 			vsize = VARSIZE_ANY(vptr);
 			if (tbuf_dst->tbuf_length < tbuf_dst->tbuf_usage + MAXALIGN(vsize))
 			{
@@ -1192,8 +1207,7 @@ tcache_copy_cs_varlena(tcache_column_store *tcs_dst, int base_dst,
 			vpos = tbuf_dst->tbuf_usage;
 			tbuf_dst->tbuf_usage += MAXALIGN(vsize);
 		}
-		dst_ofs = (cl_uint *)(tcs_dst->cdata[attidx].values);
-		dst_ofs[base_dst + i] = vpos;
+		dst_ofs[di] = vpos;
 	}
 }
 
@@ -1969,17 +1983,25 @@ do_insert_tuple(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 
 		if (!cs_isnull)
 			Assert(!isnull[j]);	/* should be always not null */
+		else if (!isnull[j])
+		{
+			cs_isnull[tcs->nrows / BITS_PER_BYTE]
+				|= (1 << (tcs->nrows % BITS_PER_BYTE));
+		}
 		else
 		{
-			if (!isnull[j])
-				cs_isnull[tcs->nrows / BITS_PER_BYTE]
-					|= (1 << (tcs->nrows % BITS_PER_BYTE));
+			cs_isnull[tcs->nrows / BITS_PER_BYTE]
+				&= ~(1 << (tcs->nrows % BITS_PER_BYTE));
+
+			if (attr->attlen > 0)
+				memset(cs_values + attr->attlen * tcs->nrows,
+					   0,
+					   attr->attlen);
 			else
-			{
-				cs_isnull[tcs->nrows / BITS_PER_BYTE]
-					&= ~(1 << (tcs->nrows % BITS_PER_BYTE));
-				continue;	/* no need to put values any more */
-			}
+				memset(cs_values + sizeof(cl_uint) * tcs->nrows,
+					   0,
+					   sizeof(cl_uint));
+			continue;	/* no need to put values any more */
 		}
 
 		if (attr->attlen > 0)
