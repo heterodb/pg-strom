@@ -908,13 +908,18 @@ pgstrom_sanitycheck_gpusort_chunk(GpuSortState *gsortstate,
 	kern_column_store  *kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
 	kern_toastbuf	   *ktoast = KERN_GPUSORT_TOASTBUF(&gs_chunk->kern);
 	cl_int			   *kstatus = KERN_GPUSORT_STATUS(&gs_chunk->kern);
+	cl_uint				ncols;
 	cl_uint				nrows;
-	cl_int				i, j;
-	ListCell		   *cell;
+	cl_int				i;
 
 	if (*kstatus != StromError_Success)
 		elog(INFO, "chunk: status %d (%s)",
 			 *kstatus, pgstrom_strerror(*kstatus));
+
+	ncols = list_length(gsortstate->sortkey_resnums) + 2;
+	if (ncols != kcs->ncols)
+		elog(ERROR, "chunk corrupted: expected ncols=%u, but kcs->ncols=%u",
+			 ncols, kcs->ncols);
 
 	nrows = 0;
 	for (i=0; i < gs_chunk->rcs_nums; i++)
@@ -924,46 +929,115 @@ pgstrom_sanitycheck_gpusort_chunk(GpuSortState *gsortstate,
 		if (StromTagIs(sobject, TCacheRowStore))
 		{
 			tcache_row_store *trs = (tcache_row_store *)sobject;
-			TupleDesc	tupdesc
-				= gsortstate->scan_slot->tts_tupleDescriptor;
-
-			for (j=0; j < trs->kern.nrows; j++)
-			{
-				rs_tuple   *rs_tup = kern_rowstore_get_tuple(&trs->kern, j);
-				HeapTuple	tup = &rs_tup->htup;
-				Datum		rs_value;
-				bool		rs_isnull;
-				void	   *cs_value;
-				int			i_col = 0;
-
-				foreach (cell, gsortstate->sortkey_resnums)
-				{
-					AttrNumber	anum = lfirst_int(cell);
-
-					rs_value = heap_getattr(tup, anum, tupdesc, &rs_isnull);
-
-					cs_value = kern_get_datum(kcs, i_col, nrows);
-
-					if ((!rs_isnull && !cs_value) || (rs_isnull && cs_value))
-						elog(ERROR, "gs_chunk corrupted (null status)");
-
-				}
-				nrows++;
-			}
+			nrows += trs->kern.nrows;
 		}
 		else if (StromTagIs(sobject, TCacheColumnStore))
 		{
 			tcache_column_store *tcs = (tcache_column_store *)sobject;
-
 			nrows += tcs->nrows;
 			elog(INFO, "chunk: rcs_slot[%d] is column store", i);
 		}
 		else
-			elog(INFO, "chunk: rcs_slot[%d] corrupted (stag: %d)",
+			elog(ERROR, "chunk: rcs_slot[%d] corrupted (stag: %d)",
 				 i, sobject->stag);
+	}
+	if (nrows != kcs->nrows)
+		elog(ERROR, "chunk corrupted: expected nrows=%u, but kcs->nrow=%u",
+			 nrows, kcs->nrows);
+
+	for (i=0; i < nrows; i++)
+	{
+		StromObject	*sobject;
+		void	   *temp;
+		cl_uint		kcs_index;
+		cl_ulong	growid;
+		cl_uint		rcs_idx;
+		cl_uint		row_idx;
+
+#if 1
+		/* it's assumption if unsorted chunk */
+		temp = kern_get_datum(kcs, ncols - 1, i);
+		if (!temp)
+			elog(ERROR, "chunk corrupted: kcs_index is null");
+		kcs_index = *((cl_uint *)temp);
+		if (kcs_index != i)
+			elog(ERROR, "chunk corrupted: kcs_index expected is %u, but %u",
+				 i, kcs_index);
+#endif
+
+		temp = kern_get_datum(kcs, ncols - 2, i);
+		if (!temp)
+			elog(ERROR, "chunk corrupted: growid is null");
+		growid = *((cl_ulong *)temp);
+		rcs_idx = growid >> 32;
+		row_idx = growid & 0xffffffff;
+
+		if (rcs_idx >= gsortstate->rcs_nums)
+			elog(ERROR, "chunk corrupted: rcs_index (=%u) out of range (<%u)",
+				 rcs_idx, gsortstate->rcs_nums);
+
+		sobject = gs_chunk->rcs_slot[rcs_idx];
+		if (StromTagIs(sobject, TCacheRowStore))
+		{
+			tcache_row_store *trs = (tcache_row_store *)sobject;
+			rs_tuple   *rs_tup = kern_rowstore_get_tuple(&trs->kern, row_idx);
+			HeapTuple	tup = &rs_tup->htup;
+			TupleDesc	tupdesc = gsortstate->scan_slot->tts_tupleDescriptor;
+			ListCell   *cell;
+			int			i_col = 0;
+
+			foreach (cell, gsortstate->sortkey_resnums)
+			{
+				AttrNumber	anum = lfirst_int(cell);
+				Form_pg_attribute attr = tupdesc->attrs[anum - 1];
+				Datum	rs_value;
+				bool	rs_isnull;
+				void   *cs_value;
+
+				rs_value = heap_getattr(tup, anum, tupdesc, &rs_isnull);
+
+				cs_value = kern_get_datum(kcs, i_col, i);
+
+				if ((!rs_isnull && !cs_value) || (rs_isnull && cs_value))
+					elog(ERROR, "[%d] null status corrupted (%s => %s)",
+						 nrows,
+						 !rs_isnull ? "false" : "true",
+						 !cs_value ? "true" : "false");
+				if (rs_isnull)
+					continue;
+				if (attr->attlen > 0 && attr->attbyval)
+				{
+					if (memcmp(&rs_value, cs_value, attr->attlen) != 0)
+						elog(ERROR, "[%d] value corrupted (%08lx=>%08lx)",
+							 i, rs_value, *((Datum *)cs_value));
+				}
+				else if (attr->attlen > 0 && !attr->attbyval)
+				{
+					if (memcmp(&rs_value, (void *)cs_value, attr->attlen) != 0)
+						elog(ERROR, "[%d] value corrupted", i);
+				}
+				else
+				{
+					cl_uint	vl_ofs = *((cl_uint *)cs_value);
+					size_t	vl_len = VARSIZE_ANY(rs_value);
+
+					if (memcmp((char *)ktoast + vl_ofs,
+							   DatumGetPointer(rs_value),
+							   vl_len) != 0)
+						elog(ERROR, "[%d] toast value corrupted", i);
+				}
+			}
+		}
+		else if (StromTagIs(sobject, TCacheColumnStore))
+		{
+			elog(ERROR, "column-store as sorting source, not implemented");
+		}
+		else
+			elog(ERROR, "unexpected strom object");
 	}
 	if (kcs->nrows != nrows)
 		elog(INFO, "chunk: nrows = %u (expected: %u)", kcs->nrows, nrows);
+	elog(INFO, "sanitycheck passed");
 }
 
 /*
@@ -1503,33 +1577,33 @@ retry:
 
 	if (gsortstate->curr_index < kcs->nrows)
 	{
-		cl_uint		   *rindex;
-		cl_ulong	   *rowids;
-		cl_uint			growid;
-		cl_uint			lrowid;
+		cl_uint		   *kcs_index;
+		cl_ulong	   *growid;
+		cl_uint			rcs_idx;
+		cl_uint			row_idx;
 		cl_int			i, j;
 		StromObject	   *sobject;
 
 		i = gsortstate->curr_index;
-		rowids = (cl_ulong *)((char *)kcs +
+		growid = (cl_ulong *)((char *)kcs +
 							  kcs->colmeta[kcs->ncols - 2].cs_ofs);
-		rindex = (cl_uint *)((char *)kcs +
-							 kcs->colmeta[kcs->ncols - 1].cs_ofs);
-		Assert(rindex[i] >= 0 && rindex[i] < kcs->nrows);
-		j = rindex[i];
+		kcs_index = (cl_uint *)((char *)kcs +
+								kcs->colmeta[kcs->ncols - 1].cs_ofs);
+		Assert(kcs_index[i] >= 0 && kcs_index[i] < kcs->nrows);
+		j = kcs_index[i];
 
-		growid = ((rowids[j] >> 32) & 0xffffffff);
-		lrowid= (rowids[j] & 0xffffffff);
-		Assert(growid < gsortstate->rcs_nums);
+		rcs_idx = ((growid[j] >> 32) & 0xffffffff);
+		row_idx = (growid[j] & 0xffffffff);
+		Assert(rcs_idx < gsortstate->rcs_nums);
 
-		sobject = gsortstate->rcs_slot[growid];
+		sobject = gsortstate->rcs_slot[rcs_idx];
 		if (StromTagIs(sobject, TCacheRowStore))
 		{
 			tcache_row_store *trs = (tcache_row_store *)sobject;
 			rs_tuple   *rs_tup;
 
-			Assert(lrowid < trs->kern.nrows);
-			rs_tup = kern_rowstore_get_tuple(&trs->kern, lrowid);
+			Assert(row_idx < trs->kern.nrows);
+			rs_tup = kern_rowstore_get_tuple(&trs->kern, row_idx);
 
 			ExecStoreTuple(&rs_tup->htup, slot, InvalidBuffer, false);
 		}

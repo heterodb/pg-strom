@@ -473,6 +473,7 @@ gpusort_setup_chunk_rs(cl_uint rcs_gstore_num,
 	__global cl_char		   *attrefs;
 	__local size_t	kcs_offset;
 	__local size_t	kcs_nitems;
+	size_t			kcs_index;
 	pg_bytea_t		kparam_0;
 	cl_int			errcode = StromError_Success;
 
@@ -487,6 +488,7 @@ gpusort_setup_chunk_rs(cl_uint rcs_gstore_num,
 		kcs_offset = atomic_add(&kcs->nrows, kcs_nitems);
 	}
 	barrier(CLK_LOCAL_MEM_FENCE);
+	kcs_index = kcs_offset + get_local_id(0);
 
 	/* flag of referenced columns */
 	kparam_0 = pg_bytea_param(kparams, &errcode, 0);
@@ -504,16 +506,15 @@ gpusort_setup_chunk_rs(cl_uint rcs_gstore_num,
 	if (get_local_id(0) < kcs_nitems)
 	{
 		cl_uint		ncols = kcs->ncols;
-		cl_uint		rindex = kcs_offset + get_local_id(0);
 		cl_ulong	growid = (cl_ulong)rcs_gstore_num << 32 | get_global_id(0);
 		__global cl_char   *addr;
 
 		/* second last column is global row-id */
-		addr = kern_get_datum(kcs, ncols - 2, rindex);
+		addr = kern_get_datum(kcs, ncols - 2, kcs_index);
 		*((__global cl_ulong *)addr) = growid;
 		/* last column is index number within a chunk */
-		addr = kern_get_datum(kcs, ncols - 1, rindex);
-		*((__global cl_uint *)addr) = rindex;
+		addr = kern_get_datum(kcs, ncols - 1, kcs_index);
+		*((__global cl_uint *)addr) = kcs_index;
 	}
 	kern_writeback_error_status(kstatus, errcode, local_workmem);
 }

@@ -1367,6 +1367,7 @@ kern_row_to_column(__private cl_int *errcode,
 	}
 	barrier(CLK_GLOBAL_MEM_FENCE);
 }
+#endif /* OPENCL_DEVICE_CODE */
 
 /*
  * kern_get_datum
@@ -1375,7 +1376,7 @@ kern_row_to_column(__private cl_int *errcode,
  * It returns NULL, If it is a null-value in context of SQL. Elsewhere,
  * it returns a pointer towards global memory.
  */
-static __global void *
+static inline __global void *
 kern_get_datum(__global kern_column_store *kcs,
 			   cl_uint colidx,
 			   cl_uint rowidx)
@@ -1402,6 +1403,7 @@ kern_get_datum(__global kern_column_store *kcs,
 	return (__global void *)((__global char *)kcs + offset);
 }
 
+#ifdef OPENCL_DEVICE_CODE
 /*
  * kern_writeback_error_status
  *
