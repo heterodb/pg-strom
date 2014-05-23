@@ -461,57 +461,59 @@ gpusort_multi(cl_int mergesort_unitsz,
  * then gpusort_single modifies this index array later.
  */
 __kernel void
-gpusort_setup_chunk_rs(cl_uint rcs_global_index,
+gpusort_setup_chunk_rs(cl_uint rcs_gstore_num,
 					   __global kern_gpusort *kgpusort,
 					   __global kern_row_store *krs,
 					   __local void *local_workmem)
 {
 	__global kern_parambuf	   *kparams = KERN_GPUSORT_PARAMBUF(kgpusort);
-	__global kern_column_store  *kcs = KERN_GPUSORT_CHUNK(kgpusort);
+	__global kern_column_store *kcs = KERN_GPUSORT_CHUNK(kgpusort);
 	__global kern_toastbuf	   *ktoast = KERN_GPUSORT_TOASTBUF(kgpusort);
 	__global cl_int			   *kstatus = KERN_GPUSORT_STATUS(kgpusort);
 	__global cl_char		   *attrefs;
-	__local size_t				kcs_usage;
-	pg_bytea_t					kparam_0;
-	cl_int						errcode = StromError_DataStoreNoSpace; //StromError_Success;
-
-	if (get_global_id(0) == 0)
-		kcs_usage = atomic_and(&kcs->nrows, krs->nrows);
+	__local size_t	kcs_offset;
+	__local size_t	kcs_nitems;
+	pg_bytea_t		kparam_0;
+	cl_int			errcode = StromError_DataStoreNoSpace; //StromError_Success;
+	if (get_local_id(0) == 0)
+	{
+		if (get_global_id(0) + get_local_size(0) < krs->nrows)
+			kcs_nitems = get_local_size(0);
+		else if (get_global_id(0) < krs_nrows)
+			kcs_nitems = krs->nrows - kcs_offset;
+		else
+			kcs_nitems = 0;
+		kcs_offset = atomic_and(&kcs->nrows, kcs_nitems);
+	}
 	barrier(CLK_LOCAL_MEM_FENCE);
 
 	/* flag of referenced columns */
 	kparam_0 = pg_bytea_param(kparams, &errcode, 0);
 	attrefs = (__global cl_char *)VARDATA(kparam_0.value);
 
-	if (kcs_usage + krs->nrows <= kcs->nrooms)
+	kern_row_to_column(&errcode,
+					   attrefs,
+					   krs,
+					   kcs,
+					   ktoast,
+					   kcs_offset,
+					   kcs_nitems,
+					   local_workmem);
+
+	if (get_local_id(0) < kcs_nitems)
 	{
 		cl_uint		ncols = kcs->ncols;
-		cl_uint		rindex = kcs_usage + get_global_id(0);
-		cl_ulong	grecid = ((cl_ulong)rcs_global_index << 32 |
-							  get_global_id(0));
+		cl_uint		rindex = kcs_offset + get_local_id(0);
+		cl_ulong	growid = (cl_ulong)rcs_gstore_num << 32 | get_global_id(0);
 		__global cl_char   *addr;
 
-		kern_row_to_column(&errcode,
-						   attrefs,
-						   krs,
-						   kcs,
-						   ktoast,
-						   kcs->nrows,
-						   local_workmem);
-
-		if (get_global_id(0) < krs->nrows)
-		{
-			/* second last column is global record-id */
-			addr = kern_get_datum(kcs, ncols - 2, rindex);
-			*((__global cl_ulong *)addr) = grecid;
-			/* last column is index number within a chunk */
-			addr = kern_get_datum(kcs, ncols - 1, rindex);
-			*((__global cl_uint *)addr) = rindex;
-		}
+		/* second last column is global record-id */
+		addr = kern_get_datum(kcs, ncols - 2, rindex);
+		*((__global cl_ulong *)addr) = grecid;
+		/* last column is index number within a chunk */
+		addr = kern_get_datum(kcs, ncols - 1, rindex);
+		*((__global cl_uint *)addr) = rindex;
 	}
-	else
-		errcode = StromError_DataStoreNoSpace;
-
 	kern_writeback_error_status(kstatus, errcode, local_workmem);
 }
 

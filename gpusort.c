@@ -345,6 +345,7 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 	*p_total_cost = startup_cost + run_cost;
 }
 
+#if 0
 static void
 gpusort_codegen_on_kparam(StringInfo str, bool is_declare,
 						  int index, Node *node, void *private)
@@ -369,6 +370,7 @@ gpusort_codegen_on_kparam(StringInfo str, bool is_declare,
 					 "pg_%s_param(kparams,errcode,%d)\n",
 					 index, dtype->type_name, index);
 }
+#endif
 
 static void
 gpusort_codegen_on_kvar(StringInfo str, bool is_declare,
@@ -393,26 +395,28 @@ gpusort_codegen_on_kvar(StringInfo str, bool is_declare,
 	for (i=0; (code = labels[i]) != '\0'; i++)
 	{
 		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
-			appendStringInfo(str,
-							 "#define KVAR_%c%u\t"
-							 "pg_%s_vref(kcs_%c,ktoast_%c,errcode,%u,%c_index)\n",
-							 toupper(code),
-							 index,
-							 dtype->type_name,
-							 code,
-							 code,
-							 index,
-							 code);
+			appendStringInfo(
+				str,
+				"#define KVAR_%c%u\t"
+				"pg_%s_vref(kcs_%c,ktoast_%c,errcode,%u,%c_index)\n",
+				toupper(code),
+				index,
+				dtype->type_name,
+				code,
+				code,
+				index,
+				code);
 		else
-			appendStringInfo(str,
-							 "#define KVAR_%c%u\t"
-							 "pg_%s_vref(kcs_%c,errcode,%u,%c_index)\n",
-							 toupper(code),
-							 index,
-							 dtype->type_name,
-							 code,
-							 index,
-							 code);
+			appendStringInfo(
+				str,
+				"#define KVAR_%c%u\t"
+				"pg_%s_vref(kcs_%c,errcode,%u,%c_index)\n",
+				toupper(code),
+				index,
+				dtype->type_name,
+				code,
+				index,
+				code);
 	}
 }
 
@@ -429,7 +433,7 @@ gpusort_codegen_comparison(Sort *sort, codegen_context *context)
 	initStringInfo(&body);
 
 	memset(context, 0, sizeof(codegen_context));
-	context->on_kparam_callback = gpusort_codegen_on_kparam;
+	//context->on_kparam_callback = gpusort_codegen_on_kparam;
 	context->on_kvar_callback = gpusort_codegen_on_kvar;
 
 	/*

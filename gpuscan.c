@@ -291,6 +291,9 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	add_path(baserel, &pathnode->cpath.path);
 }
 
+/*
+ * OpenCL code generation that can run on GPU/MIC device
+ */
 static char *
 gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 					  codegen_context *context)
@@ -330,53 +333,17 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 	/* qualifier definition with row-store */
 	appendStringInfo(
 		&str,
-		"__kernel void\n"
-		"gpuscan_qual_cs(__global kern_gpuscan *kgscan,\n"
-		"                __global kern_column_store *kcs,\n"
-		"                __global kern_toastbuf *toast,\n"
-		"                __local void *local_workmem)\n"
+		"static pg_bool_t\n"
+		"gpuscan_qual_eval(__private cl_int *errcode,\n"
+		"                  __global kern_gpuscan *kgscan,\n"
+		"                  __global kern_column_store *kcs,\n"
+		"                  __global kern_toastbuf *toast,\n"
+		"                  size_t kcs_index)\n"
 		"{\n"
-		"  pg_bool_t   rc;\n"
-		"  cl_int      errcode = StromError_Success;\n"
 		"  __global kern_parambuf *kparams\n"
-		"    = KERN_GPUSCAN_PARAMBUF(kgscan);\n"
+		"      = KERN_GPUSCAN_PARAMBUF(kgscan);\n"
 		"\n"
-		"  KDEBUG_INIT(KERN_GPUSCAN_RESULTBUF(kgscan));\n"
-		"\n"
-		"  if (get_global_id(0) < kcs->nrows)\n"
-		"    rc = %s;\n"
-		"  else\n"
-		"    rc.isnull = true;\n"
-		"  STROM_SET_ERROR(&errcode,\n"
-		"                  !rc.isnull && rc.value != 0\n"
-		"                  ? StromError_Success\n"
-		"                  : StromError_RowFiltered);\n"
-		"  gpuscan_writeback_result(kgscan, errcode, \n"
-		"                           local_workmem);\n"
-		"}\n"
-		"\n"
-		"__kernel void\n"
-		"gpuscan_qual_rs(__global kern_gpuscan *kgscan,\n"
-		"                __global kern_row_store *krs,\n"
-		"                __global kern_column_store *kcs,\n"
-		"                __local void *local_workmem)\n"
-		"{\n"
-		"  pg_bytea_t        kparam_0;\n"
-		"  __global cl_char *attrefs;\n"
-		"  __global kern_parambuf *kparams\n"
-		"    = KERN_GPUSCAN_PARAMBUF(kgscan);\n"
-		"  cl_int            errcode = StromError_Success;\n"
-		"\n"
-		"  KDEBUG_INIT(KERN_GPUSCAN_RESULTBUF(kgscan));\n"
-		"\n"
-		"  kparam_0 = KPARAM_0;\n"
-		"  attrefs = (__global cl_char *)\n"
-		"      VARDATA(kparam_0.value);\n"
-		"  kern_row_to_column(&errcode,attrefs,\n"
-		"                     krs,kcs,NULL,0,local_workmem);\n"
-		"  gpuscan_qual_cs(kgscan,kcs,\n"
-		"                  (__global kern_toastbuf *)krs,\n"
-		"                  local_workmem);\n"
+		"  return %s;\n"
 		"}\n", expr_code);
 	return str.data;
 }
@@ -749,20 +716,27 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 }
 
 static void
-pgstrom_setup_kern_colstore_head(GpuScanState *gss, kern_resultbuf *kresult)
+pgstrom_setup_kern_colstore_head(GpuScanState *gss, kern_resultbuf *kresult,
+								 bool with_row_store)
 {
 	kern_column_store *kcs_head = (kern_column_store *)kresult->results;
 	kern_toastbuf *ktoast;
 	TupleDesc	tupdesc = RelationGetDescr(gss->scan_rel);
 	cl_uint		ncols = gss->cs_attnums;
-	cl_uint		nrows = kresult->nrooms;
+	cl_uint		nrooms = kresult->nrooms;
 	cl_uint	   *i_refcols;
 	Size		offset;
 	int			i, j, k;
 
+	/*
+	 * In case of row-store is processed, kern_row_to_column will increase
+	 * the kcs_head->nrows in device. On the other hands, gpuscan_qual_cs()
+	 * handles already preprocessed column-store, it has to be same value
+	 * with kcs_head->nrooms (because we create a tightly fit kcs).
+	 */
 	kcs_head->ncols = ncols;
-	kcs_head->nrows = nrows;
-	kcs_head->nrooms = nrows;	/* we create a tightly fit kcs */
+	kcs_head->nrows = (with_row_store ? 0 : nrooms);
+	kcs_head->nrooms = nrooms;
 	ktoast = (kern_toastbuf *)&kcs_head->colmeta[ncols];
 	i_refcols = (cl_uint *)&ktoast->coldir[ncols];
 
@@ -793,10 +767,10 @@ pgstrom_setup_kern_colstore_head(GpuScanState *gss, kern_resultbuf *kresult)
 		kcmeta->cs_ofs = offset;
 
 		if (!kcmeta->attnotnull)
-			offset += STROMALIGN((nrows + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
-		offset += STROMALIGN(nrows * (attr->attlen > 0
-									  ? attr->attlen
-									  : sizeof(cl_uint)));
+			offset += STROMALIGN((nrooms + BITS_PER_BYTE-1) / BITS_PER_BYTE);
+		offset += STROMALIGN(nrooms * (attr->attlen > 0
+									   ? attr->attlen
+									   : sizeof(cl_uint)));
 		if (gss->tc_scan)
 		{
 			tcache_head	*tc_head = gss->tc_head;
@@ -990,8 +964,10 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 				kresult->nitems = kresult->nrooms;
 			}
 			else
-				pgstrom_setup_kern_colstore_head(gss, kresult);
-
+			{
+				bool	with_row_store = StromTagIs(sobject, TCacheRowStore);
+				pgstrom_setup_kern_colstore_head(gss, kresult, with_row_store);
+			}
 			Assert(pgstrom_shmem_sanitycheck(gpuscan));
 		}
 		else
@@ -2317,7 +2293,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 	cl_command_queue	kcmdq;
 	cl_uint			   *i_refcols;
 	cl_uint				ncols;
-	cl_uint				nrows;
+	cl_uint				nrooms;
 	cl_uint				i, j;
 	cl_int				rc;
 	Size				bytes_dma_send = 0;
@@ -2344,7 +2320,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 	kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
 	kcs_head = (kern_column_store *)kresults->results;
 	ncols = kcs_head->ncols;
-	nrows = kcs_head->nrows;
+	nrooms = kcs_head->nrooms;
 	ktoast = (kern_toastbuf *)&kcs_head->colmeta[ncols];
 	i_refcols = (cl_uint *)&ktoast->coldir[ncols];
 
@@ -2397,7 +2373,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 
 	/* and, compute an optimal workgroup-size of this kernel */
 	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
-									   clgsc->kernel, i, nrows,
+									   clgsc->kernel, i, nrooms,
 									   sizeof(cl_uint),
 									   sizeof(cl_uint)))
 		goto error3;
@@ -2596,7 +2572,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 		if (!kcs_head->colmeta[i].attnotnull)
 		{
 			Assert(tcs->cdata[j].isnull != NULL);
-			length = STROMALIGN((nrows + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+			length = STROMALIGN((nrooms + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
 			rc = clEnqueueWriteBuffer(kcmdq,
 									  clgsc->m_cstore,
 									  CL_FALSE,
@@ -2619,7 +2595,7 @@ clserv_process_gpuscan_column(pgstrom_message *msg)
 		}
 		length = (kcs_head->colmeta[i].attlen > 0
 				  ? kcs_head->colmeta[i].attlen
-				  : sizeof(cl_uint)) * nrows;
+				  : sizeof(cl_uint)) * nrooms;
 		rc = clEnqueueWriteBuffer(kcmdq,
 								  clgsc->m_cstore,
 								  CL_FALSE,

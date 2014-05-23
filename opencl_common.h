@@ -885,7 +885,7 @@ memcpy(__global void *__dst, __global const void *__src, size_t len)
  * use within if-blocks.
  */
 static cl_uint
-arithmetic_stairlike_add(uint my_value, __local cl_uint *items,
+arithmetic_stairlike_add(cl_uint my_value, __local cl_uint *items,
 						 __private cl_uint *total_sum)
 {
 	size_t		wkgrp_sz = get_local_size(0);
@@ -907,7 +907,7 @@ arithmetic_stairlike_add(uint my_value, __local cl_uint *items,
 	}
 	if (total_sum)
 		*total_sum = items[get_local_size(0) - 1];
-	return items[get_local_size(0) - 1];
+	return items[get_local_id(0)];
 }
 
 /*
@@ -1145,37 +1145,40 @@ static void
 kern_row_to_column(__private cl_int *errcode,
 				   __global cl_char *attreferenced,
 				   __global kern_row_store *krs,
+				   size_t krs_index,
 				   __global kern_column_store *kcs,
 				   __global kern_toastbuf *ktoast,
 				   size_t kcs_offset,
+				   size_t kcs_nitems,
 				   __local cl_uint *workbuf)
 {
 	__global rs_tuple  *rs_tup;
-	size_t		kcs_index = kcs_offset + get_global_id(0);
+	size_t		kcs_index = kcs_offset + get_local_id(0);
 	cl_uint		ncols = kcs->ncols;
 	cl_uint		offset;
 	cl_uint		i, j, k;
 
 	/* fetch a rs_tuple on the row-store */
-	rs_tup = kern_rowstore_get_tuple(krs, kcs_index);
+	if (get_local_id(0) < kcs_nitems)
+		rs_tup = kern_rowstore_get_tuple(krs, krs_index);
+	else
+		rs_tup = NULL;
 	offset = (rs_tup != NULL ? rs_tup->data.t_hoff : 0);
 
 	for (i=0, j=0; j < ncols; i++)
 	{
 		kern_colmeta	rcmeta = krs->colmeta[i];
 		kern_colmeta	ccmeta = kcs->colmeta[j];
-		__global char  *dest = NULL;
-		__global char  *src = NULL;
-		cl_bool	ktoast_copy = false;
-		cl_bool	isnull;
+		__global char  *dest;
+		__global char  *src;
 
 		if (!rs_tup || ((rs_tup->data.t_infomask & HEAP_HASNULL) != 0 &&
 						att_isnull(i, rs_tup->data.t_bits)))
-			isnull = true;
+		{
+			src = NULL;		/* means, this value is NULL */
+		}
 		else
 		{
-			isnull = false;
-
 			if (rcmeta.attlen > 0)
 				offset = TYPEALIGN(rcmeta.attalign, offset);
 			else if (!VARATT_NOT_PAD_BYTE((uintptr_t)&rs_tup->data + offset))
@@ -1189,66 +1192,95 @@ kern_row_to_column(__private cl_int *errcode,
 			offset += (rcmeta.attlen > 0 ?
 					   rcmeta.attlen :
 					   VARSIZE_ANY(src));
-			if (attreferenced[i])
-			{
-				dest = ((__global char *)kcs) + ccmeta.cs_ofs;
-
-				/* adjust destination address by nullmap, if needed */
-				if (!ccmeta.attnotnull)
-					dest += STROMALIGN((kcs->nrooms + 7) >> 3);
-
-				/* adjust destination address for exact slot on column-array */
-				dest += kcs_index * (ccmeta.attlen > 0
-									 ? ccmeta.attlen
-									 : sizeof(cl_uint));
-				/*
-				 * Copy a datum from a field of rs_tuple into column-array
-				 * of kern_column_store. In case of variable length-field,
-				 * column-array will have offset to body of the variable
-				 * length field in the toast buffer. The source row-store
-				 * will also perform as a toast buffer after the translation.
-				 *
-				 * NOTE: Also note that we assume fixed length variable has
-				 * 1, 2, 4, 8 or 16-bytes length. Elsewhere, it should be
-				 * a variable length field.
-				 */
-				if (ccmeta.attlen == sizeof(cl_char))
-					*((__global cl_char *)dest)
-						= *((__global cl_char *)src);
-				else if (ccmeta.attlen == sizeof(cl_short))
-					*((__global cl_short *)dest)
-                        = *((__global cl_short *)src);
-				else if (ccmeta.attlen == sizeof(cl_int))
-					*((__global cl_int *)dest)
-                        = *((__global cl_int *)src);
-				else if (ccmeta.attlen == sizeof(cl_long))
-					*((__global cl_long *)dest)
-                        = *((__global cl_long *)src);
-				else if (ccmeta.attlen > 0)
-					memcpy(dest, src, ccmeta.attlen);
-				else if (!ktoast)
-					*((__global cl_uint *)dest)
-						= (cl_uint)((uintptr_t)src -
-									(uintptr_t)krs);
-				else
-					ktoast_copy = true;	/* do it below */
-			}
 		}
+		/* ok, go on the next column */
+		if (!attreferenced[i])
+			continue;
 
 		/*
-		 * If caller wants to copy the reference variable length field
-		 * into the supplied kern_toastbuf buffer, let's do it below.
-		 * Because 
-		 *
+		 * calculation of destination address on the column-store,
+		 * if thread is responsible to a particular entry.
 		 */
-		if (ktoast_copy)
+		if (get_local_id(0) < kcs_nitems)
 		{
+			dest = ((__global char *)kcs) + ccmeta.cs_ofs;
+			if (!ccmeta.attnotnull)
+				dest += STROMALIGN((kcs->nrooms + 7) >> 3);
+
+			dest += kcs_index * (ccmeta.attlen > 0
+								 ? ccmeta.attlen
+								 : sizeof(cl_uint));
+		}
+		else
+			dest = NULL;	/* means, it is out of range in kcs */
+
+		/*
+		 * Copy a datum in rs_tuple into an item of column-array
+		 * in kern_column_store. In case of variable length-field,
+		 * column-array have only offset on the associated toast
+		 * buffer. Here are two options. If caller does not use
+		 * dedicated toast buffer, we deal with the source row-
+		 * store as a buffer to store variable-length field.
+		 * Elsewhere, the toast body shall be copied.
+		 */
+		if (ccmeta.attlen == sizeof(cl_char))
+		{
+			if (dest)
+				*((__global cl_char *)dest)
+					= (!src ? 0 : *((__global cl_char *)src));
+		}
+		else if (ccmeta.attlen == sizeof(cl_short))
+		{
+			if (dest)
+				*((__global cl_short *)dest)
+					= (!src ? 0 : *((__global cl_short *)src));
+		}
+		else if (ccmeta.attlen == sizeof(cl_int))
+		{
+			if (dest)
+				*((__global cl_int *)dest)
+					= (!src ? 0 : *((__global cl_int *)src));
+		}
+		else if (ccmeta.attlen == sizeof(cl_long))
+		{
+			if (dest)
+				*((__global cl_long *)dest)
+					= (!src ? 0 : *((__global cl_long *)src));
+		}
+		else if (ccmeta.attlen > 0)
+		{
+			if (dest && src)
+				memcpy(dest, src, ccmeta.attlen);
+		}
+		else if (!ktoast)
+		{
+			/*
+			 * In case of variable-length field that uses row-store to
+			 * put body of the variable, all we need to do is putting
+			 * an offset of the value.
+			 */
+			if (dest)
+				*((__global cl_uint *)dest)
+					= (!src ? 0 : (cl_uint)((uintptr_t)src -
+											(uintptr_t)krs));
+		}
+		else
+		{
+			/*
+			 * In case when we copy the variable-length field into
+			 * the supplied kern_toastbuf, let's use the routeine below.
+			 * This routine has to be called by all the threads in
+			 * a workgroup because it takes reduction steps internally,
+			 * to avoid expensive atomic operation on ktoast->usage counter
+			 * (that tends to be the hottest  point of atomic operation).
+			 */
 			cl_uint		vl_ofs
 				= kern_varlena_to_toast(errcode,
 										ktoast,
 										(__global varlena *)src,
 										workbuf);
-			*((__global cl_uint *)dest) = vl_ofs;
+			if (dest != NULL)
+				*((__global cl_uint *)dest) = vl_ofs;
 		}
 
 		/*
@@ -1256,67 +1288,67 @@ kern_row_to_column(__private cl_int *errcode,
 		 * Because it takes per bit operation using interaction with neighbor
 		 * work-item, we use local working memory for reduction.
 		 */
-		if (attreferenced[i])
+		if (!ccmeta.attnotnull)
 		{
-			if (!ccmeta.attnotnull)
+			cl_uint		wmask = sizeof(cl_uint) * 8 - 1;
+			cl_uint		shift = (kcs_offset & wmask);
+
+			/* reduction to calculate nullmap with 32bit width */
+			workbuf[get_local_id(0)]
+				= (!src ? 0 : (1 << (get_local_id(0) & wmask)));
+			barrier(CLK_LOCAL_MEM_FENCE);
+			for (k=2; k <= sizeof(cl_uint) * 8; k <<= 1)
 			{
-				cl_uint	shift = (kcs_index & 0x001f);
-
-				/* reduction to calculate nullmap with 32bit width */
-				workbuf[get_local_id(0)]
-					= (!isnull ? (1 << (get_local_id(0) & 0x001f)) : 0);
+				if ((get_local_id(0) & (k-1)) == 0)
+					workbuf[get_local_id(0)]
+						|= workbuf[get_local_id(0) + (k>>1)];
 				barrier(CLK_LOCAL_MEM_FENCE);
-				for (k=2; k <= 32; k <<= 1)
+			}
+
+			/* responsible thread put calculated nullmap */
+			if (get_local_id(0) < kcs_nitems &&
+				(shift > 0
+				 ? (get_local_id(0) == 0 ||
+					(get_local_id(0) & wmask) == 32 - shift)
+				 : (get_local_id(0) & wmask) == 0))
+			{
+				__global cl_uint *p_nullmap;
+				cl_uint		bitmap;
+				cl_uint		mask;
+
+				bitmap = workbuf[get_local_id(0) & ~wmask];
+				p_nullmap = (__global cl_uint *)((__global char *)kcs +
+												 ccmeta.cs_ofs);
+				p_nullmap += (kcs_index + get_local_id(0)) >> 5;
+
+				if (shift > 0 && get_local_id(0) == 0)
 				{
-					if ((get_local_id(0) & (k-1)) == 0)
-						workbuf[get_local_id(0)]
-							|= workbuf[get_local_id(0) + (k>>1)];
-					barrier(CLK_LOCAL_MEM_FENCE);
+					/* special treatment if unaligned head */
+					mask = ((1 << shift) - 1);
+					atomic_and(p_nullmap, mask);
+					atomic_or(p_nullmap, (bitmap << shift) & ~mask);
 				}
-				/* responsible thread put calculated nullmap */
-				if (kcs_index + shift < kcs->nrooms &&
-					(get_local_id(0) == 0 ||
-					 (get_local_id(0) & 0x001f) == shift))
+				else if (shift > 0 &&
+						 get_local_id(0) + 32 >= get_local_size(0))
 				{
-					__global cl_uint *p_nullmap;
-					cl_uint		bitmap;
-					cl_uint		mask;
-
-					k = get_local_id(0) & ~0x001f;
-					bitmap = workbuf[k];
-					p_nullmap = (__global cl_uint *)
-						((__global char *)kcs + ccmeta.cs_ofs);
-					p_nullmap += kcs_index >> 5;
-
-					if (shift > 0 && get_local_id(0) == 0)
+					/* special treatment if unaligned tail */
+					mask = ((1 << shift) - 1);
+					atomic_and(p_nullmap, ~mask);
+					atomic_or(p_nullmap, (bitmap >> (32 - shift)) & mask);
+				}
+				else
+				{
+					/* usual case; no atomic operation needed */
+					if (shift > 0)
 					{
-						/* special treatment if unaligned head */
-						mask = ~((1 << shift) - 1);
-						atomic_and(p_nullmap, mask);
-                        atomic_or(p_nullmap, (bitmap << shift) & mask);
+						bitmap >>= (32 - shift);
+						bitmap |= workbuf[k + 32] << shift;
 					}
-					else if (shift > 0 &&
-							 get_local_id(0) + 32 >= get_local_size(0))
-					{
-						/* special treatment if unaligned tail */
-						mask = ((1 << shift) - 1);
-						atomic_and(p_nullmap, mask);
-						atomic_or(p_nullmap, (bitmap >> (32 - shift)) & mask);
-					}
-					else
-					{
-						/* usual case; no atomic operation needed */
-						if (shift > 0)
-						{
-							bitmap >>= (32 - shift);
-							bitmap |= workbuf[k + 32] << shift;
-						}
-						*p_nullmap = bitmap;
-					}
+					*p_nullmap = bitmap;
 				}
 			}
-			j++;
 		}
+		j++;
 	}
 	barrier(CLK_GLOBAL_MEM_FENCE);
 }
@@ -1345,9 +1377,8 @@ kern_get_datum(__global kern_column_store *kcs,
 	{
 		if (att_isnull(rowidx, (__global char *)kcs + offset))
 			return NULL;
-		offset += STROMALIGN((kcs->nrows + 7) >> 3);
+		offset += STROMALIGN((kcs->nrooms + 7) >> 3);
 	}
-
 	if (colmeta.attlen > 0)
 		offset += colmeta.attlen * rowidx;
 	else
@@ -1360,9 +1391,6 @@ kern_get_datum(__global kern_column_store *kcs,
  * kern_writeback_error_status
  *
  * It set thread-local error code on the variable on global memory.
- * 
- *
- *
  */
 static void
 kern_writeback_error_status(__global cl_int *error_status,

@@ -99,64 +99,25 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
 							int errcode,
 							__local void *workmem)
 {
-	__local cl_int *local_error = workmem;
-	cl_uint		wkgrp_sz = get_local_size(0);
-	cl_uint		wkgrp_id = get_local_id(0);
+	__local cl_uint	base;
+	cl_uint		binary;
 	cl_uint		offset;
 	cl_uint		nitems;
-	cl_uint		i;
 
 	/*
-	 * NOTE: At the begining, local_error has either 1 or 0 according
-	 * to the row-level error code. This logic tries to count number
-	 * of elements with 1,
-	 * example)
-	 * X[0] - 1 -> 1 (X[0])      -> 1 (X[0])   -> 1 (X[0])   -> 1 *
-	 * X[1] - 0 -> 1 (X[0]+X[1]) -> 1 (X[0-1]) -> 1 (X[0-1]) -> 1
-	 * X[2] - 0 -> 0 (X[2])      -> 1 (X[0-2]) -> 1 (X[0-2]) -> 1
-	 * X[3] - 1 -> 1 (X[2]+X[3]) -> 2 (X[0-3]) -> 2 (X[0-3]) -> 2 *
-	 * X[4] - 0 -> 0 (X[4])      -> 0 (X[4])   -> 2 (X[0-4]) -> 2
-	 * X[5] - 0 -> 0 (X[4]+X[5]) -> 0 (X[4-5]) -> 2 (X[0-5]) -> 2
-	 * X[6] - 1 -> 1 (X[6])      -> 1 (X[4-6]) -> 3 (X[0-6]) -> 3 *
-	 * X[7] - 1 -> 2 (X[6]+X[7]) -> 2 (X[4-7]) -> 4 (X[0-7]) -> 4 *
-	 * X[8] - 0 -> 0 (X[8])      -> 0 (X[7])   -> 0 (X[7])   -> 4
-	 * X[9] - 1 -> 1 (X[8]+X[9]) -> 1 (X[7-8]) -> 1 (X7-8])  -> 5 *
+	 * A typical usecase of arithmetic_stairlike_add with binary value:
+	 * It takes 1 if thread wants to return a status to the host side,
+	 * then stairlike-add returns a relative offset within workgroup,
+	 * and we can adjust this offset by global base index.
 	 */
-	local_error[wkgrp_id]
-		= (get_global_id(0) < kresbuf->nrooms &&
-		   (errcode == StromError_Success ||
-			errcode == StromError_RowReCheck)) ? 1 : 0;
-	barrier(CLK_LOCAL_MEM_FENCE);
+	binary = (get_global_id(0) < kresbuf->nrooms &&
+			  (errcode == StromError_Success ||
+			   errcode == StromError_RowReCheck)) ? 1 : 0;
 
-	for (i=0; wkgrp_sz != 0; i++, wkgrp_sz >>= 1)
-	{
-		if ((wkgrp_id & (1 << i)) != 0)
-		{
-			cl_int	i_source = (wkgrp_id & ~(1 << i)) | ((1 << i) - 1);
+	offset = arithmetic_stairlike_add(binary, workmem, &nitems);
 
-			local_error[wkgrp_id] += local_error[i_source];
-		}
-		barrier(CLK_LOCAL_MEM_FENCE);
-	}
-
-	/*
-	 * After the loop, each entry of kern_local_error_work[] shall have
-	 * sum(0..i) of kern_local_error[]; that means index of the item that
-	 * has Success or ReCheck status. It also means tha last item of
-	 * kern_local_error_work[] array is total number of items to be written
-	 * back (because it it sum(0..N-1)), so we acquire this number of rooms
-	 * with atomic operation, then write them back.
-	 */
-	nitems = local_error[get_local_size(0) - 1];
-
-	barrier(CLK_LOCAL_MEM_FENCE);
 	if (get_local_id(0) == 0)
-	{
-		offset = atomic_add(&kresbuf->nitems, nitems);
-		local_error[get_local_size(0)] = offset;
-	}
-	barrier(CLK_LOCAL_MEM_FENCE);
-	local_error[get_local_id(0)] += local_error[get_local_size(0)];
+		base = atomic_add(&kresbuf->nitems, nitems);
 	barrier(CLK_LOCAL_MEM_FENCE);
 
 	/*
@@ -168,15 +129,9 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
 		return;
 
 	if (errcode == StromError_Success)
-	{
-		i = local_error[wkgrp_id];
-		kresbuf->results[i - 1] = (get_global_id(0) + 1);
-	}
+		kresbuf->results[base + offset - 1] = (get_global_id(0) + 1);
 	else if (errcode == StromError_RowReCheck)
-	{
-		i = local_error[wkgrp_id];
-		kresbuf->results[i - 1] = -(get_global_id(0) + 1);
-	}
+		kresbuf->results[base + offset - 1] = -(get_global_id(0) + 1);
 }
 
 static inline void
@@ -187,6 +142,96 @@ gpuscan_writeback_result(__global kern_gpuscan *kgpuscan, int errcode,
 
 	kern_writeback_error_status(&kresbuf->errcode, errcode, local_workmem);
 	gpuscan_writeback_row_error(kresbuf, errcode, local_workmem);
+}
+
+/*
+ * forward declaration of the function to be generated on the fly
+ */
+static pg_bool_t
+gpuscan_qual_eval(__private cl_int *errcode,
+				  __global kern_gpuscan *kgscan,
+				  __global kern_column_store *kcs,
+				  __global kern_toastbuf *toast,
+				  size_t kcs_index);
+
+/*
+ * kernel entrypoint of gpuscan for column-store
+ */
+__kernel void
+gpuscan_qual_cs(__global kern_gpuscan *kgscan,
+				__global kern_column_store *kcs,
+				__global kern_toastbuf *toast,
+				__local void *local_workmem)
+{
+	pg_bool_t	rc;
+	cl_int		errcode = StromError_Success;
+	__global kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgscan);
+
+	if (get_global_id(0) < kcs->nrows)
+		rc = gpuscan_qual_eval(&errcode, kgscan, kcs, toast, get_global_id(0));
+	else
+		rc.isnull = true;
+
+	STROM_SET_ERROR(&errcode,
+					!rc.isnull && rc.value != 0
+					? StromError_Success
+					: StromError_RowFiltered);
+	gpuscan_writeback_result(kgscan, errcode, local_workmem);
+}
+
+/*
+ * kernel entrypoint of gpuscan for row-store
+ */
+__kernel void
+gpuscan_qual_rs(__global kern_gpuscan *kgscan,
+				__global kern_row_store *krs,
+				__global kern_column_store *kcs,
+				__local void *local_workmem)
+{
+	__global kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgscan);
+	cl_int				errcode = StromError_Success;
+	pg_bytea_t			kparam_0 = pg_bytea_param(kparams,&errcode,0);
+	pg_bool_t			rc;
+	__local size_t		kcs_offset;
+	__local size_t		kcs_nitems;
+
+	/* acquire a slot of this workgroup */
+	if (get_local_id(0) == 0)
+	{
+		if (get_global_id(0) + get_local_size(0) < krs->nrows)
+			kcs_nitems = get_local_size(0);
+		else if (get_global_id(0) < krs->nrows)
+			kcs_nitems = krs->nrows - get_global_id(0);
+		else
+			kcs_nitems = 0;
+		kcs_offset = atomic_add(&kcs->nrows, kcs_nitems);
+	}
+	barrier(CLK_LOCAL_MEM_FENCE);
+
+	/* move data into column-store */
+	kern_row_to_column(&errcode,
+					   (__global cl_char *)VARDATA(kparam_0.value),
+					   krs,
+					   get_global_id(0),
+					   kcs,
+					   NULL,
+					   kcs_offset,
+					   kcs_nitems,
+					   local_workmem);
+	if (get_local_id(0) < kcs_nitems)
+	{
+		rc = gpuscan_qual_eval(&errcode, kgscan, kcs,
+							   (__global kern_toastbuf *)krs,
+							   kcs_offset + get_local_id(0));
+	}
+	else
+		rc.isnull = true;
+
+	STROM_SET_ERROR(&errcode,
+					!rc.isnull && rc.value != 0
+					? StromError_Success
+					: StromError_RowFiltered);
+	gpuscan_writeback_result(kgscan, errcode, local_workmem);
 }
 
 #else	/* OPENCL_DEVICE_CODE */

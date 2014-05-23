@@ -1232,7 +1232,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		if (!func)
 			return false;
 		appendStringInfo(&context->str,
-						 "pgfn_%s(&errcode", dfunc->func_name);
+						 "pgfn_%s(errcode", dfunc->func_name);
 
 		foreach (cell, func->args)
 		{
@@ -1259,7 +1259,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		if (!dfunc)
 			return false;
 		appendStringInfo(&context->str,
-						 "pgfn_%s(&errcode", dfunc->func_name);
+						 "pgfn_%s(errcode", dfunc->func_name);
 
 		foreach (cell, op->args)
 		{
@@ -1296,7 +1296,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 					 (int)nulltest->nulltesttype);
 				break;
 		}
-		appendStringInfo(&context->str, "pgfn_%s(&errcode, ", func_name);
+		appendStringInfo(&context->str, "pgfn_%s(errcode, ", func_name);
 		if (!codegen_expression_walker((Node *) nulltest->arg, context))
 			return false;
 		appendStringInfoChar(&context->str, ')');
@@ -1337,7 +1337,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 					 (int)booltest->booltesttype);
 				break;
 		}
-		appendStringInfo(&context->str, "pgfn_%s(&errcode, ", func_name);
+		appendStringInfo(&context->str, "pgfn_%s(errcode, ", func_name);
 		if (!codegen_expression_walker((Node *) booltest->arg, context))
 			return false;
 		appendStringInfoChar(&context->str, ')');
@@ -1350,7 +1350,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		if (b->boolop == NOT_EXPR)
 		{
 			Assert(list_length(b->args) == 1);
-			appendStringInfo(&context->str, "pg_boolop_not(&errcode, ");
+			appendStringInfo(&context->str, "pg_boolop_not(errcode, ");
 			if (!codegen_expression_walker(linitial(b->args), context))
 				return false;
 			appendStringInfoChar(&context->str, ')');
@@ -1385,7 +1385,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 														dfunc);
 			context->extra_flags |= (dfunc->func_flags & DEVFUNC_INCL_FLAGS);
 
-			appendStringInfo(&context->str, "pgfn_%s(&errcode",
+			appendStringInfo(&context->str, "pgfn_%s(errcode",
 							 dfunc->func_name);
 			foreach (cell, b->args)
 			{
@@ -1500,7 +1500,7 @@ pgstrom_codegen_declarations(codegen_context *context)
 
 			appendStringInfo(&str,
 							 "#define KPARAM_%u\t"
-							 "pg_%s_param(kparams,&errcode,%d)\n",
+							 "pg_%s_param(kparams,errcode,%d)\n",
 							 index, dtype->type_name, index);
 		}
 		else if (IsA(lfirst(cell), Param))
@@ -1512,7 +1512,7 @@ pgstrom_codegen_declarations(codegen_context *context)
 
 			appendStringInfo(&str,
 							 "#define KPARAM_%u\t"
-							 "pg_%s_param(kparams,&errcode,%d)\n",
+							 "pg_%s_param(kparams,errcode,%d)\n",
 							 index, dtype->type_name, index);
 		}
 		else
@@ -1535,21 +1535,21 @@ pgstrom_codegen_declarations(codegen_context *context)
 			Assert(dtype != NULL);
 
 			if (dtype->type_flags & DEVTYPE_IS_VARLENA)
-				appendStringInfo(&str,
-								 "#define KVAR_%u\t"
-								 "pg_%s_vref(kcs,toast,&errcode,%u,%s)\n",
-								 index,
-								 dtype->type_name,
-								 index,
-								 "get_global_id(0)");
+				appendStringInfo(
+					&str,
+					"#define KVAR_%u\t"
+					"pg_%s_vref(kcs,toast,errcode,%u,kcs_index)\n",
+					index,
+					dtype->type_name,
+					index);
 			else
-				appendStringInfo(&str,
-								 "#define KVAR_%u\t"
-								 "pg_%s_vref(kcs,&errcode,%u,%s)\n",
-								 index,
-								 dtype->type_name,
-								 index,
-								 "get_global_id(0)");
+				appendStringInfo(
+					&str,
+					"#define KVAR_%u\t"
+					"pg_%s_vref(kcs,errcode,%u,kcs_index)\n",
+					index,
+					dtype->type_name,
+					index);
 		}
 		index++;
 	}
