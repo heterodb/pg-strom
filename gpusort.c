@@ -834,9 +834,8 @@ pgstrom_create_gpusort_chunk(GpuSortState *gsortstate)
 		ktoast->length = offsetof(kern_toastbuf, coldir[0]);
 	else
 		ktoast->length =
-			STROMALIGN_DOWN(allocsz_chunk -
-							((uintptr_t)ktoast -
-							 (uintptr_t)(&gs_chunk->kern)));
+			STROMALIGN_DOWN(allocsz_chunk - ((uintptr_t)ktoast -
+											 (uintptr_t)gs_chunk));
 	ktoast->usage = offsetof(kern_toastbuf, coldir[0]);
 
 	/* OK, initialized */
@@ -910,7 +909,7 @@ pgstrom_sanitycheck_gpusort_chunk(GpuSortState *gsortstate,
 	cl_int			   *kstatus = KERN_GPUSORT_STATUS(&gs_chunk->kern);
 	cl_uint				ncols;
 	cl_uint				nrows;
-	cl_int				i;
+	cl_int				i, j;
 
 	if (*kstatus != StromError_Success)
 		elog(INFO, "chunk: status %d (%s)",
@@ -1019,12 +1018,43 @@ pgstrom_sanitycheck_gpusort_chunk(GpuSortState *gsortstate,
 				else
 				{
 					cl_uint	vl_ofs = *((cl_uint *)cs_value);
-					size_t	vl_len = VARSIZE_ANY(rs_value);
+					void   *vl_cs = (char *)ktoast + vl_ofs;
+					void   *vl_rs = DatumGetPointer(rs_value);
+					size_t	vl_len;
 
-					if (memcmp((char *)ktoast + vl_ofs,
-							   DatumGetPointer(rs_value),
-							   vl_len) != 0)
-						elog(ERROR, "[%d] toast value corrupted", i);
+					if (VARSIZE_ANY(vl_rs) != VARSIZE_ANY(vl_cs))
+						elog(INFO, "[%d] toast length corrupted (%zu=>%zu)",
+							 i, VARSIZE_ANY(vl_rs), VARSIZE_ANY(vl_cs));
+					vl_len = VARSIZE_ANY(vl_rs);
+
+					if (memcmp(vl_rs, vl_cs, vl_len) != 0)
+					{
+						StringInfoData	buf;
+
+						initStringInfo(&buf);
+						appendStringInfo(&buf, "'");
+						for (j=0; j < vl_len; j++)
+						{
+							int	c = ((char *)vl_rs)[j];
+
+							if (isprint(c))
+								appendStringInfo(&buf, "%c", c);
+							else
+								appendStringInfo(&buf, "\\%02x", c);
+						}
+						appendStringInfo(&buf, "' => '");
+						for (j=0; j < vl_len; j++)
+						{
+							int	c = ((char *)vl_cs)[j];
+							if (isprint(c))
+								appendStringInfo(&buf, "%c", c);
+							else
+								appendStringInfo(&buf, "\\%02x", c);
+						}
+						appendStringInfo(&buf, "'");
+						elog(ERROR, "[%d] toast value corrupted (%s)",
+							 i, buf.data);
+					}
 				}
 			}
 		}
@@ -1037,7 +1067,7 @@ pgstrom_sanitycheck_gpusort_chunk(GpuSortState *gsortstate,
 	}
 	if (kcs->nrows != nrows)
 		elog(INFO, "chunk: nrows = %u (expected: %u)", kcs->nrows, nrows);
-	elog(INFO, "sanitycheck passed");
+	//elog(INFO, "sanitycheck passed");
 }
 
 /*
@@ -1259,6 +1289,8 @@ gpusort_preload_chunk(GpuSortState *gsortstate, HeapTuple *overflow)
 static void
 gpusort_process_response(GpuSortState *gsortstate, pgstrom_gpusort *gpusort)
 {
+	dlist_iter	iter;
+
 	/*
 	 * response message should has only in_chunk1 as its result,
 	 * but in_chunk2 is empty (because it had only one chunk, or
@@ -1267,6 +1299,14 @@ gpusort_process_response(GpuSortState *gsortstate, pgstrom_gpusort *gpusort)
 	 */
 	Assert(!dlist_is_empty(&gpusort->in_chunk1));
 	Assert(dlist_is_empty(&gpusort->in_chunk2));
+
+	dlist_foreach(iter, &gpusort->in_chunk1)
+	{
+		pgstrom_gpusort_chunk  *gs_chunk
+			= dlist_container(pgstrom_gpusort_chunk, chain, iter.cur);
+		kern_toastbuf  *ktoast = KERN_GPUSORT_TOASTBUF(&gs_chunk->kern);
+		elog(INFO, "ktoast length=%u usage=%u", ktoast->length, ktoast->usage);
+	}
 
 	if (gpusort->msg.errcode != StromError_Success)
 	{

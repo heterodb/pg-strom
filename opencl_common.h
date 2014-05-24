@@ -30,6 +30,7 @@
 #define FLEXIBLE_ARRAY_MEMBER
 #define offsetof(TYPE, FIELD)   ((uintptr_t) &((TYPE *)0)->FIELD)
 #define lengthof(ARRAY)			(sizeof(ARRAY) / sizeof((ARRAY)[0]))
+#define BITS_PER_BYTE			8
 
 /* basic type definitions */
 typedef bool		cl_bool;
@@ -789,64 +790,18 @@ memcpy(__global void *__dst, __global const void *__src, size_t len)
 {
 	__global char		*dst = __dst;
 	__global const char	*src = __src;
-	cl_int		rshift;
-	cl_int		lshift;
-	cl_ulong	curr;
-	cl_ulong	next;
 
 	/* an obvious case that we don't need to take a copy */
 	if (dst == src || len == 0)
-		return dst;
-
+		return __dst;
 	/* just a charm */
 	prefetch(src, len);
-	/* adjust alignment */
-	while (((uintptr_t)dst & (sizeof(cl_ulong) - 1)) != 0 && len > 0)
-	{
+	/*
+	 * TODO: needs to be GPU/MIC aware implementation
+	 */
+	while (len-- > 0)
 		*dst++ = *src++;
-		len--;
-	}
-	rshift = ((uintptr_t)src & (sizeof(cl_ulong) - 1));
-	lshift = sizeof(cl_ulong) - rshift;
-	src -= rshift;	/* aligned */
-	rshift <<= 8;	/* adjustment for right bit shift */
-	lshift <<= 8;	/* adjustment for left bit shift */
-
-	next = *((__global cl_ulong *)src);
-	src += sizeof(cl_ulong);
-	while (len >= sizeof(cl_ulong))
-	{
-		curr = next;
-		next = (len > sizeof(cl_ulong) ? *((__global cl_ulong *)src) : 0);
-		*((__global cl_ulong *)dst) = ((curr >> (8 * rshift)) |
-									   (next << (8 * lshift)));
-		src += sizeof(cl_ulong);
-		dst += sizeof(cl_ulong);
-		len -= sizeof(cl_ulong);
-	}
-	/* special treatment on the last one word */
-	curr = next;
-	next = (len > lshift ? *((__global cl_ulong *)src) : 0);
-
-	curr = (curr >> (8 * rshift)) | (next << (8 * lshift));
-	if (len >= sizeof(cl_uint))
-	{
-		*((__global cl_uint *)dst) = (cl_uint)(curr & 0xffffffffUL);
-		dst += sizeof(cl_uint);
-		len -= sizeof(cl_uint);
-	}
-	if (len >= sizeof(cl_ushort))
-	{
-		*((__global cl_ushort *)dst) = (cl_ushort)(curr & 0x0000ffffUL);
-		dst += sizeof(cl_ushort);
-		len -= sizeof(cl_ushort);
-	}
-	if (len >= sizeof(cl_uchar))
-	{
-		*((__global cl_uchar *)dst) = (cl_uchar)(curr & 0x000000ffUL);
-		len -= sizeof(cl_uchar);
-	}
-	return dst;
+	return __dst;
 }
 
 /*
@@ -957,13 +912,14 @@ kern_varlena_to_toast(__private int *errcode,
 		 * prior to atomic_add, and skip and set error if
 		 * toast buffer obviously has no space any more.
 		 */
-		if (ktoast->usage + toast_len <= ktoast->length)
+		if (ktoast->usage + toast_len > ktoast->length)
+			base = 0;
+		else
 		{
 			base = atomic_add(&ktoast->usage, toast_len);
 			if (base + toast_len > ktoast->length)
 				base = 0;	/* it's overflow! */
 		}
-		base = 0;
 	}
 	barrier(CLK_LOCAL_MEM_FENCE);
 
