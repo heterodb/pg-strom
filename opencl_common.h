@@ -219,6 +219,7 @@ typedef struct varatt_indirect
 #define StromError_DataStoreCorruption	300	/* Row/Column Store Corrupted */
 #define StromError_DataStoreNoSpace		301	/* No Space in Row/Column Store */
 #define StromError_DataStoreOutOfRange	302	/* Out of range in Data Store */
+#define StromError_DataStoreReCheck		303	/* Row/Column Store be rechecked */
 
 /* significant error; that abort transaction on the host code */
 #define StromErrorIsSignificant(errcode)	((errcode) >= 100 || (errcode) < 0)

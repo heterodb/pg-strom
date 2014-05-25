@@ -70,6 +70,9 @@ typedef struct
 	cl_uint			rcs_slotsz;	/* size of row-/column-store slot */
 	StromObject	  **rcs_slot;	/* slot of row-/column-stores */
 
+	/* fallback by CPU sorting */
+	SortSupport		cpusort_keys;
+
 	pgstrom_perfmon	pfm;		/* sum of performance counter */
 } GpuSortState;
 
@@ -750,6 +753,7 @@ pgstrom_create_gpusort_chunk(GpuSortState *gsortstate)
 	gs_chunk->rcs_slotsz = (allocsz_slot / sizeof(StromObject *));
 	gs_chunk->rcs_nums = 0;
 	gs_chunk->rcs_global_index = -1;	/* to be set later */
+	gs_chunk->is_sorted = false;		/* not sorted yet */
 
 	/* next, initialization of kern_gpusort */
 	kparam = KERN_GPUSORT_PARAMBUF(&gs_chunk->kern);
@@ -840,58 +844,6 @@ pgstrom_create_gpusort_chunk(GpuSortState *gsortstate)
 
 	/* OK, initialized */
 	return gs_chunk;
-}
-
-/*
- * pgstrom_release_gpusort
- *
- * Destructor of pgstrom_gpusort_multi object, to be called when refcnt
- * as message object reached to zero.
- *
- * NOTE: this routine may be called in the OpenCL server's context
- */
-static void
-pgstrom_release_gpusort(pgstrom_message *msg)
-{
-	pgstrom_gpusort		   *gpusort = (pgstrom_gpusort *) msg;
-	pgstrom_gpusort_chunk  *gs_chunk;
-	dlist_iter	iter;
-
-	/* unlink message queue and device program (should always exists) */
-	pgstrom_put_queue(msg->respq);
-	pgstrom_put_devprog_key(gpusort->dprog_key);
-
-	/*
-	 * pgstrom_gpusort usually has multiple pgstrom_gpusort_chunk
-	 * objects in its input and output list, as literal.
-	 * So, let's unlink them.
-	 */
-	dlist_foreach(iter, &gpusort->in_chunk1)
-	{
-		gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain, iter.cur);
-		pgstrom_release_gpusort_chunk(gs_chunk);
-	}
-
-	dlist_foreach(iter, &gpusort->in_chunk2)
-	{
-		gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain, iter.cur);
-		pgstrom_release_gpusort_chunk(gs_chunk);
-	}
-
-	dlist_foreach(iter, &gpusort->work_chunk)
-	{
-		gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain, iter.cur);
-		pgstrom_release_gpusort_chunk(gs_chunk);
-	}
-
-	/*
-	 * pgstrom_gpusort_multi is a slab object. So, we don't use
-	 * pgstrom_shmem_alloc/free interface for each object.
-	 */
-	SpinLockAcquire(&gpusort_shm_values->slab_lock);
-	memset(gpusort, 0, sizeof(pgstrom_gpusort));
-	dlist_push_tail(&gpusort_shm_values->gpusort_freelist, &gpusort->chain);
-    SpinLockRelease(&gpusort_shm_values->slab_lock);	
 }
 
 /*
@@ -1068,6 +1020,256 @@ pgstrom_sanitycheck_gpusort_chunk(GpuSortState *gsortstate,
 	if (kcs->nrows != nrows)
 		elog(INFO, "chunk: nrows = %u (expected: %u)", kcs->nrows, nrows);
 	//elog(INFO, "sanitycheck passed");
+}
+
+/*
+ * pgstrom_setup_cpusort
+ *
+ * We may have to run sorting on CPU, as fallback, if OpenCL is unavailable
+ * to run GpuSort on device side.
+ */
+static void
+pgstrom_setup_cpusort(GpuSortState *gsortstate)
+{
+	GpuSortPlan *gsort = (GpuSortPlan *)gsortstate->cps.ps.plan;
+	ListCell   *cell;
+	int			i = 0;
+	int			nkeys = list_length(gsortstate->sortkey_resnums);
+
+	gsortstate->cpusort_keys = palloc0(nkeys * sizeof(SortSupportData));
+	foreach (cell, gsortstate->sortkey_resnums)
+	{
+		SortSupport sortKey = &gsortstate->cpusort_keys[i++];
+		AttrNumber	resno = lfirst_int(cell);
+
+		Assert(i < gsort->numCols);
+		Assert(resno == gsort->sortColIdx[i]);
+		Assert(OidIsValid(gsort->sortOperators[i]));
+
+		sortKey->ssup_cxt = CurrentMemoryContext;	/* may needs own special context*/
+		sortKey->ssup_collation = gsort->collations[i];
+		sortKey->ssup_nulls_first = gsort->nullsFirst[i];
+		sortKey->ssup_attno = resno;
+
+		PrepareSortSupportFromOrderingOp(gsort->sortOperators[i], sortKey);
+		i++;
+	}
+}
+
+/*
+ * pgstrom_compare_cpusort
+ *
+ * It runs CPU based comparison between two values on kern_column_store.
+ */
+static int
+pgstrom_compare_cpusort(GpuSortState *gsortstate,
+						kern_column_store *x_kcs,
+						kern_toastbuf *x_toast,
+						int xindex,
+						kern_column_store *y_kcs,
+						kern_toastbuf *y_toast,
+						int yindex)
+{
+	TupleDesc	tupdesc = gsortstate->scan_slot->tts_tupleDescriptor;
+	ListCell   *cell;
+	int			i = 0;
+
+	foreach (cell, gsortstate->sortkey_resnums)
+	{
+		SortSupport	sort_key = &gsortstate->cpusort_keys[i];
+		AttrNumber	resno = lfirst_int(cell);
+		Form_pg_attribute attr = tupdesc->attrs[resno - 1];
+		const void *x_addr;
+		const void *y_addr;
+		Datum		x_value;
+		Datum		y_value;
+		bool		x_isnull;
+		bool		y_isnull;
+		cl_uint		offset;
+		int			comp;
+
+		/* fetch a X-value to be compared */
+		x_addr = kern_get_datum(x_kcs, i, xindex);
+		if (!x_addr)
+		{
+			x_isnull = true;
+			x_value = 0;
+		}
+		else
+		{
+			x_isnull = false;
+			if (attr->attlen > 0)
+				x_value = fetch_att(x_addr, attr->attbyval, attr->attlen);
+			else
+			{
+				offset = *((cl_uint *)x_addr);
+				x_value = PointerGetDatum((char *)x_toast + offset);
+			}
+		}
+
+		/* fetch a Y-value to be compared */
+		y_addr = kern_get_datum(y_kcs, i, yindex);
+		if (!y_addr)
+		{
+			y_isnull = true;
+			y_value = 0;
+		}
+		else
+		{
+			y_isnull = false;
+			if (attr->attlen > 0)
+				y_value = fetch_att(y_addr, attr->attbyval, attr->attlen);
+			else
+			{
+				offset = *((cl_uint *)y_addr);
+				y_value = PointerGetDatum((char *)y_toast + offset);
+			}
+		}
+
+		comp = ApplySortComparator(x_value, x_isnull,
+								   y_value, y_isnull,
+								   sort_key);
+		if (comp != 0)
+			return comp;
+	}
+	return 0;
+}
+
+
+
+/*
+ * gpstrom_run_cpusort_single
+ *
+ * It runs CPU based quick-sorting on a particular chunk.
+ * After that, its result index shall be sorted according to key-comparison
+ * results.
+ */
+static void
+recursive_run_cpusort_single(GpuSortState *gsortstate,
+							 kern_column_store *kcs,
+							 kern_toastbuf *ktoast,
+							 cl_int *rindex,
+							 int left,
+							 int right)
+{
+	if (left < right)
+	{
+		int		i = left;
+		int		j = right;
+		int		temp;
+		int		pivot = (i + j) / 2;
+
+		while (true)
+		{
+			while (pgstrom_compare_cpusort(gsortstate,
+										   kcs, ktoast, rindex[i],
+										   kcs, ktoast, rindex[pivot]) < 0)
+				i++;
+			while (pgstrom_compare_cpusort(gsortstate,
+										   kcs, ktoast, rindex[j],
+										   kcs, ktoast, rindex[pivot]) > 0)
+				j--;
+			if (i >= j)
+				break;
+			/* swap it */
+			temp = rindex[i];
+			rindex[i] = rindex[j];
+			rindex[j] = temp;
+			i++;
+			j--;
+		}
+		recursive_run_cpusort_single(gsortstate, kcs, ktoast,
+									 rindex, left, i-1);
+		recursive_run_cpusort_single(gsortstate, kcs, ktoast,
+									 rindex, j+1, right);
+	}
+}
+
+static void
+gpstrom_run_cpusort_single(GpuSortState *gsortstate,
+						   pgstrom_gpusort_chunk *gs_chunk)
+{
+	kern_column_store  *kcs;
+	kern_toastbuf	   *ktoast;
+	cl_int			   *rindex;
+
+	if (gs_chunk->is_sorted)
+	{
+		elog(INFO, "chunk is already sorted, so skipped");
+		return;
+	}
+	kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
+	ktoast = KERN_GPUSORT_TOASTBUF(&gs_chunk->kern);
+	rindex = KERN_GPUSORT_RESULT_INDEX(kcs);
+
+	recursive_run_cpusort_single(gsortstate, kcs, ktoast, rindex,
+								 0, kcs->nrows - 1);
+	gs_chunk->is_sorted = true;
+}
+
+/*
+ * pgstrom_run_cpusort_multi
+ *
+ *
+ *
+ *
+ *
+ */
+
+
+
+
+
+/*
+ * pgstrom_release_gpusort
+ *
+ * Destructor of pgstrom_gpusort_multi object, to be called when refcnt
+ * as message object reached to zero.
+ *
+ * NOTE: this routine may be called in the OpenCL server's context
+ */
+static void
+pgstrom_release_gpusort(pgstrom_message *msg)
+{
+	pgstrom_gpusort		   *gpusort = (pgstrom_gpusort *) msg;
+	pgstrom_gpusort_chunk  *gs_chunk;
+	dlist_iter	iter;
+
+	/* unlink message queue and device program (should always exists) */
+	pgstrom_put_queue(msg->respq);
+	pgstrom_put_devprog_key(gpusort->dprog_key);
+
+	/*
+	 * pgstrom_gpusort usually has multiple pgstrom_gpusort_chunk
+	 * objects in its input and output list, as literal.
+	 * So, let's unlink them.
+	 */
+	dlist_foreach(iter, &gpusort->in_chunk1)
+	{
+		gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain, iter.cur);
+		pgstrom_release_gpusort_chunk(gs_chunk);
+	}
+
+	dlist_foreach(iter, &gpusort->in_chunk2)
+	{
+		gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain, iter.cur);
+		pgstrom_release_gpusort_chunk(gs_chunk);
+	}
+
+	dlist_foreach(iter, &gpusort->work_chunk)
+	{
+		gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain, iter.cur);
+		pgstrom_release_gpusort_chunk(gs_chunk);
+	}
+
+	/*
+	 * pgstrom_gpusort_multi is a slab object. So, we don't use
+	 * pgstrom_shmem_alloc/free interface for each object.
+	 */
+	SpinLockAcquire(&gpusort_shm_values->slab_lock);
+	memset(gpusort, 0, sizeof(pgstrom_gpusort));
+	dlist_push_tail(&gpusort_shm_values->gpusort_freelist, &gpusort->chain);
+    SpinLockRelease(&gpusort_shm_values->slab_lock);
 }
 
 /*
@@ -1514,6 +1716,10 @@ gpusort_begin(CustomPlan *node, EState *estate, int eflags)
 	gsortstate->rcs_slotsz = 256;
 	gsortstate->rcs_slot = palloc0(sizeof(StromObject *) *
 								   gsortstate->rcs_slotsz);
+
+	/* setup fallback sorting by CPU */
+	pgstrom_setup_cpusort(gsortstate);
+
 	return &gsortstate->cps;
 }
 

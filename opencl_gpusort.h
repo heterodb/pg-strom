@@ -542,6 +542,7 @@ typedef struct
 	cl_uint			rcs_slotsz;	/* length of the array */
 	cl_uint			rcs_nums;	/* current usage of the array */
 	cl_uint			rcs_global_index;	/* starting offset in GpuSortState */
+	bool			is_sorted;
 	kern_gpusort	kern;
 } pgstrom_gpusort_chunk;
 
