@@ -2573,7 +2573,7 @@ clserv_launch_gpusort_bitonic(clstate_gpusort_single *clgss,
 	rc = clSetKernelArg(sort_kernel,
 						0,	/* cl_int bitonic_unitsz */
 						sizeof(cl_int),
-						&unitsz);
+						&bitonic_unitsz);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
@@ -2930,7 +2930,6 @@ error:
     pgstrom_reply_message(&gpusort->msg);
 }
 
-#if 0
 /*
  * multi-chunks merge sorting
  *
@@ -2939,14 +2938,15 @@ error:
  *
  *
  */
+#if 0
 typedef struct
 {
 	pgstrom_message	*msg;
 	cl_program		program;
-	cl_kernel	   *merge_kernel;
-	cl_uint			nums_kernel;
-	cl_mem			m_chunk[5];
-	Size			m_length;
+	cl_kernel	   *kernels;
+	cl_uint			i_kernel;
+	cl_mem			m_kchunk[5];
+	cl_uint			i_kchunk;
 	cl_int			dindex;
 	Size			bytes_dma_send;
 	Size			bytes_dma_recv;
@@ -2960,6 +2960,125 @@ static void
 clserv_respond_gpusort_multi(cl_event event, cl_int ev_status, void *private)
 {
 
+}
+
+static int
+clserv_launch_gpusort_multi(clstate_gpusort_multi *clgsm,
+							cl_uint nrows, bool reversing, cl_uint unitsz,
+							pgstrom_gpusort_chunk *in_chunk1,
+							pgstrom_gpusort_chunk *in_chunk2)
+{
+	cl_kernel	merge_kernel;
+	size_t		lwork_sz;
+	size_t		gwork_sz;
+	cl_mem		kchunk;
+	cl_int		n_kchunk;
+	cl_int		i, rc;
+
+	/*
+	 * __kernel void
+	 * gpusort_multi(cl_int mergesort_unitsz,
+	 *               __global kern_gpusort *kgsort_x,
+	 *               __global kern_gpusort *kgsort_y,
+	 *               __global kern_gpusort *kgsort_z1,
+	 *               __global kern_gpusort *kgsort_z2,
+	 *               __local void *local_workbuf)
+	 */
+	merge_kernel = clCreateKernel(clgsm->program,
+								  "gpusort_multi",
+								  &rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+		return rc;
+	}
+	clgsm->kernels[clgsm->i_kernel++] = merge_kernel;
+
+	/* Set optimal global/local workgroup size */
+	unitlen = (1 << unitsz);
+	n_threads = (nrows + unitlen - 1) & ~(unitlen - 1);
+	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
+									   merge_kernel,
+									   clgsm->dindex,
+									   n_threads,
+									   sizeof(cl_uint)))
+		return StromError_OpenCLInternal;
+
+	/* push arguments */
+	rc = clSetKernelArg(merge_kernel,
+						0,	/* cl_int bitonic_unitsz */
+						sizeof(cl_int),
+						&bitonic_unitsz);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+
+	n_kchunk = lengthof(clgsm->m_kchunk);
+	kchunk = clgsm->m_kchunk[(clgsm->i_kchunk - 1 + n_kchunk) % n_kchunk];
+	rc = clSetKernelArg(merge_kernel,
+						1,	/* __global kern_gpusort *kgsort_x */
+						sizeof(cl_mem),
+						kchunk);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	kchunk = clgsm->m_kchunk[clgsm->i_kchunk % n_kchunk];
+	rc = clSetKernelArg(merge_kernel,
+						2,	/* __global kern_gpusort *kgsort_y */
+						sizeof(cl_mem),
+						kchunk);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	kchunk = clgsm->m_kchunk[(clgsm->i_kchunk + 1) % n_kchunk];
+	rc = clSetKernelArg(merge_kernel,
+						3,	/* __global kern_gpusort *kgsort_z1 */
+						sizeof(cl_mem),
+						kchunk);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	kchunk = clgsm->m_kchunk[(clgsm->i_kchunk + 2) % n_kchunk];
+	rc = clSetKernelArg(merge_kernel,
+						3,	/* __global kern_gpusort *kgsort_z1 */
+						sizeof(cl_mem),
+						kchunk);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clEnqueueNDRangeKernel(kcmdq,
+								merge_kernel,
+								1,
+								NULL,
+								&gwork_sz,
+								&lwork_sz,
+								1,
+								&clgss->events[clgss->ev_index - 1],
+								&clgss->events[clgss->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+                   opencl_strerror(rc));
+		return rc;
+	}
+	clgss->ev_index++;
+
+	return CL_SUCCESS;
 }
 #endif
 
@@ -3081,13 +3200,11 @@ clserv_process_gpusort_multi(pgstrom_gpusort *gpusort)
 	 * can run concurrently during kernel execution of 1st step.
 	 * Then, we will iterate these steps until last chunk.
 	 */
-	i_buffer = 0;
-
 	gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain,
 							   dlist_pop_head_node(&gpusort->gs_chunks));
 	length = KERN_GPUSORT_TOTAL_LENGTH(gs_chunk);
 	rc = clEnqueueWriteBuffer(kcmdq,
-							  clgsm->m_chunk[i_buffer],
+							  clgsm->m_chunk[0],
 							  CL_FALSE,
 							  0,
 							  length,
@@ -3101,21 +3218,69 @@ clserv_process_gpusort_multi(pgstrom_gpusort *gpusort)
 		goto error_nowait;
 	}
 
-	
-
-
-
+	i_kernel = 0;
+	i_buffer = 1;
 	dlist_foreach_modify(miter, &gpusort->gs_chunks)
 	{
+		prev_chunk = curr_chunk;
 
+		/* enqueue a DMA send */
+		dlist_delete(miter.cur);
+		curr_chunk = dlist_container(pgstrom_gpusort_chunk, chain, miter.cur);
+		length = KERN_GPUSORT_TOTAL_LENGTH(curr_chunk);
+		rc = clEnqueueWriteBuffer(kcmdq,
+								  clgsm->m_kchunk[i_buffer % n_buffer],
+								  CL_FALSE,
+								  0,
+								  length,
+								  &curr_chunk->kern,
+								  1,
+								  /* to be fixed */
+								  &clgsm->events[clgsm->ev_index - 1]
+								  &clgsm->events[clgsm->ev_index]);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clEnqueueWriteBuffer: %s",
+					   opencl_strerror(rc));
+			goto error_sync;
+		}
 
+		/* launch kernel */
+		for (i=1, k=0; i <= sort_size; i++)
+		{
+			for (j=i; j > 0; j--)
+			{
+				rc = clserv_launch_gpusort_multi(clgsm,
+												 nrows,
+												 reversing,
+												 unitsz,
+												 prev_chunk,
+												 curr_chunk);
+				if (rc != CL_SUCCESS)
+					goto error_sync;
+			}
+		}
 
+		/* enqueue a DMA recv request */
+		length = KERN_GPUSORT_TOTAL_LENGTH(prev_chunk);
+		rc = clEnqueueReadBuffer(kcmdq,
+								 clgsm->m_kchunk[(i_buffer + 2) % n_buffer],
+								 CL_FALSE,
+								 0,
+								 length,
+								 &prev_chunk->kern,
+								 1,
+								 &clgss->events[clgss->ev_index - 1],
+								 &clgss->events[clgss->ev_index]);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clEnqueueReadBuffer: %s",
+					   opencl_strerror(rc));
+			goto error_sync;
+		}
 
-
-
+		/* chain prev_chunk to output list */
 	}
-
-
 
 
 
