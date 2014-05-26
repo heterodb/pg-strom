@@ -96,8 +96,8 @@ static inline void *
 pmemcpy(void *from, size_t sz)
 {
 	void   *dest = palloc(sz);
-	memcpy(from, dest, sz);
-	return dest;
+
+	return memcpy(dest, from, sz);
 }
 
 /* additional dlist stuff */
@@ -905,7 +905,7 @@ pgstrom_sanitycheck_gpusort_chunk(GpuSortState *gsortstate,
 		cl_uint		rcs_idx;
 		cl_uint		row_idx;
 
-#if 1
+#if 0
 		/* it's assumption if unsorted chunk */
 		temp = kern_get_datum(kcs, ncols - 1, i);
 		if (!temp)
@@ -1039,7 +1039,7 @@ pgstrom_setup_cpusort(GpuSortState *gsortstate)
 	gsortstate->cpusort_keys = palloc0(nkeys * sizeof(SortSupportData));
 	foreach (cell, gsortstate->sortkey_resnums)
 	{
-		SortSupport sortKey = &gsortstate->cpusort_keys[i++];
+		SortSupport sortKey = &gsortstate->cpusort_keys[i];
 		AttrNumber	resno = lfirst_int(cell);
 
 		Assert(i < gsort->numCols);
@@ -1471,7 +1471,7 @@ gpusort_preload_chunk(GpuSortState *gsortstate, HeapTuple *overflow)
 	}
 	estate->es_direction = dir_saved;
 
-	/* now tuples were read in actually, so nothing to do */
+	/* no tuples were read in actually, so nothing to do */
 	if (nrows == 0)
 	{
 		pgstrom_untrack_object(&gpusort->msg.sobj);
@@ -1491,7 +1491,7 @@ gpusort_preload_chunk(GpuSortState *gsortstate, HeapTuple *overflow)
 static void
 gpusort_process_response(GpuSortState *gsortstate, pgstrom_gpusort *gpusort)
 {
-	dlist_iter	iter;
+	dlist_iter		iter;
 
 	/*
 	 * response message should has only in_chunk1 as its result,
@@ -1502,13 +1502,15 @@ gpusort_process_response(GpuSortState *gsortstate, pgstrom_gpusort *gpusort)
 	Assert(!dlist_is_empty(&gpusort->in_chunk1));
 	Assert(dlist_is_empty(&gpusort->in_chunk2));
 
+#if 0
 	dlist_foreach(iter, &gpusort->in_chunk1)
 	{
 		pgstrom_gpusort_chunk  *gs_chunk
 			= dlist_container(pgstrom_gpusort_chunk, chain, iter.cur);
 		kern_toastbuf  *ktoast = KERN_GPUSORT_TOASTBUF(&gs_chunk->kern);
-		elog(INFO, "ktoast length=%u usage=%u", ktoast->length, ktoast->usage);
+		elog(INFO, "ktoast usage %u of %u", ktoast->usage, ktoast->length);
 	}
+#endif
 
 	if (gpusort->msg.errcode != StromError_Success)
 	{
@@ -1526,6 +1528,23 @@ gpusort_process_response(GpuSortState *gsortstate, pgstrom_gpusort *gpusort)
 							kern_source),
 					 errdetail("%s", buildlog)));
 		}
+		else if (gpusort->msg.errcode == StromError_DataStoreReCheck)
+		{
+			/*
+			 * This error implies OpenCL device is unavailable to
+			 * compare the supplied data, like an external/compressed
+			 * toast datum.
+			 */
+			if (dlist_length(&gpusort->in_chunk1) == 1)
+			{
+				pgstrom_gpusort_chunk  *gs_chunk
+					= dlist_container(pgstrom_gpusort_chunk, chain,
+									  dlist_head_node(&gpusort->in_chunk1));
+				gpstrom_run_cpusort_single(gsortstate, gs_chunk);
+			}
+			else
+				elog(ERROR, "not implemented yet (multi-chunk cpusort)");
+		}
 		else
 		{
 			ereport(ERROR,
@@ -1533,6 +1552,15 @@ gpusort_process_response(GpuSortState *gsortstate, pgstrom_gpusort *gpusort)
 					 errmsg("PG-Strom: OpenCL execution error (%s)",
 							pgstrom_strerror(gpusort->msg.errcode))));
 		}
+	}
+
+	/* sanity check of sorting status */
+	dlist_foreach(iter, &gpusort->in_chunk1)
+	{
+		pgstrom_gpusort_chunk  *gs_chunk
+			= dlist_container(pgstrom_gpusort_chunk, chain, iter.cur);
+		if (!gs_chunk->is_sorted)
+			elog(ERROR, "respond gpusort chunk is not sorted");
 	}
 
 	if (gsortstate->pending_gpusort)
@@ -1765,6 +1793,25 @@ gpusort_exec(CustomPlanState *node)
 				Assert(!overflow);
 				break;
 			}
+			Assert(dlist_length(&gpusort->in_chunk1) == 1);
+
+			/*
+			 * Special case handling if a chunk preloaded contains only
+			 * one rows. It is obviously sorted, and should have no more
+			 * tuples to read.
+			 */
+			gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain,
+									   dlist_head_node(&gpusort->in_chunk1));
+			kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
+			if (kcs->nrows == 1)
+			{
+				Assert(!gsortstate->scan_done);
+				Assert(!overflow);
+				gs_chunk->is_sorted = true;
+				gpusort_process_response(gsortstate, gpusort);
+				break;
+			}
+
 			if (!pgstrom_enqueue_message(&gpusort->msg))
 				elog(ERROR, "Bug? OpenCL server seems to dead");
 			gsortstate->num_running++;
@@ -2176,6 +2223,8 @@ clserv_respond_gpusort_single(cl_event event, cl_int ev_status, void *private)
 	else
 	{
 		gpusort->msg.errcode = *KERN_GPUSORT_STATUS(&gs_chunk->kern);
+		if (gpusort->msg.errcode == StromError_Success)
+			gs_chunk->is_sorted = true;
 	}
 
 	/* collect performance statistics */
@@ -2435,7 +2484,7 @@ clserv_launch_gpusort_setup_column(clstate_gpusort_single *clgss,
  */
 static cl_kernel
 clserv_launch_gpusort_bitonic(clstate_gpusort_single *clgss,
-							  cl_uint nrooms, cl_int bitonic_unitsz,
+							  cl_uint nrows, cl_int bitonic_unitsz,
 							  bool is_first)
 {
 	cl_command_queue kcmdq = opencl_cmdq[clgss->dindex];
@@ -2457,9 +2506,11 @@ clserv_launch_gpusort_bitonic(clstate_gpusort_single *clgss,
 	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
 									   sort_kernel,
 									   clgss->dindex,
-									   (nrooms + 1 / 2),
+									   (nrows + 1) / 2,
 									   sizeof(cl_uint)))
 		goto error_1;
+
+	clserv_log("kernel call (nrows=%u, lworksz=%zu, gworksz=%zu)", nrows, lwork_sz, gwork_sz);
 
 	rc = clSetKernelArg(sort_kernel,
 						0,	/* cl_int bitonic_unitsz */
@@ -2527,6 +2578,7 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 	clstate_gpusort_single *clgss;
 	cl_command_queue		kcmdq;
 	cl_uint					dindex;
+	cl_uint					nrows;
 	cl_uint					prep_nums;
 	cl_uint					sort_nums;
 	cl_uint					sort_size;
@@ -2541,8 +2593,23 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 	kparam = KERN_GPUSORT_PARAMBUF(&gs_chunk->kern);
 	kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
 	prep_nums = gs_chunk->rcs_nums;
-	sort_size = get_next_log2(kcs->nrooms);
-	sort_nums = (sort_size * (sort_size + 1)) >> 1;
+
+	nrows = 0;
+	for (i=0; i < prep_nums; i++)
+	{
+		StromObject *sobject = gs_chunk->rcs_slot[i];
+		if (StromTagIs(sobject, TCacheRowStore))
+			nrows += ((tcache_row_store *) sobject)->kern.nrows;
+		else if (StromTagIs(sobject, TCacheColumnStore))
+			nrows += ((tcache_column_store *) sobject)->nrows;
+		else
+		{
+			rc = StromError_BadRequestMessage;
+			goto error;
+		}
+	}
+	sort_size = get_next_log2(nrows);
+	sort_nums = (sort_size * (sort_size + 1)) / 2;
 
 	/* state object of gpuscan (single chunk) */
 	event_nums = 2 * prep_nums + sort_nums + 4;
@@ -2626,18 +2693,6 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 	/* kparam + header of kern_column_store */
 	length = (KERN_GPUSORT_PARAMBUF_LENGTH(&gs_chunk->kern) +
 			  STROMALIGN(offsetof(kern_column_store, colmeta[kcs->ncols])));
-	do {
-		kern_column_store *kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
-		int i;
-
-		for (i=0; i < kcs->ncols; i++)
-		{
-			kern_colmeta cm = kcs->colmeta[i];
-
-			clserv_log("colmeta {attnotnull=%d, attalign=%d, attlen=%d, cs_ofs=%u}", cm.attnotnull, cm.attalign, cm.attlen, cm.cs_ofs);
-
-		}
-	} while(0);
 	rc = clEnqueueWriteBuffer(kcmdq,
 							  clgss->m_chunk,
 							  CL_FALSE,
@@ -2708,7 +2763,7 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 			goto error_sync;
 		}
 	}
-#if 0
+
 	/*
 	 * OK, preparation was done. Let's launch gpusort_single kernel
 	 * to sort key values within a gpusort-chunk.
@@ -2718,7 +2773,7 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 		for (j=i; j > 0; j--)
 		{
 			cl_kernel	sort_kernel
-				= clserv_launch_gpusort_bitonic(clgss, kcs->nrooms,
+				= clserv_launch_gpusort_bitonic(clgss, nrows,
 												j == i ? -j : j,
 												k==0 ? true : false);
 			if (!sort_kernel)
@@ -2726,7 +2781,7 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 			clgss->sort_kernel[k++] = sort_kernel;
 		}
 	}
-#endif
+
 	/*
 	 * Write back the gpusort chunk being prepared
 	 */
@@ -2812,7 +2867,7 @@ error_release:
 			free(clgss->prep_kernel);
 		free(clgss);
 	}
-
+error:
 	gpusort->msg.errcode = rc;
     pgstrom_reply_message(&gpusort->msg);
 }

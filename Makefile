@@ -11,7 +11,7 @@ OBJS  = main.o shmem.o codegen.o mqueue.o restrack.o debug.o grafter.o \
 
 
 PG_CONFIG = pg_config
-PGSTROM_DEBUG := $(shell $(PG_CONFIG) --configure | grep -q "'--enable-debug'" && echo "-Werror -Wall -O0 -DPGSTROM_DEBUG=1")
+PGSTROM_DEBUG := $(shell $(PG_CONFIG) --configure | grep -q "'--enable-debug'" && echo "-Wall -O0 -DPGSTROM_DEBUG=1")
 PG_CPPFLAGS := $(PGSTROM_DEBUG)
 EXTRA_CLEAN := opencl_common.c opencl_gpuscan.c \
 		opencl_gpusort.c opencl_hashjoin.c \
