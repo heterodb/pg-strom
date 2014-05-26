@@ -2531,13 +2531,16 @@ clserv_launch_gpusort_setup_column(clstate_gpusort_single *clgss,
  */
 static cl_kernel
 clserv_launch_gpusort_bitonic(clstate_gpusort_single *clgss,
-							  cl_uint nrows, cl_int bitonic_unitsz,
+							  cl_uint nrows, bool reversing, cl_uint unitsz,
 							  bool is_first)
 {
 	cl_command_queue kcmdq = opencl_cmdq[clgss->dindex];
 	cl_kernel	sort_kernel;
 	size_t		lwork_sz;
 	size_t		gwork_sz;
+	size_t		unitlen;
+	size_t		n_threads;
+	cl_int		bitonic_unitsz;
 	cl_int		rc;
 
 	sort_kernel = clCreateKernel(clgss->program,
@@ -2550,19 +2553,27 @@ clserv_launch_gpusort_bitonic(clstate_gpusort_single *clgss,
 	}
 
 	/* Set optimal global/local workgroup size */
+	unitlen = (1 << unitsz);
+	n_threads = (nrows + unitlen - 1) & ~(unitlen - 1);
 	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
 									   sort_kernel,
 									   clgss->dindex,
-									   (nrows + 1) / 2,
+									   n_threads,
 									   sizeof(cl_uint)))
 		goto error_1;
 
 	clserv_log("kernel call (nrows=%u, lworksz=%zu, gworksz=%zu)", nrows, lwork_sz, gwork_sz);
 
+	/* pack reversing and unitsz into one argument */
+	if (reversing)
+		bitonic_unitsz = unitsz;
+	else
+		bitonic_unitsz = -unitsz;
+
 	rc = clSetKernelArg(sort_kernel,
 						0,	/* cl_int bitonic_unitsz */
 						sizeof(cl_int),
-						&bitonic_unitsz);
+						&unitsz);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
@@ -2821,7 +2832,7 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 		{
 			cl_kernel	sort_kernel
 				= clserv_launch_gpusort_bitonic(clgss, nrows,
-												j == i ? -j : j,
+												j == i ? true : false, j,
 												k==0 ? true : false);
 			if (!sort_kernel)
 				goto error_sync;
@@ -2919,6 +2930,7 @@ error:
     pgstrom_reply_message(&gpusort->msg);
 }
 
+#if 0
 /*
  * multi-chunks merge sorting
  *
@@ -2927,13 +2939,14 @@ error:
  *
  *
  */
-#if 0
 typedef struct
 {
 	pgstrom_message	*msg;
 	cl_program		program;
-	cl_kernel		merge_kernel;
-	cl_mem			m_chunk[4];
+	cl_kernel	   *merge_kernel;
+	cl_uint			nums_kernel;
+	cl_mem			m_chunk[5];
+	Size			m_length;
 	cl_int			dindex;
 	Size			bytes_dma_send;
 	Size			bytes_dma_recv;
@@ -2953,14 +2966,180 @@ clserv_respond_gpusort_multi(cl_event event, cl_int ev_status, void *private)
 static void
 clserv_process_gpusort_multi(pgstrom_gpusort *gpusort)
 {
-	gpusort->msg.errcode = StromError_Success;
+#if 0
+	clstate_gpusort_multi  *clgsm = NULL;
+	pgstrom_gpusort_chunk  *gs_chunk;
+	dlist_mutable_iter		miter;
+	cl_uint			nchunks;
+	cl_uint			n_events;
+	size_t			length;
+
+	/*
+	 * allocation of clstate_gpusort_multi, according to number of
+	 * kernels to be run
+	 */
+	nchunks = dlist_length(&gpusort->gs_chunks);
+	if (nchunks < 2 || dlist_length(&gpusort->work_chunk) != 1)
+	{
+		rc = StromError_BadRequestMessage;
+		goto error;
+	}
+
+	clgsm = calloc(1, offsetof(clstate_gpusort_multi,
+							   events[n_events]));
+	if (!clgsm)
+	{
+		rc = CL_OUT_OF_HOST_MEMORY;
+		goto error;
+	}
+
+	clgsm->merge_kernel = calloc(nchunks - 1, sizeof(cl_kernel));
+	if (!clgsm->merge_kernel)
+	{
+		rc = CL_OUT_OF_HOST_MEMORY;
+		goto error_nowait;
+	}
+
+	/*
+	 * Choose a device to execute this kernel
+	 */
+	dindex = pgstrom_opencl_device_schedule(&gpusort->msg);
+	clgsm->dindex = dindex;
+	kcmdq = opencl_cmdq[dindex];
+
+	/*
+	 * First of all, it looks up a program object to be run on the
+	 * supplied gpusort-chunk. We may have three cases, however,
+	 * it usually takes the last case because this program object
+	 * should be already built.
+	 * (1) NULL; program object is under asynchronous building.
+	 * (2) BAD_OPENCL_PROGRAM; failed on program build.
+	 * (3) valid cl_program object.
+	 */
+	clgsm->program = clserv_lookup_device_program(gpusort->dprog_key,
+												  &gpusort->msg);
+	if (!clgsm->program)
+	{
+		free(clgsm->merge_kernel);
+		free(clgsm);
+		return;		/* message is in waitq, to be retried later! */
+	}
+	if (clgsm->program == BAD_OPENCL_PROGRAM)
+	{
+		rc = CL_BUILD_PROGRAM_FAILURE;
+		goto error_nowait;
+	}
+
+	/*
+	 * allocation of buffer object
+	 *
+	 * Multi-chunk merge sorting takes four chunks at once; two for input
+	 * and another two for output. Even though we create any chunks with
+	 * uniform length in a particular scan, we ensure the buffer object
+	 * can store the largest chunk being given.
+	 */
+	dlist_foreach(iter, &gpusort->gs_chunks)
+	{
+		gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain, iter.cur);
+		length = (KERN_GPUSORT_PARAMBUF_LENGTH(&gs_chunk->kern) +
+				  KERN_GPUSORT_CHUNK_LENGTH(&gs_chunk->kern) +
+				  KERN_GPUSORT_STATUS_LENGTH(&gs_chunk->kern) +
+				  KERN_GPUSORT_TOASTBUF_LENGTH(&gs_chunk->kern));
+		if (clgsm->m_length < length)
+			clgsm->m_length = length;
+	}
+	gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain,
+							   dlist_head_node(&gpusort->work_chunk));
+	length = KERN_GPUSORT_TOTAL_LENGTH(&gs_chunk->kern);
+
+	if (clgsm->m_length < length)
+		clgsm->m_length = length;
+
+	for (i=0; i < lengthof(clgsm->m_chunk); i++)
+	{
+		clgsm->m_chunk[i] = clCreateBuffer(opencl_context,
+										   CL_MEM_READ_WRITE,
+										   length,
+										   NULL,
+										   &rc);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
+			goto error_nowait;
+		}
+	}
+
+	/*
+	 * create kernel and enqueue jobs 
+	 *
+	 * We prepare five chunks in device memory, being used in rotation
+	 * manner. Let's assume the first and second chunks are used as
+	 * input buffer, the third and fourth ones are output buffer on
+	 * the 1st step. After that, the second output buffer can perform
+	 * as one of input buffer in the 2nd step, and the fifth buffer
+	 * (unused in the 1st step) can load 3rd chunk on which DMA send
+	 * can run concurrently during kernel execution of 1st step.
+	 * Then, we will iterate these steps until last chunk.
+	 */
+	i_buffer = 0;
+
+	gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain,
+							   dlist_pop_head_node(&gpusort->gs_chunks));
+	length = KERN_GPUSORT_TOTAL_LENGTH(gs_chunk);
+	rc = clEnqueueWriteBuffer(kcmdq,
+							  clgsm->m_chunk[i_buffer],
+							  CL_FALSE,
+							  0,
+							  length,
+							  &gs_chunk->kern,
+							  0,
+							  NULL,
+							  &clgsm->events[clgsm->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
+		goto error_nowait;
+	}
+
+	
+
+
+
+	dlist_foreach_modify(miter, &gpusort->gs_chunks)
+	{
+
+
+
+
+
+
+	}
+
+
+
+
+
+
+
+
+error_nowait:
+	for (i=0; i < lengthof(clgsm->m_chunk); i++)
+	{
+		if (clgsm->m_chunk[i])
+			clReleaseBuffer(clgsm->m_chunk[i]);
+	}
+	if (clgsm->program)
+		clReleaseProgram(clgsm->program);
+error:
+	gpusort->msg.errcode = rc;
 	pgstrom_reply_message(&gpusort->msg);
+#endif
 }
 
 static void
 clserv_process_gpusort(pgstrom_message *msg)
 {
-	pgstrom_gpusort	   *gpusort = (pgstrom_gpusort *) msg;
+	pgstrom_gpusort	*gpusort = (pgstrom_gpusort *) msg;
 
 	Assert(!dlist_is_empty(&gpusort->gs_chunks));
 	if (dlist_length(&gpusort->gs_chunks) == 1)
@@ -2968,6 +3147,6 @@ clserv_process_gpusort(pgstrom_message *msg)
 	else
 	{
 		Assert(!dlist_is_empty(&gpusort->work_chunk));
-		clserv_process_gpusort_multi(gpusort);
+	    clserv_process_gpusort_multi(gpusort);
 	}
 }
