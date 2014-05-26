@@ -542,7 +542,6 @@ typedef struct
 	cl_uint			rcs_slotsz;	/* length of the array */
 	cl_uint			rcs_nums;	/* current usage of the array */
 	cl_uint			rcs_global_index;	/* starting offset in GpuSortState */
-	bool			is_sorted;
 	kern_gpusort	kern;
 } pgstrom_gpusort_chunk;
 
@@ -551,14 +550,11 @@ typedef struct
 	pgstrom_message	msg;		/* = StromTag_GpuSort */
 	Datum			dprog_key;	/* key of device program object */
 	dlist_node		chain;		/* be linked to free list */
-	dlist_head		in_chunk1;	/* sorted chunks to be merged */
-	dlist_head		in_chunk2;	/* sorted chunks to be merged */
-	dlist_head		work_chunk;	/* working buffer during merge sort */
+	bool			is_sorted;	/* true, if already sorted */
+	bool			by_cpusort;	/* true, if unavailable to sort by GPU */
+	dlist_head		gs_chunks;	/* chunked being sorted, or to be sorted */
+	dlist_head		work_chunk;	/* working buffer during merge sorting */
 } pgstrom_gpusort;
-
-#define GPUSORT_MULTI_PER_BLOCK				\
-	((SHMEM_BLOCKSZ - SHMEM_ALLOC_COST		\
-	  - sizeof(dlist_node)) / sizeof(pgstrom_gpusort_multi))
 
 #endif	/* !OPENCL_DEVICE_CODE */
 #endif	/* OPENCL_GPUSORT_H */

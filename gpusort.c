@@ -136,7 +136,7 @@ get_next_log2(Size size)
 {
 	int		shift = 0;
 
-	if (size == 0)
+	if (size == 0 || size == 1)
 		return 0;
 	size--;
 #ifdef __GNUC__
@@ -753,7 +753,6 @@ pgstrom_create_gpusort_chunk(GpuSortState *gsortstate)
 	gs_chunk->rcs_slotsz = (allocsz_slot / sizeof(StromObject *));
 	gs_chunk->rcs_nums = 0;
 	gs_chunk->rcs_global_index = -1;	/* to be set later */
-	gs_chunk->is_sorted = false;		/* not sorted yet */
 
 	/* next, initialization of kern_gpusort */
 	kparam = KERN_GPUSORT_PARAMBUF(&gs_chunk->kern);
@@ -854,7 +853,8 @@ pgstrom_create_gpusort_chunk(GpuSortState *gsortstate)
  */
 static void
 pgstrom_sanitycheck_gpusort_chunk(GpuSortState *gsortstate,
-								  pgstrom_gpusort_chunk *gs_chunk)
+								  pgstrom_gpusort_chunk *gs_chunk,
+								  bool is_sorted)
 {
 	kern_column_store  *kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
 	kern_toastbuf	   *ktoast = KERN_GPUSORT_TOASTBUF(&gs_chunk->kern);
@@ -900,21 +900,22 @@ pgstrom_sanitycheck_gpusort_chunk(GpuSortState *gsortstate,
 	{
 		StromObject	*sobject;
 		void	   *temp;
-		cl_uint		kcs_index;
 		cl_ulong	growid;
 		cl_uint		rcs_idx;
 		cl_uint		row_idx;
 
-#if 0
-		/* it's assumption if unsorted chunk */
-		temp = kern_get_datum(kcs, ncols - 1, i);
-		if (!temp)
-			elog(ERROR, "chunk corrupted: kcs_index is null");
-		kcs_index = *((cl_uint *)temp);
-		if (kcs_index != i)
-			elog(ERROR, "chunk corrupted: kcs_index expected is %u, but %u",
-				 i, kcs_index);
-#endif
+		if (!is_sorted)
+		{
+			cl_uint		kcs_index;
+
+			temp = kern_get_datum(kcs, ncols - 1, i);
+			if (!temp)
+				elog(ERROR, "chunk corrupted: kcs_index is null");
+			kcs_index = *((cl_uint *)temp);
+			if (kcs_index != i)
+				elog(ERROR, "chunk corrupted: kcs_index should be %u, but %u",
+					 i, kcs_index);
+		}
 
 		temp = kern_get_datum(kcs, ncols - 2, i);
 		if (!temp)
@@ -1186,25 +1187,28 @@ recursive_run_cpusort_single(GpuSortState *gsortstate,
 }
 
 static void
-gpstrom_run_cpusort_single(GpuSortState *gsortstate,
-						   pgstrom_gpusort_chunk *gs_chunk)
+gpstrom_run_cpusort_single(GpuSortState *gsortstate, pgstrom_gpusort *gpusort)
 {
+	pgstrom_gpusort_chunk *gs_chunk;
 	kern_column_store  *kcs;
 	kern_toastbuf	   *ktoast;
 	cl_int			   *rindex;
 
-	if (gs_chunk->is_sorted)
+	if (gpusort->is_sorted)
 	{
-		elog(INFO, "chunk is already sorted, so skipped");
+		elog(INFO, "chunk is already sorted, so no need to run %s",
+			 __FUNCTION__);
 		return;
 	}
+	gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain,
+							   dlist_head_node(&gpusort->gs_chunks));
 	kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
 	ktoast = KERN_GPUSORT_TOASTBUF(&gs_chunk->kern);
 	rindex = KERN_GPUSORT_RESULT_INDEX(kcs);
 
 	recursive_run_cpusort_single(gsortstate, kcs, ktoast, rindex,
 								 0, kcs->nrows - 1);
-	gs_chunk->is_sorted = true;
+	gpusort->is_sorted = true;
 }
 
 /*
@@ -1244,13 +1248,7 @@ pgstrom_release_gpusort(pgstrom_message *msg)
 	 * objects in its input and output list, as literal.
 	 * So, let's unlink them.
 	 */
-	dlist_foreach(iter, &gpusort->in_chunk1)
-	{
-		gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain, iter.cur);
-		pgstrom_release_gpusort_chunk(gs_chunk);
-	}
-
-	dlist_foreach(iter, &gpusort->in_chunk2)
+	dlist_foreach(iter, &gpusort->gs_chunks)
 	{
 		gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain, iter.cur);
 		pgstrom_release_gpusort_chunk(gs_chunk);
@@ -1315,8 +1313,9 @@ pgstrom_create_gpusort(GpuSortState *gsortstate)
 	gpusort->msg.cb_release = pgstrom_release_gpusort;
 	/* other fields also */
 	gpusort->dprog_key = pgstrom_retain_devprog_key(gsortstate->dprog_key);
-	dlist_init(&gpusort->in_chunk1);
-	dlist_init(&gpusort->in_chunk2);
+	gpusort->is_sorted = false;
+	gpusort->by_cpusort = false;
+	dlist_init(&gpusort->gs_chunks);
 	dlist_init(&gpusort->work_chunk);
 
 	return gpusort;
@@ -1365,7 +1364,7 @@ gpusort_preload_chunk(GpuSortState *gsortstate, HeapTuple *overflow)
 	toast_length = ktoast->length;
 	toast_usage = ktoast->usage;
 
-	dlist_push_head(&gpusort->in_chunk1, &gs_chunk->chain);
+	dlist_push_head(&gpusort->gs_chunks, &gs_chunk->chain);
 
 	/*
 	 * TODO: If SubPlan support ExecMulti for data exchange,
@@ -1491,24 +1490,24 @@ gpusort_preload_chunk(GpuSortState *gsortstate, HeapTuple *overflow)
 static void
 gpusort_process_response(GpuSortState *gsortstate, pgstrom_gpusort *gpusort)
 {
-	dlist_iter		iter;
-
 	/*
-	 * response message should has only in_chunk1 as its result,
-	 * but in_chunk2 is empty (because it had only one chunk, or
-	 * chunks in in_chunk2 was merged).
-	 * regarding to working chunk, it depends on the context.
+	 * gs_chunks of response message should not be an empty list, and
+	 * work_chunk should be also valid if it is multi-chunk merge sorting.
 	 */
-	Assert(!dlist_is_empty(&gpusort->in_chunk1));
-	Assert(dlist_is_empty(&gpusort->in_chunk2));
-
+	Assert(!dlist_is_empty(&gpusort->gs_chunks));
+	Assert(dlist_is_empty(&gpusort->work_chunk) ||
+		   dlist_length(&gpusort->gs_chunks) > 1);
 #if 0
-	dlist_foreach(iter, &gpusort->in_chunk1)
 	{
-		pgstrom_gpusort_chunk  *gs_chunk
-			= dlist_container(pgstrom_gpusort_chunk, chain, iter.cur);
-		kern_toastbuf  *ktoast = KERN_GPUSORT_TOASTBUF(&gs_chunk->kern);
-		elog(INFO, "ktoast usage %u of %u", ktoast->usage, ktoast->length);
+		dlist_iter		iter;
+
+		dlist_foreach(iter, &gpusort->gs_chunks)
+		{
+			pgstrom_gpusort_chunk  *gs_chunk
+				= dlist_container(pgstrom_gpusort_chunk, chain, iter.cur);
+			kern_toastbuf  *ktoast = KERN_GPUSORT_TOASTBUF(&gs_chunk->kern);
+			elog(INFO, "ktoast usage %u of %u", ktoast->usage, ktoast->length);
+		}
 	}
 #endif
 
@@ -1530,18 +1529,8 @@ gpusort_process_response(GpuSortState *gsortstate, pgstrom_gpusort *gpusort)
 		}
 		else if (gpusort->msg.errcode == StromError_DataStoreReCheck)
 		{
-			/*
-			 * This error implies OpenCL device is unavailable to
-			 * compare the supplied data, like an external/compressed
-			 * toast datum.
-			 */
-			if (dlist_length(&gpusort->in_chunk1) == 1)
-			{
-				pgstrom_gpusort_chunk  *gs_chunk
-					= dlist_container(pgstrom_gpusort_chunk, chain,
-									  dlist_head_node(&gpusort->in_chunk1));
-				gpstrom_run_cpusort_single(gsortstate, gs_chunk);
-			}
+			if (dlist_length(&gpusort->gs_chunks) == 1)
+				gpstrom_run_cpusort_single(gsortstate, gpusort);
 			else
 				elog(ERROR, "not implemented yet (multi-chunk cpusort)");
 		}
@@ -1554,29 +1543,94 @@ gpusort_process_response(GpuSortState *gsortstate, pgstrom_gpusort *gpusort)
 		}
 	}
 
-	/* sanity check of sorting status */
-	dlist_foreach(iter, &gpusort->in_chunk1)
-	{
-		pgstrom_gpusort_chunk  *gs_chunk
-			= dlist_container(pgstrom_gpusort_chunk, chain, iter.cur);
-		if (!gs_chunk->is_sorted)
-			elog(ERROR, "respond gpusort chunk is not sorted");
-	}
+	/*
+	 * sanity check - a processed chunk or chunks should be sorted, even
+	 * if it took a fallback by CPU sorting. Elsewhere, we cannot continue
+	 * sorting any more.
+	 */
+	if (!gpusort->is_sorted)
+		elog(ERROR, "Bug? processed gpusort chunk(s) are not sorted");
 
 	if (gsortstate->pending_gpusort)
 	{
 		pgstrom_gpusort	   *pending = gsortstate->pending_gpusort;
+		dlist_head		   *x_chunks = &pending->gs_chunks;
+		dlist_head		   *y_chunks = &gpusort->gs_chunks;
+		dlist_head			new_list;
+		dlist_mutable_iter	miter;
 
-		Assert(!dlist_is_empty(&pending->in_chunk1) &&
-			   dlist_is_empty(&pending->in_chunk2) &&
-			   dlist_length(&pending->work_chunk) == 1);
+		/*
+		 * Preparation of merge-sorting; OpenCL kernel expects a series
+		 * of preliminary sorted chunks are provided according to the
+		 * order of head item of each chunk.
+		 */
+		dlist_init(&new_list);
+		while (!dlist_is_empty(x_chunks) && !dlist_is_empty(y_chunks))
+		{
+			pgstrom_gpusort_chunk  *gs_xchunk;
+			pgstrom_gpusort_chunk  *gs_ychunk;
+			kern_column_store	   *kcs_x;
+			kern_column_store	   *kcs_y;
+			kern_toastbuf		   *ktoast_x;
+			kern_toastbuf		   *ktoast_y;
+			cl_int				   *rindex_x;
+			cl_int				   *rindex_y;
+
+			gs_xchunk = dlist_container(pgstrom_gpusort_chunk, chain,
+										dlist_head_node(x_chunks));
+			kcs_x = KERN_GPUSORT_CHUNK(&gs_xchunk->kern);
+			ktoast_x = KERN_GPUSORT_TOASTBUF(&gs_xchunk->kern);
+			rindex_x = KERN_GPUSORT_RESULT_INDEX(kcs_x);
+
+			gs_ychunk = dlist_container(pgstrom_gpusort_chunk, chain,
+										dlist_head_node(y_chunks));
+			kcs_y = KERN_GPUSORT_CHUNK(&gs_ychunk->kern);
+			ktoast_y = KERN_GPUSORT_TOASTBUF(&gs_ychunk->kern);
+			rindex_y = KERN_GPUSORT_RESULT_INDEX(kcs_y);
+
+			if (pgstrom_compare_cpusort(gsortstate,
+										kcs_x, ktoast_y, rindex_x[0],
+										kcs_y, ktoast_y, rindex_y[0]) < 0)
+				dlist_move_head(&new_list, &gs_xchunk->chain);
+			else
+				dlist_move_head(&new_list, &gs_ychunk->chain);
+		}
+		/* either of loop below shall run */
+		dlist_foreach_modify(miter, x_chunks)
+			dlist_move_head(&new_list, miter.cur);
+		dlist_foreach_modify(miter, y_chunks)
+			dlist_move_head(&new_list, miter.cur);
+
+		/*
+		 * OK, all the chunks were pre-merged, let's link it again
+		 * on the pending side
+		 */
 		gsortstate->pending_gpusort = NULL;
+		dlist_move_all(&pending->gs_chunks, &new_list);
 
-		dlist_move_all(&pending->in_chunk2, &gpusort->in_chunk1);
+		/* infection of cpusort necessity */
+		if (gpusort->by_cpusort)
+			pending->by_cpusort = true;
+		/* TODO: must be checked if CPU recheck is needed or not */
+
+		/* merge sorting also takes a working chunk */
+		if (dlist_is_empty(&pending->work_chunk))
+		{
+			if (dlist_is_empty(&gpusort->work_chunk))
+			{
+				pgstrom_gpusort_chunk  *wk_chunk
+					= pgstrom_create_gpusort_chunk(gsortstate);
+				dlist_push_tail(&pending->work_chunk, &wk_chunk->chain);
+			}
+			else
+				dlist_move_all(&pending->work_chunk,
+							   &gpusort->work_chunk);
+		}
+		Assert(dlist_length(&pending->work_chunk) == 1);
+
+		/* release either of gpusorting request */
 		pgstrom_untrack_object(&gpusort->msg.sobj);
 		pgstrom_put_message(&gpusort->msg);
-
-		/* TODO: must be checked if CPU recheck is needed or not */
 
 		/* OK, this two input stream shall be merged into one */
 		if (!pgstrom_enqueue_message(&pending->msg))
@@ -1586,15 +1640,10 @@ gpusort_process_response(GpuSortState *gsortstate, pgstrom_gpusort *gpusort)
 	else
 	{
 		/*
-		 * no pending gpusort now, so this request needs to wait
-		 * for the next response message.
+		 * No pending gpusort right now, so this request needs to wait
+		 * for the next response message. It shall be merged with the
+		 * next processed chunk.
 		 */
-		if (!dlist_is_empty(&gpusort->work_chunk))
-		{
-			pgstrom_gpusort_chunk  *work_chunk
-				= pgstrom_create_gpusort_chunk(gsortstate);
-			dlist_push_tail(&gpusort->work_chunk, &work_chunk->chain);
-		}
 		gsortstate->pending_gpusort = gpusort;
 	}
 }
@@ -1793,7 +1842,7 @@ gpusort_exec(CustomPlanState *node)
 				Assert(!overflow);
 				break;
 			}
-			Assert(dlist_length(&gpusort->in_chunk1) == 1);
+			Assert(dlist_length(&gpusort->gs_chunks) == 1);
 
 			/*
 			 * Special case handling if a chunk preloaded contains only
@@ -1801,13 +1850,13 @@ gpusort_exec(CustomPlanState *node)
 			 * tuples to read.
 			 */
 			gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain,
-									   dlist_head_node(&gpusort->in_chunk1));
+									   dlist_head_node(&gpusort->gs_chunks));
 			kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
 			if (kcs->nrows == 1)
 			{
 				Assert(!gsortstate->scan_done);
 				Assert(!overflow);
-				gs_chunk->is_sorted = true;
+				gpusort->is_sorted = true;
 				gpusort_process_response(gsortstate, gpusort);
 				break;
 			}
@@ -1858,15 +1907,16 @@ gpusort_exec(CustomPlanState *node)
 	ExecClearTuple(slot);
 
 retry:
-	if (!gpusort || dlist_is_empty(&gpusort->in_chunk1))
+	if (!gpusort || dlist_is_empty(&gpusort->gs_chunks))
 		return slot;
 
-	dnode = dlist_head_node(&gpusort->in_chunk1);
+	dnode = dlist_head_node(&gpusort->gs_chunks);
 	gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain, dnode);
 	kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
 
 	/* for debugging */
-	pgstrom_sanitycheck_gpusort_chunk(gsortstate, gs_chunk);
+	pgstrom_sanitycheck_gpusort_chunk(gsortstate, gs_chunk,
+									  gpusort->is_sorted);
 
 	if (gsortstate->curr_index < kcs->nrows)
 	{
@@ -2208,11 +2258,10 @@ clserv_respond_gpusort_single(cl_event event, cl_int ev_status, void *private)
 	cl_int					i, rc;
 
 	/* gpusort-single has only one input chunk */
-	Assert(dlist_length(&gpusort->in_chunk1) == 1 &&
-		   dlist_is_empty(&gpusort->in_chunk2) &&
+	Assert(dlist_length(&gpusort->gs_chunks) == 1 &&
 		   dlist_is_empty(&gpusort->work_chunk));
 	gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain,
-							   dlist_head_node(&gpusort->in_chunk1));
+							   dlist_head_node(&gpusort->gs_chunks));
 	/* put an error code */
 	if (ev_status != CL_COMPLETE)
 	{
@@ -2224,7 +2273,7 @@ clserv_respond_gpusort_single(cl_event event, cl_int ev_status, void *private)
 	{
 		gpusort->msg.errcode = *KERN_GPUSORT_STATUS(&gs_chunk->kern);
 		if (gpusort->msg.errcode == StromError_Success)
-			gs_chunk->is_sorted = true;
+			gpusort->is_sorted = true;
 	}
 
 	/* collect performance statistics */
@@ -2589,7 +2638,7 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 
 	/* only pgstom_gpusort (sorting chunk) should be attached */
 	gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain,
-							   dlist_head_node(&gpusort->in_chunk1));
+							   dlist_head_node(&gpusort->gs_chunks));
 	kparam = KERN_GPUSORT_PARAMBUF(&gs_chunk->kern);
 	kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
 	prep_nums = gs_chunk->rcs_nums;
@@ -2768,7 +2817,7 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 	 * OK, preparation was done. Let's launch gpusort_single kernel
 	 * to sort key values within a gpusort-chunk.
 	 */
-	for (i=1, k=0; i < sort_size; i++)
+	for (i=1, k=0; i <= sort_size; i++)
 	{
 		for (j=i; j > 0; j--)
 		{
@@ -2872,7 +2921,30 @@ error:
     pgstrom_reply_message(&gpusort->msg);
 }
 
+/*
+ * multi-chunks merge sorting
+ *
+ *
+ *
+ *
+ *
+ */
 #if 0
+typedef struct
+{
+	pgstrom_message	*msg;
+	cl_program		program;
+	cl_kernel		merge_kernel;
+	cl_mem			m_chunk[4];
+	cl_int			dindex;
+	Size			bytes_dma_send;
+	Size			bytes_dma_recv;
+	cl_int			ev_index;
+	cl_event		events[20];
+} clstate_gpusort_multi;
+
+
+
 static void
 clserv_respond_gpusort_multi(cl_event event, cl_int ev_status, void *private)
 {
@@ -2883,16 +2955,6 @@ clserv_respond_gpusort_multi(cl_event event, cl_int ev_status, void *private)
 static void
 clserv_process_gpusort_multi(pgstrom_gpusort *gpusort)
 {
-	dlist_mutable_iter		iter;
-
-	dlist_foreach_modify(iter, &gpusort->in_chunk2)
-	{
-		pgstrom_gpusort_chunk  *gs_chunk
-			= dlist_container(pgstrom_gpusort_chunk, chain, iter.cur);
-
-		dlist_delete(&gs_chunk->chain);
-		dlist_push_tail(&gpusort->in_chunk1, &gs_chunk->chain);
-	}
 	gpusort->msg.errcode = StromError_Success;
 	pgstrom_reply_message(&gpusort->msg);
 }
@@ -2902,13 +2964,9 @@ clserv_process_gpusort(pgstrom_message *msg)
 {
 	pgstrom_gpusort	   *gpusort = (pgstrom_gpusort *) msg;
 
-	Assert(!dlist_is_empty(&gpusort->in_chunk1));
-	if (dlist_is_empty(&gpusort->in_chunk2))
-	{
-		Assert(dlist_length(&gpusort->in_chunk1) == 1);
-		Assert(dlist_is_empty(&gpusort->work_chunk));
+	Assert(!dlist_is_empty(&gpusort->gs_chunks));
+	if (dlist_length(&gpusort->gs_chunks) == 1)
 		clserv_process_gpusort_single(gpusort);
-	}
 	else
 	{
 		Assert(!dlist_is_empty(&gpusort->work_chunk));
