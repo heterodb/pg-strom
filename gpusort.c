@@ -1838,7 +1838,7 @@ gpusort_exec(CustomPlanState *node)
 			gpusort = gpusort_preload_chunk(gsortstate, &overflow);
 			if (!gpusort)
 			{
-				Assert(!gsortstate->scan_done);
+				Assert(gsortstate->scan_done);
 				Assert(!overflow);
 				break;
 			}
@@ -1854,7 +1854,7 @@ gpusort_exec(CustomPlanState *node)
 			kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
 			if (kcs->nrows == 1)
 			{
-				Assert(!gsortstate->scan_done);
+				Assert(gsortstate->scan_done);
 				Assert(!overflow);
 				gpusort->is_sorted = true;
 				gpusort_process_response(gsortstate, gpusort);
@@ -1897,8 +1897,6 @@ gpusort_exec(CustomPlanState *node)
 			gpusort = (pgstrom_gpusort *) msg;
 			gpusort_process_response(gsortstate, gpusort);
 		}
-		Assert(gsortstate->pending_gpusort != NULL);
-
 		gsortstate->sort_done = true;
 	}
 	/* OK, sorting done, fetch tuples according to the result */
