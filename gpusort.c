@@ -431,7 +431,7 @@ gpusort_codegen_comparison(Sort *sort, codegen_context *context)
 	StringInfoData	str;
 	StringInfoData	decl;
 	StringInfoData	body;
-	int				i;
+	int				i, j;
 
 	initStringInfo(&str);
 	initStringInfo(&decl);
@@ -469,18 +469,19 @@ gpusort_codegen_comparison(Sort *sort, codegen_context *context)
 	/* generate a comparison function */
 	for (i=0; i < sort->numCols; i++)
 	{
-		TargetEntry *tle = get_tle_by_resno(sort->plan.targetlist,
-											sort->sortColIdx[i]);
-		bool	nullfirst = sort->nullsFirst[i];
-		Oid		sort_op = sort->sortOperators[i];
-		Oid		sort_func;
-		Oid		sort_type;
-		bool	is_reverse;
-		Var	   *tvar;
-		char   *temp;
-		devtype_info   *dtype;
-		devfunc_info   *dfunc;
+		TargetEntry *tle;
+		AttrNumber	resno = sort->sortColIdx[i];
+		bool		nullfirst = sort->nullsFirst[i];
+		Oid			sort_op = sort->sortOperators[i];
+		Oid			sort_func;
+		Oid			sort_type;
+		bool		is_reverse;
+		AttrNumber	var_index;
+		Var		   *tvar;
+		devtype_info *dtype;
+		devfunc_info *dfunc;
 
+		tle = get_tle_by_resno(sort->plan.targetlist, resno);
 		Assert(IsA(tle->expr, Var));
 		tvar = (Var *)tle->expr;
 		Assert(tvar->varno == OUTER_VAR);
@@ -499,15 +500,42 @@ gpusort_codegen_comparison(Sort *sort, codegen_context *context)
 						 dtype->type_name, i+1,
 						 dtype->type_name, i+1);
 
-		context->private = "x";
-		temp = pgstrom_codegen_expression((Node *)tle->expr, context);
-		appendStringInfo(&body, "  keyval_x%u = %s;\n", i+1, temp);
-		pfree(temp);
+		/*
+		 * find out variable-index on kernel column store
+		 * (usually, this poor logic works sufficiently)
+		 */
+		var_index = 0;
+		for (j=0; j < sort->numCols; j++)
+		{
+			if (sort->sortColIdx[j] < resno)
+				var_index++;
+		}
 
-		context->private = "y";
-		temp = pgstrom_codegen_expression((Node *)tle->expr, context);
-		appendStringInfo(&body, "  keyval_y%u = %s;\n", i+1, temp);
-		pfree(temp);
+		/* reference to kcs-x */
+		appendStringInfo(&body, "  keyval_x%u =", i+1);
+		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
+			appendStringInfo(
+				&body,
+				"pg_%s_vref(kcs_x,ktoast_x,errcode,%u,x_index);\n",
+				dtype->type_name, var_index);
+		else
+			appendStringInfo(
+				&body,
+				"pg_%s_vref(kcs_x,errcode,%u,x_index);\n",
+				dtype->type_name, var_index);
+
+		/* reference to kcs-x */
+		appendStringInfo(&body, "  keyval_y%u =", i+1);
+		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
+			appendStringInfo(
+				&body,
+				"pg_%s_vref(kcs_y,ktoast_y,errcode,%u,y_index);\n",
+				dtype->type_name, var_index);
+		else
+			appendStringInfo(
+				&body,
+				"pg_%s_vref(kcs_y,errcode,%u,y_index);\n",
+				dtype->type_name, var_index);
 
 		appendStringInfo(
 			&body,
@@ -583,12 +611,18 @@ pgstrom_create_gpusort_plan(Sort *sort, List *rtable)
 	for (i=0; i < n; i++)
 	{
 		TargetEntry	*tle = get_tle_by_resno(tlist, sort->sortColIdx[i]);
+		Var	   *key_var = (Var *)tle->expr;
 		Oid		sort_op = sort->sortOperators[i];
 		Oid		sort_func;
 		bool	is_reverse;
 
-		/* sort key has to be runnable on GPU device */
-		if (!pgstrom_codegen_available_expression(tle->expr))
+		/*
+		 * Target-entry of Sort plan should be a var-node that references
+		 * a particular column of underlying relation, even if Sort-key
+		 * contains formula. So, we can expect a simple var-node towards
+		 * outer relation here.
+		 */
+		if (!IsA(key_var, Var) || key_var->varno != OUTER_VAR)
 			return NULL;
 
 		sort_func = get_compare_function(sort_op, &is_reverse);
@@ -1036,18 +1070,15 @@ static void
 pgstrom_setup_cpusort(GpuSortState *gsortstate)
 {
 	GpuSortPlan *gsort = (GpuSortPlan *)gsortstate->cps.ps.plan;
-	ListCell   *cell;
-	int			i = 0;
-	int			nkeys = list_length(gsortstate->sortkey_resnums);
+	int		i = 0;
+	int		nkeys = list_length(gsortstate->sortkey_resnums);
 
 	gsortstate->cpusort_keys = palloc0(nkeys * sizeof(SortSupportData));
-	foreach (cell, gsortstate->sortkey_resnums)
+	for (i=0; i < nkeys; i++)
 	{
 		SortSupport sortKey = &gsortstate->cpusort_keys[i];
-		AttrNumber	resno = lfirst_int(cell);
+		AttrNumber	resno = gsort->sortColIdx[i];
 
-		Assert(i < gsort->numCols);
-		Assert(resno == gsort->sortColIdx[i]);
 		Assert(OidIsValid(gsort->sortOperators[i]));
 
 		sortKey->ssup_cxt = CurrentMemoryContext;	/* may needs own special context*/
@@ -1603,7 +1634,7 @@ gpusort_process_response(GpuSortState *gsortstate, pgstrom_gpusort *gpusort)
 			rindex_y = KERN_GPUSORT_RESULT_INDEX(kcs_y);
 
 			if (pgstrom_compare_cpusort(gsortstate,
-										kcs_x, ktoast_y, rindex_x[0],
+										kcs_x, ktoast_x, rindex_x[0],
 										kcs_y, ktoast_y, rindex_y[0]) < 0)
 				dlist_move_head(&new_list, &gs_xchunk->chain);
 			else
@@ -2081,11 +2112,12 @@ static void
 gpusort_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 {
 	GpuSortState   *gsortstate = (GpuSortState *) node;
+	GpuSortPlan	   *gsort = (GpuSortPlan *)gsortstate->cps.ps.plan;
 	List		   *context;
 	bool			useprefix;
 	List		   *tlist = gsortstate->cps.ps.plan->targetlist;
 	List		   *sort_keys = NIL;
-	ListCell	   *cell;
+	int				i;
 
 	/* logic copied from show_sort_group_keys */
 	context = deparse_context_for_planstate((Node *) gsortstate,
@@ -2094,13 +2126,14 @@ gpusort_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 											es->rtable_names);
 	useprefix = (list_length(es->rtable) > 1 || es->verbose);
 
-	foreach(cell, gsortstate->sortkey_resnums)
+	for (i=0; i < gsort->numCols; i++)
 	{
-		TargetEntry	*tle = get_tle_by_resno(tlist, lfirst_int(cell));
+		AttrNumber	resno = gsort->sortColIdx[i];
+		TargetEntry	*tle = get_tle_by_resno(tlist, resno);
 		char		*exprstr;
 
 		if (!tle)
-			elog(ERROR, "no tlist entry for key %d", lfirst_int(cell));
+			elog(ERROR, "no tlist entry for key %d", resno);
 
 		/* Deparse the expression, showing any top-level cast */
 		exprstr = deparse_expression((Node *) tle->expr, context,
