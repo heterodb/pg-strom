@@ -335,7 +335,7 @@ pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 	double	n = (double)pfm->num_samples;
 	char	buf[256];
 
-	if (!pfm->enabled)
+	if (!pfm->enabled || pfm->num_samples == 0)
 		return;
 
 	ExplainPropertyInteger("Number of chunks", pfm->num_samples, es);
@@ -349,43 +349,55 @@ pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 	ExplainPropertyText("Time to build tcache", buf, es);
 
 	snprintf(buf, sizeof(buf), "%.3f ms",
-			 (double)pfm->time_in_sendq / n / 1000.0);
-	ExplainPropertyText("Avg time in send-mq", buf, es);
-
-	snprintf(buf, sizeof(buf), "%.3f ms",
 			 (double)pfm->time_kern_build / 1000.0);
 	ExplainPropertyText("Max time to build kernel", buf, es);
 
-	snprintf(buf, sizeof(buf), "total %.3f ms, avg %.3f ms",
-			 (double)pfm->time_dma_send / 1000.0,
-			 (double)pfm->time_dma_send / n / 1000.0);
-	ExplainPropertyText("DMA send time", buf, es);
+	if (n > 0.0)
+	{
+		snprintf(buf, sizeof(buf), "%.3f ms",
+				 (double)pfm->time_in_sendq / n / 1000.0);
+		ExplainPropertyText("Avg time in send-mq", buf, es);
 
-	snprintf_dma_bandwidth(buf, sizeof(buf),
-						   pfm->bytes_dma_send,
-						   pfm->num_dma_send,
-						   pfm->time_dma_send);
-	ExplainPropertyText("DMA send band", buf, es);
+		snprintf(buf, sizeof(buf), "total %.3f ms, avg %.3f ms",
+				 (double)pfm->time_dma_send / 1000.0,
+				 (double)pfm->time_dma_send / n / 1000.0);
+		ExplainPropertyText("DMA send time", buf, es);
+	}
 
-	snprintf(buf, sizeof(buf), "total %.3f ms, avg %.3f ms",
-			 (double)pfm->time_kern_exec / 1000.0,
-			 (double)pfm->time_kern_exec / n / 1000.0);
-	ExplainPropertyText("Kernel exec time", buf, es);
+	if (pfm->num_dma_send > 0)
+	{
+		snprintf_dma_bandwidth(buf, sizeof(buf),
+							   pfm->bytes_dma_send,
+							   pfm->num_dma_send,
+							   pfm->time_dma_send);
+		ExplainPropertyText("DMA send band", buf, es);
 
-	snprintf(buf, sizeof(buf), "total %.3f ms, avg %.3f ms",
-			 (double)pfm->time_dma_recv / 1000.0,
-			 (double)pfm->time_dma_recv / n / 1000.0);
-	ExplainPropertyText("DMA recv time", buf, es);
+		snprintf(buf, sizeof(buf), "total %.3f ms, avg %.3f ms",
+				 (double)pfm->time_kern_exec / 1000.0,
+				 (double)pfm->time_kern_exec / n / 1000.0);
+		ExplainPropertyText("Kernel exec time", buf, es);
+	}
 
-	snprintf_dma_bandwidth(buf, sizeof(buf),
-						   pfm->bytes_dma_recv,
-						   pfm->num_dma_recv,
-						   pfm->time_dma_recv);
-	ExplainPropertyText("DMA recv band", buf, es);
+	if (pfm->num_dma_recv > 0)
+	{
+		snprintf(buf, sizeof(buf), "total %.3f ms, avg %.3f ms",
+				 (double)pfm->time_dma_recv / 1000.0,
+				 (double)pfm->time_dma_recv / n / 1000.0);
+		ExplainPropertyText("DMA recv time", buf, es);
 
-	snprintf(buf, sizeof(buf), "%.3f ms",
-			 (double)pfm->time_in_recvq / n / 1000.0);
-	ExplainPropertyText("Avg time in recv-mq", buf, es);
+		snprintf_dma_bandwidth(buf, sizeof(buf),
+							   pfm->bytes_dma_recv,
+							   pfm->num_dma_recv,
+							   pfm->time_dma_recv);
+		ExplainPropertyText("DMA recv band", buf, es);
+	}
+
+	if (n > 0.0)
+	{
+		snprintf(buf, sizeof(buf), "%.3f ms",
+				 (double)pfm->time_in_recvq / n / 1000.0);
+		ExplainPropertyText("Avg time in recv-mq", buf, es);
+	}
 }
 
 /*

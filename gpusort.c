@@ -194,6 +194,8 @@ get_gpusort_chunksize(void)
 	static Size	device_restriction = 0;
 	Size		chunk_sz;
 
+	device_restriction = 24 * 1024 * 1024; // 24MB for debugging
+
 	if (!device_restriction)
 	{
 		int		i, n = pgstrom_get_device_nums();
@@ -856,6 +858,7 @@ pgstrom_sanitycheck_gpusort_chunk(GpuSortState *gsortstate,
 								  pgstrom_gpusort_chunk *gs_chunk,
 								  bool is_sorted)
 {
+#if 0
 	kern_column_store  *kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
 	kern_toastbuf	   *ktoast = KERN_GPUSORT_TOASTBUF(&gs_chunk->kern);
 	cl_int			   *kstatus = KERN_GPUSORT_STATUS(&gs_chunk->kern);
@@ -1020,7 +1023,7 @@ pgstrom_sanitycheck_gpusort_chunk(GpuSortState *gsortstate,
 	}
 	if (kcs->nrows != nrows)
 		elog(INFO, "chunk: nrows = %u (expected: %u)", kcs->nrows, nrows);
-	//elog(INFO, "sanitycheck passed");
+#endif
 }
 
 /*
@@ -1311,6 +1314,7 @@ pgstrom_create_gpusort(GpuSortState *gsortstate)
 	gpusort->msg.respq = pgstrom_get_queue(gsortstate->mqueue);
 	gpusort->msg.cb_process = clserv_process_gpusort;
 	gpusort->msg.cb_release = pgstrom_release_gpusort;
+	gpusort->msg.pfm.enabled = gsortstate->pfm.enabled;
 	/* other fields also */
 	gpusort->dprog_key = pgstrom_retain_devprog_key(gsortstate->dprog_key);
 	gpusort->is_sorted = false;
@@ -1347,6 +1351,7 @@ gpusort_preload_chunk(GpuSortState *gsortstate, HeapTuple *overflow)
 	Size				toast_length;
 	Size				toast_usage;
 	int					nrows;
+	struct timeval		tv1, tv2;
 
 	/* do we have any more tuple to read? */
 	if (gsortstate->scan_done)
@@ -1373,6 +1378,9 @@ gpusort_preload_chunk(GpuSortState *gsortstate, HeapTuple *overflow)
 
 	/* subplan should take forward scan */
 	estate->es_direction = ForwardScanDirection;
+
+	if (gpusort->msg.pfm.enabled)
+		gettimeofday(&tv1, NULL);
 
 	/* copy tuples to tcache_row_store */
 	trs = NULL;
@@ -1469,6 +1477,12 @@ gpusort_preload_chunk(GpuSortState *gsortstate, HeapTuple *overflow)
 		}
 	}
 	estate->es_direction = dir_saved;
+
+	if (gpusort->msg.pfm.enabled)
+	{
+		gettimeofday(&tv2, NULL);
+		gpusort->msg.pfm.time_to_load = timeval_diff(&tv1, &tv2);
+	}
 
 	/* no tuples were read in actually, so nothing to do */
 	if (nrows == 0)
@@ -1797,6 +1811,9 @@ gpusort_begin(CustomPlan *node, EState *estate, int eflags)
 	/* setup fallback sorting by CPU */
 	pgstrom_setup_cpusort(gsortstate);
 
+	/* Is perfmon needed? */
+	gsortstate->pfm.enabled = pgstrom_perfmon_enabled;
+
 	return &gsortstate->cps;
 }
 
@@ -1875,6 +1892,9 @@ gpusort_exec(CustomPlanState *node)
 			{
 				gsortstate->num_running--;
 
+				if (msg->pfm.enabled)
+					pgstrom_perfmon_add(&gsortstate->pfm, &msg->pfm);
+
 				Assert(StromTagIs(msg, GpuSort));
 				gpusort = (pgstrom_gpusort *) msg;
 				gpusort_process_response(gsortstate, gpusort);
@@ -1892,6 +1912,9 @@ gpusort_exec(CustomPlanState *node)
 			if (!msg)
 				elog(ERROR, "Bug? response of OpenCL server too late");
 			gsortstate->num_running--;
+
+			if (msg->pfm.enabled)
+				pgstrom_perfmon_add(&gsortstate->pfm, &msg->pfm);
 
 			Assert(StromTagIs(msg, GpuSort));
 			gpusort = (pgstrom_gpusort *) msg;
@@ -2562,7 +2585,7 @@ clserv_launch_gpusort_bitonic(clstate_gpusort_single *clgss,
 									   sizeof(cl_uint)))
 		goto error_1;
 
-	clserv_log("kernel call (nrows=%u, unitlen=%zu, lworksz=%zu, gworksz=%zu)", nrows, unitlen, lwork_sz, gwork_sz);
+	//clserv_log("kernel call (nrows=%u, unitlen=%zu, lworksz=%zu, gworksz=%zu)", nrows, unitlen, lwork_sz, gwork_sz);
 
 	/* pack reversing and unitsz into one argument */
 	if (reversing)

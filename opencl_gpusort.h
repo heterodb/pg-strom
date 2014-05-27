@@ -202,7 +202,7 @@ run_gpusort_single(__global kern_parambuf *kparams,
 	}
 	return;
 }
-#if 0
+
 static void
 gpusort_set_record(__global kern_parambuf		*kparams,
 				   cl_int			 			index,
@@ -396,11 +396,13 @@ run_gpusort_multi(__global kern_parambuf *kparams,
 	return;
 }
 
-
-
-
-#endif
-
+/*
+ * gpusort_single
+ *
+ * Entrypoint of the kernel function for single chunk sorting. It takes
+ * a gpusort-chunk, to be sorted according to gpusort_comp() being
+ * generated on the fly.
+ */
 __kernel void
 gpusort_single(cl_int bitonic_unitsz,
 			   __global kern_gpusort *kgsort,
@@ -420,7 +422,15 @@ gpusort_single(cl_int bitonic_unitsz,
 					   kchunk, ktoast, &errcode, local_workbuf);
 }
 
-#if 0
+/*
+ * gpusort_multi
+ *
+ * Entrypoint of the kernel function for multi chunks sorting. It takes
+ * two input chunks and two output chunks. Records in the both input
+ * chunks are sorted according to gpusort_comp() being generated on the
+ * fly, then written to the output chunks; smaller half shall be kgsort_z1,
+ * larger half shall be kgsort_z2.
+ */
 __kernel void
 gpusort_multi(cl_int mergesort_unitsz,
 			  __global kern_gpusort *kgsort_x,
@@ -452,7 +462,6 @@ gpusort_multi(cl_int mergesort_unitsz,
 					  z_chunk2, z_toast2,
 					  &errcode, local_workbuf);
 }
-#endif
 
 /*
  * gpusort_setup_chunk_rs
