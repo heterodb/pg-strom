@@ -1279,7 +1279,7 @@ kern_row_to_column(__private cl_int *errcode,
 				bitmap = workbuf[get_local_id(0) & ~wmask];
 				p_nullmap = (__global cl_uint *)((__global char *)kcs +
 												 ccmeta.cs_ofs);
-				p_nullmap += (kcs_index + get_local_id(0)) >> 5;
+				p_nullmap += (kcs_offset + get_local_id(0)) >> 5;
 
 				if (shift > 0 && get_local_id(0) == 0)
 				{
