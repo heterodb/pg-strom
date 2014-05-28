@@ -1250,14 +1250,14 @@ kern_row_to_column(__private cl_int *errcode,
 		 */
 		if (!ccmeta.attnotnull)
 		{
-			cl_uint		wmask = sizeof(cl_uint) * 8 - 1;
+			cl_uint		wmask = sizeof(cl_uint) * BITS_PER_BYTE - 1;
 			cl_uint		shift = (kcs_offset & wmask);
 
 			/* reduction to calculate nullmap with 32bit width */
 			workbuf[get_local_id(0)]
 				= (!src ? 0 : (1 << (get_local_id(0) & wmask)));
 			barrier(CLK_LOCAL_MEM_FENCE);
-			for (k=2; k <= sizeof(cl_uint) * 8; k <<= 1)
+			for (k=2; k <= sizeof(cl_uint) * BITS_PER_BYTE; k <<= 1)
 			{
 				if ((get_local_id(0) & (k-1)) == 0)
 					workbuf[get_local_id(0)]
@@ -1275,8 +1275,11 @@ kern_row_to_column(__private cl_int *errcode,
 				__global cl_uint *p_nullmap;
 				cl_uint		bitmap;
 				cl_uint		mask;
+				cl_uint		bi = get_local_id(0) & ~wmask;
+				cl_uint		width = (kcs_nitems - bi);
 
-				bitmap = workbuf[get_local_id(0) & ~wmask];
+				bitmap = workbuf[bi];
+
 				p_nullmap = (__global cl_uint *)((__global char *)kcs +
 												 ccmeta.cs_ofs);
 				p_nullmap += (kcs_offset + get_local_id(0)) >> 5;
@@ -1284,27 +1287,32 @@ kern_row_to_column(__private cl_int *errcode,
 				if (shift > 0 && get_local_id(0) == 0)
 				{
 					/* special treatment if unaligned head */
-					mask = ((1 << shift) - 1);
-					atomic_and(p_nullmap, mask);
-					atomic_or(p_nullmap, (bitmap << shift) & ~mask);
-				}
-				else if (shift > 0 &&
-						 get_local_id(0) + 32 >= get_local_size(0))
-				{
-					/* special treatment if unaligned tail */
-					mask = ((1 << shift) - 1);
+					if (width < sizeof(cl_uint) * BITS_PER_BYTE - shift)
+						mask = ((1 << width) - 1) << shift;
+					else
+						mask = ~((1 << shift) - 1);
 					atomic_and(p_nullmap, ~mask);
-					atomic_or(p_nullmap, (bitmap >> (32 - shift)) & mask);
+					atomic_or(p_nullmap, (bitmap << shift) & mask);
 				}
 				else
 				{
-					/* usual case; no atomic operation needed */
 					if (shift > 0)
+						width -= sizeof(cl_uint) * BITS_PER_BYTE - shift;
+
+					bitmap >>= (sizeof(cl_uint) * BITS_PER_BYTE) - shift;
+					if (width > shift)
+						bitmap |= workbuf[bi + (sizeof(cl_uint) *
+												BITS_PER_BYTE)] << shift;
+					if (width < sizeof(cl_uint) * BITS_PER_BYTE)
 					{
-						bitmap >>= (32 - shift);
-						bitmap |= workbuf[k + 32] << shift;
+						mask = (1 << width) - 1;
+						atomic_and(p_nullmap, ~mask);
+						atomic_or(p_nullmap, bitmap & mask);
 					}
-					*p_nullmap = bitmap;
+					else
+					{
+						*p_nullmap = bitmap;
+					}
 				}
 			}
 		}
