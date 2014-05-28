@@ -440,6 +440,7 @@ extern void *__pgstrom_shmem_realloc(const char *filename, int lineno,
 	__pgstrom_shmem_realloc(__FILE__,__LINE__,(addr),(size))
 extern void pgstrom_shmem_free(void *address);
 extern Size pgstrom_shmem_getsize(void *address);
+extern Size pgstrom_shmem_zone_length(void);
 extern bool pgstrom_shmem_sanitycheck(const void *address);
 extern void pgstrom_setup_shmem(Size zone_length,
 								void *(*callback)(void *address,

@@ -424,7 +424,6 @@ gpusort_single(cl_int bitonic_unitsz,
 					   kchunk, ktoast, &errcode, local_workbuf);
 }
 
-#if 0
 /*
  * gpusort_multi
  *
@@ -457,6 +456,7 @@ gpusort_multi(cl_int mergesort_unitsz,
 						  : 1U << mergesort_unitsz);
 	cl_int		errcode = StromError_Success;
 
+#if 0
 	run_gpusort_multi(kparams,
 					  reversing, unitsz,
 					  x_chunk, x_toast,
@@ -464,8 +464,8 @@ gpusort_multi(cl_int mergesort_unitsz,
 					  z_chunk1, z_toast1,
 					  z_chunk2, z_toast2,
 					  &errcode, local_workbuf);
-}
 #endif
+}
 
 /*
  * gpusort_setup_chunk_rs
@@ -572,7 +572,6 @@ typedef struct
 	bool			is_sorted;	/* true, if already sorted */
 	bool			by_cpusort;	/* true, if unavailable to sort by GPU */
 	dlist_head		gs_chunks;	/* chunked being sorted, or to be sorted */
-	dlist_head		work_chunk;	/* working buffer during merge sorting */
 } pgstrom_gpusort;
 
 #endif	/* !OPENCL_DEVICE_CODE */

@@ -482,6 +482,17 @@ pgstrom_shmem_getsize(void *address)
 }
 
 /*
+ * pgstrom_shmem_zone_length
+ *
+ * it returns the configured zone length
+ */
+Size
+pgstrom_shmem_zone_length(void)
+{
+	return pgstrom_shmem_head->zone_length;
+}
+
+/*
  * pgstrom_shmem_sanitycheck
  *
  * it checks whether magic number of the supplied shared-memory block is
