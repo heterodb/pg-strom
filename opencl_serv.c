@@ -179,9 +179,6 @@ init_opencl_context_and_shmem(void)
 		if (zone_length > dev_info->dev_max_mem_alloc_size)
 			zone_length = dev_info->dev_max_mem_alloc_size;
 	}
-
-	elog(LOG, "PG-Strom: setting up shared memory (zone length=%zu)",
-		 zone_length);
 	pgstrom_setup_shmem(zone_length, on_shmem_zone_callback);
 }
 

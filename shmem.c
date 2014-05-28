@@ -869,13 +869,6 @@ pgstrom_setup_shmem(Size zone_length,
 			length = pgstrom_shmem_totalsize - offset;
 		Assert(length > 0 && length % SHMEM_BLOCKSZ == 0);
 
-		/*
-		 * If remaining area is too small than expected length, we skip to
-		 * set up to avoid unexpected troubles.
-		 */
-		if (length <= zone_length / 8)
-			break;
-
 		num_blocks = ((length - offsetof(shmem_zone, blocks[0])) /
 					  (sizeof(shmem_block) + SHMEM_BLOCKSZ));
 

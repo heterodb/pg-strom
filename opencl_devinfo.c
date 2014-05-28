@@ -808,6 +808,11 @@ disclose_opencl_device_info(List *devinfo_list)
 		elog(ERROR, "usage of pgstrom_platform/device_info too large: %lu",
 			 length);
 
+	/* shows selected platform */
+	Assert(pl_info != NULL);
+	elog(LOG, "PG-Strom: \"%s (%s)\" was installed",
+		 pl_info->pl_name, pl_info->pl_version);
+
 	/* copy platform/device info */
 	foreach (cell, devinfo_list)
 	{
