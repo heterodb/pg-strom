@@ -61,56 +61,6 @@ static struct {
 	{ TEXTOID,			"varlena" },
 };
 
-static void
-make_devtype_is_null_fn(devtype_info *dtype)
-{
-	devfunc_info   *dfunc;
-
-	dfunc = palloc0(sizeof(devfunc_info));
-	dfunc->func_name = psprintf("%s_is_null", dtype->type_name);
-	dfunc->func_args = list_make1(dtype);
-	dfunc->func_rettype = pgstrom_devtype_lookup(BOOLOID);
-	dfunc->func_decl =
-		psprintf("static pg_%s_t pgfn_%s"
-				 "(__private int *errcode, pg_%s_t arg)\n"
-				 "{\n"
-				 "  pg_%s_t result;\n\n"
-				 "  result.isnull = false;\n"
-				 "  result.value = arg.isnull;\n"
-				 "  return result;\n"
-				 "}\n",
-				 dfunc->func_rettype->type_name,
-				 dfunc->func_name,
-				 dtype->type_name,
-				 dfunc->func_rettype->type_name);
-	dtype->type_is_null_fn = dfunc;
-}
-
-static void
-make_devtype_is_not_null_fn(devtype_info *dtype)
-{
-	devfunc_info   *dfunc;
-
-	dfunc = palloc0(sizeof(devfunc_info));
-	dfunc->func_name = psprintf("%s_is_not_null", dtype->type_name);
-	dfunc->func_args = list_make1(dtype);
-	dfunc->func_rettype = pgstrom_devtype_lookup(BOOLOID);
-	dfunc->func_decl =
-		psprintf("static pg_%s_t pgfn_%s"
-				 "(__private int *errcode, pg_%s_t arg)\n"
-				 "{\n"
-				 "  pg_%s_t result;\n\n"
-				 "  result.isnull = false;\n"
-				 "  result.value = !arg.isnull;\n"
-				 "  return result;\n"
-				 "}\n",
-				 dfunc->func_rettype->type_name,
-				 dfunc->func_name,
-				 dtype->type_name,
-				 dfunc->func_rettype->type_name);
-	dtype->type_is_not_null_fn = dfunc;
-}
-
 devtype_info *
 pgstrom_devtype_lookup(Oid type_oid)
 {
@@ -164,12 +114,6 @@ pgstrom_devtype_lookup(Oid type_oid)
 			entry->type_flags |= DEVINFO_IS_NEGATIVE;
 	}
 	devtype_info_slot[hash] = lappend(devtype_info_slot[hash], entry);
-
-	/*
-	 * Misc support functions associated with device type
-	 */
-	make_devtype_is_null_fn(entry);
-	make_devtype_is_not_null_fn(entry);
 
 	MemoryContextSwitchTo(oldcxt);
 	ReleaseSysCache(tuple);
@@ -1086,24 +1030,30 @@ pgstrom_devtype_lookup_and_track(Oid type_oid, codegen_context *context)
 	return dtype;
 }
 
+static void
+pgstrom_devfunc_track(devfunc_info *dfunc, codegen_context *context)
+{
+	ListCell   *cell;
+
+	context->func_defs = list_append_unique_ptr(context->func_defs, dfunc);
+	context->extra_flags |= (dfunc->func_flags & DEVFUNC_INCL_FLAGS);
+
+	/* track function arguments and result type */
+	context->type_defs = list_append_unique_ptr(context->type_defs,
+												dfunc->func_rettype);
+	foreach (cell, dfunc->func_args)
+		context->type_defs = list_append_unique_ptr(context->type_defs,
+													lfirst(cell));
+}
+
 devfunc_info *
 pgstrom_devfunc_lookup_and_track(Oid func_oid, codegen_context *context)
 {
 	devfunc_info   *dfunc = pgstrom_devfunc_lookup(func_oid);
-	ListCell	   *cell;
 
 	if (dfunc)
-	{
-		context->func_defs = list_append_unique_ptr(context->func_defs, dfunc);
-		context->extra_flags |= (dfunc->func_flags & DEVFUNC_INCL_FLAGS);
+		pgstrom_devfunc_track(dfunc, context);
 
-		/* track function arguments and result type */
-		context->type_defs = list_append_unique_ptr(context->type_defs,
-													dfunc->func_rettype);
-		foreach (cell, dfunc->func_args)
-			context->type_defs = list_append_unique_ptr(context->type_defs,
-														lfirst(cell));
-	}
 	return dfunc;
 }
 
@@ -1274,29 +1224,31 @@ codegen_expression_walker(Node *node, codegen_context *context)
 	else if (IsA(node, NullTest))
 	{
 		NullTest   *nulltest = (NullTest *) node;
+		Oid			typeoid = exprType((Node *)nulltest->arg);
 		const char *func_name;
 
 		if (nulltest->argisrow)
 			return false;
 
-		dtype = pgstrom_devtype_lookup(exprType((Node *)nulltest->arg));
+		dtype = pgstrom_devtype_lookup_and_track(typeoid, context);
 		if (!dtype)
 			return false;
 
 		switch (nulltest->nulltesttype)
 		{
 			case IS_NULL:
-				func_name = dtype->type_is_null_fn->func_name;
+				func_name = "isnull";
 				break;
 			case IS_NOT_NULL:
-				func_name = dtype->type_is_not_null_fn->func_name;
+				func_name = "isnotnull";
 				break;
 			default:
 				elog(ERROR, "unrecognized nulltesttype: %d",
 					 (int)nulltest->nulltesttype);
 				break;
 		}
-		appendStringInfo(&context->str, "pgfn_%s(errcode, ", func_name);
+		appendStringInfo(&context->str, "pgfn_%s_%s(errcode, ",
+						 dtype->type_name, func_name);
 		if (!codegen_expression_walker((Node *) nulltest->arg, context))
 			return false;
 		appendStringInfoChar(&context->str, ')');

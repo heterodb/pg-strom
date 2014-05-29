@@ -237,8 +237,6 @@ typedef struct devtype_info {
 	uint32		type_flags;
 	char	   *type_name;	/* name of device type; same of SQL's type */
 	char	   *type_base;	/* base name of this type (like varlena) */
-	struct devfunc_info *type_is_null_fn;
-	struct devfunc_info	*type_is_not_null_fn;
 } devtype_info;
 
 typedef struct devfunc_info {

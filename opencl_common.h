@@ -638,10 +638,50 @@ kern_get_datum(__global kern_column_store *kcs,
 		return result;										\
 	}
 
+#define STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)				\
+	static pg_bool_t										\
+	pgfn_##NAME##_isnull(__private int *p_errcode,			\
+						 pg_##NAME##_t arg)					\
+	{														\
+		pg_bool_t result;									\
+															\
+		result.isnull = false;								\
+		result.value = arg.isnull;							\
+		return result;										\
+	}														\
+															\
+	static pg_bool_t										\
+	pgfn_##NAME##_isnotnull(__private int *p_errcode,		\
+							pg_##NAME##_t arg)				\
+	{														\
+		pg_bool_t result;									\
+															\
+		result.isnull = false;								\
+		result.value = !arg.isnull;							\
+		return result;										\
+	}
+
 #define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)		\
-	STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)
+	STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)		\
+	STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)
+
+/*
+ * declaration of some built-in data types
+ */
+
+/* pg_bool_t */
+#ifndef PG_BOOL_TYPE_DEFINED
+#define PG_BOOL_TYPE_DEFINED
+STROMCL_SIMPLE_TYPE_TEMPLATE(bool, bool)
+#endif
+
+/* pg_int4_t */
+#ifndef PG_INT4_TYPE_DEFINED
+#define PG_INT4_TYPE_DEFINED
+STROMCL_SIMPLE_TYPE_TEMPLATE(int4, cl_int)
+#endif
 
 /*
  * Template of variable classes: variable-length variables
@@ -834,6 +874,8 @@ pg_varlena_param(__global kern_parambuf *kparam,
 	return result;
 }
 
+STROMCL_SIMPLE_NULLTEST_TEMPLATE(varlena)
+
 #define STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)						\
 	typedef pg_varlena_t	pg_##NAME##_t;
 
@@ -857,10 +899,39 @@ pg_varlena_param(__global kern_parambuf *kparam,
 		return pg_varlena_param(kparam,p_errcode,param_id);			\
 	}
 
+#define STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)						\
+	static pg_bool_t												\
+	pgfn_##NAME##_isnull(__private int *p_errcode,					\
+					   pg_##NAME##_t arg)							\
+	{																\
+		return pgfn_varlena_isnull(p_errcode, arg);					\
+	}																\
+	static pg_bool_t												\
+	pgfn_##NAME##_isnotnull(__private int *p_errcode,				\
+						  pg_##NAME##_t arg)						\
+	{																\
+		return pgfn_varlena_isnotnull(p_errcode, arg);				\
+	}
+
 #define STROMCL_VARLENA_TYPE_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_VARREF_TEMPLATE(NAME)			\
-	STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)
+	STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)			\
+	STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)
+
+/*
+ * pg_bytea_t is also a built-in data type
+ */
+#ifndef PG_BYTEA_TYPE_DEFINED
+#define PG_BYTEA_TYPE_DEFINED
+STROMCL_VARLENA_TYPE_TEMPLATE(bytea)
+#endif
+
+/* ------------------------------------------------------------------
+ *
+ * Declaration of utility functions
+ *
+ * ------------------------------------------------------------------ */
 
 /*
  * memcpy implementation for OpenCL kernel usage
@@ -1470,34 +1541,10 @@ kern_writeback_error_status(__global cl_int *error_status,
 
 /* ------------------------------------------------------------
  *
- * Declarations of common built-in types and functions
+ * Declarations of common built-in functions
  *
  * ------------------------------------------------------------
  */
-
-/*
- * pg_bool_t is a built-in data type
- */
-#ifndef PG_BOOL_TYPE_DEFINED
-#define PG_BOOL_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(bool, bool)
-#endif
-
-/*
- * pg_int4_t is a built-in data type
- */
-#ifndef PG_INT4_TYPE_DEFINED
-#define PG_INT4_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(int4, cl_int)
-#endif
-
-/*
- * pg_bytea_t is also a built-in data type
- */
-#ifndef PG_BYTEA_TYPE_DEFINED
-#define PG_BYTEA_TYPE_DEFINED
-STROMCL_VARLENA_TYPE_TEMPLATE(bytea)
-#endif
 
 /*
  * Functions for BooleanTest
