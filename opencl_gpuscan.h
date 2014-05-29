@@ -129,9 +129,9 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
 		return;
 
 	if (errcode == StromError_Success)
-		kresbuf->results[base + offset - 1] = (get_global_id(0) + 1);
+		kresbuf->results[base + offset] = (get_global_id(0) + 1);
 	else if (errcode == StromError_RowReCheck)
-		kresbuf->results[base + offset - 1] = -(get_global_id(0) + 1);
+		kresbuf->results[base + offset] = -(get_global_id(0) + 1);
 }
 
 static inline void

@@ -1013,7 +1013,7 @@ arithmetic_stairlike_add(cl_uint my_value, __local cl_uint *items,
 	}
 	if (total_sum)
 		*total_sum = items[get_local_size(0) - 1];
-	return items[get_local_id(0)];
+	return items[get_local_id(0)] - my_value;
 }
 
 /*
