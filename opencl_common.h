@@ -65,129 +65,6 @@ typedef cl_uint		hostptr_t;
 #define LONGALIGN(LEN)          TYPEALIGN(sizeof(cl_long), (LEN))
 #define LONGALIGN_DOWN(LEN)     TYPEALIGN_DOWN(sizeof(cl_long), (LEN))
 
-/*
- * Simplified varlena support.
- *
- * Unlike host code, device code cannot touch external and/or compressed
- * toast datum. All the format device code can understand is usual
- * in-memory form; 4-bytes length is put on the head and contents follows.
- * So, it is a responsibility of host code to decompress the toast values
- * if device code may access compressed varlena.
- * In case when device code touches unsupported format, calculation result
- * shall be postponed to calculate on the host side.
- *
- * Note that it is harmless to have external and/or compressed toast datam
- * unless it is NOT referenced in the device code. It can understand the
- * length of these values, unlike contents.
- */
-typedef struct {
-	cl_int		vl_len;
-	cl_char		vl_dat[1];
-} varlena;
-#define VARHDRSZ			((int) sizeof(cl_int))
-#define VARDATA(PTR)		VARDATA_4B(PTR)
-#define VARSIZE(PTR)		VARSIZE_4B(PTR)
-#define VARSIZE_EXHDR(PTR)	(VARSIZE(PTR) - VARHDRSZ)
-
-typedef union
-{
-	struct						/* Normal varlena (4-byte length) */
-	{
-		cl_uint		va_header;
-		cl_char		va_data[1];
-    }		va_4byte;
-	struct						/* Compressed-in-line format */
-	{
-		cl_uint		va_header;
-		cl_uint		va_rawsize;	/* Original data size (excludes header) */
-		cl_char		va_data[1];	/* Compressed data */
-	}		va_compressed;
-} varattrib_4b;
-
-typedef struct
-{
-	cl_uchar	va_header;
-	cl_char		va_data[1];		/* Data begins here */
-} varattrib_1b;
-
-/* inline portion of a short varlena pointing to an external resource */
-typedef struct
-{
-	cl_uchar    va_header;		/* Always 0x80 or 0x01 */
-	cl_uchar	va_tag;			/* Type of datum */
-	cl_char		va_data[1];		/* Data (of the type indicated by va_tag) */
-} varattrib_1b_e;
-
-typedef enum vartag_external
-{
-	VARTAG_INDIRECT = 1,
-	VARTAG_ONDISK = 18
-} vartag_external;
-
-#define VARHDRSZ_SHORT			offsetof(varattrib_1b, va_data)
-#define VARATT_SHORT_MAX		0x7F
-
-typedef struct varatt_external
-{
-	cl_int		va_rawsize;		/* Original data size (includes header) */
-	cl_int		va_extsize;		/* External saved size (doesn't) */
-	cl_int		va_valueid;		/* Unique ID of value within TOAST table */
-	cl_int		va_toastrelid;	/* RelID of TOAST table containing it */
-} varatt_external;
-
-typedef struct varatt_indirect
-{
-	hostptr_t	pointer;	/* Host pointer to in-memory varlena */
-} varatt_indirect;
-
-#define VARTAG_SIZE(tag) \
-	((tag) == VARTAG_INDIRECT ? sizeof(varatt_indirect) :	\
-	 (tag) == VARTAG_ONDISK ? sizeof(varatt_external) :		\
-	 0 /* should not happen */)
-
-
-#define VARHDRSZ_EXTERNAL		offsetof(varattrib_1b_e, va_data)
-#define VARTAG_EXTERNAL(PTR)	VARTAG_1B_E(PTR)
-#define VARSIZE_EXTERNAL(PTR)	\
-	(VARHDRSZ_EXTERNAL + VARTAG_SIZE(VARTAG_EXTERNAL(PTR)))
-
-#define VARATT_IS_4B(PTR) \
-	((((__global varattrib_1b *) (PTR))->va_header & 0x01) == 0x00)
-#define VARATT_IS_4B_U(PTR) \
-	((((__global varattrib_1b *) (PTR))->va_header & 0x03) == 0x00)
-#define VARATT_IS_4B_C(PTR) \
-	((((__global varattrib_1b *) (PTR))->va_header & 0x03) == 0x02)
-#define VARATT_IS_1B(PTR) \
-	((((__global varattrib_1b *) (PTR))->va_header & 0x01) == 0x01)
-#define VARATT_IS_1B_E(PTR) \
-	((((__global varattrib_1b *) (PTR))->va_header) == 0x01)
-#define VARATT_IS_COMPRESSED(PTR)		VARATT_IS_4B_C(PTR)
-#define VARATT_IS_EXTERNAL(PTR)			VARATT_IS_1B_E(PTR)
-#define VARATT_NOT_PAD_BYTE(PTR) \
-	(*((__global cl_uchar *) (PTR)) != 0)
-
-#define VARSIZE_4B(PTR) \
-	((((__global varattrib_4b *) (PTR))->va_4byte.va_header >> 2) & 0x3FFFFFFF)
-#define VARSIZE_1B(PTR) \
-	((((__global varattrib_1b *) (PTR))->va_header >> 1) & 0x7F)
-#define VARTAG_1B_E(PTR) \
-	(((__global varattrib_1b_e *) (PTR))->va_tag)
-
-#define VARSIZE_ANY_EXHDR(PTR) \
-	(VARATT_IS_1B_E(PTR) ? VARSIZE_EXTERNAL(PTR)-VARHDRSZ_EXTERNAL : \
-	 (VARATT_IS_1B(PTR) ? VARSIZE_1B(PTR)-VARHDRSZ_SHORT :			 \
-	  VARSIZE_4B(PTR)-VARHDRSZ))
-
-#define VARSIZE_ANY(PTR)							\
-	(VARATT_IS_1B_E(PTR) ? VARSIZE_EXTERNAL(PTR) :	\
-	 (VARATT_IS_1B(PTR) ? VARSIZE_1B(PTR) :			\
-	  VARSIZE_4B(PTR)))
-
-#define VARDATA_4B(PTR)	(((__global varattrib_4b *) (PTR))->va_4byte.va_data)
-#define VARDATA_1B(PTR)	(((__global varattrib_1b *) (PTR))->va_data)
-#define VARDATA_ANY(PTR) \
-	(VARATT_IS_1B(PTR) ? VARDATA_1B(PTR) : VARDATA_4B(PTR))
-
 #else	/* OPENCL_DEVICE_CODE */
 #include "access/htup_details.h"
 #include "storage/itemptr.h"
@@ -646,17 +523,76 @@ typedef struct {
 	cl_uint			coldir[FLEXIBLE_ARRAY_MEMBER];
 } kern_toastbuf;
 
+/*
+ * kern_get_datum
+ *
+ * Reference to a particular datum on the supplied column store.
+ * It returns NULL, If it is a null-value in context of SQL. Elsewhere,
+ * it returns a pointer towards global memory.
+ */
+static inline __global void *
+kern_get_datum(__global kern_column_store *kcs,
+			   cl_uint colidx,
+			   cl_uint rowidx)
+{
+	kern_colmeta colmeta;
+	cl_uint		offset;
+
+	if (colidx >= kcs->ncols || rowidx >= kcs->nrows)
+		return NULL;
+
+	colmeta = kcs->colmeta[colidx];
+	offset = colmeta.cs_ofs;
+	if (!colmeta.attnotnull)
+	{
+		if (att_isnull(rowidx, (__global char *)kcs + offset))
+			return NULL;
+		offset += STROMALIGN((kcs->nrooms + 7) >> 3);
+	}
+	if (colmeta.attlen > 0)
+		offset += colmeta.attlen * rowidx;
+	else
+		offset += sizeof(cl_uint) * rowidx;
+
+	return (__global void *)((__global char *)kcs + offset);
+}
+
 #ifdef OPENCL_DEVICE_CODE
+/*
+ * PostgreSQL Data Type support in OpenCL kernel
+ *
+ * A stream of data sequencea are moved to OpenCL kernel, according to
+ * the above row-/column-store definition. The device code being generated
+ * by PG-Strom deals with each data item using the following data type;
+ *
+ * typedef struct
+ * {
+ *     BASE    value;
+ *     bool    isnull;
+ * } pg_##NAME##_t
+ *
+ * PostgreSQL has three different data classes:
+ *  - fixed-length referenced by value
+ *  - fixed-length referenced by pointer
+ *  - variable-length value
+ *
+ * Right now, we support the two except for fixed-length referenced by
+ * pointer (because these are relatively minor data type than others).
+ * BASE reflects the data type in PostgreSQL; may be an integer, a float
+ * or something others, however, all the variable-length value has same
+ * BASE type; that is an offset of associated toast buffer, to reference
+ * varlena structure on the global memory.
+ */
 
-/* template for native types */
-#define STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)	\
-	typedef struct {								\
-		BASE	value;								\
-		bool	isnull;								\
+/*
+ * Template of variable classes: fixed-length referenced by value
+ * ---------------------------------------------------------------
+ */
+#define STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)			\
+	typedef struct {										\
+		BASE	value;										\
+		bool	isnull;										\
 	} pg_##NAME##_t;
-
-#define STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)		\
-	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,__global varlena *)
 
 #define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)			\
 	static pg_##NAME##_t									\
@@ -675,44 +611,6 @@ typedef struct {
 		{													\
 			result.isnull = false;							\
 			result.value = *addr;							\
-		}													\
-		return result;										\
-	}
-
-#define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)				\
-	static pg_##NAME##_t									\
-	pg_##NAME##_vref(__global kern_column_store *kcs,		\
-					 __global kern_toastbuf *toast,			\
-					 __private int *p_errcode,				\
-					 cl_uint colidx,						\
-					 cl_uint rowidx)						\
-	{														\
-		pg_##NAME##_t result;								\
-		__global cl_uint *p_offset							\
-			= kern_get_datum(kcs,colidx,rowidx);			\
-															\
-		if (!p_offset)										\
-			result.isnull = true;							\
-		else												\
-		{													\
-			cl_uint	offset = *p_offset;						\
-			__global varlena *val;							\
-															\
-			if (toast->length == TOASTBUF_MAGIC)			\
-				offset += toast->coldir[colidx];			\
-			val = ((__global varlena *)						\
-				   ((__global char *)toast + offset));		\
-			if (VARATT_IS_4B_U(val) || VARATT_IS_1B(val))	\
-			{												\
-				result.isnull = false;						\
-				result.value = val;							\
-			}												\
-			else											\
-			{												\
-				result.isnull = true;						\
-				STROM_SET_ERROR(p_errcode,					\
-								StromError_RowReCheck);		\
-			}												\
 		}													\
 		return result;										\
 	}
@@ -740,43 +638,224 @@ typedef struct {
 		return result;										\
 	}
 
-#define STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)				\
-	static pg_##NAME##_t									\
-	pg_##NAME##_param(__global kern_parambuf *kparam,		\
-					  __private int *p_errcode,				\
-					  cl_uint param_id)						\
-	{														\
-		pg_##NAME##_t result;								\
-		__global varlena *addr;								\
-															\
-		if (param_id < kparam->nparams &&					\
-			kparam->poffset[param_id] > 0)					\
-		{													\
-			__global varlena *val =	(__global varlena *)	\
-				((__global char *)kparam +					\
-				 kparam->poffset[param_id]);				\
-			if (VARATT_IS_4B_U(val) || VARATT_IS_1B(val))	\
-			{												\
-				result.value = val;							\
-				result.isnull = false;						\
-			}												\
-			else											\
-			{												\
-				result.isnull = true;						\
-				STROM_SET_ERROR(p_errcode,                  \
-								StromError_RowReCheck);     \
-			}												\
-		}													\
-		else												\
-			result.isnull = true;							\
-															\
-		return result;										\
-	}
-
 #define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)
+
+/*
+ * Template of variable classes: variable-length variables
+ * ---------------------------------------------------------------
+ *
+ * Unlike host code, device code cannot touch external and/or compressed
+ * toast datum. All the format device code can understand is usual
+ * in-memory form; 4-bytes length is put on the head and contents follows.
+ * So, it is a responsibility of host code to decompress the toast values
+ * if device code may access compressed varlena.
+ * In case when device code touches unsupported format, calculation result
+ * shall be postponed to calculate on the host side.
+ *
+ * Note that it is harmless to have external and/or compressed toast datam
+ * unless it is NOT referenced in the device code. It can understand the
+ * length of these values, unlike contents.
+ */
+typedef struct {
+	cl_int		vl_len;
+	cl_char		vl_dat[1];
+} varlena;
+
+#define VARHDRSZ			((int) sizeof(cl_int))
+#define VARDATA(PTR)		VARDATA_4B(PTR)
+#define VARSIZE(PTR)		VARSIZE_4B(PTR)
+#define VARSIZE_EXHDR(PTR)	(VARSIZE(PTR) - VARHDRSZ)
+
+typedef union
+{
+	struct						/* Normal varlena (4-byte length) */
+	{
+		cl_uint		va_header;
+		cl_char		va_data[1];
+    }		va_4byte;
+	struct						/* Compressed-in-line format */
+	{
+		cl_uint		va_header;
+		cl_uint		va_rawsize;	/* Original data size (excludes header) */
+		cl_char		va_data[1];	/* Compressed data */
+	}		va_compressed;
+} varattrib_4b;
+
+typedef struct
+{
+	cl_uchar	va_header;
+	cl_char		va_data[1];		/* Data begins here */
+} varattrib_1b;
+
+/* inline portion of a short varlena pointing to an external resource */
+typedef struct
+{
+	cl_uchar    va_header;		/* Always 0x80 or 0x01 */
+	cl_uchar	va_tag;			/* Type of datum */
+	cl_char		va_data[1];		/* Data (of the type indicated by va_tag) */
+} varattrib_1b_e;
+
+typedef enum vartag_external
+{
+	VARTAG_INDIRECT = 1,
+	VARTAG_ONDISK = 18
+} vartag_external;
+
+#define VARHDRSZ_SHORT			offsetof(varattrib_1b, va_data)
+#define VARATT_SHORT_MAX		0x7F
+
+typedef struct varatt_external
+{
+	cl_int		va_rawsize;		/* Original data size (includes header) */
+	cl_int		va_extsize;		/* External saved size (doesn't) */
+	cl_int		va_valueid;		/* Unique ID of value within TOAST table */
+	cl_int		va_toastrelid;	/* RelID of TOAST table containing it */
+} varatt_external;
+
+typedef struct varatt_indirect
+{
+	hostptr_t	pointer;	/* Host pointer to in-memory varlena */
+} varatt_indirect;
+
+#define VARTAG_SIZE(tag) \
+	((tag) == VARTAG_INDIRECT ? sizeof(varatt_indirect) :	\
+	 (tag) == VARTAG_ONDISK ? sizeof(varatt_external) :		\
+	 0 /* should not happen */)
+
+#define VARHDRSZ_EXTERNAL		offsetof(varattrib_1b_e, va_data)
+#define VARTAG_EXTERNAL(PTR)	VARTAG_1B_E(PTR)
+#define VARSIZE_EXTERNAL(PTR)	\
+	(VARHDRSZ_EXTERNAL + VARTAG_SIZE(VARTAG_EXTERNAL(PTR)))
+
+#define VARATT_IS_4B(PTR) \
+	((((__global varattrib_1b *) (PTR))->va_header & 0x01) == 0x00)
+#define VARATT_IS_4B_U(PTR) \
+	((((__global varattrib_1b *) (PTR))->va_header & 0x03) == 0x00)
+#define VARATT_IS_4B_C(PTR) \
+	((((__global varattrib_1b *) (PTR))->va_header & 0x03) == 0x02)
+#define VARATT_IS_1B(PTR) \
+	((((__global varattrib_1b *) (PTR))->va_header & 0x01) == 0x01)
+#define VARATT_IS_1B_E(PTR) \
+	((((__global varattrib_1b *) (PTR))->va_header) == 0x01)
+#define VARATT_IS_COMPRESSED(PTR)		VARATT_IS_4B_C(PTR)
+#define VARATT_IS_EXTERNAL(PTR)			VARATT_IS_1B_E(PTR)
+#define VARATT_NOT_PAD_BYTE(PTR) \
+	(*((__global cl_uchar *) (PTR)) != 0)
+
+#define VARSIZE_4B(PTR) \
+	((((__global varattrib_4b *) (PTR))->va_4byte.va_header >> 2) & 0x3FFFFFFF)
+#define VARSIZE_1B(PTR) \
+	((((__global varattrib_1b *) (PTR))->va_header >> 1) & 0x7F)
+#define VARTAG_1B_E(PTR) \
+	(((__global varattrib_1b_e *) (PTR))->va_tag)
+
+#define VARSIZE_ANY_EXHDR(PTR) \
+	(VARATT_IS_1B_E(PTR) ? VARSIZE_EXTERNAL(PTR)-VARHDRSZ_EXTERNAL : \
+	 (VARATT_IS_1B(PTR) ? VARSIZE_1B(PTR)-VARHDRSZ_SHORT :			 \
+	  VARSIZE_4B(PTR)-VARHDRSZ))
+
+#define VARSIZE_ANY(PTR)							\
+	(VARATT_IS_1B_E(PTR) ? VARSIZE_EXTERNAL(PTR) :	\
+	 (VARATT_IS_1B(PTR) ? VARSIZE_1B(PTR) :			\
+	  VARSIZE_4B(PTR)))
+
+#define VARDATA_4B(PTR)	(((__global varattrib_4b *) (PTR))->va_4byte.va_data)
+#define VARDATA_1B(PTR)	(((__global varattrib_1b *) (PTR))->va_data)
+#define VARDATA_ANY(PTR) \
+	(VARATT_IS_1B(PTR) ? VARDATA_1B(PTR) : VARDATA_4B(PTR))
+/*
+ * functions to reference variable length variables
+ */
+STROMCL_SIMPLE_DATATYPE_TEMPLATE(varlena, __global varlena *)
+
+static inline pg_varlena_t
+pg_varlena_vref(__global kern_column_store *kcs,
+				__global kern_toastbuf *toast,
+				__private int *p_errcode,
+				cl_uint colidx,
+				cl_uint rowidx)
+{
+	pg_varlena_t result;
+	__global cl_uint *p_offset = kern_get_datum(kcs,colidx,rowidx);
+
+	if (!p_offset)
+		result.isnull = true;
+	else
+	{
+		cl_uint	offset = *p_offset;
+		__global varlena *val;
+		if (toast->length == TOASTBUF_MAGIC)
+			offset += toast->coldir[colidx];
+		val = ((__global varlena *)((__global char *)toast + offset));
+		if (VARATT_IS_4B_U(val) || VARATT_IS_1B(val))
+		{
+			result.isnull = false;
+			result.value = val;
+		}
+		else
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(p_errcode, StromError_RowReCheck);
+		}
+	}
+	return result;
+}
+
+static inline pg_varlena_t
+pg_varlena_param(__global kern_parambuf *kparam,
+				 __private int *p_errcode,
+				 cl_uint param_id)
+{
+	pg_varlena_t	result;
+	__global varlena *addr;
+
+	if (param_id < kparam->nparams &&
+		kparam->poffset[param_id] > 0)
+	{
+		__global varlena *val = (__global varlena *)
+			((__global char *)kparam + kparam->poffset[param_id]);
+		if (VARATT_IS_4B_U(val) || VARATT_IS_1B(val))
+		{
+			result.value = val;
+			result.isnull = false;
+		}
+		else
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(p_errcode, StromError_RowReCheck);
+		}
+	}
+	else
+		result.isnull = true;
+
+	return result;
+}
+
+#define STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)						\
+	typedef pg_varlena_t	pg_##NAME##_t;
+
+#define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)						\
+	static inline pg_##NAME##_t										\
+	pg_##NAME##_vref(__global kern_column_store *kcs,				\
+					 __global kern_toastbuf *toast,					\
+					 __private int *p_errcode,						\
+					 cl_uint colidx,								\
+					 cl_uint rowidx)								\
+	{																\
+		return pg_varlena_vref(kcs,toast,p_errcode,colidx,rowidx);	\
+	}
+
+#define STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)						\
+	static pg_##NAME##_t											\
+	pg_##NAME##_param(__global kern_parambuf *kparam,				\
+					  __private int *p_errcode,						\
+					  cl_uint param_id)								\
+	{																\
+		return pg_varlena_param(kparam,p_errcode,param_id);			\
+	}
 
 #define STROMCL_VARLENA_TYPE_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)			\
@@ -1333,41 +1412,6 @@ kern_row_to_column(__private cl_int *errcode,
 	barrier(CLK_GLOBAL_MEM_FENCE);
 }
 #endif /* OPENCL_DEVICE_CODE */
-
-/*
- * kern_get_datum
- *
- * Reference to a particular datum on the supplied column store.
- * It returns NULL, If it is a null-value in context of SQL. Elsewhere,
- * it returns a pointer towards global memory.
- */
-static inline __global void *
-kern_get_datum(__global kern_column_store *kcs,
-			   cl_uint colidx,
-			   cl_uint rowidx)
-{
-	kern_colmeta colmeta;
-	cl_uint		offset;
-
-	if (colidx >= kcs->ncols || rowidx >= kcs->nrows)
-		return NULL;
-
-	colmeta = kcs->colmeta[colidx];
-	offset = colmeta.cs_ofs;
-	if (!colmeta.attnotnull)
-	{
-		if (att_isnull(rowidx, (__global char *)kcs + offset))
-			return NULL;
-		offset += STROMALIGN((kcs->nrooms + 7) >> 3);
-	}
-	if (colmeta.attlen > 0)
-		offset += colmeta.attlen * rowidx;
-	else
-		offset += sizeof(cl_uint) * rowidx;
-
-	return (__global void *)((__global char *)kcs + offset);
-}
-
 #ifdef OPENCL_DEVICE_CODE
 /*
  * kern_writeback_error_status
