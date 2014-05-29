@@ -75,18 +75,13 @@ typedef struct {
 	(offsetof(kern_gpuscan, kparam) +									\
 	 (kgscan)->kparam.length +											\
 	 offsetof(kern_resultbuf,											\
-			  results[KERN_GPUSCAN_RESULTBUF(kgscan)->nrooms]) +		\
-	 (KERN_GPUSCAN_RESULTBUF(kgscan)->debug_usage == KERN_DEBUG_UNAVAILABLE ? \
-	  0 : KERNEL_DEBUG_BUFSIZE))
+			  results[KERN_GPUSCAN_RESULTBUF(kgscan)->nrooms]))
 #define KERN_GPUSCAN_DMA_SENDLEN(kgscan)		\
 	((kgscan)->kparam.length +					\
 	 offsetof(kern_resultbuf, results[0]))
-
 #define KERN_GPUSCAN_DMA_RECVLEN(kgscan)								\
 	(offsetof(kern_resultbuf,											\
-			  results[KERN_GPUSCAN_RESULTBUF(kgscan)->nrooms]) +		\
-	 (KERN_GPUSCAN_RESULTBUF(kgscan)->debug_usage == KERN_DEBUG_UNAVAILABLE ? \
-	  0 : KERNEL_DEBUG_BUFSIZE))
+			  results[KERN_GPUSCAN_RESULTBUF(kgscan)->nrooms]))
 
 #ifdef OPENCL_DEVICE_CODE
 /*

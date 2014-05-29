@@ -577,7 +577,6 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	TupleDesc		tupdesc;
 	bytea		   *attrefs;
 	Const		   *kparam_0;
-	int32			extra_flags;
 	AttrNumber		anum;
 	AttrNumber		anum_last;
 
@@ -657,13 +656,10 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	/*
 	 * Setting up kernel program, if needed
 	 */
-	extra_flags = gsplan->extra_flags;
-	if (pgstrom_kernel_debug)
-		extra_flags |= DEVKERNEL_NEEDS_DEBUG;
 	if (gsplan->kern_source)
 	{
 		gss->dprog_key = pgstrom_get_devprog_key(gsplan->kern_source,
-												 extra_flags);
+												 gsplan->extra_flags);
 		pgstrom_track_object((StromObject *)gss->dprog_key, 0);
 
 		/* also, message queue */
@@ -805,24 +801,13 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	tcache_column_store *tcs = NULL;
 	kern_parambuf	   *kparam;
 	kern_resultbuf	   *kresult;
-	int			extra_flags;
 	cl_uint		length;
 	cl_uint		i, nrows;
-	bool		kernel_debug;
 	struct timeval tv1, tv2;
 
 	/* no more records to read! */
 	if (!gss->scan_desc && !gss->tc_scan)
 		return NULL;
-
-	/*
-	 * check status of pg_strom.kernel_debug
-	 */
-	extra_flags = pgstrom_get_devprog_extra_flags(gss->dprog_key);
-	if ((extra_flags & DEVKERNEL_NEEDS_DEBUG) != 0)
-		kernel_debug = true;
-	else
-		kernel_debug = false;
 
 	/*
 	 * First of all, allocate a row- or column- store and fill it up.
@@ -913,8 +898,7 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 											  colmeta[gss->cs_attnums]) +
 									 offsetof(kern_toastbuf,
 											  coldir[gss->cs_attnums]) +
-									 sizeof(cl_int) * gss->cs_attnums)) +
-					  (kernel_debug ? KERNEL_DEBUG_BUFSIZE : 0));
+									 sizeof(cl_int) * gss->cs_attnums)));
 			gpuscan = pgstrom_shmem_alloc(length);
 			if (!gpuscan)
 				elog(ERROR, "out of shared memory");
@@ -949,8 +933,6 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 			kresult = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
 			kresult->nrooms = nrows;
 			kresult->nitems = 0;
-			kresult->debug_nums = 0;
-			kresult->debug_usage = (kernel_debug ? 0 : KERN_DEBUG_UNAVAILABLE);
 			kresult->errcode = 0;
 
 			/*
@@ -1789,8 +1771,6 @@ clserv_respond_gpuscan_row(cl_event event, cl_int ev_status, void *private)
 			gpuscan->msg.pfm.enabled = false;	/* turn off profiling */
 		}
 	}
-	/* dump debug messages */
-	pgstrom_dump_kernel_debug(LOG, KERN_GPUSCAN_RESULTBUF(&gpuscan->kern));
 
 	/* release opencl objects */
 	while (clgsr->ev_index > 0)
@@ -2267,9 +2247,6 @@ clserv_respond_gpuscan_column(cl_event event, cl_int ev_status, void *private)
 						&status,
 						NULL);
 	Assert(rc == CL_SUCCESS);
-
-	/* dump debug messages */
-	pgstrom_dump_kernel_debug(LOG, KERN_GPUSCAN_RESULTBUF(&gpuscan->kern));
 
 	/* release opencl objects */
 	while (clgsc->ev_index > 0)

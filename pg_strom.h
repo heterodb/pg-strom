@@ -224,7 +224,6 @@ typedef struct {
 #define DEVFUNC_NEEDS_TEXTLIB		0x0010
 #define DEVFUNC_NEEDS_NUMERICLIB	0x0020
 #define DEVFUNC_INCL_FLAGS			0x0038
-#define DEVKERNEL_NEEDS_DEBUG		0x0100
 #define DEVKERNEL_NEEDS_GPUSCAN		0x0200
 #define DEVKERNEL_NEEDS_GPUSORT		0x0400
 #define DEVKERNEL_NEEDS_HASHJOIN	0x0800
@@ -517,7 +516,6 @@ extern bool clserv_compute_workgroup_size(size_t *gwork_sz,
  * opencl_devprog.c
  */
 #define BAD_OPENCL_PROGRAM		((void *) ~0UL)
-extern bool pgstrom_kernel_debug;
 extern cl_program clserv_lookup_device_program(Datum dprog_key,
 											   pgstrom_message *msg);
 extern Datum pgstrom_get_devprog_key(const char *source, int32 extra_libs);
@@ -648,16 +646,8 @@ extern void pgstrom_init_grafter(void);
 /*
  * debug.c
  */
-extern void pgstrom_dump_kernel_debug(int elevel, kern_resultbuf *kresult);
 extern Datum pgstrom_shmem_alloc_func(PG_FUNCTION_ARGS);
 extern Datum pgstrom_shmem_free_func(PG_FUNCTION_ARGS);
-extern Datum pgstrom_create_queue_func(PG_FUNCTION_ARGS);
-extern Datum pgstrom_close_queue_func(PG_FUNCTION_ARGS);
-extern Datum pgstrom_create_testmsg_func(PG_FUNCTION_ARGS);
-extern Datum pgstrom_enqueue_testmsg_func(PG_FUNCTION_ARGS);
-extern Datum pgstrom_dequeue_testmsg_func(PG_FUNCTION_ARGS);
-extern Datum pgstrom_release_testmsg_func(PG_FUNCTION_ARGS);
-extern void pgstrom_init_debug(void);
 
 /*
  * opencl_*.h

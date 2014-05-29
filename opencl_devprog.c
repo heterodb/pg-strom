@@ -384,13 +384,11 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 
 		Assert(SIZEOF_VOID_P == 8 || SIZEOF_VOID_P == 4);
 		snprintf(build_opts, sizeof(build_opts),
-				 "-DOPENCL_DEVICE_CODE -DHOSTPTRLEN=%u %s"
+				 "-DOPENCL_DEVICE_CODE -DHOSTPTRLEN=%u"
 #ifdef PGSTROM_DEBUG
-				 "-Werror"
+				 " -Werror"
 #endif
-				 ,SIZEOF_VOID_P,
-				 ((dprog->extra_flags & DEVKERNEL_NEEDS_DEBUG) != 0
-				  ? "-DPGSTROM_KERNEL_DEBUG=1 " : ""));
+				 , SIZEOF_VOID_P);
 
 		rc = clBuildProgram(program,
 							opencl_num_devices,

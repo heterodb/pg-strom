@@ -115,7 +115,6 @@ _PG_init(void)
 
 	/* miscellaneous initializations */
 	pgstrom_init_misc_guc();
-	pgstrom_init_debug();
 	pgstrom_init_codegen();
 	pgstrom_init_grafter();
 }
@@ -254,9 +253,6 @@ show_device_kernel(Datum dprog_key, ExplainState *es)
 	 * Practically, clCreateProgramWithSource() accepts multiple cstrings
 	 * as if external files are included.
 	 */
-	if (extra_flags & DEVKERNEL_NEEDS_DEBUG)
-		appendStringInfo(&str, "#define PGSTROM_KERNEL_DEBUG 1\n");
-
 	appendStringInfo(&str, "#include \"opencl_common.h\"\n");
 	if (extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
 		appendStringInfo(&str, "#include \"opencl_gpuscan.h\"\n");

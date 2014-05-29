@@ -1607,7 +1607,6 @@ gpusort_begin(CustomPlan *node, EState *estate, int eflags)
 	GpuSortPlan	   *gsortplan = (GpuSortPlan *) node;
 	GpuSortState   *gsortstate;
 	TupleDesc		tupdesc;
-	int				extra_flags;
 	List		   *sortkey_resnums = NIL;
 	List		   *sortkey_toast = NIL;
 	Bitmapset	   *tempset;
@@ -1669,11 +1668,8 @@ gpusort_begin(CustomPlan *node, EState *estate, int eflags)
 	 */
 
 	/* Setting up device kernel */
-	extra_flags = gsortplan->extra_flags;
-	if (pgstrom_kernel_debug)
-		extra_flags |= DEVKERNEL_NEEDS_DEBUG;
 	gsortstate->dprog_key = pgstrom_get_devprog_key(gsortplan->kern_source,
-													extra_flags);
+													gsortplan->extra_flags);
 	pgstrom_track_object((StromObject *)gsortstate->dprog_key, 0);
 
 	/* Also, message queue */

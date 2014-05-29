@@ -142,131 +142,15 @@ typedef struct {
  * Output buffer to write back calculation results on a parciular chunk.
  * 'errcode' informs a significant error that shall raise an error on
  * host side and abort transactions. 'results' informs row-level status.
- *
- * if 'debug_usage' is not initialized to zero, it means this result-
- * buffer does not have debug buffer.
  */
-#define KERN_DEBUG_UNAVAILABLE	0xffffffff
 typedef struct {
 	cl_uint		nrooms;		/* max number of results rooms */
 	cl_uint		nitems;		/* number of results being written */
-	cl_uint		debug_nums;	/* number of debug messages */
-	cl_uint		debug_usage;/* current usage of debug buffer */
 	cl_int		errcode;	/* chunk-level error */
 	cl_int		results[FLEXIBLE_ARRAY_MEMBER];
 } kern_resultbuf;
 
-/*
- * kern_debug
- *
- * When pg_strom.kernel_debug is enabled, KERNEL_DEBUG_BUFSIZE bytes of
- * debug buffer is allocated on the behind of kern_resultbuf.
- * Usually, it shall be written back to the host with kernel execution
- * results, and will be dumped to the console.
- */
-#define KERNEL_DEBUG_BUFSIZE	(4 * 1024 * 1024)	/* 4MB */
-
-typedef struct {
-	cl_uint		length;		/* length of this entry; 4-bytes aligned */
-	cl_uint		global_ofs;
-	cl_uint		global_sz;
-	cl_uint		global_id;
-	cl_uint		local_sz;
-	cl_uint		local_id;
-	cl_char		v_class;
-	union {
-		cl_ulong	v_int;
-		cl_double	v_fp;
-	} value;
-	cl_char		label[FLEXIBLE_ARRAY_MEMBER];
-} kern_debug;
-
 #ifdef OPENCL_DEVICE_CODE
-
-#ifdef PGSTROM_KERNEL_DEBUG
-static void
-pg_kern_debug_int(__global kern_resultbuf *kresult,
-				  __constant char *label, size_t label_sz,
-				  cl_ulong value, size_t value_sz)
-{
-	__global kern_debug *kdebug;
-	cl_uint		offset;
-	cl_uint		length = offsetof(kern_debug, label) + label_sz;
-	cl_uint		i;
-
-	if (!kresult)
-		return;
-
-	length = TYPEALIGN(sizeof(cl_uint), length);
-	offset = atomic_add(&kresult->debug_usage, length);
-	if (offset + length >= KERNEL_DEBUG_BUFSIZE)
-		return;
-
-	kdebug = (__global kern_debug *)
-		((uintptr_t)&kresult->results[kresult->nrooms] + offset);
-	kdebug->length = length;                                        \
-	kdebug->global_ofs = get_global_offset(0);
-	kdebug->global_sz = get_global_size(0);
-	kdebug->global_id = get_global_id(0);
-	kdebug->local_sz = get_local_size(0);
-	kdebug->local_id = get_local_id(0);
-	kdebug->v_class = (value_sz == sizeof(cl_char) ? 'c' :
-					   (value_sz == sizeof(cl_short) ? 's' :
-						(value_sz == sizeof(cl_int) ? 'i' : 'l')));
-	kdebug->value.v_int = value;
-	for (i=0; i < label_sz; i++)
-		kdebug->label[i] = label[i];
-	atomic_add(&kresult->debug_nums, 1);
-}
-
-static void
-pg_kern_debug_fp(__global kern_resultbuf *kresult,
-				 __constant char *label, size_t label_sz,
-				 cl_double value, size_t value_sz)
-{
-	__global kern_debug *kdebug;
-	cl_uint		offset;
-	cl_uint		length = offsetof(kern_debug, label) + label_sz;
-	cl_uint		i;
-
-	if (!kresult)
-		return;
-
-	length = TYPEALIGN(sizeof(cl_uint), length);
-	offset = atomic_add(&kresult->debug_usage, length);
-	if (offset + length >= KERNEL_DEBUG_BUFSIZE)
-		return;
-
-	kdebug = (__global kern_debug *)
-		((uintptr_t)&kresult->results[kresult->nrooms] + offset);
-	kdebug->length = length;                                        \
-	kdebug->global_ofs = get_global_offset(0);
-	kdebug->global_sz = get_global_size(0);
-	kdebug->global_id = get_global_id(0);
-	kdebug->local_sz = get_local_size(0);
-	kdebug->local_id = get_local_id(0);
-	kdebug->v_class = (value_sz == sizeof(cl_float) ? 'f' : 'd');
-	kdebug->value.v_fp = value;
-	for (i=0; i < label_sz; i++)
-		kdebug->label[i] = label[i];
-	atomic_add(&kresult->debug_nums, 1);
-}
-__global kern_resultbuf *pgstrom_kresult_buffer = NULL;
-
-#define KDEBUG_INT(label, value)	\
-	pg_kern_debug_int(pgstrom_kresult_buffer, \
-					  (label), sizeof(label), (value), sizeof(value))
-#define KDEBUG_FP(label, value)	\
-	pg_kern_debug_fp(pgstrom_kresult_buffer, \
-					 (label), sizeof(label), (value), sizeof(value))
-#define KDEBUG_INIT(kresult)	\
-	do { pgstrom_kresult_buffer = (kresult); } while (0)
-#else
-#define KDEBUG_INT(label, value)	do {} while(0)
-#define KDEBUG_FP(label, value)		do {} while(0)
-#define KDEBUG_INIT(kresult)		do {} while(0)
-#endif /* PGSTROM_KERNEL_DEBUG */
-
 /*
  * Data type definitions for row oriented data format
  * ---------------------------------------------------
