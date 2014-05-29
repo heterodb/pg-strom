@@ -506,6 +506,8 @@ pgstrom_put_queue(pgstrom_queue *mqueue)
 	if (queue_release)
 	{
 		SpinLockAcquire(&mqueue_shm_values->lock);
+		mqueue_shm_values->num_active--;
+		mqueue_shm_values->num_free++;
 		dlist_push_tail(&mqueue_shm_values->free_queue_list,
 						&mqueue->chain);
 		SpinLockRelease(&mqueue_shm_values->lock);
