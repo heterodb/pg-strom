@@ -354,81 +354,6 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 	*p_total_cost = startup_cost + run_cost;
 }
 
-#if 0
-static void
-gpusort_codegen_on_kparam(StringInfo str, bool is_declare,
-						  int index, Node *node, void *private)
-{
-	devtype_info   *dtype;
-
-	if (!is_declare)
-	{
-		appendStringInfo(str, "KPARAM_%u", index);
-		return;
-	}
-
-	if (IsA(node, Const))
-		dtype = pgstrom_devtype_lookup(((Const *)node)->consttype);
-	else if (IsA(node, Param))
-		dtype = pgstrom_devtype_lookup(((Param *)node)->paramtype);
-	else
-		elog(ERROR, "unexpexted node type: %d", (int)nodeTag(node));
-
-	appendStringInfo(str,
-					 "#define KPARAM_%u\t"
-					 "pg_%s_param(kparams,errcode,%d)\n",
-					 index, dtype->type_name, index);
-}
-#endif
-
-static void
-gpusort_codegen_on_kvar(StringInfo str, bool is_declare,
-						int index, Var *var, void *private)
-{
-	devtype_info   *dtype;
-	const char	   *labels = "xy";
-	int				i, code;
-
-	if (!is_declare)
-	{
-		int		label = ((const char *)private)[0];
-
-		Assert(label == 'x' || label == 'y');
-		appendStringInfo(str, "KVAR_%c%u", toupper(label), index);
-		return;
-	}
-
-	dtype = pgstrom_devtype_lookup(var->vartype);
-	Assert(dtype != NULL);
-
-	for (i=0; (code = labels[i]) != '\0'; i++)
-	{
-		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
-			appendStringInfo(
-				str,
-				"#define KVAR_%c%u\t"
-				"pg_%s_vref(kcs_%c,ktoast_%c,errcode,%u,%c_index)\n",
-				toupper(code),
-				index,
-				dtype->type_name,
-				code,
-				code,
-				index,
-				code);
-		else
-			appendStringInfo(
-				str,
-				"#define KVAR_%c%u\t"
-				"pg_%s_vref(kcs_%c,errcode,%u,%c_index)\n",
-				toupper(code),
-				index,
-				dtype->type_name,
-				code,
-				index,
-				code);
-	}
-}
-
 static char *
 gpusort_codegen_comparison(Sort *sort, codegen_context *context)
 {
@@ -442,8 +367,6 @@ gpusort_codegen_comparison(Sort *sort, codegen_context *context)
 	initStringInfo(&body);
 
 	memset(context, 0, sizeof(codegen_context));
-	//context->on_kparam_callback = gpusort_codegen_on_kparam;
-	context->on_kvar_callback = gpusort_codegen_on_kvar;
 
 	/*
 	 * System constants for GpuSort

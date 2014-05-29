@@ -562,11 +562,6 @@ typedef struct {
 	List	   *used_vars;	/* list of Var in use */
 	const char *row_index;	/* label to reference row-index, if exist */
 	int			extra_flags;/* external libraries to be included */
-	void	  (*on_kparam_callback)(StringInfo str, bool is_declare,
-									int index, Node *node, void *private);
-	void	  (*on_kvar_callback)(StringInfo str, bool is_declare,
-								  int index, Var *var, void *private);
-	void	   *private;
 } codegen_context;
 
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);

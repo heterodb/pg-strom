@@ -1080,12 +1080,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		{
 			if (equal(node, lfirst(cell)))
 			{
-				if (context->on_kvar_callback)
-					context->on_kvar_callback(&context->str, false,
-											  index, (Var *)node,
-											  context->private);
-				else
-					appendStringInfo(&context->str, "KPARAM_%u", index);
+				appendStringInfo(&context->str, "KPARAM_%u", index);
 				return true;
 			}
 			index++;
@@ -1093,13 +1088,8 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		context->used_params = lappend(context->used_params,
 									   copyObject(node));
 		index = list_length(context->used_params) - 1;
-		if (context->on_kvar_callback)
-			context->on_kvar_callback(&context->str, false,
-									  index, (Var *)node,
-									  context->private);
-		else
-			appendStringInfo(&context->str, "KPARAM_%u",
-							 list_length(context->used_params) - 1);
+		appendStringInfo(&context->str, "KPARAM_%u",
+						 list_length(context->used_params) - 1);
 		return true;
 	}
 	else if (IsA(node, Param))
@@ -1116,11 +1106,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		{
 			if (equal(node, lfirst(cell)))
 			{
-				if (context->on_kparam_callback)
-					context->on_kparam_callback(&context->str, false,
-												index, node, context->private);
-				else
-					appendStringInfo(&context->str, "KPARAM_%u", index);
+				appendStringInfo(&context->str, "KPARAM_%u", index);
 				return true;
 			}
 			index++;
@@ -1128,11 +1114,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		context->used_params = lappend(context->used_params,
 									   copyObject(node));
 		index = list_length(context->used_params) - 1;
-		if (context->on_kparam_callback)
-			context->on_kparam_callback(&context->str, false,
-										index, node, context->private);
-		else
-			appendStringInfo(&context->str, "KPARAM_%u", index);
+		appendStringInfo(&context->str, "KPARAM_%u", index);
 		return true;
 	}
 	else if (IsA(node, Var))
@@ -1148,12 +1130,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		{
 			if (equal(node, lfirst(cell)))
 			{
-				if (context->on_kvar_callback)
-					context->on_kvar_callback(&context->str, false,
-											  index, (Var *)node,
-											  context->private);
-				else
-					appendStringInfo(&context->str, "KVAR_%u", index);
+				appendStringInfo(&context->str, "KVAR_%u", index);
 				return true;
 			}
 			index++;
@@ -1161,12 +1138,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		context->used_vars = lappend(context->used_vars,
 									 copyObject(node));
 		index = list_length(context->used_vars) - 1;
-		if (context->on_kvar_callback)
-			context->on_kvar_callback(&context->str, false,
-									  index, (Var *)node,
-									  context->private);
-		else
-			appendStringInfo(&context->str, "KVAR_%u", index);
+		appendStringInfo(&context->str, "KVAR_%u", index);
 		return true;
 	}
 	else if (IsA(node, FuncExpr))
@@ -1367,9 +1339,6 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	walker_context.used_params = list_copy(context->used_params);
 	walker_context.used_vars = list_copy(context->used_vars);
 	walker_context.extra_flags = context->extra_flags;
-	walker_context.on_kparam_callback = context->on_kparam_callback;
-	walker_context.on_kvar_callback = context->on_kvar_callback;
-	walker_context.private = context->private;
 
 	if (IsA(expr, List))
 	{
@@ -1438,12 +1407,7 @@ pgstrom_codegen_declarations(codegen_context *context)
 	index = 0;
 	foreach (cell, context->used_params)
 	{
-		if (context->on_kparam_callback)
-		{
-			context->on_kparam_callback(&str, true, index, lfirst(cell),
-										context->private);
-		}
-		else if (IsA(lfirst(cell), Const))
+		if (IsA(lfirst(cell), Const))
 		{
 			Const  *con = lfirst(cell);
 
@@ -1477,32 +1441,34 @@ pgstrom_codegen_declarations(codegen_context *context)
 	foreach (cell, context->used_vars)
 	{
 		Var	   *var = lfirst(cell);
+		ListCell   *lc;
+		AttrNumber	colidx = 0;
 
-		if (context->on_kvar_callback)
-			context->on_kvar_callback(&str, true, index, var,
-									  context->private);
-		else
+		foreach (lc, context->used_vars)
 		{
-			dtype = pgstrom_devtype_lookup(var->vartype);
-			Assert(dtype != NULL);
-
-			if (dtype->type_flags & DEVTYPE_IS_VARLENA)
-				appendStringInfo(
-					&str,
-					"#define KVAR_%u\t"
-					"pg_%s_vref(kcs,toast,errcode,%u,kcs_index)\n",
-					index,
-					dtype->type_name,
-					index);
-			else
-				appendStringInfo(
-					&str,
-					"#define KVAR_%u\t"
-					"pg_%s_vref(kcs,errcode,%u,kcs_index)\n",
-					index,
-					dtype->type_name,
-					index);
+			if (((Var *)lfirst(lc))->varattno < var->varattno)
+				colidx++;
 		}
+
+		dtype = pgstrom_devtype_lookup(var->vartype);
+		Assert(dtype != NULL);
+
+		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
+			appendStringInfo(
+				&str,
+				"#define KVAR_%u\t"
+				"pg_%s_vref(kcs,toast,errcode,%u,kcs_index)\n",
+				index,
+				dtype->type_name,
+				colidx);
+		else
+			appendStringInfo(
+				&str,
+				"#define KVAR_%u\t"
+				"pg_%s_vref(kcs,errcode,%u,kcs_index)\n",
+				index,
+				dtype->type_name,
+				colidx);
 		index++;
 	}
 	return str.data;
