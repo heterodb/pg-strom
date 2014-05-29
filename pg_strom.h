@@ -494,6 +494,11 @@ extern CustomPlan *pgstrom_create_gpusort_plan(Sort *original, List *rtable);
 extern void pgstrom_init_gpusort(void);
 
 /*
+ * gpuhashjoin.c
+ */
+extern void pgstrom_init_gpuhashjoin(void);
+
+/*
  * opencl_devinfo.c
  */
 extern int	pgstrom_get_device_nums(void);

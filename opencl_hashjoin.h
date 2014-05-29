@@ -13,6 +13,150 @@
 #ifndef OPENCL_HASHJOIN_H
 #define OPENCL_HASHJOIN_H
 
+/*
+ * Format of kernel hash table; to be prepared
+ *
+ * +--------------------+
+ * | kern_gpuhash_table |  total length of hash table incl.
+ * | +------------------+  hash entries; size of DMA send
+ * | | length        o---------------------------------+
+ * | +------------------+                              |
+ * | | nslots (=N)      |                              |
+ * | +------------------+                              |
+ * | | nkeys (=M)       |                              |
+ * | +------------------+                              |
+ * | | colmeta[0]       |                              |
+ * | | colmeta[1]       |                              |
+ * | |    :             |                              |
+ * | | colmeta[M-1]     |                              |
+ * | +------------------+                              |
+ * | | hash_slot[0]     |                              |
+ * | | hash_slot[1]     |                              |
+ * | |     :            |                              |
+ * | | hash_slot[N-2] o-------+  single directioned    |
+ * | | hash_slot[N-1]   |     |  link from the         |
+ * +-+------------------+ <---+  hash_slot[]           |
+ * | kern_gpuhash_entry |                              |
+ * | +------------------+                              |
+ * | | next       o-----------+  If multiple entries   |
+ * | +------------------+     |  has same hash value,  |
+ * | | hash             |     |  these are linked.     |
+ * | +------------------+     |                        |
+ * | | keylen           |     |                        |
+ * | +------------------+     |                        |
+ * | | keydata:         |     |                        |
+ * | | (actual values   |     |                        |
+ * | |  to be joined)   |     |                        |
+ * +-+------------------+ <---+                        |
+ * | kern_gpuhash_entry |                              |
+ * | +-----------------+-                              |
+ * | | next       o-----------+                        |
+ * | +------------------+     |                        |
+ * | | hash             |     |                        |
+ * | +------------------+     |                        |
+ * | |      :           |     |                        |
+ * |        :           |     |                        |
+ * | |      :           |     |                        |
+ * +-+------------------+ <---+                        |
+ * | kern_gpuhash_entry |                              |
+ * | +------------------+                              |
+ * | | next             |                              |
+ * | +------------------+                              |
+ * | | hash             |                              |
+ * | +------------------+                              |
+ * | | keylen           |                              |
+ * | +------------------+                              |
+ * | | keydata:         |                              |
+ * | | (actual values   |                              |
+ * | |  to be joined)   |                              |
+ * +-+------------------+  <---------------------------+
+ */
+typedef struct
+{
+	cl_uint			next;	/* offset of the next */
+	cl_uint			hash;	/* 32-bit hash value */
+	cl_uint			leylen;	/* length of key data */
+	cl_char			keydata[FLEXIBLE_ARRAY_MEMBER];
+} kern_gpuhash_entry;
+
+typedef struct
+{
+	cl_uint			length;	/* total length of hash table */
+	cl_uint			nslots;	/* width of hash slot */
+	cl_uint			nkeys;	/* number of keys to be compared */
+	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];
+} kern_gpuhash_table;
+
+
+/*
+ * Sequential Scan using GPU/MIC acceleration
+ *
+ * It packs a kern_parambuf and kern_resultbuf structure within a continuous
+ * memory ares, to transfer (usually) small chunk by one DMA call.
+ *
+ * +----------------+       -----
+ * | kern_parambuf  |         ^
+ * | +--------------+         |
+ * | | length   o--------------------+
+ * | +--------------+         |      | kern_resultbuf is located just after
+ * | | nparams      |         |      | the kern_parambuf (because of DMA
+ * | +--------------+         |      | optimization), so head address of
+ * | | poffset[0]   |         |      | kern_gpuscan + parambuf.length
+ * | | poffset[1]   |         |      | points kern_resultbuf.
+ * | |    :         |         |      |
+ * | | poffset[M-1] |         |      |
+ * | +--------------+         |      |
+ * | | variable     |         |      |
+ * | | length field |         |      |
+ * | | for Param /  |         |      |
+ * | | Const values |         |      |
+ * | |     :        |         |      |
+ * +-+--------------+  -----  |  <---+
+ * | kern_resultbuf |    ^    |
+ * | +--------------+    |    |  Area to be sent to OpenCL device.
+ * | | nrooms       |    |    |  Forward DMA shall be issued here.
+ * | +--------------+    |    |
+ * | | nitems       |    |    |
+ * | +--------------+    |    |
+ * | | debug_usage  |    |    |
+ * | +--------------+    |    |
+ * | | errcode      |    |    V
+ * | +--------------+    |  -----
+ * | | results[0]   |    |
+ * | | results[1]   |    |  Area to be written back from OpenCL device.
+ * | |     :        |    |  Reverse DMA shall be issued here.
+ * | | results[N-1] |    V
+ * +-+--------------+  -----
+ */
+
+
+
+typedef struct
+{
+	kern_parambuf	kparam;
+	/* also, resultbuf shall be placed next to the parambuf */
+} kern_gpuhash_join;
+
+#define KERN_GPUHJ_PARAMBUF(kghashjoin)					\
+	((__global kern_parambuf *)(&(kghashjoin)->kparam))
+#define KERN_GPUHJ_PARAMBUF_LENGTH(kghashjoin)			\
+	STROMALIGN(KERN_GPUHJ_PARAMBUF(kghashjoin)->length)
+#define KERN_GPUHJ_RESULTBUF(kghashjoin)								\
+	((__global kern_resultbuf *)((__global char *)kghashjoin +			\
+								 KERN_GPUHJ_PARAMBUF_LENGTH(kghashjoin))
+#define KERN_GPUHJ_RESULTBUF_LENGTH(kghashjoin)							\
+	STROMALIGN(offsetof(kern_resultbuf,									\
+						results[KERN_GPUHJ_RESULTBUF(kghashjoin)->nrooms]))
+#define KERN_GPUHJ_DMA_SENDLEN(kghashjoin)		\
+	(KERN_GPUHJ_PARAMBUF_LENGTH(kghashjoin) +	\
+	 offsetof(kern_resultbuf, results[0]))
+#define KERN_GPUHJ_DMA_RECVLEN(kghashjoin)		\
+	(offsetof(kern_resultbuf,					\
+			  results[KERN_GPUHJ_RESULTBUF(kghashjoin)->nrooms]))
+
+
+
+
 typedef struct {
 	MessageTag		mtag;
 	cl_uint			next;	/* offset of next hash-item, or 0 if not exists */
@@ -29,5 +173,32 @@ typedef struct {
 
 
 #ifdef OPENCL_DEVICE_CODE
+/*
+ * hash_function.
+ * hash_search function,
+ *
+ */
+
+
+
 #endif
+
+typedef struct
+{
+	pgstrom_message		msg;	/* = StromTag_GpuHashTable */
+	kern_gpuhash_table	kern;
+} pgstrom_gpuhashtable;
+
+
+typedef struct
+{
+	pgstrom_message		msg;	/* = StromTag_GpuHashJoin */
+	Datum				dprog_key;
+	StromObject		   *rc_store;
+	kern_gpuhashjoin	kern;
+} pgstrom_gpuhashjoin;
+
+
+
+
 #endif	/* OPENCL_HASHJOIN_H */

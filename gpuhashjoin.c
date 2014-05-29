@@ -17,7 +17,7 @@
 #include "pg_strom.h"
 
 /* static variables */
-static add_join_path_hook_type	add_join_path_next;
+static add_hashjoin_path_hook_type	add_hashjoin_path_next;
 static CustomPathMethods		gpuhashjoin_path_methods;
 static CustomPlanMethods		gpuhashjoin_plan_methods;
 
@@ -41,16 +41,38 @@ typedef struct
 
 
 static void
-gpuhashjoin_add_join_path(PlannerInfo *root,
-						  RelOptInfo *joinrel,
-						  RelOptInfo *outerrel,
-						  RelOptInfo *innerrel,
-						  JoinType jointype,
-						  SpecialJoinInfo *sjinfo,
-						  List *restrictlist,
-						  Relids param_source_rels,
-						  Relids extra_lateral_rels)
-{}
+gpuhashjoin_add_path(PlannerInfo *root,
+					 RelOptInfo *joinrel,
+					 JoinType jointype,
+					 JoinCostWorkspace *workspace,
+					 SpecialJoinInfo *sjinfo,
+					 SemiAntiJoinFactors *semifactors,
+					 Path *outer_path,
+					 Path *inner_path,
+					 List *restrict_clauses,
+					 Relids required_outer,
+					 List *hashclauses)
+{
+	RelOptInfo	   *outer_rel = outer_path->parent;
+	RelOptInfo	   *inner_rel = inner_path->parent;
+
+	/* calls secondary module if exists */
+	if (add_hashjoin_path_next)
+		add_hashjoin_path_next(root,
+							   joinrel,
+							   jointype,
+							   workspace,
+							   sjinfo,
+							   semifactors,
+							   outer_path,
+							   inner_path,
+							   restrict_clauses,
+							   required_outer,
+							   hashclauses);
+
+	elog(INFO, "outer_path = %s", nodeToString(outer_path));
+	elog(INFO, "inner_path = %s", nodeToString(inner_path));	
+}
 
 static CustomPlan *
 gpuhashjoin_create_plan(PlannerInfo *root, CustomPath *best_path)
@@ -164,6 +186,6 @@ pgstrom_init_gpuhashjoin(void)
 	gpuhashjoin_plan_methods.CopyCustomPlan		= gpuhashjoin_copy_plan;
 
 	/* hook registration */
-	add_join_path_next = add_join_path_hook;
-	add_join_path_hook = gpuhashjoin_add_join_path;
+	add_hashjoin_path_next = add_hashjoin_path_hook;
+	add_hashjoin_path_hook = gpuhashjoin_add_path;
 }
