@@ -761,18 +761,18 @@ pgstrom_get_device_info(unsigned int index)
 /*
  * copy platform/device info into shared memory
  */
-#define PLINFO_POINTER_SHIFT(pinfo, field)				\
-	do {												\
-		opencl_devinfo_shm_values->pl_info->field		\
-			+= ((uintptr_t)opencl_devinfo_shm_values -	\
-				(uintptr_t)(pinfo));					\
+#define PLINFO_POINTER_SHIFT(pinfo, field)							\
+	do {															\
+		opencl_devinfo_shm_values->pl_info->field					\
+			+= ((uintptr_t)opencl_devinfo_shm_values->pl_info -		\
+				(uintptr_t)(pinfo));								\
 	} while(0)
 
-#define DEVINFO_POINTER_SHIFT(dinfo, i, field)			\
-	do {												\
-		opencl_devinfo_shm_values->dev_info[i]->field	\
-			+= ((uintptr_t)opencl_devinfo_shm_values -	\
-				(uintptr_t)(dinfo));					\
+#define DEVINFO_POINTER_SHIFT(dinfo, i, field)						\
+	do {															\
+		opencl_devinfo_shm_values->dev_info[i]->field				\
+			+= ((uintptr_t)opencl_devinfo_shm_values->dev_info[i] -	\
+				(uintptr_t)(dinfo));								\
 	} while(0)
 
 static void
@@ -842,7 +842,8 @@ disclose_opencl_device_info(List *devinfo_list)
 		opencl_devinfo_shm_values->dev_info[i] = (pgstrom_device_info *)
 			((char *)opencl_devinfo_shm_values + offset);
 		offset += MAXALIGN(length);
-		DEVINFO_POINTER_SHIFT(dev_info, i, pl_info);
+		opencl_devinfo_shm_values->dev_info[i]->pl_info
+			= opencl_devinfo_shm_values->pl_info;
 		DEVINFO_POINTER_SHIFT(dev_info, i, dev_device_extensions);
 		DEVINFO_POINTER_SHIFT(dev_info, i, dev_name);
 		DEVINFO_POINTER_SHIFT(dev_info, i, dev_opencl_c_version);
