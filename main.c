@@ -14,8 +14,10 @@
 #include "fmgr.h"
 #include "miscadmin.h"
 #include "optimizer/clauses.h"
+#include "optimizer/cost.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include <float.h>
 #include <limits.h>
 #include "pg_strom.h"
 
@@ -28,6 +30,11 @@ bool	pgstrom_enabled;
 bool	pgstrom_perfmon_enabled;
 int		pgstrom_max_async_chunks;
 int		pgstrom_min_async_chunks;
+
+/* cost factors */
+double	pgstrom_gpu_setup_cost;
+double	pgstrom_gpu_operator_cost;
+double	pgstrom_gpu_tuple_cost;
 
 static void
 pgstrom_init_misc_guc(void)
@@ -73,6 +80,39 @@ pgstrom_init_misc_guc(void)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("\"pg_strom.max_async_chunks\" must be larger than \"pg_strom.min_async_chunks\"")));
+
+	DefineCustomRealVariable("gpu_setup_cost",
+							 "Cost to setup GPU device to run",
+							 NULL,
+							 &pgstrom_gpu_setup_cost,
+							 50 * DEFAULT_SEQ_PAGE_COST,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
+	DefineCustomRealVariable("gpu_operator_cost",
+							 "Cost of processing each operators by GPU",
+							 NULL,
+							 &pgstrom_gpu_operator_cost,
+							 DEFAULT_CPU_OPERATOR_COST / 100.0,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
+	DefineCustomRealVariable("gpu_tuple_cost",
+							 "Cost of processing each tuple for GPU",
+							 NULL,
+							 &pgstrom_gpu_tuple_cost,
+							 DEFAULT_CPU_TUPLE_COST / 32,
+							 0,
+							 DBL_MAX,
+                             PGC_USERSET,
+                             GUC_NOT_IN_SAMPLE,
+                             NULL, NULL, NULL);
 }
 
 void

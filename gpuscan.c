@@ -113,6 +113,21 @@ static void clserv_process_gpuscan_column(pgstrom_message *msg);
 static void clserv_put_gpuscan(pgstrom_message *msg);
 
 /*
+ * pgstrom_path_is_gpuscan
+ *
+ * returns true, if supplied Path-node is GpuScan
+ */
+bool
+pgstrom_path_is_gpuscan(const Path *path)
+{
+	if (path && IsA(path, CustomPath) &&
+		((CustomPath *)path)->methods == &gpuscan_path_methods)
+		return true;
+
+	return false;
+}
+
+/*
  * cost_gpuscan
  *
  * cost estimation for GpuScan

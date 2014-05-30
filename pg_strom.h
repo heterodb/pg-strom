@@ -484,6 +484,7 @@ extern void pgstrom_init_restrack(void);
 /*
  * gpuscan.c
  */
+extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern void pgstrom_init_gpuscan(void);
 
 /*
@@ -623,6 +624,9 @@ extern bool	pgstrom_enabled;
 extern bool pgstrom_perfmon_enabled;
 extern int	pgstrom_max_async_chunks;
 extern int	pgstrom_min_async_chunks;
+extern double pgstrom_gpu_setup_cost;
+extern double pgstrom_gpu_operator_cost;
+extern double pgstrom_gpu_tuple_cost;
 extern void _PG_init(void);
 extern const char *pgstrom_strerror(cl_int errcode);
 extern void show_scan_qual(List *qual, const char *qlabel,
