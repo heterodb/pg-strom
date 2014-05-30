@@ -66,18 +66,21 @@
  * | +------------------+                              |
  * | | keylen           |                              |
  * | +------------------+                              |
- * | | keydata:         |                              |
- * | | (actual values   |                              |
- * | |  to be joined)   |                              |
+ * | | keydata          |                              |
+ * | | +----------------+                              |
+ * | | | nullmap(16bit) |                              |
+ * | | | keydata:       |                              |
+ * | | | (actual values |                              |
+ * | | |  to be joined) |                              |
  * +-+------------------+  <---------------------------+
  */
 typedef struct
 {
 	cl_uint			next;	/* offset of the next */
 	cl_uint			hash;	/* 32-bit hash value */
-	cl_uint			leylen;	/* length of key data */
+	cl_ushort		keylen;	/* length of key data */
 	cl_char			keydata[FLEXIBLE_ARRAY_MEMBER];
-} kern_gpuhash_entry;
+} kern_hash_entry;
 
 typedef struct
 {
@@ -85,7 +88,7 @@ typedef struct
 	cl_uint			nslots;	/* width of hash slot */
 	cl_uint			nkeys;	/* number of keys to be compared */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];
-} kern_gpuhash_table;
+} kern_hash_table;
 
 
 /*
@@ -128,14 +131,11 @@ typedef struct
  * | | results[N-1] |    V
  * +-+--------------+  -----
  */
-
-
-
 typedef struct
 {
 	kern_parambuf	kparam;
 	/* also, resultbuf shall be placed next to the parambuf */
-} kern_gpuhash_join;
+} kern_hash_join;
 
 #define KERN_GPUHJ_PARAMBUF(kghashjoin)					\
 	((__global kern_parambuf *)(&(kghashjoin)->kparam))
@@ -156,29 +156,143 @@ typedef struct
 
 
 
-
-typedef struct {
-	MessageTag		mtag;
-	cl_uint			next;	/* offset of next hash-item, or 0 if not exists */
-	cl_uint			hash;	/* 32-bit hash value */
-	cl_char			keydata[FLEXIBLE_ARRAY_MEMBER];
-} kern_hash_item;
-
-typedef struct {
-	MessageTag		mtag;
-	cl_uint			nslots;
-	cl_uint			nkeys;
-	kern_colmeta	keyatts[FLEXIBLE_ARRAY_MEMBER];
-} kern_hash_table;
-
-
 #ifdef OPENCL_DEVICE_CODE
 /*
- * hash_function.
- * hash_search function,
- *
+ * forward declaration of run-time generated functions.
  */
 
+/*
+ * gpuhashjoin_hashkey
+ *
+ * It generates a hash-key of the specified row in the column-store.
+ */
+static cl_uint
+gpuhashjoin_hashkey(__private cl_int *errcode,
+					__global kern_parambuf *kparam,
+					__global kern_column_store *kcs,
+					__global kern_toastbuf *ktoast,
+					size_t row_index);
+/*
+ * gpuhashjoin_keycomp
+ *
+ * It compares a hash-item with the specified row in the column-store.
+ */
+static cl_bool
+gpuhashjoin_keycomp(__private cl_int *errcode,
+					__global kern_hash_item *hitem,
+					__global kern_parambuf *kparam,
+					__global kern_column_store *kcs,
+					__global kern_toastbuf *ktoast,
+					size_t row_index);
+/*
+ * gpuhashjoin_qual_eval
+ *
+ * It preprocesses the specified row according to the qualifier, if
+ * GpuHashJoin pulled-up device executable qualifiers from underlying
+ * scan plan.
+ */
+static pg_bool_t
+gpuhashjoin_qual_eval(__private cl_int *errcode,
+					  __global kern_parambuf *kparam,
+					  __global kern_column_store *kcs,
+					  __global kern_toastbuf *ktoast,
+					  size_t row_index);
+
+static void
+gpuhashjoin_inner(__private cl_int *errcode,
+				  __global kern_parambuf *kparam,
+				  __global kern_resultbuf *kresult,
+				  __global kern_hash_table *khashtbl,
+				  __global kern_column_store *kcs,
+				  __global kern_toastbuf *ktoast,
+				  __local void *local_workbuf)
+{
+	pg_bool_t	rc;
+	cl_int		errcode = StromError_Success;
+
+	/* generate a hash key */
+	hashkey = gpuhashjoin_hashkey(get_global_id(0));
+
+	/* step.0: check qualifier around kcs, to check it should be filtered */
+	if (get_global_id(0) < kcs->nrows)
+		rc = gpuhashjoin_qual_eval(&errcode,
+								   kparam, kcs, ktoast,
+								   get_global_id(0));
+	else
+		rc.isnull = true;
+
+	/* step.1: walks on the hash slot and count number of matches */
+
+	/* step.2: allocate result buffer for this workgroup */
+	if (get_local_id(0) == 0)
+	{}
+	/* if overflow, we shall return without writing */
+
+	/* step.3: again, walks on the hash slot again, and put pair of ids */
+	
+}
+
+
+__kernel void
+gpuhashjoin_inner_cs(__global kern_hash_join *kgpuhj,
+					 __global kern_hash_table *khashtbl,
+					 __global kern_column_store *kcs,
+					 __global kern_toastbuf *toast,
+					 __local void *local_workmem)
+{
+
+
+}
+
+__kernel void
+gpuhashjoin_inner_rs(__global kern_hash_join *kgpuhj,
+					 __global kern_hash_table *khashtbl,
+					 __global kern_row_store *krs,
+					 __global kern_column_store *kcs,
+					 __local void *local_workmem)
+{
+	__global kern_parambuf *kparams = KERN_GPUHJ_PARAMBUF(kgpuhj);
+	__global kern_resultbuf *kresult = KERN_GPUHJ_RESULTBUF(kgpuhj);
+	pg_bytea_t		kparam_0 = pg_bytea_param(kparams,&errcode,0);
+	cl_int			errcode = StromError_Success;
+	__local size_t	kcs_offset;
+	__local size_t	kcs_nitems;
+
+	/* acquire a slot of this workgroup */
+	if (get_local_id(0) == 0)
+	{
+		if (get_global_id(0) + get_local_size(0) < krs->nrows)
+			kcs_nitems = get_local_size(0);
+		else if (get_global_id(0) < krs->nrows)
+			kcs_nitems = krs->nrows - get_global_id(0);
+		else
+			kcs_nitems = 0;
+		kcs_offset = atomic_add(&kcs->nrows, kcs_nitems);
+	}
+	barrier(CLK_LOCAL_MEM_FENCE);
+
+	/* move data into column store */
+	kern_row_to_column(&errcode,
+					   (__global cl_char *)VARDATA(kparam_0.value),
+					   krs,
+					   get_global_id(0),
+					   kcs,
+					   NULL,
+					   kcs_offset,
+					   kcs_nitems,
+					   local_workmem);
+	/* OK, run gpu hash join */
+	gpuhashjoin_inner(&errcode,
+					  kparams,
+					  kresult,
+					  khashtbl,
+					  kcs,
+					  (__global kern_toastbuf *)krs,
+					  kcs_offset + get_local_id(0),
+					  local_workbuf);
+	/* back execution status into host-side */
+	kern_writeback_error_status(&kresult->errcode, errcode, local_workbuf);
+}
 
 
 #endif
@@ -186,8 +300,8 @@ typedef struct {
 typedef struct
 {
 	pgstrom_message		msg;	/* = StromTag_GpuHashTable */
-	kern_gpuhash_table	kern;
-} pgstrom_gpuhashtable;
+	kern_hash_table		kern;
+} pgstrom_gpu_hash_table;
 
 
 typedef struct
@@ -195,8 +309,8 @@ typedef struct
 	pgstrom_message		msg;	/* = StromTag_GpuHashJoin */
 	Datum				dprog_key;
 	StromObject		   *rc_store;
-	kern_gpuhashjoin	kern;
-} pgstrom_gpuhashjoin;
+	kern_hash_join		kern;
+} pgstrom_gpu_hash_join;
 
 
 
