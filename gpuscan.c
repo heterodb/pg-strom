@@ -1398,6 +1398,276 @@ gpuscan_exec(CustomPlanState *node)
 static Node *
 gpuscan_exec_multi(CustomPlanState *node)
 {
+#if 0
+	GpuScanState	   *gss = (GpuScanState *) node;
+	ExprContext		   *econtext = node->ps.ps_ExprContext;
+	List			   *qual = node->ps.qual;
+	pgstrom_gpuscan	   *gpuscan;
+	pgstrom_message	   *msg;
+	pgstrom_bulk_slot  *bulk_slot;
+	cl_uint				i, j, nitems;
+	size_t				length;
+
+	/* bulk data exchange should not have projection */
+	Assert(!node->ps.ps_ProjInfo);
+	/* also, hybrid scan is nonsense */
+	Assert(gss->hybrid_scan);
+
+	while (true)
+	{
+		gpuscan = pgstrom_load_gpuscan(gss);
+		if (!gpuscan)
+			break;
+
+		/*
+		 * In case we have no device executable stuff, here is no chance
+		 * to run something asynchronous, so we simply returns this row-
+		 * or column-store as-is.
+		 */
+		if (gss->dprog_key == 0)
+			break;
+
+		/*
+		 * To keep number of asynchronous row/column stores to be processed,
+		 *  we try to enqueue at least one stores per fetch.
+		 */
+		if (!pgstrom_enqueue_message(&gpuscan->msg))
+		{
+			gpuscan->msg.cb_release(&gpuscan->msg);
+			elog(ERROR, "failed to enqueue pgstrom_gpuscan message");
+		}
+		gss->num_running++;
+		gpuscan = NULL;
+
+		/* check if any chunk being already processed */ 
+		msg = pgstrom_try_dequeue_message(gss->mqueue);
+		if (!msg)
+		{
+			if (gss->num_running < pgstrom_max_async_chunks)
+				continue;
+			else
+				break;
+		}
+		gss->num_running--;
+		Assert(StromTagIs(msg, GpuScan));
+		gpuscan = (pgstrom_gpuscan *) msg;
+		break;
+	}
+
+	/*
+	 * Try synchronous dequeue, if nothing returned yet.
+	 */
+	if (!gpuscan)
+	{
+		/* if no asynchronous jobs in progress, it's end of scan */
+		if (gss->num_running == 0)
+			return NULL;
+
+		msg = pgstrom_dequeue_message(gss->mqueue);
+		if (!msg)
+			elog(ERROR, "message queue wait timeout");
+		gss->num_running--;
+		Assert(StromTagIs(msg, GpuScan));
+		gpuscan = (pgstrom_gpuscan *) msg;
+	}
+
+	/*
+	 * Raise an error, if chunk-level error was reported.
+	 */
+	if (gpuscan->msg.errcode != StromError_Success)
+	{
+		if (gpuscan->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
+		{
+			const char *buildlog
+				= pgstrom_get_devprog_errmsg(gpuscan->dprog_key);
+			const char *kern_source
+				= ((GpuScanPlan *)gss->cps.ps.plan)->kern_source;
+
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
+							pgstrom_strerror(gpuscan->msg.errcode),
+							kern_source),
+					 errdetail("%s", buildlog)));
+		}
+		else
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("PG-Strom: OpenCL execution error (%s)",
+							pgstrom_strerror(gpuscan->msg.errcode))));
+		}
+	}
+
+	/*
+	 * OK, returns the bulk slot.
+	 */
+	if (gss->dprog_key == 0)
+		nitems = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern)->nrooms;
+	else
+		nitems = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern)->nitems;
+
+	length = offsetof(pgstrom_bulk_slot, rindex[nitems]);
+	bulk_slot = palloc0(length);
+	NodeSetTag(bulk_slot, T_Integer);
+	bulk_slot->value.val.ival = length;
+	if (StromTagIs(gpuscan->rc_store, TCacheRowStore))
+		bulk_slot->rc_store = (StromObject *)
+			tcache_get_row_store((tcache_row_store *)gpuscan->rc_store);
+	else if (StromTagIs(gpuscan->rc_store, TCacheColumnStore))
+		bulk_slot->rc_store = (StromObject *)
+			tcache_get_row_store((tcache_column_store *)gpuscan->rc_store);
+	else
+		elog(ERROR, "bug? neither row nor column store");
+
+	/*
+	 * Host side checks.
+	 * - MVCC visibility checks
+	 * - device qualifier rechecks, if rindex is negative
+	 * - (optional) qualifiers being executed on host
+	 */
+	for (i=0, j=0; i < nitems; i++)
+	{
+		HeapTupleData	htup;
+
+		if (gss->dprog_key == 0)
+			bulk_slot->rindex[i] = i + 1;
+
+		/* visibility check */
+
+		/* device qualifier rechecks */
+		if (bulk_slot->rindex[i] < 0)
+		{}
+			
+		/* host executed qualifiers, if any */
+		if (!qual)
+		{
+			/* put data into slot */
+			ExecQual(qual, econtext, false);
+
+
+		}
+
+	}
+
+
+
+
+
+	/* overall logic were copied from ExecScan */
+	ExprDoneCond	isDone;
+	TupleTableSlot *resultSlot;
+
+	/*
+	 * If we have neither a qual to check nor a projection to do, just skip
+	 * all the overhead and return the raw scan tuple.
+	 */
+	if (!qual && !projInfo)
+	{
+		ResetExprContext(econtext);
+		return gpuscan_fetch_tuple(node);
+	}
+
+	/*
+	 * Check to see if we're still projecting out tuples from a previous scan
+	 * tuple (because there is a function-returning-set in the projection
+	 * expressions).  If so, try to project another one.
+	 */
+	if (node->ps.ps_TupFromTlist)
+	{
+		Assert(projInfo);		/* can't get here if not projecting */
+		resultSlot = ExecProject(projInfo, &isDone);
+		if (isDone == ExprMultipleResult)
+			return resultSlot;
+		/* Done with that source tuple... */
+		node->ps.ps_TupFromTlist = false;
+	}
+
+	/*
+	 * Reset per-tuple memory context to free any expression evaluation
+	 * storage allocated in the previous tuple cycle.  Note this can't happen
+	 * until we're done projecting out tuples from a scan tuple.
+	 */
+	ResetExprContext(econtext);
+
+	/*
+	 * get a tuple from the access method.  Loop until we obtain a tuple that
+	 * passes the qualification.
+	 */
+	for (;;)
+	{
+		TupleTableSlot *slot;
+
+		CHECK_FOR_INTERRUPTS();
+
+		slot = gpuscan_fetch_tuple(node);
+
+		/*
+		 * if the slot returned by the accessMtd contains NULL, then it means
+		 * there is nothing more to scan so we just return an empty slot,
+		 * being careful to use the projection result slot so it has correct
+		 * tupleDesc.
+		 */
+		if (TupIsNull(slot))
+		{
+			if (projInfo)
+				return ExecClearTuple(projInfo->pi_slot);
+			else
+				return slot;
+		}
+
+		/*
+		 * place the current tuple into the expr context
+		 */
+		econtext->ecxt_scantuple = slot;
+
+		/*
+		 * check that the current tuple satisfies the qual-clause
+		 *
+		 * check for non-nil qual here to avoid a function call to ExecQual()
+		 * when the qual is nil ... saves only a few cycles, but they add up
+		 * ...
+		 */
+		if (!qual || ExecQual(qual, econtext, false))
+		{
+			/*
+			 * Found a satisfactory scan tuple.
+			 */
+			if (projInfo)
+			{
+				/*
+				 * Form a projection tuple, store it in the result tuple slot
+				 * and return it --- unless we find we can project no tuples
+				 * from this scan tuple, in which case continue scan.
+				 */
+				resultSlot = ExecProject(projInfo, &isDone);
+				if (isDone != ExprEndResult)
+				{
+					node->ps.ps_TupFromTlist = (isDone == ExprMultipleResult);
+					return resultSlot;
+				}
+			}
+			else
+			{
+				/*
+				 * Here, we aren't projecting, so just return scan tuple.
+				 */
+				return slot;
+			}
+		}
+		else
+			InstrCountFiltered1(node, 1);
+
+		/*
+		 * Tuple fails qual, so free per-tuple memory and try again.
+		 */
+		ResetExprContext(econtext);
+	}
+
+
+
+
+#endif
 	elog(ERROR, "not implemented yet");
 }
 

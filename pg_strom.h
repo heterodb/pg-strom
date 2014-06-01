@@ -406,6 +406,20 @@ typedef struct {
 } tcache_scandesc;
 
 /*
+ * pgstrom_bulk_slot
+ *
+ * A data structure to move scanned/joinned data in column-oriented data
+ * format, to reduce row to/from column translation during query execution.
+ */
+typedef struct
+{
+	Value			value;			/* T_Integer is used to chect executor */
+	bool			mvcc_checked;	/* true, if MVCC already checked */
+	StromObject	   *rc_store;		/* row/column-store to be moved */
+	cl_utint		rindex[FLEXIBLE_ARRAY_MEMBER];
+} pgstrom_bulk_slot;
+
+/*
  * --------------------------------------------------------------------
  *
  * Function Declarations
