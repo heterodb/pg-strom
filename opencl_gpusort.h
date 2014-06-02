@@ -556,22 +556,27 @@ gpusort_setup_chunk_cs(__global kern_gpusort *kgsort,
 
 typedef struct
 {
-	dlist_node		chain;		/* to be linked to pgstrom_gpusort */
-	StromObject	  **rcs_slot;	/* array of underlying row/column-store */
-	cl_uint			rcs_slotsz;	/* length of the array */
-	cl_uint			rcs_nums;	/* current usage of the array */
-	cl_uint			rcs_global_index;	/* starting offset in GpuSortState */
+	slock_t			lock;		/* protection of fields below */
+	cl_uint			refcnt;		/* reference counter of this chunk */
+	cl_uint			rcs_head;	/* head index of rcs array in GpuSortState */
+	cl_uint			rcs_nums;	/* number of rcs being associated */
+	cl_uint			rcs_pendding;	/* number of pendding rcs to be loaded */
+	bool			ready_to_sort;	/* true, if this chunk is ready to sort */
+	/* Fields below are available only OpenCL server */
+	cl_mem			m_gschunk;	/* local opencl buffer object! */
 	kern_gpusort	kern;
 } pgstrom_gpusort_chunk;
 
 typedef struct
 {
 	pgstrom_message	msg;		/* = StromTag_GpuSort */
+	dlist_node		chain;		/* chain to free list */
 	Datum			dprog_key;	/* key of device program object */
-	dlist_node		chain;		/* be linked to free list */
-	bool			is_sorted;	/* true, if already sorted */
-	bool			by_cpusort;	/* true, if unavailable to sort by GPU */
-	dlist_head		gs_chunks;	/* chunked being sorted, or to be sorted */
+	cl_int			status;		/* status of load */
+	pgstrom_gpusort	*gpusort;	/* reference to pgstrom_gpusort */
+	cl_uint			rcs_index;	/* index of this rcs in the global array */
+	StromObject	   *rc_store;	/* either row- or column- store to load */
+	pgstrom_perfmon	pfm;
 } pgstrom_gpusort;
 
 #endif	/* !OPENCL_DEVICE_CODE */

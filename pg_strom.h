@@ -136,7 +136,8 @@ typedef enum {
 	StromTag_TCacheToastBuf,
 	StromTag_GpuScan,
 	StromTag_GpuSort,
-	StromTag_GpuSortMulti,
+	StromTag_GpuSortDataLoad,
+	StromTag_HashTable,
 	StromTag_HashJoin,
 	StromTag_TestMessage,
 } StromTag;
