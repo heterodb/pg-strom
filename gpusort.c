@@ -60,11 +60,6 @@ typedef struct
 	cl_uint			nrows_per_chunk;
 	bool			scan_done;
 	bool			sort_done;
-	/* scanning status */
-	pgstrom_gpusort_chunk *gschunk_curr;
-	cl_uint			gschunk_row_usage;
-	cl_uint			gschunk_toast_usage;
-
 	/* running status */
 	cl_int			curr_index;
 	cl_int			num_running;	/* number of async running requests */
@@ -552,6 +547,342 @@ gpusort_finalize_plan(PlannerInfo *root,
 	/* nothing to do */
 }
 
+
+
+static void
+pgstrom_release_gpusort_chunk(pgstrom_gpusort_chunk *gs_chunk)
+{
+	int		i;
+
+	/*
+	 * Unference the row- and column- stores being associated with
+	 */
+	for (i=0; i < gs_chunk->rcs_nums; i++)
+	{
+		StromObject	   *sobject = gs_chunk->rcs_slot[i];
+
+		if (StromTagIs(sobject, TCacheRowStore))
+			tcache_put_row_store((tcache_row_store *) sobject);
+		else if (StromTagIs(sobject, TCacheColumnStore))
+			tcache_put_column_store((tcache_column_store *) sobject);
+		else
+			elog(ERROR, "unexpected strom object is in rcs_slot: %d",
+				 (int)sobject->stag);
+	}
+
+	/*
+	 * OK, let's free it. Note that row- and column-store are
+	 * inidividually tracked by resource tracker, we don't need
+	 * to care about them here.
+	 */
+	pgstrom_shmem_free(gs_chunk->rcs_slot);
+	pgstrom_shmem_free(gs_chunk);
+}
+
+static pgstrom_gpusort_chunk *
+pgstrom_create_gpusort_chunk(GpuSortState *gsortstate)
+{
+	pgstrom_gpusort_chunk *gs_chunk;
+	PlanState	   *subps = outerPlanState(gsortstate);
+	TupleDesc		tupdesc = ExecGetResultType(subps);
+	Size			allocsz_chunk;
+	Size			allocsz_slot;
+	kern_parambuf  *kparam;
+	kern_column_store *kcs;
+	cl_int		   *kstatus;
+	kern_toastbuf  *ktoast;
+	ListCell	   *cell;
+	Size			offset;
+	cl_int			i_col = 0;
+
+	/* allocation of a shared memory block */
+	gs_chunk = pgstrom_shmem_alloc_alap(gsortstate->gpusort_chunksz,
+										&allocsz_chunk);
+	if (!gs_chunk)
+		elog(ERROR, "out of shared memory");
+	memset(gs_chunk, 0, sizeof(pgstrom_gpusort_chunk));
+
+	/* also, allocate slot for row-/column-store */
+	gs_chunk->rcs_slot = pgstrom_shmem_alloc_alap(0, &allocsz_slot);
+	if (!gs_chunk->rcs_slot)
+	{
+		pgstrom_shmem_free(gs_chunk);
+		elog(ERROR, "out of shared memory");
+	}
+	gs_chunk->rcs_slotsz = (allocsz_slot / sizeof(StromObject *));
+	gs_chunk->rcs_nums = 0;
+	gs_chunk->rcs_global_index = -1;	/* to be set later */
+
+	/* next, initialization of kern_gpusort */
+	kparam = KERN_GPUSORT_PARAMBUF(&gs_chunk->kern);
+	memcpy(kparam, gsortstate->kparambuf, gsortstate->kparambuf->length);
+	Assert(kparam->length == STROMALIGN(kparam->length));
+
+	/* next, initialization of kern_column_store */
+	kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
+	kcs->ncols = list_length(gsortstate->sortkey_resnums) + 2;
+	kcs->nrows = 0;
+	kcs->nrooms = gsortstate->nrows_per_chunk;
+	offset = STROMALIGN(offsetof(kern_column_store,
+								 colmeta[kcs->ncols]));
+	/* regular sortkeys */
+	foreach(cell, gsortstate->sortkey_resnums)
+	{
+		Form_pg_attribute	attr;
+		int		resno = lfirst_int(cell);
+
+		Assert(resno > 0 && resno <= tupdesc->natts);
+		attr = tupdesc->attrs[resno - 1];
+
+		kcs->colmeta[i_col].attnotnull = attr->attnotnull;
+		if (attr->attalign == 'c')
+			kcs->colmeta[i_col].attalign = sizeof(cl_char);
+		else if (attr->attalign == 's')
+			kcs->colmeta[i_col].attalign = sizeof(cl_short);
+		else if (attr->attalign == 'i')
+			kcs->colmeta[i_col].attalign = sizeof(cl_int);
+		else if (attr->attalign == 'd')
+			kcs->colmeta[i_col].attalign = sizeof(cl_long);
+		else
+			elog(ERROR, "unexpected attalign '%c'", attr->attalign);
+		kcs->colmeta[i_col].attlen = attr->attlen;
+		kcs->colmeta[i_col].cs_ofs = offset;
+		if (!attr->attnotnull)
+			offset += STROMALIGN(kcs->nrooms / BITS_PER_BYTE);
+		if (attr->attlen > 0)
+			offset += STROMALIGN(attr->attlen * kcs->nrooms);
+		else
+		{
+			offset += STROMALIGN(sizeof(cl_uint) * kcs->nrooms);
+			Assert(list_member_int(gsortstate->sortkey_toast, resno));
+		}
+		i_col++;
+	}
+
+	/*
+	 * The second last column is reserved by GpuSort - fixed-length integer
+	 * as identifier of unsorted tuples, not null.
+	 */
+	kcs->colmeta[i_col].attnotnull = true;
+	kcs->colmeta[i_col].attalign = sizeof(cl_long);
+	kcs->colmeta[i_col].attlen = sizeof(cl_long);
+	kcs->colmeta[i_col].cs_ofs = offset;
+	offset += STROMALIGN(sizeof(cl_long) * kcs->nrooms);
+	i_col++;
+
+	/*
+	 * Last column is reserved by GpuSort - fixed-length integer as
+	 * index of sorted tuples, not null.
+	 * Note that this field has to be aligned to 2^N length, to
+	 * simplify kernel implementation.
+	 */
+	kcs->colmeta[i_col].attnotnull = true;
+	kcs->colmeta[i_col].attalign = sizeof(cl_int);
+	kcs->colmeta[i_col].attlen = sizeof(cl_int);
+	kcs->colmeta[i_col].cs_ofs = offset;
+	offset += STROMALIGN(sizeof(cl_int) * (1UL << get_next_log2(kcs->nrooms)));
+    i_col++;
+	Assert(i_col == kcs->ncols);
+
+	kcs->length = offset;
+
+	/* next, initialization of kernel execution status field */
+	kstatus = KERN_GPUSORT_STATUS(&gs_chunk->kern);
+	*kstatus = StromError_Success;
+
+	/* last, initialization of toast buffer in flat-mode */
+	ktoast = KERN_GPUSORT_TOASTBUF(&gs_chunk->kern);
+	if (gsortstate->sortkey_toast == NIL)
+		ktoast->length = offsetof(kern_toastbuf, coldir[0]);
+	else
+		ktoast->length =
+			STROMALIGN_DOWN(allocsz_chunk - ((uintptr_t)ktoast -
+											 (uintptr_t)gs_chunk));
+	ktoast->usage = offsetof(kern_toastbuf, coldir[0]);
+
+	/* OK, initialized */
+	return gs_chunk;
+}
+
+/*
+ * pgstrom_sanitycheck_gpusort_chunk
+ *
+ * It checks whether the gpusort-chunk being replied from OpenCL server
+ * is sanity, or not.
+ */
+static void
+pgstrom_sanitycheck_gpusort_chunk(GpuSortState *gsortstate,
+								  pgstrom_gpusort_chunk *gs_chunk,
+								  bool is_sorted)
+{
+#if 0
+	kern_column_store  *kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
+	kern_toastbuf	   *ktoast = KERN_GPUSORT_TOASTBUF(&gs_chunk->kern);
+	cl_int			   *kstatus = KERN_GPUSORT_STATUS(&gs_chunk->kern);
+	cl_uint				ncols;
+	cl_uint				nrows;
+	cl_int				i, j;
+
+	if (*kstatus != StromError_Success)
+		elog(INFO, "chunk: status %d (%s)",
+			 *kstatus, pgstrom_strerror(*kstatus));
+
+	ncols = list_length(gsortstate->sortkey_resnums) + 2;
+	if (ncols != kcs->ncols)
+		elog(ERROR, "chunk corrupted: expected ncols=%u, but kcs->ncols=%u",
+			 ncols, kcs->ncols);
+
+	nrows = 0;
+	for (i=0; i < gs_chunk->rcs_nums; i++)
+	{
+		StromObject	   *sobject = gs_chunk->rcs_slot[i];
+
+		if (StromTagIs(sobject, TCacheRowStore))
+		{
+			tcache_row_store *trs = (tcache_row_store *)sobject;
+			nrows += trs->kern.nrows;
+		}
+		else if (StromTagIs(sobject, TCacheColumnStore))
+		{
+			tcache_column_store *tcs = (tcache_column_store *)sobject;
+			nrows += tcs->nrows;
+			elog(INFO, "chunk: rcs_slot[%d] is column store", i);
+		}
+		else
+			elog(ERROR, "chunk: rcs_slot[%d] corrupted (stag: %d)",
+				 i, sobject->stag);
+	}
+	if (nrows != kcs->nrows)
+		elog(ERROR, "chunk corrupted: expected nrows=%u, but kcs->nrow=%u",
+			 nrows, kcs->nrows);
+
+	for (i=0; i < nrows; i++)
+	{
+		StromObject	*sobject;
+		void	   *temp;
+		cl_ulong	growid;
+		cl_uint		rcs_idx;
+		cl_uint		row_idx;
+
+		if (!is_sorted)
+		{
+			cl_uint		kcs_index;
+
+			temp = kern_get_datum(kcs, ncols - 1, i);
+			if (!temp)
+				elog(ERROR, "chunk corrupted: kcs_index is null");
+			kcs_index = *((cl_uint *)temp);
+			if (kcs_index != i)
+				elog(ERROR, "chunk corrupted: kcs_index should be %u, but %u",
+					 i, kcs_index);
+		}
+
+		temp = kern_get_datum(kcs, ncols - 2, i);
+		if (!temp)
+			elog(ERROR, "chunk corrupted: growid is null");
+		growid = *((cl_ulong *)temp);
+		rcs_idx = growid >> 32;
+		row_idx = growid & 0xffffffff;
+
+		if (rcs_idx >= gsortstate->rcs_nums)
+			elog(ERROR, "chunk corrupted: rcs_index (=%u) out of range (<%u)",
+				 rcs_idx, gsortstate->rcs_nums);
+
+		sobject = gs_chunk->rcs_slot[rcs_idx];
+		if (StromTagIs(sobject, TCacheRowStore))
+		{
+			tcache_row_store *trs = (tcache_row_store *)sobject;
+			rs_tuple   *rs_tup = kern_rowstore_get_tuple(&trs->kern, row_idx);
+			HeapTuple	tup = &rs_tup->htup;
+			TupleDesc	tupdesc = gsortstate->scan_slot->tts_tupleDescriptor;
+			ListCell   *cell;
+			int			i_col = 0;
+
+			foreach (cell, gsortstate->sortkey_resnums)
+			{
+				AttrNumber	anum = lfirst_int(cell);
+				Form_pg_attribute attr = tupdesc->attrs[anum - 1];
+				Datum	rs_value;
+				bool	rs_isnull;
+				void   *cs_value;
+
+				rs_value = heap_getattr(tup, anum, tupdesc, &rs_isnull);
+
+				cs_value = kern_get_datum(kcs, i_col, i);
+
+				if ((!rs_isnull && !cs_value) || (rs_isnull && cs_value))
+					elog(ERROR, "[%d] null status corrupted (%s => %s)",
+						 nrows,
+						 !rs_isnull ? "false" : "true",
+						 !cs_value ? "true" : "false");
+				if (rs_isnull)
+					continue;
+				if (attr->attlen > 0 && attr->attbyval)
+				{
+					if (memcmp(&rs_value, cs_value, attr->attlen) != 0)
+						elog(ERROR, "[%d] value corrupted (%08lx=>%08lx)",
+							 i, rs_value, *((Datum *)cs_value));
+				}
+				else if (attr->attlen > 0 && !attr->attbyval)
+				{
+					if (memcmp(&rs_value, (void *)cs_value, attr->attlen) != 0)
+						elog(ERROR, "[%d] value corrupted", i);
+				}
+				else
+				{
+					cl_uint	vl_ofs = *((cl_uint *)cs_value);
+					void   *vl_cs = (char *)ktoast + vl_ofs;
+					void   *vl_rs = DatumGetPointer(rs_value);
+					size_t	vl_len;
+
+					if (VARSIZE_ANY(vl_rs) != VARSIZE_ANY(vl_cs))
+						elog(INFO, "[%d] toast length corrupted (%zu=>%zu)",
+							 i, VARSIZE_ANY(vl_rs), VARSIZE_ANY(vl_cs));
+					vl_len = VARSIZE_ANY(vl_rs);
+
+					if (memcmp(vl_rs, vl_cs, vl_len) != 0)
+					{
+						StringInfoData	buf;
+
+						initStringInfo(&buf);
+						appendStringInfo(&buf, "'");
+						for (j=0; j < vl_len; j++)
+						{
+							int	c = ((char *)vl_rs)[j];
+
+							if (isprint(c))
+								appendStringInfo(&buf, "%c", c);
+							else
+								appendStringInfo(&buf, "\\%02x", c);
+						}
+						appendStringInfo(&buf, "' => '");
+						for (j=0; j < vl_len; j++)
+						{
+							int	c = ((char *)vl_cs)[j];
+							if (isprint(c))
+								appendStringInfo(&buf, "%c", c);
+							else
+								appendStringInfo(&buf, "\\%02x", c);
+						}
+						appendStringInfo(&buf, "'");
+						elog(ERROR, "[%d] toast value corrupted (%s)",
+							 i, buf.data);
+					}
+				}
+			}
+		}
+		else if (StromTagIs(sobject, TCacheColumnStore))
+		{
+			elog(ERROR, "column-store as sorting source, not implemented");
+		}
+		else
+			elog(ERROR, "unexpected strom object");
+	}
+	if (kcs->nrows != nrows)
+		elog(INFO, "chunk: nrows = %u (expected: %u)", kcs->nrows, nrows);
+#endif
+}
+
 /*
  * pgstrom_setup_cpusort
  *
@@ -737,35 +1068,30 @@ gpstrom_run_cpusort_single(GpuSortState *gsortstate, pgstrom_gpusort *gpusort)
 	gpusort->is_sorted = true;
 }
 
+/*
+ * pgstrom_run_cpusort_multi
+ *
+ *
+ *
+ *
+ *
+ */
+
 
 
 
 
 /*
- * pgstrom_release_gpusort_chunk
+ * pgstrom_release_gpusort
  *
- * Unlink pgstrom_gpusort_chunk object. If it is no longer referenced any
- * more, its shared memory segment shall be released.
+ * Destructor of pgstrom_gpusort_multi object, to be called when refcnt
+ * as message object reached to zero.
  *
  * NOTE: this routine may be called in the OpenCL server's context
  */
 static void
-pgstrom_release_gpusort_chunk(pgstrom_gpusort_chunk *gschunk)
+pgstrom_release_gpusort(pgstrom_message *msg)
 {
-	bool	do_release = false;
-
-	SpinLockAcquire(&gpusort->lock);
-	if (--gpusort->refcnt == 0)
-		do_release = true;
-    SpinLockRelease(&gpusort->lock);
-
-
-	/*
-	 * TODO: if clserv context, it release cl_mem also
-	 */
-
-
-
 	pgstrom_gpusort		   *gpusort = (pgstrom_gpusort *) msg;
 	pgstrom_gpusort_chunk  *gs_chunk;
 	dlist_iter	iter;
@@ -795,149 +1121,13 @@ pgstrom_release_gpusort_chunk(pgstrom_gpusort_chunk *gschunk)
     SpinLockRelease(&gpusort_shm_values->slab_lock);
 }
 
-static pgstrom_gpusort *
-pgstrom_retain_gpusort_chunk(pgstrom_gpusort_chunk *gschunk)
-{
-	SpinLockAcquire(&gschunk->lock);
-	gschunk->refcnt++;
-	SpinLockRelease(&gschunk->lock);
-
-	return gschunk;
-}
-
-/*
- * pgstrom_create_gpusort_chunk
- *
- * constructor of pgstrom_gpusort_chunk object.
- */
-static pgstrom_gpusort_chunk *
-pgstrom_create_gpusort_chunk(GpuSortState *gsortstate)
-{
-	pgstrom_gpusort_chunk *gschunk;
-	kern_parambuf	   *kparams;
-	kern_column_store  *kcs;
-
-	/* allocation of a shared memory block */
-	gschunk = pgstrom_shmem_alloc_alap(gsortstate->gpusort_chunksz,
-									   &allocsz_chunk);
-	if (!gschunk)
-		elog(ERROR, "out of shared memory");
-	memset(gschunk, 0, sizeof(pgstrom_gpusort_chunk));
-
-	SpinLockInit(&gschunk->lock);
-	gschunk->refcnt = 0;	/* to be incremented by the first owner */
-
-	/* next, initialization of kern_gpusort */
-	kparams = KERN_GPUSORT_PARAMBUF(&gschunk->kern);
-	memcpy(kparams, gsortstate->kparambuf, gsortstate->kparambuf->length);
-	Assert(kparams->length == STROMALIGN(kparams->length));
-
-	/* next, initialization of kern_column_store */
-	kcs = KERN_GPUSORT_CHUNK(&gschunk->kern);
-	kcs->ncols = list_length(gsortstate->sortkey_resnums) + 2;
-	kcs->nrows = 0;
-	kcs->nrooms = gsortstate->nrows_per_chunk;
-	offset = STROMALIGN(offsetof(kern_column_store,
-								 colmeta[kcs->ncols]));
-	/* regular sortkeys */
-	foreach(cell, gsortstate->sortkey_resnums)
-	{
-		Form_pg_attribute attr;
-		int			resno = lfirst_int(cell);
-
-		Assert(resno > 0 && resno <= tupdesc->natts);
-		attr = tupdesc->attrs[resno - 1];
-
-		kcs->colmeta[i_col].attnotnull = attr->attnotnull;
-		if (attr->attalign == 'c')
-			kcs->colmeta[i_col].attalign = sizeof(cl_char);
-		else if (attr->attalign == 's')
-			kcs->colmeta[i_col].attalign = sizeof(cl_short);
-		else if (attr->attalign == 'i')
-			kcs->colmeta[i_col].attalign = sizeof(cl_int);
-		else if (attr->attalign == 'd')
-			kcs->colmeta[i_col].attalign = sizeof(cl_long);
-		else
-			elog(ERROR, "unexpected attalign '%c'", attr->attalign);
-		kcs->colmeta[i_col].attlen = attr->attlen;
-		kcs->colmeta[i_col].cs_ofs = offset;
-		if (!attr->attnotnull)
-			offset += STROMALIGN(kcs->nrooms / BITS_PER_BYTE);
-		if (attr->attlen > 0)
-			offset += STROMALIGN(attr->attlen * kcs->nrooms);
-		else
-		{
-			offset += STROMALIGN(sizeof(cl_uint) * kcs->nrooms);
-			Assert(list_member_int(gsortstate->sortkey_toast, resno));
-		}
-		i_col++;
-	}
-
-	/*
-	 * The second last column is reserved by GpuSort - fixed-length integer
-	 * as identifier of unsorted tuples, not null.
-	 */
-	kcs->colmeta[i_col].attnotnull = true;
-	kcs->colmeta[i_col].attalign = sizeof(cl_long);
-	kcs->colmeta[i_col].attlen = sizeof(cl_long);
-	kcs->colmeta[i_col].cs_ofs = offset;
-	offset += STROMALIGN(sizeof(cl_long) * kcs->nrooms);
-	i_col++;
-
-	/*
-	 * Last column is reserved by GpuSort - fixed-length integer as
-	 * index of sorted tuples, not null.
-	 * Note that this field has to be aligned to 2^N length, to
-	 * simplify kernel implementation.
-	 */
-	kcs->colmeta[i_col].attnotnull = true;
-	kcs->colmeta[i_col].attalign = sizeof(cl_int);
-	kcs->colmeta[i_col].attlen = sizeof(cl_int);
-	kcs->colmeta[i_col].cs_ofs = offset;
-	offset += STROMALIGN(sizeof(cl_int) * (1UL << get_next_log2(kcs->nrooms)));
-	i_col++;
-	Assert(i_col == kcs->ncols);
-
-	kcs->length = offset;
-
-	/* next, initialization of kernel execution status field */
-	kstatus = KERN_GPUSORT_STATUS(&gschunk->kern);
-	*kstatus = StromError_Success;
-
-	/* last, initialization of toast buffer in flat-mode */
-	ktoast = KERN_GPUSORT_TOASTBUF(&gschunk->kern);
-	if (gsortstate->sortkey_toast == NIL)
-		ktoast->length = offsetof(kern_toastbuf, coldir[0]);
-	else
-		ktoast->length =
-			STROMALIGN_DOWN(allocsz_chunk - ((uintptr_t)ktoast -
-											 (uintptr_t)gs_chunk));
-	ktoast->usage = offsetof(kern_toastbuf, coldir[0]);
-
-	/* OK, initialized */
-	return gschunk;
-}
-
-/*
- * clserv_release_gpusort
- *
- * it releases pgstrom_gpusort object
- */
-static void
-clserv_release_gpusort(pgstrom_message *msg)
-{
-	pgstrom_gpusort	   *gpusort = (pgstrom_gpusort *) msg;
-
-}
-
 /*
  * pgstrom_create_gpusort
  *
- * it allocates a pgstrom_gpusort object from its slab.
+ * constructor of pgstrom_gpusort object.
  */
 static pgstrom_gpusort *
-pgstrom_create_gpusort(GpuSortState *gsortstate,
-					   pgstrom_gpusort_chunk *gschunk)
+pgstrom_create_gpusort(GpuSortState *gsortstate)
 {
 	pgstrom_gpusort	   *gpusort;
 	dlist_node		   *dnode;
@@ -948,16 +1138,10 @@ pgstrom_create_gpusort(GpuSortState *gsortstate,
 		Size		allocated;
 		uintptr_t	tailaddr;
 
-		gpusort = pgstrom_shmem_alloc_alap(sizeof(pgstrom_gpusort_dataload),
+		gpusort = pgstrom_shmem_alloc_alap(sizeof(pgstrom_gpusort),
 										   &allocated);
-		if (!gpusort)
-		{
-			SpinLockRelease(&gpusort_shm_values->slab_lock);
-			elog(ERROR, "out of shared memory");
-		}
-		tailaddr = (uintptr_t)gsload + allocated;
-		while (((uintptr_t)gpusort +
-				sizeof(pgstrom_gpusort_dataload)) <= tailaddr)
+		tailaddr = (uintptr_t)gpusort + allocated;
+		while (((uintptr_t)gpusort + sizeof(pgstrom_gpusort)) <= tailaddr)
 		{
 			dlist_push_tail(&gpusort_shm_values->gpusort_freelist,
 							&gpusort->chain);
@@ -967,37 +1151,29 @@ pgstrom_create_gpusort(GpuSortState *gsortstate,
 	Assert(!dlist_is_empty(&gpusort_shm_values->gpusort_freelist));
 	dnode = dlist_pop_head_node(&gpusort_shm_values->gpusort_freelist);
 	gpusort = dlist_container(pgstrom_gpusort, chain, dnode);
-	memset(gpusort, 0, sizeof(pgstrom_gpusort));
+	memset(&gpusort->chain, 0, sizeof(dlist_node));
 	SpinLockRelease(&gpusort_shm_values->slab_lock);
 
-	/* init common message header */
+	/* initialize the common message field */
+	memset(gpusort, 0, sizeof(pgstrom_gpusort));
 	gpusort->msg.sobj.stag = StromTag_GpuSort;
-	SpinLockInit(&gsload->msg.lock);
+	SpinLockInit(&gpusort->msg.lock);
 	gpusort->msg.refcnt = 1;
 	gpusort->msg.respq = pgstrom_get_queue(gsortstate->mqueue);
 	gpusort->msg.cb_process = clserv_process_gpusort;
-	gpusort->msg.cb_release = clserv_release_gpusort;
+	gpusort->msg.cb_release = pgstrom_release_gpusort;
 	gpusort->msg.pfm.enabled = gsortstate->pfm.enabled;
-	/* init other fields */
+	/* other fields also */
 	gpusort->dprog_key = pgstrom_retain_devprog_key(gsortstate->dprog_key);
-	gpusort->status = StromError_Success;
-	gpusort->gpusort = pgstrom_retain_gpusort_chunk(gschunk);
-	gpusort->rcs_index = 0;		/* to be set later */
-	gpusort->rc_store = NULL;	/* to be set later */
+	gpusort->is_sorted = false;
+	gpusort->by_cpusort = false;
+	dlist_init(&gpusort->gs_chunks);
 
 	return gpusort;
 }
 
-
-
-
-
-
-
-
-
 /*
- * gpusort_preload_subplan
+ * gpusort_preload_chunk
  *
  * It loads row-store (or column-store if available) from the underlying
  * relation scan, and enqueue a gpusort-chunk with them into OpenCL
@@ -1006,24 +1182,21 @@ pgstrom_create_gpusort(GpuSortState *gsortstate,
  * all the records in the underlying relation were already read.
  */
 static pgstrom_gpusort *
-gpusort_preload_subplan(GpuSortState *gsortstate, HeapTuple *overflow)
+gpusort_preload_chunk(GpuSortState *gsortstate, HeapTuple *overflow)
 {
-	pgstrom_gpusort_chunk *gschunk;
 	pgstrom_gpusort	   *gpusort;
+	pgstrom_gpusort_chunk *gs_chunk;
 	PlanState		   *subnode = outerPlanState(gsortstate);
 	TupleDesc			tupdesc = ExecGetResultType(subnode);
 	EState			   *estate = gsortstate->cps.ps.state;
-	ScanDirection		saved_direction = estate->es_direction;
+	ScanDirection		dir_saved = estate->es_direction;
 	tcache_row_store   *trs;
 	kern_column_store  *kcs;
 	kern_toastbuf	   *ktoast;
 	TupleTableSlot	   *slot;
 	HeapTuple			tuple;
-	cl_uint				gschunk_row_usage;
-	cl_uint				gschunk_toast_usage;
-	cl_uint				gschunk_row_limit;
-	cl_uint				gschunk_toast_limit;
-	cl_int				rcs_head = -1;
+	Size				toast_length;
+	Size				toast_usage;
 	int					nrows;
 	struct timeval		tv1, tv2;
 
@@ -1031,68 +1204,24 @@ gpusort_preload_subplan(GpuSortState *gsortstate, HeapTuple *overflow)
 	if (gsortstate->scan_done)
 		return NULL;
 
-	/*
-	 * allocation of a gpusort chunk, if not exists
-	 */
-	gschunk = gsortstate->gschunk_curr;
-	gschunk_row_usage = gsortstate->gschunk_row_usage;
-	gschunk_toast_usage = gsortstate->gschunk_toast_usage;
-	if (!gschunk)
-	{
-		gschunk = pgstrom_create_gpusort_chunk(gsortstate);
-		gschunk_row_usage = 0;
-		gschunk_toast_usage = 0;
-		rcs_head = gsortstate->rcs_nums;
-	}
-
-	/*
-	 * allocation of a gpusort message
-	 */
-	PG_TRY();
-	{
-		gpusort = pgstrom_create_gpusort(gsortstate, gschunk);
-	}
-	PG_CATCH();
-	{
-		/* if nobody owns newly allocated gpusort-chunk, enforce to
-		 * free prior to memory leaking. */
-		if (gschunk != gsortstate->gschunk_curr)
-			pgstrom_shmem_free(gschunk);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
+	/* create a gpusort message object */
+	gpusort = pgstrom_create_gpusort(gsortstate);
 	pgstrom_track_object(&gpusort->msg.sobj, 0);
 
-	/* get capacity of gpusort-chunk */
-	kcs = KERN_GPUSORT_CHUNK(&gschunk->kern);
-    ktoast = KERN_GPUSORT_TOASTBUF(&gschunk->kern);
-	gschunk_row_limit = kcs->nrooms;
-	gschunk_toast_limist = ktoast->length;
+	/* create a gpusort chunk */
+	gs_chunk = pgstrom_create_gpusort_chunk(gsortstate);
+	gs_chunk->rcs_global_index = gsortstate->rcs_nums;
+	kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
+	ktoast = KERN_GPUSORT_TOASTBUF(&gs_chunk->kern);
+	toast_length = ktoast->length;
+	toast_usage = ktoast->usage;
+
+	dlist_push_head(&gpusort->gs_chunks, &gs_chunk->chain);
 
 	/*
-	 * TODO: if subplan support column-format data exchange,
-	 * bulk-transfer is more preferable,
+	 * TODO: If SubPlan support ExecMulti for data exchange,
+	 * we use this special service.
 	 */
-
-	/*
-	 * OK, try to preload subplans into row-store
-	 *
-	 * First of all, let's allocate an empty row-store and attach it
-	 * on the rcs-array of GpuSortState.
-	 */
-	trs = tcache_create_row_store(tupdesc);
-	if (gsortstate->rcs_nums == gsortstate->rcs_slotsz)
-	{
-		gsortstate->rcs_slotsz += gsortstate->rcs_slotsz;
-		gsortstate->rcs_slot = repalloc(gsortstate->rcs_slot,
-										sizeof(StromObject *) *
-										gsortstate->rcs_slotsz);
-	}
-	Assert(gsortstate->rcs_nums < gsortstate->rcs_slotsz);
-	gsortstate->rcs_slot[gsortstate->rcs_nums] = &trs->sobj;
-	gpusort->rc_store = &trs->sobject;
-	gpusort->rcs_index = gsortstate->rcs_nums;
-	gsortstate->rcs_nums++;
 
 	/* subplan should take forward scan */
 	estate->es_direction = ForwardScanDirection;
@@ -1100,14 +1229,9 @@ gpusort_preload_subplan(GpuSortState *gsortstate, HeapTuple *overflow)
 	if (gpusort->msg.pfm.enabled)
 		gettimeofday(&tv1, NULL);
 
-	/*
-	 * copy tuples into tcache_row_store until...
-	 * - number of rows exceeds chunk's capacity
-	 * - usage of toast buffer exceeds chunk's capacity
-	 * - usage of row-store exceeds its capacity
-	 * - reached end of sub-plan
-	 */
-	for (nrows=0; nrows + gschunk_row_usage < gschunk_row_limit; nrows++)
+	/* copy tuples to tcache_row_store */
+	trs = NULL;
+	for (nrows=0; nrows < kcs->nrooms; nrows++)
 	{
 		if (HeapTupleIsValid(*overflow))
 		{
@@ -1127,7 +1251,7 @@ gpusort_preload_subplan(GpuSortState *gsortstate, HeapTuple *overflow)
 
 		/*
 		 * check whether the ktoast capacity to store variable length
-		 * values. If not, we once break to scan and this tuple shall
+		 * values. If now, we once break to scan and this tuple shall
 		 * be moved to the next gpusort chunk.
 		 */
 		if (gsortstate->sortkey_toast != NIL)
@@ -1150,8 +1274,7 @@ gpusort_preload_subplan(GpuSortState *gsortstate, HeapTuple *overflow)
 			 * any more. Then, this tuple shall be put on the next
 			 * chunk instead.
 			 */
-			gschunk_toast_usage += toastsz;
-			if (gschunk_toast_usage > gschunk_toast_limit)
+			if (toast_usage + toastsz > toast_length)
 			{
 				*overflow = tuple;
 				Assert(nrows > 0);
@@ -1160,76 +1283,53 @@ gpusort_preload_subplan(GpuSortState *gsortstate, HeapTuple *overflow)
 		}
 
 		/* OK, let's put it on the row-store */
-		if (!tcache_row_store_insert_tuple(trs, tuple))
+		if (!trs || !tcache_row_store_insert_tuple(trs, tuple))
 		{
-			*overflow = tuple;
-			Assert(nrows > 0);
-			break;
+			/*
+			 * allocation of a new row-store, but not tracked because trs
+			 * is always kept by a particular gpusort-chunk.
+			 */
+			trs = tcache_create_row_store(tupdesc);
+
+			/* put it on the r/c-store array on the GpuSortState */
+			if (gsortstate->rcs_nums == gsortstate->rcs_slotsz)
+			{
+				gsortstate->rcs_slot = repalloc(gsortstate->rcs_slot,
+												sizeof(StromObject *) *
+												2 * gsortstate->rcs_slotsz);
+				gsortstate->rcs_slotsz += gsortstate->rcs_slotsz;
+			}
+			Assert(gsortstate->rcs_nums < gsortstate->rcs_slotsz);
+			gsortstate->rcs_slot[gsortstate->rcs_nums++] = &trs->sobj;
+
+			/* also, put it on the r/c-store array on the gpusort */
+			if (gs_chunk->rcs_nums == gs_chunk->rcs_slotsz)
+			{
+				StromObject	  **new_slot;
+
+				new_slot = pgstrom_shmem_realloc(gs_chunk->rcs_slot,
+												 sizeof(StromObject *) *
+												 2 * gs_chunk->rcs_slotsz);
+				if (!new_slot)
+					elog(ERROR, "out of shared memory");
+				gs_chunk->rcs_slot = new_slot;
+				gs_chunk->rcs_slotsz += gs_chunk->rcs_slotsz;
+			}
+			Assert(gs_chunk->rcs_nums < gs_chunk->rcs_slotsz);
+			gs_chunk->rcs_slot[gs_chunk->rcs_nums++] = &trs->sobj;
+
+			/* insertion towards new empty row-store should not be failed */
+			if (!tcache_row_store_insert_tuple(trs, tuple))
+				elog(ERROR, "failed to put a tuple on a new row-store");
 		}
 	}
-    gschunk_row_usage += nrows;
-	estate->es_direction = saved_direction;
+	estate->es_direction = dir_saved;
 
 	if (gpusort->msg.pfm.enabled)
 	{
 		gettimeofday(&tv2, NULL);
 		gpusort->msg.pfm.time_to_load = timeval_diff(&tv1, &tv2);
 	}
-
-	/*
-	 * Check whether the gs_chunk is fi
-	 *
-	 *
-	 */
-	if (gschunk_row_usage >= gschunk_row_limit ||
-		gschunk_toast_usage >= gschunk_toast_limit)
-	{
-		SpinLockAcquire(&gschunk->lock);
-		if (rcs_head >= 0)
-			gschunk->rcs_head = rcs_head;
-		gschunk->rcs_nums++;
-		gschunk->rcs_pending++;
-		gschunk->ready_to_sort = true;
-		SpinLockRelease(&gschunk->lock);
-		/* switch to the next chunk */
-		gsortstate->gschunk_curr = NULL;
-		gsortstate->gschunk_row_usage = 0;
-		gsortstate->gschunk_toast_usage = 0;
-	}
-	else
-	{
-		SpinLockAcquire(&gschunk->lock);
-		if (rcs_head >= 0)
-			gschunk->rcs_head = rcs_head;
-		gschunk->rcs_nums++;
-		gschunk->rcs_pending++;
-		SpinLockRelease(&gschunk->lock);
-	}
-	/* update current status of scanning */
-
-
-
-	if (gschunk_toast_usage > gschunk_toast_limit)
-
-
-	gsortstate->gschunk_curr = gschunk;
-	gsortstate->gschunk_row_usage = gschunk_row_usage;
-	gsortstate->gschunk_toast_usage = gschunk_toast_usage;
-
-	gschunk_row_limit = kcs->nrooms;
-    gschunk_toast_limist = ktoast->length;
-
-
-	slock_t         lock;       /* protection of fields below */
-    cl_uint         refcnt;     /* reference counter of this chunk */
-    cl_uint         rcs_head;   /* head index of rcs array in GpuSortState */
-    cl_uint         rcs_nums;   /* number of rcs being associated */
-    cl_uint         rcs_pendding;   /* number of pendding rcs to be loaded */
-    bool            ready_to_sort;  /* true, if this chunk is ready to sort */
-    /* Fields below are available only OpenCL server */
-    cl_mem          m_gschunk;  /* local opencl buffer object! */
-    kern_gpusort    kern;
-
 
 	/* no tuples were read in actually, so nothing to do */
 	if (nrows == 0)
@@ -1523,7 +1623,6 @@ gpusort_begin(CustomPlan *node, EState *estate, int eflags)
 								gsortplan->cplan.plan.plan_rows);
 	gsortstate->nrows_per_chunk =
 		(gsortstate->gpusort_chunksz -
-		 offsetof(pgstrom_gpusort, &kern) -
 		 STROMALIGN(gsortstate->kparambuf->length) -
 		 STROMALIGN(offsetof(kern_column_store,
 							 colmeta[gsortplan->numCols + 2])) -
@@ -1581,41 +1680,6 @@ gpusort_exec(CustomPlanState *node)
 
 		while (!gsortstate->scan_done)
 		{
-			pgstrom_gpusort	   *p_gpusort = NULL;
-
-			while (preload(p_gpusort)
-gpusort_preload_chunk
-
-
-			/*
-			 * create a gpusort_chunk
-			 */
-			gpusort = pgstrom_create_gpusort(gsortstate);
-			if (!gpusort)
-				elog(ERROR, "out of shared memory");
-
-			while (preload)
-
-
-			/* create a gpusort_chunk */
-
-			/* preload a row-store until above chunk become filled */
-			/* or, reached end of relation */
-
-			/*
-			 * try dequeue server response.
-			 * if pgstrom_gpusort_load, put it soon.
-			 * if pgstrom_gpusort, merge it with pending gpusort
-			 */
-		}
-		/*
-		 * Also, have synchronous dequeue
-		 *
-		 */
-	}
-
-
-
 			/* preload a chunk onto pgstrom_gpusort */
 			gpusort = gpusort_preload_chunk(gsortstate, &overflow);
 			if (!gpusort)
