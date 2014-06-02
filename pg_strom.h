@@ -488,8 +488,8 @@ extern Datum pgstrom_mqueue_info(PG_FUNCTION_ARGS);
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
-extern void
-pgstrom_release_bulk_slot(pgstrom_bulk_slot *bulk_slot);
+extern void pgstrom_release_bulk_slot(pgstrom_bulk_slot *bulk_slot);
+extern bool pgstrom_plan_can_multi_exec(const PlanState *ps);
 
 /*
  * restrack.c
@@ -502,18 +502,20 @@ extern void pgstrom_init_restrack(void);
 /*
  * gpuscan.c
  */
-extern bool pgstrom_path_is_gpuscan(const Path *path);
+extern bool gpuscan_support_multi_exec(const CustomPlanState *cps);
 extern void pgstrom_init_gpuscan(void);
 
 /*
  * gpusort.c
  */
 extern CustomPlan *pgstrom_create_gpusort_plan(Sort *original, List *rtable);
+extern bool gpusort_support_multi_exec(const CustomPlanState *cps);
 extern void pgstrom_init_gpusort(void);
 
 /*
  * gpuhashjoin.c
  */
+extern bool gpuhashjoin_support_multi_exec(const CustomPlanState *cps);
 extern void pgstrom_init_gpuhashjoin(void);
 
 /*

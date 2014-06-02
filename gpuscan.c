@@ -113,21 +113,6 @@ static void clserv_process_gpuscan_column(pgstrom_message *msg);
 static void clserv_put_gpuscan(pgstrom_message *msg);
 
 /*
- * pgstrom_path_is_gpuscan
- *
- * returns true, if supplied Path-node is GpuScan
- */
-bool
-pgstrom_path_is_gpuscan(const Path *path)
-{
-	if (path && IsA(path, CustomPath) &&
-		((CustomPath *)path)->methods == &gpuscan_path_methods)
-		return true;
-
-	return false;
-}
-
-/*
  * cost_gpuscan
  *
  * cost estimation for GpuScan
@@ -495,6 +480,35 @@ gpuscan_finalize_plan(PlannerInfo *root,
 {
 	*paramids = bms_add_members(*paramids, *scan_params);
 }
+
+/*
+ * gpuscan_support_multi_exec
+ *
+ * It gives a hint whether the supplied plan-state support bulk-exec mode,
+ * or not. If it is GpuScan provided by PG-Strom, it allows bulk-exec in
+ * case when ...
+ * - no scan projection
+ * - no hybrid-scan mode (cache-only scan, or regular heap-scan)
+ */
+bool
+gpuscan_support_multi_exec(const CustomPlanState *cps)
+{
+	const GpuScanState *gss;
+
+	if (!IsA(cps, CustomPlanState) || cps->methods != &gpuscan_plan_methods)
+		return false;
+
+	if (cps->ps.ps_ProjInfo != NULL)
+		return false;
+
+	gss = (const GpuScanState *) cps;
+	if (gss->hybrid_scan)
+		return false;
+
+	return true;
+}
+
+
 
 static bool
 gpuscan_begin_tcache_scan(GpuScanState *gss,

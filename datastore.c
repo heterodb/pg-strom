@@ -153,3 +153,22 @@ pgstrom_release_bulk_slot(pgstrom_bulk_slot *bulk_slot)
 		pfree(bulk_slot->i_cached);
 	pfree(bulk_slot);
 }
+
+/*
+ * pgstrom_plan_can_multi_exec
+ *
+ * It gives a hint whether subplan support bulk-exec mode, or not.
+ */
+bool
+pgstrom_plan_can_multi_exec(const PlanState *ps)
+{
+	if (!IsA(ps, CustomPlanState))
+		return false;
+
+	if (gpuscan_support_multi_exec((const CustomPlanState *) ps) ||
+		gpusort_support_multi_exec((const CustomPlanState *) ps) ||
+		gpuhashjoin_support_multi_exec((const CustomPlanState *) ps))
+		return true;
+
+	return false;
+}

@@ -379,6 +379,21 @@ gpuhashjoin_finalize_plan(PlannerInfo *root,
 						  Bitmapset **scan_params)
 {}
 
+
+/*
+ * gpuhashjoin_support_multi_exec
+ *
+ * It gives a hint whether the supplied plan-state support bulk-exec mode,
+ * or not. If it is GpuHashJooin provided by PG-Strom, it does not allow
+ * bulk- exec mode right now.
+ */
+bool
+gpuhashjoin_support_multi_exec(const CustomPlanState *cps)
+{
+    return false;
+}
+
+
 static CustomPlanState *
 gpuhashjoin_begin(CustomPlan *custom_plan, EState *estate, int eflags)
 {

@@ -58,6 +58,7 @@ typedef struct
 	Size			sortkey_width;
 	Size			gpusort_chunksz;
 	cl_uint			nrows_per_chunk;
+	bool			bulk_scan;
 	bool			scan_done;
 	bool			sort_done;
 	/* running status */
@@ -1173,7 +1174,7 @@ pgstrom_create_gpusort(GpuSortState *gsortstate)
 }
 
 /*
- * gpusort_preload_chunk
+ * gpusort_preload_subplan
  *
  * It loads row-store (or column-store if available) from the underlying
  * relation scan, and enqueue a gpusort-chunk with them into OpenCL
@@ -1182,7 +1183,7 @@ pgstrom_create_gpusort(GpuSortState *gsortstate)
  * all the records in the underlying relation were already read.
  */
 static pgstrom_gpusort *
-gpusort_preload_chunk(GpuSortState *gsortstate, HeapTuple *overflow)
+gpusort_preload_subplan(GpuSortState *gsortstate, HeapTuple *overflow)
 {
 	pgstrom_gpusort	   *gpusort;
 	pgstrom_gpusort_chunk *gs_chunk;
@@ -1217,11 +1218,6 @@ gpusort_preload_chunk(GpuSortState *gsortstate, HeapTuple *overflow)
 	toast_usage = ktoast->usage;
 
 	dlist_push_head(&gpusort->gs_chunks, &gs_chunk->chain);
-
-	/*
-	 * TODO: If SubPlan support ExecMulti for data exchange,
-	 * we use this special service.
-	 */
 
 	/* subplan should take forward scan */
 	estate->es_direction = ForwardScanDirection;
@@ -1338,6 +1334,210 @@ gpusort_preload_chunk(GpuSortState *gsortstate, HeapTuple *overflow)
 		pgstrom_put_message(&gpusort->msg);
 		return NULL;
 	}
+	return gpusort;
+}
+
+/*
+ * gpusort_preload_subplan_bulk
+ *
+ * Like gpusort_preload_subplan, it also load tuples from subplan, but it
+ * uses bulk-scan mode.
+ */
+static pgstrom_gpusort *
+gpusort_preload_subplan_bulk(GpuSortState *gsortstate,
+							 pgstrom_bulk_slot **overflow)
+{
+	pgstrom_gpusort	   *gpusort;
+	pgstrom_gpusort_chunk *gs_chunk;
+	PlanState		   *subnode = outerPlanState(gsortstate);
+	TupleDesc			tupdesc = ExecGetResultType(subnode);
+	kern_column_store  *kcs;
+	kern_toastbuf	   *ktoast;
+	cl_uint				nrows_usage;
+	Size				toast_usage;
+	ListCell		   *lc;
+	struct timeval		tv1, tv2;
+
+	/* do we have any more row/column store to read? */
+	if (gsortstate->scan_done)
+		return NULL;
+
+	/* create a gpusort message object */
+	gpusort = pgstrom_create_gpusort(gsortstate);
+	pgstrom_track_object(&gpusort->msg.sobj, 0);
+
+	/* create a gpusort chunk */
+	gs_chunk = pgstrom_create_gpusort_chunk(gsortstate);
+	gs_chunk->rcs_global_index = gsortstate->rcs_nums;
+	kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
+	ktoast = KERN_GPUSORT_TOASTBUF(&gs_chunk->kern);
+	toast_usage = ktoast->usage;
+
+    dlist_push_head(&gpusort->gs_chunks, &gs_chunk->chain);
+
+	if (gpusort->msg.pfm.enabled)
+		gettimeofday(&tv1, NULL);
+
+	while (true)
+	{
+		pgstrom_bulk_slot  *bulk;
+
+		/* load the next bulk */
+		if (*overflow)
+		{
+			bulk = *overflow;
+			*overflow = NULL;
+		}
+		else
+		{
+			bulk = (pgstrom_bulk_slot *)MultiExecProcNode(subnode);
+		}
+		if (!bulk)
+			break;
+
+		/* pgstrom_bulk_slot performs as if T_String */
+		Assert(IsA(bulk, String) && ((Value *)bulk)->val.str == NULL);
+
+		if (StromTagIs(bulk->rc_store, TCacheRowStore))
+		{
+			tcache_row_store *trs = (tcache_row_store *) bulk->rc_store;
+			cl_uint		nitems = bulk->nitems;
+			Size		toastsz = 0;
+
+			Assert(nitems < trs->kern.nrows);
+
+			/* no capacity to put nitems more */
+			if (kcs->nrows + nitems >= kcs->nrooms)
+			{
+				*overflow = bulk;
+				break;
+			}
+
+			/*
+			 * If variable length sort-keys are in use, we need to ensure
+			 * toast buffer has enough space to store.
+			 */
+			if (gsortstate->sortkey_toast != NIL)
+			{
+				rs_tuple   *rs_tup;
+				Datum		value;
+				bool		isnull;
+				int			i, j;
+
+				for (i=0; i < nitems; i++)
+				{
+					j = bulk->rindex[i];
+					Assert(j < trs->kern.nrows);
+
+					rs_tup = kern_rowstore_get_tuple(&trs->kern, j);
+					if (!rs_tup)
+						elog(ERROR, "bug? null record was fetched");
+
+					foreach (lc, gsortstate->sortkey_toast)
+					{
+						value = heap_getattr(&rs_tup->htup,
+											 lfirst_int(lc),
+											 tupdesc,
+											 &isnull);
+						if (!isnull)
+							toastsz += MAXALIGN(VARSIZE_ANY(value));
+					}
+				}
+				if (toast_usage + toastsz >= ktoast->length)
+				{
+					*overflow = bulk;
+					break;
+				}
+			}
+			kcs->nrows += nitems;
+			toast_usage += toastsz;
+		}
+		else if (StromTagIs(bulk->rc_store, TCacheColumnStore))
+		{
+			tcache_column_store *tcs = (tcache_column_store *) bulk->rc_store;
+			cl_uint		nitems = bulk->nitems;
+			Size		toastsz = 0;
+
+			/* no capacity to put nitems any more? */
+			if (nrows_usage + nitems >= kcs->nrooms)
+			{
+				*overflow = bulk;
+				break;
+            }
+
+			if (gsortstate->sortkey_toast != NIL)
+			{
+				cl_uint		cs_ofs;
+				char	   *vl_ptr;
+				int         i, j, k;
+
+				for (i=0; i < nitems; i++)
+				{
+					j = bulk->rindex[i];
+					Assert(j < tcs->nrows);
+
+					foreach (lc, gsortstate->sortkey_toast)
+					{
+						k = lfirst_int(lc);
+
+						if (att_isnull(j, tcs->cdata[k].isnull))
+							continue;
+						cs_ofs = ((cl_uint *)tcs->cdata[k].values)[j];
+						Assert(cs_ofs > 0);
+
+						vl_ptr = ((char *)tcs->cdata[k].toast + cs_ofs);
+						toastsz += MAXALIGN(VARSIZE_ANY(vl_ptr));
+					}
+				}
+                if (toast_usage + toastsz >= ktoast->length)
+                {
+                    *overflow = bulk;
+                    break;
+                }
+            }
+			kcs->nrows += nitems;
+            toast_usage += toastsz;
+		}
+		else
+			elog(ERROR, "bug? neither row nor column store");
+
+		/* OK, let's put this row/column store on this chunk */
+		if (gsortstate->rcs_nums == gsortstate->rcs_slotsz)
+		{
+			gsortstate->rcs_slotsz += gsortstate->rcs_slotsz;
+			gsortstate->rcs_slot = repalloc(gsortstate->rcs_slot,
+											sizeof(StromObject *) *
+											gsortstate->rcs_slotsz);
+		}
+		gsortstate->rcs_slot[gsortstate->rcs_nums++] = bulk->rc_store;
+
+		/* also, put it on the r/c-store array on the gpusort */
+		if (gs_chunk->rcs_nums == gs_chunk->rcs_slotsz)
+		{
+			StromObject   **new_slot;
+
+			gs_chunk->rcs_slotsz += gs_chunk->rcs_slotsz;
+			new_slot = pgstrom_shmem_realloc(gs_chunk->rcs_slot,
+											 sizeof(StromObject *) *
+											 gs_chunk->rcs_slotsz);
+			if (!new_slot)
+				elog(ERROR, "out of shared memory");
+			gs_chunk->rcs_slot = new_slot;
+		}
+		gs_chunk->rcs_slot[gs_chunk->rcs_nums++] = bulk->rc_store;
+
+		/*
+		 * TODO: copy rindex to use
+		 */
+
+
+	}
+	if (gpusort->msg.pfm.enabled)
+	{
+		gettimeofday(&tv2, NULL);
+		gpusort->msg.pfm.time_to_load = timeval_diff(&tv1, &tv2);
+	}
+
 	return gpusort;
 }
 
@@ -1493,10 +1693,18 @@ gpusort_process_response(GpuSortState *gsortstate, pgstrom_gpusort *gpusort)
 	}
 }
 
-
-
-
-
+/*
+ * gpusort_support_multi_exec
+ *
+ * It gives a hint whether the supplied plan-state support bulk-exec mode,
+ * or not. If it is GpuSort provided by PG-Strom, it does not allow bulk-
+ * exec mode anyway.
+ */
+bool
+gpusort_support_multi_exec(const CustomPlanState *cps)
+{
+	return false;
+}
 
 static CustomPlanState *
 gpusort_begin(CustomPlan *node, EState *estate, int eflags)
@@ -1631,6 +1839,10 @@ gpusort_begin(CustomPlan *node, EState *estate, int eflags)
 		/ (sizeof(cl_ulong) + gsortstate->sortkey_width + 2 * sizeof(cl_uint));
 	gsortstate->nrows_per_chunk &= ~32UL;
 
+	/* is outerplan support bulk-scan mode? */
+	gsortstate->bulk_scan =
+		pgstrom_plan_can_multi_exec(outerPlanState(gsortstate));
+
 	/* allocate a certain amount of row-/column-store slot */
 	gsortstate->rcs_nums = 0;
 	gsortstate->rcs_slotsz = 256;
@@ -1676,16 +1888,21 @@ gpusort_exec(CustomPlanState *node)
 
 	if (!gsortstate->sort_done)
 	{
-		HeapTuple	overflow = NULL;
+		HeapTuple		overflow_tup = NULL;
+		pgstrom_bulk_slot *overflow_rcs = NULL;
 
 		while (!gsortstate->scan_done)
 		{
-			/* preload a chunk onto pgstrom_gpusort */
-			gpusort = gpusort_preload_chunk(gsortstate, &overflow);
+			if (!gsortstate->bulk_scan)
+				gpusort = gpusort_preload_subplan(gsortstate,
+												  &overflow_tup);
+			else
+				gpusort = gpusort_preload_subplan_bulk(gsortstate,
+													   &overflow_rcs);
 			if (!gpusort)
 			{
 				Assert(gsortstate->scan_done);
-				Assert(!overflow);
+				Assert(!overflow_tup && !overflow_rcs);
 				break;
 			}
 			Assert(dlist_length(&gpusort->gs_chunks) == 1);
@@ -1701,7 +1918,7 @@ gpusort_exec(CustomPlanState *node)
 			if (kcs->nrows == 1)
 			{
 				Assert(gsortstate->scan_done);
-				Assert(!overflow);
+				Assert(!overflow_tup && !overflow_rcs);
 				gpusort->is_sorted = true;
 				gpusort_process_response(gsortstate, gpusort);
 				break;
