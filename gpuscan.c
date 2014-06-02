@@ -993,6 +993,128 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	return gpuscan;
 }
 
+/*
+ * gpuscan_check_tuple_visibility
+ *
+ * It checks tuple visibility of the indexed record on the row- or column-
+ * store being supplied. Also, it extract nullmap and values on the slot,
+ * if valid one is given. (In case of multi-exec without qualifier rechecks,
+ * we don't need to set up individual TupleTableSlot here, so we can skip
+ * it; usually, it takes unignorable CPU cycles.)
+ */
+static bool
+gpuscan_check_tuple_visibility(GpuScanState *gss,
+							   StromObject *rc_store, cl_uint rindex,
+							   Snapshot snapshot, TupleTableSlot *slot)
+{
+	if (StromTagIs(rc_store, TCacheRowStore))
+	{
+		tcache_row_store *trs = (tcache_row_store *)rc_store;
+		rs_tuple		 *rs_tup;
+
+		rs_tup = kern_rowstore_get_tuple(&trs->kern, rindex);
+		if (!rs_tup)
+			return false;
+		if (!HeapTupleSatisfiesVisibility(&rs_tup->htup,
+										  snapshot,
+										  InvalidBuffer))
+			return false;
+
+		/* if needed, put this tuple on the slot for further checks */
+		if (!slot)
+			return true;
+		ExecStoreTuple(&rs_tup->htup, slot, InvalidBuffer, false);
+	}
+	else if (StromTagIs(rc_store, TCacheColumnStore))
+	{
+		tcache_column_store *tcs = (tcache_column_store *) rc_store;
+		Relation		relation = gss->scan_rel;
+		HeapTupleData	htup;
+
+		/* A dummy HeapTuple to check visibility */
+		htup.t_len = tcs->theads[rindex].t_hoff;
+		htup.t_self = tcs->ctids[rindex];
+		htup.t_tableOid = RelationGetRelid(relation);
+		htup.t_data = &tcs->theads[rindex];
+
+		if (!HeapTupleSatisfiesVisibility(&htup, snapshot, InvalidBuffer))
+			return false;
+
+		if (!slot)
+			return true;
+
+		if (!gss->hybrid_scan)
+		{
+			TupleDesc		tupdesc = RelationGetDescr(relation);
+			tcache_head	   *tc_head = gss->tc_head;
+			Form_pg_attribute attr;
+			int				i, j;
+
+			slot = ExecStoreAllNullTuple(slot);
+			for (i=0; i < tc_head->ncols; i++)
+			{
+				j = tc_head->i_cached[i];
+				attr = tupdesc->attrs[j];
+
+				if (!attr->attnotnull &&
+					att_isnull(rindex, tcs->cdata[i].isnull))
+					continue;
+
+				if (attr->attlen > 0)
+				{
+					slot->tts_values[j] = fetch_att(tcs->cdata[i].values +
+													attr->attlen * rindex,
+													attr->attbyval,
+													attr->attlen);
+				}
+				else
+				{
+					cl_uint	   *cs_offset = (cl_uint *)tcs->cdata[i].values;
+
+					Assert(cs_offset[rindex] > 0);
+					Assert(tcs->cdata[i].toast != NULL);
+					slot->tts_values[j]
+						= PointerGetDatum((char *)tcs->cdata[i].toast +
+										  cs_offset[rindex]);
+				}
+				slot->tts_isnull[j] = false;
+			}
+		}
+		else
+		{
+			/*
+			 * In case of hybrid-scan, we fetch heap buffer according
+			 * to the item-pointer
+			 */
+			Buffer		buffer = InvalidBuffer;
+
+			gss->hybrid_htup.t_self = tcs->ctids[rindex];
+			if (!heap_fetch(gss->scan_rel,
+							gss->cps.ps.state->es_snapshot,
+							&gss->hybrid_htup,
+							&buffer,
+							false,
+							NULL))
+				return false;
+
+			if (slot)
+				ExecStoreTuple(&gss->hybrid_htup, slot, buffer, false);
+
+			/*
+			 * At this point we have an extra pin on the buffer, because
+			 * ExecStoreTuple incremented the pin count.
+			 * Drop our local pin
+			 */
+			ReleaseBuffer(buffer);
+		}
+	}
+	else
+		elog(ERROR, "bug? neither row nor column store: %d",
+			 (int)rc_store->stag);
+
+	return true;
+}
+
 static bool
 gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
 {
@@ -1023,106 +1145,9 @@ gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
 		}
 		Assert(i_result > 0 && i_result <= kresult->nrooms);
 
-		if (StromTagIs(sobject, TCacheRowStore))
-		{
-			tcache_row_store *trs = (tcache_row_store *)sobject;
-			rs_tuple   *rs_tup;
-
-			rs_tup = kern_rowstore_get_tuple(&trs->kern, i_result - 1);
-			if (!rs_tup)
-				continue;
-			if (!HeapTupleSatisfiesVisibility(&rs_tup->htup,
-											  snapshot,
-											  InvalidBuffer))
-				continue;
-			ExecStoreTuple(&rs_tup->htup, slot, InvalidBuffer, false);
-		}
-		else if (StromTagIs(sobject, TCacheColumnStore))
-		{
-			tcache_head			*tc_head = gss->tc_head;
-			tcache_column_store *tcs = (tcache_column_store *)sobject;
-			Form_pg_attribute	attr;
-			int		i, j, k = i_result - 1;
-
-			Assert(tc_head != NULL);
-
-			if (!gss->hybrid_scan)
-			{
-				HeapTupleData		htup;
-
-				/* A dummy HeapTuple to check visibility */
-				htup.t_len = tcs->theads[k].t_hoff;
-				htup.t_self = tcs->ctids[k];
-				htup.t_tableOid = RelationGetRelid(gss->scan_rel);
-				htup.t_data = &tcs->theads[k];
-
-				if (!HeapTupleSatisfiesVisibility(&htup,
-												  snapshot,
-												  InvalidBuffer))
-					continue;
-
-				/* OK, put it on the result slot */
-				slot = ExecStoreAllNullTuple(slot);
-				for (i=0; i < tc_head->ncols; i++)
-				{
-					j = tc_head->i_cached[i];
-					attr = tc_head->tupdesc->attrs[j];
-
-					if (!attr->attnotnull &&
-						att_isnull(k, tcs->cdata[i].isnull))
-						continue;
-
-					if (attr->attlen > 0)
-					{
-						slot->tts_values[j]
-							= fetch_att(tcs->cdata[i].values +
-										attr->attlen * k,
-										attr->attbyval,
-										attr->attlen);
-					}
-					else
-					{
-						cl_uint	   *cs_offset
-							= (cl_uint *)tcs->cdata[i].values;
-
-						Assert(cs_offset[k] > 0);
-						Assert(tcs->cdata[i].toast != NULL);
-						slot->tts_values[j]
-							= PointerGetDatum((char *)tcs->cdata[i].toast +
-											  cs_offset[k]);
-					}
-					slot->tts_isnull[j] = false;
-				}
-			}
-			else
-			{
-				/*
-				 * In case of hybrid-scan, we fetch heap buffer according
-				 * to the item-pointer
-				 */
-				Buffer		buffer = InvalidBuffer;
-
-				gss->hybrid_htup.t_self = tcs->ctids[k];
-				if (!heap_fetch(gss->scan_rel,
-								gss->cps.ps.state->es_snapshot,
-								&gss->hybrid_htup,
-								&buffer,
-								false,
-								NULL))
-					continue;
-				ExecStoreTuple(&gss->hybrid_htup, slot, buffer, false);
-
-				/*
-				 * At this point we have an extra pin on the buffer, because
-				 * ExecStoreTuple incremented the pin count.
-				 * Drop our local pin
-				 */
-				ReleaseBuffer(buffer);
-			}
-		}
-		else
-			elog(ERROR, "unexpected data store tag in gpuscan: %d",
-				 (int)sobject->stag);
+		if (!gpuscan_check_tuple_visibility(gss, sobject, i_result - 1,
+											snapshot, slot))
+			continue;
 
 		if (do_recheck)
 		{
@@ -1162,7 +1187,7 @@ gpuscan_fetch_tuple(CustomPlanState *node)
 				pgstrom_perfmon_add(&gss->pfm, &msg->pfm);
 			Assert(msg->refcnt == 1);
 			pgstrom_untrack_object(&msg->sobj);
-			msg->cb_release(msg);
+			pgstrom_put_message(msg);
 			gss->curr_chunk = NULL;
 			gss->curr_index = 0;
 		}
@@ -1208,7 +1233,7 @@ gpuscan_fetch_tuple(CustomPlanState *node)
 
 			if (!pgstrom_enqueue_message(&gpuscan->msg))
 			{
-				gpuscan->msg.cb_release(&gpuscan->msg);
+				pgstrom_put_message(&gpuscan->msg);
 				elog(ERROR, "failed to enqueue pgstrom_gpuscan message");
 			}
 			gss->num_running++;
@@ -1398,21 +1423,22 @@ gpuscan_exec(CustomPlanState *node)
 static Node *
 gpuscan_exec_multi(CustomPlanState *node)
 {
-#if 0
 	GpuScanState	   *gss = (GpuScanState *) node;
-	ExprContext		   *econtext = node->ps.ps_ExprContext;
-	List			   *qual = node->ps.qual;
+	Snapshot			snapshot = node->ps.state->es_snapshot;
+	List			   *host_qual = node->ps.qual;
 	pgstrom_gpuscan	   *gpuscan;
 	pgstrom_message	   *msg;
 	pgstrom_bulk_slot  *bulk_slot;
 	cl_uint				i, j, nitems;
-	size_t				length;
+	StromObject		   *rc_store;
+	tcache_head		   *tc_head;
 
 	/* bulk data exchange should not have projection */
 	Assert(!node->ps.ps_ProjInfo);
 	/* also, hybrid scan is nonsense */
 	Assert(gss->hybrid_scan);
 
+retry:
 	while (true)
 	{
 		gpuscan = pgstrom_load_gpuscan(gss);
@@ -1433,7 +1459,7 @@ gpuscan_exec_multi(CustomPlanState *node)
 		 */
 		if (!pgstrom_enqueue_message(&gpuscan->msg))
 		{
-			gpuscan->msg.cb_release(&gpuscan->msg);
+			pgstrom_put_message(&gpuscan->msg);
 			elog(ERROR, "failed to enqueue pgstrom_gpuscan message");
 		}
 		gss->num_running++;
@@ -1500,175 +1526,109 @@ gpuscan_exec_multi(CustomPlanState *node)
 	}
 
 	/*
-	 * OK, returns the bulk slot.
+	 * OK, allocate an bulk slot to be returned to the upper layer.
 	 */
-	if (gss->dprog_key == 0)
-		nitems = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern)->nrooms;
-	else
-		nitems = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern)->nitems;
-
-	length = offsetof(pgstrom_bulk_slot, rindex[nitems]);
-	bulk_slot = palloc0(length);
-	NodeSetTag(bulk_slot, T_Integer);
-	bulk_slot->value.val.ival = length;
-	if (StromTagIs(gpuscan->rc_store, TCacheRowStore))
-		bulk_slot->rc_store = (StromObject *)
+	if (StromTagIs(rc_store, TCacheRowStore))
+	{
+		tc_head = NULL;
+		rc_store = (StromObject *)
 			tcache_get_row_store((tcache_row_store *)gpuscan->rc_store);
-	else if (StromTagIs(gpuscan->rc_store, TCacheColumnStore))
-		bulk_slot->rc_store = (StromObject *)
-			tcache_get_row_store((tcache_column_store *)gpuscan->rc_store);
+	}
+	else if (StromTagIs(rc_store, TCacheColumnStore))
+	{
+		tc_head = gss->tc_head;
+		rc_store = (StromObject *)
+			tcache_get_column_store((tcache_column_store *)gpuscan->rc_store);
+	}
 	else
-		elog(ERROR, "bug? neither row nor column store");
+		elog(ERROR, "Bug? neither row nor column store: %d",
+			 (int)rc_store->stag);
+	pgstrom_track_object(rc_store, 0);
+
+	nitems = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern)->nitems;
+	bulk_slot = palloc(offsetof(pgstrom_bulk_slot, rindex[nitems]));
+	memset(bulk_slot, 0, sizeof(pgstrom_bulk_slot));
+	NodeSetTag(bulk_slot, T_String);
+	bulk_slot->rc_store = rc_store;
+	if (tc_head)
+	{
+		bulk_slot->ncols = tc_head->ncols;
+		bulk_slot->i_cached = pmemcpy(tc_head->i_cached,
+									  sizeof(AttrNumber) * tc_head->ncols);
+	}
+	pgstrom_track_object(rc_store, 0);
+	bulk_slot->rc_store = rc_store;
 
 	/*
-	 * Host side checks.
-	 * - MVCC visibility checks
-	 * - device qualifier rechecks, if rindex is negative
-	 * - (optional) qualifiers being executed on host
+	 * GpuScan needs to have the host side checks below:
+	 * - MVCC visibility checks.
+	 * - Rechecks of device qualifier, if result is negative.
+	 * - Host side qualifier checks, if any.
 	 */
 	for (i=0, j=0; i < nitems; i++)
 	{
-		HeapTupleData	htup;
-
-		if (gss->dprog_key == 0)
-			bulk_slot->rindex[i] = i + 1;
-
-		/* visibility check */
-
-		/* device qualifier rechecks */
-		if (bulk_slot->rindex[i] < 0)
-		{}
-			
-		/* host executed qualifiers, if any */
-		if (!qual)
-		{
-			/* put data into slot */
-			ExecQual(qual, econtext, false);
-
-
-		}
-
-	}
-
-
-
-
-
-	/* overall logic were copied from ExecScan */
-	ExprDoneCond	isDone;
-	TupleTableSlot *resultSlot;
-
-	/*
-	 * If we have neither a qual to check nor a projection to do, just skip
-	 * all the overhead and return the raw scan tuple.
-	 */
-	if (!qual && !projInfo)
-	{
-		ResetExprContext(econtext);
-		return gpuscan_fetch_tuple(node);
-	}
-
-	/*
-	 * Check to see if we're still projecting out tuples from a previous scan
-	 * tuple (because there is a function-returning-set in the projection
-	 * expressions).  If so, try to project another one.
-	 */
-	if (node->ps.ps_TupFromTlist)
-	{
-		Assert(projInfo);		/* can't get here if not projecting */
-		resultSlot = ExecProject(projInfo, &isDone);
-		if (isDone == ExprMultipleResult)
-			return resultSlot;
-		/* Done with that source tuple... */
-		node->ps.ps_TupFromTlist = false;
-	}
-
-	/*
-	 * Reset per-tuple memory context to free any expression evaluation
-	 * storage allocated in the previous tuple cycle.  Note this can't happen
-	 * until we're done projecting out tuples from a scan tuple.
-	 */
-	ResetExprContext(econtext);
-
-	/*
-	 * get a tuple from the access method.  Loop until we obtain a tuple that
-	 * passes the qualification.
-	 */
-	for (;;)
-	{
+		cl_uint			rowidx = bulk_slot->rindex[i];
+		bool			do_recheck;
 		TupleTableSlot *slot;
 
-		CHECK_FOR_INTERRUPTS();
-
-		slot = gpuscan_fetch_tuple(node);
-
-		/*
-		 * if the slot returned by the accessMtd contains NULL, then it means
-		 * there is nothing more to scan so we just return an empty slot,
-		 * being careful to use the projection result slot so it has correct
-		 * tupleDesc.
-		 */
-		if (TupIsNull(slot))
+		if (rowidx < 0)
 		{
-			if (projInfo)
-				return ExecClearTuple(projInfo->pi_slot);
-			else
-				return slot;
-		}
-
-		/*
-		 * place the current tuple into the expr context
-		 */
-		econtext->ecxt_scantuple = slot;
-
-		/*
-		 * check that the current tuple satisfies the qual-clause
-		 *
-		 * check for non-nil qual here to avoid a function call to ExecQual()
-		 * when the qual is nil ... saves only a few cycles, but they add up
-		 * ...
-		 */
-		if (!qual || ExecQual(qual, econtext, false))
-		{
-			/*
-			 * Found a satisfactory scan tuple.
-			 */
-			if (projInfo)
-			{
-				/*
-				 * Form a projection tuple, store it in the result tuple slot
-				 * and return it --- unless we find we can project no tuples
-				 * from this scan tuple, in which case continue scan.
-				 */
-				resultSlot = ExecProject(projInfo, &isDone);
-				if (isDone != ExprEndResult)
-				{
-					node->ps.ps_TupFromTlist = (isDone == ExprMultipleResult);
-					return resultSlot;
-				}
-			}
-			else
-			{
-				/*
-				 * Here, we aren't projecting, so just return scan tuple.
-				 */
-				return slot;
-			}
+			rowidx = -rowidx - 1;
+			do_recheck = true;
 		}
 		else
-			InstrCountFiltered1(node, 1);
+		{
+			rowidx--;
+			do_recheck = false;
+		}
+
+		if (host_qual || do_recheck)
+			slot = gss->scan_slot;
+		else
+			slot = NULL;
 
 		/*
-		 * Tuple fails qual, so free per-tuple memory and try again.
+		 * MVCC visibility checks
 		 */
-		ResetExprContext(econtext);
+		if (!gpuscan_check_tuple_visibility(gss, rc_store, rowidx,
+											snapshot, slot))
+			continue;
+
+		/*
+		 * Device qualifier rechecks, if needed
+		 */
+		if (do_recheck)
+		{
+			ExprContext *econtext = gss->cps.ps.ps_ExprContext;
+
+			Assert(gss->dev_quals != NULL);
+			econtext->ecxt_scantuple = gss->scan_slot;
+			if (!ExecQual(gss->dev_quals, econtext, false))
+				continue;
+        }
+
+		/*
+		 * Optional, host qualifier checks
+		 */
+		if (host_qual)
+		{
+			ExprContext *econtext = gss->cps.ps.ps_ExprContext;
+
+			if (!ExecQual(host_qual, econtext, false))
+				continue;
+		}
+		bulk_slot->rindex[j++] = rowidx;
 	}
+	bulk_slot->nitems = j;
+	/* no longer gpuscan is needed, any more */
+	pgstrom_put_message(&gpuscan->msg);
 
-
-
-
-#endif
-	elog(ERROR, "not implemented yet");
+	if (bulk_slot->nitems == 0)
+	{
+		pgstrom_release_bulk_slot(bulk_slot);
+		goto retry;
+	}
+	return (Node *)bulk_slot;
 }
 
 static void
@@ -1681,7 +1641,7 @@ gpuscan_end(CustomPlanState *node)
 		pgstrom_gpuscan *gpuscan = gss->curr_chunk;
 
 		pgstrom_untrack_object(&gpuscan->msg.sobj);
-		gpuscan->msg.cb_release(&gpuscan->msg);
+		pgstrom_put_message(&gpuscan->msg);
 		gss->curr_chunk = NULL;
 	}
 

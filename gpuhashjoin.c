@@ -165,8 +165,7 @@ cost_gpuhashjoin(PlannerInfo *root,
 				 Path *inner_path,
 				 List *gpu_clauses,
 				 List *cpu_clauses,
-				 Cost *p_startup_cost,
-				 Cost *p_total_cost)
+				 JoinCostWorkspace *workspace)
 {
 	Cost		startup_cost = 0.0;
 	Cost		run_cost = 0.0;
@@ -223,36 +222,38 @@ cost_gpuhashjoin(PlannerInfo *root,
 	 * amount of memory than GPU/MIC device. Of course, work_mem
 	 * configuration should be considered, but not now.
 	 */
-	*p_startup_cost = startup_cost;
-	*p_total_cost = startup_cost + run_cost;
+	workspace->startup_cost = startup_cost;
+	workspace->run_cost = run_cost;
+	workspace->total_cost = startup_cost + run_cost;
 
 	elog(INFO, "startup_cost = %f, total_cost = %f, hashtable_size = %zu",
 		 startup_cost, run_cost, hashtable_size);
 
 	return true;
 }
-
+#if 0
 static void
 final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath)
 {
 
 
 }
-
+#endif
 static CustomPath *
 gpuhashjoin_create_path(PlannerInfo *root,
 						RelOptInfo *joinrel,
 						JoinType jointype,
+						SpecialJoinInfo *sjinfo,
 						Path *outer_path,
 						Path *inner_path,
-						Relids required_outer
+						Relids required_outer,
 						List *gpu_clauses,
-						List *cpu_clauses)
+						List *cpu_clauses,
+						JoinCostWorkspace *workspace)
 {
 	GpuHashJoinPath	   *gpath = palloc0(sizeof(GpuHashJoinPath));
 
-	NodeSetTag(gpath, CustomPath);
-	gpath->cpath.CustomName = "GpuHashJoin";
+	NodeSetTag(gpath, T_CustomPath);
 	gpath->cpath.methods = &gpuhashjoin_path_methods;
 	gpath->cpath.path.parent = joinrel;
 	gpath->cpath.path.param_info =
@@ -262,7 +263,7 @@ gpuhashjoin_create_path(PlannerInfo *root,
 								  inner_path,
 								  sjinfo,
 								  required_outer,
-								  &restrict_clauses);
+								  &cpu_clauses);
 	gpath->cpath.path.pathkeys = NIL;
 	gpath->jointype = jointype;
 	gpath->outerjoinpath = outer_path;
@@ -270,12 +271,7 @@ gpuhashjoin_create_path(PlannerInfo *root,
 	gpath->gpu_clauses = gpu_clauses;
 	gpath->cpu_clauses = cpu_clauses;
 
-    final_cost_hashjoin(root, pathnode, workspace, sjinfo, semifactors);
-
-	
-	
-	
-	
+    //final_cost_hashjoin(root, gpath, workspace, sjinfo, semifactors);
 	
 	return &gpath->cpath;
 }
@@ -284,7 +280,7 @@ static void
 gpuhashjoin_add_path(PlannerInfo *root,
 					 RelOptInfo *joinrel,
 					 JoinType jointype,
-					 JoinCostWorkspace *workspace,
+					 JoinCostWorkspace *core_workspace,
 					 SpecialJoinInfo *sjinfo,
 					 SemiAntiJoinFactors *semifactors,
 					 Path *outer_path,
@@ -293,20 +289,19 @@ gpuhashjoin_add_path(PlannerInfo *root,
 					 Relids required_outer,
 					 List *hashclauses)
 {
-	RelOptInfo	   *outer_rel = outer_path->parent;
-	RelOptInfo	   *inner_rel = inner_path->parent;
+	//RelOptInfo	   *outer_rel = outer_path->parent;
+	//RelOptInfo	   *inner_rel = inner_path->parent;
 	List		   *gpu_clauses = NIL;
 	List		   *cpu_clauses = NIL;
 	ListCell	   *cell;
-	Cost			startup_cost;
-	Cost			total_cost;
+	JoinCostWorkspace gpu_workspace;
 
 	/* calls secondary module if exists */
 	if (add_hashjoin_path_next)
 		add_hashjoin_path_next(root,
 							   joinrel,
 							   jointype,
-							   workspace,
+							   core_workspace,
 							   sjinfo,
 							   semifactors,
 							   outer_path,
@@ -337,14 +332,24 @@ gpuhashjoin_add_path(PlannerInfo *root,
 	if (!cost_gpuhashjoin(root, jointype,
 						  outer_path, inner_path,
 						  gpu_clauses, cpu_clauses,
-						  &startup_cost, &total_cost))
+						  &gpu_workspace))
 		return;	/* obviously unavailable to run it on GPU */
 
-	if (add_path_precheck(joinrel, startup_cost, total_cost,
+	if (add_path_precheck(joinrel,
+						  gpu_workspace.startup_cost,
+						  gpu_workspace.total_cost,
 						  NULL, required_outer))
 	{
-		CustomPath *pathnode = gpuhashjoin_create_path();
-
+		CustomPath *pathnode = gpuhashjoin_create_path(root,
+													   joinrel,
+													   jointype,
+													   sjinfo,
+													   outer_path,
+													   inner_path,
+													   required_outer,
+													   gpu_clauses,
+													   cpu_clauses,
+													   &gpu_workspace);
 		if (pathnode)
 			add_path(joinrel, &pathnode->path);
 	}

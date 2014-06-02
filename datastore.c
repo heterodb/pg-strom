@@ -131,3 +131,25 @@ pgstrom_create_kern_parambuf(List *used_params,
 
 	return kpbuf;
 }
+
+/*
+ * pgstrom_release_bulk_slot
+ *
+ * It releases the supplied pgstrom_bulk_slot object once constructed.
+ */
+void
+pgstrom_release_bulk_slot(pgstrom_bulk_slot *bulk_slot)
+{
+	/* unlink the referenced row or column store */
+	pgstrom_untrack_object(bulk_slot->rc_store);
+	if (StromTagIs(bulk_slot->rc_store, TCacheRowStore))
+		tcache_put_row_store((tcache_row_store *) bulk_slot->rc_store);
+	else if (StromTagIs(bulk_slot->rc_store, TCacheColumnStore))
+		tcache_put_column_store((tcache_column_store *) bulk_slot->rc_store);
+	else
+		elog(ERROR, "bug? neither row nor column store");
+
+	if (bulk_slot->i_cached)
+		pfree(bulk_slot->i_cached);
+	pfree(bulk_slot);
+}

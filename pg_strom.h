@@ -413,10 +413,12 @@ typedef struct {
  */
 typedef struct
 {
-	Value			value;			/* T_Integer is used to chect executor */
-	bool			mvcc_checked;	/* true, if MVCC already checked */
+	Value			value;			/* T_String is used to cheat executor */
 	StromObject	   *rc_store;		/* row/column-store to be moved */
-	cl_utint		rindex[FLEXIBLE_ARRAY_MEMBER];
+	cl_uint			nitems;			/* num of rows on this bulk-slot */
+	cl_uint			ncols;			/* num of columns if column-store */
+	AttrNumber	   *i_cached;		/* column-index to attr-number map */
+	cl_uint			rindex[FLEXIBLE_ARRAY_MEMBER];
 } pgstrom_bulk_slot;
 
 /*
@@ -486,6 +488,8 @@ extern Datum pgstrom_mqueue_info(PG_FUNCTION_ARGS);
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
+extern void
+pgstrom_release_bulk_slot(pgstrom_bulk_slot *bulk_slot);
 
 /*
  * restrack.c
@@ -675,5 +679,120 @@ extern const char *pgstrom_opencl_gpuscan_code;
 extern const char *pgstrom_opencl_gpusort_code;
 extern const char *pgstrom_opencl_textlib_code;
 extern const char *pgstrom_opencl_timelib_code;
+
+/* ----------------------------------------------------------------
+ *
+ * Miscellaneous static inline functions
+ *
+ * ---------------------------------------------------------------- */
+
+/* binary available pstrcpy() */
+static inline void *
+pmemcpy(void *from, size_t sz)
+{
+	void   *dest = palloc(sz);
+
+	return memcpy(dest, from, sz);
+}
+
+/* additional dlist stuff */
+static inline int
+dlist_length(dlist_head *head)
+{
+	dlist_iter	iter;
+	int			count = 0;
+
+	dlist_foreach(iter, head)
+		count++;
+	return count;
+}
+
+static inline void
+dlist_move_tail(dlist_head *head, dlist_node *node)
+{
+	/* fast path if it's already at the head */
+	if (head->head.next == node)
+		return;
+	dlist_delete(node);
+    dlist_push_tail(head, node);
+
+    dlist_check(head);
+}
+
+static inline void
+dlist_move_all(dlist_head *dest, dlist_head *src)
+{
+	Assert(dlist_is_empty(dest));
+
+	dest->head.next = dlist_head_node(src);
+	dest->head.prev = dlist_tail_node(src);
+	dlist_head_node(src)->prev = &dest->head;
+	dlist_tail_node(src)->next = &dest->head;
+
+	dlist_init(src);
+}
+
+/*
+ * get_next_log2
+ *
+ * It returns N of the least 2^N value that is larger than or equal to
+ * the supplied value.
+ */
+static inline int
+get_next_log2(Size size)
+{
+	int		shift = 0;
+
+	if (size == 0 || size == 1)
+		return 0;
+	size--;
+#ifdef __GNUC__
+	shift = sizeof(Size) * BITS_PER_BYTE - __builtin_clzl(size);
+#else
+#if SIZEOF_VOID_P == 8
+	if ((size & 0xffffffff00000000UL) != 0)
+	{
+		size >>= 32;
+		shift += 32;
+	}
+#endif
+	if ((size & 0xffff0000UL) != 0)
+	{
+		size >>= 16;
+		shift += 16;
+	}
+	if ((size & 0x0000ff00UL) != 0)
+	{
+		size >>= 8;
+		shift += 8;
+	}
+	if ((size & 0x000000f0UL) != 0)
+	{
+		size >>= 4;
+		shift += 4;
+	}
+	if ((size & 0x0000000cUL) != 0)
+	{
+		size >>= 2;
+		shift += 2;
+	}
+	if ((size & 0x00000002UL) != 0)
+	{
+		size >>= 1;
+		shift += 1;
+	}
+	if ((size & 0x00000001UL) != 0)
+		shift += 1;
+#endif	/* !__GNUC__ */
+	return shift;
+}
+
+
+
+
+
+
+
+
 
 #endif	/* PG_STROM_H */
