@@ -142,13 +142,7 @@ pgstrom_release_bulk_slot(pgstrom_bulk_slot *bulk_slot)
 {
 	/* unlink the referenced row or column store */
 	pgstrom_untrack_object(bulk_slot->rc_store);
-	if (StromTagIs(bulk_slot->rc_store, TCacheRowStore))
-		tcache_put_row_store((tcache_row_store *) bulk_slot->rc_store);
-	else if (StromTagIs(bulk_slot->rc_store, TCacheColumnStore))
-		tcache_put_column_store((tcache_column_store *) bulk_slot->rc_store);
-	else
-		elog(ERROR, "bug? neither row nor column store");
-
+	pgstrom_put_rcstore(bulk_slot->rc_store);
 	if (bulk_slot->i_cached)
 		pfree(bulk_slot->i_cached);
 	pfree(bulk_slot);

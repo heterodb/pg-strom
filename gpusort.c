@@ -555,22 +555,9 @@ pgstrom_release_gpusort_chunk(pgstrom_gpusort_chunk *gs_chunk)
 {
 	int		i;
 
-	/*
-	 * Unference the row- and column- stores being associated with
-	 */
+	/* Unference the row- and column- stores being associated */
 	for (i=0; i < gs_chunk->rcs_nums; i++)
-	{
-		StromObject	   *sobject = gs_chunk->rcs_slot[i].rcstore;
-
-		if (StromTagIs(sobject, TCacheRowStore))
-			tcache_put_row_store((tcache_row_store *) sobject);
-		else if (StromTagIs(sobject, TCacheColumnStore))
-			tcache_put_column_store((tcache_column_store *) sobject);
-		else
-			elog(ERROR, "unexpected strom object is in rcs_slot: %d",
-				 (int)sobject->stag);
-	}
-
+		pgstrom_put_rcstore(gs_chunk->rcs_slot[i].rcstore);
 	/*
 	 * OK, let's free it. Note that row- and column-store are
 	 * inidividually tracked by resource tracker, we don't need
@@ -1338,6 +1325,7 @@ gpusort_preload_subplan_bulk(GpuSortState *gsortstate,
 	TupleDesc			tupdesc = ExecGetResultType(subnode);
 	kern_column_store  *kcs;
 	kern_toastbuf	   *ktoast;
+	cl_uint				kcs_usage;
 	Size				toast_usage;
 	cl_int			   *rindex;
 	ListCell		   *lc;
@@ -1355,6 +1343,7 @@ gpusort_preload_subplan_bulk(GpuSortState *gsortstate,
 	gs_chunk = pgstrom_create_gpusort_chunk(gsortstate);
 	gs_chunk->rcs_head = gsortstate->rcs_nums;
 	kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
+	kcs_usage = kcs->nrows;
 	ktoast = KERN_GPUSORT_TOASTBUF(&gs_chunk->kern);
 	toast_usage = ktoast->usage;
 	rindex = KERN_GPUSORT_RESULT_INDEX(kcs);
@@ -1379,10 +1368,12 @@ gpusort_preload_subplan_bulk(GpuSortState *gsortstate,
 		else
 		{
 			bulk = (pgstrom_bulk_slot *)MultiExecProcNode(subnode);
+			if (!bulk)
+			{
+				gsortstate->scan_done = true;
+				break;
+			}
 		}
-		if (!bulk)
-			break;
-
 		nitems = bulk->nitems;
 		toastsz = 0;
 
@@ -1393,9 +1384,9 @@ gpusort_preload_subplan_bulk(GpuSortState *gsortstate,
 		{
 			tcache_row_store *trs = (tcache_row_store *) bulk->rc_store;
 
-			Assert(nitems < trs->kern.nrows);
+			Assert(nitems <= trs->kern.nrows);
 			/* no capacity to put nitems more */
-			if (kcs->nrows + nitems >= kcs->nrooms)
+			if (kcs_usage + nitems >= kcs->nrooms)
 			{
 				*overflow = bulk;
 				break;
@@ -1445,7 +1436,7 @@ gpusort_preload_subplan_bulk(GpuSortState *gsortstate,
 			Size		toastsz = 0;
 
 			/* no capacity to put nitems any more? */
-			if (kcs->nrows + nitems >= kcs->nrooms)
+			if (kcs_usage + nitems >= kcs->nrooms)
 			{
 				*overflow = bulk;
 				break;
@@ -1492,7 +1483,7 @@ gpusort_preload_subplan_bulk(GpuSortState *gsortstate,
 		 * So, we have rindex that shows which rows are still available,
 		 * to indicate the rows to be processed.
 		 */
-		memcpy(rindex + kcs->nrows, bulk->rindex, sizeof(cl_int) * nitems);
+		memcpy(rindex + kcs_usage, bulk->rindex, sizeof(cl_int) * nitems);
 
 		/* OK, let's put this row/column store on this chunk */
 		if (gsortstate->rcs_nums == gsortstate->rcs_slotsz)
@@ -1502,22 +1493,28 @@ gpusort_preload_subplan_bulk(GpuSortState *gsortstate,
 											sizeof(StromObject *) *
 											gsortstate->rcs_slotsz);
 		}
-		gsortstate->rcs_slot[gsortstate->rcs_nums++] = bulk->rc_store;
+		gsortstate->rcs_slot[gsortstate->rcs_nums++]
+			= pgstrom_get_rcstore(bulk->rc_store);
 
 		/* also, put it on the r/c-store array on the gpusort */
-		gs_chunk->rcs_slot[gs_chunk->rcs_nums].rindex = rindex + kcs->nrows;
+		gs_chunk->rcs_slot[gs_chunk->rcs_nums].rindex = rindex + kcs_usage;
 		gs_chunk->rcs_slot[gs_chunk->rcs_nums].nitems = nitems;
-		gs_chunk->rcs_slot[gs_chunk->rcs_nums].rcstore = bulk->rc_store;
+		gs_chunk->rcs_slot[gs_chunk->rcs_nums].rcstore
+			= pgstrom_get_rcstore(bulk->rc_store);
 		gs_chunk->rcs_nums++;
 
-		kcs->nrows += nitems;
+		kcs_usage += nitems;
 		toast_usage += toastsz;
+
+		/* OK, this bulk-store itself is no longer referenced */
+		pgstrom_release_bulk_slot(bulk);
 	}
 	if (gpusort->msg.pfm.enabled)
 	{
 		gettimeofday(&tv2, NULL);
 		gpusort->msg.pfm.time_to_load = timeval_diff(&tv1, &tv2);
 	}
+	elog(INFO, "bulkload gs_chunk {rcs_nums=%u kcs->nrows=%u toast=%zu}",gs_chunk->rcs_nums, kcs->nrows, toast_usage);
 
 	return gpusort;
 }
@@ -2781,7 +2778,7 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 	sort_nums = (sort_size * (sort_size + 1)) / 2;
 
 	/* state object of gpuscan (single chunk) */
-	event_nums = 2 * prep_nums + sort_nums + 4;
+	event_nums = 3 * prep_nums + sort_nums + 4;
 	clgss = calloc(1, offsetof(clstate_gpusort_single,
 							   events[event_nums]));
 	if (!clgss ||
@@ -2939,7 +2936,7 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 
 		if (StromTagIs(sobject, TCacheRowStore))
 		{
-			tcache_row_store   *trs = (tcache_row_store *) sobject;
+			tcache_row_store *trs = (tcache_row_store *) sobject;
 			prep_kernel = clserv_launch_gpusort_setup_row(clgss, trs,
 														  rcs_gindex,
 														  src_nitems,
@@ -2962,6 +2959,7 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 			rc = StromError_BadRequestMessage;
 			goto error_sync;
 		}
+		clgss->prep_kernel[i] = prep_kernel;
 	}
 
 	/*
@@ -2978,6 +2976,7 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 												k==0 ? true : false);
 			if (!sort_kernel)
 				goto error_sync;
+			Assert(k <= sort_nums);
 			clgss->sort_kernel[k++] = sort_kernel;
 		}
 	}

@@ -505,6 +505,7 @@ gpuscan_support_multi_exec(const CustomPlanState *cps)
 	if (gss->hybrid_scan)
 		return false;
 
+	elog(INFO, "now ready to run bulk-load");
 	return true;
 }
 
@@ -1442,15 +1443,15 @@ gpuscan_exec_multi(CustomPlanState *node)
 	List			   *host_qual = node->ps.qual;
 	pgstrom_gpuscan	   *gpuscan;
 	pgstrom_message	   *msg;
+	kern_resultbuf	   *kresults;
 	pgstrom_bulk_slot  *bulk_slot;
 	cl_uint				i, j, nitems;
 	StromObject		   *rc_store;
-	tcache_head		   *tc_head;
 
 	/* bulk data exchange should not have projection */
 	Assert(!node->ps.ps_ProjInfo);
 	/* also, hybrid scan is nonsense */
-	Assert(gss->hybrid_scan);
+	Assert(!gss->hybrid_scan);
 
 retry:
 	while (true)
@@ -1542,35 +1543,22 @@ retry:
 	/*
 	 * OK, allocate an bulk slot to be returned to the upper layer.
 	 */
-	if (StromTagIs(rc_store, TCacheRowStore))
-	{
-		tc_head = NULL;
-		rc_store = (StromObject *)
-			tcache_get_row_store((tcache_row_store *)gpuscan->rc_store);
-	}
-	else if (StromTagIs(rc_store, TCacheColumnStore))
-	{
-		tc_head = gss->tc_head;
-		rc_store = (StromObject *)
-			tcache_get_column_store((tcache_column_store *)gpuscan->rc_store);
-	}
-	else
-		elog(ERROR, "Bug? neither row nor column store: %d",
-			 (int)rc_store->stag);
+	rc_store = pgstrom_get_rcstore(gpuscan->rc_store);
 	pgstrom_track_object(rc_store, 0);
 
-	nitems = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern)->nitems;
+	kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
+	nitems = kresults->nitems;
 	bulk_slot = palloc(offsetof(pgstrom_bulk_slot, rindex[nitems]));
 	memset(bulk_slot, 0, sizeof(pgstrom_bulk_slot));
 	NodeSetTag(bulk_slot, T_String);
 	bulk_slot->rc_store = rc_store;
-	if (tc_head)
+	if (StromTagIs(rc_store, TCacheColumnStore))
 	{
+		tcache_head	   *tc_head = gss->tc_head;
 		bulk_slot->ncols = tc_head->ncols;
 		bulk_slot->i_cached = pmemcpy(tc_head->i_cached,
 									  sizeof(AttrNumber) * tc_head->ncols);
 	}
-	pgstrom_track_object(rc_store, 0);
 	bulk_slot->rc_store = rc_store;
 
 	/*
@@ -1581,7 +1569,7 @@ retry:
 	 */
 	for (i=0, j=0; i < nitems; i++)
 	{
-		cl_uint			rowidx = bulk_slot->rindex[i];
+		cl_uint			rowidx = kresults->results[i];
 		bool			do_recheck;
 		TupleTableSlot *slot;
 
@@ -1635,6 +1623,7 @@ retry:
 	}
 	bulk_slot->nitems = j;
 	/* no longer gpuscan is needed, any more */
+	pgstrom_untrack_object(&gpuscan->msg.sobj);
 	pgstrom_put_message(&gpuscan->msg);
 
 	if (bulk_slot->nitems == 0)

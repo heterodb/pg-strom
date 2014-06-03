@@ -688,6 +688,42 @@ extern const char *pgstrom_opencl_timelib_code;
  *
  * ---------------------------------------------------------------- */
 
+/*
+ * increment or decrement reference ounter or row- or column-store
+ */
+static inline StromObject *
+pgstrom_get_rcstore(StromObject *sobject)
+{
+	StromObject	   *result;
+
+	if (StromTagIs(sobject, TCacheRowStore))
+	{
+		result = (StromObject *)
+			tcache_get_row_store((tcache_row_store *)sobject);
+	}
+	else if (StromTagIs(sobject, TCacheColumnStore))
+	{
+		result = (StromObject *)
+			tcache_get_column_store((tcache_column_store *)sobject);
+	}
+	else
+		elog(ERROR, "Bug? it's neither row nor column store");
+
+	return result;
+}
+
+static inline void
+pgstrom_put_rcstore(StromObject *sobject)
+{
+	if (StromTagIs(sobject, TCacheRowStore))
+		tcache_put_row_store((tcache_row_store *)sobject);
+	else if (StromTagIs(sobject, TCacheColumnStore))
+		tcache_put_column_store((tcache_column_store *)sobject);
+	else
+		elog(ERROR, "Bug? it's neither row nor column store");
+}
+
+
 /* binary available pstrcpy() */
 static inline void *
 pmemcpy(void *from, size_t sz)
