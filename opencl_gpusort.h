@@ -480,9 +480,10 @@ gpusort_multi(cl_int mergesort_unitsz,
  * then gpusort_single modifies this index array later.
  */
 __kernel void
-gpusort_setup_chunk_rs(cl_uint rcs_gstore_num,
+gpusort_setup_chunk_rs(cl_uint rcs_gindex,
 					   __global kern_gpusort *kgpusort,
 					   __global kern_row_store *krs,
+					   cl_int	krs_nitems,
 					   __local void *local_workmem)
 {
 	__global kern_parambuf	   *kparams = KERN_GPUSORT_PARAMBUF(kgpusort);
@@ -490,18 +491,35 @@ gpusort_setup_chunk_rs(cl_uint rcs_gstore_num,
 	__global kern_toastbuf	   *ktoast = KERN_GPUSORT_TOASTBUF(kgpusort);
 	__global cl_int			   *kstatus = KERN_GPUSORT_STATUS(kgpusort);
 	__global cl_char		   *attrefs;
+	__global cl_uint		   *rindex;
 	__local size_t	kcs_offset;
 	__local size_t	kcs_nitems;
-	size_t			kcs_index;
+	size_t			kcs_index;	/* destination */
+	size_t			krs_index;	/* source */
 	pg_bytea_t		kparam_0;
 	cl_int			errcode = StromError_Success;
 
+	/* if number of valid items are negative, it means all the items
+	 * are valid. So, no need to use rindex
+	 */
+	if (krs_nitems < 0)
+	{
+		rindex = NULL;
+		krs_nitems = krs->nrows;
+	}
+	else
+	{
+		rindex = (__global cl_uint *)((__global char *)krs +
+									  STROMALIGN(krs->length));
+	}
+
+	/* determine number of items to be moved */
 	if (get_local_id(0) == 0)
 	{
-		if (get_global_id(0) + get_local_size(0) < krs->nrows)
+		if (get_global_id(0) + get_local_size(0) < krs_nitems)
 			kcs_nitems = get_local_size(0);
-		else if (get_global_id(0) < krs->nrows)
-			kcs_nitems = krs->nrows - get_global_id(0);
+		else if (get_global_id(0) < krs_nitems)
+			kcs_nitems = krs_nitems - get_global_id(0);
 		else
 			kcs_nitems = 0;
 		kcs_offset = atomic_add(&kcs->nrows, kcs_nitems);
@@ -509,13 +527,24 @@ gpusort_setup_chunk_rs(cl_uint rcs_gstore_num,
 	barrier(CLK_LOCAL_MEM_FENCE);
 	kcs_index = kcs_offset + get_local_id(0);
 
+	/*
+	 * fetch a valid row on the krs; pay attention row-store may contain
+	 * rows being already filtered out.
+	 */
+	if (!rindex)
+		krs_index = get_global_id(0);
+	else if (get_global_id(0) < krs_nitems)
+		krs_index = rindex[get_global_id(0)];
+	else
+		krs_index = krs->nrows;		/* dealt with invalid row */
+
 	/* flag of referenced columns */
 	kparam_0 = pg_bytea_param(kparams, &errcode, 0);
 
 	kern_row_to_column(&errcode,
 					   (__global cl_char *)VARDATA(kparam_0.value),
 					   krs,
-					   get_global_id(0),
+					   krs_index,
 					   kcs,
 					   ktoast,
 					   kcs_offset,
@@ -525,7 +554,7 @@ gpusort_setup_chunk_rs(cl_uint rcs_gstore_num,
 	if (get_local_id(0) < kcs_nitems)
 	{
 		cl_uint		ncols = kcs->ncols;
-		cl_ulong	growid = (cl_ulong)rcs_gstore_num << 32 | get_global_id(0);
+		cl_ulong	growid = (cl_ulong)rcs_gindex << 32 | krs_index;
 		__global cl_char   *addr;
 
 		/* second last column is global row-id */
@@ -557,10 +586,13 @@ gpusort_setup_chunk_cs(__global kern_gpusort *kgsort,
 typedef struct
 {
 	dlist_node		chain;		/* to be linked to pgstrom_gpusort */
-	StromObject	  **rcs_slot;	/* array of underlying row/column-store */
-	cl_uint			rcs_slotsz;	/* length of the array */
-	cl_uint			rcs_nums;	/* current usage of the array */
-	cl_uint			rcs_global_index;	/* starting offset in GpuSortState */
+	struct {
+		StromObject	   *rcstore;
+		cl_int			nitems;
+		cl_int		   *rindex;	/* non-null, if rindex is available */
+	} rcs_slot[400];	/* <- max number of r/c stores per chunk */
+	cl_uint			rcs_nums;	/* number of r/c stores associated */
+	cl_uint			rcs_head;	/* head index of rcs array in GpuSortstate */
 	kern_gpusort	kern;
 } pgstrom_gpusort_chunk;
 
@@ -569,6 +601,7 @@ typedef struct
 	pgstrom_message	msg;		/* = StromTag_GpuSort */
 	Datum			dprog_key;	/* key of device program object */
 	dlist_node		chain;		/* be linked to free list */
+	bool			has_rindex;	/* true. if some rows may not be valid */
 	bool			is_sorted;	/* true, if already sorted */
 	bool			by_cpusort;	/* true, if unavailable to sort by GPU */
 	dlist_head		gs_chunks;	/* chunked being sorted, or to be sorted */

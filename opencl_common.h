@@ -309,16 +309,16 @@ typedef struct {
 } rs_tuple;
 
 static inline __global rs_tuple *
-kern_rowstore_get_tuple(__global kern_row_store *krs, cl_uint rindex)
+kern_rowstore_get_tuple(__global kern_row_store *krs, cl_uint krs_index)
 {
 	__global cl_uint   *p_offset;
 
-	if (rindex >= krs->nrows)
+	if (krs_index >= krs->nrows)
 		return NULL;
 	p_offset = kern_rowstore_get_offset(krs);
-	if (p_offset[rindex] == 0)
+	if (p_offset[krs_index] == 0)
 		return NULL;
-	return (__global rs_tuple *)((uintptr_t)krs + p_offset[rindex]);
+	return (__global rs_tuple *)((uintptr_t)krs + p_offset[krs_index]);
 }
 
 /*
@@ -1185,7 +1185,6 @@ kern_row_to_column(__private cl_int *errcode,
 					   rcmeta.attlen :
 					   VARSIZE_ANY(src));
 		}
-
 		/* Move to the next column unless it is not actually referenced. */
 		is_referenced = attreferenced[i];
 		if (!is_referenced)
@@ -1350,7 +1349,6 @@ kern_row_to_column(__private cl_int *errcode,
 				}
 			}
 		}
-
 		/*
 		 * NOTE: end of reference marker - if attreferenced[i] has negative
 		 * value, neither zero nor positive, it means no more columns are
