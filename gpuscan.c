@@ -1552,14 +1552,6 @@ retry:
 	memset(bulk_slot, 0, sizeof(pgstrom_bulk_slot));
 	NodeSetTag(bulk_slot, T_String);
 	bulk_slot->rc_store = rc_store;
-	if (StromTagIs(rc_store, TCacheColumnStore))
-	{
-		tcache_head	   *tc_head = gss->tc_head;
-		bulk_slot->ncols = tc_head->ncols;
-		bulk_slot->i_cached = pmemcpy(tc_head->i_cached,
-									  sizeof(AttrNumber) * tc_head->ncols);
-	}
-	bulk_slot->rc_store = rc_store;
 
 	/*
 	 * GpuScan needs to have the host side checks below:

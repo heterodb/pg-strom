@@ -410,6 +410,7 @@ tcache_create_column_store(tcache_head *tc_head)
 
 	/* estimate length of column store */
 	length = MAXALIGN(offsetof(tcache_column_store, cdata[tc_head->ncols]));
+	length += MAXALIGN(sizeof(AttrNumber) * tc_head->ncols);
 	length += MAXALIGN(sizeof(ItemPointerData) * NUM_ROWS_PER_COLSTORE);
 	length += MAXALIGN(sizeof(HeapTupleHeaderData) * NUM_ROWS_PER_COLSTORE);
 
@@ -439,6 +440,12 @@ tcache_create_column_store(tcache_head *tc_head)
 
 	offset = MAXALIGN(offsetof(tcache_column_store,
 							   cdata[tcs->ncols]));
+	/* array of referenced attributes */
+	tcs->i_cached = (AttrNumber *)((char *)tcs + offset);
+	offset += MAXALIGN(sizeof(AttrNumber) * tc_head->ncols);
+	memcpy(tcs->i_cached, tc_head->i_cached,
+		   sizeof(AttrNumber) * tc_head->ncols);
+
 	/* array of item-pointers */
 	tcs->ctids = (ItemPointerData *)((char *)tcs + offset);
 	offset += MAXALIGN(sizeof(ItemPointerData) *

@@ -300,6 +300,7 @@ typedef struct {
 	bool			is_sorted;
 	BlockNumber		blkno_max;
 	BlockNumber		blkno_min;
+	AttrNumber	   *i_cached;	/* copy of tc_head->i_cached */
 	ItemPointerData		*ctids;
 	HeapTupleHeaderData	*theads;
 	struct {
@@ -416,8 +417,6 @@ typedef struct
 	Value			value;			/* T_String is used to cheat executor */
 	StromObject	   *rc_store;		/* row/column-store to be moved */
 	cl_uint			nitems;			/* num of rows on this bulk-slot */
-	cl_uint			ncols;			/* num of columns if column-store */
-	AttrNumber	   *i_cached;		/* column-index to attr-number map */
 	cl_uint			rindex[FLEXIBLE_ARRAY_MEMBER];
 } pgstrom_bulk_slot;
 

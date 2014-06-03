@@ -143,8 +143,6 @@ pgstrom_release_bulk_slot(pgstrom_bulk_slot *bulk_slot)
 	/* unlink the referenced row or column store */
 	pgstrom_untrack_object(bulk_slot->rc_store);
 	pgstrom_put_rcstore(bulk_slot->rc_store);
-	if (bulk_slot->i_cached)
-		pfree(bulk_slot->i_cached);
 	pfree(bulk_slot);
 }
 

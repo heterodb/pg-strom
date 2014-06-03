@@ -126,6 +126,12 @@ typedef struct
 	((__global cl_int *)									\
 	 ((__global char *)(kchunk) +							\
 	  (kchunk)->colmeta[(kchunk)->ncols - 1].cs_ofs))
+/* second last column of kchunk is global-rowid */
+#define KERN_GPUSORT_GLOBAL_ROWID(kchunk)				\
+	((__global cl_ulong *)								\
+	 ((__global char *)(kchunk) +						\
+	  (kchunk)->colmeta[(kchunk)->ncols - 2].cs_ofs))
+
 
 #define KERN_GPUSORT_TOTAL_LENGTH(kchunk)		\
 	(KERN_GPUSORT_PARAMBUF_LENGTH(kchunk) +		\
@@ -586,6 +592,7 @@ gpusort_setup_chunk_cs(__global kern_gpusort *kgsort,
 typedef struct
 {
 	dlist_node		chain;		/* to be linked to pgstrom_gpusort */
+	cl_uint			scan_pos;	/* current scan position, after the sorting */
 	struct {
 		StromObject	   *rcstore;
 		cl_int			nitems;
@@ -603,7 +610,6 @@ typedef struct
 	dlist_node		chain;		/* be linked to free list */
 	bool			has_rindex;	/* true. if some rows may not be valid */
 	bool			is_sorted;	/* true, if already sorted */
-	bool			by_cpusort;	/* true, if unavailable to sort by GPU */
 	dlist_head		gs_chunks;	/* chunked being sorted, or to be sorted */
 } pgstrom_gpusort;
 
