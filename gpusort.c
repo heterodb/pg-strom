@@ -295,8 +295,17 @@ gpusort_codegen_comparison(Sort *sort, codegen_context *context)
 	 * System constants for GpuSort
 	 * KPARAM_0 is an array of bool to show referenced (thus moved to
 	 * sorting chunk) columns, to translate data from row-store.
+	 * KPARAM_1 is a template of kcs_head for columnar bulk-loading,
+	 * even though its cs_ofs has to be adjusted for each c-store.
 	 */
-	context->used_params = list_make1(makeConst(BYTEAOID,
+	context->used_params = list_make2(makeConst(BYTEAOID,
+												-1,
+												InvalidOid,
+												-1,
+												PointerGetDatum(NULL),
+												true,
+												false),
+									  makeConst(BYTEAOID,
 												-1,
 												InvalidOid,
 												-1,
@@ -562,7 +571,95 @@ gpusort_finalize_plan(PlannerInfo *root,
 	/* nothing to do */
 }
 
+/*
+ * gpusort_construct_kcshead
+ *
+ * It sets up header portion of kern_column_store that can contain two
+ * system columns on gpusort (growid and rindex).
+ */
+static bytea *
+gpusort_construct_kcshead(TupleDesc tupdesc,
+						  List *sortkey_resnums,
+						  cl_uint nrooms)
+{
+	kern_column_store *kcs_head;
+	bytea	   *result;
+	int			nkeys;
+	Size		offset;
+	Size		length;
+	AttrNumber	anum;
+	AttrNumber	i_col;
+	ListCell   *lc;
 
+	nkeys = list_length(sortkey_resnums) + 2;
+	length = STROMALIGN(offsetof(kern_column_store, colmeta[nkeys]));
+	result = palloc0(VARHDRSZ + length);
+	SET_VARSIZE(result, length);
+	kcs_head = (kern_column_store *)VARDATA(result);
+	kcs_head->ncols = nkeys;
+	kcs_head->nrows = 0;
+	kcs_head->nrooms = nrooms;
+
+	i_col = 0;
+	offset = length;
+	foreach (lc, sortkey_resnums)
+	{
+		Form_pg_attribute	attr;
+
+		anum = lfirst_int(lc);
+		Assert(anum > 0 && anum <= tupdesc->natts);
+		attr = tupdesc->attrs[anum - 1];
+
+		kcs_head->colmeta[i_col].attnotnull = attr->attnotnull;
+		if (attr->attalign == 'c')
+			kcs_head->colmeta[i_col].attalign = sizeof(cl_char);
+		else if (attr->attalign == 's')
+			kcs_head->colmeta[i_col].attalign = sizeof(cl_short);
+		else if (attr->attalign == 'i')
+			kcs_head->colmeta[i_col].attalign = sizeof(cl_int);
+		else if (attr->attalign == 'd')
+			kcs_head->colmeta[i_col].attalign = sizeof(cl_long);
+		else
+			elog(ERROR, "unexpected attalign '%c'", attr->attalign);
+		kcs_head->colmeta[i_col].attlen = attr->attlen;
+		kcs_head->colmeta[i_col].cs_ofs = offset;
+		if (!attr->attnotnull)
+			offset += STROMALIGN((nrooms + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+		offset += STROMALIGN((attr->attlen > 0
+							  ? attr->attlen
+							  : sizeof(cl_uint)) * nrooms);
+		i_col++;
+	}
+
+	/*
+	 * The second last column is reserved by GpuSort - fixed-length
+	 * long integer as identifier of unsorted tuples, not null.
+	 */
+	kcs_head->colmeta[i_col].attnotnull = true;
+	kcs_head->colmeta[i_col].attalign = sizeof(cl_long);
+	kcs_head->colmeta[i_col].attlen = sizeof(cl_long);
+	kcs_head->colmeta[i_col].cs_ofs = offset;
+	offset += STROMALIGN(sizeof(cl_long) * nrooms);
+	i_col++;
+
+	/*
+	 * Last column is reserved by GpuSort - fixed-length integer as
+	 * index of sorted tuples, not null.
+	 * Note that this field has to be aligned to 2^N length, to
+	 * simplify kernel implementation.
+	 */
+	kcs_head->colmeta[i_col].attnotnull = true;
+	kcs_head->colmeta[i_col].attalign = sizeof(cl_int);
+	kcs_head->colmeta[i_col].attlen = sizeof(cl_int);
+	kcs_head->colmeta[i_col].cs_ofs = offset;
+	offset += STROMALIGN(sizeof(cl_int) * (1UL << get_next_log2(nrooms)));
+	i_col++;
+	Assert(i_col == kcs_head->ncols);
+
+	kcs_head->length = offset;
+
+	return result;
+}
 
 static void
 pgstrom_release_gpusort_chunk(pgstrom_gpusort_chunk *gs_chunk)
@@ -588,12 +685,11 @@ pgstrom_create_gpusort_chunk(GpuSortState *gsortstate)
 	TupleDesc		tupdesc = ExecGetResultType(subps);
 	Size			allocsz_chunk;
 	kern_parambuf  *kparam;
+	bytea		   *kcs_bytea;
+	kern_column_store *kcs_head;
 	kern_column_store *kcs;
 	cl_int		   *kstatus;
 	kern_toastbuf  *ktoast;
-	ListCell	   *cell;
-	Size			offset;
-	cl_int			i_col = 0;
 
 	/* allocation of a shared memory block */
 	gs_chunk = pgstrom_shmem_alloc_alap(gsortstate->gpusort_chunksz,
@@ -611,71 +707,13 @@ pgstrom_create_gpusort_chunk(GpuSortState *gsortstate)
 
 	/* next, initialization of kern_column_store */
 	kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
-	kcs->ncols = list_length(gsortstate->sortkey_resnums) + 2;
-	kcs->nrows = 0;
-	kcs->nrooms = gsortstate->nrows_per_chunk;
-	offset = STROMALIGN(offsetof(kern_column_store,
-								 colmeta[kcs->ncols]));
-	/* regular sortkeys */
-	foreach(cell, gsortstate->sortkey_resnums)
-	{
-		Form_pg_attribute	attr;
-		int		resno = lfirst_int(cell);
-
-		Assert(resno > 0 && resno <= tupdesc->natts);
-		attr = tupdesc->attrs[resno - 1];
-
-		kcs->colmeta[i_col].attnotnull = attr->attnotnull;
-		if (attr->attalign == 'c')
-			kcs->colmeta[i_col].attalign = sizeof(cl_char);
-		else if (attr->attalign == 's')
-			kcs->colmeta[i_col].attalign = sizeof(cl_short);
-		else if (attr->attalign == 'i')
-			kcs->colmeta[i_col].attalign = sizeof(cl_int);
-		else if (attr->attalign == 'd')
-			kcs->colmeta[i_col].attalign = sizeof(cl_long);
-		else
-			elog(ERROR, "unexpected attalign '%c'", attr->attalign);
-		kcs->colmeta[i_col].attlen = attr->attlen;
-		kcs->colmeta[i_col].cs_ofs = offset;
-		if (!attr->attnotnull)
-			offset += STROMALIGN(kcs->nrooms / BITS_PER_BYTE);
-		if (attr->attlen > 0)
-			offset += STROMALIGN(attr->attlen * kcs->nrooms);
-		else
-		{
-			offset += STROMALIGN(sizeof(cl_uint) * kcs->nrooms);
-			Assert(list_member_int(gsortstate->sortkey_toast, resno));
-		}
-		i_col++;
-	}
-
-	/*
-	 * The second last column is reserved by GpuSort - fixed-length integer
-	 * as identifier of unsorted tuples, not null.
-	 */
-	kcs->colmeta[i_col].attnotnull = true;
-	kcs->colmeta[i_col].attalign = sizeof(cl_long);
-	kcs->colmeta[i_col].attlen = sizeof(cl_long);
-	kcs->colmeta[i_col].cs_ofs = offset;
-	offset += STROMALIGN(sizeof(cl_long) * kcs->nrooms);
-	i_col++;
-
-	/*
-	 * Last column is reserved by GpuSort - fixed-length integer as
-	 * index of sorted tuples, not null.
-	 * Note that this field has to be aligned to 2^N length, to
-	 * simplify kernel implementation.
-	 */
-	kcs->colmeta[i_col].attnotnull = true;
-	kcs->colmeta[i_col].attalign = sizeof(cl_int);
-	kcs->colmeta[i_col].attlen = sizeof(cl_int);
-	kcs->colmeta[i_col].cs_ofs = offset;
-	offset += STROMALIGN(sizeof(cl_int) * (1UL << get_next_log2(kcs->nrooms)));
-    i_col++;
-	Assert(i_col == kcs->ncols);
-
-	kcs->length = offset;
+	kcs_bytea = gpusort_construct_kcshead(tupdesc,
+										  gsortstate->sortkey_resnums,
+										  gsortstate->nrows_per_chunk);
+	kcs_head = (kern_column_store *)VARDATA(kcs_bytea);
+	memcpy(kcs, kcs_head, offsetof(kern_column_store,
+								   colmeta[kcs_head->ncols]));
+	pfree(kcs_bytea);
 
 	/* next, initialization of kernel execution status field */
 	kstatus = KERN_GPUSORT_STATUS(&gs_chunk->kern);
@@ -1422,6 +1460,7 @@ gpusort_preload_subplan_bulk(GpuSortState *gsortstate,
 					break;
 				}
 			}
+			elog(INFO, "bulkload row (nitems=%u of %u, length=%u)", nitems, trs->kern.nrows, trs->kern.length);
 		}
 		else if (StromTagIs(bulk->rc_store, TCacheColumnStore))
 		{
@@ -1466,6 +1505,7 @@ gpusort_preload_subplan_bulk(GpuSortState *gsortstate,
                     break;
                 }
             }
+			elog(INFO, "bulkload column (nitems=%u of %u, ncols=%u)", nitems, tcs->nrows, tcs->ncols);
 		}
 		else
 			elog(ERROR, "bug? neither row nor column store");
@@ -1630,6 +1670,7 @@ gpusort_begin(CustomPlan *node, EState *estate, int eflags)
 	Size			gpusort_chunksz;
 	Size			nrows_per_chunk;
 	Const		   *kparam_0;
+	Const		   *kparam_1;
 	List		   *used_params;
 
 	/*
@@ -1711,7 +1752,7 @@ gpusort_begin(CustomPlan *node, EState *estate, int eflags)
 	/*
 	 * construction of kparam_0 according to the actual column reference
 	 */
-	Assert(list_length(gsortplan->used_params) > 0);
+	Assert(list_length(gsortplan->used_params) >= 2);
 	used_params = copyObject(gsortplan->used_params);
 
 	kparam_0 = (Const *)linitial(used_params);
@@ -1721,6 +1762,16 @@ gpusort_begin(CustomPlan *node, EState *estate, int eflags)
     kparam_0->constvalue =
 		PointerGetDatum(kparam_construct_refatts(tupdesc, sortkey_resnums));
 	kparam_0->constisnull = false;
+
+	kparam_1 = (Const *)lsecond(used_params);
+	Assert(IsA(kparam_1, Const) &&
+           kparam_1->consttype == BYTEAOID &&
+           kparam_1->constisnull);
+	kparam_1->constvalue =
+		PointerGetDatum(gpusort_construct_kcshead(tupdesc,
+												  sortkey_resnums,
+												  100));
+	kparam_1->constisnull = false;
 
 	gsortstate->kparambuf = pgstrom_create_kern_parambuf(used_params, NULL);
 
@@ -2376,13 +2427,11 @@ clserv_respond_gpusort_kmem(cl_event event, cl_int ev_status, void *private)
 		clserv_log("failed on clReleaseMemObject: %s", opencl_strerror(rc));
 }
 
-#if 0
 static void
 clserv_respond_gpusort_shmem(cl_event event, cl_int ev_status, void *private)
 {
 	pgstrom_shmem_free(private);
 }
-#endif
 
 /*
  * opencl kernel invocation of:
@@ -2605,68 +2654,222 @@ clserv_launch_gpusort_setup_column(clstate_gpusort_single *clgss,
 								   cl_uint rcs_gindex,
 								   cl_int src_nitems,
 								   cl_int *src_rindex,
-								   bytea *kparam_0)
+								   bytea *kparam_0,
+								   bytea *kparam_1)
 {
-	/*
-	 * Idea: kparam_1 moves template of kcs_head. It allows to construct
-	 * kcs_head in kernel space without additional DMA!
-	 */
-#if 0
 	cl_command_queue	kcmdq = opencl_cmdq[clgss->dindex];
 	pgstrom_gpusort	   *gpusort = (pgstrom_gpusort *)clgss->msg;
-	pgstrom_gpusort_chunk *gs_chunk;
+	kern_column_store  *kcs_tmpl;
 	kern_column_store  *kcs_head;
-	cl_kernel			prep_kernel;
-	cl_mem				m_cstore;
-	size_t				length;
-	size_t				toast_len = 0;
-	cl_char			   *sortkeys;
-	cl_int				i, j, natts, rc;
+	kern_toastbuf	   *ktoast_head;
+	cl_char			   *attrefs;
+	cl_mem				m_cstore = NULL;
+	cl_kernel			prep_kernel = NULL;
+	size_t				gwork_sz;
+	size_t				lwork_sz;
+	Size				length;
+	Size				kcs_offset;
+	Size				ktoast_offset;
+	cl_uint				rs_natts;
+	cl_uint				i_col;
+	cl_uint				ncols;
+	cl_uint				kcs_nitems;
+	cl_int				i, j, rc;
+	cl_int				ev_index_base;
+	bool				has_toast = false;
 
 	/*
-	 * setting up kernel column-store
+	 * First of all, we need to set up header portion of kern_column_store
+	 * on the source side, according to the template stuff.
+	 * kparam_0 informs us which columns are referenced, and kparam_1 gives
+	 * us template of kcs_head but needs to adjust its colmeta.
 	 */
-	length = STROMALIGN(offsetof(kern_column_store,
-								 colmeta[tcs->ncols]));
+	attrefs = (cl_char *)VARDATA(kparam_0);
+	rs_natts = VARSIZE_ANY_EXHDR(kparam_0);
+	kcs_tmpl = (kern_column_store *)VARDATA(kparam_1);
+	ncols = kcs_tmpl->ncols;
+	kcs_nitems = tcs->nrows;
+
+	kcs_offset = STROMALIGN(offsetof(kern_column_store, colmeta[ncols]));
+	length = kcs_offset + STROMALIGN(offsetof(kern_toastbuf, coldir[ncols]));
+	/* allocation of DMA source */
 	kcs_head = pgstrom_shmem_alloc(length);
 	if (!kcs_head)
 	{
-		clserv_log("failed on pgstrom_shmem_alloc");
+		clserv_log("out of shared memory");
 		return NULL;
 	}
+	memcpy(kcs_head, kcs_tmpl, kcs_offset);
+	ktoast_head = (kern_toastbuf *)((char *)kcs_head + kcs_offset);
+	ktoast_head->length = TOASTBUF_MAGIC;
+	ktoast_head->ncols = ncols;
+	ktoast_offset =  STROMALIGN(offsetof(kern_toastbuf, coldir[ncols]));
 
-	sortkey = VARDATA_ANY(kparam_0);
-	natts = VARSIZE_ANY_EXHDR(kparam_0);
-	for (i=0, j=0; i < natts; i++)
+	/* calculate and update offset */
+	i_col = 0;
+	for (i=0; i < tcs->ncols; i++)
 	{
-		
-		
-		
+		kern_colmeta   *colmeta;
+
+		j = tcs->i_cached[i];
+		Assert(j >= 0 && j < rs_natts);
+
+		if (!attrefs[j])
+			continue;
+
+		colmeta = &kcs_head->colmeta[i_col];
+		colmeta->cs_ofs = kcs_offset;
+		kcs_offset += STROMALIGN((colmeta->attlen > 0
+								  ? colmeta->attlen
+								  : sizeof(cl_uint)) * kcs_nitems);
+
+		if (kcs_head->colmeta[i_col].attlen > 0)
+			ktoast_head->coldir[i_col] = (cl_uint)(-1);
+		else
+		{
+			ktoast_head->coldir[i_col] = ktoast_offset;
+			ktoast_offset += STROMALIGN(tcs->cdata[i].toast->tbuf_usage);
+			has_toast = true;
+		}
+		i_col++;
+
+		if (attrefs[j] < 0)
+			break;
 	}
-	
+	/* NOTE: growid of source kcs never referenced */
+	kcs_head->colmeta[i_col].cs_ofs = kcs_offset;
+	ktoast_head->coldir[i_col] = (cl_uint)(-1);
+	i_col++;
 
+	/* rindex of source kcs, if valid */
+	kcs_head->colmeta[i_col].cs_ofs = kcs_offset;
+	ktoast_head->coldir[i_col] = (cl_uint)(-1);
+	i_col++;
+	if (src_rindex)
+		kcs_offset += STROMALIGN(sizeof(cl_int) * src_nitems);
+	else
+		src_nitems = -1;
+	Assert(i_col == ncols);
 
+	/*
+	 * allocation of source kernel column store on device memory
+	 */
+	m_cstore = clCreateBuffer(opencl_context,
+							  CL_MEM_READ_WRITE,
+							  kcs_offset + ktoast_offset,
+							  NULL,
+							  &rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
+		goto error_shmfree;
+	}
 
+	prep_kernel = clCreateKernel(clgss->program,
+								 "gpusort_setup_chunk_cs",
+								 &rc);
+	if (rc != CL_SUCCESS)
+	{
+		goto error_release;
+	}
 
+	/* set optimal global/local workgroup size */
+    if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
+                                       prep_kernel,
+                                       clgss->dindex,
+                                       !src_rindex
+                                       ? kcs_nitems
+                                       : src_nitems,
+                                       sizeof(cl_uint)))
+		goto error_release;
 
-	/* calculate total length of column-store */
+	/* OK, setting up kernel arguments */
+	rc = clSetKernelArg(prep_kernel,
+						0,	/* cl_uint rcs_gindex */
+						sizeof(cl_uint),
+						&rcs_gindex);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		goto error_release;
+	}
 
+	rc = clSetKernelArg(prep_kernel,
+						1,	/* kern_gpusort *kgsort */
+						sizeof(cl_mem),
+						&clgss->m_chunk);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		goto error_release;
+	}
 
-	/* calculate length */
+	rc = clSetKernelArg(prep_kernel,
+						2,	/* kern_column_store *kcs */
+						sizeof(cl_mem),
+						&m_cstore);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		goto error_release;
+	}
 
+	rc = clSetKernelArg(prep_kernel,
+						3,	/* cl_uint src_nitems */
+						sizeof(cl_uint),
+						&src_nitems);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		goto error_release;
+	}
 
+	rc = clSetKernelArg(prep_kernel,
+						4,	/* local_workmem */
+						sizeof(cl_uint) * (lwork_sz + 1),
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		goto error_release;
+	}
 
+	/*
+	 * OK, begin to enqueue DMA request
+	 */
+	ev_index_base = clgss->ev_index;
+	for (i=0; i < tcs->ncols; i++)
+	{
+		kern_colmeta   *colmeta;
 
+		j = tcs->i_cached[i];
+		Assert(j >= 0 && j < rs_natts);
 
-	/* setup kcs_head */
+		if (!attrefs[j])
+			continue;
+		/* send kcs body and toast */
 
+		if (attrefs[j] < 0)
+			break;
+	}
+	if (src_rindex)
+		/* send rindex if needed */;
 
+	/* launch kernel execution */
 
+	/* set callback to release shmem */
+	/* set callback to release m_cstore */
 
+	return prep_kernel;
 
-
-#endif
-	/* to be implemented later */
+error_sync:
+	clWaitForEvents(clgss->ev_index, clgss->events);
+error_release:
+	if (prep_kernel)
+		clReleaseKernel(prep_kernel);
+	if (m_cstore)
+		clReleaseMemObject(m_cstore);
+	pgstrom_shmem_free(kcs_head);
 	return NULL;
 }
 
@@ -2782,6 +2985,7 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 	pgstrom_gpusort_chunk  *gs_chunk;
 	kern_parambuf		   *kparams;
 	bytea				   *kparam_0;
+	bytea				   *kparam_1;
 	kern_column_store	   *kcs;
 	clstate_gpusort_single *clgss;
 	cl_command_queue		kcmdq;
@@ -2804,8 +3008,11 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 	prep_nums = gs_chunk->rcs_nums;
 
 	/* also, fetch kparam_0 for column->column translation */
-	Assert(kparams->nparams > 0 && kparams->poffset[0] > 0);
+	Assert(kparams->nparams >= 2 &&
+		   kparams->poffset[0] > 0 &&
+		   kparams->poffset[1] > 0);
 	kparam_0 = (bytea *)((char *)kparams + kparams->poffset[0]);
+	kparam_1 = (bytea *)((char *)kparams + kparams->poffset[1]);
 
 	nrows = 0;
 	for (i=0; i < prep_nums; i++)
@@ -2970,7 +3177,7 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 							  &clgss->events[clgss->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
-		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
+		clserv_log("failed on clEnqueueWriteBuffer: %s %p %zu %zu", opencl_strerror(rc), KERN_GPUSORT_STATUS(&gs_chunk->kern), offset, length);
 		goto error_sync;
 	}
 	clgss->ev_index++;
@@ -3004,7 +3211,8 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 															 rcs_gindex,
 															 src_nitems,
 															 src_rindex,
-															 kparam_0);
+															 kparam_0,
+															 kparam_1);
 			if (!prep_kernel)
 				goto error_sync;
 		}
