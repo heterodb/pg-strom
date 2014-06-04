@@ -133,6 +133,37 @@ pgstrom_create_kern_parambuf(List *used_params,
 }
 
 /*
+ * kparam_construct_refatts
+ *
+ * makes an array to inform which columns (in row format) are referenced.
+ * usually it is informed as kparam_0 constant
+ */
+bytea *
+kparam_construct_refatts(TupleDesc tupdesc, List *attnums_list)
+{
+	bytea	   *result;
+	cl_char	   *refatts;
+	AttrNumber	anum;
+	AttrNumber	anum_last = 0;
+	ListCell   *lc;
+
+	result = palloc0(VARHDRSZ + sizeof(cl_char) * tupdesc->natts);
+	SET_VARSIZE(result, VARHDRSZ + sizeof(cl_char) * tupdesc->natts);
+	refatts = (cl_char *)VARDATA(result);
+	foreach (lc, attnums_list)
+	{
+		anum = lfirst_int(lc);
+		Assert(anum > 0 && anum <= tupdesc->natts);
+		refatts[anum - 1] = 1;
+		anum_last = anum;
+	}
+	if (anum_last > 0)
+		refatts[anum_last - 1] = -1;	/* end of reference marker */
+
+	return result;
+}
+
+/*
  * pgstrom_release_bulk_slot
  *
  * It releases the supplied pgstrom_bulk_slot object once constructed.

@@ -97,11 +97,18 @@ static void clserv_process_gpusort(pgstrom_message *msg);
  * installed device. It gives a preferred size of gpusort chunk according
  * to the device properties and GUC configuration.
  */
-static inline Size
-get_gpusort_chunksize(Size width, double nrows)
+static void
+compute_gpusort_chunksize(Size width, double nrows,
+						  List *sortkey_resnums,
+						  bool has_toastbuf,
+						  kern_parambuf *kparams,
+						  Size *gpusort_chunksz,
+						  Size *nrows_per_chunk)
 {
 	Size		device_restriction;
 	Size		chunk_sz;
+	Size		base_len;
+	int			nkeys = list_length(sortkey_resnums) + 2;
 
 	/*
 	 * zone length is initialized to device's max memory allocation size
@@ -111,15 +118,34 @@ get_gpusort_chunksize(Size width, double nrows)
 	device_restriction &= ~(SHMEM_BLOCKSZ - 1);
 
 	/*
+	 * length of metadata regardless of nrows
+	 */
+	base_len = (offsetof(pgstrom_gpusort_chunk, kern) +
+				STROMALIGN(kparams->length) +
+				STROMALIGN(offsetof(kern_column_store, colmeta[nkeys])) +
+				STROMALIGN(sizeof(cl_int)) +
+				STROMALIGN(offsetof(kern_toastbuf, coldir[0])));
+	/*
 	 * Try to estimate the chunk size being required in this context.
 	 */
-	chunk_sz = SHMEM_BLOCKSZ;	/* all the metadata portion */
-	chunk_sz += (width + sizeof(cl_uint) + sizeof(cl_ulong)) * (1.10 * nrows);
+	width += 2 * sizeof(cl_uint) + sizeof(cl_ulong);
 
-	while (chunk_sz > device_restriction)
-		chunk_sz >>= 1;
+	/* if too large, nrows per chunk has to be reduced */
+	while ((chunk_sz = (Size)
+			(base_len + width * (1.08 * nrows))) >= device_restriction)
+		nrows /= 2;
+	chunk_sz = (1UL << get_next_log2(chunk_sz)) - SHMEM_ALLOC_COST;
 
-	return (1UL << get_next_log2(chunk_sz)) - SHMEM_ALLOC_COST;
+	/*
+	 * on the other hands, we can expand nrows as possible as we can,
+	 * if we have no toast buffer.
+	 */
+	if (!has_toastbuf)
+		nrows = (chunk_sz - base_len) / width;
+
+	/* Put results */
+	*gpusort_chunksz = chunk_sz;
+	*nrows_per_chunk = (((Size)nrows) & ~(PGSTROM_WORKGROUP_UNITSZ - 1));
 }
 
 /*
@@ -190,7 +216,7 @@ expected_key_width(TargetEntry *tle, Plan *subplan, List *rtable)
 
 		type_len = get_attavgwidth(rte->relid, var->varattno);
 		if (type_len > 0)
-			return sizeof(cl_uint) + MAXALIGN(type_len);
+			return sizeof(cl_uint) + MAXALIGN(type_len * 1.2);
 	}
 	/*
 	 * Uh... we have no idea how to estimate average length of
@@ -269,25 +295,14 @@ gpusort_codegen_comparison(Sort *sort, codegen_context *context)
 	 * System constants for GpuSort
 	 * KPARAM_0 is an array of bool to show referenced (thus moved to
 	 * sorting chunk) columns, to translate data from row-store.
-	 * KPARAM_1 is also an array of AttrNumber (cl_ushort) to show
-	 * referenced columns in the underlying column store.
-	 * Both of them are just placeholder here. Actual values shall be
-	 * be set up later in executor stage.
 	 */
-	context->used_params = list_make2(makeConst(BYTEAOID,
+	context->used_params = list_make1(makeConst(BYTEAOID,
 												-1,
 												InvalidOid,
 												-1,
 												PointerGetDatum(NULL),
 												true,
-												false),
-									  makeConst(BYTEAOID,
-												-1,
-												InvalidOid,
-												-1,
-												PointerGetDatum(NULL),
-                                                true,
-                                                false));
+												false));
 	context->type_defs = list_make1(pgstrom_devtype_lookup(BYTEAOID));
 
 	/* generate a comparison function */
@@ -1611,9 +1626,9 @@ gpusort_begin(CustomPlan *node, EState *estate, int eflags)
 	List		   *sortkey_resnums = NIL;
 	List		   *sortkey_toast = NIL;
 	Bitmapset	   *tempset;
-	bytea		   *rs_attrefs;
 	AttrNumber		anum;
-	AttrNumber		anum_last;
+	Size			gpusort_chunksz;
+	Size			nrows_per_chunk;
 	Const		   *kparam_0;
 	List		   *used_params;
 
@@ -1677,68 +1692,57 @@ gpusort_begin(CustomPlan *node, EState *estate, int eflags)
 	gsortstate->mqueue = pgstrom_create_queue();
 	pgstrom_track_object(&gsortstate->mqueue->sobj, 0);
 
-	/* Construct param/const buffer including system constants */
-	Assert(list_length(gsortplan->used_params) > 1);
-	used_params = copyObject(gsortplan->used_params);
+	/* is outerplan support bulk-scan mode? */
+	gsortstate->bulk_scan =
+		pgstrom_plan_can_multi_exec(outerPlanState(gsortstate));
 
-	rs_attrefs = palloc0(VARHDRSZ + sizeof(cl_char) * tupdesc->natts);
-	SET_VARSIZE(rs_attrefs, VARHDRSZ + sizeof(cl_char) * tupdesc->natts);
-
+	/* setup sortkey_resnums and sortkey_toast list */
 	tempset = bms_copy(gsortplan->sortkey_resnums);
-	anum_last = -1;
 	while ((anum = bms_first_member(tempset)) >= 0)
 	{
 		anum += FirstLowInvalidHeapAttributeNumber;
 		Assert(anum > 0 && anum <= tupdesc->natts);
 
-		((cl_char *)VARDATA(rs_attrefs))[anum - 1] = 1;
 		sortkey_resnums = lappend_int(sortkey_resnums, anum);
 		if (tupdesc->attrs[anum - 1]->attlen < 0)
 			sortkey_toast = lappend_int(sortkey_toast, anum);
-		anum_last = anum - 1;
 	}
-	/* negative value is end of referenced columns marker */
-	if (anum_last >= 0)
-		((cl_char *)VARDATA(rs_attrefs))[anum_last] = -1;
-
-	kparam_0 = (Const *)linitial(used_params);
-	Assert(IsA(kparam_0, Const) &&
-		   kparam_0->consttype == BYTEAOID &&
-		   kparam_0->constisnull);
-	kparam_0->constvalue = PointerGetDatum(rs_attrefs);
-	kparam_0->constisnull = false;
 
 	/*
-	 * TODO: kparam_1 is needed to implement column-store exchange between
-	 * plan nodes in case when several conditions are fine.
-	 * - SubPlan is GpuScan
-	 * - SubPlan has no projection
-	 * - All the Vars required in the target-list of GpuSort are cached.
-	 * 
-	 * data exchange based on column-store is not supported right now,
-	 * so kparam_1 == NULL is delivered to the kernel.
+	 * construction of kparam_0 according to the actual column reference
 	 */
+	Assert(list_length(gsortplan->used_params) > 0);
+	used_params = copyObject(gsortplan->used_params);
+
+	kparam_0 = (Const *)linitial(used_params);
+    Assert(IsA(kparam_0, Const) &&
+           kparam_0->consttype == BYTEAOID &&
+           kparam_0->constisnull);
+    kparam_0->constvalue =
+		PointerGetDatum(kparam_construct_refatts(tupdesc, sortkey_resnums));
+	kparam_0->constisnull = false;
+
 	gsortstate->kparambuf = pgstrom_create_kern_parambuf(used_params, NULL);
+
+	/*
+	 * Estimation of appropriate chunk size.
+	 */
+	compute_gpusort_chunksize(gsortplan->sortkey_width,
+							  gsortplan->cplan.plan.plan_rows,
+							  sortkey_resnums,
+							  (bool)(sortkey_toast != NIL),
+							  gsortstate->kparambuf,
+							  &gpusort_chunksz,
+							  &nrows_per_chunk);
+
+	/*
+	 * misc initialization of GpuSortState
+	 */
 	gsortstate->sortkey_resnums = sortkey_resnums;
 	gsortstate->sortkey_toast = sortkey_toast;
 	gsortstate->sortkey_width = gsortplan->sortkey_width;
-	gsortstate->gpusort_chunksz
-		= get_gpusort_chunksize(gsortplan->sortkey_width,
-								gsortplan->cplan.plan.plan_rows);
-	gsortstate->nrows_per_chunk =
-		(gsortstate->gpusort_chunksz -
-		 STROMALIGN(sizeof(pgstrom_gpusort_chunk)) -
-		 STROMALIGN(gsortstate->kparambuf->length) -
-		 STROMALIGN(offsetof(kern_column_store,
-							 colmeta[gsortplan->numCols + 2])) -
-		 STROMALIGN(sizeof(cl_int)) -
-		 STROMALIGN(offsetof(kern_toastbuf, coldir[0])))
-		/ (sizeof(cl_ulong) + gsortstate->sortkey_width + 2 * sizeof(cl_uint));
-	gsortstate->nrows_per_chunk &= ~32UL;
-
-	/* is outerplan support bulk-scan mode? */
-	gsortstate->bulk_scan =
-		pgstrom_plan_can_multi_exec(outerPlanState(gsortstate));
+	gsortstate->gpusort_chunksz = gpusort_chunksz;
+	gsortstate->nrows_per_chunk = nrows_per_chunk;
 
 	/* running status */
 	gsortstate->num_running = 0;
@@ -3038,7 +3042,6 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 			  KERN_GPUSORT_CHUNK_LENGTH(&gs_chunk->kern) +
 			  KERN_GPUSORT_STATUS_LENGTH(&gs_chunk->kern) +
 			  KERN_GPUSORT_TOASTBUF_LENGTH(&gs_chunk->kern));
-
 	rc = clEnqueueReadBuffer(kcmdq,
 							 clgss->m_chunk,
 							 CL_FALSE,

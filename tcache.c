@@ -2782,8 +2782,6 @@ tcache_get_tchead_internal(Oid datoid, Oid reloid,
 	int				hindex = tcache_hash_index(MyDatabaseId, reloid);
 	int				i, j;
 
-	return NULL;
-
 	SpinLockAcquire(&tc_common->lock);
 	PG_TRY();
 	{

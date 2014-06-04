@@ -487,6 +487,8 @@ extern Datum pgstrom_mqueue_info(PG_FUNCTION_ARGS);
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
+extern bytea *kparam_construct_refatts(TupleDesc tupdesc,
+									   List *attnums_list);
 extern void pgstrom_release_bulk_slot(pgstrom_bulk_slot *bulk_slot);
 extern bool pgstrom_plan_can_multi_exec(const PlanState *ps);
 
