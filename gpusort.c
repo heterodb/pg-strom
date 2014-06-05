@@ -1488,7 +1488,7 @@ gpusort_preload_subplan_bulk(GpuSortState *gsortstate,
 
 					foreach (lc, gsortstate->sortkey_toast)
 					{
-						k = lfirst_int(lc);
+						k = lfirst_int(lc) - 1;
 
 						if (att_isnull(j, tcs->cdata[k].isnull))
 							continue;
@@ -1505,7 +1505,6 @@ gpusort_preload_subplan_bulk(GpuSortState *gsortstate,
                     break;
                 }
             }
-			elog(INFO, "bulkload column (nitems=%u of %u, ncols=%u)", nitems, tcs->nrows, tcs->ncols);
 		}
 		else
 			elog(ERROR, "bug? neither row nor column store");
@@ -1548,8 +1547,6 @@ gpusort_preload_subplan_bulk(GpuSortState *gsortstate,
 		gettimeofday(&tv2, NULL);
 		gpusort->msg.pfm.time_to_load = timeval_diff(&tv1, &tv2);
 	}
-	elog(INFO, "bulkload gs_chunk {rcs_nums=%u kcs->nrows=%u toast=%zu}",gs_chunk->rcs_nums, kcs->nrows, toast_usage);
-
 	return gpusort;
 }
 
@@ -2419,18 +2416,19 @@ clserv_respond_gpusort_single(cl_event event, cl_int ev_status, void *private)
 static void
 clserv_respond_gpusort_kmem(cl_event event, cl_int ev_status, void *private)
 {
-	cl_mem	kern_mem = private;
 	cl_int	rc;
 
-	rc = clReleaseMemObject(kern_mem);
+	rc = clReleaseMemObject((cl_mem)private);
 	if (rc != CL_SUCCESS)
 		clserv_log("failed on clReleaseMemObject: %s", opencl_strerror(rc));
+	//clserv_log("release buffer object: %p", private);
 }
 
 static void
 clserv_respond_gpusort_shmem(cl_event event, cl_int ev_status, void *private)
 {
 	pgstrom_shmem_free(private);
+	//clserv_log("release shmem: %p", private);
 }
 
 /*
@@ -2658,7 +2656,6 @@ clserv_launch_gpusort_setup_column(clstate_gpusort_single *clgss,
 								   bytea *kparam_1)
 {
 	cl_command_queue	kcmdq = opencl_cmdq[clgss->dindex];
-	pgstrom_gpusort	   *gpusort = (pgstrom_gpusort *)clgss->msg;
 	kern_column_store  *kcs_tmpl;
 	kern_column_store  *kcs_head;
 	kern_toastbuf	   *ktoast_head;
@@ -2668,6 +2665,7 @@ clserv_launch_gpusort_setup_column(clstate_gpusort_single *clgss,
 	size_t				gwork_sz;
 	size_t				lwork_sz;
 	Size				length;
+	Size				offset;
 	Size				kcs_offset;
 	Size				ktoast_offset;
 	cl_uint				rs_natts;
@@ -2676,7 +2674,6 @@ clserv_launch_gpusort_setup_column(clstate_gpusort_single *clgss,
 	cl_uint				kcs_nitems;
 	cl_int				i, j, rc;
 	cl_int				ev_index_base;
-	bool				has_toast = false;
 
 	/*
 	 * First of all, we need to set up header portion of kern_column_store
@@ -2700,6 +2697,9 @@ clserv_launch_gpusort_setup_column(clstate_gpusort_single *clgss,
 		return NULL;
 	}
 	memcpy(kcs_head, kcs_tmpl, kcs_offset);
+	kcs_head->nrows = kcs_nitems;
+	kcs_head->nrooms = kcs_nitems;
+
 	ktoast_head = (kern_toastbuf *)((char *)kcs_head + kcs_offset);
 	ktoast_head->length = TOASTBUF_MAGIC;
 	ktoast_head->ncols = ncols;
@@ -2719,6 +2719,9 @@ clserv_launch_gpusort_setup_column(clstate_gpusort_single *clgss,
 
 		colmeta = &kcs_head->colmeta[i_col];
 		colmeta->cs_ofs = kcs_offset;
+		if (!colmeta->attnotnull)
+			kcs_offset += STROMALIGN((kcs_nitems +
+									  BITS_PER_BYTE - 1) / BITS_PER_BYTE);
 		kcs_offset += STROMALIGN((colmeta->attlen > 0
 								  ? colmeta->attlen
 								  : sizeof(cl_uint)) * kcs_nitems);
@@ -2729,26 +2732,30 @@ clserv_launch_gpusort_setup_column(clstate_gpusort_single *clgss,
 		{
 			ktoast_head->coldir[i_col] = ktoast_offset;
 			ktoast_offset += STROMALIGN(tcs->cdata[i].toast->tbuf_usage);
-			has_toast = true;
 		}
 		i_col++;
 
 		if (attrefs[j] < 0)
 			break;
 	}
-	/* NOTE: growid of source kcs never referenced */
+	/*
+	 * growid and rindex of the source kcs; kern_column_to_column assumes
+	 * source and destination column-store are symmetric, so we need to
+	 * assign a certain amount of region even if it is not actually in-use.
+	 */
 	kcs_head->colmeta[i_col].cs_ofs = kcs_offset;
 	ktoast_head->coldir[i_col] = (cl_uint)(-1);
 	i_col++;
+	//kcs_offset += STROMALIGN(sizeof(cl_long) * src_nitems);
 
-	/* rindex of source kcs, if valid */
 	kcs_head->colmeta[i_col].cs_ofs = kcs_offset;
 	ktoast_head->coldir[i_col] = (cl_uint)(-1);
 	i_col++;
 	if (src_rindex)
-		kcs_offset += STROMALIGN(sizeof(cl_int) * src_nitems);
+		kcs_offset += STROMALIGN(sizeof(cl_int) * kcs_nitems);
 	else
 		src_nitems = -1;
+	kcs_head->length = kcs_offset;
 	Assert(i_col == ncols);
 
 	/*
@@ -2762,7 +2769,7 @@ clserv_launch_gpusort_setup_column(clstate_gpusort_single *clgss,
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-		goto error_shmfree;
+		goto error_release;
 	}
 
 	prep_kernel = clCreateKernel(clgss->program,
@@ -2838,28 +2845,202 @@ clserv_launch_gpusort_setup_column(clstate_gpusort_single *clgss,
 	 * OK, begin to enqueue DMA request
 	 */
 	ev_index_base = clgss->ev_index;
+
+	/* kcs_head - header portion of kern_column_store */
+	length = offsetof(kern_column_store, colmeta[ncols]);
+	rc = clEnqueueWriteBuffer(kcmdq,
+							  m_cstore,
+							  CL_FALSE,
+							  0,
+							  length,
+							  kcs_head,
+							  0,
+							  NULL,
+							  &clgss->events[clgss->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueWriteBuffer: %s",
+				   opencl_strerror(rc));
+		goto error_release;
+	}
+	clgss->ev_index++;
+    clgss->bytes_dma_send += length;
+
+	/* ktoast_head - header portion of kern_toastbuf */
+	length = offsetof(kern_toastbuf, coldir[ncols]);
+	offset = kcs_head->length;
+	rc = clEnqueueWriteBuffer(kcmdq,
+							  m_cstore,
+							  CL_FALSE,
+							  offset,
+							  length,
+							  ktoast_head,
+							  0,
+							  NULL,
+							  &clgss->events[clgss->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueWriteBuffer: %s",
+				   opencl_strerror(rc));
+		goto error_sync;
+	}
+	clgss->ev_index++;
+	clgss->bytes_dma_send += length;
+
+	i_col = 0;
 	for (i=0; i < tcs->ncols; i++)
 	{
 		kern_colmeta   *colmeta;
 
 		j = tcs->i_cached[i];
 		Assert(j >= 0 && j < rs_natts);
-
 		if (!attrefs[j])
 			continue;
-		/* send kcs body and toast */
 
+		colmeta = &kcs_head->colmeta[i_col];
+		/* DMA send - null-bitmap and values of column store */
+		offset = colmeta->cs_ofs;
+		if (!colmeta->attnotnull)
+		{
+			length = (kcs_nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE;
+			rc = clEnqueueWriteBuffer(kcmdq,
+									  m_cstore,
+									  CL_FALSE,
+									  offset,
+									  length,
+									  tcs->cdata[i].isnull,
+									  0,
+									  NULL,
+									  &clgss->events[clgss->ev_index]);
+			if (rc != CL_SUCCESS)
+			{
+				clserv_log("failed on clEnqueueWriteBuffer: %s",
+						   opencl_strerror(rc));
+				goto error_sync;
+			}
+			clgss->ev_index++;
+			clgss->bytes_dma_send += length;
+
+			offset += STROMALIGN(length);
+		}
+		length = (colmeta->attlen > 0
+				  ? colmeta->attlen
+				  : sizeof(cl_uint)) * kcs_nitems;
+		rc = clEnqueueWriteBuffer(kcmdq,
+								  m_cstore,
+								  CL_FALSE,
+								  offset,
+								  length,
+								  tcs->cdata[i].values,
+								  0,
+								  NULL,
+								  &clgss->events[clgss->ev_index]);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clEnqueueWriteBuffer: %s",
+					   opencl_strerror(rc));
+			goto error_sync;
+		}
+		clgss->ev_index++;
+		clgss->bytes_dma_send += length;
+
+		/* DMA send - toast buffer of column store, if exists */
+		if (tcs->cdata[i].toast)
+		{
+			Assert(colmeta->attlen < 0);
+			offset = kcs_head->length + ktoast_head->coldir[i_col];
+			length = tcs->cdata[i].toast->tbuf_usage;
+			rc = clEnqueueWriteBuffer(kcmdq,
+									  m_cstore,
+									  CL_FALSE,
+									  offset,
+									  length,
+									  tcs->cdata[i].toast,
+									  0,
+									  NULL,
+									  &clgss->events[clgss->ev_index]);
+			if (rc != CL_SUCCESS)
+			{
+				clserv_log("failed on clEnqueueWriteBuffer: %s",
+						   opencl_strerror(rc));
+				goto error_sync;
+			}
+			clgss->ev_index++;
+			clgss->bytes_dma_send += length;
+		}
+
+		/* is it last column being referenced? */
 		if (attrefs[j] < 0)
 			break;
+		i_col++;
 	}
+	/* DMA send - rindex of the column store, if exists */
 	if (src_rindex)
-		/* send rindex if needed */;
+	{
+		kern_colmeta   *colmeta = &kcs_head->colmeta[ncols - 1];
 
-	/* launch kernel execution */
+		offset = colmeta->cs_ofs;
+		length = sizeof(cl_uint) * src_nitems;
+		rc = clEnqueueWriteBuffer(kcmdq,
+								  m_cstore,
+								  CL_FALSE,
+								  offset,
+								  length,
+								  src_rindex,
+								  0,
+								  NULL,
+								  &clgss->events[clgss->ev_index]);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clEnqueueWriteBuffer: %s",
+					   opencl_strerror(rc));
+			goto error_sync;
+		}
+		clgss->ev_index++;
+		clgss->bytes_dma_send += length;
+	}
+
+	/*
+	 * Kick gpusort_setup_chunk_cs() call
+	 */
+	rc = clEnqueueNDRangeKernel(kcmdq,
+								prep_kernel,
+								1,
+								NULL,
+								&gwork_sz,
+								&lwork_sz,
+								clgss->ev_index - ev_index_base,
+								&clgss->events[ev_index_base],
+								&clgss->events[clgss->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		goto error_sync;
+    }
+	clgss->ev_index++;
 
 	/* set callback to release shmem */
-	/* set callback to release m_cstore */
+	rc = clSetEventCallback(clgss->events[clgss->ev_index - 1],
+                            CL_COMPLETE,
+							clserv_respond_gpusort_shmem,
+							kcs_head);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetEventCallback: %s", opencl_strerror(rc));
+		goto error_sync;
+	}
 
+	/* set callback to release m_cstore */
+	rc = clSetEventCallback(clgss->events[clgss->ev_index - 1],
+							CL_COMPLETE,
+							clserv_respond_gpusort_kmem,
+							m_cstore);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetEventCallback: %s", opencl_strerror(rc));
+		goto error_sync;
+	}
 	return prep_kernel;
 
 error_sync:
@@ -3038,7 +3219,7 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 	sort_nums = (sort_size * (sort_size + 1)) / 2;
 
 	/* state object of gpuscan (single chunk) */
-	event_nums = 3 * prep_nums + sort_nums + 4;
+	event_nums = 3 * prep_nums + sort_nums + 4 + 10000;
 	clgss = calloc(1, offsetof(clstate_gpusort_single,
 							   events[event_nums]));
 	if (!clgss ||
@@ -3177,7 +3358,7 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 							  &clgss->events[clgss->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
-		clserv_log("failed on clEnqueueWriteBuffer: %s %p %zu %zu", opencl_strerror(rc), KERN_GPUSORT_STATUS(&gs_chunk->kern), offset, length);
+		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
 		goto error_sync;
 	}
 	clgss->ev_index++;

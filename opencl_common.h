@@ -994,6 +994,7 @@ kern_varlena_to_toast(__private int *errcode,
  */
 static void
 kern_column_to_column(__private int *errcode,
+					  cl_uint kcs_ncols,
 					  __global kern_column_store *kcs_dst,
 					  __global kern_toastbuf *ktoast_dst,
 					  cl_uint index_dst,
@@ -1004,25 +1005,28 @@ kern_column_to_column(__private int *errcode,
 {
 	kern_colmeta	scmeta;
 	kern_colmeta	dcmeta;
-	cl_int			i, j, ncols = kcs_src->ncols;
+	cl_int			i, j;
 
-#ifdef PGSTROM_KERNEL_DEBUG
-	/* number of columns shall be identical */
-	if (kcs_src->ncols != kcs_dst->ncols)
+	/*
+	 * number of columns to be moved has to be larger than or equal with
+	 * number of columns being constructed on the column store
+	 */
+	if (kcs_dst->ncols < kcs_ncols || kcs_src->ncols < kcs_ncols)
 	{
 		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 		return;
 	}
 
-	/* index towards the record has to be in the room of column-store */
+	/*
+	 * If we adopt local-memory based reduction operation later,
+	 * the check below also has to be revised, because barrier()
+	 * synchronization requires to run all the threads critical
+	 * section.
+	 */
 	if (index_src >= kcs_src->nrooms || index_dst >= kcs_dst->nrooms)
-	{
-		STROM_SET_ERROR(errcode, StromError_DataStoreOutOfRange);
 		return;
-	}
-#endif /* PGSTROM_KERNEL_DEBUG */
 
-	for (i=0; i < ncols; i++)
+	for (i=0; i < kcs_ncols; i++)
 	{
 		kern_colmeta	scmeta = kcs_src->colmeta[i];
 	    kern_colmeta	dcmeta = kcs_dst->colmeta[i];
@@ -1030,19 +1034,6 @@ kern_column_to_column(__private int *errcode,
 		__global char  *daddr;
 		cl_bool			isnull;
 
-#ifdef PGSTROM_KERNEL_DEBUG
-		/*
-		 * attalign and attlen must be identical, but attnotnull can be
-		 * handled during data copy, and may have different cs_ofs
-		 * according to nrooms of the column-store
-		 */
-		if (scmeta.attalign != dcmeta.attalign ||
-			scmeta.attlen   != dcmeta.attlen)
-		{
-			STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
-			return;
-		}
-#endif
 		saddr = (__global char *)kcs_src + scmeta.cs_ofs;
 		daddr = (__global char *)kcs_dst + dcmeta.cs_ofs;
 
@@ -1051,7 +1042,8 @@ kern_column_to_column(__private int *errcode,
 		else
 		{
 			isnull = att_isnull(index_src, saddr);
-			saddr += STROMALIGN((kcs_src->nrooms + 7) >> 3);
+			saddr += STROMALIGN((kcs_src->nrooms +
+								 BITS_PER_BYTE - 1) / BITS_PER_BYTE);
 		}
 		/* XXX - we may need to adjust alignment */
 		saddr += (scmeta.attlen > 0
@@ -1067,14 +1059,19 @@ kern_column_to_column(__private int *errcode,
 		 */
 		if (!dcmeta.attnotnull)
 		{
-			if (isnull)
-				atomic_or((__global cl_uint *)(daddr + (index_dst >> 5)),
-						  ~(1 << (index_dst & 0x001f)));
+			__global cl_uint   *nullmap = (((__global cl_uint *)daddr) +
+										   (index_dst / (sizeof(cl_uint) *
+														 BITS_PER_BYTE)));
+			cl_uint				shift = (index_dst & ~(sizeof(cl_uint) *
+													   BITS_PER_BYTE - 1));
+			if (!isnull)
+				atomic_or(nullmap, 1 << shift);
 			else
-				atomic_and((__global cl_uint *)(daddr + (index_dst >> 5)),
-						   ~(1 << (index_dst & 0x001f)));
+				atomic_and(nullmap, ~(1 << shift));
+
 			/* adjust offset for nullmap */
-			daddr += STROMALIGN((kcs_dst->nrooms + 7) >> 3);
+			daddr += STROMALIGN((kcs_dst->nrooms +
+								 BITS_PER_BYTE - 1) / BITS_PER_BYTE);
 		}
 		else if (isnull)
 		{
@@ -1082,11 +1079,11 @@ kern_column_to_column(__private int *errcode,
 			STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 			return;
 		}
+
 		/* XXX - we may need to adjust alignment */
 		daddr += (dcmeta.attlen > 0
 				  ? dcmeta.attlen
 				  : sizeof(cl_uint)) * index_dst;
-
 		/*
 		 * Right now, we have only 8, 4, 2 and 1 bytes width for
 		 * fixed length variables
@@ -1103,9 +1100,13 @@ kern_column_to_column(__private int *errcode,
 			memcpy(daddr, saddr, dcmeta.attlen);
 		else
 		{
-			__global varlena   *vl_datum
-				= (__global varlena *)((__global char *)ktoast_src +
-									   *((__global cl_uint *)saddr));
+			__global varlena   *vl_datum;
+			cl_uint				vl_offset = *((__global cl_uint *)saddr);
+
+			if (ktoast_src->length == TOASTBUF_MAGIC)
+				vl_offset += ktoast_src->coldir[i];
+			vl_datum = (__global varlena *)
+				((__global char *)ktoast_src + vl_offset);
 			*((__global cl_uint *)daddr) = kern_varlena_to_toast(errcode,
 																 ktoast_dst,
 																 vl_datum,

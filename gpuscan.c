@@ -1629,15 +1629,26 @@ retry:
 static void
 gpuscan_end(CustomPlanState *node)
 {
-	GpuScanState   *gss = (GpuScanState *)node;
+	GpuScanState	   *gss = (GpuScanState *)node;
+	pgstrom_gpuscan	   *gpuscan;
 
 	if (gss->curr_chunk)
 	{
-		pgstrom_gpuscan *gpuscan = gss->curr_chunk;
+		gpuscan = gss->curr_chunk;
 
 		pgstrom_untrack_object(&gpuscan->msg.sobj);
 		pgstrom_put_message(&gpuscan->msg);
 		gss->curr_chunk = NULL;
+	}
+
+	while (gss->num_running > 0)
+	{
+		gpuscan = (pgstrom_gpuscan *)pgstrom_dequeue_message(gss->mqueue);
+		if (!gpuscan)
+			elog(ERROR, "message queue wait timeout");
+		pgstrom_untrack_object(&gpuscan->msg.sobj);
+		pgstrom_put_message(&gpuscan->msg);
+		gss->num_running--;
 	}
 
 	if (gss->dprog_key)

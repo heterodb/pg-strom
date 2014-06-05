@@ -574,17 +574,91 @@ gpusort_setup_chunk_rs(cl_uint rcs_gindex,
 }
 
 __kernel void
-gpusort_setup_chunk_cs(__global kern_gpusort *kgsort,
-					   __global kern_column_store *kcs,
-					   __global kern_toastbuf *ktoast,
+gpusort_setup_chunk_cs(cl_uint rcs_gindex,
+					   __global kern_gpusort *kgsort,
+					   __global kern_column_store *kcs_src,
+					   cl_int   src_nitems,
 					   __local void *local_workmem)
 {
+	__global kern_parambuf	   *kparams = KERN_GPUSORT_PARAMBUF(kgsort);
+	__global kern_column_store *kcs_dst = KERN_GPUSORT_CHUNK(kgsort);
+	__global kern_toastbuf	   *ktoast_dst = KERN_GPUSORT_TOASTBUF(kgsort);
+	__global cl_int			   *kstatus = KERN_GPUSORT_STATUS(kgsort);
+	__global kern_toastbuf	   *ktoast_src =
+		(__global kern_toastbuf *)((__global char *)kcs_src + kcs_src->length);
+	__global cl_int			   *rindex;
+	__local size_t	dst_offset;
+	__local size_t	dst_nitems;
+	size_t			dst_index;	/* index on the destination column-store */
+	size_t			src_index;	/* index on the source column-store */
+	cl_uint			ncols = kcs_src->ncols;
+	cl_int			errcode = StromError_Success;
+
 	/*
-	 * This routine moves records from usual column-store (smaller)
-	 * into sorting chunk (a larger column store), as a preprocess
-	 * of GPU sorting.
-	 * Note: get_global_offset(1) shows index of row-store on host.
+	 * If number of valid rows are negative value, it means all the
+	 * rows are valid, so no need to use rindex here.
 	 */
+	if (src_nitems < 0)
+	{
+		rindex = NULL;
+		src_nitems = kcs_src->nrows;
+	}
+	else
+	{
+		rindex = KERN_GPUSORT_RESULT_INDEX(kcs_src);
+	}
+
+	/* determine number of items to be moved */
+	if (get_local_id(0) == 0)
+	{
+		if (get_global_id(0) + get_local_size(0) < src_nitems)
+			dst_nitems = get_local_size(0);
+		else if (get_global_id(0) < src_nitems)
+			dst_nitems = src_nitems - get_global_id(0);
+		else
+			dst_nitems = 0;
+		dst_offset = atomic_add(&kcs_dst->nrows, dst_nitems);
+	}
+	barrier(CLK_LOCAL_MEM_FENCE);
+	dst_index = dst_offset + get_local_id(0);
+
+	/*
+	 * fetch a valid row on the krs; pay attention row-store may contain
+	 * rows being already filtered out.
+	 */
+	if (!rindex)
+		src_index = get_global_id(0);
+	else if (get_global_id(0) < src_nitems)
+		src_index = rindex[get_global_id(0)];
+	else
+		src_index = kcs_src->nrows;		/* performs as an invalid row */
+
+	/* move data from source to destination column-store */
+	kern_column_to_column(&errcode,
+						  ncols - 2,
+						  kcs_dst,
+						  ktoast_dst,
+						  dst_index,
+						  kcs_src,
+						  ktoast_src,
+						  src_index,
+						  local_workmem);
+
+	/* also, growid and rindex shall be put */
+	if (get_local_id(0) < dst_nitems)
+	{
+		cl_uint		ncols = kcs_dst->ncols;
+		cl_ulong	growid = (cl_ulong)rcs_gindex << 32 | src_index;
+		__global cl_char   *addr;
+
+		/* second last column is global row-id */
+		addr = kern_get_datum(kcs_dst, ncols - 2, dst_index);
+		*((__global cl_ulong *)addr) = growid;
+		/* last column is index number within a chunk */
+		addr = kern_get_datum(kcs_dst, ncols - 1, dst_index);
+		*((__global cl_uint *)addr) = dst_index;
+	}
+	kern_writeback_error_status(kstatus, errcode, local_workmem);
 }
 
 #else	/* OPENCL_DEVICE_CODE */
