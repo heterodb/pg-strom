@@ -3063,9 +3063,9 @@ error_release:
  *                __local void *local_workbuf)
  */
 static cl_kernel
-clserv_launch_gpusort_bitonic(clstate_gpusort_single *clgss,
-							  cl_uint nrows, bool reversing, cl_uint unitsz,
-							  bool is_first)
+clserv_launch_gpusort_bitonic_step(clstate_gpusort_single *clgss,
+								   cl_uint nrows, bool reversing,
+								   cl_uint unitsz, bool is_first)
 {
 	cl_command_queue kcmdq = opencl_cmdq[clgss->dindex];
 	cl_kernel	sort_kernel;
@@ -3077,7 +3077,7 @@ clserv_launch_gpusort_bitonic(clstate_gpusort_single *clgss,
 	cl_int		rc;
 
 	sort_kernel = clCreateKernel(clgss->program,
-								 "gpusort_single",
+								 "gpusort_single_step",
 								 &rc);
 	if (rc != CL_SUCCESS)
 	{
@@ -3123,9 +3123,149 @@ clserv_launch_gpusort_bitonic(clstate_gpusort_single *clgss,
 		goto error_1;
 	}
 
+	rc = clEnqueueNDRangeKernel(kcmdq,
+								sort_kernel,
+								1,
+								NULL,
+								&gwork_sz,
+								&lwork_sz,
+								is_first ? clgss->ev_index : 1,
+								is_first
+								? &clgss->events[0]
+								: &clgss->events[clgss->ev_index - 1],
+								&clgss->events[clgss->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		goto error_1;
+	}
+	clgss->ev_index++;
+
+	return sort_kernel;
+
+error_1:
+	clReleaseKernel(sort_kernel);
+error_0:
+	return NULL;
+}
+
+static cl_kernel
+clserv_launch_gpusort_bitonic_marge(clstate_gpusort_single *clgss,
+									cl_uint nrows, cl_uint unitsz,
+									bool is_first)
+{
+	cl_command_queue kcmdq = opencl_cmdq[clgss->dindex];
+	cl_kernel	sort_kernel;
+	size_t		lwork_sz;
+	size_t		gwork_sz;
+	size_t		unitlen;
+	cl_int		rc;
+
+	sort_kernel = clCreateKernel(clgss->program,
+								 "gpusort_single_marge",
+								 &rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+		goto error_0;
+	}
+
+	/* Set optimal global/local workgroup size */
+	unitlen  = (1 << unitsz);
+	lwork_sz = unitlen / 2;
+	gwork_sz = ((nrows + unitlen - 1) & ~(unitlen - 1)) / 2;
+
+	// clserv_log("kernel call (nrows=%u, unitlen=%zu, lworksz=%zu, gworksz=%zu)", nrows, unitlen, lwork_sz, gwork_sz);
+
 	rc = clSetKernelArg(sort_kernel,
-						2,	/* void *local_workbuf */
-						sizeof(cl_uint) * lwork_sz + sizeof(cl_uint),
+						0,	/* kern_gpusort *kgsort */
+						sizeof(cl_mem),
+						&clgss->m_chunk);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		goto error_1;
+	}
+
+	rc = clSetKernelArg(sort_kernel,
+						1,	/* void *local_workbuf */
+						sizeof(cl_int) * lwork_sz * 2,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		goto error_1;
+	}
+
+	rc = clEnqueueNDRangeKernel(kcmdq,
+								sort_kernel,
+								1,
+								NULL,
+								&gwork_sz,
+								&lwork_sz,
+								is_first ? clgss->ev_index : 1,
+								is_first
+								? &clgss->events[0]
+								: &clgss->events[clgss->ev_index - 1],
+								&clgss->events[clgss->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		goto error_1;
+	}
+	clgss->ev_index++;
+
+	return sort_kernel;
+
+error_1:
+	clReleaseKernel(sort_kernel);
+error_0:
+	return NULL;
+}
+
+static cl_kernel
+clserv_launch_gpusort_bitonic_sort(clstate_gpusort_single *clgss,
+								   cl_uint nrows, cl_uint unitsz,
+								   bool is_first)
+{
+	cl_command_queue kcmdq = opencl_cmdq[clgss->dindex];
+	cl_kernel	sort_kernel;
+	size_t		lwork_sz;
+	size_t		gwork_sz;
+	size_t		unitlen;
+	cl_int		rc;
+
+	sort_kernel = clCreateKernel(clgss->program,
+								 "gpusort_single_sort",
+								 &rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+		goto error_0;
+	}
+
+	/* Set optimal global/local workgroup size */
+	unitlen  = (1 << unitsz);
+	lwork_sz = unitlen / 2;
+	gwork_sz = ((nrows + unitlen - 1) & ~(unitlen - 1)) / 2;
+
+	// clserv_log("kernel call (nrows=%u, unitlen=%zu, lworksz=%zu, gworksz=%zu)", nrows, unitlen, lwork_sz, gwork_sz);
+
+	rc = clSetKernelArg(sort_kernel,
+						0,	/* kern_gpusort *kgsort */
+						sizeof(cl_mem),
+						&clgss->m_chunk);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		goto error_1;
+	}
+
+	rc = clSetKernelArg(sort_kernel,
+						1,	/* void *local_workbuf */
+						sizeof(cl_int) * lwork_sz * 2,
 						NULL);
 	if (rc != CL_SUCCESS)
 	{
@@ -3177,7 +3317,7 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 	cl_uint					sort_nums;
 	cl_uint					sort_size;
 	cl_uint					event_nums;
-	cl_int					i, j, k, rc;
+	cl_int					i, j, rc;
 	size_t					length;
 	size_t					offset;
 
@@ -3409,14 +3549,49 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 	 * OK, preparation was done. Let's launch gpusort_single kernel
 	 * to sort key values within a gpusort-chunk.
 	 */
-	for (i=1, k=0; i <= sort_size; i++)
+	if (sort_size > 0)
 	{
-		for (j=i; j > 0; j--)
+		/*
+		 * FIXME: optimal size estimation should be integrated to
+		 * clserv_compute_workgroup_size(), but tentatively we
+		 * have logic here...
+		 */
+		const pgstrom_device_info *devinfo =
+			pgstrom_get_device_info(clgss->dindex);
+		size_t local_worksz    = devinfo->dev_max_work_item_sizes[0];
+		size_t local_memsz     = devinfo->dev_local_mem_size;
+		size_t lmem_per_thread = 2 * sizeof(cl_int);
+		size_t max_threads     = ((local_worksz < local_memsz/lmem_per_thread)
+								  ? local_worksz
+								  : (local_memsz/lmem_per_thread));
+		int max_sort_size      = LOG2(max_threads) + 1;
+		cl_int k               = 0;
+
+		cl_kernel sort_kernel;
+		int prt_size;
+
+		prt_size = (sort_size < max_sort_size) ? sort_size : max_sort_size;
+		sort_kernel = clserv_launch_gpusort_bitonic_sort(clgss, nrows,
+														 prt_size, true);
+		if (!sort_kernel)
+			goto error_sync;
+		clgss->sort_kernel[k++] = sort_kernel;
+
+		for (i=max_sort_size+1; i <= sort_size; i++)
 		{
-			cl_kernel	sort_kernel
-				= clserv_launch_gpusort_bitonic(clgss, nrows,
-												j == i ? true : false, j,
-												k==0 ? true : false);
+			for (j=i; max_sort_size<j; j--)
+			{
+				bool reversing = j == i ? true : false;
+				sort_kernel = clserv_launch_gpusort_bitonic_step(clgss, nrows,
+																 reversing, j,
+																 false);
+				if (!sort_kernel)
+					goto error_sync;
+				clgss->sort_kernel[k++] = sort_kernel;
+			}
+			sort_kernel = clserv_launch_gpusort_bitonic_marge(clgss, nrows,
+															  max_sort_size,
+															  false);
 			if (!sort_kernel)
 				goto error_sync;
 			Assert(k <= sort_nums);

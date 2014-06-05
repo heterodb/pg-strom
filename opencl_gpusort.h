@@ -164,15 +164,17 @@ static cl_int gpusort_comp(__private int *errcode,
 
 /* expected kernel prototypes */
 static void
-run_gpusort_single(__global kern_parambuf *kparams,
-				   cl_bool reversing,					/* in */
-				   cl_uint unitsz,						/* in */
-				   __global kern_column_store *kchunk,	/* in */
-				   __global kern_toastbuf *ktoast,		/* in */
-				   __private cl_int *errcode,			/* out */
-				   __local void *local_workbuf)
+run_gpusort_single_step(
+	__global kern_parambuf *kparams,
+	cl_bool reversing,					/* in */
+	cl_uint unitsz,						/* in */
+	__global kern_column_store *kchunk,	/* in */
+	__global kern_toastbuf *ktoast,		/* in */
+	__private cl_int *errcode			/* out */
+	)
 {
 	__global cl_int	*results = KERN_GPUSORT_RESULT_INDEX(kchunk);
+	cl_int	nrows			 = (kchunk)->nrows;
 
 	/*
 	 * sort the supplied kchunk according to the supplied
@@ -182,7 +184,6 @@ run_gpusort_single(__global kern_parambuf *kparams,
 	 */
 
 	cl_int	threadID		= get_global_id(0);
-	cl_int	nrows			= (kchunk)->nrows;
 	cl_int	halfUnitSize	= unitsz / 2;
 	cl_int	unitMask		= unitsz - 1;
 	cl_int	idx0;
@@ -206,6 +207,175 @@ run_gpusort_single(__global kern_parambuf *kparams,
 		results[idx0] = pos1;
 		results[idx1] = pos0;
 	}
+	return;
+}
+
+/* expected kernel prototypes */
+static void
+run_gpusort_single_marge(
+	__global kern_parambuf *kparams,
+	__global kern_column_store *kchunk,	/* in */
+	__global kern_toastbuf *ktoast,		/* in */
+	__private cl_int *errcode,			/* out */
+	__local int localIdx[] )
+{
+	__global cl_int	*results = KERN_GPUSORT_RESULT_INDEX(kchunk);
+	cl_int			nrows	 = (kchunk)->nrows;
+
+	/*
+	 * sort the supplied kchunk according to the supplied
+	 * compare function, then it put index of sorted array
+	 * on the rindex buffer.
+	 * (rindex array has the least 2^N capacity larger than nrows)
+	 */
+	
+    cl_int localID		= get_local_id(0);
+    cl_int globalID		= get_global_id(0);
+    cl_int localSize	= get_local_size(0);
+
+    cl_int prtID		= globalID / localSize; /* partition ID */
+    cl_int prtSize		= localSize * 2;		/* partition Size */
+    cl_int prtMask		= prtSize - 1;			/* partition Mask */
+    cl_int prtPos		= prtID * prtSize;		/* partition Position */
+
+    cl_int localEntry	= (prtPos+prtSize < nrows) ? prtSize : (nrows-prtPos);
+
+
+    // load index to localIdx
+    if(localID < localEntry)
+		localIdx[localID] = results[prtPos + localID];
+
+    if(localSize + localID < localEntry)
+		localIdx[localSize + localID] = results[prtPos + localSize + localID];
+
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+
+	// marge sorted block
+	int blockSize		= prtSize;
+	int blockMask		= blockSize - 1;
+	int halfBlockSize	= blockSize / 2;
+	int halfBlockMask	= halfBlockSize -1;
+
+	for(int unitSize=blockSize; 2<=unitSize; unitSize/=2)
+	{
+		int unitMask		= unitSize - 1;
+		int halfUnitSize	= unitSize / 2;
+		int halfUnitMask	= halfUnitSize - 1;
+
+		int idx0 = localID / halfUnitSize * unitSize + localID % halfUnitSize;
+		int idx1 = halfUnitSize + idx0;
+				
+		if(idx1 < localEntry) {
+			cl_int pos0 = localIdx[idx0];
+			cl_int pos1 = localIdx[idx1];
+			cl_int rv = gpusort_comp(errcode,
+									 kchunk, ktoast, pos0,
+									 kchunk, ktoast, pos1);
+
+			if(0 < rv) {
+				// swap
+				localIdx[idx0] = pos1;
+				localIdx[idx1] = pos0;
+			}
+		}
+		barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if(localID < localEntry)
+		results[prtPos + localID] = localIdx[localID];
+
+    if(localSize + localID < localEntry)
+		results[prtPos + localSize + localID] = localIdx[localSize + localID];
+
+	return;
+}
+
+/* expected kernel prototypes */
+static void
+run_gpusort_single_sort(
+	__global kern_parambuf *kparams,
+	__global kern_column_store *kchunk,	/* in */
+	__global kern_toastbuf *ktoast,		/* in */
+	__private cl_int *errcode,			/* out */
+	__local int localIdx[] )
+{
+	__global cl_int	*results = KERN_GPUSORT_RESULT_INDEX(kchunk);
+	cl_int			nrows	 = (kchunk)->nrows;
+
+	/*
+	 * sort the supplied kchunk according to the supplied
+	 * compare function, then it put index of sorted array
+	 * on the rindex buffer.
+	 * (rindex array has the least 2^N capacity larger than nrows)
+	 */
+	
+    cl_int localID		= get_local_id(0);
+    cl_int globalID		= get_global_id(0);
+    cl_int localSize	= get_local_size(0);
+
+    cl_int prtID		= globalID / localSize; /* partition ID */
+    cl_int prtSize		= localSize * 2;		/* partition Size */
+    cl_int prtMask		= prtSize - 1;			/* partition Mask */
+    cl_int prtPos		= prtID * prtSize;		/* partition Position */
+
+    cl_int localEntry	= ((prtPos + prtSize < nrows) 
+						   ? prtSize
+						   : (nrows - prtPos));
+
+    // load index to localIdx
+    if(localID < localEntry)
+		localIdx[localID] = results[prtPos + localID];
+
+    if(localSize + localID < localEntry)
+		localIdx[localSize + localID] = results[prtPos + localSize + localID];
+
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+
+	// bitonic sort
+	for(int blockSize=2; blockSize<=prtSize; blockSize*=2)
+	{
+		int blockMask		= blockSize - 1;
+		int halfBlockSize	= blockSize / 2;
+		int halfBlockMask	= halfBlockSize -1;
+
+		for(int unitSize=blockSize; 2<=unitSize; unitSize/=2)
+		{
+			int unitMask		= unitSize - 1;
+			int halfUnitSize	= unitSize / 2;
+			int halfUnitMask	= halfUnitSize - 1;
+
+			bool reversing	= unitSize == blockSize ? true : false;
+			int idx0 = ((localID / halfUnitSize) * unitSize
+						+ localID % halfUnitSize);
+			int idx1 = ((reversing == true)
+						? ((idx0 & ~unitMask) | (~idx0 & unitMask))
+						: (halfUnitSize + idx0));
+				
+			if(idx1 < localEntry) {
+				cl_int pos0 = localIdx[idx0];
+				cl_int pos1 = localIdx[idx1];
+				cl_int rv = gpusort_comp(errcode,
+										 kchunk, ktoast, pos0,
+										 kchunk, ktoast, pos1);
+
+				if(0 < rv) {
+					// swap
+					localIdx[idx0] = pos1;
+					localIdx[idx1] = pos0;
+				}
+			}
+			barrier(CLK_LOCAL_MEM_FENCE);
+		}
+    }
+
+    if(localID < localEntry)
+		results[prtPos + localID] = localIdx[localID];
+
+    if(localSize + localID < localEntry)
+		results[prtPos + localSize + localID] = localIdx[localSize + localID];
+
 	return;
 }
 
@@ -412,9 +582,9 @@ run_gpusort_multi(__global kern_parambuf *kparams,
  * generated on the fly.
  */
 __kernel void
-gpusort_single(cl_int bitonic_unitsz,
-			   __global kern_gpusort *kgsort,
-			   __local void *local_workbuf)
+gpusort_single_step(
+	cl_int bitonic_unitsz,
+	__global kern_gpusort *kgsort)
 {
 	__global kern_parambuf *kparams		= KERN_GPUSORT_PARAMBUF(kgsort);
 	__global kern_column_store *kchunk	= KERN_GPUSORT_CHUNK(kgsort);
@@ -426,8 +596,36 @@ gpusort_single(cl_int bitonic_unitsz,
 						  : 1U << bitonic_unitsz);
 	cl_int		errcode = StromError_Success;
 
-	run_gpusort_single(kparams, reversing, unitsz,
-					   kchunk, ktoast, &errcode, local_workbuf);
+	run_gpusort_single_step(kparams, reversing, unitsz, kchunk, ktoast,
+							&errcode);
+}
+
+__kernel void
+gpusort_single_marge(
+	__global kern_gpusort *kgsort,
+	__local void *local_workbuf)
+{
+	__global kern_parambuf *kparams		= KERN_GPUSORT_PARAMBUF(kgsort);
+	__global kern_column_store *kchunk	= KERN_GPUSORT_CHUNK(kgsort);
+	__global kern_toastbuf *ktoast		= KERN_GPUSORT_TOASTBUF(kgsort);
+	__global cl_int		   *results		= KERN_GPUSORT_RESULT_INDEX(kchunk);
+	cl_int errcode = StromError_Success;
+
+	run_gpusort_single_marge(kparams, kchunk, ktoast, &errcode, local_workbuf);
+}
+
+__kernel void
+gpusort_single_sort(
+	__global kern_gpusort *kgsort,
+	__local void *local_workbuf)
+{
+	__global kern_parambuf *kparams		= KERN_GPUSORT_PARAMBUF(kgsort);
+	__global kern_column_store *kchunk	= KERN_GPUSORT_CHUNK(kgsort);
+	__global kern_toastbuf *ktoast		= KERN_GPUSORT_TOASTBUF(kgsort);
+	__global cl_int		   *results		= KERN_GPUSORT_RESULT_INDEX(kchunk);
+	cl_int errcode = StromError_Success;
+
+	run_gpusort_single_sort(kparams, kchunk, ktoast, &errcode, local_workbuf);
 }
 
 /*
