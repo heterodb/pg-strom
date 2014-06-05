@@ -163,9 +163,14 @@ typedef struct {
 	cl_uint		num_dma_send;	/* number of DMA send request */
 	cl_uint		num_dma_recv;	/* number of DMA receive request */
 	cl_ulong	time_dma_send;	/* time to send host=>device data */
-	cl_ulong	time_kern_exec;	/* time to execute kernel */
+	cl_uint		num_prep_exec;	/* number of preprocess kernel execution */
+	cl_uint		num_kern_exec;	/* number of main kernel execution */
+	cl_ulong	time_prep_exec;	/* time to execute preprocess kernel */
+	cl_ulong	time_kern_exec;	/* time to execute main kernel */
 	cl_ulong	time_dma_recv;	/* time to receive device=>host data */
 	cl_ulong	time_in_recvq;	/* waiting time in the response mqueue */
+	cl_ulong	time_post_exec;	/* time to execute post GPU processing
+								 * like host-qual, extract column-store, ... */
 	struct timeval	tv;	/* result of gettimeofday(2) when enqueued */
 } pgstrom_perfmon;
 

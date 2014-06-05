@@ -1138,9 +1138,13 @@ gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
 	Snapshot	snapshot = gss->cps.ps.state->es_snapshot;
 	cl_int		i_result;
 	bool		do_recheck;
+	struct timeval tv1, tv2;
 
 	if (!gpuscan)
 		return false;
+
+	if (gss->pfm.enabled)
+		gettimeofday(&tv1, NULL);
 
 	kresult = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
    	while (gss->curr_index < kresult->nitems)
@@ -1173,7 +1177,19 @@ gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
 			if (!ExecQual(gss->dev_quals, econtext, false))
 				continue;
 		}
+
+		if (gss->pfm.enabled)
+		{
+			gettimeofday(&tv2, NULL);
+			gss->pfm.time_post_exec += timeval_diff(&tv1, &tv2);
+		}
 		return true;
+	}
+	/* no tuples in this row/column-store any more */
+	if (gss->pfm.enabled)
+	{
+		gettimeofday(&tv2, NULL);
+		gss->pfm.time_post_exec += timeval_diff(&tv1, &tv2);
 	}
 	return false;
 }
@@ -2327,6 +2343,7 @@ clserv_process_gpuscan_row(pgstrom_message *msg)
 		gpuscan->msg.pfm.bytes_dma_recv = bytes_dma_recv;
 		gpuscan->msg.pfm.num_dma_send = 3;
 		gpuscan->msg.pfm.num_dma_recv = 1;
+		gpuscan->msg.pfm.num_kern_exec = 1;
 	}
 
 	/*
