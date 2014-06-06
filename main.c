@@ -335,105 +335,155 @@ pgstrom_perfmon_add(pgstrom_perfmon *pfm_sum, pgstrom_perfmon *pfm_item)
 	pfm_sum->time_in_recvq	+= pfm_item->time_in_recvq;
 }
 
-static void
-snprintf_dma_bandwidth(char *buf, size_t buflen,
-					   cl_ulong length, cl_uint num, cl_ulong usec)
+static char *
+bytesz_unitary_format(double nbytes)
 {
-	double	band = (double)length / ((double)usec / 1000000.0);
-	Size	unitsz = length / num;
-	int		ofs;
+	if (nbytes > (double)(1UL << 43))
+		return psprintf("%.2fTB", nbytes / (double)(1UL << 40));
+	else if (nbytes > (double)(1UL << 33))
+		return psprintf("%.2fGB", nbytes / (double)(1UL << 30));
+	else if (nbytes > (double)(1UL << 23))
+		return psprintf("%.2fMB", nbytes / (double)(1UL << 20));
+	else if (nbytes > (double)(1UL << 13))
+		return psprintf("%.2fKB", nbytes / (double)(1UL << 10));
+	return psprintf("%uB", (unsigned int)nbytes);
+}
 
-	if (band > (double)(1UL << 43))
-		ofs = snprintf(buf, buflen, "%.1fTB/s", band / (double)(1UL<<40));
-	else if (band > (double)(1UL << 33))
-		ofs = snprintf(buf, buflen, "%.1fGB/s", band / (double)(1UL<<30));
-	else if (band > (double)(1UL << 23))
-		ofs = snprintf(buf, buflen, "%.1fMB/s", band / (double)(1UL<<20));
-	else if (band > (double)(1UL << 13))
-		ofs = snprintf(buf, buflen, "%.1fKB/s", band / (double)(1UL<<10));
-	else
-		ofs = snprintf(buf, buflen, "%.1f bytes/s", band);
-
-	if (unitsz > (1UL << 43))
-		snprintf(buf+ofs, buflen-ofs, ", unitsz %luTB", unitsz >> 40);
-	else if (unitsz > (1UL << 33))
-		snprintf(buf+ofs, buflen-ofs, ", unitsz %luGB", unitsz >> 30);
-	else if (unitsz > (1UL << 23))
-		snprintf(buf+ofs, buflen-ofs, ", unitsz %luMB", unitsz >> 20);
-	else if (unitsz > (1UL << 13))
-		snprintf(buf+ofs, buflen-ofs, ", unitsz %luKB", unitsz >> 10);
-	else
-		snprintf(buf+ofs, buflen-ofs, ", unitsz %lu bytes/s", unitsz);
+static char *
+usecond_unitary_format(double usecond)
+{
+	if (usecond > 300.0 * 1000.0 * 1000.0)
+		return psprintf("%.2fmin", usecond / (60.0 * 1000.0 * 1000.0));
+	else if (usecond > 8000.0 * 1000.0)
+		return psprintf("%.2fsec", usecond / (1000.0 * 1000.0));
+	else if (usecond > 8000.0)
+		return psprintf("%.2fms", usecond / 1000.0);
+	return psprintf("%uus", (unsigned int)usecond);
 }
 
 void
 pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 {
-	double	n = (double)pfm->num_samples;
 	char	buf[256];
 
 	if (!pfm->enabled || pfm->num_samples == 0)
 		return;
 
-	ExplainPropertyInteger("Number of chunks", pfm->num_samples, es);
+	/* common performance statistics */
+	ExplainPropertyInteger("number of requests", pfm->num_samples, es);
 
-	snprintf(buf, sizeof(buf), "%.3f ms",
-			 (double)pfm->time_to_load / 1000.0);
-	ExplainPropertyText("Total time to load", buf, es);
+	snprintf(buf, sizeof(buf), "%s",
+			 usecond_unitary_format((double)pfm->time_to_load));
+	ExplainPropertyText("total time to load", buf, es);
 
-	snprintf(buf, sizeof(buf), "%.3f ms",
-			 (double)pfm->time_tcache_build / 1000.0);
-	ExplainPropertyText("Time to build tcache", buf, es);
-
-	snprintf(buf, sizeof(buf), "%.3f ms",
-			 (double)pfm->time_kern_build / 1000.0);
-	ExplainPropertyText("Max time to build kernel", buf, es);
-
-	if (n > 0.0)
+	if (pfm->time_tcache_build > 0)
 	{
-		snprintf(buf, sizeof(buf), "%.3f ms",
-				 (double)pfm->time_in_sendq / n / 1000.0);
-		ExplainPropertyText("Avg time in send-mq", buf, es);
+		snprintf(buf, sizeof(buf), "%s",
+				 usecond_unitary_format((double)pfm->time_tcache_build));
+		ExplainPropertyText("time to build tcache", buf, es);
+	}
 
-		snprintf(buf, sizeof(buf), "total %.3f ms, avg %.3f ms",
-				 (double)pfm->time_dma_send / 1000.0,
-				 (double)pfm->time_dma_send / n / 1000.0);
-		ExplainPropertyText("DMA send time", buf, es);
+	if (pfm->time_kern_build > 0)
+	{
+		snprintf(buf, sizeof(buf), "%s",
+				 usecond_unitary_format((double)pfm->time_kern_build));
+		ExplainPropertyText("max time to build kernel", buf, es);
+	}
+
+	if (pfm->num_samples > 0 && pfm->time_in_sendq > 0)
+	{
+		snprintf(buf, sizeof(buf), "%s",
+				 usecond_unitary_format((double)pfm->time_in_sendq /
+										(double)pfm->num_samples));
+		ExplainPropertyText("average time in send-mq", buf, es);
 	}
 
 	if (pfm->num_dma_send > 0)
 	{
-		snprintf_dma_bandwidth(buf, sizeof(buf),
-							   pfm->bytes_dma_send,
-							   pfm->num_dma_send,
-							   pfm->time_dma_send);
-		ExplainPropertyText("DMA send band", buf, es);
+		snprintf(buf, sizeof(buf),
+				 "total length %s, total time %s, avg time %s",
+				 bytesz_unitary_format((double)pfm->bytes_dma_send),
+				 usecond_unitary_format((double)pfm->time_dma_send),
+				 usecond_unitary_format((double)pfm->time_dma_send /
+										(double)pfm->num_dma_send));
+		ExplainPropertyText("DMA send", buf, es);
+	}
 
-		snprintf(buf, sizeof(buf), "total %.3f ms, avg %.3f ms",
-				 (double)pfm->time_kern_exec / 1000.0,
-				 (double)pfm->time_kern_exec / n / 1000.0);
-		ExplainPropertyText("Kernel exec time", buf, es);
+	if (pfm->num_prep_exec > 0)
+	{
+		snprintf(buf, sizeof(buf), "total %s, avg %s",
+				 usecond_unitary_format((double)pfm->time_prep_exec),
+				 usecond_unitary_format((double)pfm->time_prep_exec /
+										(double)pfm->num_prep_exec));
+        ExplainPropertyText("prep kernel exec time", buf, es);
+	}
+
+	if (pfm->num_kern_exec > 0)
+	{
+		snprintf(buf, sizeof(buf), "total %s, avg %s",
+				 usecond_unitary_format((double)pfm->time_kern_exec),
+				 usecond_unitary_format((double)pfm->time_kern_exec /
+										(double)pfm->num_kern_exec));
+		ExplainPropertyText("main kernel exec time", buf, es);
 	}
 
 	if (pfm->num_dma_recv > 0)
 	{
-		snprintf(buf, sizeof(buf), "total %.3f ms, avg %.3f ms",
-				 (double)pfm->time_dma_recv / 1000.0,
-				 (double)pfm->time_dma_recv / n / 1000.0);
-		ExplainPropertyText("DMA recv time", buf, es);
-
-		snprintf_dma_bandwidth(buf, sizeof(buf),
-							   pfm->bytes_dma_recv,
-							   pfm->num_dma_recv,
-							   pfm->time_dma_recv);
-		ExplainPropertyText("DMA recv band", buf, es);
+		snprintf(buf, sizeof(buf),
+				 "total length %s, total time %s, avg time %s",
+				 bytesz_unitary_format((double)pfm->bytes_dma_recv),
+				 usecond_unitary_format((double)pfm->time_dma_recv),
+				 usecond_unitary_format((double)pfm->time_dma_recv /
+										(double)pfm->num_dma_recv));
+		ExplainPropertyText("DMA recv", buf, es);
 	}
 
-	if (n > 0.0)
+	if (pfm->num_dma_send > 0 || pfm->num_dma_recv > 0)
 	{
-		snprintf(buf, sizeof(buf), "%.3f ms",
-				 (double)pfm->time_in_recvq / n / 1000.0);
-		ExplainPropertyText("Avg time in recv-mq", buf, es);
+		double	band;
+		double	unitsz;
+		size_t	ofs = 0;
+
+		if (pfm->num_dma_send > 0)
+		{
+			band = (((double)pfm->bytes_dma_send * 1000000.0)
+					/ (double)pfm->time_dma_send);
+			unitsz = ((double)pfm->bytes_dma_send /
+					  (double)pfm->num_dma_send);
+			ofs += snprintf(buf + ofs, sizeof(buf) - ofs,
+							"%ssend %s/sec unitsz %s",
+							ofs > 0 ? ", " : "",
+							bytesz_unitary_format(band),
+							bytesz_unitary_format(unitsz));
+		}
+		if (pfm->num_dma_recv > 0)
+		{
+			band = (((double)pfm->bytes_dma_recv * 1000000.0)
+					/ (double)pfm->time_dma_recv);
+			unitsz = ((double)pfm->bytes_dma_recv /
+					  (double)pfm->num_dma_recv);
+			ofs += snprintf(buf + ofs, sizeof(buf) - ofs,
+							"%srecv %s/sec unitsz %s",
+							ofs > 0 ? ", " : "",
+							bytesz_unitary_format(band),
+							bytesz_unitary_format(unitsz));
+		}
+		ExplainPropertyText("DMA band", buf, es);
+	}
+
+	if (pfm->num_samples > 0 && pfm->time_in_recvq > 0)
+	{
+		snprintf(buf, sizeof(buf), "%s",
+				 usecond_unitary_format((double)pfm->time_in_recvq /
+										(double)pfm->num_samples));
+		ExplainPropertyText("average time in recv-mq", buf, es);
+	}
+
+	if (pfm->time_post_exec > 0)
+	{
+		snprintf(buf, sizeof(buf), "%s",
+				 usecond_unitary_format((double)pfm->time_post_exec));
+		ExplainPropertyText("time for post device exec", buf, es);
 	}
 }
 

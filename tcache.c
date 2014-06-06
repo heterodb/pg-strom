@@ -2224,7 +2224,7 @@ tcache_begin_scan(tcache_head *tc_head, Relation heap_rel)
 
 	Assert(heap_rel != NULL);
 
-	tc_scan = palloc(sizeof(tcache_scandesc));
+	tc_scan = palloc0(sizeof(tcache_scandesc));
 	tc_scan->rel = heap_rel;
 	tc_scan->heapscan = NULL;
 	tc_scan->has_exlock = false;
