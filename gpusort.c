@@ -628,6 +628,10 @@ gpusort_construct_kcshead(TupleDesc tupdesc,
 		offset += STROMALIGN((attr->attlen > 0
 							  ? attr->attlen
 							  : sizeof(cl_uint)) * nrooms);
+		{
+			kern_colmeta *colmeta = &kcs_head->colmeta[i_col];
+			clserv_log("colmeta[%d] attname=%s {attnotnull=%d, attalign=%d, attlen=%d, cs_ofs=%u}", i_col, NameStr(attr->attname), colmeta->attnotnull, colmeta->attalign, colmeta->attlen, colmeta->cs_ofs);
+		}
 		i_col++;
 	}
 
@@ -1982,7 +1986,18 @@ gpusort_exec(CustomPlanState *node)
 				Assert(j >= 0 && j < tupdesc->natts);
 				attr = tupdesc->attrs[j];
 
+				/*
+				 * NOTE: See bug #32. When we scan a underlying relation
+				 * with not-null constratint using bulk-exec mode, its
+				 * tcache_column_store does not have null-bitmap due to
+				 * optimization. However, once a relation is scanned,
+				 * TupleDesc of SubPlan lost information of this constraint.
+				 * So, we consider all the column with no-nullmap are come
+				 * from columns with not-null restrictions, thus, we have
+				 * to care about tcs->cdata[].isnull also.
+				 */
 				if (!attr->attnotnull &&
+					tcs->cdata[i].isnull &&
 					att_isnull(row_idx, tcs->cdata[i].isnull))
 					continue;
 
@@ -2718,6 +2733,7 @@ clserv_launch_gpusort_setup_column(clstate_gpusort_single *clgss,
 			continue;
 
 		colmeta = &kcs_head->colmeta[i_col];
+		//clserv_log("colmeta[%d] {attnotnull=%d, attalign=%d, attlen=%d, cs_ofs=%u}", i_col, colmeta->attnotnull, colmeta->attalign, colmeta->attlen, colmeta->cs_ofs);
 		colmeta->cs_ofs = kcs_offset;
 		if (!colmeta->attnotnull)
 			kcs_offset += STROMALIGN((kcs_nitems +
@@ -2903,20 +2919,43 @@ clserv_launch_gpusort_setup_column(clstate_gpusort_single *clgss,
 		if (!colmeta->attnotnull)
 		{
 			length = (kcs_nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE;
-			rc = clEnqueueWriteBuffer(kcmdq,
-									  m_cstore,
-									  CL_FALSE,
-									  offset,
-									  length,
-									  tcs->cdata[i].isnull,
-									  0,
-									  NULL,
-									  &clgss->events[clgss->ev_index]);
-			if (rc != CL_SUCCESS)
+			if (tcs->cdata[i].isnull)
 			{
-				clserv_log("failed on clEnqueueWriteBuffer: %s",
-						   opencl_strerror(rc));
-				goto error_sync;
+				rc = clEnqueueWriteBuffer(kcmdq,
+										  m_cstore,
+										  CL_FALSE,
+										  offset,
+										  length,
+										  tcs->cdata[i].isnull,
+										  0,
+										  NULL,
+										  &clgss->events[clgss->ev_index]);
+				if (rc != CL_SUCCESS)
+				{
+					clserv_log("failed on clEnqueueWriteBuffer: %s",
+							   opencl_strerror(rc));
+					goto error_sync;
+				}
+			}
+			else
+			{
+				cl_uint	nullmap = (cl_uint)(-1);
+
+				rc = clEnqueueFillBuffer(kcmdq,
+										 m_cstore,
+										 &nullmap,
+										 sizeof(cl_uint),
+										 offset,
+										 INTALIGN(length),
+										 0,
+										 NULL,
+										 &clgss->events[clgss->ev_index]);
+				if (rc != CL_SUCCESS)
+				{
+					clserv_log("failed on clEnqueueFillBuffer: %s",
+							   opencl_strerror(rc));
+					goto error_sync;
+				}
 			}
 			clgss->ev_index++;
 			clgss->bytes_dma_send += length;

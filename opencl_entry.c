@@ -287,6 +287,8 @@ static cl_int (*p_clEnqueueWriteBuffer)(
 	cl_uint num_events_in_wait_list,
 	const cl_event *event_wait_list,
 	cl_event *event) = NULL;
+#if 0
+/* we're waiting for nvidia's opencl 1.2 support... */
 static cl_int (*p_clEnqueueFillBuffer)(
 	cl_command_queue command_queue,
 	cl_mem buffer,
@@ -297,6 +299,7 @@ static cl_int (*p_clEnqueueFillBuffer)(
 	cl_uint num_events_in_wait_list,
 	const cl_event  *event_wait_list,
 	cl_event  *event) = NULL;
+#endif
 static cl_int (*p_clEnqueueCopyBuffer)(
 	cl_command_queue command_queue,
 	cl_mem src_buffer,
@@ -412,6 +415,20 @@ clEnqueueWriteBuffer(cl_command_queue command_queue,
 									 event);
 }
 
+/*
+ * NOTE: clEnqueueFillBuffer is a new feature being supported
+ * from OpenCL 1.2; that beyonds the requirement of PG-Strom.
+ * So, we put an alternative way to work with the driver that
+ * supports OpenCL 1.1 (typically, nvidia's one)
+ */
+static void
+pgstromEnqueueFillBufferCleanup(cl_event event,
+								cl_int event_command_exec_status,
+								void *user_data)
+{
+	clReleaseKernel((cl_kernel)user_data);
+}
+
 cl_int
 clEnqueueFillBuffer(cl_command_queue command_queue,
 					cl_mem buffer,
@@ -423,15 +440,240 @@ clEnqueueFillBuffer(cl_command_queue command_queue,
 					const cl_event *event_wait_list,
 					cl_event *event)
 {
-	return (*p_clEnqueueFillBuffer)(command_queue,
-									buffer,
-									pattern,
-									pattern_size,
-									offset,
-									size,
-									num_events_in_wait_list,
-									event_wait_list,
-									event);
+	static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+	static cl_program	last_program = NULL;
+	static cl_context	last_context = NULL;
+	cl_kernel			kernel;
+	cl_program			program;
+	cl_context			context;
+	cl_device_id		device;
+	size_t				gworksz;
+	size_t				lworksz;
+	char				kernel_name[80];
+	cl_int				rc;
+	union {
+		cl_char			v_char;
+		cl_short		v_short;
+		cl_int			v_int;
+		cl_long			v_long;
+	} pattern_value;
+	cl_uint				pattern_nums;
+
+	switch (pattern_size)
+	{
+		case sizeof(cl_char):
+			pattern_value.v_char = *((cl_char *)pattern);
+			break;
+		case sizeof(cl_short):
+			pattern_value.v_short = *((cl_short *)pattern);
+			break;
+		case sizeof(cl_int):
+			pattern_value.v_int = *((cl_int *)pattern);
+			break;
+		case sizeof(cl_long):
+			pattern_value.v_long = *((cl_long *)pattern);
+			break;
+		default:
+			/*
+			 * pattern_size was not support one, even though OpenCL 1.2
+			 * spec says 16, 32, 64 or 128 bytes patterns are supported.
+			 */
+			return CL_INVALID_VALUE;
+	}
+
+	/* ensure alignment */
+	if (offset % pattern_size != 0)
+		return CL_INVALID_VALUE;
+	if (size % pattern_size != 0)
+		return CL_INVALID_VALUE;
+
+	/* fetch context and device_id associated with this command queue */
+	rc = clGetCommandQueueInfo(command_queue,
+							   CL_QUEUE_CONTEXT,
+							   sizeof(cl_context),
+							   &context,
+							   NULL);
+	if (rc != CL_SUCCESS)
+		return rc;
+
+	rc = clGetCommandQueueInfo(command_queue,
+							   CL_QUEUE_DEVICE,
+							   sizeof(cl_device_id),
+							   &device,
+							   NULL);
+	if (rc != CL_SUCCESS)
+		return rc;
+
+	pthread_mutex_lock(&lock);
+	if (last_program && last_context == context)
+	{
+		rc = clRetainProgram(last_program);
+		if (rc != CL_SUCCESS)
+			goto out_unlock;
+		program = last_program;
+	}
+	else
+	{
+		char		source[10240];
+		const char *prog_source[1];
+		size_t		prog_length[1];
+		static struct {
+			const char *type_name;
+			size_t		type_size;
+		} pattern_types[] = {
+			{ "char",  sizeof(cl_char) },
+			{ "short", sizeof(cl_short) },
+			{ "int",   sizeof(cl_int) },
+			{ "long",  sizeof(cl_long) },
+		};
+		size_t		i, ofs;
+
+		/* release the previous program */
+		if (last_program)
+		{
+			rc = clReleaseProgram(last_program);
+			Assert(rc == CL_SUCCESS);
+			last_program = NULL;
+			last_context = NULL;
+		}
+
+		/* create a program object */
+		for (i=0, ofs=0; i < lengthof(pattern_types); i++)
+		{
+			ofs += snprintf(
+				source + ofs, sizeof(source) - ofs,
+				"__kernel void\n"
+				"pgstromEnqueueFillBuffer_%zu(__global %s *buffer,\n"
+				"                             %s value, uint nums)\n"
+				"{\n"
+				"  __global %s *dest;\n"
+				"  if (get_global_id(0) >= nums)\n"
+				"    return;\n"
+				"\n"
+				"  dest = buffer + get_global_offset(0);\n"
+				"  dest[get_global_id(0)] = value;\n"
+				"}\n\n",
+				pattern_types[i].type_size,
+				pattern_types[i].type_name,
+				pattern_types[i].type_name,
+				pattern_types[i].type_name);
+		}
+		prog_source[0] = source;
+		prog_length[0] = ofs;
+		program = clCreateProgramWithSource(context,
+											1,
+											prog_source,
+											prog_length,
+											&rc);
+		if (rc != CL_SUCCESS)
+			goto out_unlock;
+
+		/* build this program object */
+		rc = clBuildProgram(program,
+							1,
+							&device,
+							NULL,
+							NULL,
+							NULL);
+		if (rc != CL_SUCCESS)
+		{
+			char temp[10240];
+
+			clGetProgramBuildInfo(program,
+								  device,
+								  CL_PROGRAM_BUILD_LOG, 
+								  sizeof(temp),
+								  temp,
+								  NULL);
+			fprintf(stderr, "%s\n", temp);
+
+
+			clReleaseProgram(program);
+			goto out_unlock;
+		}
+
+		/* acquire the program object */
+		rc = clRetainProgram(program);
+		if (rc != CL_SUCCESS)
+		{
+			clReleaseProgram(program);
+			goto out_unlock;
+		}
+		last_program = program;
+		last_context = context;
+	}
+	pthread_mutex_unlock(&lock);
+	Assert(program != NULL);
+
+	/* fetch a kernel object to be called */
+	snprintf(kernel_name, sizeof(kernel_name),
+			 "pgstromEnqueueFillBuffer_%zu", pattern_size);
+	kernel = clCreateKernel(program,
+							kernel_name,
+							&rc);
+	if (rc != CL_SUCCESS)
+		goto out_release_program;
+
+	/* 1st arg: __global <typename> *buffer */
+	rc = clSetKernelArg(kernel, 0, sizeof(cl_mem), &buffer);
+	if (rc != CL_SUCCESS)
+		goto out_release_kernel;
+
+	/* 2nd arg: <typename> value */
+	rc = clSetKernelArg(kernel, 1, pattern_size, &pattern_value);
+	if (rc != CL_SUCCESS)
+		goto out_release_kernel;
+
+	/* 3rd arg: size_t nums */
+	pattern_nums = size / pattern_size;
+	rc = clSetKernelArg(kernel, 2, sizeof(cl_uint), &pattern_nums);
+	if (rc != CL_SUCCESS)
+		goto out_release_kernel;
+
+	/* calculate optimal workgroup size */
+	rc = clGetKernelWorkGroupInfo(kernel,
+								  device,
+								  CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE,
+								  sizeof(size_t),
+								  &lworksz,
+								  NULL);
+	Assert((lworksz & (lworksz - 1)) == 0);
+	gworksz = ((size / pattern_size + lworksz - 1) / lworksz) * lworksz;
+
+	/* enqueue a kernel, instead of clEnqueueFillBuffer */
+	offset /= pattern_size;
+	rc = clEnqueueNDRangeKernel(command_queue,
+								kernel,
+								1,
+								&offset,
+								&gworksz,
+								&lworksz,
+								num_events_in_wait_list,
+								event_wait_list,
+								event);
+	if (rc != CL_SUCCESS)
+		goto out_release_kernel;
+
+	rc = clSetEventCallback(*event,
+							CL_COMPLETE,
+							pgstromEnqueueFillBufferCleanup,
+							kernel);
+	if (rc != CL_SUCCESS)
+	{
+		clWaitForEvents(1, event);
+		goto out_release_kernel;
+	}
+	return CL_SUCCESS;
+
+out_unlock:
+	pthread_mutex_unlock(&lock);
+	return rc;
+
+out_release_kernel:
+	clReleaseKernel(kernel);
+out_release_program:
+	clReleaseProgram(program);
+	return rc;
 }
 
 cl_int
@@ -1127,7 +1369,7 @@ pgstrom_init_opencl_entry(void)
 		LOOKUP_OPENCL_FUNCTION(clCreateSubBuffer);
 		LOOKUP_OPENCL_FUNCTION(clEnqueueReadBuffer);
 		LOOKUP_OPENCL_FUNCTION(clEnqueueWriteBuffer);
-		LOOKUP_OPENCL_FUNCTION(clEnqueueFillBuffer);
+		//LOOKUP_OPENCL_FUNCTION(clEnqueueFillBuffer);
 		LOOKUP_OPENCL_FUNCTION(clEnqueueCopyBuffer);
 		LOOKUP_OPENCL_FUNCTION(clEnqueueMapBuffer);
 		LOOKUP_OPENCL_FUNCTION(clEnqueueUnmapMemObject);
