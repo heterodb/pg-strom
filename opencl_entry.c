@@ -496,14 +496,6 @@ clEnqueueFillBuffer(cl_command_queue command_queue,
 	if (rc != CL_SUCCESS)
 		return rc;
 
-	rc = clGetCommandQueueInfo(command_queue,
-							   CL_QUEUE_DEVICE,
-							   sizeof(cl_device_id),
-							   &device,
-							   NULL);
-	if (rc != CL_SUCCESS)
-		return rc;
-
 	pthread_mutex_lock(&lock);
 	if (last_program && last_context == context)
 	{
@@ -514,9 +506,11 @@ clEnqueueFillBuffer(cl_command_queue command_queue,
 	}
 	else
 	{
-		char		source[10240];
-		const char *prog_source[1];
-		size_t		prog_length[1];
+		char			source[10240];
+		const char	   *prog_source[1];
+		size_t			prog_length[1];
+		cl_uint			num_devices;
+		cl_device_id   *device_ids;
 		static struct {
 			const char *type_name;
 			size_t		type_size;
@@ -527,6 +521,33 @@ clEnqueueFillBuffer(cl_command_queue command_queue,
 			{ "long",  sizeof(cl_long) },
 		};
 		size_t		i, ofs;
+
+		/* fetch properties of cl_context */
+		rc = clGetContextInfo(context,
+							  CL_CONTEXT_NUM_DEVICES,
+							  sizeof(cl_uint),
+							  &num_devices,
+							  NULL);
+		if (rc != CL_SUCCESS)
+			goto out_unlock;
+		Assert(num_devices > 0);
+
+		device_ids = calloc(num_devices, sizeof(cl_device_id));
+		if (!device_ids)
+		{
+			rc = CL_OUT_OF_HOST_MEMORY;
+			goto out_unlock;
+		}
+		rc = clGetContextInfo(context,
+							  CL_CONTEXT_DEVICES,
+							  sizeof(cl_device_id) * num_devices,
+							  device_ids,
+							  NULL);
+		if (rc != CL_SUCCESS)
+		{
+			free(device_ids);
+			goto out_unlock;
+		}
 
 		/* release the previous program */
 		if (last_program)
@@ -566,28 +587,21 @@ clEnqueueFillBuffer(cl_command_queue command_queue,
 											prog_length,
 											&rc);
 		if (rc != CL_SUCCESS)
+		{
+			free(device_ids);
 			goto out_unlock;
+		}
 
 		/* build this program object */
 		rc = clBuildProgram(program,
-							1,
-							&device,
+							num_devices,
+							device_ids,
 							NULL,
 							NULL,
 							NULL);
+		free(device_ids);
 		if (rc != CL_SUCCESS)
 		{
-			char temp[10240];
-
-			clGetProgramBuildInfo(program,
-								  device,
-								  CL_PROGRAM_BUILD_LOG, 
-								  sizeof(temp),
-								  temp,
-								  NULL);
-			fprintf(stderr, "%s\n", temp);
-
-
 			clReleaseProgram(program);
 			goto out_unlock;
 		}
@@ -604,6 +618,15 @@ clEnqueueFillBuffer(cl_command_queue command_queue,
 	}
 	pthread_mutex_unlock(&lock);
 	Assert(program != NULL);
+
+	/* fetch a device id of this command queue */
+	rc = clGetCommandQueueInfo(command_queue,
+							   CL_QUEUE_DEVICE,
+							   sizeof(cl_device_id),
+							   &device,
+							   NULL);
+	if (rc != CL_SUCCESS)
+		goto out_release_program;
 
 	/* fetch a kernel object to be called */
 	snprintf(kernel_name, sizeof(kernel_name),
