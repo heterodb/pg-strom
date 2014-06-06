@@ -1624,6 +1624,7 @@ retry:
 		{
 			ExprContext *econtext = gss->cps.ps.ps_ExprContext;
 
+			econtext->ecxt_scantuple = gss->scan_slot;
 			if (!ExecQual(host_qual, econtext, false))
 				continue;
 		}
