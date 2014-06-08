@@ -853,6 +853,7 @@ gpuhashjoin_codegen(PlannerInfo *root,
 static CustomPlan *
 gpuhashjoin_create_plan(PlannerInfo *root, CustomPath *best_path)
 {
+#if 0
 	GpuHashJoinPath *gpath = (GpuHashJoinPath *)best_path;
 	GpuHashJoin	*ghj;
 	List	   *tlist = build_path_tlist(root, &best_path->path);
@@ -910,6 +911,8 @@ gpuhashjoin_create_plan(PlannerInfo *root, CustomPath *best_path)
 	ghj->joined_resnums = NIL;	/* to be set later */
 
 	return &ghj->cplan;
+#endif
+	return NULL;
 }
 
 static void
