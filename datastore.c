@@ -195,3 +195,66 @@ pgstrom_plan_can_multi_exec(const PlanState *ps)
 
 	return false;
 }
+
+
+bytea *
+pgstrom_create_simple_projection(List *target_list)
+{
+	bytea	   *result;
+	kern_projection *kproj;
+	Size		length;
+	int			ncols = list_length(target_list);
+	int			i_col;
+	ListCell   *cell;
+
+	length = VARHDRSZ + offsetof(kern_projection, origins[ncols]);
+	result = palloc0(length);
+	SET_VARSIZE(result, length);
+	kproj = (kern_projection *)VARDATA(result);
+	kproj->length = length;
+	kproj->ncols = ncols;
+	kproj->dprog_key = 0;	/* to be set later, by caller */
+
+	i_col = 0;
+	foreach (cell, target_list)
+	{
+		TargetEntry	*tle = lfirst(cell);
+		Var	   *var;
+		int16	typlen;
+		bool	typbyval;
+		char	typalign;
+
+		Assert(IsA(tle, TargetEntry));
+		if (!IsA(tle->expr, Var))
+			goto out_unavailable;
+		var = (Var *)tle->expr;
+
+		if (OidIsValid(var->varcollid) || var->varlevelsup > 0)
+			goto out_unavailable;
+		if (var->varno != INNER_VAR && var->varno != OUTER_VAR)
+			goto out_unavailable;
+
+		get_typlenbyvalalign(var->vartype,
+							 &typlen,
+							 &typbyval,
+							 &typalign);
+
+		kproj->origins[i_col].colmeta.attnotnull = false;
+		kproj->origins[i_col].colmeta.attalign = typealign_get_width(typalign);
+		kproj->origins[i_col].colmeta.attlen = typlen;
+		kproj->origins[i_col].colmeta.cs_ofs = -1;	/* to be set later */
+		kproj->origins[i_col].resjunk = tle->resjunk;
+		if (var->varno == INNER_VAR)
+			kproj->origins[i_col].is_outer = false;
+		else
+			kproj->origins[i_col].is_outer = true;
+		kproj->origins[i_col].resno = var->varattno;
+
+		i_col++;
+	}
+	return result;
+
+out_unavailable:
+	pfree(result);
+	return NULL;
+}

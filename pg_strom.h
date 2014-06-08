@@ -239,6 +239,8 @@ struct devfunc_info;
 typedef struct devtype_info {
 	Oid			type_oid;
 	uint32		type_flags;
+	int16		type_length;
+	int16		type_align;
 	char	   *type_name;	/* name of device type; same of SQL's type */
 	char	   *type_base;	/* base name of this type (like varlena) */
 } devtype_info;
@@ -426,6 +428,29 @@ typedef struct
 } pgstrom_bulk_slot;
 
 /*
+ * kern_projection
+ *
+ * This data structure provides a definition of destination relation on
+ * simple projection task. The "simple" means, it just puts a particular
+ * column of either of source relation (inner or outer/scan) onto somewhere
+ * on the destination relation but without calculation on target-list.
+ */
+typedef struct
+{
+	cl_uint			length;		/* length of this simple projection info */
+	cl_uint			ncols;		/* number of columns in destination store */
+	Datum			dprog_key;	/* device program key, if valid */
+	struct {
+		kern_colmeta colmeta;	/* column properties in destination store */
+		cl_char		resjunk;	/* true, if column is junk attribute */
+		cl_char		is_outer;	/* true, if column come from outer or scan
+								 * relation. Elsewhere, it come from inner
+								 * relation. */
+		AttrNumber	resno;		/* resource number of source target-list */
+	} origins[FLEXIBLE_ARRAY_MEMBER];
+} kern_projection;
+
+/*
  * --------------------------------------------------------------------
  *
  * Function Declarations
@@ -521,6 +546,7 @@ extern void pgstrom_init_gpusort(void);
 /*
  * gpuhashjoin.c
  */
+extern bytea *pgstrom_create_simple_projection(List *target_list);
 extern bool gpuhashjoin_support_multi_exec(const CustomPlanState *cps);
 extern void pgstrom_init_gpuhashjoin(void);
 
@@ -831,6 +857,23 @@ get_next_log2(Size size)
 	return shift;
 }
 
+/*
+ * It translate an alignment character into width
+ */
+static inline int
+typealign_get_width(char type_align)
+{
+	if (type_align == 'c')
+		return sizeof(cl_char);
+	else if (type_align == 's')
+		return sizeof(cl_short);
+	else if (type_align == 'i')
+		return sizeof(cl_int);
+	else if (type_align == 'd')
+		return sizeof(cl_long);
+	elog(ERROR, "unexpected type alignment: %c", type_align);
+	return -1;	/* be compiler quiet */
+}
 
 
 

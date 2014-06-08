@@ -106,6 +106,8 @@ pgstrom_devtype_lookup(Oid type_oid)
 			if (devtype_catalog[i].type_oid != type_oid)
 				continue;
 
+			entry->type_length = typeform->typlen;
+			entry->type_align = typealign_get_width(typeform->typalign);
 			entry->type_name = pstrdup(NameStr(typeform->typname));
 			entry->type_base = pstrdup(devtype_catalog[i].type_base);
 			break;
