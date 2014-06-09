@@ -567,15 +567,11 @@ clEnqueueFillBuffer(cl_command_queue command_queue,
 				"pgstromEnqueueFillBuffer_%zu(__global %s *buffer,\n"
 				"                             %s value, uint nums)\n"
 				"{\n"
-				"  __global %s *dest;\n"
 				"  if (get_global_id(0) >= nums)\n"
 				"    return;\n"
-				"\n"
-				"  dest = buffer + get_global_offset(0);\n"
-				"  dest[get_global_id(0)] = value;\n"
-				"}\n\n",
+				"  buffer[get_global_id(0)] = value;\n"
+				"}\n",
 				pattern_types[i].type_size,
-				pattern_types[i].type_name,
 				pattern_types[i].type_name,
 				pattern_types[i].type_name);
 		}
@@ -648,7 +644,7 @@ clEnqueueFillBuffer(cl_command_queue command_queue,
 		goto out_release_kernel;
 
 	/* 3rd arg: size_t nums */
-	pattern_nums = size / pattern_size;
+	pattern_nums = (offset + size) / pattern_size;
 	rc = clSetKernelArg(kernel, 2, sizeof(cl_uint), &pattern_nums);
 	if (rc != CL_SUCCESS)
 		goto out_release_kernel;

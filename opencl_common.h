@@ -1062,8 +1062,8 @@ kern_column_to_column(__private int *errcode,
 			__global cl_uint   *nullmap = (((__global cl_uint *)daddr) +
 										   (index_dst / (sizeof(cl_uint) *
 														 BITS_PER_BYTE)));
-			cl_uint				shift = (index_dst & ~(sizeof(cl_uint) *
-													   BITS_PER_BYTE - 1));
+			cl_uint				shift = (index_dst & (sizeof(cl_uint) *
+													  BITS_PER_BYTE - 1));
 			if (!isnull)
 				atomic_or(nullmap, 1 << shift);
 			else
