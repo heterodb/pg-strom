@@ -22,6 +22,7 @@
 #include "optimizer/paths.h"
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
+#include "optimizer/subselect.h"
 #include "optimizer/tlist.h"
 #include "optimizer/var.h"
 #include "utils/lsyscache.h"
@@ -1275,7 +1276,12 @@ gpuhashjoin_finalize_plan(PlannerInfo *root,
 						  Bitmapset **paramids,
 						  Bitmapset **valid_params,
 						  Bitmapset **scan_params)
-{}
+{
+	GpuHashJoin	   *ghj = (GpuHashJoin *)custom_plan;
+
+	finalize_primnode(root, (Node *)ghj->hash_clauses, *paramids);
+	finalize_primnode(root, (Node *)ghj->qual_clauses, *paramids);
+}
 
 
 /*
