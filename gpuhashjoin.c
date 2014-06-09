@@ -1267,15 +1267,6 @@ gpuhashjoin_set_plan_ref(PlannerInfo *root,
 	ghj->extra_flags = context.extra_flags;
     ghj->used_params = context.used_params;
     ghj->used_vars = context.used_vars;
-	
-
-
-
-
-
-
-	/* host qual has to be revised to reference scan slot! */
-
 }
 
 static void
@@ -1345,19 +1336,132 @@ gpuhashjoin_get_relids(CustomPlanState *node)
 static Node *
 gpuhashjoin_get_special_var(CustomPlanState *node, Var *varnode)
 {
+	vartrans_info	   *vartrans;
+	int		i;
+
+	if (varnode->varno == INDEX_VAR)
+		vartrans = ((GpuHashJoin *)node->ps.plan)->result_map;
+	else if (varnode->varno == OUTER_VAR)
+		vartrans = ((GpuHashJoin *)node->ps.plan)->outer_map;
+	else if (varnode->varno == INNER_VAR)
+		vartrans = ((GpuHashJoin *)node->ps.plan)->inner_map;
+	else
+		elog(ERROR, "unexpected varno of varnode: %d", varnode->varno);
+
+	for (i=0; i < vartrans->num_vars; i++)
+	{
+		if (vartrans->trans[i].resno == varnode->varattno)
+		{
+			Var	   *newnode = copyObject(varnode);
+
+			newnode->varno = vartrans->trans[i].varno;
+			newnode->varattno = vartrans->trans[i].varattno;
+
+			return (Node *)newnode;
+		}
+	}
+	elog(ERROR, "Bug? referenced variable was not mapped");
+
 	return NULL;
 }
 
 static void
+textout_vartrans_info(StringInfo str, vartrans_info *vartrans)
+{
+	int		i;
+
+	appendStringInfo(str, "{");
+	appendStringInfo(str, " :num_vars %d", vartrans->num_vars);
+	appendStringInfo(str, " :max_vars %d", vartrans->max_vars);
+	appendStringInfo(str, " :special_varno %d", vartrans->special_varno);
+	appendStringInfo(str, " :has_ph_vars %s",
+					 vartrans->has_ph_vars ? "true" : "false" );
+	appendStringInfo(str, " :has_non_vars %s",
+					 vartrans->has_non_vars ? "true" : "false");
+	appendStringInfo(str, " :tlist %s", nodeToString(vartrans->tlist));
+	appendStringInfo(str, " :trans (");
+	for (i=0; i < vartrans->num_vars; i++)
+	{
+		appendStringInfo(str, "%s[%d %d %d]",
+						 i > 0 ? " " : "",
+						 vartrans->trans[i].varno,
+						 vartrans->trans[i].varattno,
+						 vartrans->trans[i].resno);
+	}
+	appendStringInfo(str, ")}");
+}
+
+static void
 gpuhashjoin_textout_plan(StringInfo str, const CustomPlan *node)
-{}
+{
+	GpuHashJoin	   *plannode = (GpuHashJoin *) node;
+	char		   *temp;
+
+	appendStringInfo(str, " :jointype %d", (int)plannode->jointype);
+
+	appendStringInfo(str, " :kernel_source ");
+	_outToken(str, plannode->kernel_source);
+
+	appendStringInfo(str, " :extra_flags %u", plannode->extra_flags);
+
+	appendStringInfo(str, " :result_map ");
+	textout_vartrans_info(str, plannode->result_map);
+
+	appendStringInfo(str, " :inner_map ");
+	textout_vartrans_info(str, plannode->inner_map);
+
+	appendStringInfo(str, " :outer_map ");
+	textout_vartrans_info(str, plannode->outer_map);
+
+	temp = nodeToString(plannode->used_params);
+	appendStringInfo(str, " :used_params %s", temp);
+
+	temp = nodeToString(plannode->used_vars);
+	appendStringInfo(str, " :used_vars %s", temp);
+
+	temp = nodeToString(plannode->hash_clauses);
+	appendStringInfo(str, " :hash_clauses %s", temp);
+
+	temp = nodeToString(plannode->qual_clauses);
+	appendStringInfo(str, " :qual_clauses %s", temp);
+}
+
+static vartrans_info *
+copy_vartrans_info(vartrans_info *oldinfo)
+{
+	vartrans_info  *newinfo = NULL;
+
+	if (oldinfo)
+	{
+		newinfo = palloc0(offsetof(vartrans_info,
+								   trans[oldinfo->max_vars]));
+		memcpy(newinfo->trans,
+			   oldinfo->trans,
+			   offsetof(vartrans_info,
+						trans[oldinfo->max_vars]));
+		newinfo->tlist = copyObject(oldinfo->tlist);
+	}
+	return newinfo;
+}
 
 static CustomPlan *
 gpuhashjoin_copy_plan(const CustomPlan *from)
 {
-	GpuHashJoin		   *newnode = palloc(sizeof(GpuHashJoin));
+	GpuHashJoin	   *oldnode = (GpuHashJoin *) from;
+	GpuHashJoin	   *newnode = palloc0(sizeof(GpuHashJoin));
 
 	CopyCustomPlanCommon((Node *)from, (Node *)newnode);
+	newnode->jointype = oldnode->jointype;
+	if (oldnode->kernel_source)
+		newnode->kernel_source = pstrdup(oldnode->kernel_source);
+	newnode->extra_flags  = oldnode->extra_flags;
+	newnode->result_map   = copy_vartrans_info(oldnode->result_map);
+	newnode->inner_map    = copy_vartrans_info(oldnode->inner_map);
+	newnode->outer_map    = copy_vartrans_info(oldnode->outer_map);
+	newnode->used_params  = copyObject(oldnode->used_params);
+	newnode->used_vars    = copyObject(oldnode->used_vars);
+	newnode->hash_clauses = copyObject(oldnode->hash_clauses);
+	newnode->qual_clauses = copyObject(oldnode->qual_clauses);
 
 	return &newnode->cplan;
 }
