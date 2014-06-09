@@ -12,6 +12,8 @@
  */
 #include "postgres.h"
 
+#include "catalog/pg_type.h"
+#include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/relation.h"
 #include "nodes/plannodes.h"
@@ -20,6 +22,7 @@
 #include "optimizer/paths.h"
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
+#include "optimizer/var.h"
 #include "utils/lsyscache.h"
 #include "pg_strom.h"
 #include "opencl_hashjoin.h"
@@ -46,11 +49,10 @@ typedef struct
 	JoinType	jointype;
 	const char *kernel_source;
 	int			extra_flags;
-	List	   *device_resnums;	/* columns to be moved to device */
-	List	   *joined_resnums;	/* columns to be joined relation */
+	List	   *used_params;	/* template for kparams */
+	List	   *used_vars;		/* var used in hash/qual clauses */
 	List	   *hash_clauses;	/* expression form of hash_clauses */
 	List	   *qual_clauses;	/* expression form of qual_clauses */
-	List	   *host_clauses;	/* expression form of host_clauses */
 } GpuHashJoin;
 
 typedef struct
@@ -560,39 +562,39 @@ pull_joinrel_resnums(Node *node, Path *inner_path, Path *outer_path)
 }
 #endif
 
-#if 0
-
 /*
  * gpuhashjoin_codegen_hashkey
  *
  * code generator of gpuhashjoin_get_hash() - that computes a hash value
  * according to the hash-clause on outer relation
  */
-static char *
+static void
 gpuhashjoin_codegen_hashkey(PlannerInfo *root,
+							StringInfo str,
 							List *hash_clauses,
+							Relids outer_relids,
 							codegen_context *context)
 {
-	StringInfoData	str;
+	StringInfoData	calc;
 	devtype_info   *dtype;
 	ListCell	   *cell;
+	int				key_index;
 	int				var_index;
 	int				outer_index;
+
+	initStringInfo(&calc);
 
 	/*
 	 * Generate a function to calculate hash value
 	 */
-	appendStringInfo(
-		&str,
-		"static cl_uint\n"
-		"gpuhashjoin_get_hash(__private cl_int *errcode,\n"
-		"                     __global kern_hash_join *khashjoin,\n"
-		"                     __global kern_column_store *kcs,\n"
-		"                     __global kern_toastbuf *toast,\n"
-		"                     size_t kcs_index)\n"
-		"{\n"
-		"  __global kern_parambuf *kparams\n"
-		"      = KERN_HASHJOIN_PARAMBUF(*khashjoin);\n");
+	appendStringInfo(str,
+					 "static cl_uint\n"
+					 "gpuhashjoin_hashkey(__private cl_int *errcode,\n"
+					 "                    __global kern_parambuf *kparam,\n"
+					 "                    __global kern_column_store *kcs,\n"
+					 "                    __global kern_toastbuf *ktoast,\n"
+					 "                    size_t row_index)\n"
+					 "{\n");
 	/*
 	 * note that context->used_vars are already constructed
 	 * on the preliminary call of gpuhashjoin_codegen_compare()
@@ -603,35 +605,33 @@ gpuhashjoin_codegen_hashkey(PlannerInfo *root,
 	{
 		Var	   *var = lfirst(cell);
 
-		if (!bms_is_member(var->varno, outer_relids))
+		if (bms_is_member(var->varno, outer_relids))
 		{
-			var_index++;
-			continue;
+			dtype = pgstrom_devtype_lookup(var->vartype);
+			if (!dtype)
+				elog(ERROR, "cache lookup failed for type %u", var->vartype);
+			appendStringInfo(str,
+							 "  pg_%s_t KVAR_%u = pg_%s_vref(kcs%s, errcode, "
+							 "%u, kcs_index);\n",
+							 dtype->type_name,
+							 var_index,
+							 dtype->type_name,
+							 dtype->type_length > 0 ? "" : ", toast",
+							 outer_index);
+			outer_index++;
 		}
-
-		dtype = pgstrom_devtype_lookup(var->vartype);
-		if (!dtype)
-			elog(ERROR, "cache lookup failed for type %u", var->vartype);
-		appendStringInfo(
-			&str,
-			"  pg_%s_t KVAR_%u = pg_%s_vref(kcs%s, errcode, %u, kcs_index);\n"
-			dtype->type_name,
-			var_index,
-			dtype->type_name,
-			dtype->type_length > 0 ? "" : ", toast",
-			outer_index);
 		var_index++;
-		outer_index++;
 	}
-	appendStringInfo(&str, "\n");
+	appendStringInfo(str, "\n");
 
+	key_index = 0;
 	foreach (cell, hash_clauses)
 	{
 		OpExpr *oper = lfirst(cell);
 		Expr   *lefthand;
 		char	varname[80];
 
-		if (!IsA(OpExpr, oper) || list_length(oper->args) != 2)
+		if (!IsA(oper, OpExpr))// || list_length(oper->args) != 2)
 			elog(ERROR, "Binary OpExpr is expected in hash_clauses: %s",
 				 nodeToString(oper));
 
@@ -676,7 +676,7 @@ gpuhashjoin_codegen_hashkey(PlannerInfo *root,
 				elog(ERROR, "cache lookup failed for type %u", type_oid);
 
 			temp = pgstrom_codegen_expression((Node *)lefthand, context);
-			appendStringInfo(&str, "  pg_%s_t keyval_%u = %s;\n",
+			appendStringInfo(str, "  pg_%s_t keyval_%u = %s;\n",
 							 dtype->type_name, key_index, temp);
 		}
 
@@ -693,9 +693,9 @@ gpuhashjoin_codegen_hashkey(PlannerInfo *root,
 							 "               VARDATA_ANY(%s.value),\n"
 							 "               VARSIZE_ANY(%s.value));\n",
 							 varname, varname, varname);
-
+		key_index++;
 	}
-	appendStringInfo(&str,
+	appendStringInfo(str,
 					 "  cl_uint hash;\n"
 					 "\n"
 					 "  INIT_CRC32(hash);\n"
@@ -704,33 +704,49 @@ gpuhashjoin_codegen_hashkey(PlannerInfo *root,
 					 "\n"
 					 "  return hash;\n"
 					 "}\n", calc.data);
-	return str.data;
 }
 
-static char *
+/*
+ * gpuhashjoin_codegen_compare
+ *
+ * code generator of gpuhashjoin_compare(); that compares a particular
+ * row in kern_column_store with the supplied hash_entry.
+ */
+static void
 gpuhashjoin_codegen_compare(PlannerInfo *root,
+							StringInfo str,
 							List *hash_clauses,
 							List *qual_clauses,
-							codegen_context *context))
+							Relids outer_relids,
+							Relids inner_relids,
+							codegen_context *context)
 {
-	StringInfoData	str;
 	StringInfoData	tmpl;
 	StringInfoData	decl;
 	devtype_info   *dtype;
 	char		   *eval_formula;
 	List		   *clauses;
+	ListCell	   *cell;
+	cl_uint			var_index = 0;
+	cl_uint			outer_index = 0;
+	cl_uint			inner_index = 0;
+	cl_uint			inner_nums = 0;
+	cl_uint			inner_offset;
 
-	initStringInfo(&str);
 	initStringInfo(&tmpl);
 	initStringInfo(&decl);
 
 	clauses = list_concat(list_copy(hash_clauses),
 						  list_copy(qual_clauses));
-	eval_formula = pgstrom_codegen_expression(clauses, context);
+	eval_formula = pgstrom_codegen_expression((Node *)clauses, context);
 
-	index = 0;
-	inner_index = 0;
-	inner_offset = offsetof(kern_);
+	foreach (cell, context->used_vars)
+	{
+		if (bms_is_member(((Var *)lfirst(cell))->varno, inner_relids))
+			inner_nums++;
+	}
+	inner_offset = INTALIGN(offsetof(kern_hash_entry,
+									 keydata[inner_nums >> 3]));
 	foreach (cell, context->used_vars)
 	{
 		Var	   *var = lfirst(cell);
@@ -742,19 +758,17 @@ gpuhashjoin_codegen_compare(PlannerInfo *root,
 				elog(ERROR, "cache lookup failed for type: %u", var->vartype);
 
 			if (dtype->type_length > 0)
-				appendStringInfo(
-					&tmpl, "STROMCL_SIMPLE_HASHREF_TEMPLATE(%s,%s)\n",
-					dtype->type_name, dtype->type_base);
+				appendStringInfo(&tmpl,
+								 "STROMCL_SIMPLE_HASHREF_TEMPLATE(%s,%s)\n",
+								 dtype->type_name, dtype->type_base);
 			else
-				appendStringInfo(
-					&tmpl, "STROMCL_VARLENA_HASHREF_TEMPLATE(%s)\n",
-					dtype->type_name);
-
-			appendStringInfo(
-				&decl,
-				"  pg_%s_t KVAR_%u = pg_%s_hashref(entry, errcode, %u, %u);\n",
-				dtype->type_name, index, dtype->type_name,
-				inner_index, inner_offset);
+				appendStringInfo(&tmpl,
+								 "STROMCL_VARLENA_HASHREF_TEMPLATE(%s)\n",
+								 dtype->type_name);
+			appendStringInfo(&decl,
+			"  pg_%s_t KVAR_%u = pg_%s_hashref(entry, errcode, %u, %u);\n",
+							 dtype->type_name, var_index, dtype->type_name,
+							 inner_index, inner_offset);
 		}
 		else if (bms_is_member(var->varno, outer_relids))
 		{
@@ -762,61 +776,57 @@ gpuhashjoin_codegen_compare(PlannerInfo *root,
 			if (!dtype)
 				elog(ERROR, "cache lookup failed for type: %u", var->vartype);
 
-			appendStringInfo(
-				&decl,
-				"  pg_%s_t KVAR_%u = pg_%s_vref(kcs%s,errcode,%u,rowidx);\n",
-				dtype->type_name,
-				index,
-				dtype->type_name,
-				dtype->type_length > 0 ? "" : ", toast",
-				outer_index);
+			appendStringInfo(&decl,
+			"  pg_%s_t KVAR_%u = pg_%s_vref(kcs%s,errcode,%u,row_index);\n",
+							 dtype->type_name,
+							 var_index,
+							 dtype->type_name,
+							 dtype->type_length > 0 ? "" : ", toast",
+							 outer_index);
 			outer_index++;
 		}
 		else
 			elog(ERROR, "Bug? var-node in neither inner nor outer relations");
+		var_index++;
 	}
 
-	appendStringInfo(
-        &str,
-		"%s\n"
-		"\n"
-        "static cl_bool\n"
-        "gpuhashjoin_compare(__private cl_int *errcode,\n"
-        "                    __global kern_hash_join *khashjoin,\n"
-		"                    __global kern_hash_entry *entry,\n"
-        "                    __global kern_column_store *kcs,\n"
-        "                    __global kern_toastbuf *toast,\n"
-        "                    size_t rowidx)\n"
-        "{\n"
-        "  __global kern_parambuf *kparams\n"
-        "      = KERN_HASHJOIN_PARAMBUF(*khashjoin);\n"
-		"%s"
-		"  pg_bool_t rc;\n"
-		"\n"
-		"  rc = %s;\n"
-		"\n"
-		"  return (!rc.isnull ? rc.value : false);\n"
-		"}\n",
-		tmpl.data,
-		decl.data,
-		eval_formula);
-
-	return str.data;
+	appendStringInfo(str,
+					 "%s\n"
+					 "\n"
+					 "static cl_bool\n"
+					 "gpuhashjoin_keycomp(__private cl_int *errcode,\n"
+					 "                    __global kern_parambuf *kparams,\n"
+					 "                    __global kern_hash_entry *entry,\n"
+					 "                    __global kern_column_store *kcs,\n"
+					 "                    __global kern_toastbuf *ktoast,\n"
+					 "                    size_t row_index)\n"
+					 "{\n"
+					 "  __global kern_parambuf *kparams\n"
+					 "      = KERN_HASHJOIN_PARAMBUF(*khashjoin);\n"
+					 "%s"
+					 "  pg_bool_t rc;\n"
+					 "\n"
+					 "  rc = %s;\n"
+					 "\n"
+					 "  return (!rc.isnull ? rc.value : false);\n"
+					 "}\n",
+					 tmpl.data,
+					 decl.data,
+					 eval_formula);
 }
-
-
 
 static char *
 gpuhashjoin_codegen(PlannerInfo *root,
-					List *hash_clauses, List *qual_clauses,
+					List *hash_clauses,
+					List *qual_clauses,
+					Relids outer_relids,
+					Relids inner_relids,
 					codegen_context *context)
 {
 	StringInfoData	str;
-	StringInfoData	calc;
 
 	memset(context, 0, sizeof(codegen_context));
 	initStringInfo(&str);
-	initStringInfo(&calc);
 
 	/*
 	 * A dummy constant
@@ -832,28 +842,34 @@ gpuhashjoin_codegen(PlannerInfo *root,
 												true,
 												false));
 	context->type_defs = list_make1(pgstrom_devtype_lookup(BYTEAOID));
-		
 
+	/*
+	 * definition of gpuhashjoin_keycomp()
+	 */
+	gpuhashjoin_codegen_compare(root, &str,
+								hash_clauses,
+								qual_clauses,
+								outer_relids,
+								inner_relids,
+								context);
+	/*
+	 * definition of gpuhashjoin_hashkey()
+	 */
+	gpuhashjoin_codegen_hashkey(root, &str,
+								hash_clauses,
+								outer_relids,
+								context);
+	/*
+	 * to include opencl_hashjoin.h
+	 */
+	context->extra_flags |= DEVKERNEL_NEEDS_HASHJOIN;
 
-
-
-
-	
-
-	/* calculation of hash key */
-
-
-	/* comparison function */
-
-
-
+	return str.data;
 }
-#endif
 
 static CustomPlan *
 gpuhashjoin_create_plan(PlannerInfo *root, CustomPath *best_path)
 {
-#if 0
 	GpuHashJoinPath *gpath = (GpuHashJoinPath *)best_path;
 	GpuHashJoin	*ghj;
 	List	   *tlist = build_path_tlist(root, &best_path->path);
@@ -864,7 +880,8 @@ gpuhashjoin_create_plan(PlannerInfo *root, CustomPath *best_path)
 	List	   *hash_clauses;
 	List	   *qual_clauses;
 	List	   *host_clauses;
-	ListCell   *cell;
+	codegen_context context;
+	char	   *kernel_source;
 
 	/*
 	 * Sort clauses into best execution order, even though it's
@@ -895,31 +912,46 @@ gpuhashjoin_create_plan(PlannerInfo *root, CustomPath *best_path)
 	 * Create a GpuHashJoin node; inherited from CustomPlan
 	 */
 	ghj = palloc0(sizeof(GpuHashJoin));
-	NodeSetTag(gpath, CustomPlan);
-	ghj->methods = &gpuhashjoin_plan_methods;
+	NodeSetTag(ghj, T_CustomPlan);
+	ghj->cplan.methods = &gpuhashjoin_plan_methods;
 	ghj->cplan.plan.targetlist = tlist;
 	ghj->cplan.plan.qual = host_clauses;
 	outerPlan(ghj) = outer_plan;
 	innerPlan(ghj) = inner_plan;
 
+	kernel_source = gpuhashjoin_codegen(root,
+										hash_clauses,
+										qual_clauses,
+										outer_path->parent->relids,
+										inner_path->parent->relids,
+										&context);
 	ghj->jointype = gpath->jointype;
 	ghj->kernel_source = kernel_source;
-	ghj->extra_flags = extra_flagse;
+	ghj->extra_flags = context.extra_flags;
+	ghj->used_params = context.used_params;
+	ghj->used_vars = context.used_vars;
 	ghj->hash_clauses = hash_clauses;
 	ghj->qual_clauses = qual_clauses;
-	ghj->device_resnums = NIL;	/* to be set later */
-	ghj->joined_resnums = NIL;	/* to be set later */
 
 	return &ghj->cplan;
-#endif
-	return NULL;
 }
 
 static void
 gpuhashjoin_textout_path(StringInfo str, Node *node)
 {
-	GpuHashJoin	   *pathnode = (GpuHashJoin *) node;
-	char		   *temp;
+	GpuHashJoinPath *pathnode = (GpuHashJoinPath *) node;
+	char	   *temp;
+
+	/* jointype */
+	appendStringInfo(str, " :jointype %d", (int)pathnode->jointype);
+
+	/* outerjoinpath */
+	temp = nodeToString(pathnode->outerjoinpath);
+	appendStringInfo(str, " :outerjoinpath %s", temp);
+
+	/* innerjoinpath */
+	temp = nodeToString(pathnode->innerjoinpath);
+	appendStringInfo(str, " :innerjoinpath %s", temp);
 
 	/* hash_clauses */
 	temp = nodeToString(pathnode->hash_clauses);

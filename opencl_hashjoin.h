@@ -193,24 +193,15 @@ gpuhashjoin_hashkey(__private cl_int *errcode,
  */
 static cl_bool
 gpuhashjoin_keycomp(__private cl_int *errcode,
-					__global kern_hash_item *hitem,
-					__global kern_parambuf *kparam,
+					__global kern_parambuf *kparams,
+					__global kern_hash_entry *entry,
 					__global kern_column_store *kcs,
 					__global kern_toastbuf *ktoast,
 					size_t row_index);
-/*
- * gpuhashjoin_qual_eval
- *
- * It preprocesses the specified row according to the qualifier, if
- * GpuHashJoin pulled-up device executable qualifiers from underlying
- * scan plan.
- */
-static pg_bool_t
-gpuhashjoin_qual_eval(__private cl_int *errcode,
-					  __global kern_parambuf *kparam,
-					  __global kern_column_store *kcs,
-					  __global kern_toastbuf *ktoast,
-					  size_t row_index);
+
+
+
+
 
 static void
 gpuhashjoin_inner(__private cl_int *errcode,
