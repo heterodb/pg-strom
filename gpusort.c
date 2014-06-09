@@ -628,10 +628,6 @@ gpusort_construct_kcshead(TupleDesc tupdesc,
 		offset += STROMALIGN((attr->attlen > 0
 							  ? attr->attlen
 							  : sizeof(cl_uint)) * nrooms);
-		{
-			kern_colmeta *colmeta = &kcs_head->colmeta[i_col];
-			clserv_log("colmeta[%d] attname=%s {attnotnull=%d, attalign=%d, attlen=%d, cs_ofs=%u}", i_col, NameStr(attr->attname), colmeta->attnotnull, colmeta->attalign, colmeta->attlen, colmeta->cs_ofs);
-		}
 		i_col++;
 	}
 
