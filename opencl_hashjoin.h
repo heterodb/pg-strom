@@ -44,9 +44,7 @@
  * | +------------------+     |  has same hash value,  | |
  * | | hash             |     |  these are linked.     | |
  * | +------------------+     |                        | |
- * | | rowidx ( <M )    |     |                        | |
- * | +------------------+     |                        | |
- * | | keylen           |     |                        | |
+ * | | rowidx           |     |                        | |
  * | +------------------+     |                        | |
  * | | keydata:         |     |                        | |
  * | | (actual values   |     |                        | |
@@ -68,9 +66,7 @@
  * | +------------------+                              | |
  * | | hash             |                              | |
  * | +------------------+                              | |
- * | | rowidx ( < M )   |                              | |
- * | +------------------+                              | |
- * | | keylen           |                              | |
+ * | | rowidx           |                              | |
  * | +------------------+                              | |
  * | | keydata          |                              | |
  * | | +----------------+                              | |
@@ -103,7 +99,6 @@ typedef struct
 	cl_uint			nkeys;	/* number of keys to be compared */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];
 } kern_hash_table;
-
 
 /*
  * Sequential Scan using GPU/MIC acceleration
@@ -172,7 +167,7 @@ typedef struct
 
 #ifdef OPENCL_DEVICE_CODE
 /*
- * forward declaration of run-time generated functions.
+ * declaration of functions being generated on the fly.
  */
 
 /*
@@ -199,71 +194,100 @@ gpuhashjoin_keycomp(__private cl_int *errcode,
 					__global kern_toastbuf *ktoast,
 					size_t row_index);
 
-
-
-
-
+/*
+ * gpuhashjoin_inner
+ *
+ * Routine of INNER HASH-JOIN. It counts up number of matched rows on the
+ * hash-table using hash-key comparison function. Then, it acquires this
+ * number of result slot in the result buffer, and write a pair of row-
+ * indexes back. In case of result-buffer is not sufficient, it returns
+ * StromError_DataStoreNoSpace, to inform host system with mode larger
+ * result buffer.
+ */
 static void
 gpuhashjoin_inner(__private cl_int *errcode,
-				  __global kern_parambuf *kparam,
-				  __global kern_resultbuf *kresult,
+				  __global kern_parambuf *kparams,
+				  __global kern_resultbuf *kresults,
 				  __global kern_hash_table *khashtbl,
 				  __global kern_column_store *kcs,
 				  __global kern_toastbuf *ktoast,
+				  size_t kcs_index,
 				  __local void *local_workbuf)
 {
-	pg_bool_t	rc;
 	cl_int		errcode = StromError_Success;
+	cl_uint		hash_value;
+	cl_uint		slot_index;
 
-	/* generate a hash key */
-	hashkey = gpuhashjoin_hashkey(get_global_id(0));
+	/* calculate a hash value */
+	hash_value = gpuhashjoin_hashkey(&errcode, kparams,
+									 kcs, ktoast, kcs_index);
+	slot_index = hash_value % khashtbl->nslots;
 
-	/* step.0: check qualifier around kcs, to check it should be filtered */
-	if (get_global_id(0) < kcs->nrows)
-		rc = gpuhashjoin_qual_eval(&errcode,
-								   kparam, kcs, ktoast,
-								   get_global_id(0));
-	else
-		rc.isnull = true;
+	/*
+	 * XXX - walk on the hash table to count number of matched tuples
+	 */
 
-	/* step.1: walks on the hash slot and count number of matches */
 
-	/* step.2: allocate result buffer for this workgroup */
-	if (get_local_id(0) == 0)
-	{}
-	/* if overflow, we shall return without writing */
+	/*
+	 * XXX - calculate total number of matched tuples being searched
+	 * by this workgroup
+	 */
 
-	/* step.3: again, walks on the hash slot again, and put pair of ids */
-	
+
+	/*
+	 * XXX - allocation of result buffer. A tuple takes 2 * sizeof(cl_uint)
+	 * to store pair of row-indexes.
+	 * If no space any more, return an error code to retry later.
+	 *
+	 * use atomic_add(&kresults->nrows, nitems) to determine the position
+	 * to write. If expected usage is larger than kresults->nrooms, it
+	 * exceeds the limitation of result buffer.
+	 *
+	 * MEMO: we may need to re-define nrows/nitems using 64bit variables
+	 * to avoid overflow issues, but has special platform capability on
+	 * 64bit atomic-write...
+	 */
+
+	/*
+	 * XXX - walk on the hash table again, to write pair of row-index
+	 * on the acquired slot
+	 */
+
+
+
 }
 
 
 __kernel void
-gpuhashjoin_inner_cs(__global kern_hash_join *kgpuhj,
+gpuhashjoin_inner_cs(__global kern_hash_join *kgpuhashjoin,
 					 __global kern_hash_table *khashtbl,
 					 __global kern_column_store *kcs,
 					 __global kern_toastbuf *toast,
 					 __local void *local_workmem)
 {
+	__global kern_parambuf *kparams = KERN_GPUHJ_PARAMBUF(kghashjoin);
+	__global kern_resultbuf *kresults = KERN_GPUHJ_RESULTBUF(kghashjoin);
 
 
 }
 
 __kernel void
-gpuhashjoin_inner_rs(__global kern_hash_join *kgpuhj,
+gpuhashjoin_inner_rs(__global kern_hash_join *kghashjoin,
 					 __global kern_hash_table *khashtbl,
 					 __global kern_row_store *krs,
 					 __global kern_column_store *kcs,
 					 __local void *local_workmem)
 {
-	__global kern_parambuf *kparams = KERN_GPUHJ_PARAMBUF(kgpuhj);
-	__global kern_resultbuf *kresult = KERN_GPUHJ_RESULTBUF(kgpuhj);
+	__global kern_parambuf *kparams = KERN_GPUHJ_PARAMBUF(kghashjoin);
+	__global kern_resultbuf *kresults = KERN_GPUHJ_RESULTBUF(kghashjoin);
 	pg_bytea_t		kparam_0 = pg_bytea_param(kparams,&errcode,0);
 	cl_int			errcode = StromError_Success;
 	__local size_t	kcs_offset;
 	__local size_t	kcs_nitems;
 
-	/* acquire a slot of this workgroup */
+	/*
+	 * map this workgroup on a particular range on the column-store
+	 */
 	if (get_local_id(0) == 0)
 	{
 		if (get_global_id(0) + get_local_size(0) < krs->nrows)
@@ -289,7 +313,7 @@ gpuhashjoin_inner_rs(__global kern_hash_join *kgpuhj,
 	/* OK, run gpu hash join */
 	gpuhashjoin_inner(&errcode,
 					  kparams,
-					  kresult,
+					  kresults,
 					  khashtbl,
 					  kcs,
 					  (__global kern_toastbuf *)krs,
