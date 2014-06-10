@@ -94,7 +94,8 @@ typedef struct
 
 typedef struct
 {
-	cl_uint			length;	/* total length of hash table */
+	cl_uint			maxlen;	/* max length by shared memory allocation */
+	cl_uint			length;	/* length of this hash table */
 	cl_uint			nslots;	/* width of hash slot */
 	cl_uint			nkeys;	/* number of keys to be compared */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];
@@ -487,12 +488,17 @@ __constant cl_uint pg_crc32_table[256] = {
 
 #endif
 
-typedef struct
+typedef struct pgstrom_hashjoin_table
 {
-	pgstrom_message		msg;	/* = StromTag_GpuHashTable */
-	kern_hash_table		kern;
-} pgstrom_gpu_hash_table;
-
+	StromObject		sobj;		/* = StromTab_HashJoinTable */
+	slock_t			lock;		/* protection of the fields below */
+	cl_int			refcnt;		/* reference counter of this hash table */
+	cl_int			n_kernel;	/* number of active running kernel */
+	cl_mem			m_hash;		/* in-kernel buffer object. Once n_kernel
+								 * backed to zero, valid m_hash needs to
+								 * be released. */
+	kern_hash_table	kern;
+} pgstrom_hashjoin_table;
 
 typedef struct
 {

@@ -15,6 +15,7 @@
 #include "utils/pg_crc.h"
 #include "utils/resowner.h"
 #include "pg_strom.h"
+#include "opencl_hashjoin.h"
 
 /*
  * Object classes extended from pgstrom_message has to be tracked.
@@ -49,8 +50,8 @@ typedef struct {
 	 StromTagIs(sobject,TCacheColumnStore) ||	\
 	 StromTagIs(sobject,GpuScan)	||			\
 	 StromTagIs(sobject,GpuSort) ||				\
-	 StromTagIs(sobject,GpuSortMulti) ||		\
-	 StromTagIs(sobject,HashJoin))
+	 StromTagIs(sobject,HashJoin) ||			\
+	 StromTagIs(sobject,HashJoinTable))
 
 #define RESTRACK_HASHSZ		100
 #define PTRMAP_HASHSZ		1200
@@ -203,6 +204,8 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 				tcache_put_row_store((tcache_row_store *)sobject);
 			else if (StromTagIs(sobject, TCacheColumnStore))
 				tcache_put_column_store((tcache_column_store *)sobject);
+			else if (StromTagIs(sobject, HashJoinTable))
+				gpuhashjoin_put_hash_table((pgstrom_hashjoin_table *)sobject);
 			else
 			{
 				Assert(IS_TRACKABLE_OBJECT(sobject));
@@ -255,6 +258,8 @@ pgstrom_track_object(StromObject *sobject, Datum private)
 			tcache_put_row_store((tcache_row_store *)sobject);
 		else if (StromTagIs(sobject, TCacheColumnStore))
 			tcache_put_column_store((tcache_column_store *)sobject);
+		else if (StromTagIs(sobject, HashJoinTable))
+			gpuhashjoin_put_hash_table((pgstrom_hashjoin_table *)sobject);
 		else
 			pgstrom_put_message((pgstrom_message *)sobject);
 

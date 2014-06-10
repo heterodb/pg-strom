@@ -136,9 +136,8 @@ typedef enum {
 	StromTag_TCacheToastBuf,
 	StromTag_GpuScan,
 	StromTag_GpuSort,
-	StromTag_GpuSortMulti,
 	StromTag_HashJoin,
-	StromTag_TestMessage,
+	StromTag_HashJoinTable,
 } StromTag;
 
 typedef struct {
@@ -546,7 +545,12 @@ extern void pgstrom_init_gpusort(void);
 /*
  * gpuhashjoin.c
  */
-extern bytea *pgstrom_create_simple_projection(List *target_list);
+struct pgstrom_hashjoin_table;	/* to avoid including opencl_hashjoin.h here */
+extern struct pgstrom_hashjoin_table *
+gpuhashjoin_get_hash_table(struct pgstrom_hashjoin_table *ghash_table);
+extern void
+gpuhashjoin_put_hash_table(struct pgstrom_hashjoin_table *ghash_table);
+
 extern bool gpuhashjoin_support_multi_exec(const CustomPlanState *cps);
 extern void pgstrom_init_gpuhashjoin(void);
 

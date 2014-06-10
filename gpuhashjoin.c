@@ -76,6 +76,7 @@ typedef struct
 	TupleTableSlot *pscan_slot;	/* tuple-slot of pscan */
 	List	   *hash_clauses;	/* expression form of hash_clauses */
 	List	   *qual_clauses;	/* expression form of qual_clauses */
+	Size		entry_width;	/* average width of hash_entry */
 } GpuHashJoin;
 
 typedef struct
@@ -533,71 +534,6 @@ gpuhashjoin_add_path(PlannerInfo *root,
 	}
 }
 
-#if 0
-/*
- * pull_joinrel_resnums
- *
- *
- *
- *
- *
- *
- *
- */
-typedef struct
-{
-	Bitmapset  *inner_resnums;
-	Bitmapset  *outer_resnums;
-	Relids		inner_relids;
-	Relids		outer_relids;
-} pull_join_resnums_context;
-
-static bool
-pull_joinrel_resnums_walker(Node *node, pull_join_resnums_context *context)
-{
-	if (!node)
-		return false;
-	if (IsA(node, Var))
-	{
-		Var	   *var = (Var *) node;
-
-		if (bms_is_member(var->varno, context->inner_relids))
-		{
-			//elog(INFO, "inner var: %s", nodeToString(var));
-			
-			
-		}
-		else if (bms_is_member(var->varno, context->outer_relids))
-		{
-			//elog(INFO, "outer var: %s", nodeToString(var));
-		}
-		else
-			elog(ERROR, "varnode referenced neither inner nor outer relation");
-
-
-
-	}
-	/* Should not find an unplanned subquery */
-	Assert(!IsA(node, Query));
-	return expression_tree_walker(node, pull_joinrel_resnums_walker,
-								  (void *) context);
-}
-
-static List *
-pull_joinrel_resnums(Node *node, Path *inner_path, Path *outer_path)
-{
-	pull_join_resnums_context	context;
-
-	memset(&context, 0, sizeof(pull_join_resnums_context));
-	context.inner_relids = inner_path->parent->relids;
-	context.outer_relids = outer_path->parent->relids;
-
-	pull_joinrel_resnums_walker(node, &context);
-
-	return NIL;
-}
-#endif
-
 static CustomPlan *
 gpuhashjoin_create_plan(PlannerInfo *root, CustomPath *best_path)
 {
@@ -1023,6 +959,64 @@ gpuhashjoin_codegen(PlannerInfo *root,
 }
 
 /*
+ * estimate_gpuhashjoin_keywidth
+ *
+ * It estimates average width of hashjoin entries; sum of column width
+ * referenced by both of hash-clauses and qual-clauses, according to
+ * the list of used vars in actual.
+ */
+static Size
+estimate_gpuhashjoin_keywidth(PlannerInfo *root,
+							  List *used_vars,
+							  List *inner_tlist)
+{
+	Size		width = offsetof(kern_hash_entry, keydata);
+	ListCell   *cell;
+
+	foreach (cell, used_vars)
+	{
+		Var	   *var = lfirst(cell);
+		int16	typlen;
+		bool	typbyval;
+		char	typalign;
+
+		if (var->varno != INNER_VAR)
+			continue;
+		get_typlenbyvalalign(var->vartype, &typlen, &typbyval, &typalign);
+
+		/* consider alignment */
+		width = TYPEALIGN(typealign_get_width(typalign), width);
+
+		/* add width of variables */
+		if (typlen > 0)
+			width += typlen;
+		else
+		{
+			TargetEntry	   *tle;
+			RangeTblEntry  *rte;
+			Size			vl_len = 0;
+
+			width += sizeof(cl_uint);	/* offset to variable field */
+
+			/* average width of variable-length values */
+			tle = get_tle_by_resno(inner_tlist, var->varattno);
+			if (tle && IsA(tle->expr, Var))
+			{
+				Var	   *tlevar = (Var *) tle->expr;
+
+				rte = rt_fetch(tlevar->varno, root->parse->rtable);
+				if (rte && rte->rtekind == RTE_RELATION)
+					vl_len = get_attavgwidth(rte->relid, tlevar->varattno);
+			}
+			if (vl_len == 0)
+				vl_len = get_typavgwidth(var->vartype, var->vartypmod);
+			width += INTALIGN(vl_len);
+		}
+	}
+	return LONGALIGN(width);
+}
+
+/*
  * build_pseudoscan_tlist
  *
  * GpuHashJoin performs like a scan-node that run on pseudo relation being
@@ -1146,7 +1140,7 @@ search_tlist_for_var(Var *varnode, List *tlist, Index newvarno, int rtoffset)
 		tlevar = (Var *) tle->expr;
 
 		if (varnode->varno == tlevar->varno &&
-			varnode->varno == tlevar->varattno)
+			varnode->varattno == tlevar->varattno)
 		{
 			newvar = copyObject(varnode);
 			newvar->varno = newvarno;
@@ -1339,6 +1333,9 @@ gpuhashjoin_set_plan_ref(PlannerInfo *root,
 	ghj->extra_flags = context.extra_flags;
 	ghj->used_params = context.used_params;
 	ghj->used_vars = context.used_vars;
+	ghj->entry_width = estimate_gpuhashjoin_keywidth(root,
+													 ghj->used_vars,
+													 inner_plan->targetlist);
 }
 
 static void
@@ -1455,11 +1452,117 @@ gpuhashjoin_begin(CustomPlan *node, EState *estate, int eflags)
 	ghjs->mqueue = pgstrom_create_queue();
 	pgstrom_track_object(&ghjs->mqueue->sobj, 0);
 
+	ghjs->kparams = pgstrom_create_kern_parambuf(ghashjoin->used_params,
+												 ghjs->cps.ps.ps_ExprContext);
+
 	/* Is perfmon needed? */
 	ghjs->pfm.enabled = pgstrom_perfmon_enabled;
 
 	return &ghjs->cps;
 }
+
+pgstrom_hashjoin_table *
+gpuhashjoin_get_hash_table(pgstrom_hashjoin_table *hash_table)
+{
+	SpinLockAcquire(&hash_table->lock);
+	Assert(hash_table->refcnt > 0);
+	hash_table->refcnt++;
+	SpinLockRelease(&hash_table->lock);
+
+	return hash_table;
+}
+
+void
+gpuhashjoin_put_hash_table(pgstrom_hashjoin_table *hash_table)
+{
+	bool	do_release = false;
+
+	SpinLockAcquire(&hash_table->lock);
+	Assert(hash_table->refcnt > 0);
+	if (--hash_table->refcnt == 0)
+	{
+		Assert(hash_table->n_kernel == 0 && hash_table->m_hash == NULL);
+		do_release = true;
+	}
+	SpinLockRelease(&hash_table->lock);
+	if (do_release)
+		pgstrom_shmem_free(hash_table);
+}
+
+static pgstrom_hashjoin_table *
+gpuhashjoin_create_hash_table(GpuHashJoinState *ghjs)
+{
+	pgstrom_hashjoin_table *hash_table;
+	GpuHashJoin	   *ghashjoin = (GpuHashJoin *) ghjs->cps.ps.plan;
+	ListCell	   *cell;
+	Size			allocated;
+	Size			length;
+	int				nkeys = 0;
+	cl_ulong		nslots;
+	double			nrows;
+
+	/*
+	 * estimate length of hash-table
+	 */
+	foreach (cell, ghashjoin->used_vars)
+	{
+		if (((Var *) lfirst(cell))->varno == INNER_VAR)
+			nkeys++;
+	}
+	/* if we don't have enough information, assume 10K rows */
+	nrows = ghashjoin->cplan.plan.plan_rows;
+	if (nrows < 10000.0)
+		nrows = 10000.0;
+	nslots = (cl_ulong)(nrows * 1.5);
+
+	length = (LONGALIGN(offsetof(pgstrom_hashjoin_table,
+								 kern.colmeta[nkeys])) +
+			  LONGALIGN(sizeof(cl_uint) * nslots) +
+			  LONGALIGN(ghashjoin->entry_width * (nrows * 1.05)));
+
+	/* allocate a shared memory segment */
+	hash_table = pgstrom_shmem_alloc_alap(length, &allocated);
+	if (!hash_table)
+		elog(ERROR, "out of shared memory");
+
+	/* initialize the fields */
+	hash_table->sobj.stag = StromTag_HashJoinTable;
+	SpinLockInit(&hash_table->lock);
+	hash_table->refcnt = 1;
+	hash_table->n_kernel = 0;	/* set by opencl-server */
+	hash_table->m_hash = NULL;	/* set by opencl-server */
+
+	hash_table->kern.maxlen = (allocated -
+							   offsetof(pgstrom_hashjoin_table, kern));
+	hash_table->kern.length = (LONGALIGN(offsetof(kern_hash_table,
+												  colmeta[nkeys])) +
+							   LONGALIGN(sizeof(cl_uint) * nslots));
+	hash_table->kern.nslots = nslots;
+	hash_table->kern.nkeys = 0;	/* to be incremented later */
+
+	return hash_table;
+}
+
+static void
+gpuhashjoin_build_hash_table(GpuHashJoinState *ghjs)
+{
+	pgstrom_hashjoin_table *hash_table;
+
+
+
+	hash_table = gpuhashjoin_create_hash_table(ghjs);
+
+
+
+
+
+
+
+}
+
+
+
+
 
 static TupleTableSlot *
 gpuhashjoin_exec(CustomPlanState *node)
