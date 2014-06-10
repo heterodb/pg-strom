@@ -25,6 +25,8 @@
 #include "optimizer/subselect.h"
 #include "optimizer/tlist.h"
 #include "optimizer/var.h"
+#include "parser/parsetree.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "pg_strom.h"
 #include "opencl_hashjoin.h"
@@ -66,12 +68,12 @@ typedef struct
 	JoinType	jointype;
 	const char *kernel_source;
 	int			extra_flags;
-	vartrans_info  *result_map;	/* vartrans of result slot */
-	vartrans_info  *inner_map;	/* vartrans of device inner slot */
-	vartrans_info  *outer_map;	/* vartrans of device outer slot */
-
 	List	   *used_params;	/* template for kparams */
 	List	   *used_vars;		/* var used in hash/qual clauses */
+	List	   *pscan_tlist;	/* pseudo-scan target-list */
+	List	   *pscan_resnums;	/* source resno of pseudo-scan tlist.
+								 * positive number, if outer source */
+	TupleTableSlot *pscan_slot;	/* tuple-slot of pscan */
 	List	   *hash_clauses;	/* expression form of hash_clauses */
 	List	   *qual_clauses;	/* expression form of qual_clauses */
 } GpuHashJoin;
@@ -79,7 +81,20 @@ typedef struct
 typedef struct
 {
 	CustomPlanState	cps;
+	JoinType		jointype;
+	TupleTableSlot *pscan_slot;
+	AttrNumber	   *pscan_resnums;
 
+	pgstrom_queue  *mqueue;
+	Datum			dprog_key;
+
+	kern_parambuf  *kparams;
+
+
+	List		   *hash_clauses;
+	List		   *qual_clauses;
+
+	pgstrom_perfmon	pfm;
 } GpuHashJoinState;
 
 /*
@@ -1008,69 +1023,158 @@ gpuhashjoin_codegen(PlannerInfo *root,
 }
 
 /*
- * build_gpuhashjoin_vartrans
+ * build_pseudoscan_tlist
  *
- * It builds translation map of varno/varattno from inner/outer relations
- * to result and device inner/outer relations.
- * Once varno/varattno mappings are constructed, we can generate a kernel
- * source that references device inner/outer relations.
- *
- * most of logic was copied from build_tlist_index
+ * GpuHashJoin performs like a scan-node that run on pseudo relation being
+ * constructed with two source relations. Any (pseudo) columns in this
+ * relation are, of course, reference to either inner or outer relation.
  */
-static vartrans_info *
-build_gpuhashjoin_vartrans(List *tlist, Index special_varno)
+typedef struct
 {
-	vartrans_info  *vartrans;
-	ListCell	   *cell;
+	List   *pscan_tlist;
+	List   *pscan_resnums;
+	List   *outer_tlist;
+	List   *inner_tlist;
+} build_pseudoscan_context;
 
-	vartrans = palloc0(offsetof(vartrans_info, trans[64]));
-	vartrans->max_vars = 64;
-	vartrans->special_varno = special_varno;
-	vartrans->tlist = tlist;
-
-	foreach (cell, tlist)
+static bool
+build_pseudoscan_tlist_walker(Node *node, build_pseudoscan_context *context)
+{
+	if (!node)
+		return false;
+	if (IsA(node, Var) || IsA(node, PlaceHolderVar))
 	{
-		TargetEntry	   *tle = lfirst(cell);
+		TargetEntry	   *tle = tlist_member(node, context->pscan_tlist);
+		bool			is_outer;
 
-		if (tle->expr && IsA(tle->expr, Var))
-		{
-			Var	   *var = (Var *) tle->expr;
-			int		i;
-
-			if (vartrans->num_vars == vartrans->max_vars)
-			{
-				vartrans += vartrans->max_vars;
-				vartrans = repalloc(vartrans,
-									offsetof(vartrans_info,
-											 trans[vartrans->max_vars]));
-			}
-			i = vartrans->num_vars++;
-			vartrans->trans[i].varno = var->varno;
-			vartrans->trans[i].varattno = var->varattno;
-			vartrans->trans[i].resno = tle->resno;
-		}
-		else if (tle->expr && IsA(tle->expr, PlaceHolderVar))
-			vartrans->has_ph_vars = true;
+		if (tle)
+			return false;
+		/*
+		 * Not found in the current pseudo-scan tlist, so expand it
+		 */
+		tle = tlist_member(node, context->outer_tlist);
+		if (tle)
+			is_outer = true;
 		else
-			vartrans->has_non_vars = true;
+		{
+			tle = tlist_member(node, context->inner_tlist);
+			is_outer = false;
+		}
+		if (tle)
+		{
+			TargetEntry	   *newtle
+				= makeTargetEntry((Expr *) node,
+								  list_length(context->pscan_tlist) + 1,
+								  !tle->resname ? NULL : pstrdup(tle->resname),
+								  tle->resjunk);
+			context->pscan_tlist = lappend(context->pscan_tlist, newtle);
+			context->pscan_resnums = lappend_int(context->pscan_resnums,
+												 is_outer
+												 ? tle->resno
+												 : -tle->resno);
+		}
+		else if (IsA(node, PlaceHolderVar))
+		{
+			/*
+			 * If referenced PlaceHolderVar is not on the underlying
+			 * target-list directly, try to walk down its expression
+			 * tree.
+			 */
+			PlaceHolderVar *phv = (PlaceHolderVar *) node;
+
+			build_pseudoscan_tlist_walker((Node *)phv->phexpr, context);
+		}
+		else
+			elog(ERROR, "bug? referenced var-node not in underlying tlist");
+
+		return false;
 	}
-	return vartrans;
+	return expression_tree_walker(node,
+								  build_pseudoscan_tlist_walker,
+								  (void *) context);
+}
+
+static void
+build_pseudoscan_tlist(GpuHashJoin *ghashjoin)
+{
+	Plan	   *outer_plan = outerPlan(ghashjoin);
+	Plan	   *inner_plan = innerPlan(ghashjoin);
+	build_pseudoscan_context context;
+
+	context.pscan_tlist = NIL;
+	context.pscan_resnums = NIL;
+	context.outer_tlist = outer_plan->targetlist;
+	context.inner_tlist = inner_plan->targetlist;
+
+	build_pseudoscan_tlist_walker((Node *) ghashjoin->cplan.plan.targetlist,
+								  &context);
+	build_pseudoscan_tlist_walker((Node *) ghashjoin->cplan.plan.qual,
+								  &context);
+	ghashjoin->pscan_tlist = context.pscan_tlist;
+	ghashjoin->pscan_resnums = context.pscan_resnums;
 }
 
 /*
  * fix_gpuhashjoin_expr
  *
- *
- *
- *
+ * It mutate expression node to reference either INDEX, OUTER or INNER_VAR
+ * during query execution.
  */
 typedef struct
 {
 	PlannerInfo	   *root;
-	vartrans_info  *vartrans_maps[3];
+	List		   *outer_tlist;
+	Index			outer_varno;
+	List		   *inner_tlist;
+	Index			inner_varno;
 	int				rtoffset;
-	bool			expand_on_demand;
 } fix_gpuhashjoin_expr_context;
+
+static Var *
+search_tlist_for_var(Var *varnode, List *tlist, Index newvarno, int rtoffset)
+{
+	ListCell   *cell;
+
+	foreach (cell, tlist)
+	{
+		TargetEntry	   *tle = lfirst(cell);
+		Var			   *tlevar;
+		Var			   *newvar;
+
+		if (!IsA(tle->expr, Var))
+			continue;
+		tlevar = (Var *) tle->expr;
+
+		if (varnode->varno == tlevar->varno &&
+			varnode->varno == tlevar->varattno)
+		{
+			newvar = copyObject(varnode);
+			newvar->varno = newvarno;
+			newvar->varattno = tle->resno;
+			if (newvar->varnoold > 0)
+				newvar->varnoold += rtoffset;
+			return newvar;
+		}
+	}
+	return NULL;	/* not found */
+}
+
+static Var *
+search_tlist_for_non_var(Node *node, List *tlist, Index newvarno, int rtoffset)
+{
+	TargetEntry	   *tle = tlist_member(node, tlist);
+
+	if (tle)
+	{
+		Var	   *newvar;
+
+		newvar = makeVarFromTargetEntry(newvarno, tle);
+		newvar->varnoold = 0;   /* wasn't ever a plain Var */
+		newvar->varoattno = 0;
+		return newvar;
+	}
+	return NULL;
+}
 
 static Node *
 fix_gpuhashjoin_expr_mutator(Node *node, fix_gpuhashjoin_expr_context *context)
@@ -1081,78 +1185,63 @@ fix_gpuhashjoin_expr_mutator(Node *node, fix_gpuhashjoin_expr_context *context)
 		return NULL;
 	if (IsA(node, Var))
 	{
-		Var			   *var = (Var *) node;
-		int				i, j;
-
-		for (i=0; i < lengthof(context->vartrans_maps); i++)
+		newnode = search_tlist_for_var((Var *)node,
+									   context->outer_tlist,
+									   context->outer_varno,
+									   context->rtoffset);
+		if (newnode)
+			return (Node *) newnode;
+		if (context->inner_tlist)
 		{
-			vartrans_info  *vartrans;
-
-			if (!context->vartrans_maps[i])
-				continue;
-		retry:
-			vartrans = context->vartrans_maps[i];
-			for (j=0; j < vartrans->num_vars; j++)
-			{
-				if (vartrans->trans[j].varno != var->varno ||
-					vartrans->trans[j].varattno != var->varattno)
-					continue;
-
-				newnode = copyObject(var);
-				newnode->varno = vartrans->special_varno;
-				newnode->varattno = vartrans->trans[i].resno;
-				if (newnode->varnoold > 0)
-					newnode->varnoold += context->rtoffset;
-				return (Node *)newnode;
-			}
-			if (context->expand_on_demand)
-			{
-				if (vartrans->num_vars == vartrans->max_vars)
-				{
-					vartrans->max_vars += vartrans->max_vars;
-					vartrans = repalloc(vartrans,
-										offsetof(vartrans_info,
-												 trans[vartrans->max_vars]));
-					context->vartrans_maps[i] = vartrans;
-				}
-				j = vartrans->num_vars++;
-				vartrans->trans[j].varno = var->varno;
-				vartrans->trans[j].varattno = var->varattno;
-				vartrans->trans[j].resno = 0;	/* not in tlist! */
-				goto retry;
-			}
+			newnode = search_tlist_for_var((Var *)node,
+										   context->inner_tlist,
+										   context->inner_varno,
+										   context->rtoffset);
+			if (newnode)
+				return (Node *) newnode;
 		}
-		elog(ERROR, "variable not found in subplan target lists");
+		/* No referent found for Var */
+        elog(ERROR, "variable not found in subplan target lists");
 	}
-	if (IsA(node, PlaceHolderVar))
+	else if (IsA(node, PlaceHolderVar))
 	{
 		PlaceHolderVar *phv = (PlaceHolderVar *) node;
-		int				i, j;
 
-		for (i=0; i < lengthof(context->vartrans_maps); i++)
+		newnode = search_tlist_for_non_var(node,
+										   context->outer_tlist,
+										   context->outer_varno,
+										   context->rtoffset);
+		if (newnode)
+			return (Node *) newnode;
+		if (context->inner_tlist)
 		{
-			vartrans_info  *vartrans = context->vartrans_maps[i];
-
-			if (!vartrans || !vartrans->has_ph_vars)
-				continue;
-
-			for (j=0; j < vartrans->num_vars; j++)
-			{
-				TargetEntry	*tle = tlist_member(node, vartrans->tlist);
-
-				if (tle)
-				{
-					Var	   *newnode =
-						makeVarFromTargetEntry(vartrans->special_varno, tle);
-					newnode->varnoold = 0;
-					newnode->varoattno = 0;
-
-					return (Node *)newnode;
-				}
-			}
-			/* If not supplied by input plans, evaluate the contained expr */
-			return fix_gpuhashjoin_expr_mutator((Node *) phv->phexpr,
-												(void *) context);
+			newnode = search_tlist_for_non_var(node,
+											   context->inner_tlist,
+											   context->inner_varno,
+											   context->rtoffset);
+			if (newnode)
+				return (Node *) newnode;
+		}
+		/* If not supplied by input plans, evaluate the contained expr */
+		return fix_gpuhashjoin_expr_mutator((Node *)phv->phexpr, context);
+	}
+	else
+	{
+		/* Try matching more complex expressions too */
+		newnode = search_tlist_for_non_var(node,
+										   context->outer_tlist,
+										   context->outer_varno,
+										   context->rtoffset);
+		if (newnode)
+			return (Node *) newnode;
+		if (context->inner_tlist)
+		{
+			newnode = search_tlist_for_non_var(node,
+											   context->inner_tlist,
+											   context->inner_varno,
+											   context->rtoffset);
+			if (newnode)
+				return (Node *) newnode;
 		}
 	}
 	fix_expr_common(context->root, node);
@@ -1161,39 +1250,25 @@ fix_gpuhashjoin_expr_mutator(Node *node, fix_gpuhashjoin_expr_context *context)
 								   (void *) context);
 }
 
-static Node *
+static List *
 fix_gpuhashjoin_expr(PlannerInfo *root,
 					 List *clauses,
-					 vartrans_info **vartrans_result,
-					 vartrans_info **vartrans_outer,
-					 vartrans_info **vartrans_inner,
-					 int rtoffset,
-					 bool expand_on_demand)
+					 List *outer_tlist, Index outer_varno,
+					 List *inner_tlist, Index inner_varno,
+					 int rtoffset)
 {
 	fix_gpuhashjoin_expr_context context;
-	Node	   *result;
 
 	memset(&context, 0, sizeof(fix_gpuhashjoin_expr_context));
 	context.root = root;
-	if (vartrans_result)
-		context.vartrans_maps[0] = *vartrans_result;
-	if (vartrans_outer)
-		context.vartrans_maps[1] = *vartrans_outer;
-	if (vartrans_inner)
-		context.vartrans_maps[2] = *vartrans_inner;
-	context.rtoffset = rtoffset;
-	context.expand_on_demand = expand_on_demand;
+	context.outer_tlist = outer_tlist;
+	context.outer_varno = outer_varno;
+	context.inner_tlist = inner_tlist;
+	context.inner_varno = inner_varno;
+	context.rtoffset    = rtoffset;
 
-	result = fix_gpuhashjoin_expr_mutator((Node *) clauses, &context);
-
-	if (vartrans_result)
-		*vartrans_result = context.vartrans_maps[0];
-	if (vartrans_outer)
-		*vartrans_outer = context.vartrans_maps[1];
-	if (vartrans_inner)
-		*vartrans_inner = context.vartrans_maps[2];
-
-	return result;
+	return (List *) fix_gpuhashjoin_expr_mutator((Node *) clauses,
+												 &context);
 }
 
 /*
@@ -1213,51 +1288,47 @@ gpuhashjoin_set_plan_ref(PlannerInfo *root,
 						 int rtoffset)
 {
 	GpuHashJoin	   *ghj = (GpuHashJoin *) custom_plan;
-	Plan		   *outer_plan = outerPlan(ghj);
-	Plan		   *inner_plan = innerPlan(ghj);
+	Plan		   *outer_plan = outerPlan(custom_plan);
+	Plan		   *inner_plan = innerPlan(custom_plan);
 	char		   *kernel_source;
 	codegen_context context;
 
-	ghj->result_map =
-		build_gpuhashjoin_vartrans(ghj->cplan.plan.targetlist, INDEX_VAR);
-	ghj->outer_map =
-		build_gpuhashjoin_vartrans(outer_plan->targetlist, OUTER_VAR);
-	ghj->inner_map =
-		build_gpuhashjoin_vartrans(inner_plan->targetlist, INNER_VAR);
+	/* build a pseudo scan target-list */
+	build_pseudoscan_tlist(ghj);
 
-	ghj->cplan.plan.targetlist = (List *)
+	/* fixup tlist and qual according to the pseudo scan tlist */
+	ghj->cplan.plan.targetlist =
 		fix_gpuhashjoin_expr(root,
 							 ghj->cplan.plan.targetlist,
-							 &ghj->result_map,
-							 NULL,
-							 NULL,
-							 rtoffset,
-							 false);
-	ghj->cplan.plan.qual = (List *)
+							 ghj->pscan_tlist, INDEX_VAR,
+							 NIL, (Index) 0,
+							 rtoffset);
+	ghj->cplan.plan.qual =
 		fix_gpuhashjoin_expr(root,
 							 ghj->cplan.plan.qual,
-							 &ghj->result_map,
-							 NULL,
-							 NULL,
-							 rtoffset,
-							 true);
-	ghj->hash_clauses = (List *)
+							 ghj->pscan_tlist, INDEX_VAR,
+                             NIL, (Index) 0,
+                             rtoffset);
+	/* pseudo scan tlist is also fixed up according to inner/outer */
+	ghj->pscan_tlist =
+		fix_gpuhashjoin_expr(root,
+							 ghj->pscan_tlist,
+							 outer_plan->targetlist, OUTER_VAR,
+							 inner_plan->targetlist, INNER_VAR,
+							 rtoffset);
+	/* hash_clauses and qual_clauses also see inner/outer */
+	ghj->hash_clauses =
 		fix_gpuhashjoin_expr(root,
 							 ghj->hash_clauses,
-							 NULL,
-							 &ghj->outer_map,
-							 &ghj->inner_map,
-							 rtoffset,
-							 false);
-	ghj->qual_clauses = (List *)
+							 outer_plan->targetlist, OUTER_VAR,
+							 inner_plan->targetlist, INNER_VAR,
+							 rtoffset);
+	ghj->qual_clauses =
 		fix_gpuhashjoin_expr(root,
 							 ghj->qual_clauses,
-							 NULL,
-							 &ghj->outer_map,
-                             &ghj->inner_map,
-                             rtoffset,
-                             false);
-
+							 outer_plan->targetlist, OUTER_VAR,
+							 inner_plan->targetlist, INNER_VAR,
+							 rtoffset);
 
 	/* OK, let's general kernel source code */
 	kernel_source = gpuhashjoin_codegen(root,
@@ -1266,8 +1337,8 @@ gpuhashjoin_set_plan_ref(PlannerInfo *root,
 										&context);
 	ghj->kernel_source = kernel_source;
 	ghj->extra_flags = context.extra_flags;
-    ghj->used_params = context.used_params;
-    ghj->used_vars = context.used_vars;
+	ghj->used_params = context.used_params;
+	ghj->used_vars = context.used_vars;
 }
 
 static void
@@ -1294,14 +1365,100 @@ gpuhashjoin_finalize_plan(PlannerInfo *root,
 bool
 gpuhashjoin_support_multi_exec(const CustomPlanState *cps)
 {
-    return false;
+	/* we can issue bulk-exec mode if no projection */
+	if (cps->ps.ps_ProjInfo == NULL)
+		return true;
+	return false;
 }
 
 
 static CustomPlanState *
-gpuhashjoin_begin(CustomPlan *custom_plan, EState *estate, int eflags)
+gpuhashjoin_begin(CustomPlan *node, EState *estate, int eflags)
 {
-	return NULL;
+	GpuHashJoin		   *ghashjoin = (GpuHashJoin *) node;
+	GpuHashJoinState   *ghjs;
+	TupleDesc			tupdesc;
+	ListCell		   *cell;
+	bool				has_oid;
+	int					index;
+
+	/*
+	 * create a state structure
+	 */
+	ghjs = palloc0(sizeof(GpuHashJoinState));
+	NodeSetTag(ghjs, T_CustomPlanState);
+	ghjs->cps.ps.plan = &node->plan;
+	ghjs->cps.ps.state = estate;
+	ghjs->cps.methods = &gpuhashjoin_plan_methods;
+	ghjs->jointype = ghashjoin->jointype;
+
+	/*
+	 * create expression context
+	 */
+	ExecAssignExprContext(estate, &ghjs->cps.ps);
+
+	/*
+	 * initialize child expression
+	 */
+	ghjs->cps.ps.targetlist = (List *)
+		ExecInitExpr((Expr *) node->plan.targetlist, &ghjs->cps.ps);
+	ghjs->cps.ps.qual = (List *)
+		ExecInitExpr((Expr *) node->plan.qual, &ghjs->cps.ps);
+	ghjs->hash_clauses = (List *)
+		ExecInitExpr((Expr *) ghashjoin->hash_clauses, &ghjs->cps.ps);
+	ghjs->qual_clauses = (List *)
+		ExecInitExpr((Expr *) ghashjoin->qual_clauses, &ghjs->cps.ps);
+
+	/*
+	 * initialize child nodes
+	 */
+	outerPlanState(ghjs) = ExecInitNode(outerPlan(ghashjoin), estate, eflags);
+	innerPlanState(ghjs) = ExecInitNode(innerPlan(ghashjoin), estate, eflags);
+
+	/*
+	 * initialize "pseudo" scan slot
+	 */
+	if (!ExecContextForcesOids(&ghjs->cps.ps, &has_oid))
+		has_oid = false;
+	tupdesc = ExecTypeFromTL(ghashjoin->pscan_tlist, has_oid);
+
+	ghjs->pscan_slot = ExecAllocTableSlot(&estate->es_tupleTable);
+	ExecSetSlotDescriptor(ghjs->pscan_slot, tupdesc);
+
+	Assert(tupdesc->natts == list_length(ghashjoin->pscan_resnums));
+	ghjs->pscan_resnums = palloc0(sizeof(AttrNumber) * tupdesc->natts);
+	index = 0;
+	foreach (cell, ghashjoin->pscan_resnums)
+		ghjs->pscan_resnums[index++] = lfirst_int(cell);
+
+	/*
+	 * initialize result tuple type and projection info
+	 */
+	ExecInitResultTupleSlot(estate, &ghjs->cps.ps);
+	ExecAssignResultTypeFromTL(&ghjs->cps.ps);
+	if (tlist_matches_tupdesc(&ghjs->cps.ps,
+							  node->plan.targetlist,
+							  INDEX_VAR,
+							  tupdesc))
+		ghjs->cps.ps.ps_ProjInfo = NULL;
+	else
+		ExecAssignProjectionInfo(&ghjs->cps.ps, tupdesc);
+
+	/*
+	 * Setting up a kernel program and message queue
+	 */
+	Assert(ghashjoin->kernel_source != NULL);
+	ghjs->dprog_key = pgstrom_get_devprog_key(ghashjoin->kernel_source,
+											  ghashjoin->extra_flags);
+	pgstrom_track_object((StromObject *)ghjs->dprog_key, 0);
+
+	ghjs->mqueue = pgstrom_create_queue();
+	pgstrom_track_object(&ghjs->mqueue->sobj, 0);
+
+	/* Is perfmon needed? */
+	ghjs->pfm.enabled = pgstrom_perfmon_enabled;
+
+	return &ghjs->cps;
 }
 
 static TupleTableSlot *
@@ -1319,89 +1476,167 @@ gpuhashjoin_exec_multi(CustomPlanState *node)
 
 static void
 gpuhashjoin_end(CustomPlanState *node)
-{}
+{
+	GpuHashJoinState   *ghjs = (GpuHashJoinState *) node;
+
+
+	/*
+	 *  Free the exprcontext
+	 */
+	ExecFreeExprContext(&node->ps);
+
+	/*
+	 * clean out kernel source and message queue
+	 */
+	Assert(ghjs->dprog_key);
+	pgstrom_untrack_object((StromObject *)ghjs->dprog_key);
+	pgstrom_put_devprog_key(ghjs->dprog_key);
+
+	Assert(ghjs->mqueue);
+	pgstrom_untrack_object(&ghjs->mqueue->sobj);
+	pgstrom_close_queue(ghjs->mqueue);
+
+	/*
+	 * clean up subtrees
+	 */
+	ExecEndNode(outerPlanState(node));
+	ExecEndNode(innerPlanState(node));
+}
 
 static void
 gpuhashjoin_rescan(CustomPlanState *node)
-{}
+{
+	elog(ERROR, "not implemented yet");
+}
 
 static void
 gpuhashjoin_explain_rel(CustomPlanState *node, ExplainState *es)
-{}
+{
+	GpuHashJoinState   *ghjs = (GpuHashJoinState *) node;
+	const char		   *jointype;
+
+	switch (ghjs->jointype)
+	{
+		case JOIN_INNER:
+			jointype = "Inner";
+			break;
+		case JOIN_LEFT:
+			jointype = "Left";
+			break;
+		case JOIN_FULL:
+			jointype = "Full";
+			break;
+		case JOIN_RIGHT:
+			jointype = "Right";
+			break;
+		case JOIN_SEMI:
+			jointype = "Semi";
+			break;
+		case JOIN_ANTI:
+			jointype = "Anti";
+			break;
+		default:
+			jointype = "???";
+			break;
+	}
+
+	if (es->format == EXPLAIN_FORMAT_TEXT)
+		appendStringInfo(es->str, " using %s Join", jointype);
+	else
+		ExplainPropertyText("Join Type", jointype, es);
+}
 
 static void
 gpuhashjoin_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
-{}
+{
+	GpuHashJoin	   *ghashjoin = (GpuHashJoin *) node->ps.plan;
+	StringInfoData	str;
+	List		   *context;
+	ListCell	   *cell;
+	bool			useprefix;
+	bool			is_first;
+
+	initStringInfo(&str);
+
+	/* Set up deparsing context */
+	context = deparse_context_for_planstate((Node *) &node->ps,
+											ancestors,
+											es->rtable,
+											es->rtable_names);
+	/* device referenced columns */
+	useprefix = es->verbose;
+	is_first = false;
+	foreach (cell, ghashjoin->used_vars)
+	{
+		if (is_first)
+			appendStringInfo(&str, ", ");
+		appendStringInfo(&str, "%s",
+						 deparse_expression(lfirst(cell),
+											context,
+											useprefix,
+											false));
+		is_first = true;
+	}
+	ExplainPropertyText("Device references", str.data, es);
+
+	// Join qual / hash & qual
+	// Host qual
+	// Kernel source
+	// performance monitor (if analyze)
+
+}
 
 static Bitmapset *
 gpuhashjoin_get_relids(CustomPlanState *node)
 {
+	/* nothing to do because core backend walks down inner/outer subtree */
 	return NULL;
 }
 
 static Node *
 gpuhashjoin_get_special_var(CustomPlanState *node, Var *varnode)
 {
-	vartrans_info	   *vartrans;
-	int		i;
+	GpuHashJoin	   *ghashjoin = (GpuHashJoin *)node->ps.plan;
+	TargetEntry	   *tle;
 
 	if (varnode->varno == INDEX_VAR)
-		vartrans = ((GpuHashJoin *)node->ps.plan)->result_map;
-	else if (varnode->varno == OUTER_VAR)
-		vartrans = ((GpuHashJoin *)node->ps.plan)->outer_map;
-	else if (varnode->varno == INNER_VAR)
-		vartrans = ((GpuHashJoin *)node->ps.plan)->inner_map;
-	else
-		elog(ERROR, "unexpected varno of varnode: %d", varnode->varno);
-
-	for (i=0; i < vartrans->num_vars; i++)
 	{
-		if (vartrans->trans[i].resno == varnode->varattno)
+		tle = get_tle_by_resno(ghashjoin->pscan_tlist, varnode->varattno);
+		if (tle)
+			return (Node *)tle->expr;
+	}
+	else if (varnode->varno == OUTER_VAR)
+	{
+		Plan   *outer_plan = outerPlan(ghashjoin);
+
+		if (outer_plan)
 		{
-			Var	   *newnode = copyObject(varnode);
-
-			newnode->varno = vartrans->trans[i].varno;
-			newnode->varattno = vartrans->trans[i].varattno;
-
-			return (Node *)newnode;
+			tle = get_tle_by_resno(outer_plan->targetlist, varnode->varattno);
+			if (tle)
+				return (Node *) tle->expr;
 		}
 	}
-	elog(ERROR, "Bug? referenced variable was not mapped");
-
-	return NULL;
-}
-
-static void
-textout_vartrans_info(StringInfo str, vartrans_info *vartrans)
-{
-	int		i;
-
-	appendStringInfo(str, "{");
-	appendStringInfo(str, " :num_vars %d", vartrans->num_vars);
-	appendStringInfo(str, " :max_vars %d", vartrans->max_vars);
-	appendStringInfo(str, " :special_varno %d", vartrans->special_varno);
-	appendStringInfo(str, " :has_ph_vars %s",
-					 vartrans->has_ph_vars ? "true" : "false" );
-	appendStringInfo(str, " :has_non_vars %s",
-					 vartrans->has_non_vars ? "true" : "false");
-	appendStringInfo(str, " :tlist %s", nodeToString(vartrans->tlist));
-	appendStringInfo(str, " :trans (");
-	for (i=0; i < vartrans->num_vars; i++)
+	else if (varnode->varno == INNER_VAR)
 	{
-		appendStringInfo(str, "%s[%d %d %d]",
-						 i > 0 ? " " : "",
-						 vartrans->trans[i].varno,
-						 vartrans->trans[i].varattno,
-						 vartrans->trans[i].resno);
+		Plan   *inner_plan = innerPlan(ghashjoin);
+
+		if (inner_plan)
+		{
+			tle = get_tle_by_resno(inner_plan->targetlist, varnode->varattno);
+			if (tle)
+				return (Node *) tle->expr;
+		}
 	}
-	appendStringInfo(str, ")}");
+	elog(ERROR, "variable (varno=%u,varattno=%d) is not relevant tlist",
+		 varnode->varno, varnode->varattno);
+	return NULL;	/* be compiler quiet */
 }
+
 
 static void
 gpuhashjoin_textout_plan(StringInfo str, const CustomPlan *node)
 {
 	GpuHashJoin	   *plannode = (GpuHashJoin *) node;
-	char		   *temp;
 
 	appendStringInfo(str, " :jointype %d", (int)plannode->jointype);
 
@@ -1410,44 +1645,18 @@ gpuhashjoin_textout_plan(StringInfo str, const CustomPlan *node)
 
 	appendStringInfo(str, " :extra_flags %u", plannode->extra_flags);
 
-	appendStringInfo(str, " :result_map ");
-	textout_vartrans_info(str, plannode->result_map);
-
-	appendStringInfo(str, " :inner_map ");
-	textout_vartrans_info(str, plannode->inner_map);
-
-	appendStringInfo(str, " :outer_map ");
-	textout_vartrans_info(str, plannode->outer_map);
-
-	temp = nodeToString(plannode->used_params);
-	appendStringInfo(str, " :used_params %s", temp);
-
-	temp = nodeToString(plannode->used_vars);
-	appendStringInfo(str, " :used_vars %s", temp);
-
-	temp = nodeToString(plannode->hash_clauses);
-	appendStringInfo(str, " :hash_clauses %s", temp);
-
-	temp = nodeToString(plannode->qual_clauses);
-	appendStringInfo(str, " :qual_clauses %s", temp);
-}
-
-static vartrans_info *
-copy_vartrans_info(vartrans_info *oldinfo)
-{
-	vartrans_info  *newinfo = NULL;
-
-	if (oldinfo)
-	{
-		newinfo = palloc0(offsetof(vartrans_info,
-								   trans[oldinfo->max_vars]));
-		memcpy(newinfo->trans,
-			   oldinfo->trans,
-			   offsetof(vartrans_info,
-						trans[oldinfo->max_vars]));
-		newinfo->tlist = copyObject(oldinfo->tlist);
-	}
-	return newinfo;
+	appendStringInfo(str, " :used_params %s",
+					 nodeToString(plannode->used_params));
+	appendStringInfo(str, " :used_vars %s",
+					 nodeToString(plannode->used_vars));
+	appendStringInfo(str, " :pscan_tlist %s",
+					 nodeToString(plannode->pscan_tlist));
+	appendStringInfo(str, " :pscan_resnums %s",
+					 nodeToString(plannode->pscan_resnums));
+	appendStringInfo(str, " :hash_clauses %s",
+					 nodeToString(plannode->hash_clauses));
+	appendStringInfo(str, " :qual_clauses %s",
+					 nodeToString(plannode->qual_clauses));
 }
 
 static CustomPlan *
@@ -1460,14 +1669,13 @@ gpuhashjoin_copy_plan(const CustomPlan *from)
 	newnode->jointype = oldnode->jointype;
 	if (oldnode->kernel_source)
 		newnode->kernel_source = pstrdup(oldnode->kernel_source);
-	newnode->extra_flags  = oldnode->extra_flags;
-	newnode->result_map   = copy_vartrans_info(oldnode->result_map);
-	newnode->inner_map    = copy_vartrans_info(oldnode->inner_map);
-	newnode->outer_map    = copy_vartrans_info(oldnode->outer_map);
-	newnode->used_params  = copyObject(oldnode->used_params);
-	newnode->used_vars    = copyObject(oldnode->used_vars);
-	newnode->hash_clauses = copyObject(oldnode->hash_clauses);
-	newnode->qual_clauses = copyObject(oldnode->qual_clauses);
+	newnode->extra_flags   = oldnode->extra_flags;
+	newnode->used_params   = copyObject(oldnode->used_params);
+	newnode->used_vars     = copyObject(oldnode->used_vars);
+	newnode->pscan_tlist   = copyObject(oldnode->pscan_tlist);
+	newnode->pscan_resnums = copyObject(oldnode->pscan_resnums);
+	newnode->hash_clauses  = copyObject(oldnode->hash_clauses);
+	newnode->qual_clauses  = copyObject(oldnode->qual_clauses);
 
 	return &newnode->cplan;
 }
