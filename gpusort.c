@@ -145,7 +145,7 @@ compute_gpusort_chunksize(Size width, double nrows,
 
 	/* Put results */
 	*gpusort_chunksz = chunk_sz;
-	*nrows_per_chunk = (((Size)nrows) & ~(PGSTROM_WORKGROUP_UNITSZ - 1));
+	*nrows_per_chunk = TYPEALIGN(PGSTROM_WORKGROUP_UNITSZ, (Size)nrows);
 }
 
 /*
