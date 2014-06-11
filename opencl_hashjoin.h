@@ -88,18 +88,25 @@ typedef struct
 {
 	cl_uint			next;	/* offset of the next */
 	cl_uint			hash;	/* 32-bit hash value */
-	cl_uint			rowidx;	/* identifier of inner row */
+	cl_ulong		rowid;	/* identifier of inner rows; upper 32bits are used
+							 * to point a particular rc-store, lower 32bits
+							 * are index within the rc-store.
+							 */
 	cl_char			keydata[FLEXIBLE_ARRAY_MEMBER];
 } kern_hash_entry;
 
 typedef struct
 {
-	cl_uint			maxlen;	/* max length by shared memory allocation */
 	cl_uint			length;	/* length of this hash table */
 	cl_uint			nslots;	/* width of hash slot */
 	cl_uint			nkeys;	/* number of keys to be compared */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];
 } kern_hash_table;
+
+#define KERN_HASHTABLE_SLOT(khash)										\
+	(__global cl_uint *)((__global char *)(khash) +						\
+						 LONGALIGN(offsetof(kern_hash_table,			\
+											colmeta[(khash)->nkeys])))
 
 /*
  * Sequential Scan using GPU/MIC acceleration
@@ -491,20 +498,26 @@ __constant cl_uint pg_crc32_table[256] = {
 typedef struct pgstrom_hashjoin_table
 {
 	StromObject		sobj;		/* = StromTab_HashJoinTable */
+	cl_uint			maxlen;		/* max length of hash-table; be allocated */
 	slock_t			lock;		/* protection of the fields below */
 	cl_int			refcnt;		/* reference counter of this hash table */
 	cl_int			n_kernel;	/* number of active running kernel */
 	cl_mem			m_hash;		/* in-kernel buffer object. Once n_kernel
 								 * backed to zero, valid m_hash needs to
 								 * be released. */
+	cl_int			num_rcs;	/* number of inner row/column-stores */
+	cl_int			max_rcs;	/* max number of inner row/column-stores */
+	StromObject	  **rcstore;	/* array of row/column-store */
 	kern_hash_table	kern;
 } pgstrom_hashjoin_table;
 
 typedef struct
 {
 	pgstrom_message		msg;	/* = StromTag_GpuHashJoin */
-	Datum				dprog_key;
-	StromObject		   *rc_store;
+	Datum				dprog_key;		/* device key for gpuhashjoin */
+	bool				build_pscan;	/* true, if want pseudo-scan view */
+	StromObject		   *rcs_in;
+	StromObject		   *rcs_out;
 	kern_hash_join		kern;
 } pgstrom_gpu_hash_join;
 
