@@ -92,6 +92,9 @@ typedef struct
 	List		   *inner_resnums;
 	List		   *inner_offsets;
 	Size			inner_fixlen;
+	bool			outer_done;
+	bool			outer_bulk;
+	HeapTuple		outer_overflow;
 
 	pgstrom_queue  *mqueue;
 	Datum			dprog_key;
@@ -198,12 +201,12 @@ estimate_hashtable_size(PlannerInfo *root, List *hash_clauses, double ntuples)
 	memset(&context, 0, sizeof(estimate_hashtable_size_context));
 	estimate_hashtable_size_walker((Node *)hash_clauses, &context);
 
-	entry_size = INTALIGN(offsetof(kern_hash_entry, keydata[0]) +
+	entry_size = INTALIGN(offsetof(kern_hashentry, keydata[0]) +
 						  Max(sizeof(cl_ushort),
 							  SHORTALIGN(context.natts / BITS_PER_BYTE)) +
 						  context.width);
 
-	return MAXALIGN(offsetof(kern_hash_table,
+	return MAXALIGN(offsetof(kern_hashtable,
 							 colmeta[context.natts])
 					+ entry_size * (Size)ntuples);
 }
@@ -851,7 +854,7 @@ gpuhashjoin_codegen_compare(PlannerInfo *root,
 		if (((Var *)lfirst(cell))->varno == INNER_VAR)
 			inner_nums++;
 	}
-	inner_offset = INTALIGN(offsetof(kern_hash_entry,
+	inner_offset = INTALIGN(offsetof(kern_hashentry,
 									 keydata[(inner_nums >> 3) + 1]));
 	foreach (cell, context->used_vars)
 	{
@@ -916,7 +919,7 @@ gpuhashjoin_codegen_compare(PlannerInfo *root,
 					 "static cl_bool\n"
 					 "gpuhashjoin_keycomp(__private cl_int *errcode,\n"
 					 "                    __global kern_parambuf *kparams,\n"
-					 "                    __global kern_hash_entry *entry,\n"
+					 "                    __global kern_hashentry *entry,\n"
 					 "                    __global kern_column_store *kcs,\n"
 					 "                    __global kern_toastbuf *ktoast,\n"
 					 "                    size_t row_index,\n"
@@ -1002,7 +1005,7 @@ estimate_gpuhashjoin_keywidth(PlannerInfo *root,
 							  List *used_vars,
 							  List *inner_tlist)
 {
-	Size		width = offsetof(kern_hash_entry, keydata);
+	Size		width = offsetof(kern_hashentry, keydata);
 	ListCell   *cell;
 
 	foreach (cell, used_vars)
@@ -1468,6 +1471,11 @@ gpuhashjoin_begin(CustomPlan *node, EState *estate, int eflags)
 	ghjs->inner_offsets = list_copy(ghashjoin->inner_offsets);
 	ghjs->inner_fixlen  = ghashjoin->inner_fixlen;
 
+	/* is bulk-scan available on outer node? */
+	ghjs->outer_bulk = pgstrom_plan_can_multi_exec(outerPlanState(ghjs));
+	ghjs->outer_done = false;
+	ghjs->outer_overflow = NULL;
+
 	/*
 	 * initialize result tuple type and projection info
 	 */
@@ -1590,7 +1598,7 @@ gpuhashjoin_create_hash_table(GpuHashJoinState *ghjs)
 	hash_table->m_hash = NULL;	/* set by opencl-server */
 
 	hash_table->maxlen = (allocated - offsetof(pgstrom_hashjoin_table, kern));
-	hash_table->kern.length = (LONGALIGN(offsetof(kern_hash_table,
+	hash_table->kern.length = (LONGALIGN(offsetof(kern_hashtable,
 												  colmeta[nkeys])) +
 							   LONGALIGN(sizeof(cl_uint) * nslots));
 	hash_table->kern.nslots = nslots;
@@ -1609,7 +1617,7 @@ gpuhashjoin_preload_hash_table_rs(GpuHashJoinState *ghjs,
 								  TupleDesc tupdesc,
 								  tcache_row_store *trs, cl_uint rcs_index)
 {
-	kern_hash_entry	 *kentry;
+	kern_hashentry	 *kentry;
 	Size		kentry_sz;
 	cl_uint		nitems = trs->kern.nrows;
 	cl_uint	   *hash_slot = KERN_HASHTABLE_SLOT(&hash_table->kern);
@@ -1647,7 +1655,7 @@ gpuhashjoin_preload_hash_table_rs(GpuHashJoinState *ghjs,
 			hash_table = new_table;
 		}
 
-		kentry = (kern_hash_entry *)((char *)&hash_table->kern +
+		kentry = (kern_hashentry *)((char *)&hash_table->kern +
 									 hash_table->kern.length);
 		kentry_sz = ghjs->inner_fixlen;
 		INIT_CRC32(hash);
@@ -1720,7 +1728,7 @@ gpuhashjoin_preload_hash_table_cs(GpuHashJoinState *ghjs,
 								  cl_uint nitems, cl_uint *rindex,
 								  List *toast_resnums)
 {
-	kern_hash_entry *kentry;
+	kern_hashentry *kentry;
 	cl_uint	   *hash_slot = KERN_HASHTABLE_SLOT(&hash_table->kern);
 	Size		kentry_sz;
 	ListCell   *lp1, *lp2;
@@ -1779,8 +1787,8 @@ gpuhashjoin_preload_hash_table_cs(GpuHashJoinState *ghjs,
 			pgstrom_track_object(&new_table->sobj, 0);
 			hash_table = new_table;
 		}
-		kentry = (kern_hash_entry *)((char *)&hash_table->kern +
-									 hash_table->kern.length);
+		kentry = (kern_hashentry *)((char *)&hash_table->kern +
+									hash_table->kern.length);
 		kentry_sz = ghjs->inner_fixlen;
 		INIT_CRC32(hash);
 
@@ -1852,6 +1860,10 @@ gpuhashjoin_preload_hash_table(GpuHashJoinState *ghjs)
 	StromObject	   *rcstore;
 	HeapTuple		overflow = NULL;
 	pgstrom_bulk_slot *bulk = NULL;
+	struct timeval tv1, tv2;
+
+	if (ghjs->pfm.enabled)
+		gettimeofday(&tv1, NULL);
 
 	/* pulls resource number with toast buffer */
 	foreach (cell, ghjs->inner_resnums)
@@ -1975,6 +1987,12 @@ gpuhashjoin_preload_hash_table(GpuHashJoinState *ghjs)
 		if (bulk)
 			pfree(bulk);
 	}
+	if (ghjs->pfm.enabled)
+	{
+		gettimeofday(&tv2, NULL);
+		ghjs->pfm.time_to_load_inner += timeval_diff(&tv1, &tv2);
+	}
+
 	/*
 	 * NOTE: if num_rcs == 0, it means no tuples were not preloaded.
 	 * In this case, we don't need to return any tuples for inner join,
@@ -1990,8 +2008,8 @@ gpuhashjoin_dump_hash_table(GpuHashJoinState *ghjs)
 	TupleDesc			tupdesc = ExecGetResultType(subnode);
 	StringInfoData		str;
 	pgstrom_hashjoin_table *phash;
-	kern_hash_table	   *khash;
-	kern_hash_entry	   *kentry;
+	kern_hashtable	   *khash;
+	kern_hashentry	   *kentry;
 	cl_uint			   *kslots;
 	cl_int				i, i_key;
 	ListCell		   *lp1, *lp2;
@@ -2010,7 +2028,7 @@ gpuhashjoin_dump_hash_table(GpuHashJoinState *ghjs)
 	{
 		if (kslots[i] == 0)
 			continue;
-		kentry = (kern_hash_entry *)((char *)khash + kslots[i]);
+		kentry = (kern_hashentry *)((char *)khash + kslots[i]);
 	next:
 		resetStringInfo(&str);
 
@@ -2057,11 +2075,145 @@ gpuhashjoin_dump_hash_table(GpuHashJoinState *ghjs)
 
 		if (kentry->next != 0)
 		{
-			kentry = (kern_hash_entry *)((char *)khash + kentry->next);
+			kentry = (kern_hashentry *)((char *)khash + kentry->next);
 			goto next;
 		}
 	}
 }
+
+
+static void
+pgstrom_release_gpuhashjoin()
+{}
+
+static pgstrom_gpu_hashjoin *
+pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs, StromObject *rcstore)
+{
+
+#if 0
+
+	/* acquire a pgstrom_gpu_hashjoin from the slab */
+	SpinLockAcquire(&gpuhashjoin_shm_values->lock);
+	if (dlist_is_empty(&gpuhashjoin_shm_values->free_list))
+	{
+
+
+
+
+
+	}
+	Assert(!dlist_is_empty(&gpuhashjoin_shm_values->free_list));
+	dnode = dlist_pop_head_node(&gpuhashjoin_shm_values->free_list);
+	ghjoin = dlist_container(pgstrom_gpu_hashjoin, chain, dnode);
+
+
+
+	pgstrom_gpu_hashjoin *ghjoin;
+
+	SpinLockRelease(&gpuhashjoin_shm_values->lock);
+
+
+
+
+
+
+
+
+		return gpuhashjoin_load_next_outer
+
+
+
+typedef struct
+{
+    pgstrom_message     msg;    /* = StromTag_GpuHashJoin */
+    Datum               dprog_key;      /* device key for gpuhashjoin */
+    bool                build_pscan;    /* true, if want pseudo-scan view */
+    StromObject        *rcs_in;
+    StromObject        *rcs_out;
+    kern_hashjoin      *kern;
+} pgstrom_gpu_hashjoin;
+#endif
+		return NULL;
+}
+
+static pgstrom_gpu_hashjoin *
+gpuhashjoin_load_next_outer(GpuHashJoinState *ghjs)
+{
+	PlanState	   *subnode = outerPlanState(ghjs);
+	TupleDesc		tupdesc = ExecGetResultType(subnode);
+	StromObject	   *rcstore = NULL;
+	pgstrom_bulk_slot *bulk = NULL;
+	cl_uint			nitems;
+	cl_uint		   *rindex = NULL;
+	pgstrom_gpu_hashjoin *gpuhashjoin;
+
+	if (ghjs->outer_done)
+		return NULL;
+
+	if (!ghjs->outer_bulk)
+	{
+		/* Scan the outer relation using row-by-row mode */
+		tcache_row_store *trs = NULL;
+		HeapTuple	tuple;
+
+		while (true)
+		{
+			if (HeapTupleIsValid(ghjs->outer_overflow))
+			{
+				tuple = ghjs->outer_overflow;
+				ghjs->outer_overflow = NULL;
+			}
+			else
+			{
+				TupleTableSlot *slot = ExecProcNode(subnode);
+				if (TupIsNull(slot))
+				{
+					ghjs->outer_done = true;
+					break;
+				}
+				tuple = ExecFetchSlotTuple(slot);
+			}
+			if (!trs)
+				trs = tcache_create_row_store(tupdesc);
+			if (!tcache_row_store_insert_tuple(trs, tuple))
+			{
+				ghjs->outer_overflow = tuple;
+				break;
+			}
+		}
+		if (trs)
+		{
+			nitems = trs->kern.nrows;
+			rindex = NULL;
+			rcstore = &trs->sobj;
+		}
+	}
+	else
+	{
+		/* Scan the outer relation using bulk-scan mode */
+		bulk = (pgstrom_bulk_slot *)MultiExecProcNode(subnode);
+		if (!bulk)
+			ghjs->outer_done = true;
+		else
+		{
+			nitems = bulk->nitems;
+			rindex = bulk->rindex;
+			rcstore = bulk->rc_store;
+		}
+	}
+	/* Is there tuples to return? */
+	if (!rcstore)
+		return NULL;
+
+	gpuhashjoin = pgstrom_create_gpuhashjoin(ghjs, rcstore);
+
+	return NULL;
+}
+
+
+
+
+
 
 
 
@@ -2074,7 +2226,26 @@ gpuhashjoin_exec(CustomPlanState *node)
 	if (!ghjs->hash_table)
 		ghjs->hash_table = gpuhashjoin_preload_hash_table(ghjs);
 
-	//gpuhashjoin_dump_hash_table(ghjs);
+	{
+		// load_next_outer
+
+		// send it
+
+		// deque, if nothing, try to load next one
+
+		// if nothing to load, sync dequeue
+
+		// return null, if nothing to dequeue
+
+		// determine the next chunk to fetch
+	}
+	// next chunk should have column-store for pscan slot
+
+	// set a row onto scan-slot
+
+	// CPU will check host_clauses
+
+	// run projection if we have
 
 
 
@@ -2085,6 +2256,9 @@ gpuhashjoin_exec(CustomPlanState *node)
 static Node *
 gpuhashjoin_exec_multi(CustomPlanState *node)
 {
+	// we can use bulk-scan mode if no projection, no host quals
+
+
 	elog(ERROR, "not implemented yet");
 	return NULL;
 }

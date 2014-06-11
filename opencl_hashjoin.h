@@ -93,7 +93,7 @@ typedef struct
 							 * are index within the rc-store.
 							 */
 	cl_char			keydata[FLEXIBLE_ARRAY_MEMBER];
-} kern_hash_entry;
+} kern_hashentry;
 
 typedef struct
 {
@@ -101,11 +101,11 @@ typedef struct
 	cl_uint			nslots;	/* width of hash slot */
 	cl_uint			nkeys;	/* number of keys to be compared */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];
-} kern_hash_table;
+} kern_hashtable;
 
 #define KERN_HASHTABLE_SLOT(khash)										\
 	(__global cl_uint *)((__global char *)(khash) +						\
-						 LONGALIGN(offsetof(kern_hash_table,			\
+						 LONGALIGN(offsetof(kern_hashtable,				\
 											colmeta[(khash)->nkeys])))
 
 /*
@@ -152,7 +152,7 @@ typedef struct
 {
 	kern_parambuf	kparam;
 	/* also, resultbuf shall be placed next to the parambuf */
-} kern_hash_join;
+} kern_hashjoin;
 
 #define KERN_HASHJOIN_PARAMBUF(kghashjoin)					\
 	((__global kern_parambuf *)(&(khashjoin)->kparam))
@@ -197,7 +197,7 @@ gpuhashjoin_hashkey(__private cl_int *errcode,
 static cl_bool
 gpuhashjoin_keycomp(__private cl_int *errcode,
 					__global kern_parambuf *kparams,
-					__global kern_hash_entry *entry,
+					__global kern_hashentry *kentry,
 					__global kern_column_store *kcs,
 					__global kern_toastbuf *ktoast,
 					size_t row_index);
@@ -216,7 +216,7 @@ static void
 gpuhashjoin_inner(__private cl_int *errcode,
 				  __global kern_parambuf *kparams,
 				  __global kern_resultbuf *kresults,
-				  __global kern_hash_table *khashtbl,
+				  __global kern_hashtable *khashtbl,
 				  __global kern_column_store *kcs,
 				  __global kern_toastbuf *ktoast,
 				  size_t kcs_index,
@@ -267,8 +267,8 @@ gpuhashjoin_inner(__private cl_int *errcode,
 
 
 __kernel void
-gpuhashjoin_inner_cs(__global kern_hash_join *kgpuhashjoin,
-					 __global kern_hash_table *khashtbl,
+gpuhashjoin_inner_cs(__global kern_hashjoin *khashjoin,
+					 __global kern_hashtable *khashtbl,
 					 __global kern_column_store *kcs,
 					 __global kern_toastbuf *toast,
 					 __local void *local_workmem)
@@ -280,8 +280,8 @@ gpuhashjoin_inner_cs(__global kern_hash_join *kgpuhashjoin,
 }
 
 __kernel void
-gpuhashjoin_inner_rs(__global kern_hash_join *kghashjoin,
-					 __global kern_hash_table *khashtbl,
+gpuhashjoin_inner_rs(__global kern_hashjoin *khashjoin,
+					 __global kern_hashtable *khashtbl,
 					 __global kern_row_store *krs,
 					 __global kern_column_store *kcs,
 					 __local void *local_workmem)
@@ -336,7 +336,7 @@ gpuhashjoin_inner_rs(__global kern_hash_join *kghashjoin,
  */
 #define STROMCL_SIMPLE_HASHREF_TEMPLATE(NAME,BASE)			\
 	static pg_##NAME##_t									\
-	pg_##NAME##_hashref(__global kern_hash_entry *khe,		\
+	pg_##NAME##_hashref(__global kern_hashentry *kentry,		\
 						__private int *p_errcode,			\
 						cl_uint key_index,					\
 						cl_uint key_offset)					\
@@ -355,7 +355,7 @@ gpuhashjoin_inner_rs(__global kern_hash_join *kghashjoin,
 	}
 
 static pg_varlena_t
-pg_varlena_hashref(__global kern_hash_entry *khe,
+pg_varlena_hashref(__global kern_hashentry *kentry,
 				   __private int *p_errcode,
 				   cl_uint key_index,
 				   cl_uint key_offset)
@@ -385,7 +385,7 @@ pg_varlena_hashref(__global kern_hash_entry *khe,
 
 #define STROMCL_VARLENA_HASHREF_TEMPLATE(NAME)				\
 	static pg_##NAME##_t									\
-	pg_##NAME##_hashref(__global kern_hash_entry *khe,		\
+	pg_##NAME##_hashref(__global kern_hashentry *kentry,	\
 						__private int *p_errcode,			\
 						cl_uint key_index,					\
 						cl_uint key_offset)					\
@@ -508,7 +508,7 @@ typedef struct pgstrom_hashjoin_table
 	cl_int			num_rcs;	/* number of inner row/column-stores */
 	cl_int			max_rcs;	/* max number of inner row/column-stores */
 	StromObject	  **rcstore;	/* array of row/column-store */
-	kern_hash_table	kern;
+	kern_hashtable	kern;
 } pgstrom_hashjoin_table;
 
 typedef struct
@@ -518,8 +518,8 @@ typedef struct
 	bool				build_pscan;	/* true, if want pseudo-scan view */
 	StromObject		   *rcs_in;
 	StromObject		   *rcs_out;
-	kern_hash_join		kern;
-} pgstrom_gpu_hash_join;
+	kern_hashjoin		kern;
+} pgstrom_gpu_hashjoin;
 
 
 

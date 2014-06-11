@@ -136,7 +136,7 @@ typedef enum {
 	StromTag_TCacheToastBuf,
 	StromTag_GpuScan,
 	StromTag_GpuSort,
-	StromTag_HashJoin,
+	StromTag_GpuHashJoin,
 	StromTag_HashJoinTable,
 } StromTag;
 
@@ -519,6 +519,8 @@ pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
 extern bytea *kparam_construct_refatts(TupleDesc tupdesc,
 									   List *attnums_list);
+extern bytea *
+pgstrom_create_simple_projection(List *target_list);
 extern void pgstrom_release_bulk_slot(pgstrom_bulk_slot *bulk_slot);
 extern bool pgstrom_plan_can_multi_exec(const PlanState *ps);
 

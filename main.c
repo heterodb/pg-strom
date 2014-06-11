@@ -372,9 +372,22 @@ pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 	/* common performance statistics */
 	ExplainPropertyInteger("number of requests", pfm->num_samples, es);
 
-	snprintf(buf, sizeof(buf), "%s",
-			 usecond_unitary_format((double)pfm->time_to_load));
-	ExplainPropertyText("total time to load", buf, es);
+	if (pfm->time_to_load_inner > 0)
+	{
+		snprintf(buf, sizeof(buf), "%s",
+				 usecond_unitary_format((double)pfm->time_to_load_inner));
+		ExplainPropertyText("total time to inner load", buf, es);
+
+		snprintf(buf, sizeof(buf), "%s",
+				 usecond_unitary_format((double)pfm->time_to_load));
+		ExplainPropertyText("total time to outer load", buf, es);
+	}
+	else
+	{
+		snprintf(buf, sizeof(buf), "%s",
+				 usecond_unitary_format((double)pfm->time_to_load));
+		ExplainPropertyText("total time to load", buf, es);
+	}
 
 	if (pfm->time_tcache_build > 0)
 	{
