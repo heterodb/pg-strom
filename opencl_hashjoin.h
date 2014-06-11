@@ -513,15 +513,15 @@ typedef struct pgstrom_hashjoin_table
 
 typedef struct
 {
-	pgstrom_message		msg;	/* = StromTag_GpuHashJoin */
-	Datum				dprog_key;		/* device key for gpuhashjoin */
-	bool				build_pscan;	/* true, if want pseudo-scan view */
-	StromObject		   *rcs_in;
-	StromObject		   *rcs_out;
-	kern_hashjoin		kern;
-} pgstrom_gpu_hashjoin;
+	pgstrom_message	msg;		/* = StromTag_GpuHashJoin */
+	dlist_node		chain;		/* to chain free-list */
+	Datum			dprog_key;	/* device key for gpuhashjoin */
+	
 
-
-
+	bool			build_pscan;/* true, if want pseudo-scan view */
+	StromObject	   *rcs_in;
+	StromObject	   *rcs_out;
+	kern_hashjoin  *kern;
+} pgstrom_gpuhashjoin;
 
 #endif	/* OPENCL_HASHJOIN_H */

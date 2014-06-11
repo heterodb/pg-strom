@@ -26,6 +26,7 @@
 #include "optimizer/tlist.h"
 #include "optimizer/var.h"
 #include "parser/parsetree.h"
+#include "storage/ipc.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_crc.h"
@@ -108,6 +109,15 @@ typedef struct
 
 	pgstrom_perfmon	pfm;
 } GpuHashJoinState;
+
+/* variable to be placed in shared memory segment */
+static shmem_startup_hook_type shmem_startup_hook_next;
+static struct {
+	slock_t		lock;
+	dlist_head	free_list;	/* list of inactive gpuhashjoin slab */
+	uint32		num_free;
+	uint32		num_active;
+} *gpuhashjoin_shm_values;
 
 /*
  * estimate_hashitem_size
@@ -958,9 +968,26 @@ gpuhashjoin_codegen(PlannerInfo *root,
 	 * A dummy constant
 	 * KPARAM_0 is an array of bool to inform referenced columns
 	 * in the outer relation, in GpuHashJoin.
+	 * KPARAM_1 is a template of kcs_head in the kernel space.
+	 * KPARAM_2 is a simple projection information to generate pseudo-
+	 * scaned relation, 
 	 * Just a placeholder here. Set up it later.
 	 */
-	context->used_params = list_make1(makeConst(BYTEAOID,
+	context->used_params = list_make3(makeConst(BYTEAOID,
+												-1,
+												InvalidOid,
+												-1,
+												PointerGetDatum(NULL),
+												true,
+												false),
+									  makeConst(BYTEAOID,
+												-1,
+												InvalidOid,
+												-1,
+												PointerGetDatum(NULL),
+												true,
+												false),
+									  makeConst(BYTEAOID,
 												-1,
 												InvalidOid,
 												-1,
@@ -2081,62 +2108,87 @@ gpuhashjoin_dump_hash_table(GpuHashJoinState *ghjs)
 	}
 }
 
+static void clserv_process_gpuhashjoin(pgstrom_message *message);
 
 static void
-pgstrom_release_gpuhashjoin()
-{}
+pgstrom_release_gpuhashjoin(pgstrom_message *message)
+{
+	pgstrom_gpuhashjoin *gpuhashjoin = (pgstrom_gpuhashjoin *) message;
 
-static pgstrom_gpu_hashjoin *
+	/* unlink message queue and device program */
+	pgstrom_put_queue(gpuhashjoin->msg.respq);
+    pgstrom_put_devprog_key(gpuhashjoin->dprog_key);
+
+	/* unlink row/column store */
+	pgstrom_put_rcstore(gpuhashjoin->rcs_in);
+	if (gpuhashjoin->rcs_out)
+		pgstrom_put_rcstore(gpuhashjoin->rcs_out);
+
+	/* release kern_hashjoin */
+	if (gpuhashjoin->kern)
+		pgstrom_shmem_free(gpuhashjoin->kern);
+
+	/* release a pgstrom_gpu_hashjoin slab */
+	SpinLockAcquire(&gpuhashjoin_shm_values->lock);
+	memset(gpuhashjoin, 0, sizeof(pgstrom_gpuhashjoin));
+	gpuhashjoin_shm_values->num_active--;
+	dlist_push_tail(&gpuhashjoin_shm_values->free_list,
+					&gpuhashjoin->chain);
+	gpuhashjoin_shm_values->num_free++;
+	SpinLockRelease(&gpuhashjoin_shm_values->lock);
+}
+
+static pgstrom_gpuhashjoin *
 pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs, StromObject *rcstore)
 {
-
-#if 0
+	pgstrom_gpuhashjoin	*gpuhashjoin;
+	dlist_node	   *dnode;
 
 	/* acquire a pgstrom_gpu_hashjoin from the slab */
 	SpinLockAcquire(&gpuhashjoin_shm_values->lock);
 	if (dlist_is_empty(&gpuhashjoin_shm_values->free_list))
 	{
+		Size		allocated;
+		uintptr_t	tailaddr;
 
-
-
-
-
+		gpuhashjoin = pgstrom_shmem_alloc_alap(sizeof(pgstrom_gpuhashjoin),
+											   &allocated);
+		tailaddr = (uintptr_t)gpuhashjoin + allocated;
+		while (((uintptr_t)gpuhashjoin +
+				sizeof(pgstrom_gpuhashjoin)) <= tailaddr)
+		{
+			dlist_push_tail(&gpuhashjoin_shm_values->free_list,
+							&gpuhashjoin->chain);
+			gpuhashjoin++;
+			gpuhashjoin_shm_values->num_free++;
+		}
 	}
 	Assert(!dlist_is_empty(&gpuhashjoin_shm_values->free_list));
+	gpuhashjoin_shm_values->num_free--;
 	dnode = dlist_pop_head_node(&gpuhashjoin_shm_values->free_list);
-	ghjoin = dlist_container(pgstrom_gpu_hashjoin, chain, dnode);
-
-
-
-	pgstrom_gpu_hashjoin *ghjoin;
-
+	gpuhashjoin = dlist_container(pgstrom_gpuhashjoin, chain, dnode);
+	gpuhashjoin_shm_values->num_active++;
 	SpinLockRelease(&gpuhashjoin_shm_values->lock);
 
+	/* initialize the common message field */
+	memset(gpuhashjoin, 0, sizeof(pgstrom_gpuhashjoin));
+	gpuhashjoin->msg.sobj.stag = StromTag_GpuHashJoin;
+	SpinLockInit(&gpuhashjoin->msg.lock);
+	gpuhashjoin->msg.refcnt = 1;
+	gpuhashjoin->msg.respq = pgstrom_get_queue(ghjs->mqueue);
+	gpuhashjoin->msg.cb_process = clserv_process_gpuhashjoin;
+	gpuhashjoin->msg.cb_release = pgstrom_release_gpuhashjoin;
+	gpuhashjoin->msg.pfm.enabled = ghjs->pfm.enabled;
+	/* other fields also */
+	gpuhashjoin->dprog_key = pgstrom_retain_devprog_key(ghjs->dprog_key);
+	gpuhashjoin->rcs_in = pgstrom_get_rcstore(rcstore);
+	gpuhashjoin->rcs_out = NULL;	/* result pscan-slot */
+	gpuhashjoin->kern = NULL;	/* length needs to be estimated */
 
-
-
-
-
-
-
-		return gpuhashjoin_load_next_outer
-
-
-
-typedef struct
-{
-    pgstrom_message     msg;    /* = StromTag_GpuHashJoin */
-    Datum               dprog_key;      /* device key for gpuhashjoin */
-    bool                build_pscan;    /* true, if want pseudo-scan view */
-    StromObject        *rcs_in;
-    StromObject        *rcs_out;
-    kern_hashjoin      *kern;
-} pgstrom_gpu_hashjoin;
-#endif
-		return NULL;
+	return gpuhashjoin;
 }
 
-static pgstrom_gpu_hashjoin *
+static pgstrom_gpuhashjoin *
 gpuhashjoin_load_next_outer(GpuHashJoinState *ghjs)
 {
 	PlanState	   *subnode = outerPlanState(ghjs);
@@ -2145,7 +2197,7 @@ gpuhashjoin_load_next_outer(GpuHashJoinState *ghjs)
 	pgstrom_bulk_slot *bulk = NULL;
 	cl_uint			nitems;
 	cl_uint		   *rindex = NULL;
-	pgstrom_gpu_hashjoin *gpuhashjoin;
+	pgstrom_gpuhashjoin *gpuhashjoin;
 
 	if (ghjs->outer_done)
 		return NULL;
@@ -2475,6 +2527,24 @@ gpuhashjoin_copy_plan(const CustomPlan *from)
 	return &newnode->cplan;
 }
 
+static void
+pgstrom_startup_gpuhashjoin(void)
+{
+	bool	found;
+
+	if (shmem_startup_hook_next)
+		(*shmem_startup_hook_next)();
+
+	gpuhashjoin_shm_values =
+		ShmemInitStruct("gpuhashjoin_shm_values",
+						MAXALIGN(sizeof(*gpuhashjoin_shm_values)),
+						&found);
+	Assert(found);
+	memset(gpuhashjoin_shm_values, 0, sizeof(*gpuhashjoin_shm_values));
+	SpinLockInit(&gpuhashjoin_shm_values->lock);
+	dlist_init(&gpuhashjoin_shm_values->free_list);
+}
+
 void
 pgstrom_init_gpuhashjoin(void)
 {
@@ -2504,4 +2574,27 @@ pgstrom_init_gpuhashjoin(void)
 	/* hook registration */
 	add_hashjoin_path_next = add_hashjoin_path_hook;
 	add_hashjoin_path_hook = gpuhashjoin_add_path;
+
+	/* shared memory allocation */
+	RequestAddinShmemSpace(MAXALIGN(sizeof(*gpuhashjoin_shm_values)));
+	shmem_startup_hook_next = shmem_startup_hook;
+	shmem_startup_hook = pgstrom_startup_gpuhashjoin;
+}
+
+/* ----------------------------------------------------------------
+ *
+ * NOTE: below is the code being run on OpenCL server context
+ *
+ * ---------------------------------------------------------------- */
+
+
+
+
+
+static void
+clserv_process_gpuhashjoin(pgstrom_message *message)
+{
+	pgstrom_gpuhashjoin *gpuhashjoin = (pgstrom_gpuhashjoin *) message;
+
+
 }
