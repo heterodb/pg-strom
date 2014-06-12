@@ -501,10 +501,12 @@ typedef struct pgstrom_hashjoin_table
 	cl_uint			maxlen;		/* max length of hash-table; be allocated */
 	slock_t			lock;		/* protection of the fields below */
 	cl_int			refcnt;		/* reference counter of this hash table */
+	cl_int			dindex;		/* device to load the hash table */
 	cl_int			n_kernel;	/* number of active running kernel */
 	cl_mem			m_hash;		/* in-kernel buffer object. Once n_kernel
 								 * backed to zero, valid m_hash needs to
 								 * be released. */
+	cl_event		ev_hash;	/* event to load hash table to kernel */
 	cl_int			num_rcs;	/* number of inner row/column-stores */
 	cl_int			max_rcs;	/* max number of inner row/column-stores */
 	StromObject	  **rcstore;	/* array of row/column-store */
@@ -516,6 +518,7 @@ typedef struct
 	pgstrom_message	msg;		/* = StromTag_GpuHashJoin */
 	dlist_node		chain;		/* to chain free-list */
 	Datum			dprog_key;	/* device key for gpuhashjoin */
+	pgstrom_hashjoin_table *hjtable;	/* inner hashjoin table */
 	
 
 	bool			build_pscan;/* true, if want pseudo-scan view */

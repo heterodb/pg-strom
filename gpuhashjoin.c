@@ -2587,6 +2587,200 @@ pgstrom_init_gpuhashjoin(void)
  *
  * ---------------------------------------------------------------- */
 
+typedef struct 
+{
+	pgstrom_message *msg;
+	cl_command_queue kcmdq;
+	cl_program	program;
+	cl_kernel	kernel;
+	cl_mem		m_hash;		/* kern_hashtable */
+	cl_mem		m_join;		/* kern_hashjoin */
+	cl_mem		m_rstore;	/* kern_row_store */
+	cl_mem		m_cstore;	/* kern_column_store */
+	cl_mem		m_toast;	/* kern_toastbuf */
+	cl_int		ev_index;
+	cl_event	events[30];
+} clstate_gpuhashjoin;
+
+static clstate_gpuhashjoin *
+clserv_process_gpuhashjoin_common(pgstrom_gpuhashjoin *ghjoin)
+{
+	pgstrom_hashjoin_table *hjtable = ghjoin->hjtable;
+	clstate_gpuhashjoin *clghj;
+	cl_int		dindex;
+	cl_int		rc;
+
+	/* state object of gpuhashjoin with row-store */
+	clghj = calloc(1, sizeof(clstate_gpuhashjoin));
+	if (!clghj)
+	{
+		rc = CL_OUT_OF_HOST_MEMORY;
+		goto error;
+	}
+	clghj->msg = &ghjoin->msg;
+
+	/*
+	 * First of all, it looks up a program object to be run on
+	 * the supplied row-store. We may have three cases.
+	 * 1) NULL; it means the required program is under asynchronous
+	 *    build, and the message is kept on its internal structure
+	 *    to be enqueued again. In this case, we have nothing to do
+	 *    any more on the invocation.
+	 * 2) BAD_OPENCL_PROGRAM; it means previous compile was failed
+	 *    and unavailable to run this program anyway. So, we need
+	 *    to reply StromError_ProgramCompile error to inform the
+	 *    backend this program.
+	 * 3) valid cl_program object; it is an ideal result. pre-compiled
+	 *    program object was on the program cache, and cl_program
+	 *    object is ready to use.
+	 */
+    clghj->program = clserv_lookup_device_program(ghjoin->dprog_key,
+												  &ghjoin->msg);
+	if (!clghj->program)
+	{
+		free(clghj);
+		return NULL;	/* message is in waitq, being retried later */
+	}
+	if (clghj->program == BAD_OPENCL_PROGRAM)
+	{
+		rc = CL_BUILD_PROGRAM_FAILURE;
+		goto error;
+	}
+
+	/*
+	 * Allocation of kernel memory for hash table. If someone already
+	 * allocated it, we can reuse it.
+	 */
+	SpinLockAcquire(&hjtable->lock);
+	if (hjtable->n_kernel == 0)
+	{
+		Assert(!hjtable->m_hash && !hjtable->ev_hash);
+
+		dindex = pgstrom_opencl_device_schedule(&ghjoin->msg);
+		clghj->kcmdq = opencl_cmdq[dindex];
+
+		clghj->m_hash = clCreateBuffer(opencl_context,
+									   CL_MEM_READ_WRITE,
+									   hjtable->kern.length,
+									   NULL,
+									   &rc);
+		if (rc != CL_SUCCESS)
+		{
+			SpinLockRelease(&hjtable->lock);
+			goto error;
+		}
+
+		rc = clEnqueueWriteBuffer(clghj->kcmdq,
+								  clghj->m_hash,
+								  CL_FALSE,
+								  0,
+								  hjtable->kern.length,
+								  &hjtable->kern,
+								  0,
+								  NULL,
+								  &clghj->events[0]);
+		if (rc != CL_SUCCESS)
+		{
+			rc = clReleaseMemObject(clghj->m_hash);
+			SpinLockRelease(&hjtable->lock);
+			goto error;
+		}
+		clghj->ev_index++;
+
+		hjtable->m_hash = clghj->m_hash;
+		hjtable->ev_hash = clghj->events[0];
+	}
+	else
+	{
+		Assert(hjtable->m_hash && hjtable->ev_hash);
+		rc = clRetainMemObject(hjtable->m_hash);
+		Assert(rc == CL_SUCCESS);
+		rc = clRetainEvent(hjtable->ev_hash);
+		Assert(rc == CL_SUCCESS);
+
+		clghj->m_hash = hjtable->m_hash;
+		clghj->events[0] = hjtable->ev_hash;
+	}
+	hjtable->n_kernel++;
+	SpinLockRelease(&hjtable->lock);
+
+	return clghj;
+
+error:
+	if (clghj)
+	{
+		if (clghj->program)
+			clReleaseProgram(clghj->program);
+		free(clghj);
+	}
+	ghjoin->msg.errcode = rc;
+	pgstrom_reply_message(&ghjoin->msg);
+	return NULL;
+}
+
+
+static void
+clserv_process_gpuhashjoin_column(pgstrom_gpuhashjoin *ghjoin,
+								  tcache_column_store *tcs)
+{
+	clstate_gpuhashjoin *clghj;
+	cl_int		rc;
+
+	clghj = clserv_process_gpuhashjoin_common(ghjoin);
+	if (!clghj)
+		return;
+
+	clghj->kernel = clCreateKernel(clghj->program,
+								   "gpuhashjoin_inner_rs",
+								   &rc);
+	if (rc != CL_SUCCESS)
+		goto error;
+
+
+
+error:
+	if (clghj->kernel)
+		clReleaseKernel(clghj->kernel);
+	if (clghj->program)
+		clReleaseProgram(clghj->program);
+	free(clghj);
+	ghjoin->msg.errcode = rc;
+	pgstrom_reply_message(&ghjoin->msg);
+}
+
+static void
+clserv_process_gpuhashjoin_row(pgstrom_gpuhashjoin *ghjoin,
+							   tcache_row_store *trs)
+{
+	clstate_gpuhashjoin *clghj;
+	cl_int		rc;
+
+	clghj = clserv_process_gpuhashjoin_common(ghjoin);
+	if (!clghj)
+		return;
+
+	clghj->kernel = clCreateKernel(clghj->program,
+								   "gpuhashjoin_inner_cs",
+								   &rc);
+	if (rc != CL_SUCCESS)
+		goto error;
+
+
+
+	
+
+error:
+
+
+	if (clghj->kernel)
+		clReleaseKernel(clghj->kernel);
+	if (clghj->program)
+		clReleaseProgram(clghj->program);
+	free(clghj);
+	ghjoin->msg.errcode = rc;
+	pgstrom_reply_message(&ghjoin->msg);
+}
+
 
 
 
@@ -2594,7 +2788,21 @@ pgstrom_init_gpuhashjoin(void)
 static void
 clserv_process_gpuhashjoin(pgstrom_message *message)
 {
-	pgstrom_gpuhashjoin *gpuhashjoin = (pgstrom_gpuhashjoin *) message;
+	pgstrom_gpuhashjoin *ghjoin = (pgstrom_gpuhashjoin *) message;
 
-
+	if (StromTagIs(ghjoin->rcs_in, TCacheRowStore))
+	{
+		tcache_row_store *trs = (tcache_row_store *) ghjoin->rcs_in;
+		clserv_process_gpuhashjoin_row(ghjoin, trs);
+	}
+	else if (StromTagIs(ghjoin->rcs_in, TCacheColumnStore))
+	{
+		tcache_column_store *tcs = (tcache_column_store *) ghjoin->rcs_in;
+		clserv_process_gpuhashjoin_column(ghjoin, tcs);
+	}
+	else
+	{
+		message->errcode = StromError_BadRequestMessage;
+		pgstrom_reply_message(message);
+	}
 }
