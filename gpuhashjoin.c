@@ -119,6 +119,9 @@ static struct {
 	uint32		num_active;
 } *gpuhashjoin_shm_values;
 
+/* declaration of static functions */
+static void clserv_process_gpuhashjoin(pgstrom_message *message);
+
 /*
  * estimate_hashitem_size
  *
@@ -1440,6 +1443,11 @@ gpuhashjoin_begin(CustomPlan *node, EState *estate, int eflags)
 	GpuHashJoin		   *ghashjoin = (GpuHashJoin *) node;
 	GpuHashJoinState   *ghjs;
 	TupleDesc			tupdesc;
+	TupleDesc			tupdesc_outer;
+	bytea			   *pdatum;
+	Const			   *kparam_0;	/* bitmap of outer references */
+	Const			   *kparam_1;	/* template of outer kcs_head */
+	Const			   *kparam_2;	/* simple projection info */
 	ListCell		   *cell;
 	bool				has_oid;
 	int					index;
@@ -1517,6 +1525,48 @@ gpuhashjoin_begin(CustomPlan *node, EState *estate, int eflags)
 		ExecAssignProjectionInfo(&ghjs->cps.ps, tupdesc);
 
 	/*
+	 * setting up system kparams_0 - flags array of referenced attributes
+	 */
+	Assert(list_length(ghashjoin->used_params) >= 3);
+	kparam_0 = (Const *) linitial(ghashjoin->used_params);
+	Assert(IsA(kparam_0, Const) &&
+		   kparam_0->consttype == BYTEAOID &&
+		   kparam_0->constisnull);
+	tupdesc_outer = ExecGetResultType(outerPlanState(ghjs));
+	pdatum = kparam_make_attrefs(tupdesc_outer,
+								 ghashjoin->used_vars,
+								 OUTER_VAR);
+	kparam_0->constvalue = PointerGetDatum(pdatum);
+	kparam_0->constisnull = false;
+
+	/*
+	 * setting up system kparam_1 - template of kcs_head except for cs_ofs
+	 */
+	kparam_1 = (Const *) lsecond(ghashjoin->used_params);
+	Assert(IsA(kparam_1, Const) &&
+		   kparam_1->consttype == BYTEAOID &&
+		   kparam_1->constisnull);
+	pdatum = kparam_make_kcs_head(tupdesc_outer,
+								  (cl_char *)VARDATA(pdatum),
+								  0,	/* no additional syscols */
+								  100);
+	kparam_1->constvalue = PointerGetDatum(pdatum);
+	kparam_1->constisnull = false;
+
+	/*
+	 * Setting up system kparam_2 - simple projection info
+	 */
+	kparam_2 = (Const *) lthird(ghashjoin->used_params);
+	Assert(IsA(kparam_2, Const) &&
+		   kparam_2->consttype == BYTEAOID &&
+		   kparam_2->constisnull);
+	pdatum = kparam_make_kprojection(ghashjoin->pscan_tlist);
+	kparam_2->constvalue =  PointerGetDatum(pdatum);
+	kparam_2->constisnull = false;
+
+	ghjs->kparams = pgstrom_create_kern_parambuf(ghashjoin->used_params,
+												 ghjs->cps.ps.ps_ExprContext);
+	/*
 	 * Setting up a kernel program and message queue
 	 */
 	Assert(ghashjoin->kernel_source != NULL);
@@ -1526,9 +1576,6 @@ gpuhashjoin_begin(CustomPlan *node, EState *estate, int eflags)
 
 	ghjs->mqueue = pgstrom_create_queue();
 	pgstrom_track_object(&ghjs->mqueue->sobj, 0);
-
-	ghjs->kparams = pgstrom_create_kern_parambuf(ghashjoin->used_params,
-												 ghjs->cps.ps.ps_ExprContext);
 
 	/* Is perfmon needed? */
 	ghjs->pfm.enabled = pgstrom_perfmon_enabled;
@@ -2108,8 +2155,6 @@ gpuhashjoin_dump_hash_table(GpuHashJoinState *ghjs)
 	}
 }
 
-static void clserv_process_gpuhashjoin(pgstrom_message *message);
-
 static void
 pgstrom_release_gpuhashjoin(pgstrom_message *message)
 {
@@ -2143,6 +2188,10 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs, StromObject *rcstore)
 {
 	pgstrom_gpuhashjoin	*gpuhashjoin;
 	dlist_node	   *dnode;
+	double			nitems;
+	Size			length;
+	kern_hashjoin  *khashjoin;
+	kern_resultbuf *kresults;
 
 	/* acquire a pgstrom_gpu_hashjoin from the slab */
 	SpinLockAcquire(&gpuhashjoin_shm_values->lock);
@@ -2183,7 +2232,34 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs, StromObject *rcstore)
 	gpuhashjoin->dprog_key = pgstrom_retain_devprog_key(ghjs->dprog_key);
 	gpuhashjoin->rcs_in = pgstrom_get_rcstore(rcstore);
 	gpuhashjoin->rcs_out = NULL;	/* result pscan-slot */
-	gpuhashjoin->kern = NULL;	/* length needs to be estimated */
+
+	/* setting up kern_hashjoin (pair of kparams & kresults) */
+	if (StromTagIs(rcstore, TCacheRowStore))
+		nitems = ((tcache_row_store *)rcstore)->kern.nrows;
+	else if (StromTagIs(rcstore, TCacheColumnStore))
+		nitems = ((tcache_column_store *)rcstore)->nrows;
+	else
+		elog(ERROR, "Bug? it's neither row nor column store");
+
+	length = STROMALIGN(ghjs->kparams->length);
+	length += STROMALIGN(sizeof(cl_uint) * 3 * (Size)(1.5 * nitems));
+	khashjoin = pgstrom_shmem_alloc_alap(length, &length);
+	if (!khashjoin)
+	{
+		pgstrom_put_message(&gpuhashjoin->msg);
+		elog(ERROR, "out of shared memory");
+	}
+	memcpy(&khashjoin->kparams, ghjs->kparams, ghjs->kparams->length);
+
+	kresults = (kern_resultbuf *)((char *)khashjoin +
+								  STROMALIGN(ghjs->kparams->length));
+	length -= (STROMALIGN(ghjs->kparams->length) +
+			   offsetof(kern_resultbuf, results[0]));
+	kresults->nrooms = length / sizeof(cl_uint);
+	kresults->nitems = 0;
+	kresults->errcode = StromError_Success;
+
+	gpuhashjoin->kern = khashjoin;
 
 	return gpuhashjoin;
 }
@@ -2197,7 +2273,6 @@ gpuhashjoin_load_next_outer(GpuHashJoinState *ghjs)
 	pgstrom_bulk_slot *bulk = NULL;
 	cl_uint			nitems;
 	cl_uint		   *rindex = NULL;
-	pgstrom_gpuhashjoin *gpuhashjoin;
 
 	if (ghjs->outer_done)
 		return NULL;
@@ -2256,10 +2331,7 @@ gpuhashjoin_load_next_outer(GpuHashJoinState *ghjs)
 	/* Is there tuples to return? */
 	if (!rcstore)
 		return NULL;
-
-	gpuhashjoin = pgstrom_create_gpuhashjoin(ghjs, rcstore);
-
-	return NULL;
+	return pgstrom_create_gpuhashjoin(ghjs, rcstore);
 }
 
 
@@ -2539,7 +2611,7 @@ pgstrom_startup_gpuhashjoin(void)
 		ShmemInitStruct("gpuhashjoin_shm_values",
 						MAXALIGN(sizeof(*gpuhashjoin_shm_values)),
 						&found);
-	Assert(found);
+	Assert(!found);
 	memset(gpuhashjoin_shm_values, 0, sizeof(*gpuhashjoin_shm_values));
 	SpinLockInit(&gpuhashjoin_shm_values->lock);
 	dlist_init(&gpuhashjoin_shm_values->free_list);
@@ -2594,7 +2666,7 @@ pgstrom_init_gpuhashjoin(void)
 static void
 clserv_process_gpuhashjoin(pgstrom_message *message)
 {
-	pgstrom_gpuhashjoin *gpuhashjoin = (pgstrom_gpuhashjoin *) message;
+	//pgstrom_gpuhashjoin *gpuhashjoin = (pgstrom_gpuhashjoin *) message;
 
 
 }
