@@ -517,10 +517,18 @@ extern Datum pgstrom_mqueue_info(PG_FUNCTION_ARGS);
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
-extern bytea *kparam_construct_refatts(TupleDesc tupdesc,
-									   List *attnums_list);
-extern bytea *
-pgstrom_create_simple_projection(List *target_list);
+extern bytea *kparam_make_attrefs_by_resnums(TupleDesc tupdesc,
+											 List *attnums_list);
+extern bytea *kparam_make_attrefs(TupleDesc tupdesc,
+								  List *used_vars, Index varno);
+extern bytea *kparam_make_kcs_head(TupleDesc tupdesc,
+								   cl_char *attrefs,
+								   cl_uint nsyscols,
+								   cl_uint nrooms);
+extern void kparam_refresh_kcs_head(kern_column_store *kcs_head,
+									cl_uint nrooms);
+extern bytea *kparam_make_kprojection(List *target_list);
+
 extern void pgstrom_release_bulk_slot(pgstrom_bulk_slot *bulk_slot);
 extern bool pgstrom_plan_can_multi_exec(const PlanState *ps);
 

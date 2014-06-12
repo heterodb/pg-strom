@@ -578,68 +578,26 @@ gpusort_finalize_plan(PlannerInfo *root,
  * system columns on gpusort (growid and rindex).
  */
 static bytea *
-gpusort_construct_kcshead(TupleDesc tupdesc,
-						  List *sortkey_resnums,
-						  cl_uint nrooms)
+gpusort_construct_kcshead(TupleDesc tupdesc, cl_char *attrefs)
 {
 	kern_column_store *kcs_head;
 	bytea	   *result;
-	int			nkeys;
-	Size		offset;
-	Size		length;
-	AttrNumber	anum;
 	AttrNumber	i_col;
-	ListCell   *lc;
 
-	nkeys = list_length(sortkey_resnums) + 2;
-	length = STROMALIGN(offsetof(kern_column_store, colmeta[nkeys]));
-	result = palloc0(VARHDRSZ + length);
-	SET_VARSIZE(result, length);
-	kcs_head = (kern_column_store *)VARDATA(result);
-	kcs_head->ncols = nkeys;
-	kcs_head->nrows = 0;
-	kcs_head->nrooms = nrooms;
-
-	i_col = 0;
-	offset = length;
-	foreach (lc, sortkey_resnums)
-	{
-		Form_pg_attribute	attr;
-
-		anum = lfirst_int(lc);
-		Assert(anum > 0 && anum <= tupdesc->natts);
-		attr = tupdesc->attrs[anum - 1];
-
-		kcs_head->colmeta[i_col].attnotnull = attr->attnotnull;
-		if (attr->attalign == 'c')
-			kcs_head->colmeta[i_col].attalign = sizeof(cl_char);
-		else if (attr->attalign == 's')
-			kcs_head->colmeta[i_col].attalign = sizeof(cl_short);
-		else if (attr->attalign == 'i')
-			kcs_head->colmeta[i_col].attalign = sizeof(cl_int);
-		else if (attr->attalign == 'd')
-			kcs_head->colmeta[i_col].attalign = sizeof(cl_long);
-		else
-			elog(ERROR, "unexpected attalign '%c'", attr->attalign);
-		kcs_head->colmeta[i_col].attlen = attr->attlen;
-		kcs_head->colmeta[i_col].cs_ofs = offset;
-		if (!attr->attnotnull)
-			offset += STROMALIGN((nrooms + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
-		offset += STROMALIGN((attr->attlen > 0
-							  ? attr->attlen
-							  : sizeof(cl_uint)) * nrooms);
-		i_col++;
-	}
+	/* make a kcs_head with 2 additional columns */
+	result = kparam_make_kcs_head(tupdesc, attrefs, 2, 100);
+	kcs_head = (kern_column_store *) VARDATA(result);
 
 	/*
 	 * The second last column is reserved by GpuSort - fixed-length
 	 * long integer as identifier of unsorted tuples, not null.
 	 */
+	i_col = kcs_head->ncols - 2;
 	kcs_head->colmeta[i_col].attnotnull = true;
 	kcs_head->colmeta[i_col].attalign = sizeof(cl_long);
 	kcs_head->colmeta[i_col].attlen = sizeof(cl_long);
-	kcs_head->colmeta[i_col].cs_ofs = offset;
-	offset += STROMALIGN(sizeof(cl_long) * nrooms);
+	kcs_head->colmeta[i_col].cs_ofs = kcs_head->length;
+	kcs_head->length += STROMALIGN(sizeof(cl_long) * kcs_head->nrooms);
 	i_col++;
 
 	/*
@@ -648,16 +606,13 @@ gpusort_construct_kcshead(TupleDesc tupdesc,
 	 * Note that this field has to be aligned to 2^N length, to
 	 * simplify kernel implementation.
 	 */
+	i_col = kcs_head->ncols - 1;
 	kcs_head->colmeta[i_col].attnotnull = true;
 	kcs_head->colmeta[i_col].attalign = sizeof(cl_int);
 	kcs_head->colmeta[i_col].attlen = sizeof(cl_int);
-	kcs_head->colmeta[i_col].cs_ofs = offset;
-	offset += STROMALIGN(sizeof(cl_int) * (1UL << get_next_log2(nrooms)));
-	i_col++;
-	Assert(i_col == kcs_head->ncols);
-
-	kcs_head->length = offset;
-
+	kcs_head->colmeta[i_col].cs_ofs = kcs_head->length;
+	kcs_head->length += STROMALIGN(sizeof(cl_int) *
+								   (1UL << get_next_log2(kcs_head->nrooms)));
 	return result;
 }
 
@@ -681,11 +636,8 @@ static pgstrom_gpusort_chunk *
 pgstrom_create_gpusort_chunk(GpuSortState *gsortstate)
 {
 	pgstrom_gpusort_chunk *gs_chunk;
-	PlanState	   *subps = outerPlanState(gsortstate);
-	TupleDesc		tupdesc = ExecGetResultType(subps);
 	Size			allocsz_chunk;
-	kern_parambuf  *kparam;
-	bytea		   *kcs_bytea;
+	kern_parambuf  *kparams;
 	kern_column_store *kcs_head;
 	kern_column_store *kcs;
 	cl_int		   *kstatus;
@@ -701,19 +653,17 @@ pgstrom_create_gpusort_chunk(GpuSortState *gsortstate)
 	gs_chunk->rcs_head = -1;	/* to be set later */
 
 	/* next, initialization of kern_gpusort */
-	kparam = KERN_GPUSORT_PARAMBUF(&gs_chunk->kern);
-	memcpy(kparam, gsortstate->kparambuf, gsortstate->kparambuf->length);
-	Assert(kparam->length == STROMALIGN(kparam->length));
+	kparams = KERN_GPUSORT_PARAMBUF(&gs_chunk->kern);
+	memcpy(kparams, gsortstate->kparambuf, gsortstate->kparambuf->length);
+	Assert(kparams->length == STROMALIGN(kparams->length));
 
 	/* next, initialization of kern_column_store */
 	kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
-	kcs_bytea = gpusort_construct_kcshead(tupdesc,
-										  gsortstate->sortkey_resnums,
-										  gsortstate->nrows_per_chunk);
-	kcs_head = (kern_column_store *)VARDATA(kcs_bytea);
+	kcs_head = (kern_column_store *)
+		VARDATA((char *)kparams + kparams->poffset[1]);
 	memcpy(kcs, kcs_head, offsetof(kern_column_store,
 								   colmeta[kcs_head->ncols]));
-	pfree(kcs_bytea);
+	kparam_refresh_kcs_head(kcs, gsortstate->nrows_per_chunk);
 
 	/* next, initialization of kernel execution status field */
 	kstatus = KERN_GPUSORT_STATUS(&gs_chunk->kern);
@@ -732,185 +682,6 @@ pgstrom_create_gpusort_chunk(GpuSortState *gsortstate)
 	/* OK, initialized */
 	return gs_chunk;
 }
-
-#if 0
-/*
- * pgstrom_sanitycheck_gpusort_chunk
- *
- * It checks whether the gpusort-chunk being replied from OpenCL server
- * is sanity, or not.
- */
-static void
-pgstrom_sanitycheck_gpusort_chunk(GpuSortState *gsortstate,
-								  pgstrom_gpusort_chunk *gs_chunk,
-								  bool is_sorted)
-{
-	kern_column_store  *kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
-	kern_toastbuf	   *ktoast = KERN_GPUSORT_TOASTBUF(&gs_chunk->kern);
-	cl_int			   *kstatus = KERN_GPUSORT_STATUS(&gs_chunk->kern);
-	cl_uint				ncols;
-	cl_uint				nrows;
-	cl_int				i, j;
-
-	if (*kstatus != StromError_Success)
-		elog(INFO, "chunk: status %d (%s)",
-			 *kstatus, pgstrom_strerror(*kstatus));
-
-	ncols = list_length(gsortstate->sortkey_resnums) + 2;
-	if (ncols != kcs->ncols)
-		elog(ERROR, "chunk corrupted: expected ncols=%u, but kcs->ncols=%u",
-			 ncols, kcs->ncols);
-
-	nrows = 0;
-	for (i=0; i < gs_chunk->rcs_nums; i++)
-	{
-		StromObject	   *sobject = gs_chunk->rcs_slot[i];
-
-		if (StromTagIs(sobject, TCacheRowStore))
-		{
-			tcache_row_store *trs = (tcache_row_store *)sobject;
-			nrows += trs->kern.nrows;
-		}
-		else if (StromTagIs(sobject, TCacheColumnStore))
-		{
-			tcache_column_store *tcs = (tcache_column_store *)sobject;
-			nrows += tcs->nrows;
-			elog(INFO, "chunk: rcs_slot[%d] is column store", i);
-		}
-		else
-			elog(ERROR, "chunk: rcs_slot[%d] corrupted (stag: %d)",
-				 i, sobject->stag);
-	}
-	if (nrows != kcs->nrows)
-		elog(ERROR, "chunk corrupted: expected nrows=%u, but kcs->nrow=%u",
-			 nrows, kcs->nrows);
-
-	for (i=0; i < nrows; i++)
-	{
-		StromObject	*sobject;
-		void	   *temp;
-		cl_ulong	growid;
-		cl_uint		rcs_idx;
-		cl_uint		row_idx;
-
-		if (!is_sorted)
-		{
-			cl_uint		kcs_index;
-
-			temp = kern_get_datum(kcs, ncols - 1, i);
-			if (!temp)
-				elog(ERROR, "chunk corrupted: kcs_index is null");
-			kcs_index = *((cl_uint *)temp);
-			if (kcs_index != i)
-				elog(ERROR, "chunk corrupted: kcs_index should be %u, but %u",
-					 i, kcs_index);
-		}
-
-		temp = kern_get_datum(kcs, ncols - 2, i);
-		if (!temp)
-			elog(ERROR, "chunk corrupted: growid is null");
-		growid = *((cl_ulong *)temp);
-		rcs_idx = growid >> 32;
-		row_idx = growid & 0xffffffff;
-
-		if (rcs_idx >= gsortstate->rcs_nums)
-			elog(ERROR, "chunk corrupted: rcs_index (=%u) out of range (<%u)",
-				 rcs_idx, gsortstate->rcs_nums);
-
-		sobject = gs_chunk->rcs_slot[rcs_idx];
-		if (StromTagIs(sobject, TCacheRowStore))
-		{
-			tcache_row_store *trs = (tcache_row_store *)sobject;
-			rs_tuple   *rs_tup = kern_rowstore_get_tuple(&trs->kern, row_idx);
-			HeapTuple	tup = &rs_tup->htup;
-			TupleDesc	tupdesc = gsortstate->scan_slot->tts_tupleDescriptor;
-			ListCell   *cell;
-			int			i_col = 0;
-
-			foreach (cell, gsortstate->sortkey_resnums)
-			{
-				AttrNumber	anum = lfirst_int(cell);
-				Form_pg_attribute attr = tupdesc->attrs[anum - 1];
-				Datum	rs_value;
-				bool	rs_isnull;
-				void   *cs_value;
-
-				rs_value = heap_getattr(tup, anum, tupdesc, &rs_isnull);
-
-				cs_value = kern_get_datum(kcs, i_col, i);
-
-				if ((!rs_isnull && !cs_value) || (rs_isnull && cs_value))
-					elog(ERROR, "[%d] null status corrupted (%s => %s)",
-						 nrows,
-						 !rs_isnull ? "false" : "true",
-						 !cs_value ? "true" : "false");
-				if (rs_isnull)
-					continue;
-				if (attr->attlen > 0 && attr->attbyval)
-				{
-					if (memcmp(&rs_value, cs_value, attr->attlen) != 0)
-						elog(ERROR, "[%d] value corrupted (%08lx=>%08lx)",
-							 i, rs_value, *((Datum *)cs_value));
-				}
-				else if (attr->attlen > 0 && !attr->attbyval)
-				{
-					if (memcmp(&rs_value, (void *)cs_value, attr->attlen) != 0)
-						elog(ERROR, "[%d] value corrupted", i);
-				}
-				else
-				{
-					cl_uint	vl_ofs = *((cl_uint *)cs_value);
-					void   *vl_cs = (char *)ktoast + vl_ofs;
-					void   *vl_rs = DatumGetPointer(rs_value);
-					size_t	vl_len;
-
-					if (VARSIZE_ANY(vl_rs) != VARSIZE_ANY(vl_cs))
-						elog(INFO, "[%d] toast length corrupted (%zu=>%zu)",
-							 i, VARSIZE_ANY(vl_rs), VARSIZE_ANY(vl_cs));
-					vl_len = VARSIZE_ANY(vl_rs);
-
-					if (memcmp(vl_rs, vl_cs, vl_len) != 0)
-					{
-						StringInfoData	buf;
-
-						initStringInfo(&buf);
-						appendStringInfo(&buf, "'");
-						for (j=0; j < vl_len; j++)
-						{
-							int	c = ((char *)vl_rs)[j];
-
-							if (isprint(c))
-								appendStringInfo(&buf, "%c", c);
-							else
-								appendStringInfo(&buf, "\\%02x", c);
-						}
-						appendStringInfo(&buf, "' => '");
-						for (j=0; j < vl_len; j++)
-						{
-							int	c = ((char *)vl_cs)[j];
-							if (isprint(c))
-								appendStringInfo(&buf, "%c", c);
-							else
-								appendStringInfo(&buf, "\\%02x", c);
-						}
-						appendStringInfo(&buf, "'");
-						elog(ERROR, "[%d] toast value corrupted (%s)",
-							 i, buf.data);
-					}
-				}
-			}
-		}
-		else if (StromTagIs(sobject, TCacheColumnStore))
-		{
-			elog(ERROR, "column-store as sorting source, not implemented");
-		}
-		else
-			elog(ERROR, "unexpected strom object");
-	}
-	if (kcs->nrows != nrows)
-		elog(INFO, "chunk: nrows = %u (expected: %u)", kcs->nrows, nrows);
-}
-#endif
 
 /*
  * pgstrom_setup_cpusort
@@ -1668,6 +1439,7 @@ gpusort_begin(CustomPlan *node, EState *estate, int eflags)
 	Size			nrows_per_chunk;
 	Const		   *kparam_0;
 	Const		   *kparam_1;
+	bytea		   *pdatum;
 	List		   *used_params;
 
 	/*
@@ -1756,18 +1528,16 @@ gpusort_begin(CustomPlan *node, EState *estate, int eflags)
     Assert(IsA(kparam_0, Const) &&
            kparam_0->consttype == BYTEAOID &&
            kparam_0->constisnull);
-    kparam_0->constvalue =
-		PointerGetDatum(kparam_construct_refatts(tupdesc, sortkey_resnums));
+	pdatum = kparam_make_attrefs_by_resnums(tupdesc, sortkey_resnums);
+    kparam_0->constvalue = PointerGetDatum(pdatum);
 	kparam_0->constisnull = false;
 
 	kparam_1 = (Const *)lsecond(used_params);
 	Assert(IsA(kparam_1, Const) &&
            kparam_1->consttype == BYTEAOID &&
            kparam_1->constisnull);
-	kparam_1->constvalue =
-		PointerGetDatum(gpusort_construct_kcshead(tupdesc,
-												  sortkey_resnums,
-												  100));
+	pdatum = gpusort_construct_kcshead(tupdesc, (cl_char *)VARDATA(pdatum));
+	kparam_1->constvalue = PointerGetDatum(pdatum);
 	kparam_1->constisnull = false;
 
 	gsortstate->kparambuf = pgstrom_create_kern_parambuf(used_params, NULL);

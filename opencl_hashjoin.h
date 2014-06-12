@@ -107,6 +107,10 @@ typedef struct
 	(__global cl_uint *)((__global char *)(khash) +						\
 						 LONGALIGN(offsetof(kern_hashtable,				\
 											colmeta[(khash)->nkeys])))
+#define KERN_HASH_NEXT_ENTRY(khash,next)								\
+	(__global kern_hashentry *)((next) == 0								\
+								? NULL									\
+								: (__global char *)(khash) + (next))
 
 /*
  * Sequential Scan using GPU/MIC acceleration
@@ -138,8 +142,6 @@ typedef struct
  * | +--------------+    |    |
  * | | nitems       |    |    |
  * | +--------------+    |    |
- * | | debug_usage  |    |    |
- * | +--------------+    |    |
  * | | errcode      |    |    V
  * | +--------------+    |  -----
  * | | results[0]   |    |
@@ -147,15 +149,32 @@ typedef struct
  * | |     :        |    |  Reverse DMA shall be issued here.
  * | | results[N-1] |    V
  * +-+--------------+  -----
+ *
+ * Things to be written into result-buffer:
+ * Unlike simple scan cases, GpuHahJoin generate a tuple combined from
+ * two different relation stream; inner and outer. We invoke a kernel
+ * for each row-/column-store of outer relation stream, so it is obvious
+ * which row-/column-store is pointed by the result. However, the inner
+ * relation stream, that is hashed on the table, may have multiple row-
+ * column-stores within a hash-table. So, it takes 8bytes to identify
+ * a particular tuple on inner-side (index of rcstore and offset in the
+ * rcstore).
+ * So, we expect the result buffer shall be used as follows:
+ *   results[3 * i + 0] = rcs-index of inner side (upper 32bits of rowid)
+ *   results[3 * i + 1] = row-offset of inner side (lower 32bits of rowid)
+ *   results[3 * i + 2] = row-index of outer relation stream
+ *
+ * MEMO: In the future enhancement, we may set invalid inner identifier,
+ * if not valid pair was not found, for LEFT OUTER JOIN, but not now.
  */
 typedef struct
 {
-	kern_parambuf	kparam;
+	kern_parambuf	kparams;
 	/* also, resultbuf shall be placed next to the parambuf */
 } kern_hashjoin;
 
 #define KERN_HASHJOIN_PARAMBUF(kghashjoin)					\
-	((__global kern_parambuf *)(&(khashjoin)->kparam))
+	((__global kern_parambuf *)(&(khashjoin)->kparams))
 #define KERN_HASHJOIN_PARAMBUF_LENGTH(kghashjoin)			\
 	STROMALIGN(KERN_GPUHJ_PARAMBUF(khashjoin)->length)
 #define KERN_HASHJOIN_RESULTBUF(kghashjoin)								\

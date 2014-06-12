@@ -133,37 +133,6 @@ pgstrom_create_kern_parambuf(List *used_params,
 }
 
 /*
- * kparam_construct_refatts
- *
- * makes an array to inform which columns (in row format) are referenced.
- * usually it is informed as kparam_0 constant
- */
-bytea *
-kparam_construct_refatts(TupleDesc tupdesc, List *attnums_list)
-{
-	bytea	   *result;
-	cl_char	   *refatts;
-	AttrNumber	anum;
-	AttrNumber	anum_last = 0;
-	ListCell   *lc;
-
-	result = palloc0(VARHDRSZ + sizeof(cl_char) * tupdesc->natts);
-	SET_VARSIZE(result, VARHDRSZ + sizeof(cl_char) * tupdesc->natts);
-	refatts = (cl_char *)VARDATA(result);
-	foreach (lc, attnums_list)
-	{
-		anum = lfirst_int(lc);
-		Assert(anum > 0 && anum <= tupdesc->natts);
-		refatts[anum - 1] = 1;
-		anum_last = anum;
-	}
-	if (anum_last > 0)
-		refatts[anum_last - 1] = -1;	/* end of reference marker */
-
-	return result;
-}
-
-/*
  * pgstrom_release_bulk_slot
  *
  * It releases the supplied pgstrom_bulk_slot object once constructed.
@@ -197,8 +166,137 @@ pgstrom_plan_can_multi_exec(const PlanState *ps)
 }
 
 
+/*
+ * kparam_make_attrefs_by_resnums
+ *
+ * makes an array to inform which columns (in row format) are referenced.
+ * usually it is informed as kparam_0 constant
+ */
 bytea *
-pgstrom_create_simple_projection(List *target_list)
+kparam_make_attrefs_by_resnums(TupleDesc tupdesc, List *attnums_list)
+{
+	bytea	   *result;
+	cl_char	   *refatts;
+	AttrNumber	anum;
+	AttrNumber	anum_last = 0;
+	ListCell   *lc;
+
+	result = palloc0(VARHDRSZ + sizeof(cl_char) * tupdesc->natts);
+	SET_VARSIZE(result, VARHDRSZ + sizeof(cl_char) * tupdesc->natts);
+	refatts = (cl_char *)VARDATA(result);
+	foreach (lc, attnums_list)
+	{
+		anum = lfirst_int(lc);
+		Assert(anum > 0 && anum <= tupdesc->natts);
+		refatts[anum - 1] = 1;
+		anum_last = anum;
+	}
+	if (anum_last > 0)
+		refatts[anum_last - 1] = -1;	/* end of reference marker */
+
+	return result;
+}
+
+/*
+ * kparam_make_attrefs
+ *
+ * same as kparam_make_attrefs_by_resnums, but extract varattno from
+ * used_vars list;
+ */
+bytea *
+kparam_make_attrefs(TupleDesc tupdesc,
+					List *used_vars, Index varno)
+{
+	List	   *resnums = NIL;
+	ListCell   *cell;
+	bytea	   *result;
+
+	foreach (cell, used_vars)
+	{
+		Var	   *var = lfirst(cell);
+
+		if (var->varno != varno)
+			continue;
+		Assert(var->varattno > 0 && var->varattno <= tupdesc->natts);
+		resnums = lappend_int(resnums, var->varattno);
+	}
+	result = kparam_make_attrefs_by_resnums(tupdesc, resnums);
+	list_free(resnums);
+	return result;
+}
+
+bytea *
+kparam_make_kcs_head(TupleDesc tupdesc,
+					 cl_char *attrefs,
+					 cl_uint nsyscols,
+					 cl_uint nrooms)
+{
+	kern_column_store *kcs_head;
+	bytea	   *result;
+	Size		length;
+	int			i, j, nkeys = 0;
+
+	/* count-up number of referenced columns */
+	for (i=0; i < tupdesc->natts; i++)
+	{
+		if (attrefs[i])
+			nkeys++;
+	}
+	nkeys += nsyscols;
+
+	length = STROMALIGN(offsetof(kern_column_store, colmeta[nkeys]));
+	result = palloc0(VARHDRSZ + length);
+	SET_VARSIZE(result, VARHDRSZ + length);
+	kcs_head = (kern_column_store *) VARDATA(result);
+	kcs_head->ncols = nkeys;
+	kcs_head->nrows = 0;
+	kcs_head->nrooms = nrooms;
+	for (i=0, j=0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = tupdesc->attrs[i];
+
+		if (!attrefs[i])
+			continue;
+		kcs_head->colmeta[j].attnotnull = attr->attnotnull;
+		kcs_head->colmeta[j].attalign = typealign_get_width(attr->attalign);
+		kcs_head->colmeta[j].attlen = attr->attlen;
+		kcs_head->colmeta[j].cs_ofs = length;
+		if (!attr->attnotnull)
+			length += STROMALIGN((nrooms + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+		length += STROMALIGN((attr->attlen > 0
+							  ? attr->attlen
+							  : sizeof(cl_uint)) * nrooms);
+		j++;
+	}
+	Assert(j + nsyscols == nkeys);
+	kcs_head->length = length;
+
+	return result;
+}
+
+void
+kparam_refresh_kcs_head(kern_column_store *kcs_head, cl_uint nrooms)
+{
+	Size	length;
+	int		i;
+
+	length = STROMALIGN(offsetof(kern_column_store,
+								 colmeta[kcs_head->ncols]));
+	kcs_head->nrooms = nrooms;
+	for (i=0; i < kcs_head->ncols; i++)
+	{
+		kcs_head->colmeta[i].cs_ofs = length;
+		if (!kcs_head->colmeta[i].attnotnull)
+			length += STROMALIGN((nrooms + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+		length += STROMALIGN((kcs_head->colmeta[i].attlen > 0
+							  ? kcs_head->colmeta[i].attlen
+							  : sizeof(cl_uint)) * nrooms);
+	}
+	kcs_head->length = length;
+}
+
+bytea *
+kparam_make_kprojection(List *target_list)
 {
 	bytea	   *result;
 	kern_projection *kproj;
