@@ -107,6 +107,10 @@ typedef struct
 	(__global cl_uint *)((__global char *)(khash) +						\
 						 LONGALIGN(offsetof(kern_hashtable,				\
 											colmeta[(khash)->nkeys])))
+#define KERN_HASH_NEXT_ENTRY(khash,next)								\
+	(__global kern_hashentry *)((next) == 0								\
+								? NULL									\
+								: (__global char *)(khash) + (next))
 
 /*
  * Sequential Scan using GPU/MIC acceleration
