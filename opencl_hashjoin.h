@@ -173,22 +173,22 @@ typedef struct
 	/* also, resultbuf shall be placed next to the parambuf */
 } kern_hashjoin;
 
-#define KERN_HASHJOIN_PARAMBUF(kghashjoin)					\
+#define KERN_HASHJOIN_PARAMBUF(khashjoin)					\
 	((__global kern_parambuf *)(&(khashjoin)->kparams))
-#define KERN_HASHJOIN_PARAMBUF_LENGTH(kghashjoin)			\
-	STROMALIGN(KERN_GPUHJ_PARAMBUF(khashjoin)->length)
-#define KERN_HASHJOIN_RESULTBUF(kghashjoin)								\
-	((__global kern_resultbuf *)((__global char *)kghashjoin +			\
-								 KERN_GPUHJ_PARAMBUF_LENGTH(kghashjoin))
-#define KERN_HASHJOIN_RESULTBUF_LENGTH(kghashjoin)						\
+#define KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin)			\
+	STROMALIGN(KERN_HASHJOIN_PARAMBUF(khashjoin)->length)
+#define KERN_HASHJOIN_RESULTBUF(khashjoin)								\
+	((__global kern_resultbuf *)((__global char *)(khashjoin) +			\
+								 KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin)))
+#define KERN_HASHJOIN_RESULTBUF_LENGTH(khashjoin)						\
 	STROMALIGN(offsetof(kern_resultbuf,									\
-						results[KERN_GPUHJ_RESULTBUF(kghashjoin)->nrooms]))
-#define KERN_HASHJOIN_DMA_SENDLEN(kghashjoin)	\
-	(KERN_GPUHJ_PARAMBUF_LENGTH(kghashjoin) +	\
+						results[KERN_HASHJOIN_RESULTBUF(khashjoin)->nrooms]))
+#define KERN_HASHJOIN_DMA_SENDLEN(khashjoin)	\
+	(KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin) +	\
 	 offsetof(kern_resultbuf, results[0]))
-#define KERN_HASHJOIN_DMA_RECVLEN(kghashjoin)	\
+#define KERN_HASHJOIN_DMA_RECVLEN(khashjoin)	\
 	(offsetof(kern_resultbuf,					\
-			  results[KERN_GPUHJ_RESULTBUF(kghashjoin)->nrooms]))
+			  results[KERN_HASHJOIN_RESULTBUF(khashjoin)->nrooms]))
 
 
 
@@ -292,7 +292,7 @@ gpuhashjoin_inner_cs(__global kern_hashjoin *khashjoin,
 					 __global kern_toastbuf *toast,
 					 __local void *local_workmem)
 {
-	__global kern_parambuf *kparams = KERN_GPUHJ_PARAMBUF(kghashjoin);
+	__global kern_parambuf *kparams = KERN_HASHJOIN_PARAMBUF(kghashjoin);
 	__global kern_resultbuf *kresults = KERN_GPUHJ_RESULTBUF(kghashjoin);
 
 
@@ -305,8 +305,8 @@ gpuhashjoin_inner_rs(__global kern_hashjoin *khashjoin,
 					 __global kern_column_store *kcs,
 					 __local void *local_workmem)
 {
-	__global kern_parambuf *kparams = KERN_GPUHJ_PARAMBUF(kghashjoin);
-	__global kern_resultbuf *kresults = KERN_GPUHJ_RESULTBUF(kghashjoin);
+	__global kern_parambuf *kparams = KERN_HASHJOIN_PARAMBUF(kghashjoin);
+	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(kghashjoin);
 	pg_bytea_t		kparam_0 = pg_bytea_param(kparams,&errcode,0);
 	cl_int			errcode = StromError_Success;
 	__local size_t	kcs_offset;
@@ -505,13 +505,6 @@ __constant cl_uint pg_crc32_table[256] = {
 	} while (0)
 #define FIN_CRC32(crc)		((crc) ^= 0xFFFFFFFF)
 
-
-
-
-
-
-
-
 #endif
 
 typedef struct pgstrom_hashjoin_table
@@ -538,9 +531,9 @@ typedef struct
 	dlist_node		chain;		/* to chain free-list */
 	Datum			dprog_key;	/* device key for gpuhashjoin */
 	pgstrom_hashjoin_table *hjtable;	/* inner hashjoin table */
-	
-
-	bool			build_pscan;/* true, if want pseudo-scan view */
+	bool			hashjoin_done;
+	cl_int			nitems;	/* length of rindex array */
+	cl_int		   *rindex;	/* valid items in rcs, if not null */
 	StromObject	   *rcs_in;
 	StromObject	   *rcs_out;
 	kern_hashjoin  *kern;

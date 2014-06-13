@@ -234,23 +234,25 @@ kparam_make_kcs_head(TupleDesc tupdesc,
 	kern_column_store *kcs_head;
 	bytea	   *result;
 	Size		length;
-	int			i, j, nkeys = 0;
+	int			i, j, ncols = 0;
 
 	/* count-up number of referenced columns */
 	for (i=0; i < tupdesc->natts; i++)
 	{
 		if (attrefs[i])
-			nkeys++;
+			ncols++;
 	}
-	nkeys += nsyscols;
+	ncols += nsyscols;
 
-	length = STROMALIGN(offsetof(kern_column_store, colmeta[nkeys]));
+	length = STROMALIGN(offsetof(kern_column_store, colmeta[ncols]));
 	result = palloc0(VARHDRSZ + length);
 	SET_VARSIZE(result, VARHDRSZ + length);
+
 	kcs_head = (kern_column_store *) VARDATA(result);
-	kcs_head->ncols = nkeys;
+	kcs_head->ncols = ncols;
 	kcs_head->nrows = 0;
 	kcs_head->nrooms = nrooms;
+
 	for (i=0, j=0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute attr = tupdesc->attrs[i];
@@ -268,15 +270,16 @@ kparam_make_kcs_head(TupleDesc tupdesc,
 							  : sizeof(cl_uint)) * nrooms);
 		j++;
 	}
-	Assert(j + nsyscols == nkeys);
+	Assert(j + nsyscols == ncols);
 	kcs_head->length = length;
 
 	return result;
 }
 
 void
-kparam_refresh_kcs_head(kern_column_store *kcs_head, cl_uint nrooms)
+kparam_refresh_kcs_head(kern_parambuf *kparams, cl_uint nrooms)
 {
+	kern_column_store *kcs_head = KPARAM_GET_KCS_HEAD(kparams);
 	Size	length;
 	int		i;
 
@@ -294,6 +297,75 @@ kparam_refresh_kcs_head(kern_column_store *kcs_head, cl_uint nrooms)
 	}
 	kcs_head->length = length;
 }
+
+bytea *
+kparam_make_ktoast_head(TupleDesc tupdesc,
+						cl_char *attrefs,
+						cl_uint nsyscols)
+{
+	kern_toastbuf *ktoast_head;
+	bytea	   *result;
+	Size		length;
+	int			i, ncols = 0;
+
+	/* count-up number of referenced columns */
+	for (i=0; i < tupdesc->natts; i++)
+	{
+		if (attrefs[i])
+			ncols++;
+	}
+	ncols += nsyscols;
+
+	length = STROMALIGN(offsetof(kern_toastbuf, coldir[ncols]));
+	result = palloc0(VARHDRSZ + length);
+	SET_VARSIZE(result, VARHDRSZ + length);
+
+	ktoast_head = (kern_toastbuf *) VARDATA(result);
+	memset(ktoast_head, 0, length);
+	ktoast_head->length = TOASTBUF_MAGIC;
+	ktoast_head->ncols = ncols;
+	return result;
+}
+
+void
+kparam_refresh_ktoast_head(kern_parambuf *kparams,
+						   StromObject *rcstore)
+{
+	if (!StromTagIs(rcstore, TCacheColumnStore))
+		kparams->poffset[2] = 0;
+	else
+	{
+		tcache_column_store *tcs = (tcache_column_store *)rcstore;
+		cl_char	   *attrefs = KPARAM_GET_ATTREFS(kparams);
+		kern_column_store *kcs_head = KPARAM_GET_KCS_HEAD(kparams);
+		kern_toastbuf *ktoast_head = KPARAM_GET_KTOAST_HEAD(kparams);
+		Size		offset;
+		int			i, j, k;
+		bool		has_toast = false;
+
+		ktoast_head->length = TOASTBUF_MAGIC;
+		ktoast_head->ncols = kcs_head->ncols;
+		for (i=0, k=0; i < tcs->ncols; i++)
+		{
+			j = tcs->i_cached[i];
+			if (attrefs[j] == 0)
+				continue;
+			if (!tcs->cdata[i].toast)
+				ktoast_head->coldir[k] = 0;
+			else
+			{
+				has_toast = true;
+				ktoast_head->coldir[k] = offset;
+				offset += STROMALIGN(tcs->cdata[i].toast->tbuf_length);
+			}
+			k++;
+		}
+		Assert(k == kcs_head->ncols);
+		if (!has_toast)
+			kparams->poffset[2] = 0;
+	}
+}
+
 
 bytea *
 kparam_make_kprojection(List *target_list)

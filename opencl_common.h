@@ -121,36 +121,7 @@ STROM_SET_ERROR(__private cl_int *p_error, cl_int errcode)
 	else if (errcode > oldcode)
 		*p_error = errcode;
 }
-#endif	/* OPENCL_DEVICE_CODE */
 
-/*
- * kern_parambuf
- *
- * Const and Parameter buffer. It stores constant values during a particular
- * scan, so it may make sense if it is obvious length of kern_parambuf is
- * less than constant memory (NOTE: not implemented yet).
- */
-typedef struct {
-	cl_uint		length;		/* total length of parambuf */
-	cl_uint		nparams;	/* number of parameters */
-	cl_uint		poffset[FLEXIBLE_ARRAY_MEMBER];	/* offset of params */
-} kern_parambuf;
-
-/*
- * kern_resultbuf
- *
- * Output buffer to write back calculation results on a parciular chunk.
- * 'errcode' informs a significant error that shall raise an error on
- * host side and abort transactions. 'results' informs row-level status.
- */
-typedef struct {
-	cl_uint		nrooms;		/* max number of results rooms */
-	cl_uint		nitems;		/* number of results being written */
-	cl_int		errcode;	/* chunk-level error */
-	cl_int		results[FLEXIBLE_ARRAY_MEMBER];
-} kern_resultbuf;
-
-#ifdef OPENCL_DEVICE_CODE
 /*
  * Data type definitions for row oriented data format
  * ---------------------------------------------------
@@ -440,6 +411,51 @@ kern_get_datum(__global kern_column_store *kcs,
 
 	return (__global void *)((__global char *)kcs + offset);
 }
+
+/*
+ * kern_parambuf
+ *
+ * Const and Parameter buffer. It stores constant values during a particular
+ * scan, so it may make sense if it is obvious length of kern_parambuf is
+ * less than constant memory (NOTE: not implemented yet).
+ */
+typedef struct {
+	cl_uint		length;		/* total length of parambuf */
+	cl_uint		nparams;	/* number of parameters */
+	cl_uint		poffset[FLEXIBLE_ARRAY_MEMBER];	/* offset of params */
+} kern_parambuf;
+
+static inline __global void *
+kparam_get_value(kern_parambuf *kparams, cl_uint pindex)
+{
+	if (pindex >= kparams->nparams)
+		return NULL;
+	if (kparams->poffset[pindex] == 0)
+		return NULL;
+	return (__global char *)kparams + kparams->poffset[pindex];
+}
+
+/* utility macros to access usual system params */
+#define KPARAM_GET_ATTREFS(kparams)				\
+	((__global cl_char *) kparam_get_value((kparams), 0))
+#define KPARAM_GET_KCS_HEAD(kparams)			\
+	((__global kern_column_store *) kparam_get_value((kparams), 1))
+#define KPARAM_GET_KTOAST_HEAD(kparams)			\
+	((__global kern_toastbuf *) kparam_get_value((kparams), 2))
+
+/*
+ * kern_resultbuf
+ *
+ * Output buffer to write back calculation results on a parciular chunk.
+ * 'errcode' informs a significant error that shall raise an error on
+ * host side and abort transactions. 'results' informs row-level status.
+ */
+typedef struct {
+	cl_uint		nrooms;		/* max number of results rooms */
+	cl_uint		nitems;		/* number of results being written */
+	cl_int		errcode;	/* chunk-level error */
+	cl_int		results[FLEXIBLE_ARRAY_MEMBER];
+} kern_resultbuf;
 
 #ifdef OPENCL_DEVICE_CODE
 /*

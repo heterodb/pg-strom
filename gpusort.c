@@ -659,11 +659,10 @@ pgstrom_create_gpusort_chunk(GpuSortState *gsortstate)
 
 	/* next, initialization of kern_column_store */
 	kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
-	kcs_head = (kern_column_store *)
-		VARDATA((char *)kparams + kparams->poffset[1]);
+	kcs_head = KPARAM_GET_KCS_HEAD(kparams);
 	memcpy(kcs, kcs_head, offsetof(kern_column_store,
 								   colmeta[kcs_head->ncols]));
-	kparam_refresh_kcs_head(kcs, gsortstate->nrows_per_chunk);
+	kparam_refresh_kcs_head(kparams, gsortstate->nrows_per_chunk);
 
 	/* next, initialization of kernel execution status field */
 	kstatus = KERN_GPUSORT_STATUS(&gs_chunk->kern);

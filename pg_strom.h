@@ -525,8 +525,13 @@ extern bytea *kparam_make_kcs_head(TupleDesc tupdesc,
 								   cl_char *attrefs,
 								   cl_uint nsyscols,
 								   cl_uint nrooms);
-extern void kparam_refresh_kcs_head(kern_column_store *kcs_head,
+extern void kparam_refresh_kcs_head(kern_parambuf *kparams,
 									cl_uint nrooms);
+extern bytea *kparam_make_ktoast_head(TupleDesc tupdesc,
+									  cl_char *attrefs,
+									  cl_uint nsyscols);
+extern void kparam_refresh_ktoast_head(kern_parambuf *kparams,
+									   StromObject *rcstore);
 extern bytea *kparam_make_kprojection(List *target_list);
 
 extern void pgstrom_release_bulk_slot(pgstrom_bulk_slot *bulk_slot);
