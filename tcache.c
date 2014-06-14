@@ -1084,16 +1084,17 @@ tcache_sort_tcnode_internal(tcache_head *tc_head, tcache_node *tc_node,
 {
 	int		li = left;
 	int		ri = right;
-	ItemPointer pivot = &tcs->ctids[(li + ri) / 2];
+	ItemPointerData pivot;
 
 	if (left >= right)
 		return;
 
+	ItemPointerCopy(&tcs->ctids[(li + ri) / 2], &pivot);
 	while (li < ri)
 	{
-		while (ItemPointerCompare(&tcs->ctids[li], pivot) < 0)
+		while (ItemPointerCompare(&tcs->ctids[li], &pivot) < 0)
 			li++;
-		while (ItemPointerCompare(&tcs->ctids[ri], pivot) > 0)
+		while (ItemPointerCompare(&tcs->ctids[ri], &pivot) > 0)
 			ri--;
 		/*
 		 * Swap values
