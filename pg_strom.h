@@ -301,13 +301,12 @@ typedef struct {
 	StromObject		sobj;	/* StromTag_TCacheColumnStore */
 	slock_t			refcnt_lock;
 	int				refcnt;
-	uint32			ncols;	/* copy of tc_head->ncols */
+	uint32			ncols;	/* length of cdata[] (.incl uncached columns) */
 	uint32			nrows;	/* number of rows being cached */
 	uint32			njunks;	/* number of junk rows to be removed later */
 	bool			is_sorted;
 	BlockNumber		blkno_max;
 	BlockNumber		blkno_min;
-	AttrNumber	   *i_cached;	/* copy of tc_head->i_cached */
 	ItemPointerData		*ctids;
 	HeapTupleHeaderData	*theads;
 	struct {
@@ -380,8 +379,7 @@ typedef struct {
 	/* fields below are read-only once constructed (no lock needed) */
 	Oid			datoid;		/* database oid of this cache */
 	Oid			reloid;		/* relation oid of this cache */
-	int			ncols;		/* number of columns being cached */
-	AttrNumber *i_cached;	/* index of tupdesc->attrs for cached columns */
+	Bitmapset  *cached_attrs;	/* cached attributes in bitmap form */
 	TupleDesc	tupdesc;	/* duplication of TupleDesc of underlying table.
 							 * all the values, except for constr, are on
 							 * the shared memory region, so its visible to
