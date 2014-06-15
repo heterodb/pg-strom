@@ -2170,9 +2170,9 @@ pgstrom_release_gpuhashjoin(pgstrom_message *message)
     pgstrom_put_devprog_key(gpuhashjoin->dprog_key);
 
 	/* unlink row/column store */
-	pgstrom_put_rcstore(gpuhashjoin->rcs_in);
-	if (gpuhashjoin->rcs_out)
-		pgstrom_put_rcstore(gpuhashjoin->rcs_out);
+	pgstrom_put_rcstore(gpuhashjoin->rcs_src);
+	if (gpuhashjoin->rcs_dst)
+		pgstrom_put_rcstore(gpuhashjoin->rcs_dst);
 
 	/* release kern_hashjoin */
 	if (gpuhashjoin->kern)
@@ -2235,8 +2235,8 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs, StromObject *rcstore)
 	gpuhashjoin->msg.pfm.enabled = ghjs->pfm.enabled;
 	/* other fields also */
 	gpuhashjoin->dprog_key = pgstrom_retain_devprog_key(ghjs->dprog_key);
-	gpuhashjoin->rcs_in = pgstrom_get_rcstore(rcstore);
-	gpuhashjoin->rcs_out = NULL;	/* result pscan-slot */
+	gpuhashjoin->rcs_src = pgstrom_get_rcstore(rcstore);
+	gpuhashjoin->rcs_dst = NULL;	/* result pscan-slot */
 
 	/* setting up kern_hashjoin (pair of kparams & kresults) */
 	if (StromTagIs(rcstore, TCacheRowStore))
@@ -2343,7 +2343,7 @@ static bool
 gpuhashjoin_next_tuple(GpuHashJoinState *ghjs, TupleTableSlot *slot)
 {
 	pgstrom_gpuhashjoin *ghjoin = ghjs->curr_ghjoin;
-	tcache_column_store *tcs = (tcache_column_store *) ghjoin->rcs_out;
+	tcache_column_store *tcs = (tcache_column_store *) ghjoin->rcs_dst;
 	TupleDesc			tupdesc = slot->tts_tupleDescriptor;
 
 	Assert(tcs->ncols == tupdesc->natts);
@@ -2992,23 +2992,157 @@ error:
 	pgstrom_reply_message(&ghjoin->msg);
 }
 
+#if 0
+static void
+clserv_projection_from_column(tcache_column_store *dst, cl_uint dindex,
+							  tcache_column_store *src, cl_uint sindex,
+							  kern_projection *kproj, bool is_outer)
+{}
+
+static cl_int
+clserv_projection_from_row(tcache_column_store *dst_tcs, cl_uint dindex,
+						   tcache_row_store *src_trs, cl_uint sindex,
+						   kern_projection *kproj, bool is_outer)
+{
+	rs_tuple   *rs_tup;
+	char	  **values;
+	int			i, natts;
+
+	Assert(sindex < src_trs->kern.nrows);
+	rs_tup = kern_rowstore_get_tuple(&src_trs->kern, sindex);
+	if (!rs_tup)
+		return StromError_Success;	/* fill by NULL; nothing to do */
+
+	natts = HeapTupleHeaderGetNatts(&rs_tup->data);
+	values = calloc(natts, sizeof(char *));
+	if (!values)
+		return StromError_OutOfMemory;
+
+	/* extract row-format according to the column-metadata */
+	offset = rs_tup->data.t_hoff;
+	for (i=0; i < natts; i++)
+	{
+		kern_colmeta	rcmeta = src_trs->kern.colmeta[i];
+
+		if ((rs_tup->data.t_infomask & HEAP_HASNULL) != 0 &&
+			att_isnull(i, rs_tup->data.t_bits))
+		{
+			values[i] = NULL;
+			continue;
+		}
+
+		if (rcmeta.attlen > 0)
+			offset = TYPEALIGN(rcmeta.attalign, offset);
+		else if (!VARATT_NOT_PAD_BYTE((uintptr_t)&rs_tup->data + offset))
+			offset = TYPEALIGN(rcmeta.attalign, offset);
+		values[i] = ((char *)&rs_tup->data) + offset;
+
+		offset += (rcmeta.attlen > 0
+				   ? rcmeta.attlen
+				   : VARSIZE_ANY(values[i]));
+	}
 
 
 
+
+
+}
+
+static void
+clserv_process_post_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
+{
+	pgstrom_hashjoin_table *hjtable = ghjoin->hjtable;
+	kern_resultbuf	   *kresults = KERN_HASHJOIN_RESULTBUF(&ghjoin->kern);
+	kern_parambuf	   *kparams = KERN_HASHJOIN_PARAMBUF(&ghjoin->kern);
+	kern_projection	   *kproj = kparam_get_projection(kparams);
+	StromObject		   *outer_rcs = ghjoin->rcs_src;
+	StromObject		   *inner_rcs;
+	StromObject		   *curr_rcs;
+	tcache_column_store *dst_tcs;
+	cl_int				rc = StromError_Success;
+	int					i, j;
+
+	dst_tcs = pgstrom_create_column_store(kproj, kresults->nrows, false);
+	if (!dst_tcs)
+	{
+		rc = StromError_OutOfSharedMemory;
+		goto error;
+	}
+
+	for (i=0; i < kresults->nrows; i++)
+	{
+		cl_uint	rcs_index = kresults->results[3 * i];
+		cl_uint	inner_idx = kresults->results[3 * i + 1];
+		cl_uint	outer_idx = kresults->results[3 * i + 2];
+
+		/* fill up inner columns */
+		Assert(rcs_index < hjtable->num_rcs);
+		inner_rcs = hjtable->rcstore[rcs_index];
+
+		if (StromTagIs(inner_rcs, TCacheRowStore))
+		{
+			tcache_row_store *src_trs = (tcache_row_store *) inner_rcs;
+			clserv_projection_from_row(dst_tcs, i,
+									   src_trs, inner_idx,
+									   kproj, false);
+		}
+		else if (StromTagIs(inner_rcs, TCacheColumnStore))
+		{
+			tcache_column_store *src_tcs = (tcache_column_store *) inner_rcs;
+			clserv_projection_from_column(dst_tcs, i,
+										  src_tcs, inner_idx,
+										  kproj, false);
+		}
+		else
+		{
+			pgstrom_shmem_free(dst_tcs);
+			rc = StromError_DataStoreCorruption;
+			goto error;
+		}
+
+		/* fill up outer columns */
+		if (StromTagIs(outer_rcs, TCacheRowStore))
+		{
+			tcache_row_store *src_trs = (tcache_row_store *) outer_rcs;
+			clserv_projection_from_row(dst_tcs, i,
+									   src_trs, outer_idx,
+									   kproj, true);
+		}
+		else if (StromTagIs(outer_rcs, TCacheColumnStore))
+		{
+			tcache_column_store *src_tcs = (tcache_column_store *) outer_rcs;
+			clserv_projection_from_column(dst_tcs, i,
+										  src_tcs, outer_idx,
+										  kproj, true);
+		}
+		else
+		{
+			pgstrom_shmem_free(dst_tcs);
+			rc = StromError_DataStoreCorruption;
+			goto error;
+		}
+	}
+	ghjoin->rcs_dst = &tcs->sobj;
+
+error:
+	ghjoin->msg.errcode = rc;
+	pgstrom_reply_message(&ghjoin->msg);
+}
+#endif
 
 static void
 clserv_process_gpuhashjoin(pgstrom_message *message)
 {
 	pgstrom_gpuhashjoin *ghjoin = (pgstrom_gpuhashjoin *) message;
 
-	if (StromTagIs(ghjoin->rcs_in, TCacheRowStore))
+	if (StromTagIs(ghjoin->rcs_src, TCacheRowStore))
 	{
-		tcache_row_store *trs = (tcache_row_store *) ghjoin->rcs_in;
+		tcache_row_store *trs = (tcache_row_store *) ghjoin->rcs_src;
 		clserv_process_gpuhashjoin_row(ghjoin, trs);
 	}
-	else if (StromTagIs(ghjoin->rcs_in, TCacheColumnStore))
+	else if (StromTagIs(ghjoin->rcs_src, TCacheColumnStore))
 	{
-		tcache_column_store *tcs = (tcache_column_store *) ghjoin->rcs_in;
+		tcache_column_store *tcs = (tcache_column_store *) ghjoin->rcs_src;
 		clserv_process_gpuhashjoin_column(ghjoin, tcs);
 	}
 	else

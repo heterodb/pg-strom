@@ -356,3 +356,77 @@ out_unavailable:
 	pfree(result);
 	return NULL;
 }
+
+/*
+ * pgstrom_create_column_store
+ *
+ * creates a column-store on shared memory segment, but not linked to
+ * a particular tcache structure.
+ */
+tcache_column_store *
+pgstrom_create_column_store_with_projection(kern_projection *kproj,
+											cl_uint nitems,
+											bool with_syscols)
+{
+	tcache_column_store	*tcs;
+	Size		length;
+	Size		offset;
+	int			i;
+
+	length = MAXALIGN(offsetof(tcache_column_store, cdata[kproj->ncols]));
+	if (with_syscols)
+	{
+		length += MAXALIGN(sizeof(ItemPointerData) * nitems);
+		length += MAXALIGN(sizeof(HeapTupleHeaderData) * nitems);
+	}
+
+	for (i=0; i < kproj->ncols; i++)
+	{
+		if (!kproj->origins[i].colmeta.attnotnull)
+			length += MAXALIGN((nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+		length += MAXALIGN(kproj->origins[i].colmeta.attlen > 0
+						   ? kproj->origins[i].colmeta.attlen
+						   : sizeof(cl_uint)) * nitems;
+	}
+
+	tcs = pgstrom_shmem_alloc(length);
+	if (!tcs)
+		return NULL;	/* out of shared memory! */
+	memset(tcs, 0, sizeof(tcache_column_store));
+
+	tcs->sobj.stag = StromTag_TCacheColumnStore;
+	SpinLockInit(&tcs->refcnt_lock);
+	tcs->refcnt = 1;
+	tcs->ncols = kproj->ncols;
+	offset = MAXALIGN(offsetof(tcache_column_store, cdata[kproj->ncols]));
+
+	if (with_syscols)
+	{
+		/* array of item-pointers */
+		tcs->ctids = (ItemPointerData *)((char *)tcs + offset);
+		offset += MAXALIGN(sizeof(ItemPointerData) * nitems);
+
+		/* array of other system columns */
+		tcs->theads = (HeapTupleHeaderData *)((char *)tcs + offset);
+		offset += MAXALIGN(sizeof(HeapTupleHeaderData) * nitems);
+	}
+
+	for (i=0; i < kproj->ncols; i++)
+	{
+		if (kproj->origins[i].colmeta.attnotnull)
+			tcs->cdata[i].isnull = NULL;
+		else
+		{
+			tcs->cdata[i].isnull = (uint8 *)((char *)tcs + offset);
+			offset += MAXALIGN((nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+		}
+		tcs->cdata[i].values = ((char *)tcs + offset);
+		offset += MAXALIGN((kproj->origins[i].colmeta.attlen > 0
+							? kproj->origins[i].colmeta.attlen
+							: sizeof(cl_uint)) * nitems);
+		tcs->cdata[i].toast = NULL;		/* to be set later on demand */
+	}
+	Assert(offset == length);
+
+	return tcs;
+}

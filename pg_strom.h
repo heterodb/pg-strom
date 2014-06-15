@@ -530,6 +530,11 @@ extern bytea *kparam_make_kprojection(List *target_list);
 extern void pgstrom_release_bulk_slot(pgstrom_bulk_slot *bulk_slot);
 extern bool pgstrom_plan_can_multi_exec(const PlanState *ps);
 
+tcache_column_store *
+pgstrom_create_column_store_with_projection(kern_projection *kproj,
+                                            cl_uint nitems,
+                                            bool with_syscols);
+
 /*
  * restrack.c
  */

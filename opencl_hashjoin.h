@@ -541,8 +541,8 @@ typedef struct
 	
 
 	bool			build_pscan;/* true, if want pseudo-scan view */
-	StromObject	   *rcs_in;
-	StromObject	   *rcs_out;
+	StromObject	   *rcs_src;	/* source outer row/column store */
+	StromObject	   *rcs_dst;	/* destination column store */
 	kern_hashjoin  *kern;
 } pgstrom_gpuhashjoin;
 
