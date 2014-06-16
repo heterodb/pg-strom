@@ -14,6 +14,8 @@
 #define OPENCL_TEXTLIB_H
 #ifdef OPENCL_DEVICE_CODE
 
+
+#if 1
 static int
 varlena_cmp(__private cl_int *errcode,
 			__global varlena *arg1, __global varlena *arg2)
@@ -45,6 +47,127 @@ varlena_cmp(__private cl_int *errcode,
 		return (len1 > len2 ? 1 : -1);
 	return 0;
 }
+#else
+/*
+ * NOTE: optimal version of varlena_cmp, however, we could not observe
+ * performance benefit on random text strings. It may work effectively
+ * towards the string set with duplicated values, but not tested.
+ */
+static int
+varlena_cmp(__private cl_int *errcode,
+			__global varlena *arg1, __global varlena *arg2)
+{
+	__global cl_char *s1 = VARDATA_ANY(arg1);
+	__global cl_char *s2 = VARDATA_ANY(arg2);
+	cl_int		len1 = VARSIZE_ANY_EXHDR(arg1);
+	cl_int		len2 = VARSIZE_ANY_EXHDR(arg2);
+
+	cl_int		alignMask	= sizeof(cl_int) - 1;
+
+	cl_ulong	buf1		= 0;
+	cl_ulong	buf2		= 0;
+	cl_int		bufCnt1		= 0;
+	cl_int		bufCnt2		= 0;
+
+	cl_int				addr1, firstChars1, intLen1, rest1;
+	cl_int				addr2, firstChars2, intLen2, rest2;
+	__global cl_uchar *	src1c;
+	__global cl_uchar *	src2c;
+	__global cl_uint *	src1i;
+	__global cl_uint *	src2i;
+	int					i, j;
+
+	addr1		= (size_t)s1;
+	firstChars1	= ((sizeof(cl_uint) - (addr1 & alignMask)) & alignMask);
+	firstChars1	= min(firstChars1, len1);
+	intLen1		= (len1 - firstChars1) / sizeof(cl_uint);
+	rest1		= (len1 - firstChars1) & alignMask;
+
+	addr2		= (size_t)s2;
+	firstChars2	= ((sizeof(cl_uint) - (addr2 & alignMask)) & alignMask);
+	firstChars2	= min(firstChars2, len2);
+	intLen2		= (len2 - firstChars2) / sizeof(cl_uint);
+	rest2		= (len2 - firstChars2) & alignMask;
+
+	/* load the first 0-3 characters */
+	src1c = (__global cl_uchar *)s1;
+	for(i=0; i<firstChars1; i++) {
+		buf1 = buf1 | (src1c[i] << (CL_CHAR_BIT * bufCnt1));
+		bufCnt1 ++;
+	}
+
+	src2c = (__global cl_uchar *)s2;
+	for(i=0; i<firstChars2; i++) {
+		buf2 = buf2 | (src2c[i] << (CL_CHAR_BIT * bufCnt2));
+		bufCnt2 ++;
+	}
+
+	/* load words and compare */
+	src1i = (__global cl_uint *)&src1c[firstChars1];
+	src2i = (__global cl_uint *)&src2c[firstChars2];
+
+	for(i=0; i<min(intLen1,intLen2); i++) {
+		/* load the words */
+		buf1 = buf1 | ((cl_ulong)src1i[i] << (bufCnt1 * CL_CHAR_BIT));
+		buf2 = buf2 | ((cl_ulong)src2i[i] << (bufCnt2 * CL_CHAR_BIT));
+
+		/* compare */
+		if((cl_uint)buf1 != (cl_uint)buf2) {
+			for(i=0; 0<sizeof(int); i++) {
+				cl_char c1 = (cl_char)(buf1 >> (i * CL_CHAR_BIT));
+				cl_char c2 = (cl_char)(buf2 >> (i * CL_CHAR_BIT));
+				if(c1 < c2) {
+					return -1;
+				}
+				if(c1 > c2) {
+					return 1;
+				}
+			}
+		}
+
+		/* Remove 4 charactors. */
+		buf1 >>= (sizeof(cl_uint) * CL_CHAR_BIT);
+		buf2 >>= (sizeof(cl_uint) * CL_CHAR_BIT);
+	}
+
+	/* Load the last */
+	if(i<intLen1) {
+		buf1 = buf1 | ((cl_ulong)src1i[i] << (bufCnt1 * CL_CHAR_BIT));
+		bufCnt1 += sizeof(cl_uint);
+	}
+	src1c = (__global cl_uchar *)&src1i[intLen1];
+	for(j=0; j<rest1; j++) {
+		buf1 = buf1 | ((cl_ulong)src1c[j] << (CL_CHAR_BIT * bufCnt1));
+		bufCnt1 ++;
+	}
+
+	if(i<intLen2) {
+		buf2 = buf2 | ((cl_ulong)src2i[i] << (bufCnt2 * CL_CHAR_BIT));
+		bufCnt2 += sizeof(cl_uint);
+	}
+	src2c = (__global cl_uchar *)&src2i[intLen2];
+	for(j=0; j<rest2; j++) {
+		buf2 = buf2 | ((cl_ulong)src2c[j] << (CL_CHAR_BIT * bufCnt2));
+		bufCnt2 ++;
+	}
+
+	/* compare */
+	if(buf1 != buf2) {
+		for(i=0; 0<bufCnt1; i++) {
+			cl_char c1 = (cl_char)(buf1 >> (i * CL_CHAR_BIT));
+			cl_char c2 = (cl_char)(buf2 >> (i * CL_CHAR_BIT));
+			if(c1 < c2) {
+				return -1;
+			}
+			if(c1 > c2) {
+				return 1;
+			}
+		}
+	}
+
+	return 0;
+}
+#endif
 
 #ifndef PG_BPCHAR_TYPE_DEFINED
 #define PG_BPCHAR_TYPE_DEFINED

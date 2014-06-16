@@ -839,6 +839,7 @@ STROMCL_VARLENA_TYPE_TEMPLATE(bytea)
 /*
  * memcpy implementation for OpenCL kernel usage
  */
+#if 0
 static __global void *
 memcpy(__global void *__dst, __global const void *__src, size_t len)
 {
@@ -850,13 +851,114 @@ memcpy(__global void *__dst, __global const void *__src, size_t len)
 		return __dst;
 	/* just a charm */
 	prefetch(src, len);
-	/*
-	 * TODO: needs to be GPU/MIC aware implementation
-	 */
+
 	while (len-- > 0)
 		*dst++ = *src++;
 	return __dst;
 }
+#else
+static __global void *
+memcpy(__global void *__dst, __global const void *__src, size_t len)
+{
+	size_t		alignMask	= sizeof(cl_uint) - 1;
+	cl_ulong	buf8		= 0x0;
+	cl_int		bufCnt		= 0;
+
+	__global const cl_uchar	*srcChar;
+	__global const cl_uint	*srcInt;
+	__global cl_uchar		*dstChar;
+	__global cl_uint		*dstInt;
+
+	size_t	srcAddr, srcFirstChars, srcIntLen, srcRest;
+	size_t	dstAddr, dstFirstChars, dstIntLen, dstRest;
+	int		i, j;
+
+	srcAddr			= (size_t)__src;
+	srcFirstChars	= ((sizeof(cl_uint) - (srcAddr & alignMask)) & alignMask);
+	srcFirstChars	= min(srcFirstChars, len);
+	srcIntLen		= (len - srcFirstChars) / sizeof(cl_uint);
+	srcRest			= (len - srcFirstChars) & alignMask;
+
+	dstAddr			= (size_t)__dst;
+	dstFirstChars	= ((sizeof(cl_uint) - (dstAddr & alignMask)) & alignMask);
+	dstFirstChars	= min(dstFirstChars, len);
+	dstIntLen		= (len - dstFirstChars) / sizeof(cl_uint);
+	dstRest			= (len - dstFirstChars) & alignMask;
+
+
+	/* load the first 0-3 charactors */
+	srcChar = (__global const cl_uchar *)__src;
+	for(i=0; i<srcFirstChars; i++) {
+		buf8 = buf8 | (srcChar[i] << (BITS_PER_BYTE * bufCnt));
+		bufCnt ++;
+	}
+	srcInt = (__global const cl_uint *)&srcChar[srcFirstChars];
+
+	if(0 < srcIntLen) {
+		/* load the first 1 word(4 bytes) */
+		buf8 = buf8 | ((cl_ulong)srcInt[0] << (bufCnt * BITS_PER_BYTE));
+		bufCnt += sizeof(cl_uint);
+
+		/* store the first 0-3 charactors */
+		dstChar = (__global cl_uchar *)__dst;
+		for(j=0; j<dstFirstChars; j++) {
+			dstChar[j] = (cl_uchar)buf8;
+			buf8 >>= BITS_PER_BYTE;
+			bufCnt --;
+		}
+
+		/* store 32bit, if buffered data is larger than 32bit */
+		dstInt = (__global cl_uint *)&dstChar[dstFirstChars];
+		j	   = 0;
+		if(sizeof(cl_uint) <= bufCnt) {
+			dstInt[j++] = (cl_uint)buf8;
+			buf8 >>= (BITS_PER_BYTE * sizeof(cl_uint));
+			bufCnt -= sizeof(cl_uint);
+		}
+
+		/* copy body */
+		for(i=1; i<srcIntLen; i++) {
+			buf8 = buf8 | ((cl_ulong)srcInt[i] << (bufCnt * BITS_PER_BYTE));
+			dstInt[j++] = (cl_uint)buf8;
+			buf8 >>= (BITS_PER_BYTE * sizeof(cl_uint));
+		}
+	}
+
+	/* load the last 0-3 charactors */
+	srcChar = (__global const cl_uchar *)&srcInt[srcIntLen];
+	for(i=0; i<srcRest; i++) {
+		buf8 = buf8 | ((cl_ulong)srcChar[i] << (BITS_PER_BYTE * bufCnt));
+		bufCnt ++;
+	}
+
+	if(0 == srcIntLen) {
+	    /* store the first 0-3 charactors */
+		dstChar = (__global cl_uchar *)__dst;
+		for(j=0; j<dstFirstChars; j++) {
+			dstChar[j] = (cl_uchar)buf8;
+			buf8 >>= BITS_PER_BYTE;
+			bufCnt --;
+		}
+		dstInt = (__global cl_uint *)&dstChar[dstFirstChars];
+		j = 0;
+	}
+
+	/* store rest charactors */
+	if(sizeof(cl_uint) <= bufCnt) {
+		dstInt[j++] = (cl_uint)buf8;
+		buf8 >>= (BITS_PER_BYTE * sizeof(cl_uint));
+		bufCnt -= sizeof(cl_uint);
+	}
+	dstChar = (__global cl_uchar *)&dstInt[j];
+	for(j=0; j<dstRest; j++) {
+		dstChar[j] = (cl_uchar)buf8;
+		buf8 >>= BITS_PER_BYTE;
+		bufCnt --;
+	}
+
+	return __dst;
+}
+#endif
 
 /*
  * arithmetic_stairlike_add
