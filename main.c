@@ -188,6 +188,8 @@ pgstrom_strerror(cl_int errcode)
 			return "OpenCL internal error";
 		case StromError_OutOfSharedMemory:
 			return "out of shared memory";
+		case StromError_OutOfMemory:
+			return "out of host memory";
 		case StromError_DivisionByZero:
 			return "division by zero";
 		case StromError_DataStoreCorruption:

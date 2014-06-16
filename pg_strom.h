@@ -292,7 +292,7 @@ typedef struct {
 	char			data[FLEXIBLE_ARRAY_MEMBER];
 } tcache_toastbuf;
 
-#define TCACHE_TOASTBUF_INITSIZE	((32 << 20) - sizeof(cl_uint))	/* 32MB */
+#define TCACHE_TOASTBUF_INITSIZE	((32 << 20) - SHMEM_ALLOC_COST)	/* 32MB */
 
 /*
  * tcache_column_store - a node or leaf entity of t-tree columnar cache
@@ -301,13 +301,12 @@ typedef struct {
 	StromObject		sobj;	/* StromTag_TCacheColumnStore */
 	slock_t			refcnt_lock;
 	int				refcnt;
-	uint32			ncols;	/* copy of tc_head->ncols */
+	uint32			ncols;	/* length of cdata[] (.incl uncached columns) */
 	uint32			nrows;	/* number of rows being cached */
 	uint32			njunks;	/* number of junk rows to be removed later */
 	bool			is_sorted;
 	BlockNumber		blkno_max;
 	BlockNumber		blkno_min;
-	AttrNumber	   *i_cached;	/* copy of tc_head->i_cached */
 	ItemPointerData		*ctids;
 	HeapTupleHeaderData	*theads;
 	struct {
@@ -380,8 +379,7 @@ typedef struct {
 	/* fields below are read-only once constructed (no lock needed) */
 	Oid			datoid;		/* database oid of this cache */
 	Oid			reloid;		/* relation oid of this cache */
-	int			ncols;		/* number of columns being cached */
-	AttrNumber *i_cached;	/* index of tupdesc->attrs for cached columns */
+	Bitmapset  *cached_attrs;	/* cached attributes in bitmap form */
 	TupleDesc	tupdesc;	/* duplication of TupleDesc of underlying table.
 							 * all the values, except for constr, are on
 							 * the shared memory region, so its visible to
@@ -536,6 +534,18 @@ extern bytea *kparam_make_kprojection(List *target_list);
 
 extern void pgstrom_release_bulk_slot(pgstrom_bulk_slot *bulk_slot);
 extern bool pgstrom_plan_can_multi_exec(const PlanState *ps);
+
+extern tcache_toastbuf *pgstrom_create_toast_buffer(Size required);
+extern tcache_toastbuf *pgstrom_expand_toast_buffer(tcache_toastbuf *tbuf);
+extern tcache_toastbuf *pgstrom_get_toast_buffer(tcache_toastbuf *tbuf);
+extern void pgstrom_put_toast_buffer(tcache_toastbuf *tbuf);
+
+extern tcache_column_store *
+pgstrom_create_column_store_with_projection(kern_projection *kproj,
+                                            cl_uint nitems,
+                                            bool with_syscols);
+extern tcache_column_store *pgstrom_get_column_store(tcache_column_store *pcs);
+extern void pgstrom_put_column_store(tcache_column_store *pcs);
 
 /*
  * restrack.c

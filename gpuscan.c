@@ -758,7 +758,7 @@ pgstrom_setup_kern_colstore_head(GpuScanState *gss, kern_resultbuf *kresult,
 	cl_uint		nrooms = kresult->nrooms;
 	cl_uint	   *i_refcols;
 	Size		offset;
-	int			i, j, k;
+	int			i, j;
 
 	/*
 	 * In case of row-store is processed, kern_row_to_column will increase
@@ -774,7 +774,7 @@ pgstrom_setup_kern_colstore_head(GpuScanState *gss, kern_resultbuf *kresult,
 
 	offset = STROMALIGN(offsetof(kern_column_store,
 								 colmeta[gss->cs_attnums]));
-	for (i=0, k=0; i < ncols; i++)
+	for (i=0; i < ncols; i++)
 	{
 		kern_colmeta   *kcmeta = &kcs_head->colmeta[i];
 		Form_pg_attribute attr;
@@ -784,17 +784,7 @@ pgstrom_setup_kern_colstore_head(GpuScanState *gss, kern_resultbuf *kresult,
 
 		memset(kcmeta, 0, sizeof(kern_colmeta));
 		kcmeta->attnotnull = attr->attnotnull;
-		if (attr->attalign == 'c')
-			kcmeta->attalign = sizeof(cl_char);
-		else if (attr->attalign == 's')
-			kcmeta->attalign = sizeof(cl_short);
-		else if (attr->attalign == 'i')
-			kcmeta->attalign = sizeof(cl_int);
-		else if (attr->attalign == 'd')
-			kcmeta->attalign = sizeof(cl_long);
-		else
-			elog(ERROR, "unexpected attalign '%c'", attr->attalign);
-
+		kcmeta->attalign = typealign_get_width(attr->attalign);
 		kcmeta->attlen = attr->attlen;
 		kcmeta->cs_ofs = offset;
 
@@ -804,21 +794,7 @@ pgstrom_setup_kern_colstore_head(GpuScanState *gss, kern_resultbuf *kresult,
 									   ? attr->attlen
 									   : sizeof(cl_uint)));
 		if (gss->tc_scan)
-		{
-			tcache_head	*tc_head = gss->tc_head;
-
-			while (k < tc_head->ncols)
-			{
-				if (j == tc_head->i_cached[k])
-				{
-					i_refcols[i] = k;
-					break;
-				}
-				k++;
-			}
-			if (k == tc_head->ncols)
-				elog(ERROR, "Bug? uncached columns are referenced");
-		}
+			i_refcols[i] = j;
 	}
 	kcs_head->length = offset;
 }
@@ -1061,15 +1037,15 @@ gpuscan_check_tuple_visibility(GpuScanState *gss,
 		if (!gss->hybrid_scan)
 		{
 			TupleDesc		tupdesc = RelationGetDescr(relation);
-			tcache_head	   *tc_head = gss->tc_head;
-			Form_pg_attribute attr;
-			int				i, j;
+			int				i;
 
 			slot = ExecStoreAllNullTuple(slot);
-			for (i=0; i < tc_head->ncols; i++)
+			for (i=0; i < tupdesc->natts; i++)
 			{
-				j = tc_head->i_cached[i];
-				attr = tupdesc->attrs[j];
+				Form_pg_attribute attr = tupdesc->attrs[i];
+
+				if (!tcs->cdata[i].values)
+					continue;
 
 				if (!attr->attnotnull &&
 					att_isnull(rindex, tcs->cdata[i].isnull))
@@ -1077,7 +1053,7 @@ gpuscan_check_tuple_visibility(GpuScanState *gss,
 
 				if (attr->attlen > 0)
 				{
-					slot->tts_values[j] = fetch_att(tcs->cdata[i].values +
+					slot->tts_values[i] = fetch_att(tcs->cdata[i].values +
 													attr->attlen * rindex,
 													attr->attbyval,
 													attr->attlen);
@@ -1088,11 +1064,11 @@ gpuscan_check_tuple_visibility(GpuScanState *gss,
 
 					Assert(cs_offset[rindex] > 0);
 					Assert(tcs->cdata[i].toast != NULL);
-					slot->tts_values[j]
+					slot->tts_values[i]
 						= PointerGetDatum((char *)tcs->cdata[i].toast +
 										  cs_offset[rindex]);
 				}
-				slot->tts_isnull[j] = false;
+				slot->tts_isnull[i] = false;
 			}
 		}
 		else

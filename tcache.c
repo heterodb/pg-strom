@@ -402,24 +402,26 @@ tcache_lock_held_by_me(tcache_head *tc_head, bool is_exclusive)
 static tcache_column_store *
 tcache_create_column_store(tcache_head *tc_head)
 {
-	Form_pg_attribute attr;
 	tcache_column_store *tcs;
+	TupleDesc	tupdesc = tc_head->tupdesc;
 	Size	length;
 	Size	offset;
-	int		i, j;
+	int		i;
 
 	/* estimate length of column store */
-	length = MAXALIGN(offsetof(tcache_column_store, cdata[tc_head->ncols]));
-	length += MAXALIGN(sizeof(AttrNumber) * tc_head->ncols);
+	length = MAXALIGN(offsetof(tcache_column_store, cdata[tupdesc->natts]));
 	length += MAXALIGN(sizeof(ItemPointerData) * NUM_ROWS_PER_COLSTORE);
 	length += MAXALIGN(sizeof(HeapTupleHeaderData) * NUM_ROWS_PER_COLSTORE);
 
-	for (i=0; i < tc_head->ncols; i++)
+	for (i=0; i < tupdesc->natts; i++)
 	{
-		j = tc_head->i_cached[i];
+		Form_pg_attribute attr = tupdesc->attrs[i];
 
-		Assert(j >= 0 && j < tc_head->tupdesc->natts);
-		attr = tc_head->tupdesc->attrs[j];
+		/* is column cached? */
+		if (!bms_is_member(attr->attnum - FirstLowInvalidHeapAttributeNumber,
+						   tc_head->cached_attrs))
+			continue;
+
 		if (!attr->attnotnull)
 			length += MAXALIGN(NUM_ROWS_PER_COLSTORE / BITS_PER_BYTE);
 		length += MAXALIGN((attr->attlen > 0
@@ -436,31 +438,29 @@ tcache_create_column_store(tcache_head *tc_head)
 	tcs->sobj.stag = StromTag_TCacheColumnStore;
 	SpinLockInit(&tcs->refcnt_lock);
 	tcs->refcnt = 1;
-	tcs->ncols = tc_head->ncols;
-
+	tcs->ncols = tupdesc->natts;
 	offset = MAXALIGN(offsetof(tcache_column_store,
-							   cdata[tcs->ncols]));
-	/* array of referenced attributes */
-	tcs->i_cached = (AttrNumber *)((char *)tcs + offset);
-	offset += MAXALIGN(sizeof(AttrNumber) * tc_head->ncols);
-	memcpy(tcs->i_cached, tc_head->i_cached,
-		   sizeof(AttrNumber) * tc_head->ncols);
+							   cdata[tupdesc->natts]));
 
 	/* array of item-pointers */
 	tcs->ctids = (ItemPointerData *)((char *)tcs + offset);
 	offset += MAXALIGN(sizeof(ItemPointerData) *
 					   NUM_ROWS_PER_COLSTORE);
+
 	/* array of other system columns */
 	tcs->theads = (HeapTupleHeaderData *)((char *)tcs + offset);
 	offset += MAXALIGN(sizeof(HeapTupleHeaderData) *
 					   NUM_ROWS_PER_COLSTORE);
-	/* array of user defined columns */
-	for (i=0; i < tc_head->ncols; i++)
-	{
-		j = tc_head->i_cached[i];
 
-		Assert(j >= 0 && j < tc_head->tupdesc->natts);
-		attr = tc_head->tupdesc->attrs[j];
+	/* array of user defined columns */
+	for (i=0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = tupdesc->attrs[i];
+
+		if (!bms_is_member(attr->attnum - FirstLowInvalidHeapAttributeNumber,
+						   tc_head->cached_attrs))
+			continue;
+
 		if (attr->attnotnull)
 			tcs->cdata[i].isnull = NULL;
 		else
@@ -471,7 +471,8 @@ tcache_create_column_store(tcache_head *tc_head)
 		tcs->cdata[i].values = ((char *)tcs + offset);
 		offset += MAXALIGN((attr->attlen > 0
 							? attr->attlen
-							: sizeof(cl_uint)) * NUM_ROWS_PER_COLSTORE);
+							: sizeof(cl_uint)) *
+						   NUM_ROWS_PER_COLSTORE);
 		tcs->cdata[i].toast = NULL;	/* to be set later on demand */
 	}
 	Assert(offset == length);
@@ -485,8 +486,9 @@ tcache_duplicate_column_store(tcache_head *tc_head,
 							  bool duplicate_toastbuf)
 {
 	tcache_column_store *tcs_new = tcache_create_column_store(tc_head);
-	int		nrows = tcs_old->nrows;
-	int		i, j;
+	TupleDesc	tupdesc = tc_head->tupdesc;
+	int			nrows = tcs_old->nrows;
+	int			i;
 
 	PG_TRY();
 	{
@@ -496,12 +498,12 @@ tcache_duplicate_column_store(tcache_head *tc_head,
 		memcpy(tcs_new->theads,
 			   tcs_old->theads,
 			   sizeof(HeapTupleHeaderData) * nrows);
-		for (i=0; i < tcs_old->ncols; i++)
+		for (i=0; i < tupdesc->natts; i++)
 		{
-			Form_pg_attribute	attr;
+			Form_pg_attribute	attr = tupdesc->attrs[i];
 
-			j = tc_head->i_cached[i];
-			attr = tc_head->tupdesc->attrs[j];
+			if (!tcs_old->cdata[i].values)
+				continue;
 
 			if (!attr->attnotnull)
 			{
@@ -1082,37 +1084,40 @@ static void
 tcache_sort_tcnode_internal(tcache_head *tc_head, tcache_node *tc_node,
 							tcache_column_store *tcs, int left, int right)
 {
-	int		li = left;
-	int		ri = right;
-	ItemPointer pivot = &tcs->ctids[(li + ri) / 2];
+	int			li = left;
+	int			ri = right;
+	TupleDesc	tupdesc = tc_head->tupdesc;
+	ItemPointerData pivot;
 
 	if (left >= right)
 		return;
 
+	ItemPointerCopy(&tcs->ctids[(li + ri) / 2], &pivot);
 	while (li < ri)
 	{
-		while (ItemPointerCompare(&tcs->ctids[li], pivot) < 0)
+		while (ItemPointerCompare(&tcs->ctids[li], &pivot) < 0)
 			li++;
-		while (ItemPointerCompare(&tcs->ctids[ri], pivot) > 0)
+		while (ItemPointerCompare(&tcs->ctids[ri], &pivot) > 0)
 			ri--;
 		/*
 		 * Swap values
 		 */
 		if (li < ri)
 		{
-			Form_pg_attribute attr;
 			int		attlen;
-			int		i, j;
+			int		i;
 
 			memswap(&tcs->ctids[li], &tcs->ctids[ri],
 					sizeof(ItemPointerData));
 			memswap(&tcs->theads[li], &tcs->theads[ri],
 					sizeof(HeapTupleHeaderData));
 
-			for (i=0; i < tc_head->ncols; i++)
+			for (i=0; i < tupdesc->natts; i++)
 			{
-				j = tc_head->i_cached[i];
-				attr = tc_head->tupdesc->attrs[j];
+				Form_pg_attribute attr = tupdesc->attrs[i];
+
+				if (!tcs->cdata[i].values)
+					continue;
 
 				attlen = (attr->attlen > 0
 						  ? attr->attlen
@@ -1179,6 +1184,8 @@ tcache_copy_cs_varlena(tcache_column_store *tcs_dst, int base_dst,
 	char	   *vptr;
 	int			i, si, di;
 
+	Assert(tcs_src->cdata[attidx].values && tbuf_src &&
+		   tcs_dst->cdata[attidx].values && tbuf_dst);
 	src_isnull = tcs_src->cdata[attidx].isnull;
 	dst_isnull = tcs_dst->cdata[attidx].isnull;
 	src_ofs = (cl_uint *)(tcs_src->cdata[attidx].values);
@@ -1203,9 +1210,10 @@ tcache_copy_cs_varlena(tcache_column_store *tcs_dst, int base_dst,
 			vsize = VARSIZE_ANY(vptr);
 			if (tbuf_dst->tbuf_length < tbuf_dst->tbuf_usage + INTALIGN(vsize))
 			{
+				Size	new_len = 2 * tbuf_dst->tbuf_length;
+
 				tcs_dst->cdata[attidx].toast
-					= tcache_duplicate_toast_buffer(tbuf_dst,
-													2 * tbuf_dst->tbuf_length);
+					= tcache_duplicate_toast_buffer(tbuf_dst, new_len);
 				tbuf_dst = tcs_dst->cdata[attidx].toast;
 			}
 			memcpy((char *)tbuf_dst + tbuf_dst->tbuf_usage,
@@ -1238,11 +1246,12 @@ tcache_compaction_tcnode(tcache_head *tc_head, tcache_node *tc_node)
 	tcs_new = tcache_create_column_store(tc_head);
 	PG_TRY();
 	{
-		Size	required;
-		int		i, j, k;
+		TupleDesc	tupdesc = tc_head->tupdesc;
+		Size		required;
+		int			i, j, k;
 
 		/* assign a toast buffer first */
-		for (i=0; i < tcs_old->ncols; i++)
+		for (i=0; i < tupdesc->natts; i++)
 		{
 			if (!tcs_old->cdata[i].toast)
 				continue;
@@ -1286,20 +1295,22 @@ tcache_compaction_tcnode(tcache_head *tc_head, tcache_node *tc_node)
 			if (blkno_cur < tcs_new->blkno_min)
 				tcs_new->blkno_min = blkno_cur;
 
-			for (k=0; k < tcs_old->ncols; k++)
+			for (k=0; k < tupdesc->natts; k++)
 			{
-				int		l = tc_head->i_cached[k];
-				int		attlen = tc_head->tupdesc->attrs[l]->attlen;
+				Form_pg_attribute attr = tupdesc->attrs[k];
+
+				if (!tcs_old->cdata[k].values)
+					continue;	/* skip, if not cached */
 
 				/* nullmap */
 				if (tcs_old->cdata[k].isnull)
 					bitmapcopy(tcs_new->cdata[k].isnull, j,
 							   tcs_old->cdata[k].isnull, i, 1);
 				/* values */
-				if (attlen > 0)
-					memcopy(tcs_new->cdata[k].values + attlen * j,
-							tcs_old->cdata[k].values + attlen * i,
-							attlen);
+				if (attr->attlen > 0)
+					memcopy(tcs_new->cdata[k].values + attr->attlen * j,
+							tcs_old->cdata[k].values + attr->attlen * i,
+							attr->attlen);
 				else
 				{
 					tcache_copy_cs_varlena(tcs_new, j,
@@ -1348,9 +1359,10 @@ do_try_merge_tcnode(tcache_head *tc_head,
 	{
 		tcache_column_store *tcs_src = tc_child->tcs;
 		tcache_column_store *tcs_dst = tc_parent->tcs;
-		int		base = tcs_dst->nrows;
-		int		nmoved = tcs_src->nrows;
-		int		i, j;
+		TupleDesc	tupdesc = tc_head->tupdesc;
+		int			base = tcs_dst->nrows;
+		int			nmoved = tcs_src->nrows;
+		int			i;
 
 		memcpy(tcs_dst->ctids + base,
 			   tcs_src->ctids,
@@ -1358,12 +1370,13 @@ do_try_merge_tcnode(tcache_head *tc_head,
 		memcpy(tcs_dst->theads + base,
 			   tcs_src->theads,
 			   sizeof(HeapTupleHeaderData) * nmoved);
-		for (i=0; i < tc_head->ncols; i++)
+		for (i=0; i < tupdesc->natts; i++)
 		{
-			Form_pg_attribute	attr;
+			Form_pg_attribute	attr = tupdesc->attrs[i];
 
-			j = tc_head->i_cached[i];
-			attr = tc_head->tupdesc->attrs[j];
+			/* skip, if uncached columns */
+			if (!tcs_src->cdata[i].values)
+				continue;
 
 			/* move nullmap */
 			if (!attr->attnotnull)
@@ -1567,13 +1580,13 @@ tcache_split_tcnode(tcache_head *tc_head, tcache_node *tc_node_old)
 	tcs_new = tc_node_new->tcs;
 	PG_TRY();
 	{
-		Form_pg_attribute attr;
+		TupleDesc tupdesc = tc_head->tupdesc;
 		int		nremain;
 		int		nmoved;
-		int		i, j;
+		int		i;
 
 		/* assign toast buffers first */
-		for (i=0; i < tcs_old->ncols; i++)
+		for (i=0; i < tupdesc->natts; i++)
 		{
 			Size	required;
 
@@ -1628,10 +1641,12 @@ tcache_split_tcnode(tcache_head *tc_head, tcache_node *tc_node_old)
 		/*
 		 * copy regular columns
 		 */
-		for (i=0; i < tcs_old->ncols; i++)
+		for (i=0; i < tupdesc->natts; i++)
 		{
-			j = tc_head->i_cached[i];
-			attr = tc_head->tupdesc->attrs[j];
+			Form_pg_attribute attr = tupdesc->attrs[i];
+
+			if (!tcs_old->cdata[i].values)
+				continue;
 
 			/* nullmap */
 			if (!attr->attnotnull)
@@ -1966,10 +1981,11 @@ do_insert_tuple(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 	TupleDesc	tupdesc = tc_head->tupdesc;
 	Datum	   *values = alloca(sizeof(Datum) * tupdesc->natts);
 	bool	   *isnull = alloca(sizeof(bool) * tupdesc->natts);
-	int			i, j;
+	int			i;
 
 	tcache_lock_held_by_me(tc_head, true);
 	Assert(tcs->nrows < NUM_ROWS_PER_COLSTORE);
+	Assert(tcs->ncols == tupdesc->natts);
 
 	heap_deform_tuple(tuple, tupdesc, values, isnull);
 
@@ -1977,20 +1993,19 @@ do_insert_tuple(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 	tcs->ctids[tcs->nrows] = tuple->t_self;
 	memcopy(&tcs->theads[tcs->nrows], tuple->t_data,
 			sizeof(HeapTupleHeaderData));
-
 	for (i=0; i < tcs->ncols; i++)
 	{
-		Form_pg_attribute	attr;
+		Form_pg_attribute	attr = tupdesc->attrs[i];
 		uint8	   *cs_isnull = tcs->cdata[i].isnull;
 		char	   *cs_values = tcs->cdata[i].values;
 
-		j = tc_head->i_cached[i];
-		Assert(j >= 0 && j < tupdesc->natts);
-		attr = tupdesc->attrs[j];
+		/* skip if it is not a cached column */
+		if (!cs_values)
+			continue;
 
 		if (!cs_isnull)
-			Assert(!isnull[j]);	/* should be always not null */
-		else if (!isnull[j])
+			Assert(!isnull[i]);	/* should be always not null */
+		else if (!isnull[i])
 		{
 			cs_isnull[tcs->nrows / BITS_PER_BYTE]
 				|= (1 << (tcs->nrows % BITS_PER_BYTE));
@@ -2015,11 +2030,11 @@ do_insert_tuple(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 		{
 			if (attr->attbyval)
 				memcopy(cs_values + attr->attlen * tcs->nrows,
-						&values[j],
+						&values[i],
 						attr->attlen);
 			else
 				memcpy(cs_values + attr->attlen * tcs->nrows,
-					   DatumGetPointer(values[j]),
+					   DatumGetPointer(values[i]),
 					   attr->attlen);
 		}
 		else
@@ -2030,7 +2045,7 @@ do_insert_tuple(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 			 * put on the values array.
 			 */
 			tcache_toastbuf	*tbuf = tcs->cdata[i].toast;
-			Size		vsize = VARSIZE_ANY(values[j]);
+			Size		vsize = VARSIZE_ANY(values[i]);
 			cl_uint	   *cs_ofs = (cl_uint *)tcs->cdata[i].values;
 
 			if (!tbuf)
@@ -2058,7 +2073,7 @@ do_insert_tuple(tcache_head *tc_head, tcache_node *tc_node, HeapTuple tuple)
 
 			cs_ofs[tcs->nrows] = tbuf->tbuf_usage;
 			memcpy((char *)tbuf + tbuf->tbuf_usage,
-				   DatumGetPointer(values[j]),
+				   DatumGetPointer(values[i]),
 				   vsize);
 			tbuf->tbuf_usage += INTALIGN(vsize);
 		}
@@ -2593,7 +2608,7 @@ tcache_create_tchead(Oid reloid, Bitmapset *required,
 	Size			allocated;
 	Bitmapset	   *tempset;
 	bitmapword		attxor = 0;
-	int				i, j, k;
+	int				i, nwords;
 
 	/* calculation of the length */
 	reltup = SearchSysCache1(RELOID, ObjectIdGetDatum(reloid));
@@ -2601,11 +2616,13 @@ tcache_create_tchead(Oid reloid, Bitmapset *required,
 		elog(ERROR, "cache lookup failed for relation %u", reloid);
 	relform = (Form_pg_class) GETSTRUCT(reltup);
 
+	nwords = (relform->relnatts -
+			  FirstLowInvalidHeapAttributeNumber) / BITS_PER_BITMAPWORD + 1;
 	length = (MAXALIGN(offsetof(tcache_head, data[0])) +
 			  MAXALIGN(sizeof(*tupdesc)) +
 			  MAXALIGN(sizeof(Form_pg_attribute) * relform->relnatts) +
 			  MAXALIGN(sizeof(FormData_pg_attribute)) * relform->relnatts +
-			  MAXALIGN(sizeof(AttrNumber) * relform->relnatts));
+			  MAXALIGN(offsetof(Bitmapset, words[nwords])));
 
 	/* allocation of a shared memory block (larger than length) */
 	tc_head = pgstrom_shmem_alloc_alap(length, &allocated);
@@ -2637,22 +2654,18 @@ tcache_create_tchead(Oid reloid, Bitmapset *required,
 
 		tempset = bms_fixup_sysattrs(relform->relnatts, required);
 		if (tcache_old)
-		{
-			for (i=0; i < tcache_old->ncols; i++)
-			{
-				j = (tcache_old->i_cached[i] + 1
-					 - FirstLowInvalidHeapAttributeNumber);
-				tempset = bms_add_member(tempset, j);
-			}
-		}
+			tempset = bms_union(tcache_old->cached_attrs, tempset);
+
 		if (tempset)
 		{
 			for (i=0; i < tempset->nwords; i++)
 				attxor ^= tempset->words[i];
 		}
-		tc_head->ncols = bms_num_members(tempset);
-		tc_head->i_cached = (AttrNumber *)((char *)tc_head + offset);
-		offset += MAXALIGN(sizeof(AttrNumber) * relform->relnatts);
+		tc_head->cached_attrs = (Bitmapset *)((char *)tc_head + offset);
+		Assert(tempset->nwords <= nwords);
+		memcpy(tc_head->cached_attrs, tempset,
+			   offsetof(Bitmapset, words[nwords]));
+		offset += MAXALIGN(offsetof(Bitmapset, words[nwords]));
 
 		/* setting up locktag */
 		tc_head->locktag.locktag_field1 = MyDatabaseId;
@@ -2675,7 +2688,7 @@ tcache_create_tchead(Oid reloid, Bitmapset *required,
 		tupdesc->tdhasoid = relform->relhasoids;
 		tupdesc->tdrefcount = -1;
 
-		for (i=0, j=0; i < tupdesc->natts; i++)
+		for (i=0; i < tupdesc->natts; i++)
 		{
 			atttup = SearchSysCache2(ATTNUM,
 									 ObjectIdGetDatum(reloid),
@@ -2687,16 +2700,9 @@ tcache_create_tchead(Oid reloid, Bitmapset *required,
 			offset += MAXALIGN(sizeof(FormData_pg_attribute));
 			memcpy(tupdesc->attrs[i], GETSTRUCT(atttup),
 				   sizeof(FormData_pg_attribute));
-
-			k = ((Form_pg_attribute) GETSTRUCT(atttup))->attnum
-				- FirstLowInvalidHeapAttributeNumber;
-			if (bms_is_member(k, tempset))
-				tc_head->i_cached[j++] = i;
-
 			ReleaseSysCache(atttup);
 		}
 		Assert(offset <= length);
-		Assert(tc_head->ncols == j);
 		tc_head->tupdesc = tupdesc;
 		bms_free(tempset);
 
@@ -2780,7 +2786,6 @@ tcache_get_tchead_internal(Oid datoid, Oid reloid,
 	tcache_head	   *tc_head = NULL;
 	tcache_head	   *tc_old = NULL;
 	int				hindex = tcache_hash_index(MyDatabaseId, reloid);
-	int				i, j;
 
 	SpinLockAcquire(&tc_common->lock);
 	PG_TRY();
@@ -2793,23 +2798,10 @@ tcache_get_tchead_internal(Oid datoid, Oid reloid,
 			if (temp->datoid == MyDatabaseId &&
 				temp->reloid == reloid)
 			{
-				Bitmapset  *cached = NULL;
 				Bitmapset  *referenced
 					= bms_fixup_sysattrs(temp->tupdesc->natts, required);
 
-				for (i=0; i < temp->ncols; i++)
-				{
-					j = (temp->i_cached[i] + 1 -
-						 FirstLowInvalidHeapAttributeNumber);
-					/*
-					 * All the system attribute and whole-row reference
-					 * shall be dropped on cache creation time.
-					 */
-					Assert(j > -FirstLowInvalidHeapAttributeNumber);
-
-					cached = bms_add_member(cached, j);
-				}
-				if (bms_is_subset(referenced, cached))
+				if (bms_is_subset(referenced, temp->cached_attrs))
 				{
 					/*
 					 * Perfect! Cache of the target relation exists and all
@@ -2827,7 +2819,6 @@ tcache_get_tchead_internal(Oid datoid, Oid reloid,
 					 */
 					tc_old = temp;
 				}
-				bms_free(cached);
 				bms_free(referenced);
 				break;
 			}
@@ -3879,12 +3870,22 @@ pgstrom_tcache_info(PG_FUNCTION_ARGS)
 				{
 					tcache_head *tc_head
 						= dlist_container(tcache_head, chain, iter.cur);
+					Bitmapset	*tempset = bms_copy(tc_head->cached_attrs);
+					int			 j, k, n;
+					int16		*anums;
+
+					n = bms_num_members(tempset);
+					anums = palloc0(sizeof(int16) * n);
+					for (k=0; (j = bms_first_member(tempset)) >= 0; k++)
+					{
+						anums[k] = j - FirstLowInvalidHeapAttributeNumber;
+					}
+					Assert(n == k);
 
 					tchead_info = palloc(sizeof(tcache_head_info));
 					tchead_info->datoid = tc_head->datoid;
 					tchead_info->reloid = tc_head->reloid;
-					tchead_info->cached = buildint2vector(tc_head->i_cached,
-														   tc_head->ncols);
+					tchead_info->cached = buildint2vector(anums, n);
 					tchead_info->refcnt = tc_head->refcnt;
 					SpinLockAcquire(&tc_head->lock);
 					tchead_info->is_ready = tc_head->is_ready;
@@ -3953,8 +3954,8 @@ collect_tcache_column_node_info(tcache_head *tc_head,
 {
 	tcache_node_info    *tcnode_info;
 	tcache_column_store *tcs;
-	Form_pg_attribute	 attr;
-	int			i, j;
+	TupleDesc	tupdesc = tc_head->tupdesc;
+	int			i;
 
 	tcnode_info = palloc0(sizeof(tcache_node_info));
 	tcnode_info->row_store = false;
@@ -3978,11 +3979,13 @@ collect_tcache_column_node_info(tcache_head *tc_head,
 		(STROMALIGN(offsetof(tcache_column_store, cdata[tcs->ncols])) +
 		 STROMALIGN(sizeof(ItemPointerData) * NUM_ROWS_PER_COLSTORE) +
 		 STROMALIGN(sizeof(HeapTupleHeaderData) * NUM_ROWS_PER_COLSTORE));
-	for (i=0; i < tcs->ncols; i++)
+	for (i=0; i < tupdesc->natts; i++)
 	{
-		j = tc_head->i_cached[i];
+		Form_pg_attribute attr = tupdesc->attrs[i];
 
-		attr = tc_head->tupdesc->attrs[j];
+		if (!tcs->cdata[i].values)
+			continue;
+
 		if (!attr->attnotnull)
 		{
 			Assert(tcs->cdata[i].isnull != NULL);

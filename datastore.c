@@ -340,27 +340,25 @@ kparam_refresh_ktoast_head(kern_parambuf *kparams,
 		kern_column_store *kcs_head = KPARAM_GET_KCS_HEAD(kparams);
 		kern_toastbuf *ktoast_head = KPARAM_GET_KTOAST_HEAD(kparams);
 		Size		offset;
-		int			i, j, k;
+		int			i, j;
 		bool		has_toast = false;
 
 		ktoast_head->length = TOASTBUF_MAGIC;
 		ktoast_head->ncols = kcs_head->ncols;
-		for (i=0, k=0; i < tcs->ncols; i++)
+		for (i=0, j=0; i < tcs->ncols; i++)
 		{
-			j = tcs->i_cached[i];
-			if (attrefs[j] == 0)
+			if (!attrefs[i])
 				continue;
 			if (!tcs->cdata[i].toast)
-				ktoast_head->coldir[k] = 0;
+				ktoast_head->coldir[j] = (cl_uint)(-1);
 			else
 			{
 				has_toast = true;
-				ktoast_head->coldir[k] = offset;
+				ktoast_head->coldir[j] = offset;
 				offset += STROMALIGN(tcs->cdata[i].toast->tbuf_length);
 			}
-			k++;
+			j++;
 		}
-		Assert(k == kcs_head->ncols);
 		if (!has_toast)
 			kparams->poffset[2] = 0;
 	}
@@ -427,4 +425,220 @@ kparam_make_kprojection(List *target_list)
 out_unavailable:
 	pfree(result);
 	return NULL;
+}
+
+/*
+ * pgstrom_create_toast_buffer
+ *
+ * creata a toast-buffer to be attached on a particular column-store with
+ * initial length, but TCACHE_TOASTBUF_INITSIZE at least.
+ */
+tcache_toastbuf *
+pgstrom_create_toast_buffer(Size required)
+{
+	tcache_toastbuf *tbuf;
+	Size		allocated;
+
+	required = Max(required, TCACHE_TOASTBUF_INITSIZE);
+
+	tbuf = pgstrom_shmem_alloc_alap(required, &allocated);
+	if (!tbuf)
+		return NULL;
+
+	SpinLockInit(&tbuf->refcnt_lock);
+	tbuf->refcnt = 1;
+	tbuf->tbuf_length = allocated;
+	tbuf->tbuf_usage = offsetof(tcache_toastbuf, data[0]);
+	tbuf->tbuf_junk = 0;
+
+	return tbuf;
+}
+
+/*
+ * pgstrom_expand_toast_buffer
+ *
+ * it expand length of the toast buffer into twice.
+ */
+tcache_toastbuf *
+pgstrom_expand_toast_buffer(tcache_toastbuf *tbuf_old)
+{
+	tcache_toastbuf *tbuf_new;
+	Size	required = 2 * tbuf_old->tbuf_length;
+
+	tbuf_new = pgstrom_create_toast_buffer(required);
+	if (!tbuf_new)
+		return NULL;
+	memcpy(tbuf_new->data,
+		   tbuf_old->data,
+		   tbuf_old->tbuf_usage - offsetof(tcache_toastbuf, data[0]));
+	tbuf_new->tbuf_usage = tbuf_old->tbuf_usage;
+	tbuf_new->tbuf_junk = tbuf_old->tbuf_junk;
+
+	return tbuf_new;
+}
+
+/*
+ * pgstrom_get_toast_buffer
+ *
+ * It increments reference counter of the toast buffer.
+ */
+tcache_toastbuf *
+pgstrom_get_toast_buffer(tcache_toastbuf *tbuf)
+{
+	SpinLockAcquire(&tbuf->refcnt_lock);
+	Assert(tbuf->refcnt > 0);
+	tbuf->refcnt++;
+	SpinLockRelease(&tbuf->refcnt_lock);
+
+	return tbuf;
+}
+
+/*
+ * pgstrom_put_toast_buffer
+ *
+ * It decrements rerefence counter of the toast buffer, then release
+ * shared memory region, if needed.
+ */
+void
+pgstrom_put_toast_buffer(tcache_toastbuf *tbuf)
+{
+    bool    do_release = false;
+
+    SpinLockAcquire(&tbuf->refcnt_lock);
+    Assert(tbuf->refcnt > 0);
+    if (--tbuf->refcnt == 0)
+        do_release = true;
+    SpinLockRelease(&tbuf->refcnt_lock);
+
+    if (do_release)
+        pgstrom_shmem_free(tbuf);
+}
+
+/*
+ * pgstrom_create_column_store
+ *
+ * creates a column-store on shared memory segment, but not linked to
+ * a particular tcache structure.
+ */
+tcache_column_store *
+pgstrom_create_column_store_with_projection(kern_projection *kproj,
+											cl_uint nitems,
+											bool with_syscols)
+{
+	tcache_column_store	*tcs;
+	Size		length;
+	Size		offset;
+	int			i;
+
+	length = MAXALIGN(offsetof(tcache_column_store, cdata[kproj->ncols]));
+	if (with_syscols)
+	{
+		length += MAXALIGN(sizeof(ItemPointerData) * nitems);
+		length += MAXALIGN(sizeof(HeapTupleHeaderData) * nitems);
+	}
+
+	for (i=0; i < kproj->ncols; i++)
+	{
+		if (!kproj->origins[i].colmeta.attnotnull)
+			length += MAXALIGN((nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+		length += MAXALIGN(kproj->origins[i].colmeta.attlen > 0
+						   ? kproj->origins[i].colmeta.attlen
+						   : sizeof(cl_uint)) * nitems;
+	}
+
+	tcs = pgstrom_shmem_alloc(length);
+	if (!tcs)
+		return NULL;	/* out of shared memory! */
+	offset = MAXALIGN(offsetof(tcache_column_store, cdata[kproj->ncols]));
+
+	memset(tcs, 0, offset);
+	tcs->sobj.stag = StromTag_TCacheColumnStore;
+	SpinLockInit(&tcs->refcnt_lock);
+	tcs->refcnt = 1;
+	tcs->ncols = kproj->ncols;
+	if (with_syscols)
+	{
+		/* array of item-pointers */
+		tcs->ctids = (ItemPointerData *)((char *)tcs + offset);
+		offset += MAXALIGN(sizeof(ItemPointerData) * nitems);
+
+		/* array of other system columns */
+		tcs->theads = (HeapTupleHeaderData *)((char *)tcs + offset);
+		offset += MAXALIGN(sizeof(HeapTupleHeaderData) * nitems);
+	}
+
+	for (i=0; i < kproj->ncols; i++)
+	{
+		if (kproj->origins[i].colmeta.attnotnull)
+			tcs->cdata[i].isnull = NULL;
+		else
+		{
+			tcs->cdata[i].isnull = (uint8 *)((char *)tcs + offset);
+			offset += MAXALIGN((nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+		}
+		tcs->cdata[i].values = ((char *)tcs + offset);
+		if (kproj->origins[i].colmeta.attlen > 0)
+		{
+			offset += MAXALIGN(kproj->origins[i].colmeta.attlen * nitems);
+			tcs->cdata[i].toast = NULL;
+		}
+		else
+		{
+			offset += MAXALIGN(sizeof(cl_uint) * nitems);
+			tcs->cdata[i].toast = pgstrom_create_toast_buffer(0);
+			if (!tcs->cdata[i].toast)
+			{
+				pgstrom_put_column_store(tcs);
+				return NULL;
+			}
+		}
+	}
+	Assert(offset == length);
+
+	return tcs;
+}
+
+/*
+ * pgstrom_get_column_store
+ *
+ * it increments reference counter of column-store
+ */
+tcache_column_store *
+pgstrom_get_column_store(tcache_column_store *pcs)
+{
+	SpinLockAcquire(&pcs->refcnt_lock);
+	Assert(pcs->refcnt > 0);
+	pcs->refcnt++;
+	SpinLockRelease(&pcs->refcnt_lock);
+
+	return pcs;
+}
+
+/*
+ * pgstrom_put_column_store
+ *
+ * it decrements reference counter of column-store, then release shared-
+ * memory buffers if no longer referenced
+ */
+void
+pgstrom_put_column_store(tcache_column_store *pcs)
+{
+	bool	do_release = false;
+	int		i;
+
+	SpinLockAcquire(&pcs->refcnt_lock);
+	Assert(pcs->refcnt > 0);
+	if (--pcs->refcnt == 0)
+		do_release = true;
+	SpinLockRelease(&pcs->refcnt_lock);
+
+	if (!do_release)
+		return;
+	/* release resource */
+	for (i=0; i < pcs->ncols; i++)
+	{
+		if (pcs->cdata[i].toast)
+			pgstrom_put_toast_buffer(pcs->cdata[i].toast);
+	}
+	pgstrom_shmem_free(pcs);
 }

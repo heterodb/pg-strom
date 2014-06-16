@@ -1741,16 +1741,15 @@ gpusort_exec(CustomPlanState *node)
 		{
 			tcache_column_store *tcs = (tcache_column_store *) sobject;
 			TupleDesc	tupdesc = slot->tts_tupleDescriptor;
-			Form_pg_attribute attr;
 
 			slot = ExecStoreAllNullTuple(slot);
 			Assert(row_idx < tcs->nrows);
-			for (i=0; i < tcs->ncols; i++)
+			for (i=0; i < tupdesc->natts; i++)
 			{
-				j = tcs->i_cached[i];
-				Assert(j >= 0 && j < tupdesc->natts);
-				attr = tupdesc->attrs[j];
+				Form_pg_attribute attr = tupdesc->attrs[i];
 
+				if (!tcs->cdata[i].values)
+					continue;
 				/*
 				 * NOTE: See bug #32. When we scan a underlying relation
 				 * with not-null constratint using bulk-exec mode, its
@@ -2452,7 +2451,7 @@ clserv_launch_gpusort_setup_column(clstate_gpusort_single *clgss,
 	cl_uint				i_col;
 	cl_uint				ncols;
 	cl_uint				kcs_nitems;
-	cl_int				i, j, rc;
+	cl_int				i, rc;
 	cl_int				ev_index_base;
 
 	/*
@@ -2463,6 +2462,7 @@ clserv_launch_gpusort_setup_column(clstate_gpusort_single *clgss,
 	 */
 	attrefs = (cl_char *)VARDATA(kparam_0);
 	rs_natts = VARSIZE_ANY_EXHDR(kparam_0);
+	Assert(rs_natts == tcs->ncols);
 	kcs_tmpl = (kern_column_store *)VARDATA(kparam_1);
 	ncols = kcs_tmpl->ncols;
 	kcs_nitems = tcs->nrows;
@@ -2491,10 +2491,7 @@ clserv_launch_gpusort_setup_column(clstate_gpusort_single *clgss,
 	{
 		kern_colmeta   *colmeta;
 
-		j = tcs->i_cached[i];
-		Assert(j >= 0 && j < rs_natts);
-
-		if (!attrefs[j])
+		if (!attrefs[i])
 			continue;
 
 		colmeta = &kcs_head->colmeta[i_col];
@@ -2516,7 +2513,7 @@ clserv_launch_gpusort_setup_column(clstate_gpusort_single *clgss,
 		}
 		i_col++;
 
-		if (attrefs[j] < 0)
+		if (attrefs[i] < 0)
 			break;
 	}
 	/*
@@ -2669,13 +2666,11 @@ clserv_launch_gpusort_setup_column(clstate_gpusort_single *clgss,
 	clgss->bytes_dma_send += length;
 
 	i_col = 0;
-	for (i=0; i < tcs->ncols; i++)
+	for (i=0; i < rs_natts; i++)
 	{
 		kern_colmeta   *colmeta;
 
-		j = tcs->i_cached[i];
-		Assert(j >= 0 && j < rs_natts);
-		if (!attrefs[j])
+		if (!attrefs[i])
 			continue;
 
 		colmeta = &kcs_head->colmeta[i_col];
@@ -2774,7 +2769,7 @@ clserv_launch_gpusort_setup_column(clstate_gpusort_single *clgss,
 		}
 
 		/* is it last column being referenced? */
-		if (attrefs[j] < 0)
+		if (attrefs[i] < 0)
 			break;
 		i_col++;
 	}

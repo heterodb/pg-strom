@@ -532,10 +532,15 @@ typedef struct
 	Datum			dprog_key;	/* device key for gpuhashjoin */
 	pgstrom_hashjoin_table *hjtable;	/* inner hashjoin table */
 	bool			hashjoin_done;
-	cl_int			nitems;	/* length of rindex array */
-	cl_int		   *rindex;	/* valid items in rcs, if not null */
-	StromObject	   *rcs_in;
-	StromObject	   *rcs_out;
+	cl_int			src_nitems;	/* number of valid source items, if source
+								 * has valid and invalid records in mixed.
+								 * because result_buf is not used unless DMA
+								 * write-back, so kresults->results[] is
+								 * DMA send buffer of rindex.
+								 * if -1, it means all the records are valid.
+								 */
+	StromObject	   *rcs_src;	/* source outer row/column store */
+	StromObject	   *rcs_dst;	/* destination column store */
 	kern_hashjoin  *kern;
 } pgstrom_gpuhashjoin;
 

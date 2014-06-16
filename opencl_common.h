@@ -92,6 +92,7 @@ typedef cl_uint		hostptr_t;
 #define StromError_BadRequestMessage	101	/* Bad request message */
 #define StromError_OpenCLInternal		102	/* OpenCL internal error */
 #define StromError_OutOfSharedMemory	105	/* out of shared memory */
+#define StromError_OutOfMemory			106	/* out of host memory */
 #define StromError_DivisionByZero		200	/* Division by zero */
 #define StromError_DataStoreCorruption	300	/* Row/Column Store Corrupted */
 #define StromError_DataStoreNoSpace		301	/* No Space in Row/Column Store */
@@ -442,6 +443,8 @@ kparam_get_value(kern_parambuf *kparams, cl_uint pindex)
 	((__global kern_column_store *) kparam_get_value((kparams), 1))
 #define KPARAM_GET_KTOAST_HEAD(kparams)			\
 	((__global kern_toastbuf *) kparam_get_value((kparams), 2))
+#define KPARAM_GET_KPROJECTION(kparams)			\
+	((__global kern_projection *) kparam_get_value((kparams), 3))
 
 /*
  * kern_resultbuf
