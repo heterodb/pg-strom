@@ -436,16 +436,6 @@ kparam_get_value(kern_parambuf *kparams, cl_uint pindex)
 	return (__global char *)kparams + kparams->poffset[pindex];
 }
 
-/* utility macros to access usual system params */
-#define KPARAM_GET_ATTREFS(kparams)				\
-	((__global cl_char *) kparam_get_value((kparams), 0))
-#define KPARAM_GET_KCS_HEAD(kparams)			\
-	((__global kern_column_store *) kparam_get_value((kparams), 1))
-#define KPARAM_GET_KTOAST_HEAD(kparams)			\
-	((__global kern_toastbuf *) kparam_get_value((kparams), 2))
-#define KPARAM_GET_KPROJECTION(kparams)			\
-	((__global kern_projection *) kparam_get_value((kparams), 3))
-
 /*
  * kern_resultbuf
  *

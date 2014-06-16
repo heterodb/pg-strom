@@ -638,8 +638,8 @@ pgstrom_create_gpusort_chunk(GpuSortState *gsortstate)
 	pgstrom_gpusort_chunk *gs_chunk;
 	Size			allocsz_chunk;
 	kern_parambuf  *kparams;
-	kern_column_store *kcs_head;
 	kern_column_store *kcs;
+	kern_column_store *kcs_head;
 	cl_int		   *kstatus;
 	kern_toastbuf  *ktoast;
 
@@ -656,13 +656,12 @@ pgstrom_create_gpusort_chunk(GpuSortState *gsortstate)
 	kparams = KERN_GPUSORT_PARAMBUF(&gs_chunk->kern);
 	memcpy(kparams, gsortstate->kparambuf, gsortstate->kparambuf->length);
 	Assert(kparams->length == STROMALIGN(kparams->length));
+	kparam_refresh_kcs_head(kparams, gsortstate->nrows_per_chunk);
 
-	/* next, initialization of kern_column_store */
 	kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
 	kcs_head = KPARAM_GET_KCS_HEAD(kparams);
 	memcpy(kcs, kcs_head, offsetof(kern_column_store,
 								   colmeta[kcs_head->ncols]));
-	kparam_refresh_kcs_head(kparams, gsortstate->nrows_per_chunk);
 
 	/* next, initialization of kernel execution status field */
 	kstatus = KERN_GPUSORT_STATUS(&gs_chunk->kern);
@@ -3250,6 +3249,7 @@ clserv_process_gpusort_single(pgstrom_gpusort *gpusort)
 							  &clgss->events[clgss->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
+		Assert(false);
 		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
 		goto error_sync;
 	}

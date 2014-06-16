@@ -905,11 +905,47 @@ typealign_get_width(char type_align)
 	return -1;	/* be compiler quiet */
 }
 
+/*
+ * utility function to access system kparams
+ */
+static inline cl_char *
+KPARAM_GET_ATTREFS(kern_parambuf *kparams)
+{
+	bytea  *vl_datum = kparam_get_value(kparams, 0);
 
+	if (!vl_datum)
+		return NULL;
+	return (cl_char *)VARDATA_ANY(vl_datum);
+}
 
+static inline kern_column_store *
+KPARAM_GET_KCS_HEAD(kern_parambuf *kparams)
+{
+	bytea  *vl_datum = kparam_get_value(kparams, 1);
 
+	if (!vl_datum)
+		return NULL;
+	return (kern_column_store *)VARDATA_ANY(vl_datum);
+}
 
+static inline kern_toastbuf *
+KPARAM_GET_KTOAST_HEAD(kern_parambuf *kparams)
+{
+	bytea  *vl_datum = kparam_get_value(kparams, 2);
 
+	if (!vl_datum)
+		return NULL;
+	return (kern_toastbuf *)VARDATA_ANY(vl_datum);
+}
 
+static inline kern_projection *
+KPARAM_GET_KPROJECTION(kern_parambuf *kparams)
+{
+	bytea  *vl_datum = kparam_get_value(kparams, 3);
+
+	if (!vl_datum)
+		return NULL;
+	return (kern_projection *)VARDATA_ANY(vl_datum);
+}
 
 #endif	/* PG_STROM_H */

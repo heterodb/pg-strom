@@ -279,7 +279,8 @@ kparam_make_kcs_head(TupleDesc tupdesc,
 void
 kparam_refresh_kcs_head(kern_parambuf *kparams, cl_uint nrooms)
 {
-	kern_column_store *kcs_head = KPARAM_GET_KCS_HEAD(kparams);
+	bytea  *kparam_1 = kparam_get_value(kparams, 1);
+	kern_column_store *kcs_head = (kern_column_store *)VARDATA_ANY(kparam_1);
 	Size	length;
 	int		i;
 
@@ -336,13 +337,18 @@ kparam_refresh_ktoast_head(kern_parambuf *kparams,
 	else
 	{
 		tcache_column_store *tcs = (tcache_column_store *)rcstore;
-		cl_char	   *attrefs = KPARAM_GET_ATTREFS(kparams);
-		kern_column_store *kcs_head = KPARAM_GET_KCS_HEAD(kparams);
-		kern_toastbuf *ktoast_head = KPARAM_GET_KTOAST_HEAD(kparams);
+		bytea	   *kparam_0 = kparam_get_value(kparams, 0);
+		bytea	   *kparam_1 = kparam_get_value(kparams, 1);
+		bytea	   *kparam_2 = kparam_get_value(kparams, 2);
+		cl_char	   *attrefs = (cl_char *)VARDATA_ANY(kparam_0);
+		kern_column_store *kcs_head ;
+		kern_toastbuf *ktoast_head;
 		Size		offset;
 		int			i, j;
 		bool		has_toast = false;
 
+		kcs_head = (kern_column_store *) VARDATA_ANY(kparam_1);
+		ktoast_head = (kern_toastbuf *) VARDATA_ANY(kparam_2);
 		ktoast_head->length = TOASTBUF_MAGIC;
 		ktoast_head->ncols = kcs_head->ncols;
 		for (i=0, j=0; i < tcs->ncols; i++)
@@ -397,7 +403,12 @@ kparam_make_kprojection(List *target_list)
 			goto out_unavailable;
 		var = (Var *)tle->expr;
 
-		if (OidIsValid(var->varcollid) || var->varlevelsup > 0)
+		/*
+		 * NOTE: we don't care about collation on projection because
+		 * pseudo-tlist shall be actually handled on backend-side
+		 * projection.
+		 */
+		if (var->varlevelsup > 0)
 			goto out_unavailable;
 		if (var->varno != INNER_VAR && var->varno != OUTER_VAR)
 			goto out_unavailable;

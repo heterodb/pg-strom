@@ -1437,6 +1437,7 @@ gpuhashjoin_finalize_plan(PlannerInfo *root,
 bool
 gpuhashjoin_support_multi_exec(const CustomPlanState *cps)
 {
+	return false;	/* not supported yet */
 	/* we can issue bulk-exec mode if no projection */
 	if (cps->ps.ps_ProjInfo == NULL)
 		return true;
@@ -2639,6 +2640,7 @@ gpuhashjoin_explain_rel(CustomPlanState *node, ExplainState *es)
 static void
 gpuhashjoin_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 {
+	GpuHashJoinState *ghjs = (GpuHashJoinState *) node;
 	GpuHashJoin	   *ghashjoin = (GpuHashJoin *) node->ps.plan;
 	StringInfoData	str;
 	List		   *context;
@@ -2669,11 +2671,19 @@ gpuhashjoin_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 	}
 	ExplainPropertyText("Device references", str.data, es);
 
-	// Join qual / hash & qual
-	// Host qual
-	// Kernel source
-	// performance monitor (if analyze)
+	if (ghashjoin->hash_clauses)
+		show_scan_qual(ghashjoin->hash_clauses,
+					   "hash clauses", &node->ps, ancestors, es);
+	if (ghashjoin->qual_clauses)
+		show_scan_qual(ghashjoin->qual_clauses,
+					   "qual clauses", &node->ps, ancestors, es);
+	if (ghashjoin->cplan.plan.qual)
+		show_scan_qual(ghashjoin->cplan.plan.qual,
+					   "host clauses", &node->ps, ancestors, es);
+	show_device_kernel(ghjs->dprog_key, es);
 
+	if (es->analyze && ghjs->pfm.enabled)
+		pgstrom_perfmon_explain(&ghjs->pfm, es);
 }
 
 static Bitmapset *
