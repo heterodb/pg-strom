@@ -241,25 +241,49 @@ gpuhashjoin_inner(__private cl_int *errcode,
 				  size_t kcs_index,
 				  __local void *local_workbuf)
 {
-	cl_int		errcode = StromError_Success;
-	cl_uint		hash_value;
-	cl_uint		slot_index;
+	/* Must be set SUCCESS to errcode at caller side. */
+//	cl_int errcode 	= StromError_Success;
+	
+	cl_uint				id		= get_local_id();
+	cl_int				nrows	= (kchunk)->nrows;
+	cl_uint				nMatchs = 0;
+	cl_uint				nWrites = 0;
+
+	cl_uint				hash_value;
+	cl_uint				slot_index;
+	cl_uint				slot;
+	kern_hashentry * 	entry;
+	cl_uint				offset;
+	cl_uint				nitems;
+	__local cl_uint		base;
+
 
 	/* calculate a hash value */
-	hash_value = gpuhashjoin_hashkey(&errcode, kparams,
-									 kcs, ktoast, kcs_index);
+	hash_value = gpuhashjoin_hashkey(errcode, kparams, kcs, ktoast, kcs_index);
 	slot_index = hash_value % khashtbl->nslots;
 
 	/*
 	 * XXX - walk on the hash table to count number of matched tuples
 	 */
+	if(id < nrows) {
+		slot    = KERN_HASHTABLE_SLOT(khashtbl);
+		entry   = KERN_HASH_NEXT_ENTRY(khashtbl, slot[slot_index]);
+		while(entry)
+		{
+			cl_bool match = gpuhashjoin_keycomp(errcode, kparams,
+												entry, kcs, ktoast, kcs_index);
+			if(match)
+				nMatchs ++;
 
+			entry = KERN_HASH_NEXT_ENTRY(khash, entry->next);
+		}
+	}
 
 	/*
 	 * XXX - calculate total number of matched tuples being searched
 	 * by this workgroup
 	 */
-
+	offset = arithmetic_stairlike_add(nMatchs, local_workbuf, &nitems);
 
 	/*
 	 * XXX - allocation of result buffer. A tuple takes 2 * sizeof(cl_uint)
@@ -274,14 +298,45 @@ gpuhashjoin_inner(__private cl_int *errcode,
 	 * to avoid overflow issues, but has special platform capability on
 	 * 64bit atomic-write...
 	 */
+	if(get_local_id(0) == 0  &&  0 < nitems)
+		base = atomic_add(&kresults->nitems, nitems);
+	barrier(CLK_LOCAL_MEM_FENCE);
 
 	/*
 	 * XXX - walk on the hash table again, to write pair of row-index
 	 * on the acquired slot
 	 */
+	if(nMatches  &&  base + 3 * (ntimes) < kresults->nrooms) 
+	{
+		entry   = KERN_HASH_NEXT_ENTRY(khashtbl, slot[slot_index]);
+		while(entry)
+		{
+			cl_bool match = gpuhashjoin_keycomp(errcode, kparams, 
+												entry, kcs, ktoast, kcs_index);
+			if(match)
+			{
+			//results[3*i+0] = rcs-index of inner side (upper 32bits of rowid)
+			//results[3*i+1] = row-offset of inner side (lower 32bits of rowid)
+			//results[3*i+2] = row-index of outer relation stream
 
+				cl_int pos = base + 3 * (offset + nWrites);
+				kresults->results[pos + 0] = (cl_uint)(entry->rowid >> 32);
+				kresults->results[pos + 1] = (cl_uint)entry->rowid;
+				kresults->results[pos + 2] = kcs_index;
 
+				nWrites ++;
+			}
 
+			entry = KERN_HASH_NEXT_ENTRY(khash, entry->next);
+		}
+
+		assert(nMatches == nWrites);
+
+	}
+	else 						/* Result buffer exhaust. */
+		*errcode = StromError_DataStoreOutOfRange;
+
+	kern_writeback_error_status(&kresults->errcode, errcode, local_workmem);
 }
 
 
