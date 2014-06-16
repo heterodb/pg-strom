@@ -951,7 +951,7 @@ gpuhashjoin_codegen_compare(PlannerInfo *root,
 					 "\n"
 					 "  rc = %s;\n"
 					 "\n"
-					 "  return (!rc.isnull && rc_value ? true : false);\n"
+					 "  return (!rc.isnull && rc.value ? true : false);\n"
 					 "}\n",
 					 tmpl.data,
 					 decl.data,

@@ -335,8 +335,6 @@ gpuhashjoin_inner(__private cl_int *errcode,
 	}
 	else 						/* Result buffer exhaust. */
 		*errcode = StromError_DataStoreOutOfRange;
-
-	kern_writeback_error_status(&kresults->errcode, errcode, local_workmem);
 }
 
 
@@ -344,13 +342,33 @@ __kernel void
 gpuhashjoin_inner_cs(__global kern_hashjoin *khashjoin,
 					 __global kern_hashtable *khashtbl,
 					 __global kern_column_store *kcs,
-					 __global kern_toastbuf *toast,
-					 __local void *local_workmem)
+					 __global kern_toastbuf *ktoast,
+					 cl_int   src_nitems,
+					 __local void *local_workbuf)
 {
-	__global kern_parambuf *kparams = KERN_HASHJOIN_PARAMBUF(kghashjoin);
-	__global kern_resultbuf *kresults = KERN_GPUHJ_RESULTBUF(kghashjoin);
+	__global kern_parambuf *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
+	__global kern_resultbuf *kresults = KERN_GPUHJ_RESULTBUF(khashjoin);
+	cl_int			errcode = StromError_Success;
+	size_t			kcs_index;
 
+	if (src_nitems < 0)
+		kcs_index = get_global_id(0);
+	else if (get_global_id(0) < nitems)
+		kcs_index = (size_t)kresults->results[get_global_id(0)];
+	else
+		kcs_index = kcs->nrows;	/* ensure this thread is out of range */
 
+	/* do inner join */
+	gpuhashjoin_inner(&errcode,
+					  kparams,
+					  kresults,
+					  khashtbl,
+					  kcs,
+					  ktoast,
+					  kcs_index,
+					  local_workbuf);
+	/* back execution status into host-side */
+	kern_writeback_error_status(&kresults->errcode, errcode, local_workbuf);
 }
 
 __kernel void
@@ -358,24 +376,40 @@ gpuhashjoin_inner_rs(__global kern_hashjoin *khashjoin,
 					 __global kern_hashtable *khashtbl,
 					 __global kern_row_store *krs,
 					 __global kern_column_store *kcs,
-					 __local void *local_workmem)
+					 cl_int   krs_nitems,
+					 __local void *local_workbuf)
 {
-	__global kern_parambuf *kparams = KERN_HASHJOIN_PARAMBUF(kghashjoin);
-	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(kghashjoin);
+	__global kern_parambuf *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
+	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
 	pg_bytea_t		kparam_0 = pg_bytea_param(kparams,&errcode,0);
 	cl_int			errcode = StromError_Success;
+	size_t			krs_index;
 	__local size_t	kcs_offset;
 	__local size_t	kcs_nitems;
 
+	/* if number of valid items are negative, it means all the items
+     * are valid. So, no need to use rindex. Elsewhere, we will take
+	 * selected records according to the rindex.
+     */
+	if (krs_nitems < 0)
+	{
+		krs_nitems = krs->nrows;
+		krs_index = get_global_id(0);
+	}
+	else if (get_global_id(0) < krs_nitems)
+		krs_index = (size_t)kresults->results[get_global_id(0)];
+	else
+		krs_index = krs->nrows;	/* ensure out of range */
+
 	/*
-	 * map this workgroup on a particular range on the column-store
+	 * map this workgroup on a particular range of the column-store
 	 */
 	if (get_local_id(0) == 0)
 	{
-		if (get_global_id(0) + get_local_size(0) < krs->nrows)
+		if (get_global_id(0) + get_local_size(0) < krs_nitems)
 			kcs_nitems = get_local_size(0);
-		else if (get_global_id(0) < krs->nrows)
-			kcs_nitems = krs->nrows - get_global_id(0);
+		else if (get_global_id(0) < krs_nitems)
+			kcs_nitems = krs_nitems - get_global_id(0);
 		else
 			kcs_nitems = 0;
 		kcs_offset = atomic_add(&kcs->nrows, kcs_nitems);
@@ -386,12 +420,12 @@ gpuhashjoin_inner_rs(__global kern_hashjoin *khashjoin,
 	kern_row_to_column(&errcode,
 					   (__global cl_char *)VARDATA(kparam_0.value),
 					   krs,
-					   get_global_id(0),
+					   krs_index,
 					   kcs,
 					   NULL,
 					   kcs_offset,
 					   kcs_nitems,
-					   local_workmem);
+					   local_workbuf);
 	/* OK, run gpu hash join */
 	gpuhashjoin_inner(&errcode,
 					  kparams,
@@ -408,24 +442,24 @@ gpuhashjoin_inner_rs(__global kern_hashjoin *khashjoin,
 /*
  * Template of variable reference on the hash-entry
  */
-#define STROMCL_SIMPLE_HASHREF_TEMPLATE(NAME,BASE)			\
-	static pg_##NAME##_t									\
+#define STROMCL_SIMPLE_HASHREF_TEMPLATE(NAME,BASE)				\
+	static pg_##NAME##_t										\
 	pg_##NAME##_hashref(__global kern_hashentry *kentry,		\
-						__private int *p_errcode,			\
-						cl_uint key_index,					\
-						cl_uint key_offset)					\
-	{														\
-		pg_##NAME##_t result;								\
-															\
-		if (att_isnull(key_index, khe->keydata))			\
-			result.isnull = true;							\
-		else												\
-		{													\
-			result.isnull = false;							\
-			result.value = *((__global BASE *)				\
-							 (khe->keydata + key_offset));	\
-		}													\
-		return result;										\
+						__private int *p_errcode,				\
+						cl_uint key_index,						\
+						cl_uint key_offset)						\
+	{															\
+		pg_##NAME##_t result;									\
+																\
+		if (att_isnull(key_index, kentry->keydata))				\
+			result.isnull = true;								\
+		else													\
+		{														\
+			result.isnull = false;								\
+			result.value = *((__global BASE *)					\
+							 (kentry->keydata + key_offset));	\
+		}														\
+		return result;											\
 	}
 
 static pg_varlena_t
@@ -437,11 +471,11 @@ pg_varlena_hashref(__global kern_hashentry *kentry,
 	pg_varlena_t	result;
 	__global varlena *vl;
 
-	if (att_isnull(key_index, khe->keydata))
+	if (att_isnull(key_index, kentry->keydata))
 		result.isnull = true;
 	else
 	{
-		vl = (__global varlena *)((__global char *)khe +
+		vl = (__global varlena *)((__global char *)kentry +
 								  key_offset);
 		if (VARATT_IS_4B_U(val) || VARATT_IS_1B(val))
 		{
@@ -464,7 +498,7 @@ pg_varlena_hashref(__global kern_hashentry *kentry,
 						cl_uint key_index,					\
 						cl_uint key_offset)					\
 	{														\
-		return pg_varlena_hashref(khe,p_errcode,			\
+		return pg_varlena_hashref(kentry, p_errcode,		\
 								  key_index,key_offset);	\
 	}
 
@@ -560,7 +594,7 @@ __constant cl_uint pg_crc32_table[256] = {
 	} while (0)
 #define FIN_CRC32(crc)		((crc) ^= 0xFFFFFFFF)
 
-#endif
+#else	/* OPENCL_DEVICE_CODE */
 
 typedef struct pgstrom_hashjoin_table
 {
@@ -598,5 +632,5 @@ typedef struct
 	StromObject	   *rcs_dst;	/* destination column store */
 	kern_hashjoin  *kern;
 } pgstrom_gpuhashjoin;
-
+#endif	/* OPENCL_DEVICE_CODE */
 #endif	/* OPENCL_HASHJOIN_H */
