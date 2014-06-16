@@ -2513,7 +2513,7 @@ gpuhashjoin_exec(CustomPlanState *node)
 				break;
 
 			msg = pgstrom_dequeue_message(ghjs->mqueue);
-			if (msg)
+			if (!msg)
 				elog(ERROR, "message queue wait timeout");
 			ghjs->num_running--;
 			dlist_push_tail(&ghjs->ready_pscans, &msg->chain);
@@ -2526,6 +2526,40 @@ gpuhashjoin_exec(CustomPlanState *node)
 		dnode = dlist_pop_head_node(&ghjs->ready_pscans);
 		ghjoin = dlist_container(pgstrom_gpuhashjoin, msg.chain, dnode);
 
+		/*
+		 * Raise an error, if significan error was reported
+		 */
+		if (ghjoin->msg.errcode != StromError_Success)
+		{
+			if (ghjoin->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
+			{
+				const char *buildlog
+					= pgstrom_get_devprog_errmsg(ghjoin->dprog_key);
+				const char *kern_source
+					= ((GpuHashJoin *)node->ps.plan)->kernel_source;
+
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
+								pgstrom_strerror(ghjoin->msg.errcode),
+								kern_source),
+						 errdetail("%s", buildlog)));
+			}
+			else
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("PG-Strom: OpenCL execution error (%s)",
+								pgstrom_strerror(ghjoin->msg.errcode))));
+			}
+		}
+		/*
+		 * NOTE: right now, we assume device can run simple projection
+		 * if all the device clauses were runnable. So, we put assertion
+		 * here, however, we need to put special case handing if ghjoin
+		 * returned recheck-by-cpu.
+		 */
+		Assert(ghjoin->rcs_dst != NULL);
 		ghjs->curr_ghjoin = ghjoin;
 		ghjs->curr_index = 0;
 	}
@@ -3068,7 +3102,7 @@ clserv_process_gpuhashjoin_common(pgstrom_gpuhashjoin *ghjoin)
 error:
 	if (clghj)
 	{
-		if (clghj->program)
+		if (clghj->program && clghj->program != BAD_OPENCL_PROGRAM)
 			clReleaseProgram(clghj->program);
 		free(clghj);
 	}

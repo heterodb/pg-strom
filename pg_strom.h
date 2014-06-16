@@ -741,6 +741,7 @@ extern Datum pgstrom_shmem_free_func(PG_FUNCTION_ARGS);
 extern const char *pgstrom_opencl_common_code;
 extern const char *pgstrom_opencl_gpuscan_code;
 extern const char *pgstrom_opencl_gpusort_code;
+extern const char *pgstrom_opencl_hashjoin_code;
 extern const char *pgstrom_opencl_textlib_code;
 extern const char *pgstrom_opencl_timelib_code;
 

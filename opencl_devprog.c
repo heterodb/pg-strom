@@ -311,7 +311,6 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 			lengths[count] = strlen(pgstrom_opencl_gpusort_code);
 			count++;
 		}
-#if 0
 		/* hashjoin device implementation */
 		if (dprog->extra_flags & DEVKERNEL_NEEDS_HASHJOIN)
 		{
@@ -319,7 +318,7 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 			lengths[count] = strlen(pgstrom_opencl_hashjoin_code);
 			count++;
 		}
-#endif
+
 		/*
 		 * Supplemental OpenCL Libraries
 		 */
