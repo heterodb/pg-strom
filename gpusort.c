@@ -656,7 +656,7 @@ pgstrom_create_gpusort_chunk(GpuSortState *gsortstate)
 	kparams = KERN_GPUSORT_PARAMBUF(&gs_chunk->kern);
 	memcpy(kparams, gsortstate->kparambuf, gsortstate->kparambuf->length);
 	Assert(kparams->length == STROMALIGN(kparams->length));
-	kparam_refresh_kcs_head(kparams, gsortstate->nrows_per_chunk);
+	kparam_refresh_kcs_head(kparams, 0, gsortstate->nrows_per_chunk);
 
 	kcs = KERN_GPUSORT_CHUNK(&gs_chunk->kern);
 	kcs_head = KPARAM_GET_KCS_HEAD(kparams);

@@ -286,7 +286,7 @@ kparam_refresh_kcs_head(kern_parambuf *kparams, cl_uint nrows, cl_uint nrooms)
 
 	length = STROMALIGN(offsetof(kern_column_store,
 								 colmeta[kcs_head->ncols]));
-	kcs_head->nrows = nrooms;
+	kcs_head->nrows = nrows;
 	kcs_head->nrooms = nrooms;
 	for (i=0; i < kcs_head->ncols; i++)
 	{
