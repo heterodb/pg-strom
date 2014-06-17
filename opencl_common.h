@@ -71,6 +71,7 @@ typedef cl_uint		hostptr_t;
 #define __global	/* address space qualifier is noise on host */
 #define __local		/* address space qualifier is noise on host */
 #define __private	/* address space qualifier is noise on host */
+#define __constant	/* address space qualifier is noise on host */
 #endif
 
 /*

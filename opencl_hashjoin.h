@@ -345,10 +345,6 @@ gpuhashjoin_inner(__private cl_int *errcode,
 	}
 	else 						/* Result buffer exhaust. */
 	{
-		if(get_local_id(0) == 0) {
-			printf("[%llu] set errcode, base=%d, nitmes=%d, nrooms=%d\n",
-				   get_global_id(0), base, nitems, kresults->nrooms);
-		}
 		*errcode = StromError_DataStoreNoSpace;
 	}
 }
@@ -517,6 +513,8 @@ pg_varlena_hashref(__global kern_hashentry *kentry,
 		return pg_varlena_hashref(kentry, p_errcode,		\
 								  key_index,key_offset);	\
 	}
+#endif /* OPENCL_DEVICE_CODE */
+
 
 /*
  * Macros to calculate hash key-value.
@@ -527,7 +525,7 @@ pg_varlena_hashref(__global kern_hashentry *kentry,
  *  x^32+x^26+x^23+x^22+x^16+x^12+x^11+x^10+x^8+x^7+x^5+x^4+x^2+x+1.
  * (This is the same polynomial used in Ethernet checksums, for instance.)
  */
-__constant cl_uint pg_crc32_table[256] = {
+__constant cl_uint gpuhashjoin_crc32_table[256] = {
 	0x00000000, 0x77073096, 0xEE0E612C, 0x990951BA,
 	0x076DC419, 0x706AF48F, 0xE963A535, 0x9E6495A3,
 	0x0EDB8832, 0x79DCB8A4, 0xE0D5E91E, 0x97D2D988,
@@ -594,23 +592,23 @@ __constant cl_uint pg_crc32_table[256] = {
 	0xB40BBE37, 0xC30C8EA1, 0x5A05DF1B, 0x2D02EF8D
 };
 
-#define INIT_CRC32(crc)		((crc) = 0xFFFFFFFF)
-#define COMP_CRC32(crc, data, len)									\
+#define INIT_HASHVAL32(crc)		((crc) = 0xFFFFFFFF)
+#define COMP_HASHVAL32(crc, data, len)									\
 	do {															\
 		__global const cl_uchar *__data								\
 			= (__global const cl_uchar *)(data);					\
-		uint __len = (len);										\
+		uint __len = (len);											\
 																	\
 		while (__len-- > 0)											\
 		{															\
 			cl_int     __tab_index =								\
 				((cl_int) ((crc) >> 24) ^ *__data++) & 0xFF;		\
-			(crc) = pg_crc32_table[__tab_index] ^ ((crc) << 8);		\
+			(crc) = gpuhashjoin_crc32_table[__tab_index] ^ ((crc) << 8); \
 		};															\
 	} while (0)
-#define FIN_CRC32(crc)		((crc) ^= 0xFFFFFFFF)
+#define FIN_HASHVAL32(crc)		((crc) ^= 0xFFFFFFFF)
 
-#else	/* OPENCL_DEVICE_CODE */
+#ifndef OPENCL_DEVICE_CODE
 
 typedef struct pgstrom_hashjoin_table
 {

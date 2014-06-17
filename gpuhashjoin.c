@@ -808,23 +808,23 @@ gpuhashjoin_codegen_hashkey(PlannerInfo *root,
 		if (dtype->type_length > 0)
 			appendStringInfo(&calc,
 							 "  if (!%s.isnull)\n"
-							 "    COMP_CRC32(hash, &%s.value,\n"
-							 "               sizeof(%s.value));\n",
-							 varname, varname, varname);
+							 "    COMP_HASHVAL32(hash, &%s.value, %d);\n",
+							 varname, varname, dtype->type_length);
 		else
-			appendStringInfo(&calc,
-							 "  if (!%s.isnull)\n"
-							 "    COMP_CRC32(hash, VARDATA_ANY(%s.value),\n"
-							 "                     VARSIZE_ANY(%s.value));\n",
-							 varname, varname, varname);
+			appendStringInfo(
+				&calc,
+				"  if (!%s.isnull)\n"
+				"    COMP_HASHVAL32(hash, VARDATA_ANY(%s.value),\n"
+				"                         VARSIZE_ANY_EXHDR(%s.value));\n",
+				varname, varname, varname);
 		key_index++;
 	}
 	appendStringInfo(str,
 					 "  cl_uint hash;\n"
 					 "\n"
-					 "  INIT_CRC32(hash);\n"
+					 "  INIT_HASHVAL32(hash);\n"
 					 "%s"
-					 "  FIN_CRC32(hash);\n"
+					 "  FIN_HASHVAL32(hash);\n"
 					 "\n"
 					 "  return hash;\n"
 					 "}\n", calc.data);
@@ -1656,6 +1656,7 @@ static pgstrom_hashjoin_table *
 gpuhashjoin_create_hash_table(GpuHashJoinState *ghjs)
 {
 	pgstrom_hashjoin_table *hash_table;
+	PlanState	   *inner_planstate = innerPlanState(&ghjs->cps.ps);
 	GpuHashJoin	   *ghashjoin = (GpuHashJoin *) ghjs->cps.ps.plan;
 	ListCell	   *cell;
 	Size			allocated;
@@ -1673,7 +1674,7 @@ gpuhashjoin_create_hash_table(GpuHashJoinState *ghjs)
 			nkeys++;
 	}
 	/* if we don't have enough information, assume 10K rows */
-	nrows = ghashjoin->cplan.plan.plan_rows;
+	nrows = inner_planstate->plan->plan_rows;
 	if (nrows < 1000.0)
 		nrows = 1000.0;
 	nslots = (cl_ulong)(nrows * 1.25);
@@ -1687,9 +1688,9 @@ gpuhashjoin_create_hash_table(GpuHashJoinState *ghjs)
 	hash_table = pgstrom_shmem_alloc_alap(length, &allocated);
 	if (!hash_table)
 		elog(ERROR, "out of shared memory");
-	memset(&hash_table->kern, 0, (LONGALIGN(offsetof(pgstrom_hashjoin_table,
-													 kern.colmeta[nkeys])) +
-								  LONGALIGN(sizeof(cl_uint) * nslots)));
+	memset(hash_table, 0,
+		   LONGALIGN(offsetof(pgstrom_hashjoin_table, kern.colmeta[nkeys])) +
+		   LONGALIGN(sizeof(cl_uint) * nslots));
 
 	hash_table->rcstore = pgstrom_shmem_alloc(SHMEM_BLOCKSZ -
 											  SHMEM_ALLOC_COST);
@@ -1711,7 +1712,7 @@ gpuhashjoin_create_hash_table(GpuHashJoinState *ghjs)
 												  colmeta[nkeys])) +
 							   LONGALIGN(sizeof(cl_uint) * nslots));
 	hash_table->kern.nslots = nslots;
-	hash_table->kern.nkeys = 0;	/* to be incremented later */
+	hash_table->kern.nkeys = nkeys;
 	hash_table->num_rcs = 0;
 	hash_table->max_rcs = (SHMEM_BLOCKSZ - SHMEM_ALLOC_COST) / sizeof(cl_uint);
 
@@ -1763,11 +1764,11 @@ gpuhashjoin_preload_hash_table_rs(GpuHashJoinState *ghjs,
 			pgstrom_track_object(&new_table->sobj, 0);
 			hash_table = new_table;
 		}
-
 		kentry = (kern_hashentry *)((char *)&hash_table->kern +
 									 hash_table->kern.length);
 		kentry_sz = ghjs->inner_fixlen;
-		INIT_CRC32(hash);
+
+		INIT_HASHVAL32(hash);
 		forboth(lp1, ghjs->inner_resnums,
 				lp2, ghjs->inner_offsets)
 		{
@@ -1796,7 +1797,9 @@ gpuhashjoin_preload_hash_table_rs(GpuHashJoinState *ghjs,
 						memcpy((char *)kentry + offset,
 							   DatumGetPointer(value),
 							   attr->attlen);
-					COMP_CRC32(hash, (char *)kentry + offset, attr->attlen);
+					COMP_HASHVAL32(hash,
+								   (char *)kentry + offset,
+								   attr->attlen);
 				}
 				else
 				{
@@ -1804,15 +1807,15 @@ gpuhashjoin_preload_hash_table_rs(GpuHashJoinState *ghjs,
 					memcpy((char *)kentry + kentry_sz,
 						   DatumGetPointer(value),
 						   VARSIZE_ANY(value));
-					COMP_CRC32(hash,
-							   (char *)kentry + kentry_sz,
-							   VARSIZE_ANY(value));
+					COMP_HASHVAL32(hash,
+								   VARDATA_ANY(value),
+								   VARSIZE_ANY_EXHDR(value));
 					kentry_sz += INTALIGN(VARSIZE_ANY(value));
 				}
 			}
 			i_key++;
 		}
-		FIN_CRC32(hash);
+		FIN_HASHVAL32(hash);
 		kentry->hash = hash;
 		kentry->rowid = (((cl_ulong)rcs_index << 32) | (cl_ulong) i);
 
@@ -2129,9 +2132,11 @@ gpuhashjoin_dump_hash_table(GpuHashJoinState *ghjs)
 	kslots = KERN_HASHTABLE_SLOT(khash);
 	elog(INFO,
 		 "pgstrom_hashjoin_table {maxlen=%u, refcnt=%d, n_kernel=%d, "
-		 "m_hash=%p, num_rcs=%d, max_rcs=%d}",
+		 "m_hash=%p, num_rcs=%d, max_rcs=%d "
+		 "kern {length=%u nslots=%u nkeys=%u}}",
 		 phash->maxlen, phash->refcnt, phash->n_kernel,
-		 phash->m_hash, phash->num_rcs, phash->max_rcs);
+		 phash->m_hash, phash->num_rcs, phash->max_rcs,
+		 phash->kern.length, phash->kern.nslots, phash->kern.nkeys);
 
 	for (i=0; i < khash->nslots; i++)
 	{
@@ -2469,6 +2474,7 @@ gpuhashjoin_exec(CustomPlanState *node)
 		 */
 		if (ghjs->hash_table->num_rcs == 0)
 			return NULL;
+		gpuhashjoin_dump_hash_table(ghjs);
 	}
 
 	ExecClearTuple(slot);
@@ -3414,7 +3420,8 @@ clserv_process_gpuhashjoin_column(pgstrom_gpuhashjoin *ghjoin,
 		offset = kcs_head->colmeta[k].cs_ofs;
 		if (!kcs_head->colmeta[k].attnotnull)
 		{
-			length = (kcs_head->nrooms + BITS_PER_BYTE - 1) / BITS_PER_BYTE;
+			length = STROMALIGN((kcs_head->nrooms +
+								 BITS_PER_BYTE - 1) / BITS_PER_BYTE);
 			rc = clEnqueueWriteBuffer(clghj->kcmdq,
 									  clghj->m_cstore,
 									  CL_FALSE,
@@ -3434,7 +3441,6 @@ clserv_process_gpuhashjoin_column(pgstrom_gpuhashjoin *ghjoin,
 			clghj->ev_index++;
 			ghjoin->msg.pfm.bytes_dma_send += length;
 			ghjoin->msg.pfm.num_dma_send++;
-
 			offset += length;
 		}
 		length = (kcs_head->colmeta[k].attlen > 0
