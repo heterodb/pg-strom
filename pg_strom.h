@@ -524,6 +524,7 @@ extern bytea *kparam_make_kcs_head(TupleDesc tupdesc,
 								   cl_uint nsyscols,
 								   cl_uint nrooms);
 extern void kparam_refresh_kcs_head(kern_parambuf *kparams,
+									cl_uint nrows,
 									cl_uint nrooms);
 extern bytea *kparam_make_ktoast_head(TupleDesc tupdesc,
 									  cl_char *attrefs,

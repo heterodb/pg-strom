@@ -303,43 +303,54 @@ gpuhashjoin_inner(__private cl_int *errcode,
 	 * to avoid overflow issues, but has special platform capability on
 	 * 64bit atomic-write...
 	 */
-	if(get_local_id(0) == 0  &&  0 < nitems)
-		base = atomic_add(&kresults->nitems, nitems);
+	if(get_local_id(0) == 0)
+		base = (0 < nitems) ? atomic_add(&kresults->nitems, 3 * nitems) : 0;
 	barrier(CLK_LOCAL_MEM_FENCE);
 
 	/*
 	 * XXX - walk on the hash table again, to write pair of row-index
 	 * on the acquired slot
 	 */
-	if(nMatches  &&  base + 3 * (nitems) < kresults->nrooms) 
+	if(base + 3 * nitems < kresults->nrooms) 
 	{
-		entry   = KERN_HASH_NEXT_ENTRY(khashtbl, slot[slot_index]);
-		while(entry)
-		{
-			cl_bool match = gpuhashjoin_keycomp(errcode, kparams, entry, kcs,
-												ktoast, kcs_index, hash_value);
-			if(match)
+		if(nMatches) {
+			entry = KERN_HASH_NEXT_ENTRY(khashtbl, slot[slot_index]);
+
+			while(entry)
 			{
+				cl_bool match;
+
+				match = gpuhashjoin_keycomp(errcode, kparams, entry, kcs,
+											ktoast, kcs_index, hash_value);
+				if(match)
+				{
 			//results[3*i+0] = rcs-index of inner side (upper 32bits of rowid)
 			//results[3*i+1] = row-offset of inner side (lower 32bits of rowid)
 			//results[3*i+2] = row-index of outer relation stream
 
-				cl_int pos = base + 3 * (offset + nWrites);
-				kresults->results[pos + 0] = (cl_uint)(entry->rowid >> 32);
-				kresults->results[pos + 1] = (cl_uint)entry->rowid;
-				kresults->results[pos + 2] = kcs_index;
+					cl_int pos = base + 3 * (offset + nWrites);
+					kresults->results[pos + 0] = (cl_uint)(entry->rowid >> 32);
+					kresults->results[pos + 1] = (cl_uint)entry->rowid;
+					kresults->results[pos + 2] = kcs_index;
 
-				nWrites ++;
+					nWrites ++;
+				}
+
+				entry = KERN_HASH_NEXT_ENTRY(khashtbl, entry->next);
 			}
-
-			entry = KERN_HASH_NEXT_ENTRY(khashtbl, entry->next);
 		}
 
 //		assert(nMatches == nWrites);
 
 	}
 	else 						/* Result buffer exhaust. */
+	{
+		if(get_local_id(0) == 0) {
+			printf("[%llu] set errcode, base=%d, nitmes=%d, nrooms=%d\n",
+				   get_global_id(0), base, nitems, kresults->nrooms);
+		}
 		*errcode = StromError_DataStoreNoSpace;
+	}
 }
 
 

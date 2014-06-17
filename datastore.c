@@ -277,7 +277,7 @@ kparam_make_kcs_head(TupleDesc tupdesc,
 }
 
 void
-kparam_refresh_kcs_head(kern_parambuf *kparams, cl_uint nrooms)
+kparam_refresh_kcs_head(kern_parambuf *kparams, cl_uint nrows, cl_uint nrooms)
 {
 	bytea  *kparam_1 = kparam_get_value(kparams, 1);
 	kern_column_store *kcs_head = (kern_column_store *)VARDATA_ANY(kparam_1);
@@ -286,6 +286,7 @@ kparam_refresh_kcs_head(kern_parambuf *kparams, cl_uint nrooms)
 
 	length = STROMALIGN(offsetof(kern_column_store,
 								 colmeta[kcs_head->ncols]));
+	kcs_head->nrows = nrooms;
 	kcs_head->nrooms = nrooms;
 	for (i=0; i < kcs_head->ncols; i++)
 	{

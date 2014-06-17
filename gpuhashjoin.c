@@ -750,7 +750,6 @@ gpuhashjoin_codegen_hashkey(PlannerInfo *root,
 		}
 		var_index++;
 	}
-	appendStringInfo(str, "\n");
 
 	key_index = 0;
 	foreach (cell, hash_clauses)
@@ -815,9 +814,8 @@ gpuhashjoin_codegen_hashkey(PlannerInfo *root,
 		else
 			appendStringInfo(&calc,
 							 "  if (!%s.isnull)\n"
-							 "    COMP_CRC32(hash,\n"
-							 "               VARDATA_ANY(%s.value),\n"
-							 "               VARSIZE_ANY(%s.value));\n",
+							 "    COMP_CRC32(hash, VARDATA_ANY(%s.value),\n"
+							 "                     VARSIZE_ANY(%s.value));\n",
 							 varname, varname, varname);
 		key_index++;
 	}
@@ -2225,11 +2223,13 @@ pgstrom_release_gpuhashjoin(pgstrom_message *message)
 
 static pgstrom_gpuhashjoin *
 pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs, StromObject *rcstore,
-						   cl_uint nitems, cl_uint *rindex)
+						   cl_uint nvalids, cl_uint *rindex)
 {
 	pgstrom_gpuhashjoin	*gpuhashjoin;
 	dlist_node	   *dnode;
 	Size			length;
+	cl_uint			nrows;
+	cl_uint			nrooms;
 	kern_hashjoin  *khashjoin;
 	kern_parambuf  *kparams;
 	kern_resultbuf *kresults;
@@ -2278,7 +2278,7 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs, StromObject *rcstore,
 	/* setting up kern_hashjoin (pair of kparams & kresults) */
 	length = STROMALIGN(ghjs->kparams->length);
 	length += STROMALIGN(offsetof(kern_resultbuf,
-						 results[3 * (Size)(1.5 * (double) nitems)]));
+						 results[3 * (Size)(1.5 * (double) nvalids)]));
 	khashjoin = pgstrom_shmem_alloc_alap(length, &length);
 	if (!khashjoin)
 	{
@@ -2297,7 +2297,14 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs, StromObject *rcstore,
 	/*
 	 * update kcs_head and ktoast_head according to column references
 	 */
-	kparam_refresh_kcs_head(kparams, nitems);
+	if (StromTagIs(rcstore, TCacheColumnStore))
+		nrows = nrooms = ((tcache_column_store *)rcstore)->nrows;
+	else
+	{
+		nrows = 0;
+		nrooms = nvalids;
+	}
+	kparam_refresh_kcs_head(kparams, nrows, nrooms);
 	kparam_refresh_ktoast_head(kparams, rcstore);
 
 	/*
@@ -2309,8 +2316,8 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs, StromObject *rcstore,
 		gpuhashjoin->src_nitems = -1;
 	else
 	{
-		gpuhashjoin->src_nitems = nitems;
-		memcpy(kresults->results, rindex, sizeof(cl_int) * nitems);
+		gpuhashjoin->src_nitems = nvalids;
+		memcpy(kresults->results, rindex, sizeof(cl_int) * nvalids);
 	}
 	gpuhashjoin->kern = khashjoin;
 
@@ -3163,6 +3170,20 @@ clserv_process_gpuhashjoin_column(pgstrom_gpuhashjoin *ghjoin,
 	attrefs = KPARAM_GET_ATTREFS(kparams);
 	kcs_head = KPARAM_GET_KCS_HEAD(kparams);
 	ktoast_head = KPARAM_GET_KTOAST_HEAD(kparams);
+
+#if 0
+	clserv_log("kcs_head {length=%u ncols=%u nrows=%u nrooms=%u}",
+			   kcs_head->length, kcs_head->ncols,
+			   kcs_head->nrows, kcs_head->nrooms);
+	for (i=0; i < kcs_head->ncols; i++)
+	{
+		kern_colmeta colmeta = kcs_head->colmeta[i];
+
+		clserv_log("meta[%d] {attnotnull=%d attalign=%d attlen=%d cs_ofs=%u}",
+				   i, colmeta.attnotnull, colmeta.attalign,
+				   colmeta.attlen, colmeta.cs_ofs);
+	}
+#endif
 
 	/*
 	 * number of rows to be processed. If rindex is not given,
