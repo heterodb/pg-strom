@@ -2277,7 +2277,8 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs, StromObject *rcstore,
 
 	/* setting up kern_hashjoin (pair of kparams & kresults) */
 	length = STROMALIGN(ghjs->kparams->length);
-	length += STROMALIGN(sizeof(cl_uint) * 3 * (Size)(1.5 * (double)nitems));
+	length += STROMALIGN(offsetof(kern_resultbuf,
+						 results[3 * (Size)(1.5 * (double) nitems)]));
 	khashjoin = pgstrom_shmem_alloc_alap(length, &length);
 	if (!khashjoin)
 	{
@@ -2288,7 +2289,7 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs, StromObject *rcstore,
 	memcpy(kparams, ghjs->kparams, ghjs->kparams->length);
 	kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
 
-	length -= KERN_HASHJOIN_DMA_SENDLEN(khashjoin);
+	length -= ((uintptr_t)&kresults->results[0] - (uintptr_t)khashjoin);
 	kresults->nrooms = length / sizeof(cl_uint);
 	kresults->nitems = 0;
 	kresults->errcode = StromError_Success;
@@ -3486,9 +3487,7 @@ clserv_process_gpuhashjoin_column(pgstrom_gpuhashjoin *ghjoin,
 	/*
 	 * write back the result-buffer
 	 */
-	kresults = KERN_HASHJOIN_RESULTBUF(ghjoin->kern);
-	offset = ((uintptr_t)KERN_HASHJOIN_RESULTBUF(ghjoin->kern) -
-			  (uintptr_t)KERN_HASHJOIN_PARAMBUF(ghjoin->kern));
+	offset = KERN_HASHJOIN_DMA_RECVOFS(ghjoin->kern);
 	length = KERN_HASHJOIN_DMA_RECVLEN(ghjoin->kern);
 	rc = clEnqueueReadBuffer(clghj->kcmdq,
 							 clghj->m_join,
@@ -3706,11 +3705,12 @@ clserv_process_gpuhashjoin_row(pgstrom_gpuhashjoin *ghjoin,
 	}
 
 	/* DMA kick of kern_hashjoin */
+	offset = KERN_HASHJOIN_DMA_SENDOFS(ghjoin->kern);
 	length = KERN_HASHJOIN_DMA_SENDLEN(ghjoin->kern);
 	rc = clEnqueueWriteBuffer(clghj->kcmdq,
 							  clghj->m_join,
 							  CL_FALSE,
-							  0,
+							  offset,
 							  length,
 							  KERN_HASHJOIN_PARAMBUF(ghjoin->kern),
 							  0,
@@ -3745,7 +3745,6 @@ clserv_process_gpuhashjoin_row(pgstrom_gpuhashjoin *ghjoin,
 	ghjoin->msg.pfm.num_dma_send++;
 
 	/* DMA send of head of kern_column_store */
-	kcs_head = kparam_get_value(kparams, 1);
 	length = offsetof(kern_column_store, colmeta[kcs_head->ncols]);
 	rc = clEnqueueWriteBuffer(clghj->kcmdq,
 							  clghj->m_cstore,

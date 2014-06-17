@@ -183,9 +183,13 @@ typedef struct
 #define KERN_HASHJOIN_RESULTBUF_LENGTH(khashjoin)						\
 	STROMALIGN(offsetof(kern_resultbuf,									\
 						results[KERN_HASHJOIN_RESULTBUF(khashjoin)->nrooms]))
+#define KERN_HASHJOIN_DMA_SENDOFS(khashjoin)	\
+	((uintptr_t)&(khashjoin)->kparams - (uintptr_t)khashjoin)
 #define KERN_HASHJOIN_DMA_SENDLEN(khashjoin)	\
 	(KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin) +	\
 	 offsetof(kern_resultbuf, results[0]))
+#define KERN_HASHJOIN_DMA_RECVOFS(khashjoin)	\
+	((uintptr_t)KERN_HASHJOIN_RESULTBUF(khashjoin) - (uintptr_t)(khashjoin))
 #define KERN_HASHJOIN_DMA_RECVLEN(khashjoin)	\
 	(offsetof(kern_resultbuf,					\
 			  results[KERN_HASHJOIN_RESULTBUF(khashjoin)->nrooms]))
