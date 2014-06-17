@@ -351,6 +351,8 @@ kparam_refresh_ktoast_head(kern_parambuf *kparams,
 		ktoast_head = (kern_toastbuf *) VARDATA_ANY(kparam_2);
 		ktoast_head->length = TOASTBUF_MAGIC;
 		ktoast_head->ncols = kcs_head->ncols;
+		offset = STROMALIGN(offsetof(kern_toastbuf,
+									 coldir[ktoast_head->ncols]));
 		for (i=0, j=0; i < tcs->ncols; i++)
 		{
 			if (!attrefs[i])

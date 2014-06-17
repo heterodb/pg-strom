@@ -219,7 +219,8 @@ gpuhashjoin_keycomp(__private cl_int *errcode,
 					__global kern_hashentry *kentry,
 					__global kern_column_store *kcs,
 					__global kern_toastbuf *ktoast,
-					size_t row_index);
+					size_t row_index,
+					cl_uint hash);
 
 /*
  * gpuhashjoin_inner
@@ -244,18 +245,18 @@ gpuhashjoin_inner(__private cl_int *errcode,
 	/* Must be set SUCCESS to errcode at caller side. */
 //	cl_int errcode 	= StromError_Success;
 	
-	cl_uint				id		= get_local_id();
-	cl_int				nrows	= (kchunk)->nrows;
-	cl_uint				nMatchs = 0;
-	cl_uint				nWrites = 0;
+	cl_uint						id		 = get_local_id(0);
+	cl_int						nrows	 = (kcs)->nrows;
+	cl_uint						nMatches = 0;
+	cl_uint						nWrites  = 0;
 
-	cl_uint				hash_value;
-	cl_uint				slot_index;
-	cl_uint				slot;
-	kern_hashentry * 	entry;
-	cl_uint				offset;
-	cl_uint				nitems;
-	__local cl_uint		base;
+	cl_uint						hash_value;
+	cl_uint						slot_index;
+	__global cl_uint *			slot;
+	__global kern_hashentry * 	entry;
+	cl_uint						offset;
+	cl_uint						nitems;
+	__local cl_uint				base;
 
 
 	/* calculate a hash value */
@@ -270,12 +271,12 @@ gpuhashjoin_inner(__private cl_int *errcode,
 		entry   = KERN_HASH_NEXT_ENTRY(khashtbl, slot[slot_index]);
 		while(entry)
 		{
-			cl_bool match = gpuhashjoin_keycomp(errcode, kparams,
-												entry, kcs, ktoast, kcs_index);
+			cl_bool match = gpuhashjoin_keycomp(errcode, kparams, entry, kcs,
+												ktoast, kcs_index, hash_value);
 			if(match)
-				nMatchs ++;
+				nMatches ++;
 
-			entry = KERN_HASH_NEXT_ENTRY(khash, entry->next);
+			entry = KERN_HASH_NEXT_ENTRY(khashtbl, entry->next);
 		}
 	}
 
@@ -283,7 +284,7 @@ gpuhashjoin_inner(__private cl_int *errcode,
 	 * XXX - calculate total number of matched tuples being searched
 	 * by this workgroup
 	 */
-	offset = arithmetic_stairlike_add(nMatchs, local_workbuf, &nitems);
+	offset = arithmetic_stairlike_add(nMatches, local_workbuf, &nitems);
 
 	/*
 	 * XXX - allocation of result buffer. A tuple takes 2 * sizeof(cl_uint)
@@ -306,13 +307,13 @@ gpuhashjoin_inner(__private cl_int *errcode,
 	 * XXX - walk on the hash table again, to write pair of row-index
 	 * on the acquired slot
 	 */
-	if(nMatches  &&  base + 3 * (ntimes) < kresults->nrooms) 
+	if(nMatches  &&  base + 3 * (nitems) < kresults->nrooms) 
 	{
 		entry   = KERN_HASH_NEXT_ENTRY(khashtbl, slot[slot_index]);
 		while(entry)
 		{
-			cl_bool match = gpuhashjoin_keycomp(errcode, kparams, 
-												entry, kcs, ktoast, kcs_index);
+			cl_bool match = gpuhashjoin_keycomp(errcode, kparams, entry, kcs,
+												ktoast, kcs_index, hash_value);
 			if(match)
 			{
 			//results[3*i+0] = rcs-index of inner side (upper 32bits of rowid)
@@ -327,14 +328,14 @@ gpuhashjoin_inner(__private cl_int *errcode,
 				nWrites ++;
 			}
 
-			entry = KERN_HASH_NEXT_ENTRY(khash, entry->next);
+			entry = KERN_HASH_NEXT_ENTRY(khashtbl, entry->next);
 		}
 
-		assert(nMatches == nWrites);
+//		assert(nMatches == nWrites);
 
 	}
 	else 						/* Result buffer exhaust. */
-		*errcode = StromError_DataStoreOutOfRange;
+		*errcode = StromError_DataStoreNoSpace;
 }
 
 
@@ -347,13 +348,13 @@ gpuhashjoin_inner_cs(__global kern_hashjoin *khashjoin,
 					 __local void *local_workbuf)
 {
 	__global kern_parambuf *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
-	__global kern_resultbuf *kresults = KERN_GPUHJ_RESULTBUF(khashjoin);
+	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
 	cl_int			errcode = StromError_Success;
 	size_t			kcs_index;
 
 	if (src_nitems < 0)
 		kcs_index = get_global_id(0);
-	else if (get_global_id(0) < nitems)
+	else if (get_global_id(0) < src_nitems)
 		kcs_index = (size_t)kresults->results[get_global_id(0)];
 	else
 		kcs_index = kcs->nrows;	/* ensure this thread is out of range */
@@ -381,8 +382,8 @@ gpuhashjoin_inner_rs(__global kern_hashjoin *khashjoin,
 {
 	__global kern_parambuf *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
 	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
-	pg_bytea_t		kparam_0 = pg_bytea_param(kparams,&errcode,0);
 	cl_int			errcode = StromError_Success;
+	pg_bytea_t		kparam_0 = pg_bytea_param(kparams,&errcode,0);
 	size_t			krs_index;
 	__local size_t	kcs_offset;
 	__local size_t	kcs_nitems;
@@ -436,7 +437,7 @@ gpuhashjoin_inner_rs(__global kern_hashjoin *khashjoin,
 					  kcs_offset + get_local_id(0),
 					  local_workbuf);
 	/* back execution status into host-side */
-	kern_writeback_error_status(&kresult->errcode, errcode, local_workbuf);
+	kern_writeback_error_status(&kresults->errcode, errcode, local_workbuf);
 }
 
 /*
@@ -477,7 +478,7 @@ pg_varlena_hashref(__global kern_hashentry *kentry,
 	{
 		vl = (__global varlena *)((__global char *)kentry +
 								  key_offset);
-		if (VARATT_IS_4B_U(val) || VARATT_IS_1B(val))
+		if (VARATT_IS_4B_U(vl) || VARATT_IS_1B(vl))
 		{
 			result.value = vl;
 			result.isnull = false;
@@ -583,14 +584,14 @@ __constant cl_uint pg_crc32_table[256] = {
 	do {															\
 		__global const cl_uchar *__data								\
 			= (__global const cl_uchar *)(data);					\
-		uint32 __len = (len);										\
+		uint __len = (len);										\
 																	\
 		while (__len-- > 0)											\
 		{															\
 			cl_int     __tab_index =								\
 				((cl_int) ((crc) >> 24) ^ *__data++) & 0xFF;		\
 			(crc) = pg_crc32_table[__tab_index] ^ ((crc) << 8);		\
-		}															\
+		};															\
 	} while (0)
 #define FIN_CRC32(crc)		((crc) ^= 0xFFFFFFFF)
 

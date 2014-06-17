@@ -657,6 +657,10 @@ extern devtype_info *pgstrom_devtype_lookup_and_track(Oid type_oid,
 extern devfunc_info *pgstrom_devfunc_lookup_and_track(Oid func_oid,
 											  codegen_context *context);
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
+extern char *pgstrom_codegen_type_declarations(codegen_context *context);
+extern char *pgstrom_codegen_func_declarations(codegen_context *context);
+extern char *pgstrom_codegen_param_declarations(codegen_context *context);
+extern char *pgstrom_codegen_var_declarations(codegen_context *context);
 extern char *pgstrom_codegen_declarations(codegen_context *context);
 extern bool pgstrom_codegen_available_expression(Expr *expr);
 extern void pgstrom_init_codegen(void);

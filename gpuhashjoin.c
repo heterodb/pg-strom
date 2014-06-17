@@ -738,13 +738,13 @@ gpuhashjoin_codegen_hashkey(PlannerInfo *root,
 			dtype = pgstrom_devtype_lookup(var->vartype);
 			if (!dtype)
 				elog(ERROR, "cache lookup failed for type %u", var->vartype);
+			appendStringInfo(str, "  pg_%s_t KVAR_%u = ",
+							 dtype->type_name,
+							 var_index);
 			appendStringInfo(str,
-							 "  pg_%s_t KVAR_%u = pg_%s_vref(kcs%s, errcode, "
-							 "%u, row_index);\n",
+							 "pg_%s_vref(kcs%s, errcode, %u, row_index);\n",
 							 dtype->type_name,
-							 var_index,
-							 dtype->type_name,
-							 dtype->type_length > 0 ? "" : ", toast",
+							 dtype->type_length > 0 ? "" : ", ktoast",
 							 outer_index);
 			outer_index++;
 		}
@@ -810,7 +810,7 @@ gpuhashjoin_codegen_hashkey(PlannerInfo *root,
 			appendStringInfo(&calc,
 							 "  if (!%s.isnull)\n"
 							 "    COMP_CRC32(hash, &%s.value,\n"
-							 "               sizeof(%s.value);\n",
+							 "               sizeof(%s.value));\n",
 							 varname, varname, varname);
 		else
 			appendStringInfo(&calc,
@@ -916,12 +916,13 @@ gpuhashjoin_codegen_compare(PlannerInfo *root,
 			if (!dtype)
 				elog(ERROR, "cache lookup failed for type: %u", var->vartype);
 
+			appendStringInfo(&decl, "  pg_%s_t KVAR_%u = ",
+							 dtype->type_name,
+							 var_index);
 			appendStringInfo(&decl,
-			"  pg_%s_t KVAR_%u = pg_%s_vref(kcs%s,errcode,%u,row_index);\n",
+							 "pg_%s_vref(kcs%s,errcode,%u,row_index);\n",
 							 dtype->type_name,
-							 var_index,
-							 dtype->type_name,
-							 dtype->type_length > 0 ? "" : ", toast",
+							 dtype->type_length > 0 ? "" : ", ktoast",
 							 outer_index);
 			outer_index++;
 		}
@@ -968,9 +969,11 @@ gpuhashjoin_codegen(PlannerInfo *root,
 					Size *p_inner_fixlen)
 {
 	StringInfoData	str;
+	StringInfoData	decl;
 
 	memset(context, 0, sizeof(codegen_context));
 	initStringInfo(&str);
+	initStringInfo(&decl);
 
 	/*
 	 * placeholder of system constant - attrefs, kcs_head, ktoast_head
@@ -1009,7 +1012,7 @@ gpuhashjoin_codegen(PlannerInfo *root,
 	/*
 	 * definition of gpuhashjoin_keycomp()
 	 */
-	gpuhashjoin_codegen_compare(root, &str,
+	gpuhashjoin_codegen_compare(root, &decl,
 								hash_clauses,
 								qual_clauses,
 								context,
@@ -1019,9 +1022,19 @@ gpuhashjoin_codegen(PlannerInfo *root,
 	/*
 	 * definition of gpuhashjoin_hashkey()
 	 */
-	gpuhashjoin_codegen_hashkey(root, &str,
+	gpuhashjoin_codegen_hashkey(root, &decl,
 								hash_clauses,
 								context);
+
+	/*
+	 * put declarations of type/func/param
+	 */
+	appendStringInfo(&str,
+					 "%s%s%s%s",
+					 pgstrom_codegen_type_declarations(context),
+					 pgstrom_codegen_func_declarations(context),
+					 pgstrom_codegen_param_declarations(context),
+					 decl.data);
 	/*
 	 * to include opencl_hashjoin.h
 	 */
@@ -1578,7 +1591,7 @@ gpuhashjoin_begin(CustomPlan *node, EState *estate, int eflags)
 	kparam_2->constisnull = false;
 
 	/*
-	 * Setting up system kparam_2 - simple projection info
+	 * Setting up system kparam_3 - simple projection info
 	 */
 	kparam_3 = (Const *) lfourth(ghashjoin->used_params);
 	Assert(IsA(kparam_3, Const) &&
@@ -2188,6 +2201,9 @@ pgstrom_release_gpuhashjoin(pgstrom_message *message)
 	pgstrom_put_queue(gpuhashjoin->msg.respq);
     pgstrom_put_devprog_key(gpuhashjoin->dprog_key);
 
+	/* unlink hashjoin-table */
+	gpuhashjoin_put_hash_table(gpuhashjoin->hjtable);
+
 	/* unlink row/column store */
 	pgstrom_put_rcstore(gpuhashjoin->rcs_src);
 	if (gpuhashjoin->rcs_dst)
@@ -2255,6 +2271,7 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs, StromObject *rcstore,
 	gpuhashjoin->msg.pfm.enabled = ghjs->pfm.enabled;
 	/* other fields also */
 	gpuhashjoin->dprog_key = pgstrom_retain_devprog_key(ghjs->dprog_key);
+	gpuhashjoin->hjtable = gpuhashjoin_get_hash_table(ghjs->hash_table);
 	gpuhashjoin->rcs_src = pgstrom_get_rcstore(rcstore);
 	gpuhashjoin->rcs_dst = NULL;	/* result pscan-slot */
 
@@ -3050,9 +3067,9 @@ clserv_process_gpuhashjoin_common(pgstrom_gpuhashjoin *ghjoin)
 	{
 		Assert(!hjtable->m_hash && !hjtable->ev_hash);
 
-		clghj->dindex = pgstrom_opencl_device_schedule(&ghjoin->msg);
+		hjtable->dindex = pgstrom_opencl_device_schedule(&ghjoin->msg);
+		clghj->dindex = hjtable->dindex;
 		clghj->kcmdq = opencl_cmdq[clghj->dindex];
-
 		clghj->m_hash = clCreateBuffer(opencl_context,
 									   CL_MEM_READ_WRITE,
 									   hjtable->kern.length,
@@ -3091,6 +3108,8 @@ clserv_process_gpuhashjoin_common(pgstrom_gpuhashjoin *ghjoin)
 		rc = clRetainEvent(hjtable->ev_hash);
 		Assert(rc == CL_SUCCESS);
 
+		clghj->dindex = hjtable->dindex;
+		clghj->kcmdq = opencl_cmdq[clghj->dindex];
 		clghj->m_hash = hjtable->m_hash;
 		clghj->events[0] = hjtable->ev_hash;
 	}
@@ -3203,7 +3222,7 @@ clserv_process_gpuhashjoin_column(pgstrom_gpuhashjoin *ghjoin,
 	/* buffer object of __global kern_column_store *kcs */
 	kcs_head = KPARAM_GET_KCS_HEAD(kparams);
 	length = offsetof(kern_column_store, colmeta[kcs_head->ncols]);
-	clghj->m_rstore = clCreateBuffer(opencl_context,
+	clghj->m_cstore = clCreateBuffer(opencl_context,
 									 CL_MEM_READ_WRITE,
 									 kcs_head->length,
 									 NULL,
@@ -3365,10 +3384,10 @@ clserv_process_gpuhashjoin_column(pgstrom_gpuhashjoin *ghjoin,
 	/*
 	 * DMA send of kern_column_store / kern_toastbuf contents
 	 */
-	attrefs = kparam_get_value(kparams, 0);
+	attrefs = KPARAM_GET_ATTREFS(kparams);
 	for (i=0, k=0; i < tcs->ncols; i++)
 	{
-		if (attrefs[i])
+		if (!attrefs[i])
 			continue;
 		offset = kcs_head->colmeta[k].cs_ofs;
 		if (!kcs_head->colmeta[k].attnotnull)
@@ -3387,6 +3406,7 @@ clserv_process_gpuhashjoin_column(pgstrom_gpuhashjoin *ghjoin,
 			{
 				clserv_log("failed on clEnqueueWriteBuffer: %s",
 						   opencl_strerror(rc));
+				Assert(false);
 				goto error_sync;
 			}
 			clghj->ev_index++;
@@ -3433,12 +3453,14 @@ clserv_process_gpuhashjoin_column(pgstrom_gpuhashjoin *ghjoin,
 			{
 				clserv_log("failed on clEnqueueWriteBuffer: %s",
 						   opencl_strerror(rc));
+				Assert(false);
 				goto error_sync;
 			}
 			clghj->ev_index++;
 			ghjoin->msg.pfm.bytes_dma_send += length;
 			ghjoin->msg.pfm.num_dma_send++;
 		}
+		k++;
 	}
 
 	/*

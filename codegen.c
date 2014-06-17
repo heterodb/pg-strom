@@ -1361,23 +1361,20 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	return walker_context.str.data;
 }
 
+/*
+ * pgstrom_codegen_type_declarations
+ */
 char *
-pgstrom_codegen_declarations(codegen_context *context)
+pgstrom_codegen_type_declarations(codegen_context *context)
 {
 	StringInfoData	str;
-	devtype_info   *dtype;
-	devfunc_info   *dfunc;
 	ListCell	   *cell;
-	cl_uint			index;
 
 	initStringInfo(&str);
-
-	/* Put declarations of device types */
 	foreach (cell, context->type_defs)
 	{
+		devtype_info   *dtype = lfirst(cell);
 		int		i, n;
-
-		dtype = lfirst(cell);
 
 		/* prevent duplicated definition by built-in functions */
 		appendStringInfo(&str, "#ifndef PG_");
@@ -1396,17 +1393,41 @@ pgstrom_codegen_declarations(codegen_context *context)
 	}
 	appendStringInfoChar(&str, '\n');
 
-	/* Put declarations of device functions */
+	return str.data;
+}
+
+/*
+ * pgstrom_codegen_func_declarations
+ */
+char *
+pgstrom_codegen_func_declarations(codegen_context *context)
+{
+	StringInfoData	str;
+	ListCell	   *cell;
+
+	initStringInfo(&str);
 	foreach (cell, context->func_defs)
 	{
-		dfunc = lfirst(cell);
+		devfunc_info   *dfunc = lfirst(cell);
 
 		if (dfunc->func_decl)
 			appendStringInfo(&str, "%s\n", dfunc->func_decl);
 	}
+	return str.data;
+}
 
-	/* Put param/const definitions */
-	index = 0;
+/*
+ * pgstrom_codegen_param_declarations
+ */
+char *
+pgstrom_codegen_param_declarations(codegen_context *context)
+{
+	StringInfoData	str;
+	ListCell	   *cell;
+	devtype_info   *dtype;
+	int				index = 0;
+
+	initStringInfo(&str);
 	foreach (cell, context->used_params)
 	{
 		if (IsA(lfirst(cell), Const))
@@ -1437,33 +1458,36 @@ pgstrom_codegen_declarations(codegen_context *context)
 			elog(ERROR, "unexpected node: %s", nodeToString(lfirst(cell)));
 		index++;
 	}
+	return str.data;
+}
 
-	/* Put Var definition for row-store */
-	index = 0;
+/*
+ * pgstrom_codegen_var_declarations
+ */
+char *
+pgstrom_codegen_var_declarations(codegen_context *context)
+{
+	StringInfoData	str;
+	ListCell	   *cell;
+	int				index = 0;
+
+	initStringInfo(&str);
 	foreach (cell, context->used_vars)
 	{
-		Var	   *var = lfirst(cell);
-		ListCell   *lc;
-		AttrNumber	colidx = 0;
+		Var			   *var = lfirst(cell);
+		ListCell	   *lc;
+		devtype_info   *dtype;
+		AttrNumber		colidx = 0;
 
 		foreach (lc, context->used_vars)
 		{
 			if (((Var *)lfirst(lc))->varattno < var->varattno)
 				colidx++;
 		}
-
 		dtype = pgstrom_devtype_lookup(var->vartype);
 		Assert(dtype != NULL);
 
-		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
-			appendStringInfo(
-				&str,
-				"#define KVAR_%u\t"
-				"pg_%s_vref(kcs,toast,errcode,%u,kcs_index)\n",
-				index,
-				dtype->type_name,
-				colidx);
-		else
+		if (dtype->type_length > 0)
 			appendStringInfo(
 				&str,
 				"#define KVAR_%u\t"
@@ -1471,8 +1495,39 @@ pgstrom_codegen_declarations(codegen_context *context)
 				index,
 				dtype->type_name,
 				colidx);
+		else
+			appendStringInfo(
+				&str,
+				"#define KVAR_%u\t"
+				"pg_%s_vref(kcs,toast,errcode,%u,kcs_index)\n",
+				index,
+				dtype->type_name,
+				colidx);
 		index++;
 	}
+	return str.data;
+}
+
+char *
+pgstrom_codegen_declarations(codegen_context *context)
+{
+	StringInfoData	str;
+	char	   *type_decl = pgstrom_codegen_type_declarations(context);
+	char	   *func_decl = pgstrom_codegen_func_declarations(context);
+	char	   *param_decl = pgstrom_codegen_param_declarations(context);
+	char	   *var_decl = pgstrom_codegen_var_declarations(context);
+
+	initStringInfo(&str);
+	appendStringInfo(&str, "%s%s%s%s",
+					 type_decl,
+					 func_decl,
+					 param_decl,
+					 var_decl);
+	pfree(type_decl);
+	pfree(func_decl);
+	pfree(param_decl);
+	pfree(var_decl);
+
 	return str.data;
 }
 
