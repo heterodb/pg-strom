@@ -433,7 +433,7 @@ tcache_create_column_store(tcache_head *tc_head)
 	tcs = pgstrom_shmem_alloc(length);
 	if (!tcs)
 		elog(ERROR, "out of shared memory");
-	memset(tcs, 0, sizeof(tcache_column_store));
+	memset(tcs, 0, offsetof(tcache_column_store, cdata[tupdesc->natts]));
 
 	tcs->sobj.stag = StromTag_TCacheColumnStore;
 	SpinLockInit(&tcs->refcnt_lock);
