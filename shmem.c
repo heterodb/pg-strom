@@ -366,7 +366,12 @@ __pgstrom_shmem_alloc(const char *filename, int lineno, Size size)
 
 		zone_index = (zone_index + 1) % pgstrom_shmem_head->num_zones;
 	} while (zone_index != start);
-
+#if PGSTROM_DEBUG
+	/* For debugging, we dump current status of shared memory segment
+	 * if we have to return "out of shared memory" error */
+	if (!address)
+		pgstrom_shmem_dump();
+#endif
 	return address;	
 }
 
@@ -530,6 +535,78 @@ pgstrom_shmem_sanitycheck(const void *address)
 	p_magic = (cl_uint *)((char *)address + block->blocksz);
 
 	return (*p_magic == SHMEM_BLOCK_MAGIC ? true : false);
+}
+
+/*
+ * pgstrom_shmem_dump
+ *
+ * it logs current layout of shared memory segment
+ */
+#define DUMP(fmt,...)						\
+	do {									\
+		if (pgstrom_i_am_clserv)			\
+			clserv_log(fmt,__VA_ARGS__);	\
+		else								\
+			elog(INFO,fmt,__VA_ARGS__);		\
+	} while(0)
+
+static void
+pgstrom_shmem_dump_zone(shmem_zone *zone, int zone_index)
+{
+	long	i;
+
+	while (i < zone->num_blocks)
+	{
+		shmem_block	   *block = &zone->blocks[i];
+
+		if (BLOCK_IS_ACTIVE(block))
+		{
+			shmem_body	   *body;
+			cl_uint		   *p_magic;
+
+			body = (shmem_body *)((char *)zone->block_baseaddr +
+								  i * SHMEM_BLOCKSZ);
+			p_magic = (cl_uint *)((char *)body->data + block->blocksz);
+
+			DUMP("[%d:% 4ld] %p (size=%zu, owner=%u, %s:%d%s%s",
+				 zone_index, i, body,
+				 block->blocksz,
+				 body->owner,
+				 body->filename,
+				 body->lineno,
+				 body->magic != SHMEM_BODY_MAGIC ? ", broken" : "",
+				 *p_magic != SHMEM_BLOCK_MAGIC ? ", overrun" : "");
+		}
+		else if (BLOCK_IS_FREE(block))
+		{
+			int		nshift = find_least_pot(block->blocksz);
+			Assert(nshift <= SHMEM_BLOCKSZ_BITS_RANGE);
+            i += (1 << nshift);
+		}
+		else
+		{
+			DUMP("[%d:% 4ld] %p corrupted; neither active nor free",
+				 zone_index, i,
+				 (char *)zone->block_baseaddr + i * SHMEM_BLOCKSZ);
+			break;
+		}
+	}
+}
+#undef DUMP
+
+void
+pgstrom_shmem_dump(void)
+{
+	int		i;
+
+	for (i=0; i < pgstrom_shmem_head->num_zones; i++)
+	{
+		shmem_zone *zone = pgstrom_shmem_head->zones[i];
+
+		SpinLockAcquire(&zone->lock);
+		pgstrom_shmem_dump_zone(zone, i);
+		SpinLockRelease(&zone->lock);
+	}
 }
 
 /*
