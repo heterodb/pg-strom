@@ -1643,6 +1643,7 @@ gpuhashjoin_put_hash_table(pgstrom_hashjoin_table *hash_table)
 		do_release = true;
 	}
 	SpinLockRelease(&hash_table->lock);
+	elog(INFO, "gpuhashjoin_put_hash_table do_release=%d", do_release);
 	if (do_release)
 	{
 		for (i=0; i < hash_table->num_rcs; i++)
@@ -2009,6 +2010,7 @@ gpuhashjoin_preload_hash_table(GpuHashJoinState *ghjs)
 			rcstore = bulk->rc_store;
 			nitems = bulk->nitems;
 			rindex = bulk->rindex;
+			elog(INFO, "bulk scan %s node", StromTagGetLabel(rcstore));
 		}
 		else
 		{
@@ -2036,6 +2038,7 @@ gpuhashjoin_preload_hash_table(GpuHashJoinState *ghjs)
 				if (!trs)
 				{
 					trs = tcache_create_row_store(tupdesc);
+					elog(INFO, "hoge trs=%p", trs);
 					pgstrom_track_object(&trs->sobj, 0);
 				}
 				if (!tcache_row_store_insert_tuple(trs, tuple))
@@ -2046,11 +2049,12 @@ gpuhashjoin_preload_hash_table(GpuHashJoinState *ghjs)
 			}
 			if (!trs)
 				break;	/* no more inner tuples to be hashed */
-			if (trs && trs->kern.nrows == 0)
+			if (trs->kern.nrows == 0)
 				elog(ERROR, "bug? tcache_row_store can store no tuple");
-			rcstore = (!trs ? NULL : &trs->sobj);
+			rcstore = &trs->sobj;
 			nitems = trs->kern.nrows;
 			rindex = NULL;	/* all rows should be visible */
+			elog(INFO, "row scan %s node", StromTagGetLabel(rcstore));
 		}
 		/*
 		 * Expand the array of row/column-store on demand
@@ -2065,13 +2069,16 @@ gpuhashjoin_preload_hash_table(GpuHashJoinState *ghjs)
 											  sizeof(StromObject *) *
 											  hash_table->max_rcs);
 			if (!new_array)
-			{
-				pgstrom_put_rcstore(rcstore);
 				elog(ERROR, "out of shared memory");
-			}
 		}
-		hash_table->rcstore[hash_table->num_rcs]
-			= pgstrom_get_rcstore(rcstore);
+		/*
+		 * NOTE: Once a row-/column-store gets lined to the hash-table,
+		 * its responsibility to release the data-store moves to
+		 * gpuhashjoin_put_hash_table(), instead of individual row-/
+		 * column-stores. So, we untrack rcstore here.
+		 */
+		hash_table->rcstore[hash_table->num_rcs] = rcstore;
+		pgstrom_untrack_object(rcstore);
 		rcs_index = hash_table->num_rcs++;
 
 		/*
@@ -2099,9 +2106,7 @@ gpuhashjoin_preload_hash_table(GpuHashJoinState *ghjs)
 		}
 		else
 			elog(ERROR, "bug? neither row nor column store");
-		/* unlink row/column store */
-		pgstrom_untrack_object(rcstore);
-		pgstrom_put_rcstore(rcstore);
+
 		if (bulk)
 			pfree(bulk);
 	}
@@ -2206,6 +2211,8 @@ pgstrom_release_gpuhashjoin(pgstrom_message *message)
 {
 	pgstrom_gpuhashjoin *gpuhashjoin = (pgstrom_gpuhashjoin *) message;
 
+	elog(INFO, "pgstrom_release_gpuhashjoin is called");
+
 	/* unlink message queue and device program */
 	pgstrom_put_queue(gpuhashjoin->msg.respq);
     pgstrom_put_devprog_key(gpuhashjoin->dprog_key);
@@ -2283,8 +2290,17 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs, StromObject *rcstore,
 	/* other fields also */
 	gpuhashjoin->dprog_key = pgstrom_retain_devprog_key(ghjs->dprog_key);
 	gpuhashjoin->hjtable = gpuhashjoin_get_hash_table(ghjs->hash_table);
-	gpuhashjoin->rcs_src = pgstrom_get_rcstore(rcstore);
+	gpuhashjoin->rcs_src = rcstore;
 	gpuhashjoin->rcs_dst = NULL;	/* result pscan-slot */
+
+	/*
+	 * Once a row-/column-store connected to the pgstrom_gpuhashjoin
+	 * structure, it becomes pgstrom_release_gpuhashjoin's role to
+	 * unlink this row-/column-store. So, we don't need to track
+	 * individual row-/column-store no longer.
+	 */
+	pgstrom_untrack_object(rcstore);
+	pgstrom_track_object(&gpuhashjoin->msg.sobj, 0);
 
 	/* setting up kern_hashjoin (pair of kparams & kresults) */
 	length = STROMALIGN(ghjs->kparams->length);
@@ -2372,7 +2388,10 @@ gpuhashjoin_load_next_outer(GpuHashJoinState *ghjs)
 				tuple = ExecFetchSlotTuple(slot);
 			}
 			if (!trs)
+			{
 				trs = tcache_create_row_store(tupdesc);
+				pgstrom_track_object(&trs->sobj, 0);
+			}
 			if (!tcache_row_store_insert_tuple(trs, tuple))
 			{
 				ghjs->outer_overflow = tuple;

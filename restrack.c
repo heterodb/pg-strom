@@ -198,7 +198,7 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 			 * we should not have any valid objects in resource tracker.
 			 */
 			if (is_commit)
-				elog(WARNING, "sobject (stag=%s, at %s:%d) was not untracked",
+				elog(WARNING, "StromObject (%s at %s:%d) was not untracked",
 					 StromTagGetLabel(sobject),
 					 so_entry->filename, so_entry->lineno);
 
@@ -315,8 +315,10 @@ pgstrom_untrack_object(StromObject *sobject)
 
 		return private;
 	}
-	elog(ERROR, "StromObject %p (tag=%d) is not tracked",
-		 sobject, (int)sobject->stag);
+	elog(INFO, "StromObject %p (%s) is not tracked",
+		 sobject, StromTagGetLabel(sobject));
+	Assert(false);
+	return 0;
 }
 
 void

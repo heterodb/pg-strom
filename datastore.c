@@ -559,7 +559,6 @@ pgstrom_create_column_store_with_projection(kern_projection *kproj,
 						   ? kproj->origins[i].colmeta.attlen
 						   : sizeof(cl_uint)) * nitems;
 	}
-
 	tcs = pgstrom_shmem_alloc(length);
 	if (!tcs)
 		return NULL;	/* out of shared memory! */
