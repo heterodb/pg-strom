@@ -555,9 +555,9 @@ pgstrom_create_column_store_with_projection(kern_projection *kproj,
 	{
 		if (!kproj->origins[i].colmeta.attnotnull)
 			length += MAXALIGN((nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
-		length += MAXALIGN(kproj->origins[i].colmeta.attlen > 0
-						   ? kproj->origins[i].colmeta.attlen
-						   : sizeof(cl_uint)) * nitems;
+		length += MAXALIGN((kproj->origins[i].colmeta.attlen > 0
+							? kproj->origins[i].colmeta.attlen
+							: sizeof(cl_uint)) * nitems);
 	}
 	tcs = pgstrom_shmem_alloc(length);
 	if (!tcs)

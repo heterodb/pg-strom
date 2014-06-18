@@ -185,9 +185,9 @@ typedef struct
 						results[KERN_HASHJOIN_RESULTBUF(khashjoin)->nrooms]))
 #define KERN_HASHJOIN_DMA_SENDOFS(khashjoin)	\
 	((uintptr_t)&(khashjoin)->kparams - (uintptr_t)khashjoin)
-#define KERN_HASHJOIN_DMA_SENDLEN(khashjoin)	\
+#define KERN_HASHJOIN_DMA_SENDLEN(khashjoin, src_nitems)	\
 	(KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin) +	\
-	 offsetof(kern_resultbuf, results[0]))
+	 offsetof(kern_resultbuf, results[Max((src_nitems),0)]))
 #define KERN_HASHJOIN_DMA_RECVOFS(khashjoin)	\
 	((uintptr_t)KERN_HASHJOIN_RESULTBUF(khashjoin) - (uintptr_t)(khashjoin))
 #define KERN_HASHJOIN_DMA_RECVLEN(khashjoin)	\
@@ -268,16 +268,19 @@ gpuhashjoin_inner(__private cl_int *errcode,
 	slot_index = hash_value % khashtbl->nslots;
 
 	/*
-	 * XXX - walk on the hash table to count number of matched tuples
+	 * 1st-stage - walks on the hast table to count number of matched
+	 * hash-entries to estimate correct number of result slots to be
+	 * acquired later. Also note that, all the thread needs to walk on
+	 * are ones being mapped to a particular valid row in kcs.
 	 */
-	if(id < nrows) {
+	if (kcs_index < kcs->nrows)
+	{
 		slot    = KERN_HASHTABLE_SLOT(khashtbl);
 		entry   = KERN_HASH_NEXT_ENTRY(khashtbl, slot[slot_index]);
 		while(entry)
 		{
-			cl_bool match = gpuhashjoin_keycomp(errcode, kparams, entry, kcs,
-												ktoast, kcs_index, hash_value);
-			if(match)
+			if (gpuhashjoin_keycomp(errcode, kparams, entry, kcs,
+									ktoast, kcs_index, hash_value))
 				nMatches ++;
 
 			entry = KERN_HASH_NEXT_ENTRY(khashtbl, entry->next);
@@ -313,35 +316,29 @@ gpuhashjoin_inner(__private cl_int *errcode,
 	 */
 	if(base + 3 * nitems < kresults->nrooms) 
 	{
-		if(nMatches) {
-			entry = KERN_HASH_NEXT_ENTRY(khashtbl, slot[slot_index]);
+		if(nMatches)
+		{
+			cl_uint		pos = base + 3 * offset;
 
-			while(entry)
+			for (entry = KERN_HASH_NEXT_ENTRY(khashtbl, slot[slot_index]);
+				 entry;
+				 entry = KERN_HASH_NEXT_ENTRY(khashtbl, entry->next))
 			{
-				cl_bool match;
-
-				match = gpuhashjoin_keycomp(errcode, kparams, entry, kcs,
-											ktoast, kcs_index, hash_value);
-				if(match)
+				/*
+				 * results[3*i+0] = rcs-index of inner (upper 32bit of rowid)
+				 * results[3*i+1] = row-offset of inner (lower 32bit of rowid)
+				 * results[3*i+2] = row-index of outer relation stream
+				 */
+				if (gpuhashjoin_keycomp(errcode, kparams, entry, kcs,
+										ktoast, kcs_index, hash_value))
 				{
-			//results[3*i+0] = rcs-index of inner side (upper 32bits of rowid)
-			//results[3*i+1] = row-offset of inner side (lower 32bits of rowid)
-			//results[3*i+2] = row-index of outer relation stream
-
-					cl_int pos = base + 3 * (offset + nWrites);
 					kresults->results[pos + 0] = (cl_uint)(entry->rowid >> 32);
 					kresults->results[pos + 1] = (cl_uint)entry->rowid;
 					kresults->results[pos + 2] = kcs_index;
-
-					nWrites ++;
+					pos += 3;
 				}
-
-				entry = KERN_HASH_NEXT_ENTRY(khashtbl, entry->next);
 			}
 		}
-
-//		assert(nMatches == nWrites);
-
 	}
 	else 						/* Result buffer exhaust. */
 	{
@@ -467,9 +464,10 @@ gpuhashjoin_inner_rs(__global kern_hashjoin *khashjoin,
 			result.isnull = true;								\
 		else													\
 		{														\
+			__global BASE *ptr = (__global BASE *)				\
+				((__global char *)(kentry) + (key_offset));		\
 			result.isnull = false;								\
-			result.value = *((__global BASE *)					\
-							 (kentry->keydata + key_offset));	\
+			result.value = *ptr;								\
 		}														\
 		return result;											\
 	}

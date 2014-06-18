@@ -424,7 +424,7 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 	run_cost += (cpu_tuple_cost + host_cost.per_tuple) * hashjointuples;
 
 	gpath->cpath.path.startup_cost = startup_cost;
-	gpath->cpath.path.total_cost = startup_cost + run_cost;
+	gpath->cpath.path.total_cost = startup_cost; // + run_cost;
 }
 
 static CustomPath *
@@ -1643,7 +1643,6 @@ gpuhashjoin_put_hash_table(pgstrom_hashjoin_table *hash_table)
 		do_release = true;
 	}
 	SpinLockRelease(&hash_table->lock);
-	elog(INFO, "gpuhashjoin_put_hash_table do_release=%d", do_release);
 	if (do_release)
 	{
 		for (i=0; i < hash_table->num_rcs; i++)
@@ -2010,7 +2009,6 @@ gpuhashjoin_preload_hash_table(GpuHashJoinState *ghjs)
 			rcstore = bulk->rc_store;
 			nitems = bulk->nitems;
 			rindex = bulk->rindex;
-			elog(INFO, "bulk scan %s node", StromTagGetLabel(rcstore));
 		}
 		else
 		{
@@ -2038,7 +2036,6 @@ gpuhashjoin_preload_hash_table(GpuHashJoinState *ghjs)
 				if (!trs)
 				{
 					trs = tcache_create_row_store(tupdesc);
-					elog(INFO, "hoge trs=%p", trs);
 					pgstrom_track_object(&trs->sobj, 0);
 				}
 				if (!tcache_row_store_insert_tuple(trs, tuple))
@@ -2054,7 +2051,6 @@ gpuhashjoin_preload_hash_table(GpuHashJoinState *ghjs)
 			rcstore = &trs->sobj;
 			nitems = trs->kern.nrows;
 			rindex = NULL;	/* all rows should be visible */
-			elog(INFO, "row scan %s node", StromTagGetLabel(rcstore));
 		}
 		/*
 		 * Expand the array of row/column-store on demand
@@ -2210,8 +2206,6 @@ static void
 pgstrom_release_gpuhashjoin(pgstrom_message *message)
 {
 	pgstrom_gpuhashjoin *gpuhashjoin = (pgstrom_gpuhashjoin *) message;
-
-	elog(INFO, "pgstrom_release_gpuhashjoin is called");
 
 	/* unlink message queue and device program */
 	pgstrom_put_queue(gpuhashjoin->msg.respq);
@@ -2430,7 +2424,8 @@ gpuhashjoin_next_tuple(GpuHashJoinState *ghjs, TupleTableSlot *slot)
 {
 	pgstrom_gpuhashjoin *ghjoin = ghjs->curr_ghjoin;
 	tcache_column_store *tcs = (tcache_column_store *) ghjoin->rcs_dst;
-	TupleDesc			tupdesc = slot->tts_tupleDescriptor;
+	//TupleDesc			tupdesc = slot->tts_tupleDescriptor;
+	TupleDesc			tupdesc = ghjs->pscan_slot->tts_tupleDescriptor;
 
 	Assert(tcs->ncols == tupdesc->natts);
 	while (ghjs->curr_index < tcs->nrows)
@@ -2499,7 +2494,7 @@ gpuhashjoin_exec(CustomPlanState *node)
 		 */
 		if (ghjs->hash_table->num_rcs == 0)
 			return NULL;
-		gpuhashjoin_dump_hash_table(ghjs);
+		//gpuhashjoin_dump_hash_table(ghjs);
 	}
 
 	ExecClearTuple(slot);
@@ -2629,6 +2624,8 @@ gpuhashjoin_exec(CustomPlanState *node)
 		ProjectionInfo *pj_info = ghjs->cps.ps.ps_ProjInfo;
 		ExprContext	   *econtext = ghjs->cps.ps.ps_ExprContext;
 		ExprDoneCond	is_done;
+
+		elog(INFO, "is this projection right?");
 
 		/*
 		 * FIXME: we may need to revise the code according to ExecScan.
@@ -2784,7 +2781,9 @@ gpuhashjoin_get_relids(CustomPlanState *node)
 }
 
 static Node *
-gpuhashjoin_get_special_var(CustomPlanState *node, Var *varnode)
+gpuhashjoin_get_special_var(CustomPlanState *node,
+							Var *varnode,
+							PlanState **child_ps)
 {
 	GpuHashJoin	   *ghashjoin = (GpuHashJoin *)node->ps.plan;
 	TargetEntry	   *tle;
@@ -2803,7 +2802,10 @@ gpuhashjoin_get_special_var(CustomPlanState *node, Var *varnode)
 		{
 			tle = get_tle_by_resno(outer_plan->targetlist, varnode->varattno);
 			if (tle)
+			{
+				*child_ps = outerPlanState(node);
 				return (Node *) tle->expr;
+			}
 		}
 	}
 	else if (varnode->varno == INNER_VAR)
@@ -2814,9 +2816,13 @@ gpuhashjoin_get_special_var(CustomPlanState *node, Var *varnode)
 		{
 			tle = get_tle_by_resno(inner_plan->targetlist, varnode->varattno);
 			if (tle)
+			{
+				*child_ps = innerPlanState(node);
 				return (Node *) tle->expr;
+			}
 		}
 	}
+	Assert(false);
 	elog(ERROR, "variable (varno=%u,varattno=%d) is not relevant tlist",
 		 varnode->varno, varnode->varattno);
 	return NULL;	/* be compiler quiet */
@@ -2971,10 +2977,8 @@ clserv_respond_hashjoin(cl_event event, cl_int ev_status, void *private)
 	}
 
 	/* release opencl resources */
-	while (clghj->ev_index > 0)
+	while (--clghj->ev_index > 0)
 		clReleaseEvent(clghj->events[--clghj->ev_index]);
-	if (clghj->m_hash)
-		clReleaseMemObject(clghj->m_hash);
 	if (clghj->m_join)
 		clReleaseMemObject(clghj->m_join);
 	if (clghj->m_rstore)
@@ -2993,6 +2997,8 @@ clserv_respond_hashjoin(cl_event event, cl_int ev_status, void *private)
 	Assert(hjtable->n_kernel > 0);
 	if (--hjtable->n_kernel == 0)
 	{
+		clReleaseMemObject(hjtable->m_hash);
+		clReleaseEvent(hjtable->ev_hash);
 		hjtable->m_hash = NULL;
 		hjtable->ev_hash = NULL;
 	}
@@ -3180,7 +3186,6 @@ clserv_process_gpuhashjoin_column(pgstrom_gpuhashjoin *ghjoin,
 	kern_column_store *kcs_head;
 	kern_toastbuf *ktoast_head;
 	cl_int		nitems;
-	cl_int	   *rindex;
 	size_t		offset;
 	size_t		length;
 	size_t		gwork_sz;
@@ -3222,15 +3227,9 @@ clserv_process_gpuhashjoin_column(pgstrom_gpuhashjoin *ghjoin,
 	 * Elsewhere, each item on rindex point valid rows.
 	 */
 	if (ghjoin->src_nitems < 0)
-	{
 		nitems = tcs->nrows;
-		rindex = NULL;
-	}
 	else
-	{
 		nitems = ghjoin->src_nitems;
-		rindex = kresults->results;
-	}
 
 	/*
 	 * __kernel void
@@ -3259,8 +3258,6 @@ clserv_process_gpuhashjoin_column(pgstrom_gpuhashjoin *ghjoin,
 	/* buffer object of __global kern_hashjoin *khashjoin */
 	length = (KERN_HASHJOIN_PARAMBUF_LENGTH(ghjoin->kern) +
 			  KERN_HASHJOIN_RESULTBUF_LENGTH(ghjoin->kern));
-	if (rindex)
-		length += sizeof(cl_uint) * nitems;
 	clghj->m_join = clCreateBuffer(opencl_context,
 								   CL_MEM_READ_WRITE,
 								   length,
@@ -3346,14 +3343,10 @@ clserv_process_gpuhashjoin_column(pgstrom_gpuhashjoin *ghjoin,
 		goto error_sync;
 	}
 
-	/* negative nitems means all the rows are valid without rindex,
-	 * elsewhere, it means number of rindex being processed. */
-	if (!rindex)
-		nitems = -1;
 	rc = clSetKernelArg(clghj->kernel,
 						4,	/* cl_int kcs_nitems */
 						sizeof(cl_int),
-						&nitems);
+						&ghjoin->src_nitems);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
@@ -3371,11 +3364,12 @@ clserv_process_gpuhashjoin_column(pgstrom_gpuhashjoin *ghjoin,
 	}
 
 	/* DMA send of kern_hashjoin */
-	length = KERN_HASHJOIN_DMA_SENDLEN(ghjoin->kern);
+	offset = KERN_HASHJOIN_DMA_SENDOFS(ghjoin->kern);
+	length = KERN_HASHJOIN_DMA_SENDLEN(ghjoin->kern, ghjoin->src_nitems);
 	rc = clEnqueueWriteBuffer(clghj->kcmdq,
 							  clghj->m_join,
 							  CL_FALSE,
-							  0,
+							  offset,
 							  length,
 							  KERN_HASHJOIN_PARAMBUF(ghjoin->kern),
 							  0,
@@ -3591,7 +3585,6 @@ clserv_process_gpuhashjoin_row(pgstrom_gpuhashjoin *ghjoin,
 	kern_parambuf *kparams;
 	kern_column_store *kcs_head;
 	cl_int		nitems;
-	cl_int	   *rindex;
 	size_t		offset;
 	size_t		length;
 	size_t		gwork_sz;
@@ -3612,15 +3605,9 @@ clserv_process_gpuhashjoin_row(pgstrom_gpuhashjoin *ghjoin,
 	 * Elsewhere, each item on rindex point valid rows.
 	 */
 	if (ghjoin->src_nitems < 0)
-	{
 		nitems = trs->kern.nrows;
-		rindex = NULL;
-	}
 	else
-	{
 		nitems = ghjoin->src_nitems;
-		rindex = kresults->results;
-	}
 
 	/*
 	 * __kernel void
@@ -3653,8 +3640,6 @@ clserv_process_gpuhashjoin_row(pgstrom_gpuhashjoin *ghjoin,
 	/* buffer object of __global kern_hashjoin *khashjoin */
 	length = (KERN_HASHJOIN_PARAMBUF_LENGTH(ghjoin->kern) +
 			  KERN_HASHJOIN_RESULTBUF_LENGTH(ghjoin->kern));
-	if (rindex)
-		length += sizeof(cl_uint) * nitems;
 	clghj->m_join = clCreateBuffer(opencl_context,
 								   CL_MEM_READ_WRITE,
 								   length,
@@ -3734,12 +3719,10 @@ clserv_process_gpuhashjoin_row(pgstrom_gpuhashjoin *ghjoin,
 		goto error_sync;
 	}
 
-	if (!rindex)
-		nitems = -1;	/* informs rindex is not valid */
 	rc = clSetKernelArg(clghj->kernel,
 						4,	/* cl_int krs_nitems */
 						sizeof(cl_int),
-						&nitems);
+						&ghjoin->src_nitems);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
@@ -3758,7 +3741,7 @@ clserv_process_gpuhashjoin_row(pgstrom_gpuhashjoin *ghjoin,
 
 	/* DMA kick of kern_hashjoin */
 	offset = KERN_HASHJOIN_DMA_SENDOFS(ghjoin->kern);
-	length = KERN_HASHJOIN_DMA_SENDLEN(ghjoin->kern);
+	length = KERN_HASHJOIN_DMA_SENDLEN(ghjoin->kern, ghjoin->src_nitems);
 	rc = clEnqueueWriteBuffer(clghj->kcmdq,
 							  clghj->m_join,
 							  CL_FALSE,
@@ -4105,7 +4088,7 @@ clserv_process_post_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
 	int					i;
 
 	dst_tcs = pgstrom_create_column_store_with_projection(kproj,
-														  kresults->nitems,
+														  kresults->nitems / 3,
 														  false);
 	if (!dst_tcs)
 	{
@@ -4113,11 +4096,11 @@ clserv_process_post_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
 		goto error;
 	}
 
-	for (i=0; i < kresults->nitems; i++)
+	for (i=0; i < kresults->nitems; i+=3)
 	{
-		cl_uint	rcs_index = kresults->results[3 * i];
-		cl_uint	inner_idx = kresults->results[3 * i + 1];
-		cl_uint	outer_idx = kresults->results[3 * i + 2];
+		cl_uint	rcs_index = kresults->results[i];
+		cl_uint	inner_idx = kresults->results[i + 1];
+		cl_uint	outer_idx = kresults->results[i + 2];
 
 		/* fill up inner columns */
 		Assert(rcs_index < hjtable->num_rcs);
@@ -4126,7 +4109,7 @@ clserv_process_post_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
 		if (StromTagIs(inner_rcs, TCacheRowStore))
 		{
 			tcache_row_store *src_trs = (tcache_row_store *) inner_rcs;
-			rc = clserv_projection_from_row(dst_tcs, i,
+			rc = clserv_projection_from_row(dst_tcs, dst_tcs->nrows,
 											src_trs, inner_idx,
 											kproj, false);
 			if (rc != StromError_Success)
@@ -4135,7 +4118,7 @@ clserv_process_post_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
 		else if (StromTagIs(inner_rcs, TCacheColumnStore))
 		{
 			tcache_column_store *src_tcs = (tcache_column_store *) inner_rcs;
-			rc = clserv_projection_from_column(dst_tcs, i,
+			rc = clserv_projection_from_column(dst_tcs, dst_tcs->nrows,
 											   src_tcs, inner_idx,
 											   kproj, false);
 			if (rc != StromError_Success)
@@ -4151,7 +4134,7 @@ clserv_process_post_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
 		if (StromTagIs(outer_rcs, TCacheRowStore))
 		{
 			tcache_row_store *src_trs = (tcache_row_store *) outer_rcs;
-			rc = clserv_projection_from_row(dst_tcs, i,
+			rc = clserv_projection_from_row(dst_tcs, dst_tcs->nrows,
 											src_trs, outer_idx,
 											kproj, true);
 			if (rc != StromError_Success)
@@ -4160,7 +4143,7 @@ clserv_process_post_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
 		else if (StromTagIs(outer_rcs, TCacheColumnStore))
 		{
 			tcache_column_store *src_tcs = (tcache_column_store *) outer_rcs;
-			rc = clserv_projection_from_column(dst_tcs, i,
+			rc = clserv_projection_from_column(dst_tcs, dst_tcs->nrows,
 											   src_tcs, outer_idx,
 											   kproj, true);
 			if (rc != StromError_Success)
@@ -4171,6 +4154,7 @@ clserv_process_post_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
 			rc = StromError_DataStoreCorruption;
 			goto error;
 		}
+		dst_tcs->nrows++;
 	}
 	ghjoin->rcs_dst = &dst_tcs->sobj;
 
