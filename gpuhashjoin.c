@@ -808,23 +808,23 @@ gpuhashjoin_codegen_hashkey(PlannerInfo *root,
 		if (dtype->type_length > 0)
 			appendStringInfo(&calc,
 							 "  if (!%s.isnull)\n"
-							 "    COMP_HASHVAL32(hash, &%s.value, %d);\n",
+							 "    COMP_CRC32(hash, &%s.value, %d);\n",
 							 varname, varname, dtype->type_length);
 		else
 			appendStringInfo(
 				&calc,
 				"  if (!%s.isnull)\n"
-				"    COMP_HASHVAL32(hash, VARDATA_ANY(%s.value),\n"
-				"                         VARSIZE_ANY_EXHDR(%s.value));\n",
+				"    COMP_CRC32(hash, VARDATA_ANY(%s.value),\n"
+				"                     VARSIZE_ANY_EXHDR(%s.value));\n",
 				varname, varname, varname);
 		key_index++;
 	}
 	appendStringInfo(str,
 					 "  cl_uint hash;\n"
 					 "\n"
-					 "  INIT_HASHVAL32(hash);\n"
+					 "  INIT_CRC32(hash);\n"
 					 "%s"
-					 "  FIN_HASHVAL32(hash);\n"
+					 "  FIN_CRC32(hash);\n"
 					 "\n"
 					 "  return hash;\n"
 					 "}\n", calc.data);
@@ -1768,7 +1768,7 @@ gpuhashjoin_preload_hash_table_rs(GpuHashJoinState *ghjs,
 									 hash_table->kern.length);
 		kentry_sz = ghjs->inner_fixlen;
 
-		INIT_HASHVAL32(hash);
+		INIT_CRC32(hash);
 		forboth(lp1, ghjs->inner_resnums,
 				lp2, ghjs->inner_offsets)
 		{
@@ -1797,7 +1797,7 @@ gpuhashjoin_preload_hash_table_rs(GpuHashJoinState *ghjs,
 						memcpy((char *)kentry + offset,
 							   DatumGetPointer(value),
 							   attr->attlen);
-					COMP_HASHVAL32(hash,
+					COMP_CRC32(hash,
 								   (char *)kentry + offset,
 								   attr->attlen);
 				}
@@ -1807,15 +1807,15 @@ gpuhashjoin_preload_hash_table_rs(GpuHashJoinState *ghjs,
 					memcpy((char *)kentry + kentry_sz,
 						   DatumGetPointer(value),
 						   VARSIZE_ANY(value));
-					COMP_HASHVAL32(hash,
-								   VARDATA_ANY(value),
-								   VARSIZE_ANY_EXHDR(value));
+					COMP_CRC32(hash,
+							   VARDATA_ANY(value),
+							   VARSIZE_ANY_EXHDR(value));
 					kentry_sz += INTALIGN(VARSIZE_ANY(value));
 				}
 			}
 			i_key++;
 		}
-		FIN_HASHVAL32(hash);
+		FIN_CRC32(hash);
 		kentry->hash = hash;
 		kentry->rowid = (((cl_ulong)rcs_index << 32) | (cl_ulong) i);
 
@@ -2034,7 +2034,10 @@ gpuhashjoin_preload_hash_table(GpuHashJoinState *ghjs)
 					tuple = ExecFetchSlotTuple(slot);
 				}
 				if (!trs)
+				{
 					trs = tcache_create_row_store(tupdesc);
+					pgstrom_track_object(&trs->sobj, 0);
+				}
 				if (!tcache_row_store_insert_tuple(trs, tuple))
 				{
 					overflow = tuple;
@@ -2067,7 +2070,8 @@ gpuhashjoin_preload_hash_table(GpuHashJoinState *ghjs)
 				elog(ERROR, "out of shared memory");
 			}
 		}
-		hash_table->rcstore[hash_table->num_rcs] = rcstore;
+		hash_table->rcstore[hash_table->num_rcs]
+			= pgstrom_get_rcstore(rcstore);
 		rcs_index = hash_table->num_rcs++;
 
 		/*
@@ -2095,7 +2099,9 @@ gpuhashjoin_preload_hash_table(GpuHashJoinState *ghjs)
 		}
 		else
 			elog(ERROR, "bug? neither row nor column store");
-
+		/* unlink row/column store */
+		pgstrom_untrack_object(rcstore);
+		pgstrom_put_rcstore(rcstore);
 		if (bulk)
 			pfree(bulk);
 	}
@@ -2478,7 +2484,7 @@ gpuhashjoin_exec(CustomPlanState *node)
 	}
 
 	ExecClearTuple(slot);
-	while (!ghjs->curr_ghjoin || gpuhashjoin_next_tuple(ghjs, slot))
+	while (!ghjs->curr_ghjoin || !gpuhashjoin_next_tuple(ghjs, slot))
 	{
 		pgstrom_message	   *msg;
 		dlist_node		   *dnode;

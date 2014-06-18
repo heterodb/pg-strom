@@ -147,6 +147,34 @@ typedef struct {
 #define StromTagIs(PTR,IDENT) \
 	(((StromObject *)(PTR))->stag == StromTag_##IDENT)
 
+static inline const char *
+StromTagGetLabel(StromObject *sobject)
+{
+	static char msgbuf[80];
+#define StromTagGetLabelEntry(IDENT)		\
+	case StromTag_##IDENT: return #IDENT
+
+	switch (sobject->stag)
+	{
+		StromTagGetLabelEntry(DevProgram);
+		StromTagGetLabelEntry(MsgQueue);
+		StromTagGetLabelEntry(ParamBuf);
+		StromTagGetLabelEntry(TCacheHead);
+		StromTagGetLabelEntry(TCacheRowStore);
+		StromTagGetLabelEntry(TCacheColumnStore);
+		StromTagGetLabelEntry(TCacheToastBuf);
+		StromTagGetLabelEntry(GpuScan);
+		StromTagGetLabelEntry(GpuHashJoin);
+		StromTagGetLabelEntry(HashJoinTable);
+		default:
+			snprintf(msgbuf, sizeof(msgbuf),
+					 "unknown tag (%u)", sobject->stag);
+			break;
+	}
+#undef StromTagGetLabelEntry
+	return msgbuf;
+}
+
 /*
  * Performance monitor structure
  */
@@ -551,7 +579,10 @@ extern void pgstrom_put_column_store(tcache_column_store *pcs);
 /*
  * restrack.c
  */
-extern void pgstrom_track_object(StromObject *sobject, Datum private);
+extern void __pgstrom_track_object(const char *filename, int lineno,
+								   StromObject *sobject, Datum private);
+#define pgstrom_track_object(sobject, private)			\
+	__pgstrom_track_object(__FILE__,__LINE__,(sobject),(private))
 extern Datum pgstrom_untrack_object(StromObject *sobject);
 extern bool pgstrom_object_is_tracked(StromObject *sobject);
 extern void pgstrom_init_restrack(void);

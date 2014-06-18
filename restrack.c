@@ -38,6 +38,8 @@ typedef struct {
 	dlist_node		tracker_chain;
 	dlist_node		ptrmap_chain;
 	ResourceOwner	owner;
+	const char	   *filename;
+	int				lineno;
 	StromObject	   *sobject;
 	Datum			private;
 } sobject_entry;
@@ -131,6 +133,7 @@ restrack_get_entry(ResourceOwner resource_owner,
 
 static sobject_entry *
 sobject_get_entry(ResourceOwner resource_owner,
+				  const char *filename, int lineno,
 				  StromObject *sobject, Datum private)
 {
 	sobject_entry  *so_entry;
@@ -149,6 +152,8 @@ sobject_get_entry(ResourceOwner resource_owner,
 	i = ptrmap_hash_index(resource_owner, sobject);
 	dlist_push_head(&ptrmap_slot[i], &so_entry->ptrmap_chain);
 	so_entry->owner = resource_owner;
+	so_entry->filename = filename;
+	so_entry->lineno = lineno;
 	so_entry->sobject = sobject;
 	so_entry->private = private;
 
@@ -192,7 +197,10 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 			 * objects should be untracked by regular code path, so
 			 * we should not have any valid objects in resource tracker.
 			 */
-			Assert(!is_commit);
+			if (is_commit)
+				elog(WARNING, "sobject (stag=%s, at %s:%d) was not untracked",
+					 StromTagGetLabel(sobject),
+					 so_entry->filename, so_entry->lineno);
 
 			if (StromTagIs(sobject, MsgQueue))
 				pgstrom_close_queue((pgstrom_queue *)sobject);
@@ -226,7 +234,8 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
  * registers a shared object as one acquired by this backend.
  */
 void
-pgstrom_track_object(StromObject *sobject, Datum private)
+__pgstrom_track_object(const char *filename, int lineno,
+					   StromObject *sobject, Datum private)
 {
 	tracker_entry  *tracker = NULL;
 	sobject_entry  *so_entry = NULL;
@@ -242,7 +251,9 @@ pgstrom_track_object(StromObject *sobject, Datum private)
 			phase = RESOURCE_RELEASE_AFTER_LOCKS;
 
 		tracker = restrack_get_entry(CurrentResourceOwner, phase, true);
-		so_entry = sobject_get_entry(CurrentResourceOwner, sobject, private);
+		so_entry = sobject_get_entry(CurrentResourceOwner,
+									 filename, lineno,
+									 sobject, private);
 		dlist_push_head(&tracker->sobject_list,
 						&so_entry->tracker_chain);
 	}
