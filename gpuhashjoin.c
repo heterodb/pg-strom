@@ -764,7 +764,7 @@ gpuhashjoin_codegen_hashkey(PlannerInfo *root,
 
 		if (pull_one_varno(linitial(oper->args)) == OUTER_VAR)
 			lefthand = linitial(oper->args);
-		else if (pull_one_varno(lsecond(oper->args)) == INNER_VAR)
+		else if (pull_one_varno(lsecond(oper->args)) == OUTER_VAR)
 			lefthand = lsecond(oper->args);
 		else
 			elog(ERROR, "neither left- nor right-hand is part of outer plan");
@@ -2424,7 +2424,6 @@ gpuhashjoin_next_tuple(GpuHashJoinState *ghjs, TupleTableSlot *slot)
 {
 	pgstrom_gpuhashjoin *ghjoin = ghjs->curr_ghjoin;
 	tcache_column_store *tcs = (tcache_column_store *) ghjoin->rcs_dst;
-	//TupleDesc			tupdesc = slot->tts_tupleDescriptor;
 	TupleDesc			tupdesc = ghjs->pscan_slot->tts_tupleDescriptor;
 
 	Assert(tcs->ncols == tupdesc->natts);
@@ -2624,8 +2623,6 @@ gpuhashjoin_exec(CustomPlanState *node)
 		ProjectionInfo *pj_info = ghjs->cps.ps.ps_ProjInfo;
 		ExprContext	   *econtext = ghjs->cps.ps.ps_ExprContext;
 		ExprDoneCond	is_done;
-
-		elog(INFO, "is this projection right?");
 
 		/*
 		 * FIXME: we may need to revise the code according to ExecScan.
@@ -2976,8 +2973,14 @@ clserv_respond_hashjoin(cl_event event, cl_int ev_status, void *private)
 		/* implement it later */
 	}
 
-	/* release opencl resources */
-	while (--clghj->ev_index > 0)
+	/*
+	 * release opencl resources
+	 *
+	 * NOTE: The first event object (a.k.a hjtable->ev_hash) and memory
+	 * object of hash table (a.k.a hjtable->m_hash) has to be released
+	 * under the hjtable->lock
+	 */
+	while (clghj->ev_index > 1)
 		clReleaseEvent(clghj->events[--clghj->ev_index]);
 	if (clghj->m_join)
 		clReleaseMemObject(clghj->m_join);
@@ -2995,10 +2998,10 @@ clserv_respond_hashjoin(cl_event event, cl_int ev_status, void *private)
 	/* remove hashjoin-table, if no longer referenced */
 	SpinLockAcquire(&hjtable->lock);
 	Assert(hjtable->n_kernel > 0);
+	clReleaseMemObject(hjtable->m_hash);
+	clReleaseEvent(hjtable->ev_hash);
 	if (--hjtable->n_kernel == 0)
 	{
-		clReleaseMemObject(hjtable->m_hash);
-		clReleaseEvent(hjtable->ev_hash);
 		hjtable->m_hash = NULL;
 		hjtable->ev_hash = NULL;
 	}
@@ -3619,7 +3622,7 @@ clserv_process_gpuhashjoin_row(pgstrom_gpuhashjoin *ghjoin,
 	 *                      __local void *local_workmem)
 	 */
 	clghj->kernel = clCreateKernel(clghj->program,
-								   "gpuhashjoin_inner_cs",
+								   "gpuhashjoin_inner_rs",
 								   &rc);
 	if (rc != CL_SUCCESS)
 	{
@@ -3912,12 +3915,12 @@ clserv_projection_from_column(tcache_column_store *dst_tcs, cl_uint dindex,
 		if (!datum)
 		{
 			Assert(dst_tcs->cdata[i].isnull != NULL);
-			dst_tcs->cdata[i].isnull[sindex >> 3] &= ~(1 << (sindex & 7));
+			dst_tcs->cdata[i].isnull[dindex >> 3] &= ~(1 << (dindex & 7));
 		}
 		else
 		{
 			if (dst_tcs->cdata[i].isnull)
-				dst_tcs->cdata[i].isnull[sindex >> 3] |= (1 << (sindex & 7));
+				dst_tcs->cdata[i].isnull[dindex >> 3] |= (1 << (dindex & 7));
 			if (kproj->origins[i].colmeta.attlen > 0)
 			{
 				int		attlen = kproj->origins[i].colmeta.attlen;
