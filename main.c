@@ -332,9 +332,14 @@ pgstrom_perfmon_add(pgstrom_perfmon *pfm_sum, pgstrom_perfmon *pfm_item)
 	pfm_sum->num_dma_send	+= pfm_item->num_dma_send;
 	pfm_sum->num_dma_recv	+= pfm_item->num_dma_recv;
 	pfm_sum->time_dma_send	+= pfm_item->time_dma_send;
+	pfm_sum->num_prep_exec	+= pfm_item->num_prep_exec;
+	pfm_sum->num_kern_exec	+= pfm_item->num_kern_exec;
+	pfm_sum->time_prep_exec	+= pfm_item->time_prep_exec;
 	pfm_sum->time_kern_exec	+= pfm_item->time_kern_exec;
 	pfm_sum->time_dma_recv	+= pfm_item->time_dma_recv;
 	pfm_sum->time_in_recvq	+= pfm_item->time_in_recvq;
+	pfm_sum->time_post_exec	+= pfm_item->time_post_exec;
+	pfm_sum->time_move_slot	+= pfm_item->time_move_slot;
 }
 
 static char *
@@ -499,6 +504,13 @@ pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 		snprintf(buf, sizeof(buf), "%s",
 				 usecond_unitary_format((double)pfm->time_post_exec));
 		ExplainPropertyText("time for post device exec", buf, es);
+	}
+
+	if (pfm->time_move_slot > 0)
+	{
+		snprintf(buf, sizeof(buf), "%s",
+				 usecond_unitary_format((double)pfm->time_move_slot));
+		ExplainPropertyText("time to transform column to row", buf, es);
 	}
 }
 

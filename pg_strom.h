@@ -198,7 +198,8 @@ typedef struct {
 	cl_ulong	time_dma_recv;	/* time to receive device=>host data */
 	cl_ulong	time_in_recvq;	/* waiting time in the response mqueue */
 	cl_ulong	time_post_exec;	/* time to execute post GPU processing
-								 * like host-qual, extract column-store, ... */
+								 * like matelialization of hashjoin */
+	cl_ulong	time_move_slot;	/* time to move rows to slot from rcstore */
 	struct timeval	tv;	/* result of gettimeofday(2) when enqueued */
 } pgstrom_perfmon;
 

@@ -463,7 +463,7 @@ gpuhashjoin_create_path(PlannerInfo *root,
 	gpath->host_clauses = host_clauses;
 
 	final_cost_gpuhashjoin(root, gpath, workspace);
-
+#if 0
 	elog(INFO, "cost {startup: %f, total: %f} inner-rows: %f, outer-rows: %f",
 		 gpath->cpath.path.startup_cost,
 		 gpath->cpath.path.total_cost,
@@ -472,7 +472,7 @@ gpuhashjoin_create_path(PlannerInfo *root,
 	//elog(INFO, "hash_clauses = %s", nodeToString(hash_clauses));
 	//elog(INFO, "qual_clauses = %s", nodeToString(qual_clauses));
 	//elog(INFO, "host_clauses = %s", nodeToString(host_clauses));
-
+#endif
 	return &gpath->cpath;
 }
 
@@ -2354,9 +2354,13 @@ gpuhashjoin_load_next_outer(GpuHashJoinState *ghjs)
 	pgstrom_bulk_slot *bulk = NULL;
 	cl_uint			nitems;
 	cl_uint		   *rindex = NULL;
+	struct timeval	tv1, tv2;
 
 	if (ghjs->outer_done)
 		return NULL;
+
+	if (ghjs->pfm.enabled)
+		gettimeofday(&tv1, NULL);
 
 	if (!ghjs->outer_bulk)
 	{
@@ -2412,6 +2416,13 @@ gpuhashjoin_load_next_outer(GpuHashJoinState *ghjs)
 			rcstore = bulk->rc_store;
 		}
 	}
+	if (ghjs->pfm.enabled)
+	{
+		gettimeofday(&tv2, NULL);
+		ghjs->pfm.time_to_load += timeval_diff(&tv1, &tv2);
+	}
+
+
 	/* Is there tuples to return? */
 	if (!rcstore)
 		return NULL;
@@ -2425,6 +2436,10 @@ gpuhashjoin_next_tuple(GpuHashJoinState *ghjs, TupleTableSlot *slot)
 	pgstrom_gpuhashjoin *ghjoin = ghjs->curr_ghjoin;
 	tcache_column_store *tcs = (tcache_column_store *) ghjoin->rcs_dst;
 	TupleDesc			tupdesc = ghjs->pscan_slot->tts_tupleDescriptor;
+	struct timeval		tv1, tv2;
+
+	if (ghjs->pfm.enabled)
+		gettimeofday(&tv1, NULL);
 
 	Assert(tcs->ncols == tupdesc->natts);
 	while (ghjs->curr_index < tcs->nrows)
@@ -2472,7 +2487,18 @@ gpuhashjoin_next_tuple(GpuHashJoinState *ghjs, TupleTableSlot *slot)
 					  false))
 			continue;	/* ...try to next tuple */
 
+		if (ghjs->pfm.enabled)
+		{
+			gettimeofday(&tv2, NULL);
+			ghjs->pfm.time_move_slot += timeval_diff(&tv1, &tv2);
+		}
 		return true;
+	}
+
+	if (ghjs->pfm.enabled)
+	{
+		gettimeofday(&tv2, NULL);
+		ghjs->pfm.time_move_slot += timeval_diff(&tv1, &tv2);
 	}
 	return false;
 }
@@ -2729,7 +2755,7 @@ gpuhashjoin_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 	StringInfoData	str;
 	List		   *context;
 	ListCell	   *cell;
-	bool			useprefix;
+	bool			verbose_saved;
 	bool			is_first;
 
 	initStringInfo(&str);
@@ -2740,7 +2766,6 @@ gpuhashjoin_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 											es->rtable,
 											es->rtable_names);
 	/* device referenced columns */
-	useprefix = es->verbose;
 	is_first = false;
 	foreach (cell, ghashjoin->used_vars)
 	{
@@ -2749,12 +2774,14 @@ gpuhashjoin_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 		appendStringInfo(&str, "%s",
 						 deparse_expression(lfirst(cell),
 											context,
-											useprefix,
+											true,
 											false));
 		is_first = true;
 	}
 	ExplainPropertyText("Device references", str.data, es);
 
+	verbose_saved = es->verbose;
+	es->verbose = true;
 	if (ghashjoin->hash_clauses)
 		show_scan_qual(ghashjoin->hash_clauses,
 					   "hash clauses", &node->ps, ancestors, es);
@@ -2764,6 +2791,8 @@ gpuhashjoin_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 	if (ghashjoin->cplan.plan.qual)
 		show_scan_qual(ghashjoin->cplan.plan.qual,
 					   "host clauses", &node->ps, ancestors, es);
+	es->verbose = verbose_saved;
+
 	show_device_kernel(ghjs->dprog_key, es);
 
 	if (es->analyze && ghjs->pfm.enabled)
@@ -2944,6 +2973,7 @@ typedef struct
 	cl_mem		m_cstore;	/* kern_column_store */
 	cl_mem		m_toast;	/* kern_toastbuf */
 	cl_int		dindex;
+	bool		hash_loader;/* true, if this context loads hash table */
 	cl_int		ev_index;
 	cl_event	events[30];
 } clstate_gpuhashjoin;
@@ -2970,7 +3000,110 @@ clserv_respond_hashjoin(cl_event event, cl_int ev_status, void *private)
 	/* collect performance statistics */
 	if (ghjoin->msg.pfm.enabled)
 	{
-		/* implement it later */
+		pgstrom_perfmon *pfm = &ghjoin->msg.pfm;
+		cl_ulong	tv_start;
+		cl_ulong	tv_end;
+		cl_ulong	temp;
+		cl_int		i, n, rc;
+
+		/*
+		 * The first event is DMA send of hash-table, if context is hash-
+		 * loader. Elsewhere, it didn't take actual jobs.
+		 */
+		if (clghj->hash_loader)
+		{
+			rc = clGetEventProfilingInfo(clghj->events[0],
+										 CL_PROFILING_COMMAND_START,
+										 sizeof(cl_ulong),
+										 &tv_start,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			rc = clGetEventProfilingInfo(clghj->events[0],
+										 CL_PROFILING_COMMAND_END,
+										 sizeof(cl_ulong),
+										 &tv_end,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			pfm->time_dma_send += (tv_end - tv_start) / 1000;
+		}
+
+		/*
+		 * DMA send time of hashjoin headers and row-/column-store
+		 */
+		tv_start = ~0;
+		tv_end = 0;
+		n = clghj->ev_index - 2;
+		for (i=1; i < n; i++)
+		{
+			rc = clGetEventProfilingInfo(clghj->events[i],
+                                         CL_PROFILING_COMMAND_START,
+                                         sizeof(cl_ulong),
+                                         &temp,
+                                         NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			tv_start = Min(tv_start, temp);
+
+			rc = clGetEventProfilingInfo(clghj->events[i],
+										 CL_PROFILING_COMMAND_END,
+										 sizeof(cl_ulong),
+										 &temp,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			tv_end = Max(tv_end, temp);
+		}
+		pfm->time_dma_send += (tv_end - tv_start) / 1000;
+
+		/*
+		 * Kernel execution time
+		 */
+		rc = clGetEventProfilingInfo(clghj->events[clghj->ev_index - 2],
+									 CL_PROFILING_COMMAND_START,
+									 sizeof(cl_ulong),
+									 &tv_start,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+
+		rc = clGetEventProfilingInfo(clghj->events[clghj->ev_index - 2],
+									 CL_PROFILING_COMMAND_END,
+									 sizeof(cl_ulong),
+									 &tv_end,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+		pfm->time_kern_exec += (tv_end - tv_start) / 1000;
+
+		/*
+		 * DMA recv time
+		 */
+		rc = clGetEventProfilingInfo(clghj->events[clghj->ev_index - 2],
+									 CL_PROFILING_COMMAND_START,
+									 sizeof(cl_ulong),
+									 &tv_start,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+
+		rc = clGetEventProfilingInfo(clghj->events[clghj->ev_index - 2],
+									 CL_PROFILING_COMMAND_END,
+									 sizeof(cl_ulong),
+									 &tv_end,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+		pfm->time_dma_recv += (tv_end - tv_start) / 1000;
+
+	skip_perfmon:
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clGetEventProfilingInfo (%s)",
+					   opencl_strerror(rc));
+			pfm->enabled = false;	/* turn off profiling */
+		}
 	}
 
 	/*
@@ -3137,7 +3270,7 @@ clserv_process_gpuhashjoin_common(pgstrom_gpuhashjoin *ghjoin)
 								  &hjtable->kern,
 								  0,
 								  NULL,
-								  &clghj->events[0]);
+								  &clghj->events[clghj->ev_index]);
 		if (rc != CL_SUCCESS)
 		{
 			rc = clReleaseMemObject(clghj->m_hash);
@@ -3147,6 +3280,9 @@ clserv_process_gpuhashjoin_common(pgstrom_gpuhashjoin *ghjoin)
 		clghj->ev_index++;
 		hjtable->m_hash = clghj->m_hash;
 		hjtable->ev_hash = clghj->events[0];
+		clghj->hash_loader = true;
+		ghjoin->msg.pfm.bytes_dma_send += hjtable->kern.length;
+		ghjoin->msg.pfm.num_dma_send++;
 	}
 	else
 	{
@@ -3159,7 +3295,8 @@ clserv_process_gpuhashjoin_common(pgstrom_gpuhashjoin *ghjoin)
 		clghj->dindex = hjtable->dindex;
 		clghj->kcmdq = opencl_cmdq[clghj->dindex];
 		clghj->m_hash = hjtable->m_hash;
-		clghj->events[0] = hjtable->ev_hash;
+		clghj->events[clghj->ev_index++] = hjtable->ev_hash;
+        clghj->hash_loader = false;
 	}
 	hjtable->n_kernel++;
 	SpinLockRelease(&hjtable->lock);
@@ -3532,6 +3669,7 @@ clserv_process_gpuhashjoin_column(pgstrom_gpuhashjoin *ghjoin,
 		goto error_sync;
 	}
 	clghj->ev_index++;
+	ghjoin->msg.pfm.num_kern_exec++;
 
 	/*
 	 * write back the result-buffer
@@ -4088,7 +4226,11 @@ clserv_process_post_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
 	StromObject		   *inner_rcs;
 	tcache_column_store *dst_tcs;
 	cl_int				rc = StromError_Success;
+	struct timeval		tv1, tv2;
 	int					i;
+
+	if (ghjoin->msg.pfm.enabled)
+		gettimeofday(&tv1, NULL);
 
 	dst_tcs = pgstrom_create_column_store_with_projection(kproj,
 														  kresults->nitems / 3,
@@ -4164,6 +4306,11 @@ clserv_process_post_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
 error:
 	if (rc != StromError_Success && dst_tcs != NULL)
 		pgstrom_put_column_store(dst_tcs);
+	if (ghjoin->msg.pfm.enabled)
+	{
+		gettimeofday(&tv2, NULL);
+		ghjoin->msg.pfm.time_post_exec += timeval_diff(&tv1, &tv2);
+	}
 	ghjoin->msg.errcode = rc;
 	pgstrom_reply_message(&ghjoin->msg);
 }
