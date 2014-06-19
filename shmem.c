@@ -366,7 +366,7 @@ __pgstrom_shmem_alloc(const char *filename, int lineno, Size size)
 
 		zone_index = (zone_index + 1) % pgstrom_shmem_head->num_zones;
 	} while (zone_index != start);
-#if PGSTROM_DEBUG
+#ifdef PGSTROM_DEBUG
 	/* For debugging, we dump current status of shared memory segment
 	 * if we have to return "out of shared memory" error */
 	if (!address)
@@ -553,7 +553,7 @@ pgstrom_shmem_sanitycheck(const void *address)
 static void
 pgstrom_shmem_dump_zone(shmem_zone *zone, int zone_index)
 {
-	long	i;
+	long	i = 0;
 
 	while (i < zone->num_blocks)
 	{
@@ -563,12 +563,15 @@ pgstrom_shmem_dump_zone(shmem_zone *zone, int zone_index)
 		{
 			shmem_body	   *body;
 			cl_uint		   *p_magic;
+			int				nshift;
 
+			nshift = find_least_pot(offsetof(shmem_body, data[0]) +
+									block->blocksz + sizeof(cl_uint));
 			body = (shmem_body *)((char *)zone->block_baseaddr +
 								  i * SHMEM_BLOCKSZ);
 			p_magic = (cl_uint *)((char *)body->data + block->blocksz);
 
-			DUMP("[%d:% 4ld] %p (size=%zu, owner=%u, %s:%d%s%s",
+			DUMP("[%d:% 6ld] %p (size=%zu, owner=%u, %s:%d%s%s)",
 				 zone_index, i, body,
 				 block->blocksz,
 				 body->owner,
@@ -576,6 +579,7 @@ pgstrom_shmem_dump_zone(shmem_zone *zone, int zone_index)
 				 body->lineno,
 				 body->magic != SHMEM_BODY_MAGIC ? ", broken" : "",
 				 *p_magic != SHMEM_BLOCK_MAGIC ? ", overrun" : "");
+			i += (1 << nshift);
 		}
 		else if (BLOCK_IS_FREE(block))
 		{
@@ -585,7 +589,7 @@ pgstrom_shmem_dump_zone(shmem_zone *zone, int zone_index)
 		}
 		else
 		{
-			DUMP("[%d:% 4ld] %p corrupted; neither active nor free",
+			DUMP("[%d:% 6ld] %p corrupted; neither active nor free",
 				 zone_index, i,
 				 (char *)zone->block_baseaddr + i * SHMEM_BLOCKSZ);
 			break;
