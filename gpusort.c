@@ -2921,6 +2921,16 @@ clserv_launch_gpusort_bitonic_step(clstate_gpusort_single *clgss,
 		goto error_1;
 	}
 
+	rc = clSetKernelArg(sort_kernel,
+						2,	/* void *local_workbuf */
+						sizeof(cl_int) * lwork_sz,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		goto error_1;
+	}
+
 	rc = clEnqueueNDRangeKernel(kcmdq,
 								sort_kernel,
 								1,

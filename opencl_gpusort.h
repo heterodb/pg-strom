@@ -584,11 +584,13 @@ run_gpusort_multi(__global kern_parambuf *kparams,
 __kernel void
 gpusort_single_step(
 	cl_int bitonic_unitsz,
-	__global kern_gpusort *kgsort)
+	__global kern_gpusort *kgsort,
+	__local void *local_workbuf)
 {
 	__global kern_parambuf *kparams		= KERN_GPUSORT_PARAMBUF(kgsort);
 	__global kern_column_store *kchunk	= KERN_GPUSORT_CHUNK(kgsort);
 	__global kern_toastbuf *ktoast		= KERN_GPUSORT_TOASTBUF(kgsort);
+	__global cl_int		   *kstatus		= KERN_GPUSORT_STATUS(kgsort);
 	__global cl_int		   *results		= KERN_GPUSORT_RESULT_INDEX(kchunk);
 	cl_bool		reversing = (bitonic_unitsz < 0 ? true : false);
 	cl_uint		unitsz = (bitonic_unitsz < 0
@@ -598,6 +600,7 @@ gpusort_single_step(
 
 	run_gpusort_single_step(kparams, reversing, unitsz, kchunk, ktoast,
 							&errcode);
+	kern_writeback_error_status(kstatus, errcode, local_workbuf);
 }
 
 __kernel void
@@ -608,10 +611,12 @@ gpusort_single_marge(
 	__global kern_parambuf *kparams		= KERN_GPUSORT_PARAMBUF(kgsort);
 	__global kern_column_store *kchunk	= KERN_GPUSORT_CHUNK(kgsort);
 	__global kern_toastbuf *ktoast		= KERN_GPUSORT_TOASTBUF(kgsort);
+	__global cl_int		   *kstatus		= KERN_GPUSORT_STATUS(kgsort);
 	__global cl_int		   *results		= KERN_GPUSORT_RESULT_INDEX(kchunk);
 	cl_int errcode = StromError_Success;
 
 	run_gpusort_single_marge(kparams, kchunk, ktoast, &errcode, local_workbuf);
+	kern_writeback_error_status(kstatus, errcode, local_workbuf);
 }
 
 __kernel void
@@ -622,10 +627,12 @@ gpusort_single_sort(
 	__global kern_parambuf *kparams		= KERN_GPUSORT_PARAMBUF(kgsort);
 	__global kern_column_store *kchunk	= KERN_GPUSORT_CHUNK(kgsort);
 	__global kern_toastbuf *ktoast		= KERN_GPUSORT_TOASTBUF(kgsort);
+	__global cl_int		   *kstatus		= KERN_GPUSORT_STATUS(kgsort);
 	__global cl_int		   *results		= KERN_GPUSORT_RESULT_INDEX(kchunk);
 	cl_int errcode = StromError_Success;
 
 	run_gpusort_single_sort(kparams, kchunk, ktoast, &errcode, local_workbuf);
+	kern_writeback_error_status(kstatus, errcode, local_workbuf);
 }
 
 /*
@@ -654,6 +661,7 @@ gpusort_multi(cl_int mergesort_unitsz,
 	__global kern_toastbuf *y_toast = KERN_GPUSORT_TOASTBUF(kgsort_y);
 	__global kern_toastbuf *z_toast1 = KERN_GPUSORT_TOASTBUF(kgsort_z1);
 	__global kern_toastbuf *z_toast2 = KERN_GPUSORT_TOASTBUF(kgsort_z2);
+	__global cl_int		   *kstatus		= KERN_GPUSORT_STATUS(kgsort_x);
 	cl_bool		reversing = (mergesort_unitsz < 0 ? true : false);
 	cl_int		unitsz = (mergesort_unitsz < 0
 						  ? 1U << -mergesort_unitsz
@@ -668,6 +676,7 @@ gpusort_multi(cl_int mergesort_unitsz,
 					  z_chunk1, z_toast1,
 					  z_chunk2, z_toast2,
 					  &errcode, local_workbuf);
+	kern_writeback_error_status(kstatus, errcode, local_workbuf);
 #endif
 }
 
