@@ -2662,6 +2662,9 @@ gpuhashjoin_exec(CustomPlanState *node)
 static Node *
 gpuhashjoin_exec_multi(CustomPlanState *node)
 {
+	
+
+
 	// we can use bulk-scan mode if no projection, no host quals
 
 
@@ -4025,7 +4028,7 @@ clserv_projection_from_column(tcache_column_store *dst_tcs, cl_uint dindex,
 
 		/* fetch value from the source column-store */
 		resno = kproj->origins[i].resno;
-		if (resno >= src_tcs->ncols)
+		if (resno > src_tcs->ncols)
 			datum = NULL;	/* attribute is out of column-store */
 		else if (!src_tcs->cdata[resno-1].values)
 			datum = NULL;	/* attribute is not cached (bug?) */
@@ -4036,7 +4039,7 @@ clserv_projection_from_column(tcache_column_store *dst_tcs, cl_uint dindex,
 		{
 			Assert(!src_tcs->cdata[resno-1].toast);
 			datum = ((char *) src_tcs->cdata[resno-1].values +
-					 kproj->origins[i].colmeta.attlen * dindex);
+					 kproj->origins[i].colmeta.attlen * sindex);
 		}
 		else
 		{
@@ -4046,6 +4049,7 @@ clserv_projection_from_column(tcache_column_store *dst_tcs, cl_uint dindex,
 			vl_ofs = ((cl_uint *)src_tcs->cdata[resno-1].values)[sindex];
 			Assert(vl_ofs > 0);
 			datum = ((char *) src_tcs->cdata[resno-1].toast + vl_ofs);
+			Assert(datum != NULL);
 		}
 
 		/* put value on the destination column-store */
