@@ -134,6 +134,7 @@ typedef enum {
 	StromTag_TCacheRowStore,
 	StromTag_TCacheColumnStore,
 	StromTag_TCacheToastBuf,
+	StromTag_VirtRelation,
 	StromTag_GpuScan,
 	StromTag_GpuSort,
 	StromTag_GpuHashJoin,
@@ -455,7 +456,7 @@ typedef struct
 } pgstrom_bulk_slot;
 
 /*
- * pgstrom_bulk_store
+ * pgstrom_vrelation
  *
  * A data structure to remember a pair of tuples being scanned/joined.
  * It allows to move processed data into upper executor node without
@@ -465,12 +466,12 @@ typedef struct
  */
 typedef struct
 {
-	StromObject		sobj;	/* =StromTag_BulkStore */
+	StromObject		sobj;	/* =StromTag_VirtRelation */
 	slock_t			lock;
 	cl_int			refcnt;
-	tcache_column_store *tcstore[BULKSTORE_MAX_RELS];
-	kern_bulk_store	kern;
-} pgstrom_bulk_store;
+	StromObject	   *rcstore[VRELATION_MAX_RELS];
+	kern_vrelation	kern;
+} pgstrom_vrelation;
 
 
 

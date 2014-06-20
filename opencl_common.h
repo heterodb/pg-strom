@@ -215,7 +215,7 @@ typedef struct {
 		 * if it is kern_column_store. */
 		cl_uint			cs_ofs;
 
-		/* identifier of source relation and column, if kern_bulk_store. */
+		/* identifier of source relation and column, if kern_vrelation */
 		struct {
 			cl_ushort relid;	/* index of relation array */
 			cl_ushort colid;	/* index of the column within above relation */
@@ -461,7 +461,12 @@ typedef struct {
 } kern_resultbuf;
 
 /*
- * kern_bulkstore
+ * kern_vrelation
+ *
+ * It is a representation of a virtual relation view being consists of
+ * one or multiple relations. 
+ *
+ *
  *
  * It manages row-index (that points a particular row in a row/column-store)
  * of one or more relations if joinned. In case when nrels > 1, a bulkstore
@@ -473,7 +478,7 @@ typedef struct {
  * item of the relation. In case of negative number, it means scan/join
  * conditions have to be checked on the host again.
  *
- *   tlist_bulkstore
+ *   kern_vrelation
  * +--------------------+
  * | nrels              |
  * +--------------------+
@@ -503,7 +508,7 @@ typedef struct {
  * |    :               |
  * +--------------------+
  */
-#define BULKSTORE_MAX_RELS		8
+#define VRELATION_MAX_RELS		8
 typedef struct {
 	cl_int			nrels;
 	cl_int			ncols;
@@ -511,8 +516,13 @@ typedef struct {
 	cl_int			nrooms;
 	cl_char			has_recheck;	/* true, if any rows to be rechecked */
 	cl_int			errcode;	/* space to write back*/
-	kern_colmeta	tlist[FLEXIBLE_ARRAY_MEMBER];
-} kern_bulk_store;
+	kern_colmeta	vtlist[FLEXIBLE_ARRAY_MEMBER];
+} kern_vrelation;
+
+#define KERN_VRELATION_RINDEX(kvrel, relid)								\
+	((__global char *)(kvrel) +											\
+	 STROMALIGN(offsetof(kern_vrelation, vtlist[(kvrel)->ncols])) +		\
+	 STROMALIGN(sizeof(cl_uint) * (kvrel)->nrooms) * (relid))
 
 #ifdef OPENCL_DEVICE_CODE
 /*
