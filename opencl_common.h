@@ -210,8 +210,17 @@ typedef struct {
 	cl_char			attalign;
 	/* length of attribute */
 	cl_short		attlen;
-	/* offset to null-map and column-array from the head of column-store */
-	cl_uint			cs_ofs;
+	union {
+		/* offset to null-map and column-array from the head of column-store,
+		 * if it is kern_column_store. */
+		cl_uint			cs_ofs;
+
+		/* identifier of source relation and column, if kern_bulk_store. */
+		struct {
+			cl_ushort relid;	/* index of relation array */
+			cl_ushort colid;	/* index of the column within above relation */
+		} src;
+	};
 } kern_colmeta;
 
 /*
@@ -450,6 +459,60 @@ typedef struct {
 	cl_int		errcode;	/* chunk-level error */
 	cl_int		results[FLEXIBLE_ARRAY_MEMBER];
 } kern_resultbuf;
+
+/*
+ * kern_bulkstore
+ *
+ * It manages row-index (that points a particular row in a row/column-store)
+ * of one or more relations if joinned. In case when nrels > 1, a bulkstore
+ * has multiple row-indexed with same length. Each item in rindex for each
+ * relation represents same row in the result relation view. The result
+ * relation will have 'ncols' number of columns. Its metadata is stored
+ * in the tlist members.
+ * Usually, row-index is a positive number that points (row-index -1)'s
+ * item of the relation. In case of negative number, it means scan/join
+ * conditions have to be checked on the host again.
+ *
+ *   tlist_bulkstore
+ * +--------------------+
+ * | nrels              |
+ * +--------------------+
+ * | ncols              |
+ * +--------------------+
+ * | nitems             |
+ * +--------------------+
+ * | nrooms             |
+ * +--------------------+
+ * | errcode            |
+ * +--------------------+
+ * | tlist[0]           |
+ * |    :               |
+ * |    :               |
+ * | tlist[ncols-1]     |
+ * +--------------------+ ---
+ * | cl_int rindex[]    |  ^
+ * | for relation-0     |  | sizeof(cl_int)
+ * |    :               |  | * nrooms
+ * |    :               |  v
+ * +--------------------+ ---
+ * |    :               |
+ * +--------------------+
+ * | cl_int rindex[]    |
+ * | for relation-(N-1) |
+ * |    :               |
+ * |    :               |
+ * +--------------------+
+ */
+#define BULKSTORE_MAX_RELS		8
+typedef struct {
+	cl_int			nrels;
+	cl_int			ncols;
+	cl_int			nitems;
+	cl_int			nrooms;
+	cl_char			has_recheck;	/* true, if any rows to be rechecked */
+	cl_int			errcode;	/* space to write back*/
+	kern_colmeta	tlist[FLEXIBLE_ARRAY_MEMBER];
+} kern_bulkstore;
 
 #ifdef OPENCL_DEVICE_CODE
 /*

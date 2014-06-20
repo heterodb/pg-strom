@@ -455,6 +455,29 @@ typedef struct
 } pgstrom_bulk_slot;
 
 /*
+ * pgstrom_bulk_store
+ *
+ * A data structure to remember a pair of tuples being scanned/joined.
+ * It allows to move processed data into upper executor node without
+ * projection or materialize.
+ *
+ * XXX - it eventually replace the role of kern_resultbuf
+ */
+typedef struct
+{
+	StromObject		sobj;	/* =StromTag_BulkStore */
+	slock_t			lock;
+	cl_int			refcnt;
+	tcache_column_store *tcstore[BULKSTORE_MAX_RELS];
+	kern_bulk_store	kern;
+} pgstrom_bulk_store;
+
+
+
+
+
+
+/*
  * kern_projection
  *
  * This data structure provides a definition of destination relation on
