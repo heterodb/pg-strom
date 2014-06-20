@@ -26,6 +26,19 @@ CREATE FUNCTION pgstrom_shmem_active_info()
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
 
+CREATE TYPE __pgstrom_shmem_slab_info AS (
+  address   int8,
+  slabname  text,
+  owner		int4,
+  location	text,
+  active    bool,
+  broken	bool
+);
+CREATE FUNCTION pgstrom_shmem_slab_info()
+  RETURNS SETOF __pgstrom_shmem_slab_info
+  AS 'MODULE_PATHNAME'
+  LANGUAGE C STRICT;
+
 CREATE TYPE __pgstrom_opencl_device_info AS (
   dnum      int4,
   pnum		int4,

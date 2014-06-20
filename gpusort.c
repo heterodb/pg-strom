@@ -79,12 +79,6 @@ typedef struct
 /* static variables */
 static int						pgstrom_gpusort_chunksize;
 static CustomPlanMethods		gpusort_plan_methods;
-static shmem_startup_hook_type	shmem_startup_hook_next;
-static struct
-{
-	slock_t		slab_lock;
-	dlist_head	gpusort_freelist;
-} *gpusort_shm_values;
 
 /* static declarations */
 static void clserv_process_gpusort(pgstrom_message *msg);
@@ -889,15 +883,7 @@ pgstrom_release_gpusort(pgstrom_message *msg)
 		gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain, iter.cur);
 		pgstrom_release_gpusort_chunk(gs_chunk);
 	}
-
-	/*
-	 * pgstrom_gpusort_multi is a slab object. So, we don't use
-	 * pgstrom_shmem_alloc/free interface for each object.
-	 */
-	SpinLockAcquire(&gpusort_shm_values->slab_lock);
-	memset(gpusort, 0, sizeof(pgstrom_gpusort));
-	dlist_push_tail(&gpusort_shm_values->gpusort_freelist, &gpusort->chain);
-    SpinLockRelease(&gpusort_shm_values->slab_lock);
+	pgstrom_free_gpusort(gpusort);
 }
 
 /*
@@ -908,30 +894,13 @@ pgstrom_release_gpusort(pgstrom_message *msg)
 static pgstrom_gpusort *
 pgstrom_create_gpusort(GpuSortState *gsortstate)
 {
-	pgstrom_gpusort	   *gpusort;
-	dlist_node		   *dnode;
+	pgstrom_gpusort	   *gpusort = pgstrom_alloc_gpusort();
 
-	SpinLockAcquire(&gpusort_shm_values->slab_lock);
-	if (dlist_is_empty(&gpusort_shm_values->gpusort_freelist))
-	{
-		Size		allocated;
-		uintptr_t	tailaddr;
-
-		gpusort = pgstrom_shmem_alloc_alap(sizeof(pgstrom_gpusort),
-										   &allocated);
-		tailaddr = (uintptr_t)gpusort + allocated;
-		while (((uintptr_t)gpusort + sizeof(pgstrom_gpusort)) <= tailaddr)
-		{
-			dlist_push_tail(&gpusort_shm_values->gpusort_freelist,
-							&gpusort->chain);
-			gpusort++;
-		}
-	}
-	Assert(!dlist_is_empty(&gpusort_shm_values->gpusort_freelist));
-	dnode = dlist_pop_head_node(&gpusort_shm_values->gpusort_freelist);
-	gpusort = dlist_container(pgstrom_gpusort, chain, dnode);
+	if (!gpusort)
+		ereport(ERROR,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("out of shared memory")));
 	memset(&gpusort->chain, 0, sizeof(dlist_node));
-	SpinLockRelease(&gpusort_shm_values->slab_lock);
 
 	/* initialize the common message field */
 	memset(gpusort, 0, sizeof(pgstrom_gpusort));
@@ -2020,25 +1989,6 @@ gpusort_copy_plan(const CustomPlan *from)
 /*
  * initialization of GpuSort
  */
-static void
-pgstrom_startup_gpusort(void)
-{
-	bool		found;
-
-	if (shmem_startup_hook_next)
-		(*shmem_startup_hook_next)();
-
-	gpusort_shm_values
-		= ShmemInitStruct("gpusort_shm_values",
-						  MAXALIGN(sizeof(*gpusort_shm_values)),
-						  &found);
-	Assert(!found);
-
-	memset(gpusort_shm_values, 0, sizeof(*gpusort_shm_values));
-	SpinLockInit(&gpusort_shm_values->slab_lock);
-	dlist_init(&gpusort_shm_values->gpusort_freelist);
-}
-
 void
 pgstrom_init_gpusort(void)
 {
@@ -2070,14 +2020,6 @@ pgstrom_init_gpusort(void)
 	gpusort_plan_methods.GetSpecialCustomVar = NULL;
 	gpusort_plan_methods.TextOutCustomPlan	= gpusort_textout_plan;
 	gpusort_plan_methods.CopyCustomPlan		= gpusort_copy_plan;
-
-	/*
-	 * pgstrom_gpusort_multi is small data structure.
-	 * So, we apply slab on them
-	 */
-	RequestAddinShmemSpace(MAXALIGN(sizeof(*gpusort_shm_values)));
-	shmem_startup_hook_next = shmem_startup_hook;
-    shmem_startup_hook = pgstrom_startup_gpusort;
 }
 
 /* ----------------------------------------------------------------

@@ -543,7 +543,7 @@ extern void pgstrom_init_shmem(void);
 
 extern Datum pgstrom_shmem_info(PG_FUNCTION_ARGS);
 extern Datum pgstrom_shmem_active_info(PG_FUNCTION_ARGS);
-
+extern Datum pgstrom_shmem_slab_info(PG_FUNCTION_ARGS);
 
 /*
  * mqueue.c

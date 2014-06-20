@@ -24,6 +24,9 @@
 #include "utils/memutils.h"
 #include "utils/pg_crc.h"
 #include "pg_strom.h"
+#include "opencl_gpuscan.h"
+#include "opencl_gpusort.h"
+#include "opencl_hashjoin.h"
 #include <limits.h>
 #include <unistd.h>
 
@@ -70,9 +73,16 @@ typedef struct
 
 typedef struct
 {
-	/* for context management */
-	slock_t		context_lock;
-	dlist_head	context_list;
+	/* for slab management */
+	slock_t		slab_gpuscan_lock;
+	dlist_head	slab_gpuscan_freelist;
+	dlist_head	slab_gpuscan_blocklist;
+	slock_t		slab_gpusort_lock;
+	dlist_head	slab_gpusort_freelist;
+	dlist_head	slab_gpusort_blocklist;
+	slock_t		slab_gpuhashjoin_lock;
+	dlist_head	slab_gpuhashjoin_freelist;
+	dlist_head	slab_gpuhashjoin_blocklist;
 
 	/* for zone management */
 	bool		is_ready;
@@ -86,13 +96,24 @@ typedef struct {
 	uint32		magic;			/* = SHMEM_BODY_MAGIC */
 	pid_t		owner;
 	const char *filename;
-	uint32		lineno;
+	int			lineno;
 	Datum		data[FLEXIBLE_ARRAY_MEMBER];
 } shmem_body;
+
+typedef struct {
+	dlist_node	chain;		/* link to the free list */
+	pid_t		owner;
+	const char *filename;
+	uint32		lineno;
+	Datum		data[FLEXIBLE_ARRAY_MEMBER];
+} shmem_slab;
+
+
 /* XXX - we need to ensure SHMEM_ALLOC_COST is enough large */
 
 #define SHMEM_BODY_MAGIC		0xabadcafe
 #define SHMEM_BLOCK_MAGIC		0xdeadbeaf
+#define SHMEM_SLAB_MAGIC		0xabadf11e
 
 #define ADDRESS_IN_SHMEM(address)										\
 	((Size)(address) >= (Size)pgstrom_shmem_head->zone_baseaddr &&		\
@@ -496,6 +517,320 @@ pgstrom_shmem_zone_length(void)
 {
 	return pgstrom_shmem_head->zone_length;
 }
+
+/*
+ * pgstrom_alloc_slab
+ */
+static void *
+pgstrom_alloc_slab(const char *filename, int lineno,
+				   const char *slab_name,
+				   slock_t *slab_lock,
+				   dlist_head *slab_freelist,
+				   dlist_head *slab_blocklist,
+				   size_t slab_size)
+{
+	shmem_slab	   *entry;
+	dlist_node	   *dnode;
+	uint32		   *magic;
+
+	SpinLockAcquire(slab_lock);
+	if (dlist_is_empty(slab_freelist))
+	{
+		dlist_node *sblock;
+		Size		unitsz;
+		Size		allocated;
+		Size		offset;
+
+		/* length per slab */
+		unitsz = MAXALIGN(offsetof(shmem_slab, data[0]) +
+						  INTALIGN(slab_size) +
+						  sizeof(uint32));
+		/* allocate a page */
+		sblock = __pgstrom_shmem_alloc_alap(slab_name, 0, unitsz, &allocated);
+		if (!sblock)
+		{
+			SpinLockRelease(slab_lock);
+			return NULL;
+		}
+		memset(sblock, 0, allocated);
+		dlist_push_tail(slab_blocklist, sblock);
+
+		for (offset = MAXALIGN(sizeof(dlist_node));
+			 offset + unitsz <= allocated;
+			 offset += unitsz)
+		{
+			entry = (shmem_slab *)((char *)sblock + offset);
+			magic = (uint32 *)((char *)entry->data + INTALIGN(slab_size));
+			*magic = SHMEM_SLAB_MAGIC;
+			dlist_push_head(slab_freelist, &entry->chain);
+		}
+	}
+	Assert(!dlist_is_empty(slab_freelist));
+	dnode = dlist_pop_head_node(slab_freelist);
+	entry = dlist_container(shmem_slab, chain, dnode);
+	Assert(*magic == SHMEM_SLAB_MAGIC);
+	memset(&entry->chain, 0, sizeof(dlist_node));
+	entry->owner = getpid();
+	entry->filename = filename;
+	entry->lineno = lineno;
+	SpinLockRelease(slab_lock);
+
+	return (void *)entry->data;
+}
+
+
+/*
+ * pgstrom_free_slab
+ */
+static void
+pgstrom_free_slab(slock_t *slab_lock,
+				  dlist_head *slab_freelist,
+				  size_t slab_size,
+				  void *slab_object)
+{
+	shmem_slab *entry = (shmem_slab *)((char *)slab_object -
+									   offsetof(shmem_slab, data[0]));
+	uint32	   *magic = (uint32 *)((char *)entry->data + INTALIGN(slab_size));
+
+	Assert(!entry->chain.next && !entry->chain.prev);
+	Assert(*magic == SHMEM_SLAB_MAGIC);
+	SpinLockAcquire(slab_lock);
+	dlist_push_head(slab_freelist, &entry->chain);
+	SpinLockRelease(slab_lock);
+}
+
+/*
+ * pgstrom_init_slab
+ *
+ * init slab management structure
+ */
+static void
+pgstrom_init_slab(void)
+{
+	SpinLockInit(&pgstrom_shmem_head->slab_gpuscan_lock);
+	SpinLockInit(&pgstrom_shmem_head->slab_gpusort_lock);
+	SpinLockInit(&pgstrom_shmem_head->slab_gpuhashjoin_lock);
+
+	dlist_init(&pgstrom_shmem_head->slab_gpuscan_freelist);
+	dlist_init(&pgstrom_shmem_head->slab_gpusort_freelist);
+	dlist_init(&pgstrom_shmem_head->slab_gpuhashjoin_freelist);
+
+	dlist_init(&pgstrom_shmem_head->slab_gpuscan_blocklist);
+	dlist_init(&pgstrom_shmem_head->slab_gpusort_blocklist);
+	dlist_init(&pgstrom_shmem_head->slab_gpuhashjoin_blocklist);
+}
+
+pgstrom_gpuscan *
+__pgstrom_alloc_gpuscan(const char *filename, int lineno)
+{
+	return (pgstrom_gpuscan *)
+		pgstrom_alloc_slab(filename, lineno, "gpuscan",
+						   &pgstrom_shmem_head->slab_gpuscan_lock,
+						   &pgstrom_shmem_head->slab_gpuscan_freelist,
+						   &pgstrom_shmem_head->slab_gpuscan_blocklist,
+						   sizeof(pgstrom_gpuscan));
+}
+
+void
+pgstrom_free_gpuscan(pgstrom_gpuscan *gpuscan)
+{
+	pgstrom_free_slab(&pgstrom_shmem_head->slab_gpuscan_lock,
+					  &pgstrom_shmem_head->slab_gpuscan_freelist,
+					  sizeof(pgstrom_gpuscan),
+					  gpuscan);
+}
+
+pgstrom_gpusort *
+__pgstrom_alloc_gpusort(const char *filename, int lineno)
+{
+	return (pgstrom_gpusort *)
+		pgstrom_alloc_slab(filename, lineno, "gpusort",
+						   &pgstrom_shmem_head->slab_gpusort_lock,
+						   &pgstrom_shmem_head->slab_gpusort_freelist,
+						   &pgstrom_shmem_head->slab_gpusort_blocklist,
+						   sizeof(pgstrom_gpusort));
+}
+
+void
+pgstrom_free_gpusort(pgstrom_gpusort *gpusort)
+{
+	pgstrom_free_slab(&pgstrom_shmem_head->slab_gpusort_lock,
+					  &pgstrom_shmem_head->slab_gpusort_freelist,
+					  sizeof(pgstrom_gpusort),
+					  gpusort);
+}
+
+pgstrom_gpuhashjoin *
+__pgstrom_alloc_gpuhashjoin(const char *filename, int lineno)
+{
+	return (pgstrom_gpuhashjoin *)
+		pgstrom_alloc_slab(filename, lineno, "gpuhashjoin",
+						   &pgstrom_shmem_head->slab_gpuhashjoin_lock,
+						   &pgstrom_shmem_head->slab_gpuhashjoin_freelist,
+						   &pgstrom_shmem_head->slab_gpuhashjoin_blocklist,
+						   sizeof(pgstrom_gpuhashjoin));
+}
+
+void
+pgstrom_free_gpuhashjoin(pgstrom_gpuhashjoin *gpuhashjoin)
+{
+	pgstrom_free_slab(&pgstrom_shmem_head->slab_gpuhashjoin_lock,
+					  &pgstrom_shmem_head->slab_gpuhashjoin_freelist,
+					  sizeof(pgstrom_gpuhashjoin),
+					  gpuhashjoin);
+}
+
+/*
+ * pgstrom_shmem_slab_info
+ *
+ * shows list of slabs being allocated
+ */
+typedef struct
+{
+	void	   *address;
+	const char *slab_name;
+	const char *filename;
+	int			lineno;
+	uint32		owner;
+	bool		active;
+	bool		broken;
+} shmem_slab_info;
+
+static void
+collect_shmem_slab_info(List **p_results,
+						const char *slab_name,
+						slock_t *slab_lock,
+						dlist_head *slab_blocklist,
+						size_t slab_size)
+{
+	SpinLockAcquire(slab_lock);
+	PG_TRY();
+	{
+		dlist_iter	iter;
+		size_t		unitsz = MAXALIGN(offsetof(shmem_slab, data[0]) +
+									  INTALIGN(slab_size) +
+									  sizeof(uint32));
+		dlist_foreach (iter, slab_blocklist)
+		{
+			shmem_slab *entry;
+			uint32	   *magic;
+			size_t		offset;
+
+			for (offset = MAXALIGN(sizeof(dlist_node));
+				 offset + unitsz <= SHMEM_BLOCKSZ - offsetof(shmem_slab,
+															 data[0]);
+				 offset += unitsz)
+			{
+				shmem_slab_info	*slinfo = palloc0(sizeof(shmem_slab_info));
+
+				entry = (shmem_slab *)((char *)iter.cur + offset);
+				magic = (uint32 *)((char *)entry->data + INTALIGN(slab_size));
+				slinfo->address   = entry->data;
+				slinfo->slab_name = slab_name;
+				slinfo->filename  = entry->filename;
+				slinfo->lineno    = entry->lineno;
+				slinfo->owner     = entry->owner;
+				slinfo->active    = (!entry->chain.prev && !entry->chain.next);
+				if (*magic != SHMEM_SLAB_MAGIC ||
+					(!entry->chain.prev && entry->chain.next) ||
+					(entry->chain.prev && !entry->chain.next))
+					slinfo->broken = true;
+				else
+					slinfo->broken = false;
+
+				*p_results = lappend(*p_results, slinfo);
+			}
+		}
+	}
+	PG_CATCH();
+	{
+		SpinLockRelease(slab_lock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	SpinLockRelease(slab_lock);
+}
+
+Datum
+pgstrom_shmem_slab_info(PG_FUNCTION_ARGS)
+{
+	FuncCallContext	   *fncxt;
+	shmem_slab_info	   *slinfo;
+	HeapTuple			tuple;
+	Datum				values[6];
+	bool				isnull[6];
+	char				buf[256];
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		TupleDesc		tupdesc;
+		MemoryContext	oldcxt;
+
+		fncxt = SRF_FIRSTCALL_INIT();
+		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(6, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "address",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "slabname",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "owner",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "location",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "active",
+						   BOOLOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 6, "broken",
+						   BOOLOID, -1, 0);
+		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
+
+		collect_shmem_slab_info((List **)&fncxt->user_fctx,
+								"gpuscan",
+								&pgstrom_shmem_head->slab_gpuscan_lock,
+								&pgstrom_shmem_head->slab_gpuscan_blocklist,
+								sizeof(pgstrom_gpuscan));
+		collect_shmem_slab_info((List **)&fncxt->user_fctx,
+								"gpusort",
+								&pgstrom_shmem_head->slab_gpusort_lock,
+								&pgstrom_shmem_head->slab_gpusort_blocklist,
+								sizeof(pgstrom_gpusort));
+		collect_shmem_slab_info((List **)&fncxt->user_fctx,
+								"gpuhashjoin",
+							&pgstrom_shmem_head->slab_gpuhashjoin_lock,
+							&pgstrom_shmem_head->slab_gpuhashjoin_blocklist,
+								sizeof(pgstrom_gpuhashjoin));
+		MemoryContextSwitchTo(oldcxt);
+	}
+	fncxt = SRF_PERCALL_SETUP();
+
+	if (fncxt->user_fctx == NIL)
+		SRF_RETURN_DONE(fncxt);
+
+	slinfo = linitial((List *) fncxt->user_fctx);
+	fncxt->user_fctx = list_delete_first((List *)fncxt->user_fctx);
+
+	memset(isnull, 0, sizeof(isnull));
+	values[0] = Int64GetDatum((uint64)slinfo->address);
+	values[1] = CStringGetTextDatum(slinfo->slab_name);
+	if (slinfo->active)
+	{
+		values[2] = Int32GetDatum((uint32)slinfo->owner);
+		snprintf(buf, sizeof(buf), "%s:%d", slinfo->filename, slinfo->lineno);
+		values[3] = CStringGetTextDatum(buf);
+	}
+	else
+	{
+		isnull[2] = true;
+		isnull[3] = true;
+	}
+	values[4] = BoolGetDatum(slinfo->active);
+	values[5] = BoolGetDatum(slinfo->broken);
+
+	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
+
+    SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
+}
+PG_FUNCTION_INFO_V1(pgstrom_shmem_slab_info);
 
 /*
  * pgstrom_shmem_sanitycheck
@@ -1035,6 +1370,8 @@ pgstrom_startup_shmem(void)
 	Assert(!found);
 
 	memset(pgstrom_shmem_head, 0, length);
+	/* initialize fields for slabs */
+	pgstrom_init_slab();
 }
 
 void
