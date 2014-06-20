@@ -512,7 +512,7 @@ typedef struct {
 	cl_char			has_recheck;	/* true, if any rows to be rechecked */
 	cl_int			errcode;	/* space to write back*/
 	kern_colmeta	tlist[FLEXIBLE_ARRAY_MEMBER];
-} kern_bulkstore;
+} kern_bulk_store;
 
 #ifdef OPENCL_DEVICE_CODE
 /*

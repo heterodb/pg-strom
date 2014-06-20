@@ -1766,7 +1766,7 @@ gpusort_exec(CustomPlanState *node)
 
 				if (attr->attlen > 0)
 				{
-					slot->tts_values[j] = fetch_att(tcs->cdata[i].values +
+					slot->tts_values[i] = fetch_att(tcs->cdata[i].values +
 													attr->attlen * row_idx,
 													attr->attbyval,
 													attr->attlen);
@@ -1777,11 +1777,11 @@ gpusort_exec(CustomPlanState *node)
 
 					Assert(cs_offset[row_idx] > 0);
 					Assert(tcs->cdata[i].toast != NULL);
-					slot->tts_values[j]
+					slot->tts_values[i]
 						= PointerGetDatum((char *)tcs->cdata[i].toast +
 										  cs_offset[row_idx]);
 				}
-				slot->tts_isnull[j] = false;
+				slot->tts_isnull[i] = false;
 			}
 		}
 		else
