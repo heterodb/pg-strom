@@ -13,6 +13,7 @@
  */
 #include "postgres.h"
 #include "access/relscan.h"
+#include "access/sysattr.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
@@ -226,154 +227,183 @@ kparam_make_attrefs(TupleDesc tupdesc,
 }
 
 bytea *
-kparam_make_kcs_head(TupleDesc tupdesc,
-					 cl_char *attrefs,
+kparam_make_kds_head(TupleDesc tupdesc,
+					 Bitmapset *attrefs,
 					 cl_uint nsyscols,
 					 cl_uint nrooms)
 {
-	kern_column_store *kcs_head;
+	kern_data_store	*kds_head;
 	bytea	   *result;
 	Size		length;
-	int			i, j, ncols = 0;
+	int			i, j, ncols;
 
-	/* count-up number of referenced columns */
-	for (i=0; i < tupdesc->natts; i++)
-	{
-		if (attrefs[i])
-			ncols++;
-	}
-	ncols += nsyscols;
-
-	length = STROMALIGN(offsetof(kern_column_store, colmeta[ncols]));
+	/* allocation */
+	ncols = tupdesc->natts + nsyscols;
+	length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
 	result = palloc0(VARHDRSZ + length);
 	SET_VARSIZE(result, VARHDRSZ + length);
 
-	kcs_head = (kern_column_store *) VARDATA(result);
-	kcs_head->ncols = ncols;
-	kcs_head->nrows = 0;
-	kcs_head->nrooms = nrooms;
+	kds_head = (kern_data_store *) VARDATA(result);
+	kds_head->ncols = ncols;
+	kds_head->nitems = 0;
+	kds_head->nrooms = nrooms;
 
-	for (i=0, j=0; i < tupdesc->natts; i++)
+	for (i=0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute attr = tupdesc->attrs[i];
 
-		if (!attrefs[i])
-			continue;
-		kcs_head->colmeta[j].attnotnull = attr->attnotnull;
-		kcs_head->colmeta[j].attalign = typealign_get_width(attr->attalign);
-		kcs_head->colmeta[j].attlen = attr->attlen;
-		kcs_head->colmeta[j].cs_ofs = length;
-		if (!attr->attnotnull)
-			length += STROMALIGN((nrooms + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
-		length += STROMALIGN((attr->attlen > 0
-							  ? attr->attlen
-							  : sizeof(cl_uint)) * nrooms);
-		j++;
+		j = attr->attnum - FirstLowInvalidHeapAttributeNumber;
+
+		kds_head->colmeta[i].attnotnull = attr->attnotnull;
+		kds_head->colmeta[i].attalign = typealign_get_width(attr->attalign);
+		kds_head->colmeta[i].attlen = attr->attlen;
+		if (!bms_is_member(j, attrefs))
+			kds_head->colmeta[i].attvalid = false;
+		else
+			kds_head->colmeta[i].attvalid = true;
+		/* rest of fields shall be set later */
 	}
-	Assert(j + nsyscols == ncols);
-	kcs_head->length = length;
 
 	return result;
 }
 
 void
-kparam_refresh_kcs_head(kern_parambuf *kparams, cl_uint nrows, cl_uint nrooms)
+kparam_refresh_kds_head(kern_parambuf *kparams,
+						pgstrom_vrelation *vrel)
 {
 	bytea  *kparam_1 = kparam_get_value(kparams, 1);
-	kern_column_store *kcs_head = (kern_column_store *)VARDATA_ANY(kparam_1);
+	kern_data_store *kds_head = (kern_data_store *) VARDATA_ANY(kparam_1);
 	Size	length;
-	int		i;
+	Size	rs_ofs[VRELATION_MAX_RELS];
+	int		i, j, ncols = kds_head->ncols;
 
-	length = STROMALIGN(offsetof(kern_column_store,
-								 colmeta[kcs_head->ncols]));
-	kcs_head->nrows = nrows;
-	kcs_head->nrooms = nrooms;
-	for (i=0; i < kcs_head->ncols; i++)
+	Assert(ncols == vrel->kern.ncols);
+	length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+	kds_head->nitems = vrel->kern.nitems;
+	kds_head->nrooms = vrel->kern.nitems; /* XXX need to fit vrel->nrooms? */
+	memset(rs_ofs, 0, sizeof(rs_ofs));
+
+	for (i=0; i < ncols; i++)
 	{
-		kcs_head->colmeta[i].cs_ofs = length;
-		if (!kcs_head->colmeta[i].attnotnull)
-			length += STROMALIGN((nrooms + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
-		length += STROMALIGN((kcs_head->colmeta[i].attlen > 0
-							  ? kcs_head->colmeta[i].attlen
-							  : sizeof(cl_uint)) * nrooms);
+		StromObject	*rcs;
+
+		if (!kds_head->colmeta[i].attvalid)
+			continue;
+
+		j = vrel->kern.colmeta[i].vrelidx;
+		Assert(j < vrel->rcsnums);
+		rcs = vrel->rcstore[j];
+
+		if (StromTagIs(rcs, TCacheRowStore))
+		{
+			tcache_row_store *trs = (tcache_row_store *)rcs;
+
+			kds_head->colmeta[i].rs_attnum
+				= vrel->kern.colmeta[i].vattnum;
+			/*
+			 * In case when multiple columns in a particular row-store
+			 * is referenced, we don't need to transfer the row-store
+			 * twice. So, rs_ofs[] will point same region.
+			 */
+			if (rs_ofs[j] > 0)
+				kds_head->colmeta[i].ds_offset = rs_ofs[j];
+			else
+			{
+				kds_head->colmeta[i].ds_offset = length;
+				rs_ofs[j] = length;
+				length += STROMALIGN(trs->kern.length);
+			}
+		}
+		else
+		{
+			Assert(StromTagIs(rcs, TCacheColumnStore));
+
+			kds_head->colmeta[i].rs_attnum = 0;
+			kds_head->colmeta[i].ds_offset = length;
+			if (!kds_head->colmeta[i].attnotnull)
+				length += STROMALIGN((kds_head->nrooms +
+									  BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+			length += STROMALIGN((kds_head->colmeta[i].attlen > 0
+								  ? kds_head->colmeta[i].attlen
+								  : sizeof(cl_uint)) * kds_head->nrooms);
+		}
 	}
-	kcs_head->length = length;
+	kds_head->length = length;
 }
 
 bytea *
-kparam_make_ktoast_head(TupleDesc tupdesc,
-						cl_char *attrefs,
-						cl_uint nsyscols)
+kparam_make_ktoast_head(TupleDesc tupdesc, cl_uint nsyscols)
 {
 	kern_toastbuf *ktoast_head;
 	bytea	   *result;
 	Size		length;
-	int			i, ncols = 0;
+	int			ncols;
 
-	/* count-up number of referenced columns */
-	for (i=0; i < tupdesc->natts; i++)
-	{
-		if (attrefs[i])
-			ncols++;
-	}
-	ncols += nsyscols;
-
+	ncols = tupdesc->natts + nsyscols;
 	length = STROMALIGN(offsetof(kern_toastbuf, coldir[ncols]));
 	result = palloc0(VARHDRSZ + length);
 	SET_VARSIZE(result, VARHDRSZ + length);
 
 	ktoast_head = (kern_toastbuf *) VARDATA(result);
-	memset(ktoast_head, 0, length);
 	ktoast_head->length = TOASTBUF_MAGIC;
 	ktoast_head->ncols = ncols;
+	/* individual coldir[] shall be set later */
+
 	return result;
 }
 
 void
 kparam_refresh_ktoast_head(kern_parambuf *kparams,
-						   StromObject *rcstore)
+						   pgstrom_vrelation *vrel)
 {
-	if (!StromTagIs(rcstore, TCacheColumnStore))
-		kparams->poffset[2] = 0;
-	else
-	{
-		tcache_column_store *tcs = (tcache_column_store *)rcstore;
-		bytea	   *kparam_0 = kparam_get_value(kparams, 0);
-		bytea	   *kparam_1 = kparam_get_value(kparams, 1);
-		bytea	   *kparam_2 = kparam_get_value(kparams, 2);
-		cl_char	   *attrefs = (cl_char *)VARDATA_ANY(kparam_0);
-		kern_column_store *kcs_head ;
-		kern_toastbuf *ktoast_head;
-		Size		offset;
-		int			i, j;
-		bool		has_toast = false;
+	bytea	   *kparam_1 = kparam_get_value(kparams, 1);
+	bytea	   *kparam_2 = kparam_get_value(kparams, 2);
+	kern_data_store *kds_head;
+	kern_toastbuf *ktoast_head;
+	StromObject	*rcs;
+	int			i, j, k;
+	Size		offset;
+	bool		has_toast = false;
 
-		kcs_head = (kern_column_store *) VARDATA_ANY(kparam_1);
-		ktoast_head = (kern_toastbuf *) VARDATA_ANY(kparam_2);
-		ktoast_head->length = TOASTBUF_MAGIC;
-		ktoast_head->ncols = kcs_head->ncols;
-		offset = STROMALIGN(offsetof(kern_toastbuf,
-									 coldir[ktoast_head->ncols]));
-		for (i=0, j=0; i < tcs->ncols; i++)
+	kds_head = (kern_data_store *) VARDATA_ANY(kparam_1);
+	ktoast_head = (kern_toastbuf *) VARDATA_ANY(kparam_2);
+	Assert(ktoast_head->length == TOASTBUF_MAGIC);
+	Assert(ktoast_head->ncols == kds_head->ncols);
+	offset = STROMALIGN(offsetof(kern_toastbuf,
+								 coldir[ktoast_head->ncols]));
+	for (i=0; i < ktoast_head->ncols; i++)
+	{
+		ktoast_head->coldir[i] = (cl_uint)(-1);
+
+		/* column is not referenced or fixed-length variable */
+		if (!kds_head->colmeta[i].attvalid ||
+			kds_head->colmeta[i].attlen > 0)
+			continue;
+
+		/* row-store does not need individula toast buffer */
+		j = vrel->kern.colmeta[i].vrelidx;
+		Assert(j < vrel->rcsnums);
+		rcs = vrel->rcstore[j];
+
+		if (StromTagIs(rcs, TCacheColumnStore))
 		{
-			if (!attrefs[i])
-				continue;
-			if (!tcs->cdata[i].toast)
-				ktoast_head->coldir[j] = (cl_uint)(-1);
-			else
+			tcache_column_store *tcs = (tcache_column_store *)rcs;
+
+			k = vrel->kern.colmeta[i].vattnum;
+			if (tcs->cdata[k].toast)
 			{
 				has_toast = true;
-				ktoast_head->coldir[j] = offset;
+				ktoast_head->coldir[i] = offset;
 				offset += STROMALIGN(tcs->cdata[i].toast->tbuf_length);
 			}
-			j++;
 		}
-		if (!has_toast)
-			kparams->poffset[2] = 0;
 	}
+
+	if (!has_toast)
+		kparams->poffset[2] = 0;	/* mark it as null */
 }
 
-
+#if 0
 bytea *
 kparam_make_kprojection(List *target_list)
 {
@@ -440,6 +470,7 @@ out_unavailable:
 	pfree(result);
 	return NULL;
 }
+#endif
 
 /*
  * pgstrom_create_toast_buffer

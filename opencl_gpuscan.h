@@ -59,7 +59,7 @@
  * Gpuscan kernel code assumes all the fields shall be initialized to zero.
  */
 typedef struct {
-	kern_parambuf	kparam;
+	kern_parambuf	kparams;
 	/*
 	 * as above, kern_resultbuf shall be located next to the parambuf
 	 */
@@ -236,10 +236,11 @@ gpuscan_qual_rs(__global kern_gpuscan *kgscan,
  * kern_parambuf for constant values.
  */
 typedef struct {
-	pgstrom_message	msg;	/* = StromTag_GpuScan */
-	Datum			dprog_key;	/* key of device program */
-	StromObject	   *rc_store;	/* = StromTag_TCache(Row|Column)Store */
-	kern_gpuscan	kern;
+	pgstrom_message		msg;		/* = StromTag_GpuScan */
+	Datum				dprog_key;	/* key of device program */
+	StromObject		   *rc_store;	/* = StromTag_TCache(Row|Column)Store */
+	pgstrom_vrelation  *vrel;		/* = StromTag_VirtRelation */
+	kern_gpuscan		kern;
 } pgstrom_gpuscan;
 
 /* for slab allocation */

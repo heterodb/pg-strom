@@ -469,6 +469,7 @@ typedef struct
 	StromObject		sobj;	/* =StromTag_VirtRelation */
 	slock_t			lock;
 	cl_int			refcnt;
+	cl_int			rcsnums;
 	StromObject	   *rcstore[VRELATION_MAX_RELS];
 	kern_vrelation	kern;
 } pgstrom_vrelation;
@@ -560,6 +561,12 @@ extern void pgstrom_close_queue(pgstrom_queue *queue);
 extern pgstrom_queue *pgstrom_get_queue(pgstrom_queue *mqueue);
 extern void pgstrom_put_queue(pgstrom_queue *mqueue);
 extern void pgstrom_put_message(pgstrom_message *msg);
+extern void pgstrom_init_message(pgstrom_message *msg,
+								 StromTag stag,
+								 pgstrom_queue *respq,
+								 void (*cb_process)(pgstrom_message *msg),
+								 void (*cb_release)(pgstrom_message *msg),
+								 bool perfmon_enabled);
 extern void pgstrom_init_mqueue(void);
 extern Datum pgstrom_mqueue_info(PG_FUNCTION_ARGS);
 
@@ -573,18 +580,16 @@ extern bytea *kparam_make_attrefs_by_resnums(TupleDesc tupdesc,
 											 List *attnums_list);
 extern bytea *kparam_make_attrefs(TupleDesc tupdesc,
 								  List *used_vars, Index varno);
-extern bytea *kparam_make_kcs_head(TupleDesc tupdesc,
-								   cl_char *attrefs,
+extern bytea *kparam_make_kds_head(TupleDesc tupdesc,
+								   Bitmapset *attrefs,
 								   cl_uint nsyscols,
 								   cl_uint nrooms);
-extern void kparam_refresh_kcs_head(kern_parambuf *kparams,
-									cl_uint nrows,
-									cl_uint nrooms);
+extern void kparam_refresh_kds_head(kern_parambuf *kparams,
+									pgstrom_vrelation *vrel);
 extern bytea *kparam_make_ktoast_head(TupleDesc tupdesc,
-									  cl_char *attrefs,
 									  cl_uint nsyscols);
 extern void kparam_refresh_ktoast_head(kern_parambuf *kparams,
-									   StromObject *rcstore);
+									   pgstrom_vrelation *vrel);
 extern bytea *kparam_make_kprojection(List *target_list);
 
 extern void pgstrom_release_bulk_slot(pgstrom_bulk_slot *bulk_slot);
@@ -981,14 +986,14 @@ KPARAM_GET_ATTREFS(kern_parambuf *kparams)
 	return (cl_char *)VARDATA_ANY(vl_datum);
 }
 
-static inline kern_column_store *
-KPARAM_GET_KCS_HEAD(kern_parambuf *kparams)
+static inline kern_data_store *
+KPARAM_GET_KDS_HEAD(kern_parambuf *kparams)
 {
 	bytea  *vl_datum = kparam_get_value(kparams, 1);
 
 	if (!vl_datum)
 		return NULL;
-	return (kern_column_store *)VARDATA_ANY(vl_datum);
+	return (kern_data_store *)VARDATA_ANY(vl_datum);
 }
 
 static inline kern_toastbuf *
@@ -999,16 +1004,6 @@ KPARAM_GET_KTOAST_HEAD(kern_parambuf *kparams)
 	if (!vl_datum)
 		return NULL;
 	return (kern_toastbuf *)VARDATA_ANY(vl_datum);
-}
-
-static inline kern_projection *
-KPARAM_GET_KPROJECTION(kern_parambuf *kparams)
-{
-	bytea  *vl_datum = kparam_get_value(kparams, 3);
-
-	if (!vl_datum)
-		return NULL;
-	return (kern_projection *)VARDATA_ANY(vl_datum);
 }
 
 #endif	/* PG_STROM_H */

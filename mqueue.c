@@ -549,6 +549,30 @@ pgstrom_put_message(pgstrom_message *message)
 }
 
 /*
+ * pgstrom_init_message
+ *
+ * utility routine to initialize common message header
+ */
+void
+pgstrom_init_message(pgstrom_message *message,
+					 StromTag stag,
+					 pgstrom_queue *respq,
+					 void (*cb_process)(pgstrom_message *message),
+					 void (*cb_release)(pgstrom_message *message),
+					 bool perfmon_enabled)
+{
+	memset(message, 0, sizeof(pgstrom_message));
+	message->sobj.stag = stag;
+	SpinLockInit(&message->lock);
+	message->refcnt = 1;
+	if (respq != NULL)
+		message->respq = pgstrom_get_queue(respq);
+	message->cb_process = cb_process;
+	message->cb_release = cb_release;
+	message->pfm.enabled = perfmon_enabled;
+}
+
+/*
  * pgstrom_mqueue_info
  *
  * shows all the message queues being already acquired as SQL funcion

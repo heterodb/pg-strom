@@ -306,11 +306,27 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 		return NULL;
 
 	/*
-	 * A dummy constant - KPARAM_0 is an array of bool to show referenced
-	 * columns, in GpuScan.
+	 * A dummy constant
+	 * KPARAM_0 - an array of bool to show referenced columns.
+	 * KPARAM_1 - a template of kern_data_store to be loaded.
+	 * KPARAM_2 - a template of kern_toastbuf to be loaded.
 	 * Just a placeholder here. Set it up later.
 	 */
-	context->used_params = list_make1(makeConst(BYTEAOID,
+	context->used_params = list_make3(makeConst(BYTEAOID,
+												-1,
+												InvalidOid,
+												-1,
+												PointerGetDatum(NULL),
+												true,
+												false),
+									  makeConst(BYTEAOID,
+												-1,
+												InvalidOid,
+												-1,
+												PointerGetDatum(NULL),
+												true,
+												false),
+									  makeConst(BYTEAOID,
 												-1,
 												InvalidOid,
 												-1,
@@ -799,6 +815,92 @@ pgstrom_setup_kern_colstore_head(GpuScanState *gss, kern_resultbuf *kresult,
 	kcs_head->length = offset;
 }
 
+static pgstrom_gpuscan
+pgstrom_create_gpuscan(GpuScanState *gss, StromObject *rcstore)
+{
+
+
+	if (StromTagIs(sobject, TCacheRowStore))
+		nrows = ((tcache_row_store *)sobject)->kern.nrows;
+	else
+		nrows = ((tcache_column_store *)sobject)->nrows;
+
+	length = (STROMALIGN(offsetof(pgstrom_gpuscan, kern.kparam)) +
+			  STROMALIGN(gss->kparambuf->length));
+	gpuscan = pgstrom_shmem_alloc(length);
+	if (!gpuscan)
+		elog(ERROR, "out of shared memory");
+
+	/* fields of pgstrom_gpuscan */
+	pgstrom_init_message(&gpuscan->msg,
+						 StromTag_GpuScan,
+						 gss->dprog_key != 0 ? gss->mqueue : NULL,
+						 StromTagIs(sobject, TCacheRowStore)
+						 ? clserv_process_gpuscan_row
+						 : clserv_process_gpuscan_column,
+						 clserv_put_gpuscan,
+						 gss->pfm.enabled);
+	if (gss->dprog_key != 0)
+		gpuscan->dprog_key = pgstrom_retain_devprog_key(gss->dprog_key);
+	else
+		gpuscan->dprog_key = 0;
+	gpuscan->rc_store = sobject;
+
+	/* copy kern_parambuf */
+	Assert(gss->kparambuf->length == STROMALIGN(gss->kparambuf->length));
+	memcpy(&gpuscan->kern.kparams, gss->kparambuf, gss->kparambuf->length);
+
+
+
+	/* create vrelation to get results */
+
+
+	/* setup kern_data_store and kern_toastbuf */
+	kparam_refresh_kds_head(&gpuscan->kern.kparams, vrel);
+	kparam_refresh_ktoast_head(&gpuscan->kern.kparams, vrel);
+
+
+
+
+			/* kern_resultbuf portion */
+			kresult = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
+			kresult->nrooms = nrows;
+			kresult->nitems = 0;
+			kresult->errcode = 0;
+
+			/*
+			 * In case of no device program is valid, it expects all the
+			 * filtering jobs are done on host side later, so we modify
+			 * the result array as if all the records are visible according
+			 * to opencl kernel.
+			 * Elsewhere, result array of kern_resultbuf has another usage.
+			 * It is never used until writeback-dma happen, so we can use
+			 * this region as a source of the header portion of
+			 * kern_column_store structure.
+			 */
+			if (gss->dprog_key == 0)
+			{
+				for (i=0; i < kresult->nrooms; i++)
+					kresult->results[i] = i + 1;
+				kresult->nitems = kresult->nrooms;
+			}
+			else
+			{
+				bool	with_row_store = StromTagIs(sobject, TCacheRowStore);
+				pgstrom_setup_kern_colstore_head(gss, kresult, with_row_store);
+			}
+			Assert(pgstrom_shmem_sanitycheck(gpuscan));
+		}
+		else
+
+
+
+
+
+
+
+}
+
 static pgstrom_gpuscan *
 pgstrom_load_gpuscan(GpuScanState *gss)
 {
@@ -881,89 +983,13 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 			}
 		}
 		if (gss->pfm.enabled)
+		{
 			gettimeofday(&tv2, NULL);
+			gss->pfm.time_to_load += timeval_diff(&tv1, &tv2);
+		}
 
 		if (sobject)
-		{
-			/*
-			 * OK, let's create a pgstrom_gpuscan structure according to
-			 * the pgstrom_row_store being allocated above.
-			 */
-			if (StromTagIs(sobject, TCacheRowStore))
-				nrows = ((tcache_row_store *)sobject)->kern.nrows;
-			else
-				nrows = ((tcache_column_store *)sobject)->nrows;
-
-			length = (STROMALIGN(offsetof(pgstrom_gpuscan, kern.kparam)) +
-					  STROMALIGN(gss->kparambuf->length) +
-					  STROMALIGN(Max(offsetof(kern_resultbuf,
-											  results[nrows]),
-									 offsetof(kern_resultbuf,
-											  results[0]) +
-									 offsetof(kern_column_store,
-											  colmeta[gss->cs_attnums]) +
-									 offsetof(kern_toastbuf,
-											  coldir[gss->cs_attnums]) +
-									 sizeof(cl_int) * gss->cs_attnums)));
-			gpuscan = pgstrom_shmem_alloc(length);
-			if (!gpuscan)
-				elog(ERROR, "out of shared memory");
-
-			/* Fields of pgstrom_gpuscan */
-			memset(gpuscan, 0, sizeof(pgstrom_gpuscan));
-			gpuscan->msg.sobj.stag = StromTag_GpuScan;
-			SpinLockInit(&gpuscan->msg.lock);
-			gpuscan->msg.refcnt = 1;
-			if (gss->dprog_key != 0)
-			{
-				gpuscan->msg.respq = pgstrom_get_queue(gss->mqueue);
-				gpuscan->dprog_key
-					= pgstrom_retain_devprog_key(gss->dprog_key);
-			}
-			gpuscan->msg.cb_process = (StromTagIs(sobject, TCacheRowStore)
-									   ? clserv_process_gpuscan_row
-									   : clserv_process_gpuscan_column);
-			gpuscan->msg.cb_release = clserv_put_gpuscan;
-			gpuscan->msg.pfm.enabled = gss->pfm.enabled;
-			if (gpuscan->msg.pfm.enabled)
-				gpuscan->msg.pfm.time_to_load += timeval_diff(&tv1, &tv2);
-			gpuscan->rc_store = sobject;
-
-			/* kern_parambuf */
-			kparam = &gpuscan->kern.kparam;
-			memcpy(kparam, gss->kparambuf, gss->kparambuf->length);
-			Assert(gss->kparambuf->length
-				   == STROMALIGN(gss->kparambuf->length));
-
-			/* kern_resultbuf portion */
-			kresult = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
-			kresult->nrooms = nrows;
-			kresult->nitems = 0;
-			kresult->errcode = 0;
-
-			/*
-			 * In case of no device program is valid, it expects all the
-			 * filtering jobs are done on host side later, so we modify
-			 * the result array as if all the records are visible according
-			 * to opencl kernel.
-			 * Elsewhere, result array of kern_resultbuf has another usage.
-			 * It is never used until writeback-dma happen, so we can use
-			 * this region as a source of the header portion of
-			 * kern_column_store structure.
-			 */
-			if (gss->dprog_key == 0)
-			{
-				for (i=0; i < kresult->nrooms; i++)
-					kresult->results[i] = i + 1;
-				kresult->nitems = kresult->nrooms;
-			}
-			else
-			{
-				bool	with_row_store = StromTagIs(sobject, TCacheRowStore);
-				pgstrom_setup_kern_colstore_head(gss, kresult, with_row_store);
-			}
-			Assert(pgstrom_shmem_sanitycheck(gpuscan));
-		}
+			gpuscan = pgstrom_create_gpuscan(gss, sobject);
 		else
 			gpuscan = NULL;
 	}

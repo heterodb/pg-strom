@@ -188,6 +188,16 @@ typedef struct {
 #define HEAP_XMAX_EXCL_LOCK		0x0040	/* xmax is exclusive locker */
 #define HEAP_XMAX_LOCK_ONLY		0x0080	/* xmax, if valid, is only a locker */
 
+/*
+ * information stored in t_infomask2:
+ */
+#define HEAP_NATTS_MASK			0x07FF	/* 11 bits for number of attributes */
+#define HEAP_KEYS_UPDATED		0x2000	/* tuple was updated and key cols
+										 * modified, or tuple deleted */
+#define HEAP_HOT_UPDATED		0x4000	/* tuple was HOT-updated */
+#define HEAP_ONLY_TUPLE			0x8000	/* this is heap-only tuple */
+#define HEAP2_XACT_MASK			0xE000	/* visibility-related bits */
+
 #endif
 
 /*
@@ -196,32 +206,6 @@ typedef struct {
 #define STROMALIGN_LEN			16
 #define STROMALIGN(LEN)			TYPEALIGN(STROMALIGN_LEN,LEN)
 #define STROMALIGN_DOWN(LEN)	TYPEALIGN_DOWN(STROMALIGN_LEN,LEN)
-
-/*
- * kern_colmeta
- *
- * It stores metadata of columns being on row-store because tuple with NULL
- * values does not have always constant 
- */
-typedef struct {
-	/* true, if column never has NULL (thus, no nullmap required) */
-	cl_char			attnotnull;
-	/* alignment; 1,2,4 or 8, not characters in pg_attribute */
-	cl_char			attalign;
-	/* length of attribute */
-	cl_short		attlen;
-	union {
-		/* offset to null-map and column-array from the head of column-store,
-		 * if it is kern_column_store. */
-		cl_uint			cs_ofs;
-
-		/* identifier of source relation and column, if kern_vrelation */
-		struct {
-			cl_ushort relid;	/* index of relation array */
-			cl_ushort colid;	/* index of the column within above relation */
-		} src;
-	};
-} kern_colmeta;
 
 /*
  * kern_row_store
@@ -268,7 +252,11 @@ typedef struct {
 	cl_uint			length;	/* length of this kernel row_store */
 	cl_uint			ncols;	/* number of columns in the source relation */
 	cl_uint			nrows;	/* number of rows in this store */
-	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];	/* metadata of columns */
+	struct {
+		cl_char		attnotnull;	/* true, if always not null */
+		cl_char		attalign;	/* type alignment */
+		cl_short	attlen;		/* length of type */
+	} colmeta[FLEXIBLE_ARRAY_MEMBER];	/* simplified kern_colmeta */
 } kern_row_store;
 
 static inline __global cl_uint *
@@ -309,9 +297,9 @@ kern_rowstore_get_tuple(__global kern_row_store *krs, cl_uint krs_index)
  */
 
 /*
- * kern_column_store
+ * kern_data_store
  *
- * It stores arrays in column-format
+ * It stores row- and column-oriented values in the kernel space.
  * +-----------------+
  * | length          |
  * +-----------------+
@@ -320,11 +308,11 @@ kern_rowstore_get_tuple(__global kern_row_store *krs, cl_uint krs_index)
  * | nrows (=N)      |
  * +-----------------+
  * | colmeta[0]      |
- * | colmeta[1]   o-------+ colmeta[j].cs_ofs points an offset of the column-
- * |    :            |    | array in this store.
+ * | colmeta[1]   o-------+ colmeta[j].ds_offset points offset of column- or
+ * |    :            |    | row-array in this data-store
  * | colmeta[M-1]    |    |
- * +-----------------+    | (char *)(kcs) + colmeta[j].cs_ofs points is
- * | column array    |    | the address of column array.
+ * +-----------------+    | (char *)(kcs) + colmeta[j].ds_offset is address
+ * | column array    |    | of the column array.
  * | for column-0    |    |
  * +-----------------+ <--+
  * | +---------------|
@@ -335,6 +323,10 @@ kern_rowstore_get_tuple(__global kern_row_store *krs, cl_uint krs_index)
  * | | column-1      |
  * | |               |
  * +-+---------------+
+ * | row-store for   | If colmeta[j].attisrow is TRUE, the region pointed by
+ * | column-2 and    | colmeta[j].ds_offset is row-store, instead of column-
+ * | column-X, ...   | array. Its layout is kern_row_store above.
+ * +-+---------------+
  * |      :          |
  * |      :          |
  * +-----------------+
@@ -343,12 +335,36 @@ kern_rowstore_get_tuple(__global kern_row_store *krs, cl_uint krs_index)
  * +-----------------+
  */
 typedef struct {
+	/* true, if column never has NULL (thus, no nullmap required) */
+	cl_char			attnotnull;
+	/* alignment; 1,2,4 or 8, not characters in pg_attribute */
+	cl_char			attalign;
+	/* length of attribute */
+	cl_short		attlen;
+	/* true, if valid attribute in kernel space;
+	 * elsewhere, never referenced.
+	 */
+	cl_char			attvalid;
+	/* padding byte; reserved for future usage */
+	cl_char			padding;
+	/* if positive number, it means attribute number within row-store.
+	 * Elsewhere, it is column-store.
+	 */
+	cl_short		rs_attnum;
+	/* offset to nullmap and column-array or row-store from the head of
+	 * the kern_data_store. If multiple column reference same row-store,
+	 * it can be same offset, however, different vattidx.
+	 */
+	cl_uint			ds_offset;
+} kern_colmeta;
+
+typedef struct {
 	cl_uint			length;	/* length of this kernel column-store */
 	cl_uint			ncols;	/* number of columns in this store */
-	cl_uint			nrows;  /* number of records in this store */
+	cl_uint			nitems; /* number of rows in this store */
 	cl_uint			nrooms;	/* max number of records can be stored */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
-} kern_column_store;
+} kern_data_store;
 
 /*
  * kern_toastbuf
@@ -389,6 +405,123 @@ typedef struct {
 	cl_uint			coldir[FLEXIBLE_ARRAY_MEMBER];
 } kern_toastbuf;
 
+#if 1
+/*
+ * kern_get_datum
+ *
+ * Reference to a particular datum on the supplied kernel data store.
+ * It returns NULL, if it is a really null-value in context of SQL,
+ * or in case when out of range with error code
+ */
+static inline __global void *
+kern_get_datum_rs(__global kern_row_store *krs,
+				  cl_uint colidx, cl_uint rowidx)
+{
+	__global rs_tuple  *rs_tup;
+	cl_uint		ncols;
+	cl_uint		offset;
+	cl_uint		i;
+
+	rs_tup = kern_rowstore_get_tuple(krs, rowidx);
+	if (!rs_tup)
+		return NULL;
+
+	offset = rs_tup->data.t_hoff;
+	ncols = (rs_tup->data.t_infomask2 & HEAP_NATTS_MASK);
+
+	/* a shortcut when colidx is obviously out of range */
+	if (colidx >= ncols)
+		return NULL;
+
+	for (i=0; i < ncols; i++)
+	{
+		if ((rs_tup->data.t_infomask & HEAP_HASNULL) != 0 &&
+			att_isnull(i, rs_tup->data.t_bits))
+		{
+			if (i == colidx)
+				return NULL;
+		}
+		else
+		{
+			__global char  *addr;
+
+			if (krs->colmeta[i].attlen > 0)
+				offset = TYPEALIGN(krs->colmeta[i].attalign, offset);
+			else if (!VARATT_NOT_PAD_BYTE((uintptr_t)&rs_tup->data + offset))
+				offset = TYPEALIGN(krs->colmeta[i].attalign, offset);
+
+			addr = ((__global char *)&rs_tup->data) + offset;
+			if (i == colidx)
+				return addr;
+
+			offset += (krs->colmeta[i].attlen > 0
+					   ? krs->colmeta[i].attlen
+					   : VARSIZE_ANY(addr));
+		}
+	}
+	return NULL;
+}
+
+static inline __global void *
+kern_get_datum(__global kern_data_store *kds,
+			   __global kern_toastbuf *ktoast,
+			   cl_uint colidx, cl_uint rowidx)
+{
+	kern_colmeta	cmeta;
+	cl_uint			offset;
+	__global void  *addr;
+
+	/* is it out of range? */
+	if (colidx >= kds->ncols || rowidx >= kds->nitems)
+		return NULL;
+
+	cmeta = kds->colmeta[colidx];
+	/* is this column to be referenced? */
+	if (!cmeta.attvalid)
+		return NULL;
+	offset = cmeta.ds_offset;
+
+	/* variable reference in row-store is a little expensive */
+	if (cmeta.rs_attnum > 0)
+	{
+		__global kern_row_store *krs = (__global kern_row_store *)
+			((__global char *)kds + offset);
+
+		return kern_get_datum_rs(krs, colidx, rowidx);
+	}
+	/* elsewhere, reference to the column-array, straight-forward */
+	if (!cmeta.attnotnull)
+	{
+		if (att_isnull(rowidx, (__global char *)kds + offset))
+			return NULL;
+		offset += STROMALIGN((kds->nrooms +
+							  BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+	}
+	if (cmeta.attlen > 0)
+	{
+		offset += cmeta.attlen * rowidx;
+		addr = (__global void *)((__global char *)kds + offset);
+	}
+	else
+	{
+		cl_uint	vl_ofs;
+
+		offset += sizeof(cl_uint) * rowidx;
+		vl_ofs = *((__global cl_uint *)((__global char *)kds + offset));
+		if (ktoast->length == TOASTBUF_MAGIC)
+			vl_ofs += ktoast->coldir[colidx];
+		addr = (__global void *)((__global char *)ktoast + vl_ofs);
+	}
+	return addr;
+}
+
+
+
+
+
+
+
+#else
 /*
  * kern_get_datum
  *
@@ -422,6 +555,7 @@ kern_get_datum(__global kern_column_store *kcs,
 
 	return (__global void *)((__global char *)kcs + offset);
 }
+#endif
 
 /*
  * kern_parambuf
@@ -516,7 +650,13 @@ typedef struct {
 	cl_int			nrooms;
 	cl_char			has_recheck;	/* true, if any rows to be rechecked */
 	cl_int			errcode;	/* space to write back*/
-	kern_colmeta	vtlist[FLEXIBLE_ARRAY_MEMBER];
+	struct {
+		cl_char		attnotnull;
+		cl_char		attalign;
+		cl_short	attlen;
+		cl_short	vrelidx;
+		cl_short	vattnum;
+	} colmeta[FLEXIBLE_ARRAY_MEMBER];
 } kern_vrelation;
 
 #define KERN_VRELATION_RINDEX(kvrel, relid)								\
