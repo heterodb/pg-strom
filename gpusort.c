@@ -883,7 +883,7 @@ pgstrom_release_gpusort(pgstrom_message *msg)
 		gs_chunk = dlist_container(pgstrom_gpusort_chunk, chain, iter.cur);
 		pgstrom_release_gpusort_chunk(gs_chunk);
 	}
-	pgstrom_free_gpusort(gpusort);
+	pgstrom_shmem_free(gpusort);
 }
 
 /*
@@ -894,8 +894,9 @@ pgstrom_release_gpusort(pgstrom_message *msg)
 static pgstrom_gpusort *
 pgstrom_create_gpusort(GpuSortState *gsortstate)
 {
-	pgstrom_gpusort	   *gpusort = pgstrom_alloc_gpusort();
+	pgstrom_gpusort	   *gpusort;
 
+	gpusort = pgstrom_shmem_alloc(sizeof(pgstrom_gpusort));
 	if (!gpusort)
 		ereport(ERROR,
 				(errcode(ERRCODE_OUT_OF_MEMORY),
