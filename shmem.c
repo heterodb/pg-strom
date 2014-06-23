@@ -24,9 +24,6 @@
 #include "utils/memutils.h"
 #include "utils/pg_crc.h"
 #include "pg_strom.h"
-#include "opencl_gpuscan.h"
-#include "opencl_gpusort.h"
-#include "opencl_hashjoin.h"
 #include <limits.h>
 #include <unistd.h>
 

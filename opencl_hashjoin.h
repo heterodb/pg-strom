@@ -643,12 +643,5 @@ typedef struct
 	kern_hashjoin  *kern;
 } pgstrom_gpuhashjoin;
 
-/* for slab alloc/free */
-extern pgstrom_gpuhashjoin *
-__pgstrom_alloc_gpuhashjoin(const char *filename, int lineno);
-#define pgstrom_alloc_gpuhashjoin()				\
-	__pgstrom_alloc_gpuhashjoin(__FILE__, __LINE)
-extern void pgstrom_free_gpuhashjoin(pgstrom_gpuhashjoin *gpuhashjoin);
-
 #endif	/* OPENCL_DEVICE_CODE */
 #endif	/* OPENCL_HASHJOIN_H */
