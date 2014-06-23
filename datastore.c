@@ -599,6 +599,84 @@ out_unavailable:
 #endif
 
 /*
+ * pgstrom_get_row_store
+ *
+ * increments reference counter of row-store
+ */
+tcache_row_store *
+pgstrom_get_row_store(tcache_row_store *trs)
+{
+	SpinLockAcquire(&trs->refcnt_lock);
+	Assert(trs->refcnt > 0);
+	trs->refcnt++;
+	SpinLockRelease(&trs->refcnt_lock);
+
+	return trs;
+}
+
+/*
+ * pgstrom_put_row_store
+ *
+ * decrements reference counter of row-store, then release it if no longer
+ * referenced.
+ */
+void
+pgstrom_put_row_store(tcache_row_store *trs)
+{
+	bool	do_release = false;
+
+	SpinLockAcquire(&trs->refcnt_lock);
+	Assert(trs->refcnt > 0);
+	if (--trs->refcnt == 0)
+		do_release = true;
+	SpinLockRelease(&trs->refcnt_lock);
+
+	if (do_release)
+		pgstrom_shmem_free(trs);
+}
+
+/*
+ * pgstrom_create_row_store
+ *
+ * create a row-store with refcnt=1
+ */
+tcache_row_store *
+tcache_create_row_store(TupleDesc tupdesc)
+{
+	tcache_row_store *trs;
+	int		i;
+
+	trs = pgstrom_shmem_alloc(ROWSTORE_DEFAULT_SIZE);
+	if (!trs)
+		elog(ERROR, "out of shared memory");
+
+	memset(trs, 0, sizeof(StromObject));
+	trs->sobj.stag = StromTag_TCacheRowStore;
+	SpinLockInit(&trs->refcnt_lock);
+	trs->refcnt = 1;
+	memset(&trs->chain, 0, sizeof(dlist_node));
+	trs->usage
+		= STROMALIGN_DOWN(ROWSTORE_DEFAULT_SIZE -
+						  offsetof(tcache_row_store, kern));
+	trs->blkno_max = 0;
+	trs->blkno_min = MaxBlockNumber;
+	trs->kern.length = trs->usage;
+	trs->kern.ncols = tupdesc->natts;
+	trs->kern.nrows = 0;
+
+	/* construct colmeta structure for this row-store */
+	for (i=0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = tupdesc->attrs[i];
+
+		trs->kern.colmeta[i].attnotnull = attr->attnotnull;
+		trs->kern.colmeta[i].attalign = typealign_get_width(attr->attalign);
+		trs->kern.colmeta[i].attlen = attr->attlen;
+	}
+	return trs;
+}
+
+/*
  * pgstrom_create_toast_buffer
  *
  * creata a toast-buffer to be attached on a particular column-store with

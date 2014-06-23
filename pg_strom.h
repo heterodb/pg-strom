@@ -606,6 +606,10 @@ extern bytea *kparam_make_kprojection(List *target_list);
 extern void pgstrom_release_bulk_slot(pgstrom_bulk_slot *bulk_slot);
 extern bool pgstrom_plan_can_multi_exec(const PlanState *ps);
 
+extern tcache_row_store *pgstrom_create_row_store(TupleDesc tupdesc);
+extern tcache_row_store *pgstrom_get_row_store(tcache_row_store *trs);
+extern void pgstrom_put_row_store(tcache_row_store *trs);
+
 extern tcache_toastbuf *pgstrom_create_toast_buffer(Size required);
 extern tcache_toastbuf *pgstrom_expand_toast_buffer(tcache_toastbuf *tbuf);
 extern tcache_toastbuf *pgstrom_get_toast_buffer(tcache_toastbuf *tbuf);
