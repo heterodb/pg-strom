@@ -242,12 +242,5 @@ typedef struct {
 	kern_gpuscan	kern;
 } pgstrom_gpuscan;
 
-/* for slab allocation */
-extern pgstrom_gpuscan *
-__pgstrom_alloc_gpuscan(const char *filename, int lineno);
-#define pgstrom_alloc_gpuscan()					\
-	__pgstrom_alloc_gpuscan(__FILE__, __LINE__)
-extern void pgstrom_free_gpuscan(pgstrom_gpuscan *gpuscan);
-
 #endif	/* OPENCL_DEVICE_CODE */
 #endif	/* OPENCL_GPUSCAN_H */

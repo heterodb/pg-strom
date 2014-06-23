@@ -894,12 +894,5 @@ typedef struct
 	dlist_head		gs_chunks;	/* chunked being sorted, or to be sorted */
 } pgstrom_gpusort;
 
-/* for slab allocation */
-extern pgstrom_gpusort *
-__pgstrom_alloc_gpusort(const char *filename, int lineno);
-#define pgstrom_alloc_gpusort()								\
-	__pgstrom_alloc_gpusort(__FILE__, __LINE__)
-extern void pgstrom_free_gpusort(pgstrom_gpusort *gpusort);
-
 #endif	/* !OPENCL_DEVICE_CODE */
 #endif	/* OPENCL_GPUSORT_H */
