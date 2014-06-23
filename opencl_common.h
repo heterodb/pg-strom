@@ -644,25 +644,17 @@ typedef struct {
  */
 #define VRELATION_MAX_RELS		8
 typedef struct {
-	cl_int			nrels;
-	cl_int			ncols;
+	cl_short		nrels;
+	cl_char			has_recheck;	/* true, if any rows to be rechecked */
+	cl_char			__padding;
 	cl_int			nitems;
 	cl_int			nrooms;
-	cl_char			has_recheck;	/* true, if any rows to be rechecked */
 	cl_int			errcode;	/* space to write back*/
-	struct {
-		cl_char		attnotnull;
-		cl_char		attalign;
-		cl_short	attlen;
-		cl_short	vrelidx;
-		cl_short	vattnum;
-	} colmeta[FLEXIBLE_ARRAY_MEMBER];
+	cl_int			rindex[FLEXIBLE_ARRAY_MEMBER];
 } kern_vrelation;
 
-#define KERN_VRELATION_RINDEX(kvrel, relid)								\
-	((__global char *)(kvrel) +											\
-	 STROMALIGN(offsetof(kern_vrelation, vtlist[(kvrel)->ncols])) +		\
-	 STROMALIGN(sizeof(cl_uint) * (kvrel)->nrooms) * (relid))
+#define KERN_VRELATION_RINDEX(kvrel, relidx)	\
+	((kvrel)->rindex + ((relidx) * (kvrel)->nitems))
 
 #ifdef OPENCL_DEVICE_CODE
 /*

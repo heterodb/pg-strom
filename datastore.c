@@ -20,6 +20,127 @@
 #include "pg_strom.h"
 
 /*
+ * pgstrom_get_vrelation()
+ *
+ * it increments reference counter of the vrelation
+ */
+pgstrom_vrelation *
+pgstrom_get_vrelation(pgstrom_vrelation *vrel)
+{
+	SpinLockAcquire(&vrel->lock);
+	Assert(vrel->refcnt > 0);
+	vrel->refcnt++;
+	SpinLockRelease(&vrel->lock);
+	return vrel;
+}
+
+/*
+ * pgstrom_put_vrelation()
+ *
+ */
+void
+pgstrom_put_vrelation(pgstrom_vrelation *vrel)
+{
+	bool	do_release = false;
+	int		i;
+
+	SpinLockAcquire(&vrel->lock);
+	Assert(vrel->refcnt > 0);
+	if (--vrel->refcnt == 0)
+		do_release = true;
+	SpinLockRelease(&vrel->lock);
+
+	if (do_release)
+	{
+		for (i=0; i < vrel->rcsnums; i++)
+			pgstrom_put_rcstore(vrel->rcstore[i]);
+		pgstrom_shmem_free(vrel);
+	}
+}
+
+/*
+ * pgstrom_create_vrelation()
+ *
+ * it construct a virtual-relation object according to the supplied
+ * tuple-descriptor, reference bitmap and row-/column-stores.
+ */
+pgstrom_vrelation *
+pgstrom_create_vrelation(TupleDesc tupdesc,
+						 List *vtlist_relidx,	/* natts of int elements */
+						 List *vtlist_attidx,	/* natts of int elements */
+						 int rcsnums, StromObject **rcstore,
+						 cl_uint nitems, cl_uint nrooms)
+{
+	pgstrom_vrelation *vrel;
+	Size		length;
+	Size		offset;
+	int			i, vt_index = 0;
+	ListCell   *lc1;
+	ListCell   *lc2;
+
+	Assert(list_length(vtlist_relidx) == tupdesc->natts &&
+		   list_length(vtlist_attidx) == tupdesc->natts);
+
+	length = (MAXALIGN(offsetof(pgstrom_vrelation, vtlist[tupdesc->natts])) +
+			  MAXALIGN(sizeof(StromObject *) * rcsnums) +
+			  STROMALIGN(offsetof(kern_vrelation, rindex[rcsnums * nrooms])));
+	vrel = pgstrom_shmem_alloc(length);
+	if (!vrel)
+		elog(ERROR, "out of shared memory");
+
+	offset = MAXALIGN(offsetof(pgstrom_vrelation, vtlist[tupdesc->natts]));
+	memset(vrel, 0, offset);
+
+	vrel->sobj.stag = StromTag_VirtRelation;
+	SpinLockInit(&vrel->lock);
+	vrel->refcnt = 1;
+	vrel->ncols = tupdesc->natts;
+	vrel->rcsnums = rcsnums;
+	vrel->rcstore = (StromObject **)((char *)vrel + offset);
+	offset += MAXALIGN(sizeof(StromObject *) * rcsnums);
+	for (i=0; i < rcsnums; i++)
+		vrel->rcstore[i] = pgstrom_get_rcstore(rcstore[i]);
+	vrel->kern = (kern_vrelation *)((char *)vrel + offset);
+
+	forboth (lc1, vtlist_relidx,
+			 lc2, vtlist_attidx)
+	{
+		Form_pg_attribute attr = tupdesc->attrs[vt_index];
+		int		vt_relidx = lfirst_int(lc1);
+		int		vt_attidx = lfirst_int(lc2);
+
+		if (vt_relidx < 0 || vt_relidx >= vrel->rcsnums)
+			elog(ERROR, "vt_relidx %d is out of range", vt_relidx);
+		if (StromTagIs(rcstore[vt_relidx], TCacheRowStore))
+		{
+			tcache_row_store *trs
+				= (tcache_row_store *)rcstore[vt_relidx];
+			if (vt_attidx < 0 || vt_attidx >= trs->kern.ncols)
+				elog(ERROR, "vt_attidx %d is out of range", vt_relidx);
+		}
+		else
+		{
+			tcache_column_store *tcs
+				= (tcache_column_store *)rcstore[vt_relidx];
+			if (vt_attidx < 0 || vt_attidx >= tcs->ncols)
+				elog(ERROR, "vt_attidx %d is out of range", vt_relidx);
+		}
+		vrel->vtlist[vt_index].attnotnull = attr->attnotnull;
+		vrel->vtlist[vt_index].attalign = typealign_get_width(attr->attalign);
+		vrel->vtlist[vt_index].attlen = attr->attlen;
+		vrel->vtlist[vt_index].vrelidx = vt_relidx;
+		vrel->vtlist[vt_index].vattidx = vt_attidx;
+	}
+	/* also set fields in kern_vrelation */
+	memset(vrel->kern, 0, sizeof(kern_vrelation));
+	vrel->kern->nrels = rcsnums;
+	vrel->kern->nitems = nitems;
+	vrel->kern->nrooms = nrooms;
+
+	return vrel;
+}
+
+/*
  * pgstrom_create_param_buffer
  *
  * It construct a param-buffer on the shared memory segment, according to
@@ -228,7 +349,7 @@ kparam_make_attrefs(TupleDesc tupdesc,
 
 bytea *
 kparam_make_kds_head(TupleDesc tupdesc,
-					 Bitmapset *attrefs,
+					 Bitmapset *referenced,
 					 cl_uint nsyscols,
 					 cl_uint nrooms)
 {
@@ -257,7 +378,7 @@ kparam_make_kds_head(TupleDesc tupdesc,
 		kds_head->colmeta[i].attnotnull = attr->attnotnull;
 		kds_head->colmeta[i].attalign = typealign_get_width(attr->attalign);
 		kds_head->colmeta[i].attlen = attr->attlen;
-		if (!bms_is_member(j, attrefs))
+		if (!bms_is_member(j, referenced))
 			kds_head->colmeta[i].attvalid = false;
 		else
 			kds_head->colmeta[i].attvalid = true;
@@ -274,43 +395,44 @@ kparam_refresh_kds_head(kern_parambuf *kparams,
 	bytea  *kparam_1 = kparam_get_value(kparams, 1);
 	kern_data_store *kds_head = (kern_data_store *) VARDATA_ANY(kparam_1);
 	Size	length;
-	Size	rs_ofs[VRELATION_MAX_RELS];
-	int		i, j, ncols = kds_head->ncols;
+	Size   *rs_ofs = palloc0(sizeof(Size) * vrel->rcsnums);
+	int		i, ncols = kds_head->ncols;
 
-	Assert(ncols == vrel->kern.ncols);
+	Assert(ncols == vrel->ncols);
 	length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
-	kds_head->nitems = vrel->kern.nitems;
-	kds_head->nrooms = vrel->kern.nitems; /* XXX need to fit vrel->nrooms? */
-	memset(rs_ofs, 0, sizeof(rs_ofs));
+	kds_head->nitems = vrel->kern->nitems;
+	kds_head->nrooms = vrel->kern->nitems; /* XXX need to fit vrel->nrooms? */
 
 	for (i=0; i < ncols; i++)
 	{
 		StromObject	*rcs;
+		int			vt_relidx;
+		int			vt_attidx;
 
 		if (!kds_head->colmeta[i].attvalid)
 			continue;
 
-		j = vrel->kern.colmeta[i].vrelidx;
-		Assert(j < vrel->rcsnums);
-		rcs = vrel->rcstore[j];
+		vt_relidx = vrel->vtlist[i].vrelidx;
+		vt_attidx = vrel->vtlist[i].vattidx;
+		Assert(vt_relidx < vrel->rcsnums);
+		rcs = vrel->rcstore[vt_relidx];
 
 		if (StromTagIs(rcs, TCacheRowStore))
 		{
 			tcache_row_store *trs = (tcache_row_store *)rcs;
 
-			kds_head->colmeta[i].rs_attnum
-				= vrel->kern.colmeta[i].vattnum;
+			kds_head->colmeta[i].rs_attnum = vt_attidx;
 			/*
 			 * In case when multiple columns in a particular row-store
 			 * is referenced, we don't need to transfer the row-store
 			 * twice. So, rs_ofs[] will point same region.
 			 */
-			if (rs_ofs[j] > 0)
-				kds_head->colmeta[i].ds_offset = rs_ofs[j];
+			if (rs_ofs[vt_relidx] > 0)
+				kds_head->colmeta[i].ds_offset = rs_ofs[vt_relidx];
 			else
 			{
 				kds_head->colmeta[i].ds_offset = length;
-				rs_ofs[j] = length;
+				rs_ofs[vt_relidx] = length;
 				length += STROMALIGN(trs->kern.length);
 			}
 		}
@@ -329,6 +451,7 @@ kparam_refresh_kds_head(kern_parambuf *kparams,
 		}
 	}
 	kds_head->length = length;
+	pfree(rs_ofs);
 }
 
 bytea *
@@ -361,7 +484,9 @@ kparam_refresh_ktoast_head(kern_parambuf *kparams,
 	kern_data_store *kds_head;
 	kern_toastbuf *ktoast_head;
 	StromObject	*rcs;
-	int			i, j, k;
+	int			vt_relidx;
+	int			vt_attidx;
+	int			i;
 	Size		offset;
 	bool		has_toast = false;
 
@@ -381,16 +506,17 @@ kparam_refresh_ktoast_head(kern_parambuf *kparams,
 			continue;
 
 		/* row-store does not need individula toast buffer */
-		j = vrel->kern.colmeta[i].vrelidx;
-		Assert(j < vrel->rcsnums);
-		rcs = vrel->rcstore[j];
+		vt_relidx = vrel->vtlist[i].vrelidx;
+		vt_attidx = vrel->vtlist[i].vattidx;
+		Assert(vt_relidx < vrel->rcsnums);
+		rcs = vrel->rcstore[vt_relidx];
 
 		if (StromTagIs(rcs, TCacheColumnStore))
 		{
 			tcache_column_store *tcs = (tcache_column_store *)rcs;
 
-			k = vrel->kern.colmeta[i].vattnum;
-			if (tcs->cdata[k].toast)
+			Assert(vt_attidx >= 0 && vt_attidx < tcs->ncols);
+			if (tcs->cdata[vt_attidx].toast)
 			{
 				has_toast = true;
 				ktoast_head->coldir[i] = offset;

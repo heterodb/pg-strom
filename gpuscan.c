@@ -853,7 +853,7 @@ pgstrom_create_gpuscan(GpuScanState *gss, StromObject *rcstore)
 
 
 	/* create vrelation to get results */
-
+	vrel = pgstrom_create_vrelation(tupdesc, nitems);
 
 	/* setup kern_data_store and kern_toastbuf */
 	kparam_refresh_kds_head(&gpuscan->kern.kparams, vrel);

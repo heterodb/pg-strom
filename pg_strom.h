@@ -466,18 +466,21 @@ typedef struct
  */
 typedef struct
 {
-	StromObject		sobj;	/* =StromTag_VirtRelation */
-	slock_t			lock;
-	cl_int			refcnt;
-	cl_int			rcsnums;
-	StromObject	   *rcstore[VRELATION_MAX_RELS];
-	kern_vrelation	kern;
+	StromObject		sobj;		/* =StromTag_VirtRelation */
+	slock_t			lock;		/* protection of reference counter */
+	cl_int			refcnt;		/* reference counter */
+	cl_int			ncols;		/* number of columns; width of vtlist[] */
+	cl_int			rcsnums;	/* number of row-/column-store */
+	StromObject	  **rcstore;	/* array of row-/column-stores */
+	kern_vrelation *kern;		/* kern_vrelation */
+	struct {
+		cl_char		attnotnull; /* true, if always not null */
+		cl_char		attalign;   /* type alignment */
+		cl_short	attlen;     /* length of type */
+		cl_short	vrelidx;	/* index of relation in rcstore array */
+		cl_short	vattidx;	/* index of attribute in a certain rcstore */
+	} vtlist[FLEXIBLE_ARRAY_MEMBER];
 } pgstrom_vrelation;
-
-
-
-
-
 
 /*
  * kern_projection
@@ -573,6 +576,14 @@ extern Datum pgstrom_mqueue_info(PG_FUNCTION_ARGS);
 /*
  * datastore.c
  */
+extern pgstrom_vrelation *pgstrom_get_vrelation(pgstrom_vrelation *vrel);
+extern void pgstrom_put_vrelation(pgstrom_vrelation *vrel);
+extern pgstrom_vrelation *
+pgstrom_create_vrelation(TupleDesc tupdesc,
+						 List *vtlist_relidx,	/* natts of int elements */
+						 List *vtlist_attidx,	/* natts of int elements */
+						 int rcsnums, StromObject **rcstore,
+						 cl_uint nitems, cl_uint nrooms);
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
