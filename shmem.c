@@ -71,18 +71,38 @@ typedef struct
 	shmem_block	blocks[FLEXIBLE_ARRAY_MEMBER];
 } shmem_zone;
 
+typedef struct {
+	dlist_node	chain;		/* link to the free list */
+	const char *filename;
+	uint32		lineno;
+	pid_t		owner;
+	Datum		data[FLEXIBLE_ARRAY_MEMBER];
+} shmem_slab;
+
+typedef struct {
+	dlist_node	chain;
+	int			slab_index;	/* index of slab_sizes */
+	int			slab_nums;	/* number of slabs per block */
+	shmem_slab	entry;	/* first entry in this block */
+} shmem_slab_head;
+
+#define SHMEM_SLAB_SIZE(div)									\
+	MAXALIGN_DOWN((SHMEM_BLOCKSZ - SHMEM_ALLOC_COST) / (div) -	\
+				  (offsetof(shmem_slab, data) + sizeof(cl_uint)))
+static size_t slab_sizes[] = {
+	SHMEM_SLAB_SIZE(56),	/* about 100B */
+	SHMEM_SLAB_SIZE(30),	/* about 240B */
+	SHMEM_SLAB_SIZE(15),	/* about 512B */
+	SHMEM_SLAB_SIZE(6),		/* about 1.2KB */
+	SHMEM_SLAB_SIZE(3),		/* about 2.5KB */
+};
+#undef SHMEM_SLAB_SIZE
+
 typedef struct
 {
-	/* for slab management */
-	slock_t		slab_gpuscan_lock;
-	dlist_head	slab_gpuscan_freelist;
-	dlist_head	slab_gpuscan_blocklist;
-	slock_t		slab_gpusort_lock;
-	dlist_head	slab_gpusort_freelist;
-	dlist_head	slab_gpusort_blocklist;
-	slock_t		slab_gpuhashjoin_lock;
-	dlist_head	slab_gpuhashjoin_freelist;
-	dlist_head	slab_gpuhashjoin_blocklist;
+	slock_t		slab_locks[lengthof(slab_sizes)];
+	dlist_head	slab_freelist[lengthof(slab_sizes)];
+	dlist_head	slab_blocklist[lengthof(slab_sizes)];
 
 	/* for zone management */
 	bool		is_ready;
@@ -99,15 +119,6 @@ typedef struct {
 	int			lineno;
 	Datum		data[FLEXIBLE_ARRAY_MEMBER];
 } shmem_body;
-
-typedef struct {
-	dlist_node	chain;		/* link to the free list */
-	pid_t		owner;
-	const char *filename;
-	uint32		lineno;
-	Datum		data[FLEXIBLE_ARRAY_MEMBER];
-} shmem_slab;
-
 
 /* XXX - we need to ensure SHMEM_ALLOC_COST is enough large */
 
@@ -339,6 +350,61 @@ pgstrom_shmem_zone_block_free(shmem_zone *zone, shmem_body *body)
 }
 
 /*
+ * pgstrom_alloc_slab
+ */
+static void *
+pgstrom_alloc_slab(const char *filename, int lineno, int index)
+{
+	shmem_slab_head *sblock;
+	shmem_slab	   *entry;
+	dlist_node	   *dnode;
+	Size			slab_sz = slab_sizes[index];
+	Size			unitsz = MAXALIGN(offsetof(shmem_slab, data[0]) +
+									  INTALIGN(slab_sz) + sizeof(cl_uint));
+	SpinLockAcquire(&pgstrom_shmem_head->slab_locks[index]);
+	if (dlist_is_empty(&pgstrom_shmem_head->slab_freelist[index]))
+	{
+		Size		length;
+		Size		offset;
+		int			count;
+
+		/* allocate a block */
+		sblock = pgstrom_shmem_alloc_alap(sizeof(shmem_slab_head), &length);
+		if (!sblock)
+		{
+			SpinLockRelease(&pgstrom_shmem_head->slab_locks[index]);
+			return NULL;
+		}
+		dlist_push_tail(&pgstrom_shmem_head->slab_blocklist[index],
+						&sblock->chain);
+
+		for (offset = offsetof(shmem_slab_head, entry), count=0;
+			 offset + unitsz <= length;
+			 offset += unitsz, count++)
+		{
+			entry = (shmem_slab *)((char *)sblock + offset);
+			/* set magic number */
+			*((uint32 *)((char *)entry->data +
+						 INTALIGN(slab_sz))) = SHMEM_SLAB_MAGIC;
+			dlist_push_head(&pgstrom_shmem_head->slab_freelist[index],
+							&entry->chain);
+		}
+		sblock->slab_index = index;
+		sblock->slab_nums = count;
+	}
+	Assert(!dlist_is_empty(&pgstrom_shmem_head->slab_freelist[index]));
+	dnode = dlist_pop_head_node(&pgstrom_shmem_head->slab_freelist[index]);
+	entry = dlist_container(shmem_slab, chain, dnode);
+	memset(&entry->chain, 0, sizeof(dlist_node));
+	entry->owner = getpid();
+	entry->filename = filename;
+	entry->lineno = lineno;
+	SpinLockRelease(&pgstrom_shmem_head->slab_locks[index]);
+
+	return (void *)entry->data;
+}
+
+/*
  * pgstrom_shmem_block_alloc
  *
  * It is an internal API; that allocates a continuous 2^N blocks from
@@ -353,6 +419,7 @@ __pgstrom_shmem_alloc(const char *filename, int lineno, Size size)
 	int			start;
 	shmem_zone *zone;
 	void	   *address;
+	int			i;
 
 	/* does shared memory segment already set up? */
 	if (!pgstrom_shmem_head->is_ready)
@@ -361,10 +428,17 @@ __pgstrom_shmem_alloc(const char *filename, int lineno, Size size)
 		return NULL;
 	}
 
-
-	/* unable to allocate 0-byte or too large */
+	/*
+	 * Size check whether we should allocate bare-blocks, or a piece of
+	 * slabs. If required size is unable to allocate, return NULL soon.
+	 */
 	if (size == 0 || size > (1UL << SHMEM_BLOCKSZ_BITS_MAX))
 		return NULL;
+	for (i=0; i < lengthof(slab_sizes); i++)
+	{
+		if (size <= slab_sizes[i])
+			return pgstrom_alloc_slab(filename, lineno, i);
+	}
 
 	/*
 	 * find a zone we should allocate.
@@ -405,6 +479,8 @@ __pgstrom_shmem_alloc(const char *filename, int lineno, Size size)
  * a particular size, likely toast buffer, best storategy is to allocate
  * least 2^N block larger than required size.
  * This function round up the required size into the best-fit one.
+ *
+ * Also note that, it never falls to slab.
  */
 void *
 __pgstrom_shmem_alloc_alap(const char *filename, int lineno,
@@ -422,14 +498,48 @@ __pgstrom_shmem_alloc_alap(const char *filename, int lineno,
 	return result;
 }
 
+/*
+ * pgstrom_free_slab
+ */
+static void
+pgstrom_free_slab(shmem_slab_head *sblock, shmem_slab *entry)
+{
+	int		index = sblock->slab_index;
+	Size	slab_sz = slab_sizes[index];
+
+	Assert(!entry->chain.next && !entry->chain.prev);
+	Assert(*((uint32 *)((char *)entry->data +
+						INTALIGN(slab_sz))) == SHMEM_SLAB_MAGIC);
+	SpinLockAcquire(&pgstrom_shmem_head->slab_locks[index]);
+	dlist_push_head(&pgstrom_shmem_head->slab_freelist[index],
+					&entry->chain);
+	SpinLockRelease(&pgstrom_shmem_head->slab_locks[index]);
+}
+
 void
 pgstrom_shmem_free(void *address)
 {
 	shmem_zone *zone;
 	shmem_body *body;
-	void	   *zone_baseaddr = pgstrom_shmem_head->zone_baseaddr;
-	Size		zone_length = pgstrom_shmem_head->zone_length;
+	void	   *zone_baseaddr;
+	Size		zone_length ;
 	int			zone_index;
+	Size		offset;
+
+	offset = ((uintptr_t)address & (SHMEM_BLOCKSZ - 1));
+	if (offset != offsetof(shmem_body, data[0]))
+	{
+		shmem_slab_head *sblock = (shmem_slab_head *)
+			((char *)address - offset + offsetof(shmem_body, data));
+		shmem_slab		*entry = (shmem_slab *)
+			((char *)address - offsetof(shmem_slab, data[0]));
+		pgstrom_free_slab(sblock, entry);
+		return;
+	}
+
+	/* elsewhere, the supplied address is bare blocks */
+	zone_baseaddr = pgstrom_shmem_head->zone_baseaddr;
+	zone_length = pgstrom_shmem_head->zone_length;
 
 	Assert(pgstrom_shmem_sanitycheck(address));
 	body = (shmem_body *)((char *)address -
@@ -519,87 +629,6 @@ pgstrom_shmem_zone_length(void)
 }
 
 /*
- * pgstrom_alloc_slab
- */
-static void *
-pgstrom_alloc_slab(const char *filename, int lineno,
-				   const char *slab_name,
-				   slock_t *slab_lock,
-				   dlist_head *slab_freelist,
-				   dlist_head *slab_blocklist,
-				   size_t slab_size)
-{
-	shmem_slab	   *entry;
-	dlist_node	   *dnode;
-	uint32		   *magic;
-
-	SpinLockAcquire(slab_lock);
-	if (dlist_is_empty(slab_freelist))
-	{
-		dlist_node *sblock;
-		Size		unitsz;
-		Size		allocated;
-		Size		offset;
-
-		/* length per slab */
-		unitsz = MAXALIGN(offsetof(shmem_slab, data[0]) +
-						  INTALIGN(slab_size) +
-						  sizeof(uint32));
-		/* allocate a page */
-		sblock = __pgstrom_shmem_alloc_alap(slab_name, 0, unitsz, &allocated);
-		if (!sblock)
-		{
-			SpinLockRelease(slab_lock);
-			return NULL;
-		}
-		memset(sblock, 0, allocated);
-		dlist_push_tail(slab_blocklist, sblock);
-
-		for (offset = MAXALIGN(sizeof(dlist_node));
-			 offset + unitsz <= allocated;
-			 offset += unitsz)
-		{
-			entry = (shmem_slab *)((char *)sblock + offset);
-			magic = (uint32 *)((char *)entry->data + INTALIGN(slab_size));
-			*magic = SHMEM_SLAB_MAGIC;
-			dlist_push_head(slab_freelist, &entry->chain);
-		}
-	}
-	Assert(!dlist_is_empty(slab_freelist));
-	dnode = dlist_pop_head_node(slab_freelist);
-	entry = dlist_container(shmem_slab, chain, dnode);
-	Assert(*magic == SHMEM_SLAB_MAGIC);
-	memset(&entry->chain, 0, sizeof(dlist_node));
-	entry->owner = getpid();
-	entry->filename = filename;
-	entry->lineno = lineno;
-	SpinLockRelease(slab_lock);
-
-	return (void *)entry->data;
-}
-
-
-/*
- * pgstrom_free_slab
- */
-static void
-pgstrom_free_slab(slock_t *slab_lock,
-				  dlist_head *slab_freelist,
-				  size_t slab_size,
-				  void *slab_object)
-{
-	shmem_slab *entry = (shmem_slab *)((char *)slab_object -
-									   offsetof(shmem_slab, data[0]));
-	uint32	   *magic = (uint32 *)((char *)entry->data + INTALIGN(slab_size));
-
-	Assert(!entry->chain.next && !entry->chain.prev);
-	Assert(*magic == SHMEM_SLAB_MAGIC);
-	SpinLockAcquire(slab_lock);
-	dlist_push_head(slab_freelist, &entry->chain);
-	SpinLockRelease(slab_lock);
-}
-
-/*
  * pgstrom_init_slab
  *
  * init slab management structure
@@ -607,77 +636,14 @@ pgstrom_free_slab(slock_t *slab_lock,
 static void
 pgstrom_init_slab(void)
 {
-	SpinLockInit(&pgstrom_shmem_head->slab_gpuscan_lock);
-	SpinLockInit(&pgstrom_shmem_head->slab_gpusort_lock);
-	SpinLockInit(&pgstrom_shmem_head->slab_gpuhashjoin_lock);
+	int		i;
 
-	dlist_init(&pgstrom_shmem_head->slab_gpuscan_freelist);
-	dlist_init(&pgstrom_shmem_head->slab_gpusort_freelist);
-	dlist_init(&pgstrom_shmem_head->slab_gpuhashjoin_freelist);
-
-	dlist_init(&pgstrom_shmem_head->slab_gpuscan_blocklist);
-	dlist_init(&pgstrom_shmem_head->slab_gpusort_blocklist);
-	dlist_init(&pgstrom_shmem_head->slab_gpuhashjoin_blocklist);
-}
-
-pgstrom_gpuscan *
-__pgstrom_alloc_gpuscan(const char *filename, int lineno)
-{
-	return (pgstrom_gpuscan *)
-		pgstrom_alloc_slab(filename, lineno, "gpuscan",
-						   &pgstrom_shmem_head->slab_gpuscan_lock,
-						   &pgstrom_shmem_head->slab_gpuscan_freelist,
-						   &pgstrom_shmem_head->slab_gpuscan_blocklist,
-						   sizeof(pgstrom_gpuscan));
-}
-
-void
-pgstrom_free_gpuscan(pgstrom_gpuscan *gpuscan)
-{
-	pgstrom_free_slab(&pgstrom_shmem_head->slab_gpuscan_lock,
-					  &pgstrom_shmem_head->slab_gpuscan_freelist,
-					  sizeof(pgstrom_gpuscan),
-					  gpuscan);
-}
-
-pgstrom_gpusort *
-__pgstrom_alloc_gpusort(const char *filename, int lineno)
-{
-	return (pgstrom_gpusort *)
-		pgstrom_alloc_slab(filename, lineno, "gpusort",
-						   &pgstrom_shmem_head->slab_gpusort_lock,
-						   &pgstrom_shmem_head->slab_gpusort_freelist,
-						   &pgstrom_shmem_head->slab_gpusort_blocklist,
-						   sizeof(pgstrom_gpusort));
-}
-
-void
-pgstrom_free_gpusort(pgstrom_gpusort *gpusort)
-{
-	pgstrom_free_slab(&pgstrom_shmem_head->slab_gpusort_lock,
-					  &pgstrom_shmem_head->slab_gpusort_freelist,
-					  sizeof(pgstrom_gpusort),
-					  gpusort);
-}
-
-pgstrom_gpuhashjoin *
-__pgstrom_alloc_gpuhashjoin(const char *filename, int lineno)
-{
-	return (pgstrom_gpuhashjoin *)
-		pgstrom_alloc_slab(filename, lineno, "gpuhashjoin",
-						   &pgstrom_shmem_head->slab_gpuhashjoin_lock,
-						   &pgstrom_shmem_head->slab_gpuhashjoin_freelist,
-						   &pgstrom_shmem_head->slab_gpuhashjoin_blocklist,
-						   sizeof(pgstrom_gpuhashjoin));
-}
-
-void
-pgstrom_free_gpuhashjoin(pgstrom_gpuhashjoin *gpuhashjoin)
-{
-	pgstrom_free_slab(&pgstrom_shmem_head->slab_gpuhashjoin_lock,
-					  &pgstrom_shmem_head->slab_gpuhashjoin_freelist,
-					  sizeof(pgstrom_gpuhashjoin),
-					  gpuhashjoin);
+	for (i=0; i < lengthof(slab_sizes); i++)
+	{
+		SpinLockInit(&pgstrom_shmem_head->slab_locks[i]);
+		dlist_init(&pgstrom_shmem_head->slab_freelist[i]);
+		dlist_init(&pgstrom_shmem_head->slab_blocklist[i]);
+	}
 }
 
 /*
@@ -688,9 +654,9 @@ pgstrom_free_gpuhashjoin(pgstrom_gpuhashjoin *gpuhashjoin)
 typedef struct
 {
 	void	   *address;
-	const char *slab_name;
 	const char *filename;
 	int			lineno;
+	int			index;
 	uint32		owner;
 	bool		active;
 	bool		broken;
@@ -698,7 +664,6 @@ typedef struct
 
 static void
 collect_shmem_slab_info(List **p_results,
-						const char *slab_name,
 						slock_t *slab_lock,
 						dlist_head *slab_blocklist,
 						size_t slab_size)
@@ -707,28 +672,28 @@ collect_shmem_slab_info(List **p_results,
 	PG_TRY();
 	{
 		dlist_iter	iter;
-		size_t		unitsz = MAXALIGN(offsetof(shmem_slab, data[0]) +
+		Size		unitsz = MAXALIGN(offsetof(shmem_slab, data[0]) +
 									  INTALIGN(slab_size) +
 									  sizeof(uint32));
 		dlist_foreach (iter, slab_blocklist)
 		{
+			shmem_slab_head *sblock;
 			shmem_slab *entry;
 			uint32	   *magic;
-			size_t		offset;
+			int			count;
 
-			for (offset = MAXALIGN(sizeof(dlist_node));
-				 offset + unitsz <= SHMEM_BLOCKSZ - offsetof(shmem_slab,
-															 data[0]);
-				 offset += unitsz)
+			sblock = dlist_container(shmem_slab_head, chain, iter.cur);
+			for (count=0; count < sblock->slab_nums; count++)
 			{
 				shmem_slab_info	*slinfo = palloc0(sizeof(shmem_slab_info));
 
-				entry = (shmem_slab *)((char *)iter.cur + offset);
+				entry = (shmem_slab *)((char *)&sblock->entry +
+									   unitsz * count);
 				magic = (uint32 *)((char *)entry->data + INTALIGN(slab_size));
 				slinfo->address   = entry->data;
-				slinfo->slab_name = slab_name;
 				slinfo->filename  = entry->filename;
 				slinfo->lineno    = entry->lineno;
+				slinfo->index     = sblock->slab_index;
 				slinfo->owner     = entry->owner;
 				slinfo->active    = (!entry->chain.prev && !entry->chain.next);
 				if (*magic != SHMEM_SLAB_MAGIC ||
@@ -765,6 +730,7 @@ pgstrom_shmem_slab_info(PG_FUNCTION_ARGS)
 	{
 		TupleDesc		tupdesc;
 		MemoryContext	oldcxt;
+		int				i;
 
 		fncxt = SRF_FIRSTCALL_INIT();
 		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
@@ -784,21 +750,14 @@ pgstrom_shmem_slab_info(PG_FUNCTION_ARGS)
 						   BOOLOID, -1, 0);
 		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
 
-		collect_shmem_slab_info((List **)&fncxt->user_fctx,
-								"gpuscan",
-								&pgstrom_shmem_head->slab_gpuscan_lock,
-								&pgstrom_shmem_head->slab_gpuscan_blocklist,
-								sizeof(pgstrom_gpuscan));
-		collect_shmem_slab_info((List **)&fncxt->user_fctx,
-								"gpusort",
-								&pgstrom_shmem_head->slab_gpusort_lock,
-								&pgstrom_shmem_head->slab_gpusort_blocklist,
-								sizeof(pgstrom_gpusort));
-		collect_shmem_slab_info((List **)&fncxt->user_fctx,
-								"gpuhashjoin",
-							&pgstrom_shmem_head->slab_gpuhashjoin_lock,
-							&pgstrom_shmem_head->slab_gpuhashjoin_blocklist,
-								sizeof(pgstrom_gpuhashjoin));
+		for (i=0; i < lengthof(slab_sizes); i++)
+		{
+
+			collect_shmem_slab_info((List **)&fncxt->user_fctx,
+									&pgstrom_shmem_head->slab_locks[i],
+									&pgstrom_shmem_head->slab_blocklist[i],
+									slab_sizes[i]);
+		}
 		MemoryContextSwitchTo(oldcxt);
 	}
 	fncxt = SRF_PERCALL_SETUP();
@@ -811,7 +770,8 @@ pgstrom_shmem_slab_info(PG_FUNCTION_ARGS)
 
 	memset(isnull, 0, sizeof(isnull));
 	values[0] = Int64GetDatum((uint64)slinfo->address);
-	values[1] = CStringGetTextDatum(slinfo->slab_name);
+	snprintf(buf, sizeof(buf), "slab-%zu", slab_sizes[slinfo->index]);
+	values[1] = CStringGetTextDatum(buf);
 	if (slinfo->active)
 	{
 		values[2] = Int32GetDatum((uint32)slinfo->owner);
