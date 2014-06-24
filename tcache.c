@@ -663,89 +663,23 @@ tcache_put_toast_buffer(tcache_toastbuf *tbuf)
 tcache_row_store *
 tcache_create_row_store(TupleDesc tupdesc)
 {
-	tcache_row_store *trs;
-	int		i;
-
-	trs = pgstrom_shmem_alloc(ROWSTORE_DEFAULT_SIZE);
-	if (!trs)
-		elog(ERROR, "out of shared memory");
-
-	/*
-	 * We put header portion of kern_column_store next to the kern_row_store
-	 * as source of copy for in-kernel column store. It has offset of column
-	 * array, but contents shall be set up by kernel prior to evaluation of
-	 * qualifier expression.
-	 */
-	memset(trs, 0, sizeof(StromObject));
-	trs->sobj.stag = StromTag_TCacheRowStore;
-	SpinLockInit(&trs->refcnt_lock);
-	trs->refcnt = 1;
-	memset(&trs->chain, 0, sizeof(dlist_node));
-	trs->usage
-		= STROMALIGN_DOWN(ROWSTORE_DEFAULT_SIZE -
-						  offsetof(tcache_row_store, kern));
-	trs->blkno_max = 0;
-	trs->blkno_min = MaxBlockNumber;
-	trs->kern.length = trs->usage;
-	trs->kern.ncols = tupdesc->natts;
-	trs->kern.nrows = 0;
-
-	/* construct colmeta structure for this row-store */
-	for (i=0; i < tupdesc->natts; i++)
-	{
-		Form_pg_attribute attr = tupdesc->attrs[i];
-		kern_colmeta	colmeta;
-
-		memset(&colmeta, 0, sizeof(kern_colmeta));
-		colmeta.attnotnull = attr->attnotnull;
-		if (attr->attalign == 'c')
-			colmeta.attalign = sizeof(cl_char);
-		else if (attr->attalign == 's')
-			colmeta.attalign = sizeof(cl_short);
-		else if (attr->attalign == 'i')
-			colmeta.attalign = sizeof(cl_int);
-		else if (attr->attalign == 'd')
-			colmeta.attalign = sizeof(cl_long);
-		else
-			elog(ERROR, "unexpected attalign");
-		colmeta.attlen = attr->attlen;
-		colmeta.cs_ofs = -1;	/* not in use for row-store */
-
-		memcpy(&trs->kern.colmeta[i], &colmeta, sizeof(kern_colmeta));
-	}
-	return trs;
+	/* XXX - old tcache_* one to be replaced later */
+	return pgstrom_create_row_store(tupdesc);
 }
 
 tcache_row_store *
 tcache_get_row_store(tcache_row_store *trs)
 {
-	SpinLockAcquire(&trs->refcnt_lock);
-	Assert(trs->refcnt > 0);
-	trs->refcnt++;
-	SpinLockRelease(&trs->refcnt_lock);
-
-	return trs;
+	/* XXX - old tcache_* one to be replaced later */
+	return pgstrom_get_row_store(trs);
 }
 
 void
 tcache_put_row_store(tcache_row_store *trs)
 {
-	bool	do_release = false;
-
-	SpinLockAcquire(&trs->refcnt_lock);
-	Assert(trs->refcnt > 0);
-	if (--trs->refcnt == 0)
-		do_release = true;
-	SpinLockRelease(&trs->refcnt_lock);
-
-	if (do_release)
-		pgstrom_shmem_free(trs);
+	/* XXX = old tcache_* one to be replaced later */
+	pgstrom_put_row_store(trs);
 }
-
-
-
-
-
 
 /*
  * tcache_alloc_tcnode
