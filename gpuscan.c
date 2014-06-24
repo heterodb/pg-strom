@@ -1386,7 +1386,6 @@ gpuscan_exec_multi(CustomPlanState *node)
 	pgstrom_gpuscan	   *gpuscan;
 	pgstrom_vrelation  *vrel;
 	pgstrom_message	   *msg;
-	pgstrom_bulk_slot  *bulk_slot;
 	cl_uint				i, j, nitems;
 	cl_int			   *rindex;
 	StromObject		   *rcstore;
@@ -1557,19 +1556,19 @@ retry:
 			if (!ExecQual(host_qual, econtext, false))
 				continue;
 		}
-		bulk_slot->rindex[j++] = rowidx;
+		vrel->kern->rindex[j++] = rowidx;
 	}
-	bulk_slot->nitems = j;
+	vrel->kern->nitems = j;
 	/* no longer gpuscan is needed, any more */
 	pgstrom_untrack_object(&gpuscan->msg.sobj);
 	pgstrom_put_message(&gpuscan->msg);
 
-	if (bulk_slot->nitems == 0)
+	if (vrel->kern->nitems == 0)
 	{
-		pgstrom_release_bulk_slot(bulk_slot);
+		pgstrom_put_vrelation(vrel);
 		goto retry;
 	}
-	return (Node *)bulk_slot;
+	return (Node *) vrel;
 }
 
 static void
@@ -1868,6 +1867,11 @@ typedef struct
 	cl_event		events[20];
 } clstate_gpuscan;
 
+static void
+clserv_respond_gpuscan(cl_event event, cl_int ev_status, void *private)
+{}
+
+#if 0
 static void
 clserv_respond_gpuscan_row(cl_event event, cl_int ev_status, void *private)
 {
@@ -2368,12 +2372,6 @@ error:
 	gpuscan->msg.errcode = rc;
 	pgstrom_reply_message(&gpuscan->msg);
 }
-
-
-
-
-
-
 
 
 
@@ -2958,6 +2956,180 @@ error0:
 	gpuscan->msg.errcode = rc;
 	pgstrom_reply_message(&gpuscan->msg);
 }
+#endif
+
+static cl_int
+clserv_process_gpuscan_row(clstate_gpuscan *clgss,
+						   kern_data_store *kds_head,
+						   tcache_row_store *trs,
+						   cl_command_queue kcmdq)
+{
+	pgstrom_perfmon *pfm = &clgss->msg->pfm;
+	cl_uint		ds_offset = 0;
+	cl_int		i, rc;
+
+	/*
+	 * In case of gpuscan with row-store, all the column references
+	 * same region, so ds_offset of all the valid column must be same.
+	 */
+	for (i=0; i < kds_head->ncols; i++)
+	{
+		if (!kds_head->colmeta[i].attvalid)
+			continue;
+		if (kds_head->colmeta[i].rs_attnum == 0)
+			return StromError_DataStoreCorruption;
+		if (kds_head->colmeta[i].ds_offset == 0)
+			return StromError_DataStoreCorruption;
+		if (ds_offset == 0)
+			ds_offset = kds_head->colmeta[i].ds_offset;
+		else if (ds_offset != kds_head->colmeta[i].ds_offset)
+			return StromError_DataStoreCorruption;
+	}
+	if (ds_offset == 0)
+		return StromError_DataStoreCorruption;
+
+	/* body of kds */
+	rc = clEnqueueWriteBuffer(kcmdq,
+							  clgss->m_dstore,
+							  CL_FALSE,
+							  ds_offset,
+							  trs->kern.length,
+							  &trs->kern,
+							  0,
+							  NULL,
+							  &clgss->events[clgss->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
+		return rc;
+	}
+	clgss->ev_index++;
+	pfm->bytes_dma_send += trs->kern.length;
+	pfm->num_dma_send++;
+
+	return CL_SUCCESS;
+}
+
+static cl_int
+clserv_process_gpuscan_column(clstate_gpuscan *clgss,
+							  kern_data_store *kds_head,
+							  kern_toastbuf *ktoast_head,
+							  tcache_column_store *tcs,
+							  cl_command_queue kcmdq)
+{
+	pgstrom_perfmon *pfm = &clgss->msg->pfm;
+	Size		length;
+	Size		offset;
+	cl_uint		nrooms = kds_head->nrooms;
+	cl_uint		nitems = tcs->nrows;
+	cl_uint		ncols = kds_head->ncols;
+	cl_int		i, rc;
+
+	Assert(kds_head->ncols == tcs->ncols);
+
+	/* toast header, if any */
+	if (clgss->m_ktoast)
+	{
+		length = offsetof(kern_toastbuf, coldir[ncols]);
+		rc = clEnqueueWriteBuffer(kcmdq,
+								  clgss->m_ktoast,
+								  CL_FALSE,
+								  0,
+								  length,
+								  ktoast_head,
+								  0,
+								  NULL,
+								  &clgss->events[clgss->ev_index]);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clEnqueueWriteBuffer: %s",
+					   opencl_strerror(rc));
+			return rc;
+		}
+		clgss->ev_index++;
+		pfm->bytes_dma_send += length;
+		pfm->num_dma_send++;
+	}
+
+	for (i=0; i < kds_head->ncols; i++)
+	{
+		if (!kds_head->colmeta[i].attvalid)
+			continue;
+
+		offset = kds_head->colmeta[i].ds_offset;
+		if (!kds_head->colmeta[i].attnotnull)
+		{
+			Assert(tcs->cdata[i].isnull != NULL);
+			length = STROMALIGN((nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+			rc = clEnqueueWriteBuffer(kcmdq,
+									  clgss->m_dstore,
+									  CL_FALSE,
+									  offset,
+									  length,
+									  tcs->cdata[i].isnull,
+									  0,
+									  NULL,
+									  &clgss->events[clgss->ev_index]);
+			if (rc != CL_SUCCESS)
+			{
+				clserv_log("failed on clEnqueueWriteBuffer: %s",
+						   opencl_strerror(rc));
+				return rc;
+			}
+			clgss->ev_index++;
+			pfm->bytes_dma_send += length;
+			pfm->num_dma_send++;
+
+			offset += STROMALIGN((nrooms + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+		}
+		length = (kds_head->colmeta[i].attlen > 0
+				  ? kds_head->colmeta[i].attlen
+				  : sizeof(cl_uint)) * nitems;
+		rc = clEnqueueWriteBuffer(kcmdq,
+								  clgss->m_dstore,
+								  CL_FALSE,
+								  offset,
+								  length,
+								  tcs->cdata[i].values,
+								  0,
+								  NULL,
+								  &clgss->events[clgss->ev_index]);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clEnqueueWriteBuffer: %s",
+					   opencl_strerror(rc));
+			return rc;
+		}
+		clgss->ev_index++;
+		pfm->bytes_dma_send += length;
+		pfm->num_dma_send++;
+
+		if (tcs->cdata[i].toast)
+		{
+			Assert(kds_head->colmeta[i].attlen < 0);
+			Assert(clgss->m_ktoast);
+			rc = clEnqueueWriteBuffer(kcmdq,
+									  clgss->m_ktoast,
+									  CL_FALSE,
+									  ktoast_head->coldir[i],
+									  tcs->cdata[i].toast->tbuf_usage,
+									  tcs->cdata[i].toast,
+									  0,
+									  NULL,
+									  &clgss->events[clgss->ev_index]);
+			if (rc != CL_SUCCESS)
+			{
+				clserv_log("failed on clEnqueueWriteBuffer: %s",
+						   opencl_strerror(rc));
+				return rc;
+			}
+			clgss->ev_index++;
+			pfm->bytes_dma_send += length;
+			pfm->num_dma_send++;
+		}
+	}
+	return CL_SUCCESS;
+}
 
 /*
  * clserv_process_gpuscan
@@ -2968,12 +3140,14 @@ static void
 clserv_process_gpuscan(pgstrom_message *msg)
 {
 	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) msg;
+	pgstrom_perfmon	   *pfm = &msg->pfm;
 	pgstrom_vrelation  *vrel;
-	clstate_gpuscan_state *clgss;
+	clstate_gpuscan	   *clgss;
 	cl_program			program;
 	cl_command_queue	kcmdq;
-	kern_parambuf	   *kparams;
-	kern_data_store	   *kds_head;
+	kern_parambuf	   *kparams = KERN_GPUSCAN_PARAMBUF(&gpuscan->kern);
+	kern_data_store	   *kds_head = kparam_get_value(kparams, 0);
+	kern_toastbuf	   *ktoast_head = kparam_get_value(kparams, 1);
 	int					dindex;
 	cl_uint				nrows;
 	cl_int				rc;
@@ -2995,7 +3169,7 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	}
 	/* in case of gpuscan, vrelation has to be consist of same input rcs */
 	vrel = gpuscan->vrel;
-	Assert(vrel->rcsnums == 1 && vrel->rcstore[0] == &trs->sobj);
+	Assert(vrel->rcsnums == 1 && vrel->rcstore[0] == gpuscan->rc_store);
 
 	/*
 	 * First of all, it looks up a program object to be run on
@@ -3025,7 +3199,8 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	/*
 	 * create a state object
 	 */
-	clgss = calloc(1, sizeof(clstate_gpuscan));
+	clgss = calloc(1, offsetof(clstate_gpuscan,
+							   events[kds_head->ncols * 3 + 10]));
 	if (!clgss)
 	{
 		clReleaseProgram(program);
@@ -3058,7 +3233,7 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	/* allocation of device memory for kern_gpuscan argument */
 	clgss->m_gpuscan = clCreateBuffer(opencl_context,
 									  CL_MEM_READ_WRITE,
-									  KERN_GPUSCAN_LENGTH(gpuscan->kern),
+									  KERN_GPUSCAN_LENGTH(&gpuscan->kern),
 									  NULL,
 									  &rc);
 	if (rc != CL_SUCCESS)
@@ -3070,8 +3245,7 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	/* allocation of device memory for kern_vrelation argument */
 	clgss->m_kvrel = clCreateBuffer(opencl_context,
 									CL_MEM_READ_WRITE,
-									vrel->kern.length;
-									length,
+									vrel->kern->length,
 									NULL,
 									&rc);
 	if (rc != CL_SUCCESS)
@@ -3081,7 +3255,7 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	}
 
 	/* allocation of device memory for kern_row_store argument */
-	clgsr->m_dstore = clCreateBuffer(opencl_context,
+	clgss->m_dstore = clCreateBuffer(opencl_context,
 									 CL_MEM_READ_WRITE,
 									 kds_head->length,
 									 NULL,
@@ -3092,8 +3266,22 @@ clserv_process_gpuscan(pgstrom_message *msg)
 		goto error;
 	}
 
-	/* row-store does not take kern_toastbuf actually */
-	clgsr->m_ktoast = NULL;
+	/* allocation of device memory for kern_toastbuf, if needed */
+	if (!ktoast_head)
+		clgss->m_ktoast = NULL;
+	else
+	{
+		clgss->m_ktoast = clCreateBuffer(opencl_context,
+										 CL_MEM_READ_WRITE,
+										 ktoast_head->length,
+										 NULL,
+										 &rc);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
+			goto error;
+		}
+	}
 
 	/*
 	 * OK, all the device memory and kernel objects acquired.
@@ -3107,20 +3295,20 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	 *              __global kern_toastbuf *ktoast,
 	 *              __local void *local_workbuf)
 	 */
-	rc = clSetKernelArg(clgsr->kernel,
+	rc = clSetKernelArg(clgss->kernel,
 						0,		/* kern_gpuscan */
 						sizeof(cl_mem),
-						&clgsr->m_gpuscan);
+						&clgss->m_gpuscan);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
 		goto error;
 	}
 
-	rc = clSetKernelArg(clgsr->kernel,
+	rc = clSetKernelArg(clgss->kernel,
 						1,		/* kern_vrelation */
 						sizeof(cl_mem),
-						&clgsr->m_kvrel);
+						&clgss->m_kvrel);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
@@ -3130,7 +3318,7 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	rc = clSetKernelArg(clgss->kernel,
 						2,		/* kern_data_store */
 						sizeof(cl_mem),
-						&clgsr->m_dstore);
+						&clgss->m_dstore);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
@@ -3140,7 +3328,7 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	rc = clSetKernelArg(clgss->kernel,
 						3,		/* kern_toastbuf; always NULL */
 						sizeof(cl_mem),
-						&clgsr->m_ktoast);
+						&clgss->m_ktoast);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
@@ -3154,44 +3342,21 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error_sync;
+		goto error;
 	}
 
-
-
-
-
-
-
-
-
-
-error:
-	gpuscan->msg.errcode = rc;
-	pgstrom_reply_message(&gpuscan->msg);
-
-
-
 	/*
-	 * In this case, we use a kernel for row-store; that internally
-	 * translate row-format into column-format, then evaluate the
-	 * supplied qualifier.
+     * OK, enqueue DMA transfer, kernel execution, then DMA writeback.
+     *
+	 * (1) gpuscan (incl. kparams) - DMA send
+	 * (2) vrelation - DMA send
+	 * (3) kds_head - DMA send
+	 * (4) kds body (either row or column store) - DMA send
+	 * (5) execution of kernel function
+	 * (6) write back vrelation - DMA recv
 	 */
 
-
-
-	/* and, compute an optimal workgroup-size of this kernel */
-
-
-	/*
-	 * OK, enqueue DMA transfer, kernel execution, then DMA writeback.
-	 *
-	 * (1) gpuscan (kparams + kvrel), kds_head and row-store
-	 * (2) execution of kernel code
-	 * (3) vrelation shall be written back
-	 */
-
-	/* kern_gpuscan (aka, kern_params) */
+	/* kern_gpuscan */
 	length = KERN_GPUSCAN_LENGTH(&gpuscan->kern);
 	rc = clEnqueueWriteBuffer(kcmdq,
 							  clgss->m_gpuscan,
@@ -3201,14 +3366,15 @@ error:
 							  &gpuscan->kern,
 							  0,
 							  NULL,
-							  &clgsr->events[clgsr->ev_index]);
+							  &clgss->events[clgss->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
-		goto error_sync;
+		goto error;
 	}
-	clgsr->ev_index++;
-	bytes_dma_send += length;
+	clgss->ev_index++;
+	pfm->bytes_dma_send += length;
+	pfm->num_dma_send++;
 
 	/* kern_vrelation */
 	length = offsetof(kern_vrelation, rindex[0]);
@@ -3220,103 +3386,94 @@ error:
 							  vrel->kern,
 							  0,
 							  NULL,
-							  &clgsr->events[clgsr->ev_index]);
+							  &clgss->events[clgss->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
-		goto error_sync;
+		goto error;
 	}
-	clgsr->ev_index++;
-	bytes_dma_send += length;
+	clgss->ev_index++;
+	pfm->bytes_dma_send += length;
+	pfm->num_dma_send++;
 
-	/* kern_data_store (header) */
+	/* kds_head */
 	length = offsetof(kern_data_store, colmeta[kds_head->ncols]);
 	rc = clEnqueueWriteBuffer(kcmdq,
-							  clgsr->m_dstore,
+							  clgss->m_dstore,
 							  CL_FALSE,
 							  0,
 							  length,
 							  kds_head,
 							  0,
 							  NULL,
-							  &clgsr->events[clgsr->ev_index]);
+							  &clgss->events[clgss->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
-		goto error_sync;
+		goto error;
 	}
-	clgsr->ev_index++;
-    bytes_dma_send += length;
+	clgss->ev_index++;
+	pfm->bytes_dma_send += length;
+	pfm->num_dma_send++;
 
-	/* kern_data_store (body) */
-	rc = clEnqueueWriteBuffer(kcmdq,
-							  clgsr->m_dstore,
-							  CL_FALSE,
-							  ds_offset,
-							  krs->length,
-							  krs,
-							  0,
-							  NULL,
-							  &clgsr->events[clgsr->ev_index]);
-	if (rc != CL_SUCCESS)
+	/* body of kern_data_store */
+	if (StromTagIs(gpuscan->rc_store, TCacheRowStore))
 	{
-		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
-		goto error_sync;
+		tcache_row_store *trs = (tcache_row_store *)gpuscan->rc_store;
+		rc = clserv_process_gpuscan_row(clgss,
+										kds_head,
+										trs,
+										kcmdq);
 	}
-	clgsr->ev_index++;
-	bytes_dma_send += krs->length;
+	else
+	{
+		tcache_column_store *tcs = (tcache_column_store *)gpuscan->rc_store;
+		rc = clserv_process_gpuscan_column(clgss,
+										   kds_head,
+										   ktoast_head,
+										   tcs,
+										   kcmdq);
+	}
+	if (rc != CL_SUCCESS)
+		goto error;
 
-	/*
-	 * Kick gpuscan_qual() call
-	 */
+	/* execution of kernel function */
 	rc = clEnqueueNDRangeKernel(kcmdq,
 								clgss->kernel,
 								1,
 								NULL,
 								&gwork_sz,
 								&lwork_sz,
-								clgsr->ev_index,
-								&clgsr->events[0],
-								&clgsr->events[clgsr->ev_index]);
+								clgss->ev_index,
+								&clgss->events[0],
+								&clgss->events[clgss->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clEnqueueNDRangeKernel: %s",
 				   opencl_strerror(rc));
-		goto error_sync;
+		goto error;
 	}
-	clgsr->ev_index++;
+	clgss->ev_index++;
 
-	/*
-	 * Write back the result-buffer
-	 */
-	offset = KERN_GPUSCAN_DMA_RECVOFS(&gpuscan->kern);
-	length = KERN_GPUSCAN_DMA_RECVLEN(&gpuscan->kern);
+	/* write back result vrelation */
 	rc = clEnqueueReadBuffer(kcmdq,
-							 clgss->m_gpuscan,
+							 clgss->m_kvrel,
 							 CL_FALSE,
-							 offset,
-							 length,
+							 0,
+							 vrel->kern->length,
 							 vrel->kern,
 							 1,
-							 &clgsr->events[clgsr->ev_index - 1],
-							 &clgsr->events[clgsr->ev_index]);
+							 &clgss->events[clgss->ev_index - 1],
+							 &clgss->events[clgss->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
-		clserv_log("failed on clEnqueueReadBuffer: %s", opencl_strerror(rc));
-		goto error_sync;
+		clserv_log("failed on clEnqueueReadBuffer: %s",
+				   opencl_strerror(rc));
+		goto error;
 	}
-	clgsr->ev_index++;
-	bytes_dma_recv += length;
-
-	/* update performance counter */
-	if (gpuscan->msg.pfm.enabled)
-	{
-		gpuscan->msg.pfm.bytes_dma_send = bytes_dma_send;
-		gpuscan->msg.pfm.bytes_dma_recv = bytes_dma_recv;
-		gpuscan->msg.pfm.num_dma_send = 3;
-		gpuscan->msg.pfm.num_dma_recv = 1;
-		gpuscan->msg.pfm.num_kern_exec = 1;
-	}
+	clgss->ev_index++;
+	pfm->bytes_dma_recv += vrel->kern->length;
+	pfm->num_dma_recv++;
 
 	/*
 	 * Last, registers a callback routine that replies the message
@@ -3324,53 +3481,34 @@ error:
 	 */
 	rc = clSetEventCallback(clgss->events[clgss->ev_index - 1],
 							CL_COMPLETE,
-							clserv_respond_gpuscan_row,
+							clserv_respond_gpuscan,
 							clgss);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clSetEventCallback: %s", opencl_strerror(rc));
-		goto error_sync;
+		goto error;
 	}
 	return;
 
-error_sync:
-	/*
-	 * Once DMA requests were enqueued, we need to synchronize completion
-	 * of a series of jobs to avoid unexpected memory destruction if device
-	 * write back calculation result onto the region already released.
-	 */
-	clWaitForEvents(clgsr->ev_index, clgsr->events);
 error:
-	if (clgsr)
+	if (clgss->ev_index > 0)
+		clWaitForEvents(clgss->ev_index, clgss->events);
+	if (clgss)
 	{
-		if (clgsr->m_ktoast)
-			clReleaseMemObject(clgsr->m_ktoast);
-		if (clgsr->m_dstore)
-			clReleaseMemObject(clgsr->m_dstore);
-		if (clgsr->m_gpuscan)
-			clReleaseMemObject(clgsr->m_gpuscan);
-		if (clgsr->kernel)
-			clReleaseKernel(clgsr->kernel);
-		if (clgsr->program)
-			clReleaseProgram(clgsr->program);
-		free(clgsr);
+		if (clgss->m_ktoast)
+			clReleaseMemObject(clgss->m_ktoast);
+		if (clgss->m_dstore)
+			clReleaseMemObject(clgss->m_dstore);
+		if (clgss->m_gpuscan)
+			clReleaseMemObject(clgss->m_gpuscan);
+		if (clgss->kernel)
+			clReleaseKernel(clgss->kernel);
+		if (clgss->program)
+			clReleaseProgram(clgss->program);
+		free(clgss);
 	}
 	gpuscan->msg.errcode = rc;
 	pgstrom_reply_message(&gpuscan->msg);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 }
 
 /*

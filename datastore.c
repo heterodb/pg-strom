@@ -681,7 +681,7 @@ pgstrom_put_row_store(tcache_row_store *trs)
  * create a row-store with refcnt=1
  */
 tcache_row_store *
-tcache_create_row_store(TupleDesc tupdesc)
+pgstrom_create_row_store(TupleDesc tupdesc)
 {
 	tcache_row_store *trs;
 	int		i;
