@@ -613,43 +613,50 @@ typedef struct {
  * conditions have to be checked on the host again.
  *
  *   kern_vrelation
- * +--------------------+
- * | nrels              |
- * +--------------------+
- * | ncols              |
- * +--------------------+
- * | nitems             |
- * +--------------------+
- * | nrooms             |
- * +--------------------+
- * | errcode            |
- * +--------------------+
- * | tlist[0]           |
- * |    :               |
- * |    :               |
- * | tlist[ncols-1]     |
- * +--------------------+ ---
- * | cl_int rindex[]    |  ^
- * | for relation-0     |  | sizeof(cl_int)
- * |    :               |  | * nrooms
- * |    :               |  v
- * +--------------------+ ---
- * |    :               |
- * +--------------------+
- * | cl_int rindex[]    |
- * | for relation-(N-1) |
- * |    :               |
- * |    :               |
- * +--------------------+
+ * +---------------------+
+ * | nrels               |
+ * +---------------------+
+ * | ncols               |
+ * +---------------------+
+ * | nitems              |
+ * +---------------------+
+ * | nrooms              |
+ * +---------------------+
+ * | errcode             |
+ * +---------------------+
+ * | tlist[0]            |
+ * |    :                |
+ * |    :                |
+ * | tlist[ncols-1]      |
+ * +---------------------+ ---  ------------
+ * | cl_int rindex[]     |  ^             ^
+ * |                     |  |             |
+ * | rindex[0*nrels + 0] |  |             |
+ * | rindex[0*nrels + 1] | rindex of      |
+ * |    :                | the 1st item.  |
+ * | rindex[0*nrels +    |  |             |
+ * |        (nrels - 1)] |  V             | sizeof(cl_uint)
+ * +---------------------+ ---            | * nrels * nitems
+ * | cl_int rindex[]     |  ^             |
+ * |                     |  |             |
+ * | rindex[1*nrels + 0] |  |             |
+ * | rindex[1*nrels + 1] | rindex of      |
+ * |    :                | the 2nd item.  |
+ * | rindex[1*nrels +    |  |             |
+ * |        (nrels - 1)] |  V             |
+ * +---------------------+ ---            |
+ * |        :            |                |
+ * |        :            |                V
+ * +---------------------+ -----------------
  */
-#define VRELATION_MAX_RELS		8
 typedef struct {
-	cl_short		nrels;
-	cl_char			has_recheck;	/* true, if any rows to be rechecked */
-	cl_char			__padding;
-	cl_int			nitems;
-	cl_int			nrooms;
-	cl_int			errcode;	/* space to write back*/
+	cl_uint			length;			/* total length of kernel portion */
+	cl_uint			nrels;			/* number of relation being joined */
+	cl_int			nitems;			/* number of items being written */
+	cl_int			nrooms;			/* available rooms per rel */
+	cl_int			errcode;		/* space to write back */
+	cl_char			has_rechecks;	/* true, if any rows to be rechecked */
+	cl_char			__padding[3];	/* reserved for future usage */
 	cl_int			rindex[FLEXIBLE_ARRAY_MEMBER];
 } kern_vrelation;
 

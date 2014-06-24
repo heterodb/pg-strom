@@ -59,49 +59,37 @@ pgstrom_put_vrelation(pgstrom_vrelation *vrel)
 }
 
 /*
- * pgstrom_create_vrelation()
+ * pgstrom_create_vrelation_head
  *
- * it construct a virtual-relation object according to the supplied
- * tuple-descriptor, reference bitmap and row-/column-stores.
+ * It constructs header portion of virtual-relation object according to
+ * the supplied tuple-descriptor and pair of referenced relidx/attidx.
+ * Note that it just allocate header portion on private memory, so caller
+ * has to populate this template using pgstrom_create_vrelation to create
+ * actual vrelation object on the shared memory region.
  */
 pgstrom_vrelation *
-pgstrom_create_vrelation(TupleDesc tupdesc,
-						 List *vtlist_relidx,	/* natts of int elements */
-						 List *vtlist_attidx,	/* natts of int elements */
-						 int rcsnums, StromObject **rcstore,
-						 cl_uint nitems, cl_uint nrooms)
+pgstrom_create_vrelation_head(TupleDesc tupdesc,
+							  List *vtlist_relidx,
+							  List *vtlist_attidx)
 {
 	pgstrom_vrelation *vrel;
-	Size		length;
-	Size		offset;
-	int			i, vt_index = 0;
+	int			vt_index;
 	ListCell   *lc1;
 	ListCell   *lc2;
 
 	Assert(list_length(vtlist_relidx) == tupdesc->natts &&
 		   list_length(vtlist_attidx) == tupdesc->natts);
-
-	length = (MAXALIGN(offsetof(pgstrom_vrelation, vtlist[tupdesc->natts])) +
-			  MAXALIGN(sizeof(StromObject *) * rcsnums) +
-			  STROMALIGN(offsetof(kern_vrelation, rindex[rcsnums * nrooms])));
-	vrel = pgstrom_shmem_alloc(length);
-	if (!vrel)
-		elog(ERROR, "out of shared memory");
-
-	offset = MAXALIGN(offsetof(pgstrom_vrelation, vtlist[tupdesc->natts]));
-	memset(vrel, 0, offset);
-
+	vrel = palloc0(MAXALIGN(offsetof(pgstrom_vrelation,
+									 vtlist[tupdesc->natts])));
 	vrel->sobj.stag = StromTag_VirtRelation;
 	SpinLockInit(&vrel->lock);
 	vrel->refcnt = 1;
 	vrel->ncols = tupdesc->natts;
-	vrel->rcsnums = rcsnums;
-	vrel->rcstore = (StromObject **)((char *)vrel + offset);
-	offset += MAXALIGN(sizeof(StromObject *) * rcsnums);
-	for (i=0; i < rcsnums; i++)
-		vrel->rcstore[i] = pgstrom_get_rcstore(rcstore[i]);
-	vrel->kern = (kern_vrelation *)((char *)vrel + offset);
+	vrel->rcsnums = 0;		/* to be set later */
+	vrel->rcstore = NULL;	/* to be set later */
+	vrel->kern = NULL;		/* to be set later */
 
+	vt_index = 0;
 	forboth (lc1, vtlist_relidx,
 			 lc2, vtlist_attidx)
 	{
@@ -109,8 +97,60 @@ pgstrom_create_vrelation(TupleDesc tupdesc,
 		int		vt_relidx = lfirst_int(lc1);
 		int		vt_attidx = lfirst_int(lc2);
 
+		vrel->vtlist[vt_index].attnotnull = attr->attnotnull;
+		vrel->vtlist[vt_index].attalign = typealign_get_width(attr->attalign);
+		vrel->vtlist[vt_index].attlen = attr->attlen;
+		vrel->vtlist[vt_index].vrelidx = vt_relidx;
+		vrel->vtlist[vt_index].vattidx = vt_attidx;
+		vt_index++;
+	}
+	return vrel;
+}
+
+/*
+ * pgstrom_populate_vrelation
+ *
+ * it construct a virtual-relation object according to the prepared
+ * header portion of virtual-relation object.
+ */
+pgstrom_vrelation *
+pgstrom_populate_vrelation(pgstrom_vrelation *vrel_head,
+						   int rcsnums, StromObject **rcstore,
+						   cl_uint nitems, cl_uint nrooms)
+{
+	pgstrom_vrelation *vrel;
+	Size		length;
+	Size		offset;
+	int			i, ncols;
+
+	ncols = vrel_head->ncols;
+	length = (MAXALIGN(offsetof(pgstrom_vrelation, vtlist[ncols])) +
+			  MAXALIGN(sizeof(StromObject *) * rcsnums) +
+			  STROMALIGN(offsetof(kern_vrelation, rindex[rcsnums * nrooms])));
+	vrel = pgstrom_shmem_alloc(length);
+	if (!vrel)
+		elog(ERROR, "out of shared memory");
+
+	offset = MAXALIGN(offsetof(pgstrom_vrelation, vtlist[ncols]));
+	memcpy(vrel, vrel_head, offset);
+	Assert(vrel->sobj.stag == StromTag_VirtRelation);
+	Assert(SpinLockFree(&vrel->lock));
+	Assert(vrel->refcnt == 1);
+	vrel->rcsnums = rcsnums;
+	vrel->rcstore = (StromObject **)((char *)vrel + offset);
+	offset += MAXALIGN(sizeof(StromObject *) * rcsnums);
+	for (i=0; i < rcsnums; i++)
+		vrel->rcstore[i] = pgstrom_get_rcstore(rcstore[i]);
+	vrel->kern = (kern_vrelation *)((char *)vrel + offset);
+
+	for (i=0; i < ncols; i++)
+	{
+		int		vt_relidx = vrel->vtlist[i].vrelidx;
+		int		vt_attidx = vrel->vtlist[i].vattidx;
+
 		if (vt_relidx < 0 || vt_relidx >= vrel->rcsnums)
 			elog(ERROR, "vt_relidx %d is out of range", vt_relidx);
+
 		if (StromTagIs(rcstore[vt_relidx], TCacheRowStore))
 		{
 			tcache_row_store *trs
@@ -118,22 +158,22 @@ pgstrom_create_vrelation(TupleDesc tupdesc,
 			if (vt_attidx < 0 || vt_attidx >= trs->kern.ncols)
 				elog(ERROR, "vt_attidx %d is out of range", vt_relidx);
 		}
-		else
+		else if (StromTagIs(rcstore[vt_relidx], TCacheColumnStore))
 		{
 			tcache_column_store *tcs
 				= (tcache_column_store *)rcstore[vt_relidx];
 			if (vt_attidx < 0 || vt_attidx >= tcs->ncols)
 				elog(ERROR, "vt_attidx %d is out of range", vt_relidx);
 		}
-		vrel->vtlist[vt_index].attnotnull = attr->attnotnull;
-		vrel->vtlist[vt_index].attalign = typealign_get_width(attr->attalign);
-		vrel->vtlist[vt_index].attlen = attr->attlen;
-		vrel->vtlist[vt_index].vrelidx = vt_relidx;
-		vrel->vtlist[vt_index].vattidx = vt_attidx;
+		else
+			elog(ERROR, "bug? neither row- nor column- store: %s",
+				 StromTagGetLabel(rcstore[vt_relidx]));
 	}
-	/* also set fields in kern_vrelation */
+	/* also set fields of kern_vrelation */
 	memset(vrel->kern, 0, sizeof(kern_vrelation));
-	vrel->kern->nrels = rcsnums;
+	length = offsetof(kern_vrelation, rindex[rcsnums * nrooms]);
+	vrel->kern->length = STROMALIGN(length);
+	vrel->kern->nrels  = rcsnums;
 	vrel->kern->nitems = nitems;
 	vrel->kern->nrooms = nrooms;
 

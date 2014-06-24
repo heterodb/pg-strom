@@ -579,11 +579,14 @@ extern Datum pgstrom_mqueue_info(PG_FUNCTION_ARGS);
 extern pgstrom_vrelation *pgstrom_get_vrelation(pgstrom_vrelation *vrel);
 extern void pgstrom_put_vrelation(pgstrom_vrelation *vrel);
 extern pgstrom_vrelation *
-pgstrom_create_vrelation(TupleDesc tupdesc,
-						 List *vtlist_relidx,	/* natts of int elements */
-						 List *vtlist_attidx,	/* natts of int elements */
-						 int rcsnums, StromObject **rcstore,
-						 cl_uint nitems, cl_uint nrooms);
+pgstrom_create_vrelation_head(TupleDesc tupdesc,
+                              List *vtlist_relidx,
+                              List *vtlist_attidx);
+extern pgstrom_vrelation *
+pgstrom_populate_vrelation(pgstrom_vrelation *vrel_head,
+                           int rcsnums, StromObject **rcstore,
+                           cl_uint nitems, cl_uint nrooms);
+
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
