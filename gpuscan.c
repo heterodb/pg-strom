@@ -1177,7 +1177,7 @@ gpuscan_fetch_tuple(CustomPlanState *node)
 		{
 			Assert(gss->num_running > 0);
 			gss->num_running--;
-			dlist_push_head(&gss->ready_chunks, &msg->chain);
+			dlist_push_tail(&gss->ready_chunks, &msg->chain);
 		}
 
 		/*
@@ -1204,7 +1204,7 @@ gpuscan_fetch_tuple(CustomPlanState *node)
 				(msg = pgstrom_try_dequeue_message(gss->mqueue)) != NULL)
 			{
 				gss->num_running--;
-				dlist_push_head(&gss->ready_chunks, &msg->chain);
+				dlist_push_tail(&gss->ready_chunks, &msg->chain);
 				break;
 			}
 		}
@@ -1222,7 +1222,7 @@ gpuscan_fetch_tuple(CustomPlanState *node)
 			if (!msg)
 				elog(ERROR, "message queue wait timeout");
 			gss->num_running--;
-			dlist_push_head(&gss->ready_chunks, &msg->chain);
+			dlist_push_tail(&gss->ready_chunks, &msg->chain);
 		}
 
 		/*
@@ -1656,7 +1656,84 @@ gpuscan_end(CustomPlanState *node)
 static void
 gpuscan_rescan(CustomPlanState *node)
 {
-	elog(ERROR, "not implemented yet");
+	GpuScanState	   *gss = (GpuScanState *) node;
+	pgstrom_message	   *msg;
+	pgstrom_gpuscan	   *gpuscan;
+	dlist_mutable_iter	iter;
+
+	/*
+	 * If asynchronous requests are still running, we need to synchronize
+	 * their completion first.
+	 *
+	 * TODO: if we track all the pgstrom_gpuscan objects being enqueued
+	 * locally, all we need to do should be just decrements reference
+	 * counter. It may be a future enhancement.
+	 */
+	gpuscan = gss->curr_chunk;
+	if (gpuscan)
+	{
+		pgstrom_untrack_object(&gpuscan->msg.sobj);
+		pgstrom_put_message(&gpuscan->msg);
+	}
+
+	while (gss->num_running > 0)
+	{
+		msg = pgstrom_dequeue_message(gss->mqueue);
+		if (!msg)
+			elog(ERROR, "message queue wait timeout");
+		gss->num_running--;
+		dlist_push_tail(&gss->ready_chunks, &msg->chain);
+	}
+
+	dlist_foreach_modify (iter, &gss->ready_chunks)
+	{
+		gpuscan = dlist_container(pgstrom_gpuscan, msg.chain, iter.cur);
+		Assert(StromTagIs(gpuscan, GpuScan));
+
+		dlist_delete(&gpuscan->msg.chain);
+		if (gpuscan->msg.errcode != StromError_Success)
+		{
+			if (gpuscan->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
+			{
+				const char *buildlog
+					= pgstrom_get_devprog_errmsg(gpuscan->dprog_key);
+				const char *kern_source
+					= ((GpuScanPlan *)gss->cps.ps.plan)->kern_source;
+
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
+								pgstrom_strerror(gpuscan->msg.errcode),
+								kern_source),
+						 errdetail("%s", buildlog)));
+			}
+			else
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("PG-Strom: OpenCL execution error (%s)",
+								pgstrom_strerror(gpuscan->msg.errcode))));
+            }
+		}
+		pgstrom_untrack_object(&gpuscan->msg.sobj);
+		pgstrom_put_message(&gpuscan->msg);
+	}
+
+	/*
+	 * OK, asynchronous jobs were cleared. revert scan state to the head.
+	 */
+	gss->curr_chunk = NULL;
+	gss->curr_index = 0;
+	if (gss->tc_head)
+	{
+		if (gss->tc_scan)
+			tcache_rescan(gss->tc_scan);
+		else
+			gss->tc_scan = tcache_begin_scan(gss->tc_head,
+											 gss->scan_rel);
+	}
+	if (gss->scan_desc)
+		heap_rescan(gss->scan_desc, NULL);
 }
 
 static void
@@ -2580,16 +2657,17 @@ clserv_put_gpuscan(pgstrom_message *msg)
 {
 	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *)msg;
 
-	/* unlink message queue (if exist) */
+	/* unlink message queue, if any */
 	if (msg->respq)
 		pgstrom_put_queue(msg->respq);
-
-	/* unlink device program (if exist) */
+	/* unlink device program, if any */
 	if (gpuscan->dprog_key != 0)
 		pgstrom_put_devprog_key(gpuscan->dprog_key);
-
-	/* release row-store */
+	/* release row-/column-store, if any */
 	if (gpuscan->rc_store)
 		pgstrom_put_rcstore(gpuscan->rc_store);
+	/* release vrelation, if any */
+	if (gpuscan->vrel)
+		pgstrom_put_vrelation(gpuscan->vrel);
 	pgstrom_shmem_free(gpuscan);
 }
