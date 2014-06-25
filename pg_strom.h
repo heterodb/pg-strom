@@ -576,6 +576,7 @@ extern Datum pgstrom_mqueue_info(PG_FUNCTION_ARGS);
 /*
  * datastore.c
  */
+extern int pgstrom_try_varlena_inline(Form_pg_attribute attr);
 extern pgstrom_vrelation *pgstrom_get_vrelation(pgstrom_vrelation *vrel);
 extern void pgstrom_put_vrelation(pgstrom_vrelation *vrel);
 extern pgstrom_vrelation *
@@ -796,6 +797,7 @@ extern bool	pgstrom_enabled;
 extern bool pgstrom_perfmon_enabled;
 extern int	pgstrom_max_async_chunks;
 extern int	pgstrom_min_async_chunks;
+extern int  pgstrom_max_inline_varlena;
 extern double pgstrom_gpu_setup_cost;
 extern double pgstrom_gpu_operator_cost;
 extern double pgstrom_gpu_tuple_cost;
@@ -851,13 +853,13 @@ pgstrom_get_rcstore(StromObject *sobject)
 
 	if (StromTagIs(sobject, TCacheRowStore))
 	{
-		result = (StromObject *)
-			tcache_get_row_store((tcache_row_store *)sobject);
+		tcache_row_store *trs = (tcache_row_store *) sobject;
+		result = (StromObject *) pgstrom_get_row_store(trs);
 	}
 	else if (StromTagIs(sobject, TCacheColumnStore))
 	{
-		result = (StromObject *)
-			tcache_get_column_store((tcache_column_store *)sobject);
+		tcache_column_store *tcs = (tcache_column_store *) sobject;
+		result = (StromObject *) tcache_get_column_store(tcs);
 	}
 	else
 		elog(ERROR, "Bug? it's neither row nor column store");
@@ -869,7 +871,7 @@ static inline void
 pgstrom_put_rcstore(StromObject *sobject)
 {
 	if (StromTagIs(sobject, TCacheRowStore))
-		tcache_put_row_store((tcache_row_store *)sobject);
+		pgstrom_put_row_store((tcache_row_store *)sobject);
 	else if (StromTagIs(sobject, TCacheColumnStore))
 		tcache_put_column_store((tcache_column_store *)sobject);
 	else

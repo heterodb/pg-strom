@@ -30,6 +30,7 @@ bool	pgstrom_enabled;
 bool	pgstrom_perfmon_enabled;
 int		pgstrom_max_async_chunks;
 int		pgstrom_min_async_chunks;
+int		pgstrom_max_inline_varlena;
 
 /* cost factors */
 double	pgstrom_gpu_setup_cost;
@@ -80,7 +81,16 @@ pgstrom_init_misc_guc(void)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("\"pg_strom.max_async_chunks\" must be larger than \"pg_strom.min_async_chunks\"")));
-
+	DefineCustomIntVariable("pg_strom.max_inline_varlena",
+							"max length to inline varlena variables",
+							NULL,
+							&pgstrom_max_inline_varlena,
+							64,
+							0,
+							128,
+							PGC_POSTMASTER,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
 	DefineCustomRealVariable("gpu_setup_cost",
 							 "Cost to setup GPU device to run",
 							 NULL,

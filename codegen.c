@@ -56,7 +56,7 @@ static struct {
 	/* variable length datatypes */
 	{ BPCHAROID,		"varlena" },
 	{ VARCHAROID,		"varlena" },
-	{ NUMERICOID,		"varlena" },
+//	{ NUMERICOID,		"varlena" },
 	{ BYTEAOID,			"varlena" },
 	{ TEXTOID,			"varlena" },
 };
@@ -1315,6 +1315,17 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			elog(ERROR, "unrecognized boolop: %d", (int) b->boolop);
 		return true;
 	}
+	else if (IsA(node, RelabelType))
+	{
+		RelabelType *relabel = (RelabelType *) node;
+		/*
+		 * RelabelType translates just label of data types. Both of types
+		 * same binary form (and also PG-Strom kernel defines all varlena
+		 * data types as alias of __global *varlena), so no need to do
+		 * anything special.
+		 */
+		return codegen_expression_walker((Node *)relabel->arg, context);
+	}
 	Assert(false);
 	return false;
 }
@@ -1563,6 +1574,16 @@ pgstrom_codegen_available_expression(Expr *expr)
 		BooleanTest	   *booltest = (BooleanTest *) expr;
 
 		return pgstrom_codegen_available_expression((Expr *) booltest->arg);
+	}
+	else if (IsA(expr, RelabelType))
+	{
+		RelabelType *relabel = (RelabelType *) expr;
+
+		if (!devtype_runnable_collation(relabel->resultcollid))
+			return false;
+		if (!pgstrom_devtype_lookup(relabel->resulttype))
+			return false;
+		return pgstrom_codegen_available_expression((Expr *) relabel->arg);
 	}
 	return false;
 }

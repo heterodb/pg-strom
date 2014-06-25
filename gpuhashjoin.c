@@ -2035,7 +2035,7 @@ gpuhashjoin_preload_hash_table(GpuHashJoinState *ghjs)
 				}
 				if (!trs)
 				{
-					trs = tcache_create_row_store(tupdesc);
+					trs = pgstrom_create_row_store(tupdesc);
 					pgstrom_track_object(&trs->sobj, 0);
 				}
 				if (!tcache_row_store_insert_tuple(trs, tuple))

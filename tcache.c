@@ -648,39 +648,6 @@ tcache_put_toast_buffer(tcache_toastbuf *tbuf)
 		pgstrom_shmem_free(tbuf);
 }
 
-
-
-
-
-
-/*
- * tcache_create_row_store
- *
- *
- *
- *
- */
-tcache_row_store *
-tcache_create_row_store(TupleDesc tupdesc)
-{
-	/* XXX - old tcache_* one to be replaced later */
-	return pgstrom_create_row_store(tupdesc);
-}
-
-tcache_row_store *
-tcache_get_row_store(tcache_row_store *trs)
-{
-	/* XXX - old tcache_* one to be replaced later */
-	return pgstrom_get_row_store(trs);
-}
-
-void
-tcache_put_row_store(tcache_row_store *trs)
-{
-	/* XXX = old tcache_* one to be replaced later */
-	pgstrom_put_row_store(trs);
-}
-
 /*
  * tcache_alloc_tcnode
  *
@@ -1787,11 +1754,11 @@ tcache_insert_tuple_row(tcache_head *tc_head, HeapTuple tuple)
 	{
 	retry:
 		if (tc_head->trs_curr)
-			trs = tcache_get_row_store(tc_head->trs_curr);
+			trs = pgstrom_get_row_store(tc_head->trs_curr);
 		else
 		{
-			tc_head->trs_curr = tcache_create_row_store(tc_head->tupdesc);
-			trs = tcache_get_row_store(tc_head->trs_curr);
+			tc_head->trs_curr = pgstrom_create_row_store(tc_head->tupdesc);
+			trs = pgstrom_get_row_store(tc_head->trs_curr);
 		}
 
 		if (!tcache_row_store_insert_tuple(trs, tuple))
@@ -1801,7 +1768,7 @@ tcache_insert_tuple_row(tcache_head *tc_head, HeapTuple tuple)
 			 * columnizer pending list (if nobody do it), them retry again.
 			 */
 			dlist_push_head(&tc_head->trs_list, &trs->chain);
-			tcache_put_row_store(trs);
+			pgstrom_put_row_store(trs);
 			tc_head->trs_curr = trs = NULL;
 			pgstrom_wakeup_columnizer(false);
 			goto retry;
@@ -2332,7 +2299,7 @@ tcache_scan_next(tcache_scandesc *tc_scan)
 			trs_curr = tc_head->trs_curr;
 
 		if (trs_curr)
-			tc_scan->trs_curr = tcache_get_row_store(trs_curr);
+			tc_scan->trs_curr = pgstrom_get_row_store(trs_curr);
 	}
 	else if (dnode_is_linked(&trs_prev->chain))
 	{
@@ -2345,12 +2312,12 @@ tcache_scan_next(tcache_scandesc *tc_scan)
 		{
 			dnode = dlist_next_node(&tc_head->trs_list, &trs_prev->chain);
 			trs_curr = dlist_container(tcache_row_store, chain, dnode);
-			tc_scan->trs_curr = tcache_get_row_store(trs_curr);
+			tc_scan->trs_curr = pgstrom_get_row_store(trs_curr);
 		}
 		else
 		{
 			if (tc_head->trs_curr)
-				tc_scan->trs_curr = tcache_get_row_store(tc_head->trs_curr);
+				tc_scan->trs_curr = pgstrom_get_row_store(tc_head->trs_curr);
 			else
 				tc_scan->trs_curr = NULL;
 		}
@@ -2399,14 +2366,14 @@ tcache_scan_prev(tcache_scandesc *tc_scan)
 		{
 			if (tc_head->trs_curr)
 			{
-				trs_curr = tcache_get_row_store(tc_head->trs_curr);
+				trs_curr = pgstrom_get_row_store(tc_head->trs_curr);
 				Assert(!dnode_is_linked(&trs_curr->chain));
 			}
 			else if (!dlist_is_empty(&tc_head->trs_list))
 			{
 				dnode = dlist_tail_node(&tc_head->trs_list);
 				trs_curr = dlist_container(tcache_row_store, chain, dnode);
-				trs_curr = tcache_get_row_store(trs_curr);
+				trs_curr = pgstrom_get_row_store(trs_curr);
 			}
 			else
 				trs_curr = NULL;
@@ -2417,7 +2384,7 @@ tcache_scan_prev(tcache_scandesc *tc_scan)
 			{
 				dnode = dlist_tail_node(&tc_head->trs_list);
 				trs_curr = dlist_container(tcache_row_store, chain, dnode);
-				trs_curr = tcache_get_row_store(trs_curr);
+				trs_curr = pgstrom_get_row_store(trs_curr);
 			}
 			else
 				trs_curr = NULL;
@@ -2429,7 +2396,7 @@ tcache_scan_prev(tcache_scandesc *tc_scan)
 				dnode = dlist_prev_node(&tc_head->trs_list,
 										&trs_prev->chain);
 				trs_curr = dlist_container(tcache_row_store, chain, dnode);
-				trs_curr = tcache_get_row_store(trs_curr);
+				trs_curr = pgstrom_get_row_store(trs_curr);
 			}
 			else
 				trs_curr = NULL;
@@ -2634,6 +2601,8 @@ tcache_create_tchead(Oid reloid, Bitmapset *required,
 			offset += MAXALIGN(sizeof(FormData_pg_attribute));
 			memcpy(tupdesc->attrs[i], GETSTRUCT(atttup),
 				   sizeof(FormData_pg_attribute));
+			tupdesc->attrs[i]->attlen
+				= pgstrom_try_varlena_inline(tupdesc->attrs[i]);
 			ReleaseSysCache(atttup);
 		}
 		Assert(offset <= length);
@@ -2898,11 +2867,11 @@ tcache_reset_tchead(tcache_head *tc_head)
 		tcache_row_store   *trs
 			= dlist_container(tcache_row_store, chain, iter.cur);
 		dlist_delete(&trs->chain);
-		tcache_put_row_store(trs);
+		pgstrom_put_row_store(trs);
 	}
 	Assert(dlist_is_empty(&tc_head->trs_list));
 	if (tc_head->trs_curr)
-		tcache_put_row_store(tc_head->trs_curr);
+		pgstrom_put_row_store(tc_head->trs_curr);
 	tc_head->trs_curr = NULL;
 
 	/* all clear, this cache become 'not ready' again */
@@ -2915,9 +2884,8 @@ tcache_reset_tchead(tcache_head *tc_head)
 /*
  * pgstrom_tcache_synchronizer
  *
- *
- *
- *
+ * trigger function to be called after INSERT, UPDATE, DELETE for each row
+ * or TRUNCATE statement, to keep consistency of tcache.
  */
 Datum
 pgstrom_tcache_synchronizer(PG_FUNCTION_ARGS)
@@ -2998,12 +2966,10 @@ pgstrom_tcache_synchronizer(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_tcache_synchronizer);
 
 /*
+ * pgstrom_assign_synchronizer
  *
- *
- *
- *
- *
- *
+ * It shall be called for each creation of relations, to assign trigger
+ * functions to keep tcache status.
  */
 static void
 pgstrom_assign_synchronizer(Oid reloid)
@@ -3637,7 +3603,7 @@ pgstrom_columnizer_main(Datum index)
 											&rs_tup->htup);
 				}
 				/* row-store shall be released */
-				tcache_put_row_store(trs);
+				pgstrom_put_row_store(trs);
 			}
 			else if (!dlist_is_empty(&tc_head->pending_list))
 			{

@@ -813,19 +813,24 @@ pgstrom_create_gpuscan(GpuScanState *gss, StromObject *rcstore)
 	gpuscan->vrel = pgstrom_populate_vrelation(gss->vrel_head,
 											   1, &rcstore,
 											   0, nitems);
-	/* setup kern_data_store and kern_toastbuf */
-	kparam_refresh_kds_head(&gpuscan->kern.kparams, gpuscan->vrel, nitems);
-	kparam_refresh_ktoast_head(&gpuscan->kern.kparams, gpuscan->vrel);
-
 	/*
-	 * In case when no kernel code will run towards this row-/column-store,
-	 * we need to perform as if all the checks done on device side are 
-	 * passed.
+	 * When GpuScan involves kernel execution, kern_data_store and
+	 * kern_toastbuf have to be adjusted according to the scale of
+	 * row-/column-store to be loaded.
+	 * Elsewhere, we presume all the records passed by device checks,
+	 * although we have no actual checks, In this case, the result
+	 * vrelation points all the records as visible ones.
 	 */
-	if (gss->dprog_key == 0)
+	if (gss->dprog_key != 0)
+	{
+		kparam_refresh_kds_head(&gpuscan->kern.kparams,
+								gpuscan->vrel, nitems);
+		kparam_refresh_ktoast_head(&gpuscan->kern.kparams,
+								   gpuscan->vrel);
+	}
+	else
 	{
 		pgstrom_vrelation  *vrel = gpuscan->vrel;
-
 		for (i=0; i < vrel->kern->nrooms; i++)
 			vrel->kern->rindex[i] = i + 1;
 		vrel->kern->nitems = vrel->kern->nrooms;
@@ -865,7 +870,7 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 			TupleDesc	tupdesc = RelationGetDescr(gss->scan_rel);
 			HeapTuple	tuple;
 
-			trs = tcache_create_row_store(tupdesc);
+			trs = pgstrom_create_row_store(tupdesc);
 			while (HeapTupleIsValid(tuple = heap_getnext(gss->scan_desc,
 														 direction)))
 			{
@@ -891,7 +896,7 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 					sobject = &trs->sobj;
 				else
 				{
-					tcache_put_row_store(trs);
+					pgstrom_put_row_store(trs);
 					sobject = NULL;
 				}
 			}
@@ -926,7 +931,7 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	PG_CATCH();
 	{
 		if (trs)
-			tcache_put_row_store(trs);
+			pgstrom_put_row_store(trs);
 		if (tcs)
 			tcache_put_column_store(tcs);
 		PG_RE_THROW();
@@ -999,6 +1004,7 @@ gpuscan_check_tuple_visibility(GpuScanState *gss,
 			for (i=0; i < tupdesc->natts; i++)
 			{
 				Form_pg_attribute attr = tupdesc->attrs[i];
+				int		attlen;
 
 				if (!tcs->cdata[i].values)
 					continue;
@@ -1007,10 +1013,12 @@ gpuscan_check_tuple_visibility(GpuScanState *gss,
 					att_isnull(rindex, tcs->cdata[i].isnull))
 					continue;
 
-				if (attr->attlen > 0)
+				/* we need to consider inlined varlena */
+				attlen = pgstrom_try_varlena_inline(attr);
+				if (attlen > 0)
 				{
 					slot->tts_values[i] = fetch_att(tcs->cdata[i].values +
-													attr->attlen * rindex,
+													attlen * rindex,
 													attr->attbyval,
 													attr->attlen);
 				}
@@ -2255,7 +2263,7 @@ clserv_process_gpuscan_column(clstate_gpuscan *clgss,
 				return rc;
 			}
 			clgss->ev_index++;
-			pfm->bytes_dma_send += length;
+			pfm->bytes_dma_send += tcs->cdata[i].toast->tbuf_usage;
 			pfm->num_dma_send++;
 		}
 	}

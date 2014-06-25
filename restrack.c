@@ -212,7 +212,7 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 			else if (StromTagIs(sobject, TCacheHead))
 				tcache_abort_tchead((tcache_head *)sobject, private);
 			else if (StromTagIs(sobject, TCacheRowStore))
-				tcache_put_row_store((tcache_row_store *)sobject);
+				pgstrom_put_row_store((tcache_row_store *)sobject);
 			else if (StromTagIs(sobject, TCacheColumnStore))
 				tcache_put_column_store((tcache_column_store *)sobject);
 #if 0
@@ -273,7 +273,7 @@ __pgstrom_track_object(const char *filename, int lineno,
 		else if (StromTagIs(sobject, TCacheHead))
 			tcache_abort_tchead((tcache_head *)sobject, private);
 		else if (StromTagIs(sobject, TCacheRowStore))
-			tcache_put_row_store((tcache_row_store *)sobject);
+			pgstrom_put_row_store((tcache_row_store *)sobject);
 		else if (StromTagIs(sobject, TCacheColumnStore))
 			tcache_put_column_store((tcache_column_store *)sobject);
 #if 0
