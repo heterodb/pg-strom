@@ -1122,25 +1122,14 @@ codegen_expression_walker(Node *node, codegen_context *context)
 	else if (IsA(node, Var))
 	{
 		Var	   *var = (Var *) node;
-		cl_uint	index = 0;
 
 		if (!devtype_runnable_collation(var->varcollid) ||
 			!pgstrom_devtype_lookup_and_track(var->vartype, context))
 			return false;
 
-		foreach (cell, context->used_vars)
-		{
-			if (equal(node, lfirst(cell)))
-			{
-				appendStringInfo(&context->str, "KVAR_%u", index);
-				return true;
-			}
-			index++;
-		}
-		context->used_vars = lappend(context->used_vars,
-									 copyObject(node));
-		index = list_length(context->used_vars) - 1;
-		appendStringInfo(&context->str, "KVAR_%u", index);
+		appendStringInfo(&context->str, "KVAR_%u", var->varattno);
+		context->used_vars = list_append_unique(context->used_vars,
+												copyObject(node));
 		return true;
 	}
 	else if (IsA(node, FuncExpr))
@@ -1420,7 +1409,7 @@ pgstrom_codegen_func_declarations(codegen_context *context)
  * pgstrom_codegen_param_declarations
  */
 char *
-pgstrom_codegen_param_declarations(codegen_context *context)
+pgstrom_codegen_param_declarations(codegen_context *context, int num_skips)
 {
 	StringInfoData	str;
 	ListCell	   *cell;
@@ -1430,32 +1419,34 @@ pgstrom_codegen_param_declarations(codegen_context *context)
 	initStringInfo(&str);
 	foreach (cell, context->used_params)
 	{
-		if (IsA(lfirst(cell), Const))
+		if (index >= num_skips)
 		{
-			Const  *con = lfirst(cell);
+			if (IsA(lfirst(cell), Const))
+			{
+				Const  *con = lfirst(cell);
 
-			dtype = pgstrom_devtype_lookup(con->consttype);
-			Assert(dtype != NULL);
+				dtype = pgstrom_devtype_lookup(con->consttype);
+				Assert(dtype != NULL);
 
-			appendStringInfo(&str,
-							 "#define KPARAM_%u\t"
-							 "pg_%s_param(kparams,errcode,%d)\n",
-							 index, dtype->type_name, index);
+				appendStringInfo(
+					&str,
+					"  pg_%s_t KPARAM_%u = pg_%s_param(kparams,errcode,%d);\n",
+					dtype->type_name, index, dtype->type_name, index);
+			}
+			else if (IsA(lfirst(cell), Param))
+			{
+				Param  *param = lfirst(cell);
+
+				dtype = pgstrom_devtype_lookup(param->paramtype);
+				Assert(dtype != NULL);
+				appendStringInfo(
+					&str,
+					"  pg_%s_t KPARAM_%u = pg_%s_param(kparams,errcode,%d);\n",
+					dtype->type_name, index, dtype->type_name, index);
+			}
+			else
+				elog(ERROR, "unexpected node: %s", nodeToString(lfirst(cell)));
 		}
-		else if (IsA(lfirst(cell), Param))
-		{
-			Param  *param = lfirst(cell);
-
-			dtype = pgstrom_devtype_lookup(param->paramtype);
-			Assert(dtype != NULL);
-
-			appendStringInfo(&str,
-							 "#define KPARAM_%u\t"
-							 "pg_%s_param(kparams,errcode,%d)\n",
-							 index, dtype->type_name, index);
-		}
-		else
-			elog(ERROR, "unexpected node: %s", nodeToString(lfirst(cell)));
 		index++;
 	}
 	return str.data;
@@ -1469,65 +1460,21 @@ pgstrom_codegen_var_declarations(codegen_context *context)
 {
 	StringInfoData	str;
 	ListCell	   *cell;
-	int				index = 0;
 
 	initStringInfo(&str);
 	foreach (cell, context->used_vars)
 	{
 		Var			   *var = lfirst(cell);
-		ListCell	   *lc;
-		devtype_info   *dtype;
-		AttrNumber		colidx = 0;
+		devtype_info   *dtype = pgstrom_devtype_lookup(var->vartype);
 
-		foreach (lc, context->used_vars)
-		{
-			if (((Var *)lfirst(lc))->varattno < var->varattno)
-				colidx++;
-		}
-		dtype = pgstrom_devtype_lookup(var->vartype);
 		Assert(dtype != NULL);
-
-		if (dtype->type_length > 0)
-			appendStringInfo(
-				&str,
-				"#define KVAR_%u\t"
-				"pg_%s_vref(kcs,errcode,%u,kcs_index)\n",
-				index,
-				dtype->type_name,
-				colidx);
-		else
-			appendStringInfo(
-				&str,
-				"#define KVAR_%u\t"
-				"pg_%s_vref(kcs,toast,errcode,%u,kcs_index)\n",
-				index,
-				dtype->type_name,
-				colidx);
-		index++;
+		appendStringInfo(
+			&str,
+			"  pg_%s_t KVAR_%u"
+			" = pg_%s_vref(kds,ktoast,errcode,%u,kds_index);\n",
+			dtype->type_name, var->varattno,
+			dtype->type_name, var->varattno - 1);
 	}
-	return str.data;
-}
-
-char *
-pgstrom_codegen_declarations(codegen_context *context)
-{
-	StringInfoData	str;
-	char	   *type_decl = pgstrom_codegen_type_declarations(context);
-	char	   *func_decl = pgstrom_codegen_func_declarations(context);
-	char	   *param_decl = pgstrom_codegen_param_declarations(context);
-	char	   *var_decl = pgstrom_codegen_var_declarations(context);
-
-	initStringInfo(&str);
-	appendStringInfo(&str, "%s%s%s%s",
-					 type_decl,
-					 func_decl,
-					 param_decl,
-					 var_decl);
-	pfree(type_decl);
-	pfree(func_decl);
-	pfree(param_decl);
-	pfree(var_decl);
-
 	return str.data;
 }
 

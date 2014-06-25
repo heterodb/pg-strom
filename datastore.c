@@ -181,6 +181,71 @@ pgstrom_populate_vrelation(pgstrom_vrelation *vrel_head,
 }
 
 /*
+ * pgstrom_can_vrelation_projection
+ *
+ * It checks whether the supplied tlist can be handled by simple projection.
+ * If available, it returns simple-projection list.
+ */
+List *
+pgstrom_can_vrelation_projection(List *targetlist)
+{
+	List	   *result = NIL;
+	ListCell   *cell;
+
+	foreach (cell, targetlist)
+	{
+		TargetEntry	   *tle = lfirst(cell);
+		Var			   *var;
+
+		if (!IsA(tle->expr, Var))
+			return NIL;
+		var = (Var *) tle->expr;
+		Assert(var->varno == INDEX_VAR || !IS_SPECIAL_VARNO(var->varno));
+		/*
+		 * FIXME: we don't support to reference system columns using
+		 * vrelation structure. It should be fixed up later.
+		 */
+		if (var->varattno < 1)
+			return NIL;
+		result = lappend_int(result, var->varattno);
+	}
+	return result;
+}
+
+/*
+ * pgstrom_apply_vrelation_projection
+ *
+ * It applies simple projection on the supplied vrelation.
+ */
+pgstrom_vrelation *
+pgstrom_apply_vrelation_projection(pgstrom_vrelation *vrel, List *vrel_proj)
+{
+	pgstrom_vrelation  *temp;
+	ListCell   *cell;
+	int			i, j;
+
+	Assert(vrel_proj != NIL);
+
+	Assert(list_length(vrel_proj) <= vrel->ncols);
+	temp = palloc0(offsetof(pgstrom_vrelation, vtlist[vrel->ncols]));
+	i = 0;
+	foreach (cell, vrel_proj)
+	{
+		j = lfirst_int(cell) - 1;
+
+		Assert(j < vrel->ncols);
+		temp->vtlist[i++] = vrel->vtlist[j];
+	}
+	memcpy(vrel->vtlist, temp->vtlist,
+		   offsetof(pgstrom_vrelation, vtlist[j]) -
+		   offsetof(pgstrom_vrelation, vtlist[0]));
+	vrel->ncols = j;
+	pfree(temp);
+
+	return vrel;
+}
+
+/*
  * pgstrom_create_param_buffer
  *
  * It construct a param-buffer on the shared memory segment, according to
@@ -318,10 +383,13 @@ pgstrom_plan_can_multi_exec(const PlanState *ps)
 {
 	if (!IsA(ps, CustomPlanState))
 		return false;
-
+#if 0
 	if (gpuscan_support_multi_exec((const CustomPlanState *) ps) ||
 		gpusort_support_multi_exec((const CustomPlanState *) ps) ||
 		gpuhashjoin_support_multi_exec((const CustomPlanState *) ps))
+		return true;
+#endif
+	if (gpuscan_support_multi_exec((const CustomPlanState *) ps))
 		return true;
 
 	return false;
@@ -430,18 +498,18 @@ kparam_make_kds_head(TupleDesc tupdesc,
 
 void
 kparam_refresh_kds_head(kern_parambuf *kparams,
-						pgstrom_vrelation *vrel)
+						pgstrom_vrelation *vrel,
+						cl_uint nitems)
 {
-	bytea  *kparam_1 = kparam_get_value(kparams, 1);
-	kern_data_store *kds_head = (kern_data_store *) VARDATA_ANY(kparam_1);
+	kern_data_store *kds_head = KPARAM_GET_KDS_HEAD(kparams);
 	Size	length;
 	Size   *rs_ofs = palloc0(sizeof(Size) * vrel->rcsnums);
 	int		i, ncols = kds_head->ncols;
 
 	Assert(ncols == vrel->ncols);
 	length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
-	kds_head->nitems = vrel->kern->nitems;
-	kds_head->nrooms = vrel->kern->nitems; /* XXX need to fit vrel->nrooms? */
+	kds_head->nitems = nitems;
+	kds_head->nrooms = nitems;
 
 	for (i=0; i < ncols; i++)
 	{
@@ -519,10 +587,8 @@ void
 kparam_refresh_ktoast_head(kern_parambuf *kparams,
 						   pgstrom_vrelation *vrel)
 {
-	bytea	   *kparam_1 = kparam_get_value(kparams, 1);
-	bytea	   *kparam_2 = kparam_get_value(kparams, 2);
-	kern_data_store *kds_head;
-	kern_toastbuf *ktoast_head;
+	kern_data_store *kds_head = KPARAM_GET_KDS_HEAD(kparams);
+	kern_toastbuf *ktoast_head = KPARAM_GET_KTOAST_HEAD(kparams);
 	StromObject	*rcs;
 	int			vt_relidx;
 	int			vt_attidx;
@@ -530,8 +596,6 @@ kparam_refresh_ktoast_head(kern_parambuf *kparams,
 	Size		offset;
 	bool		has_toast = false;
 
-	kds_head = (kern_data_store *) VARDATA_ANY(kparam_1);
-	ktoast_head = (kern_toastbuf *) VARDATA_ANY(kparam_2);
 	Assert(ktoast_head->length == TOASTBUF_MAGIC);
 	Assert(ktoast_head->ncols == kds_head->ncols);
 	offset = STROMALIGN(offsetof(kern_toastbuf,
@@ -564,9 +628,9 @@ kparam_refresh_ktoast_head(kern_parambuf *kparams,
 			}
 		}
 	}
-
+	/* mark KPARAM_1 as null */
 	if (!has_toast)
-		kparams->poffset[2] = 0;	/* mark it as null */
+		kparams->poffset[1] = 0;	/* mark it as null */
 }
 
 #if 0

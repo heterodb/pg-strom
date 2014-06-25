@@ -57,9 +57,6 @@
  */
 typedef struct {
 	kern_parambuf	kparams;
-	/*
-	 * as above, kern_resultbuf shall be located next to the parambuf
-	 */
 } kern_gpuscan;
 
 #define KERN_GPUSCAN_PARAMBUF(kgpuscan)			\
@@ -96,7 +93,7 @@ gpuscan_writeback_row_error(__global kern_vrelation *kvrel,
 	offset = arithmetic_stairlike_add(binary, workmem, &nitems);
 
 	if (get_local_id(0) == 0)
-		base = atomic_add(&kresbuf->nitems, nitems);
+		base = atomic_add(&kvrel->nitems, nitems);
 	barrier(CLK_LOCAL_MEM_FENCE);
 
 	/*
@@ -108,9 +105,9 @@ gpuscan_writeback_row_error(__global kern_vrelation *kvrel,
 		return;
 
 	if (errcode == StromError_Success)
-		kresbuf->results[base + offset] = (get_global_id(0) + 1);
+		kvrel->rindex[base + offset] = (get_global_id(0) + 1);
 	else if (errcode == StromError_RowReCheck)
-		kresbuf->results[base + offset] = -(get_global_id(0) + 1);
+		kvrel->rindex[base + offset] = -(get_global_id(0) + 1);
 }
 
 /*
@@ -137,7 +134,7 @@ gpuscan_qual(__global kern_gpuscan *kgpuscan,
 	cl_int		errcode = StromError_Success;
 	__global kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
 
-	if (get_global_id(0) < kcs->nrows)
+	if (get_global_id(0) < kds->nitems)
 		rc = gpuscan_qual_eval(&errcode,
 							   kparams, kvrel, kds, ktoast,
 							   get_global_id(0));
@@ -151,7 +148,7 @@ gpuscan_qual(__global kern_gpuscan *kgpuscan,
 
 	/* writeback error code */
 	kern_writeback_error_status(&kvrel->errcode, errcode, local_workbuf);
-	gpuscan_writeback_row_error(kvrel, errcode, local_workmem);
+	gpuscan_writeback_row_error(kvrel, errcode, local_workbuf);
 }
 
 #if 0

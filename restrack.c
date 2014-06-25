@@ -212,8 +212,10 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 				tcache_put_row_store((tcache_row_store *)sobject);
 			else if (StromTagIs(sobject, TCacheColumnStore))
 				tcache_put_column_store((tcache_column_store *)sobject);
+#if 0
 			else if (StromTagIs(sobject, HashJoinTable))
 				gpuhashjoin_put_hash_table((pgstrom_hashjoin_table *)sobject);
+#endif
 			else
 			{
 				Assert(IS_TRACKABLE_OBJECT(sobject));
@@ -269,8 +271,10 @@ __pgstrom_track_object(const char *filename, int lineno,
 			tcache_put_row_store((tcache_row_store *)sobject);
 		else if (StromTagIs(sobject, TCacheColumnStore))
 			tcache_put_column_store((tcache_column_store *)sobject);
+#if 0
 		else if (StromTagIs(sobject, HashJoinTable))
 			gpuhashjoin_put_hash_table((pgstrom_hashjoin_table *)sobject);
+#endif
 		else
 			pgstrom_put_message((pgstrom_message *)sobject);
 

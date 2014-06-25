@@ -469,7 +469,7 @@ typedef struct
 	StromObject		sobj;		/* =StromTag_VirtRelation */
 	slock_t			lock;		/* protection of reference counter */
 	cl_int			refcnt;		/* reference counter */
-	cl_int			ncols;		/* number of columns; width of vtlist[] */
+	cl_int			ncols;		/* number of columns */
 	cl_int			rcsnums;	/* number of row-/column-store */
 	StromObject	  **rcstore;	/* array of row-/column-stores */
 	kern_vrelation *kern;		/* kern_vrelation */
@@ -586,6 +586,10 @@ extern pgstrom_vrelation *
 pgstrom_populate_vrelation(pgstrom_vrelation *vrel_head,
                            int rcsnums, StromObject **rcstore,
                            cl_uint nitems, cl_uint nrooms);
+extern List *
+pgstrom_can_vrelation_projection(List *targetlist);
+extern pgstrom_vrelation *
+pgstrom_apply_vrelation_projection(pgstrom_vrelation *vrel, List *vrel_proj);
 
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
@@ -599,7 +603,8 @@ extern bytea *kparam_make_kds_head(TupleDesc tupdesc,
 								   cl_uint nsyscols,
 								   cl_uint nrooms);
 extern void kparam_refresh_kds_head(kern_parambuf *kparams,
-									pgstrom_vrelation *vrel);
+									pgstrom_vrelation *vrel,
+									cl_uint nitems);
 extern bytea *kparam_make_ktoast_head(TupleDesc tupdesc,
 									  cl_uint nsyscols);
 extern void kparam_refresh_ktoast_head(kern_parambuf *kparams,
@@ -740,9 +745,9 @@ extern devfunc_info *pgstrom_devfunc_lookup_and_track(Oid func_oid,
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern char *pgstrom_codegen_type_declarations(codegen_context *context);
 extern char *pgstrom_codegen_func_declarations(codegen_context *context);
-extern char *pgstrom_codegen_param_declarations(codegen_context *context);
+extern char *pgstrom_codegen_param_declarations(codegen_context *context,
+												int num_skips);
 extern char *pgstrom_codegen_var_declarations(codegen_context *context);
-extern char *pgstrom_codegen_declarations(codegen_context *context);
 extern bool pgstrom_codegen_available_expression(Expr *expr);
 extern void pgstrom_init_codegen(void);
 
@@ -994,20 +999,11 @@ typealign_get_width(char type_align)
 /*
  * utility function to access system kparams
  */
-static inline cl_char *
-KPARAM_GET_ATTREFS(kern_parambuf *kparams)
-{
-	bytea  *vl_datum = kparam_get_value(kparams, 0);
-
-	if (!vl_datum)
-		return NULL;
-	return (cl_char *)VARDATA_ANY(vl_datum);
-}
 
 static inline kern_data_store *
 KPARAM_GET_KDS_HEAD(kern_parambuf *kparams)
 {
-	bytea  *vl_datum = kparam_get_value(kparams, 1);
+	bytea  *vl_datum = kparam_get_value(kparams, 0);
 
 	if (!vl_datum)
 		return NULL;
@@ -1017,7 +1013,7 @@ KPARAM_GET_KDS_HEAD(kern_parambuf *kparams)
 static inline kern_toastbuf *
 KPARAM_GET_KTOAST_HEAD(kern_parambuf *kparams)
 {
-	bytea  *vl_datum = kparam_get_value(kparams, 2);
+	bytea  *vl_datum = kparam_get_value(kparams, 1);
 
 	if (!vl_datum)
 		return NULL;
