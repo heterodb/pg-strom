@@ -474,6 +474,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "tan",     1, {FLOAT8OID}, "f:tan", NULL },
 };
 
+#if 0
 static devfunc_catalog_t devfunc_numericlib_catalog[] = {
 	/* Type cast functions */
 	{ "int2",    1, {NUMERICOID}, "F:numeric_int2",   NULL },
@@ -482,7 +483,7 @@ static devfunc_catalog_t devfunc_numericlib_catalog[] = {
 	{ "float4",  1, {NUMERICOID}, "F:numeric_float4", NULL },
 	{ "float8",  1, {NUMERICOID}, "F:numeric_float8", NULL },
 	/* numeric operators */
-#if 0
+
 	/*
 	 * Right now, functions that return variable-length field are not
 	 * supported.
@@ -496,7 +497,6 @@ static devfunc_catalog_t devfunc_numericlib_catalog[] = {
 	{ "numeric_uplus",  1, {NUMERICOID}, "F:numeric_uplus", NULL },
 	{ "numeric_uminus", 1, {NUMERICOID}, "F:numeric_uminus", NULL },
 	{ "numeric_abs",    1, {NUMERICOID}, "F:numeric_abs", NULL },
-#endif
 	{ "numeric_eq", 2, {NUMERICOID, NUMERICOID}, "F:numeric_eq", NULL },
 	{ "numeric_ne", 2, {NUMERICOID, NUMERICOID}, "F:numeric_ne", NULL },
 	{ "numeric_lt", 2, {NUMERICOID, NUMERICOID}, "F:numeric_lt", NULL },
@@ -504,6 +504,7 @@ static devfunc_catalog_t devfunc_numericlib_catalog[] = {
 	{ "numeric_gt", 2, {NUMERICOID, NUMERICOID}, "F:numeric_gt", NULL },
 	{ "numeric_ge", 2, {NUMERICOID, NUMERICOID}, "F:numeric_ge", NULL },
 };
+#endif
 
 static devfunc_catalog_t devfunc_timelib_catalog[] = {
 	/* Type cast functions */
@@ -934,9 +935,11 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 			{ devfunc_common_catalog,
 			  lengthof(devfunc_common_catalog),
 			  0 },
+#if 0
 			{ devfunc_numericlib_catalog,
 			  lengthof(devfunc_numericlib_catalog),
 			  DEVFUNC_NEEDS_NUMERICLIB },
+#endif
 			{ devfunc_timelib_catalog,
 			  lengthof(devfunc_timelib_catalog),
 			  DEVFUNC_NEEDS_TIMELIB },
