@@ -470,8 +470,7 @@ typedef struct
 	slock_t			lock;		/* protection of reference counter */
 	cl_int			refcnt;		/* reference counter */
 	cl_int			ncols;		/* number of columns */
-	cl_int			rcsnums;	/* number of row-/column-store */
-	StromObject	  **rcstore;	/* array of row-/column-stores */
+	StromObject	   *rcstore;	/* row-/column-store being materialized */
 	kern_vrelation *kern;		/* kern_vrelation */
 	struct {
 		cl_char		attnotnull; /* true, if always not null */
@@ -585,8 +584,8 @@ pgstrom_create_vrelation_head(TupleDesc tupdesc,
                               List *vtlist_attidx);
 extern pgstrom_vrelation *
 pgstrom_populate_vrelation(pgstrom_vrelation *vrel_head,
-                           int rcsnums, StromObject **rcstore,
-                           cl_uint nitems, cl_uint nrooms);
+						   StromObject *rcstore,
+                           cl_uint nrels, cl_uint nitems, cl_uint nrooms);
 extern List *
 pgstrom_can_vrelation_projection(List *targetlist);
 extern pgstrom_vrelation *
@@ -601,15 +600,15 @@ extern bytea *kparam_make_attrefs(TupleDesc tupdesc,
 								  List *used_vars, Index varno);
 extern bytea *kparam_make_kds_head(TupleDesc tupdesc,
 								   Bitmapset *attrefs,
-								   cl_uint nsyscols,
-								   cl_uint nrooms);
+								   cl_uint nsyscols);
 extern void kparam_refresh_kds_head(kern_parambuf *kparams,
-									pgstrom_vrelation *vrel,
+									StromObject *rcstore,
 									cl_uint nitems);
 extern bytea *kparam_make_ktoast_head(TupleDesc tupdesc,
 									  cl_uint nsyscols);
 extern void kparam_refresh_ktoast_head(kern_parambuf *kparams,
-									   pgstrom_vrelation *vrel);
+									   StromObject *rcstore);
+
 extern bytea *kparam_make_kprojection(List *target_list);
 
 extern void pgstrom_release_bulk_slot(pgstrom_bulk_slot *bulk_slot);
@@ -878,6 +877,21 @@ pgstrom_put_rcstore(StromObject *sobject)
 		elog(ERROR, "Bug? it's neither row nor column store");
 }
 
+static inline cl_uint
+pgstrom_nitems_rcstore(StromObject *sobject)
+{
+	cl_uint		nitems;
+
+	if (StromTagIs(sobject, TCacheRowStore))
+		nitems = ((tcache_row_store *) sobject)->kern.nrows;
+	else if (StromTagIs(sobject, TCacheColumnStore))
+		nitems = ((tcache_column_store *) sobject)->nrows;
+	else if (pgstrom_i_am_clserv)
+		nitems = 0;	/* tells caller rcstore is not valid */
+	else
+		elog(ERROR, "bug? it's neither row nor column store");
+	return nitems;
+}
 
 /* binary available pstrcpy() */
 static inline void *

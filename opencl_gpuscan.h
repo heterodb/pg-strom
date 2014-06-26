@@ -124,10 +124,10 @@ gpuscan_qual_eval(__private cl_int *errcode,
  * kernel entrypoint of gpuscan
  */
 __kernel void
-gpuscan_qual(__global kern_gpuscan *kgpuscan,
-			 __global kern_vrelation *kvrel,
-			 __global kern_data_store *kds,
-			 __global kern_toastbuf *ktoast,
+gpuscan_qual(__global kern_gpuscan *kgpuscan,	/* in */
+			 __global kern_vrelation *kvrel,	/* out */
+			 __global kern_data_store *kds,		/* in */
+			 __global kern_toastbuf *ktoast,	/* in */
 			 __local void *local_workbuf)
 {
 	pg_bool_t	rc;

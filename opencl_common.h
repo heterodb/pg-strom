@@ -305,10 +305,10 @@ kern_rowstore_get_tuple(__global kern_row_store *krs, cl_uint krs_index)
  * +-----------------+
  * | ncols (=M)      |
  * +-----------------+
- * | nrows (=N)      |
+ * | nitems (=N)     |
  * +-----------------+
  * | colmeta[0]      |
- * | colmeta[1]   o-------+ colmeta[j].ds_offset points offset of column- or
+ * | colmeta[1]   o-------+ colmeta[j].cs_offset points offset of column- or
  * |    :            |    | row-array in this data-store
  * | colmeta[M-1]    |    |
  * +-----------------+    | (char *)(kcs) + colmeta[j].ds_offset is address
@@ -341,28 +341,30 @@ typedef struct {
 	cl_char			attalign;
 	/* length of attribute */
 	cl_short		attlen;
-	/* true, if valid attribute in kernel space;
-	 * elsewhere, never referenced.
-	 */
-	cl_char			attvalid;
-	/* padding byte; reserved for future usage */
-	cl_char			padding;
-	/* if positive number, it means attribute number within row-store.
-	 * Elsewhere, it is column-store.
-	 */
-	cl_short		rs_attnum;
-	/* offset to nullmap and column-array or row-store from the head of
-	 * the kern_data_store. If multiple column reference same row-store,
-	 * it can be same offset, however, different vattidx.
-	 */
-	cl_uint			ds_offset;
+	/* pointer towards the values */
+	union {
+		/* 0 is valid value for neither rs_attnum (for row-store) nor
+		 * cs_offset (for column-store).
+		 */
+		cl_uint		attvalid;
+		/* If row-store, it is attribute number within row-store.
+		 * (Note that attribute number is always positive, whole-
+		 * -row references and system columns are not supported.)
+		 */
+		cl_uint		rs_attnum;
+		/* If column-store, offset to nullmap and column-array from the
+		 * head of kern_data_store.
+		 */
+		cl_uint		cs_offset;
+	};
 } kern_colmeta;
 
 typedef struct {
 	cl_uint			length;	/* length of this kernel column-store */
 	cl_uint			ncols;	/* number of columns in this store */
 	cl_uint			nitems; /* number of rows in this store */
-	cl_uint			nrooms;	/* max number of records can be stored */
+	cl_char			column_form; /* if true, data store is column-format */
+	cl_char			__padding__[3];
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_data_store;
 
@@ -471,11 +473,6 @@ typedef struct {
  * | nrooms              |
  * +---------------------+
  * | errcode             |
- * +---------------------+
- * | tlist[0]            |
- * |    :                |
- * |    :                |
- * | tlist[ncols-1]      |
  * +---------------------+ ---  ------------
  * | cl_int rindex[]     |  ^             ^
  * |                     |  |             |
@@ -498,18 +495,15 @@ typedef struct {
  * +---------------------+ -----------------
  */
 typedef struct {
-	cl_uint			length;			/* total length of kernel portion */
 	cl_uint			nrels;			/* number of relation being joined */
 	cl_int			nitems;			/* number of items being written */
 	cl_int			nrooms;			/* available rooms per rel */
 	cl_int			errcode;		/* space to write back */
 	cl_char			has_rechecks;	/* true, if any rows to be rechecked */
-	cl_char			__padding[3];	/* reserved for future usage */
+	cl_char			all_visible;	/* true, if all visible w/o rindex */
+	cl_char			__padding[2];	/* reserved for future usage */
 	cl_int			rindex[FLEXIBLE_ARRAY_MEMBER];
 } kern_vrelation;
-
-#define KERN_VRELATION_RINDEX(kvrel, relidx)	\
-	((kvrel)->rindex + ((relidx) * (kvrel)->nitems))
 
 #ifdef OPENCL_DEVICE_CODE
 /*
@@ -775,22 +769,22 @@ typedef struct varatt_indirect
  * or in case when out of range with error code
  */
 static inline __global void *
-kern_get_datum_rs(__global kern_row_store *krs,
+kern_get_datum_rs(__global kern_data_store *kds,
 				  cl_uint colidx, cl_uint rowidx)
 {
-	__global rs_tuple  *rs_tup;
-	cl_uint		ncols;
+	__global kern_row_store	*krs;
+	__global rs_tuple		*rs_tup;
+	cl_uint		i, ncols;
 	cl_uint		offset;
-	cl_uint		i;
 
+	offset = STROMALIGN(offsetof(kern_data_store, colmeta[kds->ncols]));
 	rs_tup = kern_rowstore_get_tuple(krs, rowidx);
 	if (!rs_tup)
 		return NULL;
 
 	offset = rs_tup->data.t_hoff;
 	ncols = (rs_tup->data.t_infomask2 & HEAP_NATTS_MASK);
-
-	/* a shortcut when colidx is obviously out of range */
+	/* a shortcut if colidx is obviously out of range */
 	if (colidx >= ncols)
 		return NULL;
 
@@ -824,38 +818,25 @@ kern_get_datum_rs(__global kern_row_store *krs,
 }
 
 static __global void *
-kern_get_datum(__global kern_data_store *kds,
-			   __global kern_toastbuf *ktoast,
-			   cl_uint colidx, cl_uint rowidx)
+kern_get_datum_cs(__global kern_data_store *kds,
+				  __global kern_toastbuf *ktoast,
+				  cl_uint colidx, cl_uint rowidx)
 {
-	kern_colmeta	cmeta;
+	kern_colmeta	cmeta = kds->colmeta[colidx];
 	cl_uint			offset;
 	__global void  *addr;
 
-	/* is it out of range? */
-	if (colidx >= kds->ncols || rowidx >= kds->nitems)
-		return NULL;
-
-	cmeta = kds->colmeta[colidx];
-	/* is this column to be referenced? */
+	/* why is this column referenced? */
 	if (!cmeta.attvalid)
 		return NULL;
-	offset = cmeta.ds_offset;
+	offset = cmeta.cs_offset;
 
-	/* variable reference in row-store is a little expensive */
-	if (cmeta.rs_attnum > 0)
-	{
-		__global kern_row_store *krs = (__global kern_row_store *)
-			((__global char *)kds + offset);
-
-		return kern_get_datum_rs(krs, colidx, rowidx);
-	}
 	/* elsewhere, reference to the column-array, straight-forward */
 	if (!cmeta.attnotnull)
 	{
 		if (att_isnull(rowidx, (__global char *)kds + offset))
 			return NULL;
-		offset += STROMALIGN((kds->nrooms +
+		offset += STROMALIGN((kds->nitems +
 							  BITS_PER_BYTE - 1) / BITS_PER_BYTE);
 	}
 	if (cmeta.attlen > 0)
@@ -874,6 +855,21 @@ kern_get_datum(__global kern_data_store *kds,
 		addr = (__global void *)((__global char *)ktoast + vl_ofs);
 	}
 	return addr;
+}
+
+static inline __global void *
+kern_get_datum(__global kern_data_store *kds,
+			   __global kern_toastbuf *ktoast,
+			   cl_uint colidx, cl_uint rowidx)
+{
+	/* is it out of range? */
+	if (colidx >= kds->ncols || rowidx >= kds->nitems)
+		return NULL;
+
+	if (!kds->column_form)
+		return kern_get_datum_rs(kds,colidx,rowidx);
+	else
+		return kern_get_datum_cs(kds, ktoast, colidx, rowidx);
 }
 
 /*

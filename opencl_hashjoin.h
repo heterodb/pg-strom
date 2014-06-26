@@ -17,100 +17,130 @@
  * Format of kernel hash table; to be prepared
  *
  * +--------------------+
- * | kern_gpuhash_table |  total length of hash table incl.
- * | +------------------+  hash entries; size of DMA send
- * | | length        o-----------------------------------+
- * | +------------------+                                |
- * | | is_matched    o---------------------------------+ |
- * | +------------------+  offset towards array to     | |
- * | | nslots (=N)      |  track which row was matched | |
- * | +------------------+  for outer join.             | |
- * | | nkeys (=M)       |                              | |
- * | +------------------+                              | |
- * | | colmeta[0]       |                              | |
- * | | colmeta[1]       |                              | |
- * | |    :             |                              | |
- * | | colmeta[M-1]     |                              | |
- * | +------------------+                              | |
- * | | hash_slot[0]     |                              | |
- * | | hash_slot[1]     |                              | |
- * | |     :            |                              | |
- * | | hash_slot[N-2] o-------+  single directioned    | |
- * | | hash_slot[N-1]   |     |  link from the         | |
- * +-+------------------+ <---+  hash_slot[]           | |
- * | kern_gpuhash_entry |                              | |
- * | +------------------+                              | |
- * | | next       o-----------+  If multiple entries   | |
- * | +------------------+     |  has same hash value,  | |
- * | | hash             |     |  these are linked.     | |
- * | +------------------+     |                        | |
- * | | rowidx           |     |                        | |
- * | +------------------+     |                        | |
- * | | keydata:         |     |                        | |
- * | | (actual values   |     |                        | |
- * | |  to be joined)   |     |                        | |
- * +-+------------------+ <---+                        | |
- * | kern_gpuhash_entry |                              | |
- * | +-----------------+-                              | |
- * | | next       o-----------+                        | |
- * | +------------------+     |                        | |
- * | | hash             |     |                        | |
- * | +------------------+     |                        | |
- * | |      :           |     |                        | |
- * |        :           |     |                        | |
- * | |      :           |     |                        | |
- * +-+------------------+ <---+                        | |
- * | kern_gpuhash_entry |                              | |
- * | +------------------+                              | |
- * | | next             |                              | |
- * | +------------------+                              | |
- * | | hash             |                              | |
- * | +------------------+                              | |
- * | | rowidx           |                              | |
- * | +------------------+                              | |
- * | | keydata          |                              | |
- * | | +----------------+                              | |
- * | | | nullmap(16bit) |                              | |
- * | | | keydata:       |                              | |
- * | | | (actual values |                              | |
- * | | |  to be joined) |                              | |
- * +-+------------------+  <---------------------------+ |
- * | is_matched         |     ^                          |
- * | (array of cl_char) |     |                          |
- * | Non-zero means     |     | sizeof(cl_char) * M      |
- * | associated inner   |     |                          |
- * | row was matched    |     |                          |
- * |        :           |     |                          |
- * |        :           |     v                          |
- * +--------------------+  <-----------------------------+
+ * | kern_gpuhash       |
+ * | +------------------+
+ * | | length           | <--- total length of multiple hash-tables; that
+ * | +------------------+      also meand length to be send via DMA
+ * | | ntables (=M)     | <--- number of hash-tables
+ * | +------------------+
+ * | | htbl_offset[0]   |
+ * | | htbl_offset[1] o------+
+ * | |     :            |    |
+ * | |     :            |    |
+ * | | htbl_offset[M-1] |    |
+ * +-+------------------+    |
+ * |       :            |    |
+ * +--------------------+    |
+ * | kern_hashtable(0)  |    |
+ * |       :            |    |
+ * +--------------------+ <--+
+ * | kern_hashtable(1)  |
+ * |       :            |
+ * +--------------------+
+ * |       :            |
+ * +--------------------+
+ * | kern_hashtable(M-1)|
+ * |       :            |
+ * +--------------------+
+ * | region for each    |
+ * | kern_hashentry     |
+ * | items              |
+ * |                    |
+ * |                    |
+ * +--------------------+
+ *
+ * +--------------------+
+ * | kern_hashtable     |
+ * | +------------------+
+ * | | nslots (=N)      |
+ * | +------------------+
+ * | | nkeys (=M)       |
+ * | +------------------+
+ * | | colmeta[0]       |
+ * | | colmeta[1]       |
+ * | |    :             |
+ * | | colmeta[M-1]     |
+ * | +------------------+
+ * | | hash_slot[0]     |
+ * | | hash_slot[1]     |
+ * | |     :            |
+ * | | hash_slot[N-2] o-------+  single directioned link
+ * | | hash_slot[N-1]   |     |  from the hash_slot[]
+ * +-+------------------+ <---+
+ * | kern_hashentry     |
+ * | +------------------+
+ * | | next      o------------+  If multiple entries
+ * | +------------------+     |  has same hash value,
+ * | | hash             |     |  these are linked.
+ * | +------------------+     |
+ * | | rowidx           |     |
+ * | +------------------+     |
+ * | | matched          |     |
+ * | +------------------+     |
+ * | | keydata:         |     |
+ * | | nullmap[...]     |     |
+ * | | values[...]      |     |
+ * | |                  |     |
+ * | | values are put   |     |
+ * | | next to nullmap  |     |
+ * +-+------------------+ <---+
+ * | kern_hashentry     |
+ * | +------------------+
+ * | | next       o-----------> NULL
+ * | +------------------+
+ * | | hash             |
+ * | +------------------+
+ * | |      :           |
+ * | |      :           |
+ * +-+------------------+
  */
 typedef struct
 {
 	cl_uint			next;	/* offset of the next */
 	cl_uint			hash;	/* 32-bit hash value */
-	cl_ulong		rowid;	/* identifier of inner rows; upper 32bits are used
-							 * to point a particular rc-store, lower 32bits
-							 * are index within the rc-store.
-							 */
+	cl_uint			rowid;	/* identifier of inner rows */
+	cl_char			matched;/* flag to track whether this entry get matched */
+	/* above fields take 13bytes, so the keydata will usually start from
+	 * the unaligned address. However, header portion keydata is used to
+	 * nullmap. As long as nkey is less than or equal to 24 (almost right),
+	 * key values shall be start from the aligned offset.
+	 */
 	cl_char			keydata[FLEXIBLE_ARRAY_MEMBER];
 } kern_hashentry;
 
 typedef struct
 {
-	cl_uint			length;	/* length of this hash table */
-	cl_uint			nslots;	/* width of hash slot */
-	cl_uint			nkeys;	/* number of keys to be compared */
-	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];
+	cl_uint			nslots;		/* width of hash slot */
+	cl_uint			nkeys;		/* number of keys to be compared */
+	cl_char			is_outer;	/* true, if outer join */
+	cl_char			__padding__[3];
+	struct {
+		cl_char		attnotnull;	/* true, if always not null */
+		cl_char		attalign;	/* type of alignment */
+		cl_short	attlen;		/* length of type */
+	} colmeta[FLEXIBLE_ARRAY_MEMBER];	/* simplified kern_colmeta */
 } kern_hashtable;
 
-#define KERN_HASHTABLE_SLOT(khash)										\
-	(__global cl_uint *)((__global char *)(khash) +						\
-						 LONGALIGN(offsetof(kern_hashtable,				\
-											colmeta[(khash)->nkeys])))
-#define KERN_HASH_NEXT_ENTRY(khash,next)								\
-	(__global kern_hashentry *)((next) == 0								\
-								? NULL									\
-								: (__global char *)(khash) + (next))
+typedef struct
+{
+	cl_uint			length;	/* total length of multi-hashtable */
+	cl_uint			ntables;/* number of hash tables (= num of inner rels) */
+	cl_uint			htbl_offset[FLEXIBLE_ARRAY_MEMBER];
+} kern_gpuhash;
+
+#define KERN_HASHTABLE(kgpuhash, index)								\
+	((__global kern_hashtable *)((__global char *)(kgpuhash) +		\
+								 (kgpuhash)->htbl_offset[(index)]))
+#define KERN_HASHTABLE_SLOT(khtable)								\
+	((__global cl_uint *)((__global char *)(khtable)+				\
+						  LONGALIGN(offsetof(kern_hashtable,		\
+											 colmeta[(khtable)->nkeys]))))
+#define KERN_HASH_NEXT_ENTRY(khtable, next)							\
+	((__global kern_hashentry *)((next) == 0						\
+								 ? NULL								\
+								 : (__global char *)(khtable) + (next)))
+
+
 
 /*
  * Sequential Scan using GPU/MIC acceleration
@@ -173,8 +203,11 @@ typedef struct
 	/* also, resultbuf shall be placed next to the parambuf */
 } kern_hashjoin;
 
+#define KERN_HASHJOIN_LENGTH(khashjoin)						\
+	KERN_HASHJOIN_PARAMBUF(khashjoin)->length
 #define KERN_HASHJOIN_PARAMBUF(khashjoin)					\
 	((__global kern_parambuf *)(&(khashjoin)->kparams))
+
 #define KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin)			\
 	STROMALIGN(KERN_HASHJOIN_PARAMBUF(khashjoin)->length)
 #define KERN_HASHJOIN_RESULTBUF(khashjoin)								\
@@ -346,7 +379,22 @@ gpuhashjoin_inner(__private cl_int *errcode,
 	}
 }
 
+__kernel void
+gpuhashjoin_inner(__global kern_hashjoin *khashjoin,
+				  __global kern_gpuhash *kgpuhash,
+				  __global kern_vrelation *vrel_out,
+				  __global kern_data_store *kds,
+				  __global kern_toastbuf *ktoast,
+				  __global kern_vrelation *vrel_in,
+				  __local void *local_workbuf)
+{
 
+
+
+
+}
+
+#if 0
 __kernel void
 gpuhashjoin_inner_cs(__global kern_hashjoin *khashjoin,
 					 __global kern_hashtable *khashtbl,
@@ -447,6 +495,7 @@ gpuhashjoin_inner_rs(__global kern_hashjoin *khashjoin,
 	/* back execution status into host-side */
 	kern_writeback_error_status(&kresults->errcode, errcode, local_workbuf);
 }
+#endif
 
 /*
  * Template of variable reference on the hash-entry

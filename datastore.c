@@ -61,7 +61,6 @@ void
 pgstrom_put_vrelation(pgstrom_vrelation *vrel)
 {
 	bool	do_release = false;
-	int		i;
 
 	SpinLockAcquire(&vrel->lock);
 	Assert(vrel->refcnt > 0);
@@ -71,8 +70,8 @@ pgstrom_put_vrelation(pgstrom_vrelation *vrel)
 
 	if (do_release)
 	{
-		for (i=0; i < vrel->rcsnums; i++)
-			pgstrom_put_rcstore(vrel->rcstore[i]);
+		if (vrel->rcstore)
+			pgstrom_put_rcstore(vrel->rcstore);
 		pgstrom_shmem_free(vrel);
 	}
 }
@@ -104,7 +103,6 @@ pgstrom_create_vrelation_head(TupleDesc tupdesc,
 	SpinLockInit(&vrel->lock);
 	vrel->refcnt = 1;
 	vrel->ncols = tupdesc->natts;
-	vrel->rcsnums = 0;		/* to be set later */
 	vrel->rcstore = NULL;	/* to be set later */
 	vrel->kern = NULL;		/* to be set later */
 
@@ -131,70 +129,44 @@ pgstrom_create_vrelation_head(TupleDesc tupdesc,
  *
  * it construct a virtual-relation object according to the prepared
  * header portion of virtual-relation object.
+ *
+ * NOTE: if nrooms == 0, it means all visible vrelation w/o rindex
  */
 pgstrom_vrelation *
 pgstrom_populate_vrelation(pgstrom_vrelation *vrel_head,
-						   int rcsnums, StromObject **rcstore,
-						   cl_uint nitems, cl_uint nrooms)
+						   StromObject *rcstore,	/* row-/column-store */
+						   cl_uint nrels,	/* number of source relations */
+						   cl_uint nitems,	/* number of items in use */
+						   cl_uint nrooms)	/* number of capable rooms */
 {
 	pgstrom_vrelation *vrel;
 	Size		length;
 	Size		offset;
-	int			i, ncols;
+	int			ncols;
 
 	ncols = vrel_head->ncols;
-	length = (MAXALIGN(offsetof(pgstrom_vrelation, vtlist[ncols])) +
-			  MAXALIGN(sizeof(StromObject *) * rcsnums) +
-			  STROMALIGN(offsetof(kern_vrelation, rindex[rcsnums * nrooms])));
+	length = (STROMALIGN(offsetof(pgstrom_vrelation, vtlist[ncols])) +
+			  STROMALIGN(offsetof(kern_vrelation, rindex[nrels * nrooms])));
 	vrel = pgstrom_shmem_alloc(length);
 	if (!vrel)
-		elog(ERROR, "out of shared memory");
+		return NULL;	/* out of shared memory */
 
 	offset = MAXALIGN(offsetof(pgstrom_vrelation, vtlist[ncols]));
 	memcpy(vrel, vrel_head, offset);
 	Assert(vrel->sobj.stag == StromTag_VirtRelation);
-	Assert(SpinLockFree(&vrel->lock));
-	Assert(vrel->refcnt == 1);
-	vrel->rcsnums = rcsnums;
-	vrel->rcstore = (StromObject **)((char *)vrel + offset);
-	offset += MAXALIGN(sizeof(StromObject *) * rcsnums);
-	for (i=0; i < rcsnums; i++)
-		vrel->rcstore[i] = pgstrom_get_rcstore(rcstore[i]);
+	SpinLockInit(&vrel->lock);
+	vrel->refcnt = 1;
+	/* acquire an row-/column-store, if given */
+	if (rcstore)
+		vrel->rcstore = pgstrom_get_rcstore(rcstore);
+	/* also set up fields of kern_vrelation */
 	vrel->kern = (kern_vrelation *)((char *)vrel + offset);
-
-	for (i=0; i < ncols; i++)
-	{
-		int		vt_relidx = vrel->vtlist[i].vrelidx;
-		int		vt_attidx = vrel->vtlist[i].vattidx;
-
-		if (vt_relidx < 0 || vt_relidx >= vrel->rcsnums)
-			elog(ERROR, "vt_relidx %d is out of range", vt_relidx);
-
-		if (StromTagIs(rcstore[vt_relidx], TCacheRowStore))
-		{
-			tcache_row_store *trs
-				= (tcache_row_store *)rcstore[vt_relidx];
-			if (vt_attidx < 0 || vt_attidx >= trs->kern.ncols)
-				elog(ERROR, "vt_attidx %d is out of range", vt_relidx);
-		}
-		else if (StromTagIs(rcstore[vt_relidx], TCacheColumnStore))
-		{
-			tcache_column_store *tcs
-				= (tcache_column_store *)rcstore[vt_relidx];
-			if (vt_attidx < 0 || vt_attidx >= tcs->ncols)
-				elog(ERROR, "vt_attidx %d is out of range", vt_relidx);
-		}
-		else
-			elog(ERROR, "bug? neither row- nor column- store: %s",
-				 StromTagGetLabel(rcstore[vt_relidx]));
-	}
-	/* also set fields of kern_vrelation */
 	memset(vrel->kern, 0, sizeof(kern_vrelation));
-	length = offsetof(kern_vrelation, rindex[rcsnums * nrooms]);
-	vrel->kern->length = STROMALIGN(length);
-	vrel->kern->nrels  = rcsnums;
-	vrel->kern->nitems = nitems;
-	vrel->kern->nrooms = nrooms;
+	vrel->kern->nrels  = nrels;		/* number of source relations */
+	vrel->kern->nitems = nitems;	/* number of items in use */
+	vrel->kern->nrooms = nrooms;	/* number of capable rooms */
+	vrel->kern->has_rechecks = false;
+	vrel->kern->all_visible  = (nrooms == 0 ? true : false);
 
 	return vrel;
 }
@@ -477,8 +449,7 @@ kparam_make_attrefs(TupleDesc tupdesc,
 bytea *
 kparam_make_kds_head(TupleDesc tupdesc,
 					 Bitmapset *referenced,
-					 cl_uint nsyscols,
-					 cl_uint nrooms)
+					 cl_uint nsyscols)
 {
 	kern_data_store	*kds_head;
 	bytea	   *result;
@@ -493,8 +464,7 @@ kparam_make_kds_head(TupleDesc tupdesc,
 
 	kds_head = (kern_data_store *) VARDATA(result);
 	kds_head->ncols = ncols;
-	kds_head->nitems = 0;
-	kds_head->nrooms = nrooms;
+	kds_head->nitems = (cl_uint)(-1);	/* to be set later */
 
 	for (i=0; i < tupdesc->natts; i++)
 	{
@@ -506,9 +476,9 @@ kparam_make_kds_head(TupleDesc tupdesc,
 		kds_head->colmeta[i].attalign = typealign_get_width(attr->attalign);
 		kds_head->colmeta[i].attlen = pgstrom_try_varlena_inline(attr);
 		if (!bms_is_member(j, referenced))
-			kds_head->colmeta[i].attvalid = false;
+			kds_head->colmeta[i].attvalid = 0;
 		else
-			kds_head->colmeta[i].attvalid = true;
+			kds_head->colmeta[i].attvalid = (cl_uint)(-1);
 		/* rest of fields shall be set later */
 	}
 	return result;
@@ -516,68 +486,49 @@ kparam_make_kds_head(TupleDesc tupdesc,
 
 void
 kparam_refresh_kds_head(kern_parambuf *kparams,
-						pgstrom_vrelation *vrel,
+						StromObject *rcstore,
 						cl_uint nitems)
 {
 	kern_data_store *kds_head = KPARAM_GET_KDS_HEAD(kparams);
-	Size	length;
-	Size   *rs_ofs = palloc0(sizeof(Size) * vrel->rcsnums);
-	int		i, ncols = kds_head->ncols;
+	Size		length;
+	int			i, ncols = kds_head->ncols;
 
-	Assert(ncols == vrel->ncols);
 	length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
 	kds_head->nitems = nitems;
-	kds_head->nrooms = nitems;
-
-	for (i=0; i < ncols; i++)
+	if (StromTagIs(rcstore, TCacheRowStore))
 	{
-		StromObject	*rcs;
-		int			vt_relidx;
-		int			vt_attidx;
+		tcache_row_store *trs = (tcache_row_store *) rcstore;
 
-		if (!kds_head->colmeta[i].attvalid)
-			continue;
-
-		vt_relidx = vrel->vtlist[i].vrelidx;
-		vt_attidx = vrel->vtlist[i].vattidx;
-		Assert(vt_relidx < vrel->rcsnums);
-		rcs = vrel->rcstore[vt_relidx];
-
-		if (StromTagIs(rcs, TCacheRowStore))
+		kds_head->column_form = false;
+		for (i=0; i < ncols; i++)
 		{
-			tcache_row_store *trs = (tcache_row_store *)rcs;
-
-			kds_head->colmeta[i].rs_attnum = vt_attidx;
-			/*
-			 * In case when multiple columns in a particular row-store
-			 * is referenced, we don't need to transfer the row-store
-			 * twice. So, rs_ofs[] will point same region.
-			 */
-			if (rs_ofs[vt_relidx] > 0)
-				kds_head->colmeta[i].ds_offset = rs_ofs[vt_relidx];
-			else
-			{
-				kds_head->colmeta[i].ds_offset = length;
-				rs_ofs[vt_relidx] = length;
-				length += STROMALIGN(trs->kern.length);
-			}
+			/* put attribute number to reference row-data */
+			if (!kds_head->colmeta[i].attvalid)
+				continue;
+			kds_head->colmeta[i].rs_attnum = i + 1;
 		}
-		else
+		length += STROMALIGN(trs->kern.length);
+	}
+	else if (StromTagIs(rcstore, TCacheColumnStore))
+	{
+		kds_head->column_form = true;
+		for (i=0; i < ncols; i++)
 		{
-			Assert(StromTagIs(rcs, TCacheColumnStore));
-
-			kds_head->colmeta[i].rs_attnum = 0;
-			kds_head->colmeta[i].ds_offset = length;
+			if (!kds_head->colmeta[i].attvalid)
+				continue;
+			kds_head->colmeta[i].cs_offset = length;
 			if (!kds_head->colmeta[i].attnotnull)
-				length += STROMALIGN((kds_head->nrooms +
+				length += STROMALIGN((kds_head->nitems +
 									  BITS_PER_BYTE - 1) / BITS_PER_BYTE);
 			length += STROMALIGN((kds_head->colmeta[i].attlen > 0
 								  ? kds_head->colmeta[i].attlen
-								  : sizeof(cl_uint)) * kds_head->nrooms);
+								  : sizeof(cl_uint)) * kds_head->nitems);
 		}
 	}
+	else
+		elog(ERROR, "bug? neither row- nor column-store");
+
 	kds_head->length = length;
-	pfree(rs_ofs);
 }
 
 bytea *
@@ -603,13 +554,10 @@ kparam_make_ktoast_head(TupleDesc tupdesc, cl_uint nsyscols)
 
 void
 kparam_refresh_ktoast_head(kern_parambuf *kparams,
-						   pgstrom_vrelation *vrel)
+						   StromObject *rcstore)
 {
 	kern_data_store *kds_head = KPARAM_GET_KDS_HEAD(kparams);
 	kern_toastbuf *ktoast_head = KPARAM_GET_KTOAST_HEAD(kparams);
-	StromObject	*rcs;
-	int			vt_relidx;
-	int			vt_attidx;
 	int			i;
 	Size		offset;
 	bool		has_toast = false;
@@ -628,23 +576,16 @@ kparam_refresh_ktoast_head(kern_parambuf *kparams,
 		/* fixed-length variables (incl. inlined varlena) */
 		if (kds_head->colmeta[i].attlen > 0)
 			continue;
-
-		/* row-store does not need individula toast buffer */
-		vt_relidx = vrel->vtlist[i].vrelidx;
-		vt_attidx = vrel->vtlist[i].vattidx;
-		Assert(vt_relidx < vrel->rcsnums);
-		rcs = vrel->rcstore[vt_relidx];
-
-		if (StromTagIs(rcs, TCacheColumnStore))
+		/* only column-store needs individual toast buffer */
+		if (StromTagIs(rcstore, TCacheColumnStore))
 		{
-			tcache_column_store *tcs = (tcache_column_store *)rcs;
+			tcache_column_store *tcs = (tcache_column_store *) rcstore;
 
-			Assert(vt_attidx >= 0 && vt_attidx < tcs->ncols);
-			if (tcs->cdata[vt_attidx].toast)
+			if (tcs->cdata[i].toast)
 			{
 				has_toast = true;
 				ktoast_head->coldir[i] = offset;
-				offset += STROMALIGN(tcs->cdata[i].toast->tbuf_length);
+                offset += STROMALIGN(tcs->cdata[i].toast->tbuf_length);
 			}
 		}
 	}

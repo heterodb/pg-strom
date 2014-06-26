@@ -744,10 +744,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		Assert(IsA(kparam_0, Const) &&
 			   kparam_0->consttype == BYTEAOID &&
 			   kparam_0->constisnull);
-		kds_head = kparam_make_kds_head(tupdesc,
-										gsplan->dev_attnums,
-										0,
-										100);	/* tentative */
+		kds_head = kparam_make_kds_head(tupdesc, gsplan->dev_attnums, 0);
 		kparam_0->constvalue = PointerGetDatum(kds_head);
 		kparam_0->constisnull = false;
 
@@ -779,13 +776,8 @@ pgstrom_create_gpuscan(GpuScanState *gss, StromObject *rcstore)
 	pgstrom_gpuscan *gpuscan;
 	cl_uint		nitems;
 	Size		length;
-	int			i;
 
-	if (StromTagIs(rcstore, TCacheRowStore))
-		nitems = ((tcache_row_store *) rcstore)->kern.nrows;
-	else
-		nitems = ((tcache_column_store *) rcstore)->nrows;
-
+	nitems = pgstrom_nitems_rcstore(rcstore);
 	length = (STROMALIGN(offsetof(pgstrom_gpuscan, kern.kparams)) +
 			  STROMALIGN(gss->kparambuf->length));
 	gpuscan = pgstrom_shmem_alloc(length);
@@ -811,8 +803,12 @@ pgstrom_create_gpuscan(GpuScanState *gss, StromObject *rcstore)
 
 	/* populate vrelation according to the template */
 	gpuscan->vrel = pgstrom_populate_vrelation(gss->vrel_head,
-											   1, &rcstore,
-											   0, nitems);
+											   rcstore,
+											   1,	/* # of relations */
+											   0,	/* # of items in use */
+											   nitems);	/* length of rindex */
+	if (!gpuscan->vrel)
+		elog(ERROR, "out of shared memory");
 	/*
 	 * When GpuScan involves kernel execution, kern_data_store and
 	 * kern_toastbuf have to be adjusted according to the scale of
@@ -823,17 +819,14 @@ pgstrom_create_gpuscan(GpuScanState *gss, StromObject *rcstore)
 	 */
 	if (gss->dprog_key != 0)
 	{
-		kparam_refresh_kds_head(&gpuscan->kern.kparams,
-								gpuscan->vrel, nitems);
-		kparam_refresh_ktoast_head(&gpuscan->kern.kparams,
-								   gpuscan->vrel);
+		kparam_refresh_kds_head(&gpuscan->kern.kparams, rcstore, nitems);
+		kparam_refresh_ktoast_head(&gpuscan->kern.kparams, rcstore);
 	}
 	else
 	{
 		pgstrom_vrelation  *vrel = gpuscan->vrel;
-		for (i=0; i < vrel->kern->nrooms; i++)
-			vrel->kern->rindex[i] = i + 1;
-		vrel->kern->nitems = vrel->kern->nrooms;
+
+		vrel->kern->all_visible = true;
 		vrel->kern->errcode = StromError_Success;
 	}
 	return gpuscan;
@@ -1504,8 +1497,7 @@ retry:
 	pgstrom_track_object(&vrel->sobj, 0);
 	pgstrom_untrack_object(&gpuscan->msg.sobj);
 
-	Assert(vrel->rcsnums == 1);
-	rcstore = vrel->rcstore[0];
+	rcstore = vrel->rcstore;
 	Assert(StromTagIs(rcstore, TCacheRowStore) ||
 		   StromTagIs(rcstore, TCacheColumnStore));
 	/*
@@ -1514,11 +1506,21 @@ retry:
 	 * - Rechecks of device qualifier, if result is negative
 	 * - Host side qualifier checks, if any.
 	 */
-	nitems = vrel->kern->nitems;
-	rindex = vrel->kern->rindex;
+	if (vrel->kern->all_visible)
+	{
+		nitems = pgstrom_nitems_rcstore(rcstore);
+		rindex = NULL;
+	}
+	else
+	{
+		nitems = vrel->kern->nitems;
+		rindex = vrel->kern->rindex;
+	}
+	Assert(vrel->kern->nrooms >= nitems);
+
 	for (i=0, j=0; i < nitems; i++)
 	{
-		cl_uint			rowidx = rindex[i];
+		cl_uint			rowidx = (!rindex ? i + 1 : rindex[i]);
 		bool			do_recheck;
 		TupleTableSlot *slot;
 
@@ -1543,7 +1545,11 @@ retry:
 		 */
 		if (!gpuscan_check_tuple_visibility(gss, rcstore, rowidx,
 											snapshot, slot))
+		{
+			if (vrel->kern->all_visible)
+				vrel->kern->all_visible = false;
 			continue;
+		}
 
 		/*
 		 * Device qualifier rechecks, if needed
@@ -1555,8 +1561,12 @@ retry:
 			Assert(gss->dev_quals != NULL);
 			econtext->ecxt_scantuple = gss->scan_slot;
 			if (!ExecQual(gss->dev_quals, econtext, false))
+			{
+				if (vrel->kern->all_visible)
+					vrel->kern->all_visible = false;
 				continue;
-        }
+			}
+		}
 
 		/*
 		 * Optional, host qualifier checks
@@ -1567,7 +1577,11 @@ retry:
 
 			econtext->ecxt_scantuple = gss->scan_slot;
 			if (!ExecQual(host_qual, econtext, false))
+			{
+				if (vrel->kern->all_visible)
+					vrel->kern->all_visible = false;
 				continue;
+			}
 		}
 		vrel->kern->rindex[j++] = rowidx;
 	}
@@ -2098,34 +2112,16 @@ clserv_process_gpuscan_row(clstate_gpuscan *clgss,
 						   cl_command_queue kcmdq)
 {
 	pgstrom_perfmon *pfm = &clgss->msg->pfm;
-	cl_uint		ds_offset = 0;
-	cl_int		i, rc;
+	Size		offset;
+	cl_int		rc;
 
-	/*
-	 * In case of gpuscan with row-store, all the column references
-	 * same region, so ds_offset of all the valid column must be same.
-	 */
-	for (i=0; i < kds_head->ncols; i++)
-	{
-		if (!kds_head->colmeta[i].attvalid)
-			continue;
-		if (kds_head->colmeta[i].rs_attnum == 0)
-			return StromError_DataStoreCorruption;
-		if (kds_head->colmeta[i].ds_offset == 0)
-			return StromError_DataStoreCorruption;
-		if (ds_offset == 0)
-			ds_offset = kds_head->colmeta[i].ds_offset;
-		else if (ds_offset != kds_head->colmeta[i].ds_offset)
-			return StromError_DataStoreCorruption;
-	}
-	if (ds_offset == 0)
-		return StromError_DataStoreCorruption;
-
-	/* body of kds */
+	/* enqueue row-store */
+	offset = STROMALIGN(offsetof(kern_data_store,
+								 colmeta[kds_head->ncols]));
 	rc = clEnqueueWriteBuffer(kcmdq,
 							  clgss->m_dstore,
 							  CL_FALSE,
-							  ds_offset,
+							  offset,
 							  trs->kern.length,
 							  &trs->kern,
 							  0,
@@ -2158,12 +2154,12 @@ clserv_process_gpuscan_column(clstate_gpuscan *clgss,
 	pgstrom_perfmon *pfm = &clgss->msg->pfm;
 	Size		length;
 	Size		offset;
-	cl_uint		nrooms = kds_head->nrooms;
-	cl_uint		nitems = tcs->nrows;
+	cl_uint		nitems = kds_head->nitems;
 	cl_uint		ncols = kds_head->ncols;
 	cl_int		i, rc;
 
 	Assert(kds_head->ncols == tcs->ncols);
+	Assert(kds_head->nitems == tcs->nrows);
 
 	/* toast header, if any */
 	if (clgss->m_ktoast)
@@ -2194,7 +2190,7 @@ clserv_process_gpuscan_column(clstate_gpuscan *clgss,
 		if (!kds_head->colmeta[i].attvalid)
 			continue;
 
-		offset = kds_head->colmeta[i].ds_offset;
+		offset = kds_head->colmeta[i].cs_offset;
 		if (!kds_head->colmeta[i].attnotnull)
 		{
 			Assert(tcs->cdata[i].isnull != NULL);
@@ -2219,7 +2215,7 @@ clserv_process_gpuscan_column(clstate_gpuscan *clgss,
 			pfm->bytes_dma_send += length;
 			pfm->num_dma_send++;
 
-			offset += STROMALIGN((nrooms + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+			offset += STROMALIGN((nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
 		}
 		length = (kds_head->colmeta[i].attlen > 0
 				  ? kds_head->colmeta[i].attlen
@@ -2296,11 +2292,8 @@ clserv_process_gpuscan(pgstrom_message *msg)
 
 	/* sanity checks and get number of rows; depending on data format */
 	Assert(StromTagIs(gpuscan, GpuScan));
-	if (StromTagIs(gpuscan->rc_store, TCacheRowStore))
-		nrows = ((tcache_row_store *) gpuscan->rc_store)->kern.nrows;
-	else if (StromTagIs(gpuscan->rc_store, TCacheColumnStore))
-		nrows = ((tcache_column_store *) gpuscan->rc_store)->nrows;
-	else
+	nrows = pgstrom_nitems_rcstore(gpuscan->rc_store);
+	if (nrows == 0)
 	{
 		msg->errcode = StromError_BadRequestMessage;
 		pgstrom_reply_message(msg);
@@ -2308,7 +2301,7 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	}
 	/* in case of gpuscan, vrelation has to be consist of same input rcs */
 	vrel = gpuscan->vrel;
-	Assert(vrel->rcsnums == 1 && vrel->rcstore[0] == gpuscan->rc_store);
+	Assert(vrel->kern->nrels == 1 && vrel->rcstore == gpuscan->rc_store);
 
 	/*
 	 * First of all, it looks up a program object to be run on
@@ -2383,9 +2376,12 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	}
 
 	/* allocation of device memory for kern_vrelation argument */
+	length = STROMALIGN(offsetof(kern_vrelation,
+								 rindex[vrel->kern->nrels *
+										vrel->kern->nrooms]));
 	clgss->m_kvrel = clCreateBuffer(opencl_context,
 									CL_MEM_READ_WRITE,
-									vrel->kern->length,
+									length,
 									NULL,
 									&rc);
 	if (rc != CL_SUCCESS)
@@ -2428,12 +2424,12 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	 * Let's prepare kernel invocation.
 	 *
 	 * The kernel call is:
-	 * __kernel void
-	 * gpuscan_qual(__global kern_gpuscan *kgpuscan,
-	 *              __global kern_vrelation *kvrel,
-	 *              __global kern_data_store *kds,
-	 *              __global kern_toastbuf *ktoast,
-	 *              __local void *local_workbuf)
+	 * pg_bool_t
+	 * gpuscan_qual_eval(__global kern_gpuscan *kgpuscan,
+	 *                   __global kern_vrelation *kvrel,
+	 *                   __global kern_data_store *kds,
+	 *                   __global kern_toastbuf *ktoast,
+	 *                   __local void *local_workbuf)
 	 */
 	rc = clSetKernelArg(clgss->kernel,
 						0,		/* kern_gpuscan */
@@ -2596,11 +2592,14 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	clgss->ev_index++;
 
 	/* write back result vrelation */
+	length = STROMALIGN(offsetof(kern_vrelation,
+								 rindex[vrel->kern->nrels *
+										vrel->kern->nrooms]));
 	rc = clEnqueueReadBuffer(kcmdq,
 							 clgss->m_kvrel,
 							 CL_FALSE,
 							 0,
-							 vrel->kern->length,
+							 length,
 							 vrel->kern,
 							 1,
 							 &clgss->events[clgss->ev_index - 1],
@@ -2612,7 +2611,7 @@ clserv_process_gpuscan(pgstrom_message *msg)
 		goto error;
 	}
 	clgss->ev_index++;
-	pfm->bytes_dma_recv += vrel->kern->length;
+	pfm->bytes_dma_recv += length;
 	pfm->num_dma_recv++;
 
 	/*
