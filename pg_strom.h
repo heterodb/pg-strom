@@ -466,19 +466,25 @@ typedef struct
  */
 typedef struct
 {
+	cl_char			attnotnull; /* true, if always not null */
+	cl_char			attalign;   /* type alignment */
+	cl_short		attlen;     /* length of type */
+	cl_ushort		vrelidx;	/* index of relation in rcstore array */
+	cl_ushort		vattsrc;	/* attribute index of source relation */
+	cl_ushort		vattdst;	/* attribute index of destination relation */
+	cl_ushort		vattwidth;	/* average width of this attribute */
+} vrelation_colmeta;
+
+typedef struct
+{
 	StromObject		sobj;		/* =StromTag_VirtRelation */
 	slock_t			lock;		/* protection of reference counter */
 	cl_int			refcnt;		/* reference counter */
 	cl_int			ncols;		/* number of columns */
 	StromObject	   *rcstore;	/* row-/column-store being materialized */
 	kern_vrelation *kern;		/* kern_vrelation */
-	struct {
-		cl_char		attnotnull; /* true, if always not null */
-		cl_char		attalign;   /* type alignment */
-		cl_short	attlen;     /* length of type */
-		cl_short	vrelidx;	/* index of relation in rcstore array */
-		cl_short	vattidx;	/* index of attribute in a certain rcstore */
-	} vtlist[FLEXIBLE_ARRAY_MEMBER];
+	AttrNumber	   *vtsources;	/* order to fetch columns on projection */
+	vrelation_colmeta vtlist[FLEXIBLE_ARRAY_MEMBER];
 } pgstrom_vrelation;
 
 /*
