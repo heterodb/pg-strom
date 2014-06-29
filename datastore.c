@@ -39,6 +39,7 @@ pgstrom_try_varlena_inline(Form_pg_attribute attr)
 	return attr->attlen;
 }
 
+#if 0
 /*
  * pgstrom_get_vrelation()
  *
@@ -296,7 +297,7 @@ pgstrom_apply_vrelation_projection(pgstrom_vrelation *vrel, List *vrel_proj)
 
 	return vrel;
 }
-
+#endif
 /*
  * pgstrom_create_param_buffer
  *
@@ -1017,6 +1018,7 @@ pgstrom_put_column_store(tcache_column_store *pcs)
 	pgstrom_shmem_free(pcs);
 }
 
+#if 0
 /*
  * extract_rcstore
  *
@@ -1515,3 +1517,4 @@ pgstrom_materialize_row_store(pgstrom_vrelation *vrel_tmpl,
 
 	return vrel;
 }
+#endif

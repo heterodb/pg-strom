@@ -134,7 +134,6 @@ typedef enum {
 	StromTag_TCacheRowStore,
 	StromTag_TCacheColumnStore,
 	StromTag_TCacheToastBuf,
-	StromTag_VirtRelation,
 	StromTag_GpuScan,
 	StromTag_GpuSort,
 	StromTag_GpuHashJoin,
@@ -455,6 +454,7 @@ typedef struct
 	cl_uint			rindex[FLEXIBLE_ARRAY_MEMBER];
 } pgstrom_bulk_slot;
 
+#if 0
 /*
  * pgstrom_vrelation
  *
@@ -486,6 +486,7 @@ typedef struct
 	AttrNumber	   *vtsources;	/* order to fetch columns on projection */
 	vrelation_colmeta vtlist[FLEXIBLE_ARRAY_MEMBER];
 } pgstrom_vrelation;
+#endif
 
 /*
  * kern_projection
@@ -501,13 +502,21 @@ typedef struct
 	cl_uint			ncols;		/* number of columns in destination store */
 	Datum			dprog_key;	/* device program key, if valid */
 	struct {
-		kern_colmeta colmeta;	/* column properties in destination store */
-		cl_char		resjunk;	/* true, if column is junk attribute */
-		cl_char		is_outer;	/* true, if column come from outer or scan
-								 * relation. Elsewhere, it come from inner
-								 * relation. */
-		AttrNumber	resno;		/* resource number of source target-list */
-	} origins[FLEXIBLE_ARRAY_MEMBER];
+		/* true, if column never has NULL (thus, no nullmap required) */
+		cl_char		attnotnull;
+		/* alignment; 1,2,4 or 8, not characters in pg_attribute */
+		cl_char		attalign;
+		/* length of attribute */
+		cl_short	attlen;
+		/* source relation index */
+		cl_short	relsrc;
+		/* source attribute index */
+		cl_short	attsrc;
+		/* destination attribute index */
+		cl_short	attdst;
+		/* average width of this attribute */
+		cl_short	attwidth;
+	} vtlist[FLEXIBLE_ARRAY_MEMBER];
 } kern_projection;
 
 /*
@@ -582,6 +591,7 @@ extern Datum pgstrom_mqueue_info(PG_FUNCTION_ARGS);
  * datastore.c
  */
 extern int pgstrom_try_varlena_inline(Form_pg_attribute attr);
+#if 0
 extern pgstrom_vrelation *pgstrom_get_vrelation(pgstrom_vrelation *vrel);
 extern void pgstrom_put_vrelation(pgstrom_vrelation *vrel);
 extern pgstrom_vrelation *
@@ -596,6 +606,7 @@ extern List *
 pgstrom_can_vrelation_projection(List *targetlist);
 extern pgstrom_vrelation *
 pgstrom_apply_vrelation_projection(pgstrom_vrelation *vrel, List *vrel_proj);
+#endif
 
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,

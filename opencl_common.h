@@ -341,7 +341,6 @@ typedef struct {
 	cl_char			attalign;
 	/* length of attribute */
 	cl_short		attlen;
-	/* pointer towards the values */
 	union {
 		/* 0 is valid value for neither rs_attnum (for row-store) nor
 		 * cs_offset (for column-store).
@@ -438,12 +437,17 @@ kparam_get_value(kern_parambuf *kparams, cl_uint pindex)
  * host side and abort transactions. 'results' informs row-level status.
  */
 typedef struct {
+	cl_uint		nrels;		/* number of relations to be appeared */
 	cl_uint		nrooms;		/* max number of results rooms */
 	cl_uint		nitems;		/* number of results being written */
 	cl_int		errcode;	/* chunk-level error */
+	cl_char		has_rechecks;
+	cl_char		all_visible;
+	cl_char		__padding__[2];
 	cl_int		results[FLEXIBLE_ARRAY_MEMBER];
 } kern_resultbuf;
 
+#if 0
 /*
  * kern_vrelation
  *
@@ -504,6 +508,7 @@ typedef struct {
 	cl_char			__padding[2];	/* reserved for future usage */
 	cl_int			rindex[FLEXIBLE_ARRAY_MEMBER];
 } kern_vrelation;
+#endif
 
 #ifdef OPENCL_DEVICE_CODE
 /*

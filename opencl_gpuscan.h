@@ -37,9 +37,9 @@
  * | | Const values |         |      |
  * | |     :        |         |      |
  * +-+--------------+  -----  |  <---+
- * | kern_vrelation |    ^    |
+ * | kern_resultbuf |    ^    |
  * | +--------------+    |    |  Area to be sent to OpenCL device.
- * | | nrels        |    |    |  Forward DMA shall be issued here.
+ * | | nrels (=1)   |    |    |  Forward DMA shall be issued here.
  * | +--------------+    |    |
  * | | nitems       |    |    |
  * | +--------------+    |    |
@@ -61,8 +61,28 @@ typedef struct {
 
 #define KERN_GPUSCAN_PARAMBUF(kgpuscan)			\
 	((__global kern_parambuf *)(&(kgpuscan)->kparams))
+#define KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan)	\
+	STROMALIGN((kgpuscan)->kparams.length)
+#define KERN_GPUSCAN_RESULTBUF(kgpuscan)		\
+	((__global kern_resultbuf *)				\
+	 ((__global char *)&(kgpuscan)->kparams +	\
+	  STROMALIGN((kgpuscan)->kparams.length)))
+#define KERN_GPUSCAN_RESULTBUF_LENGTH(kgpuscan)	\
+	STROMALIGN(offsetof(kern_resultbuf,			\
+		results[KERN_GPUSCAN_RESULTBUF(kgpuscan)->nrels * \
+				KERN_GPUSCAN_RESULTBUF(kgpuscan)->nrooms]))
 #define KERN_GPUSCAN_LENGTH(kgpuscan)			\
-	(KERN_GPUSCAN_PARAMBUF(kgpuscan)->length)
+	(offsetof(kern_gpuscan, kparams) +			\
+	 KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan) +	\
+	 KERN_GPUSCAN_RESULTBUF_LENGTH(kgpuscan))
+#define KERN_GPUSCAN_DMASEND_OFFSET(kgpuscan)	0
+#define KERN_GPUSCAN_DMASEND_LENGTH(kgpuscan)	\
+	(KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan) +	\
+	 offsetof(kern_resultbuf, results[0]))
+#define KERN_GPUSCAN_DMARECV_OFFSET(kgpuscan)	\
+	KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan)
+#define KERN_GPUSCAN_DMARECV_LENGTH(kgpuscan)	\
+	KERN_GPUSCAN_RESULTBUF_LENGTH(kgpuscan)
 
 #ifdef OPENCL_DEVICE_CODE
 /*

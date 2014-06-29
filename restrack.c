@@ -47,7 +47,6 @@ typedef struct {
 #define IS_TRACKABLE_OBJECT(sobject)			\
 	(StromTagIs(sobject,MsgQueue) ||			\
 	 StromTagIs(sobject,DevProgram) ||			\
-	 StromTagIs(sobject,VirtRelation) ||		\
 	 StromTagIs(sobject,TCacheHead) ||			\
 	 StromTagIs(sobject,TCacheRowStore) ||		\
 	 StromTagIs(sobject,TCacheColumnStore) ||	\
@@ -207,8 +206,6 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 				pgstrom_close_queue((pgstrom_queue *)sobject);
 			else if (StromTagIs(sobject, DevProgram))
 				pgstrom_put_devprog_key(PointerGetDatum(sobject));
-			else if (StromTagIs(sobject, VirtRelation))
-				pgstrom_put_vrelation((pgstrom_vrelation *)sobject);
 			else if (StromTagIs(sobject, TCacheHead))
 				tcache_abort_tchead((tcache_head *)sobject, private);
 			else if (StromTagIs(sobject, TCacheRowStore))
@@ -268,8 +265,6 @@ __pgstrom_track_object(const char *filename, int lineno,
 			pgstrom_close_queue((pgstrom_queue *)sobject);
 		else if (StromTagIs(sobject, DevProgram))
 			pgstrom_put_devprog_key((Datum)sobject);
-		else if (StromTagIs(sobject, VirtRelation))
-			pgstrom_put_vrelation((pgstrom_vrelation *)sobject);
 		else if (StromTagIs(sobject, TCacheHead))
 			tcache_abort_tchead((tcache_head *)sobject, private);
 		else if (StromTagIs(sobject, TCacheRowStore))
