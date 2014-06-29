@@ -119,8 +119,8 @@ pgstrom_create_vrelation_head(TupleDesc tupdesc,
 	Assert(list_length(vtlist_relidx) == tupdesc->natts &&
 		   list_length(vtlist_attidx) == tupdesc->natts);
 	vrel = palloc0(MAXALIGN(offsetof(pgstrom_vrelation,
-									 vtlist[tupdesc->natts])) +
-				   MAXALIGN(sizeof(AttrNumber) * tupdesc->natts));
+									 vtlist[tupdesc->natts + 1])) +
+				   MAXALIGN(sizeof(AttrNumber) * (tupdesc->natts)));
 	vrel->sobj.stag = StromTag_VirtRelation;
 	SpinLockInit(&vrel->lock);
 	vrel->refcnt = 1;
@@ -129,7 +129,7 @@ pgstrom_create_vrelation_head(TupleDesc tupdesc,
 	vrel->kern = NULL;		/* to be set later */
 	vrel->vtsources = (AttrNumber *)
 		((char *)vrel + MAXALIGN(offsetof(pgstrom_vrelation,
-										  vtlist[tupdesc->natts + 1])));
+										  vtlist[tupdesc->natts])));
 	i = 0;
 	forboth (lc1, vtlist_relidx,
 			 lc2, vtlist_attidx)
@@ -189,13 +189,15 @@ pgstrom_populate_vrelation(pgstrom_vrelation *vrel_head,
 	int			ncols;
 
 	ncols = vrel_head->ncols;
-	length = (STROMALIGN(offsetof(pgstrom_vrelation, vtlist[ncols])) +
+	length = (MAXALIGN(offsetof(pgstrom_vrelation, vtlist[ncols + 1])) +
+			  MAXALIGN(sizeof(AttrNumber) * ncols) +
 			  STROMALIGN(offsetof(kern_vrelation, rindex[nrels * nrooms])));
 	vrel = pgstrom_shmem_alloc(length);
 	if (!vrel)
 		return NULL;	/* out of shared memory */
 
-	offset = MAXALIGN(offsetof(pgstrom_vrelation, vtlist[ncols]));
+	offset = (MAXALIGN(offsetof(pgstrom_vrelation, vtlist[ncols + 1])) +
+			  MAXALIGN(sizeof(AttrNumber) * ncols));
 	memcpy(vrel, vrel_head, offset);
 	Assert(vrel->sobj.stag == StromTag_VirtRelation);
 	SpinLockInit(&vrel->lock);
@@ -205,6 +207,11 @@ pgstrom_populate_vrelation(pgstrom_vrelation *vrel_head,
 	/* acquire an row-/column-store, if given */
 	if (rcstore)
 		vrel->rcstore = pgstrom_get_rcstore(rcstore);
+	/* copy the projection hints */
+	vrel->vtsources = (AttrNumber *)
+		((char *)vrel + STROMALIGN(offsetof(pgstrom_vrelation,
+											vtlist[ncols + 1])));
+	memcpy(vrel->vtsources, vrel_head->vtsources, sizeof(AttrNumber) * ncols);
 
 	/* also set up fields of kern_vrelation */
 	vrel->kern = (kern_vrelation *)((char *)vrel + offset);
@@ -1011,242 +1018,425 @@ pgstrom_put_column_store(tcache_column_store *pcs)
 }
 
 /*
- *
+ * extract_rcstore
  *
  *
  *
  *
  *
  */
-extract_column_store(pgstrom_vrelation *vrel, int vtsrc_index,
-					 int rel_index, int row_index,
-					 void **dest_values, bool *dest_has_null)
-
-
 static int
-extract_row_store(pgstrom_vrelation *vrel, int vtsrc_index,
-				  int rel_index, tcache_row_store *trs, int row_index,
-				  void **dest_values, bool *dest_has_null)
+extract_rcstore(pgstrom_vrelation *vrel, int vtsrc_index,
+				cl_int rel_index, StromObject **rcstore,
+				cl_uint row_index,
+				void **dest_values, bool *dest_has_null)
 {
-	int				first_vtsrc_index = vtsrc_index;
+	cl_uint			first_vtsrc_index = vtsrc_index;
 	vrelation_colmeta *vtlist;
-	rs_tuple	   *rs_tup;
-	HeapTupleHeader	htup;
-	cl_uint			offset;
-	cl_uint			nattrs;
-	cl_int			anum;
-	char		   *addr;
-	bool			has_null;
 
+	Assert(vrel->vtsources[vtsrc_index] < vrel->ncols);
 	vtlist = &vrel->vtlist[vrel->vtsources[vtsrc_index++]];
 	if (vtlist->vrelidx != rel_index)
 		return 0;	/* no column should be extracted from this row */
 
-	rs_tup = kern_rowstore_get_tuple(&trs->kern, row_index);
-	if (!rs_tup)
+	if (StromTagIs(rcstore[rel_index], TCacheRowStore))
 	{
-		while (vtlist->vrelidx == rel_index)
-		{
-			dest_values[vtlist->vattdst] = NULL;
-			*dest_has_null = true;
-			vtlist = &vrel->vtlist[vrel->vtsources[vtsrc_index++]];
-		}
-		return first_vtsrc_index - vtsrc_index;
-	}
-	htup = &rs_tup->data;
-	nattrs = HeapTupleHeaderGetNatts(htup);
-	has_null = ((htup->t_infomask & HEAP_HASNULL) != 0);
+		tcache_row_store *trs = (tcache_row_store *) rcstore[rel_index];
+		rs_tuple	   *rs_tup;
+		HeapTupleHeader	htup;
+		cl_uint			offset;
+		cl_uint			nattrs;
+		cl_int			anum;
+		bool			has_null;
 
-	offset = htup->t_hoff;
-	for (anum = 0; anum < nattrs; anum++)
-	{
-		int		attlen;
-		int		attalign;
+		rs_tup = kern_rowstore_get_tuple(&trs->kern, row_index);
+		if (!rs_tup)
+			goto all_nulls;
 
-		/* no need to scan this tuple any more */
-		if (vtlist->vrelidx != rel_index)
-			break;
-		if (has_null && att_isnull(anum, htup->t_bits))
+		htup = &rs_tup->data;
+		nattrs = HeapTupleHeaderGetNatts(htup);
+		has_null = ((htup->t_infomask & HEAP_HASNULL) != 0);
+
+		offset = htup->t_hoff;
+		for (anum = 0; anum < nattrs; anum++)
 		{
+			int		attlen   = trs->kern.colmeta[anum].attlen;
+			int		attalign = trs->kern.colmeta[anum].attalign;
+			char   *addr;
+
+			/* no need to scan this tuple any more */
+			if (vtlist->vrelidx != rel_index)
+				break;
+
+			if (has_null && att_isnull(anum, htup->t_bits))
+				addr = NULL;
+			else
+			{
+				if (attlen > 0)
+					offset = TYPEALIGN(attalign, offset);
+				else if (!VARATT_NOT_PAD_BYTE((uintptr_t)htup + offset))
+					offset = TYPEALIGN(attalign, offset);
+				addr = (char *)htup + offset;
+			}
+
 			if (vtlist->vattsrc == anum)
 			{
-				dest_values[vtlist->vattdst] = NULL;
-				*dest_has_null = true;
+				Assert(vtlist->vattdst < vrel->ncols);
+				dest_values[vtlist->vattdst] = addr;
+				if (!addr)
+					*dest_has_null = true;
+				Assert(vrel->vtsources[vtsrc_index] < vrel->ncols);
 				vtlist = &vrel->vtlist[vrel->vtsources[vtsrc_index++]];
 			}
-			continue;
+			if (addr)
+				offset += (attlen > 0 ? attlen : VARSIZE_ANY(addr));
 		}
-		attlen   = trs->kern.colmeta[anum].attlen;
-		attalign = trs->kern.colmeta[anum].attalign;
-		if (attlen > 0)
-			offset = TYPEALIGN(attalign, offset);
-		else if (!VARATT_NOT_PAD_BYTE((uintptr_t)htup + offset))
-			offset = TYPEALIGN(attalign, offset);
-		addr = (char *)htup + offset;
-
-		if (vtlist->vattsrc == anum)
-		{
-			dest_values[vtlist->vattdst] = addr;
-			vtlist = &vrel->vtlist[vrel->vtsources[vtsrc_index++]];
-		}
-		offset += (attlen > 0 ? attlen : VARSIZE_ANY(addr));
 	}
-	return first_vtsrc_index - vtsrc_index;
-}
+	else
+	{
+		tcache_column_store *tcs = (tcache_column_store *)rcstore[rel_index];
 
-static int
-extract_column_store(pgstrom_vrelation *vrel, int vtsrc_index,
-					 int rel_index, int row_index,
-					 void **dest_values, bool *dest_has_null)
-{
-	int				first_vtsrc_index = vtsrc_index;
-	vrelation_colmeta *vtlist;
-	tcache_column_store *tcs
-		= (tcache_column_store *) vrel->rcstore[rel_index];
+		if (row_index >= tcs->nrows)
+			goto all_nulls;
 
+		for (vtlist = &vrel->vtlist[vrel->vtsources[vtsrc_index]];
+			 vtlist->vrelidx == rel_index;
+			 vtlist = &vrel->vtlist[vrel->vtsources[vtsrc_index++]])
+		{
+			int		vattsrc = vtlist->vattsrc;
+			int		vattdst = vtlist->vattdst;
+			int		vattlen = vtlist->attlen;
+
+			if (tcs->cdata[vattsrc].isnull &&
+				att_isnull(row_index, tcs->cdata[vattsrc].isnull))
+			{
+				dest_values[vattdst] = NULL;
+				*dest_has_null = true;
+			}
+			else
+			{
+				char   *cs_values = tcs->cdata[vattsrc].values;
+				Assert(cs_values);
+
+				if (vattlen > 0)
+					addr = tcs->cdata[vattsrc].values + vattlen * row_index;
+				else
+				{
+					cl_uint		vl_ofs = ((cl_uint *)cs_values)[row_index];
+
+					addr = tcs->cdata[vattsrc].toast + vl_ofs;
+				}
+				dest_values[vattdst] = addr;
+			}
+		}
+	}
+	return vtsrc_index - first_vtsrc_index;
+
+all_nulls:
 	for (vtlist = &vrel->vtlist[vrel->vtsources[vtsrc_index]];
 		 vtlist->vrelidx == rel_index;
 		 vtlist = &vrel->vtlist[vrel->vtsources[vtsrc_index++]])
 	{
-		int		vattsrc = vtlist->vattsrc;
-		int		vattdst = vtlist->vattdst;
-		int		vattlen = vtlist->attlen;
-		char   *cs_values;
-
-		if (tcs->cdata[vattsrc].isnull &&
-			att_isnull(row_index, tcs->cdata[vattsrc].isnull))
-		{
-			dest_values[vattdst] = NULL;
-			*dest_has_null = true;
-			continue;
-		}
-		cs_values = tcs->cdata[vattsrc].values;
-		Assert(cs_values);
-
-		if (vattlen > 0)
-			addr = tcs->cdata[vattsrc].values + vattlen * row_index;
-		else
-		{
-			cl_uint		vl_ofs = ((cl_uint *)cs_values)[row_index];
-
-			addr = tcs->cdata[vattsrc].toast + vl_ofs;
-		}
-		dest_values[vattdst] = addr;
+		dest_values[vtlist->vattdst] = NULL;
+		*dest_has_null = true;
 	}
 	return vtsrc_index - first_vtsrc_index;
 }
 
-static void
-do_materialize_row_store(pgstrom_vrelation *vrel,
-						 int nrels, cl_uint *rindex, StromObjet **rcstore)
+static bool
+do_materialize_column_store(pgstrom_vrelation *vrel, cl_uint row_index,
+							int nrels, cl_uint *rindex, StromObject **rcstore)
 {
-	tcache_row_store   *trs = (tcache_row_store *) vrel->rcstore;
-	rs_tuple		   *rs_tup;
-	Size				t_length;
+	tcache_column_store *tcs = (tcache_column_store *) vrel->rcstore;
+
+
+
+
+
+
+}
+
+
+
+
+
+
+pgstrom_vrelation *
+pgstrom_materialize_column_store(pgstrom_vrelation *vrel_tmpl,
+								 StromObjet **rcstore)
+{
+	pgstrom_vrelation *vrel;
+	tcache_column_store *tcs;
+	cl_uint		nrels = vrel_tmpl->kern->nrels;
+	cl_uint		nitems = vrel_tmpl->kern->nitems;
+	cl_uint		ncols = vrel_tmpl->ncols;
+	cl_uint		width;
 
 	/*
-	 * determine total space needed
+     * TODO: if nrels == 1 and vrelation is compatible, no need to make
+     * a projection. Just increment reference counter of source rcs.
+     */
+
+	/*
+	 * allocation of vrelation with rindex[nitems] length
 	 */
-	t_length = MAXALIGN(offsetof(HeapTupleHeaderData, t_bits) +
-						BITMAPLEN(vrel->ncols));
-	for (i=0, j=0; j < vrel->ncols; i++)
+	length = (MAXALIGN(offsetof(pgstrom_vrelation, vtlist[ncols])) +
+			  MAXALIGN(offsetof(kern_vrelation, rindex[nitems])));
+	vrel = pgstrom_shmem_alloc(length);
+	if (!vrel)
+		return NULL;
+	vrel->sobj.stag = StromTag_VirtRelation;
+	SpinLockInit(&vrel->lock);
+	vrel->refcnt = 1;
+	vrel->ncols = ncols;
+	vrel->rcstore = NULL;
+	vrel->kern = (char *)vrel + MAXALIGN(offsetof(pgstrom_vrelation,
+												  vtlist[ncols]));
+	memcpy(vrel->vtlist, vrel_tmpl->vtlist,
+		   offsetof(pgstrom_vrelation, vtlist[ncols]) -
+		   offsetof(pgstrom_vrelation, vtlist[0]));
+	vrel->kern->nrels = 1;  /* materialized to one row-store */
+	vrel->kern->nitems = nitems;
+	vrel->kern->nrooms = nitems;
+	vrel->kern->errcode = vrel_tmpl->kern->errcode;
+
+	/*
+     * allocation of column-store of materialized relation
+     */
+	length = STROMALIGN(offsetof(tcache_column_store, cdata[ncols]));
+	/* we cannot have system columns for materialized columns */
+	for (i=0; i < vrel->ncols; i++)
 	{
-		if (StromTagIs(rcstore[i], TCacheRowStore))
-		{
-			extract_row_store();
+		if (!vrel->vtlist[i].attnotnull)
+			length += STROMALIGN((nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+		length += STROMALIGN((vrel->vtlist[i].attlen > 0
+							  ? vrel->vtlist[i].attlen
+							  : sizeof(cl_uint)) * nitems);
+	}
 
-
-	attidx = 0;
-	w
-
-	while (i < vrel->ncols)
+	tcs = pgstrom_shmem_alloc(length);
+	if (!tcs)
 	{
-		if (StromTagIs(rcstore[i], TCacheRowStore))
-		{
-			attidx += extract_row_store
+		pgstrom_shmem_free(vrel);
+		return NULL;	/* out of shared memory */
+	}
+	offset = MAXALIGN(offsetof(tcache_column_store, cdata[ncols]));
+	memset(tcs, 0, offset);
+	tcs->sobj.stag = StromTag_TCacheColumnStore;
+    SpinLockInit(&tcs->refcnt_lock);
+    tcs->refcnt = 1;
+    tcs->ncols = ncols;
+	tcs->ctids = NULL;
+	tcs->theads = NULL;
 
-	for (i=0; i < nrels; i++)
+	for (i=0; i < ncols; i++)
 	{
-		if (StromTagIs(rcstore[i], TCacheRowStore))
+		if (!vrel->vtlist[i].attnotnull)
 		{
-			extract_row_store();
+			tcs->cdata[i].isnull = (uint8 *)((char *)tcs + offset);
+			offset += STROMALIGN((nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+		}
+		tcs->cdata[i].values = ((char *)tcs + offset);
+		if (vrel->vtlist[i].attlen > 0)
+		{
+			offset += STROMALIGN(vrel->vtlist[i].attlen * nitems);
+			tcs->cdata[i].toast = NULL;
 		}
 		else
 		{
-			extract_column_store();
+			offset += STROMALIGN(sizeof(cl_uint) * nitems);
+			tcs->cdata[i].toast = pgstrom_create_toast_buffer(0);
+			if (!tcs->cdata[i].toast)
+			{
+				pgstrom_put_column_store(tcs);
+				pgstrom_shmem_free(vrel);
+				return NULL;
+			}
 		}
+	}
+	Assert(offset == length);
 
-		StromObjet *rcs = rcstore[i];
-
-		
-
-
-
-		for (i=0; i < ncols; i++)
-		{
-			if (vrel->vtlist[i].vrelidx != j)
-				continue;
-
-
-
+	for (i=0; i < nitems; i++)
+	{
+		if (do_materialize_column_store())
+			vrel->kern->rindex[i] = i + 1;
+		else
+			vrel->kern->rindex[i] = -(i + 1);
 	}
 
-	
+	return vrel;
+}
 
+static bool
+do_materialize_row_store(pgstrom_vrelation *vrel, cl_uint row_index,
+						 int nrels, cl_uint *rindex, StromObject **rcstore)
+{
+	tcache_row_store *trs = (tcache_row_store *) vrel->rcstore;
+	HeapTupleHeader td;
+	Size		t_length;
+	Size		t_hoff;
+	void	  **dest_values = alloca(sizeof(void *) * vrel->ncols);
+	bool		dest_has_null = false;
 
+#ifdef USE_ASSERT_CHECKING
+	/*
+	 * NOTE: we assume vrel->vtsources is set up on creation time
+	 * for fast column extraction from row-store
+	 */
+	for (i=1; i < vrel->ncols; i++)
+	{
+		vrelation_colmeta  *vtent1 = vrel->vtlist[vrel->vtsources[i-1]];
+		vrelation_colmeta  *vtent2 = vrel->vtlist[vrel->vtsources[i]];
 
+		Assert(vtent1->vrelidx < vtent2->vrelidx ||
+			   (vtent1->vrelidx == vtent2->vrelidx &&
+				vtent1->vattsrc == vtent2->vattsrc));
+	}
+#endif /* USE_ASSERT_CHECKING */
 
+	/*
+	 * extract source row/column stores
+	 */
+	memset(dest_values, 0, sizeof(void *) * vrel->ncols);
+	for (i=0, j=0; i < nrels; i++)
+	{
+		j += extract_rcstore(vrel, j, i, rcstore, rindex[i],
+							 dest_values, &dest_has_null);
+	}
+	Assert(j == vrel->ncols);
 
+	/*
+	 * compute length of tuple, and expand row-store if needed
+	 */
+	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
+	if (dest_has_null)
+		t_hoff += BITMAPLEN(vrel->ncols);
+	t_hoff = MAXALIGN(t_length);
 
+	t_length = 0;
+	for (i=0; i < vrel->ncols; i++)
+	{
+		if (dest_values[i])
+		{
+			int		attlen   = vrel->vtlist[i].attlen;
+			int		attalign = vrel->vtlist[i].attalign;
 
+			if (attlen > 0)
+			{
+				t_length = TYPEALIGN(attalign, t_length);
+				t_length += attlen;
+			}
+			else if (VARATT_IS_1B(dest_values[i]))
+				t_length += VARSIZE_ANY(dest_values[i]);
+			else
+			{
+				t_length = TYPEALIGN(attalign, t_length);
+				t_length += VARSIZE_ANY(dest_values[i]);
+			}
+		}
+	}
+	t_length += t_hoff;
 
+	/* expand row-store, if not sufficient */
+	if (trs->usage + offsetof(rs_tuple, data) + t_length > trs->kern.length)
+	{
+		tcache_row_store *trs_new;
+
+		trs->kern.length += trs->kern.length;
+		trs_new = pgstrom_shmem_realloc(trs, trs->kern.length);
+		if (!trs_new)
+		{
+			vrel->rcstore = NULL;
+			return false;
+		}
+		trs = trs_new;
+	}
+
+	/*
+	 * OK, put a rs_tuple on the tuple store
+	 */
+	Assert(trs->usage +
+		   offsetof(rs_tuple, data) +
+		   t_length <= trs->kern.length);
 	rs_tup = (rs_tuple *)((char *)&trs->kern + trs->usage);
+	trs->usage += offsetof(rs_tuple, data) + t_length;
+
+	memset(rs_tup, 0, sizeof(rs_tuple));
 	rs_tup->htup.t_len = t_length;
 	ItemPointerSetInvalid(&rs_tup->htup.t_self);
 	rs_tup->htup.t_tableOid = InvalidOid;
+	rs_tup->htup.t_data = &rs_tup->data;
 
-	HeapTupleHeaderSetDatumLength(td, len);
-    HeapTupleHeaderSetTypeId(td, tupleDescriptor->tdtypeid);
-    HeapTupleHeaderSetTypMod(td, tupleDescriptor->tdtypmod);
+	td = rs_tup->htup.t_data;
+	HeapTupleHeaderSetDatumLength(td, );
+	HeapTupleHeaderSetTypeId(td, RECORDOID);
+	HeapTupleHeaderSetTypMod(td, -1);
 
-    HeapTupleHeaderSetNatts(td, numberOfAttributes);
-    td->t_hoff = hoff;
+	HeapTupleHeaderSetNatts(td, vrel->ncols);
+	td->t_hoff = t_hoff;
+	for (i=0; i < vrel->ncols; i++)
+	{
+		if (dest_values[i])
+		{
+			int		attlen   = vrel->vtlist[i].attlen;
+			int		attalign = vrel->vtlist[i].attalign;
 
+			if (dest_has_null)
+				td->t_bits[i / BITS_PER_BYTE] |= (1 << (i % BITS_PER_BYTE));
+			if (attlen > 0)
+			{
+				t_hoff = TYPEALIGN(attalign, t_hoff);
+				memcpy((char *)td + t_hoff, dest_values[i], attlen);
+				t_hoff += attlen;
+			}
+			else if (VARATT_IS_1B(dest_values[i]))
+			{
+				Size	vl_size = VARSIZE_ANY(dest_values[i]);
 
+				memcpy((char *)td + t_hoff, dest_values[i], vl_size);
+				t_hoff += vl_size;
+			}
+			else
+			{
+				Size	vl_size = VARSIZE_ANY(dest_values[i]);
 
-
-
+				t_hoff = TYPEALIGN(attalign, t_hoff);
+				memcpy((char *)td + t_hoff, dest_values[i], vl_size);
+				t_hoff += vl_size;
+			}
+		}
+		else
+		{
+			Assert(dest_has_null);
+			td->t_bits[i / BITS_PER_BYTE] |= (1 << (i % BITS_PER_BYTE));
+		}
+	}
+	return result;
 }
 
 pgstrom_vrelation *
 pgstrom_materialize_row_store(pgstrom_vrelation *vrel_tmpl,
 							  StromObjet **rcstore)
 {
-	pgstrom_vrelation  *vrel;
-	tcache_row_store   *trs;
-	cl_uint		nrels;
-	cl_uint		ncols;
-	cl_uint		nitems;
+	pgstrom_vrelation *vrel;
+	tcache_row_store *trs;
+	cl_uint		nrels = vrel_tmpl->kern->nrels;
+	cl_uint		nitems = vrel_tmpl->kern->nitems;
+	cl_uint		ncols = vrel_tmpl->ncols;
 	cl_uint		width;
+	cl_uint	   *rindex;
 	Size		length;
 	Size		allocated;
 	bool		has_rechecks;
 	bool		all_visible;
 
 	/*
-	 * TODO: if nrels == 1 and vrelation is compatible, no need to
-	 * make a projection. Just increment reference counter of rcs
+	 * TODO: if nrels == 1 and vrelation is compatible, no need to make
+	 * a projection. Just increment reference counter of source rcs.
 	 */
 
-
-
-
-	nrels = vrel_tmpl->kern->nrels;
-	ncols = vrel_tmpl->ncols;
-	nitems = vrel_tmpl->kern->nitems;
-
 	/*
-	 * allocation of vrel with rindex[nitems]
+	 * allocation of vrelation with rindex[nitems] length
 	 */
 	length = (MAXALIGN(offsetof(pgstrom_vrelation, vtlist[ncols])) +
 			  MAXALIGN(offsetof(kern_vrelation, rindex[nitems])));
@@ -1263,21 +1453,23 @@ pgstrom_materialize_row_store(pgstrom_vrelation *vrel_tmpl,
 	memcpy(vrel->vtlist, vrel_tmpl->vtlist,
 		   offsetof(pgstrom_vrelation, vtlist[ncols]) -
 		   offsetof(pgstrom_vrelation, vtlist[0]));
-	vrel->kern->nrels = 1;	/* materialize to one row-store */
+	vrel->kern->nrels = 1;	/* materialized to one row-store */
 	vrel->kern->nitems = nitems;
-	vrel->kern->nrooms = nrooms;
-	vrel->kern->errcode = StromError_Success;
+	vrel->kern->nrooms = nitems;
+	vrel->kern->errcode = vrel_tmpl->kern->errcode;
 
 	/*
 	 * allocation of row-store according to the width and nitems
 	 */
 	width = offsetof(HeapTupleHeaderData, t_bits);
 	width += BITMAPLEN(ncols);	/* nullmap */
+	width = MAXALIGN(width);
 	for (i=0; i < ncols; i++)
 	{
 		width = TYPEALIGN(vrel->vtlist[i].attalign, width);
 		width += vrel->vtlist[i].vattwidth;
 	}
+	width = MAXALIGN(width);
 	trs = pgstrom_shmem_alloc_alap(offsetof(tcache_row_store,
 											kern.colmeta[ncols]) +
 								   width * nitems,
@@ -1285,14 +1477,16 @@ pgstrom_materialize_row_store(pgstrom_vrelation *vrel_tmpl,
 	if (!trs)
 	{
 		pgstrom_shmem_free(vrel);
-		return NULL;
+		return NULL;	/* out of shared memory */
 	}
+
 	trs->sobj.stag = StromTag_TCacheRowStore;
 	SpinLockInit(&trs->refcnt_lock);
 	trs->refcnt = 1;
 	memset(&trs->chain, 0, sizeof(dlist_node));
 	/* in case of materialization, we consume row-store from head to tail
-	 * because we already know number of rows to be materialized
+	 * because we already know number of rows to be materialized, but don't
+	 * know how much size is exactly needed.
 	 */
 	trs->usage = (offsetof(kern_row_store, colmeta[ncols]) +
 				  sizeof(cl_uint) * nitems);
@@ -1308,19 +1502,16 @@ pgstrom_materialize_row_store(pgstrom_vrelation *vrel_tmpl,
 		trs->kern.colmeta[i].attalign = vrel->vtlist[i].attalign;
 		trs->kern.colmeta[i].attlen = vrel->vtlist[i].attlen;
 	}
-	vrel->rcstore = &trs->sobj;
 
-   	for (i=0; i < nitems; i++)
+	rindex = vrel_tmpl->kern->rindex;
+	for (i=0; i < nitems; i++)
 	{
-		if (do_materialize_row_store())
+		if (do_materialize_row_store(vrel, i, rcstore, rindex + i * nrels))
 			vrel->kern->rindex[i] = i + 1;
 		else
 			vrel->kern->rindex[i] = -(i + 1);
 	}
+	vrel->rcstore = &trs->sobj;
 
-	/* allocate a row-store according to the width and nitems */
-	/* XXX - average length is needed in vtlist */
-
-
+	return vrel;
 }
-#endif
