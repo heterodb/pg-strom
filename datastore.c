@@ -677,6 +677,92 @@ kparam_refresh_ktoast_head(kern_parambuf *kparams,
 		kparams->poffset[1] = 0;	/* mark it as null */
 }
 
+/*
+ * kparam_make_materialization
+ *
+ * It makes materialization info according to the supplied varnode_list
+ * and source_relids. As literal, 'varnode_list' is a list of Var-node
+ * being ordered according to the materialized relation.
+ * The 'source_relids' is a list of relid (varno of Var-node) must be
+ * there, if Var-node wants to reference.
+ * Usually, the first relation is scanned/outer one, and other relations
+ * are inner ones (it may be more than 2).
+ */
+static int
+sort_materialization_colmeta(const void *a, const void *b)
+{
+	const materialize_colmeta *cola = a;
+	const materialize_colmeta *colb = b;
+
+	if (cola->relsrc < colb->relsrc)
+		return -1;
+	if (cola->relsrc > colb->relsrc)
+		return  1;
+	if (cola->attsrc < colb->attsrc)
+		return -1;
+	if (cola->attsrc > colb->attsrc)
+		return  1;
+	return 0;
+}
+
+bytea *
+kparam_make_materialization(List *varnode_list, List *source_relids)
+{
+	bytea	   *result;
+	pgstrom_materialize *pmat;
+	ListCell   *lc1, *lc2;
+	int			i, ncols = list_length(varnode_list);
+	Size		length;
+
+	length = VARHDRSZ + offsetof(pgstrom_materialize, colmeta[ncols]);
+	result = palloc0(length);
+	SET_VARSIZE(result, length);
+	pmat = (pgstrom_materialize *) VARDATA(result);
+	pmat->nrels = list_length(source_relids);
+	pmat->ncols = ncols;
+
+	i = 0;
+	foreach (lc1, varnode_list)
+	{
+		Var	   *var = lfirst(lc1);
+		int16	typlen;
+        bool	typbyval;
+        char	typalign;
+		Index	relsrc = 0;
+
+		Assert(IsA(var, Var));
+		foreach (lc2, source_relids)
+		{
+			if (var->varno == lfirst_int(lc2))
+				break;
+			relsrc++;
+		}
+		if (!lc2)
+			elog(ERROR, "bug? referenced column (%u) is not source relations",
+				 var->varno);
+
+		get_typlenbyvalalign(var->vartype,
+							 &typlen,
+							 &typbyval,
+							 &typalign);
+		pmat->colmeta[i].attnotnull = false;
+		pmat->colmeta[i].attalign = typealign_get_width(typalign);
+		pmat->colmeta[i].attlen = typlen;
+		pmat->colmeta[i].relsrc = relsrc;
+		pmat->colmeta[i].attsrc = var->varattno;
+		pmat->colmeta[i].attdst = i;
+		i++;
+	}
+	/*
+	 * reorder the colmeta according to relsrc and attsrc for quick
+	 * extraction. it enables to avoid to walk on a heap-tuple several
+	 * times.
+	 */
+	qsort(pmat->colmeta, ncols, sizeof(pmat->colmeta[0]),
+		  sort_materialization_colmeta);
+	return result;
+}
+
 #if 0
 bytea *
 kparam_make_kprojection(List *target_list)

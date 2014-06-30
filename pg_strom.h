@@ -465,24 +465,28 @@ typedef struct
  */
 typedef struct
 {
+	/* true, if column never has NULL (thus, no nullmap required) */
+	cl_char		attnotnull;
+	/* alignment; 1,2,4 or 8, not characters in pg_attribute */
+	cl_char		attalign;
+	/* length of attribute */
+	cl_short	attlen;
+	/* source relation index */
+	cl_short	relsrc;
+	/* source attribute index */
+	cl_short	attsrc;
+	/* destination attribute index */
+	cl_short	attdst;
+	/* average width of this attribute */
+	cl_short	attwidth;
+
+} materialize_colmeta;
+
+typedef struct
+{
 	cl_uint			nrels;		/* number of relations being expected */
 	cl_uint			ncols;		/* number of columns in destination store */
-	struct {
-		/* true, if column never has NULL (thus, no nullmap required) */
-		cl_char		attnotnull;
-		/* alignment; 1,2,4 or 8, not characters in pg_attribute */
-		cl_char		attalign;
-		/* length of attribute */
-		cl_short	attlen;
-		/* source relation index */
-		cl_short	relsrc;
-		/* source attribute index */
-		cl_short	attsrc;
-		/* destination attribute index */
-		cl_short	attdst;
-		/* average width of this attribute */
-		cl_short	attwidth;
-	} vtlist[FLEXIBLE_ARRAY_MEMBER];
+	materialize_colmeta colmeta[FLEXIBLE_ARRAY_MEMBER];
 } pgstrom_materialize;
 
 /*
@@ -587,9 +591,8 @@ extern bytea *kparam_make_ktoast_head(TupleDesc tupdesc,
 									  cl_uint nsyscols);
 extern void kparam_refresh_ktoast_head(kern_parambuf *kparams,
 									   StromObject *rcstore);
-
-extern bytea *kparam_make_kprojection(List *target_list);
-
+extern bytea *kparam_make_materialization(List *varnode_list,
+										  List *source_relids);
 extern List *pgstrom_make_bulk_attmap(List *targetlist, Index varno);
 extern pgstrom_bulkslot *pgstrom_create_bulkslot(StromObject *rc_store,
 												 List *bulk_attmap,
