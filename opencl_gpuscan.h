@@ -91,7 +91,7 @@ typedef struct {
  * It writes back the calculation result of gpuscan.
  */
 static void
-gpuscan_writeback_row_error(__global kern_vrelation *kvrel,
+gpuscan_writeback_row_error(__global kern_resultbuf *kresults,
 							int errcode,
 							__local void *workmem)
 {
@@ -106,14 +106,14 @@ gpuscan_writeback_row_error(__global kern_vrelation *kvrel,
 	 * then stairlike-add returns a relative offset within workgroup,
 	 * and we can adjust this offset by global base index.
 	 */
-	binary = (get_global_id(0) < kvrel->nrooms &&
+	binary = (get_global_id(0) < kresults->nrooms &&
 			  (errcode == StromError_Success ||
 			   errcode == StromError_RowReCheck)) ? 1 : 0;
 
 	offset = arithmetic_stairlike_add(binary, workmem, &nitems);
 
 	if (get_local_id(0) == 0)
-		base = atomic_add(&kvrel->nitems, nitems);
+		base = atomic_add(&kresults->nitems, nitems);
 	barrier(CLK_LOCAL_MEM_FENCE);
 
 	/*
@@ -121,13 +121,13 @@ gpuscan_writeback_row_error(__global kern_vrelation *kvrel,
 	 * or needs re-check on the host side. In case of re-check, row-index
 	 * shall be a negative number.
 	 */
-	if (get_global_id(0) >= kvrel->nrooms)
+	if (get_global_id(0) >= kresults->nrooms)
 		return;
 
 	if (errcode == StromError_Success)
-		kvrel->rindex[base + offset] = (get_global_id(0) + 1);
+		kresults->results[base + offset] = (get_global_id(0) + 1);
 	else if (errcode == StromError_RowReCheck)
-		kvrel->rindex[base + offset] = -(get_global_id(0) + 1);
+		kresults->results[base + offset] = -(get_global_id(0) + 1);
 }
 
 /*
@@ -136,7 +136,6 @@ gpuscan_writeback_row_error(__global kern_vrelation *kvrel,
 static pg_bool_t
 gpuscan_qual_eval(__private cl_int *errcode,
 				  __global kern_parambuf *kparams,
-				  __global kern_vrelation *kvrel,
 				  __global kern_data_store *kds,
 				  __global kern_toastbuf *ktoast,
 				  size_t kds_index);
@@ -144,8 +143,7 @@ gpuscan_qual_eval(__private cl_int *errcode,
  * kernel entrypoint of gpuscan
  */
 __kernel void
-gpuscan_qual(__global kern_gpuscan *kgpuscan,	/* in */
-			 __global kern_vrelation *kvrel,	/* out */
+gpuscan_qual(__global kern_gpuscan *kgpuscan,	/* in/out */
 			 __global kern_data_store *kds,		/* in */
 			 __global kern_toastbuf *ktoast,	/* in */
 			 __local void *local_workbuf)
@@ -153,10 +151,10 @@ gpuscan_qual(__global kern_gpuscan *kgpuscan,	/* in */
 	pg_bool_t	rc;
 	cl_int		errcode = StromError_Success;
 	__global kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
+	__global kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
 
 	if (get_global_id(0) < kds->nitems)
-		rc = gpuscan_qual_eval(&errcode,
-							   kparams, kvrel, kds, ktoast,
+		rc = gpuscan_qual_eval(&errcode, kparams, kds, ktoast,
 							   get_global_id(0));
 	else
 		rc.isnull = true;
@@ -167,91 +165,9 @@ gpuscan_qual(__global kern_gpuscan *kgpuscan,	/* in */
 					: StromError_RowFiltered);
 
 	/* writeback error code */
-	kern_writeback_error_status(&kvrel->errcode, errcode, local_workbuf);
-	gpuscan_writeback_row_error(kvrel, errcode, local_workbuf);
+	kern_writeback_error_status(&kresults->errcode, errcode, local_workbuf);
+	gpuscan_writeback_row_error(kresults, errcode, local_workbuf);
 }
-
-#if 0
-/*
- * kernel entrypoint of gpuscan for column-store
- */
-__kernel void
-gpuscan_qual_cs(__global kern_gpuscan *kgscan,
-				__global kern_column_store *kcs,
-				__global kern_toastbuf *toast,
-				__local void *local_workmem)
-{
-	pg_bool_t	rc;
-	cl_int		errcode = StromError_Success;
-	__global kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgscan);
-
-	if (get_global_id(0) < kcs->nrows)
-		rc = gpuscan_qual_eval(&errcode, kgscan, kcs, toast, get_global_id(0));
-	else
-		rc.isnull = true;
-
-	STROM_SET_ERROR(&errcode,
-					!rc.isnull && rc.value != 0
-					? StromError_Success
-					: StromError_RowFiltered);
-	gpuscan_writeback_result(kgscan, errcode, local_workmem);
-}
-
-/*
- * kernel entrypoint of gpuscan for row-store
- */
-__kernel void
-gpuscan_qual_rs(__global kern_gpuscan *kgscan,
-				__global kern_row_store *krs,
-				__global kern_column_store *kcs,
-				__local void *local_workmem)
-{
-	__global kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgscan);
-	cl_int				errcode = StromError_Success;
-	pg_bytea_t			kparam_0 = pg_bytea_param(kparams,&errcode,0);
-	pg_bool_t			rc;
-	__local size_t		kcs_offset;
-	__local size_t		kcs_nitems;
-
-	/* acquire a slot of this workgroup */
-	if (get_local_id(0) == 0)
-	{
-		if (get_global_id(0) + get_local_size(0) < krs->nrows)
-			kcs_nitems = get_local_size(0);
-		else if (get_global_id(0) < krs->nrows)
-			kcs_nitems = krs->nrows - get_global_id(0);
-		else
-			kcs_nitems = 0;
-		kcs_offset = atomic_add(&kcs->nrows, kcs_nitems);
-	}
-	barrier(CLK_LOCAL_MEM_FENCE);
-
-	/* move data into column-store */
-	kern_row_to_column(&errcode,
-					   (__global cl_char *)VARDATA(kparam_0.value),
-					   krs,
-					   get_global_id(0),
-					   kcs,
-					   NULL,
-					   kcs_offset,
-					   kcs_nitems,
-					   local_workmem);
-	if (get_local_id(0) < kcs_nitems)
-	{
-		rc = gpuscan_qual_eval(&errcode, kgscan, kcs,
-							   (__global kern_toastbuf *)krs,
-							   kcs_offset + get_local_id(0));
-	}
-	else
-		rc.isnull = true;
-
-	STROM_SET_ERROR(&errcode,
-					!rc.isnull && rc.value != 0
-					? StromError_Success
-					: StromError_RowFiltered);
-	gpuscan_writeback_result(kgscan, errcode, local_workmem);
-}
-#endif
 
 #else	/* OPENCL_DEVICE_CODE */
 
@@ -265,7 +181,6 @@ typedef struct {
 	pgstrom_message		msg;		/* = StromTag_GpuScan */
 	Datum				dprog_key;	/* key of device program */
 	StromObject		   *rc_store;	/* = StromTag_TCache(Row|Column)Store */
-	pgstrom_vrelation  *vrel;		/* = StromTag_VirtRelation */
 	kern_gpuscan		kern;
 } pgstrom_gpuscan;
 

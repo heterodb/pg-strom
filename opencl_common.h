@@ -447,69 +447,6 @@ typedef struct {
 	cl_int		results[FLEXIBLE_ARRAY_MEMBER];
 } kern_resultbuf;
 
-#if 0
-/*
- * kern_vrelation
- *
- * It is a representation of a virtual relation view being consists of
- * one or multiple relations. 
- *
- *
- *
- * It manages row-index (that points a particular row in a row/column-store)
- * of one or more relations if joinned. In case when nrels > 1, a bulkstore
- * has multiple row-indexed with same length. Each item in rindex for each
- * relation represents same row in the result relation view. The result
- * relation will have 'ncols' number of columns. Its metadata is stored
- * in the tlist members.
- * Usually, row-index is a positive number that points (row-index -1)'s
- * item of the relation. In case of negative number, it means scan/join
- * conditions have to be checked on the host again.
- *
- *   kern_vrelation
- * +---------------------+
- * | nrels               |
- * +---------------------+
- * | ncols               |
- * +---------------------+
- * | nitems              |
- * +---------------------+
- * | nrooms              |
- * +---------------------+
- * | errcode             |
- * +---------------------+ ---  ------------
- * | cl_int rindex[]     |  ^             ^
- * |                     |  |             |
- * | rindex[0*nrels + 0] |  |             |
- * | rindex[0*nrels + 1] | rindex of      |
- * |    :                | the 1st item.  |
- * | rindex[0*nrels +    |  |             |
- * |        (nrels - 1)] |  V             | sizeof(cl_uint)
- * +---------------------+ ---            | * nrels * nitems
- * | cl_int rindex[]     |  ^             |
- * |                     |  |             |
- * | rindex[1*nrels + 0] |  |             |
- * | rindex[1*nrels + 1] | rindex of      |
- * |    :                | the 2nd item.  |
- * | rindex[1*nrels +    |  |             |
- * |        (nrels - 1)] |  V             |
- * +---------------------+ ---            |
- * |        :            |                |
- * |        :            |                V
- * +---------------------+ -----------------
- */
-typedef struct {
-	cl_uint			nrels;			/* number of relation being joined */
-	cl_int			nitems;			/* number of items being written */
-	cl_int			nrooms;			/* available rooms per rel */
-	cl_int			errcode;		/* space to write back */
-	cl_char			has_rechecks;	/* true, if any rows to be rechecked */
-	cl_char			all_visible;	/* true, if all visible w/o rindex */
-	cl_char			__padding[2];	/* reserved for future usage */
-	cl_int			rindex[FLEXIBLE_ARRAY_MEMBER];
-} kern_vrelation;
-#endif
-
 #ifdef OPENCL_DEVICE_CODE
 /*
  * PostgreSQL Data Type support in OpenCL kernel
@@ -834,6 +771,7 @@ kern_get_datum_cs(__global kern_data_store *kds,
 	/* why is this column referenced? */
 	if (!cmeta.attvalid)
 		return NULL;
+
 	offset = cmeta.cs_offset;
 
 	/* elsewhere, reference to the column-array, straight-forward */

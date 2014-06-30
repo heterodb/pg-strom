@@ -448,59 +448,25 @@ typedef struct {
  */
 typedef struct
 {
-	Value			value;			/* T_String is used to cheat executor */
+	Node			node;			/* dummy header portion */
 	StromObject	   *rc_store;		/* row/column-store to be moved */
 	cl_uint			nitems;			/* num of rows on this bulk-slot */
+	List		   *attmap;			/* attribute numbers */
 	cl_uint			rindex[FLEXIBLE_ARRAY_MEMBER];
-} pgstrom_bulk_slot;
-
-#if 0
-/*
- * pgstrom_vrelation
- *
- * A data structure to remember a pair of tuples being scanned/joined.
- * It allows to move processed data into upper executor node without
- * projection or materialize.
- *
- * XXX - it eventually replace the role of kern_resultbuf
- */
-typedef struct
-{
-	cl_char			attnotnull; /* true, if always not null */
-	cl_char			attalign;   /* type alignment */
-	cl_short		attlen;     /* length of type */
-	cl_ushort		vrelidx;	/* index of relation in rcstore array */
-	cl_ushort		vattsrc;	/* attribute index of source relation */
-	cl_ushort		vattdst;	/* attribute index of destination relation */
-	cl_ushort		vattwidth;	/* average width of this attribute */
-} vrelation_colmeta;
-
-typedef struct
-{
-	StromObject		sobj;		/* =StromTag_VirtRelation */
-	slock_t			lock;		/* protection of reference counter */
-	cl_int			refcnt;		/* reference counter */
-	cl_int			ncols;		/* number of columns */
-	StromObject	   *rcstore;	/* row-/column-store being materialized */
-	kern_vrelation *kern;		/* kern_vrelation */
-	AttrNumber	   *vtsources;	/* order to fetch columns on projection */
-	vrelation_colmeta vtlist[FLEXIBLE_ARRAY_MEMBER];
-} pgstrom_vrelation;
-#endif
+} pgstrom_bulkslot;
 
 /*
- * kern_projection
+ * pgstrom_materialize
  *
  * This data structure provides a definition of destination relation on
- * simple projection task. The "simple" means, it just puts a particular
- * column of either of source relation (inner or outer/scan) onto somewhere
- * on the destination relation but without calculation on target-list.
+ * server side materialization. Unlike host side, this materialization
+ * cannot contain expression in the target-list. What it can do is
+ * re-ordering the columns of (multiple) source relations.
  */
 typedef struct
 {
-	cl_uint			length;		/* length of this simple projection info */
+	cl_uint			nrels;		/* number of relations being expected */
 	cl_uint			ncols;		/* number of columns in destination store */
-	Datum			dprog_key;	/* device program key, if valid */
 	struct {
 		/* true, if column never has NULL (thus, no nullmap required) */
 		cl_char		attnotnull;
@@ -517,7 +483,7 @@ typedef struct
 		/* average width of this attribute */
 		cl_short	attwidth;
 	} vtlist[FLEXIBLE_ARRAY_MEMBER];
-} kern_projection;
+} pgstrom_materialize;
 
 /*
  * --------------------------------------------------------------------
@@ -628,7 +594,12 @@ extern void kparam_refresh_ktoast_head(kern_parambuf *kparams,
 
 extern bytea *kparam_make_kprojection(List *target_list);
 
-extern void pgstrom_release_bulk_slot(pgstrom_bulk_slot *bulk_slot);
+extern List *pgstrom_make_bulk_attmap(List *targetlist, Index varno);
+extern pgstrom_bulkslot *pgstrom_create_bulkslot(StromObject *rc_store,
+												 List *bulk_attmap,
+												 cl_uint nitems,
+												 cl_uint nrooms);
+extern void pgstrom_release_bulkslot(pgstrom_bulkslot *bulk);
 extern bool pgstrom_plan_can_multi_exec(const PlanState *ps);
 
 extern tcache_row_store *pgstrom_create_row_store(TupleDesc tupdesc);
@@ -639,11 +610,12 @@ extern tcache_toastbuf *pgstrom_create_toast_buffer(Size required);
 extern tcache_toastbuf *pgstrom_expand_toast_buffer(tcache_toastbuf *tbuf);
 extern tcache_toastbuf *pgstrom_get_toast_buffer(tcache_toastbuf *tbuf);
 extern void pgstrom_put_toast_buffer(tcache_toastbuf *tbuf);
-
+#if 0
 extern tcache_column_store *
-pgstrom_create_column_store_with_projection(kern_projection *kproj,
+pgstrom_create_column_store_with_projection(pgstrom_projection *pproj,
                                             cl_uint nitems,
                                             bool with_syscols);
+#endif
 extern tcache_column_store *pgstrom_get_column_store(tcache_column_store *pcs);
 extern void pgstrom_put_column_store(tcache_column_store *pcs);
 

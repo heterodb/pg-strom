@@ -413,17 +413,86 @@ pgstrom_create_kern_parambuf(List *used_params,
 }
 
 /*
+ * pgstrom_make_bulk_attmap
+ *
+ * It checks whether the supplied target-list has something except from
+ * Var nodes. In case of simple var-node reference only, it is available
+ * to skip expensive projection per row.
+ */
+List *
+pgstrom_make_bulk_attmap(List *targetlist, Index varno)
+{
+	List	   *attmap = NIL;
+	ListCell   *cell;
+
+	foreach (cell, targetlist)
+	{
+		TargetEntry	   *tle = lfirst(cell);
+		Var			   *var;
+
+		if (!IsA(tle->expr, Var))
+		{
+			elog(INFO, "tlist contains things except for Var (%d)",
+				 (int)nodeTag(tle->expr));
+			return NIL;
+		}
+		var = (Var *) tle->expr;
+		if (var->varno != varno)
+		{
+			elog(INFO, "var->varno = %d, but %d is expected",
+				 var->varno, varno);
+			return NIL;
+		}
+
+		/*
+		 * FIXME: right now, we don't support to reference system columns
+		 * using attmap of bulk-slot. Is it a reasonable restriction?
+		 */
+		if (var->varattno < 1)
+			return NIL;
+		attmap = lappend_int(attmap, var->varattno);
+	}
+	return attmap;
+}
+
+/*
+ * pgstrom_create_bulkslot
+ *
+ * construction of a new bulkslot according to the parameters
+ */
+pgstrom_bulkslot *
+pgstrom_create_bulkslot(StromObject *rc_store,
+						List *bulk_attmap,
+						cl_uint nitems,
+						cl_uint nrooms)
+{
+	pgstrom_bulkslot *bulk = palloc(offsetof(pgstrom_bulkslot,
+											 rindex[nrooms]));
+	Assert(StromTagIs(rc_store, TCacheRowStore) ||
+		   StromTagIs(rc_store, TCacheColumnStore));
+	bulk->rc_store = pgstrom_get_rcstore(rc_store);
+	pgstrom_track_object(bulk->rc_store, 0);
+	bulk->nitems = nitems;
+	bulk->attmap = list_copy(bulk_attmap);
+
+	return bulk;
+}
+
+/*
  * pgstrom_release_bulk_slot
  *
  * It releases the supplied pgstrom_bulk_slot object once constructed.
  */
 void
-pgstrom_release_bulk_slot(pgstrom_bulk_slot *bulk_slot)
+pgstrom_release_bulkslot(pgstrom_bulkslot *bulk)
 {
-	/* unlink the referenced row or column store */
-	pgstrom_untrack_object(bulk_slot->rc_store);
-	pgstrom_put_rcstore(bulk_slot->rc_store);
-	pfree(bulk_slot);
+	/* unlink referenced row- or column-store */
+	if (bulk->rc_store)
+	{
+		pgstrom_untrack_object(bulk->rc_store);
+		pgstrom_put_rcstore(bulk->rc_store);
+	}
+	pfree(bulk);
 }
 
 /*
@@ -890,6 +959,7 @@ pgstrom_put_toast_buffer(tcache_toastbuf *tbuf)
         pgstrom_shmem_free(tbuf);
 }
 
+#if 0
 /*
  * pgstrom_create_column_store
  *
@@ -972,6 +1042,7 @@ pgstrom_create_column_store_with_projection(kern_projection *kproj,
 
 	return tcs;
 }
+#endif
 
 /*
  * pgstrom_get_column_store
