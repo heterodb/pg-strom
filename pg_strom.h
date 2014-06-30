@@ -577,10 +577,6 @@ pgstrom_apply_vrelation_projection(pgstrom_vrelation *vrel, List *vrel_proj);
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
-extern bytea *kparam_make_attrefs_by_resnums(TupleDesc tupdesc,
-											 List *attnums_list);
-extern bytea *kparam_make_attrefs(TupleDesc tupdesc,
-								  List *used_vars, Index varno);
 extern bytea *kparam_make_kds_head(TupleDesc tupdesc,
 								   Bitmapset *attrefs,
 								   cl_uint nsyscols);

@@ -298,6 +298,7 @@ pgstrom_apply_vrelation_projection(pgstrom_vrelation *vrel, List *vrel_proj)
 	return vrel;
 }
 #endif
+
 /*
  * pgstrom_create_param_buffer
  *
@@ -517,66 +518,12 @@ pgstrom_plan_can_multi_exec(const PlanState *ps)
 	return false;
 }
 
-
 /*
- * kparam_make_attrefs_by_resnums
+ * kparam_make_kds_head
  *
- * makes an array to inform which columns (in row format) are referenced.
- * usually it is informed as kparam_0 constant
+ * it makes a template of header portion of kern_data_store according
+ * to the supplied tupdesc and bitmapset of referenced columns.
  */
-bytea *
-kparam_make_attrefs_by_resnums(TupleDesc tupdesc, List *attnums_list)
-{
-	bytea	   *result;
-	cl_char	   *refatts;
-	AttrNumber	anum;
-	AttrNumber	anum_last = 0;
-	ListCell   *lc;
-
-	result = palloc0(VARHDRSZ + sizeof(cl_char) * tupdesc->natts);
-	SET_VARSIZE(result, VARHDRSZ + sizeof(cl_char) * tupdesc->natts);
-	refatts = (cl_char *)VARDATA(result);
-	foreach (lc, attnums_list)
-	{
-		anum = lfirst_int(lc);
-		Assert(anum > 0 && anum <= tupdesc->natts);
-		refatts[anum - 1] = 1;
-		anum_last = anum;
-	}
-	if (anum_last > 0)
-		refatts[anum_last - 1] = -1;	/* end of reference marker */
-
-	return result;
-}
-
-/*
- * kparam_make_attrefs
- *
- * same as kparam_make_attrefs_by_resnums, but extract varattno from
- * used_vars list;
- */
-bytea *
-kparam_make_attrefs(TupleDesc tupdesc,
-					List *used_vars, Index varno)
-{
-	List	   *resnums = NIL;
-	ListCell   *cell;
-	bytea	   *result;
-
-	foreach (cell, used_vars)
-	{
-		Var	   *var = lfirst(cell);
-
-		if (var->varno != varno)
-			continue;
-		Assert(var->varattno > 0 && var->varattno <= tupdesc->natts);
-		resnums = lappend_int(resnums, var->varattno);
-	}
-	result = kparam_make_attrefs_by_resnums(tupdesc, resnums);
-	list_free(resnums);
-	return result;
-}
-
 bytea *
 kparam_make_kds_head(TupleDesc tupdesc,
 					 Bitmapset *referenced,
@@ -662,6 +609,11 @@ kparam_refresh_kds_head(kern_parambuf *kparams,
 	kds_head->length = length;
 }
 
+/*
+ * kparam_make_ktoast_head
+ *
+ * it also makes header portion of kern_toastbuf according to the tupdesc.
+ */
 bytea *
 kparam_make_ktoast_head(TupleDesc tupdesc, cl_uint nsyscols)
 {
