@@ -41,28 +41,17 @@ static CustomPlanMethods		gpuhashjoin_plan_methods;
 typedef struct
 {
 	CustomPath		cpath;
-	JoinType		jointype;
-	Path		   *outerjoinpath;
-	Path		   *innerjoinpath;
-	List		   *hash_clauses;
-	List		   *qual_clauses;
-	List		   *host_clauses;
-} GpuHashJoinPath;
-
-typedef struct
-{
-	int			num_vars;		/* current number of entries */
-	int			max_vars;		/* max number of entries */
-	Index		special_varno;	/* either of INDEX/INNER/OUTER_VAR */
-	bool		has_ph_vars;	/* has any PlaceHolderVar? */
-	bool		has_non_vars;	/* has any non Var expression? */
-	List	   *tlist;			/* original tlist */
+	int				num_inner;		/* number of inner relations */
+	Path		   *outerpath;		/* outer path (always one) */
 	struct {
-		Index		varno;		/* RT index of Var */
-		AttrNumber	varattno;	/* attribute number of Var */
-		AttrNumber	resno;		/* TLE position of Var */
-	} trans[FLEXIBLE_ARRAY_MEMBER];
-} vartrans_info;
+		Path	   *innerpath;
+		JoinType	jointype;
+		List	   *hash_clause;
+		List	   *qual_clause;
+		List	   *host_clause;
+		bool		host_with_volatile;
+	} inners[FLEXIBLE_ARRAY_MEMBER];
+} GpuHashJoinPath;
 
 typedef struct
 {
@@ -126,6 +115,21 @@ static struct {
 
 /* declaration of static functions */
 static void clserv_process_gpuhashjoin(pgstrom_message *message);
+
+/*
+ * path_is_gpuhashjoin - returns true, if supplied pathnode is gpuhashjoin
+ */
+static bool
+path_is_gpuhashjoin(Path *pathnode)
+{
+	CustomPath *cpath = (CustomPath *) pathnode;
+
+	if (!IsA(cpath, CustomPath))
+		return false;
+	if (cpath->methods != &gpuhashjoin_path_methods)
+		return false;
+	return true;
+}
 
 /*
  * estimate_hashitem_size
@@ -206,27 +210,42 @@ estimate_hashtable_size_walker(Node *node,
 }
 
 static Size
-estimate_hashtable_size(PlannerInfo *root, List *hash_clauses, double ntuples)
+estimate_hashtable_size(PlannerInfo *root, GpuHashJoinPath *gpath)
 {
-	estimate_hashtable_size_context context;
+	estimate_hashtable_size_context	context;
 	Size		entry_size;
+	Size		hashtable_size;
+	int			i;
 
-	/* Force a plausible relation size if no info */
-	if (ntuples <= 0.0)
-		ntuples = 1000.0;
+	/* portion of kern_multihash */
+	hashtable_size = MAXALIGN(offsetof(kern_multihash,
+									   htbl_offset[gpath->num_inner]));
+	for (i=0; i < gpath->num_inner; i++)
+	{
+		Path	   *ipath = gpath->inners[i].innerpath;
+		List	   *hash_clause = gpath->inners[i].hash_clause;
+		double		ntuples = ipath->nrows;
 
-	/* walks on the join clauses to ensure var's width */
-	memset(&context, 0, sizeof(estimate_hashtable_size_context));
-	estimate_hashtable_size_walker((Node *)hash_clauses, &context);
+		/* force a plausible relation size if no information */
+		if (ntuples <= 1000.0)
+			ntuples = 1000.0;
 
-	entry_size = INTALIGN(offsetof(kern_hashentry, keydata[0]) +
-						  Max(sizeof(cl_ushort),
-							  SHORTALIGN(context.natts / BITS_PER_BYTE)) +
-						  context.width);
+		/* walks on the join clauses to ensure var's width */
+		context->relids = ipath->parent->relids;
+		context->natts = 0;
+		context->width = 0;
+		estimate_hashtable_size_walker((Node *)hash_clause, &context);
 
-	return MAXALIGN(offsetof(kern_hashtable,
-							 colmeta[context.natts])
-					+ entry_size * (Size)ntuples);
+		entry_size = Max(INTALIGN(sizeof(kern_hashentry)),
+						 INTALIGN(offsetof(kern_hashentry,
+								  keydata[context.natts / BITS_PER_BYTE])));
+		entry_size = INTALIGN(entry_size + context.width);
+
+		hashtable_size += MAXALIGN(kern_hashtable, colmeta[context.natts]);
+		hashtable_size += entry_size * (Size)ntuples;
+		hashtable_size = MAXALIGN(table_size);
+	}
+	return hashtable_size;
 }
 
 /*
@@ -236,45 +255,48 @@ estimate_hashtable_size(PlannerInfo *root, List *hash_clauses, double ntuples)
  */
 static bool
 cost_gpuhashjoin(PlannerInfo *root,
-				 JoinType jointype,
-				 Path *outer_path,
-				 Path *inner_path,
-				 List *hash_clauses,
-				 List *qual_clauses,
-				 List *host_clauses,
+				 GpuHashJoinPath *gpath,
 				 JoinCostWorkspace *workspace)
 {
-	Cost		startup_cost = 0.0;
-	Cost		run_cost = 0.0;
-	double		outer_path_rows = outer_path->rows;
-	double		inner_path_rows = inner_path->rows;
+	Cost		startup_cost;
+	Cost		run_cost;
+	Cost		row_cost;
+	double		num_rows;
 	int			num_gpu_clauses;
 	int			num_cpu_clauses;
 	Size		hashtable_size;
 
 	/* cost of source data */
-	startup_cost += outer_path->startup_cost;
-	run_cost += outer_path->total_cost - outer_path->startup_cost;
-	startup_cost += inner_path->total_cost;
+	startup_cost = outer_path->startup_cost;
+	run_cost = outer_path->total_cost - outer_path->startup_cost;
+	for (i=0; i < gpath->num_inner; i++)
+		startup_cost += gpath->inners[i].innerpath->total_cost;
 
 	/*
 	 * Cost of computing hash function: it is done by CPU right now,
 	 * so we follow the logic in initial_cost_hashjoin().
 	 */
-	num_gpu_clauses = list_length(hash_clauses) + list_length(qual_clauses);
-	num_cpu_clauses = list_length(host_clauses);
-	startup_cost += (cpu_operator_cost * (num_gpu_clauses + num_cpu_clauses)
-					 + cpu_tuple_cost) * inner_path_rows;
+	for (i=0; i < gpath->num_inner; i++)
+	{
+		num_rows = gpath->inners[i].innerpath->rows;
+		num_gpu_clauses = (list_length(gpath->inners[i].hash_clause) +
+						   list_length(gpath->inners[i].qual_clause));
+		num_cpu_clauses = (list_length(gpath->inners[i].host_clause));
+		row_cost = cpu_operator_cost * (num_gpu_clauses +
+										num_cpu_clauses) + cpu_tuple_cost;
+		startup_cost += row_cost * num_rows;
+	}
 
-	/* in addition, it takes setting up cost for GPU/MIC devices  */
+	/* in addition, it takes cost to set up OpenCL device/program */
 	startup_cost += pgstrom_gpu_setup_cost;
 
-	/*
-	 * However, its cost to run outer scan for joinning is much less
-	 * than usual CPU join.
+	/* on the other hands, its cost to run outer scan for joinning
+	 * is much less than usual GPU hash join.
 	 */
-	run_cost += ((pgstrom_gpu_operator_cost * num_gpu_clauses) +
-				 (cpu_operator_cost * num_cpu_clauses)) * outer_path_rows;
+	num_rows = gpath->outerpath->rows;
+	row_cost = (pgstrom_gpu_operator_cost * num_gpu_clauses +
+				cpu_operator_cost * num_cpu_clauses);
+	run_cost += row_cost * num_rows;
 
 	/*
 	 * TODO: we need to pay attention towards joinkey length to copy
@@ -284,15 +306,13 @@ cost_gpuhashjoin(PlannerInfo *root,
 
 	/*
 	 * Estimation of hash table size - we want to keep it less than
-	 * device restricted memory allocation size.
+	 * the device restricted allocation size.
+	 * For safety, half of shmem zone size is considered as a hard
+	 * restriction on planne phase. If hashtable-size would be
+	 * actually bigger, right now, we simply give it up.
 	 */
 	hashtable_size = estimate_hashtable_size(root, hash_clauses,
 											 inner_path_rows);
-	/*
-	 * For safety, half of shmem zone size is considered as a hard
-	 * restriction. If table size would be actually bigger, right
-	 * now, we simply give it up.
-	 */
 	if (hashtable_size > pgstrom_shmem_zone_length() / 2)
 		return false;
 	/*
@@ -365,36 +385,55 @@ static void
 final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 					   JoinCostWorkspace *workspace)
 {
+	Path	   *path = &gpath->cpath.path;
 	Cost		startup_cost = workspace->startup_cost;
 	Cost		run_cost = workspace->run_cost;
-	List	   *hash_clauses = gpath->hash_clauses;
-	List	   *qual_clauses = gpath->qual_clauses;
-	List	   *host_clauses = gpath->host_clauses;
-	double		outer_path_rows = gpath->outerjoinpath->rows;
-	double		inner_path_rows = gpath->innerjoinpath->rows;
 	QualCost	hash_cost;
 	QualCost	qual_cost;
 	QualCost	host_cost;
 	double		hashjointuples;
 
-	/* Mark the path with the correct row estimate */
-	if (gpath->cpath.path.param_info)
-        gpath->cpath.path.rows = gpath->cpath.path.param_info->ppi_rows;
-    else
-        gpath->cpath.path.rows = gpath->cpath.path.parent->rows;
+	/* Mark the path with correct row estimation */
+	if (path->param_info)
+		path->rows = path->param_info->ppi_rows;
+	else
+		path->rows = path->parent->rows;
 
 	/* add disable_cost, if hash_join is not prefered */
 	if (!enable_hashjoin)
 		startup_cost += disable_cost;
 
-	/*
-	 * Compute cost of the hash, qual and host clauses separately.
-	 */
-	cost_qual_eval(&hash_cost, hash_clauses, root);
-	cost_qual_eval(&qual_cost, qual_clauses, root);
-	cost_qual_eval(&host_cost, host_clauses, root);
+	memset(&hash_cost, 0, sizeof(QualCost));
+	memset(&qual_cost, 0, sizeof(QualCost));
+	memset(&host_cost, 0, sizeof(QualCost));
 
-	/* adjust cost according to GPU/CPU ratio */
+	/* Compute cost of the hash, qual and host clauses */
+	for (i=0; i < gpath->num_inner; i++)
+	{
+		List	   *hash_clause = gpath->inners[i].hash_clause;
+		List	   *qual_clause = gpath->inners[i].qual_clause;
+		List	   *host_clause = gpath->inners[i].host_clause;
+		double		outer_path_rows = gpath->outerpath->rows;
+		double		inner_path_rows = gpath->inners[i].innerpath->rows;
+		QualCost	temp;
+
+		cost_qual_eval(&temp, hash_clause, root);
+		hash_cost.startup += temp.startup;
+		hash_cost.per_tuple += temp.per_tuple;
+
+		cost_qual_eval(&temp, qual_clause, root);
+		qual_cost.startup += temp.startup;
+		qual_cost.per_tuple += temp.per_tuple;
+
+		cost_qual_eval(&temp, host_clause, root);
+		host_cost.startup += temp.startup;
+		host_cost.per_tuple += temp.per_tuple;
+	}
+	/*
+	 * Because cost_qual_eval returns cost value that assumes CPU
+	 * execution, we need to adjust its ratio according to the score
+	 * of GPU execution to CPU.
+	 */
 	hash_cost.per_tuple *= (pgstrom_gpu_operator_cost / cpu_operator_cost);
 	qual_cost.per_tuple *= (pgstrom_gpu_operator_cost / cpu_operator_cost);
 
@@ -424,58 +463,14 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 	run_cost += (cpu_tuple_cost + host_cost.per_tuple) * hashjointuples;
 
 	gpath->cpath.path.startup_cost = startup_cost;
-	gpath->cpath.path.total_cost = startup_cost; // + run_cost;
+	gpath->cpath.path.total_cost = startup_cost + run_cost;
 }
 
-static CustomPath *
-gpuhashjoin_create_path(PlannerInfo *root,
-						RelOptInfo *joinrel,
-						JoinType jointype,
-						SpecialJoinInfo *sjinfo,
-						Path *outer_path,
-						Path *inner_path,
-						Relids required_outer,
-						List *hash_clauses,
-						List *qual_clauses,
-						List *host_clauses,
-						JoinCostWorkspace *workspace)
-{
-	GpuHashJoinPath	   *gpath = palloc0(sizeof(GpuHashJoinPath));
-
-	NodeSetTag(gpath, T_CustomPath);
-	gpath->cpath.methods = &gpuhashjoin_path_methods;
-	gpath->cpath.path.pathtype = T_CustomPlan;
-	gpath->cpath.path.parent = joinrel;
-	gpath->cpath.path.param_info =
-		get_joinrel_parampathinfo(root,
-								  joinrel,
-								  outer_path,
-								  inner_path,
-								  sjinfo,
-								  required_outer,
-								  &host_clauses);
-	gpath->cpath.path.pathkeys = NIL;
-	gpath->jointype = jointype;
-	gpath->outerjoinpath = outer_path;
-	gpath->innerjoinpath = inner_path;
-	gpath->hash_clauses = hash_clauses;
-	gpath->qual_clauses = qual_clauses;
-	gpath->host_clauses = host_clauses;
-
-	final_cost_gpuhashjoin(root, gpath, workspace);
-#if 0
-	elog(INFO, "cost {startup: %f, total: %f} inner-rows: %f, outer-rows: %f",
-		 gpath->cpath.path.startup_cost,
-		 gpath->cpath.path.total_cost,
-		 inner_path->rows,
-		 outer_path->rows);
-	//elog(INFO, "hash_clauses = %s", nodeToString(hash_clauses));
-	//elog(INFO, "qual_clauses = %s", nodeToString(qual_clauses));
-	//elog(INFO, "host_clauses = %s", nodeToString(host_clauses));
-#endif
-	return &gpath->cpath;
-}
-
+/*
+ * gpuhashjoin_add_path
+ *
+ * callback function invoked to check up GpuHashJoinPath.
+ */
 static void
 gpuhashjoin_add_path(PlannerInfo *root,
 					 RelOptInfo *joinrel,
@@ -489,10 +484,14 @@ gpuhashjoin_add_path(PlannerInfo *root,
 					 Relids required_outer,
 					 List *hashclauses)
 {
-	List	   *hash_clauses = NIL;
-	List	   *qual_clauses = NIL;
-	List	   *host_clauses = NIL;
-	ListCell   *cell;
+	GpuHashJoinPath	*gpath_new;
+	ParamPathInfo  *ppinfo;
+	List		   *hash_clause = NIL;
+	List		   *qual_clause = NIL;
+	List		   *host_clause = NIL;
+	bool			host_with_volatile = false;
+	int				num_inner;
+	ListCell	   *cell;
 	JoinCostWorkspace gpu_workspace;
 
 	/* calls secondary module if exists */
@@ -518,6 +517,20 @@ gpuhashjoin_add_path(PlannerInfo *root,
 	if (jointype != JOIN_INNER)
 		return;
 
+	/*
+	 * make a ParamPathInfo of this GpuHashJoin, according to the standard
+	 * manner.
+	 * XXX - needs to ensure whether it is actually harmless in case when
+	 * multiple inner relations are planned to be cached.
+	 */
+	ppinfo = get_joinrel_parampathinfo(root,
+									   joinrel,
+									   outer_path,
+									   inner_path,
+									   sjinfo,
+									   required_outer,
+									   &restrict_clauses);
+
 	/* reasonable portion of hash-clauses can be runnable on GPU */
 	foreach (cell, restrict_clauses)
 	{
@@ -526,41 +539,115 @@ gpuhashjoin_add_path(PlannerInfo *root,
 		if (pgstrom_codegen_available_expression(rinfo->clause))
 		{
 			if (list_member_ptr(hashclauses, rinfo))
-				hash_clauses = lappend(hash_clauses, rinfo);
+				hash_clause = lappend(hash_clause, rinfo);
 			else
-				qual_clauses = lappend(qual_clauses, rinfo);
+				qual_clause = lappend(qual_clause, rinfo);
 		}
 		else
-			host_clauses = lappend(host_clauses, rinfo);
+		{
+			host_clause = lappend(host_clause, rinfo);
+			if (!host_with_volatile &&
+				contain_volatile_functions((Node *) rinfo->clause))
+				host_with_volatile = true;
+		}
 	}
-	if (hash_clauses == NIL)
-		return;	/* no need to run it on GPU */
+	if (hash_clause == NIL)
+		return;		/* no need to run it on GPU */
 
-	/* cost estimation by gpuhashjoin */
-	if (!cost_gpuhashjoin(root, jointype, outer_path, inner_path,
-						  hash_clauses, qual_clauses, host_clauses,
-						  &gpu_workspace))
-		return;	/* obviously unavailable to run it on GPU */
+	/*
+	 * creation of gpuhashjoin path, if no pull-up
+	 */
+	gpath_new = palloc0(offsetof(GpuHashJoinPath, inners[1]));
+	gpath_new->cpath.path.type = T_CustomPath;
+	gpath_new->cpath.path.pathtype = T_CustomPlan;
+	gpath_new->cpath.path.parent = joinrel;
+	gpath_new->cpath.path.param_info = ppinfo;
+	gpath_new->cpath.path.pathkeys = NIL;
+	/* other cost fields of Path shall be set later */
+	gpath_new->cpath.methods = &gpuhashjoin_path_methods;
+	gpath_new->num_inner = gpath_sub->num_inner + 1;
+	gpath_new->outerpath = gpath_sub->outerpath;
+	gpath_new->inners[0].innerpath = innerpath;
+	gpath_new->inners[0].jointype = jointype;
+	gpath_new->inners[0].hash_clause = hash_clause;
+	gpath_new->inners[0].qual_clause = qual_clause;
+	gpath_new->inners[0].host_clause = host_clause;
+	gpath_new->inners[0].host_with_volatile = host_with_volatile;
 
-	if (add_path_precheck(joinrel,
-						  gpu_workspace.startup_cost,
-						  gpu_workspace.total_cost,
-						  NULL, required_outer))
+	/* cost estimation and check availability */
+	if (cost_gpuhashjoin(root, gpath_new, &gpu_workspace))
 	{
-		CustomPath *pathnode = gpuhashjoin_create_path(root,
-													   joinrel,
-													   jointype,
-													   sjinfo,
-													   outer_path,
-													   inner_path,
-													   required_outer,
-													   hash_clauses,
-													   qual_clauses,
-													   host_clauses,
-													   &gpu_workspace);
-		if (pathnode)
-			add_path(joinrel, &pathnode->path);
+		if (add_path_precheck(joinrel,
+							  gpu_workspace.startup_cost,
+							  gpu_workspace.total_cost,
+							  NULL, required_outer))
+		{
+			final_cost_gpuhashjoin(root, gpath_new, &gpu_workspace);
+			add_path(joinrel, &gpath_new->cpath.path);
+		}
 	}
+
+	/*
+     * creation of gpuhashjoin path using sub-inner pull-up, if available
+     */
+	if (path_is_gpuhashjoin(outerpath))
+	{
+		GpuHashJoinPath	   *gpath_sub = (GpuHashJoinPath *) outerpath;
+		int		num_inner = gpath_sub->num_inner;
+
+		/*
+		 * XXX - needs additional checks whether we can pull-up underlying
+		 * inner GpuHashJoin.
+		 * For example, volatile function should not exists on, except for
+		 * the last inner relation.
+		 * In case of outer join (to be supported in the future), it should
+		 * not have host_clauses expect for the last inner relation.
+		 *
+		 * And so on...
+		 */
+		if (host_with_volatile &&
+			gpath_sub->inners[num_inner - 1].host_with_volatile)
+			goto skip;
+
+		gpath_new = palloc0(offsetof(GpuHashJoinPath, inners[num_inner + 1]));
+		gpath_new->cpath.path.type = T_CustomPath;
+		gpath_new->cpath.path.pathtype = T_CustomPlan;
+		gpath_new->cpath.path.parent = joinrel;
+		gpath_new->cpath.path.param_info = ppinfo;
+		gpath_new->cpath.path.pathkeys = NIL;
+		/* other cost fields of Path shall be set later */
+		gpath_new->cpath.methods = &gpuhashjoin_path_methods;
+		gpath_new->num_inner = gpath_sub->num_inner + 1;
+		gpath_new->outerpath = gpath_sub->outerpath;
+		memcpy(gpath_new->inners,
+			   gpath_sub->inners,
+			   offsetof(GpuHashJoinPath, inners[num_inner]) -
+			   offsetof(GpuHashJoinPath, inners[0]));
+		gpath_new->inners[num_inner].innerpath = innerpath;
+		gpath_new->inners[num_inner].jointype = jointype;
+		gpath_new->inners[num_inner].hash_clause = hash_clause;
+		gpath_new->inners[num_inner].qual_clause = qual_clause;
+		gpath_new->inners[num_inner].host_clause = host_clause;
+		gpath_new->inners[num_inner].host_with_volatile = host_with_volatile;
+							
+		/* cost estimation and check availability */
+		if (cost_gpuhashjoin(root, gpath_new, &gpu_workspace))
+		{
+			if (add_path_precheck(joinrel,
+								  gpu_workspace.startup_cost,
+								  gpu_workspace.total_cost,
+								  NULL, required_outer))
+			{
+				final_cost_gpuhashjoin(root, gpath_new, &gpu_workspace);
+				add_path(joinrel, &gpath_new->cpath.path);
+			}
+		}
+	}
+skip:
+	return;
+
+
+
 }
 
 static CustomPlan *

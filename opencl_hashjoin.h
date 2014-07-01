@@ -126,7 +126,7 @@ typedef struct
 	cl_uint			length;	/* total length of multi-hashtable */
 	cl_uint			ntables;/* number of hash tables (= num of inner rels) */
 	cl_uint			htbl_offset[FLEXIBLE_ARRAY_MEMBER];
-} kern_gpuhash;
+} kern_multihash;
 
 #define KERN_HASHTABLE(kgpuhash, index)								\
 	((__global kern_hashtable *)((__global char *)(kgpuhash) +		\
