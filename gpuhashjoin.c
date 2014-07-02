@@ -17,6 +17,7 @@
 #include "nodes/nodeFuncs.h"
 #include "nodes/relation.h"
 #include "nodes/plannodes.h"
+#include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
@@ -37,12 +38,13 @@
 static add_hashjoin_path_hook_type	add_hashjoin_path_next;
 static CustomPathMethods		gpuhashjoin_path_methods;
 static CustomPlanMethods		gpuhashjoin_plan_methods;
+static CustomPlanMethods		multihash_plan_methods;
 
 typedef struct
 {
 	CustomPath		cpath;
-	int				num_inner;		/* number of inner relations */
-	Path		   *outerpath;		/* outer path (always one) */
+	Path		   *outerpath;	/* outer path (always one) */
+	int				num_rels;	/* number of inner relations */
 	struct {
 		Path	   *innerpath;
 		JoinType	jointype;
@@ -56,22 +58,30 @@ typedef struct
 typedef struct
 {
 	CustomPlan	cplan;
-	JoinType	jointype;
 	const char *kernel_source;
 	int			extra_flags;
 	List	   *used_params;	/* template for kparams */
-	List	   *used_vars;		/* var used in hash/qual clauses */
-	List	   *pscan_tlist;	/* pseudo-scan target-list */
-	List	   *pscan_resnums;	/* source resno of pseudo-scan tlist.
-								 * positive number, if outer source */
-	List	   *inner_resnums;	/* resource number to be fetched */
-	List	   *inner_offsets;	/* offset to be placed on hash-entry */
-	Size		inner_fixlen;	/* fixed length portion of hash-entry */
-	TupleTableSlot *pscan_slot;	/* tuple-slot of pscan */
-	List	   *hash_clauses;	/* expression form of hash_clauses */
-	List	   *qual_clauses;	/* expression form of qual_clauses */
-	Size		entry_width;	/* average width of hash_entry */
+	List	   *used_vars;		/* varnode used in hash/qual clauses */
+	List	   *pscan_tlist;	/* target-list of pseudo materialized scan */
+	List	   *varsrc_list;	/* list of source varnode. varno==0 means
+								 * reference to the outer relation, varno > 0
+								 * means reference to the (varno-1)th inner
+								 * relation. */
 } GpuHashJoin;
+
+typedef struct
+{
+	CustomPlan		cplan;
+	int				num_rels;		/* number of inner plans */
+	struct {
+		Plan	   *innerplan;		/* plannode of this inner scan */
+		JoinType	jointype;		/* join-type */
+		List	   *hash_clause;	/* expression form of hash_clause */
+		List	   *qual_clause;	/* expression form of qual_clause */
+		List	   *host_clause;	/* expression form of host_clause */
+		List	   *key_vars;		/* list of key variables */
+	} inners[FLEXIBLE_ARRAY_MEMBER];
+} MultiHash;
 
 typedef struct
 {
@@ -115,6 +125,8 @@ static struct {
 
 /* declaration of static functions */
 static void clserv_process_gpuhashjoin(pgstrom_message *message);
+static MultiHash *multihash_create_plan(PlannerInfo *root,
+										GpuHashJoinPath *gpath);
 
 /*
  * path_is_gpuhashjoin - returns true, if supplied pathnode is gpuhashjoin
@@ -138,9 +150,9 @@ path_is_gpuhashjoin(Path *pathnode)
  */
 typedef struct
 {
-	Relids	relids;	/* relids located on the inner loop */
-	int		natts;	/* roughly estimated number of variables */
-	int		width;	/* roughly estimated width of referenced variables */
+	Relids	relids;		/* relids located on the inner loop */
+	int		nkeys;		/* roughly estimated number of key variables */
+	int		width;		/* roughly estimated width of referenced variables */
 } estimate_hashtable_size_context;
 
 static bool
@@ -155,12 +167,11 @@ estimate_hashtable_size_walker(Node *node,
 
 		if (bms_is_member(var->varno, context->relids))
 		{
-			int16	typlen;
-			bool	typbyval;
-			char	typalign;
+			int16		typlen;
+			bool		typbyval;
+			char		typalign;
 
-			/* number of attributes affects NULL bitmap */
-			context->natts++;
+			context->nkeys++;
 
 			get_typlenbyvalalign(var->vartype, &typlen, &typbyval, &typalign);
 			if (typlen > 0)
@@ -219,31 +230,32 @@ estimate_hashtable_size(PlannerInfo *root, GpuHashJoinPath *gpath)
 
 	/* portion of kern_multihash */
 	hashtable_size = MAXALIGN(offsetof(kern_multihash,
-									   htbl_offset[gpath->num_inner]));
-	for (i=0; i < gpath->num_inner; i++)
+									   htbl_offset[gpath->num_rels]));
+	for (i=0; i < gpath->num_rels; i++)
 	{
 		Path	   *ipath = gpath->inners[i].innerpath;
 		List	   *hash_clause = gpath->inners[i].hash_clause;
-		double		ntuples = ipath->nrows;
+		double		ntuples = ipath->rows;
 
 		/* force a plausible relation size if no information */
 		if (ntuples <= 1000.0)
 			ntuples = 1000.0;
 
 		/* walks on the join clauses to ensure var's width */
-		context->relids = ipath->parent->relids;
-		context->natts = 0;
-		context->width = 0;
+		context.relids = ipath->parent->relids;
+		context.nkeys = 0;
+		context.width = 0;
 		estimate_hashtable_size_walker((Node *)hash_clause, &context);
 
 		entry_size = Max(INTALIGN(sizeof(kern_hashentry)),
 						 INTALIGN(offsetof(kern_hashentry,
-								  keydata[context.natts / BITS_PER_BYTE])));
+								  keydata[context.nkeys / BITS_PER_BYTE])));
 		entry_size = INTALIGN(entry_size + context.width);
 
-		hashtable_size += MAXALIGN(kern_hashtable, colmeta[context.natts]);
-		hashtable_size += entry_size * (Size)ntuples;
-		hashtable_size = MAXALIGN(table_size);
+		hashtable_size += (MAXALIGN(offsetof(kern_hashtable,
+											 colmeta[context.nkeys])) +
+						   MAXALIGN(sizeof(cl_uint) * (Size)ntuples) +
+						   MAXALIGN(entry_size * (Size)ntuples));
 	}
 	return hashtable_size;
 }
@@ -258,6 +270,7 @@ cost_gpuhashjoin(PlannerInfo *root,
 				 GpuHashJoinPath *gpath,
 				 JoinCostWorkspace *workspace)
 {
+	Path	   *outer_path = gpath->outerpath;
 	Cost		startup_cost;
 	Cost		run_cost;
 	Cost		row_cost;
@@ -265,18 +278,19 @@ cost_gpuhashjoin(PlannerInfo *root,
 	int			num_gpu_clauses;
 	int			num_cpu_clauses;
 	Size		hashtable_size;
+	int			i;
 
 	/* cost of source data */
 	startup_cost = outer_path->startup_cost;
 	run_cost = outer_path->total_cost - outer_path->startup_cost;
-	for (i=0; i < gpath->num_inner; i++)
+	for (i=0; i < gpath->num_rels; i++)
 		startup_cost += gpath->inners[i].innerpath->total_cost;
 
 	/*
 	 * Cost of computing hash function: it is done by CPU right now,
 	 * so we follow the logic in initial_cost_hashjoin().
 	 */
-	for (i=0; i < gpath->num_inner; i++)
+	for (i=0; i < gpath->num_rels; i++)
 	{
 		num_rows = gpath->inners[i].innerpath->rows;
 		num_gpu_clauses = (list_length(gpath->inners[i].hash_clause) +
@@ -311,8 +325,7 @@ cost_gpuhashjoin(PlannerInfo *root,
 	 * restriction on planne phase. If hashtable-size would be
 	 * actually bigger, right now, we simply give it up.
 	 */
-	hashtable_size = estimate_hashtable_size(root, hash_clauses,
-											 inner_path_rows);
+	hashtable_size = estimate_hashtable_size(root, gpath);
 	if (hashtable_size > pgstrom_shmem_zone_length() / 2)
 		return false;
 	/*
@@ -333,53 +346,54 @@ cost_gpuhashjoin(PlannerInfo *root,
  * according to GpuHashJoinPath.
  */
 static double
-approx_tuple_count(PlannerInfo *root, Path *outer_path, Path *inner_path,
-				   List *hash_clauses, List *qual_clauses)
+approx_tuple_count(PlannerInfo *root, GpuHashJoinPath *gpath)
 {
-	double		tuples;
-	double		outer_tuples = outer_path->rows;
-	double		inner_tuples = inner_path->rows;
-	SpecialJoinInfo sjinfo;
+	Path	   *outer_path = gpath->outerpath;
 	Selectivity selec = 1.0;
-	ListCell	*l;
+	double		tuples = outer_path->rows;
+	int			i;
 
-	/*
-	 * Make up a SpecialJoinInfo for JOIN_INNER semantics.
-	 */
-	sjinfo.type = T_SpecialJoinInfo;
-	sjinfo.min_lefthand  = outer_path->parent->relids;
-	sjinfo.min_righthand = inner_path->parent->relids;
-	sjinfo.syn_lefthand  = outer_path->parent->relids;
-	sjinfo.syn_righthand = inner_path->parent->relids;
-	sjinfo.jointype = JOIN_INNER;
-	/* we don't bother trying to make the remaining fields valid */
-	sjinfo.lhs_strict = false;
-	sjinfo.delay_upper_joins = false;
-	sjinfo.join_quals = NIL;
-
-	/* Get the approximate selectivity */
-	foreach (l, hash_clauses)
+	for (i=0; i < gpath->num_rels; i++)
 	{
-		Node	   *qual = (Node *) lfirst(l);
+		Path	   *inner_path = gpath->inners[i].innerpath;
+		List	   *hash_clause = gpath->inners[i].hash_clause;
+		List	   *qual_clause = gpath->inners[i].qual_clause;
+		double		inner_tuples = inner_path->rows;
+		SpecialJoinInfo sjinfo;
+		ListCell   *cell;
 
-		/* Note that clause_selectivity will be able to cache its result */
-		selec *= clause_selectivity(root, qual, 0, JOIN_INNER, &sjinfo);
+		/* make up a SpecialJoinInfo for JOIN_INNER semantics. */
+		sjinfo.type = T_SpecialJoinInfo;
+		sjinfo.min_lefthand  = outer_path->parent->relids;
+		sjinfo.min_righthand = inner_path->parent->relids;
+		sjinfo.syn_lefthand  = outer_path->parent->relids;
+		sjinfo.syn_righthand = inner_path->parent->relids;
+		sjinfo.jointype = JOIN_INNER;
+		/* we don't bother trying to make the remaining fields valid */
+		sjinfo.lhs_strict = false;
+		sjinfo.delay_upper_joins = false;
+		sjinfo.join_quals = NIL;
+
+		/* Get the approximate selectivity */
+		foreach (cell, hash_clause)
+		{
+			Node   *qual = (Node *) lfirst(cell);
+
+			/* Note that clause_selectivity can cache its result */
+			selec *= clause_selectivity(root, qual, 0, JOIN_INNER, &sjinfo);
+		}
+		foreach (cell, qual_clause)
+		{
+			Node   *qual = (Node *) lfirst(cell);
+
+			/* Note that clause_selectivity can cache its result */
+			selec *= clause_selectivity(root, qual, 0, JOIN_INNER, &sjinfo);
+		}
+		/* Apply it to the input relation sizes */
+		tuples *= selec * inner_tuples;
 	}
-
-	foreach (l, qual_clauses)
-	{
-		Node	   *qual = (Node *) lfirst(l);
-
-		/* Note that clause_selectivity will be able to cache its result */
-		selec *= clause_selectivity(root, qual, 0, JOIN_INNER, &sjinfo);
-	}
-	/* Apply it to the input relation sizes */
-	tuples = selec * outer_tuples * inner_tuples;
-
 	return clamp_row_est(tuples);
 }
-
-
 
 static void
 final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
@@ -392,6 +406,7 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 	QualCost	qual_cost;
 	QualCost	host_cost;
 	double		hashjointuples;
+	int			i;
 
 	/* Mark the path with correct row estimation */
 	if (path->param_info)
@@ -403,59 +418,44 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 	if (!enable_hashjoin)
 		startup_cost += disable_cost;
 
-	memset(&hash_cost, 0, sizeof(QualCost));
-	memset(&qual_cost, 0, sizeof(QualCost));
-	memset(&host_cost, 0, sizeof(QualCost));
-
 	/* Compute cost of the hash, qual and host clauses */
-	for (i=0; i < gpath->num_inner; i++)
+	for (i=0; i < gpath->num_rels; i++)
 	{
 		List	   *hash_clause = gpath->inners[i].hash_clause;
 		List	   *qual_clause = gpath->inners[i].qual_clause;
 		List	   *host_clause = gpath->inners[i].host_clause;
 		double		outer_path_rows = gpath->outerpath->rows;
 		double		inner_path_rows = gpath->inners[i].innerpath->rows;
-		QualCost	temp;
 
-		cost_qual_eval(&temp, hash_clause, root);
-		hash_cost.startup += temp.startup;
-		hash_cost.per_tuple += temp.per_tuple;
+		cost_qual_eval(&hash_cost, hash_clause, root);
+		cost_qual_eval(&qual_cost, qual_clause, root);
+		cost_qual_eval(&host_cost, host_clause, root);
+		/*
+		 * Because cost_qual_eval returns cost value that assumes CPU
+		 * execution, we need to adjust its ratio according to the score
+		 * of GPU execution to CPU.
+		 */
+		hash_cost.per_tuple *= (pgstrom_gpu_operator_cost / cpu_operator_cost);
+		qual_cost.per_tuple *= (pgstrom_gpu_operator_cost / cpu_operator_cost);
 
-		cost_qual_eval(&temp, qual_clause, root);
-		qual_cost.startup += temp.startup;
-		qual_cost.per_tuple += temp.per_tuple;
-
-		cost_qual_eval(&temp, host_clause, root);
-		host_cost.startup += temp.startup;
-		host_cost.per_tuple += temp.per_tuple;
+		/*
+		 * The number of comparison according to hash_clauses and qual_clauses
+		 * are the number of outer tuples, but right now PG-Strom does not
+		 * support to divide hash table
+		 */
+		startup_cost += hash_cost.startup + qual_cost.startup;
+		run_cost += ((hash_cost.per_tuple + qual_cost.per_tuple)
+					 * outer_path_rows
+					 * clamp_row_est(inner_path_rows) * 0.5);
 	}
-	/*
-	 * Because cost_qual_eval returns cost value that assumes CPU
-	 * execution, we need to adjust its ratio according to the score
-	 * of GPU execution to CPU.
-	 */
-	hash_cost.per_tuple *= (pgstrom_gpu_operator_cost / cpu_operator_cost);
-	qual_cost.per_tuple *= (pgstrom_gpu_operator_cost / cpu_operator_cost);
 
-	/*
-	 * The number of comparison according to hash_clauses and qual_clauses
-	 * are the number of outer tuples, but right now PG-Strom does not
-	 * support to divide hash table
-	 */
-	startup_cost += hash_cost.startup + qual_cost.startup;
-	run_cost += ((hash_cost.per_tuple + qual_cost.per_tuple)
-				 * outer_path_rows
-				 * clamp_row_est(inner_path_rows) * 0.5);
 	/*
 	 * Get approx # tuples passing the hashquals.  We use
 	 * approx_tuple_count here because we need an estimate done with
 	 * JOIN_INNER semantics.
 	 */
-	hashjointuples = approx_tuple_count(root,
-										gpath->outerjoinpath,
-										gpath->innerjoinpath,
-										hash_clauses,
-										qual_clauses);
+	hashjointuples = approx_tuple_count(root, gpath);
+
 	/*
 	 * Also add cost for qualifiers to be run on host
 	 */
@@ -490,7 +490,6 @@ gpuhashjoin_add_path(PlannerInfo *root,
 	List		   *qual_clause = NIL;
 	List		   *host_clause = NIL;
 	bool			host_with_volatile = false;
-	int				num_inner;
 	ListCell	   *cell;
 	JoinCostWorkspace gpu_workspace;
 
@@ -565,9 +564,9 @@ gpuhashjoin_add_path(PlannerInfo *root,
 	gpath_new->cpath.path.pathkeys = NIL;
 	/* other cost fields of Path shall be set later */
 	gpath_new->cpath.methods = &gpuhashjoin_path_methods;
-	gpath_new->num_inner = gpath_sub->num_inner + 1;
-	gpath_new->outerpath = gpath_sub->outerpath;
-	gpath_new->inners[0].innerpath = innerpath;
+	gpath_new->num_rels = 1;
+	gpath_new->outerpath = outer_path;
+	gpath_new->inners[0].innerpath = inner_path;
 	gpath_new->inners[0].jointype = jointype;
 	gpath_new->inners[0].hash_clause = hash_clause;
 	gpath_new->inners[0].qual_clause = qual_clause;
@@ -590,10 +589,10 @@ gpuhashjoin_add_path(PlannerInfo *root,
 	/*
      * creation of gpuhashjoin path using sub-inner pull-up, if available
      */
-	if (path_is_gpuhashjoin(outerpath))
+	if (path_is_gpuhashjoin(outer_path))
 	{
-		GpuHashJoinPath	   *gpath_sub = (GpuHashJoinPath *) outerpath;
-		int		num_inner = gpath_sub->num_inner;
+		GpuHashJoinPath	   *gpath_sub = (GpuHashJoinPath *) outer_path;
+		int		num_rels = gpath_sub->num_rels;
 
 		/*
 		 * XXX - needs additional checks whether we can pull-up underlying
@@ -606,10 +605,10 @@ gpuhashjoin_add_path(PlannerInfo *root,
 		 * And so on...
 		 */
 		if (host_with_volatile &&
-			gpath_sub->inners[num_inner - 1].host_with_volatile)
-			goto skip;
+			gpath_sub->inners[num_rels - 1].host_with_volatile)
+			return;
 
-		gpath_new = palloc0(offsetof(GpuHashJoinPath, inners[num_inner + 1]));
+		gpath_new = palloc0(offsetof(GpuHashJoinPath, inners[num_rels + 1]));
 		gpath_new->cpath.path.type = T_CustomPath;
 		gpath_new->cpath.path.pathtype = T_CustomPlan;
 		gpath_new->cpath.path.parent = joinrel;
@@ -617,18 +616,18 @@ gpuhashjoin_add_path(PlannerInfo *root,
 		gpath_new->cpath.path.pathkeys = NIL;
 		/* other cost fields of Path shall be set later */
 		gpath_new->cpath.methods = &gpuhashjoin_path_methods;
-		gpath_new->num_inner = gpath_sub->num_inner + 1;
+		gpath_new->num_rels = gpath_sub->num_rels + 1;
 		gpath_new->outerpath = gpath_sub->outerpath;
 		memcpy(gpath_new->inners,
 			   gpath_sub->inners,
-			   offsetof(GpuHashJoinPath, inners[num_inner]) -
+			   offsetof(GpuHashJoinPath, inners[num_rels]) -
 			   offsetof(GpuHashJoinPath, inners[0]));
-		gpath_new->inners[num_inner].innerpath = innerpath;
-		gpath_new->inners[num_inner].jointype = jointype;
-		gpath_new->inners[num_inner].hash_clause = hash_clause;
-		gpath_new->inners[num_inner].qual_clause = qual_clause;
-		gpath_new->inners[num_inner].host_clause = host_clause;
-		gpath_new->inners[num_inner].host_with_volatile = host_with_volatile;
+		gpath_new->inners[num_rels].innerpath = inner_path;
+		gpath_new->inners[num_rels].jointype = jointype;
+		gpath_new->inners[num_rels].hash_clause = hash_clause;
+		gpath_new->inners[num_rels].qual_clause = qual_clause;
+		gpath_new->inners[num_rels].host_clause = host_clause;
+		gpath_new->inners[num_rels].host_with_volatile = host_with_volatile;
 							
 		/* cost estimation and check availability */
 		if (cost_gpuhashjoin(root, gpath_new, &gpu_workspace))
@@ -643,98 +642,74 @@ gpuhashjoin_add_path(PlannerInfo *root,
 			}
 		}
 	}
-skip:
-	return;
-
-
-
 }
 
 static CustomPlan *
 gpuhashjoin_create_plan(PlannerInfo *root, CustomPath *best_path)
 {
 	GpuHashJoinPath *gpath = (GpuHashJoinPath *)best_path;
-	GpuHashJoin	*ghj;
-	List	   *tlist = build_path_tlist(root, &best_path->path);
-	Path	   *inner_path = gpath->innerjoinpath;
-	Path	   *outer_path = gpath->outerjoinpath;
-	Plan	   *inner_plan = create_plan_recurse(root, inner_path);
-	Plan	   *outer_plan = create_plan_recurse(root, outer_path);
-	List	   *hash_clauses;
-	List	   *qual_clauses;
-	List	   *host_clauses;
+	MultiHash   *mhash = multihash_create_plan(root, gpath);
+	Plan		*outer_plan = create_plan_recurse(root, gpath->outerpath);
+	List		*tlist = build_path_tlist(root, &best_path->path);
+	GpuHashJoin *ghjoin;
 
-	/*
-	 * Sort clauses into best execution order, even though it's
-	 * uncertain whether it makes sense in GPU execution...
-	 */
-	hash_clauses = order_qual_clauses(root, gpath->hash_clauses);
-	qual_clauses = order_qual_clauses(root, gpath->qual_clauses);
-	host_clauses = order_qual_clauses(root, gpath->host_clauses);
+	ghjoin = palloc0(sizeof(GpuHashJoin));
+	NodeSetTag(ghjoin, T_CustomPlan);
+    ghjoin->cplan.methods = &gpuhashjoin_plan_methods;
+	ghjoin->cplan.plan.targetlist = tlist;
+	ghjoin->cplan.plan.qual = NIL;
+	outerPlan(ghjoin) = outer_plan;
+	innerPlan(ghjoin) = (Plan *) mhash;
 
-	/*
-	 * Get plan expression form
-	 */
-	hash_clauses = extract_actual_clauses(hash_clauses, false);
-	qual_clauses = extract_actual_clauses(qual_clauses, false);
-	host_clauses = extract_actual_clauses(host_clauses, false);
-
-	/*
-	 * Replace any outer-relation variables with nestloop params.
-	 * There should not be any in the hash_ or qual_clauses
-	 */
-	if (best_path->path.param_info)
-	{
-		host_clauses = (List *)
-			replace_nestloop_params(root, (Node *)host_clauses);
-	}
-
-	/*
-	 * Create a GpuHashJoin node; inherited from CustomPlan
-	 */
-	ghj = palloc0(sizeof(GpuHashJoin));
-	NodeSetTag(ghj, T_CustomPlan);
-	ghj->cplan.methods = &gpuhashjoin_plan_methods;
-	ghj->cplan.plan.targetlist = tlist;
-	ghj->cplan.plan.qual = host_clauses;
-	outerPlan(ghj) = outer_plan;
-	innerPlan(ghj) = inner_plan;
-	ghj->jointype = gpath->jointype;
-	ghj->hash_clauses = hash_clauses;
-	ghj->qual_clauses = qual_clauses;
-	/* rest of fields are set later */
-
-	return &ghj->cplan;
+	return &ghjoin->cplan;
 }
 
 static void
 gpuhashjoin_textout_path(StringInfo str, Node *node)
 {
-	GpuHashJoinPath *pathnode = (GpuHashJoinPath *) node;
+	GpuHashJoinPath *gpath = (GpuHashJoinPath *) node;
 	char	   *temp;
+	int			i;
 
-	/* jointype */
-	appendStringInfo(str, " :jointype %d", (int)pathnode->jointype);
+	/* outerpath */
+	temp = nodeToString(gpath->outerpath);
+	appendStringInfo(str, " :outerpath %s", temp);
 
-	/* outerjoinpath */
-	temp = nodeToString(pathnode->outerjoinpath);
-	appendStringInfo(str, " :outerjoinpath %s", temp);
+	/* num_rels */
+	appendStringInfo(str, " :num_rels %d", gpath->num_rels);
 
-	/* innerjoinpath */
-	temp = nodeToString(pathnode->innerjoinpath);
-	appendStringInfo(str, " :innerjoinpath %s", temp);
+	/* inners */
+	appendStringInfo(str, " :num_rels (");
+	for (i=0; i < gpath->num_rels; i++)
+	{
+		appendStringInfo(str, "{");
+		/* innerpath */
+		temp = nodeToString(gpath->inners[i].innerpath);
+		appendStringInfo(str, " :innerpath %s", temp);
 
-	/* hash_clauses */
-	temp = nodeToString(pathnode->hash_clauses);
-	appendStringInfo(str, " :hash_clauses %s", temp);
+		/* jointype */
+		appendStringInfo(str, " :jointype %d",
+						 (int)gpath->inners[i].jointype);
 
-	/* qual_clauses */
-	temp = nodeToString(pathnode->qual_clauses);
-	appendStringInfo(str, " :qual_clauses %s", temp);
+		/* hash_clause */
+		temp = nodeToString(gpath->inners[i].hash_clause);
+		appendStringInfo(str, " :hash_clause %s", temp);
 
-	/* host_clauses */
-	temp = nodeToString(pathnode->host_clauses);
-	appendStringInfo(str, " :host_clauses %s", temp);
+		/* qual_clause */
+		temp = nodeToString(gpath->inners[i].qual_clause);
+		appendStringInfo(str, " :qual_clause %s", temp);
+
+		/* host_clause */
+		temp = nodeToString(gpath->inners[i].host_clause);
+		appendStringInfo(str, " :host_clause %s", temp);
+
+		/* host_with_volatile */
+		temp = gpath->inners[i].host_with_volatile ? "true" : "false";
+		appendStringInfo(str, " :host_with_volatile %s", temp);
+
+		appendStringInfo(str, "}");		
+	}
+	appendStringInfo(str, ")");
 }
 
 /*
@@ -1118,7 +1093,7 @@ gpuhashjoin_codegen(PlannerInfo *root,
 					 "%s%s%s%s",
 					 pgstrom_codegen_type_declarations(context),
 					 pgstrom_codegen_func_declarations(context),
-					 pgstrom_codegen_param_declarations(context),
+					 pgstrom_codegen_param_declarations(context, 3),
 					 decl.data);
 	/*
 	 * to include opencl_hashjoin.h
@@ -2992,6 +2967,147 @@ gpuhashjoin_copy_plan(const CustomPlan *from)
 	return &newnode->cplan;
 }
 
+/* ----------------------------------------------------------------
+ *
+ * Below is the handler functions of MultiHash node
+ *
+ * ---------------------------------------------------------------- */
+static MultiHash *
+multihash_create_plan(PlannerInfo *root, GpuHashJoinPath *gpath)
+{
+	MultiHash  *mhash;
+	List	   *targetlist = NIL;
+
+	mhash = palloc0(offset(MultiHash, inners[gpath->num_rels]));
+	NodeSetTag(mhash, T_CustomPlan);
+	mhash->cplan.methods = &multihash_plan_methods;
+	mhash->num_rels = gpath->num_rels;
+
+	for (i=0; i < gpath->num_rels; i++)
+	{
+		List   *hash_clause = gpath->inners[i].hash_clause;
+		List   *qual_clause = gpath->inners[i].qual_clause;
+		List   *host_clause = gpath->inners[i].host_clause;
+		Plan   *inner_plan;
+
+		inner_plan = create_plan_recurse(root, gpath->inners[i].innerpath);
+		mhash->inners[i].innerplan = inner_plan;
+		mhash->inners[i].jointype = gpath->inners[i].jointype;
+		/*
+		 * Sort clauses into best execution order, even though it's
+		 * uncertain whether it makes sense in GPU execution...
+		 */
+		hash_clauses = order_qual_clauses(root, hash_clauses);
+		qual_clauses = order_qual_clauses(root, qual_clauses);
+		host_clauses = order_qual_clauses(root, host_clauses);
+
+		/*
+		 * Get plan expression form
+		 */
+		hash_clauses = extract_actual_clauses(hash_clauses, false);
+		qual_clauses = extract_actual_clauses(qual_clauses, false);
+		host_clauses = extract_actual_clauses(host_clauses, false);
+
+		/*
+		 * Replace any outer-relation variables with nestloop params.
+		 * It should not be in the hash- or qual-clauses
+		 */
+		if (inner_path->path.param_info)
+		{
+			host_clauses = (List *)
+				replace_nestloop_params(root, (Node *)host_clauses);
+		}
+
+		mhash->inners[i].hash_clause = hash_clauses;
+		mhash->inners[i].qual_clause = qual_clauses;
+		mhash->inners[i].host_clause = host_clauses;
+
+		/*
+		 * cost of MultiHash is sum of underlying inner paths
+		 */
+		mhash->cplan.plan.startup_cost += inner_plan->startup_cost;
+		mhash->cplan.plan.total_cost += inner_plan->total_cost;
+		mhash->cplan.plan.plan_rows += inner_plan->plan_rows;
+		mhash->cplan.plan.plan_width += inner_plan->plan_width;
+
+		/*
+		 * expand dummy targetlist
+		 */
+		targetlist = list_concat(targetlist,
+								 copyObject(inner_plan->targetlist));
+	}
+	mhash->cplan.plan.targetlist = targetlist;
+	mhash->cplan.plan.qual = NIL;
+
+	return mhash;
+}
+
+static void
+multihash_set_plan_ref(PlannerInfo *root,
+					   CustomPlan *custom_plan,
+					   int rtoffset)
+{}
+
+static void
+multihash_finalize_plan(PlannerInfo *root,
+						CustomPlan *cplan,
+						Bitmapset **paramids,
+						Bitmapset **valid_params,
+						Bitmapset **scan_params)
+{}
+
+static CustomPlanState *
+multihash_begin(CustomPlan *cplan, EState *estate, int eflags)
+{
+	return NULL;
+}
+
+static TupleTableSlot *
+multihash_exec(CustomPlanState *node)
+{
+	elog(ERROR, "MultiHash does not support ExecProcNode call convention");
+	return NULL;
+}
+
+static Node *
+multihash_exec_multi(CustomPlanState *node)
+{}
+
+static void
+multihash_rescan(CustomPlanState *node)
+{}
+
+static void
+multihash_explain_rel(CustomPlanState *node, ExplainState *es);
+{}
+
+static Bitmapset *
+multihash_get_relids(CustomPlanState *node)
+{
+	return NULL;
+}
+
+static Node *
+multihash_get_special_var(CustomPlanState *node, Var *varnode)
+{
+	return NULL;
+}
+
+static void
+multihash_textout_plan(StringInfo str, const CustomPlan *cplan)
+{}
+
+static CustomPlan *
+multihash_copy_plan(const CustomPlan *from)
+{
+	return NULL;
+}
+
+/*
+ * pgstrom_startup_gpuhashjoin
+ *
+ * a startup routine to initialize shared memory values
+ */
 static void
 pgstrom_startup_gpuhashjoin(void)
 {
@@ -3010,6 +3126,11 @@ pgstrom_startup_gpuhashjoin(void)
 	dlist_init(&gpuhashjoin_shm_values->free_list);
 }
 
+/*
+ * pgstrom_init_gpuhashjoin
+ *
+ * a startup routine to initialize gpuhashjoin.c
+ */
 void
 pgstrom_init_gpuhashjoin(void)
 {
@@ -3035,6 +3156,24 @@ pgstrom_init_gpuhashjoin(void)
 	gpuhashjoin_plan_methods.GetSpecialCustomVar= gpuhashjoin_get_special_var;
 	gpuhashjoin_plan_methods.TextOutCustomPlan	= gpuhashjoin_textout_plan;
 	gpuhashjoin_plan_methods.CopyCustomPlan		= gpuhashjoin_copy_plan;
+
+	/* setup plan methods */
+	multihash_plan_methods.CustomName = "MultiHash";
+	multihash_plan_methods.SetCustomPlanRef   = multihash_set_plan_ref;
+	multihash_plan_methods.SupportBackwardScan= NULL;
+	multihash_plan_methods.FinalizeCustomPlan = multihash_finalize_plan;
+	multihash_plan_methods.BeginCustomPlan    = multihash_begin;
+	multihash_plan_methods.ExecCustomPlan     = multihash_exec;
+	multihash_plan_methods.MultiExecCustomPlan= multihash_exec_multi;
+	multihash_plan_methods.EndCustomPlan      = multihash_end;
+	multihash_plan_methods.ReScanCustomPlan   = multihash_rescan;
+	multihash_plan_methods.ExplainCustomPlanTargetRel
+		= multihash_explain_rel;
+	multihash_plan_methods.ExplainCustomPlan  = multihash_explain;
+	multihash_plan_methods.GetRelidsCustomPlan= multihash_get_relids;
+	multihash_plan_methods.GetSpecialCustomVar= multihash_get_special_var;
+	multihash_plan_methods.TextOutCustomPlan  = multihash_textout_plan;
+	multihash_plan_methods.CopyCustomPlan     = multihash_copy_plan;
 
 	/* hook registration */
 	add_hashjoin_path_next = add_hashjoin_path_hook;
