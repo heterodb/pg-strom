@@ -242,7 +242,7 @@ typedef struct
 static cl_uint
 gpuhashjoin_hashkey(__private cl_int *errcode,
 					__global kern_parambuf *kparams,
-					cl_uint hash_index,
+					cl_uint ht_index,
 					__global kern_data_store *kds,
 					__global kern_toastbuf *ktoast,
 					size_t kds_index);
@@ -254,85 +254,118 @@ gpuhashjoin_hashkey(__private cl_int *errcode,
 static cl_bool
 gpuhashjoin_keycomp(__private cl_int *errcode,
 					__global kern_parambuf *kparams,
-					cl_uint hash_index,
+					cl_uint ht_index,
 					__global kern_hashentry *kentry,
 					__global kern_data_store *kds,
 					__global kern_toastbuf *ktoast,
 					size_t kds_index,
 					cl_uint hash);
-
-
 /*
- * gpuhashjoin_inner
+ * gpuhashjoin_main
  *
- * Routine of INNER HASH-JOIN. It counts up number of matched rows on the
- * hash-table using hash-key comparison function. Then, it acquires this
- * number of result slot in the result buffer, and write a pair of row-
- * indexes back. In case of result-buffer is not sufficient, it returns
- * StromError_DataStoreNoSpace, to inform host system with mode larger
- * result buffer.
+ * main routine of gpuhashjoin - it run hash-join logic on the supplied
+ * hash-tables and kds/ktoast pair, then stores its result on the "results"
+ * array. caller already acquires (n_matches * n_rels) slot from "results".
  */
 static void
-gpuhashjoin_multi(__private cl_int *errcode,
-				  __global kern_parambuf *kparams,
-				  __global kern_resultbuf *kresults,
-				  __global kern_multihash *kmhash,
-				  __global kern_data_store *kds,
-				  __global kern_toastbuf *ktoast,
-				  size_t kds_index,
-				  __local void *local_workbuf)
-{
-	/* caller must set SUCCEESS on the errorcode */
-	cl_uint		htable_index;
-	cl_uint		hash_value;
-	cl_uint		n_matches;
-	cl_uint		offset;
-	cl_uint		nitems;
-	cl_uint		nrels = kmhash->ntables + 1;
-	__local cl_uint base;
+gpuhashjoin_main(__private cl_int *errcode,
+				 cl_uint n_matches,
+				 cl_uint n_rels,
+				 __global cl_int *results,
+				 __global kern_multihash *kmhash,
+				 __global kern_data_store *kds,
+				 __global kern_toastbuf *ktoast,
+				 size_t kds_index,
+				 __local void *local_workbuf);
 
-	/* sanity check - kresults muust have slot for this multi-hashtables */
-	if (kresults->nrels != nrels)
+/*
+ * kern_gpuhashjoin_multi
+ *
+ * entrypoint of kernel gpuhashjoin implementation. Its job can be roughly
+ * separated into two portions; the first one is to count expected number
+ * of matched items (that should be acquired on the kern_resultbuf), then
+ * the second job is to store the hashjoin result - for more correctness,
+ * it shall be done in gpuhashjoin_main automatically generated.
+ * In case when the result buffer does not have sufficient space, it
+ * returns StromError_DataStoreNoSpace to inform host system this hashjoin
+ * needs larger result buffer.
+ */
+__kernel void
+kern_gpuhashjoin_multi(__global kern_hashjoin *khashjoin,
+					   __global kern_multihash *kmhash,
+					   __global kern_data_store *kds,
+					   __global kern_toastbuf *ktoast,
+					   __global kern_resultbuf *vrowmap,
+					   __local void *local_workbuf)
+{
+	__global kern_parambuf *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
+	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
+	cl_int			errcode = StromError_Success;
+	cl_uint			n_rels = kmhash->ntables + 1;
+	cl_uint			n_matches;
+	cl_uint			ht_index;
+	cl_uint			offset;
+	cl_uint			nitems;
+	size_t			kds_index;
+	__local cl_uint	base;
+
+	/* sanity check - kresults must have sufficient width of slots for the
+	 * required hash-tables within kern_multihash.
+	 */
+	if (kresults->nrels != n_rels)
 	{
-		*errcode = StromError_DataStoreCorruption;
-		return;
+		errcode = StromError_DataStoreCorruption;
+		goto out;
 	}
 
+	/* In case when valid-row-map (vrowmap) is given, it means all the items
+	 * are not valid and some of them have to be dealt as like invisible rows.
+	 * vrowmap is an array of valid row-index. 
+	 */
+	if (!vrowmap)
+		kds_index = get_global_id(0);
+	else if (get_global_id(0) < vrowmap->nrows)
+		kds_index = (size_t) vrowmap->results[get_global_id(0)];
+	else
+		kds_index = kds->nrows;	/* ensure this thread is out of range */
+
+	/* 1st-stage: At first, we walks on the hash tables to count number of
+	 * expected number of matched hash entries towards the items being in
+	 * the kern_data_store; to be aquired later for writing back the results.
+	 * Also note that a thread not mapped on a particular valid item in kds
+	 * can be simply assumed n_matches == 0.
+	 */
 	if (kds_index < kds->nrows)
 	{
+		n_matches = gpuhashjoin_num_matches(errcode, kparams, kmhash,
+											kds, ktoast, kds_index);
+
 		n_matches = 1;
 
-		for (htable_index = 1;
-			 htable_index < kmhash->ntables;
-			 htable_index++)
+		for (ht_index = 1; ht_index < kmhash->ntables; ht_index++)
 		{
 			__global kern_hashtable *htable;
 			__global cl_uint		*slot;
 			__global kern_hashentry *entry;
+			cl_uint		hash_value;
+			cl_uint		slot_index;
 			cl_uint		count = 0;
 
 			htable = ((__global char *)kmhash +
-					  kmhash->htable_offset[htable_index]);
+					  kmhash->htable_offset[ht_index]);
+			slot = KERN_HASHTABLE_SLOT(htable);
 
-			/* calculation of a hash value */
-			hash_value = gpuhashjoin_hashkey(errcode, kparams,
-											 htable_index,
+			/* calculation of a hash value for this hash-table */
+			hash_value = gpuhashjoin_hashkey(errcode, kparams, ht_index,
 											 kds, ktoast, kds_index);
 			slot_index = hash_value % htable->nslots;
 
-			/*
-			 * 1st-stage: walks on the hash table to count number of matched
-			 * hash-entries to estimate correct number of result slots to be
-			 * acquired later. Also note that, a thread that is not mapped on
-			 * a particular valid item in kds can simply say nothing matched.
-			 */
-			slot = KERN_HASHTABLE_SLOT(htable);
-
+			/* walks on the hash-table and count up n_matches */
 			for (entry = KERN_HASH_NEXT_ENTRY(htable, slot[slot_index]);
 				 entry;
 				 entry = KERN_HASH_NEXT_ENTRY(htable, entry->next))
 			{
-				if (gpuhashjoin_keycomp(errcode, kparams, hash_index,
+				if (gpuhashjoin_keycomp(errcode, kparams, ht_index,
 										entry, kds, ktoast, kds_index,
 										hash_value))
 					count++;
@@ -373,193 +406,38 @@ gpuhashjoin_multi(__private cl_int *errcode,
 	}
 	barrier(CLK_LOCAL_MEM_FENCE);
 
+	/* In case when (base + nitems) is larger than or equal to the nrooms,
+	 * it means we don't have enough space to write back hash-join results
+	 * to host-side. So, we have to tell the host code the provided
+	 * kern_resultbuf didn't have enough space.
+	 */
+	if (base + nitems >= kresults->nrooms)
+	{
+		*errcode = StromError_DataStoreNoSpace;
+		goto out;
+	}
+
 	/*
 	 * 2nd-stage: we already know how many items shall be generated on
 	 * this hash-join. So, all we need to do is to invoke auto-generated
 	 * hash-joining function with a certain address on the result-buffer.
 	 */
-	if (base + nitems < kresults->nrooms)
+	if (n_matches > 0)
 	{
-		if (n_matches > 0)
-		{
-			/* call multihashjoin routine */
-		}
+		__global cl_int	   *rindex
+			= kresult->results + nrels * (base + offset);
+
+			gpuhashjoin_main(errcode,
+							 n_matches, n_rels, rindex,
+							 kmhash, kds, ktoast, kds_index,
+							 local_workbuf);
 	}
-	else
-	{
-		/* In case when (base + nitems) is larger than or equal to
-		 * the nrooms, it means we don't have enough space to
-		 * write back hash-join results to host-side. So, we tell
-		 * it kern_resultbuf was small.
-		 */
-		*errcode = StromError_DataStoreNoSpace;
-	}
-	return;
-
-
-
-
-	HOGEHOGEHOGE;
-
-
-
-	/*
-	 * XXX - walk on the hash table again, to write pair of row-index
-	 * on the acquired slot
-	 */
-	if(base + 3 * nitems < kresults->nrooms) 
-	{
-		if(nMatches)
-		{
-			cl_uint		pos = base + 3 * offset;
-
-			for (entry = KERN_HASH_NEXT_ENTRY(khashtbl, slot[slot_index]);
-				 entry;
-				 entry = KERN_HASH_NEXT_ENTRY(khashtbl, entry->next))
-			{
-				/*
-				 * results[3*i+0] = rcs-index of inner (upper 32bit of rowid)
-				 * results[3*i+1] = row-offset of inner (lower 32bit of rowid)
-				 * results[3*i+2] = row-index of outer relation stream
-				 */
-				if (gpuhashjoin_keycomp(errcode, kparams, entry, kcs,
-										ktoast, kcs_index, hash_value))
-				{
-					kresults->results[pos + 0] = (cl_uint)(entry->rowid >> 32);
-					kresults->results[pos + 1] = (cl_uint)entry->rowid;
-					kresults->results[pos + 2] = kcs_index;
-					pos += 3;
-				}
-			}
-		}
-	}
-	else 						/* Result buffer exhaust. */
-	{
-		*errcode = StromError_DataStoreNoSpace;
-	}
+out:
+	/* write-back execution status into host-side */
+	kern_writeback_error_status(&kresults->errcode, errcode, local_workbuf);
 }
 
-#if 0
-/*
- * gpuhashjoin_inner
- *
- * Routine of INNER HASH-JOIN. It counts up number of matched rows on the
- * hash-table using hash-key comparison function. Then, it acquires this
- * number of result slot in the result buffer, and write a pair of row-
- * indexes back. In case of result-buffer is not sufficient, it returns
- * StromError_DataStoreNoSpace, to inform host system with mode larger
- * result buffer.
- */
-static void
-gpuhashjoin_inner(__private cl_int *errcode,
-				  __global kern_parambuf *kparams,
-				  __global kern_resultbuf *kresults,
-				  __global kern_hashtable *khashtbl,
-				  __global kern_column_store *kcs,
-				  __global kern_toastbuf *ktoast,
-				  size_t kcs_index,
-				  __local void *local_workbuf)
-{
-	/* Must be set SUCCESS to errcode at caller side. */
-//	cl_int errcode 	= StromError_Success;
-	
-	cl_uint						id		 = get_local_id(0);
-	cl_int						nrows	 = (kcs)->nrows;
-	cl_uint						nMatches = 0;
-	cl_uint						nWrites  = 0;
 
-	cl_uint						hash_value;
-	cl_uint						slot_index;
-	__global cl_uint *			slot;
-	__global kern_hashentry * 	entry;
-	cl_uint						offset;
-	cl_uint						nitems;
-	__local cl_uint				base;
-
-
-	/* calculate a hash value */
-	hash_value = gpuhashjoin_hashkey(errcode, kparams, kcs, ktoast, kcs_index);
-	slot_index = hash_value % khashtbl->nslots;
-
-	/*
-	 * 1st-stage - walks on the hast table to count number of matched
-	 * hash-entries to estimate correct number of result slots to be
-	 * acquired later. Also note that, all the thread needs to walk on
-	 * are ones being mapped to a particular valid row in kcs.
-	 */
-	if (kcs_index < kcs->nrows)
-	{
-		slot    = KERN_HASHTABLE_SLOT(khashtbl);
-		entry   = KERN_HASH_NEXT_ENTRY(khashtbl, slot[slot_index]);
-		while(entry)
-		{
-			if (gpuhashjoin_keycomp(errcode, kparams, entry, kcs,
-									ktoast, kcs_index, hash_value))
-				nMatches ++;
-
-			entry = KERN_HASH_NEXT_ENTRY(khashtbl, entry->next);
-		}
-	}
-
-	/*
-	 * XXX - calculate total number of matched tuples being searched
-	 * by this workgroup
-	 */
-	offset = arithmetic_stairlike_add(nMatches, local_workbuf, &nitems);
-
-	/*
-	 * XXX - allocation of result buffer. A tuple takes 2 * sizeof(cl_uint)
-	 * to store pair of row-indexes.
-	 * If no space any more, return an error code to retry later.
-	 *
-	 * use atomic_add(&kresults->nrows, nitems) to determine the position
-	 * to write. If expected usage is larger than kresults->nrooms, it
-	 * exceeds the limitation of result buffer.
-	 *
-	 * MEMO: we may need to re-define nrows/nitems using 64bit variables
-	 * to avoid overflow issues, but has special platform capability on
-	 * 64bit atomic-write...
-	 */
-	if(get_local_id(0) == 0)
-		base = (0 < nitems) ? atomic_add(&kresults->nitems, 3 * nitems) : 0;
-	barrier(CLK_LOCAL_MEM_FENCE);
-
-	/*
-	 * XXX - walk on the hash table again, to write pair of row-index
-	 * on the acquired slot
-	 */
-	if(base + 3 * nitems < kresults->nrooms) 
-	{
-		if(nMatches)
-		{
-			cl_uint		pos = base + 3 * offset;
-
-			for (entry = KERN_HASH_NEXT_ENTRY(khashtbl, slot[slot_index]);
-				 entry;
-				 entry = KERN_HASH_NEXT_ENTRY(khashtbl, entry->next))
-			{
-				/*
-				 * results[3*i+0] = rcs-index of inner (upper 32bit of rowid)
-				 * results[3*i+1] = row-offset of inner (lower 32bit of rowid)
-				 * results[3*i+2] = row-index of outer relation stream
-				 */
-				if (gpuhashjoin_keycomp(errcode, kparams, entry, kcs,
-										ktoast, kcs_index, hash_value))
-				{
-					kresults->results[pos + 0] = (cl_uint)(entry->rowid >> 32);
-					kresults->results[pos + 1] = (cl_uint)entry->rowid;
-					kresults->results[pos + 2] = kcs_index;
-					pos += 3;
-				}
-			}
-		}
-	}
-	else 						/* Result buffer exhaust. */
-	{
-		*errcode = StromError_DataStoreNoSpace;
-	}
-}
-#endif
 #if 0
 __kernel void
 gpuhashjoin_inner_cs(__global kern_hashjoin *khashjoin,
