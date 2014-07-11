@@ -1412,6 +1412,20 @@ build_pseudoscan_tlist_walker(Node *node, build_pseudoscan_context *context)
 static List *
 build_pseudoscan_tlist(GpuHashJoin *ghjoin)
 {
+	/* make a list of varnodes for */
+
+
+
+
+
+
+
+
+
+
+
+
+
 	Plan	   *outer_plan = outerPlan(ghjoin);
 	Plan	   *inner_plan;
 	Node	   *clause;
@@ -3183,7 +3197,15 @@ static void
 multihash_set_plan_ref(PlannerInfo *root,
 					   CustomPlan *custom_plan,
 					   int rtoffset)
-{}
+{
+
+
+
+
+
+
+
+}
 
 static void
 multihash_finalize_plan(PlannerInfo *root,
@@ -3204,6 +3226,7 @@ multihash_begin(CustomPlan *custom_plan,
 static TupleTableSlot *
 multihash_exec(CustomPlanState *node)
 {
+	elog(ERROR, "MultiHash does not support ExecProcNode call convention");
 	return NULL;
 }
 
