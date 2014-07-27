@@ -1975,7 +1975,7 @@ gpusort_copy_plan(const CustomPlan *from)
 	newnode->kern_source = pstrdup(oldnode->kern_source);
 	newnode->extra_flags = oldnode->extra_flags;
 	newnode->used_params = copyObject(oldnode->used_params);
-	newnode->sortkey_resnums = copyObject(oldnode->sortkey_resnums);
+	newnode->sortkey_resnums = bms_copy(oldnode->sortkey_resnums);
 	newnode->sortkey_width = oldnode->sortkey_width;
 
 	newnode->numCols     = oldnode->numCols;
