@@ -447,6 +447,26 @@ typedef struct {
 	cl_int		results[FLEXIBLE_ARRAY_MEMBER];
 } kern_resultbuf;
 
+/*
+ * kern_row_map
+ *
+ * It informs kernel code which rows are valid, and which ones are not, if
+ * kern_data_store contains mixed 
+ */
+typedef struct {
+	cl_int		nvalids;	/* # of valid rows. -1 means all visible */
+	cl_int		rindex[FLEXIBLE_ARRAY_MEMBER];
+} kern_row_map;
+
+#if 0
+
+typedef struct {
+	/* same as kern_row_map but works for column references */
+
+} kern_column_map;
+
+#endif
+
 #ifdef OPENCL_DEVICE_CODE
 /*
  * PostgreSQL Data Type support in OpenCL kernel
@@ -1653,6 +1673,17 @@ kern_writeback_error_status(__global cl_int *error_status,
  *
  * ------------------------------------------------------------
  */
+
+/* A utility function to evaluate pg_bool_t value as if built-in
+ * bool variable.
+ */
+static inline cl_bool
+EVAL(pg_bool_t arg)
+{
+	if (!arg.isnull && arg.value != 0)
+		return CL_TRUE;
+	return CL_FALSE;
+}
 
 /*
  * Functions for BooleanTest

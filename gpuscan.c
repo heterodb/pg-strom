@@ -1468,9 +1468,10 @@ retry:
 	/*
 	 * Make a new bulk-slot according to the result
 	 */
-	bulk = pgstrom_create_bulkslot(gpuscan->rc_store,
-								   gss->bulk_attmap,
-								   0, kresults->nitems);
+	bulk = palloc0(offsetof(pgstrom_bulkslot, rindex[kresults->nitems]));
+	bulk->rcstore = pgstrom_get_rcstore(gpuscan->rc_store);
+	//bulk->attmap = copyObject(gss->bulk_attmap);
+	bulk->nvalids = 0;	/* to be set later */
 
 	/*
 	 * GpuScan needs to have the host side checks below:
@@ -1515,7 +1516,7 @@ retry:
 		/*
 		 * MVCC visibility checks
 		 */
-		if (!gpuscan_check_tuple_visibility(gss, bulk->rc_store, row_index,
+		if (!gpuscan_check_tuple_visibility(gss, bulk->rcstore, row_index,
 											snapshot, slot))
 			continue;
 
@@ -1545,15 +1546,16 @@ retry:
 		}
 		bulk->rindex[j++] = row_index;
 	}
-	bulk->nitems = j;
+	bulk->nvalids = j;
 	/* no longer gpuscan is referenced any more, linked rcstore is not
 	 * actually released because its refcnt is incremented above. */
 	pgstrom_untrack_object(&gpuscan->msg.sobj);
 	pgstrom_put_message(&gpuscan->msg);
 
-	if (bulk->nitems == 0)
+	if (bulk->nvalids == 0)
 	{
-		pgstrom_release_bulkslot(bulk);
+		pgstrom_put_rcstore(bulk->rcstore);
+		pfree(bulk);
 		goto retry;
 	}
 	return (Node *) bulk;

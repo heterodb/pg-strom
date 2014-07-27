@@ -448,10 +448,10 @@ typedef struct {
  */
 typedef struct
 {
-	Node			node;			/* dummy header portion */
-	StromObject	   *rc_store;		/* row/column-store to be moved */
-	cl_uint			nitems;			/* num of rows on this bulk-slot */
-	List		   *attmap;			/* attribute numbers */
+	Node			node;		/* dummy header portion */
+	StromObject	   *rcstore;	/* row/column-store to be moved */
+//	List		   *attmap;		/* attribute numbers */
+	cl_int			nvalids;	/* length of rindex. -1 means all valid */
 	cl_uint			rindex[FLEXIBLE_ARRAY_MEMBER];
 } pgstrom_bulkslot;
 
@@ -561,22 +561,6 @@ extern Datum pgstrom_mqueue_info(PG_FUNCTION_ARGS);
  * datastore.c
  */
 extern int pgstrom_try_varlena_inline(Form_pg_attribute attr);
-#if 0
-extern pgstrom_vrelation *pgstrom_get_vrelation(pgstrom_vrelation *vrel);
-extern void pgstrom_put_vrelation(pgstrom_vrelation *vrel);
-extern pgstrom_vrelation *
-pgstrom_create_vrelation_head(TupleDesc tupdesc,
-                              List *vtlist_relidx,
-                              List *vtlist_attidx);
-extern pgstrom_vrelation *
-pgstrom_populate_vrelation(pgstrom_vrelation *vrel_head,
-						   StromObject *rcstore,
-                           cl_uint nrels, cl_uint nitems, cl_uint nrooms);
-extern List *
-pgstrom_can_vrelation_projection(List *targetlist);
-extern pgstrom_vrelation *
-pgstrom_apply_vrelation_projection(pgstrom_vrelation *vrel, List *vrel_proj);
-#endif
 
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
@@ -594,11 +578,7 @@ extern void kparam_refresh_ktoast_head(kern_parambuf *kparams,
 extern bytea *kparam_make_materialization(List *varnode_list,
 										  List *source_relids);
 extern List *pgstrom_make_bulk_attmap(List *targetlist, Index varno);
-extern pgstrom_bulkslot *pgstrom_create_bulkslot(StromObject *rc_store,
-												 List *bulk_attmap,
-												 cl_uint nitems,
-												 cl_uint nrooms);
-extern void pgstrom_release_bulkslot(pgstrom_bulkslot *bulk);
+
 extern bool pgstrom_plan_can_multi_exec(const PlanState *ps);
 
 extern tcache_row_store *pgstrom_create_row_store(TupleDesc tupdesc);
@@ -609,15 +589,12 @@ extern tcache_toastbuf *pgstrom_create_toast_buffer(Size required);
 extern tcache_toastbuf *pgstrom_expand_toast_buffer(tcache_toastbuf *tbuf);
 extern tcache_toastbuf *pgstrom_get_toast_buffer(tcache_toastbuf *tbuf);
 extern void pgstrom_put_toast_buffer(tcache_toastbuf *tbuf);
-#if 0
-extern tcache_column_store *
-pgstrom_create_column_store_with_projection(pgstrom_projection *pproj,
-                                            cl_uint nitems,
-                                            bool with_syscols);
-#endif
 extern tcache_column_store *pgstrom_get_column_store(tcache_column_store *pcs);
 extern void pgstrom_put_column_store(tcache_column_store *pcs);
-
+extern TupleTableSlot *pgstrom_rcstore_fetch_slot(TupleTableSlot *slot,
+												  StromObject *rcstore,
+												  int rowidx,
+												  bool use_copy);
 /*
  * restrack.c
  */
@@ -645,11 +622,11 @@ extern void pgstrom_init_gpusort(void);
 /*
  * gpuhashjoin.c
  */
-struct pgstrom_hashjoin_table;	/* to avoid including opencl_hashjoin.h here */
-extern struct pgstrom_hashjoin_table *
-gpuhashjoin_get_hash_table(struct pgstrom_hashjoin_table *ghash_table);
+struct pgstrom_multihash_tables;/* to avoid include opencl_hashjoin.h here */
+extern struct pgstrom_multihash_tables *
+multihash_get_tables(struct pgstrom_multihash_tables *mhtables);
 extern void
-gpuhashjoin_put_hash_table(struct pgstrom_hashjoin_table *ghash_table);
+multihash_put_tables(struct pgstrom_multihash_tables *mhtables);
 
 extern bool gpuhashjoin_support_multi_exec(const CustomPlanState *cps);
 extern void pgstrom_init_gpuhashjoin(void);
