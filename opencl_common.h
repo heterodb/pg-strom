@@ -740,6 +740,7 @@ kern_get_datum_rs(__global kern_data_store *kds,
 	cl_uint		offset;
 
 	offset = STROMALIGN(offsetof(kern_data_store, colmeta[kds->ncols]));
+	krs = (__global kern_row_store *)((__global char *)kds + offset);
 	rs_tup = kern_rowstore_get_tuple(krs, rowidx);
 	if (!rs_tup)
 		return NULL;
