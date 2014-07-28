@@ -3028,7 +3028,14 @@ pgstrom_assign_synchronizer(Oid reloid)
 							  PointerGetDatum(buildoidvector(NULL, 0)),
 							  ObjectIdGetDatum(PG_PUBLIC_NAMESPACE));
 	if (!OidIsValid(funcoid))
-		elog(ERROR, "cache lookup failed for trigger function: %s", funcname);
+	{
+		ereport(INFO,
+				(errcode(ERRCODE_UNDEFINED_FUNCTION),
+				 errmsg("cache lookup failed for trigger function: %s",
+						funcname),
+				 errhint("Try 'CREATE EXTENSION pg_strom;'")));
+		goto skip_make_trigger;
+	}
 
 	/*
 	 * OK, let's construct trigger definitions

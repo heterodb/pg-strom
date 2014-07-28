@@ -1039,7 +1039,7 @@ gpusort_preload_subplan(GpuSortState *gsortstate, HeapTuple *overflow)
 			 * allocation of a new row-store, but not tracked because trs
 			 * is always kept by a particular gpusort-chunk.
 			 */
-			trs = tcache_create_row_store(tupdesc);
+			trs = pgstrom_create_row_store(tupdesc);
 
 			/* put it on the r/c-store array on the GpuSortState */
 			if (gsortstate->rcs_nums == gsortstate->rcs_slotsz)

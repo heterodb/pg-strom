@@ -1236,9 +1236,14 @@ build_pseudo_scan_vartrans(GpuHashJoin *ghjoin)
 				  lc2, pscan_varrefs,
 				  lc3, pscan_resnums)
 		{
-			Node   *node = lfirst(lc1);
-			int		refmode = lfirst_int(lc2);
-			int		resnum = lfirst_int(lc3);
+			Node   *node;
+			int		refmode;
+			int		resnum;
+
+		lnext:
+			node    = lfirst(lc1);
+			refmode = lfirst_int(lc2);
+			resnum  = lfirst_int(lc3);
 
 			foreach (cell, outer_plan->targetlist)
 			{
@@ -1272,6 +1277,8 @@ build_pseudo_scan_vartrans(GpuHashJoin *ghjoin)
 													 lc2, prev2);
 					pscan_resnums = list_delete_cell(pscan_resnums,
 													 lc3, prev3);
+
+
 					lc1 = prev1;
 					lc2 = prev2;
 					lc3 = prev3;
@@ -2134,7 +2141,7 @@ gpuhashjoin_load_next_outer(GpuHashJoinState *ghjs)
 			}
 			if (!trs)
 			{
-				trs = tcache_create_row_store(tupdesc);
+				trs = pgstrom_create_row_store(tupdesc);
 				pgstrom_track_object(&trs->sobj, 0);
 			}
 			if (!tcache_row_store_insert_tuple(trs, tuple))
@@ -2524,6 +2531,7 @@ gpuhashjoin_rescan(CustomPlanState *node)
 {
 	elog(ERROR, "not implemented yet");
 }
+
 #if 0
 static void
 gpuhashjoin_explain_rel(CustomPlanState *node, ExplainState *es)
