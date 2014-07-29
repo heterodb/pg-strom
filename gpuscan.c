@@ -43,6 +43,7 @@
 static add_scan_path_hook_type	add_scan_path_next;
 static CustomPathMethods		gpuscan_path_methods;
 static CustomPlanMethods		gpuscan_plan_methods;
+static bool						enable_gpuscan;
 
 typedef struct {
 	CustomPath	cpath;
@@ -208,8 +209,8 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	if (add_scan_path_next)
 		add_scan_path_next(root, baserel, rte);
 
-	/* Is PG-Strom enabled? */
-	if (!pgstrom_enabled)
+	/* nothing to do, if either PG-Strom or GpuScan is not enabled */
+	if (!pgstrom_enabled || !enable_gpuscan)
 		return;
 
 	/* only base relation we can handle */
@@ -1886,6 +1887,16 @@ gpuscan_copy_plan(const CustomPlan *from)
 void
 pgstrom_init_gpuscan(void)
 {
+	/* enable_gpuscan */
+	DefineCustomBoolVariable("enable_gpuscan",
+							 "Enables the use of GPU accelerated full-scan",
+							 NULL,
+							 &enable_gpuscan,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
 	/* setup path methods */
 	gpuscan_path_methods.CustomName			= "GpuScan";
 	gpuscan_path_methods.CreateCustomPlan	= gpuscan_create_plan;

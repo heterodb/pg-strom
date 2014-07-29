@@ -30,6 +30,7 @@
 #include "parser/parsetree.h"
 #include "storage/ipc.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_crc.h"
 #include "utils/selfuncs.h"
@@ -41,6 +42,7 @@ static add_hashjoin_path_hook_type	add_hashjoin_path_next;
 static CustomPathMethods		gpuhashjoin_path_methods;
 static CustomPlanMethods		gpuhashjoin_plan_methods;
 static CustomPlanMethods		multihash_plan_methods;
+static bool						enable_gpuhashjoin;
 
 /*
  *                              (depth=0)
@@ -553,10 +555,6 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 	else
 		path->rows = path->parent->rows;
 
-	/* add disable_cost, if hash_join is not prefered */
-	if (!enable_hashjoin)
-		startup_cost += disable_cost;
-
 	/* Compute cost of the hash, qual and host clauses */
 	for (i=0; i < gpath->num_rels; i++)
 	{
@@ -694,8 +692,9 @@ gpuhashjoin_add_path(PlannerInfo *root,
 							   restrict_clauses,
 							   required_outer,
 							   hashclauses);
-	/* nothing to do, if PG-Strom is not enabled */
-	if (!pgstrom_enabled)
+
+	/* nothing to do, if either PG-Strom or GpuHashJoin is not enabled */
+	if (!pgstrom_enabled || !enable_gpuhashjoin)
 		return;
 
 	/*
@@ -3496,6 +3495,16 @@ multihash_copy_plan(const CustomPlan *from)
 void
 pgstrom_init_gpuhashjoin(void)
 {
+	/* enable_gpuhashjoin parameter */
+	DefineCustomBoolVariable("enable_gpuhashjoin",
+							 "Enables the use of GPU accelerated hash-join",
+							 NULL,
+							 &enable_gpuhashjoin,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
 	/* setup path methods */
 	gpuhashjoin_path_methods.CustomName = "GpuHashJoin";
 	gpuhashjoin_path_methods.CreateCustomPlan	= gpuhashjoin_create_plan;
