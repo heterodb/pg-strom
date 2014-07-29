@@ -32,6 +32,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_crc.h"
+#include "utils/selfuncs.h"
 #include "pg_strom.h"
 #include "opencl_hashjoin.h"
 
@@ -415,8 +416,7 @@ cost_gpuhashjoin(PlannerInfo *root,
 	Cost		run_cost;
 	Cost		row_cost;
 	double		num_rows;
-	int			num_gpu_clauses;
-	int			num_cpu_clauses;
+	int			num_hash_clauses = 0;
 	Size		hashtable_size;
 	int			i;
 
@@ -432,13 +432,11 @@ cost_gpuhashjoin(PlannerInfo *root,
 	 */
 	for (i=0; i < gpath->num_rels; i++)
 	{
+		num_hash_clauses += list_length(gpath->inners[i].hash_clause);
 		num_rows = gpath->inners[i].scan_path->rows;
-		num_gpu_clauses = (list_length(gpath->inners[i].hash_clause) +
-						   list_length(gpath->inners[i].qual_clause));
-		num_cpu_clauses = (list_length(gpath->inners[i].host_clause));
-		row_cost = cpu_operator_cost * (num_gpu_clauses +
-										num_cpu_clauses) + cpu_tuple_cost;
-		startup_cost += row_cost * num_rows;
+		startup_cost += (cpu_operator_cost *
+						 list_length(gpath->inners[i].hash_clause) +
+						 cpu_tuple_cost) * num_rows;
 	}
 
 	/* in addition, it takes cost to set up OpenCL device/program */
@@ -448,8 +446,7 @@ cost_gpuhashjoin(PlannerInfo *root,
 	 * is much less than usual GPU hash join.
 	 */
 	num_rows = gpath->outerpath->rows;
-	row_cost = (pgstrom_gpu_operator_cost * num_gpu_clauses +
-				cpu_operator_cost * num_cpu_clauses);
+	row_cost = pgstrom_gpu_operator_cost * num_hash_clauses;
 	run_cost += row_cost * num_rows;
 
 	/*
@@ -568,7 +565,57 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 		List	   *host_clause = gpath->inners[i].host_clause;
 		double		outer_path_rows = gpath->outerpath->rows;
 		double		inner_path_rows = gpath->inners[i].scan_path->rows;
+		Relids		inner_relids = gpath->inners[i].scan_path->parent->relids;
+		Selectivity	innerbucketsize = 1.0;
+		ListCell   *cell;
 
+		/*
+		 * Determine bucketsize fraction for inner relation.
+		 * We use the smallest bucketsize estimated for any individual
+		 * hashclause; this is undoubtedly conservative.
+		 */
+		foreach (cell, hash_clause)
+		{
+			RestrictInfo   *restrictinfo = (RestrictInfo *) lfirst(cell);
+			Selectivity		thisbucketsize;
+			double			virtualbuckets;
+			Node		   *op_expr;
+
+			Assert(IsA(restrictinfo, RestrictInfo));
+
+			/* Right now, GpuHashJoin assumes all the inner record can
+			 * be loaded into a single "multihash_tables" structure,
+			 * so hash table is never divided and outer relation is
+			 * rescanned.
+			 * This assumption may change in the future implementation
+			 */
+			if (inner_path_rows < 1000.0)
+				virtualbuckets = 1000.0;
+			else
+				virtualbuckets = inner_path_rows;
+
+			/*
+			 * First we have to figure out which side of the hashjoin clause
+			 * is the inner side.
+			 *
+			 * Since we tend to visit the same clauses over and over when
+			 * planning a large query, we cache the bucketsize estimate in the
+			 * RestrictInfo node to avoid repeated lookups of statistics.
+			 */
+			if (bms_is_subset(restrictinfo->right_relids, inner_relids))
+				op_expr = get_rightop(restrictinfo->clause);
+			else
+				op_expr = get_leftop(restrictinfo->clause);
+
+			thisbucketsize = estimate_hash_bucketsize(root, op_expr,
+													  virtualbuckets);
+			if (innerbucketsize > thisbucketsize)
+				innerbucketsize = thisbucketsize;
+		}
+
+		/*
+		 * Pulls function cost of individual clauses
+		 */
 		cost_qual_eval(&hash_cost, hash_clause, root);
 		cost_qual_eval(&qual_cost, qual_clause, root);
 		cost_qual_eval(&host_cost, host_clause, root);
@@ -588,7 +635,7 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 		startup_cost += hash_cost.startup + qual_cost.startup;
 		run_cost += ((hash_cost.per_tuple + qual_cost.per_tuple)
 					 * outer_path_rows
-					 * clamp_row_est(inner_path_rows) * 0.5);
+					 * clamp_row_est(inner_path_rows * innerbucketsize) * 0.5);
 	}
 
 	/*
@@ -832,7 +879,7 @@ gpuhashjoin_create_plan(PlannerInfo *root, CustomPath *best_path)
 		mhash->cplan.plan.plan_width = scan_plan->plan_width;
 		mhash->cplan.plan.targetlist = scan_plan->targetlist;
 		mhash->cplan.plan.qual = NIL;
-		mhash->depth = i;
+		mhash->depth = i + 1;
 		mhash->hentry_size = 0;	/* to be set later */
 		mhash->hashtable_size = gpath->hashtable_size;
 
@@ -1221,9 +1268,9 @@ build_pseudo_scan_vartrans(GpuHashJoin *ghjoin)
 	{
 		Plan	   *outer_plan = outerPlan(curr_plan);
 		List	   *temp_vartrans = NIL;
-		ListCell   *lc1, *prev1;
-		ListCell   *lc2, *prev2;
-		ListCell   *lc3, *prev3;
+		ListCell   *lc1, *prev1 = NULL;
+		ListCell   *lc2, *prev2 = NULL;
+		ListCell   *lc3, *prev3 = NULL;
 		int			num_device_vars = 0;
 
 		Assert(depth==0 || plan_is_multihash(curr_plan));
@@ -1232,18 +1279,14 @@ build_pseudo_scan_vartrans(GpuHashJoin *ghjoin)
 		 * Construct a list of vartrans_info; It takes depth of source
 		 * varnode, so we need to walk down the underlying inner relations.
 		 */
+	retry_from_head:
 		forthree (lc1, pscan_varlist,
 				  lc2, pscan_varrefs,
 				  lc3, pscan_resnums)
 		{
-			Node   *node;
-			int		refmode;
-			int		resnum;
-
-		lnext:
-			node    = lfirst(lc1);
-			refmode = lfirst_int(lc2);
-			resnum  = lfirst_int(lc3);
+			Node   *node = lfirst(lc1);
+			int		refmode = lfirst_int(lc2);
+			int		resnum = lfirst_int(lc3);
 
 			foreach (cell, outer_plan->targetlist)
 			{
@@ -1251,7 +1294,7 @@ build_pseudo_scan_vartrans(GpuHashJoin *ghjoin)
 
 				if (equal(node, tle->expr))
 				{
-					vartrans_info  *vtrans = palloc0(sizeof(vartrans_info));
+					vartrans_info *vtrans = palloc0(sizeof(vartrans_info));
 
 					vtrans->srcdepth = depth;
 					vtrans->srcresno = tle->resno;
@@ -1277,8 +1320,8 @@ build_pseudo_scan_vartrans(GpuHashJoin *ghjoin)
 													 lc2, prev2);
 					pscan_resnums = list_delete_cell(pscan_resnums,
 													 lc3, prev3);
-
-
+					if (prev1 == NULL)
+						goto retry_from_head;
 					lc1 = prev1;
 					lc2 = prev2;
 					lc3 = prev3;
@@ -1357,6 +1400,36 @@ build_pseudo_scan_vartrans(GpuHashJoin *ghjoin)
 	}
 #endif
 	return pscan_vartrans;
+}
+
+static inline void
+dump_pseudo_scan_vartrans(List *pscan_vartrans)
+{
+#if 1
+	ListCell   *cell;
+	int			index = 0;
+
+	foreach (cell, pscan_vartrans)
+	{
+		vartrans_info  *vtrans = lfirst(cell);
+
+		elog(INFO, "vtrans[%d] {srcdepth=%u srcresno=%d resno=%d resname='%s' vartype=%u vartypmod=%d varcollid=%u ref_host=%s ref_device=%s hkey_index=%u hkey_offset=%u expr=%s}",
+			 index,
+			 vtrans->srcdepth,
+			 vtrans->srcresno,
+			 vtrans->resno,
+			 vtrans->resname,
+			 vtrans->vartype,
+			 vtrans->vartypmod,
+			 vtrans->varcollid,
+			 vtrans->ref_host ? "true" : "false",
+			 vtrans->ref_device ? "true" : "false",
+			 vtrans->hkey_index,
+			 vtrans->hkey_offset,
+			 nodeToString(vtrans->expr));
+		index++;
+	}
+#endif
 }
 
 /*
@@ -1522,18 +1595,25 @@ clause_in_depth_walker(Node *node, clause_in_depth_context *context)
 		return false;
 	if (IsA(node, Var))
 	{
-		Var	   *var = (Var *) node;
-		vartrans_info  *vtrans;
+		Var		   *var = (Var *) node;
+		ListCell   *cell;
 
 		Assert(var->varno == INDEX_VAR &&
 			   var->varattno > 0 &&
 			   var->varattno <= list_length(context->pscan_vartrans));
+		foreach (cell, context->pscan_vartrans)
+		{
+			vartrans_info *vtrans = lfirst(cell);
 
-		vtrans = list_nth(context->pscan_vartrans,
-						  var->varattno - 1);
-		if (vtrans->srcdepth == context->depth)
-			return false;
-		return true;
+			if (vtrans->resno == var->varattno)
+			{
+				if (vtrans->srcdepth == context->depth)
+					return false;
+				return true;
+			}
+		}
+		elog(ERROR, "Bug? pseudo scan tlist (resno=%u) not found",
+			 var->varattno);
 	}
 	/* Should not find an unplanned subquery */
 	Assert(!IsA(node, Query));
@@ -1575,23 +1655,30 @@ hashkey_setref_scanrel_mutator(Node *node,
 		return NULL;
 	if (IsA(node, Var))
 	{
-		Var			   *oldvar = (Var *) node;
-		Var			   *newvar;
-		vartrans_info  *vtrans;
+		Var		   *oldvar = (Var *) node;
+		Var		   *newvar;
+		ListCell   *cell;
 
 		Assert(oldvar->varno == INDEX_VAR &&
 			   oldvar->varattno > 0 &&
 			   oldvar->varattno <= list_length(context->pscan_vartrans));
-		vtrans = list_nth(context->pscan_vartrans, oldvar->varattno - 1);
-		Assert(oldvar->vartype == vtrans->vartype &&
-			   oldvar->vartypmod == vtrans->vartypmod &&
-			   oldvar->varcollid == vtrans->varcollid);
+		foreach (cell, context->pscan_vartrans)
+		{
+			vartrans_info *vtrans = lfirst(cell);
 
-		newvar = copyObject(oldvar);
-		newvar->varno = OUTER_VAR;
-		newvar->varattno = vtrans->srcresno;
-
-		return (Node *)newvar;
+			if (vtrans->resno == oldvar->varattno)
+			{
+				Assert(oldvar->vartype == vtrans->vartype &&
+					   oldvar->vartypmod == vtrans->vartypmod &&
+					   oldvar->varcollid == vtrans->varcollid);
+				newvar = copyObject(oldvar);
+				newvar->varno = OUTER_VAR;
+				newvar->varattno = vtrans->srcresno;
+				return (Node *) newvar;
+			}
+		}
+		elog(ERROR, "Bug? pseudo scan tlist (resno=%u) not found",
+			 oldvar->varattno);
 	}
 	return expression_tree_mutator(node,
 								   hashkey_setref_scanrel_mutator,
@@ -1994,7 +2081,7 @@ pgstrom_release_gpuhashjoin(pgstrom_message *message)
     pgstrom_put_devprog_key(gpuhashjoin->dprog_key);
 
 	/* unlink hashjoin-table */
-	multihash_get_tables(gpuhashjoin->mhtables);
+	multihash_put_tables(gpuhashjoin->mhtables);
 
 	/* unlink row/column store */
 	pgstrom_put_rcstore(gpuhashjoin->rcstore);
@@ -2341,12 +2428,11 @@ gpuhashjoin_exec(CustomPlanState *node)
 	 */
 	if (!ghjs->mhnode)
 	{
-		PlanState  *outer_ps = outerPlanState(ghjs);
-		TupleDesc	outer_tupdesc = ExecGetResultType(outerPlanState(ghjs));
+		PlanState  *inner_ps = innerPlanState(ghjs);
+		TupleDesc	tupdesc = ExecGetResultType(outerPlanState(ghjs));
 
-		ghjs->mhnode = (MultiHashNode *) MultiExecProcNode(outer_ps);
-		ghjs->mhnode->rels[0].tupslot
-			= MakeSingleTupleTableSlot(outer_tupdesc);
+		ghjs->mhnode = (MultiHashNode *) MultiExecProcNode(inner_ps);
+		ghjs->mhnode->rels[0].tupslot = MakeSingleTupleTableSlot(tupdesc);
 		Assert(!ghjs->mhnode->rels[0].tupstore);
 	}
 
@@ -2632,10 +2718,10 @@ gpuhashjoin_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 		show_scan_qual(lfirst(lc1), qlabel, &node->ps, ancestors, es);
 		/* qual clause */
 		snprintf(qlabel, sizeof(qlabel), "qual clause %d", depth);
-		show_scan_qual(lfirst(lc1), qlabel, &node->ps, ancestors, es);
+		show_scan_qual(lfirst(lc2), qlabel, &node->ps, ancestors, es);
 		/* host clause */
 		snprintf(qlabel, sizeof(qlabel), "host clause %d", depth);
-		show_scan_qual(lfirst(lc1), qlabel, &node->ps, ancestors, es);
+		show_scan_qual(lfirst(lc3), qlabel, &node->ps, ancestors, es);
 		depth++;
 	}
 	es->verbose = verbose_saved;
@@ -3344,6 +3430,13 @@ multihash_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
     ExplainPropertyText("hash keys", str.data, es);
 }
 
+static Bitmapset *
+multihash_get_relids(CustomPlanState *node)
+{
+	/* nothing to do because core backend walks down inner/outer subtree */
+	return NULL;
+}
+
 static Node *
 multihash_get_special_var(CustomPlanState *node,
 						  Var *varnode,
@@ -3353,7 +3446,7 @@ multihash_get_special_var(CustomPlanState *node,
 	TargetEntry	   *tle;
 
 	Assert(varnode->varno == OUTER_VAR);
-	tle = list_nth(outer_ps->targetlist, varnode->varattno);
+	tle = list_nth(outer_ps->plan->targetlist, varnode->varattno - 1);
 
 	*child_ps = outer_ps;
 	return (Node *)tle->expr;
@@ -3433,6 +3526,7 @@ pgstrom_init_gpuhashjoin(void)
 	multihash_plan_methods.EndCustomPlan       = multihash_end;
 	multihash_plan_methods.ReScanCustomPlan    = multihash_rescan;
 	multihash_plan_methods.ExplainCustomPlan   = multihash_explain;
+	multihash_plan_methods.GetRelidsCustomPlan = multihash_get_relids;
 	multihash_plan_methods.GetSpecialCustomVar = multihash_get_special_var;
 	multihash_plan_methods.TextOutCustomPlan   = multihash_textout_plan;
 	multihash_plan_methods.CopyCustomPlan      = multihash_copy_plan;
@@ -4275,7 +4369,7 @@ error:
 			clReleaseMemObject(clghj->m_hash);
 		if (clghj->kernel)
 			clReleaseKernel(clghj->kernel);
-		if (clghj->program)
+		if (clghj->program && clghj->program != BAD_OPENCL_PROGRAM)
 			clReleaseProgram(clghj->program);
 		free(clghj);
 	}
