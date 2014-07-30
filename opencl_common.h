@@ -1678,12 +1678,12 @@ kern_writeback_error_status(__global cl_int *error_status,
 /* A utility function to evaluate pg_bool_t value as if built-in
  * bool variable.
  */
-static inline cl_bool
+static inline bool
 EVAL(pg_bool_t arg)
 {
 	if (!arg.isnull && arg.value != 0)
-		return CL_TRUE;
-	return CL_FALSE;
+		return true;
+	return false;
 }
 
 /*

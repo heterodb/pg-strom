@@ -127,9 +127,9 @@ typedef struct
 	cl_uint			htable_offset[FLEXIBLE_ARRAY_MEMBER];
 } kern_multihash;
 
-#define KERN_HASHTABLE(kgpuhash, depth)								\
-	((__global kern_hashtable *)((__global char *)(kgpuhash) +		\
-								 (kgpuhash)->htbl_offset[(depth)]))
+#define KERN_HASHTABLE(kmhash, depth)								\
+	((__global kern_hashtable *)((__global char *)(kmhash) +		\
+								 (kmhash)->htable_offset[(depth)]))
 #define KERN_HASHTABLE_SLOT(khtable)								\
 	((__global cl_uint *)((__global char *)(khtable)+				\
 						  LONGALIGN(offsetof(kern_hashtable,		\
@@ -230,7 +230,8 @@ typedef struct
 								 KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin)))
 #define KERN_HASHJOIN_RESULTBUF_LENGTH(khashjoin)						\
 	STROMALIGN(offsetof(kern_resultbuf,									\
-						results[KERN_HASHJOIN_RESULTBUF(khashjoin)->nrooms]))
+						results[KERN_HASHJOIN_RESULTBUF(khashjoin)->nrels * \
+								KERN_HASHJOIN_RESULTBUF(khashjoin)->nrooms]))
 #define KERN_HASHJOIN_DMA_SENDOFS(khashjoin)	\
 	((uintptr_t)&(khashjoin)->kparams - (uintptr_t)khashjoin)
 #define KERN_HASHJOIN_DMA_SENDLEN(khashjoin)	\
@@ -247,25 +248,23 @@ typedef struct
 
 #ifdef OPENCL_DEVICE_CODE
 /*
- * gpuhashjoin_main
+ * gpuhashjoin_execute
  *
  * main routine of gpuhashjoin - it run hash-join logic on the supplied
  * hash-tables and kds/ktoast pair, then stores its result on the "results"
  * array. caller already acquires (n_matches * n_rels) slot from "results".
  */
-static void
-gpuhashjoin_main(__private cl_int *errcode,
-				 cl_uint n_matches,
-				 cl_uint n_rels,
-				 __global cl_int *results,
-				 __global kern_multihash *kmhash,
-				 __global kern_data_store *kds,
-				 __global kern_toastbuf *ktoast,
-				 size_t kds_index,
-				 __local void *local_workbuf);
+static cl_uint
+gpuhashjoin_execute(__private cl_int *errcode,
+					__global kern_parambuf *kparams,
+					__global kern_multihash *kmhash,
+					__global kern_data_store *kds,
+					__global kern_toastbuf *ktoast,
+					size_t kds_index,
+					__global cl_int *rbuffer);
 
 /*
- * kern_gpuhashjoin_multi
+ * kern_gpuhashjoin_main
  *
  * entrypoint of kernel gpuhashjoin implementation. Its job can be roughly
  * separated into two portions; the first one is to count expected number
@@ -277,19 +276,17 @@ gpuhashjoin_main(__private cl_int *errcode,
  * needs larger result buffer.
  */
 __kernel void
-kern_gpuhashjoin_multi(__global kern_hashjoin *khashjoin,
-					   __global kern_multihash *kmhash,
-					   __global kern_data_store *kds,
-					   __global kern_toastbuf *ktoast,
-					   __global kern_row_map *krowmap,
-					   __local void *local_workbuf)
+kern_gpuhashjoin_main(__global kern_hashjoin *khashjoin,
+					  __global kern_multihash *kmhash,
+					  __global kern_data_store *kds,
+					  __global kern_toastbuf *ktoast,
+					  __global kern_row_map *krowmap,
+					  __local void *local_workbuf)
 {
-	__global kern_parambuf *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
+	__global kern_parambuf  *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
 	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
 	cl_int			errcode = StromError_Success;
-	cl_uint			n_rels = kmhash->ntables + 1;
 	cl_uint			n_matches;
-	cl_uint			ht_index;
 	cl_uint			offset;
 	cl_uint			nitems;
 	size_t			kds_index;
@@ -298,22 +295,22 @@ kern_gpuhashjoin_multi(__global kern_hashjoin *khashjoin,
 	/* sanity check - kresults must have sufficient width of slots for the
 	 * required hash-tables within kern_multihash.
 	 */
-	if (kresults->nrels != n_rels)
+	if (kresults->nrels != kmhash->ntables + 1)
 	{
 		errcode = StromError_DataStoreCorruption;
 		goto out;
 	}
 
-	/* In case when valid-row-map (vrowmap) is given, it means all the items
-	 * are not valid and some of them have to be dealt as like invisible rows.
-	 * vrowmap is an array of valid row-index. 
+	/* In case when kern_row_map (krowmap) is given, it means all the items
+	 * are not valid and some them have to be dealt as like invisible rows.
+	 * krowmap is an array of valid row-index.
 	 */
-	if (!vrowmap)
+	if (!krowmap)
 		kds_index = get_global_id(0);
-	else if (get_global_id(0) < vrowmap->nrows)
-		kds_index = (size_t) vrowmap->results[get_global_id(0)];
+	else if (get_global_id(0) < krowmap->nvalids)
+		kds_index = (size_t) krowmap->rindex[get_global_id(0)];
 	else
-		kds_index = kds->nrows;	/* ensure this thread is out of range */
+		kds_index = kds->nitems;	/* ensure this thread is out of range */
 
 	/* 1st-stage: At first, we walks on the hash tables to count number of
 	 * expected number of matched hash entries towards the items being in
@@ -321,54 +318,16 @@ kern_gpuhashjoin_multi(__global kern_hashjoin *khashjoin,
 	 * Also note that a thread not mapped on a particular valid item in kds
 	 * can be simply assumed n_matches == 0.
 	 */
-	if (kds_index < kds->nrows)
-	{
-		n_matches = gpuhashjoin_num_matches(errcode, kparams, kmhash,
-											kds, ktoast, kds_index);
-	}
+	if (kds_index < kds->nitems)
+		n_matches = gpuhashjoin_execute(&errcode,
+										kparams,
+										kmhash,
+										kds, ktoast,
+										kds_index,
+										NULL);
 	else
-	{
 		n_matches = 0;
-	}
-#if 0
-		n_matches = 1;
 
-		for (ht_index = 1; ht_index < kmhash->ntables; ht_index++)
-		{
-			__global kern_hashtable *htable;
-			__global cl_uint		*slot;
-			__global kern_hashentry *entry;
-			cl_uint		hash_value;
-			cl_uint		slot_index;
-			cl_uint		count = 0;
-
-			htable = ((__global char *)kmhash +
-					  kmhash->htable_offset[ht_index]);
-			slot = KERN_HASHTABLE_SLOT(htable);
-
-			/* calculation of a hash value for this hash-table */
-			hash_value = gpuhashjoin_hashkey(errcode, kparams, ht_index,
-											 kds, ktoast, kds_index);
-			slot_index = hash_value % htable->nslots;
-
-			/* walks on the hash-table and count up n_matches */
-			for (entry = KERN_HASH_NEXT_ENTRY(htable, slot[slot_index]);
-				 entry;
-				 entry = KERN_HASH_NEXT_ENTRY(htable, entry->next))
-			{
-				if (gpuhashjoin_keycomp(errcode, kparams, ht_index,
-										entry, kds, ktoast, kds_index,
-										hash_value))
-					count++;
-			}
-			n_matches *= count;
-		}
-	}
-	else
-	{
-		n_matches = 0;
-	}
-#endif
 	/*
 	 * XXX - calculate total number of matched tuples being searched
 	 * by this workgroup
@@ -380,11 +339,11 @@ kern_gpuhashjoin_multi(__global kern_hashjoin *khashjoin,
 	 * to store pair of row-indexes.
 	 * If no space any more, return an error code to retry later.
 	 *
-	 * use atomic_add(&kresults->nrows, nitems) to determine the position
+	 * use atomic_add(&kresults->nitems, nitems) to determine the position
 	 * to write. If expected usage is larger than kresults->nrooms, it
 	 * exceeds the limitation of result buffer.
 	 *
-	 * MEMO: we may need to re-define nrows/nitems using 64bit variables
+	 * MEMO: we may need to re-define nrooms/nitems using 64bit variables
 	 * to avoid overflow issues, but has special platform capability on
 	 * 64bit atomic-write...
 	 */
@@ -404,7 +363,7 @@ kern_gpuhashjoin_multi(__global kern_hashjoin *khashjoin,
 	 */
 	if (base + nitems >= kresults->nrooms)
 	{
-		*errcode = StromError_DataStoreNoSpace;
+		errcode = StromError_DataStoreNoSpace;
 		goto out;
 	}
 
@@ -413,15 +372,17 @@ kern_gpuhashjoin_multi(__global kern_hashjoin *khashjoin,
 	 * this hash-join. So, all we need to do is to invoke auto-generated
 	 * hash-joining function with a certain address on the result-buffer.
 	 */
-	if (n_matches > 0)
+	if (n_matches > 0 && kds_index < kds->nitems)
 	{
-		__global cl_int	   *rindex
-			= kresult->results + nrels * (base + offset);
+		__global cl_int	   *rbuffer
+			= kresults->results + kresults->nrels * (base + offset);
 
-			gpuhashjoin_main(errcode,
-							 n_matches, n_rels, rindex,
-							 kmhash, kds, ktoast, kds_index,
-							 local_workbuf);
+		n_matches = gpuhashjoin_execute(&errcode,
+										kparams,
+										kmhash,
+										kds, ktoast,
+										kds_index,
+										rbuffer);
 	}
 out:
 	/* write-back execution status into host-side */
@@ -463,73 +424,6 @@ gpuhashjoin_inner_cs(__global kern_hashjoin *khashjoin,
 	kern_writeback_error_status(&kresults->errcode, errcode, local_workbuf);
 }
 
-__kernel void
-gpuhashjoin_inner_rs(__global kern_hashjoin *khashjoin,
-					 __global kern_hashtable *khashtbl,
-					 __global kern_row_store *krs,
-					 __global kern_column_store *kcs,
-					 cl_int   krs_nitems,
-					 __local void *local_workbuf)
-{
-	__global kern_parambuf *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
-	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
-	cl_int			errcode = StromError_Success;
-	pg_bytea_t		kparam_0 = pg_bytea_param(kparams,&errcode,0);
-	size_t			krs_index;
-	__local size_t	kcs_offset;
-	__local size_t	kcs_nitems;
-
-	/* if number of valid items are negative, it means all the items
-     * are valid. So, no need to use rindex. Elsewhere, we will take
-	 * selected records according to the rindex.
-     */
-	if (krs_nitems < 0)
-	{
-		krs_nitems = krs->nrows;
-		krs_index = get_global_id(0);
-	}
-	else if (get_global_id(0) < krs_nitems)
-		krs_index = (size_t)kresults->results[get_global_id(0)];
-	else
-		krs_index = krs->nrows;	/* ensure out of range */
-
-	/*
-	 * map this workgroup on a particular range of the column-store
-	 */
-	if (get_local_id(0) == 0)
-	{
-		if (get_global_id(0) + get_local_size(0) < krs_nitems)
-			kcs_nitems = get_local_size(0);
-		else if (get_global_id(0) < krs_nitems)
-			kcs_nitems = krs_nitems - get_global_id(0);
-		else
-			kcs_nitems = 0;
-		kcs_offset = atomic_add(&kcs->nrows, kcs_nitems);
-	}
-	barrier(CLK_LOCAL_MEM_FENCE);
-
-	/* move data into column store */
-	kern_row_to_column(&errcode,
-					   (__global cl_char *)VARDATA(kparam_0.value),
-					   krs,
-					   krs_index,
-					   kcs,
-					   NULL,
-					   kcs_offset,
-					   kcs_nitems,
-					   local_workbuf);
-	/* OK, run gpu hash join */
-	gpuhashjoin_inner(&errcode,
-					  kparams,
-					  kresults,
-					  khashtbl,
-					  kcs,
-					  (__global kern_toastbuf *)krs,
-					  kcs_offset + get_local_id(0),
-					  local_workbuf);
-	/* back execution status into host-side */
-	kern_writeback_error_status(&kresults->errcode, errcode, local_workbuf);
-}
 #endif
 
 /*
@@ -688,18 +582,18 @@ __constant cl_uint pg_crc32_table[256] = {
 	} while (0)
 #define FIN_CRC32(crc)		((crc) ^= 0xFFFFFFFF)
 
-#define STROMCL_SIMPLE_HASHREF_TEMPLATE(NAME,BASE)			\
+#define STROMCL_SIMPLE_HASHKEY_TEMPLATE(NAME,BASE)			\
 	static inline cl_uint									\
-	pg_##NAME##_hashcomp(cl_uint hash, pg_##NAME##_t datum)	\
+	pg_##NAME##_hashkey(cl_uint hash, pg_##NAME##_t datum)	\
 	{														\
 		if (!datum.isnull)									\
 			COMP_CRC32(hash, &datum.value, sizeof(BASE));	\
 		return hash;										\
 	}
 
-#define STROMCL_VARLENA_HASHCOMP_TEMPLATE(NAME)	\
-	static inline cl_uint						\
-	pg_##NAME##_hashcomp(cl_uint hash, pg_##NAME##_t datum)	\
+#define STROMCL_VARLENA_HASHKEY_TEMPLATE(NAME)				\
+	static inline cl_uint									\
+	pg_##NAME##_hashkey(cl_uint hash, pg_##NAME##_t datum)	\
 	{														\
 		if (!datum.isnull)									\
 			COMP_CRC32(hash, VARDATA_ANY(datum.value),		\
