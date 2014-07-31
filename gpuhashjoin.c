@@ -156,10 +156,12 @@ typedef struct
 typedef struct {
 	Node		type;	/* T_Invalid */
 	pgstrom_multihash_tables *mhtables;
-	int			nrels;
+	TupleTableSlot *outer_slot;
+	int				nrels;
 	struct {
-		Tuplestorestate	   *tupstore;	/* NULL, for depth==0 */
-		TupleTableSlot	   *tupslot;
+		Size				ntuples;
+		Datum			  **values_array;
+		bool			  **isnull_array;
 	} rels[FLEXIBLE_ARRAY_MEMBER];
 } MultiHashNode;
 
@@ -211,8 +213,10 @@ typedef struct {
 	List	   *hash_keys;
 	List	   *hash_keylen;
 	List	   *hash_keybyval;
-	Tuplestorestate	*tupstore;
-	TupleTableSlot	*tupslot;
+//	TupleTableSlot	*tupslot;
+	Datum	  **values_array;
+	bool	  **isnull_array;
+	Size		ntuples;
 } MultiHashState;
 
 
@@ -2427,7 +2431,7 @@ gpuhashjoin_next_tuple(GpuHashJoinState *ghjs,
 	ExprContext	   *econtext = ghjs->cps.ps.ps_ExprContext;
 	pgstrom_gpuhashjoin *gpuhashjoin = ghjs->curr_ghjoin;
 	kern_resultbuf *kresults;
-	TupleTableSlot *slot;
+	TupleTableSlot *pslot;
 	ProjectionInfo *projection;
 	bool			needs_recheck;
 	struct timeval	tv1, tv2;
@@ -2440,8 +2444,7 @@ gpuhashjoin_next_tuple(GpuHashJoinState *ghjs,
 
 	while (ghjs->curr_index < kresults->nitems)
 	{
-		Tuplestorestate *tupstore;
-		TupleTableSlot  *tupslot;
+		TupleTableSlot  *outer_slot = mhnode->outer_slot;
 		cl_int	   *rowids;
 		int			index = ghjs->curr_index++;
 		int			rowid;
@@ -2456,52 +2459,32 @@ gpuhashjoin_next_tuple(GpuHashJoinState *ghjs,
 		 * usual one. Then hash_clause and host_clause shall be evaluated.
 		 */
 		rowids = kresults->results + kresults->nrels * index;
-		Assert(rowids[0] != 0);
-		if (rowids[0] < 0)
+		rowid = rowids[0];
+		Assert(rowid != 0);
+		if (rowid < 0)
 		{
 			needs_recheck = true;
-			slot = ghjs->pscan_wider_slot;
+			pslot = ghjs->pscan_wider_slot;
 			projection = ghjs->pscan_wider_projection;
+			rowid = -rowid;	/* make it positive */
 		}
 		else
 		{
 			needs_recheck = false;
-			slot = ghjs->pscan_slot;
+			pslot = ghjs->pscan_slot;
 			projection = ghjs->pscan_projection;
 		}
-
-		/*
-		 * Load the tuple-slots from each source relations
-		 */
-		for (depth=0; depth <= mhnode->nrels; depth++)
-		{
-			tupslot = mhnode->rels[depth].tupslot;
-			rowid = rowids[depth];
-			if (depth == 0)
-			{
-				if (rowid < 0)
-					rowid = -rowid;
-				tupslot = pgstrom_rcstore_fetch_slot(tupslot,
-													 gpuhashjoin->rcstore,
-													 rowid - 1,
-													 false);
-			}
-			else
-			{
-				tupstore = mhnode->rels[depth].tupstore;
-				tuplestore_rescan(tupstore);
-				if (!tuplestore_skiptuples(tupstore, rowid - 1, true))
-					elog(ERROR, "failed to seek on rowid:%u of tupstore",
-						 rowid - 1);
-				if (!tuplestore_gettupleslot(tupstore, true, false, tupslot))
-					elog(ERROR, "failed to fetch inner tuple");
-			}
-		}
+		/* load the tuple from outer relation */
+		outer_slot = pgstrom_rcstore_fetch_slot(outer_slot,
+												gpuhashjoin->rcstore,
+												rowid - 1,
+												false);
+		slot_getallattrs(outer_slot);
 
 		/*
 		 * Fill up the tuple-slot above
 		 */
-		slot = ExecStoreAllNullTuple(slot);
+		pslot = ExecStoreAllNullTuple(pslot);
 		for (i=0; i < ghjs->pscan_nattrs; i++)
 		{
 			vartrans_info  *vtrans = &ghjs->pscan_vartrans[i];
@@ -2511,19 +2494,27 @@ gpuhashjoin_next_tuple(GpuHashJoinState *ghjs,
 			/* no need to copy, if device only variables */
 			if (!needs_recheck && !vtrans->ref_host)
 				continue;
-
 			depth = vtrans->srcdepth;
 			resno = vtrans->srcresno;
 			Assert(depth >= 0 && depth <= mhnode->nrels);
-			Assert(rowids[depth] != 0);
-			value = slot_getattr(mhnode->rels[depth].tupslot, resno, &isnull);
-			if (!isnull)
+
+			if (depth == 0)
+				value = slot_getattr(outer_slot, resno, &isnull);
+			else
 			{
-				slot->tts_isnull[vtrans->resno - 1] = false;
-				slot->tts_values[vtrans->resno - 1] = value;
+				Datum **values_array = mhnode->rels[depth].values_array;
+				bool  **isnull_array = mhnode->rels[depth].isnull_array;
+
+				rowid = rowids[depth];
+				Assert(rowid > 0 && rowid <= mhnode->rels[depth].ntuples);
+
+				value  = values_array[rowid - 1][resno - 1];
+				isnull = isnull_array[rowid - 1][resno - 1];
 			}
+			pslot->tts_isnull[vtrans->resno - 1] = isnull;
+			pslot->tts_values[vtrans->resno - 1] = value;
 		}
-		econtext->ecxt_scantuple = slot;
+		econtext->ecxt_scantuple = pslot;
 
 		/*
 		 * Re-check hash/qual clauses again
@@ -2550,7 +2541,7 @@ gpuhashjoin_next_tuple(GpuHashJoinState *ghjs,
 			gettimeofday(&tv2, NULL);
 			ghjs->pfm.time_move_slot += timeval_diff(&tv1, &tv2);
 		}
-		*p_slot = slot;
+		*p_slot = pslot;
 		*p_projection = projection;
 		return true;
 	}
@@ -2582,8 +2573,10 @@ gpuhashjoin_exec(CustomPlanState *node)
 		TupleDesc	tupdesc = ExecGetResultType(outerPlanState(ghjs));
 
 		ghjs->mhnode = (MultiHashNode *) MultiExecProcNode(inner_ps);
-		ghjs->mhnode->rels[0].tupslot = MakeSingleTupleTableSlot(tupdesc);
-		Assert(!ghjs->mhnode->rels[0].tupstore);
+		ghjs->mhnode->outer_slot = MakeSingleTupleTableSlot(tupdesc);
+		Assert(!ghjs->mhnode->rels[0].ntuples &&
+			   !ghjs->mhnode->rels[0].values_array &&
+			   !ghjs->mhnode->rels[0].isnull_array);
 	}
 
 	while (!ghjs->curr_ghjoin ||
@@ -3214,14 +3207,8 @@ multihash_begin(CustomPlan *node,
 	ExecAssignResultTypeFromTL(&mhs->cps.ps);
 	mhs->cps.ps.ps_ProjInfo = NULL;
 
-	/*
-	 * allocation of tuple store and slot
-	 */
-	tupdesc = ExecGetResultType(outerPlanState(mhs));
-	mhs->tupslot = MakeSingleTupleTableSlot(tupdesc);
-	mhs->tupstore = tuplestore_begin_heap(true, false, work_mem);
-
 	/* also, make a list of toast resource numbers */
+	tupdesc = ExecGetResultType(outerPlanState(mhs));
 	mhs->toast_resnums = NIL;
 	foreach (cell, mhs->hash_resnums)
 	{
@@ -3265,8 +3252,7 @@ expand_multihash_tables(pgstrom_multihash_tables *mhtables_old)
 
 static pgstrom_multihash_tables *
 multihash_preload_khashtable(MultiHashState *mhs,
-							 pgstrom_multihash_tables *mhtables,
-							 double *num_tuples)
+							 pgstrom_multihash_tables *mhtables)
 {
 	TupleDesc		tupdesc = ExecGetResultType(outerPlanState(mhs));
 	ExprContext	   *econtext = mhs->cps.ps.ps_ExprContext;
@@ -3280,11 +3266,22 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	cl_uint			nkeys;
 	cl_uint			rowid;
 	cl_uint		   *hash_slots;
+	char		   *nv_buffer;
+	Size			nv_usage;
+	Size			nv_length;
+	Size			nv_itemsz;
+	Datum		  **values_array;
+	bool		  **isnull_array;
+	cl_uint			array_usage;
+	cl_uint			array_length;
 	ListCell	   *cell;
 	ListCell	   *lc1;
 	ListCell	   *lc2;
 	ListCell	   *lc3;
 	int				i;
+
+	/* preload should be done under the MultiExec context */
+	Assert(CurrentMemoryContext == mhs->cps.ps.state->es_query_cxt);
 
 	/*
 	 * First of all, construct a kern_hashtable on the tail of current
@@ -3311,7 +3308,6 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	khtable->nkeys = nkeys;
 	khtable->is_outer = false;	/* only INNER is supported right now */
 
-	tupdesc = ExecGetResultType(outerPlanState(mhs));
 	i=0;
 	foreach (cell, mhs->hash_resnums)
 	{
@@ -3327,20 +3323,40 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	mhtables->length += LONGALIGN((uintptr_t)&hash_slots[nslots] -
 								  (uintptr_t)khtable);
 	/*
+	 * allocation of private memory to store isnull/values pairs for
+	 * later materialization
+	 */
+	nv_itemsz = MAXALIGN(sizeof(Datum) * tupdesc->natts +
+						 sizeof(bool) * tupdesc->natts);
+	nv_length = nslots;
+	nv_usage = 0;
+	nv_buffer = palloc(nv_itemsz * nv_length);
+
+	array_length = nslots;
+	array_usage = 0;
+	values_array = palloc0(sizeof(Datum *) * nslots);
+	isnull_array = palloc0(sizeof(bool *) * nslots);
+
+	/*
 	 * Next, get all the tuples from the outer relation into hash table
 	 * in this level.
 	 */
 	for (rowid=0; ; rowid++)
 	{
 		TupleTableSlot *scan_slot;
+		TupleDesc		scan_tupdesc;
 		Datum			value;
 		bool			isnull;
 		int				i_key;
 		pg_crc32		hash;
+		Datum		   *p_values;
+		bool		   *p_isnull;
 
 		scan_slot = ExecProcNode(outerPlanState(mhs));
 		if (TupIsNull(scan_slot))
 			break;
+		scan_tupdesc = scan_slot->tts_tupleDescriptor;
+
 		/*
 		 * estimate required size for each hash entry; it is a little bit
 		 * expensive, if hash key contains toast datum.
@@ -3449,11 +3465,34 @@ multihash_preload_khashtable(MultiHashState *mhs,
 
 		/*
 		 * Save the copy of scanned tuple in the private memory
-		 * to be materialized later.
+		 * for materialization on the later stage.
 		 */
-		tuplestore_puttupleslot(mhs->tupstore, scan_slot);
+		if (array_usage == array_length)
+		{
+			array_length += array_length;
+			values_array = repalloc(values_array,
+									sizeof(Datum *) * array_length); 
+			isnull_array = repalloc(isnull_array,
+									sizeof(bool *) * array_length);
+		}
+
+		if (nv_usage == nv_length)
+		{
+			nv_buffer = palloc(nv_itemsz * nv_length);
+			nv_usage = 0;
+		}
+
+		p_values = (Datum *)((char *)nv_buffer + nv_itemsz * nv_usage);
+		p_isnull = (bool *)((char *)p_values + sizeof(Datum) * tupdesc->natts);
+		for (i=1; i <= tupdesc->natts; i++)
+			p_values[i] = slot_getattr(scan_slot, i, &p_isnull[i]);
+		values_array[array_usage] = p_values;
+		isnull_array[array_usage] = p_isnull;
+		array_usage++;
 	}
-	*num_tuples = (double) rowid;
+	mhs->ntuples = array_usage;
+	mhs->values_array = values_array;
+	mhs->isnull_array = isnull_array;
 
 	return mhtables;
 }
@@ -3465,7 +3504,6 @@ multihash_exec_multi(CustomPlanState *node)
 	MultiHashNode  *mhnode;
 	PlanState	   *inner_ps;	/* underlying MultiHash, if any */
 	int				depth = mhs->depth;
-	double			num_tuples;
 
 	/* must provide our own instrumentation support */
 	if (node->ps.instrument)
@@ -3509,22 +3547,21 @@ multihash_exec_multi(CustomPlanState *node)
 
 		mhnode->mhtables = mhtables;
 	}
-	/* put tupslot/tupstore in this depth */
-	Assert(!mhnode->rels[depth].tupstore &&
-		   !mhnode->rels[depth].tupslot);
-	mhnode->rels[depth].tupstore = mhs->tupstore;
-	mhnode->rels[depth].tupslot  = mhs->tupslot;
+	/* No other hash table should exist in the same depth */
+	Assert(!mhnode->rels[depth].ntuples);
 
 	/*
 	 * construct a kernel hash-table that stores all the inner-keys
 	 * in this level, being loaded from the outer relation
 	 */
-	mhnode->mhtables = multihash_preload_khashtable(mhs, mhnode->mhtables,
-													&num_tuples);
+	mhnode->mhtables = multihash_preload_khashtable(mhs, mhnode->mhtables);
+	mhnode->rels[depth].ntuples  = mhs->ntuples;
+	mhnode->rels[depth].values_array = mhs->values_array;
+	mhnode->rels[depth].isnull_array = mhs->isnull_array;
 
 	/* must provide our own instrumentation support */
 	if (node->ps.instrument)
-		InstrStopNode(node->ps.instrument, num_tuples);
+		InstrStopNode(node->ps.instrument, (double)mhs->ntuples);
 
 	return (Node *) mhnode;
 }
