@@ -28,6 +28,7 @@ PG_MODULE_MAGIC;
  */
 bool	pgstrom_enabled;
 bool	pgstrom_perfmon_enabled;
+bool	pgstrom_show_device_kernel;
 int		pgstrom_max_async_chunks;
 int		pgstrom_min_async_chunks;
 int		pgstrom_max_inline_varlena;
@@ -53,6 +54,14 @@ pgstrom_init_misc_guc(void)
 							 "Enables the performance monitor of PG-Strom",
 							 NULL,
 							 &pgstrom_perfmon_enabled,
+							 false,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	DefineCustomBoolVariable("pg_strom.show_device_kernel",
+							 "Enables to show device kernel on EXPLAIN",
+							 NULL,
+							 &pgstrom_show_device_kernel,
 							 false,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
@@ -95,7 +104,7 @@ pgstrom_init_misc_guc(void)
 							 "Cost to setup GPU device to run",
 							 NULL,
 							 &pgstrom_gpu_setup_cost,
-							 50 * DEFAULT_SEQ_PAGE_COST,
+							 500 * DEFAULT_SEQ_PAGE_COST,
 							 0,
 							 DBL_MAX,
 							 PGC_USERSET,
@@ -292,7 +301,7 @@ show_device_kernel(Datum dprog_key, ExplainState *es)
 	const char *kernel_source;
 	int32		extra_flags;
 
-	if (!dprog_key || !es->verbose)
+	if (!dprog_key || !es->verbose || !pgstrom_show_device_kernel)
 		return;
 
 	kernel_source = pgstrom_get_devprog_kernel_source(dprog_key);
