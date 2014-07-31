@@ -28,8 +28,10 @@ PG_MODULE_MAGIC;
  */
 bool	pgstrom_enabled;
 bool	pgstrom_perfmon_enabled;
+bool	pgstrom_show_device_kernel;
 int		pgstrom_max_async_chunks;
 int		pgstrom_min_async_chunks;
+int		pgstrom_max_inline_varlena;
 
 /* cost factors */
 double	pgstrom_gpu_setup_cost;
@@ -52,6 +54,14 @@ pgstrom_init_misc_guc(void)
 							 "Enables the performance monitor of PG-Strom",
 							 NULL,
 							 &pgstrom_perfmon_enabled,
+							 false,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	DefineCustomBoolVariable("pg_strom.show_device_kernel",
+							 "Enables to show device kernel on EXPLAIN",
+							 NULL,
+							 &pgstrom_show_device_kernel,
 							 false,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
@@ -80,12 +90,21 @@ pgstrom_init_misc_guc(void)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("\"pg_strom.max_async_chunks\" must be larger than \"pg_strom.min_async_chunks\"")));
-
+	DefineCustomIntVariable("pg_strom.max_inline_varlena",
+							"max length to inline varlena variables",
+							NULL,
+							&pgstrom_max_inline_varlena,
+							64,
+							0,
+							128,
+							PGC_POSTMASTER,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
 	DefineCustomRealVariable("gpu_setup_cost",
 							 "Cost to setup GPU device to run",
 							 NULL,
 							 &pgstrom_gpu_setup_cost,
-							 50 * DEFAULT_SEQ_PAGE_COST,
+							 500 * DEFAULT_SEQ_PAGE_COST,
 							 0,
 							 DBL_MAX,
 							 PGC_USERSET,
@@ -147,8 +166,7 @@ _PG_init(void)
 
 	/* registration of custom-plan providers */
 	pgstrom_init_gpuscan();
-	//pgstrom_init_gpusort();
-	//pgstrom_init_gpuhashjoin();
+	pgstrom_init_gpuhashjoin();
 
 	/* initialization of tcache & registration of columnizer */
 	pgstrom_init_tcache();
@@ -282,7 +300,7 @@ show_device_kernel(Datum dprog_key, ExplainState *es)
 	const char *kernel_source;
 	int32		extra_flags;
 
-	if (!dprog_key || !es->verbose)
+	if (!dprog_key || !es->verbose || !pgstrom_show_device_kernel)
 		return;
 
 	kernel_source = pgstrom_get_devprog_kernel_source(dprog_key);

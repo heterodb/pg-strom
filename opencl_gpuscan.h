@@ -23,7 +23,7 @@
  * | kern_parambuf  |         ^
  * | +--------------+         |
  * | | length   o--------------------+
- * | +--------------+         |      | kern_resultbuf is located just after
+ * | +--------------+         |      | kern_vrelation is located just after
  * | | nparams      |         |      | the kern_parambuf (because of DMA
  * | +--------------+         |      | optimization), so head address of
  * | | poffset[0]   |         |      | kern_gpuscan + parambuf.length
@@ -39,47 +39,50 @@
  * +-+--------------+  -----  |  <---+
  * | kern_resultbuf |    ^    |
  * | +--------------+    |    |  Area to be sent to OpenCL device.
- * | | nrooms       |    |    |  Forward DMA shall be issued here.
+ * | | nrels (=1)   |    |    |  Forward DMA shall be issued here.
  * | +--------------+    |    |
  * | | nitems       |    |    |
  * | +--------------+    |    |
+ * | | nrooms (=N)  |    |    |
+ * | +--------------+    |    |
  * | | errcode      |    |    V
  * | +--------------+    |  -----
- * | | results[0]   |    |
- * | | results[1]   |    |  Area to be written back from OpenCL device.
+ * | | rindex[0]    |    |
+ * | | rindex[1]    |    |  Area to be written back from OpenCL device.
  * | |     :        |    |  Reverse DMA shall be issued here.
- * | | results[N-1] |    V
- * | +--------------+  --+--
- * | | debug buffer |    |
- * | /  (if used)   /    |
- * | /              /    |
- * | |              |    V
+ * | | rindex[N-1]  |    V
  * +-+--------------+  -----
  *
  * Gpuscan kernel code assumes all the fields shall be initialized to zero.
  */
 typedef struct {
-	kern_parambuf	kparam;
-	/*
-	 * as above, kern_resultbuf shall be located next to the parambuf
-	 */
+	kern_parambuf	kparams;
 } kern_gpuscan;
 
-#define KERN_GPUSCAN_PARAMBUF(kgscan)			\
-	((__global kern_parambuf *)(&(kgscan)->kparam))
-#define KERN_GPUSCAN_RESULTBUF(kgscan)			\
-	((__global kern_resultbuf *)((char *)(kgscan) + (kgscan)->kparam.length))
-#define KERN_GPUSCAN_LENGTH(kgscan)										\
-	(offsetof(kern_gpuscan, kparam) +									\
-	 (kgscan)->kparam.length +											\
-	 offsetof(kern_resultbuf,											\
-			  results[KERN_GPUSCAN_RESULTBUF(kgscan)->nrooms]))
-#define KERN_GPUSCAN_DMA_SENDLEN(kgscan)		\
-	((kgscan)->kparam.length +					\
+#define KERN_GPUSCAN_PARAMBUF(kgpuscan)			\
+	((__global kern_parambuf *)(&(kgpuscan)->kparams))
+#define KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan)	\
+	STROMALIGN((kgpuscan)->kparams.length)
+#define KERN_GPUSCAN_RESULTBUF(kgpuscan)		\
+	((__global kern_resultbuf *)				\
+	 ((__global char *)&(kgpuscan)->kparams +	\
+	  STROMALIGN((kgpuscan)->kparams.length)))
+#define KERN_GPUSCAN_RESULTBUF_LENGTH(kgpuscan)	\
+	STROMALIGN(offsetof(kern_resultbuf,			\
+		results[KERN_GPUSCAN_RESULTBUF(kgpuscan)->nrels * \
+				KERN_GPUSCAN_RESULTBUF(kgpuscan)->nrooms]))
+#define KERN_GPUSCAN_LENGTH(kgpuscan)			\
+	(offsetof(kern_gpuscan, kparams) +			\
+	 KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan) +	\
+	 KERN_GPUSCAN_RESULTBUF_LENGTH(kgpuscan))
+#define KERN_GPUSCAN_DMASEND_OFFSET(kgpuscan)	0
+#define KERN_GPUSCAN_DMASEND_LENGTH(kgpuscan)	\
+	(KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan) +	\
 	 offsetof(kern_resultbuf, results[0]))
-#define KERN_GPUSCAN_DMA_RECVLEN(kgscan)								\
-	(offsetof(kern_resultbuf,											\
-			  results[KERN_GPUSCAN_RESULTBUF(kgscan)->nrooms]))
+#define KERN_GPUSCAN_DMARECV_OFFSET(kgpuscan)	\
+	KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan)
+#define KERN_GPUSCAN_DMARECV_LENGTH(kgpuscan)	\
+	KERN_GPUSCAN_RESULTBUF_LENGTH(kgpuscan)
 
 #ifdef OPENCL_DEVICE_CODE
 /*
@@ -88,7 +91,7 @@ typedef struct {
  * It writes back the calculation result of gpuscan.
  */
 static void
-gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
+gpuscan_writeback_row_error(__global kern_resultbuf *kresults,
 							int errcode,
 							__local void *workmem)
 {
@@ -103,14 +106,14 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
 	 * then stairlike-add returns a relative offset within workgroup,
 	 * and we can adjust this offset by global base index.
 	 */
-	binary = (get_global_id(0) < kresbuf->nrooms &&
+	binary = (get_global_id(0) < kresults->nrooms &&
 			  (errcode == StromError_Success ||
 			   errcode == StromError_RowReCheck)) ? 1 : 0;
 
 	offset = arithmetic_stairlike_add(binary, workmem, &nitems);
 
 	if (get_local_id(0) == 0)
-		base = atomic_add(&kresbuf->nitems, nitems);
+		base = atomic_add(&kresults->nitems, nitems);
 	barrier(CLK_LOCAL_MEM_FENCE);
 
 	/*
@@ -118,23 +121,13 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresbuf,
 	 * or needs re-check on the host side. In case of re-check, row-index
 	 * shall be a negative number.
 	 */
-	if (get_global_id(0) >= kresbuf->nrooms)
+	if (get_global_id(0) >= kresults->nrooms)
 		return;
 
 	if (errcode == StromError_Success)
-		kresbuf->results[base + offset] = (get_global_id(0) + 1);
+		kresults->results[base + offset] = (get_global_id(0) + 1);
 	else if (errcode == StromError_RowReCheck)
-		kresbuf->results[base + offset] = -(get_global_id(0) + 1);
-}
-
-static inline void
-gpuscan_writeback_result(__global kern_gpuscan *kgpuscan, int errcode,
-						 __local void *local_workmem)
-{
-	__global kern_resultbuf *kresbuf = KERN_GPUSCAN_RESULTBUF(kgpuscan);
-
-	kern_writeback_error_status(&kresbuf->errcode, errcode, local_workmem);
-	gpuscan_writeback_row_error(kresbuf, errcode, local_workmem);
+		kresults->results[base + offset] = -(get_global_id(0) + 1);
 }
 
 /*
@@ -142,26 +135,27 @@ gpuscan_writeback_result(__global kern_gpuscan *kgpuscan, int errcode,
  */
 static pg_bool_t
 gpuscan_qual_eval(__private cl_int *errcode,
-				  __global kern_gpuscan *kgscan,
-				  __global kern_column_store *kcs,
-				  __global kern_toastbuf *toast,
-				  size_t kcs_index);
-
+				  __global kern_parambuf *kparams,
+				  __global kern_data_store *kds,
+				  __global kern_toastbuf *ktoast,
+				  size_t kds_index);
 /*
- * kernel entrypoint of gpuscan for column-store
+ * kernel entrypoint of gpuscan
  */
 __kernel void
-gpuscan_qual_cs(__global kern_gpuscan *kgscan,
-				__global kern_column_store *kcs,
-				__global kern_toastbuf *toast,
-				__local void *local_workmem)
+gpuscan_qual(__global kern_gpuscan *kgpuscan,	/* in/out */
+			 __global kern_data_store *kds,		/* in */
+			 __global kern_toastbuf *ktoast,	/* in */
+			 __local void *local_workbuf)
 {
 	pg_bool_t	rc;
 	cl_int		errcode = StromError_Success;
-	__global kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgscan);
+	__global kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
+	__global kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
 
-	if (get_global_id(0) < kcs->nrows)
-		rc = gpuscan_qual_eval(&errcode, kgscan, kcs, toast, get_global_id(0));
+	if (get_global_id(0) < kds->nitems)
+		rc = gpuscan_qual_eval(&errcode, kparams, kds, ktoast,
+							   get_global_id(0));
 	else
 		rc.isnull = true;
 
@@ -169,62 +163,10 @@ gpuscan_qual_cs(__global kern_gpuscan *kgscan,
 					!rc.isnull && rc.value != 0
 					? StromError_Success
 					: StromError_RowFiltered);
-	gpuscan_writeback_result(kgscan, errcode, local_workmem);
-}
 
-/*
- * kernel entrypoint of gpuscan for row-store
- */
-__kernel void
-gpuscan_qual_rs(__global kern_gpuscan *kgscan,
-				__global kern_row_store *krs,
-				__global kern_column_store *kcs,
-				__local void *local_workmem)
-{
-	__global kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgscan);
-	cl_int				errcode = StromError_Success;
-	pg_bytea_t			kparam_0 = pg_bytea_param(kparams,&errcode,0);
-	pg_bool_t			rc;
-	__local size_t		kcs_offset;
-	__local size_t		kcs_nitems;
-
-	/* acquire a slot of this workgroup */
-	if (get_local_id(0) == 0)
-	{
-		if (get_global_id(0) + get_local_size(0) < krs->nrows)
-			kcs_nitems = get_local_size(0);
-		else if (get_global_id(0) < krs->nrows)
-			kcs_nitems = krs->nrows - get_global_id(0);
-		else
-			kcs_nitems = 0;
-		kcs_offset = atomic_add(&kcs->nrows, kcs_nitems);
-	}
-	barrier(CLK_LOCAL_MEM_FENCE);
-
-	/* move data into column-store */
-	kern_row_to_column(&errcode,
-					   (__global cl_char *)VARDATA(kparam_0.value),
-					   krs,
-					   get_global_id(0),
-					   kcs,
-					   NULL,
-					   kcs_offset,
-					   kcs_nitems,
-					   local_workmem);
-	if (get_local_id(0) < kcs_nitems)
-	{
-		rc = gpuscan_qual_eval(&errcode, kgscan, kcs,
-							   (__global kern_toastbuf *)krs,
-							   kcs_offset + get_local_id(0));
-	}
-	else
-		rc.isnull = true;
-
-	STROM_SET_ERROR(&errcode,
-					!rc.isnull && rc.value != 0
-					? StromError_Success
-					: StromError_RowFiltered);
-	gpuscan_writeback_result(kgscan, errcode, local_workmem);
+	/* writeback error code */
+	kern_writeback_error_status(&kresults->errcode, errcode, local_workbuf);
+	gpuscan_writeback_row_error(kresults, errcode, local_workbuf);
 }
 
 #else	/* OPENCL_DEVICE_CODE */
@@ -236,10 +178,10 @@ gpuscan_qual_rs(__global kern_gpuscan *kgscan,
  * kern_parambuf for constant values.
  */
 typedef struct {
-	pgstrom_message	msg;	/* = StromTag_GpuScan */
-	Datum			dprog_key;	/* key of device program */
-	StromObject	   *rc_store;	/* = StromTag_TCache(Row|Column)Store */
-	kern_gpuscan	kern;
+	pgstrom_message		msg;		/* = StromTag_GpuScan */
+	Datum				dprog_key;	/* key of device program */
+	StromObject		   *rc_store;	/* = StromTag_TCache(Row|Column)Store */
+	kern_gpuscan		kern;
 } pgstrom_gpuscan;
 
 #endif	/* OPENCL_DEVICE_CODE */

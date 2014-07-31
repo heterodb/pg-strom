@@ -50,7 +50,7 @@ typedef struct {
 	 StromTagIs(sobject,TCacheHead) ||			\
 	 StromTagIs(sobject,TCacheRowStore) ||		\
 	 StromTagIs(sobject,TCacheColumnStore) ||	\
-	 StromTagIs(sobject,GpuScan)	||			\
+	 StromTagIs(sobject,GpuScan) ||				\
 	 StromTagIs(sobject,GpuSort) ||				\
 	 StromTagIs(sobject,GpuHashJoin) ||			\
 	 StromTagIs(sobject,HashJoinTable))
@@ -209,11 +209,11 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 			else if (StromTagIs(sobject, TCacheHead))
 				tcache_abort_tchead((tcache_head *)sobject, private);
 			else if (StromTagIs(sobject, TCacheRowStore))
-				tcache_put_row_store((tcache_row_store *)sobject);
+				pgstrom_put_row_store((tcache_row_store *)sobject);
 			else if (StromTagIs(sobject, TCacheColumnStore))
 				tcache_put_column_store((tcache_column_store *)sobject);
 			else if (StromTagIs(sobject, HashJoinTable))
-				gpuhashjoin_put_hash_table((pgstrom_hashjoin_table *)sobject);
+				multihash_put_tables((pgstrom_multihash_tables *) sobject);
 			else
 			{
 				Assert(IS_TRACKABLE_OBJECT(sobject));
@@ -266,11 +266,11 @@ __pgstrom_track_object(const char *filename, int lineno,
 		else if (StromTagIs(sobject, TCacheHead))
 			tcache_abort_tchead((tcache_head *)sobject, private);
 		else if (StromTagIs(sobject, TCacheRowStore))
-			tcache_put_row_store((tcache_row_store *)sobject);
+			pgstrom_put_row_store((tcache_row_store *)sobject);
 		else if (StromTagIs(sobject, TCacheColumnStore))
 			tcache_put_column_store((tcache_column_store *)sobject);
 		else if (StromTagIs(sobject, HashJoinTable))
-			gpuhashjoin_put_hash_table((pgstrom_hashjoin_table *)sobject);
+			multihash_put_tables((pgstrom_multihash_tables *) sobject);
 		else
 			pgstrom_put_message((pgstrom_message *)sobject);
 

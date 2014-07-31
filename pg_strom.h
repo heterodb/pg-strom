@@ -134,7 +134,6 @@ typedef enum {
 	StromTag_TCacheRowStore,
 	StromTag_TCacheColumnStore,
 	StromTag_TCacheToastBuf,
-	StromTag_VirtRelation,
 	StromTag_GpuScan,
 	StromTag_GpuSort,
 	StromTag_GpuHashJoin,
@@ -449,57 +448,46 @@ typedef struct {
  */
 typedef struct
 {
-	Value			value;			/* T_String is used to cheat executor */
-	StromObject	   *rc_store;		/* row/column-store to be moved */
-	cl_uint			nitems;			/* num of rows on this bulk-slot */
+	Node			node;		/* dummy header portion */
+	StromObject	   *rcstore;	/* row/column-store to be moved */
+//	List		   *attmap;		/* attribute numbers */
+	cl_int			nvalids;	/* length of rindex. -1 means all valid */
 	cl_uint			rindex[FLEXIBLE_ARRAY_MEMBER];
-} pgstrom_bulk_slot;
+} pgstrom_bulkslot;
 
 /*
- * pgstrom_vrelation
- *
- * A data structure to remember a pair of tuples being scanned/joined.
- * It allows to move processed data into upper executor node without
- * projection or materialize.
- *
- * XXX - it eventually replace the role of kern_resultbuf
- */
-typedef struct
-{
-	StromObject		sobj;	/* =StromTag_VirtRelation */
-	slock_t			lock;
-	cl_int			refcnt;
-	StromObject	   *rcstore[VRELATION_MAX_RELS];
-	kern_vrelation	kern;
-} pgstrom_vrelation;
-
-
-
-
-
-
-/*
- * kern_projection
+ * pgstrom_materialize
  *
  * This data structure provides a definition of destination relation on
- * simple projection task. The "simple" means, it just puts a particular
- * column of either of source relation (inner or outer/scan) onto somewhere
- * on the destination relation but without calculation on target-list.
+ * server side materialization. Unlike host side, this materialization
+ * cannot contain expression in the target-list. What it can do is
+ * re-ordering the columns of (multiple) source relations.
  */
 typedef struct
 {
-	cl_uint			length;		/* length of this simple projection info */
+	/* true, if column never has NULL (thus, no nullmap required) */
+	cl_char		attnotnull;
+	/* alignment; 1,2,4 or 8, not characters in pg_attribute */
+	cl_char		attalign;
+	/* length of attribute */
+	cl_short	attlen;
+	/* source relation index */
+	cl_short	relsrc;
+	/* source attribute index */
+	cl_short	attsrc;
+	/* destination attribute index */
+	cl_short	attdst;
+	/* average width of this attribute */
+	cl_short	attwidth;
+
+} materialize_colmeta;
+
+typedef struct
+{
+	cl_uint			nrels;		/* number of relations being expected */
 	cl_uint			ncols;		/* number of columns in destination store */
-	Datum			dprog_key;	/* device program key, if valid */
-	struct {
-		kern_colmeta colmeta;	/* column properties in destination store */
-		cl_char		resjunk;	/* true, if column is junk attribute */
-		cl_char		is_outer;	/* true, if column come from outer or scan
-								 * relation. Elsewhere, it come from inner
-								 * relation. */
-		AttrNumber	resno;		/* resource number of source target-list */
-	} origins[FLEXIBLE_ARRAY_MEMBER];
-} kern_projection;
+	materialize_colmeta colmeta[FLEXIBLE_ARRAY_MEMBER];
+} pgstrom_materialize;
 
 /*
  * --------------------------------------------------------------------
@@ -560,48 +548,53 @@ extern void pgstrom_close_queue(pgstrom_queue *queue);
 extern pgstrom_queue *pgstrom_get_queue(pgstrom_queue *mqueue);
 extern void pgstrom_put_queue(pgstrom_queue *mqueue);
 extern void pgstrom_put_message(pgstrom_message *msg);
+extern void pgstrom_init_message(pgstrom_message *msg,
+								 StromTag stag,
+								 pgstrom_queue *respq,
+								 void (*cb_process)(pgstrom_message *msg),
+								 void (*cb_release)(pgstrom_message *msg),
+								 bool perfmon_enabled);
 extern void pgstrom_init_mqueue(void);
 extern Datum pgstrom_mqueue_info(PG_FUNCTION_ARGS);
 
 /*
  * datastore.c
  */
+extern int pgstrom_try_varlena_inline(Form_pg_attribute attr);
+
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
-extern bytea *kparam_make_attrefs_by_resnums(TupleDesc tupdesc,
-											 List *attnums_list);
-extern bytea *kparam_make_attrefs(TupleDesc tupdesc,
-								  List *used_vars, Index varno);
-extern bytea *kparam_make_kcs_head(TupleDesc tupdesc,
-								   cl_char *attrefs,
-								   cl_uint nsyscols,
-								   cl_uint nrooms);
-extern void kparam_refresh_kcs_head(kern_parambuf *kparams,
-									cl_uint nrows,
-									cl_uint nrooms);
+extern bytea *kparam_make_kds_head(TupleDesc tupdesc,
+								   Bitmapset *attrefs,
+								   cl_uint nsyscols);
+extern void kparam_refresh_kds_head(kern_parambuf *kparams,
+									StromObject *rcstore,
+									cl_uint nitems);
 extern bytea *kparam_make_ktoast_head(TupleDesc tupdesc,
-									  cl_char *attrefs,
 									  cl_uint nsyscols);
 extern void kparam_refresh_ktoast_head(kern_parambuf *kparams,
 									   StromObject *rcstore);
-extern bytea *kparam_make_kprojection(List *target_list);
+extern bytea *kparam_make_materialization(List *varnode_list,
+										  List *source_relids);
+extern List *pgstrom_make_bulk_attmap(List *targetlist, Index varno);
 
-extern void pgstrom_release_bulk_slot(pgstrom_bulk_slot *bulk_slot);
 extern bool pgstrom_plan_can_multi_exec(const PlanState *ps);
+
+extern tcache_row_store *pgstrom_create_row_store(TupleDesc tupdesc);
+extern tcache_row_store *pgstrom_get_row_store(tcache_row_store *trs);
+extern void pgstrom_put_row_store(tcache_row_store *trs);
 
 extern tcache_toastbuf *pgstrom_create_toast_buffer(Size required);
 extern tcache_toastbuf *pgstrom_expand_toast_buffer(tcache_toastbuf *tbuf);
 extern tcache_toastbuf *pgstrom_get_toast_buffer(tcache_toastbuf *tbuf);
 extern void pgstrom_put_toast_buffer(tcache_toastbuf *tbuf);
-
-extern tcache_column_store *
-pgstrom_create_column_store_with_projection(kern_projection *kproj,
-                                            cl_uint nitems,
-                                            bool with_syscols);
 extern tcache_column_store *pgstrom_get_column_store(tcache_column_store *pcs);
 extern void pgstrom_put_column_store(tcache_column_store *pcs);
-
+extern TupleTableSlot *pgstrom_rcstore_fetch_slot(TupleTableSlot *slot,
+												  StromObject *rcstore,
+												  int rowidx,
+												  bool use_copy);
 /*
  * restrack.c
  */
@@ -629,11 +622,11 @@ extern void pgstrom_init_gpusort(void);
 /*
  * gpuhashjoin.c
  */
-struct pgstrom_hashjoin_table;	/* to avoid including opencl_hashjoin.h here */
-extern struct pgstrom_hashjoin_table *
-gpuhashjoin_get_hash_table(struct pgstrom_hashjoin_table *ghash_table);
+struct pgstrom_multihash_tables;/* to avoid include opencl_hashjoin.h here */
+extern struct pgstrom_multihash_tables *
+multihash_get_tables(struct pgstrom_multihash_tables *mhtables);
 extern void
-gpuhashjoin_put_hash_table(struct pgstrom_hashjoin_table *ghash_table);
+multihash_put_tables(struct pgstrom_multihash_tables *mhtables);
 
 extern bool gpuhashjoin_support_multi_exec(const CustomPlanState *cps);
 extern void pgstrom_init_gpuhashjoin(void);
@@ -717,9 +710,9 @@ extern devfunc_info *pgstrom_devfunc_lookup_and_track(Oid func_oid,
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern char *pgstrom_codegen_type_declarations(codegen_context *context);
 extern char *pgstrom_codegen_func_declarations(codegen_context *context);
-extern char *pgstrom_codegen_param_declarations(codegen_context *context);
+extern char *pgstrom_codegen_param_declarations(codegen_context *context,
+												int num_skips);
 extern char *pgstrom_codegen_var_declarations(codegen_context *context);
-extern char *pgstrom_codegen_declarations(codegen_context *context);
 extern bool pgstrom_codegen_available_expression(Expr *expr);
 extern void pgstrom_init_codegen(void);
 
@@ -768,6 +761,7 @@ extern bool	pgstrom_enabled;
 extern bool pgstrom_perfmon_enabled;
 extern int	pgstrom_max_async_chunks;
 extern int	pgstrom_min_async_chunks;
+extern int  pgstrom_max_inline_varlena;
 extern double pgstrom_gpu_setup_cost;
 extern double pgstrom_gpu_operator_cost;
 extern double pgstrom_gpu_tuple_cost;
@@ -823,13 +817,13 @@ pgstrom_get_rcstore(StromObject *sobject)
 
 	if (StromTagIs(sobject, TCacheRowStore))
 	{
-		result = (StromObject *)
-			tcache_get_row_store((tcache_row_store *)sobject);
+		tcache_row_store *trs = (tcache_row_store *) sobject;
+		result = (StromObject *) pgstrom_get_row_store(trs);
 	}
 	else if (StromTagIs(sobject, TCacheColumnStore))
 	{
-		result = (StromObject *)
-			tcache_get_column_store((tcache_column_store *)sobject);
+		tcache_column_store *tcs = (tcache_column_store *) sobject;
+		result = (StromObject *) tcache_get_column_store(tcs);
 	}
 	else
 		elog(ERROR, "Bug? it's neither row nor column store");
@@ -841,13 +835,28 @@ static inline void
 pgstrom_put_rcstore(StromObject *sobject)
 {
 	if (StromTagIs(sobject, TCacheRowStore))
-		tcache_put_row_store((tcache_row_store *)sobject);
+		pgstrom_put_row_store((tcache_row_store *)sobject);
 	else if (StromTagIs(sobject, TCacheColumnStore))
 		tcache_put_column_store((tcache_column_store *)sobject);
 	else
 		elog(ERROR, "Bug? it's neither row nor column store");
 }
 
+static inline cl_uint
+pgstrom_nitems_rcstore(StromObject *sobject)
+{
+	cl_uint		nitems;
+
+	if (StromTagIs(sobject, TCacheRowStore))
+		nitems = ((tcache_row_store *) sobject)->kern.nrows;
+	else if (StromTagIs(sobject, TCacheColumnStore))
+		nitems = ((tcache_column_store *) sobject)->nrows;
+	else if (pgstrom_i_am_clserv)
+		nitems = 0;	/* tells caller rcstore is not valid */
+	else
+		elog(ERROR, "bug? it's neither row nor column store");
+	return nitems;
+}
 
 /* binary available pstrcpy() */
 static inline void *
@@ -971,44 +980,25 @@ typealign_get_width(char type_align)
 /*
  * utility function to access system kparams
  */
-static inline cl_char *
-KPARAM_GET_ATTREFS(kern_parambuf *kparams)
+
+static inline kern_data_store *
+KPARAM_GET_KDS_HEAD(kern_parambuf *kparams)
 {
 	bytea  *vl_datum = kparam_get_value(kparams, 0);
 
 	if (!vl_datum)
 		return NULL;
-	return (cl_char *)VARDATA_ANY(vl_datum);
-}
-
-static inline kern_column_store *
-KPARAM_GET_KCS_HEAD(kern_parambuf *kparams)
-{
-	bytea  *vl_datum = kparam_get_value(kparams, 1);
-
-	if (!vl_datum)
-		return NULL;
-	return (kern_column_store *)VARDATA_ANY(vl_datum);
+	return (kern_data_store *)VARDATA_ANY(vl_datum);
 }
 
 static inline kern_toastbuf *
 KPARAM_GET_KTOAST_HEAD(kern_parambuf *kparams)
 {
-	bytea  *vl_datum = kparam_get_value(kparams, 2);
+	bytea  *vl_datum = kparam_get_value(kparams, 1);
 
 	if (!vl_datum)
 		return NULL;
 	return (kern_toastbuf *)VARDATA_ANY(vl_datum);
-}
-
-static inline kern_projection *
-KPARAM_GET_KPROJECTION(kern_parambuf *kparams)
-{
-	bytea  *vl_datum = kparam_get_value(kparams, 3);
-
-	if (!vl_datum)
-		return NULL;
-	return (kern_projection *)VARDATA_ANY(vl_datum);
 }
 
 #endif	/* PG_STROM_H */

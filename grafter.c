@@ -29,17 +29,19 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan *plan)
 
 	switch (nodeTag(plan))
 	{
-#if 0
-		case T_Sort:
+		case T_Agg:
 			{
-				CustomPlan *altplan
-					= pgstrom_create_gpusort_plan((Sort *)plan,
-												  pstmt->rtable);
-				if (altplan)
-					newnode = &altplan->plan;
+				if (((Agg *) plan)->aggstrategy == AGG_SORTED)
+				{
+					/*
+					 * TODO: we'd like to replace sort based aggregation
+					 * by HashAggregate with GpuMiniAgg, if all the group-
+					 * by keys and aggregate functions are supported, and
+					 * expected memory consumption is enough reasonable.
+					 */
+				}
 			}
 			break;
-#endif
 		case T_ModifyTable:
 			{
 				ModifyTable *mtplan = (ModifyTable *) newnode;

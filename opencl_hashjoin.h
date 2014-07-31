@@ -17,100 +17,145 @@
  * Format of kernel hash table; to be prepared
  *
  * +--------------------+
- * | kern_gpuhash_table |  total length of hash table incl.
- * | +------------------+  hash entries; size of DMA send
- * | | length        o-----------------------------------+
- * | +------------------+                                |
- * | | is_matched    o---------------------------------+ |
- * | +------------------+  offset towards array to     | |
- * | | nslots (=N)      |  track which row was matched | |
- * | +------------------+  for outer join.             | |
- * | | nkeys (=M)       |                              | |
- * | +------------------+                              | |
- * | | colmeta[0]       |                              | |
- * | | colmeta[1]       |                              | |
- * | |    :             |                              | |
- * | | colmeta[M-1]     |                              | |
- * | +------------------+                              | |
- * | | hash_slot[0]     |                              | |
- * | | hash_slot[1]     |                              | |
- * | |     :            |                              | |
- * | | hash_slot[N-2] o-------+  single directioned    | |
- * | | hash_slot[N-1]   |     |  link from the         | |
- * +-+------------------+ <---+  hash_slot[]           | |
- * | kern_gpuhash_entry |                              | |
- * | +------------------+                              | |
- * | | next       o-----------+  If multiple entries   | |
- * | +------------------+     |  has same hash value,  | |
- * | | hash             |     |  these are linked.     | |
- * | +------------------+     |                        | |
- * | | rowidx           |     |                        | |
- * | +------------------+     |                        | |
- * | | keydata:         |     |                        | |
- * | | (actual values   |     |                        | |
- * | |  to be joined)   |     |                        | |
- * +-+------------------+ <---+                        | |
- * | kern_gpuhash_entry |                              | |
- * | +-----------------+-                              | |
- * | | next       o-----------+                        | |
- * | +------------------+     |                        | |
- * | | hash             |     |                        | |
- * | +------------------+     |                        | |
- * | |      :           |     |                        | |
- * |        :           |     |                        | |
- * | |      :           |     |                        | |
- * +-+------------------+ <---+                        | |
- * | kern_gpuhash_entry |                              | |
- * | +------------------+                              | |
- * | | next             |                              | |
- * | +------------------+                              | |
- * | | hash             |                              | |
- * | +------------------+                              | |
- * | | rowidx           |                              | |
- * | +------------------+                              | |
- * | | keydata          |                              | |
- * | | +----------------+                              | |
- * | | | nullmap(16bit) |                              | |
- * | | | keydata:       |                              | |
- * | | | (actual values |                              | |
- * | | |  to be joined) |                              | |
- * +-+------------------+  <---------------------------+ |
- * | is_matched         |     ^                          |
- * | (array of cl_char) |     |                          |
- * | Non-zero means     |     | sizeof(cl_char) * M      |
- * | associated inner   |     |                          |
- * | row was matched    |     |                          |
- * |        :           |     |                          |
- * |        :           |     v                          |
- * +--------------------+  <-----------------------------+
+ * | kern_multihash     |
+ * | +------------------+
+ * | | length           | <--- total length of multiple hash-tables; that
+ * | +------------------+      also meand length to be send via DMA
+ * | | ntables (=M)     | <--- number of hash-tables
+ * | +------------------+
+ * | | htbl_offset[0] o---> htbl_offset[0] is always NULL
+ * | | htbl_offset[1] o------+
+ * | |     :            |    |
+ * | |     :            |    |
+ * | | htbl_offset[M-1] |    |
+ * +-+------------------+    |
+ * |       :            |    |
+ * +--------------------+    |
+ * | kern_hashtable(0)  |    |
+ * |       :            |    |
+ * +--------------------+ <--+
+ * | kern_hashtable(1)  |
+ * |       :            |
+ * +--------------------+
+ * |       :            |
+ * +--------------------+
+ * | kern_hashtable(M-1)|
+ * |       :            |
+ * +--------------------+
+ * | region for each    |
+ * | kern_hashentry     |
+ * | items              |
+ * |                    |
+ * |                    |
+ * +--------------------+
+ *
+ * +--------------------+
+ * | kern_hashtable     |
+ * | +------------------+
+ * | | nslots (=N)      |
+ * | +------------------+
+ * | | nkeys (=M)       |
+ * | +------------------+
+ * | | colmeta[0]       |
+ * | | colmeta[1]       |
+ * | |    :             |
+ * | | colmeta[M-1]     |
+ * | +------------------+
+ * | | hash_slot[0]     |
+ * | | hash_slot[1]     |
+ * | |     :            |
+ * | | hash_slot[N-2] o-------+  single directioned link
+ * | | hash_slot[N-1]   |     |  from the hash_slot[]
+ * +-+------------------+ <---+
+ * | kern_hashentry     |
+ * | +------------------+
+ * | | next      o------------+  If multiple entries
+ * | +------------------+     |  has same hash value,
+ * | | hash             |     |  these are linked.
+ * | +------------------+     |
+ * | | rowidx           |     |
+ * | +------------------+     |
+ * | | matched          |     |
+ * | +------------------+     |
+ * | | keydata:         |     |
+ * | | nullmap[...]     |     |
+ * | | values[...]      |     |
+ * | |                  |     |
+ * | | values are put   |     |
+ * | | next to nullmap  |     |
+ * +-+------------------+ <---+
+ * | kern_hashentry     |
+ * | +------------------+
+ * | | next       o-----------> NULL
+ * | +------------------+
+ * | | hash             |
+ * | +------------------+
+ * | |      :           |
+ * | |      :           |
+ * +-+------------------+
  */
 typedef struct
 {
 	cl_uint			next;	/* offset of the next */
 	cl_uint			hash;	/* 32-bit hash value */
-	cl_ulong		rowid;	/* identifier of inner rows; upper 32bits are used
-							 * to point a particular rc-store, lower 32bits
-							 * are index within the rc-store.
-							 */
+	cl_uint			rowid;	/* identifier of inner rows */
+	cl_char			matched;/* flag to track whether this entry get matched */
+	/* above fields take 13bytes, so the keydata will usually start from
+	 * the unaligned address. However, header portion keydata is used to
+	 * nullmap. As long as nkey is less than or equal to 24 (almost right),
+	 * key values shall be start from the aligned offset without loss.
+	 */
 	cl_char			keydata[FLEXIBLE_ARRAY_MEMBER];
 } kern_hashentry;
 
 typedef struct
 {
-	cl_uint			length;	/* length of this hash table */
-	cl_uint			nslots;	/* width of hash slot */
-	cl_uint			nkeys;	/* number of keys to be compared */
-	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];
+	cl_uint			nslots;		/* width of hash slot */
+	cl_uint			nkeys;		/* number of keys to be compared */
+	cl_char			is_outer;	/* true, if outer join */
+	cl_char			__padding__[3];
+	struct {
+		cl_char		attnotnull;	/* true, if always not null */
+		cl_char		attalign;	/* type of alignment */
+		cl_short	attlen;		/* length of type */
+	} colmeta[FLEXIBLE_ARRAY_MEMBER];	/* simplified kern_colmeta */
 } kern_hashtable;
 
-#define KERN_HASHTABLE_SLOT(khash)										\
-	(__global cl_uint *)((__global char *)(khash) +						\
-						 LONGALIGN(offsetof(kern_hashtable,				\
-											colmeta[(khash)->nkeys])))
-#define KERN_HASH_NEXT_ENTRY(khash,next)								\
-	(__global kern_hashentry *)((next) == 0								\
-								? NULL									\
-								: (__global char *)(khash) + (next))
+typedef struct
+{
+	cl_uint			ntables;	/* number of hash tables (= # of inner rels) */
+	cl_uint			htable_offset[FLEXIBLE_ARRAY_MEMBER];
+} kern_multihash;
+
+#define KERN_HASHTABLE(kmhash, depth)								\
+	((__global kern_hashtable *)((__global char *)(kmhash) +		\
+								 (kmhash)->htable_offset[(depth)]))
+#define KERN_HASHTABLE_SLOT(khtable)								\
+	((__global cl_uint *)((__global char *)(khtable)+				\
+						  LONGALIGN(offsetof(kern_hashtable,		\
+											 colmeta[(khtable)->nkeys]))))
+
+static inline __global kern_hashentry *
+KERN_HASH_FIRST_ENTRY(__global kern_hashtable *khtable, cl_uint hash)
+{
+	__global cl_uint *slot = KERN_HASHTABLE_SLOT(khtable);
+	cl_uint		index = hash % khtable->nslots;
+
+	if (slot[index] == 0)
+		return NULL;
+	return (__global kern_hashentry *)((__global char *) khtable +
+									   slot[index]);
+}
+
+static inline __global kern_hashentry *
+KERN_HASH_NEXT_ENTRY(__global kern_hashtable *khtable,
+					 __global kern_hashentry *khentry)
+{
+	if (khentry->next == 0)
+		return NULL;
+	return (__global kern_hashentry *)((__global char *)khtable +
+									   khentry->next);
+}
 
 /*
  * Sequential Scan using GPU/MIC acceleration
@@ -173,8 +218,11 @@ typedef struct
 	/* also, resultbuf shall be placed next to the parambuf */
 } kern_hashjoin;
 
+#define KERN_HASHJOIN_LENGTH(khashjoin)						\
+	KERN_HASHJOIN_PARAMBUF(khashjoin)->length
 #define KERN_HASHJOIN_PARAMBUF(khashjoin)					\
 	((__global kern_parambuf *)(&(khashjoin)->kparams))
+
 #define KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin)			\
 	STROMALIGN(KERN_HASHJOIN_PARAMBUF(khashjoin)->length)
 #define KERN_HASHJOIN_RESULTBUF(khashjoin)								\
@@ -182,171 +230,167 @@ typedef struct
 								 KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin)))
 #define KERN_HASHJOIN_RESULTBUF_LENGTH(khashjoin)						\
 	STROMALIGN(offsetof(kern_resultbuf,									\
-						results[KERN_HASHJOIN_RESULTBUF(khashjoin)->nrooms]))
+						results[KERN_HASHJOIN_RESULTBUF(khashjoin)->nrels * \
+								KERN_HASHJOIN_RESULTBUF(khashjoin)->nrooms]))
 #define KERN_HASHJOIN_DMA_SENDOFS(khashjoin)	\
 	((uintptr_t)&(khashjoin)->kparams - (uintptr_t)khashjoin)
-#define KERN_HASHJOIN_DMA_SENDLEN(khashjoin, src_nitems)	\
+#define KERN_HASHJOIN_DMA_SENDLEN(khashjoin)	\
 	(KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin) +	\
-	 offsetof(kern_resultbuf, results[Max((src_nitems),0)]))
+	 offsetof(kern_resultbuf, results[0]))
 #define KERN_HASHJOIN_DMA_RECVOFS(khashjoin)	\
 	((uintptr_t)KERN_HASHJOIN_RESULTBUF(khashjoin) - (uintptr_t)(khashjoin))
 #define KERN_HASHJOIN_DMA_RECVLEN(khashjoin)	\
 	(offsetof(kern_resultbuf,					\
-			  results[KERN_HASHJOIN_RESULTBUF(khashjoin)->nrooms]))
+		results[KERN_HASHJOIN_RESULTBUF(khashjoin)->nrels *	\
+				KERN_HASHJOIN_RESULTBUF(khashjoin)->nrooms]))
 
 
 
 #ifdef OPENCL_DEVICE_CODE
 /*
- * declaration of functions being generated on the fly.
- */
-
-/*
- * gpuhashjoin_hashkey
+ * gpuhashjoin_execute
  *
- * It generates a hash-key of the specified row in the column-store.
+ * main routine of gpuhashjoin - it run hash-join logic on the supplied
+ * hash-tables and kds/ktoast pair, then stores its result on the "results"
+ * array. caller already acquires (n_matches * n_rels) slot from "results".
  */
 static cl_uint
-gpuhashjoin_hashkey(__private cl_int *errcode,
-					__global kern_parambuf *kparam,
-					__global kern_column_store *kcs,
-					__global kern_toastbuf *ktoast,
-					size_t row_index);
-/*
- * gpuhashjoin_keycomp
- *
- * It compares a hash-item with the specified row in the column-store.
- */
-static cl_bool
-gpuhashjoin_keycomp(__private cl_int *errcode,
+gpuhashjoin_execute(__private cl_int *errcode,
 					__global kern_parambuf *kparams,
-					__global kern_hashentry *kentry,
-					__global kern_column_store *kcs,
+					__global kern_multihash *kmhash,
+					__global kern_data_store *kds,
 					__global kern_toastbuf *ktoast,
-					size_t row_index,
-					cl_uint hash);
+					size_t kds_index,
+					__global cl_int *rbuffer);
 
 /*
- * gpuhashjoin_inner
+ * kern_gpuhashjoin_main
  *
- * Routine of INNER HASH-JOIN. It counts up number of matched rows on the
- * hash-table using hash-key comparison function. Then, it acquires this
- * number of result slot in the result buffer, and write a pair of row-
- * indexes back. In case of result-buffer is not sufficient, it returns
- * StromError_DataStoreNoSpace, to inform host system with mode larger
- * result buffer.
+ * entrypoint of kernel gpuhashjoin implementation. Its job can be roughly
+ * separated into two portions; the first one is to count expected number
+ * of matched items (that should be acquired on the kern_resultbuf), then
+ * the second job is to store the hashjoin result - for more correctness,
+ * it shall be done in gpuhashjoin_main automatically generated.
+ * In case when the result buffer does not have sufficient space, it
+ * returns StromError_DataStoreNoSpace to inform host system this hashjoin
+ * needs larger result buffer.
  */
-static void
-gpuhashjoin_inner(__private cl_int *errcode,
-				  __global kern_parambuf *kparams,
-				  __global kern_resultbuf *kresults,
-				  __global kern_hashtable *khashtbl,
-				  __global kern_column_store *kcs,
-				  __global kern_toastbuf *ktoast,
-				  size_t kcs_index,
-				  __local void *local_workbuf)
+__kernel void
+kern_gpuhashjoin_main(__global kern_hashjoin *khashjoin,
+					  __global kern_multihash *kmhash,
+					  __global kern_data_store *kds,
+					  __global kern_toastbuf *ktoast,
+					  __global kern_row_map *krowmap,
+					  __local void *local_workbuf)
 {
-	/* Must be set SUCCESS to errcode at caller side. */
-//	cl_int errcode 	= StromError_Success;
-	
-	cl_uint						id		 = get_local_id(0);
-	cl_int						nrows	 = (kcs)->nrows;
-	cl_uint						nMatches = 0;
-	cl_uint						nWrites  = 0;
+	__global kern_parambuf  *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
+	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
+	cl_int			errcode = StromError_Success;
+	cl_uint			n_matches;
+	cl_uint			offset;
+	cl_uint			nitems;
+	size_t			kds_index;
+	__local cl_uint	base;
 
-	cl_uint						hash_value;
-	cl_uint						slot_index;
-	__global cl_uint *			slot;
-	__global kern_hashentry * 	entry;
-	cl_uint						offset;
-	cl_uint						nitems;
-	__local cl_uint				base;
-
-
-	/* calculate a hash value */
-	hash_value = gpuhashjoin_hashkey(errcode, kparams, kcs, ktoast, kcs_index);
-	slot_index = hash_value % khashtbl->nslots;
-
-	/*
-	 * 1st-stage - walks on the hast table to count number of matched
-	 * hash-entries to estimate correct number of result slots to be
-	 * acquired later. Also note that, all the thread needs to walk on
-	 * are ones being mapped to a particular valid row in kcs.
+	/* sanity check - kresults must have sufficient width of slots for the
+	 * required hash-tables within kern_multihash.
 	 */
-	if (kcs_index < kcs->nrows)
+	if (kresults->nrels != kmhash->ntables + 1)
 	{
-		slot    = KERN_HASHTABLE_SLOT(khashtbl);
-		entry   = KERN_HASH_NEXT_ENTRY(khashtbl, slot[slot_index]);
-		while(entry)
-		{
-			if (gpuhashjoin_keycomp(errcode, kparams, entry, kcs,
-									ktoast, kcs_index, hash_value))
-				nMatches ++;
-
-			entry = KERN_HASH_NEXT_ENTRY(khashtbl, entry->next);
-		}
+		errcode = StromError_DataStoreCorruption;
+		goto out;
 	}
+
+	/* In case when kern_row_map (krowmap) is given, it means all the items
+	 * are not valid and some them have to be dealt as like invisible rows.
+	 * krowmap is an array of valid row-index.
+	 */
+	if (!krowmap)
+		kds_index = get_global_id(0);
+	else if (get_global_id(0) < krowmap->nvalids)
+		kds_index = (size_t) krowmap->rindex[get_global_id(0)];
+	else
+		kds_index = kds->nitems;	/* ensure this thread is out of range */
+
+	/* 1st-stage: At first, we walks on the hash tables to count number of
+	 * expected number of matched hash entries towards the items being in
+	 * the kern_data_store; to be aquired later for writing back the results.
+	 * Also note that a thread not mapped on a particular valid item in kds
+	 * can be simply assumed n_matches == 0.
+	 */
+	if (kds_index < kds->nitems)
+		n_matches = gpuhashjoin_execute(&errcode,
+										kparams,
+										kmhash,
+										kds, ktoast,
+										kds_index,
+										NULL);
+	else
+		n_matches = 0;
 
 	/*
 	 * XXX - calculate total number of matched tuples being searched
 	 * by this workgroup
 	 */
-	offset = arithmetic_stairlike_add(nMatches, local_workbuf, &nitems);
+	offset = arithmetic_stairlike_add(n_matches, local_workbuf, &nitems);
 
 	/*
 	 * XXX - allocation of result buffer. A tuple takes 2 * sizeof(cl_uint)
 	 * to store pair of row-indexes.
 	 * If no space any more, return an error code to retry later.
 	 *
-	 * use atomic_add(&kresults->nrows, nitems) to determine the position
+	 * use atomic_add(&kresults->nitems, nitems) to determine the position
 	 * to write. If expected usage is larger than kresults->nrooms, it
 	 * exceeds the limitation of result buffer.
 	 *
-	 * MEMO: we may need to re-define nrows/nitems using 64bit variables
+	 * MEMO: we may need to re-define nrooms/nitems using 64bit variables
 	 * to avoid overflow issues, but has special platform capability on
 	 * 64bit atomic-write...
 	 */
 	if(get_local_id(0) == 0)
-		base = (0 < nitems) ? atomic_add(&kresults->nitems, 3 * nitems) : 0;
+	{
+		if (nitems > 0)
+			base = atomic_add(&kresults->nitems, nitems);
+		else
+			base = 0;
+	}
 	barrier(CLK_LOCAL_MEM_FENCE);
 
-	/*
-	 * XXX - walk on the hash table again, to write pair of row-index
-	 * on the acquired slot
+	/* In case when (base + nitems) is larger than or equal to the nrooms,
+	 * it means we don't have enough space to write back hash-join results
+	 * to host-side. So, we have to tell the host code the provided
+	 * kern_resultbuf didn't have enough space.
 	 */
-	if(base + 3 * nitems < kresults->nrooms) 
+	if (base + nitems >= kresults->nrooms)
 	{
-		if(nMatches)
-		{
-			cl_uint		pos = base + 3 * offset;
+		errcode = StromError_DataStoreNoSpace;
+		goto out;
+	}
 
-			for (entry = KERN_HASH_NEXT_ENTRY(khashtbl, slot[slot_index]);
-				 entry;
-				 entry = KERN_HASH_NEXT_ENTRY(khashtbl, entry->next))
-			{
-				/*
-				 * results[3*i+0] = rcs-index of inner (upper 32bit of rowid)
-				 * results[3*i+1] = row-offset of inner (lower 32bit of rowid)
-				 * results[3*i+2] = row-index of outer relation stream
-				 */
-				if (gpuhashjoin_keycomp(errcode, kparams, entry, kcs,
-										ktoast, kcs_index, hash_value))
-				{
-					kresults->results[pos + 0] = (cl_uint)(entry->rowid >> 32);
-					kresults->results[pos + 1] = (cl_uint)entry->rowid;
-					kresults->results[pos + 2] = kcs_index;
-					pos += 3;
-				}
-			}
-		}
-	}
-	else 						/* Result buffer exhaust. */
+	/*
+	 * 2nd-stage: we already know how many items shall be generated on
+	 * this hash-join. So, all we need to do is to invoke auto-generated
+	 * hash-joining function with a certain address on the result-buffer.
+	 */
+	if (n_matches > 0 && kds_index < kds->nitems)
 	{
-		*errcode = StromError_DataStoreNoSpace;
+		__global cl_int	   *rbuffer
+			= kresults->results + kresults->nrels * (base + offset);
+
+		n_matches = gpuhashjoin_execute(&errcode,
+										kparams,
+										kmhash,
+										kds, ktoast,
+										kds_index,
+										rbuffer);
 	}
+out:
+	/* write-back execution status into host-side */
+	kern_writeback_error_status(&kresults->errcode, errcode, local_workbuf);
 }
 
 
+#if 0
 __kernel void
 gpuhashjoin_inner_cs(__global kern_hashjoin *khashjoin,
 					 __global kern_hashtable *khashtbl,
@@ -380,73 +424,7 @@ gpuhashjoin_inner_cs(__global kern_hashjoin *khashjoin,
 	kern_writeback_error_status(&kresults->errcode, errcode, local_workbuf);
 }
 
-__kernel void
-gpuhashjoin_inner_rs(__global kern_hashjoin *khashjoin,
-					 __global kern_hashtable *khashtbl,
-					 __global kern_row_store *krs,
-					 __global kern_column_store *kcs,
-					 cl_int   krs_nitems,
-					 __local void *local_workbuf)
-{
-	__global kern_parambuf *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
-	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
-	cl_int			errcode = StromError_Success;
-	pg_bytea_t		kparam_0 = pg_bytea_param(kparams,&errcode,0);
-	size_t			krs_index;
-	__local size_t	kcs_offset;
-	__local size_t	kcs_nitems;
-
-	/* if number of valid items are negative, it means all the items
-     * are valid. So, no need to use rindex. Elsewhere, we will take
-	 * selected records according to the rindex.
-     */
-	if (krs_nitems < 0)
-	{
-		krs_nitems = krs->nrows;
-		krs_index = get_global_id(0);
-	}
-	else if (get_global_id(0) < krs_nitems)
-		krs_index = (size_t)kresults->results[get_global_id(0)];
-	else
-		krs_index = krs->nrows;	/* ensure out of range */
-
-	/*
-	 * map this workgroup on a particular range of the column-store
-	 */
-	if (get_local_id(0) == 0)
-	{
-		if (get_global_id(0) + get_local_size(0) < krs_nitems)
-			kcs_nitems = get_local_size(0);
-		else if (get_global_id(0) < krs_nitems)
-			kcs_nitems = krs_nitems - get_global_id(0);
-		else
-			kcs_nitems = 0;
-		kcs_offset = atomic_add(&kcs->nrows, kcs_nitems);
-	}
-	barrier(CLK_LOCAL_MEM_FENCE);
-
-	/* move data into column store */
-	kern_row_to_column(&errcode,
-					   (__global cl_char *)VARDATA(kparam_0.value),
-					   krs,
-					   krs_index,
-					   kcs,
-					   NULL,
-					   kcs_offset,
-					   kcs_nitems,
-					   local_workbuf);
-	/* OK, run gpu hash join */
-	gpuhashjoin_inner(&errcode,
-					  kparams,
-					  kresults,
-					  khashtbl,
-					  kcs,
-					  (__global kern_toastbuf *)krs,
-					  kcs_offset + get_local_id(0),
-					  local_workbuf);
-	/* back execution status into host-side */
-	kern_writeback_error_status(&kresults->errcode, errcode, local_workbuf);
-}
+#endif
 
 /*
  * Template of variable reference on the hash-entry
@@ -604,12 +582,34 @@ __constant cl_uint pg_crc32_table[256] = {
 	} while (0)
 #define FIN_CRC32(crc)		((crc) ^= 0xFFFFFFFF)
 
+#define STROMCL_SIMPLE_HASHKEY_TEMPLATE(NAME,BASE)			\
+	static inline cl_uint									\
+	pg_##NAME##_hashkey(cl_uint hash, pg_##NAME##_t datum)	\
+	{														\
+		if (!datum.isnull)									\
+			COMP_CRC32(hash, &datum.value, sizeof(BASE));	\
+		return hash;										\
+	}
+
+#define STROMCL_VARLENA_HASHKEY_TEMPLATE(NAME)				\
+	static inline cl_uint									\
+	pg_##NAME##_hashkey(cl_uint hash, pg_##NAME##_t datum)	\
+	{														\
+		if (!datum.isnull)									\
+			COMP_CRC32(hash, VARDATA_ANY(datum.value),		\
+					   VARSIZE_ANY_EXHDR(datum.value));		\
+		return hash;										\
+	}
+
 #else	/* OPENCL_DEVICE_CODE */
 
-typedef struct pgstrom_hashjoin_table
+typedef struct pgstrom_multihash_tables
 {
 	StromObject		sobj;		/* = StromTab_HashJoinTable */
-	cl_uint			maxlen;		/* max length of hash-table; be allocated */
+	cl_uint			maxlen;		/* max available length (also means size
+								 * of allocated shared memory region) */
+	cl_uint			length;		/* total usage of allocated shmem
+								 * (also means length of DMA send) */
 	slock_t			lock;		/* protection of the fields below */
 	cl_int			refcnt;		/* reference counter of this hash table */
 	cl_int			dindex;		/* device to load the hash table */
@@ -618,29 +618,18 @@ typedef struct pgstrom_hashjoin_table
 								 * backed to zero, valid m_hash needs to
 								 * be released. */
 	cl_event		ev_hash;	/* event to load hash table to kernel */
-	cl_int			num_rcs;	/* number of inner row/column-stores */
-	cl_int			max_rcs;	/* max number of inner row/column-stores */
-	StromObject	  **rcstore;	/* array of row/column-store */
-	kern_hashtable	kern;
-} pgstrom_hashjoin_table;
+	kern_multihash	kern;
+} pgstrom_multihash_tables;
 
 typedef struct
 {
 	pgstrom_message	msg;		/* = StromTag_GpuHashJoin */
-	dlist_node		chain;		/* to chain free-list */
 	Datum			dprog_key;	/* device key for gpuhashjoin */
-	pgstrom_hashjoin_table *hjtable;	/* inner hashjoin table */
-	bool			hashjoin_done;
-	cl_int			src_nitems;	/* number of valid source items, if source
-								 * has valid and invalid records in mixed.
-								 * because result_buf is not used unless DMA
-								 * write-back, so kresults->results[] is
-								 * DMA send buffer of rindex.
-								 * if -1, it means all the records are valid.
-								 */
-	StromObject	   *rcs_src;	/* source outer row/column store */
-	StromObject	   *rcs_dst;	/* destination column store */
-	kern_hashjoin  *kern;
+	pgstrom_multihash_tables *mhtables;	/* inner hashjoin tables */
+	kern_hashjoin  *khashjoin;	/* a pair of kparams/kresults */
+	StromObject	   *rcstore;	/* row/column store of outer relation */
+
+	kern_row_map	krowmap;	/* valid row mapping */
 } pgstrom_gpuhashjoin;
 
 #endif	/* OPENCL_DEVICE_CODE */

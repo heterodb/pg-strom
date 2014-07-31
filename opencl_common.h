@@ -188,6 +188,16 @@ typedef struct {
 #define HEAP_XMAX_EXCL_LOCK		0x0040	/* xmax is exclusive locker */
 #define HEAP_XMAX_LOCK_ONLY		0x0080	/* xmax, if valid, is only a locker */
 
+/*
+ * information stored in t_infomask2:
+ */
+#define HEAP_NATTS_MASK			0x07FF	/* 11 bits for number of attributes */
+#define HEAP_KEYS_UPDATED		0x2000	/* tuple was updated and key cols
+										 * modified, or tuple deleted */
+#define HEAP_HOT_UPDATED		0x4000	/* tuple was HOT-updated */
+#define HEAP_ONLY_TUPLE			0x8000	/* this is heap-only tuple */
+#define HEAP2_XACT_MASK			0xE000	/* visibility-related bits */
+
 #endif
 
 /*
@@ -196,32 +206,6 @@ typedef struct {
 #define STROMALIGN_LEN			16
 #define STROMALIGN(LEN)			TYPEALIGN(STROMALIGN_LEN,LEN)
 #define STROMALIGN_DOWN(LEN)	TYPEALIGN_DOWN(STROMALIGN_LEN,LEN)
-
-/*
- * kern_colmeta
- *
- * It stores metadata of columns being on row-store because tuple with NULL
- * values does not have always constant 
- */
-typedef struct {
-	/* true, if column never has NULL (thus, no nullmap required) */
-	cl_char			attnotnull;
-	/* alignment; 1,2,4 or 8, not characters in pg_attribute */
-	cl_char			attalign;
-	/* length of attribute */
-	cl_short		attlen;
-	union {
-		/* offset to null-map and column-array from the head of column-store,
-		 * if it is kern_column_store. */
-		cl_uint			cs_ofs;
-
-		/* identifier of source relation and column, if kern_vrelation */
-		struct {
-			cl_ushort relid;	/* index of relation array */
-			cl_ushort colid;	/* index of the column within above relation */
-		} src;
-	};
-} kern_colmeta;
 
 /*
  * kern_row_store
@@ -268,7 +252,11 @@ typedef struct {
 	cl_uint			length;	/* length of this kernel row_store */
 	cl_uint			ncols;	/* number of columns in the source relation */
 	cl_uint			nrows;	/* number of rows in this store */
-	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];	/* metadata of columns */
+	struct {
+		cl_char		attnotnull;	/* true, if always not null */
+		cl_char		attalign;	/* type alignment */
+		cl_short	attlen;		/* length of type */
+	} colmeta[FLEXIBLE_ARRAY_MEMBER];	/* simplified kern_colmeta */
 } kern_row_store;
 
 static inline __global cl_uint *
@@ -309,22 +297,22 @@ kern_rowstore_get_tuple(__global kern_row_store *krs, cl_uint krs_index)
  */
 
 /*
- * kern_column_store
+ * kern_data_store
  *
- * It stores arrays in column-format
+ * It stores row- and column-oriented values in the kernel space.
  * +-----------------+
  * | length          |
  * +-----------------+
  * | ncols (=M)      |
  * +-----------------+
- * | nrows (=N)      |
+ * | nitems (=N)     |
  * +-----------------+
  * | colmeta[0]      |
- * | colmeta[1]   o-------+ colmeta[j].cs_ofs points an offset of the column-
- * |    :            |    | array in this store.
+ * | colmeta[1]   o-------+ colmeta[j].cs_offset points offset of column- or
+ * |    :            |    | row-array in this data-store
  * | colmeta[M-1]    |    |
- * +-----------------+    | (char *)(kcs) + colmeta[j].cs_ofs points is
- * | column array    |    | the address of column array.
+ * +-----------------+    | (char *)(kcs) + colmeta[j].ds_offset is address
+ * | column array    |    | of the column array.
  * | for column-0    |    |
  * +-----------------+ <--+
  * | +---------------|
@@ -335,6 +323,10 @@ kern_rowstore_get_tuple(__global kern_row_store *krs, cl_uint krs_index)
  * | | column-1      |
  * | |               |
  * +-+---------------+
+ * | row-store for   | If colmeta[j].attisrow is TRUE, the region pointed by
+ * | column-2 and    | colmeta[j].ds_offset is row-store, instead of column-
+ * | column-X, ...   | array. Its layout is kern_row_store above.
+ * +-+---------------+
  * |      :          |
  * |      :          |
  * +-----------------+
@@ -343,12 +335,37 @@ kern_rowstore_get_tuple(__global kern_row_store *krs, cl_uint krs_index)
  * +-----------------+
  */
 typedef struct {
+	/* true, if column never has NULL (thus, no nullmap required) */
+	cl_char			attnotnull;
+	/* alignment; 1,2,4 or 8, not characters in pg_attribute */
+	cl_char			attalign;
+	/* length of attribute */
+	cl_short		attlen;
+	union {
+		/* 0 is valid value for neither rs_attnum (for row-store) nor
+		 * cs_offset (for column-store).
+		 */
+		cl_uint		attvalid;
+		/* If row-store, it is attribute number within row-store.
+		 * (Note that attribute number is always positive, whole-
+		 * -row references and system columns are not supported.)
+		 */
+		cl_uint		rs_attnum;
+		/* If column-store, offset to nullmap and column-array from the
+		 * head of kern_data_store.
+		 */
+		cl_uint		cs_offset;
+	};
+} kern_colmeta;
+
+typedef struct {
 	cl_uint			length;	/* length of this kernel column-store */
 	cl_uint			ncols;	/* number of columns in this store */
-	cl_uint			nrows;  /* number of records in this store */
-	cl_uint			nrooms;	/* max number of records can be stored */
+	cl_uint			nitems; /* number of rows in this store */
+	cl_char			column_form; /* if true, data store is column-format */
+	cl_char			__padding__[3];
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
-} kern_column_store;
+} kern_data_store;
 
 /*
  * kern_toastbuf
@@ -390,40 +407,6 @@ typedef struct {
 } kern_toastbuf;
 
 /*
- * kern_get_datum
- *
- * Reference to a particular datum on the supplied column store.
- * It returns NULL, If it is a null-value in context of SQL. Elsewhere,
- * it returns a pointer towards global memory.
- */
-static inline __global void *
-kern_get_datum(__global kern_column_store *kcs,
-			   cl_uint colidx,
-			   cl_uint rowidx)
-{
-	kern_colmeta colmeta;
-	cl_uint		offset;
-
-	if (colidx >= kcs->ncols || rowidx >= kcs->nrows)
-		return NULL;
-
-	colmeta = kcs->colmeta[colidx];
-	offset = colmeta.cs_ofs;
-	if (!colmeta.attnotnull)
-	{
-		if (att_isnull(rowidx, (__global char *)kcs + offset))
-			return NULL;
-		offset += STROMALIGN((kcs->nrooms + 7) >> 3);
-	}
-	if (colmeta.attlen > 0)
-		offset += colmeta.attlen * rowidx;
-	else
-		offset += sizeof(cl_uint) * rowidx;
-
-	return (__global void *)((__global char *)kcs + offset);
-}
-
-/*
  * kern_parambuf
  *
  * Const and Parameter buffer. It stores constant values during a particular
@@ -454,75 +437,35 @@ kparam_get_value(kern_parambuf *kparams, cl_uint pindex)
  * host side and abort transactions. 'results' informs row-level status.
  */
 typedef struct {
+	cl_uint		nrels;		/* number of relations to be appeared */
 	cl_uint		nrooms;		/* max number of results rooms */
 	cl_uint		nitems;		/* number of results being written */
 	cl_int		errcode;	/* chunk-level error */
+	cl_char		has_rechecks;
+	cl_char		all_visible;
+	cl_char		__padding__[2];
 	cl_int		results[FLEXIBLE_ARRAY_MEMBER];
 } kern_resultbuf;
 
 /*
- * kern_vrelation
+ * kern_row_map
  *
- * It is a representation of a virtual relation view being consists of
- * one or multiple relations. 
- *
- *
- *
- * It manages row-index (that points a particular row in a row/column-store)
- * of one or more relations if joinned. In case when nrels > 1, a bulkstore
- * has multiple row-indexed with same length. Each item in rindex for each
- * relation represents same row in the result relation view. The result
- * relation will have 'ncols' number of columns. Its metadata is stored
- * in the tlist members.
- * Usually, row-index is a positive number that points (row-index -1)'s
- * item of the relation. In case of negative number, it means scan/join
- * conditions have to be checked on the host again.
- *
- *   kern_vrelation
- * +--------------------+
- * | nrels              |
- * +--------------------+
- * | ncols              |
- * +--------------------+
- * | nitems             |
- * +--------------------+
- * | nrooms             |
- * +--------------------+
- * | errcode            |
- * +--------------------+
- * | tlist[0]           |
- * |    :               |
- * |    :               |
- * | tlist[ncols-1]     |
- * +--------------------+ ---
- * | cl_int rindex[]    |  ^
- * | for relation-0     |  | sizeof(cl_int)
- * |    :               |  | * nrooms
- * |    :               |  v
- * +--------------------+ ---
- * |    :               |
- * +--------------------+
- * | cl_int rindex[]    |
- * | for relation-(N-1) |
- * |    :               |
- * |    :               |
- * +--------------------+
+ * It informs kernel code which rows are valid, and which ones are not, if
+ * kern_data_store contains mixed 
  */
-#define VRELATION_MAX_RELS		8
 typedef struct {
-	cl_int			nrels;
-	cl_int			ncols;
-	cl_int			nitems;
-	cl_int			nrooms;
-	cl_char			has_recheck;	/* true, if any rows to be rechecked */
-	cl_int			errcode;	/* space to write back*/
-	kern_colmeta	vtlist[FLEXIBLE_ARRAY_MEMBER];
-} kern_vrelation;
+	cl_int		nvalids;	/* # of valid rows. -1 means all visible */
+	cl_int		rindex[FLEXIBLE_ARRAY_MEMBER];
+} kern_row_map;
 
-#define KERN_VRELATION_RINDEX(kvrel, relid)								\
-	((__global char *)(kvrel) +											\
-	 STROMALIGN(offsetof(kern_vrelation, vtlist[(kvrel)->ncols])) +		\
-	 STROMALIGN(sizeof(cl_uint) * (kvrel)->nrooms) * (relid))
+#if 0
+
+typedef struct {
+	/* same as kern_row_map but works for column references */
+
+} kern_column_map;
+
+#endif
 
 #ifdef OPENCL_DEVICE_CODE
 /*
@@ -551,6 +494,11 @@ typedef struct {
  * varlena structure on the global memory.
  */
 
+/* forward declaration of access interface to kern_data_store */
+static __global void *kern_get_datum(__global kern_data_store *kds,
+									 __global kern_toastbuf *ktoast,
+									 cl_uint colidx, cl_uint rowidx);
+
 /*
  * Template of variable classes: fixed-length referenced by value
  * ---------------------------------------------------------------
@@ -563,14 +511,15 @@ typedef struct {
 
 #define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)			\
 	static pg_##NAME##_t									\
-	pg_##NAME##_vref(__global kern_column_store *kcs,		\
-					 __private int *p_errcode,				\
+	pg_##NAME##_vref(__global kern_data_store *kds,			\
+					 __global kern_toastbuf *ktoast,		\
+					 __private int *errcode,				\
 					 cl_uint colidx,						\
 					 cl_uint rowidx)						\
 	{														\
 		pg_##NAME##_t result;								\
 		__global BASE *addr									\
-			= kern_get_datum(kcs,colidx,rowidx);			\
+			= kern_get_datum(kds,ktoast,colidx,rowidx);		\
 															\
 		if (!addr)											\
 			result.isnull = true;							\
@@ -584,19 +533,19 @@ typedef struct {
 
 #define STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)			\
 	static pg_##NAME##_t									\
-	pg_##NAME##_param(__global kern_parambuf *kparam,		\
-					  __private int *p_errcode,				\
+	pg_##NAME##_param(__global kern_parambuf *kparams,		\
+					  __private int *errcode,				\
 					  cl_uint param_id)						\
 	{														\
 		pg_##NAME##_t result;								\
 		__global BASE *addr;								\
 															\
-		if (param_id < kparam->nparams &&					\
-			kparam->poffset[param_id] > 0)					\
+		if (param_id < kparams->nparams &&					\
+			kparams->poffset[param_id] > 0)					\
 		{													\
 			result.value = *((__global BASE *)				\
-							 ((uintptr_t)kparam +			\
-							  kparam->poffset[param_id]));	\
+							 ((uintptr_t)kparams +			\
+							  kparams->poffset[param_id]));	\
 			result.isnull = false;							\
 		}													\
 		else												\
@@ -607,7 +556,7 @@ typedef struct {
 
 #define STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)				\
 	static pg_bool_t										\
-	pgfn_##NAME##_isnull(__private int *p_errcode,			\
+	pgfn_##NAME##_isnull(__private int *errcode,			\
 						 pg_##NAME##_t arg)					\
 	{														\
 		pg_bool_t result;									\
@@ -618,7 +567,7 @@ typedef struct {
 	}														\
 															\
 	static pg_bool_t										\
-	pgfn_##NAME##_isnotnull(__private int *p_errcode,		\
+	pgfn_##NAME##_isnotnull(__private int *errcode,			\
 							pg_##NAME##_t arg)				\
 	{														\
 		pg_bool_t result;									\
@@ -773,57 +722,166 @@ typedef struct varatt_indirect
 #define VARDATA_1B(PTR)	(((__global varattrib_1b *) (PTR))->va_data)
 #define VARDATA_ANY(PTR) \
 	(VARATT_IS_1B(PTR) ? VARDATA_1B(PTR) : VARDATA_4B(PTR))
+
+/*
+ * kern_get_datum
+ *
+ * Reference to a particular datum on the supplied kernel data store.
+ * It returns NULL, if it is a really null-value in context of SQL,
+ * or in case when out of range with error code
+ */
+static inline __global void *
+kern_get_datum_rs(__global kern_data_store *kds,
+				  cl_uint colidx, cl_uint rowidx)
+{
+	__global kern_row_store	*krs;
+	__global rs_tuple		*rs_tup;
+	cl_uint		i, ncols;
+	cl_uint		offset;
+
+	offset = STROMALIGN(offsetof(kern_data_store, colmeta[kds->ncols]));
+	krs = (__global kern_row_store *)((__global char *)kds + offset);
+	rs_tup = kern_rowstore_get_tuple(krs, rowidx);
+	if (!rs_tup)
+		return NULL;
+
+	offset = rs_tup->data.t_hoff;
+	ncols = (rs_tup->data.t_infomask2 & HEAP_NATTS_MASK);
+	/* a shortcut if colidx is obviously out of range */
+	if (colidx >= ncols)
+		return NULL;
+
+	for (i=0; i < ncols; i++)
+	{
+		if ((rs_tup->data.t_infomask & HEAP_HASNULL) != 0 &&
+			att_isnull(i, rs_tup->data.t_bits))
+		{
+			if (i == colidx)
+				return NULL;
+		}
+		else
+		{
+			__global char  *addr;
+
+			if (krs->colmeta[i].attlen > 0)
+				offset = TYPEALIGN(krs->colmeta[i].attalign, offset);
+			else if (!VARATT_NOT_PAD_BYTE((uintptr_t)&rs_tup->data + offset))
+				offset = TYPEALIGN(krs->colmeta[i].attalign, offset);
+
+			addr = ((__global char *)&rs_tup->data) + offset;
+			if (i == colidx)
+				return addr;
+
+			offset += (krs->colmeta[i].attlen > 0
+					   ? krs->colmeta[i].attlen
+					   : VARSIZE_ANY(addr));
+		}
+	}
+	return NULL;
+}
+
+static __global void *
+kern_get_datum_cs(__global kern_data_store *kds,
+				  __global kern_toastbuf *ktoast,
+				  cl_uint colidx, cl_uint rowidx)
+{
+	kern_colmeta	cmeta = kds->colmeta[colidx];
+	cl_uint			offset;
+	__global void  *addr;
+
+	/* why is this column referenced? */
+	if (!cmeta.attvalid)
+		return NULL;
+
+	offset = cmeta.cs_offset;
+
+	/* elsewhere, reference to the column-array, straight-forward */
+	if (!cmeta.attnotnull)
+	{
+		if (att_isnull(rowidx, (__global char *)kds + offset))
+			return NULL;
+		offset += STROMALIGN((kds->nitems +
+							  BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+	}
+	if (cmeta.attlen > 0)
+	{
+		offset += cmeta.attlen * rowidx;
+		addr = (__global void *)((__global char *)kds + offset);
+	}
+	else
+	{
+		cl_uint	vl_ofs;
+
+		offset += sizeof(cl_uint) * rowidx;
+		vl_ofs = *((__global cl_uint *)((__global char *)kds + offset));
+		if (ktoast->length == TOASTBUF_MAGIC)
+			vl_ofs += ktoast->coldir[colidx];
+		addr = (__global void *)((__global char *)ktoast + vl_ofs);
+	}
+	return addr;
+}
+
+static inline __global void *
+kern_get_datum(__global kern_data_store *kds,
+			   __global kern_toastbuf *ktoast,
+			   cl_uint colidx, cl_uint rowidx)
+{
+	/* is it out of range? */
+	if (colidx >= kds->ncols || rowidx >= kds->nitems)
+		return NULL;
+
+	if (!kds->column_form)
+		return kern_get_datum_rs(kds,colidx,rowidx);
+	else
+		return kern_get_datum_cs(kds, ktoast, colidx, rowidx);
+}
+
 /*
  * functions to reference variable length variables
  */
 STROMCL_SIMPLE_DATATYPE_TEMPLATE(varlena, __global varlena *)
 
 static inline pg_varlena_t
-pg_varlena_vref(__global kern_column_store *kcs,
-				__global kern_toastbuf *toast,
-				__private int *p_errcode,
+pg_varlena_vref(__global kern_data_store *kds,
+				__global kern_toastbuf *ktoast,
+				__private int *errcode,
 				cl_uint colidx,
 				cl_uint rowidx)
 {
 	pg_varlena_t result;
-	__global cl_uint *p_offset = kern_get_datum(kcs,colidx,rowidx);
+	__global varlena *vl_val = kern_get_datum(kds,ktoast,colidx,rowidx);
 
-	if (!p_offset)
+	if (!vl_val)
 		result.isnull = true;
 	else
 	{
-		cl_uint	offset = *p_offset;
-		__global varlena *val;
-		if (toast->length == TOASTBUF_MAGIC)
-			offset += toast->coldir[colidx];
-		val = ((__global varlena *)((__global char *)toast + offset));
-		if (VARATT_IS_4B_U(val) || VARATT_IS_1B(val))
+		if (VARATT_IS_4B_U(vl_val) || VARATT_IS_1B(vl_val))
 		{
 			result.isnull = false;
-			result.value = val;
+			result.value = vl_val;
 		}
 		else
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(p_errcode, StromError_RowReCheck);
+			STROM_SET_ERROR(errcode, StromError_RowReCheck);
 		}
 	}
 	return result;
 }
 
 static inline pg_varlena_t
-pg_varlena_param(__global kern_parambuf *kparam,
-				 __private int *p_errcode,
+pg_varlena_param(__global kern_parambuf *kparams,
+				 __private int *errcode,
 				 cl_uint param_id)
 {
 	pg_varlena_t	result;
 	__global varlena *addr;
 
-	if (param_id < kparam->nparams &&
-		kparam->poffset[param_id] > 0)
+	if (param_id < kparams->nparams &&
+		kparams->poffset[param_id] > 0)
 	{
 		__global varlena *val = (__global varlena *)
-			((__global char *)kparam + kparam->poffset[param_id]);
+			((__global char *)kparams + kparams->poffset[param_id]);
 		if (VARATT_IS_4B_U(val) || VARATT_IS_1B(val))
 		{
 			result.value = val;
@@ -832,7 +890,7 @@ pg_varlena_param(__global kern_parambuf *kparam,
 		else
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(p_errcode, StromError_RowReCheck);
+			STROM_SET_ERROR(errcode, StromError_RowReCheck);
 		}
 	}
 	else
@@ -848,36 +906,36 @@ STROMCL_SIMPLE_NULLTEST_TEMPLATE(varlena)
 
 #define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)						\
 	static inline pg_##NAME##_t										\
-	pg_##NAME##_vref(__global kern_column_store *kcs,				\
-					 __global kern_toastbuf *toast,					\
-					 __private int *p_errcode,						\
+	pg_##NAME##_vref(__global kern_data_store *kds,					\
+					 __global kern_toastbuf *ktoast,				\
+					 __private int *errcode,						\
 					 cl_uint colidx,								\
 					 cl_uint rowidx)								\
 	{																\
-		return pg_varlena_vref(kcs,toast,p_errcode,colidx,rowidx);	\
+		return pg_varlena_vref(kds,ktoast,errcode,colidx,rowidx);	\
 	}
 
 #define STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)						\
 	static pg_##NAME##_t											\
-	pg_##NAME##_param(__global kern_parambuf *kparam,				\
-					  __private int *p_errcode,						\
+	pg_##NAME##_param(__global kern_parambuf *kparams,				\
+					  __private int *errcode,						\
 					  cl_uint param_id)								\
 	{																\
-		return pg_varlena_param(kparam,p_errcode,param_id);			\
+		return pg_varlena_param(kparams,errcode,param_id);			\
 	}
 
 #define STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)						\
 	static pg_bool_t												\
-	pgfn_##NAME##_isnull(__private int *p_errcode,					\
+	pgfn_##NAME##_isnull(__private int *errcode,					\
 					   pg_##NAME##_t arg)							\
 	{																\
-		return pgfn_varlena_isnull(p_errcode, arg);					\
+		return pgfn_varlena_isnull(errcode, arg);					\
 	}																\
 	static pg_bool_t												\
-	pgfn_##NAME##_isnotnull(__private int *p_errcode,				\
+	pgfn_##NAME##_isnotnull(__private int *errcode,					\
 						  pg_##NAME##_t arg)						\
 	{																\
-		return pgfn_varlena_isnotnull(p_errcode, arg);				\
+		return pgfn_varlena_isnotnull(errcode, arg);				\
 	}
 
 #define STROMCL_VARLENA_TYPE_TEMPLATE(NAME)			\
@@ -1084,6 +1142,8 @@ arithmetic_stairlike_add(cl_uint my_value, __local cl_uint *items,
 		*total_sum = items[get_local_size(0) - 1];
 	return items[get_local_id(0)] - my_value;
 }
+
+#if 0
 
 /*
  * kern_varlena_to_toast
@@ -1550,6 +1610,7 @@ kern_row_to_column(__private cl_int *errcode,
 	}
 	barrier(CLK_GLOBAL_MEM_FENCE);
 }
+#endif
 #endif /* OPENCL_DEVICE_CODE */
 #ifdef OPENCL_DEVICE_CODE
 /*
@@ -1613,6 +1674,17 @@ kern_writeback_error_status(__global cl_int *error_status,
  *
  * ------------------------------------------------------------
  */
+
+/* A utility function to evaluate pg_bool_t value as if built-in
+ * bool variable.
+ */
+static inline bool
+EVAL(pg_bool_t arg)
+{
+	if (!arg.isnull && arg.value != 0)
+		return true;
+	return false;
+}
 
 /*
  * Functions for BooleanTest
