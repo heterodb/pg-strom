@@ -1,4 +1,9 @@
 --
+-- Schema to deploy PG-Strom objects
+--
+CREATE SCHEMA IF NOT EXISTS pgstrom;
+
+--
 -- pg_strom installation queries
 --
 CREATE TYPE __pgstrom_shmem_info AS (
@@ -122,3 +127,133 @@ CREATE FUNCTION pgstrom_shmem_free(int8)
   RETURNS bool
   AS 'MODULE_PATHNAME', 'pgstrom_shmem_free_func'
   LANGUAGE C STRICT;
+
+--
+-- functions for GpuPreAgg
+--
+CREATE FUNCTION pgstrom.sum_int8_accum(int8[], int4, int8)
+  RETURNS int8[]
+  AS 'MODULE_PATHNAME', 'pgstrom_sum_int8_accum'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.sum_int8_final(int8[])
+  RETURNS int8
+  AS 'MODULE_PATHNAME', 'pgstrom_sum_int8_final'
+  LANGUAGE C STRICT;
+
+CREATE AGGREGATE pgstrom.ex_avg(int4, int8)
+(
+  sfunc = pgstrom.accum_int8,
+  stype = int8[],
+  finalfunc = pg_catalog.int8_avg,
+  initcond = '{0,0}'
+);
+
+CREATE AGGREGATE pgstrom.ex_sum(int8)
+(
+  sfunc = pgstrom.accum_int8,
+  stype = int8[],
+  finalfunc = pgstrom.sum_int8_final,
+  initcond = '{0,0}'
+);
+
+CREATE FUNCTION pgstrom.sum_float8_accum(float8[], int4, float8)
+  RETURNS float8[]
+  AS 'MODULE_PATHNAME', 'pgstrom_sum_float8_accum'
+  LANGUAGE C STRICT;
+
+CREATE AGGREGATE pgstrom.ex_avg(int4, float8)
+(
+  sfunc = pgstrom.sum_float8_accum,
+  stype = float8[],
+  finalfunc = pg_catalog.float8_avg,
+  initcond = '{0,0,0}'
+);
+
+CREATE FUNCTION pgstrom.variance_float8_accum(float8[], int4, float8, float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'pgstrom_variance_float8_accum'
+  LANGUAGE C STRICT;
+
+
+
+
+CREATE AGGREGATE pgstrom.ex_stddev(int4, float8, float8)
+(
+  sfunc = pgstrom.variance_float8_accum,
+  stype = float8[],
+  finalfunc = pg_catalog.float8_stddev,
+  initcond = '{0,0,0}'
+);
+
+CREATE AGGREGATE pgstrom.ex_stddev_samp(int4, float8, float8)
+(
+  sfunc = pgstrom.variance_float8_accum,
+  stype = float8[],
+  finalfunc = pg_catalog.float8_stddev_samp,
+  initcond = '{0,0,0}'
+);
+
+CREATE AGGREGATE pgstrom.ex_stddev_pop(int4, float8, float8)
+(
+  sfunc = pgstrom.variance_float8_accum,
+  stype = float8[],
+  finalfunc = pg_catalog.float8_stddev_pop,
+  initcond = '{0,0,0}'
+);
+
+CREATE AGGREGATE pgstrom.ex_variance(int4, float8, float8)
+(
+  sfunc = pgstrom.variance_float8_accum,
+  stype = float8[],
+  finalfunc = pg_catalog.float8_var_samp,
+  initcond = '{0,0,0}'
+);
+
+CREATE AGGREGATE pgstrom.ex_var_samp(int4, float8, float8)
+(
+  sfunc = pgstrom.variance_float8_accum,
+  stype = float8[],
+  finalfunc = pg_catalog.float8_var_samp,
+  initcond = '{0,0,0}'
+);
+
+CREATE AGGREGATE pgstrom.ex_var_pop(int4, float8, float8)
+(
+  sfunc = pgstrom.variance_float8_accum,
+  stype = float8[],
+  finalfunc = pg_catalog.float8_var_pop,
+  initcond = '{0,0,0}'
+);
+
+CREATE FUNCTION pgstrom.covariance_float8_accum(float8[], int4, float8, float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'pgstrom_covariance_float8_accum'
+  LANGUAGE C STRICT;
+
+CREATE AGGREGATE pgstrom.ex_corr(int4, float8, float8, float8,
+                                       float8, float8, float8)
+(
+  sfunc = pgstrom.covariance_float8_accum,
+  stype = float8[],
+  finalfunc = float8_corr,
+  initcond = '{0,0,0,0,0,0}'
+);
+
+CREATE AGGREGATE pgstrom.ex_covar_pop(int4, float8, float8, float8,
+                                       float8, float8, float8)
+(
+  sfunc = pgstrom.covariance_float8_accum,
+  stype = float8[],
+  finalfunc = float8_covar_pop,
+  initcond = '{0,0,0,0,0,0}'
+);
+
+CREATE AGGREGATE pgstrom.ex_covar_samp(int4, float8, float8, float8,
+                                       float8, float8, float8)
+(
+  sfunc = pgstrom.covariance_float8_accum,
+  stype = float8[],
+  finalfunc = float8_covar_samp,
+  initcond = '{0,0,0,0,0,0}'
+);

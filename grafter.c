@@ -30,18 +30,13 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan *plan)
 	switch (nodeTag(plan))
 	{
 		case T_Agg:
-			{
-				if (((Agg *) plan)->aggstrategy == AGG_SORTED)
-				{
-					/*
-					 * TODO: we'd like to replace sort based aggregation
-					 * by HashAggregate with GpuMiniAgg, if all the group-
-					 * by keys and aggregate functions are supported, and
-					 * expected memory consumption is enough reasonable.
-					 */
-				}
-			}
+			/*
+			 * Try to inject GpuPreAgg plan if cost of the aggregate plan
+			 * is enough expensive to justify preprocess by GPU.
+			 */
+			pgstrom_try_insert_gpupreagg(pstmt, (Agg *) plan);
 			break;
+
 		case T_ModifyTable:
 			{
 				ModifyTable *mtplan = (ModifyTable *) newnode;
