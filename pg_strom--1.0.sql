@@ -131,6 +131,82 @@ CREATE FUNCTION pgstrom_shmem_free(int8)
 --
 -- functions for GpuPreAgg
 --
+
+-- definition of partial max
+CREATE FUNCTION pgstrom.pmax(int2)
+  RETURNS int2
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.pmax(int4)
+  RETURNS int4
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.pmax(int8)
+  RETURNS int8
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.pmax(float4)
+  RETURNS float4
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.pmax(float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  LANGUAGE C STRICT;
+
+-- definition of partial min
+CREATE FUNCTION pgstrom.pmin(int2)
+  RETURNS int2
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.pmin(int4)
+  RETURNS int4
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.pmin(int8)
+  RETURNS int8
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.pmin(float4)
+  RETURNS float4
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.pmin(float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  LANGUAGE C STRICT;
+
+-- definition of partial sum (returns 64bit)
+CREATE FUNCTION pgstrom.psum(int2)
+  RETURNS int8
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.psum(int4)
+  RETURNS int8
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.psum(int8)
+  RETURNS int8
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.psum(float4)
+  RETURNS float4
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.psum(float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  LANGUAGE C STRICT;
+
+-- definition of partial sum (returns 32bit), for nrows usually
+CREATE FUNCTION pgstrom.psum32(int4)
+  RETURNS int4
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  LANGUAGE C STRICT;
+
+--
+-- definition of trans/final functioin of alternative aggregates
+--
 CREATE FUNCTION pgstrom.sum_int8_accum(int8[], int4, int8)
   RETURNS int8[]
   AS 'MODULE_PATHNAME', 'pgstrom_sum_int8_accum'

@@ -304,18 +304,18 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 			lengths[count] = strlen(pgstrom_opencl_gpuscan_code);
 			count++;
 		}
-		/* gpusort device implementation */
-		if (dprog->extra_flags & DEVKERNEL_NEEDS_GPUSORT)
-		{
-			sources[count] = pgstrom_opencl_gpusort_code;
-			lengths[count] = strlen(pgstrom_opencl_gpusort_code);
-			count++;
-		}
 		/* hashjoin device implementation */
 		if (dprog->extra_flags & DEVKERNEL_NEEDS_HASHJOIN)
 		{
 			sources[count] = pgstrom_opencl_hashjoin_code;
 			lengths[count] = strlen(pgstrom_opencl_hashjoin_code);
+			count++;
+		}
+		/* gpupreagg device implementation */
+		if (dprog->extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
+		{
+			sources[count] = pgstrom_opencl_gpupreagg_code;
+			lengths[count] = sizeof(pgstrom_opencl_gpupreagg_code);
 			count++;
 		}
 

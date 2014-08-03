@@ -3344,7 +3344,6 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	for (rowid=0; ; rowid++)
 	{
 		TupleTableSlot *scan_slot;
-		TupleDesc		scan_tupdesc;
 		Datum			value;
 		bool			isnull;
 		int				i_key;
@@ -3355,7 +3354,6 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		scan_slot = ExecProcNode(outerPlanState(mhs));
 		if (TupIsNull(scan_slot))
 			break;
-		scan_tupdesc = scan_slot->tts_tupleDescriptor;
 
 		/*
 		 * estimate required size for each hash entry; it is a little bit

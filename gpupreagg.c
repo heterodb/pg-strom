@@ -11,7 +11,13 @@
  * within this package.
  */
 #include "postgres.h"
-
+#include "catalog/pg_aggregate.h"
+#include "catalog/pg_type.h"
+#include "catalog/pg_proc.h"
+#include "utils/guc.h"
+#include "utils/lsyscache.h"
+#include "utils/syscache.h"
+#include <math.h>
 #include "pg_strom.h"
 
 static CustomPlanMethods		gpupreagg_plan_methods;
@@ -20,6 +26,8 @@ static bool						enable_gpupreagg;
 typedef struct
 {
 	CustomPlan		cplan;
+	const char	   *kernel_source;
+	int				extra_flags;
 
 } GpuPreAggPlan;
 
@@ -28,27 +36,34 @@ typedef struct
  * An alternative functions 
  *
  */
-#define ALTFUNC_EXPR_NROWS				100	/* PSUM(1) */
-#define ALTFUNC_EXPR_NROWS_NOTNULL		101	/* PSUM((X IS NOT NULL)::int) */
-#define ALTFUNC_EXPR_MIN_ARG1			102	/* PMIN(X) */
-#define ALTFUNC_EXPR_MAX_ARG1			103	/* PMAX(X) */
-#define ALTFUNC_EXPR_SUM_ARG1			104	/* PSUM(X) */
-#define ALTFUNC_EXPR_SUM_ARG2			105	/* PSUM(Y) */
-#define ALTFUNC_EXPR_SUM_ARG1_MUL_ARG1	106	/* PSUM(X*X) */
-#define ALTFUNC_EXPR_SUM_ARG2_MUL_ARG2	107	/* PSUM(Y*Y) */
-#define ALTFUNC_EXPR_SUM_ARG1_MUL_ARG2	108	/* PSUM(X*Y) */
+#define ALTFUNC_EXPR_NROWS				101	/* PSUM(1) */
+#define ALTFUNC_EXPR_NROWS_NOTNULL		102	/* PSUM((X IS NOT NULL)::int) */
+#define ALTFUNC_EXPR_MIN_ARG1			103	/* PMIN(X) */
+#define ALTFUNC_EXPR_MAX_ARG1			104	/* PMAX(X) */
+#define ALTFUNC_EXPR_SUM_ARG1			105	/* PSUM(X) */
+#define ALTFUNC_EXPR_SUM_ARG2			106	/* PSUM(Y) */
+#define ALTFUNC_EXPR_SUM_ARG1_MUL_ARG1	107	/* PSUM(X*X) */
+#define ALTFUNC_EXPR_SUM_ARG2_MUL_ARG2	108	/* PSUM(Y*Y) */
+#define ALTFUNC_EXPR_SUM_ARG1_MUL_ARG2	109	/* PSUM(X*Y) */
 
-static struct {
+
+
+
+/*
+ * List of supported aggregate functions
+ */
+typedef struct {
 	/* aggregate function can be preprocessed */
 	const char *aggfn_name;
 	int			aggfn_nargs;
-	Oid			aggfn_argtypes[4]
+	Oid			aggfn_argtypes[4];
 	/* alternative function to generate same result */
 	const char *altfn_name;
 	int			altfn_nargs;
 	Oid			altfn_argtypes[8];
 	int			altfn_argexprs[8];
-} aggfunc_catalog[] = {
+} aggfunc_catalog_t;
+static aggfunc_catalog_t  aggfunc_catalog[] = {
 	/* AVG(X) = EX_AVG(NROWS(), PSUM(X)) */
 	{ "avg",    1, {INT2OID},
 	  "ex_avg", 2, {INT4OID, INT8OID},
@@ -164,23 +179,185 @@ static struct {
 	   ALTFUNC_EXPR_SUM_ARG1_MUL_ARG2}},
 };
 
-
-
-
-
-
-
-
-void
-pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
+static const aggfunc_catalog_t *
+aggfunc_lookup_by_oid(Oid aggfnoid)
 {
-	/* Our major pain on aggregation is data sorting on the tons of
-	 * input records. So, GpuPreAgg tries to reduce number of input
-	 * records using partial data reduction and tlist rewriting.
-	 * Elsewhere, we don't think it has great advantages.
+	Form_pg_proc	proform;
+	HeapTuple		htup;
+	int				i;
+
+	htup = SearchSysCache1(PROCOID, ObjectIdGetDatum(aggfnoid));
+	if (!HeapTupleIsValid(htup))
+		elog(ERROR, "cache lookup failed for function %u", aggfnoid);
+	proform = (Form_pg_proc) GETSTRUCT(htup);
+
+	for (i=0; i < lengthof(aggfunc_catalog); i++)
+	{
+		aggfunc_catalog_t  *catalog = &aggfunc_catalog[i];
+
+		if (strcmp(catalog->aggfn_name, NameStr(proform->proname)) == 0 &&
+			catalog->aggfn_nargs == proform->pronargs &&
+			memcmp(catalog->aggfn_argtypes,
+				   proform->proargtypes.values,
+				   sizeof(Oid) * catalog->aggfn_nargs) == 0)
+		{
+			ReleaseSysCache(htup);
+			return catalog;
+		}
+	}
+	ReleaseSysCache(htup);
+	return NULL;
+}
+
+
+
+
+/*
+ * is_aggregate_supported - It checks whether the supplied Aggregate node
+ * is consists of only supported features. If OK, we can move to the cost
+ * estimation and query rewriting.
+ */
+static bool
+is_aggregate_supported(Agg *agg)
+{
+	ListCell   *lc1;
+	ListCell   *lc2;
+	int			i;
+
+	/*
+	 * check targetlist - if aggregate function, it has to be described
+	 * on the catalog. elsewhere, it has to be supported expression.
 	 */
-	if (agg->aggstrategy != AGG_SORTED)
-		return;
+	foreach (lc1, agg->plan.targetlist)
+	{
+		TargetEntry *tle = lfirst(lc1);
+
+		Assert(IsA(tle, TargetEntry));
+
+		if (IsA(tle->expr, Aggref))
+		{
+			Aggref *aggref = (Aggref *) tle->expr;
+
+			/* aggregate function has to be supported */
+			if (!aggfunc_lookup_by_oid(aggref->aggfnoid))
+				return false;
+			/* also, its arguments have to be supported expression */
+			foreach (lc2, aggref->args)
+			{
+				TargetEntry *argtle = lfirst(lc2);
+				Assert(IsA(argtle, TargetEntry));
+
+				if (!pgstrom_codegen_available_expression(argtle->expr))
+					return false;
+			}
+		}
+		/*
+		 * NOTE: no need to check grouped variable reference on the target-
+		 * list, because its calculation shall be done on the Agg node of
+		 * host side. All we need to pay attention is sorting the group-
+		 * keys and calculation of partial result of aggregate function.
+		 */
+	}
+
+	/*
+	 * check group-by operators - comparison function has be supported to
+	 * run on the device side.
+	 */
+	for (i=0; i < agg->numCols; i++)
+	{
+		Oid		opfnoid = get_opcode(agg->grpOperators[i]);
+
+		if (!OidIsValid(opfnoid))
+			elog(ERROR, "cache lookup failed for operator: %u",
+				 agg->grpOperators[i]);
+
+		if (!pgstrom_devfunc_lookup(opfnoid))
+			return false;
+	}
+	/* OK, move to the cost estimation */
+	return true;
+}
+
+/*
+ * cost_gpupreagg
+ *
+ * cost estimation of Aggregate if GpuPreAgg is injected
+ */
+#define LOG2(x)		(log(x) / 0.693147180559945)
+
+static Cost
+cost_gpupreagg(PlannedStmt *pstmt, Agg *agg)
+{
+	Plan	   *sort_plan = NULL;
+	Plan	   *outer_plan;
+	Cost		startup_cost;
+	Cost		run_cost;
+	Cost		comparison_cost;
+	double		rows_per_chunk;
+	double		num_chunks;
+	
+
+	if (agg->aggstrategy == AGG_SORTED)
+	{
+		sort_plan = outerPlan(agg);
+		Assert(IsA(sort_plan, Sort));
+		outer_plan = outerPlan(sort_plan);
+	}
+	else
+	{
+		outer_plan = outerPlan(agg);
+	}
+
+	/*
+	 * GpuPreAgg internally takes partial sort and aggregation
+	 * on GPU devices. It is a factor of additional calculation,
+	 * but reduce number of rows to be processed on the later
+	 * stage.
+	 * Items to be considered is:
+	 * - cost for sorting by GPU
+	 * - cost for aggregation by GPU
+	 * - number of rows being reduced.
+	 */
+	startup_cost = outer_plan->startup_cost;
+	run_cost = outer_plan->total_cost - startup_cost;
+	num_rows = outer_plan->plan_rows;
+
+	/*
+	 * fixed cost to kick GPU feature
+	 */
+	startup_cost += pgstrom_gpu_setup_cost;
+
+	/*
+	 * cost estimation of internal sorting by GPU.
+	 */
+	if ((double)NUM_ROWS_PER_COLSTORE >= num_rows)
+	{
+		rows_per_chunk = num_rows;
+		num_chunks = 1.0;
+	}
+	else
+	{
+		rows_per_chunk = (double) NUM_ROWS_PER_COLSTORE;
+		num_chunks = num_rows / (double) NUM_ROWS_PER_COLSTORE + 1.0;
+	}
+	comparison_cost = 2.0 * pgstrom_gpu_operator_cost;
+	startup_cost += (comparison_cost *
+					 rows_per_chunk *
+					 LOG2(rows_per_chunk) *
+					 num_chunks);
+	run_cost += gpu_operator_cost * num_rows;
+
+	/*
+	 * cost estimation of partial aggregate by GPU
+	 */
+
+
+
+
+	nrows = outer_plan->plan_rows;
+
+
+
 
 
 
@@ -188,13 +365,675 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 
 }
 
+
+
+static Expr *
+make_altfunc_expr_typecast(Expr *expr, Oid target_type_oid)
+{
+	Oid				source_type_oid = exprType(expr);
+	HeapTuple		tuple;
+	Form_pg_cast	cast_form;
+
+	tuple = SearchSysCache2(CASTSOURCETARGET,
+                            ObjectIdGetDatum(source_type_oid),
+							ObjectIdGetDatum(target_type_oid));
+	if (!HeapTupleIsValid(tuple))
+		return NULL;
+	cast_form = (Form_pg_cast) GETSTRUCT(tuple);
+	Assert(cast_form->castsource == source_type_oid);
+	Assert(cast_form->casttarget == target_type_oid);
+
+	if (cast_form->castmethod == COERCION_METHOD_FUNCTION)
+	{
+		Assert(OidIsValid(cast_form->castfunc));
+		expr = (Expr *) makeFuncExpr(cast_form->castfunc,
+									 target_type_oid,
+									 list_make1(expr),
+									 InvalidOid,
+									 InvalidOid,
+									 COERCE_IMPLICIT_CAST);
+	}
+	else if (cast_form->castmethod == COERCION_METHOD_BINARY)
+	{
+		expr = (Expr *) makeRelabelType(expr,
+										target_type_oid,
+										-1,			/* typemod */
+										InvalidOid,	/* collid */
+										COERCE_IMPLICIT_CAST);
+	}
+	else
+	{
+		/* We don't support COERCION_METHOD_INOUT here */
+		expr = NULL;
+	}
+	ReleaseSysCache(tuple);
+
+	return expr;
+}
+
+static Expr *
+make_altfunc_expr_filter(Expr *expr, Expr *filter, Expr *defresult)
+{
+	CaseWhen   *case_when;
+	CaseExpr   *case_expr;
+
+	Assert(exprType(filter) == BOOLOID);
+
+	if (!defresult)
+	{
+		Oid		type_oid = exprType(expr);
+		int32	type_mod = exprTypmod(expr);
+		Oid		type_coll = exprCollation(expr);
+		int16	type_len;
+		bool	type_byval;
+
+		get_typlenbyval(type_oid, &typlen, &typbyval);
+		Assert(typbyval);	/* only inline variable */
+		defresult = (Expr *) makeConst(type_oid,
+									   type_mod,
+									   type_coll,
+									   type_len,
+									   (Datum) 0,
+									   false,	/* isnull */
+									   type_byval);
+	}
+	Assert(exprType(expr) == exprType(defresult));
+
+	/* in case when the 'filter' is matched */
+	case_when = makeNode(CaseWhen);
+	case_when->expr = filter;
+	case_when->result = expr;
+	case_when->location = -1;
+
+	/* case body */
+	case_expr = makeNode(CaseExpr);
+	case_expr->casetype = exprType(expr);
+	case_expr->arg = list_make1(case_when);
+	case_expr->args = NIL;
+	case_expr->defresult = defresult;
+	case_expr->location = -1;
+
+	return (Expr *) case_expr;
+}
+
+static Expr *
+make_altfunc_pseudo_aggfunc(Expr *expr, const char *func_name)
+{
+	Oid				namespace_oid = get_namespace_oid("pgstrom", false);
+	Oid				func_argtype = exprType(expr);
+	oidvector	   *func_argtypes = buildoidvector(&func_argtype, 1);
+	HeapTuple		tuple;
+	Form_pg_proc	proc_form;
+
+	Assert(strcmp(func_name, "psum32") == 0 ||
+		   strcmp(func_name, "psum") == 0 ||
+		   strcmp(func_name, "pmin") == 0 ||
+		   strcmp(func_name, "pmax") == 0);
+
+	tuple = SearchSysCache3(PROCNAMEARGSNSP,
+							PointerGetDatum(func_name),
+							PointerGetDatum(func_argtypes),
+							ObjectIdGetDatum(namespace_oid));
+	if (!HeapTupleIsValid(tuple))
+		return NULL;
+	proc_form = (Form_pg_proc) GETSTRUCT(tuple);
+	if (proc_form->prorettype == func_argtype)
+	{
+		/* Right now, pseudo aggregate function takes fixed-length
+		 * numeric variables only, so no need care about typmod,
+		 * colleace and so on.
+		 */
+		expr = (Expr *) makeFuncExpr(HeapTupleGetOid(tuple),
+									 func_argtype,
+									 list_make1(expr),
+									 InvalidOid,
+									 InvalidOid,
+									 COERCE_EXPLICIT_CALL);
+	}
+	else
+	{
+		elog(INFO, "Bug? pseudo aggregate has incompatible types");
+		expr = NULL;
+	}
+	ReleaseSysCache(tuple);
+	return expr;
+}
+
+static Expr *
+make_altfunc_expr_nrows(Aggref *aggref, List **pre_tlist, Oid type_oid)
+{
+	Expr	   *expr;
+
+	expr = (Expr *) makeConst(INT4OID,
+							  -1,
+							  InvalidOid,
+							  sizeof(int32),
+							  (Datum) 1,
+							  false,	/* isnull */
+							  true);	/* byval */
+	if (aggref->aggfilter)
+	{
+		expr = make_altfunc_expr_filter(expr, aggref->aggfilter, defresult);
+		if (!expr)
+			return NULL;
+	}
+	/* make-up pgstrom.psum(X) */
+	return make_altfunc_pseudo_aggfunc(expr, "psum32");
+}
+
+static Expr *
+make_altfunc_expr_nrows_notnull(Aggref *aggref, List **pre_tlist,
+								Oid type_oid,  Expr *arg)
+{
+	NullTest   *ntest;
+	Expr	   *cond;
+	Expr	   *expr;
+
+	expr = (Expr *) makeConst(INT4OID,
+							  -1,
+							  InvalidOid,
+							  sizeof(int32),
+							  (Datum) 1,
+							  false,	/* isnull */
+							  true);	/* byval */
+	/* nulltest */
+	ntest = (NullTest *) makeNode(NullTest);
+	ntest->arg = arg;
+	ntest->nulltesttype = IS_NOT_NULL;
+	ntest->argisrow = false;
+
+	/* merge, if aggref->aggfilter exist */
+	if (aggref->aggfilter)
+		cond = make_andclause(list_make2(ntest, aggref->aggfilter));
+	else
+		cond = ntest;
+	/* 1, if expression is not null. 0, elsewhere */
+	expr = make_altfunc_expr_filter(expr, cond, NULL);
+	if (!expr)
+		return NULL;
+	/* make-up pgstrom.psum(X) */
+	return make_altfunc_pseudo_aggfunc(expr, "psum32");
+}
+
+static Expr *
+make_altfunc_expr_min(Aggref *aggref, List **pre_tlist,
+					  Oid type_oid, Expr *arg)
+{
+	if (exprType(arg) != type_oid)
+		arg = make_altfunc_expr_typecast(arg, type_oid);
+	if (aggref->aggfilter)
+	{
+		Expr   *defresult
+			= (Expr *)makeNullConst(exprType(arg),
+									exprTypmod(arg),
+									exprCollation(arg));
+		arg = make_altfunc_expr_filter(arg, aggref->aggfilter, defresult);
+	}
+	/* make-up pgstrom.pmin(X) */
+	return make_altfunc_pseudo_aggfunc(arg, "pmin");
+}
+
+static Expr *
+make_altfunc_expr_max(Aggref *aggref, List **pre_tlist,
+					  Oid type_oid, Expr *arg)
+{
+	if (exprType(arg) != type_oid)
+		arg = make_altfunc_expr_typecast(arg, type_oid);
+	if (aggref->aggfilter)
+	{
+		Expr   *defresult
+			= (Expr *)makeNullConst(exprType(arg),
+									exprTypmod(arg),
+									exprCollation(arg));
+		arg = make_altfunc_expr_filter(arg, aggref->aggfilter, defresult);
+	}
+	/* make-up pgstrom.pmin(X) */
+	return make_altfunc_pseudo_aggfunc(arg, "pmax");
+}
+
+static Expr *
+make_altfunc_expr_sum(Aggref *aggref, List **pre_tlist,
+					  Oid type_oid, Expr *arg)
+{
+	if (exprType(arg) != type_oid)
+		arg = make_altfunc_expr_typecast(arg, type_oid);
+	if (aggref->aggfilter)
+		arg = make_altfunc_expr_filter(arg, aggref->aggfilter, NULL);
+	/* make-up pgstrom.psum(X) */
+	return make_altfunc_pseudo_aggfunc(arg, "psum");
+}
+
+static Expr *
+make_altfunc_expr_mul(Aggref *aggref, List **pre_tlist,
+					  Oid type_oid, Expr *arg1, Expr *arg2)
+{
+	Expr	   *expr;
+	HeapTuple	tuple;
+	Form_pg_operator opform;
+
+	if (exprType(arg1) != type_oid)
+		arg1 = make_altfunc_expr_typecast(arg1, type_oid);
+	if (exprType(arg2) != type_oid)
+        arg2 = make_altfunc_expr_typecast(arg2, type_oid);
+
+	tuple = SearchSysCache4(OPERNAMENSP,
+							CStringGetDatum("*"),
+							ObjectIdGetDatum(type_oid),
+							ObjectIdGetDatum(type_oid),
+							ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+	if (!HeapTupleIsValid(tuple))
+		return NULL;
+	opform = (Form_pg_operator) GETSTRUCT(tuple);
+
+	oper = makeNode(OpExpr);
+	oper->opno = HeapTupleGetOid(tuple);
+	oper->opfuncid = opform->oprcode;
+	oper->opresulttype = opform->oprresult;
+	oper->opretset = get_func_retset(oper->opfuncid);
+	oper->args = list_make2(arg1, arg2);
+	oper->opcollid = InvalidOid;
+	oper->inputcollid = InvalidOid;
+	oper->location = -1;
+
+	if (aggref->aggfilter)
+		expr = make_altfunc_expr_filter((Expr *)oper, aggref->aggfilter, NULL);
+	else
+		expr = (Expr *) oper;
+	ReleaseSysCache(tuple);
+
+	/* make-up pgstrom.psum(X*Y) */
+	return make_altfunc_pseudo_aggfunc(arg, "psum");
+}
+
+
+
+
+
+
+
+
+
+static Aggref *
+make_gpupreagg_refnode(Aggref *aggref, List **pre_tlist)
+{
+	const aggfunc_catalog_t *aggfn_cat;
+	oidvector  *altfn_argtypes;
+	Aggref	   *altnode;
+
+	/* Only aggregated functions listed on the catalog above is supported. */
+	aggfn_cat = aggfunc_lookup_by_oid(aggref->aggfnoid);
+	if (!aggfn_cat)
+		return NULL;
+
+	/* MEMO: Right now, functions below are not supported, so should not
+	 * be on the aggfunc_catalog.
+	 * - ordered-set aggregate function
+	 * - aggregate function that takes VARIADIC argument
+	 * - length of arguments are less than 2.
+	 */
+	Assert(!aggref->aggdirectargs &&
+		   !aggref->aggvariadic &&
+		   list_length(aggref->args) <= 2);
+
+	/*
+	 * Expression node that is executed in the device kernel has to be
+	 * supported by codegen.c
+	 */
+	foreach (cell, aggref->args)
+	{
+		TargetEntry *tle = lfirst(cell);
+		if (!codegen_available_expression(tle->expr))
+			return false;
+	}
+	if (!codegen_available_expression(aggref->aggfilter))
+		return false;
+
+	/*
+	 * pulls the definition of alternative aggregate functions from
+	 * the catalog. we expect these are installed in "pgstrom" schema.
+	 */
+	namespace_oid = get_namespace_oid("pgstrom", true);
+	if (!OidIsValid(namespace_oid))
+		return false;
+
+	altfn_argtypes = buildoidvector(aggfn_cat->altfn_argtypes,
+									aggfn_cat->altfn_nargs);
+	tuple = SearchSysCache3(PROCNAMEARGSNSP,
+							PointerGetDatum(aggfn_cat->altfn_name),
+							PointerGetDatum(altfn_argtypes),
+							ObjectIdGetDatum(namespace_oid));
+	if (!HeapTupleIsValid(tuple))
+	{
+		ereport(NOTICE,
+				(errcode(ERRCODE_UNDEFINED_FUNCTION),
+				 errmsg("no alternative aggregate function \"%s\" exists",
+						funcname_signature_string(aggfn_cat->altfn_name,
+												  aggfn_cat->altfn_nargs,
+												  NIL,
+												  aggfn_cat->altfn_argtypes)),
+				 errhint("Try to run: CREATE EXTENSION pg_strom")));
+		return false;
+	}
+	proform = (Form_pg_proc) GETSTRUCT(tuple);
+
+	/* sanity checks */
+	if (proform->prorettype != aggref->aggtype)
+		elog(ERROR, "bug? alternative function has different result type");
+
+	/*
+	 * construct an Aggref node that represent alternative aggregate
+	 * function with preprocessed arguments.
+	 */
+	altnode = makeNode(Aggref);
+	altnode->aggfnoid      = HeapTupleGetOid(tuple);
+	altnode->aggtype       = aggref->aggtype;
+	altnode->aggcollid     = aggref->aggcollid;
+	altnode->inputcollid   = aggref->inputcollid;
+	altnode->aggdirectargs = NIL;	/* see the checks above */
+	altnode->args          = NIL;	/* to be set below */
+	altnode->aggorder      = aggref->aggorder;
+	altnode->aggdistinct   = aggref->aggdistinct;
+	altnode->aggfilter     = NIL;	/* moved to GpuPreAgg */
+	altnode->aggstar       = aggref->aggstar;
+	altnode->aggvariadic   = false;	/* see the checks above */
+	altnode->aggkind       = aggref->aggkind;
+	altnode->agglevelsup   = aggref->agglevelsup;
+	altnode->location      = aggref->location;
+
+	/*
+	 * construct arguments of alternative aggregate function. It references
+	 * an entry of pre_tlist, so we put expression node on the tlist on
+	 * demand.
+	 */
+	for (i=0; i < aggfn_cat->altfn_nargs; i++)
+	{
+		int		code = aggfn_cat->altfn_argexprs[i];
+		Oid		type_oid = aggfn_cat->altfn_argtypes[i];
+		Expr   *expr;
+
+		switch (code)
+		{
+			case ALTFUNC_EXPR_NROWS:
+				expr = make_altfunc_expr_nrows(aggref, pre_tlist, type_oid);
+				break;
+			case ALTFUNC_EXPR_NROWS_NOTNULL:
+				expr = make_altfunc_expr_nrows_notnull(aggref, pre_tlist,
+													   type_oid,
+													   linitial(aggref->args));
+				break;
+			case ALTFUNC_EXPR_MIN_ARG1:
+				expr = make_altfunc_expr_min(aggref, pre_tlist, type_oid,
+											 linitial(aggref->args));
+				break;
+			case ALTFUNC_EXPR_MAX_ARG1:
+				expr = make_altfunc_expr_max(aggref, pre_tlist, type_oid,
+											 linitial(aggref->args));
+				break;
+			case ALTFUNC_EXPR_SUM_ARG1:
+				expr = make_altfunc_expr_sum(aggref, pre_tlist, type_oid,
+											 linitial(aggref->args));
+				break;
+			case ALTFUNC_EXPR_SUM_ARG2:
+				expr = make_altfunc_expr_sum(aggref, pre_tlist, type_oid,
+											 lsecond(aggref->args));
+				break;
+			case ALTFUNC_EXPR_SUM_ARG1_MUL_ARG1:
+				expr = make_altfunc_expr_mul(aggref, pre_tlist, type_oid,
+											 linitial(aggref->args),
+											 linitial(aggref->args));
+				break;
+			case ALTFUNC_EXPR_SUM_ARG2_MUL_ARG2:
+				expr = make_altfunc_expr_mul(aggref, pre_tlist, type_oid,
+											 lsecond(aggref->args),
+											 lsecond(aggref->args));
+				break;
+			case ALTFUNC_EXPR_SUM_ARG1_MUL_ARG2:
+				expr = make_altfunc_expr_mul(aggref, pre_tlist, type_oid,
+											 linitial(aggref->args),
+											 lsecond(aggref->args));
+				break;
+			default:
+				elog(ERROR, "Bug? unexpected ALTFUNC_EXPR_* label");
+				return false;
+		}
+
+
+
+
+
+
+
+	}
+
+
+
+
+
+
+
+
+	/*
+	 * OK, let's construct an alternative Aggref node
+	 */
+	newnode = makeNode(Aggref);
+	newnode->aggfnoid;
+	newnode->aggtype = ;
+	newnode->aggcollid;
+	newnode->inputcollid;
+	newnode->aggdirectargs = aggref->aggdirectargs;
+	newnode->args = new_args;
+	newnode->aggorder = aggref->aggorder;
+	newnode->aggdistinct = aggref->aggdistinct;
+	newnode->aggfilter = aggref->aggfilter;
+	newnode->aggstar = aggstart;
+	newnode->aggvariadic = aggref->aggvariadic;
+	newnode->aggkind = aggref->aggkind;
+	newnode->agglevelsup = aggref->agglevelsup;
+	newnode->location = aggref->location;
+
+
+
+	if (aggref->aggfilter)
+		; // needs to filter clause in the kernel code
+
+
+
+
+
+	newnode = copyObject(aggref);
+
+	
+
+
+
+	return newnode;
+}
+
+static bool
+gpupreagg_make_tlist(Agg *agg, List **p_agg_tlist, List **p_pre_tlist)
+{
+	Plan	   *outer_plan = outerPlan(agg);
+	List	   *pre_tlist = NIL;
+	List	   *agg_tlist = NIL;
+	ListCell   *cell;
+	int			i;
+
+	/* In case of sort-aggregate, it has an underlying Sort node on top
+	 * of the scan node. GpuPreAgg shall be injected under the Sort node
+	 * to reduce burden of CPU sorting.
+	 */
+	if (agg->aggstrategy == AGG_SORTED)
+	{
+		Assert(IsA(outer_plan, Sort));
+		outer_plan = outerPlan(outer_plan);
+	}
+
+	/* Head of target-list keeps original order not to adjust expression 
+	 * nodes in the Agg (and Sort if exists) node, but replaced to NULL
+	 * except for group-by key because all the non-key variables have to
+	 * be partial calculation result.
+	 */
+	i = 0;
+	foreach (cell, outer_plan->targetlist)
+	{
+		TargetEntry	*tle = lfirst(cell);
+		Oid			type_oid = exprType((Node *) tle->expr);
+		int32		type_mod = exprTypmod((Node *) tle->expr);
+		Oid			type_coll = exprCollation((Node *) tle->expr);
+		char	   *resname = (tle->resname ? pstrdup(tle->resname) : NULL);
+
+		Assert(IsA(tle, TargetEntry));
+		if (i < agg->numCols && tle->resno == agg->grpColIdx[i])
+		{
+			Expr   *var = (Expr *) makeVar(OUTER_VAR,
+										   tle->resno,
+										   type_oid,
+										   type_mod,
+										   type_coll,
+										   0);
+			*pre_tlist = lappend(*pre_tlist,
+								 makeTargetEntry(var,
+												 list_length(tlist) + 1,
+												 resname,
+												 tle->resjunk));
+			i++;
+		}
+		else
+		{
+			Expr   *cnst;
+			int16	type_len;
+			bool	type_byval;
+
+			get_typlenbyval(type_oid, &type_len, &type_byval);
+			cnst = (Expr *) makeConst(type_oid,
+									  type_mod,
+									  type_coll,
+									  type_len,
+									  (Datum) 0,
+									  true,
+									  type_byval);
+			*pre_tlist = lappend(*pre_tlist,
+								 makeTargetEntry(cnst,
+												 list_length(tlist) + 1,
+												 resname,
+												 tle->resjunk));
+		}
+	}
+
+	/* On the next, replace aggregate functions in tlist of Agg node
+	 * according to the aggfunc_catalog[] definition.
+	 */
+	foreach (cell, agg->plan.targetlist)
+	{
+		TargetEntry *tle = lfirst(cell);
+		Aggref		*aggref_old;
+		Aggref		*aggref_new;
+		const aggfunc_catalog_t *aggfunc_cat;
+
+		/* Except for Aggref, node shall be an expression node that
+		 * contains references to group-by keys. No needs to replace.
+		 */
+		if (!IsA(tle->expr, Aggref))
+		{
+			Bitmapset  *tempset = NULL;
+			int			col;
+
+			pull_varattnos((Node *) tle->expr, OUTER_VAR, &tempset);
+			while ((col = bms_first_member(tempset)) >= 0)
+			{
+				col += FirstLowInvalidHeapAttributeNumber;
+
+				for (i=0; i < agg->numCols; i++)
+				{
+					if (col == agg->grpColIdx[i])
+						break;
+				}
+				if (i == agg->numCols)
+					elog(ERROR, "Bug? references to out of grouping key");
+			}
+			bms_free(tempset);
+			*agg_tlist = lappend(*agg_tlist, copyObject(tle));
+			continue;
+		}
+		/* existing aggregate function shall be replaced */
+		aggref = make_gpupreagg_refnode((Aggref *) tle->expr, pre_tlist);
+		if (!aggref)
+			return false;
+
+		tle = flatCopyTargetEntry(tle);
+		tle->expr = (Expr *) aggref;
+		*agg_tlist = lappend(*agg_tlist, tle);
+	}
+	return true;
+}
+
+/*
+ * pgstrom_try_insert_gpupreagg
+ *
+ * Entrypoint of the gpupreagg. It checks whether the supplied Aggregate node
+ * is consists of all supported expressions.
+ */
+void
+pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
+{
+	GpuPreAggPlan  *gpreagg;
+	List		   *pre_tlist = NIL;
+	List		   *agg_tlist = NIL;
+
+	/* nothing to do, if feature is turned off */
+	if (!pgstrom_enabled || !enable_gpupreagg)
+		return;
+
+	/* Try to construct target-list of both Agg and GpuPreAgg node.
+	 * If unavailable to construct, it indicates this aggregation
+	 * does not support partial aggregation.
+	 */
+	if (!gpupreagg_make_tlist(agg, &agg_tlist, &pre_tlist))
+		return;
+
+
+
+
+	/*
+	 * Try to construct a GpuPreAggPlan node.
+	 * If aggregate node contains any unsupported expression, we give up
+	 * to insert GpuPreAgg node.
+	 */
+	gpreagg = palloc0(sizeof(GpuPreAggPlan));
+	NodeSetTag(gpreagg, T_CustomPlan);
+	gpreagg->cplan.methods = &gpupreagg_plan_methods;
+	gpreagg->cplan.plan.targetlist = gpupreagg_make_tlist(agg, &agg_tlist);
+	if (!gpreagg->cplan.plan.targetlist)
+		return;
+
+
+
+
+
+	/* Expected Aggregate cost, if GpuPreAgg is injected */
+	total_cost = cost_gpupreagg(pstmt, agg);
+
+
+
+
+
+
+
+	elog(INFO, "OK, this aggregate is supported");
+
+}
+
 static CustomPlanState *
 gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
-{}
+{
+	return NULL;
+}
 
 static TupleTableSlot *
 gpupreagg_exec(CustomPlanState *node)
-{}
+{
+	return NULL;
+}
 
 static void
 gpupreagg_end(CustomPlanState *node)
@@ -218,7 +1057,9 @@ static Node *
 gpupreagg_get_special_var(CustomPlanState *node,
 						  Var *varnode,
 						  PlanState **child_ps)
-{}
+{
+	return NULL;
+}
 
 static void
 gpupreagg_textout_plan(StringInfo str, const CustomPlan *node)
@@ -243,7 +1084,7 @@ void
 pgstrom_init_gpupreagg(void)
 {
 	/* enable_gpupreagg parameter */
-	DefineCustomBoolVariable("enable_gpuhashjoin",
+	DefineCustomBoolVariable("enable_gpupreagg",
 							 "Enables the use of GPU preprocessed aggregate",
 							 NULL,
 							 &enable_gpupreagg,
@@ -288,16 +1129,21 @@ pgstrom_init_gpupreagg(void)
  * ---------------------------------------------------------------- */
 
 /*
- * pgstrom_psum() - that produce a partial sum value being computed
- * in GPU device, for the global aggregate calculation in the later stage.
- * If GPU gave up record reduction, this function just returns the supplied
- * expression, then host code handles the group consists of only one row.
+ * gpupreagg_pseudo_aggregate - Dummy placeholder function of pmin, pmax
+ * and psum for partial groups. Usually, GPU device produces these values,
+ * so this function should not be called during execution actually.
+ * However, once GPU gave up execution of the kernel (because of external
+ * or compressed toast datum for example), host  code generate a value as
+ * if these placeholder represents a partially aggregated data --- note
+ * that nrows of a group with one row is always 1, and min, max and sum
+ * of a group with one row is always supplied expression.
  */
-Datum pgstrom_psum(PG_FUNCTION_ARGS)
+Datum
+gpupreagg_pseudo_aggregate(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 }
-PG_FUNCTION_INFO_V1(pgstrom_psum);
+PG_FUNCTION_INFO_V1(gpupreagg_pseudo_aggregate);
 
 /*
  * ex_avg() - an enhanced average calculation that takes two arguments;
@@ -332,9 +1178,10 @@ pgstrom_sum_int8_accum(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_int8_accum);
 
 /*
- * NOTE: The built-in int8_avg() can handle final translation with int64
- * array (that has compatible layout with Int8TransTypeData in the core).
- * So, no need to re-invent same stuff again.
+ * The built-in final sum() function that accept int8 generates numeric
+ * value, but it does not fit the specification of original int2/int4.
+ * So, we put our original implementation that accepet nrows(int4) and
+ * partial sum (int8) then generate total sum in int8 form.
  */
 Datum
 pgstrom_sum_int8_final(PG_FUNCTION_ARGS)
@@ -421,8 +1268,27 @@ pgstrom_variance_float8_accum(PG_FUNCTION_ARGS)
 	int32		nrows  = PG_GETARG_INT32(1);
 	float8		psumX  = PG_GETARG_FLOAT8(2);
 	float8		psumX2 = PG_GETARG_FLOAT8(3);
+	float8	   *transdata;
+	float8		newsumX;
+	float8		newsumX2;
 
+	if (AggCheckCallContext(fcinfo, NULL))
+		transarray = PG_GETARG_ARRAYTYPE_P(0);
+	else
+		transarray = PG_GETARG_ARRAYTYPE_P_COPY(0);
 
+	transdata = check_float8_array(transarray, 3);
+	transdata[0] += (float8) nrows;
+	/* SUM(X) */
+	newsumX = transdata[1] + psumX;
+	check_float8_valid(newsumX, isinf(transdata[1]) || isinf(psumX), true);
+	transdata[1] = newsumX;
+	/* SUM(X*X) */
+	newsumX2 = transdata[2] + psumX2;
+	check_float8_valid(newsumX2, isinf(transdata[2]) || isinf(psumX2), true);
+	transdata[2] = newsumX2;
+
+	PG_RETURN_ARRAYTYPE_P(transarray);
 }
 PG_FUNCTION_INFO_V1(pgstrom_variance_float8_accum);
 
@@ -433,24 +1299,49 @@ PG_FUNCTION_INFO_V1(pgstrom_variance_float8_accum);
 Datum
 pgstrom_covariance_float8_accum(PG_FUNCTION_ARGS)
 {
-	ArrayType  *transarray = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType  *transarray;
 	int32		nrows  = PG_GETARG_INT32(1);
 	float8		psumX  = PG_GETARG_FLOAT8(2);
 	float8		psumX2 = PG_GETARG_FLOAT8(3);
 	float8		psumY  = PG_GETARG_FLOAT8(4);
 	float8		psumY2 = PG_GETARG_FLOAT8(5);
 	float8		psumXY = PG_GETARG_FLOAT8(6);
+	float8		newval;
+	float8	   *transdata;
 
-    float8      newvalY = PG_GETARG_FLOAT8(1);
-    float8      newvalX = PG_GETARG_FLOAT8(2);
-    float8     *transvalues;
-    float8      N,
-		sumX,
-		sumX2,
-		sumY,
-		sumY2,
-		sumXY;
+	if (AggCheckCallContext(fcinfo, NULL))
+        transarray = PG_GETARG_ARRAYTYPE_P(0);
+    else
+        transarray = PG_GETARG_ARRAYTYPE_P_COPY(0);
 
+	transdata = check_float8_array(transarray, 3);
+    transdata[0] += (float8) nrows;
 
+	/* SUM(X) */
+	newval = transdata[1] + psumX;
+	check_float8_valid(newval, isinf(transdata[1]) || isinf(psumX), true);
+	transdata[1] = newval;
+
+	/* SUM(X*X) */
+	newval = transdata[2] + psumX2;
+    check_float8_valid(newval, isinf(transdata[2]) || isinf(psumX2), true);
+    transdata[2] = newval;
+
+	/* SUM(Y) */
+	newval = transdata[3] + psumY;
+	check_float8_valid(newval, isinf(transdata[3]) || isinf(psumY), true);
+	transdata[3] = newval;
+
+	/* SUM(Y*Y) */
+	newval = transdata[4] + psumY2;
+	check_float8_valid(newval, isinf(transdata[4]) || isinf(psumY2), true);
+	transdata[4] = newval;
+
+	/* SUM(X*Y) */
+	newval = transdata[4] + psumXY;
+	check_float8_valid(newval, isinf(transdata[4]) || isinf(psumXY), true);
+	transdata[4] = newval;
+
+	PG_RETURN_ARRAYTYPE_P(transarray);
 }
 PG_FUNCTION_INFO_V1(pgstrom_covariance_float8_accum);

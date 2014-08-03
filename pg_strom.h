@@ -259,8 +259,8 @@ typedef struct {
 #define DEVFUNC_NEEDS_NUMERICLIB	0x0020
 #define DEVFUNC_INCL_FLAGS			0x0038
 #define DEVKERNEL_NEEDS_GPUSCAN		0x0200
-#define DEVKERNEL_NEEDS_GPUSORT		0x0400
-#define DEVKERNEL_NEEDS_HASHJOIN	0x0800
+#define DEVKERNEL_NEEDS_HASHJOIN	0x0400
+#define DEVKERNEL_NEEDS_GPUPREAGG	0x0800
 
 struct devtype_info;
 struct devfunc_info;
@@ -632,6 +632,19 @@ extern bool gpuhashjoin_support_multi_exec(const CustomPlanState *cps);
 extern void pgstrom_init_gpuhashjoin(void);
 
 /*
+ * gpupreagg.c
+ */
+extern void pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg);
+extern void pgstrom_init_gpupreagg(void);
+extern Datum gpupreagg_pseudo_aggregate(PG_FUNCTION_ARGS);
+extern Datum pgstrom_psum(PG_FUNCTION_ARGS);
+extern Datum pgstrom_sum_int8_accum(PG_FUNCTION_ARGS);
+extern Datum pgstrom_sum_int8_final(PG_FUNCTION_ARGS);
+extern Datum pgstrom_sum_float8_accum(PG_FUNCTION_ARGS);
+extern Datum pgstrom_variance_float8_accum(PG_FUNCTION_ARGS);
+extern Datum pgstrom_covariance_float8_accum(PG_FUNCTION_ARGS);
+
+/*
  * opencl_devinfo.c
  */
 extern int	pgstrom_get_device_nums(void);
@@ -796,7 +809,7 @@ extern Datum pgstrom_shmem_free_func(PG_FUNCTION_ARGS);
  */
 extern const char *pgstrom_opencl_common_code;
 extern const char *pgstrom_opencl_gpuscan_code;
-extern const char *pgstrom_opencl_gpusort_code;
+extern const char *pgstrom_opencl_gpupreagg_code;
 extern const char *pgstrom_opencl_hashjoin_code;
 extern const char *pgstrom_opencl_textlib_code;
 extern const char *pgstrom_opencl_timelib_code;
