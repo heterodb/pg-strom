@@ -1874,10 +1874,13 @@ gpuscan_copy_plan(const CustomPlan *from)
 
 	CopyCustomPlanCommon((Node *)from, (Node *)newnode);
 	newnode->scanrelid = oldnode->scanrelid;
+	newnode->kern_source = (oldnode->kern_source
+							? pstrdup(oldnode->kern_source)
+							: NULL);
+	newnode->extra_flags = oldnode->extra_flags;
 	newnode->used_params = copyObject(oldnode->used_params);
 	newnode->used_vars = copyObject(oldnode->used_vars);
-	newnode->extra_flags = oldnode->extra_flags;
-	newnode->dev_clauses = oldnode->dev_clauses;
+	newnode->dev_clauses = copyObject(oldnode->dev_clauses);
 	newnode->dev_attnums = bms_copy(oldnode->dev_attnums);
 	newnode->host_attnums = bms_copy(oldnode->host_attnums);
 
