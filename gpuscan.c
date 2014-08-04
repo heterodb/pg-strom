@@ -800,7 +800,10 @@ pgstrom_create_gpuscan(GpuScanState *gss, StromObject *rcstore)
 	 * vrelation points all the records as visible ones.
 	 */
 	if (gss->dprog_key == 0)
+	{
 		kresults->all_visible = true;
+		kresults->nitems = nitems;
+	}
 	else
 	{
 		kparam_refresh_kds_head(&gpuscan->kern.kparams, rcstore, nitems);
@@ -1063,13 +1066,18 @@ gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
 		Assert(StromTagIs(sobject, TCacheRowStore) ||
 			   StromTagIs(sobject, TCacheColumnStore));
 
-		i_result = kresults->results[gss->curr_index++];
-		if (i_result> 0)
-			do_recheck = false;
+		if (kresults->all_visible)
+			i_result = ++gss->curr_index;
 		else
 		{
-			i_result = -i_result;
-			do_recheck = true;
+			i_result = kresults->results[gss->curr_index++];
+			if (i_result> 0)
+				do_recheck = false;
+			else
+			{
+				i_result = -i_result;
+				do_recheck = true;
+			}
 		}
 		Assert(i_result > 0 && i_result <= kresults->nrooms);
 
