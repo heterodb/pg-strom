@@ -1396,8 +1396,8 @@ build_pseudo_scan_vartrans(GpuHashJoin *ghjoin)
 			List	   *hash_resnums = NIL;
 			List	   *hash_resofs = NIL;
 			cl_uint		hkey_offset
-				= INTALIGN(offsetof(kern_hashentry,
-									keydata[BITMAPLEN(num_device_vars)]));
+				= offsetof(kern_hashentry,
+						   keydata[BITMAPLEN(num_device_vars)]);
 			foreach (cell, temp_vartrans)
 			{
 				vartrans_info  *vtrans = lfirst(cell);
@@ -3039,7 +3039,7 @@ gpuhashjoin_copy_plan(const CustomPlan *from)
 	if (oldnode->kernel_source)
 		newnode->kernel_source = pstrdup(oldnode->kernel_source);
 	newnode->extra_flags   = oldnode->extra_flags;
-	newnode->join_types    = copyObject(oldnode->join_types);
+	newnode->join_types    = list_copy(oldnode->join_types);
 	newnode->hash_clauses  = copyObject(oldnode->hash_clauses);
 	newnode->qual_clauses  = copyObject(oldnode->qual_clauses);
 	newnode->host_clauses  = copyObject(oldnode->host_clauses);
@@ -3159,8 +3159,8 @@ multihash_begin(CustomPlan *node,
 	mhs->depth = mhash->depth;
 	mhs->hentry_size = mhash->hentry_size;
 	mhs->hashtable_size = mhash->hashtable_size;
-	mhs->hash_resnums = copyObject(mhash->hash_resnums);
-	mhs->hash_resofs = copyObject(mhash->hash_resofs);
+	mhs->hash_resnums = list_copy(mhash->hash_resnums);
+	mhs->hash_resofs = list_copy(mhash->hash_resofs);
 
 	/*
 	 * create expression context for node
@@ -3669,8 +3669,8 @@ multihash_copy_plan(const CustomPlan *from)
 	newnode->depth           = oldnode->depth;
 	newnode->hentry_size     = oldnode->hentry_size;
 	newnode->hashtable_size  = oldnode->hashtable_size;
-	newnode->hash_resnums    = copyObject(oldnode->hash_resnums);
-	newnode->hash_resofs     = copyObject(oldnode->hash_resofs);
+	newnode->hash_resnums    = list_copy(oldnode->hash_resnums);
+	newnode->hash_resofs     = list_copy(oldnode->hash_resofs);
 	newnode->hash_inner_keys = copyObject(oldnode->hash_inner_keys);
 	newnode->hash_outer_keys = copyObject(oldnode->hash_outer_keys);
 
