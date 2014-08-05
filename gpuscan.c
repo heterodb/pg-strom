@@ -659,6 +659,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	GpuScanState   *gss;
 	TupleDesc		tupdesc;
 	List		   *tlist;
+	List		   *used_params = NIL;
 
 	/* gpuscan should not have inner/outer plan now */
 	Assert(outerPlan(node) == NULL);
@@ -763,8 +764,9 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		bytea	   *kds_head;
 		bytea	   *ktoast_head;
 
-		Assert(list_length(gsplan->used_params) >= 2);
-		kparam_0 = (Const *)linitial(gsplan->used_params);
+		used_params = copyObject(gsplan->used_params);
+		Assert(list_length(used_params) >= 2);
+		kparam_0 = (Const *)linitial(used_params);
 		Assert(IsA(kparam_0, Const) &&
 			   kparam_0->consttype == BYTEAOID &&
 			   kparam_0->constisnull);
@@ -772,7 +774,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		kparam_0->constvalue = PointerGetDatum(kds_head);
 		kparam_0->constisnull = false;
 
-		kparam_1 = (Const *)lsecond(gsplan->used_params);
+		kparam_1 = (Const *)lsecond(used_params);
 		Assert(IsA(kparam_1, Const) &&
 			   kparam_1->consttype == BYTEAOID &&
 			   kparam_1->constisnull);
@@ -780,8 +782,8 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		kparam_1->constvalue = PointerGetDatum(ktoast_head);
 		kparam_1->constisnull = false;
 	}
-	gss->kparams = pgstrom_create_kern_parambuf(gsplan->used_params,
-												gss->cps.ps.ps_ExprContext);
+	gss->kparams =
+		pgstrom_create_kern_parambuf(used_params, gss->cps.ps.ps_ExprContext);
 	/* rest of run-time parameters */
 	gss->curr_chunk = NULL;
 	gss->curr_index = 0;
@@ -2126,11 +2128,11 @@ clserv_respond_gpuscan(cl_event event, cl_int ev_status, void *private)
 	}
 
 	rc = clGetEventInfo(clgss->events[clgss->ev_index - 2],
-                        CL_EVENT_COMMAND_EXECUTION_STATUS,
-                        sizeof(cl_int),
-                        &status,
-                        NULL);
-    Assert(rc == CL_SUCCESS);
+						CL_EVENT_COMMAND_EXECUTION_STATUS,
+						sizeof(cl_int),
+						&status,
+						NULL);
+	Assert(rc == CL_SUCCESS);
 
 	/* release opencl objects */
 	while (clgss->ev_index > 0)
