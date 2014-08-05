@@ -372,7 +372,7 @@ kparam_refresh_ktoast_head(kern_parambuf *kparams,
 			}
 		}
 	}
-	/* mark KPARAM_1 as null */
+	/* make KPARAM_1 as NULL, if no toast requirement */
 	if (!has_toast)
 		kparams->poffset[1] = 0;	/* mark it as null */
 }

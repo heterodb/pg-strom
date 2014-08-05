@@ -51,6 +51,7 @@ typedef struct {
 	List	   *host_quals;		/* RestrictInfo run on host */
 	Bitmapset  *dev_attnums;	/* attnums referenced in device */
 	Bitmapset  *host_attnums;	/* attnums referenced in host */
+	bool		syscol_referenced; /* true, if system column is referenced */
 } GpuScanPath;
 
 typedef struct {
@@ -63,6 +64,7 @@ typedef struct {
 	List	   *dev_clauses;	/* clauses to be run on device */
 	Bitmapset  *dev_attnums;	/* attnums referenced in device */
 	Bitmapset  *host_attnums;	/* attnums referenced in host */
+	bool		syscol_referenced; /* true, if system column is referenced */
 } GpuScanPlan;
 
 /*
@@ -90,6 +92,7 @@ typedef struct {
 	List			   *dev_quals;
 	tcache_head		   *tc_head;
 	tcache_scandesc	   *tc_scan;
+	bool				syscol_referenced;
 	bool				hybrid_scan;
 	HeapTupleData		hybrid_htup;
 
@@ -105,6 +108,25 @@ typedef struct {
 
 	pgstrom_perfmon		pfm;	/* sum of performance counter */
 } GpuScanState;
+
+/* bitmask of all system columns; for convenience */
+#define BITMASK_ALL_SYSCOLS							\
+	((1 << (InvalidAttrNumber -						\
+			FirstLowInvalidHeapAttributeNumber)) |	\
+	 (1 << (SelfItemPointerAttributeNumber -		\
+			FirstLowInvalidHeapAttributeNumber)) |	\
+	 (1 << (ObjectIdAttributeNumber -				\
+			FirstLowInvalidHeapAttributeNumber)) |	\
+	 (1 << (MinTransactionIdAttributeNumber -		\
+			FirstLowInvalidHeapAttributeNumber)) |	\
+	 (1 << (MinCommandIdAttributeNumber -			\
+			FirstLowInvalidHeapAttributeNumber)) |	\
+	 (1 << (MaxTransactionIdAttributeNumber -		\
+			FirstLowInvalidHeapAttributeNumber)) |	\
+	 (1 << (MaxCommandIdAttributeNumber -			\
+			FirstLowInvalidHeapAttributeNumber)) |	\
+	 (1 << (TableOidAttributeNumber -				\
+			FirstLowInvalidHeapAttributeNumber)))
 
 /* static functions */
 static void clserv_process_gpuscan(pgstrom_message *msg);
@@ -202,6 +224,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	List		   *host_quals = NIL;
 	Bitmapset	   *dev_attnums = NULL;
 	Bitmapset	   *host_attnums = NULL;
+	bool			syscol_referenced = false;
 	ListCell	   *cell;
 	codegen_context	context;
 
@@ -257,6 +280,20 @@ gpuscan_add_scan_path(PlannerInfo *root,
 				   baserel->relid,
 				   &host_attnums);
 	/*
+	 * remove system column references from the host_attnums/dev_attnums
+	 * bitmap, because it takes special case handling.
+	 * In case of dev_attnums, it should never reference system columns
+	 * because it does not have supported data type.
+	 */
+	Assert(!dev_attnums || (dev_attnums->words[0] & BITMASK_ALL_SYSCOLS) == 0);
+	if (host_attnums && (host_attnums->words[0] &
+						 BITMASK_ALL_SYSCOLS) != 0)
+	{
+		host_attnums->words[0] &= ~BITMASK_ALL_SYSCOLS;
+		syscol_referenced = true;
+	}
+
+	/*
 	 * FIXME: needs to pay attention for projection cost.
 	 * It may make sense to use build_physical_tlist, if host_attnums
 	 * are much wider than dev_attnums.
@@ -285,6 +322,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	pathnode->host_quals = host_quals;
 	pathnode->dev_attnums = dev_attnums;
 	pathnode->host_attnums = host_attnums;
+	pathnode->syscol_referenced = syscol_referenced;
 
 	add_path(baserel, &pathnode->cpath.path);
 }
@@ -434,6 +472,7 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 	gscan->dev_clauses = dev_clauses;
 	gscan->dev_attnums = gpath->dev_attnums;
 	gscan->host_attnums = gpath->host_attnums;
+	gscan->syscol_referenced = gpath->syscol_referenced;
 
 	return &gscan->cplan;
 }
@@ -461,6 +500,10 @@ gpuscan_textout_path(StringInfo str, Node *node)
 	/* host_attnums */
 	appendStringInfo(str, " :host_attnums ");
 	_outBitmapset(str, pathnode->host_attnums);
+
+	/* syscol_referenced */
+	appendStringInfo(str, " :syscol_referenced %s",
+					 pathnode->syscol_referenced ? "true" : "false");
 }
 
 static void
@@ -616,6 +659,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	GpuScanState   *gss;
 	TupleDesc		tupdesc;
 	List		   *tlist;
+	List		   *used_params = NIL;
 
 	/* gpuscan should not have inner/outer plan now */
 	Assert(outerPlan(node) == NULL);
@@ -673,6 +717,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	/* also, check availability of simple projection */
 	tlist = gss->cps.ps.plan->targetlist;
 	gss->bulk_attmap = pgstrom_make_bulk_attmap(tlist, scanrelid);
+	gss->syscol_referenced = gsplan->syscol_referenced;
 
 	/*
 	 * OK, initialization of common part is over.
@@ -719,8 +764,9 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		bytea	   *kds_head;
 		bytea	   *ktoast_head;
 
-		Assert(list_length(gsplan->used_params) >= 2);
-		kparam_0 = (Const *)linitial(gsplan->used_params);
+		used_params = copyObject(gsplan->used_params);
+		Assert(list_length(used_params) >= 2);
+		kparam_0 = (Const *)linitial(used_params);
 		Assert(IsA(kparam_0, Const) &&
 			   kparam_0->consttype == BYTEAOID &&
 			   kparam_0->constisnull);
@@ -728,7 +774,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		kparam_0->constvalue = PointerGetDatum(kds_head);
 		kparam_0->constisnull = false;
 
-		kparam_1 = (Const *)lsecond(gsplan->used_params);
+		kparam_1 = (Const *)lsecond(used_params);
 		Assert(IsA(kparam_1, Const) &&
 			   kparam_1->consttype == BYTEAOID &&
 			   kparam_1->constisnull);
@@ -736,8 +782,8 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		kparam_1->constvalue = PointerGetDatum(ktoast_head);
 		kparam_1->constisnull = false;
 	}
-	gss->kparams = pgstrom_create_kern_parambuf(gsplan->used_params,
-												gss->cps.ps.ps_ExprContext);
+	gss->kparams =
+		pgstrom_create_kern_parambuf(used_params, gss->cps.ps.ps_ExprContext);
 	/* rest of run-time parameters */
 	gss->curr_chunk = NULL;
 	gss->curr_index = 0;
@@ -800,7 +846,10 @@ pgstrom_create_gpuscan(GpuScanState *gss, StromObject *rcstore)
 	 * vrelation points all the records as visible ones.
 	 */
 	if (gss->dprog_key == 0)
+	{
 		kresults->all_visible = true;
+		kresults->nitems = nitems;
+	}
 	else
 	{
 		kparam_refresh_kds_head(&gpuscan->kern.kparams, rcstore, nitems);
@@ -1004,6 +1053,21 @@ gpuscan_check_tuple_visibility(GpuScanState *gss,
 				}
 				slot->tts_isnull[i] = false;
 			}
+
+			/*
+			 * In case when we have cache-only scan with system-column
+			 * references, slot_getattr() requires physical tuple is
+			 * stored, not virtual tuple, in the TupleTableSlot.
+			 * So, we materialize it here.
+			 */
+			if (gss->syscol_referenced)
+			{
+				HeapTuple	tuple = ExecMaterializeSlot(slot);
+
+				tuple->t_self = htup.t_self;
+				tuple->t_tableOid = htup.t_tableOid;
+				tuple->t_data->t_choice = htup.t_data->t_choice;
+			}
 		}
 		else
 		{
@@ -1063,13 +1127,18 @@ gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
 		Assert(StromTagIs(sobject, TCacheRowStore) ||
 			   StromTagIs(sobject, TCacheColumnStore));
 
-		i_result = kresults->results[gss->curr_index++];
-		if (i_result> 0)
-			do_recheck = false;
+		if (kresults->all_visible)
+			i_result = ++gss->curr_index;
 		else
 		{
-			i_result = -i_result;
-			do_recheck = true;
+			i_result = kresults->results[gss->curr_index++];
+			if (i_result> 0)
+				do_recheck = false;
+			else
+			{
+				i_result = -i_result;
+				do_recheck = true;
+			}
 		}
 		Assert(i_result > 0 && i_result <= kresults->nrooms);
 
@@ -1864,6 +1933,9 @@ gpuscan_textout_plan(StringInfo str, const CustomPlan *node)
 
 	appendStringInfo(str, " :host_attnums ");
 	_outBitmapset(str, plannode->host_attnums);
+
+	appendStringInfo(str, " :syscol_referenced %s",
+					 plannode->syscol_referenced ? "true" : "false");
 }
 
 static CustomPlan *
@@ -1883,6 +1955,7 @@ gpuscan_copy_plan(const CustomPlan *from)
 	newnode->dev_clauses = copyObject(oldnode->dev_clauses);
 	newnode->dev_attnums = bms_copy(oldnode->dev_attnums);
 	newnode->host_attnums = bms_copy(oldnode->host_attnums);
+	newnode->syscol_referenced = oldnode->syscol_referenced;
 
 	return &newnode->cplan;
 }
@@ -2055,11 +2128,11 @@ clserv_respond_gpuscan(cl_event event, cl_int ev_status, void *private)
 	}
 
 	rc = clGetEventInfo(clgss->events[clgss->ev_index - 2],
-                        CL_EVENT_COMMAND_EXECUTION_STATUS,
-                        sizeof(cl_int),
-                        &status,
-                        NULL);
-    Assert(rc == CL_SUCCESS);
+						CL_EVENT_COMMAND_EXECUTION_STATUS,
+						sizeof(cl_int),
+						&status,
+						NULL);
+	Assert(rc == CL_SUCCESS);
 
 	/* release opencl objects */
 	while (clgss->ev_index > 0)
@@ -2363,13 +2436,28 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	}
 
 	/* allocation of device memory for kern_toastbuf, if needed */
-	if (!ktoast_head)
-		clgss->m_ktoast = NULL;
-	else
+	if (ktoast_head)
 	{
+		tcache_column_store *tcs;
+		Size	toast_length = 0;
+		int		i;
+
+		/* only column-store needs individual toast buffer */
+		Assert(StromTagIs(gpuscan->rc_store, TCacheColumnStore));
+		tcs = (tcache_column_store *) gpuscan->rc_store;
+		for (i=0; i < kds_head->ncols; i++)
+		{
+			if (kds_head->colmeta[i].attvalid &&
+				kds_head->colmeta[i].attlen < 1)
+				toast_length += STROMALIGN(tcs->cdata[i].toast->tbuf_length);
+		}
+		/* any of columns should be variable-length, if valid ktoast_head */
+		Assert(toast_length > 0);
+		toast_length += STROMALIGN(offsetof(kern_toastbuf,
+											coldir[kds_head->ncols]));
 		clgss->m_ktoast = clCreateBuffer(opencl_context,
 										 CL_MEM_READ_WRITE,
-										 ktoast_head->length,
+										 toast_length,
 										 NULL,
 										 &rc);
 		if (rc != CL_SUCCESS)
