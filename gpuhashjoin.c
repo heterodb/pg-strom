@@ -3052,7 +3052,8 @@ gpuhashjoin_copy_plan(const CustomPlan *from)
 		vartrans_info *vtrans_new = palloc(sizeof(vartrans_info));
 
 		memcpy(vtrans_new, vtrans_old, sizeof(vartrans_info));
-		vtrans_new->resname = pstrdup(vtrans_old->resname);
+		vtrans_new->resname = (vtrans_old->resname ?
+							   pstrdup(vtrans_old->resname) : NULL);
 		vtrans_new->expr    = copyObject(vtrans_old->expr);
 
 		newnode->pscan_vartrans = lappend(newnode->pscan_vartrans,
