@@ -2371,13 +2371,28 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	}
 
 	/* allocation of device memory for kern_toastbuf, if needed */
-	if (!ktoast_head)
-		clgss->m_ktoast = NULL;
-	else
+	if (ktoast_head)
 	{
+		tcache_column_store *tcs;
+		Size	toast_length = 0;
+		int		i;
+
+		/* only column-store needs individual toast buffer */
+		Assert(StromTagIs(gpuscan->rc_store, TCacheColumnStore));
+		tcs = (tcache_column_store *) gpuscan->rc_store;
+		for (i=0; i < kds_head->ncols; i++)
+		{
+			if (kds_head->colmeta[i].attvalid &&
+				kds_head->colmeta[i].attlen < 1)
+				toast_length += STROMALIGN(tcs->cdata[i].toast->tbuf_length);
+		}
+		/* any of columns should be variable-length, if valid ktoast_head */
+		Assert(toast_length > 0);
+		toast_length += STROMALIGN(offsetof(kern_toastbuf,
+											coldir[kds_head->ncols]));
 		clgss->m_ktoast = clCreateBuffer(opencl_context,
 										 CL_MEM_READ_WRITE,
-										 ktoast_head->length,
+										 toast_length,
 										 NULL,
 										 &rc);
 		if (rc != CL_SUCCESS)
