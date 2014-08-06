@@ -2560,8 +2560,8 @@ static TupleTableSlot *
 gpuhashjoin_exec(CustomPlanState *node)
 {
 	GpuHashJoinState   *ghjs = (GpuHashJoinState *) node;
-	TupleTableSlot	   *pscan_slot;
-	ProjectionInfo	   *pscan_proj;
+	TupleTableSlot	   *pscan_slot = NULL;
+	ProjectionInfo	   *pscan_proj = NULL;
 	pgstrom_gpuhashjoin *ghjoin;
 
 	/*
