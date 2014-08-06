@@ -718,7 +718,7 @@ gpuhashjoin_add_path(PlannerInfo *root,
 									   outer_path,
 									   inner_path,
 									   sjinfo,
-									   required_outer,
+									   bms_copy(required_outer),
 									   &restrict_clauses);
 
 	/* reasonable portion of hash-clauses can be runnable on GPU */
