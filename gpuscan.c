@@ -1538,8 +1538,8 @@ retry:
 	 */
 	bulk = palloc0(offsetof(pgstrom_bulkslot, rindex[kresults->nitems]));
 	bulk->rcstore = pgstrom_get_rcstore(gpuscan->rc_store);
-	//bulk->attmap = copyObject(gss->bulk_attmap);
 	bulk->nvalids = 0;	/* to be set later */
+	pgstrom_track_object(bulk->rcstore, 0);
 
 	/*
 	 * GpuScan needs to have the host side checks below:
