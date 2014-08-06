@@ -3397,7 +3397,9 @@ multihash_preload_khashtable(MultiHashState *mhs,
 				hentry->keydata[i_key >> 3] |= (1 << (i_key & 7));
 				if (attr->attlen > 0)
 				{
-					Assert(offset == TYPEALIGN(attr->attalign, offset));
+					/* pre-calculated offset has to be aligned */
+					Assert(TYPEALIGN(typealign_get_width(attr->attalign),
+									 offset) == offset);
 					if (attr->attbyval)
 						memcpy((char *)hentry + offset,
 							   &value,
