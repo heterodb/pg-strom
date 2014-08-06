@@ -3313,6 +3313,8 @@ tcache_vacuum_column_store(tcache_head *tc_head, Buffer buffer)
 		}
 		index++;
 	}
+	tcache_put_column_store(tcs);
+	SpinLockRelease(&tc_node->lock);
 }
 
 /*
