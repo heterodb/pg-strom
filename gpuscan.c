@@ -1111,7 +1111,7 @@ gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
 	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
 	Snapshot	snapshot = gss->cps.ps.state->es_snapshot;
 	cl_int		i_result;
-	bool		do_recheck;
+	bool		do_recheck = false;
 	struct timeval tv1, tv2;
 
 	if (!gpuscan)
@@ -1132,9 +1132,7 @@ gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
 		else
 		{
 			i_result = kresults->results[gss->curr_index++];
-			if (i_result> 0)
-				do_recheck = false;
-			else
+			if (i_result < 0)
 			{
 				i_result = -i_result;
 				do_recheck = true;
@@ -1540,8 +1538,8 @@ retry:
 	 */
 	bulk = palloc0(offsetof(pgstrom_bulkslot, rindex[kresults->nitems]));
 	bulk->rcstore = pgstrom_get_rcstore(gpuscan->rc_store);
-	//bulk->attmap = copyObject(gss->bulk_attmap);
 	bulk->nvalids = 0;	/* to be set later */
+	pgstrom_track_object(bulk->rcstore, 0);
 
 	/*
 	 * GpuScan needs to have the host side checks below:
