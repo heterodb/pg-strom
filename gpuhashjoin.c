@@ -3485,8 +3485,8 @@ multihash_preload_khashtable(MultiHashState *mhs,
 
 		p_values = (Datum *)((char *)nv_buffer + nv_itemsz * nv_usage);
 		p_isnull = (bool *)((char *)p_values + sizeof(Datum) * tupdesc->natts);
-		for (i=1; i <= tupdesc->natts; i++)
-			p_values[i] = slot_getattr(scan_slot, i, &p_isnull[i]);
+		for (i=0; i < tupdesc->natts; i++)
+			p_values[i] = slot_getattr(scan_slot, i+1, &p_isnull[i]);
 		values_array[array_usage] = p_values;
 		isnull_array[array_usage] = p_isnull;
 		array_usage++;
