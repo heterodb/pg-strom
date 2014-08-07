@@ -3376,10 +3376,9 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		/* allocation of a hash entry */
 		hentry = (kern_hashentry *)
 			((char *)&mhtables->kern + mhtables->length);
+		memset(hentry, 0, offsetof(kern_hashentry,
+								   keydata[BITMAPLEN(nkeys)]));
 		hentry->rowid = rowid;
-		memset(&hentry->matched, 0,
-			   INTALIGN(sizeof(cl_char) +
-						sizeof(cl_char) * BITMAPLEN(nkeys)));
 
 		/* move keydata into hash entries */
 		hentry_size = mhs->hentry_size;
