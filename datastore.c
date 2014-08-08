@@ -152,8 +152,6 @@ pgstrom_create_kern_parambuf(List *used_params,
 	kpbuf->length = str.len;
 	kpbuf->nparams = nparams;
 
-	Assert(false);
-
 	return kpbuf;
 }
 
