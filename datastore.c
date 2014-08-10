@@ -62,6 +62,7 @@ pgstrom_create_kern_parambuf(List *used_params,
 	offset = STROMALIGN(offsetof(kern_parambuf, poffset[nparams]));
 	initStringInfo(&str);
 	enlargeStringInfo(&str, offset);
+	memset(str.data, 0, offset);
 	str.len = offset;
 	/* walks on the Para/Const list */
 	foreach (cell, used_params)
@@ -105,7 +106,8 @@ pgstrom_create_kern_parambuf(List *used_params,
 				kpbuf = (kern_parambuf *)str.data;
 				if (!OidIsValid(prm->ptype))
 				{
-					kpbuf->poffset[index] = 0;	/* null */
+					elog(INFO, "debug: Param has no particular data type");
+					kpbuf->poffset[index++] = 0;	/* null */
 					continue;
 				}
 				/* safety check in case hook did something unexpected */

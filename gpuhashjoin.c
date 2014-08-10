@@ -12,6 +12,7 @@
  */
 #include "postgres.h"
 
+#include "access/sysattr.h"
 #include "catalog/pg_type.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -119,7 +120,7 @@ typedef struct
 	List	   *host_clauses;	/* list of host_clause (List *) */
 
 	List	   *used_params;	/* template for kparams */
-	List	   *used_vars;		/* varnode used in hash/qual clauses */
+	Bitmapset  *outer_attrefs;	/* bitmap of referenced outer columns */
 	List	   *pscan_vartrans;	/* list of vartrans_info */
 } GpuHashJoin;
 
@@ -1856,7 +1857,27 @@ gpuhashjoin_set_plan_ref(PlannerInfo *root,
 	ghjoin->kernel_source = gpuhashjoin_codegen(root, ghjoin, &context);
 	ghjoin->extra_flags = context.extra_flags;
 	ghjoin->used_params = context.used_params;
-	ghjoin->used_vars = context.used_vars;
+	ghjoin->outer_attrefs = NULL;
+	foreach (lc1, context.used_vars)
+	{
+		Var	   *var = lfirst(lc1);
+
+		Assert(IsA(var, Var) && var->varno == INDEX_VAR);
+
+		foreach (lc2, pscan_vartrans)
+		{
+			vartrans_info  *vtrans = lfirst(lc2);
+
+			if (var->varattno == vtrans->resno && vtrans->srcdepth == 0)
+			{
+				ghjoin->outer_attrefs =
+					bms_add_member(ghjoin->outer_attrefs,
+								   vtrans->srcresno -
+								   FirstLowInvalidHeapAttributeNumber);
+				break;
+			}
+		}
+	}
 }
 
 static void
@@ -2084,7 +2105,6 @@ gpuhashjoin_begin(CustomPlan *node, EState *estate, int eflags)
 	GpuHashJoin		   *ghjoin = (GpuHashJoin *) node;
 	GpuHashJoinState   *ghjs;
 	TupleDesc		outer_tupdesc;
-	Bitmapset	   *outer_attrefs = NULL;
 	List		   *used_params;
 	bytea		   *pdatum;
 	Const		   *kparam_0;	/* template of outer kds_head */
@@ -2176,16 +2196,15 @@ gpuhashjoin_begin(CustomPlan *node, EState *estate, int eflags)
 	 * toast_head of outer relation
 	 */
 	outer_tupdesc = ExecGetResultType(outerPlanState(ghjs));
-	pull_varattnos((Node *)ghjoin->used_vars, OUTER_VAR, &outer_attrefs);
-	used_params = copyObject(ghjoin->used_params);
 
-	/* kds_head */
+	/* refresh kds_head and kds_toast */
+	used_params = copyObject(ghjoin->used_params);
 	kparam_0 = (Const *) linitial(used_params);
 	Assert(IsA(kparam_0, Const) &&
 		   kparam_0->consttype == BYTEAOID &&
 		   kparam_0->constisnull);
 	pdatum = kparam_make_kds_head(outer_tupdesc,
-								  outer_attrefs,
+								  ghjoin->outer_attrefs,
 								  0);	/* no additional syscols */
 	kparam_0->constvalue = PointerGetDatum(pdatum);
 	kparam_0->constisnull = false;
@@ -2991,8 +3010,9 @@ gpuhashjoin_textout_plan(StringInfo str, const CustomPlan *node)
 					 nodeToString(plannode->host_clauses));
 	appendStringInfo(str, " :used_params %s",
 					 nodeToString(plannode->used_params));
-	appendStringInfo(str, " :used_vars %s",
-					 nodeToString(plannode->used_vars));
+	appendStringInfo(str, " :outer_attrefs ");
+	_outBitmapset(str, plannode->outer_attrefs);
+
 	foreach (cell, plannode->pscan_vartrans)
 	{
 		vartrans_info *vtrans = lfirst(cell);
@@ -3044,7 +3064,7 @@ gpuhashjoin_copy_plan(const CustomPlan *from)
 	newnode->qual_clauses  = copyObject(oldnode->qual_clauses);
 	newnode->host_clauses  = copyObject(oldnode->host_clauses);
 	newnode->used_params   = copyObject(oldnode->used_params);
-	newnode->used_vars     = copyObject(oldnode->used_vars);
+	newnode->outer_attrefs = bms_copy(oldnode->outer_attrefs);
 	newnode->pscan_vartrans = NIL;
 	foreach (cell, oldnode->pscan_vartrans)
 	{
@@ -3233,20 +3253,23 @@ static pgstrom_multihash_tables *
 expand_multihash_tables(pgstrom_multihash_tables *mhtables_old)
 {
 	pgstrom_multihash_tables *mhtables_new;
-	Size	maxlen_new = 2 * mhtables_old->maxlen;
+	Size	maxlen_old = mhtables_old->maxlen;
+	Size	allocated;
+
+	mhtables_new = pgstrom_shmem_alloc_alap(2 * maxlen_old, &allocated);
+	if (!mhtables_new)
+		elog(ERROR, "out of shared memory");
+	memcpy(mhtables_new, mhtables_old,
+		   offsetof(pgstrom_multihash_tables, kern) + maxlen_old);
+	mhtables_new->maxlen =
+		allocated - offsetof(pgstrom_multihash_tables, kern);
+	Assert(mhtables_new->maxlen > maxlen_old);
 
 	pgstrom_untrack_object(&mhtables_old->sobj);
-	mhtables_new = pgstrom_shmem_realloc(mhtables_old, maxlen_new);
-	if (!mhtables_new)
-	{
-		multihash_put_tables(mhtables_old);
-		elog(ERROR, "out of shared memory");
-	}
-	mhtables_new->maxlen = maxlen_new;
-	elog(INFO, "pgstrom_multihash_tables was expanded %u => %u",
-		 mhtables_old->maxlen, mhtables_new->maxlen);
 	pgstrom_shmem_free(mhtables_old);
-	pgstrom_track_object(&mhtables_new->sobj, 0);
+	elog(INFO, "pgstrom_multihash_tables was expanded %zu => %zu",
+		 maxlen_old, (Size)mhtables_new->maxlen);
+    pgstrom_track_object(&mhtables_new->sobj, 0);
 
 	return mhtables_new;
 }
@@ -3302,7 +3325,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 
 	required = (LONGALIGN(offsetof(kern_hashtable, colmeta[nkeys])) +
 				LONGALIGN(sizeof(cl_uint) * nslots));
-	if (mhtables->length + required > mhtables->maxlen)
+	while (mhtables->length + required > mhtables->maxlen)
 		mhtables = expand_multihash_tables(mhtables);
 
 	khtable->nslots = nslots;
@@ -3370,16 +3393,15 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		required = LONGALIGN(required);
 
 		/* expand if hash-table size is smaller than requirement */
-		if (mhtables->length + required > mhtables->maxlen)
+		while (mhtables->length + required > mhtables->maxlen)
 			mhtables = expand_multihash_tables(mhtables);
 
 		/* allocation of a hash entry */
 		hentry = (kern_hashentry *)
 			((char *)&mhtables->kern + mhtables->length);
+		memset(hentry, 0, offsetof(kern_hashentry,
+								   keydata[BITMAPLEN(nkeys)]));
 		hentry->rowid = rowid;
-		memset(&hentry->matched, 0,
-			   INTALIGN(sizeof(cl_char) +
-						sizeof(cl_char) * BITMAPLEN(nkeys)));
 
 		/* move keydata into hash entries */
 		hentry_size = mhs->hentry_size;
@@ -3422,6 +3444,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 			}
 			i_key++;
 		}
+		Assert(LONGALIGN(hentry_size) == required);
 
 		/*
 		 * calculation of a hash value, and insert an appropriate hash-slot
@@ -3485,6 +3508,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 
 		p_values = (Datum *)((char *)nv_buffer + nv_itemsz * nv_usage);
 		p_isnull = (bool *)((char *)p_values + sizeof(Datum) * tupdesc->natts);
+		nv_usage++;
 		for (i=0; i < tupdesc->natts; i++)
 			p_values[i] = slot_getattr(scan_slot, i+1, &p_isnull[i]);
 		values_array[array_usage] = p_values;
@@ -4053,17 +4077,41 @@ clserv_process_gpuhashjoin_column(clstate_gpuhashjoin *clghj,
 		offset = kds_head->colmeta[i].cs_offset;
         if (!kds_head->colmeta[i].attnotnull)
 		{
-			Assert(tcs->cdata[i].isnull != NULL);
 			length = STROMALIGN(BITMAPLEN(nitems));
-			rc = clEnqueueWriteBuffer(clghj->kcmdq,
-									  clghj->m_dstore,
-									  CL_FALSE,
-									  offset,
-									  length,
-									  tcs->cdata[i].isnull,
-									  0,
-									  NULL,
-									  &clghj->events[clghj->ev_index]);
+
+			/* MEMO: special case handing if we have a bulk-loading of
+			 * column-store from the underlying relation that has NOT
+			 * NULL constraint. Because kds_head is built according to
+			 * the target list of sub-plan, it drops this attribute,
+			 * so we simulate a bitmap of all non-null variables in
+			 * the kernel code.
+			 */
+			if (tcs->cdata[i].isnull)
+			{
+				rc = clEnqueueWriteBuffer(clghj->kcmdq,
+										  clghj->m_dstore,
+										  CL_FALSE,
+										  offset,
+										  length,
+										  tcs->cdata[i].isnull,
+										  0,
+										  NULL,
+										  &clghj->events[clghj->ev_index]);
+			}
+			else
+			{
+				cl_uint nullmap = (cl_uint)(-1);
+
+				rc = clEnqueueFillBuffer(clghj->kcmdq,
+										 clghj->m_dstore,
+										 &nullmap,
+										 sizeof(cl_uint),
+										 offset,
+										 length,
+										 0,
+										 NULL,
+										 &clghj->events[clghj->ev_index]);
+			}
 			if (rc != CL_SUCCESS)
 			{
 				clserv_log("failed on clEnqueueWriteBuffer: %s",

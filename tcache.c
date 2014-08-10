@@ -2563,9 +2563,15 @@ tcache_create_tchead(Oid reloid, Bitmapset *required,
 				attxor ^= tempset->words[i];
 		}
 		tc_head->cached_attrs = (Bitmapset *)((char *)tc_head + offset);
-		Assert(tempset->nwords <= nwords);
-		memcpy(tc_head->cached_attrs, tempset,
-			   offsetof(Bitmapset, words[nwords]));
+
+		memset(tc_head->cached_attrs, 0, offsetof(Bitmapset, words[nwords]));
+		tc_head->cached_attrs->nwords = nwords;
+		if (tempset)
+		{
+			Assert(tempset->nwords <= nwords);
+			memcpy(tc_head->cached_attrs, tempset,
+				   offsetof(Bitmapset, words[tempset->nwords]));
+		}
 		offset += MAXALIGN(offsetof(Bitmapset, words[nwords]));
 
 		/* setting up locktag */
