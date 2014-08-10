@@ -3253,20 +3253,23 @@ static pgstrom_multihash_tables *
 expand_multihash_tables(pgstrom_multihash_tables *mhtables_old)
 {
 	pgstrom_multihash_tables *mhtables_new;
-	Size	maxlen_new = 2 * mhtables_old->maxlen;
+	Size	maxlen_old = mhtables_old->maxlen;
+	Size	allocated;
+
+	mhtables_new = pgstrom_shmem_alloc_alap(2 * maxlen_old, &allocated);
+	if (!mhtables_new)
+		elog(ERROR, "out of shared memory");
+	memcpy(mhtables_new, mhtables_old,
+		   offsetof(pgstrom_multihash_tables, kern) + maxlen_old);
+	mhtables_new->maxlen =
+		allocated - offsetof(pgstrom_multihash_tables, kern);
+	Assert(mhtables_new->maxlen > maxlen_old);
 
 	pgstrom_untrack_object(&mhtables_old->sobj);
-	mhtables_new = pgstrom_shmem_realloc(mhtables_old, maxlen_new);
-	if (!mhtables_new)
-	{
-		multihash_put_tables(mhtables_old);
-		elog(ERROR, "out of shared memory");
-	}
-	mhtables_new->maxlen = maxlen_new;
-	elog(INFO, "pgstrom_multihash_tables was expanded %u => %u",
-		 mhtables_old->maxlen, mhtables_new->maxlen);
 	pgstrom_shmem_free(mhtables_old);
-	pgstrom_track_object(&mhtables_new->sobj, 0);
+	elog(INFO, "pgstrom_multihash_tables was expanded %zu => %zu",
+		 maxlen_old, (Size)mhtables_new->maxlen);
+    pgstrom_track_object(&mhtables_new->sobj, 0);
 
 	return mhtables_new;
 }
@@ -3322,7 +3325,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 
 	required = (LONGALIGN(offsetof(kern_hashtable, colmeta[nkeys])) +
 				LONGALIGN(sizeof(cl_uint) * nslots));
-	if (mhtables->length + required > mhtables->maxlen)
+	while (mhtables->length + required > mhtables->maxlen)
 		mhtables = expand_multihash_tables(mhtables);
 
 	khtable->nslots = nslots;
@@ -3390,7 +3393,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		required = LONGALIGN(required);
 
 		/* expand if hash-table size is smaller than requirement */
-		if (mhtables->length + required > mhtables->maxlen)
+		while (mhtables->length + required > mhtables->maxlen)
 			mhtables = expand_multihash_tables(mhtables);
 
 		/* allocation of a hash entry */
@@ -3441,6 +3444,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 			}
 			i_key++;
 		}
+		Assert(LONGALIGN(hentry_size) == required);
 
 		/*
 		 * calculation of a hash value, and insert an appropriate hash-slot
