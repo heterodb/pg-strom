@@ -2183,6 +2183,12 @@ gpuhashjoin_begin(CustomPlan *node, EState *estate, int eflags)
 								  outerPlan(ghjoin)->plan_rows);
 	if (ghjs->row_population_ratio < 1.0)
 		ghjs->row_population_ratio = 1.0;
+	if (ghjs->row_population_ratio > 5.0)
+	{
+		elog(NOTICE, "row population ratio (%.2f) too large, rounded to 5.0",
+			 ghjs->row_population_ratio);
+		ghjs->row_population_ratio = 5.0;
+	}
 
 	/*
 	 * Is bulk-scan available on the outer node?
@@ -2257,6 +2263,7 @@ pgstrom_release_gpuhashjoin(pgstrom_message *message)
 	/* release kern_hashjoin */
 	if (gpuhashjoin->khashjoin)
 		pgstrom_shmem_free(gpuhashjoin->khashjoin);
+	pgstrom_shmem_free(gpuhashjoin);
 }
 
 static pgstrom_gpuhashjoin *
@@ -4312,7 +4319,7 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	else
 	{
 		krowmap = &gpuhashjoin->krowmap;
-		nitems = gpuhashjoin->krowmap.nvalids;
+		nitems = krowmap->nvalids;
 	}
 
 	/*
@@ -4554,6 +4561,9 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 					   opencl_strerror(rc));
 			goto error;
 		}
+		clghj->ev_index++;
+		gpuhashjoin->msg.pfm.bytes_dma_send += length;
+		gpuhashjoin->msg.pfm.num_dma_send++;
 	}
 
 	/*
