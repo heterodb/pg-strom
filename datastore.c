@@ -822,6 +822,21 @@ pgstrom_rcstore_fetch_slot(TupleTableSlot *slot,
 					slot->tts_values[i] =
 						PointerGetDatum(pmemcpy(source, attr->attlen));
 			}
+			else if (!tcs->cdata[i].toast)
+			{
+				/* MEMO: In case of inlined varlena variables, we can have
+				 * no toast buffer, instead of inline varlena.
+				 */
+				int		attlen = pgstrom_try_varlena_inline(attr);
+				char   *vl_ptr = (tcs->cdata[i].values + attlen * rowidx);
+
+				Assert(attlen > 0);
+				if (!use_copy)
+					slot->tts_values[i] = PointerGetDatum(vl_ptr);
+				else
+					slot->tts_values[i] =
+						PointerGetDatum(pmemcpy(vl_ptr, VARSIZE_ANY(vl_ptr)));
+			}
 			else
 			{
 				cl_uint		vl_ofs = *((cl_uint *)(tcs->cdata[i].values +

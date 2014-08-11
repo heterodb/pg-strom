@@ -4313,7 +4313,7 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	else
 	{
 		krowmap = &gpuhashjoin->krowmap;
-		nitems = gpuhashjoin->krowmap.nvalids;
+		nitems = krowmap->nvalids;
 	}
 
 	/*
@@ -4555,6 +4555,9 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 					   opencl_strerror(rc));
 			goto error;
 		}
+		clghj->ev_index++;
+		gpuhashjoin->msg.pfm.bytes_dma_send += length;
+		gpuhashjoin->msg.pfm.num_dma_send++;
 	}
 
 	/*
