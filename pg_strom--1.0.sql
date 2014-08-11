@@ -132,77 +132,95 @@ CREATE FUNCTION pgstrom_shmem_free(int8)
 -- functions for GpuPreAgg
 --
 
--- definition of partial max
+-- Definition of Partial MAX
 CREATE FUNCTION pgstrom.pmax(int2)
   RETURNS int2
-  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
   LANGUAGE C STRICT;
 CREATE FUNCTION pgstrom.pmax(int4)
   RETURNS int4
-  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
   LANGUAGE C STRICT;
 CREATE FUNCTION pgstrom.pmax(int8)
   RETURNS int8
-  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
   LANGUAGE C STRICT;
 CREATE FUNCTION pgstrom.pmax(float4)
   RETURNS float4
-  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
   LANGUAGE C STRICT;
 CREATE FUNCTION pgstrom.pmax(float8)
   RETURNS float8
-  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
   LANGUAGE C STRICT;
 
--- definition of partial min
+-- Definition of Partial MIN
 CREATE FUNCTION pgstrom.pmin(int2)
   RETURNS int2
-  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
   LANGUAGE C STRICT;
 CREATE FUNCTION pgstrom.pmin(int4)
   RETURNS int4
-  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
   LANGUAGE C STRICT;
 CREATE FUNCTION pgstrom.pmin(int8)
   RETURNS int8
-  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
   LANGUAGE C STRICT;
 CREATE FUNCTION pgstrom.pmin(float4)
   RETURNS float4
-  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
   LANGUAGE C STRICT;
 CREATE FUNCTION pgstrom.pmin(float8)
   RETURNS float8
-  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
   LANGUAGE C STRICT;
 
--- definition of partial sum (returns 64bit)
-CREATE FUNCTION pgstrom.psum(int2)
-  RETURNS int8
-  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
-  LANGUAGE C STRICT;
-CREATE FUNCTION pgstrom.psum(int4)
-  RETURNS int8
-  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
-  LANGUAGE C STRICT;
-CREATE FUNCTION pgstrom.psum(int8)
-  RETURNS int8
-  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
-  LANGUAGE C STRICT;
-CREATE FUNCTION pgstrom.psum(float4)
-  RETURNS float4
-  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
-  LANGUAGE C STRICT;
-CREATE FUNCTION pgstrom.psum(float8)
-  RETURNS float8
-  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
-  LANGUAGE C STRICT;
-
--- definition of partial sum (returns 32bit), for nrows usually
+-- Definition of Partial SUM (returns 64bit value, except for psum32)
 CREATE FUNCTION pgstrom.psum32(int4)
   RETURNS int4
-  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_aggregate'
-  LANGUAGE C STRICT;
+  AS 'MODULE_PATHNAME', 'gpupreagg_psum_int32'
+  LANGUAGE C CALLED ON NULL INPUT;
+CREATE FUNCTION pgstrom.psum(int8)
+  RETURNS int8
+  AS 'MODULE_PATHNAME', 'gpupreagg_psum_int'
+  LANGUAGE C CALLED ON NULL INPUT;
+CREATE FUNCTION pgstrom.psum(float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'gpupreagg_psum_float'
+  LANGUAGE C CALLED ON NULL INPUT;
+CREATE FUNCTION pgstrom.psum_x2(float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'gpupreagg_psum_x2_float'
+  LANGUAGE C CALLED ON NULL INPUT;
+  
+-- Definition of Partial SUM for covariance (only float8)
+CREATE FUNCTION pgstrom.pcov_x(bool, float8, float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'gpupreagg_corr_psum_x'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.pcov_y(bool, float8, float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'gpupreagg_corr_psum_y'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.pcov_x2(bool, float8, float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'gpupreagg_corr_psum_x2'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.pcov_y2(bool, float8, float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'gpupreagg_corr_psum_y2'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.pcov_xy(bool, float8, float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'gpupreagg_corr_psum_xy'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+
 
 --
 -- definition of trans/final functioin of alternative aggregates
@@ -217,17 +235,17 @@ CREATE FUNCTION pgstrom.sum_int8_final(int8[])
   AS 'MODULE_PATHNAME', 'pgstrom_sum_int8_final'
   LANGUAGE C STRICT;
 
-CREATE AGGREGATE pgstrom.ex_avg(int4, int8)
+CREATE AGGREGATE pgstrom.avg(int4, int8)
 (
-  sfunc = pgstrom.accum_int8,
+  sfunc = pgstrom.sum_int8_accum,
   stype = int8[],
   finalfunc = pg_catalog.int8_avg,
   initcond = '{0,0}'
 );
 
-CREATE AGGREGATE pgstrom.ex_sum(int8)
+CREATE AGGREGATE pgstrom.sum(int4, int8)
 (
-  sfunc = pgstrom.accum_int8,
+  sfunc = pgstrom.sum_int8_accum,
   stype = int8[],
   finalfunc = pgstrom.sum_int8_final,
   initcond = '{0,0}'
@@ -238,7 +256,7 @@ CREATE FUNCTION pgstrom.sum_float8_accum(float8[], int4, float8)
   AS 'MODULE_PATHNAME', 'pgstrom_sum_float8_accum'
   LANGUAGE C STRICT;
 
-CREATE AGGREGATE pgstrom.ex_avg(int4, float8)
+CREATE AGGREGATE pgstrom.avg(int4, float8)
 (
   sfunc = pgstrom.sum_float8_accum,
   stype = float8[],
@@ -247,22 +265,11 @@ CREATE AGGREGATE pgstrom.ex_avg(int4, float8)
 );
 
 CREATE FUNCTION pgstrom.variance_float8_accum(float8[], int4, float8, float8)
-  RETURNS float8
+  RETURNS float8[]
   AS 'MODULE_PATHNAME', 'pgstrom_variance_float8_accum'
   LANGUAGE C STRICT;
 
-
-
-
-CREATE AGGREGATE pgstrom.ex_stddev(int4, float8, float8)
-(
-  sfunc = pgstrom.variance_float8_accum,
-  stype = float8[],
-  finalfunc = pg_catalog.float8_stddev,
-  initcond = '{0,0,0}'
-);
-
-CREATE AGGREGATE pgstrom.ex_stddev_samp(int4, float8, float8)
+CREATE AGGREGATE pgstrom.stddev(int4, float8, float8)
 (
   sfunc = pgstrom.variance_float8_accum,
   stype = float8[],
@@ -270,7 +277,15 @@ CREATE AGGREGATE pgstrom.ex_stddev_samp(int4, float8, float8)
   initcond = '{0,0,0}'
 );
 
-CREATE AGGREGATE pgstrom.ex_stddev_pop(int4, float8, float8)
+CREATE AGGREGATE pgstrom.stddev_samp(int4, float8, float8)
+(
+  sfunc = pgstrom.variance_float8_accum,
+  stype = float8[],
+  finalfunc = pg_catalog.float8_stddev_samp,
+  initcond = '{0,0,0}'
+);
+
+CREATE AGGREGATE pgstrom.stddev_pop(int4, float8, float8)
 (
   sfunc = pgstrom.variance_float8_accum,
   stype = float8[],
@@ -278,7 +293,7 @@ CREATE AGGREGATE pgstrom.ex_stddev_pop(int4, float8, float8)
   initcond = '{0,0,0}'
 );
 
-CREATE AGGREGATE pgstrom.ex_variance(int4, float8, float8)
+CREATE AGGREGATE pgstrom.variance(int4, float8, float8)
 (
   sfunc = pgstrom.variance_float8_accum,
   stype = float8[],
@@ -286,7 +301,7 @@ CREATE AGGREGATE pgstrom.ex_variance(int4, float8, float8)
   initcond = '{0,0,0}'
 );
 
-CREATE AGGREGATE pgstrom.ex_var_samp(int4, float8, float8)
+CREATE AGGREGATE pgstrom.var_samp(int4, float8, float8)
 (
   sfunc = pgstrom.variance_float8_accum,
   stype = float8[],
@@ -294,7 +309,7 @@ CREATE AGGREGATE pgstrom.ex_var_samp(int4, float8, float8)
   initcond = '{0,0,0}'
 );
 
-CREATE AGGREGATE pgstrom.ex_var_pop(int4, float8, float8)
+CREATE AGGREGATE pgstrom.var_pop(int4, float8, float8)
 (
   sfunc = pgstrom.variance_float8_accum,
   stype = float8[],
@@ -302,34 +317,37 @@ CREATE AGGREGATE pgstrom.ex_var_pop(int4, float8, float8)
   initcond = '{0,0,0}'
 );
 
-CREATE FUNCTION pgstrom.covariance_float8_accum(float8[], int4, float8, float8)
-  RETURNS float8
+CREATE FUNCTION pgstrom.covariance_float8_accum(float8[], int4, float8, float8,
+                                                float8, float8, float8)
+  RETURNS float8[]
   AS 'MODULE_PATHNAME', 'pgstrom_covariance_float8_accum'
   LANGUAGE C STRICT;
 
-CREATE AGGREGATE pgstrom.ex_corr(int4, float8, float8, float8,
-                                       float8, float8, float8)
+CREATE AGGREGATE pgstrom.corr(int4, float8, float8,
+                              float8, float8, float8)
 (
   sfunc = pgstrom.covariance_float8_accum,
   stype = float8[],
-  finalfunc = float8_corr,
+  finalfunc = pg_catalog.float8_corr,
   initcond = '{0,0,0,0,0,0}'
 );
 
-CREATE AGGREGATE pgstrom.ex_covar_pop(int4, float8, float8, float8,
-                                       float8, float8, float8)
+CREATE AGGREGATE pgstrom.covar_pop(int4, float8, float8,
+                                   float8, float8, float8)
 (
   sfunc = pgstrom.covariance_float8_accum,
   stype = float8[],
-  finalfunc = float8_covar_pop,
+  finalfunc = pg_catalog.float8_covar_pop,
   initcond = '{0,0,0,0,0,0}'
 );
 
-CREATE AGGREGATE pgstrom.ex_covar_samp(int4, float8, float8, float8,
-                                       float8, float8, float8)
+CREATE AGGREGATE pgstrom.covar_samp(int4, float8, float8,
+                                    float8, float8, float8)
 (
   sfunc = pgstrom.covariance_float8_accum,
   stype = float8[],
-  finalfunc = float8_covar_samp,
+  finalfunc = pg_catalog.float8_covar_samp,
   initcond = '{0,0,0,0,0,0}'
 );
+
+

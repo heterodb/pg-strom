@@ -636,8 +636,18 @@ extern void pgstrom_init_gpuhashjoin(void);
  */
 extern void pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg);
 extern void pgstrom_init_gpupreagg(void);
-extern Datum gpupreagg_pseudo_aggregate(PG_FUNCTION_ARGS);
-extern Datum pgstrom_psum(PG_FUNCTION_ARGS);
+
+extern Datum gpupreagg_pseudo_expr(PG_FUNCTION_ARGS);
+extern Datum gpupreagg_psum_int32(PG_FUNCTION_ARGS);
+extern Datum gpupreagg_psum_int(PG_FUNCTION_ARGS);
+extern Datum gpupreagg_psum_float(PG_FUNCTION_ARGS);
+extern Datum gpupreagg_psum_x2_float(PG_FUNCTION_ARGS);
+extern Datum gpupreagg_corr_psum_x(PG_FUNCTION_ARGS);
+extern Datum gpupreagg_corr_psum_y(PG_FUNCTION_ARGS);
+extern Datum gpupreagg_corr_psum_x2(PG_FUNCTION_ARGS);
+extern Datum gpupreagg_corr_psum_y2(PG_FUNCTION_ARGS);
+extern Datum gpupreagg_corr_psum_xy(PG_FUNCTION_ARGS);
+
 extern Datum pgstrom_sum_int8_accum(PG_FUNCTION_ARGS);
 extern Datum pgstrom_sum_int8_final(PG_FUNCTION_ARGS);
 extern Datum pgstrom_sum_float8_accum(PG_FUNCTION_ARGS);
