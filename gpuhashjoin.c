@@ -2183,6 +2183,12 @@ gpuhashjoin_begin(CustomPlan *node, EState *estate, int eflags)
 								  outerPlan(ghjoin)->plan_rows);
 	if (ghjs->row_population_ratio < 1.0)
 		ghjs->row_population_ratio = 1.0;
+	if (ghjs->row_population_ratio > 5.0)
+	{
+		elog(NOTICE, "row population ratio (%.2f) too large, rounded to 5.0",
+			 ghjs->row_population_ratio);
+		ghjs->row_population_ratio = 5.0;
+	}
 
 	/*
 	 * Is bulk-scan available on the outer node?
