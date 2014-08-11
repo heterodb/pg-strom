@@ -2257,6 +2257,7 @@ pgstrom_release_gpuhashjoin(pgstrom_message *message)
 	/* release kern_hashjoin */
 	if (gpuhashjoin->khashjoin)
 		pgstrom_shmem_free(gpuhashjoin->khashjoin);
+	pgstrom_shmem_free(gpuhashjoin);
 }
 
 static pgstrom_gpuhashjoin *
