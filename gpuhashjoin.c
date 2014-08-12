@@ -1074,7 +1074,9 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 				i, i);
 		appendStringInfo(
             body,
-			"}\n");
+			"  rbuffer += %d;\n"
+			"}\n",
+			ghjoin->num_rels + 1);
 	}
 	appendStringInfo(body, "}\n");
 	appendStringInfo(body, "}\n");
