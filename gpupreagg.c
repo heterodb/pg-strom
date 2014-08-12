@@ -30,6 +30,7 @@
 #include "utils/syscache.h"
 #include <math.h>
 #include "pg_strom.h"
+#include "opencl_gpupreagg.h"
 
 static CustomPlanMethods		gpupreagg_plan_methods;
 static bool						enable_gpupreagg;
@@ -37,10 +38,30 @@ static bool						enable_gpupreagg;
 typedef struct
 {
 	CustomPlan		cplan;
-	const char	   *kernel_source;
+	int				numCols;		/* number of grouping columns */
+	AttrNumber	   *grpColIdx;		/* their indexes in the target list */
+	Oid			   *grpOperators;	/* equality operators to compare with */
+	const char	   *kern_source;
 	int				extra_flags;
-
+	List		   *used_params;
+	List		   *used_vars;
 } GpuPreAggPlan;
+
+typedef struct
+{
+	CustomPlanState	cps;
+	TupleDesc		scan_desc;
+	TupleTableSlot *scan_slot;
+
+	pgstrom_queue  *mqueue;
+	Datum			dprog_key;
+	kern_parambuf  *kparams;
+
+	pgstrom_gpupreagg  *curr_chunk;
+	cl_uint				curr_index;
+} GpuPreAggState;
+
+
 
 /*
  * Arguments of alternative functions.
@@ -388,7 +409,10 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 	*p_startup_cost = dummy.startup_cost;
 	*p_total_cost = dummy.total_cost;
 
-	elog(INFO, "Agg cost = %.2f..%.2f", dummy.startup_cost, dummy.total_cost);
+	elog(INFO, "Agg cost = %.2f..%.2f nrows (%.0f => %.0f)",
+		 dummy.startup_cost, dummy.total_cost,
+		 num_rows,
+		 gpreagg->cplan.plan.plan_rows);
 }
 
 
@@ -473,66 +497,24 @@ make_altfunc_expr(const char *func_name, List *args)
 static Expr *
 make_altfunc_nrows_expr(Aggref *aggref)
 {
-	Expr	   *expr;
+	List	   *nrows_args = NIL;
+	ListCell   *cell;
 
-	if (aggref->aggfilter || list_length(aggref->args) > 0)
+	if (aggref->aggfilter)
+		nrows_args = lappend(nrows_args, copyObject(aggref->aggfilter));
+	foreach (cell, aggref->args)
 	{
-		List	   *conds = NIL;
-		ListCell   *cell;
-		Expr	   *filter;
-		Expr	   *cnst_0;
-		Expr	   *cnst_1;
+		TargetEntry *tle = lfirst(cell);
+		NullTest	*ntest = makeNode(NullTest);
 
-		if (aggref->aggfilter)
-			conds = list_make1(aggref->aggfilter);
-		foreach (cell, aggref->args)
-		{
-			TargetEntry *tle = lfirst(cell);
-			NullTest   *ntest = makeNode(NullTest);
+		Assert(IsA(tle, TargetEntry));
+		ntest->arg = copyObject(tle->expr);
+		ntest->nulltesttype = IS_NOT_NULL;
+		ntest->argisrow = false;
 
-			Assert(IsA(tle, TargetEntry));
-			ntest->arg = copyObject(tle->expr);
-			ntest->nulltesttype = IS_NOT_NULL;
-			ntest->argisrow = false;
-
-			conds = lappend(conds, ntest);
-		}
-		Assert(list_length(conds) > 0);
-		if (list_length(conds) == 1)
-			filter = linitial(conds);
-		else
-			filter = make_andclause(conds);
-		Assert(exprType((Node *) filter) == BOOLOID);
-
-		/* make psum(CASE WHEN filter THEN 1 ELSE 0 END) */
-		cnst_1 = (Expr *) makeConst(INT4OID,
-								  -1,
-								  InvalidOid,
-								  sizeof(int32),
-								  (Datum) 1,
-								  false,	/* isnull */
-								  true);	/* byval */
-		cnst_0 = (Expr *) makeConst(INT4OID,
-								  -1,
-								  InvalidOid,
-								  sizeof(int32),
-								  (Datum) 0,
-								  false,	/* isnull */
-								  true);	/* byval */
-		expr = make_expr_conditional(cnst_1, filter, cnst_0);
+		nrows_args = lappend(nrows_args, ntest);
 	}
-	else
-	{
-		/* COUNT(*) shall be extracted to psum(1::int4) */
-		expr = (Expr *) makeConst(INT4OID,
-								  -1,
-								  InvalidOid,
-								  sizeof(int32),
-								  (Datum) 1,
-								  false,	/* isnull */
-								  true);	/* byval */
-	}
-	return make_altfunc_expr("psum32", list_make1(expr));
+	return make_altfunc_expr("nrows", nrows_args);
 }
 
 /*
@@ -663,7 +645,7 @@ make_gpupreagg_refnode(Aggref *aggref, List **prep_tlist)
 	altnode->aggorder      = aggref->aggorder;
 	altnode->aggdistinct   = aggref->aggdistinct;
 	altnode->aggfilter     = NULL;	/* moved to GpuPreAgg */
-	altnode->aggstar       = aggref->aggstar;
+	altnode->aggstar       = false;	/* all the alt-agg takes arguments */
 	altnode->aggvariadic   = false;	/* see the checks above */
 	altnode->aggkind       = aggref->aggkind;
 	altnode->agglevelsup   = aggref->agglevelsup;
@@ -954,6 +936,189 @@ gpupreagg_rewrite_expr(Agg *agg,
 }
 
 /*
+ * gpupreagg_codegen_keycomp - code generator of kernel gpupreagg_keycomp();
+ * that compares two records indexed by x_index and y_index in kern_data_store,
+ * then returns -1 if X < Y, 0 if X = Y or 1 if X > Y.
+ *
+ * static cl_int
+ * gpupreagg_keycomp(__private cl_int *errcode,
+ *                   __global kern_data_store *kds,
+ *                   __global kern_toastbuf *ktoast,
+ *                   size_t x_index,
+ *                   size_t y_index);
+ */
+static Oid
+get_compare_function(Oid comp_op, bool *is_reverse)
+{
+	/* also see get_sort_function_for_ordering_op() */
+	Oid		opfamily;
+	Oid		opcintype;
+	Oid		sort_func;
+	int16	strategy;
+
+	/* Find the operator in pg_amop */
+	if (!get_ordering_op_properties(opno,
+									&opfamily,
+									&opcintype,
+									&strategy))
+		return InvalidOid;
+
+	/* Find a function that implement comparison */
+	sort_func = get_opfamily_proc(opfamily,
+								  opcintype,
+								  opcintype,
+								  BTORDER_PROC);
+	if (!OidIsValid(sort_func))		/* should not happen */
+		elog(ERROR, "missing support function %d(%u,%u) in opfamily %u",
+			 BTORDER_PROC, opcintype, opcintype, opfamily);
+
+	*is_reverse = (strategy == BTGreaterStrategyNumber);
+	return sort_func;
+}
+
+static char *
+gpupreagg_codegen_keycomp(GpuPreAggPlan *gpreagg, codegen_context *context)
+{
+	StringInfoData	str;
+	StringInfoData	decl;
+	StringInfoData	body;
+	int			i;
+
+	initStringInfo(&str);
+	initStringInfo(&decl);
+    initStringInfo(&body);
+
+	for (i=0; i < gpreagg->numCols; i++)
+	{
+		TargetEntry	*tle;
+		bool		is_reverse;
+		AttrNumber	resno = gpreagg->grpColIdx[i];
+		Oid			comp_op = gpreagg->grpOperators[i];
+		Oid			comp_func = get_compare_function(comp_op, &is_reverse);
+		const char *ktoast;
+
+		tle = get_tle_by_resno(gpreagg->cplan.plan.targetlist, resno);
+		var = (Var *) tle->expr;
+		if (!IsA(var, Var) || var->varno != OUTER_VAR)
+			elog(ERROR, "Bug? A simple Var node is expected for group key: %s",
+				 nodeToString(var));
+
+		/* find a datatype for comparison */
+		dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
+		Assert(dtype != NULL);	/* already checked! */
+		ktoast = (((dtype->type_flags & DEVTYPE_IS_VARLENA) != 0)
+				  ? ",ktoast"
+				  : "");
+		/* find a function for comparison */
+		dfunc = pgstrom_devfunc_lookup_and_track(comp_func, context);
+		Assert(dfunc != NULL);
+
+		/* variable declarations */
+		appendStringInfo(&decl,
+						 "  pg_%s_t xkeyval_%u;\n"
+						 "  pg_%s_t ykeyval_%u;\n",
+						 dtype->type_name, resno,
+						 dtype->type_name, resno);
+		/* comparison logic */
+		appendStringInfo(
+			&body,
+			"  xkeyval_%u = pg_%s_vref(kds%s,errcode,%u,x_index);\n"
+			"  ykeyval_%u = pg_%s_vref(kds%s,errcode,%u,y_index);\n"
+			"  if (!xkeyval_%u.isnull && !ykeyval_%u.isnull)\n"
+			"  {\n"
+			"    comp = pgfn_%s(errcode, xkeyval_%u, ykeyval_%u);\n"
+			"    if (!comp.isnull && comp.value != 0)\n"
+			"      return %s;\n"
+			"  }\n"
+			"  else if (xkeyval_%u.isnull  && !ykeyval_%u.isnull)\n"
+			"    return -1;\n"
+			"  else if (!xkeyval_%u.isnull &&  ykeyval_%u.isnull)\n"
+			"    return 1;\n",
+			resno, dtype->type_name, ktoast, resno-1,
+			resno, dtype->type_name, ktoast, resno-1,
+			resno, resno,
+			dfunc->func_name, resno, resno,
+			is_reverse ? "-comp.value" : "comp.value",
+			resno, resno,
+			resno, resno);
+	}
+	/* make a whole key-compare function */
+	appendStringInfo(&str,
+					 "static cl_int\n"
+					 "gpusort_comp(__private int *errcode,\n"
+					 "             __global kern_data_store *kds,\n"
+					 "             __global kern_toastbuf *ktoast,\n"
+					 "             size_t x_index,\n"
+					 "             size_t y_index)\n"
+					 "{\n"
+					 "  %s\n"
+					 "  pg_int4_t comp;\n"
+					 "\n"
+					 "%s"
+					 "  return 0;\n"
+					 "}",
+					 decl.data,
+					 body.data);
+	pfree(decl.data);
+	pfree(body.data);
+
+	return str.data;
+}
+
+/*
+ * gpupreagg_codegen_aggcalc - code generator of kernel gpupreagg_aggcalc();
+ * that implements an operation to calculate partial aggregation.
+ * The supplied accum is operated by newval, according to resno.
+ *
+ * static void
+ * gpupreagg_aggcalc(__private cl_int *errcode,
+ *                 cl_int resno,
+ *                 __local pagg_datum *accum,
+ *                 __local pagg_datum *newval);
+ */
+static char *
+gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
+{
+
+
+
+}
+
+static char *
+gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
+{
+	const char *fn_keycomp;
+	const char *fn_aggcalc;
+
+	memset(context, 0, sizeof(codegen_context));
+	/*
+	 * System constants for GpuPreAgg
+	 * KPARAM_0 is header portion of kern_data_store of source stream;
+	 * thus its table structure reflects outer relation's one.
+	 * KPARAM_1 is haeder portion of kern_toastbuf to be referenced by
+	 * both of source and destination stream (not that we don't support
+	 * partial aggregate that newly generate a varlena value).
+	 * KPARAM_2 is header portion of kern_data_store of destination
+	 * stream, thus its table structure reflects target-list of this
+	 * relation.
+	 */
+	context->used_params = list_make3(makeNullConst(BYTEAOID, -1, InvalidOid),
+									  makeNullConst(BYTEAOID, -1, InvalidOid),
+									  makeNullConst(BYTEAOID, -1, InvalidOid));
+	context->type_defs = list_make1(pgstrom_devtype_lookup(BYTEAOID));
+
+	/* generate a key comparison function */
+	fn_keycomp = gpupreagg_codegen_keycomp(gpreagg, context);
+	/* generate a partial aggregate function */
+	fn_aggcalc = gpupreagg_codegen_aggcalc(gpreagg, context);
+
+
+
+
+	return NULL;
+}
+
+/*
  * pgstrom_try_insert_gpupreagg
  *
  * Entrypoint of the gpupreagg. It checks whether the supplied Aggregate node
@@ -970,6 +1135,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	Cost			total_cost;
 	Cost			startup_sort;
 	Cost			total_sort;
+	const char	   *kern_source;
+	codegen_context context;
 
 	/* nothing to do, if feature is turned off */
 	if (!pgstrom_enabled || !enable_gpupreagg)
@@ -992,33 +1159,124 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	gpreagg->cplan.methods = &gpupreagg_plan_methods;
 	gpreagg->cplan.plan.targetlist = pre_tlist;
 	gpreagg->cplan.plan.qual = NIL;
+	gpreagg->numCols = agg->numCols;
+	gpreagg->grpColIdx = pmemcpy(agg->grpColIdx,
+								 sizeof(AttrNumber) * agg->numCols);
+	gpreagg->grpOperators = pmemcpy(agg->grpOperators,
+									sizeof(Oid) * agg->numCols);
 
-	/* Compute estimated aggregate cost, if GpuPreAgg is injected */
+	/*
+	 * Cost estimation of Aggregate node if GpuPreAgg is injected.
+	 * Then, compare the two cases. If partial aggregate does not
+	 * help the overall aggregation, nothing to do. Elsewhere, we
+	 * inject a GpuPreAgg node under the Agg (or Sort) node to
+	 * reduce number of rows to be processed.
+	 */
 	cost_gpupreagg(agg, gpreagg,
 				   agg_tlist, agg_quals,
 				   &startup_cost, &total_cost,
 				   &startup_sort, &total_sort);
-
-	elog(INFO, "GpuPreAgg => %s", nodeToString(gpreagg));
-	elog(INFO, "pre_tlist => %s", nodeToString(pre_tlist));
-	elog(INFO, "agg_tlist => %s", nodeToString(agg_tlist));
-	elog(INFO, "agg_quals => %s", nodeToString(agg_quals));
-
-	/* if GpuPreAgg is expensive, nothing to do */
 	if (agg->plan.total_cost < total_cost)
 		return;
 
+	/*
+	 * construction of kernel code, according to the above query
+	 * rewrites.
+	 */
+	kern_source = gpupreagg_codegen(gpreagg, &context);
+	gpreagg->kern_source = kern_source;
+	gpreagg->extra_flags = context.extra_flags;
+	gpreagg->used_params = context.used_params;
+	gpreagg->used_vars   = context.used_vars;
 
+	/* OK, inject it */
+	agg->plan.startup_cost = startup_cost;
+	agg->plan.total_cost = total_cost;
+	agg->plan.targetlist = agg_tlist;
+	agg->plan.qual = agg_quals;
 
+	if (agg->aggstrategy != AGG_SORTED)
+	{
+		outerPlan(gpreagg) = outerPlan(agg);
+		outerPlan(agg) = &gpreagg->cplan.plan;
+	}
+	else
+	{
+		Sort   *sort_plan = (Sort *) outerPlan(agg);
 
-	elog(INFO, "OK, this aggregate is supported");
+		Assert(IsA(sort_plan, Sort));
+		sort_plan->plan.startup_cost = startup_sort;
+		sort_plan->plan.total_cost = total_sort;
+		sort_plan->plan.plan_rows = gpreagg->cplan.plan.plan_rows;
+		sort_plan->plan.plan_width = gpreagg->cplan.plan.plan_width;
+		sort_plan->plan.targetlist = copyObject(pre_tlist);
 
+		outerPlan(gpreagg) = outerPlan(sort_plan);
+		outerPlan(sort_plan) = &gpreagg->cplan.plan;
+	}
 }
 
 static CustomPlanState *
 gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 {
-	return NULL;
+	GpuPreAggPlan  *gpreagg = (GpuPreAggPlan *) node;
+	GpuPreAggState *gpas;
+
+	/*
+	 * construct a state structure
+	 */
+	gpas = palloc0(sizeof(GpuPreAggState));
+	NodeSetTag(gpas, T_CustomPlanState);
+	gpas->cps.ps.plan = &node->plan;
+	gpas->cps.ps.state = estate;
+	gpas->cps.methods = &gpupreagg_plan_methods;
+
+	/*
+	 * create expression context
+	 */
+	ExecAssignExprContext(estate, &gpas->cps.ps);
+
+	/*
+	 * initialize child expression
+	 */
+	gpas->cps.ps.targetlist = (List *)
+		ExecInitExpr((Expr *) node->plan.targetlist, &gpas->cps.ps);
+	gpas->cps.ps.qual = NIL;	/* never has qualifier here */
+
+	/*
+	 * initialize child node
+	 */
+	outerPlanState(gpas) = ExecInitNode(outerPlan(gpreagg), estate, eflags);
+	gpas->scan_desc = ExecGetResultType(outerPlanState(gpas));
+	gpas->scan_slot = ExecAllocTableSlot(&estate->es_tupleTable);
+	ExecSetSlotDescriptor(gpas->scan_slot, gpas->scan_desc);
+
+	/*
+	 * initialize result tuple type and projection info
+	 */
+	ExecInitResultTupleSlot(estate, &gpas->cps.ps);
+	ExecAssignResultTypeFromTL(&gpas->cps.ps);
+	if (tlist_matches_tupdesc(&gpas->cps.ps,
+							  gpas->cps.ps.plan->targetlist,
+							  OUTER_VAR,
+							  gpas->scan_desc))
+		gpas->cps.ps.ps_ProjInfo = NULL;
+	else
+		gpas->cps.ps.ps_ProjInfo =
+			ExecBuildProjectionInfo(gpas->cps.ps.targetlist,
+									gpas->cps.ps.ps_ExprContext,
+									gpas->cps.ps.ps_ResultTupleSlot,
+									gpas->scan_desc);
+
+	/*
+	 * initialize kparam buffer and so on
+	 */
+
+
+
+
+
+	return &gpas->cps;
 }
 
 static TupleTableSlot *
@@ -1029,7 +1287,20 @@ gpupreagg_exec(CustomPlanState *node)
 
 static void
 gpupreagg_end(CustomPlanState *node)
-{}
+{
+	GpuPreAggState *gpas = (GpuPreAggState *) node;
+
+	/* Clean up subtree */
+	ExecEndNode(outerPlanState(node));
+
+	/* Clean out the tuple table */
+	ExecClearTuple(node->ps.ps_ResultTupleSlot);
+	ExecClearTuple(gpas->scan_slot);
+
+	/* Free the exprcontext */
+    ExecFreeExprContext(&node->ps);
+
+}
 
 static void
 gpupreagg_rescan(CustomPlanState *node)
@@ -1042,14 +1313,7 @@ gpupreagg_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 static Bitmapset *
 gpupreagg_get_relids(CustomPlanState *node)
 {
-	return NULL;
-}
-
-static Node *
-gpupreagg_get_special_var(CustomPlanState *node,
-						  Var *varnode,
-						  PlanState **child_ps)
-{
+	/* nothing to do in GpuPreAgg */
 	return NULL;
 }
 
@@ -1096,7 +1360,6 @@ pgstrom_init_gpupreagg(void)
 	gpupreagg_plan_methods.ReScanCustomPlan    = gpupreagg_rescan;
 	gpupreagg_plan_methods.ExplainCustomPlan   = gpupreagg_explain;
 	gpupreagg_plan_methods.GetRelidsCustomPlan = gpupreagg_get_relids;
-	gpupreagg_plan_methods.GetSpecialCustomVar = gpupreagg_get_special_var;
 	gpupreagg_plan_methods.TextOutCustomPlan   = gpupreagg_textout_plan;
 	gpupreagg_plan_methods.CopyCustomPlan      = gpupreagg_copy_plan;
 }
@@ -1122,6 +1385,22 @@ pgstrom_init_gpupreagg(void)
  *
  * ---------------------------------------------------------------- */
 
+/* gpupreagg_partial_nrows - placeholder function that generate number
+ * of rows being included in this partial group.
+ */
+Datum
+gpupreagg_partial_nrows(PG_FUNCTION_ARGS)
+{
+	int		i;
+
+	for (i=0; i < PG_NARGS(); i++)
+	{
+		if (PG_ARGISNULL(i) || !PG_GETARG_BOOL(i))
+			PG_RETURN_INT32(0);
+	}
+	PG_RETURN_INT32(1);
+}
+
 /* gpupreagg_pseudo_expr - placeholder function that returns the supplied
  * variable as is (even if it is NULL). Used to MIX(), MAX() placeholder.
  */
@@ -1132,19 +1411,9 @@ gpupreagg_pseudo_expr(PG_FUNCTION_ARGS)
 }
 PG_FUNCTION_INFO_V1(gpupreagg_pseudo_expr);
 
-/* gpupreagg_psum_int - placeholder function that generates partial sum
+/* gpupreagg_psum_* - placeholder function that generates partial sum
  * of the arguments. _x2 generates square value of the input
  */
-Datum
-gpupreagg_psum_int32(PG_FUNCTION_ARGS)
-{
-	Assert(PG_NARGS() == 1);
-	if (PG_ARGISNULL(0))
-		PG_RETURN_INT32(0);
-	PG_RETURN_INT32(PG_GETARG_INT32(0));
-}
-PG_FUNCTION_INFO_V1(gpupreagg_psum_int32);
-
 Datum
 gpupreagg_psum_int(PG_FUNCTION_ARGS)
 {

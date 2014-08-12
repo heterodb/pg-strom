@@ -132,6 +132,32 @@ CREATE FUNCTION pgstrom_shmem_free(int8)
 -- functions for GpuPreAgg
 --
 
+-- Definition of NROWS(...)
+CREATE FUNCTION pgstrom.nrows()
+  RETURNS int4
+  AS 'MODULE_PATHNAME', 'gpupreagg_partial_nrows'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.nrows(bool)
+  RETURNS int4
+  AS 'MODULE_PATHNAME', 'gpupreagg_partial_nrows'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.nrows(bool, bool)
+  RETURNS int4
+  AS 'MODULE_PATHNAME', 'gpupreagg_partial_nrows'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.nrows(bool, bool, bool)
+  RETURNS int4
+  AS 'MODULE_PATHNAME', 'gpupreagg_partial_nrows'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.nrows(bool, bool, bool, bool)
+  RETURNS int4
+  AS 'MODULE_PATHNAME', 'gpupreagg_partial_nrows'
+  LANGUAGE C CALLED ON NULL INPUT;
+
 -- Definition of Partial MAX
 CREATE FUNCTION pgstrom.pmax(int2)
   RETURNS int2
@@ -176,11 +202,7 @@ CREATE FUNCTION pgstrom.pmin(float8)
   AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
   LANGUAGE C STRICT;
 
--- Definition of Partial SUM (returns 64bit value, except for psum32)
-CREATE FUNCTION pgstrom.psum32(int4)
-  RETURNS int4
-  AS 'MODULE_PATHNAME', 'gpupreagg_psum_int32'
-  LANGUAGE C CALLED ON NULL INPUT;
+-- Definition of Partial SUM (returns 64bit value)
 CREATE FUNCTION pgstrom.psum(int8)
   RETURNS int8
   AS 'MODULE_PATHNAME', 'gpupreagg_psum_int'

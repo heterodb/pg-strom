@@ -637,8 +637,8 @@ extern void pgstrom_init_gpuhashjoin(void);
 extern void pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg);
 extern void pgstrom_init_gpupreagg(void);
 
+extern Datum gpupreagg_partial_nrows(PG_FUNCTION_ARGS);
 extern Datum gpupreagg_pseudo_expr(PG_FUNCTION_ARGS);
-extern Datum gpupreagg_psum_int32(PG_FUNCTION_ARGS);
 extern Datum gpupreagg_psum_int(PG_FUNCTION_ARGS);
 extern Datum gpupreagg_psum_float(PG_FUNCTION_ARGS);
 extern Datum gpupreagg_psum_x2_float(PG_FUNCTION_ARGS);
