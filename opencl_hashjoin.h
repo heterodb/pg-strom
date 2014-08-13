@@ -361,7 +361,7 @@ kern_gpuhashjoin_main(__global kern_hashjoin *khashjoin,
 	 * to host-side. So, we have to tell the host code the provided
 	 * kern_resultbuf didn't have enough space.
 	 */
-	if (base + nitems >= kresults->nrooms)
+	if (base + nitems > kresults->nrooms)
 	{
 		errcode = StromError_DataStoreNoSpace;
 		goto out;

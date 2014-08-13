@@ -3802,15 +3802,13 @@ clserv_respond_hashjoin(cl_event event, cl_int ev_status, void *private)
 	kern_resultbuf		*kresults
 		= KERN_HASHJOIN_RESULTBUF(gpuhashjoin->khashjoin);
 
-	if (ev_status != CL_COMPLETE)
+	if (ev_status == CL_COMPLETE)
+		gpuhashjoin->msg.errcode = kresults->errcode;
+	else
 	{
 		clserv_log("unexpected CL_EVENT_COMMAND_EXECUTION_STATUS: %d",
 				   ev_status);
 		gpuhashjoin->msg.errcode = StromError_OpenCLInternal;
-	}
-	else if (gpuhashjoin->msg.errcode == StromError_Success)
-	{
-		gpuhashjoin->msg.errcode = kresults->errcode;
 	}
 
 	/* collect performance statistics */
