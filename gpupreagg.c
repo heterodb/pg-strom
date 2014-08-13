@@ -1079,16 +1079,56 @@ gpupreagg_codegen_keycomp(GpuPreAggPlan *gpreagg, codegen_context *context)
 static char *
 gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 {
+	StringInfoData	str;
+    StringInfoData	decl;
+    StringInfoData	body;
+	ListCell   *cell;
+
+    initStringInfo(&str);
+    initStringInfo(&decl);
+    initStringInfo(&body);
+
+	foreach (cell, gpreagg->cplan.plan.targetlist)
+	{
+		TargetEntry *tle = lfirst(cell);
+		Aggref		*aggref;
+
+		if (!IsA(tle->expr, Aggref))
+			continue;
 
 
 
+
+
+
+
+
+	}
+
+
+	
 }
+
+/*
+ * static void
+ * gpupreagg_projection(__private cl_int *errcode,
+ *                      __global kern_data_store *kds_in,
+ *                      __global kern_data_store *kds_out,
+ *                      __global kern_toastbuf *ktoast,
+ *                      size_t kds_index);
+ */
+static char *
+gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
+{]
+
+
 
 static char *
 gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 {
 	const char *fn_keycomp;
 	const char *fn_aggcalc;
+	const char *fn_projection;
 
 	memset(context, 0, sizeof(codegen_context));
 	/*
