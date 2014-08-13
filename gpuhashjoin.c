@@ -976,7 +976,7 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 		temp = pgstrom_codegen_expression(expr, context);
 
 		appendStringInfo(body,
-						 "hash_%u = pg_%s_hashkey(hash_%u, %s);\n",
+						 "hash_%u = pg_%s_hashkey(kmhash, hash_%u, %s);\n",
 						 depth, dtype->type_name, depth, temp);
 		pfree(temp);
 	}
@@ -3575,6 +3575,10 @@ multihash_exec_multi(CustomPlanState *node)
 		mhtables->n_kernel = 0;		/* set by opencl-server */
 		mhtables->m_hash = NULL;	/* set by opencl-server */
 		mhtables->ev_hash = NULL;	/* set by opencl-server */
+
+		memcpy(mhtables->kern.pg_crc32_table,
+			   pg_crc32_table,
+			   sizeof(uint32) * 256);
 		mhtables->kern.ntables = nrels;
 		memset(mhtables->kern.htable_offset, 0, sizeof(cl_uint) * (nrels + 1));
 		pgstrom_track_object(&mhtables->sobj, 0);
