@@ -1720,7 +1720,7 @@ tcache_row_store_insert_tuple(tcache_row_store *trs, HeapTuple tuple)
 
 	/* Do we have a space to put one more tuple? */
 	if ((uintptr_t)(&tupoffset[trs->kern.nrows + 1]) >=
-		(uintptr_t)((char *)&trs->kern + trs->usage - required))
+		(uintptr_t)((char *)&trs->kern + trs->usage) - required)
 		return false;
 
 	/* OK, this row-store still has space to hold this tuple */

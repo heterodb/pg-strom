@@ -383,7 +383,7 @@ estimate_hashtable_size(PlannerInfo *root, GpuHashJoinPath *gpath)
 	{
 		Path	   *scan_path = gpath->inners[i].scan_path;
 		List	   *hash_clause = gpath->inners[i].hash_clause;
-		double		ntuples = scan_path->rows;
+		double		ntuples = scan_path->rows * 1.1;
 
 		/* force a plausible relation size if no information */
 		if (ntuples <= 1000.0)
@@ -976,7 +976,7 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 		temp = pgstrom_codegen_expression(expr, context);
 
 		appendStringInfo(body,
-						 "hash_%u = pg_%s_hashkey(hash_%u, %s);\n",
+						 "hash_%u = pg_%s_hashkey(kmhash, hash_%u, %s);\n",
 						 depth, dtype->type_name, depth, temp);
 		pfree(temp);
 	}
@@ -2648,6 +2648,7 @@ gpuhashjoin_exec(CustomPlanState *node)
 
 			if (!ghjoin)
 				break;	/* outer scan reached to end of the relation */
+
 			if (!pgstrom_enqueue_message(&ghjoin->msg))
 			{
 				pgstrom_put_message(&ghjoin->msg);
@@ -3276,8 +3277,8 @@ expand_multihash_tables(pgstrom_multihash_tables *mhtables_old)
 
 	pgstrom_untrack_object(&mhtables_old->sobj);
 	pgstrom_shmem_free(mhtables_old);
-	elog(INFO, "pgstrom_multihash_tables was expanded %zu => %zu",
-		 maxlen_old, (Size)mhtables_new->maxlen);
+	elog(INFO, "pgstrom_multihash_tables was expanded %zu (%p) => %zu (%p)",
+		 maxlen_old, mhtables_old, (Size)mhtables_new->maxlen, mhtables_new);
     pgstrom_track_object(&mhtables_new->sobj, 0);
 
 	return mhtables_new;
@@ -3293,6 +3294,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	kern_hashtable *khtable;
 	kern_hashentry *hentry;
 	Size			required;
+	Size			khtable_offset;
 	Size			hentry_size;
 	double			nrows;
 	cl_uint			nslots;
@@ -3323,8 +3325,8 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	Assert(StromTagIs(mhtables, HashJoinTable));
 	Assert(mhtables->kern.htable_offset[depth] == 0);
 	Assert(mhtables->length == LONGALIGN(mhtables->length));
-	mhtables->kern.htable_offset[depth] = mhtables->length;
-	khtable = (kern_hashtable *)((char *)&mhtables->kern + mhtables->length);
+	khtable_offset = mhtables->length;
+	mhtables->kern.htable_offset[depth] = khtable_offset;
 
 	nrows = mhs->cps.ps.plan->plan_rows;
 	if (nrows < 1000.0)
@@ -3337,6 +3339,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	while (mhtables->length + required > mhtables->maxlen)
 		mhtables = expand_multihash_tables(mhtables);
 
+	khtable = (kern_hashtable *) ((char *)&mhtables->kern + khtable_offset);
 	khtable->nslots = nslots;
 	khtable->nkeys = nkeys;
 	khtable->is_outer = false;	/* only INNER is supported right now */
@@ -3403,7 +3406,12 @@ multihash_preload_khashtable(MultiHashState *mhs,
 
 		/* expand if hash-table size is smaller than requirement */
 		while (mhtables->length + required > mhtables->maxlen)
+		{
 			mhtables = expand_multihash_tables(mhtables);
+			khtable = (kern_hashtable *)((char *)&mhtables->kern +
+										 khtable_offset);
+			hash_slots = KERN_HASHTABLE_SLOT(khtable);
+		}
 
 		/* allocation of a hash entry */
 		hentry = (kern_hashentry *)
@@ -3575,6 +3583,10 @@ multihash_exec_multi(CustomPlanState *node)
 		mhtables->n_kernel = 0;		/* set by opencl-server */
 		mhtables->m_hash = NULL;	/* set by opencl-server */
 		mhtables->ev_hash = NULL;	/* set by opencl-server */
+
+		memcpy(mhtables->kern.pg_crc32_table,
+			   pg_crc32_table,
+			   sizeof(uint32) * 256);
 		mhtables->kern.ntables = nrels;
 		memset(mhtables->kern.htable_offset, 0, sizeof(cl_uint) * (nrels + 1));
 		pgstrom_track_object(&mhtables->sobj, 0);
@@ -3802,15 +3814,13 @@ clserv_respond_hashjoin(cl_event event, cl_int ev_status, void *private)
 	kern_resultbuf		*kresults
 		= KERN_HASHJOIN_RESULTBUF(gpuhashjoin->khashjoin);
 
-	if (ev_status != CL_COMPLETE)
+	if (ev_status == CL_COMPLETE)
+		gpuhashjoin->msg.errcode = kresults->errcode;
+	else
 	{
 		clserv_log("unexpected CL_EVENT_COMMAND_EXECUTION_STATUS: %d",
 				   ev_status);
 		gpuhashjoin->msg.errcode = StromError_OpenCLInternal;
-	}
-	else if (gpuhashjoin->msg.errcode == StromError_Success)
-	{
-		gpuhashjoin->msg.errcode = kresults->errcode;
 	}
 
 	/* collect performance statistics */

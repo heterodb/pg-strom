@@ -334,8 +334,8 @@ static cl_int (*p_clGetMemObjectInfo)(
 	size_t param_value_size ,
 	void *param_value,
 	size_t *param_value_size_ret) = NULL;
-static cl_int (*p_clRetainMemObject)(cl_mem memobj) = NULL;
-static cl_int (*p_clReleaseMemObject)(cl_mem memobj) = NULL;
+static volatile cl_int (*p_clRetainMemObject)(cl_mem memobj) = NULL;
+static volatile cl_int (*p_clReleaseMemObject)(cl_mem memobj) = NULL;
 static cl_int (*p_clSetMemObjectDestructorCallback)(
 	cl_mem memobj,
 	void (CL_CALLBACK  *pfn_notify)(

@@ -1440,6 +1440,10 @@ gpuscan_exec_multi(CustomPlanState *node)
 	cl_uint				i, j, nitems;
 	cl_int			   *rindex;
 
+	/* must provide our own instrumentation support */
+	if (node->ps.instrument)
+		InstrStartNode(node->ps.instrument);
+
 	/* bulk data exchange should not have projection */
 	Assert(gss->bulk_attmap != NULL);
 	/* also, hybrid scan is nonsense */
@@ -1494,8 +1498,12 @@ retry:
 	{
 		/* if no asynchronous jobs in progress, it's end of scan */
 		if (gss->num_running == 0)
+		{
+			/* must provide our own instrumentation support */
+			if (node->ps.instrument)
+				InstrStopNode(node->ps.instrument, 0.0);
 			return NULL;
-
+		}
 		msg = pgstrom_dequeue_message(gss->mqueue);
 		if (!msg)
 			elog(ERROR, "message queue wait timeout");
@@ -1626,6 +1634,9 @@ retry:
 		pfree(bulk);
 		goto retry;
 	}
+	/* must provide our own instrumentation support */
+	if (node->ps.instrument)
+		InstrStopNode(node->ps.instrument, (double) bulk->nvalids);
 	return (Node *) bulk;
 }
 
