@@ -1414,9 +1414,9 @@ build_pseudo_scan_vartrans(GpuHashJoin *ghjoin)
 					elog(ERROR, "cache lookup failed for type %u",
 						 vtrans->vartype);
 
+				hkey_offset = TYPEALIGN(dtype->type_align, hkey_offset);
 				vtrans->hkey_index = list_length(hash_resnums);
-				vtrans->hkey_offset = TYPEALIGN(dtype->type_align,
-												hkey_offset);
+				vtrans->hkey_offset = hkey_offset;
 				hash_resnums = lappend_int(hash_resnums, vtrans->srcresno);
 				hash_resofs = lappend_int(hash_resofs, vtrans->hkey_offset);
 				hkey_offset += (dtype->type_length > 0
