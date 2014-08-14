@@ -1076,37 +1076,147 @@ gpupreagg_codegen_keycomp(GpuPreAggPlan *gpreagg, codegen_context *context)
  *                 __local pagg_datum *accum,
  *                 __local pagg_datum *newval);
  */
+static inline const char *
+typeoid_to_pagg_field_name(Oid type_oid)
+{
+	switch (type_oid)
+	{
+		case INT4OID:
+			return "int_val";
+		case INT8OID:
+			return "long_val";
+		case FLOAT4OID:
+			return "float_val";
+		case FLOAT8OID:
+			return "double_val";
+	}
+	elog(ERROR, "unexpected partial aggregate data-type");
+}
+
+
 static char *
 gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 {
-	StringInfoData	str;
-    StringInfoData	decl;
+	Oid				namespace_oid = get_namespace_oid("pgstrom", false);
     StringInfoData	body;
-	ListCell   *cell;
+	ListCell	   *cell;
 
-    initStringInfo(&str);
-    initStringInfo(&decl);
     initStringInfo(&body);
+	appendStringInfo(
+		&body,
+		"static void\n"
+		"gpupreagg_aggcalc(__private cl_int *errcode,\n"
+		"                  cl_int resno,\n"
+		"                  __local pagg_datum *accum,\n"
+		"                  __local pagg_datum *newval)\n"
+		"{\n"
+		"  switch (resno)\n"
+		"  {\n"
+		);
 
+	/* NOTE: The targetList of GpuPreAgg are either Const (as NULL),
+	 * Var node (as grouping key), or FuncExpr (as partial aggregate
+	 * calculation).
+	 */
 	foreach (cell, gpreagg->cplan.plan.targetlist)
 	{
-		TargetEntry *tle = lfirst(cell);
-		Aggref		*aggref;
+		TargetEntry	   *tle = lfirst(cell);
+		FuncExpr	   *func;
+		Oid				type_oid;
+		const char	   *field_name;
 
-		if (!IsA(tle->expr, Aggref))
+		if (!IsA(tle->expr, FuncExpr))
+		{
+			Assert(IsA(tle->expr, Const) || IsA(tle->expr, Var));
 			continue;
+		}
+		func = (FuncExpr *) tle->expr;
+		
+		if (namespace_oid != get_func_namespace(func->funcid))
+		{
+			elog(NOTICE, "Bug? function not in pgstrom schema");
+			continue;
+		}
+		func_name = get_func_name(func->funcid);
 
-
-
-
-
-
-
-
+		if (strcmp(func_name, "nrows") == 0)
+		{
+			/* XXX - nrows() should not have NULL */
+			field_name = typeoid_to_pagg_field_name(INT4OID);
+			appendStringInfo(
+				&body,
+				"  case %d:\n",
+				"    accum->%s += newval->%s;\n"
+				"    break;\n",
+				tle->resno,
+				filed_name, field_name);
+		}
+		else if (strcmp(func_name, "pmax") == 0 ||
+				 strcmp(func_name, "pmin") == 0)
+		{
+			Assert(list_length(func->args) == 1);
+			type_oid = exprType(linitial(func->args));
+			field_name = typeoid_to_pagg_field_name(type_oid);
+			appendStringInfo(
+				&body,
+				"  case %d:\n"
+				"    if (!newval->isnull)\n"
+				"    {\n"
+				"      accum->isnull = 0;\n"
+				"      if (accum->isnull)\n"
+				"        accum->%s = newval->%s;\n"
+				"      else\n"
+				"        accum->%s = %s(accum->%s, newval->%s);\n"
+				"    }\n"
+				"    break;\n",
+				tle->resno,
+				field_name, field_name,
+				field_name, func_name + 1, field_name, field_name);
+		}
+		else if (strcmp(func_name, "psum") == 0    ||
+				 strcmp(func_name, "psum_x2") == 0)
+		{
+			/* it should never be NULL */
+			Assert(list_length(func->args) == 1);
+			type_oid = exprType(linitial(func->args));
+			field_name = typeoid_to_pagg_field_name(type_oid);
+			appendStringInfo(
+				&body,
+				"  case %d:\n",
+				"      accum->%s += newval->%s;\n"
+				"    break;\n",
+				tle->resno,
+				filed_name, field_name);
+		}
+		else if (strcmp(func_name, "pcov_x") == 0  ||
+				 strcmp(func_name, "pcov_y") == 0  ||
+				 strcmp(func_name, "pcov_x2") == 0 ||
+				 strcmp(func_name, "pcov_y2") == 0 ||
+				 strcmp(func_name, "pcov_xy") == 0)
+		{
+			/* covariance takes only float8 datatype */
+			/* it should never be NULL */
+			field_name = typeoid_to_pagg_field_name(FLOAT8OID);
+			appendStringInfo(
+				&body,
+				"  case %d:\n",
+				"    accum->%s += newval->%s;\n"
+				"    break;\n",
+				tle->resno,
+				filed_name, field_name);
+		}
+		else
+		{
+			elog(NOTICE, "Bug? unexpected function: %s", func_name);
+		}
 	}
-
-
-	
+	appendStringInfo(
+		&body,
+		"  default:\n"
+		"    break;\n"
+		"  }\n"
+		"}\n");
+	return body.data;
 }
 
 /*

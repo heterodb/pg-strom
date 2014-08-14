@@ -47,22 +47,24 @@ typedef struct
 				 2 * (kgpreagg)->nindex) - (uintptr_t)(kgpreagg))
 
 
-
-
 /*
- * pagg_datum - data structure to store a running total.
- * Right now, all PG-Strom can support is 64bit running total (either integer
- * or float datum according to the context), and it eventually consumes
- * sizeof(pagg_data) x size of work-group local memory.
- * On typical GPU devices, it allows to keep maximum number of work-items
- * because 8KB (8 x 1024) is less than the minimum OpenCL requirement.
+ * NOTE: pagg_datum is a set of information to calculate running total.
+ * group_id indicates which group does this work-item belong to, instead
+ * of gpupreagg_keycomp().
+ * isnull indicates whether the current running total is NULL, or not.
+ * XXX_val is a running total itself.
  */
-typedef union
+typedef struct
 {
-	cl_uint		int_val;
-	cl_ulong	long_val;
-	cl_float	float_val;
-	cl_double	double_val;
+	cl_uint			group_id;
+	cl_char			isnull;
+	cl_char			__padding__[3];
+	union {
+		cl_uint		int_val;
+		cl_ulong	long_val;
+		cl_float	float_val;
+		cl_double	double_val;
+	};
 } pagg_datum;
 
 #ifdef OPENCL_DEVICE_CODE
