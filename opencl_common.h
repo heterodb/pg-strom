@@ -175,6 +175,7 @@ typedef struct {
 } HeapTupleHeaderData;
 
 #define att_isnull(ATT, BITS) (!((BITS)[(ATT) >> 3] & (1 << ((ATT) & 0x07))))
+#define bitmaplen(NATTS) (((int)(NATTS) + BITS_PER_BYTE - 1) / BITS_PER_BYTE)
 
 /*
  * information stored in t_infomask:

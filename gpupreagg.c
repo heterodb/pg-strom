@@ -1162,11 +1162,11 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 				"  case %d:\n"
 				"    if (!newval->isnull)\n"
 				"    {\n"
-				"      accum->isnull = 0;\n"
 				"      if (accum->isnull)\n"
 				"        accum->%s = newval->%s;\n"
 				"      else\n"
 				"        accum->%s = %s(accum->%s, newval->%s);\n"
+				"      accum->isnull = false;\n"
 				"    }\n"
 				"    break;\n",
 				tle->resno,
@@ -1183,7 +1183,11 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 			appendStringInfo(
 				&body,
 				"  case %d:\n",
-				"      accum->%s += newval->%s;\n"
+				"      if (!newval->isnull)\n"
+				"      {\n"
+				"        accum->%s += newval->%s;\n"
+				"        accum->isnull = false;\n"
+				"      }\n"
 				"    break;\n",
 				tle->resno,
 				filed_name, field_name);
@@ -1200,7 +1204,11 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 			appendStringInfo(
 				&body,
 				"  case %d:\n",
-				"    accum->%s += newval->%s;\n"
+				"    if (!newval->isnull)\n"
+				"    {\n"
+				"      accum->%s += newval->%s;\n"
+				"      accum->isnull = false;\n"
+				"    }\n"
 				"    break;\n",
 				tle->resno,
 				filed_name, field_name);
@@ -1229,7 +1237,95 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
  */
 static char *
 gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
-{]
+{
+	Oid				namespace_oid = get_namespace_oid("pgstrom", false);
+	StringInfoData	decl;
+    StringInfoData	body;
+	ListCell	   *cell;
+	Bitmapset	   *attr_refs = NULL;
+
+	initStringInfo(&decl);
+	initStringInfo(&body);
+	foreach (cell, gpreagg->cplan.plan.targetlist)
+	{
+		TargetEntry	   *tle = lfirst(cell);
+
+		if (IsA(Var, tle->expr))
+		{
+			Var	   *var = (Var *) tle->expr;
+
+			Assert(var->varno == OUTER_VAR);
+			Assert(var->varattno > 0);
+			attr_refs = bms_add_members(attr_refs, var->varattno -
+										FirstLowInvalidHeapAttributeNumber);
+			dtype = pgstrom_devtype_lookup_and_track(var->vattype,
+													 context);
+			Assert(dtype != NULL);
+			/* load variable from the source */
+			appendStringInfo(
+				&body,
+				"  VAR_%u = pg_%s_vref(kds_in%s,errcode,%u,kds_index);\n",
+				var->varattno,
+				dtype->type_name,
+				(dtype->type_flags & DEVTYPE_IS_VARLENA) ? ",ktoast" : "",
+				var->varattno - 1);
+			/* store variable to the destination */
+			pg_xxx_vstore(kds_out,errcode,%u,kds_index);
+		}
+		else if (IsA(Const, tle->expr))
+		{
+			/* no need to care about NULL variables */
+		}
+		else if (IsA(FuncExpr, tle->expr))
+		{
+			FuncExpr   *func = (FuncExpr *) tle->expr;
+			const char *func_name;
+
+			if (namespace_oid != get_func_namespace(func->funcid))
+				elog(ERROR, "Bug? unexpected FuncExpr: %s",
+					 nodeToString(func));
+
+			func_name = get_func_name(func->funcid);
+			if (strcmp(func_name, "nrows") == 0)
+			{
+				/* load 1, if filter is valid */
+			}
+			else if (strcmp(func_name, "pmax") == 0)
+			{
+				/* store the original value */
+			}
+			else if (strcmp(func_name, "pmin") == 0)
+			{}
+			else if (strcmp(func_name, "psum") == 0)
+			{}
+			else if (strcmp(func_name, "psum_x2") == 0)
+			{}
+			else if (strcmp(func_name, "pcov_x") == 0)
+			{}
+			else if (strcmp(func_name, "pcov_y") == 0)
+			{}
+			else if (strcmp(func_name, "pcov_x2") == 0)
+			{}
+			else if (strcmp(func_name, "pcov_y2") == 0)
+			{}
+			else if (strcmp(func_name, "pcov_xy") == 0)
+			{}
+			else 
+				elog(ERROR, "");
+
+
+			
+			// load initial calculation value according to the function type
+
+
+			/* store variable to the destination */
+		}
+		else
+			elog(ERROR, "bug? unexpected node type: %s",
+				 nodeToString(tle->expr));
+	}
+	return str.data;
+]
 
 
 
@@ -1261,8 +1357,8 @@ gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 	fn_keycomp = gpupreagg_codegen_keycomp(gpreagg, context);
 	/* generate a partial aggregate function */
 	fn_aggcalc = gpupreagg_codegen_aggcalc(gpreagg, context);
-
-
+	/* generate an initial data loading function */
+	fn_projection = gpupreagg_codegen_projection(gpreagg, context);
 
 
 	return NULL;

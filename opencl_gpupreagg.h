@@ -249,6 +249,189 @@ gpupreagg_check_next(__global kern_gpupreagg *kgpreagg,
 
 }
 
+
+
+/*
+ * pg_common_vstore() - utility function to store the supplied
+ * datum on appropriate position of the target kds. We assume
+ * destination kds shares a common toast buffer with source kds,
+ * so all we need to copy is offset value if varlena variable.
+ */
+static void
+pg_common_vstore(__private cl_int *errcode,
+				 __global kern_data_store *kds,
+				 cl_uint colidx,
+				 cl_uint rowidx,
+				 cl_char isnull,
+				 cl_ulong value)	/* right now, 64bit is the max width */
+{
+	kern_colmeta	cmeta;
+	cl_uint			offset;
+
+	/* only column-store can be written in the kernel space */
+	if (!kds->column_form)
+	{
+		if (!StromErrorIsSignificant(*errcode))
+			*errcode = StromError_DataStoreCorruption;
+		return;
+	}
+
+	/* out of range? */
+	if (colidx >= kds->ncols)
+	{
+		if (!StromErrorIsSignificant(*errcode))
+			*errcode = StromError_DataStoreOutOfRange;
+		return;
+	}
+
+	/* why do you try to store the datum to this column? */
+	cmeta = kds->colmeta[colidx];
+	if (!cmeta.attvalid)
+		return NULL;
+	offset = cmeta.cs_offset;
+
+	/*
+	 * setting up null-bitmask. we should not use atomic operation here,
+	 * because this function shall be called towards all the input records,
+	 * so its performance loss is not ignorable.
+	 */
+	if (cmeta.attnotnull)
+	{
+		/* NULL is unacceptable with NOT NULL constraint */
+		if (isnull)
+		{
+			if (!StromErrorIsSignificant(*errcode))
+				*errcode = StromError_DataStoreCorruption;
+			return;
+		}
+	}
+	else
+	{
+		__local cl_uint *nullmask = (__lobal cl_uint *) local_workbuf;
+		cl_uint		x;
+
+		nullmask[get_local_id(0)] = (!isnull ? (1 << (rowid & 0x3f)) : 0);
+		barrier(CLK_LOCAL_MEM_FENCE);
+
+		for (x=2; x <= sizeof(cl_uint) * BITS_PER_BYTE; x <<= 1)
+		{
+			if ((get_local_id(0) & (x - 1)) == 0 &&
+				(rowid + (x >> 1)) < kds->nitems)
+				nullmask[get_local_id(0)]
+					|= nullmask[get_local_id(0) + (x >> 1)];
+			barrier(CLK_LOCAL_MEM_FENCE);
+		}
+
+		if ((get_local_id(0) & 0x001f) == 0 && rowid < kds->nitems)
+		{
+			__global cl_uint *addr = (__global cl_uint *)
+				((__global cl_char *) kds + offset);
+
+			addr[rowid >> 5] = nullmask[get_local_id(0)];
+		}
+		offset += STROMALIGN(bitmaplen(kds->nitems));
+	}
+
+	/* NOTE: The above barrier() blocks forever if a part of threads 
+	 * are returned earlier, so we have to check out of range after
+	 * the reduction process of nullmap.
+	 */
+	if (rowidx >= kds->nitems)
+	{
+		if (!StromErrorIsSignificant(*errcode))
+			*errcode = StromError_DataStoreOutOfRange;
+		return;
+	}
+
+	/* copy the value itself */
+	if (cmeta.attlen > 0)
+	{
+		__global void *addr =
+			(__global char *) kds + offset + cmeta.attlen * rowidx;
+		switch (cmeta.attlen)
+		{
+			case sizeof(cl_uchar):
+				*((__global cl_uchar *) addr) = (value & 0x000000ffUL);
+				break;
+			case sizeof(cl_ushort):
+				*((__global cl_ushort *) addr) = (value & 0x0000ffffUL);
+				break;
+			case sizeof(cl_uint):
+				*((__global cl_uint *) addr) = (value & 0xffffffffUL);
+				break;
+			case sizeof(cl_ulong):
+				*((__global cl_ulong *) addr) = value;
+				break;
+			default:
+				/* right now, we have no data type that does not fit above */
+				if (!StromErrorIsSignificant(*errcode))
+					*errcode = StromError_DataStoreOutOfRange;
+				break;
+		}
+	}
+	else
+	{
+		__global cl_uint *addr = (__global cl_uint *)
+			((__global char *) kds + offset + sizeof(cl_uint) * rowidx);
+		*((__global cl_uint *) addr) = (value & 0xffffffffUL);
+	}
+}
+
+
+
+
+#define STROMCL_SIMPLE_VARSTORE_TEMPLATE(NAME,BASE)					\
+	static void														\
+	pg_##NAME##_vstore(__global kern_data_store *kds,				\
+					   __global kern_toastbuf *ktoast,				\
+					   __private int *errcode,						\
+					   cl_uint colidx,								\
+					   cl_uint rowidx,								\
+					   pg_##NAME##_t datum)							\
+	{																\
+	cl_ulong	value;												\
+																	\
+																	\
+																	\
+																	\
+																	\
+																	\
+																	\
+																	\
+																	\
+																	\
+												\
+												\
+
+static void
+pg_common_vstore(__private cl_int *errcode,
+				 __global kern_data_store *kds,
+				 cl_uint colidx,
+				 cl_uint rowidx,
+				 cl_char isnull,
+				 cl_ulong value)	/* right now, 64bit is the max width */
+
+
+																	\
+																	\
+																	\
+																	\
+																	\
+																	\
+																	\
+																	\
+																	\
+																	\
+								\
+
+
+
+
+
+
+
+
+
 #endif	/* OPENCL_DEVICE_CODE */
 
 /* Host side representation of kern_gpupreagg. It can perform as a message
