@@ -249,21 +249,21 @@ gpupreagg_check_next(__global kern_gpupreagg *kgpreagg,
 
 }
 
-
-
 /*
- * pg_common_vstore() - utility function to store the supplied
- * datum on appropriate position of the target kds. We assume
- * destination kds shares a common toast buffer with source kds,
- * so all we need to copy is offset value if varlena variable.
+ * pg_common_vstore_setnull() - utility function to set null bitmask
+ * on the appropriate position of the target kern_data_store.
+ * It internally uses reduction operation using local memory, so all
+ * the work-item has to be called towards this function.
+ * It returns width of null-bitmap on the required attribute, may be
+ * 0 if column has NOT NULL constratint.
  */
-static void
-pg_common_vstore(__private cl_int *errcode,
-				 __global kern_data_store *kds,
-				 cl_uint colidx,
-				 cl_uint rowidx,
-				 cl_char isnull,
-				 cl_ulong value)	/* right now, 64bit is the max width */
+static cl_int
+pg_common_vstore_setnull(__private cl_int *errcode,
+						 __global kern_data_store *kds,
+						 cl_uint colidx,
+						 cl_uint rowidx,
+						 bool isnull,
+						 __local void *local_workbuf)
 {
 	kern_colmeta	cmeta;
 	cl_uint			offset;
@@ -273,7 +273,7 @@ pg_common_vstore(__private cl_int *errcode,
 	{
 		if (!StromErrorIsSignificant(*errcode))
 			*errcode = StromError_DataStoreCorruption;
-		return;
+		return -1;
 	}
 
 	/* out of range? */
@@ -281,13 +281,13 @@ pg_common_vstore(__private cl_int *errcode,
 	{
 		if (!StromErrorIsSignificant(*errcode))
 			*errcode = StromError_DataStoreOutOfRange;
-		return;
+		return -1;
 	}
 
 	/* why do you try to store the datum to this column? */
 	cmeta = kds->colmeta[colidx];
 	if (!cmeta.attvalid)
-		return NULL;
+		return -1;
 	offset = cmeta.cs_offset;
 
 	/*
@@ -302,7 +302,7 @@ pg_common_vstore(__private cl_int *errcode,
 		{
 			if (!StromErrorIsSignificant(*errcode))
 				*errcode = StromError_DataStoreCorruption;
-			return;
+			return -1;
 		}
 	}
 	else
@@ -310,7 +310,7 @@ pg_common_vstore(__private cl_int *errcode,
 		__local cl_uint *nullmask = (__lobal cl_uint *) local_workbuf;
 		cl_uint		x;
 
-		nullmask[get_local_id(0)] = (!isnull ? (1 << (rowid & 0x3f)) : 0);
+		nullmask[get_local_id(0)] = (!isnull ? (1 << (rowid & 0x1f)) : 0);
 		barrier(CLK_LOCAL_MEM_FENCE);
 
 		for (x=2; x <= sizeof(cl_uint) * BITS_PER_BYTE; x <<= 1)
@@ -329,108 +329,90 @@ pg_common_vstore(__private cl_int *errcode,
 
 			addr[rowid >> 5] = nullmask[get_local_id(0)];
 		}
-		offset += STROMALIGN(bitmaplen(kds->nitems));
+		return (size_t) STROMALIGN(bitmaplen(kds->nitems));
 	}
-
-	/* NOTE: The above barrier() blocks forever if a part of threads 
-	 * are returned earlier, so we have to check out of range after
-	 * the reduction process of nullmap.
-	 */
-	if (rowidx >= kds->nitems)
-	{
-		if (!StromErrorIsSignificant(*errcode))
-			*errcode = StromError_DataStoreOutOfRange;
-		return;
-	}
-
-	/* copy the value itself */
-	if (cmeta.attlen > 0)
-	{
-		__global void *addr =
-			(__global char *) kds + offset + cmeta.attlen * rowidx;
-		switch (cmeta.attlen)
-		{
-			case sizeof(cl_uchar):
-				*((__global cl_uchar *) addr) = (value & 0x000000ffUL);
-				break;
-			case sizeof(cl_ushort):
-				*((__global cl_ushort *) addr) = (value & 0x0000ffffUL);
-				break;
-			case sizeof(cl_uint):
-				*((__global cl_uint *) addr) = (value & 0xffffffffUL);
-				break;
-			case sizeof(cl_ulong):
-				*((__global cl_ulong *) addr) = value;
-				break;
-			default:
-				/* right now, we have no data type that does not fit above */
-				if (!StromErrorIsSignificant(*errcode))
-					*errcode = StromError_DataStoreOutOfRange;
-				break;
-		}
-	}
-	else
-	{
-		__global cl_uint *addr = (__global cl_uint *)
-			((__global char *) kds + offset + sizeof(cl_uint) * rowidx);
-		*((__global cl_uint *) addr) = (value & 0xffffffffUL);
-	}
+	return 0;
 }
 
+#define STROMCL_SIMPLE_VARSTORE_TEMPLATE(NAME,BASE)			\
+	static void												\
+	pg_##NAME##_vstore(__global kern_data_store *kds,		\
+					   __global kern_toastbuf *ktoast,		\
+					   __private int *errcode,				\
+					   cl_uint colidx,						\
+					   cl_uint rowidx,						\
+					   pg_##NAME##_t datum,					\
+					   __local void *local_workbuf)			\
+	{														\
+		kern_colmeta	cmeta;								\
+		cl_int			width;								\
+		cl_int			cs_offset;							\
+		__global BASE  *cs_addr;							\
+															\
+		width = pg_common_vstore_setnull(errcode, kds,		\
+										 colidx, rowidx,	\
+										 datum.isnull,		\
+										 local_workbuf);	\
+		if (width < 0)										\
+			return;											\
+		if (rowidx >= kds->nitems)							\
+		{													\
+			if (!StromErrorIsSignificant(*errcode))			\
+				*errcode = StromError_DataStoreOutOfRange;	\
+		}													\
+		/* OK, let's put fixed-length datum  */				\
+		cmeta = kds->colmeta[colidx];						\
+		cs_offset = cmeta.cs_offset + width;				\
+		cs_addr = (__global BASE *)							\
+			((__global char *) kds + cs_offset +			\
+			 cmeta.attlen * rowidx);						\
+		*cs_addr = datum.value;								\
+	}
 
-
-
-#define STROMCL_SIMPLE_VARSTORE_TEMPLATE(NAME,BASE)					\
-	static void														\
-	pg_##NAME##_vstore(__global kern_data_store *kds,				\
-					   __global kern_toastbuf *ktoast,				\
-					   __private int *errcode,						\
-					   cl_uint colidx,								\
-					   cl_uint rowidx,								\
-					   pg_##NAME##_t datum)							\
-	{																\
-	cl_ulong	value;												\
-																	\
-																	\
-																	\
-																	\
-																	\
-																	\
-																	\
-																	\
-																	\
-																	\
-												\
-												\
-
-static void
-pg_common_vstore(__private cl_int *errcode,
-				 __global kern_data_store *kds,
-				 cl_uint colidx,
-				 cl_uint rowidx,
-				 cl_char isnull,
-				 cl_ulong value)	/* right now, 64bit is the max width */
-
-
-																	\
-																	\
-																	\
-																	\
-																	\
-																	\
-																	\
-																	\
-																	\
-																	\
-								\
-
-
-
-
-
-
-
-
+#define STROMCL_VARLENA_VARSTORE_TEMPLATE(NAME)				\
+	static void												\
+	pg_##NAME##_vstore(__global kern_data_store *kds,		\
+					   __global kern_toastbuf *ktoast,		\
+					   __private int *errcode,				\
+					   cl_uint colidx,						\
+					   cl_uint rowidx,						\
+					   pg_##NAME##_t datum,					\
+					   __local void *local_workbuf)			\
+	{														\
+		kern_colmeta		cmeta;							\
+		cl_int				width;							\
+		cl_int				cs_offset;						\
+		cl_int				vl_offset;						\
+		__global varlena   *cs_addr;						\
+															\
+		width = pg_common_vstore_setnull(errcode, kds,		\
+										 colidx, rowidx,	\
+										 datum.isnull,		\
+										 local_workbuf);	\
+		if (width < 0)										\
+			return;											\
+		if (rowidx >= kds->nitems)							\
+		{													\
+			if (!StromErrorIsSignificant(*errcode))			\
+				*errcode = StromError_DataStoreOutOfRange;	\
+		}													\
+		/* OK, let's put fixed-length datum  */				\
+		cmeta = kds->colmeta[colidx];						\
+		cs_offset = cmeta.cs_offset + width;				\
+		cs_addr = (__global varlena *)						\
+			((__global char *) kds + cs_offset +			\
+			 sizeof(cl_uint) * rowidx);						\
+		/* NOTE: right now, varlena datum is supported	*/	\
+		/* as a grouping key only, so its attribute		*/	\
+		/* number should not be changed */					\
+		if (ktoast->length == TOASTBUF_MAGIC)				\
+			vl_offset = (cl_uint)((uintptr_t)datum.value -	\
+								  (uintptr_t)ktoast);		\
+		else												\
+			vl_offset = (cl_uint)((uintptr_t)datum.value -	\
+								  ktoast->coldir[colidx]);	\
+		*cs_addr = vl_offset;								\
+	}
 
 #endif	/* OPENCL_DEVICE_CODE */
 
