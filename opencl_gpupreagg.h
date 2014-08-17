@@ -18,7 +18,7 @@
 typedef struct
 {
 	cl_int			status;		/* result of kernel execution */
-	cl_int			buf_nindex;	/* length of rindex/gindex */
+	cl_int			rindex_len;	/* length of rindex (= get_next_log2(nitems))*/
 	kern_parambuf	kparams;
 	/*
 	 * NOTE: In the kernel space, buffer for rindex and gindex shall
@@ -37,15 +37,13 @@ typedef struct
 	((__global cl_int *)((__global char *)(kgpreagg) +		\
 			STROMALIGN(offsetof(kern_gpupreagg, kparams) +	\
 					   KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg))))
-#define KERN_GPUPREAGG_GROUP_INDEX(kgpreagg)				\
-	(KERN_GPUPREAGG_ROW_INDEX(kgpreagg) + (kgpreagg)->nindex)
 #define KERN_GPUPREAGG_HOST_LENGTH(kgpreagg)				\
 	((uintptr_t)KERN_GPUPREAGG_ROW_INDEX(kgpreagg) -		\
 	 (uintptr_t)(kgpreagg))
 #define KERN_GPUPREAGG_DEVICE_LENGTH(kgpreagg)				\
-	((uintptr_t)(KERN_GPUPREAGG_ROW_INDEX(kgpreagg) +		\
-				 2 * (kgpreagg)->nindex) - (uintptr_t)(kgpreagg))
-
+	(((uintptr_t)KERN_GPUPREAGG_ROW_INDEX(kgpreagg)) +		\
+	 sizeof(cl_int) * (kgpreagg)->rindex_len -				\
+	 (uintptr_t)(kgpreagg))
 
 /*
  * NOTE: pagg_datum is a set of information to calculate running total.
@@ -76,6 +74,7 @@ typedef struct
  * kern_data_store, then returns -1 if record[X] is less than record[Y],
  * 0 if record[X] is equivalent to record[Y], or 1 if record[X] is greater
  * than record[Y].
+ * (auto generated function)
  */
 static cl_int
 gpupreagg_keycomp(__private cl_int *errcode,
@@ -88,6 +87,7 @@ gpupreagg_keycomp(__private cl_int *errcode,
  *
  * It updates the supplied 'accum' value by 'newval' value. Both of data
  * structure is expected to be on the local memory.
+ * (auto generated function)
  */
 static void
 gpupreagg_aggcalc(__private cl_int *errcode,
@@ -96,28 +96,8 @@ gpupreagg_aggcalc(__private cl_int *errcode,
 				  __local pagg_datum *newval);
 
 /*
- * load the data from kern_data_store to pagg_datum structure
- */
-static void
-gpupreagg_data_load(__private cl_int *errcode,
-					cl_int resno,
-					__local pagg_datum *datum,
-					__global kern_data_store *kds,
-					__global kern_toastbuf *ktoast,
-					size_t kds_index);
-
-/*
- * store the data from pagg_datum structure to kern_data_store
- */
-static void
-gpupreagg_data_store(__private cl_int *errcode,
-					 cl_int resno,
-					 __local pagg_datum *datum,
-					 __global kern_data_store *kds,
-					 __global kern_toastbuf *ktoast,
-					 size_t kds_index);
-/*
  * translate a kern_data_store (input) into an output form
+ * (auto generated function)
  */
 static void
 gpupreagg_projection(__private cl_int *errcode,
@@ -127,19 +107,119 @@ gpupreagg_projection(__private cl_int *errcode,
 					 size_t kds_index);
 
 /*
- * gpupreagg_preparation - It translaes a usual kern_data_store (that
- * reflects outer relation's tupdesc) into a form of running results
- * of gpupreagg.
+ * load the data from kern_data_store to pagg_datum structure
+ */
+static void
+gpupreagg_data_load(__local pagg_datum *pdatum,
+					__private cl_int *errcode,
+					__global kern_data_store *kds,
+					__global kern_toastbuf *ktoast,
+					cl_uint colidx, cl_uint rowidx)
+{
+	kern_colmeta	cmeta;
+
+	if (colidx >= kds->ncols)
+	{
+		if (!StromErrorIsSignificant(*errcode))
+			*errcode = StromError_DataStoreCorruption;
+		return;
+	}
+	cmeta = kds->colmeta[colidx];
+	/*
+	 * Right now, expected data length for running total of partial aggregate
+	 * are 4, or 8. Elasewhere, it may be a bug.
+	 */
+	if (cmeta.attlen == sizeof(cl_uint))		/* also, cl_float */
+	{
+		__global cl_uint   *addr = kern_get_datum(kds,ktoast,colidx,rowidx);
+		if (!addr)
+			pdatum->isnull	= true;
+		else
+		{
+			pdatum->isnull	= false;
+			pdatum->int_val	= *addr;
+		}
+	}
+	else if (cmeta.attlen == sizeof(cl_ulong))	/* also, cl_double */
+	{
+		__global cl_ulong  *addr = kern_get_datum(kds,ktoast,colidx,rowidx);
+		if (!addr)
+			pdatum->isnull	= true;
+		else
+		{
+			pdatum->isnull	= false;
+			pdatum->long_val= *addr;
+		}
+	}
+	else
+	{
+		if (!StromErrorIsSignificant(*errcode))
+			*errcode = StromError_DataStoreCorruption;
+	}
+}
+
+/*
+ * store the data from pagg_datum structure to kern_data_store
+ */
+static void
+gpupreagg_data_store(__local pagg_datum *pdatum,
+					 __private cl_int *errcode,
+					 __global kern_data_store *kds,
+					 __global kern_toastbuf *ktoast,
+					 cl_uint colidx, cl_uint rowidx,
+					 __local void *local_workbuf)
+{
+	kern_colmeta	cmeta;
+
+	if (colidx >= kds->ncols)
+	{
+		if (!StromErrorIsSignificant(*errcode))
+			*errcode = StromError_DataStoreCorruption;
+		return;
+	}
+	cmeta = kds->colmeta[colidx];
+	/*
+	 * Right now, expected data length for running total of partial aggregate
+	 * are 4, or 8. Elasewhere, it may be a bug.
+	 */
+	if (cmeta.attlen == sizeof(cl_uint))		/* also, cl_float */
+	{
+		pg_int4_t	temp;
+
+		temp.isnull	= pdatum->isnull;
+		temp.value	= pdatum->int_val;
+		pg_int4_vstore(kds, ktoast, errcode, colidx, rowidx, temp, local_workbuf);
+	}
+	else if (cmeta.attlen == sizeof(cl_ulong))	/* also, cl_double */
+	{
+		pg_int8_t	temp;
+
+		temp.isnull	= pdatum->isnull;
+		temp.value	= pdatum->long_val;
+		pg_int8_vstore(kds, ktoast, errcode, colidx, rowidx, temp, local_workbuf);
+	}
+	else
+	{
+		if (!StromErrorIsSignificant(*errcode))
+			*errcode = StromError_DataStoreCorruption;
+	}
+}
+
+/*
+ * gpupreagg_preparation - It translaes an input kern_data_store (that
+ * reflects outer relation's tupdesc) into the form of running total
+ * and final result of gpupreagg (that reflects target-list of GpuPreAgg).
  */
 __kernel void
 gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 					  __global kern_data_store *kds_in,
 					  __global kern_data_store *kds_out,
 					  __global kern_toastbuf *ktoast,
-					  __local void *local_workbuf)
+					  __local void *local_memory)
 {
 	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	cl_int		errcode = StromError_Success;
+	__global cl_int		   *rindex = KERN_GPUPREAGG_ROW_INDEX(kgpreagg);
+	cl_int					errcode = StromError_Success;
 
 	if (get_global_id(0) < kds_in->nitems)
 		gpupreagg_projection(&errcode,
@@ -148,6 +228,36 @@ gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 
 	kern_writeback_error_status(&kgpreagg->status, errcode, local_workbuf);
 }
+
+/*
+ * gpupreagg_reduction - entrypoint of the main logic for GpuPreAgg.
+ * The both of kern_data_store have identical form that reflects running 
+ * total and final results. rindex will show the sorted order according
+ * to the gpupreagg_keycomp() being constructed on the fly.
+ * This function makes grouping at first, then run data reduction within
+ * the same group. 
+ */
+__kernel void
+gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
+					__global kern_data_store *kds_src,
+					__global kern_data_store *kds_dst,
+					__global kern_toastbuf *ktoast,
+					__local void *local_memory)
+{
+	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	__global cl_int		   *rindex = KERN_GPUPREAGG_ROW_INDEX(kgpreagg);
+	__local pagg_datum	   *pagg_data = local_memory;
+	__local void		   *local_workbuf = &pagg_data[get_local_size(0)];
+	cl_int					errcode = StromError_Success;
+
+
+	kern_writeback_error_status(&kgpreagg->status, errcode, local_workbuf);
+}
+
+
+
+
+
 
 /*
  * gpupreagg_bitonic_local
@@ -159,7 +269,7 @@ __kernel void
 gpupreagg_bitonic_local(__global kern_gpupreagg *kgpreagg,
 						__global kern_data_store *kds,
 						__global kern_toastbuf *ktoast,
-						__local void *local_workbuf)
+						__local void *local_memory)
 {
 	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	cl_int		errcode = StromError_Success;
@@ -181,7 +291,7 @@ gpupreagg_bitonic_step(__global kern_gpupreagg *kgpreagg,
 					   cl_int bitonic_unitsz,
 					   __global kern_data_store *kds,
 					   __global kern_toastbuf *ktoast,
-					   __local void *local_workbuf)
+					   __local void *local_memory)
 {
 	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	cl_bool		reversing = (bitonic_unitsz < 0 ? true : false);
@@ -204,7 +314,7 @@ __kernel void
 gpupreagg_bitonic_merge(__global kern_gpupreagg *kgpreagg,
 						__global kern_data_store *kds,
 						__global kern_toastbuf *ktoast,
-						__local void *local_workbuf)
+						__local void *local_memory)
 {
 	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 
@@ -223,7 +333,7 @@ gpupreagg_main(__global kern_gpupreagg *kgpreagg,
 			   __global kern_data_store *kds_src,
 			   __global kern_data_store *kds_dst,
 			   __global kern_toastbuf *ktoast,
-			   __local void *local_workbuf)
+			   __local void *local_memory)
 {
 	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	__global cl_int *rindex = KERN_GPUPREAGG_ROW_INDEX(kgpreagg);
@@ -250,7 +360,7 @@ gpupreagg_check_next(__global kern_gpupreagg *kgpreagg,
 }
 
 /*
- * pg_common_vstore_setnull() - utility function to set null bitmask
+ * pg_common_vstore_putnull() - utility function to set null bitmask
  * on the appropriate position of the target kern_data_store.
  * It internally uses reduction operation using local memory, so all
  * the work-item has to be called towards this function.
@@ -258,7 +368,7 @@ gpupreagg_check_next(__global kern_gpupreagg *kgpreagg,
  * 0 if column has NOT NULL constratint.
  */
 static cl_int
-pg_common_vstore_setnull(__private cl_int *errcode,
+pg_common_vstore_putnull(__private cl_int *errcode,
 						 __global kern_data_store *kds,
 						 cl_uint colidx,
 						 cl_uint rowidx,
@@ -329,7 +439,7 @@ pg_common_vstore_setnull(__private cl_int *errcode,
 
 			addr[rowid >> 5] = nullmask[get_local_id(0)];
 		}
-		return (size_t) STROMALIGN(bitmaplen(kds->nitems));
+		return STROMALIGN(bitmaplen(kds->nitems));
 	}
 	return 0;
 }
@@ -349,12 +459,12 @@ pg_common_vstore_setnull(__private cl_int *errcode,
 		cl_int			cs_offset;							\
 		__global BASE  *cs_addr;							\
 															\
-		width = pg_common_vstore_setnull(errcode, kds,		\
+		width = pg_common_vstore_putnull(errcode, kds,		\
 										 colidx, rowidx,	\
 										 datum.isnull,		\
 										 local_workbuf);	\
 		if (width < 0)										\
-			return;											\
+			return;		/* something error! */				\
 		if (rowidx >= kds->nitems)							\
 		{													\
 			if (!StromErrorIsSignificant(*errcode))			\
@@ -383,14 +493,14 @@ pg_common_vstore_setnull(__private cl_int *errcode,
 		cl_int				width;							\
 		cl_int				cs_offset;						\
 		cl_int				vl_offset;						\
-		__global varlena   *cs_addr;						\
+		__global cl_uint   *cs_addr;						\
 															\
-		width = pg_common_vstore_setnull(errcode, kds,		\
+		width = pg_common_vstore_putnull(errcode, kds,		\
 										 colidx, rowidx,	\
 										 datum.isnull,		\
 										 local_workbuf);	\
 		if (width < 0)										\
-			return;											\
+			return;		/* something error! */				\
 		if (rowidx >= kds->nitems)							\
 		{													\
 			if (!StromErrorIsSignificant(*errcode))			\
@@ -399,18 +509,18 @@ pg_common_vstore_setnull(__private cl_int *errcode,
 		/* OK, let's put fixed-length datum  */				\
 		cmeta = kds->colmeta[colidx];						\
 		cs_offset = cmeta.cs_offset + width;				\
-		cs_addr = (__global varlena *)						\
+		cs_addr = (__global cl_uint *)						\
 			((__global char *) kds + cs_offset +			\
 			 sizeof(cl_uint) * rowidx);						\
-		/* NOTE: right now, varlena datum is supported	*/	\
-		/* as a grouping key only, so its attribute		*/	\
-		/* number should not be changed */					\
-		if (ktoast->length == TOASTBUF_MAGIC)				\
-			vl_offset = (cl_uint)((uintptr_t)datum.value -	\
-								  (uintptr_t)ktoast);		\
-		else												\
-			vl_offset = (cl_uint)((uintptr_t)datum.value -	\
-								  ktoast->coldir[colidx]);	\
+		/* NOTE: right now, varlena datum is supported */	\
+		/* as a grouping key only, so its attribute */		\
+		/* number should not be changed, thus coldir[] */	\
+		/* of toastbuf also should not be changed */		\
+		vl_offset = (cl_uint)								\
+			((uintptr_t)datum.value -						\
+			 (ktoast->length == TOASTBUF_MAGIC				\
+			  ? (uintptr_t)ktoast							\
+			  : (uintptr_t)ktoast->coldir[colidx]));		\
 		*cs_addr = vl_offset;								\
 	}
 

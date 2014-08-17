@@ -272,6 +272,9 @@ typedef struct devtype_info {
 	int16		type_align;
 	char	   *type_name;	/* name of device type; same of SQL's type */
 	char	   *type_base;	/* base name of this type (like varlena) */
+	/* oid of type related functions */
+	Oid			type_eqfunc;	/* function to check equality */
+	Oid			type_cmpfunc;	/* function to compare two values */
 } devtype_info;
 
 typedef struct devfunc_info {

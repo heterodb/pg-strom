@@ -19,6 +19,7 @@
 #include "nodes/nodeFuncs.h"
 #include "nodes/pg_list.h"
 #include "optimizer/clauses.h"
+#include "utils/fmgroids.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -39,26 +40,28 @@ static List	   *devfunc_info_slot[1024];
 static struct {
 	Oid				type_oid;
 	const char	   *type_base;
+	Oid				type_eqfunc;	/* function to check equality */
+	Oid				type_cmpfunc;	/* function to compare two values */
 } devtype_catalog[] = {
 	/* basic datatypes */
-	{ BOOLOID,			"cl_bool" },
-	{ INT2OID,			"cl_short" },
-	{ INT4OID,			"cl_int" },
-	{ INT8OID,			"cl_long" },
-	{ FLOAT4OID,		"cl_float" },
-	{ FLOAT8OID,		"cl_double" },
+	{ BOOLOID,			"cl_bool",		F_BOOLEQ,	F_BTBOOLCMP },
+	{ INT2OID,			"cl_short",		F_INT2EQ,	F_BTINT2CMP },
+	{ INT4OID,			"cl_int",		F_INT4EQ,	F_BTINT4CMP },
+	{ INT8OID,			"cl_long",		F_INT8EQ,	F_BTINT8CMP },
+	{ FLOAT4OID,		"cl_float",		F_FLOAT4EQ,	F_BTFLOAT4CMP },
+	{ FLOAT8OID,		"cl_double",	F_FLOAT8EQ,	F_BTFLOAT8CMP },
 	/* date and time datatypes */
-	{ DATEOID,			"cl_int" },
+	{ DATEOID,			"cl_int",		F_DATE_EQ,	F_DATE_CMP },
 #ifdef HAVE_INT64_TIMESTAMP
-	{ TIMEOID,			"cl_long" },
-	{ TIMESTAMPOID,		"cl_long" },
+	{ TIMEOID,			"cl_long",		F_TIME_EQ,	F_DATE_CMP },
+	{ TIMESTAMPOID,		"cl_long",		F_TIMESTAMP_EQ, F_TIMESTAMP_CMP },
 #endif
 	/* variable length datatypes */
-	{ BPCHAROID,		"varlena" },
-	{ VARCHAROID,		"varlena" },
-//	{ NUMERICOID,		"varlena" },
-	{ BYTEAOID,			"varlena" },
-	{ TEXTOID,			"varlena" },
+	{ BPCHAROID,		"varlena",		F_BPCHAREQ,	F_BPCHARCMP },
+	{ VARCHAROID,		"varlena",		InvalidOid,	InvalidOid },
+//	{ NUMERICOID,		"varlena",		F_NUMERIC_EQ },
+	{ BYTEAOID,			"varlena",		F_BYTEAEQ,	F_BYTEACMP },
+	{ TEXTOID,			"varlena",		F_TEXTEQ,	F_BTTEXTCMP },
 };
 
 devtype_info *
@@ -110,6 +113,8 @@ pgstrom_devtype_lookup(Oid type_oid)
 			entry->type_align = typealign_get_width(typeform->typalign);
 			entry->type_name = pstrdup(NameStr(typeform->typname));
 			entry->type_base = pstrdup(devtype_catalog[i].type_base);
+			entry->type_eqfunc = devtype_catalog[i].type_eqfunc; 
+			entry->type_cmpfunc = devtype_catalog[i].type_cmpfunc;
 			break;
 		}
 		if (i == lengthof(devtype_catalog))
@@ -1329,6 +1334,54 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		 */
 		return codegen_expression_walker((Node *)relabel->arg, context);
 	}
+	else if (IsA(node, CaseExpr))
+	{
+		CaseExpr   *caseexpr = (CaseExpr *) node;
+		ListCell   *cell;
+
+		foreach (cell, caseexpr->args)
+		{
+			CaseWhen   *casewhen = (CaseWhen *) lfirst(cell);
+
+			Assert(IsA(casewhen, CaseWhen));
+			if (caseexpr->arg)
+			{
+				devtype_info   *dtype;
+				devfunc_info   *dfunc;
+				Oid				expr_type;
+
+				expr_type = exprType((Node *)caseexpr->arg);
+				dtype = pgstrom_devtype_lookup_and_track(expr_type, context);
+				if (!dtype)
+					return false;
+				dfunc = pgstrom_devfunc_lookup_and_track(dtype->type_eqfunc, context);
+				if (!dfunc)
+					return false;
+				appendStringInfo(&context->str, "EVAL(pgfn_%s(", dfunc->func_name);
+				codegen_expression_walker((Node *) caseexpr->arg, context);
+				appendStringInfo(&context->str, ", ");
+				codegen_expression_walker((Node *) casewhen->expr, context);
+				appendStringInfo(&context->str, ") ? (");
+				codegen_expression_walker((Node *) casewhen->result, context);
+				appendStringInfo(&context->str, ") : (");
+			}
+			else
+			{
+				Assert(exprType((Node *) casewhen->expr) == BOOLOID);
+				Assert(exprType((Node *) casewhen->result) == caseexpr->casetype);
+
+				appendStringInfo(&context->str, "EVAL(");
+				codegen_expression_walker((Node *) casewhen->expr, context);
+				appendStringInfo(&context->str, ") ? (");
+				codegen_expression_walker((Node *) casewhen->result, context);
+				appendStringInfo(&context->str, ") : (");
+			}
+		}
+		codegen_expression_walker((Node *) caseexpr->defresult, context);
+		foreach (cell, caseexpr->args)
+			appendStringInfo(&context->str, ")");
+		return true;
+	}
 	Assert(false);
 	return false;
 }
@@ -1587,6 +1640,43 @@ pgstrom_codegen_available_expression(Expr *expr)
 		if (!pgstrom_devtype_lookup(relabel->resulttype))
 			return false;
 		return pgstrom_codegen_available_expression((Expr *) relabel->arg);
+	}
+	else if (IsA(expr, CaseExpr))
+	{
+		CaseExpr   *caseexpr = (CaseExpr *) expr;
+		ListCell   *cell;
+
+		if (!devtype_runnable_collation(caseexpr->casecollid))
+			return false;
+		if (!pgstrom_devtype_lookup(caseexpr->casetype))
+			return false;
+
+		if (caseexpr->arg)
+		{
+			Oid				expr_type = exprType((Node *)caseexpr->arg);
+			devtype_info   *dtype = pgstrom_devtype_lookup(expr_type);
+
+			if (!OidIsValid(dtype->type_eqfunc) ||
+				!pgstrom_devfunc_lookup(dtype->type_eqfunc))
+				return false;
+		}
+
+		foreach (cell, caseexpr->args)
+		{
+			CaseWhen   *casewhen = lfirst(cell);
+
+			Assert(IsA(casewhen, CaseWhen));
+			if (exprType((Node *)casewhen->expr) !=
+				(caseexpr->arg ? exprType((Node *)caseexpr->arg) : BOOLOID))
+				return false;
+			if (!pgstrom_codegen_available_expression(casewhen->expr))
+				return false;
+			if (!pgstrom_codegen_available_expression(casewhen->result))
+				return false;
+		}
+		if (!pgstrom_codegen_available_expression((Expr *) caseexpr->defresult))
+			return false;
+
 	}
 	return false;
 }
