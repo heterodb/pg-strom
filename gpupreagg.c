@@ -55,6 +55,7 @@ typedef struct
 	CustomPlanState	cps;
 	TupleDesc		scan_desc;
 	TupleTableSlot *scan_slot;
+	bool			outer_done;
 
 	pgstrom_queue  *mqueue;
 	Datum			dprog_key;
@@ -62,14 +63,17 @@ typedef struct
 
 	pgstrom_gpupreagg  *curr_chunk;
 	cl_uint				curr_index;
+	cl_uint				num_running;
+	dlist_head			ready_chunks;
 
 	pgstrom_perfmon		pfm;		/* performance counter */
 } GpuPreAggState;
 
+/* declaration of static functions */
+//static void clserv_process_gpupreagg(pgstrom_message *message);
+
 /*
  * Arguments of alternative functions.
- * An alternative functions 
- *
  */
 #define ALTFUNC_EXPR_NROWS			101	/* NROWS(X) */
 #define ALTFUNC_EXPR_PMIN			102	/* PMIN(X) */
@@ -81,7 +85,6 @@ typedef struct
 #define ALTFUNC_EXPR_PCOV_X2		108	/* PCOV_X2(X,Y) */
 #define ALTFUNC_EXPR_PCOV_Y2		109	/* PCOV_Y2(X,Y) */
 #define ALTFUNC_EXPR_PCOV_XY		110	/* PCOV_XY(X,Y) */
-
 
 /*
  * List of supported aggregate functions
@@ -1755,6 +1758,7 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 	gpas->scan_desc = ExecGetResultType(outerPlanState(gpas));
 	gpas->scan_slot = ExecAllocTableSlot(&estate->es_tupleTable);
 	ExecSetSlotDescriptor(gpas->scan_slot, gpas->scan_desc);
+	gpas->outer_done = false;
 
 	/*
 	 * initialize result tuple type and projection info
@@ -1820,6 +1824,13 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 	pgstrom_track_object(&gpas->mqueue->sobj, 0);
 
 	/*
+	 * init misc stuff
+	 */
+	gpas->curr_chunk = NULL;
+	gpas->curr_index = 0;
+	dlist_init(&gpas->ready_chunks);
+
+	/*
 	 * Is perfmon needed?
 	 */
 	gpas->pfm.enabled = pgstrom_perfmon_enabled;
@@ -1827,10 +1838,135 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 	return &gpas->cps;
 }
 
+static pgstrom_gpupreagg *
+gpupreagg_load_next_outer(GpuPreAggState *gpas)
+{
+	return NULL;
+}
+
+static bool
+gpupreagg_next_tuple(GpuPreAggState *gpas, TupleTableSlot *slot)
+{
+	return false;
+}
+
 static TupleTableSlot *
 gpupreagg_exec(CustomPlanState *node)
 {
-	return NULL;
+	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
+	TupleTableSlot	   *slot = gpas->cps.ps.ps_ResultTupleSlot;
+	pgstrom_gpupreagg  *gpreagg;
+
+	while (!gpas->curr_chunk ||
+		   !gpupreagg_next_tuple(gpas, slot))
+	{
+		pgstrom_message	   *msg;
+		dlist_node		   *dnode;
+
+		/* release current gpupreagg chunk being already fetched */
+		if (gpas->curr_chunk)
+		{
+			msg = &gpas->curr_chunk->msg;
+			if (msg->pfm.enabled)
+				pgstrom_perfmon_add(&gpas->pfm, &msg->pfm);
+			Assert(msg->refcnt == 1);
+			pgstrom_untrack_object(&msg->sobj);
+			pgstrom_put_message(msg);
+			gpas->curr_chunk = NULL;
+			gpas->curr_index = 0;
+		}
+
+		/*
+		 * dequeue the running gpupreagg chunk being already processed.
+		 */
+		while ((msg = pgstrom_try_dequeue_message(gpas->mqueue)) != NULL)
+		{
+			Assert(gpas->num_running > 0);
+			gpas->num_running--;
+			dlist_push_tail(&gpas->ready_chunks, &msg->chain);
+		}
+
+		/*
+		 * Keep number of asynchronous partial aggregate request a particular
+		 * level unless it does not exceed pgstrom_max_async_chunks and any
+		 * new response is not replied during the loading.
+		 */
+		while (!gpas->outer_done &&
+			   gpas->num_running <= pgstrom_max_async_chunks)
+		{
+			gpreagg = gpupreagg_load_next_outer(gpas);
+			if (!gpreagg)
+				break;	/* outer scan reached to end of the relation */
+
+			if (!pgstrom_enqueue_message(&gpreagg->msg))
+			{
+				pgstrom_put_message(&gpreagg->msg);
+				elog(ERROR, "failed to enqueue pgstrom_gpuhashjoin message");
+			}
+            gpas->num_running++;
+
+			msg = pgstrom_try_dequeue_message(gpas->mqueue);
+			if (msg)
+			{
+				gpas->num_running--;
+				dlist_push_tail(&gpas->ready_chunks, &msg->chain);
+				break;
+			}
+		}
+
+		/*
+		 * wait for server's response if no available chunks were replied
+		 */
+		if (dlist_is_empty(&gpas->ready_chunks))
+		{
+			/* OK, no more request should be fetched */
+			if (gpas->num_running == 0)
+				break;
+			msg = pgstrom_dequeue_message(gpas->mqueue);
+			if (!msg)
+				elog(ERROR, "message queue wait timeout");
+			gpas->num_running--;
+			dlist_push_tail(&gpas->ready_chunks, &msg->chain);
+		}
+
+		/*
+		 * picks up next available chunks, if any
+		 */
+		Assert(!dlist_is_empty(&gpas->ready_chunks));
+		dnode = dlist_pop_head_node(&gpas->ready_chunks);
+		gpreagg = dlist_container(pgstrom_gpupreagg, msg.chain, dnode);
+
+		/*
+		 * Raise an error, if significan error was reported
+		 */
+		if (gpreagg->msg.errcode != StromError_Success)
+		{
+			if (gpreagg->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
+			{
+				const char *buildlog
+					= pgstrom_get_devprog_errmsg(gpas->dprog_key);
+				const char *kern_source
+					= ((GpuPreAggPlan *)node->ps.plan)->kern_source;
+
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
+								pgstrom_strerror(gpreagg->msg.errcode),
+								kern_source),
+						 errdetail("%s", buildlog)));
+			}
+			else
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("PG-Strom: OpenCL execution error (%s)",
+								pgstrom_strerror(gpreagg->msg.errcode))));
+			}
+		}
+		gpas->curr_chunk = gpreagg;
+		gpas->curr_index = 0;
+	}
+	return slot;
 }
 
 static void
@@ -1932,9 +2068,23 @@ pgstrom_init_gpupreagg(void)
  *
  * ---------------------------------------------------------------- */
 
+typedef struct
+{
+	pgstrom_gpupreagg  *gpreagg;
+	cl_command_queue	kcmdq;
+	cl_program			program;
+	cl_kernel			kernel;
+
+	cl_int				ev_index;
+	cl_event			events[1];
+} clstate_gpupreagg;
 
 
-
+#if 0
+static void
+clserv_process_gpupreagg(pgstrom_message *message)
+{}
+#endif
 
 
 
