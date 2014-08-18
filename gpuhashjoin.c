@@ -4055,12 +4055,13 @@ clserv_process_gpuhashjoin_column(clstate_gpuhashjoin *clghj,
 	pgstrom_perfmon *pfm = &clghj->gpuhashjoin->msg.pfm;
 	Size		length;
 	Size		offset;
-	cl_uint		nitems = kds_head->nitems;
+	cl_uint		nrooms = kds_head->nitems;
 	cl_uint		ncols = kds_head->ncols;
 	cl_int		i, rc;
 
 	Assert(kds_head->ncols == tcs->ncols);
 	Assert(kds_head->nitems == tcs->nrows);
+	Assert(kds_head->nitems == kds_head->nrooms);
 
 	/* toast header, if any */
 	if (ktoast_head)
@@ -4096,7 +4097,7 @@ clserv_process_gpuhashjoin_column(clstate_gpuhashjoin *clghj,
 		offset = kds_head->colmeta[i].cs_offset;
         if (!kds_head->colmeta[i].attnotnull)
 		{
-			length = STROMALIGN(BITMAPLEN(nitems));
+			length = STROMALIGN(BITMAPLEN(nrooms));
 
 			/* MEMO: special case handing if we have a bulk-loading of
 			 * column-store from the underlying relation that has NOT
@@ -4145,7 +4146,7 @@ clserv_process_gpuhashjoin_column(clstate_gpuhashjoin *clghj,
 		}
 		length = (kds_head->colmeta[i].attlen > 0
 				  ? kds_head->colmeta[i].attlen
-				  : sizeof(cl_uint)) * nitems;
+				  : sizeof(cl_uint)) * nrooms;
 		rc = clEnqueueWriteBuffer(clghj->kcmdq,
 								  clghj->m_dstore,
 								  CL_FALSE,

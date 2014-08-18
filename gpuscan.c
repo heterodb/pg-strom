@@ -2212,12 +2212,13 @@ clserv_process_gpuscan_column(clstate_gpuscan *clgss,
 	pgstrom_perfmon *pfm = &clgss->msg->pfm;
 	Size		length;
 	Size		offset;
-	cl_uint		nitems = kds_head->nitems;
+	cl_uint		nrooms = kds_head->nitems;
 	cl_uint		ncols = kds_head->ncols;
 	cl_int		i, rc;
 
 	Assert(kds_head->ncols == tcs->ncols);
 	Assert(kds_head->nitems == tcs->nrows);
+	Assert(kds_head->nitems == kds_head->nrooms);
 
 	/* toast header, if any */
 	if (clgss->m_ktoast)
@@ -2252,7 +2253,7 @@ clserv_process_gpuscan_column(clstate_gpuscan *clgss,
 		if (!kds_head->colmeta[i].attnotnull)
 		{
 			Assert(tcs->cdata[i].isnull != NULL);
-			length = STROMALIGN((nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+			length = STROMALIGN(BITMAPLEN(nrooms));
 			rc = clEnqueueWriteBuffer(kcmdq,
 									  clgss->m_dstore,
 									  CL_FALSE,
@@ -2273,11 +2274,11 @@ clserv_process_gpuscan_column(clstate_gpuscan *clgss,
 			pfm->bytes_dma_send += length;
 			pfm->num_dma_send++;
 
-			offset += STROMALIGN((nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+			offset += length;
 		}
 		length = (kds_head->colmeta[i].attlen > 0
 				  ? kds_head->colmeta[i].attlen
-				  : sizeof(cl_uint)) * nitems;
+				  : sizeof(cl_uint)) * nrooms;
 		rc = clEnqueueWriteBuffer(kcmdq,
 								  clgss->m_dstore,
 								  CL_FALSE,

@@ -363,6 +363,7 @@ typedef struct {
 	cl_uint			length;	/* length of this kernel column-store */
 	cl_uint			ncols;	/* number of columns in this store */
 	cl_uint			nitems; /* number of rows in this store */
+	cl_uint			nrooms;	/* capacity of rows in this store */
 	cl_char			column_form; /* if true, data store is column-format */
 	cl_char			__padding__[3];
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
@@ -801,8 +802,7 @@ kern_get_datum_cs(__global kern_data_store *kds,
 	{
 		if (att_isnull(rowidx, (__global char *)kds + offset))
 			return NULL;
-		offset += STROMALIGN((kds->nitems +
-							  BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+		offset += STROMALIGN(bitmaplen(kds->nrooms));
 	}
 	if (cmeta.attlen > 0)
 	{

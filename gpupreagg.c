@@ -2029,6 +2029,72 @@ gpupreagg_load_next_outer(GpuPreAggState *gpas)
 static bool
 gpupreagg_next_tuple(GpuPreAggState *gpas, TupleTableSlot *slot)
 {
+	pgstrom_gpupreagg  *gpreagg = gpas->curr_chunk;
+	kern_data_store	   *kds = gpreagg->kds_dst;
+	TupleDesc			tupdesc = slot->tts_tupleDescriptor;
+
+	Assert(kds->column_form && kds->ncols == tupdesc->natts);
+
+	if (gpas->pfm.enabled)
+		gettimeofday(&tv1, NULL);
+
+
+	while (gpas->curr_index < kds->nitems)
+	{
+		int			i, j = gpas->curr_index;
+		int			attlen;
+		cl_uint		cs_offset;
+
+		ExecClearTuple(slot);
+
+		for (i=0; i < tupdesc->natts; i++)
+		{
+			cl_
+
+			if (!kds->colmeta[i].attvalid)
+			{
+				slot->tts_isnull[i] = true;
+				slot->tts_values[i] = (Datum) 0;
+				continue;
+			}
+			cs_offset = kds->colmeta[i].cs_offset;
+			if (!kds->colmeta[i].attnotnull)
+			{
+				if (att_isnull(j, (char *)kds + cs_offset))
+				{
+					slot->tts_isnull[i] = true;
+					slot->tts_values[i] = (Datum) 0;
+					continue;
+				}
+				cs_offset += STROMALIGN(BITMAPLEN(kds->nrooms));
+			}
+			slot->tts_isnull[i] = false;
+
+			attlen = kds->colmeta[i].attlen;
+			if (attlen > 0)
+			{
+				char   *ptr = (char *)kds + cs_offset + attlen * j;
+				slot->tts_values[i] = fetch_att(ptr, true, attlen);
+			}
+			else
+			{
+				/* todo varlena returning */
+				hoge
+			}
+		}
+		if (gpas->pfm.enabled)
+		{
+			gettimeofday(&tv2, NULL);
+			gpas->pfm.time_move_slot += timeval_diff(&tv1, &tv2);
+		}
+		return true;
+	}
+
+	if (gpas->pfm.enabled)
+	{
+		gettimeofday(&tv2, NULL);
+		gpas->pfm.time_move_slot += timeval_diff(&tv1, &tv2);
+	}
 	return false;
 }
 

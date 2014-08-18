@@ -51,7 +51,7 @@ typedef struct {
 	 StromTagIs(sobject,TCacheRowStore) ||		\
 	 StromTagIs(sobject,TCacheColumnStore) ||	\
 	 StromTagIs(sobject,GpuScan) ||				\
-	 StromTagIs(sobject,GpuSort) ||				\
+	 StromTagIs(sobject,GpuPreAgg) ||			\
 	 StromTagIs(sobject,GpuHashJoin) ||			\
 	 StromTagIs(sobject,HashJoinTable))
 

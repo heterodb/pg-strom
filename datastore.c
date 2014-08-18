@@ -245,6 +245,7 @@ kparam_make_kds_head(TupleDesc tupdesc,
 	kds_head = (kern_data_store *) VARDATA(result);
 	kds_head->ncols = ncols;
 	kds_head->nitems = (cl_uint)(-1);	/* to be set later */
+	kds_head->nrooms = (cl_uint)(-1);	/* to be set later */
 
 	for (i=0; i < tupdesc->natts; i++)
 	{
@@ -274,7 +275,8 @@ kparam_refresh_kds_head(kern_parambuf *kparams,
 	int			i, ncols = kds_head->ncols;
 
 	length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
-	kds_head->nitems = nitems;
+	kds_head->nitems = nitems;	/* usually, nitems and nrroms are same, */
+	kds_head->nrooms = nitems;	/* if kds is filled in the host side */
 	if (StromTagIs(rcstore, TCacheRowStore))
 	{
 		tcache_row_store *trs = (tcache_row_store *) rcstore;
@@ -298,11 +300,10 @@ kparam_refresh_kds_head(kern_parambuf *kparams,
 				continue;
 			kds_head->colmeta[i].cs_offset = length;
 			if (!kds_head->colmeta[i].attnotnull)
-				length += STROMALIGN((kds_head->nitems +
-									  BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+				length += STROMALIGN(BITMAPLEN(kds_head->nrooms));
 			length += STROMALIGN((kds_head->colmeta[i].attlen > 0
 								  ? kds_head->colmeta[i].attlen
-								  : sizeof(cl_uint)) * kds_head->nitems);
+								  : sizeof(cl_uint)) * kds_head->nrooms);
 		}
 	}
 	else

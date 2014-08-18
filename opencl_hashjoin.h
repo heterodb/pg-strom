@@ -396,43 +396,6 @@ out:
 	kern_writeback_error_status(&kresults->errcode, errcode, local_workbuf);
 }
 
-
-#if 0
-__kernel void
-gpuhashjoin_inner_cs(__global kern_hashjoin *khashjoin,
-					 __global kern_hashtable *khashtbl,
-					 __global kern_column_store *kcs,
-					 __global kern_toastbuf *ktoast,
-					 cl_int   src_nitems,
-					 __local void *local_workbuf)
-{
-	__global kern_parambuf *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
-	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
-	cl_int			errcode = StromError_Success;
-	size_t			kcs_index;
-
-	if (src_nitems < 0)
-		kcs_index = get_global_id(0);
-	else if (get_global_id(0) < src_nitems)
-		kcs_index = (size_t)kresults->results[get_global_id(0)];
-	else
-		kcs_index = kcs->nrows;	/* ensure this thread is out of range */
-
-	/* do inner join */
-	gpuhashjoin_inner(&errcode,
-					  kparams,
-					  kresults,
-					  khashtbl,
-					  kcs,
-					  ktoast,
-					  kcs_index,
-					  local_workbuf);
-	/* back execution status into host-side */
-	kern_writeback_error_status(&kresults->errcode, errcode, local_workbuf);
-}
-
-#endif
-
 /*
  * Template of variable reference on the hash-entry
  */
