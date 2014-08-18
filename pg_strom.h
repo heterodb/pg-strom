@@ -135,9 +135,9 @@ typedef enum {
 	StromTag_TCacheColumnStore,
 	StromTag_TCacheToastBuf,
 	StromTag_GpuScan,
-	StromTag_GpuSort,
 	StromTag_GpuHashJoin,
 	StromTag_HashJoinTable,
+	StromTag_GpuPreAgg,
 } StromTag;
 
 typedef struct {
