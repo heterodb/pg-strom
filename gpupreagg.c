@@ -1863,19 +1863,28 @@ static pgstrom_gpupreagg *
 pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
 {
 	pgstrom_gpupreagg  *gpupreagg;
+	kern_parambuf	   *kparams;
+	kern_row_map	   *krowmap;
+	kern_data_store	   *kds_head;
+	kern_data_store	   *kds_dst;
 	StromObject		   *rcstore = bulk->rcstore;
 	cl_int				nvalids = bulk->nvalids;
 	cl_uint				nitems = pgstrom_nitems_rcstore(rcstore);
-	cl_uint				nrooms;
 	Size				required;
-	Size				allocated;
+	Size				length;
+	void			   *vl_datum;
+	int					i;
 
 	/*
 	 * Allocation of pgtrom_gpupreagg message object
 	 */
 	required = STROMALIGN(offsetof(pgstrom_gpupreagg,
 								   kern.kparams) +
-						  gpas->kparams.length);
+						  gpas->kparams->length);
+	if (nvalids < 0)
+		required += STROMALIGN(offsetof(kern_row_map, rindex[0]));
+	else
+		required += STROMALIGN(offsetof(kern_row_map, rindex[nvalids]));
 	gpupreagg = pgstrom_shmem_alloc(required);
 	if (!gpupreagg)
 		elog(ERROR, "out of shared memory");
@@ -1888,18 +1897,10 @@ pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
     gpupreagg->msg.respq = pgstrom_get_queue(gpas->mqueue);
     gpupreagg->msg.cb_process = clserv_process_gpupreagg;
     gpupreagg->msg.cb_release = pgstrom_release_gpupreagg;
-    gpupreagg->msg.pfm.enabled = ghjs->pfm.enabled;
+    gpupreagg->msg.pfm.enabled = gpas->pfm.enabled;
 	/* other fields also */
 	gpupreagg->dprog_key = pgstrom_retain_devprog_key(gpas->dprog_key);
 	gpupreagg->rcstore = rcstore;
-	/* rindex[], if any */
-	if (nvalids < 0)
-		krowmap->nvalids = -1;
-	else
-	{
-		krowmap->nvalids = nvalids;
-		memcpy(krowmap->rindex, bulk->rindex, sizeof(cl_uint) * nvalids);
-	}
 	/*
 	 * Once a row-/column-store connected to the pgstrom_gpupreagg
 	 * structure, it becomes pgstrom_release_gpupreagg()'s role to
@@ -1910,20 +1911,28 @@ pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
 	pgstrom_track_object(&gpupreagg->msg.sobj, 0);
 
 	/*
-	 * allocation of result kern_data_store
+	 * Also initialize kern_gpupreagg portion
 	 */
+	gpupreagg->kern.status = StromError_Success;
+	gpupreagg->kern.rindex_len =
+		(1UL << get_next_log2(nvalids < 0 ? nitems : nvalids));
+	/* refresh kparams */
+	kparams = KERN_GPUPREAGG_PARAMBUF(&gpupreagg->kern);
+	memcpy(kparams, gpas->kparams, gpas->kparams->length);
 
-	/* update kds_head and ktoast_head according to the given rcstore */
 	kparam_refresh_kds_head(kparams, rcstore, nitems);
 	kparam_refresh_ktoast_head(kparams, rcstore);
-	/* also, header portion of kern_data_store */
+
+	/* also, kds_head of the destination relation */
 	vl_datum = kparam_get_value(kparams, 2);
 	if (!vl_datum)
 		elog(ERROR, "Bug? kds_head of destination is missing");
 	kds_head = (kern_data_store *)VARDATA_ANY(vl_datum);
-	kds_head->nitems = 0;
+	kds_head->nitems = 0;	/* to be incremented by kernel */
 	kds_head->nrooms = nitems;
 	kds_head->column_form = true;
+	length = STROMALIGN(offsetof(kern_data_store,
+								 colmeta[kds_head->ncols]));
 	for (i=0; i < kds_head->ncols; i++)
 	{
 		if (!kds_head->colmeta[i].attvalid)
@@ -1937,6 +1946,18 @@ pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
 	}
 	kds_head->length = length;
 
+	/*
+	 * Also, initialization of kern_row_map portion
+	 */
+	krowmap = KERN_GPUPREAGG_KROWMAP(&gpupreagg->kern);
+	if (nvalids < 0)
+		krowmap->nvalids = -1;
+	else
+	{
+		krowmap->nvalids = nvalids;
+		memcpy(krowmap->rindex, bulk->rindex, sizeof(cl_uint) * nvalids);
+	}
+
 	/* Allocation of result kern_data_store.
 	 * ----
 	 * NOTE: we don't need to initialize its header portion here,
@@ -1944,7 +1965,7 @@ pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
 	 * then DMA writeback will be applied on the buffer below; that
 	 * includes header and body portions.
 	 */
-	kds_dst = pgstrom_shmem_alloc(kds_head->length));
+	kds_dst = pgstrom_shmem_alloc(kds_head->length);
 	if (!kds_dst)
 		elog(ERROR, "out of shared memory");
 	gpupreagg->kds_dst = kds_dst;
@@ -1955,10 +1976,11 @@ pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
 static pgstrom_gpupreagg *
 gpupreagg_load_next_outer(GpuPreAggState *gpas)
 {
-	PlanState	   *subnode = outerPlanState(gpas);
-	TupleDesc		tupdesc;
-	pgstrom_gpupreagg *gpupreagg = NULL;
-	struct timeval	tv1, tv2;
+	PlanState		   *subnode = outerPlanState(gpas);
+	pgstrom_gpupreagg  *gpupreagg = NULL;
+	pgstrom_bulkslot	bulkdata;
+	pgstrom_bulkslot   *bulk = NULL;
+	struct timeval		tv1, tv2;
 
 	if (gpas->outer_done)
 		return NULL;
@@ -1984,13 +2006,15 @@ gpupreagg_load_next_outer(GpuPreAggState *gpas)
 				TupleTableSlot *slot = ExecProcNode(subnode);
 				if (TupIsNull(slot))
 				{
-					ghjs->outer_done = true;
+					gpas->outer_done = true;
 					break;
 				}
 				tuple = ExecFetchSlotTuple(slot);
 			}
 			if (!trs)
 			{
+				TupleDesc	tupdesc
+					= subnode->ps_ResultTupleSlot->tts_tupleDescriptor;
 				trs = pgstrom_create_row_store(tupdesc);
 				pgstrom_track_object(&trs->sobj, 0);
 			}
@@ -2032,25 +2056,23 @@ gpupreagg_next_tuple(GpuPreAggState *gpas, TupleTableSlot *slot)
 	pgstrom_gpupreagg  *gpreagg = gpas->curr_chunk;
 	kern_data_store	   *kds = gpreagg->kds_dst;
 	TupleDesc			tupdesc = slot->tts_tupleDescriptor;
+	bool				retval = false;
+	struct timeval		tv1, tv2;
 
 	Assert(kds->column_form && kds->ncols == tupdesc->natts);
 
 	if (gpas->pfm.enabled)
 		gettimeofday(&tv1, NULL);
 
-
-	while (gpas->curr_index < kds->nitems)
+	if (gpas->curr_index < kds->nitems)
 	{
-		int			i, j = gpas->curr_index;
+		int			i, j = gpas->curr_index++;
 		int			attlen;
 		cl_uint		cs_offset;
 
 		ExecClearTuple(slot);
-
 		for (i=0; i < tupdesc->natts; i++)
 		{
-			cl_
-
 			if (!kds->colmeta[i].attvalid)
 			{
 				slot->tts_isnull[i] = true;
@@ -2078,16 +2100,31 @@ gpupreagg_next_tuple(GpuPreAggState *gpas, TupleTableSlot *slot)
 			}
 			else
 			{
-				/* todo varlena returning */
-				hoge
+				cl_uint	vl_ofs = ((cl_uint *)((char *)kds + cs_offset))[j];
+				char   *vl_ptr;
+
+				if (StromTagIs(gpreagg->rcstore, TCacheRowStore))
+				{
+					/* row store also works for toast buffer */
+					tcache_row_store	*trs =
+						(tcache_row_store *) gpreagg->rcstore;
+					Assert(trs->kern.length != TOASTBUF_MAGIC);
+
+					vl_ptr = ((char *)&trs->kern + vl_ofs);
+				}
+				else
+				{
+					tcache_column_store	*tcs =
+						(tcache_column_store *) gpreagg->rcstore;
+					Assert(tcs->cdata[i].toast != NULL);
+					Assert(vl_ofs < tcs->cdata[i].toast->tbuf_usage);
+
+					vl_ptr = tcs->cdata[i].toast->data + vl_ofs;
+				}
+				slot->tts_values[i] = PointerGetDatum(vl_ptr);
 			}
 		}
-		if (gpas->pfm.enabled)
-		{
-			gettimeofday(&tv2, NULL);
-			gpas->pfm.time_move_slot += timeval_diff(&tv1, &tv2);
-		}
-		return true;
+		retval = true;
 	}
 
 	if (gpas->pfm.enabled)
@@ -2095,7 +2132,7 @@ gpupreagg_next_tuple(GpuPreAggState *gpas, TupleTableSlot *slot)
 		gettimeofday(&tv2, NULL);
 		gpas->pfm.time_move_slot += timeval_diff(&tv1, &tv2);
 	}
-	return false;
+	return retval;
 }
 
 static TupleTableSlot *
@@ -2263,7 +2300,29 @@ gpupreagg_get_relids(CustomPlanState *node)
 static void
 gpupreagg_textout_plan(StringInfo str, const CustomPlan *node)
 {
+	GpuPreAggPlan  *plannode = (GpuPreAggPlan *) node;
+	int				i;
 
+	appendStringInfo(str, " :numCols %u", plannode->numCols);
+
+	appendStringInfo(str, " :grpColIdx [");
+	for (i=0; i < plannode->numCols; i++)
+		appendStringInfo(str, " %u", plannode->grpColIdx[i]);
+	appendStringInfo(str, "]");
+
+	appendStringInfo(str, " :kern_source ");
+	_outToken(str, plannode->kern_source);
+
+	appendStringInfo(str, " :extra_flags %u", plannode->extra_flags);
+
+	appendStringInfo(str, " :used_params %s",
+					 nodeToString(plannode->used_params));
+
+	appendStringInfo(str, " :outer_attrefs ");
+	_outBitmapset(str, plannode->outer_attrefs);
+
+	appendStringInfo(str, " :tlist_attrefs ");
+	_outBitmapset(str, plannode->tlist_attrefs);
 }
 
 static CustomPlan *
@@ -2274,6 +2333,14 @@ gpupreagg_copy_plan(const CustomPlan *from)
 
 	newnode = palloc0(sizeof(GpuPreAggPlan));
 	CopyCustomPlanCommon((Node *) oldnode, (Node *) newnode);
+	newnode->numCols       = oldnode->numCols;
+	newnode->grpColIdx     = pmemcpy(oldnode->grpColIdx,
+									 sizeof(AttrNumber) * oldnode->numCols);
+	newnode->kern_source   = pstrdup(oldnode->kern_source);
+	newnode->extra_flags   = oldnode->extra_flags;
+	newnode->used_params   = copyObject(oldnode->used_params);
+	newnode->outer_attrefs = bms_copy(oldnode->outer_attrefs);
+	newnode->tlist_attrefs = bms_copy(oldnode->tlist_attrefs);
 
 	return &newnode->cplan;
 }

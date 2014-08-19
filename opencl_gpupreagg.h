@@ -14,17 +14,59 @@
 #ifndef OPENCL_GPUPREAGG_H
 #define OPENCL_GPUPREAGG_H
 
+/*
+ * Sequential Scan using GPU/MIC acceleration
+ *
+ * It packs a kern_parambuf and kern_resultbuf structure within a continuous
+ * memory ares, to transfer (usually) small chunk by one DMA call.
+ *
+ * +----------------+  -----
+ * | status         |    ^
+ * +----------------+    |
+ * | rindex_len     |    |
+ * +----------------+    |
+ * | kern_parambuf  |    |
+ * | +--------------+    |
+ * | | length   o--------------+
+ * | +--------------+    |     | kern_row_map is located just after
+ * | | nparams      |    |     | the kern_parambuf (because of DMA
+ * | +--------------+    |     | optimization), so head address of
+ * | | poffset[0]   |    |     | kern_gpuscan + parambuf.length
+ * | | poffset[1]   |    |     | points kern_row_map.
+ * | |    :         |    |     |
+ * | | poffset[M-1] |    |     |
+ * | +--------------+    |     |
+ * | | variable     |    |     |
+ * | | length field |    |     |
+ * | | for Param /  |    |     |
+ * | | Const values |    |     |
+ * | |     :        |    |     |
+ * +-+--------------+ <--------+
+ * | kern_row_map   |    |
+ * | +--------------+    |
+ * | | nvalids (=N) |    |
+ * | +--------------+    |
+ * | | rindex[0]    |    |
+ * | | rindex[1]    |    |
+ * | |    :         |    |
+ * | | rindex[N]    |    V
+ * +-+--------------+  -----
+ * | rindex[] for   |    ^
+ * |  working of    |    |
+ * |  bitonic sort  |  device onlye memory
+ * |       :        |    |
+ * |       :        |    V
+ * +----------------+  -----
+ */
 
 typedef struct
 {
 	cl_int			status;		/* result of kernel execution */
 	cl_int			rindex_len;	/* length of rindex (= get_next_log2(nitems))*/
+	char			__padding[8];	/* align to 128bits */
 	kern_parambuf	kparams;
 	/*
-	 * NOTE: In the kernel space, buffer for rindex and gindex shall
-	 * be allocated, next to the kparams. Its length is nindex that
-	 * is the least power of 2, but larger than or equal to the original
-	 * nitems of kern_data_store. Use get_next_log2() to calculate.
+	 * kern_row_map and rindexp[] for sorting will be here
 	 */
 } kern_gpupreagg;
 
@@ -33,17 +75,22 @@ typedef struct
 	((__global kern_parambuf *)(&(kgpreagg)->kparams))
 #define KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg)			\
 	(KERN_GPUPREAGG_PARAMBUF(kgpreagg)->length)
-#define KERN_GPUPREAGG_ROW_INDEX(kgpreagg)					\
-	((__global cl_int *)((__global char *)(kgpreagg) +		\
+#define KERN_GPUPREAGG_KROWMAP(kgpreagg)					\
+	(__global kern_row_map *)((__global char *)(kgpreagg) + \
 			STROMALIGN(offsetof(kern_gpupreagg, kparams) +	\
-					   KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg))))
-#define KERN_GPUPREAGG_HOST_LENGTH(kgpreagg)				\
-	((uintptr_t)KERN_GPUPREAGG_ROW_INDEX(kgpreagg) -		\
-	 (uintptr_t)(kgpreagg))
-#define KERN_GPUPREAGG_DEVICE_LENGTH(kgpreagg)				\
-	(((uintptr_t)KERN_GPUPREAGG_ROW_INDEX(kgpreagg)) +		\
-	 sizeof(cl_int) * (kgpreagg)->rindex_len -				\
-	 (uintptr_t)(kgpreagg))
+					   KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg)))
+#define KERN_GPUPREAGG_SORT_RINDEX(kgpreagg)			\
+	(KERN_GPUPREAGG_KROWMAP(kgpreagg)->rindex +			\
+	 (KERN_GPUPREAGG_KROWMAP(kgpreagg)->nvalids < 0		\
+	  ? 0 : KERN_GPUPREAGG_KROWMAP(kgpreagg)->nvalids))
+#define KERN_GPUPREAGG_DMASEND_OFFSET(kgpreagg)			0
+#define KERN_GPUPREAGG_DMASEND_LENGTH(kgpreagg)			\
+	((uintptr_t)KERN_GPUPREAGG_SORT_RINDEX(kgpreagg) -	\
+	 (uintptr_t)(kgpureagg))
+#define KERN_GPUPREAGG_DMARECV_OFFSET(kgpreagg)			\
+	offsetof(kern_gpupreagg, status)
+#define KERN_GPUPREAGG_DMARECV_LENGTH(kgpreagg)			\
+	sizeof(cl_uint)
 
 /*
  * NOTE: pagg_datum is a set of information to calculate running total.
