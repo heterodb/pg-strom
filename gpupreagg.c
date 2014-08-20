@@ -1914,7 +1914,7 @@ pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
 	 * Also initialize kern_gpupreagg portion
 	 */
 	gpupreagg->kern.status = StromError_Success;
-	gpupreagg->kern.rindex_len =
+	gpupreagg->kern.sortbuf_len =
 		(1UL << get_next_log2(nvalids < 0 ? nitems : nvalids));
 	/* refresh kparams */
 	kparams = KERN_GPUPREAGG_PARAMBUF(&gpupreagg->kern);
@@ -2374,9 +2374,6 @@ pgstrom_init_gpupreagg(void)
 	gpupreagg_plan_methods.CopyCustomPlan      = gpupreagg_copy_plan;
 }
 
-
-
-
 /* ----------------------------------------------------------------
  *
  * NOTE: below is the code being run on OpenCL server context
@@ -2387,16 +2384,1212 @@ typedef struct
 {
 	pgstrom_gpupreagg  *gpreagg;
 	cl_command_queue	kcmdq;
+	cl_int				dindex;
 	cl_program			program;
-	cl_kernel			kernel;
-
+	cl_kernel			kern_prep;
+	cl_kernel		   *kern_sort;
+	cl_kernel			kern_pagg;
+	cl_int				kern_sort_nums;	/* number of sorting kernel */
+	cl_mem				m_gpreagg;
+	cl_mem				m_kds_in;	/* kds of input relation */
+	cl_mem				m_kds_src;	/* kds of aggregation source */
+	cl_mem				m_kds_dst;	/* kds of aggregation results */
+	cl_mem				m_ktoast;
+	cl_int				ev_kern_prep;	/* event index of kern_prep */
+	cl_int				ev_kern_pagg;	/* event index of kern_pagg */
 	cl_int				ev_index;
-	cl_event			events[1];
+	cl_event			events[100];
 } clstate_gpupreagg;
 
 static void
+clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
+{
+	clstate_gpupreagg  *clgpa = (clstate_gpupreagg *) private;
+	pgstrom_gpupreagg  *gpreagg = clgpa->gpreagg;
+	cl_int				i, rc;
+
+	if (ev_status == CL_COMPLETE)
+		gpreagg->msg.errcode = gpreagg->kern.status;
+	else
+	{
+		clserv_log("unexpected CL_EVENT_COMMAND_EXECUTION_STATUS: %d",
+				   ev_status);
+		gpreagg->msg.errcode = StromError_OpenCLInternal;
+    }
+
+	/* collect performance statistics */
+	if (gpreagg->msg.pfm.enabled)
+	{
+		cl_ulong	tv_start;
+		cl_ulong	tv_end;
+		cl_ulong	temp;
+
+		/*
+		 * Time of all the DMA send
+		 */
+		tv_start = ~0UL;
+		tv_end = 0;
+		for (i=0; i < clgpa->ev_kern_prep; i++)
+		{
+			rc = clGetEventProfilingInfo(clgpa->events[i],
+										 CL_PROFILING_COMMAND_START,
+										 sizeof(cl_ulong),
+										 &temp,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			tv_start = Min(tv_start, temp);
+
+			rc = clGetEventProfilingInfo(clgpa->events[i],
+										 CL_PROFILING_COMMAND_END,
+										 sizeof(cl_ulong),
+										 &temp,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			tv_end = Max(tv_end, temp);
+		}
+		gpreagg->msg.pfm.time_dma_send += (tv_end - tv_start) / 1000;
+
+		/*
+		 * Kernel execution time
+		 */
+		for (i = clgpa->ev_kern_prep; i <= clgpa->ev_kern_pagg; i++)
+		{
+			rc = clGetEventProfilingInfo(clgpa->events[i],
+										 CL_PROFILING_COMMAND_START,
+										 sizeof(cl_ulong),
+										 &temp,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			tv_start = Min(tv_start, temp);
+
+			rc = clGetEventProfilingInfo(clgpa->events[i],
+										 CL_PROFILING_COMMAND_END,
+										 sizeof(cl_ulong),
+										 &temp,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			tv_end = Max(tv_end, temp);
+
+			/* NOTE: time_kern_exec - sum of above difference will show
+			 * total cost of event synchronization between kernel launch.
+			 * Usually, it takes 10-20ms, so it makes sense to reduce
+			 * number of kernel execution.
+			 */
+		}
+		gpreagg->msg.pfm.time_kern_exec += (tv_end - tv_start) / 1000;
+
+		/*
+		 * DMA recv time - last event should be DMA receive request
+		 */
+		rc = clGetEventProfilingInfo(clgpa->events[clgpa->ev_index - 1],
+									 CL_PROFILING_COMMAND_START,
+									 sizeof(cl_ulong),
+									 &tv_start,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+
+		rc = clGetEventProfilingInfo(clgpa->events[clgpa->ev_index - 1],
+									 CL_PROFILING_COMMAND_END,
+									 sizeof(cl_ulong),
+									 &tv_end,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+		gpreagg->msg.pfm.time_dma_recv += (tv_end - tv_start) / 1000;
+
+	skip_perfmon:
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clGetEventProfilingInfo (%s)",
+					   opencl_strerror(rc));
+            gpreagg->msg.pfm.enabled = false;   /* turn off profiling */
+		}
+	}
+
+	/*
+	 * release opencl resources
+	 */
+	while (clgpa->ev_index > 0)
+		clReleaseEvent(clgpa->events[--clgpa->ev_index]);	
+	if (clgpa->m_gpreagg)
+		clReleaseMemObject(clgpa->m_gpreagg);
+	if (clgpa->m_kds_in)
+		clReleaseMemObject(clgpa->m_kds_in);
+	if (clgpa->m_kds_src)
+		clReleaseMemObject(clgpa->m_kds_src);
+	if (clgpa->m_kds_dst)
+		clReleaseMemObject(clgpa->m_kds_dst);
+	if (clgpa->m_ktoast)
+		clReleaseMemObject(clgpa->m_ktoast);
+	if (clgpa->kern_prep)
+		clReleaseKernel(clgpa->kern_prep);
+	for (i=0; i < clgpa->kern_sort_nums; i++)
+		clReleaseKernel(clgpa->kern_sort[i]);
+	if (clgpa->kern_pagg)
+		clReleaseKernel(clgpa->kern_pagg);
+	if (clgpa->program && clgpa->program != BAD_OPENCL_PROGRAM)
+		clReleaseProgram(clgpa->program);
+	if (clgpa->kern_sort)
+		free(clgpa->kern_sort);
+	free(clgpa);
+
+	/* reply the result to backend side */
+	pgstrom_reply_message(&gpreagg->msg);
+}
+
+static cl_int
+clserv_launch_preagg_preparation(clstate_gpupreagg *clgpa, cl_uint nitems)
+{
+	cl_int		rc;
+	size_t		gwork_sz;
+	size_t		lwork_sz;
+
+	/* __kernel void
+	 * gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
+	 *                       __global kern_data_store *kds_in,
+	 *                       __global kern_data_store *kds_out,
+	 *                       __global kern_toastbuf *ktoast,
+	 *                       __local void *local_memory)
+	 */
+	clgpa->kern_prep = clCreateKernel(clgpa->program,
+									  "gpupreagg_preparation",
+									  &rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	if (!clserv_compute_workgroup_size(&gwork_sz,
+									   &lwork_sz,
+									   clgpa->kern_prep,
+									   clgpa->dindex,
+									   true,
+									   nitems,
+									   sizeof(cl_uint)))
+	{
+		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
+		return StromError_OpenCLInternal;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_prep,
+						0,		/* __kern_gpupreagg *kgpreagg */
+						sizeof(cl_mem),
+						&clgpa->m_gpreagg);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_prep,
+						1,		/* __global kern_data_store *kds_in */
+						sizeof(cl_mem),
+						&clgpa->m_kds_in);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_prep,
+						2,		/* __global kern_data_store *kds_out */
+						sizeof(cl_mem),
+						&clgpa->m_kds_src);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_prep,
+						3,		/* __global kern_data_store *kds_out */
+						sizeof(cl_mem),
+						&clgpa->m_ktoast);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_prep,
+						4,
+						sizeof(cl_uint) * lwork_sz,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	/*
+	 * kick gpupreagg_preparation() after all the DMA data send
+	 */
+	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
+                                clgpa->kern_prep,
+								1,
+								NULL,
+								&gwork_sz,
+								&lwork_sz,
+								clgpa->ev_index,
+								&clgpa->events[0],
+								&clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	clgpa->ev_kern_prep = clgpa->ev_index++;
+	clgpa->gpreagg->msg.pfm.num_kern_exec++;
+
+	return CL_SUCCESS;
+}
+
+static cl_int
+clserv_launch_bitonic_local(clstate_gpupreagg *clgpa,
+							size_t gwork_sz, size_t lwork_sz)
+{
+	cl_kernel	kernel;
+	cl_int		rc;
+
+	/* __kernel void
+	 * gpupreagg_bitonic_local(__global kern_gpupreagg *kgpreagg,
+	 *                         __global kern_data_store *kds,
+	 *                         __global kern_toastbuf *ktoast,
+	 *                         __local void *local_memory)
+	 */
+	kernel = clCreateKernel(clgpa->program,
+							"gpupreagg_bitonic_local",
+							&rc);
+	if (rc != CL_SUCCESS)
+    {
+        clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+        return rc;
+    }
+	clgpa->kern_sort[clgpa->kern_sort_nums++] = kernel;
+
+	rc = clSetKernelArg(kernel,
+						0,		/* __kern_gpupreagg *kgpreagg */
+						sizeof(cl_mem),
+						&clgpa->m_gpreagg);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						1,      /* __global kern_data_store *kds */
+						sizeof(cl_mem),
+						&clgpa->m_kds_src);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						2,		/* __global kern_toastbuf *ktoast */
+						sizeof(cl_mem),
+						&clgpa->m_ktoast);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						3,		/* __local void *local_memory */
+						sizeof(cl_uint) * lwork_sz,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
+								kernel,
+								1,
+								NULL,
+								&gwork_sz,
+								&lwork_sz,
+								1,
+								&clgpa->events[clgpa->ev_index - 1],
+								&clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	clgpa->ev_index++;
+	clgpa->gpreagg->msg.pfm.num_kern_exec++;
+
+	return CL_SUCCESS;
+}
+
+static cl_int
+clserv_launch_bitonic_step(clstate_gpupreagg *clgpa,
+						   bool reversing, cl_uint unitsz,
+						   size_t gwork_sz, size_t lwork_sz)
+{
+	cl_kernel	kernel;
+	cl_int		bitonic_unitsz;
+	cl_int		rc;
+
+	/*
+	 * __kernel void
+	 * gpupreagg_bitonic_step(__global kern_gpupreagg *kgpreagg,
+	 *                        cl_int bitonic_unitsz,
+	 *                        __global kern_data_store *kds,
+	 *                        __global kern_toastbuf *ktoast,
+	 *                        __local void *local_memory)
+	 */
+	kernel = clCreateKernel(clgpa->program,
+							"gpupreagg_bitonic_step",
+							&rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+		return rc;
+	}
+	clgpa->kern_sort[clgpa->kern_sort_nums++] = kernel;
+
+	rc = clSetKernelArg(kernel,
+						0,		/* __kern_gpupreagg *kgpreagg */
+						sizeof(cl_mem),
+						&clgpa->m_gpreagg);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	/*
+	 * NOTE: bitonic_unitsz informs kernel function the unit size of
+	 * sorting block and its direction. Sign of the value indicates
+	 * the direction, and absolute value indicates the sorting block
+	 * size. For example, -5 means reversing direction (because of
+	 * negative sign), and 32 (= 2^5) for sorting block size.
+	 */
+	bitonic_unitsz = (!reversing ? unitsz : -unitsz);
+	rc = clSetKernelArg(kernel,
+						1,	/* cl_int bitonic_unitsz */
+						sizeof(cl_int),
+						&bitonic_unitsz);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						2,      /* __global kern_data_store *kds */
+						sizeof(cl_mem),
+						&clgpa->m_kds_src);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						3,		/* __global kern_toastbuf *ktoast */
+						sizeof(cl_mem),
+						&clgpa->m_ktoast);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						4,		/* __local void *local_memory */
+						sizeof(cl_uint) * lwork_sz,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
+								kernel,
+								1,
+								NULL,
+								&gwork_sz,
+								&lwork_sz,
+								1,
+								&clgpa->events[clgpa->ev_index - 1],
+								&clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	clgpa->ev_index++;
+	clgpa->gpreagg->msg.pfm.num_kern_exec++;
+
+	return CL_SUCCESS;
+}
+
+static cl_int
+clserv_launch_bitonic_merge(clstate_gpupreagg *clgpa,
+							size_t gwork_sz, size_t lwork_sz)
+{
+	cl_kernel	kernel;
+	cl_int		rc;
+
+	/* __kernel void
+	 * gpupreagg_bitonic_merge(__global kern_gpupreagg *kgpreagg,
+	 *                         __global kern_data_store *kds,
+	 *                         __global kern_toastbuf *ktoast,
+	 *                         __local void *local_memory)
+	 */
+	kernel = clCreateKernel(clgpa->program,
+							"gpupreagg_bitonic_merge",
+							&rc);
+	if (rc != CL_SUCCESS)
+    {
+        clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+        return rc;
+    }
+	clgpa->kern_sort[clgpa->kern_sort_nums++] = kernel;
+
+	rc = clSetKernelArg(kernel,
+						0,		/* __kern_gpupreagg *kgpreagg */
+						sizeof(cl_mem),
+						&clgpa->m_gpreagg);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						1,      /* __global kern_data_store *kds */
+						sizeof(cl_mem),
+						&clgpa->m_kds_src);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						2,		/* __global kern_toastbuf *ktoast */
+						sizeof(cl_mem),
+						&clgpa->m_ktoast);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						3,		/* __local void *local_memory */
+						sizeof(cl_uint) * lwork_sz,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
+								kernel,
+								1,
+								NULL,
+								&gwork_sz,
+								&lwork_sz,
+								1,
+								&clgpa->events[clgpa->ev_index - 1],
+								&clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	clgpa->ev_index++;
+	clgpa->gpreagg->msg.pfm.num_kern_exec++;
+
+	return CL_SUCCESS;
+}
+
+static cl_int
+clserv_launch_preagg_reduction(clstate_gpupreagg *clgpa, cl_uint nvalids)
+{
+	cl_int		rc;
+	size_t		gwork_sz;
+	size_t		lwork_sz;
+
+	/* __kernel void
+	 * gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
+	 *                     __global kern_data_store *kds_src,
+	 *                     __global kern_data_store *kds_dst,
+	 *                     __global kern_toastbuf *ktoast,
+	 *                     __local void *local_memory)
+	 */
+	clgpa->kern_pagg = clCreateKernel(clgpa->program,
+									  "gpupreagg_reduction",
+									  &rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	/* calculation of workgroup size with assumption of a device thread
+	 * consums "sizeof(pagg_datum) + sizeof(cl_uint)" local memory per
+	 * thread, that is larger than usual cl_uint cases.
+	 */
+	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
+									   clgpa->kern_pagg,
+									   clgpa->dindex,
+									   true,
+									   nvalids,
+									   sizeof(pagg_datum) + sizeof(cl_uint)))
+	{
+		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
+		return StromError_OpenCLInternal;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_pagg,
+						0,		/* __global kern_gpupreagg *kgpreagg */
+						sizeof(cl_mem),
+						&clgpa->m_gpreagg);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_pagg,
+						1,		/* __global kern_data_store *kds_src */
+						sizeof(cl_mem),
+						&clgpa->m_kds_src);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_pagg,
+						2,		/* __global kern_data_store *kds_dst */
+						sizeof(cl_mem),
+						&clgpa->m_kds_dst);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_pagg,
+						3,		/* __global kern_toastbuf *ktoast */
+						sizeof(cl_mem),
+						&clgpa->m_ktoast);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_pagg,
+						4,		/* __local void *local_memory */
+						sizeof(cl_uint) * lwork_sz,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
+								clgpa->kern_pagg,
+								1,
+								NULL,
+								&gwork_sz,
+                                &lwork_sz,
+								1,
+								&clgpa->events[clgpa->ev_index - 1],
+								&clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	clgpa->ev_kern_pagg = clgpa->ev_index++;
+	clgpa->gpreagg->msg.pfm.num_kern_exec++;
+
+	return CL_SUCCESS;
+}
+
+static cl_int
+clserv_process_gpupreagg_row(clstate_gpupreagg *clgpa,
+							 kern_data_store *kds_head,
+							 tcache_row_store *trs)
+{
+	pgstrom_gpupreagg  *gpreagg = clgpa->gpreagg;
+	Size		offset;
+	cl_int		rc;
+
+	offset = STROMALIGN(offsetof(kern_data_store,
+								 colmeta[kds_head->ncols]));
+	rc = clEnqueueWriteBuffer(clgpa->kcmdq,
+							  clgpa->m_kds_in,
+							  CL_FALSE,
+							  offset,
+							  trs->kern.length,
+							  &trs->kern,
+							  0,
+							  NULL,
+							  &clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
+		return rc;
+	}
+	clgpa->ev_index++;
+	gpreagg->msg.pfm.bytes_dma_send += trs->kern.length;
+	gpreagg->msg.pfm.num_dma_send++;
+
+	return CL_SUCCESS;
+}
+
+static cl_int
+clserv_process_gpupreagg_column(clstate_gpupreagg *clgpa,
+								kern_data_store *kds_head,
+								kern_toastbuf *ktoast_head,
+								tcache_column_store *tcs)
+{
+	pgstrom_gpupreagg  *gpreagg = clgpa->gpreagg;
+	Size		length;
+	Size		offset;
+	cl_uint		nrooms = kds_head->nitems;
+	cl_int		i, rc;
+
+	Assert(kds_head->ncols == tcs->ncols);
+	Assert(kds_head->nitems == tcs->nrows);
+	Assert(kds_head->nitems == kds_head->nrooms);
+
+	/* toast header if any */
+	if (ktoast_head)
+	{
+		Assert(clgpa->m_ktoast);
+		length = offsetof(kern_toastbuf, coldir[kds_head->ncols]);
+		rc = clEnqueueWriteBuffer(clgpa->kcmdq,
+								  clgpa->m_ktoast,
+								  CL_FALSE,
+								  0,
+								  length,
+								  ktoast_head,
+								  0,
+								  NULL,
+								  &clgpa->events[clgpa->ev_index]);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clEnqueueWriteBuffer: %s",
+					   opencl_strerror(rc));
+			return rc;
+		}
+		clgpa->ev_index++;
+		gpreagg->msg.pfm.bytes_dma_send += length;
+		gpreagg->msg.pfm.num_dma_send++;
+	}
+
+	/* for each columns */
+	for (i=0; i < kds_head->ncols; i++)
+	{
+		if (!kds_head->colmeta[i].attvalid)
+			continue;
+
+		offset = kds_head->colmeta[i].cs_offset;
+		if (!kds_head->colmeta[i].attnotnull)
+		{
+			length = STROMALIGN(BITMAPLEN(nrooms));
+
+			/* MEMO: special case handing if we have a bulk-loading of
+			 * column-store from the underlying relation that has NOT
+			 * NULL constraint. Because kds_head is built according to
+			 * the target list of sub-plan, it drops this attribute,
+			 * so we simulate a bitmap of all non-null variables in
+			 * the kernel code.
+			 */
+			if (tcs->cdata[i].isnull)
+			{
+				rc = clEnqueueWriteBuffer(clgpa->kcmdq,
+										  clgpa->m_kds_in,
+										  CL_FALSE,
+										  offset,
+										  length,
+										  tcs->cdata[i].isnull,
+										  0,
+										  NULL,
+										  &clgpa->events[clgpa->ev_index]);
+			}
+			else
+			{
+				cl_uint		nullmap = (cl_uint)(-1);
+
+				rc = clEnqueueFillBuffer(clgpa->kcmdq,
+										 clgpa->m_kds_in,
+										 &nullmap,
+										 sizeof(cl_uint),
+										 offset,
+										 length,
+										 0,
+										 NULL,
+										 &clgpa->events[clgpa->ev_index]);
+
+			}
+			if (rc != CL_SUCCESS)
+			{
+				clserv_log("failed on clEnqueueWriteBuffer: %s",
+						   opencl_strerror(rc));
+				return rc;
+			}
+			clgpa->ev_index++;
+			gpreagg->msg.pfm.bytes_dma_send += length;
+			gpreagg->msg.pfm.num_dma_send++;
+
+			offset += length;
+		}
+		length = (kds_head->colmeta[i].attlen > 0
+				  ? kds_head->colmeta[i].attlen
+				  : sizeof(cl_uint)) * nrooms;
+		rc = clEnqueueWriteBuffer(clgpa->kcmdq,
+								  clgpa->m_kds_in,
+								  CL_FALSE,
+								  offset,
+								  length,
+								  tcs->cdata[i].values,
+								  0,
+								  NULL,
+								  &clgpa->events[clgpa->ev_index]);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clEnqueueWriteBuffer: %s",
+					   opencl_strerror(rc));
+			return rc;
+		}
+		clgpa->ev_index++;
+		gpreagg->msg.pfm.bytes_dma_send += length;
+		gpreagg->msg.pfm.num_dma_send++;
+
+		if (tcs->cdata[i].toast)
+		{
+			Assert(kds_head->colmeta[i].attlen < 0);
+			Assert(clgpa->m_ktoast);
+			length = tcs->cdata[i].toast->tbuf_usage;
+			rc = clEnqueueWriteBuffer(clgpa->kcmdq,
+									  clgpa->m_ktoast,
+									  CL_FALSE,
+									  ktoast_head->coldir[i],
+									  length,
+									  tcs->cdata[i].toast,
+									  0,
+									  NULL,
+									  &clgpa->events[clgpa->ev_index]);
+			if (rc != CL_SUCCESS)
+			{
+				clserv_log("failed on clEnqueueWriteBuffer: %s",
+						   opencl_strerror(rc));
+				return rc;
+			}
+            clgpa->ev_index++;
+            gpreagg->msg.pfm.bytes_dma_send += length;
+			gpreagg->msg.pfm.num_dma_send++;
+		}
+	}
+	return CL_SUCCESS;
+}
+
+static void
 clserv_process_gpupreagg(pgstrom_message *message)
-{}
+{
+	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) message;
+	StromObject		   *rcstore = gpreagg->rcstore;
+	clstate_gpupreagg  *clgpa;
+	kern_parambuf	   *kparams;
+	kern_row_map	   *krowmap;
+	kern_data_store	   *kds_head;	/* for input relation */
+	kern_data_store	   *kds_work;	/* for destination of gpupreagg */
+	kern_toastbuf	   *ktoast_head;
+	cl_uint				nitems = pgstrom_nitems_rcstore(rcstore);
+	cl_uint				nvalids;
+	Size				offset;
+	Size				length;
+	size_t				gwork_sz = 0;
+	size_t				lwork_sz = 0;
+	cl_int				i, rc;
+
+	Assert(StromTagIs(gpreagg, GpuPreAgg));
+
+	/*
+	 * state object of gpupreagg
+	 *
+	 * FIXME: lenght of event object has to be adjusted according to
+	 *        the contents of row/column store.
+	 */
+	clgpa = calloc(1, sizeof(clstate_gpupreagg));
+	if (!clgpa)
+	{
+		rc = CL_OUT_OF_HOST_MEMORY;
+		goto error;
+	}
+	clgpa->gpreagg = gpreagg;
+
+	/*
+	 * First of all, it looks up a program object to be run on
+	 * the supplied row-store. We may have three cases.
+	 * 1) NULL; it means the required program is under asynchronous
+	 *    build, and the message is kept on its internal structure
+	 *    to be enqueued again. In this case, we have nothing to do
+	 *    any more on the invocation.
+	 * 2) BAD_OPENCL_PROGRAM; it means previous compile was failed
+	 *    and unavailable to run this program anyway. So, we need
+	 *    to reply StromError_ProgramCompile error to inform the
+	 *    backend this program.
+	 * 3) valid cl_program object; it is an ideal result. pre-compiled
+	 *    program object was on the program cache, and cl_program
+	 *    object is ready to use.
+	 */
+	clgpa->program = clserv_lookup_device_program(gpreagg->dprog_key,
+												  &gpreagg->msg);
+	if (!clgpa->program)
+	{
+		free(clgpa);
+		return;	/* message is in waitq, being retried later */
+	}
+	if (clgpa->program == BAD_OPENCL_PROGRAM)
+	{
+		rc = CL_BUILD_PROGRAM_FAILURE;
+		goto error;
+	}
+
+	/*
+	 * choose a device to run
+	 */
+	clgpa->dindex = pgstrom_opencl_device_schedule(&gpreagg->msg);
+	clgpa->kcmdq = opencl_cmdq[clgpa->dindex];
+
+	/*
+	 * construction of kernel buffer objects
+	 *
+	 * m_gpreagg  - control data of gpupreagg
+	 * m_kds_in   - data store of input relation stream
+	 * m_kds_src  - data store of partial aggregate source
+	 * m_kds_dst  - data store of partial aggregate destination
+	 */
+	kparams = KERN_GPUPREAGG_PARAMBUF(&gpreagg->kern);
+	kds_head = KPARAM_GET_KDS_HEAD(kparams);
+	ktoast_head = KPARAM_GET_KTOAST_HEAD(kparams);
+	kds_work = KPARAM_GET_KDS_HEAD_DEST(kparams);
+	krowmap = KERN_GPUPREAGG_KROWMAP(&gpreagg->kern);
+	nvalids = (krowmap->nvalids < 0 ? nitems : krowmap->nvalids);
+
+	Assert(kds_head->nitems == nitems && kds_head->nrooms == nitems);
+	Assert(kds_work->nitems == 0 && kds_work->nrooms == nitems);
+
+	/* allocation of m_gpreagg */
+	length = KERN_GPUPREAGG_BUFFER_SIZE(&gpreagg->kern);
+	clgpa->m_gpreagg = clCreateBuffer(opencl_context,
+										CL_MEM_READ_WRITE,
+										length,
+										NULL,
+										&rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
+		goto error;
+	}
+	/* allocation of kds_in */
+	clgpa->m_kds_in = clCreateBuffer(opencl_context,
+									 CL_MEM_READ_WRITE,
+									 kds_head->length,
+									 NULL,
+									 &rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
+		goto error;
+	}
+	/* allocation of kds_src */
+	clgpa->m_kds_src = clCreateBuffer(opencl_context,
+									  CL_MEM_READ_WRITE,
+									  kds_work->length,
+									  NULL,
+									  &rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
+		goto error;
+	}
+	/* allocation of kds_out */
+	clgpa->m_kds_dst = clCreateBuffer(opencl_context,
+									  CL_MEM_READ_WRITE,
+									  kds_work->length,
+									  NULL,
+									  &rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
+		goto error;
+	}
+
+	if (!ktoast_head)
+		clgpa->m_ktoast = NULL;
+	else
+	{
+		tcache_column_store	*tcs = (tcache_column_store *) rcstore;
+		Size	toast_length = 0;
+		int		i;
+
+		/* only column-store needs individual toast buffer */
+		Assert(StromTagIs(rcstore, TCacheColumnStore));
+		for (i=0; i < kds_head->ncols; i++)
+		{
+			if (kds_head->colmeta[i].attvalid &&
+				kds_head->colmeta[i].attlen < 1)
+				toast_length += STROMALIGN(tcs->cdata[i].toast->tbuf_length);
+		}
+		/* at least one column is variable-length, if valid ktoast_head */
+		Assert(toast_length > 0);
+		toast_length += STROMALIGN(offsetof(kern_toastbuf,
+											coldir[kds_head->ncols]));
+		clgpa->m_ktoast = clCreateBuffer(opencl_context,
+										 CL_MEM_READ_WRITE,
+										 toast_length,
+										 NULL,
+										 &rc);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
+			goto error;
+		}
+	}
+
+	/*
+	 * Next, enqueuing DMA send requests, prior to kernel execution.
+	 */
+	offset = KERN_GPUPREAGG_DMASEND_OFFSET(&gpreagg->kern);
+	length = KERN_GPUPREAGG_DMASEND_LENGTH(&gpreagg->kern);
+	rc = clEnqueueWriteBuffer(clgpa->kcmdq,
+							  clgpa->m_gpreagg,
+							  CL_FALSE,
+							  offset,
+							  length,
+							  &gpreagg->kern,
+							  0,
+							  NULL,
+							  &clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
+		goto error;
+	}
+	clgpa->ev_index++;
+	gpreagg->msg.pfm.bytes_dma_send += length;
+	gpreagg->msg.pfm.num_dma_send++;
+
+	length = offsetof(kern_data_store, colmeta[kds_head->ncols]);
+	rc = clEnqueueWriteBuffer(clgpa->kcmdq,
+							  clgpa->m_kds_in,
+							  CL_FALSE,
+							  0,
+							  length,
+							  kds_head,
+							  0,
+							  NULL,
+							  &clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
+		goto error;
+	}
+	clgpa->ev_index++;
+	gpreagg->msg.pfm.bytes_dma_send += length;
+	gpreagg->msg.pfm.num_dma_send++;
+
+	length = offsetof(kern_data_store, colmeta[kds_work->ncols]);
+	rc = clEnqueueWriteBuffer(clgpa->kcmdq,
+                              clgpa->m_kds_src,
+							  CL_FALSE,
+							  0,
+							  length,
+							  kds_work,
+							  0,
+							  NULL,
+							  &clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
+		goto error;
+	}
+	clgpa->ev_index++;
+	gpreagg->msg.pfm.bytes_dma_send += length;
+	gpreagg->msg.pfm.num_dma_send++;
+
+	rc = clEnqueueWriteBuffer(clgpa->kcmdq,
+							  clgpa->m_kds_dst,
+							  CL_FALSE,
+							  0,
+							  length,
+							  kds_work,
+							  0,
+							  NULL,
+							  &clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
+		goto error;
+	}
+	clgpa->ev_index++;
+	gpreagg->msg.pfm.bytes_dma_send += length;
+	gpreagg->msg.pfm.num_dma_send++;
+
+	if (StromTagIs(rcstore, TCacheRowStore))
+	{
+		tcache_row_store	   *trs = (tcache_row_store *) rcstore;
+		rc = clserv_process_gpupreagg_row(clgpa, kds_head, trs);
+		if (rc != CL_SUCCESS)
+			goto error;
+	}
+	else if (StromTagIs(rcstore, TCacheColumnStore))
+	{
+		tcache_column_store	   *tcs = (tcache_column_store *) rcstore;
+		rc = clserv_process_gpupreagg_column(clgpa,
+											 kds_head,
+											 ktoast_head,
+											 tcs);
+		if (rc != CL_SUCCESS)
+			goto error;
+	}
+	else
+	{
+		clserv_log("Bug? neither row- nor column-store");
+		rc = StromError_DataStoreCorruption;
+		goto error;
+	}
+
+	/*
+	 * Kick the kernel functions.
+	 *
+	 * Fortunatelly, gpupreagg_preparation() is always kicked on the head
+	 * of this call-chain, thus, this function is responsible to synchronize
+	 * DMA transfer above. Rest of kernel function needs to synchronize the
+	 * previous call on itself.
+	 * The last call is always gpupreagg_reduction() also, so it can be the
+	 * only blocker of DMA receive.
+	 */
+
+	/* kick, gpupreagg_preparation() */
+	rc = clserv_launch_preagg_preparation(clgpa, nitems);
+	if (rc != CL_SUCCESS)
+		goto error;
+
+	/*
+	 * calculation of gwork_sz/lwork_sz for bitonic sorting.
+	 * it consume sizeof(cl_uint) for each workitem.
+	 */
+	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz, NULL,
+									   clgpa->dindex, true,
+									   nvalids, sizeof(cl_uint)))
+	{
+		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
+        rc = StromError_OpenCLInternal;
+		goto error;
+	}
+
+	/*
+	 * bitonic sort using,
+	 *  gpupreagg_bitonic_step()
+	 *  gpupreagg_bitonic_local()
+	 *  gpupreagg_bitonic_merge()
+	 */
+	
+	/* kick, gpupreagg_reduction() */
+	rc = clserv_launch_preagg_reduction(clgpa, nvalids);
+	if (rc != CL_SUCCESS)
+		goto error;
+
+	/* writing back the result buffer */
+	rc = clEnqueueReadBuffer(clgpa->kcmdq,
+							 clgpa->m_kds_dst,
+							 CL_FALSE,
+							 0,
+							 length,
+							 gpreagg->kds_dst,
+							 1,
+							 &clgpa->events[clgpa->ev_index - 1],
+							 &clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueReadBuffer: %s",
+				   opencl_strerror(rc));
+		goto error;
+	}
+	clgpa->ev_index++;
+	gpreagg->msg.pfm.bytes_dma_recv += length;
+	gpreagg->msg.pfm.num_dma_recv++;
+
+	/*
+	 * Last, registers a callback to handle post gpupreagg process
+	 */
+	rc = clSetEventCallback(clgpa->events[clgpa->ev_index - 1],
+							CL_COMPLETE,
+							clserv_respond_gpupreagg,
+							clgpa);
+    if (rc != CL_SUCCESS)
+    {
+        clserv_log("failed on clSetEventCallback: %s", opencl_strerror(rc));
+        goto error;
+    }
+    return;
+
+error:
+	if (clgpa)
+	{
+		if (clgpa->ev_index > 0)
+		{
+			clWaitForEvents(clgpa->ev_index, clgpa->events);
+			while (clgpa->ev_index > 0)
+				clReleaseEvent(clgpa->events[--clgpa->ev_index]);
+		}
+	
+		if (clgpa->m_gpreagg)
+			clReleaseMemObject(clgpa->m_gpreagg);
+		if (clgpa->m_kds_in)
+			clReleaseMemObject(clgpa->m_kds_in);
+		if (clgpa->m_kds_src)
+			clReleaseMemObject(clgpa->m_kds_src);
+		if (clgpa->m_kds_dst)
+			clReleaseMemObject(clgpa->m_kds_dst);
+		if (clgpa->m_ktoast)
+			clReleaseMemObject(clgpa->m_ktoast);
+		if (clgpa->kern_prep)
+			clReleaseKernel(clgpa->kern_prep);
+		for (i=0; i < clgpa->kern_sort_nums; i++)
+			clReleaseKernel(clgpa->kern_sort[i]);
+		if (clgpa->kern_pagg)
+			clReleaseKernel(clgpa->kern_pagg);
+		if (clgpa->program && clgpa->program != BAD_OPENCL_PROGRAM)
+			clReleaseProgram(clgpa->program);
+		if (clgpa->kern_sort)
+			free(clgpa->kern_sort);
+		free(clgpa);
+	}
+	gpreagg->msg.errcode = rc;
+	pgstrom_reply_message(&gpreagg->msg);
+}
 
 /* ----------------------------------------------------------------
  *
@@ -2535,14 +3728,6 @@ gpupreagg_corr_psum_xy(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(0) * PG_GETARG_FLOAT8(1));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_xy);
-
-
-
-
-
-
-
-
 
 /*
  * ex_avg() - an enhanced average calculation that takes two arguments;

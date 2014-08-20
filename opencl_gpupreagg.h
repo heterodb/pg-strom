@@ -62,7 +62,10 @@
 typedef struct
 {
 	cl_int			status;		/* result of kernel execution */
-	cl_int			rindex_len;	/* length of rindex (= get_next_log2(nitems))*/
+	cl_int			sortbuf_len;/* length of sorting rindex[] that holds
+								 * row-index being sorted; must be length
+								 * of get_next_log2(nitems)
+								 */
 	char			__padding[8];	/* align to 128bits */
 	kern_parambuf	kparams;
 	/*
@@ -71,22 +74,27 @@ typedef struct
 } kern_gpupreagg;
 
 /* macro definitions to reference packed values */
-#define KERN_GPUPREAGG_PARAMBUF(kgpreagg)					\
+#define KERN_GPUPREAGG_PARAMBUF(kgpreagg)				\
 	((__global kern_parambuf *)(&(kgpreagg)->kparams))
-#define KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg)			\
+#define KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg)		\
 	(KERN_GPUPREAGG_PARAMBUF(kgpreagg)->length)
-#define KERN_GPUPREAGG_KROWMAP(kgpreagg)					\
-	(__global kern_row_map *)((__global char *)(kgpreagg) + \
-			STROMALIGN(offsetof(kern_gpupreagg, kparams) +	\
-					   KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg)))
+#define KERN_GPUPREAGG_KROWMAP(kgpreagg)				\
+	((__global kern_row_map *)							\
+	 ((__global char *)(kgpreagg) +						\
+	  STROMALIGN(offsetof(kern_gpupreagg, kparams) +	\
+				 KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg))))
 #define KERN_GPUPREAGG_SORT_RINDEX(kgpreagg)			\
 	(KERN_GPUPREAGG_KROWMAP(kgpreagg)->rindex +			\
 	 (KERN_GPUPREAGG_KROWMAP(kgpreagg)->nvalids < 0		\
 	  ? 0 : KERN_GPUPREAGG_KROWMAP(kgpreagg)->nvalids))
+#define KERN_GPUPREAGG_BUFFER_SIZE(kgpreagg)			\
+	((uintptr_t)(KERN_GPUPREAGG_SORT_RINDEX(kgpreagg) +	\
+				 (kgpreagg)->sortbuf_len) -				\
+	 (uintptr_t)(kgpreagg))
 #define KERN_GPUPREAGG_DMASEND_OFFSET(kgpreagg)			0
 #define KERN_GPUPREAGG_DMASEND_LENGTH(kgpreagg)			\
 	((uintptr_t)KERN_GPUPREAGG_SORT_RINDEX(kgpreagg) -	\
-	 (uintptr_t)(kgpureagg))
+	 (uintptr_t)(kgpreagg))
 #define KERN_GPUPREAGG_DMARECV_OFFSET(kgpreagg)			\
 	offsetof(kern_gpupreagg, status)
 #define KERN_GPUPREAGG_DMARECV_LENGTH(kgpreagg)			\
@@ -371,27 +379,6 @@ gpupreagg_bitonic_merge(__global kern_gpupreagg *kgpreagg,
 
 
 
-
-/*
- * gpupreagg_main - run aggregation main
- */
-__kernel void
-gpupreagg_main(__global kern_gpupreagg *kgpreagg,
-			   __global kern_data_store *kds_src,
-			   __global kern_data_store *kds_dst,
-			   __global kern_toastbuf *ktoast,
-			   __local void *local_memory)
-{
-	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	__global cl_int *rindex = KERN_GPUPREAGG_ROW_INDEX(kgpreagg);
-	__global cl_int *gindex = KERN_GPUPREAGG_GROUP_INDEX(kgpreagg);
-
-
-
-
-
-}
-
 /*
  * gpupreagg_check_next - decision making whether we need to run next
  * reduction step actually.
@@ -570,8 +557,24 @@ pg_common_vstore_putnull(__private cl_int *errcode,
 			  : (uintptr_t)ktoast->coldir[colidx]));		\
 		*cs_addr = vl_offset;								\
 	}
+#else
+/*
+ * special system parameter of gpupreagg
+ * KPARAM_2 - kds_head of the source/target kern_data_store
+ * KPARAM_3 - array of referenced and aggregated column index
+ */
+static inline kern_data_store *
+KPARAM_GET_KDS_HEAD_DEST(kern_parambuf *kparams)
+{
+	bytea  *vl_datum = kparam_get_value(kparams, 2);
 
-#endif	/* OPENCL_DEVICE_CODE */
+	if (!vl_datum)
+		return NULL;
+	return (kern_data_store *)VARDATA_ANY(vl_datum);
+}
+
+
+
 
 /* Host side representation of kern_gpupreagg. It can perform as a message
  * object of PG-Strom, has key of OpenCL device program, a source row/column
@@ -585,5 +588,5 @@ typedef struct
 	kern_data_store	   *kds_dst;	/* result buffer of partial aggregate */
 	kern_gpupreagg		kern;		/* kernel portion to be sent */
 } pgstrom_gpupreagg;
-
+#endif	/* OPENCL_DEVICE_CODE */
 #endif	/* OPENCL_GPUPREAGG_H */

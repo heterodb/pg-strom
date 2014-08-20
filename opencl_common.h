@@ -75,15 +75,6 @@ typedef cl_uint		hostptr_t;
 #endif
 
 /*
- * For kernel coding simplification, PG-Strom expects size of workgroup is
- * multiplexer of 32. It allows to consolidate calculation results by each
- * core into a 32bit register.
- * NOTE: kernel code assumes this unit-size is 32 (also 2^N), so it is not
- * sufficient to update this definition, if different unit size is applied.
- */
-#define		PGSTROM_WORKGROUP_UNITSZ	32
-
-/*
  * Error code definition
  */
 #define StromError_Success				0	/* OK */

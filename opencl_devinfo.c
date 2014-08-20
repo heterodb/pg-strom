@@ -1043,27 +1043,38 @@ pgstrom_init_opencl_devinfo(void)
  * clserv_compute_workgroup_size
  *
  * It computes an optimal workgroup size for the supplied kernel object.
- * Usually, larger workgroup size is better but resource consumption
- * (like, registers, local memory, ...) is another restriction.
- * One other restrition is alignment of workgroup size. PG-Strom expects
- * workgroup size is multiplexer of 32 (= PGSTROM_WORKGROUP_UNITSZ)
- * because of coding simplification when kernel logic handles bitmap data.
- * Please imagine each core processes a record and writes bask computation
- * result using bitmap form; We like to ensure every workgroup is aligned
- * to 32.
+ * Workgroup size is usually restricted by resource consumption (like
+ * registers, local memory, ...). Alignment is also significant because
+ * some reduction logic assumes workgroup size is power-of-two larger
+ * than or equal to 32 (= width of cl_uint).
+ * It depends on the context whether larger workgroup-size is better,
+ * or smaller. So, caller shall give a hint of "large_is_better".
+ * Local memory is consumed by two different types of variables; one
+ * is static variables described in the kernel function, the other
+ * one is dynamic one being supplied as kernel arguments.
+ * Right now, we assume 1KB is a fair estimation for the consumption
+ * by static local variables, even though we ask OpenCL how much local
+ * memory is consumed by this kernel. In case when we want to apply
+ * same global/local workgroup size for multiple kernels (see gpupreagg.c),
+ * it enables to reduce number of workgroup size estimation.
  */
+#define MINIMUM_LOCALMEM_CONSUMPTION	1024
+#define MINIMUM_WORKGROUP_UNITSZ			(sizeof(cl_uint) * BITS_PER_BYTE)
+
 bool
-clserv_compute_workgroup_size(size_t *gwork_sz,
-							  size_t *lwork_sz,
+clserv_compute_workgroup_size(size_t *p_gwork_sz,
+							  size_t *p_lwork_sz,
 							  cl_kernel kernel,
 							  int dev_index,
+							  bool larger_is_better,
 							  size_t num_threads,
 							  size_t local_memsz_per_thread)
 {
 	const pgstrom_device_info *devinfo;
 	cl_device_id kdevice;
-	size_t		blocksz;
-	size_t		kern_local_usage;
+	size_t		unitsz;
+	size_t		blocksz_max;
+	size_t		local_usage;
 	cl_int		rc;
 
 	Assert(pgstrom_i_am_clserv);
@@ -1076,55 +1087,80 @@ clserv_compute_workgroup_size(size_t *gwork_sz,
 	 * multiplexer of PGSTROM_WORKGROUP_UNITSZ, so it has to be
 	 * adjusted if needed.
 	 */
-	rc = clGetKernelWorkGroupInfo(kernel,
-								  kdevice,
-								  CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE,
-								  sizeof(blocksz),
-								  &blocksz,
-								  NULL);
-	if (rc != CL_SUCCESS)
+	if (!kernel)
+		unitsz = MINIMUM_WORKGROUP_UNITSZ;
+	else
 	{
-		clserv_log("failed on clGetKernelWorkGroupInfo: %s",
-				   opencl_strerror(rc));
-		return false;
+		rc = clGetKernelWorkGroupInfo(kernel,
+									  kdevice,
+								  CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE,
+									  sizeof(unitsz),
+									  &unitsz,
+									  NULL);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clGetKernelWorkGroupInfo: %s",
+					   opencl_strerror(rc));
+			return false;
+		}
 	}
+	/* we have no idea if run-time returned a unitsz not power of two */
+	Assert((unitsz & (unitsz - 1)) == 0);
+	if (unitsz < MINIMUM_WORKGROUP_UNITSZ)
+		unitsz = MINIMUM_WORKGROUP_UNITSZ;
 
 	/*
 	 * Do we need to adjust workgroup size according to the consumption of
 	 * local memory usage.
 	 */
-	rc = clGetKernelWorkGroupInfo(kernel,
-								  kdevice,
-								  CL_KERNEL_LOCAL_MEM_SIZE,
-								  sizeof(kern_local_usage),
-								  &kern_local_usage,
-								  NULL);
-	if (rc != CL_SUCCESS)
+	if (!kernel)
+		local_usage = MINIMUM_LOCALMEM_CONSUMPTION;
+	else
 	{
-		clserv_log("failed on clGetKernelWorkGroupInfo: %s",
-				   opencl_strerror(rc));
-		return false;
+		rc = clGetKernelWorkGroupInfo(kernel,
+									  kdevice,
+									  CL_KERNEL_LOCAL_MEM_SIZE,
+									  sizeof(local_usage),
+									  &local_usage,
+									  NULL);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clGetKernelWorkGroupInfo: %s",
+					   opencl_strerror(rc));
+			return false;
+		}
 	}
+	local_usage = Max(MINIMUM_LOCALMEM_CONSUMPTION, local_usage);
 
 	/*
-	 * If blocksz takes over-consumption of local memory, we will adjust
-	 * blocksz small enough to assign local memory.
+	 * First of all, need to know hard limit of maximum workgroup-size
+	 * from viewpoint of resource consumption.
 	 */
 	devinfo = pgstrom_get_device_info(dev_index);
-	if (local_memsz_per_thread * blocksz +
-		kern_local_usage > devinfo->dev_local_mem_size)
+	lwork_sz = (devinfo->dev_local_mem_size -
+				local_usage) / local_memsz_per_thread;
+	lwork_sz = TYPEALIGN(unitsz, lwork_sz);
+	lwork_sz = Min(lwork_sz, devinfo->dev_max_work_item_sizes[0]);
+	Assert(lwork_sz == TYPEALIGN(unitsz, lwork_sz));
+
+	/*
+	 * If smaller workgroup-size is prefered, we make lwork_sz shorten
+	 * as long as we can.
+	 */
+	if (!larger_is_better)
 	{
-		blocksz = (devinfo->dev_local_mem_size -
-				   kern_local_usage) / local_memsz_per_thread;
-		blocksz = TYPEALIGN(PGSTROM_WORKGROUP_UNITSZ, blocksz);
+		if (lwork_sz < PGSTROM_WORKGROUP_UNITSZ)
+		{
+			clserv_log("local memory consumption by kernel too large");
+			return false;
+		}
+		if (lwork_sz < unitsz)
+			lwork_sz = PGSTROM_WORKGROUP_UNITSZ;
+		else
+			lwork_sz = unitsz;
 	}
-	if (blocksz == 0)
-	{
-		clserv_log("local memory consumption by kernel too large");
-		return false;
-	}
-	*lwork_sz = blocksz;
-	*gwork_sz = ((num_threads + blocksz - 1) / blocksz) * blocksz;
+	*p_lwork_sz = lwork_sz;
+	*p_gwork_sz = ((num_threads + lwork_sz - 1) / lwork_sz) * lwork_sz;
 
 	/*
 	 * TODO: needs to put optimal workgroup size for each

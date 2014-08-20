@@ -3905,7 +3905,7 @@ clserv_respond_hashjoin(cl_event event, cl_int ev_status, void *private)
 		/*
 		 * DMA recv time
 		 */
-		rc = clGetEventProfilingInfo(clghj->events[clghj->ev_index - 2],
+		rc = clGetEventProfilingInfo(clghj->events[clghj->ev_index - 1],
 									 CL_PROFILING_COMMAND_START,
 									 sizeof(cl_ulong),
 									 &tv_start,
@@ -3913,7 +3913,7 @@ clserv_respond_hashjoin(cl_event event, cl_int ev_status, void *private)
 		if (rc != CL_SUCCESS)
 			goto skip_perfmon;
 
-		rc = clGetEventProfilingInfo(clghj->events[clghj->ev_index - 2],
+		rc = clGetEventProfilingInfo(clghj->events[clghj->ev_index - 1],
 									 CL_PROFILING_COMMAND_END,
 									 sizeof(cl_ulong),
 									 &tv_end,
@@ -4356,6 +4356,7 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
 									   clghj->kernel,
 									   clghj->dindex,
+									   false,
 									   nitems,
 									   sizeof(cl_uint)))
 		goto error;

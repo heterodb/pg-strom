@@ -670,6 +670,7 @@ extern bool clserv_compute_workgroup_size(size_t *gwork_sz,
 										  size_t *lwork_sz,
 										  cl_kernel kernel,
 										  int dev_index,
+										  bool larger_is_better,
 										  size_t num_threads,
 										  size_t local_memsz_per_thread);
 /*
