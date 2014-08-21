@@ -1075,6 +1075,7 @@ clserv_compute_workgroup_size(size_t *p_gwork_sz,
 	size_t		unitsz;
 	size_t		blocksz_max;
 	size_t		local_usage;
+	size_t		lwork_sz;
 	cl_int		rc;
 
 	Assert(pgstrom_i_am_clserv);
@@ -1084,7 +1085,7 @@ clserv_compute_workgroup_size(size_t *p_gwork_sz,
 	/*
 	 * Get a preferred unit size of workgroup to be launched.
 	 * It's a performance hint. PG-Strom expects workgroup size is
-	 * multiplexer of PGSTROM_WORKGROUP_UNITSZ, so it has to be
+	 * multiplexer of MINIMUM_WORKGROUP_UNITSZ, so it has to be
 	 * adjusted if needed.
 	 */
 	if (!kernel)
@@ -1149,13 +1150,13 @@ clserv_compute_workgroup_size(size_t *p_gwork_sz,
 	 */
 	if (!larger_is_better)
 	{
-		if (lwork_sz < PGSTROM_WORKGROUP_UNITSZ)
+		if (lwork_sz < MINIMUM_WORKGROUP_UNITSZ)
 		{
 			clserv_log("local memory consumption by kernel too large");
 			return false;
 		}
 		if (lwork_sz < unitsz)
-			lwork_sz = PGSTROM_WORKGROUP_UNITSZ;
+			lwork_sz = MINIMUM_WORKGROUP_UNITSZ;
 		else
 			lwork_sz = unitsz;
 	}
