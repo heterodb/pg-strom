@@ -230,6 +230,13 @@ pg_common_vstore(__private cl_int *errcode,
 	}
 
 /* built-in declarations */
+#ifndef PG_INT4_TYPE_DEFINED
+STROMCL_SIMPLE_TYPE_TEMPLATE(int4,cl_int)
+#endif
+#ifndef PG_INT8_TYPE_DEFINED
+STROMCL_SIMPLE_TYPE_TEMPLATE(int8,cl_long)
+#endif
+
 STROMCL_SIMPLE_VARSTORE_TEMPLATE(int4,cl_int);
 STROMCL_SIMPLE_VARSTORE_TEMPLATE(int8,cl_long);
 
@@ -388,6 +395,7 @@ gpupreagg_data_move(__private cl_int *errcode,
 {
 	__global char	   *addr_src;
 	__global cl_uint   *nullmap;
+	__global void	   *src_datum;
 	cl_uint				nullmask;
 	cl_uint				cs_offset;
 
@@ -422,7 +430,7 @@ gpupreagg_data_move(__private cl_int *errcode,
 		if (!kds_dst->colmeta[colidx].attnotnull)
 		{
 			atomic_or(nullmap, nullmask);
-			cs_offset += STROMALIGN(bitmaplen(kds->nrooms));
+			cs_offset += STROMALIGN(bitmaplen(kds_dst->nrooms));
 		}
 		dest_addr = ((__global cl_char *) kds_dst +
 					 cs_offset + attlen * rowidx_dst);
@@ -468,7 +476,7 @@ gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 {
 	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	__global kern_row_map  *krowmap = KERN_GPUPREAGG_KROWMAP(kgpreagg);
-	__global cl_int		   *rindex = KERN_GPUPREAGG_ROW_INDEX(kgpreagg);
+//	__global cl_int		   *rindex = KERN_GPUPREAGG_ROW_INDEX(kgpreagg);
 	cl_int					errcode = StromError_Success;
 	cl_uint					offset;
 	cl_uint					nitems;
@@ -480,12 +488,12 @@ gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 	else if (get_global_id(0) < krowmap->nvalids)
 		kds_index = (size_t) krowmap->rindex[get_global_id(0)];
 	else
-		kds_index = kds->nitems;	/* ensure this thread is out of range */
+		kds_index = kds_in->nitems;	/* ensure this thread is out of range */
 
 	/* calculation of total number of rows to be processed in this work-
 	 * group.
 	 */
-	offset = arithmetic_stairlike_add(kds_index < kds->nitems ? 1 : 0,
+	offset = arithmetic_stairlike_add(kds_index < kds_in->nitems ? 1 : 0,
 									  local_memory,
 									  &nitems);
 
@@ -507,7 +515,7 @@ gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 	}
 
 	/* do projection */
-	if (kds_index < kds->nitems)
+	if (kds_index < kds_in->nitems)
 	{
 		gpupreagg_projection(&errcode,
 							 kds_in, kds_out, ktoast,
@@ -534,13 +542,15 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 					__global kern_toastbuf *ktoast,
 					__local void *local_memory)
 {
-	__global kern_parambuf	  *kparams	= KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	__global cl_int			  *rindex  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
-	__local pagg_datum		  *l_data  = local_memory;
-	__local void			  *l_workbuf = (__local void *)&l_data[get_local_size(0)];
-	__global varlena		  *kparam_3 = kparam_get_value(kparams, 3);
+	__global kern_parambuf	*kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	__global cl_int			*rindex  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
+	__local pagg_datum		*l_data  = local_memory;
+	__local void	 *l_workbuf = (__local void *)&l_data[get_local_size(0)];
+	__global varlena *kparam_3 = kparam_get_value(kparams, 3);
 	cl_uint	pagg_natts = VARSIZE_EXHDR(kparam_3) / sizeof(cl_uint);
 	__global cl_uint *pagg_anums = (__global cl_uint *) VARDATA(kparam_3);
+
+	cl_int pindex		= 0;
 
 	cl_int ncols		= kds_src->ncols;
 	cl_int nrows		= kds_src->nitems;

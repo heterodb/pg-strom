@@ -413,7 +413,7 @@ typedef struct {
 } kern_parambuf;
 
 static inline __global void *
-kparam_get_value(kern_parambuf *kparams, cl_uint pindex)
+kparam_get_value(__global kern_parambuf *kparams, cl_uint pindex)
 {
 	if (pindex >= kparams->nparams)
 		return NULL;

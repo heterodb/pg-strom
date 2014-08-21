@@ -1074,11 +1074,11 @@ gpupreagg_codegen_keycomp(GpuPreAggPlan *gpreagg, codegen_context *context)
 	/* make a whole key-compare function */
 	appendStringInfo(&str,
 					 "static cl_int\n"
-					 "gpusort_comp(__private int *errcode,\n"
-					 "             __global kern_data_store *kds,\n"
-					 "             __global kern_toastbuf *ktoast,\n"
-					 "             size_t x_index,\n"
-					 "             size_t y_index)\n"
+					 "gpupreagg_keycomp(__private int *errcode,\n"
+					 "                  __global kern_data_store *kds,\n"
+					 "                  __global kern_toastbuf *ktoast,\n"
+					 "                  size_t x_index,\n"
+					 "                  size_t y_index)\n"
 					 "{\n"
 					 "  %s\n"
 					 "  pg_int4_t comp;\n"
@@ -3560,7 +3560,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 							 clgpa->m_kds_dst,
 							 CL_FALSE,
 							 0,
-							 length,
+							 kds_work->length,
 							 gpreagg->kds_dst,
 							 1,
 							 &clgpa->events[clgpa->ev_index - 1],
@@ -3572,7 +3572,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		goto error;
 	}
 	clgpa->ev_index++;
-	gpreagg->msg.pfm.bytes_dma_recv += length;
+	gpreagg->msg.pfm.bytes_dma_recv += kds_work->length;
 	gpreagg->msg.pfm.num_dma_recv++;
 
 	/*
