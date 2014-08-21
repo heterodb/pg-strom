@@ -299,20 +299,114 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 					__global kern_toastbuf *ktoast,
 					__local void *local_memory)
 {
-	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	__global cl_int		   *rindex = KERN_GPUPREAGG_ROW_INDEX(kgpreagg);
-	__local pagg_datum	   *pagg_data = local_memory;
-	__local void		   *local_workbuf = &pagg_data[get_local_size(0)];
-	cl_int					errcode = StromError_Success;
+	__global kern_parambuf	   *kparams	= KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	__global cl_int			   *rindex  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
+	__local struct pagg_datum  *l_data  = local_workbuf;
+	__local void			   *l_workbuf = (void *)&l_data[get_local_size(0)];
 
+	cl_int ncols		= kds_src->ncols;
+	cl_int nrows		= kds_src->nrows;
+	cl_int errcode		= StromError_Success;
 
+	cl_int localID     = get_local_id(0);
+	cl_int globalID        = get_global_id(0);
+    cl_int localSize   = get_local_size(0);
+
+	cl_int prtID		= globalID / localSize;	/* partition ID */
+	cl_int prtSize		= localSize;			/* partition Size */
+	cl_int prtMask		= prtSize - 1;			/* partition Mask */
+	cl_int prtPos		= prtID * prtSize;		/* partition Position */
+
+	cl_int localEntry  = (prtPos+prtSize < nrows) ? prtSize : (nrows-prtPos);
+	/* Check no data for this work group */
+	if(localEntry <= 0) {
+		goto out;
+	}
+
+	/* Generate group id of local work group. */
+	cl_int groupID;
+	cl_int ngroups;
+	{
+		cl_int isNewID = 0;
+
+		if(localID == 0)
+		{
+	        isNewID = 1;
+		}
+		else if(localID < localEntry)
+		{
+			int rv = gpupreagg_keycomp(&errcode, kds_src, ktoast,
+									   rindex[globalID-1], rindex[globalID]);
+			isNewID = (rv != 0) ? 1 : 0;
+		}
+		groupID = arithmetic_stairlike_add(isNewID, local_workbuf, &ngroups);
+	}
+
+	/* allocation of result buffer */
+	__local cl_uint base;
+	{
+		if (get_local_id(0) == 0)
+			base = atomic_add(&kds_dst->nitems, ngroups);
+		barrier(CLK_LOCAL_MEM_FENCE);
+
+		if (kds_dst->nrooms <= base + nitems) {
+			errcode = StromError_DataStoreNoSpace;
+			goto out;
+		}
+	}
+	/* Aggregate for each item. */
+	for (cl_int cindex=0; cindex < ncols; cindex++)
+	{
+		/*
+		 * TODO: needs to separate cases according to the column number.
+		 * it shall be informed to kernel function via KPARAM_3
+		 */
+
+		/* Load aggregate item */
+		l_data[localID].group_id = -1;
+		if(localID < localEntry) {
+			gpupreagg_data_load(&l_data[localID], &errcode, kds_src, ktoast,
+								cindex, rindex[globalID]);
+			l_data[localID].group_id = groupID;
+		}
+		barrier(CLK_LOCAL_MEM_FENCE);
+
+		// Reduction
+		for(int unitSize=2; unitSize<=prtSize; unitSize*=2) {
+			if(localID % unitSize == unitSize/2  &&  localID < localEntry) {
+				cl_int  dstID;
+
+				dstID = localID - unitSize/2;
+				if(l_data[localID].group_id == l_data[dstID].group_id) {
+					// Marge this aggregate data to lower.
+					gpupreagg_aggcalc(&errcode, cindex,
+									  &l_data[dstID], &l_data[localID]);
+					l_data[localID].group_id = -1;
+				}
+				barrier(CLK_LOCAL_MEM_FENCE);
+
+				if(l_data[localID].group_id != -1  &&
+				   localID + unitSize/2 < localEntry) {
+					dstID = localID + unitSize/2;
+					if(l_data[localID].group_id == l_data[dstID].group_id) {
+						// Marge this aggregate data to upper.
+						gpupreagg_aggcalc(&errcode, cindex,
+										  &l_data[dstID], &l_data[localID]);
+						l_data[localID].group_id = -1;
+					}
+				}
+				barrier(CLK_LOCAL_MEM_FENCE);
+			}
+		}
+		// write back aggregate data
+		if(l_data[localID].group_id != -1) {
+			gpupreagg_data_store(&l_data[localID], &errcode, kds_dst, ktoast,
+								 cindex, base + groupID, l_workbuf);
+		}
+    }
+out:
 	kern_writeback_error_status(&kgpreagg->status, errcode, local_workbuf);
 }
-
-
-
-
-
 
 /*
  * gpupreagg_bitonic_local
@@ -326,13 +420,82 @@ gpupreagg_bitonic_local(__global kern_gpupreagg *kgpreagg,
 						__global kern_toastbuf *ktoast,
 						__local void *local_memory)
 {
-	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	cl_int		errcode = StromError_Success;
+	__global kern_parambuf	*kparams  = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	__global cl_int			*rindex	  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
+	__local  cl_int			*localIdx = local_workbuf;
+
+	cl_int nrows		= kds->nrows;
+	cl_int errcode		= StromError_Success;
+
+    cl_int localID		= get_local_id(0);
+    cl_int globalID		= get_global_id(0);
+    cl_int localSize	= get_local_size(0);
+
+    cl_int prtID		= globalID / localSize; /* partition ID */
+    cl_int prtSize		= localSize * 2;		/* partition Size */
+    cl_int prtMask		= prtSize - 1;			/* partition Mask */
+    cl_int prtPos		= prtID * prtSize;		/* partition Position */
+
+    cl_int localEntry	= ((prtPos + prtSize < nrows)
+						   ? prtSize
+						   : (nrows - prtPos));
+
+    // create row index and then store to localIdx
+    if(localID < localEntry)
+		localIdx[localID] = prtPos + localID;
+
+    if(localSize + localID < localEntry)
+		localIdx[localSize + localID] = prtPos + localSize + localID;
+
+    barrier(CLK_LOCAL_MEM_FENCE);
 
 
+	// bitonic sort
+	for(int blockSize=2; blockSize<=prtSize; blockSize*=2)
+	{
+		int blockMask		= blockSize - 1;
+		int halfBlockSize	= blockSize / 2;
+		int halfBlockMask	= halfBlockSize -1;
+
+		for(int unitSize=blockSize; 2<=unitSize; unitSize/=2)
+		{
+			int unitMask		= unitSize - 1;
+			int halfUnitSize	= unitSize / 2;
+			int halfUnitMask	= halfUnitSize - 1;
+
+			bool reversing	= unitSize == blockSize ? true : false;
+			int idx0 = ((localID / halfUnitSize) * unitSize
+						+ localID % halfUnitSize);
+			int idx1 = ((reversing == true)
+						? ((idx0 & ~unitMask) | (~idx0 & unitMask))
+						: (halfUnitSize + idx0));
+
+			if(idx1 < localEntry) {
+				cl_int pos0 = localIdx[idx0];
+				cl_int pos1 = localIdx[idx1];
+				cl_int rv   = gpupreagg_keycomp(&errcode, kds, ktoast,
+												pos0, pos1);
+
+				if(0 < rv) {
+					// swap
+					localIdx[idx0] = pos1;
+					localIdx[idx1] = pos0;
+				}
+			}
+			barrier(CLK_LOCAL_MEM_FENCE);
+		}
+    }
+
+    if(localID < localEntry)
+		rindex[prtPos + localID] = localIdx[localID];
+
+    if(localSize + localID < localEntry)
+		rindex[prtPos + localSize + localID] = localIdx[localSize + localID];
 
 	kern_writeback_error_status(&kgpreagg->status, errcode, local_workbuf);
 }
+
+
 
 /*
  * gpupreagg_bitonic_step
@@ -348,13 +511,40 @@ gpupreagg_bitonic_step(__global kern_gpupreagg *kgpreagg,
 					   __global kern_toastbuf *ktoast,
 					   __local void *local_memory)
 {
-	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	cl_bool		reversing = (bitonic_unitsz < 0 ? true : false);
-	size_t		unitsz = (bitonic_unitsz < 0
-                          ? 1U << -bitonic_unitsz
-                          : 1U << bitonic_unitsz);
-	cl_int		errcode = StromError_Success;
+	__global kern_parambuf	*kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	__global cl_int			*rindex	 = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
 
+	cl_int	nrows	  = kds->nrows;
+	cl_bool reversing = (bitonic_unitsz < 0 ? true : false);
+	size_t	unitsz    = (bitonic_unitsz < 0
+						 ? 1U << -bitonic_unitsz
+						 : 1U << bitonic_unitsz);
+	cl_int	errcode	  = StromError_Success;
+
+	cl_int	threadID		= get_global_id(0);
+	cl_int	halfUnitSize	= unitsz / 2;
+	cl_int	unitMask		= unitsz - 1;
+
+	cl_int	idx0;
+	cl_int	idx1;
+
+	idx0 = (threadID / halfUnitSize) * unitsz + threadID % halfUnitSize;
+	idx1 = (reversing
+			? ((idx0 & ~unitMask) | (~idx0 & unitMask))
+			: (idx0 + halfUnitSize));
+	if(nrows <= idx1)
+		return;
+
+	cl_int	pos0	= rindex[idx0];
+	cl_int	pos1	= rindex[idx1];
+	cl_int	rv;
+
+	rv = gpupreagg_keycomp(&errcode, kds, ktoast, pos0, pos1);
+	if(0 < rv) {
+		/* Swap */
+		rindex[idx0] = pos1;
+		rindex[idx1] = pos0;
+	}
 
 	kern_writeback_error_status(&kgpreagg->status, errcode, local_workbuf);
 }
@@ -371,7 +561,69 @@ gpupreagg_bitonic_merge(__global kern_gpupreagg *kgpreagg,
 						__global kern_toastbuf *ktoast,
 						__local void *local_memory)
 {
-	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	__global kern_parambuf	*kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	__global cl_int			*rindex	 = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
+	__local	 cl_int			localIdx = local_workbuf;
+
+	cl_int nrows		= kds->nrows;
+	cl_int errcode		= StromError_Success;
+
+    cl_int localID		= get_local_id(0);
+    cl_int globalID		= get_global_id(0);
+    cl_int localSize	= get_local_size(0);
+
+    cl_int prtID		= globalID / localSize; /* partition ID */
+    cl_int prtSize		= localSize * 2;		/* partition Size */
+    cl_int prtMask		= prtSize - 1;			/* partition Mask */
+    cl_int prtPos		= prtID * prtSize;		/* partition Position */
+
+    cl_int localEntry	= (prtPos+prtSize < nrows) ? prtSize : (nrows-prtPos);
+
+
+    // load index to localIdx
+    if(localID < localEntry)
+		localIdx[localID] = rindex[prtPos + localID];
+
+    if(localSize + localID < localEntry)
+		localIdx[localSize + localID] = rindex[prtPos + localSize + localID];
+
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+
+	// marge sorted block
+	int blockSize		= prtSize;
+	int blockMask		= blockSize - 1;
+	int halfBlockSize	= blockSize / 2;
+	int halfBlockMask	= halfBlockSize -1;
+
+	for(int unitSize=blockSize; 2<=unitSize; unitSize/=2)
+	{
+		int unitMask		= unitSize - 1;
+		int halfUnitSize	= unitSize / 2;
+		int halfUnitMask	= halfUnitSize - 1;
+
+		int idx0 = localID / halfUnitSize * unitSize + localID % halfUnitSize;
+		int idx1 = halfUnitSize + idx0;
+
+		if(idx1 < localEntry) {
+			cl_int pos0 = localIdx[idx0];
+			cl_int pos1 = localIdx[idx1];
+			cl_int rv = gpupreagg_keycomp(&errcode, kds, ktoast, pos0, pos1);
+
+			if(0 < rv) {
+				// swap
+				localIdx[idx0] = pos1;
+				localIdx[idx1] = pos0;
+			}
+		}
+		barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if(localID < localEntry)
+		rindex[prtPos + localID] = localIdx[localID];
+
+    if(localSize + localID < localEntry)
+		rindex[prtPos + localSize + localID] = localIdx[localSize + localID];
 
 	kern_writeback_error_status(&kgpreagg->status, errcode, local_workbuf);
 }
@@ -388,9 +640,25 @@ gpupreagg_check_next(__global kern_gpupreagg *kgpreagg,
 					 __global kern_data_store *kds_old,
 					 __global kern_data_store *kds_new)
 {
+#if 0
+	/* used this function ? */
+	size_t	nrows_old	= kds_old->nrows;
+	size_t	nrows_new	= kds_new->nrows;
 
+	bool	needNextReduction;
 
+	if(nrows_old->flag_needNextReduction == false) {
+		needNextReduction = false;
+	} else {
+		if((nrows_old - nrows_new) < nrows_old / 10) {
+			needNextReduction = false;
+		} else {
+			needNextReduction = true;
+		}
+	}
 
+	nrows_new->flag_needNextReduction = true;
+#endif
 }
 
 /*
