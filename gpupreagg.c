@@ -1308,8 +1308,8 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 							 "  /* projection for resource %u */\n",
 							 tle->resno);
 			appendStringInfo(&body,
-							 "  pg_%s_vstore(kds_out, ktoast, errcode,\n"
-							 "               %u,kds_index,KVAR_%u);\n",
+							 "  pg_%s_vstore(kds_out,ktoast,errcode,\n"
+							 "               %u,rowidx_out,KVAR_%u);\n",
 							 dtype->type_name,
 							 tle->resno - 1,
 							 var->varattno);
@@ -1363,7 +1363,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 					appendStringInfo(&body, "  temp_int4.value = 1;\n");
 				appendStringInfo(&body,
 								 "  pg_%s_vstore(kds_out,ktoast,errcode,\n"
-								 "               %u,kds_index,temp_int4);\n",
+								 "               %u,rowidx_out,temp_int4);\n",
 								 dtype->type_name, tle->resno - 1);
 			}
 			else if (strcmp(func_name, "pmax") == 0 ||
@@ -1384,7 +1384,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 
 				appendStringInfo(&body,
 								 "  pg_%s_vstore(kds_out,ktoast,errcode,\n"
-								 "               %u,kds_index,%s);\n",
+								 "               %u,rowidx_out,%s);\n",
 								 dtype->type_name,
 								 tle->resno - 1,
 								 pgstrom_codegen_expression((Node *)clause,
@@ -1404,7 +1404,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 				appendStringInfo(
 					&body,
 					"  pg_%s_vstore(kds_out,ktoast,errcode,\n"
-					"               %u,kds_index,\n"
+					"               %u,rowidx_out,\n"
 					"               pgfn_%s(temp_float8x, temp_float8x));\n",
 					dtype->type_name,
 					tle->resno - 1,
@@ -1485,7 +1485,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 				appendStringInfo(
 					&body,
 					"  pg_%s_vstore(kds_out, ktoast, errcode,\n"
-					"               %u,kds_index, temp_float8x);\n",
+					"               %u,rowidx_out, temp_float8x);\n",
 					dtype->type_name,
 					tle->resno - 1);
 			}
@@ -1514,7 +1514,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 		appendStringInfo(
 			&decl,
 			"  pg_%s_t KVAR_%u"
-			" = pg_%s_vref(kds_in,ktoast,errcode,colidx,rowidx);\n",
+			" = pg_%s_vref(kds_in,ktoast,errcode,colidx,rowidx_in);\n",
 			dtype->type_name,
 			anum,
 			dtype->type_name);
@@ -1535,7 +1535,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 		"            __global kern_data_store *kds_in,\n"
 		"            __global kern_data_store *kds_out,\n"
 		"            __global kern_toastbuf *ktoast,\n"
-		"            size_t kds_index)\n"
+		"            size_t rowidx_in, size_t rowidx_out)\n"
 		"{\n"
 		"%s"
 		"\n"
@@ -1617,7 +1617,7 @@ gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 	}
 	appendStringInfo(&str, "\n%s%s",
 					 pgstrom_codegen_func_declarations(context),
-					 pgstrom_codegen_param_declarations(context, 3));
+					 pgstrom_codegen_param_declarations(context, 4));
 	appendStringInfo(&str,
 					 "%s\n"		/* gpupreagg_keycomp() */
 					 "%s\n"		/* gpupreagg_aggcalc() */

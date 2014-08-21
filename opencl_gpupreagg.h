@@ -159,7 +159,8 @@ gpupreagg_projection(__private cl_int *errcode,
 					 __global kern_data_store *kds_in,
 					 __global kern_data_store *kds_out,
 					 __global kern_toastbuf *ktoast,
-					 size_t kds_index);
+					 size_t rowidx_in,
+					 size_t rowidx_out);
 
 /*
  * load the data from kern_data_store to pagg_datum structure
@@ -243,7 +244,7 @@ gpupreagg_data_store(__local pagg_datum *pdatum,
 
 		temp.isnull	= pdatum->isnull;
 		temp.value	= pdatum->int_val;
-		pg_int4_vstore(kds, ktoast, errcode, colidx, rowidx, temp, local_workbuf);
+		pg_int4_vstore(kds, ktoast, errcode, colidx, rowidx, temp);
 	}
 	else if (cmeta.attlen == sizeof(cl_ulong))	/* also, cl_double */
 	{
@@ -251,7 +252,7 @@ gpupreagg_data_store(__local pagg_datum *pdatum,
 
 		temp.isnull	= pdatum->isnull;
 		temp.value	= pdatum->long_val;
-		pg_int8_vstore(kds, ktoast, errcode, colidx, rowidx, temp, local_workbuf);
+		pg_int8_vstore(kds, ktoast, errcode, colidx, rowidx, temp);
 	}
 	else
 	{
@@ -355,14 +356,55 @@ gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 					  __local void *local_memory)
 {
 	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	__global kern_row_map  *krowmap = KERN_GPUPREAGG_KROWMAP(kgpreagg);
 	__global cl_int		   *rindex = KERN_GPUPREAGG_ROW_INDEX(kgpreagg);
 	cl_int					errcode = StromError_Success;
+	cl_uint					offset;
+	cl_uint					nitems;
+	size_t					kds_index;
+	__local cl_uint			base;
 
-	if (get_global_id(0) < kds_in->nitems)
+	if (krowmap->nvalids < 0)
+		kds_index = get_global_id(0);
+	else if (get_global_id(0) < krowmap->nvalids)
+		kds_index = (size_t) krowmap->rindex[get_global_id(0)];
+	else
+		kds_index = kds->nitems;	/* ensure this thread is out of range */
+
+	/* calculation of total number of rows to be processed in this work-
+	 * group.
+	 */
+	offset = arithmetic_stairlike_add(kds_index < kds->nitems ? 1 : 0,
+									  local_memory,
+									  &nitems);
+
+	/* Allocation of the result slot on the kds_out. */
+	if (get_local_id(0) == 0)
+	{
+		if (nitems > 0)
+			base = atomic_add(&kds_out->nitems, nitems);
+		else
+			base = 0;
+	}
+	barrier(CLK_LOCAL_MEM_FENCE);
+
+	/* out of range check -- usually, should not happen */
+	if (base + nitems > kds_out->nrooms)
+	{
+		errcode = StromError_DataStoreNoSpace;
+		goto out;
+	}
+
+	/* do projection */
+	if (kds_index < kds->nitems)
+	{
 		gpupreagg_projection(&errcode,
 							 kds_in, kds_out, ktoast,
-							 get_global_id(0));
-
+							 kds_index,			/* rowidx of kds_in */
+							 base + offset);	/* rowidx of kds_out */
+	}
+out:
+	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kgpreagg->status, errcode, local_workbuf);
 }
 

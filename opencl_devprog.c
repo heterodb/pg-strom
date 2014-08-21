@@ -282,15 +282,18 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 	SpinLockAcquire(&dprog->lock);
 	if (!dprog->program)
 	{
-		cl_program	program;
-		const char *sources[32];
-		size_t		lengths[32];
-		char		build_opts[256];
-		cl_uint		count = 0;
+		cl_program		program;
+		const char	   *sources[32];
+		size_t			lengths[32];
+		char			build_opts[256];
+		cl_uint			count = 0;
+		static size_t	common_code_length = 0;
 
 		/* common opencl header */
+		if (!common_code_length)
+			common_code_length = strlen(pgstrom_opencl_common_code);
 		sources[count] = pgstrom_opencl_common_code;
-		lengths[count] = strlen(pgstrom_opencl_common_code);
+		lengths[count] = common_code_length;
 		count++;
 
 		/*
@@ -300,22 +303,34 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 		/* gpuscan device implementation */
 		if (dprog->extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
 		{
+			static size_t	gpuscan_code_length = 0;
+
+			if (!gpuscan_code_length)
+				gpuscan_code_length = strlen(pgstrom_opencl_gpuscan_code);
 			sources[count] = pgstrom_opencl_gpuscan_code;
-			lengths[count] = strlen(pgstrom_opencl_gpuscan_code);
+			lengths[count] = gpuscan_code_length;
 			count++;
 		}
 		/* hashjoin device implementation */
 		if (dprog->extra_flags & DEVKERNEL_NEEDS_HASHJOIN)
 		{
+			static size_t	hashjoin_code_length = 0;
+
+			if (!hashjoin_code_length)
+				hashjoin_code_length = strlen(pgstrom_opencl_hashjoin_code);
 			sources[count] = pgstrom_opencl_hashjoin_code;
-			lengths[count] = strlen(pgstrom_opencl_hashjoin_code);
+			lengths[count] = hashjoin_code_length;
 			count++;
 		}
 		/* gpupreagg device implementation */
 		if (dprog->extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
 		{
+			static size_t	gpupreagg_code_length = 0;
+
+			if (!gpupreagg_code_length)
+				gpupreagg_code_length = strlen(pgstrom_opencl_gpupreagg_code);
 			sources[count] = pgstrom_opencl_gpupreagg_code;
-			lengths[count] = sizeof(pgstrom_opencl_gpupreagg_code);
+			lengths[count] = gpupreagg_code_length;
 			count++;
 		}
 
@@ -326,27 +341,26 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 		/* opencl timelib */
 		if (dprog->extra_flags & DEVFUNC_NEEDS_TIMELIB)
 		{
+			static size_t	timelib_code_length = 0;
+
+			if (!timelib_code_length)
+				timelib_code_length = strlen(pgstrom_opencl_timelib_code);
 			sources[count] = pgstrom_opencl_timelib_code;
-			lengths[count] = strlen(pgstrom_opencl_timelib_code);
+			lengths[count] = timelib_code_length;
 			count++;
 		}
 
 		/* opencl textlib */
 		if (dprog->extra_flags & DEVFUNC_NEEDS_TEXTLIB)
 		{
+			static size_t	textlib_code_length = 0;
+
+			if (!textlib_code_length)
+				textlib_code_length = strlen(pgstrom_opencl_textlib_code);
 			sources[count] = pgstrom_opencl_textlib_code;
-			lengths[count] = strlen(pgstrom_opencl_textlib_code);
+			lengths[count] = textlib_code_length;
 			count++;
 		}
-#if 0
-		/* opencl numericlib */
-		if (dprog->extra_flags & DEVFUNC_NEEDS_NUMERICLIB)
-		{
-			sources[count] = pgstrom_opencl_numericlib_code;
-			lengths[count] = strlen(pgstrom_opencl_numericlib_code);
-			count++;
-		}
-#endif
 		/* source code of this program */
 		sources[count] = dprog->source;
 		lengths[count] = dprog->source_len;
