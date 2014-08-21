@@ -1274,6 +1274,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
     StringInfoData	body;
 	Expr		   *clause;
 	ListCell	   *cell;
+	List		   *pagg_atts = NIL;
 	Bitmapset	   *attr_refs = NULL;
 	devtype_info   *dtype;
 	devfunc_info   *dfunc;
@@ -1283,6 +1284,9 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 	bool			use_temp_int8 = false;
 	bool			use_temp_float8x = false;
 	bool			use_temp_float8y = false;
+	struct varlena *vl_datum;
+	Const		   *kparam_3;
+	int				i;
 
 	initStringInfo(&str);
 	initStringInfo(&decl);
@@ -1305,8 +1309,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 							 tle->resno);
 			appendStringInfo(&body,
 							 "  pg_%s_vstore(kds_out, ktoast, errcode,\n"
-							 "               %u,kds_index,\n"
-							 "               KVAR_%u,local_workbuf);\n",
+							 "               %u,kds_index,KVAR_%u);\n",
 							 dtype->type_name,
 							 tle->resno - 1,
 							 var->varattno);
@@ -1359,32 +1362,33 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 				else
 					appendStringInfo(&body, "  temp_int4.value = 1;\n");
 				appendStringInfo(&body,
-								 "  pg_%s_vstore(kds_out, ktoast, errcode,\n"
-								 "               %u,kds_index,\n"
-								 "               temp_int4,local_workbuf);\n",
+								 "  pg_%s_vstore(kds_out,ktoast,errcode,\n"
+								 "               %u,kds_index,temp_int4);\n",
 								 dtype->type_name, tle->resno - 1);
 			}
 			else if (strcmp(func_name, "pmax") == 0 ||
 					 strcmp(func_name, "pmin") == 0 ||
 					 strcmp(func_name, "psum") == 0)
 			{
-				/* Store the original value as-is. In case when clause is conditional
-				 * and its result is false, NULL shall be set on "pmax" and "pmin",
-				 * or 0 shall be set on "psum".
+				/* Store the original value as-is. In case when clause is
+				 * conditional and its result is false, NULL shall be set
+				 * on "pmax" and "pmin", or 0 shall be set on "psum".
 				 */
+				Oid		type_oid;
+
 				Assert(list_length(func->args) == 1);
 				clause = linitial(func->args);
-				dtype = pgstrom_devtype_lookup_and_track(exprType((Node *)clause),
-														 context);
+				type_oid = exprType((Node *)clause);
+				dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
 				Assert(dtype != NULL);
 
 				appendStringInfo(&body,
-								 "  pg_%s_vstore(kds_out, ktoast, errcode,\n"
-								 "               %u,kds_index,\n"
-								 "               %s,local_workbuf);\n",
+								 "  pg_%s_vstore(kds_out,ktoast,errcode,\n"
+								 "               %u,kds_index,%s);\n",
 								 dtype->type_name,
 								 tle->resno - 1,
-								 pgstrom_codegen_expression((Node *)clause, context));
+								 pgstrom_codegen_expression((Node *)clause,
+															context));
 			}
 			else if (strcmp(func_name, "psum_x2") == 0)
 			{
@@ -1395,13 +1399,13 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 
 				appendStringInfo(&body,
 								 "  temp_float8x = %s;\n",
-								 pgstrom_codegen_expression((Node *)clause, context));
+								 pgstrom_codegen_expression((Node *)clause,
+															context));
 				appendStringInfo(
 					&body,
-					"  pg_%s_vstore(kds_out, ktoast, errcode,\n"
-					"               %u, kds_index,\n"
-					"               pgfn_%s(temp_float8x, temp_float8x),\n"
-					"               local_workbuf);\n",
+					"  pg_%s_vstore(kds_out,ktoast,errcode,\n"
+					"               %u,kds_index,\n"
+					"               pgfn_%s(temp_float8x, temp_float8x));\n",
 					dtype->type_name,
 					tle->resno - 1,
 					dfunc->func_name);
@@ -1481,14 +1485,15 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 				appendStringInfo(
 					&body,
 					"  pg_%s_vstore(kds_out, ktoast, errcode,\n"
-					"               %u,kds_index,\n"
-					"               temp_float8x, local_workbuf);\n",
+					"               %u,kds_index, temp_float8x);\n",
 					dtype->type_name,
 					tle->resno - 1);
 			}
 			else 
 				elog(ERROR, "Bug? unexpected partial aggregate function: %s",
 					 func_name);
+			/* track resource number to construct kparam_3 */
+			pagg_atts = lappend_int(pagg_atts, tle->resno);
 		}
 		else
 			elog(ERROR, "bug? unexpected node type: %s",
@@ -1508,7 +1513,8 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 												 context);
 		appendStringInfo(
 			&decl,
-			"  pg_%s_t KVAR_%u = pg_%s_vref(kds_in,ktoast,errcode,colidx,rowidx);\n",
+			"  pg_%s_t KVAR_%u"
+			" = pg_%s_vref(kds_in,ktoast,errcode,colidx,rowidx);\n",
 			dtype->type_name,
 			anum,
 			dtype->type_name);
@@ -1538,6 +1544,19 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 		decl.data,
 		body.data);
 
+	/*
+	 * construction of kparam_3 - array of partial aggregation indexes
+	 * never changed in the executor stage.
+	 */
+	kparam_3 = (Const *) lfourth(context->used_params);
+	vl_datum = palloc(VARHDRSZ + sizeof(cl_uint) * list_length(pagg_atts));
+	i = 0;
+	foreach (cell, pagg_atts)
+		((cl_uint *)VARDATA(vl_datum))[i++] = lfirst_int(cell) - 1;
+	SET_VARSIZE(vl_datum, VARHDRSZ + sizeof(cl_uint) * list_length(pagg_atts));
+	kparam_3->constvalue = PointerGetDatum(vl_datum);
+	kparam_3->constisnull = false;
+
 	return str.data;
 }
 
@@ -1561,8 +1580,10 @@ gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 	 * KPARAM_2 is header portion of kern_data_store of destination
 	 * stream, thus its table structure reflects target-list of this
 	 * relation.
+	 * KPARAM_3 is an array of columns 
 	 */
-	context->used_params = list_make3(makeNullConst(BYTEAOID, -1, InvalidOid),
+	context->used_params = list_make4(makeNullConst(BYTEAOID, -1, InvalidOid),
+									  makeNullConst(BYTEAOID, -1, InvalidOid),
 									  makeNullConst(BYTEAOID, -1, InvalidOid),
 									  makeNullConst(BYTEAOID, -1, InvalidOid));
 	context->type_defs = list_make1(pgstrom_devtype_lookup(BYTEAOID));
@@ -1682,7 +1703,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	 */
 	kern_source = gpupreagg_codegen(gpreagg, &context);
 	gpreagg->kern_source = kern_source;
-	gpreagg->extra_flags = context.extra_flags;
+	gpreagg->extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUPREAGG;
 	gpreagg->used_params = context.used_params;
 	pull_varattnos((Node *)context.used_vars,
 				   OUTER_VAR,
@@ -1693,8 +1714,9 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 
 		if (IsA(tle->expr, Const))
 			continue;
-		gpreagg->tlist_attrefs = bms_add_member(gpreagg->tlist_attrefs, tle->resno -
-												FirstLowInvalidHeapAttributeNumber);
+		gpreagg->tlist_attrefs =
+			bms_add_member(gpreagg->tlist_attrefs, tle->resno -
+						   FirstLowInvalidHeapAttributeNumber);
 	}
 
 	/* OK, inject it */
@@ -1729,6 +1751,7 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 	Const		   *kparam_0;
 	Const		   *kparam_1;
 	Const		   *kparam_2;
+	Const		   *kparam_3;
 	bytea		   *kds_head;
 	bytea		   *ktoast_head;
 
@@ -1808,13 +1831,19 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 
 	/* kds_head of the destination relation, but ktoast_head is shared */
 	tupdesc = gpas->cps.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
-	kparam_2 = (Const *)lthird(used_params);
+	kparam_2 = (Const *) lthird(used_params);
     Assert(IsA(kparam_2, Const) &&
            kparam_2->consttype == BYTEAOID &&
            kparam_2->constisnull);
     kds_head = kparam_make_kds_head(tupdesc, gpreagg->tlist_attrefs, 0);
     kparam_2->constvalue = PointerGetDatum(kds_head);
     kparam_2->constisnull = false;
+
+	/* kparam_3 shall be already set */
+	kparam_3 = (Const *) lfourth(used_params);
+	Assert(IsA(kparam_3, Const) &&
+		   kparam_3->consttype == BYTEAOID &&
+		   !kparam_3->constisnull);
 
 	gpas->kparams = pgstrom_create_kern_parambuf(used_params,
 												 gpas->cps.ps.ps_ExprContext);

@@ -260,6 +260,88 @@ gpupreagg_data_store(__local pagg_datum *pdatum,
 	}
 }
 
+/* gpupreagg_data_move - it moves grouping key from the source kds to
+ * the destination kds as is. We assume toast buffer is shared and
+ * resource number of varlena key is not changed. So, all we need to
+ * do is copying the offset value, not varlena body itself.
+ */
+static void
+gpupreagg_data_move(__private cl_int *errcode,
+					__global kern_data_store *kds_src,
+					__global kern_data_store *kds_dst,
+					__global kern_toastbuf *ktoast,
+					cl_uint colidx,
+					cl_uint rowidx_src,
+					cl_uint rowidx_dst)
+{
+	__global char	   *addr_src;
+	__global cl_uint   *nullmap;
+	cl_uint				nullmask;
+	cl_uint				cs_offset;
+
+	if (kds_src->ncols != kds_dst->ncols ||
+		colidx >= kds_src->ncols ||
+		!kds_src->colmeta[colidx].attvalid ||
+		!kds_dst->colmeta[colidx].attvalid ||
+		kds_src->colmeta[colidx].attlen != kds_dst->colmeta[colidx].attlen)
+	{
+		*errcode = StromError_DataStoreCorruption;
+		return;
+	}
+
+	cs_offset = kds_src->colmeta[colidx].cs_offset;
+	nullmap = (__global cl_uint *)
+		((__global char *)kds_dst + cs_offset + (rowidx_dst >> 5));
+	nullmask = (1U << (rowidx_dst & 0x1f));
+
+	src_datum = kern_get_datum(kds_src, ktoast, colidx, rowidx_src);
+	if (!src_datum)
+	{
+		if (!kds_dst->colmeta[colidx].attnotnull)
+			atomic_and(nullmap, ~nullmask);
+		else
+			*errcode = StromError_DataStoreCorruption;
+	}
+	else
+	{
+		__global cl_char   *dest_addr;
+		cl_short			attlen = kds_dst->colmeta[colidx].attlen;
+
+		if (!kds_dst->colmeta[colidx].attnotnull)
+		{
+			atomic_or(nullmap, nullmask);
+			cs_offset += STROMALIGN(bitmaplen(kds->nrooms));
+		}
+		dest_addr = ((__global cl_char *) kds_dst +
+					 cs_offset + attlen * rowidx_dst);
+		switch (attlen)
+		{
+			case sizeof(cl_char):
+				*((__global cl_char *) dest_addr)
+					= *((__global cl_char *) src_datum);
+				break;
+			case sizeof(cl_short):
+				*((__global cl_short *) dest_addr)
+					= *((__global cl_short *) src_datum);
+				break;
+			case sizeof(cl_int):
+				*((__global cl_int *) dest_addr)
+					= *((__global cl_int *) src_datum);
+				break;
+			case sizeof(cl_long):
+				*((__global cl_long *) dest_addr)
+					= *((__global cl_long *) src_datum);
+				break;
+			default:
+				if (attlen > 0)
+					memcpy(dest_addr, src_datum, attlen);
+				else
+					*((__global cl_uint *) dest_addr) =
+						*((__global cl_uint *) src_datum);
+		}
+	}
+}
+
 /*
  * gpupreagg_preparation - It translaes an input kern_data_store (that
  * reflects outer relation's tupdesc) into the form of running total
@@ -303,6 +385,9 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 	__global cl_int			   *rindex  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
 	__local struct pagg_datum  *l_data  = local_workbuf;
 	__local void			   *l_workbuf = (void *)&l_data[get_local_size(0)];
+	__global varlena		   *kparam_3 = kparam_get_value(kparams, 3);
+	cl_uint	pagg_natts = VARSIZE_EXHDR(kparam_3) / sizeof(cl_uint);
+	__global cl_uint *pagg_anums = (__global cl_uint *) VARDATA(kparam_3);
 
 	cl_int ncols		= kds_src->ncols;
 	cl_int nrows		= kds_src->nrows;
@@ -357,10 +442,26 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 	/* Aggregate for each item. */
 	for (cl_int cindex=0; cindex < ncols; cindex++)
 	{
-		/*
-		 * TODO: needs to separate cases according to the column number.
-		 * it shall be informed to kernel function via KPARAM_3
+		/* In case when column is neither grouping-key nor partial
+		 * aggregation, we have nothing to do. So, move to the next
+		 * column.
 		 */
+		if (!kds_src->colmeta[cindex].attvalid)
+			continue;
+
+		/* In case when column is a grouping-key (thus, no partial
+		 * aggregation is defined), all we need to do is copying
+		 * the data from source to destination.
+		 */
+		if (pindex < pagg_natts && cindex == pagg_anums[pindex])
+		{
+			gpupreagg_data_move(errcode, kds_src, kds_dst, ktoast,
+								cindex,
+								rindex[globalID],	/* source rowid */
+								base + groupID);	/* destination rowid */
+			pindex++;
+			continue;
+		}
 
 		/* Load aggregate item */
 		l_data[localID].group_id = -1;
@@ -661,89 +762,65 @@ gpupreagg_check_next(__global kern_gpupreagg *kgpreagg,
 #endif
 }
 
-/*
- * pg_common_vstore_putnull() - utility function to set null bitmask
- * on the appropriate position of the target kern_data_store.
- * It internally uses reduction operation using local memory, so all
- * the work-item has to be called towards this function.
- * It returns width of null-bitmap on the required attribute, may be
- * 0 if column has NOT NULL constratint.
- */
-static cl_int
-pg_common_vstore_putnull(__private cl_int *errcode,
-						 __global kern_data_store *kds,
-						 cl_uint colidx,
-						 cl_uint rowidx,
-						 bool isnull,
-						 __local void *local_workbuf)
+static __global void *
+pg_common_vstore(__private cl_int *errcode,
+				 __global kern_data_store *kds,
+				 cl_uint colidx,
+				 cl_uint rowidx,
+				 bool isnull)
 {
-	kern_colmeta	cmeta;
-	cl_uint			offset;
+	kern_colmeta		cmeta = kds->colmeta[colidx];
+	__global cl_uint   *nullmap;
+	cl_uint				nullmask;
+	cl_uint				offset = 0;
 
 	/* only column-store can be written in the kernel space */
 	if (!kds->column_form)
 	{
 		if (!StromErrorIsSignificant(*errcode))
 			*errcode = StromError_DataStoreCorruption;
-		return -1;
+		return NULL;
 	}
-
 	/* out of range? */
-	if (colidx >= kds->ncols)
+	if (colidx >= kds->ncols || rowidx >= kds->nrooms)
 	{
 		if (!StromErrorIsSignificant(*errcode))
 			*errcode = StromError_DataStoreOutOfRange;
-		return -1;
+		return NULL;
+	}
+	cmeta = kds->colmeta[colidx];
+	/* only null can be allowed to store value on invalid column */
+	if (!cmeta.attvalid)
+	{
+		if (!isnull && !StromErrorIsSignificant(*errcode))
+			*errcode = StromError_DataStoreCorruption;
+		return NULL;
 	}
 
-	/* why do you try to store the datum to this column? */
-	cmeta = kds->colmeta[colidx];
-	if (!cmeta.attvalid)
-		return -1;
 	offset = cmeta.cs_offset;
-
-	/*
-	 * setting up null-bitmask. we should not use atomic operation here,
-	 * because this function shall be called towards all the input records,
-	 * so its performance loss is not ignorable.
-	 */
-	if (cmeta.attnotnull)
+	nullmap = (__global cl_uint *)((__global cl_char *)kds + offset +
+								   (1U << (rowidx >> 5)));
+	nullmask = (1U << (rowidx & 0x1f));
+	if (isnull)
 	{
-		/* NULL is unacceptable with NOT NULL constraint */
-		if (isnull)
+		if (!cmeta.attnotnull)
+			atomic_and(nullmap, ~nullmask);
+		else
 		{
 			if (!StromErrorIsSignificant(*errcode))
 				*errcode = StromError_DataStoreCorruption;
-			return -1;
 		}
+		return NULL;
 	}
-	else
+
+	if (!cmeta.attnotnull)
 	{
-		__local cl_uint *nullmask = (__lobal cl_uint *) local_workbuf;
-		cl_uint		x;
-
-		nullmask[get_local_id(0)] = (!isnull ? (1 << (rowid & 0x1f)) : 0);
-		barrier(CLK_LOCAL_MEM_FENCE);
-
-		for (x=2; x <= sizeof(cl_uint) * BITS_PER_BYTE; x <<= 1)
-		{
-			if ((get_local_id(0) & (x - 1)) == 0 &&
-				(rowid + (x >> 1)) < kds->nitems)
-				nullmask[get_local_id(0)]
-					|= nullmask[get_local_id(0) + (x >> 1)];
-			barrier(CLK_LOCAL_MEM_FENCE);
-		}
-
-		if ((get_local_id(0) & 0x001f) == 0 && rowid < kds->nitems)
-		{
-			__global cl_uint *addr = (__global cl_uint *)
-				((__global cl_char *) kds + offset);
-
-			addr[rowid >> 5] = nullmask[get_local_id(0)];
-		}
-		return STROMALIGN(bitmaplen(kds->nitems));
+		atomic_or(nullmap, nullmask);
+		offset += STROMALIGN(bitmaplen(kds->nrooms));
 	}
-	return 0;
+	return (__global cl_char *)kds + offset + (cmeta.attlen > 0 ?
+											   cmeta.attlen :
+											   sizeof(cl_uint)) * rowidx;
 }
 
 #define STROMCL_SIMPLE_VARSTORE_TEMPLATE(NAME,BASE)			\
@@ -753,32 +830,14 @@ pg_common_vstore_putnull(__private cl_int *errcode,
 					   __private int *errcode,				\
 					   cl_uint colidx,						\
 					   cl_uint rowidx,						\
-					   pg_##NAME##_t datum,					\
-					   __local void *local_workbuf)			\
+					   pg_##NAME##_t datum)					\
 	{														\
-		kern_colmeta	cmeta;								\
-		cl_int			width;								\
-		cl_int			cs_offset;							\
-		__global BASE  *cs_addr;							\
-															\
-		width = pg_common_vstore_putnull(errcode, kds,		\
-										 colidx, rowidx,	\
-										 datum.isnull,		\
-										 local_workbuf);	\
-		if (width < 0)										\
-			return;		/* something error! */				\
-		if (rowidx >= kds->nitems)							\
-		{													\
-			if (!StromErrorIsSignificant(*errcode))			\
-				*errcode = StromError_DataStoreOutOfRange;	\
-		}													\
-		/* OK, let's put fixed-length datum  */				\
-		cmeta = kds->colmeta[colidx];						\
-		cs_offset = cmeta.cs_offset + width;				\
-		cs_addr = (__global BASE *)							\
-			((__global char *) kds + cs_offset +			\
-			 cmeta.attlen * rowidx);						\
-		*cs_addr = datum.value;								\
+		__global BASE  *cs_addr								\
+			= pg_common_vstore(errcode, kds,				\
+							   colidx, rowidx,				\
+							   datum.isnull);				\
+		if (cs_addr)										\
+			*cs_addr = datum.value;							\
 	}
 
 #define STROMCL_VARLENA_VARSTORE_TEMPLATE(NAME)				\
@@ -788,42 +847,22 @@ pg_common_vstore_putnull(__private cl_int *errcode,
 					   __private int *errcode,				\
 					   cl_uint colidx,						\
 					   cl_uint rowidx,						\
-					   pg_##NAME##_t datum,					\
-					   __local void *local_workbuf)			\
+					   pg_##NAME##_t datum)					\
 	{														\
-		kern_colmeta		cmeta;							\
-		cl_int				width;							\
-		cl_int				cs_offset;						\
-		cl_int				vl_offset;						\
-		__global cl_uint   *cs_addr;						\
-															\
-		width = pg_common_vstore_putnull(errcode, kds,		\
-										 colidx, rowidx,	\
-										 datum.isnull,		\
-										 local_workbuf);	\
-		if (width < 0)										\
-			return;		/* something error! */				\
-		if (rowidx >= kds->nitems)							\
+		__global cl_uint   *cs_addr							\
+			= pg_common_vstore(errcode, kds,				\
+							   colidx, rowidx,				\
+							   datum.isnull);				\
+		if (cs_addr)										\
 		{													\
-			if (!StromErrorIsSignificant(*errcode))			\
-				*errcode = StromError_DataStoreOutOfRange;	\
+			cl_uint		vl_offset							\
+				= (cl_uint)((uintptr_t)datum.value -		\
+							(uintptr_t)ktoast);				\
+			if (ktoast->length == TOASTBUF_MAGIC)			\
+				vl_offset -= ktoast->coldir[colidx];		\
+															\
+			*cs_addr = vl_offset;							\
 		}													\
-		/* OK, let's put fixed-length datum  */				\
-		cmeta = kds->colmeta[colidx];						\
-		cs_offset = cmeta.cs_offset + width;				\
-		cs_addr = (__global cl_uint *)						\
-			((__global char *) kds + cs_offset +			\
-			 sizeof(cl_uint) * rowidx);						\
-		/* NOTE: right now, varlena datum is supported */	\
-		/* as a grouping key only, so its attribute */		\
-		/* number should not be changed, thus coldir[] */	\
-		/* of toastbuf also should not be changed */		\
-		vl_offset = (cl_uint)								\
-			((uintptr_t)datum.value -						\
-			 (ktoast->length == TOASTBUF_MAGIC				\
-			  ? (uintptr_t)ktoast							\
-			  : (uintptr_t)ktoast->coldir[colidx]));		\
-		*cs_addr = vl_offset;								\
 	}
 #else
 /*
