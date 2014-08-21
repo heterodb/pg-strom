@@ -4356,7 +4356,7 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
 									   clghj->kernel,
 									   clghj->dindex,
-									   false,
+									   false,	/* smaller WG-sz is better */
 									   nitems,
 									   sizeof(cl_uint)))
 		goto error;

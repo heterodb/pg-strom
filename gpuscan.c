@@ -2417,8 +2417,9 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	dindex = pgstrom_opencl_device_schedule(&gpuscan->msg);
 	kcmdq = opencl_cmdq[dindex];	
 	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
-									   clgss->kernel, dindex, nrows,
-									   sizeof(cl_uint)))
+									   clgss->kernel, dindex,
+									   false,	/* smaller WG-sz is better */
+									   nrows, sizeof(cl_uint)))
 		goto error;
 
 	/* allocation of device memory for kern_gpuscan argument */

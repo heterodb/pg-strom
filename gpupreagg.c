@@ -1514,10 +1514,11 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 		appendStringInfo(
 			&decl,
 			"  pg_%s_t KVAR_%u"
-			" = pg_%s_vref(kds_in,ktoast,errcode,colidx,rowidx_in);\n",
+			" = pg_%s_vref(kds_in,ktoast,errcode,%u,rowidx_in);\n",
 			dtype->type_name,
 			anum,
-			dtype->type_name);
+			dtype->type_name,
+			anum - 1);
 	}
 	if (use_temp_int4)
 		appendStringInfo(&decl, "  pg_int4_t temp_int4;\n");
@@ -1601,6 +1602,10 @@ gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 	foreach (cell, context->type_defs)
 	{
 		devtype_info   *dtype = lfirst(cell);
+
+		/* pg_XXX_vstore() of int4/int8 are declared as a built-in */
+		if (dtype->type_oid == INT4OID || dtype->type_oid == INT8OID)
+			continue;
 
 		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
 		{
