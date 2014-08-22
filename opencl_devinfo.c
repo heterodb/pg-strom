@@ -1140,9 +1140,9 @@ clserv_compute_workgroup_size(size_t *p_gwork_sz,
 	devinfo = pgstrom_get_device_info(dev_index);
 	lwork_sz = (devinfo->dev_local_mem_size -
 				local_usage) / local_memsz_per_thread;
-	lwork_sz = TYPEALIGN(unitsz, lwork_sz);
+	lwork_sz = (1UL << (get_next_log2(lwork_sz + 1) - 1));
 	lwork_sz = Min(lwork_sz, devinfo->dev_max_work_item_sizes[0]);
-	Assert(lwork_sz == TYPEALIGN(unitsz, lwork_sz));
+	Assert((lwork_sz & (lwork_sz - 1)) == 0);
 
 	/*
 	 * If smaller workgroup-size is prefered, we make lwork_sz shorten
@@ -1161,7 +1161,7 @@ clserv_compute_workgroup_size(size_t *p_gwork_sz,
 			lwork_sz = unitsz;
 	}
 	*p_lwork_sz = lwork_sz;
-	*p_gwork_sz = ((num_threads + lwork_sz - 1) / lwork_sz) * lwork_sz;
+	*p_gwork_sz = TYPEALIGN(lwork_sz, num_threads);
 
 	/*
 	 * TODO: needs to put optimal workgroup size for each
