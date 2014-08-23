@@ -231,9 +231,11 @@ pg_common_vstore(__private cl_int *errcode,
 
 /* built-in declarations */
 #ifndef PG_INT4_TYPE_DEFINED
+#define PG_INT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int4,cl_int)
 #endif
 #ifndef PG_INT8_TYPE_DEFINED
+#define PG_INT8_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int8,cl_long)
 #endif
 

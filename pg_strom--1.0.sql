@@ -247,7 +247,12 @@ CREATE FUNCTION pgstrom.pcov_xy(bool, float8, float8)
 --
 -- definition of trans/final functioin of alternative aggregates
 --
-CREATE FUNCTION pgstrom.sum_int8_accum(int8[], int4, int8)
+CREATE FUNCTION pgstrom.avg_int8_accum(int8[], int4, int8)
+  RETURNS int8[]
+  AS 'MODULE_PATHNAME', 'pgstrom_avg_int8_accum'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.sum_int8_accum(int8[], int8)
   RETURNS int8[]
   AS 'MODULE_PATHNAME', 'pgstrom_sum_int8_accum'
   LANGUAGE C STRICT;
@@ -259,13 +264,13 @@ CREATE FUNCTION pgstrom.sum_int8_final(int8[])
 
 CREATE AGGREGATE pgstrom.avg(int4, int8)
 (
-  sfunc = pgstrom.sum_int8_accum,
+  sfunc = pgstrom.avg_int8_accum,
   stype = int8[],
   finalfunc = pg_catalog.int8_avg,
   initcond = '{0,0}'
 );
 
-CREATE AGGREGATE pgstrom.sum(int4, int8)
+CREATE AGGREGATE pgstrom.sum(int8)
 (
   sfunc = pgstrom.sum_int8_accum,
   stype = int8[],

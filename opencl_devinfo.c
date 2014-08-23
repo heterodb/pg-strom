@@ -1073,7 +1073,6 @@ clserv_compute_workgroup_size(size_t *p_gwork_sz,
 	const pgstrom_device_info *devinfo;
 	cl_device_id kdevice;
 	size_t		unitsz;
-	size_t		blocksz_max;
 	size_t		local_usage;
 	size_t		lwork_sz;
 	cl_int		rc;

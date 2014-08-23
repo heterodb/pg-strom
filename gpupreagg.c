@@ -15,6 +15,7 @@
 #include "access/sysattr.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_aggregate.h"
+#include "catalog/pg_cast.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
@@ -471,6 +472,59 @@ makeZeroConst(Oid consttype, int32 consttypmod, Oid constcollid)
  * make_altfunc_expr_pcov() - makes expression node of covariances.
  */
 static Expr *
+make_expr_typecast(Expr *expr, Oid target_type)
+{
+	Oid			source_type = exprType((Node *) expr);
+	HeapTuple	tup;
+	Form_pg_cast cast;
+
+	if (source_type == target_type)
+		return expr;
+
+	tup = SearchSysCache2(CASTSOURCETARGET,
+						  ObjectIdGetDatum(source_type),
+						  ObjectIdGetDatum(target_type));
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "could not find tuple for cast (%u,%u)",
+			 source_type, target_type);
+	cast = (Form_pg_cast) GETSTRUCT(tup);
+	if (cast->castmethod == COERCION_METHOD_FUNCTION)
+	{
+		FuncExpr	   *func;
+
+		Assert(OidIsValid(cast->castfunc));
+		func = makeFuncExpr(cast->castfunc,
+							target_type,
+							list_make1(expr),
+							InvalidOid,	/* always right? */
+							exprCollation((Node *) expr),
+							COERCE_EXPLICIT_CAST);
+		expr = (Expr *) func;
+	}
+	else if (cast->castmethod == COERCION_METHOD_BINARY)
+	{
+		RelabelType	   *relabel = makeNode(RelabelType);
+
+		relabel->arg = expr;
+		relabel->resulttype = target_type;
+		relabel->resulttypmod = exprTypmod((Node *) expr);
+		relabel->resultcollid = exprCollation((Node *) expr);
+		relabel->relabelformat = COERCE_EXPLICIT_CAST;
+		relabel->location = -1;
+
+		expr = (Expr *) relabel;
+	}
+	else
+	{
+		elog(ERROR, "cast-method '%c' is not supported in opencl kernel",
+			 cast->castmethod);
+	}
+	ReleaseSysCache(tup);
+
+	return expr;
+}
+
+static Expr *
 make_expr_conditional(Expr *expr, Expr *filter, Expr *defresult)
 {
 	CaseWhen   *case_when;
@@ -706,7 +760,7 @@ make_gpupreagg_refnode(Aggref *aggref, List **prep_tlist)
 	for (i=0; i < aggfn_cat->altfn_nargs; i++)
 	{
 		int			code = aggfn_cat->altfn_argexprs[i];
-		Oid			rettype_oid = aggfn_cat->altfn_argtypes[i];
+		Oid			argtype_oid = aggfn_cat->altfn_argtypes[i];
 		TargetEntry *tle;
 		Expr	   *expr;
 		Var		   *varref;
@@ -739,13 +793,17 @@ make_gpupreagg_refnode(Aggref *aggref, List **prep_tlist)
 				tle = linitial(aggref->args);
 				Assert(IsA(tle, TargetEntry));
 				expr = tle->expr;
+				if (exprType((Node *) expr) != argtype_oid)
+					expr = make_expr_typecast(expr, argtype_oid);
 				if (aggref->aggfilter)
 				{
 					Expr   *defresult
 						= (Expr *) makeZeroConst(exprType((Node *) expr),
 												 exprTypmod((Node *) expr),
 												 exprCollation((Node *) expr));
-					expr = make_expr_conditional(expr, aggref->aggfilter, defresult);
+					expr = make_expr_conditional(expr,
+												 aggref->aggfilter,
+												 defresult);
 				}
 				expr = make_altfunc_expr("psum", list_make1(expr));
 				break;
@@ -753,13 +811,17 @@ make_gpupreagg_refnode(Aggref *aggref, List **prep_tlist)
 				tle = linitial(aggref->args);
 				Assert(IsA(tle, TargetEntry));
 				expr = tle->expr;
+				if (exprType((Node *) expr) != argtype_oid)
+					expr = make_expr_typecast(expr, argtype_oid);
 				if (aggref->aggfilter)
 				{
 					Expr   *defresult
 						= (Expr *) makeZeroConst(exprType((Node *) expr),
 												 exprTypmod((Node *) expr),
 												 exprCollation((Node *) expr));
-					expr = make_expr_conditional(expr, aggref->aggfilter, defresult);
+					expr = make_expr_conditional(expr,
+												 aggref->aggfilter,
+												 defresult);
 				}
 				expr = make_altfunc_expr("psum_x2", list_make1(expr));
 				break;
@@ -786,11 +848,11 @@ make_gpupreagg_refnode(Aggref *aggref, List **prep_tlist)
 			return NULL;
 
 		/* check return type of the alternative functions */
-		if (rettype_oid != exprType((Node *) expr))
+		if (argtype_oid != exprType((Node *) expr))
 		{
 			elog(NOTICE, "Bug? result type is \"%s\", but \"%s\" is expected",
 				 format_type_be(exprType((Node *) expr)),
-				 format_type_be(rettype_oid));
+				 format_type_be(argtype_oid));
 			return NULL;
 		}
 
@@ -1699,8 +1761,10 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 				   agg_tlist, agg_quals,
 				   &startup_cost, &total_cost,
 				   &startup_sort, &total_sort);
+#if 0	/* force GpuPreAgg for development purpose */
 	if (agg->plan.total_cost < total_cost)
 		return;
+#endif
 
 	/*
 	 * construction of kernel code, according to the above query
@@ -3769,7 +3833,7 @@ PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_xy);
  * Then, it eventually generate mathmatically compatible average value.
  */
 Datum
-pgstrom_sum_int8_accum(PG_FUNCTION_ARGS)
+pgstrom_avg_int8_accum(PG_FUNCTION_ARGS)
 {
 	ArrayType  *transarray;
 	int32		nrows = PG_GETARG_INT32(1);
@@ -3793,7 +3857,33 @@ pgstrom_sum_int8_accum(PG_FUNCTION_ARGS)
 
 	PG_RETURN_ARRAYTYPE_P(transarray);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int8_accum);
+PG_FUNCTION_INFO_V1(pgstrom_avg_int8_accum);
+
+Datum
+pgstrom_sum_int8_accum(PG_FUNCTION_ARGS)
+{
+	ArrayType  *transarray;
+	int64		psum = PG_GETARG_INT64(2);
+	int64	   *transdata;
+
+	if (AggCheckCallContext(fcinfo, NULL))
+		transarray = PG_GETARG_ARRAYTYPE_P(0);
+	else
+		transarray = PG_GETARG_ARRAYTYPE_P_COPY(0);
+
+	if (ARR_NDIM(transarray) != 1 ||
+		ARR_DIMS(transarray)[0] != 2 ||
+		ARR_HASNULL(transarray) ||
+		ARR_ELEMTYPE(transarray) != INT8OID)
+		elog(ERROR, "Two elements int8 array is expected");
+
+	transdata = (int64 *) ARR_DATA_PTR(transarray);
+	transdata[0] += (int64) 0;		/* # of rows (dummy) */
+	transdata[1] += (int64) psum;	/* partial sum */
+
+	PG_RETURN_ARRAYTYPE_P(transarray);
+}
+PG_FUNCTION_INFO_V1(pgstrom_sum_int8_accum);
 
 /*
  * The built-in final sum() function that accept int8 generates numeric
@@ -3817,8 +3907,7 @@ pgstrom_sum_int8_final(PG_FUNCTION_ARGS)
 
 	PG_RETURN_INT64(transdata[1]);
 }
-
-
+PG_FUNCTION_INFO_V1(pgstrom_sum_int8_final);
 
 /* logic copied from utils/adt/float.c */
 static inline float8 *
