@@ -1240,7 +1240,7 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 				"  case %d:\n"
 				"    accum->%s += newval->%s;\n"
 				"    break;\n",
-				tle->resno,
+				tle->resno - 1,
 				field_name, field_name);
 		}
 		else if (strcmp(func_name, "pmax") == 0 ||
@@ -1261,7 +1261,7 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 				"      accum->isnull = false;\n"
 				"    }\n"
 				"    break;\n",
-				tle->resno,
+				tle->resno - 1,
 				field_name, field_name,
 				field_name, func_name + 1, field_name, field_name);
 		}
@@ -1281,7 +1281,7 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 				"        accum->isnull = false;\n"
 				"      }\n"
 				"    break;\n",
-				tle->resno,
+				tle->resno - 1,
 				field_name, field_name);
 		}
 		else if (strcmp(func_name, "pcov_x") == 0  ||
@@ -1302,7 +1302,7 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 				"      accum->isnull = false;\n"
 				"    }\n"
 				"    break;\n",
-				tle->resno,
+				tle->resno - 1,
 				field_name, field_name);
 		}
 		else
@@ -3224,7 +3224,7 @@ clserv_launch_preagg_reduction(clstate_gpupreagg *clgpa, cl_uint nvalids)
 
 	rc = clSetKernelArg(clgpa->kern_pagg,
 						4,		/* __local void *local_memory */
-						sizeof(cl_uint) * lwork_sz,
+						sizeof(pagg_datum) * lwork_sz + STROMALIGN_LEN,
 						NULL);
 	if (rc != CL_SUCCESS)
 	{
@@ -3736,12 +3736,10 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	 *  gpupreagg_bitonic_local()
 	 *  gpupreagg_bitonic_merge()
 	 */
-#if 0
 	/* kick, gpupreagg_reduction() */
 	rc = clserv_launch_preagg_reduction(clgpa, nvalids);
 	if (rc != CL_SUCCESS)
 		goto error;
-#endif
 
 	/* writing back the result buffer */
 	rc = clEnqueueReadBuffer(clgpa->kcmdq,
