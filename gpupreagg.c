@@ -2168,24 +2168,17 @@ gpupreagg_next_tuple(GpuPreAggState *gpas, TupleTableSlot *slot)
 		int			attlen;
 		cl_uint		cs_offset;
 
-		ExecClearTuple(slot);
+		ExecStoreAllNullTuple(slot);
 		for (i=0; i < tupdesc->natts; i++)
 		{
 			if (!kds->colmeta[i].attvalid)
-			{
-				slot->tts_isnull[i] = true;
-				slot->tts_values[i] = (Datum) 0;
 				continue;
-			}
+
 			cs_offset = kds->colmeta[i].cs_offset;
 			if (!kds->colmeta[i].attnotnull)
 			{
 				if (att_isnull(j, (char *)kds + cs_offset))
-				{
-					slot->tts_isnull[i] = true;
-					slot->tts_values[i] = (Datum) 0;
 					continue;
-				}
 				cs_offset += STROMALIGN(BITMAPLEN(kds->nrooms));
 			}
 			slot->tts_isnull[i] = false;

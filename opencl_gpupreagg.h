@@ -182,12 +182,9 @@ pg_common_vstore(__private cl_int *errcode,
 		atomic_or(nullmap, nullmask);
 		offset += STROMALIGN(bitmaplen(kds->nrooms));
 	}
-	__global cl_char *hoge
-		= (__global cl_char *)kds + offset + (cmeta.attlen > 0 ?
+	return (__global cl_char *)kds + offset + (cmeta.attlen > 0 ?
 											   cmeta.attlen :
 											   sizeof(cl_uint)) * rowidx;
-	printf("vstore col=%d row=%d offset=%u hoge-kds=%zu\n", colidx, rowidx, offset, (uintptr_t)hoge - (uintptr_t)kds);
-	return hoge;
 }
 
 #define STROMCL_SIMPLE_VARSTORE_TEMPLATE(NAME,BASE)			\
