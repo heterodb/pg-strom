@@ -162,8 +162,8 @@ pg_common_vstore(__private cl_int *errcode,
 	}
 
 	offset = cmeta.cs_offset;
-	nullmap = (__global cl_uint *)((__global cl_char *)kds + offset +
-								   (1U << (rowidx >> 5)));
+	nullmap = ((__global cl_uint *)
+			   ((__global cl_char *)kds + offset)) + (rowidx >> 5);
 	nullmask = (1U << (rowidx & 0x1f));
 	if (isnull)
 	{
@@ -182,9 +182,12 @@ pg_common_vstore(__private cl_int *errcode,
 		atomic_or(nullmap, nullmask);
 		offset += STROMALIGN(bitmaplen(kds->nrooms));
 	}
-	return (__global cl_char *)kds + offset + (cmeta.attlen > 0 ?
+	__global cl_char *hoge
+		= (__global cl_char *)kds + offset + (cmeta.attlen > 0 ?
 											   cmeta.attlen :
 											   sizeof(cl_uint)) * rowidx;
+	printf("vstore col=%d row=%d offset=%u hoge-kds=%zu\n", colidx, rowidx, offset, (uintptr_t)hoge - (uintptr_t)kds);
+	return hoge;
 }
 
 #define STROMCL_SIMPLE_VARSTORE_TEMPLATE(NAME,BASE)			\

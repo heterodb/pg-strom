@@ -2569,32 +2569,34 @@ clserv_dump_kds(kern_data_store *kds)
 					cs_offset += STROMALIGN(BITMAPLEN(kds->nrooms));
 				}
 				values = (char *)kds + cs_offset;
-				if (kds->colmeta[i].attlen == 1)
-					clserv_log("(c%d,r%d) = %d", j, i,
-							   *((cl_char *)(values + sizeof(char) * i)));
-				else if (kds->colmeta[i].attlen == 2)
-					clserv_log("(c%d,r%d) = %d", j, i,
-							   *((cl_short *)(values + sizeof(short) * i)));
-				else if (kds->colmeta[i].attlen == 4)
-					clserv_log("(c%d,r%d) = %d", j, i,
-							   *((cl_int *)(values + sizeof(int) * i)));
-				else if (kds->colmeta[i].attlen == 8)
-					clserv_log("(c%d,r%d) = %ld", j, i,
-							   *((cl_long *)(values + sizeof(long) * i)));
-				else if (kds->colmeta[i].attlen < 0)
-					clserv_log("(c%d,r%d) = vl_ofs: %u", j, i,
-							   *((cl_uint *)(values + sizeof(cl_uint) * i)));
+				if (kds->colmeta[j].attlen == 1)
+					clserv_log("(c%d,r%d) = %d (attlen=1)", j, i,
+							   *((cl_char *)(values + i)));
+				else if (kds->colmeta[j].attlen == 2)
+					clserv_log("(c%d,r%d) = %d (attlen=2)", j, i,
+							   *((cl_short *)(values + 2 * i)));
+				else if (kds->colmeta[j].attlen == 4)
+					clserv_log("(c%d,r%d) = %d (attlen=4)", j, i,
+							   *((cl_int *)(values + 4 * i)));
+				else if (kds->colmeta[j].attlen == 8)
+					clserv_log("(c%d,r%d) = %ld (attlen=8)", j, i,
+							   *((cl_long *)(values + 8 * i)));
+				else if (kds->colmeta[j].attlen < 0)
+					clserv_log("(c%d,r%d) = vl_ofs: %u (attlen=%d)", j, i,
+							   *((cl_uint *)(values + sizeof(cl_uint) * i)),
+							   kds->colmeta[j].attlen);
 				else
 				{
-					int		attlen = kds->colmeta[i].attlen;
+					int		attlen = kds->colmeta[j].attlen;
 					char	buffer[160];
 					int		offset = 0;
 
 					values += attlen * i;
+					buffer[0] = '\0';
 					for (k=0; k < attlen && k < 32; k++)
 						offset += sprintf(buffer + offset, " %02x", values[k]);
-					clserv_log("(c%d,r%d) =%s%s", j, i, buffer,
-							   k < 32 ? "" : "...");
+					clserv_log("(c%d,r%d) =%s%s (attlen=%d)", j, i, buffer,
+							   k < 32 ? "" : "...", attlen);
 				}
 			}
 		}
@@ -3747,7 +3749,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	/* writing back the result buffer */
 	rc = clEnqueueReadBuffer(clgpa->kcmdq,
 							 clgpa->m_kds_dst,
-							 CL_TRUE,
+							 CL_FALSE,
 							 0,
 							 kds_work->length,
 							 gpreagg->kds_dst,
