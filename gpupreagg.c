@@ -2233,6 +2233,7 @@ gpupreagg_exec(CustomPlanState *node)
 	TupleTableSlot	   *slot = gpas->cps.ps.ps_ResultTupleSlot;
 	pgstrom_gpupreagg  *gpreagg;
 
+	ExecClearTuple(slot);
 	while (!gpas->curr_chunk ||
 		   !gpupreagg_next_tuple(gpas, slot))
 	{
@@ -2754,6 +2755,9 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 	if (clgpa->kern_sort)
 		free(clgpa->kern_sort);
 	free(clgpa);
+
+	/* dump kds */
+	clserv_dump_kds(gpreagg->kds_dst);
 
 	/* reply the result to backend side */
 	pgstrom_reply_message(&gpreagg->msg);
@@ -3759,8 +3763,6 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	gpreagg->msg.pfm.bytes_dma_recv += kds_work->length;
 	gpreagg->msg.pfm.num_dma_recv++;
 
-	clserv_dump_kds(gpreagg->kds_dst);
-
 	/*
 	 * Last, registers a callback to handle post gpupreagg process
 	 */
@@ -3985,7 +3987,7 @@ Datum
 pgstrom_sum_int8_accum(PG_FUNCTION_ARGS)
 {
 	ArrayType  *transarray;
-	int64		psum = PG_GETARG_INT64(2);
+	int64		psum = PG_GETARG_INT64(1);
 	int64	   *transdata;
 
 	if (AggCheckCallContext(fcinfo, NULL))
