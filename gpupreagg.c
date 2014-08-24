@@ -2355,7 +2355,33 @@ gpupreagg_exec(CustomPlanState *node)
 static void
 gpupreagg_end(CustomPlanState *node)
 {
-	GpuPreAggState *gpas = (GpuPreAggState *) node;
+	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
+	pgstrom_message	   *msg;
+
+	/* Clean up strom objects */
+	if (gpas->curr_chunk)
+	{
+		msg = &gpas->curr_chunk->msg;
+		if (msg->pfm.enabled)
+			pgstrom_perfmon_add(&gpas->pfm, &msg->pfm);
+		pgstrom_untrack_object(&msg->sobj);
+		pgstrom_put_message(msg);
+	}
+
+	while (gpas->num_running > 0)
+	{
+		msg = pgstrom_dequeue_message(gpas->mqueue);
+		if (!msg)
+			elog(ERROR, "message queue wait timeout");
+		pgstrom_untrack_object(&msg->sobj);
+        pgstrom_put_message(msg);
+		gpas->num_running--;
+	}
+
+	pgstrom_untrack_object((StromObject *)gpas->dprog_key);
+	pgstrom_put_devprog_key(gpas->dprog_key);
+	pgstrom_untrack_object(&gpas->mqueue->sobj);
+	pgstrom_close_queue(gpas->mqueue);
 
 	/* Clean up subtree */
 	ExecEndNode(outerPlanState(node));
@@ -2366,17 +2392,13 @@ gpupreagg_end(CustomPlanState *node)
 
 	/* Free the exprcontext */
     ExecFreeExprContext(&node->ps);
-
-	/* Clean up strom objects */
-	pgstrom_untrack_object((StromObject *)gpas->dprog_key);
-	pgstrom_put_devprog_key(gpas->dprog_key);
-	pgstrom_untrack_object(&gpas->mqueue->sobj);
-	pgstrom_close_queue(gpas->mqueue);
 }
 
 static void
 gpupreagg_rescan(CustomPlanState *node)
-{}
+{
+	elog(ERROR, "not implemented yet");
+}
 
 static void
 gpupreagg_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
@@ -2477,6 +2499,108 @@ pgstrom_init_gpupreagg(void)
  * NOTE: below is the code being run on OpenCL server context
  *
  * ---------------------------------------------------------------- */
+
+/*
+ * for debugging purpose, dump a part of kern_data_store contents
+ */
+#if 1
+static inline void
+clserv_dump_kds(kern_data_store *kds)
+{
+	int		limit = 20;	/* 20 lines in max */
+	int		i, j, k;
+
+	clserv_log("kds (%p) length=%u form=%s ncols=%u nitems=%u nrooms=%u",
+			   kds, kds->length, kds->column_form ? "column" : "row",
+			   kds->ncols, kds->nitems, kds->nrooms);
+	for (i=0; i < kds->ncols; i++)
+	{
+		clserv_log("col[%d] {attnotnull=%d attalign=%d attlen=%d %s=%d",
+				   i,
+				   kds->colmeta[i].attnotnull,
+				   kds->colmeta[i].attalign,
+				   kds->colmeta[i].attlen,
+				   !kds->colmeta[i].attvalid ? "attvalid" :
+				   (kds->column_form ? "cs_offset" : "rs_attnum"),
+				   kds->colmeta[i].attvalid);
+	}
+
+	if (!kds->column_form)
+	{
+		kern_row_store *krs = (kern_row_store *)
+			((char *)kds + STROMALIGN(offsetof(kern_data_store,
+											   colmeta[kds->ncols])));
+		for (i=0; i < kds->nitems && i < limit; i++)
+		{
+			rs_tuple   *tup = kern_rowstore_get_tuple(krs, i);
+
+			clserv_log("row%d {t_len=%u t_self=(%u,%u) t_tableOid=%u}",
+					   i, tup->htup.t_len,
+					   tup->htup.t_self.ip_blkid.bi_hi << 16 |
+					   tup->htup.t_self.ip_blkid.bi_lo,
+					   tup->htup.t_self.ip_posid,
+					   tup->htup.t_tableOid);
+		}
+	}
+	else
+	{
+		for (i=0; i < kds->nitems; i++)
+		{
+			for (j=0; j < kds->ncols; j++)
+			{
+				cl_uint		cs_offset = kds->colmeta[j].cs_offset;
+				char	   *values;
+
+				if (!cs_offset)
+				{
+					clserv_log("(c%d,r%d) = NULL", j, i);
+					continue;
+				}
+
+				if (!kds->colmeta[j].attnotnull)
+				{
+					char   *nullmap = (char *)kds + cs_offset;
+
+					if (att_isnull(j, nullmap))
+					{
+						clserv_log("(c%d,r%d) = null", j, i);
+						continue;
+					}
+					cs_offset += STROMALIGN(BITMAPLEN(kds->nrooms));
+				}
+				values = (char *)kds + cs_offset;
+				if (kds->colmeta[i].attlen == 1)
+					clserv_log("(c%d,r%d) = %d", j, i,
+							   *((cl_char *)(values + sizeof(char) * i)));
+				else if (kds->colmeta[i].attlen == 2)
+					clserv_log("(c%d,r%d) = %d", j, i,
+							   *((cl_short *)(values + sizeof(short) * i)));
+				else if (kds->colmeta[i].attlen == 4)
+					clserv_log("(c%d,r%d) = %d", j, i,
+							   *((cl_int *)(values + sizeof(int) * i)));
+				else if (kds->colmeta[i].attlen == 8)
+					clserv_log("(c%d,r%d) = %ld", j, i,
+							   *((cl_long *)(values + sizeof(long) * i)));
+				else if (kds->colmeta[i].attlen < 0)
+					clserv_log("(c%d,r%d) = vl_ofs: %u", j, i,
+							   *((cl_uint *)(values + sizeof(cl_uint) * i)));
+				else
+				{
+					int		attlen = kds->colmeta[i].attlen;
+					char	buffer[160];
+					int		offset = 0;
+
+					values += attlen * i;
+					for (k=0; k < attlen && k < 32; k++)
+						offset += sprintf(buffer + offset, " %02x", values[k]);
+					clserv_log("(c%d,r%d) =%s%s", j, i, buffer,
+							   k < 32 ? "" : "...");
+				}
+			}
+		}
+	}
+}
+#endif
 
 typedef struct
 {
@@ -3613,16 +3737,17 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	 *  gpupreagg_bitonic_local()
 	 *  gpupreagg_bitonic_merge()
 	 */
-	
+#if 0
 	/* kick, gpupreagg_reduction() */
 	rc = clserv_launch_preagg_reduction(clgpa, nvalids);
 	if (rc != CL_SUCCESS)
 		goto error;
+#endif
 
 	/* writing back the result buffer */
 	rc = clEnqueueReadBuffer(clgpa->kcmdq,
 							 clgpa->m_kds_dst,
-							 CL_FALSE,
+							 CL_TRUE,
 							 0,
 							 kds_work->length,
 							 gpreagg->kds_dst,
@@ -3638,6 +3763,8 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	clgpa->ev_index++;
 	gpreagg->msg.pfm.bytes_dma_recv += kds_work->length;
 	gpreagg->msg.pfm.num_dma_recv++;
+
+	clserv_dump_kds(gpreagg->kds_dst);
 
 	/*
 	 * Last, registers a callback to handle post gpupreagg process

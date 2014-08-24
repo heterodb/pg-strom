@@ -164,6 +164,7 @@ StromTagGetLabel(StromObject *sobject)
 		StromTagGetLabelEntry(TCacheColumnStore);
 		StromTagGetLabelEntry(TCacheToastBuf);
 		StromTagGetLabelEntry(GpuScan);
+		StromTagGetLabelEntry(GpuPreAgg);
 		StromTagGetLabelEntry(GpuHashJoin);
 		StromTagGetLabelEntry(HashJoinTable);
 		default:
@@ -651,6 +652,7 @@ extern Datum gpupreagg_corr_psum_x2(PG_FUNCTION_ARGS);
 extern Datum gpupreagg_corr_psum_y2(PG_FUNCTION_ARGS);
 extern Datum gpupreagg_corr_psum_xy(PG_FUNCTION_ARGS);
 
+extern Datum pgstrom_avg_int8_accum(PG_FUNCTION_ARGS);
 extern Datum pgstrom_sum_int8_accum(PG_FUNCTION_ARGS);
 extern Datum pgstrom_sum_int8_final(PG_FUNCTION_ARGS);
 extern Datum pgstrom_sum_float8_accum(PG_FUNCTION_ARGS);
