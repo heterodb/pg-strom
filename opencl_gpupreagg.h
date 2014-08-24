@@ -558,9 +558,9 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 	cl_int nrows		= kds_src->nitems;
 	cl_int errcode		= StromError_Success;
 
-	cl_int localID     = get_local_id(0);
-	cl_int globalID        = get_global_id(0);
-    cl_int localSize   = get_local_size(0);
+	cl_int localID		= get_local_id(0);
+	cl_int globalID		= get_global_id(0);
+    cl_int localSize	= get_local_size(0);
 
 	cl_int prtID		= globalID / localSize;	/* partition ID */
 	cl_int prtSize		= localSize;			/* partition Size */
@@ -579,17 +579,14 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 	{
 		cl_int isNewID = 0;
 
-		if(localID == 0)
-		{
-	        isNewID = 1;
-		}
-		else if(localID < localEntry)
+		if(localID < localEntry)
 		{
 			int rv = gpupreagg_keycomp(&errcode, kds_src, ktoast,
 									   rindex[globalID-1], rindex[globalID]);
 			isNewID = (rv != 0) ? 1 : 0;
 		}
 		groupID = arithmetic_stairlike_add(isNewID, local_memory, &ngroups);
+		ngroups += 1;
 	}
 
 	/* allocation of result buffer */
