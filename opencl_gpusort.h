@@ -288,6 +288,8 @@ run_gpusort_single_marge(
     if(localSize + localID < localEntry)
 		results[prtPos + localSize + localID] = localIdx[localSize + localID];
 
+	barrier(CLK_LOCAL_MEM_FENCE);
+
 	return;
 }
 
@@ -375,6 +377,8 @@ run_gpusort_single_sort(
 
     if(localSize + localID < localEntry)
 		results[prtPos + localSize + localID] = localIdx[localSize + localID];
+
+	barrier(CLK_LOCAL_MEM_FENCE);
 
 	return;
 }

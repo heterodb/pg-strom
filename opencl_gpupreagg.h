@@ -342,8 +342,7 @@ gpupreagg_data_store(__local pagg_datum *pdatum,
 					 __private cl_int *errcode,
 					 __global kern_data_store *kds,
 					 __global kern_toastbuf *ktoast,
-					 cl_uint colidx, cl_uint rowidx,
-					 __local void *local_workbuf)
+					 cl_uint colidx, cl_uint rowidx)
 {
 	kern_colmeta	cmeta;
 
@@ -478,19 +477,20 @@ gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 {
 	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	__global kern_row_map  *krowmap = KERN_GPUPREAGG_KROWMAP(kgpreagg);
-//	__global cl_int		   *rindex = KERN_GPUPREAGG_ROW_INDEX(kgpreagg);
 	cl_int					errcode = StromError_Success;
 	cl_uint					offset;
 	cl_uint					nitems;
 	size_t					kds_index;
 	__local cl_uint			base;
 
+#if 0
 	// Temporary code
 	// Initialize rindex when rindex is not marged.
 	__global cl_int	*rindex = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
 	if(get_global_id(0) < kds_in->nitems) {
 		rindex[get_global_id(0)] = get_global_id(0);
 	}
+#endif
 
 	if (krowmap->nvalids < 0)
 		kds_index = get_global_id(0);
@@ -544,6 +544,8 @@ out:
  * This function makes grouping at first, then run data reduction within
  * the same group. 
  */
+#define INVALID_GROUPID	-1
+
 __kernel void
 gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 					__global kern_data_store *kds_src,
@@ -555,7 +557,6 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 	__global cl_int			*rindex  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
 	__local pagg_datum *l_data
 		= (__local pagg_datum *)STROMALIGN(local_memory);
-	__local void	 *l_workbuf = (__local void *)&l_data[get_local_size(0)];
 	__global varlena *kparam_3 = kparam_get_value(kparams, 3);
 	cl_uint	pagg_natts = VARSIZE_EXHDR(kparam_3) / sizeof(cl_uint);
 	__global cl_uint *pagg_anums = (__global cl_uint *) VARDATA(kparam_3);
@@ -584,18 +585,20 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 	/* Generate group id of local work group. */
 	cl_int groupID;
 	cl_uint ngroups;
+	cl_int isNewID = 0;
 	{
-		cl_int isNewID = 0;
-
-		if(0 < localID  &&  localID < localEntry)
+		if (localID == 0) 
+		{
+			isNewID = 1;
+		}
+		else if (localID < localEntry)
 		{
 			int rv = gpupreagg_keycomp(&errcode, kds_src, ktoast,
 									   rindex[globalID-1], rindex[globalID]);
 			isNewID = (rv != 0) ? 1 : 0;
 		}
 		groupID = (arithmetic_stairlike_add(isNewID, local_memory, &ngroups) 
-				   + isNewID);
-		ngroups += 1;
+				   + isNewID - 1);
 	}
 
 	/* allocation of result buffer */
@@ -627,16 +630,18 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 		 */
 		if (pindex < pagg_natts && cindex != pagg_anums[pindex])
 		{
-			gpupreagg_data_move(&errcode, kds_src, kds_dst, ktoast,
-								cindex,
-								rindex[globalID],	/* source rowid */
-								base + groupID);	/* destination rowid */
+			if (isNewID) {
+				gpupreagg_data_move(&errcode, kds_src, kds_dst, ktoast,
+									cindex,
+									rindex[globalID],	/* source rowid */
+									base + groupID);	/* destination rowid */
+			}
 			continue;
 		}
 		pindex++;
 
 		/* Load aggregate item */
-		l_data[localID].group_id = -1;
+		l_data[localID].group_id = INVALID_GROUPID;
 		if(localID < localEntry) {
 			gpupreagg_data_load(&l_data[localID], &errcode, kds_src, ktoast,
 								cindex, rindex[globalID]);
@@ -652,20 +657,20 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 					// Marge this aggregate data to lower.
 					gpupreagg_aggcalc(&errcode, cindex,
 									  &l_data[dstID], &l_data[localID]);
-					l_data[localID].group_id = -1;
+					l_data[localID].group_id = INVALID_GROUPID;
 				}
 			}
 			barrier(CLK_LOCAL_MEM_FENCE);
 
 			if(localID % unitSize == unitSize/2  &&  localID < localEntry) {
-				if(l_data[localID].group_id != -1  &&
+				if(l_data[localID].group_id != INVALID_GROUPID  &&
 				   localID + unitSize/2 < localEntry) {
 					cl_int dstID = localID + unitSize/2;
 					if(l_data[localID].group_id == l_data[dstID].group_id) {
 						// Marge this aggregate data to upper.
 						gpupreagg_aggcalc(&errcode, cindex,
 										  &l_data[dstID], &l_data[localID]);
-						l_data[localID].group_id = -1;
+						l_data[localID].group_id = INVALID_GROUPID;
 					}
 				}
 			}
@@ -673,10 +678,11 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 		}
 
 		// write back aggregate data
-		if(l_data[localID].group_id != -1) {
+		if(l_data[localID].group_id != INVALID_GROUPID) {
 			gpupreagg_data_store(&l_data[localID], &errcode, kds_dst, ktoast,
-								 cindex, base + groupID, l_workbuf);
+								 cindex, base + groupID);
 		}
+		barrier(CLK_LOCAL_MEM_FENCE);
     }
 out:
 	kern_writeback_error_status(&kgpreagg->status, errcode, local_memory);

@@ -2927,7 +2927,7 @@ clserv_launch_bitonic_local(clstate_gpupreagg *clgpa,
 
 	rc = clSetKernelArg(kernel,
 						3,		/* __local void *local_memory */
-						sizeof(cl_uint) * lwork_sz,
+						2 * sizeof(cl_uint) * lwork_sz,
 						NULL);
 	if (rc != CL_SUCCESS)
 	{
@@ -3116,7 +3116,7 @@ clserv_launch_bitonic_merge(clstate_gpupreagg *clgpa,
 
 	rc = clSetKernelArg(kernel,
 						3,		/* __local void *local_memory */
-						sizeof(cl_uint) * lwork_sz,
+						2 * sizeof(cl_uint) * lwork_sz,
 						NULL);
 	if (rc != CL_SUCCESS)
 	{
@@ -3736,6 +3736,52 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	 *  gpupreagg_bitonic_local()
 	 *  gpupreagg_bitonic_merge()
 	 */
+	if(0 < nvalids)
+	{
+		const pgstrom_device_info *devinfo =
+			pgstrom_get_device_info(clgpa->dindex);
+		size_t max_lwork_sz    = devinfo->dev_max_work_item_sizes[0];
+		size_t max_lmem_sz     = devinfo->dev_local_mem_size;
+		size_t lmem_per_thread = 2 * sizeof(cl_int);
+		size_t nhalf           = (nvalids + 1) / 2;
+
+		size_t gwork_sz, lwork_sz, i, j, nsteps, launches;
+
+		lwork_sz = Min(nhalf, max_lwork_sz);
+		lwork_sz = Min(max_lwork_sz, max_lmem_sz/lmem_per_thread);
+		lwork_sz = 1 << get_next_log2(lwork_sz);
+
+		gwork_sz = ((nhalf + lwork_sz - 1) / lwork_sz) * lwork_sz;
+
+		nsteps   = get_next_log2(nhalf / lwork_sz);
+		launches = (nsteps + 1) * nsteps / 2 + nsteps + 1;
+		clgpa->kern_sort = calloc(launches, sizeof(cl_kernel));
+		if(clgpa->kern_sort == NULL) {
+			goto error;
+		}
+
+		/* Sort key in each local work group */
+        rc = clserv_launch_bitonic_local(clgpa, gwork_sz, lwork_sz);
+		if (rc != CL_SUCCESS)
+			goto error;
+
+		/* Sort key value between inter work group. */
+		for(i=lwork_sz*2; i<=nhalf; i*=2)
+		{
+			for(j=i; lwork_sz<j; j/=2)
+			{
+				bool reversing = (j == i) ? true : false;
+				rc = clserv_launch_bitonic_step(clgpa, reversing, j, 
+												gwork_sz, lwork_sz);
+				if (rc != CL_SUCCESS)
+					goto error;
+			}
+			rc = clserv_launch_bitonic_merge(clgpa, gwork_sz, lwork_sz);
+			if (rc != CL_SUCCESS)
+				goto error;
+		}
+	}
+
 	/* kick, gpupreagg_reduction() */
 	rc = clserv_launch_preagg_reduction(clgpa, nvalids);
 	if (rc != CL_SUCCESS)
