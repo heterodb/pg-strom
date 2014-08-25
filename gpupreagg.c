@@ -2957,12 +2957,13 @@ clserv_launch_bitonic_local(clstate_gpupreagg *clgpa,
 
 static cl_int
 clserv_launch_bitonic_step(clstate_gpupreagg *clgpa,
-						   bool reversing, cl_uint unitsz,
-						   size_t gwork_sz, size_t lwork_sz)
+						   bool reversing, cl_uint unitsz, size_t work_sz)
 {
 	cl_kernel	kernel;
 	cl_int		bitonic_unitsz;
 	cl_int		rc;
+	size_t		gwork_sz;
+	size_t		lwork_sz;
 
 	/*
 	 * __kernel void
@@ -2981,6 +2982,18 @@ clserv_launch_bitonic_step(clstate_gpupreagg *clgpa,
 		return rc;
 	}
 	clgpa->kern_sort[clgpa->kern_sort_nums++] = kernel;
+
+	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
+									   clgpa->kern_pagg,
+									   clgpa->dindex,
+									   false,
+									   work_sz,
+									   sizeof(int)))
+	{
+		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
+		return StromError_OpenCLInternal;
+	}
+	clserv_log("STEP : lwork=%zd, gwork=%zd, work=%zd, reversing=%d, unitsz=%d", lwork_sz, gwork_sz, work_sz, reversing, unitsz);
 
 	rc = clSetKernelArg(kernel,
 						0,		/* __kern_gpupreagg *kgpreagg */
@@ -3176,7 +3189,7 @@ clserv_launch_preagg_reduction(clstate_gpupreagg *clgpa, cl_uint nvalids)
 									   clgpa->dindex,
 									   true,
 									   nvalids,
-									   sizeof(pagg_datum) + sizeof(cl_uint)))
+									   sizeof(pagg_datum)))
 	{
 		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
 		return StromError_OpenCLInternal;
@@ -3767,13 +3780,17 @@ clserv_process_gpupreagg(pgstrom_message *message)
 			goto error;
 
 		/* Sort key value between inter work group. */
-		for(i=lwork_sz*2; i<=2*nhalf; i*=2)
+		for(i=lwork_sz*2; i<2*nhalf; i*=2)
 		{
 			for(j=i; lwork_sz<j; j/=2)
 			{
-				bool reversing = (j == i) ? true : false;
-				rc = clserv_launch_bitonic_step(clgpa, reversing, 2*j, 
-												gwork_sz, lwork_sz);
+				cl_uint unitsz    = 2 * j;
+				bool	reversing = (j == i) ? true : false;
+				size_t	work_sz   = (((nvalids + unitsz - 1) / unitsz) 
+									 * unitsz / 2);
+
+				rc = clserv_launch_bitonic_step(clgpa, reversing, unitsz, 
+												work_sz);
 				if (rc != CL_SUCCESS)
 					goto error;
 			}
