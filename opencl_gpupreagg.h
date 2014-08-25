@@ -796,24 +796,24 @@ gpupreagg_bitonic_step(__global kern_gpupreagg *kgpreagg,
 
 	cl_int	nrows	  = kds->nitems;
 	cl_bool reversing = (bitonic_unitsz < 0 ? true : false);
-	size_t	unitsz    = (bitonic_unitsz < 0
-						 ? 1U << -bitonic_unitsz
-						 : 1U << bitonic_unitsz);
+	size_t	unitsz    = (bitonic_unitsz < 0 
+						 ? -bitonic_unitsz 
+						 : bitonic_unitsz);
 	cl_int	errcode	  = StromError_Success;
 
-	cl_int	threadID		= get_global_id(0);
+	cl_int	globalID		= get_global_id(0);
 	cl_int	halfUnitSize	= unitsz / 2;
 	cl_int	unitMask		= unitsz - 1;
 
 	cl_int	idx0;
 	cl_int	idx1;
 
-	idx0 = (threadID / halfUnitSize) * unitsz + threadID % halfUnitSize;
+	idx0 = (globalID / halfUnitSize) * unitsz + globalID % halfUnitSize;
 	idx1 = (reversing
 			? ((idx0 & ~unitMask) | (~idx0 & unitMask))
 			: (idx0 + halfUnitSize));
 	if(nrows <= idx1)
-		return;
+		goto out;
 
 	cl_int	pos0	= rindex[idx0];
 	cl_int	pos1	= rindex[idx1];
@@ -826,6 +826,7 @@ gpupreagg_bitonic_step(__global kern_gpupreagg *kgpreagg,
 		rindex[idx1] = pos0;
 	}
 
+out:
 	kern_writeback_error_status(&kgpreagg->status, errcode, local_memory);
 }
 

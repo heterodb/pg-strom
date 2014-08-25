@@ -3753,8 +3753,9 @@ clserv_process_gpupreagg(pgstrom_message *message)
 
 		gwork_sz = ((nhalf + lwork_sz - 1) / lwork_sz) * lwork_sz;
 
-		nsteps   = get_next_log2(nhalf / lwork_sz);
+		nsteps   = get_next_log2(nhalf / lwork_sz) + 1;
 		launches = (nsteps + 1) * nsteps / 2 + nsteps + 1;
+
 		clgpa->kern_sort = calloc(launches, sizeof(cl_kernel));
 		if(clgpa->kern_sort == NULL) {
 			goto error;
@@ -3766,12 +3767,12 @@ clserv_process_gpupreagg(pgstrom_message *message)
 			goto error;
 
 		/* Sort key value between inter work group. */
-		for(i=lwork_sz*2; i<=nhalf; i*=2)
+		for(i=lwork_sz*2; i<=2*nhalf; i*=2)
 		{
 			for(j=i; lwork_sz<j; j/=2)
 			{
 				bool reversing = (j == i) ? true : false;
-				rc = clserv_launch_bitonic_step(clgpa, reversing, j, 
+				rc = clserv_launch_bitonic_step(clgpa, reversing, 2*j, 
 												gwork_sz, lwork_sz);
 				if (rc != CL_SUCCESS)
 					goto error;
