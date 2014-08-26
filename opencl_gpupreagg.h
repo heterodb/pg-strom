@@ -600,7 +600,7 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 			base = atomic_add(&kds_dst->nitems, ngroups);
 		barrier(CLK_LOCAL_MEM_FENCE);
 
-		if (kds_dst->nrooms <= base + ngroups) {
+		if (kds_dst->nrooms < base + ngroups) {
 			errcode = StromError_DataStoreNoSpace;
 			goto out;
 		}

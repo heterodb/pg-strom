@@ -2718,23 +2718,30 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 		gpreagg->msg.pfm.time_kern_exec += (tv_end - tv_start) / 1000;
 
 		/*
-		 * DMA recv time - last event should be DMA receive request
+		 * DMA recv time - last two event should be DMA receive request
 		 */
-		rc = clGetEventProfilingInfo(clgpa->events[clgpa->ev_index - 1],
-									 CL_PROFILING_COMMAND_START,
-									 sizeof(cl_ulong),
-									 &tv_start,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
+		tv_start = ~0UL;
+		tv_end = 0;
+		for (i=2; i > 0; i--)
+		{
+			rc = clGetEventProfilingInfo(clgpa->events[clgpa->ev_index - i],
+										 CL_PROFILING_COMMAND_START,
+										 sizeof(cl_ulong),
+										 &tv_start,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			tv_start = Min(tv_start, temp);
 
-		rc = clGetEventProfilingInfo(clgpa->events[clgpa->ev_index - 1],
-									 CL_PROFILING_COMMAND_END,
-									 sizeof(cl_ulong),
-									 &tv_end,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
+			rc = clGetEventProfilingInfo(clgpa->events[clgpa->ev_index - i],
+										 CL_PROFILING_COMMAND_END,
+										 sizeof(cl_ulong),
+										 &tv_end,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			tv_end = Max(tv_end, temp);
+		}
 		gpreagg->msg.pfm.time_dma_recv += (tv_end - tv_start) / 1000;
 
 	skip_perfmon:
@@ -3830,6 +3837,28 @@ clserv_process_gpupreagg(pgstrom_message *message)
 							 gpreagg->kds_dst,
 							 1,
 							 &clgpa->events[clgpa->ev_index - 1],
+							 &clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueReadBuffer: %s",
+				   opencl_strerror(rc));
+		goto error;
+	}
+	clgpa->ev_index++;
+	gpreagg->msg.pfm.bytes_dma_recv += kds_work->length;
+	gpreagg->msg.pfm.num_dma_recv++;
+
+	/* also, this sizeof(cl_int) bytes for result status */
+	offset = KERN_GPUPREAGG_DMARECV_OFFSET(&gpreagg->kern);
+	length = KERN_GPUPREAGG_DMARECV_LENGTH(&gpreagg->kern);
+	rc = clEnqueueReadBuffer(clgpa->kcmdq,
+							 clgpa->m_gpreagg,
+							 CL_FALSE,
+							 offset,
+							 length,
+							 &gpreagg->kern.status
+							 1,
+							 &clgpa->events[clgpa->ev_index - 2],
 							 &clgpa->events[clgpa->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
