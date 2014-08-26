@@ -411,8 +411,8 @@ gpupreagg_data_move(__private cl_int *errcode,
 	}
 
 	cs_offset = kds_src->colmeta[colidx].cs_offset;
-	nullmap = (__global cl_uint *)
-		((__global char *)kds_dst + cs_offset + (rowidx_dst >> 5));
+	nullmap = ((__global cl_uint *)((__global char *)kds_dst + cs_offset)
+			   + (rowidx_dst >> 5));
 	nullmask = (1U << (rowidx_dst & 0x1f));
 
 	src_datum = kern_get_datum(kds_src, ktoast, colidx, rowidx_src);
@@ -483,14 +483,6 @@ gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 	size_t					kds_index;
 	__local cl_uint			base;
 
-#if 0
-	// Temporary code
-	// Initialize rindex when rindex is not marged.
-	__global cl_int	*rindex = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
-	if(get_global_id(0) < kds_in->nitems) {
-		rindex[get_global_id(0)] = get_global_id(0);
-	}
-#endif
 
 	if (krowmap->nvalids < 0)
 		kds_index = get_global_id(0);

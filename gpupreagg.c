@@ -2517,6 +2517,23 @@ clserv_dump_kds(kern_data_store *kds)
 				   !kds->colmeta[i].attvalid ? "attvalid" :
 				   (kds->column_form ? "cs_offset" : "rs_attnum"),
 				   kds->colmeta[i].attvalid);
+
+		if (!kds->colmeta[i].attnotnull) {
+			char *msg = malloc(128 + kds->nitems * 2);
+			if (msg) {
+				char *nullmap = (char *)kds + kds->colmeta[i].cs_offset;
+				sprintf(msg, "  bitmap[%d] :", kds->nitems);
+				for(j=0; j<kds->nitems; j++) {
+					char buf[4];
+					sprintf(buf, (j%10)?"%d,":" %d,", att_isnull(j, nullmap));
+					strcat(msg, buf);
+				}
+				clserv_log(msg);
+				free(msg);
+			} else {
+				clserv_log("Memory exhaust.");
+			}
+		}
 	}
 
 	if (!kds->column_form)
@@ -2993,7 +3010,6 @@ clserv_launch_bitonic_step(clstate_gpupreagg *clgpa,
 		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
 		return StromError_OpenCLInternal;
 	}
-	clserv_log("STEP : lwork=%zd, gwork=%zd, work=%zd, reversing=%d, unitsz=%d", lwork_sz, gwork_sz, work_sz, reversing, unitsz);
 
 	rc = clSetKernelArg(kernel,
 						0,		/* __kern_gpupreagg *kgpreagg */
