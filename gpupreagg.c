@@ -2572,7 +2572,7 @@ clserv_dump_kds(kern_data_store *kds)
 				{
 					char   *nullmap = (char *)kds + cs_offset;
 
-					if (att_isnull(j, nullmap))
+					if (att_isnull(i, nullmap))
 					{
 						clserv_log("(c%d,r%d) = null", j, i);
 						continue;
