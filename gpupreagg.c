@@ -2528,7 +2528,7 @@ clserv_dump_kds(kern_data_store *kds)
 					sprintf(buf, (j%10)?"%d,":" %d,", att_isnull(j, nullmap));
 					strcat(msg, buf);
 				}
-				clserv_log(msg);
+				clserv_log("%s", msg);
 				free(msg);
 			} else {
 				clserv_log("Memory exhaust.");
@@ -3856,7 +3856,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 							 CL_FALSE,
 							 offset,
 							 length,
-							 &gpreagg->kern.status
+							 &gpreagg->kern.status,
 							 1,
 							 &clgpa->events[clgpa->ev_index - 2],
 							 &clgpa->events[clgpa->ev_index]);
