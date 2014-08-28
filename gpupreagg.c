@@ -4174,24 +4174,40 @@ check_float8_valid(float8 value, bool inf_is_valid, bool zero_is_valid)
 Datum
 pgstrom_sum_float8_accum(PG_FUNCTION_ARGS)
 {
-	ArrayType  *transarray;
+	ArrayType  *transarray = PG_GETARG_ARRAYTYPE_P(0);
 	int32		nrows = PG_GETARG_INT32(1);
 	float8		psum = PG_GETARG_FLOAT8(2);
-	float8	   *transdata;
-	float8		newsum;
+	float8	   *transvalues;
+	float8		newN;
+	float8		newSum;
+
+	transvalues = check_float8_array(transarray, 3);
+	newN = transvalues[0] + (float8) nrows;
+	newSum = transvalues[1] + psum;
+	check_float8_valid(newSum, isinf(transvalues[1]) || isinf(psum), true);
 
 	if (AggCheckCallContext(fcinfo, NULL))
-		transarray = PG_GETARG_ARRAYTYPE_P(0);
+	{
+		transvalues[0] = newN;
+		transvalues[1] = newSum;
+		transvalues[2] = 0.0;	/* dummy */
+
+		PG_RETURN_ARRAYTYPE_P(transarray);
+	}
 	else
-		transarray = PG_GETARG_ARRAYTYPE_P_COPY(0);
+	{
+		Datum		transdatums[3];
+		ArrayType  *result;
 
-	transdata = check_float8_array(transarray, 3);
-	transdata[0] += (float8) nrows;
-	newsum = transdata[1] + psum;
-	check_float8_valid(newsum, isinf(transdata[1]) || isinf(psum), true);
-	transdata[1] = newsum;
+		transdatums[0] = Float8GetDatumFast(newN);
+		transdatums[1] = Float8GetDatumFast(newSum);
+		transdatums[2] = Float8GetDatumFast(0.0);
 
-    PG_RETURN_ARRAYTYPE_P(transarray);	
+		result = construct_array(transdatums, 3,
+								 FLOAT8OID,
+								 sizeof(float8), FLOAT8PASSBYVAL, 'd');
+		PG_RETURN_ARRAYTYPE_P(result);
+	}
 }
 PG_FUNCTION_INFO_V1(pgstrom_float8_accum);
 
