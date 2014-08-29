@@ -1222,7 +1222,8 @@ gpuhashjoin_codegen(PlannerInfo *root,
 					 pgstrom_codegen_type_declarations(context),
 					 gpuhashjoin_codegen_type_declarations(context),
 					 pgstrom_codegen_func_declarations(context),
-					 pgstrom_codegen_param_declarations(context, 2),
+					 pgstrom_codegen_param_declarations(context,
+														context->param_refs),
 					 body.data);
 
 	/* include opencl_hashjoin.h */
