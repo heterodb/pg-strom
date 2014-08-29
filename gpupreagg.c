@@ -1791,10 +1791,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 				   agg_tlist, agg_quals,
 				   &startup_cost, &total_cost,
 				   &startup_sort, &total_sort);
-#if 0	/* force GpuPreAgg for development purpose */
 	if (agg->plan.total_cost < total_cost)
 		return;
-#endif
 
 	/*
 	 * construction of kernel code, according to the above query
@@ -2527,7 +2525,7 @@ pgstrom_init_gpupreagg(void)
 /*
  * for debugging purpose, dump a part of kern_data_store contents
  */
-#if 1
+#if 0
 static inline void
 clserv_dump_kds(kern_data_store *kds)
 {
@@ -2811,7 +2809,7 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 	free(clgpa);
 
 	/* dump kds */
-	clserv_dump_kds(gpreagg->kds_dst);
+	// clserv_dump_kds(gpreagg->kds_dst);
 
 	/* reply the result to backend side */
 	pgstrom_reply_message(&gpreagg->msg);
