@@ -288,7 +288,7 @@ CREATE AGGREGATE pgstrom.avg(int4, float8)
   sfunc = pgstrom.sum_float8_accum,
   stype = float8[],
   finalfunc = pg_catalog.float8_avg,
-  initcond = '{0,0,0}'
+  initcond = "{0,0,0}"
 );
 
 CREATE FUNCTION pgstrom.variance_float8_accum(float8[], int4, float8, float8)

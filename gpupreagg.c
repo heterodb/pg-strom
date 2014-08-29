@@ -1467,7 +1467,8 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 					&body,
 					"  pg_%s_vstore(kds_out,ktoast,errcode,\n"
 					"               %u,rowidx_out,\n"
-					"               pgfn_%s(temp_float8x, temp_float8x));\n",
+					"               pgfn_%s(errcode, temp_float8x,\n"
+					"                                temp_float8x));\n",
 					dtype->type_name,
 					tle->resno - 1,
 					dfunc->func_name);
