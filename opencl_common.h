@@ -241,6 +241,14 @@ typedef struct {
  * +-----------------+
  */
 typedef struct {
+
+	
+	cl_uint			nblocks;
+	cl_uint			ltid[FLEXIBLE_ARRAY_MEMBER];
+} kern_row_store;
+
+
+typedef struct {
 	cl_uint			length;	/* length of this kernel row_store */
 	cl_uint			ncols;	/* number of columns in the source relation */
 	cl_uint			nrows;	/* number of rows in this store */
@@ -292,39 +300,60 @@ kern_rowstore_get_tuple(__global kern_row_store *krs, cl_uint krs_index)
  * kern_data_store
  *
  * It stores row- and column-oriented values in the kernel space.
- * +-----------------+
- * | length          |
- * +-----------------+
- * | ncols (=M)      |
- * +-----------------+
- * | nitems (=N)     |
- * +-----------------+
- * | colmeta[0]      |
- * | colmeta[1]   o-------+ colmeta[j].cs_offset points offset of column- or
- * |    :            |    | row-array in this data-store
- * | colmeta[M-1]    |    |
- * +-----------------+    | (char *)(kcs) + colmeta[j].ds_offset is address
- * | column array    |    | of the column array.
- * | for column-0    |    |
- * +-----------------+ <--+
- * | +---------------|
- * | | Nulls map     | If colmeta[j].atthasnull is TRUE, a bitmap shall be
- * | |               | put in front of the column array. Its length is aligned
- * | +---------------| to STROMALIGN_LEN
- * | | array of      |
- * | | column-1      |
- * | |               |
- * +-+---------------+
- * | row-store for   | If colmeta[j].attisrow is TRUE, the region pointed by
- * | column-2 and    | colmeta[j].ds_offset is row-store, instead of column-
- * | column-X, ...   | array. Its layout is kern_row_store above.
- * +-+---------------+
- * |      :          |
- * |      :          |
- * +-----------------+
- * | column array    |
- * | for column-(M-1)|
- * +-----------------+
+ *
+ * +----------------------------------+
+ * | length                           |
+ * +----------------------------------+
+ * | ncols                            |
+ * +----------------------------------+
+ * | nitems                           |
+ * +----------------------------------+
+ * | nrooms                           |
+ * +----------------------------------+
+ * | column_form                      |
+ * +----------------------------------+
+ * | __padding__[7]                   |
+ * +----------------------------------+
+ * | colmeta[0]                       |
+ * | colmeta[1]                       |
+ * |   :                              |
+ * | colmeta[M-1]                     |
+ * +----------------+-----------------+
+ * | <row-format>   | <column-format> |
+ * |   kern_ltids   +-----------------+
+ * | +--------------+ column-data of  |
+ * | | nblocks      | the 1st column  |
+ * | +--------------+ +---------------+
+ * | | ltids[0]     | | null bitmap   |
+ * | | ltids[1]     | +---------------+
+ * | |    :         | | values array  |
+ * | | ltids[N-1]   | | of the 1st    |
+ * +-+--------------+ | column        |
+ * |      :         +-+---------------+ <--- cs_offset points starting
+ * |  alignment     | column-data of  |      offset of the column-data
+ * |      :         | the 2nd column  |
+ * +----------------+ +---------------+
+ * | blocks[0]      | | null bitmap   |
+ * | PageHeaderData | +---------------+
+ * |      :         | | values array  |
+ * | pd_linep[]     | | of the 2nd    |
+ * |      :         | | column        |
+ * +----------------+-+---------------+
+ * | blocks[1]      |       :         |
+ * | PageHeaderData |       :         |
+ * |      :         |       :         |
+ * | pd_linep[]     |       :         |
+ * |      :         |       :         |
+ * +----------------+-----------------+
+ * |      :         | column-data of  |
+ * |      :         | the last column |
+ * +----------------+ +---------------+
+ * | blocks[1]      | | null bitmap   |
+ * | PageHeaderData | +---------------+
+ * |      :         | | values array  |
+ * | pd_linep[]     | | of the last   |
+ * |      :         | | column        |
+ * +----------------+-+---------------+
  */
 typedef struct {
 	/* true, if column never has NULL (thus, no nullmap required) */
@@ -350,53 +379,54 @@ typedef struct {
 	};
 } kern_colmeta;
 
+/*
+ * ltid (=local tuple id) points a particular tuple on the buffer of
+ * row-format. Its higher 16-bits is index to the block, lower 16-bits
+ * is the line pointer of the tuple within a block.
+ */
 typedef struct {
-	cl_uint			length;	/* length of this kernel column-store */
+	cl_uint			nblocks;
+	cl_uint			ltids[FLEXIBLE_ARRAY_MEMBER];
+} kern_ltids;
+
+typedef struct {
+	cl_uint			length;	/* length of this kernel data store */
 	cl_uint			ncols;	/* number of columns in this store */
 	cl_uint			nitems; /* number of rows in this store */
 	cl_uint			nrooms;	/* capacity of rows in this store */
 	cl_char			column_form; /* if true, data store is column-format */
-	cl_char			__padding__[3];
+	cl_char			__padding__[7];
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_data_store;
+
+#define KERN_DATA_STORE_ROWBLOCKS(kds)					\
+	(__global PageHeader)								\
+	((__global cl_char *)(kds) +						\
+	 ((STROMALIGN(offsetof(kern_data_store,				\
+						   colmeta[(kds)->ncols])) +	\
+	   STROMALIGN(offsetof(kern_ltids,					\
+						   ltids[(kds)->nitems])) +		\
+	   BLCKSZ - 1) & ~(BLCKSZ - 1)))
+
 
 /*
  * kern_toastbuf
  *
- * The kernel toast buffer has number of columns and per-column directory
- * in its header region. The per-column directory points the starting offset
- * from the head of kern_toastbuf.
- *
- * +--------------+
- * | magic        | magic number; a value that should not be a length of
- * +--------------+ other buffer object (like, row- or column-store)
- * | ncols        | number of columns in this buffer
- * +--------------+
- * | coldir[0]    |
- * | coldir[1]  o-------+ In case when a varlena reference (offset=120) of
- * |   :          |     | column-1, it has to reference coldir[1] to get
- * | coldir[N-1]  |     | offset of per-column varlena buffer.
- * +--------------+     | Then, it adds per-datum offset to reach the
- * |   :          |     | address of variable.
- * |   :          |     |
- * +--------------+  <--+
- * |   :          |  )
- * +--------------+  +120
- * |'Hello!'      |
- * +--------------+
- * |   :          |
- * |   :          |
- * +--------------+
+ * A varlena datum is represented as an offset from the head of toast-buffer,
+ * and data contents are actually stored within this toast-buffer.
  */
-#define TOASTBUF_MAGIC		0xffffffff	/* should not be length of buffer */
+
+#define TOASTBUF_UNITSZ		(32 << 20)	/* 32MB for each toastbuf chunks */
 
 typedef struct {
-	cl_uint			length;	/* = TOASTBUF_MAGIC, if coldir should be added */
-	union {
-		cl_uint		ncols;	/* number of coldir entries, if exists */
-		cl_uint		usage;	/* usage counter of this toastbuf */
-	};
-	cl_uint			coldir[FLEXIBLE_ARRAY_MEMBER];
+#ifndef OPENCL_DEVICE_CODE
+	dlist_node		dnode;	/* host only; used to chain multiple toastbuf */
+#else
+	cl_char			__padding__[2 * HOSTPTRLEN];
+#endif
+	cl_uint			length;	/* length of toast-buffer */
+	cl_uint			usage;	/* usage of toast-buffer */
+	cl_char			data[FLEXIBLE_ARRAY_MEMBER];
 } kern_toastbuf;
 
 /*

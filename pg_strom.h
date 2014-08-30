@@ -134,6 +134,7 @@ typedef enum {
 	StromTag_TCacheRowStore,
 	StromTag_TCacheColumnStore,
 	StromTag_TCacheToastBuf,
+	StromTag_DataStore,
 	StromTag_GpuScan,
 	StromTag_GpuHashJoin,
 	StromTag_HashJoinTable,
@@ -163,6 +164,7 @@ StromTagGetLabel(StromObject *sobject)
 		StromTagGetLabelEntry(TCacheRowStore);
 		StromTagGetLabelEntry(TCacheColumnStore);
 		StromTagGetLabelEntry(TCacheToastBuf);
+		StromTagGetLabelEntry(DataStore);
 		StromTagGetLabelEntry(GpuScan);
 		StromTagGetLabelEntry(GpuPreAgg);
 		StromTagGetLabelEntry(GpuHashJoin);
@@ -443,6 +445,28 @@ typedef struct {
 	BlockNumber		tcs_blkno_max;
 	tcache_row_store *trs_curr;
 } tcache_scandesc;
+
+/*
+ * pgstrom_data_store - a data structure with row- or column- format
+ * to exchange a data chunk between the host and opencl server.
+ */
+typedef struct {
+	StromObject			sobj;
+	slock_t				lock;
+	int					refcnt;
+	kern_data_store	   *kds;	/* reference to kern_data_store */
+	dlist_head			ktoast;	/* list of kern_toastbuf */
+	/*
+	 * MEMO: Fields below are valid only when data store is row-format.
+	 * It pins multiple buffer cache pages until pgstrom_data_store is
+	 * released, so we have to track these pages to release later.
+	 * Also note that the page may be a segment we acquired from shmem.c
+	 * if local buffer (because stored on the private memory area).
+	 */
+	int					num_blocks;
+	int					max_blocks;
+	Page				blocks[FLEXIBLE_ARRAY_MEMBER];
+} pgstrom_data_store;
 
 /*
  * pgstrom_bulk_slot

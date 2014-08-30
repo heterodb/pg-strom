@@ -397,11 +397,11 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 
 		Assert(SIZEOF_VOID_P == 8 || SIZEOF_VOID_P == 4);
 		snprintf(build_opts, sizeof(build_opts),
-				 "-DOPENCL_DEVICE_CODE -DHOSTPTRLEN=%u"
+				 "-DOPENCL_DEVICE_CODE -DHOSTPTRLEN=%u -DBLCKSZ=%u"
 #ifdef PGSTROM_DEBUG
 				 " -Werror"
 #endif
-				 , SIZEOF_VOID_P);
+				 , SIZEOF_VOID_P, BLCKSZ);
 
 		rc = clBuildProgram(program,
 							opencl_num_devices,

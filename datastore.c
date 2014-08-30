@@ -631,91 +631,6 @@ pgstrom_put_toast_buffer(tcache_toastbuf *tbuf)
         pgstrom_shmem_free(tbuf);
 }
 
-#if 0
-/*
- * pgstrom_create_column_store
- *
- * creates a column-store on shared memory segment, but not linked to
- * a particular tcache structure.
- */
-tcache_column_store *
-pgstrom_create_column_store_with_projection(kern_projection *kproj,
-											cl_uint nitems,
-											bool with_syscols)
-{
-	tcache_column_store	*tcs;
-	Size		length;
-	Size		offset;
-	int			i;
-
-	length = MAXALIGN(offsetof(tcache_column_store, cdata[kproj->ncols]));
-	if (with_syscols)
-	{
-		length += MAXALIGN(sizeof(ItemPointerData) * nitems);
-		length += MAXALIGN(sizeof(HeapTupleHeaderData) * nitems);
-	}
-
-	for (i=0; i < kproj->ncols; i++)
-	{
-		if (!kproj->origins[i].colmeta.attnotnull)
-			length += MAXALIGN((nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
-		length += MAXALIGN((kproj->origins[i].colmeta.attlen > 0
-							? kproj->origins[i].colmeta.attlen
-							: sizeof(cl_uint)) * nitems);
-	}
-	tcs = pgstrom_shmem_alloc(length);
-	if (!tcs)
-		return NULL;	/* out of shared memory! */
-	offset = MAXALIGN(offsetof(tcache_column_store, cdata[kproj->ncols]));
-
-	memset(tcs, 0, offset);
-	tcs->sobj.stag = StromTag_TCacheColumnStore;
-	SpinLockInit(&tcs->refcnt_lock);
-	tcs->refcnt = 1;
-	tcs->ncols = kproj->ncols;
-	if (with_syscols)
-	{
-		/* array of item-pointers */
-		tcs->ctids = (ItemPointerData *)((char *)tcs + offset);
-		offset += MAXALIGN(sizeof(ItemPointerData) * nitems);
-
-		/* array of other system columns */
-		tcs->theads = (HeapTupleHeaderData *)((char *)tcs + offset);
-		offset += MAXALIGN(sizeof(HeapTupleHeaderData) * nitems);
-	}
-
-	for (i=0; i < kproj->ncols; i++)
-	{
-		if (kproj->origins[i].colmeta.attnotnull)
-			tcs->cdata[i].isnull = NULL;
-		else
-		{
-			tcs->cdata[i].isnull = (uint8 *)((char *)tcs + offset);
-			offset += MAXALIGN((nitems + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
-		}
-		tcs->cdata[i].values = ((char *)tcs + offset);
-		if (kproj->origins[i].colmeta.attlen > 0)
-		{
-			offset += MAXALIGN(kproj->origins[i].colmeta.attlen * nitems);
-			tcs->cdata[i].toast = NULL;
-		}
-		else
-		{
-			offset += MAXALIGN(sizeof(cl_uint) * nitems);
-			tcs->cdata[i].toast = pgstrom_create_toast_buffer(0);
-			if (!tcs->cdata[i].toast)
-			{
-				pgstrom_put_column_store(tcs);
-				return NULL;
-			}
-		}
-	}
-	Assert(offset == length);
-
-	return tcs;
-}
-#endif
-
 /*
  * pgstrom_get_column_store
  *
@@ -856,3 +771,51 @@ pgstrom_rcstore_fetch_slot(TupleTableSlot *slot,
 		elog(ERROR, "Bug? neither row- nor column-store");
 	return slot;
 }
+
+
+void
+pgstrom_release_data_store(pgstrom_data_store *pds)
+{}
+
+pgstrom_data_store *
+pgstrom_create_data_store_row(TupleDesc tupdesc, Size ds_size)
+{
+	pgstrom_data_store *pds;
+	kern_data_store	   *kds;
+	Size		required;
+	Size		allocation;
+	int			max_blocks;
+
+	/* round-up required size of data-store into BLCKSZ alignment */
+	ds_size = TYPEALIGN(BLCKSZ, ds_size);
+	max_blocks = ds_size / BLCKSZ;
+
+	/* determine the size of pgstrom_data_store */
+	required = offsetof(pgstrom_data_store, blocks[max_blocks]);
+	pds = pgstrom_shmem_alloc(required);
+	if (!pds)
+		elog(ERROR, "out of shared memory");
+	pds->sobj.stag = StromTag_DataStore;
+	SpinLockInit(&pds->lock);
+	pds->refcnt = 1;
+	pds->kds = ;
+	dlist_init(&pds->ktoast);
+	pds->num_blocks = 0;
+	pds->max_blocks = max_blocks;
+
+
+
+}
+
+pgstrom_data_store *
+pgstrom_create_data_store_column(TupleDesc tupdesc, Size ds_size,
+								 Bitmapset *attr_refs)
+{}
+
+pgstrom_data_store *
+pgstrom_get_data_store(pgstrom_data_store *pds)
+{}
+
+void
+pgstrom_put_data_store(pgstrom_data_store *pds)
+{}
