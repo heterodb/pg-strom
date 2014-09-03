@@ -211,8 +211,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {INT4OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PCOV_X,
-	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_X2,
+	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
 	   ALTFUNC_EXPR_PCOV_XY}},
 	{ "covar_pop", 2, {FLOAT8OID, FLOAT8OID},
@@ -220,8 +220,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {INT4OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PCOV_X,
-	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_X2,
+	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
 	   ALTFUNC_EXPR_PCOV_XY}},
 	{ "covar_samp", 2, {FLOAT8OID, FLOAT8OID},
@@ -229,8 +229,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {INT4OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PCOV_X,
-	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_X2,
+	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
 	   ALTFUNC_EXPR_PCOV_XY}},
 };
@@ -632,9 +632,7 @@ make_altfunc_pcov_expr(Aggref *aggref, const char *func_name)
 		filter = (Expr *) makeBoolConst(true, false);
 	else
 		filter = copyObject(aggref->aggfilter);
-	return make_altfunc_expr(func_name, list_make3(filter,
-												   linitial(aggref->args),
-												   lsecond(aggref->args)));
+	return make_altfunc_expr(func_name, list_make3(filter, tle_1->expr, tle_2->expr));
 }
 
 /*
@@ -1507,7 +1505,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 					appendStringInfo(
 						&body,
 						" ||\n"
-						"      EVAL(%s)",
+						"      !EVAL(%s)",
 						pgstrom_codegen_expression((Node *) filter, context));
 				appendStringInfo(
 					&body,
@@ -1521,7 +1519,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 					appendStringInfo(
 						&body,
 						"  else\n"
-						"    temp_float8y = temp_float8x;\n");
+						"    temp_float8x = temp_float8y;\n");
 				else if (strcmp(func_name, "pcov_x2") == 0)
 					appendStringInfo(
 						&body,
@@ -1534,7 +1532,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 						"  else\n"
 						"    temp_float8x.value = temp_float8y.value *\n"
 						"                         temp_float8y.value;\n");
-				else if (strcmp(func_name, "pcov_y2") == 0)
+				else if (strcmp(func_name, "pcov_xy") == 0)
 					appendStringInfo(
 						&body,
 						"  else\n"
