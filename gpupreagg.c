@@ -1385,7 +1385,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 
 			appendStringInfo(&body,
 							 "  /* projection for resource %u */\n",
-							 tle->resno);
+							 tle->resno - 1);
 			if (namespace_oid != get_func_namespace(func->funcid))
 				elog(ERROR, "Bug? unexpected FuncExpr: %s",
 					 nodeToString(func));
@@ -1407,7 +1407,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 					{
 						if (lc != list_head(func->args))
 							appendStringInfo(&body,
-											 " ||\n"
+											 " &&\n"
 											 "      ");
 						appendStringInfo(&body, "EVAL(%s)",
 										 pgstrom_codegen_expression(lfirst(lc),
