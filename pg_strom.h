@@ -726,6 +726,7 @@ typedef struct {
 	List	   *func_defs;	/* list of devfunc_info in use */
 	List	   *used_params;/* list of Const/Param in use */
 	List	   *used_vars;	/* list of Var in use */
+	Bitmapset  *param_refs;	/* referenced parameters */
 	const char *row_index;	/* label to reference row-index, if exist */
 	int			extra_flags;/* external libraries to be included */
 } codegen_context;
@@ -740,7 +741,7 @@ extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern char *pgstrom_codegen_type_declarations(codegen_context *context);
 extern char *pgstrom_codegen_func_declarations(codegen_context *context);
 extern char *pgstrom_codegen_param_declarations(codegen_context *context,
-												int num_skips);
+												Bitmapset *param_refs);
 extern char *pgstrom_codegen_var_declarations(codegen_context *context);
 extern bool pgstrom_codegen_available_expression(Expr *expr);
 extern void pgstrom_init_codegen(void);

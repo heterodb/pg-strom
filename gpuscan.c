@@ -377,7 +377,8 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 	appendStringInfo(&str, "%s\n", pgstrom_codegen_type_declarations(context));
 	appendStringInfo(&str, "%s\n", pgstrom_codegen_func_declarations(context));
 	appendStringInfo(&decl, "%s%s\n",
-					 pgstrom_codegen_param_declarations(context, 2),
+					 pgstrom_codegen_param_declarations(context,
+														context->param_refs),
 					 pgstrom_codegen_var_declarations(context));
 
 	/* qualifier definition with row-store */

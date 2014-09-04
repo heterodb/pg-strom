@@ -1091,6 +1091,8 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			if (equal(node, lfirst(cell)))
 			{
 				appendStringInfo(&context->str, "KPARAM_%u", index);
+				context->param_refs =
+					bms_add_member(context->param_refs, index);
 				return true;
 			}
 			index++;
@@ -1098,8 +1100,9 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		context->used_params = lappend(context->used_params,
 									   copyObject(node));
 		index = list_length(context->used_params) - 1;
-		appendStringInfo(&context->str, "KPARAM_%u",
-						 list_length(context->used_params) - 1);
+		appendStringInfo(&context->str, "KPARAM_%u", index);
+		context->param_refs =
+			bms_add_member(context->param_refs, index);
 		return true;
 	}
 	else if (IsA(node, Param))
@@ -1117,6 +1120,8 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			if (equal(node, lfirst(cell)))
 			{
 				appendStringInfo(&context->str, "KPARAM_%u", index);
+				context->param_refs =
+					bms_add_member(context->param_refs, index);
 				return true;
 			}
 			index++;
@@ -1125,6 +1130,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 									   copyObject(node));
 		index = list_length(context->used_params) - 1;
 		appendStringInfo(&context->str, "KPARAM_%u", index);
+		context->param_refs = bms_add_member(context->param_refs, index);
 		return true;
 	}
 	else if (IsA(node, Var))
@@ -1396,6 +1402,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	walker_context.func_defs = list_copy(context->func_defs);
 	walker_context.used_params = list_copy(context->used_params);
 	walker_context.used_vars = list_copy(context->used_vars);
+	walker_context.param_refs = bms_copy(context->param_refs);
 	walker_context.extra_flags = context->extra_flags;
 
 	if (IsA(expr, List))
@@ -1412,6 +1419,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	context->func_defs = walker_context.func_defs;
 	context->used_params = walker_context.used_params;
 	context->used_vars = walker_context.used_vars;
+	context->param_refs = walker_context.param_refs;
 	context->extra_flags = walker_context.extra_flags;
 
 	return walker_context.str.data;
@@ -1476,7 +1484,8 @@ pgstrom_codegen_func_declarations(codegen_context *context)
  * pgstrom_codegen_param_declarations
  */
 char *
-pgstrom_codegen_param_declarations(codegen_context *context, int num_skips)
+pgstrom_codegen_param_declarations(codegen_context *context,
+								   Bitmapset *param_refs)
 {
 	StringInfoData	str;
 	ListCell	   *cell;
@@ -1486,35 +1495,34 @@ pgstrom_codegen_param_declarations(codegen_context *context, int num_skips)
 	initStringInfo(&str);
 	foreach (cell, context->used_params)
 	{
-		if (index >= num_skips)
+		if (!bms_is_member(index++, param_refs))
+			continue;
+
+		if (IsA(lfirst(cell), Const))
 		{
-			if (IsA(lfirst(cell), Const))
-			{
-				Const  *con = lfirst(cell);
+			Const  *con = lfirst(cell);
 
-				dtype = pgstrom_devtype_lookup(con->consttype);
-				Assert(dtype != NULL);
+			dtype = pgstrom_devtype_lookup(con->consttype);
+			Assert(dtype != NULL);
 
-				appendStringInfo(
-					&str,
-					"  pg_%s_t KPARAM_%u = pg_%s_param(kparams,errcode,%d);\n",
-					dtype->type_name, index, dtype->type_name, index);
-			}
-			else if (IsA(lfirst(cell), Param))
-			{
-				Param  *param = lfirst(cell);
-
-				dtype = pgstrom_devtype_lookup(param->paramtype);
-				Assert(dtype != NULL);
-				appendStringInfo(
-					&str,
-					"  pg_%s_t KPARAM_%u = pg_%s_param(kparams,errcode,%d);\n",
-					dtype->type_name, index, dtype->type_name, index);
-			}
-			else
-				elog(ERROR, "unexpected node: %s", nodeToString(lfirst(cell)));
+			appendStringInfo(
+				&str,
+				"  pg_%s_t KPARAM_%u = pg_%s_param(kparams,errcode,%d);\n",
+				dtype->type_name, index, dtype->type_name, index);
 		}
-		index++;
+		else if (IsA(lfirst(cell), Param))
+		{
+			Param  *param = lfirst(cell);
+
+			dtype = pgstrom_devtype_lookup(param->paramtype);
+			Assert(dtype != NULL);
+			appendStringInfo(
+				&str,
+				"  pg_%s_t KPARAM_%u = pg_%s_param(kparams,errcode,%d);\n",
+				dtype->type_name, index, dtype->type_name, index);
+		}
+		else
+			elog(ERROR, "unexpected node: %s", nodeToString(lfirst(cell)));
 	}
 	return str.data;
 }

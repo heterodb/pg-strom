@@ -1076,11 +1076,13 @@ gpupreagg_codegen_keycomp(GpuPreAggPlan *gpreagg, codegen_context *context)
 	StringInfoData	str;
 	StringInfoData	decl;
 	StringInfoData	body;
+	Bitmapset  *param_refs_saved = context->param_refs;
 	int			i;
 
 	initStringInfo(&str);
 	initStringInfo(&decl);
     initStringInfo(&body);
+	context->param_refs = NULL;
 
 	for (i=0; i < gpreagg->numCols; i++)
 	{
@@ -1100,7 +1102,8 @@ gpupreagg_codegen_keycomp(GpuPreAggPlan *gpreagg, codegen_context *context)
 		/* find a datatype for comparison */
 		dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
 		if (!OidIsValid(dtype->type_cmpfunc))
-			elog(ERROR, "Bug? type (%u) has no comparison function", var->vartype);
+			elog(ERROR, "Bug? type (%u) has no comparison function",
+				 var->vartype);
 		dfunc = pgstrom_devfunc_lookup_and_track(dtype->type_cmpfunc, context);
 
 		/* variable declarations */
@@ -1131,6 +1134,18 @@ gpupreagg_codegen_keycomp(GpuPreAggPlan *gpreagg, codegen_context *context)
 			resno, resno,
 			resno, resno);
 	}
+	/* add parameters, if referenced */
+	if (context->param_refs)
+	{
+		char	   *params_decl
+			= pgstrom_codegen_param_declarations(context,
+												 context->param_refs);
+		appendStringInfo(&decl, "%s", params_decl);
+		pfree(params_decl);
+		bms_free(context->param_refs);
+	}
+	context->param_refs = param_refs_saved;
+
 	/* make a whole key-compare function */
 	appendStringInfo(&str,
 					 "static cl_int\n"
@@ -1140,7 +1155,7 @@ gpupreagg_codegen_keycomp(GpuPreAggPlan *gpreagg, codegen_context *context)
 					 "                  size_t x_index,\n"
 					 "                  size_t y_index)\n"
 					 "{\n"
-					 "  %s\n"
+					 "%s"	/* variable/params declarations */
 					 "  pg_int4_t comp;\n"
 					 "\n"
 					 "%s"
@@ -1336,6 +1351,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 	ListCell	   *cell;
 	List		   *pagg_atts = NIL;
 	Bitmapset	   *attr_refs = NULL;
+	Bitmapset	   *param_refs_saved = context->param_refs;
 	devtype_info   *dtype;
 	devfunc_info   *dfunc;
 	Plan		   *outer_plan;
@@ -1351,6 +1367,8 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 	initStringInfo(&str);
 	initStringInfo(&decl);
 	initStringInfo(&body);
+	context->param_refs = NULL;
+
 	foreach (cell, gpreagg->cplan.plan.targetlist)
 	{
 		TargetEntry	   *tle = lfirst(cell);
@@ -1581,6 +1599,19 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 			dtype->type_name,
 			anum - 1);
 	}
+	/* declaration of parameter reference */
+	if (context->param_refs)
+	{
+		char	   *params_decl
+			= pgstrom_codegen_param_declarations(context,
+												 context->param_refs);
+		appendStringInfo(&decl, "%s", params_decl);
+		pfree(params_decl);
+		bms_free(context->param_refs);
+	}
+	context->param_refs = param_refs_saved;
+
+	/* declaration of other temp variables */
 	if (use_temp_int4)
 		appendStringInfo(&decl, "  pg_int4_t temp_int4;\n");
 	if (use_temp_int8)
@@ -1632,6 +1663,7 @@ gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 	ListCell	   *cell;
 
 	memset(context, 0, sizeof(codegen_context));
+
 	/*
 	 * System constants for GpuPreAgg
 	 * KPARAM_0 is header portion of kern_data_store of source stream;
@@ -1681,9 +1713,8 @@ gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 							 dtype->type_name, dtype->type_base);
 		}
 	}
-	appendStringInfo(&str, "\n%s%s",
-					 pgstrom_codegen_func_declarations(context),
-					 pgstrom_codegen_param_declarations(context, 4));
+	appendStringInfo(&str, "\n%s",
+					 pgstrom_codegen_func_declarations(context));
 	appendStringInfo(&str,
 					 "%s\n"		/* gpupreagg_keycomp() */
 					 "%s\n"		/* gpupreagg_aggcalc() */
