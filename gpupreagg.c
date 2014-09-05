@@ -1881,7 +1881,7 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 	gpas->scan_slot = ExecAllocTableSlot(&estate->es_tupleTable);
 	ExecSetSlotDescriptor(gpas->scan_slot, gpas->scan_desc);
 	gpas->outer_done = false;
-	gpas->outer_bulk = false;
+	gpas->outer_bulk = pgstrom_plan_can_multi_exec(outerPlanState(gpas));
 	gpas->outer_overflow = NULL;
 
 	/*
