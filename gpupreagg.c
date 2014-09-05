@@ -1983,6 +1983,7 @@ pgstrom_release_gpupreagg(pgstrom_message *message)
 	/* release result kern_data_store, if any */
 	if (gpupreagg->kds_dst)
 		pgstrom_shmem_free(gpupreagg->kds_dst);
+	pgstrom_shmem_free(gpupreagg);
 }
 
 static pgstrom_gpupreagg *
