@@ -398,6 +398,12 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 		startup_cost    = dummy.startup_cost;
 		run_cost        = dummy.total_cost - dummy.startup_cost;
 	}
+	else
+	{
+		/* to avoid compiler warning */
+		*p_startup_sort = 0.0;
+		*p_total_sort   = 0.0;
+	}
 
 	/*
 	 * Update estimated aggregate cost.
@@ -1403,7 +1409,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 
 			appendStringInfo(&body,
 							 "  /* projection for resource %u */\n",
-							 tle->resno);
+							 tle->resno - 1);
 			if (namespace_oid != get_func_namespace(func->funcid))
 				elog(ERROR, "Bug? unexpected FuncExpr: %s",
 					 nodeToString(func));
@@ -1425,7 +1431,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 					{
 						if (lc != list_head(func->args))
 							appendStringInfo(&body,
-											 " ||\n"
+											 " &&\n"
 											 "      ");
 						appendStringInfo(&body, "EVAL(%s)",
 										 pgstrom_codegen_expression(lfirst(lc),
@@ -1471,6 +1477,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 			else if (strcmp(func_name, "psum_x2") == 0)
 			{
 				Assert(exprType(linitial(func->args)) == FLOAT8OID);
+				clause = linitial(func->args);
 				use_temp_float8x = true;
 				dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL, context);
 				dtype = pgstrom_devtype_lookup_and_track(FLOAT8OID, context);
@@ -1881,7 +1888,7 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 	gpas->scan_slot = ExecAllocTableSlot(&estate->es_tupleTable);
 	ExecSetSlotDescriptor(gpas->scan_slot, gpas->scan_desc);
 	gpas->outer_done = false;
-	gpas->outer_bulk = false;
+	gpas->outer_bulk = pgstrom_plan_can_multi_exec(outerPlanState(gpas));
 	gpas->outer_overflow = NULL;
 
 	/*
@@ -1983,6 +1990,7 @@ pgstrom_release_gpupreagg(pgstrom_message *message)
 	/* release result kern_data_store, if any */
 	if (gpupreagg->kds_dst)
 		pgstrom_shmem_free(gpupreagg->kds_dst);
+	pgstrom_shmem_free(gpupreagg);
 }
 
 static pgstrom_gpupreagg *

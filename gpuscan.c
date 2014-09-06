@@ -391,7 +391,7 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 		"                  __global kern_toastbuf *ktoast,\n"
 		"                  size_t kds_index)\n"
 		"{\n"
-		"  %s"
+		"%s"
 		"  return %s;\n"
 		"}\n", decl.data, expr_code);
 	return str.data;
@@ -2066,6 +2066,8 @@ clserv_respond_gpuscan(cl_event event, cl_int ev_status, void *private)
 		cl_int		i, n;
 
 		n = clgss->ev_index - 2;
+		dma_send_begin = (cl_ulong)(~0);
+		dma_send_end = (cl_ulong) 0;
 		for (i=0; i < n; i++)
 		{
 			rc = clGetEventProfilingInfo(clgss->events[i],

@@ -1495,8 +1495,8 @@ pgstrom_codegen_param_declarations(codegen_context *context,
 	initStringInfo(&str);
 	foreach (cell, context->used_params)
 	{
-		if (!bms_is_member(index++, param_refs))
-			continue;
+		if (!bms_is_member(index, param_refs))
+			goto lnext;
 
 		if (IsA(lfirst(cell), Const))
 		{
@@ -1523,6 +1523,8 @@ pgstrom_codegen_param_declarations(codegen_context *context,
 		}
 		else
 			elog(ERROR, "unexpected node: %s", nodeToString(lfirst(cell)));
+	lnext:
+		index++;
 	}
 	return str.data;
 }

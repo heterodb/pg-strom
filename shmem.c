@@ -366,7 +366,8 @@ pgstrom_alloc_slab(const char *filename, int lineno, int index)
 		int			count;
 
 		/* allocate a block */
-		sblock = pgstrom_shmem_alloc_alap(sizeof(shmem_slab_head), &length);
+		sblock = __pgstrom_shmem_alloc_alap(filename, lineno,
+											sizeof(shmem_slab_head), &length);
 		if (!sblock)
 		{
 			SpinLockRelease(&pgstrom_shmem_head->slab_locks[index]);
