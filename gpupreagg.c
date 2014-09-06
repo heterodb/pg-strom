@@ -398,6 +398,12 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 		startup_cost    = dummy.startup_cost;
 		run_cost        = dummy.total_cost - dummy.startup_cost;
 	}
+	else
+	{
+		/* to avoid compiler warning */
+		*p_startup_sort = 0.0;
+		*p_total_sort   = 0.0;
+	}
 
 	/*
 	 * Update estimated aggregate cost.
@@ -1471,6 +1477,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 			else if (strcmp(func_name, "psum_x2") == 0)
 			{
 				Assert(exprType(linitial(func->args)) == FLOAT8OID);
+				clause = linitial(func->args);
 				use_temp_float8x = true;
 				dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL, context);
 				dtype = pgstrom_devtype_lookup_and_track(FLOAT8OID, context);
