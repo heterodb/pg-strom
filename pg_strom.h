@@ -453,7 +453,7 @@ typedef struct {
 typedef struct {
 	StromObject			sobj;
 	slock_t				lock;
-	int					refcnt;
+	volatile int		refcnt;
 	kern_data_store	   *kds;	/* reference to kern_data_store */
 	dlist_head			ktoast;	/* list of kern_toastbuf */
 	/*
@@ -467,6 +467,9 @@ typedef struct {
 	int					max_blocks;
 	Page				blocks[FLEXIBLE_ARRAY_MEMBER];
 } pgstrom_data_store;
+
+/* 8MB for each buffer */
+#define TOASTBUF_UNITSZ		((8 << 20) - SHMEM_ALLOC_COST)
 
 /*
  * pgstrom_bulk_slot
@@ -603,8 +606,6 @@ extern bytea *kparam_make_ktoast_head(TupleDesc tupdesc,
 									  cl_uint nsyscols);
 extern void kparam_refresh_ktoast_head(kern_parambuf *kparams,
 									   StromObject *rcstore);
-extern bytea *kparam_make_materialization(List *varnode_list,
-										  List *source_relids);
 extern List *pgstrom_make_bulk_attmap(List *targetlist, Index varno);
 
 extern bool pgstrom_plan_can_multi_exec(const PlanState *ps);
@@ -623,6 +624,26 @@ extern TupleTableSlot *pgstrom_rcstore_fetch_slot(TupleTableSlot *slot,
 												  StromObject *rcstore,
 												  int rowidx,
 												  bool use_copy);
+
+extern void
+pgstrom_release_data_store(pgstrom_data_store *pds);
+extern pgstrom_data_store *
+pgstrom_create_data_store_row(TupleDesc tupdesc,
+							  Size ds_size,
+							  double ntup_per_page);
+extern pgstrom_data_store *
+pgstrom_create_data_store_column(TupleDesc tupdesc,
+								 Size ds_size,
+								 Bitmapset *attr_refs);
+extern pgstrom_data_store *pgstrom_get_data_store(pgstrom_data_store *pds);
+extern void pgstrom_put_data_store(pgstrom_data_store *pds);
+extern int pgstrom_data_store_insert_block(pgstrom_data_store *pds,
+										   Relation rel,
+										   BlockNumber blknum,
+										   Snapshot snapshot);
+extern bool pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
+											TupleTableSlot *slot);
+
 /*
  * restrack.c
  */

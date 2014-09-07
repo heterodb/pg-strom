@@ -14,10 +14,14 @@
 #include "postgres.h"
 #include "access/relscan.h"
 #include "access/sysattr.h"
+#include "miscadmin.h"
 #include "port.h"
+#include "storage/bufmgr.h"
+#include "storage/predicate.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/tqual.h"
 #include "pg_strom.h"
 
 /*
@@ -220,6 +224,7 @@ pgstrom_plan_can_multi_exec(const PlanState *ps)
 	return false;
 }
 
+#if 0
 /*
  * kparam_make_kds_head
  *
@@ -379,92 +384,7 @@ kparam_refresh_ktoast_head(kern_parambuf *kparams,
 	if (!has_toast)
 		kparams->poffset[1] = 0;	/* mark it as null */
 }
-
-/*
- * kparam_make_materialization
- *
- * It makes materialization info according to the supplied varnode_list
- * and source_relids. As literal, 'varnode_list' is a list of Var-node
- * being ordered according to the materialized relation.
- * The 'source_relids' is a list of relid (varno of Var-node) must be
- * there, if Var-node wants to reference.
- * Usually, the first relation is scanned/outer one, and other relations
- * are inner ones (it may be more than 2).
- */
-static int
-sort_materialization_colmeta(const void *a, const void *b)
-{
-	const materialize_colmeta *cola = a;
-	const materialize_colmeta *colb = b;
-
-	if (cola->relsrc < colb->relsrc)
-		return -1;
-	if (cola->relsrc > colb->relsrc)
-		return  1;
-	if (cola->attsrc < colb->attsrc)
-		return -1;
-	if (cola->attsrc > colb->attsrc)
-		return  1;
-	return 0;
-}
-
-bytea *
-kparam_make_materialization(List *varnode_list, List *source_relids)
-{
-	bytea	   *result;
-	pgstrom_materialize *pmat;
-	ListCell   *lc1, *lc2;
-	int			i, ncols = list_length(varnode_list);
-	Size		length;
-
-	length = VARHDRSZ + offsetof(pgstrom_materialize, colmeta[ncols]);
-	result = palloc0(length);
-	SET_VARSIZE(result, length);
-	pmat = (pgstrom_materialize *) VARDATA(result);
-	pmat->nrels = list_length(source_relids);
-	pmat->ncols = ncols;
-
-	i = 0;
-	foreach (lc1, varnode_list)
-	{
-		Var	   *var = lfirst(lc1);
-		int16	typlen;
-        bool	typbyval;
-        char	typalign;
-		Index	relsrc = 0;
-
-		Assert(IsA(var, Var));
-		foreach (lc2, source_relids)
-		{
-			if (var->varno == lfirst_int(lc2))
-				break;
-			relsrc++;
-		}
-		if (!lc2)
-			elog(ERROR, "bug? referenced column (%u) is not source relations",
-				 var->varno);
-
-		get_typlenbyvalalign(var->vartype,
-							 &typlen,
-							 &typbyval,
-							 &typalign);
-		pmat->colmeta[i].attnotnull = false;
-		pmat->colmeta[i].attalign = typealign_get_width(typalign);
-		pmat->colmeta[i].attlen = typlen;
-		pmat->colmeta[i].relsrc = relsrc;
-		pmat->colmeta[i].attsrc = var->varattno;
-		pmat->colmeta[i].attdst = i;
-		i++;
-	}
-	/*
-	 * reorder the colmeta according to relsrc and attsrc for quick
-	 * extraction. it enables to avoid to walk on a heap-tuple several
-	 * times.
-	 */
-	qsort(pmat->colmeta, ncols, sizeof(pmat->colmeta[0]),
-		  sort_materialization_colmeta);
-	return result;
-}
+#endif
 
 /*
  * pgstrom_get_row_store
@@ -775,47 +695,452 @@ pgstrom_rcstore_fetch_slot(TupleTableSlot *slot,
 
 void
 pgstrom_release_data_store(pgstrom_data_store *pds)
-{}
+{
+	int		i;
+
+	for (i=0; i < pds->num_blocks; i++)
+	{
+		Page	block = pds->blocks[i];
+		Buffer	buffer;
+
+		if (block >= BufferBlocks &&
+			block <  BufferBlocks + NBuffers * (Size) BLCKSZ)
+		{
+			buffer = ((uintptr_t)block -
+					  (uintptr_t)BufferBlocks) / BLCKSZ + 1;
+			Assert(BufferIsValid(buffer));
+			ReleaseBuffer(buffer);
+		}
+		else
+		{
+			pgstrom_shmem_free(block);
+		}
+	}
+	pgstrom_shmem_free(pds->kds);
+	pgstrom_shmem_free(pds);
+}
 
 pgstrom_data_store *
-pgstrom_create_data_store_row(TupleDesc tupdesc, Size ds_size)
+pgstrom_create_data_store_row(TupleDesc tupdesc, Size ds_size,
+							  double ntup_per_page)
 {
 	pgstrom_data_store *pds;
 	kern_data_store	   *kds;
+	Size		baselen;
 	Size		required;
 	Size		allocation;
-	int			max_blocks;
+	cl_uint		max_blocks;
+	cl_uint		nrooms;
+	int			i;
 
 	/* round-up required size of data-store into BLCKSZ alignment */
 	ds_size = TYPEALIGN(BLCKSZ, ds_size);
 	max_blocks = ds_size / BLCKSZ;
+	nrooms = ntup_per_page * (double)max_blocks * 1.1;
 
-	/* determine the size of pgstrom_data_store */
+	baselen = STROMALIGN(offsetof(kern_data_store,
+								  colmeta[tupdesc->natts]));
+	required = baselen + sizeof(kern_rowitem) * nrooms;
+	kds = pgstrom_shmem_alloc_alap(required, &allocation);
+	if (!kds)
+		elog(ERROR, "out of shared memory");
+	/* update exact number of rooms available */
+	nrooms = (allocation - baselen) / sizeof(kern_rowitem);
+
+	/* initialize kern_data_store fields */
+	kds->length = ds_size;
+	kds->ncols = tupdesc->natts;
+	kds->nitems = 0;
+	kds->nrooms = nrooms;
+	kds->nblocks = 0;
+	kds->is_column = false;
+	for (i=0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute	attr = tupdesc->attrs[i];
+
+		kds->colmeta[i].attnotnull = attr->attnotnull;
+		kds->colmeta[i].attalign = typealign_get_width(attr->attalign);
+		kds->colmeta[i].attlen = attr->attlen;
+		kds->colmeta[i].rs_attnum = attr->attnum;
+	}
+	Assert((uintptr_t)(KERN_DATA_STORE_ROWITEMS(kds) + nrooms) <=
+		   (uintptr_t)kds + allocation);
+
+	/* allocation of pgstrom_data_store */
 	required = offsetof(pgstrom_data_store, blocks[max_blocks]);
 	pds = pgstrom_shmem_alloc(required);
 	if (!pds)
+	{
+		pgstrom_shmem_free(kds);
 		elog(ERROR, "out of shared memory");
+	}
 	pds->sobj.stag = StromTag_DataStore;
 	SpinLockInit(&pds->lock);
 	pds->refcnt = 1;
-	pds->kds = ;
+	pds->kds = kds;
 	dlist_init(&pds->ktoast);
 	pds->num_blocks = 0;
 	pds->max_blocks = max_blocks;
 
-
-
+	return pds;
 }
 
 pgstrom_data_store *
 pgstrom_create_data_store_column(TupleDesc tupdesc, Size ds_size,
 								 Bitmapset *attr_refs)
-{}
+{
+	pgstrom_data_store *pds;
+	kern_data_store	   *kds;
+	Size		required;
+	Size		cs_offset;
+	cl_uint		unitsz = 0;
+	cl_uint		nrooms;
+	int			i, j;
+
+	/* calculate how many rows can be stored in a data store.
+	 * note that unitsz here means memory consumption per
+	 * (STROMALIGN_LEN * BITS_PER_BYTE) rows to simplify the
+	 * calculation because of alignment and null-bitmap
+	 */
+	cs_offset = STROMALIGN(offsetof(kern_data_store,
+									colmeta[tupdesc->natts]));
+	for (i=0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute	attr = tupdesc->attrs[i];
+
+		j = i - FirstLowInvalidHeapAttributeNumber;
+		if (!bms_is_member(j, attr_refs))
+			continue;
+		if (!attr->attnotnull)
+			unitsz += STROMALIGN_LEN;
+		if (attr->attlen > 0)
+			unitsz += attr->attlen * (STROMALIGN_LEN * BITS_PER_BYTE);
+		else
+			unitsz += sizeof(cl_uint) * (STROMALIGN_LEN * BITS_PER_BYTE);
+	}
+	/* note that unitsz is size per STROMALIGN_LEN * BITS_PER_BYTE rows! */
+	nrooms = ((ds_size - cs_offset) / unitsz);
+	required = cs_offset + nrooms * unitsz;
+	nrooms *= STROMALIGN_LEN * BITS_PER_BYTE;
+	Assert(required <= ds_size);
+
+	kds = pgstrom_shmem_alloc(required);
+	if (!kds)
+		elog(ERROR, "out of shared memory");
+	kds->length = required;
+	kds->ncols = tupdesc->natts;
+	kds->nitems = 0;
+	kds->nrooms = nrooms;
+	kds->nblocks = 0;	/* column format never uses blocks */
+	kds->is_column = true;
+	for (i=0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute	attr = tupdesc->attrs[i];
+
+		j = i - FirstLowInvalidHeapAttributeNumber;
+		kds->colmeta[i].attnotnull = attr->attnotnull;
+		kds->colmeta[i].attalign = typealign_get_width(attr->attalign);
+		kds->colmeta[i].attlen = attr->attlen;
+		if (!bms_is_member(j, attr_refs))
+			kds->colmeta[i].attvalid = 0;
+		else
+		{
+			kds->colmeta[i].cs_offset = cs_offset;
+			if (!attr->attnotnull)
+				cs_offset += STROMALIGN(nrooms / BITS_PER_BYTE);
+			if (attr->attlen > 0)
+				cs_offset += STROMALIGN(attr->attlen * nrooms);
+			else
+				cs_offset += STROMALIGN(sizeof(cl_uint) * nrooms);
+		}
+	}
+	Assert(cs_offset == required);
+
+	/* allocation of pgstrom_data_store also */
+	pds = pgstrom_shmem_alloc(sizeof(pgstrom_data_store));
+	if (!pds)
+	{
+		pgstrom_shmem_free(kds);
+		elog(ERROR, "out of shared memory");
+	}
+	pds->sobj.stag = StromTag_DataStore;
+	SpinLockInit(&pds->lock);
+	pds->refcnt = 1;
+	pds->kds = kds;
+	dlist_init(&pds->ktoast);
+	pds->num_blocks = 0;
+	pds->max_blocks = 0;
+
+	return pds;
+}
 
 pgstrom_data_store *
 pgstrom_get_data_store(pgstrom_data_store *pds)
-{}
+{
+	SpinLockAcquire(&pds->lock);
+	Assert(pds->refcnt > 0);
+	pds->refcnt++;
+	SpinLockRelease(&pds->lock);
+
+	return pds;
+}
 
 void
 pgstrom_put_data_store(pgstrom_data_store *pds)
-{}
+{
+	bool	do_release = false;
+
+	SpinLockAcquire(&pds->lock);
+    Assert(pds->refcnt > 0);
+	if (--pds->refcnt == 0)
+		do_release = true;
+	SpinLockRelease(&pds->lock);
+
+	/*
+	 * NOTE: Unlike other object types, pgstrom_data_store must be released
+	 * by the backend process, not opencl server, because it touches some
+	 * internal state of PostgreSQL core.
+	 */
+	if (do_release)
+	{
+		Assert(!pgstrom_i_am_clserv);
+		pgstrom_release_data_store(pds);
+	}
+}
+
+int
+pgstrom_data_store_insert_block(pgstrom_data_store *pds,
+								Relation rel, BlockNumber blknum,
+								Snapshot snapshot)
+{
+	kern_data_store	*kds = pds->kds;
+	kern_rowitem *kri;
+	Buffer		buffer;
+	Page		page;
+	int			lines;
+	int			ntup;
+	OffsetNumber lineoff;
+	ItemId		lpp;
+	bool		all_visible;
+
+	Assert(!pds->kds->is_column);
+
+	/* no more blocks available */
+	if (pds->num_blocks == pds->max_blocks)
+		return -1;
+
+	CHECK_FOR_INTERRUPTS();
+
+	buffer = ReadBuffer(rel, blknum);
+
+	/* Just like heapgetpage(), however, jobs we focus on is OLAP workload,
+	 * so it's uncertain whether we should vacuum the page here.
+	 */
+	heap_page_prune_opt(rel, buffer);
+
+	/* we check tuple's visibility under the shared lock */
+	LockBuffer(buffer, BUFFER_LOCK_SHARE);
+	page = (Page) BufferGetPage(buffer);
+	lines = PageGetMaxOffsetNumber(page);
+	ntup = 0;
+
+	/* check whether we have enough slot for rowitems. if not, it shall
+	 * be expanded to be able to host all the potential tuples.
+	 */
+	if (kds->nitems + lines > kds->nrooms)
+	{
+		kern_data_store *kds_new;
+		Size		required;
+		cl_uint		nrooms = kds->nrooms;
+
+		required = STROMALIGN(offsetof(kern_data_store,
+									   colmeta[kds->ncols]));
+		while (kds->nitems + lines > nrooms)
+			nrooms += nrooms;
+		required = STROMALIGN(sizeof(kern_rowitem) * nrooms);
+
+		kds_new = pgstrom_shmem_alloc(required);
+		if (!kds_new)
+		{
+			UnlockReleaseBuffer(buffer);
+			elog(ERROR, "out of shared memory");
+		}
+		memcpy(kds_new, kds,
+			   STROMALIGN(offsetof(kern_data_store,
+								   colmeta[kds->ncols])) +
+			   sizeof(kern_rowitem) * kds->nitems);
+		pgstrom_shmem_free(kds);
+		kds_new->nrooms = nrooms;
+		kds = pds->kds = kds_new;
+	}
+
+	/*
+	 * Logic is almost same as heapgetpage() doing.
+	 */
+	all_visible = PageIsAllVisible(page) && !snapshot->takenDuringRecovery;
+
+	/* TODO: make SerializationNeededForRead() an external function
+	 * on the core side. It kills necessity of setting up HeapTupleData
+	 * when all_visible and non-serialized transaction.
+	 */
+	kri = KERN_DATA_STORE_ROWITEMS(kds) + kds->nitems;
+	for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(page, lineoff);
+		 lineoff <= lines;
+		 lineoff++, lpp++)
+	{
+		HeapTupleData	tup;
+		bool			valid;
+
+		if (!ItemIdIsNormal(lpp))
+			continue;
+
+		tup.t_tableOid = RelationGetRelid(rel);
+		tup.t_data = (HeapTupleHeader) PageGetItem((Page) page, lpp);
+		tup.t_len = ItemIdGetLength(lpp);
+		ItemPointerSet(&tup.t_self, blknum, lineoff);
+
+		if (all_visible)
+			valid = true;
+		else
+			valid = HeapTupleSatisfiesVisibility(&tup, snapshot, buffer);
+
+		CheckForSerializableConflictOut(valid, rel, &tup,
+										buffer, snapshot);
+		if (!valid)
+			continue;
+
+		kri->block_id = pds->num_blocks;
+		kri->item_id = lineoff;
+		kri++;
+		ntup++;
+	}
+	LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
+	Assert(ntup <= MaxHeapTuplesPerPage);
+	Assert(kds->nitems + ntup <= kds->nrooms);
+	kds->nitems += ntup;
+
+	return ntup;
+}
+
+bool
+pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
+								TupleTableSlot *slot)
+{
+	kern_data_store *kds = pds->kds;
+	TupleDesc	tupdesc = slot->tts_tupleDescriptor;
+	cl_uint		cs_offset;
+	int			i, j;
+
+	Assert(kds->is_column);
+	Assert(kds->ncols == tupdesc->natts);
+
+	/* no more rooms to store tuples */
+	if (kds->nitems == kds->nrooms)
+		return false;
+	j = kds->nitems++;
+
+	/* makes tts_values/tts_isnull available */
+	slot_getallattrs(slot);
+
+	for (i=0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute	attr = tupdesc->attrs[i];
+
+		Assert(attr->attlen > 0
+			   ? attr->attlen == kds->colmeta[i].attlen
+			   : kds->colmeta[i].attlen < 0);
+
+		if (!kds->colmeta[i].attvalid)
+			continue;
+
+		cs_offset = kds->colmeta[i].cs_offset;
+		if (!kds->colmeta[i].attnotnull)
+		{
+			cl_char   *nullmap = (cl_char *)kds + cs_offset;
+
+			if (slot->tts_isnull[i])
+			{
+				nullmap[j>>3] &= ~(1 << (j & 7));
+				continue;
+			}
+			nullmap[j>>3] |=  (1 << (j & 7));
+            cs_offset += STROMALIGN(BITMAPLEN(kds->nrooms));
+		}
+		else if (slot->tts_isnull[i])
+			elog(ERROR, "unable to put NULL on not-null attribute");
+
+		if (attr->attlen > 0)
+		{
+			char   *cs_values = (char *)kds + cs_offset + attr->attlen * j;
+
+			if (!attr->attbyval)
+			{
+				Pointer	ptr = DatumGetPointer(slot->tts_values[i]);
+
+				memcpy(cs_values, ptr, attr->attlen);
+			}						   
+			else
+			{
+				switch (attr->attlen)
+				{
+					case sizeof(char):
+						*((char *)cs_values)
+							= DatumGetChar(slot->tts_values[i]);
+						break;
+					case sizeof(uint16):
+						*((int16 *)cs_values)
+							= DatumGetInt16(slot->tts_values[i]);
+						break;
+					case sizeof(uint32):
+						*((int32 *)cs_values)
+							= DatumGetInt32(slot->tts_values[i]);
+						break;
+					case sizeof(int64):
+						*((int64 *)cs_values)
+							= DatumGetInt64(slot->tts_values[i]);
+						break;
+					default:
+						memcpy(cs_values, &slot->tts_values[i], attr->attlen);
+						break;
+				}
+			}
+		}
+		else
+		{
+			struct varlena *vl_data = (struct varlena *) slot->tts_values[i];
+			cl_uint			vl_len = VARSIZE_ANY(vl_data);
+			cl_uint		   *vl_ofs = (cl_uint *)((char *)kds + cs_offset);
+			kern_toastbuf  *ktoast;
+
+			Assert(!attr->attbyval);
+			if (dlist_is_empty(&pds->ktoast))
+			{
+				ktoast = pgstrom_shmem_alloc(TOASTBUF_UNITSZ);
+				if (!ktoast)
+					elog(ERROR, "out of shared memory");
+				ktoast->length = TOASTBUF_UNITSZ;
+				ktoast->usage = offsetof(kern_toastbuf, data[0]);
+				dlist_push_tail(&pds->ktoast, &ktoast->dnode);
+			}
+			else
+			{
+				ktoast = dlist_container(kern_toastbuf, dnode,
+										 dlist_tail_node(&pds->ktoast));
+				if (ktoast->usage + INTALIGN(vl_len) > ktoast->length)
+				{
+					ktoast = pgstrom_shmem_alloc(TOASTBUF_UNITSZ);
+					if (!ktoast)
+						elog(ERROR, "out of shared memory");
+					ktoast->length = TOASTBUF_UNITSZ;
+					ktoast->usage = offsetof(kern_toastbuf, data[0]);
+					dlist_push_tail(&pds->ktoast, &ktoast->dnode);
+				}
+			}
+			Assert(ktoast->usage + INTALIGN(vl_len) <= ktoast->length);
+			vl_ofs[j] = ktoast->usage;
+			memcpy((cl_char *)ktoast + ktoast->usage, vl_data, vl_len);
+			ktoast->usage += INTALIGN(vl_len);
+		}
+	}
+	return false;
+}

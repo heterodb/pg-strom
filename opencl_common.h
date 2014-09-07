@@ -241,14 +241,6 @@ typedef struct {
  * +-----------------+
  */
 typedef struct {
-
-	
-	cl_uint			nblocks;
-	cl_uint			ltid[FLEXIBLE_ARRAY_MEMBER];
-} kern_row_store;
-
-
-typedef struct {
 	cl_uint			length;	/* length of this kernel row_store */
 	cl_uint			ncols;	/* number of columns in the source relation */
 	cl_uint			nrows;	/* number of rows in this store */
@@ -318,20 +310,20 @@ kern_rowstore_get_tuple(__global kern_row_store *krs, cl_uint krs_index)
  * | colmeta[1]                       |
  * |   :                              |
  * | colmeta[M-1]                     |
- * +----------------+-----------------+
+ * +----------------+-----------------+ <--- aligned by STROMALIGN()
  * | <row-format>   | <column-format> |
- * |   kern_ltids   +-----------------+
- * | +--------------+ column-data of  |
- * | | nblocks      | the 1st column  |
- * | +--------------+ +---------------+
- * | | ltids[0]     | | null bitmap   |
- * | | ltids[1]     | +---------------+
- * | |    :         | | values array  |
- * | | ltids[N-1]   | | of the 1st    |
- * +-+--------------+ | column        |
- * |      :         +-+---------------+ <--- cs_offset points starting
- * |  alignment     | column-data of  |      offset of the column-data
- * |      :         | the 2nd column  |
+ * +----------------+-----------------+
+ * | rowitems[0]    | column-data of  |
+ * | rowitems[1]    | the 1st column  |
+ * | rowitems[2]    | +---------------+
+ * |    :           | | null bitmap   |
+ * |    :           | +---------------+
+ * | rowitems[N-1]  | | values array  |
+ * |                | | of the 1st    |
+ * +----------------+ | column        |
+ * |    :           +-+---------------+ <--- cs_offset points starting
+ * | alignment to   | column-data of  |      offset of the column-data
+ * | BLCKSZ         | the 2nd column  |
  * +----------------+ +---------------+
  * | blocks[0]      | | null bitmap   |
  * | PageHeaderData | +---------------+
@@ -380,34 +372,40 @@ typedef struct {
 } kern_colmeta;
 
 /*
- * ltid (=local tuple id) points a particular tuple on the buffer of
- * row-format. Its higher 16-bits is index to the block, lower 16-bits
- * is the line pointer of the tuple within a block.
+ * kern_rowitem packs an index of block and tuple item. 
+ * block_id points a particular block in the block array of this data-store.
+ * item_id points a particular tuple item within the block.
  */
 typedef struct {
-	cl_uint			nblocks;
-	cl_uint			ltids[FLEXIBLE_ARRAY_MEMBER];
-} kern_ltids;
+	cl_ushort		block_id;
+	cl_ushort		item_id;
+} kern_rowitem;
 
 typedef struct {
 	cl_uint			length;	/* length of this kernel data store */
 	cl_uint			ncols;	/* number of columns in this store */
 	cl_uint			nitems; /* number of rows in this store */
-	cl_uint			nrooms;	/* capacity of rows in this store */
-	cl_char			column_form; /* if true, data store is column-format */
-	cl_char			__padding__[7];
+	cl_uint			nrooms;	/* number of available rows in this store */
+	cl_uint			nblocks;/* number of blocks in this store, if row-store.
+							 * Elsewhere, always 0. */
+	cl_char			is_column;/* if true, data store is column-format */
+	cl_char			__padding__[3];
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_data_store;
 
 #define KERN_DATA_STORE_ROWBLOCKS(kds)					\
-	(__global PageHeader)								\
-	((__global cl_char *)(kds) +						\
-	 ((STROMALIGN(offsetof(kern_data_store,				\
-						   colmeta[(kds)->ncols])) +	\
-	   STROMALIGN(offsetof(kern_ltids,					\
-						   ltids[(kds)->nitems])) +		\
-	   BLCKSZ - 1) & ~(BLCKSZ - 1)))
+	((__global PageHeader)								\
+	 ((__global cl_char *)(kds) +						\
+	  ((STROMALIGN(offsetof(kern_data_store,			\
+							colmeta[(kds)->ncols])) +	\
+		STROMALIGN(sizeof(kern_rowitem) *				\
+				   (kds->nitems)) + BLCKSZ - 1) & ~(BLCKSZ - 1))))
 
+#define KERN_DATA_STORE_ROWITEMS(kds)		\
+	((__global kern_rowitem *)				\
+	 ((__global cl_char *)(kds) +			\
+	  STROMALIGN(offsetof(kern_data_store,	\
+						  colmeta[(kds)->ncols]))))
 
 /*
  * kern_toastbuf
@@ -415,9 +413,6 @@ typedef struct {
  * A varlena datum is represented as an offset from the head of toast-buffer,
  * and data contents are actually stored within this toast-buffer.
  */
-
-#define TOASTBUF_UNITSZ		(32 << 20)	/* 32MB for each toastbuf chunks */
-
 typedef struct {
 #ifndef OPENCL_DEVICE_CODE
 	dlist_node		dnode;	/* host only; used to chain multiple toastbuf */
