@@ -563,6 +563,8 @@ extern void pgstrom_init_shmem(void);
 extern Datum pgstrom_shmem_info(PG_FUNCTION_ARGS);
 extern Datum pgstrom_shmem_active_info(PG_FUNCTION_ARGS);
 extern Datum pgstrom_shmem_slab_info(PG_FUNCTION_ARGS);
+extern Datum pgstrom_shmem_alloc_func(PG_FUNCTION_ARGS);
+extern Datum pgstrom_shmem_free_func(PG_FUNCTION_ARGS);
 
 /*
  * mqueue.c
@@ -859,12 +861,6 @@ extern void _outBitmapset(StringInfo str, const Bitmapset *bms);
  * grafter.c
  */
 extern void pgstrom_init_grafter(void);
-
-/*
- * debug.c
- */
-extern Datum pgstrom_shmem_alloc_func(PG_FUNCTION_ARGS);
-extern Datum pgstrom_shmem_free_func(PG_FUNCTION_ARGS);
 
 /*
  * opencl_*.h
