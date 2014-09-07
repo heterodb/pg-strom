@@ -67,34 +67,15 @@ typedef struct {
 	bool		syscol_referenced; /* true, if system column is referenced */
 } GpuScanPlan;
 
-/*
- * Gpuscan has three strategy to scan a relation.
- * a) cache-only scan, if all the variables being referenced in target-list
- *    and scan-qualifiers are on the t-tree columnar cache.
- *    It is capable to return a columner-store, instead of individual rows,
- *    if upper plan node is also managed by PG-Strom.
- * b) hybrid-scan, if Var references by scan-qualifiers are on cache, but
- *    ones by target-list are not. It runs first screening by device, then
- *    fetch a tuple from the shared buffers.
- * c) heap-only scan, if all the variables in scan-qualifier are not on
- *    the cache, all we can do is read tuples from shared-buffer to the
- *    row-store, then picking it up.
- * In case of (a) and (b), gpuscan needs to be responsible to MVCC checks;
- * that is not done on the first evaluation timing.
- * In case of (c), it may construct a columnar cache entry that caches the
- * required columns.
- */
 typedef struct {
 	CustomPlanState		cps;
 	Relation			scan_rel;
-	HeapScanDesc		scan_desc;
 	TupleTableSlot	   *scan_slot;
+	BlockNumber			curr_blknum;
+	BlockNumber			last_blknum;
+	double				ntup_per_page;
 	List			   *dev_quals;
-	tcache_head		   *tc_head;
-	tcache_scandesc	   *tc_scan;
 	bool				syscol_referenced;
-	bool				hybrid_scan;
-	HeapTupleData		hybrid_htup;
 
 	pgstrom_queue	   *mqueue;
 	Datum				dprog_key;
@@ -563,95 +544,6 @@ gpuscan_support_multi_exec(const CustomPlanState *cps)
 	return true;
 }
 
-
-
-static bool
-gpuscan_begin_tcache_scan(GpuScanState *gss,
-						  Bitmapset *host_attnums,
-						  Bitmapset *dev_attnums)
-{
-	Relation		scan_rel = gss->scan_rel;
-	Oid				scan_reloid = RelationGetRelid(scan_rel);
-	tcache_head	   *tc_head = NULL;
-	tcache_scandesc	*tc_scan = NULL;
-	Bitmapset	   *tempset;
-	bool			hybrid_scan = false;
-	Datum			tr_private = 0;
-
-	tempset = bms_union(host_attnums, dev_attnums);
-	PG_TRY();
-	{
-		/*
-		 * First of all, we try the plan-a; that uses cache-only scan
-		 * if both of reference columns by host and by device are on
-		 * the tcache.
-		 * If found, it's perfect. We don't need to touch heap in
-		 * this scan.
-		 */
-		tc_head = tcache_get_tchead(scan_reloid, tempset);
-		if (!tc_head)
-		{
-			if (!bms_equal(dev_attnums, tempset))
-			{
-				/*
-				 * As a second best, we try hybrid approach that uses tcache
-				 * for computation in device, but host-side fetches tuples
-				 * from the heap pages according to item-pointers.
-				 */
-				tc_head = tcache_get_tchead(scan_reloid, dev_attnums);
-				if (tc_head)
-					hybrid_scan = true;
-			}
-			/*
-			 * In case when we have no suitable tcache anyway, let's
-			 * create a new one and build up it.
-			 */
-			if (!tc_head)
-				tc_head = tcache_try_create_tchead(scan_reloid, tempset);
-		}
-		/* OK, let's try to make tcache-scan handler */
-		if (tc_head)
-		{
-			tc_scan = tcache_begin_scan(tc_head, scan_rel);
-			if (!tc_scan)
-			{
-				/*
-				 * Even if we could get tcache_head, we might fail to begin
-				 * tcache-scan because of concurrent cache build. In this
-				 * case, we take usual heap scan using row-store.
-				 */
-				tcache_put_tchead(tc_head);
-				tc_head = NULL;
-			}
-			else if (tc_scan->heapscan)
-			{
-				/*
-				 * In case when tcache_begin_scan returns a tcache_scandesc
-				 * with a valid heapscan, it means this scan also performs
-				 * as a tcache builder.
-				 */
-				tr_private = BoolGetDatum(true);
-			}
-		}
-	}
-	PG_CATCH();
-	{
-		if (tc_head)
-			tcache_put_tchead(tc_head);
-	}
-	PG_END_TRY();
-
-	if (!tc_head)
-		return false;
-
-	pgstrom_track_object(&tc_head->sobj, tr_private);
-	gss->tc_head = tc_head;
-	gss->tc_scan = tc_scan;
-	gss->hybrid_scan = hybrid_scan;
-
-	return true;
-}
-
 static  CustomPlanState *
 gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 {
@@ -661,6 +553,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	TupleDesc		tupdesc;
 	List		   *tlist;
 	List		   *used_params = NIL;
+	Form_pg_class	rel_form;
 
 	/* gpuscan should not have inner/outer plan now */
 	Assert(outerPlan(node) == NULL);
@@ -721,24 +614,12 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	gss->syscol_referenced = gsplan->syscol_referenced;
 
 	/*
-	 * OK, initialization of common part is over.
-	 * Let's have GPU stuff initialization
+	 * OK, let's initialize stuff for block scan
 	 */
-	if (!gpuscan_begin_tcache_scan(gss,
-								   gsplan->host_attnums,
-								   gsplan->dev_attnums))
-	{
-		/*
-		 * Oops, someone concurrently build a tcache.
-		 * We will move on the regular heap scan as fallback.
-		 * One (small) benefit in this option is that MVCC
-		 * check is already done in heap_fetch()
-		 */
-		gss->scan_desc = heap_beginscan(gss->scan_rel,
-										estate->es_snapshot,
-										0,
-										NULL);
-	}
+	gss->curr_blknum = 0;
+	gss->last_blknum = RelationGetNumberOfBlocks(gss->scan_rel);
+	rel_form = RelationGetForm(gss->scan_rel);
+	gss->ntup_per_page = rel_form->reltupls / (float)rel_form->relpages;
 
 	/*
 	 * Setting up kernel program, if needed
@@ -753,7 +634,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		gss->mqueue = pgstrom_create_queue();
 		pgstrom_track_object(&gss->mqueue->sobj, 0);
 	}
-
+#if 0
 	/*
 	 * construction of kds_head and ktoast_head template, if it can be
 	 * executed in the kernel space.
@@ -783,8 +664,9 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		kparam_1->constvalue = PointerGetDatum(ktoast_head);
 		kparam_1->constisnull = false;
 	}
-	gss->kparams =
-		pgstrom_create_kern_parambuf(used_params, gss->cps.ps.ps_ExprContext);
+#endif
+	gss->kparams = pgstrom_create_kern_parambuf(gsplan->used_params,
+												gss->cps.ps.ps_ExprContext);
 	/* rest of run-time parameters */
 	gss->curr_chunk = NULL;
 	gss->curr_index = 0;
@@ -798,7 +680,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 }
 
 static pgstrom_gpuscan *
-pgstrom_create_gpuscan(GpuScanState *gss, StromObject *rcstore)
+pgstrom_create_gpuscan(GpuScanState *gss, pgstrom_data_store *pds)
 {
 	pgstrom_gpuscan *gpuscan;
 	kern_resultbuf	*kresults;
@@ -863,101 +745,38 @@ static pgstrom_gpuscan *
 pgstrom_load_gpuscan(GpuScanState *gss)
 {
 	pgstrom_gpuscan	   *gpuscan = NULL;
-	tcache_row_store   *trs = NULL;
-	tcache_column_store *tcs = NULL;
+	Relation			rel = gss->scan_rel;
+	TupleDesc			tupdesc = RelationGetDescr(rel);
+	Snapshot			snapshot = gss->cps.ps.state->es_snapshot;
 	struct timeval tv1, tv2;
 
-	/* no more records to read! */
-	if (!gss->scan_desc && !gss->tc_scan)
+	/* no more blocks to read */
+	if (gss->curr_blknum > gss->last_blknum)
 		return NULL;
 
-	/*
-	 * First of all, allocate a row- or column- store and fill it up.
-	 */
 	if (gss->pfm.enabled)
 		gettimeofday(&tv1, NULL);
 
+	pds = pgstrom_create_data_store_row(tupdesc, gss->ntup_per_page);
 	PG_TRY();
 	{
-		StromObject	   *sobject;
-		ScanDirection	direction;
-
-		direction = gss->cps.ps.state->es_direction;
-		Assert(!ScanDirectionIsNoMovement(direction));
-
-		if (!gss->tc_scan)
+		while (gss->curr_blknum <= gss->last_blknum)
 		{
-			TupleDesc	tupdesc = RelationGetDescr(gss->scan_rel);
-			HeapTuple	tuple;
-
-			trs = pgstrom_create_row_store(tupdesc);
-			while (HeapTupleIsValid(tuple = heap_getnext(gss->scan_desc,
-														 direction)))
-			{
-				if (!tcache_row_store_insert_tuple(trs, tuple))
-				{
-					/*
-					 * In case when we have no room to put tuples on the
-					 * row-store, we rewind the tuple (to be read on the
-					 * next trial) and break the loop.
-					 */
-					heap_getnext(gss->scan_desc, -direction);
-					break;
-				}
-			}
-
-			if (HeapTupleIsValid(tuple))
-				sobject = &trs->sobj;
-			else
-			{
-				heap_endscan(gss->scan_desc);
-				gss->scan_desc = NULL;
-				if (trs->kern.nrows > 0)
-					sobject = &trs->sobj;
-				else
-				{
-					pgstrom_put_row_store(trs);
-					sobject = NULL;
-				}
-			}
+			if (pgstrom_data_store_insert_block(pds, rel,
+												gss->curr_blknum,
+												snapshot) < 0)
+				break;
+			gss->curr_blknum++;
 		}
-		else
-		{
-			if (ScanDirectionIsForward(direction))
-				sobject = tcache_scan_next(gss->tc_scan);
-			else
-				sobject = tcache_scan_prev(gss->tc_scan);
-			if (!sobject)
-			{
-				tcache_scandesc	*tc_scan = gss->tc_scan;
-
-				gss->pfm.time_tcache_build += tc_scan->time_tcache_build;
-				tcache_end_scan(tc_scan);
-				gss->tc_scan = NULL;
-			}
-		}
-		if (gss->pfm.enabled)
-		{
-			gettimeofday(&tv2, NULL);
-			gss->pfm.time_to_load += timeval_diff(&tv1, &tv2);
-		}
-		/*
-		 * Once a row-/column-store was successfully loaded, make up
-		 * pgstrom_gpuscan request message for execution.
-		 */
-		if (sobject)
-			gpuscan = pgstrom_create_gpuscan(gss, sobject);
+		if (pds->kds->nitems > 0)
+			gpuscan = pgstrom_create_gpuscan(gss, pds);
 	}
 	PG_CATCH();
-	{
-		if (trs)
-			pgstrom_put_row_store(trs);
-		if (tcs)
-			tcache_put_column_store(tcs);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-
+    {
+		pgstrom_put_data_store(pds);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
 	/* track local object */
 	if (gpuscan)
 		pgstrom_track_object(&gpuscan->msg.sobj, 0);

@@ -836,6 +836,7 @@ extern void pgstrom_init_tcache(void);
  */
 extern bool	pgstrom_enabled;
 extern bool pgstrom_perfmon_enabled;
+extern int	pgstrom_chunk_size;
 extern int	pgstrom_max_async_chunks;
 extern int	pgstrom_min_async_chunks;
 extern int  pgstrom_max_inline_varlena;

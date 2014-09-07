@@ -180,7 +180,7 @@ gpuscan_qual(__global kern_gpuscan *kgpuscan,	/* in/out */
 typedef struct {
 	pgstrom_message		msg;		/* = StromTag_GpuScan */
 	Datum				dprog_key;	/* key of device program */
-	StromObject		   *rc_store;	/* = StromTag_TCache(Row|Column)Store */
+	pgstrom_data_store *pds;		/* = StromTag_DataStore */
 	kern_gpuscan		kern;
 } pgstrom_gpuscan;
 

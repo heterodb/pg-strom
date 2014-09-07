@@ -721,8 +721,7 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 }
 
 pgstrom_data_store *
-pgstrom_create_data_store_row(TupleDesc tupdesc, Size ds_size,
-							  double ntup_per_page)
+pgstrom_create_data_store_row(TupleDesc tupdesc, double ntup_per_page)
 {
 	pgstrom_data_store *pds;
 	kern_data_store	   *kds;
@@ -734,7 +733,7 @@ pgstrom_create_data_store_row(TupleDesc tupdesc, Size ds_size,
 	int			i;
 
 	/* round-up required size of data-store into BLCKSZ alignment */
-	ds_size = TYPEALIGN(BLCKSZ, ds_size);
+	ds_size = pgstrom_chunk_size << 20;
 	max_blocks = ds_size / BLCKSZ;
 	nrooms = ntup_per_page * (double)max_blocks * 1.1;
 
@@ -786,11 +785,11 @@ pgstrom_create_data_store_row(TupleDesc tupdesc, Size ds_size,
 }
 
 pgstrom_data_store *
-pgstrom_create_data_store_column(TupleDesc tupdesc, Size ds_size,
-								 Bitmapset *attr_refs)
+pgstrom_create_data_store_column(TupleDesc tupdesc, Bitmapset *attr_refs)
 {
 	pgstrom_data_store *pds;
 	kern_data_store	   *kds;
+	Size		ds_size = (pgstrom_chunk_size << 20);
 	Size		required;
 	Size		cs_offset;
 	cl_uint		unitsz = 0;

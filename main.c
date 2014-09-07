@@ -29,6 +29,7 @@ PG_MODULE_MAGIC;
 bool	pgstrom_enabled;
 bool	pgstrom_perfmon_enabled;
 bool	pgstrom_show_device_kernel;
+int		pgstrom_chunk_size;
 int		pgstrom_max_async_chunks;
 int		pgstrom_min_async_chunks;
 int		pgstrom_max_inline_varlena;
@@ -66,6 +67,16 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	DefineCustomIntVariable("pg_strom.chunk_size",
+							"default size of pgstrom_data_store in MB",
+							NULL,
+							&pgstrom_chunk_size,
+							15,
+							4,
+							128
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
 	DefineCustomIntVariable("pg_strom.min_async_chunks",
 							"least number of chunks to be run asynchronously",
 							NULL,
