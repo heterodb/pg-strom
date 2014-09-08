@@ -1798,9 +1798,10 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 				   agg_tlist, agg_quals,
 				   &startup_cost, &total_cost,
 				   &startup_sort, &total_sort);
+#if 0
 	if (agg->plan.total_cost < total_cost)
 		return;
-
+#endif
 	/*
 	 * construction of kernel code, according to the above query
 	 * rewrites.
