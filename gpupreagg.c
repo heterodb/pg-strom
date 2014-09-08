@@ -3912,7 +3912,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 							 length,
 							 &gpreagg->kern.status,
 							 1,
-							 &clgpa->events[clgpa->ev_index - 2],
+							 &clgpa->events[clgpa->ev_index - 1],
 							 &clgpa->events[clgpa->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
