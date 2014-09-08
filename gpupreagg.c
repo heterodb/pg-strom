@@ -1191,6 +1191,8 @@ typeoid_to_pagg_field_name(Oid type_oid)
 {
 	switch (type_oid)
 	{
+		case INT2OID:
+			return "short_val";
 		case INT4OID:
 			return "int_val";
 		case INT8OID:
@@ -1703,8 +1705,12 @@ gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 	{
 		devtype_info   *dtype = lfirst(cell);
 
-		/* pg_XXX_vstore() of int4/int8 are declared as a built-in */
-		if (dtype->type_oid == INT4OID || dtype->type_oid == INT8OID)
+		/* pg_xxx_vstore() of int2/int4/int8 are declared as
+		 * a built-in data types; so should not be redefined.
+		 */
+		if (dtype->type_oid == INT2OID ||
+			dtype->type_oid == INT4OID ||
+			dtype->type_oid == INT8OID)
 			continue;
 
 		if (dtype->type_flags & DEVTYPE_IS_VARLENA)

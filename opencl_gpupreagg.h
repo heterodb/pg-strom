@@ -113,8 +113,9 @@ typedef struct
 	cl_char			isnull;
 	cl_char			__padding__[3];
 	union {
-		cl_uint		int_val;
-		cl_ulong	long_val;
+		cl_short	short_val;
+		cl_int		int_val;
+		cl_long		long_val;
 		cl_float	float_val;
 		cl_double	double_val;
 	};
@@ -230,6 +231,10 @@ pg_common_vstore(__private cl_int *errcode,
 	}
 
 /* built-in declarations */
+#ifndef PG_INT2_TYPE_DEFINED
+#define PG_INT2_TYPE_DEFINED
+STROMCL_SIMPLE_TYPE_TEMPLATE(int2,cl_short)
+#endif
 #ifndef PG_INT4_TYPE_DEFINED
 #define PG_INT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int4,cl_int)
@@ -239,6 +244,7 @@ STROMCL_SIMPLE_TYPE_TEMPLATE(int4,cl_int)
 STROMCL_SIMPLE_TYPE_TEMPLATE(int8,cl_long)
 #endif
 
+STROMCL_SIMPLE_VARSTORE_TEMPLATE(int2,cl_short);
 STROMCL_SIMPLE_VARSTORE_TEMPLATE(int4,cl_int);
 STROMCL_SIMPLE_VARSTORE_TEMPLATE(int8,cl_long);
 
@@ -303,11 +309,22 @@ gpupreagg_data_load(__local pagg_datum *pdatum,
 	cmeta = kds->colmeta[colidx];
 	/*
 	 * Right now, expected data length for running total of partial aggregate
-	 * are 4, or 8. Elasewhere, it may be a bug.
+	 * are 2, 4, or 8. Elasewhere, it may be a bug.
 	 */
-	if (cmeta.attlen == sizeof(cl_uint))		/* also, cl_float */
+	if (cmeta.attlen == sizeof(cl_short))
 	{
-		__global cl_uint   *addr = kern_get_datum(kds,ktoast,colidx,rowidx);
+		__global cl_short  *addr = kern_get_datum(kds,ktoast,colidx,rowidx);
+		if (!addr)
+			pdatum->isnull = true;
+		else
+		{
+			pdatum->isnull = false;
+			pdatum->short_val = *addr;
+		}
+	}
+	else if (cmeta.attlen == sizeof(cl_int))		/* also, cl_float */
+	{
+		__global cl_int   *addr = kern_get_datum(kds,ktoast,colidx,rowidx);
 		if (!addr)
 			pdatum->isnull	= true;
 		else
@@ -316,9 +333,9 @@ gpupreagg_data_load(__local pagg_datum *pdatum,
 			pdatum->int_val	= *addr;
 		}
 	}
-	else if (cmeta.attlen == sizeof(cl_ulong))	/* also, cl_double */
+	else if (cmeta.attlen == sizeof(cl_long))	/* also, cl_double */
 	{
-		__global cl_ulong  *addr = kern_get_datum(kds,ktoast,colidx,rowidx);
+		__global cl_long  *addr = kern_get_datum(kds,ktoast,colidx,rowidx);
 		if (!addr)
 			pdatum->isnull	= true;
 		else
@@ -355,9 +372,17 @@ gpupreagg_data_store(__local pagg_datum *pdatum,
 	cmeta = kds->colmeta[colidx];
 	/*
 	 * Right now, expected data length for running total of partial aggregate
-	 * are 4, or 8. Elasewhere, it may be a bug.
+	 * are 2, 4, or 8. Elasewhere, it may be a bug.
 	 */
-	if (cmeta.attlen == sizeof(cl_uint))		/* also, cl_float */
+	if (cmeta.attlen == sizeof(cl_short))
+	{
+		pg_int2_t	temp;
+
+		temp.isnull = pdatum->isnull;
+		temp.value  = pdatum->short_val;
+		pg_int2_vstore(kds, ktoast, errcode, colidx, rowidx, temp);
+	}
+	else if (cmeta.attlen == sizeof(cl_uint))		/* also, cl_float */
 	{
 		pg_int4_t	temp;
 
