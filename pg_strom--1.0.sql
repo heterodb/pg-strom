@@ -207,9 +207,13 @@ CREATE FUNCTION pgstrom.psum(int8)
   RETURNS int8
   AS 'MODULE_PATHNAME', 'gpupreagg_psum_int'
   LANGUAGE C CALLED ON NULL INPUT;
+CREATE FUNCTION pgstrom.psum(float4)
+  RETURNS float4
+  AS 'MODULE_PATHNAME', 'gpupreagg_psum_float4'
+  LANGUAGE C CALLED ON NULL INPUT;
 CREATE FUNCTION pgstrom.psum(float8)
   RETURNS float8
-  AS 'MODULE_PATHNAME', 'gpupreagg_psum_float'
+  AS 'MODULE_PATHNAME', 'gpupreagg_psum_float8'
   LANGUAGE C CALLED ON NULL INPUT;
 CREATE FUNCTION pgstrom.psum_x2(float8)
   RETURNS float8

@@ -147,7 +147,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	/* SUM(X) = SUM(PSUM(X)) */
 	{ "sum", 1, {INT2OID},   "s:sum", 1, {INT8OID},   {ALTFUNC_EXPR_PSUM}},
 	{ "sum", 1, {INT4OID},   "s:sum", 1, {INT8OID},   {ALTFUNC_EXPR_PSUM}},
-	{ "sum", 1, {FLOAT4OID}, "c:sum", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PSUM}},
+	{ "sum", 1, {FLOAT4OID}, "c:sum", 1, {FLOAT4OID}, {ALTFUNC_EXPR_PSUM}},
 	{ "sum", 1, {FLOAT8OID}, "c:sum", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PSUM}},
 	/* STDDEV(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
 	{ "stddev", 1, {FLOAT4OID},
@@ -4002,14 +4002,24 @@ gpupreagg_psum_int(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(gpupreagg_psum_int);
 
 Datum
-gpupreagg_psum_float(PG_FUNCTION_ARGS)
+gpupreagg_psum_float4(PG_FUNCTION_ARGS)
+{
+	Assert(PG_NARGS() == 1);
+	if (PG_ARGISNULL(0))
+		PG_RETURN_FLOAT4(0.0);
+	PG_RETURN_FLOAT4(PG_GETARG_FLOAT4(0));
+}
+PG_FUNCTION_INFO_V1(gpupreagg_psum_float4);
+
+Datum
+gpupreagg_psum_float8(PG_FUNCTION_ARGS)
 {
 	Assert(PG_NARGS() == 1);
 	if (PG_ARGISNULL(0))
 		PG_RETURN_FLOAT8(0.0);
 	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(0));
 }
-PG_FUNCTION_INFO_V1(gpupreagg_psum_float);
+PG_FUNCTION_INFO_V1(gpupreagg_psum_float8);
 
 Datum
 gpupreagg_psum_x2_float(PG_FUNCTION_ARGS)
