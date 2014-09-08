@@ -1296,13 +1296,19 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 			appendStringInfo(
 				&body,
 				"  case %d:\n"
+				"    if (!accum->isnull)\n"
+				"    {\n"
 				"      if (!newval->isnull)\n"
-				"      {\n"
 				"        accum->%s += newval->%s;\n"
-				"        accum->isnull = false;\n"
-				"      }\n"
+				"    }\n"
+				"    else if (!newval->isnull)\n"
+				"    {\n"
+				"      accum->%s = newval->%s;\n"
+				"      accum->isnull = false;\n"
+				"    }\n"
 				"    break;\n",
 				tle->resno - 1,
+				field_name, field_name,
 				field_name, field_name);
 		}
 		else if (strcmp(func_name, "pcov_x") == 0  ||
@@ -1317,9 +1323,14 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 			appendStringInfo(
 				&body,
 				"  case %d:\n"
-				"    if (!newval->isnull)\n"
+				"    if (!accum->isnull)\n"
 				"    {\n"
-				"      accum->%s += newval->%s;\n"
+				"      if (!newval->isnull)\n"
+				"        accum->%s += newval->%s;\n"
+				"    }\n"
+				"    else if (!newval->isnull)\n"
+				"    {\n"
+				"      accum->%s = newval->%s;\n"
 				"      accum->isnull = false;\n"
 				"    }\n"
 				"    break;\n",
@@ -1392,7 +1403,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 			dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
 			appendStringInfo(&body,
 							 "  /* projection for resource %u */\n",
-							 tle->resno);
+							 tle->resno - 1);
 			appendStringInfo(&body,
 							 "  pg_%s_vstore(kds_out,ktoast,errcode,\n"
 							 "               %u,rowidx_out,KVAR_%u);\n",
@@ -4208,17 +4219,11 @@ Datum
 pgstrom_sum_int8_final(PG_FUNCTION_ARGS)
 {
 	ArrayType  *transarray = PG_GETARG_ARRAYTYPE_P(0);
-	int64	   *transdata = (int64 *) ARR_DATA_PTR(transarray);
+	int64      *transvalues;
 
-	if (ARR_NDIM(transarray) != 1 ||
-		ARR_DIMS(transarray)[0] != 2 ||
-		ARR_HASNULL(transarray) ||
-		ARR_ELEMTYPE(transarray) != INT8OID)
-		elog(ERROR, "Two elements int8 array is expected");
+	transvalues = check_int64_array(transarray, 2);
 
-	transdata = (int64 *) ARR_DATA_PTR(transarray);
-
-	PG_RETURN_INT64(transdata[1]);
+	PG_RETURN_INT64(transvalues[1]);
 }
 PG_FUNCTION_INFO_V1(pgstrom_sum_int8_final);
 
