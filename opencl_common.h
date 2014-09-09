@@ -85,7 +85,7 @@ typedef cl_uint		hostptr_t;
 #define StromError_OpenCLInternal		102	/* OpenCL internal error */
 #define StromError_OutOfSharedMemory	105	/* out of shared memory */
 #define StromError_OutOfMemory			106	/* out of host memory */
-#define StromError_DivisionByZero		200	/* Division by zero */
+#define StromError_ReCheckByCPU			200	/* To be run by CPU */
 #define StromError_DataStoreCorruption	300	/* Row/Column Store Corrupted */
 #define StromError_DataStoreNoSpace		301	/* No Space in Row/Column Store */
 #define StromError_DataStoreOutOfRange	302	/* Out of range in Data Store */

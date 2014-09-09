@@ -1299,7 +1299,11 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 				"    if (!accum->isnull)\n"
 				"    {\n"
 				"      if (!newval->isnull)\n"
+				"      {\n"
+				"        if (CHECK_OVERFLOW_%s(accum->%s, newval->%s))\n"
+				"          STROM_SET_ERROR(errcode, StromError_ReCheckByCPU);\n"
 				"        accum->%s += newval->%s;\n"
+				"      }\n"
 				"    }\n"
 				"    else if (!newval->isnull)\n"
 				"    {\n"
@@ -1308,6 +1312,8 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 				"    }\n"
 				"    break;\n",
 				tle->resno - 1,
+				(type_oid == FLOAT4OID || type_oid == FLOAT8OID) ? "FLOAT" : "INT",
+				field_name, field_name,
 				field_name, field_name,
 				field_name, field_name);
 		}
@@ -1326,7 +1332,11 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 				"    if (!accum->isnull)\n"
 				"    {\n"
 				"      if (!newval->isnull)\n"
+				"      {\n"
+				"        if (CHECK_OVERFLOW_FLOAT(accum->%s, newval->%s))\n"
+				"          STROM_SET_ERROR(errcode, StromError_ReCheckByCPU);\n"
 				"        accum->%s += newval->%s;\n"
+				"      }\n"
 				"    }\n"
 				"    else if (!newval->isnull)\n"
 				"    {\n"
@@ -1335,6 +1345,8 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 				"    }\n"
 				"    break;\n",
 				tle->resno - 1,
+				field_name, field_name,
+				field_name, field_name,
 				field_name, field_name);
 		}
 		else
@@ -2254,8 +2266,11 @@ gpupreagg_next_tuple(GpuPreAggState *gpas, TupleTableSlot *slot)
 					tcache_row_store	*trs =
 						(tcache_row_store *) gpreagg->rcstore;
 					Assert(trs->kern.length != TOASTBUF_MAGIC);
-
-					vl_ptr = ((char *)&trs->kern + vl_ofs);
+					/* adjustment */
+					vl_ofs -= STROMALIGN(offsetof(kern_data_store,
+												  colmeta[trs->kern.ncols]));
+					Assert(vl_ofs <= trs->kern.length);
+					vl_ptr = ((char *)&trs->kern) + vl_ofs;
 				}
 				else
 				{
@@ -3656,9 +3671,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		goto error;
 	}
 
-	if (!ktoast_head)
-		clgpa->m_ktoast = NULL;
-	else
+	if (ktoast_head)
 	{
 		tcache_column_store	*tcs = (tcache_column_store *) rcstore;
 		Size	toast_length = 0;
@@ -3687,6 +3700,22 @@ clserv_process_gpupreagg(pgstrom_message *message)
 			goto error;
 		}
 	}
+	else if (StromTagIs(rcstore, TCacheRowStore))
+	{
+		/* once a preparation done, kds_in shall be used as a toast buffer
+		 * of the later stage if row-format. So, we deal with ktoast as
+		 * as alias of the later stage.
+		 */
+		rc = clRetainMemObject(clgpa->m_kds_in);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clRetainMemObject: %s", opencl_strerror(rc));
+			goto error;
+		}
+		clgpa->m_ktoast = clgpa->m_kds_in;
+	}
+	else
+		clgpa->m_ktoast = NULL;	/* case of fixed-length only column-format */
 
 	/*
 	 * Next, enqueuing DMA send requests, prior to kernel execution.
