@@ -1299,7 +1299,11 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 				"    if (!accum->isnull)\n"
 				"    {\n"
 				"      if (!newval->isnull)\n"
+				"      {\n"
+				"        if (CHECK_OVERFLOW_%s(accum->%s, newval->%s))\n"
+				"          STROM_SET_ERROR(errcode, StromError_ReCheckByCPU);\n"
 				"        accum->%s += newval->%s;\n"
+				"      }\n"
 				"    }\n"
 				"    else if (!newval->isnull)\n"
 				"    {\n"
@@ -1308,6 +1312,8 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 				"    }\n"
 				"    break;\n",
 				tle->resno - 1,
+				(type_oid == FLOAT4OID || type_oid == FLOAT8OID) ? "FLOAT" : "INT",
+				field_name, field_name,
 				field_name, field_name,
 				field_name, field_name);
 		}
@@ -1326,7 +1332,11 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 				"    if (!accum->isnull)\n"
 				"    {\n"
 				"      if (!newval->isnull)\n"
+				"      {\n"
+				"        if (CHECK_OVERFLOW_FLOAT(accum->%s, newval->%s))\n"
+				"          STROM_SET_ERROR(errcode, StromError_ReCheckByCPU);\n"
 				"        accum->%s += newval->%s;\n"
+				"      }\n"
 				"    }\n"
 				"    else if (!newval->isnull)\n"
 				"    {\n"
@@ -1335,6 +1345,7 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 				"    }\n"
 				"    break;\n",
 				tle->resno - 1,
+				field_name, field_name,
 				field_name, field_name,
 				field_name, field_name);
 		}

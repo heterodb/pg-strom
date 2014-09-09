@@ -224,6 +224,13 @@ pg_common_vstore(__private cl_int *errcode,
 		}													\
 	}
 
+/* macro to check overflow on accumlate operation*/
+#define CHECK_OVERFLOW_INT(x, y)				\
+	((((x) < 0) == ((y) < 0)) && (((x) + (y) < 0) != ((x) < 0)))
+	
+#define CHECK_OVERFLOW_FLOAT(x, y)				\
+	(isinf((x) + (y)) && !isinf(x) && !isinf(y))
+
 /* built-in declarations */
 #ifndef PG_INT2_TYPE_DEFINED
 #define PG_INT2_TYPE_DEFINED
