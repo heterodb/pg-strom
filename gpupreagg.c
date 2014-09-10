@@ -31,6 +31,7 @@
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/syscache.h"
 #include <math.h>
 #include "pg_strom.h"
@@ -119,7 +120,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}
 	},
 	{ "avg",    1, {INT8OID},
-	  "s:avg",  2, {INT4OID, INT8OID},
+	  "s:avg_numeric",  2, {INT4OID, INT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}
 	},
 	{ "avg",    1, {FLOAT4OID},
@@ -2264,7 +2265,6 @@ gpupreagg_next_tuple(GpuPreAggState *gpas, TupleTableSlot *slot)
 			econtext->ecxt_outertuple = slot_in;
 			slot_out = ExecProject(projection, &is_done);
 			Assert(slot_out == slot);
-			Assert(false);
 			if (is_done == ExprEndResult)
 				goto retry;
 			gpas->cps.ps.ps_TupFromTlist = (is_done == ExprMultipleResult);
@@ -4304,6 +4304,48 @@ pgstrom_sum_int8_final(PG_FUNCTION_ARGS)
 	PG_RETURN_INT64(transvalues[1]);
 }
 PG_FUNCTION_INFO_V1(pgstrom_sum_int8_final);
+
+/*
+ * pgstrom_avg_numeric_accum - It keeps an internal state using
+ * NumericAggState for int8, to prevent overflow. Unlike built-in
+ * implementation, it also takes "nrows" arguments in addition to
+ * the partial sum.
+ */
+/* copy from numeric.c */
+typedef struct NumericAggState
+{
+	bool		calcSumX2;		/* if true, calculate sumX2 */
+	MemoryContext agg_context;	/* context we're calculating in */
+	int64		N;				/* count of processed numbers */
+#if 0
+	NumericVar	sumX;			/* sum of processed numbers */
+	NumericVar	sumX2;			/* sum of squares of processed numbers */
+	int			maxScale;		/* maximum scale seen so far */
+	int64		maxScaleCount;	/* number of values seen with maximum scale */
+	int64		NaNcount;		/* count of NaN values (not included in N!) */
+#endif
+} NumericAggState;
+
+Datum
+pgstrom_avg_numeric_accum(PG_FUNCTION_ARGS)
+{
+	int32	nrows = PG_GETARG_INT32(1);
+	Datum	datum;
+	NumericAggState *state;
+
+	/* adjust argument */
+	fcinfo->nargs      = 2;
+	fcinfo->arg[1]     = fcinfo->arg[2];
+	fcinfo->argnull[1] = fcinfo->argnull[2];
+
+	datum = int8_accum(fcinfo);
+
+	state = (NumericAggState *) DatumGetPointer(datum);
+	if (state)
+		state->N += nrows - 1;
+	PG_RETURN_POINTER(state);
+}
+PG_FUNCTION_INFO_V1(pgstrom_avg_numeric_accum);
 
 /* logic copied from utils/adt/float.c */
 static inline float8 *
