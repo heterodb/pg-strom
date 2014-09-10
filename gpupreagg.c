@@ -66,6 +66,7 @@ typedef struct
 
 	pgstrom_gpupreagg  *curr_chunk;
 	cl_uint				curr_index;
+	bool				curr_recheck;
 	cl_uint				num_running;
 	dlist_head			ready_chunks;
 
@@ -1995,6 +1996,7 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 	 */
 	gpas->curr_chunk = NULL;
 	gpas->curr_index = 0;
+	gpas->curr_recheck = false;
 	dlist_init(&gpas->ready_chunks);
 
 	/*
@@ -2228,6 +2230,50 @@ gpupreagg_next_tuple(GpuPreAggState *gpas, TupleTableSlot *slot)
 	if (gpas->pfm.enabled)
 		gettimeofday(&tv1, NULL);
 
+	/* In case when we have to give up making partial aggregation by GPU,
+	 * we take a fallback by CPU. It looks like to construct a special
+	 * partial aggregation being consist of individual rows; so here is
+	 * no performance benefit, but less frequency.
+	 */
+	if (gpas->curr_recheck)
+	{
+		cl_uint			nitems = pgstrom_nitems_rcstore(gpreagg->rcstore);
+
+	retry:
+		if (gpas->curr_index < nitems)
+		{
+			ProjectionInfo *projection = gpas->cps.ps.ps_ProjInfo;
+			ExprContext	   *econtext = gpas->cps.ps.ps_ExprContext;
+			TupleTableSlot *slot_in = gpas->scan_slot;
+			TupleTableSlot *slot_out;
+			int				index = gpas->curr_index++;
+			ExprDoneCond	is_done;
+
+			/* reset per-tuple memory context */
+			ResetExprContext(econtext);
+
+			slot_in = pgstrom_rcstore_fetch_slot(slot_in,
+												 gpreagg->rcstore,
+												 index, false);
+			if (!projection)
+			{
+				/* may really happen? */
+				ExecCopySlot(slot, slot);
+				return true;
+			}
+			econtext->ecxt_outertuple = slot_in;
+			slot_out = ExecProject(projection, &is_done);
+			Assert(slot_out == slot);
+			Assert(false);
+			if (is_done == ExprEndResult)
+				goto retry;
+			gpas->cps.ps.ps_TupFromTlist = (is_done == ExprMultipleResult);
+
+			return true;
+		}
+		return false;
+	}
+
 	if (gpas->curr_index < kds->nitems)
 	{
 		int			i, j = gpas->curr_index++;
@@ -2320,6 +2366,7 @@ gpupreagg_exec(CustomPlanState *node)
 			pgstrom_put_message(msg);
 			gpas->curr_chunk = NULL;
 			gpas->curr_index = 0;
+			gpas->curr_recheck = false;
 		}
 
 		/*
@@ -2385,29 +2432,30 @@ gpupreagg_exec(CustomPlanState *node)
 		/*
 		 * Raise an error, if significan error was reported
 		 */
-		if (gpreagg->msg.errcode != StromError_Success)
+		if (gpreagg->msg.errcode == StromError_Success)
+			gpas->curr_recheck = false;
+		else if (gpreagg->msg.errcode == StromError_ReCheckByCPU)
+			gpas->curr_recheck = true;	/* fallback by CPU */
+		else if (gpreagg->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
 		{
-			if (gpreagg->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
-			{
-				const char *buildlog
-					= pgstrom_get_devprog_errmsg(gpas->dprog_key);
-				const char *kern_source
-					= ((GpuPreAggPlan *)node->ps.plan)->kern_source;
+			const char *buildlog
+				= pgstrom_get_devprog_errmsg(gpas->dprog_key);
+			const char *kern_source
+				= ((GpuPreAggPlan *)node->ps.plan)->kern_source;
 
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
-								pgstrom_strerror(gpreagg->msg.errcode),
-								kern_source),
-						 errdetail("%s", buildlog)));
-			}
-			else
-			{
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("PG-Strom: OpenCL execution error (%s)",
-								pgstrom_strerror(gpreagg->msg.errcode))));
-			}
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
+							pgstrom_strerror(gpreagg->msg.errcode),
+							kern_source),
+					 errdetail("%s", buildlog)));
+		}
+		else
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("PG-Strom: OpenCL execution error (%s)",
+							pgstrom_strerror(gpreagg->msg.errcode))));
 		}
 		gpas->curr_chunk = gpreagg;
 		gpas->curr_index = 0;
@@ -4024,6 +4072,7 @@ gpupreagg_partial_nrows(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_INT32(1);
 }
+PG_FUNCTION_INFO_V1(gpupreagg_partial_nrows);
 
 /* gpupreagg_pseudo_expr - placeholder function that returns the supplied
  * variable as is (even if it is NULL). Used to MIX(), MAX() placeholder.

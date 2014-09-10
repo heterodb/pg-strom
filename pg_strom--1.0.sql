@@ -282,6 +282,27 @@ CREATE AGGREGATE pgstrom.sum(int8)
   initcond = '{0,0}'
 );
 
+CREATE FUNCTION pgstrom.int8_numeric_accum(internal, int4, int8)
+  RETURNS internal
+  AS 'MODULE_PATHNAME', 'pgstrom_int8_numeric_accum'
+  LANGUAGE C STRICT;
+
+CREATE AGGREGATE pgstrom.avg_numeric(int4, int8)
+(
+  sfunc = pgstrom.int8_numeric_accum,
+  stype = internal,
+  finalfunc = pg_catalog.numeric_avg,
+  initcond = NULL
+);
+
+CREATE AGGREGATE pgstrom.sum_numeric(int8)
+(
+  sfunc = pgstrom.int8_numeric_accum,
+  stype = internal,
+  finalfunc = pg_catalog.numeric_sum,
+  initcond = NULL
+);
+
 CREATE FUNCTION pgstrom.sum_float8_accum(float8[], int4, float8)
   RETURNS float8[]
   AS 'MODULE_PATHNAME', 'pgstrom_sum_float8_accum'
