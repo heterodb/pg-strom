@@ -657,11 +657,12 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 		if (!kds_src->colmeta[cindex].attvalid)
 			continue;
 
-		/* In case when column is a grouping-key (thus, no partial
-		 * aggregation is defined), all we need to do is copying
-		 * the data from source to destination.
+		/* In case when column is a grouping-key (thus, not a partial
+		 * aggregation), all we need to do is copying the data from
+		 * the source to the destination; no need to modify anything.
 		 */
-		if (pindex < pagg_natts && cindex != pagg_anums[pindex])
+		if (pagg_natts == 0 || /* case of no aggregate function */
+			(pindex < pagg_natts && cindex != pagg_anums[pindex]))
 		{
 			if (isNewID) {
 				gpupreagg_data_move(&errcode, kds_src, kds_dst, ktoast,

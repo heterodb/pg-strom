@@ -1317,7 +1317,8 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 				"    }\n"
 				"    break;\n",
 				tle->resno - 1,
-				(type_oid == FLOAT4OID || type_oid == FLOAT8OID) ? "FLOAT" : "INT",
+				(type_oid == FLOAT4OID ||
+				 type_oid == FLOAT8OID) ? "FLOAT" : "INT",
 				field_name, field_name,
 				field_name, field_name,
 				field_name, field_name);
