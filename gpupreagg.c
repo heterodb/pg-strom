@@ -944,7 +944,10 @@ gpupreagg_rewrite_expr(Agg *agg,
 			devtype_info   *dtype = pgstrom_devtype_lookup(type_oid);
 			Expr		   *var;
 
-			/* grouping key must comparison function in kernel */
+			/* grouping key must be a supported data type */
+			if (!dtype)
+				return false;
+			/* data type of the grouping key must have comparison function */
 			if (!OidIsValid(dtype->type_cmpfunc) ||
 				!pgstrom_devfunc_lookup(dtype->type_cmpfunc))
 				return false;
