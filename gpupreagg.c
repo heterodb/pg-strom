@@ -2217,68 +2217,91 @@ gpupreagg_load_next_outer(GpuPreAggState *gpas)
 	return gpupreagg;
 }
 
-static bool
-gpupreagg_next_tuple(GpuPreAggState *gpas, TupleTableSlot *slot)
+/*
+ * gpupreagg_next_tuple_fallback - a fallback routine if GPU returned
+ * StromError_ReCheckByCPU, to suggest the backend to handle request
+ * by itself. A fallback process looks like construction of special
+ * partial aggregations that consist of individual rows; so here is
+ * no performance benefit once it happen.
+ */
+static TupleTableSlot *
+gpupreagg_next_tuple_fallback(GpuPreAggState *gpas)
 {
-	pgstrom_gpupreagg  *gpreagg = gpas->curr_chunk;
-	kern_data_store	   *kds = gpreagg->kds_dst;
-	TupleDesc			tupdesc = slot->tts_tupleDescriptor;
-	bool				retval = false;
-	struct timeval		tv1, tv2;
-
-	Assert(kds->column_form && kds->ncols == tupdesc->natts);
+	pgstrom_gpupreagg *gpreagg = gpas->curr_chunk;
+	cl_uint			nitems = pgstrom_nitems_rcstore(gpreagg->rcstore);
+	TupleTableSlot *slot = NULL;
+	struct timeval	tv1, tv2;
 
 	if (gpas->pfm.enabled)
 		gettimeofday(&tv1, NULL);
-
-	/* In case when we have to give up making partial aggregation by GPU,
-	 * we take a fallback by CPU. It looks like to construct a special
-	 * partial aggregation being consist of individual rows; so here is
-	 * no performance benefit, but less frequency.
-	 */
-	if (gpas->curr_recheck)
+	while (gpas->curr_index < nitems)
 	{
-		cl_uint			nitems = pgstrom_nitems_rcstore(gpreagg->rcstore);
+		ProjectionInfo *projection = gpas->cps.ps.ps_ProjInfo;
+		ExprContext	   *econtext = gpas->cps.ps.ps_ExprContext;
+		TupleTableSlot *slot_in = gpas->scan_slot;
+		int				index = gpas->curr_index++;
+		ExprDoneCond	is_done;
 
-	retry:
-		if (gpas->curr_index < nitems)
+		/* Reset Per-tuple memory context */
+		ResetExprContext(econtext);
+
+		slot_in = pgstrom_rcstore_fetch_slot(slot_in,
+											 gpreagg->rcstore,
+											 index, false);
+		if (!projection)
 		{
-			ProjectionInfo *projection = gpas->cps.ps.ps_ProjInfo;
-			ExprContext	   *econtext = gpas->cps.ps.ps_ExprContext;
-			TupleTableSlot *slot_in = gpas->scan_slot;
-			TupleTableSlot *slot_out;
-			int				index = gpas->curr_index++;
-			ExprDoneCond	is_done;
-
-			/* reset per-tuple memory context */
-			ResetExprContext(econtext);
-
-			slot_in = pgstrom_rcstore_fetch_slot(slot_in,
-												 gpreagg->rcstore,
-												 index, false);
-			if (!projection)
-			{
-				/* may really happen? */
-				ExecCopySlot(slot, slot);
-				return true;
-			}
-			econtext->ecxt_outertuple = slot_in;
-			slot_out = ExecProject(projection, &is_done);
-			Assert(slot_out == slot);
-			if (is_done == ExprEndResult)
-				goto retry;
-			gpas->cps.ps.ps_TupFromTlist = (is_done == ExprMultipleResult);
-
-			return true;
+			slot = gpas->cps.ps.ps_ResultTupleSlot;
+			ExecCopySlot(slot, slot_in);
+			break;
 		}
-		return false;
+		else
+		{
+			econtext->ecxt_outertuple = slot_in;
+			slot = ExecProject(projection, &is_done);
+			if (is_done == ExprEndResult)
+			{
+				slot = NULL;
+				continue;
+			}
+			gpas->cps.ps.ps_TupFromTlist = (is_done == ExprMultipleResult);
+		}
+		break;
 	}
+	if (gpas->pfm.enabled)
+	{
+		gettimeofday(&tv2, NULL);
+		gpas->pfm.time_move_slot += timeval_diff(&tv1, &tv2);
+	}
+	return slot;
+}
+
+static TupleTableSlot *
+gpupreagg_next_tuple(GpuPreAggState *gpas)
+{
+	pgstrom_gpupreagg  *gpreagg = gpas->curr_chunk;
+	kern_data_store	   *kds = gpreagg->kds_dst;
+	TupleTableSlot	   *slot = NULL;
+	TupleDesc			tupdesc;
+
+	if (gpas->curr_recheck)
+		return gpupreagg_next_tuple_fallback(gpas);
 
 	if (gpas->curr_index < kds->nitems)
 	{
-		int			i, j = gpas->curr_index++;
-		int			attlen;
-		cl_uint		cs_offset;
+		int				i, j = gpas->curr_index++;
+		int				attlen;
+		cl_uint			cs_offset;
+		struct timeval	tv1, tv2;
+
+		if (gpas->pfm.enabled)
+			gettimeofday(&tv1, NULL);
+
+		slot = gpas->cps.ps.ps_ResultTupleSlot;
+		tupdesc = slot->tts_tupleDescriptor;
+		Assert(kds->column_form && kds->ncols == tupdesc->natts);
+
+		if (gpas->pfm.enabled)
+			gettimeofday(&tv1, NULL);
 
 		ExecStoreAllNullTuple(slot);
 		for (i=0; i < tupdesc->natts; i++)
@@ -2330,27 +2353,24 @@ gpupreagg_next_tuple(GpuPreAggState *gpas, TupleTableSlot *slot)
 				slot->tts_values[i] = PointerGetDatum(vl_ptr);
 			}
 		}
-		retval = true;
-	}
 
-	if (gpas->pfm.enabled)
-	{
-		gettimeofday(&tv2, NULL);
-		gpas->pfm.time_move_slot += timeval_diff(&tv1, &tv2);
+		if (gpas->pfm.enabled)
+		{
+			gettimeofday(&tv2, NULL);
+			gpas->pfm.time_move_slot += timeval_diff(&tv1, &tv2);
+		}
 	}
-	return retval;
+	return slot;
 }
 
 static TupleTableSlot *
 gpupreagg_exec(CustomPlanState *node)
 {
 	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
-	TupleTableSlot	   *slot = gpas->cps.ps.ps_ResultTupleSlot;
+	TupleTableSlot	   *slot = NULL;
 	pgstrom_gpupreagg  *gpreagg;
 
-	ExecClearTuple(slot);
-	while (!gpas->curr_chunk ||
-		   !gpupreagg_next_tuple(gpas, slot))
+	while (!gpas->curr_chunk || !(slot = gpupreagg_next_tuple(gpas)))
 	{
 		pgstrom_message	   *msg;
 		dlist_node		   *dnode;
