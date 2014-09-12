@@ -207,9 +207,13 @@ CREATE FUNCTION pgstrom.psum(int8)
   RETURNS int8
   AS 'MODULE_PATHNAME', 'gpupreagg_psum_int'
   LANGUAGE C CALLED ON NULL INPUT;
+CREATE FUNCTION pgstrom.psum(float4)
+  RETURNS float4
+  AS 'MODULE_PATHNAME', 'gpupreagg_psum_float4'
+  LANGUAGE C CALLED ON NULL INPUT;
 CREATE FUNCTION pgstrom.psum(float8)
   RETURNS float8
-  AS 'MODULE_PATHNAME', 'gpupreagg_psum_float'
+  AS 'MODULE_PATHNAME', 'gpupreagg_psum_float8'
   LANGUAGE C CALLED ON NULL INPUT;
 CREATE FUNCTION pgstrom.psum_x2(float8)
   RETURNS float8
@@ -276,6 +280,18 @@ CREATE AGGREGATE pgstrom.sum(int8)
   stype = int8[],
   finalfunc = pgstrom.sum_int8_final,
   initcond = '{0,0}'
+);
+
+CREATE FUNCTION pgstrom.avg_numeric_accum(internal, int4, int8)
+  RETURNS internal
+  AS 'MODULE_PATHNAME', 'pgstrom_avg_numeric_accum'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE AGGREGATE pgstrom.avg_numeric(int4, int8)
+(
+  sfunc = pgstrom.avg_numeric_accum,
+  stype = internal,
+  finalfunc = pg_catalog.numeric_avg
 );
 
 CREATE FUNCTION pgstrom.sum_float8_accum(float8[], int4, float8)

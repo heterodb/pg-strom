@@ -220,8 +220,8 @@ pgstrom_strerror(cl_int errcode)
 			return "out of shared memory";
 		case StromError_OutOfMemory:
 			return "out of host memory";
-		case StromError_DivisionByZero:
-			return "division by zero";
+		case StromError_ReCheckByCPU:
+			return "to be re-checked by CPU";
 		case StromError_DataStoreCorruption:
 			return "row/column store is corrupted";
 		case StromError_DataStoreNoSpace:

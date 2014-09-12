@@ -113,8 +113,9 @@ typedef struct
 	cl_char			isnull;
 	cl_char			__padding__[3];
 	union {
-		cl_uint		int_val;
-		cl_ulong	long_val;
+		cl_short	short_val;
+		cl_int		int_val;
+		cl_long		long_val;
 		cl_float	float_val;
 		cl_double	double_val;
 	};
@@ -141,23 +142,21 @@ pg_common_vstore(__private cl_int *errcode,
 	/* only column-store can be written in the kernel space */
 	if (!kds->column_form)
 	{
-		if (!StromErrorIsSignificant(*errcode))
-			*errcode = StromError_DataStoreCorruption;
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 		return NULL;
 	}
 	/* out of range? */
 	if (colidx >= kds->ncols || rowidx >= kds->nrooms)
 	{
-		if (!StromErrorIsSignificant(*errcode))
-			*errcode = StromError_DataStoreOutOfRange;
+		STROM_SET_ERROR(errcode, StromError_DataStoreOutOfRange);
 		return NULL;
 	}
 	cmeta = kds->colmeta[colidx];
 	/* only null can be allowed to store value on invalid column */
 	if (!cmeta.attvalid)
 	{
-		if (!isnull && !StromErrorIsSignificant(*errcode))
-			*errcode = StromError_DataStoreCorruption;
+		if (!isnull)
+			STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 		return NULL;
 	}
 
@@ -170,10 +169,7 @@ pg_common_vstore(__private cl_int *errcode,
 		if (!cmeta.attnotnull)
 			atomic_and(nullmap, ~nullmask);
 		else
-		{
-			if (!StromErrorIsSignificant(*errcode))
-				*errcode = StromError_DataStoreCorruption;
-		}
+			STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 		return NULL;
 	}
 
@@ -220,16 +216,26 @@ pg_common_vstore(__private cl_int *errcode,
 		if (cs_addr)										\
 		{													\
 			cl_uint		vl_offset							\
-				= (cl_uint)((uintptr_t)datum.value -		\
-							(uintptr_t)ktoast);				\
+				= (cl_uint)((__global char *)datum.value -	\
+							(__global char *)ktoast);		\
 			if (ktoast->length == TOASTBUF_MAGIC)			\
 				vl_offset -= ktoast->coldir[colidx];		\
-															\
 			*cs_addr = vl_offset;							\
 		}													\
 	}
 
+/* macro to check overflow on accumlate operation*/
+#define CHECK_OVERFLOW_INT(x, y)				\
+	((((x) < 0) == ((y) < 0)) && (((x) + (y) < 0) != ((x) < 0)))
+	
+#define CHECK_OVERFLOW_FLOAT(x, y)				\
+	(isinf((x) + (y)) && !isinf(x) && !isinf(y))
+
 /* built-in declarations */
+#ifndef PG_INT2_TYPE_DEFINED
+#define PG_INT2_TYPE_DEFINED
+STROMCL_SIMPLE_TYPE_TEMPLATE(int2,cl_short)
+#endif
 #ifndef PG_INT4_TYPE_DEFINED
 #define PG_INT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int4,cl_int)
@@ -239,6 +245,7 @@ STROMCL_SIMPLE_TYPE_TEMPLATE(int4,cl_int)
 STROMCL_SIMPLE_TYPE_TEMPLATE(int8,cl_long)
 #endif
 
+STROMCL_SIMPLE_VARSTORE_TEMPLATE(int2,cl_short);
 STROMCL_SIMPLE_VARSTORE_TEMPLATE(int4,cl_int);
 STROMCL_SIMPLE_VARSTORE_TEMPLATE(int8,cl_long);
 
@@ -296,18 +303,28 @@ gpupreagg_data_load(__local pagg_datum *pdatum,
 
 	if (colidx >= kds->ncols)
 	{
-		if (!StromErrorIsSignificant(*errcode))
-			*errcode = StromError_DataStoreCorruption;
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 		return;
 	}
 	cmeta = kds->colmeta[colidx];
 	/*
 	 * Right now, expected data length for running total of partial aggregate
-	 * are 4, or 8. Elasewhere, it may be a bug.
+	 * are 2, 4, or 8. Elasewhere, it may be a bug.
 	 */
-	if (cmeta.attlen == sizeof(cl_uint))		/* also, cl_float */
+	if (cmeta.attlen == sizeof(cl_short))
 	{
-		__global cl_uint   *addr = kern_get_datum(kds,ktoast,colidx,rowidx);
+		__global cl_short  *addr = kern_get_datum(kds,ktoast,colidx,rowidx);
+		if (!addr)
+			pdatum->isnull = true;
+		else
+		{
+			pdatum->isnull = false;
+			pdatum->short_val = *addr;
+		}
+	}
+	else if (cmeta.attlen == sizeof(cl_int))		/* also, cl_float */
+	{
+		__global cl_int   *addr = kern_get_datum(kds,ktoast,colidx,rowidx);
 		if (!addr)
 			pdatum->isnull	= true;
 		else
@@ -316,9 +333,9 @@ gpupreagg_data_load(__local pagg_datum *pdatum,
 			pdatum->int_val	= *addr;
 		}
 	}
-	else if (cmeta.attlen == sizeof(cl_ulong))	/* also, cl_double */
+	else if (cmeta.attlen == sizeof(cl_long))	/* also, cl_double */
 	{
-		__global cl_ulong  *addr = kern_get_datum(kds,ktoast,colidx,rowidx);
+		__global cl_long  *addr = kern_get_datum(kds,ktoast,colidx,rowidx);
 		if (!addr)
 			pdatum->isnull	= true;
 		else
@@ -329,8 +346,7 @@ gpupreagg_data_load(__local pagg_datum *pdatum,
 	}
 	else
 	{
-		if (!StromErrorIsSignificant(*errcode))
-			*errcode = StromError_DataStoreCorruption;
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 	}
 }
 
@@ -348,16 +364,23 @@ gpupreagg_data_store(__local pagg_datum *pdatum,
 
 	if (colidx >= kds->ncols)
 	{
-		if (!StromErrorIsSignificant(*errcode))
-			*errcode = StromError_DataStoreCorruption;
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 		return;
 	}
 	cmeta = kds->colmeta[colidx];
 	/*
 	 * Right now, expected data length for running total of partial aggregate
-	 * are 4, or 8. Elasewhere, it may be a bug.
+	 * are 2, 4, or 8. Elasewhere, it may be a bug.
 	 */
-	if (cmeta.attlen == sizeof(cl_uint))		/* also, cl_float */
+	if (cmeta.attlen == sizeof(cl_short))
+	{
+		pg_int2_t	temp;
+
+		temp.isnull = pdatum->isnull;
+		temp.value  = pdatum->short_val;
+		pg_int2_vstore(kds, ktoast, errcode, colidx, rowidx, temp);
+	}
+	else if (cmeta.attlen == sizeof(cl_uint))		/* also, cl_float */
 	{
 		pg_int4_t	temp;
 
@@ -375,8 +398,7 @@ gpupreagg_data_store(__local pagg_datum *pdatum,
 	}
 	else
 	{
-		if (!StromErrorIsSignificant(*errcode))
-			*errcode = StromError_DataStoreCorruption;
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 	}
 }
 
@@ -406,7 +428,7 @@ gpupreagg_data_move(__private cl_int *errcode,
 		!kds_dst->colmeta[colidx].attvalid ||
 		kds_src->colmeta[colidx].attlen != kds_dst->colmeta[colidx].attlen)
 	{
-		*errcode = StromError_DataStoreCorruption;
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 		return;
 	}
 
@@ -421,7 +443,7 @@ gpupreagg_data_move(__private cl_int *errcode,
 		if (!kds_dst->colmeta[colidx].attnotnull)
 			atomic_and(nullmap, ~nullmask);
 		else
-			*errcode = StromError_DataStoreCorruption;
+			STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 	}
 	else
 	{
@@ -433,32 +455,44 @@ gpupreagg_data_move(__private cl_int *errcode,
 			atomic_or(nullmap, nullmask);
 			cs_offset += STROMALIGN(bitmaplen(kds_dst->nrooms));
 		}
-		dest_addr = ((__global cl_char *) kds_dst +
-					 cs_offset + attlen * rowidx_dst);
-		switch (attlen)
+		dest_addr = (__global cl_char *) kds_dst + cs_offset;
+
+		if (attlen > 0)
 		{
-			case sizeof(cl_char):
-				*((__global cl_char *) dest_addr)
-					= *((__global cl_char *) src_datum);
-				break;
-			case sizeof(cl_short):
-				*((__global cl_short *) dest_addr)
-					= *((__global cl_short *) src_datum);
-				break;
-			case sizeof(cl_int):
-				*((__global cl_int *) dest_addr)
-					= *((__global cl_int *) src_datum);
-				break;
-			case sizeof(cl_long):
-				*((__global cl_long *) dest_addr)
-					= *((__global cl_long *) src_datum);
-				break;
-			default:
-				if (attlen > 0)
+			dest_addr += attlen * rowidx_dst;
+			switch (attlen)
+			{
+				case sizeof(cl_char):
+					*((__global cl_char *) dest_addr)
+						= *((__global cl_char *) src_datum);
+					break;
+				case sizeof(cl_short):
+					*((__global cl_short *) dest_addr)
+						= *((__global cl_short *) src_datum);
+					break;
+				case sizeof(cl_int):
+					*((__global cl_int *) dest_addr)
+						= *((__global cl_int *) src_datum);
+					break;
+				case sizeof(cl_long):
+					*((__global cl_long *) dest_addr)
+						= *((__global cl_long *) src_datum);
+					break;
+				default:
 					memcpy(dest_addr, src_datum, attlen);
-				else
-					*((__global cl_uint *) dest_addr) =
-						*((__global cl_uint *) src_datum);
+					break;
+			}
+		}
+		else
+		{
+			cl_uint		vl_offset =
+				(cl_uint)((__global cl_char *) src_datum -
+						  (__global cl_char *) ktoast);
+			if (ktoast->length == TOASTBUF_MAGIC)
+				vl_offset -= ktoast->coldir[colidx];
+
+			dest_addr += sizeof(cl_uint) * rowidx_dst;
+			*((__global cl_uint *) dest_addr) = vl_offset;
 		}
 	}
 }
@@ -467,6 +501,13 @@ gpupreagg_data_move(__private cl_int *errcode,
  * gpupreagg_preparation - It translaes an input kern_data_store (that
  * reflects outer relation's tupdesc) into the form of running total
  * and final result of gpupreagg (that reflects target-list of GpuPreAgg).
+ *
+ * Pay attention on a case when the kern_data_store with row-format is
+ * translated. Row-format does not have toast buffer because variable-
+ * length fields are in-place. gpupreagg_projection() treats the input
+ * kern_data_store as toast buffer of the later stage. So, caller has to
+ * give this kern_data_store (never used for data-store in the later
+ * stage) as toast buffer if the source kds has row-format.
  */
 __kernel void
 gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
@@ -616,11 +657,12 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 		if (!kds_src->colmeta[cindex].attvalid)
 			continue;
 
-		/* In case when column is a grouping-key (thus, no partial
-		 * aggregation is defined), all we need to do is copying
-		 * the data from source to destination.
+		/* In case when column is a grouping-key (thus, not a partial
+		 * aggregation), all we need to do is copying the data from
+		 * the source to the destination; no need to modify anything.
 		 */
-		if (pindex < pagg_natts && cindex != pagg_anums[pindex])
+		if (pagg_natts == 0 || /* case of no aggregate function */
+			(pindex < pagg_natts && cindex != pagg_anums[pindex]))
 		{
 			if (isNewID) {
 				gpupreagg_data_move(&errcode, kds_src, kds_dst, ktoast,

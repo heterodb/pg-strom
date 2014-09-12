@@ -31,6 +31,7 @@
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/syscache.h"
 #include <math.h>
 #include "pg_strom.h"
@@ -66,6 +67,7 @@ typedef struct
 
 	pgstrom_gpupreagg  *curr_chunk;
 	cl_uint				curr_index;
+	bool				curr_recheck;
 	cl_uint				num_running;
 	dlist_head			ready_chunks;
 
@@ -118,7 +120,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}
 	},
 	{ "avg",    1, {INT8OID},
-	  "s:avg",  2, {INT4OID, INT8OID},
+	  "s:avg_numeric",  2, {INT4OID, INT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}
 	},
 	{ "avg",    1, {FLOAT4OID},
@@ -147,7 +149,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	/* SUM(X) = SUM(PSUM(X)) */
 	{ "sum", 1, {INT2OID},   "s:sum", 1, {INT8OID},   {ALTFUNC_EXPR_PSUM}},
 	{ "sum", 1, {INT4OID},   "s:sum", 1, {INT8OID},   {ALTFUNC_EXPR_PSUM}},
-	{ "sum", 1, {FLOAT4OID}, "c:sum", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PSUM}},
+	{ "sum", 1, {FLOAT4OID}, "c:sum", 1, {FLOAT4OID}, {ALTFUNC_EXPR_PSUM}},
 	{ "sum", 1, {FLOAT8OID}, "c:sum", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PSUM}},
 	/* STDDEV(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
 	{ "stddev", 1, {FLOAT4OID},
@@ -942,7 +944,10 @@ gpupreagg_rewrite_expr(Agg *agg,
 			devtype_info   *dtype = pgstrom_devtype_lookup(type_oid);
 			Expr		   *var;
 
-			/* grouping key must comparison function in kernel */
+			/* grouping key must be a supported data type */
+			if (!dtype)
+				return false;
+			/* data type of the grouping key must have comparison function */
 			if (!OidIsValid(dtype->type_cmpfunc) ||
 				!pgstrom_devfunc_lookup(dtype->type_cmpfunc))
 				return false;
@@ -1191,6 +1196,8 @@ typeoid_to_pagg_field_name(Oid type_oid)
 {
 	switch (type_oid)
 	{
+		case INT2OID:
+			return "short_val";
 		case INT4OID:
 			return "int_val";
 		case INT8OID:
@@ -1294,13 +1301,26 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 			appendStringInfo(
 				&body,
 				"  case %d:\n"
+				"    if (!accum->isnull)\n"
+				"    {\n"
 				"      if (!newval->isnull)\n"
 				"      {\n"
+				"        if (CHECK_OVERFLOW_%s(accum->%s, newval->%s))\n"
+				"          STROM_SET_ERROR(errcode, StromError_ReCheckByCPU);\n"
 				"        accum->%s += newval->%s;\n"
-				"        accum->isnull = false;\n"
 				"      }\n"
+				"    }\n"
+				"    else if (!newval->isnull)\n"
+				"    {\n"
+				"      accum->%s = newval->%s;\n"
+				"      accum->isnull = false;\n"
+				"    }\n"
 				"    break;\n",
 				tle->resno - 1,
+				(type_oid == FLOAT4OID ||
+				 type_oid == FLOAT8OID) ? "FLOAT" : "INT",
+				field_name, field_name,
+				field_name, field_name,
 				field_name, field_name);
 		}
 		else if (strcmp(func_name, "pcov_x") == 0  ||
@@ -1315,13 +1335,24 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 			appendStringInfo(
 				&body,
 				"  case %d:\n"
-				"    if (!newval->isnull)\n"
+				"    if (!accum->isnull)\n"
 				"    {\n"
-				"      accum->%s += newval->%s;\n"
+				"      if (!newval->isnull)\n"
+				"      {\n"
+				"        if (CHECK_OVERFLOW_FLOAT(accum->%s, newval->%s))\n"
+				"          STROM_SET_ERROR(errcode, StromError_ReCheckByCPU);\n"
+				"        accum->%s += newval->%s;\n"
+				"      }\n"
+				"    }\n"
+				"    else if (!newval->isnull)\n"
+				"    {\n"
+				"      accum->%s = newval->%s;\n"
 				"      accum->isnull = false;\n"
 				"    }\n"
 				"    break;\n",
 				tle->resno - 1,
+				field_name, field_name,
+				field_name, field_name,
 				field_name, field_name);
 		}
 		else
@@ -1390,7 +1421,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 			dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
 			appendStringInfo(&body,
 							 "  /* projection for resource %u */\n",
-							 tle->resno);
+							 tle->resno - 1);
 			appendStringInfo(&body,
 							 "  pg_%s_vstore(kds_out,ktoast,errcode,\n"
 							 "               %u,rowidx_out,KVAR_%u);\n",
@@ -1703,8 +1734,12 @@ gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 	{
 		devtype_info   *dtype = lfirst(cell);
 
-		/* pg_XXX_vstore() of int4/int8 are declared as a built-in */
-		if (dtype->type_oid == INT4OID || dtype->type_oid == INT8OID)
+		/* pg_xxx_vstore() of int2/int4/int8 are declared as
+		 * a built-in data types; so should not be redefined.
+		 */
+		if (dtype->type_oid == INT2OID ||
+			dtype->type_oid == INT4OID ||
+			dtype->type_oid == INT8OID)
 			continue;
 
 		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
@@ -1798,9 +1833,10 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 				   agg_tlist, agg_quals,
 				   &startup_cost, &total_cost,
 				   &startup_sort, &total_sort);
+#if 0
 	if (agg->plan.total_cost < total_cost)
 		return;
-
+#endif
 	/*
 	 * construction of kernel code, according to the above query
 	 * rewrites.
@@ -1965,6 +2001,7 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 	 */
 	gpas->curr_chunk = NULL;
 	gpas->curr_index = 0;
+	gpas->curr_recheck = false;
 	dlist_init(&gpas->ready_chunks);
 
 	/*
@@ -2184,25 +2221,91 @@ gpupreagg_load_next_outer(GpuPreAggState *gpas)
 	return gpupreagg;
 }
 
-static bool
-gpupreagg_next_tuple(GpuPreAggState *gpas, TupleTableSlot *slot)
+/*
+ * gpupreagg_next_tuple_fallback - a fallback routine if GPU returned
+ * StromError_ReCheckByCPU, to suggest the backend to handle request
+ * by itself. A fallback process looks like construction of special
+ * partial aggregations that consist of individual rows; so here is
+ * no performance benefit once it happen.
+ */
+static TupleTableSlot *
+gpupreagg_next_tuple_fallback(GpuPreAggState *gpas)
 {
-	pgstrom_gpupreagg  *gpreagg = gpas->curr_chunk;
-	kern_data_store	   *kds = gpreagg->kds_dst;
-	TupleDesc			tupdesc = slot->tts_tupleDescriptor;
-	bool				retval = false;
-	struct timeval		tv1, tv2;
-
-	Assert(kds->column_form && kds->ncols == tupdesc->natts);
+	pgstrom_gpupreagg *gpreagg = gpas->curr_chunk;
+	cl_uint			nitems = pgstrom_nitems_rcstore(gpreagg->rcstore);
+	TupleTableSlot *slot = NULL;
+	struct timeval	tv1, tv2;
 
 	if (gpas->pfm.enabled)
 		gettimeofday(&tv1, NULL);
+	while (gpas->curr_index < nitems)
+	{
+		ProjectionInfo *projection = gpas->cps.ps.ps_ProjInfo;
+		ExprContext	   *econtext = gpas->cps.ps.ps_ExprContext;
+		TupleTableSlot *slot_in = gpas->scan_slot;
+		int				index = gpas->curr_index++;
+		ExprDoneCond	is_done;
+
+		/* Reset Per-tuple memory context */
+		ResetExprContext(econtext);
+
+		slot_in = pgstrom_rcstore_fetch_slot(slot_in,
+											 gpreagg->rcstore,
+											 index, false);
+		if (!projection)
+		{
+			slot = gpas->cps.ps.ps_ResultTupleSlot;
+			ExecCopySlot(slot, slot_in);
+			break;
+		}
+		else
+		{
+			econtext->ecxt_outertuple = slot_in;
+			slot = ExecProject(projection, &is_done);
+			if (is_done == ExprEndResult)
+			{
+				slot = NULL;
+				continue;
+			}
+			gpas->cps.ps.ps_TupFromTlist = (is_done == ExprMultipleResult);
+		}
+		break;
+	}
+	if (gpas->pfm.enabled)
+	{
+		gettimeofday(&tv2, NULL);
+		gpas->pfm.time_move_slot += timeval_diff(&tv1, &tv2);
+	}
+	return slot;
+}
+
+static TupleTableSlot *
+gpupreagg_next_tuple(GpuPreAggState *gpas)
+{
+	pgstrom_gpupreagg  *gpreagg = gpas->curr_chunk;
+	kern_data_store	   *kds = gpreagg->kds_dst;
+	TupleTableSlot	   *slot = NULL;
+	TupleDesc			tupdesc;
+
+	if (gpas->curr_recheck)
+		return gpupreagg_next_tuple_fallback(gpas);
 
 	if (gpas->curr_index < kds->nitems)
 	{
-		int			i, j = gpas->curr_index++;
-		int			attlen;
-		cl_uint		cs_offset;
+		int				i, j = gpas->curr_index++;
+		int				attlen;
+		cl_uint			cs_offset;
+		struct timeval	tv1, tv2;
+
+		if (gpas->pfm.enabled)
+			gettimeofday(&tv1, NULL);
+
+		slot = gpas->cps.ps.ps_ResultTupleSlot;
+		tupdesc = slot->tts_tupleDescriptor;
+		Assert(kds->column_form && kds->ncols == tupdesc->natts);
+
+		if (gpas->pfm.enabled)
+			gettimeofday(&tv1, NULL);
 
 		ExecStoreAllNullTuple(slot);
 		for (i=0; i < tupdesc->natts; i++)
@@ -2236,8 +2339,11 @@ gpupreagg_next_tuple(GpuPreAggState *gpas, TupleTableSlot *slot)
 					tcache_row_store	*trs =
 						(tcache_row_store *) gpreagg->rcstore;
 					Assert(trs->kern.length != TOASTBUF_MAGIC);
-
-					vl_ptr = ((char *)&trs->kern + vl_ofs);
+					/* adjustment */
+					vl_ofs -= STROMALIGN(offsetof(kern_data_store,
+												  colmeta[trs->kern.ncols]));
+					Assert(vl_ofs <= trs->kern.length);
+					vl_ptr = ((char *)&trs->kern) + vl_ofs;
 				}
 				else
 				{
@@ -2251,27 +2357,24 @@ gpupreagg_next_tuple(GpuPreAggState *gpas, TupleTableSlot *slot)
 				slot->tts_values[i] = PointerGetDatum(vl_ptr);
 			}
 		}
-		retval = true;
-	}
 
-	if (gpas->pfm.enabled)
-	{
-		gettimeofday(&tv2, NULL);
-		gpas->pfm.time_move_slot += timeval_diff(&tv1, &tv2);
+		if (gpas->pfm.enabled)
+		{
+			gettimeofday(&tv2, NULL);
+			gpas->pfm.time_move_slot += timeval_diff(&tv1, &tv2);
+		}
 	}
-	return retval;
+	return slot;
 }
 
 static TupleTableSlot *
 gpupreagg_exec(CustomPlanState *node)
 {
 	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
-	TupleTableSlot	   *slot = gpas->cps.ps.ps_ResultTupleSlot;
+	TupleTableSlot	   *slot = NULL;
 	pgstrom_gpupreagg  *gpreagg;
 
-	ExecClearTuple(slot);
-	while (!gpas->curr_chunk ||
-		   !gpupreagg_next_tuple(gpas, slot))
+	while (!gpas->curr_chunk || !(slot = gpupreagg_next_tuple(gpas)))
 	{
 		pgstrom_message	   *msg;
 		dlist_node		   *dnode;
@@ -2287,6 +2390,7 @@ gpupreagg_exec(CustomPlanState *node)
 			pgstrom_put_message(msg);
 			gpas->curr_chunk = NULL;
 			gpas->curr_index = 0;
+			gpas->curr_recheck = false;
 		}
 
 		/*
@@ -2352,29 +2456,30 @@ gpupreagg_exec(CustomPlanState *node)
 		/*
 		 * Raise an error, if significan error was reported
 		 */
-		if (gpreagg->msg.errcode != StromError_Success)
+		if (gpreagg->msg.errcode == StromError_Success)
+			gpas->curr_recheck = false;
+		else if (gpreagg->msg.errcode == StromError_ReCheckByCPU)
+			gpas->curr_recheck = true;	/* fallback by CPU */
+		else if (gpreagg->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
 		{
-			if (gpreagg->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
-			{
-				const char *buildlog
-					= pgstrom_get_devprog_errmsg(gpas->dprog_key);
-				const char *kern_source
-					= ((GpuPreAggPlan *)node->ps.plan)->kern_source;
+			const char *buildlog
+				= pgstrom_get_devprog_errmsg(gpas->dprog_key);
+			const char *kern_source
+				= ((GpuPreAggPlan *)node->ps.plan)->kern_source;
 
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
-								pgstrom_strerror(gpreagg->msg.errcode),
-								kern_source),
-						 errdetail("%s", buildlog)));
-			}
-			else
-			{
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("PG-Strom: OpenCL execution error (%s)",
-								pgstrom_strerror(gpreagg->msg.errcode))));
-			}
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
+							pgstrom_strerror(gpreagg->msg.errcode),
+							kern_source),
+					 errdetail("%s", buildlog)));
+		}
+		else
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("PG-Strom: OpenCL execution error (%s)",
+							pgstrom_strerror(gpreagg->msg.errcode))));
 		}
 		gpas->curr_chunk = gpreagg;
 		gpas->curr_index = 0;
@@ -3638,9 +3743,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		goto error;
 	}
 
-	if (!ktoast_head)
-		clgpa->m_ktoast = NULL;
-	else
+	if (ktoast_head)
 	{
 		tcache_column_store	*tcs = (tcache_column_store *) rcstore;
 		Size	toast_length = 0;
@@ -3669,6 +3772,22 @@ clserv_process_gpupreagg(pgstrom_message *message)
 			goto error;
 		}
 	}
+	else if (StromTagIs(rcstore, TCacheRowStore))
+	{
+		/* once a preparation done, kds_in shall be used as a toast buffer
+		 * of the later stage if row-format. So, we deal with ktoast as
+		 * as alias of the later stage.
+		 */
+		rc = clRetainMemObject(clgpa->m_kds_in);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clRetainMemObject: %s", opencl_strerror(rc));
+			goto error;
+		}
+		clgpa->m_ktoast = clgpa->m_kds_in;
+	}
+	else
+		clgpa->m_ktoast = NULL;	/* case of fixed-length only column-format */
 
 	/*
 	 * Next, enqueuing DMA send requests, prior to kernel execution.
@@ -3894,7 +4013,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 							 length,
 							 &gpreagg->kern.status,
 							 1,
-							 &clgpa->events[clgpa->ev_index - 2],
+							 &clgpa->events[clgpa->ev_index - 1],
 							 &clgpa->events[clgpa->ev_index]);
 	if (rc != CL_SUCCESS)
 	{
@@ -3977,6 +4096,7 @@ gpupreagg_partial_nrows(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_INT32(1);
 }
+PG_FUNCTION_INFO_V1(gpupreagg_partial_nrows);
 
 /* gpupreagg_pseudo_expr - placeholder function that returns the supplied
  * variable as is (even if it is NULL). Used to MIX(), MAX() placeholder.
@@ -4002,14 +4122,24 @@ gpupreagg_psum_int(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(gpupreagg_psum_int);
 
 Datum
-gpupreagg_psum_float(PG_FUNCTION_ARGS)
+gpupreagg_psum_float4(PG_FUNCTION_ARGS)
+{
+	Assert(PG_NARGS() == 1);
+	if (PG_ARGISNULL(0))
+		PG_RETURN_FLOAT4(0.0);
+	PG_RETURN_FLOAT4(PG_GETARG_FLOAT4(0));
+}
+PG_FUNCTION_INFO_V1(gpupreagg_psum_float4);
+
+Datum
+gpupreagg_psum_float8(PG_FUNCTION_ARGS)
 {
 	Assert(PG_NARGS() == 1);
 	if (PG_ARGISNULL(0))
 		PG_RETURN_FLOAT8(0.0);
 	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(0));
 }
-PG_FUNCTION_INFO_V1(gpupreagg_psum_float);
+PG_FUNCTION_INFO_V1(gpupreagg_psum_float8);
 
 Datum
 gpupreagg_psum_x2_float(PG_FUNCTION_ARGS)
@@ -4191,19 +4321,55 @@ Datum
 pgstrom_sum_int8_final(PG_FUNCTION_ARGS)
 {
 	ArrayType  *transarray = PG_GETARG_ARRAYTYPE_P(0);
-	int64	   *transdata = (int64 *) ARR_DATA_PTR(transarray);
+	int64      *transvalues;
 
-	if (ARR_NDIM(transarray) != 1 ||
-		ARR_DIMS(transarray)[0] != 2 ||
-		ARR_HASNULL(transarray) ||
-		ARR_ELEMTYPE(transarray) != INT8OID)
-		elog(ERROR, "Two elements int8 array is expected");
+	transvalues = check_int64_array(transarray, 2);
 
-	transdata = (int64 *) ARR_DATA_PTR(transarray);
-
-	PG_RETURN_INT64(transdata[1]);
+	PG_RETURN_INT64(transvalues[1]);
 }
 PG_FUNCTION_INFO_V1(pgstrom_sum_int8_final);
+
+/*
+ * pgstrom_avg_numeric_accum - It keeps an internal state using
+ * NumericAggState for int8, to prevent overflow. Unlike built-in
+ * implementation, it also takes "nrows" arguments in addition to
+ * the partial sum.
+ */
+/* copy from numeric.c */
+typedef struct NumericAggState
+{
+	bool		calcSumX2;		/* if true, calculate sumX2 */
+	MemoryContext agg_context;	/* context we're calculating in */
+	int64		N;				/* count of processed numbers */
+#if 0
+	NumericVar	sumX;			/* sum of processed numbers */
+	NumericVar	sumX2;			/* sum of squares of processed numbers */
+	int			maxScale;		/* maximum scale seen so far */
+	int64		maxScaleCount;	/* number of values seen with maximum scale */
+	int64		NaNcount;		/* count of NaN values (not included in N!) */
+#endif
+} NumericAggState;
+
+Datum
+pgstrom_avg_numeric_accum(PG_FUNCTION_ARGS)
+{
+	int32	nrows = PG_GETARG_INT32(1);
+	Datum	datum;
+	NumericAggState *state;
+
+	/* adjust argument */
+	fcinfo->nargs      = 2;
+	fcinfo->arg[1]     = fcinfo->arg[2];
+	fcinfo->argnull[1] = fcinfo->argnull[2];
+
+	datum = int8_accum(fcinfo);
+
+	state = (NumericAggState *) DatumGetPointer(datum);
+	if (state)
+		state->N += nrows - 1;
+	PG_RETURN_POINTER(state);
+}
+PG_FUNCTION_INFO_V1(pgstrom_avg_numeric_accum);
 
 /* logic copied from utils/adt/float.c */
 static inline float8 *
