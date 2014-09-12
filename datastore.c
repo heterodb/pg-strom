@@ -693,12 +693,30 @@ pgstrom_rcstore_fetch_slot(TupleTableSlot *slot,
 }
 
 
+
+
+
+bool
+pgstrom_fetch_data_store(TupleTableSlot *slot,
+						 pgstrom_data_store *pds,
+						 int rowidx, bool use_copy)
+{
+	
+
+
+
+
+	return false;
+}
+
 void
 pgstrom_release_data_store(pgstrom_data_store *pds)
 {
+	kern_data_store	   *kds = pds->kds;
 	int		i;
 
-	for (i=0; i < pds->num_blocks; i++)
+	Assert(kds->nblocks < pds->max_blocks);
+	for (i=0; i < kds->nblocks; i++)
 	{
 		Page	block = pds->blocks[i];
 		Buffer	buffer;
@@ -721,7 +739,9 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 }
 
 pgstrom_data_store *
-pgstrom_create_data_store_row(TupleDesc tupdesc, double ntup_per_page)
+pgstrom_create_data_store_row(TupleDesc tupdesc,
+							  Size dstore_sz,
+							  double ntup_per_block)
 {
 	pgstrom_data_store *pds;
 	kern_data_store	   *kds;
@@ -732,11 +752,15 @@ pgstrom_create_data_store_row(TupleDesc tupdesc, double ntup_per_page)
 	cl_uint		nrooms;
 	int			i;
 
-	/* round-up required size of data-store into BLCKSZ alignment */
-	ds_size = pgstrom_chunk_size << 20;
-	max_blocks = ds_size / BLCKSZ;
-	nrooms = ntup_per_page * (double)max_blocks * 1.1;
+	/* size of data-store has to be aligned to BLCKSZ */
+	dstore_sz = TYPEALIGN(BLCKSZ, dstore_sz);
+	max_blocks = dstore_sz / BLCKSZ;
+	nrooms = (cl_uint)(ntup_per_block * (double)max_blocks * 1.1);
 
+	/* allocation of kern_data_store; all we need to allocate here
+	 * is base portion + array of rowitems, but no shared buffer page
+	 * itself because we kick DMA on the pages directly.
+	 */
 	baselen = STROMALIGN(offsetof(kern_data_store,
 								  colmeta[tupdesc->natts]));
 	required = baselen + sizeof(kern_rowitem) * nrooms;
@@ -746,8 +770,7 @@ pgstrom_create_data_store_row(TupleDesc tupdesc, double ntup_per_page)
 	/* update exact number of rooms available */
 	nrooms = (allocation - baselen) / sizeof(kern_rowitem);
 
-	/* initialize kern_data_store fields */
-	kds->length = ds_size;
+	kds->length = baselen;
 	kds->ncols = tupdesc->natts;
 	kds->nitems = 0;
 	kds->nrooms = nrooms;
@@ -763,7 +786,7 @@ pgstrom_create_data_store_row(TupleDesc tupdesc, double ntup_per_page)
 		kds->colmeta[i].rs_attnum = attr->attnum;
 	}
 	Assert((uintptr_t)(KERN_DATA_STORE_ROWITEMS(kds) + nrooms) <=
-		   (uintptr_t)kds + allocation);
+		   (uintptr_t)(kds) + allocation);
 
 	/* allocation of pgstrom_data_store */
 	required = offsetof(pgstrom_data_store, blocks[max_blocks]);
@@ -778,18 +801,18 @@ pgstrom_create_data_store_row(TupleDesc tupdesc, double ntup_per_page)
 	pds->refcnt = 1;
 	pds->kds = kds;
 	dlist_init(&pds->ktoast);
-	pds->num_blocks = 0;
 	pds->max_blocks = max_blocks;
 
 	return pds;
 }
 
 pgstrom_data_store *
-pgstrom_create_data_store_column(TupleDesc tupdesc, Bitmapset *attr_refs)
+pgstrom_create_data_store_column(TupleDesc tupdesc,
+								 Size dstore_sz,
+								 Bitmapset *attr_refs)
 {
 	pgstrom_data_store *pds;
 	kern_data_store	   *kds;
-	Size		ds_size = (pgstrom_chunk_size << 20);
 	Size		required;
 	Size		cs_offset;
 	cl_uint		unitsz = 0;
@@ -818,10 +841,10 @@ pgstrom_create_data_store_column(TupleDesc tupdesc, Bitmapset *attr_refs)
 			unitsz += sizeof(cl_uint) * (STROMALIGN_LEN * BITS_PER_BYTE);
 	}
 	/* note that unitsz is size per STROMALIGN_LEN * BITS_PER_BYTE rows! */
-	nrooms = ((ds_size - cs_offset) / unitsz);
+	nrooms = ((dstore_sz - cs_offset) / unitsz);
 	required = cs_offset + nrooms * unitsz;
 	nrooms *= STROMALIGN_LEN * BITS_PER_BYTE;
-	Assert(required <= ds_size);
+	Assert(required <= dstore_sz);
 
 	kds = pgstrom_shmem_alloc(required);
 	if (!kds)
@@ -867,7 +890,6 @@ pgstrom_create_data_store_column(TupleDesc tupdesc, Bitmapset *attr_refs)
 	pds->refcnt = 1;
 	pds->kds = kds;
 	dlist_init(&pds->ktoast);
-	pds->num_blocks = 0;
 	pds->max_blocks = 0;
 
 	return pds;
@@ -910,7 +932,7 @@ pgstrom_put_data_store(pgstrom_data_store *pds)
 int
 pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 								Relation rel, BlockNumber blknum,
-								Snapshot snapshot)
+								Snapshot snapshot, bool page_prune)
 {
 	kern_data_store	*kds = pds->kds;
 	kern_rowitem *kri;
@@ -922,11 +944,10 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 	ItemId		lpp;
 	bool		all_visible;
 
+	/* only row-store can block read */
 	Assert(!pds->kds->is_column);
-
-	/* no more blocks available */
-	if (pds->num_blocks == pds->max_blocks)
-		return -1;
+	/* we never use all the block slots */
+	Assert(kds->nblocks < pds->max_blocks);
 
 	CHECK_FOR_INTERRUPTS();
 
@@ -935,42 +956,27 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 	/* Just like heapgetpage(), however, jobs we focus on is OLAP workload,
 	 * so it's uncertain whether we should vacuum the page here.
 	 */
-	heap_page_prune_opt(rel, buffer);
+	if (page_prune)
+		heap_page_prune_opt(rel, buffer);
 
-	/* we check tuple's visibility under the shared lock */
+	/* we will check tuple's visibility under the shared lock */
 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
 	page = (Page) BufferGetPage(buffer);
 	lines = PageGetMaxOffsetNumber(page);
 	ntup = 0;
 
-	/* check whether we have enough slot for rowitems. if not, it shall
-	 * be expanded to be able to host all the potential tuples.
+	/* Check whether we have enough rooms to store expected rowitems
+	 * and shared buffer pages, any mode.
+	 * If not, we have to inform the caller this block shall be loaded
+	 * on the next data-store.
 	 */
-	if (kds->nitems + lines > kds->nrooms)
+	if (kds->nitems + lines > kds->nrooms ||
+		STROMALIGN(offsetof(kern_data_store, colmeta[kds->ncols])) +
+		STROMALIGN(sizeof(kern_rowitem) * (kds->nitems + lines)) +
+		BLCKSZ * kds->nblocks >= BLCKSZ * pds->max_blocks)
 	{
-		kern_data_store *kds_new;
-		Size		required;
-		cl_uint		nrooms = kds->nrooms;
-
-		required = STROMALIGN(offsetof(kern_data_store,
-									   colmeta[kds->ncols]));
-		while (kds->nitems + lines > nrooms)
-			nrooms += nrooms;
-		required = STROMALIGN(sizeof(kern_rowitem) * nrooms);
-
-		kds_new = pgstrom_shmem_alloc(required);
-		if (!kds_new)
-		{
-			UnlockReleaseBuffer(buffer);
-			elog(ERROR, "out of shared memory");
-		}
-		memcpy(kds_new, kds,
-			   STROMALIGN(offsetof(kern_data_store,
-								   colmeta[kds->ncols])) +
-			   sizeof(kern_rowitem) * kds->nitems);
-		pgstrom_shmem_free(kds);
-		kds_new->nrooms = nrooms;
-		kds = pds->kds = kds_new;
+		UnlockReleaseBuffer(buffer);
+		return -1;
 	}
 
 	/*
@@ -1008,7 +1014,7 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 		if (!valid)
 			continue;
 
-		kri->block_id = pds->num_blocks;
+		kri->block_id = kds->nblocks;
 		kri->item_id = lineoff;
 		kri++;
 		ntup++;
@@ -1017,6 +1023,11 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 	Assert(ntup <= MaxHeapTuplesPerPage);
 	Assert(kds->nitems + ntup <= kds->nrooms);
 	kds->nitems += ntup;
+
+	/* TODO: we have to copy the contents of shared-buffer if it is
+	 * private buffer, thus assigned of the private memory area
+	 */
+	pds->blocks[kds->nblocks++] = page;
 
 	return ntup;
 }

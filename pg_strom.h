@@ -130,10 +130,6 @@ typedef enum {
 	StromTag_DevProgram = 1001,
 	StromTag_MsgQueue,
 	StromTag_ParamBuf,
-	StromTag_TCacheHead,
-	StromTag_TCacheRowStore,
-	StromTag_TCacheColumnStore,
-	StromTag_TCacheToastBuf,
 	StromTag_DataStore,
 	StromTag_GpuScan,
 	StromTag_GpuHashJoin,
@@ -160,10 +156,6 @@ StromTagGetLabel(StromObject *sobject)
 		StromTagGetLabelEntry(DevProgram);
 		StromTagGetLabelEntry(MsgQueue);
 		StromTagGetLabelEntry(ParamBuf);
-		StromTagGetLabelEntry(TCacheHead);
-		StromTagGetLabelEntry(TCacheRowStore);
-		StromTagGetLabelEntry(TCacheColumnStore);
-		StromTagGetLabelEntry(TCacheToastBuf);
 		StromTagGetLabelEntry(DataStore);
 		StromTagGetLabelEntry(GpuScan);
 		StromTagGetLabelEntry(GpuPreAgg);
@@ -291,162 +283,6 @@ typedef struct devfunc_info {
 } devfunc_info;
 
 /*
- * T-Tree Columner Cache
- */
-struct tcache_head;
-
-/*
- * tcache_row_store - uncolumnized data buffer in row-format
- */
-typedef struct {
-	StromObject		sobj;	/* =StromTag_TCacheRowStore */
-	slock_t			refcnt_lock;
-	int				refcnt;
-	dlist_node		chain;
-	cl_uint			usage;
-	BlockNumber		blkno_max;
-	BlockNumber		blkno_min;
-	kern_row_store	kern;
-} tcache_row_store;
-
-/*
- * NOTE: shmem.c put a magic number to detect shared memory usage overrun.
- * So, we have a little adjustment for this padding.
- */
-#define ROWSTORE_DEFAULT_SIZE	(8 * 1024 * 1024 - SHMEM_ALLOC_COST)
-
-/*
- * tcache_toastbuf - toast buffer for each varlena column
- */
-typedef struct {
-	slock_t			refcnt_lock;
-	int				refcnt;
-	cl_uint			tbuf_length;
-	cl_uint			tbuf_usage;
-	cl_uint			tbuf_junk;
-	char			data[FLEXIBLE_ARRAY_MEMBER];
-} tcache_toastbuf;
-
-#define TCACHE_TOASTBUF_INITSIZE	((32 << 20) - SHMEM_ALLOC_COST)	/* 32MB */
-
-/*
- * tcache_column_store - a node or leaf entity of t-tree columnar cache
- */
-typedef struct {
-	StromObject		sobj;	/* StromTag_TCacheColumnStore */
-	slock_t			refcnt_lock;
-	int				refcnt;
-	uint32			ncols;	/* length of cdata[] (.incl uncached columns) */
-	uint32			nrows;	/* number of rows being cached */
-	uint32			njunks;	/* number of junk rows to be removed later */
-	bool			is_sorted;
-	BlockNumber		blkno_max;
-	BlockNumber		blkno_min;
-	ItemPointerData		*ctids;
-	HeapTupleHeaderData	*theads;
-	struct {
-		uint8	   *isnull;		/* nullmap, if NOT NULL is not set */
-		char	   *values;		/* array of values in columnar format */
-		tcache_toastbuf *toast;	/* toast buffer, if varlena variable */
-	} cdata[FLEXIBLE_ARRAY_MEMBER];
-} tcache_column_store;
-
-#define NUM_ROWS_PER_COLSTORE	(1 << 18)	/* 256K records */
-
-/*
- * tcache_node - leaf or 
- */
-struct tcache_node {
-	StromObject		sobj;	/* = StromTag_TCacheNode */
-	dlist_node		chain;
-	struct timeval	tv;		/* time being enqueued */
-	struct tcache_node *right;	/* node with greater ctids */
-	struct tcache_node *left;	/* node with less ctids */
-	int				r_depth;
-	int				l_depth;
-	/* above fields are protected by lwlock of tc_head */
-
-	slock_t			lock;
-	tcache_column_store	*tcs;
-};
-typedef struct tcache_node tcache_node;
-
-/*
- * tcache_head - a cache entry of individual relations
- */
-typedef struct {
-	StromObject		sobj;			/* StromTag_TCacheHead */
-	dlist_node		chain;			/* link to the hash or free list */
-	dlist_node		lru_chain;		/* link to the LRU list */
-	dlist_node		pending_chain;	/* link to the pending list */
-	int				refcnt;
-	/* above fields are protected by tc_common->lock */
-
-	/*
-	 * NOTE: regarding to locking
-	 *
-	 * tcache_head contains two types of stores; row and column.
-	 * Usually, newly written tuples are put on the row-store, then
-	 * it shall be moved to column-store by columnizer background
-	 * worker process.
-	 * To simplifies the implementation, we right now adopt a giant-
-	 * lock approach; regular backend code takes shared-lock during
-	 * its execution, but columnizer process takes exclusive-lock
-	 * during its translation. Usually, row -> column translation
-	 * shall be done chunk-by-chunk, so this shared lock does not
-	 * take so long time.
-	 * Also note that an writer operation within a particular row-
-	 * or column- store is protected by its individual spinlock,
-	 * but it never takes giant locks.
-	 */
-	LOCKTAG			locktag;	/* locktag of per execution (long) lock */
-	tcache_node	   *tcs_root;	/* root node of this cache */
-	
-
-	slock_t			lock;		/* short term locking for fields below */
-	bool			is_ready;	/* true, if tcache is already built */
-	dlist_head		free_list;	/* list of free tcache_node */
-	dlist_head		block_list;	/* list of blocks of tcache_node */
-	dlist_head		pending_list; /* list of pending tcahe_node */
-	dlist_head		trs_list; /* list of pending tcache_row_store */
-	tcache_row_store *trs_curr;	/* current available row-store */
-
-	/* fields below are read-only once constructed (no lock needed) */
-	Oid			datoid;		/* database oid of this cache */
-	Oid			reloid;		/* relation oid of this cache */
-	Bitmapset  *cached_attrs;	/* cached attributes in bitmap form */
-	TupleDesc	tupdesc;	/* duplication of TupleDesc of underlying table.
-							 * all the values, except for constr, are on
-							 * the shared memory region, so its visible to
-							 * all processes including columnizer.
-							 */
-	char		data[FLEXIBLE_ARRAY_MEMBER];
-} tcache_head;
-
-#define TCACHE_NODE_PER_BLOCK(row_natts, col_natts)						\
-	((SHMEM_BLOCKSZ - SHMEM_ALLOC_COST -								\
-	  MAXALIGN(offsetof(tcache_head, attrs[(row_natts)])) -				\
-	  MAXALIGN(sizeof(AttrNumber) * (col_natts))) / sizeof(tcache_node))
-#define TCACHE_NODE_PER_BLOCK_BARE					\
-	((SHMEM_BLOCKSZ - SHMEM_ALLOC_COST				\
-	  - sizeof(dlist_node)) / sizeof(tcache_node))
-
-/*
- * tcache_scandesc - 
- */
-typedef struct {
-	StromObject		sobj;		/* =StromTag_TCacheScanDesc */
-	Relation		rel;
-	HeapScanDesc	heapscan;	/* valid, if state == TC_STATE_NOW_BUILD */
-	bool			has_exlock;	/* true, if this scan hold exclusive lock */
-	cl_ulong		time_tcache_build;
-	tcache_head	   *tc_head;
-	BlockNumber		tcs_blkno_min;
-	BlockNumber		tcs_blkno_max;
-	tcache_row_store *trs_curr;
-} tcache_scandesc;
-
-/*
  * pgstrom_data_store - a data structure with row- or column- format
  * to exchange a data chunk between the host and opencl server.
  */
@@ -463,8 +299,7 @@ typedef struct {
 	 * Also note that the page may be a segment we acquired from shmem.c
 	 * if local buffer (because stored on the private memory area).
 	 */
-	int					num_blocks;
-	int					max_blocks;
+	int					max_blocks;		/* maximum # of blocks */
 	Page				blocks[FLEXIBLE_ARRAY_MEMBER];
 } pgstrom_data_store;
 
@@ -612,37 +447,26 @@ extern List *pgstrom_make_bulk_attmap(List *targetlist, Index varno);
 
 extern bool pgstrom_plan_can_multi_exec(const PlanState *ps);
 
-extern tcache_row_store *pgstrom_create_row_store(TupleDesc tupdesc);
-extern tcache_row_store *pgstrom_get_row_store(tcache_row_store *trs);
-extern void pgstrom_put_row_store(tcache_row_store *trs);
 
-extern tcache_toastbuf *pgstrom_create_toast_buffer(Size required);
-extern tcache_toastbuf *pgstrom_expand_toast_buffer(tcache_toastbuf *tbuf);
-extern tcache_toastbuf *pgstrom_get_toast_buffer(tcache_toastbuf *tbuf);
-extern void pgstrom_put_toast_buffer(tcache_toastbuf *tbuf);
-extern tcache_column_store *pgstrom_get_column_store(tcache_column_store *pcs);
-extern void pgstrom_put_column_store(tcache_column_store *pcs);
-extern TupleTableSlot *pgstrom_rcstore_fetch_slot(TupleTableSlot *slot,
-												  StromObject *rcstore,
-												  int rowidx,
-												  bool use_copy);
 
-extern void
-pgstrom_release_data_store(pgstrom_data_store *pds);
+extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
+									 pgstrom_data_store *pds,
+									 int rowidx, bool use_copy);
+extern void pgstrom_release_data_store(pgstrom_data_store *pds);
 extern pgstrom_data_store *
 pgstrom_create_data_store_row(TupleDesc tupdesc,
-							  Size ds_size,
-							  double ntup_per_page);
+							  Size dstore_sz, double ntup_per_block);
 extern pgstrom_data_store *
 pgstrom_create_data_store_column(TupleDesc tupdesc,
-								 Size ds_size,
+								 Size dstore_sz,
 								 Bitmapset *attr_refs);
 extern pgstrom_data_store *pgstrom_get_data_store(pgstrom_data_store *pds);
 extern void pgstrom_put_data_store(pgstrom_data_store *pds);
 extern int pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 										   Relation rel,
 										   BlockNumber blknum,
-										   Snapshot snapshot);
+										   Snapshot snapshot,
+										   bool page_prune);
 extern bool pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 											TupleTableSlot *slot);
 
@@ -794,44 +618,6 @@ extern bool pgstrom_codegen_available_expression(Expr *expr);
 extern void pgstrom_init_codegen(void);
 
 /*
- * tcache.c
- */
-extern tcache_scandesc *tcache_begin_scan(tcache_head *tc_head,
-										  Relation heap_rel);
-extern StromObject *tcache_scan_next(tcache_scandesc *tc_scan);
-extern StromObject *tcache_scan_prev(tcache_scandesc *tc_scan);
-extern void tcache_end_scan(tcache_scandesc *tc_scan);
-extern void tcache_abort_scan(tcache_scandesc *tc_scan);
-extern void tcache_rescan(tcache_scandesc *tc_scan);
-
-extern tcache_head *tcache_try_create_tchead(Oid reloid, Bitmapset *required);
-extern tcache_head *tcache_get_tchead(Oid reloid, Bitmapset *required);
-extern void tcache_put_tchead(tcache_head *tc_head);
-extern void tcache_abort_tchead(tcache_head *tc_head, Datum private);
-extern bool tcache_state_is_ready(tcache_head *tc_head);
-
-
-extern tcache_row_store *tcache_create_row_store(TupleDesc tupdesc);
-extern tcache_row_store *tcache_get_row_store(tcache_row_store *trs);
-extern void tcache_put_row_store(tcache_row_store *trs);
-extern bool tcache_row_store_insert_tuple(tcache_row_store *trs,
-										  HeapTuple tuple);
-extern void tcache_row_store_fixup_tcs_head(tcache_row_store *trs);
-
-extern tcache_column_store *tcache_get_column_store(tcache_column_store *tcs);
-extern void tcache_put_column_store(tcache_column_store *tcs);
-
-extern bool pgstrom_relation_has_synchronizer(Relation rel);
-extern Datum pgstrom_tcache_synchronizer(PG_FUNCTION_ARGS);
-
-
-extern Datum pgstrom_tcache_info(PG_FUNCTION_ARGS);
-extern Datum pgstrom_tcache_node_info(PG_FUNCTION_ARGS);
-
-extern void pgstrom_init_tcache(void);
-
-
-/*
  * main.c
  */
 extern bool	pgstrom_enabled;
@@ -878,57 +664,6 @@ extern const char *pgstrom_opencl_timelib_code;
  * Miscellaneous static inline functions
  *
  * ---------------------------------------------------------------- */
-
-/*
- * increment or decrement reference ounter or row- or column-store
- */
-static inline StromObject *
-pgstrom_get_rcstore(StromObject *sobject)
-{
-	StromObject	   *result;
-
-	if (StromTagIs(sobject, TCacheRowStore))
-	{
-		tcache_row_store *trs = (tcache_row_store *) sobject;
-		result = (StromObject *) pgstrom_get_row_store(trs);
-	}
-	else if (StromTagIs(sobject, TCacheColumnStore))
-	{
-		tcache_column_store *tcs = (tcache_column_store *) sobject;
-		result = (StromObject *) tcache_get_column_store(tcs);
-	}
-	else
-		elog(ERROR, "Bug? it's neither row nor column store");
-
-	return result;
-}
-
-static inline void
-pgstrom_put_rcstore(StromObject *sobject)
-{
-	if (StromTagIs(sobject, TCacheRowStore))
-		pgstrom_put_row_store((tcache_row_store *)sobject);
-	else if (StromTagIs(sobject, TCacheColumnStore))
-		tcache_put_column_store((tcache_column_store *)sobject);
-	else
-		elog(ERROR, "Bug? it's neither row nor column store");
-}
-
-static inline cl_uint
-pgstrom_nitems_rcstore(StromObject *sobject)
-{
-	cl_uint		nitems;
-
-	if (StromTagIs(sobject, TCacheRowStore))
-		nitems = ((tcache_row_store *) sobject)->kern.nrows;
-	else if (StromTagIs(sobject, TCacheColumnStore))
-		nitems = ((tcache_column_store *) sobject)->nrows;
-	else if (pgstrom_i_am_clserv)
-		nitems = 0;	/* tells caller rcstore is not valid */
-	else
-		elog(ERROR, "bug? it's neither row nor column store");
-	return nitems;
-}
 
 /* binary available pstrcpy() */
 static inline void *

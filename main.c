@@ -73,7 +73,7 @@ pgstrom_init_misc_guc(void)
 							&pgstrom_chunk_size,
 							15,
 							4,
-							128
+							128,
 							PGC_USERSET,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
