@@ -19,6 +19,7 @@
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/syslogger.h"
+#include "storage/bufmgr.h"
 #include "storage/ipc.h"
 #include "storage/shmem.h"
 #include "tcop/tcopprot.h"
@@ -145,6 +146,7 @@ static void
 init_opencl_context_and_shmem(void)
 {
 	Size	zone_length = LONG_MAX;
+	Size	curr_pos = 0;
 	cl_int	i, rc;
 
 	/*
@@ -177,9 +179,39 @@ init_opencl_context_and_shmem(void)
 				 opencl_strerror(rc));
 
 		if (zone_length > dev_info->dev_max_mem_alloc_size)
-			zone_length = dev_info->dev_max_mem_alloc_size;
+			zone_length = (dev_info->dev_max_mem_alloc_size &
+						   ~(1UL << 20 - 1));
 	}
+	/* Lock shared memory of PG-Strom's private area */
 	pgstrom_setup_shmem(zone_length, on_shmem_zone_callback);
+
+	/* Lock shared memory of shared buffer area */
+	for (curr_pos = 0;
+		 curr_pos < NBuffers * (Size) BLCKSZ;
+		 curr_pos += zone_length)
+	{
+		Size		length;
+		cl_mem		host_mem;
+		cl_int		rc;
+
+		length = Min(zone_length, NBuffers * (Size) BLCKSZ - curr_pos);
+
+		host_mem = clCreateBuffer(opencl_context,
+								  CL_MEM_READ_WRITE |
+								  CL_MEM_USE_HOST_PTR,
+								  length,
+								  BufferBlocks + curr_pos,
+								  &rc);
+		if (rc != CL_SUCCESS)
+			elog(ERROR, "clCreateBuffer failed on host memory (%p-%p): %s",
+				 BufferBlocks + curr_pos,
+				 BufferBlocks + curr_pos + length - 1,
+				 opencl_strerror(rc));
+	}
+	elog(LOG, "Shared Buffer: %p-%p was mapped (len: %luMB)",
+		 BufferBlocks,
+		 BufferBlocks + NBuffers * (Size) BLCKSZ,
+		 (NBuffers * (Size) BLCKSZ) >> 20);
 }
 
 /*
