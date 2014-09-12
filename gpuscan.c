@@ -200,7 +200,6 @@ gpuscan_add_scan_path(PlannerInfo *root,
 					  RangeTblEntry *rte)
 {
 	GpuScanPath	   *pathnode;
-	Relation		rel;
 	List		   *dev_quals = NIL;
 	List		   *host_quals = NIL;
 	Bitmapset	   *dev_attnums = NULL;
@@ -225,17 +224,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	if (get_rel_namespace(rte->relid) == PG_CATALOG_NAMESPACE)
 		return;
 
-	/* also, relation has to have synchronizer trigger */
-	rel = heap_open(rte->relid, NoLock);
-	if (!pgstrom_relation_has_synchronizer(rel))
-	{
-		heap_close(rel, NoLock);
-		elog(INFO, "no synchronizer!");
-		return;
-	}
-	heap_close(rel, NoLock);
-
-	/* check whether qualifier can run on GPU device */
+	/* check whether the qualifier can run on GPU device, or not */
 	memset(&context, 0, sizeof(codegen_context));
 	foreach (cell, baserel->baserestrictinfo)
 	{
@@ -528,19 +517,8 @@ gpuscan_finalize_plan(PlannerInfo *root,
 bool
 gpuscan_support_multi_exec(const CustomPlanState *cps)
 {
-	const GpuScanState *gss;
-
-	if (!IsA(cps, CustomPlanState) || cps->methods != &gpuscan_plan_methods)
-		return false;
-
 	if (cps->ps.ps_ProjInfo != NULL)
 		return false;
-
-	gss = (const GpuScanState *) cps;
-	if (gss->hybrid_scan)
-		return false;
-
-	elog(INFO, "now ready to run bulk-load");
 	return true;
 }
 
@@ -552,7 +530,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	GpuScanState   *gss;
 	TupleDesc		tupdesc;
 	List		   *tlist;
-	List		   *used_params = NIL;
+	//List		   *used_params = NIL;
 	Form_pg_class	rel_form;
 
 	/* gpuscan should not have inner/outer plan now */
@@ -619,7 +597,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	gss->curr_blknum = 0;
 	gss->last_blknum = RelationGetNumberOfBlocks(gss->scan_rel);
 	rel_form = RelationGetForm(gss->scan_rel);
-	gss->ntup_per_page = rel_form->reltupls / (float)rel_form->relpages;
+	gss->ntup_per_page = rel_form->reltuples / (float)rel_form->relpages;
 
 	/*
 	 * Setting up kernel program, if needed
@@ -683,11 +661,11 @@ static pgstrom_gpuscan *
 pgstrom_create_gpuscan(GpuScanState *gss, pgstrom_data_store *pds)
 {
 	pgstrom_gpuscan *gpuscan;
+	kern_data_store	*kds = pds->kds;
 	kern_resultbuf	*kresults;
-	cl_uint		nitems;
+	cl_uint		nitems = kds->nitems;
 	Size		length;
 
-	nitems = pgstrom_nitems_rcstore(rcstore);
 	length = (STROMALIGN(offsetof(pgstrom_gpuscan, kern.kparams)) +
 			  STROMALIGN(gss->kparams->length) +
 			  STROMALIGN(offsetof(kern_resultbuf, results[nitems])));
@@ -706,7 +684,7 @@ pgstrom_create_gpuscan(GpuScanState *gss, pgstrom_data_store *pds)
 		gpuscan->dprog_key = pgstrom_retain_devprog_key(gss->dprog_key);
 	else
 		gpuscan->dprog_key = 0;
-	gpuscan->rc_store = rcstore;
+	gpuscan->pds = pds;
 
 	/* copy kern_parambuf */
 	Assert(gss->kparams->length == STROMALIGN(gss->kparams->length));
@@ -720,23 +698,12 @@ pgstrom_create_gpuscan(GpuScanState *gss, pgstrom_data_store *pds)
 	kresults->nrels = 1;
 	kresults->nrooms = nitems;
 
-	/*
-	 * When GpuScan involves kernel execution, kern_data_store and
-	 * kern_toastbuf have to be adjusted according to the scale of
-	 * row-/column-store to be loaded.
-	 * Elsewhere, we presume all the records passed by device checks,
-	 * although we have no actual checks, In this case, the result
-	 * vrelation points all the records as visible ones.
-	 */
+	/* If GpuScan does not involve kernel execution, we treat this
+	 * chunk as all-visible. */
 	if (gss->dprog_key == 0)
 	{
 		kresults->all_visible = true;
 		kresults->nitems = nitems;
-	}
-	else
-	{
-		kparam_refresh_kds_head(&gpuscan->kern.kparams, rcstore, nitems);
-		kparam_refresh_ktoast_head(&gpuscan->kern.kparams, rcstore);
 	}
 	return gpuscan;
 }
@@ -748,6 +715,8 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	Relation			rel = gss->scan_rel;
 	TupleDesc			tupdesc = RelationGetDescr(rel);
 	Snapshot			snapshot = gss->cps.ps.state->es_snapshot;
+	Size				length;
+	pgstrom_data_store *pds;
 	struct timeval tv1, tv2;
 
 	/* no more blocks to read */
@@ -757,14 +726,15 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	if (gss->pfm.enabled)
 		gettimeofday(&tv1, NULL);
 
-	pds = pgstrom_create_data_store_row(tupdesc, gss->ntup_per_page);
+	length = (pgstrom_chunk_size << 20);
+	pds = pgstrom_create_data_store_row(tupdesc, length, gss->ntup_per_page);
 	PG_TRY();
 	{
 		while (gss->curr_blknum <= gss->last_blknum)
 		{
 			if (pgstrom_data_store_insert_block(pds, rel,
 												gss->curr_blknum,
-												snapshot) < 0)
+												snapshot, true) < 0)
 				break;
 			gss->curr_blknum++;
 		}
@@ -780,9 +750,17 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	/* track local object */
 	if (gpuscan)
 		pgstrom_track_object(&gpuscan->msg.sobj, 0);
-
+	/* update perfmon statistics */
+	if (gss->pfm.enabled)
+	{
+		gettimeofday(&tv2, NULL);
+		gss->pfm.time_to_load += timeval_diff(&tv1, &tv2);
+	}
 	return gpuscan;
 }
+
+#if 0
+/* pgstrom_data_store_insert_block already checks visibility */
 
 /*
  * gpuscan_check_tuple_visibility
@@ -923,16 +901,18 @@ gpuscan_check_tuple_visibility(GpuScanState *gss,
 
 	return true;
 }
+#endif
 
-static bool
-gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
+static TupleTableSlot *
+gpuscan_next_tuple(GpuScanState *gss)
 {
 	pgstrom_gpuscan	   *gpuscan = gss->curr_chunk;
 	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
-	Snapshot	snapshot = gss->cps.ps.state->es_snapshot;
-	cl_int		i_result;
-	bool		do_recheck = false;
-	struct timeval tv1, tv2;
+	Snapshot			snapshot = gss->cps.ps.state->es_snapshot;
+	TupleTableSlot	   *slot = NULL;
+	cl_int				i_result;
+	bool				do_recheck = false;
+	struct timeval		tv1, tv2;
 
 	if (!gpuscan)
 		return false;
@@ -942,10 +922,7 @@ gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
 
    	while (gss->curr_index < kresults->nitems)
 	{
-		StromObject	   *sobject = gpuscan->rc_store;
-
-		Assert(StromTagIs(sobject, TCacheRowStore) ||
-			   StromTagIs(sobject, TCacheColumnStore));
+		pgstrom_data_store *pds = gpuscan->pds;
 
 		if (kresults->all_visible)
 			i_result = ++gss->curr_index;
@@ -958,11 +935,11 @@ gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
 				do_recheck = true;
 			}
 		}
-		Assert(i_result > 0 && i_result <= kresults->nrooms);
+		Assert(i_result > 0 && i_result <= kresults->nitems);
 
-		if (!gpuscan_check_tuple_visibility(gss, sobject, i_result - 1,
-											snapshot, slot))
-			continue;
+		if (!pgstrom_fetch_data_store(gss->scan_slot,
+									  pds, i_result - 1, false))
+			elog(ERROR, "failed to fetch a record from pds: %d", i_result);
 
 		if (do_recheck)
 		{
@@ -973,21 +950,15 @@ gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
 			if (!ExecQual(gss->dev_quals, econtext, false))
 				continue;
 		}
-
-		if (gss->pfm.enabled)
-		{
-			gettimeofday(&tv2, NULL);
-			gss->pfm.time_post_exec += timeval_diff(&tv1, &tv2);
-		}
-		return true;
+		slot = gss->scan_slot;
+		break;
 	}
-	/* no tuples in this row/column-store any more */
 	if (gss->pfm.enabled)
 	{
 		gettimeofday(&tv2, NULL);
 		gss->pfm.time_post_exec += timeval_diff(&tv1, &tv2);
 	}
-	return false;
+	return slot;
 }
 
 static TupleTableSlot *

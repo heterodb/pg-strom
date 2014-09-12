@@ -385,7 +385,7 @@ kparam_refresh_ktoast_head(kern_parambuf *kparams,
 		kparams->poffset[1] = 0;	/* mark it as null */
 }
 #endif
-
+#if 0
 /*
  * pgstrom_get_row_store
  *
@@ -691,21 +691,57 @@ pgstrom_rcstore_fetch_slot(TupleTableSlot *slot,
 		elog(ERROR, "Bug? neither row- nor column-store");
 	return slot;
 }
+#endif
 
 
 
-
+#define IsSharedBuffer(PTR)						\
+	((uintptr_t)(PTR) >= (uintptr_t)(BufferBlocks) &&	\
+	 (uintptr_t)(PTR) < (uintptr_t)(BufferBlocks) + NBuffers * (Size) BLCKSZ)
 
 bool
 pgstrom_fetch_data_store(TupleTableSlot *slot,
 						 pgstrom_data_store *pds,
 						 int rowidx, bool use_copy)
 {
-	
+	kern_data_store	   *kds = pds->kds;
+
+	if (rowidx >= kds->nitems)
+		return false;	/* out of range */
+
+	if (!kds->is_column)
+	{
+		kern_rowitem   *ritem = KERN_DATA_STORE_ROWITEMS(kds) + rowidx;
+		Buffer			buffer;
+		Page			page;
+		ItemId			lpp;
+
+		Assert(ritem->block_id < kds->nblocks);
+		page = pds->blocks[ritem->block_id];
+		lpp = PageGetItemId(page, ritem->item_id);
+		Assert(ItemIdIsNormal(lpp));
+
+		tuple->t_data = (HeapTupleHeader) PageGetItem((Page) dp, lpp);
+		tuple->t_len = ItemIdGetLength(lpp);
+		ItemPointerSet(&(tuple->t_self), page, lineoff);
+
+
+		if (IsSharedBuffer(page))
+
+		if (!IsSharedBuffer(page))
+			buffer = InvalidBuffer;
+		else
+			buffer = ((uintptr_t)(page) -
+					  (uintptr_t)(BufferBlocks)) / BLCKSZ + 1;
+		/* lock buffer and  */
 
 
 
+	}
+	else
+	{
 
+	}
 	return false;
 }
 

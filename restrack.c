@@ -44,15 +44,13 @@ typedef struct {
 	Datum			private;
 } sobject_entry;
 
-#define IS_TRACKABLE_OBJECT(sobject)			\
-	(StromTagIs(sobject,MsgQueue) ||			\
-	 StromTagIs(sobject,DevProgram) ||			\
-	 StromTagIs(sobject,TCacheHead) ||			\
-	 StromTagIs(sobject,TCacheRowStore) ||		\
-	 StromTagIs(sobject,TCacheColumnStore) ||	\
-	 StromTagIs(sobject,GpuScan) ||				\
-	 StromTagIs(sobject,GpuPreAgg) ||			\
-	 StromTagIs(sobject,GpuHashJoin) ||			\
+#define IS_TRACKABLE_OBJECT(sobject)	\
+	(StromTagIs(sobject,MsgQueue)	||	\
+	 StromTagIs(sobject,DevProgram)	||	\
+	 StromTagIs(sobject,DataStore)	||	\
+	 StromTagIs(sobject,GpuScan)	||	\
+	 StromTagIs(sobject,GpuPreAgg)	||	\
+	 StromTagIs(sobject,GpuHashJoin)||	\
 	 StromTagIs(sobject,HashJoinTable))
 
 #define RESTRACK_HASHSZ		100
@@ -206,14 +204,10 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 				pgstrom_close_queue((pgstrom_queue *)sobject);
 			else if (StromTagIs(sobject, DevProgram))
 				pgstrom_put_devprog_key(PointerGetDatum(sobject));
-			else if (StromTagIs(sobject, TCacheHead))
-				tcache_abort_tchead((tcache_head *)sobject, private);
-			else if (StromTagIs(sobject, TCacheRowStore))
-				pgstrom_put_row_store((tcache_row_store *)sobject);
-			else if (StromTagIs(sobject, TCacheColumnStore))
-				tcache_put_column_store((tcache_column_store *)sobject);
 			else if (StromTagIs(sobject, HashJoinTable))
 				multihash_put_tables((pgstrom_multihash_tables *) sobject);
+			else if (StromTagIs(sobject, DataStore))
+				pgstrom_put_data_store((pgstrom_data_store *) sobject);
 			else
 			{
 				Assert(IS_TRACKABLE_OBJECT(sobject));
@@ -243,12 +237,7 @@ __pgstrom_track_object(const char *filename, int lineno,
 	Assert(IS_TRACKABLE_OBJECT(sobject));
 	PG_TRY();
 	{
-		ResourceReleasePhase	phase;
-
-		if (StromTagIs(sobject, TCacheHead))
-			phase = RESOURCE_RELEASE_BEFORE_LOCKS;
-		else
-			phase = RESOURCE_RELEASE_AFTER_LOCKS;
+		ResourceReleasePhase	phase = RESOURCE_RELEASE_AFTER_LOCKS;
 
 		tracker = restrack_get_entry(CurrentResourceOwner, phase, true);
 		so_entry = sobject_get_entry(CurrentResourceOwner,
@@ -263,17 +252,12 @@ __pgstrom_track_object(const char *filename, int lineno,
 			pgstrom_close_queue((pgstrom_queue *)sobject);
 		else if (StromTagIs(sobject, DevProgram))
 			pgstrom_put_devprog_key((Datum)sobject);
-		else if (StromTagIs(sobject, TCacheHead))
-			tcache_abort_tchead((tcache_head *)sobject, private);
-		else if (StromTagIs(sobject, TCacheRowStore))
-			pgstrom_put_row_store((tcache_row_store *)sobject);
-		else if (StromTagIs(sobject, TCacheColumnStore))
-			tcache_put_column_store((tcache_column_store *)sobject);
+		else if (StromTagIs(sobject, DataStore))
+			pgstrom_put_data_store((pgstrom_data_store *) sobject);
 		else if (StromTagIs(sobject, HashJoinTable))
 			multihash_put_tables((pgstrom_multihash_tables *) sobject);
 		else
 			pgstrom_put_message((pgstrom_message *)sobject);
-
 		/* also, tracker objects shall be backed to free-list */
 		if (tracker)
 			dlist_move_head(&tracker_free_list, &tracker->chain);
