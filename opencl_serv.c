@@ -207,11 +207,11 @@ init_opencl_context_and_shmem(void)
 				 BufferBlocks + curr_pos,
 				 BufferBlocks + curr_pos + length - 1,
 				 opencl_strerror(rc));
-		elog(LOG, "shared-buffer: %p-%p was mapped (len: %luMB)",
-			 BufferBlocks + curr_pos,
-			 BufferBlocks + curr_pos + length - 1,
-			 length >> 20);
 	}
+	elog(LOG, "Shared Buffer: %p-%p was mapped (len: %luMB)",
+		 BufferBlocks,
+		 BufferBlocks + NBuffers * (Size) BLCKSZ,
+		 (NBuffers * (Size) BLCKSZ) >> 20);
 }
 
 /*
