@@ -64,14 +64,15 @@ typedef struct
 	pgstrom_queue  *mqueue;
 	Datum			dprog_key;
 	kern_parambuf  *kparams;
+	bool			needs_grouping;
 
 	pgstrom_gpupreagg  *curr_chunk;
-	cl_uint				curr_index;
-	bool				curr_recheck;
-	cl_uint				num_running;
-	dlist_head			ready_chunks;
+	cl_uint			curr_index;
+	bool			curr_recheck;
+	cl_uint			num_running;
+	dlist_head		ready_chunks;
 
-	pgstrom_perfmon		pfm;		/* performance counter */
+	pgstrom_perfmon	pfm;		/* performance counter */
 } GpuPreAggState;
 
 /* declaration of static functions */
@@ -1999,6 +2000,7 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 	/*
 	 * init misc stuff
 	 */
+	gpas->needs_grouping = (gpreagg->numCols > 0);
 	gpas->curr_chunk = NULL;
 	gpas->curr_index = 0;
 	gpas->curr_recheck = false;
@@ -2071,6 +2073,7 @@ pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
     gpupreagg->msg.pfm.enabled = gpas->pfm.enabled;
 	/* other fields also */
 	gpupreagg->dprog_key = pgstrom_retain_devprog_key(gpas->dprog_key);
+	gpupreagg->needs_grouping = gpas->needs_grouping;
 	gpupreagg->rcstore = rcstore;
 	/*
 	 * Once a row-/column-store connected to the pgstrom_gpupreagg
@@ -3927,7 +3930,14 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	 *  gpupreagg_bitonic_local()
 	 *  gpupreagg_bitonic_merge()
 	 */
-	if(0 < nvalids)
+	if (!gpreagg->needs_grouping)
+	{
+		/* XXX - special case handling when GpuPreAgg does not contain
+		 * any grouping keys (typically, aggregate functions are used
+		 * without GROUP BY clause).
+		 */
+	}
+	else if (nvalids > 0)
 	{
 		const pgstrom_device_info *devinfo =
 			pgstrom_get_device_info(clgpa->dindex);
@@ -3948,7 +3958,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		launches = (nsteps + 1) * nsteps / 2 + nsteps + 1;
 
 		clgpa->kern_sort = calloc(launches, sizeof(cl_kernel));
-		if(clgpa->kern_sort == NULL) {
+		if (clgpa->kern_sort == NULL) {
 			goto error;
 		}
 

@@ -1003,6 +1003,7 @@ typedef struct
 {
 	pgstrom_message		msg;		/* = StromTag_GpuPreAgg */
 	Datum				dprog_key;	/* key of device program */
+	bool				needs_grouping;	/* true, if it needs grouping step */
 	StromObject		   *rcstore;	/* source row/column store as input */
 	kern_data_store	   *kds_dst;	/* result buffer of partial aggregate */
 	kern_gpupreagg		kern;		/* kernel portion to be sent */
