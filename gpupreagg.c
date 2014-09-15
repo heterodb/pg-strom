@@ -4357,15 +4357,19 @@ pgstrom_avg_numeric_accum(PG_FUNCTION_ARGS)
 	Datum	datum;
 	NumericAggState *state;
 
+	/* nrows should be a non-null and non-negative input */
+	if (PG_ARGISNULL(1) || nrows < 0)
+		elog(ERROR, "Bug? NULL or negative nrows was given");
+
 	/* adjust argument */
 	fcinfo->nargs      = 2;
 	fcinfo->arg[1]     = fcinfo->arg[2];
 	fcinfo->argnull[1] = fcinfo->argnull[2];
 
-	datum = int8_accum(fcinfo);
+	datum = int8_avg_accum(fcinfo);
 
 	state = (NumericAggState *) DatumGetPointer(datum);
-	if (state)
+	if (state && nrows > 0)
 		state->N += nrows - 1;
 	PG_RETURN_POINTER(state);
 }
