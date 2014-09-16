@@ -2766,6 +2766,7 @@ typedef struct
 	cl_int				dindex;
 	cl_program			program;
 	cl_kernel			kern_prep;
+	cl_kernel			kern_set_rindex;
 	cl_kernel		   *kern_sort;
 	cl_kernel			kern_pagg;
 	cl_int				kern_sort_nums;	/* number of sorting kernel */
@@ -2914,6 +2915,8 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 		clReleaseMemObject(clgpa->m_ktoast);
 	if (clgpa->kern_prep)
 		clReleaseKernel(clgpa->kern_prep);
+	if (clgpa->kern_set_rindex)
+		clReleaseKernel(clgpa->kern_set_rindex);
 	for (i=0; i < clgpa->kern_sort_nums; i++)
 		clReleaseKernel(clgpa->kern_sort[i]);
 	if (clgpa->kern_pagg)
@@ -3035,6 +3038,98 @@ clserv_launch_preagg_preparation(clstate_gpupreagg *clgpa, cl_uint nitems)
 		return rc;
 	}
 	clgpa->ev_kern_prep = clgpa->ev_index++;
+	clgpa->gpreagg->msg.pfm.num_kern_exec++;
+
+	return CL_SUCCESS;
+}
+
+static cl_int
+clserv_launch_set_rindex(clstate_gpupreagg *clgpa, cl_uint nvalids)
+{
+	cl_int		rc;
+	size_t		gwork_sz;
+	size_t		lwork_sz;
+
+
+	/* Return without dispatch the kernel function if no data in the chunk.
+	 */
+	if (nvalids == 0)
+		return CL_SUCCESS;
+
+	/* __kernel void
+	 * gpupreagg_set_rindex(__global kern_gpupreagg *kgpreagg,
+	 *                      __global kern_data_store *kds,
+	 *                      __local void *local_memory)
+	 */
+	clgpa->kern_set_rindex = clCreateKernel(clgpa->program,
+											"gpupreagg_set_rindex",
+											&rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	/* calculation of workgroup size with assumption of a device thread
+	 * consums "sizeof(cl_int)" local memory per thread.
+	 */
+	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
+									   clgpa->kern_set_rindex,
+									   clgpa->dindex,
+									   true,
+									   nvalids,
+									   sizeof(cl_uint)))
+	{
+		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
+		return StromError_OpenCLInternal;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_set_rindex,
+						0,		/* __global kern_gpupreagg *kgpreagg */
+						sizeof(cl_mem),
+						&clgpa->m_gpreagg);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_set_rindex,
+						1,		/* __global kern_data_store *kds_src */
+						sizeof(cl_mem),
+						&clgpa->m_kds_src);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_set_rindex,
+						2,		/* __local void *local_memory */
+						sizeof(cl_int) * lwork_sz,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
+								clgpa->kern_set_rindex,
+								1,
+								NULL,
+								&gwork_sz,
+                                &lwork_sz,
+								1,
+								&clgpa->events[clgpa->ev_index - 1],
+								&clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	clgpa->ev_index++;
 	clgpa->gpreagg->msg.pfm.num_kern_exec++;
 
 	return CL_SUCCESS;
@@ -3932,10 +4027,11 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	 */
 	if (!gpreagg->needs_grouping)
 	{
-		/* XXX - special case handling when GpuPreAgg does not contain
-		 * any grouping keys (typically, aggregate functions are used
-		 * without GROUP BY clause).
-		 */
+
+		rc = clserv_launch_set_rindex(clgpa, nvalids);
+		if (rc != CL_SUCCESS) {
+			goto error;
+		}
 	}
 	else if (nvalids > 0)
 	{
@@ -4071,6 +4167,8 @@ error:
 			clReleaseMemObject(clgpa->m_ktoast);
 		if (clgpa->kern_prep)
 			clReleaseKernel(clgpa->kern_prep);
+		if (clgpa->kern_set_rindex)
+			clReleaseKernel(clgpa->kern_set_rindex);
 		for (i=0; i < clgpa->kern_sort_nums; i++)
 			clReleaseKernel(clgpa->kern_sort[i]);
 		if (clgpa->kern_pagg)
