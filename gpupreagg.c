@@ -4126,7 +4126,7 @@ gpupreagg_psum_int(PG_FUNCTION_ARGS)
 {
 	Assert(PG_NARGS() == 1);
 	if (PG_ARGISNULL(0))
-		PG_RETURN_INT64(0);
+		PG_RETURN_NULL();
 	PG_RETURN_INT64(PG_GETARG_INT64(0));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_psum_int);
@@ -4136,7 +4136,7 @@ gpupreagg_psum_float4(PG_FUNCTION_ARGS)
 {
 	Assert(PG_NARGS() == 1);
 	if (PG_ARGISNULL(0))
-		PG_RETURN_FLOAT4(0.0);
+		PG_RETURN_NULL();
 	PG_RETURN_FLOAT4(PG_GETARG_FLOAT4(0));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_psum_float4);
@@ -4146,7 +4146,7 @@ gpupreagg_psum_float8(PG_FUNCTION_ARGS)
 {
 	Assert(PG_NARGS() == 1);
 	if (PG_ARGISNULL(0))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(0));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_psum_float8);
@@ -4156,7 +4156,7 @@ gpupreagg_psum_x2_float(PG_FUNCTION_ARGS)
 {
 	Assert(PG_NARGS() == 1);
 	if (PG_ARGISNULL(0))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(0) * PG_GETARG_FLOAT8(0));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_psum_x2_float);
@@ -4170,10 +4170,10 @@ gpupreagg_corr_psum_x(PG_FUNCTION_ARGS)
 	Assert(PG_NARGS() == 3);
 	/* Aggregate Filter */
 	if (PG_ARGISNULL(0) || !PG_GETARG_BOOL(0))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	/* NULL checks */
 	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(0));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_x);
@@ -4184,10 +4184,10 @@ gpupreagg_corr_psum_y(PG_FUNCTION_ARGS)
 	Assert(PG_NARGS() == 3);
 	/* Aggregate Filter */
 	if (PG_ARGISNULL(0) || !PG_GETARG_BOOL(0))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	/* NULL checks */
 	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(1));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_y);
@@ -4198,10 +4198,10 @@ gpupreagg_corr_psum_x2(PG_FUNCTION_ARGS)
 	Assert(PG_NARGS() == 3);
 	/* Aggregate Filter */
 	if (PG_ARGISNULL(0) || !PG_GETARG_BOOL(0))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	/* NULL checks */
 	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(0) * PG_GETARG_FLOAT8(0));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_x2);
@@ -4212,10 +4212,10 @@ gpupreagg_corr_psum_y2(PG_FUNCTION_ARGS)
 	Assert(PG_NARGS() == 3);
 	/* Aggregate Filter */
 	if (PG_ARGISNULL(0) || !PG_GETARG_BOOL(0))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	/* NULL checks */
 	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(1) * PG_GETARG_FLOAT8(1));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_y2);
@@ -4226,10 +4226,10 @@ gpupreagg_corr_psum_xy(PG_FUNCTION_ARGS)
 	Assert(PG_NARGS() == 3);
 	/* Aggregate Filter */
 	if (PG_ARGISNULL(0) || !PG_GETARG_BOOL(0))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	/* NULL checks */
 	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(0) * PG_GETARG_FLOAT8(1));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_xy);
