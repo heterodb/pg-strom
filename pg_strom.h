@@ -182,25 +182,30 @@ StromTagGetLabel(StromObject *sobject)
 typedef struct {
 	cl_bool		enabled;
 	cl_uint		num_samples;
-	cl_ulong	time_to_load;	/* time to load data from heap/cache/subplan */
-	cl_ulong	time_to_load_inner;	/* time to load inner scan */
-	cl_ulong	time_tcache_build;	/* time to build tcache */
-	cl_ulong	time_in_sendq;	/* waiting time in the server mqueue */
-	cl_ulong	time_kern_build;/* max time to build opencl kernel */
-	cl_ulong	bytes_dma_send;	/* bytes of DMA send */
-	cl_ulong	bytes_dma_recv;	/* bytes of DMA receive */
+	/*-- perfmon to load and materialize --*/
+	cl_ulong	time_inner_load;	/* time to load the inner relation */
+	cl_ulong	time_outer_load;	/* time to load the outer relation */
+	cl_ulong	time_materialize;	/* time to materialize the result */
+	/*-- perfmon for message exchanging --*/
+	cl_ulong	time_in_sendq;		/* waiting time in the server mqueue */
+	cl_ulong	time_in_recvq;		/* waiting time in the response mqueue */
+	cl_ulong	time_kern_build;	/* max time to build opencl kernel */
+	/*-- perfmon for DMA send/recv --*/
 	cl_uint		num_dma_send;	/* number of DMA send request */
 	cl_uint		num_dma_recv;	/* number of DMA receive request */
+	cl_ulong	bytes_dma_send;	/* bytes of DMA send */
+	cl_ulong	bytes_dma_recv;	/* bytes of DMA receive */
 	cl_ulong	time_dma_send;	/* time to send host=>device data */
-	cl_uint		num_prep_exec;	/* number of preprocess kernel execution */
-	cl_uint		num_kern_exec;	/* number of main kernel execution */
-	cl_ulong	time_prep_exec;	/* time to execute preprocess kernel */
-	cl_ulong	time_kern_exec;	/* time to execute main kernel */
 	cl_ulong	time_dma_recv;	/* time to receive device=>host data */
-	cl_ulong	time_in_recvq;	/* waiting time in the response mqueue */
-	cl_ulong	time_post_exec;	/* time to execute post GPU processing
-								 * like matelialization of hashjoin */
-	cl_ulong	time_move_slot;	/* time to move rows to slot from rcstore */
+	/*-- perfmon for kernel execution --*/
+	cl_uint		num_kern_exec;	/* number of main kernel execution */
+	cl_ulong	time_kern_exec;	/* time to execute main kernel */
+	/*-- (special perfmon for gpupreagg) --*/
+	cl_uint		num_kern_prep;	/* number of projection kernel execution */
+	cl_uint		num_kern_sort;	/* number of sort kernel execution */
+	cl_ulong	time_kern_prep;	/* time to execute projection kernel */
+	cl_ulong	time_kern_sort;	/* time to execute sort kernel */
+
 	struct timeval	tv;	/* result of gettimeofday(2) when enqueued */
 } pgstrom_perfmon;
 

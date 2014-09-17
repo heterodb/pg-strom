@@ -931,7 +931,6 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 			{
 				tcache_scandesc	*tc_scan = gss->tc_scan;
 
-				gss->pfm.time_tcache_build += tc_scan->time_tcache_build;
 				tcache_end_scan(tc_scan);
 				gss->tc_scan = NULL;
 			}
@@ -939,7 +938,7 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 		if (gss->pfm.enabled)
 		{
 			gettimeofday(&tv2, NULL);
-			gss->pfm.time_to_load += timeval_diff(&tv1, &tv2);
+			gss->pfm.time_outer_load += timeval_diff(&tv1, &tv2);
 		}
 		/*
 		 * Once a row-/column-store was successfully loaded, make up
@@ -1158,7 +1157,7 @@ gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
 		if (gss->pfm.enabled)
 		{
 			gettimeofday(&tv2, NULL);
-			gss->pfm.time_post_exec += timeval_diff(&tv1, &tv2);
+			gss->pfm.time_materialize += timeval_diff(&tv1, &tv2);
 		}
 		return true;
 	}
@@ -1166,7 +1165,7 @@ gpuscan_next_tuple(GpuScanState *gss, TupleTableSlot *slot)
 	if (gss->pfm.enabled)
 	{
 		gettimeofday(&tv2, NULL);
-		gss->pfm.time_post_exec += timeval_diff(&tv1, &tv2);
+		gss->pfm.time_materialize += timeval_diff(&tv1, &tv2);
 	}
 	return false;
 }
@@ -1686,7 +1685,6 @@ gpuscan_end(CustomPlanState *node)
 		 * tcache_end_scan() will release all the tc_node recursively,
 		 * if tcache is not ready.
 		 */
-		gss->pfm.time_tcache_build = gss->tc_scan->time_tcache_build;
 		tcache_end_scan(gss->tc_scan);
 	}
 
@@ -2129,7 +2127,6 @@ clserv_respond_gpuscan(cl_event event, cl_int ev_status, void *private)
 			+= (kern_exec_end - kern_exec_begin) / 1000;
 		gpuscan->msg.pfm.time_dma_recv
 			+= (dma_recv_end - dma_recv_begin) / 1000;
-
 	skip_perfmon:
 		if (rc != CL_SUCCESS)
 		{

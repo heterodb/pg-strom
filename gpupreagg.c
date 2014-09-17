@@ -2216,7 +2216,7 @@ gpupreagg_load_next_outer(GpuPreAggState *gpas)
 	if (gpas->pfm.enabled)
 	{
 		gettimeofday(&tv2, NULL);
-		gpas->pfm.time_to_load += timeval_diff(&tv1, &tv2);
+		gpas->pfm.time_outer_load += timeval_diff(&tv1, &tv2);
 	}
 	if (bulk)
 		gpupreagg = pgstrom_create_gpupreagg(gpas, bulk);
@@ -2277,7 +2277,7 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas)
 	if (gpas->pfm.enabled)
 	{
 		gettimeofday(&tv2, NULL);
-		gpas->pfm.time_move_slot += timeval_diff(&tv1, &tv2);
+		gpas->pfm.time_materialize += timeval_diff(&tv1, &tv2);
 	}
 	return slot;
 }
@@ -2364,7 +2364,7 @@ gpupreagg_next_tuple(GpuPreAggState *gpas)
 		if (gpas->pfm.enabled)
 		{
 			gettimeofday(&tv2, NULL);
-			gpas->pfm.time_move_slot += timeval_diff(&tv1, &tv2);
+			gpas->pfm.time_materialize += timeval_diff(&tv1, &tv2);
 		}
 	}
 	return slot;
@@ -2832,34 +2832,73 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 		gpreagg->msg.pfm.time_dma_send += (tv_end - tv_start) / 1000;
 
 		/*
-		 * Kernel execution time
+		 * Prep kernel execution time
 		 */
-		for (i = clgpa->ev_kern_prep; i <= clgpa->ev_kern_pagg; i++)
-		{
-			rc = clGetEventProfilingInfo(clgpa->events[i],
-										 CL_PROFILING_COMMAND_START,
-										 sizeof(cl_ulong),
-										 &temp,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			tv_start = Min(tv_start, temp);
+		i = clgpa->ev_kern_prep;
+		rc = clGetEventProfilingInfo(clgpa->events[i],
+									 CL_PROFILING_COMMAND_START,
+									 sizeof(cl_ulong),
+									 &tv_start,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+		rc = clGetEventProfilingInfo(clgpa->events[i],
+									 CL_PROFILING_COMMAND_END,
+									 sizeof(cl_ulong),
+									 &tv_end,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+		gpreagg->msg.pfm.num_kern_prep++;
+		gpreagg->msg.pfm.time_kern_prep += (tv_end - tv_start) / 1000;
 
-			rc = clGetEventProfilingInfo(clgpa->events[i],
-										 CL_PROFILING_COMMAND_END,
-										 sizeof(cl_ulong),
-										 &temp,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			tv_end = Max(tv_end, temp);
+		/*
+		 * Sort kernel execution time
+		 */
+		tv_start = ~0UL;
+		tv_end = 0;
+		for (i=clgpa->ev_kern_prep + 1; i < clgpa->ev_kern_pagg; i++)
+        {
+            rc = clGetEventProfilingInfo(clgpa->events[i],
+                                         CL_PROFILING_COMMAND_START,
+                                         sizeof(cl_ulong),
+                                         &temp,
+                                         NULL);
+            if (rc != CL_SUCCESS)
+                goto skip_perfmon;
+            tv_start = Min(tv_start, temp);
 
-			/* NOTE: time_kern_exec - sum of above difference will show
-			 * total cost of event synchronization between kernel launch.
-			 * Usually, it takes 10-20ms, so it makes sense to reduce
-			 * number of kernel execution.
-			 */
-		}
+            rc = clGetEventProfilingInfo(clgpa->events[i],
+                                         CL_PROFILING_COMMAND_END,
+                                         sizeof(cl_ulong),
+                                         &temp,
+                                         NULL);
+            if (rc != CL_SUCCESS)
+                goto skip_perfmon;
+            tv_end = Max(tv_end, temp);
+        }
+		gpreagg->msg.pfm.num_kern_sort++;
+		gpreagg->msg.pfm.time_kern_sort += (tv_end - tv_start) / 1000;
+
+		/*
+		 * Main kernel execution time
+		 */
+		i = clgpa->ev_kern_pagg;
+		rc = clGetEventProfilingInfo(clgpa->events[i],
+									 CL_PROFILING_COMMAND_START,
+									 sizeof(cl_ulong),
+									 &tv_start,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+		rc = clGetEventProfilingInfo(clgpa->events[i],
+									 CL_PROFILING_COMMAND_END,
+									 sizeof(cl_ulong),
+									 &tv_end,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+		gpreagg->msg.pfm.num_kern_exec++;
 		gpreagg->msg.pfm.time_kern_exec += (tv_end - tv_start) / 1000;
 
 		/*
@@ -2872,7 +2911,7 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 			rc = clGetEventProfilingInfo(clgpa->events[clgpa->ev_index - i],
 										 CL_PROFILING_COMMAND_START,
 										 sizeof(cl_ulong),
-										 &tv_start,
+										 &temp,
 										 NULL);
 			if (rc != CL_SUCCESS)
 				goto skip_perfmon;
@@ -2881,7 +2920,7 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 			rc = clGetEventProfilingInfo(clgpa->events[clgpa->ev_index - i],
 										 CL_PROFILING_COMMAND_END,
 										 sizeof(cl_ulong),
-										 &tv_end,
+										 &temp,
 										 NULL);
 			if (rc != CL_SUCCESS)
 				goto skip_perfmon;

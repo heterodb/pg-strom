@@ -341,24 +341,25 @@ pgstrom_perfmon_add(pgstrom_perfmon *pfm_sum, pgstrom_perfmon *pfm_item)
 		return;
 
 	pfm_sum->num_samples++;
-	pfm_sum->time_to_load	+= pfm_item->time_to_load;
-	pfm_sum->time_in_sendq	+= pfm_item->time_in_sendq;
-	pfm_sum->time_kern_build
-		= Max(pfm_sum->time_kern_build,
-			  pfm_item->time_kern_build);
-	pfm_sum->bytes_dma_send += pfm_item->bytes_dma_send;
-	pfm_sum->bytes_dma_recv += pfm_item->bytes_dma_recv;
-	pfm_sum->num_dma_send	+= pfm_item->num_dma_send;
-	pfm_sum->num_dma_recv	+= pfm_item->num_dma_recv;
-	pfm_sum->time_dma_send	+= pfm_item->time_dma_send;
-	pfm_sum->num_prep_exec	+= pfm_item->num_prep_exec;
-	pfm_sum->num_kern_exec	+= pfm_item->num_kern_exec;
-	pfm_sum->time_prep_exec	+= pfm_item->time_prep_exec;
-	pfm_sum->time_kern_exec	+= pfm_item->time_kern_exec;
-	pfm_sum->time_dma_recv	+= pfm_item->time_dma_recv;
-	pfm_sum->time_in_recvq	+= pfm_item->time_in_recvq;
-	pfm_sum->time_post_exec	+= pfm_item->time_post_exec;
-	pfm_sum->time_move_slot	+= pfm_item->time_move_slot;
+	pfm_sum->time_inner_load	+= pfm_item->time_inner_load;
+	pfm_sum->time_outer_load	+= pfm_item->time_outer_load;
+	pfm_sum->time_materialize	+= pfm_item->time_materialize;
+	pfm_sum->time_in_sendq		+= pfm_item->time_in_sendq;
+	pfm_sum->time_in_recvq		+= pfm_item->time_in_recvq;
+	pfm_sum->time_kern_build = Max(pfm_sum->time_kern_build,
+								   pfm_item->time_kern_build);
+	pfm_sum->num_dma_send		+= pfm_item->num_dma_send;
+	pfm_sum->num_dma_recv		+= pfm_item->num_dma_recv;
+	pfm_sum->bytes_dma_send		+= pfm_item->bytes_dma_send;
+	pfm_sum->bytes_dma_recv		+= pfm_item->bytes_dma_recv;
+	pfm_sum->time_dma_send		+= pfm_item->time_dma_send;
+	pfm_sum->time_dma_recv		+= pfm_item->time_dma_recv;
+	pfm_sum->num_kern_exec		+= pfm_item->num_kern_exec;
+	pfm_sum->time_kern_exec		+= pfm_item->time_kern_exec;
+	pfm_sum->num_kern_prep		+= pfm_item->num_kern_prep;
+	pfm_sum->num_kern_sort		+= pfm_item->num_kern_sort;
+	pfm_sum->time_kern_prep		+= pfm_item->time_kern_prep;
+	pfm_sum->time_kern_sort		+= pfm_item->time_kern_sort;
 }
 
 static char *
@@ -390,7 +391,8 @@ usecond_unitary_format(double usecond)
 void
 pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 {
-	char	buf[256];
+	bool		multi_kernel = false;
+	char		buf[256];
 
 	if (!pfm->enabled || pfm->num_samples == 0)
 		return;
@@ -398,28 +400,42 @@ pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 	/* common performance statistics */
 	ExplainPropertyInteger("number of requests", pfm->num_samples, es);
 
-	if (pfm->time_to_load_inner > 0)
+	if (pfm->time_inner_load > 0)
 	{
 		snprintf(buf, sizeof(buf), "%s",
-				 usecond_unitary_format((double)pfm->time_to_load_inner));
-		ExplainPropertyText("total time to inner load", buf, es);
+				 usecond_unitary_format((double)pfm->time_inner_load));
+		ExplainPropertyText("total time for inner load", buf, es);
 
 		snprintf(buf, sizeof(buf), "%s",
-				 usecond_unitary_format((double)pfm->time_to_load));
-		ExplainPropertyText("total time to outer load", buf, es);
+				 usecond_unitary_format((double)pfm->time_outer_load));
+		ExplainPropertyText("total time for outer load", buf, es);
 	}
 	else
 	{
 		snprintf(buf, sizeof(buf), "%s",
-				 usecond_unitary_format((double)pfm->time_to_load));
+				 usecond_unitary_format((double)pfm->time_outer_load));
 		ExplainPropertyText("total time to load", buf, es);
 	}
 
-	if (pfm->time_tcache_build > 0)
+	if (pfm->time_materialize > 0)
 	{
 		snprintf(buf, sizeof(buf), "%s",
-				 usecond_unitary_format((double)pfm->time_tcache_build));
-		ExplainPropertyText("time to build tcache", buf, es);
+                 usecond_unitary_format((double)pfm->time_materialize));
+		ExplainPropertyText("total time to materialize", buf, es);
+	}
+
+	if (pfm->num_samples > 0 && (pfm->time_in_sendq > 0 ||
+								 pfm->time_in_recvq > 0))
+	{
+		snprintf(buf, sizeof(buf), "%s",
+				 usecond_unitary_format((double)pfm->time_in_sendq /
+										(double)pfm->num_samples));
+		ExplainPropertyText("average time in send-mq", buf, es);
+
+		snprintf(buf, sizeof(buf), "%s",
+				 usecond_unitary_format((double)pfm->time_in_recvq /
+										(double)pfm->num_samples));
+		ExplainPropertyText("average time in recv-mq", buf, es);
 	}
 
 	if (pfm->time_kern_build > 0)
@@ -429,107 +445,62 @@ pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 		ExplainPropertyText("max time to build kernel", buf, es);
 	}
 
-	if (pfm->num_samples > 0 && pfm->time_in_sendq > 0)
-	{
-		snprintf(buf, sizeof(buf), "%s",
-				 usecond_unitary_format((double)pfm->time_in_sendq /
-										(double)pfm->num_samples));
-		ExplainPropertyText("average time in send-mq", buf, es);
-	}
-
 	if (pfm->num_dma_send > 0)
 	{
+		double	band = (((double)pfm->bytes_dma_send * 1000000.0)
+						/ (double)pfm->time_dma_send);
 		snprintf(buf, sizeof(buf),
-				 "total length %s, total time %s, avg time %s",
+				 "%s/sec, len: %s, time: %s",
+				 bytesz_unitary_format(band),
 				 bytesz_unitary_format((double)pfm->bytes_dma_send),
-				 usecond_unitary_format((double)pfm->time_dma_send),
-				 usecond_unitary_format((double)pfm->time_dma_send /
-										(double)pfm->num_dma_send));
+				 usecond_unitary_format((double)pfm->time_dma_send));
 		ExplainPropertyText("DMA send", buf, es);
-	}
-
-	if (pfm->num_prep_exec > 0)
-	{
-		snprintf(buf, sizeof(buf), "total %s, avg %s",
-				 usecond_unitary_format((double)pfm->time_prep_exec),
-				 usecond_unitary_format((double)pfm->time_prep_exec /
-										(double)pfm->num_prep_exec));
-        ExplainPropertyText("prep kernel exec time", buf, es);
-	}
-
-	if (pfm->num_kern_exec > 0)
-	{
-		snprintf(buf, sizeof(buf), "total %s, avg %s",
-				 usecond_unitary_format((double)pfm->time_kern_exec),
-				 usecond_unitary_format((double)pfm->time_kern_exec /
-										(double)pfm->num_kern_exec));
-		ExplainPropertyText("main kernel exec time", buf, es);
 	}
 
 	if (pfm->num_dma_recv > 0)
 	{
+		double	band = (((double)pfm->bytes_dma_recv * 1000000.0)
+                        / (double)pfm->time_dma_recv);
 		snprintf(buf, sizeof(buf),
-				 "total length %s, total time %s, avg time %s",
-				 bytesz_unitary_format((double)pfm->bytes_dma_recv),
-				 usecond_unitary_format((double)pfm->time_dma_recv),
-				 usecond_unitary_format((double)pfm->time_dma_recv /
-										(double)pfm->num_dma_recv));
+				 "%s/sec, len: %s, time: %s",
+				 bytesz_unitary_format(band),
+                 bytesz_unitary_format((double)pfm->bytes_dma_recv),
+                 usecond_unitary_format((double)pfm->time_dma_recv));
 		ExplainPropertyText("DMA recv", buf, es);
 	}
 
-	if (pfm->num_dma_send > 0 || pfm->num_dma_recv > 0)
+	/* only gpupreagg */
+	if (pfm->num_kern_prep > 0)
 	{
-		double	band;
-		double	unitsz;
-		size_t	ofs = 0;
-
-		if (pfm->num_dma_send > 0)
-		{
-			band = (((double)pfm->bytes_dma_send * 1000000.0)
-					/ (double)pfm->time_dma_send);
-			unitsz = ((double)pfm->bytes_dma_send /
-					  (double)pfm->num_dma_send);
-			ofs += snprintf(buf + ofs, sizeof(buf) - ofs,
-							"%ssend %s/sec unitsz %s",
-							ofs > 0 ? ", " : "",
-							bytesz_unitary_format(band),
-							bytesz_unitary_format(unitsz));
-		}
-		if (pfm->num_dma_recv > 0)
-		{
-			band = (((double)pfm->bytes_dma_recv * 1000000.0)
-					/ (double)pfm->time_dma_recv);
-			unitsz = ((double)pfm->bytes_dma_recv /
-					  (double)pfm->num_dma_recv);
-			ofs += snprintf(buf + ofs, sizeof(buf) - ofs,
-							"%srecv %s/sec unitsz %s",
-							ofs > 0 ? ", " : "",
-							bytesz_unitary_format(band),
-							bytesz_unitary_format(unitsz));
-		}
-		ExplainPropertyText("DMA band", buf, es);
+		multi_kernel = true;
+		snprintf(buf, sizeof(buf), "total: %s, avg: %s",
+				 usecond_unitary_format((double)pfm->time_kern_prep),
+				 usecond_unitary_format((double)pfm->time_kern_prep /
+										(double)pfm->num_kern_prep));
+        ExplainPropertyText("prep kernel exec", buf, es);
 	}
 
-	if (pfm->num_samples > 0 && pfm->time_in_recvq > 0)
+	/* only gpupreagg */
+	if (pfm->num_kern_sort > 0)
 	{
-		snprintf(buf, sizeof(buf), "%s",
-				 usecond_unitary_format((double)pfm->time_in_recvq /
-										(double)pfm->num_samples));
-		ExplainPropertyText("average time in recv-mq", buf, es);
+		multi_kernel = true;
+		snprintf(buf, sizeof(buf), "total: %s, avg: %s",
+				 usecond_unitary_format((double)pfm->time_kern_sort),
+				 usecond_unitary_format((double)pfm->time_kern_sort /
+										(double)pfm->num_kern_sort));
+        ExplainPropertyText("sort kernel exec", buf, es);
 	}
 
-	if (pfm->time_post_exec > 0)
+	if (pfm->num_kern_exec > 0)
 	{
-		snprintf(buf, sizeof(buf), "%s",
-				 usecond_unitary_format((double)pfm->time_post_exec));
-		ExplainPropertyText("time for post device exec", buf, es);
-	}
+		const char	   *label =
+			(multi_kernel ? "main kernel exec" : "kernel exec");
 
-	if (pfm->time_move_slot > 0)
-	{
-		snprintf(buf, sizeof(buf), "%s",
-				 usecond_unitary_format((double)pfm->time_move_slot));
-		ExplainPropertyText("time to transform column to row", buf, es);
+		snprintf(buf, sizeof(buf), "total: %s, avg: %s",
+				 usecond_unitary_format((double)pfm->time_kern_exec),
+				 usecond_unitary_format((double)pfm->time_kern_exec /
+										(double)pfm->num_kern_exec));
+		ExplainPropertyText(label, buf, es);
 	}
 }
 
