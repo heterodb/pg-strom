@@ -64,14 +64,15 @@ typedef struct
 	pgstrom_queue  *mqueue;
 	Datum			dprog_key;
 	kern_parambuf  *kparams;
+	bool			needs_grouping;
 
 	pgstrom_gpupreagg  *curr_chunk;
-	cl_uint				curr_index;
-	bool				curr_recheck;
-	cl_uint				num_running;
-	dlist_head			ready_chunks;
+	cl_uint			curr_index;
+	bool			curr_recheck;
+	cl_uint			num_running;
+	dlist_head		ready_chunks;
 
-	pgstrom_perfmon		pfm;		/* performance counter */
+	pgstrom_perfmon	pfm;		/* performance counter */
 } GpuPreAggState;
 
 /* declaration of static functions */
@@ -1999,6 +2000,7 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 	/*
 	 * init misc stuff
 	 */
+	gpas->needs_grouping = (gpreagg->numCols > 0);
 	gpas->curr_chunk = NULL;
 	gpas->curr_index = 0;
 	gpas->curr_recheck = false;
@@ -2071,6 +2073,7 @@ pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
     gpupreagg->msg.pfm.enabled = gpas->pfm.enabled;
 	/* other fields also */
 	gpupreagg->dprog_key = pgstrom_retain_devprog_key(gpas->dprog_key);
+	gpupreagg->needs_grouping = gpas->needs_grouping;
 	gpupreagg->rcstore = rcstore;
 	/*
 	 * Once a row-/column-store connected to the pgstrom_gpupreagg
@@ -2213,7 +2216,7 @@ gpupreagg_load_next_outer(GpuPreAggState *gpas)
 	if (gpas->pfm.enabled)
 	{
 		gettimeofday(&tv2, NULL);
-		gpas->pfm.time_to_load += timeval_diff(&tv1, &tv2);
+		gpas->pfm.time_outer_load += timeval_diff(&tv1, &tv2);
 	}
 	if (bulk)
 		gpupreagg = pgstrom_create_gpupreagg(gpas, bulk);
@@ -2274,7 +2277,7 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas)
 	if (gpas->pfm.enabled)
 	{
 		gettimeofday(&tv2, NULL);
-		gpas->pfm.time_move_slot += timeval_diff(&tv1, &tv2);
+		gpas->pfm.time_materialize += timeval_diff(&tv1, &tv2);
 	}
 	return slot;
 }
@@ -2361,7 +2364,7 @@ gpupreagg_next_tuple(GpuPreAggState *gpas)
 		if (gpas->pfm.enabled)
 		{
 			gettimeofday(&tv2, NULL);
-			gpas->pfm.time_move_slot += timeval_diff(&tv1, &tv2);
+			gpas->pfm.time_materialize += timeval_diff(&tv1, &tv2);
 		}
 	}
 	return slot;
@@ -2763,6 +2766,7 @@ typedef struct
 	cl_int				dindex;
 	cl_program			program;
 	cl_kernel			kern_prep;
+	cl_kernel			kern_set_rindex;
 	cl_kernel		   *kern_sort;
 	cl_kernel			kern_pagg;
 	cl_int				kern_sort_nums;	/* number of sorting kernel */
@@ -2828,34 +2832,73 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 		gpreagg->msg.pfm.time_dma_send += (tv_end - tv_start) / 1000;
 
 		/*
-		 * Kernel execution time
+		 * Prep kernel execution time
 		 */
-		for (i = clgpa->ev_kern_prep; i <= clgpa->ev_kern_pagg; i++)
-		{
-			rc = clGetEventProfilingInfo(clgpa->events[i],
-										 CL_PROFILING_COMMAND_START,
-										 sizeof(cl_ulong),
-										 &temp,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			tv_start = Min(tv_start, temp);
+		i = clgpa->ev_kern_prep;
+		rc = clGetEventProfilingInfo(clgpa->events[i],
+									 CL_PROFILING_COMMAND_START,
+									 sizeof(cl_ulong),
+									 &tv_start,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+		rc = clGetEventProfilingInfo(clgpa->events[i],
+									 CL_PROFILING_COMMAND_END,
+									 sizeof(cl_ulong),
+									 &tv_end,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+		gpreagg->msg.pfm.num_kern_prep++;
+		gpreagg->msg.pfm.time_kern_prep += (tv_end - tv_start) / 1000;
 
-			rc = clGetEventProfilingInfo(clgpa->events[i],
-										 CL_PROFILING_COMMAND_END,
-										 sizeof(cl_ulong),
-										 &temp,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			tv_end = Max(tv_end, temp);
+		/*
+		 * Sort kernel execution time
+		 */
+		tv_start = ~0UL;
+		tv_end = 0;
+		for (i=clgpa->ev_kern_prep + 1; i < clgpa->ev_kern_pagg; i++)
+        {
+            rc = clGetEventProfilingInfo(clgpa->events[i],
+                                         CL_PROFILING_COMMAND_START,
+                                         sizeof(cl_ulong),
+                                         &temp,
+                                         NULL);
+            if (rc != CL_SUCCESS)
+                goto skip_perfmon;
+            tv_start = Min(tv_start, temp);
 
-			/* NOTE: time_kern_exec - sum of above difference will show
-			 * total cost of event synchronization between kernel launch.
-			 * Usually, it takes 10-20ms, so it makes sense to reduce
-			 * number of kernel execution.
-			 */
-		}
+            rc = clGetEventProfilingInfo(clgpa->events[i],
+                                         CL_PROFILING_COMMAND_END,
+                                         sizeof(cl_ulong),
+                                         &temp,
+                                         NULL);
+            if (rc != CL_SUCCESS)
+                goto skip_perfmon;
+            tv_end = Max(tv_end, temp);
+        }
+		gpreagg->msg.pfm.num_kern_sort++;
+		gpreagg->msg.pfm.time_kern_sort += (tv_end - tv_start) / 1000;
+
+		/*
+		 * Main kernel execution time
+		 */
+		i = clgpa->ev_kern_pagg;
+		rc = clGetEventProfilingInfo(clgpa->events[i],
+									 CL_PROFILING_COMMAND_START,
+									 sizeof(cl_ulong),
+									 &tv_start,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+		rc = clGetEventProfilingInfo(clgpa->events[i],
+									 CL_PROFILING_COMMAND_END,
+									 sizeof(cl_ulong),
+									 &tv_end,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+		gpreagg->msg.pfm.num_kern_exec++;
 		gpreagg->msg.pfm.time_kern_exec += (tv_end - tv_start) / 1000;
 
 		/*
@@ -2868,7 +2911,7 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 			rc = clGetEventProfilingInfo(clgpa->events[clgpa->ev_index - i],
 										 CL_PROFILING_COMMAND_START,
 										 sizeof(cl_ulong),
-										 &tv_start,
+										 &temp,
 										 NULL);
 			if (rc != CL_SUCCESS)
 				goto skip_perfmon;
@@ -2877,7 +2920,7 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 			rc = clGetEventProfilingInfo(clgpa->events[clgpa->ev_index - i],
 										 CL_PROFILING_COMMAND_END,
 										 sizeof(cl_ulong),
-										 &tv_end,
+										 &temp,
 										 NULL);
 			if (rc != CL_SUCCESS)
 				goto skip_perfmon;
@@ -2911,6 +2954,8 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 		clReleaseMemObject(clgpa->m_ktoast);
 	if (clgpa->kern_prep)
 		clReleaseKernel(clgpa->kern_prep);
+	if (clgpa->kern_set_rindex)
+		clReleaseKernel(clgpa->kern_set_rindex);
 	for (i=0; i < clgpa->kern_sort_nums; i++)
 		clReleaseKernel(clgpa->kern_sort[i]);
 	if (clgpa->kern_pagg)
@@ -3032,6 +3077,98 @@ clserv_launch_preagg_preparation(clstate_gpupreagg *clgpa, cl_uint nitems)
 		return rc;
 	}
 	clgpa->ev_kern_prep = clgpa->ev_index++;
+	clgpa->gpreagg->msg.pfm.num_kern_exec++;
+
+	return CL_SUCCESS;
+}
+
+static cl_int
+clserv_launch_set_rindex(clstate_gpupreagg *clgpa, cl_uint nvalids)
+{
+	cl_int		rc;
+	size_t		gwork_sz;
+	size_t		lwork_sz;
+
+
+	/* Return without dispatch the kernel function if no data in the chunk.
+	 */
+	if (nvalids == 0)
+		return CL_SUCCESS;
+
+	/* __kernel void
+	 * gpupreagg_set_rindex(__global kern_gpupreagg *kgpreagg,
+	 *                      __global kern_data_store *kds,
+	 *                      __local void *local_memory)
+	 */
+	clgpa->kern_set_rindex = clCreateKernel(clgpa->program,
+											"gpupreagg_set_rindex",
+											&rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	/* calculation of workgroup size with assumption of a device thread
+	 * consums "sizeof(cl_int)" local memory per thread.
+	 */
+	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
+									   clgpa->kern_set_rindex,
+									   clgpa->dindex,
+									   true,
+									   nvalids,
+									   sizeof(cl_uint)))
+	{
+		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
+		return StromError_OpenCLInternal;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_set_rindex,
+						0,		/* __global kern_gpupreagg *kgpreagg */
+						sizeof(cl_mem),
+						&clgpa->m_gpreagg);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_set_rindex,
+						1,		/* __global kern_data_store *kds_src */
+						sizeof(cl_mem),
+						&clgpa->m_kds_src);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_set_rindex,
+						2,		/* __local void *local_memory */
+						sizeof(cl_int) * lwork_sz,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
+								clgpa->kern_set_rindex,
+								1,
+								NULL,
+								&gwork_sz,
+                                &lwork_sz,
+								1,
+								&clgpa->events[clgpa->ev_index - 1],
+								&clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	clgpa->ev_index++;
 	clgpa->gpreagg->msg.pfm.num_kern_exec++;
 
 	return CL_SUCCESS;
@@ -3927,7 +4064,15 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	 *  gpupreagg_bitonic_local()
 	 *  gpupreagg_bitonic_merge()
 	 */
-	if(0 < nvalids)
+	if (!gpreagg->needs_grouping)
+	{
+
+		rc = clserv_launch_set_rindex(clgpa, nvalids);
+		if (rc != CL_SUCCESS) {
+			goto error;
+		}
+	}
+	else if (nvalids > 0)
 	{
 		const pgstrom_device_info *devinfo =
 			pgstrom_get_device_info(clgpa->dindex);
@@ -3948,7 +4093,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		launches = (nsteps + 1) * nsteps / 2 + nsteps + 1;
 
 		clgpa->kern_sort = calloc(launches, sizeof(cl_kernel));
-		if(clgpa->kern_sort == NULL) {
+		if (clgpa->kern_sort == NULL) {
 			goto error;
 		}
 
@@ -4061,6 +4206,8 @@ error:
 			clReleaseMemObject(clgpa->m_ktoast);
 		if (clgpa->kern_prep)
 			clReleaseKernel(clgpa->kern_prep);
+		if (clgpa->kern_set_rindex)
+			clReleaseKernel(clgpa->kern_set_rindex);
 		for (i=0; i < clgpa->kern_sort_nums; i++)
 			clReleaseKernel(clgpa->kern_sort[i]);
 		if (clgpa->kern_pagg)
@@ -4116,7 +4263,7 @@ gpupreagg_psum_int(PG_FUNCTION_ARGS)
 {
 	Assert(PG_NARGS() == 1);
 	if (PG_ARGISNULL(0))
-		PG_RETURN_INT64(0);
+		PG_RETURN_NULL();
 	PG_RETURN_INT64(PG_GETARG_INT64(0));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_psum_int);
@@ -4126,7 +4273,7 @@ gpupreagg_psum_float4(PG_FUNCTION_ARGS)
 {
 	Assert(PG_NARGS() == 1);
 	if (PG_ARGISNULL(0))
-		PG_RETURN_FLOAT4(0.0);
+		PG_RETURN_NULL();
 	PG_RETURN_FLOAT4(PG_GETARG_FLOAT4(0));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_psum_float4);
@@ -4136,7 +4283,7 @@ gpupreagg_psum_float8(PG_FUNCTION_ARGS)
 {
 	Assert(PG_NARGS() == 1);
 	if (PG_ARGISNULL(0))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(0));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_psum_float8);
@@ -4146,7 +4293,7 @@ gpupreagg_psum_x2_float(PG_FUNCTION_ARGS)
 {
 	Assert(PG_NARGS() == 1);
 	if (PG_ARGISNULL(0))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(0) * PG_GETARG_FLOAT8(0));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_psum_x2_float);
@@ -4160,10 +4307,10 @@ gpupreagg_corr_psum_x(PG_FUNCTION_ARGS)
 	Assert(PG_NARGS() == 3);
 	/* Aggregate Filter */
 	if (PG_ARGISNULL(0) || !PG_GETARG_BOOL(0))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	/* NULL checks */
 	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(0));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_x);
@@ -4174,10 +4321,10 @@ gpupreagg_corr_psum_y(PG_FUNCTION_ARGS)
 	Assert(PG_NARGS() == 3);
 	/* Aggregate Filter */
 	if (PG_ARGISNULL(0) || !PG_GETARG_BOOL(0))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	/* NULL checks */
 	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(1));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_y);
@@ -4188,10 +4335,10 @@ gpupreagg_corr_psum_x2(PG_FUNCTION_ARGS)
 	Assert(PG_NARGS() == 3);
 	/* Aggregate Filter */
 	if (PG_ARGISNULL(0) || !PG_GETARG_BOOL(0))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	/* NULL checks */
 	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(0) * PG_GETARG_FLOAT8(0));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_x2);
@@ -4202,10 +4349,10 @@ gpupreagg_corr_psum_y2(PG_FUNCTION_ARGS)
 	Assert(PG_NARGS() == 3);
 	/* Aggregate Filter */
 	if (PG_ARGISNULL(0) || !PG_GETARG_BOOL(0))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	/* NULL checks */
 	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(1) * PG_GETARG_FLOAT8(1));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_y2);
@@ -4216,10 +4363,10 @@ gpupreagg_corr_psum_xy(PG_FUNCTION_ARGS)
 	Assert(PG_NARGS() == 3);
 	/* Aggregate Filter */
 	if (PG_ARGISNULL(0) || !PG_GETARG_BOOL(0))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	/* NULL checks */
 	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
-		PG_RETURN_FLOAT8(0.0);
+		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(0) * PG_GETARG_FLOAT8(1));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_xy);
@@ -4357,15 +4504,19 @@ pgstrom_avg_numeric_accum(PG_FUNCTION_ARGS)
 	Datum	datum;
 	NumericAggState *state;
 
+	/* nrows should be a non-null and non-negative input */
+	if (PG_ARGISNULL(1) || nrows < 0)
+		elog(ERROR, "Bug? NULL or negative nrows was given");
+
 	/* adjust argument */
 	fcinfo->nargs      = 2;
 	fcinfo->arg[1]     = fcinfo->arg[2];
 	fcinfo->argnull[1] = fcinfo->argnull[2];
 
-	datum = int8_accum(fcinfo);
+	datum = int8_avg_accum(fcinfo);
 
 	state = (NumericAggState *) DatumGetPointer(datum);
-	if (state)
+	if (state && nrows > 0)
 		state->N += nrows - 1;
 	PG_RETURN_POINTER(state);
 }

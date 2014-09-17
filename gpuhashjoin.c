@@ -2442,7 +2442,7 @@ gpuhashjoin_load_next_outer(GpuHashJoinState *ghjs)
 	if (ghjs->pfm.enabled)
 	{
 		gettimeofday(&tv2, NULL);
-		ghjs->pfm.time_to_load += timeval_diff(&tv1, &tv2);
+		ghjs->pfm.time_outer_load += timeval_diff(&tv1, &tv2);
 	}
 
 	if (bulk)
@@ -2568,7 +2568,7 @@ gpuhashjoin_next_tuple(GpuHashJoinState *ghjs,
 		if (ghjs->pfm.enabled)
 		{
 			gettimeofday(&tv2, NULL);
-			ghjs->pfm.time_move_slot += timeval_diff(&tv1, &tv2);
+			ghjs->pfm.time_materialize += timeval_diff(&tv1, &tv2);
 		}
 		*p_slot = pslot;
 		*p_projection = projection;
@@ -2578,7 +2578,7 @@ gpuhashjoin_next_tuple(GpuHashJoinState *ghjs,
 	if (ghjs->pfm.enabled)
 	{
 		gettimeofday(&tv2, NULL);
-		ghjs->pfm.time_move_slot += timeval_diff(&tv1, &tv2);
+		ghjs->pfm.time_materialize += timeval_diff(&tv1, &tv2);
 	}
 	*p_slot = NULL;
 	*p_projection = NULL;

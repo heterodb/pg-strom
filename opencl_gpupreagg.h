@@ -723,6 +723,34 @@ out:
 }
 
 /*
+ * gpupreagg_set_rindex
+ *
+ * It makes pseudo rindex value according to the global-id, instead of
+ * the sorting by grouping keys. Aggregate functions can be run without
+ * grouping keys (that simpliy generate one row consists of the results
+ * of aggregate functions only). In this case, we can assume all the
+ * records are in a same group, thus rindex[] can be determined without
+ * key comparison.
+ */
+__kernel void
+gpupreagg_set_rindex(__global kern_gpupreagg *kgpreagg,
+					 __global kern_data_store *kds,
+					 __local void *local_memory)
+{
+	__global kern_parambuf	*kparams  = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	__global cl_int			*rindex	  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
+
+	cl_int nrows		= kds->nitems;
+	cl_int errcode		= StromError_Success;
+	cl_int globalID		= get_global_id(0);
+
+	if(globalID < nrows)
+		rindex[globalID] = globalID;
+
+	kern_writeback_error_status(&kgpreagg->status, errcode, local_memory);
+}
+
+/*
  * gpupreagg_bitonic_local
  *
  * It tries to apply each steps of bitonic-sorting until its unitsize
@@ -1003,6 +1031,7 @@ typedef struct
 {
 	pgstrom_message		msg;		/* = StromTag_GpuPreAgg */
 	Datum				dprog_key;	/* key of device program */
+	bool				needs_grouping;	/* true, if it needs grouping step */
 	StromObject		   *rcstore;	/* source row/column store as input */
 	kern_data_store	   *kds_dst;	/* result buffer of partial aggregate */
 	kern_gpupreagg		kern;		/* kernel portion to be sent */
