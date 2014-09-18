@@ -730,14 +730,11 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	pds = pgstrom_create_data_store_row(tupdesc, length, gss->ntup_per_page);
 	PG_TRY();
 	{
-		while (gss->curr_blknum <= gss->last_blknum)
-		{
-			if (pgstrom_data_store_insert_block(pds, rel,
-												gss->curr_blknum,
-												snapshot, true) < 0)
-				break;
+		while (pgstrom_data_store_insert_block(pds, rel,
+											   gss->curr_blknum,
+											   snapshot, true))
 			gss->curr_blknum++;
-		}
+
 		if (pds->kds->nitems > 0)
 			gpuscan = pgstrom_create_gpuscan(gss, pds);
 	}
@@ -754,7 +751,7 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	if (gss->pfm.enabled)
 	{
 		gettimeofday(&tv2, NULL);
-		gss->pfm.time_to_load += timeval_diff(&tv1, &tv2);
+		gss->pfm.time_outer_load += timeval_diff(&tv1, &tv2);
 	}
 	return gpuscan;
 }
@@ -908,7 +905,6 @@ gpuscan_next_tuple(GpuScanState *gss)
 {
 	pgstrom_gpuscan	   *gpuscan = gss->curr_chunk;
 	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
-	Snapshot			snapshot = gss->cps.ps.state->es_snapshot;
 	TupleTableSlot	   *slot = NULL;
 	cl_int				i_result;
 	bool				do_recheck = false;
@@ -969,7 +965,7 @@ gpuscan_fetch_tuple(CustomPlanState *node)
 
 	ExecClearTuple(slot);
 
-	while (!gss->curr_chunk || !gpuscan_next_tuple(gss, slot))
+	while (!gss->curr_chunk || !(slot = gpuscan_next_tuple(gss)))
 	{
 		pgstrom_message	   *msg;
 		pgstrom_gpuscan	   *gpuscan;
@@ -1021,8 +1017,7 @@ gpuscan_fetch_tuple(CustomPlanState *node)
 		 * larger than minimum multiplicity, unless it does not exceed
 		 * maximum one and OpenCL server does not return a new response.
 		 */
-		while ((gss->scan_desc || gss->tc_scan) &&
-			   gss->num_running <= pgstrom_max_async_chunks)
+		while (gss->num_running <= pgstrom_max_async_chunks)
 		{
 			pgstrom_gpuscan	*gpuscan = pgstrom_load_gpuscan(gss);
 
@@ -1066,12 +1061,14 @@ gpuscan_fetch_tuple(CustomPlanState *node)
 		 */
 		Assert(!dlist_is_empty(&gss->ready_chunks));
 		gpuscan = dlist_container(pgstrom_gpuscan, msg.chain,
-								dlist_pop_head_node(&gss->ready_chunks));
+								  dlist_pop_head_node(&gss->ready_chunks));
 		Assert(StromTagIs(gpuscan, GpuScan));
 
 		/*
-         * Raise an error, if chunk-level error was reported.
-         */
+		 * Raise an error, if an error was reported.
+		 *
+		 * XXX: Row-level recheck really makes sense?
+		 */
 		if (gpuscan->msg.errcode != StromError_Success)
 		{
 			if (gpuscan->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
@@ -1218,6 +1215,9 @@ gpuscan_exec(CustomPlanState *node)
 		ResetExprContext(econtext);
 	}
 }
+
+#if 0
+
 static Node *
 gpuscan_exec_multi(CustomPlanState *node)
 {
@@ -1430,6 +1430,7 @@ retry:
 		InstrStopNode(node->ps.instrument, (double) bulk->nvalids);
 	return (Node *) bulk;
 }
+#endif
 
 static void
 gpuscan_end(CustomPlanState *node)
@@ -1468,26 +1469,6 @@ gpuscan_end(CustomPlanState *node)
 		pgstrom_close_queue(gss->mqueue);
 	}
 
-	if (gss->tc_scan)
-	{
-		/*
-		 * Usually, tc_scan should be already released during scan.
-		 * If not, it implies this scan didn't reach to the relation end.
-		 * tcache_end_scan() will release all the tc_node recursively,
-		 * if tcache is not ready.
-		 */
-		tcache_end_scan(gss->tc_scan);
-	}
-
-	if (gss->tc_head)
-	{
-		tcache_head	*tc_head = gss->tc_head;
-
-		pgstrom_untrack_object(&tc_head->sobj);
-
-		tcache_put_tchead(tc_head);
-	}
-
 	/*
 	 * Free the exprcontext
 	 */
@@ -1502,8 +1483,6 @@ gpuscan_end(CustomPlanState *node)
 	/*
 	 * close heap scan and relation
 	 */
-	if (gss->scan_desc)
-		heap_endscan(gss->scan_desc);
 	heap_close(gss->scan_rel, NoLock);
 }
 
@@ -1578,16 +1557,7 @@ gpuscan_rescan(CustomPlanState *node)
 	 */
 	gss->curr_chunk = NULL;
 	gss->curr_index = 0;
-	if (gss->tc_head)
-	{
-		if (gss->tc_scan)
-			tcache_rescan(gss->tc_scan);
-		else
-			gss->tc_scan = tcache_begin_scan(gss->tc_head,
-											 gss->scan_rel);
-	}
-	if (gss->scan_desc)
-		heap_rescan(gss->scan_desc, NULL);
+	gss->curr_blknum = 0;
 }
 
 static void
@@ -1784,7 +1754,7 @@ pgstrom_init_gpuscan(void)
 	gpuscan_plan_methods.FinalizeCustomPlan	= gpuscan_finalize_plan;
 	gpuscan_plan_methods.BeginCustomPlan	= gpuscan_begin;
 	gpuscan_plan_methods.ExecCustomPlan		= gpuscan_exec;
-	gpuscan_plan_methods.MultiExecCustomPlan= gpuscan_exec_multi;
+	//gpuscan_plan_methods.MultiExecCustomPlan= gpuscan_exec_multi;
 	gpuscan_plan_methods.EndCustomPlan		= gpuscan_end;
 	gpuscan_plan_methods.ReScanCustomPlan	= gpuscan_rescan;
 	gpuscan_plan_methods.ExplainCustomPlanTargetRel	= gpuscan_explain_rel;

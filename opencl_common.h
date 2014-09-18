@@ -414,11 +414,6 @@ typedef struct {
  * and data contents are actually stored within this toast-buffer.
  */
 typedef struct {
-#ifndef OPENCL_DEVICE_CODE
-	dlist_node		dnode;	/* host only; used to chain multiple toastbuf */
-#else
-	cl_char			__padding__[2 * HOSTPTRLEN];
-#endif
 	cl_uint			length;	/* length of toast-buffer */
 	cl_uint			usage;	/* usage of toast-buffer */
 	cl_char			data[FLEXIBLE_ARRAY_MEMBER];
@@ -475,15 +470,6 @@ typedef struct {
 	cl_int		nvalids;	/* # of valid rows. -1 means all visible */
 	cl_int		rindex[FLEXIBLE_ARRAY_MEMBER];
 } kern_row_map;
-
-#if 0
-
-typedef struct {
-	/* same as kern_row_map but works for column references */
-
-} kern_column_map;
-
-#endif
 
 #ifdef OPENCL_DEVICE_CODE
 /*

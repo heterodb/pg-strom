@@ -385,364 +385,86 @@ kparam_refresh_ktoast_head(kern_parambuf *kparams,
 		kparams->poffset[1] = 0;	/* mark it as null */
 }
 #endif
-#if 0
-/*
- * pgstrom_get_row_store
- *
- * increments reference counter of row-store
- */
-tcache_row_store *
-pgstrom_get_row_store(tcache_row_store *trs)
-{
-	SpinLockAcquire(&trs->refcnt_lock);
-	Assert(trs->refcnt > 0);
-	trs->refcnt++;
-	SpinLockRelease(&trs->refcnt_lock);
-
-	return trs;
-}
-
-/*
- * pgstrom_put_row_store
- *
- * decrements reference counter of row-store, then release it if no longer
- * referenced.
- */
-void
-pgstrom_put_row_store(tcache_row_store *trs)
-{
-	bool	do_release = false;
-
-	SpinLockAcquire(&trs->refcnt_lock);
-	Assert(trs->refcnt > 0);
-	if (--trs->refcnt == 0)
-		do_release = true;
-	SpinLockRelease(&trs->refcnt_lock);
-
-	if (do_release)
-		pgstrom_shmem_free(trs);
-}
-
-/*
- * pgstrom_create_row_store
- *
- * create a row-store with refcnt=1
- */
-tcache_row_store *
-pgstrom_create_row_store(TupleDesc tupdesc)
-{
-	tcache_row_store *trs;
-	int		i;
-
-	trs = pgstrom_shmem_alloc(ROWSTORE_DEFAULT_SIZE);
-	if (!trs)
-		elog(ERROR, "out of shared memory");
-
-	memset(trs, 0, sizeof(StromObject));
-	trs->sobj.stag = StromTag_TCacheRowStore;
-	SpinLockInit(&trs->refcnt_lock);
-	trs->refcnt = 1;
-	memset(&trs->chain, 0, sizeof(dlist_node));
-	trs->usage
-		= STROMALIGN_DOWN(ROWSTORE_DEFAULT_SIZE -
-						  offsetof(tcache_row_store, kern));
-	trs->blkno_max = 0;
-	trs->blkno_min = MaxBlockNumber;
-	trs->kern.length = trs->usage;
-	trs->kern.ncols = tupdesc->natts;
-	trs->kern.nrows = 0;
-
-	/* construct colmeta structure for this row-store */
-	for (i=0; i < tupdesc->natts; i++)
-	{
-		Form_pg_attribute attr = tupdesc->attrs[i];
-
-		trs->kern.colmeta[i].attnotnull = attr->attnotnull;
-		trs->kern.colmeta[i].attalign = typealign_get_width(attr->attalign);
-		trs->kern.colmeta[i].attlen = attr->attlen;
-	}
-	return trs;
-}
-
-/*
- * pgstrom_create_toast_buffer
- *
- * creata a toast-buffer to be attached on a particular column-store with
- * initial length, but TCACHE_TOASTBUF_INITSIZE at least.
- */
-tcache_toastbuf *
-pgstrom_create_toast_buffer(Size required)
-{
-	tcache_toastbuf *tbuf;
-	Size		allocated;
-
-	required = Max(required, TCACHE_TOASTBUF_INITSIZE);
-
-	tbuf = pgstrom_shmem_alloc_alap(required, &allocated);
-	if (!tbuf)
-		return NULL;
-
-	SpinLockInit(&tbuf->refcnt_lock);
-	tbuf->refcnt = 1;
-	tbuf->tbuf_length = allocated;
-	tbuf->tbuf_usage = offsetof(tcache_toastbuf, data[0]);
-	tbuf->tbuf_junk = 0;
-
-	return tbuf;
-}
-
-/*
- * pgstrom_expand_toast_buffer
- *
- * it expand length of the toast buffer into twice.
- */
-tcache_toastbuf *
-pgstrom_expand_toast_buffer(tcache_toastbuf *tbuf_old)
-{
-	tcache_toastbuf *tbuf_new;
-	Size	required = 2 * tbuf_old->tbuf_length;
-
-	tbuf_new = pgstrom_create_toast_buffer(required);
-	if (!tbuf_new)
-		return NULL;
-	memcpy(tbuf_new->data,
-		   tbuf_old->data,
-		   tbuf_old->tbuf_usage - offsetof(tcache_toastbuf, data[0]));
-	tbuf_new->tbuf_usage = tbuf_old->tbuf_usage;
-	tbuf_new->tbuf_junk = tbuf_old->tbuf_junk;
-
-	return tbuf_new;
-}
-
-/*
- * pgstrom_get_toast_buffer
- *
- * It increments reference counter of the toast buffer.
- */
-tcache_toastbuf *
-pgstrom_get_toast_buffer(tcache_toastbuf *tbuf)
-{
-	SpinLockAcquire(&tbuf->refcnt_lock);
-	Assert(tbuf->refcnt > 0);
-	tbuf->refcnt++;
-	SpinLockRelease(&tbuf->refcnt_lock);
-
-	return tbuf;
-}
-
-/*
- * pgstrom_put_toast_buffer
- *
- * It decrements rerefence counter of the toast buffer, then release
- * shared memory region, if needed.
- */
-void
-pgstrom_put_toast_buffer(tcache_toastbuf *tbuf)
-{
-    bool    do_release = false;
-
-    SpinLockAcquire(&tbuf->refcnt_lock);
-    Assert(tbuf->refcnt > 0);
-    if (--tbuf->refcnt == 0)
-        do_release = true;
-    SpinLockRelease(&tbuf->refcnt_lock);
-
-    if (do_release)
-        pgstrom_shmem_free(tbuf);
-}
-
-/*
- * pgstrom_get_column_store
- *
- * it increments reference counter of column-store
- */
-tcache_column_store *
-pgstrom_get_column_store(tcache_column_store *pcs)
-{
-	SpinLockAcquire(&pcs->refcnt_lock);
-	Assert(pcs->refcnt > 0);
-	pcs->refcnt++;
-	SpinLockRelease(&pcs->refcnt_lock);
-
-	return pcs;
-}
-
-/*
- * pgstrom_put_column_store
- *
- * it decrements reference counter of column-store, then release shared-
- * memory buffers if no longer referenced
- */
-void
-pgstrom_put_column_store(tcache_column_store *pcs)
-{
-	bool	do_release = false;
-	int		i;
-
-	SpinLockAcquire(&pcs->refcnt_lock);
-	Assert(pcs->refcnt > 0);
-	if (--pcs->refcnt == 0)
-		do_release = true;
-	SpinLockRelease(&pcs->refcnt_lock);
-
-	if (!do_release)
-		return;
-	/* release resource */
-	for (i=0; i < pcs->ncols; i++)
-	{
-		if (pcs->cdata[i].toast)
-			pgstrom_put_toast_buffer(pcs->cdata[i].toast);
-	}
-	pgstrom_shmem_free(pcs);
-}
-
-/*
- * pgstrom_rcstore_fetch_slot
- *
- * A utility routine to fetch a record in row-/colum-store.
- */
-TupleTableSlot *
-pgstrom_rcstore_fetch_slot(TupleTableSlot *slot,
-						   StromObject *rcstore,
-						   int rowidx,
-						   bool use_copy)
-{
-	if (StromTagIs(rcstore, TCacheRowStore))
-	{
-		tcache_row_store   *trs = (tcache_row_store *) rcstore;
-		rs_tuple		   *rs_tup;
-		HeapTuple			tuple;	
-
-		rs_tup = kern_rowstore_get_tuple(&trs->kern, rowidx);
-		if (!rs_tup)
-			elog(ERROR, "Bug? rowid (%d) is out of range", rowidx);
-		if (use_copy)
-			tuple = heap_copytuple(&rs_tup->htup);
-		else
-			tuple = &rs_tup->htup;
-
-		slot = ExecStoreTuple(tuple, slot, InvalidBuffer, use_copy);
-	}
-	else if (StromTagIs(rcstore, TCacheColumnStore))
-	{
-		tcache_column_store *tcs = (tcache_column_store *) rcstore;
-		TupleDesc	tupdesc = slot->tts_tupleDescriptor;
-		int			i;
-
-		Assert(tcs->ncols == tupdesc->natts);
-		Assert(rowidx < tcs->nrows);
-		ExecStoreAllNullTuple(slot);
-		for (i=0; i < tupdesc->natts; i++)
-		{
-			Form_pg_attribute	attr = tupdesc->attrs[i];
-
-			/* uncached columns are dealt as null */
-			if (!tcs->cdata[i].values)
-				continue;
-			/* null items are also considered as null */
-			if (tcs->cdata[i].isnull &&
-				att_isnull(rowidx, tcs->cdata[i].isnull))
-				continue;
-
-			/* otherwise, non-null values are stored in */
-			slot->tts_isnull[i] = false;
-			if (attr->attlen > 0)
-			{
-				char   *source = tcs->cdata[i].values + attr->attlen * rowidx;
-
-				if (attr->attbyval)
-					memcpy(&slot->tts_values[i], source, attr->attlen);
-				else if (!use_copy)
-					slot->tts_values[i] = PointerGetDatum(source);
-				else
-					slot->tts_values[i] =
-						PointerGetDatum(pmemcpy(source, attr->attlen));
-			}
-			else if (!tcs->cdata[i].toast)
-			{
-				/* MEMO: In case of inlined varlena variables, we can have
-				 * no toast buffer, instead of inline varlena.
-				 */
-				int		attlen = pgstrom_try_varlena_inline(attr);
-				char   *vl_ptr = (tcs->cdata[i].values + attlen * rowidx);
-
-				Assert(attlen > 0);
-				if (!use_copy)
-					slot->tts_values[i] = PointerGetDatum(vl_ptr);
-				else
-					slot->tts_values[i] =
-						PointerGetDatum(pmemcpy(vl_ptr, VARSIZE_ANY(vl_ptr)));
-			}
-			else
-			{
-				cl_uint		vl_ofs = *((cl_uint *)(tcs->cdata[i].values +
-												   sizeof(cl_uint) * rowidx));
-				char	   *vl_ptr = ((char *)tcs->cdata[i].toast + vl_ofs);
-
-				if (!use_copy)
-					slot->tts_values[i] = PointerGetDatum(vl_ptr);
-				else
-					slot->tts_values[i] =
-						PointerGetDatum(pmemcpy(vl_ptr, VARSIZE_ANY(vl_ptr)));
-			}
-		}
-	}
-	else
-		elog(ERROR, "Bug? neither row- nor column-store");
-	return slot;
-}
-#endif
 
 
-
-#define IsSharedBuffer(PTR)						\
-	((uintptr_t)(PTR) >= (uintptr_t)(BufferBlocks) &&	\
-	 (uintptr_t)(PTR) < (uintptr_t)(BufferBlocks) + NBuffers * (Size) BLCKSZ)
 
 bool
 pgstrom_fetch_data_store(TupleTableSlot *slot,
 						 pgstrom_data_store *pds,
-						 int rowidx, bool use_copy)
+						 size_t row_index,
+						 HeapTuple tuple)
 {
-	kern_data_store	   *kds = pds->kds;
+	kern_data_store *kds = pds->kds;
+	TupleDesc	tupdesc;
+	cl_uint		cs_offset;
+	char	   *cs_values;
+	int			i, attlen;
 
-	if (rowidx >= kds->nitems)
+	if (row_index >= kds->nitems)
 		return false;	/* out of range */
 
+	/* in case of row-store */
 	if (!kds->is_column)
 	{
-		kern_rowitem   *ritem = KERN_DATA_STORE_ROWITEMS(kds) + rowidx;
+		kern_rowitem   *ritem = KERN_DATA_STORE_ROWITEMS(kds) + row_index;
 		Buffer			buffer;
 		Page			page;
 		ItemId			lpp;
 
 		Assert(ritem->block_id < kds->nblocks);
-		page = pds->blocks[ritem->block_id];
+		buffer = pds->blocks[ritem->block_id].buffer;
+		page   = pds->blocks[ritem->block_id].page;
 		lpp = PageGetItemId(page, ritem->item_id);
 		Assert(ItemIdIsNormal(lpp));
 
-		tuple->t_data = (HeapTupleHeader) PageGetItem((Page) dp, lpp);
+		tuple->t_data = (HeapTupleHeader) PageGetItem(page, lpp);
 		tuple->t_len = ItemIdGetLength(lpp);
-		ItemPointerSet(&(tuple->t_self), page, lineoff);
+		ItemPointerSet(&tuple->t_self, buffer, ritem->item_id);
 
+		ExecStoreTuple(tuple, slot, buffer, false);
 
-		if (IsSharedBuffer(page))
-
-		if (!IsSharedBuffer(page))
-			buffer = InvalidBuffer;
-		else
-			buffer = ((uintptr_t)(page) -
-					  (uintptr_t)(BufferBlocks)) / BLCKSZ + 1;
-		/* lock buffer and  */
-
-
-
+		return true;
 	}
-	else
+
+	/* otherwise, column store */
+	ExecStoreAllNullTuple(slot);
+	tupdesc = slot->tts_tupleDescriptor;
+	for (i=0; i < tupdesc->natts; i++)
 	{
+		Form_pg_attribute	attr = tupdesc->attrs[i];
 
+		if (i < kds->ncols && !kds->colmeta[i].attvalid)
+		{
+			cs_offset = kds->colmeta[i].cs_offset;
+			if (!kds->colmeta[i].attnotnull)
+			{
+				char   *nullmap = (char *)kds + cs_offset;
+
+				if (att_isnull(row_index, nullmap))
+					continue;
+				cs_offset += STROMALIGN(BITMAPLEN(kds->nrooms));
+			}
+			slot->tts_isnull[i] = false;
+			cs_values = (char *)kds + cs_offset;
+
+			attlen = kds->colmeta[i].attlen;
+			if (attlen > 0)
+			{
+				cs_values += attlen * row_index;
+				slot->tts_values[i] = fetch_att(cs_values,
+												attr->attbyval,
+												attr->attlen);
+			}
+			else
+			{
+				cl_uint		vl_offset = ((cl_uint *)cs_values)[row_index];
+				char	   *vl_ptr = (char *)pds->ktoast + vl_offset;
+
+				slot->tts_values[i] = PointerGetDatum(vl_ptr);
+			}
+		}
 	}
-	return false;
+	return true;
 }
 
 void
@@ -754,22 +476,16 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 	Assert(kds->nblocks < pds->max_blocks);
 	for (i=0; i < kds->nblocks; i++)
 	{
-		Page	block = pds->blocks[i];
-		Buffer	buffer;
+		Page	page = pds->blocks[i].page;
+		Buffer	buffer = pds->blocks[i].buffer;
 
-		if (block >= BufferBlocks &&
-			block <  BufferBlocks + NBuffers * (Size) BLCKSZ)
-		{
-			buffer = ((uintptr_t)block -
-					  (uintptr_t)BufferBlocks) / BLCKSZ + 1;
-			Assert(BufferIsValid(buffer));
-			ReleaseBuffer(buffer);
-		}
+		if (BufferIsLocal(buffer))
+			pgstrom_shmem_free(page);
 		else
-		{
-			pgstrom_shmem_free(block);
-		}
+			ReleaseBuffer(buffer);
 	}
+	if (pds->ktoast)
+		pgstrom_shmem_free(pds->ktoast);
 	pgstrom_shmem_free(pds->kds);
 	pgstrom_shmem_free(pds);
 }
@@ -836,7 +552,7 @@ pgstrom_create_data_store_row(TupleDesc tupdesc,
 	SpinLockInit(&pds->lock);
 	pds->refcnt = 1;
 	pds->kds = kds;
-	dlist_init(&pds->ktoast);
+	pds->ktoast = NULL;	/* never used */
 	pds->max_blocks = max_blocks;
 
 	return pds;
@@ -925,7 +641,7 @@ pgstrom_create_data_store_column(TupleDesc tupdesc,
 	SpinLockInit(&pds->lock);
 	pds->refcnt = 1;
 	pds->kds = kds;
-	dlist_init(&pds->ktoast);
+	pds->ktoast = NULL;	/* expand on demand */
 	pds->max_blocks = 0;
 
 	return pds;
@@ -1060,10 +776,24 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 	Assert(kds->nitems + ntup <= kds->nrooms);
 	kds->nitems += ntup;
 
-	/* TODO: we have to copy the contents of shared-buffer if it is
-	 * private buffer, thus assigned of the private memory area
+	/*
+	 * NOTE: Local buffers are allocated on the private address space,
+	 * it is not visible to opencl server. so, we make a duplication
+	 * instead. Shared buffer can be referenced with zero-copy.
 	 */
-	pds->blocks[kds->nblocks++] = page;
+	pds->blocks[kds->nblocks].buffer = buffer;
+	if (!BufferIsLocal(buffer))
+		pds->blocks[kds->nblocks].page = page;
+	else
+	{
+		Page	dup_page = pgstrom_shmem_alloc(BLCKSZ);
+
+		if (!dup_page)
+			elog(ERROR, "out of memory");
+		memcpy(dup_page, page, BLCKSZ);
+		pds->blocks[kds->nblocks].page = dup_page;
+	}
+	kds->nblocks++;
 
 	return ntup;
 }
@@ -1159,32 +889,36 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 			kern_toastbuf  *ktoast;
 
 			Assert(!attr->attbyval);
-			if (dlist_is_empty(&pds->ktoast))
+			/* expand toast buffer on demand */
+			while (!pds->ktoast || (pds->ktoast->length -
+									pds->ktoast->usage) < INTALIGN(vl_len))
 			{
-				ktoast = pgstrom_shmem_alloc(TOASTBUF_UNITSZ);
+				Size	required;
+
+				if (!pds->ktoast)
+					required = TOASTBUF_UNITSZ;
+				else
+					required = 2 * pds->ktoast->length;
+
+				ktoast = pgstrom_shmem_alloc(required);
 				if (!ktoast)
 					elog(ERROR, "out of shared memory");
-				ktoast->length = TOASTBUF_UNITSZ;
-				ktoast->usage = offsetof(kern_toastbuf, data[0]);
-				dlist_push_tail(&pds->ktoast, &ktoast->dnode);
-			}
-			else
-			{
-				ktoast = dlist_container(kern_toastbuf, dnode,
-										 dlist_tail_node(&pds->ktoast));
-				if (ktoast->usage + INTALIGN(vl_len) > ktoast->length)
+				ktoast->length = required;
+				ktoast->usage = (!pds->ktoast
+								 ? offsetof(kern_toastbuf, data[0])
+								 : pds->ktoast->usage);
+				if (pds->ktoast)
 				{
-					ktoast = pgstrom_shmem_alloc(TOASTBUF_UNITSZ);
-					if (!ktoast)
-						elog(ERROR, "out of shared memory");
-					ktoast->length = TOASTBUF_UNITSZ;
-					ktoast->usage = offsetof(kern_toastbuf, data[0]);
-					dlist_push_tail(&pds->ktoast, &ktoast->dnode);
+					memcpy(ktoast->data,
+						   pds->ktoast->data,
+						   pds->ktoast->usage);
+					pgstrom_shmem_free(pds->ktoast);
 				}
+				pds->ktoast = ktoast;
 			}
 			Assert(ktoast->usage + INTALIGN(vl_len) <= ktoast->length);
 			vl_ofs[j] = ktoast->usage;
-			memcpy((cl_char *)ktoast + ktoast->usage, vl_data, vl_len);
+			memcpy((char *)ktoast + ktoast->usage, vl_data, vl_len);
 			ktoast->usage += INTALIGN(vl_len);
 		}
 	}

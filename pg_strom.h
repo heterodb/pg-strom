@@ -296,7 +296,8 @@ typedef struct {
 	slock_t				lock;
 	volatile int		refcnt;
 	kern_data_store	   *kds;	/* reference to kern_data_store */
-	dlist_head			ktoast;	/* list of kern_toastbuf */
+	kern_toastbuf	   *ktoast;	/* reference to kern_toastbuf */
+
 	/*
 	 * MEMO: Fields below are valid only when data store is row-format.
 	 * It pins multiple buffer cache pages until pgstrom_data_store is
@@ -305,7 +306,10 @@ typedef struct {
 	 * if local buffer (because stored on the private memory area).
 	 */
 	int					max_blocks;		/* maximum # of blocks */
-	Page				blocks[FLEXIBLE_ARRAY_MEMBER];
+	struct {
+		Buffer			buffer;	/* buffer identifier (may be negative!) */
+		Page			page;	/* buffer page being pinned */
+	} blocks[FLEXIBLE_ARRAY_MEMBER];
 } pgstrom_data_store;
 
 /* 8MB for each buffer */
@@ -314,14 +318,12 @@ typedef struct {
 /*
  * pgstrom_bulk_slot
  *
- * A data structure to move scanned/joinned data in column-oriented data
- * format, to reduce row to/from column translation during query execution.
+ * A data structure to move a chunk of data with keeping pgstrom_data_store
+ * data format on shared memory segment. It reduces cost for data copy.
  */
 typedef struct
 {
-	Node			node;		/* dummy header portion */
-	StromObject	   *rcstore;	/* row/column-store to be moved */
-//	List		   *attmap;		/* attribute numbers */
+	pgstrom_data_store *pds;
 	cl_int			nvalids;	/* length of rindex. -1 means all valid */
 	cl_uint			rindex[FLEXIBLE_ARRAY_MEMBER];
 } pgstrom_bulkslot;
@@ -456,7 +458,8 @@ extern bool pgstrom_plan_can_multi_exec(const PlanState *ps);
 
 extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
 									 pgstrom_data_store *pds,
-									 int rowidx, bool use_copy);
+									 size_t row_index,
+									 HeapTuple tuple);
 extern void pgstrom_release_data_store(pgstrom_data_store *pds);
 extern pgstrom_data_store *
 pgstrom_create_data_store_row(TupleDesc tupdesc,
