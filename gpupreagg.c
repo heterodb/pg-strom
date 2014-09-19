@@ -1568,33 +1568,53 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 					&body,
 					")\n"
 					"  {\n"
-					"    temp_float8x.isnull = false;\n"
+					"    temp_float8x.isnull = true;\n"
 					"    temp_float8x.value = 0.0;\n"
 					"  }\n");
 				/* initial value according to the function */
 				if (strcmp(func_name, "pcov_y") == 0)
+				{
 					appendStringInfo(
 						&body,
 						"  else\n"
 						"    temp_float8x = temp_float8y;\n");
+				}
 				else if (strcmp(func_name, "pcov_x2") == 0)
+				{
+					dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL,
+															 context);
 					appendStringInfo(
 						&body,
 						"  else\n"
-						"    temp_float8x.value = temp_float8x.value *\n"
-						"                         temp_float8x.value;\n");
+						"    temp_float8x = pgfn_%s(errcode,\n"
+						"                           temp_float8x,\n"
+						"                           temp_float8x);\n",
+						dfunc->func_name);
+				}
 				else if (strcmp(func_name, "pcov_y2") == 0)
+				{
+					dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL,
+                                                             context);
 					appendStringInfo(
 						&body,
 						"  else\n"
-						"    temp_float8x.value = temp_float8y.value *\n"
-						"                         temp_float8y.value;\n");
+						"    temp_float8x = pgfn_%s(errcode,\n"
+						"                           temp_float8y,\n"
+						"                           temp_float8y);\n",
+						dfunc->func_name);
+				}
 				else if (strcmp(func_name, "pcov_xy") == 0)
+				{
+					dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL,
+                                                             context);
 					appendStringInfo(
 						&body,
 						"  else\n"
-						"    temp_float8x.value = temp_float8x.value *\n"
-						"                         temp_float8y.value;\n");
+						"    temp_float8x = pgfn_%s(errcode,\n"
+						"                           temp_float8x,\n"
+						"                           temp_float8y);\n",
+						dfunc->func_name);
+				}
 				else if (strcmp(func_name, "pcov_x") != 0)
 					elog(ERROR, "unexpected partial covariance function: %s",
 						 func_name);
