@@ -1058,9 +1058,8 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 
 		/*
 		 * FIXME: needs to set negative value if host-recheck is needed
-		 * (errcode: StromError_RowReCheck)
+		 * (errcode: StromError_CpuReCheck)
 		 */
-
 		appendStringInfo(
 			body,
 			"n_matches++;\n"

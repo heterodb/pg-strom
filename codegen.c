@@ -175,6 +175,8 @@ typedef struct devfunc_catalog_t {
 							   struct devfunc_catalog_t *procat);
 } devfunc_catalog_t;
 
+static void devfunc_setup_mul_oper(devfunc_info *entry,
+								   devfunc_catalog_t *procat);
 static void devfunc_setup_div_oper(devfunc_info *entry,
 								   devfunc_catalog_t *procat);
 static void devfunc_setup_const(devfunc_info *entry,
@@ -241,19 +243,19 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "float8mi",  2, {FLOAT8OID, FLOAT8OID}, "b:-", NULL },
 
 	/* '*' : mutiply operators */
-	{ "int2mul",  2, {INT2OID, INT2OID}, "b:*", NULL },
-	{ "int24mul", 2, {INT2OID, INT4OID}, "b:*", NULL },
-	{ "int28mul", 2, {INT2OID, INT8OID}, "b:*", NULL },
-	{ "int42mul", 2, {INT4OID, INT2OID}, "b:*", NULL },
-	{ "int4mul",  2, {INT4OID, INT4OID}, "b:*", NULL },
-	{ "int48mul", 2, {INT4OID, INT8OID}, "b:*", NULL },
-	{ "int82mul", 2, {INT8OID, INT2OID}, "b:*", NULL },
-	{ "int84mul", 2, {INT8OID, INT4OID}, "b:*", NULL },
-	{ "int8mul",  2, {INT8OID, INT8OID}, "b:*", NULL },
-	{ "float4mul",  2, {FLOAT4OID, FLOAT4OID}, "b:*", NULL },
-	{ "float48mul", 2, {FLOAT4OID, FLOAT8OID}, "b:*", NULL },
-	{ "float84mul", 2, {FLOAT4OID, FLOAT4OID}, "b:*", NULL },
-	{ "float8mul",  2, {FLOAT8OID, FLOAT8OID}, "b:*", NULL },
+	{ "int2mul",  2, {INT2OID, INT2OID}, NULL, devfunc_setup_mul_oper },
+	{ "int24mul", 2, {INT2OID, INT4OID}, NULL, devfunc_setup_mul_oper },
+	{ "int28mul", 2, {INT2OID, INT8OID}, NULL, devfunc_setup_mul_oper },
+	{ "int42mul", 2, {INT4OID, INT2OID}, NULL, devfunc_setup_mul_oper },
+	{ "int4mul",  2, {INT4OID, INT4OID}, NULL, devfunc_setup_mul_oper },
+	{ "int48mul", 2, {INT4OID, INT8OID}, NULL, devfunc_setup_mul_oper },
+	{ "int82mul", 2, {INT8OID, INT2OID}, NULL, devfunc_setup_mul_oper },
+	{ "int84mul", 2, {INT8OID, INT4OID}, NULL, devfunc_setup_mul_oper },
+	{ "int8mul",  2, {INT8OID, INT8OID}, NULL, devfunc_setup_mul_oper },
+	{ "float4mul",  2, {FLOAT4OID, FLOAT4OID}, NULL, devfunc_setup_mul_oper },
+	{ "float48mul", 2, {FLOAT4OID, FLOAT8OID}, NULL, devfunc_setup_mul_oper },
+	{ "float84mul", 2, {FLOAT4OID, FLOAT4OID}, NULL, devfunc_setup_mul_oper },
+	{ "float8mul",  2, {FLOAT8OID, FLOAT8OID}, NULL, devfunc_setup_mul_oper },
 
 	/* '/' : divide operators */
 	{ "int2div",  2, {INT2OID, INT2OID}, "0", devfunc_setup_div_oper },
@@ -603,6 +605,96 @@ static devfunc_catalog_t devfunc_textlib_catalog[] = {
 };
 
 static void
+devfunc_setup_mul_oper(devfunc_info *entry, devfunc_catalog_t *procat)
+{
+	devtype_info   *dtype1 = linitial(entry->func_args);
+	devtype_info   *dtype2 = lsecond(entry->func_args);
+	StringInfoData	str;
+
+	initStringInfo(&str);
+
+	Assert(procat->func_nargs == 2);
+	entry->func_name = pstrdup(procat->func_name);
+	appendStringInfo(
+		&str,
+		"static pg_%s_t\n"
+		"pgfn_%s(__private int *errcode, pg_%s_t arg1, pg_%s_t arg2)\n"
+		"{\n"
+		"  pg_%s_t result;\n"
+		"\n"
+		"  result.isnull = arg1.isnull | arg2.isnull;\n"
+		"  if (!result.isnull)\n"
+		"  {\n"
+		"    result.value = (%s)(arg1.value * arg2.value);\n",
+		entry->func_rettype->type_name,
+		entry->func_name,
+        dtype1->type_name,
+        dtype2->type_name,
+        entry->func_rettype->type_name,
+		entry->func_rettype->type_base);
+
+	/* overflow check depends on data types */
+	if (strcmp(procat->func_name, "int2mul") == 0)
+	{
+		appendStringInfo(
+			&str,
+			"    if (result.value < SHRT_MIN || result.value > SHRT_MAX)\n"
+			"      STROM_SET_ERROR(errcode, StromError_CpuReCheck);\n");
+	}
+	else if (strcmp(procat->func_name, "int4mul") == 0 ||
+			 strcmp(procat->func_name, "int8mul") == 0)
+	{
+		appendStringInfo(
+			&str,
+			"    if (arg2.value != 0 &&\n"
+			"        ((arg2.value == -1 && arg1.value < 0 && result.value < 0) ||\n"
+			"         (result.value / arg2.value != arg1.value)))\n"
+			"      STROM_SET_ERROR(errcode, StromError_CpuReCheck);\n");
+	}
+	else if (strcmp(procat->func_name, "int24mul") == 0 ||
+			 strcmp(procat->func_name, "int28mul") == 0 ||
+			 strcmp(procat->func_name, "int48mul") == 0)
+	{
+		appendStringInfo(
+			&str,
+			"    if (arg2.value != 0 &&\n"
+			"        result.value / arg2.value != arg1.value)\n"
+			"      STROM_SET_ERROR(errcode, StromError_CpuReCheck);\n");
+	}
+	else if (strcmp(procat->func_name, "int42mul") == 0 ||
+			 strcmp(procat->func_name, "int82mul") == 0 ||
+			 strcmp(procat->func_name, "int84mul") == 0)
+	{
+		appendStringInfo(
+			&str,
+			"    if (arg1.value != 0\n"
+			"        result.value / arg1.value != arg2.value)\n"
+			"      STROM_SET_ERROR(errcode, StromError_CpuReCheck);\n");
+	}
+	else if (strcmp(procat->func_name, "float4mul") == 0 ||
+			 strcmp(procat->func_name, "float48mul") == 0 ||
+			 strcmp(procat->func_name, "float48mul") == 0 ||
+			 strcmp(procat->func_name, "float8mul") == 0)
+	{
+		appendStringInfo(
+			&str,
+			"    if ((isinf(result.value) &&\n"
+			"         (!isinf(arg1.value) || !isinf(arg2.value))) ||\n"
+			"        (result.value == 0 && arg1.value != 0 && arg2.value != 0))\n"
+			"      STROM_SET_ERROR(errcode, StromError_CpuReCheck);\n");
+	}
+	else
+	{
+		appendStringInfo(&str, "    /* no overflow checks */\n");
+	}
+	appendStringInfo(&str,
+					 "  }\n"
+					 "  return result;\n"
+					 "}\n");
+	entry->func_decl = str.data;
+}
+
+static void
 devfunc_setup_div_oper(devfunc_info *entry, devfunc_catalog_t *procat)
 {
 	devtype_info   *dtype1 = linitial(entry->func_args);
@@ -619,7 +711,7 @@ devfunc_setup_div_oper(devfunc_info *entry, devfunc_catalog_t *procat)
 				   "    if (arg2.value == %s)\n"
 				   "    {\n"
 				   "        result.isnull = true;\n"
-				   "        STROM_SET_ERROR(errcode, StromError_RowReCheck);\n"
+				   "        STROM_SET_ERROR(errcode, StromError_CpuReCheck);\n"
 				   "    }\n"
 				   "    else\n"
 				   "    {\n"

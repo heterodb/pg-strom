@@ -241,7 +241,7 @@ pgfn_timestamp_date(__private cl_int *errcode, pg_timestamp_t arg1)
 	else if (!timestamp2tm(arg1.value, &tm, &fsec))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(errcode, StromError_RowReCheck);
+		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
 	}
 	else
 	{
@@ -266,7 +266,7 @@ pgfn_timestamp_time(__private cl_int *errcode, pg_timestamp_t arg1)
 	else if (!timestamp2tm(arg1.value, &tm, &fsec))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(errcode, StromError_RowReCheck);
+		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
 	}
 	else
 	{
@@ -308,7 +308,7 @@ pgfn_date_timestamp(__private cl_int *errcode, pg_date_t arg1)
 		if (result.value / USECS_PER_DAY != arg1.value)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(errcode, StromError_RowReCheck);
+			STROM_SET_ERROR(errcode, StromError_CpuReCheck);
 		}
 	}
 	return result;
@@ -363,7 +363,7 @@ pgfn_date_mi(__private cl_int *errcode, pg_date_t arg1, pg_date_t arg2)
 	else if (DATE_NOT_FINITE(arg1.value) || DATE_NOT_FINITE(arg2.value))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(errcode, StromError_RowReCheck);
+		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
 	}
 	else
 	{

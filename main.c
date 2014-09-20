@@ -205,23 +205,21 @@ pgstrom_strerror(cl_int errcode)
 	switch (errcode)
 	{
 		case StromError_Success:
-			return "success";
+			return "Success";
 		case StromError_RowFiltered:
-			return "row is filtered";
-		case StromError_RowReCheck:
-			return "row should be rechecked";
+			return "Row is filtered";
+		case StromError_CpuReCheck:
+			return "To be re-checked by CPU";
 		case StromError_ServerNotReady:
 			return "OpenCL server is not ready";
 		case StromError_BadRequestMessage:
-			return "request message is bad";
+			return "Request message is bad";
 		case StromError_OpenCLInternal:
 			return "OpenCL internal error";
 		case StromError_OutOfSharedMemory:
 			return "out of shared memory";
 		case StromError_OutOfMemory:
 			return "out of host memory";
-		case StromError_ReCheckByCPU:
-			return "to be re-checked by CPU";
 		case StromError_DataStoreCorruption:
 			return "row/column store is corrupted";
 		case StromError_DataStoreNoSpace:

@@ -79,13 +79,12 @@ typedef cl_uint		hostptr_t;
  */
 #define StromError_Success				0	/* OK */
 #define StromError_RowFiltered			1	/* Row-clause was false */
-#define StromError_RowReCheck			2	/* To be checked on the host */
+#define StromError_CpuReCheck			2	/* To be re-checked by CPU */
 #define StromError_ServerNotReady		100	/* OpenCL server is not ready */
 #define StromError_BadRequestMessage	101	/* Bad request message */
 #define StromError_OpenCLInternal		102	/* OpenCL internal error */
 #define StromError_OutOfSharedMemory	105	/* out of shared memory */
 #define StromError_OutOfMemory			106	/* out of host memory */
-#define StromError_ReCheckByCPU			200	/* To be run by CPU */
 #define StromError_DataStoreCorruption	300	/* Row/Column Store Corrupted */
 #define StromError_DataStoreNoSpace		301	/* No Space in Row/Column Store */
 #define StromError_DataStoreOutOfRange	302	/* Out of range in Data Store */
@@ -97,7 +96,7 @@ typedef cl_uint		hostptr_t;
 #ifdef OPENCL_DEVICE_CODE
 /*
  * It sets an error code unless no significant error code is already set.
- * Also, RowReCheck has higher priority than RowFiltered because RowReCheck
+ * Also, CpuReCheck has higher priority than RowFiltered because CpuReCheck
  * implies device cannot run the given expression completely.
  * (Usually, due to compressed or external varlena datum)
  */
@@ -866,7 +865,7 @@ pg_varlena_vref(__global kern_data_store *kds,
 		else
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(errcode, StromError_RowReCheck);
+			STROM_SET_ERROR(errcode, StromError_CpuReCheck);
 		}
 	}
 	return result;
@@ -893,7 +892,7 @@ pg_varlena_param(__global kern_parambuf *kparams,
 		else
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(errcode, StromError_RowReCheck);
+			STROM_SET_ERROR(errcode, StromError_CpuReCheck);
 		}
 	}
 	else
@@ -1151,7 +1150,11 @@ arithmetic_stairlike_add(cl_uint my_value, __local cl_uint *items,
 /*
  * kern_writeback_error_status
  *
- * It set thread-local error code on the variable on global memory.
+ * It set thread local error code on the status variable on the global
+ * memory, if status code is still StromError_Success and any of thread
+ * has a particular error code.
+ * NOTE: It does not look at significance of the error, so caller has
+ * to clear its error code if it is a minor one.
  */
 static void
 kern_writeback_error_status(__global cl_int *error_status,
@@ -1183,8 +1186,8 @@ kern_writeback_error_status(__global cl_int *error_status,
 			errcode_1 = (buddy < get_local_size(0)
 						 ? error_temp[buddy]
 						 : StromError_Success);
-			if (!StromErrorIsSignificant(errcode_0) &&
-				StromErrorIsSignificant(errcode_1))
+			if (errcode_0 == StromError_Success &&
+				errcode_1 != StromError_Success)
 				error_temp[get_local_id(0)] = errcode_1;
 		}
 		barrier(CLK_LOCAL_MEM_FENCE);
@@ -1197,10 +1200,8 @@ kern_writeback_error_status(__global cl_int *error_status,
 	 * StromError_Success.
 	 */
 	errcode_0 = error_temp[0];
-	if (get_local_id(0) == 0 && StromErrorIsSignificant(errcode_0))
-	{
+	if (get_local_id(0) == 0)
 		atomic_cmpxchg(error_status, StromError_Success, errcode_0);
-	}
 }
 
 /* ------------------------------------------------------------
