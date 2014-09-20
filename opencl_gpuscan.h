@@ -108,7 +108,7 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresults,
 	 */
 	binary = (get_global_id(0) < kresults->nrooms &&
 			  (errcode == StromError_Success ||
-			   errcode == StromError_RowReCheck)) ? 1 : 0;
+			   errcode == StromError_CpuReCheck)) ? 1 : 0;
 
 	offset = arithmetic_stairlike_add(binary, workmem, &nitems);
 
@@ -126,7 +126,7 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresults,
 
 	if (errcode == StromError_Success)
 		kresults->results[base + offset] = (get_global_id(0) + 1);
-	else if (errcode == StromError_RowReCheck)
+	else if (errcode == StromError_CpuReCheck)
 		kresults->results[base + offset] = -(get_global_id(0) + 1);
 }
 
@@ -165,8 +165,10 @@ gpuscan_qual(__global kern_gpuscan *kgpuscan,	/* in/out */
 					: StromError_RowFiltered);
 
 	/* writeback error code */
-	kern_writeback_error_status(&kresults->errcode, errcode, local_workbuf);
 	gpuscan_writeback_row_error(kresults, errcode, local_workbuf);
+	if (!StromErrorIsSignificant(errcode))
+		errcode = StromError_Success;	/* clear the minor error */
+	kern_writeback_error_status(&kresults->errcode, errcode, local_workbuf);
 }
 
 #else	/* OPENCL_DEVICE_CODE */

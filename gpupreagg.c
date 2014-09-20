@@ -2246,7 +2246,7 @@ gpupreagg_load_next_outer(GpuPreAggState *gpas)
 
 /*
  * gpupreagg_next_tuple_fallback - a fallback routine if GPU returned
- * StromError_ReCheckByCPU, to suggest the backend to handle request
+ * StromError_CpuReCheck, to suggest the backend to handle request
  * by itself. A fallback process looks like construction of special
  * partial aggregations that consist of individual rows; so here is
  * no performance benefit once it happen.
@@ -2481,7 +2481,7 @@ gpupreagg_exec(CustomPlanState *node)
 		 */
 		if (gpreagg->msg.errcode == StromError_Success)
 			gpas->curr_recheck = false;
-		else if (gpreagg->msg.errcode == StromError_ReCheckByCPU)
+		else if (gpreagg->msg.errcode == StromError_CpuReCheck)
 			gpas->curr_recheck = true;	/* fallback by CPU */
 		else if (gpreagg->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
 		{

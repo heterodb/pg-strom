@@ -180,7 +180,7 @@ init_opencl_context_and_shmem(void)
 
 		if (zone_length > dev_info->dev_max_mem_alloc_size)
 			zone_length = (dev_info->dev_max_mem_alloc_size &
-						   ~(1UL << 20 - 1));
+						   ~((1UL << 20) - 1));
 	}
 	/* Lock shared memory of PG-Strom's private area */
 	pgstrom_setup_shmem(zone_length, on_shmem_zone_callback);
@@ -191,17 +191,16 @@ init_opencl_context_and_shmem(void)
 		 curr_pos += zone_length)
 	{
 		Size		length;
-		cl_mem		host_mem;
 		cl_int		rc;
 
 		length = Min(zone_length, NBuffers * (Size) BLCKSZ - curr_pos);
 
-		host_mem = clCreateBuffer(opencl_context,
-								  CL_MEM_READ_WRITE |
-								  CL_MEM_USE_HOST_PTR,
-								  length,
-								  BufferBlocks + curr_pos,
-								  &rc);
+		(void) clCreateBuffer(opencl_context,
+							  CL_MEM_READ_WRITE |
+							  CL_MEM_USE_HOST_PTR,
+							  length,
+							  BufferBlocks + curr_pos,
+							  &rc);
 		if (rc != CL_SUCCESS)
 			elog(ERROR, "clCreateBuffer failed on host memory (%p-%p): %s",
 				 BufferBlocks + curr_pos,

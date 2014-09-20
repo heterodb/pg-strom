@@ -639,7 +639,7 @@ devfunc_setup_mul_oper(devfunc_info *entry, devfunc_catalog_t *procat)
 		appendStringInfo(
 			&str,
 			"    if (result.value < SHRT_MIN || result.value > SHRT_MAX)\n"
-			"      STROM_SET_ERROR(errcode, StromError_RowReCheck);\n");
+			"      STROM_SET_ERROR(errcode, StromError_CpuReCheck);\n");
 	}
 	else if (strcmp(procat->func_name, "int4mul") == 0 ||
 			 strcmp(procat->func_name, "int8mul") == 0)
@@ -649,7 +649,7 @@ devfunc_setup_mul_oper(devfunc_info *entry, devfunc_catalog_t *procat)
 			"    if (arg2.value != 0 &&\n"
 			"        ((arg2.value == -1 && arg1.value < 0 && result.value < 0) ||\n"
 			"         (result.value / arg2.value != arg1.value)))\n"
-			"      STROM_SET_ERROR(errcode, StromError_RowReCheck);\n");
+			"      STROM_SET_ERROR(errcode, StromError_CpuReCheck);\n");
 	}
 	else if (strcmp(procat->func_name, "int24mul") == 0 ||
 			 strcmp(procat->func_name, "int28mul") == 0 ||
@@ -659,7 +659,7 @@ devfunc_setup_mul_oper(devfunc_info *entry, devfunc_catalog_t *procat)
 			&str,
 			"    if (arg2.value != 0 &&\n"
 			"        result.value / arg2.value != arg1.value)\n"
-			"      STROM_SET_ERROR(errcode, StromError_RowReCheck);\n");
+			"      STROM_SET_ERROR(errcode, StromError_CpuReCheck);\n");
 	}
 	else if (strcmp(procat->func_name, "int42mul") == 0 ||
 			 strcmp(procat->func_name, "int82mul") == 0 ||
@@ -669,7 +669,7 @@ devfunc_setup_mul_oper(devfunc_info *entry, devfunc_catalog_t *procat)
 			&str,
 			"    if (arg1.value != 0\n"
 			"        result.value / arg1.value != arg2.value)\n"
-			"      STROM_SET_ERROR(errcode, StromError_RowReCheck);\n");
+			"      STROM_SET_ERROR(errcode, StromError_CpuReCheck);\n");
 	}
 	else if (strcmp(procat->func_name, "float4mul") == 0 ||
 			 strcmp(procat->func_name, "float48mul") == 0 ||
@@ -681,7 +681,7 @@ devfunc_setup_mul_oper(devfunc_info *entry, devfunc_catalog_t *procat)
 			"    if ((isinf(result.value) &&\n"
 			"         (!isinf(arg1.value) || !isinf(arg2.value))) ||\n"
 			"        (result.value == 0 && arg1.value != 0 && arg2.value != 0))\n"
-			"      STROM_SET_ERROR(errcode, StromError_RowReCheck);\n");
+			"      STROM_SET_ERROR(errcode, StromError_CpuReCheck);\n");
 	}
 	else
 	{
@@ -711,7 +711,7 @@ devfunc_setup_div_oper(devfunc_info *entry, devfunc_catalog_t *procat)
 				   "    if (arg2.value == %s)\n"
 				   "    {\n"
 				   "        result.isnull = true;\n"
-				   "        STROM_SET_ERROR(errcode, StromError_RowReCheck);\n"
+				   "        STROM_SET_ERROR(errcode, StromError_CpuReCheck);\n"
 				   "    }\n"
 				   "    else\n"
 				   "    {\n"

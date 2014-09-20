@@ -443,7 +443,7 @@ pg_varlena_hashref(__global kern_hashentry *kentry,
 		else
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(p_errcode, StromError_RowReCheck);
+			STROM_SET_ERROR(p_errcode, StromError_CpuReCheck);
 		}
 	}
 	return result;
