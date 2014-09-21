@@ -177,11 +177,8 @@ _PG_init(void)
 
 	/* registration of custom-plan providers */
 	pgstrom_init_gpuscan();
-	pgstrom_init_gpuhashjoin();
-	pgstrom_init_gpupreagg();
-
-	/* initialization of tcache & registration of columnizer */
-	pgstrom_init_tcache();
+	//pgstrom_init_gpuhashjoin();
+	//pgstrom_init_gpupreagg();
 
 	/* miscellaneous initializations */
 	pgstrom_init_misc_guc();

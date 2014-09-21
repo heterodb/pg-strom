@@ -204,8 +204,8 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 				pgstrom_close_queue((pgstrom_queue *)sobject);
 			else if (StromTagIs(sobject, DevProgram))
 				pgstrom_put_devprog_key(PointerGetDatum(sobject));
-			else if (StromTagIs(sobject, HashJoinTable))
-				multihash_put_tables((pgstrom_multihash_tables *) sobject);
+			//else if (StromTagIs(sobject, HashJoinTable))
+			//	multihash_put_tables((pgstrom_multihash_tables *) sobject);
 			else if (StromTagIs(sobject, DataStore))
 				pgstrom_put_data_store((pgstrom_data_store *) sobject);
 			else
@@ -254,8 +254,8 @@ __pgstrom_track_object(const char *filename, int lineno,
 			pgstrom_put_devprog_key((Datum)sobject);
 		else if (StromTagIs(sobject, DataStore))
 			pgstrom_put_data_store((pgstrom_data_store *) sobject);
-		else if (StromTagIs(sobject, HashJoinTable))
-			multihash_put_tables((pgstrom_multihash_tables *) sobject);
+		//else if (StromTagIs(sobject, HashJoinTable))
+		//	multihash_put_tables((pgstrom_multihash_tables *) sobject);
 		else
 			pgstrom_put_message((pgstrom_message *)sobject);
 		/* also, tracker objects shall be backed to free-list */

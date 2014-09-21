@@ -406,20 +406,20 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 	/* in case of row-store */
 	if (!kds->is_column)
 	{
-		kern_rowitem   *ritem = KERN_DATA_STORE_ROWITEMS(kds) + row_index;
+		kern_rowitem   *ritem = KERN_DATA_STORE_ROWITEM(kds, row_index);
 		Buffer			buffer;
 		Page			page;
 		ItemId			lpp;
 
-		Assert(ritem->block_id < kds->nblocks);
-		buffer = pds->blocks[ritem->block_id].buffer;
-		page   = pds->blocks[ritem->block_id].page;
-		lpp = PageGetItemId(page, ritem->item_id);
+		Assert(ritem->block_ofs < kds->nblocks);
+		buffer = pds->blocks[ritem->block_ofs].buffer;
+		page   = pds->blocks[ritem->block_ofs].page;
+		lpp = PageGetItemId(page, ritem->item_ofs);
 		Assert(ItemIdIsNormal(lpp));
 
 		tuple->t_data = (HeapTupleHeader) PageGetItem(page, lpp);
 		tuple->t_len = ItemIdGetLength(lpp);
-		ItemPointerSet(&tuple->t_self, buffer, ritem->item_id);
+		ItemPointerSet(&tuple->t_self, buffer, ritem->item_ofs);
 
 		ExecStoreTuple(tuple, slot, buffer, false);
 
@@ -522,7 +522,7 @@ pgstrom_create_data_store_row(TupleDesc tupdesc,
 	/* update exact number of rooms available */
 	nrooms = (allocation - baselen) / sizeof(kern_rowitem);
 
-	kds->length = baselen;
+	kds->length = 0;	/* 0 for row-store */
 	kds->ncols = tupdesc->natts;
 	kds->nitems = 0;
 	kds->nrooms = nrooms;
@@ -537,7 +537,7 @@ pgstrom_create_data_store_row(TupleDesc tupdesc,
 		kds->colmeta[i].attlen = attr->attlen;
 		kds->colmeta[i].rs_attnum = attr->attnum;
 	}
-	Assert((uintptr_t)(KERN_DATA_STORE_ROWITEMS(kds) + nrooms) <=
+	Assert((uintptr_t)KERN_DATA_STORE_ROWITEM(kds, nrooms) <=
 		   (uintptr_t)(kds) + allocation);
 
 	/* allocation of pgstrom_data_store */
@@ -740,7 +740,7 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 	 * on the core side. It kills necessity of setting up HeapTupleData
 	 * when all_visible and non-serialized transaction.
 	 */
-	kri = KERN_DATA_STORE_ROWITEMS(kds) + kds->nitems;
+	kri = KERN_DATA_STORE_ROWITEM(kds, kds->nitems);
 	for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(page, lineoff);
 		 lineoff <= lines;
 		 lineoff++, lpp++)
@@ -766,8 +766,8 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 		if (!valid)
 			continue;
 
-		kri->block_id = kds->nblocks;
-		kri->item_id = lineoff;
+		kri->block_ofs = kds->nblocks;
+		kri->item_ofs = lineoff;
 		kri++;
 		ntup++;
 	}
@@ -923,4 +923,144 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 		}
 	}
 	return false;
+}
+
+/*
+ * clserv_dmasend_data_store
+ *
+ * It enqueues DMA send request of the supplied data-store.
+ * Note that we expect this routine is called under the OpenCL server
+ * context.
+ */
+cl_int
+clserv_dmasend_data_store(pgstrom_data_store *pds,
+						  cl_command_queue kcmdq,
+						  cl_mem kds_buffer,
+						  cl_mem ktoast_buffer,
+						  cl_uint num_blockers,
+						  const cl_event *blockers,
+						  cl_uint *ev_index,
+						  cl_event *events,
+						  pgstrom_perfmon *pfm)
+{
+	kern_data_store *kds = pds->kds;
+	size_t		length;
+	size_t		offset;
+	cl_int		i, rc;
+
+#ifdef USE_ASSERT_CHECKING
+	Assert(pgstrom_i_am_clserv);
+	rc = clGetMemObjectInfo(kds_buffer,
+							CL_MEM_SIZE,
+							sizeof(length),
+							&length,
+							NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clGetMemObjectInfo (%s)",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	Assert(length < KERN_DATA_STORE_LENGTH(kds));
+#endif
+
+	if (kds->is_column)
+	{
+		rc = clEnqueueWriteBuffer(kcmdq,
+								  kds_buffer,
+								  CL_FALSE,
+								  0,
+								  kds->length,
+								  kds,
+								  num_blockers,
+								  blockers,
+								  events + *ev_index);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clEnqueueWriteBuffer: %s",
+					   opencl_strerror(rc));
+			return rc;
+		}
+		(*ev_index)++;
+		pfm->bytes_dma_send += kds->length;
+		pfm->num_dma_send++;
+
+		if (!pds->ktoast)
+			Assert(!ktoast_buffer);
+		else
+		{
+			kern_toastbuf  *ktoast = pds->ktoast;
+
+			Assert(ktoast_buffer);
+
+			rc = clEnqueueWriteBuffer(kcmdq,
+									  ktoast_buffer,
+									  CL_FALSE,
+									  0,
+									  ktoast->usage,
+									  ktoast,
+									  num_blockers,
+									  blockers,
+									  events + *ev_index);
+			if (rc != CL_SUCCESS)
+			{
+				clserv_log("failed on clEnqueueWriteBuffer: %s",
+						   opencl_strerror(rc));
+				return rc;
+			}
+			(*ev_index)++;
+			pfm->bytes_dma_send += ktoast->usage;
+			pfm->num_dma_send++;
+		}
+	}
+	else
+	{
+		length = ((uintptr_t)KERN_DATA_STORE_ROWITEM(kds, kds->nitems) -
+				  (uintptr_t)(kds));
+		rc = clEnqueueWriteBuffer(kcmdq,
+								  kds_buffer,
+								  CL_FALSE,
+								  0,
+								  length,
+								  kds,
+								  num_blockers,
+								  blockers,
+								  events);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clEnqueueWriteBuffer: %s",
+					   opencl_strerror(rc));
+			return rc;
+		}
+		(*ev_index)++;
+		pfm->bytes_dma_send += kds->length;
+		pfm->num_dma_send++;
+
+		offset = ((uintptr_t)KERN_DATA_STORE_ROWBLOCK(kds, 0) -
+				  (uintptr_t)(kds));
+		for (i=0; i < kds->nblocks; i++)
+		{
+			rc = clEnqueueWriteBuffer(kcmdq,
+									  kds_buffer,
+									  CL_FALSE,
+									  offset,
+									  BLCKSZ,
+									  pds->blocks[i].page,
+									  num_blockers,
+									  blockers,
+									  events + *ev_index);
+			if (rc != CL_SUCCESS)
+			{
+				clserv_log("failed on clEnqueueWriteBuffer: %s",
+						   opencl_strerror(rc));
+				return rc;
+			}
+			(*ev_index)++;
+			pfm->bytes_dma_send += BLCKSZ;
+			pfm->num_dma_send++;
+			offset += BLCKSZ;
+		}
+		Assert(!pds->ktoast);
+	}
+	return CL_SUCCESS;
 }

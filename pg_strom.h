@@ -477,7 +477,15 @@ extern int pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 										   bool page_prune);
 extern bool pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 											TupleTableSlot *slot);
-
+extern cl_int clserv_dmasend_data_store(pgstrom_data_store *pds,
+										cl_command_queue kcmdq,
+										cl_mem kds_buffer,
+										cl_mem ktoast_buffer,
+										cl_uint num_blockers,
+										const cl_event *blockers,
+										cl_uint *ev_index,
+										cl_event *events,
+										pgstrom_perfmon *pfm);
 /*
  * restrack.c
  */

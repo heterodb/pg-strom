@@ -120,6 +120,61 @@ STROM_SET_ERROR(__private cl_int *p_error, cl_int errcode)
  */
 
 /*
+ * Local definition of PageHeaderData and related
+ */
+typedef cl_ushort LocationIndex;
+
+typedef struct
+{
+	cl_uint		xlogid;		/* high bits */
+	cl_uint		xrecoff;	/* low bits */
+} PageXLogRecPtr;
+
+typedef cl_uint	TransactionId;
+/*
+ * NOTE: ItemIdData is defined using bit-fields in PostgreSQL, however,
+ * OpenCL does not support bit-fields. So, we deal with ItemIdData as
+ * a 32bit width integer variable, even though lower 15bits are lp_off,
+ * higher 15bits are lp_len, and rest of 2bits are lp_flags.
+ *
+ * FIXME: Host should tell how to handle bitfield layout
+ */
+typedef cl_uint	ItemIdData;
+typedef __global ItemIdData ItemId;
+
+#define ItemIdGetLength(itemId)		((itemId) & 0x00007fff)
+#define ItemIdGetOffset(itemId)		(((itemId) >> 17) & 0x7fff)
+#define ItemIdGetFlags(itemId)		(((itemId) >> 15) & 0x0003)
+
+typedef struct PageHeaderData
+{
+    /* XXX LSN is member of *any* block, not only page-organized ones */
+    PageXLogRecPtr	pd_lsn;		/* LSN: next byte after last byte of xlog
+								 * record for last change to this page */
+    cl_ushort		pd_checksum;	/* checksum */
+    cl_ushort		pd_flags;		/* flag bits, see below */
+    LocationIndex	pd_lower;		/* offset to start of free space */
+    LocationIndex	pd_upper;		/* offset to end of free space */
+    LocationIndex	pd_special;		/* offset to start of special space */
+    cl_ushort		pd_pagesize_version;
+	TransactionId	pd_prune_xid;	/* oldest prunable XID, or zero if none */
+	ItemIdData		pd_linp[1];		/* beginning of line pointer array */
+} PageHeaderData;
+
+typedef __global PageHeaderData *PageHeader;
+
+#define SizeOfPageHeaderData (offsetof(PageHeaderData, pd_linp))
+
+#define PageGetMaxOffsetNumber(page) \
+	(((PageHeader) (page))->pd_lower <= SizeOfPageHeaderData ? 0 :	\
+	 ((((PageHeader) (page))->pd_lower - SizeOfPageHeaderData)		\
+	  / sizeof(ItemIdData)))
+
+
+
+
+
+/*
  * we need to e-define HeapTupleData and HeapTupleHeaderData and
  * t_infomask related stuff
  */
@@ -137,6 +192,12 @@ typedef struct HeapTupleData {
 	cl_uint			t_tableOid;
 	hostptr_t		t_data;		/* !HOSTONLY! pointer to htup on the host */
 } HeapTupleData;
+
+
+
+
+
+
 
 typedef struct {
 	union {
@@ -197,95 +258,6 @@ typedef struct {
 #define STROMALIGN_LEN			16
 #define STROMALIGN(LEN)			TYPEALIGN(STROMALIGN_LEN,LEN)
 #define STROMALIGN_DOWN(LEN)	TYPEALIGN_DOWN(STROMALIGN_LEN,LEN)
-
-/*
- * kern_row_store
- *
- * It stores records in row-format.
- *
- * +-----------------+
- * | length          |
- * +-----------------+ o--+
- * | ncols (= M)     |    | The array of tuple offset begins from colmeta[N].
- * +-----------------+    | It points a particular variable length region 
- * | nrows (= N)     |    | from the tail.
- * +-----------------+    |
- * | colmeta[0]      |    |
- * | colmeta[1]      |    |
- * |    :            |    |
- * | colmeta[M-1]    |    |
- * +-----------------+ <--+
- * | tuples[0]       |
- * | tuples[1]       |
- * | tuples[2] o----------+ offset from the head of this row-store
- * |    :            |    |
- * | tuples[N-1]     |    |
- * +-----------------+    |
- * |      :          |    |
- * | free area       |    |
- * |      :          |    |
- * +-----------------+ <------ current usage of this row-store
- * | (N-1)th rs_tuple|    |
- * +-----------------+    |
- * |      :          |    |
- * |      :          |    |
- * +-----------------+ <--+
- * | 2nd rs_tuple    |
- * +-----------------+
- * | 1st rs_tuple    |
- * +-----------------+
- * |      :          |
- * | 0th rs_tuple    |
- * |      :          |
- * +-----------------+
- */
-typedef struct {
-	cl_uint			length;	/* length of this kernel row_store */
-	cl_uint			ncols;	/* number of columns in the source relation */
-	cl_uint			nrows;	/* number of rows in this store */
-	struct {
-		cl_char		attnotnull;	/* true, if always not null */
-		cl_char		attalign;	/* type alignment */
-		cl_short	attlen;		/* length of type */
-	} colmeta[FLEXIBLE_ARRAY_MEMBER];	/* simplified kern_colmeta */
-} kern_row_store;
-
-static inline __global cl_uint *
-kern_rowstore_get_offset(__global kern_row_store *krs)
-{
-	return ((__global cl_uint *)(&krs->colmeta[krs->ncols]));
-}
-
-/*
- * rs_tuple
- *
- * HeapTuple representation in row-store. Even though most of metadata in
- * the HeapTupleData / HeapTupleHeaderData are not used in device kernel,
- * we put them together because it enables to avoid tuple re-construction
- * on the host side that has limited computing power.
- */
-typedef struct {
-	HeapTupleData		htup;
-	HeapTupleHeaderData	data;
-} rs_tuple;
-
-static inline __global rs_tuple *
-kern_rowstore_get_tuple(__global kern_row_store *krs, cl_uint krs_index)
-{
-	__global cl_uint   *p_offset;
-
-	if (krs_index >= krs->nrows)
-		return NULL;
-	p_offset = kern_rowstore_get_offset(krs);
-	if (p_offset[krs_index] == 0)
-		return NULL;
-	return (__global rs_tuple *)((uintptr_t)krs + p_offset[krs_index]);
-}
-
-/*
- * Data type definitions for column oriented data format
- * ---------------------------------------------------
- */
 
 /*
  * kern_data_store
@@ -376,12 +348,12 @@ typedef struct {
  * item_id points a particular tuple item within the block.
  */
 typedef struct {
-	cl_ushort		block_id;
-	cl_ushort		item_id;
+	cl_ushort		block_ofs;
+	cl_ushort		item_ofs;
 } kern_rowitem;
 
 typedef struct {
-	cl_uint			length;	/* length of this kernel data store */
+	cl_uint			length;	/* length of the column-store, or 0 elsewhere */
 	cl_uint			ncols;	/* number of columns in this store */
 	cl_uint			nitems; /* number of rows in this store */
 	cl_uint			nrooms;	/* number of available rows in this store */
@@ -392,19 +364,26 @@ typedef struct {
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_data_store;
 
-#define KERN_DATA_STORE_ROWBLOCKS(kds)					\
-	((__global PageHeader)								\
-	 ((__global cl_char *)(kds) +						\
-	  ((STROMALIGN(offsetof(kern_data_store,			\
-							colmeta[(kds)->ncols])) +	\
-		STROMALIGN(sizeof(kern_rowitem) *				\
-				   (kds->nitems)) + BLCKSZ - 1) & ~(BLCKSZ - 1))))
+#define KERN_DATA_STORE_ROWITEM(kds,row_index)				\
+	(((__global kern_rowitem *)								\
+	  ((__global cl_char *)(kds) +							\
+	   STROMALIGN(offsetof(kern_data_store,					\
+						   colmeta[(kds)->ncols])))) +		\
+	 (row_index))
 
-#define KERN_DATA_STORE_ROWITEMS(kds)				\
-	((__global kern_rowitem *)						\
-	 ((__global cl_char *)(kds) +					\
-	  STROMALIGN(offsetof(kern_data_store,			\
-						  colmeta[(kds)->ncols]))))
+#define KERN_DATA_STORE_ROWBLOCK(kds,block_ofs)				\
+	((__global PageHeader)									\
+	 (((__global cl_char *)(kds) +							\
+	   ((STROMALIGN(offsetof(kern_data_store,				\
+							 colmeta[(kds)->ncols])) +		\
+		 STROMALIGN(sizeof(kern_rowitem) * (kds)->nitems) +	\
+		 BLCKSZ - 1) & ~(BLCKSZ - 1)) + BLCKSZ * (block_ofs))))
+
+#define KERN_DATA_STORE_LENGTH(kds)							\
+	((kds)->is_column ?										\
+	 STROMALIGN((kds)->length) :							\
+	 ((uintptr_t)KERN_DATA_STORE_ROWBLOCK((kds), (kds)->nblocks) -	\
+	  (uintptr_t)(kds)))
 
 /*
  * kern_toastbuf
@@ -737,27 +716,43 @@ static inline __global void *
 kern_get_datum_rs(__global kern_data_store *kds,
 				  cl_uint colidx, cl_uint rowidx)
 {
-	__global kern_row_store	*krs;
-	__global rs_tuple		*rs_tup;
+	__global kern_row_items *kritem;
+	PageHeader	page;
+	cl_ushort	block_ofs;
+	cl_ushort	item_ofs;
+	cl_ushort	item_max;
+	ItemIdData	itemid;
 	cl_uint		i, ncols;
 	cl_uint		offset;
 
-	offset = STROMALIGN(offsetof(kern_data_store, colmeta[kds->ncols]));
-	krs = (__global kern_row_store *)((__global char *)kds + offset);
-	rs_tup = kern_rowstore_get_tuple(krs, rowidx);
-	if (!rs_tup)
+	if (colidx >= kds->ncols || rowidx >= kds->nitems)
 		return NULL;
 
-	offset = rs_tup->data.t_hoff;
-	ncols = (rs_tup->data.t_infomask2 & HEAP_NATTS_MASK);
-	/* a shortcut if colidx is obviously out of range */
+	kritem = KERN_DATA_STORE_ROWITEM(kds, rowidx);
+	block_ofs = kritem->block_ofs;
+	item_ofs = kritem->item_ofs;
+	if (block_ofs >= kds->nblocks)
+		return NULL;	/* likely a BUG */
+
+	page = KERN_DATA_STORE_ROWBLOCK(kds, block_ofs);
+	item_max = PageGetMaxOffsetNumber(page);
+	if (item_ofs == 0 || item_ofs > item_max)
+		return NULL;	/* likely a BUG */
+
+	item_id = page->pd_linp[item_ofs - 1];
+	htup = (__global HeapTupleHeaderData *)
+		((__global char *)page + ItemIdGetOffset(item_id));
+
+	offset = htup->t_hoff;
+	ncols = (htup->t_infomask2 & HEAP_NATTS_MASK);
+	/* shortcut if colidx is obviously out of range */
 	if (colidx >= ncols)
 		return NULL;
 
 	for (i=0; i < ncols; i++)
 	{
-		if ((rs_tup->data.t_infomask & HEAP_HASNULL) != 0 &&
-			att_isnull(i, rs_tup->data.t_bits))
+		if ((htup->t_infomask & HEAP_HASNULL) != 0 &&
+			att_isnull(i, htup->t_bits))
 		{
 			if (i == colidx)
 				return NULL;
@@ -766,17 +761,17 @@ kern_get_datum_rs(__global kern_data_store *kds,
 		{
 			__global char  *addr;
 
-			if (krs->colmeta[i].attlen > 0)
-				offset = TYPEALIGN(krs->colmeta[i].attalign, offset);
-			else if (!VARATT_NOT_PAD_BYTE((uintptr_t)&rs_tup->data + offset))
-				offset = TYPEALIGN(krs->colmeta[i].attalign, offset);
+			if (kds->colmeta[i].attlen > 0)
+				offset = TYPEALIGN(kds->colmeta[i].attalign, offset);
+			else if (!VARATT_NOT_PAD_BYTE((__global char *)htup + offset))
+				offset = TYPEALIGN(kds->colmeta[i].attalign, offset);
 
-			addr = ((__global char *)&rs_tup->data) + offset;
+			addr = ((__global char *) htup + offset);
 			if (i == colidx)
 				return addr;
 
-			offset += (krs->colmeta[i].attlen > 0
-					   ? krs->colmeta[i].attlen
+			offset += (kds->colmeta[i].attlen > 0
+					   ? kds->colmeta[i].attlen
 					   : VARSIZE_ANY(addr));
 		}
 	}
@@ -832,8 +827,8 @@ kern_get_datum(__global kern_data_store *kds,
 	if (colidx >= kds->ncols || rowidx >= kds->nitems)
 		return NULL;
 
-	if (!kds->column_form)
-		return kern_get_datum_rs(kds,colidx,rowidx);
+	if (!kds->is_column)
+		return kern_get_datum_rs(kds, colidx, rowidx);
 	else
 		return kern_get_datum_cs(kds, ktoast, colidx, rowidx);
 }

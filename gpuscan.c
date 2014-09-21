@@ -730,7 +730,8 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	pds = pgstrom_create_data_store_row(tupdesc, length, gss->ntup_per_page);
 	PG_TRY();
 	{
-		while (pgstrom_data_store_insert_block(pds, rel,
+		while (gss->curr_blknum > gss->last_blknum &&
+			   pgstrom_data_store_insert_block(pds, rel,
 											   gss->curr_blknum,
 											   snapshot, true))
 			gss->curr_blknum++;
@@ -1785,7 +1786,7 @@ typedef struct
 	cl_mem			m_gpuscan;
 	cl_mem			m_dstore;
 	cl_mem			m_ktoast;
-	cl_int			ev_index;
+	cl_uint			ev_index;
 	cl_event		events[20];
 } clstate_gpuscan;
 
@@ -1920,173 +1921,6 @@ clserv_respond_gpuscan(cl_event event, cl_int ev_status, void *private)
 }
 
 /*
- * clserv_process_gpuscan_row
- *
- * enqueuing DMA send for row-store
- */
-static cl_int
-clserv_process_gpuscan_row(clstate_gpuscan *clgss,
-						   kern_data_store *kds_head,
-						   tcache_row_store *trs,
-						   cl_command_queue kcmdq)
-{
-	pgstrom_perfmon *pfm = &clgss->msg->pfm;
-	Size		offset;
-	cl_int		rc;
-
-	/* enqueue row-store */
-	offset = STROMALIGN(offsetof(kern_data_store,
-								 colmeta[kds_head->ncols]));
-	rc = clEnqueueWriteBuffer(kcmdq,
-							  clgss->m_dstore,
-							  CL_FALSE,
-							  offset,
-							  trs->kern.length,
-							  &trs->kern,
-							  0,
-							  NULL,
-							  &clgss->events[clgss->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
-		return rc;
-	}
-	clgss->ev_index++;
-	pfm->bytes_dma_send += trs->kern.length;
-	pfm->num_dma_send++;
-
-	return CL_SUCCESS;
-}
-
-/*
- * clserv_process_gpuscan_column
- *
- * enqueuing DMA send for column-store
- */
-static cl_int
-clserv_process_gpuscan_column(clstate_gpuscan *clgss,
-							  kern_data_store *kds_head,
-							  kern_toastbuf *ktoast_head,
-							  tcache_column_store *tcs,
-							  cl_command_queue kcmdq)
-{
-	pgstrom_perfmon *pfm = &clgss->msg->pfm;
-	Size		length;
-	Size		offset;
-	cl_uint		nrooms = kds_head->nitems;
-	cl_uint		ncols = kds_head->ncols;
-	cl_int		i, rc;
-
-	Assert(kds_head->ncols == tcs->ncols);
-	Assert(kds_head->nitems == tcs->nrows);
-	Assert(kds_head->nitems == kds_head->nrooms);
-
-	/* toast header, if any */
-	if (clgss->m_ktoast)
-	{
-		length = offsetof(kern_toastbuf, coldir[ncols]);
-		rc = clEnqueueWriteBuffer(kcmdq,
-								  clgss->m_ktoast,
-								  CL_FALSE,
-								  0,
-								  length,
-								  ktoast_head,
-								  0,
-								  NULL,
-								  &clgss->events[clgss->ev_index]);
-		if (rc != CL_SUCCESS)
-		{
-			clserv_log("failed on clEnqueueWriteBuffer: %s",
-					   opencl_strerror(rc));
-			return rc;
-		}
-		clgss->ev_index++;
-		pfm->bytes_dma_send += length;
-		pfm->num_dma_send++;
-	}
-
-	for (i=0; i < kds_head->ncols; i++)
-	{
-		if (!kds_head->colmeta[i].attvalid)
-			continue;
-
-		offset = kds_head->colmeta[i].cs_offset;
-		if (!kds_head->colmeta[i].attnotnull)
-		{
-			Assert(tcs->cdata[i].isnull != NULL);
-			length = STROMALIGN(BITMAPLEN(nrooms));
-			rc = clEnqueueWriteBuffer(kcmdq,
-									  clgss->m_dstore,
-									  CL_FALSE,
-									  offset,
-									  length,
-									  tcs->cdata[i].isnull,
-									  0,
-									  NULL,
-									  &clgss->events[clgss->ev_index]);
-			if (rc != CL_SUCCESS)
-			{
-				clserv_log("failed on clEnqueueWriteBuffer: %s",
-						   opencl_strerror(rc));
-				Assert(false);
-				return rc;
-			}
-			clgss->ev_index++;
-			pfm->bytes_dma_send += length;
-			pfm->num_dma_send++;
-
-			offset += length;
-		}
-		length = (kds_head->colmeta[i].attlen > 0
-				  ? kds_head->colmeta[i].attlen
-				  : sizeof(cl_uint)) * nrooms;
-		rc = clEnqueueWriteBuffer(kcmdq,
-								  clgss->m_dstore,
-								  CL_FALSE,
-								  offset,
-								  length,
-								  tcs->cdata[i].values,
-								  0,
-								  NULL,
-								  &clgss->events[clgss->ev_index]);
-		if (rc != CL_SUCCESS)
-		{
-			clserv_log("failed on clEnqueueWriteBuffer: %s",
-					   opencl_strerror(rc));
-			return rc;
-		}
-		clgss->ev_index++;
-		pfm->bytes_dma_send += length;
-		pfm->num_dma_send++;
-
-		if (tcs->cdata[i].toast)
-		{
-			Assert(kds_head->colmeta[i].attlen < 0);
-			Assert(clgss->m_ktoast);
-			rc = clEnqueueWriteBuffer(kcmdq,
-									  clgss->m_ktoast,
-									  CL_FALSE,
-									  ktoast_head->coldir[i],
-									  tcs->cdata[i].toast->tbuf_usage,
-									  tcs->cdata[i].toast,
-									  0,
-									  NULL,
-									  &clgss->events[clgss->ev_index]);
-			if (rc != CL_SUCCESS)
-			{
-				clserv_log("failed on clEnqueueWriteBuffer: %s",
-						   opencl_strerror(rc));
-				return rc;
-			}
-			clgss->ev_index++;
-			pfm->bytes_dma_send += tcs->cdata[i].toast->tbuf_usage;
-			pfm->num_dma_send++;
-		}
-	}
-	return CL_SUCCESS;
-}
-
-/*
  * clserv_process_gpuscan
  *
  * entrypoint of kernel gpuscan implementation
@@ -2095,32 +1929,30 @@ static void
 clserv_process_gpuscan(pgstrom_message *msg)
 {
 	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) msg;
-	pgstrom_perfmon	   *pfm = &msg->pfm;
+	pgstrom_perfmon	   *pfm = &gpuscan->msg.pfm;
+	pgstrom_data_store *pds = gpuscan->pds;
+	kern_data_store	   *kds = pds->kds;
 	clstate_gpuscan	   *clgss = NULL;
 	cl_program			program;
 	cl_command_queue	kcmdq;
-	kern_parambuf	   *kparams = KERN_GPUSCAN_PARAMBUF(&gpuscan->kern);
-	kern_data_store	   *kds_head = KPARAM_GET_KDS_HEAD(kparams);
-	kern_toastbuf	   *ktoast_head = KPARAM_GET_KTOAST_HEAD(kparams);
 	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
 	int					dindex;
-	cl_uint				nrows;
 	cl_int				rc;
 	size_t				length;
 	size_t				offset;
 	size_t				gwork_sz;
 	size_t				lwork_sz;
 
-	/* sanity checks and get number of rows; depending on data format */
+	/* sanity checks */
 	Assert(StromTagIs(gpuscan, GpuScan));
-	nrows = pgstrom_nitems_rcstore(gpuscan->rc_store);
-	if (nrows == 0)
+	Assert(!kds->is_column);
+	Assert(kresults->nrels == 1);
+	if (kds->nitems == 0)
 	{
 		msg->errcode = StromError_BadRequestMessage;
 		pgstrom_reply_message(msg);
 		return;
 	}
-	Assert(kresults->nrels == 1);
 
 	/*
 	 * First of all, it looks up a program object to be run on
@@ -2150,8 +1982,7 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	/*
 	 * create a state object
 	 */
-	clgss = calloc(1, offsetof(clstate_gpuscan,
-							   events[kds_head->ncols * 3 + 10]));
+	clgss = calloc(1, offsetof(clstate_gpuscan, events[20 + kds->nblocks]));
 	if (!clgss)
 	{
 		clReleaseProgram(program);
@@ -2180,7 +2011,7 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
 									   clgss->kernel, dindex,
 									   false,	/* smaller WG-sz is better */
-									   nrows, sizeof(cl_uint)))
+									   kds->nitems, sizeof(cl_uint)))
 		goto error;
 
 	/* allocation of device memory for kern_gpuscan argument */
@@ -2195,10 +2026,10 @@ clserv_process_gpuscan(pgstrom_message *msg)
 		goto error;
 	}
 
-	/* allocation of device memory for kern_row_store argument */
+	/* allocation of device memory for kern_data_store argument */
 	clgss->m_dstore = clCreateBuffer(opencl_context,
 									 CL_MEM_READ_WRITE,
-									 kds_head->length,
+									 KERN_DATA_STORE_LENGTH(kds),
 									 NULL,
 									 &rc);
 	if (rc != CL_SUCCESS)
@@ -2207,37 +2038,10 @@ clserv_process_gpuscan(pgstrom_message *msg)
 		goto error;
 	}
 
-	/* allocation of device memory for kern_toastbuf, if needed */
-	if (ktoast_head)
-	{
-		tcache_column_store *tcs;
-		Size	toast_length = 0;
-		int		i;
-
-		/* only column-store needs individual toast buffer */
-		Assert(StromTagIs(gpuscan->rc_store, TCacheColumnStore));
-		tcs = (tcache_column_store *) gpuscan->rc_store;
-		for (i=0; i < kds_head->ncols; i++)
-		{
-			if (kds_head->colmeta[i].attvalid &&
-				kds_head->colmeta[i].attlen < 1)
-				toast_length += STROMALIGN(tcs->cdata[i].toast->tbuf_length);
-		}
-		/* any of columns should be variable-length, if valid ktoast_head */
-		Assert(toast_length > 0);
-		toast_length += STROMALIGN(offsetof(kern_toastbuf,
-											coldir[kds_head->ncols]));
-		clgss->m_ktoast = clCreateBuffer(opencl_context,
-										 CL_MEM_READ_WRITE,
-										 toast_length,
-										 NULL,
-										 &rc);
-		if (rc != CL_SUCCESS)
-		{
-			clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-			goto error;
-		}
-	}
+	/*
+	 * allocation of device memory for kern_toastbuf, but never required
+	 */
+	clgss->m_ktoast = NULL;
 
 	/*
 	 * OK, all the device memory and kernel objects acquired.
@@ -2321,44 +2125,16 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	pfm->bytes_dma_send += length;
 	pfm->num_dma_send++;
 
-	/* kds_head */
-	length = offsetof(kern_data_store, colmeta[kds_head->ncols]);
-	rc = clEnqueueWriteBuffer(kcmdq,
-							  clgss->m_dstore,
-							  CL_FALSE,
-							  0,
-							  length,
-							  kds_head,
-							  0,
-							  NULL,
-							  &clgss->events[clgss->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-	clgss->ev_index++;
-	pfm->bytes_dma_send += length;
-	pfm->num_dma_send++;
-
-	/* body of kern_data_store */
-	if (StromTagIs(gpuscan->rc_store, TCacheRowStore))
-	{
-		tcache_row_store *trs = (tcache_row_store *)gpuscan->rc_store;
-		rc = clserv_process_gpuscan_row(clgss,
-										kds_head,
-										trs,
-										kcmdq);
-	}
-	else
-	{
-		tcache_column_store *tcs = (tcache_column_store *)gpuscan->rc_store;
-		rc = clserv_process_gpuscan_column(clgss,
-										   kds_head,
-										   ktoast_head,
-										   tcs,
-										   kcmdq);
-	}
+	/* kern_data_store, via common routine */
+	rc = clserv_dmasend_data_store(pds,
+								   kcmdq,
+								   clgss->m_dstore,
+								   clgss->m_ktoast,
+								   0,
+								   NULL,
+								   &clgss->ev_index,
+								   clgss->events,
+								   pfm);
 	if (rc != CL_SUCCESS)
 		goto error;
 
@@ -2459,7 +2235,7 @@ clserv_put_gpuscan(pgstrom_message *msg)
 	if (gpuscan->dprog_key != 0)
 		pgstrom_put_devprog_key(gpuscan->dprog_key);
 	/* release row-/column-store, if any */
-	if (gpuscan->rc_store)
-		pgstrom_put_rcstore(gpuscan->rc_store);
+	if (gpuscan->pds)
+		pgstrom_put_data_store(gpuscan->pds);
 	pgstrom_shmem_free(gpuscan);
 }
