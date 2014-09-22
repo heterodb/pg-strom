@@ -71,6 +71,7 @@ typedef struct {
 	CustomPlanState		cps;
 	Relation			scan_rel;
 	TupleTableSlot	   *scan_slot;
+	HeapTupleData		scan_tuple;
 	BlockNumber			curr_blknum;
 	BlockNumber			last_blknum;
 	double				ntup_per_page;
@@ -312,6 +313,7 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 	if (dev_quals == NIL)
 		return NULL;
 
+#if 0
 	/*
 	 * A dummy constant
 	 * KPARAM_0 - a template of kern_data_store to be loaded.
@@ -333,7 +335,7 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 												true,
 												false));
 	context->type_defs = list_make1(pgstrom_devtype_lookup(BYTEAOID));
-
+#endif
 	/* OK, let's walk on the device expression tree */
 	expr_code = pgstrom_codegen_expression((Node *)dev_quals, context);
 	Assert(expr_code != NULL);
@@ -362,6 +364,13 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 		"                  size_t kds_index)\n"
 		"{\n"
 		"%s"
+		"  if (get_global_id(0) == 0)\n"
+		"  {\n"
+		"    printf(\"%%d %%f\\n\", KPARAM_0.isnull, KPARAM_0.value);\n"
+		"    printf(\"%%d %%f\\n\", KPARAM_1.isnull, KPARAM_1.value);\n"
+		"    printf(\"%%d %%f\\n\", KPARAM_2.isnull, KPARAM_2.value);\n"
+		"    printf(\"%%d %%f\\n\", KPARAM_3.isnull, KPARAM_3.value);\n"
+		"  }\n"
 		"  return %s;\n"
 		"}\n", decl.data, expr_code);
 	return str.data;
@@ -573,6 +582,7 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	gss->scan_rel = ExecOpenScanRelation(estate, scanrelid, eflags);
 	tupdesc = RelationGetDescr(gss->scan_rel);
 	ExecSetSlotDescriptor(gss->scan_slot, tupdesc);
+	gss->scan_tuple.t_tableOid = RelationGetRelid(gss->scan_rel);
 
 	/*
 	 * Initialize result tuple type and projection info.
@@ -730,7 +740,7 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	pds = pgstrom_create_data_store_row(tupdesc, length, gss->ntup_per_page);
 	PG_TRY();
 	{
-		while (gss->curr_blknum > gss->last_blknum &&
+		while (gss->curr_blknum < gss->last_blknum &&
 			   pgstrom_data_store_insert_block(pds, rel,
 											   gss->curr_blknum,
 											   snapshot, true))
@@ -757,150 +767,6 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	return gpuscan;
 }
 
-#if 0
-/* pgstrom_data_store_insert_block already checks visibility */
-
-/*
- * gpuscan_check_tuple_visibility
- *
- * It checks tuple visibility of the indexed record on the row- or column-
- * store being supplied. Also, it extract nullmap and values on the slot,
- * if valid one is given. (In case of multi-exec without qualifier rechecks,
- * we don't need to set up individual TupleTableSlot here, so we can skip
- * it; usually, it takes unignorable CPU cycles.)
- */
-static bool
-gpuscan_check_tuple_visibility(GpuScanState *gss,
-							   StromObject *rc_store, cl_uint rindex,
-							   Snapshot snapshot, TupleTableSlot *slot)
-{
-	if (StromTagIs(rc_store, TCacheRowStore))
-	{
-		tcache_row_store *trs = (tcache_row_store *)rc_store;
-		rs_tuple		 *rs_tup;
-
-		rs_tup = kern_rowstore_get_tuple(&trs->kern, rindex);
-		if (!rs_tup)
-			return false;
-		if (!HeapTupleSatisfiesVisibility(&rs_tup->htup,
-										  snapshot,
-										  InvalidBuffer))
-			return false;
-
-		/* if needed, put this tuple on the slot for further checks */
-		if (!slot)
-			return true;
-		ExecStoreTuple(&rs_tup->htup, slot, InvalidBuffer, false);
-	}
-	else if (StromTagIs(rc_store, TCacheColumnStore))
-	{
-		tcache_column_store *tcs = (tcache_column_store *) rc_store;
-		Relation		relation = gss->scan_rel;
-		HeapTupleData	htup;
-
-		/* A dummy HeapTuple to check visibility */
-		htup.t_len = tcs->theads[rindex].t_hoff;
-		htup.t_self = tcs->ctids[rindex];
-		htup.t_tableOid = RelationGetRelid(relation);
-		htup.t_data = &tcs->theads[rindex];
-
-		if (!HeapTupleSatisfiesVisibility(&htup, snapshot, InvalidBuffer))
-			return false;
-
-		if (!slot)
-			return true;
-
-		if (!gss->hybrid_scan)
-		{
-			TupleDesc		tupdesc = RelationGetDescr(relation);
-			int				i;
-
-			slot = ExecStoreAllNullTuple(slot);
-			for (i=0; i < tupdesc->natts; i++)
-			{
-				Form_pg_attribute attr = tupdesc->attrs[i];
-				int		attlen;
-
-				if (!tcs->cdata[i].values)
-					continue;
-
-				if (!attr->attnotnull &&
-					att_isnull(rindex, tcs->cdata[i].isnull))
-					continue;
-
-				/* we need to consider inlined varlena */
-				attlen = pgstrom_try_varlena_inline(attr);
-				if (attlen > 0)
-				{
-					slot->tts_values[i] = fetch_att(tcs->cdata[i].values +
-													attlen * rindex,
-													attr->attbyval,
-													attr->attlen);
-				}
-				else
-				{
-					cl_uint	   *cs_offset = (cl_uint *)tcs->cdata[i].values;
-
-					Assert(cs_offset[rindex] > 0);
-					Assert(tcs->cdata[i].toast != NULL);
-					slot->tts_values[i]
-						= PointerGetDatum((char *)tcs->cdata[i].toast +
-										  cs_offset[rindex]);
-				}
-				slot->tts_isnull[i] = false;
-			}
-
-			/*
-			 * In case when we have cache-only scan with system-column
-			 * references, slot_getattr() requires physical tuple is
-			 * stored, not virtual tuple, in the TupleTableSlot.
-			 * So, we materialize it here.
-			 */
-			if (gss->syscol_referenced)
-			{
-				HeapTuple	tuple = ExecMaterializeSlot(slot);
-
-				tuple->t_self = htup.t_self;
-				tuple->t_tableOid = htup.t_tableOid;
-				tuple->t_data->t_choice = htup.t_data->t_choice;
-			}
-		}
-		else
-		{
-			/*
-			 * In case of hybrid-scan, we fetch heap buffer according
-			 * to the item-pointer
-			 */
-			Buffer		buffer = InvalidBuffer;
-
-			gss->hybrid_htup.t_self = tcs->ctids[rindex];
-			if (!heap_fetch(gss->scan_rel,
-							gss->cps.ps.state->es_snapshot,
-							&gss->hybrid_htup,
-							&buffer,
-							false,
-							NULL))
-				return false;
-
-			if (slot)
-				ExecStoreTuple(&gss->hybrid_htup, slot, buffer, false);
-
-			/*
-			 * At this point we have an extra pin on the buffer, because
-			 * ExecStoreTuple incremented the pin count.
-			 * Drop our local pin
-			 */
-			ReleaseBuffer(buffer);
-		}
-	}
-	else
-		elog(ERROR, "bug? neither row nor column store: %d",
-			 (int)rc_store->stag);
-
-	return true;
-}
-#endif
-
 static TupleTableSlot *
 gpuscan_next_tuple(GpuScanState *gss)
 {
@@ -910,6 +776,16 @@ gpuscan_next_tuple(GpuScanState *gss)
 	cl_int				i_result;
 	bool				do_recheck = false;
 	struct timeval		tv1, tv2;
+
+	if (gss->curr_index == 0)
+	{
+		int i;
+
+		elog(INFO, "kresults {nrels=%u nrooms=%u nitems=%u errcode=%d has_recheks=%d}", kresults->nrels, kresults->nrooms, kresults->nitems, kresults->errcode, kresults->has_rechecks);
+		for (i=0; i < kresults->nitems; i++)
+			elog(INFO, "kresults[%d] = %d", i, kresults->results[i]);
+		
+	}
 
 	if (!gpuscan)
 		return false;
@@ -935,7 +811,8 @@ gpuscan_next_tuple(GpuScanState *gss)
 		Assert(i_result > 0 && i_result <= kresults->nitems);
 
 		if (!pgstrom_fetch_data_store(gss->scan_slot,
-									  pds, i_result - 1, false))
+									  pds, i_result - 1,
+									  &gss->scan_tuple))
 			elog(ERROR, "failed to fetch a record from pds: %d", i_result);
 
 		if (do_recheck)
@@ -1094,6 +971,7 @@ gpuscan_fetch_tuple(CustomPlanState *node)
 								pgstrom_strerror(gpuscan->msg.errcode))));
 			}
 		}
+		elog(INFO, "curr_chunk = %p", gpuscan);
 		gss->curr_chunk = gpuscan;
 		gss->curr_index = 0;
 	}
@@ -1978,6 +1856,9 @@ clserv_process_gpuscan(pgstrom_message *msg)
 		rc = CL_BUILD_PROGRAM_FAILURE;
 		goto error;
 	}
+
+	/* debug output */
+	pgstrom_dump_data_store(pds);
 
 	/*
 	 * create a state object

@@ -486,6 +486,8 @@ extern cl_int clserv_dmasend_data_store(pgstrom_data_store *pds,
 										cl_uint *ev_index,
 										cl_event *events,
 										pgstrom_perfmon *pfm);
+extern void pgstrom_dump_data_store(pgstrom_data_store *pds);
+
 /*
  * restrack.c
  */

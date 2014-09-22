@@ -225,6 +225,8 @@ typedef struct {
 	cl_uchar		t_bits[1];		/* bitmap of NULLs -- VARIABLE LENGTH */
 } HeapTupleHeaderData;
 
+typedef __global HeapTupleHeaderData *HeapTuple;
+
 #define att_isnull(ATT, BITS) (!((BITS)[(ATT) >> 3] & (1 << ((ATT) & 0x07))))
 #define bitmaplen(NATTS) (((int)(NATTS) + BITS_PER_BYTE - 1) / BITS_PER_BYTE)
 
@@ -716,12 +718,13 @@ static inline __global void *
 kern_get_datum_rs(__global kern_data_store *kds,
 				  cl_uint colidx, cl_uint rowidx)
 {
-	__global kern_row_items *kritem;
+	__global kern_rowitem *kritem;
+	HeapTuple	htup;
 	PageHeader	page;
 	cl_ushort	block_ofs;
 	cl_ushort	item_ofs;
 	cl_ushort	item_max;
-	ItemIdData	itemid;
+	ItemIdData	item_id;
 	cl_uint		i, ncols;
 	cl_uint		offset;
 
@@ -809,10 +812,8 @@ kern_get_datum_cs(__global kern_data_store *kds,
 	{
 		cl_uint	vl_ofs;
 
-		offset += sizeof(cl_uint) * rowidx;
-		vl_ofs = *((__global cl_uint *)((__global char *)kds + offset));
-		if (ktoast->length == TOASTBUF_MAGIC)
-			vl_ofs += ktoast->coldir[colidx];
+		vl_ofs = ((__global cl_uint *)
+				  ((__global char *)kds + offset))[rowidx];
 		addr = (__global void *)((__global char *)ktoast + vl_ofs);
 	}
 	return addr;

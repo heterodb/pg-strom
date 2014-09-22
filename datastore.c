@@ -961,7 +961,7 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 				   opencl_strerror(rc));
 		return rc;
 	}
-	Assert(length < KERN_DATA_STORE_LENGTH(kds));
+	Assert(length <= KERN_DATA_STORE_LENGTH(kds));
 #endif
 
 	if (kds->is_column)
@@ -1025,7 +1025,7 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 								  kds,
 								  num_blockers,
 								  blockers,
-								  events);
+								  events + *ev_index);
 		if (rc != CL_SUCCESS)
 		{
 			clserv_log("failed on clEnqueueWriteBuffer: %s",
@@ -1063,4 +1063,60 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 		Assert(!pds->ktoast);
 	}
 	return CL_SUCCESS;
+}
+
+/*
+ * pgstrom_dump_data_store
+ *
+ * A utility routine that dumps properties of data store
+ */
+void
+pgstrom_dump_data_store(pgstrom_data_store *pds)
+{
+	kern_data_store	   *kds = pds->kds;
+	int					i;
+
+#define PDS_DUMP(...)							\
+	do {										\
+		if (pgstrom_i_am_clserv)				\
+			clserv_log(__VA_ARGS__);			\
+		else									\
+			elog(INFO, __VA_ARGS__);			\
+	} while (0)
+
+	PDS_DUMP("pds {refcnt=%d kds=%p ktoast=%p}",
+			 pds->refcnt, pds->kds, pds->ktoast);
+	PDS_DUMP("kds (%s) {length=%u ncols=%u nitems=%u nrooms=%u nblocks=%u}",
+			 kds->is_column ? "column-store" : "row-store",
+			 kds->length, kds->ncols, kds->nitems, kds->nrooms, kds->nblocks);
+	for (i=0; i < kds->ncols; i++)
+	{
+		if (!kds->colmeta[i].attvalid)
+		{
+			PDS_DUMP("attr[%d] {attnotnull=%d attalign=%d attlen=%d; invalid}",
+					 i,
+					 kds->colmeta[i].attnotnull,
+					 kds->colmeta[i].attalign,
+					 kds->colmeta[i].attlen);
+		}
+		else
+		{
+			PDS_DUMP("attr[%d] {attnotnull=%d attalign=%d attlen=%d %s=%u}",
+					 i,
+					 kds->colmeta[i].attnotnull,
+					 kds->colmeta[i].attalign,
+					 kds->colmeta[i].attlen,
+					 kds->is_column ? "cs_offset" : "rs_attnum",
+					 kds->colmeta[i].cs_offset);
+		}
+	}
+
+	for (i=0; i < kds->nblocks; i++)
+	{
+		PDS_DUMP("block[%d] {buffer=%u page=%p}",
+				 i,
+				 pds->blocks[i].buffer,
+				 pds->blocks[i].page);
+	}
+#undef PDS_DUMP
 }
