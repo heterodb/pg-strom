@@ -946,7 +946,7 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 	kern_data_store *kds = pds->kds;
 	size_t		length;
 	size_t		offset;
-	cl_int		i, rc;
+	cl_int		i, n, rc;
 
 #ifdef USE_ASSERT_CHECKING
 	Assert(pgstrom_i_am_clserv);
@@ -1038,14 +1038,27 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 
 		offset = ((uintptr_t)KERN_DATA_STORE_ROWBLOCK(kds, 0) -
 				  (uintptr_t)(kds));
-		for (i=0; i < kds->nblocks; i++)
+		length = BLCKSZ;
+		for (i=0, n=0; i < kds->nblocks; i++)
 		{
+			/*
+			 * NOTE: A micro optimization; if next page is located
+			 * on the continuous region, the upcoming DMA request
+			 * can be merged to reduce DMA management cost
+			 */
+			if (i+1 < kds->nblocks &&
+				(uintptr_t)pds->blocks[i].page + BLCKSZ ==
+				(uintptr_t)pds->blocks[i+1].page)
+			{
+				n++;
+				continue;
+			}
 			rc = clEnqueueWriteBuffer(kcmdq,
 									  kds_buffer,
 									  CL_FALSE,
 									  offset,
-									  BLCKSZ,
-									  pds->blocks[i].page,
+									  BLCKSZ * (n+1),
+									  pds->blocks[i-n].page,
 									  num_blockers,
 									  blockers,
 									  events + *ev_index);
@@ -1056,9 +1069,10 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 				return rc;
 			}
 			(*ev_index)++;
-			pfm->bytes_dma_send += BLCKSZ;
+			pfm->bytes_dma_send += BLCKSZ * (n+1);
 			pfm->num_dma_send++;
-			offset += BLCKSZ;
+			offset += BLCKSZ * (n+1);
+			n = 0;
 		}
 		Assert(!pds->ktoast);
 	}

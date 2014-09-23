@@ -25,6 +25,9 @@
 
 static shmem_startup_hook_type shmem_startup_hook_next;
 static int	reclaim_threshold;
+static int	itemid_offset_shift;
+static int	itemid_flags_shift;
+static int	itemid_length_shift;
 
 #define DEVPROG_HASH_SIZE	2048
 
@@ -398,10 +401,16 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 		Assert(SIZEOF_VOID_P == 8 || SIZEOF_VOID_P == 4);
 		snprintf(build_opts, sizeof(build_opts),
 				 "-DOPENCL_DEVICE_CODE -DHOSTPTRLEN=%u -DBLCKSZ=%u"
+				 " -DITEMID_OFFSET_SHIFT=%u"
+				 " -DITEMID_FLAGS_SHIFT=%u"
+				 " -DITEMID_LENGTH_SHIFT=%u"
 #ifdef PGSTROM_DEBUG
 				 " -Werror"
 #endif
-				 , SIZEOF_VOID_P, BLCKSZ);
+				 , SIZEOF_VOID_P, BLCKSZ,
+				 itemid_offset_shift,
+				 itemid_flags_shift,
+				 itemid_length_shift);
 
 		rc = clBuildProgram(program,
 							opencl_num_devices,
@@ -867,6 +876,9 @@ pgstrom_startup_opencl_devprog(void)
 void
 pgstrom_init_opencl_devprog(void)
 {
+	ItemIdData	item_id;
+	cl_uint		code;
+
 	/* threshold to reclaim the cached opencl programs */
 	DefineCustomIntVariable("pgstrom.devprog_reclaim_threshold",
 							"threahold to reclaim device program objects",
@@ -878,6 +890,32 @@ pgstrom_init_opencl_devprog(void)
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
+	/*
+	 * NOTE: Here is no C standard for bitfield layout (thus, OpenCL does not
+	 * support bitfields), so we need to tell run-time compiler exact layout
+	 * of the ItemIdData structure.
+	 */
+	Assert(sizeof(item_id) == sizeof(code));
+	memset(&item_id, 0, sizeof(ItemIdData));
+	item_id.lp_off = 1;
+	memcpy(&code, &item_id, sizeof(ItemIdData));
+	for (itemid_offset_shift = 0;
+		 ((code >> itemid_offset_shift) & 0x0001) == 0;
+		 itemid_offset_shift++);
+
+	memset(&item_id, 0, sizeof(ItemIdData));
+	item_id.lp_flags = 1;
+	memcpy(&code, &item_id, sizeof(ItemIdData));
+	for (itemid_flags_shift = 0;
+		 ((code >> itemid_flags_shift) & 0x0001) == 0;
+		 itemid_flags_shift++);
+
+	memset(&item_id, 0, sizeof(ItemIdData));
+	item_id.lp_len = 1;
+	memcpy(&code, &item_id, sizeof(ItemIdData));
+	for (itemid_length_shift = 0;
+		 ((code >> itemid_length_shift) & 0x0001) == 0;
+		 itemid_length_shift++);
 
 	/* aquires shared memory region */
 	RequestAddinShmemSpace(MAXALIGN(sizeof(*opencl_devprog_shm_values)));

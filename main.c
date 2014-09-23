@@ -456,10 +456,11 @@ pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 		double	band = (((double)pfm->bytes_dma_send * 1000000.0)
 						/ (double)pfm->time_dma_send);
 		snprintf(buf, sizeof(buf),
-				 "%s/sec, len: %s, time: %s",
+				 "%s/sec, len: %s, time: %s, count: %u",
 				 bytesz_unitary_format(band),
 				 bytesz_unitary_format((double)pfm->bytes_dma_send),
-				 usecond_unitary_format((double)pfm->time_dma_send));
+				 usecond_unitary_format((double)pfm->time_dma_send),
+				 pfm->num_dma_send);
 		ExplainPropertyText("DMA send", buf, es);
 	}
 
@@ -468,10 +469,11 @@ pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 		double	band = (((double)pfm->bytes_dma_recv * 1000000.0)
                         / (double)pfm->time_dma_recv);
 		snprintf(buf, sizeof(buf),
-				 "%s/sec, len: %s, time: %s",
+				 "%s/sec, len: %s, time: %s, count: %u",
 				 bytesz_unitary_format(band),
                  bytesz_unitary_format((double)pfm->bytes_dma_recv),
-                 usecond_unitary_format((double)pfm->time_dma_recv));
+                 usecond_unitary_format((double)pfm->time_dma_recv),
+				 pfm->num_dma_recv);
 		ExplainPropertyText("DMA recv", buf, es);
 	}
 

@@ -186,30 +186,21 @@ init_opencl_context_and_shmem(void)
 	pgstrom_setup_shmem(zone_length, on_shmem_zone_callback);
 
 	/* Lock shared memory of shared buffer area */
-	for (curr_pos = 0;
-		 curr_pos < NBuffers * (Size) BLCKSZ;
-		 curr_pos += zone_length)
-	{
-		Size		length;
-		cl_int		rc;
+	(void) clCreateBuffer(opencl_context,
+						  CL_MEM_READ_WRITE |
+						  CL_MEM_USE_HOST_PTR,
+						  NBuffers * (Size) BLCKSZ,
+						  (char *)((uintptr_t)BufferBlocks & ~(BLCKSZ-1)),
+						  &rc);
+	if (rc != CL_SUCCESS)
+		elog(ERROR, "clCreateBuffer failed on host memory (%p-%p): %s",
+			 BufferBlocks,
+			 BufferBlocks + NBuffers * (Size) BLCKSZ - 1,
+			 opencl_strerror(rc));
 
-		length = Min(zone_length, NBuffers * (Size) BLCKSZ - curr_pos);
-
-		(void) clCreateBuffer(opencl_context,
-							  CL_MEM_READ_WRITE |
-							  CL_MEM_USE_HOST_PTR,
-							  length,
-							  BufferBlocks + curr_pos,
-							  &rc);
-		if (rc != CL_SUCCESS)
-			elog(ERROR, "clCreateBuffer failed on host memory (%p-%p): %s",
-				 BufferBlocks + curr_pos,
-				 BufferBlocks + curr_pos + length - 1,
-				 opencl_strerror(rc));
-	}
 	elog(LOG, "Shared Buffer: %p-%p was mapped (len: %luMB)",
 		 BufferBlocks,
-		 BufferBlocks + NBuffers * (Size) BLCKSZ,
+		 BufferBlocks + NBuffers * (Size) BLCKSZ - 1,
 		 (NBuffers * (Size) BLCKSZ) >> 20);
 }
 

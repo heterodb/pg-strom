@@ -142,9 +142,9 @@ typedef cl_uint	TransactionId;
 typedef cl_uint	ItemIdData;
 typedef __global ItemIdData ItemId;
 
-#define ItemIdGetLength(itemId)		((itemId) & 0x00007fff)
-#define ItemIdGetOffset(itemId)		(((itemId) >> 17) & 0x7fff)
-#define ItemIdGetFlags(itemId)		(((itemId) >> 15) & 0x0003)
+#define ItemIdGetLength(itemId)		(((itemId) >> ITEMID_LENGTH_SHIFT) & 0x7fff)
+#define ItemIdGetOffset(itemId)		(((itemId) >> ITEMID_OFFSET_SHIFT) & 0x7fff)
+#define ItemIdGetFlags(itemId)		(((itemId) >> ITEMID_FLAGS_SHIFT)  & 0x0003)
 
 typedef struct PageHeaderData
 {
@@ -734,6 +734,7 @@ kern_get_datum_rs(__global kern_data_store *kds,
 	kritem = KERN_DATA_STORE_ROWITEM(kds, rowidx);
 	block_ofs = kritem->block_ofs;
 	item_ofs = kritem->item_ofs;
+
 	if (block_ofs >= kds->nblocks)
 		return NULL;	/* likely a BUG */
 

@@ -313,29 +313,6 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 	if (dev_quals == NIL)
 		return NULL;
 
-#if 0
-	/*
-	 * A dummy constant
-	 * KPARAM_0 - a template of kern_data_store to be loaded.
-	 * KPARAM_1 - a template of kern_toastbuf to be loaded.
-	 * Just a placeholder here. Set it up later.
-	 */
-	context->used_params = list_make2(makeConst(BYTEAOID,
-												-1,
-												InvalidOid,
-												-1,
-												PointerGetDatum(NULL),
-												true,
-												false),
-									  makeConst(BYTEAOID,
-												-1,
-												InvalidOid,
-												-1,
-												PointerGetDatum(NULL),
-												true,
-												false));
-	context->type_defs = list_make1(pgstrom_devtype_lookup(BYTEAOID));
-#endif
 	/* OK, let's walk on the device expression tree */
 	expr_code = pgstrom_codegen_expression((Node *)dev_quals, context);
 	Assert(expr_code != NULL);
@@ -364,13 +341,6 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 		"                  size_t kds_index)\n"
 		"{\n"
 		"%s"
-		"  if (get_global_id(0) == 0)\n"
-		"  {\n"
-		"    printf(\"%%d %%f\\n\", KPARAM_0.isnull, KPARAM_0.value);\n"
-		"    printf(\"%%d %%f\\n\", KPARAM_1.isnull, KPARAM_1.value);\n"
-		"    printf(\"%%d %%f\\n\", KPARAM_2.isnull, KPARAM_2.value);\n"
-		"    printf(\"%%d %%f\\n\", KPARAM_3.isnull, KPARAM_3.value);\n"
-		"  }\n"
 		"  return %s;\n"
 		"}\n", decl.data, expr_code);
 	return str.data;
@@ -622,37 +592,6 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		gss->mqueue = pgstrom_create_queue();
 		pgstrom_track_object(&gss->mqueue->sobj, 0);
 	}
-#if 0
-	/*
-	 * construction of kds_head and ktoast_head template, if it can be
-	 * executed in the kernel space.
-	 */
-	if (gsplan->kern_source)
-	{
-		Const	   *kparam_0;
-		Const	   *kparam_1;
-		bytea	   *kds_head;
-		bytea	   *ktoast_head;
-
-		used_params = copyObject(gsplan->used_params);
-		Assert(list_length(used_params) >= 2);
-		kparam_0 = (Const *)linitial(used_params);
-		Assert(IsA(kparam_0, Const) &&
-			   kparam_0->consttype == BYTEAOID &&
-			   kparam_0->constisnull);
-		kds_head = kparam_make_kds_head(tupdesc, gsplan->dev_attnums, 0);
-		kparam_0->constvalue = PointerGetDatum(kds_head);
-		kparam_0->constisnull = false;
-
-		kparam_1 = (Const *)lsecond(used_params);
-		Assert(IsA(kparam_1, Const) &&
-			   kparam_1->consttype == BYTEAOID &&
-			   kparam_1->constisnull);
-		ktoast_head = kparam_make_ktoast_head(tupdesc, 0);
-		kparam_1->constvalue = PointerGetDatum(ktoast_head);
-		kparam_1->constisnull = false;
-	}
-#endif
 	gss->kparams = pgstrom_create_kern_parambuf(gsplan->used_params,
 												gss->cps.ps.ps_ExprContext);
 	/* rest of run-time parameters */
@@ -743,7 +682,7 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 		while (gss->curr_blknum < gss->last_blknum &&
 			   pgstrom_data_store_insert_block(pds, rel,
 											   gss->curr_blknum,
-											   snapshot, true))
+											   snapshot, true) > 0)
 			gss->curr_blknum++;
 
 		if (pds->kds->nitems > 0)
@@ -777,16 +716,6 @@ gpuscan_next_tuple(GpuScanState *gss)
 	bool				do_recheck = false;
 	struct timeval		tv1, tv2;
 
-	if (gss->curr_index == 0)
-	{
-		int i;
-
-		elog(INFO, "kresults {nrels=%u nrooms=%u nitems=%u errcode=%d has_recheks=%d}", kresults->nrels, kresults->nrooms, kresults->nitems, kresults->errcode, kresults->has_rechecks);
-		for (i=0; i < kresults->nitems; i++)
-			elog(INFO, "kresults[%d] = %d", i, kresults->results[i]);
-		
-	}
-
 	if (!gpuscan)
 		return false;
 
@@ -808,7 +737,7 @@ gpuscan_next_tuple(GpuScanState *gss)
 				do_recheck = true;
 			}
 		}
-		Assert(i_result > 0 && i_result <= kresults->nitems);
+		Assert(i_result > 0);
 
 		if (!pgstrom_fetch_data_store(gss->scan_slot,
 									  pds, i_result - 1,
@@ -971,7 +900,6 @@ gpuscan_fetch_tuple(CustomPlanState *node)
 								pgstrom_strerror(gpuscan->msg.errcode))));
 			}
 		}
-		elog(INFO, "curr_chunk = %p", gpuscan);
 		gss->curr_chunk = gpuscan;
 		gss->curr_index = 0;
 	}
@@ -1857,9 +1785,6 @@ clserv_process_gpuscan(pgstrom_message *msg)
 		goto error;
 	}
 
-	/* debug output */
-	pgstrom_dump_data_store(pds);
-
 	/*
 	 * create a state object
 	 */
@@ -2036,6 +1961,7 @@ clserv_process_gpuscan(pgstrom_message *msg)
 		goto error;
 	}
 	clgss->ev_index++;
+	pfm->num_kern_exec++;
 
 	/* write back result vrelation */
 	offset = KERN_GPUSCAN_DMARECV_OFFSET(&gpuscan->kern);
