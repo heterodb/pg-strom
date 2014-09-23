@@ -916,6 +916,7 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 				}
 				pds->ktoast = ktoast;
 			}
+			ktoast = pds->ktoast;
 			Assert(ktoast->usage + INTALIGN(vl_len) <= ktoast->length);
 			vl_ofs[j] = ktoast->usage;
 			memcpy((char *)ktoast + ktoast->usage, vl_data, vl_len);

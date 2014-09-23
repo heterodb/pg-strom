@@ -49,9 +49,6 @@ typedef struct {
 	CustomPath	cpath;
 	List	   *dev_quals;		/* RestrictInfo run on device */
 	List	   *host_quals;		/* RestrictInfo run on host */
-	Bitmapset  *dev_attnums;	/* attnums referenced in device */
-	Bitmapset  *host_attnums;	/* attnums referenced in host */
-	bool		syscol_referenced; /* true, if system column is referenced */
 } GpuScanPath;
 
 typedef struct {
@@ -62,9 +59,6 @@ typedef struct {
 	List	   *used_params;	/* list of Const/Param in use */
 	List	   *used_vars;		/* list of Var in use */
 	List	   *dev_clauses;	/* clauses to be run on device */
-	Bitmapset  *dev_attnums;	/* attnums referenced in device */
-	Bitmapset  *host_attnums;	/* attnums referenced in host */
-	bool		syscol_referenced; /* true, if system column is referenced */
 } GpuScanPlan;
 
 typedef struct {
@@ -76,7 +70,6 @@ typedef struct {
 	BlockNumber			last_blknum;
 	double				ntup_per_page;
 	List			   *dev_quals;
-	bool				syscol_referenced;
 
 	pgstrom_queue	   *mqueue;
 	Datum				dprog_key;
@@ -203,9 +196,6 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	GpuScanPath	   *pathnode;
 	List		   *dev_quals = NIL;
 	List		   *host_quals = NIL;
-	Bitmapset	   *dev_attnums = NULL;
-	Bitmapset	   *host_attnums = NULL;
-	bool			syscol_referenced = false;
 	ListCell	   *cell;
 	codegen_context	context;
 
@@ -232,46 +222,14 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		RestrictInfo   *rinfo = lfirst(cell);
 
 		if (pgstrom_codegen_available_expression(rinfo->clause))
-		{
-			pull_varattnos((Node *)rinfo->clause,
-						   baserel->relid,
-						   &dev_attnums);
 			dev_quals = lappend(dev_quals, rinfo);
-		}
 		else
-		{
-			pull_varattnos((Node *)rinfo->clause,
-						   baserel->relid,
-						   &host_attnums);
 			host_quals = lappend(host_quals, rinfo);
-		}
-	}
-	/* also, picks up Var nodes in the target list */
-	pull_varattnos((Node *)baserel->reltargetlist,
-				   baserel->relid,
-				   &host_attnums);
-	/*
-	 * remove system column references from the host_attnums/dev_attnums
-	 * bitmap, because it takes special case handling.
-	 * In case of dev_attnums, it should never reference system columns
-	 * because it does not have supported data type.
-	 */
-	Assert(!dev_attnums || (dev_attnums->words[0] & BITMASK_ALL_SYSCOLS) == 0);
-	if (host_attnums && (host_attnums->words[0] &
-						 BITMASK_ALL_SYSCOLS) != 0)
-	{
-		host_attnums->words[0] &= ~BITMASK_ALL_SYSCOLS;
-		syscol_referenced = true;
 	}
 
 	/*
 	 * FIXME: needs to pay attention for projection cost.
-	 * It may make sense to use build_physical_tlist, if host_attnums
-	 * are much wider than dev_attnums.
-	 * Anyway, it needs investigation of the actual behavior.
 	 */
-
-	/* XXX - check whether columnar cache may be available */
 
 	/*
 	 * Construction of a custom-plan node.
@@ -291,9 +249,6 @@ gpuscan_add_scan_path(PlannerInfo *root,
 
 	pathnode->dev_quals = dev_quals;
 	pathnode->host_quals = host_quals;
-	pathnode->dev_attnums = dev_attnums;
-	pathnode->host_attnums = host_attnums;
-	pathnode->syscol_referenced = syscol_referenced;
 
 	add_path(baserel, &pathnode->cpath.path);
 }
@@ -420,9 +375,6 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 	gscan->used_params = context.used_params;
 	gscan->used_vars = context.used_vars;
 	gscan->dev_clauses = dev_clauses;
-	gscan->dev_attnums = gpath->dev_attnums;
-	gscan->host_attnums = gpath->host_attnums;
-	gscan->syscol_referenced = gpath->syscol_referenced;
 
 	return &gscan->cplan;
 }
@@ -442,18 +394,6 @@ gpuscan_textout_path(StringInfo str, Node *node)
 	temp = nodeToString(pathnode->host_quals);
 	appendStringInfo(str, " :host_quals %s", temp);
 	pfree(temp);
-
-	/* dev_attnums */
-	appendStringInfo(str, " :dev_attnums ");
-	_outBitmapset(str, pathnode->dev_attnums);
-
-	/* host_attnums */
-	appendStringInfo(str, " :host_attnums ");
-	_outBitmapset(str, pathnode->host_attnums);
-
-	/* syscol_referenced */
-	appendStringInfo(str, " :syscol_referenced %s",
-					 pathnode->syscol_referenced ? "true" : "false");
 }
 
 static void
@@ -569,7 +509,6 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	/* also, check availability of simple projection */
 	tlist = gss->cps.ps.plan->targetlist;
 	gss->bulk_attmap = pgstrom_make_bulk_attmap(tlist, scanrelid);
-	gss->syscol_referenced = gsplan->syscol_referenced;
 
 	/*
 	 * OK, let's initialize stuff for block scan
@@ -606,6 +545,33 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	return &gss->cps;
 }
 
+/*
+ * pgstrom_release_gpuscan
+ *
+ * Callback handler when reference counter of pgstrom_gpuscan object
+ * reached to zero, due to pgstrom_put_message.
+ * It also unlinks associated device program and release row-store.
+ * Note that this callback shall never be invoked under the OpenCL
+ * server context, because some resources (like shared-buffer) are
+ * assumed to be released by the backend process.
+ */
+static void
+pgstrom_release_gpuscan(pgstrom_message *msg)
+{
+	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) msg;
+
+	/* unlink message queue, if any */
+	if (msg->respq)
+		pgstrom_put_queue(msg->respq);
+	/* unlink device program, if any */
+	if (gpuscan->dprog_key != 0)
+		pgstrom_put_devprog_key(gpuscan->dprog_key);
+	/* release data-store, if any */
+	if (gpuscan->pds)
+		pgstrom_put_data_store(gpuscan->pds);
+	pgstrom_shmem_free(gpuscan);
+}
+
 static pgstrom_gpuscan *
 pgstrom_create_gpuscan(GpuScanState *gss, pgstrom_data_store *pds)
 {
@@ -627,7 +593,7 @@ pgstrom_create_gpuscan(GpuScanState *gss, pgstrom_data_store *pds)
 						 StromTag_GpuScan,
 						 gss->dprog_key != 0 ? gss->mqueue : NULL,
 						 clserv_process_gpuscan,
-						 clserv_put_gpuscan,
+						 pgstrom_release_gpuscan,
 						 gss->pfm.enabled);
 	if (gss->dprog_key != 0)
 		gpuscan->dprog_key = pgstrom_retain_devprog_key(gss->dprog_key);
@@ -1414,42 +1380,9 @@ gpuscan_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 {
 	GpuScanState   *gss = (GpuScanState *) node;
 	GpuScanPlan	   *gsplan = (GpuScanPlan *) gss->cps.ps.plan;
-	Relation		rel = gss->scan_rel;
-	Bitmapset	   *tempset;
-	Oid				relid = RelationGetRelid(rel);
-	AttrNumber		anum;
-	bool			is_first;
 	StringInfoData	str;
 
 	initStringInfo(&str);
-	tempset = bms_copy(gsplan->host_attnums);
-	is_first = true;
-	while ((anum = bms_first_member(tempset)) >= 0)
-	{
-		anum += FirstLowInvalidHeapAttributeNumber;
-
-		appendStringInfo(&str, "%s%s",
-						 is_first ? "" : ", ",
-						 get_relid_attribute_name(relid, anum));
-		is_first = false;
-	}
-	bms_free(tempset);
-	ExplainPropertyText("Host References", str.data, es);
-
-	resetStringInfo(&str);
-	tempset = bms_copy(gsplan->dev_attnums);
-	is_first = true;
-	while ((anum = bms_first_member(tempset)) >= 0)
-	{
-		anum += FirstLowInvalidHeapAttributeNumber;
-
-		appendStringInfo(&str, "%s%s",
-						 is_first ? "" : ", ",
-						 get_relid_attribute_name(relid, anum));
-		is_first = false;
-	}
-	bms_free(tempset);
-	ExplainPropertyText("Device References", str.data, es);
 
 	if (gsplan->cplan.plan.qual != NIL)
 	{
@@ -1503,15 +1436,6 @@ gpuscan_textout_plan(StringInfo str, const CustomPlan *node)
 	temp = nodeToString(plannode->dev_clauses);
 	appendStringInfo(str, " :dev_clauses %s", temp);
 	pfree(temp);
-
-	appendStringInfo(str, " :dev_attnums ");
-	_outBitmapset(str, plannode->dev_attnums);
-
-	appendStringInfo(str, " :host_attnums ");
-	_outBitmapset(str, plannode->host_attnums);
-
-	appendStringInfo(str, " :syscol_referenced %s",
-					 plannode->syscol_referenced ? "true" : "false");
 }
 
 static CustomPlan *
@@ -1529,9 +1453,6 @@ gpuscan_copy_plan(const CustomPlan *from)
 	newnode->used_params = copyObject(oldnode->used_params);
 	newnode->used_vars = copyObject(oldnode->used_vars);
 	newnode->dev_clauses = copyObject(oldnode->dev_clauses);
-	newnode->dev_attnums = bms_copy(oldnode->dev_attnums);
-	newnode->host_attnums = bms_copy(oldnode->host_attnums);
-	newnode->syscol_referenced = oldnode->syscol_referenced;
 
 	return &newnode->cplan;
 }

@@ -180,7 +180,6 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 		{
 			sobject_entry  *so_entry;
 			StromObject	   *sobject;
-			Datum			private;
 
 			so_entry = dlist_container(sobject_entry,
 									   tracker_chain,
@@ -188,7 +187,6 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 			dlist_delete(&so_entry->tracker_chain);
 			dlist_delete(&so_entry->ptrmap_chain);
 			sobject = so_entry->sobject;
-			private = so_entry->private;
 
 			/*
 			 * In case of normal transaction commit, all the tracked
