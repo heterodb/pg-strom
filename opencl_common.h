@@ -173,10 +173,8 @@ typedef __global PageHeaderData *PageHeader;
 
 
 
-
 /*
- * we need to e-define HeapTupleData and HeapTupleHeaderData and
- * t_infomask related stuff
+ * We need to re-define HeapTupleHeaderData and t_infomask related stuff
  */
 typedef struct {
 	struct {
@@ -185,19 +183,6 @@ typedef struct {
 	} ip_blkid;
 	cl_ushort		ip_posid;
 } ItemPointerData;
-
-typedef struct HeapTupleData {
-	cl_uint			t_len;
-	ItemPointerData	t_self;
-	cl_uint			t_tableOid;
-	hostptr_t		t_data;		/* !HOSTONLY! pointer to htup on the host */
-} HeapTupleData;
-
-
-
-
-
-
 
 typedef struct {
 	union {
@@ -713,6 +698,16 @@ typedef struct varatt_indirect
  * Reference to a particular datum on the supplied kernel data store.
  * It returns NULL, if it is a really null-value in context of SQL,
  * or in case when out of range with error code
+ *
+ * NOTE: We are paranoia for validation of the data being fetched from
+ * the kern_data_store in row-format because we may see a phantom page
+ * if the source transaction that required this kernel execution was
+ * aborted during execution.
+ * Once a transaction gets aborted, shared buffers being pinned are
+ * released, even if DMA send request on the buffers are already
+ * enqueued. In this case, the calculation result shall be discarded,
+ * so no need to worry about correctness of the calculation, however,
+ * needs to be care about address of the variables being referenced.
  */
 static inline __global void *
 kern_get_datum_rs(__global kern_data_store *kds,
@@ -740,10 +735,14 @@ kern_get_datum_rs(__global kern_data_store *kds,
 
 	page = KERN_DATA_STORE_ROWBLOCK(kds, block_ofs);
 	item_max = PageGetMaxOffsetNumber(page);
-	if (item_ofs == 0 || item_ofs > item_max)
+	if (offsetof(PageHeaderData, pd_linp[item_max + 1]) >= BLCKSZ ||
+		item_ofs == 0 || item_ofs > item_max)
 		return NULL;	/* likely a BUG */
 
 	item_id = page->pd_linp[item_ofs - 1];
+	if (ItemIdGetOffset(item_id) +
+		offsetof(HeapTupleHeaderData, t_bits) >= BLCKSZ)
+		return NULL;	/* likely a BUG */
 	htup = (__global HeapTupleHeaderData *)
 		((__global char *)page + ItemIdGetOffset(item_id));
 
