@@ -323,8 +323,8 @@ show_device_kernel(Datum dprog_key, ExplainState *es)
 		appendStringInfo(&str, "#include \"opencl_timelib.h\"\n");
 	if (extra_flags & DEVFUNC_NEEDS_TEXTLIB)
 		appendStringInfo(&str, "#include \"opencl_textlib.h\"\n");
-	if (extra_flags & DEVFUNC_NEEDS_NUMERICLIB)
-		appendStringInfo(&str, "#include \"opencl_numericlib.h\"\n");
+	if (extra_flags & DEVFUNC_NEEDS_NUMERIC)
+		appendStringInfo(&str, "#include \"opencl_numeric.h\"\n");
 	appendStringInfo(&str, "\n%s", kernel_source);
 
 	ExplainPropertyText("Kernel Source", str.data, es);
