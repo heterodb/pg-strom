@@ -1049,6 +1049,7 @@ pgstrom_init_opencl_devinfo(void)
 					 errhint("must be 'any' or non-negative integer")));
 
 		opencl_valid_devices = lappend_int(opencl_valid_devices, code);
+		token = strtok_r(NULL, ", ", &pos);
 	}
 
 	/* selection of opencl device types */
