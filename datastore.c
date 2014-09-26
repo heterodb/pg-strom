@@ -479,9 +479,30 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 		Page	page = pds->blocks[i].page;
 		Buffer	buffer = pds->blocks[i].buffer;
 
+		/*
+		 * NOTE: A page buffer is assigned on the PG-Strom's shared memory,
+		 * if referenced table is local / temporary relation (because its
+		 * buffer is originally assigned on the private memory; invisible
+		 * from OpenCL server process).
+		 *
+		 * Also note that, we don't need to call ReleaseBuffer() in case
+		 * when the current context is OpenCL server or cleanup callback
+		 * of resource-tracker.
+		 * If pgstrom_release_data_store() is called on the OpenCL server
+		 * context, it means the source transaction was already aborted
+		 * thus the shared-buffers being mapped were already released.
+		 * (It leads probability to send invalid region by DMA; so
+		 * kern_get_datum_rs() takes careful data validation.)
+		 * If pgstrom_release_data_store() is called under the cleanup
+		 * callback context of resource-tracker, it means shared-buffers
+		 * being pinned by the current transaction were already released
+		 * by the built-in code prior to PG-Strom's cleanup. So, no need
+		 * to do anything by ourselves.
+		 */
 		if (BufferIsLocal(buffer))
 			pgstrom_shmem_free(page);
-		else
+		else if (!pgstrom_i_am_clserv &&
+				 !pgstrom_restrack_cleanup_context())
 			ReleaseBuffer(buffer);
 	}
 	if (pds->ktoast)
@@ -668,17 +689,8 @@ pgstrom_put_data_store(pgstrom_data_store *pds)
 	if (--pds->refcnt == 0)
 		do_release = true;
 	SpinLockRelease(&pds->lock);
-
-	/*
-	 * NOTE: Unlike other object types, pgstrom_data_store must be released
-	 * by the backend process, not opencl server, because it touches some
-	 * internal state of PostgreSQL core.
-	 */
 	if (do_release)
-	{
-		Assert(!pgstrom_i_am_clserv);
 		pgstrom_release_data_store(pds);
-	}
 }
 
 int

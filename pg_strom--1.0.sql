@@ -81,43 +81,6 @@ CREATE FUNCTION pgstrom_mqueue_info()
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
 
-CREATE TYPE __pgstrom_tcache_info AS (
-  datoid    oid,
-  reloid    oid,
-  cached    int2vector,
-  refcnt    int4,
-  state     text,
-  lwlock    text
-);
-CREATE FUNCTION pgstrom_tcache_info()
-  RETURNS SETOF __pgstrom_tcache_info
-  AS 'MODULE_PATHNAME'
-  LANGUAGE C STRICT;
-
-CREATE TYPE __pgstrom_tcache_node_info AS (
-  type      text,
-  addr      int8,
-  l_node    int8,
-  r_node    int8,
-  l_depth   int4,
-  r_depth   int4,
-  refcnt    int4,
-  nrows     int4,
-  usage     int8,
-  length    int8,
-  blkno_min int4,
-  blkno_max int4
-);
-CREATE FUNCTION pgstrom_tcache_node_info(regclass)
-  RETURNS SETOF __pgstrom_tcache_node_info
-  AS 'MODULE_PATHNAME'
-  LANGUAGE C STRICT;
-
-CREATE FUNCTION public.pgstrom_tcache_synchronizer()
-  RETURNS trigger
-  AS 'MODULE_PATHNAME'
-  LANGUAGE C STRICT;
-
 CREATE FUNCTION pgstrom_shmem_alloc(int8)
   RETURNS int8
   AS 'MODULE_PATHNAME', 'pgstrom_shmem_alloc_func'
