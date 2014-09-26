@@ -199,6 +199,16 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}},
+	{ "var_pop", 1, {FLOAT8OID},
+	  "s:var_pop", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}},
+	{ "var_samp", 1, {FLOAT4OID},
+	  "s:var_samp", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}},
 	{ "var_samp", 1, {FLOAT8OID},
 	  "s:var_samp", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -1307,7 +1317,7 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 				"      if (!newval->isnull)\n"
 				"      {\n"
 				"        if (CHECK_OVERFLOW_%s(accum->%s, newval->%s))\n"
-				"          STROM_SET_ERROR(errcode, StromError_ReCheckByCPU);\n"
+				"          STROM_SET_ERROR(errcode, StromError_CpuReCheck);\n"
 				"        accum->%s += newval->%s;\n"
 				"      }\n"
 				"    }\n"
@@ -1341,7 +1351,7 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 				"      if (!newval->isnull)\n"
 				"      {\n"
 				"        if (CHECK_OVERFLOW_FLOAT(accum->%s, newval->%s))\n"
-				"          STROM_SET_ERROR(errcode, StromError_ReCheckByCPU);\n"
+				"          STROM_SET_ERROR(errcode, StromError_CpuReCheck);\n"
 				"        accum->%s += newval->%s;\n"
 				"      }\n"
 				"    }\n"

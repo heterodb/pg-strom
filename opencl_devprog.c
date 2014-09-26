@@ -364,6 +364,19 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 			lengths[count] = textlib_code_length;
 			count++;
 		}
+
+		/* opencl numeric */
+		if (dprog->extra_flags & DEVFUNC_NEEDS_NUMERIC)
+		{
+			static size_t  numeric_code_length = 0;
+
+			if (!numeric_code_length)
+				numeric_code_length = strlen(pgstrom_opencl_numeric_code);
+			sources[count] = pgstrom_opencl_numeric_code;
+			lengths[count] = numeric_code_length;
+			count++;
+		}
+
 		/* source code of this program */
 		sources[count] = dprog->source;
 		lengths[count] = dprog->source_len;

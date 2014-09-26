@@ -46,6 +46,7 @@ cl_device_type		opencl_device_types = 0;
 cl_uint				opencl_num_devices;
 cl_device_id		opencl_devices[MAX_NUM_DEVICES];
 cl_command_queue	opencl_cmdq[MAX_NUM_DEVICES];
+static List		   *opencl_valid_devices = NIL;
 
 /*
  * Registration of OpenCL device info.
@@ -810,13 +811,14 @@ disclose_opencl_device_info(List *devinfo_list)
 
 	/* shows selected platform */
 	Assert(pl_info != NULL);
-	elog(LOG, "PG-Strom: \"%s (%s)\" was installed",
+	elog(LOG, "PG-Strom: Platform \"%s (%s)\" was installed",
 		 pl_info->pl_name, pl_info->pl_version);
 
 	/* copy platform/device info */
 	foreach (cell, devinfo_list)
 	{
 		dev_info = lfirst(cell);
+		elog(LOG, "PG-Strom: Device \"%s\" was installed", dev_info->dev_name);
 
 		if (cell == list_head(devinfo_list))
 		{
@@ -869,9 +871,10 @@ construct_opencl_device_info(void)
 	cl_uint			n_devices;
 	pgstrom_platform_info *pl_info;
 	pgstrom_device_info	*dev_info;
-	cl_int			i, j, rc;
+	cl_int			i, j, k, rc;
 	long			score_max = -1;
 	List		   *result = NIL;
+	ListCell	   *lc;
 
 	rc = clGetPlatformIDs(lengthof(platforms),
 						  platforms,
@@ -915,17 +918,32 @@ construct_opencl_device_info(void)
 			continue;
 		}
 
-		for (j=0; j < n_devices; j++)
+		for (j=0, k=0; j < n_devices; j++)
 		{
 			dev_info = collect_opencl_device_info(devices[j]);
 			dev_info->pl_info = pl_info;
-			dev_info->dev_index = j;
+			dev_info->dev_index = k;
 
-			elog(LOG, "PG-Strom:  + device %s (%uMHz x %uunits, %luMB)",
+			elog(LOG, "PG-Strom: (%d:%d) Device %s (%uMHz x %uunits, %luMB)",
+				 i, j,
 				 dev_info->dev_name,
 				 dev_info->dev_max_clock_frequency,
 				 dev_info->dev_max_compute_units,
 				 dev_info->dev_global_mem_size >> 20);
+
+			if (opencl_valid_devices)
+			{
+				foreach (lc, opencl_valid_devices)
+				{
+					if (lfirst_int(lc) == j)
+						break;
+				}
+				if (!lc)
+				{
+					pfree(dev_info);
+					continue;
+				}
+			}
 
 			/* rough estimation about computing power */
 			if ((dev_info->dev_type & CL_DEVICE_TYPE_GPU) != 0)
@@ -936,14 +954,17 @@ construct_opencl_device_info(void)
 						  dev_info->dev_max_clock_frequency);
 
 			temp = lappend(temp, dev_info);
+			devices[k] = devices[j];
+			k++;
 		}
 
-		if (opencl_platform_index == i ||
-			(opencl_platform_index < 0 && score > score_max))
+		if (k > 0 &&
+			(opencl_platform_index == i ||
+			 (opencl_platform_index < 0 && score > score_max)))
 		{
 			opencl_platform_id = platforms[i];
-			opencl_num_devices = n_devices;
-			memcpy(opencl_devices, devices, sizeof(cl_device_id) * n_devices);
+			opencl_num_devices = k;
+			memcpy(opencl_devices, devices, sizeof(cl_device_id) * k);
 			score_max = score;
 			result = temp;
 		}
@@ -959,7 +980,7 @@ construct_opencl_device_info(void)
 	if (!opencl_platform_id)
 		elog(ERROR,
 			 "PG-Strom: No OpenCL device available. "
-			 "Please check \"pgstrom.opencl_platform\" parameter");
+			 "Please check \"pg_strom.opencl_platform\" parameter");
 
 	/* OK, let's put device/platform information on shared memory */
 	disclose_opencl_device_info(result);
@@ -984,12 +1005,13 @@ pgstrom_startup_opencl_devinfo(void)
 void
 pgstrom_init_opencl_devinfo(void)
 {
+	static char *devnums_strings;
 	static char	*devtype_strings;
 	char		*token;
 	char		*pos;
 
 	/* selection of opencl platform */
-	DefineCustomIntVariable("pgstrom.opencl_platform",
+	DefineCustomIntVariable("pg_strom.opencl_platform",
 							"selection of OpenCL platform to be used",
 							NULL,
 							&opencl_platform_index,
@@ -999,10 +1021,39 @@ pgstrom_init_opencl_devinfo(void)
 							PGC_POSTMASTER,
                             GUC_NOT_IN_SAMPLE,
                             NULL, NULL, NULL);
+	/* selection of opencl devices */
+	DefineCustomStringVariable("pg_strom.opencl_devices",
+							   "selection of OpenCL devices to be used",
+							   NULL,
+							   &devnums_strings,
+							   "any",
+							   PGC_POSTMASTER,
+							   GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
+	token = strtok_r(devnums_strings, ", ", &pos);
+	while (token != NULL)
+	{
+		int		code;
+
+		if (strcmp(token, "any") == 0)
+		{
+			opencl_valid_devices = NIL;
+			break;
+		}
+		code = atoi(token);
+		if (code < 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid pg_strom.opencl_devices option: %s",
+							token),
+					 errhint("must be 'any' or non-negative integer")));
+
+		opencl_valid_devices = lappend_int(opencl_valid_devices, code);
+	}
 
 	/* selection of opencl device types */
-	DefineCustomStringVariable("pgstrom.opencl_device_types",
-							   "selection of OpenCL device types to be used",
+	DefineCustomStringVariable("pg_strom.opencl_device_types",
+							   "OpenCL device filter based on device types",
 							   NULL,
 							   &devtype_strings,
 							   "gpu,accelerator",

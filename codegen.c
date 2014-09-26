@@ -59,7 +59,7 @@ static struct {
 	/* variable length datatypes */
 	{ BPCHAROID,		"varlena",		F_BPCHAREQ,	F_BPCHARCMP },
 	{ VARCHAROID,		"varlena",		InvalidOid,	InvalidOid },
-//	{ NUMERICOID,		"varlena",		F_NUMERIC_EQ },
+	{ NUMERICOID,		"varlena",		F_NUMERIC_EQ, F_NUMERIC_CMP },
 	{ BYTEAOID,			"varlena",		F_BYTEAEQ,	F_BYTEACMP },
 	{ TEXTOID,			"varlena",		F_TEXTEQ,	F_BTTEXTCMP },
 };
@@ -481,7 +481,6 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "tan",     1, {FLOAT8OID}, "f:tan", NULL },
 };
 
-#if 0
 static devfunc_catalog_t devfunc_numericlib_catalog[] = {
 	/* Type cast functions */
 	{ "int2",    1, {NUMERICOID}, "F:numeric_int2",   NULL },
@@ -489,29 +488,27 @@ static devfunc_catalog_t devfunc_numericlib_catalog[] = {
 	{ "int8",    1, {NUMERICOID}, "F:numeric_int8",   NULL },
 	{ "float4",  1, {NUMERICOID}, "F:numeric_float4", NULL },
 	{ "float8",  1, {NUMERICOID}, "F:numeric_float8", NULL },
-	/* numeric operators */
-
-	/*
-	 * Right now, functions that return variable-length field are not
-	 * supported.
-	 */
+	{ "numeric", 1, {INT2OID},    "F:int2_numeric",   NULL },
+	{ "numeric", 1, {INT4OID},    "F:int4_numeric",   NULL },
+	{ "numeric", 1, {INT8OID},    "F:int8_numeric",   NULL },
+	{ "numeric", 1, {FLOAT4OID},  "F:float4_numeric", NULL },
+	{ "numeric", 1, {FLOAT8OID},  "F:float8_numeric", NULL },
+	/* Numeric operators */
 	{ "numeric_add", 2, {NUMERICOID, NUMERICOID}, "F:numeric_add", NULL },
 	{ "numeric_sub", 2, {NUMERICOID, NUMERICOID}, "F:numeric_sub", NULL },
 	{ "numeric_mul", 2, {NUMERICOID, NUMERICOID}, "F:numeric_mul", NULL },
-	{ "numeric_div", 2, {NUMERICOID, NUMERICOID}, "F:numeric_div", NULL },
-	{ "numeric_mod", 2, {NUMERICOID, NUMERICOID}, "F:numeric_mod", NULL },
-	{ "numeric_power", 2,{NUMERICOID, NUMERICOID},"F:numeric_power", NULL},
 	{ "numeric_uplus",  1, {NUMERICOID}, "F:numeric_uplus", NULL },
 	{ "numeric_uminus", 1, {NUMERICOID}, "F:numeric_uminus", NULL },
 	{ "numeric_abs",    1, {NUMERICOID}, "F:numeric_abs", NULL },
+	/* Numeric comparison */
 	{ "numeric_eq", 2, {NUMERICOID, NUMERICOID}, "F:numeric_eq", NULL },
 	{ "numeric_ne", 2, {NUMERICOID, NUMERICOID}, "F:numeric_ne", NULL },
 	{ "numeric_lt", 2, {NUMERICOID, NUMERICOID}, "F:numeric_lt", NULL },
 	{ "numeric_le", 2, {NUMERICOID, NUMERICOID}, "F:numeric_le", NULL },
 	{ "numeric_gt", 2, {NUMERICOID, NUMERICOID}, "F:numeric_gt", NULL },
 	{ "numeric_ge", 2, {NUMERICOID, NUMERICOID}, "F:numeric_ge", NULL },
+	{ "numeric_cmp", 2, {NUMERICOID, NUMERICOID}, "F:numeric_cmp", NULL },
 };
-#endif
 
 static devfunc_catalog_t devfunc_timelib_catalog[] = {
 	/* Type cast functions */
@@ -1032,11 +1029,9 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 			{ devfunc_common_catalog,
 			  lengthof(devfunc_common_catalog),
 			  0 },
-#if 0
 			{ devfunc_numericlib_catalog,
 			  lengthof(devfunc_numericlib_catalog),
-			  DEVFUNC_NEEDS_NUMERICLIB },
-#endif
+			  DEVFUNC_NEEDS_NUMERIC },
 			{ devfunc_timelib_catalog,
 			  lengthof(devfunc_timelib_catalog),
 			  DEVFUNC_NEEDS_TIMELIB },

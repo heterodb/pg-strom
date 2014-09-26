@@ -256,7 +256,7 @@ typedef struct {
 #define DEVTYPE_IS_BUILTIN			0x0004
 #define DEVFUNC_NEEDS_TIMELIB		0x0008
 #define DEVFUNC_NEEDS_TEXTLIB		0x0010
-#define DEVFUNC_NEEDS_NUMERICLIB	0x0020
+#define DEVFUNC_NEEDS_NUMERIC		0x0020
 #define DEVFUNC_INCL_FLAGS			0x0038
 #define DEVKERNEL_NEEDS_GPUSCAN		0x0200
 #define DEVKERNEL_NEEDS_HASHJOIN	0x0400
@@ -491,6 +491,7 @@ extern void pgstrom_dump_data_store(pgstrom_data_store *pds);
 /*
  * restrack.c
  */
+extern bool pgstrom_restrack_cleanup_context(void);
 extern void __pgstrom_track_object(const char *filename, int lineno,
 								   StromObject *sobject, Datum private);
 #define pgstrom_track_object(sobject, private)			\
@@ -678,6 +679,7 @@ extern const char *pgstrom_opencl_gpupreagg_code;
 extern const char *pgstrom_opencl_hashjoin_code;
 extern const char *pgstrom_opencl_textlib_code;
 extern const char *pgstrom_opencl_timelib_code;
+extern const char *pgstrom_opencl_numeric_code;
 
 /* ----------------------------------------------------------------
  *
