@@ -811,13 +811,14 @@ disclose_opencl_device_info(List *devinfo_list)
 
 	/* shows selected platform */
 	Assert(pl_info != NULL);
-	elog(LOG, "PG-Strom: \"%s (%s)\" was installed",
+	elog(LOG, "PG-Strom: Platform \"%s (%s)\" was installed",
 		 pl_info->pl_name, pl_info->pl_version);
 
 	/* copy platform/device info */
 	foreach (cell, devinfo_list)
 	{
 		dev_info = lfirst(cell);
+		elog(LOG, "PG-Strom: Device \"%s\" was installed", dev_info->dev_name);
 
 		if (cell == list_head(devinfo_list))
 		{
