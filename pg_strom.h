@@ -607,6 +607,7 @@ extern TupleTableSlot *pgstrom_rcstore_fetch_slot(TupleTableSlot *slot,
 /*
  * restrack.c
  */
+extern bool pgstrom_restrack_cleanup_context(void);
 extern void __pgstrom_track_object(const char *filename, int lineno,
 								   StromObject *sobject, Datum private);
 #define pgstrom_track_object(sobject, private)			\

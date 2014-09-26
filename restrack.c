@@ -63,6 +63,7 @@ static dlist_head		tracker_free_list;
 static dlist_head		tracker_slot[RESTRACK_HASHSZ];
 static dlist_head		ptrmap_slot[PTRMAP_HASHSZ];
 static MemoryContext	ResTrackContext;
+static bool				restrack_is_cleanup_context = false;
 
 static inline int
 restrack_hash_index(ResourceOwner resource_owner,
@@ -160,18 +161,37 @@ sobject_get_entry(ResourceOwner resource_owner,
 	return so_entry;
 }
 
+/*
+ * pgstrom_restrack_cleanup_context - It informs another portions whether
+ * the current context is restrack's cleanup context, or not.
+ * Some class of resources (like, shared buffer) are released prior to
+ * the callback of resource-owner.
+ */
+bool
+pgstrom_restrack_cleanup_context(void)
+{
+	return restrack_is_cleanup_context;
+}
+
 static void
 pgstrom_restrack_callback(ResourceReleasePhase phase,
 						  bool is_commit,
 						  bool is_toplevel,
 						  void *arg)
 {
-	tracker_entry  *tracker
-		= restrack_get_entry(CurrentResourceOwner, phase, false);
+	tracker_entry  *tracker;
+	bool			saved_context = restrack_is_cleanup_context;
 
-	if (tracker)
+	tracker = restrack_get_entry(CurrentResourceOwner, phase, false);
+	if (!tracker)
+		return;
+
+	PG_TRY();
 	{
 		dlist_mutable_iter miter;
+
+		/* switch current context */
+		restrack_is_cleanup_context = true;
 
 		/*
 		 * In case of transaction abort, we decrement reference counter of
@@ -226,6 +246,13 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 		memset(tracker, 0, sizeof(tracker_entry));
 		dlist_push_head(&tracker_free_list, &tracker->chain);
 	}
+	PG_CATCH();
+	{
+		restrack_is_cleanup_context = saved_context;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	restrack_is_cleanup_context = saved_context;
 }
 
 /*
