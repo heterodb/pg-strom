@@ -25,25 +25,6 @@
 #include "pg_strom.h"
 
 /*
- * pgstrom_try_varlena_inline
- *
- * It tried to inline varlena variables if it has an explicit
- * maximum length that is enough small than the threthold.
- * It enables to reduce number of DMA send and also allows
- * reduce waste of RAM by offset pointer (as long as user
- * designed database schema well).
- */
-int
-pgstrom_try_varlena_inline(Form_pg_attribute attr)
-{
-	if (attr->attlen < 0 &&
-		attr->atttypmod > 0 &&
-		attr->atttypmod <= pgstrom_max_inline_varlena)
-		return INTALIGN(attr->atttypmod);
-	return attr->attlen;
-}
-
-/*
  * pgstrom_create_param_buffer
  *
  * It construct a param-buffer on the shared memory segment, according to

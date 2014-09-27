@@ -435,8 +435,6 @@ extern Datum pgstrom_mqueue_info(PG_FUNCTION_ARGS);
 /*
  * datastore.c
  */
-extern int pgstrom_try_varlena_inline(Form_pg_attribute attr);
-
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
@@ -646,7 +644,6 @@ extern bool pgstrom_perfmon_enabled;
 extern int	pgstrom_chunk_size;
 extern int	pgstrom_max_async_chunks;
 extern int	pgstrom_min_async_chunks;
-extern int  pgstrom_max_inline_varlena;
 extern double pgstrom_gpu_setup_cost;
 extern double pgstrom_gpu_operator_cost;
 extern double pgstrom_gpu_tuple_cost;

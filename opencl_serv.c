@@ -146,7 +146,6 @@ static void
 init_opencl_context_and_shmem(void)
 {
 	Size	zone_length = LONG_MAX;
-	Size	curr_pos = 0;
 	cl_int	i, rc;
 
 	/*
