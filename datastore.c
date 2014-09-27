@@ -189,26 +189,20 @@ pgstrom_make_bulk_attmap(List *targetlist, Index varno)
  * It gives a hint whether subplan support bulk-exec mode, or not.
  */
 bool
-pgstrom_plan_can_multi_exec(const PlanState *ps)
+pgstrom_planstate_can_bulkload(const PlanState *ps)
 {
-	if (!IsA(ps, CustomPlanState))
-		return false;
-#if 0
-	if (gpuscan_support_multi_exec((const CustomPlanState *) ps) ||
-		gpusort_support_multi_exec((const CustomPlanState *) ps) ||
-		gpuhashjoin_support_multi_exec((const CustomPlanState *) ps))
-		return true;
-#endif
-	if (gpuscan_support_multi_exec((const CustomPlanState *) ps))
-		return true;
+	if (IsA(ps, CustomPlanState))
+	{
+		const CustomPlanState  *cps = (const CustomPlanState *) ps;
 
+		if (pgstrom_gpuscan_can_bulkload(cps))
+			return true;
+	}
 	return false;
 }
 
 #if 0
 /*
- * kparam_make_kds_head
- *
  * it makes a template of header portion of kern_data_store according
  * to the supplied tupdesc and bitmapset of referenced columns.
  */

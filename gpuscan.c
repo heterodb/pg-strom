@@ -74,7 +74,6 @@ typedef struct {
 	pgstrom_queue	   *mqueue;
 	Datum				dprog_key;
 	kern_parambuf	   *kparams;
-	List			   *bulk_attmap;
 
 	pgstrom_gpuscan	   *curr_chunk;
 	uint32				curr_index;
@@ -105,7 +104,6 @@ typedef struct {
 
 /* static functions */
 static void clserv_process_gpuscan(pgstrom_message *msg);
-static void clserv_put_gpuscan(pgstrom_message *msg);
 
 /*
  * cost_gpuscan
@@ -425,20 +423,19 @@ gpuscan_finalize_plan(PlannerInfo *root,
 }
 
 /*
- * gpuscan_support_multi_exec
+ * pgstrom_gpuscan_can_bulkload
  *
- * It gives a hint whether the supplied plan-state support bulk-exec mode,
- * or not. If it is GpuScan provided by PG-Strom, it allows bulk-exec in
- * case when ...
- * - no scan projection
- * - no hybrid-scan mode (cache-only scan, or regular heap-scan)
+ * It tells caller whether the supplied custom-plan-state is GpuScan and
+ * can support bulk-loading, or not.
  */
 bool
-gpuscan_support_multi_exec(const CustomPlanState *cps)
+pgstrom_gpuscan_can_bulkload(const CustomPlanState *cps)
 {
-	if (cps->ps.ps_ProjInfo != NULL)
-		return false;
-	return true;
+	if (cps->methods == &gpuscan_plan_methods &&
+		!cps->ps.ps_ProjInfo)
+		return true;
+
+	return false;
 }
 
 static  CustomPlanState *
@@ -448,8 +445,6 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	Index			scanrelid = gsplan->scanrelid;
 	GpuScanState   *gss;
 	TupleDesc		tupdesc;
-	List		   *tlist;
-	//List		   *used_params = NIL;
 	Form_pg_class	rel_form;
 
 	/* gpuscan should not have inner/outer plan now */
@@ -505,10 +500,6 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 		gss->cps.ps.ps_ProjInfo = NULL;
 	else
 		ExecAssignProjectionInfo(&gss->cps.ps, tupdesc);
-
-	/* also, check availability of simple projection */
-	tlist = gss->cps.ps.plan->targetlist;
-	gss->bulk_attmap = pgstrom_make_bulk_attmap(tlist, scanrelid);
 
 	/*
 	 * OK, let's initialize stuff for block scan
@@ -730,6 +721,121 @@ gpuscan_next_tuple(GpuScanState *gss)
 	return slot;
 }
 
+/*
+ * pgstrom_fetch_gpuscan
+ *
+ * It loads a chunk from the target relation, then enqueue the GpuScan
+ * chunk to be processed by OpenCL devices if valid device kernel was
+ * constructed. Elsewhere, it works as a wrapper of pgstrom_load_gpuscan,
+ */
+static pgstrom_gpuscan *
+pgstrom_fetch_gpuscan(GpuScanState *gss)
+{
+	pgstrom_message	   *msg;
+	pgstrom_gpuscan	   *gpuscan;
+
+	/*
+	 * In case when no device code will be executed, we don't need to have
+	 * asynchronous execution. So, just return a chunk with synchronous
+	 * manner.
+	 */
+	if (gss->dprog_key == 0)
+		return pgstrom_load_gpuscan(gss);
+
+	/* A valid device code shall have message queue */
+	Assert(gss->mqueue != NULL);
+
+	/* Dequeue current gpuscan chunks being already processed */
+	while ((msg = pgstrom_try_dequeue_message(gss->mqueue)) != NULL)
+	{
+		Assert(gss->num_running > 0);
+		gss->num_running--;
+		dlist_push_tail(&gss->ready_chunks, &msg->chain);
+	}
+
+	/*
+	 * Try to keep number of gpuscan chunks being asynchronously executed
+	 * larger than minimum multiplicity, unless it does not exceed
+	 * maximum one and OpenCL server does not return a new response.
+	 */
+	while (gss->num_running <= pgstrom_max_async_chunks)
+	{
+		pgstrom_gpuscan	*gpuscan = pgstrom_load_gpuscan(gss);
+
+		if (!gpuscan)
+			break;	/* scan reached end of the relation */
+
+		if (!pgstrom_enqueue_message(&gpuscan->msg))
+		{
+			pgstrom_put_message(&gpuscan->msg);
+			elog(ERROR, "failed to enqueue pgstrom_gpuscan message");
+		}
+		gss->num_running++;
+
+		if (gss->num_running > pgstrom_min_async_chunks &&
+			(msg = pgstrom_try_dequeue_message(gss->mqueue)) != NULL)
+		{
+			gss->num_running--;
+			dlist_push_tail(&gss->ready_chunks, &msg->chain);
+			break;
+		}
+	}
+
+	/*
+	 * Wait for server's response if no available chunks were replied.
+	 */
+	if (dlist_is_empty(&gss->ready_chunks))
+	{
+		/* OK, no more chunks to be scanned */
+		if (gss->num_running == 0)
+			return NULL;
+
+		/* Synchronization, if needed */
+		msg = pgstrom_dequeue_message(gss->mqueue);
+		if (!msg)
+			elog(ERROR, "message queue wait timeout");
+		gss->num_running--;
+		dlist_push_tail(&gss->ready_chunks, &msg->chain);
+	}
+
+	/*
+	 * Picks up next available chunks if any
+	 */
+	Assert(!dlist_is_empty(&gss->ready_chunks));
+	gpuscan = dlist_container(pgstrom_gpuscan, msg.chain,
+							  dlist_pop_head_node(&gss->ready_chunks));
+	Assert(StromTagIs(gpuscan, GpuScan));
+
+	/*
+	 * Raise an error, if any error was reported
+	 */
+	if (gpuscan->msg.errcode != StromError_Success)
+	{
+		if (gpuscan->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
+		{
+			const char *buildlog
+				= pgstrom_get_devprog_errmsg(gpuscan->dprog_key);
+			const char *kern_source
+				= ((GpuScanPlan *)gss->cps.ps.plan)->kern_source;
+
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
+							pgstrom_strerror(gpuscan->msg.errcode),
+							kern_source),
+					 errdetail("%s", buildlog)));
+		}
+		else
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("PG-Strom: OpenCL execution error (%s)",
+							pgstrom_strerror(gpuscan->msg.errcode))));
+		}
+	}
+	return gpuscan;
+}
+
 static TupleTableSlot *
 gpuscan_fetch_tuple(CustomPlanState *node)
 {
@@ -740,7 +846,6 @@ gpuscan_fetch_tuple(CustomPlanState *node)
 
 	while (!gss->curr_chunk || !(slot = gpuscan_next_tuple(gss)))
 	{
-		pgstrom_message	   *msg;
 		pgstrom_gpuscan	   *gpuscan;
 
 		/*
@@ -758,114 +863,9 @@ gpuscan_fetch_tuple(CustomPlanState *node)
 			gss->curr_chunk = NULL;
 			gss->curr_index = 0;
 		}
-
-		/*
-		 * In case when no device code will be executed, we have no
-		 * message queue for asynchronous execution because of senseless.
-		 * We handle the job synchronously, but may make sense if tcache
-		 * reduces disk accesses.
-		 */
-		if (gss->dprog_key == 0)
-		{
-			gss->curr_chunk = pgstrom_load_gpuscan(gss);
-			gss->curr_index = 0;
-			if (gss->curr_chunk)
-				continue;
+		gpuscan = pgstrom_fetch_gpuscan(gss);
+		if (!gpuscan)
 			break;
-		}
-		Assert(gss->mqueue != NULL);
-
-		/*
-		 * Dequeue the current gpuscan chunks being already processed
-		 */
-		while ((msg = pgstrom_try_dequeue_message(gss->mqueue)) != NULL)
-		{
-			Assert(gss->num_running > 0);
-			gss->num_running--;
-			dlist_push_tail(&gss->ready_chunks, &msg->chain);
-		}
-
-		/*
-		 * Try to keep number of gpuscan chunks being asynchronously executed
-		 * larger than minimum multiplicity, unless it does not exceed
-		 * maximum one and OpenCL server does not return a new response.
-		 */
-		while (gss->num_running <= pgstrom_max_async_chunks)
-		{
-			pgstrom_gpuscan	*gpuscan = pgstrom_load_gpuscan(gss);
-
-			if (!gpuscan)
-				break;	/* scan reached end of the relation */
-
-			if (!pgstrom_enqueue_message(&gpuscan->msg))
-			{
-				pgstrom_put_message(&gpuscan->msg);
-				elog(ERROR, "failed to enqueue pgstrom_gpuscan message");
-			}
-			gss->num_running++;
-
-			if (gss->num_running > pgstrom_min_async_chunks &&
-				(msg = pgstrom_try_dequeue_message(gss->mqueue)) != NULL)
-			{
-				gss->num_running--;
-				dlist_push_tail(&gss->ready_chunks, &msg->chain);
-				break;
-			}
-		}
-
-		/*
-		 * Wait for server's response if no available chunks were replied.
-		 */
-		if (dlist_is_empty(&gss->ready_chunks))
-		{
-			/* OK, no more chunks to be scanned */
-			if (gss->num_running == 0)
-				break;
-
-			msg = pgstrom_dequeue_message(gss->mqueue);
-			if (!msg)
-				elog(ERROR, "message queue wait timeout");
-			gss->num_running--;
-			dlist_push_tail(&gss->ready_chunks, &msg->chain);
-		}
-
-		/*
-		 * Picks up next available chunks if any
-		 */
-		Assert(!dlist_is_empty(&gss->ready_chunks));
-		gpuscan = dlist_container(pgstrom_gpuscan, msg.chain,
-								  dlist_pop_head_node(&gss->ready_chunks));
-		Assert(StromTagIs(gpuscan, GpuScan));
-
-		/*
-		 * Raise an error, if an error was reported.
-		 *
-		 * XXX: Row-level recheck really makes sense?
-		 */
-		if (gpuscan->msg.errcode != StromError_Success)
-		{
-			if (gpuscan->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
-			{
-				const char *buildlog
-					= pgstrom_get_devprog_errmsg(gpuscan->dprog_key);
-				const char *kern_source
-					= ((GpuScanPlan *)gss->cps.ps.plan)->kern_source;
-
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
-								pgstrom_strerror(gpuscan->msg.errcode),
-								kern_source),
-						 errdetail("%s", buildlog)));
-			}
-			else
-			{
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("PG-Strom: OpenCL execution error (%s)",
-								pgstrom_strerror(gpuscan->msg.errcode))));
-			}
-		}
 		gss->curr_chunk = gpuscan;
 		gss->curr_index = 0;
 	}
@@ -989,221 +989,123 @@ gpuscan_exec(CustomPlanState *node)
 	}
 }
 
-#if 0
-
 static Node *
 gpuscan_exec_multi(CustomPlanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *) node;
-	Snapshot			snapshot = node->ps.state->es_snapshot;
 	List			   *host_qual = node->ps.qual;
 	pgstrom_gpuscan	   *gpuscan;
 	kern_resultbuf	   *kresults;
 	pgstrom_bulkslot   *bulk;
-	pgstrom_message	   *msg;
 	cl_uint				i, j, nitems;
 	cl_int			   *rindex;
+	HeapTupleData		tuple;
 
 	/* must provide our own instrumentation support */
 	if (node->ps.instrument)
 		InstrStartNode(node->ps.instrument);
 
-	/* bulk data exchange should not have projection */
-	Assert(gss->bulk_attmap != NULL);
-	/* also, hybrid scan is nonsense */
-	Assert(!gss->hybrid_scan);
-
-retry:
 	while (true)
 	{
-		gpuscan = pgstrom_load_gpuscan(gss);
+		gpuscan = pgstrom_fetch_gpuscan(gss);
 		if (!gpuscan)
-			break;
-
-		/*
-		 * In case we have no device executable stuff, here is no chance
-		 * to run something asynchronous, so we simply returns this row-
-		 * or column-store as-is.
-		 */
-		if (gss->dprog_key == 0)
-			break;
-
-		/*
-		 * To keep number of asynchronous row/column stores to be processed,
-		 *  we try to enqueue at least one stores per fetch.
-		 */
-		if (!pgstrom_enqueue_message(&gpuscan->msg))
-		{
-			pgstrom_put_message(&gpuscan->msg);
-			elog(ERROR, "failed to enqueue pgstrom_gpuscan message");
-		}
-		gss->num_running++;
-		gpuscan = NULL;
-
-		/* check if any chunk being already processed */ 
-		msg = pgstrom_try_dequeue_message(gss->mqueue);
-		if (!msg)
-		{
-			if (gss->num_running < pgstrom_max_async_chunks)
-				continue;
-			else
-				break;
-		}
-		gss->num_running--;
-		Assert(StromTagIs(msg, GpuScan));
-		gpuscan = (pgstrom_gpuscan *) msg;
-		break;
-	}
-
-	/*
-	 * Try synchronous dequeue, if nothing returned yet.
-	 */
-	if (!gpuscan)
-	{
-		/* if no asynchronous jobs in progress, it's end of scan */
-		if (gss->num_running == 0)
-		{
-			/* must provide our own instrumentation support */
-			if (node->ps.instrument)
-				InstrStopNode(node->ps.instrument, 0.0);
 			return NULL;
-		}
-		msg = pgstrom_dequeue_message(gss->mqueue);
-		if (!msg)
-			elog(ERROR, "message queue wait timeout");
-		gss->num_running--;
-		Assert(StromTagIs(msg, GpuScan));
-		gpuscan = (pgstrom_gpuscan *) msg;
-	}
 
-	/*
-	 * Raise an error, if chunk-level error was reported.
-	 */
-	if (gpuscan->msg.errcode != StromError_Success)
-	{
-		if (gpuscan->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
+		/*
+		 * Make a bulk-slot according to the result
+		 */
+		kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
+		bulk = palloc0(offsetof(pgstrom_bulkslot, rindex[kresults->nitems]));
+		bulk->pds = pgstrom_get_data_store(gpuscan->pds);
+		bulk->nvalids = 0;	/* to be set later */
+		pgstrom_track_object(&bulk->pds->sobj, 0);
+
+		/*
+		 * If any, it may take host side checks
+		 * - Recheck of device qualifier, if result is nagative
+		 * - Host qualifier checks, if any.
+		 */
+		if (kresults->all_visible)
 		{
-			const char *buildlog
-				= pgstrom_get_devprog_errmsg(gpuscan->dprog_key);
-			const char *kern_source
-				= ((GpuScanPlan *)gss->cps.ps.plan)->kern_source;
-
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
-							pgstrom_strerror(gpuscan->msg.errcode),
-							kern_source),
-					 errdetail("%s", buildlog)));
+			if (!host_qual)
+			{
+				bulk->nvalids = -1;	/* all the rows are valid */
+				break;
+			}
+			nitems = bulk->pds->kds->nitems;
+			rindex = NULL;
+			Assert(nitems <= kresults->nitems);
 		}
 		else
 		{
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("PG-Strom: OpenCL execution error (%s)",
-							pgstrom_strerror(gpuscan->msg.errcode))));
+			nitems = kresults->nitems;
+			rindex = kresults->results;
 		}
-	}
-	kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
 
-	/*
-	 * Make a new bulk-slot according to the result
-	 */
-	bulk = palloc0(offsetof(pgstrom_bulkslot, rindex[kresults->nitems]));
-	bulk->rcstore = pgstrom_get_rcstore(gpuscan->rc_store);
-	bulk->nvalids = 0;	/* to be set later */
-	pgstrom_track_object(bulk->rcstore, 0);
-
-	/*
-	 * GpuScan needs to have the host side checks below:
-	 * - MVCC visibility checks.
-	 * - Rechecks of device qualifier, if result is negative
-	 * - Host side qualifier checks, if any.
-	 */
-	if (kresults->all_visible)
-	{
-		nitems = pgstrom_nitems_rcstore(gpuscan->rc_store);
-		rindex = NULL;
-	}
-	else
-	{
-		nitems = kresults->nitems;
-		rindex = kresults->results;
-	}
-	Assert(nitems <= kresults->nrooms);
-
-	for (i=0, j=0; i < nitems; i++)
-	{
-		cl_uint			row_index = (!rindex ? i + 1 : rindex[i]);
-		bool			do_recheck;
-		TupleTableSlot *slot;
-
-		if (row_index < 0)
+		for (i=0, j=0; i < nitems; i++)
 		{
-			row_index = -row_index - 1;
-			do_recheck = true;
-		}
-		else
-		{
-			row_index--;
-			do_recheck = false;
-		}
+			cl_uint			row_index = (!rindex ? i + 1 : rindex[i]);
+			bool			do_recheck = false;
 
-		if (host_qual || do_recheck)
-			slot = gss->scan_slot;
-		else
-			slot = NULL;
+			Assert(row_index != 0);
+			if (row_index > 0)
+				row_index--;
+			else
+			{
+				row_index = -row_index - 1;
+				do_recheck = true;
+			}
 
-		/*
-		 * MVCC visibility checks
+			if (host_qual || do_recheck)
+			{
+				ExprContext *econtext = gss->cps.ps.ps_ExprContext;
+
+				if (!pgstrom_fetch_data_store(gss->scan_slot,
+											  bulk->pds,
+											  row_index,
+											  &tuple))
+					elog(ERROR, "Bug? invalid row-index was in the result");
+				econtext->ecxt_scantuple = gss->scan_slot;
+
+				/* Recheck of device qualifier, if needed */
+				if (do_recheck)
+				{
+					Assert(gss->dev_quals != NULL);
+					if (!ExecQual(gss->dev_quals, econtext, false))
+						continue;
+				}
+				/* Check of host qualifier, if needed */
+				if (host_qual)
+				{
+					if (!ExecQual(host_qual, econtext, false))
+						continue;
+				}
+			}
+			bulk->rindex[j++] = row_index;
+		}
+		bulk->nvalids = j;
+
+		/* No longer gpuscan is referenced any more. The associated
+		 * data-store is not actually released because its refcnt is
+		 * already incremented above.
 		 */
-		if (!gpuscan_check_tuple_visibility(gss, bulk->rcstore, row_index,
-											snapshot, slot))
-			continue;
+		pgstrom_untrack_object(&gpuscan->msg.sobj);
+		pgstrom_put_message(&gpuscan->msg);
 
-		/*
-		 * Device qualifier rechecks, if needed
+		if (bulk->nvalids > 0)
+			break;
+
+		/* If this chunk has no valid items, it does not make sense to
+		 * return upper level this chunk.
 		 */
-		if (do_recheck)
-		{
-			ExprContext *econtext = gss->cps.ps.ps_ExprContext;
-
-			Assert(gss->dev_quals != NULL);
-			econtext->ecxt_scantuple = gss->scan_slot;
-			if (!ExecQual(gss->dev_quals, econtext, false))
-				continue;
-		}
-
-		/*
-		 * Optional, host qualifier checks
-		 */
-		if (host_qual)
-		{
-			ExprContext *econtext = gss->cps.ps.ps_ExprContext;
-
-			econtext->ecxt_scantuple = gss->scan_slot;
-			if (!ExecQual(host_qual, econtext, false))
-				continue;
-		}
-		bulk->rindex[j++] = row_index;
-	}
-	bulk->nvalids = j;
-	/* no longer gpuscan is referenced any more, linked rcstore is not
-	 * actually released because its refcnt is incremented above. */
-	pgstrom_untrack_object(&gpuscan->msg.sobj);
-	pgstrom_put_message(&gpuscan->msg);
-
-	if (bulk->nvalids == 0)
-	{
-		pgstrom_put_rcstore(bulk->rcstore);
+		pgstrom_put_data_store(bulk->pds);
 		pfree(bulk);
-		goto retry;
 	}
 	/* must provide our own instrumentation support */
 	if (node->ps.instrument)
 		InstrStopNode(node->ps.instrument, (double) bulk->nvalids);
 	return (Node *) bulk;
 }
-#endif
 
 static void
 gpuscan_end(CustomPlanState *node)
@@ -1482,7 +1384,7 @@ pgstrom_init_gpuscan(void)
 	gpuscan_plan_methods.FinalizeCustomPlan	= gpuscan_finalize_plan;
 	gpuscan_plan_methods.BeginCustomPlan	= gpuscan_begin;
 	gpuscan_plan_methods.ExecCustomPlan		= gpuscan_exec;
-	//gpuscan_plan_methods.MultiExecCustomPlan= gpuscan_exec_multi;
+	gpuscan_plan_methods.MultiExecCustomPlan= gpuscan_exec_multi;
 	gpuscan_plan_methods.EndCustomPlan		= gpuscan_end;
 	gpuscan_plan_methods.ReScanCustomPlan	= gpuscan_rescan;
 	gpuscan_plan_methods.ExplainCustomPlanTargetRel	= gpuscan_explain_rel;
@@ -1940,30 +1842,4 @@ error:
 	}
 	gpuscan->msg.errcode = rc;
 	pgstrom_reply_message(&gpuscan->msg);
-}
-
-/*
- * clserv_put_gpuscan
- *
- * Callback handler when reference counter of pgstrom_gpuscan object
- * reached to zero, due to pgstrom_put_message.
- * It also unlinks associated device program and release row-store.
- * Also note that this routine can be called under the OpenCL server
- * context.
- */
-static void
-clserv_put_gpuscan(pgstrom_message *msg)
-{
-	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *)msg;
-
-	/* unlink message queue, if any */
-	if (msg->respq)
-		pgstrom_put_queue(msg->respq);
-	/* unlink device program, if any */
-	if (gpuscan->dprog_key != 0)
-		pgstrom_put_devprog_key(gpuscan->dprog_key);
-	/* release row-/column-store, if any */
-	if (gpuscan->pds)
-		pgstrom_put_data_store(gpuscan->pds);
-	pgstrom_shmem_free(gpuscan);
 }

@@ -323,6 +323,7 @@ typedef struct {
  */
 typedef struct
 {
+	NodeTag			type;
 	pgstrom_data_store *pds;
 	cl_int			nvalids;	/* length of rindex. -1 means all valid */
 	cl_uint			rindex[FLEXIBLE_ARRAY_MEMBER];
@@ -438,6 +439,7 @@ extern Datum pgstrom_mqueue_info(PG_FUNCTION_ARGS);
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
+#if 0
 extern bytea *kparam_make_kds_head(TupleDesc tupdesc,
 								   Bitmapset *attrefs,
 								   cl_uint nsyscols);
@@ -448,11 +450,8 @@ extern bytea *kparam_make_ktoast_head(TupleDesc tupdesc,
 									  cl_uint nsyscols);
 extern void kparam_refresh_ktoast_head(kern_parambuf *kparams,
 									   StromObject *rcstore);
-extern List *pgstrom_make_bulk_attmap(List *targetlist, Index varno);
-
-extern bool pgstrom_plan_can_multi_exec(const PlanState *ps);
-
-
+#endif
+extern bool pgstrom_planstate_can_bulkload(const PlanState *ps);
 
 extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
 									 pgstrom_data_store *pds,
@@ -501,7 +500,7 @@ extern void pgstrom_init_restrack(void);
 /*
  * gpuscan.c
  */
-extern bool gpuscan_support_multi_exec(const CustomPlanState *cps);
+extern bool pgstrom_gpuscan_can_bulkload(const CustomPlanState *cps);
 extern void pgstrom_init_gpuscan(void);
 
 /*
