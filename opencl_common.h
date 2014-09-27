@@ -46,8 +46,10 @@ typedef float		cl_float;
 typedef double		cl_double;
 #if HOSTPTRLEN == 8
 typedef cl_ulong	hostptr_t;
+typedef cl_ulong	Datum;
 #elif HOSTPTRLEN == 4
 typedef cl_uint		hostptr_t;
+typedef cl_uint		Datum;
 #else
 #error unexpected host pointer length
 #endif	/* HOSTPTRLEN */
@@ -72,6 +74,7 @@ typedef cl_uint		hostptr_t;
 #define __local		/* address space qualifier is noise on host */
 #define __private	/* address space qualifier is noise on host */
 #define __constant	/* address space qualifier is noise on host */
+typedef uintptr_t	hostptr_t;
 #endif
 
 /*
@@ -340,6 +343,7 @@ typedef struct {
 } kern_rowitem;
 
 typedef struct {
+	hostptr_t		hostptr;/* address of kds on the host */
 	cl_uint			length;	/* length of the column-store, or 0 elsewhere */
 	cl_uint			ncols;	/* number of columns in this store */
 	cl_uint			nitems; /* number of rows in this store */
@@ -347,7 +351,6 @@ typedef struct {
 	cl_uint			nblocks;/* number of blocks in this store, if row-store.
 							 * Elsewhere, always 0. */
 	cl_char			is_column;/* if true, data store is column-format */
-	cl_char			__padding__[3];
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_data_store;
 
@@ -379,6 +382,7 @@ typedef struct {
  * and data contents are actually stored within this toast-buffer.
  */
 typedef struct {
+	hostptr_t		hostptr;/* address of ktoast on the host */
 	cl_uint			length;	/* length of toast-buffer */
 	cl_uint			usage;	/* usage of toast-buffer */
 	cl_char			data[FLEXIBLE_ARRAY_MEMBER];

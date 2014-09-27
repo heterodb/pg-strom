@@ -141,49 +141,6 @@ pgstrom_create_kern_parambuf(List *used_params,
 }
 
 /*
- * pgstrom_make_bulk_attmap
- *
- * It checks whether the supplied target-list has something except from
- * Var nodes. In case of simple var-node reference only, it is available
- * to skip expensive projection per row.
- */
-List *
-pgstrom_make_bulk_attmap(List *targetlist, Index varno)
-{
-	List	   *attmap = NIL;
-	ListCell   *cell;
-
-	foreach (cell, targetlist)
-	{
-		TargetEntry	   *tle = lfirst(cell);
-		Var			   *var;
-
-		if (!IsA(tle->expr, Var))
-		{
-			elog(INFO, "tlist contains things except for Var (%d)",
-				 (int)nodeTag(tle->expr));
-			return NIL;
-		}
-		var = (Var *) tle->expr;
-		if (var->varno != varno)
-		{
-			elog(INFO, "var->varno = %d, but %d is expected",
-				 var->varno, varno);
-			return NIL;
-		}
-
-		/*
-		 * FIXME: right now, we don't support to reference system columns
-		 * using attmap of bulk-slot. Is it a reasonable restriction?
-		 */
-		if (var->varattno < 1)
-			return NIL;
-		attmap = lappend_int(attmap, var->varattno);
-	}
-	return attmap;
-}
-
-/*
  * pgstrom_plan_can_multi_exec
  *
  * It gives a hint whether subplan support bulk-exec mode, or not.
@@ -518,6 +475,7 @@ pgstrom_create_data_store_row(TupleDesc tupdesc,
 	/* update exact number of rooms available */
 	nrooms = (allocation - baselen) / sizeof(kern_rowitem);
 
+	kds->hostptr = (hostptr_t) kds;
 	kds->length = 0;	/* 0 for row-store */
 	kds->ncols = tupdesc->natts;
 	kds->nitems = 0;
@@ -597,6 +555,7 @@ pgstrom_create_data_store_column(TupleDesc tupdesc,
 	kds = pgstrom_shmem_alloc(required);
 	if (!kds)
 		elog(ERROR, "out of shared memory");
+	kds->hostptr = (hostptr_t) kds;
 	kds->length = required;
 	kds->ncols = tupdesc->natts;
 	kds->nitems = 0;
@@ -890,6 +849,7 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 				ktoast = pgstrom_shmem_alloc(required);
 				if (!ktoast)
 					elog(ERROR, "out of shared memory");
+				ktoast->hostptr = (hostptr_t) ktoast;
 				ktoast->length = required;
 				ktoast->usage = (!pds->ktoast
 								 ? offsetof(kern_toastbuf, data[0])
