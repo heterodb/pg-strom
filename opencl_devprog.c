@@ -893,7 +893,7 @@ pgstrom_init_opencl_devprog(void)
 	cl_uint		code;
 
 	/* threshold to reclaim the cached opencl programs */
-	DefineCustomIntVariable("pgstrom.devprog_reclaim_threshold",
+	DefineCustomIntVariable("pg_strom.devprog_reclaim_threshold",
 							"threahold to reclaim device program objects",
 							NULL,
 							&reclaim_threshold,

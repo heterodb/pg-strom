@@ -1379,7 +1379,7 @@ pgstrom_init_shmem(void)
 	/*
 	 * Definition of GUC variables for shared memory management
 	 */
-	DefineCustomIntVariable("pgstrom.shmem_totalsize",
+	DefineCustomIntVariable("pg_strom.shmem_totalsize",
 							"total size of shared memory segment in MB",
 							NULL,
 							&shmem_totalsize,
@@ -1390,7 +1390,7 @@ pgstrom_init_shmem(void)
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
 
-	DefineCustomIntVariable("pgstrom.shmem_maxzones",
+	DefineCustomIntVariable("pg_strom.shmem_maxzones",
 							"max number of shared memory zones for PG-Strom",
 							NULL,
 							&pgstrom_shmem_maxzones,

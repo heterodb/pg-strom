@@ -237,7 +237,7 @@ pgstrom_opencl_main(Datum main_arg)
 	/*
 	 * OK, ready to launch server thread. In the default, it creates
 	 * same number with online CPUs, but user can give an explicit
-	 * number using "pgstrom.opencl_num_threads" parameter.
+	 * number using "pg_strom.opencl_num_threads" parameter.
 	 *
 	 * NOTE: sysconf(_SC_NPROCESSORS_ONLN) may not be portable.
 	 */
@@ -391,7 +391,7 @@ pgstrom_init_opencl_server(void)
 	BackgroundWorker	worker;
 
 	/* number of opencl server threads */
-	DefineCustomIntVariable("pgstrom.opencl_num_threads",
+	DefineCustomIntVariable("pg_strom.opencl_num_threads",
 							"number of opencl server threads",
 							NULL,
 							&opencl_num_threads,
