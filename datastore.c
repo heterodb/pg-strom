@@ -744,9 +744,22 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 	return ntup;
 }
 
-bool
-pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
-								TupleTableSlot *slot)
+/*
+ * pgstrom_data_store_insert_tuple
+ *
+ * It inserts a tuple on the data store. Unlike block read mode, we can use
+ * this interface for both of row and column data store.
+ */
+static bool
+row_data_store_insert_tuple(pgstrom_data_store *pds,
+							kern_data_store *kds,
+							TupleTableSlot *slot)
+{}
+
+static bool
+column_data_store_insert_tuple(pgstrom_data_store *pds,
+							   kern_data_store *kds,
+							   TupleTableSlot *slot)
 {
 	kern_data_store *kds = pds->kds;
 	TupleDesc	tupdesc = slot->tts_tupleDescriptor;
@@ -871,6 +884,17 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 		}
 	}
 	return false;
+}
+
+bool
+pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
+								TupleTableSlot *slot)
+{
+	kern_data_store *kds = pds->kds;
+
+	return (!kds->is_column
+			? row_data_store_insert_tuple(pds, kds, slot)
+			: column_data_store_insert_tuple(pds, kds, slot));
 }
 
 /*

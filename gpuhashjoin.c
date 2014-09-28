@@ -111,6 +111,8 @@ typedef struct
 	 * outerPlan ... relation to be joined
 	 * innerPlan ... MultiHash with multiple inner relations
 	 */
+	double		ntup_per_page;	/* expected # of tups per page */
+
 	int			num_rels;		/* number of underlying MultiHash */
 	const char *kernel_source;
 	int			extra_flags;
@@ -2112,6 +2114,7 @@ gpuhashjoin_begin(CustomPlan *node, EState *estate, int eflags)
 	Const		   *kparam_0;	/* template of outer kds_head */
 	Const		   *kparam_1;	/* template of outer ktoast_head */
 	ListCell	   *cell;
+	int				outer_width;
 	int				i;
 
 	/*
@@ -2146,6 +2149,13 @@ gpuhashjoin_begin(CustomPlan *node, EState *estate, int eflags)
 	 */
 	outerPlanState(ghjs) = ExecInitNode(outerPlan(ghjoin), estate, eflags);
 	innerPlanState(ghjs) = ExecInitNode(innerPlan(ghjoin), estate, eflags);
+
+	/* rough estimation of number of tuples per page on the outer relation */
+	outer_width = outerPlanState(ghjs)->plan->plan_width;
+	ghjs->ntup_per_page =
+		((double)(BLCKSZ - MAXALIGN(SizeOfPageHeaderData))) /
+		((double)(sizeof(ItemIdData) +
+				  sizeof(HeapTupleHeaderData) + outer_width));
 
 	/*
 	 * initialize result tuple type and projection info
@@ -2197,7 +2207,7 @@ gpuhashjoin_begin(CustomPlan *node, EState *estate, int eflags)
 	 * If CustomPlan provided by PG-Strom, it may be able to produce bulk
 	 * data chunk, instead of row-by-row format.
 	 */
-	ghjs->outer_bulk = pgstrom_plan_can_multi_exec(outerPlanState(ghjs));
+	ghjs->outer_bulk = pgstrom_planstate_can_bulkload(outerPlanState(ghjs));
 
 	/*
 	 * setting up system kparam_0 and kparam_1 - template of kds_head and
@@ -2383,11 +2393,13 @@ gpuhashjoin_load_next_outer(GpuHashJoinState *ghjs)
 	if (!ghjs->outer_bulk)
 	{
 		/* Scan the outer relation using row-by-row mode */
-		tcache_row_store *trs = NULL;
+		pgstrom_data_store *pds = NULL;
 		HeapTuple	tuple;
 
 		while (true)
 		{
+			TupleTableSlot *slot;
+
 			if (HeapTupleIsValid(ghjs->outer_overflow))
 			{
 				tuple = ghjs->outer_overflow;
@@ -2403,21 +2415,23 @@ gpuhashjoin_load_next_outer(GpuHashJoinState *ghjs)
 				}
 				tuple = ExecFetchSlotTuple(slot);
 			}
-			if (!trs)
+			if (!pds)
 			{
-				trs = pgstrom_create_row_store(tupdesc);
-				pgstrom_track_object(&trs->sobj, 0);
+				pds = pgstrom_create_data_store_row(tupdesc,
+													pgstrom_chunk_size << 20,
+													ghjs->ntup_per_page);
+				pgstrom_track_object(&pds->sobj, 0);
 			}
-			if (!tcache_row_store_insert_tuple(trs, tuple))
+			if (!pgstrom_data_store_insert_tuple(pds, tuple))
 			{
 				ghjs->outer_overflow = tuple;
 				break;
 			}
 		}
-		if (trs)
+		if (pds)
 		{
 			memset(&bulkdata, 0, sizeof(pgstrom_bulkslot));
-			bulkdata.rcstore = &trs->sobj;
+			bulkdata.pds = pds;
 			bulkdata.nvalids = -1;	/* all valid */
 			bulk = &bulkdata;
 		}
@@ -3587,6 +3601,7 @@ multihash_exec_multi(CustomPlanState *node)
 		memcpy(mhtables->kern.pg_crc32_table,
 			   pg_crc32_table,
 			   sizeof(uint32) * 256);
+		mhtables->kern.hostptr = (hostptr_t) &mhtables->kern;
 		mhtables->kern.ntables = nrels;
 		memset(mhtables->kern.htable_offset, 0, sizeof(cl_uint) * (nrels + 1));
 		pgstrom_track_object(&mhtables->sobj, 0);

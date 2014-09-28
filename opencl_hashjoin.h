@@ -130,6 +130,7 @@ typedef struct
 	 * on __constant memory. So, we moved the 'pg_crc32_table' into
 	 * __global memory area as a workaround....
 	 */
+	hostptr_t		hostptr;	/* address of this mhash on the host-side */
 	cl_uint			ntables;	/* number of hash tables (= # of inner rels) */
 	cl_uint			htable_offset[FLEXIBLE_ARRAY_MEMBER];
 } kern_multihash;
@@ -537,9 +538,8 @@ typedef struct
 	pgstrom_message	msg;		/* = StromTag_GpuHashJoin */
 	Datum			dprog_key;	/* device key for gpuhashjoin */
 	pgstrom_multihash_tables *mhtables;	/* inner hashjoin tables */
+	pgstrom_data_store *pds;	/* data store of outer relation */
 	kern_hashjoin  *khashjoin;	/* a pair of kparams/kresults */
-	StromObject	   *rcstore;	/* row/column store of outer relation */
-
 	kern_row_map	krowmap;	/* valid row mapping */
 } pgstrom_gpuhashjoin;
 

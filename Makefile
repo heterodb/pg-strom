@@ -4,7 +4,7 @@ DATA = pg_strom--1.0.sql
 
 MODULE_big = pg_strom
 OBJS  = main.o shmem.o codegen.o mqueue.o restrack.o grafter.o \
-	datastore.o gpuscan.o \
+	datastore.o gpuscan.o gpuhashjoin.o \
 	opencl_entry.o opencl_serv.o opencl_devinfo.o opencl_devprog.o \
 	opencl_common.o opencl_gpuscan.o opencl_gpupreagg.o opencl_hashjoin.o \
 	opencl_textlib.o opencl_timelib.o opencl_numeric.o
