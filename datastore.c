@@ -750,99 +750,92 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
  * It inserts a tuple on the data store. Unlike block read mode, we can use
  * this interface for both of row and column data store.
  */
-static bool
-row_data_store_insert_tuple(pgstrom_data_store *pds,
-							kern_data_store *kds,
-							TupleTableSlot *slot)
+bool
+pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
+								TupleTableSlot *slot)
 {
-	HeapTuple		tuple;
-	Buffer			buffer;
-	Page			page;
-	OffsetNumber	offnum;
-	kern_rowitem   *ritem;
-
-	/* No room to store a new kern_rowitem? */
-	if (kds->nitems >= kds->nrooms)
-		return false;
-	ritem = KERN_DATA_STORE_ROWITEM(kds, kds->nitems);
-
-	/* NOTE: ExecMaterializeSlot() internally takes palloc() even if slot
-	 * already has a reference to physical tuple. It's waste of CPU cycles
-	 * because this routine just references the physical tuple as source
-	 * of copy. So, we skip materialization if available.
-	 */
-	if (TTS_HAS_PHYSICAL_TUPLE(slot))
-		tuple = slot->tts_tuple;
-	else
-		tuple = ExecMaterializeSlot(slot);
-
-
-	if (kds->nblocks > 0)
-	{
-		buffer = pds->blocks[kds->nblocks - 1].buffer;
-		page   = pds->blocks[kds->nblocks - 1].page;
-	}
-	if (kds->nblocks == 0 ||
-		!BufferIsInvalid(buffer) ||
-		PageGetFreeSpace(page) < MAXALIGN(tuple->t_len))
-	{
-		/*
-		 * Expand blocks if the last one is associated with a particular
-		 * shared or private buffer, or free space is not available to
-		 * put this new item.
-		 */
-
-		/* No rooms to expand blocks? */
-		if (kds->nblocks >= pds->max_blocks)
-			return false;
-
-		buffer = InvalidBuffer;
-		page = pgstrom_shmem_alloc(BLCKSZ);
-		if (!page)
-			elog(ERROR, "out of memory");
-
-		PageInit(page, BLCKSZ, 0);
-		if (PageGetFreeSpace(page) < MAXALIGN(tuple->t_len))
-		{
-			pgstrom_shmem_free(page);
-			elog(ERROR, "tuple too large (%zu)", (Size)MAXALIGN(tuple->t_len));
-		}
-		pds->blocks[kds->nblocks].buffer = buffer;
-		pds->blocks[kds->nblocks].page = page;
-		kds->nblocks++;
-	}
-	Assert(kds->nblocks > 0);
-	offnum = PageAddItem(page, (Item) tuple->t_data, tuple->t_len,
-						 InvalidOffsetNumber, false, true);
-	if (offnum == InvalidOffsetNumber)
-		elog(ERROR, "failed to add tuple");
-
-	ritem->block_ofs = kds->nblocks - 1;
-	ritem->item_ofs = offnum;
-	kds->nitems++;
-
-	return true;
-}
-
-static bool
-column_data_store_insert_tuple(pgstrom_data_store *pds,
-							   kern_data_store *kds,
-							   TupleTableSlot *slot)
-{
+	kern_data_store *kds = pds->kds;
 	TupleDesc	tupdesc = slot->tts_tupleDescriptor;
 	cl_uint		cs_offset;
 	int			i, j;
 
-	Assert(kds->is_column);
-	Assert(kds->ncols == tupdesc->natts);
-
-	/* no more rooms to store tuples */
-	if (kds->nitems == kds->nrooms)
+	/* No room to store a new kern_rowitem? */
+	if (kds->nitems >= kds->nrooms)
 		return false;
-	j = kds->nitems++;
+
+	Assert(kds->ncols == tupdesc->natts);
+	if (!kds->is_column)
+	{
+		HeapTuple		tuple;
+		Buffer			buffer;
+		Page			page;
+		OffsetNumber	offnum;
+		kern_rowitem   *ritem
+			= KERN_DATA_STORE_ROWITEM(kds, kds->nitems);
+
+		/* NOTE: ExecMaterializeSlot() internally takes palloc() even if slot
+		 * already has a reference to physical tuple. It's waste of CPU cycles
+		 * because this routine just references the physical tuple as source
+		 * of copy. So, we skip materialization if available.
+		 */
+		if (TTS_HAS_PHYSICAL_TUPLE(slot))
+			tuple = slot->tts_tuple;
+		else
+			tuple = ExecMaterializeSlot(slot);
+
+		if (kds->nblocks > 0)
+		{
+			buffer = pds->blocks[kds->nblocks - 1].buffer;
+			page   = pds->blocks[kds->nblocks - 1].page;
+		}
+		if (kds->nblocks == 0 ||
+			!BufferIsInvalid(buffer) ||
+			PageGetFreeSpace(page) < MAXALIGN(tuple->t_len))
+		{
+			/*
+			 * Expand blocks if the last one is associated with a particular
+			 * shared or private buffer, or free space is not available to
+			 * put this new item.
+			 */
+
+			/* No rooms to expand blocks? */
+			if (kds->nblocks >= pds->max_blocks)
+				return false;
+
+			buffer = InvalidBuffer;
+			page = pgstrom_shmem_alloc(BLCKSZ);
+			if (!page)
+				elog(ERROR, "out of memory");
+
+			PageInit(page, BLCKSZ, 0);
+			if (PageGetFreeSpace(page) < MAXALIGN(tuple->t_len))
+			{
+				pgstrom_shmem_free(page);
+				elog(ERROR, "tuple too large (%zu)",
+					 (Size)MAXALIGN(tuple->t_len));
+			}
+			pds->blocks[kds->nblocks].buffer = buffer;
+			pds->blocks[kds->nblocks].page = page;
+			kds->nblocks++;
+		}
+		Assert(kds->nblocks > 0);
+		offnum = PageAddItem(page, (Item) tuple->t_data, tuple->t_len,
+							 InvalidOffsetNumber, false, true);
+		if (offnum == InvalidOffsetNumber)
+			elog(ERROR, "failed to add tuple");
+
+		ritem->block_ofs = kds->nblocks - 1;
+		ritem->item_ofs = offnum;
+		kds->nitems++;
+
+		return true;
+	}
 
 	/* makes tts_values/tts_isnull available */
 	slot_getallattrs(slot);
+
+	/* row-index to store a new item */
+	j = kds->nitems++;
 
 	for (i=0; i < tupdesc->natts; i++)
 	{
@@ -951,17 +944,6 @@ column_data_store_insert_tuple(pgstrom_data_store *pds,
 		}
 	}
 	return false;
-}
-
-bool
-pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
-								TupleTableSlot *slot)
-{
-	kern_data_store *kds = pds->kds;
-
-	return (!kds->is_column
-			? row_data_store_insert_tuple(pds, kds, slot)
-			: column_data_store_insert_tuple(pds, kds, slot));
 }
 
 /*
