@@ -773,15 +773,8 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 		kern_rowitem   *ritem
 			= KERN_DATA_STORE_ROWITEM(kds, kds->nitems);
 
-		/* NOTE: ExecMaterializeSlot() internally takes palloc() even if slot
-		 * already has a reference to physical tuple. It's waste of CPU cycles
-		 * because this routine just references the physical tuple as source
-		 * of copy. So, we skip materialization if available.
-		 */
-		if (TTS_HAS_PHYSICAL_TUPLE(slot))
-			tuple = slot->tts_tuple;
-		else
-			tuple = ExecMaterializeSlot(slot);
+		/* reference a HeapTuple in TupleTableSlot */
+		tuple = ExecFetchSlotTuple(slot);
 
 		if (kds->nblocks > 0)
 		{
