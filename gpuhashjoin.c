@@ -754,7 +754,7 @@ gpuhashjoin_add_path(PlannerInfo *root,
 	/* other cost fields of Path shall be set later */
 	gpath_new->cpath.methods = &gpuhashjoin_path_methods;
 	gpath_new->num_rels = 1;
-	gpath_new->outerpath = outer_path;
+	gpath_new->outerpath = gpuscan_try_replace_seqscan(root, outer_path);
 	gpath_new->inners[0].scan_path = inner_path;
 	gpath_new->inners[0].jointype = jointype;
 	gpath_new->inners[0].hash_clause = hash_clause;
@@ -791,7 +791,8 @@ gpuhashjoin_add_path(PlannerInfo *root,
 		/* other cost fields of Path shall be set later */
 		gpath_new->cpath.methods = &gpuhashjoin_path_methods;
 		gpath_new->num_rels = gpath_sub->num_rels + 1;
-		gpath_new->outerpath = gpath_sub->outerpath;
+		gpath_new->outerpath =
+			gpuscan_try_replace_seqscan(root, gpath_sub->outerpath);
 		memcpy(gpath_new->inners,
 			   gpath_sub->inners,
 			   offsetof(GpuHashJoinPath, inners[num_rels]) -
@@ -2731,6 +2732,8 @@ gpuhashjoin_end(CustomPlanState *node)
 		pgstrom_multihash_tables   *mhtables = ghjs->mhnode->mhtables;
 		pgstrom_untrack_object(&mhtables->sobj);
 		multihash_put_tables(mhtables);
+		/* clean out the tuple table */
+		ExecClearTuple(ghjs->mhnode->outer_slot);
 	}
 
 	/*
@@ -2743,6 +2746,13 @@ gpuhashjoin_end(CustomPlanState *node)
 	Assert(ghjs->mqueue);
 	pgstrom_untrack_object(&ghjs->mqueue->sobj);
 	pgstrom_close_queue(ghjs->mqueue);
+
+	/*
+	 * clean out the tuple table
+	 */
+	ExecClearTuple(node->ps.ps_ResultTupleSlot);
+	ExecClearTuple(ghjs->pscan_slot);
+	ExecClearTuple(ghjs->pscan_wider_slot);
 
 	/*
 	 * clean up subtrees

@@ -738,6 +738,7 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 			elog(ERROR, "out of memory");
 		memcpy(dup_page, page, BLCKSZ);
 		pds->blocks[kds->nblocks].page = dup_page;
+		ReleaseBuffer(buffer);
 	}
 	kds->nblocks++;
 

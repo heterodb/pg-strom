@@ -252,6 +252,84 @@ gpuscan_add_scan_path(PlannerInfo *root,
 }
 
 /*
+ * gpuscan_try_replace_seqscan
+ *
+ * It tries to replace the supplied SeqScan path by GpuScan, if it is
+ * enough simple. Even though seq_path didn't involve any qualifiers,
+ * it makes sense if parent path is managed by PG-Strom because of bulk-
+ * loading functionality.
+ */
+Path *
+gpuscan_try_replace_seqscan(PlannerInfo *root, Path *path)
+{
+	RelOptInfo	   *rel;
+	ListCell	   *lc;
+	GpuScanPath	   *gpath;
+	int				i;
+
+	/* only SeqScan can be replaced */
+	if (path->pathtype != T_SeqScan)
+		return path;
+
+	/* SeqScan shall take a relation to be scanned */
+	rel = path->parent;
+	if (rel->rtekind != RTE_RELATION)
+		return path;	/* usually, shouldn't happen */
+	if (rel->reloptkind != RELOPT_BASEREL)
+		return path;	/* usually, shouldn't happen */
+
+	/* enable_gpuscan has to be turned on */
+	if (!enable_gpuscan)
+		return path;
+
+	/* "simple" SeqScan cannot have qualifier, right now.
+	 * TODO: pull-up qualifiers will make sense.
+	 */
+	if (rel->baserestrictinfo)
+		return path;
+
+	/* !!! See the logic in use_physical_tlist() !!! */
+
+	/* System column reference involves projection */
+	for (i = rel->min_attr; i <= 0; i++)
+	{
+		if (!bms_is_empty(rel->attr_needed[i - rel->min_attr]))
+			return path;
+	}
+
+	/*
+     * Can't do it if the rel is required to emit any placeholder
+	 * expressions, either.
+     */
+	foreach (lc, root->placeholder_list)
+	{
+		PlaceHolderInfo *phinfo = (PlaceHolderInfo *) lfirst(lc);
+
+		if (bms_nonempty_difference(phinfo->ph_needed, rel->relids) &&
+			bms_is_subset(phinfo->ph_eval_at, rel->relids))
+			return path;
+	}
+
+	/* OK, probably GpuScan instead of SeqScan makes sense */
+	gpath = palloc0(sizeof(GpuScanPath));
+    gpath->cpath.path.type = T_CustomPath;
+    gpath->cpath.path.pathtype = T_CustomPlan;
+    gpath->cpath.path.parent = rel;
+    gpath->cpath.path.param_info
+		= get_baserel_parampathinfo(root, rel, rel->lateral_relids);
+	gpath->cpath.path.pathkeys = NIL;	/* gpuscan has unsorted result */
+	gpath->cpath.methods = &gpuscan_path_methods;
+
+	cost_gpuscan(gpath, root, rel,
+				 gpath->cpath.path.param_info,
+				 NIL, NIL);
+	gpath->dev_quals = NIL;
+	gpath->host_quals = NIL;
+
+	return (Path *)gpath;
+}
+
+/*
  * OpenCL code generation that can run on GPU/MIC device
  */
 static char *
@@ -1009,7 +1087,11 @@ gpuscan_exec_multi(CustomPlanState *node)
 	{
 		gpuscan = pgstrom_fetch_gpuscan(gss);
 		if (!gpuscan)
+		{
+			if (node->ps.instrument)
+				InstrStopNode(node->ps.instrument, (double) 0.0);
 			return NULL;
+		}
 
 		/*
 		 * Make a bulk-slot according to the result
@@ -1019,6 +1101,15 @@ gpuscan_exec_multi(CustomPlanState *node)
 		bulk->pds = pgstrom_get_data_store(gpuscan->pds);
 		bulk->nvalids = 0;	/* to be set later */
 		pgstrom_track_object(&bulk->pds->sobj, 0);
+
+
+
+		/* No longer gpuscan is referenced any more. The associated
+		 * data-store is not actually released because its refcnt is
+		 * already incremented above.
+		 */
+		pgstrom_untrack_object(&gpuscan->msg.sobj);
+		pgstrom_put_message(&gpuscan->msg);
 
 		/*
 		 * If any, it may take host side checks
@@ -1085,13 +1176,6 @@ gpuscan_exec_multi(CustomPlanState *node)
 		}
 		bulk->nvalids = j;
 
-		/* No longer gpuscan is referenced any more. The associated
-		 * data-store is not actually released because its refcnt is
-		 * already incremented above.
-		 */
-		pgstrom_untrack_object(&gpuscan->msg.sobj);
-		pgstrom_put_message(&gpuscan->msg);
-
 		if (bulk->nvalids > 0)
 			break;
 
@@ -1103,7 +1187,10 @@ gpuscan_exec_multi(CustomPlanState *node)
 	}
 	/* must provide our own instrumentation support */
 	if (node->ps.instrument)
-		InstrStopNode(node->ps.instrument, (double) bulk->nvalids);
+		InstrStopNode(node->ps.instrument,
+					  bulk->nvalids < 0 ?
+					  (double) bulk->pds->kds->nitems :
+					  (double) bulk->nvalids);
 	return (Node *) bulk;
 }
 

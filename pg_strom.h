@@ -501,6 +501,7 @@ extern void pgstrom_init_restrack(void);
 /*
  * gpuscan.c
  */
+extern Path *gpuscan_try_replace_seqscan(PlannerInfo *root, Path *seq_path);
 extern bool pgstrom_gpuscan_can_bulkload(const CustomPlanState *cps);
 extern void pgstrom_init_gpuscan(void);
 
