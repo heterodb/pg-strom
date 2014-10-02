@@ -801,7 +801,7 @@ gpuhashjoin_add_path(PlannerInfo *root,
 		gpath_new->inners[num_rels].hash_clause = hash_clause;
 		gpath_new->inners[num_rels].qual_clause = qual_clause;
 		gpath_new->inners[num_rels].host_clause = host_clause;
-							
+
 		/* cost estimation and check availability */
 		if (cost_gpuhashjoin(root, gpath_new, &gpu_workspace))
 		{
@@ -3962,7 +3962,8 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	Assert(StromTagIs(gpuhashjoin->mhtables, HashJoinTable));
 	Assert(StromTagIs(gpuhashjoin->pds, DataStore));
 	/* state object of gpuhashjoin */
-	clghj = calloc(1, sizeof(clstate_gpuhashjoin));
+	clghj = calloc(1, (sizeof(clstate_gpuhashjoin) +
+					   sizeof(cl_event) * kds->nblocks));
 	if (!clghj)
 	{
 		rc = CL_OUT_OF_HOST_MEMORY;
@@ -4068,8 +4069,7 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	 */
 	kparams = KERN_HASHJOIN_PARAMBUF(gpuhashjoin->khashjoin);
 	kresults = KERN_HASHJOIN_RESULTBUF(gpuhashjoin->khashjoin);
-	//kds_head = KPARAM_GET_KDS_HEAD(kparams);
-	//ktoast_head = KPARAM_GET_KTOAST_HEAD(kparams);
+
 	if (gpuhashjoin->krowmap.nvalids < 0)
 	{
 		krowmap = NULL;

@@ -405,7 +405,7 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 	kern_data_store	   *kds = pds->kds;
 	int		i;
 
-	Assert(kds->nblocks < pds->max_blocks);
+	Assert(kds->nblocks <= pds->max_blocks);
 	for (i=0; i < kds->nblocks; i++)
 	{
 		Page	page = pds->blocks[i].page;
