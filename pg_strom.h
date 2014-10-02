@@ -399,8 +399,9 @@ extern Size pgstrom_shmem_zone_length(void);
 extern bool pgstrom_shmem_sanitycheck(const void *address);
 extern void pgstrom_shmem_dump(void);
 extern void pgstrom_setup_shmem(Size zone_length,
-								void *(*callback)(void *address,
-												  Size length));
+								bool (*callback)(void *address, Size length,
+												 const char *label,
+												 bool abort_on_error));
 extern void pgstrom_init_shmem(void);
 
 extern Datum pgstrom_shmem_info(PG_FUNCTION_ARGS);

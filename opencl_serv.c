@@ -105,24 +105,28 @@ pgstrom_opencl_device_schedule(pgstrom_message *message)
  * initialization. It assigns a buffer object of OpenCL for each zone
  * for asynchronous memory transfer later.
  */
-static void *
-on_shmem_zone_callback(void *address, Size length)
+static bool
+on_shmem_zone_callback(void *address, Size length,
+					   const char *label, bool abort_on_error)
 {
-	cl_mem		host_mem;
 	cl_int		rc;
 
-	host_mem = clCreateBuffer(opencl_context,
-							  CL_MEM_READ_WRITE |
-							  CL_MEM_USE_HOST_PTR,
-							  length,
-							  address,
-							  &rc);
+	(void)clCreateBuffer(opencl_context,
+						 CL_MEM_READ_WRITE |
+						 CL_MEM_USE_HOST_PTR,
+						 length,
+						 address,
+						 &rc);
 	if (rc != CL_SUCCESS)
-		elog(ERROR, "clCreateBuffer failed on host memory (%p-%p): %s",
-			 address, (char *)address + length - 1, opencl_strerror(rc));
-	elog(LOG, "PG-Strom: zone %p-%p was mapped (len: %luMB)",
-		 address, (char *)address + length - 1, length >> 20);
-	return host_mem;
+	{
+		if (abort_on_error)
+			elog(ERROR, "clCreateBuffer failed on host memory (%p-%p): %s",
+				 address, (char *)address + length - 1, opencl_strerror(rc));
+		return false;
+	}
+	elog(LOG, "PG-Strom: %s %p-%p was mapped (len: %luMB)",
+		 label, address, (char *)address + length - 1, length >> 20);
+	return true;
 }
 
 /*
@@ -185,22 +189,22 @@ init_opencl_context_and_shmem(void)
 	pgstrom_setup_shmem(zone_length, on_shmem_zone_callback);
 
 	/* Lock shared memory of shared buffer area */
-	(void) clCreateBuffer(opencl_context,
-						  CL_MEM_READ_WRITE |
-						  CL_MEM_USE_HOST_PTR,
-						  NBuffers * (Size) BLCKSZ,
-						  (char *)((uintptr_t)BufferBlocks & ~(BLCKSZ-1)),
-						  &rc);
-	if (rc != CL_SUCCESS)
-		elog(ERROR, "clCreateBuffer failed on host memory (%p-%p): %s",
-			 BufferBlocks,
-			 BufferBlocks + NBuffers * (Size) BLCKSZ - 1,
-			 opencl_strerror(rc));
+	if (!on_shmem_zone_callback(BufferBlocks,
+								NBuffers * (Size) BLCKSZ,
+								"buffer", false))
+	{
+		Size	total_size = NBuffers * (Size) BLCKSZ;
+		Size	offset;
 
-	elog(LOG, "Shared Buffer: %p-%p was mapped (len: %luMB)",
-		 BufferBlocks,
-		 BufferBlocks + NBuffers * (Size) BLCKSZ - 1,
-		 (NBuffers * (Size) BLCKSZ) >> 20);
+		Assert((zone_length & (BLCKSZ - 1)) == 0);
+
+		for (offset = 0; offset < total_size; offset += zone_length)
+		{
+			on_shmem_zone_callback(BufferBlocks + offset,
+								   Min(zone_length, total_size - offset),
+								   "buffer", true);
+		}
+	}
 }
 
 /*

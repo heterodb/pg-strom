@@ -767,8 +767,8 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 	if (!kds->is_column)
 	{
 		HeapTuple		tuple;
-		Buffer			buffer;
-		Page			page;
+		Buffer			buffer = InvalidBuffer;
+		Page			page = NULL;
 		OffsetNumber	offnum;
 		kern_rowitem   *ritem
 			= KERN_DATA_STORE_ROWITEM(kds, kds->nitems);

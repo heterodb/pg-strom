@@ -1256,13 +1256,16 @@ PG_FUNCTION_INFO_V1(pgstrom_shmem_free_func);
 
 void
 pgstrom_setup_shmem(Size zone_length,
-					void *(*callback)(void *address, Size length))
+					bool (*callback)(void *address, Size length,
+									 const char *label,
+									 bool abort_on_error))
 {
 	shmem_zone	   *zone;
 	long			zone_index;
 	long			num_zones;
 	long			num_blocks;
 	Size			offset;
+	bool			hostmem_mapped;
 
 	pg_memory_barrier();
 	if (pgstrom_shmem_head->is_ready)
@@ -1278,6 +1281,13 @@ pgstrom_setup_shmem(Size zone_length,
 							&pgstrom_shmem_head->zones[num_zones]);
 	pgstrom_shmem_head->zone_length = zone_length;
 
+	/* NOTE: If run-time support host mapped memory which is larger than
+	 * zone-length, we map the host memory at once.
+	 * If unavailable (rc == CL_INVALID_BUFFER_SIZE), it tries to map
+	 * host memory per zone basis.
+	 */
+	hostmem_mapped = callback(pgstrom_shmem_head->zone_baseaddr,
+							  pgstrom_shmem_totalsize, "shmem", false);
 	offset = 0;
 	for (zone_index = 0; zone_index < num_zones; zone_index++)
 	{
@@ -1286,10 +1296,7 @@ pgstrom_setup_shmem(Size zone_length,
 		int		shift;
 		int		i;
 
-		if (offset + zone_length < pgstrom_shmem_totalsize)
-			length = zone_length;
-		else
-			length = pgstrom_shmem_totalsize - offset;
+		length = Min(zone_length, pgstrom_shmem_totalsize - offset);
 		Assert(length > 0 && length % SHMEM_BLOCKSZ == 0);
 
 		num_blocks = ((length - offsetof(shmem_zone, blocks[0])) /
@@ -1335,9 +1342,11 @@ pgstrom_setup_shmem(Size zone_length,
 			else if (shift > 0)
 				shift--;
 		}
-		/* per zone initialization */
-		(*callback)(zone->block_baseaddr,
-					zone->num_blocks * SHMEM_BLOCKSZ);
+		/* host memory mapping per zone basis, if needed */
+		if (!hostmem_mapped)
+			callback(zone->block_baseaddr,
+					 zone->num_blocks * SHMEM_BLOCKSZ,
+					 "shmem", true);
 		/* put zone on the pgstrom_shmem_head */
 		pgstrom_shmem_head->zones[zone_index] = zone;
 		offset += length;
