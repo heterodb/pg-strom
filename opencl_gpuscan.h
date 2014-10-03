@@ -146,7 +146,7 @@ __kernel void
 gpuscan_qual(__global kern_gpuscan *kgpuscan,	/* in/out */
 			 __global kern_data_store *kds,		/* in */
 			 __global kern_toastbuf *ktoast,	/* in */
-			 __local void *local_workbuf)
+			 KERN_DYNAMIC_LOCAL_WORKMEM_ARG)	/* in */
 {
 	pg_bool_t	rc;
 	cl_int		errcode = StromError_Success;
@@ -165,10 +165,10 @@ gpuscan_qual(__global kern_gpuscan *kgpuscan,	/* in/out */
 					: StromError_RowFiltered);
 
 	/* writeback error code */
-	gpuscan_writeback_row_error(kresults, errcode, local_workbuf);
+	gpuscan_writeback_row_error(kresults, errcode, LOCAL_WORKMEM);
 	if (!StromErrorIsSignificant(errcode))
 		errcode = StromError_Success;	/* clear the minor error */
-	kern_writeback_error_status(&kresults->errcode, errcode, local_workbuf);
+	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
 }
 
 #else	/* OPENCL_DEVICE_CODE */

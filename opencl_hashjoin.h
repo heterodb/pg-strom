@@ -289,7 +289,7 @@ kern_gpuhashjoin_main(__global kern_hashjoin *khashjoin,
 					  __global kern_data_store *kds,
 					  __global kern_toastbuf *ktoast,
 					  __global kern_row_map *krowmap,
-					  __local void *local_workbuf)
+					  KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
 	__global kern_parambuf  *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
 	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
@@ -340,7 +340,7 @@ kern_gpuhashjoin_main(__global kern_hashjoin *khashjoin,
 	 * XXX - calculate total number of matched tuples being searched
 	 * by this workgroup
 	 */
-	offset = arithmetic_stairlike_add(n_matches, local_workbuf, &nitems);
+	offset = arithmetic_stairlike_add(n_matches, LOCAL_WORKMEM, &nitems);
 
 	/*
 	 * XXX - allocation of result buffer. A tuple takes 2 * sizeof(cl_uint)
@@ -394,7 +394,7 @@ kern_gpuhashjoin_main(__global kern_hashjoin *khashjoin,
 	}
 out:
 	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kresults->errcode, errcode, local_workbuf);
+	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
 }
 
 /*

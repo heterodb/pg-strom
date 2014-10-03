@@ -24,7 +24,9 @@
 #pragma OPENCL EXTENSION cl_khr_byte_addressable_store : enable
 
 /* NULL definition */
+#ifndef NULL
 #define NULL	((__global void *) 0UL)
+#endif
 
 /* Misc definitions */
 #define FLEXIBLE_ARRAY_MEMBER
@@ -66,6 +68,20 @@ typedef cl_uint		Datum;
 #define INTALIGN_DOWN(LEN)		TYPEALIGN_DOWN(sizeof(cl_int), (LEN))
 #define LONGALIGN(LEN)          TYPEALIGN(sizeof(cl_long), (LEN))
 #define LONGALIGN_DOWN(LEN)     TYPEALIGN_DOWN(sizeof(cl_long), (LEN))
+
+/*
+ * MEMO: We takes dynamic local memory using cl_ulong data-type because of
+ * alignment problem. The nvidia's driver adjust alignment of local memory
+ * according to the data type; 1byte for cl_char, 4bytes for cl_uint and
+ * so on. Unexpectedly, void * pointer has 1byte alignment even if it is
+ * expected to be casted another data types.
+ * A pragma option __attribute__((aligned)) didn't work at least driver
+ * version 340.xx. So, we declared the local_workmem as cl_ulong * pointer
+ * as a workaround.
+ */
+#define KERN_DYNAMIC_LOCAL_WORKMEM_ARG			\
+	__local cl_ulong *__pgstrom_local_workmem
+#define LOCAL_WORKMEM		(__local void *)(__pgstrom_local_workmem)
 
 #else	/* OPENCL_DEVICE_CODE */
 #include "access/htup_details.h"
