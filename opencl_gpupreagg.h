@@ -514,7 +514,7 @@ gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 					  __global kern_data_store *kds_in,
 					  __global kern_data_store *kds_out,
 					  __global kern_toastbuf *ktoast,
-					  __local void *local_memory)
+					  KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
 	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	__global kern_row_map  *krowmap = KERN_GPUPREAGG_KROWMAP(kgpreagg);
@@ -536,7 +536,7 @@ gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 	 * group.
 	 */
 	offset = arithmetic_stairlike_add(kds_index < kds_in->nitems ? 1 : 0,
-									  local_memory,
+									  LOCAL_WORKMEM,
 									  &nitems);
 
 	/* Allocation of the result slot on the kds_out. */
@@ -566,7 +566,7 @@ gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 	}
 out:
 	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kgpreagg->status, errcode, local_memory);
+	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
 }
 
 /*
@@ -584,12 +584,12 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 					__global kern_data_store *kds_src,
 					__global kern_data_store *kds_dst,
 					__global kern_toastbuf *ktoast,
-					__local void *local_memory)
+					KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
 	__global kern_parambuf	*kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	__global cl_int			*rindex  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
 	__local pagg_datum *l_data
-		= (__local pagg_datum *)STROMALIGN(local_memory);
+		= (__local pagg_datum *)STROMALIGN(LOCAL_WORKMEM);
 	__global varlena *kparam_3 = kparam_get_value(kparams, 3);
 	cl_uint	pagg_natts = VARSIZE_EXHDR(kparam_3) / sizeof(cl_uint);
 	__global cl_uint *pagg_anums = (__global cl_uint *) VARDATA(kparam_3);
@@ -630,7 +630,7 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 									   rindex[globalID-1], rindex[globalID]);
 			isNewID = (rv != 0) ? 1 : 0;
 		}
-		groupID = (arithmetic_stairlike_add(isNewID, local_memory, &ngroups) 
+		groupID = (arithmetic_stairlike_add(isNewID, LOCAL_WORKMEM, &ngroups) 
 				   + isNewID - 1);
 	}
 
@@ -719,7 +719,7 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 		barrier(CLK_LOCAL_MEM_FENCE);
     }
 out:
-	kern_writeback_error_status(&kgpreagg->status, errcode, local_memory);
+	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
 }
 
 /*
@@ -735,7 +735,7 @@ out:
 __kernel void
 gpupreagg_set_rindex(__global kern_gpupreagg *kgpreagg,
 					 __global kern_data_store *kds,
-					 __local void *local_memory)
+					 KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
 	__global kern_parambuf	*kparams  = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	__global cl_int			*rindex	  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
@@ -747,7 +747,7 @@ gpupreagg_set_rindex(__global kern_gpupreagg *kgpreagg,
 	if(globalID < nrows)
 		rindex[globalID] = globalID;
 
-	kern_writeback_error_status(&kgpreagg->status, errcode, local_memory);
+	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
 }
 
 /*
@@ -760,11 +760,11 @@ __kernel void
 gpupreagg_bitonic_local(__global kern_gpupreagg *kgpreagg,
 						__global kern_data_store *kds,
 						__global kern_toastbuf *ktoast,
-						__local void *local_memory)
+						KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
 	__global kern_parambuf	*kparams  = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	__global cl_int			*rindex	  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
-	__local  cl_int			*localIdx = local_memory;
+	__local  cl_int			*localIdx = LOCAL_WORKMEM;
 
 	cl_int nrows		= kds->nitems;
 	cl_int errcode		= StromError_Success;
@@ -834,7 +834,7 @@ gpupreagg_bitonic_local(__global kern_gpupreagg *kgpreagg,
     if(localSize + localID < localEntry)
 		rindex[prtPos + localSize + localID] = localIdx[localSize + localID];
 
-	kern_writeback_error_status(&kgpreagg->status, errcode, local_memory);
+	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
 }
 
 
@@ -851,7 +851,7 @@ gpupreagg_bitonic_step(__global kern_gpupreagg *kgpreagg,
 					   cl_int bitonic_unitsz,
 					   __global kern_data_store *kds,
 					   __global kern_toastbuf *ktoast,
-					   __local void *local_memory)
+					   KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
 	__global kern_parambuf	*kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	__global cl_int			*rindex	 = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
@@ -889,7 +889,7 @@ gpupreagg_bitonic_step(__global kern_gpupreagg *kgpreagg,
 	}
 
 out:
-	kern_writeback_error_status(&kgpreagg->status, errcode, local_memory);
+	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
 }
 
 /*
@@ -902,11 +902,11 @@ __kernel void
 gpupreagg_bitonic_merge(__global kern_gpupreagg *kgpreagg,
 						__global kern_data_store *kds,
 						__global kern_toastbuf *ktoast,
-						__local void *local_memory)
+						KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
 	__global kern_parambuf	*kparams  = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	__global cl_int			*rindex	  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
-	__local	 cl_int			*localIdx = local_memory;
+	__local	 cl_int			*localIdx = LOCAL_WORKMEM;
 
 	cl_int nrows		= kds->nitems;
 	cl_int errcode		= StromError_Success;
@@ -968,7 +968,7 @@ gpupreagg_bitonic_merge(__global kern_gpupreagg *kgpreagg,
     if(localSize + localID < localEntry)
 		rindex[prtPos + localSize + localID] = localIdx[localSize + localID];
 
-	kern_writeback_error_status(&kgpreagg->status, errcode, local_memory);
+	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
 }
 
 
