@@ -1007,21 +1007,18 @@ gpupreagg_check_next(__global kern_gpupreagg *kgpreagg,
 #else
 /*
  * special system parameter of gpupreagg
- * KPARAM_2 - kds_head of the source/target kern_data_store
- * KPARAM_3 - array of referenced and aggregated column index
+ * KPARAM_0 - kds_head of the source/target kern_data_store
+ * KPARAM_1 - array of referenced and aggregated column index
  */
 static inline kern_data_store *
 KPARAM_GET_KDS_HEAD_DEST(kern_parambuf *kparams)
 {
-	bytea  *vl_datum = kparam_get_value(kparams, 2);
+	bytea  *vl_datum = kparam_get_value(kparams, 0);
 
 	if (!vl_datum)
 		return NULL;
 	return (kern_data_store *)VARDATA_ANY(vl_datum);
 }
-
-
-
 
 /* Host side representation of kern_gpupreagg. It can perform as a message
  * object of PG-Strom, has key of OpenCL device program, a source row/column
@@ -1032,7 +1029,7 @@ typedef struct
 	pgstrom_message		msg;		/* = StromTag_GpuPreAgg */
 	Datum				dprog_key;	/* key of device program */
 	bool				needs_grouping;	/* true, if it needs grouping step */
-	StromObject		   *rcstore;	/* source row/column store as input */
+	pgstrom_data_store *pds;		/* source row/column store as input */
 	kern_data_store	   *kds_dst;	/* result buffer of partial aggregate */
 	kern_gpupreagg		kern;		/* kernel portion to be sent */
 } pgstrom_gpupreagg;

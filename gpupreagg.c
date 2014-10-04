@@ -57,9 +57,11 @@ typedef struct
 	CustomPlanState	cps;
 	TupleDesc		scan_desc;
 	TupleTableSlot *scan_slot;
+	/* average number of tuples per page */
+	double			ntups_per_page;
 	bool			outer_done;
 	bool			outer_bulk;
-	HeapTuple		outer_overflow;
+	TupleTableSlot *outer_overflow;
 
 	pgstrom_queue  *mqueue;
 	Datum			dprog_key;
@@ -302,7 +304,8 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 	Cost		comparison_cost;
 	QualCost	pagg_cost;
 	int			pagg_width;
-	double		num_rows;
+	int			outer_width;
+	double		outer_rows;
 	double		rows_per_chunk;
 	double		num_chunks;
 	Path		dummy;
@@ -329,7 +332,8 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 	 */
 	startup_cost = outer_plan->startup_cost;
 	run_cost = outer_plan->total_cost - startup_cost;
-	num_rows = outer_plan->plan_rows;
+	outer_rows = outer_plan->plan_rows;
+	outer_width = outer_plan->plan_width;
 
 	/*
 	 * fixed cost to kick GPU feature
@@ -339,22 +343,20 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 	/*
 	 * cost estimation of internal sorting by GPU.
 	 */
-	if ((double)NUM_ROWS_PER_COLSTORE >= num_rows)
-	{
-		rows_per_chunk = num_rows;
+	rows_per_chunk =
+		((double)(BLCKSZ - MAXALIGN(SizeOfPageHeaderData))) /
+        ((double)(sizeof(ItemIdData) +
+                  sizeof(HeapTupleHeaderData) + outer_width));
+	num_chunks = outer_rows / rows_per_chunk;
+	if (num_chunks < 1.0)
 		num_chunks = 1.0;
-	}
-	else
-	{
-		rows_per_chunk = (double) NUM_ROWS_PER_COLSTORE;
-		num_chunks = num_rows / (double) NUM_ROWS_PER_COLSTORE + 1.0;
-	}
+
 	comparison_cost = 2.0 * pgstrom_gpu_operator_cost;
 	startup_cost += (comparison_cost *
 					 rows_per_chunk *
 					 LOG2(rows_per_chunk) *
 					 num_chunks);
-	run_cost += pgstrom_gpu_operator_cost * num_rows;
+	run_cost += pgstrom_gpu_operator_cost * outer_rows;
 
 	/*
 	 * cost estimation of partial aggregate by GPU
@@ -386,7 +388,7 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 	gpreagg->cplan.plan.startup_cost = startup_cost;
 	gpreagg->cplan.plan.total_cost = startup_cost + run_cost;
 	gpreagg->cplan.plan.plan_rows =
-		(agg->plan.plan_rows / num_rows)	/* reduction ratio */
+		(agg->plan.plan_rows / outer_rows)	/* reduction ratio */
 		* rows_per_chunk					/* rows per chunk */
 		* num_chunks;						/* number of chunks */
 	gpreagg->cplan.plan.plan_width = pagg_width;
@@ -439,7 +441,7 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 
 	elog(INFO, "Agg cost = %.2f..%.2f nrows (%.0f => %.0f)",
 		 dummy.startup_cost, dummy.total_cost,
-		 num_rows,
+		 outer_rows,
 		 gpreagg->cplan.plan.plan_rows);
 }
 
@@ -1409,7 +1411,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 	bool			use_temp_float8x = false;
 	bool			use_temp_float8y = false;
 	struct varlena *vl_datum;
-	Const		   *kparam_3;
+	Const		   *kparam_1;
 	int				i;
 
 	initStringInfo(&str);
@@ -1640,7 +1642,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 			else 
 				elog(ERROR, "Bug? unexpected partial aggregate function: %s",
 					 func_name);
-			/* track resource number to construct kparam_3 */
+			/* track resource number to construct kparam_1 */
 			pagg_atts = lappend_int(pagg_atts, tle->resno);
 		}
 		else
@@ -1710,14 +1712,14 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 	 * construction of kparam_3 - array of partial aggregation indexes
 	 * never changed in the executor stage.
 	 */
-	kparam_3 = (Const *) lfourth(context->used_params);
+	kparam_1 = (Const *) lsecond(context->used_params);
 	vl_datum = palloc(VARHDRSZ + sizeof(cl_uint) * list_length(pagg_atts));
 	i = 0;
 	foreach (cell, pagg_atts)
 		((cl_uint *)VARDATA(vl_datum))[i++] = lfirst_int(cell) - 1;
 	SET_VARSIZE(vl_datum, VARHDRSZ + sizeof(cl_uint) * list_length(pagg_atts));
-	kparam_3->constvalue = PointerGetDatum(vl_datum);
-	kparam_3->constisnull = false;
+	kparam_1->constvalue = PointerGetDatum(vl_datum);
+	kparam_1->constisnull = false;
 
 	return str.data;
 }
@@ -1734,20 +1736,14 @@ gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 	memset(context, 0, sizeof(codegen_context));
 
 	/*
-	 * System constants for GpuPreAgg
-	 * KPARAM_0 is header portion of kern_data_store of source stream;
-	 * thus its table structure reflects outer relation's one.
-	 * KPARAM_1 is haeder portion of kern_toastbuf to be referenced by
-	 * both of source and destination stream (not that we don't support
-	 * partial aggregate that newly generate a varlena value).
-	 * KPARAM_2 is header portion of kern_data_store of destination
-	 * stream, thus its table structure reflects target-list of this
-	 * relation.
-	 * KPARAM_3 is an array of columns 
+	 * System constatnts for GpuPreAgg
+	 * KPARAM_0 is header portion of kern_data_store of the destination
+	 * buffer, thus its relation structure reflects target-list of the
+	 * result slot.
+	 * KPARAM_1 is an array of cl_int to inform attribute number of
+	 * grouping keys.
 	 */
-	context->used_params = list_make4(makeNullConst(BYTEAOID, -1, InvalidOid),
-									  makeNullConst(BYTEAOID, -1, InvalidOid),
-									  makeNullConst(BYTEAOID, -1, InvalidOid),
+	context->used_params = list_make2(makeNullConst(BYTEAOID, -1, InvalidOid),
 									  makeNullConst(BYTEAOID, -1, InvalidOid));
 	context->type_defs = list_make1(pgstrom_devtype_lookup(BYTEAOID));
 
@@ -1918,13 +1914,11 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 	GpuPreAggPlan  *gpreagg = (GpuPreAggPlan *) node;
 	GpuPreAggState *gpas;
 	List		   *used_params;
+	int				outer_width;
 	TupleDesc		tupdesc;
 	Const		   *kparam_0;
 	Const		   *kparam_1;
-	Const		   *kparam_2;
-	Const		   *kparam_3;
 	bytea		   *kds_head;
-	bytea		   *ktoast_head;
 
 	/*
 	 * construct a state structure
@@ -1955,8 +1949,14 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 	gpas->scan_slot = ExecAllocTableSlot(&estate->es_tupleTable);
 	ExecSetSlotDescriptor(gpas->scan_slot, gpas->scan_desc);
 	gpas->outer_done = false;
-	gpas->outer_bulk = pgstrom_plan_can_multi_exec(outerPlanState(gpas));
+	gpas->outer_bulk = pgstrom_planstate_can_bulkload(outerPlanState(gpas));
 	gpas->outer_overflow = NULL;
+
+	outer_width = outerPlanState(gpas)->plan->plan_width;
+	gpas->ntups_per_page =
+		((double)(BLCKSZ - MAXALIGN(SizeOfPageHeaderData))) /
+		((double)(sizeof(ItemIdData) +
+				  sizeof(HeapTupleHeaderData) + outer_width));
 
 	/*
 	 * initialize result tuple type and projection info
@@ -1979,42 +1979,24 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 	 * ktoast_head template.
 	 */
 	used_params = copyObject(gpreagg->used_params);
-	Assert(list_length(used_params) >= 3);
+	Assert(list_length(used_params) >= 2);
 
-	/* kds_head of the source relation */
-	tupdesc = outerPlanState(gpas)->ps_ResultTupleSlot->tts_tupleDescriptor;
-	kparam_0 = (Const *)linitial(used_params);
-	Assert(IsA(kparam_0, Const) &&
-		   kparam_0->consttype == BYTEAOID &&
-		   kparam_0->constisnull);
-	kds_head = kparam_make_kds_head(tupdesc, gpreagg->outer_attrefs, 0);
-	kparam_0->constvalue = PointerGetDatum(kds_head);
-	kparam_0->constisnull = false;
+	/* kparam_0 - header portion of kds for destination relation */
+	tupdesc = gpas->cps.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
+	kparam_0 = (Const *) linitial(used_params);
+    Assert(IsA(kparam_0, Const) &&
+           kparam_0->consttype == BYTEAOID &&
+           kparam_0->constisnull);
+    kds_head = kparam_make_kds_head(tupdesc, KDS_FORMAT_COLUMN,
+									gpreagg->tlist_attrefs);
+    kparam_0->constvalue = PointerGetDatum(kds_head);
+    kparam_0->constisnull = false;
 
-	/* ktoast_head of the source relation, but common for the destination */
-	kparam_1 = (Const *)lsecond(used_params);
+	/* kparam_1 shall be already set */
+	kparam_1 = (Const *) lsecond(used_params);
 	Assert(IsA(kparam_1, Const) &&
 		   kparam_1->consttype == BYTEAOID &&
-		   kparam_1->constisnull);
-	ktoast_head = kparam_make_ktoast_head(tupdesc, 0);
-	kparam_1->constvalue = PointerGetDatum(ktoast_head);
-	kparam_1->constisnull = false;
-
-	/* kds_head of the destination relation, but ktoast_head is shared */
-	tupdesc = gpas->cps.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
-	kparam_2 = (Const *) lthird(used_params);
-    Assert(IsA(kparam_2, Const) &&
-           kparam_2->consttype == BYTEAOID &&
-           kparam_2->constisnull);
-    kds_head = kparam_make_kds_head(tupdesc, gpreagg->tlist_attrefs, 0);
-    kparam_2->constvalue = PointerGetDatum(kds_head);
-    kparam_2->constisnull = false;
-
-	/* kparam_3 shall be already set */
-	kparam_3 = (Const *) lfourth(used_params);
-	Assert(IsA(kparam_3, Const) &&
-		   kparam_3->consttype == BYTEAOID &&
-		   !kparam_3->constisnull);
+		   !kparam_1->constisnull);
 
 	gpas->kparams = pgstrom_create_kern_parambuf(used_params,
 												 gpas->cps.ps.ps_ExprContext);
@@ -2053,8 +2035,8 @@ pgstrom_release_gpupreagg(pgstrom_message *message)
 	pgstrom_put_queue(gpupreagg->msg.respq);
 	pgstrom_put_devprog_key(gpupreagg->dprog_key);
 
-	/* unlink row/column store */
-	pgstrom_put_rcstore(gpupreagg->rcstore);
+	/* unlink data-store */
+	pgstrom_put_data_store(gpupreagg->pds);
 
 	/* release result kern_data_store, if any */
 	if (gpupreagg->kds_dst)
@@ -2068,15 +2050,14 @@ pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
 	pgstrom_gpupreagg  *gpupreagg;
 	kern_parambuf	   *kparams;
 	kern_row_map	   *krowmap;
-	kern_data_store	   *kds_head;
-	kern_data_store	   *kds_dst;
-	StromObject		   *rcstore = bulk->rcstore;
+	pgstrom_data_store *pds = bulk->pds;
+	kern_data_store	   *kds = pds->kds;
+	kern_data_store	   *kds_head;	/* for result */
+	kern_data_store	   *kds_dst;	/* for result */
 	cl_int				nvalids = bulk->nvalids;
-	cl_uint				nitems = pgstrom_nitems_rcstore(rcstore);
+	cl_uint				nitems = kds->nitems;
 	Size				required;
-	Size				length;
 	void			   *vl_datum;
-	int					i;
 
 	/*
 	 * Allocation of pgtrom_gpupreagg message object
@@ -2104,14 +2085,14 @@ pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
 	/* other fields also */
 	gpupreagg->dprog_key = pgstrom_retain_devprog_key(gpas->dprog_key);
 	gpupreagg->needs_grouping = gpas->needs_grouping;
-	gpupreagg->rcstore = rcstore;
+	gpupreagg->pds = pds;
 	/*
-	 * Once a row-/column-store connected to the pgstrom_gpupreagg
+	 * Once a row/column data-store connected to the pgstrom_gpupreagg
 	 * structure, it becomes pgstrom_release_gpupreagg()'s role to
-	 * unlink this row-/column-store. So, we don't need to track
-	 * individual row-/column-store no longer.
+	 * unlink this data-store. So, we don't need to track individual
+	 * data-store no longer.
 	 */
-	pgstrom_untrack_object(rcstore);
+	pgstrom_untrack_object(&pds->sobj);
 	pgstrom_track_object(&gpupreagg->msg.sobj, 0);
 
 	/*
@@ -2124,32 +2105,13 @@ pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
 	kparams = KERN_GPUPREAGG_PARAMBUF(&gpupreagg->kern);
 	memcpy(kparams, gpas->kparams, gpas->kparams->length);
 
-	kparam_refresh_kds_head(kparams, rcstore, nitems);
-	kparam_refresh_ktoast_head(kparams, rcstore);
-
 	/* also, kds_head of the destination relation */
-	vl_datum = kparam_get_value(kparams, 2);
+	vl_datum = kparam_get_value(kparams, 0);
 	if (!vl_datum)
 		elog(ERROR, "Bug? kds_head of destination is missing");
 	kds_head = (kern_data_store *)VARDATA_ANY(vl_datum);
-	kds_head->nitems = 0;	/* to be incremented by kernel */
-	kds_head->nrooms = nitems;
-	kds_head->column_form = true;
-	length = STROMALIGN(offsetof(kern_data_store,
-								 colmeta[kds_head->ncols]));
-	for (i=0; i < kds_head->ncols; i++)
-	{
-		if (!kds_head->colmeta[i].attvalid)
-			continue;
-		kds_head->colmeta[i].cs_offset = length;
-		if (!kds_head->colmeta[i].attnotnull)
-			length += STROMALIGN(BITMAPLEN(nitems));
-		length += STROMALIGN((kds_head->colmeta[i].attlen > 0
-							  ? kds_head->colmeta[i].attlen
-							  : sizeof(cl_uint)) * nitems);
-	}
-	kds_head->length = length;
-
+	kparam_refresh_kds_head(kds_head, 0,
+							nvalids < 0 ? nitems : nvalids);
 	/*
 	 * Also, initialization of kern_row_map portion
 	 */
@@ -2182,6 +2144,7 @@ gpupreagg_load_next_outer(GpuPreAggState *gpas)
 {
 	PlanState		   *subnode = outerPlanState(gpas);
 	pgstrom_gpupreagg  *gpupreagg = NULL;
+	pgstrom_data_store *pds;
 	pgstrom_bulkslot	bulkdata;
 	pgstrom_bulkslot   *bulk = NULL;
 	struct timeval		tv1, tv2;
@@ -2195,43 +2158,47 @@ gpupreagg_load_next_outer(GpuPreAggState *gpas)
 	if (!gpas->outer_bulk)
 	{
 		/* Scan the outer relation using row-by-row mode */
-		tcache_row_store *trs = NULL;
-		HeapTuple	tuple;
+		TupleDesc		tupdesc
+			= subnode->ps_ResultTupleSlot->tts_tupleDescriptor;
 
 		while (true)
 		{
+			TupleTableSlot *slot;
+
 			if (HeapTupleIsValid(gpas->outer_overflow))
 			{
-				tuple = gpas->outer_overflow;
+				slot = gpas->outer_overflow;
 				gpas->outer_overflow = NULL;
 			}
 			else
 			{
-				TupleTableSlot *slot = ExecProcNode(subnode);
+				slot = ExecProcNode(subnode);
 				if (TupIsNull(slot))
 				{
 					gpas->outer_done = true;
 					break;
 				}
-				tuple = ExecFetchSlotTuple(slot);
 			}
-			if (!trs)
+
+			if (!pds)
 			{
-				TupleDesc	tupdesc
-					= subnode->ps_ResultTupleSlot->tts_tupleDescriptor;
-				trs = pgstrom_create_row_store(tupdesc);
-				pgstrom_track_object(&trs->sobj, 0);
+				pds = pgstrom_create_data_store_row(tupdesc,
+													pgstrom_chunk_size << 20,
+													gpas->ntups_per_page);
+				pgstrom_track_object(&pds->sobj, 0);
 			}
-			if (!tcache_row_store_insert_tuple(trs, tuple))
+			/* insert tuple to the data-store */
+			if (!pgstrom_data_store_insert_tuple(pds, slot))
 			{
-				gpas->outer_overflow = tuple;
+				gpas->outer_overflow = slot;
 				break;
 			}
 		}
-		if (trs)
+
+		if (pds)
 		{
 			memset(&bulkdata, 0, sizeof(pgstrom_bulkslot));
-			bulkdata.rcstore = &trs->sobj;
+			bulkdata.pds = pds;
 			bulkdata.nvalids = -1;	/* all valid */
 			bulk = &bulkdata;
 		}
@@ -2264,36 +2231,34 @@ gpupreagg_load_next_outer(GpuPreAggState *gpas)
 static TupleTableSlot *
 gpupreagg_next_tuple_fallback(GpuPreAggState *gpas)
 {
-	pgstrom_gpupreagg *gpreagg = gpas->curr_chunk;
-	cl_uint			nitems = pgstrom_nitems_rcstore(gpreagg->rcstore);
-	TupleTableSlot *slot = NULL;
-	struct timeval	tv1, tv2;
+	pgstrom_gpupreagg  *gpreagg = gpas->curr_chunk;
+	TupleTableSlot	   *slot = NULL;
+	HeapTupleData		tuple;
+	struct timeval		tv1, tv2;
 
 	if (gpas->pfm.enabled)
 		gettimeofday(&tv1, NULL);
-	while (gpas->curr_index < nitems)
+
+	while (pgstrom_fetch_data_store(gpas->scan_slot,
+									gpreagg->pds,
+									gpas->curr_index++,
+									&tuple))
 	{
 		ProjectionInfo *projection = gpas->cps.ps.ps_ProjInfo;
 		ExprContext	   *econtext = gpas->cps.ps.ps_ExprContext;
-		TupleTableSlot *slot_in = gpas->scan_slot;
-		int				index = gpas->curr_index++;
 		ExprDoneCond	is_done;
 
-		/* Reset Per-tuple memory context */
+		/* reset per-tuple memory context */
 		ResetExprContext(econtext);
 
-		slot_in = pgstrom_rcstore_fetch_slot(slot_in,
-											 gpreagg->rcstore,
-											 index, false);
 		if (!projection)
 		{
 			slot = gpas->cps.ps.ps_ResultTupleSlot;
-			ExecCopySlot(slot, slot_in);
-			break;
+			ExecCopySlot(slot, gpas->scan_slot);
 		}
 		else
 		{
-			econtext->ecxt_outertuple = slot_in;
+			econtext->ecxt_outertuple = gpas->scan_slot;
 			slot = ExecProject(projection, &is_done);
 			if (is_done == ExprEndResult)
 			{
@@ -2316,86 +2281,87 @@ static TupleTableSlot *
 gpupreagg_next_tuple(GpuPreAggState *gpas)
 {
 	pgstrom_gpupreagg  *gpreagg = gpas->curr_chunk;
-	kern_data_store	   *kds = gpreagg->kds_dst;
+	pgstrom_data_store *pds = gpreagg->pds;
+	kern_data_store	   *kds = pds->kds;
+	kern_data_store	   *kds_dst = gpreagg->kds_dst;
 	TupleTableSlot	   *slot = NULL;
 	TupleDesc			tupdesc;
+	struct timeval		tv1, tv2;
 
 	if (gpas->curr_recheck)
 		return gpupreagg_next_tuple_fallback(gpas);
 
-	if (gpas->curr_index < kds->nitems)
+	if (gpas->pfm.enabled)
+		gettimeofday(&tv1, NULL);
+
+	if (gpas->curr_index < kds_dst->nitems)
 	{
 		int				i, j = gpas->curr_index++;
-		int				attlen;
-		cl_uint			cs_offset;
-		struct timeval	tv1, tv2;
-
-		if (gpas->pfm.enabled)
-			gettimeofday(&tv1, NULL);
 
 		slot = gpas->cps.ps.ps_ResultTupleSlot;
 		tupdesc = slot->tts_tupleDescriptor;
-		Assert(kds->column_form && kds->ncols == tupdesc->natts);
-
-		if (gpas->pfm.enabled)
-			gettimeofday(&tv1, NULL);
+		Assert(kds_dst->format == KDS_FORMAT_COLUMN &&
+			   kds_dst->ncols == tupdesc->natts);
 
 		ExecStoreAllNullTuple(slot);
 		for (i=0; i < tupdesc->natts; i++)
 		{
-			if (!kds->colmeta[i].attvalid)
+			cl_uint		cs_offset;
+			int			attlen;
+
+			if (!kds_dst->colmeta[i].attvalid)
 				continue;
 
-			cs_offset = kds->colmeta[i].cs_offset;
-			if (!kds->colmeta[i].attnotnull)
+			cs_offset = kds_dst->colmeta[i].cs_offset;
+			if (!kds_dst->colmeta[i].attnotnull)
 			{
-				if (att_isnull(j, (char *)kds + cs_offset))
+				if (att_isnull(j, (char *)kds_dst + cs_offset))
 					continue;
-				cs_offset += STROMALIGN(BITMAPLEN(kds->nrooms));
+				cs_offset += STROMALIGN(BITMAPLEN(kds_dst->nrooms));
 			}
 			slot->tts_isnull[i] = false;
 
-			attlen = kds->colmeta[i].attlen;
+			attlen = kds_dst->colmeta[i].attlen;
 			if (attlen > 0)
 			{
-				char   *ptr = (char *)kds + cs_offset + attlen * j;
+				char   *ptr = (char *)kds_dst + cs_offset + attlen * j;
 				slot->tts_values[i] = fetch_att(ptr, true, attlen);
 			}
 			else
 			{
-				cl_uint	vl_ofs = ((cl_uint *)((char *)kds + cs_offset))[j];
-				char   *vl_ptr;
+				cl_uint		vl_ofs;
+				char	   *vl_ptr;
 
-				if (StromTagIs(gpreagg->rcstore, TCacheRowStore))
+				vl_ofs = ((cl_uint *)((char *)kds_dst + cs_offset))[j];
+				if (kds->format == KDS_FORMAT_ROW)
 				{
-					/* row store also works for toast buffer */
-					tcache_row_store	*trs =
-						(tcache_row_store *) gpreagg->rcstore;
-					Assert(trs->kern.length != TOASTBUF_MAGIC);
-					/* adjustment */
-					vl_ofs -= STROMALIGN(offsetof(kern_data_store,
-												  colmeta[trs->kern.ncols]));
-					Assert(vl_ofs <= trs->kern.length);
-					vl_ptr = ((char *)&trs->kern) + vl_ofs;
+					int		index;
+					Page	page;
+
+					vl_ofs -= ((uintptr_t)KERN_DATA_STORE_ROWBLOCK(kds,0) -
+							   (uintptr_t)(kds));
+					index = vl_ofs / BLCKSZ;
+					Assert(index < kds->nblocks);
+					page = pds->blocks[index].page;
+					vl_ptr = (char *)page + (vl_ofs + (BLCKSZ-1));
 				}
 				else
 				{
-					tcache_column_store	*tcs =
-						(tcache_column_store *) gpreagg->rcstore;
-					Assert(tcs->cdata[i].toast != NULL);
-					Assert(vl_ofs < tcs->cdata[i].toast->tbuf_usage);
+					kern_toastbuf  *ktoast = pds->ktoast;
 
-					vl_ptr = tcs->cdata[i].toast->data + vl_ofs;
+					Assert(vl_ofs < ktoast->usage);
+					vl_ptr = (char *)ktoast + vl_ofs;
 				}
 				slot->tts_values[i] = PointerGetDatum(vl_ptr);
 			}
 		}
 
-		if (gpas->pfm.enabled)
-		{
-			gettimeofday(&tv2, NULL);
-			gpas->pfm.time_materialize += timeval_diff(&tv1, &tv2);
-		}
+	}
+
+	if (gpas->pfm.enabled)
+	{
+		gettimeofday(&tv2, NULL);
+		gpas->pfm.time_materialize += timeval_diff(&tv1, &tv2);
 	}
 	return slot;
 }
@@ -2805,10 +2771,10 @@ typedef struct
 	cl_mem				m_kds_src;	/* kds of aggregation source */
 	cl_mem				m_kds_dst;	/* kds of aggregation results */
 	cl_mem				m_ktoast;
-	cl_int				ev_kern_prep;	/* event index of kern_prep */
-	cl_int				ev_kern_pagg;	/* event index of kern_pagg */
-	cl_int				ev_index;
-	cl_event			events[100];
+	cl_uint				ev_kern_prep;	/* event index of kern_prep */
+	cl_uint				ev_kern_pagg;	/* event index of kern_pagg */
+	cl_uint				ev_index;
+	cl_event			events[50];
 } clstate_gpupreagg;
 
 static void
@@ -3597,6 +3563,7 @@ clserv_launch_preagg_reduction(clstate_gpupreagg *clgpa, cl_uint nvalids)
 	return CL_SUCCESS;
 }
 
+#if 0
 static cl_int
 clserv_process_gpupreagg_row(clstate_gpupreagg *clgpa,
 							 kern_data_store *kds_head,
@@ -3776,19 +3743,19 @@ clserv_process_gpupreagg_column(clstate_gpupreagg *clgpa,
 	}
 	return CL_SUCCESS;
 }
+#endif
 
 static void
 clserv_process_gpupreagg(pgstrom_message *message)
 {
 	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) message;
-	StromObject		   *rcstore = gpreagg->rcstore;
+	pgstrom_data_store *pds = gpreagg->pds;
+	kern_data_store	   *kds = pds->kds;
 	clstate_gpupreagg  *clgpa;
 	kern_parambuf	   *kparams;
 	kern_row_map	   *krowmap;
-	kern_data_store	   *kds_head;	/* for input relation */
-	kern_data_store	   *kds_work;	/* for destination of gpupreagg */
-	kern_toastbuf	   *ktoast_head;
-	cl_uint				nitems = pgstrom_nitems_rcstore(rcstore);
+	kern_data_store	   *kds_dest;	/* for destination kds */
+	cl_uint				nitems = kds->nitems;
 	cl_uint				nvalids;
 	Size				offset;
 	Size				length;
@@ -3804,7 +3771,8 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	 * FIXME: lenght of event object has to be adjusted according to
 	 *        the contents of row/column store.
 	 */
-	clgpa = calloc(1, sizeof(clstate_gpupreagg));
+	clgpa = calloc(1, (sizeof(clstate_gpupreagg) +
+					   sizeof(cl_event) * kds->nblocks));
 	if (!clgpa)
 	{
 		rc = CL_OUT_OF_HOST_MEMORY;
@@ -3855,14 +3823,13 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	 * m_kds_dst  - data store of partial aggregate destination
 	 */
 	kparams = KERN_GPUPREAGG_PARAMBUF(&gpreagg->kern);
-	kds_head = KPARAM_GET_KDS_HEAD(kparams);
-	ktoast_head = KPARAM_GET_KTOAST_HEAD(kparams);
-	kds_work = KPARAM_GET_KDS_HEAD_DEST(kparams);
+	kds_dest = KPARAM_GET_KDS_HEAD_DEST(kparams);
 	krowmap = KERN_GPUPREAGG_KROWMAP(&gpreagg->kern);
 	nvalids = (krowmap->nvalids < 0 ? nitems : krowmap->nvalids);
 
-	Assert(kds_head->nitems == nitems && kds_head->nrooms == nitems);
-	Assert(kds_work->nitems == 0 && kds_work->nrooms == nitems);
+	Assert(kds_dest->nitems == 0 &&
+		   kds_dest->nrooms == nitems &&
+		   kds_dest->format == KDS_FORMAT_COLUMN);
 
 	/* allocation of m_gpreagg */
 	length = KERN_GPUPREAGG_BUFFER_SIZE(&gpreagg->kern);
@@ -3876,10 +3843,11 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
 		goto error;
 	}
+
 	/* allocation of kds_in */
 	clgpa->m_kds_in = clCreateBuffer(opencl_context,
 									 CL_MEM_READ_WRITE,
-									 kds_head->length,
+									 KERN_DATA_STORE_LENGTH(kds),
 									 NULL,
 									 &rc);
 	if (rc != CL_SUCCESS)
@@ -3890,7 +3858,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	/* allocation of kds_src */
 	clgpa->m_kds_src = clCreateBuffer(opencl_context,
 									  CL_MEM_READ_WRITE,
-									  kds_work->length,
+									  KERN_DATA_STORE_LENGTH(kds_dest),
 									  NULL,
 									  &rc);
 	if (rc != CL_SUCCESS)
@@ -3901,7 +3869,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	/* allocation of kds_out */
 	clgpa->m_kds_dst = clCreateBuffer(opencl_context,
 									  CL_MEM_READ_WRITE,
-									  kds_work->length,
+									  KERN_DATA_STORE_LENGTH(kds_dest),
 									  NULL,
 									  &rc);
 	if (rc != CL_SUCCESS)
@@ -3910,27 +3878,13 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		goto error;
 	}
 
-	if (ktoast_head)
+	if (pds->ktoast)
 	{
-		tcache_column_store	*tcs = (tcache_column_store *) rcstore;
-		Size	toast_length = 0;
-		int		i;
+		kern_toastbuf  *ktoast = pds->ktoast;
 
-		/* only column-store needs individual toast buffer */
-		Assert(StromTagIs(rcstore, TCacheColumnStore));
-		for (i=0; i < kds_head->ncols; i++)
-		{
-			if (kds_head->colmeta[i].attvalid &&
-				kds_head->colmeta[i].attlen < 1)
-				toast_length += STROMALIGN(tcs->cdata[i].toast->tbuf_length);
-		}
-		/* at least one column is variable-length, if valid ktoast_head */
-		Assert(toast_length > 0);
-		toast_length += STROMALIGN(offsetof(kern_toastbuf,
-											coldir[kds_head->ncols]));
 		clgpa->m_ktoast = clCreateBuffer(opencl_context,
-										 CL_MEM_READ_WRITE,
-										 toast_length,
+                                         CL_MEM_READ_WRITE,
+										 STROMALIGN(ktoast->usage),
 										 NULL,
 										 &rc);
 		if (rc != CL_SUCCESS)
@@ -3939,7 +3893,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 			goto error;
 		}
 	}
-	else if (StromTagIs(rcstore, TCacheRowStore))
+	else if (kds->format == KDS_FORMAT_ROW)
 	{
 		/* once a preparation done, kds_in shall be used as a toast buffer
 		 * of the later stage if row-format. So, we deal with ktoast as
@@ -3979,13 +3933,13 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	gpreagg->msg.pfm.bytes_dma_send += length;
 	gpreagg->msg.pfm.num_dma_send++;
 
-	length = offsetof(kern_data_store, colmeta[kds_head->ncols]);
+	length = offsetof(kern_data_store, colmeta[kds_dest->ncols]);
 	rc = clEnqueueWriteBuffer(clgpa->kcmdq,
 							  clgpa->m_kds_in,
 							  CL_FALSE,
 							  0,
 							  length,
-							  kds_head,
+							  kds_dest,
 							  0,
 							  NULL,
 							  &clgpa->events[clgpa->ev_index]);
@@ -3998,13 +3952,13 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	gpreagg->msg.pfm.bytes_dma_send += length;
 	gpreagg->msg.pfm.num_dma_send++;
 
-	length = offsetof(kern_data_store, colmeta[kds_work->ncols]);
+	length = offsetof(kern_data_store, colmeta[kds_dest->ncols]);
 	rc = clEnqueueWriteBuffer(clgpa->kcmdq,
                               clgpa->m_kds_src,
 							  CL_FALSE,
 							  0,
 							  length,
-							  kds_work,
+							  kds_dest,
 							  0,
 							  NULL,
 							  &clgpa->events[clgpa->ev_index]);
@@ -4022,7 +3976,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 							  CL_FALSE,
 							  0,
 							  length,
-							  kds_work,
+							  kds_dest,
 							  0,
 							  NULL,
 							  &clgpa->events[clgpa->ev_index]);
@@ -4035,29 +3989,15 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	gpreagg->msg.pfm.bytes_dma_send += length;
 	gpreagg->msg.pfm.num_dma_send++;
 
-	if (StromTagIs(rcstore, TCacheRowStore))
-	{
-		tcache_row_store	   *trs = (tcache_row_store *) rcstore;
-		rc = clserv_process_gpupreagg_row(clgpa, kds_head, trs);
-		if (rc != CL_SUCCESS)
-			goto error;
-	}
-	else if (StromTagIs(rcstore, TCacheColumnStore))
-	{
-		tcache_column_store	   *tcs = (tcache_column_store *) rcstore;
-		rc = clserv_process_gpupreagg_column(clgpa,
-											 kds_head,
-											 ktoast_head,
-											 tcs);
-		if (rc != CL_SUCCESS)
-			goto error;
-	}
-	else
-	{
-		clserv_log("Bug? neither row- nor column-store");
-		rc = StromError_DataStoreCorruption;
-		goto error;
-	}
+	rc = clserv_dmasend_data_store(pds,
+								   clgpa->kcmdq,
+								   clgpa->m_kds_in,
+								   clgpa->m_ktoast,
+								   0,
+								   NULL,
+								   &clgpa->ev_index,
+								   clgpa->events,
+								   &gpreagg->msg.pfm);
 
 	/*
 	 * Kick the kernel functions.
@@ -4159,11 +4099,12 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		goto error;
 
 	/* writing back the result buffer */
+	length = KERN_DATA_STORE_LENGTH(kds_dest);
 	rc = clEnqueueReadBuffer(clgpa->kcmdq,
 							 clgpa->m_kds_dst,
 							 CL_FALSE,
 							 0,
-							 kds_work->length,
+							 length,
 							 gpreagg->kds_dst,
 							 1,
 							 &clgpa->events[clgpa->ev_index - 1],
@@ -4175,7 +4116,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		goto error;
 	}
 	clgpa->ev_index++;
-	gpreagg->msg.pfm.bytes_dma_recv += kds_work->length;
+	gpreagg->msg.pfm.bytes_dma_recv += length;
 	gpreagg->msg.pfm.num_dma_recv++;
 
 	/* also, this sizeof(cl_int) bytes for result status */
@@ -4197,7 +4138,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		goto error;
 	}
 	clgpa->ev_index++;
-	gpreagg->msg.pfm.bytes_dma_recv += kds_work->length;
+	gpreagg->msg.pfm.bytes_dma_recv += length;
 	gpreagg->msg.pfm.num_dma_recv++;
 
 	/*

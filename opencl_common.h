@@ -270,59 +270,57 @@ typedef __global HeapTupleHeaderData *HeapTuple;
  *
  * It stores row- and column-oriented values in the kernel space.
  *
- * +----------------------------------+
- * | length                           |
- * +----------------------------------+
- * | ncols                            |
- * +----------------------------------+
- * | nitems                           |
- * +----------------------------------+
- * | nrooms                           |
- * +----------------------------------+
- * | is_column                        |
- * +----------------------------------+
- * | __padding__[7]                   |
- * +----------------------------------+
- * | colmeta[0]                       |
- * | colmeta[1]                       |
- * |   :                              |
- * | colmeta[M-1]                     |
- * +----------------+-----------------+ <--- aligned by STROMALIGN()
- * | <row-format>   | <column-format> |
- * +----------------+-----------------+
- * | rowitems[0]    | column-data of  |
- * | rowitems[1]    | the 1st column  |
- * | rowitems[2]    | +---------------+
- * |    :           | | null bitmap   |
- * |    :           | +---------------+
- * | rowitems[N-1]  | | values array  |
- * |                | | of the 1st    |
- * +----------------+ | column        |
- * |    :           +-+---------------+ <--- cs_offset points starting
- * | alignment to   | column-data of  |      offset of the column-data
- * | BLCKSZ         | the 2nd column  |
- * +----------------+ +---------------+
- * | blocks[0]      | | null bitmap   |
- * | PageHeaderData | +---------------+
- * |      :         | | values array  |
- * | pd_linep[]     | | of the 2nd    |
- * |      :         | | column        |
- * +----------------+-+---------------+
- * | blocks[1]      |       :         |
- * | PageHeaderData |       :         |
- * |      :         |       :         |
- * | pd_linep[]     |       :         |
- * |      :         |       :         |
- * +----------------+-----------------+
- * |      :         | column-data of  |
- * |      :         | the last column |
- * +----------------+ +---------------+
- * | blocks[1]      | | null bitmap   |
- * | PageHeaderData | +---------------+
- * |      :         | | values array  |
- * | pd_linep[]     | | of the last   |
- * |      :         | | column        |
- * +----------------+-+---------------+
+ * +---------------------------------------------------+
+ * | length                                            |
+ * +---------------------------------------------------+
+ * | ncols                                             |
+ * +---------------------------------------------------+
+ * | nitems                                            |
+ * +---------------------------------------------------+
+ * | nrooms                                            |
+ * +---------------------------------------------------+
+ * | format                                            |
+ * +---------------------------------------------------+
+ * | colmeta[0]                                        | aligned to
+ * | colmeta[1]                                        | STROMALIGN()
+ * |   :                                               |    |
+ * | colmeta[M-1]                                      |    V
+ * +----------------+-----------------+----------------+-------
+ * | <row-format>   | <column-format> |<tupslot-format>|
+ * +----------------+-----------------+----------------+
+ * | rowitems[0]    | column-data of  | values/isnull  |
+ * | rowitems[1]    | the 1st column  | pair of the    |
+ * | rowitems[2]    | +---------------+ 1st row        |
+ * |    :           | | null bitmap   | +--------------+
+ * |    :           | +---------------+ | values[0]    |
+ * | rowitems[N-1]  | | values array  | |   :          |
+ * |                | | of the 1st    | | values[M-1]  |
+ * +----------------+ | column        | +--------------+
+ * |    :           +-+---------------+ | isnull[0]    |
+ * | alignment to   | column-data of  | |   :          |
+ * | BLCKSZ         | the 2nd column  | | isnull[M-1]  |
+ * +----------------+ +---------------+-+--------------+
+ * | blocks[0]      | | null bitmap   | values/isnull  |
+ * | PageHeaderData | +---------------+ pair of the    |
+ * |      :         | | values array  | 2nd row        |
+ * | pd_linep[]     | | of the 2nd    | +--------------+
+ * |      :         | | column        | | values[0]    |
+ * +----------------+-+---------------+ |   :          |
+ * | blocks[1]      |       :         | | values[M-1]  |
+ * | PageHeaderData |       :         | +--------------+
+ * |      :         |       :         | | isnull[0]    |
+ * | pd_linep[]     |       :         | |   :          |
+ * |      :         |       :         | | isnull[M-1]  |
+ * +----------------+-----------------+-+--------------+
+ * |      :         | column-data of  | values/isnull  |
+ * |      :         | the last column | pair of the    |
+ * +----------------+ +---------------+ 3rd row        |
+ * | blocks[1]      | | null bitmap   | +--------------+
+ * | PageHeaderData | +---------------+ | values[0]    |
+ * |      :         | | values array  | |   :          |
+ * | pd_linep[]     | | of the last   | | values[M-1]  |
+ * |      :         | | column        | |   :          |
+ * +----------------+-+---------------+-+--------------+
  */
 typedef struct {
 	/* true, if column never has NULL (thus, no nullmap required) */
@@ -358,6 +356,10 @@ typedef struct {
 	cl_ushort		item_ofs;
 } kern_rowitem;
 
+#define KDS_FORMAT_ROW			1
+#define KDS_FORMAT_COLUMN		2
+#define KDS_FORMAT_TUPSLOT		3
+
 typedef struct {
 	hostptr_t		hostptr;/* address of kds on the host */
 	cl_uint			length;	/* length of the column-store, or 0 elsewhere */
@@ -366,10 +368,11 @@ typedef struct {
 	cl_uint			nrooms;	/* number of available rows in this store */
 	cl_uint			nblocks;/* number of blocks in this store, if row-store.
 							 * Elsewhere, always 0. */
-	cl_char			is_column;/* if true, data store is column-format */
+	cl_char			format;	/* one of KDS_FORMAT_* above */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_data_store;
 
+/* access macro for row-format */
 #define KERN_DATA_STORE_ROWITEM(kds,row_index)				\
 	(((__global kern_rowitem *)								\
 	  ((__global cl_char *)(kds) +							\
@@ -385,11 +388,27 @@ typedef struct {
 		 STROMALIGN(sizeof(kern_rowitem) * (kds)->nitems) +	\
 		 BLCKSZ - 1) & ~(BLCKSZ - 1)) + BLCKSZ * (block_ofs))))
 
-#define KERN_DATA_STORE_LENGTH(kds)							\
-	((kds)->is_column ?										\
-	 STROMALIGN((kds)->length) :							\
-	 ((uintptr_t)KERN_DATA_STORE_ROWBLOCK((kds), (kds)->nblocks) -	\
-	  (uintptr_t)(kds)))
+/* access macro for tuple-slot format */
+#define KERN_DATA_STORE_VALUES(kds,row_index)			\
+	((__global Datum *)									\
+	 (((__global cl_char *)(kds) +						\
+	   STROMALIGN(offsetof(kern_data_store,				\
+						   colmeta[(kds)->ncols]))) +	\
+	  TYPEALIGN(sizeof(Datum),							\
+				(sizeof(Datum) + sizeof(cl_char)) *		\
+				(kds)->ncols) * (row_index)))
+
+#define KERN_DATA_STORE_ISNULL(kds,row_index)			\
+	((__global cl_char *)								\
+	 (KERN_DATA_STORE_VALUES((kds),(row_index)) +		\
+	  (kds)->ncols))
+
+/* length of kern_data_store */
+#define KERN_DATA_STORE_LENGTH(kds)										\
+	((kds)->format == KDS_FORMAT_ROW ?									\
+	 ((uintptr_t)KERN_DATA_STORE_ROWBLOCK((kds), (kds)->nblocks) -		\
+	  (uintptr_t)(kds)) :												\
+	 STROMALIGN((kds)->length))
 
 /*
  * kern_toastbuf
@@ -847,11 +866,12 @@ kern_get_datum(__global kern_data_store *kds,
 	/* is it out of range? */
 	if (colidx >= kds->ncols || rowidx >= kds->nitems)
 		return NULL;
-
-	if (!kds->is_column)
+	if (kds->format == KDS_FORMAT_ROW)
 		return kern_get_datum_rs(kds, colidx, rowidx);
-	else
+	if (kds->format == KDS_FORMAT_COLUMN)
 		return kern_get_datum_cs(kds, ktoast, colidx, rowidx);
+	/* !!KDS_FORMAT_TUPSLOT is write-only format!! */
+	return NULL;
 }
 
 /*

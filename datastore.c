@@ -158,15 +158,14 @@ pgstrom_planstate_can_bulkload(const PlanState *ps)
 	return false;
 }
 
-#if 0
 /*
  * it makes a template of header portion of kern_data_store according
  * to the supplied tupdesc and bitmapset of referenced columns.
  */
 bytea *
 kparam_make_kds_head(TupleDesc tupdesc,
-					 Bitmapset *referenced,
-					 cl_uint nsyscols)
+					 int kds_format,
+					 Bitmapset *referenced)
 {
 	kern_data_store	*kds_head;
 	bytea	   *result;
@@ -174,15 +173,17 @@ kparam_make_kds_head(TupleDesc tupdesc,
 	int			i, j, ncols;
 
 	/* allocation */
-	ncols = tupdesc->natts + nsyscols;
+	ncols = tupdesc->natts;
 	length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
 	result = palloc0(VARHDRSZ + length);
 	SET_VARSIZE(result, VARHDRSZ + length);
 
 	kds_head = (kern_data_store *) VARDATA(result);
+	kds_head->length = (cl_uint)(-1);	/* to be set later */
 	kds_head->ncols = ncols;
 	kds_head->nitems = (cl_uint)(-1);	/* to be set later */
 	kds_head->nrooms = (cl_uint)(-1);	/* to be set later */
+	kds_head->format = kds_format;
 
 	for (i=0; i < tupdesc->natts; i++)
 	{
@@ -192,7 +193,7 @@ kparam_make_kds_head(TupleDesc tupdesc,
 
 		kds_head->colmeta[i].attnotnull = attr->attnotnull;
 		kds_head->colmeta[i].attalign = typealign_get_width(attr->attalign);
-		kds_head->colmeta[i].attlen = pgstrom_try_varlena_inline(attr);
+		kds_head->colmeta[i].attlen = (attr->attlen > 0 ? attr->attlen : -1);
 		if (!bms_is_member(j, referenced))
 			kds_head->colmeta[i].attvalid = 0;
 		else
@@ -203,34 +204,23 @@ kparam_make_kds_head(TupleDesc tupdesc,
 }
 
 void
-kparam_refresh_kds_head(kern_parambuf *kparams,
-						StromObject *rcstore,
-						cl_uint nitems)
+kparam_refresh_kds_head(kern_data_store *kds_head,
+						cl_uint nitems, cl_uint nrooms)
 {
-	kern_data_store *kds_head = KPARAM_GET_KDS_HEAD(kparams);
-	Size		length;
-	int			i, ncols = kds_head->ncols;
+	/*
+	 * Only column- or tupslot- format is writable by device kernel
+	 */
+	Assert(kds_head->format == KDS_FORMAT_COLUMN ||
+		   kds_head->format == KDS_FORMAT_TUPSLOT);
+	kds_head->nitems = nitems;
+	kds_head->nrooms = nrooms;
 
-	length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
-	kds_head->nitems = nitems;	/* usually, nitems and nrroms are same, */
-	kds_head->nrooms = nitems;	/* if kds is filled in the host side */
-	if (StromTagIs(rcstore, TCacheRowStore))
+	if (kds_head->format == KDS_FORMAT_COLUMN)
 	{
-		tcache_row_store *trs = (tcache_row_store *) rcstore;
+		Size		length;
+		cl_uint		i, ncols = kds_head->ncols;
 
-		kds_head->column_form = false;
-		for (i=0; i < ncols; i++)
-		{
-			/* put attribute number to reference row-data */
-			if (!kds_head->colmeta[i].attvalid)
-				continue;
-			kds_head->colmeta[i].rs_attnum = i + 1;
-		}
-		length += STROMALIGN(trs->kern.length);
-	}
-	else if (StromTagIs(rcstore, TCacheColumnStore))
-	{
-		kds_head->column_form = true;
+		length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
 		for (i=0; i < ncols; i++)
 		{
 			if (!kds_head->colmeta[i].attvalid)
@@ -242,13 +232,20 @@ kparam_refresh_kds_head(kern_parambuf *kparams,
 								  ? kds_head->colmeta[i].attlen
 								  : sizeof(cl_uint)) * kds_head->nrooms);
 		}
+		kds_head->length = STROMALIGN(length);
+	}
+	else if (kds_head->format == KDS_FORMAT_TUPSLOT)
+	{
+		Size		length =
+			((uintptr_t)KERN_DATA_STORE_VALUES(kds_head, nrooms) -
+			 (uintptr_t)(kds_head));
+		kds_head->length = STROMALIGN(length);
 	}
 	else
-		elog(ERROR, "bug? neither row- nor column-store");
-
-	kds_head->length = length;
+		elog(ERROR, "Bug? unexpected kds format: %d", kds_head->format);
 }
 
+#if 0
 /*
  * kparam_make_ktoast_head
  *
@@ -336,7 +333,7 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 		return false;	/* out of range */
 
 	/* in case of row-store */
-	if (!kds->is_column)
+	if (kds->format == KDS_FORMAT_ROW)
 	{
 		kern_rowitem   *ritem = KERN_DATA_STORE_ROWITEM(kds, row_index);
 		Buffer			buffer;
@@ -357,8 +354,26 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 
 		return true;
 	}
+	/* in case of tuple-slot format */
+	if (kds->format == KDS_FORMAT_TUPSLOT)
+	{
+		Datum	   *tts_values = KERN_DATA_STORE_VALUES(kds, row_index);
+		cl_char	   *tts_isnull = KERN_DATA_STORE_ISNULL(kds, row_index);
+
+		ExecClearTuple(slot);
+		memcpy(slot->tts_values, tts_values, sizeof(Datum) * kds->ncols);
+		memcpy(slot->tts_isnull, tts_isnull, sizeof(bool) * kds->ncols);
+		/*
+		 * MEMO: Is it really needed to take memcpy() here? If we can 
+		 * do same job with pointer opertion, it makes more sense from
+		 * performance standpoint.
+		 * (NOTE: hash-join materialization is a hot point)
+		 */
+		return true;
+	}
 
 	/* otherwise, column store */
+	Assert(kds->format == KDS_FORMAT_COLUMN);
 	ExecStoreAllNullTuple(slot);
 	tupdesc = slot->tts_tupleDescriptor;
 	for (i=0; i < tupdesc->natts; i++)
@@ -481,7 +496,7 @@ pgstrom_create_data_store_row(TupleDesc tupdesc,
 	kds->nitems = 0;
 	kds->nrooms = nrooms;
 	kds->nblocks = 0;
-	kds->is_column = false;
+	kds->format = KDS_FORMAT_ROW;
 	for (i=0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute	attr = tupdesc->attrs[i];
@@ -561,7 +576,7 @@ pgstrom_create_data_store_column(TupleDesc tupdesc,
 	kds->nitems = 0;
 	kds->nrooms = nrooms;
 	kds->nblocks = 0;	/* column format never uses blocks */
-	kds->is_column = true;
+	kds->format = KDS_FORMAT_COLUMN;
 	for (i=0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute	attr = tupdesc->attrs[i];
@@ -643,7 +658,7 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 	bool		all_visible;
 
 	/* only row-store can block read */
-	Assert(!pds->kds->is_column);
+	Assert(kds->format == KDS_FORMAT_ROW);
 	/* we never use all the block slots */
 	Assert(kds->nblocks < pds->max_blocks);
 
@@ -763,9 +778,9 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 	/* No room to store a new kern_rowitem? */
 	if (kds->nitems >= kds->nrooms)
 		return false;
-
 	Assert(kds->ncols == tupdesc->natts);
-	if (!kds->is_column)
+
+	if (kds->format == KDS_FORMAT_ROW)
 	{
 		HeapTuple		tuple;
 		Buffer			buffer = InvalidBuffer;
@@ -824,6 +839,7 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 
 		return true;
 	}
+	Assert(kds->format == KDS_FORMAT_COLUMN);
 
 	/* makes tts_values/tts_isnull available */
 	slot_getallattrs(slot);
@@ -979,7 +995,7 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 	Assert(length <= KERN_DATA_STORE_LENGTH(kds));
 #endif
 
-	if (kds->is_column)
+	if (kds->format == KDS_FORMAT_COLUMN)
 	{
 		rc = clEnqueueWriteBuffer(kcmdq,
 								  kds_buffer,
@@ -1027,17 +1043,54 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 			pfm->bytes_dma_send += ktoast->usage;
 			pfm->num_dma_send++;
 		}
+		return CL_SUCCESS;
 	}
-	else
+
+	Assert(kds->format == KDS_FORMAT_ROW);
+	length = ((uintptr_t)KERN_DATA_STORE_ROWITEM(kds, kds->nitems) -
+			  (uintptr_t)(kds));
+	rc = clEnqueueWriteBuffer(kcmdq,
+							  kds_buffer,
+							  CL_FALSE,
+							  0,
+							  length,
+							  kds,
+							  num_blockers,
+							  blockers,
+							  events + *ev_index);
+	if (rc != CL_SUCCESS)
 	{
-		length = ((uintptr_t)KERN_DATA_STORE_ROWITEM(kds, kds->nitems) -
-				  (uintptr_t)(kds));
+		clserv_log("failed on clEnqueueWriteBuffer: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	(*ev_index)++;
+	pfm->bytes_dma_send += kds->length;
+	pfm->num_dma_send++;
+
+	offset = ((uintptr_t)KERN_DATA_STORE_ROWBLOCK(kds, 0) -
+			  (uintptr_t)(kds));
+	length = BLCKSZ;
+	for (i=0, n=0; i < kds->nblocks; i++)
+	{
+		/*
+		 * NOTE: A micro optimization; if next page is located
+		 * on the continuous region, the upcoming DMA request
+		 * can be merged to reduce DMA management cost
+		 */
+		if (i+1 < kds->nblocks &&
+			(uintptr_t)pds->blocks[i].page + BLCKSZ ==
+			(uintptr_t)pds->blocks[i+1].page)
+		{
+			n++;
+			continue;
+		}
 		rc = clEnqueueWriteBuffer(kcmdq,
 								  kds_buffer,
 								  CL_FALSE,
-								  0,
-								  length,
-								  kds,
+								  offset,
+								  BLCKSZ * (n+1),
+								  pds->blocks[i-n].page,
 								  num_blockers,
 								  blockers,
 								  events + *ev_index);
@@ -1048,49 +1101,12 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 			return rc;
 		}
 		(*ev_index)++;
-		pfm->bytes_dma_send += kds->length;
+		pfm->bytes_dma_send += BLCKSZ * (n+1);
 		pfm->num_dma_send++;
-
-		offset = ((uintptr_t)KERN_DATA_STORE_ROWBLOCK(kds, 0) -
-				  (uintptr_t)(kds));
-		length = BLCKSZ;
-		for (i=0, n=0; i < kds->nblocks; i++)
-		{
-			/*
-			 * NOTE: A micro optimization; if next page is located
-			 * on the continuous region, the upcoming DMA request
-			 * can be merged to reduce DMA management cost
-			 */
-			if (i+1 < kds->nblocks &&
-				(uintptr_t)pds->blocks[i].page + BLCKSZ ==
-				(uintptr_t)pds->blocks[i+1].page)
-			{
-				n++;
-				continue;
-			}
-			rc = clEnqueueWriteBuffer(kcmdq,
-									  kds_buffer,
-									  CL_FALSE,
-									  offset,
-									  BLCKSZ * (n+1),
-									  pds->blocks[i-n].page,
-									  num_blockers,
-									  blockers,
-									  events + *ev_index);
-			if (rc != CL_SUCCESS)
-			{
-				clserv_log("failed on clEnqueueWriteBuffer: %s",
-						   opencl_strerror(rc));
-				return rc;
-			}
-			(*ev_index)++;
-			pfm->bytes_dma_send += BLCKSZ * (n+1);
-			pfm->num_dma_send++;
-			offset += BLCKSZ * (n+1);
-			n = 0;
-		}
-		Assert(!pds->ktoast);
+		offset += BLCKSZ * (n+1);
+		n = 0;
 	}
+	Assert(!pds->ktoast);
 	return CL_SUCCESS;
 }
 
@@ -1116,7 +1132,9 @@ pgstrom_dump_data_store(pgstrom_data_store *pds)
 	PDS_DUMP("pds {refcnt=%d kds=%p ktoast=%p}",
 			 pds->refcnt, pds->kds, pds->ktoast);
 	PDS_DUMP("kds (%s) {length=%u ncols=%u nitems=%u nrooms=%u nblocks=%u}",
-			 kds->is_column ? "column-store" : "row-store",
+			 kds->format == KDS_FORMAT_ROW ? "row-store" :
+			 kds->format == KDS_FORMAT_COLUMN ? "column-store" :
+			 kds->format == KDS_FORMAT_TUPSLOT ? "tuple-slot" : "unknown",
 			 kds->length, kds->ncols, kds->nitems, kds->nrooms, kds->nblocks);
 	for (i=0; i < kds->ncols; i++)
 	{
@@ -1135,7 +1153,9 @@ pgstrom_dump_data_store(pgstrom_data_store *pds)
 					 kds->colmeta[i].attnotnull,
 					 kds->colmeta[i].attalign,
 					 kds->colmeta[i].attlen,
-					 kds->is_column ? "cs_offset" : "rs_attnum",
+					 kds->format == KDS_FORMAT_COLUMN
+					 ? "cs_offset"
+					 : "rs_attnum",
 					 kds->colmeta[i].cs_offset);
 		}
 	}
