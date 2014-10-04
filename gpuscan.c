@@ -1661,7 +1661,7 @@ clserv_process_gpuscan(pgstrom_message *msg)
 
 	/* sanity checks */
 	Assert(StromTagIs(gpuscan, GpuScan));
-	Assert(!kds->is_column);
+	Assert(kds->format == KDS_FORMAT_COLUMN);
 	Assert(kresults->nrels == 1);
 	if (kds->nitems == 0)
 	{
