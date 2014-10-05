@@ -1057,7 +1057,7 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 							  kds,
 							  num_blockers,
 							  blockers,
-							  events + *ev_index);
+							  events + (*ev_index));
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clEnqueueWriteBuffer: %s",
@@ -1093,7 +1093,7 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 								  pds->blocks[i-n].page,
 								  num_blockers,
 								  blockers,
-								  events + *ev_index);
+								  events + (*ev_index));
 		if (rc != CL_SUCCESS)
 		{
 			clserv_log("failed on clEnqueueWriteBuffer: %s",

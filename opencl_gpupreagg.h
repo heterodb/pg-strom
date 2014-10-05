@@ -140,7 +140,7 @@ pg_common_vstore(__private cl_int *errcode,
 	cl_uint				offset = 0;
 
 	/* only column-store can be written in the kernel space */
-	if (!kds->column_form)
+	if (kds->format != KDS_FORMAT_COLUMN)
 	{
 		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 		return NULL;
@@ -218,8 +218,6 @@ pg_common_vstore(__private cl_int *errcode,
 			cl_uint		vl_offset							\
 				= (cl_uint)((__global char *)datum.value -	\
 							(__global char *)ktoast);		\
-			if (ktoast->length == TOASTBUF_MAGIC)			\
-				vl_offset -= ktoast->coldir[colidx];		\
 			*cs_addr = vl_offset;							\
 		}													\
 	}
@@ -488,9 +486,6 @@ gpupreagg_data_move(__private cl_int *errcode,
 			cl_uint		vl_offset =
 				(cl_uint)((__global cl_char *) src_datum -
 						  (__global cl_char *) ktoast);
-			if (ktoast->length == TOASTBUF_MAGIC)
-				vl_offset -= ktoast->coldir[colidx];
-
 			dest_addr += sizeof(cl_uint) * rowidx_dst;
 			*((__global cl_uint *) dest_addr) = vl_offset;
 		}

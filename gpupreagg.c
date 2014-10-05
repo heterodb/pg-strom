@@ -2144,7 +2144,7 @@ gpupreagg_load_next_outer(GpuPreAggState *gpas)
 {
 	PlanState		   *subnode = outerPlanState(gpas);
 	pgstrom_gpupreagg  *gpupreagg = NULL;
-	pgstrom_data_store *pds;
+	pgstrom_data_store *pds = NULL;
 	pgstrom_bulkslot	bulkdata;
 	pgstrom_bulkslot   *bulk = NULL;
 	struct timeval		tv1, tv2;
@@ -2774,7 +2774,7 @@ typedef struct
 	cl_uint				ev_kern_prep;	/* event index of kern_prep */
 	cl_uint				ev_kern_pagg;	/* event index of kern_pagg */
 	cl_uint				ev_index;
-	cl_event			events[50];
+	cl_event			events[FLEXIBLE_ARRAY_MEMBER];
 } clstate_gpupreagg;
 
 static void
@@ -3563,188 +3563,6 @@ clserv_launch_preagg_reduction(clstate_gpupreagg *clgpa, cl_uint nvalids)
 	return CL_SUCCESS;
 }
 
-#if 0
-static cl_int
-clserv_process_gpupreagg_row(clstate_gpupreagg *clgpa,
-							 kern_data_store *kds_head,
-							 tcache_row_store *trs)
-{
-	pgstrom_gpupreagg  *gpreagg = clgpa->gpreagg;
-	Size		offset;
-	cl_int		rc;
-
-	offset = STROMALIGN(offsetof(kern_data_store,
-								 colmeta[kds_head->ncols]));
-	rc = clEnqueueWriteBuffer(clgpa->kcmdq,
-							  clgpa->m_kds_in,
-							  CL_FALSE,
-							  offset,
-							  trs->kern.length,
-							  &trs->kern,
-							  0,
-							  NULL,
-							  &clgpa->events[clgpa->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
-		return rc;
-	}
-	clgpa->ev_index++;
-	gpreagg->msg.pfm.bytes_dma_send += trs->kern.length;
-	gpreagg->msg.pfm.num_dma_send++;
-
-	return CL_SUCCESS;
-}
-
-static cl_int
-clserv_process_gpupreagg_column(clstate_gpupreagg *clgpa,
-								kern_data_store *kds_head,
-								kern_toastbuf *ktoast_head,
-								tcache_column_store *tcs)
-{
-	pgstrom_gpupreagg  *gpreagg = clgpa->gpreagg;
-	Size		length;
-	Size		offset;
-	cl_uint		nrooms = kds_head->nitems;
-	cl_int		i, rc;
-
-	Assert(kds_head->ncols == tcs->ncols);
-	Assert(kds_head->nitems == tcs->nrows);
-	Assert(kds_head->nitems == kds_head->nrooms);
-
-	/* toast header if any */
-	if (ktoast_head)
-	{
-		Assert(clgpa->m_ktoast);
-		length = offsetof(kern_toastbuf, coldir[kds_head->ncols]);
-		rc = clEnqueueWriteBuffer(clgpa->kcmdq,
-								  clgpa->m_ktoast,
-								  CL_FALSE,
-								  0,
-								  length,
-								  ktoast_head,
-								  0,
-								  NULL,
-								  &clgpa->events[clgpa->ev_index]);
-		if (rc != CL_SUCCESS)
-		{
-			clserv_log("failed on clEnqueueWriteBuffer: %s",
-					   opencl_strerror(rc));
-			return rc;
-		}
-		clgpa->ev_index++;
-		gpreagg->msg.pfm.bytes_dma_send += length;
-		gpreagg->msg.pfm.num_dma_send++;
-	}
-
-	/* for each columns */
-	for (i=0; i < kds_head->ncols; i++)
-	{
-		if (!kds_head->colmeta[i].attvalid)
-			continue;
-
-		offset = kds_head->colmeta[i].cs_offset;
-		if (!kds_head->colmeta[i].attnotnull)
-		{
-			length = STROMALIGN(BITMAPLEN(nrooms));
-
-			/* MEMO: special case handing if we have a bulk-loading of
-			 * column-store from the underlying relation that has NOT
-			 * NULL constraint. Because kds_head is built according to
-			 * the target list of sub-plan, it drops this attribute,
-			 * so we simulate a bitmap of all non-null variables in
-			 * the kernel code.
-			 */
-			if (tcs->cdata[i].isnull)
-			{
-				rc = clEnqueueWriteBuffer(clgpa->kcmdq,
-										  clgpa->m_kds_in,
-										  CL_FALSE,
-										  offset,
-										  length,
-										  tcs->cdata[i].isnull,
-										  0,
-										  NULL,
-										  &clgpa->events[clgpa->ev_index]);
-			}
-			else
-			{
-				cl_uint		nullmap = (cl_uint)(-1);
-
-				rc = clEnqueueFillBuffer(clgpa->kcmdq,
-										 clgpa->m_kds_in,
-										 &nullmap,
-										 sizeof(cl_uint),
-										 offset,
-										 length,
-										 0,
-										 NULL,
-										 &clgpa->events[clgpa->ev_index]);
-
-			}
-			if (rc != CL_SUCCESS)
-			{
-				clserv_log("failed on clEnqueueWriteBuffer: %s",
-						   opencl_strerror(rc));
-				return rc;
-			}
-			clgpa->ev_index++;
-			gpreagg->msg.pfm.bytes_dma_send += length;
-			gpreagg->msg.pfm.num_dma_send++;
-
-			offset += length;
-		}
-		length = (kds_head->colmeta[i].attlen > 0
-				  ? kds_head->colmeta[i].attlen
-				  : sizeof(cl_uint)) * nrooms;
-		rc = clEnqueueWriteBuffer(clgpa->kcmdq,
-								  clgpa->m_kds_in,
-								  CL_FALSE,
-								  offset,
-								  length,
-								  tcs->cdata[i].values,
-								  0,
-								  NULL,
-								  &clgpa->events[clgpa->ev_index]);
-		if (rc != CL_SUCCESS)
-		{
-			clserv_log("failed on clEnqueueWriteBuffer: %s",
-					   opencl_strerror(rc));
-			return rc;
-		}
-		clgpa->ev_index++;
-		gpreagg->msg.pfm.bytes_dma_send += length;
-		gpreagg->msg.pfm.num_dma_send++;
-
-		if (tcs->cdata[i].toast)
-		{
-			Assert(kds_head->colmeta[i].attlen < 0);
-			Assert(clgpa->m_ktoast);
-			length = tcs->cdata[i].toast->tbuf_usage;
-			rc = clEnqueueWriteBuffer(clgpa->kcmdq,
-									  clgpa->m_ktoast,
-									  CL_FALSE,
-									  ktoast_head->coldir[i],
-									  length,
-									  tcs->cdata[i].toast,
-									  0,
-									  NULL,
-									  &clgpa->events[clgpa->ev_index]);
-			if (rc != CL_SUCCESS)
-			{
-				clserv_log("failed on clEnqueueWriteBuffer: %s",
-						   opencl_strerror(rc));
-				return rc;
-			}
-            clgpa->ev_index++;
-            gpreagg->msg.pfm.bytes_dma_send += length;
-			gpreagg->msg.pfm.num_dma_send++;
-		}
-	}
-	return CL_SUCCESS;
-}
-#endif
-
 static void
 clserv_process_gpupreagg(pgstrom_message *message)
 {
@@ -3771,8 +3589,8 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	 * FIXME: lenght of event object has to be adjusted according to
 	 *        the contents of row/column store.
 	 */
-	clgpa = calloc(1, (sizeof(clstate_gpupreagg) +
-					   sizeof(cl_event) * kds->nblocks));
+	clgpa = calloc(1, offsetof(clstate_gpupreagg,
+							   events[50 + kds->nblocks]));
 	if (!clgpa)
 	{
 		rc = CL_OUT_OF_HOST_MEMORY;
@@ -3933,24 +3751,20 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	gpreagg->msg.pfm.bytes_dma_send += length;
 	gpreagg->msg.pfm.num_dma_send++;
 
-	length = offsetof(kern_data_store, colmeta[kds_dest->ncols]);
-	rc = clEnqueueWriteBuffer(clgpa->kcmdq,
-							  clgpa->m_kds_in,
-							  CL_FALSE,
-							  0,
-							  length,
-							  kds_dest,
-							  0,
-							  NULL,
-							  &clgpa->events[clgpa->ev_index]);
+	/*
+	 * Enqueue DMA send on the input data-store
+	 */
+	rc = clserv_dmasend_data_store(pds,
+								   clgpa->kcmdq,
+								   clgpa->m_kds_in,
+								   clgpa->m_ktoast,
+								   0,
+								   NULL,
+								   &clgpa->ev_index,
+								   clgpa->events,
+								   &gpreagg->msg.pfm);
 	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
 		goto error;
-	}
-	clgpa->ev_index++;
-	gpreagg->msg.pfm.bytes_dma_send += length;
-	gpreagg->msg.pfm.num_dma_send++;
 
 	length = offsetof(kern_data_store, colmeta[kds_dest->ncols]);
 	rc = clEnqueueWriteBuffer(clgpa->kcmdq,
@@ -3988,16 +3802,6 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	clgpa->ev_index++;
 	gpreagg->msg.pfm.bytes_dma_send += length;
 	gpreagg->msg.pfm.num_dma_send++;
-
-	rc = clserv_dmasend_data_store(pds,
-								   clgpa->kcmdq,
-								   clgpa->m_kds_in,
-								   clgpa->m_ktoast,
-								   0,
-								   NULL,
-								   &clgpa->ev_index,
-								   clgpa->events,
-								   &gpreagg->msg.pfm);
 
 	/*
 	 * Kick the kernel functions.
