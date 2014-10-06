@@ -754,7 +754,7 @@ gpuhashjoin_add_path(PlannerInfo *root,
 	/* other cost fields of Path shall be set later */
 	gpath_new->cpath.methods = &gpuhashjoin_path_methods;
 	gpath_new->num_rels = 1;
-	gpath_new->outerpath = gpuscan_try_replace_seqscan(root, outer_path);
+	gpath_new->outerpath = gpuscan_try_replace_seqscan_path(root, outer_path);
 	gpath_new->inners[0].scan_path = inner_path;
 	gpath_new->inners[0].jointype = jointype;
 	gpath_new->inners[0].hash_clause = hash_clause;
@@ -792,7 +792,7 @@ gpuhashjoin_add_path(PlannerInfo *root,
 		gpath_new->cpath.methods = &gpuhashjoin_path_methods;
 		gpath_new->num_rels = gpath_sub->num_rels + 1;
 		gpath_new->outerpath =
-			gpuscan_try_replace_seqscan(root, gpath_sub->outerpath);
+			gpuscan_try_replace_seqscan_path(root, gpath_sub->outerpath);
 		memcpy(gpath_new->inners,
 			   gpath_sub->inners,
 			   offsetof(GpuHashJoinPath, inners[num_rels]) -

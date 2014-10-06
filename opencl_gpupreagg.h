@@ -585,9 +585,9 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 	__global cl_int			*rindex  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
 	__local pagg_datum *l_data
 		= (__local pagg_datum *)STROMALIGN(LOCAL_WORKMEM);
-	__global varlena *kparam_3 = kparam_get_value(kparams, 3);
-	cl_uint	pagg_natts = VARSIZE_EXHDR(kparam_3) / sizeof(cl_uint);
-	__global cl_uint *pagg_anums = (__global cl_uint *) VARDATA(kparam_3);
+	__global varlena *kparam_1 = kparam_get_value(kparams, 1);
+	cl_uint	pagg_natts = VARSIZE_EXHDR(kparam_1) / sizeof(cl_uint);
+	__global cl_uint *pagg_anums = (__global cl_uint *) VARDATA(kparam_1);
 
 	cl_int pindex		= 0;
 

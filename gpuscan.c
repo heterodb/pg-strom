@@ -36,6 +36,7 @@
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/spccache.h"
+#include "utils/syscache.h"
 #include "utils/tqual.h"
 #include "pg_strom.h"
 #include "opencl_gpuscan.h"
@@ -252,7 +253,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 }
 
 /*
- * gpuscan_try_replace_seqscan
+ * gpuscan_try_replace_seqscan_path
  *
  * It tries to replace the supplied SeqScan path by GpuScan, if it is
  * enough simple. Even though seq_path didn't involve any qualifiers,
@@ -260,7 +261,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
  * loading functionality.
  */
 Path *
-gpuscan_try_replace_seqscan(PlannerInfo *root, Path *path)
+gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path)
 {
 	RelOptInfo	   *rel;
 	ListCell	   *lc;
@@ -327,6 +328,138 @@ gpuscan_try_replace_seqscan(PlannerInfo *root, Path *path)
 	gpath->host_quals = NIL;
 
 	return (Path *)gpath;
+}
+
+
+/*
+ * gpuscan_try_replace_seqscan_plan
+ *
+ * It tries to replace the supplied SeqScan plan by GpuScan, if it is
+ * enough simple. Even though seq_path didn't involve any qualifiers,
+ * it makes sense if parent path is managed by PG-Strom because of bulk-
+ * loading functionality.
+ */
+Plan *
+gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt, Plan *plan)
+{
+	RangeTblEntry *rte;
+	GpuScanPlan	   *gscan;
+	Index			varno;
+	List		   *tlist;
+	ListCell	   *titem;
+	HeapTuple		tup;
+	int				nattrs;
+	int				anum;
+
+	/* only SeqScan can be replaced */
+	if (!IsA(plan, SeqScan))
+		return plan;
+	/* enable_gpuscan has to be turned on */
+	if (!enable_gpuscan)
+		return plan;
+	/* SeqScan with qualifier cannot be replaced, right now */
+	if (plan->qual != NIL)
+		return plan;
+
+	tlist = plan->targetlist;
+	varno = ((Scan *)plan)->scanrelid;
+	rte = rt_fetch(varno, pstmt->rtable);
+
+	/* SeqScan shall take a relation to be scanned */
+	if (rte->rtekind != RTE_RELATION)
+		return plan;	/* usually, shouldn't happen */
+	if (rte->relkind != RELKIND_RELATION &&
+		rte->relkind != RELKIND_TOASTVALUE &&
+		rte->relkind != RELKIND_MATVIEW)
+		return plan;	/* usually, shouldn't happen */
+
+	/*
+	 * Check whether the underlying SeqScan potentially takes projection,
+	 * or not. See the logic in tlist_matches_tupdesc().
+	 */
+
+	/* get number of attributes */
+	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(rte->relid));
+	if (!HeapTupleIsValid(tup))
+		return plan;	/* usually, shouldn't happen */
+	nattrs = ((Form_pg_class) GETSTRUCT(tup))->relnatts;
+	ReleaseSysCache(tup);
+
+	for (anum = 1, titem = list_head(tlist);
+		 anum <= nattrs;
+		 anum++, titem = lnext(titem))
+	{
+		Form_pg_attribute attr;
+		Var	   *var;
+
+		if (!titem)
+			return plan;	/* tlist too short */
+		if (!IsA(lfirst(titem), TargetEntry))
+			return plan;	/* sanity check; usually, shouldn't happen */
+		var = (Var *)((TargetEntry *) lfirst(titem))->expr;
+		if (!var || !IsA(var, Var))
+			return plan;	/* tlist item not a Var */
+		/* if these Asserts fail, planner messed up */
+		Assert(var->varno == varno);
+		Assert(var->varlevelsup == 0);
+		if (var->varattno != anum)
+			return plan;	/* out of order */
+
+		/* also checks attribute's property */
+		tup = SearchSysCache2(ATTNUM,
+							  ObjectIdGetDatum(rte->relid),
+							  Int16GetDatum(anum));
+		if (!HeapTupleIsValid(tup))
+			return plan;	/* usually, shouldn't happen */
+		attr = (Form_pg_attribute) GETSTRUCT(tup);
+		if (attr->attisdropped)
+		{
+			ReleaseSysCache(tup);
+			return plan;	/* table contains dropped columns */
+		}
+
+		/*
+		 * Note: usually the Var's type should match the tupdesc exactly,
+		 * but in situations involving unions of columns that have different
+		 * typmods, the Var may have come from above the union and hence have
+		 * typmod -1.
+		 */
+		if (var->vartype != attr->atttypid ||
+			(var->vartypmod != attr->atttypmod &&
+			 var->vartypmod != -1))
+		{
+			ReleaseSysCache(tup);
+			return plan;	/* type mismatch */
+		}
+		ReleaseSysCache(tup);
+	}
+	if (titem)
+		return plan;		/* tlist too long */
+
+	/*
+	 * FIXME: I have no idea to determine oid handling here.
+	 * Do it later
+	 */
+
+	/*
+	 * OK, SeqScan can be replaced by GpuScan
+	 */
+	gscan = palloc0(sizeof(GpuScanPlan));
+	gscan->cplan.plan.type = T_CustomPlan;
+	gscan->cplan.plan.targetlist = tlist;
+	gscan->cplan.plan.qual = NIL;
+	gscan->cplan.plan.lefttree = NULL;
+	gscan->cplan.plan.righttree = NULL;
+	gscan->cplan.methods = &gpuscan_plan_methods;
+
+	gscan->scanrelid = varno;
+	gscan->kern_source = NULL;
+	gscan->extra_flags = DEVKERNEL_NEEDS_GPUSCAN;
+	gscan->used_params = NIL;
+    gscan->used_vars = NIL;
+    gscan->dev_clauses = NULL;
+
+	return (Plan *) gscan;
 }
 
 /*
@@ -1661,7 +1794,7 @@ clserv_process_gpuscan(pgstrom_message *msg)
 
 	/* sanity checks */
 	Assert(StromTagIs(gpuscan, GpuScan));
-	Assert(kds->format == KDS_FORMAT_COLUMN);
+	Assert(kds->format == KDS_FORMAT_ROW);
 	Assert(kresults->nrels == 1);
 	if (kds->nitems == 0)
 	{

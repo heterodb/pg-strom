@@ -313,10 +313,9 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 	ListCell   *cell;
 
 	outer_plan = outerPlan(agg);
-	if (agg->aggstrategy == AGG_SORTED)
+	if (IsA(outer_plan, Sort))
 	{
 		sort_plan = outer_plan;
-		Assert(IsA(sort_plan, Sort));
 		outer_plan = outerPlan(sort_plan);
 	}
 
@@ -1839,14 +1838,16 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	gpreagg->numCols = agg->numCols;
 	gpreagg->grpColIdx = pmemcpy(agg->grpColIdx,
 								 sizeof(AttrNumber) * agg->numCols);
-	if (agg->aggstrategy != AGG_SORTED)
-		outerPlan(gpreagg) = outerPlan(agg);
+	if (!IsA(outerPlan(agg), Sort))
+		outerPlan(gpreagg) = gpuscan_try_replace_seqscan_plan(pstmt,
+															  outerPlan(agg));
 	else
 	{
 		Sort   *sort_plan = (Sort *) outerPlan(agg);
+		Plan   *outer_plan = outerPlan(sort_plan);
 
-		Assert(IsA(sort_plan, Sort));
-		outerPlan(gpreagg) = outerPlan(sort_plan);
+		outerPlan(gpreagg) = gpuscan_try_replace_seqscan_plan(pstmt,
+															  outer_plan);
 	}
 
 	/*
@@ -1892,7 +1893,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	agg->plan.targetlist = agg_tlist;
 	agg->plan.qual = agg_quals;
 
-	if (agg->aggstrategy != AGG_SORTED)
+	if (!IsA(outerPlan(agg), Sort))
 		outerPlan(agg) = &gpreagg->cplan.plan;
 	else
 	{
@@ -3585,12 +3586,9 @@ clserv_process_gpupreagg(pgstrom_message *message)
 
 	/*
 	 * state object of gpupreagg
-	 *
-	 * FIXME: lenght of event object has to be adjusted according to
-	 *        the contents of row/column store.
 	 */
 	clgpa = calloc(1, offsetof(clstate_gpupreagg,
-							   events[50 + kds->nblocks]));
+							   events[50 + 10 * kds->nblocks]));
 	if (!clgpa)
 	{
 		rc = CL_OUT_OF_HOST_MEMORY;
@@ -3842,9 +3840,8 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	{
 
 		rc = clserv_launch_set_rindex(clgpa, nvalids);
-		if (rc != CL_SUCCESS) {
+		if (rc != CL_SUCCESS)
 			goto error;
-		}
 	}
 	else if (nvalids > 0)
 	{
