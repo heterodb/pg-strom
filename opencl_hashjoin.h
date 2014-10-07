@@ -99,26 +99,17 @@ typedef struct
 	cl_uint			next;	/* offset of the next */
 	cl_uint			hash;	/* 32-bit hash value */
 	cl_uint			rowid;	/* identifier of inner rows */
-	cl_char			matched;/* flag to track whether this entry get matched */
-	/* above fields take 13bytes, so the keydata will usually start from
-	 * the unaligned address. However, header portion keydata is used to
-	 * nullmap. As long as nkey is less than or equal to 24 (almost right),
-	 * key values shall be start from the aligned offset without loss.
-	 */
-	cl_char			keydata[FLEXIBLE_ARRAY_MEMBER];
+	cl_uint			t_len;	/* length of the tuple */
+	HeapTupleHeaderData htup;	/* tuple of the inner relation */
 } kern_hashentry;
 
 typedef struct
 {
+	cl_uint			ncols;		/* number of inner relation's columns */
 	cl_uint			nslots;		/* width of hash slot */
-	cl_uint			nkeys;		/* number of keys to be compared */
-	cl_char			is_outer;	/* true, if outer join */
-	cl_char			__padding__[3];
-	struct {
-		cl_char		attnotnull;	/* true, if always not null */
-		cl_char		attalign;	/* type of alignment */
-		cl_short	attlen;		/* length of type */
-	} colmeta[FLEXIBLE_ARRAY_MEMBER];	/* simplified kern_colmeta */
+	cl_char			is_outer;	/* true, if outer join (not supported now) */
+	cl_char			__padding__[7];	/* for 64bit alignment */
+	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];
 } kern_hashtable;
 
 typedef struct
@@ -141,7 +132,9 @@ typedef struct
 #define KERN_HASHTABLE_SLOT(khtable)								\
 	((__global cl_uint *)((__global char *)(khtable)+				\
 						  LONGALIGN(offsetof(kern_hashtable,		\
-											 colmeta[(khtable)->nkeys]))))
+											 colmeta[(khtable)->ncols]))))
+#define KERN_HASHENTRY_SIZE(khentry)								\
+	LONGALIGN(offsetof(kern_hashentry, htup) + (khentry)->t_len)
 
 static inline __global kern_hashentry *
 KERN_HASH_FIRST_ENTRY(__global kern_hashtable *khtable, cl_uint hash)
@@ -166,7 +159,7 @@ KERN_HASH_NEXT_ENTRY(__global kern_hashtable *khtable,
 }
 
 /*
- * Sequential Scan using GPU/MIC acceleration
+ * Hash-Joining using GPU/MIC acceleration
  *
  * It packs a kern_parambuf and kern_resultbuf structure within a continuous
  * memory ares, to transfer (usually) small chunk by one DMA call.
@@ -251,8 +244,6 @@ typedef struct
 	(offsetof(kern_resultbuf,					\
 		results[KERN_HASHJOIN_RESULTBUF(khashjoin)->nrels *	\
 				KERN_HASHJOIN_RESULTBUF(khashjoin)->nrooms]))
-
-
 
 #ifdef OPENCL_DEVICE_CODE
 /*
@@ -402,63 +393,61 @@ out:
  */
 #define STROMCL_SIMPLE_HASHREF_TEMPLATE(NAME,BASE)				\
 	static pg_##NAME##_t										\
-	pg_##NAME##_hashref(__global kern_hashentry *kentry,		\
+	pg_##NAME##_hashref(__global kern_hashtable *khtable,		\
+						__global kern_hashentry *kentry,		\
 						__private int *p_errcode,				\
-						cl_uint key_index,						\
-						cl_uint key_offset)						\
+						cl_uint colidx)							\
 	{															\
 		pg_##NAME##_t result;									\
-																\
-		if (att_isnull(key_index, kentry->keydata))				\
+		__global BASE *addr										\
+			= kern_get_datum_tuple(khtable->colmeta,			\
+								   &kentry->htup,				\
+								   colidx);						\
+		if (!addr)												\
 			result.isnull = true;								\
 		else													\
 		{														\
-			__global BASE *ptr = (__global BASE *)				\
-				((__global char *)(kentry) + (key_offset));		\
 			result.isnull = false;								\
-			result.value = *ptr;								\
+			result.value = *addr;								\
 		}														\
 		return result;											\
 	}
 
 static pg_varlena_t
-pg_varlena_hashref(__global kern_hashentry *kentry,
+pg_varlena_hashref(__global kern_hashtable *khtable,
+				   __global kern_hashentry *kentry,
 				   __private int *p_errcode,
-				   cl_uint key_index,
-				   cl_uint key_offset)
+				   cl_uint colidx)
 {
 	pg_varlena_t	result;
-	__global varlena *vl;
-
-	if (att_isnull(key_index, kentry->keydata))
+	__global varlena *vl_ptr
+		= kern_get_datum_tuple(khtable->colmeta,
+							   &kentry->htup,
+							   colidx);
+	if (!vl_ptr)
 		result.isnull = true;
+	else if (VARATT_IS_4B_U(vl_ptr) || VARATT_IS_1B(vl_ptr))
+	{
+		result.value = vl_ptr;
+		result.isnull = false;
+	}
 	else
 	{
-		vl = (__global varlena *)((__global char *)kentry +
-								  key_offset);
-		if (VARATT_IS_4B_U(vl) || VARATT_IS_1B(vl))
-		{
-			result.value = vl;
-			result.isnull = false;
-		}
-		else
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(p_errcode, StromError_CpuReCheck);
-		}
+		result.isnull = true;
+		STROM_SET_ERROR(p_errcode, StromError_CpuReCheck);
 	}
 	return result;
 }
 
 #define STROMCL_VARLENA_HASHREF_TEMPLATE(NAME)				\
 	static pg_##NAME##_t									\
-	pg_##NAME##_hashref(__global kern_hashentry *kentry,	\
+	pg_##NAME##_hashref(__global kern_hashtable *khtable,	\
+						__global kern_hashentry *kentry,	\
 						__private int *p_errcode,			\
-						cl_uint key_index,					\
-						cl_uint key_offset)					\
+						cl_uint colidx)						\
 	{														\
-		return pg_varlena_hashref(kentry, p_errcode,		\
-								  key_index,key_offset);	\
+		return pg_varlena_hashref(khtable, kentry,			\
+								  p_errcode, colidx);		\
 	}
 
 /*
@@ -493,7 +482,7 @@ pg_varlena_hashref(__global kern_hashentry *kentry,
 
 #define STROMCL_VARLENA_HASHKEY_TEMPLATE(NAME)				\
 	static inline cl_uint									\
-	 pg_##NAME##_hashkey(__global kern_multihash *kmhash,	\
+	pg_##NAME##_hashkey(__global kern_multihash *kmhash,	\
 						cl_uint hash, pg_##NAME##_t datum)	\
 	{														\
 		__global const cl_uint *crc32_table					\
