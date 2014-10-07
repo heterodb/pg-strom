@@ -2344,7 +2344,7 @@ gpupreagg_next_tuple(GpuPreAggState *gpas)
 					index = vl_ofs / BLCKSZ;
 					Assert(index < kds->nblocks);
 					page = pds->blocks[index].page;
-					vl_ptr = (char *)page + (vl_ofs + (BLCKSZ-1));
+					vl_ptr = (char *)page + (vl_ofs & (BLCKSZ-1));
 				}
 				else
 				{
@@ -2846,7 +2846,6 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 									 NULL);
 		if (rc != CL_SUCCESS)
 			goto skip_perfmon;
-		gpreagg->msg.pfm.num_kern_prep++;
 		gpreagg->msg.pfm.time_kern_prep += (tv_end - tv_start) / 1000;
 
 		/*
@@ -2874,7 +2873,6 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
                 goto skip_perfmon;
             tv_end = Max(tv_end, temp);
         }
-		gpreagg->msg.pfm.num_kern_sort++;
 		gpreagg->msg.pfm.time_kern_sort += (tv_end - tv_start) / 1000;
 
 		/*
@@ -2895,7 +2893,6 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 									 NULL);
 		if (rc != CL_SUCCESS)
 			goto skip_perfmon;
-		gpreagg->msg.pfm.num_kern_exec++;
 		gpreagg->msg.pfm.time_kern_exec += (tv_end - tv_start) / 1000;
 
 		/*
@@ -3074,7 +3071,7 @@ clserv_launch_preagg_preparation(clstate_gpupreagg *clgpa, cl_uint nitems)
 		return rc;
 	}
 	clgpa->ev_kern_prep = clgpa->ev_index++;
-	clgpa->gpreagg->msg.pfm.num_kern_exec++;
+	clgpa->gpreagg->msg.pfm.num_kern_prep++;
 
 	return CL_SUCCESS;
 }
@@ -3166,7 +3163,7 @@ clserv_launch_set_rindex(clstate_gpupreagg *clgpa, cl_uint nvalids)
 		return rc;
 	}
 	clgpa->ev_index++;
-	clgpa->gpreagg->msg.pfm.num_kern_exec++;
+	clgpa->gpreagg->msg.pfm.num_kern_sort++;
 
 	return CL_SUCCESS;
 }
@@ -3249,7 +3246,7 @@ clserv_launch_bitonic_local(clstate_gpupreagg *clgpa,
 		return rc;
 	}
 	clgpa->ev_index++;
-	clgpa->gpreagg->msg.pfm.num_kern_exec++;
+	clgpa->gpreagg->msg.pfm.num_kern_sort++;
 
 	return CL_SUCCESS;
 }
@@ -3367,7 +3364,7 @@ clserv_launch_bitonic_step(clstate_gpupreagg *clgpa,
 		return rc;
 	}
 	clgpa->ev_index++;
-	clgpa->gpreagg->msg.pfm.num_kern_exec++;
+	clgpa->gpreagg->msg.pfm.num_kern_sort++;
 
 	return CL_SUCCESS;
 }
@@ -3450,7 +3447,7 @@ clserv_launch_bitonic_merge(clstate_gpupreagg *clgpa,
 		return rc;
 	}
 	clgpa->ev_index++;
-	clgpa->gpreagg->msg.pfm.num_kern_exec++;
+	clgpa->gpreagg->msg.pfm.num_kern_sort++;
 
 	return CL_SUCCESS;
 }

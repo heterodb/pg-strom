@@ -471,10 +471,11 @@ pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 	if (pfm->num_kern_prep > 0)
 	{
 		multi_kernel = true;
-		snprintf(buf, sizeof(buf), "total: %s, avg: %s",
+		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
 				 usecond_unitary_format((double)pfm->time_kern_prep),
 				 usecond_unitary_format((double)pfm->time_kern_prep /
-										(double)pfm->num_kern_prep));
+										(double)pfm->num_kern_prep),
+				 pfm->num_kern_prep);
         ExplainPropertyText("prep kernel exec", buf, es);
 	}
 
@@ -482,10 +483,11 @@ pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 	if (pfm->num_kern_sort > 0)
 	{
 		multi_kernel = true;
-		snprintf(buf, sizeof(buf), "total: %s, avg: %s",
+		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
 				 usecond_unitary_format((double)pfm->time_kern_sort),
 				 usecond_unitary_format((double)pfm->time_kern_sort /
-										(double)pfm->num_kern_sort));
+										(double)pfm->num_kern_sort),
+				 pfm->num_kern_sort);
         ExplainPropertyText("sort kernel exec", buf, es);
 	}
 
@@ -494,10 +496,11 @@ pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 		const char	   *label =
 			(multi_kernel ? "main kernel exec" : "kernel exec");
 
-		snprintf(buf, sizeof(buf), "total: %s, avg: %s",
+		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
 				 usecond_unitary_format((double)pfm->time_kern_exec),
 				 usecond_unitary_format((double)pfm->time_kern_exec /
-										(double)pfm->num_kern_exec));
+										(double)pfm->num_kern_exec),
+				 pfm->num_kern_exec);
 		ExplainPropertyText(label, buf, es);
 	}
 }
