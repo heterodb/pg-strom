@@ -2206,15 +2206,10 @@ gpuhashjoin_begin(CustomPlan *node, EState *estate, int eflags)
 	return &ghjs->cps;
 }
 
-static cl_ulong dtime = 0;
-
 static void
 pgstrom_release_gpuhashjoin(pgstrom_message *message)
 {
 	pgstrom_gpuhashjoin *gpuhashjoin = (pgstrom_gpuhashjoin *) message;
-	struct timeval tv1, tv2;
-
-	gettimeofday(&tv1, NULL);
 
 	/* unlink message queue and device program */
 	pgstrom_put_queue(gpuhashjoin->msg.respq);
@@ -2230,9 +2225,6 @@ pgstrom_release_gpuhashjoin(pgstrom_message *message)
 	if (gpuhashjoin->khashjoin)
 		pgstrom_shmem_free(gpuhashjoin->khashjoin);
 	pgstrom_shmem_free(gpuhashjoin);
-
-	gettimeofday(&tv2, NULL);
-	dtime += timeval_diff(&tv1, &tv2);
 }
 
 static pgstrom_gpuhashjoin *
@@ -2725,8 +2717,6 @@ static void
 gpuhashjoin_end(CustomPlanState *node)
 {
 	GpuHashJoinState   *ghjs = (GpuHashJoinState *) node;
-
-	elog(INFO, "dtime = %f", (double)dtime / 1000000.0);
 
 	/*
 	 *  Free the exprcontext
