@@ -418,40 +418,54 @@ void
 pgstrom_release_data_store(pgstrom_data_store *pds)
 {
 	kern_data_store	   *kds = pds->kds;
-	int		i;
+	ResourceOwner		saved_owner;
+	int					i;
 
-	Assert(kds->nblocks <= pds->max_blocks);
-	for (i=0; i < kds->nblocks; i++)
+	saved_owner = CurrentResourceOwner;
+	PG_TRY();
 	{
-		Page	page = pds->blocks[i].page;
-		Buffer	buffer = pds->blocks[i].buffer;
+		CurrentResourceOwner = pds->resowner;
+		Assert(kds->nblocks <= pds->max_blocks);
+		for (i = kds->nblocks - 1; i >= 0; i--)
+		{
+			Page	page = pds->blocks[i].page;
+			Buffer	buffer = pds->blocks[i].buffer;
 
-		/*
-		 * NOTE: A page buffer is assigned on the PG-Strom's shared memory,
-		 * if referenced table is local / temporary relation (because its
-		 * buffer is originally assigned on the private memory; invisible
-		 * from OpenCL server process).
-		 *
-		 * Also note that, we don't need to call ReleaseBuffer() in case
-		 * when the current context is OpenCL server or cleanup callback
-		 * of resource-tracker.
-		 * If pgstrom_release_data_store() is called on the OpenCL server
-		 * context, it means the source transaction was already aborted
-		 * thus the shared-buffers being mapped were already released.
-		 * (It leads probability to send invalid region by DMA; so
-		 * kern_get_datum_rs() takes careful data validation.)
-		 * If pgstrom_release_data_store() is called under the cleanup
-		 * callback context of resource-tracker, it means shared-buffers
-		 * being pinned by the current transaction were already released
-		 * by the built-in code prior to PG-Strom's cleanup. So, no need
-		 * to do anything by ourselves.
-		 */
-		if (BufferIsLocal(buffer) || BufferIsInvalid(buffer))
-			pgstrom_shmem_free(page);
-		else if (!pgstrom_i_am_clserv &&
-				 !pgstrom_restrack_cleanup_context())
-			ReleaseBuffer(buffer);
+			/*
+			 * NOTE: A page buffer is assigned on the PG-Strom's shared memory,
+			 * if referenced table is local / temporary relation (because its
+			 * buffer is originally assigned on the private memory; invisible
+			 * from OpenCL server process).
+			 *
+			 * Also note that, we don't need to call ReleaseBuffer() in case
+			 * when the current context is OpenCL server or cleanup callback
+			 * of resource-tracker.
+			 * If pgstrom_release_data_store() is called on the OpenCL server
+			 * context, it means the source transaction was already aborted
+			 * thus the shared-buffers being mapped were already released.
+			 * (It leads probability to send invalid region by DMA; so
+			 * kern_get_datum_rs() takes careful data validation.)
+			 * If pgstrom_release_data_store() is called under the cleanup
+			 * callback context of resource-tracker, it means shared-buffers
+			 * being pinned by the current transaction were already released
+			 * by the built-in code prior to PG-Strom's cleanup. So, no need
+			 * to do anything by ourselves.
+			 */
+			if (BufferIsLocal(buffer) || BufferIsInvalid(buffer))
+				pgstrom_shmem_free(page);
+			else if (!pgstrom_i_am_clserv &&
+					 !pgstrom_restrack_cleanup_context())
+				ReleaseBuffer(buffer);
+		}
 	}
+	PG_CATCH();
+	{
+		CurrentResourceOwner = saved_owner;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	CurrentResourceOwner = saved_owner;
+
 	if (pds->ktoast)
 		pgstrom_shmem_free(pds->ktoast);
 	pgstrom_shmem_free(pds->kds);
@@ -517,12 +531,25 @@ pgstrom_create_data_store_row(TupleDesc tupdesc,
 		pgstrom_shmem_free(kds);
 		elog(ERROR, "out of shared memory");
 	}
-	pds->sobj.stag = StromTag_DataStore;
-	SpinLockInit(&pds->lock);
-	pds->refcnt = 1;
-	pds->kds = kds;
-	pds->ktoast = NULL;	/* never used */
-	pds->max_blocks = max_blocks;
+	/* ResourceOwnerCreate() may raise an error */
+	PG_TRY();
+	{
+		pds->sobj.stag = StromTag_DataStore;
+		SpinLockInit(&pds->lock);
+		pds->refcnt = 1;
+		pds->kds = kds;
+		pds->ktoast = NULL;	/* never used */
+		pds->resowner = ResourceOwnerCreate(CurrentResourceOwner,
+											"pgstrom_data_store");
+		pds->max_blocks = max_blocks;
+	}
+	PG_CATCH();
+	{
+		pgstrom_shmem_free(kds);
+		pgstrom_shmem_free(pds);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	return pds;
 }
@@ -611,7 +638,8 @@ pgstrom_create_data_store_column(TupleDesc tupdesc,
 	SpinLockInit(&pds->lock);
 	pds->refcnt = 1;
 	pds->kds = kds;
-	pds->ktoast = NULL;	/* expand on demand */
+	pds->ktoast = NULL;		/* expand on demand */
+	pds->resowner = NULL;	/* should not be used to column-store */
 	pds->max_blocks = 0;
 
 	return pds;
@@ -648,114 +676,133 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 								Snapshot snapshot, bool page_prune)
 {
 	kern_data_store	*kds = pds->kds;
-	kern_rowitem *kri;
-	Buffer		buffer;
-	Page		page;
-	int			lines;
-	int			ntup;
-	OffsetNumber lineoff;
-	ItemId		lpp;
-	bool		all_visible;
+	kern_rowitem   *kri;
+	Buffer			buffer;
+	Page			page;
+	int				lines;
+	int				ntup;
+	OffsetNumber	lineoff;
+	ItemId			lpp;
+	bool			all_visible;
+	ResourceOwner	saved_owner;
 
 	/* only row-store can block read */
 	Assert(kds->format == KDS_FORMAT_ROW);
 	/* we never use all the block slots */
 	Assert(kds->nblocks < pds->max_blocks);
+	/* we need a resource owner to track shared buffer */
+	Assert(pds->resowner != NULL);
 
 	CHECK_FOR_INTERRUPTS();
 
-	buffer = ReadBuffer(rel, blknum);
-
-	/* Just like heapgetpage(), however, jobs we focus on is OLAP workload,
-	 * so it's uncertain whether we should vacuum the page here.
-	 */
-	if (page_prune)
-		heap_page_prune_opt(rel, buffer);
-
-	/* we will check tuple's visibility under the shared lock */
-	LockBuffer(buffer, BUFFER_LOCK_SHARE);
-	page = (Page) BufferGetPage(buffer);
-	lines = PageGetMaxOffsetNumber(page);
-	ntup = 0;
-
-	/* Check whether we have enough rooms to store expected rowitems
-	 * and shared buffer pages, any mode.
-	 * If not, we have to inform the caller this block shall be loaded
-	 * on the next data-store.
-	 */
-	if (kds->nitems + lines > kds->nrooms ||
-		STROMALIGN(offsetof(kern_data_store, colmeta[kds->ncols])) +
-		STROMALIGN(sizeof(kern_rowitem) * (kds->nitems + lines)) +
-		BLCKSZ * kds->nblocks >= BLCKSZ * pds->max_blocks)
+	saved_owner = CurrentResourceOwner;
+	PG_TRY();
 	{
-		UnlockReleaseBuffer(buffer);
-		return -1;
-	}
+		CurrentResourceOwner = pds->resowner;
 
-	/*
-	 * Logic is almost same as heapgetpage() doing.
-	 */
-	all_visible = PageIsAllVisible(page) && !snapshot->takenDuringRecovery;
+		/* load the target buffer */
+		buffer = ReadBuffer(rel, blknum);
 
-	/* TODO: make SerializationNeededForRead() an external function
-	 * on the core side. It kills necessity of setting up HeapTupleData
-	 * when all_visible and non-serialized transaction.
-	 */
-	kri = KERN_DATA_STORE_ROWITEM(kds, kds->nitems);
-	for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(page, lineoff);
-		 lineoff <= lines;
-		 lineoff++, lpp++)
-	{
-		HeapTupleData	tup;
-		bool			valid;
+		/* Just like heapgetpage(), however, jobs we focus on is OLAP
+		 * workload, so it's uncertain whether we should vacuum the page
+		 * here.
+		 */
+		if (page_prune)
+			heap_page_prune_opt(rel, buffer);
 
-		if (!ItemIdIsNormal(lpp))
-			continue;
+		/* we will check tuple's visibility under the shared lock */
+		LockBuffer(buffer, BUFFER_LOCK_SHARE);
+		page = (Page) BufferGetPage(buffer);
+		lines = PageGetMaxOffsetNumber(page);
+		ntup = 0;
 
-		tup.t_tableOid = RelationGetRelid(rel);
-		tup.t_data = (HeapTupleHeader) PageGetItem((Page) page, lpp);
-		tup.t_len = ItemIdGetLength(lpp);
-		ItemPointerSet(&tup.t_self, blknum, lineoff);
+		/* Check whether we have enough rooms to store expected rowitems
+		 * and shared buffer pages, any mode.
+		 * If not, we have to inform the caller this block shall be loaded
+		 * on the next data-store.
+		 */
+		if (kds->nitems + lines > kds->nrooms ||
+			STROMALIGN(offsetof(kern_data_store, colmeta[kds->ncols])) +
+			STROMALIGN(sizeof(kern_rowitem) * (kds->nitems + lines)) +
+			BLCKSZ * kds->nblocks >= BLCKSZ * pds->max_blocks)
+		{
+			UnlockReleaseBuffer(buffer);
+			CurrentResourceOwner = saved_owner;
+			return -1;
+		}
 
-		if (all_visible)
-			valid = true;
+		/*
+		 * Logic is almost same as heapgetpage() doing.
+		 */
+		all_visible = PageIsAllVisible(page) && !snapshot->takenDuringRecovery;
+
+		/* TODO: make SerializationNeededForRead() an external function
+		 * on the core side. It kills necessity of setting up HeapTupleData
+		 * when all_visible and non-serialized transaction.
+		 */
+		kri = KERN_DATA_STORE_ROWITEM(kds, kds->nitems);
+		for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(page, lineoff);
+			 lineoff <= lines;
+			 lineoff++, lpp++)
+		{
+			HeapTupleData	tup;
+			bool			valid;
+
+			if (!ItemIdIsNormal(lpp))
+				continue;
+
+			tup.t_tableOid = RelationGetRelid(rel);
+			tup.t_data = (HeapTupleHeader) PageGetItem((Page) page, lpp);
+			tup.t_len = ItemIdGetLength(lpp);
+			ItemPointerSet(&tup.t_self, blknum, lineoff);
+
+			if (all_visible)
+				valid = true;
+			else
+				valid = HeapTupleSatisfiesVisibility(&tup, snapshot, buffer);
+
+			CheckForSerializableConflictOut(valid, rel, &tup,
+											buffer, snapshot);
+			if (!valid)
+				continue;
+
+			kri->block_ofs = kds->nblocks;
+			kri->item_ofs = lineoff;
+			kri++;
+			ntup++;
+		}
+		LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
+		Assert(ntup <= MaxHeapTuplesPerPage);
+		Assert(kds->nitems + ntup <= kds->nrooms);
+		kds->nitems += ntup;
+
+		/*
+		 * NOTE: Local buffers are allocated on the private address space,
+		 * it is not visible to opencl server. so, we make a duplication
+		 * instead. Shared buffer can be referenced with zero-copy.
+		 */
+		pds->blocks[kds->nblocks].buffer = buffer;
+		if (!BufferIsLocal(buffer))
+			pds->blocks[kds->nblocks].page = page;
 		else
-			valid = HeapTupleSatisfiesVisibility(&tup, snapshot, buffer);
+		{
+			Page	dup_page = pgstrom_shmem_alloc(BLCKSZ);
 
-		CheckForSerializableConflictOut(valid, rel, &tup,
-										buffer, snapshot);
-		if (!valid)
-			continue;
-
-		kri->block_ofs = kds->nblocks;
-		kri->item_ofs = lineoff;
-		kri++;
-		ntup++;
+			if (!dup_page)
+				elog(ERROR, "out of memory");
+			memcpy(dup_page, page, BLCKSZ);
+			pds->blocks[kds->nblocks].page = dup_page;
+			ReleaseBuffer(buffer);
+		}
+		kds->nblocks++;
 	}
-	LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
-	Assert(ntup <= MaxHeapTuplesPerPage);
-	Assert(kds->nitems + ntup <= kds->nrooms);
-	kds->nitems += ntup;
-
-	/*
-	 * NOTE: Local buffers are allocated on the private address space,
-	 * it is not visible to opencl server. so, we make a duplication
-	 * instead. Shared buffer can be referenced with zero-copy.
-	 */
-	pds->blocks[kds->nblocks].buffer = buffer;
-	if (!BufferIsLocal(buffer))
-		pds->blocks[kds->nblocks].page = page;
-	else
+	PG_CATCH();
 	{
-		Page	dup_page = pgstrom_shmem_alloc(BLCKSZ);
-
-		if (!dup_page)
-			elog(ERROR, "out of memory");
-		memcpy(dup_page, page, BLCKSZ);
-		pds->blocks[kds->nblocks].page = dup_page;
-		ReleaseBuffer(buffer);
+		CurrentResourceOwner = saved_owner;
+		PG_RE_THROW();
 	}
-	kds->nblocks++;
+	PG_END_TRY();
+	CurrentResourceOwner = saved_owner;
 
 	return ntup;
 }

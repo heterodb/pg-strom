@@ -22,6 +22,7 @@
 #include "nodes/primnodes.h"
 #include "storage/lock.h"
 #include "storage/spin.h"
+#include "utils/resowner.h"
 #include <pthread.h>
 #include <unistd.h>
 #include <limits.h>
@@ -297,6 +298,7 @@ typedef struct {
 	volatile int		refcnt;
 	kern_data_store	   *kds;	/* reference to kern_data_store */
 	kern_toastbuf	   *ktoast;	/* reference to kern_toastbuf */
+	ResourceOwner		resowner;	/* !!NOTE: private address!!*/
 
 	/*
 	 * MEMO: Fields below are valid only when data store is row-format.
