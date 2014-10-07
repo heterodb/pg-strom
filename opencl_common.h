@@ -749,6 +749,46 @@ typedef struct varatt_indirect
  * needs to be care about address of the variables being referenced.
  */
 static inline __global void *
+kern_get_datum_tuple(__global kern_colmeta *colmeta,
+					 HeapTuple htup, cl_uint colidx)
+{
+	cl_uint		offset = htup->t_hoff;
+	cl_uint		i, ncols = (htup->t_infomask2 & HEAP_NATTS_MASK);
+
+	/* shortcut if colidx is obviously out of range */
+	if (colidx >= ncols)
+		return NULL;
+
+	for (i=0; i < ncols; i++)
+	{
+		if ((htup->t_infomask & HEAP_HASNULL) != 0 &&
+			att_isnull(i, htup->t_bits))
+		{
+			if (i == colidx)
+				return NULL;
+		}
+		else
+		{
+			__global char  *addr;
+
+			if (colmeta[i].attlen > 0)
+				offset = TYPEALIGN(colmeta[i].attalign, offset);
+			else if (!VARATT_NOT_PAD_BYTE((__global char *)htup + offset))
+				offset = TYPEALIGN(colmeta[i].attalign, offset);
+
+			addr = ((__global char *) htup + offset);
+			if (i == colidx)
+				return addr;
+
+			offset += (colmeta[i].attlen > 0
+					   ? colmeta[i].attlen
+					   : VARSIZE_ANY(addr));
+		}
+	}
+	return NULL;
+}
+
+static inline __global void *
 kern_get_datum_rs(__global kern_data_store *kds,
 				  cl_uint colidx, cl_uint rowidx)
 {
@@ -759,8 +799,6 @@ kern_get_datum_rs(__global kern_data_store *kds,
 	cl_ushort	item_ofs;
 	cl_ushort	item_max;
 	ItemIdData	item_id;
-	cl_uint		i, ncols;
-	cl_uint		offset;
 
 	if (colidx >= kds->ncols || rowidx >= kds->nitems)
 		return NULL;
@@ -785,39 +823,7 @@ kern_get_datum_rs(__global kern_data_store *kds,
 	htup = (__global HeapTupleHeaderData *)
 		((__global char *)page + ItemIdGetOffset(item_id));
 
-	offset = htup->t_hoff;
-	ncols = (htup->t_infomask2 & HEAP_NATTS_MASK);
-	/* shortcut if colidx is obviously out of range */
-	if (colidx >= ncols)
-		return NULL;
-
-	for (i=0; i < ncols; i++)
-	{
-		if ((htup->t_infomask & HEAP_HASNULL) != 0 &&
-			att_isnull(i, htup->t_bits))
-		{
-			if (i == colidx)
-				return NULL;
-		}
-		else
-		{
-			__global char  *addr;
-
-			if (kds->colmeta[i].attlen > 0)
-				offset = TYPEALIGN(kds->colmeta[i].attalign, offset);
-			else if (!VARATT_NOT_PAD_BYTE((__global char *)htup + offset))
-				offset = TYPEALIGN(kds->colmeta[i].attalign, offset);
-
-			addr = ((__global char *) htup + offset);
-			if (i == colidx)
-				return addr;
-
-			offset += (kds->colmeta[i].attlen > 0
-					   ? kds->colmeta[i].attlen
-					   : VARSIZE_ANY(addr));
-		}
-	}
-	return NULL;
+	return kern_get_datum_tuple(kds->colmeta, htup, colidx);
 }
 
 static __global void *
