@@ -216,7 +216,6 @@ typedef struct {
 	List	   *hash_keys;
 	List	   *hash_keylen;
 	List	   *hash_keybyval;
-//	TupleTableSlot	*tupslot;
 	Datum	  **values_array;
 	bool	  **isnull_array;
 	Size		ntuples;

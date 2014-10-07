@@ -84,25 +84,6 @@ typedef struct {
 	pgstrom_perfmon		pfm;	/* sum of performance counter */
 } GpuScanState;
 
-/* bitmask of all system columns; for convenience */
-#define BITMASK_ALL_SYSCOLS							\
-	((1 << (InvalidAttrNumber -						\
-			FirstLowInvalidHeapAttributeNumber)) |	\
-	 (1 << (SelfItemPointerAttributeNumber -		\
-			FirstLowInvalidHeapAttributeNumber)) |	\
-	 (1 << (ObjectIdAttributeNumber -				\
-			FirstLowInvalidHeapAttributeNumber)) |	\
-	 (1 << (MinTransactionIdAttributeNumber -		\
-			FirstLowInvalidHeapAttributeNumber)) |	\
-	 (1 << (MinCommandIdAttributeNumber -			\
-			FirstLowInvalidHeapAttributeNumber)) |	\
-	 (1 << (MaxTransactionIdAttributeNumber -		\
-			FirstLowInvalidHeapAttributeNumber)) |	\
-	 (1 << (MaxCommandIdAttributeNumber -			\
-			FirstLowInvalidHeapAttributeNumber)) |	\
-	 (1 << (TableOidAttributeNumber -				\
-			FirstLowInvalidHeapAttributeNumber)))
-
 /* static functions */
 static void clserv_process_gpuscan(pgstrom_message *msg);
 
@@ -140,29 +121,17 @@ cost_gpuscan(GpuScanPath *gpu_path, PlannerInfo *root,
 	get_tablespace_page_costs(baserel->reltablespace,
 							  NULL,
 							  &spc_seq_page_cost);
-	/*
-	 * disk costs
-	 * XXX - needs to adjust after columner cache in case of bare heapscan,
-	 * or partial heapscan if targetlist references out of cached columns
-	 */
+	/* Disk costs */
     run_cost += spc_seq_page_cost * baserel->pages;
 
 	/* GPU costs */
 	cost_qual_eval(&dev_cost, dev_quals, root);
 	dev_sel = clauselist_selectivity(root, dev_quals, 0, JOIN_INNER, NULL);
-
-	/*
-	 * XXX - very rough estimation towards GPU startup and device calculation
-	 *       to be adjusted according to device info
-	 *
-	 * TODO: startup cost takes NITEMS_PER_CHUNK * width to be carried, but
-	 * only first chunk because data transfer is concurrently done, if NOT
-	 * integrated GPU
-	 * TODO: per_tuple calculation cost shall be divided by parallelism of
-	 * average opencl spec.
-	 */
-	dev_cost.startup += 10000;
-	dev_cost.per_tuple /= 100;
+	dev_cost.startup += pgstrom_gpu_setup_cost;
+	if (cpu_tuple_cost > 0.0)
+		dev_cost.per_tuple *= pgstrom_gpu_tuple_cost / cpu_tuple_cost;
+	else
+		dev_cost.per_tuple += disable_cost;
 
 	/* CPU costs */
 	cost_qual_eval(&host_cost, host_quals, root);
@@ -179,7 +148,7 @@ cost_gpuscan(GpuScanPath *gpu_path, PlannerInfo *root,
 	/* total path cost */
 	startup_cost += dev_cost.startup + host_cost.startup;
 	cpu_per_tuple = cpu_tuple_cost + host_cost.per_tuple;
-	gpu_per_tuple = cpu_tuple_cost / 100 + dev_cost.per_tuple;
+	gpu_per_tuple = dev_cost.per_tuple;
 	run_cost += (gpu_per_tuple * baserel->tuples +
 				 cpu_per_tuple * dev_sel * baserel->tuples);
 
@@ -557,13 +526,7 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 	}
 
 	/*
-	 * Construct OpenCL kernel code - A kernel code contains two forms of
-	 * entrypoints; for row-store and column-store. OpenCL intermediator
-	 * invoked proper kernel function according to the class of data store.
-	 * Once a kernel function for row-store is called, it translates the
-	 * data format into column-store, then kicks jobs for row-evaluation.
-	 * This design is optimized to process column-oriented data format on
-	 * the relation cache.
+	 * Construct OpenCL kernel code
 	 */
 	kern_source = gpuscan_codegen_quals(root, dev_clauses, &context);
 
@@ -1947,10 +1910,9 @@ clserv_process_gpuscan(pgstrom_message *msg)
      * OK, enqueue DMA transfer, kernel execution, then DMA writeback.
      *
 	 * (1) gpuscan (incl. kparams) - DMA send
-	 * (2) kds_head - DMA send
-	 * (3) kds body (either row or column store) - DMA send
-	 * (4) execution of kernel function
-	 * (5) write back vrelation - DMA recv
+	 * (2) kern_data_store - DMA send
+	 * (3) execution of kernel function
+	 * (4) write back vrelation - DMA recv
 	 */
 
 	/* kern_gpuscan */
