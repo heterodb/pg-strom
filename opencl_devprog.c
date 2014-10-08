@@ -28,6 +28,7 @@ static int	reclaim_threshold;
 static int	itemid_offset_shift;
 static int	itemid_flags_shift;
 static int	itemid_length_shift;
+bool		devprog_enable_optimize;
 
 #define DEVPROG_HASH_SIZE	2048
 
@@ -413,17 +414,20 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 
 		Assert(SIZEOF_VOID_P == 8 || SIZEOF_VOID_P == 4);
 		snprintf(build_opts, sizeof(build_opts),
-				 "-DOPENCL_DEVICE_CODE -DHOSTPTRLEN=%u -DBLCKSZ=%u"
-				 " -DITEMID_OFFSET_SHIFT=%u"
-				 " -DITEMID_FLAGS_SHIFT=%u"
-				 " -DITEMID_LENGTH_SHIFT=%u"
 #ifdef PGSTROM_DEBUG
 				 " -Werror"
 #endif
-				 , SIZEOF_VOID_P, BLCKSZ,
+				 " -DOPENCL_DEVICE_CODE -DHOSTPTRLEN=%u -DBLCKSZ=%u"
+				 " -DITEMID_OFFSET_SHIFT=%u"
+				 " -DITEMID_FLAGS_SHIFT=%u"
+				 " -DITEMID_LENGTH_SHIFT=%u"
+				 " %s",
+				 SIZEOF_VOID_P, BLCKSZ,
 				 itemid_offset_shift,
 				 itemid_flags_shift,
-				 itemid_length_shift);
+				 itemid_length_shift,
+				 (dprog->extra_flags &
+				  DEVKERNEL_DISABLE_OPTIMIZE) != 0 ? "-cl-opt-disable" : "");
 
 		rc = clBuildProgram(program,
 							opencl_num_devices,
@@ -891,6 +895,16 @@ pgstrom_init_opencl_devprog(void)
 {
 	ItemIdData	item_id;
 	cl_uint		code;
+
+	/* turn on/off device program optimization */
+	DefineCustomBoolVariable("pg_strom.devprog_enable_optimization",
+							 "enables optimization on device program build",
+							 NULL,
+							 &devprog_enable_optimize,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 
 	/* threshold to reclaim the cached opencl programs */
 	DefineCustomIntVariable("pg_strom.devprog_reclaim_threshold",

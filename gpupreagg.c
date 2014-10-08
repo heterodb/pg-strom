@@ -1871,7 +1871,9 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	 */
 	kern_source = gpupreagg_codegen(gpreagg, &context);
 	gpreagg->kern_source = kern_source;
-	gpreagg->extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUPREAGG;
+	gpreagg->extra_flags = context.extra_flags |
+		DEVKERNEL_NEEDS_GPUPREAGG |
+		(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
 	gpreagg->used_params = context.used_params;
 	pull_varattnos((Node *)context.used_vars,
 				   OUTER_VAR,
