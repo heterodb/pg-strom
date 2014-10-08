@@ -423,7 +423,8 @@ gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt, Plan *plan)
 
 	gscan->scanrelid = varno;
 	gscan->kern_source = NULL;
-	gscan->extra_flags = DEVKERNEL_NEEDS_GPUSCAN;
+	gscan->extra_flags = DEVKERNEL_NEEDS_GPUSCAN |
+		(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
 	gscan->used_params = NIL;
     gscan->used_vars = NIL;
     gscan->dev_clauses = NULL;
@@ -543,7 +544,9 @@ gpuscan_create_plan(PlannerInfo *root, CustomPath *best_path)
 
 	gscan->scanrelid = rel->relid;
 	gscan->kern_source = kern_source;
-	gscan->extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSCAN;
+	gscan->extra_flags = context.extra_flags |
+		DEVKERNEL_NEEDS_GPUSCAN |
+		(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
 	gscan->used_params = context.used_params;
 	gscan->used_vars = context.used_vars;
 	gscan->dev_clauses = dev_clauses;

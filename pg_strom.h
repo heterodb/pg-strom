@@ -259,9 +259,11 @@ typedef struct {
 #define DEVFUNC_NEEDS_TEXTLIB		0x0010
 #define DEVFUNC_NEEDS_NUMERIC		0x0020
 #define DEVFUNC_INCL_FLAGS			0x0038
+#define DEVKERNEL_DISABLE_OPTIMIZE	0x0100
 #define DEVKERNEL_NEEDS_GPUSCAN		0x0200
 #define DEVKERNEL_NEEDS_HASHJOIN	0x0400
 #define DEVKERNEL_NEEDS_GPUPREAGG	0x0800
+
 
 struct devtype_info;
 struct devfunc_info;
@@ -572,6 +574,7 @@ extern bool clserv_compute_workgroup_size(size_t *gwork_sz,
  * opencl_devprog.c
  */
 #define BAD_OPENCL_PROGRAM		((void *) ~0UL)
+extern bool		devprog_enable_optimize;
 extern cl_program clserv_lookup_device_program(Datum dprog_key,
 											   pgstrom_message *msg);
 extern Datum pgstrom_get_devprog_key(const char *source, int32 extra_libs);

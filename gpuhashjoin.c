@@ -1840,7 +1840,8 @@ gpuhashjoin_set_plan_ref(PlannerInfo *root,
 
 	/* OK, let's generate kernel source code */
 	ghjoin->kernel_source = gpuhashjoin_codegen(root, ghjoin, &context);
-	ghjoin->extra_flags = context.extra_flags;
+	ghjoin->extra_flags = context.extra_flags |
+		(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
 	ghjoin->used_params = context.used_params;
 	ghjoin->outer_attrefs = NULL;
 	foreach (lc1, context.used_vars)

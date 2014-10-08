@@ -732,7 +732,7 @@ pgstrom_init_mqueue(void)
 	int		rc;
 
 	/* timeout configuration of the message queue feature */
-	DefineCustomIntVariable("pgstrom.mqueue_timeout",
+	DefineCustomIntVariable("pg_strom.mqueue_timeout",
 							"timeout of PG-Strom's message queue in msec",
 							NULL,
 							&pgstrom_mqueue_timeout,
