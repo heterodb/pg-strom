@@ -99,8 +99,8 @@ typedef struct
 	Oid			varcollid;	/* collation oid of the expression node */
 	bool		ref_host;	/* true, if referenced in host expression */
 	bool		ref_device;	/* true, if referenced in device expression */
-	cl_uint		hkey_index;	/* index number of hash entries */
-	cl_uint		hkey_offset;/* offset in hash entries */
+	//cl_uint		hkey_index;	/* index number of hash entries */
+	//cl_uint		hkey_offset;/* offset in hash entries */
 	Expr	   *expr;		/* source Var or PlaceHolderVar node */
 } vartrans_info;
 
@@ -135,7 +135,7 @@ typedef struct
 	int			hentry_size;	/* size of fixed length part of hentry */
 	Size		hashtable_size;	/* estimated hash-table size */
 	List	   *hash_resnums;	/* list of resource numbers to be loaded */
-	List	   *hash_resofs;	/* list of resource offsets in hentry */
+	//List	   *hash_resofs;	/* list of resource offsets in hentry */
 	List	   *hash_inner_keys;/* list of inner hash key expressions */
 	List	   *hash_outer_keys;/* list of outer hash key expressions */
 	/*
@@ -211,8 +211,7 @@ typedef struct {
 	int			hentry_size;
 	Size		hashtable_size;
 	List	   *hash_resnums;
-	List	   *hash_resofs;
-	List	   *toast_resnums;
+	//List	   *hash_resofs;
 	List	   *hash_keys;
 	List	   *hash_keylen;
 	List	   *hash_keybyval;
@@ -309,102 +308,34 @@ plan_is_multihash(Plan *plannode)
  *
  * It estimates size of hashitem for GpuHashJoin
  */
-typedef struct
-{
-	Relids	relids;		/* relids located on the inner loop */
-	int		nkeys;		/* roughly estimated number of key variables */
-	int		width;		/* roughly estimated width of referenced variables */
-} estimate_hashtable_size_context;
-
-static bool
-estimate_hashtable_size_walker(Node *node,
-							   estimate_hashtable_size_context *context)
-{
-	if (node == NULL)
-		return false;
-	if (IsA(node, Var))
-	{
-		Var	   *var = (Var *) node;
-
-		if (bms_is_member(var->varno, context->relids))
-		{
-			int16		typlen;
-			bool		typbyval;
-			char		typalign;
-
-			context->nkeys++;
-
-			get_typlenbyvalalign(var->vartype, &typlen, &typbyval, &typalign);
-			if (typlen > 0)
-			{
-				context->width = TYPEALIGN(typealign_get_width(typalign),
-										   context->width) + typlen;
-			}
-			else
-			{
-				context->width = TYPEALIGN(sizeof(cl_uint),
-										   context->width) + sizeof(cl_uint);
-				context->width += INTALIGN(get_typavgwidth(var->vartype,
-														   var->vartypmod));
-			}
-		}
-		return false;
-	}
-	else if (IsA(node, RestrictInfo))
-	{
-		RestrictInfo   *rinfo = (RestrictInfo *)node;
-		Relids			relids_saved = context->relids;
-		bool			rc;
-
-		context->relids = rinfo->left_relids;
-		rc = estimate_hashtable_size_walker((Node *)rinfo->clause, context);
-		context->relids = relids_saved;
-
-		return rc;
-	}
-	/* Should not find an unplanned subquery */
-	Assert(!IsA(node, Query));
-	return expression_tree_walker(node,
-								  estimate_hashtable_size_walker,
-								  context);
-}
-
 static Size
 estimate_hashtable_size(PlannerInfo *root, GpuHashJoinPath *gpath)
 {
-	estimate_hashtable_size_context	context;
-	Size		entry_size;
 	Size		hashtable_size;
 	int			i;
 
 	/* portion of kern_multihash */
-	hashtable_size = MAXALIGN(offsetof(kern_multihash,
-									   htable_offset[gpath->num_rels]));
+	hashtable_size = LONGALIGN(offsetof(kern_multihash,
+										htable_offset[gpath->num_rels]));
 	for (i=0; i < gpath->num_rels; i++)
 	{
 		Path	   *scan_path = gpath->inners[i].scan_path;
-		List	   *hash_clause = gpath->inners[i].hash_clause;
+		RelOptInfo *scan_rel = scan_path->parent;
+		int			scan_width = scan_rel->width;
+		int			scan_ncols = list_length(scan_rel->reltargetlist);
 		double		ntuples = scan_path->rows * 1.1;
+		Size		entry_size;
 
 		/* force a plausible relation size if no information */
 		if (ntuples <= 1000.0)
 			ntuples = 1000.0;
 
-		/* walks on the join clauses to ensure var's width */
-		context.relids = scan_path->parent->relids;
-		context.nkeys = 0;
-		context.width = 0;
-		estimate_hashtable_size_walker((Node *)hash_clause, &context);
-
-		entry_size = Max(INTALIGN(sizeof(kern_hashentry)),
-						 INTALIGN(offsetof(kern_hashentry,
-								  keydata[context.nkeys / BITS_PER_BYTE])));
-		entry_size = INTALIGN(entry_size + context.width);
-
-		hashtable_size += (MAXALIGN(offsetof(kern_hashtable,
-											 colmeta[context.nkeys])) +
-						   MAXALIGN(sizeof(cl_uint) * (Size)ntuples) +
-						   MAXALIGN(entry_size * (Size)ntuples));
+		/* expand expected hashtable-size */
+		entry_size = LONGALIGN(offsetof(kern_hashentry, htup) + scan_width);
+		hashtable_size += (LONGALIGN(offsetof(kern_hashtable,
+											  colmeta[scan_ncols])) +
+						   LONGALIGN(sizeof(cl_uint) * (Size)ntuples) +
+						   LONGALIGN(entry_size * (Size)ntuples));
 	}
 	return hashtable_size;
 }
@@ -1015,13 +946,14 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 
 		appendStringInfo(
 			body,
-			"pg_%s_t KVAR_%u = pg_%s_hashref(kentry_%u,errcode,%u,%u);\n",
+			"pg_%s_t KVAR_%u = "
+			"pg_%s_hashref(khtable_%d,kentry_%u,errcode,%u);\n",
 			dtype->type_name,
 			vtrans->resno,
 			dtype->type_name,
 			depth,
-			vtrans->hkey_index,
-			vtrans->hkey_offset);
+			depth,
+			vtrans->srcresno - 1);
 	}
 
 	/*
@@ -1373,6 +1305,7 @@ build_pseudo_scan_vartrans(GpuHashJoin *ghjoin)
 			prev3 = lc3;
 		}
 
+#if 0
 		/*
 		 * Compute index/offset of varnode on hash entries
 		 */
@@ -1402,6 +1335,7 @@ build_pseudo_scan_vartrans(GpuHashJoin *ghjoin)
 				vtrans->hkey_offset = hkey_offset;
 				hash_resnums = lappend_int(hash_resnums, vtrans->srcresno);
 				hash_resofs = lappend_int(hash_resofs, vtrans->hkey_offset);
+
 				hkey_offset += (dtype->type_length > 0
 								? dtype->type_length
 								: sizeof(cl_uint));
@@ -1410,6 +1344,7 @@ build_pseudo_scan_vartrans(GpuHashJoin *ghjoin)
 			mhash->hash_resnums = hash_resnums;
 			mhash->hash_resofs  = hash_resofs;
 		}
+#endif
 		pscan_vartrans = list_concat(pscan_vartrans, temp_vartrans);
 	}
 	Assert(list_length(pscan_varlist) == 0);
@@ -1453,7 +1388,7 @@ dump_pseudo_scan_vartrans(List *pscan_vartrans)
 	{
 		vartrans_info  *vtrans = lfirst(cell);
 
-		elog(INFO, "vtrans[%d] {srcdepth=%u srcresno=%d resno=%d resname='%s' vartype=%u vartypmod=%d varcollid=%u ref_host=%s ref_device=%s hkey_index=%u hkey_offset=%u expr=%s}",
+		elog(INFO, "vtrans[%d] {srcdepth=%u srcresno=%d resno=%d resname='%s' vartype=%u vartypmod=%d varcollid=%u ref_host=%s ref_device=%s expr=%s}",
 			 index,
 			 vtrans->srcdepth,
 			 vtrans->srcresno,
@@ -1464,8 +1399,6 @@ dump_pseudo_scan_vartrans(List *pscan_vartrans)
 			 vtrans->varcollid,
 			 vtrans->ref_host ? "true" : "false",
 			 vtrans->ref_device ? "true" : "false",
-			 vtrans->hkey_index,
-			 vtrans->hkey_offset,
 			 nodeToString(vtrans->expr));
 		index++;
 	}
@@ -1906,17 +1839,16 @@ static inline void
 multihash_dump_tables(pgstrom_multihash_tables *mhtables)
 {
 	StringInfoData	str;
-	int		i, j, k;
-	Size	offset;
+	int		i, j;
 
 	initStringInfo(&str);
 	for (i=1; i <= mhtables->kern.ntables; i++)
 	{
 		kern_hashtable *khash = KERN_HASHTABLE(&mhtables->kern, i);
 
-		elog(INFO, "----hashtable[%d] {nslots=%u nkeys=%u} ------------",
-			 i, khash->nslots, khash->nkeys);
-		for (j=0; j < khash->nkeys; j++)
+		elog(INFO, "----hashtable[%d] {nslots=%u ncols=%u} ------------",
+			 i, khash->nslots, khash->ncols);
+		for (j=0; j < khash->ncols; j++)
 		{
 			elog(INFO, "colmeta {attnotnull=%d attalign=%d attlen=%d}",
 				 khash->colmeta[j].attnotnull,
@@ -1932,50 +1864,8 @@ multihash_dump_tables(pgstrom_multihash_tables *mhtables)
 				 kentry;
 				 kentry = KERN_HASH_NEXT_ENTRY(khash, kentry))
 			{
-				resetStringInfo(&str);
-
-				appendStringInfo(&str, "entry[%d] hash=%08x rowid=%u",
-								 j, kentry->hash, kentry->rowid);
-				offset = INTALIGN(offsetof(kern_hashentry,
-										   keydata[BITMAPLEN(khash->nkeys)]));
-				for (k=0; k < khash->nkeys; k++)
-				{
-					if (att_isnull(k, kentry->keydata))
-						appendStringInfo(&str, " key%d=null", k);
-					else
-					{
-						char   *value;
-
-						offset = TYPEALIGN(khash->colmeta[k].attalign > 0 ?
-										   khash->colmeta[k].attalign :
-										   sizeof(cl_uint), offset);
-						value = (char *) kentry + offset;
-						if (khash->colmeta[k].attlen > 0)
-						{
-							if (khash->colmeta[k].attlen == 8)
-								appendStringInfo(&str, " key%d=%lu", k,
-												 *((cl_ulong *) value));
-							else if (khash->colmeta[k].attlen == 4)
-								appendStringInfo(&str, " key%d=%u", k,
-												 *((cl_uint *) value));
-							else if (khash->colmeta[k].attlen == 2)
-								appendStringInfo(&str, " key%d=%u", k,
-												 *((cl_ushort *) value));
-							else if (khash->colmeta[k].attlen == 1)
-								appendStringInfo(&str, " key%d=%u", k,
-												 *((cl_uchar *) value));
-							else
-								appendStringInfo(&str, " key%d=???", k);
-							offset += khash->colmeta[k].attlen;
-						}
-						else
-						{
-							appendStringInfo(&str, " key%d=<varlena>", k);
-							offset += VARSIZE_ANY(value);
-						}
-					}
-				}
-				elog(INFO, "%s", str.data);
+				elog(INFO, "entry[%d] hash=%08x rowid=%u t_len=%u",
+					 j, kentry->hash, kentry->rowid, kentry->t_len);
 			}
 		}
 	}
@@ -2570,6 +2460,7 @@ gpuhashjoin_exec(CustomPlanState *node)
 		Assert(!ghjs->mhnode->rels[0].ntuples &&
 			   !ghjs->mhnode->rels[0].values_array &&
 			   !ghjs->mhnode->rels[0].isnull_array);
+		//multihash_dump_tables(ghjs->mhnode->mhtables);
 	}
 
 	while (!ghjs->curr_ghjoin ||
@@ -2973,8 +2864,6 @@ gpuhashjoin_textout_plan(StringInfo str, const CustomPlan *node)
 						 ":varcollid %u "
 						 ":ref_host %s "
 						 ":ref_device %s "
-						 ":hkey_index %u "
-						 ":hkey_offset %u "
 						 ":expr %s"
 						 "}",
 						 (int)vtrans->srcdepth,
@@ -2986,8 +2875,6 @@ gpuhashjoin_textout_plan(StringInfo str, const CustomPlan *node)
 						 vtrans->varcollid,
 						 vtrans->ref_host ? "true" : "false",
 						 vtrans->ref_device ? "true" : "false",
-						 vtrans->hkey_index,
-						 vtrans->hkey_offset,
 						 nodeToString(vtrans->expr));
 	}
 }
@@ -3107,7 +2994,6 @@ multihash_begin(CustomPlan *node,
 {
 	MultiHash	   *mhash = (MultiHash *) node;
 	MultiHashState *mhs = palloc0(sizeof(MultiHashState));
-	TupleDesc		tupdesc;
 	List		   *hash_keylen = NIL;
 	List		   *hash_keybyval = NIL;
 	ListCell	   *cell;
@@ -3125,7 +3011,6 @@ multihash_begin(CustomPlan *node,
 	mhs->hentry_size = mhash->hentry_size;
 	mhs->hashtable_size = mhash->hashtable_size;
 	mhs->hash_resnums = list_copy(mhash->hash_resnums);
-	mhs->hash_resofs = list_copy(mhash->hash_resofs);
 
 	/*
 	 * create expression context for node
@@ -3173,17 +3058,6 @@ multihash_begin(CustomPlan *node,
 	ExecAssignResultTypeFromTL(&mhs->cps.ps);
 	mhs->cps.ps.ps_ProjInfo = NULL;
 
-	/* also, make a list of toast resource numbers */
-	tupdesc = ExecGetResultType(outerPlanState(mhs));
-	mhs->toast_resnums = NIL;
-	foreach (cell, mhs->hash_resnums)
-	{
-		AttrNumber			resnum = lfirst_int(cell);
-		Form_pg_attribute	attr = tupdesc->attrs[resnum - 1];
-
-		if (attr->attlen < 1)
-			mhs->toast_resnums = lappend_int(mhs->toast_resnums, resnum);
-	}
 	return &mhs->cps;
 }
 
@@ -3230,10 +3104,9 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	kern_hashentry *hentry;
 	Size			required;
 	Size			khtable_offset;
-	Size			hentry_size;
 	double			nrows;
+	cl_uint			ncols;
 	cl_uint			nslots;
-	cl_uint			nkeys;
 	cl_uint			rowid;
 	cl_uint		   *hash_slots;
 	char		   *nv_buffer;
@@ -3244,7 +3117,6 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	bool		  **isnull_array;
 	cl_uint			array_usage;
 	cl_uint			array_length;
-	ListCell	   *cell;
 	ListCell	   *lc1;
 	ListCell	   *lc2;
 	ListCell	   *lc3;
@@ -3263,31 +3135,30 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	khtable_offset = mhtables->length;
 	mhtables->kern.htable_offset[depth] = khtable_offset;
 
+	ncols = tupdesc->natts;
 	nrows = mhs->cps.ps.plan->plan_rows;
 	if (nrows < 1000.0)
 		nrows = 1000.0;
 	nslots = (cl_uint)(nrows * 1.15);
-	nkeys = list_length(mhs->hash_resnums);
 
-	required = (LONGALIGN(offsetof(kern_hashtable, colmeta[nkeys])) +
+	required = (LONGALIGN(offsetof(kern_hashtable, colmeta[ncols])) +
 				LONGALIGN(sizeof(cl_uint) * nslots));
 	while (mhtables->length + required > mhtables->maxlen)
 		mhtables = expand_multihash_tables(mhtables);
 
 	khtable = (kern_hashtable *) ((char *)&mhtables->kern + khtable_offset);
 	khtable->nslots = nslots;
-	khtable->nkeys = nkeys;
+	khtable->ncols = ncols;
 	khtable->is_outer = false;	/* only INNER is supported right now */
 
-	i=0;
-	foreach (cell, mhs->hash_resnums)
+	for (i=0; i < tupdesc->natts; i++)
 	{
-		Form_pg_attribute attr = tupdesc->attrs[lfirst_int(cell) - 1];
+		Form_pg_attribute attr = tupdesc->attrs[i];
 
 		khtable->colmeta[i].attnotnull = attr->attnotnull;
 		khtable->colmeta[i].attalign = typealign_get_width(attr->attalign);
 		khtable->colmeta[i].attlen = attr->attlen;
-		i++;
+		khtable->colmeta[i].rs_attnum = attr->attnum;
 	}
 	hash_slots = KERN_HASHTABLE_SLOT(khtable);
 	memset(hash_slots, 0, sizeof(cl_uint) * nslots);
@@ -3315,9 +3186,9 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	for (rowid=0; ; rowid++)
 	{
 		TupleTableSlot *scan_slot;
+		HeapTuple		scan_tuple;
 		Datum			value;
 		bool			isnull;
-		int				i_key;
 		pg_crc32		hash;
 		Datum		   *p_values;
 		bool		   *p_isnull;
@@ -3325,21 +3196,11 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		scan_slot = ExecProcNode(outerPlanState(mhs));
 		if (TupIsNull(scan_slot))
 			break;
+		scan_tuple = ExecFetchSlotTuple(scan_slot);
+		required = LONGALIGN(offsetof(kern_hashentry, htup) +
+							 scan_tuple->t_len);
 
-		/*
-		 * estimate required size for each hash entry; it is a little bit
-		 * expensive, if hash key contains toast datum.
-		 */
-		required = mhs->hentry_size;
-		foreach (cell, mhs->toast_resnums)
-		{
-			value = slot_getattr(scan_slot, lfirst_int(cell), &isnull);
-			if (!isnull)
-				required += INTALIGN(VARSIZE_ANY(value));
-		}
-		required = LONGALIGN(required);
-
-		/* expand if hash-table size is smaller than requirement */
+		/* Expand if hash-table size is smaller than requirement */
 		while (mhtables->length + required > mhtables->maxlen)
 		{
 			mhtables = expand_multihash_tables(mhtables);
@@ -3348,59 +3209,18 @@ multihash_preload_khashtable(MultiHashState *mhs,
 			hash_slots = KERN_HASHTABLE_SLOT(khtable);
 		}
 
-		/* allocation of a hash entry */
+		/* Allocation of a hash entry */
 		hentry = (kern_hashentry *)
 			((char *)&mhtables->kern + mhtables->length);
-		memset(hentry, 0, offsetof(kern_hashentry,
-								   keydata[BITMAPLEN(nkeys)]));
+		memset(hentry, 0, offsetof(kern_hashentry, htup));
+		mhtables->length += required;
+
+		/* Setting up its fields */
 		hentry->rowid = rowid;
+		hentry->t_len = scan_tuple->t_len;
+		memcpy(&hentry->htup, scan_tuple->t_data, scan_tuple->t_len);
 
-		/* move keydata into hash entries */
-		hentry_size = mhs->hentry_size;
-		i_key = 0;
-		forboth (lc1, mhs->hash_resnums,
-				 lc2, mhs->hash_resofs)
-		{
-			Form_pg_attribute attr;
-			AttrNumber	attnum = lfirst_int(lc1);
-			int			offset = lfirst_int(lc2);
-
-			attr = tupdesc->attrs[attnum - 1];
-			value = slot_getattr(scan_slot, attnum, &isnull);
-			if (!isnull)
-			{
-				hentry->keydata[i_key >> 3] |= (1 << (i_key & 7));
-				if (attr->attlen > 0)
-				{
-					/* pre-calculated offset has to be aligned */
-					Assert(TYPEALIGN(typealign_get_width(attr->attalign),
-									 offset) == offset);
-					if (attr->attbyval)
-						memcpy((char *)hentry + offset,
-							   &value,
-							   attr->attlen);
-					else
-						memcpy((char *)hentry + offset,
-							   DatumGetPointer(value),
-							   attr->attlen);
-				}
-				else
-				{
-					Assert(offset == INTALIGN(offset));
-					*((cl_uint *)((char *)hentry + offset)) = hentry_size;
-					memcpy((char *)hentry + hentry_size,
-						   DatumGetPointer(value),
-						   VARSIZE_ANY(value));
-					hentry_size += INTALIGN(VARSIZE_ANY(value));
-				}
-			}
-			i_key++;
-		}
-		Assert(LONGALIGN(hentry_size) == required);
-
-		/*
-		 * calculation of a hash value, and insert an appropriate hash-slot
-		 */
+		/* Calculation of a hash value, and insert an appropriate hash-slot */
 		INIT_CRC32(hash);
 		econtext->ecxt_outertuple = scan_slot;
 		forthree (lc1, mhs->hash_keys,
@@ -3431,13 +3251,13 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		FIN_CRC32(hash);
 		hentry->hash = hash;
 
-		/* insert this new entry */
+		/* Insert this new entry */
 		i = hash % nslots;
 		hentry->next = hash_slots[i];
 		hash_slots[i] = ((uintptr_t)hentry - (uintptr_t)khtable);
 
-		/* increment usage counter */
-		mhtables->length += LONGALIGN(hentry_size);
+
+		/* XXX - buffer below shall be removed - XXX*/
 
 		/*
 		 * Save the copy of scanned tuple in the private memory
@@ -3634,8 +3454,6 @@ multihash_textout_plan(StringInfo str, const CustomPlan *node)
 	appendStringInfo(str, " :hashtable_size %zu", plannode->hashtable_size);
 	appendStringInfo(str, " :hash_resnums %s",
 					 nodeToString(plannode->hash_resnums));
-	appendStringInfo(str, " :hash_resofs %s",
-					 nodeToString(plannode->hash_resofs));
 	appendStringInfo(str, " :hash_inner_keys %s",
 					 nodeToString(plannode->hash_inner_keys));
 	appendStringInfo(str, " :hash_outer_keys %s",
@@ -3653,7 +3471,6 @@ multihash_copy_plan(const CustomPlan *from)
 	newnode->hentry_size     = oldnode->hentry_size;
 	newnode->hashtable_size  = oldnode->hashtable_size;
 	newnode->hash_resnums    = list_copy(oldnode->hash_resnums);
-	newnode->hash_resofs     = list_copy(oldnode->hash_resofs);
 	newnode->hash_inner_keys = copyObject(oldnode->hash_inner_keys);
 	newnode->hash_outer_keys = copyObject(oldnode->hash_outer_keys);
 
