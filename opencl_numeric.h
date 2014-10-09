@@ -106,7 +106,7 @@ pgfn_numeric_isnull(__private int *errcode,
 
 static pg_bool_t
 pgfn_numeric_isnotnull(__private int *errcode,
-					   pg_numeric_arg)
+					   pg_numeric_t arg)
 {
 	pg_bool_t	result;
 
@@ -114,8 +114,8 @@ pgfn_numeric_isnotnull(__private int *errcode,
 	result.value = !arg.isnull;
 	return result;
 }
-
-#define PG_NUMERIC_TYPE_DEFINE
+/* to avoid conflicts with auto-generated data type */
+#define PG_NUMERIC_TYPE_DEFINED
 
 /*
  * Numeric format translation functions
@@ -208,7 +208,7 @@ pgfn_numeric_mul(__private int *errcode,
 {}
 
 static pg_numeric_t
-pgfn_numeric_add(__private int *errcode, pg_numeric_t arg)
+pgfn_numeric_uplus(__private int *errcode, pg_numeric_t arg)
 {
 	/* return the value as-is */
 	return arg;
@@ -318,5 +318,5 @@ pgfn_numeric_cmp(__private cl_int *errcode,
 	result.value = numeric_cmp(errcode, arg1, arg2);
 	return result;
 }
-
+#endif /* OPENCL_DEVICE_CODE */
 #endif /* OPENCL_NUMERIC_H */
