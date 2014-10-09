@@ -167,34 +167,34 @@ KERN_HASH_NEXT_ENTRY(__global kern_hashtable *khtable,
  * +----------------+       -----
  * | kern_parambuf  |         ^
  * | +--------------+         |
- * | | length   o--------------------+
- * | +--------------+         |      | kern_resultbuf is located just after
- * | | nparams      |         |      | the kern_parambuf (because of DMA
- * | +--------------+         |      | optimization), so head address of
- * | | poffset[0]   |         |      | kern_gpuscan + parambuf.length
- * | | poffset[1]   |         |      | points kern_resultbuf.
- * | |    :         |         |      |
- * | | poffset[M-1] |         |      |
- * | +--------------+         |      |
- * | | variable     |         |      |
- * | | length field |         |      |
- * | | for Param /  |         |      |
- * | | Const values |         |      |
- * | |     :        |         |      |
- * +-+--------------+  -----  |  <---+
+ * | | length   o-------------------+
+ * | +--------------+         |     | kern_resultbuf is located just after
+ * | | nparams      |         |     | the kern_parambuf (because of DMA
+ * | +--------------+         |     | optimization), so head address of
+ * | | poffset[0]   |         |     | kern_gpuscan + parambuf.length
+ * | | poffset[1]   |         |     | points kern_resultbuf.
+ * | |    :         |         |     |
+ * | | poffset[M-1] |         |     |
+ * | +--------------+         |     |
+ * | | variable     |         |     |
+ * | | length field |         |     |
+ * | | for Param /  |         |     |
+ * | | Const values |         |     |
+ * | |     :        |         |     |
+ * +-+--------------+  -----  |  <--+
  * | kern_resultbuf |    ^    |
  * | +--------------+    |    |  Area to be sent to OpenCL device.
  * | | nrooms       |    |    |  Forward DMA shall be issued here.
  * | +--------------+    |    |
  * | | nitems       |    |    |
  * | +--------------+    |    |
- * | | errcode      |    |    V
- * | +--------------+    |  -----
- * | | results[0]   |    |
- * | | results[1]   |    |  Area to be written back from OpenCL device.
- * | |     :        |    |  Reverse DMA shall be issued here.
- * | | results[N-1] |    V
- * +-+--------------+  -----
+ * | | errcode      |    V    V
+ * | +--------------+ -----------
+ * | | results[0]   |  Area to be written back from the OpenCL device.
+ * | | results[1]   |  Reverse DMA shall be issued here.
+ * | |     :        |
+ * | | results[N-1] |  results[] array is only in-kernel
+ * +-+--------------+
  *
  * Things to be written into result-buffer:
  * Unlike simple scan cases, GpuHahJoin generate a tuple combined from
@@ -383,6 +383,64 @@ kern_gpuhashjoin_main(__global kern_hashjoin *khashjoin,
 										kds_index,
 										rbuffer);
 	}
+out:
+	/* write-back execution status into host-side */
+	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
+}
+
+/*
+ * kern_gpuhashjoin_projection
+ *
+ *
+ *
+ */
+__kernel void
+kern_gpuhashjoin_projection(__global kern_hashjoin *khashjoin,	/* in */
+							__global kern_multihash *kmhash,	/* in */
+							__global kern_data_store *kds,		/* in */
+							__global kern_toastbuf *ktoast,		/* in */
+							__global kern_data_store *kds_slot,	/* out */
+							KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+{
+	__global kern_parambuf  *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
+	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
+	__global Datum	   *values;
+	__global cl_char   *isnull;
+	cl_int		errcode = StromError_Success;
+
+	/* Case of overflow; it shall be retried or executed by CPU instead,
+	 * so no projection is needed anyway. We quickly exit the kernel.
+	 * No need to set an error code because kern_gpuhashjoin_main()
+	 * should already set it.
+	 */
+	if (kresults->nitems > kresults->nrooms ||
+		kresults->nitems > kds_slot->nrooms)
+	{
+		errcode = StromError_DataStoreNoSpace;
+		goto out;
+	}
+		return;
+
+	/* Update 
+	 *
+	 */
+	if (get_global_id(0) == 0)
+		kds_slot->nitems = kresults->nitems;
+
+	if (get_global_id(0) >= kresults->nitems)
+		goto out;
+
+	values = KERN_DATA_STORE_VALUES(kds_slot, get_global_id(0));
+	isnull = KERN_DATA_STORE_ISNULL(kds_slot, get_global_id(0));
+
+	gpuhashjoin_projection(&errcode,
+						   kmhash, kds, ktoast,
+						   rindex, values, isnull);
+
+
+
+
+
 out:
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
