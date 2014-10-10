@@ -259,8 +259,8 @@ gpuhashjoin_execute(__private cl_int *errcode,
 					__global kern_multihash *kmhash,
 					__global kern_data_store *kds,
 					__global kern_toastbuf *ktoast,
-					size_t kds_index,
-					__global cl_int *rbuffer);
+					__global kern_resultbuf *kresults,
+					size_t kds_index);
 
 /*
  * kern_gpuhashjoin_main
@@ -394,19 +394,240 @@ out:
  *
  *
  */
+static void
+gpuhashjoin_projection_move_tupslot(__private cl_int *errcode,
+									__global Datum *slot_values,
+									__global cl_char *slot_isnull,
+									cl_uint depth,
+									cl_uint residx,
+									__global hostptr_t *hostptr,
+									__global void *srcaddr);
+
+static void
+gpuhashjoin_projection_move_column(__private cl_int *errcode,
+								   __global kern_data_store *kds_dest,
+								   cl_uint depth,
+								   cl_uint residx,
+								   __global hostptr_t *hostptr,
+								   __global void *srcaddr);
+
+#define GPUHASHJOIN_PROJECTION_TEMPLATE(PREFIX,MOVE_FUNC)			\
+	/* Projection of the outer relation */							\
+	if (kds->format == KDS_FORMAT_ROW)								\
+	{}																\
+	else if (kds->format == KDS_FORMAT_COLUMN)						\
+	{}																\
+	else															\
+	{																\
+		/* only row- and column- format is valid as input */		\
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);	\
+		return;														\
+	}																\
+	/* Projection for individual inner relations */
+
+
+
+static void
+gpuhashjoin_projection_tupslot(__private cl_int *errcode,
+							   __global kern_multihash *kmhash,
+							   __global kern_data_store *kds,
+							   __global kern_toastbuf *ktoast,
+							   __global kern_resultbuf *kresults,
+							   __global kern_data_store *kds_dest,
+							   size_t dest_index)
+{
+	cl_uint				nrels = kresults->nrels;
+	__global Datum	   *slot_values;
+	__global cl_char   *slot_isnull;
+	__global cl_int	   *rbuffer;
+
+	rbuffer = kresults->results + nrels * dest_index;
+	slot_values = KERN_DATA_STORE_VALUES(kds_dest, dest_index);
+	slot_isnull = KERN_DATA_STORE_ISNULL(kds_dest, dest_index);
+
+	/* projection of outer relation  */
+	if (kds->format == KDS_FORMAT_ROW)
+	{
+		__global HeapTupleHeaderData *htup;
+		cl_uint		i, ncols = kds->ncols;
+
+		htup = kern_get_tuple_rs(kds, rbuffer[0]);
+		if (htup)
+		{
+			cl_uint		offset = htup->t_hoff;
+			cl_uint		natts = (htup->t_infomask2 & HEAP_NATTS_MASK);
+			cl_bool		heap_hasnull = (htup->t_infomask & HEAP_HASNULL);
+
+			for (i=0; i < ncols; i++)
+			{
+				if (i >= nattrs)
+					srcaddr = NULL;
+				else if (heap_hasnull && att_isnull(i, htup->t_bits))
+					srcaddr = NULL;
+				else
+				{
+					if (kds->colmeta[i].attlen > 0)
+						offset = TYPEALIGN(colmeta[i].attalign, offset);
+					else if (!VARATT_NOT_PAD_BYTE((__global char *)htup +
+												  offset))
+						offset = TYPEALIGN(colmeta[i].attalign, offset);
+					srcaddr = ((__global char *) htup + offset);
+				}
+				gpuhashjoin_projection_move_tupslot(errcode,
+													slot_values,
+													slot_isnull,
+													0, /* depth */
+													i, /* resource index */
+													&kds->hostptr,
+													srcaddr);
+			}
+		}
+		else
+		{
+			/* fill up slot with null */
+			for (i=0; i < ncols; i++)
+				gpuhashjoin_projection_move_tupslot(errcode,
+													slot_values,
+													slot_isnull,
+													0, /* depth */
+													i, /* resource index */
+													NULL, /* hostptr */
+													srcaddr);
+		}
+	}
+	else if (kds->format == KDS_FORMAT_COLUMN)
+	{
+		cl_uint		i, ncols = kds->ncols;
+
+		for (i=0; i < ncols; i++)
+		{
+			__global void	   *srcaddr;
+			__global hostptr_t *hostptr;
+
+			srcaddr = kern_get_datum_cs(kds, ktoast, i, rbuffer[0]);
+			hostptr = (kds->colmeta[i].attlen < 0
+					   ? &ktoast->hostptr
+					   : &kds->hostptr);
+			gpuhashjoin_projection_move_column(errcode,
+											   slot_values,
+											   slot_isnull,
+											   0,	/* depth */
+											   i,	/* resource index */
+											   hostptr,
+											   srcaddr);
+		}
+	}
+	else
+	{
+		/* only row- and column- format is valid as input */
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
+		return;
+	}
+	/* Projection for individual inner relations */
+
+
+}
+
+static void
+gpuhashjoin_projection_column(__private cl_int *errcode,
+							  __global kern_multihash *kmhash,
+							  __global kern_data_store *kds,
+							  __global kern_toastbuf *ktoast,
+							  __global kern_resultbuf *kresults,
+							  __global kern_data_store *kds_dest,
+							  size_t dest_index)
+{
+
+	if (kds->format == KDS_FORMAT_ROW)
+	{
+		__global HeapTupleHeaderData *htup;
+		cl_uint		i, ncols = kds->ncols;
+
+		htup = kern_get_tuple_rs(kds, rbuffer[0]);
+		if (htup)
+		{
+			cl_uint		offset = htup->t_hoff;
+			cl_uint		natts = (htup->t_infomask2 & HEAP_NATTS_MASK);
+			cl_bool		heap_hasnull = (htup->t_infomask & HEAP_HASNULL);
+
+			for (i=0; i < ncols; i++)
+			{
+				if (i >= nattrs)
+					srcaddr = NULL;
+				else if (heap_hasnull && att_isnull(i, htup->t_bits))
+					srcaddr = NULL;
+				else
+				{
+					if (kds->colmeta[i].attlen > 0)
+						offset = TYPEALIGN(colmeta[i].attalign, offset);
+					else if (!VARATT_NOT_PAD_BYTE((__global char *)htup +
+												  offset))
+						offset = TYPEALIGN(colmeta[i].attalign, offset);
+					srcaddr = ((__global char *) htup + offset);
+				}
+				gpuhashjoin_projection_move_column(errcode,
+												   kds_dest,
+												   0, /* depth */
+												   i, /* resource index */
+												   &kds->hostptr,
+												   srcaddr);
+			}
+		}
+		else
+		{
+			/* fill up slot with null */
+			for (i=0; i < ncols; i++)
+				gpuhashjoin_projection_move_column(errcode,
+												   kds_dest,
+												   0, /* depth */
+												   i, /* resource index */
+												   NULL, /* hostptr */
+												   srcaddr);
+		}
+	}
+	else if (kds->format == KDS_FORMAT_COLUMN)
+	{
+		cl_uint		i, ncols = kds->ncols;
+
+		for (i=0; i < ncols; i++)
+		{
+			__global void	   *srcaddr;
+			__global hostptr_t *hostptr;
+
+			srcaddr = kern_get_datum_cs(kds, ktoast, i, rbuffer[0]);
+			hostptr = (kds->colmeta[i].attlen < 0
+					   ? &ktoast->hostptr
+					   : &kds->hostptr);
+			gpuhashjoin_projection_move_column(errcode,
+											   kds_dest,
+											   0,	/* depth */
+											   i,	/* resource index */
+											   hostptr,
+											   srcaddr);
+		}
+	}
+	else
+	{
+		/* only row- and column- format is valid as input */
+        STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
+		return;
+	}
+	/* Projection for individual inner relations */
+
+
+}
+
 __kernel void
 kern_gpuhashjoin_projection(__global kern_hashjoin *khashjoin,	/* in */
 							__global kern_multihash *kmhash,	/* in */
 							__global kern_data_store *kds,		/* in */
 							__global kern_toastbuf *ktoast,		/* in */
-							__global kern_data_store *kds_slot,	/* out */
+							__global kern_data_store *kds_dest,	/* out */
 							KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
 	__global kern_parambuf  *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
 	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
-	__global Datum	   *values;
-	__global cl_char   *isnull;
-	cl_int		errcode = StromError_Success;
+	cl_int				errcode = StromError_Success;
 
 	/* Case of overflow; it shall be retried or executed by CPU instead,
 	 * so no projection is needed anyway. We quickly exit the kernel.
@@ -416,31 +637,29 @@ kern_gpuhashjoin_projection(__global kern_hashjoin *khashjoin,	/* in */
 	if (kresults->nitems > kresults->nrooms ||
 		kresults->nitems > kds_slot->nrooms)
 	{
-		errcode = StromError_DataStoreNoSpace;
+		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
 		goto out;
 	}
-		return;
-
-	/* Update 
-	 *
-	 */
+	/* Update the nitems of kds_dest */
 	if (get_global_id(0) == 0)
-		kds_slot->nitems = kresults->nitems;
-
+		kds_dest->nitems = kresults->nitems;
+	/* Do projection if thread is responsible */
 	if (get_global_id(0) >= kresults->nitems)
 		goto out;
 
-	values = KERN_DATA_STORE_VALUES(kds_slot, get_global_id(0));
-	isnull = KERN_DATA_STORE_ISNULL(kds_slot, get_global_id(0));
-
-	gpuhashjoin_projection(&errcode,
-						   kmhash, kds, ktoast,
-						   rindex, values, isnull);
-
-
-
-
-
+	/* Projection of outer relation */
+	if (kds_dest->format == KDS_FORMAT_TUPSLOT)
+		gpuhashjoin_projection_tupslot(&errcode,
+									   kmhash, kds, ktoast,
+									   kresults, kds_dest,
+									   get_global_id(0));
+	else if (kds_dest->format == KDS_FORMAT_COLUMN)
+		gpuhashjoin_projection_column(&errcode,
+									  kmhash, kds, ktoast,
+									  kresults, kds_dest,
+									  get_global_id(0));
+	else
+		STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption);
 out:
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
@@ -559,6 +778,114 @@ pg_varlena_hashref(__global kern_hashtable *khtable,
 		}													\
 		return hash;										\
 	}
+
+/*
+ * Utility macro definition for projection
+ */
+static inline void
+PUT_DATUM_KDS_TUPSLOT(__global Datum *values,
+					  __global cl_char *isnull,
+					  cl_uint colidx,
+					  cl_int typlen,
+					  cl_bool typbyval,
+					  __global hostptr_t *kbuffer,	/* kernel buffer that */
+					  __global void *addr)			/* owns "addr" */
+{
+	if (!addr)
+		isnull[colidx] = (cl_char) 1;
+	else
+	{
+		isnull[colidx] = (cl_char) 0;
+		if (typbyval)
+		{
+			if (typlen == sizeof(cl_char))
+				values[colidx] = (Datum)(*((cl_char *) addr));
+			else if (typlen == sizof(cl_short))
+				values[colidx] = (Datum)(*((cl_short *) addr));
+			else if (typlen == sizeof(cl_int))
+				values[colidx] = (Datum)(*((cl_int *) addr));
+			else if (typlen == sizeof(cl_long))
+				values[colidx] = (Datum)(*((cl_long *) addr));
+			else
+				isnull[colidx] = (cl_char) 1;	/* likely, a BUG */
+		}
+		else
+		{
+			values[colidx] = (Datum)(*kbuffer +
+									 (uintptr_t)addr -
+									 (uintptr_t)kbuffer);
+		}
+	}
+}
+
+static inline void
+PUT_DATUM_KDS_COLUMN(__global kern_data_store *kds_dest,
+					 cl_uint colidx, cl_uint rowidx,
+					 __global hostptr_t *kbuffer,
+					 __global void *src_addr)
+{
+	__global kern_colmeta colmeta = &kds_dest->colmeta[colidx];
+	__global char  *dst_addr;
+	cl_uint			offset;
+
+	offset = colmeta.cs_offset;
+	if (!offset)
+		return;		/* likely, BUG */
+
+	if (!colmeta.attnotnull)
+	{
+		__global cl_uint   *nullmap
+			= ((__global cl_uint *)
+			   ((__global char *)kds_dest + offset)) + (rowidx >> 5);
+		cl_uint				nullmask = (1U << (rowidx & 0x1f));
+
+		if (!src_addr)
+		{
+			atomic_and(nullmap, ~nullmask);
+			return;
+		}
+		atomic_or(nullmap, nullmask);
+		offset += STROMALIGN(bitmaplen(kds->nrooms));
+	}
+	else if (!src_addr)
+		return;		/* likely, BUG */
+
+	dst_addr = (__global char *) kds_dest + offset;
+	if (typlen > 0)
+	{
+		dst_addr += typlen * rowidx;
+		switch (typlen)
+		{
+			case sizeof(cl_char):
+				*((__global cl_char *) dst_addr)
+					= *((__global cl_char *) src_addr);
+				break;
+			case sizeof(cl_short):
+				*((__global cl_short *) dst_addr)
+					= *((__global cl_short *) src_addr);
+				break;
+			case sizeof(cl_int):
+				*((__global cl_int *) dst_addr)
+					= *((__global cl_int *) src_addr);
+				break;
+			case sizeof(cl_long):
+				*((__global cl_long) dst_addr)
+					= *((__global cl_long *) dst_addr);
+				break;
+			default:
+				memcpy(dst_addr, src_addr, typlen);
+				break;
+		}
+	}
+	else
+	{
+		cl_uint		vl_offset =
+			(cl_uint)((__global cl_char *) src_addr -
+					  (__global cl_char *) kbuffer);
+		dst_addr += sizeof(cl_uint) * rowidx;
+		*((__global cl_uint *) dst_addr) = vl_offset;
+	}
+}
 
 #else	/* OPENCL_DEVICE_CODE */
 

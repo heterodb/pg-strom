@@ -229,8 +229,6 @@ typedef struct {
 	cl_uchar		t_bits[1];		/* bitmap of NULLs -- VARIABLE LENGTH */
 } HeapTupleHeaderData;
 
-typedef __global HeapTupleHeaderData *HeapTuple;
-
 #define att_isnull(ATT, BITS) (!((BITS)[(ATT) >> 3] & (1 << ((ATT) & 0x07))))
 #define bitmaplen(NATTS) (((int)(NATTS) + BITS_PER_BYTE - 1) / BITS_PER_BYTE)
 
@@ -750,7 +748,7 @@ typedef struct varatt_indirect
  */
 static inline __global void *
 kern_get_datum_tuple(__global kern_colmeta *colmeta,
-					 HeapTuple htup, cl_uint colidx)
+					 __global HeapTupleHeaderData *htup, cl_uint colidx)
 {
 	cl_uint		offset = htup->t_hoff;
 	cl_uint		i, ncols = (htup->t_infomask2 & HEAP_NATTS_MASK);
@@ -788,25 +786,22 @@ kern_get_datum_tuple(__global kern_colmeta *colmeta,
 	return NULL;
 }
 
-static inline __global void *
-kern_get_datum_rs(__global kern_data_store *kds,
-				  cl_uint colidx, cl_uint rowidx)
+static inline __global HeapTupleHeaderData *
+kern_get_tuple_rs(__global kern_data_store *kds, cl_uint rowidx)
 {
 	__global kern_rowitem *kritem;
-	HeapTuple	htup;
 	PageHeader	page;
 	cl_ushort	block_ofs;
 	cl_ushort	item_ofs;
 	cl_ushort	item_max;
 	ItemIdData	item_id;
 
-	if (colidx >= kds->ncols || rowidx >= kds->nitems)
-		return NULL;
+	if (rowidx >= kds->nitems)
+		return NULL;	/* likely a BUG */
 
 	kritem = KERN_DATA_STORE_ROWITEM(kds, rowidx);
 	block_ofs = kritem->block_ofs;
 	item_ofs = kritem->item_ofs;
-
 	if (block_ofs >= kds->nblocks)
 		return NULL;	/* likely a BUG */
 
@@ -820,9 +815,22 @@ kern_get_datum_rs(__global kern_data_store *kds,
 	if (ItemIdGetOffset(item_id) +
 		offsetof(HeapTupleHeaderData, t_bits) >= BLCKSZ)
 		return NULL;	/* likely a BUG */
-	htup = (__global HeapTupleHeaderData *)
-		((__global char *)page + ItemIdGetOffset(item_id));
 
+	return (__global HeapTupleHeaderData *)
+		((__global char *)page + ItemIdGetOffset(item_id));
+}
+
+static inline __global void *
+kern_get_datum_rs(__global kern_data_store *kds,
+				  cl_uint colidx, cl_uint rowidx)
+{
+	__global HeapTupleHeaderData *htup;
+
+	if (colidx >= kds->ncols)
+		return NULL;	/* likely a BUG */
+	htup = kern_get_tuple_rs(kds, rowidx);
+	if (!htup)
+		return NULL;
 	return kern_get_datum_tuple(kds->colmeta, htup, colidx);
 }
 
