@@ -884,264 +884,67 @@ gpuhashjoin_textout_path(StringInfo str, Node *node)
 static void
 gpuhashjoin_codegen_projection(StringInfo body,
 							   GpuHashJoin *ghjoin,
-							   cl_int dest_format,
 							   codegen_context *context)
 {
-	Assert(dest_format == KDS_FORMAT_COLUMN ||
-		   dest_format == KDS_FORMAT_TUPSLOT);
+	Plan	   *plan = (Plan *) ghjoin;
+	int			depth = 0;
+	ListCell   *lc;
 
 	appendStringInfo(
 		body,
-		"static void\n"
-		"gpuhashjoin_projection_%s(__private cl_int *errcode,\n"
-		"                       __global kern_multihash *kmhash,\n"
-		"                       __global kern_data_store *kds,\n"
-		"                       __global kern_toastbuf *ktoast,\n"
-		"                       __global kern_resultbuf *kresults,\n"
-		"                       __global kern_data_store *kds_dest,\n"
-		"                       size_t kds_index)\n"
-		"{\n"
-		"  __global cl_int  *rbuffer;\n",
-		dest_format == KDS_FORMAT_COLUMN ? "column" : "tupslot");
-
-	if (dest_format == KDS_FORMAT_COLUMN)
-	{
-		appendStringInfo(
-			body,
-			"");
-	}
-	else
-	{
-		appendStringInfo(
-			body,
-			"  __global Datum   *slot_values"
-			" = KERN_DATA_STORE_VALUES(kds_dest, kds_index);\n"
-			"  __global cl_char *slot_isnull"
-			" = KERN_DATA_STORE_ISNULL(kds_dest, kds_index);\n");
-	}
-	/* projection of the outer relation */
-	appendStringInfo(
-		body,
-		"  rbuffer = kresults->results + kresults->nrels * kds_index;\n"
-		"  /* projection of outer relation */\n"
-		"  if (kds->format == KDS_FORMAT_ROW)\n"
-		"  {\n"
-		"    __global HeapTupleHeaderData *htup\n"
-		"      = kern_get_tuple_rs(kds, rbuffer[0]);\n"
-		"    if (htup)\n"
-		"    {\n"
-		"      cl_uint offset = htup->t_hoff;\n"
-		"      cl_uint i, ncols;\n"
-		"      cl_bool heap_hasnull;\n"
-		"      __global char *srcaddr;\n"
 		"\n"
-		"      ncols = min(kds->ncols, htup->t_infomask2 & HEAP_NATTS_MASK);\n"
-		"      heap_hasnull = (htup->t_infomask & HEAP_HASNULL);\n"
-		"      for (i=0; i < ncols; i++)\n"
-		"      {\n"
-		"        if (heap_hasnull && att_isnull(i, htup->t_bits))\n"
-		"          srcaddr = NULL;\n"
-		"        else\n"
-		"        {\n"
-		"          if (kds->colmeta[i].attlen > 0)\n"
-		"            offset = TYPEALIGN(colmeta[i].attalign, offset);\n"
-		"          else if (!VARATT_NOT_PAD_BYTE((__global char *)htup + offset))\n"
-		"            offset = TYPEALIGN(colmeta[i].attalign, offset);\n"
-		"          srcaddr = ((__global char *) htup + offset);\n"
-		"        }\n"
-		"        switch (i)\n"
-		"        {\n");
-	for (lc, ghjoin->pscan_vartrans)
-	{
-		vartrans_info  *vtrans = lfirst(lc);
-		int16	typlen;
-		bool	typbyval;
+		"static void\n"
+		"gpuhashjoin_projection_datum(__private cl_int *errcode,\n"
+		"                             __global kern_data_store *kds_dest,\n"
+		"                             size_t kds_index,\n"
+		"                             cl_int depth,\n"
+		"                             cl_int colidx,\n"
+		"                             __global hostptr_t *hostptr,\n"
+		"                             __global void *addr)\n"
+		"{\n"
+		"  switch (depth)\n"
+		"  {\n");
 
-		if (vtrans->srcdepth != 0)
-			continue;
-
+	depth = 0;
+	do {
 		appendStringInfo(
 			body,
-			"        case %d: /* %s */\n",
-			vtrans->srcresno - 1,
-			vtrans->resname);
-
-		get_typlenbyval(vtrans->vartype, &typlen, &typbyval);
-		if (dest_format == KDS_FORMAT_COLUMN)
-		{}
-		else
-		{
-			if (typbyval)
-			{
-				Assert(typlen > 0);
-				appendStringInfo(
-					body,
-					"          if (!srcaddr)\n"
-					"            isnull[%d] = (cl_char) 1;\n"
-					"          else\n"
-					"          {\n"
-					"            isnull[%d] = (cl_char) 0;\n",
-					"            values[%d] = (Datum)(*((%s *)srcaddr));\n"
-					"          }\n",
-					vtrans->resno - 1,
-					vtrans->resno - 1,
-					vtrans->resno - 1,
-					typlen == sizeof(cl_char) ? "cl_char" :
-					typlen == sizeof(cl_short) ? "cl_short" :
-					typlen == sizeof(cl_int) ? "cl_int" : "cl_long");
-			}
-			else
-			{
-				appendStringInfo(
-					body,
-					"          if (!srcaddr)\n"
-					"            isnull[%d] = (cl_char) 1;\n"
-					"          else\n"
-					"          {\n"
-					"            isnull[%d] = (cl_char) 0;\n"
-					"            values[%d] = (hostptr_t)(kds->hostptr +\n"
-					"                                     ((uintptr_t)srcaddr -\n"
-					"                                      (uintptr+t)kds));\n"
-					"          }\n",
-					vtrans->resno - 1,
-                    vtrans->resno - 1,
-                    vtrans->resno - 1);
-			}
-		}
-		appendStringInfo(
-			body,
-			"          break;\n");
-	}
-	appendStringInfo(
-		body,
-		"        }\n"
-		"      }\n"
-		"    }\n"
-		"    else\n"
-		"    {\n");
-	if (dest_format == KDS_FORMAT_COLUMN)
-	{}
-	else
-	{
-		for (lc, ghjoin->pscan_vartrans)
+			"  case %d:\n"
+			"    switch (colidx)\n"
+			"    {\n", depth);
+		foreach (lc, ghjoin->pscan_vartrans)
 		{
 			vartrans_info  *vtrans = lfirst(lc);
-			if (vtrans->srcdepth == 0)
-				appendStringInfo(
-					body,
-					"      slot_isnull[%d] = (cl_char) 1;\n",
-					vtrans->resno - 1);
+			int16			typlen;
+			bool			typbyval;
+
+			if (vtrans->srcdepth != depth)
+				continue;
+			get_typlenbyval(vtrans->vartype, &typlen, &typbyval);
+			appendStringInfo(
+				body,
+				"    case %d: GHJOIN_PUT_DATUM(%u,%d,%s); break;\n",
+				vtrans->srcresno - 1,
+				vtrans->resno - 1,
+				typlen,
+				typbyval ? "true" : "false");
 		}
-	}
-	appendStringInfo(
-		body,
-		"    }\n"
-		"  }\n"
-		"  else\n"
-		"  {\n"
-		
-
-
-	appendStringInfo(
-		body,
-		"      slot_isnull[]"
-
-	for (lc, ghjoin->pscan_vartrans)
-	{
-		vartrans_info  *vtrans = lfirst(lc);
-
-		if (vtrans->srcdepth == 0)
-
 		appendStringInfo(
 			body,
-			"        case %d: /* %s */\n",
-			vtrans->srcresno - 1,
-			vtrans->resname);
-
-
-
-		"  if (kds->format == KDS_FORMAT_ROW)\n"
-		"  {\n"
-		"    __global HeapTupleHeaderData *htup\n"
-		"      = kern_get_tuple_rs(kds, rbuffer[0]);\n"
-		"    if (htup)\n"
-		"    {\n"
-		"      cl_uint offset = htup->t_hoff;\n"
-		"      cl_uint i, ncols;\n"
-		"      cl_bool heap_hasnull;\n"
-		"      __global char *srcaddr;\n"
-
-
-		if (typbyval)
-		{
-			Assert(typlen > 0);
-			switch (typlen)
-			{
-				case sizeof(cl_char):
-					appendStringInfo(
-						body,
-						""
-
-
-			/* copy by value */
-
-
-
-
-		}
-		else
-		{
-			/* just a pointer */
-		}
-
-
-
-
-		appendStringInfo(
-			body,
-			"        break;\n"
-			);
-
-
-
-	}
-
-		switch (colidx)
-		{
-			case xxx:
-				memcpy
-		}
-
-
-		"        offset += (colmeta[i].attlen > 0\n"
-		"                   ? colmeta[i].attlen\n"
-		"                   : VARSIZE_ANY(addr));\n"
-		"      }\n"
-		"    }\n"
-		"  }\n");
-
-
-
-
-
-		"  else if (kds->format == KDS_FORMAT_COLUMN)\n"
-		"  {\n"
+			"    default:\n"
+			"      /* do nothing */\n"
+			"      break;\n"
+			"    }\n");
+		plan = innerPlan(plan);
+		depth++;
+	} while (plan);
+	appendStringInfo(
+		body,
+		"  default:\n"
+		"    /* do nothing */\n"
+		"    break;\n"
 		"  }\n"
-		"  else\n"
-		"  {\n"
-		"    *errcode = StromError_DataStoreCorruption;\n"
-		"    return;\n"
-		"  }\n"
-
-	
-
-
-
-
-
-
-
-	appendStringInfo(body, "}\n");
+		"}\n");
 }
 
 static void
@@ -1266,8 +1069,10 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 		for (i=1; i <= ghjoin->num_rels; i++)
 			appendStringInfo(
 				body,
-				"  rbuffer[%d] = kentry_%d->rowid + 1;\n",
-				i, i);
+				//"  rbuffer[%d] = kentry_%d->rowid + 1;\n",
+				"  rbuffer[%d] = (cl_int)"
+				"((uintptr_t)kentry_%d - (uintptr_t)khtable_%d);\n",
+				i, i, i);
 		appendStringInfo(
             body,
 			"  rbuffer += %d;\n"
@@ -1393,6 +1198,9 @@ gpuhashjoin_codegen(PlannerInfo *root,
 	appendStringInfo(&body,
 					 "return n_matches;\n"
 					 "}\n");
+
+	/* also, gpuhashjoin_projection_datum() */
+	gpuhashjoin_codegen_projection(&body, ghjoin, context);
 
 	/* put declarations of types/funcs/params */
 	appendStringInfo(&str, "%s%s%s%s%s",
@@ -3343,6 +3151,7 @@ expand_multihash_tables(pgstrom_multihash_tables *mhtables_old)
 		elog(ERROR, "out of shared memory");
 	memcpy(mhtables_new, mhtables_old,
 		   offsetof(pgstrom_multihash_tables, kern) + maxlen_old);
+	mhtables_new->kern.hostptr = (hostptr_t)&mhtables_new->kern.hostptr;
 	mhtables_new->maxlen =
 		allocated - offsetof(pgstrom_multihash_tables, kern);
 	Assert(mhtables_new->maxlen > maxlen_old);
@@ -3605,7 +3414,7 @@ multihash_exec_multi(CustomPlanState *node)
 		memcpy(mhtables->kern.pg_crc32_table,
 			   pg_crc32_table,
 			   sizeof(uint32) * 256);
-		mhtables->kern.hostptr = (hostptr_t) &mhtables->kern;
+		mhtables->kern.hostptr = (hostptr_t) &mhtables->kern.hostptr;
 		mhtables->kern.ntables = nrels;
 		memset(mhtables->kern.htable_offset, 0, sizeof(cl_uint) * (nrels + 1));
 		pgstrom_track_object(&mhtables->sobj, 0);

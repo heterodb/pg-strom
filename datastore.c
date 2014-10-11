@@ -504,7 +504,7 @@ pgstrom_create_data_store_row(TupleDesc tupdesc,
 	/* update exact number of rooms available */
 	nrooms = (allocation - baselen) / sizeof(kern_rowitem);
 
-	kds->hostptr = (hostptr_t) kds;
+	kds->hostptr = (hostptr_t) &kds->hostptr;
 	kds->length = 0;	/* 0 for row-store */
 	kds->ncols = tupdesc->natts;
 	kds->nitems = 0;
@@ -597,7 +597,7 @@ pgstrom_create_data_store_column(TupleDesc tupdesc,
 	kds = pgstrom_shmem_alloc(required);
 	if (!kds)
 		elog(ERROR, "out of shared memory");
-	kds->hostptr = (hostptr_t) kds;
+	kds->hostptr = (hostptr_t) &kds->hostptr;
 	kds->length = required;
 	kds->ncols = tupdesc->natts;
 	kds->nitems = 0;
@@ -979,7 +979,7 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 				ktoast = pgstrom_shmem_alloc(required);
 				if (!ktoast)
 					elog(ERROR, "out of shared memory");
-				ktoast->hostptr = (hostptr_t) ktoast;
+				ktoast->hostptr = (hostptr_t) &ktoast->hostptr;
 				ktoast->length = required;
 				ktoast->usage = (!pds->ktoast
 								 ? offsetof(kern_toastbuf, data[0])
