@@ -195,10 +195,13 @@ typedef struct {
 	/*-- perfmon for kernel execution --*/
 	cl_uint		num_kern_exec;	/* number of main kernel execution */
 	cl_ulong	time_kern_exec;	/* time to execute main kernel */
+	/*-- (special perfmon for gpuhashjoin) --*/
+	cl_uint		num_kern_proj;	/* number of projection kernel execution */
+	cl_ulong	time_kern_proj;	/* time to execute projection kernel */
 	/*-- (special perfmon for gpupreagg) --*/
-	cl_uint		num_kern_prep;	/* number of projection kernel execution */
+	cl_uint		num_kern_prep;	/* number of preparation kernel execution */
 	cl_uint		num_kern_sort;	/* number of sort kernel execution */
-	cl_ulong	time_kern_prep;	/* time to execute projection kernel */
+	cl_ulong	time_kern_prep;	/* time to execute preparation kernel */
 	cl_ulong	time_kern_sort;	/* time to execute sort kernel */
 
 	struct timeval	tv;	/* result of gettimeofday(2) when enqueued */

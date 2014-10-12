@@ -164,86 +164,83 @@ KERN_HASH_NEXT_ENTRY(__global kern_hashtable *khtable,
  * It packs a kern_parambuf and kern_resultbuf structure within a continuous
  * memory ares, to transfer (usually) small chunk by one DMA call.
  *
- * +----------------+       -----
- * | kern_parambuf  |         ^
- * | +--------------+         |
- * | | length   o-------------------+
- * | +--------------+         |     | kern_resultbuf is located just after
- * | | nparams      |         |     | the kern_parambuf (because of DMA
- * | +--------------+         |     | optimization), so head address of
- * | | poffset[0]   |         |     | kern_gpuscan + parambuf.length
- * | | poffset[1]   |         |     | points kern_resultbuf.
- * | |    :         |         |     |
- * | | poffset[M-1] |         |     |
- * | +--------------+         |     |
- * | | variable     |         |     |
- * | | length field |         |     |
- * | | for Param /  |         |     |
- * | | Const values |         |     |
- * | |     :        |         |     |
- * +-+--------------+  -----  |  <--+
- * | kern_resultbuf |    ^    |
- * | +--------------+    |    |  Area to be sent to OpenCL device.
- * | | nrooms       |    |    |  Forward DMA shall be issued here.
- * | +--------------+    |    |
- * | | nitems       |    |    |
- * | +--------------+    |    |
- * | | errcode      |    V    V
- * | +--------------+ -----------
- * | | results[0]   |  Area to be written back from the OpenCL device.
- * | | results[1]   |  Reverse DMA shall be issued here.
- * | |     :        |
- * | | results[N-1] |  results[] array is only in-kernel
- * +-+--------------+
  *
- * Things to be written into result-buffer:
- * Unlike simple scan cases, GpuHahJoin generate a tuple combined from
- * two different relation stream; inner and outer. We invoke a kernel
- * for each row-/column-store of outer relation stream, so it is obvious
- * which row-/column-store is pointed by the result. However, the inner
- * relation stream, that is hashed on the table, may have multiple row-
- * column-stores within a hash-table. So, it takes 8bytes to identify
- * a particular tuple on inner-side (index of rcstore and offset in the
- * rcstore).
- * So, we expect the result buffer shall be used as follows:
- *   results[3 * i + 0] = rcs-index of inner side (upper 32bits of rowid)
- *   results[3 * i + 1] = row-offset of inner side (lower 32bits of rowid)
- *   results[3 * i + 2] = row-index of outer relation stream
  *
- * MEMO: In the future enhancement, we may set invalid inner identifier,
- * if not valid pair was not found, for LEFT OUTER JOIN, but not now.
+ * +-------------------+ -------
+ * | kern_resultbuf    |  ^  ^
+ * |(only fixed fields)|  |  | Region to be written back from device
+ * | +-----------------+  |  | to host
+ * | | nrels           |  |  |
+ * | +-----------------+  |  |
+ * | | nrooms          |  |  |
+ * | +-----------------+  |  |
+ * | | nitems          |  |  |
+ * | +-----------------+  |  |
+ * | | errcode         |  |  |
+ * | +-----------------+  |  |
+ * | | has_recheckes   |  |  |
+ * | +-----------------+  |  |
+ * | | __padding__[]   |  |  V
+ * +-+-----------------+  | ---
+ * | kern_parambuf     |  |
+ * | +-----------------+  | Region to be sent to device from host
+ * | | length          |  |
+ * | +-----------------+  |
+ * | | nparams         |  |
+ * | +-----------------+  |
+ * | | poffset[0]      |  |
+ * | | poffset[1]      |  |
+ * | |    :            |  |
+ * | | poffset[M-1]    |  |
+ * | +-----------------+  |
+ * | | variable length |  |
+ * | | fields for      |  |
+ * | | Param / Const   |  |
+ * | |     :           |  |
+ * +-+-----------------+  |
+ * | kern_row_map      |  |
+ * | +-----------------+  |
+ * | | nvalids         |  |
+ * | +-----------------+  |
+ * | | rindex[0]       |  |
+ * | | rindex[1]       |  |
+ * | |   :             |  |
+ * | | rindex[N-1]     |  V
+ * +-+-----------------+ ---
  */
 typedef struct
 {
+	kern_resultbuf	kresults;
 	kern_parambuf	kparams;
-	/* also, resultbuf shall be placed next to the parambuf */
 } kern_hashjoin;
 
-#define KERN_HASHJOIN_LENGTH(khashjoin)						\
-	KERN_HASHJOIN_PARAMBUF(khashjoin)->length
-#define KERN_HASHJOIN_PARAMBUF(khashjoin)					\
+#define KERN_HASHJOIN_PARAMBUF(khashjoin)			\
 	((__global kern_parambuf *)(&(khashjoin)->kparams))
-
-#define KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin)			\
+#define KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin)	\
 	STROMALIGN(KERN_HASHJOIN_PARAMBUF(khashjoin)->length)
-#define KERN_HASHJOIN_RESULTBUF(khashjoin)								\
-	((__global kern_resultbuf *)((__global char *)(khashjoin) +			\
-								 KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin)))
-#define KERN_HASHJOIN_RESULTBUF_LENGTH(khashjoin)						\
-	STROMALIGN(offsetof(kern_resultbuf,									\
-						results[KERN_HASHJOIN_RESULTBUF(khashjoin)->nrels * \
-								KERN_HASHJOIN_RESULTBUF(khashjoin)->nrooms]))
-#define KERN_HASHJOIN_DMA_SENDOFS(khashjoin)	\
-	((uintptr_t)&(khashjoin)->kparams - (uintptr_t)khashjoin)
-#define KERN_HASHJOIN_DMA_SENDLEN(khashjoin)	\
-	(KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin) +	\
-	 offsetof(kern_resultbuf, results[0]))
-#define KERN_HASHJOIN_DMA_RECVOFS(khashjoin)	\
-	((uintptr_t)KERN_HASHJOIN_RESULTBUF(khashjoin) - (uintptr_t)(khashjoin))
-#define KERN_HASHJOIN_DMA_RECVLEN(khashjoin)	\
-	(offsetof(kern_resultbuf,					\
-		results[KERN_HASHJOIN_RESULTBUF(khashjoin)->nrels *	\
-				KERN_HASHJOIN_RESULTBUF(khashjoin)->nrooms]))
+#define KERN_HASHJOIN_RESULTBUF(khashjoin)			\
+	((__global kern_resultbuf *)(&(khashjoin)->kresults))
+#define KERN_HASHJOIN_RESULTBUF_LENGTH(khashjoin)	\
+	STROMALIGN(offsetof(kern_resultbuf, results[0]))
+#define KERN_HASHJOIN_ROWMAP(khashjoin)				\
+	((__global kern_row_map *)						\
+	 ((__global char *)KERN_HASHJOIN_PARAMBUF(khashjoin) +	\
+	  KERN_HASHJOIN_RESULTBUF_LENGTH(khashjoin)))
+#define KERN_HASHJOIN_ROWMAP_LENGTH(khashjoin)		\
+	(KERN_HASHJOIN_ROWMAP(khashjoin)->nvalids < 0 ?	\
+	 STROMALIGN(offsetof(kern_row_map, rindex[0])) :\
+	 STROMALIGN(offsetof(kern_row_map,				\
+				rindex[KERN_HASHJOIN_ROWMAP(khashjoin)->nvalids])))
+#define KERN_HASHJOIN_DMA_SENDPTR(khashjoin)	(&(khashjoin)->kresults)
+#define KERN_HASHJOIN_DMA_SENDOFS(khashjoin)	0UL
+#define KERN_HASHJOIN_DMA_SENDLEN(khashjoin)		\
+	((uintptr_t)KERN_HASHJOIN_ROWMAP(khashjoin) -	\
+	 (uintptr_t)(&(khashjoin)->kresults) +			\
+	 KERN_HASHJOIN_ROWMAP_LENGTH(khashjoin))
+#define KERN_HASHJOIN_DMA_RECVPTR(khashjoin)	(&(khashjoin)->kresults)
+#define KERN_HASHJOIN_DMA_RECVOFS(khashjoin)	0UL
+#define KERN_HASHJOIN_DMA_RECVLEN(khashjoin)		\
+	KERN_HASHJOIN_RESULTBUF_LENGTH(khashjoin)
 
 #ifdef OPENCL_DEVICE_CODE
 /*
@@ -827,12 +824,13 @@ typedef struct pgstrom_multihash_tables
 
 typedef struct
 {
-	pgstrom_message	msg;		/* = StromTag_GpuHashJoin */
-	Datum			dprog_key;	/* device key for gpuhashjoin */
+	pgstrom_message		msg;		/* = StromTag_GpuHashJoin */
+	Datum				dprog_key;	/* device key for gpuhashjoin */
 	pgstrom_multihash_tables *mhtables;	/* inner hashjoin tables */
-	pgstrom_data_store *pds;	/* data store of outer relation */
-	kern_hashjoin  *khashjoin;	/* a pair of kparams/kresults */
-	kern_row_map	krowmap;	/* valid row mapping */
+	pgstrom_data_store *pds;		/* data store of outer relation */
+	kern_data_store	   *kds_dest;	/* result kds */
+	kern_toastbuf	   *ktoast_dest;/* result ktoast, if any */
+	kern_hashjoin		khashjoin;		/* kern_hashjoin of this request */
 } pgstrom_gpuhashjoin;
 
 #endif	/* OPENCL_DEVICE_CODE */
