@@ -932,18 +932,14 @@ gpuhashjoin_codegen_projection(StringInfo body,
 		}
 		appendStringInfo(
 			body,
-			"    default:\n"
-			"      /* do nothing */\n"
-			"      break;\n"
+			"    default: /* do nothing */ break;\n"
 			"    }\n");
 		plan = innerPlan(plan);
 		depth++;
 	} while (plan);
 	appendStringInfo(
 		body,
-		"  default:\n"
-		"    /* do nothing */\n"
-		"    break;\n"
+		"  default: /* do nothing */ break;\n"
 		"  }\n"
 		"}\n");
 }
@@ -2175,8 +2171,9 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs,
 	/*
 	 * Allocation of pgstrom_gpuhashjoin message object
 	 */
-	required = (offsetof(pgstrom_gpuhashjoin, khashjoin.kparams) +
+	required = (offsetof(pgstrom_gpuhashjoin, khashjoin) +
 				STROMALIGN(ghjs->kparams->length) +
+				STROMALIGN(sizeof(kern_resultbuf)) +
 				(nvalids < 0 ?
 				 STROMALIGN(offsetof(kern_row_map, rindex[0])) :
 				 STROMALIGN(offsetof(kern_row_map, rindex[nvalids]))));
@@ -2199,19 +2196,19 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs,
 	gpuhashjoin->ktoast_dest = NULL;	/* to be set below */
 	khashjoin = &gpuhashjoin->khashjoin;
 
+	/* setup kern_parambuf */
+	kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
+	memcpy(kparams, ghjs->kparams, ghjs->kparams->length);
+
 	/* setup kern_resultbuf */
 	nrooms = (cl_uint)((double)(nvalids < 0 ? kds->nitems : nvalids) *
-					   ghjs->row_population_ratio);
+					   ghjs->row_population_ratio * 1.1);
 	kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
     memset(kresults, 0, sizeof(kern_resultbuf));
 	kresults->nrels = nrels + 1;
 	kresults->nrooms = nrooms;
 	kresults->nitems = 0;
 	kresults->errcode = StromError_Success;
-
-	/* setup kern_parambuf */
-	kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
-	memcpy(kparams, ghjs->kparams, ghjs->kparams->length);
 
 	/* setup kern_row_map */
 	krowmap = KERN_HASHJOIN_ROWMAP(khashjoin);
@@ -2399,6 +2396,7 @@ gpuhashjoin_next_tuple(GpuHashJoinState *ghjs,
 			   sizeof(Datum) * tupdesc->natts);
 		memcpy(pslot->tts_isnull, tts_isnull,
 			   sizeof(bool) * tupdesc->natts);
+		ExecStoreVirtualTuple(pslot);
 
 		if (ghjs->host_clauses != NIL)
 		{
@@ -3547,6 +3545,7 @@ typedef struct
 	cl_mem			m_hash;
 	cl_mem			m_dstore;
 	cl_mem			m_ktoast;
+	cl_mem			m_rowmap;
 	cl_mem			m_kresult;
 	cl_int			dindex;
 	bool			hash_loader;/* true, if this context loads hash table */
@@ -3717,6 +3716,10 @@ clserv_respond_hashjoin(cl_event event, cl_int ev_status, void *private)
 	 */
 	while (clghj->ev_index > 1)
 		clReleaseEvent(clghj->events[--clghj->ev_index]);
+	if (clghj->m_kresult)
+		clReleaseMemObject(clghj->m_kresult);
+	if (clghj->m_rowmap)
+		clReleaseMemObject(clghj->m_rowmap);
 	if (clghj->m_ktoast)
 		clReleaseMemObject(clghj->m_ktoast);
 	if (clghj->m_dstore)
@@ -3798,6 +3801,7 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	//kern_toastbuf	   *ktoast_dest = gpuhashjoin->ktoast_dest;
 	clstate_gpuhashjoin	*clghj = NULL;
 	kern_row_map	   *krowmap;
+	kern_resultbuf	   *kresults;
 	size_t				nitems;
 	size_t				gwork_sz;
 	size_t				lwork_sz;
@@ -3809,6 +3813,9 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	Assert(StromTagIs(gpuhashjoin, GpuHashJoin));
 	Assert(StromTagIs(gpuhashjoin->mhtables, HashJoinTable));
 	Assert(StromTagIs(gpuhashjoin->pds, DataStore));
+	krowmap = KERN_HASHJOIN_ROWMAP(&gpuhashjoin->khashjoin);
+	kresults = KERN_HASHJOIN_RESULTBUF(&gpuhashjoin->khashjoin);
+
 	/* state object of gpuhashjoin */
 	clghj = calloc(1, (sizeof(clstate_gpuhashjoin) +
 					   sizeof(cl_event) * kds->nblocks));
@@ -3942,7 +3949,9 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 		goto error;
 
 	/* buffer object of __global kern_hashjoin *khashjoin */
-	length = KERN_HASHJOIN_DMA_SENDLEN(&gpuhashjoin->khashjoin);
+	length = (KERN_HASHJOIN_PARAMBUF_LENGTH(&gpuhashjoin->khashjoin) +
+			  KERN_HASHJOIN_RESULTBUF_LENGTH(&gpuhashjoin->khashjoin) +
+			  sizeof(cl_int) * kresults->nrels * kresults->nrooms);
 	clghj->m_join = clCreateBuffer(opencl_context,
 								   CL_MEM_READ_WRITE,
 								   length,
@@ -3985,7 +3994,28 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 		}
 	}
 
+	/* buffer object of __global kern_row_map *krowmap */
+	if (krowmap->nvalids < 0)
+		clghj->m_rowmap = NULL;
+	else
+	{
+		length = STROMALIGN(offsetof(kern_row_map,
+									 rindex[krowmap->nvalids]));
+		clghj->m_rowmap = clCreateBuffer(opencl_context,
+                                         CL_MEM_READ_WRITE,
+										 length,
+										 NULL,
+										 &rc);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
+			goto error;
+		}
+	}
+
 	/* buffer object of __global kern_data_store *kds_dest */
+	clserv_log("kds length=%u ncols=%u nitems=%u nrooms=%u", KERN_DATA_STORE_LENGTH(kds), kds->ncols, kds->nitems, kds->nrooms);
+	clserv_log("kds_dest length=%u ncols=%u nitems=%u nrooms=%u", kds_dest->length, kds_dest->ncols, kds->nitems, kds_dest->nrooms);
 	clghj->m_kresult = clCreateBuffer(opencl_context,
 									  CL_MEM_READ_WRITE,
 									  STROMALIGN(kds_dest->length),
@@ -4072,7 +4102,6 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	 */
 
 	/* Get an optimal workgroup-size of this kernel */
-	krowmap = KERN_HASHJOIN_ROWMAP(&gpuhashjoin->khashjoin);
 	nitems = (krowmap->nvalids < 0 ? kds->nitems : krowmap->nvalids);
 	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
 									   clghj->kern_main,
@@ -4123,7 +4152,17 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	}
 
 	rc = clSetKernelArg(clghj->kern_main,
-						4,	/* __local void *local_workbuf */
+						4,	/*  __global kern_row_map *krowmap */
+						sizeof(cl_mem),
+						&clghj->m_ktoast);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		goto error;
+	}
+
+	rc = clSetKernelArg(clghj->kern_main,
+						5,	/* KERN_DYNAMIC_LOCAL_WORKMEM_ARG */
 						sizeof(cl_uint) * lwork_sz,
 						NULL);
 	if (rc != CL_SUCCESS)

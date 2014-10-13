@@ -352,6 +352,8 @@ pgstrom_perfmon_add(pgstrom_perfmon *pfm_sum, pgstrom_perfmon *pfm_item)
 	pfm_sum->time_dma_recv		+= pfm_item->time_dma_recv;
 	pfm_sum->num_kern_exec		+= pfm_item->num_kern_exec;
 	pfm_sum->time_kern_exec		+= pfm_item->time_kern_exec;
+	pfm_sum->num_kern_proj		+= pfm_item->num_kern_proj;
+	pfm_sum->time_kern_proj		+= pfm_item->time_kern_proj;
 	pfm_sum->num_kern_prep		+= pfm_item->num_kern_prep;
 	pfm_sum->num_kern_sort		+= pfm_item->num_kern_sort;
 	pfm_sum->time_kern_prep		+= pfm_item->time_kern_prep;
@@ -489,6 +491,18 @@ pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 										(double)pfm->num_kern_sort),
 				 pfm->num_kern_sort);
         ExplainPropertyText("sort kernel exec", buf, es);
+	}
+
+	/* only gpuhashjoin */
+	if (pfm->num_kern_proj > 0)
+	{
+		multi_kernel = true;
+		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
+				 usecond_unitary_format((double)pfm->time_kern_proj),
+				 usecond_unitary_format((double)pfm->time_kern_proj /
+										(double)pfm->num_kern_proj),
+				 pfm->num_kern_exec);
+		ExplainPropertyText("proj kernel exec", buf, es);
 	}
 
 	if (pfm->num_kern_exec > 0)

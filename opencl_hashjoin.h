@@ -166,25 +166,10 @@ KERN_HASH_NEXT_ENTRY(__global kern_hashtable *khtable,
  *
  *
  *
- * +-------------------+ -------
- * | kern_resultbuf    |  ^  ^
- * |(only fixed fields)|  |  | Region to be written back from device
- * | +-----------------+  |  | to host
- * | | nrels           |  |  |
- * | +-----------------+  |  |
- * | | nrooms          |  |  |
- * | +-----------------+  |  |
- * | | nitems          |  |  |
- * | +-----------------+  |  |
- * | | errcode         |  |  |
- * | +-----------------+  |  |
- * | | has_recheckes   |  |  |
- * | +-----------------+  |  |
- * | | __padding__[]   |  |  V
- * +-+-----------------+  | ---
- * | kern_parambuf     |  |
- * | +-----------------+  | Region to be sent to device from host
- * | | length          |  |
+ * +-+-----------------+ ---
+ * | kern_parambuf     |  ^
+ * | +-----------------+  | Region to be sent to the m_join device memory
+ * | | length          |  | 
  * | +-----------------+  |
  * | | nparams         |  |
  * | +-----------------+  |
@@ -197,9 +182,24 @@ KERN_HASH_NEXT_ENTRY(__global kern_hashtable *khtable,
  * | | fields for      |  |
  * | | Param / Const   |  |
  * | |     :           |  |
- * +-+-----------------+  |
- * | kern_row_map      |  |
- * | +-----------------+  |
+ * +-------------------+ -|----
+ * | kern_resultbuf    |  |  ^
+ * |(only fixed fields)|  |  | Region to be written back from the device
+ * | +-----------------+  |  | memory to the host-side
+ * | | nrels           |  |  |
+ * | +-----------------+  |  |
+ * | | nrooms          |  |  |
+ * | +-----------------+  |  |
+ * | | nitems          |  |  |
+ * | +-----------------+  |  |
+ * | | errcode         |  |  |
+ * | +-----------------+  |  |
+ * | | has_recheckes   |  |  |
+ * | +-----------------+  |  |
+ * | | __padding__[]   |  |  V
+ * +-+-----------------+ ------
+ * | kern_row_map      |  ^  Region to be sent to the m_rowmap device memory,
+ * | +-----------------+  |  on demand.
  * | | nvalids         |  |
  * | +-----------------+  |
  * | | rindex[0]       |  |
@@ -210,36 +210,39 @@ KERN_HASH_NEXT_ENTRY(__global kern_hashtable *khtable,
  */
 typedef struct
 {
-	kern_resultbuf	kresults;
 	kern_parambuf	kparams;
 } kern_hashjoin;
 
-#define KERN_HASHJOIN_PARAMBUF(khashjoin)			\
+#define KERN_HASHJOIN_PARAMBUF(khashjoin)					\
 	((__global kern_parambuf *)(&(khashjoin)->kparams))
-#define KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin)	\
+#define KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin)			\
 	STROMALIGN(KERN_HASHJOIN_PARAMBUF(khashjoin)->length)
-#define KERN_HASHJOIN_RESULTBUF(khashjoin)			\
-	((__global kern_resultbuf *)(&(khashjoin)->kresults))
-#define KERN_HASHJOIN_RESULTBUF_LENGTH(khashjoin)	\
-	STROMALIGN(offsetof(kern_resultbuf, results[0]))
-#define KERN_HASHJOIN_ROWMAP(khashjoin)				\
-	((__global kern_row_map *)						\
+#define KERN_HASHJOIN_RESULTBUF(khashjoin)					\
+	((__global kern_resultbuf *)							\
 	 ((__global char *)KERN_HASHJOIN_PARAMBUF(khashjoin) +	\
+	  KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin)))
+#define KERN_HASHJOIN_RESULTBUF_LENGTH(khashjoin)			\
+	STROMALIGN(offsetof(kern_resultbuf, results[0]))
+#define KERN_HASHJOIN_ROWMAP(khashjoin)						\
+	((__global kern_row_map *)								\
+	 ((__global char *)KERN_HASHJOIN_RESULTBUF(khashjoin) +	\
 	  KERN_HASHJOIN_RESULTBUF_LENGTH(khashjoin)))
 #define KERN_HASHJOIN_ROWMAP_LENGTH(khashjoin)		\
 	(KERN_HASHJOIN_ROWMAP(khashjoin)->nvalids < 0 ?	\
 	 STROMALIGN(offsetof(kern_row_map, rindex[0])) :\
 	 STROMALIGN(offsetof(kern_row_map,				\
 				rindex[KERN_HASHJOIN_ROWMAP(khashjoin)->nvalids])))
-#define KERN_HASHJOIN_DMA_SENDPTR(khashjoin)	(&(khashjoin)->kresults)
-#define KERN_HASHJOIN_DMA_SENDOFS(khashjoin)	0UL
+#define KERN_HASHJOIN_DMA_SENDPTR(khashjoin)	\
+	KERN_HASHJOIN_PARAMBUF(khashjoin)
+#define KERN_HASHJOIN_DMA_SENDOFS(khashjoin)		0UL
 #define KERN_HASHJOIN_DMA_SENDLEN(khashjoin)		\
 	((uintptr_t)KERN_HASHJOIN_ROWMAP(khashjoin) -	\
-	 (uintptr_t)(&(khashjoin)->kresults) +			\
-	 KERN_HASHJOIN_ROWMAP_LENGTH(khashjoin))
-#define KERN_HASHJOIN_DMA_RECVPTR(khashjoin)	(&(khashjoin)->kresults)
-#define KERN_HASHJOIN_DMA_RECVOFS(khashjoin)	0UL
-#define KERN_HASHJOIN_DMA_RECVLEN(khashjoin)		\
+	 (uintptr_t)KERN_HASHJOIN_PARAMBUF(khashjoin))
+#define KERN_HASHJOIN_DMA_RECVPTR(khashjoin)	\
+	KERN_HASHJOIN_RESULTBUF(khashjoin)
+#define KERN_HASHJOIN_DMA_RECVOFS(khashjoin)	\
+	KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin)
+#define KERN_HASHJOIN_DMA_RECVLEN(khashjoin)	\
 	KERN_HASHJOIN_RESULTBUF_LENGTH(khashjoin)
 
 #ifdef OPENCL_DEVICE_CODE
@@ -276,7 +279,7 @@ kern_gpuhashjoin_main(__global kern_hashjoin *khashjoin,
 					  __global kern_multihash *kmhash,
 					  __global kern_data_store *kds,
 					  __global kern_toastbuf *ktoast,
-					  __global kern_row_map *krowmap,
+					  __global kern_row_map   *krowmap,
 					  KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
 	__global kern_parambuf  *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
@@ -414,8 +417,8 @@ kern_gpuhashjoin_projection(__global kern_hashjoin *khashjoin,	/* in */
 	__global HeapTupleHeaderData *htup;
 	__global hostptr_t *hostptr;
 	__global void	   *addr;
-	cl_int				depth, nrels;
-	cl_int				i, ncols;
+	cl_int				nrels = kresults->nrels;
+	cl_int				depth;
 	cl_uint				offset;
 	cl_uint				nattrs;
 	cl_bool				heap_hasnull;
@@ -440,7 +443,7 @@ kern_gpuhashjoin_projection(__global kern_hashjoin *khashjoin,	/* in */
 		goto out;
 	/* Ensure format of the kds_dest */
 	if (kds_dest->format != KDS_FORMAT_TUPSLOT &&
-		kds_dest->format == KDS_FORMAT_COLUMN)
+		kds_dest->format != KDS_FORMAT_COLUMN)
 	{
 		STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption);
 		goto out;
@@ -456,41 +459,8 @@ kern_gpuhashjoin_projection(__global kern_hashjoin *khashjoin,	/* in */
 	{
 		cl_uint		i, ncols = kds->ncols;
 
-		htup = kern_get_tuple_rs(kds, rbuffer[0]);
-		if (htup)
-		{
-			offset = htup->t_hoff;
-			nattrs = (htup->t_infomask2 & HEAP_NATTS_MASK);
-			heap_hasnull = (htup->t_infomask & HEAP_HASNULL);
-
-			for (i=0; i < ncols; i++)
-			{
-				if (i >= nattrs)
-					addr = NULL;
-				else if (heap_hasnull && att_isnull(i, htup->t_bits))
-					addr = NULL;
-				else
-				{
-					kern_colmeta	cmeta = kds->colmeta[i];
-
-					if (cmeta.attlen > 0)
-						offset = TYPEALIGN(cmeta.attalign, offset);
-					else if (!VARATT_NOT_PAD_BYTE((__global char *)htup +
-												  offset))
-						offset = TYPEALIGN(cmeta.attalign, offset);
-
-					addr = ((__global char *) htup + offset);
-				}
-				gpuhashjoin_projection_datum(&errcode,
-											 kds_dest,
-											 get_global_id(0),
-											 0,	/* depth */
-											 i,	/* colidx */
-											 &kds->hostptr,
-											 addr);
-			}
-		}
-		else
+		htup = kern_get_tuple_rs(kds, rbuffer[0] - 1);
+		if (!htup)
 		{
 			/* fill up the slot with null */
 			for (i=0; i < ncols; i++)
@@ -501,6 +471,40 @@ kern_gpuhashjoin_projection(__global kern_hashjoin *khashjoin,	/* in */
 											 i,	/* colidx */
 											 NULL,	/* hostptr */
 											 NULL);	/* addr */
+			goto out;
+		}
+		offset = htup->t_hoff;
+		nattrs = (htup->t_infomask2 & HEAP_NATTS_MASK);
+		heap_hasnull = (htup->t_infomask & HEAP_HASNULL);
+
+		for (i=0; i < ncols; i++)
+		{
+			if (i >= nattrs)
+				addr = NULL;
+			else if (heap_hasnull && att_isnull(i, htup->t_bits))
+				addr = NULL;
+			else
+			{
+				kern_colmeta	cmeta = kds->colmeta[i];
+
+				if (cmeta.attlen > 0)
+					offset = TYPEALIGN(cmeta.attalign, offset);
+				else if (!VARATT_NOT_PAD_BYTE((__global char *)htup + offset))
+					offset = TYPEALIGN(cmeta.attalign, offset);
+
+				addr = ((__global char *) htup + offset);
+
+				offset += (cmeta.attlen > 0
+						   ? cmeta.attlen
+						   : VARSIZE_ANY(addr));
+			}
+			gpuhashjoin_projection_datum(&errcode,
+										 kds_dest,
+										 get_global_id(0),
+										 0,	/* depth */
+										 i,	/* colidx */
+										 &kds->hostptr,
+										 addr);
 		}
 	}
 	else if (kds->format == KDS_FORMAT_COLUMN)
@@ -555,11 +559,17 @@ kern_gpuhashjoin_projection(__global kern_hashjoin *khashjoin,	/* in */
 				addr = NULL;
 			else
 			{
-				if (khtable->colmeta[i].attlen > 0)
-					offset = TYPEALIGN(khtable->colmeta[i].attlen, offset);
+				kern_colmeta	cmeta = khtable->colmeta[i];
+
+				if (cmeta.attlen > 0)
+					offset = TYPEALIGN(cmeta.attlen, offset);
 				else if (!VARATT_NOT_PAD_BYTE((__global char *)htup + offset))
-					offset = TYPEALIGN(khtable->colmeta[i].attalign, offset);
+					offset = TYPEALIGN(cmeta.attalign, offset);
 				addr = ((__global char *) htup + offset);
+
+				offset += (cmeta.attlen > 0
+						   ? cmeta.attlen
+						   : VARSIZE_ANY(addr));
 			}
 			gpuhashjoin_projection_datum(&errcode,
 										 kds_dest,
@@ -592,21 +602,26 @@ gpuhashjoin_put_datum(__private cl_int *errcode,
 	{
 		__global Datum   *values = KERN_DATA_STORE_VALUES(kds_dest, kds_index);
 		__global cl_char *isnull = KERN_DATA_STORE_ISNULL(kds_dest, kds_index);
+		Datum aaa;
+		cl_char bbb;
 
 		if (!addr)
 			isnull[colidx] = (cl_char) 1;
-		else{
+		else
+		{
 			isnull[colidx] = (cl_char) 0;
 			if (typbyval)
 			{
 				if (typlen == sizeof(cl_char))
-					values[colidx] = (Datum)(*((cl_char *)addr));
+					values[colidx] = (Datum) (*((cl_char *)addr));
 				else if (typlen == sizeof(cl_short))
-					values[colidx] = (Datum)(*((cl_short *)addr));
+					values[colidx] = (Datum) (*((cl_short *)addr));
 				else if (typlen == sizeof(cl_int))
-					values[colidx] = (Datum)(*((cl_int *)addr));
+					values[colidx] = (Datum) (*((cl_int *)addr));
+				else if (typlen == sizeof(cl_long))
+					values[colidx] = (Datum) (*((cl_long *)addr));
 				else
-					values[colidx] = (Datum)(*((cl_long *)addr));
+					isnull[colidx] = (cl_char) 1;	/* likely a BUG */
 			}
 			else
 			{

@@ -29,7 +29,7 @@
 #endif
 
 /* Misc definitions */
-#define FLEXIBLE_ARRAY_MEMBER
+#define FLEXIBLE_ARRAY_MEMBER	0
 #define offsetof(TYPE, FIELD)   ((uintptr_t) &((TYPE *)0)->FIELD)
 #define lengthof(ARRAY)			(sizeof(ARRAY) / sizeof((ARRAY)[0]))
 #define BITS_PER_BYTE			8
@@ -387,19 +387,17 @@ typedef struct {
 		 BLCKSZ - 1) & ~(BLCKSZ - 1)) + BLCKSZ * (block_ofs))))
 
 /* access macro for tuple-slot format */
-#define KERN_DATA_STORE_VALUES(kds,row_index)			\
-	((__global Datum *)									\
-	 (((__global cl_char *)(kds) +						\
-	   STROMALIGN(offsetof(kern_data_store,				\
-						   colmeta[(kds)->ncols]))) +	\
-	  TYPEALIGN(sizeof(Datum),							\
-				(sizeof(Datum) + sizeof(cl_char)) *		\
-				(kds)->ncols) * (row_index)))
+#define KERN_DATA_STORE_VALUES(kds,row_index)				\
+	((__global Datum *)										\
+	 (((__global cl_char *)(kds) +							\
+	   STROMALIGN(offsetof(kern_data_store,					\
+						   colmeta[(kds)->ncols]))) +		\
+	  LONGALIGN((sizeof(Datum) +									\
+				 sizeof(cl_char)) *	(kds)->ncols) * (row_index)))
 
-#define KERN_DATA_STORE_ISNULL(kds,row_index)			\
-	((__global cl_char *)								\
-	 (KERN_DATA_STORE_VALUES((kds),(row_index)) +		\
-	  (kds)->ncols))
+#define KERN_DATA_STORE_ISNULL(kds,row_index)				\
+	((__global cl_char *)									\
+	 (KERN_DATA_STORE_VALUES((kds),(row_index)) + (kds)->ncols))
 
 /* length of kern_data_store */
 #define KERN_DATA_STORE_LENGTH(kds)										\
