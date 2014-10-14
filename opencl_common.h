@@ -354,6 +354,16 @@ typedef struct {
 	cl_ushort		item_ofs;
 } kern_rowitem;
 
+typedef struct {
+#ifdef OPENCL_DEVICE_CODE
+	cl_int			buffer;
+	hostptr_t		page;
+#else
+	Buffer			buffer;
+	Page			page;
+#endif
+} kern_blkitem;
+
 #define KDS_FORMAT_ROW			1
 #define KDS_FORMAT_COLUMN		2
 #define KDS_FORMAT_TUPSLOT		3
@@ -364,27 +374,36 @@ typedef struct {
 	cl_uint			ncols;	/* number of columns in this store */
 	cl_uint			nitems; /* number of rows in this store */
 	cl_uint			nrooms;	/* number of available rows in this store */
-	cl_uint			nblocks;/* number of blocks in this store, if row-store.
-							 * Elsewhere, always 0. */
+	cl_uint			i_blocks;/* number of blocks in this store */
+	cl_uint			n_blocks;/* max available blocks in this store */
 	cl_char			format;	/* one of KDS_FORMAT_* above */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_data_store;
 
 /* access macro for row-format */
+#define KERN_DATA_STORE_BLKITEM(kds,blk_index)				\
+	(((__global kern_blkitem *)								\
+	  ((__global cl_char *)(kds) +							\
+	   STROMALIGN(offsetof(kern_data_store,					\
+						   colmeta[(kds)->ncols]))))		\
+	 + (blk_index))
 #define KERN_DATA_STORE_ROWITEM(kds,row_index)				\
 	(((__global kern_rowitem *)								\
 	  ((__global cl_char *)(kds) +							\
 	   STROMALIGN(offsetof(kern_data_store,					\
-						   colmeta[(kds)->ncols])))) +		\
-	 (row_index))
+						   colmeta[(kds)->ncols])) +		\
+	   STROMALIGN(sizeof(kern_blkitem) * (kds)->n_blocks)))	\
+	 + (row_index))
 
-#define KERN_DATA_STORE_ROWBLOCK(kds,block_ofs)				\
-	((__global PageHeader)									\
-	 (((__global cl_char *)(kds) +							\
-	   ((STROMALIGN(offsetof(kern_data_store,				\
-							 colmeta[(kds)->ncols])) +		\
-		 STROMALIGN(sizeof(kern_rowitem) * (kds)->nitems) +	\
-		 BLCKSZ - 1) & ~(BLCKSZ - 1)) + BLCKSZ * (block_ofs))))
+#define KERN_DATA_STORE_ROWBLOCK(kds,blk_index)							\
+	((__global PageHeader)												\
+	 ((__global cl_char *)(kds) +										\
+	  (TYPEALIGN(BLCKSZ,												\
+				 STROMALIGN(offsetof(kern_data_store,					\
+									 colmeta[(kds)->ncols])) +			\
+				 STROMALIGN(sizeof(kern_blkitem) * (kds)->n_blocks) +	\
+				 STROMALIGN(sizeof(kern_rowitem) * (kds)->nitems))		\
+	   + BLCKSZ * (blk_index))))
 
 /* access macro for tuple-slot format */
 #define KERN_DATA_STORE_VALUES(kds,row_index)				\
@@ -392,7 +411,7 @@ typedef struct {
 	 (((__global cl_char *)(kds) +							\
 	   STROMALIGN(offsetof(kern_data_store,					\
 						   colmeta[(kds)->ncols]))) +		\
-	  LONGALIGN((sizeof(Datum) +									\
+	  LONGALIGN((sizeof(Datum) +							\
 				 sizeof(cl_char)) *	(kds)->ncols) * (row_index)))
 
 #define KERN_DATA_STORE_ISNULL(kds,row_index)				\

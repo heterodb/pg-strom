@@ -301,22 +301,9 @@ typedef struct {
 	StromObject			sobj;
 	slock_t				lock;
 	volatile int		refcnt;
-	kern_data_store	   *kds;	/* reference to kern_data_store */
-	kern_toastbuf	   *ktoast;	/* reference to kern_toastbuf */
+	kern_data_store	   *kds;		/* reference to kern_data_store */
+	kern_toastbuf	   *ktoast;		/* reference to kern_toastbuf */
 	ResourceOwner		resowner;	/* !!NOTE: private address!!*/
-
-	/*
-	 * MEMO: Fields below are valid only when data store is row-format.
-	 * It pins multiple buffer cache pages until pgstrom_data_store is
-	 * released, so we have to track these pages to release later.
-	 * Also note that the page may be a segment we acquired from shmem.c
-	 * if local buffer (because stored on the private memory area).
-	 */
-	int					max_blocks;		/* maximum # of blocks */
-	struct {
-		Buffer			buffer;	/* buffer identifier (may be negative!) */
-		Page			page;	/* buffer page being pinned */
-	} blocks[FLEXIBLE_ARRAY_MEMBER];
 } pgstrom_data_store;
 
 /* 8MB for each buffer */
@@ -812,6 +799,7 @@ typealign_get_width(char type_align)
 	return -1;	/* be compiler quiet */
 }
 
+#if 0
 /*
  * utility function to access system kparams
  */
@@ -835,5 +823,7 @@ KPARAM_GET_KTOAST_HEAD(kern_parambuf *kparams)
 		return NULL;
 	return (kern_toastbuf *)VARDATA_ANY(vl_datum);
 }
+#endif
+
 
 #endif	/* PG_STROM_H */
