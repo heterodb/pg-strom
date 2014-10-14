@@ -4014,8 +4014,6 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	}
 
 	/* buffer object of __global kern_data_store *kds_dest */
-	clserv_log("kds length=%u ncols=%u nitems=%u nrooms=%u", KERN_DATA_STORE_LENGTH(kds), kds->ncols, kds->nitems, kds->nrooms);
-	clserv_log("kds_dest length=%u ncols=%u nitems=%u nrooms=%u", kds_dest->length, kds_dest->ncols, kds->nitems, kds_dest->nrooms);
 	clghj->m_kresult = clCreateBuffer(opencl_context,
 									  CL_MEM_READ_WRITE,
 									  STROMALIGN(kds_dest->length),

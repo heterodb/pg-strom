@@ -613,13 +613,13 @@ gpuhashjoin_put_datum(__private cl_int *errcode,
 			if (typbyval)
 			{
 				if (typlen == sizeof(cl_char))
-					values[colidx] = (Datum) (*((cl_char *)addr));
+					values[colidx] = (Datum) (*((__global cl_char *)addr));
 				else if (typlen == sizeof(cl_short))
-					values[colidx] = (Datum) (*((cl_short *)addr));
+					values[colidx] = (Datum) (*((__global cl_short *)addr));
 				else if (typlen == sizeof(cl_int))
-					values[colidx] = (Datum) (*((cl_int *)addr));
+					values[colidx] = (Datum) (*((__global cl_int *)addr));
 				else if (typlen == sizeof(cl_long))
-					values[colidx] = (Datum) (*((cl_long *)addr));
+					values[colidx] = (Datum) (*((__global cl_long *)addr));
 				else
 					isnull[colidx] = (cl_char) 1;	/* likely a BUG */
 			}
