@@ -336,21 +336,19 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 	if (kds->format == KDS_FORMAT_ROW)
 	{
 		kern_rowitem   *ritem = KERN_DATA_STORE_ROWITEM(kds, row_index);
-		Buffer			buffer;
-		Page			page;
+		kern_blkitem   *bitem;
 		ItemId			lpp;
 
-		Assert(ritem->block_ofs < kds->nblocks);
-		buffer = pds->blocks[ritem->block_ofs].buffer;
-		page   = pds->blocks[ritem->block_ofs].page;
-		lpp = PageGetItemId(page, ritem->item_ofs);
+		Assert(ritem->blk_index < kds->nblocks);
+		bitem = KERN_DATA_STORE_BLKITEM(kds, ritem->blk_index);
+		lpp = PageGetItemId(bitem->page, ritem->item_offset);
 		Assert(ItemIdIsNormal(lpp));
 
-		tuple->t_data = (HeapTupleHeader) PageGetItem(page, lpp);
+		tuple->t_data = (HeapTupleHeader) PageGetItem(bitem->page, lpp);
 		tuple->t_len = ItemIdGetLength(lpp);
-		ItemPointerSet(&tuple->t_self, buffer, ritem->item_ofs);
+		ItemPointerSet(&tuple->t_self, bitem->buffer, ritem->item_offset);
 
-		ExecStoreTuple(tuple, slot, buffer, false);
+		ExecStoreTuple(tuple, slot, bitem->buffer, false);
 
 		return true;
 	}
@@ -425,11 +423,10 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 	PG_TRY();
 	{
 		CurrentResourceOwner = pds->resowner;
-		Assert(kds->nblocks <= pds->max_blocks);
+		Assert(kds->nblocks <= kds->maxblocks);
 		for (i = kds->nblocks - 1; i >= 0; i--)
 		{
-			Page	page = pds->blocks[i].page;
-			Buffer	buffer = pds->blocks[i].buffer;
+			kern_blkitem   *bitem = KERN_DATA_STORE_BLKITEM(kds, i);
 
 			/*
 			 * NOTE: A page buffer is assigned on the PG-Strom's shared memory,
@@ -451,11 +448,12 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 			 * by the built-in code prior to PG-Strom's cleanup. So, no need
 			 * to do anything by ourselves.
 			 */
-			if (BufferIsLocal(buffer) || BufferIsInvalid(buffer))
-				pgstrom_shmem_free(page);
+			if (BufferIsLocal(bitem->buffer) ||
+				BufferIsInvalid(bitem->buffer))
+				pgstrom_shmem_free(bitem->page);
 			else if (!pgstrom_i_am_clserv &&
 					 !pgstrom_restrack_cleanup_context())
-				ReleaseBuffer(buffer);
+				ReleaseBuffer(bitem->buffer);
 		}
 	}
 	PG_CATCH();
@@ -495,9 +493,10 @@ pgstrom_create_data_store_row(TupleDesc tupdesc,
 	 * is base portion + array of rowitems, but no shared buffer page
 	 * itself because we kick DMA on the pages directly.
 	 */
-	baselen = STROMALIGN(offsetof(kern_data_store,
-								  colmeta[tupdesc->natts]));
-	required = baselen + sizeof(kern_rowitem) * nrooms;
+	baselen = (STROMALIGN(offsetof(kern_data_store,
+								   colmeta[tupdesc->natts])) +
+			   STROMALIGN(sizeof(kern_blkitem) * max_blocks));
+	required = baselen + STROMALIGN(sizeof(kern_rowitem) * nrooms);
 	kds = pgstrom_shmem_alloc_alap(required, &allocation);
 	if (!kds)
 		elog(ERROR, "out of shared memory");
@@ -510,6 +509,7 @@ pgstrom_create_data_store_row(TupleDesc tupdesc,
 	kds->nitems = 0;
 	kds->nrooms = nrooms;
 	kds->nblocks = 0;
+	kds->maxblocks = max_blocks;
 	kds->format = KDS_FORMAT_ROW;
 	for (i=0; i < tupdesc->natts; i++)
 	{
@@ -524,8 +524,7 @@ pgstrom_create_data_store_row(TupleDesc tupdesc,
 		   (uintptr_t)(kds) + allocation);
 
 	/* allocation of pgstrom_data_store */
-	required = offsetof(pgstrom_data_store, blocks[max_blocks]);
-	pds = pgstrom_shmem_alloc(required);
+	pds = pgstrom_shmem_alloc(sizeof(pgstrom_data_store));
 	if (!pds)
 	{
 		pgstrom_shmem_free(kds);
@@ -541,7 +540,6 @@ pgstrom_create_data_store_row(TupleDesc tupdesc,
 		pds->ktoast = NULL;	/* never used */
 		pds->resowner = ResourceOwnerCreate(CurrentResourceOwner,
 											"pgstrom_data_store");
-		pds->max_blocks = max_blocks;
 	}
 	PG_CATCH();
 	{
@@ -602,7 +600,8 @@ pgstrom_create_data_store_column(TupleDesc tupdesc,
 	kds->ncols = tupdesc->natts;
 	kds->nitems = 0;
 	kds->nrooms = nrooms;
-	kds->nblocks = 0;	/* column format never uses blocks */
+	kds->nblocks = 0;	/* column format never */
+	kds->maxblocks = 0;	/* uses buffer blocks */
 	kds->format = KDS_FORMAT_COLUMN;
 	for (i=0; i < tupdesc->natts; i++)
 	{
@@ -640,7 +639,6 @@ pgstrom_create_data_store_column(TupleDesc tupdesc,
 	pds->kds = kds;
 	pds->ktoast = NULL;		/* expand on demand */
 	pds->resowner = NULL;	/* should not be used to column-store */
-	pds->max_blocks = 0;
 
 	return pds;
 }
@@ -676,7 +674,8 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 								Snapshot snapshot, bool page_prune)
 {
 	kern_data_store	*kds = pds->kds;
-	kern_rowitem   *kri;
+	kern_rowitem   *ritem;
+	kern_blkitem   *bitem;
 	Buffer			buffer;
 	Page			page;
 	int				lines;
@@ -689,7 +688,7 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 	/* only row-store can block read */
 	Assert(kds->format == KDS_FORMAT_ROW);
 	/* we never use all the block slots */
-	Assert(kds->nblocks < pds->max_blocks);
+	Assert(kds->nblocks < kds->maxblocks);
 	/* we need a resource owner to track shared buffer */
 	Assert(pds->resowner != NULL);
 
@@ -723,8 +722,9 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 		 */
 		if (kds->nitems + lines > kds->nrooms ||
 			STROMALIGN(offsetof(kern_data_store, colmeta[kds->ncols])) +
+			STROMALIGN(sizeof(kern_blkitem) * (kds->maxblocks)) +
 			STROMALIGN(sizeof(kern_rowitem) * (kds->nitems + lines)) +
-			BLCKSZ * kds->nblocks >= BLCKSZ * pds->max_blocks)
+			BLCKSZ * kds->nblocks >= BLCKSZ * kds->maxblocks)
 		{
 			UnlockReleaseBuffer(buffer);
 			CurrentResourceOwner = saved_owner;
@@ -740,7 +740,8 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 		 * on the core side. It kills necessity of setting up HeapTupleData
 		 * when all_visible and non-serialized transaction.
 		 */
-		kri = KERN_DATA_STORE_ROWITEM(kds, kds->nitems);
+		ritem = KERN_DATA_STORE_ROWITEM(kds, kds->nitems);
+		bitem = KERN_DATA_STORE_BLKITEM(kds, kds->nblocks);
 		for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(page, lineoff);
 			 lineoff <= lines;
 			 lineoff++, lpp++)
@@ -766,9 +767,9 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 			if (!valid)
 				continue;
 
-			kri->block_ofs = kds->nblocks;
-			kri->item_ofs = lineoff;
-			kri++;
+			ritem->blk_index = kds->nblocks;
+			ritem->item_offset = lineoff;
+			ritem++;
 			ntup++;
 		}
 		LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
@@ -781,9 +782,9 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 		 * it is not visible to opencl server. so, we make a duplication
 		 * instead. Shared buffer can be referenced with zero-copy.
 		 */
-		pds->blocks[kds->nblocks].buffer = buffer;
+		bitem->buffer = buffer;
 		if (!BufferIsLocal(buffer))
-			pds->blocks[kds->nblocks].page = page;
+			bitem->page = page;
 		else
 		{
 			Page	dup_page = pgstrom_shmem_alloc(BLCKSZ);
@@ -791,7 +792,7 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 			if (!dup_page)
 				elog(ERROR, "out of memory");
 			memcpy(dup_page, page, BLCKSZ);
-			pds->blocks[kds->nblocks].page = dup_page;
+			bitem->page = dup_page;
 			ReleaseBuffer(buffer);
 		}
 		kds->nblocks++;
@@ -830,23 +831,25 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 	if (kds->format == KDS_FORMAT_ROW)
 	{
 		HeapTuple		tuple;
-		Buffer			buffer = InvalidBuffer;
-		Page			page = NULL;
 		OffsetNumber	offnum;
-		kern_rowitem   *ritem
-			= KERN_DATA_STORE_ROWITEM(kds, kds->nitems);
+		kern_rowitem   *ritem = KERN_DATA_STORE_ROWITEM(kds, kds->nitems);
+		kern_blkitem   *bitem;
+		Page			page = NULL;
 
 		/* reference a HeapTuple in TupleTableSlot */
 		tuple = ExecFetchSlotTuple(slot);
 
-		if (kds->nblocks > 0)
+		if (kds->nblocks == 0)
+			bitem = NULL;
+		else
 		{
-			buffer = pds->blocks[kds->nblocks - 1].buffer;
-			page   = pds->blocks[kds->nblocks - 1].page;
+			bitem = KERN_DATA_STORE_BLKITEM(kds, kds->nblocks - 1);
+			page = bitem->page;
 		}
-		if (kds->nblocks == 0 ||
-			!BufferIsInvalid(buffer) ||
-			PageGetFreeSpace(page) < MAXALIGN(tuple->t_len))
+
+		if (!bitem ||
+			!BufferIsInvalid(bitem->buffer) ||
+			PageGetFreeSpace(bitem->page) < MAXALIGN(tuple->t_len))
 		{
 			/*
 			 * Expand blocks if the last one is associated with a particular
@@ -855,14 +858,13 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 			 */
 
 			/* No rooms to expand blocks? */
-			if (kds->nblocks >= pds->max_blocks)
+			if (kds->nblocks >= kds->maxblocks)
 				return false;
 
-			buffer = InvalidBuffer;
+			/* allocate an anonymous page */
 			page = pgstrom_shmem_alloc(BLCKSZ);
 			if (!page)
 				elog(ERROR, "out of memory");
-
 			PageInit(page, BLCKSZ, 0);
 			if (PageGetFreeSpace(page) < MAXALIGN(tuple->t_len))
 			{
@@ -870,8 +872,9 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 				elog(ERROR, "tuple too large (%zu)",
 					 (Size)MAXALIGN(tuple->t_len));
 			}
-			pds->blocks[kds->nblocks].buffer = buffer;
-			pds->blocks[kds->nblocks].page = page;
+			bitem = KERN_DATA_STORE_BLKITEM(kds, kds->nblocks);
+			bitem->buffer = InvalidBuffer;
+			bitem->page = page;
 			kds->nblocks++;
 		}
 		Assert(kds->nblocks > 0);
@@ -880,8 +883,8 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 		if (offnum == InvalidOffsetNumber)
 			elog(ERROR, "failed to add tuple");
 
-		ritem->block_ofs = kds->nblocks - 1;
-		ritem->item_ofs = offnum;
+		ritem->blk_index = kds->nblocks - 1;
+		ritem->item_offset = offnum;
 		kds->nitems++;
 
 		return true;
@@ -1022,6 +1025,7 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 						  pgstrom_perfmon *pfm)
 {
 	kern_data_store *kds = pds->kds;
+	kern_blkitem	*bitem;
 	size_t		length;
 	size_t		offset;
 	cl_int		i, n, rc;
@@ -1118,6 +1122,7 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 	offset = ((uintptr_t)KERN_DATA_STORE_ROWBLOCK(kds, 0) -
 			  (uintptr_t)(kds));
 	length = BLCKSZ;
+	bitem = KERN_DATA_STORE_BLKITEM(kds, 0);
 	for (i=0, n=0; i < kds->nblocks; i++)
 	{
 		/*
@@ -1126,8 +1131,7 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 		 * can be merged to reduce DMA management cost
 		 */
 		if (i+1 < kds->nblocks &&
-			(uintptr_t)pds->blocks[i].page + BLCKSZ ==
-			(uintptr_t)pds->blocks[i+1].page)
+			(uintptr_t)bitem[i].page + BLCKSZ == (uintptr_t)bitem[i+1].page)
 		{
 			n++;
 			continue;
@@ -1137,7 +1141,7 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 								  CL_FALSE,
 								  offset,
 								  BLCKSZ * (n+1),
-								  pds->blocks[i-n].page,
+								  bitem[i-n].page,
 								  num_blockers,
 								  blockers,
 								  events + (*ev_index));
@@ -1166,6 +1170,7 @@ void
 pgstrom_dump_data_store(pgstrom_data_store *pds)
 {
 	kern_data_store	   *kds = pds->kds;
+	kern_blkitem	   *bitem;
 	int					i;
 
 #define PDS_DUMP(...)							\
@@ -1178,11 +1183,13 @@ pgstrom_dump_data_store(pgstrom_data_store *pds)
 
 	PDS_DUMP("pds {refcnt=%d kds=%p ktoast=%p}",
 			 pds->refcnt, pds->kds, pds->ktoast);
-	PDS_DUMP("kds (%s) {length=%u ncols=%u nitems=%u nrooms=%u nblocks=%u}",
+	PDS_DUMP("kds (%s) {length=%u ncols=%u nitems=%u nrooms=%u "
+			 "nblocks=%u maxblocks=%u}",
 			 kds->format == KDS_FORMAT_ROW ? "row-store" :
 			 kds->format == KDS_FORMAT_COLUMN ? "column-store" :
 			 kds->format == KDS_FORMAT_TUPSLOT ? "tuple-slot" : "unknown",
-			 kds->length, kds->ncols, kds->nitems, kds->nrooms, kds->nblocks);
+			 kds->length, kds->ncols, kds->nitems, kds->nrooms,
+			 kds->nblocks, kds->maxblocks);
 	for (i=0; i < kds->ncols; i++)
 	{
 		if (!kds->colmeta[i].attvalid)
@@ -1207,12 +1214,11 @@ pgstrom_dump_data_store(pgstrom_data_store *pds)
 		}
 	}
 
+	bitem = KERN_DATA_STORE_BLKITEM(kds, 0);
 	for (i=0; i < kds->nblocks; i++)
 	{
 		PDS_DUMP("block[%d] {buffer=%u page=%p}",
-				 i,
-				 pds->blocks[i].buffer,
-				 pds->blocks[i].page);
+				 i, bitem[i].buffer, bitem[i].page);
 	}
 #undef PDS_DUMP
 }

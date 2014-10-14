@@ -350,8 +350,8 @@ typedef struct {
  * item_id points a particular tuple item within the block.
  */
 typedef struct {
-	cl_ushort		block_ofs;
-	cl_ushort		item_ofs;
+	cl_ushort		blk_index;
+	cl_ushort		item_offset;
 } kern_rowitem;
 
 typedef struct {
@@ -374,8 +374,8 @@ typedef struct {
 	cl_uint			ncols;	/* number of columns in this store */
 	cl_uint			nitems; /* number of rows in this store */
 	cl_uint			nrooms;	/* number of available rows in this store */
-	cl_uint			i_blocks;/* number of blocks in this store */
-	cl_uint			n_blocks;/* max available blocks in this store */
+	cl_uint			nblocks;/* number of blocks in this store */
+	cl_uint			maxblocks; /* max available blocks in this store */
 	cl_char			format;	/* one of KDS_FORMAT_* above */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_data_store;
@@ -387,12 +387,12 @@ typedef struct {
 	   STROMALIGN(offsetof(kern_data_store,					\
 						   colmeta[(kds)->ncols]))))		\
 	 + (blk_index))
-#define KERN_DATA_STORE_ROWITEM(kds,row_index)				\
-	(((__global kern_rowitem *)								\
-	  ((__global cl_char *)(kds) +							\
-	   STROMALIGN(offsetof(kern_data_store,					\
-						   colmeta[(kds)->ncols])) +		\
-	   STROMALIGN(sizeof(kern_blkitem) * (kds)->n_blocks)))	\
+#define KERN_DATA_STORE_ROWITEM(kds,row_index)					\
+	(((__global kern_rowitem *)									\
+	  ((__global cl_char *)(kds) +								\
+	   STROMALIGN(offsetof(kern_data_store,						\
+						   colmeta[(kds)->ncols])) +			\
+	   STROMALIGN(sizeof(kern_blkitem) * (kds)->maxblocks)))	\
 	 + (row_index))
 
 #define KERN_DATA_STORE_ROWBLOCK(kds,blk_index)							\
@@ -401,7 +401,7 @@ typedef struct {
 	  (TYPEALIGN(BLCKSZ,												\
 				 STROMALIGN(offsetof(kern_data_store,					\
 									 colmeta[(kds)->ncols])) +			\
-				 STROMALIGN(sizeof(kern_blkitem) * (kds)->n_blocks) +	\
+				 STROMALIGN(sizeof(kern_blkitem) * (kds)->maxblocks) +	\
 				 STROMALIGN(sizeof(kern_rowitem) * (kds)->nitems))		\
 	   + BLCKSZ * (blk_index))))
 
@@ -808,8 +808,8 @@ kern_get_tuple_rs(__global kern_data_store *kds, cl_uint rowidx)
 {
 	__global kern_rowitem *kritem;
 	PageHeader	page;
-	cl_ushort	block_ofs;
-	cl_ushort	item_ofs;
+	cl_ushort	blk_index;
+	cl_ushort	item_offset;
 	cl_ushort	item_max;
 	ItemIdData	item_id;
 
@@ -817,18 +817,18 @@ kern_get_tuple_rs(__global kern_data_store *kds, cl_uint rowidx)
 		return NULL;	/* likely a BUG */
 
 	kritem = KERN_DATA_STORE_ROWITEM(kds, rowidx);
-	block_ofs = kritem->block_ofs;
-	item_ofs = kritem->item_ofs;
-	if (block_ofs >= kds->nblocks)
+	blk_index = kritem->blk_index;
+	item_offset = kritem->item_offset;
+	if (blk_index >= kds->nblocks)
 		return NULL;	/* likely a BUG */
 
-	page = KERN_DATA_STORE_ROWBLOCK(kds, block_ofs);
+	page = KERN_DATA_STORE_ROWBLOCK(kds, blk_index);
 	item_max = PageGetMaxOffsetNumber(page);
 	if (offsetof(PageHeaderData, pd_linp[item_max + 1]) >= BLCKSZ ||
-		item_ofs == 0 || item_ofs > item_max)
+		item_offset == 0 || item_offset > item_max)
 		return NULL;	/* likely a BUG */
 
-	item_id = page->pd_linp[item_ofs - 1];
+	item_id = page->pd_linp[item_offset - 1];
 	if (ItemIdGetOffset(item_id) +
 		offsetof(HeapTupleHeaderData, t_bits) >= BLCKSZ)
 		return NULL;	/* likely a BUG */

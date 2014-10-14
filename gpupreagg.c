@@ -2338,15 +2338,15 @@ gpupreagg_next_tuple(GpuPreAggState *gpas)
 				vl_ofs = ((cl_uint *)((char *)kds_dst + cs_offset))[j];
 				if (kds->format == KDS_FORMAT_ROW)
 				{
-					int		index;
-					Page	page;
+					kern_blkitem   *bitem;
+					int				index;
 
 					vl_ofs -= ((uintptr_t)KERN_DATA_STORE_ROWBLOCK(kds,0) -
 							   (uintptr_t)(kds));
 					index = vl_ofs / BLCKSZ;
 					Assert(index < kds->nblocks);
-					page = pds->blocks[index].page;
-					vl_ptr = (char *)page + (vl_ofs & (BLCKSZ-1));
+					bitem = KERN_DATA_STORE_BLKITEM(kds,index);
+					vl_ptr = (char *)bitem->page + (vl_ofs & (BLCKSZ-1));
 				}
 				else
 				{
