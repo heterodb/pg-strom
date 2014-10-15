@@ -816,7 +816,7 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 		while (gss->curr_blknum < gss->last_blknum &&
 			   pgstrom_data_store_insert_block(pds, rel,
 											   gss->curr_blknum,
-											   snapshot, true) > 0)
+											   snapshot, true) >= 0)
 			gss->curr_blknum++;
 
 		if (pds->kds->nitems > 0)
