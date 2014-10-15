@@ -472,47 +472,53 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 	pgstrom_shmem_free(pds);
 }
 
-pgstrom_data_store *
-pgstrom_create_data_store_row(TupleDesc tupdesc,
-							  Size dstore_sz,
-							  double ntup_per_block)
+static kern_data_store *
+create_kern_data_store(TupleDesc tupdesc,
+					   cl_uint maxblocks,
+					   cl_uint nrooms,
+					   cl_char format)
 {
-	pgstrom_data_store *pds;
-	kern_data_store	   *kds;
-	Size		baselen;
+	kern_data_store *kds;
 	Size		required;
 	Size		allocation;
-	cl_uint		max_blocks;
-	cl_uint		nrooms;
 	int			i;
 
-	/* size of data-store has to be aligned to BLCKSZ */
-	dstore_sz = TYPEALIGN(BLCKSZ, dstore_sz);
-	max_blocks = dstore_sz / BLCKSZ;
-	nrooms = (cl_uint)(ntup_per_block * (double)max_blocks * 1.1);
+	/* needs column format? */
+	Assert(format == KDS_FORMAT_ROW ||
+		   format == KDS_FORMAT_ROW_FLAT);
 
-	/* allocation of kern_data_store; all we need to allocate here
-	 * is base portion + array of rowitems, but no shared buffer page
-	 * itself because we kick DMA on the pages directly.
+	/* allocation of kern_data_store
+	 * In case of usual row format, all we need to allocate here is
+	 * base portion, array of blkitems and rowitems, but no shared
+	 * buffers because we kick DMA on these pages directly.
+	 * In case of flat-row format, we allocate everything at once.
 	 */
-	baselen = (STROMALIGN(offsetof(kern_data_store,
-								   colmeta[tupdesc->natts])) +
-			   STROMALIGN(sizeof(kern_blkitem) * max_blocks));
-	required = baselen + STROMALIGN(sizeof(kern_rowitem) * nrooms);
+	required = (STROMALIGN(offsetof(kern_data_store,
+									colmeta[tupdesc->natts])) +
+				STROMALIGN(sizeof(kern_blkitem) * maxblocks) +
+				STROMALIGN(sizeof(kern_rowitem) * nrooms));
+	if (format == KDS_FORMAT_ROW_FLAT)
+	{
+		if (required + BLCKSZ > BLCKSZ * maxblocks)
+			elog(ERROR, "Bug? strange nrooms/maxblocks ratio (%u/%u)",
+				 nrooms, maxblocks);
+		required = BLCKSZ * maxblocks;
+	}
 	kds = pgstrom_shmem_alloc_alap(required, &allocation);
 	if (!kds)
 		elog(ERROR, "out of shared memory");
-	/* update exact number of rooms available */
-	nrooms = (allocation - baselen) / sizeof(kern_rowitem);
 
 	kds->hostptr = (hostptr_t) &kds->hostptr;
-	kds->length = 0;	/* 0 for row-store */
+	kds->length = allocation;
 	kds->ncols = tupdesc->natts;
 	kds->nitems = 0;
 	kds->nrooms = nrooms;
 	kds->nblocks = 0;
-	kds->maxblocks = max_blocks;
-	kds->format = KDS_FORMAT_ROW;
+	kds->maxblocks = (format == KDS_FORMAT_ROW_FLAT ? 0 : maxblocks);
+	kds->format = format;
+	kds->tdhasoid = tupdesc->tdhasoid;
+	kds->tdtypeid = tupdesc->tdtypeid;
+	kds->tdtypmod = tupdesc->tdtypmod;
 	for (i=0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute	attr = tupdesc->attrs[i];
@@ -522,9 +528,28 @@ pgstrom_create_data_store_row(TupleDesc tupdesc,
 		kds->colmeta[i].attlen = attr->attlen;
 		kds->colmeta[i].rs_attnum = attr->attnum;
 	}
-	Assert((uintptr_t)KERN_DATA_STORE_ROWITEM(kds, nrooms) <=
-		   (uintptr_t)(kds) + allocation);
+	return kds;
+}
 
+pgstrom_data_store *
+pgstrom_create_data_store_row(TupleDesc tupdesc,
+							  Size dstore_sz,
+							  double ntup_per_block)
+{
+	pgstrom_data_store *pds;
+	kern_data_store	   *kds;
+	cl_uint		maxblocks;
+	cl_uint		nrooms;
+
+	/* size of data-store has to be aligned to BLCKSZ */
+	dstore_sz = TYPEALIGN(BLCKSZ, dstore_sz);
+	maxblocks = dstore_sz / BLCKSZ;
+	nrooms = (cl_uint)(ntup_per_block * (double)maxblocks * 1.25);
+
+	kds = create_kern_data_store(tupdesc,
+								 maxblocks,
+								 nrooms,
+								 KDS_FORMAT_ROW);
 	/* allocation of pgstrom_data_store */
 	pds = pgstrom_shmem_alloc(sizeof(pgstrom_data_store));
 	if (!pds)
@@ -606,6 +631,9 @@ pgstrom_create_data_store_column(TupleDesc tupdesc,
 	kds->nblocks = 0;	/* column format never */
 	kds->maxblocks = 0;	/* uses buffer blocks */
 	kds->format = KDS_FORMAT_COLUMN;
+	kds->tdhasoid = tupdesc->tdhasoid;
+	kds->tdtypeid = tupdesc->tdtypeid;
+	kds->tdtypmod = tupdesc->tdtypmod;
 	for (i=0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute	attr = tupdesc->attrs[i];

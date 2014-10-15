@@ -421,11 +421,13 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 				 " -DITEMID_OFFSET_SHIFT=%u"
 				 " -DITEMID_FLAGS_SHIFT=%u"
 				 " -DITEMID_LENGTH_SHIFT=%u"
+				 " -DMAXIMUM_ALIGNOF=%u"
 				 " %s",
 				 SIZEOF_VOID_P, BLCKSZ,
 				 itemid_offset_shift,
 				 itemid_flags_shift,
 				 itemid_length_shift,
+				 MAXIMUM_ALIGNOF,
 				 (dprog->extra_flags &
 				  DEVKERNEL_DISABLE_OPTIMIZE) != 0 ? "-cl-opt-disable" : "");
 

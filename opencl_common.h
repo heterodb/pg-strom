@@ -64,10 +64,14 @@ typedef cl_uint		Datum;
  */
 #define TYPEALIGN(ALIGNVAL,LEN)	\
 	(((uintptr_t) (LEN) + ((ALIGNVAL) - 1)) & ~((uintptr_t) ((ALIGNVAL) - 1)))
+#define TYPEALIGN_DOWN(ALIGNVAL,LEN) \
+	(((uintptr_t) (LEN)) & ~((uintptr_t) ((ALIGNVAL) - 1)))
 #define INTALIGN(LEN)			TYPEALIGN(sizeof(cl_int), (LEN))
 #define INTALIGN_DOWN(LEN)		TYPEALIGN_DOWN(sizeof(cl_int), (LEN))
 #define LONGALIGN(LEN)          TYPEALIGN(sizeof(cl_long), (LEN))
 #define LONGALIGN_DOWN(LEN)     TYPEALIGN_DOWN(sizeof(cl_long), (LEN))
+#define MAXALIGN(LEN)			TYPEALIGN(MAXIMUM_ALIGNOF, (LEN))
+#define MAXALIGN_DOWN(LEN)		TYPEALIGN_DOWN(MAXIMUM_ALIGNOF, (LEN))
 
 /*
  * MEMO: We takes dynamic local memory using cl_ulong data-type because of
@@ -349,9 +353,12 @@ typedef struct {
  * block_id points a particular block in the block array of this data-store.
  * item_id points a particular tuple item within the block.
  */
-typedef struct {
-	cl_ushort		blk_index;
-	cl_ushort		item_offset;
+typedef union {
+	struct {
+		cl_ushort	blk_index;		/* if ROW format */
+		cl_ushort	item_offset;	/* if ROW format */
+	};
+	cl_uint			htup_offset;	/* if FLAT_ROW format */
 } kern_rowitem;
 
 typedef struct {
@@ -365,18 +372,23 @@ typedef struct {
 } kern_blkitem;
 
 #define KDS_FORMAT_ROW			1
-#define KDS_FORMAT_COLUMN		2
+#define KDS_FORMAT_ROW_FLAT		2
 #define KDS_FORMAT_TUPSLOT		3
+#define KDS_FORMAT_COLUMN		4
 
 typedef struct {
-	hostptr_t		hostptr;/* address of kds on the host */
-	cl_uint			length;	/* length of the column-store, or 0 elsewhere */
-	cl_uint			ncols;	/* number of columns in this store */
-	cl_uint			nitems; /* number of rows in this store */
-	cl_uint			nrooms;	/* number of available rows in this store */
-	cl_uint			nblocks;/* number of blocks in this store */
-	cl_uint			maxblocks; /* max available blocks in this store */
-	cl_char			format;	/* one of KDS_FORMAT_* above */
+	hostptr_t		hostptr;	/* address of kds on the host */
+	cl_uint			length;		/* length of this data-store */
+	cl_uint			usage;		/* usage of this data-store */
+	cl_uint			ncols;		/* number of columns in this store */
+	cl_uint			nitems; 	/* number of rows in this store */
+	cl_uint			nrooms;		/* number of available rows in this store */
+	cl_uint			nblocks;	/* number of blocks in this store */
+	cl_uint			maxblocks;	/* max available blocks in this store */
+	cl_char			format;		/* one of KDS_FORMAT_* above */
+	cl_char			tdhasoid;	/* copy of TupleDesc.tdhasoid */
+	cl_uint			tdtypeid;	/* copy of TupleDesc.tdtypeid */
+	cl_int			tdtypmod;	/* copy of TupleDesc.tdtypmod */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_data_store;
 
@@ -746,6 +758,9 @@ typedef struct varatt_indirect
 #define VARDATA_ANY(PTR) \
 	(VARATT_IS_1B(PTR) ? VARDATA_1B(PTR) : VARDATA_4B(PTR))
 
+#define SET_VARSIZE(PTR, len)					\
+	(((varattrib_4b *) (PTR))->va_4byte.va_header = (((cl_uint) (len)) << 2))
+
 /*
  * kern_get_datum
  *
@@ -765,7 +780,8 @@ typedef struct varatt_indirect
  */
 static inline __global void *
 kern_get_datum_tuple(__global kern_colmeta *colmeta,
-					 __global HeapTupleHeaderData *htup, cl_uint colidx)
+					 __global HeapTupleHeaderData *htup,
+					 cl_uint colidx)
 {
 	cl_uint		offset = htup->t_hoff;
 	cl_uint		i, ncols = (htup->t_infomask2 & HEAP_NATTS_MASK);
@@ -790,7 +806,7 @@ kern_get_datum_tuple(__global kern_colmeta *colmeta,
 				offset = TYPEALIGN(colmeta[i].attalign, offset);
 			else if (!VARATT_NOT_PAD_BYTE((__global char *)htup + offset))
 				offset = TYPEALIGN(colmeta[i].attalign, offset);
-
+			/* TODO: overrun checks here */
 			addr = ((__global char *) htup + offset);
 			if (i == colidx)
 				return addr;
@@ -804,7 +820,8 @@ kern_get_datum_tuple(__global kern_colmeta *colmeta,
 }
 
 static inline __global HeapTupleHeaderData *
-kern_get_tuple_rs(__global kern_data_store *kds, cl_uint rowidx)
+kern_get_tuple_rs(__global kern_data_store *kds, cl_uint rowidx,
+				  __private cl_uint *p_blk_index)
 {
 	__global kern_rowitem *kritem;
 	PageHeader	page;
@@ -833,6 +850,9 @@ kern_get_tuple_rs(__global kern_data_store *kds, cl_uint rowidx)
 		offsetof(HeapTupleHeaderData, t_bits) >= BLCKSZ)
 		return NULL;	/* likely a BUG */
 
+	/* also set additional properties */
+	*p_blk_index = blk_index;
+
 	return (__global HeapTupleHeaderData *)
 		((__global char *)page + ItemIdGetOffset(item_id));
 }
@@ -842,10 +862,42 @@ kern_get_datum_rs(__global kern_data_store *kds,
 				  cl_uint colidx, cl_uint rowidx)
 {
 	__global HeapTupleHeaderData *htup;
+	cl_uint			blkidx;
 
 	if (colidx >= kds->ncols)
 		return NULL;	/* likely a BUG */
-	htup = kern_get_tuple_rs(kds, rowidx);
+	htup = kern_get_tuple_rs(kds, rowidx, &blkidx);
+	if (!htup)
+		return NULL;
+	return kern_get_datum_tuple(kds->colmeta, htup, colidx);
+}
+
+static inline __global HeapTupleHeaderData *
+kern_get_tuple_rsflat(__global kern_data_store *kds, cl_uint rowidx)
+{
+	__global kern_rowitem *kritem;
+
+	if (rowidx >= kds->nitems)
+		return NULL;	/* likely a BUG */
+
+	kritem = KERN_DATA_STORE_ROWITEM(kds, rowidx);
+	/* simple sanity check */
+	if (kritem->htup_offset >= kds->length)
+		return NULL;
+
+	return ((__global HeapTupleHeaderData *)
+			(__global char *)kds + kritem->htup_offset);
+}
+
+static inline __global void *
+kern_get_datum_rsflat(__global kern_data_store *kds,
+					  cl_uint colidx, cl_uint rowidx)
+{
+	__global HeapTupleHeaderData *htup;
+
+	if (colidx >= kds->ncols)
+		return NULL;	/* likely a BUG */
+	htup = kern_get_tuple_rsflat(kds, rowidx);
 	if (!htup)
 		return NULL;
 	return kern_get_datum_tuple(kds->colmeta, htup, colidx);
@@ -899,6 +951,8 @@ kern_get_datum(__global kern_data_store *kds,
 		return NULL;
 	if (kds->format == KDS_FORMAT_ROW)
 		return kern_get_datum_rs(kds, colidx, rowidx);
+	if (kds->format == KDS_FORMAT_ROW_FLAT)
+		return kern_get_datum_rsflat(kds, colidx, rowidx);
 	if (kds->format == KDS_FORMAT_COLUMN)
 		return kern_get_datum_cs(kds, ktoast, colidx, rowidx);
 	/* !!KDS_FORMAT_TUPSLOT is write-only format!! */
@@ -1030,6 +1084,16 @@ STROMCL_VARLENA_TYPE_TEMPLATE(bytea)
 /*
  * memcpy implementation for OpenCL kernel usage
  */
+static __global void *
+memset(__global void *s, int c, size_t n)
+{
+	__global char  *ptr = s;
+
+	while (n-- > 0)
+		*ptr++ = c;
+	return s;
+}
+
 #if 0
 static __global void *
 memcpy(__global void *__dst, __global const void *__src, size_t len)

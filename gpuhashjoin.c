@@ -891,57 +891,150 @@ gpuhashjoin_codegen_projection(StringInfo body,
 	int			depth = 0;
 	ListCell   *lc;
 
+	/* materialize-mapping function */
 	appendStringInfo(
 		body,
 		"\n"
 		"static void\n"
-		"gpuhashjoin_projection_datum(__private cl_int *errcode,\n"
-		"                             __global kern_data_store *kds_dest,\n"
-		"                             size_t kds_index,\n"
-		"                             cl_int depth,\n"
-		"                             cl_int colidx,\n"
-		"                             __global hostptr_t *hostptr,\n"
-		"                             __global void *addr)\n"
+		"gpuhashjoin_projection_mapping(cl_int dest_colidx,\n"
+		"                               __private cl_uint *src_depth,\n"
+		"                               __private cl_uint *src_colidx)\n"
 		"{\n"
-		"  switch (depth)\n"
+		"  switch (dest_colidx)\n"
 		"  {\n");
+	foreach (lc, ghjoin->pscan_vartrans)
+	{
+		vartrans_info  *vtrans = lfirst(lc);
 
-	depth = 0;
-	do {
 		appendStringInfo(
 			body,
 			"  case %d:\n"
-			"    switch (colidx)\n"
-			"    {\n", depth);
-		foreach (lc, ghjoin->pscan_vartrans)
-		{
-			vartrans_info  *vtrans = lfirst(lc);
-			int16			typlen;
-			bool			typbyval;
-
-			if (vtrans->srcdepth != depth)
-				continue;
-			get_typlenbyval(vtrans->vartype, &typlen, &typbyval);
-			appendStringInfo(
-				body,
-				"    case %d: GHJOIN_PUT_DATUM(%u,%d,%s); break;\n",
-				vtrans->srcresno - 1,
-				vtrans->resno - 1,
-				typlen,
-				typbyval ? "true" : "false");
-		}
-		appendStringInfo(
-			body,
-			"    default: /* do nothing */ break;\n"
-			"    }\n");
-		plan = innerPlan(plan);
-		depth++;
-	} while (plan);
+			"    *src_depth = %d;\n"
+			"    *src_colidx = %d;\n"
+			"    break;\n",
+			vtrans->resno - 1,
+			vtrans->srcdepth,
+			vtrans->srcresno - 1);
+	}
 	appendStringInfo(
-		body,
-		"  default: /* do nothing */ break;\n"
+        body,
+		"  default:\n"
+		"    /* should not run here */\n"
+		"    break;\n"
 		"  }\n"
-		"}\n");
+		"}\n"
+		"\n");
+
+	/* projection-datum function */
+	appendStringInfo(
+        body,
+		"static void\n"
+		"gpuhashjoin_projection_datum(__private cl_int *errcode,\n"
+		"                             __global Datum *slot_values,\n"
+		"                             __global cl_char *slot_isnull,\n"
+		"                             cl_int depth,\n"
+		"                             cl_int colidx,\n"
+		"                             hostptr_t hostaddr,\n"
+		"                             __global void *datum)\n"
+		"{\n"
+		"  switch (depth)\n"
+		"  {\n");
+	depth = 0;
+    do {
+        appendStringInfo(
+            body,
+            "  case %d:\n"
+            "    switch (colidx)\n"
+            "    {\n", depth);
+        foreach (lc, ghjoin->pscan_vartrans)
+        {
+            vartrans_info  *vtrans = lfirst(lc);
+            int16           typlen;
+            bool            typbyval;
+
+            if (vtrans->srcdepth != depth)
+                continue;
+            get_typlenbyval(vtrans->vartype, &typlen, &typbyval);
+			if (typbyval)
+			{
+				char   *cl_type = NULL;
+
+				appendStringInfo(
+					body,
+					"    case %d:\n"
+					"      if (!datum)\n"
+					"        slot_isnull[%d] = (cl_char) 1;\n"
+					"      else\n"
+					"      {\n"
+					"        slot_isnull[%d] = (cl_char) 0;\n",
+					vtrans->srcresno - 1,
+                    vtrans->resno - 1,
+                    vtrans->resno - 1);
+				if (typlen == sizeof(cl_char))
+					cl_type = "cl_char";
+				else if (typlen == sizeof(cl_short))
+					cl_type = "cl_short";
+				else if (typlen == sizeof(cl_int))
+					cl_type = "cl_int";
+				else if (typlen == sizeof(cl_long))
+					cl_type = "cl_long";
+
+				if (cl_type)
+				{
+					appendStringInfo(
+						body,
+						"        slot_values[%d]"
+						" = (Datum)(*((__global %s *) datum));\n",
+						vtrans->resno - 1,
+						cl_type);
+				}
+				else if (typlen < sizeof(Datum))
+				{
+					appendStringInfo(
+						body,
+						"        memcpy(&slot_values[%d], datum, %d);\n",
+						vtrans->resno - 1,
+						typlen);
+				}
+				else
+					elog(ERROR, "Bug? unexpected type length (%d)", typlen);
+				appendStringInfo(
+					body,
+					"      }\n"
+					"      break;\n");
+			}
+			else
+			{
+				appendStringInfo(
+					body,
+					"    case %d:\n"
+					"      if (!datum)\n"
+					"        slot_isnull[%d] = (cl_char) 1;\n"
+					"      else\n"
+					"      {\n"
+					"        slot_isnull[%d] = (cl_char) 0;\n"
+					"        slot_values[%d] = (Datum) hostaddr;\n"
+					"      }\n"
+					"      break;\n",
+					vtrans->srcresno - 1,
+					vtrans->resno - 1,
+					vtrans->resno - 1,
+					vtrans->resno - 1);
+			}
+		}
+        appendStringInfo(
+            body,
+            "    default: /* do nothing */ break;\n"
+            "    }\n"
+			"    break;\n");
+        plan = innerPlan(plan);
+        depth++;
+    } while (plan);
+    appendStringInfo(
+        body,
+        "  default: /* do nothing */ break;\n"
+        "  }\n"
+        "}\n");
 }
 
 static void
@@ -2599,7 +2692,26 @@ gpuhashjoin_exec_multi(CustomPlanState *node)
 static void
 gpuhashjoin_end(CustomPlanState *node)
 {
-	GpuHashJoinState   *ghjs = (GpuHashJoinState *) node;
+	GpuHashJoinState	   *ghjs = (GpuHashJoinState *) node;
+	pgstrom_gpuhashjoin	   *ghjoin;
+
+	/* release asynchronous jobs */
+	if (ghjs->curr_ghjoin)
+	{
+		ghjoin = ghjs->curr_ghjoin;
+		pgstrom_untrack_object(&ghjoin->msg.sobj);
+        pgstrom_put_message(&ghjoin->msg);
+	}
+
+	while (ghjs->num_running > 0)
+	{
+		ghjoin = (pgstrom_gpuhashjoin *)pgstrom_dequeue_message(ghjs->mqueue);
+		if (!ghjoin)
+			elog(ERROR, "message queue wait timeout");
+		pgstrom_untrack_object(&ghjoin->msg.sobj);
+        pgstrom_put_message(&ghjoin->msg);
+		ghjs->num_running--;
+	}
 
 	/*
 	 *  Free the exprcontext
@@ -3943,7 +4055,7 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	 *                             KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 	 */
 	clghj->kern_proj = clCreateKernel(clghj->program,
-									  "kern_gpuhashjoin_projection",
+									  "kern_gpuhashjoin_projection_slot",
 									  &rc);
 	if (rc != CL_SUCCESS)
 		goto error;
@@ -4182,6 +4294,7 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	{
 		clserv_log("failed on clEnqueueNDRangeKernel: %s",
 				   opencl_strerror(rc));
+		clserv_log("gwork_sz=%zu lwork_sz=%zu", gwork_sz, lwork_sz);
 		goto error;
 	}
 	clghj->ev_kern_main = clghj->ev_index;
@@ -4354,7 +4467,8 @@ error:
 		if (clghj->ev_index > 0)
 		{
 			clWaitForEvents(clghj->ev_index, clghj->events);
-			while (clghj->ev_index > 0)
+			/* NOTE: first event has to be released under mhtables->lock */
+			while (clghj->ev_index > 1)
 				clReleaseEvent(clghj->events[--clghj->ev_index]);
 		}
 		if (clghj->m_kresult)
@@ -4366,7 +4480,18 @@ error:
 		if (clghj->m_join)
 			clReleaseMemObject(clghj->m_join);
 		if (clghj->m_hash)
-			clReleaseMemObject(clghj->m_hash);
+		{
+			SpinLockAcquire(&mhtables->lock);
+			Assert(mhtables->n_kernel > 0);
+			clReleaseMemObject(mhtables->m_hash);
+			clReleaseEvent(mhtables->ev_hash);
+			if (--mhtables->n_kernel == 0)
+			{
+				mhtables->m_hash = NULL;
+				mhtables->ev_hash = NULL;
+			}
+			SpinLockRelease(&mhtables->lock);
+		}
 		if (clghj->kern_main)
 			clReleaseKernel(clghj->kern_main);
 		if (clghj->kern_proj)
