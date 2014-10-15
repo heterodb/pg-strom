@@ -304,6 +304,7 @@ typedef struct {
 	kern_data_store	   *kds;		/* reference to kern_data_store */
 	kern_toastbuf	   *ktoast;		/* reference to kern_toastbuf */
 	ResourceOwner		resowner;	/* !!NOTE: private address!!*/
+	char			   *local_pages;/* duplication of local pages */
 } pgstrom_data_store;
 
 /* 8MB for each buffer */

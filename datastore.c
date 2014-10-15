@@ -450,9 +450,9 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 			 */
 			if (BufferIsLocal(bitem->buffer) ||
 				BufferIsInvalid(bitem->buffer))
-				pgstrom_shmem_free(bitem->page);
-			else if (!pgstrom_i_am_clserv &&
-					 !pgstrom_restrack_cleanup_context())
+				continue;
+			if (!pgstrom_i_am_clserv &&
+				!pgstrom_restrack_cleanup_context())
 				ReleaseBuffer(bitem->buffer);
 		}
 	}
@@ -464,6 +464,8 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 	PG_END_TRY();
 	CurrentResourceOwner = saved_owner;
 
+	if (pds->local_pages)
+		pgstrom_shmem_free(pds->local_pages);
 	if (pds->ktoast)
 		pgstrom_shmem_free(pds->ktoast);
 	pgstrom_shmem_free(pds->kds);
@@ -540,6 +542,7 @@ pgstrom_create_data_store_row(TupleDesc tupdesc,
 		pds->ktoast = NULL;	/* never used */
 		pds->resowner = ResourceOwnerCreate(CurrentResourceOwner,
 											"pgstrom_data_store");
+		pds->local_pages = NULL;	/* allocation on demand */
 	}
 	PG_CATCH();
 	{
@@ -638,7 +641,8 @@ pgstrom_create_data_store_column(TupleDesc tupdesc,
 	pds->refcnt = 1;
 	pds->kds = kds;
 	pds->ktoast = NULL;		/* expand on demand */
-	pds->resowner = NULL;	/* should not be used to column-store */
+	pds->resowner = NULL;	/* should be never used to column-store */
+	pds->local_pages = NULL;/* should be never used to column-store */
 
 	return pds;
 }
@@ -787,13 +791,29 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 			bitem->page = page;
 		else
 		{
-			Page	dup_page = pgstrom_shmem_alloc(BLCKSZ);
+			Page	dup_page;
 
-			if (!dup_page)
-				elog(ERROR, "out of memory");
+			/*
+			 * NOTE: We expect seldom cases requires to mix shared buffers
+			 * and private buffers in a single data-chunk. So, we allocate
+			 * all the expected local-pages at once. It has two another
+			 * benefit; 1. duplicated pages tend to have continuous address
+			 * that may reduce number of DMA call, 2. memory allocation
+			 * request to BLCKSZ actually consumes 2*BLCKSZ because of
+			 * additional fields that does not fit 2^N manner.
+			 */
+			if (!pds->local_pages)
+			{
+				Size	required = BLCKSZ * kds->maxblocks;
+
+				pds->local_pages = pgstrom_shmem_alloc(required);
+				if (!pds->local_pages)
+					elog(ERROR, "out of memory");
+			}
+			dup_page = (Page)(pds->local_pages + BLCKSZ * kds->nblocks);
 			memcpy(dup_page, page, BLCKSZ);
-			bitem->page = dup_page;
-			ReleaseBuffer(buffer);
+            bitem->page = dup_page;
+            ReleaseBuffer(buffer);
 		}
 		kds->nblocks++;
 	}
@@ -861,10 +881,19 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 			if (kds->nblocks >= kds->maxblocks)
 				return false;
 
-			/* allocate an anonymous page */
-			page = pgstrom_shmem_alloc(BLCKSZ);
-			if (!page)
-				elog(ERROR, "out of memory");
+			/*
+			 * Allocation of anonymous pages at once. See the comments at
+			 * pgstrom_data_store_insert_block().
+			 */
+			if (!pds->local_pages)
+			{
+				Size	required = kds->maxblocks * BLCKSZ;
+
+				pds->local_pages = pgstrom_shmem_alloc(required);
+				if (!pds->local_pages)
+					elog(ERROR, "out of memory");
+			}
+			page = (Page)(pds->local_pages + kds->nblocks * BLCKSZ);
 			PageInit(page, BLCKSZ, 0);
 			if (PageGetFreeSpace(page) < MAXALIGN(tuple->t_len))
 			{
