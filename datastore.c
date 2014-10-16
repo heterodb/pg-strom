@@ -141,7 +141,7 @@ pgstrom_create_kern_parambuf(List *used_params,
 }
 
 /*
- * pgstrom_plan_can_multi_exec
+ * pgstrom_plan_can_multi_exec (obsolete; should not be used any more)
  *
  * It gives a hint whether subplan support bulk-exec mode, or not.
  */

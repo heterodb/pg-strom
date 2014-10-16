@@ -19,6 +19,7 @@
 #include "nodes/bitmapset.h"
 #include "nodes/execnodes.h"
 #include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "nodes/plannodes.h"
 #include "nodes/relation.h"
 #include "optimizer/cost.h"
@@ -184,7 +185,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		return;
 
 	/* check whether the qualifier can run on GPU device, or not */
-	memset(&context, 0, sizeof(codegen_context));
+	pgstrom_init_codegen_context(&context);
 	foreach (cell, baserel->baserestrictinfo)
 	{
 		RestrictInfo   *rinfo = lfirst(cell);
@@ -252,11 +253,14 @@ gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path)
 	if (!enable_gpuscan)
 		return path;
 
-	/* "simple" SeqScan cannot have qualifier, right now.
-	 * TODO: pull-up qualifiers will make sense.
-	 */
-	if (rel->baserestrictinfo)
-		return path;
+	/* Simple SeqScan cannot have not device executable */
+	foreach (lc, rel->baserestrictinfo)
+	{
+		RestrictInfo   *rinfo = lfirst(lc);
+
+		if (!pgstrom_codegen_available_expression(rinfo->clause))
+			return path;
+	}
 
 	/* !!! See the logic in use_physical_tlist() !!! */
 
@@ -309,16 +313,14 @@ gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path)
  * loading functionality.
  */
 Plan *
-gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt, Plan *plan)
+gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt, Plan *plan,
+								 Bitmapset *attr_refs)
 {
 	RangeTblEntry *rte;
 	GpuScanPlan	   *gscan;
 	Index			varno;
 	List		   *tlist;
-	ListCell	   *titem;
-	HeapTuple		tup;
-	int				nattrs;
-	int				anum;
+	ListCell	   *lc;
 
 	/* only SeqScan can be replaced */
 	if (!IsA(plan, SeqScan))
@@ -343,72 +345,19 @@ gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt, Plan *plan)
 		return plan;	/* usually, shouldn't happen */
 
 	/*
-	 * Check whether the underlying SeqScan potentially takes projection,
-	 * or not. See the logic in tlist_matches_tupdesc().
+	 * Check whether the device referenced target-entry can be constructed
+	 * on the device side. (no need to care about host-only fields)
 	 */
-
-	/* get number of attributes */
-	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(rte->relid));
-	if (!HeapTupleIsValid(tup))
-		return plan;	/* usually, shouldn't happen */
-	nattrs = ((Form_pg_class) GETSTRUCT(tup))->relnatts;
-	ReleaseSysCache(tup);
-
-	for (anum = 1, titem = list_head(tlist);
-		 anum <= nattrs;
-		 anum++, titem = lnext(titem))
+	foreach (lc, plan->targetlist)
 	{
-		Form_pg_attribute attr;
-		Var	   *var;
+		TargetEntry	   *tle = lfirst(lc);
+		int		x = tle->resno - FirstLowInvalidHeapAttributeNumber;
 
-		if (!titem)
-			return plan;	/* tlist too short */
-		if (!IsA(lfirst(titem), TargetEntry))
-			return plan;	/* sanity check; usually, shouldn't happen */
-		var = (Var *)((TargetEntry *) lfirst(titem))->expr;
-		if (!var || !IsA(var, Var))
-			return plan;	/* tlist item not a Var */
-		/* if these Asserts fail, planner messed up */
-		Assert(var->varno == varno);
-		Assert(var->varlevelsup == 0);
-		if (var->varattno != anum)
-			return plan;	/* out of order */
-
-		/* also checks attribute's property */
-		tup = SearchSysCache2(ATTNUM,
-							  ObjectIdGetDatum(rte->relid),
-							  Int16GetDatum(anum));
-		if (!HeapTupleIsValid(tup))
-			return plan;	/* usually, shouldn't happen */
-		attr = (Form_pg_attribute) GETSTRUCT(tup);
-		if (attr->attisdropped)
-		{
-			ReleaseSysCache(tup);
-			return plan;	/* table contains dropped columns */
-		}
-
-		/*
-		 * Note: usually the Var's type should match the tupdesc exactly,
-		 * but in situations involving unions of columns that have different
-		 * typmods, the Var may have come from above the union and hence have
-		 * typmod -1.
-		 */
-		if (var->vartype != attr->atttypid ||
-			(var->vartypmod != attr->atttypmod &&
-			 var->vartypmod != -1))
-		{
-			ReleaseSysCache(tup);
-			return plan;	/* type mismatch */
-		}
-		ReleaseSysCache(tup);
+		if (!bms_is_member(x, attr_refs))
+			continue;
+		if (!pgstrom_codegen_available_expression(tle->expr))
+			return plan;
 	}
-	if (titem)
-		return plan;		/* tlist too long */
-
-	/*
-	 * FIXME: I have no idea to determine oid handling here.
-	 * Do it later
-	 */
 
 	/*
 	 * OK, SeqScan can be replaced by GpuScan
@@ -443,7 +392,7 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 	StringInfoData	decl;
 	char		   *expr_code;
 
-	memset(context, 0, sizeof(codegen_context));
+	pgstrom_init_codegen_context(context);
 	if (dev_quals == NIL)
 		return NULL;
 
@@ -600,7 +549,7 @@ gpuscan_finalize_plan(PlannerInfo *root,
 }
 
 /*
- * pgstrom_gpuscan_can_bulkload
+ * pgstrom_gpuscan_can_bulkload (obsolete!)
  *
  * It tells caller whether the supplied custom-plan-state is GpuScan and
  * can support bulk-loading, or not.
@@ -612,6 +561,22 @@ pgstrom_gpuscan_can_bulkload(const CustomPlanState *cps)
 		!cps->ps.ps_ProjInfo)
 		return true;
 
+	return false;
+}
+
+/*
+ * pgstrom_plan_is_gpuscan
+ *
+ * It returns true, if supplied plan node is gpuscan.
+ */
+bool
+pgstrom_plan_is_gpuscan(const Plan *plan)
+{
+	CustomPlan	   *cplan = (CustomPlan *) plan;
+
+	if (IsA(cplan, CustomPlan) &&
+		cplan->methods == &gpuscan_plan_methods)
+		return true;
 	return false;
 }
 

@@ -13,6 +13,7 @@
 #include "postgres.h"
 #include "access/hash.h"
 #include "access/htup_details.h"
+#include "access/sysattr.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
@@ -1228,7 +1229,9 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			!pgstrom_devtype_lookup_and_track(var->vartype, context))
 			return false;
 
-		appendStringInfo(&context->str, "KVAR_%u", var->varattno);
+		appendStringInfo(&context->str, "%s_%u",
+						 context->var_label,
+						 var->varattno);
 		context->used_vars = list_append_unique(context->used_vars,
 												copyObject(node));
 		return true;
@@ -1447,10 +1450,12 @@ codegen_expression_walker(Node *node, codegen_context *context)
 				dtype = pgstrom_devtype_lookup_and_track(expr_type, context);
 				if (!dtype)
 					return false;
-				dfunc = pgstrom_devfunc_lookup_and_track(dtype->type_eqfunc, context);
+				dfunc = pgstrom_devfunc_lookup_and_track(dtype->type_eqfunc,
+														 context);
 				if (!dfunc)
 					return false;
-				appendStringInfo(&context->str, "EVAL(pgfn_%s(", dfunc->func_name);
+				appendStringInfo(&context->str,
+								 "EVAL(pgfn_%s(", dfunc->func_name);
 				codegen_expression_walker((Node *) caseexpr->arg, context);
 				appendStringInfo(&context->str, ", ");
 				codegen_expression_walker((Node *) casewhen->expr, context);
@@ -1490,6 +1495,10 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	walker_context.used_params = list_copy(context->used_params);
 	walker_context.used_vars = list_copy(context->used_vars);
 	walker_context.param_refs = bms_copy(context->param_refs);
+	walker_context.var_label  = context->var_label;
+	walker_context.kds_label  = context->kds_label;
+	walker_context.ktoast_label  = context->ktoast_label;
+	walker_context.kds_index_label = context->kds_index_label;
 	walker_context.extra_flags = context->extra_flags;
 
 	if (IsA(expr, List))
@@ -1507,6 +1516,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	context->used_params = walker_context.used_params;
 	context->used_vars = walker_context.used_vars;
 	context->param_refs = walker_context.param_refs;
+	/* no need to write back xxx_label fields because read-only */
 	context->extra_flags = walker_context.extra_flags;
 
 	return walker_context.str.data;
@@ -1634,12 +1644,107 @@ pgstrom_codegen_var_declarations(codegen_context *context)
 		Assert(dtype != NULL);
 		appendStringInfo(
 			&str,
-			"  pg_%s_t KVAR_%u"
-			" = pg_%s_vref(kds,ktoast,errcode,%u,kds_index);\n",
-			dtype->type_name, var->varattno,
-			dtype->type_name, var->varattno - 1);
+			"  pg_%s_t %s_%u = pg_%s_vref(%s,%s,errcode,%u,%s);\n",
+			dtype->type_name,
+			context->var_label,
+			var->varattno,
+			dtype->type_name,
+			context->kds_label,
+			context->ktoast_label,
+			var->varattno - 1,
+			context->kds_index_label);
 	}
 	return str.data;
+}
+
+/*
+ * pgstrom_codegen_bulk_var_declarations
+ *
+ *
+ *
+ */
+char *
+pgstrom_codegen_bulk_var_declarations(codegen_context *context,
+									  Plan *outer_plan,
+									  Bitmapset *attr_refs)
+{
+	List		   *subplan_vars = NIL;
+	ListCell	   *lc;
+	StringInfoData	buf1;
+	StringInfoData	buf2;
+	devtype_info   *dtype;
+
+	initStringInfo(&buf1);
+	initStringInfo(&buf2);
+	foreach (lc, outer_plan->targetlist)
+	{
+		TargetEntry *tle = lfirst(lc);
+		int			x = tle->resno - FirstLowInvalidHeapAttributeNumber;
+		Oid			type_oid;
+
+		if (!bms_is_member(x, attr_refs))
+			continue;
+
+		type_oid = exprType((Node *) tle->expr);
+		dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
+		if (IsA(tle->expr, Var))
+		{
+			Var	   *outer_var = (Var *) tle->expr;
+
+			Assert(outer_var->vartype == type_oid);
+			appendStringInfo(
+				&buf2,
+				"  pg_%s_t %s_%u = pg_%s_vref(%s,%s,errcode,%u,%s);\n",
+				dtype->type_name,
+				context->var_label,
+				tle->resno,
+				dtype->type_name,
+				context->kds_label,
+				context->ktoast_label,
+				outer_var->varoattno - 1,
+				context->kds_index_label);
+		}
+		else
+		{
+			const char *saved_var_label = context->var_label;
+			List	   *saved_used_vars = context->used_vars;
+			char	   *temp;
+
+			context->var_label = "OVAR";
+			context->used_vars = subplan_vars;
+
+			temp = pgstrom_codegen_expression((Node *)tle->expr, context);
+			appendStringInfo(&buf2, "  pg_%s_t %s_%u = %s;\n",
+							 dtype->type_name,
+							 saved_var_label,
+							 tle->resno,
+							 temp);
+			subplan_vars = context->used_vars;
+			context->var_label = saved_var_label;
+			context->used_vars = saved_used_vars;
+		}
+	}
+
+	foreach (lc, subplan_vars)
+	{
+		Var	   *var = lfirst(lc);
+
+		dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
+		appendStringInfo(
+			&buf1,
+			"  pg_%s_t OVAR_%u = pg_%s_vref(%s,%s,errcode,%u,%s);\n",
+			dtype->type_name,
+			var->varattno,
+			dtype->type_name,
+			context->kds_label,
+			context->ktoast_label,
+			var->varattno - 1,
+			context->kds_index_label);
+	}
+	appendStringInfo(&buf1, "%s", buf2.data);
+	pfree(buf2.data);
+
+	return buf1.data;
 }
 
 /*
@@ -1784,6 +1889,17 @@ codegen_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 	MemoryContextReset(devinfo_memcxt);
 	memset(devtype_info_slot, 0, sizeof(devtype_info_slot));
 	memset(devfunc_info_slot, 0, sizeof(devfunc_info_slot));
+}
+
+void
+pgstrom_init_codegen_context(codegen_context *context)
+{
+	memset(context, 0, sizeof(codegen_context));
+
+	context->var_label = "KVAR";
+	context->kds_label = "kds";
+	context->ktoast_label = "ktoast";
+	context->kds_index_label = "kds_index";
 }
 
 void

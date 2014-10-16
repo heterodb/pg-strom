@@ -1216,9 +1216,9 @@ gpuhashjoin_codegen(PlannerInfo *root,
 	ListCell	   *cell;
 	int				depth;
 
-	memset(context, 0, sizeof(codegen_context));
 	initStringInfo(&str);
 	initStringInfo(&body);
+	pgstrom_init_codegen_context(context);
 
 	/* declaration of gpuhashjoin_exec_multi */
 	appendStringInfo(
@@ -1934,7 +1934,7 @@ gpuhashjoin_finalize_plan(PlannerInfo *root,
 
 
 /*
- * gpuhashjoin_support_multi_exec
+ * gpuhashjoin_support_multi_exec (obsolete)
  *
  * It gives a hint whether the supplied plan-state support bulk-exec mode,
  * or not. If it is GpuHashJooin provided by PG-Strom, it does not allow
@@ -1946,6 +1946,22 @@ gpuhashjoin_support_multi_exec(const CustomPlanState *cps)
 	return false;	/* not supported yet */
 	/* we can issue bulk-exec mode if no projection */
 	if (cps->ps.ps_ProjInfo == NULL)
+		return true;
+	return false;
+}
+
+/*
+ * pgstrom_plan_is_gpuhashjoin
+ *
+ * It returns true, if supplied plan node is gpuhashjoin.
+ */
+bool
+pgstrom_plan_is_gpuhashjoin(const Plan *plan)
+{
+	CustomPlan     *cplan = (CustomPlan *) plan;
+
+	if (IsA(cplan, CustomPlan) &&
+		cplan->methods == &gpuhashjoin_plan_methods)
 		return true;
 	return false;
 }

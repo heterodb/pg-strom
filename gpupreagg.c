@@ -45,6 +45,7 @@ typedef struct
 	CustomPlan		cplan;
 	int				numCols;		/* number of grouping columns */
 	AttrNumber	   *grpColIdx;		/* their indexes in the target list */
+	bool			outer_bulkload;
 	const char	   *kern_source;
 	int				extra_flags;
 	List		   *used_params;	/* referenced Const/Param */
@@ -60,7 +61,7 @@ typedef struct
 	/* average number of tuples per page */
 	double			ntups_per_page;
 	bool			outer_done;
-	bool			outer_bulk;
+	bool			outer_bulkload;
 	TupleTableSlot *outer_overflow;
 
 	pgstrom_queue  *mqueue;
@@ -916,12 +917,14 @@ static bool
 gpupreagg_rewrite_expr(Agg *agg,
 					   List **p_agg_tlist,
 					   List **p_agg_quals,
-					   List **p_pre_tlist)
+					   List **p_pre_tlist,
+					   Bitmapset **p_attr_refs)
 {
 	Plan	   *outer_plan = outerPlan(agg);
 	List	   *pre_tlist = NIL;
 	List	   *agg_tlist = NIL;
 	List	   *agg_quals = NIL;
+	Bitmapset  *attr_refs = NULL;
 	ListCell   *cell;
 	int			i;
 
@@ -975,6 +978,8 @@ gpupreagg_rewrite_expr(Agg *agg,
 									  resname,
 									  tle->resjunk);
 			pre_tlist = lappend(pre_tlist, tle_new);
+			attr_refs = bms_add_member(attr_refs, tle->resno -
+									   FirstLowInvalidHeapAttributeNumber);
 			i++;
 		}
 		else
@@ -1078,6 +1083,7 @@ gpupreagg_rewrite_expr(Agg *agg,
 	*p_pre_tlist = pre_tlist;
 	*p_agg_tlist = agg_tlist;
 	*p_agg_quals = agg_quals;
+	*p_attr_refs = attr_refs;
 	return true;
 }
 
@@ -1394,7 +1400,8 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 {
 	Oid				namespace_oid = get_namespace_oid("pgstrom", false);
 	StringInfoData	str;
-	StringInfoData	decl;
+	StringInfoData	decl1;
+	StringInfoData	decl2;
     StringInfoData	body;
 	Expr		   *clause;
 	ListCell	   *cell;
@@ -1404,7 +1411,6 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 	devtype_info   *dtype;
 	devfunc_info   *dfunc;
 	Plan		   *outer_plan;
-	AttrNumber		anum;
 	bool			use_temp_int4 = false;
 	bool			use_temp_int8 = false;
 	bool			use_temp_float8x = false;
@@ -1414,7 +1420,8 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 	int				i;
 
 	initStringInfo(&str);
-	initStringInfo(&decl);
+	initStringInfo(&decl1);
+	initStringInfo(&decl2);
 	initStringInfo(&body);
 	context->param_refs = NULL;
 
@@ -1649,33 +1656,58 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 				 nodeToString(tle->expr));
 	}
 
-	/* declaration of variables */
+	/*
+	 * Declaration of variables
+	 */
 	outer_plan = outerPlan(gpreagg);
-	while ((anum = bms_first_member(attr_refs)) >= 0)
+	if (gpreagg->outer_bulkload)
 	{
-		TargetEntry	   *tle;
+		const char *saved_kds_label = context->kds_label;
+		const char *saved_kds_index_label = context->kds_index_label;
+		char	   *temp;
 
-		anum += FirstLowInvalidHeapAttributeNumber;
+		context->kds_label = "kds_in";
+		context->kds_index_label = "rowidx_in";
 
-		tle = get_tle_by_resno(outer_plan->targetlist, anum);
-		dtype = pgstrom_devtype_lookup_and_track(exprType((Node *) tle->expr),
-												 context);
-		appendStringInfo(
-			&decl,
-			"  pg_%s_t KVAR_%u"
-			" = pg_%s_vref(kds_in,ktoast,errcode,%u,rowidx_in);\n",
-			dtype->type_name,
-			anum,
-			dtype->type_name,
-			anum - 1);
+		temp = pgstrom_codegen_bulk_var_declarations(context,
+													 outer_plan,
+													 attr_refs);
+		appendStringInfo(&decl1, "%s", temp);
+		pfree(temp);
+
+		context->kds_label = saved_kds_label;
+		context->kds_index_label = saved_kds_index_label;
 	}
+	else
+	{
+		foreach (cell, outer_plan->targetlist)
+		{
+			TargetEntry	*tle = lfirst(cell);
+			int		x = tle->resno - FirstLowInvalidHeapAttributeNumber;
+			Oid		type_oid;
+
+			if (!bms_is_member(x, attr_refs))
+				continue;
+			type_oid = exprType((Node *) tle->expr);
+			dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
+			appendStringInfo(
+				&decl1,
+				"  pg_%s_t KVAR_%u"
+				" = pg_%s_vref(kds_in,ktoast,errcode,%u,rowidx_in);\n",
+				dtype->type_name,
+				tle->resno,
+				dtype->type_name,
+				tle->resno - 1);
+		}
+	}
+
 	/* declaration of parameter reference */
 	if (context->param_refs)
 	{
 		char	   *params_decl
 			= pgstrom_codegen_param_declarations(context,
 												 context->param_refs);
-		appendStringInfo(&decl, "%s", params_decl);
+		appendStringInfo(&decl2, "%s", params_decl);
 		pfree(params_decl);
 		bms_free(context->param_refs);
 	}
@@ -1683,28 +1715,31 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 
 	/* declaration of other temp variables */
 	if (use_temp_int4)
-		appendStringInfo(&decl, "  pg_int4_t temp_int4;\n");
+		appendStringInfo(&decl1, "  pg_int4_t temp_int4;\n");
 	if (use_temp_int8)
-		appendStringInfo(&decl, "  pg_int8_t temp_int8;\n");
+		appendStringInfo(&decl1, "  pg_int8_t temp_int8;\n");
 	if (use_temp_float8x)
-		appendStringInfo(&decl, "  pg_float8_t temp_float8x;\n");
+		appendStringInfo(&decl1, "  pg_float8_t temp_float8x;\n");
 	if (use_temp_float8y)
-		appendStringInfo(&decl, "  pg_float8_t temp_float8y;\n");
+		appendStringInfo(&decl1, "  pg_float8_t temp_float8y;\n");
 
 	appendStringInfo(
 		&str,
 		"static void\n"
 		"gpupreagg_projection(__private cl_int *errcode,\n"
+		"            __global kern_parambuf *kparams,\n"
 		"            __global kern_data_store *kds_in,\n"
 		"            __global kern_data_store *kds_out,\n"
 		"            __global kern_toastbuf *ktoast,\n"
 		"            size_t rowidx_in, size_t rowidx_out)\n"
 		"{\n"
 		"%s"
+		"%s"
 		"\n"
 		"%s"
 		"}\n",
-		decl.data,
+		decl2.data,
+		decl1.data,
 		body.data);
 
 	/*
@@ -1732,7 +1767,7 @@ gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 	const char	   *fn_projection;
 	ListCell	   *cell;
 
-	memset(context, 0, sizeof(codegen_context));
+	pgstrom_init_codegen_context(context);
 
 	/*
 	 * System constatnts for GpuPreAgg
@@ -1794,6 +1829,42 @@ gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 }
 
 /*
+ * gpupreagg_use_bulkload
+ *
+ * It checks availability of bulk-loading
+ */
+static bool
+gpupreagg_use_bulkload(GpuPreAggPlan *gpreagg)
+{
+	Plan	   *outer_plan = outerPlan(gpreagg);
+	List	   *tlist = gpreagg->cplan.plan.targetlist;
+	Bitmapset  *attrefs = NULL;
+	int			i, resno;
+
+	/*
+	 * Only GpuScan and GpuHashJoin support bulk-loading right now.
+	 */
+	if (!pgstrom_plan_is_gpuscan(outer_plan) &&
+		!pgstrom_plan_is_gpuhashjoin(outer_plan))
+		return false;
+
+	pull_varattnos((Node *)tlist, OUTER_VAR, &attrefs);
+	while ((i = bms_first_member(attrefs)) >= 0)
+	{
+		TargetEntry	   *tle;
+
+		resno = i + FirstLowInvalidHeapAttributeNumber;
+		if (resno  < 1)
+			elog(ERROR, "Bug? system column should not be in GpuPreAgg");
+
+		tle = get_tle_by_resno(outer_plan->targetlist, resno);
+		if (!pgstrom_codegen_available_expression(tle->expr))
+			return false;
+	}
+	return true;
+}
+
+/*
  * pgstrom_try_insert_gpupreagg
  *
  * Entrypoint of the gpupreagg. It checks whether the supplied Aggregate node
@@ -1806,6 +1877,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	List		   *pre_tlist = NIL;
 	List		   *agg_quals = NIL;
 	List		   *agg_tlist = NIL;
+	Bitmapset	   *attr_refs = NULL;
 	ListCell	   *cell;
 	Cost			startup_cost;
 	Cost			total_cost;
@@ -1822,7 +1894,11 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	 * If unavailable to construct, it indicates this aggregation
 	 * does not support partial aggregation.
 	 */
-	if (!gpupreagg_rewrite_expr(agg, &agg_tlist, &agg_quals, &pre_tlist))
+	if (!gpupreagg_rewrite_expr(agg,
+								&agg_tlist,
+								&agg_quals,
+								&pre_tlist,
+								&attr_refs))
 		return;
 
 	/*
@@ -1840,15 +1916,19 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 								 sizeof(AttrNumber) * agg->numCols);
 	if (!IsA(outerPlan(agg), Sort))
 		outerPlan(gpreagg) = gpuscan_try_replace_seqscan_plan(pstmt,
-															  outerPlan(agg));
+															  outerPlan(agg),
+															  attr_refs);
 	else
 	{
 		Sort   *sort_plan = (Sort *) outerPlan(agg);
 		Plan   *outer_plan = outerPlan(sort_plan);
 
 		outerPlan(gpreagg) = gpuscan_try_replace_seqscan_plan(pstmt,
-															  outer_plan);
+															  outer_plan,
+															  attr_refs);
 	}
+	/* XXX - gpupreagg_use_bulkload references outer plan */
+	gpreagg->outer_bulkload = gpupreagg_use_bulkload(gpreagg);
 
 	/*
 	 * Cost estimation of Aggregate node if GpuPreAgg is injected.
@@ -1951,8 +2031,8 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 	gpas->scan_desc = ExecGetResultType(outerPlanState(gpas));
 	gpas->scan_slot = ExecAllocTableSlot(&estate->es_tupleTable);
 	ExecSetSlotDescriptor(gpas->scan_slot, gpas->scan_desc);
+	gpas->outer_bulkload = gpreagg->outer_bulkload;
 	gpas->outer_done = false;
-	gpas->outer_bulk = pgstrom_planstate_can_bulkload(outerPlanState(gpas));
 	gpas->outer_overflow = NULL;
 
 	outer_width = outerPlanState(gpas)->plan->plan_width;
@@ -2158,7 +2238,7 @@ gpupreagg_load_next_outer(GpuPreAggState *gpas)
 	if (gpas->pfm.enabled)
 		gettimeofday(&tv1, NULL);
 
-	if (!gpas->outer_bulk)
+	if (!gpas->outer_bulkload)
 	{
 		/* Scan the outer relation using row-by-row mode */
 		TupleDesc		tupdesc
@@ -2542,6 +2622,8 @@ gpupreagg_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 
+	ExplainPropertyText("Bulkload",
+						gpas->outer_bulkload ? "on" : "off", es);
 	show_device_kernel(gpas->dprog_key, es);
 	if (es->analyze && gpas->pfm.enabled)
 		pgstrom_perfmon_explain(&gpas->pfm, es);
@@ -3643,7 +3725,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	nvalids = (krowmap->nvalids < 0 ? nitems : krowmap->nvalids);
 
 	Assert(kds_dest->nitems == 0 &&
-		   kds_dest->nrooms == nitems &&
+		   kds_dest->nrooms == nvalids &&
 		   kds_dest->format == KDS_FORMAT_COLUMN);
 
 	/* allocation of m_gpreagg */

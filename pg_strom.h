@@ -430,6 +430,42 @@ extern void pgstrom_init_mqueue(void);
 extern Datum pgstrom_mqueue_info(PG_FUNCTION_ARGS);
 
 /*
+ * codegen.c
+ */
+typedef struct {
+	StringInfoData	str;
+	List	   *type_defs;	/* list of devtype_info in use */
+	List	   *func_defs;	/* list of devfunc_info in use */
+	List	   *used_params;/* list of Const/Param in use */
+	List	   *used_vars;	/* list of Var in use */
+	Bitmapset  *param_refs;	/* referenced parameters */
+	const char *var_label;	/* prefix of var reference, if exist */
+	const char *kds_label;	/* label to reference kds, if exist */
+	const char *ktoast_label;/* label to reference ktoast, if exist */
+	const char *kds_index_label; /* label to reference kds_index, if exist */
+	int			extra_flags;/* external libraries to be included */
+} codegen_context;
+
+extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
+extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid);
+extern devtype_info *pgstrom_devtype_lookup_and_track(Oid type_oid,
+											  codegen_context *context);
+extern devfunc_info *pgstrom_devfunc_lookup_and_track(Oid func_oid,
+											  codegen_context *context);
+extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
+extern char *pgstrom_codegen_type_declarations(codegen_context *context);
+extern char *pgstrom_codegen_func_declarations(codegen_context *context);
+extern char *pgstrom_codegen_param_declarations(codegen_context *context,
+												Bitmapset *param_refs);
+extern char *pgstrom_codegen_var_declarations(codegen_context *context);
+extern char *pgstrom_codegen_bulk_var_declarations(codegen_context *context,
+												   Plan *outer_plan,
+												   Bitmapset *attr_refs);
+extern bool pgstrom_codegen_available_expression(Expr *expr);
+extern void pgstrom_init_codegen_context(codegen_context *context);
+extern void pgstrom_init_codegen(void);
+
+/*
  * datastore.c
  */
 extern kern_parambuf *
@@ -496,16 +532,20 @@ extern void pgstrom_init_restrack(void);
  * gpuscan.c
  */
 extern Path *gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path);
-extern Plan *gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt, Plan *plan);
+extern Plan *gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt, Plan *plan,
+											  Bitmapset *attr_refs);
 extern bool pgstrom_gpuscan_can_bulkload(const CustomPlanState *cps);
+extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern void pgstrom_init_gpuscan(void);
 
+#if 0
 /*
  * gpusort.c
  */
 extern CustomPlan *pgstrom_create_gpusort_plan(Sort *original, List *rtable);
 extern bool gpusort_support_multi_exec(const CustomPlanState *cps);
 extern void pgstrom_init_gpusort(void);
+#endif
 
 /*
  * gpuhashjoin.c
@@ -517,6 +557,9 @@ extern void
 multihash_put_tables(struct pgstrom_multihash_tables *mhtables);
 
 extern bool gpuhashjoin_support_multi_exec(const CustomPlanState *cps);
+extern bool pgstrom_plan_is_gpuhashjoin(const Plan *plan);
+extern void pgstrom_gpuhashjoin_bulk_varref(StringInfo decl, Plan *plan,
+											Bitmapset *var_refs);
 extern void pgstrom_init_gpuhashjoin(void);
 
 /*
@@ -603,35 +646,6 @@ extern void __clserv_log(const char *funcname,
 	__attribute__((format(PG_PRINTF_ATTRIBUTE, 4, 5)));
 #define clserv_log(...)						\
 	__clserv_log(__FUNCTION__,__FILE__,__LINE__,__VA_ARGS__)
-
-/*
- * codegen.c
- */
-typedef struct {
-	StringInfoData	str;
-	List	   *type_defs;	/* list of devtype_info in use */
-	List	   *func_defs;	/* list of devfunc_info in use */
-	List	   *used_params;/* list of Const/Param in use */
-	List	   *used_vars;	/* list of Var in use */
-	Bitmapset  *param_refs;	/* referenced parameters */
-	const char *row_index;	/* label to reference row-index, if exist */
-	int			extra_flags;/* external libraries to be included */
-} codegen_context;
-
-extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
-extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid);
-extern devtype_info *pgstrom_devtype_lookup_and_track(Oid type_oid,
-											  codegen_context *context);
-extern devfunc_info *pgstrom_devfunc_lookup_and_track(Oid func_oid,
-											  codegen_context *context);
-extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
-extern char *pgstrom_codegen_type_declarations(codegen_context *context);
-extern char *pgstrom_codegen_func_declarations(codegen_context *context);
-extern char *pgstrom_codegen_param_declarations(codegen_context *context,
-												Bitmapset *param_refs);
-extern char *pgstrom_codegen_var_declarations(codegen_context *context);
-extern bool pgstrom_codegen_available_expression(Expr *expr);
-extern void pgstrom_init_codegen(void);
 
 /*
  * main.c

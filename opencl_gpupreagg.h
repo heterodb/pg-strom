@@ -281,6 +281,7 @@ gpupreagg_aggcalc(__private cl_int *errcode,
  */
 static void
 gpupreagg_projection(__private cl_int *errcode,
+					 __global kern_parambuf *kparams,
 					 __global kern_data_store *kds_in,
 					 __global kern_data_store *kds_out,
 					 __global kern_toastbuf *ktoast,
@@ -555,6 +556,7 @@ gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 	if (kds_index < kds_in->nitems)
 	{
 		gpupreagg_projection(&errcode,
+							 kparams,
 							 kds_in, kds_out, ktoast,
 							 kds_index,			/* rowidx of kds_in */
 							 base + offset);	/* rowidx of kds_out */
