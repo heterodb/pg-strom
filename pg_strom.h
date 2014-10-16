@@ -536,16 +536,10 @@ extern Plan *gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt, Plan *plan,
 											  Bitmapset *attr_refs);
 extern bool pgstrom_gpuscan_can_bulkload(const CustomPlanState *cps);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
+extern void pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,
+										   ProjectionInfo **p_bulk_proj,
+										   TupleTableSlot **p_bulk_slot);
 extern void pgstrom_init_gpuscan(void);
-
-#if 0
-/*
- * gpusort.c
- */
-extern CustomPlan *pgstrom_create_gpusort_plan(Sort *original, List *rtable);
-extern bool gpusort_support_multi_exec(const CustomPlanState *cps);
-extern void pgstrom_init_gpusort(void);
-#endif
 
 /*
  * gpuhashjoin.c
@@ -558,8 +552,9 @@ multihash_put_tables(struct pgstrom_multihash_tables *mhtables);
 
 extern bool gpuhashjoin_support_multi_exec(const CustomPlanState *cps);
 extern bool pgstrom_plan_is_gpuhashjoin(const Plan *plan);
-extern void pgstrom_gpuhashjoin_bulk_varref(StringInfo decl, Plan *plan,
-											Bitmapset *var_refs);
+extern void pgstrom_gpuhashjoin_setup_bulkslot(PlanState *outer_ps,
+											   ProjectionInfo **p_bulk_proj,
+											   TupleTableSlot **p_bulk_slot);
 extern void pgstrom_init_gpuhashjoin(void);
 
 /*

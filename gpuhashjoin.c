@@ -1967,6 +1967,28 @@ pgstrom_plan_is_gpuhashjoin(const Plan *plan)
 }
 
 /*
+ * pgstrom_gpuhashjoin_setup_bulkslot
+ *
+ * 
+ *
+ */
+void
+pgstrom_gpuhashjoin_setup_bulkslot(PlanState *outer_ps,
+								   ProjectionInfo **p_bulk_proj,
+								   TupleTableSlot **p_bulk_slot)
+{
+	GpuHashJoinState   *ghjs = (GpuHashJoinState *) outer_ps;
+
+	if (!IsA(ghjs, CustomPlanState) ||
+		ghjs->cps.methods != &gpuhashjoin_plan_methods)
+		elog(ERROR, "Bug? PlanState node is not GpuHashJoin");
+
+	/* XXX - is it wider proj/slot? which is correct? */
+	*p_bulk_proj = ghjs->pscan_projection;
+	*p_bulk_slot = ghjs->pscan_slot;
+}
+
+/*
  * multihash_dump_tables
  *
  * For debugging, it dumps contents of multihash-tables

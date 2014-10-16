@@ -580,6 +580,28 @@ pgstrom_plan_is_gpuscan(const Plan *plan)
 	return false;
 }
 
+/*
+ * pgstrom_gpuscan_setup_bulkslot
+ *
+ * It setup tuple-slot for bulk-loading and projection-info to transform
+ * the tuple into expected form.
+ * (Once CustomPlan become CustomScan, no need to be a API)
+ */
+void
+pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,
+							   ProjectionInfo **p_bulk_proj,
+							   TupleTableSlot **p_bulk_slot)
+{
+	GpuScanState   *gss = (GpuScanState *) outer_ps;
+
+	if (!IsA(gss, CustomPlanState) ||
+		gss->cps.methods != &gpuscan_plan_methods)
+		elog(ERROR, "Bug? PlanState node is not GpuScan");
+
+	*p_bulk_proj = gss->cps.ps.ps_ProjInfo;
+	*p_bulk_slot = gss->scan_slot;
+}
+
 static  CustomPlanState *
 gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 {
