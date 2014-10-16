@@ -420,12 +420,13 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 	__global cl_int	   *rbuffer;
 	__global void	   *datum;
 	cl_uint				nrels = kresults->nrels;
-	cl_uint				baseline;
 	cl_uint				t_hoff;
 	cl_uint				required;
 	cl_uint				offset;
 	cl_uint				total_len;
-	__local cl_uint		my_usage;
+	cl_uint				usage_head;
+	cl_uint				usage_tail;
+	__local cl_uint		usage_prev;
 	cl_int				errcode = StromError_Success;
 
 	/* Ensure format of the kern_data_store (source/destination) */
@@ -449,16 +450,6 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 		goto out;
 	}
 
-	/*
-	 * offset to the blocks area. Note that KERN_DATA_STORE_ROWBLOCK
-	 * macro is unavailable to use because kds_dest->nitems may not be
-	 * initialized here.
-	 */
-	baseline = (STROMALIGN(offsetof(kern_data_store,
-									colmeta[kds_dest->ncols])) +
-				STROMALIGN(sizeof(kern_blkitem) * kds_dest->maxblocks) +
-				STROMALIGN(sizeof(kern_rowitem) * kresults->nitems));
-	baseline = TYPEALIGN(BLCKSZ, baseline);
 	/* combination of rows in this join */
 	rbuffer = kresults->results + nrels * get_global_id(0);
 
@@ -537,13 +528,18 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 	if (get_local_id(0) == 0)
 	{
 		if (total_len > 0)
-			my_usage = atomic_add(&kds_dest->usage, total_len);
+			usage_prev = atomic_add(&kds_dest->usage, total_len);
 		else
-			my_usage = 0;
+			usage_prev = 0;
 	}
 	barrier(CLK_LOCAL_MEM_FENCE);
 
-	if (baseline + my_usage + total_len > kds_dest->length)
+	/* Check expected usage of the buffer */
+	usage_head = (STROMALIGN(offsetof(kern_data_store,
+									  colmeta[kds_dest->ncols])) +
+				  STROMALIGN(sizeof(kern_blkitem) * kds_dest->maxblocks) +
+				  STROMALIGN(sizeof(kern_rowitem) * kresults->nitems));
+	if (usage_head + usage_prev + total_len > kds_dest->length)
 	{
 		errcode = StromError_DataStoreNoSpace;
 		goto out;
@@ -556,11 +552,12 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 	{
 		__global HeapTupleHeaderData *htup;
 		__global kern_rowitem *ritem;
-		cl_uint		htup_offset = baseline + my_usage + total_len;
+		cl_uint		htup_offset;
 		cl_uint		i, ncols = kds_dest->ncols;
 		cl_uint		curr;
 
 		/* put index of heap-tuple */
+		htup_offset = kds_dest->length - (usage_prev + offset + required);
 		ritem = KERN_DATA_STORE_ROWITEM(kds_dest, get_global_id(0));
 		ritem->htup_offset = htup_offset;
 

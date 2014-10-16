@@ -946,6 +946,32 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 
 		return true;
 	}
+	else if (kds->format == KDS_FORMAT_ROW_FLAT)
+	{
+		HeapTuple		tuple;
+		kern_rowitem   *ritem = KERN_DATA_STORE_ROWITEM(kds, kds->nitems);
+		uintptr_t		usage;
+		char		   *dest_addr;
+
+		/* reference a HeapTuple in TupleTableSlot */
+		tuple = ExecFetchSlotTuple(slot);
+
+		/* check whether the tuple touches the watermark */
+		usage = ((uintptr_t)(ritem + 1) -
+				 (uintptr_t)(kds) +			/* from head */
+				 kds->usage +				/* from tail */
+				 LONGALIGN(tuple->t_len));	/* newly added */
+		if (usage > kds->length)
+			return false;
+
+		dest_addr = ((char *)kds + kds->length -
+					 kds->usage - LONGALIGN(tuple->t_len));
+		memcpy(dest_addr, tuple, tuple->t_len);
+		ritem->htup_offset = (hostptr_t)((char *)dest_addr - (char *)kds);
+		kds->nitems++;
+
+		return true;
+	}
 	Assert(kds->format == KDS_FORMAT_COLUMN);
 
 	/* makes tts_values/tts_isnull available */
@@ -1103,7 +1129,8 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 	Assert(length <= KERN_DATA_STORE_LENGTH(kds));
 #endif
 
-	if (kds->format == KDS_FORMAT_COLUMN)
+	if (kds->format == KDS_FORMAT_COLUMN ||
+		kds->format == KDS_FORMAT_ROW_FLAT)
 	{
 		rc = clEnqueueWriteBuffer(kcmdq,
 								  kds_buffer,
@@ -1153,7 +1180,6 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 		}
 		return CL_SUCCESS;
 	}
-
 	Assert(kds->format == KDS_FORMAT_ROW);
 	length = ((uintptr_t)KERN_DATA_STORE_ROWITEM(kds, kds->nitems) -
 			  (uintptr_t)(kds));

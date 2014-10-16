@@ -288,41 +288,43 @@ typedef struct {
  * |   :                                               |    |
  * | colmeta[M-1]                                      |    V
  * +----------------+-----------------+----------------+-------
- * | <row-format>   | <column-format> |<tupslot-format>|
+ * | <row-format>   | <row-flat-form> |<tupslot-format>|
  * +----------------+-----------------+----------------+
- * | rowitems[0]    | column-data of  | values/isnull  |
- * | rowitems[1]    | the 1st column  | pair of the    |
- * | rowitems[2]    | +---------------+ 1st row        |
- * |    :           | | null bitmap   | +--------------+
- * |    :           | +---------------+ | values[0]    |
- * | rowitems[N-1]  | | values array  | |   :          |
- * |                | | of the 1st    | | values[M-1]  |
- * +----------------+ | column        | +--------------+
- * |    :           +-+---------------+ | isnull[0]    |
- * | alignment to   | column-data of  | |   :          |
- * | BLCKSZ         | the 2nd column  | | isnull[M-1]  |
- * +----------------+ +---------------+-+--------------+
- * | blocks[0]      | | null bitmap   | values/isnull  |
- * | PageHeaderData | +---------------+ pair of the    |
- * |      :         | | values array  | 2nd row        |
- * | pd_linep[]     | | of the 2nd    | +--------------+
- * |      :         | | column        | | values[0]    |
- * +----------------+-+---------------+ |   :          |
- * | blocks[1]      |       :         | | values[M-1]  |
- * | PageHeaderData |       :         | +--------------+
- * |      :         |       :         | | isnull[0]    |
- * | pd_linep[]     |       :         | |   :          |
+ * | blkitems[0]    | rowitems[0]     | values/isnull  |
+ * | blkitems[1]    | rowitems[1]     | pair of the    |
+ * |    :           | rowitems[2]     | 1st row        |
+ * | blkitems[N-1]  |    :            | +--------------+
+ * +----------------+ rowitems[N-2]   | values[0]      |
+ * | rowitems[0]    | rowitems[N-1]   |   :            |
+ * | rowitems[1]    +-----------------+ values[M-1]    |
+ * | rowitems[2]    |                 | +--------------+
+ * |    :           +-----------------+ | isnull[0]    |
+ * | rowitems[K-1]  | HeapTupleData   | |  :           |
+ * +----------------+  tuple[N-1]     | | isnull[M-1]  |
+ * | alignment to ..|  <contents>     +-+--------------+
+ * | BLCKSZ.........+-----------------+ values/isnull  |
+ * +----------------+       :         | pair of the    |
+ * | blocks[0]      |       :         | 2nd row        |
+ * | PageHeaderData | Row-flat form   | +--------------+
+ * |      :         | consumes buffer | | values[0]    |
+ * | pd_linep[]     |                 | |  :           |
+ * |      :         |                 | | values[M-1]  |
+ * +----------------+       ^         | +--------------+
+ * | blocks[1]      |       :         | | isnull[0]    |
+ * | PageHeaderData |       :         | |   :          |
  * |      :         |       :         | | isnull[M-1]  |
+ * | pd_linep[]     |       :         +-+--------------+
+ * |      :         |       :         |     :          |
+ * +----------------+       :         +----------------+
+ * |      :         +-----------------+ values/isnull  |
+ * |      :         | HeapTupleData   | pair of the    |
+ * +----------------+  tuple[1]       | Nth row        |
+ * | blocks[N-1]    |  <contents>     | +--------------+
+ * | PageHeaderData +-----------------+ | values[0]    |
+ * |      :         | HeapTupleData   | |   :          |
+ * | pd_linep[]     |  tuple[0]       | | values[M-1]  |
+ * |      :         |  <contents>     | |   :          |
  * +----------------+-----------------+-+--------------+
- * |      :         | column-data of  | values/isnull  |
- * |      :         | the last column | pair of the    |
- * +----------------+ +---------------+ 3rd row        |
- * | blocks[1]      | | null bitmap   | +--------------+
- * | PageHeaderData | +---------------+ | values[0]    |
- * |      :         | | values array  | |   :          |
- * | pd_linep[]     | | of the last   | | values[M-1]  |
- * |      :         | | column        | |   :          |
- * +----------------+-+---------------+-+--------------+
  */
 typedef struct {
 	/* true, if column never has NULL (thus, no nullmap required) */
