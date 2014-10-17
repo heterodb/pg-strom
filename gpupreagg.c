@@ -58,6 +58,8 @@ typedef struct
 	CustomPlanState	cps;
 	TupleDesc		scan_desc;
 	TupleTableSlot *scan_slot;
+	ProjectionInfo *bulk_proj;
+	TupleTableSlot *bulk_slot;
 	/* average number of tuples per page */
 	double			ntups_per_page;
 	bool			outer_done;
@@ -2057,6 +2059,21 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 									gpas->cps.ps.ps_ExprContext,
 									gpas->cps.ps.ps_ResultTupleSlot,
 									gpas->scan_desc);
+
+	if (gpas->outer_bulkload)
+	{
+		if (pgstrom_plan_is_gpuscan(outerPlan(gpreagg)))
+			pgstrom_gpuscan_setup_bulkslot(outerPlanState(gpas),
+										   &gpas->bulk_proj,
+										   &gpas->bulk_slot);
+		else if (pgstrom_plan_is_gpuhashjoin(outerPlan(gpreagg)))
+			pgstrom_gpuhashjoin_setup_bulkslot(outerPlanState(gpas),
+											   &gpas->bulk_proj,
+											   &gpas->bulk_slot);
+		else
+			elog(ERROR, "Bug? unexpected PlanState node");
+	}
+
 	/*
 	 * construction of both of kds_head (for source and destination) and
 	 * ktoast_head template.
@@ -2315,17 +2332,45 @@ static TupleTableSlot *
 gpupreagg_next_tuple_fallback(GpuPreAggState *gpas)
 {
 	pgstrom_gpupreagg  *gpreagg = gpas->curr_chunk;
+	pgstrom_data_store *pds = gpreagg->pds;
+	kern_data_store	   *kds = pds->kds;
+	kern_row_map	   *krowmap = KERN_GPUPREAGG_KROWMAP(&gpreagg->kern);
 	TupleTableSlot	   *slot = NULL;
+	TupleTableSlot	   *slot_in;
+	cl_uint				row_index;
 	HeapTupleData		tuple;
 	struct timeval		tv1, tv2;
 
 	if (gpas->pfm.enabled)
 		gettimeofday(&tv1, NULL);
 
-	while (pgstrom_fetch_data_store(gpas->scan_slot,
-									gpreagg->pds,
-									gpas->curr_index++,
-									&tuple))
+	/* bulk-load uses individual slot; then may have a projection */
+	if (!gpas->outer_bulkload)
+		slot_in = gpas->scan_slot;
+	else
+		slot_in = gpas->bulk_slot;
+
+retry:
+	/*
+	 * identify the kds_index to be fetched
+	 */
+	if (krowmap->nvalids < 0)
+	{
+		if (gpas->curr_index >= kds->nitems)
+			goto out;
+		row_index = gpas->curr_index++;
+	}
+	else
+	{
+		if (gpas->curr_index >= krowmap->nvalids)
+			goto out;
+		row_index = krowmap->rindex[gpas->curr_index++];
+	}
+
+	/*
+	 * Fetch a tuple from the data-store
+	 */
+	if (pgstrom_fetch_data_store(slot_in, pds, row_index, &tuple))
 	{
 		ProjectionInfo *projection = gpas->cps.ps.ps_ProjInfo;
 		ExprContext	   *econtext = gpas->cps.ps.ps_ExprContext;
@@ -2334,24 +2379,40 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas)
 		/* reset per-tuple memory context */
 		ResetExprContext(econtext);
 
+		/* additional projection if bulk-load required */
+		if (gpas->outer_bulkload)
+		{
+			if (gpas->bulk_proj)
+			{
+				econtext->ecxt_outertuple = slot_in;
+				gpas->scan_slot = ExecProject(gpas->bulk_proj, &is_done);
+				if (is_done == ExprEndResult)
+				{
+					slot = NULL;
+					goto retry;
+				}
+				slot_in = gpas->scan_slot;
+			}
+		}
+		/* put result tuple */
 		if (!projection)
 		{
 			slot = gpas->cps.ps.ps_ResultTupleSlot;
-			ExecCopySlot(slot, gpas->scan_slot);
+			ExecCopySlot(slot, slot_in);
 		}
 		else
 		{
-			econtext->ecxt_outertuple = gpas->scan_slot;
+			econtext->ecxt_outertuple = slot_in;
 			slot = ExecProject(projection, &is_done);
 			if (is_done == ExprEndResult)
 			{
 				slot = NULL;
-				continue;
+				goto retry;
 			}
 			gpas->cps.ps.ps_TupFromTlist = (is_done == ExprMultipleResult);
 		}
-		break;
 	}
+out:
 	if (gpas->pfm.enabled)
 	{
 		gettimeofday(&tv2, NULL);
