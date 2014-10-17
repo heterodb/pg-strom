@@ -926,8 +926,7 @@ typedef struct
 	Datum				dprog_key;	/* device key for gpuhashjoin */
 	pgstrom_multihash_tables *mhtables;	/* inner hashjoin tables */
 	pgstrom_data_store *pds;		/* data store of outer relation */
-	kern_data_store	   *kds_dest;	/* result kds */
-	kern_toastbuf	   *ktoast_dest;/* result ktoast, if any */
+	pgstrom_data_store *pds_dest;	/* data store of result buffer */
 	kern_hashjoin		khashjoin;		/* kern_hashjoin of this request */
 } pgstrom_gpuhashjoin;
 

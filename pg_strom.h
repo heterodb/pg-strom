@@ -297,12 +297,13 @@ typedef struct devfunc_info {
  * pgstrom_data_store - a data structure with row- or column- format
  * to exchange a data chunk between the host and opencl server.
  */
-typedef struct {
+typedef struct pgstrom_data_store {
 	StromObject			sobj;
 	slock_t				lock;
 	volatile int		refcnt;
 	kern_data_store	   *kds;		/* reference to kern_data_store */
-	kern_toastbuf	   *ktoast;		/* reference to kern_toastbuf */
+//	kern_toastbuf	   *ktoast;		/* reference to kern_toastbuf */
+	struct pgstrom_data_store *ktoast;
 	ResourceOwner		resowner;	/* !!NOTE: private address!!*/
 	char			   *local_pages;/* duplication of local pages */
 } pgstrom_data_store;
@@ -493,9 +494,15 @@ extern pgstrom_data_store *
 pgstrom_create_data_store_row(TupleDesc tupdesc,
 							  Size dstore_sz, double ntup_per_block);
 extern pgstrom_data_store *
+pgstrom_create_data_store_row_flat(TupleDesc tupdesc, Size length);
+extern pgstrom_data_store *
+pgstrom_create_data_store_tupslot(TupleDesc tupdesc, cl_uint nrooms);
+#if 0
+extern pgstrom_data_store *
 pgstrom_create_data_store_column(TupleDesc tupdesc,
 								 Size dstore_sz,
 								 Bitmapset *attr_refs);
+#endif
 extern pgstrom_data_store *pgstrom_get_data_store(pgstrom_data_store *pds);
 extern void pgstrom_put_data_store(pgstrom_data_store *pds);
 extern int pgstrom_data_store_insert_block(pgstrom_data_store *pds,

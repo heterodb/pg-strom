@@ -2491,9 +2491,11 @@ gpupreagg_next_tuple(GpuPreAggState *gpas)
 				}
 				else
 				{
-					kern_toastbuf  *ktoast = pds->ktoast;
-
-					Assert(vl_ofs < ktoast->usage);
+					pgstrom_data_store *ktoast = pds->ktoast;
+					/*
+					 * FIXME: It does not work if ktoast has row-format
+					 * needs to use tup-slot format instead!!!!!!!!!!!!
+					 */
 					vl_ptr = (char *)ktoast + vl_ofs;
 				}
 				slot->tts_values[i] = PointerGetDatum(vl_ptr);
@@ -3838,11 +3840,11 @@ clserv_process_gpupreagg(pgstrom_message *message)
 
 	if (pds->ktoast)
 	{
-		kern_toastbuf  *ktoast = pds->ktoast;
+		pgstrom_data_store *ktoast = pds->ktoast;
 
 		clgpa->m_ktoast = clCreateBuffer(opencl_context,
                                          CL_MEM_READ_WRITE,
-										 STROMALIGN(ktoast->usage),
+										 KERN_DATA_STORE_LENGTH(ktoast->kds),
 										 NULL,
 										 &rc);
 		if (rc != CL_SUCCESS)

@@ -441,7 +441,7 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 		{
 			dlist_mutable_iter iter;
 
-			elog(LOG, "clBuildProgram failed: %s", opencl_strerror(rc));
+			clserv_log("clBuildProgram failed: %s", opencl_strerror(rc));
 
 			SpinLockAcquire(&dprog->lock);
 			/*
