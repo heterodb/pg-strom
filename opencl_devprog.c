@@ -289,7 +289,8 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 		cl_program		program;
 		const char	   *sources[32];
 		size_t			lengths[32];
-		char			build_opts[256];
+		char			build_opts[1024];
+		cl_uint			ofs;
 		cl_uint			count = 0;
 		static size_t	common_code_length = 0;
 
@@ -413,23 +414,32 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 		SpinLockRelease(&dprog->lock);
 
 		Assert(SIZEOF_VOID_P == 8 || SIZEOF_VOID_P == 4);
-		snprintf(build_opts, sizeof(build_opts),
+		ofs = snprintf(build_opts, sizeof(build_opts),
 #ifdef PGSTROM_DEBUG
-				 " -Werror"
+					   " -Werror"
 #endif
-				 " -DOPENCL_DEVICE_CODE -DHOSTPTRLEN=%u -DBLCKSZ=%u"
-				 " -DITEMID_OFFSET_SHIFT=%u"
-				 " -DITEMID_FLAGS_SHIFT=%u"
-				 " -DITEMID_LENGTH_SHIFT=%u"
-				 " -DMAXIMUM_ALIGNOF=%u"
-				 " %s",
-				 SIZEOF_VOID_P, BLCKSZ,
-				 itemid_offset_shift,
-				 itemid_flags_shift,
-				 itemid_length_shift,
-				 MAXIMUM_ALIGNOF,
-				 (dprog->extra_flags &
-				  DEVKERNEL_DISABLE_OPTIMIZE) != 0 ? "-cl-opt-disable" : "");
+					   " -DOPENCL_DEVICE_CODE -DHOSTPTRLEN=%u -DBLCKSZ=%u"
+					   " -DITEMID_OFFSET_SHIFT=%u"
+					   " -DITEMID_FLAGS_SHIFT=%u"
+					   " -DITEMID_LENGTH_SHIFT=%u"
+					   " -DMAXIMUM_ALIGNOF=%u",
+					   SIZEOF_VOID_P, BLCKSZ,
+					   itemid_offset_shift,
+					   itemid_flags_shift,
+					   itemid_length_shift,
+					   MAXIMUM_ALIGNOF);
+		if (dprog->extra_flags & DEVKERNEL_DISABLE_OPTIMIZE)
+			ofs += snprintf(build_opts + ofs, sizeof(build_opts) - ofs,
+							" -D-cl-opt-disable");
+		if (dprog->extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
+			ofs += snprintf(build_opts + ofs, sizeof(build_opts) - ofs,
+							" -DKERNEL_IS_GPUSCAN=1");
+		if (dprog->extra_flags & DEVKERNEL_NEEDS_HASHJOIN)
+			ofs += snprintf(build_opts + ofs, sizeof(build_opts) - ofs,
+                            " -DKERNEL_IS_HASHJOIN=1");
+		if (dprog->extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
+			ofs += snprintf(build_opts + ofs, sizeof(build_opts) - ofs,
+							" -DKERNEL_IS_GPUPREAGG=1");
 
 		rc = clBuildProgram(program,
 							opencl_num_devices,

@@ -444,6 +444,7 @@ typedef struct {
 	const char *kds_label;	/* label to reference kds, if exist */
 	const char *ktoast_label;/* label to reference ktoast, if exist */
 	const char *kds_index_label; /* label to reference kds_index, if exist */
+	List	   *pseudo_tlist;/* pseudo tlist expression, if any */
 	int			extra_flags;/* external libraries to be included */
 } codegen_context;
 

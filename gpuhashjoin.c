@@ -695,12 +695,16 @@ gpuhashjoin_add_path(PlannerInfo *root,
 	/* cost estimation and check availability */
 	if (cost_gpuhashjoin(root, gpath_new, &gpu_workspace))
 	{
+		gpu_workspace.startup_cost = 0.0;
+		gpu_workspace.total_cost = 0.0;
 		if (add_path_precheck(joinrel,
 							  gpu_workspace.startup_cost,
 							  gpu_workspace.total_cost,
 							  NULL, required_outer))
 		{
 			final_cost_gpuhashjoin(root, gpath_new, &gpu_workspace);
+			gpath_new->cpath.path.startup_cost = 0.0;
+			gpath_new->cpath.path.total_cost = 0.0;
 			add_path(joinrel, &gpath_new->cpath.path);
 		}
 	}
@@ -2280,7 +2284,8 @@ pgstrom_release_gpuhashjoin(pgstrom_message *message)
 
 static pgstrom_gpuhashjoin *
 pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs,
-						   pgstrom_bulkslot *bulk)
+						   pgstrom_bulkslot *bulk,
+						   int result_format)
 {
 	pgstrom_multihash_tables *mhtables = ghjs->mhnode->mhtables;
 	pgstrom_gpuhashjoin	*gpuhashjoin;
@@ -2361,9 +2366,9 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs,
 	 * allocation of the destination data-store
 	 */
 	tupdesc = ghjs->pscan_wider_slot->tts_tupleDescriptor;
-	if (!ghjs->outer_bulk)
+	if (result_format == KDS_FORMAT_TUPSLOT)
 		pds_dest = pgstrom_create_data_store_tupslot(tupdesc, nrooms);
-	else
+	else if (result_format == KDS_FORMAT_ROW_FLAT)
 	{
 		int		plan_width = ghjs->cps.ps.plan->plan_width;
 		Size	length;
@@ -2373,13 +2378,15 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs,
 				  LONGALIGN(HEAPTUPLESIZE + plan_width) * nrooms);
 		pds_dest = pgstrom_create_data_store_row_flat(tupdesc, length);
 	}
+	else
+		elog(ERROR, "Bug? unexpected result format: %d", result_format);
 	gpuhashjoin->pds_dest = pds_dest;
 
 	return gpuhashjoin;
 }
 
 static pgstrom_gpuhashjoin *
-gpuhashjoin_load_next_outer(GpuHashJoinState *ghjs)
+gpuhashjoin_load_next_outer(GpuHashJoinState *ghjs, int result_format)
 {
 	PlanState		   *subnode = outerPlanState(ghjs);
 	TupleDesc			tupdesc = ExecGetResultType(subnode);
@@ -2463,7 +2470,7 @@ gpuhashjoin_load_next_outer(GpuHashJoinState *ghjs)
 	}
 
 	if (bulk)
-		gpuhashjoin = pgstrom_create_gpuhashjoin(ghjs, bulk);
+		gpuhashjoin = pgstrom_create_gpuhashjoin(ghjs, bulk, result_format);
 
 	return gpuhashjoin;
 }
@@ -2536,7 +2543,9 @@ gpuhashjoin_next_tuple(GpuHashJoinState *ghjs,
 }
 
 static pgstrom_gpuhashjoin *
-pgstrom_fetch_gpuhashjoin(GpuHashJoinState *ghjs, bool *needs_recheck)
+pgstrom_fetch_gpuhashjoin(GpuHashJoinState *ghjs,
+						  bool *needs_recheck,
+						  int result_format)
 {
 	pgstrom_message	   *msg;
 	pgstrom_gpuhashjoin *ghjoin;
@@ -2580,8 +2589,8 @@ pgstrom_fetch_gpuhashjoin(GpuHashJoinState *ghjs, bool *needs_recheck)
 	while (!ghjs->outer_done &&
 		   ghjs->num_running <= pgstrom_max_async_chunks)
 	{
-		pgstrom_gpuhashjoin *ghjoin = gpuhashjoin_load_next_outer(ghjs);
-
+		pgstrom_gpuhashjoin *ghjoin
+			= gpuhashjoin_load_next_outer(ghjs, result_format);
 		if (!ghjoin)
 			break;	/* outer scan reached to end of the relation */
 
@@ -2692,7 +2701,8 @@ gpuhashjoin_exec(CustomPlanState *node)
 		/*
 		 * Fetch a next hashjoin chunk already processed
 		 */
-		ghjoin = pgstrom_fetch_gpuhashjoin(ghjs, &ghjs->curr_recheck);
+		ghjoin = pgstrom_fetch_gpuhashjoin(ghjs, &ghjs->curr_recheck,
+										   KDS_FORMAT_TUPSLOT);
 		if (!ghjoin)
 			break;
 		ghjs->curr_ghjoin = ghjoin;
@@ -2733,7 +2743,8 @@ gpuhashjoin_exec_multi(CustomPlanState *node)
 		cl_uint		nitems;
 		cl_uint		i, j;
 
-		ghjoin = pgstrom_fetch_gpuhashjoin(ghjs, &needs_rechecks);
+		ghjoin = pgstrom_fetch_gpuhashjoin(ghjs, &needs_rechecks,
+										   KDS_FORMAT_ROW_FLAT);
 		if (!ghjoin)
 			break;
 		if (needs_rechecks)
@@ -2747,7 +2758,7 @@ gpuhashjoin_exec_multi(CustomPlanState *node)
 		Assert(pds->kds->format == KDS_FORMAT_ROW ||
 			   pds->kds->format == KDS_FORMAT_ROW_FLAT);
 		Assert(pds_dest->kds->format == KDS_FORMAT_ROW_FLAT);
-		pds_dest->ktoast = pgstrom_get_data_store(pds);
+		//pds_dest->ktoast = pgstrom_get_data_store(pds);
 
 		/*
 		 * Make a bulk-slot according to the result
@@ -2791,11 +2802,15 @@ gpuhashjoin_exec_multi(CustomPlanState *node)
 
 	/* must provide our own instrumentation support */
     if (node->ps.instrument)
-        InstrStopNode(node->ps.instrument,
-                      bulk->nvalids < 0 ?
-                      (double) bulk->pds->kds->nitems :
-                      (double) bulk->nvalids);
-
+	{
+		if (!bulk)
+			InstrStopNode(node->ps.instrument, 0.0);
+		else
+			InstrStopNode(node->ps.instrument,
+						  bulk->nvalids < 0 ?
+						  (double) bulk->pds->kds->nitems :
+						  (double) bulk->nvalids);
+	}
 	return (Node *) bulk;
 }
 
@@ -2940,6 +2955,8 @@ gpuhashjoin_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 		depth++;
 	}
 	es->verbose = verbose_saved;
+
+	ExplainPropertyText("Bulkload", ghjs->outer_bulk ? "On" : "Off", es);
 
 	show_device_kernel(ghjs->dprog_key, es);
 
@@ -3986,6 +4003,8 @@ clserv_respond_hashjoin(cl_event event, cl_int ev_status, void *private)
 		cl_uint				ncols = old_kds->ncols;
 		cl_uint				nitems = old_kds->nitems;
 		Size				required;
+
+		clserv_log("GHJ input again");
 
 		/* expand kern_data_store */
 		required = (STROMALIGN(offsetof(kern_data_store, colmeta[ncols])) +

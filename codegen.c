@@ -1660,8 +1660,11 @@ pgstrom_codegen_var_declarations(codegen_context *context)
 /*
  * pgstrom_codegen_bulk_var_declarations
  *
- *
- *
+ * It adds variable references on bulk loading. Note that this routine
+ * assumes varattno points correct (pseudo) attribute number, so we may
+ * needs to revise the design in the future version.
+ * Right now, only GpuPreAgg can have bulk-loading from GpuHashJoin,
+ * and it will be added all query-planning stuff was done.
  */
 char *
 pgstrom_codegen_bulk_var_declarations(codegen_context *context,
@@ -1701,7 +1704,7 @@ pgstrom_codegen_bulk_var_declarations(codegen_context *context,
 				dtype->type_name,
 				context->kds_label,
 				context->ktoast_label,
-				outer_var->varoattno - 1,
+				outer_var->varattno - 1,
 				context->kds_index_label);
 		}
 		else

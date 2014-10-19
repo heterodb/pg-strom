@@ -283,8 +283,8 @@ static void
 gpupreagg_projection(__private cl_int *errcode,
 					 __global kern_parambuf *kparams,
 					 __global kern_data_store *kds_in,
-					 __global kern_data_store *kds_out,
-					 __global kern_toastbuf *ktoast,
+					 __global kern_data_store *kds_src,
+					 __global void *ktoast,
 					 size_t rowidx_in,
 					 size_t rowidx_out);
 
@@ -508,8 +508,7 @@ gpupreagg_data_move(__private cl_int *errcode,
 __kernel void
 gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 					  __global kern_data_store *kds_in,
-					  __global kern_data_store *kds_out,
-					  __global kern_toastbuf *ktoast,
+					  __global kern_data_store *kds_src,
 					  KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
 	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
@@ -535,18 +534,18 @@ gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 									  LOCAL_WORKMEM,
 									  &nitems);
 
-	/* Allocation of the result slot on the kds_out. */
+	/* Allocation of the result slot on the kds_src. */
 	if (get_local_id(0) == 0)
 	{
 		if (nitems > 0)
-			base = atomic_add(&kds_out->nitems, nitems);
+			base = atomic_add(&kds_src->nitems, nitems);
 		else
 			base = 0;
 	}
 	barrier(CLK_LOCAL_MEM_FENCE);
 
 	/* out of range check -- usually, should not happen */
-	if (base + nitems > kds_out->nrooms)
+	if (base + nitems > kds_src->nrooms)
 	{
 		errcode = StromError_DataStoreNoSpace;
 		goto out;
@@ -557,9 +556,11 @@ gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 	{
 		gpupreagg_projection(&errcode,
 							 kparams,
-							 kds_in, kds_out, ktoast,
+							 kds_in,			/* input kds */
+							 kds_src,			/* source of reduction kds */
+							 NULL,				/* never use toast */
 							 kds_index,			/* rowidx of kds_in */
-							 base + offset);	/* rowidx of kds_out */
+							 base + offset);	/* rowidx of kds_src */
 	}
 out:
 	/* write-back execution status into host-side */

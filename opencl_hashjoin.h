@@ -563,7 +563,7 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 
 		/* build a heap-tuple */
 		htup = (__global HeapTupleHeaderData *)
-			((__global char *)kds + htup_offset);
+			((__global char *)kds_dest + htup_offset);
 
 		SET_VARSIZE(&htup->t_choice.t_datum, required);
 		htup->t_choice.t_datum.datum_typmod = kds_dest->tdtypmod;
@@ -573,10 +573,11 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 		htup->t_ctid.ip_blkid.bi_lo = 0;
 		htup->t_ctid.ip_posid = 0;
 
-		htup->t_infomask2 = (ncols & ~HEAP_NATTS_MASK);
+		htup->t_infomask2 = (ncols & HEAP_NATTS_MASK);
 		htup->t_infomask = 0;
 		memset(htup->t_bits, 0, bitmaplen(ncols));
-		htup->t_hoff = curr = t_hoff;
+		htup->t_hoff = t_hoff;
+		curr = t_hoff;
 
 		for (i=0; i < ncols; i++)
 		{
@@ -609,9 +610,33 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 			{
 				if (cmeta.attlen > 0)
 				{
+					__global char *dest;
+
 					while (TYPEALIGN(cmeta.attalign, curr) != curr)
 						((__global char *)htup)[curr++] = 0;
-					memcpy((__global char *)htup + curr, datum, cmeta.attlen);
+					dest = (__global char *)htup + curr;
+					switch (cmeta.attlen)
+					{
+						case sizeof(cl_char):
+							*((__global cl_char *) dest)
+								= *((__global cl_char *) datum);
+							break;
+						case sizeof(cl_short):
+							*((__global cl_short *) dest)
+								= *((__global cl_short *) datum);
+							break;
+						case sizeof(cl_int):
+							*((__global cl_int *) dest)
+							  = *((__global cl_int *) datum);
+							break;
+						case sizeof(cl_long):
+							*((__global cl_long *) dest)
+							  = *((__global cl_long *) datum);
+							break;
+						default:
+							memcpy(dest, datum, cmeta.attlen);
+							break;
+					}
 					curr += cmeta.attlen;
 				}
 				else

@@ -352,6 +352,25 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 
 		return true;
 	}
+	/* in case of row-flat-store */
+	if (kds->format == KDS_FORMAT_ROW_FLAT)
+	{
+		TupleDesc		tupdesc = slot->tts_tupleDescriptor;
+		kern_rowitem   *ritem = KERN_DATA_STORE_ROWITEM(kds, row_index);
+		HeapTupleHeader	htup;
+
+		Assert(ritem->htup_offset < kds->length);
+		htup = (HeapTupleHeader)((char *)kds + ritem->htup_offset);
+
+		memset(tuple, 0, sizeof(HeapTupleData));
+		tuple->t_data = htup;
+		heap_deform_tuple(tuple, tupdesc,
+						  slot->tts_values,
+						  slot->tts_isnull);
+		ExecStoreVirtualTuple(slot);
+
+		return true;
+	}
 	/* in case of tuple-slot format */
 	if (kds->format == KDS_FORMAT_TUPSLOT)
 	{
@@ -490,6 +509,7 @@ init_kern_data_store(kern_data_store *kds,
 
 	kds->hostptr = (hostptr_t) &kds->hostptr;
 	kds->length = length;
+	kds->usage = 0;
 	kds->ncols = tupdesc->natts;
 	kds->nitems = 0;
 	kds->nrooms = nrooms;
@@ -1305,8 +1325,8 @@ void
 pgstrom_dump_data_store(pgstrom_data_store *pds)
 {
 	kern_data_store	   *kds = pds->kds;
-	kern_blkitem	   *bitem;
-	int					i;
+	StringInfoData		buf;
+	int					i, j, k;
 
 #define PDS_DUMP(...)							\
 	do {										\
@@ -1316,11 +1336,13 @@ pgstrom_dump_data_store(pgstrom_data_store *pds)
 			elog(INFO, __VA_ARGS__);			\
 	} while (0)
 
+	initStringInfo(&buf);
 	PDS_DUMP("pds {refcnt=%d kds=%p ktoast=%p}",
 			 pds->refcnt, pds->kds, pds->ktoast);
 	PDS_DUMP("kds (%s) {length=%u ncols=%u nitems=%u nrooms=%u "
 			 "nblocks=%u maxblocks=%u}",
 			 kds->format == KDS_FORMAT_ROW ? "row-store" :
+			 kds->format == KDS_FORMAT_ROW_FLAT ? "row-flat" :
 			 kds->format == KDS_FORMAT_COLUMN ? "column-store" :
 			 kds->format == KDS_FORMAT_TUPSLOT ? "tuple-slot" : "unknown",
 			 kds->length, kds->ncols, kds->nitems, kds->nrooms,
@@ -1349,11 +1371,75 @@ pgstrom_dump_data_store(pgstrom_data_store *pds)
 		}
 	}
 
-	bitem = KERN_DATA_STORE_BLKITEM(kds, 0);
-	for (i=0; i < kds->nblocks; i++)
+	if (kds->format == KDS_FORMAT_ROW_FLAT)
 	{
-		PDS_DUMP("block[%d] {buffer=%u page=%p}",
-				 i, bitem[i].buffer, bitem[i].page);
+		for (i=0; i < kds->nitems; i++)
+		{
+			kern_rowitem *ritem = KERN_DATA_STORE_ROWITEM(kds, i);
+			HeapTupleHeaderData *htup =
+				(HeapTupleHeaderData *)((char *)kds + ritem->htup_offset);
+			cl_int		natts = (htup->t_infomask2 & HEAP_NATTS_MASK);
+			cl_int		curr = htup->t_hoff;
+			cl_int		vl_len;
+			char	   *datum;
+
+			resetStringInfo(&buf);
+			appendStringInfo(&buf, "htup[%d] @%u natts=%u {",
+							 i, ritem->htup_offset, natts);
+			for (j=0; j < kds->ncols; j++)
+			{
+				if (j > 0)
+					appendStringInfo(&buf, ", ");
+				if ((htup->t_infomask & HEAP_HASNULL) != 0 &&
+					att_isnull(j, htup->t_bits))
+					appendStringInfo(&buf, "null");
+				else if (kds->colmeta[j].attlen > 0)
+				{
+					curr = TYPEALIGN(kds->colmeta[j].attalign, curr);
+					datum = (char *)htup + curr;
+
+					if (kds->colmeta[j].attlen == sizeof(cl_char))
+						appendStringInfo(&buf, "%02x", *((cl_char *)datum));
+					else if (kds->colmeta[j].attlen == sizeof(cl_short))
+						appendStringInfo(&buf, "%04x", *((cl_short *)datum));
+					else if (kds->colmeta[j].attlen == sizeof(cl_int))
+						appendStringInfo(&buf, "%08x", *((cl_int *)datum));
+					else if (kds->colmeta[j].attlen == sizeof(cl_long))
+						appendStringInfo(&buf, "%016lx", *((cl_long *)datum));
+					else
+					{
+						for (k=0; k < kds->colmeta[j].attlen; k++)
+							appendStringInfo(&buf, "%02x",
+											 k > 0 ? " " : "",
+											 datum[k]);
+					}
+					curr += kds->colmeta[j].attlen;
+				}
+				else
+				{
+					if (!VARATT_NOT_PAD_BYTE((char *)htup + curr))
+						curr = TYPEALIGN(kds->colmeta[j].attalign, curr);
+					datum = (char *)htup + curr;
+					vl_len = VARSIZE_ANY_EXHDR(datum);
+					appendBinaryStringInfo(&buf, VARDATA_ANY(datum), vl_len);
+					curr += vl_len;
+				}
+			}
+			appendStringInfo(&buf, "}");
+			PDS_DUMP("%s", buf.data);
+		}
+		pfree(buf.data);
+	}
+
+	if (false)
+	{
+		kern_blkitem	   *bitem = KERN_DATA_STORE_BLKITEM(kds, 0);
+
+		for (i=0; i < kds->nblocks; i++)
+		{
+			PDS_DUMP("block[%d] {buffer=%u page=%p}",
+					 i, bitem[i].buffer, bitem[i].page);
+		}
 	}
 #undef PDS_DUMP
 }

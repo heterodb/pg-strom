@@ -11,10 +11,10 @@ CREATE TABLE t2 (bid int, btext text);
 CREATE TABLE t3 (cid int, ctext text);
 CREATE TABLE t4 (did int, dtext text);
 
-INSERT INTO t1 (SELECT x, md5((x+1)::text) FROM generate_series(1,40000) x);
-INSERT INTO t2 (SELECT x, md5((x+2)::text) FROM generate_series(1,40000) x);
-INSERT INTO t3 (SELECT x, md5((x+3)::text) FROM generate_series(1,40000) x);
-INSERT INTO t4 (SELECT x, md5((x+4)::text) FROM generate_series(1,40000) x);
+INSERT INTO t1 (SELECT x, md5((x+1)::text) FROM generate_series(1,4000) x);
+INSERT INTO t2 (SELECT x, md5((x+2)::text) FROM generate_series(1,4000) x);
+INSERT INTO t3 (SELECT x, md5((x+3)::text) FROM generate_series(1,4000) x);
+INSERT INTO t4 (SELECT x, md5((x+4)::text) FROM generate_series(1,4000) x);
 INSERT INTO t0 (SELECT x, CASE floor(random()*12)
                           WHEN  0 THEN 'aaa'
                           WHEN  1 THEN 'bbb'
@@ -35,4 +35,4 @@ INSERT INTO t0 (SELECT x, CASE floor(random()*12)
                        floor(random() * 40000 + 1),
                        random() * 100,
                        random() * 100,
-                       md5(x::text) FROM generate_series(1,20000000) x);
+                       md5(x::text) FROM generate_series(1,20000) x);

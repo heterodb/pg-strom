@@ -886,9 +886,8 @@ kern_get_tuple_rsflat(__global kern_data_store *kds, cl_uint rowidx)
 	/* simple sanity check */
 	if (kritem->htup_offset >= kds->length)
 		return NULL;
-
-	return ((__global HeapTupleHeaderData *)
-			(__global char *)kds + kritem->htup_offset);
+	return (__global HeapTupleHeaderData *)
+		((__global char *)kds + kritem->htup_offset);
 }
 
 static inline __global void *
@@ -1096,7 +1095,7 @@ memset(__global void *s, int c, size_t n)
 	return s;
 }
 
-#if 0
+#if 1
 static __global void *
 memcpy(__global void *__dst, __global const void *__src, size_t len)
 {

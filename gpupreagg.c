@@ -1148,8 +1148,10 @@ gpupreagg_codegen_keycomp(GpuPreAggPlan *gpreagg, codegen_context *context)
 			&body,
 			"  xkeyval_%u = pg_%s_vref(kds,ktoast,errcode,%u,x_index);\n"
 			"  ykeyval_%u = pg_%s_vref(kds,ktoast,errcode,%u,y_index);\n"
+			//"printf(\"gid=%%zu xnull=%%d ynull=%%d\\n\", get_global_id(0), xkeyval_1.isnull, ykeyval_1.isnull);\n"
 			"  if (!xkeyval_%u.isnull && !ykeyval_%u.isnull)\n"
 			"  {\n"
+			//"printf(\"gid=%%zu x=%%d y=%%d\\n\", get_global_id(0), xkeyval_1.value, ykeyval_1.value);\n"
 			"    comp = pgfn_%s(errcode, xkeyval_%u, ykeyval_%u);\n"
 			"    if (!comp.isnull && comp.value != 0)\n"
 			"      return comp.value;\n"
@@ -1393,8 +1395,7 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
  * static void
  * gpupreagg_projection(__private cl_int *errcode,
  *                      __global kern_data_store *kds_in,
- *                      __global kern_data_store *kds_out,
- *                      __global kern_toastbuf *ktoast,
+ *                      __global kern_data_store *kds_src,
  *                      size_t kds_index);
  */
 static char *
@@ -1444,7 +1445,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 							 "  /* projection for resource %u */\n",
 							 tle->resno - 1);
 			appendStringInfo(&body,
-							 "  pg_%s_vstore(kds_out,ktoast,errcode,\n"
+							 "  pg_%s_vstore(kds_src,ktoast,errcode,\n"
 							 "               %u,rowidx_out,KVAR_%u);\n",
 							 dtype->type_name,
 							 tle->resno - 1,
@@ -1498,7 +1499,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 				else
 					appendStringInfo(&body, "  temp_int4.value = 1;\n");
 				appendStringInfo(&body,
-								 "  pg_%s_vstore(kds_out,ktoast,errcode,\n"
+								 "  pg_%s_vstore(kds_src,ktoast,errcode,\n"
 								 "               %u,rowidx_out,temp_int4);\n",
 								 dtype->type_name, tle->resno - 1);
 			}
@@ -1519,7 +1520,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 				Assert(dtype != NULL);
 
 				appendStringInfo(&body,
-								 "  pg_%s_vstore(kds_out,ktoast,errcode,\n"
+								 "  pg_%s_vstore(kds_src,ktoast,errcode,\n"
 								 "               %u,rowidx_out,%s);\n",
 								 dtype->type_name,
 								 tle->resno - 1,
@@ -1540,7 +1541,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 															context));
 				appendStringInfo(
 					&body,
-					"  pg_%s_vstore(kds_out,ktoast,errcode,\n"
+					"  pg_%s_vstore(kds_src,ktoast,errcode,\n"
 					"               %u,rowidx_out,\n"
 					"               pgfn_%s(errcode, temp_float8x,\n"
 					"                                temp_float8x));\n",
@@ -1642,7 +1643,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 				dtype = pgstrom_devtype_lookup_and_track(FLOAT8OID, context);
 				appendStringInfo(
 					&body,
-					"  pg_%s_vstore(kds_out, ktoast, errcode,\n"
+					"  pg_%s_vstore(kds_src, ktoast, errcode,\n"
 					"               %u,rowidx_out, temp_float8x);\n",
 					dtype->type_name,
 					tle->resno - 1);
@@ -1731,8 +1732,8 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 		"gpupreagg_projection(__private cl_int *errcode,\n"
 		"            __global kern_parambuf *kparams,\n"
 		"            __global kern_data_store *kds_in,\n"
-		"            __global kern_data_store *kds_out,\n"
-		"            __global kern_toastbuf *ktoast,\n"
+		"            __global kern_data_store *kds_src,\n"
+		"            __global void *ktoast,\n"
 		"            size_t rowidx_in, size_t rowidx_out)\n"
 		"{\n"
 		"%s"
@@ -2560,6 +2561,8 @@ gpupreagg_exec(CustomPlanState *node)
 			if (!gpreagg)
 				break;	/* outer scan reached to end of the relation */
 
+			//pgstrom_dump_data_store(gpreagg->pds);
+
 			if (!pgstrom_enqueue_message(&gpreagg->msg))
 			{
 				pgstrom_put_message(&gpreagg->msg);
@@ -2686,7 +2689,7 @@ gpupreagg_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 
 	ExplainPropertyText("Bulkload",
-						gpas->outer_bulkload ? "on" : "off", es);
+						gpas->outer_bulkload ? "On" : "Off", es);
 	show_device_kernel(gpas->dprog_key, es);
 	if (es->analyze && gpas->pfm.enabled)
 		pgstrom_perfmon_explain(&gpas->pfm, es);
@@ -2918,7 +2921,7 @@ typedef struct
 	cl_mem				m_kds_in;	/* kds of input relation */
 	cl_mem				m_kds_src;	/* kds of aggregation source */
 	cl_mem				m_kds_dst;	/* kds of aggregation results */
-	cl_mem				m_ktoast;
+	//cl_mem				m_ktoast;
 	cl_uint				ev_kern_prep;	/* event index of kern_prep */
 	cl_uint				ev_kern_pagg;	/* event index of kern_pagg */
 	cl_uint				ev_index;
@@ -3091,8 +3094,8 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 		clReleaseMemObject(clgpa->m_kds_src);
 	if (clgpa->m_kds_dst)
 		clReleaseMemObject(clgpa->m_kds_dst);
-	if (clgpa->m_ktoast)
-		clReleaseMemObject(clgpa->m_ktoast);
+	//if (clgpa->m_ktoast)
+	//	clReleaseMemObject(clgpa->m_ktoast);
 	if (clgpa->kern_prep)
 		clReleaseKernel(clgpa->kern_prep);
 	if (clgpa->kern_set_rindex)
@@ -3124,7 +3127,7 @@ clserv_launch_preagg_preparation(clstate_gpupreagg *clgpa, cl_uint nitems)
 	/* __kernel void
 	 * gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 	 *                       __global kern_data_store *kds_in,
-	 *                       __global kern_data_store *kds_out,
+	 *                       __global kern_data_store *kds_src,
 	 *                       __global kern_toastbuf *ktoast,
 	 *                       __local void *local_memory)
 	 */
@@ -3170,7 +3173,7 @@ clserv_launch_preagg_preparation(clstate_gpupreagg *clgpa, cl_uint nitems)
 	}
 
 	rc = clSetKernelArg(clgpa->kern_prep,
-						2,		/* __global kern_data_store *kds_out */
+						2,		/* __global kern_data_store *kds_src */
 						sizeof(cl_mem),
 						&clgpa->m_kds_src);
 	if (rc != CL_SUCCESS)
@@ -3178,9 +3181,9 @@ clserv_launch_preagg_preparation(clstate_gpupreagg *clgpa, cl_uint nitems)
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
 		return rc;
 	}
-
+#if 0
 	rc = clSetKernelArg(clgpa->kern_prep,
-						3,		/* __global kern_data_store *kds_out */
+						3,		/* __global kern_data_store *ktoast */
 						sizeof(cl_mem),
 						&clgpa->m_ktoast);
 	if (rc != CL_SUCCESS)
@@ -3188,9 +3191,9 @@ clserv_launch_preagg_preparation(clstate_gpupreagg *clgpa, cl_uint nitems)
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
 		return rc;
 	}
-
+#endif
 	rc = clSetKernelArg(clgpa->kern_prep,
-						4,
+						3,
 						sizeof(cl_uint) * lwork_sz,
 						NULL);
 	if (rc != CL_SUCCESS)
@@ -3361,7 +3364,7 @@ clserv_launch_bitonic_local(clstate_gpupreagg *clgpa,
 	rc = clSetKernelArg(kernel,
 						2,		/* __global kern_toastbuf *ktoast */
 						sizeof(cl_mem),
-						&clgpa->m_ktoast);
+						&clgpa->m_kds_in);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
@@ -3478,7 +3481,7 @@ clserv_launch_bitonic_step(clstate_gpupreagg *clgpa,
 	rc = clSetKernelArg(kernel,
 						3,		/* __global kern_toastbuf *ktoast */
 						sizeof(cl_mem),
-						&clgpa->m_ktoast);
+						&clgpa->m_kds_in);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
@@ -3562,7 +3565,7 @@ clserv_launch_bitonic_merge(clstate_gpupreagg *clgpa,
 	rc = clSetKernelArg(kernel,
 						2,		/* __global kern_toastbuf *ktoast */
 						sizeof(cl_mem),
-						&clgpa->m_ktoast);
+						&clgpa->m_kds_in);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
@@ -3670,7 +3673,7 @@ clserv_launch_preagg_reduction(clstate_gpupreagg *clgpa, cl_uint nvalids)
 	rc = clSetKernelArg(clgpa->kern_pagg,
 						3,		/* __global kern_toastbuf *ktoast */
 						sizeof(cl_mem),
-						&clgpa->m_ktoast);
+						&clgpa->m_kds_in);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
@@ -3732,7 +3735,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	 * state object of gpupreagg
 	 */
 	clgpa = calloc(1, offsetof(clstate_gpupreagg,
-							   events[50 + 10 * kds->nblocks]));
+							   events[50000 + 10 * kds->nblocks]));
 	if (!clgpa)
 	{
 		rc = CL_OUT_OF_HOST_MEMORY;
@@ -3794,10 +3797,10 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	/* allocation of m_gpreagg */
 	length = KERN_GPUPREAGG_BUFFER_SIZE(&gpreagg->kern);
 	clgpa->m_gpreagg = clCreateBuffer(opencl_context,
-										CL_MEM_READ_WRITE,
-										length,
-										NULL,
-										&rc);
+									  CL_MEM_READ_WRITE,
+									  length,
+									  NULL,
+									  &rc);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
@@ -3826,7 +3829,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
 		goto error;
 	}
-	/* allocation of kds_out */
+	/* allocation of kds_src */
 	clgpa->m_kds_dst = clCreateBuffer(opencl_context,
 									  CL_MEM_READ_WRITE,
 									  KERN_DATA_STORE_LENGTH(kds_dest),
@@ -3837,38 +3840,9 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
 		goto error;
 	}
-
-	if (pds->ktoast)
-	{
-		pgstrom_data_store *ktoast = pds->ktoast;
-
-		clgpa->m_ktoast = clCreateBuffer(opencl_context,
-                                         CL_MEM_READ_WRITE,
-										 KERN_DATA_STORE_LENGTH(ktoast->kds),
-										 NULL,
-										 &rc);
-		if (rc != CL_SUCCESS)
-		{
-			clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-			goto error;
-		}
-	}
-	else if (kds->format == KDS_FORMAT_ROW)
-	{
-		/* once a preparation done, kds_in shall be used as a toast buffer
-		 * of the later stage if row-format. So, we deal with ktoast as
-		 * as alias of the later stage.
-		 */
-		rc = clRetainMemObject(clgpa->m_kds_in);
-		if (rc != CL_SUCCESS)
-		{
-			clserv_log("failed on clRetainMemObject: %s", opencl_strerror(rc));
-			goto error;
-		}
-		clgpa->m_ktoast = clgpa->m_kds_in;
-	}
-	else
-		clgpa->m_ktoast = NULL;	/* case of fixed-length only column-format */
+	Assert(kds->format == KDS_FORMAT_ROW ||
+		   kds->format == KDS_FORMAT_ROW_FLAT);
+	Assert(!pds->ktoast);
 
 	/*
 	 * Next, enqueuing DMA send requests, prior to kernel execution.
@@ -3899,7 +3873,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	rc = clserv_dmasend_data_store(pds,
 								   clgpa->kcmdq,
 								   clgpa->m_kds_in,
-								   clgpa->m_ktoast,
+								   NULL,
 								   0,
 								   NULL,
 								   &clgpa->ev_index,
@@ -4118,8 +4092,6 @@ error:
 			clReleaseMemObject(clgpa->m_kds_src);
 		if (clgpa->m_kds_dst)
 			clReleaseMemObject(clgpa->m_kds_dst);
-		if (clgpa->m_ktoast)
-			clReleaseMemObject(clgpa->m_ktoast);
 		if (clgpa->kern_prep)
 			clReleaseKernel(clgpa->kern_prep);
 		if (clgpa->kern_set_rindex)
