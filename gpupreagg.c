@@ -1097,7 +1097,7 @@ gpupreagg_rewrite_expr(Agg *agg,
  * static cl_int
  * gpupreagg_keycomp(__private cl_int *errcode,
  *                   __global kern_data_store *kds,
- *                   __global kern_toastbuf *ktoast,
+ *                   __global kern_data_store *ktoast,
  *                   size_t x_index,
  *                   size_t y_index);
  */
@@ -1184,7 +1184,7 @@ gpupreagg_codegen_keycomp(GpuPreAggPlan *gpreagg, codegen_context *context)
 					 "static cl_int\n"
 					 "gpupreagg_keycomp(__private int *errcode,\n"
 					 "                  __global kern_data_store *kds,\n"
-					 "                  __global kern_toastbuf *ktoast,\n"
+					 "                  __global kern_data_store *ktoast,\n"
 					 "                  size_t x_index,\n"
 					 "                  size_t y_index)\n"
 					 "{\n"
@@ -1793,38 +1793,14 @@ gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 
 	/* OK, add type/function declarations */
 	initStringInfo(&str);
-	appendStringInfo(&str, "%s", pgstrom_codegen_type_declarations(context));
-	foreach (cell, context->type_defs)
-	{
-		devtype_info   *dtype = lfirst(cell);
-
-		/* pg_xxx_vstore() of int2/int4/int8 are declared as
-		 * a built-in data types; so should not be redefined.
-		 */
-		if (dtype->type_oid == INT2OID ||
-			dtype->type_oid == INT4OID ||
-			dtype->type_oid == INT8OID)
-			continue;
-
-		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
-		{
-			appendStringInfo(&str,
-							 "STROMCL_VARLENA_VARSTORE_TEMPLATE(%s);\n",
-							 dtype->type_name);
-		}
-		else
-		{
-			appendStringInfo(&str,
-							 "STROMCL_SIMPLE_VARSTORE_TEMPLATE(%s,%s);\n",
-							 dtype->type_name, dtype->type_base);
-		}
-	}
-	appendStringInfo(&str, "\n%s",
-					 pgstrom_codegen_func_declarations(context));
 	appendStringInfo(&str,
+					 "%s\n"		/* type declarations */
+					 "%s\n"		/* function declarations */
 					 "%s\n"		/* gpupreagg_keycomp() */
 					 "%s\n"		/* gpupreagg_aggcalc() */
 					 "%s\n",	/* gpupreagg_projection() */
+					 pgstrom_codegen_type_declarations(context),
+					 pgstrom_codegen_func_declarations(context),
 					 fn_keycomp,
 					 fn_aggcalc,
 					 fn_projection);
@@ -3128,7 +3104,7 @@ clserv_launch_preagg_preparation(clstate_gpupreagg *clgpa, cl_uint nitems)
 	 * gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 	 *                       __global kern_data_store *kds_in,
 	 *                       __global kern_data_store *kds_src,
-	 *                       __global kern_toastbuf *ktoast,
+	 *                       __global kern_data_store *ktoast,
 	 *                       __local void *local_memory)
 	 */
 	clgpa->kern_prep = clCreateKernel(clgpa->program,
@@ -3328,7 +3304,7 @@ clserv_launch_bitonic_local(clstate_gpupreagg *clgpa,
 	/* __kernel void
 	 * gpupreagg_bitonic_local(__global kern_gpupreagg *kgpreagg,
 	 *                         __global kern_data_store *kds,
-	 *                         __global kern_toastbuf *ktoast,
+	 *                         __global kern_data_store *ktoast,
 	 *                         __local void *local_memory)
 	 */
 	kernel = clCreateKernel(clgpa->program,
@@ -3362,7 +3338,7 @@ clserv_launch_bitonic_local(clstate_gpupreagg *clgpa,
 	}
 
 	rc = clSetKernelArg(kernel,
-						2,		/* __global kern_toastbuf *ktoast */
+						2,		/* __global kern_data_store *ktoast */
 						sizeof(cl_mem),
 						&clgpa->m_kds_in);
 	if (rc != CL_SUCCESS)
@@ -3416,7 +3392,7 @@ clserv_launch_bitonic_step(clstate_gpupreagg *clgpa,
 	 * gpupreagg_bitonic_step(__global kern_gpupreagg *kgpreagg,
 	 *                        cl_int bitonic_unitsz,
 	 *                        __global kern_data_store *kds,
-	 *                        __global kern_toastbuf *ktoast,
+	 *                        __global kern_data_store *ktoast,
 	 *                        __local void *local_memory)
 	 */
 	kernel = clCreateKernel(clgpa->program,
@@ -3479,7 +3455,7 @@ clserv_launch_bitonic_step(clstate_gpupreagg *clgpa,
 	}
 
 	rc = clSetKernelArg(kernel,
-						3,		/* __global kern_toastbuf *ktoast */
+						3,		/* __global kern_data_store *ktoast */
 						sizeof(cl_mem),
 						&clgpa->m_kds_in);
 	if (rc != CL_SUCCESS)
@@ -3529,7 +3505,7 @@ clserv_launch_bitonic_merge(clstate_gpupreagg *clgpa,
 	/* __kernel void
 	 * gpupreagg_bitonic_merge(__global kern_gpupreagg *kgpreagg,
 	 *                         __global kern_data_store *kds,
-	 *                         __global kern_toastbuf *ktoast,
+	 *                         __global kern_data_store *ktoast,
 	 *                         __local void *local_memory)
 	 */
 	kernel = clCreateKernel(clgpa->program,
@@ -3563,7 +3539,7 @@ clserv_launch_bitonic_merge(clstate_gpupreagg *clgpa,
 	}
 
 	rc = clSetKernelArg(kernel,
-						2,		/* __global kern_toastbuf *ktoast */
+						2,		/* __global kern_data_store *ktoast */
 						sizeof(cl_mem),
 						&clgpa->m_kds_in);
 	if (rc != CL_SUCCESS)
@@ -3613,7 +3589,7 @@ clserv_launch_preagg_reduction(clstate_gpupreagg *clgpa, cl_uint nvalids)
 	 * gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 	 *                     __global kern_data_store *kds_src,
 	 *                     __global kern_data_store *kds_dst,
-	 *                     __global kern_toastbuf *ktoast,
+	 *                     __global kern_data_store *ktoast,
 	 *                     __local void *local_memory)
 	 */
 	clgpa->kern_pagg = clCreateKernel(clgpa->program,
@@ -3671,7 +3647,7 @@ clserv_launch_preagg_reduction(clstate_gpupreagg *clgpa, cl_uint nvalids)
 	}
 
 	rc = clSetKernelArg(clgpa->kern_pagg,
-						3,		/* __global kern_toastbuf *ktoast */
+						3,		/* __global kern_data_store *ktoast */
 						sizeof(cl_mem),
 						&clgpa->m_kds_in);
 	if (rc != CL_SUCCESS)

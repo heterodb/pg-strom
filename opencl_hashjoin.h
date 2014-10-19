@@ -258,7 +258,7 @@ gpuhashjoin_execute(__private cl_int *errcode,
 					__global kern_parambuf *kparams,
 					__global kern_multihash *kmhash,
 					__global kern_data_store *kds,
-					__global kern_toastbuf *ktoast,
+					__global kern_data_store *ktoast,
 					size_t kds_index,
 					__global cl_int *rbuffer);
 
@@ -278,7 +278,7 @@ __kernel void
 kern_gpuhashjoin_main(__global kern_hashjoin *khashjoin,
 					  __global kern_multihash *kmhash,
 					  __global kern_data_store *kds,
-					  __global kern_toastbuf *ktoast,
+					  __global kern_data_store *ktoast,
 					  __global kern_row_map   *krowmap,
 					  KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
@@ -411,7 +411,7 @@ __kernel void
 kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 								__global kern_multihash *kmhash,	/* in */
 								__global kern_data_store *kds,		/* in */
-								__global kern_toastbuf *ktoast,	/* in */
+								__global kern_data_store *ktoast,	/* in */
 								__global kern_data_store *kds_dest,/* out */
 								KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
@@ -665,7 +665,7 @@ __kernel void
 kern_gpuhashjoin_projection_slot(__global kern_hashjoin *khashjoin,	/* in */
 								 __global kern_multihash *kmhash,	/* in */
 								 __global kern_data_store *kds,		/* in */
-								 __global kern_toastbuf *ktoast,	/* in */
+								 __global kern_data_store *ktoast,	/* in */
 								 __global kern_data_store *kds_dest, /* out */
 								 KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {

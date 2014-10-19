@@ -112,6 +112,7 @@ typedef uintptr_t	hostptr_t;
 #define StromError_DataStoreNoSpace		301	/* No Space in Row/Column Store */
 #define StromError_DataStoreOutOfRange	302	/* Out of range in Data Store */
 #define StromError_DataStoreReCheck		303	/* Row/Column Store be rechecked */
+#define StromError_SanityCheckViolation	999	/* SanityCheckViolation */
 
 /* significant error; that abort transaction on the host code */
 #define StromErrorIsSignificant(errcode)	((errcode) >= 100 || (errcode) < 0)
@@ -440,19 +441,6 @@ typedef struct {
 	 STROMALIGN((kds)->length))
 
 /*
- * kern_toastbuf
- *
- * A varlena datum is represented as an offset from the head of toast-buffer,
- * and data contents are actually stored within this toast-buffer.
- */
-typedef struct {
-	hostptr_t		hostptr;/* address of ktoast on the host */
-	cl_uint			length;	/* length of toast-buffer */
-	cl_uint			usage;	/* usage of toast-buffer */
-	cl_char			data[FLEXIBLE_ARRAY_MEMBER];
-} kern_toastbuf;
-
-/*
  * kern_parambuf
  *
  * Const and Parameter buffer. It stores constant values during a particular
@@ -533,8 +521,14 @@ typedef struct {
 
 /* forward declaration of access interface to kern_data_store */
 static __global void *kern_get_datum(__global kern_data_store *kds,
-									 __global kern_toastbuf *ktoast,
+									 __global kern_data_store *ktoast,
 									 cl_uint colidx, cl_uint rowidx);
+/* forward declaration of writer interface to kern_data_store */
+static __global Datum *pg_common_vstore(__global kern_data_store *kds,
+										__global kern_data_store *ktoast,
+										__private int *errcode,
+										cl_uint colidx, cl_uint rowidx,
+										cl_bool isnull);
 
 /*
  * Template of variable classes: fixed-length referenced by value
@@ -549,7 +543,7 @@ static __global void *kern_get_datum(__global kern_data_store *kds,
 #define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)			\
 	static pg_##NAME##_t									\
 	pg_##NAME##_vref(__global kern_data_store *kds,			\
-					 __global kern_toastbuf *ktoast,		\
+					 __global kern_data_store *ktoast,		\
 					 __private int *errcode,				\
 					 cl_uint colidx,						\
 					 cl_uint rowidx)						\
@@ -566,6 +560,41 @@ static __global void *kern_get_datum(__global kern_data_store *kds,
 			result.value = *addr;							\
 		}													\
 		return result;										\
+	}
+
+#define STROMCL_SIMPLE_VARSTORE_TEMPLATE(NAME,BASE)			\
+	static void												\
+	pg_##NAME##_vstore(__global kern_data_store *kds,		\
+					   __global kern_data_store *ktoast,	\
+					   __private int *errcode,				\
+					   cl_uint colidx,						\
+					   cl_uint rowidx,						\
+					   pg_##NAME##_t datum)					\
+	{														\
+		__global Datum *daddr;								\
+		union {												\
+			cl_bool		v_cl_bool_buf;						\
+			cl_short	v_cl_short_buf;						\
+			cl_ushort	v_cl_ushort_buf;					\
+			cl_int		v_cl_int_buf;						\
+			cl_uint		v_cl_uint_buf;						\
+			cl_long		v_cl_long_buf;						\
+			cl_ulong	v_cl_ulong_buf;						\
+			cl_float	v_cl_float_buf;						\
+			cl_double	v_cl_double_buf;					\
+			Datum		v_datum;							\
+		} temp;												\
+		Datum			v_mask;								\
+		daddr = pg_common_vstore(kds, ktoast, errcode,		\
+								 colidx, rowidx,			\
+								 datum.isnull);				\
+		if (daddr)											\
+		{													\
+			temp.v_datum = 0;								\
+			temp.v_##BASE##_buf = datum.value;				\
+			v_mask = (1UL << (sizeof(BASE) * BITS_PER_BYTE - 1)); \
+			*daddr = (temp.v_datum & v_mask);				\
+		}													\
 	}
 
 #define STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)			\
@@ -617,6 +646,7 @@ static __global void *kern_get_datum(__global kern_data_store *kds,
 #define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)		\
+	STROMCL_SIMPLE_VARSTORE_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)
 
@@ -627,7 +657,7 @@ static __global void *kern_get_datum(__global kern_data_store *kds,
 /* pg_bool_t */
 #ifndef PG_BOOL_TYPE_DEFINED
 #define PG_BOOL_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(bool, bool)
+STROMCL_SIMPLE_TYPE_TEMPLATE(bool, cl_bool)
 #endif
 
 /* pg_int4_t */
@@ -905,46 +935,23 @@ kern_get_datum_rsflat(__global kern_data_store *kds,
 }
 
 static __global void *
-kern_get_datum_cs(__global kern_data_store *kds,
-				  __global kern_toastbuf *ktoast,
-				  cl_uint colidx, cl_uint rowidx)
+kern_get_datum_tupslot(__global kern_data_store *kds,
+					   __global kern_data_store *ktoast,
+					   cl_uint colidx, cl_uint rowidx)
 {
-	kern_colmeta	cmeta = kds->colmeta[colidx];
-	cl_uint			offset;
-	__global void  *addr;
+	__global Datum	   *values = KERN_DATA_STORE_VALUES(kds,rowidx);
+	__global cl_char   *isnull = KERN_DATA_STORE_ISNULL(kds,rowidx);
+	kern_colmeta		cmeta = kds->colmeta[colidx];
 
-	/* why is this column referenced? */
-	if (!cmeta.attvalid)
-		return NULL;
-
-	offset = cmeta.cs_offset;
-
-	/* elsewhere, reference to the column-array, straight-forward */
-	if (!cmeta.attnotnull)
-	{
-		if (att_isnull(rowidx, (__global char *)kds + offset))
-			return NULL;
-		offset += STROMALIGN(bitmaplen(kds->nrooms));
-	}
 	if (cmeta.attlen > 0)
-	{
-		offset += cmeta.attlen * rowidx;
-		addr = (__global void *)((__global char *)kds + offset);
-	}
-	else
-	{
-		cl_uint	vl_ofs;
+		return values + colidx;
 
-		vl_ofs = ((__global cl_uint *)
-				  ((__global char *)kds + offset))[rowidx];
-		addr = (__global void *)((__global char *)ktoast + vl_ofs);
-	}
-	return addr;
+	return (__global char *)ktoast + values[colidx];
 }
 
 static inline __global void *
 kern_get_datum(__global kern_data_store *kds,
-			   __global kern_toastbuf *ktoast,
+			   __global kern_data_store *ktoast,
 			   cl_uint colidx, cl_uint rowidx)
 {
 	/* is it out of range? */
@@ -954,10 +961,136 @@ kern_get_datum(__global kern_data_store *kds,
 		return kern_get_datum_rs(kds, colidx, rowidx);
 	if (kds->format == KDS_FORMAT_ROW_FLAT)
 		return kern_get_datum_rsflat(kds, colidx, rowidx);
-	if (kds->format == KDS_FORMAT_COLUMN)
-		return kern_get_datum_cs(kds, ktoast, colidx, rowidx);
-	/* !!KDS_FORMAT_TUPSLOT is write-only format!! */
+	if (kds->format == KDS_FORMAT_TUPSLOT)
+		return kern_get_datum_tupslot(kds,ktoast,colidx,rowidx);
+	/* TODO: put StromError_DataStoreCorruption error here */
 	return NULL;
+}
+
+/*
+ * common function to store a value on tuple-slot format
+ */
+static __global Datum *
+pg_common_vstore(__global kern_data_store *kds,
+				 __global kern_data_store *ktoast,
+				 __private int *errcode,
+				 cl_uint colidx, cl_uint rowidx,
+				 cl_bool isnull)
+{
+	kern_colmeta		cmeta;
+	__global Datum	   *slot_values;
+	__global cl_char   *slot_isnull;
+	/*
+	 * Only tuple-slot is acceptable destination format.
+	 * Only row- and row-flat are acceptable source format.
+	 */
+	if (kds->format != KDS_FORMAT_TUPSLOT ||
+		(ktoast->format != KDS_FORMAT_ROW &&
+		 ktoast->format != KDS_FORMAT_ROW_FLAT))
+	{
+		STROM_SET_ERROR(errcode, StromError_SanityCheckViolation);
+		return NULL;
+	}
+	/* out of range? */
+	if (colidx >= kds->ncols || rowidx >= kds->nrooms)
+	{
+		STROM_SET_ERROR(errcode, StromError_DataStoreOutOfRange);
+		return NULL;
+	}
+	slot_values = KERN_DATA_STORE_VALUES(kds, rowidx);
+	slot_isnull = KERN_DATA_STORE_ISNULL(kds, rowidx);
+
+	slot_isnull[colidx] = (cl_char)(isnull ? 1 : 0);
+
+	return slot_values + colidx;
+}
+
+/*
+ * kern_fixup_data_store
+ *
+ * pg_xxx_vstore() interface stores varlena datum on kern_data_store with
+ * KDS_FORMAT_TUP_SLOT format using device address space. Because tup-slot
+ * format intends to store host accessable representation, we need to fix-
+ * up pointers in the tuple store.
+ * In case of any other format, we don't need to modify the data.
+ */
+static void
+pg_fixup_tupslot_vstore(__private int *errcode,
+						__global kern_data_store *kds,
+						__global kern_data_store *ktoast,
+						cl_uint rowidx)
+{
+	__global Datum	   *values;
+	__global cl_char   *isnull;
+	cl_uint				i, ncols;
+
+	/* only tuple-slot format needs to fixup pointer values */
+	if (kds->format != KDS_FORMAT_TUPSLOT)
+		return;
+	/* out of range? */
+	if (rowidx >= kds->nitems)
+		return;
+
+	values = KERN_DATA_STORE_VALUES(kds, rowidx);
+	isnull = KERN_DATA_STORE_ISNULL(kds, rowidx);
+	ncols = kds->ncols;
+	for (i=0; i < ncols; i++)
+	{
+		kern_colmeta	cmeta = kds->colmeta[i];
+
+		/* XXX - we should check attbyval, instead of attlen.
+		 * However, no fixed-length type with attbyval=false
+		 * are not supported.
+		 */
+		if (cmeta.attlen > 0)
+			continue;
+		/* no need to care about NULL values */
+		if (isnull[i])
+		{
+			values[i] = 0;
+			continue;
+		}
+
+		if (ktoast->format == KDS_FORMAT_ROW)
+		{
+			hostptr_t	offset = values[i];
+			hostptr_t	baseline
+				= ((__global char *)KERN_DATA_STORE_ROWBLOCK(ktoast,0) -
+				   (__global char *)ktoast);
+
+			if (offset >= baseline &&
+				offset - baseline < kds->nblocks * BLCKSZ)
+			{
+				cl_uint		blkidx = (offset - baseline) / BLCKSZ;
+				__global kern_blkitem *bitem
+					= KERN_DATA_STORE_BLKITEM(kds, blkidx);
+
+				values[i] = (Datum)(bitem->page +
+									((offset - baseline) & (BLCKSZ - 1)));
+			}
+			else
+			{
+				isnull[i] = (cl_char) 1;
+				values[i] = 0;
+				STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
+			}
+		}
+		else if (ktoast->format == KDS_FORMAT_ROW_FLAT)
+		{
+			hostptr_t	offset = values[i];
+
+			if (offset < ktoast->length)
+				values[i] = (Datum)(ktoast->hostptr + offset);
+			else
+			{
+				isnull[i] = (cl_char) 1;
+				values[i] = 0;
+				STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
+			}
+		}
+		else
+			STROM_SET_ERROR(errcode, StromError_SanityCheckViolation);
+	}
 }
 
 /*
@@ -967,7 +1100,7 @@ STROMCL_SIMPLE_DATATYPE_TEMPLATE(varlena, __global varlena *)
 
 static inline pg_varlena_t
 pg_varlena_vref(__global kern_data_store *kds,
-				__global kern_toastbuf *ktoast,
+				__global kern_data_store *ktoast,
 				__private int *errcode,
 				cl_uint colidx,
 				cl_uint rowidx)
@@ -991,6 +1124,22 @@ pg_varlena_vref(__global kern_data_store *kds,
 		}
 	}
 	return result;
+}
+
+static inline void
+pg_varlena_vstore(__global kern_data_store *kds,
+				  __global kern_data_store *ktoast,
+				  __private int *errcode,
+				  cl_uint colidx,
+				  cl_uint rowidx,
+				  pg_varlena_t datum)
+{
+	__global Datum *daddr
+		= pg_common_vstore(kds, ktoast, errcode,
+						   colidx, rowidx, datum.isnull);
+	if (daddr)
+		*daddr = ((__global char *)datum.value - (__global char *)ktoast);
+	/* NOTE: pg_fixup_tupslot_vstore() shall be called later */
 }
 
 static inline pg_varlena_t
@@ -1025,18 +1174,32 @@ pg_varlena_param(__global kern_parambuf *kparams,
 
 STROMCL_SIMPLE_NULLTEST_TEMPLATE(varlena)
 
-#define STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)						\
+#define STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)			\
 	typedef pg_varlena_t	pg_##NAME##_t;
 
-#define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)						\
-	static inline pg_##NAME##_t										\
-	pg_##NAME##_vref(__global kern_data_store *kds,					\
-					 __global kern_toastbuf *ktoast,				\
-					 __private int *errcode,						\
-					 cl_uint colidx,								\
-					 cl_uint rowidx)								\
-	{																\
-		return pg_varlena_vref(kds,ktoast,errcode,colidx,rowidx);	\
+#define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)			\
+	static pg_##NAME##_t								\
+	pg_##NAME##_vref(__global kern_data_store *kds,		\
+					 __global kern_data_store *ktoast,	\
+					 __private int *errcode,			\
+					 cl_uint colidx,					\
+					 cl_uint rowidx)					\
+	{													\
+		return pg_varlena_vref(kds,ktoast,errcode,		\
+							   colidx,rowidx);			\
+	}
+
+#define STROMCL_VARLENA_VARSTORE_TEMPLATE(NAME)				\
+	static void												\
+	pg_##NAME##_vstore(__global kern_data_store *kds,		\
+					   __global kern_data_store *ktoast,	\
+					   __private int *errcode,				\
+					   cl_uint colidx,						\
+					   cl_uint rowidx,						\
+					   pg_##NAME##_t datum)					\
+	{														\
+		return pg_varlena_vstore(kds,ktoast,errcode,		\
+								 colidx,rowidx,datum);		\
 	}
 
 #define STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)						\
@@ -1065,6 +1228,7 @@ STROMCL_SIMPLE_NULLTEST_TEMPLATE(varlena)
 #define STROMCL_VARLENA_TYPE_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_VARREF_TEMPLATE(NAME)			\
+	STROMCL_VARLENA_VARSTORE_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)
 

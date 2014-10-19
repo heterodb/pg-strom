@@ -213,6 +213,8 @@ pgstrom_strerror(cl_int errcode)
 			return "row/column store has no space";
 		case StromError_DataStoreOutOfRange:
 			return "out of range in row/column store";
+		case StromError_SanityCheckViolation:
+			return "sanity check violation";
 		default:
 			snprintf(unknown_buf, sizeof(unknown_buf),
 					 "undefined strom error (code: %d)", errcode);

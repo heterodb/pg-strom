@@ -1232,7 +1232,7 @@ gpuhashjoin_codegen(PlannerInfo *root,
 		"                    __global kern_parambuf *kparams,\n"
 		"                    __global kern_multihash *kmhash,\n"
 		"                    __global kern_data_store *kds,\n"
-		"                    __global kern_toastbuf *ktoast,\n"
+		"                    __global kern_data_store *ktoast,\n"
 		"                    size_t kds_index,\n"
 		"                    __global cl_int *rbuffer)\n"
 		"{\n"
@@ -4061,7 +4061,6 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	pgstrom_data_store *pds_dest = gpuhashjoin->pds_dest;
 	kern_data_store	   *kds = pds->kds;
 	kern_data_store	   *kds_dest = pds_dest->kds;
-	//kern_toastbuf	   *ktoast_dest = gpuhashjoin->ktoast_dest;
 	clstate_gpuhashjoin	*clghj = NULL;
 	kern_row_map	   *krowmap;
 	kern_resultbuf	   *kresults;
@@ -4187,7 +4186,7 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	 * kern_gpuhashjoin_main(__global kern_hashjoin *khashjoin,
 	 *                        __global kern_multihash *kmhash,
 	 *                        __global kern_data_store *kds,
-	 *                        __global kern_toastbuf *ktoast,
+	 *                        __global kern_data_store *ktoast,
 	 *                        KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 	 */
 	clghj->kern_main = clCreateKernel(clghj->program,
@@ -4204,7 +4203,7 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	 * kern_gpuhashjoin_projection(__global kern_hashjoin *khashjoin,
 	 *                             __global kern_multihash *kmhash,
 	 *                             __global kern_data_store *kds,
-	 *                             __global kern_toastbuf *ktoast,
+	 *                             __global kern_data_store *ktoast,
 	 *                             __global kern_data_store *kds_dest,
 	 *                             KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 	 */
@@ -4254,7 +4253,7 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 		goto error;
 	}
 
-	/* buffer object of __global kern_toastbuf *ktoast, if needed */
+	/* buffer object of __global kern_data_store *ktoast, if needed */
 	if (!pds->ktoast)
 		clghj->m_ktoast = NULL;
 	else
@@ -4332,7 +4331,7 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
     gpuhashjoin->msg.pfm.num_dma_send++;
 
 	/*
-	 * Enqueue DMA send of kern_data_store and kern_toastbuf
+	 * Enqueue DMA send of kern_data_store
 	 * according to the type of data store
 	 */
 	rc = clserv_dmasend_data_store(pds,
@@ -4374,7 +4373,7 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	 * kern_gpuhashjoin_main(__global kern_hashjoin *khashjoin,
 	 *                       __global kern_multihash *kmhash,
 	 *                       __global kern_data_store *kds,
-	 *                       __global kern_toastbuf *ktoast,
+	 *                       __global kern_data_store *ktoast,
 	 *                       KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 	 */
 
@@ -4419,7 +4418,7 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	}
 
 	rc = clSetKernelArg(clghj->kern_main,
-						3,	/*  __global kern_toastbuf *ktoast */
+						3,	/*  __global kern_data_store *ktoast */
 						sizeof(cl_mem),
 						&clghj->m_ktoast);
 	if (rc != CL_SUCCESS)
@@ -4473,7 +4472,7 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	 * kern_gpuhashjoin_projection(__global kern_hashjoin *khashjoin,
 	 *                             __global kern_multihash *kmhash,
 	 *                             __global kern_data_store *kds,
-	 *                             __global kern_toastbuf *ktoast,
+	 *                             __global kern_data_store *ktoast,
 	 *                             __global kern_data_store *kds_dest,
 	 *                             KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 	 */
@@ -4518,7 +4517,7 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	}
 
 	rc = clSetKernelArg(clghj->kern_proj,
-						3,	/*  __global kern_toastbuf *ktoast */
+						3,	/*  __global kern_data_store *ktoast */
 						sizeof(cl_mem),
 						&clghj->m_ktoast);
 	if (rc != CL_SUCCESS)
