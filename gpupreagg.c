@@ -3629,6 +3629,8 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		   kds->format == KDS_FORMAT_ROW_FLAT);
 	Assert(kds_dest->format == KDS_FORMAT_TUPSLOT);
 
+	clserv_log("kds_dest=%p hostptr=%p", kds_dest, (void *)kds_dest->hostptr);
+
 	/*
 	 * state object of gpupreagg
 	 */

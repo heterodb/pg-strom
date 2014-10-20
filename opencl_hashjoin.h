@@ -458,7 +458,6 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 	 */
 	if (get_global_id(0) == 0)
 		kds_dest->nitems = kresults->nitems;
-	goto out;
 
 	/*
 	 * Step.1 - compute length of the joined tuple
@@ -568,11 +567,9 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 		SET_VARSIZE(&htup->t_choice.t_datum, required);
 		htup->t_choice.t_datum.datum_typmod = kds_dest->tdtypmod;
 		htup->t_choice.t_datum.datum_typeid = kds_dest->tdtypeid;
-
 		htup->t_ctid.ip_blkid.bi_hi = 0;
 		htup->t_ctid.ip_blkid.bi_lo = 0;
 		htup->t_ctid.ip_posid = 0;
-
 		htup->t_infomask2 = (ncols & HEAP_NATTS_MASK);
 		htup->t_infomask = 0;
 		memset(htup->t_bits, 0, bitmaplen(ncols));
@@ -616,6 +613,7 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 					while (TYPEALIGN(cmeta.attalign, curr) != curr)
 						((__global char *)htup)[curr++] = 0;
 					dest = (__global char *)htup + curr;
+
 					switch (cmeta.attlen)
 					{
 						case sizeof(cl_char):

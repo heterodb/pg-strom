@@ -325,9 +325,6 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 {
 	kern_data_store *kds = pds->kds;
 	TupleDesc	tupdesc;
-	cl_uint		cs_offset;
-	char	   *cs_values;
-	int			i, attlen;
 
 	if (row_index >= kds->nitems)
 		return false;	/* out of range */
@@ -376,6 +373,12 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 	{
 		Datum	   *tts_values = KERN_DATA_STORE_VALUES(kds, row_index);
 		cl_char	   *tts_isnull = KERN_DATA_STORE_ISNULL(kds, row_index);
+		int			i;
+
+		for (i=0; i < kds->ncols; i++)
+		{
+			elog(INFO, "(%u,%zu) isnull=%d value=%016lx", i, row_index, tts_isnull[i], tts_values[i]);
+		}
 
 		ExecClearTuple(slot);
 		memcpy(slot->tts_values, tts_values, sizeof(Datum) * kds->ncols);
@@ -389,7 +392,9 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 		 */
 		return true;
 	}
-
+	elog(ERROR, "Bug? unexpected data-store format: %d", kds->format);
+	return false;
+#if 0
 	/* otherwise, column store */
 	Assert(kds->format == KDS_FORMAT_COLUMN);
 	ExecStoreAllNullTuple(slot);
@@ -430,6 +435,7 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 		}
 	}
 	return true;
+#endif
 }
 
 void
@@ -489,7 +495,9 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 	}
 	PG_END_TRY();
 	CurrentResourceOwner = saved_owner;
-	if (pds->resowner)
+	if (pds->resowner &&
+		!pgstrom_i_am_clserv &&
+		!pgstrom_restrack_cleanup_context())
 		ResourceOwnerDelete(pds->resowner);
 	if (pds->ktoast)
 		pgstrom_release_data_store(pds->ktoast);
@@ -599,6 +607,12 @@ pgstrom_create_data_store_row_flat(TupleDesc tupdesc, Size length)
 	kds = pgstrom_shmem_alloc_alap(length, &allocated);
 	if (!kds)
 		elog(ERROR, "out of shared memory");
+	/*
+	 * NOTE: length of row-flat format has to be strictly aligned
+	 * because location of heaptuple is calculated using offset from
+	 * the buffer tail!
+	 */
+	allocated = STROMALIGN_DOWN(allocated);
 
 	/* max number of rooms according to the allocated buffer length */
 	nrooms = (STROMALIGN_DOWN(length) -

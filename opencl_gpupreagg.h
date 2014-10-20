@@ -327,20 +327,20 @@ gpupreagg_data_move(__private cl_int *errcode,
 		return;
 	}
 
-	src_values = KERN_DATA_STORE_VALUES(kds_src, 0);
-	src_isnull = KERN_DATA_STORE_ISNULL(kds_src, 0);
-	dst_values = KERN_DATA_STORE_VALUES(kds_dst, 0);
-	dst_isnull = KERN_DATA_STORE_ISNULL(kds_dst, 0);
+	src_values = KERN_DATA_STORE_VALUES(kds_src, rowidx_src);
+	src_isnull = KERN_DATA_STORE_ISNULL(kds_src, rowidx_src);
+	dst_values = KERN_DATA_STORE_VALUES(kds_dst, rowidx_dst);
+	dst_isnull = KERN_DATA_STORE_ISNULL(kds_dst, rowidx_dst);
 
-	if (src_isnull[rowidx_src])
+	if (src_isnull[colidx])
 	{
-		dst_isnull[rowidx_dst] = (cl_char) 1;
-		dst_values[rowidx_dst] = (Datum) 0;
+		dst_isnull[colidx] = (cl_char) 1;
+		dst_values[colidx] = (Datum) 0;
 	}
 	else
 	{
-		dst_isnull[rowidx_dst] = (cl_char) 0;
-		dst_values[rowidx_dst] = src_values[rowidx_src];
+		dst_isnull[colidx] = (cl_char) 0;
+		dst_values[colidx] = src_values[colidx];
 	}
 }
 
@@ -439,9 +439,9 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 	__global cl_int			*rindex  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
 	__local pagg_datum *l_data
 		= (__local pagg_datum *)STROMALIGN(LOCAL_WORKMEM);
-	__global varlena *kparam_1 = kparam_get_value(kparams, 1);
+	__global varlena   *kparam_1 = kparam_get_value(kparams, 1);
 	cl_uint	pagg_natts = VARSIZE_EXHDR(kparam_1) / sizeof(cl_uint);
-	__global cl_uint *pagg_anums = (__global cl_uint *) VARDATA(kparam_1);
+	__global cl_uint   *pagg_anums = (__global cl_uint *) VARDATA(kparam_1);
 
 	cl_int pindex		= 0;
 
@@ -518,6 +518,9 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 									cindex,
 									rindex[globalID],	/* source rowid */
 									base + groupID);	/* destination rowid */
+				/* also, fixup varlena datum if needed */
+				pg_fixup_tupslot_varlena(&errcode, kds_dst, ktoast,
+										 cindex, base + groupID);
 			}
 			continue;
 		}
@@ -564,12 +567,13 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 		if(l_data[localID].group_id != INVALID_GROUPID) {
 			gpupreagg_data_store(&l_data[localID], &errcode, kds_dst, ktoast,
 								 cindex, base + groupID);
+			/*
+			 * varlena should never appear here, so we don't need to
+			 * put pg_fixup_tupslot_varlena() here
+			 */
 		}
 		barrier(CLK_LOCAL_MEM_FENCE);
 	}
-	/* fixup tuple-slot data */
-	if(l_data[localID].group_id != INVALID_GROUPID)
-		pg_fixup_tupslot_vstore(&errcode, kds_dst, ktoast, base + groupID);
 out:
 	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
 }

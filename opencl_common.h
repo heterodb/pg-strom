@@ -789,7 +789,7 @@ typedef struct varatt_indirect
 	(VARATT_IS_1B(PTR) ? VARDATA_1B(PTR) : VARDATA_4B(PTR))
 
 #define SET_VARSIZE(PTR, len)					\
-	(((varattrib_4b *) (PTR))->va_4byte.va_header = (((cl_uint) (len)) << 2))
+	(((__global varattrib_4b *) (PTR))->va_4byte.va_header = (((cl_uint) (len)) << 2))
 
 /*
  * kern_get_datum
@@ -941,9 +941,10 @@ kern_get_datum_tupslot(__global kern_data_store *kds,
 	__global cl_char   *isnull = KERN_DATA_STORE_ISNULL(kds,rowidx);
 	kern_colmeta		cmeta = kds->colmeta[colidx];
 
+	if (isnull[colidx])
+		return NULL;
 	if (cmeta.attlen > 0)
 		return values + colidx;
-
 	return (__global char *)ktoast + values[colidx];
 }
 
@@ -1013,82 +1014,76 @@ pg_common_vstore(__global kern_data_store *kds,
  * In case of any other format, we don't need to modify the data.
  */
 static void
-pg_fixup_tupslot_vstore(__private int *errcode,
-						__global kern_data_store *kds,
-						__global kern_data_store *ktoast,
-						cl_uint rowidx)
+pg_fixup_tupslot_varlena(__private int *errcode,
+						 __global kern_data_store *kds,
+						 __global kern_data_store *ktoast,
+						 cl_uint colidx, cl_uint rowidx)
 {
 	__global Datum	   *values;
 	__global cl_char   *isnull;
-	cl_uint				i, ncols;
+	kern_colmeta		cmeta;
 
 	/* only tuple-slot format needs to fixup pointer values */
 	if (kds->format != KDS_FORMAT_TUPSLOT)
 		return;
 	/* out of range? */
-	if (rowidx >= kds->nitems)
+	if (rowidx >= kds->nitems || colidx >= kds->ncols)
+		return;
+
+	/* fixed length variable? */
+	cmeta = kds->colmeta[colidx];
+	if (cmeta.attlen > 0)
 		return;
 
 	values = KERN_DATA_STORE_VALUES(kds, rowidx);
 	isnull = KERN_DATA_STORE_ISNULL(kds, rowidx);
-	ncols = kds->ncols;
-	for (i=0; i < ncols; i++)
+	/* no need to care about NULL values */
+	if (isnull[colidx])
+		return;
+	/* OK, non-null varlena datum has to be fixed up for host address space */
+	if (ktoast->format == KDS_FORMAT_ROW)
 	{
-		kern_colmeta	cmeta = kds->colmeta[i];
+		hostptr_t	offset = values[colidx];
+		hostptr_t	baseline
+			= ((__global char *)KERN_DATA_STORE_ROWBLOCK(ktoast,0) -
+			   (__global char *)ktoast);
 
-		/* XXX - we should check attbyval, instead of attlen.
-		 * However, no fixed-length type with attbyval=false
-		 * are not supported.
-		 */
-		if (cmeta.attlen > 0)
-			continue;
-		/* no need to care about NULL values */
-		if (isnull[i])
+		if (offset >= baseline &&
+			offset - baseline < kds->nblocks * BLCKSZ)
 		{
-			values[i] = 0;
-			continue;
-		}
+			cl_uint		blkidx = (offset - baseline) / BLCKSZ;
+			__global kern_blkitem *bitem
+				= KERN_DATA_STORE_BLKITEM(kds, blkidx);
 
-		if (ktoast->format == KDS_FORMAT_ROW)
-		{
-			hostptr_t	offset = values[i];
-			hostptr_t	baseline
-				= ((__global char *)KERN_DATA_STORE_ROWBLOCK(ktoast,0) -
-				   (__global char *)ktoast);
-
-			if (offset >= baseline &&
-				offset - baseline < kds->nblocks * BLCKSZ)
-			{
-				cl_uint		blkidx = (offset - baseline) / BLCKSZ;
-				__global kern_blkitem *bitem
-					= KERN_DATA_STORE_BLKITEM(kds, blkidx);
-
-				values[i] = (Datum)(bitem->page +
-									((offset - baseline) & (BLCKSZ - 1)));
-			}
-			else
-			{
-				isnull[i] = (cl_char) 1;
-				values[i] = 0;
-				STROM_SET_ERROR(errcode, StromError_DataStoreCorruption + 1000);
-			}
-		}
-		else if (ktoast->format == KDS_FORMAT_ROW_FLAT)
-		{
-			hostptr_t	offset = values[i];
-
-			if (offset < ktoast->length)
-				values[i] = (Datum)(ktoast->hostptr + offset);
-			else
-			{
-				isnull[i] = (cl_char) 1;
-				values[i] = 0;
-				STROM_SET_ERROR(errcode, StromError_DataStoreCorruption + 2000);
-			}
+			values[colidx] = (Datum)(bitem->page +
+									 (hostptr_t)((offset - baseline) & (BLCKSZ - 1)));
 		}
 		else
-			STROM_SET_ERROR(errcode, StromError_SanityCheckViolation);
+		{
+			isnull[colidx] = (cl_char) 1;
+			values[colidx] = 0;
+			STROM_SET_ERROR(errcode, StromError_DataStoreCorruption + 1000);
+		}
 	}
+	else if (ktoast->format == KDS_FORMAT_ROW_FLAT)
+	{
+		hostptr_t	offset = values[colidx];
+
+		if (offset < ktoast->length)
+		{
+			values[colidx] = (Datum)((hostptr_t)ktoast->hostptr +
+									 (hostptr_t)offset);
+			printf("values[%d] = %016lx\n", colidx, values[colidx]);
+		}
+		else
+		{
+			isnull[colidx] = (cl_char) 1;
+			values[colidx] = 0;
+			STROM_SET_ERROR(errcode, StromError_DataStoreCorruption + 2000);
+		}
+	}
+	else
+		STROM_SET_ERROR(errcode, StromError_SanityCheckViolation);
 }
 
 #if 0
@@ -1157,7 +1152,10 @@ pg_varlena_vstore(__global kern_data_store *kds,
 		= pg_common_vstore(kds, ktoast, errcode,
 						   colidx, rowidx, datum.isnull);
 	if (daddr)
-		*daddr = ((__global char *)datum.value - (__global char *)ktoast);
+	{
+		*daddr = (Datum)((__global char *)datum.value -
+						 (__global char *)&ktoast->hostptr);
+	}
 	/* NOTE: pg_fixup_tupslot_vstore() shall be called later */
 }
 
