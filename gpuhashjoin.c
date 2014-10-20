@@ -114,6 +114,7 @@ typedef struct
 	int			num_rels;		/* number of underlying MultiHash */
 	const char *kernel_source;
 	int			extra_flags;
+	bool		outer_bulkload;	/* is outer can bulk loading? */
 	List	   *join_types;		/* list of join types */
 	List	   *hash_clauses;	/* list of hash_clause (List *) */
 	List	   *qual_clauses;	/* list of qual_clause (List *) */
@@ -190,7 +191,7 @@ typedef struct
 
 	/* state for outer scan */
 	bool			outer_done;
-	bool			outer_bulk;
+	bool			outer_bulkload;
 	TupleTableSlot *outer_overflow;
 
 	pgstrom_queue  *mqueue;
@@ -220,8 +221,6 @@ typedef struct {
 	bool	  **isnull_array;
 	Size		ntuples;
 } MultiHashState;
-
-
 
 /* declaration of static functions */
 static void clserv_process_gpuhashjoin(pgstrom_message *message);
@@ -753,6 +752,57 @@ gpuhashjoin_add_path(PlannerInfo *root,
 	}
 }
 
+/*
+ * XXX - a workaround. once CustomPlan became based on CustomScan,
+ * we can access Scan->scanrelid...
+ */
+typedef struct {
+	CustomPlan	cplan;
+    Index		scanrelid;
+} GpuScanPlanDummy;
+
+static bool
+gpuhashjoin_use_bulkload(GpuHashJoin *ghjoin)
+{
+	Plan	   *outer_plan = outerPlan(ghjoin);
+	Bitmapset  *outer_attrefs = NULL;
+	Index		outer_scanrelid;
+	ListCell   *lc;
+
+	/*
+	 * Only GpuScan support bulk-loading right now
+	 */
+	if (!pgstrom_plan_is_gpuscan(outer_plan))
+		return false;
+	outer_scanrelid = ((GpuScanPlanDummy *) outer_plan)->scanrelid;
+	pull_varattnos((Node *)ghjoin->cplan.plan.targetlist,
+				   outer_scanrelid,
+				   &outer_attrefs);
+	pull_varattnos((Node *)ghjoin->hash_clauses,
+				   outer_scanrelid,
+				   &outer_attrefs);
+	pull_varattnos((Node *)ghjoin->qual_clauses,
+				   outer_scanrelid,
+				   &outer_attrefs);
+	pull_varattnos((Node *)ghjoin->host_clauses,
+				   outer_scanrelid,
+				   &outer_attrefs);
+
+	foreach (lc, outer_plan->targetlist)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		int				x = tle->resno - FirstLowInvalidHeapAttributeNumber;
+
+		if (!bms_is_member(x, outer_attrefs))
+			continue;
+
+		if (!IsA(tle->expr, Var) ||
+			((Var *) tle->expr)->varattno != tle->resno)
+			return false;
+	}
+	return true;
+}
+
 static CustomPlan *
 gpuhashjoin_create_plan(PlannerInfo *root, CustomPath *best_path)
 {
@@ -838,6 +888,7 @@ gpuhashjoin_create_plan(PlannerInfo *root, CustomPath *best_path)
 	ghjoin->hash_clauses = hash_clauses;
 	ghjoin->qual_clauses = qual_clauses;
 	ghjoin->host_clauses = host_clauses;
+	ghjoin->outer_bulkload = gpuhashjoin_use_bulkload(ghjoin);
 
 	return &ghjoin->cplan;
 }
@@ -2235,7 +2286,7 @@ gpuhashjoin_begin(CustomPlan *node, EState *estate, int eflags)
 	 * If CustomPlan provided by PG-Strom, it may be able to produce bulk
 	 * data chunk, instead of row-by-row format.
 	 */
-	ghjs->outer_bulk = pgstrom_planstate_can_bulkload(outerPlanState(ghjs));
+	ghjs->outer_bulkload = ghjoin->outer_bulkload;
 
 	/* construction of kernel parameter buffer */
 	ghjs->kparams = pgstrom_create_kern_parambuf(ghjoin->used_params,
@@ -2401,7 +2452,7 @@ gpuhashjoin_load_next_outer(GpuHashJoinState *ghjs, int result_format)
 	if (ghjs->pfm.enabled)
 		gettimeofday(&tv1, NULL);
 
-	if (!ghjs->outer_bulk)
+	if (!ghjs->outer_bulkload)
 	{
 		/* Scan the outer relation using row-by-row mode */
 		pgstrom_data_store *pds = NULL;
@@ -2956,7 +3007,7 @@ gpuhashjoin_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 	}
 	es->verbose = verbose_saved;
 
-	ExplainPropertyText("Bulkload", ghjs->outer_bulk ? "On" : "Off", es);
+	ExplainPropertyText("Bulkload", ghjs->outer_bulkload ? "On" : "Off", es);
 
 	show_device_kernel(ghjs->dprog_key, es);
 
