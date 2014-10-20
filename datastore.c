@@ -380,6 +380,7 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 		ExecClearTuple(slot);
 		memcpy(slot->tts_values, tts_values, sizeof(Datum) * kds->ncols);
 		memcpy(slot->tts_isnull, tts_isnull, sizeof(bool) * kds->ncols);
+		ExecStoreVirtualTuple(slot);
 		/*
 		 * MEMO: Is it really needed to take memcpy() here? If we can 
 		 * do same job with pointer opertion, it makes more sense from
@@ -1409,9 +1410,11 @@ pgstrom_dump_data_store(pgstrom_data_store *pds)
 					else
 					{
 						for (k=0; k < kds->colmeta[j].attlen; k++)
-							appendStringInfo(&buf, "%02x",
-											 k > 0 ? " " : "",
-											 datum[k]);
+						{
+							if (k > 0)
+								appendStringInfoChar(&buf, ' ');
+							appendStringInfo(&buf, "%02x", datum[k]);
+						}
 					}
 					curr += kds->colmeta[j].attlen;
 				}

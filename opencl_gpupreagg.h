@@ -123,106 +123,6 @@ typedef struct
 
 #ifdef OPENCL_DEVICE_CODE
 
-#if 0
-/*
- * pg_XXX_vstore - an interface function that stores a datum on
- * the destination kern_data_store.
- */
-static __global void *
-pg_common_vstore(__private cl_int *errcode,
-				 __global kern_data_store *kds,
-				 cl_uint colidx,
-				 cl_uint rowidx,
-				 bool isnull)
-{
-	kern_colmeta		cmeta = kds->colmeta[colidx];
-	__global cl_uint   *nullmap;
-	cl_uint				nullmask;
-	cl_uint				offset = 0;
-
-	/* only column-store can be written in the kernel space */
-	if (kds->format != KDS_FORMAT_COLUMN)
-	{
-		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
-		return NULL;
-	}
-	/* out of range? */
-	if (colidx >= kds->ncols || rowidx >= kds->nrooms)
-	{
-		STROM_SET_ERROR(errcode, StromError_DataStoreOutOfRange);
-		return NULL;
-	}
-	cmeta = kds->colmeta[colidx];
-	/* only null can be allowed to store value on invalid column */
-	if (!cmeta.attvalid)
-	{
-		if (!isnull)
-			STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
-		return NULL;
-	}
-
-	offset = cmeta.cs_offset;
-	nullmap = ((__global cl_uint *)
-			   ((__global cl_char *)kds + offset)) + (rowidx >> 5);
-	nullmask = (1U << (rowidx & 0x1f));
-	if (isnull)
-	{
-		if (!cmeta.attnotnull)
-			atomic_and(nullmap, ~nullmask);
-		else
-			STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
-		return NULL;
-	}
-
-	if (!cmeta.attnotnull)
-	{
-		atomic_or(nullmap, nullmask);
-		offset += STROMALIGN(bitmaplen(kds->nrooms));
-	}
-	return (__global cl_char *)kds + offset + (cmeta.attlen > 0 ?
-											   cmeta.attlen :
-											   sizeof(cl_uint)) * rowidx;
-}
-
-#define STROMCL_SIMPLE_VARSTORE_TEMPLATE(NAME,BASE)			\
-	static void												\
-	pg_##NAME##_vstore(__global kern_data_store *kds,		\
-					   __global kern_toastbuf *ktoast,		\
-					   __private int *errcode,				\
-					   cl_uint colidx,						\
-					   cl_uint rowidx,						\
-					   pg_##NAME##_t datum)					\
-	{														\
-		__global BASE  *cs_addr								\
-			= pg_common_vstore(errcode, kds,				\
-							   colidx, rowidx,				\
-							   datum.isnull);				\
-		if (cs_addr)										\
-			*cs_addr = datum.value;							\
-	}
-
-#define STROMCL_VARLENA_VARSTORE_TEMPLATE(NAME)				\
-	static void												\
-	pg_##NAME##_vstore(__global kern_data_store *kds,		\
-					   __global kern_toastbuf *ktoast,		\
-					   __private int *errcode,				\
-					   cl_uint colidx,						\
-					   cl_uint rowidx,						\
-					   pg_##NAME##_t datum)					\
-	{														\
-		__global cl_uint   *cs_addr							\
-			= pg_common_vstore(errcode, kds,				\
-							   colidx, rowidx,				\
-							   datum.isnull);				\
-		if (cs_addr)										\
-		{													\
-			cl_uint		vl_offset							\
-				= (cl_uint)((__global char *)datum.value -	\
-							(__global char *)ktoast);		\
-			*cs_addr = vl_offset;							\
-		}													\
-	}
-#endif
 /* macro to check overflow on accumlate operation*/
 #define CHECK_OVERFLOW_INT(x, y)				\
 	((((x) < 0) == ((y) < 0)) && (((x) + (y) < 0) != ((x) < 0)))
@@ -303,7 +203,7 @@ gpupreagg_data_load(__local pagg_datum *pdatum,
 
 	if (colidx >= kds->ncols)
 	{
-		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption + 3000);
 		return;
 	}
 	cmeta = kds->colmeta[colidx];
@@ -346,7 +246,7 @@ gpupreagg_data_load(__local pagg_datum *pdatum,
 	}
 	else
 	{
-		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption + 4000);
 	}
 }
 
@@ -364,7 +264,7 @@ gpupreagg_data_store(__local pagg_datum *pdatum,
 
 	if (colidx >= kds->ncols)
 	{
-		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption + 5000);
 		return;
 	}
 	cmeta = kds->colmeta[colidx];
@@ -398,7 +298,7 @@ gpupreagg_data_store(__local pagg_datum *pdatum,
 	}
 	else
 	{
-		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption + 6000);
 	}
 }
 
@@ -416,81 +316,31 @@ gpupreagg_data_move(__private cl_int *errcode,
 					cl_uint rowidx_src,
 					cl_uint rowidx_dst)
 {
-	__global char	   *addr_src;
-	__global cl_uint   *nullmap;
-	__global void	   *src_datum;
-	cl_uint				nullmask;
-	cl_uint				cs_offset;
+	__global Datum	   *src_values;
+	__global Datum	   *dst_values;
+	__global cl_char   *src_isnull;
+	__global cl_char   *dst_isnull;
 
-	if (kds_src->ncols != kds_dst->ncols ||
-		colidx >= kds_src->ncols ||
-		!kds_src->colmeta[colidx].attvalid ||
-		!kds_dst->colmeta[colidx].attvalid ||
-		kds_src->colmeta[colidx].attlen != kds_dst->colmeta[colidx].attlen)
+	if (colidx >= kds_src->ncols || colidx >= kds_dst->ncols)
 	{
-		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption + 7000);
 		return;
 	}
 
-	cs_offset = kds_src->colmeta[colidx].cs_offset;
-	nullmap = ((__global cl_uint *)((__global char *)kds_dst + cs_offset)
-			   + (rowidx_dst >> 5));
-	nullmask = (1U << (rowidx_dst & 0x1f));
+	src_values = KERN_DATA_STORE_VALUES(kds_src, 0);
+	src_isnull = KERN_DATA_STORE_ISNULL(kds_src, 0);
+	dst_values = KERN_DATA_STORE_VALUES(kds_dst, 0);
+	dst_isnull = KERN_DATA_STORE_ISNULL(kds_dst, 0);
 
-	src_datum = kern_get_datum(kds_src, ktoast, colidx, rowidx_src);
-	if (!src_datum)
+	if (src_isnull[rowidx_src])
 	{
-		if (!kds_dst->colmeta[colidx].attnotnull)
-			atomic_and(nullmap, ~nullmask);
-		else
-			STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
+		dst_isnull[rowidx_dst] = (cl_char) 1;
+		dst_values[rowidx_dst] = (Datum) 0;
 	}
 	else
 	{
-		__global cl_char   *dest_addr;
-		cl_short			attlen = kds_dst->colmeta[colidx].attlen;
-
-		if (!kds_dst->colmeta[colidx].attnotnull)
-		{
-			atomic_or(nullmap, nullmask);
-			cs_offset += STROMALIGN(bitmaplen(kds_dst->nrooms));
-		}
-		dest_addr = (__global cl_char *) kds_dst + cs_offset;
-
-		if (attlen > 0)
-		{
-			dest_addr += attlen * rowidx_dst;
-			switch (attlen)
-			{
-				case sizeof(cl_char):
-					*((__global cl_char *) dest_addr)
-						= *((__global cl_char *) src_datum);
-					break;
-				case sizeof(cl_short):
-					*((__global cl_short *) dest_addr)
-						= *((__global cl_short *) src_datum);
-					break;
-				case sizeof(cl_int):
-					*((__global cl_int *) dest_addr)
-						= *((__global cl_int *) src_datum);
-					break;
-				case sizeof(cl_long):
-					*((__global cl_long *) dest_addr)
-						= *((__global cl_long *) src_datum);
-					break;
-				default:
-					memcpy(dest_addr, src_datum, attlen);
-					break;
-			}
-		}
-		else
-		{
-			cl_uint		vl_offset =
-				(cl_uint)((__global cl_char *) src_datum -
-						  (__global cl_char *) ktoast);
-			dest_addr += sizeof(cl_uint) * rowidx_dst;
-			*((__global cl_uint *) dest_addr) = vl_offset;
-		}
+		dst_isnull[rowidx_dst] = (cl_char) 0;
+		dst_values[rowidx_dst] = src_values[rowidx_src];
 	}
 }
 
@@ -716,7 +566,10 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 								 cindex, base + groupID);
 		}
 		barrier(CLK_LOCAL_MEM_FENCE);
-    }
+	}
+	/* fixup tuple-slot data */
+	if(l_data[localID].group_id != INVALID_GROUPID)
+		pg_fixup_tupslot_vstore(&errcode, kds_dst, ktoast, base + groupID);
 out:
 	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
 }
@@ -886,7 +739,6 @@ gpupreagg_bitonic_step(__global kern_gpupreagg *kgpreagg,
 		rindex[idx0] = pos1;
 		rindex[idx1] = pos0;
 	}
-
 out:
 	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
 }
@@ -1028,8 +880,8 @@ typedef struct
 	pgstrom_message		msg;		/* = StromTag_GpuPreAgg */
 	Datum				dprog_key;	/* key of device program */
 	bool				needs_grouping;	/* true, if it needs grouping step */
-	pgstrom_data_store *pds;		/* source row/column store as input */
-	kern_data_store	   *kds_dst;	/* result buffer of partial aggregate */
+	pgstrom_data_store *pds;		/* source data-store */
+	pgstrom_data_store *pds_dest;	/* result data-store */
 	kern_gpupreagg		kern;		/* kernel portion to be sent */
 } pgstrom_gpupreagg;
 #endif	/* OPENCL_DEVICE_CODE */

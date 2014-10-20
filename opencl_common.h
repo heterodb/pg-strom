@@ -584,7 +584,6 @@ static __global Datum *pg_common_vstore(__global kern_data_store *kds,
 			cl_double	v_cl_double_buf;					\
 			Datum		v_datum;							\
 		} temp;												\
-		Datum			v_mask;								\
 		daddr = pg_common_vstore(kds, ktoast, errcode,		\
 								 colidx, rowidx,			\
 								 datum.isnull);				\
@@ -592,8 +591,7 @@ static __global Datum *pg_common_vstore(__global kern_data_store *kds,
 		{													\
 			temp.v_datum = 0;								\
 			temp.v_##BASE##_buf = datum.value;				\
-			v_mask = (1UL << (sizeof(BASE) * BITS_PER_BYTE - 1)); \
-			*daddr = (temp.v_datum & v_mask);				\
+			*daddr = temp.v_datum;							\
 		}													\
 	}
 
@@ -1072,7 +1070,7 @@ pg_fixup_tupslot_vstore(__private int *errcode,
 			{
 				isnull[i] = (cl_char) 1;
 				values[i] = 0;
-				STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
+				STROM_SET_ERROR(errcode, StromError_DataStoreCorruption + 1000);
 			}
 		}
 		else if (ktoast->format == KDS_FORMAT_ROW_FLAT)
@@ -1085,7 +1083,7 @@ pg_fixup_tupslot_vstore(__private int *errcode,
 			{
 				isnull[i] = (cl_char) 1;
 				values[i] = 0;
-				STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
+				STROM_SET_ERROR(errcode, StromError_DataStoreCorruption + 2000);
 			}
 		}
 		else
@@ -1093,6 +1091,27 @@ pg_fixup_tupslot_vstore(__private int *errcode,
 	}
 }
 
+#if 0
+static inline void
+pg_dump_data_store(__global kern_data_store *kds, __constant const char *label)
+{
+	cl_uint		i;
+
+	printf("gid=%zu: kds(%s) {length=%u usage=%u ncols=%u nitems=%u nrooms=%u "
+		   "nblocks=%u maxblocks=%u format=%d}\n",
+		   get_global_id(0), label,
+		   kds->length, kds->usage, kds->ncols,
+		   kds->nitems, kds->nrooms,
+		   kds->nblocks, kds->maxblocks, kds->format);
+	for (i=0; i < kds->ncols; i++)
+		printf("gid=%zu: kds(%s) colmeta[%d] "
+			   "{attnotnull=%d attalign=%d attlen=%d}\n",
+			   get_global_id(0), label, i,
+			   kds->colmeta[i].attnotnull,
+			   kds->colmeta[i].attalign,
+			   kds->colmeta[i].attlen);
+}
+#endif
 /*
  * functions to reference variable length variables
  */

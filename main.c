@@ -208,11 +208,11 @@ pgstrom_strerror(cl_int errcode)
 		case StromError_OutOfMemory:
 			return "out of host memory";
 		case StromError_DataStoreCorruption:
-			return "row/column store is corrupted";
+			return "data store is corrupted";
 		case StromError_DataStoreNoSpace:
-			return "row/column store has no space";
+			return "data store has no space";
 		case StromError_DataStoreOutOfRange:
-			return "out of range in row/column store";
+			return "out of range in data store";
 		case StromError_SanityCheckViolation:
 			return "sanity check violation";
 		default:

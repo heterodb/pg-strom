@@ -412,7 +412,7 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 								__global kern_multihash *kmhash,	/* in */
 								__global kern_data_store *kds,		/* in */
 								__global kern_data_store *ktoast,	/* in */
-								__global kern_data_store *kds_dest,/* out */
+								__global kern_data_store *kds_dest,	/* out */
 								KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
 	__global kern_parambuf  *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
@@ -449,7 +449,6 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
 		goto out;
 	}
-
 	/* combination of rows in this join */
 	rbuffer = kresults->results + nrels * get_global_id(0);
 
@@ -459,6 +458,7 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 	 */
 	if (get_global_id(0) == 0)
 		kds_dest->nitems = kresults->nitems;
+	goto out;
 
 	/*
 	 * Step.1 - compute length of the joined tuple
@@ -603,6 +603,7 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 											 &kentry->htup,
 											 colidx);
 			}
+
 			/* put datum on the destination kds */
 			if (!datum)
 				htup->t_infomask |= HEAP_HASNULL;
