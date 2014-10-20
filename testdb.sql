@@ -15,7 +15,7 @@ INSERT INTO t1 (SELECT x, md5((x+1)::text) FROM generate_series(1,4000) x);
 INSERT INTO t2 (SELECT x, md5((x+2)::text) FROM generate_series(1,4000) x);
 INSERT INTO t3 (SELECT x, md5((x+3)::text) FROM generate_series(1,4000) x);
 INSERT INTO t4 (SELECT x, md5((x+4)::text) FROM generate_series(1,4000) x);
-INSERT INTO t0 (SELECT x, CASE floor(random()*12)
+INSERT INTO t0 (SELECT x, CASE floor(random()*26)
                           WHEN  0 THEN 'aaa'
                           WHEN  1 THEN 'bbb'
                           WHEN  2 THEN 'ccc'
@@ -27,7 +27,21 @@ INSERT INTO t0 (SELECT x, CASE floor(random()*12)
                           WHEN  8 THEN 'iii'
                           WHEN  9 THEN 'jjj'
                           WHEN 10 THEN 'kkk'
-                          ELSE 'lll'
+                          WHEN 11 THEN 'lll'
+                          WHEN 12 THEN 'mmm'
+                          WHEN 13 THEN 'nnn'
+                          WHEN 14 THEN 'ooo'
+                          WHEN 15 THEN 'ppp'
+                          WHEN 16 THEN 'qqq'
+                          WHEN 17 THEN 'rrr'
+                          WHEN 18 THEN 'sss'
+                          WHEN 19 THEN 'ttt'
+                          WHEN 20 THEN 'uuu'
+                          WHEN 21 THEN 'vvv'
+                          WHEN 22 THEN 'www'
+                          WHEN 23 THEN 'xxx'
+                          WHEN 24 THEN 'yyy'
+                          ELSE 'zzz'
                           END,
                        floor(random() * 40000 + 1),
                        floor(random() * 40000 + 1),
@@ -35,4 +49,4 @@ INSERT INTO t0 (SELECT x, CASE floor(random()*12)
                        floor(random() * 40000 + 1),
                        random() * 100,
                        random() * 100,
-                       md5(x::text) FROM generate_series(1,20000) x);
+                       md5(x::text) FROM generate_series(1,50000000) x);
