@@ -140,183 +140,6 @@ pgstrom_create_kern_parambuf(List *used_params,
 	return kpbuf;
 }
 
-/*
- * pgstrom_plan_can_multi_exec (obsolete; should not be used any more)
- *
- * It gives a hint whether subplan support bulk-exec mode, or not.
- */
-bool
-pgstrom_planstate_can_bulkload(const PlanState *ps)
-{
-	if (IsA(ps, CustomPlanState))
-	{
-		const CustomPlanState  *cps = (const CustomPlanState *) ps;
-
-		if (pgstrom_gpuscan_can_bulkload(cps))
-			return true;
-	}
-	return false;
-}
-
-/*
- * it makes a template of header portion of kern_data_store according
- * to the supplied tupdesc and bitmapset of referenced columns.
- */
-bytea *
-kparam_make_kds_head(TupleDesc tupdesc,
-					 int kds_format,
-					 Bitmapset *referenced)
-{
-	kern_data_store	*kds_head;
-	bytea	   *result;
-	Size		length;
-	int			i, j, ncols;
-
-	/* allocation */
-	ncols = tupdesc->natts;
-	length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
-	result = palloc0(VARHDRSZ + length);
-	SET_VARSIZE(result, VARHDRSZ + length);
-
-	kds_head = (kern_data_store *) VARDATA(result);
-	kds_head->length = (cl_uint)(-1);	/* to be set later */
-	kds_head->ncols = ncols;
-	kds_head->nitems = (cl_uint)(-1);	/* to be set later */
-	kds_head->nrooms = (cl_uint)(-1);	/* to be set later */
-	kds_head->format = kds_format;
-
-	for (i=0; i < tupdesc->natts; i++)
-	{
-		Form_pg_attribute attr = tupdesc->attrs[i];
-
-		j = attr->attnum - FirstLowInvalidHeapAttributeNumber;
-
-		kds_head->colmeta[i].attnotnull = attr->attnotnull;
-		kds_head->colmeta[i].attalign = typealign_get_width(attr->attalign);
-		kds_head->colmeta[i].attlen = (attr->attlen > 0 ? attr->attlen : -1);
-		if (!bms_is_member(j, referenced))
-			kds_head->colmeta[i].attvalid = 0;
-		else
-			kds_head->colmeta[i].attvalid = (cl_uint)(-1);
-		/* rest of fields shall be set later */
-	}
-	return result;
-}
-
-void
-kparam_refresh_kds_head(kern_data_store *kds_head,
-						cl_uint nitems, cl_uint nrooms)
-{
-	/*
-	 * Only column- or tupslot- format is writable by device kernel
-	 */
-	Assert(kds_head->format == KDS_FORMAT_COLUMN ||
-		   kds_head->format == KDS_FORMAT_TUPSLOT);
-	kds_head->nitems = nitems;
-	kds_head->nrooms = nrooms;
-
-	if (kds_head->format == KDS_FORMAT_COLUMN)
-	{
-		Size		length;
-		cl_uint		i, ncols = kds_head->ncols;
-
-		length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
-		for (i=0; i < ncols; i++)
-		{
-			if (!kds_head->colmeta[i].attvalid)
-				continue;
-			kds_head->colmeta[i].cs_offset = length;
-			if (!kds_head->colmeta[i].attnotnull)
-				length += STROMALIGN(BITMAPLEN(kds_head->nrooms));
-			length += STROMALIGN((kds_head->colmeta[i].attlen > 0
-								  ? kds_head->colmeta[i].attlen
-								  : sizeof(cl_uint)) * kds_head->nrooms);
-		}
-		kds_head->length = STROMALIGN(length);
-	}
-	else if (kds_head->format == KDS_FORMAT_TUPSLOT)
-	{
-		Size		length =
-			((uintptr_t)KERN_DATA_STORE_VALUES(kds_head, nrooms) -
-			 (uintptr_t)(kds_head));
-		kds_head->length = STROMALIGN(length);
-	}
-	else
-		elog(ERROR, "Bug? unexpected kds format: %d", kds_head->format);
-}
-
-#if 0
-/*
- * kparam_make_ktoast_head
- *
- * it also makes header portion of kern_toastbuf according to the tupdesc.
- */
-bytea *
-kparam_make_ktoast_head(TupleDesc tupdesc, cl_uint nsyscols)
-{
-	kern_toastbuf *ktoast_head;
-	bytea	   *result;
-	Size		length;
-	int			ncols;
-
-	ncols = tupdesc->natts + nsyscols;
-	length = STROMALIGN(offsetof(kern_toastbuf, coldir[ncols]));
-	result = palloc0(VARHDRSZ + length);
-	SET_VARSIZE(result, VARHDRSZ + length);
-
-	ktoast_head = (kern_toastbuf *) VARDATA(result);
-	ktoast_head->length = TOASTBUF_MAGIC;
-	ktoast_head->ncols = ncols;
-	/* individual coldir[] shall be set later */
-
-	return result;
-}
-
-void
-kparam_refresh_ktoast_head(kern_parambuf *kparams,
-						   StromObject *rcstore)
-{
-	kern_data_store *kds_head = KPARAM_GET_KDS_HEAD(kparams);
-	kern_toastbuf *ktoast_head = KPARAM_GET_KTOAST_HEAD(kparams);
-	int			i;
-	Size		offset;
-	bool		has_toast = false;
-
-	Assert(ktoast_head->length == TOASTBUF_MAGIC);
-	Assert(ktoast_head->ncols == kds_head->ncols);
-	offset = STROMALIGN(offsetof(kern_toastbuf,
-								 coldir[ktoast_head->ncols]));
-	for (i=0; i < ktoast_head->ncols; i++)
-	{
-		ktoast_head->coldir[i] = (cl_uint)(-1);
-
-		/* column is not referenced */
-		if (!kds_head->colmeta[i].attvalid)
-			continue;
-		/* fixed-length variables (incl. inlined varlena) */
-		if (kds_head->colmeta[i].attlen > 0)
-			continue;
-		/* only column-store needs individual toast buffer */
-		if (StromTagIs(rcstore, TCacheColumnStore))
-		{
-			tcache_column_store *tcs = (tcache_column_store *) rcstore;
-
-			if (tcs->cdata[i].toast)
-			{
-				has_toast = true;
-				ktoast_head->coldir[i] = offset;
-                offset += STROMALIGN(tcs->cdata[i].toast->tbuf_length);
-			}
-		}
-	}
-	/* make KPARAM_1 as NULL, if no toast requirement */
-	if (!has_toast)
-		kparams->poffset[1] = 0;	/* mark it as null */
-}
-#endif
-
-
-
 bool
 pgstrom_fetch_data_store(TupleTableSlot *slot,
 						 pgstrom_data_store *pds,
@@ -324,7 +147,6 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 						 HeapTuple tuple)
 {
 	kern_data_store *kds = pds->kds;
-	TupleDesc	tupdesc;
 
 	if (row_index >= kds->nitems)
 		return false;	/* out of range */
@@ -373,12 +195,6 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 	{
 		Datum	   *tts_values = KERN_DATA_STORE_VALUES(kds, row_index);
 		cl_char	   *tts_isnull = KERN_DATA_STORE_ISNULL(kds, row_index);
-		int			i;
-
-		for (i=0; i < kds->ncols; i++)
-		{
-			elog(INFO, "(%u,%zu) isnull=%d value=%016lx", i, row_index, tts_isnull[i], tts_values[i]);
-		}
 
 		ExecClearTuple(slot);
 		memcpy(slot->tts_values, tts_values, sizeof(Datum) * kds->ncols);
@@ -394,48 +210,6 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 	}
 	elog(ERROR, "Bug? unexpected data-store format: %d", kds->format);
 	return false;
-#if 0
-	/* otherwise, column store */
-	Assert(kds->format == KDS_FORMAT_COLUMN);
-	ExecStoreAllNullTuple(slot);
-	tupdesc = slot->tts_tupleDescriptor;
-	for (i=0; i < tupdesc->natts; i++)
-	{
-		Form_pg_attribute	attr = tupdesc->attrs[i];
-
-		if (i < kds->ncols && !kds->colmeta[i].attvalid)
-		{
-			cs_offset = kds->colmeta[i].cs_offset;
-			if (!kds->colmeta[i].attnotnull)
-			{
-				char   *nullmap = (char *)kds + cs_offset;
-
-				if (att_isnull(row_index, nullmap))
-					continue;
-				cs_offset += STROMALIGN(BITMAPLEN(kds->nrooms));
-			}
-			slot->tts_isnull[i] = false;
-			cs_values = (char *)kds + cs_offset;
-
-			attlen = kds->colmeta[i].attlen;
-			if (attlen > 0)
-			{
-				cs_values += attlen * row_index;
-				slot->tts_values[i] = fetch_att(cs_values,
-												attr->attbyval,
-												attr->attlen);
-			}
-			else
-			{
-				cl_uint		vl_offset = ((cl_uint *)cs_values)[row_index];
-				char	   *vl_ptr = (char *)pds->ktoast + vl_offset;
-
-				slot->tts_values[i] = PointerGetDatum(vl_ptr);
-			}
-		}
-	}
-	return true;
-#endif
 }
 
 void
@@ -674,103 +448,6 @@ pgstrom_create_data_store_tupslot(TupleDesc tupdesc, cl_uint nrooms)
 
 	return pds;
 }
-
-#if 0
-pgstrom_data_store *
-pgstrom_create_data_store_column(TupleDesc tupdesc,
-								 Size dstore_sz,
-								 Bitmapset *attr_refs)
-{
-	pgstrom_data_store *pds;
-	kern_data_store	   *kds;
-	Size		required;
-	Size		cs_offset;
-	cl_uint		unitsz = 0;
-	cl_uint		nrooms;
-	int			i, j;
-
-	/* calculate how many rows can be stored in a data store.
-	 * note that unitsz here means memory consumption per
-	 * (STROMALIGN_LEN * BITS_PER_BYTE) rows to simplify the
-	 * calculation because of alignment and null-bitmap
-	 */
-	cs_offset = STROMALIGN(offsetof(kern_data_store,
-									colmeta[tupdesc->natts]));
-	for (i=0; i < tupdesc->natts; i++)
-	{
-		Form_pg_attribute	attr = tupdesc->attrs[i];
-
-		j = i - FirstLowInvalidHeapAttributeNumber;
-		if (!bms_is_member(j, attr_refs))
-			continue;
-		if (!attr->attnotnull)
-			unitsz += STROMALIGN_LEN;
-		if (attr->attlen > 0)
-			unitsz += attr->attlen * (STROMALIGN_LEN * BITS_PER_BYTE);
-		else
-			unitsz += sizeof(cl_uint) * (STROMALIGN_LEN * BITS_PER_BYTE);
-	}
-	/* note that unitsz is size per STROMALIGN_LEN * BITS_PER_BYTE rows! */
-	nrooms = ((dstore_sz - cs_offset) / unitsz);
-	required = cs_offset + nrooms * unitsz;
-	nrooms *= STROMALIGN_LEN * BITS_PER_BYTE;
-	Assert(required <= dstore_sz);
-
-	kds = pgstrom_shmem_alloc(required);
-	if (!kds)
-		elog(ERROR, "out of shared memory");
-	kds->hostptr = (hostptr_t) &kds->hostptr;
-	kds->length = required;
-	kds->ncols = tupdesc->natts;
-	kds->nitems = 0;
-	kds->nrooms = nrooms;
-	kds->nblocks = 0;	/* column format never */
-	kds->maxblocks = 0;	/* uses buffer blocks */
-	kds->format = KDS_FORMAT_COLUMN;
-	kds->tdhasoid = tupdesc->tdhasoid;
-	kds->tdtypeid = tupdesc->tdtypeid;
-	kds->tdtypmod = tupdesc->tdtypmod;
-	for (i=0; i < tupdesc->natts; i++)
-	{
-		Form_pg_attribute	attr = tupdesc->attrs[i];
-
-		j = i - FirstLowInvalidHeapAttributeNumber;
-		kds->colmeta[i].attnotnull = attr->attnotnull;
-		kds->colmeta[i].attalign = typealign_get_width(attr->attalign);
-		kds->colmeta[i].attlen = attr->attlen;
-		if (!bms_is_member(j, attr_refs))
-			kds->colmeta[i].attvalid = 0;
-		else
-		{
-			kds->colmeta[i].cs_offset = cs_offset;
-			if (!attr->attnotnull)
-				cs_offset += STROMALIGN(nrooms / BITS_PER_BYTE);
-			if (attr->attlen > 0)
-				cs_offset += STROMALIGN(attr->attlen * nrooms);
-			else
-				cs_offset += STROMALIGN(sizeof(cl_uint) * nrooms);
-		}
-	}
-	Assert(cs_offset == required);
-
-	/* allocation of pgstrom_data_store also */
-	pds = pgstrom_shmem_alloc(sizeof(pgstrom_data_store));
-	if (!pds)
-	{
-		pgstrom_shmem_free(kds);
-		elog(ERROR, "out of shared memory");
-	}
-	pds->sobj.stag = StromTag_DataStore;
-	SpinLockInit(&pds->lock);
-	pds->refcnt = 1;
-	pds->kds = kds;
-	pds->ktoast = NULL;		/* expand on demand */
-	pds->resowner = NULL;	/* should be never used to column-store */
-	pds->local_pages = NULL;/* should be never used to column-store */
-
-	return pds;
-}
-#endif
 
 pgstrom_data_store *
 pgstrom_get_data_store(pgstrom_data_store *pds)
@@ -1067,124 +744,8 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 
 		return true;
 	}
-	Assert(kds->format == KDS_FORMAT_COLUMN);
-	/*
-	 * No longer column format is in-use
-	 */
-#if 0
-	/* makes tts_values/tts_isnull available */
-	slot_getallattrs(slot);
-
-	/* row-index to store a new item */
-	j = kds->nitems++;
-
-	for (i=0; i < tupdesc->natts; i++)
-	{
-		Form_pg_attribute	attr = tupdesc->attrs[i];
-
-		Assert(attr->attlen > 0
-			   ? attr->attlen == kds->colmeta[i].attlen
-			   : kds->colmeta[i].attlen < 0);
-
-		if (!kds->colmeta[i].attvalid)
-			continue;
-
-		cs_offset = kds->colmeta[i].cs_offset;
-		if (!kds->colmeta[i].attnotnull)
-		{
-			cl_char   *nullmap = (cl_char *)kds + cs_offset;
-
-			if (slot->tts_isnull[i])
-			{
-				nullmap[j>>3] &= ~(1 << (j & 7));
-				continue;
-			}
-			nullmap[j>>3] |=  (1 << (j & 7));
-            cs_offset += STROMALIGN(BITMAPLEN(kds->nrooms));
-		}
-		else if (slot->tts_isnull[i])
-			elog(ERROR, "unable to put NULL on not-null attribute");
-
-		if (attr->attlen > 0)
-		{
-			char   *cs_values = (char *)kds + cs_offset + attr->attlen * j;
-
-			if (!attr->attbyval)
-			{
-				Pointer	ptr = DatumGetPointer(slot->tts_values[i]);
-
-				memcpy(cs_values, ptr, attr->attlen);
-			}						   
-			else
-			{
-				switch (attr->attlen)
-				{
-					case sizeof(char):
-						*((char *)cs_values)
-							= DatumGetChar(slot->tts_values[i]);
-						break;
-					case sizeof(uint16):
-						*((int16 *)cs_values)
-							= DatumGetInt16(slot->tts_values[i]);
-						break;
-					case sizeof(uint32):
-						*((int32 *)cs_values)
-							= DatumGetInt32(slot->tts_values[i]);
-						break;
-					case sizeof(int64):
-						*((int64 *)cs_values)
-							= DatumGetInt64(slot->tts_values[i]);
-						break;
-					default:
-						memcpy(cs_values, &slot->tts_values[i], attr->attlen);
-						break;
-				}
-			}
-		}
-		else
-		{
-			struct varlena *vl_data = (struct varlena *) slot->tts_values[i];
-			cl_uint			vl_len = VARSIZE_ANY(vl_data);
-			cl_uint		   *vl_ofs = (cl_uint *)((char *)kds + cs_offset);
-			kern_toastbuf  *ktoast;
-
-			Assert(!attr->attbyval);
-			/* expand toast buffer on demand */
-			while (!pds->ktoast || (pds->ktoast->length -
-									pds->ktoast->usage) < INTALIGN(vl_len))
-			{
-				Size	required;
-
-				if (!pds->ktoast)
-					required = TOASTBUF_UNITSZ;
-				else
-					required = 2 * pds->ktoast->length;
-
-				ktoast = pgstrom_shmem_alloc(required);
-				if (!ktoast)
-					elog(ERROR, "out of shared memory");
-				ktoast->hostptr = (hostptr_t) &ktoast->hostptr;
-				ktoast->length = required;
-				ktoast->usage = (!pds->ktoast
-								 ? offsetof(kern_toastbuf, data[0])
-								 : pds->ktoast->usage);
-				if (pds->ktoast)
-				{
-					memcpy(ktoast->data,
-						   pds->ktoast->data,
-						   pds->ktoast->usage);
-					pgstrom_shmem_free(pds->ktoast);
-				}
-				pds->ktoast = ktoast;
-			}
-			ktoast = pds->ktoast;
-			Assert(ktoast->usage + INTALIGN(vl_len) <= ktoast->length);
-			vl_ofs[j] = ktoast->usage;
-			memcpy((char *)ktoast + ktoast->usage, vl_data, vl_len);
-			ktoast->usage += INTALIGN(vl_len);
-		}
-	}
-#endif
+	elog(ERROR, "Bug? data-store with format %d is not expected",
+		 kds->format);
 	return false;
 }
 
@@ -1228,8 +789,7 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 	Assert(length >= KERN_DATA_STORE_LENGTH(kds));
 #endif
 	if (kds->format == KDS_FORMAT_ROW_FLAT ||
-		kds->format == KDS_FORMAT_TUPSLOT ||
-		kds->format == KDS_FORMAT_COLUMN)
+		kds->format == KDS_FORMAT_TUPSLOT)
 	{
 		rc = clEnqueueWriteBuffer(kcmdq,
 								  kds_buffer,
@@ -1358,32 +918,17 @@ pgstrom_dump_data_store(pgstrom_data_store *pds)
 			 "nblocks=%u maxblocks=%u}",
 			 kds->format == KDS_FORMAT_ROW ? "row-store" :
 			 kds->format == KDS_FORMAT_ROW_FLAT ? "row-flat" :
-			 kds->format == KDS_FORMAT_COLUMN ? "column-store" :
 			 kds->format == KDS_FORMAT_TUPSLOT ? "tuple-slot" : "unknown",
 			 kds->length, kds->ncols, kds->nitems, kds->nrooms,
 			 kds->nblocks, kds->maxblocks);
 	for (i=0; i < kds->ncols; i++)
 	{
-		if (!kds->colmeta[i].attvalid)
-		{
-			PDS_DUMP("attr[%d] {attnotnull=%d attalign=%d attlen=%d; invalid}",
-					 i,
-					 kds->colmeta[i].attnotnull,
-					 kds->colmeta[i].attalign,
-					 kds->colmeta[i].attlen);
-		}
-		else
-		{
-			PDS_DUMP("attr[%d] {attnotnull=%d attalign=%d attlen=%d %s=%u}",
-					 i,
-					 kds->colmeta[i].attnotnull,
-					 kds->colmeta[i].attalign,
-					 kds->colmeta[i].attlen,
-					 kds->format == KDS_FORMAT_COLUMN
-					 ? "cs_offset"
-					 : "rs_attnum",
-					 kds->colmeta[i].cs_offset);
-		}
+		PDS_DUMP("attr[%d] {attnotnull=%d attalign=%d attlen=%d attnum=%u}",
+				 i,
+				 kds->colmeta[i].attnotnull,
+				 kds->colmeta[i].attalign,
+				 kds->colmeta[i].attlen,
+				 kds->colmeta[i].rs_attnum);
 	}
 
 	if (kds->format == KDS_FORMAT_ROW_FLAT)

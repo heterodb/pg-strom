@@ -473,19 +473,6 @@ extern void pgstrom_init_codegen(void);
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
-extern bytea *kparam_make_kds_head(TupleDesc tupdesc,
-								   int kds_format,
-								   Bitmapset *attrefs);
-extern void kparam_refresh_kds_head(kern_data_store *kds_head,
-									cl_uint nitems, cl_uint nrooms);
-#if 0
-extern bytea *kparam_make_ktoast_head(TupleDesc tupdesc,
-									  cl_uint nsyscols);
-extern void kparam_refresh_ktoast_head(kern_parambuf *kparams,
-									   StromObject *rcstore);
-#endif
-extern bool pgstrom_planstate_can_bulkload(const PlanState *ps);
-
 extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
 									 pgstrom_data_store *pds,
 									 size_t row_index,
@@ -498,12 +485,6 @@ extern pgstrom_data_store *
 pgstrom_create_data_store_row_flat(TupleDesc tupdesc, Size length);
 extern pgstrom_data_store *
 pgstrom_create_data_store_tupslot(TupleDesc tupdesc, cl_uint nrooms);
-#if 0
-extern pgstrom_data_store *
-pgstrom_create_data_store_column(TupleDesc tupdesc,
-								 Size dstore_sz,
-								 Bitmapset *attr_refs);
-#endif
 extern pgstrom_data_store *pgstrom_get_data_store(pgstrom_data_store *pds);
 extern void pgstrom_put_data_store(pgstrom_data_store *pds);
 extern int pgstrom_data_store_insert_block(pgstrom_data_store *pds,

@@ -377,7 +377,6 @@ typedef struct {
 #define KDS_FORMAT_ROW			1
 #define KDS_FORMAT_ROW_FLAT		2
 #define KDS_FORMAT_TUPSLOT		3
-#define KDS_FORMAT_COLUMN		4
 
 typedef struct {
 	hostptr_t		hostptr;	/* address of kds on the host */
@@ -1073,7 +1072,7 @@ pg_fixup_tupslot_varlena(__private int *errcode,
 		{
 			values[colidx] = (Datum)((hostptr_t)ktoast->hostptr +
 									 (hostptr_t)offset);
-			printf("values[%d] = %016lx\n", colidx, values[colidx]);
+			//printf("values[%d] = %016lx\n", colidx, values[colidx]);
 		}
 		else
 		{
