@@ -4051,7 +4051,7 @@ clserv_respond_hashjoin(cl_event event, cl_int ev_status, void *private)
 		cl_uint				nitems = old_kds->nitems;
 		Size				required;
 
-		clserv_log("GHJ input again");
+		clserv_log("GHJ input again (%u => %u)", old_kds->nrooms, nitems);
 
 		/* expand kern_data_store */
 		required = (STROMALIGN(offsetof(kern_data_store, colmeta[ncols])) +

@@ -875,6 +875,7 @@ typedef struct
 	pgstrom_message		msg;		/* = StromTag_GpuPreAgg */
 	Datum				dprog_key;	/* key of device program */
 	bool				needs_grouping;	/* true, if it needs grouping step */
+	double				num_groups;	/* estimated number of groups */
 	pgstrom_data_store *pds;		/* source data-store */
 	pgstrom_data_store *pds_dest;	/* result data-store */
 	kern_gpupreagg		kern;		/* kernel portion to be sent */

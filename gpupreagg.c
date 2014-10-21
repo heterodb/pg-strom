@@ -46,6 +46,7 @@ typedef struct
 	int				numCols;		/* number of grouping columns */
 	AttrNumber	   *grpColIdx;		/* their indexes in the target list */
 	bool			outer_bulkload;
+	double			num_groups;		/* estimated number of groups */
 	const char	   *kern_source;
 	int				extra_flags;
 	List		   *used_params;	/* referenced Const/Param */
@@ -60,8 +61,8 @@ typedef struct
 	TupleTableSlot *scan_slot;
 	ProjectionInfo *bulk_proj;
 	TupleTableSlot *bulk_slot;
-	/* average number of tuples per page */
-	double			ntups_per_page;
+	double			num_groups;		/* estimated number of groups */
+	double			ntups_per_page;	/* average number of tuples per page */
 	bool			outer_done;
 	bool			outer_bulkload;
 	TupleTableSlot *outer_overflow;
@@ -311,6 +312,7 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 	double		outer_rows;
 	double		rows_per_chunk;
 	double		num_chunks;
+	double		num_groups = Max(agg->plan.plan_rows, 1.0);
 	Path		dummy;
 	AggClauseCosts agg_costs;
 	ListCell   *cell;
@@ -346,6 +348,7 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 	 * cost estimation of internal sorting by GPU.
 	 */
 	rows_per_chunk =
+		((double)((pgstrom_chunk_size << 20) / BLCKSZ)) *
 		((double)(BLCKSZ - MAXALIGN(SizeOfPageHeaderData))) /
         ((double)(sizeof(ItemIdData) +
                   sizeof(HeapTupleHeaderData) + outer_width));
@@ -389,11 +392,9 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 	 */
 	gpreagg->cplan.plan.startup_cost = startup_cost;
 	gpreagg->cplan.plan.total_cost = startup_cost + run_cost;
-	gpreagg->cplan.plan.plan_rows =
-		(agg->plan.plan_rows / outer_rows)	/* reduction ratio */
-		* rows_per_chunk					/* rows per chunk */
-		* num_chunks;						/* number of chunks */
+	gpreagg->cplan.plan.plan_rows = num_groups * num_chunks;
 	gpreagg->cplan.plan.plan_width = pagg_width;
+	gpreagg->num_groups = num_groups;
 
 	/*
 	 * Update estimated sorting cost, if any.
@@ -2032,6 +2033,7 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 	gpas->outer_overflow = NULL;
 
 	outer_width = outerPlanState(gpas)->plan->plan_width;
+	gpas->num_groups = gpreagg->num_groups;
 	gpas->ntups_per_page =
 		((double)(BLCKSZ - MAXALIGN(SizeOfPageHeaderData))) /
 		((double)(sizeof(ItemIdData) +
@@ -2166,6 +2168,7 @@ pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
 	/* other fields also */
 	gpupreagg->dprog_key = pgstrom_retain_devprog_key(gpas->dprog_key);
 	gpupreagg->needs_grouping = gpas->needs_grouping;
+	gpupreagg->num_groups = gpas->num_groups;
 	gpupreagg->pds = pds;
 	/*
 	 * Once a row/column data-store connected to the pgstrom_gpupreagg
@@ -3494,6 +3497,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	Size				length;
 	size_t				gwork_sz = 0;
 	size_t				lwork_sz = 0;
+	size_t				gsort_sz;
 	cl_int				i, rc;
 
 	Assert(StromTagIs(gpreagg, GpuPreAgg));
@@ -3750,6 +3754,19 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		if (clgpa->kern_sort == NULL) {
 			goto error;
 		}
+		/* Adjust size of global sorting */
+		gsort_sz = 2 * nhalf;
+		//clserv_log("gsort_sz=%zu nvalids=%u num_groups=%f", gsort_sz, nvalids, gpreagg->num_groups);
+		while (gsort_sz > 2 * lwork_sz)
+		{
+			/* FIXME: fixed-threshold is not preferable in all cases.
+			 * if available, we need to pay attention on the balance
+			 * between row reduction ratio and expected sorting cost.
+			 */
+			if (((double) gsort_sz / gpreagg->num_groups) < 20.0)
+				break;
+			gsort_sz /= 2;
+		}
 
 		/* Sort key in each local work group */
         rc = clserv_launch_bitonic_local(clgpa, gwork_sz, lwork_sz);
@@ -3757,7 +3774,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 			goto error;
 
 		/* Sort key value between inter work group. */
-		for(i=lwork_sz*2; i<2*nhalf; i*=2)
+		for(i=lwork_sz*2; i < gsort_sz; i*=2)
 		{
 			for(j=i; lwork_sz<j; j/=2)
 			{
