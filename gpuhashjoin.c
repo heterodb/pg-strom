@@ -2412,7 +2412,8 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs,
 	/*
 	 * allocation of the destination data-store
 	 */
-	tupdesc = ghjs->pscan_wider_slot->tts_tupleDescriptor;
+	//tupdesc = ghjs->pscan_wider_slot->tts_tupleDescriptor;
+	tupdesc = ghjs->pscan_slot->tts_tupleDescriptor;
 	if (result_format == KDS_FORMAT_TUPSLOT)
 		pds_dest = pgstrom_create_data_store_tupslot(tupdesc, nrooms);
 	else if (result_format == KDS_FORMAT_ROW_FLAT)
@@ -2422,7 +2423,11 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs,
 
 		length = (STROMALIGN(offsetof(kern_data_store,
 									  colmeta[tupdesc->natts])) +
-				  LONGALIGN(HEAPTUPLESIZE + plan_width) * nrooms);
+				  STROMALIGN(sizeof(kern_rowitem) * nrooms) +
+				  (MAXALIGN(offsetof(HeapTupleHeaderData,
+									 t_bits[BITMAPLEN(tupdesc->natts)]) +
+							(tupdesc->tdhasoid ? sizeof(Oid) : 0)) +
+				   MAXALIGN(plan_width)) * nrooms);
 		pds_dest = pgstrom_create_data_store_row_flat(tupdesc, length);
 	}
 	else
@@ -2829,7 +2834,8 @@ gpuhashjoin_exec_multi(CustomPlanState *node)
 		if (node->ps.qual)
 		{
 			ExprContext	   *econtext = ghjs->cps.ps.ps_ExprContext;
-			TupleTableSlot *slot = ghjs->pscan_wider_slot;
+			//TupleTableSlot *slot = ghjs->pscan_wider_slot;
+			TupleTableSlot *slot = ghjs->pscan_slot;
 			HeapTupleData	tuple;
 
 			for (i=0, j=0; i < nitems; i++)
@@ -4041,37 +4047,77 @@ clserv_respond_hashjoin(cl_event event, cl_int ev_status, void *private)
 	 */
 	if (gpuhashjoin->msg.errcode == StromError_DataStoreNoSpace)
 	{
-		/* expand the result buffer then retry, if rough estimation didn't
-		 * offer enough space to store. */
+		/*
+		 * Expand the result buffer then retry, if rough estimation didn't
+		 * give enough space to store the result
+		 */
 		pgstrom_data_store *old_pds = gpuhashjoin->pds_dest;
 		pgstrom_data_store *new_pds;
 		kern_data_store	   *old_kds = old_pds->kds;
 		kern_data_store	   *new_kds;
+		kern_resultbuf	   *kresults;
 		cl_uint				ncols = old_kds->ncols;
 		cl_uint				nitems = old_kds->nitems;
+		Size				head_len;
 		Size				required;
 
-		clserv_log("GHJ input again (%u => %u)", old_kds->nrooms, nitems);
+		/* adjust kern_resultbuf */
+		kresults = KERN_HASHJOIN_RESULTBUF(&gpuhashjoin->khashjoin);
+		clserv_log("GHJ input kresults (%u=>%u)", kresults->nrooms, nitems);
+		kresults->nrooms = nitems;
+		kresults->nitems = 0;
+		kresults->errcode = StromError_Success;
 
-		/* expand kern_data_store */
-		required = (STROMALIGN(offsetof(kern_data_store, colmeta[ncols])) +
-					(LONGALIGN(sizeof(Datum) * ncols) +
-					 LONGALIGN(sizeof(bool) * ncols)) * nitems);
-		new_kds = pgstrom_shmem_alloc(STROMALIGN(required));
-		if (!new_kds)
+		head_len = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+		if (old_kds->format == KDS_FORMAT_TUPSLOT)
 		{
-			gpuhashjoin->msg.errcode = StromError_OutOfSharedMemory;
-            pgstrom_reply_message(&gpuhashjoin->msg);
+			clserv_log("GHJ input again (nrooms: %u => %u)",
+					   old_kds->nrooms, nitems);
+			required = STROMALIGN(head_len +
+								  (LONGALIGN(sizeof(Datum) * ncols) +
+								   LONGALIGN(sizeof(bool) * ncols)) * nitems);
+			new_kds = pgstrom_shmem_alloc(required);
+			if (!new_kds)
+			{
+				gpuhashjoin->msg.errcode = StromError_OutOfSharedMemory;
+				pgstrom_reply_message(&gpuhashjoin->msg);
+				return;
+			}
+			memcpy(new_kds, old_kds, head_len);
+			new_kds->hostptr = (hostptr_t) &new_kds->hostptr;
+			new_kds->length = required;
+			new_kds->usage = 0;
+			new_kds->nrooms = nitems;
+			new_kds->nitems = 0;
+		}
+		else if (old_kds->format == KDS_FORMAT_ROW_FLAT)
+		{
+			clserv_log("GHJ input again (length: %u => %u)",
+					   old_kds->length, old_kds->usage);
+			required = head_len +
+				STROMALIGN(sizeof(kern_blkitem) * old_kds->maxblocks) +
+				STROMALIGN(sizeof(kern_rowitem) * nitems) +
+				STROMALIGN(old_kds->usage);
+			new_kds = pgstrom_shmem_alloc(required);
+			if (!new_kds)
+			{
+				gpuhashjoin->msg.errcode = StromError_OutOfSharedMemory;
+				pgstrom_reply_message(&gpuhashjoin->msg);
+				return;
+			}
+			memcpy(new_kds, old_kds, head_len);
+			new_kds->hostptr = (hostptr_t) &new_kds->hostptr;
+			new_kds->length = required;
+			new_kds->usage = 0;
+			new_kds->nrooms = (required - head_len) / sizeof(kern_rowitem);
+			new_kds->nitems = 0;
+		}
+		else
+		{
+			gpuhashjoin->msg.errcode = StromError_DataStoreCorruption;
+			pgstrom_reply_message(&gpuhashjoin->msg);
 			return;
 		}
-		memcpy(new_kds,
-			   old_kds,
-			   STROMALIGN(offsetof(kern_data_store,
-								   colmeta[ncols])));
-		new_kds->length = required;
-		new_kds->nrooms = nitems;
-		new_kds->nitems = 0;
-
 		/* allocate a new pgstrom_data_store */
 		new_pds = pgstrom_shmem_alloc(sizeof(pgstrom_data_store));
 		if (!new_pds)
