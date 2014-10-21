@@ -787,8 +787,9 @@ typedef struct varatt_indirect
 #define VARDATA_ANY(PTR) \
 	(VARATT_IS_1B(PTR) ? VARDATA_1B(PTR) : VARDATA_4B(PTR))
 
-#define SET_VARSIZE(PTR, len)					\
-	(((__global varattrib_4b *) (PTR))->va_4byte.va_header = (((cl_uint) (len)) << 2))
+#define SET_VARSIZE(PTR, len)						\
+	(((__global varattrib_4b *)						\
+	  (PTR))->va_4byte.va_header = (((cl_uint) (len)) << 2))
 
 /*
  * kern_get_datum
@@ -1048,14 +1049,14 @@ pg_fixup_tupslot_varlena(__private int *errcode,
 			   (__global char *)ktoast);
 
 		if (offset >= baseline &&
-			offset - baseline < kds->nblocks * BLCKSZ)
+			offset - baseline < ktoast->nblocks * BLCKSZ)
 		{
 			cl_uint		blkidx = (offset - baseline) / BLCKSZ;
+			hostptr_t	itemptr = (offset - baseline) % BLCKSZ;
 			__global kern_blkitem *bitem
-				= KERN_DATA_STORE_BLKITEM(kds, blkidx);
+				= KERN_DATA_STORE_BLKITEM(ktoast, blkidx);
 
-			values[colidx] = (Datum)(bitem->page +
-									 (hostptr_t)((offset - baseline) & (BLCKSZ - 1)));
+			values[colidx] = (Datum)(bitem->page + itemptr);
 		}
 		else
 		{
@@ -1072,7 +1073,6 @@ pg_fixup_tupslot_varlena(__private int *errcode,
 		{
 			values[colidx] = (Datum)((hostptr_t)ktoast->hostptr +
 									 (hostptr_t)offset);
-			//printf("values[%d] = %016lx\n", colidx, values[colidx]);
 		}
 		else
 		{

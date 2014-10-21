@@ -694,16 +694,12 @@ gpuhashjoin_add_path(PlannerInfo *root,
 	/* cost estimation and check availability */
 	if (cost_gpuhashjoin(root, gpath_new, &gpu_workspace))
 	{
-		gpu_workspace.startup_cost = 0.0;
-		gpu_workspace.total_cost = 0.0;
 		if (add_path_precheck(joinrel,
 							  gpu_workspace.startup_cost,
 							  gpu_workspace.total_cost,
 							  NULL, required_outer))
 		{
 			final_cost_gpuhashjoin(root, gpath_new, &gpu_workspace);
-			gpath_new->cpath.path.startup_cost = 0.0;
-			gpath_new->cpath.path.total_cost = 0.0;
 			add_path(joinrel, &gpath_new->cpath.path);
 		}
 	}

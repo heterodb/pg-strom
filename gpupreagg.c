@@ -2873,8 +2873,6 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 		clReleaseMemObject(clgpa->m_kds_src);
 	if (clgpa->m_kds_dst)
 		clReleaseMemObject(clgpa->m_kds_dst);
-	//if (clgpa->m_ktoast)
-	//	clReleaseMemObject(clgpa->m_ktoast);
 	if (clgpa->kern_prep)
 		clReleaseKernel(clgpa->kern_prep);
 	if (clgpa->kern_set_rindex)
@@ -3502,8 +3500,6 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	Assert(kds->format == KDS_FORMAT_ROW ||
 		   kds->format == KDS_FORMAT_ROW_FLAT);
 	Assert(kds_dest->format == KDS_FORMAT_TUPSLOT);
-
-	clserv_log("kds_dest=%p hostptr=%p", kds_dest, (void *)kds_dest->hostptr);
 
 	/*
 	 * state object of gpupreagg
