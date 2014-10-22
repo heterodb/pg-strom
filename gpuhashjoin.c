@@ -2804,13 +2804,17 @@ gpuhashjoin_exec_multi(CustomPlanState *node)
 			/* fill up kds_dest by CPU */
 			elog(ERROR, "CPU Recheck not implemented yet");
 		}
+
 		/* source kds performs as ktoast of pds_dest */
 		pds = ghjoin->pds;
 		pds_dest = ghjoin->pds_dest;
 		Assert(pds->kds->format == KDS_FORMAT_ROW ||
 			   pds->kds->format == KDS_FORMAT_ROW_FLAT);
 		Assert(pds_dest->kds->format == KDS_FORMAT_ROW_FLAT);
-		//pds_dest->ktoast = pgstrom_get_data_store(pds);
+
+		/* update perfmon info */
+		if (ghjoin->msg.pfm.enabled)
+			pgstrom_perfmon_add(&ghjs->pfm, &ghjoin->msg.pfm);
 
 		/*
 		 * Make a bulk-slot according to the result

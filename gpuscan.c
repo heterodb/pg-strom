@@ -1179,6 +1179,10 @@ gpuscan_exec_multi(CustomPlanState *node)
 			return NULL;
 		}
 
+		/* update perfmon info */
+		if (gpuscan->msg.pfm.enabled)
+			pgstrom_perfmon_add(&gss->pfm, &gpuscan->msg.pfm);
+
 		/*
 		 * Make a bulk-slot according to the result
 		 */
@@ -1187,8 +1191,6 @@ gpuscan_exec_multi(CustomPlanState *node)
 		bulk->pds = pgstrom_get_data_store(gpuscan->pds);
 		bulk->nvalids = 0;	/* to be set later */
 		pgstrom_track_object(&bulk->pds->sobj, 0);
-
-
 
 		/* No longer gpuscan is referenced any more. The associated
 		 * data-store is not actually released because its refcnt is
