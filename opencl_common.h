@@ -813,17 +813,16 @@ kern_get_datum_tuple(__global kern_colmeta *colmeta,
 					 __global HeapTupleHeaderData *htup,
 					 cl_uint colidx)
 {
+	cl_bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
 	cl_uint		offset = htup->t_hoff;
 	cl_uint		i, ncols = (htup->t_infomask2 & HEAP_NATTS_MASK);
 
 	/* shortcut if colidx is obviously out of range */
 	if (colidx >= ncols)
 		return NULL;
-
 	for (i=0; i < ncols; i++)
 	{
-		if ((htup->t_infomask & HEAP_HASNULL) != 0 &&
-			att_isnull(i, htup->t_bits))
+		if (heap_hasnull && att_isnull(i, htup->t_bits))
 		{
 			if (i == colidx)
 				return NULL;
@@ -831,18 +830,18 @@ kern_get_datum_tuple(__global kern_colmeta *colmeta,
 		else
 		{
 			__global char  *addr;
+			kern_colmeta	cmeta = colmeta[i];
 
-			if (colmeta[i].attlen > 0)
-				offset = TYPEALIGN(colmeta[i].attalign, offset);
+			if (cmeta.attlen > 0)
+				offset = TYPEALIGN(cmeta.attalign, offset);
 			else if (!VARATT_NOT_PAD_BYTE((__global char *)htup + offset))
-				offset = TYPEALIGN(colmeta[i].attalign, offset);
+				offset = TYPEALIGN(cmeta.attalign, offset);
 			/* TODO: overrun checks here */
 			addr = ((__global char *) htup + offset);
 			if (i == colidx)
 				return addr;
-
-			offset += (colmeta[i].attlen > 0
-					   ? colmeta[i].attlen
+			offset += (cmeta.attlen > 0
+					   ? cmeta.attlen
 					   : VARSIZE_ANY(addr));
 		}
 	}

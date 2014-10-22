@@ -193,13 +193,16 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 	/* in case of tuple-slot format */
 	if (kds->format == KDS_FORMAT_TUPSLOT)
 	{
-		Datum	   *tts_values = KERN_DATA_STORE_VALUES(kds, row_index);
-		cl_char	   *tts_isnull = KERN_DATA_STORE_ISNULL(kds, row_index);
+		Datum  *tts_values = KERN_DATA_STORE_VALUES(kds, row_index);
+		bool   *tts_isnull = KERN_DATA_STORE_ISNULL(kds, row_index);
 
 		ExecClearTuple(slot);
-		memcpy(slot->tts_values, tts_values, sizeof(Datum) * kds->ncols);
-		memcpy(slot->tts_isnull, tts_isnull, sizeof(bool) * kds->ncols);
+		slot->tts_values = tts_values;
+		slot->tts_isnull = tts_isnull;
+		//memcpy(slot->tts_values, tts_values, sizeof(Datum) * kds->ncols);
+		//memcpy(slot->tts_isnull, tts_isnull, sizeof(bool) * kds->ncols);
 		ExecStoreVirtualTuple(slot);
+
 		/*
 		 * MEMO: Is it really needed to take memcpy() here? If we can 
 		 * do same job with pointer opertion, it makes more sense from
