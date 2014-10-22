@@ -627,6 +627,25 @@ pgstrom_shmem_zone_length(void)
 }
 
 /*
+ * pgstrom_shmem_maxalloc
+ *
+ * it returns the length of maximum allocatable length
+ */
+Size
+pgstrom_shmem_maxalloc(void)
+{
+	static Size		maxalloc_length = 0;
+
+	if (!maxalloc_length)
+	{
+		int		n = get_next_log2(pgstrom_shmem_head->zone_length + 1);
+
+		maxalloc_length = (1UL << n);
+	}
+	return maxalloc_length;
+}
+
+/*
  * pgstrom_init_slab
  *
  * init slab management structure

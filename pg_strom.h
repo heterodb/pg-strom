@@ -392,6 +392,7 @@ extern void *__pgstrom_shmem_realloc(const char *filename, int lineno,
 extern void pgstrom_shmem_free(void *address);
 extern Size pgstrom_shmem_getsize(void *address);
 extern Size pgstrom_shmem_zone_length(void);
+extern Size pgstrom_shmem_maxalloc(void);
 extern bool pgstrom_shmem_sanitycheck(const void *address);
 extern void pgstrom_shmem_dump(void);
 extern void pgstrom_setup_shmem(Size zone_length,
@@ -797,32 +798,5 @@ typealign_get_width(char type_align)
 	elog(ERROR, "unexpected type alignment: %c", type_align);
 	return -1;	/* be compiler quiet */
 }
-
-#if 0
-/*
- * utility function to access system kparams
- */
-
-static inline kern_data_store *
-KPARAM_GET_KDS_HEAD(kern_parambuf *kparams)
-{
-	bytea  *vl_datum = kparam_get_value(kparams, 0);
-
-	if (!vl_datum)
-		return NULL;
-	return (kern_data_store *)VARDATA_ANY(vl_datum);
-}
-
-static inline kern_toastbuf *
-KPARAM_GET_KTOAST_HEAD(kern_parambuf *kparams)
-{
-	bytea  *vl_datum = kparam_get_value(kparams, 1);
-
-	if (!vl_datum)
-		return NULL;
-	return (kern_toastbuf *)VARDATA_ANY(vl_datum);
-}
-#endif
-
 
 #endif	/* PG_STROM_H */

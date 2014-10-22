@@ -82,6 +82,9 @@ typedef struct
 		List	   *hash_clause;
 		List	   *qual_clause;
 		List	   *host_clause;
+		Size		chunk_size;	/* available size for each relation chunk */
+		cl_uint		ntuples;	/* estimated number of tuples per chunk */
+		cl_uint		nloops;		/* expected number of outer loops */
 	} inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuHashJoinPath;
 
@@ -131,10 +134,11 @@ typedef struct
 	 * innerPlan ... one another MultiHash, if any
 	 */
 	int			depth;		/* depth of this hash table */
-	int			hentry_size;	/* size of fixed length part of hentry */
-	Size		hashtable_size;	/* estimated hash-table size */
-	List	   *hash_resnums;	/* list of resource numbers to be loaded */
-	//List	   *hash_resofs;	/* list of resource offsets in hentry */
+
+	cl_uint		ntuples;	/* number of hash slots */
+	Size		chunk_size;	/* available length for each chunk */
+	Size		hashtable_size;	/* estimated total hashtable size */
+
 	List	   *hash_inner_keys;/* list of inner hash key expressions */
 	List	   *hash_outer_keys;/* list of outer hash key expressions */
 	/*
@@ -202,16 +206,15 @@ typedef struct
 
 typedef struct {
 	CustomPlanState	cps;
-	int			depth;
-	int			hentry_size;
-	Size		hashtable_size;
-	List	   *hash_resnums;
-	List	   *hash_keys;
-	List	   *hash_keylen;
-	List	   *hash_keybyval;
-	//Datum	  **values_array;
-	//bool	  **isnull_array;
-	//Size		ntuples;
+	int				depth;
+	cl_uint			ntuples;
+	Size			chunk_size;
+	Size			hashtable_size;
+	TupleTableSlot *outer_overflow;
+	bool			outer_done;
+	List		   *hash_keys;
+	List		   *hash_keylen;
+	List		   *hash_keybyval;
 } MultiHashState;
 
 /* declaration of static functions */
@@ -304,31 +307,66 @@ static Size
 estimate_hashtable_size(PlannerInfo *root, GpuHashJoinPath *gpath)
 {
 	Size		hashtable_size;
-	int			i;
+	bool		is_first = true;
 
-	/* portion of kern_multihash */
-	hashtable_size = LONGALIGN(offsetof(kern_multihash,
-										htable_offset[gpath->num_rels]));
-	for (i=0; i < gpath->num_rels; i++)
-	{
-		Path	   *scan_path = gpath->inners[i].scan_path;
-		RelOptInfo *scan_rel = scan_path->parent;
-		int			scan_width = scan_rel->width;
-		int			scan_ncols = list_length(scan_rel->reltargetlist);
-		double		ntuples = scan_path->rows * 1.1;
-		Size		entry_size;
+	do {
+		double		largest_size;
+		cl_int		i_largest;
+		cl_int		i, nrels = gpath->num_rels;
 
-		/* force a plausible relation size if no information */
-		if (ntuples <= 1000.0)
-			ntuples = 1000.0;
+		/* increment outer loop count to reduce size of hash table */
+		if (!is_first)
+			gpath->inners[i_largest].nloops++;
+		largest_size = 0.0;
+		i_largest = -1;
 
-		/* expand expected hashtable-size */
-		entry_size = LONGALIGN(offsetof(kern_hashentry, htup) + scan_width);
-		hashtable_size += (LONGALIGN(offsetof(kern_hashtable,
-											  colmeta[scan_ncols])) +
-						   LONGALIGN(sizeof(cl_uint) * (Size)ntuples) +
-						   LONGALIGN(entry_size * (Size)ntuples));
-	}
+		hashtable_size = LONGALIGN(offsetof(kern_multihash,
+											htable_offset[nrels]));
+		for (i=0; i < nrels; i++)
+		{
+			Path	   *scan_path = gpath->inners[i].scan_path;
+			RelOptInfo *scan_rel = scan_path->parent;
+			cl_uint		ncols = list_length(scan_rel->reltargetlist);
+			double		ntuples;
+			Size		entry_size;
+			Size		chunk_size;
+
+			if (is_first)
+				gpath->inners[i].nloops = 1;
+
+			/* force a plausible relation size if no information.
+			 * It expects 15% of margin to avoid unnecessary hash-
+			 * table split
+			 */
+			ntuples = (Max(1.15 * scan_path->rows, 1000.0) /
+					   (double) gpath->inners[i].nloops);
+
+			/* estimate length of each hash entry */
+			entry_size = (offsetof(kern_hashentry, htup) +
+						  MAXALIGN(offsetof(HeapTupleHeaderData,
+											t_bits[BITMAPLEN(ncols)])) +
+						  MAXALIGN(scan_rel->width));
+			/* estimate length of this chunk */
+			chunk_size = (LONGALIGN(offsetof(kern_hashtable,
+											 colmeta[ncols])) +
+						  LONGALIGN(sizeof(cl_uint) * (Size)ntuples) +
+						  LONGALIGN(entry_size * (Size)ntuples));
+			chunk_size = STROMALIGN(chunk_size);
+			if (largest_size < chunk_size)
+			{
+				largest_size = chunk_size;
+				i_largest = i;
+			}
+			gpath->inners[i].chunk_size = chunk_size;
+			gpath->inners[i].ntuples = (cl_uint) ntuples;
+
+			/* expand estimated hashtable-size */
+			hashtable_size += chunk_size;
+		}
+		Assert(i_largest >= 0 && i_largest < nrels);
+		is_first = false;
+	} while (hashtable_size > pgstrom_shmem_maxalloc());
+
 	return hashtable_size;
 }
 
@@ -348,8 +386,7 @@ cost_gpuhashjoin(PlannerInfo *root,
 	Cost		row_cost;
 	double		num_rows;
 	int			num_hash_clauses = 0;
-	Size		hashtable_size;
-	int			i;
+	int			i, numbatches;
 
 	/* cost of source data */
 	startup_cost = outer_path->startup_cost;
@@ -381,22 +418,16 @@ cost_gpuhashjoin(PlannerInfo *root,
 	run_cost += row_cost * num_rows;
 
 	/*
-	 * TODO: we need to pay attention towards joinkey length to copy
-	 * data from host to device, to prevent massive amount of DMA
-	 * request for wider keys, like text comparison.
+	 * Estimation of hash table size, and number of outer loops
+	 * according to the split of hash table.
 	 */
+	gpath->hashtable_size = estimate_hashtable_size(root, gpath);
 
-	/*
-	 * Estimation of hash table size - we want to keep it less than
-	 * the device restricted allocation size.
-	 * For safety, half of shmem zone size is considered as a hard
-	 * restriction on planne phase. If hashtable-size would be
-	 * actually bigger, right now, we simply give it up.
-	 */
-	hashtable_size = estimate_hashtable_size(root, gpath);
-	if (hashtable_size > pgstrom_shmem_zone_length() / 2)
-		return false;
-	gpath->hashtable_size = hashtable_size;
+	numbatches = 1;
+	for (i=0; i < gpath->num_rels; i++)
+		numbatches *= gpath->inners[i].nloops;
+	if (numbatches > 1)
+		run_cost *= numbatches;
 
 	/*
 	 * FIXME: Right now, we pay attention on the memory consumption of
@@ -407,6 +438,7 @@ cost_gpuhashjoin(PlannerInfo *root,
 	workspace->startup_cost = startup_cost;
 	workspace->run_cost = run_cost;
 	workspace->total_cost = startup_cost + run_cost;
+	workspace->numbatches = numbatches;
 
 	return true;
 }
@@ -860,7 +892,8 @@ gpuhashjoin_create_plan(PlannerInfo *root, CustomPath *best_path)
 		mhash->cplan.plan.targetlist = scan_plan->targetlist;
 		mhash->cplan.plan.qual = NIL;
 		mhash->depth = i + 1;
-		mhash->hentry_size = 0;	/* to be set later */
+		mhash->ntuples = gpath->inners[i].ntuples;
+		mhash->chunk_size = gpath->inners[i].chunk_size;
 		mhash->hashtable_size = gpath->hashtable_size;
 
 		/* chain it under the GpuHashJoin */
@@ -3285,9 +3318,11 @@ multihash_begin(CustomPlan *node,
 	mhs->cps.ps.plan = (Plan *) mhash;
 	mhs->cps.ps.state = estate;
 	mhs->depth = mhash->depth;
-	mhs->hentry_size = mhash->hentry_size;
+	mhs->ntuples = mhash->ntuples;
+	mhs->chunk_size = mhash->chunk_size;
 	mhs->hashtable_size = mhash->hashtable_size;
-	mhs->hash_resnums = list_copy(mhash->hash_resnums);
+	mhs->outer_overflow = NULL;
+	mhs->outer_done = false;
 
 	/*
 	 * create expression context for node
@@ -3346,32 +3381,6 @@ multihash_exec(CustomPlanState *node)
 }
 
 static pgstrom_multihash_tables *
-expand_multihash_tables(pgstrom_multihash_tables *mhtables_old)
-{
-	pgstrom_multihash_tables *mhtables_new;
-	Size	maxlen_old = mhtables_old->maxlen;
-	Size	allocated;
-
-	mhtables_new = pgstrom_shmem_alloc_alap(2 * maxlen_old, &allocated);
-	if (!mhtables_new)
-		elog(ERROR, "out of shared memory");
-	memcpy(mhtables_new, mhtables_old,
-		   offsetof(pgstrom_multihash_tables, kern) + maxlen_old);
-	mhtables_new->kern.hostptr = (hostptr_t)&mhtables_new->kern.hostptr;
-	mhtables_new->maxlen =
-		allocated - offsetof(pgstrom_multihash_tables, kern);
-	Assert(mhtables_new->maxlen > maxlen_old);
-
-	pgstrom_untrack_object(&mhtables_old->sobj);
-	pgstrom_shmem_free(mhtables_old);
-	elog(INFO, "pgstrom_multihash_tables was expanded %zu (%p) => %zu (%p)",
-		 maxlen_old, mhtables_old, (Size)mhtables_new->maxlen, mhtables_new);
-    pgstrom_track_object(&mhtables_new->sobj, 0);
-
-	return mhtables_new;
-}
-
-static pgstrom_multihash_tables *
 multihash_preload_khashtable(MultiHashState *mhs,
 							 pgstrom_multihash_tables *mhtables)
 {
@@ -3380,16 +3389,9 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	int				depth = mhs->depth;
 	kern_hashtable *khtable;
 	kern_hashentry *hentry;
-	Size			required;
-	Size			khtable_offset;
-	double			nrows;
-	cl_uint			ncols;
-	cl_uint			nslots;
-	cl_uint			rowid;
+	Size			consumed;
 	cl_uint		   *hash_slots;
-	ListCell	   *lc1;
-	ListCell	   *lc2;
-	ListCell	   *lc3;
+	cl_uint			ntuples;
 	int				i;
 
 	/* preload should be done under the MultiExec context */
@@ -3401,26 +3403,13 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	 */
 	Assert(StromTagIs(mhtables, HashJoinTable));
 	Assert(mhtables->kern.htable_offset[depth] == 0);
-	Assert(mhtables->length == LONGALIGN(mhtables->length));
-	khtable_offset = mhtables->length;
-	mhtables->kern.htable_offset[depth] = khtable_offset;
+	Assert(mhtables->usage == LONGALIGN(mhtables->usage));
+	mhtables->kern.htable_offset[depth] = mhtables->usage;
 
-	ncols = tupdesc->natts;
-	nrows = mhs->cps.ps.plan->plan_rows;
-	if (nrows < 1000.0)
-		nrows = 1000.0;
-	nslots = (cl_uint)(nrows * 1.15);
-
-	required = (LONGALIGN(offsetof(kern_hashtable, colmeta[ncols])) +
-				LONGALIGN(sizeof(cl_uint) * nslots));
-	while (mhtables->length + required > mhtables->maxlen)
-		mhtables = expand_multihash_tables(mhtables);
-
-	khtable = (kern_hashtable *) ((char *)&mhtables->kern + khtable_offset);
-	khtable->nslots = nslots;
-	khtable->ncols = ncols;
-	khtable->is_outer = false;	/* only INNER is supported right now */
-
+	khtable = (kern_hashtable *)((char *)&mhtables->kern + mhtables->usage);
+	khtable->ncols = tupdesc->natts;
+	khtable->nslots = mhs->ntuples;
+	khtable->is_outer = false;	/* Only INNER is supported right now */
 	for (i=0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute attr = tupdesc->attrs[i];
@@ -3431,49 +3420,54 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		khtable->colmeta[i].rs_attnum = attr->attnum;
 	}
 	hash_slots = KERN_HASHTABLE_SLOT(khtable);
-	memset(hash_slots, 0, sizeof(cl_uint) * nslots);
-	mhtables->length += LONGALIGN((uintptr_t)&hash_slots[nslots] -
-								  (uintptr_t)khtable);
+	memset(hash_slots, 0, sizeof(cl_uint) * khtable->nslots);
+	consumed = LONGALIGN((uintptr_t)&hash_slots[khtable->nslots] -
+						 (uintptr_t)khtable);
 	/*
-	 * Next, get all the tuples from the outer relation into hash table
-	 * in this level.
+	 * Nest, fill up tuples fetched from the outer relation into
+	 * the hash-table in this level
 	 */
-	for (rowid=0; ; rowid++)
+	while (true)
 	{
 		TupleTableSlot *scan_slot;
 		HeapTuple		scan_tuple;
-		Datum			value;
-		bool			isnull;
+		Size			entry_size;
 		pg_crc32		hash;
+		ListCell	   *lc1;
+		ListCell	   *lc2;
+		ListCell	   *lc3;
 
-		scan_slot = ExecProcNode(outerPlanState(mhs));
-		if (TupIsNull(scan_slot))
-			break;
-		scan_tuple = ExecFetchSlotTuple(scan_slot);
-		required = LONGALIGN(offsetof(kern_hashentry, htup) +
-							 scan_tuple->t_len);
-
-		/* Expand if hash-table size is smaller than requirement */
-		while (mhtables->length + required > mhtables->maxlen)
+		if (!mhs->outer_overflow)
+			scan_tuple = ExecFetchSlotTuple(scan_slot);
+		else
 		{
-			mhtables = expand_multihash_tables(mhtables);
-			khtable = (kern_hashtable *)((char *)&mhtables->kern +
-										 khtable_offset);
-			hash_slots = KERN_HASHTABLE_SLOT(khtable);
+			scan_slot = mhs->outer_overflow;
+			mhs->outer_overflow = NULL;
+		}
+		if (TupIsNull(scan_slot))
+		{
+			mhs->outer_done = true;
+			break;
+		}
+		scan_tuple = ExecFetchSlotTuple(scan_slot);
+
+		/*
+		 * NOTE: If number of tuples read is less than expected, we try to
+		 * read it aggressively even if we need to use margin area. 
+		 * If we already read expected number of tuples, we don't read
+		 * anymore unless we consume all the area being assigned on.
+		 */
+		entry_size = LONGALIGN(offsetof(kern_hashentry, htup) +
+							   scan_tuple->t_len);
+		if (ntuples < mhs->ntuples
+			? consumed + entry_size > mhs->chunk_size + mhtables->margin
+			: consumed + entry_size > mhs->chunk_size)
+		{
+			mhs->outer_overflow = scan_slot;
+			break;
 		}
 
-		/* Allocation of a hash entry */
-		hentry = (kern_hashentry *)
-			((char *)&mhtables->kern + mhtables->length);
-		memset(hentry, 0, offsetof(kern_hashentry, htup));
-		mhtables->length += required;
-
-		/* Setting up its fields */
-		hentry->rowid = rowid;
-		hentry->t_len = scan_tuple->t_len;
-		memcpy(&hentry->htup, scan_tuple->t_data, scan_tuple->t_len);
-
-		/* Calculation of a hash value, and insert an appropriate hash-slot */
+		/* calculation of a hash value of this entry */
 		INIT_CRC32(hash);
 		econtext->ecxt_outertuple = scan_slot;
 		forthree (lc1, mhs->hash_keys,
@@ -3483,6 +3477,8 @@ multihash_preload_khashtable(MultiHashState *mhs,
 			ExprState  *clause = lfirst(lc1);
 			int			keylen = lfirst_int(lc2);
 			bool		keybyval = lfirst_int(lc3);
+			Datum		value;
+			bool		isnull;
 
 			value = ExecEvalExpr(clause, econtext, &isnull, NULL);
 			if (isnull)
@@ -3502,14 +3498,29 @@ multihash_preload_khashtable(MultiHashState *mhs,
 			}
 		}
 		FIN_CRC32(hash);
-		hentry->hash = hash;
 
-		/* Insert this new entry */
-		i = hash % nslots;
+		/* allocation of hash entry and insert it */
+		hentry = (kern_hashentry *)((char *)khtable + consumed);
+		hentry->hash = hash;
+		hentry->rowid = ntuples;	/* actually not used... */
+		hentry->t_len = scan_tuple->t_len;
+		memcpy(&hentry->htup, scan_tuple->t_data, scan_tuple->t_len);
+
+		i = hash % khtable->nslots;
 		hentry->next = hash_slots[i];
-		hash_slots[i] = ((uintptr_t)hentry - (uintptr_t)khtable);
+		hash_slots[i] = (cl_uint)consumed;
+
+		/* increment buffer consumption */
+		if (consumed + entry_size > mhs->chunk_size)
+			mhtables->margin -= entry_size;
+		consumed += entry_size;
+		/* increment number of tuples read */
+		ntuples++;
 	}
-	mhtables->ntuples += rowid;
+	mhtables->usage += consumed;
+	Assert(mhtables->usage < mhtables->length);
+
+	mhtables->ntuples += (double) ntuples;
 
 	return mhtables;
 }
@@ -3534,7 +3545,7 @@ multihash_exec_multi(CustomPlanState *node)
 		/* no more deep hash-table, so create a MultiHashNode */
 		pgstrom_multihash_tables *mhtables;
 		int			nrels = depth;
-		Size		required;
+		Size		usage;
 		Size		allocated;
 
 		mhnode = palloc0(sizeof(MultiHashNode));
@@ -3542,17 +3553,21 @@ multihash_exec_multi(CustomPlanState *node)
 		mhnode->nrels = nrels;
 
 		/* allocation of multihash_tables on shared memory */
-		required = (Size)((double)mhs->hashtable_size * 1.1 +
-						  offsetof(pgstrom_multihash_tables, kern));
-		mhtables = pgstrom_shmem_alloc_alap(required, &allocated);
+		mhtables = pgstrom_shmem_alloc_alap(mhs->hashtable_size, &allocated);
 		if (!mhtables)
 			elog(ERROR, "out of shared memory");
+
+		/* initialize multihash_tables */
+		usage = STROMALIGN(offsetof(kern_multihash,
+									htable_offset[nrels + 1]));
+		memset(mhtables, 0, usage);
+
 		mhtables->sobj.stag = StromTag_HashJoinTable;
-		mhtables->maxlen =
-			allocated - offsetof(pgstrom_multihash_tables, kern);
-		mhtables->length = STROMALIGN(offsetof(kern_multihash,
-											   htable_offset[nrels + 1]));
-		mhtables->ntuples = 0;
+		mhtables->length =
+			(allocated - offsetof(pgstrom_multihash_tables, kern));
+		mhtables->usage = usage;
+		mhtables->margin = allocated - mhs->hashtable_size;
+		mhtables->ntuples = 0.0;
 		SpinLockInit(&mhtables->lock);
 		mhtables->refcnt = 1;
 		mhtables->dindex = -1;		/* set by opencl-server */
@@ -3665,10 +3680,9 @@ multihash_textout_plan(StringInfo str, const CustomPlan *node)
 	MultiHash  *plannode = (MultiHash *) node;
 
 	appendStringInfo(str, " :depth %d", plannode->depth);
-	appendStringInfo(str, " :hentry_size %d", plannode->hentry_size);
+	appendStringInfo(str, " :ntuples %u", plannode->ntuples);
+	appendStringInfo(str, " :chunk_size %zu", plannode->chunk_size);
 	appendStringInfo(str, " :hashtable_size %zu", plannode->hashtable_size);
-	appendStringInfo(str, " :hash_resnums %s",
-					 nodeToString(plannode->hash_resnums));
 	appendStringInfo(str, " :hash_inner_keys %s",
 					 nodeToString(plannode->hash_inner_keys));
 	appendStringInfo(str, " :hash_outer_keys %s",
@@ -3683,9 +3697,9 @@ multihash_copy_plan(const CustomPlan *from)
 
 	CopyCustomPlanCommon((Node *)oldnode, (Node *)newnode);
 	newnode->depth           = oldnode->depth;
-	newnode->hentry_size     = oldnode->hentry_size;
+	newnode->ntuples         = oldnode->ntuples;
+	newnode->chunk_size      = oldnode->chunk_size;
 	newnode->hashtable_size  = oldnode->hashtable_size;
-	newnode->hash_resnums    = list_copy(oldnode->hash_resnums);
 	newnode->hash_inner_keys = copyObject(oldnode->hash_inner_keys);
 	newnode->hash_outer_keys = copyObject(oldnode->hash_outer_keys);
 

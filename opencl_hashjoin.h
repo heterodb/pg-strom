@@ -929,11 +929,10 @@ pg_varlena_hashref(__global kern_hashtable *khtable,
 typedef struct pgstrom_multihash_tables
 {
 	StromObject		sobj;		/* = StromTab_HashJoinTable */
-	cl_uint			maxlen;		/* max available length (also means size
-								 * of allocated shared memory region) */
-	cl_uint			length;		/* total usage of allocated shmem
-								 * (also means length of DMA send) */
-	cl_uint			ntuples;	/* number of tuples in this mhash-table */
+	Size			length;		/* max available length of this mhash */
+	Size			usage;		/* current usage of this mhash */
+	Size			margin;		/* margin of mhash usage  */
+	double			ntuples;	/* number of tuples in this mhash */
 	slock_t			lock;		/* protection of the fields below */
 	cl_int			refcnt;		/* reference counter of this hash table */
 	cl_int			dindex;		/* device to load the hash table */
