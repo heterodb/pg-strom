@@ -99,8 +99,6 @@ typedef struct
 	Oid			varcollid;	/* collation oid of the expression node */
 	bool		ref_host;	/* true, if referenced in host expression */
 	bool		ref_device;	/* true, if referenced in device expression */
-	//cl_uint		hkey_index;	/* index number of hash entries */
-	//cl_uint		hkey_offset;/* offset in hash entries */
 	Expr	   *expr;		/* source Var or PlaceHolderVar node */
 } vartrans_info;
 
@@ -160,11 +158,6 @@ typedef struct {
 	pgstrom_multihash_tables *mhtables;
 	TupleTableSlot *outer_slot;
 	int				nrels;
-	struct {
-		Size				ntuples;
-		Datum			  **values_array;
-		bool			  **isnull_array;
-	} rels[FLEXIBLE_ARRAY_MEMBER];
 } MultiHashNode;
 
 typedef struct
@@ -213,13 +206,12 @@ typedef struct {
 	int			hentry_size;
 	Size		hashtable_size;
 	List	   *hash_resnums;
-	//List	   *hash_resofs;
 	List	   *hash_keys;
 	List	   *hash_keylen;
 	List	   *hash_keybyval;
-	Datum	  **values_array;
-	bool	  **isnull_array;
-	Size		ntuples;
+	//Datum	  **values_array;
+	//bool	  **isnull_array;
+	//Size		ntuples;
 } MultiHashState;
 
 /* declaration of static functions */
@@ -2617,9 +2609,6 @@ pgstrom_fetch_gpuhashjoin(GpuHashJoinState *ghjs,
 			return NULL;	/* end of inner multi-hashtable */
 
 		mhnode->outer_slot = MakeSingleTupleTableSlot(tupdesc);
-		Assert(!mhnode->rels[0].ntuples &&
-			   !mhnode->rels[0].values_array &&
-			   !mhnode->rels[0].isnull_array);
 		ghjs->mhnode = mhnode;
 	}
 
@@ -3398,14 +3387,6 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	cl_uint			nslots;
 	cl_uint			rowid;
 	cl_uint		   *hash_slots;
-	char		   *nv_buffer;
-	Size			nv_usage;
-	Size			nv_length;
-	Size			nv_itemsz;
-	Datum		  **values_array;
-	bool		  **isnull_array;
-	cl_uint			array_usage;
-	cl_uint			array_length;
 	ListCell	   *lc1;
 	ListCell	   *lc2;
 	ListCell	   *lc3;
@@ -3454,21 +3435,6 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	mhtables->length += LONGALIGN((uintptr_t)&hash_slots[nslots] -
 								  (uintptr_t)khtable);
 	/*
-	 * allocation of private memory to store isnull/values pairs for
-	 * later materialization
-	 */
-	nv_itemsz = MAXALIGN(sizeof(Datum) * tupdesc->natts +
-						 sizeof(bool) * tupdesc->natts);
-	nv_length = nslots;
-	nv_usage = 0;
-	nv_buffer = palloc(nv_itemsz * nv_length);
-
-	array_length = nslots;
-	array_usage = 0;
-	values_array = palloc0(sizeof(Datum *) * nslots);
-	isnull_array = palloc0(sizeof(bool *) * nslots);
-
-	/*
 	 * Next, get all the tuples from the outer relation into hash table
 	 * in this level.
 	 */
@@ -3479,8 +3445,6 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		Datum			value;
 		bool			isnull;
 		pg_crc32		hash;
-		Datum		   *p_values;
-		bool		   *p_isnull;
 
 		scan_slot = ExecProcNode(outerPlanState(mhs));
 		if (TupIsNull(scan_slot))
@@ -3544,41 +3508,8 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		i = hash % nslots;
 		hentry->next = hash_slots[i];
 		hash_slots[i] = ((uintptr_t)hentry - (uintptr_t)khtable);
-
-
-		/* XXX - buffer below shall be removed - XXX*/
-
-		/*
-		 * Save the copy of scanned tuple in the private memory
-		 * for materialization on the later stage.
-		 */
-		if (array_usage == array_length)
-		{
-			array_length += array_length;
-			values_array = repalloc(values_array,
-									sizeof(Datum *) * array_length); 
-			isnull_array = repalloc(isnull_array,
-									sizeof(bool *) * array_length);
-		}
-
-		if (nv_usage == nv_length)
-		{
-			nv_buffer = palloc(nv_itemsz * nv_length);
-			nv_usage = 0;
-		}
-
-		p_values = (Datum *)((char *)nv_buffer + nv_itemsz * nv_usage);
-		p_isnull = (bool *)((char *)p_values + sizeof(Datum) * tupdesc->natts);
-		nv_usage++;
-		for (i=0; i < tupdesc->natts; i++)
-			p_values[i] = slot_getattr(scan_slot, i+1, &p_isnull[i]);
-		values_array[array_usage] = p_values;
-		isnull_array[array_usage] = p_isnull;
-		array_usage++;
 	}
-	mhs->ntuples = array_usage;
-	mhs->values_array = values_array;
-	mhs->isnull_array = isnull_array;
+	mhtables->ntuples += rowid;
 
 	return mhtables;
 }
@@ -3606,7 +3537,7 @@ multihash_exec_multi(CustomPlanState *node)
 		Size		required;
 		Size		allocated;
 
-		mhnode = palloc0(offsetof(MultiHashNode, rels[depth + 1]));
+		mhnode = palloc0(sizeof(MultiHashNode));
 		NodeSetTag(mhnode, T_Invalid);
 		mhnode->nrels = nrels;
 
@@ -3621,6 +3552,7 @@ multihash_exec_multi(CustomPlanState *node)
 			allocated - offsetof(pgstrom_multihash_tables, kern);
 		mhtables->length = STROMALIGN(offsetof(kern_multihash,
 											   htable_offset[nrels + 1]));
+		mhtables->ntuples = 0;
 		SpinLockInit(&mhtables->lock);
 		mhtables->refcnt = 1;
 		mhtables->dindex = -1;		/* set by opencl-server */
@@ -3638,22 +3570,16 @@ multihash_exec_multi(CustomPlanState *node)
 
 		mhnode->mhtables = mhtables;
 	}
-	/* No other hash table should exist in the same depth */
-	Assert(!mhnode->rels[depth].ntuples);
-
 	/*
 	 * construct a kernel hash-table that stores all the inner-keys
 	 * in this level, being loaded from the outer relation
 	 */
 	mhnode->mhtables = multihash_preload_khashtable(mhs, mhnode->mhtables);
-	mhnode->rels[depth].ntuples  = mhs->ntuples;
-	mhnode->rels[depth].values_array = mhs->values_array;
-	mhnode->rels[depth].isnull_array = mhs->isnull_array;
 
 	/* must provide our own instrumentation support */
 	if (node->ps.instrument)
-		InstrStopNode(node->ps.instrument, (double)mhs->ntuples);
-
+		InstrStopNode(node->ps.instrument,
+					  (double)mhnode->mhtables->ntuples);
 	return (Node *) mhnode;
 }
 

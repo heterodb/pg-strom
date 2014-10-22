@@ -933,6 +933,7 @@ typedef struct pgstrom_multihash_tables
 								 * of allocated shared memory region) */
 	cl_uint			length;		/* total usage of allocated shmem
 								 * (also means length of DMA send) */
+	cl_uint			ntuples;	/* number of tuples in this mhash-table */
 	slock_t			lock;		/* protection of the fields below */
 	cl_int			refcnt;		/* reference counter of this hash table */
 	cl_int			dindex;		/* device to load the hash table */
