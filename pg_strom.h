@@ -302,7 +302,6 @@ typedef struct pgstrom_data_store {
 	slock_t				lock;
 	volatile int		refcnt;
 	kern_data_store	   *kds;		/* reference to kern_data_store */
-//	kern_toastbuf	   *ktoast;		/* reference to kern_toastbuf */
 	struct pgstrom_data_store *ktoast;
 	ResourceOwner		resowner;	/* !!NOTE: private address!!*/
 	char			   *local_pages;/* duplication of local pages */
