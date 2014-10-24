@@ -599,7 +599,7 @@ static __global Datum *pg_common_vstore(__global kern_data_store *kds,
 			kparams->poffset[param_id] > 0)					\
 		{													\
 			result.value = *((__global BASE *)				\
-							 ((uintptr_t)kparams +			\
+							 ((__global char *)kparams +	\
 							  kparams->poffset[param_id]));	\
 			result.isnull = false;							\
 		}													\
