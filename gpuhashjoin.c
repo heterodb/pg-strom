@@ -212,6 +212,7 @@ typedef struct {
 	Size			hashtable_size;
 	TupleTableSlot *outer_overflow;
 	bool			outer_done;
+	kern_hashtable *curr_chunk;
 	List		   *hash_keys;
 	List		   *hash_keylen;
 	List		   *hash_keybyval;
@@ -3323,6 +3324,7 @@ multihash_begin(CustomPlan *node,
 	mhs->hashtable_size = mhash->hashtable_size;
 	mhs->outer_overflow = NULL;
 	mhs->outer_done = false;
+	mhs->curr_chunk = NULL;
 
 	/*
 	 * create expression context for node
@@ -3517,10 +3519,12 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		/* increment number of tuples read */
 		ntuples++;
 	}
+	mhtables->ntuples += (double) ntuples;
 	mhtables->usage += consumed;
 	Assert(mhtables->usage < mhtables->length);
 
-	mhtables->ntuples += (double) ntuples;
+	khtable->length = consumed;
+	mhs->curr_chunk = pmemcpy(khtable, khtable->length);
 
 	return mhtables;
 }
@@ -3529,7 +3533,7 @@ static Node *
 multihash_exec_multi(CustomPlanState *node)
 {
 	MultiHashState *mhs = (MultiHashState *) node;
-	MultiHashNode  *mhnode;
+	MultiHashNode  *mhnode = NULL;
 	PlanState	   *inner_ps;	/* underlying MultiHash, if any */
 	int				depth = mhs->depth;
 
@@ -3539,7 +3543,18 @@ multihash_exec_multi(CustomPlanState *node)
 
 	inner_ps = innerPlanState(mhs);
 	if (inner_ps)
+	{
 		mhnode = (MultiHashNode *) MultiExecProcNode(inner_ps);
+
+		if (!mhnode)
+		{
+			if (mhs->outer_done)
+				goto out;
+			ExecReScan(inner_ps);
+			mhnode = (MultiHashNode *) MultiExecProcNode(inner_ps);
+		}
+		Assert(mhnode);
+	}
 	else
 	{
 		/* no more deep hash-table, so create a MultiHashNode */
@@ -3547,6 +3562,9 @@ multihash_exec_multi(CustomPlanState *node)
 		int			nrels = depth;
 		Size		usage;
 		Size		allocated;
+
+		if (mhs->outer_done)
+			goto out;
 
 		mhnode = palloc0(sizeof(MultiHashNode));
 		NodeSetTag(mhnode, T_Invalid);
@@ -3591,6 +3609,7 @@ multihash_exec_multi(CustomPlanState *node)
 	 */
 	mhnode->mhtables = multihash_preload_khashtable(mhs, mhnode->mhtables);
 
+out:
 	/* must provide our own instrumentation support */
 	if (node->ps.instrument)
 		InstrStopNode(node->ps.instrument,
@@ -3616,7 +3635,17 @@ multihash_end(CustomPlanState *node)
 static void
 multihash_rescan(CustomPlanState *node)
 {
-	elog(ERROR, "not implemented yet");
+	MultiHashState *mhs = (MultiHashState *) node;
+
+	if (innerPlanState(node))
+		ExecReScan(innerPlanState(node));
+	ExecReScam(outerPlanState(node));
+
+	if (mhs->curr_chunk)
+		pfree(mhs->curr_chunk);
+	mhs->curr_chunk = NULL;
+	mhs->outer_done = false;
+	mhs->outer_overflow = NULL;
 }
 
 static void

@@ -105,10 +105,11 @@ typedef struct
 
 typedef struct
 {
+	cl_uint			length;		/* length of this hashtable chunk */
 	cl_uint			ncols;		/* number of inner relation's columns */
 	cl_uint			nslots;		/* width of hash slot */
 	cl_char			is_outer;	/* true, if outer join (not supported now) */
-	cl_char			__padding__[7];	/* for 64bit alignment */
+	cl_char			__padding__[3];	/* for 64bit alignment */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];
 } kern_hashtable;
 
