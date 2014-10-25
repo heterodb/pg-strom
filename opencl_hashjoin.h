@@ -420,6 +420,7 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 	__global cl_int	   *rbuffer;
 	__global void	   *datum;
 	cl_uint				nrels = kresults->nrels;
+	cl_bool				heap_hasnull = false;
 	cl_uint				t_hoff;
 	cl_uint				required;
 	cl_uint				offset;
@@ -428,15 +429,6 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 	cl_uint				usage_tail;
 	__local cl_uint		usage_prev;
 	cl_int				errcode = StromError_Success;
-
-	/* Ensure format of the kern_data_store (source/destination) */
-	if ((kds->format != KDS_FORMAT_ROW &&
-		 kds->format != KDS_FORMAT_ROW_FLAT) ||
-		kds_dest->format != KDS_FORMAT_ROW_FLAT)
-	{
-		STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption);
-		goto out;
-	}
 
 	/* Case of overflow; it shall be retried or executed by CPU instead,
 	 * so no projection is needed anyway. We quickly exit the kernel.
@@ -449,15 +441,25 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
 		goto out;
 	}
-	/* combination of rows in this join */
-	rbuffer = kresults->results + nrels * get_global_id(0);
 
 	/* update nitems of kds_dest. note that get_global_id(0) is not always
-	 * called earlier than other thread. So, we should not expect nitems
+     * called earlier than other thread. So, we should not expect nitems
 	 * of kds_dest is initialized.
 	 */
 	if (get_global_id(0) == 0)
 		kds_dest->nitems = kresults->nitems;
+
+	/* Ensure format of the kern_data_store (source/destination) */
+	if ((kds->format != KDS_FORMAT_ROW &&
+		 kds->format != KDS_FORMAT_ROW_FLAT) ||
+		kds_dest->format != KDS_FORMAT_ROW_FLAT)
+	{
+		STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption);
+		goto out;
+	}
+
+	/* combination of rows in this join */
+	rbuffer = kresults->results + nrels * get_global_id(0);
 
 	/*
 	 * Step.1 - compute length of the joined tuple
@@ -466,7 +468,6 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 	{
 		cl_uint		i, ncols = kds_dest->ncols;
 		cl_uint		datalen = 0;
-		cl_bool		has_null = false;
 
 		for (i=0; i < ncols; i++)
 		{
@@ -496,7 +497,7 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 				datum = NULL;
 
 			if (!datum)
-				has_null = true;
+				heap_hasnull = true;
 			else
 			{
 				/* att_align_datum */
@@ -510,7 +511,7 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 			}
 		}
 		required = offsetof(HeapTupleHeaderData, t_bits);
-		if (has_null)
+		if (heap_hasnull)
 			required += bitmaplen(ncols);
 		if (kds->tdhasoid)
 			required += sizeof(cl_uint);
@@ -571,8 +572,7 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 		htup->t_ctid.ip_blkid.bi_lo = 0;
 		htup->t_ctid.ip_posid = 0;
 		htup->t_infomask2 = (ncols & HEAP_NATTS_MASK);
-		htup->t_infomask = 0;
-		memset(htup->t_bits, 0, bitmaplen(ncols));
+		htup->t_infomask = (heap_hasnull ? HEAP_HASNULL : 0);
 		htup->t_hoff = t_hoff;
 		curr = t_hoff;
 
@@ -603,7 +603,7 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 
 			/* put datum on the destination kds */
 			if (!datum)
-				htup->t_infomask |= HEAP_HASNULL;
+				htup->t_bits[i >> 3] &= ~(1 << (i & 0x07));
 			else
 			{
 				if (cmeta.attlen > 0)
@@ -651,7 +651,8 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 					memcpy((__global char *)htup + curr, datum, vl_len);
 					curr += vl_len;
 				}
-				htup->t_bits[i >> 3] |= (1 << (i & 0x07));
+				if (heap_hasnull)
+					htup->t_bits[i >> 3] |= (1 << (i & 0x07));
 			}
 		}
 	}

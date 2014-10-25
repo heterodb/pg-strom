@@ -1005,6 +1005,9 @@ gpuhashjoin_codegen_projection(StringInfo body,
 
             if (vtrans->srcdepth != depth)
                 continue;
+			if (!vtrans->ref_host)
+				continue;
+
             get_typlenbyval(vtrans->vartype, &typlen, &typbyval);
 			if (typbyval)
 			{
@@ -1210,7 +1213,6 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 		for (i=1; i <= ghjoin->num_rels; i++)
 			appendStringInfo(
 				body,
-				//"  rbuffer[%d] = kentry_%d->rowid + 1;\n",
 				"  rbuffer[%d] = (cl_int)"
 				"((uintptr_t)kentry_%d - (uintptr_t)khtable_%d);\n",
 				i, i, i);
