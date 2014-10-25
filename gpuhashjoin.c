@@ -4428,6 +4428,32 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
     gpuhashjoin->msg.pfm.num_dma_send++;
 
 	/*
+	 * Enqueue DMA send of kern_rowmap, if any
+	 */
+	if (clghj->m_rowmap)
+	{
+		length = STROMALIGN(offsetof(kern_row_map,
+									 rindex[krowmap->nvalids]));
+		rc = clEnqueueWriteBuffer(clghj->kcmdq,
+								  clghj->m_rowmap,
+								  CL_FALSE,
+								  0,
+								  length,
+								  krowmap,
+								  0,
+								  NULL,
+								  &clghj->events[clghj->ev_index]);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
+			goto error;
+		}
+		clghj->ev_index++;
+		gpuhashjoin->msg.pfm.bytes_dma_send += length;
+		gpuhashjoin->msg.pfm.num_dma_send++;
+	}
+
+	/*
 	 * Enqueue DMA send of kern_data_store
 	 * according to the type of data store
 	 */
@@ -4471,6 +4497,7 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	 *                       __global kern_multihash *kmhash,
 	 *                       __global kern_data_store *kds,
 	 *                       __global kern_data_store *ktoast,
+	 *                       __global kern_row_map   *krowmap,
 	 *                       KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 	 */
 
@@ -4527,7 +4554,7 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	rc = clSetKernelArg(clghj->kern_main,
 						4,	/*  __global kern_row_map *krowmap */
 						sizeof(cl_mem),
-						&clghj->m_ktoast);
+						&clghj->m_rowmap);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));

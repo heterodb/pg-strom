@@ -1223,8 +1223,8 @@ gpuscan_exec_multi(CustomPlanState *node)
 
 		for (i=0, j=0; i < nitems; i++)
 		{
-			cl_uint			row_index = (!rindex ? i + 1 : rindex[i]);
-			bool			do_recheck = false;
+			cl_uint		row_index = (!rindex ? i + 1 : rindex[i]);
+			bool		do_recheck = false;
 
 			Assert(row_index != 0);
 			if (row_index > 0)
