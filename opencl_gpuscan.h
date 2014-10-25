@@ -137,7 +137,7 @@ static pg_bool_t
 gpuscan_qual_eval(__private cl_int *errcode,
 				  __global kern_parambuf *kparams,
 				  __global kern_data_store *kds,
-				  __global kern_toastbuf *ktoast,
+				  __global kern_data_store *ktoast,
 				  size_t kds_index);
 /*
  * kernel entrypoint of gpuscan
@@ -145,7 +145,7 @@ gpuscan_qual_eval(__private cl_int *errcode,
 __kernel void
 gpuscan_qual(__global kern_gpuscan *kgpuscan,	/* in/out */
 			 __global kern_data_store *kds,		/* in */
-			 __global kern_toastbuf *ktoast,	/* in */
+			 __global kern_data_store *ktoast,	/* always NULL */
 			 KERN_DYNAMIC_LOCAL_WORKMEM_ARG)	/* in */
 {
 	pg_bool_t	rc;

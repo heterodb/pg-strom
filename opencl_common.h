@@ -572,15 +572,7 @@ static __global Datum *pg_common_vstore(__global kern_data_store *kds,
 	{														\
 		__global Datum *daddr;								\
 		union {												\
-			cl_bool		v_cl_bool_buf;						\
-			cl_short	v_cl_short_buf;						\
-			cl_ushort	v_cl_ushort_buf;					\
-			cl_int		v_cl_int_buf;						\
-			cl_uint		v_cl_uint_buf;						\
-			cl_long		v_cl_long_buf;						\
-			cl_ulong	v_cl_ulong_buf;						\
-			cl_float	v_cl_float_buf;						\
-			cl_double	v_cl_double_buf;					\
+			BASE		v_base;								\
 			Datum		v_datum;							\
 		} temp;												\
 		daddr = pg_common_vstore(kds, ktoast, errcode,		\
@@ -589,7 +581,7 @@ static __global Datum *pg_common_vstore(__global kern_data_store *kds,
 		if (daddr)											\
 		{													\
 			temp.v_datum = 0;								\
-			temp.v_##BASE##_buf = datum.value;				\
+			temp.v_base = datum.value;						\
 			*daddr = temp.v_datum;							\
 		}													\
 	}
@@ -607,7 +599,7 @@ static __global Datum *pg_common_vstore(__global kern_data_store *kds,
 			kparams->poffset[param_id] > 0)					\
 		{													\
 			result.value = *((__global BASE *)				\
-							 ((uintptr_t)kparams +			\
+							 ((__global char *)kparams +	\
 							  kparams->poffset[param_id]));	\
 			result.isnull = false;							\
 		}													\

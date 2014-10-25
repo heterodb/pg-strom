@@ -420,7 +420,7 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 		"gpuscan_qual_eval(__private cl_int *errcode,\n"
 		"                  __global kern_parambuf *kparams,\n"
 		"                  __global kern_data_store *kds,\n"
-		"                  __global kern_toastbuf *ktoast,\n"
+		"                  __global kern_data_store *ktoast,\n"
 		"                  size_t kds_index)\n"
 		"{\n"
 		"%s"
@@ -1223,8 +1223,8 @@ gpuscan_exec_multi(CustomPlanState *node)
 
 		for (i=0, j=0; i < nitems; i++)
 		{
-			cl_uint			row_index = (!rindex ? i + 1 : rindex[i]);
-			bool			do_recheck = false;
+			cl_uint		row_index = (!rindex ? i + 1 : rindex[i]);
+			bool		do_recheck = false;
 
 			Assert(row_index != 0);
 			if (row_index > 0)
@@ -1843,7 +1843,7 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	}
 
 	/*
-	 * allocation of device memory for kern_toastbuf, but never required
+	 * allocation of device memory for toast buffer, but never required
 	 */
 	clgss->m_ktoast = NULL;
 
@@ -1855,7 +1855,7 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	 * pg_bool_t
 	 * gpuscan_qual_eval(__global kern_gpuscan *kgpuscan,
 	 *                   __global kern_data_store *kds,
-	 *                   __global kern_toastbuf *ktoast,
+	 *                   __global kern_data_store *ktoast,
 	 *                   __local void *local_workbuf)
 	 */
 	rc = clSetKernelArg(clgss->kernel,
@@ -1879,7 +1879,7 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	}
 
 	rc = clSetKernelArg(clgss->kernel,
-						2,		/* kern_toastbuf; always NULL */
+						2,		/* kds of toast buffer; always NULL */
 						sizeof(cl_mem),
 						&clgss->m_ktoast);
 	if (rc != CL_SUCCESS)
