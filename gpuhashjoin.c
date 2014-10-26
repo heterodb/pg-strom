@@ -82,6 +82,7 @@ typedef struct
 		List	   *hash_clause;
 		List	   *qual_clause;
 		List	   *host_clause;
+		double		threshold_ratio;
 		Size		chunk_size;	/* available size for each relation chunk */
 		cl_uint		ntuples;	/* estimated number of tuples per chunk */
 		cl_uint		nloops;		/* expected number of outer loops */
@@ -136,6 +137,7 @@ typedef struct
 	int			depth;		/* depth of this hash table */
 
 	cl_uint		ntuples;	/* number of hash slots */
+	double		threshold_ratio;
 	Size		chunk_size;	/* available length for each chunk */
 	Size		hashtable_size;	/* estimated total hashtable size */
 
@@ -207,6 +209,7 @@ typedef struct {
 	CustomPlanState	cps;
 	int				depth;
 	cl_uint			ntuples;
+	double			threshold_ratio;
 	Size			chunk_size;
 	Size			hashtable_size;
 	TupleTableSlot *outer_overflow;
@@ -307,10 +310,11 @@ static Size
 estimate_hashtable_size(PlannerInfo *root, GpuHashJoinPath *gpath)
 {
 	Size		hashtable_size;
+	Size		threshold_size;
 	bool		is_first = true;
 
 	do {
-		double		largest_size;
+		Size		largest_size;
 		cl_int		i_largest;
 		cl_int		i, nrels = gpath->num_rels;
 
@@ -363,11 +367,20 @@ estimate_hashtable_size(PlannerInfo *root, GpuHashJoinPath *gpath)
 			/* expand estimated hashtable-size */
 			hashtable_size += chunk_size;
 		}
+		/* also compute threshold_ratio */
+		threshold_size = 0;
+		for (i = nrels - 1; i >= 0; i--)
+		{
+			threshold_size += gpath->inners[i].chunk_size;
+			gpath->inners[i].threshold_ratio
+				= (double) threshold_size / (double) hashtable_size;
+		}
 		Assert(i_largest >= 0 && i_largest < nrels);
 		is_first = false;
 	} while (hashtable_size > pgstrom_shmem_maxalloc());
 
-	return hashtable_size;
+	/* try to allocate pgstrom_chunk_size at least */
+	return Max(hashtable_size, pgstrom_chunk_size << 20);
 }
 
 /*
@@ -893,6 +906,7 @@ gpuhashjoin_create_plan(PlannerInfo *root, CustomPath *best_path)
 		mhash->cplan.plan.qual = NIL;
 		mhash->depth = i + 1;
 		mhash->ntuples = gpath->inners[i].ntuples;
+		mhash->threshold_ratio = gpath->inners[i].threshold_ratio;
 		mhash->chunk_size = gpath->inners[i].chunk_size;
 		mhash->hashtable_size = gpath->hashtable_size;
 
@@ -3354,6 +3368,7 @@ multihash_begin(CustomPlan *node,
 	mhs->cps.ps.state = estate;
 	mhs->depth = mhash->depth;
 	mhs->ntuples = mhash->ntuples;
+	mhs->threshold_ratio = mhash->threshold_ratio;
 	mhs->chunk_size = mhash->chunk_size;
 	mhs->hashtable_size = mhash->hashtable_size;
 	mhs->outer_overflow = NULL;
@@ -3414,6 +3429,29 @@ multihash_exec(CustomPlanState *node)
 {
 	elog(ERROR, "MultiHash does not support ExecProcNode call convention");
 	return NULL;
+}
+
+static pgstrom_multihash_tables *
+expand_multihash_tables(pgstrom_multihash_tables *mhtables_old)
+{
+	pgstrom_multihash_tables *mhtables_new;
+	Size	length_old = mhtables_old->length;
+	Size	allocated;
+
+	mhtables_new = pgstrom_shmem_alloc_alap(2 * length_old, &allocated);
+	if (!mhtables_new)
+		elog(ERROR, "out of shared memory");
+	memcpy(mhtables_new, mhtables_old, mhtables_old->usage);
+
+	mhtables_new->length =
+		allocated - offsetof(pgstrom_multihash_tables, kern);
+	Assert(mhtables_new->length > mhtables_old->length);
+	elog(INFO, "pgstrom_multihash_tables was expanded %zu (%p) => %zu (%p)",
+		 mhtables_old->length, mhtables_old,
+		 mhtables_new->length, mhtables_new);
+	pgstrom_track_object(&mhtables_new->sobj, 0);
+
+	return mhtables_new;
 }
 
 static void
