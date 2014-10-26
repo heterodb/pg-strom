@@ -328,27 +328,16 @@ typedef struct {
  * +----------------+-----------------+-+--------------+
  */
 typedef struct {
-	/* true, if column never has NULL (thus, no nullmap required) */
-	cl_char			attnotnull;
+	/* true, if column is held by value. Elsewhere, a reference */
+	cl_char			attbyval;
 	/* alignment; 1,2,4 or 8, not characters in pg_attribute */
 	cl_char			attalign;
 	/* length of attribute */
 	cl_short		attlen;
-	union {
-		/* 0 is valid value for neither rs_attnum (for row-store) nor
-		 * cs_offset (for column-store).
-		 */
-		cl_uint		attvalid;
-		/* If row-store, it is attribute number within row-store.
-		 * (Note that attribute number is always positive, whole-
-		 * -row references and system columns are not supported.)
-		 */
-		cl_uint		rs_attnum;
-		/* If column-store, offset to nullmap and column-array from the
-		 * head of kern_data_store.
-		 */
-		cl_uint		cs_offset;
-	};
+	/* attribute number */
+	cl_short		attnum;
+	/* offset of attribute location, if deterministic */
+	cl_short		attcacheoff;
 } kern_colmeta;
 
 /*
@@ -812,6 +801,15 @@ kern_get_datum_tuple(__global kern_colmeta *colmeta,
 	/* shortcut if colidx is obviously out of range */
 	if (colidx >= ncols)
 		return NULL;
+	/* shortcut if tuple contains no NULL values */
+	if (!heap_hasnull)
+	{
+		kern_colmeta	cmeta = colmeta[colidx];
+
+		if (cmeta.attcacheoff >= 0)
+			return (__global char *)htup + cmeta.attcacheoff;
+	}
+	/* regular path that walks on heap-tuple from the head */
 	for (i=0; i < ncols; i++)
 	{
 		if (heap_hasnull && att_isnull(i, htup->t_bits))

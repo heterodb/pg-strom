@@ -307,9 +307,6 @@ typedef struct pgstrom_data_store {
 	char			   *local_pages;/* duplication of local pages */
 } pgstrom_data_store;
 
-/* 8MB for each buffer */
-#define TOASTBUF_UNITSZ		((8 << 20) - SHMEM_ALLOC_COST)
-
 /*
  * pgstrom_bulk_slot
  *
@@ -323,40 +320,6 @@ typedef struct
 	cl_int			nvalids;	/* length of rindex. -1 means all valid */
 	cl_uint			rindex[FLEXIBLE_ARRAY_MEMBER];
 } pgstrom_bulkslot;
-
-/*
- * pgstrom_materialize
- *
- * This data structure provides a definition of destination relation on
- * server side materialization. Unlike host side, this materialization
- * cannot contain expression in the target-list. What it can do is
- * re-ordering the columns of (multiple) source relations.
- */
-typedef struct
-{
-	/* true, if column never has NULL (thus, no nullmap required) */
-	cl_char		attnotnull;
-	/* alignment; 1,2,4 or 8, not characters in pg_attribute */
-	cl_char		attalign;
-	/* length of attribute */
-	cl_short	attlen;
-	/* source relation index */
-	cl_short	relsrc;
-	/* source attribute index */
-	cl_short	attsrc;
-	/* destination attribute index */
-	cl_short	attdst;
-	/* average width of this attribute */
-	cl_short	attwidth;
-
-} materialize_colmeta;
-
-typedef struct
-{
-	cl_uint			nrels;		/* number of relations being expected */
-	cl_uint			ncols;		/* number of columns in destination store */
-	materialize_colmeta colmeta[FLEXIBLE_ARRAY_MEMBER];
-} pgstrom_materialize;
 
 /*
  * --------------------------------------------------------------------

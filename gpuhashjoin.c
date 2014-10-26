@@ -2086,10 +2086,13 @@ multihash_dump_tables(pgstrom_multihash_tables *mhtables)
 			 i, khash->nslots, khash->ncols);
 		for (j=0; j < khash->ncols; j++)
 		{
-			elog(INFO, "colmeta {attnotnull=%d attalign=%d attlen=%d}",
-				 khash->colmeta[j].attnotnull,
+			elog(INFO, "colmeta {attbyval=%d attalign=%d attlen=%d "
+				 "attnum=%d attcacheoff=%d}",
+				 khash->colmeta[j].attbyval,
 				 khash->colmeta[j].attalign,
-				 khash->colmeta[j].attlen);
+				 khash->colmeta[j].attlen,
+				 khash->colmeta[j].attnum,
+				 khash->colmeta[j].attcacheoff);
 		}
 
 		for (j=0; j < khash->nslots; j++)
@@ -3424,6 +3427,8 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	Size			consumed;
 	cl_uint		   *hash_slots;
 	cl_uint			ntuples;
+	int				attcacheoff;
+	int				attalign;
 	int				i;
 
 	/* preload should be done under the MultiExec context */
@@ -3451,14 +3456,31 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	khtable->ncols = tupdesc->natts;
 	khtable->nslots = mhs->ntuples;
 	khtable->is_outer = false;	/* Only INNER is supported right now */
+
+	attcacheoff = offsetof(HeapTupleHeaderData, t_bits);
+	if (tupdesc->tdhasoid)
+		attcacheoff += sizeof(Oid);
+	attcacheoff = MAXALIGN(attcacheoff);
+
 	for (i=0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute attr = tupdesc->attrs[i];
 
-		khtable->colmeta[i].attnotnull = attr->attnotnull;
-		khtable->colmeta[i].attalign = typealign_get_width(attr->attalign);
+		attalign = typealign_get_width(attr->attalign);
+        if (attcacheoff > 0)
+		{
+			if (attr->attlen > 0)
+				attcacheoff = TYPEALIGN(attalign, attcacheoff);
+			else
+				attcacheoff = -1;	/* no more shortcut any more */
+		}
+		khtable->colmeta[i].attbyval = attr->attbyval;
+		khtable->colmeta[i].attalign = attalign;
 		khtable->colmeta[i].attlen = attr->attlen;
-		khtable->colmeta[i].rs_attnum = attr->attnum;
+		khtable->colmeta[i].attnum = attr->attnum;
+		khtable->colmeta[i].attcacheoff = attcacheoff;
+		if (attcacheoff >= 0)
+			attcacheoff += attr->attlen;
 	}
 	hash_slots = KERN_HASHTABLE_SLOT(khtable);
 	memset(hash_slots, 0, sizeof(cl_uint) * khtable->nslots);

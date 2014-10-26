@@ -289,6 +289,9 @@ init_kern_data_store(kern_data_store *kds,
 					 cl_uint maxblocks,
 					 cl_uint nrooms)
 {
+	
+	int		attcacheoff;
+	int		attalign;
 	int		i;
 
 	kds->hostptr = (hostptr_t) &kds->hostptr;
@@ -303,14 +306,31 @@ init_kern_data_store(kern_data_store *kds,
 	kds->tdhasoid = tupdesc->tdhasoid;
 	kds->tdtypeid = tupdesc->tdtypeid;
 	kds->tdtypmod = tupdesc->tdtypmod;
+
+	attcacheoff = offsetof(HeapTupleHeaderData, t_bits);
+	if (tupdesc->tdhasoid)
+		attcacheoff += sizeof(Oid);
+	attcacheoff = MAXALIGN(attcacheoff);
+
 	for (i=0; i < tupdesc->natts; i++)
 	{
-		Form_pg_attribute	attr = tupdesc->attrs[i];
+		Form_pg_attribute attr = tupdesc->attrs[i];
 
-		kds->colmeta[i].attnotnull = attr->attnotnull;
-		kds->colmeta[i].attalign = typealign_get_width(attr->attalign);
+		attalign = typealign_get_width(attr->attalign);
+		if (attcacheoff > 0)
+		{
+			if (attr->attlen > 0)
+				attcacheoff = TYPEALIGN(attalign, attcacheoff);
+			else
+				attcacheoff = -1;	/* no more shortcut any more */
+		}
+		kds->colmeta[i].attbyval = attr->attbyval;
+		kds->colmeta[i].attalign = attalign;
 		kds->colmeta[i].attlen = attr->attlen;
-		kds->colmeta[i].rs_attnum = attr->attnum;
+		kds->colmeta[i].attnum = attr->attnum;
+		kds->colmeta[i].attcacheoff = attcacheoff;
+		if (attcacheoff >= 0)
+			attcacheoff += attr->attlen;
 	}
 }
 
@@ -933,12 +953,14 @@ pgstrom_dump_data_store(pgstrom_data_store *pds)
 			 kds->nblocks, kds->maxblocks);
 	for (i=0; i < kds->ncols; i++)
 	{
-		PDS_DUMP("attr[%d] {attnotnull=%d attalign=%d attlen=%d attnum=%u}",
+		PDS_DUMP("attr[%d] {attbyval=%d attalign=%d attlen=%d "
+				 "attnum=%d attcacheoff=%d}",
 				 i,
-				 kds->colmeta[i].attnotnull,
+				 kds->colmeta[i].attbyval,
 				 kds->colmeta[i].attalign,
 				 kds->colmeta[i].attlen,
-				 kds->colmeta[i].rs_attnum);
+				 kds->colmeta[i].attnum,
+				 kds->colmeta[i].attcacheoff);
 	}
 
 	if (kds->format == KDS_FORMAT_ROW_FLAT)
