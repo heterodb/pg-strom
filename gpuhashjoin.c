@@ -1143,9 +1143,10 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 		Assert(dtype != NULL);
 		temp = pgstrom_codegen_expression(expr, context);
 
-		appendStringInfo(body,
-						 "hash_%u = pg_%s_hashkey(kmhash, hash_%u, %s);\n",
-						 depth, dtype->type_name, depth, temp);
+		appendStringInfo(
+			body,
+			"hash_%u = pg_%s_hashkey(pg_crc32_table, hash_%u, %s);\n",
+			depth, dtype->type_name, depth, temp);
 		pfree(temp);
 	}
 	appendStringInfo(body, "FIN_CRC32(hash_%u);\n", depth);
@@ -1305,6 +1306,7 @@ gpuhashjoin_codegen(PlannerInfo *root,
 		"gpuhashjoin_execute(__private cl_int *errcode,\n"
 		"                    __global kern_parambuf *kparams,\n"
 		"                    __global kern_multihash *kmhash,\n"
+		"                    __local cl_uint *pg_crc32_table,\n"
 		"                    __global kern_data_store *kds,\n"
 		"                    __global kern_data_store *ktoast,\n"
 		"                    size_t kds_index,\n"
@@ -4544,7 +4546,7 @@ clserv_process_gpuhashjoin(pgstrom_message *message)
 	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
 									   clghj->kern_main,
 									   clghj->dindex,
-									   false,	/* smaller is better */
+									   true,	/* larger is better? */
 									   nitems,
 									   sizeof(cl_uint)))
 		goto error;

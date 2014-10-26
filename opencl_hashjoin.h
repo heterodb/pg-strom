@@ -258,6 +258,7 @@ static cl_uint
 gpuhashjoin_execute(__private cl_int *errcode,
 					__global kern_parambuf *kparams,
 					__global kern_multihash *kmhash,
+					__local cl_uint *crc32_table,
 					__global kern_data_store *kds,
 					__global kern_data_store *ktoast,
 					size_t kds_index,
@@ -290,7 +291,9 @@ kern_gpuhashjoin_main(__global kern_hashjoin *khashjoin,
 	cl_uint			offset;
 	cl_uint			nitems;
 	size_t			kds_index;
+	size_t			crc_index;
 	__local cl_uint	base;
+	__local cl_uint	crc32_table[256];
 
 	/* sanity check - kresults must have sufficient width of slots for the
 	 * required hash-tables within kern_multihash.
@@ -300,6 +303,22 @@ kern_gpuhashjoin_main(__global kern_hashjoin *khashjoin,
 		errcode = StromError_DataStoreCorruption;
 		goto out;
 	}
+
+	/* move crc32 table to __local memory from __global memory.
+	 *
+	 * NOTE: calculation of hash value (based on crc32 in GpuHashJoin) is
+	 * the core of calculation workload in the GpuHashJoin implementation.
+	 * If we keep the master table is global memory, it will cause massive
+	 * amount of computing core stall because of RAM access latency.
+	 * So, we try to move them into local shared memory at the beginning.
+	 */
+	for (crc_index = get_local_id(0);
+		 crc_index < 256;
+		 crc_index += get_local_size(0))
+	{
+		crc32_table[crc_index] = kmhash->pg_crc32_table[crc_index];
+	}
+	barrier(CLK_LOCAL_MEM_FENCE);
 
 	/* In case when kern_row_map (krowmap) is given, it means all the items
 	 * are not valid and some them have to be dealt as like invisible rows.
@@ -322,6 +341,7 @@ kern_gpuhashjoin_main(__global kern_hashjoin *khashjoin,
 		n_matches = gpuhashjoin_execute(&errcode,
 										kparams,
 										kmhash,
+										crc32_table,
 										kds, ktoast,
 										kds_index,
 										NULL);
@@ -380,6 +400,7 @@ kern_gpuhashjoin_main(__global kern_hashjoin *khashjoin,
 		n_matches = gpuhashjoin_execute(&errcode,
 										kparams,
 										kmhash,
+										crc32_table,
 										kds, ktoast,
 										kds_index,
 										rbuffer);
@@ -883,11 +904,9 @@ pg_varlena_hashref(__global kern_hashtable *khtable,
 
 #define STROMCL_SIMPLE_HASHKEY_TEMPLATE(NAME,BASE)			\
 	static inline cl_uint									\
-	pg_##NAME##_hashkey(__global kern_multihash *kmhash,	\
+	pg_##NAME##_hashkey(__local cl_uint *crc32_table,		\
 						cl_uint hash, pg_##NAME##_t datum)	\
 	{														\
-		__global const cl_uint *crc32_table					\
-			= kmhash->pg_crc32_table;						\
 		if (!datum.isnull)									\
 		{													\
 			BASE		__data = datum.value;				\
@@ -906,11 +925,9 @@ pg_varlena_hashref(__global kern_hashtable *khtable,
 
 #define STROMCL_VARLENA_HASHKEY_TEMPLATE(NAME)				\
 	static inline cl_uint									\
-	pg_##NAME##_hashkey(__global kern_multihash *kmhash,	\
+	pg_##NAME##_hashkey(__local cl_uint *crc32_table,		\
 						cl_uint hash, pg_##NAME##_t datum)	\
 	{														\
-		__global const cl_uint *crc32_table					\
-			= kmhash->pg_crc32_table;						\
 		if (!datum.isnull)									\
 		{													\
 			__global const cl_char *__data =				\
