@@ -193,14 +193,12 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 	/* in case of tuple-slot format */
 	if (kds->format == KDS_FORMAT_TUPSLOT)
 	{
-		Datum  *tts_values = KERN_DATA_STORE_VALUES(kds, row_index);
-		bool   *tts_isnull = KERN_DATA_STORE_ISNULL(kds, row_index);
+		Datum  *tts_values = (Datum *)KERN_DATA_STORE_VALUES(kds, row_index);
+		bool   *tts_isnull = (bool *)KERN_DATA_STORE_ISNULL(kds, row_index);
 
 		ExecClearTuple(slot);
 		slot->tts_values = tts_values;
 		slot->tts_isnull = tts_isnull;
-		//memcpy(slot->tts_values, tts_values, sizeof(Datum) * kds->ncols);
-		//memcpy(slot->tts_isnull, tts_isnull, sizeof(bool) * kds->ncols);
 		ExecStoreVirtualTuple(slot);
 
 		/*
@@ -317,9 +315,10 @@ init_kern_data_store(kern_data_store *kds,
 }
 
 pgstrom_data_store *
-pgstrom_create_data_store_row(TupleDesc tupdesc,
-							  Size dstore_sz,
-							  double ntup_per_block)
+__pgstrom_create_data_store_row(const char *filename, int lineno,
+								TupleDesc tupdesc,
+								Size dstore_sz,
+								double ntup_per_block)
 {
 	pgstrom_data_store *pds;
 	kern_data_store	   *kds;
@@ -337,13 +336,15 @@ pgstrom_create_data_store_row(TupleDesc tupdesc,
 									colmeta[tupdesc->natts])) +
 				STROMALIGN(sizeof(kern_blkitem) * maxblocks) +
 				STROMALIGN(sizeof(kern_rowitem) * nrooms));
-	kds = pgstrom_shmem_alloc(required);
+	kds = __pgstrom_shmem_alloc(filename,lineno,
+								required);
 	if (!kds)
 		elog(ERROR, "out of shared memory");
 	init_kern_data_store(kds, tupdesc, required,
 						 KDS_FORMAT_ROW, maxblocks, nrooms);
 	/* allocation of pgstrom_data_store */
-	pds = pgstrom_shmem_alloc(sizeof(pgstrom_data_store));
+	pds = __pgstrom_shmem_alloc(filename,lineno,
+								sizeof(pgstrom_data_store));
 	if (!pds)
 	{
 		pgstrom_shmem_free(kds);
@@ -373,7 +374,8 @@ pgstrom_create_data_store_row(TupleDesc tupdesc,
 }
 
 pgstrom_data_store *
-pgstrom_create_data_store_row_flat(TupleDesc tupdesc, Size length)
+__pgstrom_create_data_store_row_flat(const char *filename, int lineno,
+									 TupleDesc tupdesc, Size length)
 {
 	pgstrom_data_store *pds;
 	kern_data_store	   *kds;
@@ -381,7 +383,8 @@ pgstrom_create_data_store_row_flat(TupleDesc tupdesc, Size length)
 	cl_uint		nrooms;
 
 	/* allocation of kern_data_store */
-	kds = pgstrom_shmem_alloc_alap(length, &allocated);
+	kds = __pgstrom_shmem_alloc_alap(filename, lineno,
+									 length, &allocated);
 	if (!kds)
 		elog(ERROR, "out of shared memory");
 	/*
@@ -399,7 +402,8 @@ pgstrom_create_data_store_row_flat(TupleDesc tupdesc, Size length)
 	init_kern_data_store(kds, tupdesc, allocated,
 						 KDS_FORMAT_ROW_FLAT, 0, nrooms);
 	/* allocation of pgstrom_data_store */
-	pds = pgstrom_shmem_alloc(sizeof(pgstrom_data_store));
+	pds = __pgstrom_shmem_alloc(filename, lineno,
+								sizeof(pgstrom_data_store));
 	if (!pds)
 	{
 		pgstrom_shmem_free(kds);
@@ -417,7 +421,8 @@ pgstrom_create_data_store_row_flat(TupleDesc tupdesc, Size length)
 }
 
 pgstrom_data_store *
-pgstrom_create_data_store_tupslot(TupleDesc tupdesc, cl_uint nrooms)
+__pgstrom_create_data_store_tupslot(const char *filename, int lineno,
+									TupleDesc tupdesc, cl_uint nrooms)
 {
 	pgstrom_data_store *pds;
 	kern_data_store	   *kds;
@@ -428,14 +433,16 @@ pgstrom_create_data_store_tupslot(TupleDesc tupdesc, cl_uint nrooms)
 									colmeta[tupdesc->natts])) +
 				(LONGALIGN(sizeof(bool) * tupdesc->natts) +
 				 LONGALIGN(sizeof(Datum) * tupdesc->natts)) * nrooms);
-	kds = pgstrom_shmem_alloc(STROMALIGN(required));
+	kds = __pgstrom_shmem_alloc(filename, lineno,
+								STROMALIGN(required));
 	if (!kds)
 		elog(ERROR, "out of shared memory");
 	init_kern_data_store(kds, tupdesc, required,
 						 KDS_FORMAT_TUPSLOT, 0, nrooms);
 
 	/* pgstrom_data_store */
-	pds = pgstrom_shmem_alloc(sizeof(pgstrom_data_store));
+	pds = __pgstrom_shmem_alloc(filename, lineno,
+								sizeof(pgstrom_data_store));
 	if (!pds)
 	{
 		pgstrom_shmem_free(kds);

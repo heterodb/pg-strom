@@ -808,6 +808,8 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 
 		if (pds->kds->nitems > 0)
 			gpuscan = pgstrom_create_gpuscan(gss, pds);
+		else
+			pgstrom_put_data_store(pds);
 	}
 	PG_CATCH();
     {
@@ -1357,6 +1359,8 @@ gpuscan_rescan(CustomPlanState *node)
 	{
 		pgstrom_untrack_object(&gpuscan->msg.sobj);
 		pgstrom_put_message(&gpuscan->msg);
+		gss->curr_chunk = NULL;
+		gss->curr_index = 0;
 	}
 
 	while (gss->num_running > 0)
@@ -1405,8 +1409,6 @@ gpuscan_rescan(CustomPlanState *node)
 	/*
 	 * OK, asynchronous jobs were cleared. revert scan state to the head.
 	 */
-	gss->curr_chunk = NULL;
-	gss->curr_index = 0;
 	gss->curr_blknum = 0;
 }
 

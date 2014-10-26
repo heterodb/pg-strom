@@ -479,12 +479,25 @@ extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
 									 HeapTuple tuple);
 extern void pgstrom_release_data_store(pgstrom_data_store *pds);
 extern pgstrom_data_store *
-pgstrom_create_data_store_row(TupleDesc tupdesc,
-							  Size dstore_sz, double ntup_per_block);
+__pgstrom_create_data_store_row(const char *filename, int lineno,
+								TupleDesc tupdesc, Size dstore_sz,
+								double ntup_per_block);
+#define pgstrom_create_data_store_row(tupdesc,dstore_sz,ntup_per_block)	\
+	__pgstrom_create_data_store_row(__FILE__, __LINE__,			\
+									(tupdesc),(dstore_sz),		\
+									(ntup_per_block))
 extern pgstrom_data_store *
-pgstrom_create_data_store_row_flat(TupleDesc tupdesc, Size length);
+__pgstrom_create_data_store_row_flat(const char *filename, int lineno,
+									 TupleDesc tupdesc, Size length);
+#define pgstrom_create_data_store_row_flat(tupdesc,length)		\
+	__pgstrom_create_data_store_row_flat(__FILE__,__LINE__,		\
+										 (tupdesc),(length))
 extern pgstrom_data_store *
-pgstrom_create_data_store_tupslot(TupleDesc tupdesc, cl_uint nrooms);
+__pgstrom_create_data_store_tupslot(const char *filename, int lineno,
+									TupleDesc tupdesc, cl_uint nrooms);
+#define pgstrom_create_data_store_tupslot(tupdesc,nrooms)		\
+	__pgstrom_create_data_store_tupslot(__FILE__,__LINE__,		\
+										(tupdesc),(nrooms))
 extern pgstrom_data_store *pgstrom_get_data_store(pgstrom_data_store *pds);
 extern void pgstrom_put_data_store(pgstrom_data_store *pds);
 extern int pgstrom_data_store_insert_block(pgstrom_data_store *pds,
