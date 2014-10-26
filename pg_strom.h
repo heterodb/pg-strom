@@ -203,6 +203,11 @@ typedef struct {
 	cl_uint		num_kern_sort;	/* number of sort kernel execution */
 	cl_ulong	time_kern_prep;	/* time to execute preparation kernel */
 	cl_ulong	time_kern_sort;	/* time to execute sort kernel */
+	/*-- for debugging usage --*/
+	cl_ulong	time_debug1;	/* time for debugging purpose.1 */
+	cl_ulong	time_debug2;	/* time for debugging purpose.2 */
+	cl_ulong	time_debug3;	/* time for debugging purpose.3 */
+	cl_ulong	time_debug4;	/* time for debugging purpose.4 */
 
 	struct timeval	tv;	/* result of gettimeofday(2) when enqueued */
 } pgstrom_perfmon;

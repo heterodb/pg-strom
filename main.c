@@ -354,12 +354,19 @@ pgstrom_perfmon_add(pgstrom_perfmon *pfm_sum, pgstrom_perfmon *pfm_item)
 	pfm_sum->time_dma_recv		+= pfm_item->time_dma_recv;
 	pfm_sum->num_kern_exec		+= pfm_item->num_kern_exec;
 	pfm_sum->time_kern_exec		+= pfm_item->time_kern_exec;
+	/* for gpuhashjoin */
 	pfm_sum->num_kern_proj		+= pfm_item->num_kern_proj;
 	pfm_sum->time_kern_proj		+= pfm_item->time_kern_proj;
+	/* for gpupreagg */
 	pfm_sum->num_kern_prep		+= pfm_item->num_kern_prep;
 	pfm_sum->num_kern_sort		+= pfm_item->num_kern_sort;
 	pfm_sum->time_kern_prep		+= pfm_item->time_kern_prep;
 	pfm_sum->time_kern_sort		+= pfm_item->time_kern_sort;
+	/* for debugging */
+	pfm_sum->time_debug1		+= pfm_item->time_debug1;
+	pfm_sum->time_debug2		+= pfm_item->time_debug2;
+	pfm_sum->time_debug3		+= pfm_item->time_debug3;
+	pfm_sum->time_debug4		+= pfm_item->time_debug4;
 }
 
 static char *
@@ -518,6 +525,31 @@ pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 										(double)pfm->num_kern_exec),
 				 pfm->num_kern_exec);
 		ExplainPropertyText(label, buf, es);
+	}
+	/* for debugging if any */
+	if (pfm->time_debug1 > 0)
+	{
+		snprintf(buf, sizeof(buf), "debug1: %s",
+				 usecond_unitary_format((double)pfm->time_debug1));
+		ExplainPropertyText("debug-1", buf, es);
+	}
+	if (pfm->time_debug2 > 0)
+	{
+		snprintf(buf, sizeof(buf), "debug2: %s",
+				 usecond_unitary_format((double)pfm->time_debug2));
+		ExplainPropertyText("debug-2", buf, es);
+	}
+	if (pfm->time_debug3 > 0)
+	{
+		snprintf(buf, sizeof(buf), "debug3: %s",
+				 usecond_unitary_format((double)pfm->time_debug3));
+		ExplainPropertyText("debug-3", buf, es);
+	}
+	if (pfm->time_debug4 > 0)
+	{
+		snprintf(buf, sizeof(buf), "debug4: %s",
+				 usecond_unitary_format((double)pfm->time_debug4));
+		ExplainPropertyText("debug-4", buf, es);
 	}
 }
 
