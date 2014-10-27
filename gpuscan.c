@@ -866,6 +866,7 @@ gpuscan_next_tuple(GpuScanState *gss)
 									  pds, i_result - 1,
 									  &gss->scan_tuple))
 			elog(ERROR, "failed to fetch a record from pds: %d", i_result);
+		Assert(gss->scan_slot->tts_tuple == &gss->scan_tuple);
 
 		if (do_recheck)
 		{

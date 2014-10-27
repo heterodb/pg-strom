@@ -156,16 +156,18 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 	{
 		kern_rowitem   *ritem = KERN_DATA_STORE_ROWITEM(kds, row_index);
 		kern_blkitem   *bitem;
+		BlockNumber		blknum;
 		ItemId			lpp;
 
 		Assert(ritem->blk_index < kds->nblocks);
 		bitem = KERN_DATA_STORE_BLKITEM(kds, ritem->blk_index);
 		lpp = PageGetItemId(bitem->page, ritem->item_offset);
 		Assert(ItemIdIsNormal(lpp));
+		blknum = BufferGetBlockNumber(bitem->buffer);
 
 		tuple->t_data = (HeapTupleHeader) PageGetItem(bitem->page, lpp);
 		tuple->t_len = ItemIdGetLength(lpp);
-		ItemPointerSet(&tuple->t_self, bitem->buffer, ritem->item_offset);
+		ItemPointerSet(&tuple->t_self, blknum, ritem->item_offset);
 
 		ExecStoreTuple(tuple, slot, bitem->buffer, false);
 
