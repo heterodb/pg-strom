@@ -137,8 +137,9 @@ typedef struct
 	int			depth;		/* depth of this hash table */
 
 	cl_uint		nslots;		/* width of hash slots */
+	cl_uint		nloops;		/* expected number of outer loops */
 	double		threshold_ratio;
-	Size		chunk_size;	/* available length for each chunk */
+//	Size		chunk_size;	/* available length for each chunk */
 	Size		hashtable_size;	/* estimated total hashtable size */
 
 	List	   *hash_inner_keys;/* list of inner hash key expressions */
@@ -906,8 +907,9 @@ gpuhashjoin_create_plan(PlannerInfo *root, CustomPath *best_path)
 		mhash->cplan.plan.qual = NIL;
 		mhash->depth = i + 1;
 		mhash->nslots = gpath->inners[i].ntuples;
+		mhash->nloops = gpath->inners[i].nloops;
 		mhash->threshold_ratio = gpath->inners[i].threshold_ratio;
-		mhash->chunk_size = gpath->inners[i].chunk_size;
+		//mhash->chunk_size = gpath->inners[i].chunk_size;
 		mhash->hashtable_size = gpath->hashtable_size;
 
 		/* chain it under the GpuHashJoin */
@@ -3377,7 +3379,7 @@ multihash_begin(CustomPlan *node,
 	mhs->depth = mhash->depth;
 	mhs->nslots = mhash->nslots;
 	mhs->threshold_ratio = mhash->threshold_ratio;
-	mhs->chunk_size = mhash->chunk_size;
+	//mhs->chunk_size = mhash->chunk_size;
 	mhs->hashtable_size = mhash->hashtable_size;
 	mhs->outer_overflow = NULL;
 	mhs->outer_done = false;
@@ -3822,12 +3824,25 @@ multihash_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 		appendStringInfo(&str, "%s", exprstr);
 		pfree(exprstr);
 	}
-	/* And add to es->str */
     ExplainPropertyText("hash keys", str.data, es);
-	/* Also, reserved chunk size */
-	resetStringInfo(&str);
-	appendStringInfo(&str, "%.2f%%", 100.0 * mhash->threshold_ratio);
-	ExplainPropertyText("chunk usage", str.data, es);
+
+	/* shows hash parameters */
+	if (es->format != EXPLAIN_FORMAT_TEXT)
+	{
+		resetStringInfo(&str);
+		ExplainPropertyInteger("Buckets", mhash->nslots, es);
+		ExplainPropertyInteger("Batches", mhash->nloops, es);
+		appendStringInfo(&str, "%.2f%%", 100.0 * mhash->threshold_ratio);
+		ExplainPropertyText("Memory Usage", str.data, es);
+	}
+	else
+	{
+		appendStringInfoSpaces(es->str, es->indent * 2);
+		appendStringInfo(es->str,
+						 "Buckets: %u  Batches: %u  Memory Usage: %.2f%%\n",
+						 mhash->nslots, mhash->nloops,
+						 100.0 * mhash->threshold_ratio);
+	}
 }
 
 static Bitmapset *
@@ -3859,8 +3874,9 @@ multihash_textout_plan(StringInfo str, const CustomPlan *node)
 
 	appendStringInfo(str, " :depth %d", plannode->depth);
 	appendStringInfo(str, " :nslots %u", plannode->nslots);
+	appendStringInfo(str, " :nloops %u", plannode->nloops);
 	appendStringInfo(str, " :threshold_ratio %f", plannode->threshold_ratio);
-	appendStringInfo(str, " :chunk_size %zu", plannode->chunk_size);
+	//appendStringInfo(str, " :chunk_size %zu", plannode->chunk_size);
 	appendStringInfo(str, " :hashtable_size %zu", plannode->hashtable_size);
 	appendStringInfo(str, " :hash_inner_keys %s",
 					 nodeToString(plannode->hash_inner_keys));
@@ -3877,8 +3893,9 @@ multihash_copy_plan(const CustomPlan *from)
 	CopyCustomPlanCommon((Node *)oldnode, (Node *)newnode);
 	newnode->depth           = oldnode->depth;
 	newnode->nslots          = oldnode->nslots;
+	newnode->nloops          = oldnode->nslots;
 	newnode->threshold_ratio = oldnode->threshold_ratio;
-	newnode->chunk_size      = oldnode->chunk_size;
+	//newnode->chunk_size      = oldnode->chunk_size;
 	newnode->hashtable_size  = oldnode->hashtable_size;
 	newnode->hash_inner_keys = copyObject(oldnode->hash_inner_keys);
 	newnode->hash_outer_keys = copyObject(oldnode->hash_outer_keys);
