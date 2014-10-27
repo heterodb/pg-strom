@@ -950,7 +950,6 @@ typedef struct pgstrom_multihash_tables
 	StromObject		sobj;		/* = StromTab_HashJoinTable */
 	Size			length;		/* max available length of this mhash */
 	Size			usage;		/* current usage of this mhash */
-	Size			margin;		/* margin of mhash usage  */
 	double			ntuples;	/* number of tuples in this mhash */
 	slock_t			lock;		/* protection of the fields below */
 	cl_int			refcnt;		/* reference counter of this hash table */

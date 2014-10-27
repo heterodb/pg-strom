@@ -136,7 +136,7 @@ typedef struct
 	 */
 	int			depth;		/* depth of this hash table */
 
-	cl_uint		ntuples;	/* number of hash slots */
+	cl_uint		nslots;		/* width of hash slots */
 	double		threshold_ratio;
 	Size		chunk_size;	/* available length for each chunk */
 	Size		hashtable_size;	/* estimated total hashtable size */
@@ -208,7 +208,7 @@ typedef struct
 typedef struct {
 	CustomPlanState	cps;
 	int				depth;
-	cl_uint			ntuples;
+	cl_uint			nslots;
 	double			threshold_ratio;
 	Size			chunk_size;
 	Size			hashtable_size;
@@ -905,7 +905,7 @@ gpuhashjoin_create_plan(PlannerInfo *root, CustomPath *best_path)
 		mhash->cplan.plan.targetlist = scan_plan->targetlist;
 		mhash->cplan.plan.qual = NIL;
 		mhash->depth = i + 1;
-		mhash->ntuples = gpath->inners[i].ntuples;
+		mhash->nslots = gpath->inners[i].ntuples;
 		mhash->threshold_ratio = gpath->inners[i].threshold_ratio;
 		mhash->chunk_size = gpath->inners[i].chunk_size;
 		mhash->hashtable_size = gpath->hashtable_size;
@@ -3020,48 +3020,56 @@ gpuhashjoin_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 {
 	GpuHashJoinState *ghjs = (GpuHashJoinState *) node;
 	GpuHashJoin	   *ghjoin = (GpuHashJoin *) node->ps.plan;
-	StringInfoData	str;
-	List		   *context;
 	ListCell	   *cell;
 	ListCell	   *lc1;
 	ListCell	   *lc2;
 	ListCell	   *lc3;
-	int				depth;
 	bool			verbose_saved;
-	bool			is_first;
+	int				depth;
 
-	initStringInfo(&str);
-
-	/* Set up deparsing context */
-	context = deparse_context_for_planstate((Node *) &node->ps,
-											ancestors,
-											es->rtable,
-											es->rtable_names);
-	/* pseudo scan relation */
-	is_first = true;
-	foreach (cell, ghjoin->pscan_vartrans)
+	/* pseudo scan tlist if verbose mode */
+	if (es->verbose)
 	{
-		vartrans_info  *vtrans = lfirst(cell);
+		StringInfoData	str;
+		List		   *context;
+		vartrans_info  *vt_prev;
+		vartrans_info  *vt_curr;
+		vartrans_info  *vt_next;
 		char		   *temp;
 
-		if (!is_first)
-			appendStringInfo(&str, ", ");
-		temp = deparse_expression((Node *)vtrans->expr,
-								  context,
-								  true,
-								  false);
-		if (vtrans->ref_host && vtrans->ref_device)
-			appendStringInfo(&str, "%d:(%s)", vtrans->resno, temp);
-		else if (vtrans->ref_device)
-			appendStringInfo(&str, "%d:[%s]", vtrans->resno, temp);
-		else if (vtrans->ref_host)
-			appendStringInfo(&str, "%d:<%s>", vtrans->resno, temp);
-		else
-			elog(ERROR, "Bug? \"%s\" is not reference by host/device", temp);
-		is_first = false;
-	}
-	ExplainPropertyText("pseudo scan tlist", str.data, es);
+		initStringInfo(&str);
+		context = deparse_context_for_planstate((Node *) &node->ps,
+												ancestors,
+												es->rtable,
+												es->rtable_names);
+		vt_prev = NULL;
+		while (true)
+		{
+			vt_next = NULL;
+			foreach (cell, ghjoin->pscan_vartrans)
+			{
+				vt_curr = lfirst(cell);
+				if ((!vt_prev || vt_prev->resno < vt_curr->resno) &&
+					(!vt_next || vt_next->resno > vt_curr->resno))
+					vt_next = vt_curr;
+			}
+			if (!vt_next)
+				break;
+			if (vt_prev)
+				appendStringInfo(&str, ", ");
+			temp = deparse_expression((Node *)vt_next->expr,
+									  context,
+									  true,
+									  false);
+			if (vt_next->ref_host)
+				appendStringInfo(&str, "%s", temp);
+			else
+				appendStringInfo(&str, "(%s)", temp);
 
+			vt_prev = vt_next;
+		}
+		ExplainPropertyText("pscan tlist", str.data, es);
+	}
 	verbose_saved = es->verbose;
 	es->verbose = true;
 	depth = 1;
@@ -3367,7 +3375,7 @@ multihash_begin(CustomPlan *node,
 	mhs->cps.ps.plan = (Plan *) mhash;
 	mhs->cps.ps.state = estate;
 	mhs->depth = mhash->depth;
-	mhs->ntuples = mhash->ntuples;
+	mhs->nslots = mhash->nslots;
 	mhs->threshold_ratio = mhash->threshold_ratio;
 	mhs->chunk_size = mhash->chunk_size;
 	mhs->hashtable_size = mhash->hashtable_size;
@@ -3431,16 +3439,19 @@ multihash_exec(CustomPlanState *node)
 	return NULL;
 }
 
-static pgstrom_multihash_tables *
-expand_multihash_tables(pgstrom_multihash_tables *mhtables_old)
+static bool
+expand_multihash_tables(MultiHashState *mhs,
+						pgstrom_multihash_tables **p_mhtables)
 {
+
+	pgstrom_multihash_tables *mhtables_old = *p_mhtables;
 	pgstrom_multihash_tables *mhtables_new;
 	Size	length_old = mhtables_old->length;
 	Size	allocated;
 
 	mhtables_new = pgstrom_shmem_alloc_alap(2 * length_old, &allocated);
 	if (!mhtables_new)
-		elog(ERROR, "out of shared memory");
+		return false;	/* out of shmem, or too large to allocate */
 	memcpy(mhtables_new, mhtables_old, mhtables_old->usage);
 
 	mhtables_new->length =
@@ -3451,7 +3462,17 @@ expand_multihash_tables(pgstrom_multihash_tables *mhtables_old)
 		 mhtables_new->length, mhtables_new);
 	pgstrom_track_object(&mhtables_new->sobj, 0);
 
-	return mhtables_new;
+	/* update hashtable_size of MultiHashState */
+	do {
+		Assert(IsA(mhs, CustomPlanState) &&
+			   mhs->cps.methods == &multihash_plan_methods);
+		mhs->hashtable_size = allocated;
+		mhs = (MultiHashState *) innerPlanState(mhs);
+	} while (mhs);
+
+	*p_mhtables = mhtables_new;
+
+	return true;
 }
 
 static void
@@ -3464,6 +3485,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	int				depth = mhs->depth;
 	kern_hashtable *khtable;
 	kern_hashentry *hentry;
+	Size			required;
 	Size			consumed;
 	cl_uint		   *hash_slots;
 	cl_uint			ntuples;
@@ -3483,18 +3505,37 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	Assert(mhtables->usage == LONGALIGN(mhtables->usage));
 	mhtables->kern.htable_offset[depth] = mhtables->usage;
 
-	khtable = (kern_hashtable *)((char *)&mhtables->kern + mhtables->usage);
-
 	if (!scan_forward)
 	{
-		consumed = mhs->curr_chunk->length;
-		memcpy(khtable, mhs->curr_chunk, consumed);
-		// mhtables->ntuples += ??
-		mhtables->usage += consumed;
+		Assert(mhs->curr_chunk);
+		required = mhtables->usage + mhs->curr_chunk->length;
+		while (required > mhs->threshold_ratio * mhtables->length)
+		{
+			if (!expand_multihash_tables(mhs, &mhtables))
+				elog(ERROR, "No multi-hashtables expandable any more");
+		}
+		memcpy((char *)&mhtables->kern + mhtables->usage,
+			   mhs->curr_chunk,
+			   mhs->curr_chunk->length);
+		mhtables->usage += mhs->curr_chunk->length;
 		return;
 	}
+
+	/*
+	 * Below is the case when we need to make the scan pointer advanced
+	 */
+	required = (mhtables->usage +
+				LONGALIGN(offsetof(kern_hashtable,
+								   colmeta[tupdesc->natts])) +
+				LONGALIGN(sizeof(cl_uint) * mhs->nslots));
+	while (required > mhs->threshold_ratio * mhtables->length)
+	{
+		if (!expand_multihash_tables(mhs, &mhtables))
+			elog(ERROR, "No multi-hashtables expandable any more");
+	}
+	khtable = (kern_hashtable *)((char *)&mhtables->kern + mhtables->usage);
 	khtable->ncols = tupdesc->natts;
-	khtable->nslots = mhs->ntuples;
+	khtable->nslots = mhs->nslots;
 	khtable->is_outer = false;	/* Only INNER is supported right now */
 
 	attcacheoff = offsetof(HeapTupleHeaderData, t_bits);
@@ -3554,20 +3595,19 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		}
 		scan_tuple = ExecFetchSlotTuple(scan_slot);
 
-		/*
-		 * NOTE: If number of tuples read is less than expected, we try to
-		 * read it aggressively even if we need to use margin area. 
-		 * If we already read expected number of tuples, we don't read
-		 * anymore unless we consume all the area being assigned on.
-		 */
+		/* acquire the space on buffer */
 		entry_size = LONGALIGN(offsetof(kern_hashentry, htup) +
 							   scan_tuple->t_len);
-		if (ntuples < mhs->ntuples
-			? consumed + entry_size > mhs->chunk_size + mhtables->margin
-			: consumed + entry_size > mhs->chunk_size)
+		required = mhtables->usage + consumed + entry_size;
+		while (required > mhs->threshold_ratio * mhtables->length)
 		{
-			mhs->outer_overflow = scan_slot;
-			break;
+			if (!expand_multihash_tables(mhs, &mhtables))
+			{
+				mhs->outer_overflow = scan_slot;
+				goto out;
+			}
+			khtable = (kern_hashtable *)((char *)&mhtables->kern +
+										 mhtables->usage);
 		}
 
 		/* calculation of a hash value of this entry */
@@ -3614,12 +3654,11 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		hash_slots[i] = (cl_uint)consumed;
 
 		/* increment buffer consumption */
-		if (consumed + entry_size > mhs->chunk_size)
-			mhtables->margin -= entry_size;
 		consumed += entry_size;
 		/* increment number of tuples read */
 		ntuples++;
 	}
+out:
 	mhtables->ntuples += (double) ntuples;
 	mhtables->usage += consumed;
 	Assert(mhtables->usage < mhtables->length);
@@ -3691,7 +3730,6 @@ multihash_exec_multi(CustomPlanState *node)
 		mhtables->length =
 			(allocated - offsetof(pgstrom_multihash_tables, kern));
 		mhtables->usage = usage;
-		mhtables->margin = allocated - mhs->hashtable_size;
 		mhtables->ntuples = 0.0;
 		SpinLockInit(&mhtables->lock);
 		mhtables->refcnt = 1;
@@ -3787,7 +3825,9 @@ multihash_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 	/* And add to es->str */
     ExplainPropertyText("hash keys", str.data, es);
 	/* Also, reserved chunk size */
-	ExplainPropertyInteger("chunk size", mhash->chunk_size, es);
+	resetStringInfo(&str);
+	appendStringInfo(&str, "%.2f%%", 100.0 * mhash->threshold_ratio);
+	ExplainPropertyText("chunk usage", str.data, es);
 }
 
 static Bitmapset *
@@ -3818,7 +3858,8 @@ multihash_textout_plan(StringInfo str, const CustomPlan *node)
 	MultiHash  *plannode = (MultiHash *) node;
 
 	appendStringInfo(str, " :depth %d", plannode->depth);
-	appendStringInfo(str, " :ntuples %u", plannode->ntuples);
+	appendStringInfo(str, " :nslots %u", plannode->nslots);
+	appendStringInfo(str, " :threshold_ratio %f", plannode->threshold_ratio);
 	appendStringInfo(str, " :chunk_size %zu", plannode->chunk_size);
 	appendStringInfo(str, " :hashtable_size %zu", plannode->hashtable_size);
 	appendStringInfo(str, " :hash_inner_keys %s",
@@ -3835,7 +3876,8 @@ multihash_copy_plan(const CustomPlan *from)
 
 	CopyCustomPlanCommon((Node *)oldnode, (Node *)newnode);
 	newnode->depth           = oldnode->depth;
-	newnode->ntuples         = oldnode->ntuples;
+	newnode->nslots          = oldnode->nslots;
+	newnode->threshold_ratio = oldnode->threshold_ratio;
 	newnode->chunk_size      = oldnode->chunk_size;
 	newnode->hashtable_size  = oldnode->hashtable_size;
 	newnode->hash_inner_keys = copyObject(oldnode->hash_inner_keys);
