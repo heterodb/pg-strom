@@ -3490,7 +3490,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	Size			required;
 	Size			consumed;
 	cl_uint		   *hash_slots;
-	cl_uint			ntuples;
+	cl_uint			ntuples = 0;
 	int				attcacheoff;
 	int				attalign;
 	int				i;
