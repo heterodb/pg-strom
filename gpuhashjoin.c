@@ -248,6 +248,7 @@ path_is_mergeable_gpuhashjoin(Path *pathnode)
 {
 	RelOptInfo		*rel = pathnode->parent;
 	GpuHashJoinPath	*gpath;
+	List	   *host_clause;
 	ListCell   *cell;
 	int			last;
 
@@ -278,8 +279,15 @@ path_is_mergeable_gpuhashjoin(Path *pathnode)
 	 * Host qual should not contain volatile function except for
 	 * the last inner relation
 	 */
-	if (contain_volatile_functions((Node *)gpath->inners[last].host_clause))
-		return false;
+	host_clause = gpath->inners[last].host_clause;
+	foreach (cell, host_clause)
+	{
+		RestrictInfo   *rinfo = lfirst(cell);
+
+		Assert(IsA(rinfo, RestrictInfo));
+		if (contain_volatile_functions((Node *)rinfo->clause))
+			return false;
+	}
 
 	/*
 	 * TODO: Is any other condition to be checked?
