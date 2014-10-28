@@ -2235,7 +2235,7 @@ ExecInitExprOnlyValid(List *clauses_list, PlanState *pstate)
 		Expr	   *expr = lfirst(cell);
 
 		if (expr)
-			results = lappend(results, ExecInitExpr(expr, pstate));
+			results = list_concat(results, ExecInitExpr(expr, pstate));
 	}
 	return results;
 }
