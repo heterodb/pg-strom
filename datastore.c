@@ -888,6 +888,9 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 	bitem = KERN_DATA_STORE_BLKITEM(kds, 0);
 	for (i=0, n=0; i < kds->nblocks; i++)
 	{
+		/* simple sanity check */
+		Assert(bitem[i].buffer < NBuffers);
+
 		/*
 		 * NOTE: A micro optimization; if next page is located
 		 * on the continuous region, the upcoming DMA request
