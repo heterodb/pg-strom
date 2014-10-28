@@ -3443,7 +3443,7 @@ multihash_exec(CustomPlanState *node)
 
 static bool
 expand_multihash_tables(MultiHashState *mhs,
-						pgstrom_multihash_tables **p_mhtables)
+						pgstrom_multihash_tables **p_mhtables, Size consumed)
 {
 
 	pgstrom_multihash_tables *mhtables_old = *p_mhtables;
@@ -3454,15 +3454,21 @@ expand_multihash_tables(MultiHashState *mhs,
 	mhtables_new = pgstrom_shmem_alloc_alap(2 * length_old, &allocated);
 	if (!mhtables_new)
 		return false;	/* out of shmem, or too large to allocate */
-	memcpy(mhtables_new, mhtables_old, mhtables_old->usage);
+	memcpy(mhtables_new, mhtables_old,
+		   offsetof(pgstrom_multihash_tables, kern) +
+		   mhtables_old->usage + consumed);
 
 	mhtables_new->length =
 		allocated - offsetof(pgstrom_multihash_tables, kern);
+	mhtables_new->kern.hostptr = (hostptr_t)&mhtables_new->kern.hostptr;
 	Assert(mhtables_new->length > mhtables_old->length);
 	elog(INFO, "pgstrom_multihash_tables was expanded %zu (%p) => %zu (%p)",
 		 mhtables_old->length, mhtables_old,
 		 mhtables_new->length, mhtables_new);
 	pgstrom_track_object(&mhtables_new->sobj, 0);
+
+	pgstrom_untrack_object(&mhtables_old->sobj);
+	multihash_put_tables(mhtables_old);
 
 	/* update hashtable_size of MultiHashState */
 	do {
@@ -3479,12 +3485,13 @@ expand_multihash_tables(MultiHashState *mhs,
 
 static void
 multihash_preload_khashtable(MultiHashState *mhs,
-							 pgstrom_multihash_tables *mhtables,
+							 pgstrom_multihash_tables **p_mhtables,
 							 bool scan_forward)
 {
 	TupleDesc		tupdesc = ExecGetResultType(outerPlanState(mhs));
 	ExprContext	   *econtext = mhs->cps.ps.ps_ExprContext;
 	int				depth = mhs->depth;
+	pgstrom_multihash_tables *mhtables = *p_mhtables;
 	kern_hashtable *khtable;
 	kern_hashentry *hentry;
 	Size			required;
@@ -3513,8 +3520,9 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		required = mhtables->usage + mhs->curr_chunk->length;
 		while (required > mhs->threshold_ratio * mhtables->length)
 		{
-			if (!expand_multihash_tables(mhs, &mhtables))
+			if (!expand_multihash_tables(mhs, p_mhtables, 0))
 				elog(ERROR, "No multi-hashtables expandable any more");
+			mhtables = *p_mhtables;
 		}
 		memcpy((char *)&mhtables->kern + mhtables->usage,
 			   mhs->curr_chunk,
@@ -3532,8 +3540,9 @@ multihash_preload_khashtable(MultiHashState *mhs,
 				LONGALIGN(sizeof(cl_uint) * mhs->nslots));
 	while (required > mhs->threshold_ratio * mhtables->length)
 	{
-		if (!expand_multihash_tables(mhs, &mhtables))
+		if (!expand_multihash_tables(mhs, &mhtables, 0))
 			elog(ERROR, "No multi-hashtables expandable any more");
+		mhtables = *p_mhtables;
 	}
 	khtable = (kern_hashtable *)((char *)&mhtables->kern + mhtables->usage);
 	khtable->ncols = tupdesc->natts;
@@ -3569,6 +3578,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	memset(hash_slots, 0, sizeof(cl_uint) * khtable->nslots);
 	consumed = LONGALIGN((uintptr_t)&hash_slots[khtable->nslots] -
 						 (uintptr_t)khtable);
+
 	/*
 	 * Nest, fill up tuples fetched from the outer relation into
 	 * the hash-table in this level
@@ -3603,11 +3613,12 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		required = mhtables->usage + consumed + entry_size;
 		while (required > mhs->threshold_ratio * mhtables->length)
 		{
-			if (!expand_multihash_tables(mhs, &mhtables))
+			if (!expand_multihash_tables(mhs, p_mhtables, consumed))
 			{
 				mhs->outer_overflow = scan_slot;
 				goto out;
 			}
+			mhtables = *p_mhtables;
 			khtable = (kern_hashtable *)((char *)&mhtables->kern +
 										 mhtables->usage);
 		}
@@ -3754,8 +3765,7 @@ multihash_exec_multi(CustomPlanState *node)
 	 * construct a kernel hash-table that stores all the inner-keys
 	 * in this level, being loaded from the outer relation
 	 */
-	multihash_preload_khashtable(mhs, mhnode->mhtables, scan_forward);
-
+	multihash_preload_khashtable(mhs, &mhnode->mhtables, scan_forward);
 out:
 	/* must provide our own instrumentation support */
 	if (node->ps.instrument)
