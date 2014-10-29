@@ -339,8 +339,8 @@ init_kern_data_store(kern_data_store *kds,
 pgstrom_data_store *
 __pgstrom_create_data_store_row(const char *filename, int lineno,
 								TupleDesc tupdesc,
-								Size dstore_sz,
-								double ntup_per_block)
+								Size pds_length,
+								Size tup_width)
 {
 	pgstrom_data_store *pds;
 	kern_data_store	   *kds;
@@ -349,9 +349,11 @@ __pgstrom_create_data_store_row(const char *filename, int lineno,
 	cl_uint		nrooms;
 
 	/* size of data-store has to be aligned to BLCKSZ */
-	dstore_sz = TYPEALIGN(BLCKSZ, dstore_sz);
-	maxblocks = dstore_sz / BLCKSZ;
-	nrooms = (cl_uint)(ntup_per_block * (double)maxblocks * 1.25);
+	pds_length = TYPEALIGN(BLCKSZ, pds_length);
+	maxblocks = pds_length / BLCKSZ;
+	nrooms = (cl_uint)((double)BLCKSZ *
+					   (double)maxblocks * 1.25 /
+					   (double)tup_width);
 
 	/* allocation of kern_data_store */
 	required = (STROMALIGN(offsetof(kern_data_store,
@@ -646,8 +648,8 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 			}
 			dup_page = (Page)(pds->local_pages + BLCKSZ * kds->nblocks);
 			memcpy(dup_page, page, BLCKSZ);
-            bitem->page = dup_page;
-            ReleaseBuffer(buffer);
+			bitem->page = dup_page;
+			ReleaseBuffer(buffer);
 		}
 		kds->nblocks++;
 	}

@@ -448,12 +448,12 @@ extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
 extern void pgstrom_release_data_store(pgstrom_data_store *pds);
 extern pgstrom_data_store *
 __pgstrom_create_data_store_row(const char *filename, int lineno,
-								TupleDesc tupdesc, Size dstore_sz,
-								double ntup_per_block);
-#define pgstrom_create_data_store_row(tupdesc,dstore_sz,ntup_per_block)	\
+								TupleDesc tupdesc,
+								Size pds_length,
+								Size tup_width);
+#define pgstrom_create_data_store_row(tupdesc,pds_length,tup_width) \
 	__pgstrom_create_data_store_row(__FILE__, __LINE__,			\
-									(tupdesc),(dstore_sz),		\
-									(ntup_per_block))
+									(tupdesc),(pds_length),(tup_width))
 extern pgstrom_data_store *
 __pgstrom_create_data_store_row_flat(const char *filename, int lineno,
 									 TupleDesc tupdesc, Size length);

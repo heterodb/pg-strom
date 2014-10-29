@@ -70,7 +70,7 @@ typedef struct {
 	HeapTupleData		scan_tuple;
 	BlockNumber			curr_blknum;
 	BlockNumber			last_blknum;
-	double				ntup_per_page;
+	cl_uint				tuple_width;
 	List			   *dev_quals;
 
 	pgstrom_queue	   *mqueue;
@@ -609,7 +609,9 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	Index			scanrelid = gsplan->scanrelid;
 	GpuScanState   *gss;
 	TupleDesc		tupdesc;
-	Form_pg_class	rel_form;
+	BlockNumber		relpages;
+	double			reltuples;
+	double			allvisfrac;
 
 	/* gpuscan should not have inner/outer plan now */
 	Assert(outerPlan(node) == NULL);
@@ -670,8 +672,9 @@ gpuscan_begin(CustomPlan *node, EState *estate, int eflags)
 	 */
 	gss->curr_blknum = 0;
 	gss->last_blknum = RelationGetNumberOfBlocks(gss->scan_rel);
-	rel_form = RelationGetForm(gss->scan_rel);
-	gss->ntup_per_page = rel_form->reltuples / (float)rel_form->relpages;
+	estimate_rel_size(gss->scan_rel, NULL,
+					  &relpages, &reltuples, &allvisfrac);
+	gss->tuple_width = (Size)((double)BLCKSZ * (double)relpages / reltuples);
 
 	/*
 	 * Setting up kernel program, if needed
@@ -797,7 +800,7 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 		gettimeofday(&tv1, NULL);
 
 	length = (pgstrom_chunk_size << 20);
-	pds = pgstrom_create_data_store_row(tupdesc, length, gss->ntup_per_page);
+	pds = pgstrom_create_data_store_row(tupdesc, length, gss->tuple_width);
 	PG_TRY();
 	{
 		while (gss->curr_blknum < gss->last_blknum &&
