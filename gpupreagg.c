@@ -916,6 +916,54 @@ make_gpupreagg_refnode(Aggref *aggref, List **prep_tlist)
 	return altnode;
 }
 
+typedef struct
+{
+	Agg		   *agg;
+	List	   *pre_tlist;
+	Bitmapset  *attr_refs;
+	bool		gpupreagg_invalid;
+} gpupreagg_rewrite_context;
+
+static Node *
+gpupreagg_rewrite_mutator(Node *node, gpupreagg_rewrite_context *context)
+{
+	if (!node)
+		return NULL;
+
+	if (IsA(node, Aggref))
+	{
+		Aggref	   *orgagg = (Aggref *) node;
+		Aggref	   *altagg = NULL;
+
+		altagg = make_gpupreagg_refnode(orgagg, &context->pre_tlist);
+		if (!altagg)
+			context->gpupreagg_invalid = true;
+		return (Node *) altagg;
+	}
+	else if (IsA(node, Var))
+	{
+		Agg	   *agg = context->agg;
+		Var	   *var = (Var *) node;
+		int		i, x;
+
+		if (var->varno != OUTER_VAR)
+			elog(ERROR, "Bug? varnode references did not outer relation");
+		for (i=0; i < agg->numCols; i++)
+		{
+			if (var->varattno == agg->grpColIdx[i])
+			{
+				x = var->varattno - FirstLowInvalidHeapAttributeNumber;
+				context->attr_refs = bms_add_member(context->attr_refs, x);
+				return copyObject(var);
+			}
+		}
+		context->gpupreagg_invalid = true;
+		return NULL;
+	}
+	return expression_tree_mutator(node, gpupreagg_rewrite_mutator,
+								   (void *)context);
+}
+
 static bool
 gpupreagg_rewrite_expr(Agg *agg,
 					   List **p_agg_tlist,
@@ -923,6 +971,7 @@ gpupreagg_rewrite_expr(Agg *agg,
 					   List **p_pre_tlist,
 					   Bitmapset **p_attr_refs)
 {
+	gpupreagg_rewrite_context context;
 	Plan	   *outer_plan = outerPlan(agg);
 	List	   *pre_tlist = NIL;
 	List	   *agg_tlist = NIL;
@@ -1000,93 +1049,38 @@ gpupreagg_rewrite_expr(Agg *agg,
 	/* On the next, replace aggregate functions in tlist of Agg node
 	 * according to the aggfunc_catalog[] definition.
 	 */
+	memset(&context, 0, sizeof(gpupreagg_rewrite_context));
+	context.agg = agg;
+	context.pre_tlist = pre_tlist;
+	context.attr_refs = attr_refs;
+
 	foreach (cell, agg->plan.targetlist)
 	{
-		TargetEntry *tle = lfirst(cell);
+		TargetEntry	   *oldtle = lfirst(cell);
+		TargetEntry	   *newtle = flatCopyTargetEntry(oldtle);
 
-		if (IsA(tle->expr, Aggref))
-		{
-			/* aggregate shall be replaced to the alternative one */
-			Aggref *altagg = make_gpupreagg_refnode((Aggref *) tle->expr,
-													&pre_tlist);
-			if (!altagg)
-				return false;
-
-			tle = flatCopyTargetEntry(tle);
-			tle->expr = (Expr *) altagg;
-			agg_tlist = lappend(agg_tlist, tle);
-		}
-		else
-		{
-			/* Except for Aggref, node shall be an expression node that
-			 * contains references to group-by keys. No needs to replace.
-			 */
-			Bitmapset  *tempset = NULL;
-			int			col;
-
-			pull_varattnos((Node *) tle->expr, OUTER_VAR, &tempset);
-			while ((col = bms_first_member(tempset)) >= 0)
-			{
-				col += FirstLowInvalidHeapAttributeNumber;
-
-				for (i=0; i < agg->numCols; i++)
-				{
-					if (col == agg->grpColIdx[i])
-						break;
-				}
-				if (i == agg->numCols)
-					elog(ERROR, "Bug? references to out of grouping key");
-			}
-			bms_free(tempset);
-			agg_tlist = lappend(agg_tlist, copyObject(tle));
-			continue;
-		}
+		newtle->expr = (Expr *)gpupreagg_rewrite_mutator((Node *)oldtle->expr,
+														 &context);
+		if (context.gpupreagg_invalid)
+			return false;
+		agg_tlist = lappend(agg_tlist, newtle);
 	}
 
-	/* At the last, replace aggregate functions in qual of Agg node (that
-	 * is used to handle HAVING clause), according to the catalog definition.
-	 */
 	foreach (cell, agg->plan.qual)
 	{
-		Expr	   *expr = lfirst(cell);
+		Expr	   *old_expr = lfirst(cell);
+		Expr	   *new_expr;
 
-		if (IsA(expr, Aggref))
-		{
-			Aggref *altagg = make_gpupreagg_refnode((Aggref *) expr,
-													&pre_tlist);
-			if (!altagg)
-				return false;
-			agg_quals = lappend(agg_quals, altagg);
-		}
-		else
-		{
-			/* Except for Aggref, all expression can reference are columns
-			 * being grouped. 
-			 */
-			Bitmapset  *tempset = NULL;
-			int			col;
-
-			pull_varattnos((Node *) expr, OUTER_VAR, &tempset);
-			while ((col = bms_first_member(tempset)) >= 0)
-			{
-				col += FirstLowInvalidHeapAttributeNumber;
-
-				for (i=0; i < agg->numCols; i++)
-				{
-					if (col == agg->grpColIdx[i])
-						break;
-				}
-				if (i == agg->numCols)
-					elog(ERROR, "Bug? references to out of grouping key");
-			}
-			bms_free(tempset);
-			agg_quals = lappend(agg_quals, copyObject(expr));
-		}
+		new_expr = (Expr *)gpupreagg_rewrite_mutator((Node *)old_expr,
+													 &context);
+		if (context.gpupreagg_invalid)
+			return false;
+		agg_quals = lappend(agg_quals, new_expr);
 	}
-	*p_pre_tlist = pre_tlist;
+	*p_pre_tlist = context.pre_tlist;
 	*p_agg_tlist = agg_tlist;
 	*p_agg_quals = agg_quals;
-	*p_attr_refs = attr_refs;
+	*p_attr_refs = context.attr_refs;
 	return true;
 }
 
