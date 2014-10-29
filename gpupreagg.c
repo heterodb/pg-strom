@@ -2577,7 +2577,33 @@ gpupreagg_end(CustomPlanState *node)
 static void
 gpupreagg_rescan(CustomPlanState *node)
 {
+	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
+	pgstrom_message	   *msg;
+
 	elog(ERROR, "not implemented yet");
+
+	/* Clean up strom objects */
+	if (gpas->curr_chunk)
+	{
+		msg = &gpas->curr_chunk->msg;
+		if (msg->pfm.enabled)
+			pgstrom_perfmon_add(&gpas->pfm, &msg->pfm);
+		pgstrom_untrack_object(&msg->sobj);
+		pgstrom_put_message(msg);
+	}
+
+	while (gpas->num_running > 0)
+	{
+		msg = pgstrom_dequeue_message(gpas->mqueue);
+		if (!msg)
+			elog(ERROR, "message queue wait timeout");
+		pgstrom_untrack_object(&msg->sobj);
+		pgstrom_put_message(msg);
+		gpas->num_running--;
+	}
+
+	/* Rewind the subtree */
+	ExecReScan(outerPlanState(node));
 }
 
 static void

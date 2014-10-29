@@ -124,8 +124,22 @@ pgstrom_grafter_entrypoint(Query *parse,
 		result = standard_planner(parse, cursorOptions, boundParams);
 
 	if (pgstrom_enabled)
+	{
+		List	   *sub_plans = NIL;
+		ListCell   *cell;
+
 		result->planTree = grafter_try_replace_recurse(result,
 													   result->planTree);
+		foreach (cell, result->subplans)
+		{
+			Plan   *old_plan = lfirst(cell);
+			Plan   *new_plan;
+
+			new_plan = grafter_try_replace_recurse(result, old_plan);
+			sub_plans = lappend(sub_plans, new_plan);
+		}
+		result->subplans = sub_plans;
+	}
 	return result;
 }
 
