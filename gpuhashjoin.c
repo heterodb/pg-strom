@@ -2228,14 +2228,21 @@ static inline List *
 ExecInitExprOnlyValid(List *clauses_list, PlanState *pstate)
 {
 	List	   *results = NIL;
-	ListCell   *cell;
+	ListCell   *lc1;
+	ListCell   *lc2;
 
-	foreach (cell, clauses_list)
+	foreach (lc1, clauses_list)
 	{
-		Expr	   *expr = lfirst(cell);
+		List	   *expr_list = lfirst(lc1);
 
-		if (expr)
-			results = list_concat(results, ExecInitExpr(expr, pstate));
+		Assert(expr_list == NIL || IsA(expr_list, List));
+		foreach (lc2, expr_list)
+		{
+			Expr   *expr = lfirst(lc2);
+
+			if (expr)
+				results = lappend(results, ExecInitExpr(expr, pstate));
+		}
 	}
 	return results;
 }
