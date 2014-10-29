@@ -315,11 +315,16 @@ plan_is_multihash(Plan *plannode)
  *
  * It estimates size of hashitem for GpuHashJoin
  */
-static Size
-estimate_hashtable_size(PlannerInfo *root, GpuHashJoinPath *gpath)
+static bool
+estimate_hashtable_size(PlannerInfo *root,
+						GpuHashJoinPath *gpath,
+						Relids required_outer,
+						JoinCostWorkspace *workspace)
 {
+	RelOptInfo *joinrel = gpath->cpath.path.parent;
 	Size		hashtable_size;
 	Size		threshold_size;
+	cl_int		numbatches;
 	bool		is_first = true;
 
 	do {
@@ -330,7 +335,8 @@ estimate_hashtable_size(PlannerInfo *root, GpuHashJoinPath *gpath)
 		/* increment outer loop count to reduce size of hash table */
 		if (!is_first)
 			gpath->inners[i_largest].nloops++;
-		largest_size = 0.0;
+		numbatches = 1;
+		largest_size = 0;
 		i_largest = -1;
 
 		hashtable_size = LONGALIGN(offsetof(kern_multihash,
@@ -346,6 +352,8 @@ estimate_hashtable_size(PlannerInfo *root, GpuHashJoinPath *gpath)
 
 			if (is_first)
 				gpath->inners[i].nloops = 1;
+			else
+				numbatches *= gpath->inners[i].nloops;
 
 			/* force a plausible relation size if no information.
 			 * It expects 15% of margin to avoid unnecessary hash-
@@ -386,10 +394,36 @@ estimate_hashtable_size(PlannerInfo *root, GpuHashJoinPath *gpath)
 		}
 		Assert(i_largest >= 0 && i_largest < nrels);
 		is_first = false;
+
+		/*
+		 * NOTE: In case when extreme number of rows are expected,
+		 * it does not make sense to split hash-tables because
+		 * increasion of numbatches also increases the total cost
+		 * by iteration of outer scan. In this case, the best
+		 * strategy is to give up this path, instead of incredible
+		 * number of numbatches!
+		 */
+		if (!add_path_precheck(joinrel,
+							   workspace->startup_cost,
+							   workspace->startup_cost +
+							   workspace->run_cost * numbatches,
+							   NULL, required_outer))
+			return false;
 	} while (hashtable_size > pgstrom_shmem_maxalloc());
 
-	/* try to allocate pgstrom_chunk_size at least */
-	return Max(hashtable_size, pgstrom_chunk_size << 20);
+	/*
+	 * Update estimated hashtable_size, but ensure hashtable_size
+	 * shall be allocated at least
+	 */
+	gpath->hashtable_size = Max(hashtable_size,
+								pgstrom_chunk_size << 20);
+	/*
+	 * Update JoinCostWorkspace according to numbatches
+	 */
+	workspace->run_cost *= numbatches;
+	workspace->total_cost = workspace->startup_cost + workspace->run_cost;
+
+	return true;	/* ok */
 }
 
 /*
@@ -400,6 +434,7 @@ estimate_hashtable_size(PlannerInfo *root, GpuHashJoinPath *gpath)
 static bool
 cost_gpuhashjoin(PlannerInfo *root,
 				 GpuHashJoinPath *gpath,
+				 Relids required_outer,
 				 JoinCostWorkspace *workspace)
 {
 	Path	   *outer_path = gpath->outerpath;
@@ -408,7 +443,7 @@ cost_gpuhashjoin(PlannerInfo *root,
 	Cost		row_cost;
 	double		num_rows;
 	int			num_hash_clauses = 0;
-	int			i, numbatches;
+	int			i;
 
 	/* cost of source data */
 	startup_cost = outer_path->startup_cost;
@@ -439,28 +474,20 @@ cost_gpuhashjoin(PlannerInfo *root,
 	row_cost = pgstrom_gpu_operator_cost * num_hash_clauses;
 	run_cost += row_cost * num_rows;
 
-	/*
-	 * Estimation of hash table size, and number of outer loops
-	 * according to the split of hash table.
-	 */
-	gpath->hashtable_size = estimate_hashtable_size(root, gpath);
-
-	numbatches = 1;
-	for (i=0; i < gpath->num_rels; i++)
-		numbatches *= gpath->inners[i].nloops;
-	if (numbatches > 1)
-		run_cost *= (Cost)numbatches;
-
-	/*
-	 * FIXME: Right now, we pay attention on the memory consumption of
-	 * kernel hash-table only, because host system mounts much larger
-	 * amount of memory than GPU/MIC device. Of course, work_mem
-	 * configuration should be considered, but not now.
-	 */
+	/* setup join-cost-workspace */
 	workspace->startup_cost = startup_cost;
 	workspace->run_cost = run_cost;
 	workspace->total_cost = startup_cost + run_cost;
-	workspace->numbatches = numbatches;
+	workspace->numbatches = 1;
+
+	/*
+	 * Estimation of hash table size and number of outer loops
+	 * according to the split of hash tables.
+	 * In case of estimated plan cost is too large to win the
+	 * existing paths, it breaks to find out this path.
+	 */
+	if (!estimate_hashtable_size(root, gpath, required_outer, workspace))
+		return false;
 
 	return true;
 }
@@ -738,7 +765,9 @@ gpuhashjoin_add_path(PlannerInfo *root,
 	gpath_new->inners[0].host_clause = host_clause;
 
 	/* cost estimation and check availability */
-	if (cost_gpuhashjoin(root, gpath_new, &gpu_workspace))
+	if (cost_gpuhashjoin(root, gpath_new,
+						 required_outer,
+						 &gpu_workspace))
 	{
 		if (add_path_precheck(joinrel,
 							  gpu_workspace.startup_cost,
@@ -780,7 +809,9 @@ gpuhashjoin_add_path(PlannerInfo *root,
 		gpath_new->inners[num_rels].host_clause = host_clause;
 
 		/* cost estimation and check availability */
-		if (cost_gpuhashjoin(root, gpath_new, &gpu_workspace))
+		if (cost_gpuhashjoin(root, gpath_new,
+							 required_outer,
+							 &gpu_workspace))
 		{
 			if (add_path_precheck(joinrel,
 								  gpu_workspace.startup_cost,
