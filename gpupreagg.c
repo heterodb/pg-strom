@@ -1006,11 +1006,15 @@ gpupreagg_rewrite_expr(Agg *agg,
 		char	   *resname = (tle->resname ? pstrdup(tle->resname) : NULL);
 
 		Assert(IsA(tle, TargetEntry));
-		if (i < agg->numCols && tle->resno == agg->grpColIdx[i])
+		for (i=0; i < agg->numCols; i++)
 		{
-			devtype_info   *dtype = pgstrom_devtype_lookup(type_oid);
+			devtype_info   *dtype;
 			Expr		   *var;
 
+			if (tle->resno != agg->grpColIdx[i])
+				continue;
+
+			dtype = pgstrom_devtype_lookup(type_oid);
 			/* grouping key must be a supported data type */
 			if (!dtype)
 				return false;
@@ -1032,9 +1036,10 @@ gpupreagg_rewrite_expr(Agg *agg,
 			pre_tlist = lappend(pre_tlist, tle_new);
 			attr_refs = bms_add_member(attr_refs, tle->resno -
 									   FirstLowInvalidHeapAttributeNumber);
-			i++;
+			break;
 		}
-		else
+		/* if not a grouping key, NULL is set instead */
+		if (i == agg->numCols)
 		{
 			Const  *cnst = makeNullConst(type_oid, type_mod, type_coll);
 
