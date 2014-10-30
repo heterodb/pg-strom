@@ -139,7 +139,6 @@ typedef struct
 	cl_uint		nslots;		/* width of hash slots */
 	cl_uint		nloops;		/* expected number of outer loops */
 	double		threshold_ratio;
-//	Size		chunk_size;	/* available length for each chunk */
 	Size		hashtable_size;	/* estimated total hashtable size */
 
 	List	   *hash_inner_keys;/* list of inner hash key expressions */
@@ -3665,8 +3664,9 @@ multihash_preload_khashtable(MultiHashState *mhs,
 				goto out;
 			}
 			mhtables = *p_mhtables;
-			khtable = (kern_hashtable *)((char *)&mhtables->kern +
-										 mhtables->usage);
+			khtable = (kern_hashtable *)
+				((char *)&mhtables->kern + mhtables->usage);
+			hash_slots = KERN_HASHTABLE_SLOT(khtable);
 		}
 
 		/* calculation of a hash value of this entry */

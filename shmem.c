@@ -463,7 +463,11 @@ __pgstrom_shmem_alloc(const char *filename, int lineno, Size size)
 	/* For debugging, we dump current status of shared memory segment
 	 * if we have to return "out of shared memory" error */
 	if (!address)
+	{
 		pgstrom_shmem_dump();
+		clserv_log("%s:%d required %zu bytes of shared memory",
+				   filename, lineno, size);
+	}
 #endif
 	return address;	
 }
@@ -640,7 +644,7 @@ pgstrom_shmem_maxalloc(void)
 	{
 		int		n = get_next_log2(pgstrom_shmem_head->zone_length + 1);
 
-		maxalloc_length = (1UL << n);
+		maxalloc_length = (1UL << (n - 1));
 	}
 	return maxalloc_length;
 }
