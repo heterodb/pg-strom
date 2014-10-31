@@ -685,6 +685,7 @@ gpuhashjoin_add_path(PlannerInfo *root,
 	List		   *hash_clause = NIL;
 	List		   *qual_clause = NIL;
 	List		   *host_clause = NIL;
+	List		   *outer_clause;
 	ListCell	   *cell;
 	JoinCostWorkspace gpu_workspace;
 
@@ -747,6 +748,7 @@ gpuhashjoin_add_path(PlannerInfo *root,
 	/*
 	 * creation of gpuhashjoin path, if no pull-up
 	 */
+	outer_clause = NIL;
 	gpath_new = palloc0(offsetof(GpuHashJoinPath, inners[1]));
 	gpath_new->cpath.path.type = T_CustomPath;
 	gpath_new->cpath.path.pathtype = T_CustomPlan;
@@ -756,11 +758,12 @@ gpuhashjoin_add_path(PlannerInfo *root,
 	/* other cost fields of Path shall be set later */
 	gpath_new->cpath.methods = &gpuhashjoin_path_methods;
 	gpath_new->num_rels = 1;
-	gpath_new->outerpath = gpuscan_try_replace_seqscan_path(root, outer_path);
+	gpath_new->outerpath = gpuscan_try_replace_seqscan_path(root, outer_path,
+															&outer_clause);
 	gpath_new->inners[0].scan_path = inner_path;
 	gpath_new->inners[0].jointype = jointype;
 	gpath_new->inners[0].hash_clause = hash_clause;
-	gpath_new->inners[0].qual_clause = qual_clause;
+	gpath_new->inners[0].qual_clause = list_concat(qual_clause, outer_clause);
 	gpath_new->inners[0].host_clause = host_clause;
 
 	/* cost estimation and check availability */
@@ -786,6 +789,7 @@ gpuhashjoin_add_path(PlannerInfo *root,
 		GpuHashJoinPath	   *gpath_sub = (GpuHashJoinPath *) outer_path;
 		int		num_rels = gpath_sub->num_rels;
 
+		outer_clause = NIL;
 		gpath_new = palloc0(offsetof(GpuHashJoinPath, inners[num_rels + 1]));
 		gpath_new->cpath.path.type = T_CustomPath;
 		gpath_new->cpath.path.pathtype = T_CustomPlan;
@@ -796,7 +800,8 @@ gpuhashjoin_add_path(PlannerInfo *root,
 		gpath_new->cpath.methods = &gpuhashjoin_path_methods;
 		gpath_new->num_rels = gpath_sub->num_rels + 1;
 		gpath_new->outerpath =
-			gpuscan_try_replace_seqscan_path(root, gpath_sub->outerpath);
+			gpuscan_try_replace_seqscan_path(root, gpath_sub->outerpath,
+											 &outer_clause);
 		memcpy(gpath_new->inners,
 			   gpath_sub->inners,
 			   offsetof(GpuHashJoinPath, inners[num_rels]) -
@@ -804,7 +809,8 @@ gpuhashjoin_add_path(PlannerInfo *root,
 		gpath_new->inners[num_rels].scan_path = inner_path;
 		gpath_new->inners[num_rels].jointype = jointype;
 		gpath_new->inners[num_rels].hash_clause = hash_clause;
-		gpath_new->inners[num_rels].qual_clause = qual_clause;
+		gpath_new->inners[num_rels].qual_clause = list_concat(qual_clause,
+															  outer_clause);
 		gpath_new->inners[num_rels].host_clause = host_clause;
 
 		/* cost estimation and check availability */
@@ -1345,17 +1351,19 @@ gpuhashjoin_codegen(PlannerInfo *root,
 					codegen_context *context)
 {
 	StringInfoData	str;
+	StringInfoData	decl;
 	StringInfoData	body;
 	ListCell	   *cell;
 	int				depth;
 
 	initStringInfo(&str);
 	initStringInfo(&body);
+	initStringInfo(&decl);
 	pgstrom_init_codegen_context(context);
 
 	/* declaration of gpuhashjoin_execute */
 	appendStringInfo(
-		&body,
+		&decl,
 		"static cl_uint\n"
 		"gpuhashjoin_execute(__private cl_int *errcode,\n"
 		"                    __global kern_parambuf *kparams,\n"
@@ -1372,7 +1380,7 @@ gpuhashjoin_codegen(PlannerInfo *root,
 	for (depth=1; depth <= ghjoin->num_rels; depth++)
 	{
 		appendStringInfo(
-			&body,
+			&decl,
 			"__global kern_hashtable *khtable_%d"
 			" = KERN_HASHTABLE(kmhash,%d);\n",
 			depth, depth);
@@ -1381,7 +1389,7 @@ gpuhashjoin_codegen(PlannerInfo *root,
 	for (depth=1; depth <= ghjoin->num_rels; depth++)
     {
         appendStringInfo(
-            &body,
+            &decl,
             "__global kern_hashentry *kentry_%d;\n",
 			depth);
 	}
@@ -1423,17 +1431,24 @@ gpuhashjoin_codegen(PlannerInfo *root,
 					 "return n_matches;\n"
 					 "}\n");
 
+	/* reference to kern_params */
+	appendStringInfo(&decl, "%s",
+					 pgstrom_codegen_param_declarations(context,
+														context->param_refs));
+	context->param_refs = NULL;
+
+	/* integrate decl and body */
+	appendStringInfo(&decl, "%s", body.data);
+
 	/* also, gpuhashjoin_projection_datum() */
-	gpuhashjoin_codegen_projection(&body, ghjoin, context);
+	gpuhashjoin_codegen_projection(&decl, ghjoin, context);
 
 	/* put declarations of types/funcs/params */
-	appendStringInfo(&str, "%s%s%s%s%s",
+	appendStringInfo(&str, "%s%s%s%s",
 					 pgstrom_codegen_type_declarations(context),
 					 gpuhashjoin_codegen_type_declarations(context),
 					 pgstrom_codegen_func_declarations(context),
-					 pgstrom_codegen_param_declarations(context,
-														context->param_refs),
-					 body.data);
+					 decl.data);
 
 	/* include opencl_hashjoin.h */
 	context->extra_flags |= DEVKERNEL_NEEDS_HASHJOIN;

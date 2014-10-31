@@ -907,17 +907,21 @@ pg_varlena_hashref(__global kern_hashtable *khtable,
 	pg_##NAME##_hashkey(__local cl_uint *crc32_table,		\
 						cl_uint hash, pg_##NAME##_t datum)	\
 	{														\
+		cl_uint			__len = sizeof(BASE);				\
+		cl_uint			__index;							\
+		union {												\
+			BASE		as_base;							\
+			cl_ulong	as_long;							\
+		} __data;											\
+															\
 		if (!datum.isnull)									\
 		{													\
-			BASE		__data = datum.value;				\
-			cl_uint		__len = sizeof(BASE);				\
-			cl_uint		__index;							\
-															\
+			__data.as_base = datum.value;					\
 			while (__len-- > 0)								\
 			{												\
-				__index = ((hash >> 24) ^ (__data)) & 0xff;	\
+				__index = ((hash >> 24) ^ (__data.as_long)) & 0xff;	\
 				hash = crc32_table[__index] ^ (hash << 8);	\
-				__data = (__data >> 8);						\
+				__data.as_long = (__data.as_long >> 8);		\
 			}												\
 		}													\
 		return hash;										\

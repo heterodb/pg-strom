@@ -96,7 +96,7 @@ static void clserv_process_gpuscan(pgstrom_message *msg);
 static void
 cost_gpuscan(GpuScanPath *gpu_path, PlannerInfo *root,
 			 RelOptInfo *baserel, ParamPathInfo *param_info,
-			 List *dev_quals, List *host_quals)
+			 List *dev_quals, List *host_quals, bool is_bulkload)
 {
 	Path	   *path = &gpu_path->cpath.path;
 	Cost		startup_cost = 0;
@@ -148,7 +148,10 @@ cost_gpuscan(GpuScanPath *gpu_path, PlannerInfo *root,
 
 	/* total path cost */
 	startup_cost += dev_cost.startup + host_cost.startup;
-	cpu_per_tuple = cpu_tuple_cost + host_cost.per_tuple;
+	if (!is_bulkload)
+		cpu_per_tuple = host_cost.per_tuple + cpu_tuple_cost;
+	else
+		cpu_per_tuple = host_cost.per_tuple;
 	gpu_per_tuple = dev_cost.per_tuple;
 	run_cost += (gpu_per_tuple * baserel->tuples +
 				 cpu_per_tuple * dev_sel * baserel->tuples);
@@ -214,7 +217,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 
 	cost_gpuscan(pathnode, root, baserel,
 				 pathnode->cpath.path.param_info,
-				 dev_quals, host_quals);
+				 dev_quals, host_quals, false);
 
 	pathnode->dev_quals = dev_quals;
 	pathnode->host_quals = host_quals;
@@ -231,19 +234,51 @@ gpuscan_add_scan_path(PlannerInfo *root,
  * loading functionality.
  */
 Path *
-gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path)
+gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path,
+								 List **p_upper_quals)
 {
-	RelOptInfo	   *rel;
-	ListCell	   *lc;
+	RelOptInfo	   *rel = path->parent;
 	GpuScanPath	   *gpath;
+	ListCell	   *lc;
+	List		   *dev_quals;
 	int				i;
 
-	/* only SeqScan can be replaced */
+#if 0
+	/*
+	 * XXX - It looks dev_quals pull up breaks adeque plan estimation.
+	 * needs to be fixed.
+	 */
+
+	/*
+	 * In case when SubPlan is already GpuScanPath, it may be available
+	 * to pull up device executable qualifiers.
+	 */
+	if (path->pathtype == T_CustomPlan &&
+		((CustomPath *) path)->methods == &gpuscan_path_methods)
+	{
+		Assert(rel->rtekind == RTE_RELATION);
+		Assert(rel->reloptkind == RELOPT_BASEREL);
+
+		gpath = (GpuScanPath *) path;
+
+		if (p_upper_quals != NULL &&
+			enable_gpuscan &&
+			gpath->dev_quals != NIL &&
+			gpath->host_quals == NIL)
+		{
+			*p_upper_quals = copyObject(gpath->dev_quals);
+			dev_quals = NIL;
+			goto build;
+		}
+		return path;	/* nothing to do */
+	}
+#endif
+
+	/* Elsewhere, only SeqScan can be replaced */
 	if (path->pathtype != T_SeqScan)
 		return path;
 
 	/* SeqScan shall take a relation to be scanned */
-	rel = path->parent;
 	if (rel->rtekind != RTE_RELATION)
 		return path;	/* usually, shouldn't happen */
 	if (rel->reloptkind != RELOPT_BASEREL)
@@ -253,13 +288,27 @@ gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path)
 	if (!enable_gpuscan)
 		return path;
 
-	/* Simple SeqScan cannot have not device executable */
+	/* Simple SeqScan can have only device executable qualifier */
+	dev_quals = NIL;
 	foreach (lc, rel->baserestrictinfo)
 	{
 		RestrictInfo   *rinfo = lfirst(lc);
 
 		if (!pgstrom_codegen_available_expression(rinfo->clause))
 			return path;
+		dev_quals = lappend(dev_quals, rinfo);
+	}
+
+	/* If upper node allows to pull-up device executable qualifier,
+	 * we hand over this evaluation on the upper node. Unlike usual
+	 * query planning policy, qualifier pull-up enables to reduce
+	 * interaction between backend and opencl server. So, it makes
+	 * sense probably.
+	 */
+	if (p_upper_quals)
+	{
+		*p_upper_quals = copyObject(dev_quals);
+		dev_quals = NIL;
 	}
 
 	/* !!! See the logic in use_physical_tlist() !!! */
@@ -285,6 +334,7 @@ gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path)
 	}
 
 	/* OK, probably GpuScan instead of SeqScan makes sense */
+//build:
 	gpath = palloc0(sizeof(GpuScanPath));
     gpath->cpath.path.type = T_CustomPath;
     gpath->cpath.path.pathtype = T_CustomPlan;
@@ -296,8 +346,8 @@ gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path)
 
 	cost_gpuscan(gpath, root, rel,
 				 gpath->cpath.path.param_info,
-				 NIL, NIL);
-	gpath->dev_quals = NIL;
+				 dev_quals, NIL, true);
+	gpath->dev_quals = dev_quals;
 	gpath->host_quals = NIL;
 
 	return (Path *)gpath;
