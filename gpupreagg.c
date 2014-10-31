@@ -2585,8 +2585,6 @@ gpupreagg_rescan(CustomPlanState *node)
 	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
 	pgstrom_message	   *msg;
 
-	elog(ERROR, "not implemented yet");
-
 	/* Clean up strom objects */
 	if (gpas->curr_chunk)
 	{
@@ -2595,6 +2593,9 @@ gpupreagg_rescan(CustomPlanState *node)
 			pgstrom_perfmon_add(&gpas->pfm, &msg->pfm);
 		pgstrom_untrack_object(&msg->sobj);
 		pgstrom_put_message(msg);
+		gpas->curr_chunk = NULL;
+		gpas->curr_index = 0;
+		gpas->curr_recheck = false;
 	}
 
 	while (gpas->num_running > 0)
@@ -2608,6 +2609,7 @@ gpupreagg_rescan(CustomPlanState *node)
 	}
 
 	/* Rewind the subtree */
+	gpas->outer_done = false;
 	ExecReScan(outerPlanState(node));
 }
 

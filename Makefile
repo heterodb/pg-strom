@@ -10,7 +10,7 @@ OBJS  = main.o shmem.o codegen.o mqueue.o restrack.o grafter.o \
 	opencl_textlib.o opencl_timelib.o opencl_numeric.o
 
 PG_CONFIG = pg_config
-PGSTROM_DEBUG := $(shell $(PG_CONFIG) --configure | grep -q "'--enable-debug'" && echo "-Wall -DPGSTROM_DEBUG=1 -O0")
+PGSTROM_DEBUG := $(shell $(PG_CONFIG) --configure | grep -q "'--enable-debug'" && echo "-Wall -DPGSTROM_DEBUG=1")
 PG_CPPFLAGS := $(PGSTROM_DEBUG)
 EXTRA_CLEAN := opencl_common.c opencl_gpuscan.c \
 		opencl_gpupreagg.c opencl_hashjoin.c \

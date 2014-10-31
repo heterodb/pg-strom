@@ -2380,7 +2380,7 @@ gpuhashjoin_begin(CustomPlan *node, EState *estate, int eflags)
 	/* construction of kernel parameter buffer */
 	ghjs->kparams = pgstrom_create_kern_parambuf(ghjoin->used_params,
 												 ghjs->cps.ps.ps_ExprContext);
-
+	Assert(false);
 	/*
 	 * Setting up a kernel program and message queue
 	 */
@@ -3059,7 +3059,65 @@ gpuhashjoin_end(CustomPlanState *node)
 static void
 gpuhashjoin_rescan(CustomPlanState *node)
 {
-	elog(ERROR, "not implemented yet");
+	GpuHashJoinState	   *ghjs = (GpuHashJoinState *) node;
+	pgstrom_gpuhashjoin	   *ghjoin;
+
+	/* release asynchronous jobs, if any */
+	if (ghjs->curr_ghjoin)
+	{
+		ghjoin = ghjs->curr_ghjoin;
+		pgstrom_untrack_object(&ghjoin->msg.sobj);
+		pgstrom_put_message(&ghjoin->msg);
+		ghjs->curr_ghjoin = NULL;
+		ghjs->curr_index = 0;
+		ghjs->curr_recheck = false;
+	}
+
+	while (ghjs->num_running > 0)
+	{
+		ghjoin = (pgstrom_gpuhashjoin *)pgstrom_dequeue_message(ghjs->mqueue);
+		if (!ghjoin)
+			elog(ERROR, "message queue wait timeout");
+		pgstrom_untrack_object(&ghjoin->msg.sobj);
+		pgstrom_put_message(&ghjoin->msg);
+		ghjs->num_running--;
+	}
+
+	/*
+	 * We may be reuse inner hash table, if single-batch join, and there is
+	 * no parameter change for the inner subnodes.
+	 */
+	if (ghjs->mhtables)
+	{
+		pgstrom_multihash_tables *mhtables = ghjs->mhtables;
+		PlanState	   *inner_ps = innerPlanState(ghjs);
+
+		if (mhtables->is_divided || inner_ps->chgParam == NULL)
+		{
+			/*
+             * if chgParam of subnode is not null then plan will be
+			 * re-scanned by first ExecProcNode.
+             */
+			if (inner_ps->chgParam == NULL)
+				ExecReScan(inner_ps);
+
+			/*
+			 * Release previous multi-hash-table
+			 */
+			pgstrom_untrack_object(&mhtables->sobj);
+			multihash_put_tables(mhtables);
+			ghjs->mhtables = NULL;
+		}
+	}
+
+	/*
+	 * if chgParam of subnode is not null then plan will be
+	 * re-scanned by first ExecProcNode.
+	 */
+	ghjs->outer_done = false;
+	ghjs->outer_overflow = NULL;
+	if (outerPlanState(ghjs)->chgParam == NULL)
+		ExecReScan(outerPlanState(ghjs));
 }
 
 static void
@@ -3573,6 +3631,9 @@ multihash_preload_khashtable(MultiHashState *mhs,
 			   mhs->curr_chunk,
 			   mhs->curr_chunk->length);
 		mhtables->usage += mhs->curr_chunk->length;
+		Assert(mhtables->usage < mhtables->length);
+		if (!mhs->outer_done)
+			mhtables->is_divided = true;
 		return;
 	}
 
@@ -3721,8 +3782,9 @@ out:
 	mhtables->ntuples += (double) ntuples;
 	mhtables->usage += consumed;
 	Assert(mhtables->usage < mhtables->length);
-
 	khtable->length = consumed;
+	if (mhs->curr_chunk || !mhs->outer_done)
+		mhtables->is_divided = true;
 	if (mhs->curr_chunk)
 		pfree(mhs->curr_chunk);
 	mhs->curr_chunk = pmemcpy(khtable, khtable->length);

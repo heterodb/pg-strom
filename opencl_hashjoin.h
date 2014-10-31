@@ -951,6 +951,7 @@ typedef struct pgstrom_multihash_tables
 	Size			length;		/* max available length of this mhash */
 	Size			usage;		/* current usage of this mhash */
 	double			ntuples;	/* number of tuples in this mhash */
+	bool			is_divided;	/* true, if not whole of the inner relation */
 	slock_t			lock;		/* protection of the fields below */
 	cl_int			refcnt;		/* reference counter of this hash table */
 	cl_int			dindex;		/* device to load the hash table */
