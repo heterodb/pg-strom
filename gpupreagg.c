@@ -984,11 +984,8 @@ gpupreagg_rewrite_expr(Agg *agg,
 	 * of the scan node. GpuPreAgg shall be injected under the Sort node
 	 * to reduce burden of CPU sorting.
 	 */
-	if (agg->aggstrategy == AGG_SORTED)
-	{
-		Assert(IsA(outer_plan, Sort));
+	if (IsA(outer_plan, Sort))
 		outer_plan = outerPlan(outer_plan);
-	}
 
 	/* Head of target-list keeps original order not to adjust expression 
 	 * nodes in the Agg (and Sort if exists) node, but replaced to NULL
@@ -1941,10 +1938,10 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 				   agg_tlist, agg_quals,
 				   &startup_cost, &total_cost,
 				   &startup_sort, &total_sort);
-#if 0
+
 	if (agg->plan.total_cost < total_cost)
 		return;
-#endif
+
 	/*
 	 * construction of kernel code, according to the above query
 	 * rewrites.
@@ -1981,7 +1978,6 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	{
 		Sort   *sort_plan = (Sort *) outerPlan(agg);
 
-		Assert(IsA(sort_plan, Sort));
 		sort_plan->plan.startup_cost = startup_sort;
 		sort_plan->plan.total_cost = total_sort;
 		sort_plan->plan.plan_rows = gpreagg->cplan.plan.plan_rows;
