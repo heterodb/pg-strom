@@ -2380,7 +2380,7 @@ gpuhashjoin_begin(CustomPlan *node, EState *estate, int eflags)
 	/* construction of kernel parameter buffer */
 	ghjs->kparams = pgstrom_create_kern_parambuf(ghjoin->used_params,
 												 ghjs->cps.ps.ps_ExprContext);
-	Assert(false);
+
 	/*
 	 * Setting up a kernel program and message queue
 	 */
