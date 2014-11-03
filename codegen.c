@@ -483,6 +483,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 };
 
 static devfunc_catalog_t devfunc_numericlib_catalog[] = {
+#if 0
 	/* Type cast functions */
 	{ "int2",    1, {NUMERICOID}, "F:numeric_int2",   NULL },
 	{ "int4",    1, {NUMERICOID}, "F:numeric_int4",   NULL },
@@ -509,6 +510,7 @@ static devfunc_catalog_t devfunc_numericlib_catalog[] = {
 	{ "numeric_gt", 2, {NUMERICOID, NUMERICOID}, "F:numeric_gt", NULL },
 	{ "numeric_ge", 2, {NUMERICOID, NUMERICOID}, "F:numeric_ge", NULL },
 	{ "numeric_cmp", 2, {NUMERICOID, NUMERICOID}, "F:numeric_cmp", NULL },
+#endif
 };
 
 static devfunc_catalog_t devfunc_timelib_catalog[] = {

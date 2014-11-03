@@ -33,13 +33,15 @@ typedef struct {
 
 #define PG_NUMERIC_SIGN_MASK		0x0200000000000000UL
 #define PG_NUMERIC_MANTISSA_MASK	0x01ffffffffffffffUL
+#define PG_NUMERIC_EXPONENT_OFFSET	32
 
-#define PG_NUMERIC_EXPONENT(num)	((num) >> 58)
+#define PG_NUMERIC_EXPONENT(num)	\
+	((int)((num) >> 58) - PG_NUMERIC_EXPONENT_OFFSET)
 #define PG_NUMERIC_SIGN(num)		(((num) & PG_NUMERIC_SIGN_MASK) != 0)
 #define PG_NUMERIC_MANTISSA(num)	(((num) & PG_NUMERIC_MANTISSA_MASK)
-#define PG_NUMERIC_SET(expo,sign,mant)				\
-	(((expo) << 58) |								\
-	 ((sign) != 0 ? PG_NUMERIC_SIGN_MASK : 0UL) |	\
+#define PG_NUMERIC_SET(expo,sign,mant)							\
+	(((cl_ulong)(expo + PG_NUMERIC_EXPONENT_OFFSET) << 58) |	\
+	 ((sign) != 0 ? PG_NUMERIC_SIGN_MASK : 0UL) |				\
 	 ((mant) & PG_NUMERIC_MANTISSA_MASK))
 
 static pg_numeric_t
