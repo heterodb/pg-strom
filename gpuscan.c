@@ -965,14 +965,6 @@ pgstrom_fetch_gpuscan(GpuScanState *gss)
 	/* A valid device code shall have message queue */
 	Assert(gss->mqueue != NULL);
 
-	/* Dequeue current gpuscan chunks being already processed */
-	while ((msg = pgstrom_try_dequeue_message(gss->mqueue)) != NULL)
-	{
-		Assert(gss->num_running > 0);
-		gss->num_running--;
-		dlist_push_tail(&gss->ready_chunks, &msg->chain);
-	}
-
 	/*
 	 * Try to keep number of gpuscan chunks being asynchronously executed
 	 * larger than minimum multiplicity, unless it does not exceed

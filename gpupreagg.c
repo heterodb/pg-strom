@@ -2440,16 +2440,6 @@ gpupreagg_exec(CustomPlanState *node)
 		}
 
 		/*
-		 * dequeue the running gpupreagg chunk being already processed.
-		 */
-		while ((msg = pgstrom_try_dequeue_message(gpas->mqueue)) != NULL)
-		{
-			Assert(gpas->num_running > 0);
-			gpas->num_running--;
-			dlist_push_tail(&gpas->ready_chunks, &msg->chain);
-		}
-
-		/*
 		 * Keep number of asynchronous partial aggregate request a particular
 		 * level unless it does not exceed pgstrom_max_async_chunks and any
 		 * new response is not replied during the loading.

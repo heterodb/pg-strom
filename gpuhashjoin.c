@@ -2759,16 +2759,6 @@ pgstrom_fetch_gpuhashjoin(GpuHashJoinState *ghjs,
 	dlist_node			*dnode;
 
 	/*
-	 * Dequeue the running gpuhashjoin chunk being already processed
-	 */
-	while ((msg = pgstrom_try_dequeue_message(ghjs->mqueue)) != NULL)
-	{
-		Assert(ghjs->num_running > 0);
-		ghjs->num_running--;
-		dlist_push_tail(&ghjs->ready_pscans, &msg->chain);
-	}
-
-	/*
 	 * Keep number of asynchronous hashjoin request a particular level,
 	 * unless it does not exceed pgstrom_max_async_chunks and any new
 	 * response is not replied during the loading.
