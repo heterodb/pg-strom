@@ -3508,8 +3508,6 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	cl_uint				nvalids;
 	Size				offset;
 	Size				length;
-	size_t				gwork_sz = 0;
-	size_t				lwork_sz = 0;
 	size_t				gsort_sz;
 	cl_int				i, rc;
 
@@ -3718,19 +3716,6 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		goto error;
 
 	/*
-	 * calculation of gwork_sz/lwork_sz for bitonic sorting.
-	 * it consume sizeof(cl_uint) for each workitem.
-	 */
-	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz, NULL,
-									   clgpa->dindex, true,
-									   nvalids, sizeof(cl_uint)))
-	{
-		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
-        rc = StromError_OpenCLInternal;
-		goto error;
-	}
-
-	/*
 	 * bitonic sort using,
 	 *  gpupreagg_bitonic_step()
 	 *  gpupreagg_bitonic_local()
@@ -3745,6 +3730,12 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	}
 	else if (nvalids > 0)
 	{
+		/*
+		 * FIXME: Here, we assume bitonic_sorting logic is restricted by
+		 * max local workgroup size, rather then local memory or register
+		 * consumption. So, it just references device's max workgroup size,
+		 * however, we need to care about these resource consumption also.
+		 */
 		const pgstrom_device_info *devinfo =
 			pgstrom_get_device_info(clgpa->dindex);
 		size_t max_lwork_sz    = devinfo->dev_max_work_item_sizes[0];
@@ -3769,7 +3760,6 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		}
 		/* Adjust size of global sorting */
 		gsort_sz = 2 * nhalf;
-		//clserv_log("gsort_sz=%zu nvalids=%u num_groups=%f", gsort_sz, nvalids, gpreagg->num_groups);
 		while (gsort_sz > 2 * lwork_sz)
 		{
 			/* FIXME: fixed-threshold is not preferable in all cases.

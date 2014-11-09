@@ -1124,8 +1124,10 @@ clserv_compute_workgroup_size(size_t *p_gwork_sz,
 {
 	const pgstrom_device_info *devinfo;
 	cl_device_id kdevice;
+	size_t		max_workgroup_sz;
 	size_t		unitsz;
 	size_t		local_usage;
+	size_t		adjusted;
 	size_t		lwork_sz;
 	cl_int		rc;
 
@@ -1134,83 +1136,81 @@ clserv_compute_workgroup_size(size_t *p_gwork_sz,
 	kdevice = opencl_devices[dev_index];
 
 	/*
+	 * Get a suggested maximum workgroup size by rum-time.
+	 * It does not pay attention about dynamically allocated local
+	 * memory, so we need additional estimation for local memory
+	 * to avoid over consumption.
+	 */
+	rc = clGetKernelWorkGroupInfo(kernel,
+								  kdevice,
+								  CL_KERNEL_WORK_GROUP_SIZE,
+								  sizeof(size_t),
+								  &max_workgroup_sz,
+								  NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clGetKernelWorkGroupInfo: %s",
+				   opencl_strerror(rc));
+		return false;
+	}
+	/* we expect max_workgroup_sz is power of two */
+	if ((max_workgroup_sz & (max_workgroup_sz - 1)) != 0)
+		max_workgroup_sz = (1UL << (get_next_log2(max_workgroup_sz + 1) - 1));
+
+	/*
 	 * Get a preferred unit size of workgroup to be launched.
 	 * It's a performance hint. PG-Strom expects workgroup size is
 	 * multiplexer of MINIMUM_WORKGROUP_UNITSZ, so it has to be
 	 * adjusted if needed.
 	 */
-	if (!kernel)
-		unitsz = MINIMUM_WORKGROUP_UNITSZ;
-	else
-	{
-		rc = clGetKernelWorkGroupInfo(kernel,
-									  kdevice,
+	rc = clGetKernelWorkGroupInfo(kernel,
+								  kdevice,
 								  CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE,
-									  sizeof(unitsz),
-									  &unitsz,
-									  NULL);
-		if (rc != CL_SUCCESS)
-		{
-			clserv_log("failed on clGetKernelWorkGroupInfo: %s",
-					   opencl_strerror(rc));
-			return false;
-		}
+								  sizeof(size_t),
+								  &unitsz,
+								  NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clGetKernelWorkGroupInfo: %s",
+				   opencl_strerror(rc));
+		return false;
 	}
-	/* we have no idea if run-time returned a unitsz not power of two */
+	/* we have no idea if runtime told a unitsz not power of two */
 	Assert((unitsz & (unitsz - 1)) == 0);
-	if (unitsz < MINIMUM_WORKGROUP_UNITSZ)
-		unitsz = MINIMUM_WORKGROUP_UNITSZ;
 
 	/*
-	 * Do we need to adjust workgroup size according to the consumption of
-	 * local memory usage.
-	 */
-	if (!kernel)
-		local_usage = MINIMUM_LOCALMEM_CONSUMPTION;
-	else
+	 * We may need to adjust maximum workgroup size according to
+	 * the consumption of local memory usage.
+     */
+	rc = clGetKernelWorkGroupInfo(kernel,
+								  kdevice,
+								  CL_KERNEL_LOCAL_MEM_SIZE,
+								  sizeof(local_usage),
+								  &local_usage,
+								  NULL);
+	if (rc != CL_SUCCESS)
 	{
-		rc = clGetKernelWorkGroupInfo(kernel,
-									  kdevice,
-									  CL_KERNEL_LOCAL_MEM_SIZE,
-									  sizeof(local_usage),
-									  &local_usage,
-									  NULL);
-		if (rc != CL_SUCCESS)
-		{
-			clserv_log("failed on clGetKernelWorkGroupInfo: %s",
-					   opencl_strerror(rc));
-			return false;
-		}
+		clserv_log("failed on clGetKernelWorkGroupInfo: %s",
+				   opencl_strerror(rc));
+		return false;
 	}
 	local_usage = Max(MINIMUM_LOCALMEM_CONSUMPTION, local_usage);
 
-	/*
-	 * First of all, need to know hard limit of maximum workgroup-size
-	 * from viewpoint of resource consumption.
-	 */
 	devinfo = pgstrom_get_device_info(dev_index);
-	lwork_sz = (devinfo->dev_local_mem_size -
+	adjusted = (devinfo->dev_local_mem_size -
 				local_usage) / local_memsz_per_thread;
-	lwork_sz = (1UL << (get_next_log2(lwork_sz + 1) - 1));
-	lwork_sz = Min(lwork_sz, devinfo->dev_max_work_item_sizes[0]);
-	Assert((lwork_sz & (lwork_sz - 1)) == 0);
+	if (adjusted < max_workgroup_sz)
+		max_workgroup_sz = (1UL << (get_next_log2(adjusted + 1) - 1));
 
 	/*
-	 * If smaller workgroup-size is prefered, we make lwork_sz shorten
-	 * as long as we can.
+	 * Determine local workgroup size according to the policy
 	 */
-	if (!larger_is_better)
-	{
-		if (lwork_sz < MINIMUM_WORKGROUP_UNITSZ)
-		{
-			clserv_log("local memory consumption by kernel too large");
-			return false;
-		}
-		if (lwork_sz < unitsz)
-			lwork_sz = MINIMUM_WORKGROUP_UNITSZ;
-		else
-			lwork_sz = unitsz;
-	}
+	if (larger_is_better)
+		lwork_sz = max_workgroup_sz;
+	else
+		lwork_sz = Min(unitsz, max_workgroup_sz);
+	Assert((lwork_sz & (lwork_sz - 1)) == 0);
+
 	*p_lwork_sz = lwork_sz;
 	*p_gwork_sz = TYPEALIGN(lwork_sz, num_threads);
 
