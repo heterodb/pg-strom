@@ -1051,7 +1051,7 @@ pg_fixup_tupslot_varlena(__private int *errcode,
 		{
 			isnull[colidx] = (cl_char) 1;
 			values[colidx] = 0;
-			STROM_SET_ERROR(errcode, StromError_DataStoreCorruption + 1000);
+			STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 		}
 	}
 	else if (ktoast->format == KDS_FORMAT_ROW_FLAT)
@@ -1067,7 +1067,7 @@ pg_fixup_tupslot_varlena(__private int *errcode,
 		{
 			isnull[colidx] = (cl_char) 1;
 			values[colidx] = 0;
-			STROM_SET_ERROR(errcode, StromError_DataStoreCorruption + 2000);
+			STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 		}
 	}
 	else

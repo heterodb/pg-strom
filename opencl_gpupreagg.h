@@ -209,7 +209,7 @@ gpupreagg_data_load(__local pagg_datum *pdatum,
 
 	if (colidx >= kds->ncols)
 	{
-		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption + 3000);
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 		return;
 	}
 	cmeta = kds->colmeta[colidx];
@@ -252,7 +252,7 @@ gpupreagg_data_load(__local pagg_datum *pdatum,
 	}
 	else
 	{
-		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption + 4000);
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 	}
 }
 
@@ -270,7 +270,7 @@ gpupreagg_data_store(__local pagg_datum *pdatum,
 
 	if (colidx >= kds->ncols)
 	{
-		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption + 5000);
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 		return;
 	}
 	cmeta = kds->colmeta[colidx];
@@ -304,7 +304,7 @@ gpupreagg_data_store(__local pagg_datum *pdatum,
 	}
 	else
 	{
-		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption + 6000);
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 	}
 }
 
@@ -329,7 +329,7 @@ gpupreagg_data_move(__private cl_int *errcode,
 
 	if (colidx >= kds_src->ncols || colidx >= kds_dst->ncols)
 	{
-		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption + 7000);
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 		return;
 	}
 
