@@ -1318,6 +1318,7 @@ gpuscan_exec_multi(CustomPlanState *node)
 		/* If this chunk has no valid items, it does not make sense to
 		 * return upper level this chunk.
 		 */
+		pgstrom_untrack_object(&bulk->pds->sobj);
 		pgstrom_put_data_store(bulk->pds);
 		pfree(bulk);
 	}
