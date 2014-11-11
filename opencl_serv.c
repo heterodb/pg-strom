@@ -52,6 +52,7 @@ pgstrom_opencl_sigterm(SIGNAL_ARGS)
 	clserv_log("Got SIGTERM");
 }
 
+#if 0
 static void
 pgstrom_opencl_sighup(SIGNAL_ARGS)
 {
@@ -59,6 +60,7 @@ pgstrom_opencl_sighup(SIGNAL_ARGS)
 	pgstrom_cancel_server_loop();
 	clserv_log("Got SIGHUP");
 }
+#endif
 
 /*
  * pgstrom_opencl_event_loop
@@ -223,8 +225,11 @@ pgstrom_opencl_main(Datum main_arg)
 	/* mark this process is OpenCL intermediator */
 	pgstrom_i_am_clserv = true;
 
-	/* Establish signal handlers before unblocking signals. */
-    pqsignal(SIGHUP, pgstrom_opencl_sighup);
+	/*
+	 * Set up signal handlers. Currently, OpenCL Server does not pay
+	 * attention on reloading of postgresql.conf, so we can ignore SIGHUP.
+	 */
+    pqsignal(SIGHUP, SIG_IGN);
     pqsignal(SIGTERM, pgstrom_opencl_sigterm);
 	ImmediateInterruptOK = false;
 
