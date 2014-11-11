@@ -896,7 +896,7 @@ clserv_dmasend_data_store(pgstrom_data_store *pds,
 	for (i=0, n=0; i < kds->nblocks; i++)
 	{
 		/* simple sanity check */
-		Assert(bitem[i].buffer < NBuffers);
+		Assert(bitem[i].buffer <= NBuffers);
 
 		/*
 		 * NOTE: A micro optimization; if next page is located
