@@ -430,7 +430,7 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 					   MAXIMUM_ALIGNOF);
 		if (dprog->extra_flags & DEVKERNEL_DISABLE_OPTIMIZE)
 			ofs += snprintf(build_opts + ofs, sizeof(build_opts) - ofs,
-							" -D-cl-opt-disable");
+							" -cl-opt-disable");
 		if (dprog->extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
 			ofs += snprintf(build_opts + ofs, sizeof(build_opts) - ofs,
 							" -DKERNEL_IS_GPUSCAN=1");
