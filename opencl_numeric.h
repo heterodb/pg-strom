@@ -130,8 +130,8 @@ pgfn_numeric_isnotnull(__private int *errcode,
  */
 
 /* pg_int2_t */
-#ifndef PG_INT4_TYPE_DEFINED
-#define PG_INT4_TYPE_DEFINED
+#ifndef PG_INT2_TYPE_DEFINED
+#define PG_INT2_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int2, cl_short)
 #endif
 /* pg_int4_t */
