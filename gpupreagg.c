@@ -3218,7 +3218,7 @@ clserv_launch_bitonic_step(clstate_gpupreagg *clgpa,
 	clgpa->kern_sort[clgpa->kern_sort_nums++] = kernel;
 
 	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
-									   clgpa->kern_pagg,
+									   kernel,
 									   clgpa->dindex,
 									   false,
 									   work_sz,
