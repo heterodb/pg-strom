@@ -248,7 +248,9 @@ pgstrom_shmem_zone_block_alloc(shmem_zone *zone,
 	void   *address;
 	int		i;
 
-	total_size = size + offsetof(shmem_body, data[0]) + sizeof(cl_uint);
+	total_size = offsetof(shmem_body, data[0]) + size + sizeof(cl_uint);
+	if (total_size > (1UL << SHMEM_BLOCKSZ_BITS_MAX))
+		return NULL;	/* too large size required */
 	shift = find_least_pot(total_size);
 	if (dlist_is_empty(&zone->free_list[shift]))
 	{
@@ -647,9 +649,15 @@ pgstrom_shmem_maxalloc(void)
 
 	if (!maxalloc_length)
 	{
-		int		n = get_next_log2(pgstrom_shmem_head->zone_length + 1);
+		Size	zone_length = pgstrom_shmem_head->zone_length;
+		int		nbits;
 
-		maxalloc_length = (1UL << (n - 1));
+		zone_length = Min(zone_length, (1UL << SHMEM_BLOCKSZ_BITS_MAX));
+		nbits = get_next_log2(zone_length + 1);
+
+		maxalloc_length = ((1UL << (nbits - 1)) -	/* half of zone */
+						   offsetof(shmem_body, data[0]) -
+						   sizeof(cl_uint));
 	}
 	return maxalloc_length;
 }
@@ -1301,6 +1309,12 @@ pgstrom_setup_shmem(Size zone_length,
 		elog(LOG, "shared memory segment is already set up");
 		return;
 	}
+
+	/* NOTE: Host unified memory device tends to have much larger zone-
+	 * length than discrete devices. It may mislead the query planner,
+	 * and cause unexpected large memory requirement.
+	 */
+	zone_length = Min(pgstrom_shmem_totalsize, zone_length);
 
 	zone_length = TYPEALIGN_DOWN(SHMEM_BLOCKSZ, zone_length);
 	num_zones = (pgstrom_shmem_totalsize + zone_length - 1) / zone_length;
