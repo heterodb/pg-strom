@@ -893,6 +893,7 @@ construct_opencl_device_info(void)
 	{
 		long		score = 0;
 		List	   *temp = NIL;
+		List	   *cleanup = NIL;
 
 		pl_info = collect_opencl_platform_info(platforms[i]);
 		pl_info->pl_index = i;
@@ -971,13 +972,17 @@ construct_opencl_device_info(void)
 			opencl_num_devices = k;
 			memcpy(opencl_devices, devices, sizeof(cl_device_id) * k);
 			score_max = score;
+			cleanup = result;
 			result = temp;
 		}
 		else
+			cleanup = temp;
+
+		if (cleanup != NIL)
 		{
-			pl_info = ((pgstrom_device_info *) linitial(result))->pl_info;
+			pl_info = ((pgstrom_device_info *) linitial(cleanup))->pl_info;
 			pfree(pl_info);
-			list_free_deep(temp);
+			list_free_deep(cleanup);
 		}
 	}
 
