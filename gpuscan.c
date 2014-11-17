@@ -376,70 +376,150 @@ gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path,
  * loading functionality.
  */
 Plan *
-gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt, Plan *plan,
-								 Bitmapset *attr_refs)
+gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt,
+								 Plan *plan,
+								 Bitmapset *attr_refs,
+								 List **p_upper_quals)
 {
-	RangeTblEntry *rte;
+	Index			scanrelid;
+	RangeTblEntry  *rte;
+	Relation		relation;
 	GpuScanPlan	   *gscan;
-	Index			varno;
-	List		   *tlist;
 	ListCell	   *lc;
+	BlockNumber		num_pages;
+	double			num_tuples;
+	double			allvisfrac;
+	double			spc_seq_page_cost;
+	Oid				tablespace_oid;
 
-	/* only SeqScan can be replaced */
-	if (!IsA(plan, SeqScan))
-		return plan;
 	/* enable_gpuscan has to be turned on */
 	if (!enable_gpuscan)
 		return plan;
-	/* SeqScan with qualifier cannot be replaced, right now */
-	if (plan->qual != NIL)
-		return plan;
 
-	tlist = plan->targetlist;
-	varno = ((Scan *)plan)->scanrelid;
-	rte = rt_fetch(varno, pstmt->rtable);
-
-	/* SeqScan shall take a relation to be scanned */
-	if (rte->rtekind != RTE_RELATION)
-		return plan;	/* usually, shouldn't happen */
-	if (rte->relkind != RELKIND_RELATION &&
-		rte->relkind != RELKIND_TOASTVALUE &&
-		rte->relkind != RELKIND_MATVIEW)
-		return plan;	/* usually, shouldn't happen */
-
-	/*
-	 * Check whether the device referenced target-entry can be constructed
-	 * on the device side. (no need to care about host-only fields)
-	 */
-	foreach (lc, plan->targetlist)
+	if (IsA(plan, SeqScan))
 	{
-		TargetEntry	   *tle = lfirst(lc);
-		int		x = tle->resno - FirstLowInvalidHeapAttributeNumber;
+		List	   *dev_clauses = NIL;
 
-		if (!bms_is_member(x, attr_refs))
-			continue;
-		if (!pgstrom_codegen_available_expression(tle->expr))
-			return plan;
+		scanrelid = ((Scan *) plan)->scanrelid;
+		rte = rt_fetch(scanrelid, pstmt->rtable);
+		if (rte->rtekind != RTE_RELATION)
+			return plan;	/* usually, shouldn't happen */
+		if (rte->relkind != RELKIND_RELATION &&
+			rte->relkind != RELKIND_TOASTVALUE &&
+			rte->relkind != RELKIND_MATVIEW)
+			return plan;	/* usually, shouldn't happen */
+
+		/*
+		 * check whether the device referenced target-entry can be
+		 * constructed on the device side. no need to care about
+		 * host-only fields.
+		 */
+		foreach (lc, plan->targetlist)
+		{
+			TargetEntry *tle = lfirst(lc);
+			int		x = tle->resno - FirstLowInvalidHeapAttributeNumber;
+
+			if (!bms_is_member(x, attr_refs))
+				continue;
+			if (!pgstrom_codegen_available_expression(tle->expr))
+				return plan;
+		}
+
+		/*
+		 * check whether the plan qualifiers can be executable on the
+		 * device side. If host only expression is here, unavailable
+		 * to replace it by GpuScan.
+		 */
+		foreach (lc, plan->qual)
+		{
+			RestrictInfo   *rinfo = lfirst(lc);
+
+			if (!pgstrom_codegen_available_expression(rinfo->clause))
+				return plan;
+		}
+		dev_clauses = extract_actual_clauses(plan->qual, false);
+
+		/*
+		 * OK, SeqScan can be replaced by GpuScan
+		 */
+		gscan = palloc0(sizeof(GpuScanPlan));
+		gscan->cplan.plan.type = T_CustomPlan;
+		gscan->cplan.plan.plan_width = plan->plan_width;
+		gscan->cplan.plan.targetlist = plan->targetlist;
+		gscan->cplan.plan.qual = NIL;
+		gscan->cplan.plan.lefttree = NULL;
+		gscan->cplan.plan.righttree = NULL;
+		gscan->cplan.methods = &gpuscan_plan_methods;
+
+		gscan->scanrelid = scanrelid;
+		gscan->kern_source = NULL;
+		gscan->extra_flags = DEVKERNEL_NEEDS_GPUSCAN |
+			(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
+		gscan->used_params = NIL;
+		gscan->used_vars = NIL;
+		gscan->dev_clauses = copyObject(dev_clauses);
 	}
+	else if (pgstrom_plan_is_gpuscan(plan))
+	{
+		gscan = (GpuScanPlan *) plan;
+		scanrelid = gscan->scanrelid;
+		rte = rt_fetch(scanrelid, pstmt->rtable);
+		Assert(rte->rtekind == RTE_RELATION);
+		Assert(rte->relkind == RELKIND_RELATION ||
+			   rte->relkind == RELKIND_TOASTVALUE ||
+			   rte->relkind == RELKIND_MATVIEW);
+
+		/* unavailable to pull-up host only qualifiers */
+		if (gscan->cplan.plan.qual != NIL)
+			return plan;
+		/* it does not make sense to replace GpuScan again */
+		if (!gscan->dev_clauses)
+			return plan;
+
+		/* duplication to modify field below */
+		gscan = copyObject(plan);
+	}
+	else
+		return plan;	/* elsewhere, unavailable to replace */
 
 	/*
-	 * OK, SeqScan can be replaced by GpuScan
+	 * pull-up device executable qualifiers, if available
 	 */
-	gscan = palloc0(sizeof(GpuScanPlan));
-	gscan->cplan.plan.type = T_CustomPlan;
-	gscan->cplan.plan.targetlist = tlist;
-	gscan->cplan.plan.qual = NIL;
-	gscan->cplan.plan.lefttree = NULL;
-	gscan->cplan.plan.righttree = NULL;
-	gscan->cplan.methods = &gpuscan_plan_methods;
+	if (p_upper_quals && gscan->dev_clauses)
+	{
+		*p_upper_quals = gscan->dev_clauses;
+		gscan->dev_clauses = NIL;
 
-	gscan->scanrelid = varno;
-	gscan->kern_source = NULL;
-	gscan->extra_flags = DEVKERNEL_NEEDS_GPUSCAN |
-		(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
-	gscan->used_params = NIL;
-    gscan->used_vars = NIL;
-    gscan->dev_clauses = NULL;
+		/* it also leads no kernel execution in GpuScan node */
+		gscan->kern_source = NULL;
+		gscan->extra_flags &= DEVKERNEL_DISABLE_OPTIMIZE;
+		gscan->used_params = NIL;
+		gscan->used_vars = NIL;
+	}
+	/* FIXME: we may have p_upper_quals != NULL on call */
+	Assert(gscan->dev_clauses == NIL);
+
+	/*
+	 * update cost estimation for the GpuScan node
+	 *
+	 * TODO: integration with cost_gpuscan() for more consistency.
+	 */
+	relation = heap_open(rte->relid, NoLock);
+
+	estimate_rel_size(relation, NULL,
+					  &num_pages,
+					  &num_tuples,
+					  &allvisfrac);
+	/* fetch estimated page cost for tablespace containing table */
+	tablespace_oid = RelationGetForm(relation)->reltablespace;
+	get_tablespace_page_costs(tablespace_oid, NULL, &spc_seq_page_cost);
+
+	/* only disk cost to be paid attention */
+	gscan->cplan.plan.plan_rows = num_tuples;
+	gscan->cplan.plan.startup_cost = 0.0;
+	gscan->cplan.plan.total_cost = spc_seq_page_cost * num_pages;
+
+	heap_close(relation, NoLock);
 
 	return (Plan *) gscan;
 }

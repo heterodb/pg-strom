@@ -52,6 +52,7 @@ typedef struct
 	AttrNumber	   *grpColIdx;		/* their indexes in the target list */
 	bool			outer_bulkload;
 	double			num_groups;		/* estimated number of groups */
+	List		   *outer_quals;	/* device quals pulled-up */
 	const char	   *kern_source;
 	int				extra_flags;
 	List		   *used_params;	/* referenced Const/Param */
@@ -1150,10 +1151,8 @@ gpupreagg_codegen_keycomp(GpuPreAggPlan *gpreagg, codegen_context *context)
 			&body,
 			"  xkeyval_%u = pg_%s_vref(kds,ktoast,errcode,%u,x_index);\n"
 			"  ykeyval_%u = pg_%s_vref(kds,ktoast,errcode,%u,y_index);\n"
-			//"printf(\"gid=%%zu xnull=%%d ynull=%%d\\n\", get_global_id(0), xkeyval_1.isnull, ykeyval_1.isnull);\n"
 			"  if (!xkeyval_%u.isnull && !ykeyval_%u.isnull)\n"
 			"  {\n"
-			//"printf(\"gid=%%zu x=%%d y=%%d\\n\", get_global_id(0), xkeyval_1.value, ykeyval_1.value);\n"
 			"    comp = pgfn_%s(errcode, xkeyval_%u, ykeyval_%u);\n"
 			"    if (!comp.isnull && comp.value != 0)\n"
 			"      return comp.value;\n"
@@ -1790,10 +1789,74 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 	return str.data;
 }
 
+/*
+ * gpupreagg_codegen_qual_eval - code generator of kernel gpupreagg_qual_eval()
+ * that check qualifier on individual tuples prior to the job of preagg
+ *
+ * static bool
+ * gpupreagg_qual_eval(__private cl_int *errcode,
+ *                     __global kern_parambuf *kparams,
+ *                     __global kern_data_store *kds,
+ *                     __global kern_data_store *ktoast,
+ *                     size_t kds_index);
+ */
+static char *
+gpupreagg_codegen_qual_eval(GpuPreAggPlan *gpreagg, codegen_context *context)
+{
+	StringInfoData	str;
+
+	/* init context */
+	context->param_refs = NULL;
+	context->used_vars = NIL;
+
+	initStringInfo(&str);
+	appendStringInfo(
+        &str,
+        "static bool\n"
+        "gpupreagg_qual_eval(__private cl_int *errcode,\n"
+        "                    __global kern_parambuf *kparams,\n"
+        "                    __global kern_data_store *kds,\n"
+        "                    __global kern_data_store *ktoast,\n"
+        "                    size_t kds_index)\n"
+        "{\n");
+
+	if (gpreagg->outer_quals != NIL)
+	{
+		/*
+		 * Generate code for qual evaluation
+		 * Note that outer_quals was pulled up from outer plan, thus,
+		 * its varnodes are arranged to reference fields on outer
+		 * relation. So, it does not need to pay attention for projection,
+		 * however, needs to be careful to deal with...
+		 */
+		char   *expr_code
+			= pgstrom_codegen_expression((Node *)gpreagg->outer_quals,
+										 context);
+		Assert(expr_code != NULL);
+
+		appendStringInfo(
+			&str,
+			"%s%s\n"
+			"  return EVAL(%s);\n",
+			pgstrom_codegen_param_declarations(context,
+											   context->param_refs),
+			pgstrom_codegen_var_declarations(context),
+			expr_code);
+	}
+	else
+	{
+		appendStringInfo(&str, "  return true;\n");
+	}
+	appendStringInfo(&str, "}\n");
+
+	return str.data;
+}
+
 static char *
 gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 {
 	StringInfoData	str;
+	const char	   *fn_qualeval;
 	const char	   *fn_keycomp;
 	const char	   *fn_aggcalc;
 	const char	   *fn_projection;
@@ -1807,6 +1870,8 @@ gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 	context->used_params = list_make1(makeNullConst(BYTEAOID, -1, InvalidOid));
 	context->type_defs = list_make1(pgstrom_devtype_lookup(BYTEAOID));
 
+	/* generate a qual evaluation function */
+	fn_qualeval = gpupreagg_codegen_qual_eval(gpreagg, context);
 	/* generate a key comparison function */
 	fn_keycomp = gpupreagg_codegen_keycomp(gpreagg, context);
 	/* generate a partial aggregate function */
@@ -1819,11 +1884,13 @@ gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 	appendStringInfo(&str,
 					 "%s\n"		/* type declarations */
 					 "%s\n"		/* function declarations */
+					 "%s\n"		/* gpupreagg_qual_eval() */
 					 "%s\n"		/* gpupreagg_keycomp() */
 					 "%s\n"		/* gpupreagg_aggcalc() */
 					 "%s\n",	/* gpupreagg_projection() */
 					 pgstrom_codegen_type_declarations(context),
 					 pgstrom_codegen_func_declarations(context),
+					 fn_qualeval,
 					 fn_keycomp,
 					 fn_aggcalc,
 					 fn_projection);
@@ -1880,6 +1947,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	List		   *agg_quals = NIL;
 	List		   *agg_tlist = NIL;
 	Bitmapset	   *attr_refs = NULL;
+	List		   *outer_quals = NIL;
 	ListCell	   *cell;
 	Cost			startup_cost;
 	Cost			total_cost;
@@ -1919,7 +1987,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	if (!IsA(outerPlan(agg), Sort))
 		outerPlan(gpreagg) = gpuscan_try_replace_seqscan_plan(pstmt,
 															  outerPlan(agg),
-															  attr_refs);
+															  attr_refs,
+															  &outer_quals);
 	else
 	{
 		Sort   *sort_plan = (Sort *) outerPlan(agg);
@@ -1927,8 +1996,12 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 
 		outerPlan(gpreagg) = gpuscan_try_replace_seqscan_plan(pstmt,
 															  outer_plan,
-															  attr_refs);
+															  attr_refs,
+															  &outer_quals);
 	}
+	/* qualifiers that were pulled up from the outer plan */
+	gpreagg->outer_quals = outer_quals;
+
 	/* XXX - gpupreagg_use_bulkload references outer plan */
 	gpreagg->outer_bulkload = gpupreagg_use_bulkload(gpreagg);
 
@@ -2608,10 +2681,18 @@ static void
 gpupreagg_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
+	GpuPreAggPlan  *gpreagg = (GpuPreAggPlan *) gpas->cps.ps.plan;
 
 	ExplainPropertyText("Bulkload",
 						gpas->outer_bulkload ? "On" : "Off", es);
 	show_device_kernel(gpas->dprog_key, es);
+	if (gpreagg->outer_quals != NIL)
+	{
+		show_scan_qual(gpreagg->outer_quals,
+					   "Device Filter", &gpas->cps.ps, ancestors, es);
+		show_instrumentation_count("Rows Removed by Device Fileter",
+                                   2, &gpas->cps.ps, es);
+	}
 	if (es->analyze && gpas->pfm.enabled)
 		pgstrom_perfmon_explain(&gpas->pfm, es);
 }
@@ -2635,6 +2716,13 @@ gpupreagg_textout_plan(StringInfo str, const CustomPlan *node)
 	for (i=0; i < plannode->numCols; i++)
 		appendStringInfo(str, " %u", plannode->grpColIdx[i]);
 	appendStringInfo(str, "]");
+
+	appendStringInfo(str, " :outer_bulkload %s",
+					 plannode->outer_bulkload ? "true" : "false");
+	appendStringInfo(str, " :num_groups %f", plannode->num_groups);
+
+	appendStringInfo(str, " :outer_quals %s",
+					 nodeToString(plannode->outer_quals));
 
 	appendStringInfo(str, " :kern_source ");
 	_outToken(str, plannode->kern_source);
@@ -2662,6 +2750,8 @@ gpupreagg_copy_plan(const CustomPlan *from)
 	newnode->numCols       = oldnode->numCols;
 	newnode->grpColIdx     = pmemcpy(oldnode->grpColIdx,
 									 sizeof(AttrNumber) * oldnode->numCols);
+	newnode->num_groups    = oldnode->num_groups;
+	newnode->outer_quals   = copyObject(oldnode->outer_quals);
 	newnode->kern_source   = pstrdup(oldnode->kern_source);
 	newnode->extra_flags   = oldnode->extra_flags;
 	newnode->used_params   = copyObject(oldnode->used_params);

@@ -199,6 +199,16 @@ gpupreagg_projection(__private cl_int *errcode,
 					 __global void *ktoast,
 					 size_t rowidx_in,
 					 size_t rowidx_out);
+/*
+ * check qualifiers being pulled-up from the outer relation.
+ * if not valid, this record shall not be processed.
+ */
+static bool
+gpupreagg_qual_eval(__private cl_int *errcode,
+					__global kern_parambuf *kparams,
+					__global kern_data_store *kds,
+					__global kern_data_store *ktoast,
+					size_t kds_index);
 
 /*
  * load the data from kern_data_store to pagg_datum structure
@@ -388,6 +398,13 @@ gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 		kds_index = (size_t) krowmap->rindex[get_global_id(0)];
 	else
 		kds_index = kds_in->nitems;	/* ensure this thread is out of range */
+
+	/* check qualifiers */
+	if (kds_index < kds_in->nitems)
+	{
+		if (!gpupreagg_qual_eval(&errcode, kparams, kds_in, NULL, kds_index))
+			kds_index = kds_in->nitems;	/* ensure this thread is not valid */
+	}
 
 	/* calculation of total number of rows to be processed in this work-
 	 * group.
