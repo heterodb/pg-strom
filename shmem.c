@@ -517,7 +517,7 @@ pgstrom_free_slab(shmem_slab_head *sblock, shmem_slab *entry)
 
 	Assert(!entry->chain.next && !entry->chain.prev);
 	Assert(*((uint32 *)((char *)entry->data +
-						INTALIGN(slab_sz))) == SHMEM_SLAB_MAGIC);
+						INTALIGN(slab_sizes[index]))) == SHMEM_SLAB_MAGIC);
 	SpinLockAcquire(&pgstrom_shmem_head->slab_locks[index]);
 	dlist_push_head(&pgstrom_shmem_head->slab_freelist[index],
 					&entry->chain);

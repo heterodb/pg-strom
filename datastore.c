@@ -684,7 +684,7 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 	/* No room to store a new kern_rowitem? */
 	if (kds->nitems >= kds->nrooms)
 		return false;
-	Assert(kds->ncols == tupdesc->natts);
+	Assert(kds->ncols == slot->tts_tupleDescriptor->natts);
 
 	if (kds->format == KDS_FORMAT_ROW)
 	{
