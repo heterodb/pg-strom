@@ -680,7 +680,6 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 								TupleTableSlot *slot)
 {
 	kern_data_store	   *kds = pds->kds;
-	TupleDesc			tupdesc = slot->tts_tupleDescriptor;
 
 	/* No room to store a new kern_rowitem? */
 	if (kds->nitems >= kds->nrooms)

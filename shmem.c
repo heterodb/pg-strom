@@ -514,7 +514,6 @@ static void
 pgstrom_free_slab(shmem_slab_head *sblock, shmem_slab *entry)
 {
 	int		index = sblock->slab_index;
-	Size	slab_sz = slab_sizes[index];
 
 	Assert(!entry->chain.next && !entry->chain.prev);
 	Assert(*((uint32 *)((char *)entry->data +
