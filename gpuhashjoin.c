@@ -300,18 +300,17 @@ path_is_mergeable_gpuhashjoin(Path *pathnode)
 }
 
 /*
- * plan_is_multihash - returns true, if supplied plannode is multihash
+ * pgstrom_plan_is_multihash - returns true, if supplied plan is multihash
  */
-static bool
-plan_is_multihash(Plan *plannode)
+bool
+pgstrom_plan_is_multihash(const Plan *plan)
 {
-	CustomPlan *cplan = (CustomPlan *) plannode;
+	CustomPlan *cplan = (CustomPlan *) plan;
 
-	if (!IsA(cplan, CustomPlan))
-		return false;
-	if (cplan->methods != &multihash_plan_methods)
-		return false;
-	return true;
+	if (IsA(cplan, CustomPlan) &&
+		cplan->methods == &multihash_plan_methods)
+		return true;
+	return false;
 }
 
 /*
@@ -1522,7 +1521,7 @@ build_pseudo_scan_vartrans(GpuHashJoin *ghjoin)
 
 	/* check for top-level subplans */
 	Assert(outerPlan(ghjoin) != NULL);
-	Assert(plan_is_multihash(innerPlan(ghjoin)));
+	Assert(pgstrom_plan_is_multihash(innerPlan(ghjoin)));
 
 	/*
 	 * build a pseudo-scan varlist/varhost - first of all, we pick up
@@ -1560,7 +1559,7 @@ build_pseudo_scan_vartrans(GpuHashJoin *ghjoin)
 		ListCell   *lc3, *prev3 = NULL;
 		int			num_device_vars = 0;
 
-		Assert(depth==0 || plan_is_multihash(curr_plan));
+		Assert(depth==0 || pgstrom_plan_is_multihash(curr_plan));
 
 		/*
 		 * Construct a list of vartrans_info; It takes depth of source
@@ -3483,7 +3482,7 @@ multihash_begin(CustomPlan *node,
 	/* check for unsupported flags */
 	Assert(!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
 	/* ensure the plan is MultiHash */
-	Assert(plan_is_multihash((Plan *) mhash));
+	Assert(pgstrom_plan_is_multihash((Plan *) mhash));
 
 	NodeSetTag(mhs, T_CustomPlanState);
 	mhs->cps.methods = &multihash_plan_methods;

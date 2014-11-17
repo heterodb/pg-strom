@@ -245,80 +245,24 @@ gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path,
 	RelOptInfo	   *rel = path->parent;
 	GpuScanPath	   *gpath;
 	ListCell	   *lc;
-	List		   *dev_quals;
 	int				i;
-
-#if 0
-	/*
-	 * XXX - It looks dev_quals pull up breaks adeque plan estimation.
-	 * needs to be fixed.
-	 */
-
-	/*
-	 * In case when SubPlan is already GpuScanPath, it may be available
-	 * to pull up device executable qualifiers.
-	 */
-	if (path->pathtype == T_CustomPlan &&
-		((CustomPath *) path)->methods == &gpuscan_path_methods)
-	{
-		Assert(rel->rtekind == RTE_RELATION);
-		Assert(rel->reloptkind == RELOPT_BASEREL);
-
-		gpath = (GpuScanPath *) path;
-
-		if (p_upper_quals != NULL &&
-			enable_gpuscan &&
-			gpath->dev_quals != NIL &&
-			gpath->host_quals == NIL)
-		{
-			*p_upper_quals = copyObject(gpath->dev_quals);
-			dev_quals = NIL;
-			goto build;
-		}
-		return path;	/* nothing to do */
-	}
-#endif
-
-	/* Elsewhere, only SeqScan can be replaced */
-	if (path->pathtype != T_SeqScan)
-		return path;
-
-	/* SeqScan shall take a relation to be scanned */
-	if (rel->rtekind != RTE_RELATION)
-		return path;	/* usually, shouldn't happen */
-	if (rel->reloptkind != RELOPT_BASEREL)
-		return path;	/* usually, shouldn't happen */
 
 	/* enable_gpuscan has to be turned on */
 	if (!enable_gpuscan)
 		return path;
 
-	/* Simple SeqScan can have only device executable qualifier */
-	dev_quals = NIL;
-	foreach (lc, rel->baserestrictinfo)
-	{
-		RestrictInfo   *rinfo = lfirst(lc);
-
-		if (!pgstrom_codegen_available_expression(rinfo->clause))
-			return path;
-		dev_quals = lappend(dev_quals, rinfo);
-	}
-
-	/* If upper node allows to pull-up device executable qualifier,
-	 * we hand over this evaluation on the upper node. Unlike usual
-	 * query planning policy, qualifier pull-up enables to reduce
-	 * interaction between backend and opencl server. So, it makes
-	 * sense probably.
-	 */
-	if (p_upper_quals)
-	{
-		*p_upper_quals = copyObject(dev_quals);
-		dev_quals = NIL;
-	}
-
 	/* !!! See the logic in use_physical_tlist() !!! */
 
-	/* System column reference involves projection */
+	/* shortcut checks, if unavailable to replace */
+	if (rel->rtekind != RTE_RELATION)
+		return path;
+	if (rel->reloptkind != RELOPT_BASEREL)
+		return path;
+
+	/*
+	 * System column reference involves projection, so unavailable
+	 * to have bulk-loading.
+	 */
 	for (i = rel->min_attr; i <= 0; i++)
 	{
 		if (!bms_is_empty(rel->attr_needed[i - rel->min_attr]))
@@ -326,9 +270,9 @@ gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path,
 	}
 
 	/*
-     * Can't do it if the rel is required to emit any placeholder
+	 * Can't replace it if the rel is required to emit any placeholder
 	 * expressions, either.
-     */
+	 */
 	foreach (lc, root->placeholder_list)
 	{
 		PlaceHolderInfo *phinfo = (PlaceHolderInfo *) lfirst(lc);
@@ -338,24 +282,88 @@ gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path,
 			return path;
 	}
 
-	/* OK, probably GpuScan instead of SeqScan makes sense */
-//build:
-	gpath = palloc0(sizeof(GpuScanPath));
-    gpath->cpath.path.type = T_CustomPath;
-    gpath->cpath.path.pathtype = T_CustomPlan;
-    gpath->cpath.path.parent = rel;
-    gpath->cpath.path.param_info
-		= get_baserel_parampathinfo(root, rel, rel->lateral_relids);
-	gpath->cpath.path.pathkeys = NIL;	/* gpuscan has unsorted result */
-	gpath->cpath.methods = &gpuscan_path_methods;
+	/* OK, check individual path-node */
+	if (path->pathtype == T_SeqScan)
+	{
+		List   *dev_quals = NIL;
 
-	cost_gpuscan(gpath, root, rel,
-				 gpath->cpath.path.param_info,
-				 dev_quals, NIL, true);
-	gpath->dev_quals = dev_quals;
-	gpath->host_quals = NIL;
+		/* Simple SeqScan has only device executable qualifier */
+		foreach (lc, rel->baserestrictinfo)
+		{
+			RestrictInfo   *rinfo = lfirst(lc);
 
-	return (Path *)gpath;
+			if (!pgstrom_codegen_available_expression(rinfo->clause))
+				return path;
+			dev_quals = lappend(dev_quals, rinfo);
+		}
+
+		/* OK, probably GpuScan instead of SeqScan makes sense */
+		gpath = palloc0(sizeof(GpuScanPath));
+		gpath->cpath.path.type = T_CustomPath;
+		gpath->cpath.path.pathtype = T_CustomPlan;
+		gpath->cpath.path.parent = rel;
+		gpath->cpath.path.param_info
+			= get_baserel_parampathinfo(root, rel, rel->lateral_relids);
+		gpath->cpath.path.pathkeys = NIL;	/* gpuscan has unsorted result */
+		gpath->cpath.methods = &gpuscan_path_methods;
+		gpath->dev_quals = copyObject(dev_quals);
+		gpath->host_quals = NIL;
+	}
+	else if (pgstrom_path_is_gpuscan(path))
+	{
+		GpuScanPath	   *gpath_orig = (GpuScanPath *) path;
+
+		/* we cannot pull up dev_quals from GpuScan with host_qual */
+		if (gpath_orig->host_quals != NIL)
+			return path;
+		/* it does not make sense to pull-up device qualifier */
+		if (gpath_orig->dev_quals == NIL)
+			return path;
+
+		gpath = palloc0(sizeof(GpuScanPath));
+		gpath->cpath.path.type = T_CustomPath;
+		gpath->cpath.path.pathtype = T_CustomPlan;
+		gpath->cpath.path.parent = rel;
+		gpath->cpath.path.param_info
+			= get_baserel_parampathinfo(root, rel, rel->lateral_relids);
+		gpath->cpath.path.pathkeys = NIL;   /* gpuscan has unsorted result */
+		gpath->cpath.methods = &gpuscan_path_methods;
+		gpath->dev_quals = copyObject(gpath_orig->dev_quals);
+		gpath->host_quals = NIL;
+	}
+	else
+		return path;	/* elsewhere, unavailable to replace */
+
+	/*
+	 * If upper node allows to device executable qualifier, we hand
+	 * over this evaluation on the upper node. Unlike usual query
+	 * planning policy, qualifier pull-up enables to reduce interaction
+	 * between backend and opencl server So, it makes sense probably.
+	 */
+	if (p_upper_quals && gpath->dev_quals)
+	{
+		RelOptInfo		rel_fake;
+
+		/* move the device qualifier */
+		*p_upper_quals = gpath->dev_quals;
+		gpath->dev_quals = NIL;
+		Assert(gpath->host_quals == NIL);
+
+		/* adjust number of rows estimated */
+		memcpy(&rel_fake, rel, sizeof(RelOptInfo));
+		rel_fake.rows = rel_fake.tuples;
+
+		cost_gpuscan(gpath, root, &rel_fake,
+					 gpath->cpath.path.param_info,
+					 NIL, NIL, true);
+	}
+	else
+	{
+		cost_gpuscan(gpath, root, rel,
+					 gpath->cpath.path.param_info,
+					 gpath->dev_quals, NIL, true);
+	}
+	return (Path *) gpath;
 }
 
 
@@ -616,6 +624,21 @@ pgstrom_gpuscan_can_bulkload(const CustomPlanState *cps)
 		!cps->ps.ps_ProjInfo)
 		return true;
 
+	return false;
+}
+
+/*
+ * pgstrom_path_is_gpuscan
+ *
+ * It returns true, if supplied path node is gpuscan.
+ */
+bool
+pgstrom_path_is_gpuscan(const Path *path)
+{
+	if (IsA(path, CustomPath) &&
+		path->pathtype == T_CustomPlan &&
+		((CustomPath *) path)->methods == &gpuscan_path_methods)
+		return true;
 	return false;
 }
 
