@@ -669,7 +669,14 @@ extern const char *pgstrom_opencl_numeric_code;
 static inline void *
 pmemcpy(void *from, size_t sz)
 {
-	void   *dest = palloc(sz);
+	/*
+	 * Note that usual palloc() has 1GB limitation because of historical
+	 * reason, so we have to use MemoryContextAllocHuge instead in case
+	 * when we expect sz > 1GB.
+	 * Also, *_huge has identical implementation expect for size checks,
+	 * we don't need to check the cases.
+	 */
+	void   *dest = MemoryContextAllocHuge(CurrentMemoryContext, sz);
 
 	return memcpy(dest, from, sz);
 }
