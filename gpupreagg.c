@@ -3589,6 +3589,75 @@ clserv_launch_preagg_reduction(clstate_gpupreagg *clgpa, cl_uint nvalids)
 	return CL_SUCCESS;
 }
 
+/*
+ * bitonic_compute_workgroup_size
+ *
+ * Bitonic-sorting logic will compare and exchange items being located
+ * on distance of 2^N unit size. Its kernel entrypoint depends on the
+ * unit size that depends on maximum available local workgroup size
+ * for the kernel code. Because it depends on kernel resource consumption,
+ * we need to ask runtime the max available local workgroup size prior
+ * to the kernel enqueue.
+ */
+static cl_int
+bitonic_compute_workgroup_size(clstate_gpupreagg *clgpa,
+							   cl_uint nhalf,
+							   size_t *p_gwork_sz,
+							   size_t *p_lwork_sz)
+{
+	static struct {
+		const char *kern_name;
+		size_t		kern_lmem;
+	} kern_calls[] = {
+		{ "gpupreagg_bitonic_local", 2 * sizeof(cl_uint) },
+		{ "gpupreagg_bitonic_merge",     sizeof(cl_uint) },
+	};
+	size_t		least = nhalf;
+	size_t		lwork_sz;
+	size_t		gwork_sz;
+	cl_kernel	kernel;
+	cl_int		i, rc;
+
+	for (i=0; i < lengthof(kern_calls); i++)
+	{
+		kernel = clCreateKernel(clgpa->program,
+								kern_calls[i].kern_name,
+								&rc);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+			return rc;
+		}
+
+		if(!clserv_compute_workgroup_size(&gwork_sz,
+										  &lwork_sz,
+										  kernel,
+										  clgpa->dindex,
+										  true,
+										  nhalf,
+										  kern_calls[i].kern_lmem))
+		{
+			clserv_log("failed on clserv_compute_workgroup_size");
+			clReleaseKernel(kernel);
+			return StromError_OpenCLInternal;
+		}
+		clReleaseKernel(kernel);
+
+		least = Min(least, lwork_sz);
+	}
+
+	lwork_sz = 1UL << get_next_log2(least);
+	if (least < lwork_sz)
+		lwork_sz /= 2;
+    lwork_sz = 1 << get_next_log2(lwork_sz);
+	gwork_sz = ((nhalf + lwork_sz - 1) / lwork_sz) * lwork_sz;
+
+	*p_lwork_sz = lwork_sz;
+	*p_gwork_sz = gwork_sz;
+
+	return CL_SUCCESS;
+}
+
 static void
 clserv_process_gpupreagg(pgstrom_message *message)
 {
@@ -3825,26 +3894,18 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	}
 	else if (nvalids > 0)
 	{
-		/*
-		 * FIXME: Here, we assume bitonic_sorting logic is restricted by
-		 * max local workgroup size, rather then local memory or register
-		 * consumption. So, it just references device's max workgroup size,
-		 * however, we need to care about these resource consumption also.
-		 */
-		const pgstrom_device_info *devinfo =
-			pgstrom_get_device_info(clgpa->dindex);
-		size_t max_lwork_sz    = devinfo->dev_max_work_item_sizes[0];
-		size_t max_lmem_sz     = devinfo->dev_local_mem_size;
-		size_t lmem_per_thread = 2 * sizeof(cl_int);
-		size_t nhalf           = (nvalids + 1) / 2;
+		size_t		nhalf = (nvalids + 1) / 2;
+		size_t		gwork_sz = 0;
+		size_t		lwork_sz = 0;
+		size_t		nsteps;
+		size_t		launches;
+		size_t		i, j;
 
-		size_t gwork_sz, lwork_sz, i, j, nsteps, launches;
-
-		lwork_sz = Min(nhalf, max_lwork_sz);
-		lwork_sz = Min(max_lwork_sz, max_lmem_sz/lmem_per_thread);
-		lwork_sz = 1 << get_next_log2(lwork_sz);
-
-		gwork_sz = ((nhalf + lwork_sz - 1) / lwork_sz) * lwork_sz;
+		rc = bitonic_compute_workgroup_size(clgpa, nhalf,
+											&gwork_sz,
+											&lwork_sz);
+		if (rc != CL_SUCCESS)
+			goto error;
 
 		nsteps   = get_next_log2(nhalf / lwork_sz) + 1;
 		launches = (nsteps + 1) * nsteps / 2 + nsteps + 1;
