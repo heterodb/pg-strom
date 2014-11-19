@@ -290,10 +290,6 @@ aggfunc_lookup_by_oid(Oid aggfnoid)
 	return NULL;
 }
 
-
-
-
-
 /*
  * cost_gpupreagg
  *
@@ -3612,7 +3608,7 @@ bitonic_compute_workgroup_size(clstate_gpupreagg *clgpa,
 		{ "gpupreagg_bitonic_local", 2 * sizeof(cl_uint) },
 		{ "gpupreagg_bitonic_merge",     sizeof(cl_uint) },
 	};
-	size_t		least = nhalf;
+	size_t		least_sz = nhalf;
 	size_t		lwork_sz;
 	size_t		gwork_sz;
 	cl_kernel	kernel;
@@ -3643,13 +3639,13 @@ bitonic_compute_workgroup_size(clstate_gpupreagg *clgpa,
 		}
 		clReleaseKernel(kernel);
 
-		least = Min(least, lwork_sz);
+		least_sz = Min(least_sz, lwork_sz);
 	}
-
-	lwork_sz = 1UL << get_next_log2(least);
-	if (least < lwork_sz)
-		lwork_sz /= 2;
-    lwork_sz = 1 << get_next_log2(lwork_sz);
+	/*
+	 * NOTE: Local workgroup size is the largest 2^N value less than or
+	 * equal to the least one of expected kernels.
+	 */
+	lwork_sz = 1UL << (get_next_log2(least_sz + 1) - 1);
 	gwork_sz = ((nhalf + lwork_sz - 1) / lwork_sz) * lwork_sz;
 
 	*p_lwork_sz = lwork_sz;
