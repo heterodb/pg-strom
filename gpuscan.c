@@ -957,6 +957,7 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	if (gss->pfm.enabled)
 		gettimeofday(&tv1, NULL);
 
+retry:
 	length = (pgstrom_chunk_size << 20);
 	pds = pgstrom_create_data_store_row(tupdesc, length, gss->tuple_width);
 	PG_TRY();
@@ -970,7 +971,21 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 		if (pds->kds->nitems > 0)
 			gpuscan = pgstrom_create_gpuscan(gss, pds);
 		else
+		{
 			pgstrom_put_data_store(pds);
+
+			/* NOTE: In case when it scans on a large hole (that is
+			 * continuous blocks contain invisible tuples only; may
+			 * be created by DELETE with relaxed condition),
+			 * pgstrom_data_store_insert_block() may return negative
+			 * value without valid tuples, even though we don't reach
+			 * either end of relation or chunk.
+			 * So, we need to check whether we actually touched on
+			 * the end-of-relation. If not, retry scanning.
+			 */
+			if (gss->curr_blknum < gss->last_blknum)
+				goto retry;
+		}
 	}
 	PG_CATCH();
     {
