@@ -2380,8 +2380,8 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas)
 	pgstrom_data_store *pds = gpreagg->pds;
 	kern_data_store	   *kds = pds->kds;
 	kern_row_map	   *krowmap = KERN_GPUPREAGG_KROWMAP(&gpreagg->kern);
-	TupleTableSlot	   *slot = NULL;
 	TupleTableSlot	   *slot_in;
+	TupleTableSlot	   *slot_out = NULL;
 	cl_uint				row_index;
 	HeapTupleData		tuple;
 
@@ -2420,40 +2420,47 @@ retry:
 		/* reset per-tuple memory context */
 		ResetExprContext(econtext);
 
-		/* additional projection if bulk-load required */
+		/*
+		 * In case of bulk-loading mode, it may take additional projection
+		 * because slot_in has a record type of underlying scan node, thus
+		 * we need to translate this record into the form we expected.
+		 * If bulk_proj is valid, it implies our expected input record is
+		 * incompatible from the record type of underlying scan.
+		 */
 		if (gpas->outer_bulkload)
 		{
 			if (gpas->bulk_proj)
 			{
-				econtext->ecxt_outertuple = slot_in;
-				gpas->scan_slot = ExecProject(gpas->bulk_proj, &is_done);
+				ExprContext	*bulk_econtext = gpas->bulk_proj->pi_exprContext;
+
+				bulk_econtext->ecxt_scantuple = slot_in;
+				slot_in = ExecProject(gpas->bulk_proj, &is_done);
 				if (is_done == ExprEndResult)
 				{
-					slot = NULL;
+					slot_out = NULL;
 					goto retry;
 				}
-				slot_in = gpas->scan_slot;
 			}
 		}
 		/* put result tuple */
 		if (!projection)
 		{
-			slot = gpas->cps.ps.ps_ResultTupleSlot;
-			ExecCopySlot(slot, slot_in);
+			slot_out = gpas->cps.ps.ps_ResultTupleSlot;
+			ExecCopySlot(slot_out, slot_in);
 		}
 		else
 		{
 			econtext->ecxt_outertuple = slot_in;
-			slot = ExecProject(projection, &is_done);
+			slot_out = ExecProject(projection, &is_done);
 			if (is_done == ExprEndResult)
 			{
-				slot = NULL;
+				slot_out = NULL;
 				goto retry;
 			}
 			gpas->cps.ps.ps_TupFromTlist = (is_done == ExprMultipleResult);
 		}
 	}
-	return slot;
+	return slot_out;
 }
 
 static TupleTableSlot *
