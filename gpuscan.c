@@ -432,9 +432,7 @@ gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt,
 		 */
 		foreach (lc, plan->qual)
 		{
-			RestrictInfo   *rinfo = lfirst(lc);
-
-			if (!pgstrom_codegen_available_expression(rinfo->clause))
+			if (!pgstrom_codegen_available_expression(lfirst(lc)))
 				return plan;
 		}
 		dev_clauses = extract_actual_clauses(plan->qual, false);
