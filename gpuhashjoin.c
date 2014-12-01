@@ -34,6 +34,7 @@
 #include "optimizer/tlist.h"
 #include "optimizer/var.h"
 #include "parser/parsetree.h"
+#include "parser/parse_coerce.h"
 #include "storage/ipc.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
@@ -2031,6 +2032,24 @@ gpuhashjoin_set_plan_ref(PlannerInfo *root,
 			else
 				elog(ERROR, "Unexpected OpExpr arguments: %s",
 					 nodeToString(oper));
+
+			/*
+			 * Even if same values on both-side, different variable-width
+			 * leads another hash-value bacause of CRC32 algorithm.
+			 * So, we needs to adjust data width to fit it.
+			 */
+			if (exprType(i_expr) != exprType(o_expr))
+			{
+				i_expr = coerce_type(NULL,
+									 (Node *)i_expr,
+									 exprType(i_expr),
+									 exprType(o_expr),
+									 exprTypmod(o_expr),
+									 COERCION_EXPLICIT,
+									 COERCE_EXPLICIT_CAST,
+									 -1);
+			}
+
 			/* See the comment in MultiHash declaration. 'i_expr' is used
 			 * to calculate hash-value on construction of hentry, so it
 			 * has to reference OUTER_VAR; that means relation being scanned.
