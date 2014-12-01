@@ -957,7 +957,6 @@ gpuhashjoin_create_plan(PlannerInfo *root, CustomPath *best_path)
 		mhash->nslots = gpath->inners[i].ntuples;
 		mhash->nloops = gpath->inners[i].nloops;
 		mhash->threshold_ratio = gpath->inners[i].threshold_ratio;
-		//mhash->chunk_size = gpath->inners[i].chunk_size;
 		mhash->hashtable_size = gpath->hashtable_size;
 
 		/* chain it under the GpuHashJoin */
@@ -3491,7 +3490,6 @@ multihash_begin(CustomPlan *node,
 	mhs->depth = mhash->depth;
 	mhs->nslots = mhash->nslots;
 	mhs->threshold_ratio = mhash->threshold_ratio;
-	//mhs->chunk_size = mhash->chunk_size;
 	mhs->hashtable_size = mhash->hashtable_size;
 	mhs->outer_overflow = NULL;
 	mhs->outer_done = false;
@@ -4003,7 +4001,6 @@ multihash_textout_plan(StringInfo str, const CustomPlan *node)
 	appendStringInfo(str, " :nslots %u", plannode->nslots);
 	appendStringInfo(str, " :nloops %u", plannode->nloops);
 	appendStringInfo(str, " :threshold_ratio %f", plannode->threshold_ratio);
-	//appendStringInfo(str, " :chunk_size %zu", plannode->chunk_size);
 	appendStringInfo(str, " :hashtable_size %zu", plannode->hashtable_size);
 	appendStringInfo(str, " :hash_inner_keys %s",
 					 nodeToString(plannode->hash_inner_keys));
@@ -4020,9 +4017,8 @@ multihash_copy_plan(const CustomPlan *from)
 	CopyCustomPlanCommon((Node *)oldnode, (Node *)newnode);
 	newnode->depth           = oldnode->depth;
 	newnode->nslots          = oldnode->nslots;
-	newnode->nloops          = oldnode->nslots;
+	newnode->nloops          = oldnode->nloops;
 	newnode->threshold_ratio = oldnode->threshold_ratio;
-	//newnode->chunk_size      = oldnode->chunk_size;
 	newnode->hashtable_size  = oldnode->hashtable_size;
 	newnode->hash_inner_keys = copyObject(oldnode->hash_inner_keys);
 	newnode->hash_outer_keys = copyObject(oldnode->hash_outer_keys);
