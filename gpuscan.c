@@ -245,80 +245,24 @@ gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path,
 	RelOptInfo	   *rel = path->parent;
 	GpuScanPath	   *gpath;
 	ListCell	   *lc;
-	List		   *dev_quals;
 	int				i;
-
-#if 0
-	/*
-	 * XXX - It looks dev_quals pull up breaks adeque plan estimation.
-	 * needs to be fixed.
-	 */
-
-	/*
-	 * In case when SubPlan is already GpuScanPath, it may be available
-	 * to pull up device executable qualifiers.
-	 */
-	if (path->pathtype == T_CustomPlan &&
-		((CustomPath *) path)->methods == &gpuscan_path_methods)
-	{
-		Assert(rel->rtekind == RTE_RELATION);
-		Assert(rel->reloptkind == RELOPT_BASEREL);
-
-		gpath = (GpuScanPath *) path;
-
-		if (p_upper_quals != NULL &&
-			enable_gpuscan &&
-			gpath->dev_quals != NIL &&
-			gpath->host_quals == NIL)
-		{
-			*p_upper_quals = copyObject(gpath->dev_quals);
-			dev_quals = NIL;
-			goto build;
-		}
-		return path;	/* nothing to do */
-	}
-#endif
-
-	/* Elsewhere, only SeqScan can be replaced */
-	if (path->pathtype != T_SeqScan)
-		return path;
-
-	/* SeqScan shall take a relation to be scanned */
-	if (rel->rtekind != RTE_RELATION)
-		return path;	/* usually, shouldn't happen */
-	if (rel->reloptkind != RELOPT_BASEREL)
-		return path;	/* usually, shouldn't happen */
 
 	/* enable_gpuscan has to be turned on */
 	if (!enable_gpuscan)
 		return path;
 
-	/* Simple SeqScan can have only device executable qualifier */
-	dev_quals = NIL;
-	foreach (lc, rel->baserestrictinfo)
-	{
-		RestrictInfo   *rinfo = lfirst(lc);
-
-		if (!pgstrom_codegen_available_expression(rinfo->clause))
-			return path;
-		dev_quals = lappend(dev_quals, rinfo);
-	}
-
-	/* If upper node allows to pull-up device executable qualifier,
-	 * we hand over this evaluation on the upper node. Unlike usual
-	 * query planning policy, qualifier pull-up enables to reduce
-	 * interaction between backend and opencl server. So, it makes
-	 * sense probably.
-	 */
-	if (p_upper_quals)
-	{
-		*p_upper_quals = copyObject(dev_quals);
-		dev_quals = NIL;
-	}
-
 	/* !!! See the logic in use_physical_tlist() !!! */
 
-	/* System column reference involves projection */
+	/* shortcut checks, if unavailable to replace */
+	if (rel->rtekind != RTE_RELATION)
+		return path;
+	if (rel->reloptkind != RELOPT_BASEREL)
+		return path;
+
+	/*
+	 * System column reference involves projection, so unavailable
+	 * to have bulk-loading.
+	 */
 	for (i = rel->min_attr; i <= 0; i++)
 	{
 		if (!bms_is_empty(rel->attr_needed[i - rel->min_attr]))
@@ -326,9 +270,9 @@ gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path,
 	}
 
 	/*
-     * Can't do it if the rel is required to emit any placeholder
+	 * Can't replace it if the rel is required to emit any placeholder
 	 * expressions, either.
-     */
+	 */
 	foreach (lc, root->placeholder_list)
 	{
 		PlaceHolderInfo *phinfo = (PlaceHolderInfo *) lfirst(lc);
@@ -338,24 +282,88 @@ gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path,
 			return path;
 	}
 
-	/* OK, probably GpuScan instead of SeqScan makes sense */
-//build:
-	gpath = palloc0(sizeof(GpuScanPath));
-    gpath->cpath.path.type = T_CustomPath;
-    gpath->cpath.path.pathtype = T_CustomPlan;
-    gpath->cpath.path.parent = rel;
-    gpath->cpath.path.param_info
-		= get_baserel_parampathinfo(root, rel, rel->lateral_relids);
-	gpath->cpath.path.pathkeys = NIL;	/* gpuscan has unsorted result */
-	gpath->cpath.methods = &gpuscan_path_methods;
+	/* OK, check individual path-node */
+	if (path->pathtype == T_SeqScan)
+	{
+		List   *dev_quals = NIL;
 
-	cost_gpuscan(gpath, root, rel,
-				 gpath->cpath.path.param_info,
-				 dev_quals, NIL, true);
-	gpath->dev_quals = dev_quals;
-	gpath->host_quals = NIL;
+		/* Simple SeqScan has only device executable qualifier */
+		foreach (lc, rel->baserestrictinfo)
+		{
+			RestrictInfo   *rinfo = lfirst(lc);
 
-	return (Path *)gpath;
+			if (!pgstrom_codegen_available_expression(rinfo->clause))
+				return path;
+			dev_quals = lappend(dev_quals, rinfo);
+		}
+
+		/* OK, probably GpuScan instead of SeqScan makes sense */
+		gpath = palloc0(sizeof(GpuScanPath));
+		gpath->cpath.path.type = T_CustomPath;
+		gpath->cpath.path.pathtype = T_CustomPlan;
+		gpath->cpath.path.parent = rel;
+		gpath->cpath.path.param_info
+			= get_baserel_parampathinfo(root, rel, rel->lateral_relids);
+		gpath->cpath.path.pathkeys = NIL;	/* gpuscan has unsorted result */
+		gpath->cpath.methods = &gpuscan_path_methods;
+		gpath->dev_quals = copyObject(dev_quals);
+		gpath->host_quals = NIL;
+	}
+	else if (pgstrom_path_is_gpuscan(path))
+	{
+		GpuScanPath	   *gpath_orig = (GpuScanPath *) path;
+
+		/* we cannot pull up dev_quals from GpuScan with host_qual */
+		if (gpath_orig->host_quals != NIL)
+			return path;
+		/* it does not make sense to pull-up device qualifier */
+		if (gpath_orig->dev_quals == NIL)
+			return path;
+
+		gpath = palloc0(sizeof(GpuScanPath));
+		gpath->cpath.path.type = T_CustomPath;
+		gpath->cpath.path.pathtype = T_CustomPlan;
+		gpath->cpath.path.parent = rel;
+		gpath->cpath.path.param_info
+			= get_baserel_parampathinfo(root, rel, rel->lateral_relids);
+		gpath->cpath.path.pathkeys = NIL;   /* gpuscan has unsorted result */
+		gpath->cpath.methods = &gpuscan_path_methods;
+		gpath->dev_quals = copyObject(gpath_orig->dev_quals);
+		gpath->host_quals = NIL;
+	}
+	else
+		return path;	/* elsewhere, unavailable to replace */
+
+	/*
+	 * If upper node allows to device executable qualifier, we hand
+	 * over this evaluation on the upper node. Unlike usual query
+	 * planning policy, qualifier pull-up enables to reduce interaction
+	 * between backend and opencl server So, it makes sense probably.
+	 */
+	if (p_upper_quals && gpath->dev_quals)
+	{
+		RelOptInfo		rel_fake;
+
+		/* move the device qualifier */
+		*p_upper_quals = gpath->dev_quals;
+		gpath->dev_quals = NIL;
+		Assert(gpath->host_quals == NIL);
+
+		/* adjust number of rows estimated */
+		memcpy(&rel_fake, rel, sizeof(RelOptInfo));
+		rel_fake.rows = rel_fake.tuples;
+
+		cost_gpuscan(gpath, root, &rel_fake,
+					 gpath->cpath.path.param_info,
+					 NIL, NIL, true);
+	}
+	else
+	{
+		cost_gpuscan(gpath, root, rel,
+					 gpath->cpath.path.param_info,
+					 gpath->dev_quals, NIL, true);
+	}
+	return (Path *) gpath;
 }
 
 
@@ -368,70 +376,148 @@ gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path,
  * loading functionality.
  */
 Plan *
-gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt, Plan *plan,
-								 Bitmapset *attr_refs)
+gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt,
+								 Plan *plan,
+								 Bitmapset *attr_refs,
+								 List **p_upper_quals)
 {
-	RangeTblEntry *rte;
+	Index			scanrelid;
+	RangeTblEntry  *rte;
+	Relation		relation;
 	GpuScanPlan	   *gscan;
-	Index			varno;
-	List		   *tlist;
 	ListCell	   *lc;
+	BlockNumber		num_pages;
+	double			num_tuples;
+	double			allvisfrac;
+	double			spc_seq_page_cost;
+	Oid				tablespace_oid;
 
-	/* only SeqScan can be replaced */
-	if (!IsA(plan, SeqScan))
-		return plan;
 	/* enable_gpuscan has to be turned on */
 	if (!enable_gpuscan)
 		return plan;
-	/* SeqScan with qualifier cannot be replaced, right now */
-	if (plan->qual != NIL)
-		return plan;
 
-	tlist = plan->targetlist;
-	varno = ((Scan *)plan)->scanrelid;
-	rte = rt_fetch(varno, pstmt->rtable);
-
-	/* SeqScan shall take a relation to be scanned */
-	if (rte->rtekind != RTE_RELATION)
-		return plan;	/* usually, shouldn't happen */
-	if (rte->relkind != RELKIND_RELATION &&
-		rte->relkind != RELKIND_TOASTVALUE &&
-		rte->relkind != RELKIND_MATVIEW)
-		return plan;	/* usually, shouldn't happen */
-
-	/*
-	 * Check whether the device referenced target-entry can be constructed
-	 * on the device side. (no need to care about host-only fields)
-	 */
-	foreach (lc, plan->targetlist)
+	if (IsA(plan, SeqScan))
 	{
-		TargetEntry	   *tle = lfirst(lc);
-		int		x = tle->resno - FirstLowInvalidHeapAttributeNumber;
+		List	   *dev_clauses = NIL;
 
-		if (!bms_is_member(x, attr_refs))
-			continue;
-		if (!pgstrom_codegen_available_expression(tle->expr))
-			return plan;
+		scanrelid = ((Scan *) plan)->scanrelid;
+		rte = rt_fetch(scanrelid, pstmt->rtable);
+		if (rte->rtekind != RTE_RELATION)
+			return plan;	/* usually, shouldn't happen */
+		if (rte->relkind != RELKIND_RELATION &&
+			rte->relkind != RELKIND_TOASTVALUE &&
+			rte->relkind != RELKIND_MATVIEW)
+			return plan;	/* usually, shouldn't happen */
+
+		/*
+		 * check whether the device referenced target-entry can be
+		 * constructed on the device side. no need to care about
+		 * host-only fields.
+		 */
+		foreach (lc, plan->targetlist)
+		{
+			TargetEntry *tle = lfirst(lc);
+			int		x = tle->resno - FirstLowInvalidHeapAttributeNumber;
+
+			if (!bms_is_member(x, attr_refs))
+				continue;
+			if (!pgstrom_codegen_available_expression(tle->expr))
+				return plan;
+		}
+
+		/*
+		 * check whether the plan qualifiers can be executable on the
+		 * device side. If host only expression is here, unavailable
+		 * to replace it by GpuScan.
+		 */
+		foreach (lc, plan->qual)
+		{
+			if (!pgstrom_codegen_available_expression(lfirst(lc)))
+				return plan;
+		}
+		dev_clauses = extract_actual_clauses(plan->qual, false);
+
+		/*
+		 * OK, SeqScan can be replaced by GpuScan
+		 */
+		gscan = palloc0(sizeof(GpuScanPlan));
+		gscan->cplan.plan.type = T_CustomPlan;
+		gscan->cplan.plan.plan_width = plan->plan_width;
+		gscan->cplan.plan.targetlist = plan->targetlist;
+		gscan->cplan.plan.qual = NIL;
+		gscan->cplan.plan.lefttree = NULL;
+		gscan->cplan.plan.righttree = NULL;
+		gscan->cplan.methods = &gpuscan_plan_methods;
+
+		gscan->scanrelid = scanrelid;
+		gscan->kern_source = NULL;
+		gscan->extra_flags = DEVKERNEL_NEEDS_GPUSCAN |
+			(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
+		gscan->used_params = NIL;
+		gscan->used_vars = NIL;
+		gscan->dev_clauses = copyObject(dev_clauses);
 	}
+	else if (pgstrom_plan_is_gpuscan(plan))
+	{
+		gscan = (GpuScanPlan *) plan;
+		scanrelid = gscan->scanrelid;
+		rte = rt_fetch(scanrelid, pstmt->rtable);
+		Assert(rte->rtekind == RTE_RELATION);
+		Assert(rte->relkind == RELKIND_RELATION ||
+			   rte->relkind == RELKIND_TOASTVALUE ||
+			   rte->relkind == RELKIND_MATVIEW);
+
+		/* unavailable to pull-up host only qualifiers */
+		if (gscan->cplan.plan.qual != NIL)
+			return plan;
+		/* it does not make sense to replace GpuScan again */
+		if (!gscan->dev_clauses)
+			return plan;
+
+		/* duplication to modify field below */
+		gscan = copyObject(plan);
+	}
+	else
+		return plan;	/* elsewhere, unavailable to replace */
 
 	/*
-	 * OK, SeqScan can be replaced by GpuScan
+	 * pull-up device executable qualifiers, if available
 	 */
-	gscan = palloc0(sizeof(GpuScanPlan));
-	gscan->cplan.plan.type = T_CustomPlan;
-	gscan->cplan.plan.targetlist = tlist;
-	gscan->cplan.plan.qual = NIL;
-	gscan->cplan.plan.lefttree = NULL;
-	gscan->cplan.plan.righttree = NULL;
-	gscan->cplan.methods = &gpuscan_plan_methods;
+	if (p_upper_quals && gscan->dev_clauses)
+	{
+		*p_upper_quals = gscan->dev_clauses;
+		gscan->dev_clauses = NIL;
 
-	gscan->scanrelid = varno;
-	gscan->kern_source = NULL;
-	gscan->extra_flags = DEVKERNEL_NEEDS_GPUSCAN |
-		(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
-	gscan->used_params = NIL;
-    gscan->used_vars = NIL;
-    gscan->dev_clauses = NULL;
+		/* it also leads no kernel execution in GpuScan node */
+		gscan->kern_source = NULL;
+		gscan->extra_flags &= DEVKERNEL_DISABLE_OPTIMIZE;
+		gscan->used_params = NIL;
+		gscan->used_vars = NIL;
+	}
+	/* FIXME: we may have p_upper_quals != NULL on call */
+	Assert(gscan->dev_clauses == NIL);
+
+	/*
+	 * update cost estimation for the GpuScan node
+	 *
+	 * TODO: integration with cost_gpuscan() for more consistency.
+	 */
+	relation = heap_open(rte->relid, NoLock);
+
+	estimate_rel_size(relation, NULL,
+					  &num_pages,
+					  &num_tuples,
+					  &allvisfrac);
+	/* fetch estimated page cost for tablespace containing table */
+	tablespace_oid = RelationGetForm(relation)->reltablespace;
+	get_tablespace_page_costs(tablespace_oid, NULL, &spc_seq_page_cost);
+
+	/* only disk cost to be paid attention */
+	gscan->cplan.plan.plan_rows = num_tuples;
+	gscan->cplan.plan.startup_cost = 0.0;
+	gscan->cplan.plan.total_cost = spc_seq_page_cost * num_pages;
+
+	heap_close(relation, NoLock);
 
 	return (Plan *) gscan;
 }
@@ -616,6 +702,21 @@ pgstrom_gpuscan_can_bulkload(const CustomPlanState *cps)
 		!cps->ps.ps_ProjInfo)
 		return true;
 
+	return false;
+}
+
+/*
+ * pgstrom_path_is_gpuscan
+ *
+ * It returns true, if supplied path node is gpuscan.
+ */
+bool
+pgstrom_path_is_gpuscan(const Path *path)
+{
+	if (IsA(path, CustomPath) &&
+		path->pathtype == T_CustomPlan &&
+		((CustomPath *) path)->methods == &gpuscan_path_methods)
+		return true;
 	return false;
 }
 
@@ -854,6 +955,7 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	if (gss->pfm.enabled)
 		gettimeofday(&tv1, NULL);
 
+retry:
 	length = (pgstrom_chunk_size << 20);
 	pds = pgstrom_create_data_store_row(tupdesc, length, gss->tuple_width);
 	PG_TRY();
@@ -867,7 +969,21 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 		if (pds->kds->nitems > 0)
 			gpuscan = pgstrom_create_gpuscan(gss, pds);
 		else
+		{
 			pgstrom_put_data_store(pds);
+
+			/* NOTE: In case when it scans on a large hole (that is
+			 * continuous blocks contain invisible tuples only; may
+			 * be created by DELETE with relaxed condition),
+			 * pgstrom_data_store_insert_block() may return negative
+			 * value without valid tuples, even though we don't reach
+			 * either end of relation or chunk.
+			 * So, we need to check whether we actually touched on
+			 * the end-of-relation. If not, retry scanning.
+			 */
+			if (gss->curr_blknum < gss->last_blknum)
+				goto retry;
+		}
 	}
 	PG_CATCH();
     {

@@ -20,6 +20,11 @@
 #include <CL/cl.h>
 #include <dlfcn.h>
 
+/* Force OpenCL 1.1 or later */
+#ifndef CL_VERSION_1_1
+#error PG-Strom requires OpenCL 1.1 or later
+#endif
+
 /*
  * Query Platform Info
  */
@@ -203,11 +208,19 @@ clGetContextInfo(cl_context context,
 /*
  * Command Queues
  */
+#ifdef CL_VERSION_2_0
+static cl_command_queue (*p_clCreateCommandQueueWithProperties)(
+	cl_context context,
+	cl_device_id device,
+	cl_command_queue_properties properties,
+	cl_int *errcode_ret) = NULL;
+#else
 static cl_command_queue (*p_clCreateCommandQueue)(
 	cl_context context,
 	cl_device_id device,
 	cl_command_queue_properties properties,
 	cl_int *errcode_ret) = NULL;
+#endif
 static cl_int (*p_clRetainCommandQueue)(cl_command_queue cmdq) = NULL;
 static cl_int (*p_clReleaseCommandQueue)(cl_command_queue cmdq) = NULL;
 static cl_int (*p_clGetCommandQueueInfo)(
@@ -223,10 +236,21 @@ clCreateCommandQueue(cl_context context,
 					 cl_command_queue_properties properties,
 					 cl_int *errcode_ret)
 {
+	/* NOTE: clCreateCommandQueue() was deprecated on OpenCL 2.0,
+	 * but clCreateCommandQueueWithProperties() is newly provided
+	 * with same functionality.
+	 */
+#ifdef CL_VERSION_2_0
+	return (*p_clCreateCommandQueueWithProperties)(context,
+												   device,
+												   properties,
+												   errcode_ret);
+#else
 	return (*p_clCreateCommandQueue)(context,
 									 device,
 									 properties,
 									 errcode_ret);
+#endif
 }
 
 cl_int
@@ -291,8 +315,7 @@ static cl_int (*p_clEnqueueWriteBuffer)(
 	cl_uint num_events_in_wait_list,
 	const cl_event *event_wait_list,
 	cl_event *event) = NULL;
-#if 0
-/* we're waiting for nvidia's opencl 1.2 support... */
+#ifdef CL_VERSION_1_2
 static cl_int (*p_clEnqueueFillBuffer)(
 	cl_command_queue command_queue,
 	cl_mem buffer,
@@ -425,6 +448,7 @@ clEnqueueWriteBuffer(cl_command_queue command_queue,
  * So, we put an alternative way to work with the driver that
  * supports OpenCL 1.1 (typically, nvidia's one)
  */
+#ifndef CL_VERSION_1_2
 static void
 pgstromEnqueueFillBufferCleanup(cl_event event,
 								cl_int event_command_exec_status,
@@ -432,6 +456,7 @@ pgstromEnqueueFillBufferCleanup(cl_event event,
 {
 	clReleaseKernel((cl_kernel)user_data);
 }
+#endif
 
 cl_int
 clEnqueueFillBuffer(cl_command_queue command_queue,
@@ -444,6 +469,20 @@ clEnqueueFillBuffer(cl_command_queue command_queue,
 					const cl_event *event_wait_list,
 					cl_event *event)
 {
+#ifdef CL_VERSION_1_2
+	return (*p_clEnqueueFillBuffer)(command_queue,
+									buffer,
+									pattern,
+									pattern_size,
+									offset,
+									size,
+									num_events_in_wait_list,
+									event_wait_list,
+									event);
+#else
+	/*
+	 * equivalent implementation on OpenCL 1.1
+	 */
 	static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 	static cl_program	last_program = NULL;
 	static cl_context	last_context = NULL;
@@ -697,6 +736,7 @@ out_release_kernel:
 out_release_program:
 	clReleaseProgram(program);
 	return rc;
+#endif
 }
 
 cl_int
@@ -1262,6 +1302,7 @@ clReleaseEvent(cl_event event)
 /*
  * Markers, Barriers, and Waiting
  */
+#ifdef CL_VERSION_1_2
 static cl_int (*p_clEnqueueMarkerWithWaitList)(
 	cl_command_queue command_queue,
 	cl_uint num_events_in_wait_list,
@@ -1296,6 +1337,7 @@ clEnqueueBarrierWithWaitList(cl_command_queue command_queue,
 											 event_wait_list,
 											 event);
 }
+#endif
 
 /*
  * Profiling Operations on Memory Objects and Kernels
@@ -1383,7 +1425,11 @@ pgstrom_init_opencl_entry(void)
 		LOOKUP_OPENCL_FUNCTION(clReleaseContext);
 		LOOKUP_OPENCL_FUNCTION(clGetContextInfo);
 		/* Command Queues */
+#ifdef CL_VERSION_2_0
+		LOOKUP_OPENCL_FUNCTION(clCreateCommandQueueWithProperties);
+#else
 		LOOKUP_OPENCL_FUNCTION(clCreateCommandQueue);
+#endif
 		LOOKUP_OPENCL_FUNCTION(clRetainCommandQueue);
 		LOOKUP_OPENCL_FUNCTION(clReleaseCommandQueue);
 		LOOKUP_OPENCL_FUNCTION(clGetCommandQueueInfo);
@@ -1392,7 +1438,9 @@ pgstrom_init_opencl_entry(void)
 		LOOKUP_OPENCL_FUNCTION(clCreateSubBuffer);
 		LOOKUP_OPENCL_FUNCTION(clEnqueueReadBuffer);
 		LOOKUP_OPENCL_FUNCTION(clEnqueueWriteBuffer);
-		//LOOKUP_OPENCL_FUNCTION(clEnqueueFillBuffer);
+#ifdef CL_VERSION_1_2
+		LOOKUP_OPENCL_FUNCTION(clEnqueueFillBuffer);
+#endif
 		LOOKUP_OPENCL_FUNCTION(clEnqueueCopyBuffer);
 		LOOKUP_OPENCL_FUNCTION(clEnqueueMapBuffer);
 		LOOKUP_OPENCL_FUNCTION(clEnqueueUnmapMemObject);
@@ -1432,8 +1480,10 @@ pgstrom_init_opencl_entry(void)
 		LOOKUP_OPENCL_FUNCTION(clRetainEvent);
 		LOOKUP_OPENCL_FUNCTION(clReleaseEvent);
 		/* Markers, Barriers, and Waiting */
+#ifdef CL_VERSION_1_2
 		LOOKUP_OPENCL_FUNCTION(clEnqueueMarkerWithWaitList);
 		LOOKUP_OPENCL_FUNCTION(clEnqueueBarrierWithWaitList);
+#endif
 		/* Profiling Operations on Memory Objects and Kernels */
 		LOOKUP_OPENCL_FUNCTION(clGetEventProfilingInfo);
 		/* Flush and Finish */

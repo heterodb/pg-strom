@@ -52,6 +52,7 @@ typedef struct
 	AttrNumber	   *grpColIdx;		/* their indexes in the target list */
 	bool			outer_bulkload;
 	double			num_groups;		/* estimated number of groups */
+	List		   *outer_quals;	/* device quals pulled-up */
 	const char	   *kern_source;
 	int				extra_flags;
 	List		   *used_params;	/* referenced Const/Param */
@@ -288,10 +289,6 @@ aggfunc_lookup_by_oid(Oid aggfnoid)
 	ReleaseSysCache(htup);
 	return NULL;
 }
-
-
-
-
 
 /*
  * cost_gpupreagg
@@ -1150,10 +1147,8 @@ gpupreagg_codegen_keycomp(GpuPreAggPlan *gpreagg, codegen_context *context)
 			&body,
 			"  xkeyval_%u = pg_%s_vref(kds,ktoast,errcode,%u,x_index);\n"
 			"  ykeyval_%u = pg_%s_vref(kds,ktoast,errcode,%u,y_index);\n"
-			//"printf(\"gid=%%zu xnull=%%d ynull=%%d\\n\", get_global_id(0), xkeyval_1.isnull, ykeyval_1.isnull);\n"
 			"  if (!xkeyval_%u.isnull && !ykeyval_%u.isnull)\n"
 			"  {\n"
-			//"printf(\"gid=%%zu x=%%d y=%%d\\n\", get_global_id(0), xkeyval_1.value, ykeyval_1.value);\n"
 			"    comp = pgfn_%s(errcode, xkeyval_%u, ykeyval_%u);\n"
 			"    if (!comp.isnull && comp.value != 0)\n"
 			"      return comp.value;\n"
@@ -1790,10 +1785,74 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 	return str.data;
 }
 
+/*
+ * gpupreagg_codegen_qual_eval - code generator of kernel gpupreagg_qual_eval()
+ * that check qualifier on individual tuples prior to the job of preagg
+ *
+ * static bool
+ * gpupreagg_qual_eval(__private cl_int *errcode,
+ *                     __global kern_parambuf *kparams,
+ *                     __global kern_data_store *kds,
+ *                     __global kern_data_store *ktoast,
+ *                     size_t kds_index);
+ */
+static char *
+gpupreagg_codegen_qual_eval(GpuPreAggPlan *gpreagg, codegen_context *context)
+{
+	StringInfoData	str;
+
+	/* init context */
+	context->param_refs = NULL;
+	context->used_vars = NIL;
+
+	initStringInfo(&str);
+	appendStringInfo(
+        &str,
+        "static bool\n"
+        "gpupreagg_qual_eval(__private cl_int *errcode,\n"
+        "                    __global kern_parambuf *kparams,\n"
+        "                    __global kern_data_store *kds,\n"
+        "                    __global kern_data_store *ktoast,\n"
+        "                    size_t kds_index)\n"
+        "{\n");
+
+	if (gpreagg->outer_quals != NIL)
+	{
+		/*
+		 * Generate code for qual evaluation
+		 * Note that outer_quals was pulled up from outer plan, thus,
+		 * its varnodes are arranged to reference fields on outer
+		 * relation. So, it does not need to pay attention for projection,
+		 * however, needs to be careful to deal with...
+		 */
+		char   *expr_code
+			= pgstrom_codegen_expression((Node *)gpreagg->outer_quals,
+										 context);
+		Assert(expr_code != NULL);
+
+		appendStringInfo(
+			&str,
+			"%s%s\n"
+			"  return EVAL(%s);\n",
+			pgstrom_codegen_param_declarations(context,
+											   context->param_refs),
+			pgstrom_codegen_var_declarations(context),
+			expr_code);
+	}
+	else
+	{
+		appendStringInfo(&str, "  return true;\n");
+	}
+	appendStringInfo(&str, "}\n");
+
+	return str.data;
+}
+
 static char *
 gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 {
 	StringInfoData	str;
+	const char	   *fn_qualeval;
 	const char	   *fn_keycomp;
 	const char	   *fn_aggcalc;
 	const char	   *fn_projection;
@@ -1807,6 +1866,8 @@ gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 	context->used_params = list_make1(makeNullConst(BYTEAOID, -1, InvalidOid));
 	context->type_defs = list_make1(pgstrom_devtype_lookup(BYTEAOID));
 
+	/* generate a qual evaluation function */
+	fn_qualeval = gpupreagg_codegen_qual_eval(gpreagg, context);
 	/* generate a key comparison function */
 	fn_keycomp = gpupreagg_codegen_keycomp(gpreagg, context);
 	/* generate a partial aggregate function */
@@ -1819,11 +1880,13 @@ gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 	appendStringInfo(&str,
 					 "%s\n"		/* type declarations */
 					 "%s\n"		/* function declarations */
+					 "%s\n"		/* gpupreagg_qual_eval() */
 					 "%s\n"		/* gpupreagg_keycomp() */
 					 "%s\n"		/* gpupreagg_aggcalc() */
 					 "%s\n",	/* gpupreagg_projection() */
 					 pgstrom_codegen_type_declarations(context),
 					 pgstrom_codegen_func_declarations(context),
+					 fn_qualeval,
 					 fn_keycomp,
 					 fn_aggcalc,
 					 fn_projection);
@@ -1880,6 +1943,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	List		   *agg_quals = NIL;
 	List		   *agg_tlist = NIL;
 	Bitmapset	   *attr_refs = NULL;
+	List		   *outer_quals = NIL;
 	ListCell	   *cell;
 	Cost			startup_cost;
 	Cost			total_cost;
@@ -1919,7 +1983,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	if (!IsA(outerPlan(agg), Sort))
 		outerPlan(gpreagg) = gpuscan_try_replace_seqscan_plan(pstmt,
 															  outerPlan(agg),
-															  attr_refs);
+															  attr_refs,
+															  &outer_quals);
 	else
 	{
 		Sort   *sort_plan = (Sort *) outerPlan(agg);
@@ -1927,8 +1992,12 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 
 		outerPlan(gpreagg) = gpuscan_try_replace_seqscan_plan(pstmt,
 															  outer_plan,
-															  attr_refs);
+															  attr_refs,
+															  &outer_quals);
 	}
+	/* qualifiers that were pulled up from the outer plan */
+	gpreagg->outer_quals = outer_quals;
+
 	/* XXX - gpupreagg_use_bulkload references outer plan */
 	gpreagg->outer_bulkload = gpupreagg_use_bulkload(gpreagg);
 
@@ -2311,8 +2380,8 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas)
 	pgstrom_data_store *pds = gpreagg->pds;
 	kern_data_store	   *kds = pds->kds;
 	kern_row_map	   *krowmap = KERN_GPUPREAGG_KROWMAP(&gpreagg->kern);
-	TupleTableSlot	   *slot = NULL;
 	TupleTableSlot	   *slot_in;
+	TupleTableSlot	   *slot_out = NULL;
 	cl_uint				row_index;
 	HeapTupleData		tuple;
 
@@ -2351,40 +2420,47 @@ retry:
 		/* reset per-tuple memory context */
 		ResetExprContext(econtext);
 
-		/* additional projection if bulk-load required */
+		/*
+		 * In case of bulk-loading mode, it may take additional projection
+		 * because slot_in has a record type of underlying scan node, thus
+		 * we need to translate this record into the form we expected.
+		 * If bulk_proj is valid, it implies our expected input record is
+		 * incompatible from the record type of underlying scan.
+		 */
 		if (gpas->outer_bulkload)
 		{
 			if (gpas->bulk_proj)
 			{
-				econtext->ecxt_outertuple = slot_in;
-				gpas->scan_slot = ExecProject(gpas->bulk_proj, &is_done);
+				ExprContext	*bulk_econtext = gpas->bulk_proj->pi_exprContext;
+
+				bulk_econtext->ecxt_scantuple = slot_in;
+				slot_in = ExecProject(gpas->bulk_proj, &is_done);
 				if (is_done == ExprEndResult)
 				{
-					slot = NULL;
+					slot_out = NULL;
 					goto retry;
 				}
-				slot_in = gpas->scan_slot;
 			}
 		}
 		/* put result tuple */
 		if (!projection)
 		{
-			slot = gpas->cps.ps.ps_ResultTupleSlot;
-			ExecCopySlot(slot, slot_in);
+			slot_out = gpas->cps.ps.ps_ResultTupleSlot;
+			ExecCopySlot(slot_out, slot_in);
 		}
 		else
 		{
 			econtext->ecxt_outertuple = slot_in;
-			slot = ExecProject(projection, &is_done);
+			slot_out = ExecProject(projection, &is_done);
 			if (is_done == ExprEndResult)
 			{
-				slot = NULL;
+				slot_out = NULL;
 				goto retry;
 			}
 			gpas->cps.ps.ps_TupFromTlist = (is_done == ExprMultipleResult);
 		}
 	}
-	return slot;
+	return slot_out;
 }
 
 static TupleTableSlot *
@@ -2608,10 +2684,18 @@ static void
 gpupreagg_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
+	GpuPreAggPlan  *gpreagg = (GpuPreAggPlan *) gpas->cps.ps.plan;
 
 	ExplainPropertyText("Bulkload",
 						gpas->outer_bulkload ? "On" : "Off", es);
 	show_device_kernel(gpas->dprog_key, es);
+	if (gpreagg->outer_quals != NIL)
+	{
+		show_scan_qual(gpreagg->outer_quals,
+					   "Device Filter", &gpas->cps.ps, ancestors, es);
+		show_instrumentation_count("Rows Removed by Device Fileter",
+                                   2, &gpas->cps.ps, es);
+	}
 	if (es->analyze && gpas->pfm.enabled)
 		pgstrom_perfmon_explain(&gpas->pfm, es);
 }
@@ -2635,6 +2719,13 @@ gpupreagg_textout_plan(StringInfo str, const CustomPlan *node)
 	for (i=0; i < plannode->numCols; i++)
 		appendStringInfo(str, " %u", plannode->grpColIdx[i]);
 	appendStringInfo(str, "]");
+
+	appendStringInfo(str, " :outer_bulkload %s",
+					 plannode->outer_bulkload ? "true" : "false");
+	appendStringInfo(str, " :num_groups %f", plannode->num_groups);
+
+	appendStringInfo(str, " :outer_quals %s",
+					 nodeToString(plannode->outer_quals));
 
 	appendStringInfo(str, " :kern_source ");
 	_outToken(str, plannode->kern_source);
@@ -2662,6 +2753,8 @@ gpupreagg_copy_plan(const CustomPlan *from)
 	newnode->numCols       = oldnode->numCols;
 	newnode->grpColIdx     = pmemcpy(oldnode->grpColIdx,
 									 sizeof(AttrNumber) * oldnode->numCols);
+	newnode->num_groups    = oldnode->num_groups;
+	newnode->outer_quals   = copyObject(oldnode->outer_quals);
 	newnode->kern_source   = pstrdup(oldnode->kern_source);
 	newnode->extra_flags   = oldnode->extra_flags;
 	newnode->used_params   = copyObject(oldnode->used_params);
@@ -3499,6 +3592,75 @@ clserv_launch_preagg_reduction(clstate_gpupreagg *clgpa, cl_uint nvalids)
 	return CL_SUCCESS;
 }
 
+/*
+ * bitonic_compute_workgroup_size
+ *
+ * Bitonic-sorting logic will compare and exchange items being located
+ * on distance of 2^N unit size. Its kernel entrypoint depends on the
+ * unit size that depends on maximum available local workgroup size
+ * for the kernel code. Because it depends on kernel resource consumption,
+ * we need to ask runtime the max available local workgroup size prior
+ * to the kernel enqueue.
+ */
+static cl_int
+bitonic_compute_workgroup_size(clstate_gpupreagg *clgpa,
+							   cl_uint nhalf,
+							   size_t *p_gwork_sz,
+							   size_t *p_lwork_sz)
+{
+	static struct {
+		const char *kern_name;
+		size_t		kern_lmem;
+	} kern_calls[] = {
+		{ "gpupreagg_bitonic_local", 2 * sizeof(cl_uint) },
+		{ "gpupreagg_bitonic_merge",     sizeof(cl_uint) },
+	};
+	size_t		least_sz = nhalf;
+	size_t		lwork_sz;
+	size_t		gwork_sz;
+	cl_kernel	kernel;
+	cl_int		i, rc;
+
+	for (i=0; i < lengthof(kern_calls); i++)
+	{
+		kernel = clCreateKernel(clgpa->program,
+								kern_calls[i].kern_name,
+								&rc);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+			return rc;
+		}
+
+		if(!clserv_compute_workgroup_size(&gwork_sz,
+										  &lwork_sz,
+										  kernel,
+										  clgpa->dindex,
+										  true,
+										  nhalf,
+										  kern_calls[i].kern_lmem))
+		{
+			clserv_log("failed on clserv_compute_workgroup_size");
+			clReleaseKernel(kernel);
+			return StromError_OpenCLInternal;
+		}
+		clReleaseKernel(kernel);
+
+		least_sz = Min(least_sz, lwork_sz);
+	}
+	/*
+	 * NOTE: Local workgroup size is the largest 2^N value less than or
+	 * equal to the least one of expected kernels.
+	 */
+	lwork_sz = 1UL << (get_next_log2(least_sz + 1) - 1);
+	gwork_sz = ((nhalf + lwork_sz - 1) / lwork_sz) * lwork_sz;
+
+	*p_lwork_sz = lwork_sz;
+	*p_gwork_sz = gwork_sz;
+
+	return CL_SUCCESS;
+}
+
 static void
 clserv_process_gpupreagg(pgstrom_message *message)
 {
@@ -3735,26 +3897,18 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	}
 	else if (nvalids > 0)
 	{
-		/*
-		 * FIXME: Here, we assume bitonic_sorting logic is restricted by
-		 * max local workgroup size, rather then local memory or register
-		 * consumption. So, it just references device's max workgroup size,
-		 * however, we need to care about these resource consumption also.
-		 */
-		const pgstrom_device_info *devinfo =
-			pgstrom_get_device_info(clgpa->dindex);
-		size_t max_lwork_sz    = devinfo->dev_max_work_item_sizes[0];
-		size_t max_lmem_sz     = devinfo->dev_local_mem_size;
-		size_t lmem_per_thread = 2 * sizeof(cl_int);
-		size_t nhalf           = (nvalids + 1) / 2;
+		size_t		nhalf = (nvalids + 1) / 2;
+		size_t		gwork_sz = 0;
+		size_t		lwork_sz = 0;
+		size_t		nsteps;
+		size_t		launches;
+		size_t		i, j;
 
-		size_t gwork_sz, lwork_sz, i, j, nsteps, launches;
-
-		lwork_sz = Min(nhalf, max_lwork_sz);
-		lwork_sz = Min(max_lwork_sz, max_lmem_sz/lmem_per_thread);
-		lwork_sz = 1 << get_next_log2(lwork_sz);
-
-		gwork_sz = ((nhalf + lwork_sz - 1) / lwork_sz) * lwork_sz;
+		rc = bitonic_compute_workgroup_size(clgpa, nhalf,
+											&gwork_sz,
+											&lwork_sz);
+		if (rc != CL_SUCCESS)
+			goto error;
 
 		nsteps   = get_next_log2(nhalf / lwork_sz) + 1;
 		launches = (nsteps + 1) * nsteps / 2 + nsteps + 1;
