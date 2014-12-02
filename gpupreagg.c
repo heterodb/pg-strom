@@ -443,11 +443,6 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 			 gpreagg->cplan.plan.plan_rows);
 	*p_startup_cost = dummy.startup_cost;
 	*p_total_cost = dummy.total_cost;
-
-	elog(INFO, "Agg cost = %.2f..%.2f nrows (%.0f => %.0f)",
-		 dummy.startup_cost, dummy.total_cost,
-		 outer_rows,
-		 gpreagg->cplan.plan.plan_rows);
 }
 
 /*
