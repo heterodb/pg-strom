@@ -219,7 +219,6 @@ pgstrom_startup_global_guc(void)
 	/* segment initialization */
 	memset(global_guc_values, 0, MAXALIGN(sizeof(*global_guc_values)));
 	SpinLockInit(&global_guc_values->lock);
-	global_guc_values->pgstrom_enabled_global;
 
 	/* add pg_strom.enabled_global parameter */
 	DefineCustomBoolVariable("pg_strom.enabled_global",
