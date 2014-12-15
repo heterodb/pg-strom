@@ -128,7 +128,7 @@ pgstrom_grafter_entrypoint(Query *parse,
 	else
 		result = standard_planner(parse, cursorOptions, boundParams);
 
-	if (pgstrom_enabled)
+	if (pgstrom_enabled())
 	{
 		List	   *sub_plans = NIL;
 		ListCell   *cell;

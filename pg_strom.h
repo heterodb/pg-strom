@@ -620,7 +620,7 @@ extern void __clserv_log(const char *funcname,
 /*
  * main.c
  */
-extern bool	pgstrom_enabled;
+extern bool	pgstrom_enabled(void);
 extern bool pgstrom_perfmon_enabled;
 extern int	pgstrom_chunk_size;
 extern int	pgstrom_max_async_chunks;

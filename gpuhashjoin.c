@@ -709,7 +709,7 @@ gpuhashjoin_add_path(PlannerInfo *root,
 							   hashclauses);
 
 	/* nothing to do, if either PG-Strom or GpuHashJoin is not enabled */
-	if (!pgstrom_enabled || !enable_gpuhashjoin)
+	if (!pgstrom_enabled() || !enable_gpuhashjoin)
 		return;
 
 	/*

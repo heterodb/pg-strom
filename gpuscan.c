@@ -181,7 +181,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		add_scan_path_next(root, baserel, rte);
 
 	/* nothing to do, if either PG-Strom or GpuScan is not enabled */
-	if (!pgstrom_enabled || !enable_gpuscan)
+	if (!pgstrom_enabled() || !enable_gpuscan)
 		return;
 
 	/* only base relation we can handle */

@@ -20,6 +20,8 @@
 #include "miscadmin.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
+#include "storage/ipc.h"
+#include "storage/shmem.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include <float.h>
@@ -31,7 +33,8 @@ PG_MODULE_MAGIC;
 /*
  * miscellaneous GUC parameters
  */
-bool	pgstrom_enabled;
+static bool	guc_pgstrom_enabled;
+static bool guc_pgstrom_enabled_global;
 bool	pgstrom_perfmon_enabled;
 bool	pgstrom_show_device_kernel;
 int		pgstrom_chunk_size;
@@ -43,6 +46,61 @@ double	pgstrom_gpu_setup_cost;
 double	pgstrom_gpu_operator_cost;
 double	pgstrom_gpu_tuple_cost;
 
+/*
+ * global_guc_values - segment for global GUC variables
+ *
+ * pg_strom.enabled_global turns on/off PG-Strom functionality of
+ * all the concurrent backend, for test/benchmark purpose mainly.
+ */
+static shmem_startup_hook_type shmem_startup_hook_next = NULL;
+static struct {
+	slock_t		lock;
+	bool		pgstrom_enabled_global;
+} *global_guc_values = NULL;
+
+/*
+ * wrapper of pg_strom.enabled and pg_strom.enabled_global configuration
+ */
+bool
+pgstrom_enabled(void)
+{
+	bool	rc = false;
+
+	if (guc_pgstrom_enabled)
+	{
+		SpinLockAcquire(&global_guc_values->lock);
+		rc = global_guc_values->pgstrom_enabled_global;
+		SpinLockRelease(&global_guc_values->lock);
+	}
+	return rc;
+}
+
+/*
+ * assign callback of pg_strom.enabled_global
+ */
+static void
+pg_strom_enabled_global_assign(bool newval, void *extra)
+{
+	SpinLockAcquire(&global_guc_values->lock);
+	global_guc_values->pgstrom_enabled_global = newval;
+	SpinLockRelease(&global_guc_values->lock);
+}
+
+/*
+ * show callback of pg_strom.enabled_global
+ */
+static const char *
+pg_strom_enabled_global_show(void)
+{
+	bool	rc;
+
+	SpinLockAcquire(&global_guc_values->lock);
+	rc = global_guc_values->pgstrom_enabled_global;
+	SpinLockRelease(&global_guc_values->lock);
+
+	return rc ? "on" : "off";
+}
+
 static void
 pgstrom_init_misc_guc(void)
 {
@@ -50,7 +108,7 @@ pgstrom_init_misc_guc(void)
 	DefineCustomBoolVariable("pg_strom.enabled",
 							 "Enables the planner's use of PG-Strom",
 							 NULL,
-							 &pgstrom_enabled,
+							 &guc_pgstrom_enabled,
 							 true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
@@ -140,6 +198,43 @@ pgstrom_init_misc_guc(void)
                              NULL, NULL, NULL);
 }
 
+/*
+ * pgstrom_startup_global_guc
+ *
+ * allocation of shared memory for global guc
+ */
+static void
+pgstrom_startup_global_guc(void)
+{
+	bool	found;
+
+	if (shmem_startup_hook_next)
+		(*shmem_startup_hook_next)();
+
+	global_guc_values = ShmemInitStruct("pg_strom: global_guc",
+										MAXALIGN(sizeof(*global_guc_values)),
+										&found);
+	Assert(!found);
+
+	/* segment initialization */
+	memset(global_guc_values, 0, MAXALIGN(sizeof(*global_guc_values)));
+	SpinLockInit(&global_guc_values->lock);
+	global_guc_values->pgstrom_enabled_global;
+
+	/* add pg_strom.enabled_global parameter */
+	DefineCustomBoolVariable("pg_strom.enabled_global",
+							 "Enables the planner's use of PG-Strom in global",
+							 NULL,
+							 &guc_pgstrom_enabled_global,
+							 true,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE |
+							 GUC_SUPERUSER_ONLY,
+							 NULL,
+							 pg_strom_enabled_global_assign,
+							 pg_strom_enabled_global_show);
+}
+
 void
 _PG_init(void)
 {
@@ -179,6 +274,11 @@ _PG_init(void)
 	pgstrom_init_misc_guc();
 	pgstrom_init_codegen();
 	pgstrom_init_grafter();
+
+	/* allocation of shared memory */
+	RequestAddinShmemSpace(MAXALIGN(sizeof(*global_guc_values)));
+	shmem_startup_hook_next = shmem_startup_hook;
+	shmem_startup_hook = pgstrom_startup_global_guc;
 }
 
 /*

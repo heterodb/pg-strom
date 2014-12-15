@@ -1948,7 +1948,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	codegen_context context;
 
 	/* nothing to do, if feature is turned off */
-	if (!pgstrom_enabled || !enable_gpupreagg)
+	if (!pgstrom_enabled() || !enable_gpupreagg)
 		return;
 
 	/* Try to construct target-list of both Agg and GpuPreAgg node.
