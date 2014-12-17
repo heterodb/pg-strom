@@ -24,6 +24,7 @@
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
+#include "executor/nodeAgg.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -298,13 +299,14 @@ aggfunc_lookup_by_oid(Oid aggfnoid)
 #define LOG2(x)		(log(x) / 0.693147180559945)
 
 static void
-cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
-			   List *agg_tlist, List *agg_quals,
-			   Cost *p_total_cost, Cost *p_startup_cost,
-			   Cost *p_total_sort, Cost *p_startup_sort)
+cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
+			   AggStrategy new_agg_strategy,
+			   List *gpupreagg_tlist,
+			   AggClauseCosts *agg_clause_costs,
+			   Plan *p_newcost_agg,
+			   Plan *p_newcost_sort,
+			   Plan *p_newcost_gpreagg)
 {
-	Plan	   *sort_plan = NULL;
-	Plan	   *outer_plan;
 	Cost		startup_cost;
 	Cost		run_cost;
 	Cost		comparison_cost;
@@ -315,17 +317,10 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 	double		rows_per_chunk;
 	double		num_chunks;
 	double		num_groups = Max(agg->plan.plan_rows, 1.0);
-	Path		dummy;
-	AggClauseCosts agg_costs;
 	ListCell   *cell;
+	Path		dummy;
 
-	outer_plan = outerPlan(agg);
-	if (IsA(outer_plan, Sort))
-	{
-		sort_plan = outer_plan;
-		outer_plan = outerPlan(sort_plan);
-	}
-
+	Assert(outer_plan != NULL);
 	/*
 	 * GpuPreAgg internally takes partial sort and aggregation
 	 * on GPU devices. It is a factor of additional calculation,
@@ -342,7 +337,7 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 	outer_width = outer_plan->plan_width;
 
 	/*
-	 * fixed cost to kick GPU feature
+	 * fixed cost to launch GPU feature
 	 */
 	startup_cost += pgstrom_gpu_setup_cost;
 
@@ -353,15 +348,15 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 		((double)((pgstrom_chunk_size << 20) / BLCKSZ)) *
 		((double)(BLCKSZ - MAXALIGN(SizeOfPageHeaderData))) /
         ((double)(sizeof(ItemIdData) +
-                  sizeof(HeapTupleHeaderData) + outer_width));
+				  MAXALIGN(sizeof(HeapTupleHeaderData) +
+						   outer_width)));
 	num_chunks = outer_rows / rows_per_chunk;
 	if (num_chunks < 1.0)
 		num_chunks = 1.0;
 
 	comparison_cost = 2.0 * pgstrom_gpu_operator_cost;
 	startup_cost += (comparison_cost *
-					 rows_per_chunk *
-					 LOG2(rows_per_chunk) *
+					 LOG2(rows_per_chunk * rows_per_chunk) *
 					 num_chunks);
 	run_cost += pgstrom_gpu_operator_cost * outer_rows;
 
@@ -370,7 +365,7 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 	 */
 	memset(&pagg_cost, 0, sizeof(QualCost));
 	pagg_width = 0;
-	foreach (cell, gpreagg->cplan.plan.targetlist)
+	foreach (cell, gpupreagg_tlist)
 	{
 		TargetEntry	   *tle = lfirst(cell);
 		QualCost		cost;
@@ -392,57 +387,54 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 	/*
 	 * set cost values on GpuPreAgg
 	 */
-	gpreagg->cplan.plan.startup_cost = startup_cost;
-	gpreagg->cplan.plan.total_cost = startup_cost + run_cost;
-	gpreagg->cplan.plan.plan_rows = num_groups * num_chunks;
-	gpreagg->cplan.plan.plan_width = pagg_width;
-	gpreagg->num_groups = num_groups;
+	p_newcost_gpreagg->startup_cost = startup_cost;
+	p_newcost_gpreagg->total_cost = startup_cost + run_cost;
+	p_newcost_gpreagg->plan_rows = num_groups * num_chunks;
+	p_newcost_gpreagg->plan_width = pagg_width;
 
 	/*
 	 * Update estimated sorting cost, if any.
-	 * Calculation logic is cost_sort() as built-in code doing.
 	 */
-	if (agg->aggstrategy == AGG_SORTED)
+	if (sort != NULL)
 	{
 		cost_sort(&dummy,
 				  NULL,		/* PlannerInfo is not referenced! */
-				  NIL, 		/* NIL is acceptable */
-				  gpreagg->cplan.plan.total_cost,
-				  gpreagg->cplan.plan.plan_rows,
-				  gpreagg->cplan.plan.plan_width,
+				  NIL,		/* NIL is acceptable */
+				  p_newcost_gpreagg->total_cost,
+				  p_newcost_gpreagg->plan_rows,
+				  p_newcost_gpreagg->plan_width,
 				  0.0,
 				  work_mem,
 				  -1.0);
-		*p_startup_sort = dummy.startup_cost;
-		*p_total_sort   = dummy.total_cost;
-		startup_cost    = dummy.startup_cost;
-		run_cost        = dummy.total_cost - dummy.startup_cost;
-	}
-	else
-	{
-		/* to avoid compiler warning */
-		*p_startup_sort = 0.0;
-		*p_total_sort   = 0.0;
+		p_newcost_sort->startup_cost = dummy.startup_cost;
+		p_newcost_sort->total_cost = dummy.total_cost;
+		p_newcost_sort->plan_rows = p_newcost_gpreagg->plan_rows;
+		p_newcost_sort->plan_width = p_newcost_gpreagg->plan_width;
+		/*
+		 * increase of startup_cost/run_cost according to the Sort
+		 * to be injected between Agg and GpuPreAgg.
+		 */
+		startup_cost = dummy.startup_cost;
+		run_cost     = dummy.total_cost - dummy.startup_cost;
 	}
 
 	/*
 	 * Update estimated aggregate cost.
 	 * Calculation logic is cost_agg() as built-in code doing.
 	 */
-	memset(&agg_costs, 0, sizeof(AggClauseCosts));
-	count_agg_clauses(NULL, (Node *) agg_tlist, &agg_costs);
-	count_agg_clauses(NULL, (Node *) agg_quals, &agg_costs);
 	cost_agg(&dummy,
 			 NULL,		/* PlannerInfo is not referenced! */
-			 agg->aggstrategy,
-			 &agg_costs,
+			 new_agg_strategy,
+			 agg_clause_costs,
 			 agg->numCols,
 			 (double) agg->numGroups,
 			 startup_cost,
 			 startup_cost + run_cost,
-			 gpreagg->cplan.plan.plan_rows);
-	*p_startup_cost = dummy.startup_cost;
-	*p_total_cost = dummy.total_cost;
+			 p_newcost_gpreagg->plan_rows);
+	p_newcost_agg->startup_cost = dummy.startup_cost;
+	p_newcost_agg->total_cost   = dummy.total_cost;
+	p_newcost_agg->plan_rows    = agg->plan.plan_rows;
+	p_newcost_agg->plan_width   = agg->plan.plan_width;
 }
 
 /*
@@ -1934,16 +1926,19 @@ void
 pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 {
 	GpuPreAggPlan  *gpreagg;
+	Sort		   *sort_node;
+	Plan		   *outer_node;
 	List		   *pre_tlist = NIL;
 	List		   *agg_quals = NIL;
 	List		   *agg_tlist = NIL;
 	Bitmapset	   *attr_refs = NULL;
 	List		   *outer_quals = NIL;
 	ListCell	   *cell;
-	Cost			startup_cost;
-	Cost			total_cost;
-	Cost			startup_sort;
-	Cost			total_sort;
+	AggStrategy		new_agg_strategy;
+	AggClauseCosts	agg_clause_costs;
+	Plan			newcost_agg;
+	Plan			newcost_sort;
+	Plan			newcost_gpreagg;
 	const char	   *kern_source;
 	codegen_context context;
 
@@ -1963,57 +1958,120 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		return;
 
 	/*
-	 * Try to construct a GpuPreAggPlan node.
-	 * If aggregate node contains any unsupported expression, we give up
-	 * to insert GpuPreAgg node.
+	 * cost estimation of aggregate clauses
+	 */
+	memset(&agg_clause_costs, 0, sizeof(AggClauseCosts));
+	count_agg_clauses(NULL, (Node *) agg_tlist, &agg_clause_costs);
+	count_agg_clauses(NULL, (Node *) agg_quals, &agg_clause_costs);
+
+	/* be compiler quiet */
+	memset(&newcost_agg,     0, sizeof(Plan));
+	memset(&newcost_sort,    0, sizeof(Plan));
+	memset(&newcost_gpreagg, 0, sizeof(Plan));
+
+	if (agg->aggstrategy != AGG_SORTED)
+	{
+		/*
+		 * If this aggregate strategy is either plain or hash, we don't
+		 * need to pay attention something complicated.
+		 * Just inject GpuPreAgg under the Agg node, because Agg does not
+		 * expect order of input stream.
+		 */
+		sort_node = NULL;
+		outer_node = gpuscan_try_replace_seqscan_plan(pstmt,
+													  outerPlan(agg),
+													  attr_refs,
+													  &outer_quals);
+		new_agg_strategy = agg->aggstrategy;
+	}
+	else if (IsA(outerPlan(agg), Sort))
+	{
+		/*
+		 * If this aggregation expects the input stream is already sorted
+		 * and Sort node is connected below, it makes sense to reduce
+		 * number of rows to be processed by Sort, not only Agg.
+		 * So, we try to inject GpuPreAgg prior to the Sort node.
+		 */
+		sort_node = (Sort *)outerPlan(agg);
+		outer_node = gpuscan_try_replace_seqscan_plan(pstmt,
+													  outerPlan(sort_node),
+													  attr_refs,
+													  &outer_quals);
+		new_agg_strategy = agg->aggstrategy;
+	}
+	else
+	{
+		Size	hashentrysize;
+
+		/*
+		 * Elsewhere, outer-plan of Agg is not Sort even though its strategy
+		 * is AGG_SORTED (it is likely index aware scan to ensure order of
+		 * input stream). In this case, we try to replace this Agg by
+		 * alternative Agg with AGG_HASHED strategy that takes underlying
+		 * GpuPreAgg node.
+		 */
+		sort_node = NULL;
+		outer_node = gpuscan_try_replace_seqscan_plan(pstmt,
+													  outerPlan(agg),
+													  attr_refs,
+													  &outer_quals);
+		new_agg_strategy = AGG_HASHED;
+
+		/*
+		 * NOTE: all the supported aggregate functions are available to
+		 * aggregate values with both of hashed and sorted basis.
+		 * So, we switch the strategy of Agg without checks.
+		 * This assumption may change in the future version, but not now.
+		 * All we need to check is over-consumption of local memory.
+		 * If estimated amount of local memory usage is larger than
+		 * work_mem, it is a case we should give up.
+		 * (See the logic in choose_hashed_grouping)
+		 */
+		hashentrysize = (MAXALIGN(sizeof(MinimalTupleData)) +
+						 MAXALIGN(agg->plan.plan_width) +
+						 agg_clause_costs.transitionSpace +
+						 hash_agg_entry_size(agg_clause_costs.numAggs));
+		if (hashentrysize * agg->plan.plan_rows > work_mem * 1024L)
+			return;
+	}
+	/* estimate cost if GpuPreAgg would be injected */
+	cost_gpupreagg(agg, sort_node, outer_node,
+				   new_agg_strategy,
+				   pre_tlist,
+				   &agg_clause_costs,
+				   &newcost_agg,
+				   &newcost_sort,
+				   &newcost_gpreagg);
+	/*
+	 * nothing to do, if GpuPreAgg will increase the cost for aggregation
+	 */
+	if (agg->plan.total_cost <= newcost_agg.total_cost)
+		return;
+
+	/*
+	 * OK, let's construct GpuPreAgg node then inject it.
 	 */
 	gpreagg = palloc0(sizeof(GpuPreAggPlan));
 	NodeSetTag(gpreagg, T_CustomPlan);
 	gpreagg->cplan.methods = &gpupreagg_plan_methods;
-	gpreagg->cplan.plan.targetlist = pre_tlist;
-	gpreagg->cplan.plan.qual = NIL;
-	gpreagg->numCols = agg->numCols;
+	gpreagg->cplan.plan.startup_cost = newcost_gpreagg.startup_cost;
+	gpreagg->cplan.plan.total_cost   = newcost_gpreagg.total_cost;
+	gpreagg->cplan.plan.plan_rows    = newcost_gpreagg.plan_rows;
+	gpreagg->cplan.plan.plan_width   = newcost_gpreagg.plan_width;
+	gpreagg->cplan.plan.targetlist   = pre_tlist;
+	gpreagg->cplan.plan.qual         = NIL;
+	gpreagg->numCols   = agg->numCols;
 	gpreagg->grpColIdx = pmemcpy(agg->grpColIdx,
 								 sizeof(AttrNumber) * agg->numCols);
-	if (!IsA(outerPlan(agg), Sort))
-		outerPlan(gpreagg) = gpuscan_try_replace_seqscan_plan(pstmt,
-															  outerPlan(agg),
-															  attr_refs,
-															  &outer_quals);
-	else
-	{
-		Sort   *sort_plan = (Sort *) outerPlan(agg);
-		Plan   *outer_plan = outerPlan(sort_plan);
-
-		outerPlan(gpreagg) = gpuscan_try_replace_seqscan_plan(pstmt,
-															  outer_plan,
-															  attr_refs,
-															  &outer_quals);
-	}
-	/* qualifiers that were pulled up from the outer plan */
+	outerPlan(gpreagg) = outer_node;
+	/* qualifiers pulled-up from outer scan, if any */
 	gpreagg->outer_quals = outer_quals;
-
-	/* XXX - gpupreagg_use_bulkload references outer plan */
+	/* check whether the bulk-load is supported, or not */
 	gpreagg->outer_bulkload = gpupreagg_use_bulkload(gpreagg);
 
 	/*
-	 * Cost estimation of Aggregate node if GpuPreAgg is injected.
-	 * Then, compare the two cases. If partial aggregate does not
-	 * help the overall aggregation, nothing to do. Elsewhere, we
-	 * inject a GpuPreAgg node under the Agg (or Sort) node to
-	 * reduce number of rows to be processed.
-	 */
-	cost_gpupreagg(agg, gpreagg,
-				   agg_tlist, agg_quals,
-				   &startup_cost, &total_cost,
-				   &startup_sort, &total_sort);
-
-	if (agg->plan.total_cost < total_cost)
-		return;
-
-	/*
-	 * construction of kernel code, according to the above query
-	 * rewrites.
+	 * construction of the kernel code according to the target-list
+	 * and qualifiers (pulled-up from outer plan).
 	 */
 	kern_source = gpupreagg_codegen(gpreagg, &context);
 	gpreagg->kern_source = kern_source;
@@ -2035,25 +2093,27 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 						   FirstLowInvalidHeapAttributeNumber);
 	}
 
-	/* OK, inject it */
-	agg->plan.startup_cost = startup_cost;
-	agg->plan.total_cost = total_cost;
-	agg->plan.targetlist = agg_tlist;
-	agg->plan.qual = agg_quals;
-
-	if (!IsA(outerPlan(agg), Sort))
+	/*
+	 * OK, let's inject GpuPreAgg and update the cost values.
+	 */
+	if (!sort_node)
 		outerPlan(agg) = &gpreagg->cplan.plan;
 	else
 	{
-		Sort   *sort_plan = (Sort *) outerPlan(agg);
-
-		sort_plan->plan.startup_cost = startup_sort;
-		sort_plan->plan.total_cost = total_sort;
-		sort_plan->plan.plan_rows = gpreagg->cplan.plan.plan_rows;
-		sort_plan->plan.plan_width = gpreagg->cplan.plan.plan_width;
-		sort_plan->plan.targetlist = copyObject(pre_tlist);
-		outerPlan(sort_plan) = &gpreagg->cplan.plan;
+		sort_node->plan.startup_cost = newcost_sort.startup_cost;
+		sort_node->plan.total_cost   = newcost_sort.total_cost;
+		sort_node->plan.plan_rows    = newcost_sort.plan_rows;
+		sort_node->plan.plan_width   = newcost_sort.plan_width;
+		sort_node->plan.targetlist   = copyObject(pre_tlist);
+		outerPlan(sort_node) = &gpreagg->cplan.plan;
 	}
+	agg->plan.startup_cost = newcost_agg.startup_cost;
+	agg->plan.total_cost   = newcost_agg.total_cost;
+	agg->plan.plan_rows    = newcost_agg.plan_rows;
+	agg->plan.plan_width   = newcost_agg.plan_width;
+	agg->plan.targetlist = agg_tlist;
+	agg->plan.qual = agg_quals;
+	agg->aggstrategy = new_agg_strategy;
 }
 
 static CustomPlanState *
