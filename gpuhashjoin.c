@@ -2545,7 +2545,7 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs,
 	//tupdesc = ghjs->pscan_wider_slot->tts_tupleDescriptor;
 	tupdesc = ghjs->pscan_slot->tts_tupleDescriptor;
 	if (result_format == KDS_FORMAT_TUPSLOT)
-		pds_dest = pgstrom_create_data_store_tupslot(tupdesc, nrooms);
+		pds_dest = pgstrom_create_data_store_tupslot(tupdesc, nrooms, false);
 	else if (result_format == KDS_FORMAT_ROW_FLAT)
 	{
 		int		plan_width = ghjs->cps.ps.plan->plan_width;
