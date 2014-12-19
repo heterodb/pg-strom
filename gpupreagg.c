@@ -87,6 +87,7 @@ typedef struct
 	pgstrom_gpupreagg  *curr_chunk;
 	cl_uint			curr_index;
 	bool			curr_recheck;
+	cl_uint			num_rechecks;
 	cl_uint			num_running;
 	dlist_head		ready_chunks;
 
@@ -2294,6 +2295,7 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 	gpas->curr_chunk = NULL;
 	gpas->curr_index = 0;
 	gpas->curr_recheck = false;
+	gpas->num_rechecks = 0;
 	dlist_init(&gpas->ready_chunks);
 
 	/*
@@ -2729,7 +2731,10 @@ gpupreagg_exec(CustomPlanState *node)
 		if (gpreagg->msg.errcode == StromError_Success)
 			gpas->curr_recheck = false;
 		else if (gpreagg->msg.errcode == StromError_CpuReCheck)
+		{
 			gpas->curr_recheck = true;	/* fallback by CPU */
+			gpas->num_rechecks++;
+		}
 		else if (gpreagg->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
 		{
 			const char *buildlog
@@ -2762,6 +2767,11 @@ gpupreagg_end(CustomPlanState *node)
 {
 	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
 	pgstrom_message	   *msg;
+
+	/* Debug message if needed */
+	if (gpas->num_rechecks > 0)
+		elog(NOTICE, "GpuPreAgg: %u chunks were re-checked by CPU",
+			 gpas->num_rechecks);
 
 	/* Clean up strom objects */
 	if (gpas->curr_chunk)
