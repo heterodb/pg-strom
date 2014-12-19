@@ -46,6 +46,7 @@
 
 static CustomPlanMethods		gpupreagg_plan_methods;
 static bool						enable_gpupreagg;
+static bool						debug_force_gpupreagg;
 
 typedef struct
 {
@@ -2099,7 +2100,12 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		if (hashentrysize * agg->plan.plan_rows > work_mem * 1024L)
 			return;
 	}
-	/* estimate cost if GpuPreAgg would be injected */
+
+	/*
+	 * Estimate the cost if GpuPreAgg would be injected, and determine
+	 * which plan is cheaper, unless pg_strom.debug_force_gpupreagg is
+	 * not turned on.
+	 */
 	cost_gpupreagg(agg, sort_node, outer_node,
 				   new_agg_strategy,
 				   pre_tlist,
@@ -2107,10 +2113,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 				   &newcost_agg,
 				   &newcost_sort,
 				   &newcost_gpreagg);
-	/*
-	 * nothing to do, if GpuPreAgg will increase the cost for aggregation
-	 */
-	if (agg->plan.total_cost <= newcost_agg.total_cost)
+	if (!debug_force_gpupreagg &&
+		agg->plan.total_cost <= newcost_agg.total_cost)
 		return;
 
 	/*
@@ -2928,6 +2932,15 @@ pgstrom_init_gpupreagg(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	/* pg_strom.debug_force_gpupreagg */
+	DefineCustomBoolVariable("pg_strom.debug_force_gpupreagg",
+							 "Force GpuPreAgg regardless of the cost (debug)",
+							 NULL,
+							 &debug_force_gpupreagg,
+							 false,
+							 PGC_USERSET,
+                             GUC_NOT_IN_SAMPLE,
+                             NULL, NULL, NULL);
 
 	/* initialization of plan method table */
 	memset(&gpupreagg_plan_methods, 0, sizeof(CustomPlanMethods));
