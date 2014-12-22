@@ -73,6 +73,7 @@ typedef struct
 	TupleTableSlot *bulk_slot;
 	double			num_groups;		/* estimated number of groups */
 	double			ntups_per_page;	/* average number of tuples per page */
+	List		   *outer_quals;
 	bool			outer_done;
 	bool			outer_bulkload;
 	TupleTableSlot *outer_overflow;
@@ -2215,6 +2216,8 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 	gpas->cps.ps.targetlist = (List *)
 		ExecInitExpr((Expr *) node->plan.targetlist, &gpas->cps.ps);
 	gpas->cps.ps.qual = NIL;	/* never has qualifier here */
+	gpas->outer_quals = (List *)
+		ExecInitExpr((Expr *) gpreagg->outer_quals, &gpas->cps.ps);
 
 	/*
 	 * initialize child node
@@ -2549,6 +2552,18 @@ retry:
 
 		/* reset per-tuple memory context */
 		ResetExprContext(econtext);
+
+		/*
+		 * check qualifier being pulled up from the outer scan, if any.
+		 * outer_quals assumes fetched tuple is in ecxt_scantuple (because
+		 * it came from relation-scan), we need to adjust it.
+		 */
+		if (gpas->outer_quals != NIL)
+		{
+			econtext->ecxt_scantuple = slot_in;
+			if (!ExecQual(gpas->outer_quals, econtext, false))
+				goto retry;
+		}
 
 		/*
 		 * In case of bulk-loading mode, it may take additional projection
