@@ -292,10 +292,11 @@ typedef struct devfunc_info {
 	int32		func_flags;
 	Oid			func_namespace;
 	Oid		   *func_argtypes;
-	const char *func_name;	/* name of device function; same of SQL's func */
+	const char *func_name;	/* name of SQL function */
 	List	   *func_args;	/* list of devtype_info */
 	devtype_info *func_rettype;
-	const char *func_decl;	/* declaration of function */
+	const char *func_alias;	/* name of declared device function */
+	const char *func_decl;	/* declaration of device function */
 } devfunc_info;
 
 /*
@@ -441,6 +442,7 @@ extern void pgstrom_init_codegen(void);
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
+extern Datum pgstrom_fixup_kernel_numeric(Datum numeric_datum);
 extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
 									 pgstrom_data_store *pds,
 									 size_t row_index,
@@ -462,10 +464,12 @@ __pgstrom_create_data_store_row_flat(const char *filename, int lineno,
 										 (tupdesc),(length))
 extern pgstrom_data_store *
 __pgstrom_create_data_store_tupslot(const char *filename, int lineno,
-									TupleDesc tupdesc, cl_uint nrooms);
-#define pgstrom_create_data_store_tupslot(tupdesc,nrooms)		\
+									TupleDesc tupdesc, cl_uint nrooms,
+									bool internal_format);
+#define pgstrom_create_data_store_tupslot(tupdesc,nrooms,internal_format) \
 	__pgstrom_create_data_store_tupslot(__FILE__,__LINE__,		\
-										(tupdesc),(nrooms))
+										(tupdesc),(nrooms),		\
+										(internal_format))
 extern pgstrom_data_store *pgstrom_get_data_store(pgstrom_data_store *pds);
 extern void pgstrom_put_data_store(pgstrom_data_store *pds);
 extern int pgstrom_data_store_insert_block(pgstrom_data_store *pds,
@@ -544,6 +548,8 @@ extern Datum gpupreagg_psum_int(PG_FUNCTION_ARGS);
 extern Datum gpupreagg_psum_float4(PG_FUNCTION_ARGS);
 extern Datum gpupreagg_psum_float8(PG_FUNCTION_ARGS);
 extern Datum gpupreagg_psum_x2_float(PG_FUNCTION_ARGS);
+extern Datum gpupreagg_psum_numeric(PG_FUNCTION_ARGS);
+extern Datum gpupreagg_psum_x2_numeric(PG_FUNCTION_ARGS);
 extern Datum gpupreagg_corr_psum_x(PG_FUNCTION_ARGS);
 extern Datum gpupreagg_corr_psum_y(PG_FUNCTION_ARGS);
 extern Datum gpupreagg_corr_psum_x2(PG_FUNCTION_ARGS);
@@ -553,7 +559,8 @@ extern Datum gpupreagg_corr_psum_xy(PG_FUNCTION_ARGS);
 extern Datum pgstrom_avg_int8_accum(PG_FUNCTION_ARGS);
 extern Datum pgstrom_sum_int8_accum(PG_FUNCTION_ARGS);
 extern Datum pgstrom_sum_int8_final(PG_FUNCTION_ARGS);
-extern Datum pgstrom_avg_numeric_accum(PG_FUNCTION_ARGS);
+extern Datum pgstrom_int8_avg_accum(PG_FUNCTION_ARGS);
+extern Datum pgstrom_numeric_avg_accum(PG_FUNCTION_ARGS);
 extern Datum pgstrom_sum_float8_accum(PG_FUNCTION_ARGS);
 extern Datum pgstrom_variance_float8_accum(PG_FUNCTION_ARGS);
 extern Datum pgstrom_covariance_float8_accum(PG_FUNCTION_ARGS);
@@ -620,7 +627,7 @@ extern void __clserv_log(const char *funcname,
 /*
  * main.c
  */
-extern bool	pgstrom_enabled;
+extern bool	pgstrom_enabled(void);
 extern bool pgstrom_perfmon_enabled;
 extern int	pgstrom_chunk_size;
 extern int	pgstrom_max_async_chunks;

@@ -19,6 +19,7 @@
 #include "postgres.h"
 #include "access/relscan.h"
 #include "access/sysattr.h"
+#include "catalog/pg_type.h"
 #include "miscadmin.h"
 #include "port.h"
 #include "storage/bufmgr.h"
@@ -28,6 +29,7 @@
 #include "utils/rel.h"
 #include "utils/tqual.h"
 #include "pg_strom.h"
+#include "opencl_numeric.h"
 
 /*
  * pgstrom_create_param_buffer
@@ -143,6 +145,25 @@ pgstrom_create_kern_parambuf(List *used_params,
 	kpbuf->nparams = nparams;
 
 	return kpbuf;
+}
+
+Datum
+pgstrom_fixup_kernel_numeric(Datum datum)
+{
+	cl_ulong	numeric_value = (cl_ulong) datum;
+	bool		sign = PG_NUMERIC_SIGN(numeric_value);
+	int			expo = PG_NUMERIC_EXPONENT(numeric_value);
+	cl_ulong	mantissa = PG_NUMERIC_MANTISSA(numeric_value);
+	char		temp[100];
+
+	/* more effective implementation in the future :-) */
+	snprintf(temp, sizeof(temp), "%c%lue%d",
+			 sign ? '-' : '+', mantissa, expo);
+	//elog(INFO, "numeric %016lx -> %s", numeric_value, temp);
+	return DirectFunctionCall3(numeric_in,
+							   CStringGetDatum(temp),
+							   Int32GetDatum(0),
+							   Int32GetDatum(-1));
 }
 
 bool
@@ -294,12 +315,10 @@ init_kern_data_store(kern_data_store *kds,
 					 Size length,
 					 int format,
 					 cl_uint maxblocks,
-					 cl_uint nrooms)
+					 cl_uint nrooms,
+					 bool internal_format)
 {
-	
-	int		attcacheoff;
-	int		attalign;
-	int		i;
+	int		i, attcacheoff;
 
 	kds->hostptr = (hostptr_t) &kds->hostptr;
 	kds->length = length;
@@ -322,22 +341,41 @@ init_kern_data_store(kern_data_store *kds,
 	for (i=0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute attr = tupdesc->attrs[i];
+		bool	attbyval = attr->attbyval;
+		int		attalign = typealign_get_width(attr->attalign);
+		int		attlen   = attr->attlen;
+		int		attnum   = attr->attnum;
 
-		attalign = typealign_get_width(attr->attalign);
+		/*
+		 * If variable is expected to have special internal format
+		 * different from the host representation, we need to fixup
+		 * colmeta catalog also. Right now, only NUMERIC can have
+		 * special internal format.
+		 */
+		if (internal_format)
+		{
+			if (attr->atttypid == NUMERICOID)
+			{
+				attbyval = true;
+				attalign = sizeof(cl_ulong);
+				attlen   = sizeof(cl_ulong);
+			}
+		}
+
 		if (attcacheoff > 0)
 		{
-			if (attr->attlen > 0)
+			if (attlen > 0)
 				attcacheoff = TYPEALIGN(attalign, attcacheoff);
 			else
 				attcacheoff = -1;	/* no more shortcut any more */
 		}
-		kds->colmeta[i].attbyval = attr->attbyval;
+		kds->colmeta[i].attbyval = attbyval;
 		kds->colmeta[i].attalign = attalign;
-		kds->colmeta[i].attlen = attr->attlen;
-		kds->colmeta[i].attnum = attr->attnum;
+		kds->colmeta[i].attlen = attlen;
+		kds->colmeta[i].attnum = attnum;
 		kds->colmeta[i].attcacheoff = attcacheoff;
 		if (attcacheoff >= 0)
-			attcacheoff += attr->attlen;
+			attcacheoff += attlen;
 	}
 }
 
@@ -370,7 +408,7 @@ __pgstrom_create_data_store_row(const char *filename, int lineno,
 	if (!kds)
 		elog(ERROR, "out of shared memory");
 	init_kern_data_store(kds, tupdesc, required,
-						 KDS_FORMAT_ROW, maxblocks, nrooms);
+						 KDS_FORMAT_ROW, maxblocks, nrooms, false);
 	/* allocation of pgstrom_data_store */
 	pds = __pgstrom_shmem_alloc(filename,lineno,
 								sizeof(pgstrom_data_store));
@@ -429,7 +467,7 @@ __pgstrom_create_data_store_row_flat(const char *filename, int lineno,
 								  colmeta[tupdesc->natts])))
 		/ sizeof(kern_rowitem);
 	init_kern_data_store(kds, tupdesc, allocated,
-						 KDS_FORMAT_ROW_FLAT, 0, nrooms);
+						 KDS_FORMAT_ROW_FLAT, 0, nrooms, false);
 	/* allocation of pgstrom_data_store */
 	pds = __pgstrom_shmem_alloc(filename, lineno,
 								sizeof(pgstrom_data_store));
@@ -451,7 +489,8 @@ __pgstrom_create_data_store_row_flat(const char *filename, int lineno,
 
 pgstrom_data_store *
 __pgstrom_create_data_store_tupslot(const char *filename, int lineno,
-									TupleDesc tupdesc, cl_uint nrooms)
+									TupleDesc tupdesc, cl_uint nrooms,
+									bool internal_format)
 {
 	pgstrom_data_store *pds;
 	kern_data_store	   *kds;
@@ -467,7 +506,8 @@ __pgstrom_create_data_store_tupslot(const char *filename, int lineno,
 	if (!kds)
 		elog(ERROR, "out of shared memory");
 	init_kern_data_store(kds, tupdesc, required,
-						 KDS_FORMAT_TUPSLOT, 0, nrooms);
+						 KDS_FORMAT_TUPSLOT, 0, nrooms,
+						 internal_format);
 
 	/* pgstrom_data_store */
 	pds = __pgstrom_shmem_alloc(filename, lineno,

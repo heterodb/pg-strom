@@ -181,7 +181,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		add_scan_path_next(root, baserel, rte);
 
 	/* nothing to do, if either PG-Strom or GpuScan is not enabled */
-	if (!pgstrom_enabled || !enable_gpuscan)
+	if (!pgstrom_enabled() || !enable_gpuscan)
 		return;
 
 	/* only base relation we can handle */
@@ -398,8 +398,6 @@ gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt,
 
 	if (IsA(plan, SeqScan))
 	{
-		List	   *dev_clauses = NIL;
-
 		scanrelid = ((Scan *) plan)->scanrelid;
 		rte = rt_fetch(scanrelid, pstmt->rtable);
 		if (rte->rtekind != RTE_RELATION)
@@ -430,12 +428,8 @@ gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt,
 		 * device side. If host only expression is here, unavailable
 		 * to replace it by GpuScan.
 		 */
-		foreach (lc, plan->qual)
-		{
-			if (!pgstrom_codegen_available_expression(lfirst(lc)))
-				return plan;
-		}
-		dev_clauses = extract_actual_clauses(plan->qual, false);
+		if (!pgstrom_codegen_available_expression((Expr *)plan->qual))
+			return plan;
 
 		/*
 		 * OK, SeqScan can be replaced by GpuScan
@@ -455,7 +449,7 @@ gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt,
 			(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
 		gscan->used_params = NIL;
 		gscan->used_vars = NIL;
-		gscan->dev_clauses = copyObject(dev_clauses);
+		gscan->dev_clauses = copyObject(plan->qual);
 	}
 	else if (pgstrom_plan_is_gpuscan(plan))
 	{

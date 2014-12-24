@@ -24,6 +24,7 @@
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
+#include "executor/nodeAgg.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -37,6 +38,7 @@
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/numeric.h"
 #include "utils/syscache.h"
 #include <math.h>
 #include "pg_strom.h"
@@ -44,6 +46,7 @@
 
 static CustomPlanMethods		gpupreagg_plan_methods;
 static bool						enable_gpupreagg;
+static bool						debug_force_gpupreagg;
 
 typedef struct
 {
@@ -58,6 +61,7 @@ typedef struct
 	List		   *used_params;	/* referenced Const/Param */
 	Bitmapset	   *outer_attrefs;	/* bitmap of referenced outer attributes */
 	Bitmapset	   *tlist_attrefs;	/* bitmap of referenced tlist attributes */
+	bool			has_numeric;	/* if true, result contains numeric val */
 } GpuPreAggPlan;
 
 typedef struct
@@ -69,6 +73,7 @@ typedef struct
 	TupleTableSlot *bulk_slot;
 	double			num_groups;		/* estimated number of groups */
 	double			ntups_per_page;	/* average number of tuples per page */
+	List		   *outer_quals;
 	bool			outer_done;
 	bool			outer_bulkload;
 	TupleTableSlot *outer_overflow;
@@ -78,9 +83,12 @@ typedef struct
 	kern_parambuf  *kparams;
 	bool			needs_grouping;
 
+	bool			has_numeric;
+
 	pgstrom_gpupreagg  *curr_chunk;
 	cl_uint			curr_index;
 	bool			curr_recheck;
+	cl_uint			num_rechecks;
 	cl_uint			num_running;
 	dlist_head		ready_chunks;
 
@@ -121,112 +129,176 @@ typedef struct {
 	int			altfn_nargs;
 	Oid			altfn_argtypes[8];
 	int			altfn_argexprs[8];
+	int			altfn_flags;
 } aggfunc_catalog_t;
 static aggfunc_catalog_t  aggfunc_catalog[] = {
 	/* AVG(X) = EX_AVG(NROWS(), PSUM(X)) */
 	{ "avg",    1, {INT2OID},
 	  "s:avg",  2, {INT4OID, INT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}
+	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0
 	},
 	{ "avg",    1, {INT4OID},
 	  "s:avg",  2, {INT4OID, INT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}
+	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0
 	},
 	{ "avg",    1, {INT8OID},
 	  "s:avg_numeric",  2, {INT4OID, INT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}
+	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0
 	},
 	{ "avg",    1, {FLOAT4OID},
 	  "s:avg",  2, {INT4OID, FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}
+	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0
 	},
 	{ "avg",    1, {FLOAT8OID},
 	  "s:avg",  2, {INT4OID, FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}
+	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0
+	},
+	{ "avg",	1, {NUMERICOID},
+	  "s:avg",	2, {INT4OID, NUMERICOID},
+	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, DEVFUNC_NEEDS_NUMERIC
 	},
 	/* COUNT(*) = SUM(NROWS(*|X)) */
-	{ "count", 0, {},       "c:sum", 1, {INT4OID}, {ALTFUNC_EXPR_NROWS}},
-	{ "count", 1, {ANYOID}, "c:sum", 1, {INT4OID}, {ALTFUNC_EXPR_NROWS}},
+	{ "count", 0, {},
+	  "c:sum", 1, {INT4OID},
+	  {ALTFUNC_EXPR_NROWS}, 0},
+	{ "count", 1, {ANYOID},
+	  "c:sum", 1, {INT4OID},
+	  {ALTFUNC_EXPR_NROWS}, 0},
 	/* MAX(X) = MAX(PMAX(X)) */
-	{ "max", 1, {INT2OID},   "c:max", 1, {INT2OID},   {ALTFUNC_EXPR_PMAX}},
-	{ "max", 1, {INT4OID},   "c:max", 1, {INT4OID},   {ALTFUNC_EXPR_PMAX}},
-	{ "max", 1, {INT8OID},   "c:max", 1, {INT8OID},   {ALTFUNC_EXPR_PMAX}},
-	{ "max", 1, {FLOAT4OID}, "c:max", 1, {FLOAT4OID}, {ALTFUNC_EXPR_PMAX}},
-	{ "max", 1, {FLOAT8OID}, "c:max", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PMAX}},
+	{ "max", 1, {INT2OID},   "c:max", 1, {INT2OID},   {ALTFUNC_EXPR_PMAX}, 0},
+	{ "max", 1, {INT4OID},   "c:max", 1, {INT4OID},   {ALTFUNC_EXPR_PMAX}, 0},
+	{ "max", 1, {INT8OID},   "c:max", 1, {INT8OID},   {ALTFUNC_EXPR_PMAX}, 0},
+	{ "max", 1, {FLOAT4OID}, "c:max", 1, {FLOAT4OID}, {ALTFUNC_EXPR_PMAX}, 0},
+	{ "max", 1, {FLOAT8OID}, "c:max", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PMAX}, 0},
+	{ "max", 1, {NUMERICOID},"c:max", 1, {NUMERICOID},
+	  {ALTFUNC_EXPR_PMAX}, DEVFUNC_NEEDS_NUMERIC},
 	/* MIX(X) = MIN(PMIN(X)) */
-	{ "min", 1, {INT2OID},   "c:min", 1, {INT2OID},   {ALTFUNC_EXPR_PMIN}},
-	{ "min", 1, {INT4OID},   "c:min", 1, {INT4OID},   {ALTFUNC_EXPR_PMIN}},
-	{ "min", 1, {INT8OID},   "c:min", 1, {INT8OID},   {ALTFUNC_EXPR_PMIN}},
-	{ "min", 1, {FLOAT4OID}, "c:min", 1, {FLOAT4OID}, {ALTFUNC_EXPR_PMIN}},
-	{ "min", 1, {FLOAT8OID}, "c:min", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PMIN}},
+	{ "min", 1, {INT2OID},   "c:min", 1, {INT2OID},   {ALTFUNC_EXPR_PMIN}, 0},
+	{ "min", 1, {INT4OID},   "c:min", 1, {INT4OID},   {ALTFUNC_EXPR_PMIN}, 0},
+	{ "min", 1, {INT8OID},   "c:min", 1, {INT8OID},   {ALTFUNC_EXPR_PMIN}, 0},
+	{ "min", 1, {FLOAT4OID}, "c:min", 1, {FLOAT4OID}, {ALTFUNC_EXPR_PMIN}, 0},
+	{ "min", 1, {FLOAT8OID}, "c:min", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PMIN}, 0},
+	{ "min", 1, {NUMERICOID},"c:min", 1, {NUMERICOID},
+	  {ALTFUNC_EXPR_PMIN}, DEVFUNC_NEEDS_NUMERIC},
 	/* SUM(X) = SUM(PSUM(X)) */
-	{ "sum", 1, {INT2OID},   "s:sum", 1, {INT8OID},   {ALTFUNC_EXPR_PSUM}},
-	{ "sum", 1, {INT4OID},   "s:sum", 1, {INT8OID},   {ALTFUNC_EXPR_PSUM}},
-	{ "sum", 1, {FLOAT4OID}, "c:sum", 1, {FLOAT4OID}, {ALTFUNC_EXPR_PSUM}},
-	{ "sum", 1, {FLOAT8OID}, "c:sum", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PSUM}},
+	{ "sum", 1, {INT2OID},   "s:sum", 1, {INT8OID},   {ALTFUNC_EXPR_PSUM}, 0},
+	{ "sum", 1, {INT4OID},   "s:sum", 1, {INT8OID},   {ALTFUNC_EXPR_PSUM}, 0},
+	{ "sum", 1, {FLOAT4OID}, "c:sum", 1, {FLOAT4OID}, {ALTFUNC_EXPR_PSUM}, 0},
+	{ "sum", 1, {FLOAT8OID}, "c:sum", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PSUM}, 0},
+	{ "sum", 1, {NUMERICOID},"c:sum", 1, {NUMERICOID},
+	  {ALTFUNC_EXPR_PSUM}, DEVFUNC_NEEDS_NUMERIC},
 	/* STDDEV(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
 	{ "stddev", 1, {FLOAT4OID},
 	  "s:stddev", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}},
+	   ALTFUNC_EXPR_PSUM_X2}, 0
+	},
 	{ "stddev", 1, {FLOAT8OID},
 	  "s:stddev", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}},
+	   ALTFUNC_EXPR_PSUM_X2}, 0
+	},
+	{ "stddev", 1, {NUMERICOID},
+	  "s:stddev", 3, {INT4OID, NUMERICOID, NUMERICOID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
+	},
 	{ "stddev_pop", 1, {FLOAT4OID},
 	  "s:stddev_pop", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}},
+	   ALTFUNC_EXPR_PSUM_X2}, 0
+	},
 	{ "stddev_pop", 1, {FLOAT8OID},
 	  "s:stddev_pop", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}},
+	   ALTFUNC_EXPR_PSUM_X2}, 0
+	},
+	{ "stddev_pop", 1, {NUMERICOID},
+	  "s:stddev_pop", 3, {INT4OID, NUMERICOID, NUMERICOID},
+	  {ALTFUNC_EXPR_NROWS,
+       ALTFUNC_EXPR_PSUM,
+       ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
+	},
 	{ "stddev_samp", 1, {FLOAT4OID},
 	  "s:stddev_samp", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}},
+	   ALTFUNC_EXPR_PSUM_X2}, 0
+	},
 	{ "stddev_samp", 1, {FLOAT8OID},
 	  "s:stddev_samp", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}},
+	   ALTFUNC_EXPR_PSUM_X2}, 0
+	},
+	{ "stddev_samp", 1, {NUMERICOID},
+	  "s:stddev_samp", 3, {INT4OID, NUMERICOID, NUMERICOID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
+	},
 	/* VARIANCE(X) = PGSTROM.VARIANCE(NROWS(), PSUM(X),PSUM(X^2)) */
 	{ "variance", 1, {FLOAT4OID},
 	  "s:variance", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}},
+	   ALTFUNC_EXPR_PSUM_X2}, 0
+	},
 	{ "variance", 1, {FLOAT8OID},
 	  "s:variance", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}},
+	   ALTFUNC_EXPR_PSUM_X2}, 0
+	},
+	{ "variance", 1, {NUMERICOID},
+	  "s:variance", 3, {INT4OID, NUMERICOID, NUMERICOID},
+	  {ALTFUNC_EXPR_NROWS,
+       ALTFUNC_EXPR_PSUM,
+       ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
+	},
 	{ "var_pop", 1, {FLOAT4OID},
 	  "s:var_pop", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}},
+	   ALTFUNC_EXPR_PSUM_X2}, 0
+	},
 	{ "var_pop", 1, {FLOAT8OID},
 	  "s:var_pop", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}},
+	   ALTFUNC_EXPR_PSUM_X2}, 0
+	},
+	{ "var_pop", 1, {NUMERICOID},
+	  "s:var_pop", 3, {INT4OID, NUMERICOID, NUMERICOID},
+	  {ALTFUNC_EXPR_NROWS,
+       ALTFUNC_EXPR_PSUM,
+       ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
+	},
 	{ "var_samp", 1, {FLOAT4OID},
 	  "s:var_samp", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}},
+	   ALTFUNC_EXPR_PSUM_X2}, 0
+	},
 	{ "var_samp", 1, {FLOAT8OID},
 	  "s:var_samp", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}},
-	/* CORR(X,Y) = PGSTROM.CORR(NROWS(X,Y),
+	   ALTFUNC_EXPR_PSUM_X2}, 0
+	},
+	{ "var_samp", 1, {NUMERICOID},
+	  "s:var_samp", 3, {INT4OID, NUMERICOID, NUMERICOID},
+	  {ALTFUNC_EXPR_NROWS,
+       ALTFUNC_EXPR_PSUM,
+       ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
+	},
+	/*
+	 * CORR(X,Y) = PGSTROM.CORR(NROWS(X,Y),
 	 *                          PCOV_X(X,Y),  PCOV_Y(X,Y)
 	 *                          PCOV_X2(X,Y), PCOV_Y2(X,Y),
 	 *                          PCOV_XY(X,Y))
@@ -239,7 +311,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}},
+	   ALTFUNC_EXPR_PCOV_XY}, 0},
 	{ "covar_pop", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:covar_pop", 6,
 	  {INT4OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
@@ -248,7 +320,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}},
+	   ALTFUNC_EXPR_PCOV_XY}, 0},
 	{ "covar_samp", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:covar_samp", 6,
 	  {INT4OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
@@ -257,7 +329,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}},
+	   ALTFUNC_EXPR_PCOV_XY}, 0},
 };
 
 static const aggfunc_catalog_t *
@@ -298,13 +370,14 @@ aggfunc_lookup_by_oid(Oid aggfnoid)
 #define LOG2(x)		(log(x) / 0.693147180559945)
 
 static void
-cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
-			   List *agg_tlist, List *agg_quals,
-			   Cost *p_total_cost, Cost *p_startup_cost,
-			   Cost *p_total_sort, Cost *p_startup_sort)
+cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
+			   AggStrategy new_agg_strategy,
+			   List *gpupreagg_tlist,
+			   AggClauseCosts *agg_clause_costs,
+			   Plan *p_newcost_agg,
+			   Plan *p_newcost_sort,
+			   Plan *p_newcost_gpreagg)
 {
-	Plan	   *sort_plan = NULL;
-	Plan	   *outer_plan;
 	Cost		startup_cost;
 	Cost		run_cost;
 	Cost		comparison_cost;
@@ -315,17 +388,10 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 	double		rows_per_chunk;
 	double		num_chunks;
 	double		num_groups = Max(agg->plan.plan_rows, 1.0);
-	Path		dummy;
-	AggClauseCosts agg_costs;
 	ListCell   *cell;
+	Path		dummy;
 
-	outer_plan = outerPlan(agg);
-	if (IsA(outer_plan, Sort))
-	{
-		sort_plan = outer_plan;
-		outer_plan = outerPlan(sort_plan);
-	}
-
+	Assert(outer_plan != NULL);
 	/*
 	 * GpuPreAgg internally takes partial sort and aggregation
 	 * on GPU devices. It is a factor of additional calculation,
@@ -342,7 +408,7 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 	outer_width = outer_plan->plan_width;
 
 	/*
-	 * fixed cost to kick GPU feature
+	 * fixed cost to launch GPU feature
 	 */
 	startup_cost += pgstrom_gpu_setup_cost;
 
@@ -353,15 +419,15 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 		((double)((pgstrom_chunk_size << 20) / BLCKSZ)) *
 		((double)(BLCKSZ - MAXALIGN(SizeOfPageHeaderData))) /
         ((double)(sizeof(ItemIdData) +
-                  sizeof(HeapTupleHeaderData) + outer_width));
+				  MAXALIGN(sizeof(HeapTupleHeaderData) +
+						   outer_width)));
 	num_chunks = outer_rows / rows_per_chunk;
 	if (num_chunks < 1.0)
 		num_chunks = 1.0;
 
 	comparison_cost = 2.0 * pgstrom_gpu_operator_cost;
 	startup_cost += (comparison_cost *
-					 rows_per_chunk *
-					 LOG2(rows_per_chunk) *
+					 LOG2(rows_per_chunk * rows_per_chunk) *
 					 num_chunks);
 	run_cost += pgstrom_gpu_operator_cost * outer_rows;
 
@@ -370,7 +436,7 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 	 */
 	memset(&pagg_cost, 0, sizeof(QualCost));
 	pagg_width = 0;
-	foreach (cell, gpreagg->cplan.plan.targetlist)
+	foreach (cell, gpupreagg_tlist)
 	{
 		TargetEntry	   *tle = lfirst(cell);
 		QualCost		cost;
@@ -392,62 +458,54 @@ cost_gpupreagg(Agg *agg, GpuPreAggPlan *gpreagg,
 	/*
 	 * set cost values on GpuPreAgg
 	 */
-	gpreagg->cplan.plan.startup_cost = startup_cost;
-	gpreagg->cplan.plan.total_cost = startup_cost + run_cost;
-	gpreagg->cplan.plan.plan_rows = num_groups * num_chunks;
-	gpreagg->cplan.plan.plan_width = pagg_width;
-	gpreagg->num_groups = num_groups;
+	p_newcost_gpreagg->startup_cost = startup_cost;
+	p_newcost_gpreagg->total_cost = startup_cost + run_cost;
+	p_newcost_gpreagg->plan_rows = num_groups * num_chunks;
+	p_newcost_gpreagg->plan_width = pagg_width;
 
 	/*
 	 * Update estimated sorting cost, if any.
-	 * Calculation logic is cost_sort() as built-in code doing.
 	 */
-	if (agg->aggstrategy == AGG_SORTED)
+	if (sort != NULL)
 	{
 		cost_sort(&dummy,
 				  NULL,		/* PlannerInfo is not referenced! */
-				  NIL, 		/* NIL is acceptable */
-				  gpreagg->cplan.plan.total_cost,
-				  gpreagg->cplan.plan.plan_rows,
-				  gpreagg->cplan.plan.plan_width,
+				  NIL,		/* NIL is acceptable */
+				  p_newcost_gpreagg->total_cost,
+				  p_newcost_gpreagg->plan_rows,
+				  p_newcost_gpreagg->plan_width,
 				  0.0,
 				  work_mem,
 				  -1.0);
-		*p_startup_sort = dummy.startup_cost;
-		*p_total_sort   = dummy.total_cost;
-		startup_cost    = dummy.startup_cost;
-		run_cost        = dummy.total_cost - dummy.startup_cost;
-	}
-	else
-	{
-		/* to avoid compiler warning */
-		*p_startup_sort = 0.0;
-		*p_total_sort   = 0.0;
+		p_newcost_sort->startup_cost = dummy.startup_cost;
+		p_newcost_sort->total_cost = dummy.total_cost;
+		p_newcost_sort->plan_rows = p_newcost_gpreagg->plan_rows;
+		p_newcost_sort->plan_width = p_newcost_gpreagg->plan_width;
+		/*
+		 * increase of startup_cost/run_cost according to the Sort
+		 * to be injected between Agg and GpuPreAgg.
+		 */
+		startup_cost = dummy.startup_cost;
+		run_cost     = dummy.total_cost - dummy.startup_cost;
 	}
 
 	/*
 	 * Update estimated aggregate cost.
 	 * Calculation logic is cost_agg() as built-in code doing.
 	 */
-	memset(&agg_costs, 0, sizeof(AggClauseCosts));
-	count_agg_clauses(NULL, (Node *) agg_tlist, &agg_costs);
-	count_agg_clauses(NULL, (Node *) agg_quals, &agg_costs);
 	cost_agg(&dummy,
 			 NULL,		/* PlannerInfo is not referenced! */
-			 agg->aggstrategy,
-			 &agg_costs,
+			 new_agg_strategy,
+			 agg_clause_costs,
 			 agg->numCols,
 			 (double) agg->numGroups,
 			 startup_cost,
 			 startup_cost + run_cost,
-			 gpreagg->cplan.plan.plan_rows);
-	*p_startup_cost = dummy.startup_cost;
-	*p_total_cost = dummy.total_cost;
-
-	elog(INFO, "Agg cost = %.2f..%.2f nrows (%.0f => %.0f)",
-		 dummy.startup_cost, dummy.total_cost,
-		 outer_rows,
-		 gpreagg->cplan.plan.plan_rows);
+			 p_newcost_gpreagg->plan_rows);
+	p_newcost_agg->startup_cost = dummy.startup_cost;
+	p_newcost_agg->total_cost   = dummy.total_cost;
+	p_newcost_agg->plan_rows    = agg->plan.plan_rows;
+	p_newcost_agg->plan_width   = agg->plan.plan_width;
 }
 
 /*
@@ -658,7 +716,8 @@ make_altfunc_pcov_expr(Aggref *aggref, const char *func_name)
 		filter = (Expr *) makeBoolConst(true, false);
 	else
 		filter = copyObject(aggref->aggfilter);
-	return make_altfunc_expr(func_name, list_make3(filter, tle_1->expr, tle_2->expr));
+	return make_altfunc_expr(func_name,
+							 list_make3(filter, tle_1->expr, tle_2->expr));
 }
 
 /*
@@ -668,7 +727,7 @@ make_altfunc_pcov_expr(Aggref *aggref, const char *func_name)
  * partially aggregated results on the target-list of GpuPreAgg node.
  */
 static Aggref *
-make_gpupreagg_refnode(Aggref *aggref, List **prep_tlist)
+make_gpupreagg_refnode(Aggref *aggref, List **prep_tlist, int *extra_flags)
 {
 	const aggfunc_catalog_t *aggfn_cat;
 	const char *altfn_name;
@@ -694,6 +753,8 @@ make_gpupreagg_refnode(Aggref *aggref, List **prep_tlist)
 	Assert(!aggref->aggdirectargs &&
 		   !aggref->aggvariadic &&
 		   list_length(aggref->args) <= 2);
+	/* update extra flags */
+	*extra_flags |= aggfn_cat->altfn_flags;
 
 	/*
 	 * Expression node that is executed in the device kernel has to be
@@ -923,6 +984,7 @@ typedef struct
 	Agg		   *agg;
 	List	   *pre_tlist;
 	Bitmapset  *attr_refs;
+	int			extra_flags;
 	bool		gpupreagg_invalid;
 } gpupreagg_rewrite_context;
 
@@ -937,7 +999,9 @@ gpupreagg_rewrite_mutator(Node *node, gpupreagg_rewrite_context *context)
 		Aggref	   *orgagg = (Aggref *) node;
 		Aggref	   *altagg = NULL;
 
-		altagg = make_gpupreagg_refnode(orgagg, &context->pre_tlist);
+		altagg = make_gpupreagg_refnode(orgagg,
+										&context->pre_tlist,
+										&context->extra_flags);
 		if (!altagg)
 			context->gpupreagg_invalid = true;
 		return (Node *) altagg;
@@ -971,7 +1035,9 @@ gpupreagg_rewrite_expr(Agg *agg,
 					   List **p_agg_tlist,
 					   List **p_agg_quals,
 					   List **p_pre_tlist,
-					   Bitmapset **p_attr_refs)
+					   Bitmapset **p_attr_refs,
+					   int	*p_extra_flags,
+					   bool *p_has_numeric)
 {
 	gpupreagg_rewrite_context context;
 	Plan	   *outer_plan = outerPlan(agg);
@@ -979,6 +1045,7 @@ gpupreagg_rewrite_expr(Agg *agg,
 	List	   *agg_tlist = NIL;
 	List	   *agg_quals = NIL;
 	Bitmapset  *attr_refs = NULL;
+	bool		has_numeric = false;
 	ListCell   *cell;
 	int			i;
 
@@ -1021,6 +1088,9 @@ gpupreagg_rewrite_expr(Agg *agg,
 			if (!OidIsValid(dtype->type_cmpfunc) ||
 				!pgstrom_devfunc_lookup(dtype->type_cmpfunc))
 				return false;
+			/* check types that needs special treatment */
+			if (type_oid == NUMERICOID)
+				has_numeric = true;
 
 			var = (Expr *) makeVar(OUTER_VAR,
 								   tle->resno,
@@ -1057,6 +1127,7 @@ gpupreagg_rewrite_expr(Agg *agg,
 	context.agg = agg;
 	context.pre_tlist = pre_tlist;
 	context.attr_refs = attr_refs;
+	context.extra_flags = *p_extra_flags;
 
 	foreach (cell, agg->plan.targetlist)
 	{
@@ -1067,6 +1138,8 @@ gpupreagg_rewrite_expr(Agg *agg,
 														 &context);
 		if (context.gpupreagg_invalid)
 			return false;
+		if (exprType((Node *)newtle->expr) == NUMERICOID)
+			has_numeric = true;
 		agg_tlist = lappend(agg_tlist, newtle);
 	}
 
@@ -1079,12 +1152,16 @@ gpupreagg_rewrite_expr(Agg *agg,
 													 &context);
 		if (context.gpupreagg_invalid)
 			return false;
+		if (exprType((Node *)new_expr) == NUMERICOID)
+			has_numeric = true;
 		agg_quals = lappend(agg_quals, new_expr);
 	}
 	*p_pre_tlist = context.pre_tlist;
 	*p_agg_tlist = agg_tlist;
 	*p_agg_quals = agg_quals;
 	*p_attr_refs = context.attr_refs;
+	*p_extra_flags = context.extra_flags;
+	*p_has_numeric = has_numeric;
 	return true;
 }
 
@@ -1142,7 +1219,14 @@ gpupreagg_codegen_keycomp(GpuPreAggPlan *gpreagg, codegen_context *context)
 						 "  pg_%s_t ykeyval_%u;\n",
 						 dtype->type_name, resno,
 						 dtype->type_name, resno);
-		/* comparison logic */
+		/*
+		 * values comparison
+		 *
+		 * XXX - note that NUMERIC data type is already transformed to
+		 * the internal format on projection timing, so not a good idea
+		 * to use pg_numeric_vref() here, because it assumes Numeric in
+		 * varlena format.
+		 */
 		appendStringInfo(
 			&body,
 			"  xkeyval_%u = pg_%s_vref(kds,ktoast,errcode,%u,x_index);\n"
@@ -1211,20 +1295,22 @@ gpupreagg_codegen_keycomp(GpuPreAggPlan *gpreagg, codegen_context *context)
  *                 __local pagg_datum *newval);
  */
 static inline const char *
-typeoid_to_pagg_field_name(Oid type_oid)
+aggcalc_method_of_typeoid(Oid type_oid)
 {
 	switch (type_oid)
 	{
 		case INT2OID:
-			return "short_val";
+			return "SHORT";
 		case INT4OID:
-			return "int_val";
+			return "INT";
 		case INT8OID:
-			return "long_val";
+			return "LONG";
 		case FLOAT4OID:
-			return "float_val";
+			return "FLOAT";
 		case FLOAT8OID:
-			return "double_val";
+			return "DOUBLE";
+		case NUMERICOID:
+			return "NUMERIC";
 	}
 	elog(ERROR, "unexpected partial aggregate data-type");
 }
@@ -1260,7 +1346,6 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 		FuncExpr	   *func;
 		Oid				type_oid;
 		const char	   *func_name;
-		const char	   *field_name;
 
 		if (!IsA(tle->expr, FuncExpr))
 		{
@@ -1278,37 +1363,38 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 
 		if (strcmp(func_name, "nrows") == 0)
 		{
-			/* XXX - nrows() should not have NULL */
-			field_name = typeoid_to_pagg_field_name(INT4OID);
+			/* nrows() is always int4 */
 			appendStringInfo(
-				&body,
+                &body,
 				"  case %d:\n"
-				"    accum->%s += newval->%s;\n"
+				"    GPUPREAGG_AGGCALC_PSUM_%s(errcode,accum,newval);\n"
 				"    break;\n",
 				tle->resno - 1,
-				field_name, field_name);
+				aggcalc_method_of_typeoid(INT4OID));
 		}
-		else if (strcmp(func_name, "pmax") == 0 ||
-				 strcmp(func_name, "pmin") == 0)
+		else if (strcmp(func_name, "pmax") == 0)
 		{
 			Assert(list_length(func->args) == 1);
 			type_oid = exprType(linitial(func->args));
-			field_name = typeoid_to_pagg_field_name(type_oid);
 			appendStringInfo(
 				&body,
 				"  case %d:\n"
-				"    if (!newval->isnull)\n"
-				"    {\n"
-				"      if (accum->isnull)\n"
-				"        accum->%s = newval->%s;\n"
-				"      else\n"
-				"        accum->%s = %s(accum->%s, newval->%s);\n"
-				"      accum->isnull = false;\n"
-				"    }\n"
+				"    GPUPREAGG_AGGCALC_PMAX_%s(errcode,accum,newval);\n"
 				"    break;\n",
 				tle->resno - 1,
-				field_name, field_name,
-				field_name, func_name + 1, field_name, field_name);
+				aggcalc_method_of_typeoid(type_oid));
+		}
+		else if (strcmp(func_name, "pmin") == 0)
+		{
+			Assert(list_length(func->args) == 1);
+			type_oid = exprType(linitial(func->args));
+			appendStringInfo(
+				&body,
+				"  case %d:\n"
+				"    GPUPREAGG_AGGCALC_PMIN_%s(errcode,accum,newval);\n"
+				"    break;\n",
+				tle->resno - 1,
+				aggcalc_method_of_typeoid(type_oid));
 		}
 		else if (strcmp(func_name, "psum") == 0    ||
 				 strcmp(func_name, "psum_x2") == 0)
@@ -1316,31 +1402,13 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 			/* it should never be NULL */
 			Assert(list_length(func->args) == 1);
 			type_oid = exprType(linitial(func->args));
-			field_name = typeoid_to_pagg_field_name(type_oid);
 			appendStringInfo(
 				&body,
 				"  case %d:\n"
-				"    if (!accum->isnull)\n"
-				"    {\n"
-				"      if (!newval->isnull)\n"
-				"      {\n"
-				"        if (CHECK_OVERFLOW_%s(accum->%s, newval->%s))\n"
-				"          STROM_SET_ERROR(errcode, StromError_CpuReCheck);\n"
-				"        accum->%s += newval->%s;\n"
-				"      }\n"
-				"    }\n"
-				"    else if (!newval->isnull)\n"
-				"    {\n"
-				"      accum->%s = newval->%s;\n"
-				"      accum->isnull = false;\n"
-				"    }\n"
+				"    GPUPREAGG_AGGCALC_PSUM_%s(errcode,accum,newval);\n"
 				"    break;\n",
 				tle->resno - 1,
-				(type_oid == FLOAT4OID ||
-				 type_oid == FLOAT8OID) ? "FLOAT" : "INT",
-				field_name, field_name,
-				field_name, field_name,
-				field_name, field_name);
+				aggcalc_method_of_typeoid(type_oid));
 		}
 		else if (strcmp(func_name, "pcov_x") == 0  ||
 				 strcmp(func_name, "pcov_y") == 0  ||
@@ -1349,30 +1417,13 @@ gpupreagg_codegen_aggcalc(GpuPreAggPlan *gpreagg, codegen_context *context)
 				 strcmp(func_name, "pcov_xy") == 0)
 		{
 			/* covariance takes only float8 datatype */
-			/* it should never be NULL */
-			field_name = typeoid_to_pagg_field_name(FLOAT8OID);
 			appendStringInfo(
 				&body,
 				"  case %d:\n"
-				"    if (!accum->isnull)\n"
-				"    {\n"
-				"      if (!newval->isnull)\n"
-				"      {\n"
-				"        if (CHECK_OVERFLOW_FLOAT(accum->%s, newval->%s))\n"
-				"          STROM_SET_ERROR(errcode, StromError_CpuReCheck);\n"
-				"        accum->%s += newval->%s;\n"
-				"      }\n"
-				"    }\n"
-				"    else if (!newval->isnull)\n"
-				"    {\n"
-				"      accum->%s = newval->%s;\n"
-				"      accum->isnull = false;\n"
-				"    }\n"
+				"    GPUPREAGG_AGGCALC_PSUM_%s(errcode,accum,newval);\n"
 				"    break;\n",
 				tle->resno - 1,
-				field_name, field_name,
-				field_name, field_name,
-				field_name, field_name);
+				aggcalc_method_of_typeoid(FLOAT8OID));
 		}
 		else
 		{
@@ -1939,21 +1990,26 @@ void
 pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 {
 	GpuPreAggPlan  *gpreagg;
+	Sort		   *sort_node;
+	Plan		   *outer_node;
 	List		   *pre_tlist = NIL;
 	List		   *agg_quals = NIL;
 	List		   *agg_tlist = NIL;
 	Bitmapset	   *attr_refs = NULL;
 	List		   *outer_quals = NIL;
+	bool			has_numeric = false;
 	ListCell	   *cell;
-	Cost			startup_cost;
-	Cost			total_cost;
-	Cost			startup_sort;
-	Cost			total_sort;
+	AggStrategy		new_agg_strategy;
+	AggClauseCosts	agg_clause_costs;
+	Plan			newcost_agg;
+	Plan			newcost_sort;
+	Plan			newcost_gpreagg;
 	const char	   *kern_source;
+	int				extra_flags = DEVKERNEL_NEEDS_GPUPREAGG;
 	codegen_context context;
 
 	/* nothing to do, if feature is turned off */
-	if (!pgstrom_enabled || !enable_gpupreagg)
+	if (!pgstrom_enabled() || !enable_gpupreagg)
 		return;
 
 	/* Try to construct target-list of both Agg and GpuPreAgg node.
@@ -1964,67 +2020,135 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 								&agg_tlist,
 								&agg_quals,
 								&pre_tlist,
-								&attr_refs))
+								&attr_refs,
+								&extra_flags,
+								&has_numeric))
 		return;
 
 	/*
-	 * Try to construct a GpuPreAggPlan node.
-	 * If aggregate node contains any unsupported expression, we give up
-	 * to insert GpuPreAgg node.
+	 * cost estimation of aggregate clauses
+	 */
+	memset(&agg_clause_costs, 0, sizeof(AggClauseCosts));
+	count_agg_clauses(NULL, (Node *) agg_tlist, &agg_clause_costs);
+	count_agg_clauses(NULL, (Node *) agg_quals, &agg_clause_costs);
+
+	/* be compiler quiet */
+	memset(&newcost_agg,     0, sizeof(Plan));
+	memset(&newcost_sort,    0, sizeof(Plan));
+	memset(&newcost_gpreagg, 0, sizeof(Plan));
+
+	if (agg->aggstrategy != AGG_SORTED)
+	{
+		/*
+		 * If this aggregate strategy is either plain or hash, we don't
+		 * need to pay attention something complicated.
+		 * Just inject GpuPreAgg under the Agg node, because Agg does not
+		 * expect order of input stream.
+		 */
+		sort_node = NULL;
+		outer_node = gpuscan_try_replace_seqscan_plan(pstmt,
+													  outerPlan(agg),
+													  attr_refs,
+													  &outer_quals);
+		new_agg_strategy = agg->aggstrategy;
+	}
+	else if (IsA(outerPlan(agg), Sort))
+	{
+		/*
+		 * If this aggregation expects the input stream is already sorted
+		 * and Sort node is connected below, it makes sense to reduce
+		 * number of rows to be processed by Sort, not only Agg.
+		 * So, we try to inject GpuPreAgg prior to the Sort node.
+		 */
+		sort_node = (Sort *)outerPlan(agg);
+		outer_node = gpuscan_try_replace_seqscan_plan(pstmt,
+													  outerPlan(sort_node),
+													  attr_refs,
+													  &outer_quals);
+		new_agg_strategy = agg->aggstrategy;
+	}
+	else
+	{
+		Size	hashentrysize;
+
+		/*
+		 * Elsewhere, outer-plan of Agg is not Sort even though its strategy
+		 * is AGG_SORTED (it is likely index aware scan to ensure order of
+		 * input stream). In this case, we try to replace this Agg by
+		 * alternative Agg with AGG_HASHED strategy that takes underlying
+		 * GpuPreAgg node.
+		 */
+		sort_node = NULL;
+		outer_node = gpuscan_try_replace_seqscan_plan(pstmt,
+													  outerPlan(agg),
+													  attr_refs,
+													  &outer_quals);
+		new_agg_strategy = AGG_HASHED;
+
+		/*
+		 * NOTE: all the supported aggregate functions are available to
+		 * aggregate values with both of hashed and sorted basis.
+		 * So, we switch the strategy of Agg without checks.
+		 * This assumption may change in the future version, but not now.
+		 * All we need to check is over-consumption of local memory.
+		 * If estimated amount of local memory usage is larger than
+		 * work_mem, it is a case we should give up.
+		 * (See the logic in choose_hashed_grouping)
+		 */
+		hashentrysize = (MAXALIGN(sizeof(MinimalTupleData)) +
+						 MAXALIGN(agg->plan.plan_width) +
+						 agg_clause_costs.transitionSpace +
+						 hash_agg_entry_size(agg_clause_costs.numAggs));
+		if (hashentrysize * agg->plan.plan_rows > work_mem * 1024L)
+			return;
+	}
+
+	/*
+	 * Estimate the cost if GpuPreAgg would be injected, and determine
+	 * which plan is cheaper, unless pg_strom.debug_force_gpupreagg is
+	 * not turned on.
+	 */
+	cost_gpupreagg(agg, sort_node, outer_node,
+				   new_agg_strategy,
+				   pre_tlist,
+				   &agg_clause_costs,
+				   &newcost_agg,
+				   &newcost_sort,
+				   &newcost_gpreagg);
+	if (!debug_force_gpupreagg &&
+		agg->plan.total_cost <= newcost_agg.total_cost)
+		return;
+
+	/*
+	 * OK, let's construct GpuPreAgg node then inject it.
 	 */
 	gpreagg = palloc0(sizeof(GpuPreAggPlan));
 	NodeSetTag(gpreagg, T_CustomPlan);
 	gpreagg->cplan.methods = &gpupreagg_plan_methods;
-	gpreagg->cplan.plan.targetlist = pre_tlist;
-	gpreagg->cplan.plan.qual = NIL;
-	gpreagg->numCols = agg->numCols;
+	gpreagg->cplan.plan.startup_cost = newcost_gpreagg.startup_cost;
+	gpreagg->cplan.plan.total_cost   = newcost_gpreagg.total_cost;
+	gpreagg->cplan.plan.plan_rows    = newcost_gpreagg.plan_rows;
+	gpreagg->cplan.plan.plan_width   = newcost_gpreagg.plan_width;
+	gpreagg->cplan.plan.targetlist   = pre_tlist;
+	gpreagg->cplan.plan.qual         = NIL;
+	gpreagg->numCols   = agg->numCols;
 	gpreagg->grpColIdx = pmemcpy(agg->grpColIdx,
 								 sizeof(AttrNumber) * agg->numCols);
-	if (!IsA(outerPlan(agg), Sort))
-		outerPlan(gpreagg) = gpuscan_try_replace_seqscan_plan(pstmt,
-															  outerPlan(agg),
-															  attr_refs,
-															  &outer_quals);
-	else
-	{
-		Sort   *sort_plan = (Sort *) outerPlan(agg);
-		Plan   *outer_plan = outerPlan(sort_plan);
-
-		outerPlan(gpreagg) = gpuscan_try_replace_seqscan_plan(pstmt,
-															  outer_plan,
-															  attr_refs,
-															  &outer_quals);
-	}
-	/* qualifiers that were pulled up from the outer plan */
+	outerPlan(gpreagg) = outer_node;
+	/* qualifiers pulled-up from outer scan, if any */
 	gpreagg->outer_quals = outer_quals;
-
-	/* XXX - gpupreagg_use_bulkload references outer plan */
+	/* check whether the bulk-load is supported, or not */
 	gpreagg->outer_bulkload = gpupreagg_use_bulkload(gpreagg);
 
 	/*
-	 * Cost estimation of Aggregate node if GpuPreAgg is injected.
-	 * Then, compare the two cases. If partial aggregate does not
-	 * help the overall aggregation, nothing to do. Elsewhere, we
-	 * inject a GpuPreAgg node under the Agg (or Sort) node to
-	 * reduce number of rows to be processed.
-	 */
-	cost_gpupreagg(agg, gpreagg,
-				   agg_tlist, agg_quals,
-				   &startup_cost, &total_cost,
-				   &startup_sort, &total_sort);
-
-	if (agg->plan.total_cost < total_cost)
-		return;
-
-	/*
-	 * construction of kernel code, according to the above query
-	 * rewrites.
+	 * construction of the kernel code according to the target-list
+	 * and qualifiers (pulled-up from outer plan).
 	 */
 	kern_source = gpupreagg_codegen(gpreagg, &context);
 	gpreagg->kern_source = kern_source;
-	gpreagg->extra_flags = context.extra_flags |
-		DEVKERNEL_NEEDS_GPUPREAGG |
-		(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
+	gpreagg->extra_flags = extra_flags | context.extra_flags;
+	if (!devprog_enable_optimize)
+		gpreagg->extra_flags |= DEVKERNEL_DISABLE_OPTIMIZE;
 	gpreagg->used_params = context.used_params;
 	pull_varattnos((Node *)context.used_vars,
 				   OUTER_VAR,
@@ -2039,26 +2163,29 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 			bms_add_member(gpreagg->tlist_attrefs, tle->resno -
 						   FirstLowInvalidHeapAttributeNumber);
 	}
+	gpreagg->has_numeric = has_numeric;
 
-	/* OK, inject it */
-	agg->plan.startup_cost = startup_cost;
-	agg->plan.total_cost = total_cost;
-	agg->plan.targetlist = agg_tlist;
-	agg->plan.qual = agg_quals;
-
-	if (!IsA(outerPlan(agg), Sort))
+	/*
+	 * OK, let's inject GpuPreAgg and update the cost values.
+	 */
+	if (!sort_node)
 		outerPlan(agg) = &gpreagg->cplan.plan;
 	else
 	{
-		Sort   *sort_plan = (Sort *) outerPlan(agg);
-
-		sort_plan->plan.startup_cost = startup_sort;
-		sort_plan->plan.total_cost = total_sort;
-		sort_plan->plan.plan_rows = gpreagg->cplan.plan.plan_rows;
-		sort_plan->plan.plan_width = gpreagg->cplan.plan.plan_width;
-		sort_plan->plan.targetlist = copyObject(pre_tlist);
-		outerPlan(sort_plan) = &gpreagg->cplan.plan;
+		sort_node->plan.startup_cost = newcost_sort.startup_cost;
+		sort_node->plan.total_cost   = newcost_sort.total_cost;
+		sort_node->plan.plan_rows    = newcost_sort.plan_rows;
+		sort_node->plan.plan_width   = newcost_sort.plan_width;
+		sort_node->plan.targetlist   = copyObject(pre_tlist);
+		outerPlan(sort_node) = &gpreagg->cplan.plan;
 	}
+	agg->plan.startup_cost = newcost_agg.startup_cost;
+	agg->plan.total_cost   = newcost_agg.total_cost;
+	agg->plan.plan_rows    = newcost_agg.plan_rows;
+	agg->plan.plan_width   = newcost_agg.plan_width;
+	agg->plan.targetlist = agg_tlist;
+	agg->plan.qual = agg_quals;
+	agg->aggstrategy = new_agg_strategy;
 }
 
 static CustomPlanState *
@@ -2089,6 +2216,8 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 	gpas->cps.ps.targetlist = (List *)
 		ExecInitExpr((Expr *) node->plan.targetlist, &gpas->cps.ps);
 	gpas->cps.ps.qual = NIL;	/* never has qualifier here */
+	gpas->outer_quals = (List *)
+		ExecInitExpr((Expr *) gpreagg->outer_quals, &gpas->cps.ps);
 
 	/*
 	 * initialize child node
@@ -2165,9 +2294,11 @@ gpupreagg_begin(CustomPlan *node, EState *estate, int eflags)
 	 * init misc stuff
 	 */
 	gpas->needs_grouping = (gpreagg->numCols > 0);
+	gpas->has_numeric = gpreagg->has_numeric;
 	gpas->curr_chunk = NULL;
 	gpas->curr_index = 0;
 	gpas->curr_recheck = false;
+	gpas->num_rechecks = 0;
 	dlist_init(&gpas->ready_chunks);
 
 	/*
@@ -2274,9 +2405,11 @@ pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
 	 * Allocation of the result data-store
 	 */
 	tupdesc = gpas->cps.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
-	pds_dest = pgstrom_create_data_store_tupslot(tupdesc, (nvalids < 0
-														   ? nitems
-														   : nvalids));
+	pds_dest = pgstrom_create_data_store_tupslot(tupdesc,
+												 (nvalids < 0
+												  ? nitems
+												  : nvalids),
+												 gpas->has_numeric);
 	if (!pds_dest)
 		elog(ERROR, "out of shared memory");
 	gpupreagg->pds_dest = pds_dest;
@@ -2421,6 +2554,18 @@ retry:
 		ResetExprContext(econtext);
 
 		/*
+		 * check qualifier being pulled up from the outer scan, if any.
+		 * outer_quals assumes fetched tuple is in ecxt_scantuple (because
+		 * it came from relation-scan), we need to adjust it.
+		 */
+		if (gpas->outer_quals != NIL)
+		{
+			econtext->ecxt_scantuple = slot_in;
+			if (!ExecQual(gpas->outer_quals, econtext, false))
+				goto retry;
+		}
+
+		/*
 		 * In case of bulk-loading mode, it may take additional projection
 		 * because slot_in has a record type of underlying scan node, thus
 		 * we need to translate this record into the form we expected.
@@ -2484,6 +2629,31 @@ gpupreagg_next_tuple(GpuPreAggState *gpas)
 									  gpas->curr_index++,
 									  &tuple))
 			slot = NULL;
+		else if (gpas->has_numeric)
+		{
+			TupleDesc	tupdesc = slot->tts_tupleDescriptor;
+			int			i;
+
+			/*
+			 * We have to fixup numeric values from the in-kernel format
+			 * to PostgreSQL's internal format.
+			 */
+			slot_getallattrs(slot);
+			for (i=0; i < tupdesc->natts; i++)
+			{
+				Form_pg_attribute	attr = tupdesc->attrs[i];
+
+				if (attr->atttypid != NUMERICOID || slot->tts_isnull[i])
+					continue;	/* no need to fixup */
+
+				slot->tts_values[i] =
+					pgstrom_fixup_kernel_numeric(slot->tts_values[i]);
+			}
+			/* Now we expect GpuPreAgg takes KDS_FORMAT_TUPSLOT for result
+			 * buffer, it should not have tts_tuple to be fixed up too.
+			 */
+			Assert(!slot->tts_tuple);
+		}
 	}
 
 	if (gpas->pfm.enabled)
@@ -2576,7 +2746,10 @@ gpupreagg_exec(CustomPlanState *node)
 		if (gpreagg->msg.errcode == StromError_Success)
 			gpas->curr_recheck = false;
 		else if (gpreagg->msg.errcode == StromError_CpuReCheck)
+		{
 			gpas->curr_recheck = true;	/* fallback by CPU */
+			gpas->num_rechecks++;
+		}
 		else if (gpreagg->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
 		{
 			const char *buildlog
@@ -2609,6 +2782,11 @@ gpupreagg_end(CustomPlanState *node)
 {
 	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
 	pgstrom_message	   *msg;
+
+	/* Debug message if needed */
+	if (gpas->num_rechecks > 0)
+		elog(NOTICE, "GpuPreAgg: %u chunks were re-checked by CPU",
+			 gpas->num_rechecks);
 
 	/* Clean up strom objects */
 	if (gpas->curr_chunk)
@@ -2779,6 +2957,15 @@ pgstrom_init_gpupreagg(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	/* pg_strom.debug_force_gpupreagg */
+	DefineCustomBoolVariable("pg_strom.debug_force_gpupreagg",
+							 "Force GpuPreAgg regardless of the cost (debug)",
+							 NULL,
+							 &debug_force_gpupreagg,
+							 false,
+							 PGC_USERSET,
+                             GUC_NOT_IN_SAMPLE,
+                             NULL, NULL, NULL);
 
 	/* initialization of plan method table */
 	memset(&gpupreagg_plan_methods, 0, sizeof(CustomPlanMethods));
@@ -4130,6 +4317,29 @@ gpupreagg_psum_x2_float(PG_FUNCTION_ARGS)
 }
 PG_FUNCTION_INFO_V1(gpupreagg_psum_x2_float);
 
+Datum
+gpupreagg_psum_numeric(PG_FUNCTION_ARGS)
+{
+	Assert(PG_NARGS() == 1);
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+	PG_RETURN_NUMERIC(PG_GETARG_NUMERIC(0));
+}
+PG_FUNCTION_INFO_V1(gpupreagg_psum_numeric);
+
+Datum
+gpupreagg_psum_x2_numeric(PG_FUNCTION_ARGS)
+{
+	Assert(PG_NARGS() == 1);
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+
+	PG_RETURN_NUMERIC(DirectFunctionCall2(numeric_mul,
+										  PG_GETARG_DATUM(0),
+										  PG_GETARG_DATUM(0)));
+}
+PG_FUNCTION_INFO_V1(gpupreagg_psum_x2_numeric);
+
 /* gpupreagg_corr_psum - placeholder function that generates partial sum
  * of the arguments. _x2 generates square value of the input
  */
@@ -4330,7 +4540,7 @@ typedef struct NumericAggState
 } NumericAggState;
 
 Datum
-pgstrom_avg_numeric_accum(PG_FUNCTION_ARGS)
+pgstrom_int8_avg_accum(PG_FUNCTION_ARGS)
 {
 	int32	nrows = PG_GETARG_INT32(1);
 	Datum	datum;
@@ -4352,7 +4562,32 @@ pgstrom_avg_numeric_accum(PG_FUNCTION_ARGS)
 		state->N += nrows - 1;
 	PG_RETURN_POINTER(state);
 }
-PG_FUNCTION_INFO_V1(pgstrom_avg_numeric_accum);
+PG_FUNCTION_INFO_V1(pgstrom_int8_avg_accum);
+
+Datum
+pgstrom_numeric_avg_accum(PG_FUNCTION_ARGS)
+{
+	int32	nrows = PG_GETARG_INT32(1);
+	Datum	datum;
+	NumericAggState *state;
+
+	/* nrows should be a valid non-negative input */
+	if (PG_ARGISNULL(1) || nrows < 0)
+		elog(ERROR, "Bug? NULL or negative nrows was given");
+
+	/* adjust argument */
+	fcinfo->nargs		= 2;
+	fcinfo->arg[1]		= fcinfo->arg[2];
+	fcinfo->argnull[1]	= fcinfo->argnull[2];
+
+	datum = numeric_avg_accum(fcinfo);
+
+	state = (NumericAggState *) DatumGetPointer(datum);
+	if (state && nrows > 0)
+		state->N += nrows - 1;
+	PG_RETURN_POINTER(state);
+}
+PG_FUNCTION_INFO_V1(pgstrom_numeric_avg_accum);
 
 /* logic copied from utils/adt/float.c */
 static inline float8 *

@@ -307,44 +307,6 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 		count++;
 
 		/*
-		 * main logic for each GPU task (scan, sort, join)
-		 */
-
-		/* gpuscan device implementation */
-		if (dprog->extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
-		{
-			static size_t	gpuscan_code_length = 0;
-
-			if (!gpuscan_code_length)
-				gpuscan_code_length = strlen(pgstrom_opencl_gpuscan_code);
-			sources[count] = pgstrom_opencl_gpuscan_code;
-			lengths[count] = gpuscan_code_length;
-			count++;
-		}
-		/* hashjoin device implementation */
-		if (dprog->extra_flags & DEVKERNEL_NEEDS_HASHJOIN)
-		{
-			static size_t	hashjoin_code_length = 0;
-
-			if (!hashjoin_code_length)
-				hashjoin_code_length = strlen(pgstrom_opencl_hashjoin_code);
-			sources[count] = pgstrom_opencl_hashjoin_code;
-			lengths[count] = hashjoin_code_length;
-			count++;
-		}
-		/* gpupreagg device implementation */
-		if (dprog->extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
-		{
-			static size_t	gpupreagg_code_length = 0;
-
-			if (!gpupreagg_code_length)
-				gpupreagg_code_length = strlen(pgstrom_opencl_gpupreagg_code);
-			sources[count] = pgstrom_opencl_gpupreagg_code;
-			lengths[count] = gpupreagg_code_length;
-			count++;
-		}
-
-		/*
 		 * Supplemental OpenCL Libraries
 		 */
 
@@ -381,6 +343,44 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 				numeric_code_length = strlen(pgstrom_opencl_numeric_code);
 			sources[count] = pgstrom_opencl_numeric_code;
 			lengths[count] = numeric_code_length;
+			count++;
+		}
+
+		/*
+		 * main logic for each GPU task (scan, sort, join)
+		 */
+
+		/* gpuscan device implementation */
+		if (dprog->extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
+		{
+			static size_t	gpuscan_code_length = 0;
+
+			if (!gpuscan_code_length)
+				gpuscan_code_length = strlen(pgstrom_opencl_gpuscan_code);
+			sources[count] = pgstrom_opencl_gpuscan_code;
+			lengths[count] = gpuscan_code_length;
+			count++;
+		}
+		/* hashjoin device implementation */
+		if (dprog->extra_flags & DEVKERNEL_NEEDS_HASHJOIN)
+		{
+			static size_t	hashjoin_code_length = 0;
+
+			if (!hashjoin_code_length)
+				hashjoin_code_length = strlen(pgstrom_opencl_hashjoin_code);
+			sources[count] = pgstrom_opencl_hashjoin_code;
+			lengths[count] = hashjoin_code_length;
+			count++;
+		}
+		/* gpupreagg device implementation */
+		if (dprog->extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
+		{
+			static size_t	gpupreagg_code_length = 0;
+
+			if (!gpupreagg_code_length)
+				gpupreagg_code_length = strlen(pgstrom_opencl_gpupreagg_code);
+			sources[count] = pgstrom_opencl_gpupreagg_code;
+			lengths[count] = gpupreagg_code_length;
 			count++;
 		}
 
