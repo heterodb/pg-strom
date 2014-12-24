@@ -192,31 +192,31 @@ static void devfunc_setup_comp(devfunc_info *entry,
 
 static devfunc_catalog_t devfunc_common_catalog[] = {
 	/* Type cast functions */
-	{ "int2", 1, {INT4OID}, "c:", NULL },
-	{ "int2", 1, {INT8OID}, "c:", NULL },
-	{ "int2", 1, {FLOAT4OID}, "c:", NULL },
-	{ "int2", 1, {FLOAT8OID}, "c:", NULL },
+	{ "int2", 1, {INT4OID},   "ac:", NULL },
+	{ "int2", 1, {INT8OID},   "ac:", NULL },
+	{ "int2", 1, {FLOAT4OID}, "ac:", NULL },
+	{ "int2", 1, {FLOAT8OID}, "ac:", NULL },
 
-	{ "int4", 1, {BOOLOID}, "c:", NULL },
-	{ "int4", 1, {INT2OID}, "c:", NULL },
-	{ "int4", 1, {INT8OID}, "c:", NULL },
-	{ "int4", 1, {FLOAT4OID}, "c:", NULL },
-	{ "int4", 1, {FLOAT8OID}, "c:", NULL },
+	{ "int4", 1, {BOOLOID},   "ac:", NULL },
+	{ "int4", 1, {INT2OID},   "ac:", NULL },
+	{ "int4", 1, {INT8OID},   "ac:", NULL },
+	{ "int4", 1, {FLOAT4OID}, "ac:", NULL },
+	{ "int4", 1, {FLOAT8OID}, "ac:", NULL },
 
-	{ "int8", 1, {INT2OID}, "c:", NULL },
-	{ "int8", 1, {INT4OID}, "c:", NULL },
-	{ "int8", 1, {FLOAT4OID}, "c:", NULL },
-	{ "int8", 1, {FLOAT8OID}, "c:", NULL },
+	{ "int8", 1, {INT2OID},   "ac:", NULL },
+	{ "int8", 1, {INT4OID},   "ac:", NULL },
+	{ "int8", 1, {FLOAT4OID}, "ac:", NULL },
+	{ "int8", 1, {FLOAT8OID}, "ac:", NULL },
 
-	{ "float4", 1, {INT2OID}, "c:", NULL },
-	{ "float4", 1, {INT4OID}, "c:", NULL },
-	{ "float4", 1, {INT8OID}, "c:", NULL },
-	{ "float4", 1, {FLOAT8OID}, "c:", NULL },
+	{ "float4", 1, {INT2OID},   "ac:", NULL },
+	{ "float4", 1, {INT4OID},   "ac:", NULL },
+	{ "float4", 1, {INT8OID},   "ac:", NULL },
+	{ "float4", 1, {FLOAT8OID}, "ac:", NULL },
 
-	{ "float8", 1, {INT2OID}, "c:", NULL },
-	{ "float8", 1, {INT4OID}, "c:", NULL },
-	{ "float8", 1, {INT8OID}, "c:", NULL },
-	{ "float8", 1, {FLOAT4OID}, "c:", NULL },
+	{ "float8", 1, {INT2OID},   "ac:", NULL },
+	{ "float8", 1, {INT4OID},   "ac:", NULL },
+	{ "float8", 1, {INT8OID},   "ac:", NULL },
+	{ "float8", 1, {FLOAT4OID}, "ac:", NULL },
 
 	/* '+' : add operators */
 	{ "int2pl",  2, {INT2OID, INT2OID}, "b:+", NULL },
@@ -443,11 +443,11 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	/*
      * Mathmatical functions
      */
-	{ "abs", 1, {INT2OID}, "f:abs", NULL },
-	{ "abs", 1, {INT4OID}, "f:abs", NULL },
-	{ "abs", 1, {INT8OID}, "f:abs", NULL },
-	{ "abs", 1, {FLOAT4OID}, "f:fabs", NULL },
-	{ "abs", 1, {FLOAT8OID}, "f:fabs", NULL },
+	{ "abs", 1, {INT2OID}, "af:abs", NULL },
+	{ "abs", 1, {INT4OID}, "af:abs", NULL },
+	{ "abs", 1, {INT8OID}, "af:abs", NULL },
+	{ "abs", 1, {FLOAT4OID}, "af:fabs", NULL },
+	{ "abs", 1, {FLOAT8OID}, "af:fabs", NULL },
 	{ "cbrt",  1, {FLOAT4OID}, "f:cbrt", NULL },
 	{ "dcbrt", 1, {FLOAT8OID}, "f:cbrt", NULL },
 	{ "ceil", 1, {FLOAT8OID}, "f:ceil", NULL },
@@ -474,8 +474,8 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	/*
      * Trigonometric function
      */
-	{ "degrees", 1, {FLOAT4OID}, "f:degrees", NULL },
-	{ "degrees", 1, {FLOAT8OID}, "f:degrees", NULL },
+	{ "degrees", 1, {FLOAT4OID}, "af:degrees", NULL },
+	{ "degrees", 1, {FLOAT8OID}, "af:degrees", NULL },
 	{ "radians", 1, {FLOAT8OID}, "f:radians", NULL },
 	{ "acos",    1, {FLOAT8OID}, "f:acos", NULL },
 	{ "asin",    1, {FLOAT8OID}, "f:asin", NULL },
@@ -519,11 +519,11 @@ static devfunc_catalog_t devfunc_numericlib_catalog[] = {
 
 static devfunc_catalog_t devfunc_timelib_catalog[] = {
 	/* Type cast functions */
-	{ "date", 1, {DATEOID}, "c:", NULL },
+	{ "date", 1, {DATEOID}, "ac:", NULL },
 	{ "date", 1, {TIMESTAMPOID}, "F:timestamp_date", NULL },
 	{ "time", 1, {TIMESTAMPOID}, "F:timestamp_time", NULL },
-	{ "time", 1, {TIMEOID}, "c:", NULL },
-	{ "timestamp", 1, {TIMESTAMPOID}, "c:", NULL },
+	{ "time", 1, {TIMEOID}, "ac:", NULL },
+	{ "timestamp", 1, {TIMESTAMPOID}, "ac:", NULL },
 	{ "timestamp", 1, {DATEOID}, "F:date_timestamp", NULL },
 	/* timedata operators */
 	{ "date_pli", 2, {DATEOID, INT4OID}, "F:date_pli", NULL },
@@ -619,6 +619,7 @@ devfunc_setup_mul_oper(devfunc_info *entry, devfunc_catalog_t *procat)
 
 	Assert(procat->func_nargs == 2);
 	entry->func_name = pstrdup(procat->func_name);
+	entry->func_alias = entry->func_name;	/* never has alias */
 	appendStringInfo(
 		&str,
 		"static pg_%s_t\n"
@@ -631,7 +632,7 @@ devfunc_setup_mul_oper(devfunc_info *entry, devfunc_catalog_t *procat)
 		"  {\n"
 		"    result.value = (%s)(arg1.value * arg2.value);\n",
 		entry->func_rettype->type_name,
-		entry->func_name,
+		entry->func_alias,
         dtype1->type_name,
         dtype2->type_name,
         entry->func_rettype->type_name,
@@ -706,6 +707,7 @@ devfunc_setup_div_oper(devfunc_info *entry, devfunc_catalog_t *procat)
 
 	Assert(procat->func_nargs == 2);
 	entry->func_name = pstrdup(procat->func_name);
+	entry->func_alias = entry->func_name;	/* never has alias */
 	entry->func_decl
 		= psprintf("static pg_%s_t pgfn_%s"
 				   "(__private int *errcode,"
@@ -725,7 +727,7 @@ devfunc_setup_div_oper(devfunc_info *entry, devfunc_catalog_t *procat)
 				   "    return result;\n"
 				   "}\n",
 				   entry->func_rettype->type_name,
-				   entry->func_name,
+				   entry->func_alias,
 				   dtype1->type_name,
 				   dtype2->type_name,
 				   entry->func_rettype->type_name,
@@ -738,6 +740,7 @@ devfunc_setup_const(devfunc_info *entry, devfunc_catalog_t *procat)
 {
 	Assert(procat->func_nargs == 0);
 	entry->func_name = pstrdup(procat->func_name);
+	entry->func_alias = entry->func_name;	/* never has alias */
 	entry->func_decl
 		= psprintf("static pg_%s_t pgfn_%s(__private int *errcode)\n"
 				   "{\n"
@@ -747,7 +750,7 @@ devfunc_setup_const(devfunc_info *entry, devfunc_catalog_t *procat)
 				   "  return result;\n"
 				   "}\n",
 				   entry->func_rettype->type_name,
-				   entry->func_name,
+				   entry->func_alias,
 				   entry->func_rettype->type_name,
 				   procat->func_template);
 }
@@ -768,6 +771,7 @@ devfunc_setup_comp(devfunc_info *entry, devfunc_catalog_t *procat)
 	dtype2 = lsecond(entry->func_args);
 
 	entry->func_name = pstrdup(procat->func_name);
+	entry->func_alias = entry->func_name;	/* never has alias */
 	entry->func_decl
 		= psprintf("static pg_%s_t\n"
 				   "pgfn_%s(__private int *errcode,\n"
@@ -789,19 +793,24 @@ devfunc_setup_comp(devfunc_info *entry, devfunc_catalog_t *procat)
 				   "  return result;\n"
 				   "}\n",
 				   entry->func_rettype->type_name,
-				   entry->func_name,
+				   entry->func_alias,
 				   dtype1->type_name,
 				   dtype2->type_name,
 				   entry->func_rettype->type_name);
 }
 
 static void
-devfunc_setup_cast(devfunc_info *entry, devfunc_catalog_t *procat)
+devfunc_setup_cast(devfunc_info *entry, devfunc_catalog_t *procat, bool has_alias)
 {
 	devtype_info   *dtype = linitial(entry->func_args);
 
 	Assert(procat->func_nargs == 1);
 	entry->func_name = pstrdup(procat->func_name);
+	entry->func_alias = (!has_alias
+						 ? entry->func_name
+						 : psprintf("%s_%s",
+									dtype->type_name,
+									entry->func_rettype->type_name));
 	entry->func_decl
 		= psprintf("static pg_%s_t pgfn_%s"
 				   "(__private int *errcode, pg_%s_t arg)\n"
@@ -812,20 +821,28 @@ devfunc_setup_cast(devfunc_info *entry, devfunc_catalog_t *procat)
 				   "    return result;\n"
 				   "}\n",
 				   entry->func_rettype->type_name,
-				   entry->func_name,
+				   entry->func_alias,
 				   dtype->type_name,
 				   entry->func_rettype->type_name,
 				   entry->func_rettype->type_base);
 }
 
 static void
-devfunc_setup_oper_both(devfunc_info *entry, devfunc_catalog_t *procat)
+devfunc_setup_oper_both(devfunc_info *entry,
+						devfunc_catalog_t *procat,
+						bool has_alias)
 {
 	devtype_info   *dtype1 = linitial(entry->func_args);
 	devtype_info   *dtype2 = lsecond(entry->func_args);
 
 	Assert(procat->func_nargs == 2);
 	entry->func_name = pstrdup(procat->func_name);
+	entry->func_alias = (!has_alias
+						 ? entry->func_name
+						 : psprintf("%s_%s_%s",
+									entry->func_name,
+									dtype1->type_name,
+									dtype2->type_name));
 	entry->func_decl
 		= psprintf("static pg_%s_t pgfn_%s"
 				   "(__private int *errcode, pg_%s_t arg1, pg_%s_t arg2)\n"
@@ -836,7 +853,7 @@ devfunc_setup_oper_both(devfunc_info *entry, devfunc_catalog_t *procat)
 				   "    return result;\n"
 				   "}\n",
 				   entry->func_rettype->type_name,
-				   entry->func_name,
+				   entry->func_alias,
 				   dtype1->type_name,
 				   dtype2->type_name,
 				   entry->func_rettype->type_name,
@@ -845,13 +862,20 @@ devfunc_setup_oper_both(devfunc_info *entry, devfunc_catalog_t *procat)
 }
 
 static void
-devfunc_setup_oper_either(devfunc_info *entry, devfunc_catalog_t *procat)
+devfunc_setup_oper_either(devfunc_info *entry,
+						  devfunc_catalog_t *procat,
+						  bool has_alias)
 {
 	devtype_info   *dtype = linitial(entry->func_args);
 	const char	   *templ = procat->func_template;
 
 	Assert(procat->func_nargs == 1);
 	entry->func_name = pstrdup(procat->func_name);
+	entry->func_alias = (!has_alias
+						 ? entry->func_name
+						 : psprintf("%s_%s",
+									entry->func_name,
+									dtype->type_name));
 	entry->func_decl
 		= psprintf("static pg_%s_t pgfn_%s"
 				   "(__private int *errcode, pg_%s_t arg)\n"
@@ -862,7 +886,7 @@ devfunc_setup_oper_either(devfunc_info *entry, devfunc_catalog_t *procat)
 				   "    return result;\n"
 				   "}\n",
 				   entry->func_rettype->type_name,
-				   entry->func_name,
+				   entry->func_alias,
 				   dtype->type_name,
 				   entry->func_rettype->type_name,
 				   entry->func_rettype->type_base,
@@ -871,19 +895,36 @@ devfunc_setup_oper_either(devfunc_info *entry, devfunc_catalog_t *procat)
 }
 
 static void
-devfunc_setup_func(devfunc_info *entry, devfunc_catalog_t *procat)
+devfunc_setup_func_decl(devfunc_info *entry,
+						devfunc_catalog_t *procat, bool has_alias)
 {
 	StringInfoData	str;
 	ListCell	   *cell;
 	int				index;
-	const char	   *templ = procat->func_template;
+	const char	   *builtin_name = strchr(procat->func_template, ':') + 1;
+
+	initStringInfo(&str);
 
 	entry->func_name = pstrdup(procat->func_name);
+	if (!has_alias)
+		entry->func_alias = entry->func_name;
+	else
+	{
+		appendStringInfo(&str, "%s", entry->func_name);
+		foreach (cell, entry->func_args)
+		{
+			devtype_info   *dtype = lfirst(cell);
+
+			appendStringInfo(&str, "_%s", dtype->type_name);
+		}
+		entry->func_alias = pstrdup(str.data);
+	}
+
 	/* declaration */
-	initStringInfo(&str);
+	resetStringInfo(&str);
 	appendStringInfo(&str, "static pg_%s_t pgfn_%s(",
 					 entry->func_rettype->type_name,
-					 entry->func_name);
+					 entry->func_alias);
 	appendStringInfo(&str, "__private int *errcode");
 	index = 1;
 	foreach (cell, entry->func_args)
@@ -915,7 +956,7 @@ devfunc_setup_func(devfunc_info *entry, devfunc_catalog_t *procat)
 					 "    if (!result.isnull)\n"
 					 "        result.value = (%s) %s(",
 					 entry->func_rettype->type_base,
-					 templ + 2);
+					 builtin_name);
 	index = 1;
 	foreach (cell, entry->func_args)
 	{
@@ -927,6 +968,16 @@ devfunc_setup_func(devfunc_info *entry, devfunc_catalog_t *procat)
 					 "    return result;\n"
 					 "}\n");
 	entry->func_decl = str.data;
+}
+
+static void
+devfunc_setup_func_impl(devfunc_info *entry,
+						devfunc_catalog_t *procat, bool has_alias)
+{
+	entry->func_name = pstrdup(procat->func_name);
+	if (has_alias)
+		elog(ERROR, "Bug? implimented device function should not have alias");
+	entry->func_alias = entry->func_name;
 }
 
 static devfunc_info *
@@ -943,9 +994,11 @@ devfunc_setup_boolop(BoolExprType boolop, const char *fn_name, int fn_nargs)
 		entry->func_args = lappend(entry->func_args, dtype);
 	entry->func_rettype = dtype;
 	entry->func_name = pstrdup(fn_name);
+	entry->func_alias = entry->func_name;	/* never has alias */
+
 	appendStringInfo(&str, "static pg_%s_t pgfn_%s("
 					 "__private int *errcode",
-					 dtype->type_name, fn_name);
+					 dtype->type_name, entry->func_alias);
 	for (i=0; i < fn_nargs; i++)
 		appendStringInfo(&str, ", pg_%s_t arg%u",
 						 dtype->type_name, i+1);
@@ -1073,20 +1126,32 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 
 					if (procat->func_callback)
 						procat->func_callback(entry, procat);
-					else if (strncmp(procat->func_template, "c:", 2) == 0)
-						devfunc_setup_cast(entry, procat);
-					else if (strncmp(procat->func_template, "b:", 2) == 0)
-						devfunc_setup_oper_both(entry, procat);
-					else if (strncmp(procat->func_template, "l:", 2) == 0 ||
-							 strncmp(procat->func_template, "r:", 2) == 0)
-						devfunc_setup_oper_either(entry, procat);
-					else if (strncmp(procat->func_template, "f:", 2) == 0)
-						devfunc_setup_func(entry, procat);
-					else if (strncmp(procat->func_template, "F:", 2) == 0)
-						entry->func_name = pstrdup(procat->func_template + 2);
 					else
-						entry->func_flags = DEVINFO_IS_NEGATIVE;
+					{
+						const char *template = procat->func_template;
+						bool		has_alias = false;
 
+						/* needs an alias? */
+						if (*template == 'a')
+						{
+							has_alias = true;
+							template++;
+						}
+						if (strncmp(template, "c:", 2) == 0)
+							devfunc_setup_cast(entry, procat, has_alias);
+						else if (strncmp(template, "b:", 2) == 0)
+							devfunc_setup_oper_both(entry, procat, has_alias);
+						else if (strncmp(template, "l:", 2) == 0 ||
+								 strncmp(template, "r:", 2) == 0)
+							devfunc_setup_oper_either(entry, procat,
+													  has_alias);
+						else if (strncmp(template, "f:", 2) == 0)
+							devfunc_setup_func_decl(entry, procat, has_alias);
+						else if (strncmp(template, "F:", 2) == 0)
+							devfunc_setup_func_impl(entry, procat, has_alias);
+						else
+							entry->func_flags = DEVINFO_IS_NEGATIVE;
+					}
 					goto out;
 				}
 			}
@@ -1255,7 +1320,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		if (!func)
 			return false;
 		appendStringInfo(&context->str,
-						 "pgfn_%s(errcode", dfunc->func_name);
+						 "pgfn_%s(errcode", dfunc->func_alias);
 
 		foreach (cell, func->args)
 		{
@@ -1282,7 +1347,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		if (!dfunc)
 			return false;
 		appendStringInfo(&context->str,
-						 "pgfn_%s(errcode", dfunc->func_name);
+						 "pgfn_%s(errcode", dfunc->func_alias);
 
 		foreach (cell, op->args)
 		{
@@ -1411,7 +1476,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			context->extra_flags |= (dfunc->func_flags & DEVFUNC_INCL_FLAGS);
 
 			appendStringInfo(&context->str, "pgfn_%s(errcode",
-							 dfunc->func_name);
+							 dfunc->func_alias);
 			foreach (cell, b->args)
 			{
 				Assert(exprType(lfirst(cell)) == BOOLOID);
@@ -1461,7 +1526,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 				if (!dfunc)
 					return false;
 				appendStringInfo(&context->str,
-								 "EVAL(pgfn_%s(", dfunc->func_name);
+								 "EVAL(pgfn_%s(", dfunc->func_alias);
 				codegen_expression_walker((Node *) caseexpr->arg, context);
 				appendStringInfo(&context->str, ", ");
 				codegen_expression_walker((Node *) casewhen->expr, context);

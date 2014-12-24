@@ -292,10 +292,11 @@ typedef struct devfunc_info {
 	int32		func_flags;
 	Oid			func_namespace;
 	Oid		   *func_argtypes;
-	const char *func_name;	/* name of device function; same of SQL's func */
+	const char *func_name;	/* name of SQL function */
 	List	   *func_args;	/* list of devtype_info */
 	devtype_info *func_rettype;
-	const char *func_decl;	/* declaration of function */
+	const char *func_alias;	/* name of declared device function */
+	const char *func_decl;	/* declaration of device function */
 } devfunc_info;
 
 /*
