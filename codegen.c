@@ -1153,7 +1153,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			return false;
 
 		dfunc = pgstrom_devfunc_lookup_and_track(func->funcid, context);
-		if (!func)
+		if (!dfunc)
 			return false;
 		appendStringInfo(&context->str,
 						 "pgfn_%s(errcode", dfunc->func_alias);
