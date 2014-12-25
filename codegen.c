@@ -206,457 +206,432 @@ typedef struct devfunc_catalog_t {
 	int			func_nargs;
 	Oid			func_argtypes[4];
 	const char *func_template;	/* a template string if simple function */
-	void	  (*func_callback)(devfunc_info *dfunc,
-							   struct devfunc_catalog_t *procat);
 } devfunc_catalog_t;
-
-static void devfunc_setup_const(devfunc_info *entry,
-								devfunc_catalog_t *procat);
 
 static devfunc_catalog_t devfunc_common_catalog[] = {
 	/* Type cast functions */
-	{ "int2", 1, {INT4OID},   "ac:", NULL },
-	{ "int2", 1, {INT8OID},   "ac:", NULL },
-	{ "int2", 1, {FLOAT4OID}, "ac:", NULL },
-	{ "int2", 1, {FLOAT8OID}, "ac:", NULL },
+	{ "int2", 1, {INT4OID},   "ac:" },
+	{ "int2", 1, {INT8OID},   "ac:" },
+	{ "int2", 1, {FLOAT4OID}, "ac:" },
+	{ "int2", 1, {FLOAT8OID}, "ac:" },
 
-	{ "int4", 1, {BOOLOID},   "ac:", NULL },
-	{ "int4", 1, {INT2OID},   "ac:", NULL },
-	{ "int4", 1, {INT8OID},   "ac:", NULL },
-	{ "int4", 1, {FLOAT4OID}, "ac:", NULL },
-	{ "int4", 1, {FLOAT8OID}, "ac:", NULL },
+	{ "int4", 1, {BOOLOID},   "ac:" },
+	{ "int4", 1, {INT2OID},   "ac:" },
+	{ "int4", 1, {INT8OID},   "ac:" },
+	{ "int4", 1, {FLOAT4OID}, "ac:" },
+	{ "int4", 1, {FLOAT8OID}, "ac:" },
 
-	{ "int8", 1, {INT2OID},   "ac:", NULL },
-	{ "int8", 1, {INT4OID},   "ac:", NULL },
-	{ "int8", 1, {FLOAT4OID}, "ac:", NULL },
-	{ "int8", 1, {FLOAT8OID}, "ac:", NULL },
+	{ "int8", 1, {INT2OID},   "ac:" },
+	{ "int8", 1, {INT4OID},   "ac:" },
+	{ "int8", 1, {FLOAT4OID}, "ac:" },
+	{ "int8", 1, {FLOAT8OID}, "ac:" },
 
-	{ "float4", 1, {INT2OID},   "ac:", NULL },
-	{ "float4", 1, {INT4OID},   "ac:", NULL },
-	{ "float4", 1, {INT8OID},   "ac:", NULL },
-	{ "float4", 1, {FLOAT8OID}, "ac:", NULL },
+	{ "float4", 1, {INT2OID},   "ac:" },
+	{ "float4", 1, {INT4OID},   "ac:" },
+	{ "float4", 1, {INT8OID},   "ac:" },
+	{ "float4", 1, {FLOAT8OID}, "ac:" },
 
-	{ "float8", 1, {INT2OID},   "ac:", NULL },
-	{ "float8", 1, {INT4OID},   "ac:", NULL },
-	{ "float8", 1, {INT8OID},   "ac:", NULL },
-	{ "float8", 1, {FLOAT4OID}, "ac:", NULL },
+	{ "float8", 1, {INT2OID},   "ac:" },
+	{ "float8", 1, {INT4OID},   "ac:" },
+	{ "float8", 1, {INT8OID},   "ac:" },
+	{ "float8", 1, {FLOAT4OID}, "ac:" },
 
 	/* '+' : add operators */
-	{ "int2pl",  2, {INT2OID, INT2OID}, "b:+", NULL },
-	{ "int24pl", 2, {INT2OID, INT4OID}, "b:+", NULL },
-	{ "int28pl", 2, {INT2OID, INT8OID}, "b:+", NULL },
-	{ "int42pl", 2, {INT4OID, INT2OID}, "b:+", NULL },
-	{ "int4pl",  2, {INT4OID, INT4OID}, "b:+", NULL },
-	{ "int48pl", 2, {INT4OID, INT8OID}, "b:+", NULL },
-	{ "int82pl", 2, {INT8OID, INT2OID}, "b:+", NULL },
-	{ "int84pl", 2, {INT8OID, INT4OID}, "b:+", NULL },
-	{ "int8pl",  2, {INT8OID, INT8OID}, "b:+", NULL },
-	{ "float4pl",  2, {FLOAT4OID, FLOAT4OID}, "b:+", NULL },
-	{ "float48pl", 2, {FLOAT4OID, FLOAT8OID}, "b:+", NULL },
-	{ "float84pl", 2, {FLOAT4OID, FLOAT4OID}, "b:+", NULL },
-	{ "float8pl",  2, {FLOAT8OID, FLOAT8OID}, "b:+", NULL },
+	{ "int2pl",  2, {INT2OID, INT2OID}, "m/F:int2pl" },
+	{ "int24pl", 2, {INT2OID, INT4OID}, "m/F:int24pl" },
+	{ "int28pl", 2, {INT2OID, INT8OID}, "m/F:int28pl" },
+	{ "int42pl", 2, {INT4OID, INT2OID}, "m/F:int42pl" },
+	{ "int4pl",  2, {INT4OID, INT4OID}, "m/F:int4pl" },
+	{ "int48pl", 2, {INT4OID, INT8OID}, "m/F:int48pl" },
+	{ "int82pl", 2, {INT8OID, INT2OID}, "m/F:int82pl" },
+	{ "int84pl", 2, {INT8OID, INT4OID}, "m/F:int84pl" },
+	{ "int8pl",  2, {INT8OID, INT8OID}, "m/F:int8pl" },
+	{ "float4pl",  2, {FLOAT4OID, FLOAT4OID}, "m/F:float4pl" },
+	{ "float48pl", 2, {FLOAT4OID, FLOAT8OID}, "m/F:float48pl" },
+	{ "float84pl", 2, {FLOAT4OID, FLOAT4OID}, "m/F:float84pl" },
+	{ "float8pl",  2, {FLOAT8OID, FLOAT8OID}, "m/F:float8pl" },
 
 	/* '-' : subtract operators */
-	{ "int2mi",  2, {INT2OID, INT2OID}, "b:-", NULL },
-	{ "int24mi", 2, {INT2OID, INT4OID}, "b:-", NULL },
-	{ "int28mi", 2, {INT2OID, INT8OID}, "b:-", NULL },
-	{ "int42mi", 2, {INT4OID, INT2OID}, "b:-", NULL },
-	{ "int4mi",  2, {INT4OID, INT4OID}, "b:-", NULL },
-	{ "int48mi", 2, {INT4OID, INT8OID}, "b:-", NULL },
-	{ "int82mi", 2, {INT8OID, INT2OID}, "b:-", NULL },
-	{ "int84mi", 2, {INT8OID, INT4OID}, "b:-", NULL },
-	{ "int8mi",  2, {INT8OID, INT8OID}, "b:-", NULL },
-	{ "float4mi",  2, {FLOAT4OID, FLOAT4OID}, "b:-", NULL },
-	{ "float48mi", 2, {FLOAT4OID, FLOAT8OID}, "b:-", NULL },
-	{ "float84mi", 2, {FLOAT4OID, FLOAT4OID}, "b:-", NULL },
-	{ "float8mi",  2, {FLOAT8OID, FLOAT8OID}, "b:-", NULL },
+	{ "int2mi",  2, {INT2OID, INT2OID}, "m/F:int2mi" },
+	{ "int24mi", 2, {INT2OID, INT4OID}, "m/F:int24mi" },
+	{ "int28mi", 2, {INT2OID, INT8OID}, "m/F:int28mi" },
+	{ "int42mi", 2, {INT4OID, INT2OID}, "m/F:int42mi" },
+	{ "int4mi",  2, {INT4OID, INT4OID}, "m/F:int4mi" },
+	{ "int48mi", 2, {INT4OID, INT8OID}, "m/F:int48mi" },
+	{ "int82mi", 2, {INT8OID, INT2OID}, "m/F:int82mi" },
+	{ "int84mi", 2, {INT8OID, INT4OID}, "m/F:int84mi" },
+	{ "int8mi",  2, {INT8OID, INT8OID}, "m/F:int8mi" },
+	{ "float4mi",  2, {FLOAT4OID, FLOAT4OID}, "m/F:float4mi" },
+	{ "float48mi", 2, {FLOAT4OID, FLOAT8OID}, "m/F:float48mi" },
+	{ "float84mi", 2, {FLOAT4OID, FLOAT4OID}, "m/F:float84mi" },
+	{ "float8mi",  2, {FLOAT8OID, FLOAT8OID}, "m/F:float8mi" },
 
 	/* '*' : mutiply operators */
-	{ "int2mul",  2, {INT2OID, INT2OID}, "m/F:int2mul", NULL },
-	{ "int24mul", 2, {INT2OID, INT4OID}, "m/F:int24mul", NULL },
-	{ "int28mul", 2, {INT2OID, INT8OID}, "m/F:int28mul", NULL },
-	{ "int42mul", 2, {INT4OID, INT2OID}, "m/F:int42mul", NULL },
-	{ "int4mul",  2, {INT4OID, INT4OID}, "m/F:int4mul", NULL },
-	{ "int48mul", 2, {INT4OID, INT8OID}, "m/F:int48mul", NULL },
-	{ "int82mul", 2, {INT8OID, INT2OID}, "m/F:int82mul", NULL },
-	{ "int84mul", 2, {INT8OID, INT4OID}, "m/F:int84mul", NULL },
-	{ "int8mul",  2, {INT8OID, INT8OID}, "m/F:int8mul", NULL },
-	{ "float4mul",  2, {FLOAT4OID, FLOAT4OID}, "m/F:float4mul", NULL },
-	{ "float48mul", 2, {FLOAT4OID, FLOAT8OID}, "m/F:float48mul", NULL },
-	{ "float84mul", 2, {FLOAT4OID, FLOAT4OID}, "m/F:float84mul", NULL },
-	{ "float8mul",  2, {FLOAT8OID, FLOAT8OID}, "m/F:float8mul", NULL },
+	{ "int2mul",  2, {INT2OID, INT2OID}, "m/F:int2mul" },
+	{ "int24mul", 2, {INT2OID, INT4OID}, "m/F:int24mul" },
+	{ "int28mul", 2, {INT2OID, INT8OID}, "m/F:int28mul" },
+	{ "int42mul", 2, {INT4OID, INT2OID}, "m/F:int42mul" },
+	{ "int4mul",  2, {INT4OID, INT4OID}, "m/F:int4mul" },
+	{ "int48mul", 2, {INT4OID, INT8OID}, "m/F:int48mul" },
+	{ "int82mul", 2, {INT8OID, INT2OID}, "m/F:int82mul" },
+	{ "int84mul", 2, {INT8OID, INT4OID}, "m/F:int84mul" },
+	{ "int8mul",  2, {INT8OID, INT8OID}, "m/F:int8mul" },
+	{ "float4mul",  2, {FLOAT4OID, FLOAT4OID}, "m/F:float4mul" },
+	{ "float48mul", 2, {FLOAT4OID, FLOAT8OID}, "m/F:float48mul" },
+	{ "float84mul", 2, {FLOAT4OID, FLOAT4OID}, "m/F:float84mul" },
+	{ "float8mul",  2, {FLOAT8OID, FLOAT8OID}, "m/F:float8mul" },
 
 	/* '/' : divide operators */
-	{ "int2div",  2, {INT2OID, INT2OID}, "m/F:int2div",  NULL },
-	{ "int24div", 2, {INT2OID, INT4OID}, "m/F:int24div", NULL },
-	{ "int28div", 2, {INT2OID, INT8OID}, "m/F:int28div", NULL },
-	{ "int42div", 2, {INT4OID, INT2OID}, "m/F:int42div", NULL },
-	{ "int4div",  2, {INT4OID, INT4OID}, "m/F:int4div",  NULL },
-	{ "int48div", 2, {INT4OID, INT8OID}, "m/F:int48div", NULL },
-	{ "int82div", 2, {INT8OID, INT2OID}, "m/F:int82div", NULL },
-	{ "int84div", 2, {INT8OID, INT4OID}, "m/F:int84div", NULL },
-	{ "int8div",  2, {INT8OID, INT8OID}, "m/F:int8div",  NULL },
-	{ "float4div",  2, {FLOAT4OID, FLOAT4OID}, "m/F:float4div",  NULL },
-	{ "float48div", 2, {FLOAT4OID, FLOAT8OID}, "m/F:float48div", NULL },
-	{ "float84div", 2, {FLOAT4OID, FLOAT4OID}, "m/F:float84div", NULL },
-	{ "float8div",  2, {FLOAT8OID, FLOAT8OID}, "m/F:float8div",  NULL },
+	{ "int2div",  2, {INT2OID, INT2OID}, "m/F:int2div" },
+	{ "int24div", 2, {INT2OID, INT4OID}, "m/F:int24div" },
+	{ "int28div", 2, {INT2OID, INT8OID}, "m/F:int28div" },
+	{ "int42div", 2, {INT4OID, INT2OID}, "m/F:int42div" },
+	{ "int4div",  2, {INT4OID, INT4OID}, "m/F:int4div" },
+	{ "int48div", 2, {INT4OID, INT8OID}, "m/F:int48div" },
+	{ "int82div", 2, {INT8OID, INT2OID}, "m/F:int82div" },
+	{ "int84div", 2, {INT8OID, INT4OID}, "m/F:int84div" },
+	{ "int8div",  2, {INT8OID, INT8OID}, "m/F:int8div" },
+	{ "float4div",  2, {FLOAT4OID, FLOAT4OID}, "m/F:float4div" },
+	{ "float48div", 2, {FLOAT4OID, FLOAT8OID}, "m/F:float48div" },
+	{ "float84div", 2, {FLOAT4OID, FLOAT4OID}, "m/F:float84div" },
+	{ "float8div",  2, {FLOAT8OID, FLOAT8OID}, "m/F:float8div" },
 
 	/* '%' : reminder operators */
-	{ "int2mod", 2, {INT2OID, INT2OID}, "b:%", NULL },
-	{ "int4mod", 2, {INT4OID, INT4OID}, "b:%", NULL },
-	{ "int8mod", 2, {INT8OID, INT8OID}, "b:%", NULL },
+	{ "int2mod", 2, {INT2OID, INT2OID}, "m/F:int2mod" },
+	{ "int4mod", 2, {INT4OID, INT4OID}, "m/F:int4mod" },
+	{ "int8mod", 2, {INT8OID, INT8OID}, "m/F:int8mod" },
 
 	/* '+' : unary plus operators */
-	{ "int2up", 1, {INT2OID}, "l:+", NULL },
-	{ "int4up", 1, {INT4OID}, "l:+", NULL },
-	{ "int8up", 1, {INT8OID}, "l:+", NULL },
-	{ "float4up", 1, {FLOAT4OID}, "l:+", NULL },
-	{ "float8up", 1, {FLOAT8OID}, "l:+", NULL },
+	{ "int2up", 1, {INT2OID}, "l:+" },
+	{ "int4up", 1, {INT4OID}, "l:+" },
+	{ "int8up", 1, {INT8OID}, "l:+" },
+	{ "float4up", 1, {FLOAT4OID}, "l:+" },
+	{ "float8up", 1, {FLOAT8OID}, "l:+" },
 
 	/* '-' : unary minus operators */
-	{ "int2mi", 1, {INT2OID}, "l:-", NULL },
-	{ "int4mi", 1, {INT4OID}, "l:-", NULL },
-	{ "int8mi", 1, {INT8OID}, "l:-", NULL },
-	{ "float4mi", 1, {FLOAT4OID}, "l:-", NULL },
-	{ "float8mi", 1, {FLOAT8OID}, "l:-", NULL },
+	{ "int2mi", 1, {INT2OID}, "l:-" },
+	{ "int4mi", 1, {INT4OID}, "l:-" },
+	{ "int8mi", 1, {INT8OID}, "l:-" },
+	{ "float4mi", 1, {FLOAT4OID}, "l:-" },
+	{ "float8mi", 1, {FLOAT8OID}, "l:-" },
 
 	/* '@' : absolute value operators */
-	{ "int2abs", 1, {INT2OID}, "f:abs", NULL },
-	{ "int4abs", 1, {INT4OID}, "f:abs", NULL },
-	{ "int8abs", 1, {INT8OID}, "f:abs", NULL },
-	{ "float4abs", 1, {FLOAT4OID}, "l:fabs", NULL },
-	{ "float8abs", 1, {FLOAT8OID}, "l:fabs", NULL },
+	{ "int2abs", 1, {INT2OID}, "f:abs" },
+	{ "int4abs", 1, {INT4OID}, "f:abs" },
+	{ "int8abs", 1, {INT8OID}, "f:abs" },
+	{ "float4abs", 1, {FLOAT4OID}, "l:fabs" },
+	{ "float8abs", 1, {FLOAT8OID}, "l:fabs" },
 
 	/* '=' : equal operators */
-	{ "int2eq",  2, {INT2OID, INT2OID}, "b:==", NULL },
-	{ "int24eq", 2, {INT2OID, INT4OID}, "b:==", NULL },
-	{ "int28eq", 2, {INT2OID, INT8OID}, "b:==", NULL },
-	{ "int42eq", 2, {INT4OID, INT2OID}, "b:==", NULL },
-	{ "int4eq",  2, {INT4OID, INT4OID}, "b:==", NULL },
-	{ "int48eq", 2, {INT4OID, INT8OID}, "b:==", NULL },
-	{ "int82eq", 2, {INT8OID, INT2OID}, "b:==", NULL },
-	{ "int84eq", 2, {INT8OID, INT4OID}, "b:==", NULL },
-	{ "int8eq",  2, {INT8OID, INT8OID}, "b:==", NULL },
-	{ "float4eq",  2, {FLOAT4OID, FLOAT4OID}, "b:==", NULL },
-	{ "float48eq", 2, {FLOAT4OID, FLOAT8OID}, "b:==", NULL },
-	{ "float84eq", 2, {FLOAT4OID, FLOAT4OID}, "b:==", NULL },
-	{ "float8eq",  2, {FLOAT8OID, FLOAT8OID}, "b:==", NULL },
+	{ "int2eq",  2, {INT2OID, INT2OID}, "b:==" },
+	{ "int24eq", 2, {INT2OID, INT4OID}, "b:==" },
+	{ "int28eq", 2, {INT2OID, INT8OID}, "b:==" },
+	{ "int42eq", 2, {INT4OID, INT2OID}, "b:==" },
+	{ "int4eq",  2, {INT4OID, INT4OID}, "b:==" },
+	{ "int48eq", 2, {INT4OID, INT8OID}, "b:==" },
+	{ "int82eq", 2, {INT8OID, INT2OID}, "b:==" },
+	{ "int84eq", 2, {INT8OID, INT4OID}, "b:==" },
+	{ "int8eq",  2, {INT8OID, INT8OID}, "b:==" },
+	{ "float4eq",  2, {FLOAT4OID, FLOAT4OID}, "b:==" },
+	{ "float48eq", 2, {FLOAT4OID, FLOAT8OID}, "b:==" },
+	{ "float84eq", 2, {FLOAT4OID, FLOAT4OID}, "b:==" },
+	{ "float8eq",  2, {FLOAT8OID, FLOAT8OID}, "b:==" },
 
 	/* '<>' : not equal operators */
-	{ "int2ne",  2, {INT2OID, INT2OID}, "b:!=", NULL },
-	{ "int24ne", 2, {INT2OID, INT4OID}, "b:!=", NULL },
-	{ "int28ne", 2, {INT2OID, INT8OID}, "b:!=", NULL },
-	{ "int42ne", 2, {INT4OID, INT2OID}, "b:!=", NULL },
-	{ "int4ne",  2, {INT4OID, INT4OID}, "b:!=", NULL },
-	{ "int48ne", 2, {INT4OID, INT8OID}, "b:!=", NULL },
-	{ "int82ne", 2, {INT8OID, INT2OID}, "b:!=", NULL },
-	{ "int84ne", 2, {INT8OID, INT4OID}, "b:!=", NULL },
-	{ "int8ne",  2, {INT8OID, INT8OID}, "b:!=", NULL },
-	{ "float4ne",  2, {FLOAT4OID, FLOAT4OID}, "b:!=", NULL },
-	{ "float48ne", 2, {FLOAT4OID, FLOAT8OID}, "b:!=", NULL },
-	{ "float84ne", 2, {FLOAT4OID, FLOAT4OID}, "b:!=", NULL },
-	{ "float8ne",  2, {FLOAT8OID, FLOAT8OID}, "b:!=", NULL },
+	{ "int2ne",  2, {INT2OID, INT2OID}, "b:!=" },
+	{ "int24ne", 2, {INT2OID, INT4OID}, "b:!=" },
+	{ "int28ne", 2, {INT2OID, INT8OID}, "b:!=" },
+	{ "int42ne", 2, {INT4OID, INT2OID}, "b:!=" },
+	{ "int4ne",  2, {INT4OID, INT4OID}, "b:!=" },
+	{ "int48ne", 2, {INT4OID, INT8OID}, "b:!=" },
+	{ "int82ne", 2, {INT8OID, INT2OID}, "b:!=" },
+	{ "int84ne", 2, {INT8OID, INT4OID}, "b:!=" },
+	{ "int8ne",  2, {INT8OID, INT8OID}, "b:!=" },
+	{ "float4ne",  2, {FLOAT4OID, FLOAT4OID}, "b:!=" },
+	{ "float48ne", 2, {FLOAT4OID, FLOAT8OID}, "b:!=" },
+	{ "float84ne", 2, {FLOAT4OID, FLOAT4OID}, "b:!=" },
+	{ "float8ne",  2, {FLOAT8OID, FLOAT8OID}, "b:!=" },
 
 	/* '>' : equal operators */
-	{ "int2gt",  2, {INT2OID, INT2OID}, "b:>", NULL },
-	{ "int24gt", 2, {INT2OID, INT4OID}, "b:>", NULL },
-	{ "int28gt", 2, {INT2OID, INT8OID}, "b:>", NULL },
-	{ "int42gt", 2, {INT4OID, INT2OID}, "b:>", NULL },
-	{ "int4gt",  2, {INT4OID, INT4OID}, "b:>", NULL },
-	{ "int48gt", 2, {INT4OID, INT8OID}, "b:>", NULL },
-	{ "int82gt", 2, {INT8OID, INT2OID}, "b:>", NULL },
-	{ "int84gt", 2, {INT8OID, INT4OID}, "b:>", NULL },
-	{ "int8gt",  2, {INT8OID, INT8OID}, "b:>", NULL },
-	{ "float4gt",  2, {FLOAT4OID, FLOAT4OID}, "b:>", NULL },
-	{ "float48gt", 2, {FLOAT4OID, FLOAT8OID}, "b:>", NULL },
-	{ "float84gt", 2, {FLOAT4OID, FLOAT4OID}, "b:>", NULL },
-	{ "float8gt",  2, {FLOAT8OID, FLOAT8OID}, "b:>", NULL },
+	{ "int2gt",  2, {INT2OID, INT2OID}, "b:>" },
+	{ "int24gt", 2, {INT2OID, INT4OID}, "b:>" },
+	{ "int28gt", 2, {INT2OID, INT8OID}, "b:>" },
+	{ "int42gt", 2, {INT4OID, INT2OID}, "b:>" },
+	{ "int4gt",  2, {INT4OID, INT4OID}, "b:>" },
+	{ "int48gt", 2, {INT4OID, INT8OID}, "b:>" },
+	{ "int82gt", 2, {INT8OID, INT2OID}, "b:>" },
+	{ "int84gt", 2, {INT8OID, INT4OID}, "b:>" },
+	{ "int8gt",  2, {INT8OID, INT8OID}, "b:>" },
+	{ "float4gt",  2, {FLOAT4OID, FLOAT4OID}, "b:>" },
+	{ "float48gt", 2, {FLOAT4OID, FLOAT8OID}, "b:>" },
+	{ "float84gt", 2, {FLOAT4OID, FLOAT4OID}, "b:>" },
+	{ "float8gt",  2, {FLOAT8OID, FLOAT8OID}, "b:>" },
 
 	/* '<' : equal operators */
-	{ "int2lt",  2, {INT2OID, INT2OID}, "b:<", NULL },
-	{ "int24lt", 2, {INT2OID, INT4OID}, "b:<", NULL },
-	{ "int28lt", 2, {INT2OID, INT8OID}, "b:<", NULL },
-	{ "int42lt", 2, {INT4OID, INT2OID}, "b:<", NULL },
-	{ "int4lt",  2, {INT4OID, INT4OID}, "b:<", NULL },
-	{ "int48lt", 2, {INT4OID, INT8OID}, "b:<", NULL },
-	{ "int82lt", 2, {INT8OID, INT2OID}, "b:<", NULL },
-	{ "int84lt", 2, {INT8OID, INT4OID}, "b:<", NULL },
-	{ "int8lt",  2, {INT8OID, INT8OID}, "b:<", NULL },
-	{ "float4lt",  2, {FLOAT4OID, FLOAT4OID}, "b:<", NULL },
-	{ "float48lt", 2, {FLOAT4OID, FLOAT8OID}, "b:<", NULL },
-	{ "float84lt", 2, {FLOAT4OID, FLOAT4OID}, "b:<", NULL },
-	{ "float8lt",  2, {FLOAT8OID, FLOAT8OID}, "b:<", NULL },
+	{ "int2lt",  2, {INT2OID, INT2OID}, "b:<" },
+	{ "int24lt", 2, {INT2OID, INT4OID}, "b:<" },
+	{ "int28lt", 2, {INT2OID, INT8OID}, "b:<" },
+	{ "int42lt", 2, {INT4OID, INT2OID}, "b:<" },
+	{ "int4lt",  2, {INT4OID, INT4OID}, "b:<" },
+	{ "int48lt", 2, {INT4OID, INT8OID}, "b:<" },
+	{ "int82lt", 2, {INT8OID, INT2OID}, "b:<" },
+	{ "int84lt", 2, {INT8OID, INT4OID}, "b:<" },
+	{ "int8lt",  2, {INT8OID, INT8OID}, "b:<" },
+	{ "float4lt",  2, {FLOAT4OID, FLOAT4OID}, "b:<" },
+	{ "float48lt", 2, {FLOAT4OID, FLOAT8OID}, "b:<" },
+	{ "float84lt", 2, {FLOAT4OID, FLOAT4OID}, "b:<" },
+	{ "float8lt",  2, {FLOAT8OID, FLOAT8OID}, "b:<" },
 
 	/* '>=' : relational greater-than or equal-to */
-	{ "int2ge",  2, {INT2OID, INT2OID}, "b:>=", NULL },
-	{ "int24ge", 2, {INT2OID, INT4OID}, "b:>=", NULL },
-	{ "int28ge", 2, {INT2OID, INT8OID}, "b:>=", NULL },
-	{ "int42ge", 2, {INT4OID, INT2OID}, "b:>=", NULL },
-	{ "int4ge",  2, {INT4OID, INT4OID}, "b:>=", NULL },
-	{ "int48ge", 2, {INT4OID, INT8OID}, "b:>=", NULL },
-	{ "int82ge", 2, {INT8OID, INT2OID}, "b:>=", NULL },
-	{ "int84ge", 2, {INT8OID, INT4OID}, "b:>=", NULL },
-	{ "int8ge",  2, {INT8OID, INT8OID}, "b:>=", NULL },
-	{ "float4ge",  2, {FLOAT4OID, FLOAT4OID}, "b:>=", NULL },
-	{ "float48ge", 2, {FLOAT4OID, FLOAT8OID}, "b:>=", NULL },
-	{ "float84ge", 2, {FLOAT4OID, FLOAT4OID}, "b:>=", NULL },
-	{ "float8ge",  2, {FLOAT8OID, FLOAT8OID}, "b:>=", NULL },
+	{ "int2ge",  2, {INT2OID, INT2OID}, "b:>=" },
+	{ "int24ge", 2, {INT2OID, INT4OID}, "b:>=" },
+	{ "int28ge", 2, {INT2OID, INT8OID}, "b:>=" },
+	{ "int42ge", 2, {INT4OID, INT2OID}, "b:>=" },
+	{ "int4ge",  2, {INT4OID, INT4OID}, "b:>=" },
+	{ "int48ge", 2, {INT4OID, INT8OID}, "b:>=" },
+	{ "int82ge", 2, {INT8OID, INT2OID}, "b:>=" },
+	{ "int84ge", 2, {INT8OID, INT4OID}, "b:>=" },
+	{ "int8ge",  2, {INT8OID, INT8OID}, "b:>=" },
+	{ "float4ge",  2, {FLOAT4OID, FLOAT4OID}, "b:>=" },
+	{ "float48ge", 2, {FLOAT4OID, FLOAT8OID}, "b:>=" },
+	{ "float84ge", 2, {FLOAT4OID, FLOAT4OID}, "b:>=" },
+	{ "float8ge",  2, {FLOAT8OID, FLOAT8OID}, "b:>=" },
 
 	/* '<=' : relational greater-than or equal-to */
-	{ "int2le",  2, {INT2OID, INT2OID}, "b:<=", NULL },
-	{ "int24le", 2, {INT2OID, INT4OID}, "b:<=", NULL },
-	{ "int28le", 2, {INT2OID, INT8OID}, "b:<=", NULL },
-	{ "int42le", 2, {INT4OID, INT2OID}, "b:<=", NULL },
-	{ "int4le",  2, {INT4OID, INT4OID}, "b:<=", NULL },
-	{ "int48le", 2, {INT4OID, INT8OID}, "b:<=", NULL },
-	{ "int82le", 2, {INT8OID, INT2OID}, "b:<=", NULL },
-	{ "int84le", 2, {INT8OID, INT4OID}, "b:<=", NULL },
-	{ "int8le",  2, {INT8OID, INT8OID}, "b:<=", NULL },
-	{ "float4le",  2, {FLOAT4OID, FLOAT4OID}, "b:<=", NULL },
-	{ "float48le", 2, {FLOAT4OID, FLOAT8OID}, "b:<=", NULL },
-	{ "float84le", 2, {FLOAT4OID, FLOAT4OID}, "b:<=", NULL },
-	{ "float8le",  2, {FLOAT8OID, FLOAT8OID}, "b:<=", NULL },
+	{ "int2le",  2, {INT2OID, INT2OID}, "b:<=" },
+	{ "int24le", 2, {INT2OID, INT4OID}, "b:<=" },
+	{ "int28le", 2, {INT2OID, INT8OID}, "b:<=" },
+	{ "int42le", 2, {INT4OID, INT2OID}, "b:<=" },
+	{ "int4le",  2, {INT4OID, INT4OID}, "b:<=" },
+	{ "int48le", 2, {INT4OID, INT8OID}, "b:<=" },
+	{ "int82le", 2, {INT8OID, INT2OID}, "b:<=" },
+	{ "int84le", 2, {INT8OID, INT4OID}, "b:<=" },
+	{ "int8le",  2, {INT8OID, INT8OID}, "b:<=" },
+	{ "float4le",  2, {FLOAT4OID, FLOAT4OID}, "b:<=" },
+	{ "float48le", 2, {FLOAT4OID, FLOAT8OID}, "b:<=" },
+	{ "float84le", 2, {FLOAT4OID, FLOAT4OID}, "b:<=" },
+	{ "float8le",  2, {FLOAT8OID, FLOAT8OID}, "b:<=" },
 
 	/* '&' : bitwise and */
-	{ "int2and", 2, {INT2OID, INT2OID}, "b:&", NULL },
-	{ "int4and", 2, {INT4OID, INT4OID}, "b:&", NULL },
-	{ "int8and", 2, {INT8OID, INT8OID}, "b:&", NULL },
+	{ "int2and", 2, {INT2OID, INT2OID}, "b:&" },
+	{ "int4and", 2, {INT4OID, INT4OID}, "b:&" },
+	{ "int8and", 2, {INT8OID, INT8OID}, "b:&" },
 
 	/* '|'  : bitwise or */
-	{ "int2or", 2, {INT2OID, INT2OID}, "b:|", NULL },
-	{ "int4or", 2, {INT4OID, INT4OID}, "b:|", NULL },
-	{ "int8or", 2, {INT8OID, INT8OID}, "b:|", NULL },
+	{ "int2or", 2, {INT2OID, INT2OID}, "b:|" },
+	{ "int4or", 2, {INT4OID, INT4OID}, "b:|" },
+	{ "int8or", 2, {INT8OID, INT8OID}, "b:|" },
 
 	/* '#'  : bitwise xor */
-	{ "int2xor", 2, {INT2OID, INT2OID}, "b:^", NULL },
-	{ "int4xor", 2, {INT4OID, INT4OID}, "b:^", NULL },
-	{ "int8xor", 2, {INT8OID, INT8OID}, "b:^", NULL },
+	{ "int2xor", 2, {INT2OID, INT2OID}, "b:^" },
+	{ "int4xor", 2, {INT4OID, INT4OID}, "b:^" },
+	{ "int8xor", 2, {INT8OID, INT8OID}, "b:^" },
 
 	/* '~'  : bitwise not operators */
-	{ "int2not", 1, {INT2OID}, "b:~", NULL },
-	{ "int4not", 1, {INT4OID}, "b:~", NULL },
-	{ "int8not", 1, {INT8OID}, "b:~", NULL },
+	{ "int2not", 1, {INT2OID}, "b:~" },
+	{ "int4not", 1, {INT4OID}, "b:~" },
+	{ "int8not", 1, {INT8OID}, "b:~" },
 
 	/* '>>' : right shift */
-	{ "int2shr", 2, {INT2OID, INT4OID}, "b:>>", NULL },
-	{ "int4shr", 2, {INT4OID, INT4OID}, "b:>>", NULL },
-	{ "int8shr", 2, {INT8OID, INT4OID}, "b:>>", NULL },
+	{ "int2shr", 2, {INT2OID, INT4OID}, "b:>>" },
+	{ "int4shr", 2, {INT4OID, INT4OID}, "b:>>" },
+	{ "int8shr", 2, {INT8OID, INT4OID}, "b:>>" },
 
 	/* '<<' : left shift */
-	{ "int2shl", 2, {INT2OID, INT4OID}, "b:<<", NULL },
-	{ "int4shl", 2, {INT4OID, INT4OID}, "b:<<", NULL },
-	{ "int8shl", 2, {INT8OID, INT4OID}, "b:<<", NULL },
+	{ "int2shl", 2, {INT2OID, INT4OID}, "b:<<" },
+	{ "int4shl", 2, {INT4OID, INT4OID}, "b:<<" },
+	{ "int8shl", 2, {INT8OID, INT4OID}, "b:<<" },
 
 	/* comparison functions */
-	{ "btboolcmp",  2, {BOOLOID, BOOLOID}, "f:devfunc_int_comp", NULL},
-	{ "btint2cmp",  2, {INT2OID, INT2OID}, "f:devfunc_int_comp", NULL},
-	{ "btint24cmp", 2, {INT2OID, INT4OID}, "f:devfunc_int_comp", NULL},
-	{ "btint28cmp", 2, {INT2OID, INT8OID}, "f:devfunc_int_comp", NULL},
-	{ "btint42cmp", 2, {INT4OID, INT2OID}, "f:devfunc_int_comp", NULL},
-	{ "btint4cmp",  2, {INT4OID, INT4OID}, "f:devfunc_int_comp", NULL},
-	{ "btint48cmp", 2, {INT4OID, INT8OID}, "f:devfunc_int_comp", NULL},
-	{ "btint82cmp", 2, {INT8OID, INT2OID}, "f:devfunc_int_comp", NULL},
-	{ "btint84cmp", 2, {INT8OID, INT4OID}, "f:devfunc_int_comp", NULL},
-	{ "btint8cmp",  2, {INT8OID, INT8OID}, "f:devfunc_int_comp", NULL},
-	{ "btfloat4cmp",  2, {FLOAT4OID, FLOAT4OID}, "f:devfunc_float_comp", NULL},
-	{ "btfloat48cmp", 2, {FLOAT4OID, FLOAT8OID}, "f:devfunc_float_comp", NULL},
-	{ "btfloat84cmp", 2, {FLOAT8OID, FLOAT4OID}, "f:devfunc_float_comp", NULL},
-	{ "btfloat8cmp",  2, {FLOAT8OID, FLOAT8OID}, "f:devfunc_float_comp", NULL},
+	{ "btboolcmp",  2, {BOOLOID, BOOLOID}, "f:devfunc_int_comp" },
+	{ "btint2cmp",  2, {INT2OID, INT2OID}, "f:devfunc_int_comp" },
+	{ "btint24cmp", 2, {INT2OID, INT4OID}, "f:devfunc_int_comp" },
+	{ "btint28cmp", 2, {INT2OID, INT8OID}, "f:devfunc_int_comp" },
+	{ "btint42cmp", 2, {INT4OID, INT2OID}, "f:devfunc_int_comp" },
+	{ "btint4cmp",  2, {INT4OID, INT4OID}, "f:devfunc_int_comp" },
+	{ "btint48cmp", 2, {INT4OID, INT8OID}, "f:devfunc_int_comp" },
+	{ "btint82cmp", 2, {INT8OID, INT2OID}, "f:devfunc_int_comp" },
+	{ "btint84cmp", 2, {INT8OID, INT4OID}, "f:devfunc_int_comp" },
+	{ "btint8cmp",  2, {INT8OID, INT8OID}, "f:devfunc_int_comp" },
+	{ "btfloat4cmp",  2, {FLOAT4OID, FLOAT4OID}, "f:devfunc_float_comp" },
+	{ "btfloat48cmp", 2, {FLOAT4OID, FLOAT8OID}, "f:devfunc_float_comp" },
+	{ "btfloat84cmp", 2, {FLOAT8OID, FLOAT4OID}, "f:devfunc_float_comp" },
+	{ "btfloat8cmp",  2, {FLOAT8OID, FLOAT8OID}, "f:devfunc_float_comp" },
 
 	/*
      * Mathmatical functions
      */
-	{ "abs", 1, {INT2OID}, "af:abs", NULL },
-	{ "abs", 1, {INT4OID}, "af:abs", NULL },
-	{ "abs", 1, {INT8OID}, "af:abs", NULL },
-	{ "abs", 1, {FLOAT4OID}, "af:fabs", NULL },
-	{ "abs", 1, {FLOAT8OID}, "af:fabs", NULL },
-	{ "cbrt",  1, {FLOAT4OID}, "f:cbrt", NULL },
-	{ "dcbrt", 1, {FLOAT8OID}, "f:cbrt", NULL },
-	{ "ceil", 1, {FLOAT8OID}, "f:ceil", NULL },
-	{ "ceiling", 1, {FLOAT8OID}, "f:ceil", NULL },
-	{ "exp", 1, {FLOAT8OID}, "f:exp", NULL },
-	{ "dexp", 1, {FLOAT8OID}, "f:exp", NULL },
-	{ "floor", 1, {FLOAT8OID}, "f:dfloor", NULL },
-	{ "ln", 1, {FLOAT8OID}, "f:log", NULL },
-	{ "dlog1", 1, {FLOAT8OID}, "f:log", NULL },
-	{ "log", 1, {FLOAT8OID}, "f:log10", NULL },
-	{ "dlog10", 1, {FLOAT8OID}, "f:log10", NULL },
-	{ "pi", 0, {}, "f:M_PI", devfunc_setup_const },
-	{ "power", 2, {FLOAT8OID, FLOAT8OID}, "f:pow" },
-	{ "pow", 2, {FLOAT8OID, FLOAT8OID}, "f:pow" },
-	{ "dpow", 2, {FLOAT8OID, FLOAT8OID}, "f:pow" },
-	{ "round", 1, {FLOAT8OID}, "f:round", NULL },
-	{ "dround", 1, {FLOAT8OID}, "f:round", NULL },
-	{ "sign", 1, {FLOAT8OID}, "f:sign", NULL },
-	{ "sqrt", 1, {FLOAT8OID}, "f:sqrt", NULL },
-	{ "dsqrt", 1, {FLOAT8OID}, "f:sqrt", NULL },
-	{ "trunc", 1, {FLOAT8OID}, "f:trunc", NULL },
-	{ "dtrunc", 1, {FLOAT8OID}, "f:trunc", NULL },
+	{ "abs", 1, {INT2OID}, "af:abs" },
+	{ "abs", 1, {INT4OID}, "af:abs" },
+	{ "abs", 1, {INT8OID}, "af:abs" },
+	{ "abs", 1, {FLOAT4OID}, "af:fabs" },
+	{ "abs", 1, {FLOAT8OID}, "af:fabs" },
+	{ "cbrt",  1, {FLOAT4OID}, "f:cbrt" },
+	{ "dcbrt", 1, {FLOAT8OID}, "f:cbrt" },
+	{ "ceil", 1, {FLOAT8OID}, "f:ceil" },
+	{ "ceiling", 1, {FLOAT8OID}, "f:ceil" },
+	{ "exp", 1, {FLOAT8OID}, "f:exp" },
+	{ "dexp", 1, {FLOAT8OID}, "f:exp" },
+	{ "floor", 1, {FLOAT8OID}, "f:dfloor" },
+	{ "ln", 1, {FLOAT8OID}, "f:log" },
+	{ "dlog1", 1, {FLOAT8OID}, "f:log" },
+	{ "log", 1, {FLOAT8OID}, "f:log10" },
+	{ "dlog10", 1, {FLOAT8OID}, "f:log10" },
+	{ "pi", 0, {}, "m/F:dpi" },
+	{ "power", 2, {FLOAT8OID, FLOAT8OID}, "m/F:dpow" },
+	{ "pow", 2, {FLOAT8OID, FLOAT8OID}, "m/F:dpow" },
+	{ "dpow", 2, {FLOAT8OID, FLOAT8OID}, "m/F:dpow" },
+	{ "round", 1, {FLOAT8OID}, "f:round" },
+	{ "dround", 1, {FLOAT8OID}, "f:round" },
+	{ "sign", 1, {FLOAT8OID}, "f:sign" },
+	{ "sqrt", 1, {FLOAT8OID}, "f:sqrt" },
+	{ "dsqrt", 1, {FLOAT8OID}, "f:sqrt" },
+	{ "trunc", 1, {FLOAT8OID}, "f:trunc" },
+	{ "dtrunc", 1, {FLOAT8OID}, "f:trunc" },
 
 	/*
      * Trigonometric function
      */
-	{ "degrees", 1, {FLOAT4OID}, "af:degrees", NULL },
-	{ "degrees", 1, {FLOAT8OID}, "af:degrees", NULL },
-	{ "radians", 1, {FLOAT8OID}, "f:radians", NULL },
-	{ "acos",    1, {FLOAT8OID}, "f:acos", NULL },
-	{ "asin",    1, {FLOAT8OID}, "f:asin", NULL },
-	{ "atan",    1, {FLOAT8OID}, "f:atan", NULL },
-	{ "atan2",   2, {FLOAT8OID, FLOAT8OID}, "f:atan2", NULL },
-	{ "cos",     1, {FLOAT8OID}, "f:cos", NULL },
-	//{ "cot",     1, {FLOAT8OID}, "f:", NULL }, /* not supported in opencl */
-	{ "sin",     1, {FLOAT8OID}, "f:sin", NULL },
-	{ "tan",     1, {FLOAT8OID}, "f:tan", NULL },
+	{ "degrees", 1, {FLOAT4OID}, "af:degrees" },
+	{ "degrees", 1, {FLOAT8OID}, "af:degrees" },
+	{ "radians", 1, {FLOAT8OID}, "f:radians" },
+	{ "acos",    1, {FLOAT8OID}, "f:acos" },
+	{ "asin",    1, {FLOAT8OID}, "f:asin" },
+	{ "atan",    1, {FLOAT8OID}, "f:atan" },
+	{ "atan2",   2, {FLOAT8OID, FLOAT8OID}, "f:atan2" },
+	{ "cos",     1, {FLOAT8OID}, "f:cos" },
+	//{ "cot",     1, {FLOAT8OID}, "f:" }, /* not supported in opencl */
+	{ "sin",     1, {FLOAT8OID}, "f:sin" },
+	{ "tan",     1, {FLOAT8OID}, "f:tan" },
 
 	/*
 	 * Numeric functions
 	 * ------------------------- */
 	/* Numeric type cast functions */
-	{ "int2",    1, {NUMERICOID}, "n/F:numeric_int2",   NULL },
-	{ "int4",    1, {NUMERICOID}, "n/F:numeric_int4",   NULL },
-	{ "int8",    1, {NUMERICOID}, "n/F:numeric_int8",   NULL },
-	{ "float4",  1, {NUMERICOID}, "n/F:numeric_float4", NULL },
-	{ "float8",  1, {NUMERICOID}, "n/F:numeric_float8", NULL },
-	{ "numeric", 1, {INT2OID},    "n/F:int2_numeric",   NULL },
-	{ "numeric", 1, {INT4OID},    "n/F:int4_numeric",   NULL },
-	{ "numeric", 1, {INT8OID},    "n/F:int8_numeric",   NULL },
-	{ "numeric", 1, {FLOAT4OID},  "n/F:float4_numeric", NULL },
-	{ "numeric", 1, {FLOAT8OID},  "n/F:float8_numeric", NULL },
+	{ "int2",    1, {NUMERICOID}, "n/F:numeric_int2" },
+	{ "int4",    1, {NUMERICOID}, "n/F:numeric_int4" },
+	{ "int8",    1, {NUMERICOID}, "n/F:numeric_int8" },
+	{ "float4",  1, {NUMERICOID}, "n/F:numeric_float4" },
+	{ "float8",  1, {NUMERICOID}, "n/F:numeric_float8" },
+	{ "numeric", 1, {INT2OID},    "n/F:int2_numeric" },
+	{ "numeric", 1, {INT4OID},    "n/F:int4_numeric" },
+	{ "numeric", 1, {INT8OID},    "n/F:int8_numeric" },
+	{ "numeric", 1, {FLOAT4OID},  "n/F:float4_numeric" },
+	{ "numeric", 1, {FLOAT8OID},  "n/F:float8_numeric" },
 	/* Numeric operators */
-	{ "numeric_add", 2, {NUMERICOID, NUMERICOID}, "n/F:numeric_add", NULL },
-	{ "numeric_sub", 2, {NUMERICOID, NUMERICOID}, "n/F:numeric_sub", NULL },
-	{ "numeric_mul", 2, {NUMERICOID, NUMERICOID}, "n/F:numeric_mul", NULL },
-	{ "numeric_uplus",  1, {NUMERICOID}, "n/F:numeric_uplus", NULL },
-	{ "numeric_uminus", 1, {NUMERICOID}, "n/F:numeric_uminus", NULL },
-	{ "numeric_abs",    1, {NUMERICOID}, "n/F:numeric_abs", NULL },
-	{ "abs",            1, {NUMERICOID}, "n/F:numeric_abs", NULL },
+	{ "numeric_add", 2, {NUMERICOID, NUMERICOID}, "n/F:numeric_add" },
+	{ "numeric_sub", 2, {NUMERICOID, NUMERICOID}, "n/F:numeric_sub" },
+	{ "numeric_mul", 2, {NUMERICOID, NUMERICOID}, "n/F:numeric_mul" },
+	{ "numeric_uplus",  1, {NUMERICOID}, "n/F:numeric_uplus" },
+	{ "numeric_uminus", 1, {NUMERICOID}, "n/F:numeric_uminus" },
+	{ "numeric_abs",    1, {NUMERICOID}, "n/F:numeric_abs" },
+	{ "abs",            1, {NUMERICOID}, "n/F:numeric_abs" },
 	/* Numeric comparison */
-	{ "numeric_eq", 2, {NUMERICOID, NUMERICOID},  "n/F:numeric_eq", NULL },
-	{ "numeric_ne", 2, {NUMERICOID, NUMERICOID},  "n/F:numeric_ne", NULL },
-	{ "numeric_lt", 2, {NUMERICOID, NUMERICOID},  "n/F:numeric_lt", NULL },
-	{ "numeric_le", 2, {NUMERICOID, NUMERICOID},  "n/F:numeric_le", NULL },
-	{ "numeric_gt", 2, {NUMERICOID, NUMERICOID},  "n/F:numeric_gt", NULL },
-	{ "numeric_ge", 2, {NUMERICOID, NUMERICOID},  "n/F:numeric_ge", NULL },
-	{ "numeric_cmp", 2, {NUMERICOID, NUMERICOID}, "n/F:numeric_cmp", NULL },
+	{ "numeric_eq", 2, {NUMERICOID, NUMERICOID},  "n/F:numeric_eq" },
+	{ "numeric_ne", 2, {NUMERICOID, NUMERICOID},  "n/F:numeric_ne" },
+	{ "numeric_lt", 2, {NUMERICOID, NUMERICOID},  "n/F:numeric_lt" },
+	{ "numeric_le", 2, {NUMERICOID, NUMERICOID},  "n/F:numeric_le" },
+	{ "numeric_gt", 2, {NUMERICOID, NUMERICOID},  "n/F:numeric_gt" },
+	{ "numeric_ge", 2, {NUMERICOID, NUMERICOID},  "n/F:numeric_ge" },
+	{ "numeric_cmp", 2, {NUMERICOID, NUMERICOID}, "n/F:numeric_cmp" },
 
 	/*
 	 * Date and time functions
 	 * ------------------------------- */
 	/* Type cast functions */
-	{ "date", 1, {DATEOID}, "ta/c:", NULL },
-	{ "date", 1, {TIMESTAMPOID}, "t/F:timestamp_date", NULL },
-	{ "time", 1, {TIMESTAMPOID}, "t/F:timestamp_time", NULL },
-	{ "time", 1, {TIMEOID}, "ta/c:", NULL },
-	{ "timestamp", 1, {TIMESTAMPOID}, "ta/c:", NULL },
-	{ "timestamp", 1, {DATEOID}, "t/F:date_timestamp", NULL },
+	{ "date", 1, {DATEOID}, "ta/c:" },
+	{ "date", 1, {TIMESTAMPOID}, "t/F:timestamp_date" },
+	{ "time", 1, {TIMESTAMPOID}, "t/F:timestamp_time" },
+	{ "time", 1, {TIMEOID}, "ta/c:" },
+	{ "timestamp", 1, {TIMESTAMPOID}, "ta/c:" },
+	{ "timestamp", 1, {DATEOID}, "t/F:date_timestamp" },
 	/* timedata operators */
-	{ "date_pli", 2, {DATEOID, INT4OID}, "t/F:date_pli", NULL },
-	{ "date_mii", 2, {DATEOID, INT4OID}, "t/F:date_mii", NULL },
-	{ "date_mi", 2, {DATEOID, DATEOID}, "t/F:date_mi", NULL },
-	{ "datetime_pl", 2, {DATEOID, TIMEOID}, "t/F:datetime_pl", NULL },
-	{ "integer_pl_date", 2, {INT4OID, DATEOID}, "t/F:integer_pl_date", NULL },
-	//{ "time_mi_time", 2, {TIMEOID, TIMEOID}, "t/F:time_mi_time", NULL },
-	{ "timedate_pl", 2, {TIMEOID, DATEOID}, "t/F:timedata_pl", NULL },
-	//{ "timestamp_mi", 2, {TIMESTAMPOID, TIMESTAMPOID}, "", NULL },
+	{ "date_pli", 2, {DATEOID, INT4OID}, "t/F:date_pli" },
+	{ "date_mii", 2, {DATEOID, INT4OID}, "t/F:date_mii" },
+	{ "date_mi", 2, {DATEOID, DATEOID}, "t/F:date_mi" },
+	{ "datetime_pl", 2, {DATEOID, TIMEOID}, "t/F:datetime_pl" },
+	{ "integer_pl_date", 2, {INT4OID, DATEOID}, "t/F:integer_pl_date" },
+	//{ "time_mi_time", 2, {TIMEOID, TIMEOID}, "t/F:time_mi_time" },
+	{ "timedate_pl", 2, {TIMEOID, DATEOID}, "t/F:timedata_pl" },
+	//{ "timestamp_mi", 2, {TIMESTAMPOID, TIMESTAMPOID}, "" },
 	/* comparison between date */
-	{ "date_eq", 2, {DATEOID, DATEOID}, "t/b:==", NULL },
-	{ "date_ne", 2, {DATEOID, DATEOID}, "t/b:!=", NULL },
-	{ "date_lt", 2, {DATEOID, DATEOID}, "t/b:<", NULL },
-	{ "date_le", 2, {DATEOID, DATEOID}, "t/b:<=", NULL },
-	{ "date_gt", 2, {DATEOID, DATEOID}, "t/b:>", NULL },
-	{ "date_ge", 2, {DATEOID, DATEOID}, "t/b:>=", NULL },
-	{ "date_cmp", 2, {DATEOID, DATEOID}, "t/f:devfunc_int_comp", NULL},
+	{ "date_eq", 2, {DATEOID, DATEOID}, "t/b:==" },
+	{ "date_ne", 2, {DATEOID, DATEOID}, "t/b:!=" },
+	{ "date_lt", 2, {DATEOID, DATEOID}, "t/b:<"  },
+	{ "date_le", 2, {DATEOID, DATEOID}, "t/b:<=" },
+	{ "date_gt", 2, {DATEOID, DATEOID}, "t/b:>"  },
+	{ "date_ge", 2, {DATEOID, DATEOID}, "t/b:>=" },
+	{ "date_cmp", 2, {DATEOID, DATEOID}, "t/f:devfunc_int_comp" },
 	/* comparison of date and timestamp */
 	{ "date_eq_timestamp", 2, {DATEOID, TIMESTAMPOID},
-	  "t/F:date_eq_timestamp", NULL },
+	  "t/F:date_eq_timestamp" },
 	{ "date_ne_timestamp", 2, {DATEOID, TIMESTAMPOID},
-	  "t/F:date_ne_timestamp", NULL },
+	  "t/F:date_ne_timestamp" },
 	{ "date_lt_timestamp", 2, {DATEOID, TIMESTAMPOID},
-	  "t/F:date_lt_timestamp", NULL },
+	  "t/F:date_lt_timestamp" },
 	{ "date_le_timestamp", 2, {DATEOID, TIMESTAMPOID},
-	  "t/F:date_le_timestamp", NULL },
+	  "t/F:date_le_timestamp" },
 	{ "date_gt_timestamp", 2, {DATEOID, TIMESTAMPOID},
-	  "t/F:date_gt_timestamp", NULL },
+	  "t/F:date_gt_timestamp" },
 	{ "date_ge_timestamp", 2, {DATEOID, TIMESTAMPOID},
-	  "t/F:date_ge_timestamp", NULL },
+	  "t/F:date_ge_timestamp" },
 	{ "date_cmp_timestamp", 2, {DATEOID, TIMESTAMPOID},
-	  "t/F:date_cmp_timestamp", NULL },
+	  "t/F:date_cmp_timestamp" },
 	/* comparion between time */
-	{ "time_eq", 2, {TIMEOID, TIMEOID}, "t/b:==", NULL },
-	{ "time_ne", 2, {TIMEOID, TIMEOID}, "t/b:!=", NULL },
-	{ "time_lt", 2, {TIMEOID, TIMEOID}, "t/b:<", NULL },
-	{ "time_le", 2, {TIMEOID, TIMEOID}, "t/b:<=", NULL },
-	{ "time_gt", 2, {TIMEOID, TIMEOID}, "t/b:>", NULL },
-	{ "time_ge", 2, {TIMEOID, TIMEOID}, "t/b:>=", NULL },
-	{ "time_cmp", 2, {TIMEOID, TIMEOID}, "t/f:devfunc_int_comp", NULL},
+	{ "time_eq", 2, {TIMEOID, TIMEOID}, "t/b:==" },
+	{ "time_ne", 2, {TIMEOID, TIMEOID}, "t/b:!=" },
+	{ "time_lt", 2, {TIMEOID, TIMEOID}, "t/b:<"  },
+	{ "time_le", 2, {TIMEOID, TIMEOID}, "t/b:<=" },
+	{ "time_gt", 2, {TIMEOID, TIMEOID}, "t/b:>"  },
+	{ "time_ge", 2, {TIMEOID, TIMEOID}, "t/b:>=" },
+	{ "time_cmp", 2, {TIMEOID, TIMEOID}, "t/f:devfunc_int_comp" },
 	/* comparison between timestamp */
-	{ "timestamp_eq", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/b:==", NULL},
-	{ "timestamp_ne", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/b:!=", NULL},
-	{ "timestamp_lt", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/b:<", NULL},
-	{ "timestamp_le", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/b:<=", NULL},
-	{ "timestamp_gt", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/b:>", NULL},
-	{ "timestamp_ge", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/b:>=", NULL},
+	{ "timestamp_eq", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/b:==" },
+	{ "timestamp_ne", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/b:!=" },
+	{ "timestamp_lt", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/b:<"  },
+	{ "timestamp_le", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/b:<=" },
+	{ "timestamp_gt", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/b:>"  },
+	{ "timestamp_ge", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/b:>=" },
 	{ "timestamp_cmp", 2, {TIMESTAMPOID, TIMESTAMPOID},
-	  "t/f:devfunc_int_comp", NULL},
+	  "t/f:devfunc_int_comp" },
 	/* comparison of timestamp and date */
 	{ "timestamp_eq_date", 2, {TIMESTAMPOID, DATEOID},
-	  "t/F:timestamp_eq_date", NULL},
+	  "t/F:timestamp_eq_date" },
 	{ "timestamp_ne_date", 2, {TIMESTAMPOID, DATEOID},
-	  "t/F:timestamp_ne_date", NULL},
+	  "t/F:timestamp_ne_date" },
 	{ "timestamp_lt_date", 2, {TIMESTAMPOID, DATEOID},
-	  "t/F:timestamp_lt_date", NULL},
+	  "t/F:timestamp_lt_date" },
 	{ "timestamp_le_date", 2, {TIMESTAMPOID, DATEOID},
-	  "t/F:timestamp_le_date", NULL},
+	  "t/F:timestamp_le_date" },
 	{ "timestamp_gt_date", 2, {TIMESTAMPOID, DATEOID},
-	  "t/F:timestamp_gt_date", NULL},
+	  "t/F:timestamp_gt_date" },
 	{ "timestamp_ge_date", 2, {TIMESTAMPOID, DATEOID},
-	  "t/F:timestamp_ge_date", NULL},
+	  "t/F:timestamp_ge_date" },
 	{ "timestamp_cmp_date", 2, {TIMESTAMPOID, DATEOID},
-	  "t/F:timestamp_cmp_date", NULL},
+	  "t/F:timestamp_cmp_date"},
 
 	/*
 	 * Text functions
 	 * ---------------------- */
-	{ "bpchareq", 2, {BPCHAROID,BPCHAROID},   "s/F:bpchareq", NULL },
-	{ "bpcharne", 2, {BPCHAROID,BPCHAROID},   "s/F:bpcharne", NULL },
-	{ "bpcharlt", 2, {BPCHAROID,BPCHAROID},   "s/F:bpcharlt", NULL },
-	{ "bpcharle", 2, {BPCHAROID,BPCHAROID},   "s/F:bpcharle", NULL },
-	{ "bpchargt", 2, {BPCHAROID,BPCHAROID},   "s/F:bpchargt", NULL },
-	{ "bpcharge", 2, {BPCHAROID,BPCHAROID},   "s/F:bpcharge", NULL },
-	{ "bpcharcmp", 2, {BPCHAROID, BPCHAROID}, "s/F:bpcharcmp", NULL },
-	{ "texteq", 2, {TEXTOID, TEXTOID},  "s/F:texteq", NULL  },
-	{ "textne", 2, {TEXTOID, TEXTOID},  "s/F:textne", NULL  },
-	{ "text_lt", 2, {TEXTOID, TEXTOID}, "s/F:text_lt", NULL  },
-	{ "text_le", 2, {TEXTOID, TEXTOID}, "s/F:text_le", NULL  },
-	{ "text_gt", 2, {TEXTOID, TEXTOID}, "s/F:text_gt", NULL  },
-	{ "text_ge", 2, {TEXTOID, TEXTOID}, "s/F:text_ge", NULL  },
-	{ "bttextcmp",   2, {TEXTOID, TEXTOID}, "s/F:text_cmp", NULL },
+	{ "bpchareq", 2, {BPCHAROID,BPCHAROID},   "s/F:bpchareq" },
+	{ "bpcharne", 2, {BPCHAROID,BPCHAROID},   "s/F:bpcharne" },
+	{ "bpcharlt", 2, {BPCHAROID,BPCHAROID},   "s/F:bpcharlt" },
+	{ "bpcharle", 2, {BPCHAROID,BPCHAROID},   "s/F:bpcharle" },
+	{ "bpchargt", 2, {BPCHAROID,BPCHAROID},   "s/F:bpchargt" },
+	{ "bpcharge", 2, {BPCHAROID,BPCHAROID},   "s/F:bpcharge" },
+	{ "bpcharcmp", 2, {BPCHAROID, BPCHAROID}, "s/F:bpcharcmp"},
+	{ "texteq", 2, {TEXTOID, TEXTOID},  "s/F:texteq" },
+	{ "textne", 2, {TEXTOID, TEXTOID},  "s/F:textne" },
+	{ "text_lt", 2, {TEXTOID, TEXTOID}, "s/F:text_lt" },
+	{ "text_le", 2, {TEXTOID, TEXTOID}, "s/F:text_le" },
+	{ "text_gt", 2, {TEXTOID, TEXTOID}, "s/F:text_gt" },
+	{ "text_ge", 2, {TEXTOID, TEXTOID}, "s/F:text_ge" },
+	{ "bttextcmp",   2, {TEXTOID, TEXTOID}, "s/F:text_cmp" },
 };
 
-
 static void
-devfunc_setup_const(devfunc_info *entry, devfunc_catalog_t *procat)
-{
-	Assert(procat->func_nargs == 0);
-	entry->func_name = pstrdup(procat->func_name);
-	entry->func_alias = entry->func_name;	/* never has alias */
-	entry->func_decl
-		= psprintf("static pg_%s_t pgfn_%s(__private int *errcode)\n"
-				   "{\n"
-				   "  pg_%s_t result;\n"
-				   "  result.isnull = false;\n"
-				   "  result.value = %s;\n"
-				   "  return result;\n"
-				   "}\n",
-				   entry->func_rettype->type_name,
-				   entry->func_alias,
-				   entry->func_rettype->type_name,
-				   procat->func_template);
-}
-
-static void
-devfunc_setup_cast(devfunc_info *entry, devfunc_catalog_t *procat, bool has_alias)
+devfunc_setup_cast(devfunc_info *entry,
+				   devfunc_catalog_t *procat, bool has_alias)
 {
 	devtype_info   *dtype = linitial(entry->func_args);
 
@@ -997,27 +972,22 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 				}
 				entry->func_flags = flags;
 
-				if (procat->func_callback)
-					procat->func_callback(entry, procat);
+				if (strncmp(template, "c:", 2) == 0)
+					devfunc_setup_cast(entry, procat, has_alias);
+				else if (strncmp(template, "b:", 2) == 0)
+					devfunc_setup_oper_both(entry, procat, has_alias);
+				else if (strncmp(template, "l:", 2) == 0 ||
+						 strncmp(template, "r:", 2) == 0)
+					devfunc_setup_oper_either(entry, procat, has_alias);
+				else if (strncmp(template, "f:", 2) == 0)
+					devfunc_setup_func_decl(entry, procat, has_alias);
+				else if (strncmp(template, "F:", 2) == 0)
+					devfunc_setup_func_impl(entry, procat, has_alias);
 				else
 				{
-					if (strncmp(template, "c:", 2) == 0)
-						devfunc_setup_cast(entry, procat, has_alias);
-					else if (strncmp(template, "b:", 2) == 0)
-						devfunc_setup_oper_both(entry, procat, has_alias);
-					else if (strncmp(template, "l:", 2) == 0 ||
-							 strncmp(template, "r:", 2) == 0)
-						devfunc_setup_oper_either(entry, procat, has_alias);
-					else if (strncmp(template, "f:", 2) == 0)
-						devfunc_setup_func_decl(entry, procat, has_alias);
-					else if (strncmp(template, "F:", 2) == 0)
-						devfunc_setup_func_impl(entry, procat, has_alias);
-					else
-					{
-						elog(NOTICE, "Bug? unknown devfunc template: '%s'",
-							template);
-						entry->func_flags = DEVINFO_IS_NEGATIVE;
-					}
+					elog(NOTICE, "Bug? unknown devfunc template: '%s'",
+						 template);
+					entry->func_flags = DEVINFO_IS_NEGATIVE;
 				}
 				goto out;
 			}
@@ -1457,44 +1427,6 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	context->extra_flags = walker_context.extra_flags;
 
 	return walker_context.str.data;
-}
-
-/*
- * pgstrom_codegen_type_declarations
- */
-char *
-pgstrom_codegen_type_declarations(codegen_context *context)
-{
-#if 0
-	StringInfoData	str;
-	ListCell	   *cell;
-
-	initStringInfo(&str);
-	foreach (cell, context->type_defs)
-	{
-		devtype_info   *dtype = lfirst(cell);
-		int		i, n;
-
-		/* prevent duplicated definition by built-in functions */
-		appendStringInfo(&str, "#ifndef PG_");
-		n = strlen(dtype->type_name);
-		for (i=0; i < n; i++)
-			appendStringInfoChar(&str, toupper(dtype->type_name[i]));
-		appendStringInfo(&str, "_TYPE_DEFINED\n");
-
-		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
-			appendStringInfo(&str, "STROMCL_VARLENA_TYPE_TEMPLATE(%s)\n",
-							 dtype->type_name);
-		else
-			appendStringInfo(&str, "STROMCL_SIMPLE_TYPE_TEMPLATE(%s,%s)\n",
-							 dtype->type_name, dtype->type_base);
-		appendStringInfo(&str, "#endif\n");
-	}
-	appendStringInfoChar(&str, '\n');
-
-	return str.data;
-#endif
-	return "";
 }
 
 /*

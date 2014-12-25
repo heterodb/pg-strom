@@ -541,7 +541,6 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 	/*
 	 * make declarations of var and param references
 	 */
-	appendStringInfo(&str, "%s\n", pgstrom_codegen_type_declarations(context));
 	appendStringInfo(&str, "%s\n", pgstrom_codegen_func_declarations(context));
 	appendStringInfo(&decl, "%s%s\n",
 					 pgstrom_codegen_param_declarations(context,

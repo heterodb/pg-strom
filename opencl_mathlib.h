@@ -29,6 +29,139 @@
 #define SAMESIGN(a,b)	(((a) < 0) == ((b) < 0))
 
 /*
+ * Functions for addition operator on basic data types
+ */
+#define BASIC_INT_ADDFUNC_TEMPLATE(name,r_type,x_type,y_type)		\
+	static inline pg_##r_type##_t									\
+	pgfn_##name(__private cl_int *errcode,							\
+				pg_##x_type##_t arg1, pg_##y_type##_t arg2)			\
+	{																\
+		pg_##r_type##_t	result;										\
+																	\
+		result.isnull = arg1.isnull | arg2.isnull;					\
+		if (!result.isnull)											\
+		{															\
+			result.value = arg1.value + arg2.value;					\
+			if (SAMESIGN(arg1.value, arg2.value) &&					\
+				!SAMESIGN(result.value, arg1.value))				\
+			{														\
+				result.isnull = true;								\
+				STROM_SET_ERROR(errcode, StromError_CpuReCheck);	\
+			}														\
+		}															\
+		return result;												\
+	}
+
+#define BASIC_FLOAT_ADDFUNC_TEMPLATE(name,r_type,x_type,y_type)		\
+	static inline pg_##r_type##_t									\
+	pgfn_##name(__private cl_int *errcode,                          \
+				pg_##x_type##_t arg1, pg_##y_type##_t arg2)         \
+    {																\
+		pg_##r_type##_t	result;										\
+																	\
+		result.isnull = arg1.isnull | arg2.isnull;					\
+		if (!result.isnull)											\
+		{															\
+			result.value = arg1.value + arg2.value;					\
+			if (CHECKFLOATVAL(result.value,							\
+							  isinf(arg1.value) ||					\
+							  isinf(arg2.value), true))				\
+			{														\
+				result.isnull = true;								\
+				STROM_SET_ERROR(errcode, StromError_CpuReCheck);    \
+			}                                                       \
+		}                                                           \
+		return result;												\
+	}
+
+BASIC_INT_ADDFUNC_TEMPLATE(int2pl, int2,int2,int2)
+BASIC_INT_ADDFUNC_TEMPLATE(int24pl,int4,int4,int2)
+BASIC_INT_ADDFUNC_TEMPLATE(int28pl,int8,int8,int2)
+
+BASIC_INT_ADDFUNC_TEMPLATE(int42pl,int4,int4,int2)
+BASIC_INT_ADDFUNC_TEMPLATE(int4pl, int4,int4,int4)
+BASIC_INT_ADDFUNC_TEMPLATE(int48pl,int4,int4,int8)
+
+BASIC_INT_ADDFUNC_TEMPLATE(int82pl,int8,int8,int2)
+BASIC_INT_ADDFUNC_TEMPLATE(int84pl,int8,int8,int4)
+BASIC_INT_ADDFUNC_TEMPLATE(int8pl, int8,int8,int8)
+
+BASIC_FLOAT_ADDFUNC_TEMPLATE(float4pl, float4, float4, float4)
+BASIC_FLOAT_ADDFUNC_TEMPLATE(float48pl,float8, float4, float8)
+BASIC_FLOAT_ADDFUNC_TEMPLATE(float84pl,float8, float8, float4)
+BASIC_FLOAT_ADDFUNC_TEMPLATE(float8pl, float8, float8, float8)
+
+#undef BASIC_INT_ADDFUNC_TEMPLATE
+#undef BASIC_FLOAT_ADDFUNC_TEMPLATE
+
+/*
+ * Functions for addition operator on basic data types
+ */
+#define BASIC_INT_SUBFUNC_TEMPLATE(name,r_type,x_type,y_type)		\
+	static inline pg_##r_type##_t									\
+	pgfn_##name(__private cl_int *errcode,							\
+				pg_##x_type##_t arg1, pg_##y_type##_t arg2)			\
+	{																\
+		pg_##r_type##_t	result;										\
+																	\
+		result.isnull = arg1.isnull | arg2.isnull;					\
+		if (!result.isnull)											\
+		{															\
+			result.value = arg1.value - arg2.value;					\
+			if (SAMESIGN(arg1.value, arg2.value) &&					\
+				!SAMESIGN(result.value, arg1.value))				\
+			{														\
+				result.isnull = true;								\
+				STROM_SET_ERROR(errcode, StromError_CpuReCheck);	\
+			}														\
+		}															\
+		return result;												\
+	}
+
+#define BASIC_FLOAT_SUBFUNC_TEMPLATE(name,r_type,x_type,y_type)		\
+	static inline pg_##r_type##_t									\
+	pgfn_##name(__private cl_int *errcode,                          \
+				pg_##x_type##_t arg1, pg_##y_type##_t arg2)         \
+    {																\
+		pg_##r_type##_t	result;										\
+																	\
+		result.isnull = arg1.isnull | arg2.isnull;					\
+		if (!result.isnull)											\
+		{															\
+			result.value = arg1.value - arg2.value;					\
+			if (CHECKFLOATVAL(result.value,							\
+							  isinf(arg1.value) ||					\
+							  isinf(arg2.value), true))				\
+			{														\
+				result.isnull = true;								\
+				STROM_SET_ERROR(errcode, StromError_CpuReCheck);    \
+			}                                                       \
+		}                                                           \
+		return result;												\
+	}
+
+BASIC_INT_SUBFUNC_TEMPLATE(int2mi,  int2, int2, int2)
+BASIC_INT_SUBFUNC_TEMPLATE(int24mi, int4, int2, int4)
+BASIC_INT_SUBFUNC_TEMPLATE(int28mi, int8, int2, int8)
+
+BASIC_INT_SUBFUNC_TEMPLATE(int42mi, int4, int4, int2)
+BASIC_INT_SUBFUNC_TEMPLATE(int4mi,  int4, int4, int4)
+BASIC_INT_SUBFUNC_TEMPLATE(int48mi, int8, int4, int8)
+
+BASIC_INT_SUBFUNC_TEMPLATE(int82mi, int8, int8, int2)
+BASIC_INT_SUBFUNC_TEMPLATE(int84mi, int8, int8, int4)
+BASIC_INT_SUBFUNC_TEMPLATE(int8mi,  int8, int8, int8)
+
+BASIC_FLOAT_SUBFUNC_TEMPLATE(float4mi,  float4, float4, float4)
+BASIC_FLOAT_SUBFUNC_TEMPLATE(float48mi, float8, float4, float8)
+BASIC_FLOAT_SUBFUNC_TEMPLATE(float84mi, float8, float8, float4)
+BASIC_FLOAT_SUBFUNC_TEMPLATE(float8mi,  float8, float8, float8)
+
+#undef BASIC_INT_SUBFUNC_TEMPLATE
+#undef BASIC_FLOAT_SUBFUNC_TEMPLATE
+
+
+/*
  * Functions for multiplication operator on basic data types
  */
 static inline pg_int2_t
@@ -647,6 +780,74 @@ pgfn_float8div(__private cl_int *errcode, pg_float8_t arg1, pg_float8_t arg2)
 	}
 	return result;
 }
+
+/*
+ * Functions for modulo operator on basic data types
+ */
+#define BASIC_INT_MODFUNC_TEMPLATE(name,d_type)		\
+	static inline pg_##d_type##_t									\
+	pgfn_##name(__private cl_int *errcode,							\
+				pg_##d_type##_t arg1, pg_##d_type##_t arg2)			\
+	{																\
+		pg_##d_type##_t	result;										\
+																	\
+		result.isnull = arg1.isnull | arg2.isnull;					\
+		if (!result.isnull)											\
+		{															\
+			if (arg2.value == 0)									\
+			{														\
+				result.isnull = true;								\
+				STROM_SET_ERROR(errcode, StromError_CpuReCheck);	\
+			}														\
+			else if (arg2.value == -1)								\
+				result.value = 0;									\
+			else													\
+				result.value = arg1.value % arg2.value;				\
+		}															\
+		return result;												\
+	}
+
+BASIC_INT_MODFUNC_TEMPLATE(int2mod, int2)
+BASIC_INT_MODFUNC_TEMPLATE(int4mod, int4)
+BASIC_INT_MODFUNC_TEMPLATE(int8mod, int8)
+
+#undef BASIC_INT_MODFUNC_TEMPLATE
+
+/*
+ * Misc mathematic functions
+ */
+static inline pg_float8_t
+dpow(__private cl_int *errcode, pg_float8_t arg1, pg_float8_t arg2)
+{
+	pg_float8_t	result;
+
+	if ((arg1.value == 0.0 && arg2.value < 0.0) ||
+		(arg1.value < 0.0 && floor(arg2.value) != arg2.value))
+	{
+		result.isnull = true;
+		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+	}
+	else
+	{
+		result.isnull = false;
+		result.value = pow(arg1.value, arg2.value);
+	}
+	// TODO: needs to investigate which value shall be returned when
+	// NVIDIA platform accept very large number
+	return result;
+}
+
+static inline pg_float8_t
+pgfn_dpi(__private cl_int *errcode)
+{
+	pg_float8_t	result;
+
+	result.isnull = false;
+	result.value = M_PI;
+
+	return result;
+}
+
 
 #endif	/* OPENCL_DEVICE_CODE */
 #endif	/* OPENCL_MATH_H */

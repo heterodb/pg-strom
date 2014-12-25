@@ -425,7 +425,6 @@ extern devtype_info *pgstrom_devtype_lookup_and_track(Oid type_oid,
 extern devfunc_info *pgstrom_devfunc_lookup_and_track(Oid func_oid,
 											  codegen_context *context);
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
-extern char *pgstrom_codegen_type_declarations(codegen_context *context);
 extern char *pgstrom_codegen_func_declarations(codegen_context *context);
 extern char *pgstrom_codegen_param_declarations(codegen_context *context,
 												Bitmapset *param_refs);

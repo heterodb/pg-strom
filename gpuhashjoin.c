@@ -1448,8 +1448,7 @@ gpuhashjoin_codegen(PlannerInfo *root,
 	gpuhashjoin_codegen_projection(&decl, ghjoin, context);
 
 	/* put declarations of types/funcs/params */
-	appendStringInfo(&str, "%s%s%s%s",
-					 pgstrom_codegen_type_declarations(context),
+	appendStringInfo(&str, "%s%s%s",
 					 gpuhashjoin_codegen_type_declarations(context),
 					 pgstrom_codegen_func_declarations(context),
 					 decl.data);

@@ -1929,13 +1929,11 @@ gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 	/* OK, add type/function declarations */
 	initStringInfo(&str);
 	appendStringInfo(&str,
-					 "%s\n"		/* type declarations */
 					 "%s\n"		/* function declarations */
 					 "%s\n"		/* gpupreagg_qual_eval() */
 					 "%s\n"		/* gpupreagg_keycomp() */
 					 "%s\n"		/* gpupreagg_aggcalc() */
 					 "%s\n",	/* gpupreagg_projection() */
-					 pgstrom_codegen_type_declarations(context),
 					 pgstrom_codegen_func_declarations(context),
 					 fn_qualeval,
 					 fn_keycomp,
