@@ -8,7 +8,9 @@
 # ----------
 # GpuPreAgg Pattern
 # ----------
+# initialize data for gpupreagg tests. (it needs to run first.)
 test: agg_init
+# GpuPreAgg parallel test-cases.
 test: explain_agg zero_agg where_agg nogrp_agg recheck_agg group_agg overflow_agg
 
 # ----------
