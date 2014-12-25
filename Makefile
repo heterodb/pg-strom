@@ -2,6 +2,10 @@
 EXTENSION = pg_strom
 DATA = pg_strom--1.0.sql
 
+# regression test options.
+REGRESS=--schedule=input/parallel_schedule
+REGRESS_OPTS=--top-builddir=../.. --extra-install=contrib/pg_strom --inputdir=input --temp-install=tmp_check --temp-config=input/enable.conf
+
 MODULE_big = pg_strom
 OBJS  = main.o shmem.o codegen.o mqueue.o restrack.o grafter.o \
 	datastore.o gpuscan.o gpuhashjoin.o gpupreagg.o \

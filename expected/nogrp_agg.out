@@ -1,0 +1,770 @@
+--#
+--#       Gpu PreAggregate Simple TestCases. 
+--#
+set client_min_messages to warning;
+set extra_float_digits to -3;
+-- smallint
+select  avg(smlint_x)            from gpupreagg_test ;
+          avg           
+------------------------
+ 0.01014854092776626751
+(1 row)
+
+select  count(smlint_x)          from gpupreagg_test ;
+ count 
+-------
+ 28477
+(1 row)
+
+select  max(smlint_x)            from gpupreagg_test ;
+ max 
+-----
+  33
+(1 row)
+
+select  min(smlint_x)            from gpupreagg_test ;
+ min 
+-----
+ -33
+(1 row)
+
+select  sum(smlint_x)            from gpupreagg_test ;
+ sum 
+-----
+ 289
+(1 row)
+
+select  stddev(smlint_x)         from gpupreagg_test ;
+       stddev        
+---------------------
+ 18.9395650462766244
+(1 row)
+
+select  stddev_pop(smlint_x)     from gpupreagg_test ;
+     stddev_pop      
+---------------------
+ 18.9392325019194254
+(1 row)
+
+select  stddev_samp(smlint_x)    from gpupreagg_test ;
+     stddev_samp     
+---------------------
+ 18.9395650462766244
+(1 row)
+
+select  variance(smlint_x)       from gpupreagg_test ;
+       variance       
+----------------------
+ 358.7071241421432742
+(1 row)
+
+select  var_pop(smlint_x)        from gpupreagg_test ;
+       var_pop        
+----------------------
+ 358.6945277617611362
+(1 row)
+
+select  var_samp(smlint_x)       from gpupreagg_test ;
+       var_samp       
+----------------------
+ 358.7071241421432742
+(1 row)
+
+select corr(smlint_x,smlint_x) from gpupreagg_test ;
+ corr 
+------
+    1
+(1 row)
+
+select covar_pop(smlint_x,smlint_x) from gpupreagg_test ;
+   covar_pop   
+---------------
+ 358.694527762
+(1 row)
+
+select covar_samp(smlint_x,smlint_x) from gpupreagg_test ;
+  covar_samp   
+---------------
+ 358.707124142
+(1 row)
+
+--integer
+select  avg(integer_x)            from gpupreagg_test ;
+          avg          
+-----------------------
+ 3473.3132124443197362
+(1 row)
+
+select  count(integer_x)          from gpupreagg_test ;
+ count 
+-------
+ 28511
+(1 row)
+
+select  max(integer_x)            from gpupreagg_test ;
+   max   
+---------
+ 2147112
+(1 row)
+
+select  min(integer_x)            from gpupreagg_test ;
+   min    
+----------
+ -2147350
+(1 row)
+
+select  sum(integer_x)            from gpupreagg_test ;
+   sum    
+----------
+ 99027633
+(1 row)
+
+select  stddev(integer_x)         from gpupreagg_test ;
+    stddev    
+--------------
+ 1242493.5711
+(1 row)
+
+select  stddev_pop(integer_x)     from gpupreagg_test ;
+  stddev_pop  
+--------------
+ 1242471.7812
+(1 row)
+
+select  stddev_samp(integer_x)    from gpupreagg_test ;
+ stddev_samp  
+--------------
+ 1242493.5711
+(1 row)
+
+select  variance(integer_x)       from gpupreagg_test ;
+      variance      
+--------------------
+ 1543790274277.5558
+(1 row)
+
+select  var_pop(integer_x)        from gpupreagg_test ;
+      var_pop       
+--------------------
+ 1543736127096.6685
+(1 row)
+
+select  var_samp(integer_x)       from gpupreagg_test ;
+      var_samp      
+--------------------
+ 1543790274277.5558
+(1 row)
+
+select corr(integer_x,integer_x) from gpupreagg_test ;
+ corr 
+------
+    1
+(1 row)
+
+select covar_pop(integer_x,integer_x) from gpupreagg_test ;
+    covar_pop     
+------------------
+ 1.5437361271e+12
+(1 row)
+
+select covar_samp(integer_x,integer_x) from gpupreagg_test ;
+    covar_samp     
+-------------------
+ 1.54379027428e+12
+(1 row)
+
+--bigint
+select  avg(bigint_x)            from gpupreagg_test ;
+         avg         
+---------------------
+ -1956275034081.1003
+(1 row)
+
+select  count(bigint_x)          from gpupreagg_test ;
+ count 
+-------
+ 28502
+(1 row)
+
+select  max(bigint_x)            from gpupreagg_test ;
+       max        
+------------------
+ 9222962820960748
+(1 row)
+
+select  min(bigint_x)            from gpupreagg_test ;
+        min        
+-------------------
+ -9221992927150998
+(1 row)
+
+select  sum(bigint_x)            from gpupreagg_test ;
+        sum         
+--------------------
+ -55757751021379520
+(1 row)
+
+select  stddev(bigint_x)         from gpupreagg_test ;
+      stddev      
+------------------
+ 5325311446033157
+(1 row)
+
+select  stddev_pop(bigint_x)     from gpupreagg_test ;
+    stddev_pop    
+------------------
+ 5325218025252916
+(1 row)
+
+select  stddev_samp(bigint_x)    from gpupreagg_test ;
+   stddev_samp    
+------------------
+ 5325311446033157
+(1 row)
+
+select  variance(bigint_x)       from gpupreagg_test ;
+             variance             
+----------------------------------
+ 28358941997251750574135561157327
+(1 row)
+
+select  var_pop(bigint_x)        from gpupreagg_test ;
+             var_pop              
+----------------------------------
+ 28357947016478567929037879045154
+(1 row)
+
+select  var_samp(bigint_x)       from gpupreagg_test ;
+             var_samp             
+----------------------------------
+ 28358941997251750574135561157327
+(1 row)
+
+select corr(bigint_x,bigint_x) from gpupreagg_test ;
+ corr 
+------
+    1
+(1 row)
+
+select covar_pop(bigint_x,bigint_x) from gpupreagg_test ;
+     covar_pop     
+-------------------
+ 2.83579470165e+31
+(1 row)
+
+select covar_samp(bigint_x,bigint_x) from gpupreagg_test ;
+    covar_samp     
+-------------------
+ 2.83589419973e+31
+(1 row)
+
+--real
+select  avg(real_x)            from gpupreagg_test ;
+       avg        
+------------------
+ 0.00196869469895
+(1 row)
+
+select  count(real_x)          from gpupreagg_test ;
+ count 
+-------
+ 28484
+(1 row)
+
+select  max(real_x)            from gpupreagg_test ;
+ max 
+-----
+   1
+(1 row)
+
+select  min(real_x)            from gpupreagg_test ;
+ min 
+-----
+  -1
+(1 row)
+
+select  sum(real_x)            from gpupreagg_test ;
+ sum  
+------
+ 56.1
+(1 row)
+
+select  stddev(real_x)         from gpupreagg_test ;
+     stddev     
+----------------
+ 0.575437064644
+(1 row)
+
+select  stddev_pop(real_x)     from gpupreagg_test ;
+   stddev_pop   
+----------------
+ 0.575426963497
+(1 row)
+
+select  stddev_samp(real_x)    from gpupreagg_test ;
+  stddev_samp   
+----------------
+ 0.575437064644
+(1 row)
+
+select  variance(real_x)       from gpupreagg_test ;
+    variance    
+----------------
+ 0.331127815366
+(1 row)
+
+select  var_pop(real_x)        from gpupreagg_test ;
+    var_pop    
+---------------
+ 0.33111619032
+(1 row)
+
+select  var_samp(real_x)       from gpupreagg_test ;
+    var_samp    
+----------------
+ 0.331127815366
+(1 row)
+
+select corr(real_x,real_x) from gpupreagg_test ;
+ corr 
+------
+    1
+(1 row)
+
+select covar_pop(real_x,real_x) from gpupreagg_test ;
+   covar_pop   
+---------------
+ 0.33111619032
+(1 row)
+
+select covar_samp(real_x,real_x) from gpupreagg_test ;
+   covar_samp   
+----------------
+ 0.331127815366
+(1 row)
+
+--float
+select  avg(float_x)            from gpupreagg_test ;
+       avg        
+------------------
+ 0.00111512946958
+(1 row)
+
+select  count(float_x)          from gpupreagg_test ;
+ count 
+-------
+ 28513
+(1 row)
+
+select  max(float_x)            from gpupreagg_test ;
+      max       
+----------------
+ 0.999941079877
+(1 row)
+
+select  min(float_x)            from gpupreagg_test ;
+       min       
+-----------------
+ -0.999974144157
+(1 row)
+
+select  sum(float_x)            from gpupreagg_test ;
+      sum      
+---------------
+ 31.7956865663
+(1 row)
+
+select  stddev(float_x)         from gpupreagg_test ;
+    stddev     
+---------------
+ 0.57975574797
+(1 row)
+
+select  stddev_pop(float_x)     from gpupreagg_test ;
+   stddev_pop   
+----------------
+ 0.579745581365
+(1 row)
+
+select  stddev_samp(float_x)    from gpupreagg_test ;
+  stddev_samp  
+---------------
+ 0.57975574797
+(1 row)
+
+select  variance(float_x)       from gpupreagg_test ;
+    variance    
+----------------
+ 0.336116727304
+(1 row)
+
+select  var_pop(float_x)        from gpupreagg_test ;
+    var_pop     
+----------------
+ 0.336104939112
+(1 row)
+
+select  var_samp(float_x)       from gpupreagg_test ;
+    var_samp    
+----------------
+ 0.336116727304
+(1 row)
+
+select corr(float_x,float_x) from gpupreagg_test ;
+ corr 
+------
+    1
+(1 row)
+
+select covar_pop(float_x,float_x) from gpupreagg_test ;
+   covar_pop    
+----------------
+ 0.336104939112
+(1 row)
+
+select covar_samp(float_x,float_x) from gpupreagg_test ;
+   covar_samp   
+----------------
+ 0.336116727304
+(1 row)
+
+--numeric
+select  avg(nume_x)            from gpupreagg_test ;
+           avg           
+-------------------------
+ -0.00212757033332667606
+(1 row)
+
+select  count(nume_x)          from gpupreagg_test ;
+ count 
+-------
+ 28519
+(1 row)
+
+select  max(nume_x)            from gpupreagg_test ;
+        max        
+-------------------
+ 0.999978278763592
+(1 row)
+
+select  min(nume_x)            from gpupreagg_test ;
+        min        
+-------------------
+ -0.99993916740641
+(1 row)
+
+select  sum(nume_x)            from gpupreagg_test ;
+           sum            
+--------------------------
+ -60.67617833614347448932
+(1 row)
+
+select  stddev(nume_x)         from gpupreagg_test ;
+                   stddev                   
+--------------------------------------------
+ 0.5776846433022537640548732193412116778844
+(1 row)
+
+select  stddev_pop(nume_x)     from gpupreagg_test ;
+                 stddev_pop                 
+--------------------------------------------
+ 0.5776745151472093345711080662763978594441
+(1 row)
+
+select  stddev_samp(nume_x)    from gpupreagg_test ;
+                stddev_samp                 
+--------------------------------------------
+ 0.5776846433022537640548732193412116778844
+(1 row)
+
+select  variance(nume_x)       from gpupreagg_test ;
+                  variance                  
+--------------------------------------------
+ 0.3337195471072521646582486741361160968325
+(1 row)
+
+select  var_pop(nume_x)        from gpupreagg_test ;
+                  var_pop                   
+--------------------------------------------
+ 0.3337078454505633869253457585824804112861
+(1 row)
+
+select  var_samp(nume_x)       from gpupreagg_test ;
+                  var_samp                  
+--------------------------------------------
+ 0.3337195471072521646582486741361160968325
+(1 row)
+
+select corr(nume_x,nume_x) from gpupreagg_test ;
+ corr 
+------
+    1
+(1 row)
+
+select covar_pop(nume_x,nume_x) from gpupreagg_test ;
+   covar_pop    
+----------------
+ 0.333707845451
+(1 row)
+
+select covar_samp(nume_x,nume_x) from gpupreagg_test ;
+   covar_samp   
+----------------
+ 0.333719547107
+(1 row)
+
+--smallserial
+select  avg(smlsrl_x)            from gpupreagg_test ;
+          avg           
+------------------------
+ 0.02125000000000000000
+(1 row)
+
+select  count(smlsrl_x)          from gpupreagg_test ;
+ count 
+-------
+ 40000
+(1 row)
+
+select  max(smlsrl_x)            from gpupreagg_test ;
+ max 
+-----
+  33
+(1 row)
+
+select  min(smlsrl_x)            from gpupreagg_test ;
+ min 
+-----
+ -33
+(1 row)
+
+select  sum(smlsrl_x)            from gpupreagg_test ;
+ sum 
+-----
+ 850
+(1 row)
+
+select  stddev(smlsrl_x)         from gpupreagg_test ;
+       stddev        
+---------------------
+ 16.3834889112552162
+(1 row)
+
+select  stddev_pop(smlsrl_x)     from gpupreagg_test ;
+     stddev_pop      
+---------------------
+ 16.3832841163638495
+(1 row)
+
+select  stddev_samp(smlsrl_x)    from gpupreagg_test ;
+     stddev_samp     
+---------------------
+ 16.3834889112552162
+(1 row)
+
+select  variance(smlsrl_x)       from gpupreagg_test ;
+       variance       
+----------------------
+ 268.4187089052226306
+(1 row)
+
+select  var_pop(smlsrl_x)        from gpupreagg_test ;
+       var_pop        
+----------------------
+ 268.4119984375000000
+(1 row)
+
+select  var_samp(smlsrl_x)       from gpupreagg_test ;
+       var_samp       
+----------------------
+ 268.4187089052226306
+(1 row)
+
+select corr(smlsrl_x,smlsrl_x) from gpupreagg_test ;
+ corr 
+------
+    1
+(1 row)
+
+select covar_pop(smlsrl_x,smlsrl_x) from gpupreagg_test ;
+   covar_pop   
+---------------
+ 268.411998438
+(1 row)
+
+select covar_samp(smlsrl_x,smlsrl_x) from gpupreagg_test ;
+  covar_samp   
+---------------
+ 268.418708905
+(1 row)
+
+--serial
+select  avg(serial_x)            from gpupreagg_test ;
+          avg           
+------------------------
+ -1893.1650500000000000
+(1 row)
+
+select  count(serial_x)          from gpupreagg_test ;
+ count 
+-------
+ 40000
+(1 row)
+
+select  max(serial_x)            from gpupreagg_test ;
+   max   
+---------
+ 2147372
+(1 row)
+
+select  min(serial_x)            from gpupreagg_test ;
+   min    
+----------
+ -2147386
+(1 row)
+
+select  sum(serial_x)            from gpupreagg_test ;
+    sum    
+-----------
+ -75726602
+(1 row)
+
+select  stddev(serial_x)         from gpupreagg_test ;
+    stddev    
+--------------
+ 1071092.0380
+(1 row)
+
+select  stddev_pop(serial_x)     from gpupreagg_test ;
+  stddev_pop  
+--------------
+ 1071078.6493
+(1 row)
+
+select  stddev_samp(serial_x)    from gpupreagg_test ;
+ stddev_samp  
+--------------
+ 1071092.0380
+(1 row)
+
+select  variance(serial_x)       from gpupreagg_test ;
+      variance      
+--------------------
+ 1147238153844.2689
+(1 row)
+
+select  var_pop(serial_x)        from gpupreagg_test ;
+      var_pop       
+--------------------
+ 1147209472890.4228
+(1 row)
+
+select  var_samp(serial_x)       from gpupreagg_test ;
+      var_samp      
+--------------------
+ 1147238153844.2689
+(1 row)
+
+select corr(serial_x,serial_x) from gpupreagg_test ;
+ corr 
+------
+    1
+(1 row)
+
+select covar_pop(serial_x,serial_x) from gpupreagg_test ;
+     covar_pop     
+-------------------
+ 1.14720947289e+12
+(1 row)
+
+select covar_samp(serial_x,serial_x) from gpupreagg_test ;
+    covar_samp     
+-------------------
+ 1.14723815384e+12
+(1 row)
+
+--bigserial
+select  avg(bigsrl_x)            from gpupreagg_test ;
+           avg           
+-------------------------
+ -1104030969639.62695000
+(1 row)
+
+select  count(bigsrl_x)          from gpupreagg_test ;
+ count 
+-------
+ 40000
+(1 row)
+
+select  max(bigsrl_x)            from gpupreagg_test ;
+       max        
+------------------
+ 9223129809289216
+(1 row)
+
+select  min(bigsrl_x)            from gpupreagg_test ;
+        min        
+-------------------
+ -9221683105390134
+(1 row)
+
+select  sum(bigsrl_x)            from gpupreagg_test ;
+        sum         
+--------------------
+ -44161238785585078
+(1 row)
+
+select  stddev(bigsrl_x)         from gpupreagg_test ;
+      stddev      
+------------------
+ 4615061716811914
+(1 row)
+
+select  stddev_pop(bigsrl_x)     from gpupreagg_test ;
+    stddev_pop    
+------------------
+ 4615004028179898
+(1 row)
+
+select  stddev_samp(bigsrl_x)    from gpupreagg_test ;
+   stddev_samp    
+------------------
+ 4615061716811914
+(1 row)
+
+select  variance(bigsrl_x)       from gpupreagg_test ;
+             variance             
+----------------------------------
+ 21298794649982931973840274612980
+(1 row)
+
+select  var_pop(bigsrl_x)        from gpupreagg_test ;
+             var_pop              
+----------------------------------
+ 21298262180116682400540928606115
+(1 row)
+
+select  var_samp(bigsrl_x)       from gpupreagg_test ;
+             var_samp             
+----------------------------------
+ 21298794649982931973840274612980
+(1 row)
+
+select corr(bigsrl_x,bigsrl_x) from gpupreagg_test ;
+ corr 
+------
+    1
+(1 row)
+
+select covar_pop(bigsrl_x,bigsrl_x) from gpupreagg_test ;
+     covar_pop     
+-------------------
+ 2.12982621801e+31
+(1 row)
+
+select covar_samp(bigsrl_x,bigsrl_x) from gpupreagg_test ;
+   covar_samp    
+-----------------
+ 2.129879465e+31
+(1 row)
+

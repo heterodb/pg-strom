@@ -1,0 +1,20 @@
+# ----------
+# src/test/regress/parallel_schedule
+#
+# By convention, we put no more than twenty tests in any one parallel group;
+# this limits the number of connections needed to run the tests.
+# ----------
+
+# ----------
+# GpuPreAgg Pattern
+# ----------
+test: agg_init
+test: explain_agg zero_agg where_agg nogrp_agg recheck_agg group_agg overflow_agg
+
+# ----------
+# xxxxx pattern
+# ----------
+
+# ----------
+# xxxxxx pattern
+# ----------
