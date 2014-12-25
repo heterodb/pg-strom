@@ -1244,7 +1244,7 @@ gpupreagg_codegen_keycomp(GpuPreAggPlan *gpreagg, codegen_context *context)
 			resno, dtype->type_name, resno - 1,
 			resno, dtype->type_name, resno - 1,
 			resno, resno,
-			dfunc->func_name, resno, resno,
+			dfunc->func_alias, resno, resno,
 			resno, resno,
 			resno, resno);
 	}
@@ -1633,7 +1633,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 					ktoast_label,
 					tle->resno - 1,
 					rowidx_label,
-					dfunc->func_name);
+					dfunc->func_alias);
 			}
 			else if (strcmp(func_name, "pcov_x") == 0 ||
 					 strcmp(func_name, "pcov_y") == 0 ||
@@ -1708,7 +1708,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 						"    temp_float8x = pgfn_%s(errcode,\n"
 						"                           temp_float8y,\n"
 						"                           temp_float8y);\n",
-						dfunc->func_name);
+						dfunc->func_alias);
 				}
 				else if (strcmp(func_name, "pcov_xy") == 0)
 				{
@@ -1720,7 +1720,7 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 						"    temp_float8x = pgfn_%s(errcode,\n"
 						"                           temp_float8x,\n"
 						"                           temp_float8y);\n",
-						dfunc->func_name);
+						dfunc->func_alias);
 				}
 				else if (strcmp(func_name, "pcov_x") != 0)
 					elog(ERROR, "unexpected partial covariance function: %s",
@@ -1929,13 +1929,11 @@ gpupreagg_codegen(GpuPreAggPlan *gpreagg, codegen_context *context)
 	/* OK, add type/function declarations */
 	initStringInfo(&str);
 	appendStringInfo(&str,
-					 "%s\n"		/* type declarations */
 					 "%s\n"		/* function declarations */
 					 "%s\n"		/* gpupreagg_qual_eval() */
 					 "%s\n"		/* gpupreagg_keycomp() */
 					 "%s\n"		/* gpupreagg_aggcalc() */
 					 "%s\n",	/* gpupreagg_projection() */
-					 pgstrom_codegen_type_declarations(context),
 					 pgstrom_codegen_func_declarations(context),
 					 fn_qualeval,
 					 fn_keycomp,

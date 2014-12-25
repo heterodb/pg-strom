@@ -310,6 +310,18 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 		 * Supplemental OpenCL Libraries
 		 */
 
+		/* opencl mathlib */
+		if (dprog->extra_flags & DEVFUNC_NEEDS_MATHLIB)
+		{
+			static size_t	mathlib_code_length = 0;
+
+			if (!mathlib_code_length)
+				mathlib_code_length = strlen(pgstrom_opencl_mathlib_code);
+			sources[count] = pgstrom_opencl_mathlib_code;
+            lengths[count] = mathlib_code_length;
+            count++;
+		}
+
 		/* opencl timelib */
 		if (dprog->extra_flags & DEVFUNC_NEEDS_TIMELIB)
 		{

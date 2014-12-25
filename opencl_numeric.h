@@ -396,35 +396,6 @@ pgfn_numeric_isnotnull(__private int *errcode,
  * Numeric format translation functions
  * ----------------------------------------------------------------
  */
-
-/* pg_int2_t */
-#ifndef PG_INT2_TYPE_DEFINED
-#define PG_INT2_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(int2, cl_short)
-#endif
-/* pg_int4_t */
-#ifndef PG_INT4_TYPE_DEFINED
-#define PG_INT4_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(int4, cl_int)
-#endif
-/* pg_int8_t */
-#ifndef PG_INT8_TYPE_DEFINED
-#define PG_INT8_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(int8, cl_long)
-#endif
-/* pg_float4_t */
-#ifndef PG_FLOAT4_TYPE_DEFINED
-#define PG_FLOAT4_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(float4, cl_float)
-#endif
-/* pg_float8_t */
-#ifndef PG_FLOAT8_TYPE_DEFINED
-#define PG_FLOAT8_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(float8, cl_double)
-#endif
-
-
-
 static pg_int8_t
 numeric_to_integer(__private int *errcode, pg_numeric_t arg, cl_int size)
 {

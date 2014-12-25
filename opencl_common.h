@@ -633,20 +633,40 @@ static __global Datum *pg_common_vstore(__global kern_data_store *kds,
 	STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)
 
-/*
- * declaration of some built-in data types
- */
-
 /* pg_bool_t */
 #ifndef PG_BOOL_TYPE_DEFINED
 #define PG_BOOL_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(bool, cl_bool)
 #endif
 
+/* pg_int2_t */
+#ifndef PG_INT2_TYPE_DEFINED
+#define PG_INT2_TYPE_DEFINED
+STROMCL_SIMPLE_TYPE_TEMPLATE(int2, cl_short)
+#endif
+
 /* pg_int4_t */
 #ifndef PG_INT4_TYPE_DEFINED
 #define PG_INT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int4, cl_int)
+#endif
+
+/* pg_int8_t */
+#ifndef PG_INT8_TYPE_DEFINED
+#define PG_INT8_TYPE_DEFINED
+STROMCL_SIMPLE_TYPE_TEMPLATE(int8, cl_long)
+#endif
+
+/* pg_float4_t */
+#ifndef PG_FLOAT4_TYPE_DEFINED
+#define PG_FLOAT4_TYPE_DEFINED
+STROMCL_SIMPLE_TYPE_TEMPLATE(float4, cl_float)
+#endif
+
+/* pg_float8_t */
+#ifndef PG_FLOAT8_TYPE_DEFINED
+#define PG_FLOAT8_TYPE_DEFINED
+STROMCL_SIMPLE_TYPE_TEMPLATE(float8, cl_double)
 #endif
 
 /*
@@ -1242,9 +1262,7 @@ STROMCL_SIMPLE_NULLTEST_TEMPLATE(varlena)
 	STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)
 
-/*
- * pg_bytea_t is also a built-in data type
- */
+/* pg_bytea_t */
 #ifndef PG_BYTEA_TYPE_DEFINED
 #define PG_BYTEA_TYPE_DEFINED
 STROMCL_VARLENA_TYPE_TEMPLATE(bytea)
@@ -1451,8 +1469,6 @@ arithmetic_stairlike_add(cl_uint my_value, __local cl_uint *items,
 	return items[get_local_id(0)] - my_value;
 }
 
-#endif /* OPENCL_DEVICE_CODE */
-#ifdef OPENCL_DEVICE_CODE
 /*
  * kern_writeback_error_status
  *
@@ -1527,6 +1543,21 @@ EVAL(pg_bool_t arg)
 		return true;
 	return false;
 }
+
+/*
+ * macros for general binary compare functions
+ */
+#define devfunc_int_comp(x,y)					\
+	((x) < (y) ? -1 : ((x) > (y) ? 1 : 0))
+
+#define devfunc_float_comp(x,y)					\
+	(isnan(x)									\
+	 ? (isnan(y)								\
+		? 0		/* NAN = NAM */					\
+		: 1)	/* NAN > non-NAN */				\
+	 : (isnan(y)								\
+		? -1	/* non-NAN < NAN */				\
+		: devfunc_int_comp((x),(y))))
 
 /*
  * Functions for BooleanTest

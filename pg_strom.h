@@ -266,7 +266,8 @@ typedef struct {
 #define DEVFUNC_NEEDS_TIMELIB		0x0008
 #define DEVFUNC_NEEDS_TEXTLIB		0x0010
 #define DEVFUNC_NEEDS_NUMERIC		0x0020
-#define DEVFUNC_INCL_FLAGS			0x0038
+#define DEVFUNC_NEEDS_MATHLIB		0x0040
+#define DEVFUNC_INCL_FLAGS			0x0078
 #define DEVKERNEL_DISABLE_OPTIMIZE	0x0100
 #define DEVKERNEL_NEEDS_GPUSCAN		0x0200
 #define DEVKERNEL_NEEDS_HASHJOIN	0x0400
@@ -424,7 +425,6 @@ extern devtype_info *pgstrom_devtype_lookup_and_track(Oid type_oid,
 extern devfunc_info *pgstrom_devfunc_lookup_and_track(Oid func_oid,
 											  codegen_context *context);
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
-extern char *pgstrom_codegen_type_declarations(codegen_context *context);
 extern char *pgstrom_codegen_func_declarations(codegen_context *context);
 extern char *pgstrom_codegen_param_declarations(codegen_context *context,
 												Bitmapset *param_refs);
@@ -662,6 +662,7 @@ extern const char *pgstrom_opencl_common_code;
 extern const char *pgstrom_opencl_gpuscan_code;
 extern const char *pgstrom_opencl_gpupreagg_code;
 extern const char *pgstrom_opencl_hashjoin_code;
+extern const char *pgstrom_opencl_mathlib_code;
 extern const char *pgstrom_opencl_textlib_code;
 extern const char *pgstrom_opencl_timelib_code;
 extern const char *pgstrom_opencl_numeric_code;

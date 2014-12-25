@@ -423,6 +423,8 @@ show_device_kernel(Datum dprog_key, ExplainState *es)
 		appendStringInfo(&str, "#include \"opencl_hashjoin.h\"\n");
 	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
 		appendStringInfo(&str, "#include \"opencl_gpupreagg.h\"\n");
+	if (extra_flags & DEVFUNC_NEEDS_MATHLIB)
+		appendStringInfo(&str, "#include \"opencl_mathlib.h\"\n");
 	if (extra_flags & DEVFUNC_NEEDS_TIMELIB)
 		appendStringInfo(&str, "#include \"opencl_timelib.h\"\n");
 	if (extra_flags & DEVFUNC_NEEDS_TEXTLIB)
