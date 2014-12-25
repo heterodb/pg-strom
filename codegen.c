@@ -210,31 +210,31 @@ typedef struct devfunc_catalog_t {
 
 static devfunc_catalog_t devfunc_common_catalog[] = {
 	/* Type cast functions */
-	{ "int2", 1, {INT4OID},   "ac:" },
-	{ "int2", 1, {INT8OID},   "ac:" },
-	{ "int2", 1, {FLOAT4OID}, "ac:" },
-	{ "int2", 1, {FLOAT8OID}, "ac:" },
+	{ "int2", 1, {INT4OID},   "a/c:" },
+	{ "int2", 1, {INT8OID},   "a/c:" },
+	{ "int2", 1, {FLOAT4OID}, "a/c:" },
+	{ "int2", 1, {FLOAT8OID}, "a/c:" },
 
-	{ "int4", 1, {BOOLOID},   "ac:" },
-	{ "int4", 1, {INT2OID},   "ac:" },
-	{ "int4", 1, {INT8OID},   "ac:" },
-	{ "int4", 1, {FLOAT4OID}, "ac:" },
-	{ "int4", 1, {FLOAT8OID}, "ac:" },
+	{ "int4", 1, {BOOLOID},   "a/c:" },
+	{ "int4", 1, {INT2OID},   "a/c:" },
+	{ "int4", 1, {INT8OID},   "a/c:" },
+	{ "int4", 1, {FLOAT4OID}, "a/c:" },
+	{ "int4", 1, {FLOAT8OID}, "a/c:" },
 
-	{ "int8", 1, {INT2OID},   "ac:" },
-	{ "int8", 1, {INT4OID},   "ac:" },
-	{ "int8", 1, {FLOAT4OID}, "ac:" },
-	{ "int8", 1, {FLOAT8OID}, "ac:" },
+	{ "int8", 1, {INT2OID},   "a/c:" },
+	{ "int8", 1, {INT4OID},   "a/c:" },
+	{ "int8", 1, {FLOAT4OID}, "a/c:" },
+	{ "int8", 1, {FLOAT8OID}, "a/c:" },
 
-	{ "float4", 1, {INT2OID},   "ac:" },
-	{ "float4", 1, {INT4OID},   "ac:" },
-	{ "float4", 1, {INT8OID},   "ac:" },
-	{ "float4", 1, {FLOAT8OID}, "ac:" },
+	{ "float4", 1, {INT2OID},   "a/c:" },
+	{ "float4", 1, {INT4OID},   "a/c:" },
+	{ "float4", 1, {INT8OID},   "a/c:" },
+	{ "float4", 1, {FLOAT8OID}, "a/c:" },
 
-	{ "float8", 1, {INT2OID},   "ac:" },
-	{ "float8", 1, {INT4OID},   "ac:" },
-	{ "float8", 1, {INT8OID},   "ac:" },
-	{ "float8", 1, {FLOAT4OID}, "ac:" },
+	{ "float8", 1, {INT2OID},   "a/c:" },
+	{ "float8", 1, {INT4OID},   "a/c:" },
+	{ "float8", 1, {INT8OID},   "a/c:" },
+	{ "float8", 1, {FLOAT4OID}, "a/c:" },
 
 	/* '+' : add operators */
 	{ "int2pl",  2, {INT2OID, INT2OID}, "m/F:int2pl" },
