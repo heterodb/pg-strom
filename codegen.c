@@ -974,10 +974,12 @@ static void
 devfunc_setup_func_impl(devfunc_info *entry,
 						devfunc_catalog_t *procat, bool has_alias)
 {
+	const char *func_alias = strchr(procat->func_template, ':') + 1;
+
 	entry->func_name = pstrdup(procat->func_name);
 	if (has_alias)
 		elog(ERROR, "Bug? implimented device function should not have alias");
-	entry->func_alias = entry->func_name;
+	entry->func_alias = func_alias;
 }
 
 static devfunc_info *
