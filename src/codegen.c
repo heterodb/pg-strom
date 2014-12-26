@@ -1030,35 +1030,40 @@ devtype_info *
 pgstrom_devtype_lookup_and_track(Oid type_oid, codegen_context *context)
 {
 	devtype_info   *dtype = pgstrom_devtype_lookup(type_oid);
-	if (dtype)
-		context->type_defs = list_append_unique_ptr(context->type_defs, dtype);
+
+	if (!dtype)
+		return NULL;
+
+	context->extra_flags |= (dtype->type_flags & DEVFUNC_INCL_FLAGS);
+	context->type_defs = list_append_unique_ptr(context->type_defs, dtype);
+
 	return dtype;
-}
-
-static void
-pgstrom_devfunc_track(devfunc_info *dfunc, codegen_context *context)
-{
-	ListCell   *cell;
-
-	context->func_defs = list_append_unique_ptr(context->func_defs, dfunc);
-	context->extra_flags |= (dfunc->func_flags & DEVFUNC_INCL_FLAGS);
-
-	/* track function arguments and result type */
-	context->type_defs = list_append_unique_ptr(context->type_defs,
-												dfunc->func_rettype);
-	foreach (cell, dfunc->func_args)
-		context->type_defs = list_append_unique_ptr(context->type_defs,
-													lfirst(cell));
 }
 
 devfunc_info *
 pgstrom_devfunc_lookup_and_track(Oid func_oid, codegen_context *context)
 {
 	devfunc_info   *dfunc = pgstrom_devfunc_lookup(func_oid);
+	devtype_info   *dtype;
+	ListCell	   *cell;
 
-	if (dfunc)
-		pgstrom_devfunc_track(dfunc, context);
+	if (!dfunc)
+		return NULL;
+	/* track device function */
+	context->func_defs = list_append_unique_ptr(context->func_defs, dfunc);
+	context->extra_flags |= (dfunc->func_flags & DEVFUNC_INCL_FLAGS);
 
+	/* track function arguments and result type also */
+	dtype = dfunc->func_rettype;
+	context->extra_flags |= (dtype->type_flags & DEVFUNC_INCL_FLAGS);
+	context->type_defs = list_append_unique_ptr(context->type_defs, dtype);
+
+	foreach (cell, dfunc->func_args)
+	{
+		dtype = lfirst(cell);
+		context->extra_flags |= (dtype->type_flags & DEVFUNC_INCL_FLAGS);
+		context->type_defs = list_append_unique_ptr(context->type_defs, dtype);
+	}
 	return dfunc;
 }
 
