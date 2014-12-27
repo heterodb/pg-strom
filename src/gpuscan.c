@@ -263,144 +263,6 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	add_path(baserel, &pathnode->path);
 }
 
-#if 0
-/* XXX - needs an interface to estimate cost for bulk-loading,
- * instead of SeqScan
- */
-
-/*
- * gpuscan_try_replace_seqscan_path
- *
- * It tries to replace the supplied SeqScan path by GpuScan, if it is
- * enough simple. Even though seq_path didn't involve any qualifiers,
- * it makes sense if parent path is managed by PG-Strom because of bulk-
- * loading functionality.
- */
-Path *
-gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path,
-								 List **p_upper_quals)
-{
-	RelOptInfo	   *rel = path->parent;
-	GpuScanPath	   *gpath;
-	RelOptInfo		rel_fake;
-	CustomPath	   *cpath;
-	ListCell	   *lc;
-	int				i;
-
-	/* enable_gpuscan has to be turned on */
-	if (!enable_gpuscan)
-		return path;
-
-	/* !!! See the logic in use_physical_tlist() !!! */
-
-	/* shortcut checks, if unavailable to replace */
-	if (rel->rtekind != RTE_RELATION)
-		return path;
-	if (rel->reloptkind != RELOPT_BASEREL)
-		return path;
-
-	/*
-	 * System column reference involves projection, so unavailable
-	 * to have bulk-loading.
-	 */
-	for (i = rel->min_attr; i <= 0; i++)
-	{
-		if (!bms_is_empty(rel->attr_needed[i - rel->min_attr]))
-			return path;
-	}
-
-	/*
-	 * Can't replace it if the rel is required to emit any placeholder
-	 * expressions, either.
-	 */
-	foreach (lc, root->placeholder_list)
-	{
-		PlaceHolderInfo *phinfo = (PlaceHolderInfo *) lfirst(lc);
-
-		if (bms_nonempty_difference(phinfo->ph_needed, rel->relids) &&
-			bms_is_subset(phinfo->ph_eval_at, rel->relids))
-			return path;
-	}
-
-	/* OK, check individual path-node */
-	if (path->pathtype == T_SeqScan)
-	{
-		List   *dev_quals;
-
-		/* Simple SeqScan has only device executable qualifier */
-		foreach (lc, rel->baserestrictinfo)
-		{
-			RestrictInfo   *rinfo = lfirst(lc);
-
-			if (!pgstrom_codegen_available_expression(rinfo->clause))
-				return path;
-		}
-		dev_quals = copyObject(rel->baserestrictinfo);
-		if (p_upper_quals)
-		{
-			*p_upper_quals = dev_quals;
-			dev_quals = NIL;
-		}
-		/* OK, GpuScan instead of SeqScan will make sense */
-		gpath = palloc0(sizeof(GpuScanPath));
-		NodeSetTag(gpath, T_CustomPath);
-		gpath->cpath.path.pathtype = T_CustomScan;
-		gpath->cpath.path.parent = rel;
-		gpath->cpath.path.param_info
-			= get_baserel_parampathinfo(root, rel, rel->lateral_relids);
-		gpath->cpath.path.pathkeys = NIL;	/* unsorted result */
-		gpath->cpath.flags = 0;
-		gpath->cpath.custom_private = NIL;
-		gpath->cpath.methods = &gpuscan_path_methods;
-		gpath->host_quals = NIL;
-		gpath->dev_quals = dev_quals;
-	}
-	else if (pgstrom_path_is_gpuscan(path) &&
-			 p_upper_quals &&
-			 ((GpuScanPath *)path)->host_quals == NIL &&
-			 ((GpuScanPath *)path)->dev_quals != NIL)
-	{
-		/* Even if it is already GpuScan node, it makes sense to pull-up
-		 * device qualifier to upper node to reduce interaction between
-		 * CPU and GPU. In case when GpuScan node has no host qualifiers
-		 * and at least valid device qualifier, it is available to pull-up.
-		 */
-		*p_upper_quals = copyObject(((GpuScanPath *)path)->dev_quals);
-
-		/* makes an alternative GpuScanPath node with no quals */
-		gpath = palloc0(sizeof(GpuScanPath));
-		NodeSetTag(gpath, T_CustomPath);
-		gpath->cpath.path.pathtype = T_CustomScan;
-		gpath->cpath.path.parent = rel;
-		gpath->cpath.path.param_info
-			= get_baserel_parampathinfo(root, rel, rel->lateral_relids);
-		gpath->cpath.path.pathkeys = NIL;   /* unsorted result */
-		gpath->cpath.flags = 0;
-		gpath->cpath.custom_private = NIL;
-		gpath->cpath.methods = &gpuscan_path_methods;
-		gpath->host_quals = NIL;
-		gpath->dev_quals = NIL;
-	}
-	else
-		return path;	/* elsewhere, unavailable to replace */
-
-	/*
-	 * cost estimation. note that we cannot trust rel->rows because
-	 * estimated number of rows will be adjusted by qualifier.
-	 */
-	memcpy(&rel_fake, rel, sizeof(RelOptInfo));
-	rel_fake.rows = rel_fake.tuples;	// need to reduce by dev_quals?
-
-	/* No host_quals should be here */
-	Assert(linitial(cpath->custom_private) == NIL);
-
-	cost_gpuscan(gpath, root, &rel_fake,
-				 gpath->cpath.path.param_info,
-				 gpath->host_quals, gpath->dev_quals, true);
-	return &cpath->path;
-}
-#endif
-
 /*
  * gpuscan_try_replace_seqscan_plan
  *
@@ -655,21 +517,6 @@ create_gpuscan_plan(PlannerInfo *root,
 	cscan->methods = &gpuscan_plan_methods;
 
 	return &cscan->scan.plan;
-}
-
-/*
- * pgstrom_gpuscan_can_bulkload (obsolete!)
- *
- * It tells caller whether the supplied custom-plan-state is GpuScan and
- * can support bulk-loading, or not.
- */
-bool
-pgstrom_gpuscan_can_bulkload(const CustomScanState *css)
-{
-	if (css->methods == &gpuscan_exec_methods &&
-		!css->ss.ps.ps_ProjInfo)
-		return true;
-	return false;
 }
 
 /*
@@ -1160,8 +1007,8 @@ gpuscan_exec(CustomScanState *node)
 }
 
 #if 0
-static Node *
-gpuscan_exec_multi(CustomPlanState *node)
+static pgstrom_bulkslot *
+gpuscan_exec_bulk(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *) node;
 	List			   *host_qual = node->ps.qual;

@@ -329,6 +329,8 @@ typedef struct
 	cl_uint			rindex[FLEXIBLE_ARRAY_MEMBER];
 } pgstrom_bulkslot;
 
+typedef pgstrom_bulkslot *(*pgstromExecBulkScan)(CustomScanState *node);
+
 /*
  * --------------------------------------------------------------------
  *
@@ -506,13 +508,10 @@ extern void pgstrom_init_restrack(void);
 /*
  * gpuscan.c
  */
-//extern Path *gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path,
-//											  List **p_upper_quals);
 extern Plan *gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt,
 											  Plan *plan,
 											  Bitmapset *attr_refs,
 											  List **p_upper_quals);
-extern bool pgstrom_gpuscan_can_bulkload(const CustomScanState *cps);
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern void pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,
