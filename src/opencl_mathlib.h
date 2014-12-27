@@ -817,7 +817,35 @@ BASIC_INT_MODFUNC_TEMPLATE(int8mod, int8)
  * Misc mathematic functions
  */
 static inline pg_float8_t
-dpow(__private cl_int *errcode, pg_float8_t arg1, pg_float8_t arg2)
+pgfn_dsqrt(__private cl_int *errcode, pg_float8_t arg1)
+{
+	pg_float8_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!arg1.isnull)
+	{
+		if (arg1.value < 0.0)
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		}
+		else
+		{
+			result.value = sqrt(arg1.value);
+			if (!CHECKFLOATVAL(result.value,
+							   isinf(arg1.value),
+							   arg1.value == 0))
+			{
+				result.isnull = true;
+				STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+			}
+		}
+	}
+	return result;
+}
+
+static inline pg_float8_t
+pgfn_dpow(__private cl_int *errcode, pg_float8_t arg1, pg_float8_t arg2)
 {
 	pg_float8_t	result;
 
