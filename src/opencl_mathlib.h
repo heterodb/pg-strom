@@ -22,9 +22,15 @@
 /*
  * Utility macros
  */
-#define CHECKFLOATVAL(val, inf_is_valid, zero_is_valid)         \
-	((isinf(val) && !(inf_is_valid)) ||							\
-	 (val) == 0.0 && !(zero_is_valid))
+#define CHECKFLOATVAL(errcode, result, inf_is_valid, zero_is_valid)	\
+	do {															\
+		if ((isinf((result).value) && !(inf_is_valid)) ||			\
+			((result).value == 0.0 && !(zero_is_valid)))			\
+		{															\
+			(result).isnull = true;									\
+			STROM_SET_ERROR((errcode), StromError_CpuReCheck);		\
+		}															\
+	} while(0)
 
 #define SAMESIGN(a,b)	(((a) < 0) == ((b) < 0))
 
@@ -63,13 +69,9 @@
 		if (!result.isnull)											\
 		{															\
 			result.value = arg1.value + arg2.value;					\
-			if (CHECKFLOATVAL(result.value,							\
-							  isinf(arg1.value) ||					\
-							  isinf(arg2.value), true))				\
-			{														\
-				result.isnull = true;								\
-				STROM_SET_ERROR(errcode, StromError_CpuReCheck);    \
-			}                                                       \
+			CHECKFLOATVAL(errcode, result,							\
+						  isinf(arg1.value) ||						\
+						  isinf(arg2.value), true);					\
 		}                                                           \
 		return result;												\
 	}
@@ -129,13 +131,9 @@ BASIC_FLOAT_ADDFUNC_TEMPLATE(float8pl, float8, float8, float8)
 		if (!result.isnull)											\
 		{															\
 			result.value = arg1.value - arg2.value;					\
-			if (CHECKFLOATVAL(result.value,							\
-							  isinf(arg1.value) ||					\
-							  isinf(arg2.value), true))				\
-			{														\
-				result.isnull = true;								\
-				STROM_SET_ERROR(errcode, StromError_CpuReCheck);    \
-			}                                                       \
+			CHECKFLOATVAL(errcode, result,							\
+						  isinf(arg1.value) ||						\
+						  isinf(arg2.value), true);					\
 		}                                                           \
 		return result;												\
 	}
@@ -364,14 +362,9 @@ pgfn_float4mul(__private cl_int *errcode, pg_float4_t arg1, pg_float4_t arg2)
 	if (!result.isnull)
 	{
 		result.value = arg1.value * arg2.value;
-		/* logic copied from CHECKFLOATVAL */
-		if (CHECKFLOATVAL(result.value,
-						  isinf(arg1.value) || isinf(arg2.value),
-						  arg1.value == 0.0 || arg2.value == 0.0))
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(errcode, StromError_CpuReCheck);
-		}
+		CHECKFLOATVAL(errcode, result,
+					  isinf(arg1.value) || isinf(arg2.value),
+					  arg1.value == 0.0 || arg2.value == 0.0);
 	}
 	return result;
 }
@@ -385,14 +378,9 @@ pgfn_float48mul(__private cl_int *errcode, pg_float4_t arg1, pg_float8_t arg2)
 	if (!result.isnull)
 	{
 		result.value = arg1.value * arg2.value;
-		/* logic copied from CHECKFLOATVAL */
-		if (CHECKFLOATVAL(result.value,
-						  isinf(arg1.value) || isinf(arg2.value),
-						  arg1.value == 0.0 || arg2.value == 0.0))
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(errcode, StromError_CpuReCheck);
-		}
+		CHECKFLOATVAL(errcode, result,
+					  isinf(arg1.value) || isinf(arg2.value),
+					  arg1.value == 0.0 || arg2.value == 0.0);
 	}
 	return result;
 }
@@ -406,14 +394,9 @@ pgfn_float84mul(__private cl_int *errcode, pg_float8_t arg1, pg_float4_t arg2)
 	if (!result.isnull)
 	{
 		result.value = arg1.value * arg2.value;
-		/* logic copied from CHECKFLOATVAL */
-		if (CHECKFLOATVAL(result.value,
-						  isinf(arg1.value) || isinf(arg2.value),
-						  arg1.value == 0.0 || arg2.value == 0.0))
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(errcode, StromError_CpuReCheck);
-		}
+		CHECKFLOATVAL(errcode, result,
+					  isinf(arg1.value) || isinf(arg2.value),
+					  arg1.value == 0.0 || arg2.value == 0.0);
 	}
 	return result;
 }
@@ -427,14 +410,9 @@ pgfn_float8mul(__private cl_int *errcode, pg_float8_t arg1, pg_float8_t arg2)
 	if (!result.isnull)
 	{
 		result.value = arg1.value * arg2.value;
-		/* logic copied from CHECKFLOATVAL */
-		if (CHECKFLOATVAL(result.value,
-						  isinf(arg1.value) || isinf(arg2.value),
-						  arg1.value == 0.0 || arg2.value == 0.0))
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(errcode, StromError_CpuReCheck);
-		}
+		CHECKFLOATVAL(errcode, result,
+					  isinf(arg1.value) || isinf(arg2.value),
+					  arg1.value == 0.0 || arg2.value == 0.0);
 	}
 	return result;
 }
@@ -685,13 +663,9 @@ pgfn_float4div(__private cl_int *errcode, pg_float4_t arg1, pg_float4_t arg2)
 		else
 		{
 			result.value = arg1.value / arg2.value;
-			if (CHECKFLOATVAL(result.value,
-							  isinf(arg1.value) || isinf(arg2.value),
-							  arg1.value == 0.0))
-			{
-				result.isnull = true;
-				STROM_SET_ERROR(errcode, StromError_CpuReCheck);
-			}
+			CHECKFLOATVAL(errcode, result,
+						  isinf(arg1.value) || isinf(arg2.value),
+						  arg1.value == 0.0);
 		}
 	}
 	return result;
@@ -713,13 +687,9 @@ pgfn_float48div(__private cl_int *errcode, pg_float4_t arg1, pg_float8_t arg2)
 		else
 		{
 			result.value = arg1.value / arg2.value;
-			if (CHECKFLOATVAL(result.value,
-							  isinf(arg1.value) || isinf(arg2.value),
-							  arg1.value == 0.0))
-			{
-				result.isnull = true;
-				STROM_SET_ERROR(errcode, StromError_CpuReCheck);
-			}
+			CHECKFLOATVAL(errcode, result,
+						  isinf(arg1.value) || isinf(arg2.value),
+						  arg1.value == 0.0);
 		}
 	}
 	return result;
@@ -741,13 +711,9 @@ pgfn_float84div(__private cl_int *errcode, pg_float8_t arg1, pg_float4_t arg2)
 		else
 		{
 			result.value = arg1.value / arg2.value;
-			if (CHECKFLOATVAL(result.value,
-							  isinf(arg1.value) || isinf(arg2.value),
-							  arg1.value == 0.0))
-			{
-				result.isnull = true;
-				STROM_SET_ERROR(errcode, StromError_CpuReCheck);
-			}
+			CHECKFLOATVAL(errcode, result,
+						  isinf(arg1.value) || isinf(arg2.value),
+						  arg1.value == 0.0);
 		}
 	}
 	return result;
@@ -769,13 +735,9 @@ pgfn_float8div(__private cl_int *errcode, pg_float8_t arg1, pg_float8_t arg2)
 		else
 		{
 			result.value = arg1.value / arg2.value;
-			if (CHECKFLOATVAL(result.value,
-							  isinf(arg1.value) || isinf(arg2.value),
-							  arg1.value == 0.0))
-			{
-				result.isnull = true;
-				STROM_SET_ERROR(errcode, StromError_CpuReCheck);
-			}
+			CHECKFLOATVAL(errcode, result,
+						  isinf(arg1.value) || isinf(arg2.value),
+						  arg1.value == 0.0);
 		}
 	}
 	return result;
@@ -832,13 +794,8 @@ pgfn_dsqrt(__private cl_int *errcode, pg_float8_t arg1)
 		else
 		{
 			result.value = sqrt(arg1.value);
-			if (!CHECKFLOATVAL(result.value,
-							   isinf(arg1.value),
-							   arg1.value == 0))
-			{
-				result.isnull = true;
-				STROM_SET_ERROR(errcode, StromError_CpuReCheck);
-			}
+			CHECKFLOATVAL(errcode, result,
+						  isinf(arg1.value), arg1.value == 0);
 		}
 	}
 	return result;
