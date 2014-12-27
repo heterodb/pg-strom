@@ -74,10 +74,10 @@ restrack_hash_index(ResourceOwner resource_owner,
 {
 	pg_crc32	crc;
 
-	INIT_CRC32(crc);
-	COMP_CRC32(crc, resource_owner, sizeof(ResourceOwner));
-	COMP_CRC32(crc, &phase, sizeof(ResourceReleasePhase));
-	FIN_CRC32(crc);
+	INIT_CRC32C(crc);
+	COMP_CRC32C(crc, resource_owner, sizeof(ResourceOwner));
+	COMP_CRC32C(crc, &phase, sizeof(ResourceReleasePhase));
+	FIN_CRC32C(crc);
 
     return crc % RESTRACK_HASHSZ;
 }
@@ -88,10 +88,10 @@ ptrmap_hash_index(ResourceOwner resource_owner,
 {
 	pg_crc32	crc;
 
-	INIT_CRC32(crc);
-	COMP_CRC32(crc, resource_owner, sizeof(ResourceOwner));
-	COMP_CRC32(crc, sobject, sizeof(StromObject *));
-	FIN_CRC32(crc);
+	INIT_CRC32C(crc);
+	COMP_CRC32C(crc, resource_owner, sizeof(ResourceOwner));
+	COMP_CRC32C(crc, sobject, sizeof(StromObject *));
+	FIN_CRC32C(crc);
 
 	return crc % PTRMAP_HASHSZ;
 }
@@ -227,8 +227,8 @@ pgstrom_restrack_callback(ResourceReleasePhase phase,
 				pgstrom_close_queue((pgstrom_queue *)sobject);
 			else if (StromTagIs(sobject, DevProgram))
 				pgstrom_put_devprog_key(PointerGetDatum(sobject));
-			else if (StromTagIs(sobject, HashJoinTable))
-				multihash_put_tables((pgstrom_multihash_tables *) sobject);
+//			else if (StromTagIs(sobject, HashJoinTable))
+//				multihash_put_tables((pgstrom_multihash_tables *) sobject);
 			else if (StromTagIs(sobject, DataStore))
 				pgstrom_put_data_store((pgstrom_data_store *) sobject);
 			else
@@ -284,8 +284,8 @@ __pgstrom_track_object(const char *filename, int lineno,
 			pgstrom_put_devprog_key((Datum)sobject);
 		else if (StromTagIs(sobject, DataStore))
 			pgstrom_put_data_store((pgstrom_data_store *) sobject);
-		else if (StromTagIs(sobject, HashJoinTable))
-			multihash_put_tables((pgstrom_multihash_tables *) sobject);
+//		else if (StromTagIs(sobject, HashJoinTable))
+//			multihash_put_tables((pgstrom_multihash_tables *) sobject);
 		else
 			pgstrom_put_message((pgstrom_message *)sobject);
 		/* also, tracker objects shall be backed to free-list */

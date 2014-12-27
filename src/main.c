@@ -24,6 +24,7 @@
 #include "storage/shmem.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/ruleutils.h"
 #include <float.h>
 #include <limits.h>
 #include "pg_strom.h"
@@ -266,8 +267,8 @@ _PG_init(void)
 
 	/* registration of custom-plan providers */
 	pgstrom_init_gpuscan();
-	pgstrom_init_gpuhashjoin();
-	pgstrom_init_gpupreagg();
+	//pgstrom_init_gpuhashjoin();
+	//pgstrom_init_gpupreagg();
 
 	/* miscellaneous initializations */
 	pgstrom_init_misc_guc();

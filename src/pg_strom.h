@@ -20,6 +20,7 @@
 #include "nodes/execnodes.h"
 #include "nodes/plannodes.h"
 #include "nodes/primnodes.h"
+#include "nodes/relation.h"
 #include "storage/lock.h"
 #include "storage/spin.h"
 #include "utils/resowner.h"
@@ -505,13 +506,13 @@ extern void pgstrom_init_restrack(void);
 /*
  * gpuscan.c
  */
-extern Path *gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path,
-											  List **p_upper_quals);
+//extern Path *gpuscan_try_replace_seqscan_path(PlannerInfo *root, Path *path,
+//											  List **p_upper_quals);
 extern Plan *gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt,
 											  Plan *plan,
 											  Bitmapset *attr_refs,
 											  List **p_upper_quals);
-extern bool pgstrom_gpuscan_can_bulkload(const CustomPlanState *cps);
+extern bool pgstrom_gpuscan_can_bulkload(const CustomScanState *cps);
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern void pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,
@@ -528,7 +529,7 @@ multihash_get_tables(struct pgstrom_multihash_tables *mhtables);
 extern void
 multihash_put_tables(struct pgstrom_multihash_tables *mhtables);
 
-extern bool gpuhashjoin_support_multi_exec(const CustomPlanState *cps);
+extern bool gpuhashjoin_support_multi_exec(const CustomScanState *cps);
 extern bool pgstrom_plan_is_gpuhashjoin(const Plan *plan);
 extern bool pgstrom_plan_is_multihash(const Plan *plan);
 extern void pgstrom_gpuhashjoin_setup_bulkslot(PlanState *outer_ps,

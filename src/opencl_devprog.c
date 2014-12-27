@@ -588,10 +588,10 @@ pgstrom_get_devprog_key(const char *source, int32 extra_flags)
 	pg_crc32	crc;
 
 	/* calculate a hash value */
-	INIT_CRC32(crc);
-	COMP_CRC32(crc, &extra_flags, sizeof(int32));
-	COMP_CRC32(crc, source, source_len);
-	FIN_CRC32(crc);
+	INIT_CRC32C(crc);
+	COMP_CRC32C(crc, &extra_flags, sizeof(int32));
+	COMP_CRC32C(crc, source, source_len);
+	FIN_CRC32C(crc);
 
 retry:
 	index = crc % DEVPROG_HASH_SIZE;
