@@ -114,7 +114,8 @@ typedef struct {
 
 	pgstrom_gpuscan	   *curr_chunk;
 	uint32				curr_index;
-	int					num_running;
+	cl_uint				num_rechecked;
+	cl_uint				num_running;
 	dlist_head			ready_chunks;
 
 	pgstrom_perfmon		pfm;	/* sum of performance counter */
@@ -788,6 +789,7 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	/* rest of run-time parameters */
 	gss->curr_chunk = NULL;
 	gss->curr_index = 0;
+	gss->num_rechecked = 0;
 	gss->num_running = 0;
 	dlist_init(&gss->ready_chunks);
 
@@ -968,6 +970,7 @@ gpuscan_next_tuple(GpuScanState *gss)
 			{
 				i_result = -i_result;
 				do_recheck = true;
+				gss->num_rechecked++;
 			}
 		}
 		Assert(i_result > 0);
@@ -1312,6 +1315,10 @@ gpuscan_end(CustomScanState *node)
 		pgstrom_put_message(&gpuscan->msg);
 		gss->num_running--;
 	}
+
+	if (gss->num_rechecked > 0)
+		elog(NOTICE, "GpuScan: %u records were re-checked by CPU",
+			 gss->num_rechecked);
 
 	if (gss->dprog_key)
 	{
