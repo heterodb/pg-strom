@@ -484,8 +484,8 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "round", 1, {FLOAT8OID}, "f:round" },
 	{ "dround", 1, {FLOAT8OID}, "f:round" },
 	{ "sign", 1, {FLOAT8OID}, "f:sign" },
-	{ "sqrt", 1, {FLOAT8OID}, "f:sqrt" },
-	{ "dsqrt", 1, {FLOAT8OID}, "f:sqrt" },
+	{ "sqrt", 1, {FLOAT8OID}, "m/F:dsqrt" },
+	{ "dsqrt", 1, {FLOAT8OID}, "m/F:dsqrt" },
 	{ "trunc", 1, {FLOAT8OID}, "f:trunc" },
 	{ "dtrunc", 1, {FLOAT8OID}, "f:trunc" },
 
