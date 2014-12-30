@@ -612,8 +612,8 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 			BLCKSZ * kds->nblocks >= BLCKSZ * kds->maxblocks)
 		{
 			UnlockReleaseBuffer(buffer);
-			CurrentResourceOwner = saved_owner;
-			return -1;
+			ntup = -1;
+			goto out;		/* must restore exception stack */
 		}
 
 		/*
@@ -697,6 +697,8 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 			ReleaseBuffer(buffer);
 		}
 		kds->nblocks++;
+	out:
+		;
 	}
 	PG_CATCH();
 	{
