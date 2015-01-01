@@ -1135,15 +1135,43 @@ codegen_expression_walker(Node *node, codegen_context *context)
 	}
 	else if (IsA(node, Var))
 	{
-		Var	   *var = (Var *) node;
+		Var		   *var = (Var *) node;
+		AttrNumber	varattno = var->varattno;
+		ListCell   *cell;
 
 		if (!devtype_runnable_collation(var->varcollid) ||
 			!pgstrom_devtype_lookup_and_track(var->vartype, context))
 			return false;
 
+		/* Fixup varattno when pseudo-scan tlist exists, because varattno
+		 * shall be adjusted on setrefs.c, so we have to adjust variable
+		 * name according to the expected attribute number is kernel-
+		 * source shall be constructed prior to setrefs.c / subselect.c
+		 */
+		if (context->pseudo_tlist != NIL)
+		{
+			foreach (cell, context->pseudo_tlist)
+			{
+				TargetEntry *tle = lfirst(cell);
+				Var	   *ps_var;
+
+				if (!IsA(tle->expr, Var))
+					continue;
+				ps_var = (Var *) tle->expr;
+				if (ps_var->varno == var->varno &&
+					ps_var->varattno == var->varattno &&
+					ps_var->varlevelsup == var->varlevelsup)
+				{
+					varattno = tle->resno;
+					break;
+				}
+			}
+			if (!cell)
+				elog(ERROR, "failed to lookup var-node in ps_tlist");
+		}
 		appendStringInfo(&context->str, "%s_%u",
 						 context->var_label,
-						 var->varattno);
+						 varattno);
 		context->used_vars = list_append_unique(context->used_vars,
 												copyObject(node));
 		return true;
@@ -1412,6 +1440,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	walker_context.ktoast_label  = context->ktoast_label;
 	walker_context.kds_index_label = context->kds_index_label;
 	walker_context.extra_flags = context->extra_flags;
+	walker_context.pseudo_tlist = context->pseudo_tlist;
 
 	if (IsA(expr, List))
 	{
@@ -1458,8 +1487,7 @@ pgstrom_codegen_func_declarations(codegen_context *context)
  * pgstrom_codegen_param_declarations
  */
 char *
-pgstrom_codegen_param_declarations(codegen_context *context,
-								   Bitmapset *param_refs)
+pgstrom_codegen_param_declarations(codegen_context *context)
 {
 	StringInfoData	str;
 	ListCell	   *cell;
@@ -1469,7 +1497,7 @@ pgstrom_codegen_param_declarations(codegen_context *context,
 	initStringInfo(&str);
 	foreach (cell, context->used_params)
 	{
-		if (!bms_is_member(index, param_refs))
+		if (!bms_is_member(index, context->param_refs))
 			goto lnext;
 
 		if (IsA(lfirst(cell), Const))

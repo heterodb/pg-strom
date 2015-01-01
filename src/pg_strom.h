@@ -331,6 +331,37 @@ typedef struct
 
 typedef pgstrom_bulkslot *(*pgstromExecBulkScan)(CustomScanState *node);
 
+/* --------------------------------------------------------------------
+ *
+ * Private enhancement of CustomScan Interface
+ *
+ * --------------------------------------------------------------------
+ */
+typedef struct
+{
+	CustomExecMethods	c;
+	void   *(*ExecCustomBulk)(CustomScanState *node);
+} PGStromExecMethods;
+
+static inline void *
+BulkExecProcNode(PlanState *node)
+{
+	CHECK_FOR_INTERRUPTS();
+
+	if (node->chgParam != NULL)		/* something changed */
+		ExecReScan(node);			/* let ReScan handle this */
+
+	/* rough check, not sufficient... */
+	if (IsA(node, CustomScanState))
+	{
+		CustomScanState *css = (CustomScanState *) node;
+		PGStromExecMethods *methods = (PGStromExecMethods *) css->methods;
+		Assert(methods->ExecCustomBulk != NULL);
+		return methods->ExecCustomBulk(css);
+	}
+	elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
+}
+
 /*
  * --------------------------------------------------------------------
  *
@@ -429,8 +460,7 @@ extern devfunc_info *pgstrom_devfunc_lookup_and_track(Oid func_oid,
 											  codegen_context *context);
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern char *pgstrom_codegen_func_declarations(codegen_context *context);
-extern char *pgstrom_codegen_param_declarations(codegen_context *context,
-												Bitmapset *param_refs);
+extern char *pgstrom_codegen_param_declarations(codegen_context *context);
 extern char *pgstrom_codegen_var_declarations(codegen_context *context);
 extern char *pgstrom_codegen_bulk_var_declarations(codegen_context *context,
 												   Plan *outer_plan,
@@ -508,10 +538,10 @@ extern void pgstrom_init_restrack(void);
 /*
  * gpuscan.c
  */
-extern Plan *gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt,
-											  Plan *plan,
-											  Bitmapset *attr_refs,
-											  List **p_upper_quals);
+extern Plan *gpuscan_try_replace_relscan(Plan *plan,
+										 List *range_table,
+										 Bitmapset *attr_refs,
+										 List **p_upper_quals);
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern void pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,
@@ -528,7 +558,6 @@ multihash_get_tables(struct pgstrom_multihash_tables *mhtables);
 extern void
 multihash_put_tables(struct pgstrom_multihash_tables *mhtables);
 
-extern bool gpuhashjoin_support_multi_exec(const CustomScanState *cps);
 extern bool pgstrom_plan_is_gpuhashjoin(const Plan *plan);
 extern bool pgstrom_plan_is_multihash(const Plan *plan);
 extern void pgstrom_gpuhashjoin_setup_bulkslot(PlanState *outer_ps,
@@ -648,7 +677,8 @@ extern void pgstrom_perfmon_add(pgstrom_perfmon *pfm_sum,
 extern void pgstrom_perfmon_explain(pgstrom_perfmon *pfm,
 									ExplainState *es);
 extern void _outToken(StringInfo str, const char *s);
-extern void _outBitmapset(StringInfo str, const Bitmapset *bms);
+extern Value *formBitmapset(const Bitmapset *bms);
+extern Bitmapset *deformBitmapset(const Value *value);
 
 /*
  * grafter.c

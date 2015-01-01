@@ -50,7 +50,7 @@
 static set_rel_pathlist_hook_type	set_rel_pathlist_next;
 static CustomPathMethods		gpuscan_path_methods;
 static CustomScanMethods		gpuscan_plan_methods;
-static CustomExecMethods		gpuscan_exec_methods;
+static PGStromExecMethods		gpuscan_exec_methods;
 static bool						enable_gpuscan;
 
 /*
@@ -264,7 +264,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 }
 
 /*
- * gpuscan_try_replace_seqscan_plan
+ * gpuscan_try_replace_relscan
  *
  * It tries to replace the supplied SeqScan plan by GpuScan, if it is
  * enough simple. Even though seq_path didn't involve any qualifiers,
@@ -272,145 +272,99 @@ gpuscan_add_scan_path(PlannerInfo *root,
  * loading functionality.
  */
 Plan *
-gpuscan_try_replace_seqscan_plan(PlannedStmt *pstmt,
-								 Plan *plan,
-								 Bitmapset *attr_refs,
-								 List **p_upper_quals)
+gpuscan_try_replace_relscan(Plan *plan,
+							List *range_table,
+							Bitmapset *attr_refs,
+							List **p_upper_quals)
 {
-	RangeTblEntry  *rte;
-	Relation		relation;
 	CustomScan	   *cscan;
+	GpuScanInfo		gs_info;
+	RangeTblEntry  *rte;
+	Index			scanrelid;
 	ListCell	   *lc;
-	BlockNumber		num_pages;
-	double			num_tuples;
-	double			allvisfrac;
-	double			spc_seq_page_cost;
-	Oid				tablespace_oid;
 
-	/* enable_gpuscan has to be turned on */
 	if (!enable_gpuscan)
-		return plan;
+		return NULL;
 
-	if (IsA(plan, SeqScan))
+	if (!IsA(plan, SeqScan) && !pgstrom_plan_is_gpuscan(plan))
+		return NULL;
+
+	scanrelid = ((Scan *) plan)->scanrelid;
+	rte = rt_fetch(scanrelid, range_table);
+	if (rte->rtekind != RTE_RELATION)
+		return NULL;	/* usually, shouldn't happen */
+	if (rte->relkind != RELKIND_RELATION &&
+		rte->relkind != RELKIND_TOASTVALUE &&
+		rte->relkind != RELKIND_MATVIEW)
+		return NULL;	/* usually, shouldn't happen */
+
+	/*
+	 * All the referenced target-entry must be constructable on the
+	 * device side, even if not a simple var reference.
+	 */
+	foreach (lc, plan->targetlist)
 	{
-		GpuScanInfo		gs_info;
-		Index			scanrelid = ((Scan *) plan)->scanrelid;
+		TargetEntry *tle = lfirst(lc);
+		int		x = tle->resno - FirstLowInvalidHeapAttributeNumber;
 
-		rte = rt_fetch(scanrelid, pstmt->rtable);
-		if (rte->rtekind != RTE_RELATION)
-			return plan;	/* usually, shouldn't happen */
-		if (rte->relkind != RELKIND_RELATION &&
-			rte->relkind != RELKIND_TOASTVALUE &&
-			rte->relkind != RELKIND_MATVIEW)
-			return plan;	/* usually, shouldn't happen */
-
-		/*
-		 * check whether the device referenced target-entry can be
-		 * constructed on the device side. no need to care about
-		 * host-only fields.
-		 */
-		foreach (lc, plan->targetlist)
+		if (bms_is_member(x, attr_refs))
 		{
-			TargetEntry *tle = lfirst(lc);
-			int		x = tle->resno - FirstLowInvalidHeapAttributeNumber;
-
-			if (!bms_is_member(x, attr_refs))
-				continue;
 			if (!pgstrom_codegen_available_expression(tle->expr))
 				return plan;
 		}
-
-		/*
-		 * check whether the plan qualifiers can be executable on the
-		 * device side. If host only expression is here, unavailable
-		 * to replace it by GpuScan.
-		 */
-		if (!pgstrom_codegen_available_expression((Expr *)plan->qual))
-			return plan;
-
-		/*
-		 * OK, SeqScan can be replaced by GpuScan
-		 */
-		cscan = makeNode(CustomScan);
-		cscan->scan.plan.plan_width = plan->plan_width;
-		cscan->scan.plan.targetlist = copyObject(plan->targetlist);
-		cscan->scan.plan.qual = NIL;
-		cscan->scan.plan.lefttree = NULL;
-		cscan->scan.plan.righttree = NULL;
-		cscan->scan.scanrelid = scanrelid;
-		cscan->flags = 0;
-
-		memset(&gs_info, 0, sizeof(GpuScanInfo));
-		gs_info.kern_source = NULL;
-		gs_info.extra_flags = DEVKERNEL_NEEDS_GPUSCAN |
-			(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
-		gs_info.used_params = NIL;
-		gs_info.used_vars = NIL;
-		if (p_upper_quals)
-			*p_upper_quals = copyObject(plan->qual);
-		else
-			gs_info.dev_quals = copyObject(plan->qual);
-		form_gpuscan_info(cscan, &gs_info);
-		cscan->methods = &gpuscan_plan_methods;
 	}
-	else if (pgstrom_plan_is_gpuscan(plan) &&
-			 p_upper_quals &&
-			 plan->qual == NIL)
-	{
-		GpuScanInfo    *gs_info = deform_gpuscan_info((CustomScan *) plan);
-
-		/* it does not make sense to replace GpuScan again */
-		if (!gs_info->dev_quals)
-			return plan;
-		*p_upper_quals = gs_info->dev_quals;
-		gs_info->dev_quals = NIL;
-		gs_info->extra_flags &= DEVKERNEL_DISABLE_OPTIMIZE;
-
-		cscan = makeNode(CustomScan);
-		cscan->scan.plan.plan_width = plan->plan_width;
-		cscan->scan.plan.targetlist = copyObject(plan->targetlist);
-		cscan->scan.plan.qual = NIL;
-		cscan->scan.plan.lefttree = NULL;
-		cscan->scan.plan.righttree = NULL;
-		cscan->scan.scanrelid = ((Scan *)plan)->scanrelid;
-		cscan->flags = 0;
-		form_gpuscan_info(cscan, gs_info);
-		cscan->methods = &gpuscan_plan_methods;
-	}
-	else
-		return plan;	/* elsewhere, unavailable to replace */
 
 	/*
-	 * update cost estimation for the GpuScan node
-	 *
-	 * TODO: integration with cost_gpuscan() for more consistency.
+     * Check whether the plan qualifiers can be executable on device
+     */
+	if (IsA(plan, SeqScan))
+	{
+		if (!pgstrom_codegen_available_expression((Expr *)plan->qual))
+			return NULL;
+		*p_upper_quals = copyObject(plan->qual);
+	}
+	else if (pgstrom_plan_is_gpuscan(plan))
+	{
+		GpuScanInfo	   *temp;
+
+		/* unable run bulk-loading with host qualifiers */
+		if (plan->qual != NIL)
+			return NULL;
+
+		temp = deform_gpuscan_info((CustomScan *) plan);
+		if (temp->dev_quals == NIL)
+		{
+			*p_upper_quals = NIL;
+			return plan;	/* nothing to do anymore */
+		}
+		*p_upper_quals = copyObject(temp->dev_quals);
+	}
+	else
+		elog(ERROR, "Bug? unexpected plan node: %s", nodeToString(plan));
+
+	/*
+	 * OK, it was SeqScan with all device executable (or no) qualifiers,
+	 * or, GpuScan without host qualifiers.
 	 */
-	relation = heap_open(rte->relid, NoLock);
+	cscan = makeNode(CustomScan);
+    cscan->scan.plan.plan_width = plan->plan_width;
+    cscan->scan.plan.targetlist = copyObject(plan->targetlist);
+    cscan->scan.plan.qual = NIL;
+    cscan->scan.scanrelid = scanrelid;
+    cscan->flags = 0;
+	memset(&gs_info, 0, sizeof(GpuScanInfo));
+	form_gpuscan_info(cscan, &gs_info);
+	cscan->methods = &gpuscan_plan_methods;
 
-	estimate_rel_size(relation, NULL,
-					  &num_pages,
-					  &num_tuples,
-					  &allvisfrac);
-	/* fetch estimated page cost for tablespace containing table */
-	tablespace_oid = RelationGetForm(relation)->reltablespace;
-	get_tablespace_page_costs(tablespace_oid, NULL, &spc_seq_page_cost);
-
-	/* only disk cost to be paid attention */
-	cscan->scan.plan.plan_rows = num_tuples;
-	cscan->scan.plan.startup_cost = 0.0;
-	cscan->scan.plan.total_cost = spc_seq_page_cost * num_pages;
-
-	heap_close(relation, NoLock);
-
-	return (Plan *) cscan;
+	return &cscan->scan.plan;
 }
 
 /*
  * OpenCL code generation that can run on GPU/MIC device
  */
 static char *
-gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
-					  codegen_context *context)
+gpuscan_codegen_quals(PlannerInfo *root,
+					  List *dev_quals, codegen_context *context)
 {
 	StringInfoData	str;
 	StringInfoData	decl;
@@ -432,8 +386,7 @@ gpuscan_codegen_quals(PlannerInfo *root, List *dev_quals,
 	 */
 	appendStringInfo(&str, "%s\n", pgstrom_codegen_func_declarations(context));
 	appendStringInfo(&decl, "%s%s\n",
-					 pgstrom_codegen_param_declarations(context,
-														context->param_refs),
+					 pgstrom_codegen_param_declarations(context),
 					 pgstrom_codegen_var_declarations(context));
 
 	/* qualifier definition with row-store */
@@ -565,7 +518,7 @@ pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,
 	GpuScanState   *gss = (GpuScanState *) outer_ps;
 
 	if (!IsA(gss, CustomScanState) ||
-		gss->css.methods != &gpuscan_exec_methods)
+		gss->css.methods != &gpuscan_exec_methods.c)
 		elog(ERROR, "Bug? PlanState node is not GpuScanState");
 
 	*p_bulk_proj = gss->css.ss.ps.ps_ProjInfo;
@@ -583,7 +536,7 @@ gpuscan_create_scan_state(CustomScan *cscan)
 	GpuScanState   *gss = palloc0(sizeof(GpuScanState));
 
 	NodeSetTag(gss, T_CustomScanState);
-	gss->css.methods = &gpuscan_exec_methods;
+	gss->css.methods = &gpuscan_exec_methods.c;
 
 	return (Node *)gss;
 }
@@ -1006,12 +959,11 @@ gpuscan_exec(CustomScanState *node)
 					(ExecScanRecheckMtd) gpuscan_recheck);
 }
 
-#if 0
-static pgstrom_bulkslot *
+static void *
 gpuscan_exec_bulk(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *) node;
-	List			   *host_qual = node->ps.qual;
+	List			   *host_qual = node->ss.ps.qual;
 	pgstrom_gpuscan	   *gpuscan;
 	kern_resultbuf	   *kresults;
 	pgstrom_bulkslot   *bulk;
@@ -1020,16 +972,16 @@ gpuscan_exec_bulk(CustomScanState *node)
 	HeapTupleData		tuple;
 
 	/* must provide our own instrumentation support */
-	if (node->ps.instrument)
-		InstrStartNode(node->ps.instrument);
+	if (node->ss.ps.instrument)
+		InstrStartNode(node->ss.ps.instrument);
 
 	while (true)
 	{
 		gpuscan = pgstrom_fetch_gpuscan(gss);
 		if (!gpuscan)
 		{
-			if (node->ps.instrument)
-				InstrStopNode(node->ps.instrument, (double) 0.0);
+			if (node->ss.ps.instrument)
+				InstrStopNode(node->ss.ps.instrument, (double) 0.0);
 			return NULL;
 		}
 
@@ -1091,14 +1043,15 @@ gpuscan_exec_bulk(CustomScanState *node)
 
 			if (host_qual || do_recheck)
 			{
-				ExprContext *econtext = gss->cps.ps.ps_ExprContext;
+				ExprContext	   *econtext = gss->css.ss.ps.ps_ExprContext;
+				TupleTableSlot *slot = gss->css.ss.ss_ScanTupleSlot;
 
-				if (!pgstrom_fetch_data_store(gss->scan_slot,
+				if (!pgstrom_fetch_data_store(slot,
 											  bulk->pds,
 											  row_index,
 											  &tuple))
 					elog(ERROR, "Bug? invalid row-index was in the result");
-				econtext->ecxt_scantuple = gss->scan_slot;
+				econtext->ecxt_scantuple = slot;
 
 				/* Recheck of device qualifier, if needed */
 				if (do_recheck)
@@ -1129,14 +1082,13 @@ gpuscan_exec_bulk(CustomScanState *node)
 		pfree(bulk);
 	}
 	/* must provide our own instrumentation support */
-	if (node->ps.instrument)
-		InstrStopNode(node->ps.instrument,
+	if (node->ss.ps.instrument)
+		InstrStopNode(node->ss.ps.instrument,
 					  bulk->nvalids < 0 ?
 					  (double) bulk->pds->kds->nitems :
 					  (double) bulk->nvalids);
-	return (Node *) bulk;
+	return bulk;
 }
-#endif
 
 static void
 gpuscan_end(CustomScanState *node)
@@ -1296,14 +1248,15 @@ pgstrom_init_gpuscan(void)
 	gpuscan_plan_methods.TextOutCustomScan	= NULL;
 
 	/* setup exec methods */
-	gpuscan_exec_methods.CustomName			= "GpuScan";
-	gpuscan_exec_methods.BeginCustomScan	= gpuscan_begin;
-	gpuscan_exec_methods.ExecCustomScan		= gpuscan_exec;
-	gpuscan_exec_methods.EndCustomScan		= gpuscan_end;
-	gpuscan_exec_methods.ReScanCustomScan	= gpuscan_rescan;
-	gpuscan_exec_methods.MarkPosCustomScan	= NULL;
-	gpuscan_exec_methods.RestrPosCustomScan	= NULL;
-	gpuscan_exec_methods.ExplainCustomScan	= gpuscan_explain;
+	gpuscan_exec_methods.c.CustomName         = "GpuScan";
+	gpuscan_exec_methods.c.BeginCustomScan    = gpuscan_begin;
+	gpuscan_exec_methods.c.ExecCustomScan     = gpuscan_exec;
+	gpuscan_exec_methods.c.EndCustomScan      = gpuscan_end;
+	gpuscan_exec_methods.c.ReScanCustomScan   = gpuscan_rescan;
+	gpuscan_exec_methods.c.MarkPosCustomScan  = NULL;
+	gpuscan_exec_methods.c.RestrPosCustomScan = NULL;
+	gpuscan_exec_methods.c.ExplainCustomScan  = gpuscan_explain;
+	gpuscan_exec_methods.ExecCustomBulk       = gpuscan_exec_bulk;
 
 	/* hook registration */
 	set_rel_pathlist_next = set_rel_pathlist_hook;

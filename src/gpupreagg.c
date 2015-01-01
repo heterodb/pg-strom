@@ -1252,8 +1252,8 @@ gpupreagg_codegen_keycomp(GpuPreAggPlan *gpreagg, codegen_context *context)
 	if (context->param_refs)
 	{
 		char	   *params_decl
-			= pgstrom_codegen_param_declarations(context,
-												 context->param_refs);
+			= pgstrom_codegen_param_declarations(context);
+
 		appendStringInfo(&decl, "%s", params_decl);
 		pfree(params_decl);
 		bms_free(context->param_refs);
@@ -1796,8 +1796,8 @@ gpupreagg_codegen_projection(GpuPreAggPlan *gpreagg, codegen_context *context)
 	if (context->param_refs)
 	{
 		char	   *params_decl
-			= pgstrom_codegen_param_declarations(context,
-												 context->param_refs);
+			= pgstrom_codegen_param_declarations(context);
+
 		appendStringInfo(&decl2, "%s", params_decl);
 		pfree(params_decl);
 		bms_free(context->param_refs);
@@ -1885,8 +1885,7 @@ gpupreagg_codegen_qual_eval(GpuPreAggPlan *gpreagg, codegen_context *context)
 			&str,
 			"%s%s\n"
 			"  return EVAL(%s);\n",
-			pgstrom_codegen_param_declarations(context,
-											   context->param_refs),
+			pgstrom_codegen_param_declarations(context),
 			pgstrom_codegen_var_declarations(context),
 			expr_code);
 	}

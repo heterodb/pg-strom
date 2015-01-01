@@ -267,7 +267,7 @@ _PG_init(void)
 
 	/* registration of custom-plan providers */
 	pgstrom_init_gpuscan();
-	//pgstrom_init_gpuhashjoin();
+	pgstrom_init_gpuhashjoin();
 	//pgstrom_init_gpupreagg();
 
 	/* miscellaneous initializations */
@@ -702,22 +702,64 @@ _outToken(StringInfo str, const char *s)
 }
 
 /*
- * _outBitmapset -
- *	   converts a bitmap set of integers
+ * formBitmapset / deformBitmapset
+ *
+ * It translate a Bitmapset to/from copyObject available form.
+ * Logic was fully copied from outfunc.c and readfunc.c.
  *
  * Note: the output format is "(b int int ...)", similar to an integer List.
  */
-void
-_outBitmapset(StringInfo str, const Bitmapset *bms)
+Value *
+formBitmapset(const Bitmapset *bms)
 {
-	Bitmapset  *tmpset;
-	int			x;
+	StringInfoData str;
+	int		i;
 
-	appendStringInfoChar(str, '(');
-	appendStringInfoChar(str, 'b');
-	tmpset = bms_copy(bms);
-	while ((x = bms_first_member(tmpset)) >= 0)
-		appendStringInfo(str, " %d", x);
-	bms_free(tmpset);
-	appendStringInfoChar(str, ')');
+	initStringInfo(&str);
+	appendStringInfo(&str, "b:");
+	for (i=0; i < bms->nwords; i++)
+	{
+		if (i > 0)
+			appendStringInfoChar(&str, ',');
+		appendStringInfo(&str, "%08x", bms->words[i]);
+	}
+	return makeString(str.data);
+}
+
+Bitmapset *
+deformBitmapset(const Value *value)
+{
+	Bitmapset  *result;
+	char	   *temp = strVal(value);
+	char	   *token;
+	char	   *delim;
+	int			nwords;
+
+	if (!temp)
+		elog(ERROR, "incomplete Bitmapset structure");
+	if (strncmp(temp, "b:", 2) != 0)
+		elog(ERROR, "unrecognized Bitmapset format \"%s\"", temp);
+	if (temp[3] == '\0')
+		return NULL;	/* NULL bitmap */
+
+	token = temp = pstrdup(temp + 2);
+	nwords = strlen(temp) / (BITS_PER_BITMAPWORD / 4);
+	result = palloc0(offsetof(Bitmapset, words[nwords]));
+
+	do {
+		bitmapword	x;
+
+		delim = strchr(token, ',');
+		if (delim)
+			*delim = '\0';
+		if (sscanf(token, "%8x", &x) != 1)
+			elog(ERROR, "unrecognized Bitmapset token \"%s\"", token);
+		Assert(result->nwords < nwords);
+		result->words[result->nwords++] = x;
+		token = delim + 1;
+	} while (delim != NULL);
+
+	pfree(temp);
+
+	return result;
 }

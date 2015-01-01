@@ -252,6 +252,19 @@ typedef struct
 	KERN_HASHJOIN_RESULTBUF_LENGTH(khashjoin)
 
 #ifdef OPENCL_DEVICE_CODE
+
+/*
+ * gpuhashjoin_qual_eval
+ *
+ * simple evaluation of qualifier, if any
+ */
+static bool
+gpuhashjoin_qual_eval(__private cl_int *errcode,
+					  __global kern_parambuf *kparams,
+					  __global kern_data_store *kds,
+					  __global kern_data_store *ktoast,
+					  size_t kds_index);
+
 /*
  * gpuhashjoin_execute
  *
@@ -335,6 +348,15 @@ kern_gpuhashjoin_main(__global kern_hashjoin *khashjoin,
 		kds_index = (size_t) krowmap->rindex[get_global_id(0)];
 	else
 		kds_index = kds->nitems;	/* ensure this thread is out of range */
+
+	/*
+	 * 0th-stage: if gpuhashjoin pulled-up device executable qualifiers
+	 * from the outer relation scan, we try to evaluate it on the outer
+	 * relation (that is kern_data_store), then exclude this thread if
+	 * record shouldn't be visible
+	 */
+	if (!gpuhashjoin_qual_eval(&errcode, kparams, kds, ktoast, kds_index))
+		kds_index = kds->nitems;	/* ensure this thread is not visible */
 
 	/* 1st-stage: At first, we walks on the hash tables to count number of
 	 * expected number of matched hash entries towards the items being in

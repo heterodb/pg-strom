@@ -40,15 +40,18 @@
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_crc.h"
+#include "utils/ruleutils.h"
 #include "utils/selfuncs.h"
 #include "pg_strom.h"
 #include "opencl_hashjoin.h"
 
 /* static variables */
-static add_hashjoin_path_hook_type	add_hashjoin_path_next;
+static set_join_pathlist_hook_type set_join_pathlist_next;
 static CustomPathMethods		gpuhashjoin_path_methods;
-static CustomPlanMethods		gpuhashjoin_plan_methods;
-static CustomPlanMethods		multihash_plan_methods;
+static CustomScanMethods		gpuhashjoin_plan_methods;
+static CustomScanMethods		multihash_plan_methods;
+static PGStromExecMethods		gpuhashjoin_exec_methods;
+static PGStromExecMethods		multihash_exec_methods;
 static bool						enable_gpuhashjoin;
 
 /*
@@ -80,62 +83,138 @@ typedef struct
 {
 	CustomPath		cpath;
 	Path		   *outerpath;	/* outer path (always one) */
-	int				num_rels;	/* number of inner relations */
 	Size			hashtable_size;	/* estimated hashtable size */
+	double			row_population_ratio;	/* estimated population ratio */
+	int				num_rels;	/* number of inner relations */
 	struct {
 		Path	   *scan_path;
 		JoinType	jointype;
-		List	   *hash_clause;
-		List	   *qual_clause;
-		List	   *host_clause;
-		double		threshold_ratio;
-		Size		chunk_size;	/* available size for each relation chunk */
-		cl_uint		ntuples;	/* estimated number of tuples per chunk */
-		cl_uint		nloops;		/* expected number of outer loops */
+		List	   *hash_clauses;
+		List	   *qual_clauses;
+		List	   *host_clauses;
+		double		threshold;
+		Size		chunk_size;
+		cl_uint		nslots;
+		int			nloops;
 	} inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuHashJoinPath;
 
 /*
- * source of pseudo tlist entries
+ * GpuHashJoinInfo - state object of CustomScan(GpuHashJoin)
  */
 typedef struct
 {
-	Index		srcdepth;	/* source relation depth */
-	AttrNumber	srcresno;	/* source resource number (>0) */
-	AttrNumber	resno;		/* resource number of pseudo relation */
-	char	   *resname;	/* name of this resource, if any */
-	Oid			vartype;	/* type oid of the expression node */
-	int32		vartypmod;	/* typmod value of the expression node */
-	Oid			varcollid;	/* collation oid of the expression node */
-	bool		ref_host;	/* true, if referenced in host expression */
-	bool		ref_device;	/* true, if referenced in device expression */
-	Expr	   *expr;		/* source Var or PlaceHolderVar node */
-} vartrans_info;
-
-typedef struct
-{
-	CustomPlan	cplan;
+	//CustomScan	cscan;
 	/*
 	 * outerPlan ... relation to be joined
 	 * innerPlan ... MultiHash with multiple inner relations
 	 */
 	int			num_rels;		/* number of underlying MultiHash */
-	const char *kernel_source;
+	Size		hashtable_size;	/* estimated hashtable size */
+	double		row_population_ratio;	/* estimated population ratio */
+	char	   *kernel_source;
 	int			extra_flags;
 	bool		outer_bulkload;	/* is outer can bulk loading? */
+	Expr	   *outer_quals;	/* qualifiers pulled-up from outer-scan */
 	List	   *join_types;		/* list of join types */
+	List	   *hash_keys;		/* list of hash-keys in outer relation */
 	List	   *hash_clauses;	/* list of hash_clause (List *) */
 	List	   *qual_clauses;	/* list of qual_clause (List *) */
 	List	   *host_clauses;	/* list of host_clause (List *) */
 
-	List	   *used_params;	/* template for kparams */
-	Bitmapset  *outer_attrefs;	/* bitmap of referenced outer columns */
-	List	   *pscan_vartrans;	/* list of vartrans_info */
-} GpuHashJoin;
+	/* NOTE: device qualifiers are already fixed-up to reference special
+	 * varnodes (INNER/OUTER/INDEX) on fixup_device_expression(). It should
+	 * be saved separately to avoid built-in adjustment in setrefs.c.
+	 */
+	Expr	   *dev_outer_quals;
+	List	   *dev_hash_clauses;
+	List	   *dev_qual_clauses;
+	List	   *raw_hash_keys;
 
+	List	   *used_params;	/* template for kparams */
+
+	/* supplemental information for ps_tlist */
+	List	   *ps_src_depth;	/* source depth of the pseudo target entry */
+	List	   *ps_src_resno;	/* source resno of the pseudo target entry */
+} GpuHashJoinInfo;
+
+static inline void
+form_gpuhashjoin_info(CustomScan *cscan, GpuHashJoinInfo *ghj_info)
+{
+	List   *privs = NIL;
+	List   *exprs = NIL;
+	union {
+        long    ival;
+        double  fval;
+    } datum;
+
+	privs = lappend(privs, makeInteger(ghj_info->num_rels));
+	privs = lappend(privs, makeInteger(ghj_info->hashtable_size));
+	datum.fval = ghj_info->row_population_ratio;
+	privs = lappend(privs, makeInteger(datum.ival));
+	privs = lappend(privs, makeString(ghj_info->kernel_source));
+	privs = lappend(privs, makeInteger(ghj_info->extra_flags));
+	privs = lappend(privs, makeInteger(ghj_info->outer_bulkload));
+	exprs = lappend(exprs, ghj_info->outer_quals);
+	privs = lappend(privs, ghj_info->join_types);
+	exprs = lappend(exprs, ghj_info->hash_keys);
+	exprs = lappend(exprs, ghj_info->hash_clauses);
+	exprs = lappend(exprs, ghj_info->qual_clauses);
+	exprs = lappend(exprs, ghj_info->host_clauses);
+	privs = lappend(privs, ghj_info->dev_outer_quals);
+	privs = lappend(privs, ghj_info->dev_hash_clauses);
+	privs = lappend(privs, ghj_info->dev_qual_clauses);
+	privs = lappend(privs, ghj_info->raw_hash_keys);
+	exprs = lappend(exprs, ghj_info->used_params);
+	privs = lappend(privs, ghj_info->ps_src_depth);
+	privs = lappend(privs, ghj_info->ps_src_resno);
+
+	cscan->custom_private = privs;
+	cscan->custom_exprs = exprs;
+}
+
+static inline GpuHashJoinInfo *
+deform_gpuhashjoin_info(CustomScan *cscan)
+{
+	GpuHashJoinInfo *ghj_info = palloc0(sizeof(GpuHashJoinInfo));
+	List	   *privs = cscan->custom_private;
+	List	   *exprs = cscan->custom_exprs;
+	int			pindex = 0;
+	int			eindex = 0;
+	union {
+        long    ival;
+        double  fval;
+    } datum;
+
+	ghj_info->num_rels        = intVal(list_nth(privs, pindex++));
+	ghj_info->hashtable_size  = intVal(list_nth(privs, pindex++));
+	datum.ival = intVal(list_nth(privs, pindex++));
+	ghj_info->row_population_ratio = datum.fval;
+	ghj_info->kernel_source   = strVal(list_nth(privs, pindex++));
+	ghj_info->extra_flags     = intVal(list_nth(privs, pindex++));
+	ghj_info->outer_bulkload  = intVal(list_nth(privs, pindex++));
+	ghj_info->outer_quals     = list_nth(exprs, eindex++);
+	ghj_info->join_types      = list_nth(privs, pindex++);
+	ghj_info->hash_keys       = list_nth(exprs, eindex++);
+	ghj_info->hash_clauses    = list_nth(exprs, eindex++);
+	ghj_info->qual_clauses    = list_nth(exprs, eindex++);
+	ghj_info->host_clauses    = list_nth(exprs, eindex++);
+	ghj_info->dev_outer_quals = list_nth(privs, pindex++);
+	ghj_info->dev_hash_clauses= list_nth(privs, pindex++);
+	ghj_info->dev_qual_clauses= list_nth(privs, pindex++);
+	ghj_info->raw_hash_keys   = list_nth(privs, pindex++);
+	ghj_info->used_params     = list_nth(exprs, eindex++);
+	ghj_info->ps_src_depth    = list_nth(privs, pindex++);
+	ghj_info->ps_src_resno    = list_nth(privs, pindex++);
+
+	return ghj_info;
+}
+
+/*
+ * MultiHashInfo - state object of CustomScan(MultiHash)
+ */
 typedef struct
 {
-	CustomPlan	cplan;
 	/*
 	 * outerPlan ... relation to be hashed
 	 * innerPlan ... one another MultiHash, if any
@@ -143,22 +222,77 @@ typedef struct
 	int			depth;		/* depth of this hash table */
 
 	cl_uint		nslots;		/* width of hash slots */
-	cl_uint		nloops;		/* expected number of outer loops */
-	double		threshold_ratio;
-	Size		hashtable_size;	/* estimated total hashtable size */
+	Size		hashtable_size;
+	double		threshold;
 
-	List	   *hash_inner_keys;/* list of inner hash key expressions */
-	List	   *hash_outer_keys;/* list of outer hash key expressions */
 	/*
-	 * NOTE: Any varno of the var-nodes in hash_inner_keys references
-	 * OUTER_VAR, because this expression node is used to calculate
-	 * hash-value of individual entries on construction of MultiHashNode
-	 * during outer relation scan.
-	 * On the other hands, any varno of the var-nodes in hash_outer_keys
-	 * references INDEX_VAR with varattno on the pseudo tlist, because
-	 * it is used for code generation.
+	 * NOTE: setrefs.c adjusts varnode reference on hash_keys because
+	 * of custom-scan interface contract. It shall be redirected to
+	 * INDEX_VAR reference, to reference pseudo-scan tlist.
+	 * MultiHash has idential pseudo-scan tlist with its outer scan-
+	 * path, it always reference correct attribute as long as tuple-
+	 * slot is stored on ecxt_scantuple of ExprContext.
 	 */
-} MultiHash;
+	List	   *hash_keys;
+} MultiHashInfo;
+
+static inline void
+form_multihash_info(CustomScan *cscan, MultiHashInfo *mh_info)
+{
+	List   *exprs = NIL;
+	List   *privs = NIL;
+	union {
+		long	ival;
+		double	fval;
+	} datum;
+
+	privs = lappend(privs, makeInteger(mh_info->depth));
+	privs = lappend(privs, makeInteger(mh_info->nslots));
+	privs = lappend(privs, makeInteger(mh_info->hashtable_size));
+	datum.fval = mh_info->threshold;
+	privs = lappend(privs, makeInteger(datum.ival));
+	exprs = lappend(exprs, mh_info->hash_keys);
+
+	cscan->custom_private = privs;
+	cscan->custom_exprs = exprs;
+}
+
+static MultiHashInfo *
+deform_multihash_info(CustomScan *cscan)
+{
+	MultiHashInfo *mh_info = palloc0(sizeof(MultiHashInfo));
+	List   *privs = cscan->custom_private;
+	List   *exprs = cscan->custom_exprs;
+	int		pindex = 0;
+	int		eindex = 0;
+	union {
+        long    ival;
+        double  fval;
+    } datum;
+
+	mh_info->depth     = intVal(list_nth(privs, pindex++));
+	mh_info->nslots    = intVal(list_nth(privs, pindex++));
+	mh_info->hashtable_size = intVal(list_nth(privs, pindex++));
+	datum.ival         = intVal(list_nth(privs, pindex++));
+	mh_info->threshold = datum.fval;
+	mh_info->hash_keys = list_nth(exprs, eindex++);
+
+	return mh_info;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /*
  * MultiHashNode - a data structure to be returned from MultiHash node;
@@ -173,20 +307,18 @@ typedef struct {
 
 typedef struct
 {
-	CustomPlanState	cps;
+	CustomScanState css;
 	List		   *join_types;
+	ExprState	   *outer_quals;
 	List		   *hash_clauses;
 	List		   *qual_clauses;
-	List		   *host_clauses;
+	List		   *host_clauses;	/* to be run on pseudo-scan slot */
 
 	pgstrom_multihash_tables *mhtables;
 
-	int				pscan_nattrs;
-	vartrans_info  *pscan_vartrans;
-	TupleTableSlot *pscan_slot;
-	TupleTableSlot *pscan_wider_slot;
-	ProjectionInfo *pscan_projection;
-	ProjectionInfo *pscan_wider_projection;
+	/* Source relation/columns of pseudo-scan */
+	List	   *ps_src_depth;
+	List	   *ps_src_resno;
 
 	/* average ratio to popurate result row */
 	double			row_population_ratio;
@@ -198,9 +330,10 @@ typedef struct
 	bool			outer_bulkload;
 	TupleTableSlot *outer_overflow;
 
-	pgstrom_queue  *mqueue;
-	Datum			dprog_key;
 	kern_parambuf  *kparams;
+	const char	   *kernel_source;
+	Datum			dprog_key;
+	pgstrom_queue  *mqueue;
 
 	pgstrom_gpuhashjoin *curr_ghjoin;
 	cl_uint			curr_index;
@@ -212,11 +345,10 @@ typedef struct
 } GpuHashJoinState;
 
 typedef struct {
-	CustomPlanState	cps;
+	CustomScanState css;
 	int				depth;
 	cl_uint			nslots;
-	double			threshold_ratio;
-	Size			chunk_size;
+	double			threshold;
 	Size			hashtable_size;
 	TupleTableSlot *outer_overflow;
 	bool			outer_done;
@@ -284,7 +416,7 @@ path_is_mergeable_gpuhashjoin(Path *pathnode)
 	 * Host qual should not contain volatile function except for
 	 * the last inner relation
 	 */
-	host_clause = gpath->inners[last].host_clause;
+	host_clause = gpath->inners[last].host_clauses;
 	foreach (cell, host_clause)
 	{
 		RestrictInfo   *rinfo = lfirst(cell);
@@ -306,10 +438,10 @@ path_is_mergeable_gpuhashjoin(Path *pathnode)
 bool
 pgstrom_plan_is_multihash(const Plan *plan)
 {
-	CustomPlan *cplan = (CustomPlan *) plan;
+	CustomScan *cscan = (CustomScan *) plan;
 
-	if (IsA(cplan, CustomPlan) &&
-		cplan->methods == &multihash_plan_methods)
+	if (IsA(cscan, CustomScan) &&
+		cscan->methods == &multihash_plan_methods)
 		return true;
 	return false;
 }
@@ -325,95 +457,98 @@ estimate_hashtable_size(PlannerInfo *root,
 						Relids required_outer,
 						JoinCostWorkspace *workspace)
 {
-	RelOptInfo *joinrel = gpath->cpath.path.parent;
 	Size		hashtable_size;
+	Size		largest_size;
 	Size		threshold_size;
+	cl_int		i, i_largest;
 	cl_int		numbatches;
-	bool		is_first = true;
 
-	do {
-		Size		largest_size;
-		cl_int		i_largest;
-		cl_int		i, nrels = gpath->num_rels;
+	for (i=0; i < gpath->num_rels; i++)
+		gpath->inners[i].nloops = 1;
+retry:
+	hashtable_size = LONGALIGN(offsetof(kern_multihash,
+										htable_offset[gpath->num_rels]));
+	numbatches = 1;
+	largest_size = 0;
+	i_largest = -1;
+	for (i=0; i < gpath->num_rels; i++)
+	{
+		Path	   *inner_path = gpath->inners[i].scan_path;
+		RelOptInfo *inner_rel = inner_path->parent;
+		cl_uint		ncols = list_length(inner_rel->reltargetlist);
+		cl_uint		nslots;
+		double		ntuples;
+		Size		entry_size;
+		Size		chunk_size;
 
-		/* increment outer loop count to reduce size of hash table */
-		if (!is_first)
-			gpath->inners[i_largest].nloops++;
-		numbatches = 1;
-		largest_size = 0;
-		i_largest = -1;
+		numbatches *= gpath->inners[i].nloops;
 
-		hashtable_size = LONGALIGN(offsetof(kern_multihash,
-											htable_offset[nrels]));
-		for (i=0; i < nrels; i++)
-		{
-			Path	   *scan_path = gpath->inners[i].scan_path;
-			RelOptInfo *scan_rel = scan_path->parent;
-			cl_uint		ncols = list_length(scan_rel->reltargetlist);
-			double		ntuples;
-			Size		entry_size;
-			Size		chunk_size;
-
-			if (is_first)
-				gpath->inners[i].nloops = 1;
-			else
-				numbatches *= gpath->inners[i].nloops;
-
-			/* force a plausible relation size if no information.
-			 * It expects 15% of margin to avoid unnecessary hash-
-			 * table split
-			 */
-			ntuples = (Max(1.15 * scan_path->rows, 1000.0) /
-					   (double) gpath->inners[i].nloops);
-
-			/* estimate length of each hash entry */
-			entry_size = (offsetof(kern_hashentry, htup) +
-						  MAXALIGN(offsetof(HeapTupleHeaderData,
-											t_bits[BITMAPLEN(ncols)])) +
-						  MAXALIGN(scan_rel->width));
-			/* estimate length of this chunk */
-			chunk_size = (LONGALIGN(offsetof(kern_hashtable,
-											 colmeta[ncols])) +
-						  LONGALIGN(sizeof(cl_uint) * (Size)ntuples) +
-						  LONGALIGN(entry_size * (Size)ntuples));
-			chunk_size = STROMALIGN(chunk_size);
-			if (largest_size < chunk_size)
-			{
-				largest_size = chunk_size;
-				i_largest = i;
-			}
-			gpath->inners[i].chunk_size = chunk_size;
-			gpath->inners[i].ntuples = (cl_uint) ntuples;
-
-			/* expand estimated hashtable-size */
-			hashtable_size += chunk_size;
-		}
-		/* also compute threshold_ratio */
-		threshold_size = 0;
-		for (i = nrels - 1; i >= 0; i--)
-		{
-			threshold_size += gpath->inners[i].chunk_size;
-			gpath->inners[i].threshold_ratio
-				= (double) threshold_size / (double) hashtable_size;
-		}
-		Assert(i_largest >= 0 && i_largest < nrels);
-		is_first = false;
-
-		/*
-		 * NOTE: In case when extreme number of rows are expected,
-		 * it does not make sense to split hash-tables because
-		 * increasion of numbatches also increases the total cost
-		 * by iteration of outer scan. In this case, the best
-		 * strategy is to give up this path, instead of incredible
-		 * number of numbatches!
+		/* force a plausible relation size if no information.
+		 * It expects 15% of margin to avoid unnecessary hash-
+		 * table split
 		 */
-		if (!add_path_precheck(joinrel,
-							   workspace->startup_cost,
-							   workspace->startup_cost +
-							   workspace->run_cost * numbatches,
-							   NULL, required_outer))
-			return false;
-	} while (hashtable_size > pgstrom_shmem_maxalloc());
+		ntuples = Max(1.15 * inner_path->rows, 1000.0);
+		if (gpath->inners[i].nloops > 0)
+			ntuples /= (double) gpath->inners[i].nloops;
+
+		/* estimate length of each hash entry */
+		entry_size = (offsetof(kern_hashentry, htup) +
+					  MAXALIGN(offsetof(HeapTupleHeaderData,
+										t_bits[BITMAPLEN(ncols)])) +
+					  MAXALIGN(inner_rel->width));
+		/* estimate length of hash slot */
+		nslots = (Size)ntuples / gpath->inners[i].nloops;
+		gpath->inners[i].nslots = nslots;
+		/* estimate length of this chunk */
+		chunk_size = (LONGALIGN(offsetof(kern_hashtable,
+										 colmeta[ncols])) +
+					  LONGALIGN(sizeof(cl_uint) * nslots) +
+					  LONGALIGN(entry_size * (Size)ntuples));
+		chunk_size = STROMALIGN(chunk_size);
+		if (largest_size < chunk_size)
+		{
+			largest_size = chunk_size;
+			i_largest = i;
+		}
+		gpath->inners[i].chunk_size = chunk_size;
+
+		/* expand estimated hashtable-size */
+		hashtable_size += chunk_size;
+	}
+	/* also, compute threshold of each chunk */
+	threshold_size = 0;
+	for (i = gpath->num_rels - 1; i >= 0; i--)
+	{
+		threshold_size += gpath->inners[i].chunk_size;
+		gpath->inners[i].threshold
+			= (double) threshold_size / (double) hashtable_size;
+	}
+
+	/*
+	 * NOTE: In case when extreme number of rows are expected,
+	 * it does not make sense to split hash-tables because
+	 * increasion of numbatches also increases the total cost
+	 * by iteration of outer scan. In this case, the best
+	 * strategy is to give up this path, instead of incredible
+	 * number of numbatches!
+	 */
+	if (!add_path_precheck(gpath->cpath.path.parent,
+						   workspace->startup_cost,
+						   workspace->startup_cost +
+						   workspace->run_cost * numbatches,
+						   NULL, required_outer))
+		return false;
+
+	/*
+	 * If hashtable-size is still larger than device limitation,
+	 * we try to split the largest chunk then retry the size
+	 * estimation.
+	 */
+	if (hashtable_size > pgstrom_shmem_maxalloc())
+	{
+		gpath->inners[i_largest].nloops++;
+		goto retry;
+	}
 
 	/*
 	 * Update estimated hashtable_size, but ensure hashtable_size
@@ -421,6 +556,7 @@ estimate_hashtable_size(PlannerInfo *root,
 	 */
 	gpath->hashtable_size = Max(hashtable_size,
 								pgstrom_chunk_size << 20);
+
 	/*
 	 * Update JoinCostWorkspace according to numbatches
 	 */
@@ -431,41 +567,45 @@ estimate_hashtable_size(PlannerInfo *root,
 }
 
 /*
- * cost_gpuhashjoin
+ * initial_cost_gpuhashjoin
  *
  * cost estimation for GpuHashJoin
  */
 static bool
-cost_gpuhashjoin(PlannerInfo *root,
-				 GpuHashJoinPath *gpath,
-				 Relids required_outer,
-				 JoinCostWorkspace *workspace)
+initial_cost_gpuhashjoin(PlannerInfo *root,
+						 GpuHashJoinPath *gpath,
+						 Relids required_outer,
+						 JoinCostWorkspace *workspace)
 {
 	Path	   *outer_path = gpath->outerpath;
 	Cost		startup_cost;
 	Cost		run_cost;
 	Cost		row_cost;
-	double		num_rows;
 	int			num_hash_clauses = 0;
 	int			i;
 
-	/* cost of source data */
+	/*
+	 * cost to construct inner hash-table; that consists of two portions.
+	 * 1. total cost to run underlying scan node.
+	 * 2. cost to evaluate hash-functions to make hash-table.
+	 *
+	 * It has to be executed by CPU, so we follow the overall logic
+	 * in initial_cost_hashjoin().
+	 */
 	startup_cost = outer_path->startup_cost;
 	run_cost = outer_path->total_cost - outer_path->startup_cost;
-	for (i=0; i < gpath->num_rels; i++)
-		startup_cost += gpath->inners[i].scan_path->total_cost;
 
-	/*
-	 * Cost of computing hash function: it is done by CPU right now,
-	 * so we follow the logic in initial_cost_hashjoin().
-	 */
 	for (i=0; i < gpath->num_rels; i++)
 	{
-		num_hash_clauses += list_length(gpath->inners[i].hash_clause);
-		num_rows = gpath->inners[i].scan_path->rows;
+		Path   *inner_path = gpath->inners[i].scan_path;
+		List   *hash_clauses = gpath->inners[i].hash_clauses;
+
+		startup_cost += inner_path->total_cost;
+
+		num_hash_clauses += list_length(hash_clauses);
 		startup_cost += (cpu_operator_cost *
-						 list_length(gpath->inners[i].hash_clause) +
-						 cpu_tuple_cost) * num_rows;
+						 list_length(hash_clauses) +
+						 cpu_tuple_cost) * inner_path->rows;
 	}
 
 	/* in addition, it takes cost to set up OpenCL device/program */
@@ -474,9 +614,8 @@ cost_gpuhashjoin(PlannerInfo *root,
 	/* on the other hands, its cost to run outer scan for joinning
 	 * is much less than usual GPU hash join.
 	 */
-	num_rows = gpath->outerpath->rows;
 	row_cost = pgstrom_gpu_operator_cost * num_hash_clauses;
-	run_cost += row_cost * num_rows;
+	run_cost += row_cost * outer_path->rows;
 
 	/* setup join-cost-workspace */
 	workspace->startup_cost = startup_cost;
@@ -511,8 +650,9 @@ approx_tuple_count(PlannerInfo *root, GpuHashJoinPath *gpath)
 	for (i=0; i < gpath->num_rels; i++)
 	{
 		Path	   *inner_path = gpath->inners[i].scan_path;
-		List	   *hash_clause = gpath->inners[i].hash_clause;
-		List	   *qual_clause = gpath->inners[i].qual_clause;
+		List	   *hash_clauses = gpath->inners[i].hash_clauses;
+		List	   *qual_clauses = gpath->inners[i].qual_clauses;
+		List	   *host_clauses = gpath->inners[i].host_clauses;
 		double		inner_tuples = inner_path->rows;
 		SpecialJoinInfo sjinfo;
 		ListCell   *cell;
@@ -530,14 +670,21 @@ approx_tuple_count(PlannerInfo *root, GpuHashJoinPath *gpath)
 		sjinfo.join_quals = NIL;
 
 		/* Get the approximate selectivity */
-		foreach (cell, hash_clause)
+		foreach (cell, hash_clauses)
 		{
 			Node   *qual = (Node *) lfirst(cell);
 
 			/* Note that clause_selectivity can cache its result */
 			selec *= clause_selectivity(root, qual, 0, JOIN_INNER, &sjinfo);
 		}
-		foreach (cell, qual_clause)
+		foreach (cell, qual_clauses)
+		{
+			Node   *qual = (Node *) lfirst(cell);
+
+			/* Note that clause_selectivity can cache its result */
+			selec *= clause_selectivity(root, qual, 0, JOIN_INNER, &sjinfo);
+		}
+		foreach (cell, host_clauses)
 		{
 			Node   *qual = (Node *) lfirst(cell);
 
@@ -561,6 +708,7 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 	QualCost	qual_cost;
 	QualCost	host_cost;
 	double		hashjointuples;
+	double		row_population_ratio;
 	int			i;
 
 	/* Mark the path with correct row estimation */
@@ -572,9 +720,9 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 	/* Compute cost of the hash, qual and host clauses */
 	for (i=0; i < gpath->num_rels; i++)
 	{
-		List	   *hash_clause = gpath->inners[i].hash_clause;
-		List	   *qual_clause = gpath->inners[i].qual_clause;
-		List	   *host_clause = gpath->inners[i].host_clause;
+		List	   *hash_clauses = gpath->inners[i].hash_clauses;
+		List	   *qual_clauses = gpath->inners[i].qual_clauses;
+		List	   *host_clauses = gpath->inners[i].host_clauses;
 		double		outer_path_rows = gpath->outerpath->rows;
 		double		inner_path_rows = gpath->inners[i].scan_path->rows;
 		Relids		inner_relids = gpath->inners[i].scan_path->parent->relids;
@@ -586,7 +734,7 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 		 * We use the smallest bucketsize estimated for any individual
 		 * hashclause; this is undoubtedly conservative.
 		 */
-		foreach (cell, hash_clause)
+		foreach (cell, hash_clauses)
 		{
 			RestrictInfo   *restrictinfo = (RestrictInfo *) lfirst(cell);
 			Selectivity		thisbucketsize;
@@ -628,9 +776,9 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 		/*
 		 * Pulls function cost of individual clauses
 		 */
-		cost_qual_eval(&hash_cost, hash_clause, root);
-		cost_qual_eval(&qual_cost, qual_clause, root);
-		cost_qual_eval(&host_cost, host_clause, root);
+		cost_qual_eval(&hash_cost, hash_clauses, root);
+		cost_qual_eval(&qual_cost, qual_clauses, root);
+		cost_qual_eval(&host_cost, host_clauses, root);
 		/*
 		 * Because cost_qual_eval returns cost value that assumes CPU
 		 * execution, we need to adjust its ratio according to the score
@@ -657,6 +805,18 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 	 */
 	hashjointuples = approx_tuple_count(root, gpath);
 
+	row_population_ratio = hashjointuples / gpath->outerpath->rows;
+	if (row_population_ratio < 1.0)
+		row_population_ratio = 1.0;
+	if (row_population_ratio > 5.0)
+	{
+		elog(NOTICE, "row population ratio (%.2f) too large, rounded to 5.0",
+			 row_population_ratio);
+		row_population_ratio = 5.0;
+		/* usually, not recommended to use GpuHashJoin */
+		startup_cost += disable_cost;
+	}
+
 	/*
 	 * Also add cost for qualifiers to be run on host
 	 */
@@ -665,6 +825,139 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 
 	gpath->cpath.path.startup_cost = startup_cost;
 	gpath->cpath.path.total_cost = startup_cost + run_cost;
+	gpath->row_population_ratio = row_population_ratio;
+}
+
+/*
+ * try_gpuhashjoin_path
+ *
+ *
+ *
+ *
+ *
+ */
+static void
+try_gpuhashjoin_path(PlannerInfo *root,
+					 RelOptInfo *joinrel,
+					 JoinType jointype,
+					 SpecialJoinInfo *sjinfo,
+					 SemiAntiJoinFactors *semifactors,
+					 Relids param_source_rels,
+					 Relids extra_lateral_rels,
+					 Path *outer_path,
+					 Path *inner_path,
+					 List *restrict_clauses,
+					 List *hash_clauses,
+					 List *qual_clauses,
+					 List *host_clauses)
+{
+	GpuHashJoinPath	   *gpath;
+	Relids				required_outer;
+	JoinCostWorkspace	workspace;
+
+	required_outer = calc_non_nestloop_required_outer(outer_path,
+													  inner_path);
+	if (required_outer && !bms_overlap(required_outer, param_source_rels))
+	{
+		bms_free(required_outer);
+		return;
+	}
+
+	/*
+	 * Independently of that, add parameterization needed for any
+	 * PlaceHolderVars that need to be computed at the join.
+	 */
+	required_outer = bms_add_members(required_outer, extra_lateral_rels);
+
+	/*
+	 * creation of gpuhashjoin path, without merging underlying gpuhashjoin.
+	 */
+	gpath = palloc0(offsetof(GpuHashJoinPath, inners[1]));
+	NodeSetTag(gpath, T_CustomPath);
+	gpath->cpath.path.pathtype = T_CustomScan;
+	gpath->cpath.path.parent = joinrel;
+	gpath->cpath.path.param_info =
+		get_joinrel_parampathinfo(root,
+								  joinrel,
+								  outer_path,
+								  inner_path,
+								  sjinfo,
+								  bms_copy(required_outer),
+								  &restrict_clauses);
+	gpath->cpath.path.pathkeys = NIL;
+	gpath->cpath.flags = 0;
+	gpath->cpath.methods = &gpuhashjoin_path_methods;
+	gpath->outerpath = outer_path;
+	gpath->num_rels = 1;
+	gpath->inners[0].scan_path = inner_path;
+	gpath->inners[0].jointype = jointype;
+	gpath->inners[0].hash_clauses = hash_clauses;
+    gpath->inners[0].qual_clauses = qual_clauses;
+	gpath->inners[0].host_clauses = host_clauses;
+
+	/* cost estimation and check availability */
+	if (initial_cost_gpuhashjoin(root, gpath, required_outer, &workspace))
+	{
+		if (add_path_precheck(joinrel,
+							  workspace.startup_cost,
+							  workspace.total_cost,
+							  NULL, required_outer))
+		{
+			final_cost_gpuhashjoin(root, gpath, &workspace);
+			add_path(joinrel, &gpath->cpath.path);
+		}
+	}
+
+	/*
+	 * creation of alternative path, if underlying outer-path is
+	 * merginable gpuhashjoin.
+	 */
+	if (path_is_mergeable_gpuhashjoin(outer_path))
+	{
+		GpuHashJoinPath	*outer_ghj = (GpuHashJoinPath *) outer_path;
+		int		num_rels = outer_ghj->num_rels;
+
+		gpath = palloc0(offsetof(GpuHashJoinPath, inners[num_rels + 1]));
+		NodeSetTag(gpath, T_CustomPath);
+		gpath->cpath.path.pathtype = T_CustomScan;
+		gpath->cpath.path.parent = joinrel;
+		gpath->cpath.path.param_info =
+			get_joinrel_parampathinfo(root,
+									  joinrel,
+									  outer_path,
+									  inner_path,
+									  sjinfo,
+									  bms_copy(required_outer),
+									  &restrict_clauses);
+		gpath->cpath.path.pathkeys = NIL;
+		gpath->cpath.flags = 0;
+		gpath->cpath.methods = &gpuhashjoin_path_methods;
+		gpath->num_rels = num_rels + 1;
+		gpath->outerpath = outer_ghj->outerpath;
+		memcpy(gpath->inners,
+			   outer_ghj->inners,
+			   offsetof(GpuHashJoinPath, inners[num_rels]) -
+			   offsetof(GpuHashJoinPath, inners[0]));
+		gpath->inners[num_rels].scan_path = inner_path;
+        gpath->inners[num_rels].jointype = jointype;
+        gpath->inners[num_rels].hash_clauses = hash_clauses;
+        gpath->inners[num_rels].qual_clauses = qual_clauses;
+        gpath->inners[num_rels].host_clauses = host_clauses;
+
+		/* cost estimation and check availability */
+		if (initial_cost_gpuhashjoin(root, gpath, required_outer, &workspace))
+		{
+			if (add_path_precheck(joinrel,
+								  workspace.startup_cost,
+								  workspace.total_cost,
+								  NULL, required_outer))
+			{
+				final_cost_gpuhashjoin(root, gpath, &workspace);
+				add_path(joinrel, &gpath->cpath.path);
+			}
+		}
+	}
+	bms_free(required_outer);
 }
 
 /*
@@ -672,364 +965,240 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
  *
  * callback function invoked to check up GpuHashJoinPath.
  */
+#define PATH_PARAM_BY_REL(path, rel)	\
+	((path)->param_info && bms_overlap(PATH_REQ_OUTER(path), (rel)->relids))
+
 static void
-gpuhashjoin_add_path(PlannerInfo *root,
-					 RelOptInfo *joinrel,
-					 JoinType jointype,
-					 JoinCostWorkspace *core_workspace,
-					 SpecialJoinInfo *sjinfo,
-					 SemiAntiJoinFactors *semifactors,
-					 Path *outer_path,
-					 Path *inner_path,
-					 List *restrict_clauses,
-					 Relids required_outer,
-					 List *hashclauses)
+gpuhashjoin_add_join_path(PlannerInfo *root,
+						  RelOptInfo *joinrel,
+						  RelOptInfo *outerrel,
+						  RelOptInfo *innerrel,
+						  List *restrictlist,
+						  JoinType jointype,
+						  SpecialJoinInfo *sjinfo,
+						  SemiAntiJoinFactors *semifactors,
+						  Relids param_source_rels,
+						  Relids extra_lateral_rels)
 {
-	GpuHashJoinPath	*gpath_new;
-	ParamPathInfo  *ppinfo;
-	List		   *hash_clause = NIL;
-	List		   *qual_clause = NIL;
-	List		   *host_clause = NIL;
-	List		   *outer_clause;
-	ListCell	   *cell;
-	JoinCostWorkspace gpu_workspace;
+	List	   *hash_clauses = NIL;
+	List	   *qual_clauses = NIL;
+	List	   *host_clauses = NIL;
+	ListCell   *cell;
 
 	/* calls secondary module if exists */
-	if (add_hashjoin_path_next)
-		add_hashjoin_path_next(root,
+	if (set_join_pathlist_next)
+		set_join_pathlist_next(root,
 							   joinrel,
+							   outerrel,
+							   innerrel,
+							   restrictlist,
 							   jointype,
-							   core_workspace,
 							   sjinfo,
 							   semifactors,
-							   outer_path,
-							   inner_path,
-							   restrict_clauses,
-							   required_outer,
-							   hashclauses);
+							   param_source_rels,
+							   extra_lateral_rels);
 
 	/* nothing to do, if either PG-Strom or GpuHashJoin is not enabled */
 	if (!pgstrom_enabled() || !enable_gpuhashjoin)
 		return;
 
-	/*
-	 * right now, only inner join is supported!
+	/* Is this join supported by GpuHashJoin?
+	 *
+	 * Logic came from hash_inner_and_outer()
+	 *
+	 *
+	 *
+	 *
+	 *
 	 */
 	if (jointype != JOIN_INNER)
-		return;
-
-	/*
-	 * make a ParamPathInfo of this GpuHashJoin, according to the standard
-	 * manner.
-	 * XXX - needs to ensure whether it is actually harmless in case when
-	 * multiple inner relations are planned to be cached.
-	 */
-	ppinfo = get_joinrel_parampathinfo(root,
-									   joinrel,
-									   outer_path,
-									   inner_path,
-									   sjinfo,
-									   bms_copy(required_outer),
-									   &restrict_clauses);
-
-	/* reasonable portion of hash-clauses can be runnable on GPU */
-	foreach (cell, restrict_clauses)
+		return;		/* right now, only inner join is supported */
+	foreach (cell, restrictlist)
 	{
-		RestrictInfo   *rinfo = lfirst(cell);
+		RestrictInfo   *rinfo = (RestrictInfo *) lfirst(cell);
 
-		if (pgstrom_codegen_available_expression(rinfo->clause))
+		/* Even if clause is hash-joinable, here is no benefit
+		 * in case when clause is not runnable on OpenCL device.
+		 * So, we drop them from the candidate of join-key.
+		 */
+		if (!pgstrom_codegen_available_expression(rinfo->clause))
 		{
-			if (list_member_ptr(hashclauses, rinfo))
-				hash_clause = lappend(hash_clause, rinfo);
-			else
-				qual_clause = lappend(qual_clause, rinfo);
+			host_clauses = lappend(host_clauses, rinfo);
+			continue;
 		}
+
+        /*
+         * If processing an outer join, only use its own join clauses
+         * for hashing.  For inner joins we need not be so picky.
+         */
+		if (IS_OUTER_JOIN(jointype) && rinfo->is_pushed_down)
+		{
+			qual_clauses = lappend(qual_clauses, rinfo);
+			continue;
+		}
+
+		/* Is it hash-joinable clause? */
+		if (!rinfo->can_join || !OidIsValid(rinfo->hashjoinoperator))
+		{
+			qual_clauses = lappend(qual_clauses, rinfo);
+			continue;
+		}
+
+        /*
+         * Check if clause has the form "outer op inner" or "inner op outer".
+		 *
+		 * Logic is copied from clause_sides_match_join
+         */
+		if (bms_is_subset(rinfo->left_relids, outerrel->relids) &&
+			bms_is_subset(rinfo->right_relids, innerrel->relids))
+			rinfo->outer_is_left = true;	/* lefthand side is outer */
+		else if (bms_is_subset(rinfo->left_relids, innerrel->relids) &&
+				 bms_is_subset(rinfo->right_relids, outerrel->relids))
+			rinfo->outer_is_left = false;	/* righthand side is outer */
 		else
-			host_clause = lappend(host_clause, rinfo);
-	}
-	if (hash_clause == NIL)
-		return;		/* no need to run it on GPU */
-
-	/*
-	 * creation of gpuhashjoin path, if no pull-up
-	 */
-	outer_clause = NIL;
-	gpath_new = palloc0(offsetof(GpuHashJoinPath, inners[1]));
-	gpath_new->cpath.path.type = T_CustomPath;
-	gpath_new->cpath.path.pathtype = T_CustomPlan;
-	gpath_new->cpath.path.parent = joinrel;
-	gpath_new->cpath.path.param_info = ppinfo;
-	gpath_new->cpath.path.pathkeys = NIL;
-	/* other cost fields of Path shall be set later */
-	gpath_new->cpath.methods = &gpuhashjoin_path_methods;
-	gpath_new->num_rels = 1;
-	gpath_new->outerpath = gpuscan_try_replace_seqscan_path(root, outer_path,
-															&outer_clause);
-	gpath_new->inners[0].scan_path = inner_path;
-	gpath_new->inners[0].jointype = jointype;
-	gpath_new->inners[0].hash_clause = hash_clause;
-	gpath_new->inners[0].qual_clause = list_concat(qual_clause, outer_clause);
-	gpath_new->inners[0].host_clause = host_clause;
-
-	/* cost estimation and check availability */
-	if (cost_gpuhashjoin(root, gpath_new,
-						 required_outer,
-						 &gpu_workspace))
-	{
-		if (add_path_precheck(joinrel,
-							  gpu_workspace.startup_cost,
-							  gpu_workspace.total_cost,
-							  NULL, required_outer))
 		{
-			final_cost_gpuhashjoin(root, gpath_new, &gpu_workspace);
-			add_path(joinrel, &gpath_new->cpath.path);
+			/* no good for these input relations */
+			qual_clauses = lappend(qual_clauses, rinfo);
+			continue;
 		}
+		hash_clauses = lappend(hash_clauses, rinfo);
 	}
 
-	/*
-     * creation of gpuhashjoin path using sub-inner pull-up, if available
-     */
-	if (path_is_mergeable_gpuhashjoin(outer_path))
+	/* If we found any usable hashclauses, make paths */
+	if (hash_clauses != NIL)
 	{
-		GpuHashJoinPath	   *gpath_sub = (GpuHashJoinPath *) outer_path;
-		int		num_rels = gpath_sub->num_rels;
+		/* overall logic comes from hash_inner_and_outer.
+		 *
+		 * We consider both the cheapest-total-cost and cheapest-startup-cost
+		 * outer paths.  There's no need to consider any but the
+		 * cheapest-total-cost inner path, however.
+		 */
+		Path	   *cheapest_startup_outer = outerrel->cheapest_startup_path;
+		Path	   *cheapest_total_outer = outerrel->cheapest_total_path;
+		Path	   *cheapest_total_inner = innerrel->cheapest_total_path;
+		ListCell   *lc1;
+		ListCell   *lc2;
 
-		outer_clause = NIL;
-		gpath_new = palloc0(offsetof(GpuHashJoinPath, inners[num_rels + 1]));
-		gpath_new->cpath.path.type = T_CustomPath;
-		gpath_new->cpath.path.pathtype = T_CustomPlan;
-		gpath_new->cpath.path.parent = joinrel;
-		gpath_new->cpath.path.param_info = ppinfo;
-		gpath_new->cpath.path.pathkeys = NIL;
-		/* other cost fields of Path shall be set later */
-		gpath_new->cpath.methods = &gpuhashjoin_path_methods;
-		gpath_new->num_rels = gpath_sub->num_rels + 1;
-		gpath_new->outerpath =
-			gpuscan_try_replace_seqscan_path(root, gpath_sub->outerpath,
-											 &outer_clause);
-		memcpy(gpath_new->inners,
-			   gpath_sub->inners,
-			   offsetof(GpuHashJoinPath, inners[num_rels]) -
-			   offsetof(GpuHashJoinPath, inners[0]));
-		gpath_new->inners[num_rels].scan_path = inner_path;
-		gpath_new->inners[num_rels].jointype = jointype;
-		gpath_new->inners[num_rels].hash_clause = hash_clause;
-		gpath_new->inners[num_rels].qual_clause = list_concat(qual_clause,
-															  outer_clause);
-		gpath_new->inners[num_rels].host_clause = host_clause;
+		/*
+		 * If either cheapest-total path is parameterized by the other rel, we
+		 * can't use a hashjoin.  (There's no use looking for alternative
+		 * input paths, since these should already be the least-parameterized
+		 * available paths.)
+		 */
+		if (PATH_PARAM_BY_REL(cheapest_total_outer, innerrel) ||
+			PATH_PARAM_BY_REL(cheapest_total_inner, outerrel))
+			return;
 
-		/* cost estimation and check availability */
-		if (cost_gpuhashjoin(root, gpath_new,
-							 required_outer,
-							 &gpu_workspace))
+		if (cheapest_startup_outer != NULL)
+			try_gpuhashjoin_path(root,
+								 joinrel,
+								 jointype,
+								 sjinfo,
+								 semifactors,
+								 param_source_rels,
+								 extra_lateral_rels,
+								 cheapest_startup_outer,
+								 cheapest_total_inner,
+								 restrictlist,
+								 hash_clauses,
+								 qual_clauses,
+								 host_clauses);
+
+		foreach (lc1, outerrel->cheapest_parameterized_paths)
 		{
-			if (add_path_precheck(joinrel,
-								  gpu_workspace.startup_cost,
-								  gpu_workspace.total_cost,
-								  NULL, required_outer))
+			Path   *outerpath = (Path *) lfirst(lc1);
+
+			/*
+			 * We cannot use an outer path that is parameterized by the
+			 * inner rel.
+			 */
+			if (PATH_PARAM_BY_REL(outerpath, innerrel))
+				continue;
+
+			foreach (lc2, innerrel->cheapest_parameterized_paths)
 			{
-				final_cost_gpuhashjoin(root, gpath_new, &gpu_workspace);
-				add_path(joinrel, &gpath_new->cpath.path);
+				Path   *innerpath = (Path *) lfirst(lc2);
+
+				/*
+				 * We cannot use an inner path that is parameterized by
+				 * the outer rel, either.
+				 */
+				if (PATH_PARAM_BY_REL(innerpath, outerrel))
+					continue;
+
+				if (outerpath == cheapest_startup_outer &&
+					innerpath == cheapest_total_inner)
+					continue;		/* already tried it */
+
+				try_gpuhashjoin_path(root,
+									 joinrel,
+									 jointype,
+									 sjinfo,
+									 semifactors,
+									 param_source_rels,
+									 extra_lateral_rels,
+									 outerpath,
+									 innerpath,
+									 restrictlist,
+									 hash_clauses,
+									 qual_clauses,
+									 host_clauses);
 			}
 		}
 	}
 }
 
-/*
- * XXX - a workaround. once CustomPlan became based on CustomScan,
- * we can access Scan->scanrelid...
- */
-typedef struct {
-	CustomPlan	cplan;
-    Index		scanrelid;
-} GpuScanPlanDummy;
-
-static bool
-gpuhashjoin_use_bulkload(GpuHashJoin *ghjoin)
-{
-	Plan	   *outer_plan = outerPlan(ghjoin);
-	Bitmapset  *outer_attrefs = NULL;
-	Index		outer_scanrelid;
-	ListCell   *lc;
-
-	/*
-	 * Only GpuScan support bulk-loading right now
-	 */
-	if (!pgstrom_plan_is_gpuscan(outer_plan))
-		return false;
-	outer_scanrelid = ((GpuScanPlanDummy *) outer_plan)->scanrelid;
-	pull_varattnos((Node *)ghjoin->cplan.plan.targetlist,
-				   outer_scanrelid,
-				   &outer_attrefs);
-	pull_varattnos((Node *)ghjoin->hash_clauses,
-				   outer_scanrelid,
-				   &outer_attrefs);
-	pull_varattnos((Node *)ghjoin->qual_clauses,
-				   outer_scanrelid,
-				   &outer_attrefs);
-	pull_varattnos((Node *)ghjoin->host_clauses,
-				   outer_scanrelid,
-				   &outer_attrefs);
-
-	foreach (lc, outer_plan->targetlist)
-	{
-		TargetEntry	   *tle = lfirst(lc);
-		int				x = tle->resno - FirstLowInvalidHeapAttributeNumber;
-
-		if (!bms_is_member(x, outer_attrefs))
-			continue;
-
-		if (!IsA(tle->expr, Var) ||
-			((Var *) tle->expr)->varattno != tle->resno)
-			return false;
-	}
-	return true;
-}
-
-static CustomPlan *
-gpuhashjoin_create_plan(PlannerInfo *root, CustomPath *best_path)
-{
-	GpuHashJoinPath *gpath = (GpuHashJoinPath *)best_path;
-	GpuHashJoin		*ghjoin;
-	Plan	   *prev_plan = NULL;
-	List	   *join_types = NIL;
-	List	   *hash_clauses = NIL;
-	List	   *qual_clauses = NIL;
-	List	   *host_clauses = NIL;
-	int			i;
-
-
-	ghjoin = palloc0(sizeof(GpuHashJoin));
-	NodeSetTag(ghjoin, T_CustomPlan);
-	ghjoin->cplan.methods = &gpuhashjoin_plan_methods;
-	ghjoin->cplan.plan.targetlist
-		= build_path_tlist(root, &gpath->cpath.path);
-	ghjoin->cplan.plan.qual = NIL;	/* to be set later */
-	outerPlan(ghjoin) = create_plan_recurse(root, gpath->outerpath);
-
-	for (i=0; i < gpath->num_rels; i++)
-	{
-		MultiHash  *mhash;
-		List	   *hash_clause = gpath->inners[i].hash_clause;
-		List	   *qual_clause = gpath->inners[i].qual_clause;
-		List	   *host_clause = gpath->inners[i].host_clause;
-		Plan	   *scan_plan
-			= create_plan_recurse(root, gpath->inners[i].scan_path);
-
-		if (gpath->cpath.path.param_info)
-		{
-			hash_clause = (List *)
-				replace_nestloop_params(root, (Node *) hash_clause);
-			qual_clause = (List *)
-				replace_nestloop_params(root, (Node *) qual_clause);
-			host_clause = (List *)
-				replace_nestloop_params(root, (Node *) host_clause);
-		}
-		/*
-		 * Sort clauses into best execution order, even though it's
-		 * uncertain whether it makes sense in GPU execution...
-		 */
-		hash_clause = order_qual_clauses(root, hash_clause);
-		qual_clause = order_qual_clauses(root, qual_clause);
-		host_clause = order_qual_clauses(root, host_clause);
-
-		/* Get plan expression form */
-		hash_clause = extract_actual_clauses(hash_clause, false);
-		qual_clause = extract_actual_clauses(qual_clause, false);
-		host_clause = extract_actual_clauses(host_clause, false);
-
-		/* saved on the GpuHashJoin node */
-		join_types = lappend_int(join_types, (int)gpath->inners[i].jointype);
-		hash_clauses = lappend(hash_clauses, hash_clause);
-		qual_clauses = lappend(qual_clauses, qual_clause);
-		host_clauses = lappend(host_clauses, host_clause);
-
-		/* Make a MultiHash node */
-		mhash = palloc0(sizeof(MultiHash));
-		NodeSetTag(mhash, T_CustomPlan);
-		mhash->cplan.methods = &multihash_plan_methods;
-		mhash->cplan.plan.startup_cost = scan_plan->total_cost;
-		mhash->cplan.plan.total_cost = scan_plan->total_cost;
-		mhash->cplan.plan.plan_rows = scan_plan->plan_rows;
-		mhash->cplan.plan.plan_width = scan_plan->plan_width;
-		mhash->cplan.plan.targetlist = scan_plan->targetlist;
-		mhash->cplan.plan.qual = NIL;
-		mhash->depth = i + 1;
-		mhash->nslots = gpath->inners[i].ntuples;
-		mhash->nloops = gpath->inners[i].nloops;
-		mhash->threshold_ratio = gpath->inners[i].threshold_ratio;
-		mhash->hashtable_size = gpath->hashtable_size;
-
-		/* chain it under the GpuHashJoin */
-		outerPlan(mhash) = scan_plan;
-		if (prev_plan)
-			innerPlan(prev_plan) = (Plan *) mhash;
-		else
-			innerPlan(ghjoin) = (Plan *) mhash;
-		prev_plan = (Plan *) mhash;
-	}
-	ghjoin->num_rels = gpath->num_rels;
-	ghjoin->join_types = join_types;
-	ghjoin->hash_clauses = hash_clauses;
-	ghjoin->qual_clauses = qual_clauses;
-	ghjoin->host_clauses = host_clauses;
-	ghjoin->outer_bulkload = gpuhashjoin_use_bulkload(ghjoin);
-
-	return &ghjoin->cplan;
-}
-
 static void
-gpuhashjoin_textout_path(StringInfo str, Node *node)
+gpuhashjoin_codegen_qual(StringInfo body,
+						 CustomScan *ghjoin,
+						 GpuHashJoinInfo *ghj_info,
+						 codegen_context *context)
 {
-	GpuHashJoinPath *gpath = (GpuHashJoinPath *) node;
-	char	   *temp;
-	int			i;
+	appendStringInfo(
+        body,
+		"static bool\n"
+		"gpuhashjoin_qual_eval(__private cl_int *errcode,\n"
+		"                      __global kern_parambuf *kparams,\n"
+		"                      __global kern_data_store *kds,\n"
+		"                      __global kern_data_store *ktoast,\n"
+		"                      size_t kds_index)\n"
+		"{\n");
 
-	/* outerpath */
-	temp = nodeToString(gpath->outerpath);
-	appendStringInfo(str, " :outerpath %s", temp);
-
-	/* num_rels */
-	appendStringInfo(str, " :num_rels %d", gpath->num_rels);
-
-	/* inners */
-	appendStringInfo(str, " :num_rels (");
-	for (i=0; i < gpath->num_rels; i++)
+	if (ghj_info->dev_outer_quals)
 	{
-		appendStringInfo(str, "{");
-		/* path */
-		temp = nodeToString(gpath->inners[i].scan_path);
-		appendStringInfo(str, " :scan_path %s", temp);
+		Node   *dev_outer_quals = (Node *) ghj_info->dev_outer_quals;
+		char   *expr_code;
 
-		/* jointype */
-		appendStringInfo(str, " :jointype %d",
-						 (int)gpath->inners[i].jointype);
+		context->used_params = NIL;
+		context->used_vars = NIL;
 
-		/* hash_clause */
-		temp = nodeToString(gpath->inners[i].hash_clause);
-		appendStringInfo(str, " :hash_clause %s", temp);
-
-		/* qual_clause */
-		temp = nodeToString(gpath->inners[i].qual_clause);
-		appendStringInfo(str, " :qual_clause %s", temp);
-
-		/* host_clause */
-		temp = nodeToString(gpath->inners[i].host_clause);
-		appendStringInfo(str, " :host_clause %s", temp);
-
-		appendStringInfo(str, "}");		
+		expr_code = pgstrom_codegen_expression(dev_outer_quals, context);
+		appendStringInfo(
+			body,
+			"%s%s\n"
+			"  return EVAL(%s);\n",
+			pgstrom_codegen_param_declarations(context),
+			pgstrom_codegen_var_declarations(context),
+			expr_code);
 	}
-	appendStringInfo(str, ")");
+	else
+	{
+		appendStringInfo(body, "  return true;\n");
+	}
+	appendStringInfo(
+        body,
+		"}\n");
 }
 
 static void
 gpuhashjoin_codegen_projection(StringInfo body,
-							   GpuHashJoin *ghjoin,
+							   CustomScan *ghjoin,
+							   GpuHashJoinInfo *ghj_info,
 							   codegen_context *context)
 {
 	Plan	   *plan = (Plan *) ghjoin;
 	int			depth = 0;
-	ListCell   *lc;
+	ListCell   *lc1, *lc2, *lc3;
 
 	/* materialize-mapping function */
 	appendStringInfo(
@@ -1042,9 +1211,13 @@ gpuhashjoin_codegen_projection(StringInfo body,
 		"{\n"
 		"  switch (dest_colidx)\n"
 		"  {\n");
-	foreach (lc, ghjoin->pscan_vartrans)
+	forthree (lc1, ghjoin->custom_ps_tlist,
+              lc2, ghj_info->ps_src_depth,
+              lc3, ghj_info->ps_src_resno)
 	{
-		vartrans_info  *vtrans = lfirst(lc);
+		TargetEntry    *tle = lfirst(lc1);
+		int				src_depth = lfirst_int(lc2);
+		int				src_resno = lfirst_int(lc3);
 
 		appendStringInfo(
 			body,
@@ -1052,9 +1225,9 @@ gpuhashjoin_codegen_projection(StringInfo body,
 			"    *src_depth = %d;\n"
 			"    *src_colidx = %d;\n"
 			"    break;\n",
-			vtrans->resno - 1,
-			vtrans->srcdepth,
-			vtrans->srcresno - 1);
+			tle->resno - 1,
+			src_depth,
+			src_resno - 1);
 	}
 	appendStringInfo(
         body,
@@ -1086,18 +1259,23 @@ gpuhashjoin_codegen_projection(StringInfo body,
             "  case %d:\n"
             "    switch (colidx)\n"
             "    {\n", depth);
-        foreach (lc, ghjoin->pscan_vartrans)
-        {
-            vartrans_info  *vtrans = lfirst(lc);
-            int16           typlen;
-            bool            typbyval;
+		forthree (lc1, ghjoin->custom_ps_tlist,
+				  lc2, ghj_info->ps_src_depth,
+				  lc3, ghj_info->ps_src_resno)
+		{
+			TargetEntry	   *tle = lfirst(lc1);
+			int				src_depth = lfirst_int(lc2);
+			int				src_resno = lfirst_int(lc3);
+			int16			typlen;
+			bool			typbyval;
 
-            if (vtrans->srcdepth != depth)
-                continue;
-			if (!vtrans->ref_host)
+			if (tle->resjunk)
+				break;	/* no valid tle should appear later */
+			if (src_depth != depth)
 				continue;
 
-            get_typlenbyval(vtrans->vartype, &typlen, &typbyval);
+			get_typlenbyval(exprType((Node *)tle->expr),
+							&typlen, &typbyval);
 			if (typbyval)
 			{
 				char   *cl_type = NULL;
@@ -1110,9 +1288,9 @@ gpuhashjoin_codegen_projection(StringInfo body,
 					"      else\n"
 					"      {\n"
 					"        slot_isnull[%d] = (cl_char) 0;\n",
-					vtrans->srcresno - 1,
-                    vtrans->resno - 1,
-                    vtrans->resno - 1);
+					src_resno - 1,
+                    tle->resno - 1,
+                    tle->resno - 1);
 				if (typlen == sizeof(cl_char))
 					cl_type = "cl_char";
 				else if (typlen == sizeof(cl_short))
@@ -1128,7 +1306,7 @@ gpuhashjoin_codegen_projection(StringInfo body,
 						body,
 						"        slot_values[%d]"
 						" = (Datum)(*((__global %s *) datum));\n",
-						vtrans->resno - 1,
+						tle->resno - 1,
 						cl_type);
 				}
 				else if (typlen < sizeof(Datum))
@@ -1136,7 +1314,7 @@ gpuhashjoin_codegen_projection(StringInfo body,
 					appendStringInfo(
 						body,
 						"        memcpy(&slot_values[%d], datum, %d);\n",
-						vtrans->resno - 1,
+						tle->resno - 1,
 						typlen);
 				}
 				else
@@ -1159,10 +1337,10 @@ gpuhashjoin_codegen_projection(StringInfo body,
 					"        slot_values[%d] = (Datum) hostaddr;\n"
 					"      }\n"
 					"      break;\n",
-					vtrans->srcresno - 1,
-					vtrans->resno - 1,
-					vtrans->resno - 1,
-					vtrans->resno - 1);
+					src_resno - 1,
+					tle->resno - 1,
+					tle->resno - 1,
+					tle->resno - 1);
 			}
 		}
         appendStringInfo(
@@ -1170,43 +1348,58 @@ gpuhashjoin_codegen_projection(StringInfo body,
             "    default: /* do nothing */ break;\n"
             "    }\n"
 			"    break;\n");
-        plan = innerPlan(plan);
-        depth++;
-    } while (plan);
-    appendStringInfo(
-        body,
-        "  default: /* do nothing */ break;\n"
-        "  }\n"
-        "}\n");
+		plan = innerPlan(plan);
+		depth++;
+	} while (plan);
+	appendStringInfo(
+		body,
+		"  default: /* do nothing */ break;\n"
+		"  }\n"
+		"}\n");
 }
 
 static void
 gpuhashjoin_codegen_recurse(StringInfo body,
-							GpuHashJoin *ghjoin,
-							MultiHash *mhash, int depth,
+							CustomScan *ghjoin,
+							GpuHashJoinInfo *ghj_info,
+							CustomScan *mhash, int depth,
 							codegen_context *context)
 {
-	MultiHash  *inner_hash = (MultiHash *) innerPlan(mhash);
-	List	   *hash_clause = list_nth(ghjoin->hash_clauses, depth - 1);
-	List	   *qual_clause = list_nth(ghjoin->qual_clauses, depth - 1);
-	ListCell   *cell;
+	MultiHashInfo *mhinfo = deform_multihash_info(mhash);
+	List	   *hash_keys;
+	List	   *hash_clause;
+	List	   *qual_clause;
+	List	   *dev_hash_clause;
+	List	   *dev_qual_clause;
+	Bitmapset  *attrs_ref = NULL;
+	ListCell   *lc1, *lc2, *lc3;
 	char	   *clause;
+
+	/* pulls qualifiers list */
+	hash_keys = list_nth(ghj_info->hash_keys, depth - 1);
+	hash_clause = list_nth(ghj_info->hash_clauses, depth - 1);
+	qual_clause = list_nth(ghj_info->qual_clauses, depth - 1);
+	dev_hash_clause = list_nth(ghj_info->dev_hash_clauses, depth - 1);
+	dev_qual_clause = list_nth(ghj_info->dev_qual_clauses, depth - 1);
 
 	/*
 	 * construct a hash-key in this nest-level
 	 */
 	appendStringInfo(body, "cl_uint hash_%u;\n\n", depth);
 	appendStringInfo(body, "INIT_CRC32(hash_%u);\n", depth);
-	foreach (cell, mhash->hash_outer_keys)
+	foreach (lc1, hash_keys)
 	{
-		Node		   *expr = lfirst(cell);
+		Node		   *expr = lfirst(lc1);
+		Oid				type_oid = exprType(expr);
 		devtype_info   *dtype;
 		char		   *temp;
 
-		dtype = pgstrom_devtype_lookup(exprType(expr));
-		Assert(dtype != NULL);
-		temp = pgstrom_codegen_expression(expr, context);
+		dtype = pgstrom_devtype_lookup(type_oid);
+		if (!dtype)
+			elog(ERROR, "device type \"%s\" not found",
+				 format_type_be(type_oid));
 
+		temp = pgstrom_codegen_expression(expr, context);
 		appendStringInfo(
 			body,
 			"hash_%u = pg_%s_hashkey(pg_crc32_table, hash_%u, %s);\n",
@@ -1234,27 +1427,38 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 	 * (its value depends on the current entry, so it needs to be
 	 * referenced within the loop)
 	 */
-	foreach (cell, ghjoin->pscan_vartrans)
+	pull_varattnos((Node *)dev_hash_clause, INNER_VAR, &attrs_ref);
+	pull_varattnos((Node *)dev_qual_clause, INNER_VAR, &attrs_ref);
+	forthree (lc1, ghjoin->custom_ps_tlist,
+			  lc2, ghj_info->ps_src_depth,
+			  lc3, ghj_info->ps_src_resno)
 	{
-		vartrans_info  *vtrans = lfirst(cell);
+		TargetEntry	   *tle = lfirst(lc1);
+		int				src_depth = lfirst_int(lc2);
+        int				src_resno = lfirst_int(lc3);
+		int				x = src_resno - FirstLowInvalidHeapAttributeNumber;
 		devtype_info   *dtype;
 
-		if (!vtrans->ref_device || vtrans->srcdepth != depth)
+		if (src_depth != depth || !bms_is_member(x, attrs_ref))
 			continue;
-		dtype = pgstrom_devtype_lookup(vtrans->vartype);
-		Assert(dtype != NULL);
+
+		dtype = pgstrom_devtype_lookup(exprType((Node *)tle->expr));
+		if (!dtype)
+			elog(ERROR, "cache lookup failed for device type: %s",
+				 format_type_be(exprType((Node *)tle->expr)));
 
 		appendStringInfo(
 			body,
 			"pg_%s_t KVAR_%u = "
 			"pg_%s_hashref(khtable_%d,kentry_%u,errcode,%u);\n",
 			dtype->type_name,
-			vtrans->resno,
+			tle->resno,
 			dtype->type_name,
 			depth,
 			depth,
-			vtrans->srcresno - 1);
+			src_resno - 1);
 	}
+	bms_free(attrs_ref);
 
 	/*
 	 * construct hash-key (and other qualifiers) comparison
@@ -1262,16 +1466,15 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 	appendStringInfo(body,
 					 "if (kentry_%d->hash == hash_%d",
 					 depth, depth);
-	foreach (cell, hash_clause)
+	if (hash_clause)
 	{
-		clause = pgstrom_codegen_expression(lfirst(cell), context);
+		clause = pgstrom_codegen_expression(hash_clause, context);
 		appendStringInfo(body, " &&\n    EVAL(%s)", clause);
 		pfree(clause);
 	}
-
-	foreach (cell, qual_clause)
+	if (qual_clause)
 	{
-		clause = pgstrom_codegen_expression(lfirst(cell), context);
+		clause = pgstrom_codegen_expression(qual_clause, context);
 		appendStringInfo(body, " &&\n      EVAL(%s)", clause);
 		pfree(clause);
 	}
@@ -1282,9 +1485,10 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 	 * Elsewhere, a code to put hash-join result and to increment the counter
 	 * of matched items.
 	 */
-	if (inner_hash)
-		gpuhashjoin_codegen_recurse(body, ghjoin,
-									inner_hash, depth + 1,
+	if (innerPlan(mhash))
+		gpuhashjoin_codegen_recurse(body, ghjoin, ghj_info,
+									(CustomScan *) innerPlan(mhash),
+									depth + 1,
 									context);
 	else
 	{
@@ -1300,7 +1504,7 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 			"if (rbuffer)\n"
 			"{\n"
 			"  rbuffer[0] = (cl_int)kds_index + 1;\n");	/* outer relation */
-		for (i=1; i <= ghjoin->num_rels; i++)
+		for (i=1; i <= ghj_info->num_rels; i++)
 			appendStringInfo(
 				body,
 				"  rbuffer[%d] = (cl_int)"
@@ -1310,7 +1514,7 @@ gpuhashjoin_codegen_recurse(StringInfo body,
             body,
 			"  rbuffer += %d;\n"
 			"}\n",
-			ghjoin->num_rels + 1);
+			ghj_info->num_rels + 1);
 	}
 	appendStringInfo(body, "}\n");
 	appendStringInfo(body, "}\n");
@@ -1351,19 +1555,20 @@ gpuhashjoin_codegen_type_declarations(codegen_context *context)
 
 static char *
 gpuhashjoin_codegen(PlannerInfo *root,
-					GpuHashJoin *ghjoin,
+					CustomScan *ghjoin,
+					GpuHashJoinInfo *ghj_info,
 					codegen_context *context)
 {
 	StringInfoData	str;
 	StringInfoData	decl;
 	StringInfoData	body;
-	ListCell	   *cell;
+	Bitmapset	   *attrs_ref = NULL;
+	ListCell	   *lc1, *lc2, *lc3;
 	int				depth;
 
 	initStringInfo(&str);
 	initStringInfo(&body);
 	initStringInfo(&decl);
-	pgstrom_init_codegen_context(context);
 
 	/* declaration of gpuhashjoin_execute */
 	appendStringInfo(
@@ -1379,9 +1584,8 @@ gpuhashjoin_codegen(PlannerInfo *root,
 		"                    __global cl_int *rbuffer)\n"
 		"{\n"
 		);
-
 	/* reference to each hash table */
-	for (depth=1; depth <= ghjoin->num_rels; depth++)
+	for (depth=1; depth <= ghj_info->num_rels; depth++)
 	{
 		appendStringInfo(
 			&decl,
@@ -1390,35 +1594,53 @@ gpuhashjoin_codegen(PlannerInfo *root,
 			depth, depth);
 	}
 	/* variable for individual hash entries */
-	for (depth=1; depth <= ghjoin->num_rels; depth++)
-    {
-        appendStringInfo(
-            &decl,
-            "__global kern_hashentry *kentry_%d;\n",
+	for (depth=1; depth <= ghj_info->num_rels; depth++)
+	{
+		appendStringInfo(
+			&decl,
+			"__global kern_hashentry *kentry_%d;\n",
 			depth);
 	}
 
 	/*
 	 * declaration of variables that reference outer relations
 	 */
-	foreach (cell, ghjoin->pscan_vartrans)
+	pull_varattnos((Node *)ghj_info->dev_hash_clauses,
+				   OUTER_VAR, &attrs_ref);
+	pull_varattnos((Node *)ghj_info->dev_qual_clauses,
+				   OUTER_VAR, &attrs_ref);
+
+	forthree (lc1, ghjoin->custom_ps_tlist,
+			  lc2, ghj_info->ps_src_depth,
+			  lc3, ghj_info->ps_src_resno)
 	{
-		vartrans_info  *vtrans = lfirst(cell);
+		TargetEntry	   *tle = lfirst(lc1);
+		int				src_depth = lfirst_int(lc2);
+		int				src_resno = lfirst_int(lc3);
+		int				x = src_resno - FirstLowInvalidHeapAttributeNumber;
 		devtype_info   *dtype;
 
-		if (vtrans->srcdepth != 0 || !vtrans->ref_device)
+		/* columns that does not reference outer relation, or columns
+		 * not referenecd?
+		 */
+		if (src_depth > 0 || !bms_is_member(x, attrs_ref))
 			continue;
 
-		/* reference to the outer relation (kern_data_store) */
-		dtype = pgstrom_devtype_lookup(vtrans->vartype);
+		dtype = pgstrom_devtype_lookup(exprType((Node *) tle->expr));
+		if (!dtype)
+			elog(ERROR, "device type \"%s\" not found",
+				 format_type_be(exprType((Node *) tle->expr)));
+
 		appendStringInfo(&body,
 						 "pg_%s_t KVAR_%u = "
 						 "pg_%s_vref(kds,ktoast,errcode,%u,kds_index);\n",
 						 dtype->type_name,
-						 vtrans->resno,
+						 tle->resno,
 						 dtype->type_name,
-						 vtrans->srcresno - 1);
+						 src_resno - 1);
 	}
+	bms_free(attrs_ref);
+
 	/* misc variable definitions */
 	appendStringInfo(&body,
 					 "cl_int n_matches = 0;\n");
@@ -1426,7 +1648,8 @@ gpuhashjoin_codegen(PlannerInfo *root,
 	/* nested loop for hash tables */
 	gpuhashjoin_codegen_recurse(&body,
 								ghjoin,
-								(MultiHash *) innerPlan(ghjoin),
+								ghj_info,
+								(CustomScan *) innerPlan(ghjoin),
 								1,
 								context);
 
@@ -1437,15 +1660,21 @@ gpuhashjoin_codegen(PlannerInfo *root,
 
 	/* reference to kern_params */
 	appendStringInfo(&decl, "%s",
-					 pgstrom_codegen_param_declarations(context,
-														context->param_refs));
+					 pgstrom_codegen_param_declarations(context));
 	context->param_refs = NULL;
 
 	/* integrate decl and body */
 	appendStringInfo(&decl, "%s", body.data);
 
 	/* also, gpuhashjoin_projection_datum() */
-	gpuhashjoin_codegen_projection(&decl, ghjoin, context);
+	context->used_vars = NIL;
+	context->param_refs = NULL;
+	gpuhashjoin_codegen_projection(&decl, ghjoin, ghj_info, context);
+
+	/* also, gpuhashjoin_qual_eval */
+	context->used_vars = NIL;
+	context->param_refs = NULL;
+	gpuhashjoin_codegen_qual(&decl, ghjoin, ghj_info, context);
 
 	/* put declarations of types/funcs/params */
 	appendStringInfo(&str, "%s%s%s",
@@ -1460,664 +1689,546 @@ gpuhashjoin_codegen(PlannerInfo *root,
 }
 
 /*
- * build_pseudoscan_tlist
+ * build_pseudo_targetlist
  *
- * GpuHashJoin performs like a scan-node that run on pseudo relation being
- * constructed with two source relations. Any (pseudo) columns in this
- * relation are, of course, reference to either inner or outer relation.
+ * constructor of pseudo-targetlist according to the expression tree
+ * to be evaluated or returned. Usually, all we need to consider are
+ * columns referenced by host-qualifiers and target-list. However,
+ * we may need to execute device-qualifiers on CPU when device code
+ * raised CpuReCheck error, so we also append columns (that is
+ * referenced by device qualifiers only) in addition to the columns
+ * referenced by host qualifiers. It has another benefit, because
+ * it can share the data-structure regardless of CpuReCheck error.
+ * Device code will generate full pseudo-scan data chunk, then we
+ * can cut off the columns within scope of host references, if no
+ * error was reported.
  */
-typedef struct
-{
-	List	   *varlist;	/* list of either Var or PHV */
-	List	   *varrefs;	/* list of variable reference flags */
-	List	   *resnums;	/* list of pseudo resource number to be assigned */
-	int			refmode;	/* bitmask to be put on the related varrefs */
-} pscan_varlist_context;
+typedef struct {
+	List	   *ps_tlist;
+	List	   *ps_depth;
+	List	   *ps_resno;
+	GpuHashJoinPath	*gpath;
+	bool		resjunk;
+} build_pseudo_targetlist_context;
 
 static bool
-build_pscan_varlist_walker(Node *node, pscan_varlist_context *context)
+build_pseudo_targetlist_walker(Node *node,
+							   build_pseudo_targetlist_context *context)
 {
-	ListCell   *lc1;
-	ListCell   *lc2;
-	ListCell   *lc3;
+	GpuHashJoinPath *gpath = context->gpath;
+	RelOptInfo	   *rel;
+	TargetEntry	   *tle;
+	ListCell	   *cell;
 
 	if (!node)
 		return false;
-	if (IsA(node, Var) || IsA(node, PlaceHolderVar))
+	if (IsA(node, Var))
 	{
-		forthree (lc1, context->varlist,
-				  lc2, context->varrefs,
-				  lc3, context->resnums)
+		Var	   *varnode = (Var *) node;
+		Var	   *ps_node;
+		int		ps_depth;
+		int		ps_resno;
+
+		foreach (cell, context->ps_tlist)
 		{
-			if (equal(node, lfirst(lc1)))
+			TargetEntry	   *tle = lfirst(cell);
+
+			if (!IsA(tle->expr, Var))
+				continue;
+
+			ps_node = (Var *) tle->expr;
+			if (ps_node->varno == varnode->varno &&
+				ps_node->varattno == varnode->varattno &&
+				ps_node->varlevelsup == varnode->varlevelsup)
 			{
-				lfirst_int(lc2) |= context->refmode;
+				/* sanity checks */
+				if (ps_node->vartype != varnode->vartype ||
+					ps_node->vartypmod != varnode->vartypmod ||
+					ps_node->varcollid != varnode->varcollid)
+					elog(ERROR, "inconsistent Var node on ps_tlist");
 				return false;
 			}
 		}
-		context->varlist = lappend(context->varlist, copyObject(node));
-		context->varrefs = lappend_int(context->varrefs,
-									   context->refmode);
-		context->resnums = lappend_int(context->resnums,
-									   list_length(context->resnums) + 1);
-		return false;
-	}
-	return expression_tree_walker(node, build_pscan_varlist_walker,
-								  (void *) context);
-}
-
-static List *
-build_pseudo_scan_vartrans(GpuHashJoin *ghjoin)
-{
-	List	   *pscan_vartrans = NIL;
-	List	   *pscan_varlist;
-	List	   *pscan_varrefs;
-	List	   *pscan_resnums;
-	Plan	   *curr_plan;
-	ListCell   *cell;
-	int			depth;
-	pscan_varlist_context context;
-
-	/* check for top-level subplans */
-	Assert(outerPlan(ghjoin) != NULL);
-	Assert(pgstrom_plan_is_multihash(innerPlan(ghjoin)));
-
-	/*
-	 * build a pseudo-scan varlist/varhost - first of all, we pick up
-	 * all the varnode (and place-holder) in the GpuHashJoin node and
-	 * underlying MultiHash nodes.
-	 */
-	context.varlist = NIL;
-	context.varrefs = NIL;
-	context.resnums = NIL;
-	context.refmode = 0x0001;	/* host referenced */
-	curr_plan = &ghjoin->cplan.plan;
-	build_pscan_varlist_walker((Node *)curr_plan->targetlist, &context);
-	build_pscan_varlist_walker((Node *)curr_plan->qual, &context);
-	build_pscan_varlist_walker((Node *)ghjoin->host_clauses, &context);
-	context.refmode = 0x0002;	/* device referenced */
-	build_pscan_varlist_walker((Node *)ghjoin->hash_clauses, &context);
-	build_pscan_varlist_walker((Node *)ghjoin->qual_clauses, &context);
-	pscan_varlist = context.varlist;
-	pscan_varrefs = context.varrefs;
-	pscan_resnums = context.resnums;
-
-	/*
-	 * Second, walks on the target list of outer relation of the GpuHashJoin
-	 * and MultiHash nodes, to find out where is the source of the referenced
-	 * variables.
-	 */
-	for (curr_plan = &ghjoin->cplan.plan, depth = 0;
-		 curr_plan;
-		 curr_plan = innerPlan(curr_plan), depth++)
-	{
-		Plan	   *outer_plan = outerPlan(curr_plan);
-		List	   *temp_vartrans = NIL;
-		ListCell   *lc1, *prev1 = NULL;
-		ListCell   *lc2, *prev2 = NULL;
-		ListCell   *lc3, *prev3 = NULL;
-		int			num_device_vars = 0;
-
-		Assert(depth==0 || pgstrom_plan_is_multihash(curr_plan));
-
-		/*
-		 * Construct a list of vartrans_info; It takes depth of source
-		 * varnode, so we need to walk down the underlying inner relations.
-		 */
-	retry_from_head:
-		forthree (lc1, pscan_varlist,
-				  lc2, pscan_varrefs,
-				  lc3, pscan_resnums)
+		/* not in the pseudo-scan targetlist, so append this one */
+		rel = gpath->outerpath->parent;
+		if (bms_is_member(varnode->varno, rel->relids))
+			ps_depth = 0;
+		else
 		{
-			Node   *node = lfirst(lc1);
-			int		refmode = lfirst_int(lc2);
-			int		resnum = lfirst_int(lc3);
+			int		i;
 
-			foreach (cell, outer_plan->targetlist)
+			for (i=0; i < gpath->num_rels; i++)
 			{
-				TargetEntry	   *tle = lfirst(cell);
-
-				if (equal(node, tle->expr))
-				{
-					vartrans_info *vtrans = palloc0(sizeof(vartrans_info));
-
-					vtrans->srcdepth = depth;
-					vtrans->srcresno = tle->resno;
-					vtrans->resno = resnum;
-					if (tle->resname)
-						vtrans->resname = pstrdup(tle->resname);
-					vtrans->vartype = exprType((Node *) tle->expr);
-					vtrans->vartypmod = exprTypmod((Node *) tle->expr);
-					vtrans->varcollid = exprCollation((Node *) tle->expr);
-					if ((refmode & 0x0001) != 0)
-						vtrans->ref_host = true;
-					if ((refmode & 0x0002) != 0)
-					{
-						vtrans->ref_device = true;
-						num_device_vars++;
-					}
-					vtrans->expr = copyObject(node);
-					temp_vartrans = lappend(temp_vartrans, vtrans);
-					/* remove this varnode; no longer needed */
-					pscan_varlist = list_delete_cell(pscan_varlist,
-													 lc1, prev1);
-					pscan_varrefs = list_delete_cell(pscan_varrefs,
-													 lc2, prev2);
-					pscan_resnums = list_delete_cell(pscan_resnums,
-													 lc3, prev3);
-					if (prev1 == NULL)
-						goto retry_from_head;
-					lc1 = prev1;
-					lc2 = prev2;
-					lc3 = prev3;
+				rel = gpath->inners[i].scan_path->parent;
+				if (bms_is_member(varnode->varno, rel->relids))
 					break;
-				}
 			}
-			prev1 = lc1;
-			prev2 = lc2;
-			prev3 = lc3;
+			if (i == gpath->num_rels)
+				elog(ERROR, "Bug? uncertain origin of Var-node: %s",
+					 nodeToString(varnode));
+			ps_depth = i + 1;
 		}
-		pscan_vartrans = list_concat(pscan_vartrans, temp_vartrans);
-	}
-	Assert(list_length(pscan_varlist) == 0);
-#ifdef USE_ASSERT_CHECKING
-	/*
-	 * sanity checks - all the host referenced variables has to heve
-	 * smaller resource number than device only variables, to keep
-	 * consistent pseudo scan view.
-	 */
-	{
-		int		max_resno_host = 0;
-		int		min_resno_device = 0;
 
-		foreach (cell, pscan_vartrans)
+		ps_resno = 1;
+		foreach (cell, rel->reltargetlist)
 		{
-			vartrans_info  *vtrans = lfirst(cell);
-
-			if (vtrans->ref_host &&
-				(!max_resno_host || max_resno_host < vtrans->resno))
-				max_resno_host = vtrans->resno;
-			if (!vtrans->ref_host &&
-				(!min_resno_device || min_resno_device > vtrans->resno))
-				min_resno_device = vtrans->resno;
+			if (equal(varnode, lfirst(cell)))
+				break;
+			ps_resno++;
 		}
-		Assert(!max_resno_host ||
-			   !min_resno_device ||
-			   max_resno_host < min_resno_device);
-	}
-#endif
-	return pscan_vartrans;
-}
+		if (cell == NULL)
+			elog(ERROR, "Bug? uncertain origin of Var-node: %s",
+				 nodeToString(varnode));
 
-static inline void
-dump_pseudo_scan_vartrans(List *pscan_vartrans)
-{
-#if 1
-	ListCell   *cell;
-	int			index = 0;
+		tle = makeTargetEntry((Expr *) copyObject(varnode),
+							  list_length(context->ps_tlist) + 1,
+							  NULL,
+							  context->resjunk);
+		context->ps_tlist = lappend(context->ps_tlist, tle);
+		context->ps_depth = lappend_int(context->ps_depth, ps_depth);
+		context->ps_resno = lappend_int(context->ps_resno, ps_resno);
 
-	foreach (cell, pscan_vartrans)
-	{
-		vartrans_info  *vtrans = lfirst(cell);
-
-		elog(INFO, "vtrans[%d] {srcdepth=%u srcresno=%d resno=%d resname='%s' vartype=%u vartypmod=%d varcollid=%u ref_host=%s ref_device=%s expr=%s}",
-			 index,
-			 vtrans->srcdepth,
-			 vtrans->srcresno,
-			 vtrans->resno,
-			 vtrans->resname,
-			 vtrans->vartype,
-			 vtrans->vartypmod,
-			 vtrans->varcollid,
-			 vtrans->ref_host ? "true" : "false",
-			 vtrans->ref_device ? "true" : "false",
-			 nodeToString(vtrans->expr));
-		index++;
-	}
-#endif
-}
-
-/*
- * fix_gpuhashjoin_expr
- *
- * It mutate expression node to reference pseudo scan relation, instead of
- * the raw relation.
- */
-typedef struct
-{
-	PlannerInfo	   *root;
-	List		   *pscan_vartrans;
-	int				rtoffset;
-} fix_gpuhashjoin_expr_context;
-
-static Var *
-search_vartrans_for_var(Var *varnode, List *pscan_vartrans, int rtoffset)
-{
-	ListCell	   *cell;
-
-	foreach (cell, pscan_vartrans)
-	{
-		vartrans_info  *vtrans = lfirst(cell);
-		Var		   *srcvar = (Var *) vtrans->expr;
-
-		if (IsA(srcvar, Var) &&
-			srcvar->varno == varnode->varno &&
-			srcvar->varattno == varnode->varattno)
-		{
-			Var	   *newnode = copyObject(varnode);
-
-			newnode->varno = INDEX_VAR;
-			newnode->varattno = vtrans->resno;
-			if (newnode->varnoold > 0)
-				newnode->varnoold += rtoffset;
-			return newnode;
-		}
-	}
-	return NULL;	/* not found */
-}
-
-static Var *
-search_vartrans_for_non_var(Node *node, List *pscan_vartrans, int rtoffset)
-{
-	ListCell	   *cell;
-
-	foreach (cell, pscan_vartrans)
-	{
-		vartrans_info  *vtrans = lfirst(cell);
-
-		if (equal(vtrans->expr, node))
-		{
-			Var	   *newnode = makeVar(INDEX_VAR,
-									  vtrans->resno,
-									  vtrans->vartype,
-									  vtrans->vartypmod,
-									  vtrans->varcollid,
-									  0);
-			return newnode;
-		}
-	}
-	return NULL;
-}
-
-static Node *
-fix_gpuhashjoin_expr_mutator(Node *node, fix_gpuhashjoin_expr_context *context)
-{
-	Var	   *newnode;
-
-	if (!node)
-		return NULL;
-	if (IsA(node, Var))
-	{
-		newnode = search_vartrans_for_var((Var *)node,
-										  context->pscan_vartrans,
-										  context->rtoffset);
-		if (newnode)
-			return (Node *) newnode;
-		/* No referent found for Var */
-        elog(ERROR, "variable not found in the pseudo scan target lists");
-	}
-	else if (IsA(node, PlaceHolderVar))
-	{
-		PlaceHolderVar *phv = (PlaceHolderVar *) node;
-
-		newnode = search_vartrans_for_non_var(node,
-											  context->pscan_vartrans,
-											  context->rtoffset);
-		if (newnode)
-			return (Node *) newnode;
-		/* If not supplied by input plans, evaluate the contained expr */
-		return fix_gpuhashjoin_expr_mutator((Node *)phv->phexpr, context);
-	}
-	else if (IsA(node, Param))
-	{
-		/* XXX - logic copied from fix_param_node */
-		Param	   *p = (Param *) node;
-
-		if (p->paramkind == PARAM_MULTIEXPR)
-		{
-			PlannerInfo *root = context->root;
-			int		subqueryid = p->paramid >> 16;
-			int		colno = p->paramid & 0xFFFF;
-			List   *params;
-
-			if (subqueryid <= 0 ||
-				subqueryid > list_length(root->multiexpr_params))
-				elog(ERROR, "unexpected PARAM_MULTIEXPR ID: %d", p->paramid);
-			params = (List *) list_nth(root->multiexpr_params, subqueryid - 1);
-			if (colno <= 0 || colno > list_length(params))
-				elog(ERROR, "unexpected PARAM_MULTIEXPR ID: %d", p->paramid);
-			return copyObject(list_nth(params, colno - 1));
-		}
-		return copyObject(p);
-	}
-	else
-	{
-		/* Try matching more complex expressions too */
-		newnode = search_vartrans_for_non_var(node,
-											  context->pscan_vartrans,
-											  context->rtoffset);
-		if (newnode)
-			return (Node *) newnode;
-	}
-	fix_expr_common(context->root, node);
-	return expression_tree_mutator(node,
-								   fix_gpuhashjoin_expr_mutator,
-								   (void *) context);
-}
-
-static List *
-fix_gpuhashjoin_expr(PlannerInfo *root,
-					 Node *node,
-					 List *pscan_vartrans,
-					 int rtoffset)
-{
-	fix_gpuhashjoin_expr_context context;
-
-	memset(&context, 0, sizeof(fix_gpuhashjoin_expr_context));
-	context.root           = root;
-	context.pscan_vartrans = pscan_vartrans;
-	context.rtoffset       = rtoffset;
-
-	return (List *) fix_gpuhashjoin_expr_mutator(node, &context);
-}
-
-/*
- * clause_in_depth
- *
- * It checks whether var-nodes in the supplied expression reference
- * the relation in a particular depth or not.
- */
-typedef struct
-{
-	int		depth;
-	List   *pscan_vartrans;
-} clause_in_depth_context;
-
-static bool
-clause_in_depth_walker(Node *node, clause_in_depth_context *context)
-{
-	if (!node)
 		return false;
-	if (IsA(node, Var))
-	{
-		Var		   *var = (Var *) node;
-		ListCell   *cell;
-
-		Assert(var->varno == INDEX_VAR &&
-			   var->varattno > 0 &&
-			   var->varattno <= list_length(context->pscan_vartrans));
-		foreach (cell, context->pscan_vartrans)
-		{
-			vartrans_info *vtrans = lfirst(cell);
-
-			if (vtrans->resno == var->varattno)
-			{
-				if (vtrans->srcdepth == context->depth)
-					return false;
-				return true;
-			}
-		}
-		elog(ERROR, "Bug? pseudo scan tlist (resno=%u) not found",
-			 var->varattno);
 	}
-	/* Should not find an unplanned subquery */
-	Assert(!IsA(node, Query));
-	return expression_tree_walker(node, clause_in_depth_walker,
+	return expression_tree_walker(node, build_pseudo_targetlist_walker,
 								  (void *) context);
 }
 
-static bool
-clause_in_depth(Node *node, List *pscan_vartrans, int depth)
+static List *
+build_pseudo_targetlist(GpuHashJoinPath *gpath,
+						CustomScan *ghjoin,
+						GpuHashJoinInfo *ghj_info)
 {
-	clause_in_depth_context context;
+	build_pseudo_targetlist_context	context;
 
-	context.depth = depth;
-	context.pscan_vartrans = pscan_vartrans;
+	context.ps_tlist = NIL;
+	context.ps_depth = NIL;
+	context.ps_resno = NIL;
+	context.gpath    = gpath;
+	context.resjunk  = false;
 
-	if (!clause_in_depth_walker(node, &context))
-		return true;
-	return false;
+	build_pseudo_targetlist_walker((Node *) ghjoin->scan.plan.targetlist,
+								   &context);
+	build_pseudo_targetlist_walker((Node *) ghj_info->host_clauses,
+								   &context);
+	/*
+	 * Above are host referenced columns. On the other hands, the columns
+	 * newly added below are device-only columns, so it will never
+	 * referenced by the host-side. We mark it resjunk=true.
+	 */
+	context.resjunk = true;
+	build_pseudo_targetlist_walker((Node *) ghj_info->hash_clauses,
+								   &context);
+	build_pseudo_targetlist_walker((Node *) ghj_info->qual_clauses,
+								   &context);
+	build_pseudo_targetlist_walker((Node *) ghj_info->outer_quals,
+								   &context);
+
+	Assert(list_length(context.ps_tlist) == list_length(context.ps_depth) &&
+		   list_length(context.ps_tlist) == list_length(context.ps_resno));
+
+	ghj_info->ps_src_depth = context.ps_depth;
+	ghj_info->ps_src_resno = context.ps_resno;
+
+	return context.ps_tlist;
+}
+
+static Expr *
+build_flatten_qualifier(List *clauses)
+{
+	List	   *args = NIL;
+	ListCell   *cell;
+
+	if (clauses == NIL)
+		return NULL;
+
+	clauses = extract_actual_clauses(clauses, false);
+	foreach (cell, clauses)
+	{
+		Expr   *expr = lfirst(cell);
+
+		if (!expr)
+			continue;
+		if (IsA(expr, BoolExpr) &&
+			((BoolExpr *) expr)->boolop == AND_EXPR)
+			args = list_concat(args, ((BoolExpr *) expr)->args);
+		else
+			args = lappend(args, expr);
+	}
+	if (list_length(args) == 0)
+		return NULL;
+	if (list_length(args) == 1)
+		return linitial(args);
+	return make_andclause(args);
 }
 
 /*
- * hashkey_setref_scanrel
+ * fixup_device_expression
  *
- * It returns an expression node that references outer relation according
- * to the supplied pscan_vartrans. The supplied expression has to be workable
- * on a particular depth
+ * Unlike host executable qualifiers, device qualifiers need to reference
+ * tables before the joinning. So, we need to apply special initialization
+ * to reference OUTER/INNER relation, instead of pseudo-scan relation.
  */
-typedef struct
-{
+typedef struct {
+	GpuHashJoinPath *gpath;
 	int		depth;
-	List   *pscan_vartrans;
-} hashkey_setref_scanrel_context;
+} fixup_device_expression_context;
 
 static Node *
-hashkey_setref_scanrel_mutator(Node *node,
-							   hashkey_setref_scanrel_context *context)
+fixup_device_expression_mutator(Node *node,
+								fixup_device_expression_context *context)
 {
 	if (!node)
 		return NULL;
 	if (IsA(node, Var))
 	{
-		Var		   *oldvar = (Var *) node;
-		Var		   *newvar;
+		GpuHashJoinPath *gpath = context->gpath;
+		Var		   *varnode = (Var *) node;
+		Var		   *newnode;
+		Index		new_varno;
+		AttrNumber	new_varattno;
+		RelOptInfo *rel;
 		ListCell   *cell;
 
-		Assert(oldvar->varno == INDEX_VAR &&
-			   oldvar->varattno > 0 &&
-			   oldvar->varattno <= list_length(context->pscan_vartrans));
-		foreach (cell, context->pscan_vartrans)
+		rel = gpath->outerpath->parent;
+		if (bms_is_member(varnode->varno, rel->relids))
+			new_varno = OUTER_VAR;
+		else
 		{
-			vartrans_info *vtrans = lfirst(cell);
+			int		depth = context->depth;
 
-			if (vtrans->resno == oldvar->varattno)
-			{
-				Assert(oldvar->vartype == vtrans->vartype &&
-					   oldvar->vartypmod == vtrans->vartypmod &&
-					   oldvar->varcollid == vtrans->varcollid);
-				newvar = copyObject(oldvar);
-				newvar->varno = OUTER_VAR;
-				newvar->varattno = vtrans->srcresno;
-				return (Node *) newvar;
-			}
+			rel = gpath->inners[depth].scan_path->parent;
+			if (!bms_is_member(varnode->varno, rel->relids))
+				elog(ERROR, "Bug? uncertain origin of Var-node: %s",
+					 nodeToString(varnode));
+			new_varno = INNER_VAR;
 		}
-		elog(ERROR, "Bug? pseudo scan tlist (resno=%u) not found",
-			 oldvar->varattno);
+
+		new_varattno = 1;
+		foreach (cell, rel->reltargetlist)
+		{
+			if (equal(varnode, lfirst(cell)))
+				break;
+			new_varattno++;
+		}
+		if (!cell)
+			elog(ERROR, "Bug? uncertain origin of Var-node: %s",
+				 nodeToString(varnode));
+
+		newnode = copyObject(varnode);
+		newnode->varnoold = varnode->varno;
+		newnode->varoattno = varnode->varattno;
+		newnode->varno = new_varno;
+		newnode->varattno = new_varattno;
+
+		return (Node *) newnode;
 	}
-	return expression_tree_mutator(node,
-								   hashkey_setref_scanrel_mutator,
+	return expression_tree_mutator(node, fixup_device_expression_mutator,
 								   (void *) context);
 }
 
 static Node *
-hashkey_setref_scanrel(Node *node, List *pscan_vartrans)
+fixup_device_expression(GpuHashJoinPath *gpath, Node *node, bool is_single)
 {
-	hashkey_setref_scanrel_context context;
+	fixup_device_expression_context context;
+	List	   *result = NIL;
+	ListCell   *cell;
 
-	context.depth = -1;
-	context.pscan_vartrans = pscan_vartrans;
-	return hashkey_setref_scanrel_mutator(node, &context);
+	context.gpath = gpath;
+	context.depth = 0;
+	if (is_single)
+		return fixup_device_expression_mutator(node, &context);
+
+	Assert(IsA(node, List) &&
+		   list_length((List *) node) == gpath->num_rels);
+
+	foreach (cell, (List *) node)
+	{
+		Node   *node = lfirst(cell);
+
+		node = fixup_device_expression_mutator(node, &context);
+		result = lappend(result, node);
+
+		context.depth++;
+	}
+	return (Node *)result;
 }
 
-/*
- * gpuhashjoin_set_plan_ref
- *
- * It fixes up varno and varattno according to the data format being
- * visible to targetlist or host_clauses. Unlike built-in join logics,
- * GpuHashJoin looks like a scan on a pseudo relation even though its
- * contents are actually consist of two different input streams.
- * So, note that it looks like all the columns are in outer relation,
- * however, GpuHashJoin manages the mapping which column come from
- * which column of what relation.
- */
-static void
-gpuhashjoin_set_plan_ref(PlannerInfo *root,
-						 CustomPlan *custom_plan,
-						 int rtoffset)
+
+
+static Plan *
+create_gpuhashjoin_plan(PlannerInfo *root,
+						RelOptInfo *rel,
+						CustomPath *best_path,
+						List *tlist,
+						List *clauses)
 {
-	GpuHashJoin	   *ghjoin = (GpuHashJoin *) custom_plan;
-	MultiHash	   *mhash;
-	List		   *pscan_vartrans;
-	ListCell	   *lc1, *lc2;
-	int				depth;
+	GpuHashJoinPath *gpath = (GpuHashJoinPath *)best_path;
+	GpuHashJoinInfo  ghj_info;
+	CustomScan *ghjoin;
+	Plan	   *outer_plan;
+	Plan	   *prev_plan = NULL;
 	codegen_context context;
+	int			i;
 
-	/*
-	 * build a list of vartrans_info; that tracks which relation is
-	 * the source of varnode on the pseudo scan relation
-	 */
-	pscan_vartrans = build_pseudo_scan_vartrans(ghjoin);
-	ghjoin->pscan_vartrans = pscan_vartrans;
 
-	/* fixup expression nodes according to the pscan_vartrans */
-	ghjoin->cplan.plan.targetlist
-		= fix_gpuhashjoin_expr(root,
-							   (Node *)ghjoin->cplan.plan.targetlist,
-							   ghjoin->pscan_vartrans,
-							   rtoffset);
-	ghjoin->cplan.plan.qual
-		= fix_gpuhashjoin_expr(root,
-							   (Node *)ghjoin->cplan.plan.qual,
-							   ghjoin->pscan_vartrans,
-							   rtoffset);
-	ghjoin->hash_clauses
-		= fix_gpuhashjoin_expr(root,
-							   (Node *)ghjoin->hash_clauses,
-							   ghjoin->pscan_vartrans,
-							   rtoffset);
-	ghjoin->qual_clauses
-		= fix_gpuhashjoin_expr(root,
-							   (Node *)ghjoin->qual_clauses,
-							   ghjoin->pscan_vartrans,
-							   rtoffset);
-	ghjoin->host_clauses
-		= fix_gpuhashjoin_expr(root,
-							   (Node *)ghjoin->host_clauses,
-							   ghjoin->pscan_vartrans,
-							   rtoffset);
-	/* picks up hash clauses */
-	mhash = (MultiHash *) ghjoin;
-	depth = 1;
-	foreach (lc1, ghjoin->hash_clauses)
+
+
+
+	ghjoin = makeNode(CustomScan);
+	ghjoin->scan.plan.targetlist = tlist;
+	ghjoin->scan.plan.qual = NIL;
+	ghjoin->scan.scanrelid = 0;	/* not related to any relation */
+	ghjoin->flags = 0;
+	ghjoin->methods = &gpuhashjoin_plan_methods;
+
+	memset(&ghj_info, 0, sizeof(GpuHashJoinInfo));
+	ghj_info.num_rels = gpath->num_rels;
+
+	for (i=0; i < gpath->num_rels; i++)
 	{
-		List   *hash_clause = lfirst(lc1);
-		List   *hash_inner_keys = NIL;
-		List   *hash_outer_keys = NIL;
+		CustomScan	   *mhash;
+		MultiHashInfo	mh_info;
+		List		   *mhash_tlist = NIL;
+		List		   *hash_clause = gpath->inners[i].hash_clauses;
+		List		   *qual_clause = gpath->inners[i].qual_clauses;
+		List		   *host_clause = gpath->inners[i].host_clauses;
+		List		   *hash_inner_keys = NIL;
+		List		   *hash_outer_keys = NIL;
+		Path		   *scan_path = gpath->inners[i].scan_path;
+		Plan		   *scan_plan = create_plan_recurse(root, scan_path);
+		ListCell	   *cell;
+		TargetEntry	   *tle;
 
-		mhash = (MultiHash *) innerPlan(mhash);
-		foreach (lc2, hash_clause)
+		ghj_info.join_types = lappend_int(ghj_info.join_types,
+										  gpath->inners[i].jointype);
+		ghj_info.hash_clauses =
+			lappend(ghj_info.hash_clauses,
+					build_flatten_qualifier(hash_clause));
+		ghj_info.qual_clauses =
+			lappend(ghj_info.qual_clauses,
+					build_flatten_qualifier(qual_clause));
+		ghj_info.host_clauses =
+			lappend(ghj_info.host_clauses,
+					build_flatten_qualifier(host_clause));
+		/* Make a CustomScan(MultiHash) node */
+		foreach (cell, scan_plan->targetlist)
 		{
-			OpExpr *oper = lfirst(lc2);
-			Node   *i_expr;
-			Node   *o_expr;
+			TargetEntry	*tle =
+				makeTargetEntry(copyObject(lfirst(cell)),
+								list_length(mhash_tlist) + 1,
+								NULL,
+								false);
+			mhash_tlist = lappend(mhash_tlist, tle);
+		}
+		mhash = makeNode(CustomScan);
+		mhash->scan.plan.startup_cost = scan_plan->total_cost;
+		mhash->scan.plan.total_cost = scan_plan->total_cost;
+		mhash->scan.plan.plan_rows = scan_plan->plan_rows;
+		mhash->scan.plan.plan_width = scan_plan->plan_width;
+		mhash->scan.plan.targetlist = scan_plan->targetlist;
+		mhash->scan.plan.qual = NIL;
+		mhash->scan.scanrelid = 0;
+		mhash->flags = 0;
+		mhash->custom_ps_tlist = scan_plan->targetlist;
+		mhash->methods = &multihash_plan_methods;
 
-			if (!IsA(oper, OpExpr) || list_length(oper->args) != 2)
-				elog(ERROR, "Binary OpExpr is expected in hash_clause: %s",
-					 nodeToString(oper));
-			if (clause_in_depth(linitial(oper->args),
-								pscan_vartrans, depth))
+		memset(&mh_info, 0, sizeof(MultiHashInfo));
+		mh_info.depth = i + 1;
+		mh_info.nslots = gpath->inners[i].nslots;
+		mh_info.hashtable_size = gpath->hashtable_size;
+		mh_info.threshold = gpath->inners[i].threshold;
+		foreach (cell, hash_clause)
+		{
+			RestrictInfo   *rinfo = lfirst(cell);
+			RelOptInfo	   *scan_rel = scan_path->parent;
+
+			if (!rinfo->left_em || !rinfo->right_em)
+				elog(ERROR, "Bug? EquivalenceMember was not set on %s",
+					 nodeToString(rinfo));
+
+			if (!bms_is_empty(rinfo->left_em->em_relids) &&
+				bms_is_subset(rinfo->left_em->em_relids,
+							  scan_rel->relids))
 			{
-				i_expr = linitial(oper->args);
-				o_expr = lsecond(oper->args);
+				hash_inner_keys = lappend(hash_inner_keys,
+										  rinfo->left_em->em_expr);
+				hash_outer_keys = lappend(hash_outer_keys,
+										  rinfo->right_em->em_expr);
 			}
-			else if (clause_in_depth(lsecond(oper->args),
-									 pscan_vartrans, depth))
+			else if (!bms_is_empty(rinfo->right_em->em_relids) &&
+					 bms_is_subset(rinfo->right_em->em_relids,
+								   scan_rel->relids))
 			{
-				i_expr = lsecond(oper->args);
-				o_expr = linitial(oper->args);
+				hash_inner_keys = lappend(hash_inner_keys,
+										  rinfo->right_em->em_expr);
+				hash_outer_keys = lappend(hash_outer_keys,
+										  rinfo->left_em->em_expr);
 			}
 			else
-				elog(ERROR, "Unexpected OpExpr arguments: %s",
-					 nodeToString(oper));
-
-			/*
-			 * Even if same values on both-side, different variable-width
-			 * leads another hash-value bacause of CRC32 algorithm.
-			 * So, we needs to adjust data width to fit it.
-			 */
-			if (exprType(i_expr) != exprType(o_expr))
-			{
-				i_expr = coerce_type(NULL,
-									 (Node *)i_expr,
-									 exprType(i_expr),
-									 exprType(o_expr),
-									 exprTypmod(o_expr),
-									 COERCION_EXPLICIT,
-									 COERCE_EXPLICIT_CAST,
-									 -1);
-			}
-
-			/* See the comment in MultiHash declaration. 'i_expr' is used
-			 * to calculate hash-value on construction of hentry, so it
-			 * has to reference OUTER_VAR; that means relation being scanned.
-			 */
-			i_expr = hashkey_setref_scanrel(i_expr, pscan_vartrans);
-			hash_inner_keys = lappend(hash_inner_keys, i_expr);
-			hash_outer_keys = lappend(hash_outer_keys, o_expr);
+				elog(ERROR, "Bug? EquivalenceMember didn't fit GpuHashJoin");
 		}
-		mhash->hash_inner_keys = hash_inner_keys;
-		mhash->hash_outer_keys = hash_outer_keys;
-		depth++;
-	}
+		Assert(list_length(hash_inner_keys) == list_length(hash_outer_keys));
+		mh_info.hash_keys = hash_inner_keys;
+		ghj_info.hash_keys = lappend(ghj_info.hash_keys, hash_outer_keys);
 
-	/* OK, let's generate kernel source code */
-	ghjoin->kernel_source = gpuhashjoin_codegen(root, ghjoin, &context);
-	ghjoin->extra_flags = context.extra_flags |
-		(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
-	ghjoin->used_params = context.used_params;
-	ghjoin->outer_attrefs = NULL;
-	foreach (lc1, context.used_vars)
+		form_multihash_info(mhash, &mh_info);
+
+		/* chain it under the GpuHashJoin */
+		outerPlan(mhash) = scan_plan;
+		if (prev_plan)
+			innerPlan(prev_plan) = &mhash->scan.plan;
+		else
+			innerPlan(ghjoin) = &mhash->scan.plan;
+
+		prev_plan = &mhash->scan.plan;
+	}
+	ghj_info.num_rels = gpath->num_rels;
+
+	/*
+	 * Creation of the underlying outer Plan node. In case of SeqScan,
+	 * it may make sense to replace it with GpuScan for bulk-loading.
+	 */
+	outer_plan = create_plan_recurse(root, gpath->outerpath);
+	if (IsA(outer_plan, SeqScan) || IsA(outer_plan, CustomScan))
 	{
-		Var	   *var = lfirst(lc1);
+		Query	   *parse = root->parse;
+		Index		outer_scanrelid = ((Scan *) outer_plan)->scanrelid;
+		Bitmapset  *outer_attrefs = NULL;
+		List	   *outer_quals = NULL;
+		Plan	   *alter_plan;
 
-		Assert(IsA(var, Var) && var->varno == INDEX_VAR);
-
-		foreach (lc2, pscan_vartrans)
+		pull_varattnos((Node *)ghjoin->scan.plan.targetlist,
+					   outer_scanrelid,
+					   &outer_attrefs);
+		pull_varattnos((Node *)ghj_info.hash_clauses,
+					   outer_scanrelid,
+					   &outer_attrefs);
+		pull_varattnos((Node *)ghj_info.qual_clauses,
+					   outer_scanrelid,
+					   &outer_attrefs);
+		pull_varattnos((Node *)ghj_info.host_clauses,
+					   outer_scanrelid,
+					   &outer_attrefs);
+		alter_plan = gpuscan_try_replace_relscan(outer_plan,
+												 parse->rtable,
+												 outer_attrefs,
+												 &outer_quals);
+		if (alter_plan)
 		{
-			vartrans_info  *vtrans = lfirst(lc2);
-
-			if (var->varattno == vtrans->resno && vtrans->srcdepth == 0)
-			{
-				ghjoin->outer_attrefs =
-					bms_add_member(ghjoin->outer_attrefs,
-								   vtrans->srcresno -
-								   FirstLowInvalidHeapAttributeNumber);
-				break;
-			}
+			ghj_info.outer_quals = build_flatten_qualifier(outer_quals);
+			ghj_info.outer_bulkload = true;
+			outerPlan(ghjoin) = alter_plan;
 		}
+		else
+			outerPlan(ghjoin) = outer_plan;
+
+		bms_free(outer_attrefs);
 	}
+	else
+		outerPlan(ghjoin) = outer_plan;
+
+	/*
+	 * Build a pseudo-scan targetlist.
+	 */
+	ghjoin->custom_ps_tlist =
+		build_pseudo_targetlist(gpath, ghjoin, &ghj_info);
+	ghj_info.dev_outer_quals = (Expr *)
+		fixup_device_expression(gpath, (Node *)ghj_info.outer_quals, true);
+	ghj_info.dev_hash_clauses = (List *)
+		fixup_device_expression(gpath, (Node *)ghj_info.hash_clauses, false);
+	ghj_info.dev_qual_clauses = (List *)
+		fixup_device_expression(gpath, (Node *)ghj_info.qual_clauses, false);
+	ghj_info.raw_hash_keys = (List *)
+		fixup_device_expression(gpath, (Node *)ghj_info.hash_keys,false);
+
+	pgstrom_init_codegen_context(&context);
+	context.pseudo_tlist = ghjoin->custom_ps_tlist;
+	ghj_info.kernel_source =
+		gpuhashjoin_codegen(root, ghjoin, &ghj_info, &context);
+	ghj_info.extra_flags = context.extra_flags |
+		(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
+	ghj_info.used_params = context.used_params;
+
+	form_gpuhashjoin_info(ghjoin, &ghj_info);
+
+	return &ghjoin->scan.plan;
 }
 
 static void
-gpuhashjoin_finalize_plan(PlannerInfo *root,
-						  CustomPlan *custom_plan,
-						  Bitmapset **paramids,
-						  Bitmapset **valid_params,
-						  Bitmapset **scan_params)
+gpuhashjoin_textout_path(StringInfo str, const CustomPath *node)
 {
-	GpuHashJoin	   *ghj = (GpuHashJoin *)custom_plan;
+	GpuHashJoinPath *gpath = (GpuHashJoinPath *) node;
+	char	   *temp;
+	int			i;
 
-	finalize_primnode(root, (Node *)ghj->hash_clauses, *paramids);
-	finalize_primnode(root, (Node *)ghj->qual_clauses, *paramids);
+	/* outerpath */
+	temp = nodeToString(gpath->outerpath);
+	appendStringInfo(str, " :outerpath %s", temp);
+
+	/* hashtable_size */
+	appendStringInfo(str, " :hashtable_size %zu", gpath->hashtable_size);
+
+	/* num_rels */
+	appendStringInfo(str, " :num_rels %d", gpath->num_rels);
+
+	/* inners */
+	appendStringInfo(str, " :num_rels (");
+	for (i=0; i < gpath->num_rels; i++)
+	{
+		appendStringInfo(str, "{");
+		/* path */
+		temp = nodeToString(gpath->inners[i].scan_path);
+		appendStringInfo(str, " :scan_path %s", temp);
+
+		/* jointype */
+		appendStringInfo(str, " :jointype %d",
+						 (int)gpath->inners[i].jointype);
+
+		/* hash_clause */
+		temp = nodeToString(gpath->inners[i].hash_clauses);
+		appendStringInfo(str, " :hash_clause %s", temp);
+
+		/* qual_clause */
+		temp = nodeToString(gpath->inners[i].qual_clauses);
+		appendStringInfo(str, " :qual_clause %s", temp);
+
+		/* host_clause */
+		temp = nodeToString(gpath->inners[i].host_clauses);
+		appendStringInfo(str, " :host_clause %s", temp);
+
+		/* threshold */
+		appendStringInfo(str, " :threshold %f",
+						 gpath->inners[i].threshold);
+		/* chunk_size */
+		appendStringInfo(str, " :chunk_size %zu",
+						 gpath->inners[i].chunk_size);
+		/* nslots */
+		appendStringInfo(str, " :nslots %u",
+						 gpath->inners[i].nslots);
+		/* nloops */
+		appendStringInfo(str, " :nslots %d",
+                         gpath->inners[i].nloops);
+		appendStringInfo(str, "}");		
+	}
+	appendStringInfo(str, ")");
 }
 
-
 /*
- * gpuhashjoin_support_multi_exec (obsolete)
+ * gpuhashjoin_create_scan_state
  *
- * It gives a hint whether the supplied plan-state support bulk-exec mode,
- * or not. If it is GpuHashJooin provided by PG-Strom, it does not allow
- * bulk- exec mode right now.
+ * callback to create GpuHashJoinState object.
  */
-bool
-gpuhashjoin_support_multi_exec(const CustomPlanState *cps)
+static Node *
+gpuhashjoin_create_scan_state(CustomScan *cscan)
 {
-	return false;	/* not supported yet */
-	/* we can issue bulk-exec mode if no projection */
-	if (cps->ps.ps_ProjInfo == NULL)
-		return true;
-	return false;
+	GpuHashJoinState   *ghjs = palloc0(sizeof(GpuHashJoinState));
+
+	NodeSetTag(ghjs, T_CustomScanState);
+	ghjs->css.flags = cscan->flags;
+	ghjs->css.methods = &gpuhashjoin_exec_methods.c;
+
+	return (Node *) ghjs;
 }
 
 /*
@@ -2128,14 +2239,15 @@ gpuhashjoin_support_multi_exec(const CustomPlanState *cps)
 bool
 pgstrom_plan_is_gpuhashjoin(const Plan *plan)
 {
-	CustomPlan     *cplan = (CustomPlan *) plan;
+	CustomScan	   *cscan = (CustomScan *) plan;
 
-	if (IsA(cplan, CustomPlan) &&
-		cplan->methods == &gpuhashjoin_plan_methods)
+	if (IsA(cscan, CustomScan) &&
+		cscan->methods == &gpuhashjoin_plan_methods)
 		return true;
 	return false;
 }
 
+#if 0
 /*
  * pgstrom_gpuhashjoin_setup_bulkslot
  *
@@ -2149,14 +2261,13 @@ pgstrom_gpuhashjoin_setup_bulkslot(PlanState *outer_ps,
 {
 	GpuHashJoinState   *ghjs = (GpuHashJoinState *) outer_ps;
 
-	if (!IsA(ghjs, CustomPlanState) ||
-		ghjs->cps.methods != &gpuhashjoin_plan_methods)
+	if (!IsA(ghjs, CustomScanState) ||
+		ghjs->css.methods != &gpuhashjoin_exec_methods.c)
 		elog(ERROR, "Bug? PlanState node is not GpuHashJoin");
-
-	/* XXX - is it wider proj/slot? which is correct? */
-	*p_bulk_proj = ghjs->pscan_projection;
-	*p_bulk_slot = ghjs->pscan_slot;
+	*p_bulk_proj = ghjs->css.ss.ps.ps_ProjInfo;
+	*p_bulk_slot = ghjs->css.ss.ss_ScanTupleSlot;
 }
+#endif
 
 /*
  * multihash_dump_tables
@@ -2203,235 +2314,103 @@ multihash_dump_tables(pgstrom_multihash_tables *mhtables)
 }
 
 static void
-setup_pseudo_scan_slot(GpuHashJoinState *ghjs, bool is_fallback)
+gpuhashjoin_begin(CustomScanState *node, EState *estate, int eflags)
 {
-	EState		   *estate = ghjs->cps.ps.state;
-	TupleDesc		tupdesc;
-	TupleTableSlot *slot;
-	ProjectionInfo *projection;
-	int				i, nattrs = 0;
-	bool			has_oid;
-
-	for (i=0; i < ghjs->pscan_nattrs; i++)
-	{
-		vartrans_info  *vtrans = &ghjs->pscan_vartrans[i];
-
-		if (!is_fallback && !vtrans->ref_host)
-			continue;
-		if (nattrs < ghjs->pscan_vartrans[i].resno)
-			nattrs = ghjs->pscan_vartrans[i].resno;
-	}
-
-	/* construct a pseudo scan slot for this */
-	if (!ExecContextForcesOids(&ghjs->cps.ps, &has_oid))
-		has_oid = false;
-	tupdesc = CreateTemplateTupleDesc(nattrs, has_oid);
-
-	/* dummy */
-	for (i=1; i <= nattrs; i++)
-		TupleDescInitEntry(tupdesc, i, NULL, INT4OID, -1, 0);
-
-	for (i=0; i < ghjs->pscan_nattrs; i++)
-	{
-		vartrans_info   *vtrans = &ghjs->pscan_vartrans[i];
-
-		if (!is_fallback && !vtrans->ref_host)
-			continue;
-		TupleDescInitEntry(tupdesc,
-						   vtrans->resno,
-						   vtrans->resname,
-						   vtrans->vartype,
-						   vtrans->vartypmod,
-						   0);
-		TupleDescInitEntryCollation(tupdesc,
-									vtrans->resno,
-									vtrans->varcollid);
-	}
-	slot = ExecAllocTableSlot(&estate->es_tupleTable);
-	ExecSetSlotDescriptor(slot, tupdesc);
-
-	/* make a projection if needed */
-	if (tlist_matches_tupdesc(&ghjs->cps.ps,
-							  ghjs->cps.ps.plan->targetlist,
-							  INDEX_VAR,
-							  tupdesc))
-		projection = NULL;
-	else
-		projection = ExecBuildProjectionInfo(ghjs->cps.ps.targetlist,
-											 ghjs->cps.ps.ps_ExprContext,
-											 ghjs->cps.ps.ps_ResultTupleSlot,
-											 tupdesc);
-	if (!is_fallback)
-	{
-		ghjs->pscan_slot = slot;
-		ghjs->pscan_projection = projection;
-	}
-	else
-	{
-		ghjs->pscan_wider_slot = slot;
-		ghjs->pscan_wider_projection = projection;
-	}
-}
-
-static int
-pscan_vartrans_comp(const void *v1, const void *v2)
-{
-	const vartrans_info	   *vtrans1 = v1;
-	const vartrans_info	   *vtrans2 = v2;
-
-	if (vtrans1->srcdepth < vtrans2->srcdepth)
-		return -1;
-	if (vtrans1->srcdepth > vtrans2->srcdepth)
-		return  1;
-	if (vtrans1->srcresno < vtrans2->srcresno)
-		return -1;
-	if (vtrans1->srcresno > vtrans2->srcresno)
-		return  1;
-	return 0;
-}
-
-static inline List *
-ExecInitExprOnlyValid(List *clauses_list, PlanState *pstate)
-{
-	List	   *results = NIL;
-	ListCell   *lc1;
-	ListCell   *lc2;
-
-	foreach (lc1, clauses_list)
-	{
-		List	   *expr_list = lfirst(lc1);
-
-		Assert(expr_list == NIL || IsA(expr_list, List));
-		foreach (lc2, expr_list)
-		{
-			Expr   *expr = lfirst(lc2);
-
-			if (expr)
-				results = lappend(results, ExecInitExpr(expr, pstate));
-		}
-	}
-	return results;
-}
-
-static CustomPlanState *
-gpuhashjoin_begin(CustomPlan *node, EState *estate, int eflags)
-{
-	GpuHashJoin		   *ghjoin = (GpuHashJoin *) node;
-	GpuHashJoinState   *ghjs;
+	PlanState		   *ps = &node->ss.ps;
+	GpuHashJoinState   *ghjs = (GpuHashJoinState *) node;
+	CustomScan		   *ghjoin = (CustomScan *)node->ss.ps.plan;
+	GpuHashJoinInfo	   *ghj_info = deform_gpuhashjoin_info(ghjoin);
+	TupleDesc			tupdesc;
 	ListCell		   *cell;
-	int					i, outer_width;
+
+	ghjs->join_types = copyObject(ghj_info->join_types);
 
 	/*
-	 * create a state structure
+	 * NOTE: outer_quals, hash_clauses and qual_clauses assume
+	 * input stream that is not joinned yet, so its expression
+	 * state must be initialized based on the device qualifiers'
+	 * perspective. On the other hands, host qualifiers can
+	 * assume pseudo-scan targetlist already constructed.
 	 */
-	ghjs = palloc0(sizeof(GpuHashJoinState));
-	NodeSetTag(ghjs, T_CustomPlanState);
-	ghjs->cps.ps.plan = &node->plan;
-	ghjs->cps.ps.state = estate;
-	ghjs->cps.methods = &gpuhashjoin_plan_methods;
-	ghjs->join_types = copyObject(ghjoin->join_types);
+	ghjs->outer_quals = ExecInitExpr(ghj_info->dev_outer_quals, ps);
+	foreach (cell, ghj_info->dev_hash_clauses)
+		ghjs->hash_clauses = lappend(ghjs->hash_clauses,
+									 ExecInitExpr(lfirst(cell), ps));
+	foreach (cell, ghj_info->dev_qual_clauses)
+		ghjs->qual_clauses = lappend(ghjs->qual_clauses,
+									 ExecInitExpr(lfirst(cell), ps));
+	foreach (cell, ghj_info->host_clauses)
+		ghjs->host_clauses = lappend(ghjs->host_clauses,
+									 ExecInitExpr(lfirst(cell), ps));
+	/* for ExecScan */
+	foreach (cell, ghj_info->host_clauses)
+	{
+		if (!lfirst(cell))
+			continue;
+		ghjs->css.ss.ps.qual = lappend(ghjs->css.ss.ps.qual,
+									   ExecInitExpr(lfirst(cell), ps));
+	}
 
-	/*
-	 * create expression context
-	 */
-	ExecAssignExprContext(estate, &ghjs->cps.ps);
+	/* XXX - it may need to sort by depth/resno */
+	ghjs->ps_src_depth = ghj_info->ps_src_depth;
+	ghjs->ps_src_resno = ghj_info->ps_src_resno;
 
-	/*
-	 * initialize child expression
-	 */
-	ghjs->cps.ps.targetlist = (List *)
-		ExecInitExpr((Expr *) node->plan.targetlist, &ghjs->cps.ps);
-	Assert(!node->plan.qual);
-	ghjs->hash_clauses = ExecInitExprOnlyValid(ghjoin->hash_clauses,
-											   &ghjs->cps.ps);
-	ghjs->qual_clauses = ExecInitExprOnlyValid(ghjoin->qual_clauses,
-											   &ghjs->cps.ps);
-	ghjs->host_clauses = ExecInitExprOnlyValid(ghjoin->host_clauses,
-											   &ghjs->cps.ps);
 	/*
 	 * initialize child nodes
 	 */
 	outerPlanState(ghjs) = ExecInitNode(outerPlan(ghjoin), estate, eflags);
 	innerPlanState(ghjs) = ExecInitNode(innerPlan(ghjoin), estate, eflags);
 
-	/* rough estimation of number of tuples per page on the outer relation */
-	outer_width = outerPlanState(ghjs)->plan->plan_width;
+	/*
+	 * rough estimation for expected amount of resource comsumption
+	 */
+	ghjs->row_population_ratio = ghj_info->row_population_ratio;
 	ghjs->ntups_per_page =
 		((double)(BLCKSZ - MAXALIGN(SizeOfPageHeaderData))) /
 		((double)(sizeof(ItemIdData) +
-				  sizeof(HeapTupleHeaderData) + outer_width));
+				  sizeof(HeapTupleHeaderData) +
+				  outerPlanState(ghjs)->plan->plan_width));
+	/*
+	 * fix-up definition of the pseudo scan tuple-desc, because our
+	 * ps_tlist contains TLE with resjust=true; that means columns
+	 * referenced by device only, so it leads unnecessary projection.
+	 */
+	tupdesc = ExecCleanTypeFromTL(ghjoin->custom_ps_tlist, false);
+	ExecAssignScanType(&ghjs->css.ss, tupdesc);
+	ExecAssignScanProjectionInfo(&ghjs->css.ss);
 
 	/*
-	 * initialize result tuple type and projection info
+	 * initialize outer scan state
 	 */
-	ExecInitResultTupleSlot(estate, &ghjs->cps.ps);
-	ExecAssignResultTypeFromTL(&ghjs->cps.ps);
+	ghjs->outer_done = false;
+	ghjs->outer_bulkload = ghj_info->outer_bulkload;
+	ghjs->outer_overflow = NULL;
 
 	/*
-	 * initialize "pseudo" scan slot - we use two types of pseudo scan slot;
-	 * one contains var-nodes referenced in host expression only, to avoid
-	 * unnecessary projection in usual cases. the other one contains all
-	 * the var-nodes referenced in both of host and device expression to
-	 * handle host retrying.
+	 * initialize kernel execution parameter
 	 */
-	ghjs->pscan_nattrs = list_length(ghjoin->pscan_vartrans);
-	ghjs->pscan_vartrans = palloc(sizeof(vartrans_info) * ghjs->pscan_nattrs);
-	i = 0;
-	foreach (cell, ghjoin->pscan_vartrans)
-	{
-		vartrans_info *vtrans = lfirst(cell);
-
-		memcpy(&ghjs->pscan_vartrans[i], vtrans, sizeof(vartrans_info));
-		i++;
-	}
-	qsort(ghjs->pscan_vartrans,
-		  ghjs->pscan_nattrs,
-		  sizeof(vartrans_info),
-		  pscan_vartrans_comp);
-	setup_pseudo_scan_slot(ghjs, false);
-	setup_pseudo_scan_slot(ghjs, true);
-
-	/*
-	 * estimate average ratio to populete join results towards the supplied
-	 * input records, but we ensure results buffer to keep same number.
-	 */
-	ghjs->row_population_ratio = (ghjoin->cplan.plan.plan_rows /
-								  outerPlan(ghjoin)->plan_rows);
-	if (ghjs->row_population_ratio < 1.0)
-		ghjs->row_population_ratio = 1.0;
-	if (ghjs->row_population_ratio > 5.0)
-	{
-		elog(NOTICE, "row population ratio (%.2f) too large, rounded to 5.0",
-			 ghjs->row_population_ratio);
-		ghjs->row_population_ratio = 5.0;
-	}
-
-	/*
-	 * Is bulk-scan available on the outer node?
-	 * If CustomPlan provided by PG-Strom, it may be able to produce bulk
-	 * data chunk, instead of row-by-row format.
-	 */
-	ghjs->outer_bulkload = ghjoin->outer_bulkload;
-
-	/* construction of kernel parameter buffer */
-	ghjs->kparams = pgstrom_create_kern_parambuf(ghjoin->used_params,
-												 ghjs->cps.ps.ps_ExprContext);
-
-	/*
-	 * Setting up a kernel program and message queue
-	 */
-	Assert(ghjoin->kernel_source != NULL);
-	ghjs->dprog_key = pgstrom_get_devprog_key(ghjoin->kernel_source,
-											  ghjoin->extra_flags);
+	ghjs->kparams = pgstrom_create_kern_parambuf(ghj_info->used_params,
+												 ps->ps_ExprContext);
+	Assert(ghj_info->kernel_source != NULL);
+	ghjs->kernel_source = ghj_info->kernel_source;
+	ghjs->dprog_key = pgstrom_get_devprog_key(ghj_info->kernel_source,
+											  ghj_info->extra_flags);
 	pgstrom_track_object((StromObject *)ghjs->dprog_key, 0);
 
 	ghjs->mqueue = pgstrom_create_queue();
 	pgstrom_track_object(&ghjs->mqueue->sobj, 0);
 
+	/*
+	 * initialize misc stuff
+	 */
+	ghjs->curr_ghjoin = NULL;
+	ghjs->curr_index = 0;
+	ghjs->curr_recheck = false;
+	ghjs->num_running = 0;
+	dlist_init(&ghjs->ready_pscans);
+
 	/* Is perfmon needed? */
 	ghjs->pfm.enabled = pgstrom_perfmon_enabled;
-
-	return &ghjs->cps;
 }
 
 static void
@@ -2541,13 +2520,12 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs,
 	/*
 	 * allocation of the destination data-store
 	 */
-	//tupdesc = ghjs->pscan_wider_slot->tts_tupleDescriptor;
-	tupdesc = ghjs->pscan_slot->tts_tupleDescriptor;
+	tupdesc = ghjs->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 	if (result_format == KDS_FORMAT_TUPSLOT)
 		pds_dest = pgstrom_create_data_store_tupslot(tupdesc, nrooms, false);
 	else if (result_format == KDS_FORMAT_ROW_FLAT)
 	{
-		int		plan_width = ghjs->cps.ps.plan->plan_width;
+		int		plan_width = ghjs->css.ss.ps.plan->plan_width;
 		Size	length;
 
 		length = (STROMALIGN(offsetof(kern_data_store,
@@ -2602,7 +2580,7 @@ retry:
 			ghjs->mhtables = NULL;
 		}
 		/* load an inner hash-table */
-		mhnode = (MultiHashNode *) MultiExecProcNode(inner_ps);
+		mhnode = (MultiHashNode *) BulkExecProcNode(inner_ps);
 		if (!mhnode)
 		{
 			if (ghjs->pfm.enabled)
@@ -2684,7 +2662,7 @@ retry:
 		 */
 
 		/* load a bunch of records at once */
-		bulk = (pgstrom_bulkslot *) MultiExecProcNode(subnode);
+		bulk = (pgstrom_bulkslot *) BulkExecProcNode(subnode);
 		if (!bulk)
 			ghjs->outer_done = true;
 	}
@@ -2704,10 +2682,10 @@ retry:
 }
 
 static bool
-gpuhashjoin_next_tuple(GpuHashJoinState *ghjs,
-					   TupleTableSlot **p_slot,
-					   ProjectionInfo **p_projection)
+gpuhashjoin_next_tuple(GpuHashJoinState *ghjs)
 {
+	TupleTableSlot		   *ps_slot = ghjs->css.ss.ss_ScanTupleSlot;
+	TupleDesc				tupdesc = ps_slot->tts_tupleDescriptor;
 	pgstrom_gpuhashjoin	   *gpuhashjoin = ghjs->curr_ghjoin;
 	pgstrom_data_store	   *pds_dest = gpuhashjoin->pds_dest;
 	kern_data_store		   *kds_dest = pds_dest->kds;
@@ -2723,30 +2701,27 @@ gpuhashjoin_next_tuple(GpuHashJoinState *ghjs,
 
 	while (ghjs->curr_index < kds_dest->nitems)
 	{
-		TupleTableSlot *pslot = ghjs->pscan_slot;
-		ProjectionInfo *projection = ghjs->pscan_projection;
-		TupleDesc		tupdesc = pslot->tts_tupleDescriptor;
 		Datum		   *tts_values;
 		cl_char		   *tts_isnull;
 		int				index = ghjs->curr_index++;
 
 		/* fetch a result tuple */
-		ExecClearTuple(pslot);
+		ExecClearTuple(ps_slot);
 		tts_values = KERN_DATA_STORE_VALUES(kds_dest, index);
 		tts_isnull = KERN_DATA_STORE_ISNULL(kds_dest, index);
 		Assert(tts_values != NULL && tts_isnull != NULL);
-		memcpy(pslot->tts_values, tts_values,
+		memcpy(ps_slot->tts_values, tts_values,
 			   sizeof(Datum) * tupdesc->natts);
-		memcpy(pslot->tts_isnull, tts_isnull,
+		memcpy(ps_slot->tts_isnull, tts_isnull,
 			   sizeof(bool) * tupdesc->natts);
-		ExecStoreVirtualTuple(pslot);
+		ExecStoreVirtualTuple(ps_slot);
 
-		if (ghjs->host_clauses != NIL)
+		if (ghjs->css.ss.ps.qual != NIL)
 		{
-			ExprContext	   *econtext = ghjs->cps.ps.ps_ExprContext;
+			ExprContext	   *econtext = ghjs->css.ss.ps.ps_ExprContext;
 
-			econtext->ecxt_scantuple = pslot;
-			if (!ExecQual(ghjs->host_clauses, econtext, false))
+			econtext->ecxt_scantuple = ps_slot;
+			if (!ExecQual(ghjs->css.ss.ps.qual, econtext, false))
 				continue;	/* try to fetch next tuple */
 		}
 
@@ -2755,8 +2730,6 @@ gpuhashjoin_next_tuple(GpuHashJoinState *ghjs,
 			gettimeofday(&tv2, NULL);
 			ghjs->pfm.time_materialize += timeval_diff(&tv1, &tv2);
 		}
-		*p_slot = pslot;
-		*p_projection = projection;
 		return true;
 	}
 
@@ -2765,8 +2738,7 @@ gpuhashjoin_next_tuple(GpuHashJoinState *ghjs,
 		gettimeofday(&tv2, NULL);
 		ghjs->pfm.time_materialize += timeval_diff(&tv1, &tv2);
 	}
-	*p_slot = NULL;
-	*p_projection = NULL;
+	ExecClearTuple(ps_slot);
 	return false;
 }
 
@@ -2845,14 +2817,12 @@ pgstrom_fetch_gpuhashjoin(GpuHashJoinState *ghjs,
 		{
 			const char *buildlog
 				= pgstrom_get_devprog_errmsg(ghjoin->dprog_key);
-			const char *kern_source
-				= ((GpuHashJoin *)ghjs->cps.ps.plan)->kernel_source;
 
 			ereport(ERROR,
 					(errcode(ERRCODE_INTERNAL_ERROR),
 					 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
 							pgstrom_strerror(ghjoin->msg.errcode),
-							kern_source),
+							ghjs->kernel_source),
 					 errdetail("%s", buildlog)));
 		}
 		else
@@ -2869,15 +2839,14 @@ pgstrom_fetch_gpuhashjoin(GpuHashJoinState *ghjs,
 }
 
 static TupleTableSlot *
-gpuhashjoin_exec(CustomPlanState *node)
+gpuhashjoin_exec(CustomScanState *node)
 {
 	GpuHashJoinState   *ghjs = (GpuHashJoinState *) node;
-	TupleTableSlot	   *pscan_slot = NULL;
-	ProjectionInfo	   *pscan_proj = NULL;
+	TupleTableSlot	   *ps_slot = ghjs->css.ss.ss_ScanTupleSlot;
+	ProjectionInfo	   *ps_proj = ghjs->css.ss.ps.ps_ProjInfo;
 	pgstrom_gpuhashjoin *ghjoin;
 
-	while (!ghjs->curr_ghjoin ||
-		   !gpuhashjoin_next_tuple(ghjs, &pscan_slot, &pscan_proj))
+	while (!ghjs->curr_ghjoin || !gpuhashjoin_next_tuple(ghjs))
 	{
 		pgstrom_message	   *msg;
 
@@ -2902,28 +2871,31 @@ gpuhashjoin_exec(CustomPlanState *node)
 		ghjoin = pgstrom_fetch_gpuhashjoin(ghjs, &ghjs->curr_recheck,
 										   KDS_FORMAT_TUPSLOT);
 		if (!ghjoin)
+		{
+			ExecClearTuple(ps_slot);
 			break;
+		}
 		ghjs->curr_ghjoin = ghjoin;
 		ghjs->curr_index = 0;
 	}
 	/* can valid tuple be fetched? */
-	if (TupIsNull(pscan_slot))
-		return pscan_slot;
+	if (TupIsNull(ps_slot));
+		return ps_slot;
 
 	/* needs to apply projection? */
-	if (pscan_proj)
+	if (ps_proj)
 	{
-		ExprContext	   *econtext = ghjs->cps.ps.ps_ExprContext;
+		ExprContext	   *econtext = ghjs->css.ss.ps.ps_ExprContext;
 		ExprDoneCond	is_done;
 
-		econtext->ecxt_scantuple = pscan_slot;
-		return ExecProject(pscan_proj, &is_done);
+		econtext->ecxt_scantuple = ps_slot;
+		return ExecProject(ps_proj, &is_done);
 	}
-	return pscan_slot;
+	return ps_slot;
 }
 
-static Node *
-gpuhashjoin_exec_multi(CustomPlanState *node)
+static void *
+gpuhashjoin_exec_bulk(CustomScanState *node)
 {
 	GpuHashJoinState	   *ghjs = (GpuHashJoinState *) node;
 	pgstrom_gpuhashjoin	   *ghjoin;
@@ -2932,8 +2904,8 @@ gpuhashjoin_exec_multi(CustomPlanState *node)
 	pgstrom_bulkslot	   *bulk = NULL;
 
 	/* must provide our own instrumentation support */
-	if (node->ps.instrument)
-		InstrStartNode(node->ps.instrument);
+	if (node->ss.ps.instrument)
+		InstrStartNode(node->ss.ps.instrument);
 
 	while (true)
 	{
@@ -2981,11 +2953,10 @@ gpuhashjoin_exec_multi(CustomPlanState *node)
 		/*
 		 * Reduce results if host-only qualifiers
 		 */
-		if (node->ps.qual)
+		if (node->ss.ps.qual)
 		{
-			ExprContext	   *econtext = ghjs->cps.ps.ps_ExprContext;
-			//TupleTableSlot *slot = ghjs->pscan_wider_slot;
-			TupleTableSlot *slot = ghjs->pscan_slot;
+			ExprContext	   *econtext = ghjs->css.ss.ps.ps_ExprContext;
+			TupleTableSlot *slot = ghjs->css.ss.ss_ScanTupleSlot;
 			HeapTupleData	tuple;
 
 			for (i=0, j=0; i < nitems; i++)
@@ -2994,9 +2965,9 @@ gpuhashjoin_exec_multi(CustomPlanState *node)
 					elog(ERROR, "Bug? unable to fetch a result slot");
 				econtext->ecxt_scantuple = slot;
 
-				if (!ExecQual(node->ps.qual, econtext, false))
-					continue;
-				bulk->rindex[j++] = i;
+				if (!ghjs->css.ss.ps.qual ||
+					ExecQual(ghjs->css.ss.ps.qual, econtext, false))
+					bulk->rindex[j++] = i;
 			}
 			bulk->nvalids = j;
 		}
@@ -3004,21 +2975,21 @@ gpuhashjoin_exec_multi(CustomPlanState *node)
 	}
 
 	/* must provide our own instrumentation support */
-    if (node->ps.instrument)
+    if (node->ss.ps.instrument)
 	{
 		if (!bulk)
-			InstrStopNode(node->ps.instrument, 0.0);
+			InstrStopNode(node->ss.ps.instrument, 0.0);
 		else
-			InstrStopNode(node->ps.instrument,
+			InstrStopNode(node->ss.ps.instrument,
 						  bulk->nvalids < 0 ?
 						  (double) bulk->pds->kds->nitems :
 						  (double) bulk->nvalids);
 	}
-	return (Node *) bulk;
+	return bulk;
 }
 
 static void
-gpuhashjoin_end(CustomPlanState *node)
+gpuhashjoin_end(CustomScanState *node)
 {
 	GpuHashJoinState	   *ghjs = (GpuHashJoinState *) node;
 	pgstrom_gpuhashjoin	   *ghjoin;
@@ -3040,11 +3011,6 @@ gpuhashjoin_end(CustomPlanState *node)
         pgstrom_put_message(&ghjoin->msg);
 		ghjs->num_running--;
 	}
-
-	/*
-	 *  Free the exprcontext
-	 */
-	ExecFreeExprContext(&node->ps);
 
 	/*
 	 * clean out multiple hash tables on the portion of shared memory
@@ -3069,13 +3035,6 @@ gpuhashjoin_end(CustomPlanState *node)
 	pgstrom_close_queue(ghjs->mqueue);
 
 	/*
-	 * clean out the tuple table
-	 */
-	ExecClearTuple(node->ps.ps_ResultTupleSlot);
-	ExecClearTuple(ghjs->pscan_slot);
-	ExecClearTuple(ghjs->pscan_wider_slot);
-
-	/*
 	 * clean up subtrees
 	 */
 	ExecEndNode(outerPlanState(node));
@@ -3083,7 +3042,7 @@ gpuhashjoin_end(CustomPlanState *node)
 }
 
 static void
-gpuhashjoin_rescan(CustomPlanState *node)
+gpuhashjoin_rescan(CustomScanState *node)
 {
 	GpuHashJoinState	   *ghjs = (GpuHashJoinState *) node;
 	pgstrom_gpuhashjoin	   *ghjoin;
@@ -3147,83 +3106,85 @@ gpuhashjoin_rescan(CustomPlanState *node)
 }
 
 static void
-gpuhashjoin_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
+gpuhashjoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 {
-	GpuHashJoinState *ghjs = (GpuHashJoinState *) node;
-	GpuHashJoin	   *ghjoin = (GpuHashJoin *) node->ps.plan;
-	ListCell	   *cell;
-	ListCell	   *lc1;
-	ListCell	   *lc2;
-	ListCell	   *lc3;
-	bool			verbose_saved;
-	int				depth;
+	GpuHashJoinState   *ghjs = (GpuHashJoinState *) node;
+	CustomScan		   *cscan = (CustomScan *) node->ss.ps.plan;
+	GpuHashJoinInfo	   *ghj_info = deform_gpuhashjoin_info(cscan);
+	StringInfoData		str;
+	List			   *context;
+	ListCell		   *lc1, *lc2, *lc3;
+	char			   *temp;
+	int					depth;
 
+	initStringInfo(&str);
+
+	/* name lookup context */
+	context = deparse_context_for_planstate((Node *) &node->ss.ps,
+											ancestors,
+											es->rtable,
+											es->rtable_names);
 	/* pseudo scan tlist if verbose mode */
 	if (es->verbose)
 	{
-		StringInfoData	str;
-		List		   *context;
-		vartrans_info  *vt_prev;
-		vartrans_info  *vt_curr;
-		vartrans_info  *vt_next;
-		char		   *temp;
-
-		initStringInfo(&str);
-		context = deparse_context_for_planstate((Node *) &node->ps,
-												ancestors,
-												es->rtable,
-												es->rtable_names);
-		vt_prev = NULL;
-		while (true)
+		resetStringInfo(&str);
+		foreach (lc1, cscan->custom_ps_tlist)
 		{
-			vt_next = NULL;
-			foreach (cell, ghjoin->pscan_vartrans)
-			{
-				vt_curr = lfirst(cell);
-				if ((!vt_prev || vt_prev->resno < vt_curr->resno) &&
-					(!vt_next || vt_next->resno > vt_curr->resno))
-					vt_next = vt_curr;
-			}
-			if (!vt_next)
-				break;
-			if (vt_prev)
+			TargetEntry	   *tle = lfirst(lc1);
+
+			temp = deparse_expression((Node *)tle->expr,
+									  context, true, false);
+			if (lc1 != list_head(cscan->custom_ps_tlist))
 				appendStringInfo(&str, ", ");
-			temp = deparse_expression((Node *)vt_next->expr,
-									  context,
-									  true,
-									  false);
-			if (vt_next->ref_host)
+			if (!tle->resjunk)
 				appendStringInfo(&str, "%s", temp);
 			else
 				appendStringInfo(&str, "(%s)", temp);
-
-			vt_prev = vt_next;
 		}
-		ExplainPropertyText("pscan tlist", str.data, es);
+		ExplainPropertyText("ps-tlist", str.data, es);
 	}
-	verbose_saved = es->verbose;
-	es->verbose = true;
+	/* hash, qual and host clauses */
 	depth = 1;
-	forthree (lc1, ghjoin->hash_clauses,
-			  lc2, ghjoin->qual_clauses,
-			  lc3, ghjoin->host_clauses)
+	forthree (lc1, ghj_info->hash_clauses,
+			  lc2, ghj_info->qual_clauses,
+			  lc3, ghj_info->host_clauses)
 	{
 		char	qlabel[80];
 
 		/* hash clause */
-		snprintf(qlabel, sizeof(qlabel), "hash clause %d", depth);
-		show_scan_qual(lfirst(lc1), qlabel, &node->ps, ancestors, es);
+		if (lfirst(lc1))
+		{
+			temp = deparse_expression(lfirst(lc1),
+									  context, es->verbose, false);
+			snprintf(qlabel, sizeof(qlabel), "hash clause %d", depth);
+			ExplainPropertyText(qlabel, temp, es);
+		}
 		/* qual clause */
-		snprintf(qlabel, sizeof(qlabel), "qual clause %d", depth);
-		show_scan_qual(lfirst(lc2), qlabel, &node->ps, ancestors, es);
+		if (lfirst(lc2))
+		{
+			temp = deparse_expression(lfirst(lc2),
+									  context, es->verbose, false);
+			snprintf(qlabel, sizeof(qlabel), "qual clause %d", depth);
+			ExplainPropertyText(qlabel, temp, es);
+		}
 		/* host clause */
-		snprintf(qlabel, sizeof(qlabel), "host clause %d", depth);
-		show_scan_qual(lfirst(lc3), qlabel, &node->ps, ancestors, es);
+		if (lfirst(lc3))
+		{
+			temp = deparse_expression(lfirst(lc3),
+									  context, es->verbose, false);
+			snprintf(qlabel, sizeof(qlabel), "qual clause %d", depth);
+			ExplainPropertyText(qlabel, temp, es);
+		}
 		depth++;
 	}
-	es->verbose = verbose_saved;
-
-	ExplainPropertyText("Bulkload", ghjs->outer_bulkload ? "On" : "Off", es);
+	/* outer clause if any */
+	if (ghj_info->outer_quals)
+	{
+		temp = deparse_expression((Node *)ghj_info->outer_quals,
+								  context, es->verbose, false);
+		ExplainPropertyText("outer clause", temp, es);
+	}
+	ExplainPropertyText("bulkload", ghjs->outer_bulkload ? "On" : "Off", es);
 
 	show_device_kernel(ghjs->dprog_key, es);
 
@@ -3231,192 +3192,12 @@ gpuhashjoin_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 		pgstrom_perfmon_explain(&ghjs->pfm, es);
 }
 
-static Bitmapset *
-gpuhashjoin_get_relids(CustomPlanState *node)
-{
-	/* nothing to do because core backend walks down inner/outer subtree */
-	return NULL;
-}
-
-static Node *
-gpuhashjoin_get_special_var(CustomPlanState *node,
-							Var *varnode,
-							PlanState **child_ps)
-{
-	GpuHashJoinState *ghjs = (GpuHashJoinState *) node;
-	GpuHashJoin	   *ghjoin = (GpuHashJoin *) node->ps.plan;
-	TargetEntry	   *tle;
-	ListCell	   *cell;
-
-	if (varnode->varno == INDEX_VAR)
-	{
-		foreach (cell, ghjoin->pscan_vartrans)
-		{
-			vartrans_info  *vtrans = lfirst(cell);
-			PlanState  *curr_ps;
-			int			depth;
-			int			resno;
-
-			if (vtrans->resno != varnode->varattno)
-				continue;
-			depth = vtrans->srcdepth;
-			resno = vtrans->srcresno;
-
-			if (depth == 0)
-			{
-				curr_ps = outerPlanState(ghjs);
-				tle = get_tle_by_resno(curr_ps->plan->targetlist, resno);
-				if (!tle)
-					goto not_found;
-				*child_ps = curr_ps;
-				return (Node *) tle->expr;
-			}
-			for (curr_ps = innerPlanState(ghjs);
-				 depth > 1;
-				 curr_ps = innerPlanState(curr_ps), depth--)
-			{
-				if (!curr_ps)
-					goto not_found;
-			}
-			tle = get_tle_by_resno(curr_ps->plan->targetlist, resno);
-			if (!tle)
-				goto not_found;
-			*child_ps = curr_ps;
-			return (Node *) tle->expr;
-		}
-	}
-	else if (varnode->varno == OUTER_VAR)
-	{
-		Plan   *outer_plan = outerPlan(ghjoin);
-
-		if (outer_plan)
-		{
-			tle = get_tle_by_resno(outer_plan->targetlist, varnode->varattno);
-			if (tle)
-			{
-				*child_ps = outerPlanState(node);
-				return (Node *) tle->expr;
-			}
-		}
-	}
-	else if (varnode->varno == INNER_VAR)
-	{
-		Plan   *inner_plan = innerPlan(ghjoin);
-
-		if (inner_plan)
-		{
-			tle = get_tle_by_resno(inner_plan->targetlist, varnode->varattno);
-			if (tle)
-			{
-				*child_ps = innerPlanState(node);
-				return (Node *) tle->expr;
-			}
-		}
-	}
-not_found:
-	Assert(false);
-	elog(ERROR, "variable (varno=%u,varattno=%d) is not relevant tlist",
-		 varnode->varno, varnode->varattno);
-	return NULL;	/* be compiler quiet */
-}
-
-
-static void
-gpuhashjoin_textout_plan(StringInfo str, const CustomPlan *node)
-{
-	GpuHashJoin	   *plannode = (GpuHashJoin *) node;
-	ListCell	   *cell;
-
-	appendStringInfo(str, " :num_rels %d", plannode->num_rels);
-
-	appendStringInfo(str, " :kernel_source ");
-	_outToken(str, plannode->kernel_source);
-
-	appendStringInfo(str, " :extra_flags %u", plannode->extra_flags);
-
-	appendStringInfo(str, " :join_types %s",
-					 nodeToString(plannode->join_types));
-	appendStringInfo(str, " :hash_clauses %s",
-					 nodeToString(plannode->hash_clauses));
-	appendStringInfo(str, " :qual_clauses %s",
-					 nodeToString(plannode->qual_clauses));
-	appendStringInfo(str, " :host_clauses %s",
-					 nodeToString(plannode->host_clauses));
-	appendStringInfo(str, " :used_params %s",
-					 nodeToString(plannode->used_params));
-	appendStringInfo(str, " :outer_attrefs ");
-	_outBitmapset(str, plannode->outer_attrefs);
-
-	foreach (cell, plannode->pscan_vartrans)
-	{
-		vartrans_info *vtrans = lfirst(cell);
-
-		appendStringInfo(str,
-						 "{"
-						 ":srcdepth %d "
-						 ":srcresno %d "
-						 ":resno %d "
-						 ":resname %s "
-						 ":vartype %u "
-						 ":vartypmod %d "
-						 ":varcollid %u "
-						 ":ref_host %s "
-						 ":ref_device %s "
-						 ":expr %s"
-						 "}",
-						 (int)vtrans->srcdepth,
-						 (int)vtrans->srcresno,
-						 (int)vtrans->resno,
-						 vtrans->resname,
-						 vtrans->vartype,
-						 vtrans->vartypmod,
-						 vtrans->varcollid,
-						 vtrans->ref_host ? "true" : "false",
-						 vtrans->ref_device ? "true" : "false",
-						 nodeToString(vtrans->expr));
-	}
-}
-
-static CustomPlan *
-gpuhashjoin_copy_plan(const CustomPlan *from)
-{
-	GpuHashJoin	   *oldnode = (GpuHashJoin *) from;
-	GpuHashJoin	   *newnode = palloc0(sizeof(GpuHashJoin));
-	ListCell	   *cell;
-
-	CopyCustomPlanCommon((Node *)from, (Node *)newnode);
-	newnode->num_rels      = oldnode->num_rels;
-	if (oldnode->kernel_source)
-		newnode->kernel_source = pstrdup(oldnode->kernel_source);
-	newnode->extra_flags   = oldnode->extra_flags;
-	newnode->join_types    = list_copy(oldnode->join_types);
-	newnode->hash_clauses  = copyObject(oldnode->hash_clauses);
-	newnode->qual_clauses  = copyObject(oldnode->qual_clauses);
-	newnode->host_clauses  = copyObject(oldnode->host_clauses);
-	newnode->used_params   = copyObject(oldnode->used_params);
-	newnode->outer_attrefs = bms_copy(oldnode->outer_attrefs);
-	newnode->pscan_vartrans = NIL;
-	foreach (cell, oldnode->pscan_vartrans)
-	{
-		vartrans_info *vtrans_old = lfirst(cell);
-		vartrans_info *vtrans_new = palloc(sizeof(vartrans_info));
-
-		memcpy(vtrans_new, vtrans_old, sizeof(vartrans_info));
-		vtrans_new->resname = (vtrans_old->resname ?
-							   pstrdup(vtrans_old->resname) : NULL);
-		vtrans_new->expr    = copyObject(vtrans_old->expr);
-
-		newnode->pscan_vartrans = lappend(newnode->pscan_vartrans,
-										  vtrans_new);
-	}
-	return &newnode->cplan;
-}
-
 /* ----------------------------------------------------------------
  *
  * Callback routines for MultiHash node
  *
  * ---------------------------------------------------------------- */
+#if 0
 static void
 multihash_set_plan_ref(PlannerInfo *root,
 					   CustomPlan *custom_plan,
@@ -3456,6 +3237,7 @@ multihash_set_plan_ref(PlannerInfo *root,
 	mhash->cplan.plan.targetlist = tlist;
 	Assert(mhash->cplan.plan.qual == NIL);
 }
+#endif
 
 pgstrom_multihash_tables *
 multihash_get_tables(pgstrom_multihash_tables *mhtables)
@@ -3485,13 +3267,25 @@ multihash_put_tables(pgstrom_multihash_tables *mhtables)
 		pgstrom_shmem_free(mhtables);
 }
 
-static CustomPlanState *
-multihash_begin(CustomPlan *node,
-				struct EState *estate,
-				int eflags)
+static Node *
+multihash_create_scan_state(CustomScan *cscan)
 {
-	MultiHash	   *mhash = (MultiHash *) node;
 	MultiHashState *mhs = palloc0(sizeof(MultiHashState));
+
+	NodeSetTag(mhs, T_CustomScanState);
+	mhs->css.flags = cscan->flags;
+	mhs->css.methods = &multihash_exec_methods.c;
+
+	return (Node *) mhs;
+}
+
+static void
+multihash_begin(CustomScanState *node, EState *estate, int eflags)
+{
+	MultiHashState *mhs = (MultiHashState *) node;
+	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
+	MultiHashInfo  *mh_info = deform_multihash_info(cscan);
+	List		   *hash_keys = NIL;
 	List		   *hash_keylen = NIL;
 	List		   *hash_keybyval = NIL;
 	ListCell	   *cell;
@@ -3499,71 +3293,45 @@ multihash_begin(CustomPlan *node,
 	/* check for unsupported flags */
 	Assert(!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
 	/* ensure the plan is MultiHash */
-	Assert(pgstrom_plan_is_multihash((Plan *) mhash));
+	Assert(pgstrom_plan_is_multihash((Plan *) cscan));
 
-	NodeSetTag(mhs, T_CustomPlanState);
-	mhs->cps.methods = &multihash_plan_methods;
-	mhs->cps.ps.plan = (Plan *) mhash;
-	mhs->cps.ps.state = estate;
-	mhs->depth = mhash->depth;
-	mhs->nslots = mhash->nslots;
-	mhs->threshold_ratio = mhash->threshold_ratio;
-	mhs->hashtable_size = mhash->hashtable_size;
+	mhs->depth = mh_info->depth;
+	mhs->nslots = mh_info->nslots;
+	mhs->threshold = mh_info->threshold;
+	mhs->hashtable_size = mh_info->hashtable_size;
+
 	mhs->outer_overflow = NULL;
 	mhs->outer_done = false;
 	mhs->curr_chunk = NULL;
 
 	/*
-	 * create expression context for node
+	 * initialize the expression state of hash-keys
 	 */
-	ExecAssignExprContext(estate, &mhs->cps.ps);
-
-	/*
-	 * initialize our result slot
-	 */
-	ExecInitResultTupleSlot(estate, &mhs->cps.ps);
-
-	/*
-	 * initialize child expressions
-	 */
-	mhs->cps.ps.targetlist = (List *)
-		ExecInitExpr((Expr *) mhash->cplan.plan.targetlist, &mhs->cps.ps);
-	mhs->cps.ps.qual = (List *)
-		ExecInitExpr((Expr *) mhash->cplan.plan.qual, &mhs->cps.ps);
-	mhs->hash_keys = (List *)
-		ExecInitExpr((Expr *) mhash->hash_inner_keys, &mhs->cps.ps);
-
-	foreach (cell, mhash->hash_inner_keys)
+	foreach (cell, mh_info->hash_keys)
 	{
-		int16	typlen;
-		bool	typbyval;
+		int16		typlen;
+		bool		typbyval;
 
 		get_typlenbyval(exprType(lfirst(cell)), &typlen, &typbyval);
 
+		hash_keys = lappend(hash_keys,
+							ExecInitExpr(lfirst(cell), &mhs->css.ss.ps));
 		hash_keylen = lappend_int(hash_keylen, typlen);
 		hash_keybyval = lappend_int(hash_keybyval, typbyval);
 	}
+	mhs->hash_keys = hash_keys;
 	mhs->hash_keylen = hash_keylen;
 	mhs->hash_keybyval = hash_keybyval;
 
 	/*
 	 * initialize child nodes
 	 */
-	outerPlanState(mhs) = ExecInitNode(outerPlan(mhash), estate, eflags);
-	innerPlanState(mhs) = ExecInitNode(innerPlan(mhash), estate, eflags);
-
-	/*
-	 * initialize tuple type, but no need to initialize projection info
-	 * because this node never have projection
-	 */
-	ExecAssignResultTypeFromTL(&mhs->cps.ps);
-	mhs->cps.ps.ps_ProjInfo = NULL;
-
-	return &mhs->cps;
+	outerPlanState(mhs) = ExecInitNode(outerPlan(cscan), estate, eflags);
+	innerPlanState(mhs) = ExecInitNode(innerPlan(cscan), estate, eflags);
 }
 
 static TupleTableSlot *
-multihash_exec(CustomPlanState *node)
+multihash_exec(CustomScanState *node)
 {
 	elog(ERROR, "MultiHash does not support ExecProcNode call convention");
 	return NULL;
@@ -3600,8 +3368,8 @@ expand_multihash_tables(MultiHashState *mhs,
 
 	/* update hashtable_size of MultiHashState */
 	do {
-		Assert(IsA(mhs, CustomPlanState) &&
-			   mhs->cps.methods == &multihash_plan_methods);
+		Assert(IsA(mhs, CustomScanState) &&
+			   mhs->css.methods == &multihash_exec_methods.c);
 		mhs->hashtable_size = allocated;
 		mhs = (MultiHashState *) innerPlanState(mhs);
 	} while (mhs);
@@ -3617,7 +3385,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 							 bool scan_forward)
 {
 	TupleDesc		tupdesc = ExecGetResultType(outerPlanState(mhs));
-	ExprContext	   *econtext = mhs->cps.ps.ps_ExprContext;
+	ExprContext	   *econtext = mhs->css.ss.ps.ps_ExprContext;
 	int				depth = mhs->depth;
 	pgstrom_multihash_tables *mhtables = *p_mhtables;
 	kern_hashtable *khtable;
@@ -3631,7 +3399,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	int				i;
 
 	/* preload should be done under the MultiExec context */
-	Assert(CurrentMemoryContext == mhs->cps.ps.state->es_query_cxt);
+	Assert(CurrentMemoryContext == mhs->css.ss.ps.state->es_query_cxt);
 
 	/*
 	 * First of all, construct a kern_hashtable on the tail of current
@@ -3646,7 +3414,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	{
 		Assert(mhs->curr_chunk);
 		required = mhtables->usage + mhs->curr_chunk->length;
-		while (required > mhs->threshold_ratio * mhtables->length)
+		while (required > mhs->threshold * mhtables->length)
 		{
 			if (!expand_multihash_tables(mhs, p_mhtables, 0))
 				elog(ERROR, "No multi-hashtables expandable any more");
@@ -3669,7 +3437,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 				LONGALIGN(offsetof(kern_hashtable,
 								   colmeta[tupdesc->natts])) +
 				LONGALIGN(sizeof(cl_uint) * mhs->nslots));
-	while (required > mhs->threshold_ratio * mhtables->length)
+	while (required > mhs->threshold * mhtables->length)
 	{
 		if (!expand_multihash_tables(mhs, &mhtables, 0))
 			elog(ERROR, "No multi-hashtables expandable any more");
@@ -3742,7 +3510,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		entry_size = LONGALIGN(offsetof(kern_hashentry, htup) +
 							   scan_tuple->t_len);
 		required = mhtables->usage + consumed + entry_size;
-		while (required > mhs->threshold_ratio * mhtables->length)
+		while (required > mhs->threshold * mhtables->length)
 		{
 			if (!expand_multihash_tables(mhs, p_mhtables, consumed))
 			{
@@ -3756,8 +3524,8 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		}
 
 		/* calculation of a hash value of this entry */
-		INIT_CRC32(hash);
-		econtext->ecxt_outertuple = scan_slot;
+		INIT_CRC32C(hash);
+		econtext->ecxt_scantuple = scan_slot;
 		forthree (lc1, mhs->hash_keys,
 				  lc2, mhs->hash_keylen,
 				  lc3, mhs->hash_keybyval)
@@ -3774,18 +3542,18 @@ multihash_preload_khashtable(MultiHashState *mhs,
 			if (keylen > 0)
 			{
 				if (keybyval)
-					COMP_CRC32(hash, &value, keylen);
+					COMP_CRC32C(hash, &value, keylen);
 				else
-					COMP_CRC32(hash, DatumGetPointer(value), keylen);
+					COMP_CRC32C(hash, DatumGetPointer(value), keylen);
 			}
 			else
 			{
-				COMP_CRC32(hash,
-						   VARDATA_ANY(value),
-						   VARSIZE_ANY_EXHDR(value));
+				COMP_CRC32C(hash,
+							VARDATA_ANY(value),
+							VARSIZE_ANY_EXHDR(value));
 			}
 		}
-		FIN_CRC32(hash);
+		FIN_CRC32C(hash);
 
 		/* allocation of hash entry and insert it */
 		hentry = (kern_hashentry *)((char *)khtable + consumed);
@@ -3815,8 +3583,8 @@ out:
 	mhs->curr_chunk = pmemcpy(khtable, khtable->length);
 }
 
-static Node *
-multihash_exec_multi(CustomPlanState *node)
+static void *
+multihash_exec_bulk(CustomScanState *node)
 {
 	MultiHashState *mhs = (MultiHashState *) node;
 	MultiHashNode  *mhnode = NULL;
@@ -3825,19 +3593,19 @@ multihash_exec_multi(CustomPlanState *node)
 	int				depth = mhs->depth;
 
 	/* must provide our own instrumentation support */
-	if (node->ps.instrument)
-		InstrStartNode(node->ps.instrument);
+	if (node->ss.ps.instrument)
+		InstrStartNode(node->ss.ps.instrument);
 
 	inner_ps = innerPlanState(mhs);
 	if (inner_ps)
 	{
-		mhnode = (MultiHashNode *) MultiExecProcNode(inner_ps);
+		mhnode = (MultiHashNode *) BulkExecProcNode(inner_ps);
 		if (!mhnode)
 		{
 			if (mhs->outer_done)
 				goto out;
 			ExecReScan(inner_ps);
-			mhnode = (MultiHashNode *) MultiExecProcNode(inner_ps);
+			mhnode = (MultiHashNode *) BulkExecProcNode(inner_ps);
 			if (!mhnode)
 				goto out;
 			scan_forward = true;
@@ -3901,20 +3669,15 @@ multihash_exec_multi(CustomPlanState *node)
 	multihash_preload_khashtable(mhs, &mhnode->mhtables, scan_forward);
 out:
 	/* must provide our own instrumentation support */
-	if (node->ps.instrument)
-		InstrStopNode(node->ps.instrument,
+	if (node->ss.ps.instrument)
+		InstrStopNode(node->ss.ps.instrument,
 					  !mhnode ? 0.0 : mhnode->mhtables->ntuples);
-	return (Node *) mhnode;
+	return mhnode;
 }
 
 static void
-multihash_end(CustomPlanState *node)
+multihash_end(CustomScanState *node)
 {
-	/*
-	 * free exprcontext
-	 */
-	ExecFreeExprContext(&node->ps);
-
 	/*
 	 * shut down the subplan
 	 */
@@ -3923,7 +3686,7 @@ multihash_end(CustomPlanState *node)
 }
 
 static void
-multihash_rescan(CustomPlanState *node)
+multihash_rescan(CustomScanState *node)
 {
 	MultiHashState *mhs = (MultiHashState *) node;
 
@@ -3939,25 +3702,26 @@ multihash_rescan(CustomPlanState *node)
 }
 
 static void
-multihash_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
+multihash_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 {
-	MultiHash  *mhash = (MultiHash *) node->ps.plan;
-	StringInfoData str;
-	List	   *context;
-	ListCell   *cell;
+	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
+	MultiHashInfo  *mh_info = deform_multihash_info(cscan);
+	StringInfoData	str;
+	List		   *context;
+	ListCell	   *cell;
 
 	/* set up deparsing context */
-	context = deparse_context_for_planstate((Node *) node,
+	context = deparse_context_for_planstate((Node *) &node->ss.ps,
                                             ancestors,
                                             es->rtable,
                                             es->rtable_names);
 	/* shows hash keys */
 	initStringInfo(&str);
-	foreach (cell, mhash->hash_inner_keys)
+	foreach (cell, mh_info->hash_keys)
 	{
 		char   *exprstr;
 
-		if (cell != list_head(mhash->hash_inner_keys))
+		if (cell != list_head(mh_info->hash_keys))
 			appendStringInfo(&str, ", ");
 
 		exprstr = deparse_expression(lfirst(cell),
@@ -3973,75 +3737,18 @@ multihash_explain(CustomPlanState *node, List *ancestors, ExplainState *es)
 	if (es->format != EXPLAIN_FORMAT_TEXT)
 	{
 		resetStringInfo(&str);
-		ExplainPropertyInteger("Buckets", mhash->nslots, es);
-		ExplainPropertyInteger("Batches", mhash->nloops, es);
-		appendStringInfo(&str, "%.2f%%", 100.0 * mhash->threshold_ratio);
+		ExplainPropertyInteger("Buckets", mh_info->nslots, es);
+		appendStringInfo(&str, "%.2f%%", 100.0 * mh_info->threshold);
 		ExplainPropertyText("Memory Usage", str.data, es);
 	}
 	else
 	{
 		appendStringInfoSpaces(es->str, es->indent * 2);
 		appendStringInfo(es->str,
-						 "Buckets: %u  Batches: %u  Memory Usage: %.2f%%\n",
-						 mhash->nslots, mhash->nloops,
-						 100.0 * mhash->threshold_ratio);
+						 "Buckets: %u  Memory Usage: %.2f%%\n",
+						 mh_info->nslots,
+						 100.0 * mh_info->threshold);
 	}
-}
-
-static Bitmapset *
-multihash_get_relids(CustomPlanState *node)
-{
-	/* nothing to do because core backend walks down inner/outer subtree */
-	return NULL;
-}
-
-static Node *
-multihash_get_special_var(CustomPlanState *node,
-						  Var *varnode,
-						  PlanState **child_ps)
-{
-	PlanState	   *outer_ps = outerPlanState(node);
-	TargetEntry	   *tle;
-
-	Assert(varnode->varno == OUTER_VAR);
-	tle = list_nth(outer_ps->plan->targetlist, varnode->varattno - 1);
-
-	*child_ps = outer_ps;
-	return (Node *)tle->expr;
-}
-
-static void
-multihash_textout_plan(StringInfo str, const CustomPlan *node)
-{
-	MultiHash  *plannode = (MultiHash *) node;
-
-	appendStringInfo(str, " :depth %d", plannode->depth);
-	appendStringInfo(str, " :nslots %u", plannode->nslots);
-	appendStringInfo(str, " :nloops %u", plannode->nloops);
-	appendStringInfo(str, " :threshold_ratio %f", plannode->threshold_ratio);
-	appendStringInfo(str, " :hashtable_size %zu", plannode->hashtable_size);
-	appendStringInfo(str, " :hash_inner_keys %s",
-					 nodeToString(plannode->hash_inner_keys));
-	appendStringInfo(str, " :hash_outer_keys %s",
-					 nodeToString(plannode->hash_outer_keys));
-}
-
-static CustomPlan *
-multihash_copy_plan(const CustomPlan *from)
-{
-	MultiHash  *oldnode = (MultiHash *) from;
-	MultiHash  *newnode = palloc0(sizeof(MultiHash));
-
-	CopyCustomPlanCommon((Node *)oldnode, (Node *)newnode);
-	newnode->depth           = oldnode->depth;
-	newnode->nslots          = oldnode->nslots;
-	newnode->nloops          = oldnode->nloops;
-	newnode->threshold_ratio = oldnode->threshold_ratio;
-	newnode->hashtable_size  = oldnode->hashtable_size;
-	newnode->hash_inner_keys = copyObject(oldnode->hash_inner_keys);
-	newnode->hash_outer_keys = copyObject(oldnode->hash_outer_keys);
-
-	return &newnode->cplan;
 }
 
 /*
@@ -4064,42 +3771,46 @@ pgstrom_init_gpuhashjoin(void)
 
 	/* setup path methods */
 	gpuhashjoin_path_methods.CustomName = "GpuHashJoin";
-	gpuhashjoin_path_methods.CreateCustomPlan	= gpuhashjoin_create_plan;
+	gpuhashjoin_path_methods.PlanCustomPath     = create_gpuhashjoin_plan;
 	gpuhashjoin_path_methods.TextOutCustomPath	= gpuhashjoin_textout_path;
 
 	/* setup plan methods */
 	gpuhashjoin_plan_methods.CustomName = "GpuHashJoin";
-	gpuhashjoin_plan_methods.SetCustomPlanRef	= gpuhashjoin_set_plan_ref;
-	gpuhashjoin_plan_methods.SupportBackwardScan= NULL;
-	gpuhashjoin_plan_methods.FinalizeCustomPlan	= gpuhashjoin_finalize_plan;
-	gpuhashjoin_plan_methods.BeginCustomPlan	= gpuhashjoin_begin;
-	gpuhashjoin_plan_methods.ExecCustomPlan		= gpuhashjoin_exec;
-	gpuhashjoin_plan_methods.MultiExecCustomPlan= gpuhashjoin_exec_multi;
-	gpuhashjoin_plan_methods.EndCustomPlan		= gpuhashjoin_end;
-	gpuhashjoin_plan_methods.ReScanCustomPlan	= gpuhashjoin_rescan;
-	gpuhashjoin_plan_methods.ExplainCustomPlan	= gpuhashjoin_explain;
-	gpuhashjoin_plan_methods.GetRelidsCustomPlan= gpuhashjoin_get_relids;
-	gpuhashjoin_plan_methods.GetSpecialCustomVar= gpuhashjoin_get_special_var;
-	gpuhashjoin_plan_methods.TextOutCustomPlan	= gpuhashjoin_textout_plan;
-	gpuhashjoin_plan_methods.CopyCustomPlan		= gpuhashjoin_copy_plan;
+	gpuhashjoin_plan_methods.CreateCustomScanState
+		= gpuhashjoin_create_scan_state;
+	gpuhashjoin_plan_methods.TextOutCustomScan  = NULL;
+
+	/* setup exec methods */
+	gpuhashjoin_exec_methods.c.CustomName = "GpuHashJoin";
+	gpuhashjoin_exec_methods.c.BeginCustomScan    = gpuhashjoin_begin;
+	gpuhashjoin_exec_methods.c.ExecCustomScan     = gpuhashjoin_exec;
+	gpuhashjoin_exec_methods.c.EndCustomScan      = gpuhashjoin_end;
+	gpuhashjoin_exec_methods.c.ReScanCustomScan   = gpuhashjoin_rescan;
+	gpuhashjoin_exec_methods.c.MarkPosCustomScan  = NULL;
+	gpuhashjoin_exec_methods.c.RestrPosCustomScan = NULL;
+	gpuhashjoin_exec_methods.c.ExplainCustomScan  = gpuhashjoin_explain;
+	gpuhashjoin_exec_methods.ExecCustomBulk       = gpuhashjoin_exec_bulk;
 
 	/* setup plan methods of MultiHash */
 	multihash_plan_methods.CustomName          = "MultiHash";
-	multihash_plan_methods.SetCustomPlanRef    = multihash_set_plan_ref;
-	multihash_plan_methods.BeginCustomPlan     = multihash_begin;
-	multihash_plan_methods.ExecCustomPlan      = multihash_exec;
-	multihash_plan_methods.MultiExecCustomPlan = multihash_exec_multi;
-	multihash_plan_methods.EndCustomPlan       = multihash_end;
-	multihash_plan_methods.ReScanCustomPlan    = multihash_rescan;
-	multihash_plan_methods.ExplainCustomPlan   = multihash_explain;
-	multihash_plan_methods.GetRelidsCustomPlan = multihash_get_relids;
-	multihash_plan_methods.GetSpecialCustomVar = multihash_get_special_var;
-	multihash_plan_methods.TextOutCustomPlan   = multihash_textout_plan;
-	multihash_plan_methods.CopyCustomPlan      = multihash_copy_plan;
+	multihash_plan_methods.CreateCustomScanState
+		= multihash_create_scan_state;
+	multihash_plan_methods.TextOutCustomScan   = NULL;
+
+	/* setup exec methods of MultiHash */
+	multihash_exec_methods.c.CustomName        = "MultiHash";
+	multihash_exec_methods.c.BeginCustomScan   = multihash_begin;
+	multihash_exec_methods.c.ExecCustomScan    = multihash_exec;
+	multihash_exec_methods.c.EndCustomScan     = multihash_end;
+	multihash_exec_methods.c.ReScanCustomScan  = multihash_rescan;
+	multihash_exec_methods.c.MarkPosCustomScan = NULL;
+	multihash_exec_methods.c.RestrPosCustomScan= NULL;
+	multihash_exec_methods.c.ExplainCustomScan = multihash_explain;
+	multihash_exec_methods.ExecCustomBulk      = multihash_exec_bulk;
 
 	/* hook registration */
-	add_hashjoin_path_next = add_hashjoin_path_hook;
-	add_hashjoin_path_hook = gpuhashjoin_add_path;
+	set_join_pathlist_next = set_join_pathlist_hook;
+	set_join_pathlist_hook = gpuhashjoin_add_join_path;
 }
 
 /* ----------------------------------------------------------------
