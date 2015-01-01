@@ -3000,7 +3000,18 @@ gpuhashjoin_exec_multi(CustomPlanState *node)
 			}
 			bulk->nvalids = j;
 		}
-		break;
+
+		if ((bulk->nvalids < 0 ? nitems : bulk->nvalids) > 0)
+			break;
+
+		/* If this chunk has no valid items, it does not make sense to
+		 * return upper level this chunk. So, release this data-store
+		 * and tries to fetch next one.
+		 */
+		pgstrom_untrack_object(&bulk->pds->sobj);
+		pgstrom_put_data_store(bulk->pds);
+		pfree(bulk);
+		bulk = NULL;
 	}
 
 	/* must provide our own instrumentation support */
