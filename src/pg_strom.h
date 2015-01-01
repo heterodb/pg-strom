@@ -17,6 +17,7 @@
 #include "fmgr.h"
 #include "lib/ilist.h"
 #include "lib/stringinfo.h"
+#include "miscadmin.h"
 #include "nodes/execnodes.h"
 #include "nodes/plannodes.h"
 #include "nodes/primnodes.h"

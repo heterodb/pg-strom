@@ -678,11 +678,12 @@ pgstrom_create_gpuscan(GpuScanState *gss, pgstrom_data_store *pds)
 static pgstrom_gpuscan *
 pgstrom_load_gpuscan(GpuScanState *gss)
 {
-	pgstrom_gpuscan *gpuscan = NULL;
-	Relation	rel = gss->css.ss.ss_currentRelation;
-	TupleDesc	tupdesc = RelationGetDescr(rel);
-	Snapshot	snapshot = gss->css.ss.ps.state->es_snapshot;
-	Size		length;
+	pgstrom_gpuscan	   *gpuscan = NULL;
+	Relation			rel = gss->css.ss.ss_currentRelation;
+	TupleDesc			tupdesc = RelationGetDescr(rel);
+	Snapshot			snapshot = gss->css.ss.ps.state->es_snapshot;
+	bool				end_of_scan = false;
+	Size				length;
 	pgstrom_data_store *pds;
 	struct timeval tv1, tv2;
 
@@ -693,45 +694,47 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	if (gss->pfm.enabled)
 		gettimeofday(&tv1, NULL);
 
-retry:
-	length = (pgstrom_chunk_size << 20);
-	pds = pgstrom_create_data_store_row(tupdesc, length, gss->tuple_width);
-	PG_TRY();
+	while (!gpuscan && !end_of_scan)
 	{
-		while (gss->curr_blknum < gss->last_blknum &&
-			   pgstrom_data_store_insert_block(pds, rel,
-											   gss->curr_blknum,
-											   snapshot, true) >= 0)
-			gss->curr_blknum++;
+		length = (pgstrom_chunk_size << 20);
+		pds = pgstrom_create_data_store_row(tupdesc, length, gss->tuple_width);
+		PG_TRY();
+		{
+			while (gss->curr_blknum < gss->last_blknum &&
+				   pgstrom_data_store_insert_block(pds, rel,
+												   gss->curr_blknum,
+												   snapshot, true) >= 0)
+				gss->curr_blknum++;
 
-		if (pds->kds->nitems > 0)
-			gpuscan = pgstrom_create_gpuscan(gss, pds);
-		else
+			if (pds->kds->nitems > 0)
+				gpuscan = pgstrom_create_gpuscan(gss, pds);
+			else
+			{
+				pgstrom_put_data_store(pds);
+
+				/* NOTE: In case when it scans on a large hole (that is
+				 * continuous blocks contain invisible tuples only; may
+				 * be created by DELETE with relaxed condition),
+				 * pgstrom_data_store_insert_block() may return negative
+				 * value without valid tuples, even though we don't reach
+				 * either end of relation or chunk.
+				 * So, we need to check whether we actually touched on
+				 * the end-of-relation. If not, retry scanning.
+				 */
+				if (gss->curr_blknum >= gss->last_blknum)
+					end_of_scan = true;
+			}
+		}
+		PG_CATCH();
 		{
 			pgstrom_put_data_store(pds);
-
-			/* NOTE: In case when it scans on a large hole (that is
-			 * continuous blocks contain invisible tuples only; may
-			 * be created by DELETE with relaxed condition),
-			 * pgstrom_data_store_insert_block() may return negative
-			 * value without valid tuples, even though we don't reach
-			 * either end of relation or chunk.
-			 * So, we need to check whether we actually touched on
-			 * the end-of-relation. If not, retry scanning.
-			 */
-			if (gss->curr_blknum < gss->last_blknum)
-				goto retry;
+			PG_RE_THROW();
 		}
+		PG_END_TRY();
+		/* track local object */
+		if (gpuscan)
+			pgstrom_track_object(&gpuscan->msg.sobj, 0);
 	}
-	PG_CATCH();
-    {
-		pgstrom_put_data_store(pds);
-        PG_RE_THROW();
-    }
-    PG_END_TRY();
-	/* track local object */
-	if (gpuscan)
-		pgstrom_track_object(&gpuscan->msg.sobj, 0);
 	/* update perfmon statistics */
 	if (gss->pfm.enabled)
 	{

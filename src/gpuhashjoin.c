@@ -1365,12 +1365,11 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 							CustomScan *mhash, int depth,
 							codegen_context *context)
 {
-	MultiHashInfo *mhinfo = deform_multihash_info(mhash);
 	List	   *hash_keys;
-	List	   *hash_clause;
-	List	   *qual_clause;
-	List	   *dev_hash_clause;
-	List	   *dev_qual_clause;
+	Expr	   *hash_clause;
+	Expr	   *qual_clause;
+	Expr	   *dev_hash_clause;
+	Expr	   *dev_qual_clause;
 	Bitmapset  *attrs_ref = NULL;
 	ListCell   *lc1, *lc2, *lc3;
 	char	   *clause;
@@ -1468,13 +1467,13 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 					 depth, depth);
 	if (hash_clause)
 	{
-		clause = pgstrom_codegen_expression(hash_clause, context);
+		clause = pgstrom_codegen_expression((Node *)hash_clause, context);
 		appendStringInfo(body, " &&\n    EVAL(%s)", clause);
 		pfree(clause);
 	}
 	if (qual_clause)
 	{
-		clause = pgstrom_codegen_expression(qual_clause, context);
+		clause = pgstrom_codegen_expression((Node *)qual_clause, context);
 		appendStringInfo(body, " &&\n      EVAL(%s)", clause);
 		pfree(clause);
 	}
@@ -1989,7 +1988,6 @@ create_gpuhashjoin_plan(PlannerInfo *root,
 	{
 		CustomScan	   *mhash;
 		MultiHashInfo	mh_info;
-		List		   *mhash_tlist = NIL;
 		List		   *hash_clause = gpath->inners[i].hash_clauses;
 		List		   *qual_clause = gpath->inners[i].qual_clauses;
 		List		   *host_clause = gpath->inners[i].host_clauses;
@@ -1998,7 +1996,6 @@ create_gpuhashjoin_plan(PlannerInfo *root,
 		Path		   *scan_path = gpath->inners[i].scan_path;
 		Plan		   *scan_plan = create_plan_recurse(root, scan_path);
 		ListCell	   *cell;
-		TargetEntry	   *tle;
 
 		ghj_info.join_types = lappend_int(ghj_info.join_types,
 										  gpath->inners[i].jointype);
@@ -2011,16 +2008,7 @@ create_gpuhashjoin_plan(PlannerInfo *root,
 		ghj_info.host_clauses =
 			lappend(ghj_info.host_clauses,
 					build_flatten_qualifier(host_clause));
-		/* Make a CustomScan(MultiHash) node */
-		foreach (cell, scan_plan->targetlist)
-		{
-			TargetEntry	*tle =
-				makeTargetEntry(copyObject(lfirst(cell)),
-								list_length(mhash_tlist) + 1,
-								NULL,
-								false);
-			mhash_tlist = lappend(mhash_tlist, tle);
-		}
+
 		mhash = makeNode(CustomScan);
 		mhash->scan.plan.startup_cost = scan_plan->total_cost;
 		mhash->scan.plan.total_cost = scan_plan->total_cost;
@@ -2971,7 +2959,18 @@ gpuhashjoin_exec_bulk(CustomScanState *node)
 			}
 			bulk->nvalids = j;
 		}
-		break;
+
+		if ((bulk->nvalids < 0 ? nitems : bulk->nvalids) > 0)
+			break;
+
+		/* If this chunk has no valid items, it does not make sense to
+		 * return upper level this chunk. So, release this data-store
+		 * and tries to fetch next one.
+		 */
+		pgstrom_untrack_object(&bulk->pds->sobj);
+		pgstrom_put_data_store(bulk->pds);
+		pfree(bulk);
+		bulk = NULL;
 	}
 
 	/* must provide our own instrumentation support */
