@@ -106,35 +106,19 @@ typedef struct
  */
 typedef struct
 {
-	//CustomScan	cscan;
-	/*
-	 * outerPlan ... relation to be joined
-	 * innerPlan ... MultiHash with multiple inner relations
-	 */
 	int			num_rels;		/* number of underlying MultiHash */
 	Size		hashtable_size;	/* estimated hashtable size */
 	double		row_population_ratio;	/* estimated population ratio */
 	char	   *kernel_source;
 	int			extra_flags;
 	bool		outer_bulkload;	/* is outer can bulk loading? */
-	Expr	   *outer_quals;	/* qualifiers pulled-up from outer-scan */
+	Expr	   *outer_quals;	/* Var has raw depth/resno pair */
 	List	   *join_types;		/* list of join types */
-	List	   *hash_keys;		/* list of hash-keys in outer relation */
-	List	   *hash_clauses;	/* list of hash_clause (List *) */
-	List	   *qual_clauses;	/* list of qual_clause (List *) */
-	List	   *host_clauses;	/* list of host_clause (List *) */
-
-	/* NOTE: device qualifiers are already fixed-up to reference special
-	 * varnodes (INNER/OUTER/INDEX) on fixup_device_expression(). It should
-	 * be saved separately to avoid built-in adjustment in setrefs.c.
-	 */
-	Expr	   *dev_outer_quals;
-	List	   *dev_hash_clauses;
-	List	   *dev_qual_clauses;
-	List	   *raw_hash_keys;
-
+	List	   *hash_keys;		/* Var has raw depth/resno pair */
+	List	   *hash_clauses;	/* Var has raw depth/resno pair */
+	List	   *qual_clauses;	/* Var has raw depth/resno pair */
+	List	   *host_clauses;	/* Var is mapped on custom_ps_tlist */
 	List	   *used_params;	/* template for kparams */
-
 	/* supplemental information for ps_tlist */
 	List	   *ps_src_depth;	/* source depth of the pseudo target entry */
 	List	   *ps_src_resno;	/* source resno of the pseudo target entry */
@@ -157,16 +141,12 @@ form_gpuhashjoin_info(CustomScan *cscan, GpuHashJoinInfo *ghj_info)
 	privs = lappend(privs, makeString(ghj_info->kernel_source));
 	privs = lappend(privs, makeInteger(ghj_info->extra_flags));
 	privs = lappend(privs, makeInteger(ghj_info->outer_bulkload));
-	exprs = lappend(exprs, ghj_info->outer_quals);
+	privs = lappend(privs, ghj_info->outer_quals);
 	privs = lappend(privs, ghj_info->join_types);
-	exprs = lappend(exprs, ghj_info->hash_keys);
-	exprs = lappend(exprs, ghj_info->hash_clauses);
-	exprs = lappend(exprs, ghj_info->qual_clauses);
+	privs = lappend(privs, ghj_info->hash_keys);
+	privs = lappend(privs, ghj_info->hash_clauses);
+	privs = lappend(privs, ghj_info->qual_clauses);
 	exprs = lappend(exprs, ghj_info->host_clauses);
-	privs = lappend(privs, ghj_info->dev_outer_quals);
-	privs = lappend(privs, ghj_info->dev_hash_clauses);
-	privs = lappend(privs, ghj_info->dev_qual_clauses);
-	privs = lappend(privs, ghj_info->raw_hash_keys);
 	exprs = lappend(exprs, ghj_info->used_params);
 	privs = lappend(privs, ghj_info->ps_src_depth);
 	privs = lappend(privs, ghj_info->ps_src_resno);
@@ -195,16 +175,12 @@ deform_gpuhashjoin_info(CustomScan *cscan)
 	ghj_info->kernel_source   = strVal(list_nth(privs, pindex++));
 	ghj_info->extra_flags     = intVal(list_nth(privs, pindex++));
 	ghj_info->outer_bulkload  = intVal(list_nth(privs, pindex++));
-	ghj_info->outer_quals     = list_nth(exprs, eindex++);
+	ghj_info->outer_quals     = list_nth(privs, pindex++);
 	ghj_info->join_types      = list_nth(privs, pindex++);
-	ghj_info->hash_keys       = list_nth(exprs, eindex++);
-	ghj_info->hash_clauses    = list_nth(exprs, eindex++);
-	ghj_info->qual_clauses    = list_nth(exprs, eindex++);
+	ghj_info->hash_keys       = list_nth(privs, pindex++);
+	ghj_info->hash_clauses    = list_nth(privs, pindex++);
+	ghj_info->qual_clauses    = list_nth(privs, pindex++);
 	ghj_info->host_clauses    = list_nth(exprs, eindex++);
-	ghj_info->dev_outer_quals = list_nth(privs, pindex++);
-	ghj_info->dev_hash_clauses= list_nth(privs, pindex++);
-	ghj_info->dev_qual_clauses= list_nth(privs, pindex++);
-	ghj_info->raw_hash_keys   = list_nth(privs, pindex++);
 	ghj_info->used_params     = list_nth(exprs, eindex++);
 	ghj_info->ps_src_depth    = list_nth(privs, pindex++);
 	ghj_info->ps_src_resno    = list_nth(privs, pindex++);
@@ -1165,7 +1141,7 @@ gpuhashjoin_codegen_qual(StringInfo body,
 		"                      __global kern_data_store *kds,\n"
 		"                      __global kern_data_store *ktoast,\n"
 		"                      size_t kds_index)\n");
-	if (!ghj_info->dev_outer_quals)
+	if (!ghj_info->outer_quals)
 	{
 		appendStringInfo(
 			body,
@@ -1175,10 +1151,10 @@ gpuhashjoin_codegen_qual(StringInfo body,
 	}
 	else
 	{
-		Node   *dev_outer_quals = (Node *) ghj_info->dev_outer_quals;
+		Node   *outer_quals = (Node *) ghj_info->outer_quals;
 		char   *expr_code;
 
-		expr_code = pgstrom_codegen_expression(dev_outer_quals, context);
+		expr_code = pgstrom_codegen_expression(outer_quals, context);
 		appendStringInfo(
 			body,
 			"{\n"
@@ -1366,9 +1342,9 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 							CustomScan *mhash, int depth,
 							codegen_context *context)
 {
-	List	   *hash_keys = list_nth(ghj_info->raw_hash_keys, depth - 1);
-	Expr	   *hash_clause = list_nth(ghj_info->dev_hash_clauses, depth - 1);
-	Expr	   *qual_clause = list_nth(ghj_info->dev_qual_clauses, depth - 1);
+	List	   *hash_keys = list_nth(ghj_info->hash_keys, depth - 1);
+	Expr	   *hash_clause = list_nth(ghj_info->hash_clauses, depth - 1);
+	Expr	   *qual_clause = list_nth(ghj_info->qual_clauses, depth - 1);
 	Bitmapset  *attrs_ref = NULL;
 	ListCell   *cell;
 	char	   *clause;
@@ -1419,8 +1395,8 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 	 * (its value depends on the current entry, so it needs to be
 	 * referenced within the loop)
 	 */
-	pull_varattnos((Node *)ghj_info->dev_hash_clauses, depth, &attrs_ref);
-	pull_varattnos((Node *)ghj_info->dev_qual_clauses, depth, &attrs_ref);
+	pull_varattnos((Node *)ghj_info->hash_clauses, depth, &attrs_ref);
+	pull_varattnos((Node *)ghj_info->qual_clauses, depth, &attrs_ref);
 
 	while ((x = bms_first_member(attrs_ref)) >= 0)
 	{
@@ -1605,8 +1581,8 @@ gpuhashjoin_codegen(PlannerInfo *root,
 	/*
 	 * declaration of variables that reference outer relations
 	 */
-	pull_varattnos((Node *)ghj_info->dev_hash_clauses, 0, &attrs_ref);
-	pull_varattnos((Node *)ghj_info->dev_qual_clauses, 0, &attrs_ref);
+	pull_varattnos((Node *)ghj_info->hash_clauses, 0, &attrs_ref);
+	pull_varattnos((Node *)ghj_info->qual_clauses, 0, &attrs_ref);
 
 	while ((x = bms_first_member(attrs_ref)) >= 0)
 	{
@@ -1750,7 +1726,6 @@ build_pseudo_targetlist_walker(Node *node,
 			}
 		}
 		/* not in the pseudo-scan targetlist, so append this one */
-		//plan = outerPlan(context->ghjoin);
 		rel = gpath->outer_path->parent;
 		plan = gpath->outer_plan;
 		if (bms_is_member(varnode->varno, rel->relids))
@@ -2129,16 +2104,16 @@ create_gpuhashjoin_plan(PlannerInfo *root,
 	 * Build a pseudo-scan targetlist.
 	 */
 	ghjoin->custom_ps_tlist = build_pseudo_targetlist(gpath, &ghj_info, tlist);
-	ghj_info.dev_outer_quals = (Expr *)
+	ghj_info.outer_quals = (Expr *)
 		fixup_device_expression(ghjoin, gpath,
 								(Node *)ghj_info.outer_quals, true);
-	ghj_info.dev_hash_clauses = (List *)
+	ghj_info.hash_clauses = (List *)
 		fixup_device_expression(ghjoin, gpath,
 								(Node *)ghj_info.hash_clauses, false);
-	ghj_info.dev_qual_clauses = (List *)
+	ghj_info.qual_clauses = (List *)
 		fixup_device_expression(ghjoin, gpath,
 								(Node *)ghj_info.qual_clauses, false);
-	ghj_info.raw_hash_keys = (List *)
+	ghj_info.hash_keys = (List *)
 		fixup_device_expression(ghjoin, gpath,
 								(Node *)ghj_info.hash_keys,false);
 
@@ -2334,11 +2309,11 @@ gpuhashjoin_begin(CustomScanState *node, EState *estate, int eflags)
 	 * perspective. On the other hands, host qualifiers can
 	 * assume pseudo-scan targetlist already constructed.
 	 */
-	ghjs->outer_quals = ExecInitExpr(ghj_info->dev_outer_quals, ps);
-	foreach (cell, ghj_info->dev_hash_clauses)
+	ghjs->outer_quals = ExecInitExpr(ghj_info->outer_quals, ps);
+	foreach (cell, ghj_info->hash_clauses)
 		ghjs->hash_clauses = lappend(ghjs->hash_clauses,
 									 ExecInitExpr(lfirst(cell), ps));
-	foreach (cell, ghj_info->dev_qual_clauses)
+	foreach (cell, ghj_info->qual_clauses)
 		ghjs->qual_clauses = lappend(ghjs->qual_clauses,
 									 ExecInitExpr(lfirst(cell), ps));
 	foreach (cell, ghj_info->host_clauses)
@@ -3219,8 +3194,8 @@ gpuhashjoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	}
 	/* hash, qual and host clauses */
 	depth = 1;
-	forthree (lc1, ghj_info->dev_hash_clauses,
-			  lc2, ghj_info->dev_qual_clauses,
+	forthree (lc1, ghj_info->hash_clauses,
+			  lc2, ghj_info->qual_clauses,
 			  lc3, ghj_info->host_clauses)
 	{
 		char	qlabel[80];
@@ -3252,9 +3227,9 @@ gpuhashjoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		depth++;
 	}
 	/* outer clause if any */
-	if (ghj_info->dev_outer_quals)
+	if (ghj_info->outer_quals)
 	{
-		expr = (Node *) ghj_info->dev_outer_quals;
+		expr = (Node *) ghj_info->outer_quals;
 		expr = gpuhashjoin_remap_raw_expression(ghjs, expr);
 		temp = deparse_expression(expr, context, es->verbose, false);
 		ExplainPropertyText("Outer clause", temp, es);
