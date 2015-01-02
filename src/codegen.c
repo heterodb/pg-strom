@@ -1153,21 +1153,20 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			foreach (cell, context->pseudo_tlist)
 			{
 				TargetEntry *tle = lfirst(cell);
-				Var	   *ps_var;
+				Var	   *ptv = (Var *) tle->expr;
 
-				if (!IsA(tle->expr, Var))
+				if (!IsA(tle->expr, Var) ||
+					ptv->varno != var->varno ||
+					ptv->varattno != var->varattno ||
+					ptv->varlevelsup != var->varlevelsup)
 					continue;
-				ps_var = (Var *) tle->expr;
-				if (ps_var->varno == var->varno &&
-					ps_var->varattno == var->varattno &&
-					ps_var->varlevelsup == var->varlevelsup)
-				{
-					varattno = tle->resno;
-					break;
-				}
+
+				varattno = tle->resno;
+				break;
 			}
+			Assert(cell != NULL);
 			if (!cell)
-				elog(ERROR, "failed to lookup var-node in the pseudo_tlist");
+				elog(ERROR, "failed to lookup var-node in the pseudo_tlist v=%s ps=%s", nodeToString(var), nodeToString(context->pseudo_tlist));
 		}
 		appendStringInfo(&context->str, "%s_%u",
 						 context->var_label,
