@@ -15,6 +15,8 @@ OPENCL_OBJS = opencl_common.o \
 	opencl_textlib.o \
 	opencl_timelib.o \
 	opencl_numeric.o
+OPENCL_SOURCES = $(addprefix src/,$(OPENCL_OBJS:.o=.c))
+
 # Module definition
 MODULE_big = pg_strom
 OBJS =  $(addprefix src/,$(STROM_OBJS)) \
@@ -37,13 +39,13 @@ PGSTROM_DEBUG := $(shell $(PG_CONFIG) --configure | \
 	grep -q "'--enable-debug'" && \
 	echo "-Wall -DPGSTROM_DEBUG=1 -O0")
 PG_CPPFLAGS := $(PGSTROM_DEBUG)
-EXTRA_CLEAN := $(addprefix src/,$(OPENCL_OBJS:.o=.c))
+EXTRA_CLEAN := $(OPENCL_SOURCES)
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
-$(addprefix src/,$(OPENCL_OBJS:.o=.c)): $(@:.c=.h)
-	(echo "const char *pgstrom_$(@:src/%.c=%)_code ="; \
-	 sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
-	     -e 's/^/  "/g' -e 's/$$/\\n"/g' < $*.h; \
-	 echo ";") > $@
+$(OPENCL_SOURCES): $(OPENCL_SOURCES:.c=.h)
+	@(echo "const char *pgstrom_$(@:src/%.c=%)_code ="; \
+	  sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
+	      -e 's/^/  "/g' -e 's/$$/\\n"/g' < $*.h; \
+	  echo ";") > $@
