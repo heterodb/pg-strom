@@ -926,8 +926,9 @@ pg_varlena_hashref(__global kern_hashtable *khtable,
  * Macros to calculate hash key-value.
  * (logic was copied from pg_crc32.c)
  */
-#define INIT_CRC32(crc)		((crc) = 0xFFFFFFFF)
-#define FIN_CRC32(crc)		((crc) ^= 0xFFFFFFFF)
+#define INIT_CRC32C(crc)		((crc) = 0xFFFFFFFF)
+#define FIN_CRC32C(crc)			((crc) ^= 0xFFFFFFFF)
+#define EQ_CRC32C(crc1,crc2)	((crc1) == (crc2))
 
 #define STROMCL_SIMPLE_HASHKEY_TEMPLATE(NAME,BASE)			\
 	static inline cl_uint									\
@@ -938,6 +939,7 @@ pg_varlena_hashref(__global kern_hashtable *khtable,
 		cl_uint			__index;							\
 		union {												\
 			BASE		as_base;							\
+			cl_uint		as_int;								\
 			cl_ulong	as_long;							\
 		} __data;											\
 															\
@@ -946,8 +948,8 @@ pg_varlena_hashref(__global kern_hashtable *khtable,
 			__data.as_base = datum.value;					\
 			while (__len-- > 0)								\
 			{												\
-				__index = ((hash >> 24) ^ (__data.as_long)) & 0xff;	\
-				hash = crc32_table[__index] ^ (hash << 8);	\
+				__index = (hash ^ __data.as_int) & 0xff;	\
+				hash = crc32_table[__index] ^ ((hash) >> 8);\
 				__data.as_long = (__data.as_long >> 8);		\
 			}												\
 		}													\
@@ -967,8 +969,8 @@ pg_varlena_hashref(__global kern_hashtable *khtable,
 			cl_uint		__index;							\
 			while (__len-- > 0)								\
 			{												\
-				__index = ((hash >> 24) ^ *__data++) & 0xff;\
-				hash = crc32_table[__index] ^ (hash << 8);	\
+				__index = (hash ^ *__data++) & 0xff;		\
+				hash = crc32_table[__index] ^ (hash >> 8);	\
 			}												\
 		}													\
 		return hash;										\

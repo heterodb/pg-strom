@@ -917,6 +917,7 @@ try_gpuhashjoin_path(PlannerInfo *root,
 		GpuHashJoinPath	*outer_ghj = (GpuHashJoinPath *) outer_path;
 		int		num_rels = outer_ghj->num_rels;
 
+		Assert(num_rels > 0);
 		gpath = palloc0(offsetof(GpuHashJoinPath, inners[num_rels + 1]));
 		NodeSetTag(gpath, T_CustomPath);
 		gpath->cpath.path.pathtype = T_CustomScan;
@@ -1161,16 +1162,21 @@ gpuhashjoin_codegen_qual(StringInfo body,
 		"                      __global kern_parambuf *kparams,\n"
 		"                      __global kern_data_store *kds,\n"
 		"                      __global kern_data_store *ktoast,\n"
-		"                      size_t kds_index)\n"
-		"{\n");
+		"                      size_t kds_index)\n");
+	if (!ghj_info->dev_outer_quals)
+	{
+		appendStringInfo(
+			body,
+			"{\n"
+			"  return true;\n"
+			"}\n");
+		return;
+	}
 
 	if (ghj_info->dev_outer_quals)
 	{
 		Node   *dev_outer_quals = (Node *) ghj_info->dev_outer_quals;
 		char   *expr_code;
-
-		context->used_params = NIL;
-		context->used_vars = NIL;
 
 		expr_code = pgstrom_codegen_expression(dev_outer_quals, context);
 		appendStringInfo(
@@ -1365,27 +1371,18 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 							CustomScan *mhash, int depth,
 							codegen_context *context)
 {
-	List	   *hash_keys;
-	Expr	   *hash_clause;
-	Expr	   *qual_clause;
-	Expr	   *dev_hash_clause;
-	Expr	   *dev_qual_clause;
+	List	   *hash_keys = list_nth(ghj_info->hash_keys, depth - 1);
+	Expr	   *hash_clause = list_nth(ghj_info->hash_clauses, depth - 1);
+	Expr	   *qual_clause = list_nth(ghj_info->qual_clauses, depth - 1);
 	Bitmapset  *attrs_ref = NULL;
 	ListCell   *lc1, *lc2, *lc3;
 	char	   *clause;
-
-	/* pulls qualifiers list */
-	hash_keys = list_nth(ghj_info->hash_keys, depth - 1);
-	hash_clause = list_nth(ghj_info->hash_clauses, depth - 1);
-	qual_clause = list_nth(ghj_info->qual_clauses, depth - 1);
-	dev_hash_clause = list_nth(ghj_info->dev_hash_clauses, depth - 1);
-	dev_qual_clause = list_nth(ghj_info->dev_qual_clauses, depth - 1);
 
 	/*
 	 * construct a hash-key in this nest-level
 	 */
 	appendStringInfo(body, "cl_uint hash_%u;\n\n", depth);
-	appendStringInfo(body, "INIT_CRC32(hash_%u);\n", depth);
+	appendStringInfo(body, "INIT_CRC32C(hash_%u);\n", depth);
 	foreach (lc1, hash_keys)
 	{
 		Node		   *expr = lfirst(lc1);
@@ -1405,7 +1402,7 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 			depth, dtype->type_name, depth, temp);
 		pfree(temp);
 	}
-	appendStringInfo(body, "FIN_CRC32(hash_%u);\n", depth);
+	appendStringInfo(body, "FIN_CRC32C(hash_%u);\n", depth);
 
 	/*
 	 * construct hash-table walking according to the hash-value
@@ -1426,8 +1423,9 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 	 * (its value depends on the current entry, so it needs to be
 	 * referenced within the loop)
 	 */
-	pull_varattnos((Node *)dev_hash_clause, INNER_VAR, &attrs_ref);
-	pull_varattnos((Node *)dev_qual_clause, INNER_VAR, &attrs_ref);
+	pull_varattnos((Node *)ghj_info->dev_hash_clauses, depth, &attrs_ref);
+	pull_varattnos((Node *)ghj_info->dev_qual_clauses, depth, &attrs_ref);
+
 	forthree (lc1, ghjoin->custom_ps_tlist,
 			  lc2, ghj_info->ps_src_depth,
 			  lc3, ghj_info->ps_src_resno)
@@ -1435,10 +1433,11 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 		TargetEntry	   *tle = lfirst(lc1);
 		int				src_depth = lfirst_int(lc2);
         int				src_resno = lfirst_int(lc3);
-		int				x = src_resno - FirstLowInvalidHeapAttributeNumber;
+		int				bit;
 		devtype_info   *dtype;
 
-		if (src_depth != depth || !bms_is_member(x, attrs_ref))
+		bit = src_resno - FirstLowInvalidHeapAttributeNumber;
+		if (src_depth != depth || !bms_is_member(bit, attrs_ref))
 			continue;
 
 		dtype = pgstrom_devtype_lookup(exprType((Node *)tle->expr));
@@ -1463,7 +1462,7 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 	 * construct hash-key (and other qualifiers) comparison
 	 */
 	appendStringInfo(body,
-					 "if (kentry_%d->hash == hash_%d",
+					 "if (EQ_CRC32C(kentry_%d->hash, hash_%d)",
 					 depth, depth);
 	if (hash_clause)
 	{
@@ -1474,7 +1473,7 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 	if (qual_clause)
 	{
 		clause = pgstrom_codegen_expression((Node *)qual_clause, context);
-		appendStringInfo(body, " &&\n      EVAL(%s)", clause);
+		appendStringInfo(body, " &&\n    EVAL(%s)", clause);
 		pfree(clause);
 	}
 	appendStringInfo(body, ")\n{\n");
@@ -1604,10 +1603,8 @@ gpuhashjoin_codegen(PlannerInfo *root,
 	/*
 	 * declaration of variables that reference outer relations
 	 */
-	pull_varattnos((Node *)ghj_info->dev_hash_clauses,
-				   OUTER_VAR, &attrs_ref);
-	pull_varattnos((Node *)ghj_info->dev_qual_clauses,
-				   OUTER_VAR, &attrs_ref);
+	pull_varattnos((Node *)ghj_info->dev_hash_clauses, 0, &attrs_ref);
+	pull_varattnos((Node *)ghj_info->dev_qual_clauses, 0, &attrs_ref);
 
 	forthree (lc1, ghjoin->custom_ps_tlist,
 			  lc2, ghj_info->ps_src_depth,
@@ -1616,13 +1613,14 @@ gpuhashjoin_codegen(PlannerInfo *root,
 		TargetEntry	   *tle = lfirst(lc1);
 		int				src_depth = lfirst_int(lc2);
 		int				src_resno = lfirst_int(lc3);
-		int				x = src_resno - FirstLowInvalidHeapAttributeNumber;
+		int				bit;
 		devtype_info   *dtype;
 
 		/* columns that does not reference outer relation, or columns
 		 * not referenecd?
 		 */
-		if (src_depth > 0 || !bms_is_member(x, attrs_ref))
+		bit = src_resno - FirstLowInvalidHeapAttributeNumber;
+		if (src_depth > 0 || !bms_is_member(bit, attrs_ref))
 			continue;
 
 		dtype = pgstrom_devtype_lookup(exprType((Node *) tle->expr));
@@ -1707,6 +1705,7 @@ typedef struct {
 	List	   *ps_depth;
 	List	   *ps_resno;
 	GpuHashJoinPath	*gpath;
+	CustomScan *ghjoin;
 	bool		resjunk;
 } build_pseudo_targetlist_context;
 
@@ -1716,7 +1715,6 @@ build_pseudo_targetlist_walker(Node *node,
 {
 	GpuHashJoinPath *gpath = context->gpath;
 	RelOptInfo	   *rel;
-	TargetEntry	   *tle;
 	ListCell	   *cell;
 
 	if (!node)
@@ -1726,7 +1724,7 @@ build_pseudo_targetlist_walker(Node *node,
 		Var	   *varnode = (Var *) node;
 		Var	   *ps_node;
 		int		ps_depth;
-		int		ps_resno;
+		Plan   *plan;
 
 		foreach (cell, context->ps_tlist)
 		{
@@ -1749,45 +1747,48 @@ build_pseudo_targetlist_walker(Node *node,
 			}
 		}
 		/* not in the pseudo-scan targetlist, so append this one */
+		plan = outerPlan(context->ghjoin);
 		rel = gpath->outerpath->parent;
 		if (bms_is_member(varnode->varno, rel->relids))
 			ps_depth = 0;
 		else
 		{
-			int		i;
+			int		depth;
 
-			for (i=0; i < gpath->num_rels; i++)
+			for (depth = 1, plan = innerPlan(context->ghjoin);
+				 depth <= gpath->num_rels && plan != NULL;
+				 depth++, plan = innerPlan(plan))
 			{
-				rel = gpath->inners[i].scan_path->parent;
+				rel = gpath->inners[depth - 1].scan_path->parent;
 				if (bms_is_member(varnode->varno, rel->relids))
 					break;
 			}
-			if (i == gpath->num_rels)
+			if (!plan || depth > gpath->num_rels)
 				elog(ERROR, "Bug? uncertain origin of Var-node: %s",
 					 nodeToString(varnode));
-			ps_depth = i + 1;
+			ps_depth = depth;
 		}
 
-		ps_resno = 1;
-		foreach (cell, rel->reltargetlist)
+		foreach (cell, plan->targetlist)
 		{
-			if (equal(varnode, lfirst(cell)))
-				break;
-			ps_resno++;
+			TargetEntry	   *tle = lfirst(cell);
+			TargetEntry	   *tle_new;
+
+			if (equal(varnode, tle->expr))
+			{
+				tle_new = makeTargetEntry((Expr *) copyObject(varnode),
+										  list_length(context->ps_tlist) + 1,
+										  NULL,
+										  context->resjunk);
+				context->ps_tlist = lappend(context->ps_tlist, tle_new);
+				context->ps_depth = lappend_int(context->ps_depth, ps_depth);
+				context->ps_resno = lappend_int(context->ps_resno, tle->resno);
+
+				return false;
+			}
 		}
-		if (cell == NULL)
-			elog(ERROR, "Bug? uncertain origin of Var-node: %s",
-				 nodeToString(varnode));
-
-		tle = makeTargetEntry((Expr *) copyObject(varnode),
-							  list_length(context->ps_tlist) + 1,
-							  NULL,
-							  context->resjunk);
-		context->ps_tlist = lappend(context->ps_tlist, tle);
-		context->ps_depth = lappend_int(context->ps_depth, ps_depth);
-		context->ps_resno = lappend_int(context->ps_resno, ps_resno);
-
-		return false;
+		elog(ERROR, "Bug? uncertain origin of Var-node: %s",
+			 nodeToString(varnode));
 	}
 	return expression_tree_walker(node, build_pseudo_targetlist_walker,
 								  (void *) context);
@@ -1804,6 +1805,7 @@ build_pseudo_targetlist(GpuHashJoinPath *gpath,
 	context.ps_depth = NIL;
 	context.ps_resno = NIL;
 	context.gpath    = gpath;
+	context.ghjoin   = ghjoin;
 	context.resjunk  = false;
 
 	build_pseudo_targetlist_walker((Node *) ghjoin->scan.plan.targetlist,
@@ -1838,10 +1840,6 @@ build_flatten_qualifier(List *clauses)
 	List	   *args = NIL;
 	ListCell   *cell;
 
-	if (clauses == NIL)
-		return NULL;
-
-	clauses = extract_actual_clauses(clauses, false);
 	foreach (cell, clauses)
 	{
 		Expr   *expr = lfirst(cell);
@@ -1870,7 +1868,7 @@ build_flatten_qualifier(List *clauses)
  */
 typedef struct {
 	GpuHashJoinPath *gpath;
-	int		depth;
+	CustomScan *cscan;
 } fixup_device_expression_context;
 
 static Node *
@@ -1882,59 +1880,69 @@ fixup_device_expression_mutator(Node *node,
 	if (IsA(node, Var))
 	{
 		GpuHashJoinPath *gpath = context->gpath;
+		CustomScan *cscan = context->cscan;
+		Plan	   *plan;
 		Var		   *varnode = (Var *) node;
 		Var		   *newnode;
-		Index		new_varno;
-		AttrNumber	new_varattno;
 		RelOptInfo *rel;
 		ListCell   *cell;
+		int			i, depth;
 
 		rel = gpath->outerpath->parent;
 		if (bms_is_member(varnode->varno, rel->relids))
-			new_varno = OUTER_VAR;
+		{
+			plan = outerPlan(cscan);
+			depth = 0;	/* outer relation */
+		}
 		else
 		{
-			int		depth = context->depth;
-
-			rel = gpath->inners[depth].scan_path->parent;
-			if (!bms_is_member(varnode->varno, rel->relids))
+			for (i=0, plan = innerPlan(cscan);
+				 i < gpath->num_rels && plan != NULL;
+				 i++, plan = innerPlan(plan))
+			{
+				rel = gpath->inners[i].scan_path->parent;
+				if (bms_is_member(varnode->varno, rel->relids))
+					break;
+			}
+			if (!plan || i == gpath->num_rels)
 				elog(ERROR, "Bug? uncertain origin of Var-node: %s",
 					 nodeToString(varnode));
-			new_varno = INNER_VAR;
+			depth = i + 1;
 		}
 
-		new_varattno = 1;
-		foreach (cell, rel->reltargetlist)
+		foreach (cell, plan->targetlist)
 		{
-			if (equal(varnode, lfirst(cell)))
-				break;
-			new_varattno++;
+			TargetEntry	   *tle = lfirst(cell);
+
+			if (equal(tle->expr, varnode))
+			{
+				newnode = copyObject(varnode);
+				newnode->varnoold = varnode->varno;
+				newnode->varoattno = varnode->varattno;
+				newnode->varno = depth;
+				newnode->varattno = tle->resno;
+
+				return (Node *) newnode;
+			}
 		}
-		if (!cell)
-			elog(ERROR, "Bug? uncertain origin of Var-node: %s",
-				 nodeToString(varnode));
-
-		newnode = copyObject(varnode);
-		newnode->varnoold = varnode->varno;
-		newnode->varoattno = varnode->varattno;
-		newnode->varno = new_varno;
-		newnode->varattno = new_varattno;
-
-		return (Node *) newnode;
+		elog(ERROR, "Bug? uncertain origin of Var-node: %s",
+			 nodeToString(varnode));
 	}
 	return expression_tree_mutator(node, fixup_device_expression_mutator,
 								   (void *) context);
 }
 
 static Node *
-fixup_device_expression(GpuHashJoinPath *gpath, Node *node, bool is_single)
+fixup_device_expression(CustomScan *cscan,
+						GpuHashJoinPath *gpath,
+						Node *node, bool is_single)
 {
 	fixup_device_expression_context context;
 	List	   *result = NIL;
 	ListCell   *cell;
 
 	context.gpath = gpath;
-	context.depth = 0;
+	context.cscan = cscan;
 	if (is_single)
 		return fixup_device_expression_mutator(node, &context);
 
@@ -1947,13 +1955,9 @@ fixup_device_expression(GpuHashJoinPath *gpath, Node *node, bool is_single)
 
 		node = fixup_device_expression_mutator(node, &context);
 		result = lappend(result, node);
-
-		context.depth++;
 	}
 	return (Node *)result;
 }
-
-
 
 static Plan *
 create_gpuhashjoin_plan(PlannerInfo *root,
@@ -1983,6 +1987,8 @@ create_gpuhashjoin_plan(PlannerInfo *root,
 
 	memset(&ghj_info, 0, sizeof(GpuHashJoinInfo));
 	ghj_info.num_rels = gpath->num_rels;
+	ghj_info.hashtable_size = gpath->hashtable_size;
+	ghj_info.row_population_ratio = gpath->row_population_ratio;
 
 	for (i=0; i < gpath->num_rels; i++)
 	{
@@ -1996,18 +2002,6 @@ create_gpuhashjoin_plan(PlannerInfo *root,
 		Path		   *scan_path = gpath->inners[i].scan_path;
 		Plan		   *scan_plan = create_plan_recurse(root, scan_path);
 		ListCell	   *cell;
-
-		ghj_info.join_types = lappend_int(ghj_info.join_types,
-										  gpath->inners[i].jointype);
-		ghj_info.hash_clauses =
-			lappend(ghj_info.hash_clauses,
-					build_flatten_qualifier(hash_clause));
-		ghj_info.qual_clauses =
-			lappend(ghj_info.qual_clauses,
-					build_flatten_qualifier(qual_clause));
-		ghj_info.host_clauses =
-			lappend(ghj_info.host_clauses,
-					build_flatten_qualifier(host_clause));
 
 		mhash = makeNode(CustomScan);
 		mhash->scan.plan.startup_cost = scan_plan->total_cost;
@@ -2058,9 +2052,23 @@ create_gpuhashjoin_plan(PlannerInfo *root,
 		}
 		Assert(list_length(hash_inner_keys) == list_length(hash_outer_keys));
 		mh_info.hash_keys = hash_inner_keys;
-		ghj_info.hash_keys = lappend(ghj_info.hash_keys, hash_outer_keys);
-
 		form_multihash_info(mhash, &mh_info);
+
+		/* also add keys and clauses to ghj_info */
+		ghj_info.hash_keys = lappend(ghj_info.hash_keys, hash_outer_keys);
+		ghj_info.join_types = lappend_int(ghj_info.join_types,
+										  gpath->inners[i].jointype);
+		hash_clause = extract_actual_clauses(hash_clause, false);
+		ghj_info.hash_clauses = lappend(ghj_info.hash_clauses,
+										build_flatten_qualifier(hash_clause));
+
+		qual_clause = extract_actual_clauses(qual_clause, false);
+		ghj_info.qual_clauses = lappend(ghj_info.qual_clauses,
+										build_flatten_qualifier(qual_clause));
+
+		host_clause = extract_actual_clauses(host_clause, false);
+		ghj_info.host_clauses = lappend(ghj_info.host_clauses,
+										build_flatten_qualifier(host_clause));
 
 		/* chain it under the GpuHashJoin */
 		outerPlan(mhash) = scan_plan;
@@ -2071,7 +2079,6 @@ create_gpuhashjoin_plan(PlannerInfo *root,
 
 		prev_plan = &mhash->scan.plan;
 	}
-	ghj_info.num_rels = gpath->num_rels;
 
 	/*
 	 * Creation of the underlying outer Plan node. In case of SeqScan,
@@ -2122,16 +2129,21 @@ create_gpuhashjoin_plan(PlannerInfo *root,
 	ghjoin->custom_ps_tlist =
 		build_pseudo_targetlist(gpath, ghjoin, &ghj_info);
 	ghj_info.dev_outer_quals = (Expr *)
-		fixup_device_expression(gpath, (Node *)ghj_info.outer_quals, true);
+		fixup_device_expression(ghjoin, gpath,
+								(Node *)ghj_info.outer_quals, true);
 	ghj_info.dev_hash_clauses = (List *)
-		fixup_device_expression(gpath, (Node *)ghj_info.hash_clauses, false);
+		fixup_device_expression(ghjoin, gpath,
+								(Node *)ghj_info.hash_clauses, false);
 	ghj_info.dev_qual_clauses = (List *)
-		fixup_device_expression(gpath, (Node *)ghj_info.qual_clauses, false);
+		fixup_device_expression(ghjoin, gpath,
+								(Node *)ghj_info.qual_clauses, false);
 	ghj_info.raw_hash_keys = (List *)
-		fixup_device_expression(gpath, (Node *)ghj_info.hash_keys,false);
+		fixup_device_expression(ghjoin, gpath,
+								(Node *)ghj_info.hash_keys,false);
 
 	pgstrom_init_codegen_context(&context);
-	context.pseudo_tlist = ghjoin->custom_ps_tlist;
+	context.pseudo_tlist =
+		fixup_device_expression(ghjoin, gpath, ghjoin->custom_ps_tlist);
 	ghj_info.kernel_source =
 		gpuhashjoin_codegen(root, ghjoin, &ghj_info, &context);
 	ghj_info.extra_flags = context.extra_flags |
@@ -3140,7 +3152,7 @@ gpuhashjoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 			else
 				appendStringInfo(&str, "(%s)", temp);
 		}
-		ExplainPropertyText("ps-tlist", str.data, es);
+		ExplainPropertyText("Pseudo scan", str.data, es);
 	}
 	/* hash, qual and host clauses */
 	depth = 1;
@@ -3155,7 +3167,7 @@ gpuhashjoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		{
 			temp = deparse_expression(lfirst(lc1),
 									  context, es->verbose, false);
-			snprintf(qlabel, sizeof(qlabel), "hash clause %d", depth);
+			snprintf(qlabel, sizeof(qlabel), "Hash clause %d", depth);
 			ExplainPropertyText(qlabel, temp, es);
 		}
 		/* qual clause */
@@ -3163,7 +3175,7 @@ gpuhashjoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		{
 			temp = deparse_expression(lfirst(lc2),
 									  context, es->verbose, false);
-			snprintf(qlabel, sizeof(qlabel), "qual clause %d", depth);
+			snprintf(qlabel, sizeof(qlabel), "Qual clause %d", depth);
 			ExplainPropertyText(qlabel, temp, es);
 		}
 		/* host clause */
@@ -3171,7 +3183,7 @@ gpuhashjoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		{
 			temp = deparse_expression(lfirst(lc3),
 									  context, es->verbose, false);
-			snprintf(qlabel, sizeof(qlabel), "qual clause %d", depth);
+			snprintf(qlabel, sizeof(qlabel), "Host clause %d", depth);
 			ExplainPropertyText(qlabel, temp, es);
 		}
 		depth++;
@@ -3181,9 +3193,9 @@ gpuhashjoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	{
 		temp = deparse_expression((Node *)ghj_info->outer_quals,
 								  context, es->verbose, false);
-		ExplainPropertyText("outer clause", temp, es);
+		ExplainPropertyText("Outer clause", temp, es);
 	}
-	ExplainPropertyText("bulkload", ghjs->outer_bulkload ? "On" : "Off", es);
+	ExplainPropertyText("Bulkload", ghjs->outer_bulkload ? "On" : "Off", es);
 
 	show_device_kernel(ghjs->dprog_key, es);
 
@@ -3652,7 +3664,7 @@ multihash_exec_bulk(CustomScanState *node)
 		mhtables->ev_hash = NULL;	/* set by opencl-server */
 
 		memcpy(mhtables->kern.pg_crc32_table,
-			   pg_crc32_table,
+			   pg_crc32c_table,
 			   sizeof(uint32) * 256);
 		mhtables->kern.hostptr = (hostptr_t) &mhtables->kern.hostptr;
 		mhtables->kern.ntables = nrels;

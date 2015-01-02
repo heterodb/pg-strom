@@ -1167,7 +1167,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 				}
 			}
 			if (!cell)
-				elog(ERROR, "failed to lookup var-node in ps_tlist");
+				elog(ERROR, "failed to lookup var-node in the pseudo_tlist");
 		}
 		appendStringInfo(&context->str, "%s_%u",
 						 context->var_label,

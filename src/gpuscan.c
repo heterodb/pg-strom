@@ -280,8 +280,14 @@ gpuscan_try_replace_relscan(Plan *plan,
 	CustomScan	   *cscan;
 	GpuScanInfo		gs_info;
 	RangeTblEntry  *rte;
+	Relation		rel;
 	Index			scanrelid;
 	ListCell	   *lc;
+	BlockNumber		num_pages;
+	double			num_tuples;
+	double			allvisfrac;
+	double			spc_seq_page_cost;
+	Oid				tablespace_oid;
 
 	if (!enable_gpuscan)
 		return NULL;
@@ -355,6 +361,24 @@ gpuscan_try_replace_relscan(Plan *plan,
 	memset(&gs_info, 0, sizeof(GpuScanInfo));
 	form_gpuscan_info(cscan, &gs_info);
 	cscan->methods = &gpuscan_plan_methods;
+
+	/*
+	 * Rebuild the cost estimation of the new plan. Overall logic is same
+	 * with estimate_rel_size(), although integration with cost_gpuhashjoin()
+	 * is more preferable for consistency....
+	 */
+	rel = heap_open(rte->relid, NoLock);
+	estimate_rel_size(rel, NULL, &num_pages, &num_tuples, &allvisfrac);
+	tablespace_oid = RelationGetForm(rel)->reltablespace;
+	get_tablespace_page_costs(tablespace_oid, NULL, &spc_seq_page_cost);
+
+	cscan->scan.plan.startup_cost = pgstrom_gpu_setup_cost;
+	cscan->scan.plan.total_cost = cscan->scan.plan.startup_cost
+		+ spc_seq_page_cost * num_pages;
+	cscan->scan.plan.plan_rows = num_tuples;
+    cscan->scan.plan.plan_width = plan->plan_width;
+
+	heap_close(rel, NoLock);
 
 	return &cscan->scan.plan;
 }
