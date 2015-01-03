@@ -80,10 +80,8 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	/* numCols and grpColIdx */
 	temp = NIL;
 	for (i = 0; i < gpa_info->numCols; i++)
-	{
-		elog(INFO, "form colidx[%d] = %d", i, gpa_info->grpColIdx[i]);
 		temp = lappend_int(temp, gpa_info->grpColIdx[i]);
-	}
+
 	privs = lappend(privs, temp);
 	privs = lappend(privs, makeInteger(gpa_info->outer_bulkload));
 	datum.fval = gpa_info->num_groups;
@@ -134,10 +132,7 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->numCols = list_length(temp);
 	gpa_info->grpColIdx = palloc0(sizeof(AttrNumber) * gpa_info->numCols);
 	foreach (cell, temp)
-	{
-		elog(INFO, "deform colidx[%d] = %d", i, lfirst_int(cell));
 		gpa_info->grpColIdx[i++] = lfirst_int(cell);
-	}
 
 	gpa_info->outer_bulkload = intVal(list_nth(privs, pindex++));
 	datum.ival = intVal(list_nth(privs, pindex++));
