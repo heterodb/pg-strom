@@ -570,6 +570,7 @@ extern void pgstrom_init_gpuhashjoin(void);
  * gpupreagg.c
  */
 extern void pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg);
+extern bool pgstrom_plan_is_gpupreagg(const Plan *plan);
 extern void pgstrom_init_gpupreagg(void);
 
 extern Datum gpupreagg_partial_nrows(PG_FUNCTION_ARGS);
