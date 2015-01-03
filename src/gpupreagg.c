@@ -2120,7 +2120,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		 * expect order of input stream.
 		 */
 		sort_node = NULL;
-		alter_node = gpuscan_try_replace_relscan(outerPlan(agg),
+		outer_node = outerPlan(agg);
+		alter_node = gpuscan_try_replace_relscan(outer_node,
 												 pstmt->rtable,
 												 attr_refs,
 												 &outer_quals);
@@ -2140,7 +2141,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		 * So, we try to inject GpuPreAgg prior to the Sort node.
 		 */
 		sort_node = (Sort *)outerPlan(agg);
-		alter_node = gpuscan_try_replace_relscan(outerPlan(sort_node),
+		outer_node = outerPlan(sort_node);
+		alter_node = gpuscan_try_replace_relscan(outer_node,
 												 pstmt->rtable,
 												 attr_refs,
 												 &outer_quals);
@@ -2163,7 +2165,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		 * GpuPreAgg node.
 		 */
 		sort_node = NULL;
-		alter_node = gpuscan_try_replace_relscan(outerPlan(agg),
+		outer_node = outerPlan(agg);
+		alter_node = gpuscan_try_replace_relscan(outer_node,
 												 pstmt->rtable,
 												 attr_refs,
 												 &outer_quals);
@@ -2232,7 +2235,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	gpa_info.outer_quals    = outer_quals;
 	gpa_info.outer_bulkload = outer_bulkload;
 	gpa_info.num_groups     = Max(agg->plan.plan_rows, 1.0);
-	gpa_info.outer_quals          = outer_quals;
+	gpa_info.outer_quals    = outer_quals;
 
 	/*
 	 * construction of the kernel code according to the target-list
