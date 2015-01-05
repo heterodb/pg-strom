@@ -22,7 +22,7 @@ MODULE_big = pg_strom
 OBJS =  $(addprefix src/,$(STROM_OBJS)) \
 	$(addprefix src/,$(OPENCL_OBJS))
 
-
+# Regression test options
 REGRESS = --schedule=test/parallel_schedule
 ifndef PGSQL_BUILD_DIR 
 	REGRESS_OPTS = --inputdir=test
