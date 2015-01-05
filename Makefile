@@ -22,16 +22,21 @@ MODULE_big = pg_strom
 OBJS =  $(addprefix src/,$(STROM_OBJS)) \
 	$(addprefix src/,$(OPENCL_OBJS))
 
-# Regression test options
+
 REGRESS = --schedule=test/parallel_schedule
-ifndef $(PGSQL_BUILD_DIR)
-REGRESS_OPTS = --inputdir=test
+ifndef PGSQL_BUILD_DIR 
+	REGRESS_OPTS = --inputdir=test
 else
-REGRESS_OPTS = --inputdir=test \
+	RET := $(shell ln -sn $(CURDIR) $(PGSQL_BUILD_DIR)/contrib/pg_strom)
+	REGRESS_OPTS = --inputdir=test \
                --top-builddir=$(PGSQL_BUILD_DIR) \
-               --extra-install=. \
-               --temp-install=test/tmp_check \
-               --temp-config=test/enable.conf
+               --extra-install=contrib/pg_strom \
+               --temp-install=tmp_check
+	ifndef CPUTEST 
+        	REGRESS_OPTS += --temp-config=test/enable.conf
+	else
+	        REGRESS_OPTS += --temp-config=test/disable.conf
+	endif
 endif
 
 PG_CONFIG = pg_config
@@ -49,3 +54,4 @@ $(OPENCL_SOURCES): $(OPENCL_SOURCES:.c=.h)
 	  sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
 	      -e 's/^/  "/g' -e 's/$$/\\n"/g' < $*.h; \
 	  echo ";") > $@
+
