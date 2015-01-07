@@ -564,7 +564,7 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 	barrier(CLK_LOCAL_MEM_FENCE);
 
 	new_slot.hash = hash_value;
-	new_slot.index = get_global_id(0);
+	new_slot.index = get_local_id(0);
 	old_slot.hash = 0;
 	old_slot.index = (cl_uint)(0xffffffff);
 	index = hash_value % hash_size;
