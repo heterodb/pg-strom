@@ -849,6 +849,127 @@ retry:
 	}
 }
 
+/* ----------------------------------------------------------------
+ *
+ * Own version of atomic functions; for float, double and numeric
+ *
+ * ----------------------------------------------------------------
+ */
+#define lspace	__local
+#define gspace	__global
+#define add(x,y)	(x)+(y)
+
+#define ATOMIC_FLOAT_TEMPLATE(prefix, op_name)				\
+	static inline float													\
+	prefix##atomic_##op_name##(volatile prefix##space float *ptr,		\
+							   float value)								\
+	{																	\
+		uint	oldval = to_uint(*ptr);									\
+		uint	newval = to_uint(op_name(to_float(oldval), value));		\
+		uint	curval;													\
+																		\
+		while ((curval = atomic_cmpxchg((prefix##space uint *) ptr,		\
+										oldval, newval)) != oldval)		\
+		{																\
+			oldval = curval;											\
+			newval = to_uint(op_name(to_float(oldval),value));			\
+		}																\
+		return to_float(oldval);										\
+	}
+
+ATOMIC_FLOAT_TEMPLATE(l,max)
+ATOMIC_FLOAT_TEMPLATE(l,min)
+ATOMIC_FLOAT_TEMPLATE(l,add)
+ATOMIC_FLOAT_TEMPLATE(g,max)
+ATOMIC_FLOAT_TEMPLATE(g,min)
+ATOMIC_FLOAT_TEMPLATE(g,add)
+
+#define ATOMIC_DOUBLE_TEMPLATE(prefix, op_name)							\
+	static inline double												\
+	prefix##atomic_##op_name##(volatile prefix##space double *ptr,		\
+							   double value)							\
+	{																	\
+		ulong	oldval = to_ulong(*ptr);								\
+		ulong	newval = to_ulong(op_name(to_double(oldval), value));	\
+		ulong	curval;													\
+																		\
+		while ((curval = atom_cmpxchg((prefix##space ulong *) ptr,		\
+									  oldval, newval)) != oldval)		\
+		{																\
+			oldval = curval;											\
+			newval = to_ulong(op_name(to_double(oldval),value));		\
+		}																\
+		return to_double(oldval);										\
+	}
+
+ATOMIC_DOUBLE_TEMPLATE(l,min)
+ATOMIC_DOUBLE_TEMPLATE(l,max)
+ATOMIC_DOUBLE_TEMPLATE(l,add)
+ATOMIC_DOUBLE_TEMPLATE(g,min)
+ATOMIC_DOUBLE_TEMPLATE(g,max)
+ATOMIC_DOUBLE_TEMPLATE(g,add)
+
+#undef add
+
+#ifdef PG_NUMERIC_TYPE_DEFINED
+
+#define ATOMIC_NUMERIC_MINMAX_TEMPLATE(prefix,op_name,ineq_op)	\
+	static inline cl_ulong										\
+	prefic##atomic_##op_name(__private int *errcode,			\
+							 volatile prefix##space cl_ulong *ptr,	\
+							 cl_ulong numeric_value)			\
+	{															\
+		pg_numeric_t x, y, z;									\
+		ulong		oldval;										\
+		ulong		newval;										\
+		ulong		curval = *ptr;								\
+																\
+		do {													\
+			x.isnull = false;									\
+			y.isnull = false;									\
+			x.value = oldval = curval;							\
+			y.value = numeric_value;							\
+			newval = (pgfn_numeric_cmp(errcode, x, y) ineq_op 0	\
+					  ? x.value									\
+					  : y.value);								\
+		} while ((curval = atom_cmpxchg((prefix##space ulong *) ptr, \
+										oldval, newval)) != oldval); \
+		return oldval;											\
+	}
+
+ATOMIC_NUMERIC_MINMAX_TEMPLATE(l,max,>)
+ATOMIC_NUMERIC_MINMAX_TEMPLATE(l,min,<)
+ATOMIC_NUMERIC_MINMAX_TEMPLATE(g,max,>)
+ATOMIC_NUMERIC_MINMAX_TEMPLATE(g,min,<)
+
+#define ATOMIC_NUMERIC_ADD_TEMPLATE(prefix)								\
+	static inline cl_ulong												\
+	prefix##atomic_add_numeric(__private int *errcode,					\
+							   volatile prefix##space cl_ulong *ptr,	\
+							   cl_ulong numeric_value)					\
+	{																	\
+		pg_numeric_t x, y, z;											\
+		ulong	oldval;													\
+		ulong	newval;													\
+		ulong	curval = *ptr;											\
+																		\
+		do {															\
+			x.isnull = false;											\
+			y.isnull = false;											\
+			x.value = oldval = curval;									\
+			y.value = numeric_value;									\
+			z = pgfn_numeric_add(errcode, x, y);						\
+			newval = z.value;											\
+		} while ((curval = atom_cmpxchg((prefix##space ulong *)ptr,		\
+										oldval, newval)) != oldval);	\
+		return oldval;													\
+	}
+
+ATOMIC_NUMERIC_ADD_TEMPLATE(l)
+ATOMIC_NUMERIC_ADD_TEMPLATE(g)
+
+#endif
+
 /*
  * Helper macros for gpupreagg_local_calc
  *
@@ -858,408 +979,142 @@ retry:
  *   __local pagg_datum *newval;
  *   int                 state;
  */
-#define AGGCALC_LOCAL32_TEMPLATE(ATOMIC_FUNC_CALL)		\
+#define AGGCALC_LOCAL_TEMPLATE(ATOMIC_FUNC_CALL)		\
 	do {												\
 		if (!newval->isnull)							\
-			break;										\
-		state = atomic_cmpxchg(&accum->isnull, 1, 2);	\
-		if (state == 0)			/* it was NOT NULL */	\
 		{												\
 			ATOMIC_FUNC_CALL;							\
 		}												\
-		else if (state == 1)	/* it was NULL */		\
-		{												\
-			newval->int_val = newval->int_val;			\
-			newval->isnull = 0;							\
-		}												\
-	} while (state > 1)
+	} while (0)
 
-#define AGGCALC_LOCAL64_TEMPLATE(ATOMIC_FUNC_CALL)		\
-	do {												\
-		if (!newval->isnull)							\
-			break;										\
-		state = atomic_cmpxchg(&accum->isnull, 1, 2);	\
-		if (state == 0)			/* it was NOT NULL */	\
-		{												\
-			ATOMIC_FUNC_CALL;							\
-		}												\
-		else if (state == 1)	/* it was NULL */		\
-		{												\
-			newval->long_val = newval->long_val;		\
-			newval->isnull = 0;							\
-		}												\
-	} while (state > 1)
-
-/* original atomic functions */
-static inline float
-latomic_max_float(volatile __local float *ptr, float value)
-{
-	uint	oldval = to_uint(*ptr);
-	uint	newval = to_uint(max(to_float(oldval), value));
-	uint	curval;
-
-	while ((curval = atomic_cmpxchg((__global uint *)ptr,
-									oldval, newval)) != oldval)
-	{
-		oldval = curval;
-		newval = to_uint(max(to_float(oldval),value));
-	}
-	return to_float(oldval);
-}
-
-static inline float
-latomic_min_float(volatile __local float *ptr, float value)
-{
-	uint	oldval = to_uint(*ptr);
-	uint	newval = to_uint(min(to_float(oldval), value));
-	uint	curval;
-
-	while ((curval = atomic_cmpxchg((__global uint *)ptr,
-									oldval, newval)) != oldval)
-	{
-		oldval = curval;
-		newval = to_uint(min(to_float(oldval),value));
-	}
-	return to_float(oldval);
-}
-
-static inline float
-latomic_add_float(volatile __local float *ptr, float value)
-{
-	uint	oldval = to_uint(*ptr);
-	uint	newval = to_uint(to_float(oldval) + value));
-	uint	curval;
-
-	while ((curval = atomic_cmpxchg((__global uint *)ptr,
-									oldval, newval)) != oldval)
-	{
-		oldval = curval;
-		newval = to_uint(to_float(oldval) + value));
-	}
-	return to_float(oldval);
-}
-
-static inline double
-latomic_max_double(volatile __local double *ptr, float value)
-{
-	ulong	oldval = to_ulong(*ptr);
-	ulong	newval = to_ulong(max(to_double(oldval), value));
-	ulong	curval;
-
-	while ((curval = atomic_cmpxchg((__global ulong *)ptr,
-									oldval, newval)) != oldval)
-	{
-		oldval = curval;
-		newval = to_ulong(max(to_double(oldval),value));
-	}
-	return to_double(oldval);
-}
-
-static inline double
-latomic_min_double(volatile __local double *ptr, float value)
-{
-	ulong	oldval = to_ulong(*ptr);
-	ulong	newval = to_ulong(min(to_double(oldval), value));
-	ulong	curval;
-
-	while ((curval = atomic_cmpxchg((__global ulong *)ptr,
-									oldval, newval)) != oldval)
-	{
-		oldval = curval;
-		newval = to_ulong(min(to_double(oldval),value));
-	}
-	return to_double(oldval);
-}
-
-static inline double
-latomic_add_double(volatile __local double *ptr, float value)
-{
-	ulong	oldval = to_ulong(*ptr);
-	ulong	newval = to_ulong(to_double(oldval) + value);
-	ulong	curval;
-
-	while ((curval = atomic_cmpxchg((__global ulong *)ptr,
-									oldval, newval)) != oldval)
-	{
-		oldval = curval;
-		newval = to_ulong(to_double(oldval) + value);
-	}
-	return to_double(oldval);
-}
-
-#ifdef PG_NUMERIC_TYPE_DEFINED
-static inline cl_ulong
-latomic_max_numeric(__private int *errcode,
-					volatile __local cl_ulong *ptr, cl_ulong value)
-{
-	pg_numeric_t	x, y, z;
-	int				comp;
-
-	x.isnull = false;
-	y.isnull = false;
-	x.value  = *ptr;
-	y.value  = value;
-	comp = pgfn_numeric_cmp(errcode, x, y);
-}
-
-static inline cl_ulong
-latomic_min_numeric(__private int *errcode,
-					volatile __local cl_ulong *ptr, cl_ulong value)
-{}
-
-static inline cl_ulong
-latomic_add_numeric(__private int *errcode,
-					volatile __local cl_ulong *ptr, cl_ulong value)
-{}
-#endif
-
-/* calculation for partial max */
-#define GPUPREAGG_AGGCALC_PMAX_SHORT(errcode)							\
-	AGGCALC_LOCAL32_TEMPLATE(atomic_max(&accum->int_val,				\
-										(int)newval->short_val))
-#define GPUPREAGG_AGGCALC_PMAX_INT(errcode)								\
-	AGGCALC_LOCAL32_TEMPLATE(atomic_max(&accum->int_val, newval->int_val))
-#define GPUPREAGG_AGGCALC_PMAX_LONG(errcode)							\
-	AGGCALC_LOCAL64_TEMPLATE(atom_max(&accum->long_val, newval->long_val))
-#define GPUPREAGG_AGGCALC_PMAX_FLOAT(errcode)							\
-    AGGCALC_LOCAL32_TEMPLATE(latomic_max_float(&accum->float_val,		\
-											   newval->float_val))
-#define GPUPREAGG_AGGCALC_PMAX_DOUBLE(errcode)							\
-	AGGCALC_LOCAL64_TEMPLATE(latomic_max_double(&accum->double_val,		\
-												newval->double_val))
-#define GPUPREAGG_AGGCALC_PMAX_NUMERIC(errcode)							\
-	AGGCALC_LOCAL64_TEMPLATE(latomic_max_numeric(&accum->long_val,		\
-												 newval->long_val))
-
-/* calculation for partial min */
-#define GPUPREAGG_AGGCALC_PMIN_SHORT(errcode)							\
-	AGGCALC_LOCAL32_TEMPLATE(atomic_min(&accum->int_val,				\
-										(int)newval->short_val))
-#define GPUPREAGG_AGGCALC_PMIN_INT(errcode)								\
-	AGGCALC_LOCAL32_TEMPLATE(atomic_min(&accum->int_val, newval->int_val))
-#define GPUPREAGG_AGGCALC_PMIN_LONG(errcode)							\
-	AGGCALC_LOCAL64_TEMPLATE(atom_min(&accum->long_val, newval->long_val))
-#define GPUPREAGG_AGGCALC_PMIN_FLOAT(errcode)							\
-    AGGCALC_LOCAL32_TEMPLATE(latomic_min_float(&accum->float_val,		\
-											   newval->float_val))
-#define GPUPREAGG_AGGCALC_PMIN_DOUBLE(errcode)							\
-	AGGCALC_LOCAL64_TEMPLATE(latomic_min_double(&accum->double_val,		\
-												newval->double_val))
-#define GPUPREAGG_AGGCALC_PMIN_NUMERIC(errcode)							\
-	AGGCALC_LOCAL64_TEMPLATE(latomic_min_numeric(&accum->long_val,		\
-												 newval->long_val))
-
-/* calculation for partial sum */
-#define GPUPREAGG_AGGCALC_PSUM_SHORT(errcode)							\
-	AGGCALC_LOCAL32_TEMPLATE(atomic_add(&accum->int_val,				\
-										(int)newval->short_val))
-#define GPUPREAGG_AGGCALC_PSUM_INT(errcode)								\
-	AGGCALC_LOCAL32_TEMPLATE(atomic_add(&accum->int_val, newval->int_val))
-#define GPUPREAGG_AGGCALC_PSUM_LONG(errcode)							\
-	AGGCALC_LOCAL64_TEMPLATE(atom_add(&accum->long_val, newval->long_val))
-#define GPUPREAGG_AGGCALC_PSUM_FLOAT(errcode)							\
-    AGGCALC_LOCAL32_TEMPLATE(latomic_add_float(&accum->float_val,		\
-											   newval->float_val))
-#define GPUPREAGG_AGGCALC_PSUM_DOUBLE(errcode)							\
-	AGGCALC_LOCAL64_TEMPLATE(latomic_add_double(&accum->double_val,		\
-												newval->double_val))
-#define GPUPREAGG_AGGCALC_PSUM_NUMERIC(errcode)							\
-	AGGCALC_LOCAL64_TEMPLATE(latomic_add_numeric(&accum->long_val,		\
-												 newval->long_val))
-
-
-
-
-/* calculation for partial min */
-
-
-#define GPUPREAGG_AGGCALC_PMAX_SHORT(errcode,accum,newval)      \
-    GPUPREAGG_AGGCALC_PMAX_TEMPLATE(short,(accum),(newval))
-
-
-GPUPREAGG_AGGCALC_PMAX_SHORT(
-
-/* Partial Max functions */
-AGGCALC_LOCAL32_TEMPLATE(pmax,short,
-						 atomic_max(&accum->int_val,
-									(cl_int) newval->short_val))
-AGGCALC_LOCAL32_TEMPLATE(pmax,int,
-						 atomic_max(&accum->int_val,
-									(cl_int) newval->int_val))
-AGGCALC_LOCAL64_TEMPLATE(pmax,long,
-						 atom_max(&accum->long_val,
-								  newval->long_val))
-AGGCALC_LOCAL32_TEMPLATE(pmax,float,
-						 atomic_max_local_float(&accum->float_val,
-												newval->float_val))
-AGGCALC_LOCAL64_TEMPLATE(pmax,double,
-						 atomic_max_local_double(&accum->double_val,
-												 newval->double_val))
-#ifdef PG_NUMERIC_TYPE_DEFINED
-AGGCALC_LOCAL64_TEMPLATE(pmax,numeric,
-						 atomic_max_local_numeric(&accum->long_val,
-												  newval->long_val))
-#endif
-
-/* Partial Min functions */
-AGGCALC_LOCAL32_TEMPLATE(pmin,short,
-						 atomic_min(&accum->int_val,
-									(cl_int) newval->short_val))
-AGGCALC_LOCAL32_TEMPLATE(pmin,int,
-						 atomic_min(&accum->int_val,
-									(cl_int) newval->int_val))
-AGGCALC_LOCAL64_TEMPLATE(pmin,long,
-						 atom_min(&accum->long_val,
-								  newval->long_val))
-AGGCALC_LOCAL32_TEMPLATE(pmin,float,
-						 atomic_min_local_float(&accum->float_val,
-												newval->float_val))
-AGGCALC_LOCAL64_TEMPLATE(pmin,double,
-						 atomic_min_local_double(&accum->double_val,
-												 newval->double_val))
-#ifdef PG_NUMERIC_TYPE_DEFINED
-AGGCALC_LOCAL64_TEMPLATE(pmax,numeric,
-						 atomic_max_local_numeric(&accum->long_val,
-												  newval->long_val))
-#endif
-
-
-
-
-
-
-
-
-
-
-
-#define GPUPREAGG_AGGCALC_PMAX_TEMPLATE(FIELD,accum,newval)		\
-	if (!(newval)->isnull)										\
-	{															\
-		if ((accum)->isnull)									\
-			(accum)->FIELD##_val = (newval)->FIELD##_val;		\
-		else													\
-			(accum)->FIELD##_val = max((accum)->FIELD##_val,	\
-									   (newval)->FIELD##_val);	\
-		(accum)->isnull = false;								\
+/* calculation for local partial max */
+#define AGGCALC_LOCAL_PMAX_SHORT(errcode)				\
+	AGGCALC_LOCALTEMPLATE(atomic_max(&accum->int_val,	\
+									 (int)newval->short_val))
+#define AGGCALC_LOCAL_PMAX_INT(errcode)					\
+	AGGCALC_LOCAL_TEMPLATE(atomic_max(&accum->int_val,	\
+									  newval->int_val))
+#define AGGCALC_LOCAL_PMAX_LONG(errcode)				\
+	AGGCALC_LOCAL_TEMPLATE(atom_max(&accum->long_val,	\
+									newval->long_val))
+#define AGGCALC_LOCAL_PMAX_FLOAT(errcode)							\
+    AGGCALC_LOCAL_TEMPLATE(latomic_max_float(&accum->float_val,		\
+											 newval->float_val))
+#define AGGCALC_LOCAL_PMAX_DOUBLE(errcode)							\
+	AGGCALC_LOCAL_TEMPLATE(latomic_max_double(&accum->double_val,	\
+											  newval->double_val))
+#define AGGCALC_LOCAL_PMAX_NUMERIC(errcode)							\
+	AGGCALC_LOCAL_TEMPLATE(latomic_max_numeric(&accum->long_val,	\
+											   newval->long_val))
+/* calculation for local partial min */
+#define AGGCALC_LOCAL_PMIN_SHORT(errcode)				\
+	AGGCALC_LOCALTEMPLATE(atomic_min(&accum->int_val,	\
+									 (int)newval->short_val))
+#define AGGCALC_LOCAL_PMIN_INT(errcode)					\
+	AGGCALC_LOCAL_TEMPLATE(atomic_min(&accum->int_val,	\
+									  newval->int_val))
+#define AGGCALC_LOCAL_PMIN_LONG(errcode)				\
+	AGGCALC_LOCAL_TEMPLATE(atom_min(&accum->long_val,	\
+									newval->long_val))
+#define AGGCALC_LOCAL_PMIN_FLOAT(errcode)							\
+    AGGCALC_LOCAL_TEMPLATE(latomic_min_float(&accum->float_val,		\
+											 newval->float_val))
+#define AGGCALC_LOCAL_PMIN_DOUBLE(errcode)							\
+	AGGCALC_LOCAL_TEMPLATE(latomic_min_double(&accum->double_val,	\
+											  newval->double_val))
+#define AGGCALC_LOCAL_PMIN_NUMERIC(errcode)							\
+	AGGCALC_LOCAL_TEMPLATE(latomic_min_numeric(&accum->long_val,	\
+											   newval->long_val))
+/* calculation for local partial add */
+#define AGGCALC_LOCAL_PADD_SHORT(errcode)				\
+	AGGCALC_LOCALTEMPLATE(atomic_add(&accum->int_val,	\
+									 (int)newval->short_val))
+#define AGGCALC_LOCAL_PADD_INT(errcode)					\
+	AGGCALC_LOCAL_TEMPLATE(atomic_add(&accum->int_val,	\
+									  newval->int_val))
+#define AGGCALC_LOCAL_PADD_LONG(errcode)				\
+	AGGCALC_LOCAL_TEMPLATE(atom_add(&accum->long_val,	\
+									newval->long_val))
+#define AGGCALC_LOCAL_PADD_FLOAT(errcode)							\
+    AGGCALC_LOCAL_TEMPLATE(latomic_add_float(&accum->float_val,		\
+											 newval->float_val))
+#define AGGCALC_LOCAL_PADD_DOUBLE(errcode)							\
+	AGGCALC_LOCAL_TEMPLATE(latomic_add_double(&accum->double_val,	\
+											  newval->double_val))
+#define AGGCALC_LOCAL_PADD_NUMERIC(errcode)							\
+	AGGCALC_LOCAL_TEMPLATE(latomic_add_numeric(&accum->long_val,	\
+											   newval->long_val))
+/*
+ * Helper macros for gpupreagg_global_calc
+ *
+ * NOTE: please assume the variables below are available in the context
+ * these macros in use.
+ *   char  src_isnull;
+ *   Datum src_value;
+ *   __global char *dest_isnull;
+ *   __global union {
+ *       Datum     datum;
+ *       cl_short  short_val;
+ *       cl_int    int_val;
+ *       cl_long   long_val;
+ *       cl_float  float_val;
+ *       cl_double double_val;
+ *   } dest;
+ */
+#define AGGCALC_GLOBAL_TEMPLATE(ATOMIC_FUNC_CALL)	\
+	if (!my_isnull)									\
+	{												\
+		ATOMIC_FUNC_CALL;							\
+		*dest_isnull = true;						\
 	}
 
-#define GPUPREAGG_AGGCALC_PMIN_TEMPLATE(FIELD,accum,newval)		\
-	if (!(newval)->isnull)										\
-	{															\
-		if ((accum)->isnull)									\
-			(accum)->FIELD##_val = (newval)->FIELD##_val;		\
-		else													\
-			(accum)->FIELD##_val = min((accum)->FIELD##_val,	\
-									   (newval)->FIELD##_val);	\
-		(accum)->isnull = false;								\
-	}
+#define AGGCALC_GLOBAL_PMAX_SHORT(errcode)		\
+	AGGCALC_GLOBAL_TEMPLATE(atomic_max(&dest->int_val, (cl_int)src_value))
+#define AGGCALC_GLOBAL_PMAX_INT(errcode)		\
+	AGGCALC_GLOBAL_TEMPLATE(atomic_max(&dest->int_val, (cl_int)src_value))
+#define AGGCALC_GLOBAL_PMAX_LONG(errcode)		\
+	AGGCALC_GLOBAL_TEMPLATE(atom_max(&dest->long_val, (cl_long)src_value))
+#define AGGCALC_GLOBAL_PMAX_FLOAT(errcode)							\
+	AGGCALC_GLOBAL_TEMPLATE(gatomic_max_float(&dest->float_val,		\
+											  (cl_float)src_value))
+#define AGGCALC_GLOBAL_PMAX_DOUBLE(errcode)							\
+	AGGCALC_GLOBAL_TEMPLATE(gatomic_max_double(&dest->double_val,	\
+											   (cl_double)src_value))
+#define AGGCALC_GLOBAL_PMAX_NUMERIC(errcode)						\
+	AGGCALC_GLOBAL_TEMPLATE(gatomic_max_float(&dest->long_val,		\
+											  (cl_long)src_value))
 
-#define GPUPREAGG_AGGCALC_PMINMAX_NUMERIC_TEMPLATE(OP,errcode,accum,newval) \
-	if (!(newval)->isnull)										\
-	{															\
-		if ((accum)->isnull)									\
-			(accum)->long_val = (newval)->long_val;				\
-		else													\
-		{														\
-			pg_numeric_t	x;									\
-			pg_numeric_t	y;									\
-																\
-			x.isnull = y.isnull = false;						\
-			x.value = (accum)->long_val;						\
-			y.value = (newval)->long_val;						\
-																\
-			if (numeric_cmp(errcode,x,y) OP 0)					\
-				(accum)->long_val = (newval)->long_val;			\
-		}														\
-		(accum)->isnull = false;								\
-	}
+#define AGGCALC_GLOBAL_PMIN_SHORT(errcode)		\
+	AGGCALC_GLOBAL_TEMPLATE(atomic_min(&dest->int_val, (cl_int)src_value))
+#define AGGCALC_GLOBAL_PMIN_INT(errcode)		\
+	AGGCALC_GLOBAL_TEMPLATE(atomic_min(&dest->int_val, (cl_int)src_value))
+#define AGGCALC_GLOBAL_PMIN_LONG(errcode)		\
+	AGGCALC_GLOBAL_TEMPLATE(atom_min(&dest->long_val, (cl_long)src_value))
+#define AGGCALC_GLOBAL_PMIN_FLOAT(errcode)							\
+	AGGCALC_GLOBAL_TEMPLATE(gatomic_min_float(&dest->float_val,		\
+											  (cl_float)src_value))
+#define AGGCALC_GLOBAL_PMIN_DOUBLE(errcode)							\
+	AGGCALC_GLOBAL_TEMPLATE(gatomic_min_double(&dest->double_val,	\
+											   (cl_double)src_value))
+#define AGGCALC_GLOBAL_PMIN_NUMERIC(errcode)						\
+	AGGCALC_GLOBAL_TEMPLATE(gatomic_min_float(&dest->long_val,		\
+											  (cl_long)src_value))
 
-/* In-kernel PMAX() implementation */
-#define GPUPREAGG_AGGCALC_PMAX_SHORT(errcode,accum,newval)		\
-	GPUPREAGG_AGGCALC_PMAX_TEMPLATE(short,(accum),(newval))
-#define GPUPREAGG_AGGCALC_PMAX_INT(errcode,accum,newval)		\
-	GPUPREAGG_AGGCALC_PMAX_TEMPLATE(int,(accum),(newval))
-#define GPUPREAGG_AGGCALC_PMAX_LONG(errcode,accum,newval)		\
-	GPUPREAGG_AGGCALC_PMAX_TEMPLATE(long,(accum),(newval))
-#define GPUPREAGG_AGGCALC_PMAX_FLOAT(errcode,accum,newval)		\
-	GPUPREAGG_AGGCALC_PMAX_TEMPLATE(float,(accum),(newval))
-#define GPUPREAGG_AGGCALC_PMAX_DOUBLE(errcode,accum,newval)		\
-	GPUPREAGG_AGGCALC_PMAX_TEMPLATE(double,(accum),(newval))
-#define GPUPREAGG_AGGCALC_PMAX_NUMERIC(errcode,accum,newval)	\
-	GPUPREAGG_AGGCALC_PMINMAX_NUMERIC_TEMPLATE(<,errcode,accum,newval)
-
-/* In-kernel PMIN() implementation */
-#define GPUPREAGG_AGGCALC_PMIN_SHORT(errcode,accum,newval)		\
-	GPUPREAGG_AGGCALC_PMIN_TEMPLATE(short,(accum),(newval))
-#define GPUPREAGG_AGGCALC_PMIN_INT(errcode,accum,newval)		\
-	GPUPREAGG_AGGCALC_PMIN_TEMPLATE(int,(accum),(newval))
-#define GPUPREAGG_AGGCALC_PMIN_LONG(errcode,accum,newval)		\
-	GPUPREAGG_AGGCALC_PMIN_TEMPLATE(long,(accum),(newval))
-#define GPUPREAGG_AGGCALC_PMIN_FLOAT(errcode,accum,newval)		\
-	GPUPREAGG_AGGCALC_PMIN_TEMPLATE(float,(accum),(newval))
-#define GPUPREAGG_AGGCALC_PMIN_DOUBLE(errcode,accum,newval)		\
-	GPUPREAGG_AGGCALC_PMIN_TEMPLATE(double,(accum),(newval))
-#define GPUPREAGG_AGGCALC_PMIN_NUMERIC(errcode,accum,newval)	\
-	GPUPREAGG_AGGCALC_PMINMAX_NUMERIC_TEMPLATE(>,errcode,accum,newval)
-
-/* In-kernel PSUM() implementation */
-#define GPUPREAGG_AGGCALC_PSUM_TEMPLATE(FIELD,OVERFLOW,errcode,accum,newval) \
-	if (!(accum)->isnull)											\
-	{																\
-		if (!(newval)->isnull)										\
-		{															\
-			if (OVERFLOW((accum)->FIELD##_val,						\
-						 (newval)->FIELD##_val))					\
-				STROM_SET_ERROR(errcode, StromError_CpuReCheck);	\
-			(accum)->FIELD##_val += (newval)->FIELD##_val;			\
-		}															\
-	}																\
-	else if (!(newval)->isnull)										\
-	{																\
-		(accum)->isnull = (newval)->isnull;							\
-		(accum)->FIELD##_val = (newval)->FIELD##_val;				\
-	}
-
-#define GPUPREAGG_AGGCALC_PSUM_SHORT(errcode,accum,newval)			\
-	GPUPREAGG_AGGCALC_PSUM_TEMPLATE(short,CHECK_OVERFLOW_INT,		\
-									(errcode),(accum),(newval))
-#define GPUPREAGG_AGGCALC_PSUM_INT(errcode,accum,newval)			\
-	GPUPREAGG_AGGCALC_PSUM_TEMPLATE(int,CHECK_OVERFLOW_INT,			\
-									(errcode),(accum),(newval))
-#define GPUPREAGG_AGGCALC_PSUM_LONG(errcode,accum,newval)			\
-	GPUPREAGG_AGGCALC_PSUM_TEMPLATE(long,CHECK_OVERFLOW_INT,		\
-									(errcode),(accum),(newval))
-#define GPUPREAGG_AGGCALC_PSUM_FLOAT(errcode,accum,newval)			\
-	GPUPREAGG_AGGCALC_PSUM_TEMPLATE(float,CHECK_OVERFLOW_FLOAT,		\
-									(errcode),(accum),(newval))
-#define GPUPREAGG_AGGCALC_PSUM_DOUBLE(errcode,accum,newval)			\
-	GPUPREAGG_AGGCALC_PSUM_TEMPLATE(double,CHECK_OVERFLOW_FLOAT,	\
-									(errcode),(accum),(newval))
-#define GPUPREAGG_AGGCALC_PSUM_NUMERIC(errcode,accum,newval)		\
-	if (!(accum)->isnull)											\
-	{																\
-		if (!(newval)->isnull)										\
-		{															\
-			pg_numeric_t	x;										\
-			pg_numeric_t	y;										\
-			pg_numeric_t	r;										\
-																	\
-			x.isnull = y.isnull = false;							\
-			x.value = (accum)->long_val;							\
-			y.value = (newval)->long_val;							\
-																	\
-			r = pgfn_numeric_add(errcode,x,y);						\
-																	\
-			(accum)->long_val = r.value;							\
-		}															\
-	}																\
-	else if (!(newval)->isnull)										\
-	{																\
-		(accum)->isnull = (newval)->isnull;							\
-		(accum)->long_val = (newval)->long_val;						\
-	}
-
+#define AGGCALC_GLOBAL_PADD_SHORT(errcode)		\
+	AGGCALC_GLOBAL_TEMPLATE(atomic_add(&dest->int_val, (cl_int)src_value))
+#define AGGCALC_GLOBAL_PADD_INT(errcode)		\
+	AGGCALC_GLOBAL_TEMPLATE(atomic_add(&dest->int_val, (cl_int)src_value))
+#define AGGCALC_GLOBAL_PADD_LONG(errcode)		\
+	AGGCALC_GLOBAL_TEMPLATE(atom_add(&dest->long_val, (cl_long)src_value))
+#define AGGCALC_GLOBAL_PADD_FLOAT(errcode)							\
+	AGGCALC_GLOBAL_TEMPLATE(gatomic_add_float(&dest->float_val,		\
+											  (cl_float)src_value))
+#define AGGCALC_GLOBAL_PADD_DOUBLE(errcode)							\
+	AGGCALC_GLOBAL_TEMPLATE(gatomic_add_double(&dest->double_val,	\
+											   (cl_double)src_value))
+#define AGGCALC_GLOBAL_PADD_NUMERIC(errcode)						\
+	AGGCALC_GLOBAL_TEMPLATE(gatomic_add_float(&dest->long_val,		\
+											  (cl_long)src_value))
 #else
 /* Host side representation of kern_gpupreagg. It can perform as a message
  * object of PG-Strom, has key of OpenCL device program, a source row/column

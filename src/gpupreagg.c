@@ -1267,6 +1267,24 @@ gpupreagg_rewrite_expr(Agg *agg,
 }
 
 /*
+ *  
+ *
+ * static cl_uint
+ * gpupreagg_hashvalue(__private cl_int *errcode,
+ *                     __global kern_data_store *kds,
+ *                     __global kern_data_store *ktoast,
+ *                     __local cl_uint *crc32_table,
+ *                     size_t kds_index);
+ */
+static char *
+gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
+							codegen_context *context)
+{
+	hoge
+	return NULL;
+}
+
+/*
  * gpupreagg_codegen_keycomp - code generator of kernel gpupreagg_keycomp();
  * that compares two records indexed by x_index and y_index in kern_data_store,
  * then returns -1 if X < Y, 0 if X = Y or 1 if X > Y.
@@ -1386,15 +1404,15 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 }
 
 /*
- * gpupreagg_codegen_aggcalc - code generator of kernel gpupreagg_aggcalc();
- * that implements an operation to calculate partial aggregation.
+ * gpupreagg_codegen_local_calc - code generator of gpupreagg_local_calc()
+ * kernel function that implements an operation to make partial aggregation
+ * on the local memory.
  * The supplied accum is operated by newval, according to resno.
  *
- * static void
- * gpupreagg_aggcalc(__private cl_int *errcode,
- *                 cl_int resno,
- *                 __local pagg_datum *accum,
- *                 __local pagg_datum *newval);
+ * gpupreagg_local_calc(__private cl_int *errcode,
+ *                      cl_int attnum,
+ *                      __local pagg_datum *accum,
+ *                      __local pagg_datum *newval);
  */
 static inline const char *
 aggcalc_method_of_typeoid(Oid type_oid)
@@ -1419,7 +1437,7 @@ aggcalc_method_of_typeoid(Oid type_oid)
 
 
 static char *
-gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
+gpupreagg_codegen_local_cals(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 						  codegen_context *context)
 {
 	Oid				namespace_oid = get_namespace_oid("pgstrom", false);
@@ -1541,6 +1559,10 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 		"}\n");
 	return body.data;
 }
+
+
+
+
 
 HOGE:
 need to add codegen for local/global reduction here.
@@ -2019,7 +2041,8 @@ gpupreagg_codegen(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	StringInfoData	str;
 	const char	   *fn_qualeval;
 	const char	   *fn_keycomp;
-	const char	   *fn_aggcalc;
+	const char	   *fn_local_calc;
+	const char	   *fn_global_calc;
 	const char	   *fn_projection;
 
 	pgstrom_init_codegen_context(context);
@@ -2033,10 +2056,14 @@ gpupreagg_codegen(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 
 	/* generate a qual evaluation function */
 	fn_qualeval = gpupreagg_codegen_qual_eval(cscan, gpa_info, context);
+	/* generate gpupreagg_hashvalue function */
+	fn_hashvalue = gpupreagg_codegen_hashvalue(cscan, gpa_info, context);
 	/* generate a key comparison function */
 	fn_keycomp = gpupreagg_codegen_keycomp(cscan, gpa_info, context);
-	/* generate a partial aggregate function */
-	fn_aggcalc = gpupreagg_codegen_aggcalc(cscan, gpa_info, context);
+	/* generate a gpupreagg_local_calc function */
+	fn_local_calc = gpupreagg_codegen_local_calc(cscan, gpa_info, context);
+	/* generate a gpupreagg_global_calc function */
+	fn_global_calc = gpupreagg_codegen_global_calc(cscan, gpa_info, context);
 	/* generate an initial data loading function */
 	fn_projection = gpupreagg_codegen_projection(cscan, gpa_info, context);
 
@@ -2045,13 +2072,17 @@ gpupreagg_codegen(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	appendStringInfo(&str,
 					 "%s\n"		/* function declarations */
 					 "%s\n"		/* gpupreagg_qual_eval() */
+					 "%s\n"		/* gpupreagg_hashvalue() */
 					 "%s\n"		/* gpupreagg_keycomp() */
-					 "%s\n"		/* gpupreagg_aggcalc() */
+					 "%s\n"		/* gpupreagg_local_calc() */
+					 "%s\n"		/* gpupreagg_global_calc() */
 					 "%s\n",	/* gpupreagg_projection() */
 					 pgstrom_codegen_func_declarations(context),
 					 fn_qualeval,
+					 fn_hashvalue,
 					 fn_keycomp,
-					 fn_aggcalc,
+					 fn_local_calc,
+					 fn_global_calc,
 					 fn_projection);
 	return str.data;
 }
