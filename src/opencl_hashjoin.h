@@ -922,60 +922,6 @@ pg_varlena_hashref(__global kern_hashtable *khtable,
 								  p_errcode, colidx);		\
 	}
 
-/*
- * Macros to calculate hash key-value.
- * (logic was copied from pg_crc32.c)
- */
-#define INIT_CRC32C(crc)		((crc) = 0xFFFFFFFF)
-#define FIN_CRC32C(crc)			((crc) ^= 0xFFFFFFFF)
-#define EQ_CRC32C(crc1,crc2)	((crc1) == (crc2))
-
-#define STROMCL_SIMPLE_HASHKEY_TEMPLATE(NAME,BASE)			\
-	static inline cl_uint									\
-	pg_##NAME##_hashkey(__local cl_uint *crc32_table,		\
-						cl_uint hash, pg_##NAME##_t datum)	\
-	{														\
-		cl_uint			__len = sizeof(BASE);				\
-		cl_uint			__index;							\
-		union {												\
-			BASE		as_base;							\
-			cl_uint		as_int;								\
-			cl_ulong	as_long;							\
-		} __data;											\
-															\
-		if (!datum.isnull)									\
-		{													\
-			__data.as_base = datum.value;					\
-			while (__len-- > 0)								\
-			{												\
-				__index = (hash ^ __data.as_int) & 0xff;	\
-				hash = crc32_table[__index] ^ ((hash) >> 8);\
-				__data.as_long = (__data.as_long >> 8);		\
-			}												\
-		}													\
-		return hash;										\
-	}
-
-#define STROMCL_VARLENA_HASHKEY_TEMPLATE(NAME)				\
-	static inline cl_uint									\
-	pg_##NAME##_hashkey(__local cl_uint *crc32_table,		\
-						cl_uint hash, pg_##NAME##_t datum)	\
-	{														\
-		if (!datum.isnull)									\
-		{													\
-			__global const cl_char *__data =				\
-				VARDATA_ANY(datum.value);					\
-			cl_uint		__len = VARSIZE_ANY_EXHDR(datum.value); \
-			cl_uint		__index;							\
-			while (__len-- > 0)								\
-			{												\
-				__index = (hash ^ *__data++) & 0xff;		\
-				hash = crc32_table[__index] ^ (hash >> 8);	\
-			}												\
-		}													\
-		return hash;										\
-	}
-
 #else	/* OPENCL_DEVICE_CODE */
 
 typedef struct pgstrom_multihash_tables

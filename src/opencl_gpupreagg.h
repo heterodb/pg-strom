@@ -127,8 +127,8 @@ typedef union
  */
 typedef struct
 {
-//	cl_uint			group_id;
-	cl_int			isnull;		/* 0: not null 1: null 2: now updating */
+	cl_int			isnull;
+	cl_char			__padding__[4];
 	union {
 		cl_short	short_val;
 		cl_int		int_val;
@@ -864,17 +864,17 @@ retry:
 	prefix##atomic_##op_name##(volatile prefix##space float *ptr,		\
 							   float value)								\
 	{																	\
-		uint	oldval = to_uint(*ptr);									\
-		uint	newval = to_uint(op_name(to_float(oldval), value));		\
+		uint	oldval = as_uint(*ptr);									\
+		uint	newval = as_uint(op_name(as_float(oldval), value));		\
 		uint	curval;													\
 																		\
 		while ((curval = atomic_cmpxchg((prefix##space uint *) ptr,		\
 										oldval, newval)) != oldval)		\
 		{																\
 			oldval = curval;											\
-			newval = to_uint(op_name(to_float(oldval),value));			\
+			newval = as_uint(op_name(as_float(oldval),value));			\
 		}																\
-		return to_float(oldval);										\
+		return as_float(oldval);										\
 	}
 
 ATOMIC_FLOAT_TEMPLATE(l,max)
@@ -889,17 +889,17 @@ ATOMIC_FLOAT_TEMPLATE(g,add)
 	prefix##atomic_##op_name##(volatile prefix##space double *ptr,		\
 							   double value)							\
 	{																	\
-		ulong	oldval = to_ulong(*ptr);								\
-		ulong	newval = to_ulong(op_name(to_double(oldval), value));	\
+		ulong	oldval = as_ulong(*ptr);								\
+		ulong	newval = as_ulong(op_name(as_double(oldval), value));	\
 		ulong	curval;													\
 																		\
 		while ((curval = atom_cmpxchg((prefix##space ulong *) ptr,		\
 									  oldval, newval)) != oldval)		\
 		{																\
 			oldval = curval;											\
-			newval = to_ulong(op_name(to_double(oldval),value));		\
+			newval = as_ulong(op_name(as_double(oldval),value));		\
 		}																\
-		return to_double(oldval);										\
+		return as_double(oldval);										\
 	}
 
 ATOMIC_DOUBLE_TEMPLATE(l,min)
@@ -972,149 +972,176 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 
 /*
  * Helper macros for gpupreagg_local_calc
- *
- * NOTE: please assume the variables below are available in the context
- * these macros in use.
- *   __local pagg_datum *accum;
- *   __local pagg_datum *newval;
- *   int                 state;
  */
-#define AGGCALC_LOCAL_TEMPLATE(ATOMIC_FUNC_CALL)		\
+#define AGGCALC_LOCAL_TEMPLATE(newval,ATOMIC_FUNC_CALL)	\
 	do {												\
-		if (!newval->isnull)							\
+		if (!(newval)->isnull)							\
 		{												\
 			ATOMIC_FUNC_CALL;							\
 		}												\
 	} while (0)
 
 /* calculation for local partial max */
-#define AGGCALC_LOCAL_PMAX_SHORT(errcode)				\
-	AGGCALC_LOCALTEMPLATE(atomic_max(&accum->int_val,	\
-									 (int)newval->short_val))
-#define AGGCALC_LOCAL_PMAX_INT(errcode)					\
-	AGGCALC_LOCAL_TEMPLATE(atomic_max(&accum->int_val,	\
-									  newval->int_val))
-#define AGGCALC_LOCAL_PMAX_LONG(errcode)				\
-	AGGCALC_LOCAL_TEMPLATE(atom_max(&accum->long_val,	\
-									newval->long_val))
-#define AGGCALC_LOCAL_PMAX_FLOAT(errcode)							\
-    AGGCALC_LOCAL_TEMPLATE(latomic_max_float(&accum->float_val,		\
-											 newval->float_val))
-#define AGGCALC_LOCAL_PMAX_DOUBLE(errcode)							\
-	AGGCALC_LOCAL_TEMPLATE(latomic_max_double(&accum->double_val,	\
-											  newval->double_val))
-#define AGGCALC_LOCAL_PMAX_NUMERIC(errcode)							\
-	AGGCALC_LOCAL_TEMPLATE(latomic_max_numeric(&accum->long_val,	\
-											   newval->long_val))
+#define AGGCALC_LOCAL_PMAX_SHORT(errcode,accum,newval)		\
+	AGGCALC_LOCALTEMPLATE(newval,							\
+			atomic_max(&(accum)->int_val, (int)(newval)->short_val))
+#define AGGCALC_LOCAL_PMAX_INT(errcode,accum,newval)		\
+	AGGCALC_LOCAL_TEMPLATE(newval,							\
+			atomic_max(&(accum)->int_val, (newval)->int_val))
+#define AGGCALC_LOCAL_PMAX_LONG(errcode,accum,newval)		\
+	AGGCALC_LOCAL_TEMPLATE(newval,							\
+			atom_max(&(accum)->long_val, (newval)->long_val))
+#define AGGCALC_LOCAL_PMAX_FLOAT(errcode,accum,newval)		\
+    AGGCALC_LOCAL_TEMPLATE(newval,							\
+			latomic_max_float(&(accum)->float_val, (newval)->float_val))
+#define AGGCALC_LOCAL_PMAX_DOUBLE(errcode,accum,newval)		\
+	AGGCALC_LOCAL_TEMPLATE(newval,							\
+			latomic_max_double(&(accum)->double_val, (newval)->double_val))
+#define AGGCALC_LOCAL_PMAX_NUMERIC(errcode,accum,newval)	\
+	AGGCALC_LOCAL_TEMPLATE(newval,							\
+			latomic_max_numeric(&(accum)->long_val, (newval)->long_val))
+
 /* calculation for local partial min */
-#define AGGCALC_LOCAL_PMIN_SHORT(errcode)				\
-	AGGCALC_LOCALTEMPLATE(atomic_min(&accum->int_val,	\
-									 (int)newval->short_val))
-#define AGGCALC_LOCAL_PMIN_INT(errcode)					\
-	AGGCALC_LOCAL_TEMPLATE(atomic_min(&accum->int_val,	\
-									  newval->int_val))
-#define AGGCALC_LOCAL_PMIN_LONG(errcode)				\
-	AGGCALC_LOCAL_TEMPLATE(atom_min(&accum->long_val,	\
-									newval->long_val))
-#define AGGCALC_LOCAL_PMIN_FLOAT(errcode)							\
-    AGGCALC_LOCAL_TEMPLATE(latomic_min_float(&accum->float_val,		\
-											 newval->float_val))
-#define AGGCALC_LOCAL_PMIN_DOUBLE(errcode)							\
-	AGGCALC_LOCAL_TEMPLATE(latomic_min_double(&accum->double_val,	\
-											  newval->double_val))
-#define AGGCALC_LOCAL_PMIN_NUMERIC(errcode)							\
-	AGGCALC_LOCAL_TEMPLATE(latomic_min_numeric(&accum->long_val,	\
-											   newval->long_val))
+#define AGGCALC_LOCAL_PMIN_SHORT(errcode,accum,newval)		\
+	AGGCALC_LOCALTEMPLATE(newval,							\
+			atomic_min(&(accum)->int_val, (int)(newval)->short_val))
+#define AGGCALC_LOCAL_PMIN_INT(errcode,accum,newval)		\
+	AGGCALC_LOCAL_TEMPLATE(newval,							\
+			atomic_min(&(accum)->int_val, (newval)->int_val))
+#define AGGCALC_LOCAL_PMIN_LONG(errcode,accum,newval)		\
+	AGGCALC_LOCAL_TEMPLATE(newval,							\
+			atom_min(&(accum)->long_val, (newval)->long_val))
+#define AGGCALC_LOCAL_PMIN_FLOAT(errcode,accum,newval)		\
+    AGGCALC_LOCAL_TEMPLATE(newval,							\
+			latomic_min_float(&(accum)->float_val, (newval)->float_val))
+#define AGGCALC_LOCAL_PMIN_DOUBLE(errcode,accum,newval)		\
+	AGGCALC_LOCAL_TEMPLATE(newval,							\
+			latomic_min_double(&(accum)->double_val, (newval)->double_val))
+#define AGGCALC_LOCAL_PMIN_NUMERIC(errcode,accum,newval)	\
+	AGGCALC_LOCAL_TEMPLATE(newval,							\
+			latomic_min_numeric(&(accum)->long_val, (newval)->long_val))
+
 /* calculation for local partial add */
-#define AGGCALC_LOCAL_PADD_SHORT(errcode)				\
-	AGGCALC_LOCALTEMPLATE(atomic_add(&accum->int_val,	\
-									 (int)newval->short_val))
-#define AGGCALC_LOCAL_PADD_INT(errcode)					\
-	AGGCALC_LOCAL_TEMPLATE(atomic_add(&accum->int_val,	\
-									  newval->int_val))
-#define AGGCALC_LOCAL_PADD_LONG(errcode)				\
-	AGGCALC_LOCAL_TEMPLATE(atom_add(&accum->long_val,	\
-									newval->long_val))
-#define AGGCALC_LOCAL_PADD_FLOAT(errcode)							\
-    AGGCALC_LOCAL_TEMPLATE(latomic_add_float(&accum->float_val,		\
-											 newval->float_val))
-#define AGGCALC_LOCAL_PADD_DOUBLE(errcode)							\
-	AGGCALC_LOCAL_TEMPLATE(latomic_add_double(&accum->double_val,	\
-											  newval->double_val))
-#define AGGCALC_LOCAL_PADD_NUMERIC(errcode)							\
-	AGGCALC_LOCAL_TEMPLATE(latomic_add_numeric(&accum->long_val,	\
-											   newval->long_val))
+#define AGGCALC_LOCAL_PADD_SHORT(errcode,accum,newval)		\
+	AGGCALC_LOCALTEMPLATE(newval,							\
+			atomic_add(&(accum)->int_val, (int)(newval)->short_val))
+#define AGGCALC_LOCAL_PADD_INT(errcode,accum,newval)		\
+	AGGCALC_LOCAL_TEMPLATE(newval,							\
+			atomic_add(&(accum)->int_val, (newval)->int_val))
+#define AGGCALC_LOCAL_PADD_LONG(errcode,accum,newval)		\
+	AGGCALC_LOCAL_TEMPLATE(newval,							\
+			atom_add(&(accum)->long_val, (newval)->long_val))
+#define AGGCALC_LOCAL_PADD_FLOAT(errcode,accum,newval)		\
+    AGGCALC_LOCAL_TEMPLATE(newval,							\
+			latomic_add_float(&(accum)->float_val, (newval)->float_val))
+#define AGGCALC_LOCAL_PADD_DOUBLE(errcode,accum,newval)		\
+	AGGCALC_LOCAL_TEMPLATE(newval,							\
+			latomic_add_double(&(accum)->double_val, (newval)->double_val))
+#define AGGCALC_LOCAL_PADD_NUMERIC(errcode,accum,newval)	\
+	AGGCALC_LOCAL_TEMPLATE(newval,							\
+			latomic_add_numeric(&(accum)->long_val, (newval)->long_val))
+
 /*
  * Helper macros for gpupreagg_global_calc
  *
  * NOTE: please assume the variables below are available in the context
  * these macros in use.
- *   char  src_isnull;
- *   Datum src_value;
- *   __global char *dest_isnull;
- *   __global union {
- *       Datum     datum;
- *       cl_short  short_val;
- *       cl_int    int_val;
- *       cl_long   long_val;
- *       cl_float  float_val;
- *       cl_double double_val;
- *   } dest;
+ *   char            new_isnull;
+ *   Datum           new_value;
+ *   __global char  *accum_isnull;
+ *   __global Datum *accum_value;
  */
-#define AGGCALC_GLOBAL_TEMPLATE(ATOMIC_FUNC_CALL)	\
-	if (!my_isnull)									\
-	{												\
-		ATOMIC_FUNC_CALL;							\
-		*dest_isnull = true;						\
+#define AGGCALC_GLOBAL_TEMPLATE(new_isnull, accum_isnull, ATOMIC_FUNC_CALL) \
+	if (!(new_isnull))				\
+	{								\
+		ATOMIC_FUNC_CALL;			\
+		*(accum_isnull) = true;		\
 	}
 
-#define AGGCALC_GLOBAL_PMAX_SHORT(errcode)		\
-	AGGCALC_GLOBAL_TEMPLATE(atomic_max(&dest->int_val, (cl_int)src_value))
-#define AGGCALC_GLOBAL_PMAX_INT(errcode)		\
-	AGGCALC_GLOBAL_TEMPLATE(atomic_max(&dest->int_val, (cl_int)src_value))
-#define AGGCALC_GLOBAL_PMAX_LONG(errcode)		\
-	AGGCALC_GLOBAL_TEMPLATE(atom_max(&dest->long_val, (cl_long)src_value))
-#define AGGCALC_GLOBAL_PMAX_FLOAT(errcode)							\
-	AGGCALC_GLOBAL_TEMPLATE(gatomic_max_float(&dest->float_val,		\
-											  (cl_float)src_value))
-#define AGGCALC_GLOBAL_PMAX_DOUBLE(errcode)							\
-	AGGCALC_GLOBAL_TEMPLATE(gatomic_max_double(&dest->double_val,	\
-											   (cl_double)src_value))
-#define AGGCALC_GLOBAL_PMAX_NUMERIC(errcode)						\
-	AGGCALC_GLOBAL_TEMPLATE(gatomic_max_float(&dest->long_val,		\
-											  (cl_long)src_value))
-
-#define AGGCALC_GLOBAL_PMIN_SHORT(errcode)		\
-	AGGCALC_GLOBAL_TEMPLATE(atomic_min(&dest->int_val, (cl_int)src_value))
-#define AGGCALC_GLOBAL_PMIN_INT(errcode)		\
-	AGGCALC_GLOBAL_TEMPLATE(atomic_min(&dest->int_val, (cl_int)src_value))
-#define AGGCALC_GLOBAL_PMIN_LONG(errcode)		\
-	AGGCALC_GLOBAL_TEMPLATE(atom_min(&dest->long_val, (cl_long)src_value))
-#define AGGCALC_GLOBAL_PMIN_FLOAT(errcode)							\
-	AGGCALC_GLOBAL_TEMPLATE(gatomic_min_float(&dest->float_val,		\
-											  (cl_float)src_value))
-#define AGGCALC_GLOBAL_PMIN_DOUBLE(errcode)							\
-	AGGCALC_GLOBAL_TEMPLATE(gatomic_min_double(&dest->double_val,	\
-											   (cl_double)src_value))
-#define AGGCALC_GLOBAL_PMIN_NUMERIC(errcode)						\
-	AGGCALC_GLOBAL_TEMPLATE(gatomic_min_float(&dest->long_val,		\
-											  (cl_long)src_value))
-
-#define AGGCALC_GLOBAL_PADD_SHORT(errcode)		\
-	AGGCALC_GLOBAL_TEMPLATE(atomic_add(&dest->int_val, (cl_int)src_value))
-#define AGGCALC_GLOBAL_PADD_INT(errcode)		\
-	AGGCALC_GLOBAL_TEMPLATE(atomic_add(&dest->int_val, (cl_int)src_value))
-#define AGGCALC_GLOBAL_PADD_LONG(errcode)		\
-	AGGCALC_GLOBAL_TEMPLATE(atom_add(&dest->long_val, (cl_long)src_value))
-#define AGGCALC_GLOBAL_PADD_FLOAT(errcode)							\
-	AGGCALC_GLOBAL_TEMPLATE(gatomic_add_float(&dest->float_val,		\
-											  (cl_float)src_value))
-#define AGGCALC_GLOBAL_PADD_DOUBLE(errcode)							\
-	AGGCALC_GLOBAL_TEMPLATE(gatomic_add_double(&dest->double_val,	\
-											   (cl_double)src_value))
-#define AGGCALC_GLOBAL_PADD_NUMERIC(errcode)						\
-	AGGCALC_GLOBAL_TEMPLATE(gatomic_add_float(&dest->long_val,		\
-											  (cl_long)src_value))
+/* calculation for global partial max */
+#define AGGCALC_GLOBAL_PMAX_SHORT(errcode,accum_isnull,accum_value,	\
+								  new_isnull,new_value)			\
+	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
+		atomic_max((__global cl_int *)(accum_value), (cl_int)(new_value)))
+#define AGGCALC_GLOBAL_PMAX_INT(errcode,accum_isnull,accum_value,	\
+								new_isnull,new_value)			\
+	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
+		atomic_max((__global cl_int *)(accum_value), (cl_int)(new_value)))
+#define AGGCALC_GLOBAL_PMAX_LONG(errcode,accum_isnull,accum_value,	\
+								 new_isnull,new_value)			\
+	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
+		atom_max((__global cl_long *)(accum_value), (cl_long)(new_value)))
+#define AGGCALC_GLOBAL_PMAX_FLOAT(errcode,accum_isnull,accum_value,	\
+								  new_isnull,new_value)			\
+	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
+		gatomic_max_float((__global cl_float *)(accum_value),	\
+						  as_float((cl_uint)(new_value)))
+#define AGGCALC_GLOBAL_PMAX_DOUBLE(errcode,accum_isnull,accum_value,	\
+								   new_isnull,new_value)		\
+	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
+		gatomic_max_double((__global cl_double *)(accum_value),	\
+						   as_double(new_value)))
+#define AGGCALC_GLOBAL_PMAX_NUMERIC(errcode,accum_isnull,accum_value,	\
+									new_isnull,new_value)		\
+	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
+		gatomic_max_numeric((__global cl_long *)(accum_value),	\
+							(cl_long)(new_value)))
+/* calculation for global partial min */
+#define AGGCALC_GLOBAL_PMIN_SHORT(errcode,accum_isnull,accum_value,	\
+								  new_isnull,new_value)			\
+	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
+		atomic_min((__global cl_int *)(accum_value), (cl_int)(new_value)))
+#define AGGCALC_GLOBAL_PMIN_INT(errcode,accum_isnull,accum_value,	\
+								new_isnull,new_value)			\
+	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
+		atomic_min((__global cl_int *)(accum_value), (cl_int)(new_value)))
+#define AGGCALC_GLOBAL_PMIN_LONG(errcode,accum_isnull,accum_value,	\
+								 new_isnull,new_value)			\
+	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
+		atom_min((__global cl_long *)(accum_value), (cl_long)(new_value)))
+#define AGGCALC_GLOBAL_PMIN_FLOAT(errcode,accum_isnull,accum_value,	\
+								  new_isnull,new_value)			\
+	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
+		gatomic_min_float((__global cl_float *)(accum_value),	\
+						  as_float((cl_uint)(new_value)))
+#define AGGCALC_GLOBAL_PMIN_DOUBLE(errcode,accum_isnull,accum_value,	\
+								   new_isnull,new_value)		\
+	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
+		gatomic_min_double((__global cl_double *)(accum_value),	\
+						   as_double(new_value)))
+#define AGGCALC_GLOBAL_PMIN_NUMERIC(errcode,accum_isnull,accum_value,	\
+									new_isnull,new_value)		\
+	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
+		gatomic_min_numeric((__global cl_long *)(accum_value),	\
+							(cl_long)(new_value)))
+/* calculation for global partial add */
+#define AGGCALC_GLOBAL_PADD_SHORT(errcode,accum_isnull,accum_value,	\
+								  new_isnull,new_value)			\
+	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
+		atomic_add((__global cl_int *)(accum_value), (cl_int)(new_value)))
+#define AGGCALC_GLOBAL_PADD_INT(errcode,accum_isnull,accum_value,	\
+								new_isnull,new_value)			\
+	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
+		atomic_add((__global cl_int *)(accum_value), (cl_int)(new_value)))
+#define AGGCALC_GLOBAL_PADD_LONG(errcode,accum_isnull,accum_value,	\
+								 new_isnull,new_value)			\
+	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
+		atom_add((__global cl_long *)(accum_value), (cl_long)(new_value)))
+#define AGGCALC_GLOBAL_PADD_FLOAT(errcode,accum_isnull,accum_value,	\
+								  new_isnull,new_value)			\
+	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
+		gatomic_add_float((__global cl_float *)(accum_value),	\
+						  as_float((cl_uint)(new_value)))
+#define AGGCALC_GLOBAL_PADD_DOUBLE(errcode,accum_isnull,accum_value,	\
+								   new_isnull,new_value)		\
+	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
+		gatomic_add_double((__global cl_double *)(accum_value),	\
+						   as_double(new_value)))
+#define AGGCALC_GLOBAL_PADD_NUMERIC(errcode,accum_isnull,accum_value,	\
+									new_isnull,new_value)		\
+	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
+		gatomic_add_numeric((__global cl_long *)(accum_value),	\
+							(cl_long)(new_value)))
 #else
 /* Host side representation of kern_gpupreagg. It can perform as a message
  * object of PG-Strom, has key of OpenCL device program, a source row/column

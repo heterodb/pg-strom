@@ -626,12 +626,47 @@ static __global Datum *pg_common_vstore(__global kern_data_store *kds,
 		return result;										\
 	}
 
+/*
+ * Macros to calculate CRC32 value.
+ * (logic was copied from pg_crc32.c)
+ */
+#define INIT_CRC32C(crc)		((crc) = 0xFFFFFFFF)
+#define FIN_CRC32C(crc)			((crc) ^= 0xFFFFFFFF)
+#define EQ_CRC32C(crc1,crc2)	((crc1) == (crc2))
+
+#define STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)		   \
+	static inline cl_uint									   \
+	pg_##NAME##_comp_crc32(__local cl_uint *crc32_table,       \
+						   cl_uint hash, pg_##NAME##_t datum)  \
+	{														   \
+		cl_uint         __len = sizeof(BASE);				   \
+		cl_uint         __index;							   \
+		union {												   \
+			BASE        as_base;							   \
+			cl_uint     as_int;								   \
+			cl_ulong    as_long;							   \
+		} __data;											   \
+															   \
+		if (!datum.isnull)									   \
+		{													   \
+			__data.as_base = datum.value;					   \
+			while (__len-- > 0)								   \
+			{												   \
+				__index = (hash ^ __data.as_int) & 0xff;	   \
+				hash = crc32_table[__index] ^ ((hash) >> 8);   \
+				__data.as_long = (__data.as_long >> 8);		   \
+			}												   \
+		}													   \
+		return hash;										   \
+	}
+
 #define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_VARSTORE_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)		\
-	STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)
+	STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)			\
+	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)
 
 /* pg_bool_t */
 #ifndef PG_BOOL_TYPE_DEFINED
@@ -1204,6 +1239,24 @@ pg_varlena_param(__global kern_parambuf *kparams,
 
 STROMCL_SIMPLE_NULLTEST_TEMPLATE(varlena)
 
+static inline cl_uint
+pg_varlena_hashkey(__local cl_uint *crc32_table,
+				   cl_uint hash, pg_varlena_t datum)
+{
+	if (!datum.isnull)
+	{
+		__global const cl_char *__data = VARDATA_ANY(datum.value);
+		cl_uint		__len = VARSIZE_ANY_EXHDR(datum.value);
+		cl_uint		__index;
+		while (__len-- > 0)
+		{
+			__index = (hash ^ *__data++) & 0xff;
+			hash = crc32_table[__index] ^ (hash >> 8);
+		}
+	}
+	return hash;
+}
+
 #define STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)			\
 	typedef pg_varlena_t	pg_##NAME##_t;
 
@@ -1255,12 +1308,21 @@ STROMCL_SIMPLE_NULLTEST_TEMPLATE(varlena)
 		return pgfn_varlena_isnotnull(errcode, arg);				\
 	}
 
+#define STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)					\
+	static inline cl_uint											\
+	pg_##NAME##_comp_crc32(__local cl_uint *crc32_table,			\
+						   cl_uint hash, pg_##NAME##_t datum)		\
+	{																\
+		return pg_varlena_comp_crc32(crc32_table, hash, datum);		\
+	}
+
 #define STROMCL_VARLENA_TYPE_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_VARREF_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_VARSTORE_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)			\
-	STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)
+	STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)			\
+	STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)
 
 /* pg_bytea_t */
 #ifndef PG_BYTEA_TYPE_DEFINED
