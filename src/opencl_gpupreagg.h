@@ -1151,7 +1151,7 @@ typedef struct
 {
 	pgstrom_message	msg;		/* = StromTag_GpuPreAgg */
 	Datum			dprog_key;	/* key of device program */
-	bool			skip_local_reduction;
+	bool			local_reduction;/* true, if it needs local reduction */
 	bool			needs_grouping;	/* true, if it needs grouping step */
 	double			num_groups;	/* estimated number of groups */
 	pgstrom_data_store *pds;	/* source data-store */

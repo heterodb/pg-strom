@@ -83,8 +83,10 @@ collect_opencl_device_info(cl_device_id device_id)
 					dev_available, false),
 		CLDEV_PARAM(CL_DEVICE_COMPILER_AVAILABLE,
 					dev_compiler_available, false),
+/* -- not supported in OpenCL 1.1? at least CUDA6.5
 		CLDEV_PARAM(CL_DEVICE_DOUBLE_FP_CONFIG,
 					dev_double_fp_config, false),
+*/
 		CLDEV_PARAM(CL_DEVICE_ENDIAN_LITTLE,
 					dev_endian_little, false),
 		CLDEV_PARAM(CL_DEVICE_ERROR_CORRECTION_SUPPORT,
@@ -711,8 +713,6 @@ pgstrom_opencl_device_info(PG_FUNCTION_ARGS)
 				ofs += sprintf(buf, "%saccelerator", ofs > 0 ? ", " : "");
 			if (dinfo->dev_type & CL_DEVICE_TYPE_DEFAULT)
 				ofs += sprintf(buf, "%sdefault", ofs > 0 ? ", " : "");
-			if (dinfo->dev_type & CL_DEVICE_TYPE_CUSTOM)
-				ofs += sprintf(buf, "%scustom", ofs > 0 ? ", " : "");
 			value = buf;
 			break;
 		case 51:
