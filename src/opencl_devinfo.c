@@ -83,10 +83,11 @@ collect_opencl_device_info(cl_device_id device_id)
 					dev_available, false),
 		CLDEV_PARAM(CL_DEVICE_COMPILER_AVAILABLE,
 					dev_compiler_available, false),
-/* -- not supported in OpenCL 1.1? at least CUDA6.5
-		CLDEV_PARAM(CL_DEVICE_DOUBLE_FP_CONFIG,
-					dev_double_fp_config, false),
-*/
+/*
+ * XXX - Bug? CUDA6.5 does not define this label
+ *		CLDEV_PARAM(CL_DEVICE_DOUBLE_FP_CONFIG,
+ *		dev_double_fp_config, false),
+ */
 		CLDEV_PARAM(CL_DEVICE_ENDIAN_LITTLE,
 					dev_endian_little, false),
 		CLDEV_PARAM(CL_DEVICE_ERROR_CORRECTION_SUPPORT,

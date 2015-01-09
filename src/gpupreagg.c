@@ -611,6 +611,35 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 }
 
 /*
+ * copyObjectFixupVarno - create a copy of expression node, but varno of
+ * Var shall be fixed up to INDEX_VAR from OUTER_VAR.
+ */
+static Node *
+__copyObjectFixupVarno(Node *node, void *context)
+{
+	if (!node)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		Var	   *varnode = (Var *) node;
+		Var	   *newnode;
+
+		Assert(varnode->varno == OUTER_VAR);
+		newnode = copyObject(varnode);
+		newnode->varno = INDEX_VAR;
+
+		return (Node *) newnode;
+	}
+	return expression_tree_mutator(node, __copyObjectFixupVarno, NULL);
+}
+
+static inline void *
+copyObjectFixupVarno(const void *from)
+{
+	return __copyObjectFixupVarno((Node *) from, NULL);
+}
+
+/*
  * makeZeroConst - create zero constant
  */
 static Const *
@@ -718,7 +747,7 @@ make_expr_conditional(Expr *expr, Expr *filter, Expr *defresult)
 
 	Assert(exprType((Node *) filter) == BOOLOID);
 	if (defresult)
-		defresult = copyObject(defresult);
+		defresult = copyObjectFixupVarno(defresult);
 	else
 	{
 		defresult = (Expr *) makeNullConst(exprType((Node *) expr),
@@ -729,8 +758,8 @@ make_expr_conditional(Expr *expr, Expr *filter, Expr *defresult)
 
 	/* in case when the 'filter' is matched */
 	case_when = makeNode(CaseWhen);
-	case_when->expr = copyObject(filter);
-	case_when->result = copyObject(expr);
+	case_when->expr = copyObjectFixupVarno(filter);
+	case_when->result = copyObjectFixupVarno(expr);
 	case_when->location = -1;
 
 	/* case body */
@@ -786,14 +815,16 @@ make_altfunc_nrows_expr(Aggref *aggref)
 	ListCell   *cell;
 
 	if (aggref->aggfilter)
-		nrows_args = lappend(nrows_args, copyObject(aggref->aggfilter));
+		nrows_args = lappend(nrows_args,
+							 copyObjectFixupVarno(aggref->aggfilter));
+
 	foreach (cell, aggref->args)
 	{
 		TargetEntry *tle = lfirst(cell);
 		NullTest	*ntest = makeNode(NullTest);
 
 		Assert(IsA(tle, TargetEntry));
-		ntest->arg = copyObject(tle->expr);
+		ntest->arg = copyObjectFixupVarno(tle->expr);
 		ntest->nulltesttype = IS_NOT_NULL;
 		ntest->argisrow = false;
 
@@ -817,7 +848,7 @@ make_altfunc_pcov_expr(Aggref *aggref, const char *func_name)
 	if (!aggref->aggfilter)
 		filter = (Expr *) makeBoolConst(true, false);
 	else
-		filter = copyObject(aggref->aggfilter);
+		filter = copyObjectFixupVarno(aggref->aggfilter);
 	return make_altfunc_expr(func_name,
 							 list_make3(filter, tle_1->expr, tle_2->expr));
 }
@@ -1111,18 +1142,19 @@ gpupreagg_rewrite_mutator(Node *node, gpupreagg_rewrite_context *context)
 	else if (IsA(node, Var))
 	{
 		Agg	   *agg = context->agg;
-		Var	   *var = (Var *) node;
+		Var	   *varnode = (Var *) node;
 		int		i, x;
 
-		if (var->varno != OUTER_VAR)
+		if (varnode->varno != OUTER_VAR)
 			elog(ERROR, "Bug? varnode references did not outer relation");
 		for (i=0; i < agg->numCols; i++)
 		{
-			if (var->varattno == agg->grpColIdx[i])
+			if (varnode->varattno == agg->grpColIdx[i])
 			{
-				x = var->varattno - FirstLowInvalidHeapAttributeNumber;
+				x = varnode->varattno - FirstLowInvalidHeapAttributeNumber;
 				context->attr_refs = bms_add_member(context->attr_refs, x);
-				return copyObject(var);
+
+				return copyObject(varnode);
 			}
 		}
 		context->gpupreagg_invalid = true;
@@ -1177,7 +1209,7 @@ gpupreagg_rewrite_expr(Agg *agg,
 		for (i=0; i < agg->numCols; i++)
 		{
 			devtype_info   *dtype;
-			Expr		   *var;
+			Expr		   *varnode;
 
 			if (tle->resno != agg->grpColIdx[i])
 				continue;
@@ -1194,13 +1226,13 @@ gpupreagg_rewrite_expr(Agg *agg,
 			if (type_oid == NUMERICOID)
 				has_numeric = true;
 
-			var = (Expr *) makeVar(OUTER_VAR,
-								   tle->resno,
-								   type_oid,
-								   type_mod,
-								   type_coll,
-								   0);
-			tle_new = makeTargetEntry(var,
+			varnode = (Expr *) makeVar(INDEX_VAR,
+									   tle->resno,
+									   type_oid,
+									   type_mod,
+									   type_coll,
+									   0);
+			tle_new = makeTargetEntry(varnode,
 									  list_length(pre_tlist) + 1,
 									  resname,
 									  tle->resjunk);
@@ -1448,7 +1480,7 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 
 		tle = get_tle_by_resno(cscan->scan.plan.targetlist, resno);
 		var = (Var *) tle->expr;
-		if (!IsA(var, Var) || var->varno != OUTER_VAR)
+		if (!IsA(var, Var) || var->varno != INDEX_VAR)
 			elog(ERROR, "Bug? A simple Var node is expected for group key: %s",
 				 nodeToString(var));
 
@@ -2106,7 +2138,7 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 		{
 			Var	   *var = (Var *) pc.tle->expr;
 
-			Assert(var->varno == OUTER_VAR);
+			Assert(var->varno == INDEX_VAR);
 			Assert(var->varattno > 0);
 			attr_refs = bms_add_member(attr_refs, var->varattno -
 									   FirstLowInvalidHeapAttributeNumber);
@@ -2157,7 +2189,7 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 				elog(ERROR, "Bug? unexpected FuncExpr: %s",
 					 nodeToString(func));
 
-			pull_varattnos((Node *)func, OUTER_VAR, &attr_refs);
+			pull_varattnos((Node *)func, INDEX_VAR, &attr_refs);
 
 			func_name = get_func_name(func->funcid);
 			if (strcmp(func_name, "nrows") == 0)
@@ -2289,7 +2321,6 @@ gpupreagg_codegen(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	const char	   *fn_global_calc;
 	const char	   *fn_projection;
 
-	pgstrom_init_codegen_context(context);
 	/*
 	 * System constants of GpuPreAgg:
 	 * KPARAM_0 is an array of cl_char to inform which field is grouping
@@ -2520,12 +2551,13 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	 * construction of the kernel code according to the target-list
 	 * and qualifiers (pulled-up from outer plan).
 	 */
+	pgstrom_init_codegen_context(&context);
 	gpa_info.kern_source = gpupreagg_codegen(cscan, &gpa_info, &context);
 	gpa_info.extra_flags = extra_flags | context.extra_flags |
 		(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
 	gpa_info.used_params = context.used_params;
 	pull_varattnos((Node *)context.used_vars,
-                   OUTER_VAR,
+				   INDEX_VAR,
 				   &gpa_info.outer_attrefs);
 	foreach (cell, cscan->scan.plan.targetlist)
 	{
@@ -2953,7 +2985,7 @@ retry:
 		}
 		else
 		{
-			econtext->ecxt_outertuple = slot_in;
+			econtext->ecxt_scantuple = slot_in;
 			slot_out = ExecProject(projection, &is_done);
 			if (is_done == ExprEndResult)
 			{
