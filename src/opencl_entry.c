@@ -419,6 +419,7 @@ clEnqueueWriteBuffer(cl_command_queue command_queue,
 									 event);
 }
 
+#if 0
 /*
  * NOTE: clEnqueueFillBuffer is a new feature being supported
  * from OpenCL 1.2; that beyonds the requirement of PG-Strom.
@@ -698,6 +699,7 @@ out_release_program:
 	clReleaseProgram(program);
 	return rc;
 }
+#endif
 
 cl_int
 clEnqueueCopyBuffer(cl_command_queue command_queue,
