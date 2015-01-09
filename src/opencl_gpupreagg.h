@@ -89,8 +89,8 @@ typedef struct
 #define KERN_GPUPREAGG_DMASEND_OFFSET(kgpreagg)			0
 #define KERN_GPUPREAGG_DMASEND_LENGTH(kgpreagg)						\
 	((uintptr_t)(KERN_GPUPREAGG_KROWMAP(kgpreagg)->rindex +			\
-				 KERN_GPUPREAGG_KROWMAP(kgpreagg)->nvalids < 0 ?	\
-				 0 : KERN_GPUPREAGG_KROWMAP(kgpreagg)->nvalids) -	\
+				 (KERN_GPUPREAGG_KROWMAP(kgpreagg)->nvalids < 0 ?	\
+				  0 : KERN_GPUPREAGG_KROWMAP(kgpreagg)->nvalids)) -	\
 	 (uintptr_t)(kgpreagg))
 #define KERN_GPUPREAGG_DMARECV_OFFSET(kgpreagg)			0
 #define KERN_GPUPREAGG_DMARECV_LENGTH(kgpreagg,nitems)					\
@@ -162,6 +162,7 @@ typedef struct
  */
 static cl_uint
 gpupreagg_hashvalue(__private cl_int *errcode,
+					__local cl_uint *crc32_table,
 					__global kern_data_store *kds,
 					__global kern_data_store *ktoast,
 					size_t kds_index);
@@ -549,7 +550,8 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 	barrier(CLK_LOCAL_MEM_FENCE);
 
 	if (get_global_id(0) < nitems)
-		hash_value = gpupreagg_hashvalue(&errcode, kds_src, ktoast,
+		hash_value = gpupreagg_hashvalue(&errcode, crc32_table,
+										 kds_src, ktoast,
 										 get_global_id(0));
 	/*
 	 * Find a hash-slot to determine the item index that represents
@@ -705,6 +707,9 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 		}
         barrier(CLK_LOCAL_MEM_FENCE);
     }
+out:
+	/* write-back execution status into host-side */
+	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
 }
 
 /*
@@ -750,7 +755,8 @@ gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
 	barrier(CLK_LOCAL_MEM_FENCE);
 
 	if (get_global_id(0) < nitems)
-		hash_value = gpupreagg_hashvalue(&errcode, kds_dst, ktoast,
+		hash_value = gpupreagg_hashvalue(&errcode, crc32_table,
+										 kds_dst, ktoast,
 										 get_global_id(0));
 	/*
 	 * Find a hash-slot to determine the item index that represents
@@ -783,7 +789,7 @@ retry:
 		}
 		else if (cur_slot.hash == new_slot.hash &&
 				 gpupreagg_keycomp(&errcode,
-								   kds_src, ktoast,
+								   kds_dst, ktoast,
 								   get_global_id(0),
 								   cur_slot.index) == 0)
 		{
@@ -814,7 +820,7 @@ retry:
 	if (kds_dst->nrooms < base_index + ngroups)
 	{
 		errcode = StromError_DataStoreNoSpace;
-		return;
+		goto out;
 	}
 	dest_index = base_index + index;
 
@@ -850,6 +856,7 @@ retry:
 			else
 			{
 				gpupreagg_global_calc(&errcode,
+									  attnum,
 									  kds_dst,
 									  ktoast,
 									  owner_index,
@@ -857,6 +864,9 @@ retry:
 			}
 		}
 	}
+out:
+    /* write-back execution status into host-side */
+    kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
 }
 
 /* ----------------------------------------------------------------
@@ -871,8 +881,8 @@ retry:
 
 #define ATOMIC_FLOAT_TEMPLATE(prefix, op_name)				\
 	static inline float													\
-	prefix##atomic_##op_name##(volatile prefix##space float *ptr,		\
-							   float value)								\
+	prefix##atomic_##op_name##_float(volatile prefix##space float *ptr,	\
+									 float value)						\
 	{																	\
 		uint	oldval = as_uint(*ptr);									\
 		uint	newval = as_uint(op_name(as_float(oldval), value));		\
@@ -896,8 +906,8 @@ ATOMIC_FLOAT_TEMPLATE(g,add)
 
 #define ATOMIC_DOUBLE_TEMPLATE(prefix, op_name)							\
 	static inline double												\
-	prefix##atomic_##op_name##(volatile prefix##space double *ptr,		\
-							   double value)							\
+	prefix##atomic_##op_name##_double(volatile prefix##space double *ptr, \
+									  double value)						\
 	{																	\
 		ulong	oldval = as_ulong(*ptr);								\
 		ulong	newval = as_ulong(op_name(as_double(oldval), value));	\

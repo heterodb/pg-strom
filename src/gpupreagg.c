@@ -1335,9 +1335,9 @@ gpupreagg_codegen_qual_eval(CustomScan *cscan, GpuPreAggInfo *gpa_info,
  *
  * static cl_uint
  * gpupreagg_hashvalue(__private cl_int *errcode,
+ *                     __local cl_uint *crc32_table,
  *                     __global kern_data_store *kds,
  *                     __global kern_data_store *ktoast,
- *                     __local cl_uint *crc32_table,
  *                     size_t kds_index);
  */
 static char *
@@ -1357,9 +1357,9 @@ gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	appendStringInfo(&decl,
 					 "static cl_uint\n"
 					 "gpupreagg_hashvalue(__private cl_int *errcode,\n"
+					 "                    __local cl_uint *crc32_table,\n"
 					 "                    __global kern_data_store *kds,\n"
 					 "                    __global kern_data_store *ktoast,\n"
-					 "                    __local cl_uint *crc32_table,\n"
 					 "                    size_t kds_index)\n"
 					 "{\n");
 	appendStringInfo(&body,
@@ -1654,7 +1654,7 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			/* nrows() is always int4 */
 			appendStringInfo(&body,
 							 "  case %d:\n"
-							 "    AGGCALC_%s_PSUM_%s(%s);\n"
+							 "    AGGCALC_%s_PADD_%s(%s);\n"
 							 "    break;\n",
 							 tle->resno - 1,
 							 aggcalc_class,
@@ -1695,7 +1695,7 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			type_oid = exprType(linitial(func->args));
 			appendStringInfo(&body,
 							 "  case %d:\n"
-							 "    AGGCALC_%s_PSUM_%s(%s);\n"
+							 "    AGGCALC_%s_PADD_%s(%s);\n"
 							 "    break;\n",
 							 tle->resno - 1,
 							 aggcalc_class,
@@ -2746,6 +2746,7 @@ pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
 	 * Also initialize kern_gpupreagg portion
 	 */
 	gpupreagg->kern.status = StromError_Success;
+	gpupreagg->kern.hash_size = (nvalids < 0 ? nitems : nvalids);
 	/* kern_parambuf */
 	kparams = KERN_GPUPREAGG_PARAMBUF(&gpupreagg->kern);
 	memcpy(kparams, gpas->kparams, gpas->kparams->length);
@@ -3931,7 +3932,8 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	/*
 	 * state object of gpupreagg
 	 */
-	ev_limit = 50 + kds->nblocks;
+	clserv_log("kds->nblocks = %u", kds->nblocks);
+	ev_limit = 50000 + kds->nblocks;
 	clgpa = calloc(1, offsetof(clstate_gpupreagg, events[ev_limit]));
 	if (!clgpa)
 	{
@@ -4046,7 +4048,6 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
 		goto error;
 	}
-	Assert(!clgpa->m_ghash);
 
 	/*
 	 * Next, enqueuing DMA send requests, prior to kernel execution.
