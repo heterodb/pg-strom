@@ -2969,6 +2969,7 @@ static TupleTableSlot *
 gpupreagg_next_tuple(GpuPreAggState *gpas)
 {
 	pgstrom_gpupreagg  *gpreagg = gpas->curr_chunk;
+	kern_row_map       *krowmap = KERN_GPUPREAGG_KROWMAP(&gpreagg->kern);
 	pgstrom_data_store *pds_dest = gpreagg->pds_dest;
 	TupleTableSlot	   *slot = NULL;
 	HeapTupleData		tuple;
@@ -2979,13 +2980,16 @@ gpupreagg_next_tuple(GpuPreAggState *gpas)
 
 	if (gpas->curr_recheck)
 		slot = gpupreagg_next_tuple_fallback(gpas);
-	else
+	else if (gpas->curr_index < krowmap->nvalids)
 	{
+		size_t		row_index = krowmap->rindex[gpas->curr_index++];
+
 		slot = gpas->css.ss.ps.ps_ResultTupleSlot;
-		if (!pgstrom_fetch_data_store(slot, pds_dest,
-									  gpas->curr_index++,
-									  &tuple))
+		if (!pgstrom_fetch_data_store(slot, pds_dest, row_index, &tuple))
+		{
+			elog(NOTICE, "Bug? empty slot was specified by kern_row_map");
 			slot = NULL;
+		}
 		else if (gpas->has_numeric)
 		{
 			TupleDesc	tupdesc = slot->tts_tupleDescriptor;
@@ -3290,6 +3294,7 @@ typedef struct
 	cl_mem				m_kds_dst;	/* kds of aggregation results */
 	cl_mem				m_ghash;	/* global hashslot */
 	cl_uint				ev_kern_prep;	/* event index of kern_prep */
+	cl_uint				ev_kern_init;	/* event index of kern_init */
 	cl_uint				ev_kern_lagg;	/* event index of kern_lagg */
 	cl_uint				ev_kern_gagg;	/* event index of kern_gagg */
 	cl_uint				ev_limit;
@@ -3348,7 +3353,7 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 		gpreagg->msg.pfm.time_dma_send += (tv_end - tv_start) / 1000;
 
 		/*
-		 * Prep kernel execution time
+		 * Prep kernel execution time (includes global hash table init)
 		 */
 		i = clgpa->ev_kern_prep;
 		rc = clGetEventProfilingInfo(clgpa->events[i],
@@ -3367,28 +3372,48 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 			goto skip_perfmon;
 		gpreagg->msg.pfm.time_kern_prep += (tv_end - tv_start) / 1000;
 
+		if (clgpa->kern_init)
+		{
+			i = clgpa->ev_kern_init;
+			rc = clGetEventProfilingInfo(clgpa->events[i],
+										 CL_PROFILING_COMMAND_START,
+										 sizeof(cl_ulong),
+										 &tv_start,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			rc = clGetEventProfilingInfo(clgpa->events[i],
+										 CL_PROFILING_COMMAND_END,
+										 sizeof(cl_ulong),
+										 &tv_end,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			gpreagg->msg.pfm.time_kern_prep += (tv_end - tv_start) / 1000;
+		}
+
 		/*
 		 * Local reduction kernel execution time (if any)
 		 */
-		i = clgpa->ev_kern_lagg;
-		rc = clGetEventProfilingInfo(clgpa->events[i],
-									 CL_PROFILING_COMMAND_START,
-									 sizeof(cl_ulong),
-									 &tv_start,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
-		rc = clGetEventProfilingInfo(clgpa->events[i],
-									 CL_PROFILING_COMMAND_END,
-									 sizeof(cl_ulong),
-									 &tv_end,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
-		if (!gpreagg->local_reduction)
-			gpreagg->msg.pfm.time_kern_prep += (tv_end - tv_start) / 1000;
-		else
+		if (clgpa->kern_lagg)
+		{
+			i = clgpa->ev_kern_lagg;
+			rc = clGetEventProfilingInfo(clgpa->events[i],
+										 CL_PROFILING_COMMAND_START,
+										 sizeof(cl_ulong),
+										 &tv_start,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			rc = clGetEventProfilingInfo(clgpa->events[i],
+										 CL_PROFILING_COMMAND_END,
+										 sizeof(cl_ulong),
+										 &tv_end,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
 			gpreagg->msg.pfm.time_kern_lagg += (tv_end - tv_start) / 1000;
+		}
 
 		/*
 		 * Global reduction kernel execution time
@@ -3648,7 +3673,7 @@ clserv_launch_init_hashslot(clstate_gpupreagg *clgpa, cl_uint nitems)
 				   opencl_strerror(rc));
 		return rc;
 	}
-	clgpa->ev_index++;
+	clgpa->ev_kern_init = clgpa->ev_index++;
 	clgpa->gpreagg->msg.pfm.num_kern_prep++;
 
 	return CL_SUCCESS;
@@ -3768,7 +3793,7 @@ clserv_launch_local_reduction(clstate_gpupreagg *clgpa, cl_uint nitems)
 				   opencl_strerror(rc));
 		return rc;
 	}
-	clgpa->ev_index++;
+	clgpa->ev_kern_lagg = clgpa->ev_index++;
 	clgpa->gpreagg->msg.pfm.num_kern_lagg++;
 
 	return CL_SUCCESS;
@@ -3875,7 +3900,7 @@ clserv_launch_global_reduction(clstate_gpupreagg *clgpa, cl_uint nitems)
 				   opencl_strerror(rc));
 		return rc;
 	}
-	clgpa->ev_index++;
+	clgpa->ev_kern_gagg = clgpa->ev_index++;
 	clgpa->gpreagg->msg.pfm.num_kern_gagg++;
 
 	return CL_SUCCESS;
@@ -4161,7 +4186,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 
 	/* also, status and kern_row_map has to be written back */
 	offset = KERN_GPUPREAGG_DMARECV_OFFSET(&gpreagg->kern);
-	length = KERN_GPUPREAGG_DMARECV_LENGTH(&gpreagg->kern);
+	length = KERN_GPUPREAGG_DMARECV_LENGTH(&gpreagg->kern, nvalids);
 	rc = clEnqueueReadBuffer(clgpa->kcmdq,
 							 clgpa->m_gpreagg,
 							 CL_FALSE,

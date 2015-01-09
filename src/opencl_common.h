@@ -27,6 +27,7 @@
 
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
 #pragma OPENCL EXTENSION cl_khr_byte_addressable_store : enable
+#pragma OPENCL EXTENSION cl_khr_int64_base_atomics : enable
 
 /* NULL definition */
 #ifndef NULL
@@ -1240,8 +1241,8 @@ pg_varlena_param(__global kern_parambuf *kparams,
 STROMCL_SIMPLE_NULLTEST_TEMPLATE(varlena)
 
 static inline cl_uint
-pg_varlena_hashkey(__local cl_uint *crc32_table,
-				   cl_uint hash, pg_varlena_t datum)
+pg_varlena_comp_crc32(__local cl_uint *crc32_table,
+					  cl_uint hash, pg_varlena_t datum)
 {
 	if (!datum.isnull)
 	{
