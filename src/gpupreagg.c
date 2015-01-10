@@ -798,7 +798,7 @@ make_altfunc_expr(const char *func_name, List *args)
 	proc_form = (Form_pg_proc) GETSTRUCT(tuple);
 	expr = (Expr *) makeFuncExpr(HeapTupleGetOid(tuple),
 								 proc_form->prorettype,
-								 args,
+								 copyObjectFixupVarno(args),
 								 InvalidOid,
 								 InvalidOid,
 								 COERCE_EXPLICIT_CALL);
@@ -812,9 +812,12 @@ make_altfunc_nrows_expr(Aggref *aggref)
 	List	   *nrows_args = NIL;
 	ListCell   *cell;
 
+	/* NOTE: make_altfunc_expr() translates OUTER_VAR to INDEX_VAR,
+	 * so we don't need to translate the expression nodes at this
+	 * moment.
+	 */
 	if (aggref->aggfilter)
-		nrows_args = lappend(nrows_args,
-							 copyObjectFixupVarno(aggref->aggfilter));
+		nrows_args = lappend(nrows_args, copyObject(aggref->aggfilter));
 
 	foreach (cell, aggref->args)
 	{
@@ -822,7 +825,7 @@ make_altfunc_nrows_expr(Aggref *aggref)
 		NullTest	*ntest = makeNode(NullTest);
 
 		Assert(IsA(tle, TargetEntry));
-		ntest->arg = copyObjectFixupVarno(tle->expr);
+		ntest->arg = copyObject(tle->expr);
 		ntest->nulltesttype = IS_NOT_NULL;
 		ntest->argisrow = false;
 
