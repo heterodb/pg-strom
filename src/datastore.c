@@ -818,8 +818,9 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 
 		dest_addr = ((char *)kds + kds->length -
 					 kds->usage - LONGALIGN(tuple->t_len));
-		memcpy(dest_addr, tuple, tuple->t_len);
+		memcpy(dest_addr, tuple->t_data, tuple->t_len);
 		ritem->htup_offset = (hostptr_t)((char *)dest_addr - (char *)kds);
+		kds->usage += LONGALIGN(tuple->t_len);
 		kds->nitems++;
 
 		return true;

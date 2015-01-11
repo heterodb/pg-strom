@@ -2253,7 +2253,24 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	cscan->scan.scanrelid         = 0;
 	cscan->flags                  = 0;
 	cscan->methods                = &gpupreagg_scan_methods;
-	cscan->custom_ps_tlist        = copyObject(outer_node->targetlist);
+	foreach (cell, outer_node->targetlist)
+	{
+		TargetEntry *tle = lfirst(cell);
+		TargetEntry	*ps_tle;
+		Var		   *varnode;
+
+		varnode = makeVar(OUTER_VAR,
+						  tle->resno,
+						  exprType((Node *) tle->expr),
+						  exprTypmod((Node *) tle->expr),
+						  exprCollation((Node *) tle->expr),
+						  0);
+		ps_tle = makeTargetEntry((Expr *) varnode,
+								 list_length(cscan->custom_ps_tlist) + 1,
+								 tle->resname ? pstrdup(tle->resname) : NULL,
+								 tle->resjunk);
+		cscan->custom_ps_tlist = lappend(cscan->custom_ps_tlist, ps_tle);
+	}
 	outerPlan(cscan)              = outer_node;
 
 	/* also set up private information */
@@ -2262,7 +2279,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	gpa_info.grpColIdx      = pmemcpy(agg->grpColIdx,
 									  sizeof(AttrNumber) * agg->numCols);
 	gpa_info.outer_quals    = outer_quals;
-	gpa_info.outer_bulkload = outer_bulkload;
+	gpa_info.outer_bulkload = false; //outer_bulkload;
 	gpa_info.num_groups     = Max(agg->plan.plan_rows, 1.0);
 	gpa_info.outer_quals    = outer_quals;
 
