@@ -995,7 +995,7 @@ kern_get_datum_tupslot(__global kern_data_store *kds,
 		return NULL;
 	if (cmeta.attlen > 0)
 		return values + colidx;
-	return (__global char *)ktoast + values[colidx];
+	return (__global char *)(&ktoast->hostptr) + values[colidx];
 }
 
 static inline __global void *
@@ -1205,7 +1205,10 @@ pg_varlena_vstore(__global kern_data_store *kds,
 		*daddr = (Datum)((__global char *)datum.value -
 						 (__global char *)&ktoast->hostptr);
 	}
-	/* NOTE: pg_fixup_tupslot_vstore() shall be called later */
+	/*
+	 * NOTE: pg_fixup_tupslot_varlena() shall be called, prior to
+	 * the write-back of kern_data_store.
+	 */
 }
 
 static inline pg_varlena_t

@@ -727,6 +727,10 @@ kern_gpuhashjoin_projection_slot(__global kern_hashjoin *khashjoin,	/* in */
 	cl_int				depth;
 	cl_int				errcode = StromError_Success;
 
+	/* Update the nitems of kds_dest */
+	if (get_global_id(0) == 0)
+		kds_dest->nitems = kresults->nitems;
+
 	/* Case of overflow; it shall be retried or executed by CPU instead,
 	 * so no projection is needed anyway. We quickly exit the kernel.
 	 * No need to set an error code because kern_gpuhashjoin_main()
@@ -738,9 +742,6 @@ kern_gpuhashjoin_projection_slot(__global kern_hashjoin *khashjoin,	/* in */
 		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
 		goto out;
 	}
-	/* Update the nitems of kds_dest */
-	if (get_global_id(0) == 0)
-		kds_dest->nitems = kresults->nitems;
 	/* Do projection if thread is responsible */
 	if (get_global_id(0) >= kresults->nitems)
 		goto out;
