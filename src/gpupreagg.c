@@ -2279,7 +2279,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	gpa_info.grpColIdx      = pmemcpy(agg->grpColIdx,
 									  sizeof(AttrNumber) * agg->numCols);
 	gpa_info.outer_quals    = outer_quals;
-	gpa_info.outer_bulkload = false; //outer_bulkload;
+	gpa_info.outer_bulkload = outer_bulkload;
 	gpa_info.num_groups     = Max(agg->plan.plan_rows, 1.0);
 	gpa_info.outer_quals    = outer_quals;
 
