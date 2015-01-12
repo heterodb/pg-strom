@@ -403,7 +403,6 @@ __kernel void
 gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 					  __global kern_data_store *kds_in,
 					  __global kern_data_store *kds_src,
-					  __global pagg_hashslot *g_hashslot,
 					  KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
 	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);

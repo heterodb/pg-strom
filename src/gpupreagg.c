@@ -1411,7 +1411,7 @@ gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 
 		tle = get_tle_by_resno(cscan->scan.plan.targetlist, resno);
 		var = (Var *) tle->expr;
-		if (!IsA(var, Var) || var->varno != OUTER_VAR)
+		if (!IsA(var, Var) || var->varno != INDEX_VAR)
 			elog(ERROR, "Bug? A simple Var node is expected for group key: %s",
 				 nodeToString(var));
 
@@ -3567,7 +3567,6 @@ clserv_launch_preagg_preparation(clstate_gpupreagg *clgpa, cl_uint nitems)
 	 * gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 	 *                       __global kern_data_store *kds_in,
 	 *                       __global kern_data_store *kds_src,
-	 *                       __global kern_data_store *ktoast,
 	 *                       __local void *local_memory)
 	 */
 	clgpa->kern_prep = clCreateKernel(clgpa->program,
@@ -3984,7 +3983,6 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	/*
 	 * state object of gpupreagg
 	 */
-	clserv_log("kds->nblocks = %u", kds->nblocks);
 	ev_limit = 50000 + kds->nblocks;
 	clgpa = calloc(1, offsetof(clstate_gpupreagg, events[ev_limit]));
 	if (!clgpa)
@@ -4245,7 +4243,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 							 CL_FALSE,
 							 offset,
 							 length,
-							 &gpreagg->kern.status,
+							 &gpreagg->kern,
 							 1,
 							 &clgpa->events[clgpa->ev_index - 1],
 							 &clgpa->events[clgpa->ev_index]);
