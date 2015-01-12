@@ -597,6 +597,12 @@ extern Datum pgstrom_variance_float8_accum(PG_FUNCTION_ARGS);
 extern Datum pgstrom_covariance_float8_accum(PG_FUNCTION_ARGS);
 
 /*
+ * gpusort.c
+ */
+extern void pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan);
+extern void pgstrom_init_gpusort(void);
+
+/*
  * opencl_devinfo.c
  */
 extern int	pgstrom_get_device_nums(void);

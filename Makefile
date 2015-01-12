@@ -4,7 +4,7 @@ DATA = src/pg_strom--1.0.sql
 
 # Source file of CPU portion
 STROM_OBJS = main.o shmem.o codegen.o mqueue.o restrack.o grafter.o \
-        datastore.o gpuscan.o gpuhashjoin.o gpupreagg.o \
+        datastore.o gpuscan.o gpuhashjoin.o gpupreagg.o gpusort.o \
         opencl_entry.o opencl_serv.o opencl_devinfo.o opencl_devprog.o
 # Source file of GPU portion
 OPENCL_OBJS = opencl_common.o \
