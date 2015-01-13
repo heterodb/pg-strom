@@ -2285,7 +2285,8 @@ gpuhashjoin_begin(CustomScanState *node, EState *estate, int eflags)
 	 * initialize outer scan state
 	 */
 	ghjs->outer_done = false;
-	ghjs->outer_bulkload = ghj_info->outer_bulkload;
+	ghjs->outer_bulkload =
+		(!pgstrom_debug_bulkload_enabled ? false : ghj_info->outer_bulkload);
 	ghjs->outer_overflow = NULL;
 
 	/*
