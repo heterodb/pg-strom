@@ -2165,28 +2165,6 @@ pgstrom_plan_is_gpuhashjoin(const Plan *plan)
 	return false;
 }
 
-#if 0
-/*
- * pgstrom_gpuhashjoin_setup_bulkslot
- *
- * 
- *
- */
-void
-pgstrom_gpuhashjoin_setup_bulkslot(PlanState *outer_ps,
-								   ProjectionInfo **p_bulk_proj,
-								   TupleTableSlot **p_bulk_slot)
-{
-	GpuHashJoinState   *ghjs = (GpuHashJoinState *) outer_ps;
-
-	if (!IsA(ghjs, CustomScanState) ||
-		ghjs->css.methods != &gpuhashjoin_exec_methods.c)
-		elog(ERROR, "Bug? PlanState node is not GpuHashJoin");
-	*p_bulk_proj = ghjs->css.ss.ps.ps_ProjInfo;
-	*p_bulk_slot = ghjs->css.ss.ss_ScanTupleSlot;
-}
-#endif
-
 /*
  * multihash_dump_tables
  *
@@ -3188,48 +3166,6 @@ gpuhashjoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
  * Callback routines for MultiHash node
  *
  * ---------------------------------------------------------------- */
-#if 0
-static void
-multihash_set_plan_ref(PlannerInfo *root,
-					   CustomPlan *custom_plan,
-					   int rtoffset)
-{
-	MultiHash  *mhash = (MultiHash *) custom_plan;
-	List	   *tlist = NIL;
-	ListCell   *cell;
-
-	/* logic is copied from set_dummy_tlist_reference */
-	foreach (cell, mhash->cplan.plan.targetlist)
-	{
-		TargetEntry *tle = (TargetEntry *) lfirst(cell);
-		Var	   *oldvar = (Var *) tle->expr;
-		Var	   *newvar;
-
-		newvar = makeVar(OUTER_VAR,
-						 tle->resno,
-						 exprType((Node *) oldvar),
-						 exprTypmod((Node *) oldvar),
-                         exprCollation((Node *) oldvar),
-                         0);
-        if (IsA(oldvar, Var))
-		{
-			newvar->varnoold = oldvar->varno + rtoffset;
-            newvar->varoattno = oldvar->varattno;
-		}
-		else
-		{
-			newvar->varnoold = 0;		/* wasn't ever a plain Var */
-            newvar->varoattno = 0;
-		}
-		tle = flatCopyTargetEntry(tle);
-		tle->expr = (Expr *) newvar;
-		tlist = lappend(tlist, tle);
-	}
-	mhash->cplan.plan.targetlist = tlist;
-	Assert(mhash->cplan.plan.qual == NIL);
-}
-#endif
-
 pgstrom_multihash_tables *
 multihash_get_tables(pgstrom_multihash_tables *mhtables)
 {
