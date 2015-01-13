@@ -559,6 +559,8 @@ initial_cost_gpuhashjoin(PlannerInfo *root,
 	Cost		startup_cost;
 	Cost		run_cost;
 	Cost		row_cost;
+	double		hashjointuples;
+	double		row_population_ratio;
 	int			num_hash_clauses = 0;
 	int			i;
 
@@ -602,6 +604,28 @@ initial_cost_gpuhashjoin(PlannerInfo *root,
 	workspace->numbatches = 1;
 
 	/*
+	 * estimation of row-population ratio; that is a ratio between
+	 * output rows and input rows come from outer relation stream.
+	 * We use approx_tuple_count here because we need an estimation
+	 * based JOIN_INNER semantics.
+	 */
+	hashjointuples = gpath->cpath.path.parent->rows;
+	row_population_ratio = Max(1.0, hashjointuples / gpath->outer_path->rows);
+	if (row_population_ratio > 10.0)
+	{
+		elog(DEBUG1, "row population ratio (%.2f) too large, give up",
+			 row_population_ratio);
+		return false;
+	}
+	else if (row_population_ratio > 5.0)
+	{
+		elog(NOTICE, "row population ratio (%.2f) too large, rounded to 5.0",
+			 row_population_ratio);
+		row_population_ratio = 5.0;
+	}
+	gpath->row_population_ratio = row_population_ratio;
+
+	/*
 	 * Estimation of hash table size and number of outer loops
 	 * according to the split of hash tables.
 	 * In case of estimated plan cost is too large to win the
@@ -613,68 +637,6 @@ initial_cost_gpuhashjoin(PlannerInfo *root,
 	return true;
 }
 
-/*
- * approx_tuple_count - copied from costsize.c but arguments are adjusted
- * according to GpuHashJoinPath.
- */
-static double
-approx_tuple_count(PlannerInfo *root, GpuHashJoinPath *gpath)
-{
-	Path	   *outer_path = gpath->outer_path;
-	Selectivity selec = 1.0;
-	double		tuples = outer_path->rows;
-	int			i;
-
-	for (i=0; i < gpath->num_rels; i++)
-	{
-		Path	   *inner_path = gpath->inners[i].scan_path;
-		List	   *hash_clauses = gpath->inners[i].hash_clauses;
-		List	   *qual_clauses = gpath->inners[i].qual_clauses;
-		List	   *host_clauses = gpath->inners[i].host_clauses;
-		double		inner_tuples = inner_path->rows;
-		SpecialJoinInfo sjinfo;
-		ListCell   *cell;
-
-		/* make up a SpecialJoinInfo for JOIN_INNER semantics. */
-		sjinfo.type = T_SpecialJoinInfo;
-		sjinfo.min_lefthand  = outer_path->parent->relids;
-		sjinfo.min_righthand = inner_path->parent->relids;
-		sjinfo.syn_lefthand  = outer_path->parent->relids;
-		sjinfo.syn_righthand = inner_path->parent->relids;
-		sjinfo.jointype = JOIN_INNER;
-		/* we don't bother trying to make the remaining fields valid */
-		sjinfo.lhs_strict = false;
-		sjinfo.delay_upper_joins = false;
-		sjinfo.join_quals = NIL;
-
-		/* Get the approximate selectivity */
-		foreach (cell, hash_clauses)
-		{
-			Node   *qual = (Node *) lfirst(cell);
-
-			/* Note that clause_selectivity can cache its result */
-			selec *= clause_selectivity(root, qual, 0, JOIN_INNER, &sjinfo);
-		}
-		foreach (cell, qual_clauses)
-		{
-			Node   *qual = (Node *) lfirst(cell);
-
-			/* Note that clause_selectivity can cache its result */
-			selec *= clause_selectivity(root, qual, 0, JOIN_INNER, &sjinfo);
-		}
-		foreach (cell, host_clauses)
-		{
-			Node   *qual = (Node *) lfirst(cell);
-
-			/* Note that clause_selectivity can cache its result */
-			selec *= clause_selectivity(root, qual, 0, JOIN_INNER, &sjinfo);
-		}
-		/* Apply it to the input relation sizes */
-		tuples *= selec * inner_tuples;
-	}
-	return clamp_row_est(tuples);
-}
-
 static void
 final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 					   JoinCostWorkspace *workspace)
@@ -682,11 +644,10 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 	Path	   *path = &gpath->cpath.path;
 	Cost		startup_cost = workspace->startup_cost;
 	Cost		run_cost = workspace->run_cost;
+	double		hashjointuples = gpath->cpath.path.parent->rows;
 	QualCost	hash_cost;
 	QualCost	qual_cost;
 	QualCost	host_cost;
-	double		hashjointuples;
-	double		row_population_ratio;
 	int			i;
 
 	/* Mark the path with correct row estimation */
@@ -777,25 +738,6 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 	}
 
 	/*
-	 * Get approx # tuples passing the hashquals.  We use
-	 * approx_tuple_count here because we need an estimate done with
-	 * JOIN_INNER semantics.
-	 */
-	hashjointuples = approx_tuple_count(root, gpath);
-
-	row_population_ratio = hashjointuples / gpath->outer_path->rows;
-	if (row_population_ratio < 1.0)
-		row_population_ratio = 1.0;
-	if (row_population_ratio > 5.0)
-	{
-		elog(NOTICE, "row population ratio (%.2f) too large, rounded to 5.0",
-			 row_population_ratio);
-		row_population_ratio = 5.0;
-		/* usually, not recommended to use GpuHashJoin */
-		startup_cost += disable_cost;
-	}
-
-	/*
 	 * Also add cost for qualifiers to be run on host
 	 */
 	startup_cost += host_cost.startup;
@@ -803,7 +745,6 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 
 	gpath->cpath.path.startup_cost = startup_cost;
 	gpath->cpath.path.total_cost = startup_cost + run_cost;
-	gpath->row_population_ratio = row_population_ratio;
 }
 
 /*
