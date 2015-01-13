@@ -37,6 +37,7 @@ PG_MODULE_MAGIC;
 static bool	guc_pgstrom_enabled;
 static bool guc_pgstrom_enabled_global;
 bool	pgstrom_perfmon_enabled;
+bool	pgstrom_debug_bulkload_enabled;
 bool	pgstrom_show_device_kernel;
 int		pgstrom_chunk_size;
 int		pgstrom_max_async_chunks;
@@ -122,6 +123,14 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	DefineCustomBoolVariable("pg_strom.debug_bulkload_enabled",
+							 "Enables the bulk-loading mode of PG-Strom",
+							 NULL,
+							 &pgstrom_debug_bulkload_enabled,
+							 true,
+							 PGC_USERSET,
+                             GUC_NOT_IN_SAMPLE,
+                             NULL, NULL, NULL);
 	DefineCustomBoolVariable("pg_strom.show_device_kernel",
 							 "Enables to show device kernel on EXPLAIN",
 							 NULL,

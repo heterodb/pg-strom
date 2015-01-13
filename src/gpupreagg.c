@@ -2655,7 +2655,8 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	 * initialize child node
 	 */
 	outerPlanState(gpas) = ExecInitNode(outerPlan(cscan), estate, eflags);
-	gpas->outer_bulkload = gpa_info->outer_bulkload;
+	gpas->outer_bulkload =
+		(!pgstrom_debug_bulkload_enabled ? false : gpa_info->outer_bulkload);
 	gpas->outer_done = false;
 	gpas->outer_overflow = NULL;
 
