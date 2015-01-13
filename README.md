@@ -1,4 +1,4 @@
-PG-Storm
+PG-Strom
 ========
 
 PG-Strom is a custom-scan provider module for the PostgreSQL database.
