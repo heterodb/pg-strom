@@ -2471,16 +2471,6 @@ retry:
 		PlanState	   *inner_ps = innerPlanState(ghjs);
 		MultiHashNode  *mhnode;
 
-		/* unlink the previous pgstrom_multihash_tables */
-		if (ghjs->mhtables)
-		{
-			pgstrom_multihash_tables *mhtables = ghjs->mhtables;
-
-			Assert(ghjs->outer_done);	/* should not be the first call */
-			pgstrom_untrack_object(&mhtables->sobj);
-			multihash_put_tables(mhtables);
-			ghjs->mhtables = NULL;
-		}
 		/* load an inner hash-table */
 		mhnode = (MultiHashNode *) BulkExecProcNode(inner_ps);
 		if (!mhnode)
@@ -2492,10 +2482,31 @@ retry:
 			}
 			return NULL;	/* end of inner multi-hashtable */
 		}
+
+		/*
+		 * unlink the previous pgstrom_multihash_tables
+		 *
+		 * NOTE: we shouldn't release the multihash-tables immediately, even
+		 * if outer scan already touched end of the scan, because GpuHashJoin
+		 * may be required to rewind the position later. In multihash-table
+		 * is flat (not divided to multiple portion) and no parameter changes,
+		 * we can omit inner scan again.
+		 */
+		if (ghjs->mhtables)
+		{
+			pgstrom_multihash_tables *mhtables = ghjs->mhtables;
+
+			Assert(ghjs->outer_done);	/* should not be the first call */
+			pgstrom_untrack_object(&mhtables->sobj);
+			multihash_put_tables(mhtables);
+			ghjs->mhtables = NULL;
+		}
 		ghjs->mhtables = mhnode->mhtables;
 		pfree(mhnode);
 
-		/* rewind the outer scan for the next inner hash table */
+		/*
+		 * Rewind the outer scan pointer, if it is not first time.
+		 */
 		if (ghjs->outer_done)
 		{
 			ExecReScan(outerPlanState(ghjs));
@@ -2963,6 +2974,7 @@ gpuhashjoin_rescan(CustomScanState *node)
 {
 	GpuHashJoinState	   *ghjs = (GpuHashJoinState *) node;
 	pgstrom_gpuhashjoin	   *ghjoin;
+	pgstrom_multihash_tables *mhtables = ghjs->mhtables;
 
 	/* release asynchronous jobs, if any */
 	if (ghjs->curr_ghjoin)
@@ -2986,40 +2998,30 @@ gpuhashjoin_rescan(CustomScanState *node)
 	}
 
 	/*
-	 * We may be reuse inner hash table, if single-batch join, and there is
-	 * no parameter change for the inner subnodes.
+	 * TODO: we may reuse inner hash table, if flat hash table (that is not
+	 * divided to multiple portions) and no parameter changes.
+	 * However, gpuhashjoin_load_next_chunk() releases the hash-table when
+	 * our scan reached end of the scan... needs to fix up.
 	 */
-	if (ghjs->mhtables)
+	if (!mhtables || mhtables->is_divided ||
+		innerPlanState(ghjs)->chgParam != NULL)
 	{
-		pgstrom_multihash_tables *mhtables = ghjs->mhtables;
-		PlanState	   *inner_ps = innerPlanState(ghjs);
+		ExecReScan(innerPlanState(ghjs));
 
-		if (mhtables->is_divided || inner_ps->chgParam == NULL)
+		/* also, rewind the outer relation */
+		ghjs->outer_done = false;
+		ghjs->outer_overflow = NULL;
+		ExecReScan(outerPlanState(ghjs));
+
+		/* release the previous one */
+		if (mhtables)
 		{
-			/*
-             * if chgParam of subnode is not null then plan will be
-			 * re-scanned by first ExecProcNode.
-             */
-			if (inner_ps->chgParam == NULL)
-				ExecReScan(inner_ps);
-
-			/*
-			 * Release previous multi-hash-table
-			 */
 			pgstrom_untrack_object(&mhtables->sobj);
 			multihash_put_tables(mhtables);
 			ghjs->mhtables = NULL;
 		}
 	}
-
-	/*
-	 * if chgParam of subnode is not null then plan will be
-	 * re-scanned by first ExecProcNode.
-	 */
-	ghjs->outer_done = false;
-	ghjs->outer_overflow = NULL;
-	if (outerPlanState(ghjs)->chgParam == NULL)
-		ExecReScan(outerPlanState(ghjs));
+	/* elsewhere, we can reuse pre-built inner multihash-tables */
 }
 
 /*
