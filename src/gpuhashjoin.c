@@ -200,6 +200,7 @@ typedef struct
 	int			depth;		/* depth of this hash table */
 
 	cl_uint		nslots;		/* width of hash slots */
+	cl_uint		nloops;		/* expected number of batches */
 	Size		hashtable_size;
 	double		threshold;
 
@@ -226,6 +227,7 @@ form_multihash_info(CustomScan *cscan, MultiHashInfo *mh_info)
 
 	privs = lappend(privs, makeInteger(mh_info->depth));
 	privs = lappend(privs, makeInteger(mh_info->nslots));
+	privs = lappend(privs, makeInteger(mh_info->nloops));
 	privs = lappend(privs, makeInteger(mh_info->hashtable_size));
 	datum.fval = mh_info->threshold;
 	privs = lappend(privs, makeInteger(datum.ival));
@@ -250,6 +252,7 @@ deform_multihash_info(CustomScan *cscan)
 
 	mh_info->depth     = intVal(list_nth(privs, pindex++));
 	mh_info->nslots    = intVal(list_nth(privs, pindex++));
+	mh_info->nloops    = intVal(list_nth(privs, pindex++));
 	mh_info->hashtable_size = intVal(list_nth(privs, pindex++));
 	datum.ival         = intVal(list_nth(privs, pindex++));
 	mh_info->threshold = datum.fval;
@@ -326,6 +329,8 @@ typedef struct {
 	CustomScanState css;
 	int				depth;
 	cl_uint			nslots;
+	cl_int			nbatches_plan;
+	cl_int			nbatches_exec;
 	double			threshold;
 	Size			hashtable_size;
 	TupleTableSlot *outer_overflow;
@@ -1934,6 +1939,7 @@ create_gpuhashjoin_plan(PlannerInfo *root,
 		memset(&mh_info, 0, sizeof(MultiHashInfo));
 		mh_info.depth = i + 1;
 		mh_info.nslots = gpath->inners[i].nslots;
+		mh_info.nloops = gpath->inners[i].nloops;
 		mh_info.hashtable_size = gpath->hashtable_size;
 		mh_info.threshold = gpath->inners[i].threshold;
 		foreach (cell, hash_clause)
@@ -3224,6 +3230,8 @@ multihash_begin(CustomScanState *node, EState *estate, int eflags)
 
 	mhs->depth = mh_info->depth;
 	mhs->nslots = mh_info->nslots;
+	mhs->nbatches_plan = mh_info->nloops;
+	mhs->nbatches_exec = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0 ? -1 : 0);
 	mhs->threshold = mh_info->threshold;
 	mhs->hashtable_size = mh_info->hashtable_size;
 
@@ -3599,6 +3607,9 @@ out:
 	if (node->ss.ps.instrument)
 		InstrStopNode(node->ss.ps.instrument,
 					  !mhnode ? 0.0 : mhnode->mhtables->ntuples);
+	if (mhnode)
+		mhs->nbatches_exec++;
+
 	return mhnode;
 }
 
@@ -3632,6 +3643,7 @@ static void
 multihash_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
+	MultiHashState *mhs = (MultiHashState *) node;
 	MultiHashInfo  *mh_info = deform_multihash_info(cscan);
 	StringInfoData	str;
 	List		   *context;
@@ -3664,6 +3676,10 @@ multihash_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	if (es->format != EXPLAIN_FORMAT_TEXT)
 	{
 		resetStringInfo(&str);
+		if (mhs->nbatches_exec >= 0)
+			ExplainPropertyInteger("nBatches", mhs->nbatches_exec, es);
+		else
+			ExplainPropertyInteger("nBatches", mhs->nbatches_plan, es);
 		ExplainPropertyInteger("Buckets", mh_info->nslots, es);
 		appendStringInfo(&str, "%.2f%%", 100.0 * mh_info->threshold);
 		ExplainPropertyText("Memory Usage", str.data, es);
@@ -3672,7 +3688,10 @@ multihash_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	{
 		appendStringInfoSpaces(es->str, es->indent * 2);
 		appendStringInfo(es->str,
-						 "Buckets: %u  Memory Usage: %.2f%%\n",
+						 "nBatches: %u  Buckets: %u  Memory Usage: %.2f%%\n",
+						 mhs->nbatches_exec >= 0
+						 ? mhs->nbatches_exec
+						 : mhs->nbatches_plan,
 						 mh_info->nslots,
 						 100.0 * mh_info->threshold);
 	}
