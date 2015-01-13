@@ -200,6 +200,7 @@ typedef struct
 	int			depth;		/* depth of this hash table */
 
 	cl_uint		nslots;		/* width of hash slots */
+	cl_uint		nloops;		/* expected number of batches */
 	Size		hashtable_size;
 	double		threshold;
 
@@ -226,6 +227,7 @@ form_multihash_info(CustomScan *cscan, MultiHashInfo *mh_info)
 
 	privs = lappend(privs, makeInteger(mh_info->depth));
 	privs = lappend(privs, makeInteger(mh_info->nslots));
+	privs = lappend(privs, makeInteger(mh_info->nloops));
 	privs = lappend(privs, makeInteger(mh_info->hashtable_size));
 	datum.fval = mh_info->threshold;
 	privs = lappend(privs, makeInteger(datum.ival));
@@ -250,6 +252,7 @@ deform_multihash_info(CustomScan *cscan)
 
 	mh_info->depth     = intVal(list_nth(privs, pindex++));
 	mh_info->nslots    = intVal(list_nth(privs, pindex++));
+	mh_info->nloops    = intVal(list_nth(privs, pindex++));
 	mh_info->hashtable_size = intVal(list_nth(privs, pindex++));
 	datum.ival         = intVal(list_nth(privs, pindex++));
 	mh_info->threshold = datum.fval;
@@ -326,6 +329,8 @@ typedef struct {
 	CustomScanState css;
 	int				depth;
 	cl_uint			nslots;
+	cl_int			nbatches_plan;
+	cl_int			nbatches_exec;
 	double			threshold;
 	Size			hashtable_size;
 	TupleTableSlot *outer_overflow;
@@ -559,6 +564,8 @@ initial_cost_gpuhashjoin(PlannerInfo *root,
 	Cost		startup_cost;
 	Cost		run_cost;
 	Cost		row_cost;
+	double		hashjointuples;
+	double		row_population_ratio;
 	int			num_hash_clauses = 0;
 	int			i;
 
@@ -602,6 +609,28 @@ initial_cost_gpuhashjoin(PlannerInfo *root,
 	workspace->numbatches = 1;
 
 	/*
+	 * estimation of row-population ratio; that is a ratio between
+	 * output rows and input rows come from outer relation stream.
+	 * We use approx_tuple_count here because we need an estimation
+	 * based JOIN_INNER semantics.
+	 */
+	hashjointuples = gpath->cpath.path.parent->rows;
+	row_population_ratio = Max(1.0, hashjointuples / gpath->outer_path->rows);
+	if (row_population_ratio > 10.0)
+	{
+		elog(DEBUG1, "row population ratio (%.2f) too large, give up",
+			 row_population_ratio);
+		return false;
+	}
+	else if (row_population_ratio > 5.0)
+	{
+		elog(NOTICE, "row population ratio (%.2f) too large, rounded to 5.0",
+			 row_population_ratio);
+		row_population_ratio = 5.0;
+	}
+	gpath->row_population_ratio = row_population_ratio;
+
+	/*
 	 * Estimation of hash table size and number of outer loops
 	 * according to the split of hash tables.
 	 * In case of estimated plan cost is too large to win the
@@ -613,68 +642,6 @@ initial_cost_gpuhashjoin(PlannerInfo *root,
 	return true;
 }
 
-/*
- * approx_tuple_count - copied from costsize.c but arguments are adjusted
- * according to GpuHashJoinPath.
- */
-static double
-approx_tuple_count(PlannerInfo *root, GpuHashJoinPath *gpath)
-{
-	Path	   *outer_path = gpath->outer_path;
-	Selectivity selec = 1.0;
-	double		tuples = outer_path->rows;
-	int			i;
-
-	for (i=0; i < gpath->num_rels; i++)
-	{
-		Path	   *inner_path = gpath->inners[i].scan_path;
-		List	   *hash_clauses = gpath->inners[i].hash_clauses;
-		List	   *qual_clauses = gpath->inners[i].qual_clauses;
-		List	   *host_clauses = gpath->inners[i].host_clauses;
-		double		inner_tuples = inner_path->rows;
-		SpecialJoinInfo sjinfo;
-		ListCell   *cell;
-
-		/* make up a SpecialJoinInfo for JOIN_INNER semantics. */
-		sjinfo.type = T_SpecialJoinInfo;
-		sjinfo.min_lefthand  = outer_path->parent->relids;
-		sjinfo.min_righthand = inner_path->parent->relids;
-		sjinfo.syn_lefthand  = outer_path->parent->relids;
-		sjinfo.syn_righthand = inner_path->parent->relids;
-		sjinfo.jointype = JOIN_INNER;
-		/* we don't bother trying to make the remaining fields valid */
-		sjinfo.lhs_strict = false;
-		sjinfo.delay_upper_joins = false;
-		sjinfo.join_quals = NIL;
-
-		/* Get the approximate selectivity */
-		foreach (cell, hash_clauses)
-		{
-			Node   *qual = (Node *) lfirst(cell);
-
-			/* Note that clause_selectivity can cache its result */
-			selec *= clause_selectivity(root, qual, 0, JOIN_INNER, &sjinfo);
-		}
-		foreach (cell, qual_clauses)
-		{
-			Node   *qual = (Node *) lfirst(cell);
-
-			/* Note that clause_selectivity can cache its result */
-			selec *= clause_selectivity(root, qual, 0, JOIN_INNER, &sjinfo);
-		}
-		foreach (cell, host_clauses)
-		{
-			Node   *qual = (Node *) lfirst(cell);
-
-			/* Note that clause_selectivity can cache its result */
-			selec *= clause_selectivity(root, qual, 0, JOIN_INNER, &sjinfo);
-		}
-		/* Apply it to the input relation sizes */
-		tuples *= selec * inner_tuples;
-	}
-	return clamp_row_est(tuples);
-}
-
 static void
 final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 					   JoinCostWorkspace *workspace)
@@ -682,11 +649,10 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 	Path	   *path = &gpath->cpath.path;
 	Cost		startup_cost = workspace->startup_cost;
 	Cost		run_cost = workspace->run_cost;
+	double		hashjointuples = gpath->cpath.path.parent->rows;
 	QualCost	hash_cost;
 	QualCost	qual_cost;
 	QualCost	host_cost;
-	double		hashjointuples;
-	double		row_population_ratio;
 	int			i;
 
 	/* Mark the path with correct row estimation */
@@ -777,25 +743,6 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 	}
 
 	/*
-	 * Get approx # tuples passing the hashquals.  We use
-	 * approx_tuple_count here because we need an estimate done with
-	 * JOIN_INNER semantics.
-	 */
-	hashjointuples = approx_tuple_count(root, gpath);
-
-	row_population_ratio = hashjointuples / gpath->outer_path->rows;
-	if (row_population_ratio < 1.0)
-		row_population_ratio = 1.0;
-	if (row_population_ratio > 5.0)
-	{
-		elog(NOTICE, "row population ratio (%.2f) too large, rounded to 5.0",
-			 row_population_ratio);
-		row_population_ratio = 5.0;
-		/* usually, not recommended to use GpuHashJoin */
-		startup_cost += disable_cost;
-	}
-
-	/*
 	 * Also add cost for qualifiers to be run on host
 	 */
 	startup_cost += host_cost.startup;
@@ -803,7 +750,6 @@ final_cost_gpuhashjoin(PlannerInfo *root, GpuHashJoinPath *gpath,
 
 	gpath->cpath.path.startup_cost = startup_cost;
 	gpath->cpath.path.total_cost = startup_cost + run_cost;
-	gpath->row_population_ratio = row_population_ratio;
 }
 
 /*
@@ -1993,6 +1939,7 @@ create_gpuhashjoin_plan(PlannerInfo *root,
 		memset(&mh_info, 0, sizeof(MultiHashInfo));
 		mh_info.depth = i + 1;
 		mh_info.nslots = gpath->inners[i].nslots;
+		mh_info.nloops = gpath->inners[i].nloops;
 		mh_info.hashtable_size = gpath->hashtable_size;
 		mh_info.threshold = gpath->inners[i].threshold;
 		foreach (cell, hash_clause)
@@ -2224,28 +2171,6 @@ pgstrom_plan_is_gpuhashjoin(const Plan *plan)
 	return false;
 }
 
-#if 0
-/*
- * pgstrom_gpuhashjoin_setup_bulkslot
- *
- * 
- *
- */
-void
-pgstrom_gpuhashjoin_setup_bulkslot(PlanState *outer_ps,
-								   ProjectionInfo **p_bulk_proj,
-								   TupleTableSlot **p_bulk_slot)
-{
-	GpuHashJoinState   *ghjs = (GpuHashJoinState *) outer_ps;
-
-	if (!IsA(ghjs, CustomScanState) ||
-		ghjs->css.methods != &gpuhashjoin_exec_methods.c)
-		elog(ERROR, "Bug? PlanState node is not GpuHashJoin");
-	*p_bulk_proj = ghjs->css.ss.ps.ps_ProjInfo;
-	*p_bulk_slot = ghjs->css.ss.ss_ScanTupleSlot;
-}
-#endif
-
 /*
  * multihash_dump_tables
  *
@@ -2360,7 +2285,8 @@ gpuhashjoin_begin(CustomScanState *node, EState *estate, int eflags)
 	 * initialize outer scan state
 	 */
 	ghjs->outer_done = false;
-	ghjs->outer_bulkload = ghj_info->outer_bulkload;
+	ghjs->outer_bulkload =
+		(!pgstrom_debug_bulkload_enabled ? false : ghj_info->outer_bulkload);
 	ghjs->outer_overflow = NULL;
 
 	/*
@@ -2526,7 +2452,6 @@ gpuhashjoin_load_next_chunk(GpuHashJoinState *ghjs, int result_format)
 {
 	PlanState		   *subnode = outerPlanState(ghjs);
 	TupleDesc			tupdesc = ExecGetResultType(subnode);
-	pgstrom_gpuhashjoin *gpuhashjoin = NULL;
 	pgstrom_bulkslot	bulkdata;
 	pgstrom_bulkslot   *bulk = NULL;
 	struct timeval		tv1, tv2, tv3;
@@ -2546,16 +2471,6 @@ retry:
 		PlanState	   *inner_ps = innerPlanState(ghjs);
 		MultiHashNode  *mhnode;
 
-		/* unlink the previous pgstrom_multihash_tables */
-		if (ghjs->mhtables)
-		{
-			pgstrom_multihash_tables *mhtables = ghjs->mhtables;
-
-			Assert(ghjs->outer_done);	/* should not be the first call */
-			pgstrom_untrack_object(&mhtables->sobj);
-			multihash_put_tables(mhtables);
-			ghjs->mhtables = NULL;
-		}
 		/* load an inner hash-table */
 		mhnode = (MultiHashNode *) BulkExecProcNode(inner_ps);
 		if (!mhnode)
@@ -2567,10 +2482,31 @@ retry:
 			}
 			return NULL;	/* end of inner multi-hashtable */
 		}
+
+		/*
+		 * unlink the previous pgstrom_multihash_tables
+		 *
+		 * NOTE: we shouldn't release the multihash-tables immediately, even
+		 * if outer scan already touched end of the scan, because GpuHashJoin
+		 * may be required to rewind the position later. In multihash-table
+		 * is flat (not divided to multiple portion) and no parameter changes,
+		 * we can omit inner scan again.
+		 */
+		if (ghjs->mhtables)
+		{
+			pgstrom_multihash_tables *mhtables = ghjs->mhtables;
+
+			Assert(ghjs->outer_done);	/* should not be the first call */
+			pgstrom_untrack_object(&mhtables->sobj);
+			multihash_put_tables(mhtables);
+			ghjs->mhtables = NULL;
+		}
 		ghjs->mhtables = mhnode->mhtables;
 		pfree(mhnode);
 
-		/* rewind the outer scan for the new inner hash table */
+		/*
+		 * Rewind the outer scan pointer, if it is not first time.
+		 */
 		if (ghjs->outer_done)
 		{
 			ExecReScan(outerPlanState(ghjs));
@@ -2619,6 +2555,7 @@ retry:
 				break;
 			}
 		}
+
 		if (pds)
 		{
 			memset(&bulkdata, 0, sizeof(pgstrom_bulkslot));
@@ -2650,12 +2587,16 @@ retry:
 		ghjs->pfm.time_outer_load += timeval_diff(&tv2, &tv3);
 	}
 
-	if (bulk)
-		gpuhashjoin = pgstrom_create_gpuhashjoin(ghjs, bulk, result_format);
-	else
+	/*
+	 * We also need to check existence of next inner hash-chunks, even if
+	 * here is no more outer records, In case of hash-table splited-out,
+	 * we have to rewind the outer relation scan, then makes relations
+	 * join with the next inner hash chunks.
+	 */
+	if (!bulk)
 		goto retry;
 
-	return gpuhashjoin;
+	return pgstrom_create_gpuhashjoin(ghjs, bulk, result_format);
 }
 
 static bool
@@ -2733,8 +2674,7 @@ pgstrom_fetch_gpuhashjoin(GpuHashJoinState *ghjs,
 	 * unless it does not exceed pgstrom_max_async_chunks and any new
 	 * response is not replied during the loading.
 	 */
-	while (!ghjs->outer_done &&
-		   ghjs->num_running <= pgstrom_max_async_chunks)
+	while (ghjs->num_running <= pgstrom_max_async_chunks)
 	{
 		pgstrom_gpuhashjoin *ghjoin
 			= gpuhashjoin_load_next_chunk(ghjs, result_format);
@@ -3034,6 +2974,7 @@ gpuhashjoin_rescan(CustomScanState *node)
 {
 	GpuHashJoinState	   *ghjs = (GpuHashJoinState *) node;
 	pgstrom_gpuhashjoin	   *ghjoin;
+	pgstrom_multihash_tables *mhtables = ghjs->mhtables;
 
 	/* release asynchronous jobs, if any */
 	if (ghjs->curr_ghjoin)
@@ -3057,40 +2998,30 @@ gpuhashjoin_rescan(CustomScanState *node)
 	}
 
 	/*
-	 * We may be reuse inner hash table, if single-batch join, and there is
-	 * no parameter change for the inner subnodes.
+	 * TODO: we may reuse inner hash table, if flat hash table (that is not
+	 * divided to multiple portions) and no parameter changes.
+	 * However, gpuhashjoin_load_next_chunk() releases the hash-table when
+	 * our scan reached end of the scan... needs to fix up.
 	 */
-	if (ghjs->mhtables)
+	if (!mhtables || mhtables->is_divided ||
+		innerPlanState(ghjs)->chgParam != NULL)
 	{
-		pgstrom_multihash_tables *mhtables = ghjs->mhtables;
-		PlanState	   *inner_ps = innerPlanState(ghjs);
+		ExecReScan(innerPlanState(ghjs));
 
-		if (mhtables->is_divided || inner_ps->chgParam == NULL)
+		/* also, rewind the outer relation */
+		ghjs->outer_done = false;
+		ghjs->outer_overflow = NULL;
+		ExecReScan(outerPlanState(ghjs));
+
+		/* release the previous one */
+		if (mhtables)
 		{
-			/*
-             * if chgParam of subnode is not null then plan will be
-			 * re-scanned by first ExecProcNode.
-             */
-			if (inner_ps->chgParam == NULL)
-				ExecReScan(inner_ps);
-
-			/*
-			 * Release previous multi-hash-table
-			 */
 			pgstrom_untrack_object(&mhtables->sobj);
 			multihash_put_tables(mhtables);
 			ghjs->mhtables = NULL;
 		}
 	}
-
-	/*
-	 * if chgParam of subnode is not null then plan will be
-	 * re-scanned by first ExecProcNode.
-	 */
-	ghjs->outer_done = false;
-	ghjs->outer_overflow = NULL;
-	if (outerPlanState(ghjs)->chgParam == NULL)
-		ExecReScan(outerPlanState(ghjs));
+	/* elsewhere, we can reuse pre-built inner multihash-tables */
 }
 
 /*
@@ -3247,48 +3178,6 @@ gpuhashjoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
  * Callback routines for MultiHash node
  *
  * ---------------------------------------------------------------- */
-#if 0
-static void
-multihash_set_plan_ref(PlannerInfo *root,
-					   CustomPlan *custom_plan,
-					   int rtoffset)
-{
-	MultiHash  *mhash = (MultiHash *) custom_plan;
-	List	   *tlist = NIL;
-	ListCell   *cell;
-
-	/* logic is copied from set_dummy_tlist_reference */
-	foreach (cell, mhash->cplan.plan.targetlist)
-	{
-		TargetEntry *tle = (TargetEntry *) lfirst(cell);
-		Var	   *oldvar = (Var *) tle->expr;
-		Var	   *newvar;
-
-		newvar = makeVar(OUTER_VAR,
-						 tle->resno,
-						 exprType((Node *) oldvar),
-						 exprTypmod((Node *) oldvar),
-                         exprCollation((Node *) oldvar),
-                         0);
-        if (IsA(oldvar, Var))
-		{
-			newvar->varnoold = oldvar->varno + rtoffset;
-            newvar->varoattno = oldvar->varattno;
-		}
-		else
-		{
-			newvar->varnoold = 0;		/* wasn't ever a plain Var */
-            newvar->varoattno = 0;
-		}
-		tle = flatCopyTargetEntry(tle);
-		tle->expr = (Expr *) newvar;
-		tlist = lappend(tlist, tle);
-	}
-	mhash->cplan.plan.targetlist = tlist;
-	Assert(mhash->cplan.plan.qual == NIL);
-}
-#endif
-
 pgstrom_multihash_tables *
 multihash_get_tables(pgstrom_multihash_tables *mhtables)
 {
@@ -3347,6 +3236,8 @@ multihash_begin(CustomScanState *node, EState *estate, int eflags)
 
 	mhs->depth = mh_info->depth;
 	mhs->nslots = mh_info->nslots;
+	mhs->nbatches_plan = mh_info->nloops;
+	mhs->nbatches_exec = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0 ? -1 : 0);
 	mhs->threshold = mh_info->threshold;
 	mhs->hashtable_size = mh_info->hashtable_size;
 
@@ -3722,6 +3613,9 @@ out:
 	if (node->ss.ps.instrument)
 		InstrStopNode(node->ss.ps.instrument,
 					  !mhnode ? 0.0 : mhnode->mhtables->ntuples);
+	if (mhnode)
+		mhs->nbatches_exec++;
+
 	return mhnode;
 }
 
@@ -3755,6 +3649,7 @@ static void
 multihash_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
+	MultiHashState *mhs = (MultiHashState *) node;
 	MultiHashInfo  *mh_info = deform_multihash_info(cscan);
 	StringInfoData	str;
 	List		   *context;
@@ -3787,6 +3682,10 @@ multihash_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	if (es->format != EXPLAIN_FORMAT_TEXT)
 	{
 		resetStringInfo(&str);
+		if (mhs->nbatches_exec >= 0)
+			ExplainPropertyInteger("nBatches", mhs->nbatches_exec, es);
+		else
+			ExplainPropertyInteger("nBatches", mhs->nbatches_plan, es);
 		ExplainPropertyInteger("Buckets", mh_info->nslots, es);
 		appendStringInfo(&str, "%.2f%%", 100.0 * mh_info->threshold);
 		ExplainPropertyText("Memory Usage", str.data, es);
@@ -3795,7 +3694,10 @@ multihash_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	{
 		appendStringInfoSpaces(es->str, es->indent * 2);
 		appendStringInfo(es->str,
-						 "Buckets: %u  Memory Usage: %.2f%%\n",
+						 "nBatches: %u  Buckets: %u  Memory Usage: %.2f%%\n",
+						 mhs->nbatches_exec >= 0
+						 ? mhs->nbatches_exec
+						 : mhs->nbatches_plan,
 						 mh_info->nslots,
 						 100.0 * mh_info->threshold);
 	}
