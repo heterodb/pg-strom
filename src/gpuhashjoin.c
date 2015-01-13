@@ -2451,7 +2451,6 @@ gpuhashjoin_load_next_chunk(GpuHashJoinState *ghjs, int result_format)
 {
 	PlanState		   *subnode = outerPlanState(ghjs);
 	TupleDesc			tupdesc = ExecGetResultType(subnode);
-	pgstrom_gpuhashjoin *gpuhashjoin = NULL;
 	pgstrom_bulkslot	bulkdata;
 	pgstrom_bulkslot   *bulk = NULL;
 	struct timeval		tv1, tv2, tv3;
@@ -2495,7 +2494,7 @@ retry:
 		ghjs->mhtables = mhnode->mhtables;
 		pfree(mhnode);
 
-		/* rewind the outer scan for the new inner hash table */
+		/* rewind the outer scan for the next inner hash table */
 		if (ghjs->outer_done)
 		{
 			ExecReScan(outerPlanState(ghjs));
@@ -2544,6 +2543,7 @@ retry:
 				break;
 			}
 		}
+
 		if (pds)
 		{
 			memset(&bulkdata, 0, sizeof(pgstrom_bulkslot));
@@ -2575,12 +2575,16 @@ retry:
 		ghjs->pfm.time_outer_load += timeval_diff(&tv2, &tv3);
 	}
 
-	if (bulk)
-		gpuhashjoin = pgstrom_create_gpuhashjoin(ghjs, bulk, result_format);
-	else
+	/*
+	 * We also need to check existence of next inner hash-chunks, even if
+	 * here is no more outer records, In case of hash-table splited-out,
+	 * we have to rewind the outer relation scan, then makes relations
+	 * join with the next inner hash chunks.
+	 */
+	if (!bulk)
 		goto retry;
 
-	return gpuhashjoin;
+	return pgstrom_create_gpuhashjoin(ghjs, bulk, result_format);
 }
 
 static bool
@@ -2658,8 +2662,7 @@ pgstrom_fetch_gpuhashjoin(GpuHashJoinState *ghjs,
 	 * unless it does not exceed pgstrom_max_async_chunks and any new
 	 * response is not replied during the loading.
 	 */
-	while (!ghjs->outer_done &&
-		   ghjs->num_running <= pgstrom_max_async_chunks)
+	while (ghjs->num_running <= pgstrom_max_async_chunks)
 	{
 		pgstrom_gpuhashjoin *ghjoin
 			= gpuhashjoin_load_next_chunk(ghjs, result_format);
