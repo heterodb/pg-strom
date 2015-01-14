@@ -66,7 +66,9 @@ typedef struct
 	cl_int			status;		/* result of kernel execution */
 	cl_uint			hash_size;	/* size of global hash-slots */
 	cl_uint			pg_crc32_table[256];	/* master CRC32 table */
-	char			__padding__[8];		/* alignment */
+	char			__padding__[4];		/* alignment */
+	cl_int			debug_usage;	/* if > 0, usage of debug buffer */
+	cl_uint			debug[2048];	/* debug buffer */
 	kern_parambuf	kparams;
 	/*
 	 *  kern_row_map shall be located next to kern_parmbuf
