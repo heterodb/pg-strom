@@ -412,8 +412,8 @@ gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 	cl_int					errcode = StromError_Success;
 	cl_uint					offset;
 	cl_uint					nitems;
-	size_t					hash_size;
-	size_t					curr_index;
+//	size_t					hash_size;
+//	size_t					curr_index;
 	size_t					kds_index;
 	__local cl_uint			base;
 
@@ -486,7 +486,7 @@ gpupreagg_init_global_hashslot(__global kern_gpupreagg *kgpreagg,
 							   __global pagg_hashslot *g_hashslot)
 {
 	__global kern_row_map *krowmap = KERN_GPUPREAGG_KROWMAP(kgpreagg);
-	cl_int					errcode = StromError_Success;
+	//cl_int					errcode = StromError_Success;
 	size_t					hash_size;
 	size_t					curr_index;
 
@@ -566,7 +566,7 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 	 * to the grouping key. We cannot help the later case, so retry
 	 * the steps with next hash-slot.
 	 */
-	l_hashslot = (__local pagg_hashslot *)STROMALIGN(LOCAL_WORKMEM);
+	l_hashslot = (__local pagg_hashslot *)LOCAL_WORKMEM;
 	for (index = get_local_id(0);
 		 index < hash_size;
 		 index += get_local_size(0))
@@ -648,7 +648,7 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
      * NOTE: local memory shall be reused to l_datum array, so l_hashslot[]
      * array is no longer available across here
      */
-	l_datum = (__local pagg_datum *)STROMALIGN(LOCAL_WORKMEM);
+	l_datum = (__local pagg_datum *)LOCAL_WORKMEM;
 	for (attnum = 0; attnum < nattrs; attnum++)
 	{
 		/*
@@ -880,8 +880,8 @@ out:
 #define gspace	__global
 #define add(x,y)	(x)+(y)
 
-#define ATOMIC_FLOAT_TEMPLATE(prefix, op_name)				\
-	static inline float													\
+#define ATOMIC_FLOAT_TEMPLATE(prefix, op_name)							\
+	float																\
 	prefix##atomic_##op_name##_float(volatile prefix##space float *ptr,	\
 									 float value)						\
 	{																	\
@@ -906,7 +906,7 @@ ATOMIC_FLOAT_TEMPLATE(g,min)
 ATOMIC_FLOAT_TEMPLATE(g,add)
 
 #define ATOMIC_DOUBLE_TEMPLATE(prefix, op_name)							\
-	static inline double												\
+	double																\
 	prefix##atomic_##op_name##_double(volatile prefix##space double *ptr, \
 									  double value)						\
 	{																	\
@@ -935,7 +935,7 @@ ATOMIC_DOUBLE_TEMPLATE(g,add)
 #ifdef PG_NUMERIC_TYPE_DEFINED
 
 #define ATOMIC_NUMERIC_MINMAX_TEMPLATE(prefix,op_name,ineq_op)	\
-	static inline cl_ulong										\
+	cl_ulong													\
 	prefic##atomic_##op_name(__private int *errcode,			\
 							 volatile prefix##space cl_ulong *ptr,	\
 							 cl_ulong numeric_value)			\
@@ -964,7 +964,7 @@ ATOMIC_NUMERIC_MINMAX_TEMPLATE(g,max,>)
 ATOMIC_NUMERIC_MINMAX_TEMPLATE(g,min,<)
 
 #define ATOMIC_NUMERIC_ADD_TEMPLATE(prefix)								\
-	static inline cl_ulong												\
+	cl_ulong															\
 	prefix##atomic_add_numeric(__private int *errcode,					\
 							   volatile prefix##space cl_ulong *ptr,	\
 							   cl_ulong numeric_value)					\

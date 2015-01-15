@@ -1427,6 +1427,7 @@ gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 						 " = pg_%s_vref(kds,ktoast,errcode,%u,kds_index);\n",
 						 dtype->type_name, resno,
 						 dtype->type_name, resno - 1);
+
 		/* crc32 computing */
 		appendStringInfo(
 			&body,
@@ -1551,12 +1552,12 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 					 "                  size_t y_index)\n"
 					 "{\n"
 					 "%s"	/* variable/params declarations */
-					 "  pg_int4_t comp;\n"
-					 "\n"
+					 "%s"	/* definition of pg_int4_t comp */
 					 "%s"
 					 "  return 0;\n"
 					 "}\n",
 					 decl.data,
+					 gpa_info->numCols > 0 ? "  pg_int4_t comp;\n" : "",
 					 body.data);
 	pfree(decl.data);
 	pfree(body.data);

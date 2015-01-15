@@ -320,7 +320,7 @@ pg_numeric_from_varlena(__private int *errcode, __global varlena *vl_val)
  * to reference varlena variable. Otherwise, in case when attlen > 0, it
  * tries to fetch fixed-length variable.
  */
-static pg_numeric_t
+pg_numeric_t
 pg_numeric_vref(__global kern_data_store *kds,
 				__global kern_data_store *ktoast,
 				__private int *errcode,
@@ -345,7 +345,7 @@ pg_numeric_vref(__global kern_data_store *kds,
 /* pg_numeric_vstore() is same as template */
 STROMCL_SIMPLE_VARSTORE_TEMPLATE(numeric, cl_ulong)
 
-static pg_numeric_t
+pg_numeric_t
 pg_numeric_param(__global kern_parambuf *kparams,
 				 __private int *errcode,
 				 cl_uint param_id)
@@ -368,9 +368,7 @@ pg_numeric_param(__global kern_parambuf *kparams,
 	return result;
 }
 
-
-
-static pg_bool_t
+pg_bool_t
 pgfn_numeric_isnull(__private int *errcode,
 					pg_numeric_t arg)
 {
@@ -381,9 +379,7 @@ pgfn_numeric_isnull(__private int *errcode,
 	return result;
 }
 
-
-
-static pg_bool_t
+pg_bool_t
 pgfn_numeric_isnotnull(__private int *errcode,
 					   pg_numeric_t arg)
 {
@@ -467,8 +463,6 @@ numeric_to_integer(__private int *errcode, pg_numeric_t arg, cl_int size)
 	return v;
 }
 
-
-
 static pg_float8_t
 numeric_to_float(__private int *errcode, pg_numeric_t arg)
 {
@@ -510,7 +504,7 @@ numeric_to_float(__private int *errcode, pg_numeric_t arg)
 
 
 
-static pg_int2_t
+pg_int2_t
 pgfn_numeric_int2(__private int *errcode, pg_numeric_t arg)
 {
 	pg_int2_t v;
@@ -522,9 +516,7 @@ pgfn_numeric_int2(__private int *errcode, pg_numeric_t arg)
 	return v;
 }
 
-
-
-static pg_int4_t
+pg_int4_t
 pgfn_numeric_int4(__private int *errcode, pg_numeric_t arg)
 {
 	pg_int4_t v;
@@ -536,18 +528,14 @@ pgfn_numeric_int4(__private int *errcode, pg_numeric_t arg)
 	return v;
 }
 
-
-
-static pg_int8_t
+pg_int8_t
 pgfn_numeric_int8(__private int *errcode, pg_numeric_t arg)
 {
 	pg_int8_t v;
 	return numeric_to_integer(errcode, arg, sizeof(v.value));
 }
 
-
-
-static pg_float4_t
+pg_float4_t
 pgfn_numeric_float4(__private int *errcode, pg_numeric_t arg)
 {
 
@@ -563,9 +551,7 @@ pgfn_numeric_float4(__private int *errcode, pg_numeric_t arg)
 	return v;
 }
 
-
-
-static pg_float8_t
+pg_float8_t
 pgfn_numeric_float8(__private int *errcode, pg_numeric_t arg)
 {
 	return numeric_to_float(errcode, arg);
@@ -743,42 +729,34 @@ float_to_numeric(__private int *errcode, pg_float8_t arg, int dig)
 
 
 
-static pg_numeric_t
+pg_numeric_t
 pgfn_int2_numeric(__private int *errcode, pg_int2_t arg)
 {
 	pg_int8_t tmp = { arg.value, arg.isnull };
 	return integer_to_numeric(errcode, tmp, sizeof(arg.value));
 }
 
-
-
-static pg_numeric_t
+pg_numeric_t
 pgfn_int4_numeric(__private int *errcode, pg_int4_t arg)
 {
 	pg_int8_t tmp = { arg.value, arg.isnull };
 	return integer_to_numeric(errcode, tmp, sizeof(arg.value));
 }
 
-
-
-static pg_numeric_t
+pg_numeric_t
 pgfn_int8_numeric(__private int *errcode, pg_int8_t arg)
 {
 	return integer_to_numeric(errcode, arg, sizeof(arg.value));
 }
 
-
-
-static pg_numeric_t
+pg_numeric_t
 pgfn_float4_numeric(__private int *errcode, pg_float4_t arg)
 {
 	pg_float8_t tmp = { (cl_double)arg.value, arg.isnull };
 	return float_to_numeric(errcode, tmp, FLT_DIG);
 }
 
-
-
-static pg_numeric_t
+pg_numeric_t
 pgfn_float8_numeric(__private int *errcode, pg_float8_t arg)
 {
 	return float_to_numeric(errcode, arg, DBL_DIG);
@@ -790,16 +768,14 @@ pgfn_float8_numeric(__private int *errcode, pg_float8_t arg)
  * Numeric operator functions
  * ----------------------------------------------------------------
  */
-static pg_numeric_t
+pg_numeric_t
 pgfn_numeric_uplus(__private int *errcode, pg_numeric_t arg)
 {
 	/* return the value as-is */
 	return arg;
 }
 
-
-
-static pg_numeric_t
+pg_numeric_t
 pgfn_numeric_uminus(__private int *errcode, pg_numeric_t arg)
 {
 	/* reverse the sign bit */
@@ -807,9 +783,7 @@ pgfn_numeric_uminus(__private int *errcode, pg_numeric_t arg)
 	return arg;
 }
 
-
-
-static pg_numeric_t
+pg_numeric_t
 pgfn_numeric_abs(__private int *errcode, pg_numeric_t arg)
 {
 	/* clear the sign bit */
@@ -817,9 +791,7 @@ pgfn_numeric_abs(__private int *errcode, pg_numeric_t arg)
 	return arg;
 }
 
-
-
-static pg_numeric_t
+pg_numeric_t
 pgfn_numeric_add(__private int *errcode,
 				 pg_numeric_t arg1, pg_numeric_t arg2)
 {
@@ -926,8 +898,7 @@ pgfn_numeric_add(__private int *errcode,
 }
 
 
-
-static pg_numeric_t
+pg_numeric_t
 pgfn_numeric_sub(__private int *errcode,
 				 pg_numeric_t arg1, pg_numeric_t arg2)
 {
@@ -937,8 +908,7 @@ pgfn_numeric_sub(__private int *errcode,
 }
 
 
-
-static pg_numeric_t
+pg_numeric_t
 pgfn_numeric_mul(__private int *errcode,
 				 pg_numeric_t arg1, pg_numeric_t arg2)
 {
@@ -1099,9 +1069,7 @@ numeric_cmp(__private cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
 	return ret;
 }
 
-
-
-static pg_bool_t
+pg_bool_t
 pgfn_numeric_eq(__private cl_int *errcode,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
@@ -1119,9 +1087,7 @@ pgfn_numeric_eq(__private cl_int *errcode,
 	return result;
 }
 
-
-
-static pg_bool_t
+pg_bool_t
 pgfn_numeric_ne(__private cl_int *errcode,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
@@ -1140,8 +1106,7 @@ pgfn_numeric_ne(__private cl_int *errcode,
 }
 
 
-
-static pg_bool_t
+pg_bool_t
 pgfn_numeric_lt(__private cl_int *errcode,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
@@ -1160,8 +1125,7 @@ pgfn_numeric_lt(__private cl_int *errcode,
 }
 
 
-
-static pg_bool_t
+pg_bool_t
 pgfn_numeric_le(__private cl_int *errcode,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
@@ -1180,8 +1144,7 @@ pgfn_numeric_le(__private cl_int *errcode,
 }
 
 
-
-static pg_bool_t
+pg_bool_t
 pgfn_numeric_gt(__private cl_int *errcode,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
@@ -1200,8 +1163,7 @@ pgfn_numeric_gt(__private cl_int *errcode,
 }
 
 
-
-static pg_bool_t
+pg_bool_t
 pgfn_numeric_ge(__private cl_int *errcode,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
@@ -1220,8 +1182,7 @@ pgfn_numeric_ge(__private cl_int *errcode,
 }
 
 
-
-static pg_int4_t
+pg_int4_t
 pgfn_numeric_cmp(__private cl_int *errcode,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
