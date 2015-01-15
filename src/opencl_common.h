@@ -25,7 +25,9 @@
  */
 #ifdef OPENCL_DEVICE_CODE
 
-//#pragma OPENCL EXTENSION cl_khr_fp64 : enable
+#if __OPENCL_VERSION__ < CL_VERSION_1_2
+#pragma OPENCL EXTENSION cl_khr_fp64 : enable
+#endif
 #pragma OPENCL EXTENSION cl_khr_byte_addressable_store : enable
 #pragma OPENCL EXTENSION cl_khr_int64_base_atomics : enable
 #pragma OPENCL EXTENSION cl_khr_int64_extended_atomics : enable 

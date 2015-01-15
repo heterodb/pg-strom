@@ -757,6 +757,7 @@ gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
 
 	if (get_global_id(0) < nitems)
 	{
+	retry:
 		hash_value = gpupreagg_hashvalue(&errcode, crc32_table,
 										 kds_dst, ktoast,
 										 get_global_id(0));
