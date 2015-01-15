@@ -1611,7 +1611,7 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	ListCell	   *cell;
 
 	initStringInfo(&body);
-	if (is_global_aggcalc)
+	if (!is_global_aggcalc)
 	{
 		appendStringInfo(
 			&body,
@@ -1646,10 +1646,10 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			"    STROM_SET_ERROR(errcode,StromError_SanityCheckViolation);\n"
 			"    return;\n"
 			"  }\n"
-			"  accum_isnull = KERN_DATA_STORE_ISNULL(kds,accum_index);\n"
-			"  accum_value  = KERN_DATA_STORE_VALUES(kds,accum_index);\n"
-			"  new_isnull  = *KERN_DATA_STORE_ISNULL(kds,newval_index);\n"
-			"  new_value   = *KERN_DATA_STORE_VALUES(kds,newval_index);\n"
+			"  accum_isnull = KERN_DATA_STORE_ISNULL(kds,accum_index) + attnum;\n"
+			"  accum_value = KERN_DATA_STORE_VALUES(kds,accum_index) + attnum;\n"
+			"  new_isnull = *(KERN_DATA_STORE_ISNULL(kds,newval_index) + attnum);\n"
+			"  new_value = *(KERN_DATA_STORE_VALUES(kds,newval_index) + attnum);\n"
 			"\n");
 		aggcalc_class = "GLOBAL";
 		aggcalc_args = "errcode,accum_isnull,accum_value,new_isnull,new_value";
