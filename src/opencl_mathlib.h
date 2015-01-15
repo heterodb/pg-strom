@@ -38,7 +38,7 @@
  * Functions for addition operator on basic data types
  */
 #define BASIC_INT_ADDFUNC_TEMPLATE(name,r_type,x_type,y_type)		\
-	static inline pg_##r_type##_t									\
+	pg_##r_type##_t													\
 	pgfn_##name(__private cl_int *errcode,							\
 				pg_##x_type##_t arg1, pg_##y_type##_t arg2)			\
 	{																\
@@ -59,7 +59,7 @@
 	}
 
 #define BASIC_FLOAT_ADDFUNC_TEMPLATE(name,r_type,x_type,y_type)		\
-	static inline pg_##r_type##_t									\
+	pg_##r_type##_t													\
 	pgfn_##name(__private cl_int *errcode,                          \
 				pg_##x_type##_t arg1, pg_##y_type##_t arg2)         \
     {																\
@@ -100,7 +100,7 @@ BASIC_FLOAT_ADDFUNC_TEMPLATE(float8pl, float8, float8, float8)
  * Functions for addition operator on basic data types
  */
 #define BASIC_INT_SUBFUNC_TEMPLATE(name,r_type,x_type,y_type)		\
-	static inline pg_##r_type##_t									\
+	pg_##r_type##_t													\
 	pgfn_##name(__private cl_int *errcode,							\
 				pg_##x_type##_t arg1, pg_##y_type##_t arg2)			\
 	{																\
@@ -121,7 +121,7 @@ BASIC_FLOAT_ADDFUNC_TEMPLATE(float8pl, float8, float8, float8)
 	}
 
 #define BASIC_FLOAT_SUBFUNC_TEMPLATE(name,r_type,x_type,y_type)		\
-	static inline pg_##r_type##_t									\
+	pg_##r_type##_t													\
 	pgfn_##name(__private cl_int *errcode,                          \
 				pg_##x_type##_t arg1, pg_##y_type##_t arg2)         \
     {																\
@@ -162,7 +162,7 @@ BASIC_FLOAT_SUBFUNC_TEMPLATE(float8mi,  float8, float8, float8)
 /*
  * Functions for multiplication operator on basic data types
  */
-static inline pg_int2_t
+pg_int2_t
 pgfn_int2mul(__private cl_int *errcode, pg_int2_t arg1, pg_int2_t arg2)
 {
 	pg_int2_t	result;
@@ -183,7 +183,7 @@ pgfn_int2mul(__private cl_int *errcode, pg_int2_t arg1, pg_int2_t arg2)
 	return result;
 }
 
-static inline pg_int4_t
+pg_int4_t
 pgfn_int24mul(__private cl_int *errcode, pg_int2_t arg1, pg_int4_t arg2)
 {
 	pg_int4_t	result;
@@ -204,7 +204,7 @@ pgfn_int24mul(__private cl_int *errcode, pg_int2_t arg1, pg_int4_t arg2)
 	return result;
 }
 
-static inline pg_int8_t
+pg_int8_t
 pgfn_int28mul(__private cl_int *errcode, pg_int2_t arg1, pg_int8_t arg2)
 {
 	pg_int8_t	result;
@@ -224,7 +224,7 @@ pgfn_int28mul(__private cl_int *errcode, pg_int2_t arg1, pg_int8_t arg2)
 	return result;
 }
 
-static inline pg_int4_t
+pg_int4_t
 pgfn_int42mul(__private cl_int *errcode, pg_int4_t arg1, pg_int2_t arg2)
 {
 	pg_int4_t	result;
@@ -245,7 +245,7 @@ pgfn_int42mul(__private cl_int *errcode, pg_int4_t arg1, pg_int2_t arg2)
 	return result;
 }
 
-static inline pg_int4_t
+pg_int4_t
 pgfn_int4mul(__private cl_int *errcode, pg_int4_t arg1, pg_int4_t arg2)
 {
 	pg_int4_t	result;
@@ -270,7 +270,7 @@ pgfn_int4mul(__private cl_int *errcode, pg_int4_t arg1, pg_int4_t arg2)
 	return result;
 }
 
-static inline pg_int8_t
+pg_int8_t
 pgfn_int48mul(__private cl_int *errcode, pg_int4_t arg1, pg_int8_t arg2)
 {
 	pg_int8_t	result;
@@ -290,7 +290,7 @@ pgfn_int48mul(__private cl_int *errcode, pg_int4_t arg1, pg_int8_t arg2)
 	return result;
 }
 
-static inline pg_int8_t
+pg_int8_t
 pgfn_int82mul(__private cl_int *errcode, pg_int8_t arg1, pg_int2_t arg2)
 {
 	pg_int8_t	result;
@@ -310,7 +310,7 @@ pgfn_int82mul(__private cl_int *errcode, pg_int8_t arg1, pg_int2_t arg2)
 	return result;
 }
 
-static inline pg_int8_t
+pg_int8_t
 pgfn_int84mul(__private cl_int *errcode, pg_int8_t arg1, pg_int4_t arg2)
 {
 	pg_int8_t	result;
@@ -330,7 +330,7 @@ pgfn_int84mul(__private cl_int *errcode, pg_int8_t arg1, pg_int4_t arg2)
 	return result;
 }
 
-static inline pg_int8_t
+pg_int8_t
 pgfn_int8mul(__private cl_int *errcode, pg_int8_t arg1, pg_int8_t arg2)
 {
 	pg_int8_t	result;
@@ -353,7 +353,7 @@ pgfn_int8mul(__private cl_int *errcode, pg_int8_t arg1, pg_int8_t arg2)
 	return result;
 }
 
-static inline pg_float4_t
+pg_float4_t
 pgfn_float4mul(__private cl_int *errcode, pg_float4_t arg1, pg_float4_t arg2)
 {
 	pg_float4_t	result;
@@ -369,7 +369,7 @@ pgfn_float4mul(__private cl_int *errcode, pg_float4_t arg1, pg_float4_t arg2)
 	return result;
 }
 
-static inline pg_float8_t
+pg_float8_t
 pgfn_float48mul(__private cl_int *errcode, pg_float4_t arg1, pg_float8_t arg2)
 {
 	pg_float8_t	result;
@@ -385,7 +385,7 @@ pgfn_float48mul(__private cl_int *errcode, pg_float4_t arg1, pg_float8_t arg2)
 	return result;
 }
 
-static inline pg_float8_t
+pg_float8_t
 pgfn_float84mul(__private cl_int *errcode, pg_float8_t arg1, pg_float4_t arg2)
 {
 	pg_float8_t	result;
@@ -401,7 +401,7 @@ pgfn_float84mul(__private cl_int *errcode, pg_float8_t arg1, pg_float4_t arg2)
 	return result;
 }
 
-static inline pg_float8_t
+pg_float8_t
 pgfn_float8mul(__private cl_int *errcode, pg_float8_t arg1, pg_float8_t arg2)
 {
 	pg_float8_t	result;
@@ -422,7 +422,7 @@ pgfn_float8mul(__private cl_int *errcode, pg_float8_t arg1, pg_float8_t arg2)
  */
 #define SAMESIGN(a,b)	(((a) < 0) == ((b) < 0))
 
-static inline pg_int2_t
+pg_int2_t
 pgfn_int2div(__private cl_int *errcode, pg_int2_t arg1, pg_int2_t arg2)
 {
 	pg_int2_t	result;
@@ -450,7 +450,7 @@ pgfn_int2div(__private cl_int *errcode, pg_int2_t arg1, pg_int2_t arg2)
 	return result;
 }
 
-static inline pg_int4_t
+pg_int4_t
 pgfn_int24div(__private cl_int *errcode, pg_int2_t arg1, pg_int4_t arg2)
 {
 	pg_int4_t	result;
@@ -469,7 +469,7 @@ pgfn_int24div(__private cl_int *errcode, pg_int2_t arg1, pg_int4_t arg2)
 	return result;
 }
 
-static inline pg_int8_t
+pg_int8_t
 pgfn_int28div(__private cl_int *errcode, pg_int2_t arg1, pg_int8_t arg2)
 {
 	pg_int8_t	result;
@@ -488,7 +488,7 @@ pgfn_int28div(__private cl_int *errcode, pg_int2_t arg1, pg_int8_t arg2)
 	return result;
 }
 
-static inline pg_int4_t
+pg_int4_t
 pgfn_int42div(__private cl_int *errcode, pg_int4_t arg1, pg_int2_t arg2)
 {
 	pg_int4_t	result;
@@ -516,7 +516,7 @@ pgfn_int42div(__private cl_int *errcode, pg_int4_t arg1, pg_int2_t arg2)
 	return result;
 }
 
-static inline pg_int4_t
+pg_int4_t
 pgfn_int4div(__private cl_int *errcode, pg_int4_t arg1, pg_int4_t arg2)
 {
 	pg_int4_t	result;
@@ -544,7 +544,7 @@ pgfn_int4div(__private cl_int *errcode, pg_int4_t arg1, pg_int4_t arg2)
 	return result;
 }
 
-static inline pg_int8_t
+pg_int8_t
 pgfn_int48div(__private cl_int *errcode, pg_int4_t arg1, pg_int8_t arg2)
 {
 	pg_int8_t	result;
@@ -563,7 +563,7 @@ pgfn_int48div(__private cl_int *errcode, pg_int4_t arg1, pg_int8_t arg2)
 	return result;
 }
 
-static inline pg_int8_t
+pg_int8_t
 pgfn_int82div(__private cl_int *errcode, pg_int8_t arg1, pg_int2_t arg2)
 {
 	pg_int8_t	result;
@@ -591,7 +591,7 @@ pgfn_int82div(__private cl_int *errcode, pg_int8_t arg1, pg_int2_t arg2)
 	return result;
 }
 
-static inline pg_int8_t
+pg_int8_t
 pgfn_int84div(__private cl_int *errcode, pg_int8_t arg1, pg_int4_t arg2)
 {
 	pg_int8_t	result;
@@ -619,7 +619,7 @@ pgfn_int84div(__private cl_int *errcode, pg_int8_t arg1, pg_int4_t arg2)
 	return result;
 }
 
-static inline pg_int8_t
+pg_int8_t
 pgfn_int8div(__private cl_int *errcode, pg_int8_t arg1, pg_int8_t arg2)
 {
 	pg_int8_t	result;
@@ -647,7 +647,7 @@ pgfn_int8div(__private cl_int *errcode, pg_int8_t arg1, pg_int8_t arg2)
 	return result;
 }
 
-static inline pg_float4_t
+pg_float4_t
 pgfn_float4div(__private cl_int *errcode, pg_float4_t arg1, pg_float4_t arg2)
 {
 	pg_float4_t	result;
@@ -671,7 +671,7 @@ pgfn_float4div(__private cl_int *errcode, pg_float4_t arg1, pg_float4_t arg2)
 	return result;
 }
 
-static inline pg_float8_t
+pg_float8_t
 pgfn_float48div(__private cl_int *errcode, pg_float4_t arg1, pg_float8_t arg2)
 {
 	pg_float8_t	result;
@@ -695,7 +695,7 @@ pgfn_float48div(__private cl_int *errcode, pg_float4_t arg1, pg_float8_t arg2)
 	return result;
 }
 
-static inline pg_float8_t
+pg_float8_t
 pgfn_float84div(__private cl_int *errcode, pg_float8_t arg1, pg_float4_t arg2)
 {
 	pg_float8_t	result;
@@ -719,7 +719,7 @@ pgfn_float84div(__private cl_int *errcode, pg_float8_t arg1, pg_float4_t arg2)
 	return result;
 }
 
-static inline pg_float8_t
+pg_float8_t
 pgfn_float8div(__private cl_int *errcode, pg_float8_t arg1, pg_float8_t arg2)
 {
 	pg_float8_t	result;
@@ -746,8 +746,8 @@ pgfn_float8div(__private cl_int *errcode, pg_float8_t arg1, pg_float8_t arg2)
 /*
  * Functions for modulo operator on basic data types
  */
-#define BASIC_INT_MODFUNC_TEMPLATE(name,d_type)		\
-	static inline pg_##d_type##_t									\
+#define BASIC_INT_MODFUNC_TEMPLATE(name,d_type)						\
+	pg_##d_type##_t													\
 	pgfn_##name(__private cl_int *errcode,							\
 				pg_##d_type##_t arg1, pg_##d_type##_t arg2)			\
 	{																\
@@ -778,7 +778,7 @@ BASIC_INT_MODFUNC_TEMPLATE(int8mod, int8)
 /*
  * Misc mathematic functions
  */
-static inline pg_float8_t
+pg_float8_t
 pgfn_dsqrt(__private cl_int *errcode, pg_float8_t arg1)
 {
 	pg_float8_t	result;
@@ -801,7 +801,7 @@ pgfn_dsqrt(__private cl_int *errcode, pg_float8_t arg1)
 	return result;
 }
 
-static inline pg_float8_t
+pg_float8_t
 pgfn_dpow(__private cl_int *errcode, pg_float8_t arg1, pg_float8_t arg2)
 {
 	pg_float8_t	result;
@@ -822,7 +822,7 @@ pgfn_dpow(__private cl_int *errcode, pg_float8_t arg1, pg_float8_t arg2)
 	return result;
 }
 
-static inline pg_float8_t
+pg_float8_t
 pgfn_dpi(__private cl_int *errcode)
 {
 	pg_float8_t	result;

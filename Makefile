@@ -20,7 +20,7 @@ OPENCL_SOURCES = $(addprefix src/,$(OPENCL_OBJS:.o=.c))
 # Header and Libraries of OpenCL (to be autoconf?)
 IPATH_LIST := /usr/include \
 	/usr/local/cuda/include \
-	/opt/AMDAPP/include
+	/opt/AMDAPP*/include
 LPATH_LIST := /usr/lib64 \
 	/usr/lib \
 	/usr/local/cuda/lib64 \

@@ -25,7 +25,7 @@
  */
 #ifdef OPENCL_DEVICE_CODE
 
-#pragma OPENCL EXTENSION cl_khr_fp64 : enable
+//#pragma OPENCL EXTENSION cl_khr_fp64 : enable
 #pragma OPENCL EXTENSION cl_khr_byte_addressable_store : enable
 
 /* NULL definition */
@@ -34,7 +34,7 @@
 #endif
 
 /* Misc definitions */
-#define FLEXIBLE_ARRAY_MEMBER	0
+#define FLEXIBLE_ARRAY_MEMBER	1	/* instead of 0, to avoid AMD's bug! */
 #define offsetof(TYPE, FIELD)   ((uintptr_t) &((TYPE *)0)->FIELD)
 #define lengthof(ARRAY)			(sizeof(ARRAY) / sizeof((ARRAY)[0]))
 #define BITS_PER_BYTE			8
@@ -190,17 +190,14 @@ typedef struct PageHeaderData
 	ItemIdData		pd_linp[1];		/* beginning of line pointer array */
 } PageHeaderData;
 
-typedef __global PageHeaderData *PageHeader;
+typedef PageHeaderData *PageHeader;
 
 #define SizeOfPageHeaderData (offsetof(PageHeaderData, pd_linp))
 
 #define PageGetMaxOffsetNumber(page) \
-	(((PageHeader) (page))->pd_lower <= SizeOfPageHeaderData ? 0 :	\
-	 ((((PageHeader) (page))->pd_lower - SizeOfPageHeaderData)		\
-	  / sizeof(ItemIdData)))
-
-
-
+	(((__global PageHeaderData *)(page))->pd_lower <= SizeOfPageHeaderData \
+	 ? 0 : ((((__global PageHeaderData *)(page))->pd_lower -			\
+			 SizeOfPageHeaderData) / sizeof(ItemIdData)))
 
 /*
  * We need to re-define HeapTupleHeaderData and t_infomask related stuff
@@ -404,7 +401,7 @@ typedef struct {
 	 + (row_index))
 
 #define KERN_DATA_STORE_ROWBLOCK(kds,blk_index)							\
-	((__global PageHeader)												\
+	((__global PageHeaderData *)										\
 	 ((__global cl_char *)(kds) +										\
 	  (TYPEALIGN(BLCKSZ,												\
 				 STROMALIGN(offsetof(kern_data_store,					\
@@ -446,7 +443,7 @@ typedef struct {
 	cl_uint		poffset[FLEXIBLE_ARRAY_MEMBER];	/* offset of params */
 } kern_parambuf;
 
-static inline __global void *
+__global void *
 kparam_get_value(__global kern_parambuf *kparams, cl_uint pindex)
 {
 	if (pindex >= kparams->nparams)
@@ -534,7 +531,7 @@ static __global Datum *pg_common_vstore(__global kern_data_store *kds,
 	} pg_##NAME##_t;
 
 #define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)			\
-	static pg_##NAME##_t									\
+	pg_##NAME##_t											\
 	pg_##NAME##_vref(__global kern_data_store *kds,			\
 					 __global kern_data_store *ktoast,		\
 					 __private int *errcode,				\
@@ -556,7 +553,7 @@ static __global Datum *pg_common_vstore(__global kern_data_store *kds,
 	}
 
 #define STROMCL_SIMPLE_VARSTORE_TEMPLATE(NAME,BASE)			\
-	static void												\
+	void													\
 	pg_##NAME##_vstore(__global kern_data_store *kds,		\
 					   __global kern_data_store *ktoast,	\
 					   __private int *errcode,				\
@@ -581,20 +578,20 @@ static __global Datum *pg_common_vstore(__global kern_data_store *kds,
 	}
 
 #define STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)			\
-	static pg_##NAME##_t									\
+	pg_##NAME##_t											\
 	pg_##NAME##_param(__global kern_parambuf *kparams,		\
 					  __private int *errcode,				\
 					  cl_uint param_id)						\
 	{														\
 		pg_##NAME##_t result;								\
-		__global BASE *addr;								\
 															\
 		if (param_id < kparams->nparams &&					\
 			kparams->poffset[param_id] > 0)					\
 		{													\
-			result.value = *((__global BASE *)				\
-							 ((__global char *)kparams +	\
-							  kparams->poffset[param_id]));	\
+			__global BASE *addr = (__global BASE *)			\
+				((__global char *)kparams +					\
+				 kparams->poffset[param_id]);				\
+			result.value = *addr;							\
 			result.isnull = false;							\
 		}													\
 		else												\
@@ -604,7 +601,7 @@ static __global Datum *pg_common_vstore(__global kern_data_store *kds,
 	}
 
 #define STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)				\
-	static pg_bool_t										\
+	pg_bool_t												\
 	pgfn_##NAME##_isnull(__private int *errcode,			\
 						 pg_##NAME##_t arg)					\
 	{														\
@@ -615,7 +612,7 @@ static __global Datum *pg_common_vstore(__global kern_data_store *kds,
 		return result;										\
 	}														\
 															\
-	static pg_bool_t										\
+	pg_bool_t												\
 	pgfn_##NAME##_isnotnull(__private int *errcode,			\
 							pg_##NAME##_t arg)				\
 	{														\
@@ -868,7 +865,7 @@ kern_get_tuple_rs(__global kern_data_store *kds, cl_uint rowidx,
 				  __private cl_uint *p_blk_index)
 {
 	__global kern_rowitem *kritem;
-	PageHeader	page;
+	__global PageHeaderData *page;
 	cl_ushort	blk_index;
 	cl_ushort	item_offset;
 	cl_ushort	item_max;
@@ -990,7 +987,6 @@ pg_common_vstore(__global kern_data_store *kds,
 				 cl_uint colidx, cl_uint rowidx,
 				 cl_bool isnull)
 {
-	kern_colmeta		cmeta;
 	__global Datum	   *slot_values;
 	__global cl_char   *slot_isnull;
 	/*
@@ -1027,7 +1023,7 @@ pg_common_vstore(__global kern_data_store *kds,
  * up pointers in the tuple store.
  * In case of any other format, we don't need to modify the data.
  */
-static void
+void
 pg_fixup_tupslot_varlena(__private int *errcode,
 						 __global kern_data_store *kds,
 						 __global kern_data_store *ktoast,
@@ -1125,7 +1121,7 @@ pg_dump_data_store(__global kern_data_store *kds, __constant const char *label)
  */
 STROMCL_SIMPLE_DATATYPE_TEMPLATE(varlena, __global varlena *)
 
-static inline pg_varlena_t
+pg_varlena_t
 pg_varlena_vref(__global kern_data_store *kds,
 				__global kern_data_store *ktoast,
 				__private int *errcode,
@@ -1181,7 +1177,6 @@ pg_varlena_param(__global kern_parambuf *kparams,
 				 cl_uint param_id)
 {
 	pg_varlena_t	result;
-	__global varlena *addr;
 
 	if (param_id < kparams->nparams &&
 		kparams->poffset[param_id] > 0)
@@ -1211,7 +1206,7 @@ STROMCL_SIMPLE_NULLTEST_TEMPLATE(varlena)
 	typedef pg_varlena_t	pg_##NAME##_t;
 
 #define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)			\
-	static pg_##NAME##_t								\
+	pg_##NAME##_t										\
 	pg_##NAME##_vref(__global kern_data_store *kds,		\
 					 __global kern_data_store *ktoast,	\
 					 __private int *errcode,			\
@@ -1223,7 +1218,7 @@ STROMCL_SIMPLE_NULLTEST_TEMPLATE(varlena)
 	}
 
 #define STROMCL_VARLENA_VARSTORE_TEMPLATE(NAME)				\
-	static void												\
+	void													\
 	pg_##NAME##_vstore(__global kern_data_store *kds,		\
 					   __global kern_data_store *ktoast,	\
 					   __private int *errcode,				\
@@ -1236,7 +1231,7 @@ STROMCL_SIMPLE_NULLTEST_TEMPLATE(varlena)
 	}
 
 #define STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)						\
-	static pg_##NAME##_t											\
+	pg_##NAME##_t													\
 	pg_##NAME##_param(__global kern_parambuf *kparams,				\
 					  __private int *errcode,						\
 					  cl_uint param_id)								\
@@ -1245,13 +1240,13 @@ STROMCL_SIMPLE_NULLTEST_TEMPLATE(varlena)
 	}
 
 #define STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)						\
-	static pg_bool_t												\
+	pg_bool_t														\
 	pgfn_##NAME##_isnull(__private int *errcode,					\
 					   pg_##NAME##_t arg)							\
 	{																\
 		return pgfn_varlena_isnull(errcode, arg);					\
 	}																\
-	static pg_bool_t												\
+	pg_bool_t														\
 	pgfn_##NAME##_isnotnull(__private int *errcode,					\
 						  pg_##NAME##_t arg)						\
 	{																\
@@ -1280,7 +1275,7 @@ STROMCL_VARLENA_TYPE_TEMPLATE(bytea)
 /*
  * memcpy implementation for OpenCL kernel usage
  */
-static __global void *
+__global void *
 memset(__global void *s, int c, size_t n)
 {
 	__global char  *ptr = s;
@@ -1291,7 +1286,7 @@ memset(__global void *s, int c, size_t n)
 }
 
 #if 1
-static __global void *
+__global void *
 memcpy(__global void *__dst, __global const void *__src, size_t len)
 {
 	__global char		*dst = __dst;
@@ -1308,7 +1303,7 @@ memcpy(__global void *__dst, __global const void *__src, size_t len)
 	return __dst;
 }
 #else
-static __global void *
+__global void *
 memcpy(__global void *__dst, __global const void *__src, size_t len)
 {
 	size_t		alignMask	= sizeof(cl_uint) - 1;
@@ -1539,7 +1534,7 @@ kern_writeback_error_status(__global cl_int *error_status,
 /* A utility function to evaluate pg_bool_t value as if built-in
  * bool variable.
  */
-static inline bool
+inline bool
 EVAL(pg_bool_t arg)
 {
 	if (!arg.isnull && arg.value != 0)
@@ -1565,7 +1560,7 @@ EVAL(pg_bool_t arg)
 /*
  * Functions for BooleanTest
  */
-static inline pg_bool_t
+pg_bool_t
 pgfn_bool_is_true(__private cl_int *errcode, pg_bool_t result)
 {
 	result.value = (!result.isnull && result.value);
@@ -1573,7 +1568,7 @@ pgfn_bool_is_true(__private cl_int *errcode, pg_bool_t result)
 	return result;
 }
 
-static inline pg_bool_t
+pg_bool_t
 pgfn_bool_is_not_true(__private cl_int *errcode, pg_bool_t result)
 {
 	result.value = (result.isnull || !result.value);
@@ -1581,7 +1576,7 @@ pgfn_bool_is_not_true(__private cl_int *errcode, pg_bool_t result)
 	return result;
 }
 
-static inline pg_bool_t
+pg_bool_t
 pgfn_bool_is_false(__private cl_int *errcode, pg_bool_t result)
 {
 	result.value = (!result.isnull && !result.value);
@@ -1589,7 +1584,7 @@ pgfn_bool_is_false(__private cl_int *errcode, pg_bool_t result)
 	return result;
 }
 
-static inline pg_bool_t
+pg_bool_t
 pgfn_bool_is_not_false(__private cl_int *errcode, pg_bool_t result)
 {
 	result.value = (result.isnull || result.value);
@@ -1597,7 +1592,7 @@ pgfn_bool_is_not_false(__private cl_int *errcode, pg_bool_t result)
 	return result;
 }
 
-static inline pg_bool_t
+pg_bool_t
 pgfn_bool_is_unknown(__private cl_int *errcode, pg_bool_t result)
 {
 	result.value = result.isnull;
@@ -1605,7 +1600,7 @@ pgfn_bool_is_unknown(__private cl_int *errcode, pg_bool_t result)
 	return result;
 }
 
-static inline pg_bool_t
+pg_bool_t
 pgfn_bool_is_not_unknown(__private cl_int *errcode, pg_bool_t result)
 {
 	result.value = !result.isnull;
@@ -1616,7 +1611,7 @@ pgfn_bool_is_not_unknown(__private cl_int *errcode, pg_bool_t result)
 /*
  * Functions for BoolOp (EXPR_AND and EXPR_OR shall be constructed on demand)
  */
-static inline pg_bool_t
+pg_bool_t
 pgfn_boolop_not(__private cl_int *errcode, pg_bool_t result)
 {
 	result.value = !result.value;

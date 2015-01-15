@@ -464,7 +464,6 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 								__global kern_data_store *kds_dest,	/* out */
 								KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
-	__global kern_parambuf  *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
 	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
 	__global cl_int	   *rbuffer;
 	__global void	   *datum;
@@ -475,7 +474,6 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 	cl_uint				offset;
 	cl_uint				total_len;
 	cl_uint				usage_head;
-	cl_uint				usage_tail;
 	__local cl_uint		usage_prev;
 	cl_int				errcode = StromError_Success;
 
@@ -718,7 +716,6 @@ kern_gpuhashjoin_projection_slot(__global kern_hashjoin *khashjoin,	/* in */
 								 __global kern_data_store *kds_dest, /* out */
 								 KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
-	__global kern_parambuf  *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
 	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
 	__global cl_int	   *rbuffer;
 	__global Datum	   *slot_values;
@@ -865,7 +862,7 @@ out:
  * Template of variable reference on the hash-entry
  */
 #define STROMCL_SIMPLE_HASHREF_TEMPLATE(NAME,BASE)				\
-	static pg_##NAME##_t										\
+	pg_##NAME##_t												\
 	pg_##NAME##_hashref(__global kern_hashtable *khtable,		\
 						__global kern_hashentry *kentry,		\
 						__private int *p_errcode,				\
@@ -886,7 +883,7 @@ out:
 		return result;											\
 	}
 
-static pg_varlena_t
+pg_varlena_t
 pg_varlena_hashref(__global kern_hashtable *khtable,
 				   __global kern_hashentry *kentry,
 				   __private int *p_errcode,
@@ -913,7 +910,7 @@ pg_varlena_hashref(__global kern_hashtable *khtable,
 }
 
 #define STROMCL_VARLENA_HASHREF_TEMPLATE(NAME)				\
-	static pg_##NAME##_t									\
+	pg_##NAME##_t											\
 	pg_##NAME##_hashref(__global kern_hashtable *khtable,	\
 						__global kern_hashentry *kentry,	\
 						__private int *p_errcode,			\
@@ -932,7 +929,7 @@ pg_varlena_hashref(__global kern_hashtable *khtable,
 #define EQ_CRC32C(crc1,crc2)	((crc1) == (crc2))
 
 #define STROMCL_SIMPLE_HASHKEY_TEMPLATE(NAME,BASE)			\
-	static inline cl_uint									\
+	cl_uint													\
 	pg_##NAME##_hashkey(__local cl_uint *crc32_table,		\
 						cl_uint hash, pg_##NAME##_t datum)	\
 	{														\
@@ -958,7 +955,7 @@ pg_varlena_hashref(__global kern_hashtable *khtable,
 	}
 
 #define STROMCL_VARLENA_HASHKEY_TEMPLATE(NAME)				\
-	static inline cl_uint									\
+	cl_uint													\
 	pg_##NAME##_hashkey(__local cl_uint *crc32_table,		\
 						cl_uint hash, pg_##NAME##_t datum)	\
 	{														\

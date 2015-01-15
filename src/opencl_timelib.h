@@ -224,7 +224,7 @@ timestamp2tm(Timestamp dt, struct pg_tm *tm, fsec_t *fsec)
  * Type cast functions
  *
  * --------------------------------------------------------------- */
-static pg_date_t
+pg_date_t
 pgfn_timestamp_date(__private cl_int *errcode, pg_timestamp_t arg1)
 {
 	pg_date_t		result;
@@ -256,8 +256,7 @@ pgfn_timestamp_date(__private cl_int *errcode, pg_timestamp_t arg1)
 	return result;
 }
 
-
-static pg_time_t
+pg_time_t
 pgfn_timestamp_time(__private cl_int *errcode, pg_timestamp_t arg1)
 {
 	pg_time_t		result;
@@ -285,7 +284,7 @@ pgfn_timestamp_time(__private cl_int *errcode, pg_timestamp_t arg1)
 	return result;
 }
 
-static pg_timestamp_t
+pg_timestamp_t
 pgfn_date_timestamp(__private cl_int *errcode, pg_date_t arg1)
 {
 	pg_timestamp_t	result;
@@ -322,7 +321,7 @@ pgfn_date_timestamp(__private cl_int *errcode, pg_date_t arg1)
 /*
  * Time/Date operators
  */
-static pg_date_t
+pg_date_t
 pgfn_date_pli(__private cl_int *errcode, pg_date_t arg1, pg_int4_t arg2)
 {
 	pg_date_t	result;
@@ -340,7 +339,7 @@ pgfn_date_pli(__private cl_int *errcode, pg_date_t arg1, pg_int4_t arg2)
 	return result;
 }
 
-static pg_date_t
+pg_date_t
 pgfn_date_mii(__private cl_int *errcode, pg_date_t arg1, pg_int4_t arg2)
 {
 	pg_date_t	result;
@@ -358,7 +357,7 @@ pgfn_date_mii(__private cl_int *errcode, pg_date_t arg1, pg_int4_t arg2)
 	return result;
 }
 
-static pg_int4_t
+pg_int4_t
 pgfn_date_mi(__private cl_int *errcode, pg_date_t arg1, pg_date_t arg2)
 {
 	pg_int4_t	result;
@@ -378,7 +377,7 @@ pgfn_date_mi(__private cl_int *errcode, pg_date_t arg1, pg_date_t arg2)
 	return result;
 }
 
-static pg_timestamp_t
+pg_timestamp_t
 pgfn_datetime_pl(__private cl_int *errcode, pg_date_t arg1, pg_time_t arg2)
 {
 	pg_timestamp_t	result;
@@ -394,13 +393,13 @@ pgfn_datetime_pl(__private cl_int *errcode, pg_date_t arg1, pg_time_t arg2)
 	return result;
 }
 
-static pg_date_t
+pg_date_t
 pgfn_integer_pl_date(__private cl_int *errcode, pg_int4_t arg1, pg_date_t arg2)
 {
 	return pgfn_date_pli(errcode, arg2, arg1);
 }
 
-static pg_timestamp_t
+pg_timestamp_t
 pgfn_timedata_pl(__private cl_int *errcode, pg_time_t arg1, pg_date_t arg2)
 {
 	return pgfn_datetime_pl(errcode, arg2, arg1);
@@ -409,7 +408,7 @@ pgfn_timedata_pl(__private cl_int *errcode, pg_time_t arg1, pg_date_t arg2)
 /*
  * Date comparison
  */
-static pg_bool_t
+pg_bool_t
 pgfn_date_eq_timestamp(__private cl_int *errcode,
 					   pg_date_t arg1, pg_timestamp_t arg2)
 {
@@ -426,7 +425,7 @@ pgfn_date_eq_timestamp(__private cl_int *errcode,
 	return result;
 }
 
-static pg_bool_t
+pg_bool_t
 pgfn_date_ne_timestamp(__private cl_int *errcode,
 					   pg_date_t arg1, pg_timestamp_t arg2)
 {
@@ -443,7 +442,7 @@ pgfn_date_ne_timestamp(__private cl_int *errcode,
 	return result;
 }
 
-static pg_bool_t
+pg_bool_t
 pgfn_date_lt_timestamp(__private cl_int *errcode,
 					   pg_date_t arg1, pg_timestamp_t arg2)
 {
@@ -460,7 +459,7 @@ pgfn_date_lt_timestamp(__private cl_int *errcode,
 	return result;
 }
 
-static pg_bool_t
+pg_bool_t
 pgfn_date_le_timestamp(__private cl_int *errcode,
 					   pg_date_t arg1, pg_timestamp_t arg2)
 {
@@ -477,7 +476,7 @@ pgfn_date_le_timestamp(__private cl_int *errcode,
 	return result;
 }
 
-static pg_bool_t
+pg_bool_t
 pgfn_date_gt_timestamp(__private cl_int *errcode,
 					   pg_date_t arg1, pg_timestamp_t arg2)
 {
@@ -494,7 +493,7 @@ pgfn_date_gt_timestamp(__private cl_int *errcode,
 	return result;
 }
 
-static pg_bool_t
+pg_bool_t
 pgfn_date_ge_timestamp(__private cl_int *errcode,
 					   pg_date_t arg1, pg_timestamp_t arg2)
 {
@@ -511,7 +510,7 @@ pgfn_date_ge_timestamp(__private cl_int *errcode,
 	return result;
 }
 
-static pg_int4_t
+pg_int4_t
 date_cmp_timestamp(__private cl_int *errcode,
 				   pg_date_t arg1, pg_timestamp_t arg2)
 {
@@ -536,7 +535,7 @@ date_cmp_timestamp(__private cl_int *errcode,
 /*
  * Timestamp comparison
  */
-static pg_bool_t
+pg_bool_t
 pgfn_timestamp_eq_date(__private cl_int *errcode,
 					   pg_timestamp_t arg1, pg_date_t arg2)
 {
@@ -553,7 +552,7 @@ pgfn_timestamp_eq_date(__private cl_int *errcode,
 	return result;
 }
 
-static pg_bool_t
+pg_bool_t
 pgfn_timestamp_ne_date(__private cl_int *errcode,
 					   pg_timestamp_t arg1, pg_date_t arg2)
 {
@@ -570,7 +569,7 @@ pgfn_timestamp_ne_date(__private cl_int *errcode,
 	return result;
 }
 
-static pg_bool_t
+pg_bool_t
 pgfn_timestamp_lt_date(__private cl_int *errcode,
 					   pg_timestamp_t arg1, pg_date_t arg2)
 {
@@ -587,7 +586,7 @@ pgfn_timestamp_lt_date(__private cl_int *errcode,
 	return result;
 }
 
-static pg_bool_t
+pg_bool_t
 pgfn_timestamp_le_date(__private cl_int *errcode,
 					   pg_timestamp_t arg1, pg_date_t arg2)
 {
@@ -604,7 +603,7 @@ pgfn_timestamp_le_date(__private cl_int *errcode,
 	return result;
 }
 
-static pg_bool_t
+pg_bool_t
 pgfn_timestamp_gt_date(__private cl_int *errcode,
 					   pg_timestamp_t arg1, pg_date_t arg2)
 {
@@ -621,7 +620,7 @@ pgfn_timestamp_gt_date(__private cl_int *errcode,
 	return result;
 }
 
-static pg_bool_t
+pg_bool_t
 pgfn_timestamp_ge_date(__private cl_int *errcode,
 					   pg_timestamp_t arg1, pg_date_t arg2)
 {
@@ -638,7 +637,7 @@ pgfn_timestamp_ge_date(__private cl_int *errcode,
 	return result;
 }
 
-static pg_int4_t
+pg_int4_t
 pgfn_timestamp_cmp_date(__private cl_int *errcode,
 						pg_timestamp_t arg1, pg_date_t arg2)
 {
