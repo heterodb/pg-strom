@@ -114,7 +114,7 @@ typedef struct
  */
 typedef struct
 {
-	cl_uint			group_id;
+	cl_int			group_id;
 	cl_char			isnull;
 	cl_char			__padding__[3];
 	union {
@@ -465,8 +465,7 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 {
 	__global kern_parambuf	*kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	__global cl_int			*rindex  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
-	__local pagg_datum *l_data
-		= (__local pagg_datum *)STROMALIGN(LOCAL_WORKMEM);
+	__local pagg_datum *l_data = LOCAL_WORKMEM;
 	__global varlena   *kparam_0 = kparam_get_value(kparams, 0);
 	__global cl_char   *gpagg_atts = (__global cl_char *) VARDATA(kparam_0);
 
@@ -482,10 +481,14 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 
 	cl_int prtID		= globalID / localSize;	/* partition ID */
 	cl_int prtSize		= localSize;			/* partition Size */
-	cl_int prtMask		= prtSize - 1;			/* partition Mask */
 	cl_int prtPos		= prtID * prtSize;		/* partition Position */
 
 	cl_int localEntry  = (prtPos+prtSize < nrows) ? prtSize : (nrows-prtPos);
+
+	cl_int groupID;
+	cl_uint ngroups;
+	cl_int isNewID = 0;
+	__local cl_uint base;
 
 	/* Sanity check of gpagg_atts array */
 	if (VARSIZE_EXHDR(kparam_0) != ncols)
@@ -500,9 +503,6 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 	}
 
 	/* Generate group id of local work group. */
-	cl_int groupID;
-	cl_uint ngroups;
-	cl_int isNewID = 0;
 	{
 		if (localID == 0) 
 		{
@@ -519,7 +519,6 @@ gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
 	}
 
 	/* allocation of result buffer */
-	__local cl_uint base;
 	{
 		if (get_local_id(0) == 0)
 			base = atomic_add(&kds_dst->nitems, ngroups);
@@ -622,7 +621,6 @@ gpupreagg_set_rindex(__global kern_gpupreagg *kgpreagg,
 					 __global kern_data_store *kds,
 					 KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
-	__global kern_parambuf	*kparams  = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	__global cl_int			*rindex	  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
 
 	cl_int nrows		= kds->nitems;
@@ -647,7 +645,6 @@ gpupreagg_bitonic_local(__global kern_gpupreagg *kgpreagg,
 						__global kern_data_store *ktoast,
 						KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
-	__global kern_parambuf	*kparams  = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	__global cl_int			*rindex	  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
 	__local  cl_int			*localIdx = LOCAL_WORKMEM;
 
@@ -660,7 +657,6 @@ gpupreagg_bitonic_local(__global kern_gpupreagg *kgpreagg,
 
     cl_int prtID		= globalID / localSize; /* partition ID */
     cl_int prtSize		= localSize * 2;		/* partition Size */
-    cl_int prtMask		= prtSize - 1;			/* partition Mask */
     cl_int prtPos		= prtID * prtSize;		/* partition Position */
 
     cl_int localEntry	= ((prtPos + prtSize < nrows)
@@ -680,15 +676,10 @@ gpupreagg_bitonic_local(__global kern_gpupreagg *kgpreagg,
 	// bitonic sort
 	for(int blockSize=2; blockSize<=prtSize; blockSize*=2)
 	{
-		int blockMask		= blockSize - 1;
-		int halfBlockSize	= blockSize / 2;
-		int halfBlockMask	= halfBlockSize -1;
-
 		for(int unitSize=blockSize; 2<=unitSize; unitSize/=2)
 		{
 			int unitMask		= unitSize - 1;
 			int halfUnitSize	= unitSize / 2;
-			int halfUnitMask	= halfUnitSize - 1;
 
 			bool reversing	= unitSize == blockSize ? true : false;
 			int idx0 = ((localID / halfUnitSize) * unitSize
@@ -738,7 +729,6 @@ gpupreagg_bitonic_step(__global kern_gpupreagg *kgpreagg,
 					   __global kern_data_store *ktoast,
 					   KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
-	__global kern_parambuf	*kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	__global cl_int			*rindex	 = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
 
 	cl_int	nrows	  = kds->nitems;
@@ -754,6 +744,9 @@ gpupreagg_bitonic_step(__global kern_gpupreagg *kgpreagg,
 
 	cl_int	idx0;
 	cl_int	idx1;
+	cl_int	pos0;
+	cl_int	pos1;
+	cl_int	rv;
 
 	idx0 = (globalID / halfUnitSize) * unitsz + globalID % halfUnitSize;
 	idx1 = (reversing
@@ -762,9 +755,8 @@ gpupreagg_bitonic_step(__global kern_gpupreagg *kgpreagg,
 	if(nrows <= idx1)
 		goto out;
 
-	cl_int	pos0	= rindex[idx0];
-	cl_int	pos1	= rindex[idx1];
-	cl_int	rv;
+   	pos0 = rindex[idx0];
+	pos1 = rindex[idx1];
 
 	rv = gpupreagg_keycomp(&errcode, kds, ktoast, pos0, pos1);
 	if(0 < rv) {
@@ -788,7 +780,6 @@ gpupreagg_bitonic_merge(__global kern_gpupreagg *kgpreagg,
 						__global kern_data_store *ktoast,
 						KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
-	__global kern_parambuf	*kparams  = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	__global cl_int			*rindex	  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
 	__local	 cl_int			*localIdx = LOCAL_WORKMEM;
 
@@ -801,7 +792,6 @@ gpupreagg_bitonic_merge(__global kern_gpupreagg *kgpreagg,
 
     cl_int prtID		= globalID / localSize; /* partition ID */
     cl_int prtSize		= localSize * 2;		/* partition Size */
-    cl_int prtMask		= prtSize - 1;			/* partition Mask */
     cl_int prtPos		= prtID * prtSize;		/* partition Position */
 
     cl_int localEntry	= (prtPos+prtSize < nrows) ? prtSize : (nrows-prtPos);
@@ -819,16 +809,10 @@ gpupreagg_bitonic_merge(__global kern_gpupreagg *kgpreagg,
 
 	// marge sorted block
 	int blockSize		= prtSize;
-	int blockMask		= blockSize - 1;
-	int halfBlockSize	= blockSize / 2;
-	int halfBlockMask	= halfBlockSize -1;
 
 	for(int unitSize=blockSize; 2<=unitSize; unitSize/=2)
 	{
-		int unitMask		= unitSize - 1;
 		int halfUnitSize	= unitSize / 2;
-		int halfUnitMask	= halfUnitSize - 1;
-
 		int idx0 = localID / halfUnitSize * unitSize + localID % halfUnitSize;
 		int idx1 = halfUnitSize + idx0;
 

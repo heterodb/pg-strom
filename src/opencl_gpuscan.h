@@ -100,7 +100,8 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresults,
 							int errcode,
 							__local void *workmem)
 {
-	__local cl_uint	base;
+	__local cl_uint *p_base = workmem;
+	cl_uint		base;
 	cl_uint		binary;
 	cl_uint		offset;
 	cl_uint		nitems;
@@ -118,8 +119,9 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresults,
 	offset = arithmetic_stairlike_add(binary, workmem, &nitems);
 
 	if (get_local_id(0) == 0)
-		base = atomic_add(&kresults->nitems, nitems);
+		*p_base = atomic_add(&kresults->nitems, nitems);
 	barrier(CLK_LOCAL_MEM_FENCE);
+	base = *p_base;
 
 	/*
 	 * Write back the row-index that passed evaluation of the qualifier,
