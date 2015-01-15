@@ -756,28 +756,29 @@ gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
 	barrier(CLK_LOCAL_MEM_FENCE);
 
 	if (get_global_id(0) < nitems)
+	{
 		hash_value = gpupreagg_hashvalue(&errcode, crc32_table,
 										 kds_dst, ktoast,
 										 get_global_id(0));
-	/*
-	 * Find a hash-slot to determine the item index that represents
-	 * a particular group-keys.
-	 * The array of hash-slot is initialized to 'all empty', so first
-	 * one will take a place using atomic operation. Then. here are
-	 * two cases for hash conflicts; case of same grouping-key, or
-	 * case of different grouping-key but same hash-value.
-	 * The first conflict case informs us the item-index responsible
-	 * to the grouping key. We cannot help the later case, so retry
-	 * the steps with next hash-slot.
-	 */
-	new_slot.hash = hash_value;
-	new_slot.index = get_global_id(0);
-	old_slot.hash = 0;
-	old_slot.index = (cl_uint)(0xffffffff);
-	index = hash_value % hash_size;
-retry:
-	if (get_global_id(0) < nitems)
-	{
+		/*
+		 * Find a hash-slot to determine the item index that represents
+		 * a particular group-keys.
+		 * The array of hash-slot is initialized to 'all empty', so first
+		 * one will take a place using atomic operation. Then. here are
+		 * two cases for hash conflicts; case of same grouping-key, or
+		 * case of different grouping-key but same hash-value.
+		 * The first conflict case informs us the item-index responsible
+		 * to the grouping key. We cannot help the later case, so retry
+		 * the steps with next hash-slot.
+		 */
+		new_slot.hash = hash_value;
+		new_slot.index = get_global_id(0);
+		old_slot.hash = 0;
+		old_slot.index = (cl_uint)(0xffffffff);
+		index = hash_value % hash_size;
+
+		printf((__constant char *)"gid = %zu hash=%08x index = %u\n", get_global_id(0), hash_value, index);
+
 		cur_slot.value = atom_cmpxchg(&g_hashslot[index].value,
 									  old_slot.value,
 									  new_slot.value);

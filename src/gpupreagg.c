@@ -611,11 +611,18 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 }
 
 /*
- * copyObjectFixupVarno - create a copy of expression node, but varno of
- * Var shall be fixed up to INDEX_VAR from OUTER_VAR.
+ * expr_fixup_varno - create a copy of expression node, but varno of Var
+ * shall be fixed up, If required, it also applies sanity checks for
+ * the source varno.
  */
+typedef struct
+{
+	Index	src_varno;	/* if zero, all the source varno is accepted */
+	Index	dst_varno;
+} expr_fixup_varno_context;
+
 static Node *
-__copyObjectFixupVarno(Node *node, void *context)
+expr_fixup_varno_mutator(Node *node, expr_fixup_varno_context *context)
 {
 	if (!node)
 		return NULL;
@@ -624,19 +631,26 @@ __copyObjectFixupVarno(Node *node, void *context)
 		Var	   *varnode = (Var *) node;
 		Var	   *newnode;
 
-		Assert(varnode->varno == OUTER_VAR);
+		if (context->src_varno > 0 && context->src_varno != varnode->varno)
+			elog(ERROR, "Bug? varno %d is not expected one (%d) : %s",
+				 varnode->varno, context->src_varno, nodeToString(varnode));
 		newnode = copyObject(varnode);
-		newnode->varno = INDEX_VAR;
+		newnode->varno = context->dst_varno;
 
 		return (Node *) newnode;
 	}
-	return expression_tree_mutator(node, __copyObjectFixupVarno, NULL);
+	return expression_tree_mutator(node, expr_fixup_varno_mutator, context);
 }
 
 static inline void *
-copyObjectFixupVarno(const void *from)
+expr_fixup_varno(void *from, Index src_varno, Index dst_varno)
 {
-	return __copyObjectFixupVarno((Node *) from, NULL);
+	expr_fixup_varno_context context;
+
+	context.src_varno = src_varno;
+	context.dst_varno = dst_varno;
+
+	return expr_fixup_varno_mutator((Node *) from, &context);
 }
 
 /*
@@ -747,7 +761,7 @@ make_expr_conditional(Expr *expr, Expr *filter, Expr *defresult)
 
 	Assert(exprType((Node *) filter) == BOOLOID);
 	if (defresult)
-		defresult = copyObjectFixupVarno(defresult);
+		defresult = expr_fixup_varno(defresult, OUTER_VAR, INDEX_VAR);
 	else
 	{
 		defresult = (Expr *) makeNullConst(exprType((Node *) expr),
@@ -758,8 +772,8 @@ make_expr_conditional(Expr *expr, Expr *filter, Expr *defresult)
 
 	/* in case when the 'filter' is matched */
 	case_when = makeNode(CaseWhen);
-	case_when->expr = copyObjectFixupVarno(filter);
-	case_when->result = copyObjectFixupVarno(expr);
+	case_when->expr = expr_fixup_varno(filter, OUTER_VAR, INDEX_VAR);
+	case_when->result = expr_fixup_varno(expr, OUTER_VAR, INDEX_VAR);
 	case_when->location = -1;
 
 	/* case body */
@@ -800,7 +814,7 @@ make_altfunc_expr(const char *func_name, List *args)
 	proc_form = (Form_pg_proc) GETSTRUCT(tuple);
 	expr = (Expr *) makeFuncExpr(HeapTupleGetOid(tuple),
 								 proc_form->prorettype,
-								 copyObjectFixupVarno(args),
+								 expr_fixup_varno(args, OUTER_VAR, INDEX_VAR),
 								 InvalidOid,
 								 InvalidOid,
 								 COERCE_EXPLICIT_CALL);
@@ -851,7 +865,7 @@ make_altfunc_pcov_expr(Aggref *aggref, const char *func_name)
 	if (!aggref->aggfilter)
 		filter = (Expr *) makeBoolConst(true, false);
 	else
-		filter = copyObjectFixupVarno(aggref->aggfilter);
+		filter = expr_fixup_varno(aggref->aggfilter, OUTER_VAR, INDEX_VAR);
 	return make_altfunc_expr(func_name,
 							 list_make3(filter, tle_1->expr, tle_2->expr));
 }
@@ -2604,7 +2618,9 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		sort_node->plan.total_cost   = newcost_sort.total_cost;
 		sort_node->plan.plan_rows    = newcost_sort.plan_rows;
 		sort_node->plan.plan_width   = newcost_sort.plan_width;
-		sort_node->plan.targetlist   = copyObject(pre_tlist);
+		sort_node->plan.targetlist   = expr_fixup_varno(pre_tlist,
+														INDEX_VAR,
+														OUTER_VAR);
 		outerPlan(sort_node) = &cscan->scan.plan;
 	}
 	agg->plan.startup_cost = newcost_agg.startup_cost;
