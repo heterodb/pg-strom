@@ -1075,7 +1075,7 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 	if (!(new_isnull))				\
 	{								\
 		ATOMIC_FUNC_CALL;			\
-		*(accum_isnull) = true;		\
+		*(accum_isnull) = false;	\
 	}
 
 /* calculation for global partial max */
