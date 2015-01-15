@@ -777,8 +777,6 @@ gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
 		old_slot.index = (cl_uint)(0xffffffff);
 		index = hash_value % hash_size;
 
-		printf((__constant char *)"gid = %zu hash=%08x index = %u\n", get_global_id(0), hash_value, index);
-
 		cur_slot.value = atom_cmpxchg(&g_hashslot[index].value,
 									  old_slot.value,
 									  new_slot.value);
