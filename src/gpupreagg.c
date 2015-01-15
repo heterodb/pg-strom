@@ -3380,25 +3380,6 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 	pgstrom_gpupreagg  *gpreagg = clgpa->gpreagg;
 	cl_int				i, rc;
 
-#if 1
-	char				buffer[1024];
-	size_t				offset = 0;
-	/* XXX - Intel's OpenCL driver didn't support 64bit-atomic operations.
-	 * So, we cannot choose this platform, even though it is debugging
-	 * purpose, so we need an alternatives here....
-	 */
-	for (i=0; i < gpreagg->kern.debug_usage; i++)
-	{
-		offset += snprintf(buffer + offset, sizeof(buffer) - offset, " %08x",
-						gpreagg->kern.debug[i]);
-		if ((i & 7) == 7 || i + 1 == gpreagg->kern.debug_usage)
-		{
-			clserv_log("DEBUG: %04x %s", (i & ~7), buffer);
-			offset = 0;
-		}
-	}
-#endif
-
 	if (ev_status == CL_COMPLETE)
 		gpreagg->msg.errcode = gpreagg->kern.status;
 	else

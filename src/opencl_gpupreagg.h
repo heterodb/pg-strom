@@ -63,12 +63,10 @@
 
 typedef struct
 {
-	cl_int			status;		/* result of kernel execution */
-	cl_uint			hash_size;	/* size of global hash-slots */
+	cl_int			status;				/* result of kernel execution */
+	cl_uint			hash_size;			/* size of global hash-slots */
+	char			__padding__[8];		/* 16bytes alignment */
 	cl_uint			pg_crc32_table[256];	/* master CRC32 table */
-	char			__padding__[4];		/* alignment */
-	cl_int			debug_usage;	/* if > 0, usage of debug buffer */
-	cl_uint			debug[2048];	/* debug buffer */
 	kern_parambuf	kparams;
 	/*
 	 *  kern_row_map shall be located next to kern_parmbuf
@@ -576,14 +574,14 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 	}
 	barrier(CLK_LOCAL_MEM_FENCE);
 
-	new_slot.hash = hash_value;
-	new_slot.index = get_local_id(0);
-	old_slot.hash = 0;
-	old_slot.index = (cl_uint)(0xffffffff);
-	index = hash_value % hash_size;
-
 	if (get_global_id(0) < nitems)
 	{
+		new_slot.hash = hash_value;
+		new_slot.index = get_local_id(0);
+		old_slot.hash = 0;
+		old_slot.index = (cl_uint)(0xffffffff);
+		index = hash_value % hash_size;
+
 	retry:
 		cur_slot.value = atom_cmpxchg(&g_hashslot[index].value,
 									  old_slot.value,
@@ -757,7 +755,6 @@ gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
 
 	if (get_global_id(0) < nitems)
 	{
-	retry:
 		hash_value = gpupreagg_hashvalue(&errcode, crc32_table,
 										 kds_dst, ktoast,
 										 get_global_id(0));
@@ -777,7 +774,7 @@ gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
 		old_slot.hash = 0;
 		old_slot.index = (cl_uint)(0xffffffff);
 		index = hash_value % hash_size;
-
+	retry:
 		cur_slot.value = atom_cmpxchg(&g_hashslot[index].value,
 									  old_slot.value,
 									  new_slot.value);
