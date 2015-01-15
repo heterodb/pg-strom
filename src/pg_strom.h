@@ -138,6 +138,8 @@ typedef enum {
 	StromTag_GpuHashJoin,
 	StromTag_HashJoinTable,
 	StromTag_GpuPreAgg,
+	StromTag_GpuSort,
+	StromTag_DSMSegment,
 } StromTag;
 
 typedef struct {

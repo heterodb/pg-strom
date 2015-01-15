@@ -368,6 +368,7 @@ typedef struct {
 #define KDS_FORMAT_ROW			1
 #define KDS_FORMAT_ROW_FLAT		2
 #define KDS_FORMAT_TUPSLOT		3
+#define KDS_FORMAT_ROW_FMAP		4
 
 typedef struct {
 	hostptr_t		hostptr;	/* address of kds on the host */

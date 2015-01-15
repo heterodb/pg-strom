@@ -30,7 +30,7 @@ typedef struct
 	const char *kern_source;
 	int			extra_flags;
 	List	   *used_params;
-	Size		sortkey_width;
+	long		num_chunks;
 	/* delivered from original Sort */
 	int			numCols;		/* number of sort-key columns */
 	AttrNumber *sortColIdx;		/* their indexes in the target list */
@@ -40,30 +40,31 @@ typedef struct
 } GpuSortInfo;
 
 static inline void
-form_gpusort_info(CustomScan *cscan, GpuSortInfo *gsort_info)
+form_gpusort_info(CustomScan *cscan, GpuSortInfo *gs_info)
 {
 	List   *privs = NIL;
 	List   *temp;
 
-	privs = lappend(privs, makeString(pstrdup(gsort_info->kern_source)));
-	privs = lappend(privs, makeInteger(gsort_info->extra_flags));
-	privs = lappend(privs, used_params);
-	privs = lappend(privs, makeInteger(gsort_info->numCols));
+	privs = lappend(privs, makeString(pstrdup(gs_info->kern_source)));
+	privs = lappend(privs, makeInteger(gs_info->extra_flags));
+	privs = lappend(privs, gs_info->used_params);
+	privs = lappend(privs, makeInteger(gs_info->num_chunks));
+	privs = lappend(privs, makeInteger(gs_info->numCols));
 	/* sortColIdx */
-	for (temp = NIL, i=0; i < gsort_info->numCols; i++)
-		temp = lappend_int(temp, gsort_info->sortColIdx[i]);
+	for (temp = NIL, i=0; i < gs_info->numCols; i++)
+		temp = lappend_int(temp, gs_info->sortColIdx[i]);
 	privs = lappend(privs, temp);
 	/* sortOperators */
-	for (temp = NIL, i=0; i < gsort_info->numCols; i++)
-		temp = lappend_oid(temp, gsort_info->sortOperators[i]);
+	for (temp = NIL, i=0; i < gs_info->numCols; i++)
+		temp = lappend_oid(temp, gs_info->sortOperators[i]);
 	privs = lappend(privs, temp);
 	/* collations */
-	for (temp = NIL, i=0; i < gsort_info->numCols; i++)
-		temp = lappend_oid(temp, gsort_info->collations[i]);
+	for (temp = NIL, i=0; i < gs_info->numCols; i++)
+		temp = lappend_oid(temp, gs_info->collations[i]);
 	privs = lappend(privs, temp);
 	/* nullsFirst */
-	for (temp = NIL, i=0; i < gsort_info->numCols; i++)
-		temp = lappend_int(temp, gsort_info->nullsFirst[i]);
+	for (temp = NIL, i=0; i < gs_info->numCols; i++)
+		temp = lappend_int(temp, gs_info->nullsFirst[i]);
 	privs = lappend(privs, tmep);
 
 	cscan->custom_private = privs;
@@ -72,57 +73,123 @@ form_gpusort_info(CustomScan *cscan, GpuSortInfo *gsort_info)
 static inline GpuSortInfo *
 deform_gpusort_info(CustomScan *cscan)
 {
-	GpuSortInfo	   *gsort_info = palloc0(sizeof(GpuSortInfo));
+	GpuSortInfo	   *gs_info = palloc0(sizeof(GpuSortInfo));
 	List		   *privs = cscan->custom_private;
 	List		   *temp;
 	ListCell	   *cell;
 	int				pindex = 0;
 	int				i;
 
-	gsort_info->kern_source = strVal(list_nth(privs, pindex++));
-	gsort_info->extra_flags = intVal(list_nth(privs, pindex++));
-	gsort_info->used_params = list_nth(privs, pindex++);
-	gsort_info->numCols = intVal(list_nth(privs, pindex++));
+	gs_info->kern_source = strVal(list_nth(privs, pindex++));
+	gs_info->extra_flags = intVal(list_nth(privs, pindex++));
+	gs_info->used_params = list_nth(privs, pindex++);
+	gs_info->num_chunks = list_nth(privs, pindex++);
+	gs_info->numCols = intVal(list_nth(privs, pindex++));
 	/* sortColIdx */
 	temp = list_nth(privs, pindex++);
-	Assert(list_length(temp) == gsort_info->numCols);
-	gsort_info->sortColIdx = palloc0(sizeof(AttrNumber) * gsort_info->numCols);
+	Assert(list_length(temp) == gs_info->numCols);
+	gs_info->sortColIdx = palloc0(sizeof(AttrNumber) * gs_info->numCols);
 	i = 0;
 	foreach (cell, temp)
-		gsort_info->sortColIdx[i++] = lfirst_int(cell);
+		gs_info->sortColIdx[i++] = lfirst_int(cell);
 
 	/* sortOperators */
 	temp = list_nth(privs, pindex++);
-    Assert(list_length(temp) == gsort_info->numCols);
-	gsort_info->sortOperators = palloc0(sizeof(Oid) * gsort_info->numCols);
+    Assert(list_length(temp) == gs_info->numCols);
+	gs_info->sortOperators = palloc0(sizeof(Oid) * gs_info->numCols);
 	i = 0;
 	foreach (cell, temp)
-		gsort_info->sortOperators[i++] = lfirst_oid(cell);
+		gs_info->sortOperators[i++] = lfirst_oid(cell);
 
 	/* collations */
 	temp = list_nth(privs, pindex++);
-    Assert(list_length(temp) == gsort_info->numCols);
-	gsort_info->collations = palloc0(sizeof(Oid) * gsort_info->numCols);
+    Assert(list_length(temp) == gs_info->numCols);
+	gs_info->collations = palloc0(sizeof(Oid) * gs_info->numCols);
 	i = 0;
 	foreach (cell, temp)
-		gsort_info->collations[i] = lfirst_oid(cell);
+		gs_info->collations[i] = lfirst_oid(cell);
 
 	/* nullsFirst */
 	temp = list_nth(privs, pindex++);
-    Assert(list_length(temp) == gsort_info->numCols);
-	gsort_info->nullsFirst = palloc0(sizeof(bool) * gsort_info->numCols);
+    Assert(list_length(temp) == gs_info->numCols);
+	gs_info->nullsFirst = palloc0(sizeof(bool) * gs_info->numCols);
 	i = 0;
 	foreach (cell, temp)
-		gsort_info->nullsFirst[i] = lfirst_int(cell);
+		gs_info->nullsFirst[i] = lfirst_int(cell);
 
-	return gsort_info;
+	return gs_info;
 }
 
 typedef struct
 {
 	CustomScanState	css;
 
+	/* for GPU bitonic sorting */
+	pgstrom_queue  *mqueue;
+	Datum			dprog_key;
+	const char	   *kern_source;
+	kern_parambuf  *kparambuf;
+	pgstrom_perfmon	pfm;
+
+	/* for CPU merge sorting */
+	int				num_chunks;		/* number of valid sorting chunks */
+	int				limit_chunks;	/* length of sort_chunks array */
+	pgstrom_data_store **sort_chunks;
+
+    int				numCols;		/* number of sort-key columns */
+    AttrNumber	   *sortColIdx;		/* their indexes in the target list */
+    Oid			   *sortOperators;	/* OIDs of operators to sort them by */
+	Oid			   *collations;		/* OIDs of collations */
+	bool		   *nullsFirst;		/* NULLS FIRST/LAST directions */
+
+	/* running status */
+	cl_int			num_gpu_running;
+	cl_int			num_cpu_running;
+
+
+
+
+
 } GpuSortState;
+
+/*
+ * CpuSortInfo - State object for CPU sorting. It shall be allocated on the
+ * private memory, then dynamic worker will be able to reference the copy
+ * because of process fork(2). It means, we don't mention about Windows
+ * platform at this moment. :-)
+ */
+typedef struct
+{
+	cl_int		nitems;
+	struct {
+		cl_int	chunk_id;
+		cl_int	row_id;
+	} items[FLEXIBLE_ARRAY_MEMBER];
+} gpusort_items;
+
+typedef struct CpuSortInfo
+{
+	char			dbname[NAMEDATALEN];
+	gpusort_items  *r_items;
+	gpusort_items  *l_items;
+	gpusort_items  *o_items;
+	/* reference to GpuSortState */
+	uint			num_chunks;
+	pgstrom_data_store **sort_chunks;
+	TupleDesc		tupdesc;
+	int				numCols;
+	AttrNumber	   *sortColIdx;
+	Oid			   *sortOperators;
+	Oid			   *collations;
+	bool		   *nullsFirst;
+} CpuSortInfo;
+
+
+
+
+
+
+
 
 /*
  * gpusort_check_buffer_path
@@ -172,50 +239,6 @@ gpusort_check_buffer_path(char **newval, void **extra, GucSource source)
 
 
 /*
- * expected_key_width - computes an expected (average) key width, to estimate
- * number of rows we can put on a gpusort chunk.
- */
-static size_t
-expected_key_width(TargetEntry *tle, Plan *subplan, List *rtable)
-{
-	Oid		type_oid = exprType((Node *) tle->expr);
-	int		type_len = get_typlen(type_oid);
-	int		type_mod;
-
-	/* fixed-length variables are an obvious case */
-    if (type_len > 0)
-        return type_len;
-
-	/* we may be able to utilize statistical information */
-	if (IsA(tle->expr, Var) && (IsA(subplan, SeqScan) ||
-								IsA(subplan, IndexScan) ||
-								IsA(subplan, IndexOnlyScan) ||
-								IsA(subplan, BitmapHeapScan) ||
-								IsA(subplan, TidScan)))
-	{
-		Var	   *var = (Var *) tle->expr;
-		Index	scanrelid = ((Scan *) subplan)->scanrelid;
-		RangeTblEntry *rte = rt_fetch(scanrelid, rtable);
-
-		Assert(rte->rtekind == RTE_RELATION && OidIsValid(rte->relid));
-		type_len = get_attavgwidth(rte->relid, var->varattno);
-		if (type_len > 0)
-			return sizeof(cl_uint) + MAXALIGN(type_len * 1.2);
-	}
-
-	/*
-	 * Uh... we have no idea how to estimate average length of
-	 * key variable if target-entry is not Var nor underlying
-	 * plan is not a usual relation scan.
-	 */
-	type_mod = exprTypmod((Node *)tle->expr);
-
-	type_len = get_typavgwidth(type_oid, type_mod);
-
-	return sizeof(cl_uint) + MAXALIGN(type_len);
-}
-
-/*
  * cost_gpusort
  *
  * cost estimation for GpuSort
@@ -223,7 +246,7 @@ expected_key_width(TargetEntry *tle, Plan *subplan, List *rtable)
 #define LOG2(x)		(log(x) / 0.693147180559945)
 
 static void
-cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
+cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost, long *p_num_chunks,
 			 Cost subplan_total, double ntuples, int width)
 {
 	Cost	cpu_comp_cost = 2.0 * cpu_operator_cost;
@@ -268,8 +291,122 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 }
 
 
+static char *
+pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
+{
+	StringInfoData	decl;
+	StringInfoData	body;
+	StringInfoData	result;
+	int		i;
 
+	initStringInfo(&decl);
+	initStringInfo(&body);
+	initStringInfo(&result);
 
+	for (i=0; i < sort->numCols; i++)
+	{
+		TargetEntry *tle;
+		AttrNumber	colidx = sort->sortColIdx[i];
+		Oid			sort_op = sort->sortOperators[i];
+		Oid			sort_func;
+		Oid			sort_type;
+		Oid			opfamily;
+		Oid			opcintype;
+		int16		strategy;
+		bool		null_first = sort->nullsFirst[i];
+		devtype_info *dtype;
+		devfunc_info *dfunc;
+
+		/* Find the operator in pg_amop */
+		if (!get_ordering_op_properties(sort_op,
+										&opfamily,
+										&sort_type,
+										&strategy))
+			elog(ERROR, "operator %u is not a valid ordering operator",
+				 sort_op);
+		is_reverse = (strategy == BTGreaterStrategyNumber);
+
+		/* Find the sort support function */
+		sort_func = get_opfamily_proc(opfamily, sort_type, sort_type,
+									  BTORDER_PROC);
+		if (!OidIsValid(sort_func))
+			elog(ERROR, "missing support function %d(%u,%u) in opfamily %u",
+				 BTORDER_PROC, opcintype, opcintype, opfamily);
+
+		/* Sanity check of the data type */
+		tle = get_tle_by_resno(sort->plan.targetlist, colidx);
+		if (exprType(tle->expr) != sort_type)
+			elog(ERROR, "Bug? type mismatch tlist:%u /catalog:%u",
+				 exprType(tle->expr), sort_type);
+
+		/* device type for comparison */
+		sort_type = exprType((Node *) varnode);
+		dtype = pgstrom_devtype_lookup_and_track(sort_type, context);
+		if (!dtype)
+			elog(ERROR, "device type %u lookup failed", sort_type);
+
+		/* device function for comparison */
+		sort_func = sort_type->type_cmpfunc;
+		dfunc = pgstrom_devfunc_lookup_and_track(sort_func, context);
+		if (!dfunc)
+			elog(ERROR, "device function %u lookup failed", sort_func);
+
+		/* reference to X-variable / Y-variable */
+		appendStringInfo(
+			&decl,
+			"  pg_%s_t KVAR_X%d"
+			" = pg_%s_vref(kds,ktoast,errcode,%d,x_index);\n"
+			"  pg_%s_t KVAR_Y%d"
+			" = pg_%s_vref(kds,ktoast,errcode,%d,y_index);\n",
+			dtype->type_name, i+1,
+			dtype->type_name, attno,
+			dtype->type_name, i+1,
+			dtype->type_name, attno);
+
+		/* logic to compare */
+		appendStringInfo(
+			&body,
+			"  /* sort key comparison on the resource %d */"
+			"  if (!KVAR_X%d.isnull && !KVAR_Y%d.isnull)\n"
+			"  {\n"
+			"    comp = pgfn_%s(errcode, KVAR_X%d, KVAR_Y%d);\n"
+			"    if (comp.value != 0)\n"
+			"      return %s;\n"
+			"  }\n"
+			"  else if (KVAR_X%d.isnull && !KVAR_Y%d.isnull)\n"
+			"    return %d;\n"
+			"  else if (!KVAR_X%d.isnull && KVAR_Y%d.isnull)\n"
+			"    return %d;\n",
+			i+1,
+			i+1, i+1,
+			dfunc->func_name, i+1, i+1,
+			is_reverse ? "-comp.value" : "comp.value",
+			i+1, i+1, nullfirst ? -1 : 1,
+			i+1, i+1, nullfirst ? 1 : -1);
+	}
+	/* make a comparison function */
+	appendStringInfo(&result,
+					 "%s\n"		/* function declaration */
+					 "static cl_int\n"
+					 "gpusort_keycomp(__private cl_int *errcode,\n"
+					 "                __global kern_data_store *kds,\n"
+					 "                __global kern_data_store *ktoast,\n"
+					 "                size_t x_index,\n"
+					 "                size_t y_index)\n"
+					 "{\n"
+					 "%s\n"		/* variables declaration */
+					 "  pg_int4_t comp;\n"
+					 "%s"		/* comparison body */
+					 "  return 0;\n"
+					 "}\n",
+					 pgstrom_codegen_func_declarations(context),
+					 decl.data,
+					 body.data);
+	pfree(decl.data);
+	pfree(body.data);
+
+	return result.data;
+}
 
 void
 pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
@@ -278,9 +415,11 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	List	   *tlist = sort->plan.targetlist;
 	List	   *rtable = pstmt->rtable;
 	ListCell   *cell;
+	Cost		startup_cost;
+	Cost		total_cost;
+	long		num_chunks;
 	Plan	   *subplan;
-	Size		sortkey_width = 0;
-	GpuSortInfo	gsort_info;
+	GpuSortInfo	gs_info;
 	int			i;
 
 	/* ensure the plan is Sort */
@@ -313,15 +452,15 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 		dfunc = pgstrom_devfunc_lookup(dtype->type_cmpfunc);
 		if (!dfunc)
 			return;
-
-		/* also, estimate average key length */
-		sortkey_width += expected_key_width(tle, subplan, rtable);
 	}
 
 	/*
 	 * OK, cost estimation with GpuSort
 	 */
-	cost_gpusort();
+	cost_gpusort(&startup_cost, &total_cost, &num_chunks,
+				 subplan->total_cost,
+				 subplan->plan_rows,
+				 subplan->plan_width);
 	if (!debug_force_gpusort && total_cost >= sort->plan.total_cost)
 		return;
 
@@ -370,32 +509,73 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	outerPlan(cscan) = subplan;
 
 	pgstrom_init_codegen_context(&context);
-	gsort_info.kern_source = gpusort_codegen(sort, &context);
-	gsort_info.extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSORT |
+	gs_info.kern_source = gpusort_codegen(sort, &context);
+	gs_info.extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSORT |
 		(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
-	gsort_info.used_params = context.used_params;
-	gsort_info.sortkey_width = sortkey_width;
-	gsort_info.numCols = sort->numCols;
-	gsort_info.sortColIdx = sort->sortColIdx;
-	gsort_info.sortOperators = sort->sortOperators;
-	gsort_info.collations = sort->collations;
-	gsort_info.nullsFirst = sort->nullsFirst;
-	form_gpusort_info(cscan, &gsort_info);
+	gs_info.used_params = context.used_params;
+	gs_info.num_chunks = num_chunks;
+	gs_info.numCols = sort->numCols;
+	gs_info.sortColIdx = sort->sortColIdx;
+	gs_info.sortOperators = sort->sortOperators;
+	gs_info.collations = sort->collations;
+	gs_info.nullsFirst = sort->nullsFirst;
+	form_gpusort_info(cscan, &gs_info);
 
 	*p_plan = &cscan->scan.plan;
 }
 
-
-
-
-
 static Node *
 gpusort_create_scan_state(CustomScan *cscan)
-{}
+{
+	GpuSortState   *gss = palloc0(sizeof(GpuSortState));
+
+	NodeSetTag(gss, T_CustomScanState);
+	gss->css.methods = &gpusort_exec_methods;
+
+	return (Node *) gss;
+}
 
 static void
 gpusort_begin(CustomScanState *node, EState *estate, int eflags)
-{}
+{
+	GpuSortState   *gss = (GpuSortState *) node;
+	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
+	GpuSortInfo	   *gs_info = deform_gpusort_info(cscan);
+	PlanState	   *ps = node->ss.ps;
+	
+
+	/* for GPU bitonic sorting */
+	gss->kparams = pgstrom_create_kern_parambuf(gs_info->used_params,
+												ps->ps_ExprContext);
+	Assert(gs_info->kern_source != NULL);
+	gss->dprog_key = pgstrom_get_devprog_key(ghj_info->kernel_source,
+											 ghj_info->extra_flags);
+	gss->kern_source = gs_info->kern_source;
+	pgstrom_track_object((StromObject *)gss->dprog_key, 0);
+
+	gss->mqueue = pgstrom_create_queue();
+	pgstrom_track_object(&gss->mqueue->sobj, 0);
+
+	/* Is perfmon needed? */
+	gss->pfm.enabled = pgstrom_perfmon_enabled;
+
+
+	/**/
+	gss->num_chunks = 0;
+	gss->limit_chunks = 2 * gs_info->num_chunks;
+	gss->sort_chunks = palloc0(sizeof(pgstrom_data_store *) *
+							   gss->limit_chunks);
+	gss->numCols = gs_info->numCols;
+	gss->sortColIdx = gs_info->sortColIdx;
+	gss->sortOperators = gs_info->sortOperators;
+	gss->collations = gs_info->collations;
+	gss->nullsFirst = gs_info->nullsFirst;
+
+
+
+
+
+}
 
 static TupleTableSlot *
 gpusort_exec(CustomScanState *node)
