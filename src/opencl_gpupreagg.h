@@ -545,6 +545,11 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 		crc32_table[index] = kgpreagg->pg_crc32_table[index];
 	barrier(CLK_LOCAL_MEM_FENCE);
 
+	if (get_global_id(0) < nitems)
+		hash_value = gpupreagg_hashvalue(&errcode, crc32_table,
+										 kds_src, ktoast,
+										 get_global_id(0));
+
 	/*
 	 * Find a hash-slot to determine the item index that represents
 	 * a particular group-keys.
@@ -569,9 +574,6 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 
 	if (get_global_id(0) < nitems)
 	{
-		hash_value = gpupreagg_hashvalue(&errcode, crc32_table,
-										 kds_src, ktoast,
-										 get_global_id(0));
 		new_slot.hash = hash_value;
 		new_slot.index = get_local_id(0);
 		old_slot.hash = 0;
