@@ -242,50 +242,38 @@ gpupreagg_data_load(__local pagg_datum *pdatum,
 					__global kern_data_store *ktoast,
 					cl_uint colidx, cl_uint rowidx)
 {
-	kern_colmeta	cmeta;
+	kern_colmeta		cmeta;
+	__global Datum	   *values;
+	__global cl_char   *isnull;
 
-	if (colidx >= kds->ncols)
+	if (kds->format != KDS_FORMAT_TUPSLOT ||
+		colidx >= kds->ncols)
 	{
 		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 		return;
 	}
 	cmeta = kds->colmeta[colidx];
+	values = KERN_DATA_STORE_VALUES(kds,rowidx);
+	isnull = KERN_DATA_STORE_ISNULL(kds,rowidx);
+
 	/*
-	 * Right now, expected data length for running total of partial aggregate
-	 * are 2, 4, or 8. Elasewhere, it may be a bug.
+	 * Right now, expected data length for running total of partial
+	 * aggregates are 2, 4, or 8. Elasewhere, it may be a bug.
 	 */
 	if (cmeta.attlen == sizeof(cl_short))
 	{
-		__global cl_short  *addr = kern_get_datum(kds,ktoast,colidx,rowidx);
-		if (!addr)
-			pdatum->isnull = true;
-		else
-		{
-			pdatum->isnull = false;
-			pdatum->short_val = *addr;
-		}
+		pdatum->isnull = isnull[colidx];
+		pdatum->short_val = (cl_short)(values[colidx] & 0x0000ffffUL);
 	}
-	else if (cmeta.attlen == sizeof(cl_int))		/* also, cl_float */
+	else if (cmeta.attlen == sizeof(cl_int))	/* also, cl_float */
 	{
-		__global cl_int   *addr = kern_get_datum(kds,ktoast,colidx,rowidx);
-		if (!addr)
-			pdatum->isnull	= true;
-		else
-		{
-			pdatum->isnull	= false;
-			pdatum->int_val	= *addr;
-		}
+		pdatum->isnull = isnull[colidx];
+		pdatum->int_val = (cl_int)(values[colidx] & 0xffffffffUL);
 	}
 	else if (cmeta.attlen == sizeof(cl_long))	/* also, cl_double */
 	{
-		__global cl_long  *addr = kern_get_datum(kds,ktoast,colidx,rowidx);
-		if (!addr)
-			pdatum->isnull	= true;
-		else
-		{
-			pdatum->isnull	= false;
-			pdatum->long_val= *addr;
-		}
+		pdatum->isnull = isnull[colidx];
+		pdatum->long_val = (cl_short)(values[colidx] & 0xffffffffUL);
 	}
 	else
 	{
@@ -303,41 +291,38 @@ gpupreagg_data_store(__local pagg_datum *pdatum,
 					 __global kern_data_store *ktoast,
 					 cl_uint colidx, cl_uint rowidx)
 {
-	kern_colmeta	cmeta;
+	kern_colmeta		cmeta;
+	__global Datum	   *values;
+	__global cl_char   *isnull;
 
-	if (colidx >= kds->ncols)
+	if (kds->format != KDS_FORMAT_TUPSLOT ||
+		colidx >= kds->ncols)
 	{
 		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 		return;
 	}
 	cmeta = kds->colmeta[colidx];
+	values = KERN_DATA_STORE_VALUES(kds,rowidx);
+	isnull = KERN_DATA_STORE_ISNULL(kds,rowidx);
+
 	/*
-	 * Right now, expected data length for running total of partial aggregate
-	 * are 2, 4, or 8. Elasewhere, it may be a bug.
+	 * Right now, expected data length for running total of partial
+	 * aggregates are 2, 4, or 8. Elasewhere, it may be a bug.
 	 */
 	if (cmeta.attlen == sizeof(cl_short))
 	{
-		pg_int2_t	temp;
-
-		temp.isnull = pdatum->isnull;
-		temp.value  = pdatum->short_val;
-		pg_int2_vstore(kds, ktoast, errcode, colidx, rowidx, temp);
+		isnull[colidx] = pdatum->isnull;
+		values[colidx] = pdatum->short_val;
 	}
-	else if (cmeta.attlen == sizeof(cl_uint))		/* also, cl_float */
+	else if (cmeta.attlen == sizeof(cl_int))	/* also, cl_float */
 	{
-		pg_int4_t	temp;
-
-		temp.isnull	= pdatum->isnull;
-		temp.value	= pdatum->int_val;
-		pg_int4_vstore(kds, ktoast, errcode, colidx, rowidx, temp);
+		isnull[colidx] = pdatum->isnull;
+		values[colidx] = pdatum->int_val;
 	}
-	else if (cmeta.attlen == sizeof(cl_ulong))	/* also, cl_double */
+	else if (cmeta.attlen == sizeof(cl_long))	/* also, cl_double */
 	{
-		pg_int8_t	temp;
-
-		temp.isnull	= pdatum->isnull;
-		temp.value	= pdatum->long_val;
-		pg_int8_vstore(kds, ktoast, errcode, colidx, rowidx, temp);
+		isnull[colidx] = pdatum->isnull;
+		values[colidx] = pdatum->long_val;
 	}
 	else
 	{
@@ -364,27 +349,27 @@ gpupreagg_data_move(__private cl_int *errcode,
 	__global cl_char   *src_isnull;
 	__global cl_char   *dst_isnull;
 
+	/*
+	 * XXX - Paranoire checks?
+	 */
+	if (kds_src->format != KDS_FORMAT_TUPSLOT ||
+		kds_dst->format != KDS_FORMAT_TUPSLOT)
+	{
+		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
+		return;
+	}
 	if (colidx >= kds_src->ncols || colidx >= kds_dst->ncols)
 	{
 		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 		return;
 	}
-
 	src_values = KERN_DATA_STORE_VALUES(kds_src, rowidx_src);
 	src_isnull = KERN_DATA_STORE_ISNULL(kds_src, rowidx_src);
 	dst_values = KERN_DATA_STORE_VALUES(kds_dst, rowidx_dst);
 	dst_isnull = KERN_DATA_STORE_ISNULL(kds_dst, rowidx_dst);
 
-	if (src_isnull[colidx])
-	{
-		dst_isnull[colidx] = (cl_char) 1;
-		dst_values[colidx] = (Datum) 0;
-	}
-	else
-	{
-		dst_isnull[colidx] = (cl_char) 0;
-		dst_values[colidx] = src_values[colidx];
-	}
+	dst_isnull[colidx] = src_isnull[colidx];
+	dst_values[colidx] = src_values[colidx];
 }
 
 /*
