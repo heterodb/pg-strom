@@ -633,17 +633,17 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 	}
 	dest_index = base_index + index;
 
-    /*
-     * Local reduction for each column
-     *
-     * Any threads that are NOT responsible to grouping-key calculates
-     * aggregation on the item that is responsibles.
-     * Once atomic operations got finished, values of pagg_datum in the
-     * respobsible thread will have partially aggregated one.
-     *
-     * NOTE: local memory shall be reused to l_datum array, so l_hashslot[]
-     * array is no longer available across here
-     */
+	/*
+	 * Local reduction for each column
+	 *
+	 * Any threads that are NOT responsible to grouping-key calculates
+	 * aggregation on the item that is responsibles.
+	 * Once atomic operations got finished, values of pagg_datum in the
+	 * respobsible thread will have partially aggregated one.
+	 *
+	 * NOTE: local memory shall be reused to l_datum array, so l_hashslot[]
+	 * array is no longer available across here
+	 */
 	l_datum = (__local pagg_datum *)LOCAL_WORKMEM;
 	for (attnum = 0; attnum < nattrs; attnum++)
 	{
@@ -672,14 +672,14 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 		/* Load aggregation item to pagg_datum */
 		if (get_global_id(0) < nitems)
 		{
-            gpupreagg_data_load(l_datum + get_local_id(0),
-                                &errcode,
-                                kds_src, ktoast,
-                                attnum, get_global_id(0));
-        }
-        barrier(CLK_LOCAL_MEM_FENCE);
+			gpupreagg_data_load(l_datum + get_local_id(0),
+								&errcode,
+								kds_src, ktoast,
+								attnum, get_global_id(0));
+		}
+		barrier(CLK_LOCAL_MEM_FENCE);
 
-        /* Reduction, using local atomic operation */
+		/* Reduction, using local atomic operation */
 		if (get_global_id(0) < nitems &&
 			get_global_id(0) != owner_index)
 		{
@@ -702,8 +702,8 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 			 * put pg_fixup_tupslot_varlena() here
 			 */
 		}
-        barrier(CLK_LOCAL_MEM_FENCE);
-    }
+		barrier(CLK_LOCAL_MEM_FENCE);
+	}
 out:
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
