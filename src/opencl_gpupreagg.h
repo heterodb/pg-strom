@@ -681,7 +681,7 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 
 		/* Reduction, using local atomic operation */
 		if (get_global_id(0) < nitems &&
-			get_global_id(0) != owner_index)
+			get_local_id(0) != owner_index)
 		{
 			gpupreagg_local_calc(&errcode,
 								 attnum,
