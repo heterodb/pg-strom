@@ -26,66 +26,81 @@
  * within a continuous memory area, to translate this chunk with
  * a single DMA call.
  *
- * +----------------+  -----
- * | status         |    ^
- * +----------------+    |
- * | __padding__    |    |
- * +----------------+    |
- * | kern_parambuf  |    |
- * | +--------------+    |
- * | | length   o--------------+
- * | +--------------+    |     | kern_row_map is located just after
- * | | nparams      |    |     | the kern_parambuf (because of DMA
- * | +--------------+    |     | optimization), so head address of
- * | | poffset[0]   |    |     | kern_gpuscan + parambuf.length
- * | | poffset[1]   |    |     | points kern_row_map.
- * | |    :         |    |     |
- * | | poffset[M-1] |    |     |
- * | +--------------+    |     |
- * | | variable     |    |     |
- * | | length field |    |     |
- * | | for Param /  |    |     |
- * | | Const values |    |     |
- * | |     :        |    |     |
- * +-+--------------+ <--------+
- * | kern_row_map   |    |
- * | +--------------+    |
- * | | nvalids (=N) |    | 'nvalids' is the length of kern_row_map.
- * | +--------------+    | It is the minimum 2^N value that is larger than
- * | | rindex[0]    |    | or equal to kds->nitems.
- * | | rindex[1]    |    |
- * | |    :         |    |
- * | | rindex[N]    |    V
+ * +----------------+
+ * | kern_parambuf  |
+ * | +--------------+
+ * | | length   o---------+
+ * | +--------------+     | kern_row_map is located just after
+ * | | nparams      |     | the kern_parambuf (because of DMA
+ * | +--------------+     | optimization), so head address of
+ * | | poffset[0]   |     | kern_gpuscan + parambuf.length
+ * | | poffset[1]   |     | points kern_row_map.
+ * | |    :         |     |
+ * | | poffset[M-1] |     |
+ * | +--------------+     |
+ * | | variable     |     |
+ * | | length field |     |
+ * | | for Param /  |     |
+ * | | Const values |     |
+ * | |     :        |     |
+ * +-+--------------+ <---+
+ * | kern_resultbuf |
+ * | +--------------+
+ * | | nrels (=2)   |
+ * | +--------------+
+ * | | nrooms       |
+ * | +--------------+
+ * | | nitems       |
+ * | +--------------+
+ * | | errcode      |
+ * | +--------------+
+ * | | has_rechecks |
+ * | +--------------+
+ * | | all_visible  |
+ * | +--------------+
+ * | | __padding__[]|
+ * | +--------------+
+ * | | results[0]   | A pair of results identify the records being sorted.
+ * | | results[1]   | result[even number] indicates chunk_id.
+ * | +--------------+   (It is always same in a single kernel execution)
+ * | | results[2]   | result[odd number] indicated item_id; that is index
+ * | | results[3]   |   of a row within a sorting chunk
+ * | +--------------+
+ * | |     :        |
  * +-+--------------+  -----
  */
 typedef struct
 {
-	cl_int			status;
-	cl_char			__padding__[4];
 	kern_parambuf	kparams;
-	/* kern_row_map shall be located next to the kparams */
+	/* kern_resultbuf (nrels = 2) shall be located next to the kparams */
 } kern_gpusort;
 
 #define KERN_GPUSORT_PARAMBUF(kgsort)				\
 	((__global kern_parambuf *)(&(kgsort)->kparams)
 #define KERN_GPUSORT_PARAMBUF_LENGTH(kgsort)		\
 	(KERN_GPUSORT_PARAMBUF(kgsort)->length)
-#define KERN_GPUSORT_KROWMAP(kgsort)				\
-	((__global kern_row_map *)						\
-	 ((__global char *)(kgsort) +					\
-	  STROMALIGN(offsetof(kern_gpusort, kparams) +	\
-				 KERN_GPUSORT_PARAMBUF_LENGTH(kgsort))))
-#define KERN_GPUSORT_BUFFER_SIZE(kgsort, nitems)
-
-#define KERN_GPUSORT_DMASEND_OFFSET(kgsort)			0
+#define KERN_GPUSORT_RESULTBUF(kgsort)			\
+	((__global kern_resultbuf *)				\
+	 ((__global char *)&(kgsort)->kparams +		\
+	  STROMALIGN((kgsort)->kparams.length)))
+#define KERN_GPUSORT_RESULTBUF_LENGTH(kgsort)			\
+	STROMALIGN(offsetof(kern_resultbuf,					\
+		results[KERN_GPUSORT_RESULTBUF(kgsort)->nrels *	\
+				KERN_GPUSORT_RESULTBUF(kgsort)->nrooms]))
+#define KERN_GPUSORT_LENGTH(kgsort)				\
+	(offsetof(kern_gpusort, kparams) +			\
+	 KERN_GPUSORT_PARAMBUF_LENGTH(kgsort) +		\
+	 KERN_GPUSORT_RESULTBUF_LENGTH(kgsort))
+#define KERN_GPUSORT_DMASEND_OFFSET(kgsort)		\
+	offsetof(kern_gpusort, kparams)
 #define KERN_GPUSORT_DMASEND_LENGTH(kgsort)			\
-	((uintptr_t)(KERN_GPUSORT_KROWMAP(kgsort)->rindex) -	\
+	(KERN_GPUSORT_LENGTH(kgsort) -					\
+	 offsetof(kern_gpusort, kparams))
+#define KERN_GPUSORT_DMARECV_OFFSET(kgsort)			\
+	((uintptr_t)KERN_GPUSORT_RESULTBUF(kgsort) -	\
 	 (uintptr_t)(kgsort))
-#define KERN_GPUSORT_DMARECV_OFFSET(kgsort)			0
-#define KERN_GPUSORT_DMARECV_LENGTH(kgsort)					\
-	((uintptr_t)(KERN_GPUSORT_KROWMAP(kgsort)->rindex +		\
-				 KERN_GPUSORT_KROWMAP(kgsort)->nvalids) -	\
-	 (uintptr_t)(kgsort))
+#define KERN_GPUSORT_DMARECV_LENGTH(kgsort)			\
+	KERN_GPUSORT_RESULTBUF_LENGTH(kgsort)
 
 #ifdef	/* OPENCL_DEVICE_CODE */
 /*
@@ -189,6 +204,7 @@ typedef struct
 {
 	pgstrom_message		msg;
 	Datum				dprog_key;
+	cl_int				chunk_id;
 	pgstrom_data_store *pds;	/* source data store (file mapped row-store) */
 	kern_gpusort		kern;
 } pgstrom_gpusort;

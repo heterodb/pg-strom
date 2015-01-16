@@ -139,7 +139,6 @@ typedef enum {
 	StromTag_HashJoinTable,
 	StromTag_GpuPreAgg,
 	StromTag_GpuSort,
-	StromTag_DSMSegment,
 } StromTag;
 
 typedef struct {
@@ -313,6 +312,9 @@ typedef struct pgstrom_data_store {
 	slock_t				lock;
 	volatile int		refcnt;
 	kern_data_store	   *kds;		/* reference to kern_data_store */
+	size_t				kds_length;	/* length of kds */
+	const char		   *kds_fname;	/* if KDS_FORMAT_ROW_FMAP */
+	int					kds_fdesc;	/* !!NOTE: valid only the backend */
 	struct pgstrom_data_store *ktoast;
 	ResourceOwner		resowner;	/* !!NOTE: private address!!*/
 	char			   *local_pages;/* duplication of local pages */
@@ -475,6 +477,8 @@ extern void pgstrom_init_codegen(void);
 /*
  * datastore.c
  */
+extern Size pgstrom_chunk_size();
+
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
@@ -498,6 +502,18 @@ __pgstrom_create_data_store_row_flat(const char *filename, int lineno,
 #define pgstrom_create_data_store_row_flat(tupdesc,length)		\
 	__pgstrom_create_data_store_row_flat(__FILE__,__LINE__,		\
 										 (tupdesc),(length))
+
+extern pgstrom_data_store *
+__pgstrom_create_data_store_row_fmap(const char *filename, int lineno,
+									 TupleDesc tupdesc, Size length);
+#define pgstrom_create_data_store_row_fmap(tupdesc,length)		\
+	__pgstrom_create_data_store_row_fmap(__FILE__,__LINE__,		\
+										 (tupdesc),(length))
+extern kern_data_store *
+pgstrom_map_data_store_row_fmap(pgstrom_data_store *pds, int *p_fdesc);
+extern void
+pgstrom_unmap_data_store_row_fmap(kern_data_store *kds, int fdesc);
+
 extern pgstrom_data_store *
 __pgstrom_create_data_store_tupslot(const char *filename, int lineno,
 									TupleDesc tupdesc, cl_uint nrooms,
@@ -525,6 +541,7 @@ extern cl_int clserv_dmasend_data_store(pgstrom_data_store *pds,
 										cl_event *events,
 										pgstrom_perfmon *pfm);
 extern void pgstrom_dump_data_store(pgstrom_data_store *pds);
+extern void pgstrom_init_datastore(void);
 
 /*
  * restrack.c
@@ -669,7 +686,6 @@ extern void __clserv_log(const char *funcname,
 extern bool	pgstrom_enabled(void);
 extern bool pgstrom_perfmon_enabled;
 extern bool pgstrom_debug_bulkload_enabled;
-extern int	pgstrom_chunk_size;
 extern int	pgstrom_max_async_chunks;
 extern int	pgstrom_min_async_chunks;
 extern double pgstrom_gpu_setup_cost;

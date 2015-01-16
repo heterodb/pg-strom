@@ -31,6 +31,7 @@ typedef struct
 	int			extra_flags;
 	List	   *used_params;
 	long		num_chunks;
+	Size		chunk_size;
 	/* delivered from original Sort */
 	int			numCols;		/* number of sort-key columns */
 	AttrNumber *sortColIdx;		/* their indexes in the target list */
@@ -49,6 +50,7 @@ form_gpusort_info(CustomScan *cscan, GpuSortInfo *gs_info)
 	privs = lappend(privs, makeInteger(gs_info->extra_flags));
 	privs = lappend(privs, gs_info->used_params);
 	privs = lappend(privs, makeInteger(gs_info->num_chunks));
+	privs = lappend(privs, makeInteger(gs_info->chunk_size));
 	privs = lappend(privs, makeInteger(gs_info->numCols));
 	/* sortColIdx */
 	for (temp = NIL, i=0; i < gs_info->numCols; i++)
@@ -83,7 +85,8 @@ deform_gpusort_info(CustomScan *cscan)
 	gs_info->kern_source = strVal(list_nth(privs, pindex++));
 	gs_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gs_info->used_params = list_nth(privs, pindex++);
-	gs_info->num_chunks = list_nth(privs, pindex++);
+	gs_info->num_chunks = intVal(list_nth(privs, pindex++));
+	gs_info->chunk_size = intVal(list_nth(privs, pindex++));
 	gs_info->numCols = intVal(list_nth(privs, pindex++));
 	/* sortColIdx */
 	temp = list_nth(privs, pindex++);
@@ -136,6 +139,7 @@ typedef struct
 	int				limit_chunks;	/* length of sort_chunks array */
 	pgstrom_data_store **sort_chunks;
 
+	Size			chunk_size;		/* expected best size of sorting chunk */
     int				numCols;		/* number of sort-key columns */
     AttrNumber	   *sortColIdx;		/* their indexes in the target list */
     Oid			   *sortOperators;	/* OIDs of operators to sort them by */
@@ -246,15 +250,21 @@ gpusort_check_buffer_path(char **newval, void **extra, GucSource source)
 #define LOG2(x)		(log(x) / 0.693147180559945)
 
 static void
-cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost, long *p_num_chunks,
-			 Cost subplan_total, double ntuples, int width)
+cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
+			 long *p_num_chunks, Size *p_chunk_size,
+			 Plan *subplan)
 {
+	Cost	subplan_total = subplan->total_cost;
+	double	ntuples = subplan->plan_rows;
+	int		width = subplan->plan_width;
+	int		nattrs = list_length(subplan->targetlist);
 	Cost	cpu_comp_cost = 2.0 * cpu_operator_cost;
 	Cost	gpu_comp_cost = 2.0 * pgstrom_gpu_operator_cost;
 	Cost	startup_cost = subplan_total;
 	Cost	run_cost = 0.0;
 	double	nrows_per_chunk;
 	long	num_chunks;
+	Size	chunk_size;
 
 	if (ntuples < 2.0)
 		ntuples = 2.0;
@@ -262,9 +272,19 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost, long *p_num_chunks,
 	/*
 	 * calculate expected number of rows per chunk and number of chunks.
 	 */
-	width += sizeof(cl_uint) + offsetof(HeapTupleHeaderData, t_bits);
-	nrows_per_chunk = (pgstrom_shmem_maxalloc() - 1024) / MAXALIGN(width);
-	num_chunks = Max(1.0, floor(ntupls / nrows_per_chunk + 0.999999));
+	width = MAXALIGN(width + sizeof(cl_uint) +
+					 offsetof(HeapTupleHeaderData, t_bits) +
+					 BITMAPLEN(list_length(subplan->targetlist)));
+	chunk_size = (Size)((double)width * ntuples * 1.15) + 1024;
+	if (pgstrom_shmem_maxalloc() > chunk_size)
+		num_chunks = 1;
+	else
+	{
+		double		nrows_per_chunk =
+			(double)(pgstrom_shmem_maxalloc() - 1024) / ((double)width * 1.25);
+		chunk_size = (Size)((double)width * nrows_per_chunk * 1.25);
+		num_chunks = Max(1.0, floor(ntuples / nrows_per_chunk + 0.9999));
+	}
 
 	/*
 	 * We'll use bitonic sorting logic on GPU device.
@@ -288,6 +308,8 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost, long *p_num_chunks,
 	/* result */
     *p_startup_cost = startup_cost;
     *p_total_cost = startup_cost + run_cost;
+	*p_num_chunks = num_chunks;
+	*p_chunk_size = chunk_size;
 }
 
 
@@ -418,6 +440,7 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	Cost		startup_cost;
 	Cost		total_cost;
 	long		num_chunks;
+	Size		chunk_size;
 	Plan	   *subplan;
 	GpuSortInfo	gs_info;
 	int			i;
@@ -457,10 +480,9 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	/*
 	 * OK, cost estimation with GpuSort
 	 */
-	cost_gpusort(&startup_cost, &total_cost, &num_chunks,
-				 subplan->total_cost,
-				 subplan->plan_rows,
-				 subplan->plan_width);
+	cost_gpusort(&startup_cost, &total_cost,
+				 &num_chunks, &chunk_size,
+				 subplan);
 	if (!debug_force_gpusort && total_cost >= sort->plan.total_cost)
 		return;
 
@@ -514,6 +536,7 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 		(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
 	gs_info.used_params = context.used_params;
 	gs_info.num_chunks = num_chunks;
+	gs_info.chunk_size = chunk_size;
 	gs_info.numCols = sort->numCols;
 	gs_info.sortColIdx = sort->sortColIdx;
 	gs_info.sortOperators = sort->sortOperators;
@@ -565,11 +588,119 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->limit_chunks = 2 * gs_info->num_chunks;
 	gss->sort_chunks = palloc0(sizeof(pgstrom_data_store *) *
 							   gss->limit_chunks);
+	gss->chunk_size = gs_info->chunk_size;
 	gss->numCols = gs_info->numCols;
 	gss->sortColIdx = gs_info->sortColIdx;
 	gss->sortOperators = gs_info->sortOperators;
 	gss->collations = gs_info->collations;
 	gss->nullsFirst = gs_info->nullsFirst;
+
+}
+
+static void
+pgstrom_release_gpusort(pgstrom_message *msg)
+{
+	pgstrom_gpusort	   *gpusort = (pgstrom_gpusort *) msg;
+
+	/* unlink message queue and device program */
+	pgstrom_put_queue(msg->respq);
+	pgstrom_put_devprog_key(gpusort->dprog_key);
+
+	pgstrom_put_data_store(gpusort->pds);
+
+	pgstrom_shmem_free(gpusort);
+}
+
+static pgstrom_gpusort *
+pgstrom_create_gpusort(GpuSortState *gss)
+{
+	pgstrom_data_store *pds;
+	TupleDesc	tupdesc;
+
+	// length; as long as possible we can, but not too long
+	// according to the cost estimation
+
+	tupdesc = gss->css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
+
+
+	pds = pgstrom_create_data_store_row_fmap(tupdesc, gss->chunk_size);
+
+	while (true)
+	{
+		if (gss->overflow_slot != NULL)
+		{
+			slot = gss->overflow_slot;
+			gss->overflow_slot = NULL;
+		}
+		else
+		{
+			slot = ExecProcNode(outerPlanState(gss));
+			if (TupIsNull(slot))
+			{
+				gss->scan_done = true;
+				slot = NULL;
+				break;
+			}
+		}
+		Assert(!TupIsNull(slot));
+		if (!pgstrom_data_store_insert_tuple(pds, slot))
+		{
+			gss->overflow_slot = slot;
+			break;
+		}
+	}
+
+	/* make pgstrom_gpusort object */
+	nitems = pds->kds->nitems;
+	length = (STROMALIGN(offsetof(pgstrom_gpusort, kern.kparams)) +
+			  STROMALIGN(gss->kparams->length) +
+			  STROMALIGN(offsetof(kern_resultbuf, results[2 * nitems])));
+	gpusort = pgstrom_shmem_alloc(length);
+	if (!gpusort)
+		elog(ERROR, "out of shared memory");
+
+	/* common field of pgstrom_gpusort */
+	pgstrom_init_message(&gpusort->msg,
+                         StromTag_GpuSort,
+						 gss->mqueue,
+						 clserv_process_gpusort,
+						 pgstrom_release_gpusort,
+						 gss->pfm.enabled);
+	gpusort->dprog_key = pgstrom_retain_devprog_key(gss->dprog_key);
+	gpusort->chunk_id = gss->;
+	gpusort->pds = pds;
+	memcpy(KERN_GPUSORT_PARAMBUF(&gpusort->kern),
+		   gss->kparams,
+		   gss->kparams->length);
+	kresults = KERN_GPUSORT_RESULTBUF(&gpusort->kernel);
+	memset(kresults, 0, sizeof(kern_resultbuf));
+	kresults->nrels = 2;
+	kresults->nrooms = nitems;
+
+	return gpusort;
+}
+
+
+static void
+gpusort_exec_sort(GpuSortState *gss)
+{
+	pgstrom_gpusort	   *gsort;
+
+	while (!gss->scan_done)
+	{
+		gpusort = pgstrom_create_gpusort(gss);
+
+
+
+
+
+
+
+
+	}
+
+
+
 
 
 
@@ -577,9 +708,18 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 
 }
 
+
 static TupleTableSlot *
 gpusort_exec(CustomScanState *node)
 {
+	GpuSortState   *gss = (GpuSortState *) node;
+
+	if (!gss->sort_done)
+		gpusort_exec_sort();
+
+
+
+
 	return NULL;
 }
 
