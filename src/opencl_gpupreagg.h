@@ -974,72 +974,73 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 /*
  * Helper macros for gpupreagg_local_calc
  */
-#define AGGCALC_LOCAL_TEMPLATE(newval,ATOMIC_FUNC_CALL)	\
+#define AGGCALC_LOCAL_TEMPLATE(accum,newval,ATOMIC_FUNC_CALL)	\
 	do {												\
 		if (!(newval)->isnull)							\
 		{												\
 			ATOMIC_FUNC_CALL;							\
+			(accum)->isnull = false;					\
 		}												\
 	} while (0)
 
 /* calculation for local partial max */
 #define AGGCALC_LOCAL_PMAX_SHORT(errcode,accum,newval)		\
-	AGGCALC_LOCALTEMPLATE(newval,							\
+	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			atomic_max(&(accum)->int_val, (int)(newval)->short_val))
 #define AGGCALC_LOCAL_PMAX_INT(errcode,accum,newval)		\
-	AGGCALC_LOCAL_TEMPLATE(newval,							\
+	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			atomic_max(&(accum)->int_val, (newval)->int_val))
 #define AGGCALC_LOCAL_PMAX_LONG(errcode,accum,newval)		\
-	AGGCALC_LOCAL_TEMPLATE(newval,							\
+	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			atom_max(&(accum)->long_val, (newval)->long_val))
 #define AGGCALC_LOCAL_PMAX_FLOAT(errcode,accum,newval)		\
-    AGGCALC_LOCAL_TEMPLATE(newval,							\
+    AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			latomic_max_float(&(accum)->float_val, (newval)->float_val))
 #define AGGCALC_LOCAL_PMAX_DOUBLE(errcode,accum,newval)		\
-	AGGCALC_LOCAL_TEMPLATE(newval,							\
+	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			latomic_max_double(&(accum)->double_val, (newval)->double_val))
 #define AGGCALC_LOCAL_PMAX_NUMERIC(errcode,accum,newval)	\
-	AGGCALC_LOCAL_TEMPLATE(newval,							\
+	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			latomic_max_numeric(&(accum)->long_val, (newval)->long_val))
 
 /* calculation for local partial min */
 #define AGGCALC_LOCAL_PMIN_SHORT(errcode,accum,newval)		\
-	AGGCALC_LOCALTEMPLATE(newval,							\
+	AGGCALC_LOCALTEMPLATE(accum,newval,						\
 			atomic_min(&(accum)->int_val, (int)(newval)->short_val))
 #define AGGCALC_LOCAL_PMIN_INT(errcode,accum,newval)		\
-	AGGCALC_LOCAL_TEMPLATE(newval,							\
+	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			atomic_min(&(accum)->int_val, (newval)->int_val))
 #define AGGCALC_LOCAL_PMIN_LONG(errcode,accum,newval)		\
-	AGGCALC_LOCAL_TEMPLATE(newval,							\
+	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			atom_min(&(accum)->long_val, (newval)->long_val))
 #define AGGCALC_LOCAL_PMIN_FLOAT(errcode,accum,newval)		\
-    AGGCALC_LOCAL_TEMPLATE(newval,							\
+    AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			latomic_min_float(&(accum)->float_val, (newval)->float_val))
 #define AGGCALC_LOCAL_PMIN_DOUBLE(errcode,accum,newval)		\
-	AGGCALC_LOCAL_TEMPLATE(newval,							\
+	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			latomic_min_double(&(accum)->double_val, (newval)->double_val))
 #define AGGCALC_LOCAL_PMIN_NUMERIC(errcode,accum,newval)	\
-	AGGCALC_LOCAL_TEMPLATE(newval,							\
+	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			latomic_min_numeric(&(accum)->long_val, (newval)->long_val))
 
 /* calculation for local partial add */
 #define AGGCALC_LOCAL_PADD_SHORT(errcode,accum,newval)		\
-	AGGCALC_LOCALTEMPLATE(newval,							\
+	AGGCALC_LOCALTEMPLATE(accum,newval,						\
 			atomic_add(&(accum)->int_val, (int)(newval)->short_val))
 #define AGGCALC_LOCAL_PADD_INT(errcode,accum,newval)		\
-	AGGCALC_LOCAL_TEMPLATE(newval,							\
+	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			atomic_add(&(accum)->int_val, (newval)->int_val))
 #define AGGCALC_LOCAL_PADD_LONG(errcode,accum,newval)		\
-	AGGCALC_LOCAL_TEMPLATE(newval,							\
+	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			atom_add(&(accum)->long_val, (newval)->long_val))
 #define AGGCALC_LOCAL_PADD_FLOAT(errcode,accum,newval)		\
-    AGGCALC_LOCAL_TEMPLATE(newval,							\
+    AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			latomic_add_float(&(accum)->float_val, (newval)->float_val))
 #define AGGCALC_LOCAL_PADD_DOUBLE(errcode,accum,newval)		\
-	AGGCALC_LOCAL_TEMPLATE(newval,							\
+	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			latomic_add_double(&(accum)->double_val, (newval)->double_val))
 #define AGGCALC_LOCAL_PADD_NUMERIC(errcode,accum,newval)	\
-	AGGCALC_LOCAL_TEMPLATE(newval,							\
+	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			latomic_add_numeric(&(accum)->long_val, (newval)->long_val))
 
 /*
