@@ -2817,6 +2817,9 @@ pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
 	 */
 	gpupreagg->kern.status = StromError_Success;
 	gpupreagg->kern.hash_size = (nvalids < 0 ? nitems : nvalids);
+	memcpy(gpupreagg->kern.pg_crc32_table,
+		   pg_crc32c_table,
+		   sizeof(uint32) * 256);
 	/* kern_parambuf */
 	kparams = KERN_GPUPREAGG_PARAMBUF(&gpupreagg->kern);
 	memcpy(kparams, gpas->kparams, gpas->kparams->length);

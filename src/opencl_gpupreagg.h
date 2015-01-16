@@ -410,8 +410,6 @@ gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 	cl_int					errcode = StromError_Success;
 	cl_uint					offset;
 	cl_uint					nitems;
-//	size_t					hash_size;
-//	size_t					curr_index;
 	size_t					kds_index;
 	__local cl_uint			base;
 
@@ -484,7 +482,6 @@ gpupreagg_init_global_hashslot(__global kern_gpupreagg *kgpreagg,
 							   __global pagg_hashslot *g_hashslot)
 {
 	__global kern_row_map *krowmap = KERN_GPUPREAGG_KROWMAP(kgpreagg);
-	//cl_int					errcode = StromError_Success;
 	size_t					hash_size;
 	size_t					curr_index;
 
@@ -548,10 +545,6 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 		crc32_table[index] = kgpreagg->pg_crc32_table[index];
 	barrier(CLK_LOCAL_MEM_FENCE);
 
-	if (get_global_id(0) < nitems)
-		hash_value = gpupreagg_hashvalue(&errcode, crc32_table,
-										 kds_src, ktoast,
-										 get_global_id(0));
 	/*
 	 * Find a hash-slot to determine the item index that represents
 	 * a particular group-keys.
@@ -576,6 +569,9 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 
 	if (get_global_id(0) < nitems)
 	{
+		hash_value = gpupreagg_hashvalue(&errcode, crc32_table,
+										 kds_src, ktoast,
+										 get_global_id(0));
 		new_slot.hash = hash_value;
 		new_slot.index = get_local_id(0);
 		old_slot.hash = 0;
@@ -583,7 +579,7 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 		index = hash_value % hash_size;
 
 	retry:
-		cur_slot.value = atom_cmpxchg(&g_hashslot[index].value,
+		cur_slot.value = atom_cmpxchg(&l_hashslot[index].value,
 									  old_slot.value,
 									  new_slot.value);
 		if (cur_slot.value == old_slot.value)
