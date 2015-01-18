@@ -149,10 +149,9 @@ typedef struct
 	/* running status */
 	cl_int			num_gpu_running;
 	cl_int			num_cpu_running;
-
-
-
-
+	pgstrom_cpusort *sorted_chunk;	/* sorted but no pair chunk yet */
+	dlist_head		pending_chunks;	/* chunks waiting for cpu sort */
+	dlist_head		running_chunks;	/* chunks in running by bgworker */
 
 } GpuSortState;
 
@@ -164,29 +163,25 @@ typedef struct
  */
 typedef struct
 {
-	cl_int		nitems;
-	struct {
-		cl_int	chunk_id;
-		cl_int	row_id;
-	} items[FLEXIBLE_ARRAY_MEMBER];
-} gpusort_items;
+	dlist_node		chain;
+	BackgroundWorkerHandle *bgw_handle;	/* valid, if running */
 
-typedef struct CpuSortInfo
-{
-	char			dbname[NAMEDATALEN];
-	gpusort_items  *r_items;
-	gpusort_items  *l_items;
-	gpusort_items  *o_items;
-	/* reference to GpuSortState */
+	dsm_segment	   *ritems_dsm;
+	dsm_segment	   *litems_dsm;
+	dsm_segment	   *oitems_dsm;
+
+	/* sorting chunks */
 	uint			num_chunks;
 	pgstrom_data_store **sort_chunks;
+	/* sorting keys */
 	TupleDesc		tupdesc;
 	int				numCols;
 	AttrNumber	   *sortColIdx;
 	Oid			   *sortOperators;
 	Oid			   *collations;
 	bool		   *nullsFirst;
-} CpuSortInfo;
+} pgstrom_cpusort;
+
 
 
 
@@ -614,18 +609,15 @@ pgstrom_release_gpusort(pgstrom_message *msg)
 static pgstrom_gpusort *
 pgstrom_create_gpusort(GpuSortState *gss)
 {
-	pgstrom_data_store *pds;
-	TupleDesc	tupdesc;
+	pgstrom_data_store *pds = NULL;
+	TupleTableSlot *slot;
+	TupleDesc		tupdesc;
+	int				chunk_id = -1;
 
-	// length; as long as possible we can, but not too long
-	// according to the cost estimation
-
-	tupdesc = gss->css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
-
-
-	pds = pgstrom_create_data_store_row_fmap(tupdesc, gss->chunk_size);
-
-	while (true)
+	/*
+	 * Load tuples from the underlying plan node
+	 */
+	for (;;)
 	{
 		if (gss->overflow_slot != NULL)
 		{
@@ -643,6 +635,27 @@ pgstrom_create_gpusort(GpuSortState *gss)
 			}
 		}
 		Assert(!TupIsNull(slot));
+
+		/* Makes a sorting chunk on the first tuple */
+		if (!pds)
+		{
+			tupdesc = gss->css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
+			pds = pgstrom_create_data_store_row_fmap(tupdesc, gss->chunk_size);
+			chunk_id = gss->num_chunks++;
+			if (chunk_id >= gss->limit_chunks)
+			{
+				pgstrom_data_store *new_chunks
+					= repalloc(gss->sort_chunks,
+							   sizeof(pgstrom_data_store *) *
+							   2 * gss->limit_chunks);
+				pfree(ss->sort_chunks);
+				gss->sort_chunks = new_chunks;
+				gss->limit_chunks = 2 * gss->limit_chunks;
+			}
+			gss->sort_chunks[chunk_id] = pds;
+			pgstrom_track_object(&pds->sobj, 0);
+		}
+		/* Then, insert this tuple to the data store */
 		if (!pgstrom_data_store_insert_tuple(pds, slot))
 		{
 			gss->overflow_slot = slot;
@@ -650,7 +663,10 @@ pgstrom_create_gpusort(GpuSortState *gss)
 		}
 	}
 
-	/* make pgstrom_gpusort object */
+	if (!pds)
+		return NULL;
+
+	/* Makea a pgstrom_gpusort object based on the data-store */
 	nitems = pds->kds->nitems;
 	length = (STROMALIGN(offsetof(pgstrom_gpusort, kern.kparams)) +
 			  STROMALIGN(gss->kparams->length) +
@@ -667,8 +683,8 @@ pgstrom_create_gpusort(GpuSortState *gss)
 						 pgstrom_release_gpusort,
 						 gss->pfm.enabled);
 	gpusort->dprog_key = pgstrom_retain_devprog_key(gss->dprog_key);
-	gpusort->chunk_id = gss->;
-	gpusort->pds = pds;
+	gpusort->chunk_id = chunk_id;
+	gpusort->pds = pgstrom_get_data_store(pds);
 	memcpy(KERN_GPUSORT_PARAMBUF(&gpusort->kern),
 		   gss->kparams,
 		   gss->kparams->length);
@@ -676,27 +692,235 @@ pgstrom_create_gpusort(GpuSortState *gss)
 	memset(kresults, 0, sizeof(kern_resultbuf));
 	kresults->nrels = 2;
 	kresults->nrooms = nitems;
+	pgstrom_track_object(&gpusort->sobj, 0);
 
 	return gpusort;
 }
 
+static void
+gpusort_launch_cpusort_worker(GpuSortState *gss, pgstrom_cpusort *cpusort)
+{
+	BackgroundWorker	worker;
+
+	/* set up dynamic background worker */
+	memset(&worker, 0, sizeof(BackgroundWorker));
+	snprintf(worker.bgw_name, sizeof(worker.bgw_name),
+			 "GpuSort worker-%u", gss->cpusort_seqno++);
+	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
+        BGWORKER_BACKEND_DATABASE_CONNECTION;
+    worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+	worker.bgw_restart_time = BGW_NEVER_RESTART;
+	worker.bgw_main = gpusort_cpusort_main;
+	worker.bgw_main_arg = PointerGetDatum(cpusort);
+	/* XXX - we may need to serialize when we support windows shmem */
+
+	if (!RegisterDynamicBackgroundWorker(&worker, &cpusort->bgw_handle))
+		dlist_push_tail(&gss->pending_chunks, &cpusort->chain);
+	else
+	{
+		dlist_push_tail(&gss->running_chunks, &cpusort->chain);
+		gss->num_cpu_running++;
+	}
+}
+
+static void
+gpusort_check_cpusort_worker(GpuSortState *gss)
+{
+	dlist_mutable_iter	iter;
+
+	dlist_foreach_modify(iter, &gss->running_chunks)
+	{
+		pgstrom_cpusort	   *cpusort;
+		BgwHandleStatus		status;
+
+		cpusort = dlist_container(pgstrom_cpusort, chain, iter.cur);
+		status = GetBackgroundWorkerPid(cpusort->bgw_handle, &bgw_pid);
+
+		if (status == BGWH_STOPPED)
+		{
+			dlist_delete(&cpusort->chain);
+			/* decrement num_cpu_running */
+
+			/* check results status */
+
+			/* call the gpusort_merge_cpu_chunks */
+
+		}
+		else if (status == BGWH_POSTMASTER_DIED)
+		{
+			/* emergency. kills all the backend and raise an error */
+			hoge;
+		}
+	}
+
+}
+
+static void
+gpusort_merge_cpu_chunks(GpuSortState *gss, pgstrom_cpusort *cpusort_1)
+{
+	pgstrom_cpusort	   *cpusort_2;
+	kern_resultbuf	   *kresults_1;
+	kern_resultbuf	   *kresults_2;
+	kern_resultbuf	   *kresults_next;
+	cl_uint				nitems;
+
+	/* ritems and litems are no longer referenced */
+	dsm_detach(cpusort_1->ritems_dsm);
+	cpusort_1->ritems_dsm = NULL;
+	dsm_detach(cpusort_1->litems_dsm);
+	cpusort_1->litems_dsm = NULL;
+
+	if (!gss->sorted_chunk)
+	{
+		gss->sorted_chunk = cpusort_1;
+		return;
+	}
+	cpusort_2 = gss->sorted_chunk;
+	Assert(cpusort_2->oitems_dsm != NULL &&
+		   !cpusort_2->ritems_dsm &&
+		   !cpusort_2->litems_dsm);
+	kresults_1 = dsm_segment_address(cpusort_1->oitems_dsm);
+	kresults_2 = dsm_segment_address(cpusort_2->oitems_dsm);
+	Assert(kresults_1->nrels == 2 && kresults_2->nrels == 2);
+	nitems = kresults_1->nitems + kresults_2->nitems;
+
+	cpusort_2->ritems_dsm = cpusort_1->oitems_dsm;
+	cpusort_2->litems_dsm = cpusort_2->oitems_dsm;
+	length = STROMALIGN(offsetof(kern_resultbuf,
+								 kresults_1->nrels * nitems));
+
+	cpusort_2->oitems_dsm = dsm_create(length);
+	kresults_next = dsm_segment_address(cpusort_2->oitems_dsm);
+	memset(kresults_new, 0, sizeof(kern_resultbuf));
+	kresults_next->nrels = 2;
+	kresults_next->nrooms = nitems;
+
+	/* OK, kick a dynamic worker process */
+	pfree(cpusort_1);
+	gss->sorted_chunk = NULL;
+
+	hogehoge;
+}
+
+static void
+gpusort_merge_gpu_chunks(GpuSortState *gss, pgstrom_gpusort *gpusort)
+{
+	pgstrom_cpusort	   *cpusort;
+	EState			   *estate = gss->css.ss.ps.state;
+	MemoryContext		memcxt = estate->es_query_cxt;
+	kern_resultbuf	   *kresults_1;
+	kern_resultbuf	   *kresults_2;
+	Size				length;
+
+	if (!gss->sorted_chunk)
+	{
+		cpusort = MemoryContextAllocZero(memcxt, sizeof(pgstrom_cpusort));
+		cpusort->num_chunks = gss->num_chunks;
+		cpusort->sort_chunks = gss->sort_chunks;
+		cpusort->tupdesc = gss->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor;
+		cpusort->numCols = gss->numCols;
+		cpusort->sortColIdx = gss->sortColIdx;
+		cpusort->sortOperators = gss->sortOperators;
+		cpusort->collations = gss->collations;
+		cpusort->nullsFirst = gss->nullsFirst;
+
+		kresults_1 = KERN_GPUSORT_RESULTBUF(&gpusort->kern);
+		length = STROMALIGN(offsetof(kern_resultbuf,
+									 kresults_1->nrels *
+									 kresults_1->nitems));
+		cpusort->oitems_dsm = dsm_create(length);
+		cpusort->ritems_dsm = NULL;		/* to be set later */
+		cpusort->litems_dsm = NULL;		/* to be set later */
+		kresults_2 = dsm_segment_address(cpusort->oitems_dsm);
+		memcpy(kresults_2, kresults_1, length);
+
+		/* pds is still valid, but gpusort is no longer referenced */
+		pgstrom_put_message(gpusort->msg);
+
+		/* to be merged with next chunk */
+		gss->sorted_chunk = cpusort;
+		return;
+	}
+	cpusort = gss->sorted_chunk;
+	Assert(cpusort->oitems_dsm != NULL &&
+		   !cpusort->ritems_dsm &&
+		   !cpusort->litems_dsm);
+	kresults_1 = KERN_GPUSORT_RESULTBUF(&gpusort->kern);
+	length = STROMALIGN(offsetof(kern_resultbuf,
+								 kresults_1->nrels *
+								 kresults_1->nitems));
+	cpusort->ritems_dsm = oitems_dsm;
+	cpusort->litems_dsm = dsm_create(length);
+	kresults_2 = dsm_segment_address(cpusort->litems_dsm);
+	memcpy(kresults_2, kresults_1, length);
+
+	/* pds is still valid, but gpusort is no longer referenced */
+	pgstrom_put_message(gpusort->msg);
+
+	/* to be merged with next chunk */
+	gss->sorted_chunk = NULL;
+
+	/* try to kick background worker */
+	hogehoge;
+}
 
 static void
 gpusort_exec_sort(GpuSortState *gss)
 {
-	pgstrom_gpusort	   *gsort;
+	pgstrom_gpusort	   *gpusort;
 
-	while (!gss->scan_done)
+	while (!gss->scan_done ||
+		   gss->num_gpu_running > 0 ||
+		   gss->num_cpu_running > 0)
 	{
-		gpusort = pgstrom_create_gpusort(gss);
+		bool	launch_pending = false;
+
+		/*  */
+		if (!gss->scan_done)
+		{
+			gpusort = pgstrom_create_gpusort(gss);
+			if (gpusort)
+			{
+				if (!pgstrom_enqueue_message(&gpusort->msg))
+					elog(ERROR, "Bug? OpenCL server seems to dead");
+				gss->num_gpu_running++;
+			}
+		}
+
+		/* fetch and merge if pair is found */
+		while ((msg = pgstrom_try_dequeue_message(mqueue)) != NULL)
+		{
+			Assert(gss->num_gpu_running > 0);
+			gss->num_gpu_running--;
+
+			if (msg->pfm.enabled)
+				pgstrom_perfmon_add(&gss->pfm, &msg->pfm);
+			Assert(StromTagIs(msg, GpuSort));
+			gpusort = (pgstrom_gpusort *) msg;
+			gpusort_merge_chunks(gss, gpusort);
+		}
+
+		/* also checks result of CPU sorting */
+		while (fetch a CPU sort result)
+		{
+			Assert(gss->num_cpu_running > 0);
+			gss->num_cpu_running--;
+			launch_pending = true;
+
+			if (msg->pfm.enabled)
+				pgstrom_perfmon_add(&gss->pfm, &msg->pfm);
+			Assert(StromTagIs(msg, GpuSort));
+			gpusort = (pgstrom_gpusort *) msg;
+			gpusort_merge_chunks(gss, gpusort);
+		}
+
+		/***/
+		if (gss->scan_done)
+		{
 
 
 
-
-
-
-
-
+		}
 	}
 
 
