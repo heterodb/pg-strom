@@ -2,6 +2,7 @@
 --#       Gpu PreAggregate Simple TestCases. 
 --#
 
+set pg_strom.debug_force_gpupreagg to on;
 set client_min_messages to warning;
 set extra_float_digits to -3;
 
