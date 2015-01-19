@@ -273,7 +273,7 @@ gpupreagg_data_load(__local pagg_datum *pdatum,
 	else if (cmeta.attlen == sizeof(cl_long))	/* also, cl_double */
 	{
 		pdatum->isnull = isnull[colidx];
-		pdatum->long_val = (cl_short)(values[colidx] & 0xffffffffUL);
+		pdatum->long_val = (cl_long)values[colidx];
 	}
 	else
 	{
