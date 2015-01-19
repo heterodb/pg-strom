@@ -106,6 +106,16 @@ typedef uintptr_t	hostptr_t;
 #endif
 
 /*
+ * HOST_STATIC_INLINE is a qualifier of function that performs as static
+ * inline function on the host side implementation.
+ */
+#ifdef OPENCL_DEVICE_CODE
+#define HOST_STATIC_INLINE
+#else
+#define HOST_STATIC_INLINE		static inline
+#endif
+
+/*
  * Error code definition
  */
 #define StromError_Success				0	/* OK */
@@ -446,7 +456,7 @@ typedef struct {
 	cl_uint		poffset[FLEXIBLE_ARRAY_MEMBER];	/* offset of params */
 } kern_parambuf;
 
-__global void *
+HOST_STATIC_INLINE __global void *
 kparam_get_value(__global kern_parambuf *kparams, cl_uint pindex)
 {
 	if (pindex >= kparams->nparams)
