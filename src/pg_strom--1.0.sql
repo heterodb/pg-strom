@@ -261,20 +261,35 @@ CREATE AGGREGATE pgstrom.sum(int8)
 );
 
 --
--- Partial aggregates for int8 data type
--- (it keeps internal state using numeric, the function name might
---  be misleading...)
+-- Partial aggregates for int8 / numeric data type
 --
 CREATE FUNCTION pgstrom.int8_avg_accum(internal, int4, int8)
   RETURNS internal
   AS 'MODULE_PATHNAME', 'pgstrom_int8_avg_accum'
   LANGUAGE C CALLED ON NULL INPUT;
 
-CREATE AGGREGATE pgstrom.avg_numeric(int4, int8)
+CREATE FUNCTION pgstrom.numeric_avg_accum(internal, int4, numeric)
+  RETURNS internal
+  AS 'MODULE_PATHNAME', 'pgstrom_numeric_avg_accum'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.numeric_avg_final(internal)
+  RETURNS numeric
+  AS 'MODULE_PATHNAME', 'pgstrom_numeric_avg_final'
+  LANGUAGE C STRICT;
+
+CREATE AGGREGATE pgstrom.avg_int8(int4, int8)
 (
   sfunc = pgstrom.int8_avg_accum,
   stype = internal,
-  finalfunc = pg_catalog.numeric_avg
+  finalfunc = pgstrom.numeric_avg_final
+);
+
+CREATE AGGREGATE pgstrom.avg_numeric(int4, numeric)
+(
+  sfunc = pgstrom.numeric_avg_accum,
+  stype = internal,
+  finalfunc = pgstrom.numeric_avg_final
 );
 
 --
@@ -291,21 +306,6 @@ CREATE AGGREGATE pgstrom.avg(int4, float8)
   stype = float8[],
   finalfunc = pg_catalog.float8_avg,
   initcond = "{0,0,0}"
-);
-
---
--- Partial aggregate for numeric data type
---
-CREATE FUNCTION pgstrom.numeric_avg_accum(internal, int4, numeric)
-  RETURNS internal
-  AS 'MODULE_PATHNAME', 'pgstrom_numeric_avg_accum'
-  LANGUAGE C CALLED ON NULL INPUT;
-
-CREATE AGGREGATE pgstrom.avg(int4, numeric)
-(
-  sfunc = pgstrom.numeric_avg_accum,
-  stype = internal,
-  finalfunc = pg_catalog.numeric_avg
 );
 
 --
@@ -362,6 +362,73 @@ CREATE AGGREGATE pgstrom.var_pop(int4, float8, float8)
   stype = float8[],
   finalfunc = pg_catalog.float8_var_pop,
   initcond = '{0,0,0}'
+);
+
+CREATE FUNCTION pgstrom.numeric_var_accum(internal, int4, numeric, numeric)
+  RETURNS internal
+  AS 'MODULE_PATHNAME', 'pgstrom_numeric_var_accum'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.numeric_var_samp(internal)
+  RETURNS numeric
+  AS 'MODULE_PATHNAME', 'pgstrom_numeric_var_samp'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.numeric_stddev_samp(internal)
+  RETURNS numeric
+  AS 'MODULE_PATHNAME', 'pgstrom_numeric_stddev_samp'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.numeric_var_pop(internal)
+  RETURNS numeric
+  AS 'MODULE_PATHNAME', 'pgstrom_numeric_var_pop'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.numeric_stddev_pop(internal)
+  RETURNS numeric
+  AS 'MODULE_PATHNAME', 'pgstrom_numeric_stddev_pop'
+  LANGUAGE C STRICT;
+
+CREATE AGGREGATE pgstrom.stddev(int4, numeric, numeric)
+(
+  sfunc = pgstrom.numeric_var_accum,
+  stype = internal,
+  finalfunc = pgstrom.numeric_stddev_samp
+);
+
+CREATE AGGREGATE pgstrom.stddev_samp(int4, numeric, numeric)
+(
+  sfunc = pgstrom.numeric_var_accum,
+  stype = internal,
+  finalfunc = pgstrom.numeric_stddev_samp
+);
+
+CREATE AGGREGATE pgstrom.stddev_pop(int4, numeric, numeric)
+(
+  sfunc = pgstrom.numeric_var_accum,
+  stype = internal,
+  finalfunc = pgstrom.numeric_stddev_pop
+);
+
+CREATE AGGREGATE pgstrom.variance(int4, numeric, numeric)
+(
+  sfunc = pgstrom.numeric_var_accum,
+  stype = internal,
+  finalfunc = pgstrom.numeric_var_samp
+);
+
+CREATE AGGREGATE pgstrom.var_samp(int4, numeric, numeric)
+(
+  sfunc = pgstrom.numeric_var_accum,
+  stype = internal,
+  finalfunc = pgstrom.numeric_var_samp
+);
+
+CREATE AGGREGATE pgstrom.var_pop(int4, numeric, numeric)
+(
+  sfunc = pgstrom.numeric_var_accum,
+  stype = internal,
+  finalfunc = pgstrom.numeric_var_pop
 );
 
 --
