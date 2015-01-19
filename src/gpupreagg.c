@@ -242,7 +242,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0
 	},
 	{ "avg",    1, {INT8OID},
-	  "s:avg_numeric",  2, {INT4OID, INT8OID},
+	  "s:avg_int8",  2, {INT4OID, INT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0
 	},
 	{ "avg",    1, {FLOAT4OID},
@@ -254,7 +254,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0
 	},
 	{ "avg",	1, {NUMERICOID},
-	  "s:avg",	2, {INT4OID, NUMERICOID},
+	  "s:avg_numeric",	2, {INT4OID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, DEVFUNC_NEEDS_NUMERIC
 	},
 	/* COUNT(*) = SUM(NROWS(*|X)) */
@@ -1607,6 +1607,7 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	bool			use_temp_int8 = false;
 	bool			use_temp_float8x = false;
 	bool			use_temp_float8y = false;
+	bool			use_temp_numeric = false;
 	struct varlena *vl_datum;
 	Const		   *kparam_0;
 	cl_char		   *gpagg_atts;
@@ -1752,27 +1753,48 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			}
 			else if (strcmp(func_name, "psum_x2") == 0)
 			{
-				Assert(exprType(linitial(func->args)) == FLOAT8OID);
-				clause = linitial(func->args);
-				use_temp_float8x = true;
-				dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL, context);
-				dtype = pgstrom_devtype_lookup_and_track(FLOAT8OID, context);
+				const char *temp_label;
 
-				appendStringInfo(&body,
-								 "  temp_float8x = %s;\n",
-								 pgstrom_codegen_expression((Node *)clause,
-															context));
+				clause = linitial(func->args);
+				if (exprType((Node *)clause) == FLOAT8OID)
+				{
+					use_temp_float8x = true;
+					dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL,
+															 context);
+					dtype = pgstrom_devtype_lookup_and_track(FLOAT8OID,
+															 context);
+					appendStringInfo(
+						&body, "  temp_float8x = %s;\n",
+						pgstrom_codegen_expression((Node *)clause, context));
+					temp_label = "temp_float8x";
+				}
+				else if (exprType((Node *)clause) == NUMERICOID)
+				{
+					use_temp_numeric = true;
+					dfunc = pgstrom_devfunc_lookup_and_track(F_NUMERIC_MUL,
+															 context);
+					dtype = pgstrom_devtype_lookup_and_track(NUMERICOID,
+															 context);
+					appendStringInfo(
+						&body, "  temp_numeric = %s;\n",
+						pgstrom_codegen_expression((Node *)clause, context));
+					temp_label = "temp_numeric";
+				}
+				else
+					elog(ERROR, "Bug? psum_x2 expect float8 or numeric");
+
 				appendStringInfo(
 					&body,
 					"  pg_%s_vstore(%s,%s,errcode,%u,%s,\n"
-					"               pgfn_%s(errcode, temp_float8x,\n"
-					"                                temp_float8x));\n",
+					"               pgfn_%s(errcode, %s, %s));\n",
 					dtype->type_name,
 					kds_label,
 					ktoast_label,
 					tle->resno - 1,
 					rowidx_label,
-					dfunc->func_alias);
+					dfunc->func_alias,
+					temp_label,
+					temp_label);
 			}
 			else if (strcmp(func_name, "pcov_x") == 0 ||
 					 strcmp(func_name, "pcov_y") == 0 ||
@@ -1952,6 +1974,8 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 		appendStringInfo(&decl1, "  pg_float8_t temp_float8x;\n");
 	if (use_temp_float8y)
 		appendStringInfo(&decl1, "  pg_float8_t temp_float8y;\n");
+	if (use_temp_numeric)
+		appendStringInfo(&decl1, "  pg_numeric_t temp_numeric;\n");
 
 	appendStringInfo(
 		&str,
@@ -4574,47 +4598,47 @@ pgstrom_sum_int8_final(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_sum_int8_final);
 
 /*
- * pgstrom_avg_numeric_accum - It keeps an internal state using
- * NumericAggState for int8, to prevent overflow. Unlike built-in
- * implementation, it also takes "nrows" arguments in addition to
- * the partial sum.
+ * numeric_agg_state - self version of aggregation internal state; that
+ * can keep N, sum(X) and sum(X*X) in numeric data-type.
  */
-/* copy from numeric.c */
-typedef struct NumericAggState
+typedef struct
 {
-	bool		calcSumX2;		/* if true, calculate sumX2 */
-	MemoryContext agg_context;	/* context we're calculating in */
-	int64		N;				/* count of processed numbers */
-#if 0
-	NumericVar	sumX;			/* sum of processed numbers */
-	NumericVar	sumX2;			/* sum of squares of processed numbers */
-	int			maxScale;		/* maximum scale seen so far */
-	int64		maxScaleCount;	/* number of values seen with maximum scale */
-	int64		NaNcount;		/* count of NaN values (not included in N!) */
-#endif
-} NumericAggState;
+	int64	N;
+	Datum	sumX;
+	Datum	sumX2;
+} numeric_agg_state;
 
 Datum
 pgstrom_int8_avg_accum(PG_FUNCTION_ARGS)
 {
-	int32	nrows = PG_GETARG_INT32(1);
-	Datum	datum;
-	NumericAggState *state;
+	int32			nrows = PG_GETARG_INT32(1);
+	Datum			addNum;
+	MemoryContext	aggcxt;
+	MemoryContext	oldcxt;
+	numeric_agg_state *state;
 
-	/* nrows should be a non-null and non-negative input */
-	if (PG_ARGISNULL(1) || nrows < 0)
-		elog(ERROR, "Bug? NULL or negative nrows was given");
+	if (!AggCheckCallContext(fcinfo, &aggcxt))
+		elog(ERROR, "aggregate function called in non-aggregate context");
+	if (nrows < 0 || PG_ARGISNULL(1))
+		elog(ERROR, "Bug? negative or NULL nrows was given");
 
-	/* adjust argument */
-	fcinfo->nargs      = 2;
-	fcinfo->arg[1]     = fcinfo->arg[2];
-	fcinfo->argnull[1] = fcinfo->argnull[2];
+	/* make a state object and update it */
+	oldcxt = MemoryContextSwitchTo(aggcxt);
+	state = PG_ARGISNULL(0) ? NULL : (numeric_agg_state *)PG_GETARG_POINTER(0);
+	if (!state)
+	{
+		state = palloc0(sizeof(numeric_agg_state));
+		state->N = 0;
+		state->sumX = DirectFunctionCall3(numeric_in,
+										  CStringGetDatum("0"),
+										  ObjectIdGetDatum(0),
+										  Int32GetDatum(-1));
+	}
+	state->N += nrows;
+	addNum = DirectFunctionCall1(int8_numeric, PG_GETARG_DATUM(2));
+	state->sumX = DirectFunctionCall2(numeric_add, state->sumX, addNum);
+	MemoryContextSwitchTo(oldcxt);
 
-	datum = int8_avg_accum(fcinfo);
-
-	state = (NumericAggState *) DatumGetPointer(datum);
-	if (state && nrows > 0)
-		state->N += nrows - 1;
 	PG_RETURN_POINTER(state);
 }
 PG_FUNCTION_INFO_V1(pgstrom_int8_avg_accum);
@@ -4622,27 +4646,60 @@ PG_FUNCTION_INFO_V1(pgstrom_int8_avg_accum);
 Datum
 pgstrom_numeric_avg_accum(PG_FUNCTION_ARGS)
 {
-	int32	nrows = PG_GETARG_INT32(1);
-	Datum	datum;
-	NumericAggState *state;
+	int32			nrows = PG_GETARG_INT32(1);
+	MemoryContext	aggcxt;
+	MemoryContext	oldcxt;
+	numeric_agg_state *state;
 
-	/* nrows should be a valid non-negative input */
-	if (PG_ARGISNULL(1) || nrows < 0)
-		elog(ERROR, "Bug? NULL or negative nrows was given");
+	if (!AggCheckCallContext(fcinfo, &aggcxt))
+		elog(ERROR, "aggregate function called in non-aggregate context");
+	if (nrows < 0 || PG_ARGISNULL(1))
+		elog(ERROR, "Bug? negative or NULL nrows was given");
 
-	/* adjust argument */
-	fcinfo->nargs		= 2;
-	fcinfo->arg[1]		= fcinfo->arg[2];
-	fcinfo->argnull[1]	= fcinfo->argnull[2];
+	/* make a state object and update it */
+	oldcxt = MemoryContextSwitchTo(aggcxt);
+	state = PG_ARGISNULL(0) ? NULL : (numeric_agg_state *)PG_GETARG_POINTER(0);
+	if (!state)
+	{
+		state = palloc0(sizeof(numeric_agg_state));
+		state->N = 0;
+		state->sumX = DirectFunctionCall3(numeric_in,
+										  CStringGetDatum("0"),
+										  ObjectIdGetDatum(0),
+										  Int32GetDatum(-1));
+	}
+	state->N += nrows;
+	state->sumX = DirectFunctionCall2(numeric_add,
+									  state->sumX,
+									  PG_GETARG_DATUM(2));
+	MemoryContextSwitchTo(oldcxt);
 
-	datum = numeric_avg_accum(fcinfo);
-
-	state = (NumericAggState *) DatumGetPointer(datum);
-	if (state && nrows > 0)
-		state->N += nrows - 1;
 	PG_RETURN_POINTER(state);
 }
 PG_FUNCTION_INFO_V1(pgstrom_numeric_avg_accum);
+
+Datum
+pgstrom_numeric_avg_final(PG_FUNCTION_ARGS)
+{
+	numeric_agg_state *state;
+	Datum		vN;
+	Datum		result;
+
+	state = PG_ARGISNULL(0) ? NULL : (numeric_agg_state *)PG_GETARG_POINTER(0);
+
+	/* If there were no non-null inputs, return NULL */
+	if (state == NULL || state->N == 0)
+		PG_RETURN_NULL();
+	/* If any NaN value is accumlated, return NaN */
+	if (numeric_is_nan(DatumGetNumeric(state->sumX)))
+		PG_RETURN_NUMERIC(state->sumX);
+
+	vN = DirectFunctionCall1(int8_numeric, Int64GetDatum(state->N));
+	result = DirectFunctionCall2(numeric_div, state->sumX, vN);
+
+	PG_RETURN_NUMERIC(result);
+}
+PG_FUNCTION_INFO_V1(pgstrom_numeric_avg_final);
 
 /* logic copied from utils/adt/float.c */
 static inline float8 *
@@ -4762,6 +4819,180 @@ pgstrom_variance_float8_accum(PG_FUNCTION_ARGS)
 	}
 }
 PG_FUNCTION_INFO_V1(pgstrom_variance_float8_accum);
+
+Datum
+pgstrom_numeric_var_accum(PG_FUNCTION_ARGS)
+{
+	int32			nrows = PG_GETARG_INT32(1);
+	MemoryContext	aggcxt;
+	MemoryContext	oldcxt;
+	numeric_agg_state *state;
+
+	if (!AggCheckCallContext(fcinfo, &aggcxt))
+		elog(ERROR, "aggregate function called in non-aggregate context");
+
+	if (nrows < 0 || PG_ARGISNULL(1))
+		elog(ERROR, "Bug? negative or NULL nrows was given");
+
+	/* make a state object and update it */
+	oldcxt = MemoryContextSwitchTo(aggcxt);
+	state = PG_ARGISNULL(0) ? NULL : (numeric_agg_state *)PG_GETARG_POINTER(0);
+	if (!state)
+	{
+		state = palloc0(sizeof(numeric_agg_state));
+		state->N = 0;
+		state->sumX = DirectFunctionCall3(numeric_in,
+										  CStringGetDatum("0"),
+										  ObjectIdGetDatum(0),
+										  Int32GetDatum(-1));
+		state->sumX2 = DirectFunctionCall3(numeric_in,
+										   CStringGetDatum("0"),
+										   ObjectIdGetDatum(0),
+										   Int32GetDatum(-1));
+	}
+	state->N += nrows;
+	state->sumX = DirectFunctionCall2(numeric_add,
+									  state->sumX,
+									  PG_GETARG_DATUM(2));
+	state->sumX2 = DirectFunctionCall2(numeric_add,
+									   state->sumX2,
+									   PG_GETARG_DATUM(3));
+	MemoryContextSwitchTo(oldcxt);
+
+	PG_RETURN_POINTER(state);
+}
+PG_FUNCTION_INFO_V1(pgstrom_numeric_var_accum);
+
+static Numeric
+pgstrom_numeric_stddev_internal(numeric_agg_state *state,
+								bool variance, bool sample)
+{
+	Datum	vZero;
+	Datum	vN;
+	Datum	vN2;
+	Datum	vSumX;
+	Datum	vSumX2;
+	Datum	result;
+
+	if (state == NULL)
+		return NULL;
+	/* NaN checks */
+	if (numeric_is_nan(DatumGetNumeric(state->sumX)))
+		return DatumGetNumeric(state->sumX);
+	if (numeric_is_nan(DatumGetNumeric(state->sumX2)))
+		return DatumGetNumeric(state->sumX2);
+
+	/*
+	 * Sample stddev and variance are undefined when N <= 1; population stddev
+	 * is undefined when N == 0. Return NULL in either case.
+	 */
+	if (sample ? state->N <= 1 : state->N <= 0)
+		return NULL;
+
+	/* const_zero = (Numeric)0 */
+	vZero  = DirectFunctionCall3(numeric_in,
+								 CStringGetDatum("0"),
+								 ObjectIdGetDatum(0),
+								 Int32GetDatum(-1));
+	/* vN = (Numeric)N */
+	vN = DirectFunctionCall1(int8_numeric, Int64GetDatum(state->N));
+	/* vsumX = sumX * sumX */
+	vSumX = DirectFunctionCall2(numeric_mul, state->sumX, state->sumX);
+	/* vsumX2 = N * sumX2 */
+	vSumX2 = DirectFunctionCall2(numeric_mul, state->sumX2, vN);
+	/* N * sumX2 - sumX * sumX */
+	vSumX2 = DirectFunctionCall2(numeric_sub, vSumX2, vSumX);
+
+	/* Watch out for roundoff error producing a negative numerator */
+	if (DirectFunctionCall2(numeric_cmp, vSumX2, vZero) <= 0)
+		return DatumGetNumeric(vZero);
+
+	if (!sample)
+		vN2 = DirectFunctionCall2(numeric_mul, vN, vN);	/* N * N */
+	else
+	{
+		Datum	vOne;
+		Datum	vNminus;
+
+		vOne = DirectFunctionCall3(numeric_in,
+								   CStringGetDatum("1"),
+								   ObjectIdGetDatum(0),
+								   Int32GetDatum(-1));
+		vNminus = DirectFunctionCall2(numeric_sub, vN, vOne);
+		vN2 = DirectFunctionCall2(numeric_mul, vN, vNminus); /* N * (N - 1) */
+	}
+	/* variance */
+	result = DirectFunctionCall2(numeric_div, vSumX2, vN2);
+	/* stddev? */
+	if (!variance)
+		result = DirectFunctionCall1(numeric_sqrt, result);
+
+	return DatumGetNumeric(result);
+}
+
+Datum
+pgstrom_numeric_var_samp(PG_FUNCTION_ARGS)
+{
+	numeric_agg_state *state;
+	Numeric		result;
+
+	state = PG_ARGISNULL(0) ? NULL : (numeric_agg_state *)PG_GETARG_POINTER(0);
+
+	result = pgstrom_numeric_stddev_internal(state, true, true);
+	if (!result)
+		PG_RETURN_NULL();
+
+	PG_RETURN_NUMERIC(result);
+}
+PG_FUNCTION_INFO_V1(pgstrom_numeric_var_samp);
+
+Datum
+pgstrom_numeric_stddev_samp(PG_FUNCTION_ARGS)
+{
+	numeric_agg_state *state;
+	Numeric		result;
+
+	state = PG_ARGISNULL(0) ? NULL : (numeric_agg_state *)PG_GETARG_POINTER(0);
+
+	result = pgstrom_numeric_stddev_internal(state, false, true);
+	if (!result)
+		PG_RETURN_NULL();
+
+	PG_RETURN_NUMERIC(result);
+}
+PG_FUNCTION_INFO_V1(pgstrom_numeric_stddev_samp);
+
+Datum
+pgstrom_numeric_var_pop(PG_FUNCTION_ARGS)
+{
+	numeric_agg_state *state;
+	Numeric		result;
+
+	state = PG_ARGISNULL(0) ? NULL : (numeric_agg_state *)PG_GETARG_POINTER(0);
+
+	result = pgstrom_numeric_stddev_internal(state, true, false);
+	if (!result)
+		PG_RETURN_NULL();
+
+	PG_RETURN_NUMERIC(result);
+}
+PG_FUNCTION_INFO_V1(pgstrom_numeric_var_pop);
+
+Datum
+pgstrom_numeric_stddev_pop(PG_FUNCTION_ARGS)
+{
+	numeric_agg_state *state;
+	Numeric		result;
+
+	state = PG_ARGISNULL(0) ? NULL : (numeric_agg_state *)PG_GETARG_POINTER(0);
+
+	result = pgstrom_numeric_stddev_internal(state, false, false);
+	if (!result)
+		PG_RETURN_NULL();
+
+	PG_RETURN_NUMERIC(result);
+}
+PG_FUNCTION_INFO_V1(pgstrom_numeric_stddev_pop);
 
 /*
  * covariance - mathmatical compatible result can be lead using
