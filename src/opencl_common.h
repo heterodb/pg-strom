@@ -26,6 +26,7 @@
 #ifdef OPENCL_DEVICE_CODE
 
 #if __OPENCL_VERSION__ < CL_VERSION_1_2
+/* NOTE: cl_khr_fp64 extension got merged at OpenCL 1.2 */
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
 #endif
 #pragma OPENCL EXTENSION cl_khr_byte_addressable_store : enable
@@ -113,7 +114,7 @@ typedef uintptr_t	hostptr_t;
 #ifdef OPENCL_DEVICE_CODE
 #define HOST_STATIC_INLINE
 #else
-#define HOST_STATIC_INLINE	static inline
+#define HOST_STATIC_INLINE		static inline
 #endif
 
 /*
