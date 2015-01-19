@@ -1,10 +1,11 @@
 --#
 --#       Gpu PreAggregate Complex TestCases. 
 --#
+set pg_strom.debug_force_gpupreagg to on;
 set client_min_messages to warning;
 set extra_float_digits to -3;
 -- Device Filter
-select key, avg(float_x)  from gpupreagg_test  where float_x >= 0.5 and float_x <= 0.6 group by key order by key;
+select key, avg(float_x)  from strom_test  where float_x >= 0.5 and float_x <= 0.6 group by key order by key;
  key |      avg       
 -----+----------------
    1 | 0.551919001672
@@ -30,7 +31,7 @@ select key, avg(float_x)  from gpupreagg_test  where float_x >= 0.5 and float_x 
 (20 rows)
 
 -- select distinct
-select key,count(distinct smlint_x)  from gpupreagg_test group by key order by key;
+select key,count(distinct smlint_x)  from strom_test group by key order by key;
  key | count 
 -----+-------
    1 |    34
@@ -67,7 +68,7 @@ select key,count(distinct smlint_x)  from gpupreagg_test group by key order by k
 (31 rows)
 
 -- (group by x+y)
-select key+1000,count(float_x)  from gpupreagg_test group by key+1000 order by key+1000;
+select key+1000,count(float_x)  from strom_test group by key+1000 order by key+1000;
  ?column? | count 
 ----------+-------
      1001 |   962
@@ -104,7 +105,7 @@ select key+1000,count(float_x)  from gpupreagg_test group by key+1000 order by k
 (31 rows)
 
 -- (group by x::varchar)
-select key::varchar(20),count(float_x)  from gpupreagg_test group by key::varchar(20) order by key;
+select key::varchar(20),count(float_x)  from strom_test group by key::varchar(20) order by key;
  key | count 
 -----+-------
  1   |   962
@@ -141,7 +142,7 @@ select key::varchar(20),count(float_x)  from gpupreagg_test group by key::varcha
 (31 rows)
 
 -- (group by x::numeric)
-select key::numeric,count(float_x)  from gpupreagg_test group by key::numeric order by key;
+select key::numeric,count(float_x)  from strom_test group by key::numeric order by key;
  key | count 
 -----+-------
    1 |   962
@@ -178,7 +179,7 @@ select key::numeric,count(float_x)  from gpupreagg_test group by key::numeric or
 (31 rows)
 
 -- aggfunc( x + y + z )
-select key, avg(float_x + float_y + float_z)  from gpupreagg_mix  group by key order by key;
+select key, avg(float_x + float_y + float_z)  from strom_mix  group by key order by key;
  key |        avg        
 -----+-------------------
    1 | 0.000211111484183

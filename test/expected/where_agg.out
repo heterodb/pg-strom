@@ -1,768 +1,769 @@
 --#
 --#       Gpu PreAggregate TestCases with WHERE.
 --#
+set pg_strom.debug_force_gpupreagg to on;
 set client_min_messages to warning;
 set extra_float_digits to -3;
 -- smallint
-select  avg(smlint_x)            from gpupreagg_test where key=1 group by key order by key;
+select  avg(smlint_x)            from strom_test where key=1 group by key order by key;
          avg         
 ---------------------
  16.6401273885350318
 (1 row)
 
-select  count(smlint_x)          from gpupreagg_test where key=1 group by key order by key;
+select  count(smlint_x)          from strom_test where key=1 group by key order by key;
  count 
 -------
    942
 (1 row)
 
-select  max(smlint_x)            from gpupreagg_test where key=1 group by key order by key;
+select  max(smlint_x)            from strom_test where key=1 group by key order by key;
  max 
 -----
   33
 (1 row)
 
-select  min(smlint_x)            from gpupreagg_test where key=1 group by key order by key;
+select  min(smlint_x)            from strom_test where key=1 group by key order by key;
  min 
 -----
    0
 (1 row)
 
-select  sum(smlint_x)            from gpupreagg_test where key=1 group by key order by key;
+select  sum(smlint_x)            from strom_test where key=1 group by key order by key;
   sum  
 -------
  15675
 (1 row)
 
-select  stddev(smlint_x)         from gpupreagg_test where key=1 group by key order by key;
+select  stddev(smlint_x)         from strom_test where key=1 group by key order by key;
        stddev       
 --------------------
  9.4325168011370996
 (1 row)
 
-select  stddev_pop(smlint_x)     from gpupreagg_test where key=1 group by key order by key;
+select  stddev_pop(smlint_x)     from strom_test where key=1 group by key order by key;
      stddev_pop     
 --------------------
  9.4275088279669217
 (1 row)
 
-select  stddev_samp(smlint_x)    from gpupreagg_test where key=1 group by key order by key;
+select  stddev_samp(smlint_x)    from strom_test where key=1 group by key order by key;
     stddev_samp     
 --------------------
  9.4325168011370996
 (1 row)
 
-select  variance(smlint_x)       from gpupreagg_test where key=1 group by key order by key;
+select  variance(smlint_x)       from strom_test where key=1 group by key order by key;
       variance       
 ---------------------
  88.9723732037336618
 (1 row)
 
-select  var_pop(smlint_x)        from gpupreagg_test where key=1 group by key order by key;
+select  var_pop(smlint_x)        from strom_test where key=1 group by key order by key;
        var_pop       
 ---------------------
  88.8779227013942418
 (1 row)
 
-select  var_samp(smlint_x)       from gpupreagg_test where key=1 group by key order by key;
+select  var_samp(smlint_x)       from strom_test where key=1 group by key order by key;
       var_samp       
 ---------------------
  88.9723732037336618
 (1 row)
 
-select corr(smlint_x,smlint_x) from gpupreagg_test where key=1 group by key order by key;
+select corr(smlint_x,smlint_x) from strom_test where key=1 group by key order by key;
  corr 
 ------
     1
 (1 row)
 
-select covar_pop(smlint_x,smlint_x) from gpupreagg_test where key=1 group by key order by key;
+select covar_pop(smlint_x,smlint_x) from strom_test where key=1 group by key order by key;
    covar_pop   
 ---------------
  88.8779227014
 (1 row)
 
-select covar_samp(smlint_x,smlint_x) from gpupreagg_test where key=1 group by key order by key;
+select covar_samp(smlint_x,smlint_x) from strom_test where key=1 group by key order by key;
   covar_samp   
 ---------------
  88.9723732037
 (1 row)
 
 --integer
-select  avg(integer_x)            from gpupreagg_test where key=1 group by key order by key;
+select  avg(integer_x)            from strom_test where key=1 group by key order by key;
          avg          
 ----------------------
  1092510.915094339623
 (1 row)
 
-select  count(integer_x)          from gpupreagg_test where key=1 group by key order by key;
+select  count(integer_x)          from strom_test where key=1 group by key order by key;
  count 
 -------
    954
 (1 row)
 
-select  max(integer_x)            from gpupreagg_test where key=1 group by key order by key;
+select  max(integer_x)            from strom_test where key=1 group by key order by key;
    max   
 ---------
  2145854
 (1 row)
 
-select  min(integer_x)            from gpupreagg_test where key=1 group by key order by key;
+select  min(integer_x)            from strom_test where key=1 group by key order by key;
  min  
 ------
  1345
 (1 row)
 
-select  sum(integer_x)            from gpupreagg_test where key=1 group by key order by key;
+select  sum(integer_x)            from strom_test where key=1 group by key order by key;
     sum     
 ------------
  1042255413
 (1 row)
 
-select  stddev(integer_x)         from gpupreagg_test where key=1 group by key order by key;
+select  stddev(integer_x)         from strom_test where key=1 group by key order by key;
      stddev      
 -----------------
  617152.70194370
 (1 row)
 
-select  stddev_pop(integer_x)     from gpupreagg_test where key=1 group by key order by key;
+select  stddev_pop(integer_x)     from strom_test where key=1 group by key order by key;
    stddev_pop    
 -----------------
  616829.16184181
 (1 row)
 
-select  stddev_samp(integer_x)    from gpupreagg_test where key=1 group by key order by key;
+select  stddev_samp(integer_x)    from strom_test where key=1 group by key order by key;
    stddev_samp   
 -----------------
  617152.70194370
 (1 row)
 
-select  variance(integer_x)       from gpupreagg_test where key=1 group by key order by key;
+select  variance(integer_x)       from strom_test where key=1 group by key order by key;
        variance        
 -----------------------
  380877457516.41355996
 (1 row)
 
-select  var_pop(integer_x)        from gpupreagg_test where key=1 group by key order by key;
+select  var_pop(integer_x)        from strom_test where key=1 group by key order by key;
         var_pop        
 -----------------------
  380478214898.47182667
 (1 row)
 
-select  var_samp(integer_x)       from gpupreagg_test where key=1 group by key order by key;
+select  var_samp(integer_x)       from strom_test where key=1 group by key order by key;
        var_samp        
 -----------------------
  380877457516.41355996
 (1 row)
 
-select corr(integer_x,integer_x) from gpupreagg_test where key=1 group by key order by key;
+select corr(integer_x,integer_x) from strom_test where key=1 group by key order by key;
  corr 
 ------
     1
 (1 row)
 
-select covar_pop(integer_x,integer_x) from gpupreagg_test where key=1 group by key order by key;
+select covar_pop(integer_x,integer_x) from strom_test where key=1 group by key order by key;
   covar_pop   
 --------------
  380478214898
 (1 row)
 
-select covar_samp(integer_x,integer_x) from gpupreagg_test where key=1 group by key order by key;
+select covar_samp(integer_x,integer_x) from strom_test where key=1 group by key order by key;
   covar_samp  
 --------------
  380877457516
 (1 row)
 
 --bigint
-select  avg(bigint_x)            from gpupreagg_test where key=1 group by key order by key;
+select  avg(bigint_x)            from strom_test where key=1 group by key order by key;
           avg          
 -----------------------
  4516318046434256.4854
 (1 row)
 
-select  count(bigint_x)          from gpupreagg_test where key=1 group by key order by key;
+select  count(bigint_x)          from strom_test where key=1 group by key order by key;
  count 
 -------
    960
 (1 row)
 
-select  max(bigint_x)            from gpupreagg_test where key=1 group by key order by key;
+select  max(bigint_x)            from strom_test where key=1 group by key order by key;
        max        
 ------------------
  9203540446272290
 (1 row)
 
-select  min(bigint_x)            from gpupreagg_test where key=1 group by key order by key;
+select  min(bigint_x)            from strom_test where key=1 group by key order by key;
       min       
 ----------------
  10159337116795
 (1 row)
 
-select  sum(bigint_x)            from gpupreagg_test where key=1 group by key order by key;
+select  sum(bigint_x)            from strom_test where key=1 group by key order by key;
          sum         
 ---------------------
  4335665324576886226
 (1 row)
 
-select  stddev(bigint_x)         from gpupreagg_test where key=1 group by key order by key;
+select  stddev(bigint_x)         from strom_test where key=1 group by key order by key;
       stddev      
 ------------------
  2692212451815744
 (1 row)
 
-select  stddev_pop(bigint_x)     from gpupreagg_test where key=1 group by key order by key;
+select  stddev_pop(bigint_x)     from strom_test where key=1 group by key order by key;
     stddev_pop    
 ------------------
  2690809892485431
 (1 row)
 
-select  stddev_samp(bigint_x)    from gpupreagg_test where key=1 group by key order by key;
+select  stddev_samp(bigint_x)    from strom_test where key=1 group by key order by key;
    stddev_samp    
 ------------------
  2692212451815744
 (1 row)
 
-select  variance(bigint_x)       from gpupreagg_test where key=1 group by key order by key;
+select  variance(bigint_x)       from strom_test where key=1 group by key order by key;
             variance             
 ---------------------------------
  7248007885711742128769406973299
 (1 row)
 
-select  var_pop(bigint_x)        from gpupreagg_test where key=1 group by key order by key;
+select  var_pop(bigint_x)        from strom_test where key=1 group by key order by key;
              var_pop             
 ---------------------------------
  7240457877497459064051938841035
 (1 row)
 
-select  var_samp(bigint_x)       from gpupreagg_test where key=1 group by key order by key;
+select  var_samp(bigint_x)       from strom_test where key=1 group by key order by key;
             var_samp             
 ---------------------------------
  7248007885711742128769406973299
 (1 row)
 
-select corr(bigint_x,bigint_x) from gpupreagg_test where key=1 group by key order by key;
+select corr(bigint_x,bigint_x) from strom_test where key=1 group by key order by key;
  corr 
 ------
     1
 (1 row)
 
-select covar_pop(bigint_x,bigint_x) from gpupreagg_test where key=1 group by key order by key;
+select covar_pop(bigint_x,bigint_x) from strom_test where key=1 group by key order by key;
     covar_pop     
 ------------------
  7.2404578775e+30
 (1 row)
 
-select covar_samp(bigint_x,bigint_x) from gpupreagg_test where key=1 group by key order by key;
+select covar_samp(bigint_x,bigint_x) from strom_test where key=1 group by key order by key;
     covar_samp     
 -------------------
  7.24800788571e+30
 (1 row)
 
 --real
-select  avg(real_x)            from gpupreagg_test where key=1 group by key order by key;
+select  avg(real_x)            from strom_test where key=1 group by key order by key;
       avg       
 ----------------
  0.504476891242
 (1 row)
 
-select  count(real_x)          from gpupreagg_test where key=1 group by key order by key;
+select  count(real_x)          from strom_test where key=1 group by key order by key;
  count 
 -------
    952
 (1 row)
 
-select  max(real_x)            from gpupreagg_test where key=1 group by key order by key;
+select  max(real_x)            from strom_test where key=1 group by key order by key;
  max 
 -----
    1
 (1 row)
 
-select  min(real_x)            from gpupreagg_test where key=1 group by key order by key;
+select  min(real_x)            from strom_test where key=1 group by key order by key;
   min   
 --------
  0.0005
 (1 row)
 
-select  sum(real_x)            from gpupreagg_test where key=1 group by key order by key;
+select  sum(real_x)            from strom_test where key=1 group by key order by key;
  sum 
 -----
  480
 (1 row)
 
-select  stddev(real_x)         from gpupreagg_test where key=1 group by key order by key;
+select  stddev(real_x)         from strom_test where key=1 group by key order by key;
      stddev     
 ----------------
  0.287870634921
 (1 row)
 
-select  stddev_pop(real_x)     from gpupreagg_test where key=1 group by key order by key;
+select  stddev_pop(real_x)     from strom_test where key=1 group by key order by key;
    stddev_pop   
 ----------------
  0.287719402635
 (1 row)
 
-select  stddev_samp(real_x)    from gpupreagg_test where key=1 group by key order by key;
+select  stddev_samp(real_x)    from strom_test where key=1 group by key order by key;
   stddev_samp   
 ----------------
  0.287870634921
 (1 row)
 
-select  variance(real_x)       from gpupreagg_test where key=1 group by key order by key;
+select  variance(real_x)       from strom_test where key=1 group by key order by key;
     variance     
 -----------------
  0.0828695024496
 (1 row)
 
-select  var_pop(real_x)        from gpupreagg_test where key=1 group by key order by key;
+select  var_pop(real_x)        from strom_test where key=1 group by key order by key;
      var_pop     
 -----------------
  0.0827824546529
 (1 row)
 
-select  var_samp(real_x)       from gpupreagg_test where key=1 group by key order by key;
+select  var_samp(real_x)       from strom_test where key=1 group by key order by key;
     var_samp     
 -----------------
  0.0828695024496
 (1 row)
 
-select corr(real_x,real_x) from gpupreagg_test where key=1 group by key order by key;
+select corr(real_x,real_x) from strom_test where key=1 group by key order by key;
  corr 
 ------
     1
 (1 row)
 
-select covar_pop(real_x,real_x) from gpupreagg_test where key=1 group by key order by key;
+select covar_pop(real_x,real_x) from strom_test where key=1 group by key order by key;
     covar_pop    
 -----------------
  0.0827824546529
 (1 row)
 
-select covar_samp(real_x,real_x) from gpupreagg_test where key=1 group by key order by key;
+select covar_samp(real_x,real_x) from strom_test where key=1 group by key order by key;
    covar_samp    
 -----------------
  0.0828695024496
 (1 row)
 
 --float
-select  avg(float_x)            from gpupreagg_test where key=1 group by key order by key;
+select  avg(float_x)            from strom_test where key=1 group by key order by key;
       avg       
 ----------------
  0.517954838058
 (1 row)
 
-select  count(float_x)          from gpupreagg_test where key=1 group by key order by key;
+select  count(float_x)          from strom_test where key=1 group by key order by key;
  count 
 -------
    962
 (1 row)
 
-select  max(float_x)            from gpupreagg_test where key=1 group by key order by key;
+select  max(float_x)            from strom_test where key=1 group by key order by key;
       max       
 ----------------
  0.996401201934
 (1 row)
 
-select  min(float_x)            from gpupreagg_test where key=1 group by key order by key;
+select  min(float_x)            from strom_test where key=1 group by key order by key;
        min       
 -----------------
  0.0020891358145
 (1 row)
 
-select  sum(float_x)            from gpupreagg_test where key=1 group by key order by key;
+select  sum(float_x)            from strom_test where key=1 group by key order by key;
       sum      
 ---------------
  498.272554212
 (1 row)
 
-select  stddev(float_x)         from gpupreagg_test where key=1 group by key order by key;
+select  stddev(float_x)         from strom_test where key=1 group by key order by key;
      stddev     
 ----------------
  0.288342551366
 (1 row)
 
-select  stddev_pop(float_x)     from gpupreagg_test where key=1 group by key order by key;
+select  stddev_pop(float_x)     from strom_test where key=1 group by key order by key;
    stddev_pop   
 ----------------
  0.288192646208
 (1 row)
 
-select  stddev_samp(float_x)    from gpupreagg_test where key=1 group by key order by key;
+select  stddev_samp(float_x)    from strom_test where key=1 group by key order by key;
   stddev_samp   
 ----------------
  0.288342551366
 (1 row)
 
-select  variance(float_x)       from gpupreagg_test where key=1 group by key order by key;
+select  variance(float_x)       from strom_test where key=1 group by key order by key;
     variance     
 -----------------
  0.0831414269282
 (1 row)
 
-select  var_pop(float_x)        from gpupreagg_test where key=1 group by key order by key;
+select  var_pop(float_x)        from strom_test where key=1 group by key order by key;
      var_pop     
 -----------------
  0.0830550013285
 (1 row)
 
-select  var_samp(float_x)       from gpupreagg_test where key=1 group by key order by key;
+select  var_samp(float_x)       from strom_test where key=1 group by key order by key;
     var_samp     
 -----------------
  0.0831414269282
 (1 row)
 
-select corr(float_x,float_x) from gpupreagg_test where key=1 group by key order by key;
+select corr(float_x,float_x) from strom_test where key=1 group by key order by key;
  corr 
 ------
     1
 (1 row)
 
-select covar_pop(float_x,float_x) from gpupreagg_test where key=1 group by key order by key;
+select covar_pop(float_x,float_x) from strom_test where key=1 group by key order by key;
     covar_pop    
 -----------------
  0.0830550013285
 (1 row)
 
-select covar_samp(float_x,float_x) from gpupreagg_test where key=1 group by key order by key;
+select covar_samp(float_x,float_x) from strom_test where key=1 group by key order by key;
    covar_samp    
 -----------------
  0.0831414269282
 (1 row)
 
 --numeric
-select  avg(nume_x)            from gpupreagg_test where key=1 group by key order by key;
+select  avg(nume_x)            from strom_test where key=1 group by key order by key;
           avg           
 ------------------------
  0.47978746774016962980
 (1 row)
 
-select  count(nume_x)          from gpupreagg_test where key=1 group by key order by key;
+select  count(nume_x)          from strom_test where key=1 group by key order by key;
  count 
 -------
    948
 (1 row)
 
-select  max(nume_x)            from gpupreagg_test where key=1 group by key order by key;
+select  max(nume_x)            from strom_test where key=1 group by key order by key;
         max        
 -------------------
  0.995276160072535
 (1 row)
 
-select  min(nume_x)            from gpupreagg_test where key=1 group by key order by key;
+select  min(nume_x)            from strom_test where key=1 group by key order by key;
          min          
 ----------------------
  0.000203380361199379
 (1 row)
 
-select  sum(nume_x)            from gpupreagg_test where key=1 group by key order by key;
+select  sum(nume_x)            from strom_test where key=1 group by key order by key;
           sum           
 ------------------------
  454.838519417680809049
 (1 row)
 
-select  stddev(nume_x)         from gpupreagg_test where key=1 group by key order by key;
+select  stddev(nume_x)         from strom_test where key=1 group by key order by key;
                  stddev                 
 ----------------------------------------
  0.290009254232895026833836137419545211
 (1 row)
 
-select  stddev_pop(nume_x)     from gpupreagg_test where key=1 group by key order by key;
+select  stddev_pop(nume_x)     from strom_test where key=1 group by key order by key;
                stddev_pop               
 ----------------------------------------
  0.289856255407035128072447102616870638
 (1 row)
 
-select  stddev_samp(nume_x)    from gpupreagg_test where key=1 group by key order by key;
+select  stddev_samp(nume_x)    from strom_test where key=1 group by key order by key;
               stddev_samp               
 ----------------------------------------
  0.290009254232895026833836137419545211
 (1 row)
 
-select  variance(nume_x)       from gpupreagg_test where key=1 group by key order by key;
+select  variance(nume_x)       from strom_test where key=1 group by key order by key;
                 variance                
 ----------------------------------------
  0.084105367540719942039021693866500838
 (1 row)
 
-select  var_pop(nume_x)        from gpupreagg_test where key=1 group by key order by key;
+select  var_pop(nume_x)        from strom_test where key=1 group by key order by key;
                 var_pop                 
 ----------------------------------------
  0.084016648798588380918727367185207061
 (1 row)
 
-select  var_samp(nume_x)       from gpupreagg_test where key=1 group by key order by key;
+select  var_samp(nume_x)       from strom_test where key=1 group by key order by key;
                 var_samp                
 ----------------------------------------
  0.084105367540719942039021693866500838
 (1 row)
 
-select corr(nume_x,nume_x) from gpupreagg_test where key=1 group by key order by key;
+select corr(nume_x,nume_x) from strom_test where key=1 group by key order by key;
  corr 
 ------
     1
 (1 row)
 
-select covar_pop(nume_x,nume_x) from gpupreagg_test where key=1 group by key order by key;
+select covar_pop(nume_x,nume_x) from strom_test where key=1 group by key order by key;
     covar_pop    
 -----------------
  0.0840166487986
 (1 row)
 
-select covar_samp(nume_x,nume_x) from gpupreagg_test where key=1 group by key order by key;
+select covar_samp(nume_x,nume_x) from strom_test where key=1 group by key order by key;
    covar_samp    
 -----------------
  0.0841053675407
 (1 row)
 
 --smallserial
-select  avg(smlsrl_x)            from gpupreagg_test where key=1 group by key order by key;
+select  avg(smlsrl_x)            from strom_test where key=1 group by key order by key;
          avg         
 ---------------------
  16.8070000000000000
 (1 row)
 
-select  count(smlsrl_x)          from gpupreagg_test where key=1 group by key order by key;
+select  count(smlsrl_x)          from strom_test where key=1 group by key order by key;
  count 
 -------
   1000
 (1 row)
 
-select  max(smlsrl_x)            from gpupreagg_test where key=1 group by key order by key;
+select  max(smlsrl_x)            from strom_test where key=1 group by key order by key;
  max 
 -----
   33
 (1 row)
 
-select  min(smlsrl_x)            from gpupreagg_test where key=1 group by key order by key;
+select  min(smlsrl_x)            from strom_test where key=1 group by key order by key;
  min 
 -----
    0
 (1 row)
 
-select  sum(smlsrl_x)            from gpupreagg_test where key=1 group by key order by key;
+select  sum(smlsrl_x)            from strom_test where key=1 group by key order by key;
   sum  
 -------
  16807
 (1 row)
 
-select  stddev(smlsrl_x)         from gpupreagg_test where key=1 group by key order by key;
+select  stddev(smlsrl_x)         from strom_test where key=1 group by key order by key;
        stddev       
 --------------------
  9.3756948891617977
 (1 row)
 
-select  stddev_pop(smlsrl_x)     from gpupreagg_test where key=1 group by key order by key;
+select  stddev_pop(smlsrl_x)     from strom_test where key=1 group by key order by key;
      stddev_pop     
 --------------------
  9.3710058691690083
 (1 row)
 
-select  stddev_samp(smlsrl_x)    from gpupreagg_test where key=1 group by key order by key;
+select  stddev_samp(smlsrl_x)    from strom_test where key=1 group by key order by key;
     stddev_samp     
 --------------------
  9.3756948891617977
 (1 row)
 
-select  variance(smlsrl_x)       from gpupreagg_test where key=1 group by key order by key;
+select  variance(smlsrl_x)       from strom_test where key=1 group by key order by key;
       variance       
 ---------------------
  87.9036546546546547
 (1 row)
 
-select  var_pop(smlsrl_x)        from gpupreagg_test where key=1 group by key order by key;
+select  var_pop(smlsrl_x)        from strom_test where key=1 group by key order by key;
        var_pop       
 ---------------------
  87.8157510000000000
 (1 row)
 
-select  var_samp(smlsrl_x)       from gpupreagg_test where key=1 group by key order by key;
+select  var_samp(smlsrl_x)       from strom_test where key=1 group by key order by key;
       var_samp       
 ---------------------
  87.9036546546546547
 (1 row)
 
-select corr(smlsrl_x,smlsrl_x) from gpupreagg_test where key=1 group by key order by key;
+select corr(smlsrl_x,smlsrl_x) from strom_test where key=1 group by key order by key;
  corr 
 ------
     1
 (1 row)
 
-select covar_pop(smlsrl_x,smlsrl_x) from gpupreagg_test where key=1 group by key order by key;
+select covar_pop(smlsrl_x,smlsrl_x) from strom_test where key=1 group by key order by key;
  covar_pop 
 -----------
  87.815751
 (1 row)
 
-select covar_samp(smlsrl_x,smlsrl_x) from gpupreagg_test where key=1 group by key order by key;
+select covar_samp(smlsrl_x,smlsrl_x) from strom_test where key=1 group by key order by key;
   covar_samp   
 ---------------
  87.9036546547
 (1 row)
 
 --serial
-select  avg(serial_x)            from gpupreagg_test where key=1 group by key order by key;
+select  avg(serial_x)            from strom_test where key=1 group by key order by key;
          avg          
 ----------------------
  1044050.624000000000
 (1 row)
 
-select  count(serial_x)          from gpupreagg_test where key=1 group by key order by key;
+select  count(serial_x)          from strom_test where key=1 group by key order by key;
  count 
 -------
   1000
 (1 row)
 
-select  max(serial_x)            from gpupreagg_test where key=1 group by key order by key;
+select  max(serial_x)            from strom_test where key=1 group by key order by key;
    max   
 ---------
  2145533
 (1 row)
 
-select  min(serial_x)            from gpupreagg_test where key=1 group by key order by key;
+select  min(serial_x)            from strom_test where key=1 group by key order by key;
  min  
 ------
  1791
 (1 row)
 
-select  sum(serial_x)            from gpupreagg_test where key=1 group by key order by key;
+select  sum(serial_x)            from strom_test where key=1 group by key order by key;
     sum     
 ------------
  1044050624
 (1 row)
 
-select  stddev(serial_x)         from gpupreagg_test where key=1 group by key order by key;
+select  stddev(serial_x)         from strom_test where key=1 group by key order by key;
      stddev      
 -----------------
  613656.56955072
 (1 row)
 
-select  stddev_pop(serial_x)     from gpupreagg_test where key=1 group by key order by key;
+select  stddev_pop(serial_x)     from strom_test where key=1 group by key order by key;
    stddev_pop    
 -----------------
  613349.66452050
 (1 row)
 
-select  stddev_samp(serial_x)    from gpupreagg_test where key=1 group by key order by key;
+select  stddev_samp(serial_x)    from strom_test where key=1 group by key order by key;
    stddev_samp   
 -----------------
  613656.56955072
 (1 row)
 
-select  variance(serial_x)       from gpupreagg_test where key=1 group by key order by key;
+select  variance(serial_x)       from strom_test where key=1 group by key order by key;
        variance        
 -----------------------
  376574385352.75938338
 (1 row)
 
-select  var_pop(serial_x)        from gpupreagg_test where key=1 group by key order by key;
+select  var_pop(serial_x)        from strom_test where key=1 group by key order by key;
         var_pop        
 -----------------------
  376197810967.40662400
 (1 row)
 
-select  var_samp(serial_x)       from gpupreagg_test where key=1 group by key order by key;
+select  var_samp(serial_x)       from strom_test where key=1 group by key order by key;
        var_samp        
 -----------------------
  376574385352.75938338
 (1 row)
 
-select corr(serial_x,serial_x) from gpupreagg_test where key=1 group by key order by key;
+select corr(serial_x,serial_x) from strom_test where key=1 group by key order by key;
  corr 
 ------
     1
 (1 row)
 
-select covar_pop(serial_x,serial_x) from gpupreagg_test where key=1 group by key order by key;
+select covar_pop(serial_x,serial_x) from strom_test where key=1 group by key order by key;
   covar_pop   
 --------------
  376197810967
 (1 row)
 
-select covar_samp(serial_x,serial_x) from gpupreagg_test where key=1 group by key order by key;
+select covar_samp(serial_x,serial_x) from strom_test where key=1 group by key order by key;
   covar_samp  
 --------------
  376574385353
 (1 row)
 
 --bigserial
-select  avg(bigsrl_x)            from gpupreagg_test where key=1 group by key order by key;
+select  avg(bigsrl_x)            from strom_test where key=1 group by key order by key;
           avg          
 -----------------------
  4487416992954893.4620
 (1 row)
 
-select  count(bigsrl_x)          from gpupreagg_test where key=1 group by key order by key;
+select  count(bigsrl_x)          from strom_test where key=1 group by key order by key;
  count 
 -------
   1000
 (1 row)
 
-select  max(bigsrl_x)            from gpupreagg_test where key=1 group by key order by key;
+select  max(bigsrl_x)            from strom_test where key=1 group by key order by key;
        max        
 ------------------
  9213799147457478
 (1 row)
 
-select  min(bigsrl_x)            from gpupreagg_test where key=1 group by key order by key;
+select  min(bigsrl_x)            from strom_test where key=1 group by key order by key;
       min      
 ---------------
  1299627038999
 (1 row)
 
-select  sum(bigsrl_x)            from gpupreagg_test where key=1 group by key order by key;
+select  sum(bigsrl_x)            from strom_test where key=1 group by key order by key;
          sum         
 ---------------------
  4487416992954893462
 (1 row)
 
-select  stddev(bigsrl_x)         from gpupreagg_test where key=1 group by key order by key;
+select  stddev(bigsrl_x)         from strom_test where key=1 group by key order by key;
       stddev      
 ------------------
  2626544487221622
 (1 row)
 
-select  stddev_pop(bigsrl_x)     from gpupreagg_test where key=1 group by key order by key;
+select  stddev_pop(bigsrl_x)     from strom_test where key=1 group by key order by key;
     stddev_pop    
 ------------------
  2625230886495688
 (1 row)
 
-select  stddev_samp(bigsrl_x)    from gpupreagg_test where key=1 group by key order by key;
+select  stddev_samp(bigsrl_x)    from strom_test where key=1 group by key order by key;
    stddev_samp    
 ------------------
  2626544487221622
 (1 row)
 
-select  variance(bigsrl_x)       from gpupreagg_test where key=1 group by key order by key;
+select  variance(bigsrl_x)       from strom_test where key=1 group by key order by key;
             variance             
 ---------------------------------
  6898735943354291202773723457962
 (1 row)
 
-select  var_pop(bigsrl_x)        from gpupreagg_test where key=1 group by key order by key;
+select  var_pop(bigsrl_x)        from strom_test where key=1 group by key order by key;
              var_pop             
 ---------------------------------
  6891837207410936911570949734504
 (1 row)
 
-select  var_samp(bigsrl_x)       from gpupreagg_test where key=1 group by key order by key;
+select  var_samp(bigsrl_x)       from strom_test where key=1 group by key order by key;
             var_samp             
 ---------------------------------
  6898735943354291202773723457962
 (1 row)
 
-select corr(bigsrl_x,bigsrl_x) from gpupreagg_test where key=1 group by key order by key;
+select corr(bigsrl_x,bigsrl_x) from strom_test where key=1 group by key order by key;
  corr 
 ------
     1
 (1 row)
 
-select covar_pop(bigsrl_x,bigsrl_x) from gpupreagg_test where key=1 group by key order by key;
+select covar_pop(bigsrl_x,bigsrl_x) from strom_test where key=1 group by key order by key;
      covar_pop     
 -------------------
  6.89183720741e+30
 (1 row)
 
-select covar_samp(bigsrl_x,bigsrl_x) from gpupreagg_test where key=1 group by key order by key;
+select covar_samp(bigsrl_x,bigsrl_x) from strom_test where key=1 group by key order by key;
     covar_samp     
 -------------------
  6.89873594335e+30
