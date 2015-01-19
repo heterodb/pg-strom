@@ -1923,8 +1923,8 @@ gpupreagg_codegen_projection_misc(StringInfo body, FuncExpr *func,
 			break;
 
 		case NUMERICOID:
-			pc->use_temp_int8 = true;
-			temp_val = "temp_int8";
+			pc->use_temp_numeric = true;
+			temp_val = "temp_numeric";
 			max_const = "PG_NUMERIC_MAX";
 			min_const = "PG_NUMERIC_MIN";
 			zero_const = "PG_NUMERIC_ZERO";
