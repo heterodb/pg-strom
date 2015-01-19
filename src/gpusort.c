@@ -182,9 +182,18 @@ typedef struct
 	bool		   *nullsFirst;
 } pgstrom_cpusort;
 
-
-
-
+/*
+ * static function declarations
+ */
+static void clserv_process_gpusort(pgstrom_message *msg);
+static void gpusort_launch_cpusort_worker(GpuSortState *gss,
+										  pgstrom_cpusort *cpusort);
+static void gpusort_check_cpusort_worker(GpuSortState *gss);
+static void gpusort_entrypoint_cpusort_worker(Datum main_arg);
+static void gpusort_merge_cpu_chunks(GpuSortState *gss,
+									 pgstrom_cpusort *cpusort);
+static void gpusort_merge_gpu_chunks(GpuSortState *gss,
+									 pgstrom_gpusort *gpusort);
 
 
 
@@ -710,7 +719,7 @@ gpusort_launch_cpusort_worker(GpuSortState *gss, pgstrom_cpusort *cpusort)
         BGWORKER_BACKEND_DATABASE_CONNECTION;
     worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
 	worker.bgw_restart_time = BGW_NEVER_RESTART;
-	worker.bgw_main = gpusort_cpusort_main;
+	worker.bgw_main = gpusort_entrypoint_cpusort_worker;
 	worker.bgw_main_arg = PointerGetDatum(cpusort);
 	/* XXX - we may need to serialize when we support windows shmem */
 
@@ -721,38 +730,6 @@ gpusort_launch_cpusort_worker(GpuSortState *gss, pgstrom_cpusort *cpusort)
 		dlist_push_tail(&gss->running_chunks, &cpusort->chain);
 		gss->num_cpu_running++;
 	}
-}
-
-static void
-gpusort_check_cpusort_worker(GpuSortState *gss)
-{
-	dlist_mutable_iter	iter;
-
-	dlist_foreach_modify(iter, &gss->running_chunks)
-	{
-		pgstrom_cpusort	   *cpusort;
-		BgwHandleStatus		status;
-
-		cpusort = dlist_container(pgstrom_cpusort, chain, iter.cur);
-		status = GetBackgroundWorkerPid(cpusort->bgw_handle, &bgw_pid);
-
-		if (status == BGWH_STOPPED)
-		{
-			dlist_delete(&cpusort->chain);
-			/* decrement num_cpu_running */
-
-			/* check results status */
-
-			/* call the gpusort_merge_cpu_chunks */
-
-		}
-		else if (status == BGWH_POSTMASTER_DIED)
-		{
-			/* emergency. kills all the backend and raise an error */
-			hoge;
-		}
-	}
-
 }
 
 static void
@@ -799,7 +776,7 @@ gpusort_merge_cpu_chunks(GpuSortState *gss, pgstrom_cpusort *cpusort_1)
 	pfree(cpusort_1);
 	gss->sorted_chunk = NULL;
 
-	hogehoge;
+	gpusort_launch_cpusort_worker(gss, cpusort_2);
 }
 
 static void
@@ -861,21 +838,116 @@ gpusort_merge_gpu_chunks(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	gss->sorted_chunk = NULL;
 
 	/* try to kick background worker */
-	hogehoge;
+	gpusort_launch_cpusort_worker(gss, cpusort);
 }
+
+static void
+gpusort_check_async_workers(GpuSortState *gss)
+{
+	pgstrom_message	   *msg;
+	pgstrom_gpusort	   *gpusort;
+	pgstrom_cpusort	   *cpusort;
+	dlist_mutable_iter	iter;
+
+	/*
+	 * Check status of GPU co-routine
+	 */
+	while ((msg = pgstrom_try_dequeue_message(gss->mqueue)) != NULL)
+	{
+		Assert(gss->num_gpu_running > 0);
+		gss->num_gpu_running--;
+
+		if (msg->pfm.enabled)
+			pgstrom_perfmon_add(&gss->pfm, &msg->pfm);
+		Assert(StromTagIs(msg, GpuSort));
+		gpusort = (pgstrom_gpusort *) msg;
+		kresults = KERN_GPUSORT_RESULTBUF(&gpusort->kern);
+
+		if (kresults->errcode != StromError_Success)
+		{
+			if (kresults->errcode == CL_BUILD_PROGRAM_FAILURE)
+			{
+				const char *buildlog
+					= pgstrom_get_devprog_errmsg(gpuscan->dprog_key);
+
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
+								pgstrom_strerror(gpuscan->msg.errcode),
+								gss->kern_source),
+						 errdetail("%s", buildlog)));
+			}
+			else
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("PG-Strom: OpenCL execution error (%s)",
+								pgstrom_strerror(kresults->errcode))));
+			}
+		}
+		gpusort_merge_chunks(gss, gpusort);
+	}
+
+	/*
+	 * Check status of CPU co-routine
+	 */
+	dlist_foreach_modify(iter, &gss->running_cpu_chunks)
+	{
+		BgwHandleStatus		status;
+		kern_resultbuf	   *kresults;
+
+		cpusort = dlist_container(pgstrom_cpusort, chain, iter.cur);
+		status = GetBackgroundWorkerPid(cpusort->bgw_handle, &bgw_pid);
+
+		if (status == BGWH_STOPPED)
+		{
+			dlist_delete(&cpusort->chain);
+			gss->num_cpu_running--;
+
+			/*
+			 * check the result status in the dynamic worker
+			 *
+			 * note: we intend dynamic worker returns error code and
+			 * message on the kern_resultbuf if error happen.
+			 * we may need to make a common format later.
+			 */
+			kresults = dsm_segment_address(cpusort->oitems_dsm);
+			if (kresults->errcode != ERRCODE_SUCCESSFUL_COMPLETION)
+				ereport(ERROR,
+						(errcode(kresults->errcode),
+						 errmsg("GpuSort worker: %s",
+								(char *)kresults->results)));
+
+			gpusort_merge_cpu_chunks(gss, cpusort);
+		}
+		else if (status == BGWH_POSTMASTER_DIED)
+		{
+			/* emergency. kills all the backend and raise an error */
+			elog(ERROR, "Bug? BGWH_POSTMASTER_DIED");
+		}
+	}
+}
+
+static void
+gpusort_kick_pending_workers(GpuSortState *gss)
+{}
 
 static void
 gpusort_exec_sort(GpuSortState *gss)
 {
 	pgstrom_gpusort	   *gpusort;
+	pgstrom_cpusort	   *cpusort;
+	dlist_mutable_iter	iter;
+	int					rc;
 
 	while (!gss->scan_done ||
 		   gss->num_gpu_running > 0 ||
-		   gss->num_cpu_running > 0)
+		   gss->num_cpu_running > 0 ||
+		   !dlist_is_empty(&gss->pending_cpu_chunks))
 	{
-		bool	launch_pending = false;
+		CHECK_FOR_INTERRUPTS();
 
-		/*  */
+		/* if not end of relation, make one more chunk to be sorted */
 		if (!gss->scan_done)
 		{
 			gpusort = pgstrom_create_gpusort(gss);
@@ -886,40 +958,22 @@ gpusort_exec_sort(GpuSortState *gss)
 				gss->num_gpu_running++;
 			}
 		}
-
-		/* fetch and merge if pair is found */
-		while ((msg = pgstrom_try_dequeue_message(mqueue)) != NULL)
+		/* check status of asynchronous workers */
+		gpusort_check_async_workers(gss);
+		/* kick pending CPU sorting jobs */
+		gpusort_kick_pending_workers(gss);
+		/* If scan is already done, we synchronize GPU/CPU jobs */
+		if (gss->scan_done &&
+			(gss->num_gpu_running > 0 || gss->num_cpu_running > 0))
 		{
-			Assert(gss->num_gpu_running > 0);
-			gss->num_gpu_running--;
+			rc = WaitLatch(&MyProc->procLatch,
+						   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+						   20 * 1000L);
+			ResetLatch(&MyProc->procLatch);
 
-			if (msg->pfm.enabled)
-				pgstrom_perfmon_add(&gss->pfm, &msg->pfm);
-			Assert(StromTagIs(msg, GpuSort));
-			gpusort = (pgstrom_gpusort *) msg;
-			gpusort_merge_chunks(gss, gpusort);
-		}
-
-		/* also checks result of CPU sorting */
-		while (fetch a CPU sort result)
-		{
-			Assert(gss->num_cpu_running > 0);
-			gss->num_cpu_running--;
-			launch_pending = true;
-
-			if (msg->pfm.enabled)
-				pgstrom_perfmon_add(&gss->pfm, &msg->pfm);
-			Assert(StromTagIs(msg, GpuSort));
-			gpusort = (pgstrom_gpusort *) msg;
-			gpusort_merge_chunks(gss, gpusort);
-		}
-
-		/***/
-		if (gss->scan_done)
-		{
-
-
-
+			/* emergency bailout if postmaster has died */
+			if (rc & WL_POSTMASTER_DEATH)
+				elog(ERROR, "failed on WaitLatch due to Postmaster die");
 		}
 	}
 
