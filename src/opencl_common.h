@@ -25,7 +25,10 @@
  */
 #ifdef OPENCL_DEVICE_CODE
 
-//#pragma OPENCL EXTENSION cl_khr_fp64 : enable
+#if __OPENCL_VERSION__ < CL_VERSION_1_2
+/* NOTE: cl_khr_fp64 extension got merged at OpenCL 1.2 */
+#pragma OPENCL EXTENSION cl_khr_fp64 : enable
+#endif
 #pragma OPENCL EXTENSION cl_khr_byte_addressable_store : enable
 
 /* NULL definition */
@@ -100,6 +103,16 @@ typedef cl_uint		Datum;
 #define __private	/* address space qualifier is noise on host */
 #define __constant	/* address space qualifier is noise on host */
 typedef uintptr_t	hostptr_t;
+#endif
+
+/*
+ * HOST_STATIC_INLINE is a qualifier of function that performs as static
+ * inline function on the host side implementation.
+ */
+#ifdef OPENCL_DEVICE_CODE
+#define HOST_STATIC_INLINE
+#else
+#define HOST_STATIC_INLINE		static inline
 #endif
 
 /*
@@ -444,7 +457,7 @@ typedef struct {
 	cl_uint		poffset[FLEXIBLE_ARRAY_MEMBER];	/* offset of params */
 } kern_parambuf;
 
-__global void *
+HOST_STATIC_INLINE __global void *
 kparam_get_value(__global kern_parambuf *kparams, cl_uint pindex)
 {
 	if (pindex >= kparams->nparams)
