@@ -1005,7 +1005,7 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 
 /* calculation for local partial min */
 #define AGGCALC_LOCAL_PMIN_SHORT(errcode,accum,newval)		\
-	AGGCALC_LOCALTEMPLATE(accum,newval,						\
+	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			atomic_min(&(accum)->int_val, (int)(newval)->short_val))
 #define AGGCALC_LOCAL_PMIN_INT(errcode,accum,newval)		\
 	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
@@ -1025,7 +1025,7 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 
 /* calculation for local partial add */
 #define AGGCALC_LOCAL_PADD_SHORT(errcode,accum,newval)		\
-	AGGCALC_LOCALTEMPLATE(accum,newval,						\
+	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			atomic_add(&(accum)->int_val, (int)(newval)->short_val))
 #define AGGCALC_LOCAL_PADD_INT(errcode,accum,newval)		\
 	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\

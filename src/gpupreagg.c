@@ -2311,7 +2311,7 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 
 	/* declaration of other temp variables */
 	if (pc.use_temp_int2)
-		appendStringInfo(&decl1, "  pg_int4_t temp_int2;\n");
+		appendStringInfo(&decl1, "  pg_int2_t temp_int2;\n");
 	if (pc.use_temp_int4)
 		appendStringInfo(&decl1, "  pg_int4_t temp_int4;\n");
 	if (pc.use_temp_int8)
