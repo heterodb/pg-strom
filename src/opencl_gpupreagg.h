@@ -260,12 +260,8 @@ gpupreagg_data_load(__local pagg_datum *pdatum,
 	 * Right now, expected data length for running total of partial
 	 * aggregates are 2, 4, or 8. Elasewhere, it may be a bug.
 	 */
-	if (cmeta.attlen == sizeof(cl_short))
-	{
-		pdatum->isnull = isnull[colidx];
-		pdatum->short_val = (cl_short)(values[colidx] & 0x0000ffffUL);
-	}
-	else if (cmeta.attlen == sizeof(cl_int))	/* also, cl_float */
+	if (cmeta.attlen == sizeof(cl_short) ||		/* also, cl_short */
+		cmeta.attlen == sizeof(cl_int))			/* also, cl_float */
 	{
 		pdatum->isnull = isnull[colidx];
 		pdatum->int_val = (cl_int)(values[colidx] & 0xffffffffUL);
@@ -986,7 +982,7 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 /* calculation for local partial max */
 #define AGGCALC_LOCAL_PMAX_SHORT(errcode,accum,newval)		\
 	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
-			atomic_max(&(accum)->int_val, (int)(newval)->short_val))
+			atomic_max(&(accum)->int_val, (newval)->int_val))
 #define AGGCALC_LOCAL_PMAX_INT(errcode,accum,newval)		\
 	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			atomic_max(&(accum)->int_val, (newval)->int_val))
@@ -1007,7 +1003,7 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 /* calculation for local partial min */
 #define AGGCALC_LOCAL_PMIN_SHORT(errcode,accum,newval)		\
 	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
-			atomic_min(&(accum)->int_val, (int)(newval)->short_val))
+			atomic_min(&(accum)->int_val, (newval)->int_val))
 #define AGGCALC_LOCAL_PMIN_INT(errcode,accum,newval)		\
 	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			atomic_min(&(accum)->int_val, (newval)->int_val))
@@ -1028,7 +1024,7 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 /* calculation for local partial add */
 #define AGGCALC_LOCAL_PADD_SHORT(errcode,accum,newval)		\
 	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
-			atomic_add(&(accum)->int_val, (int)(newval)->short_val))
+			atomic_add(&(accum)->int_val, (newval)->int_val))
 #define AGGCALC_LOCAL_PADD_INT(errcode,accum,newval)		\
 	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			atomic_add(&(accum)->int_val, (newval)->int_val))

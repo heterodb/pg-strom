@@ -1873,19 +1873,21 @@ gpupreagg_codegen_projection_misc(StringInfo body, FuncExpr *func,
 	const char	   *min_const;
 	const char	   *zero_const;
 
-	dtype = pgstrom_devtype_lookup_and_track(type_oid, pc->context);
-	if (!dtype)
-		elog(ERROR, "device type lookup failed: %u", type_oid);
-
-	switch (dtype->type_oid)
+	switch (type_oid)
 	{
 		case INT2OID:
-			pc->use_temp_int2 = true;
-			temp_val = "temp_int2";
-			max_const = "SHRT_MAX";
-			min_const = "SHRT_MIN";
-			zero_const = "0";
-			break;
+			/* NOTE: Only 32/64bit width are supported by atomic operation,
+			 * thus, we deal with 16bit datum using 32bit field internally.
+			 */
+			clause = (Node *)
+				makeFuncExpr(F_I2TOI4,
+							 INT4OID,
+							 list_make1(clause),
+							 InvalidOid,
+							 InvalidOid,
+							 COERCE_IMPLICIT_CAST);
+			type_oid = INT4OID;
+			/* no break here */
 
 		case INT4OID:
 		case DATEOID:
@@ -1934,6 +1936,9 @@ gpupreagg_codegen_projection_misc(StringInfo body, FuncExpr *func,
 			elog(ERROR, "Bug? device type %s is not expected",
 				 dtype->type_name);
 	}
+	dtype = pgstrom_devtype_lookup_and_track(type_oid, pc->context);
+	if (!dtype)
+		elog(ERROR, "device type lookup failed: %u", type_oid);
 
 	appendStringInfo(body,
 					 "  %s = %s;\n"
