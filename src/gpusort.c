@@ -127,6 +127,11 @@ typedef struct
 {
 	CustomScanState	css;
 
+	/* data store saved in temporary file */
+	int				num_chunks;
+	int				num_chunks_limit;
+	pgstrom_data_store **pds_chunks;
+
 	/* for GPU bitonic sorting */
 	pgstrom_queue  *mqueue;
 	Datum			dprog_key;
@@ -134,11 +139,7 @@ typedef struct
 	kern_parambuf  *kparambuf;
 	pgstrom_perfmon	pfm;
 
-	/* for CPU merge sorting */
-	int				num_chunks;		/* number of valid sorting chunks */
-	int				limit_chunks;	/* length of sort_chunks array */
-	pgstrom_data_store **sort_chunks;
-
+	/* copied from the plan node */
 	Size			chunk_size;		/* expected best size of sorting chunk */
     int				numCols;		/* number of sort-key columns */
     AttrNumber	   *sortColIdx;		/* their indexes in the target list */
@@ -152,7 +153,10 @@ typedef struct
 	pgstrom_cpusort *sorted_chunk;	/* sorted but no pair chunk yet */
 	dlist_head		pending_chunks;	/* chunks waiting for cpu sort */
 	dlist_head		running_chunks;	/* chunks in running by bgworker */
-
+	/* final result */
+	dsm_segment	   *sorted_result;	/* final index of the sorted result */
+	cl_long			sorted_index;	/* index of the final index on scan */
+	HeapTupleData	tuple_buf;		/* temp buffer during scan */
 } GpuSortState;
 
 /*
@@ -172,7 +176,7 @@ typedef struct
 
 	/* sorting chunks */
 	uint			num_chunks;
-	pgstrom_data_store **sort_chunks;
+	pgstrom_data_store **pds_chunks;
 	/* sorting keys */
 	TupleDesc		tupdesc;
 	int				numCols;
@@ -589,9 +593,9 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 
 	/**/
 	gss->num_chunks = 0;
-	gss->limit_chunks = 2 * gs_info->num_chunks;
+	gss->num_chunks_limit = gs_info->num_chunks + 32;
 	gss->sort_chunks = palloc0(sizeof(pgstrom_data_store *) *
-							   gss->limit_chunks);
+							   gss->num_chunks_limit);
 	gss->chunk_size = gs_info->chunk_size;
 	gss->numCols = gs_info->numCols;
 	gss->sortColIdx = gs_info->sortColIdx;
@@ -651,17 +655,19 @@ pgstrom_create_gpusort(GpuSortState *gss)
 			tupdesc = gss->css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
 			pds = pgstrom_create_data_store_row_fmap(tupdesc, gss->chunk_size);
 			chunk_id = gss->num_chunks++;
-			if (chunk_id >= gss->limit_chunks)
+			if (chunk_id >= gss->num_chunks_limit)
 			{
-				pgstrom_data_store *new_chunks
-					= repalloc(gss->sort_chunks,
-							   sizeof(pgstrom_data_store *) *
-							   2 * gss->limit_chunks);
-				pfree(ss->sort_chunks);
-				gss->sort_chunks = new_chunks;
-				gss->limit_chunks = 2 * gss->limit_chunks;
+				pgstrom_data_store *new_pds_chunks;
+
+				/* expand array twice */
+				gss->num_chunks_limit = 2 * gss->num_chunks_limit;
+				new_pds_chunks = repalloc(gss->pds_chunks,
+										  sizeof(pgstrom_data_store *) *
+										  gss->num_chunks_limit);
+				pfree(gss->pds_chunks);
+				gss->pds_chunks = new_pds_chunks;
 			}
-			gss->sort_chunks[chunk_id] = pds;
+			gss->pds_chunks[chunk_id] = pds;
 			pgstrom_track_object(&pds->sobj, 0);
 		}
 		/* Then, insert this tuple to the data store */
@@ -793,7 +799,7 @@ gpusort_merge_gpu_chunks(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	{
 		cpusort = MemoryContextAllocZero(memcxt, sizeof(pgstrom_cpusort));
 		cpusort->num_chunks = gss->num_chunks;
-		cpusort->sort_chunks = gss->sort_chunks;
+		cpusort->pds_chunks = gss->pds_chunks;
 		cpusort->tupdesc = gss->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 		cpusort->numCols = gss->numCols;
 		cpusort->sortColIdx = gss->sortColIdx;
@@ -976,42 +982,205 @@ gpusort_exec_sort(GpuSortState *gss)
 				elog(ERROR, "failed on WaitLatch due to Postmaster die");
 		}
 	}
-
-
-
-
-
-
-
-
+	gss->sorted_index = ;
 }
 
 
 static TupleTableSlot *
 gpusort_exec(CustomScanState *node)
 {
-	GpuSortState   *gss = (GpuSortState *) node;
+	GpuSortState	   *gss = (GpuSortState *) node;
+	kern_resultbuf	   *kresults;
+	pgstrom_data_store *pds;
 
 	if (!gss->sort_done)
-		gpusort_exec_sort();
+		gpusort_exec_sort(gss);
 
+	kresults = dsm_segment_address(gss->sorted_result);
+	if (gss->sorted_index < kresults->nitems)
+	{
+		cl_long		index = 2 * gss->sorted_index;
+		cl_int		chunk_id = kresults->results[index];
+		cl_int		item_id = kresults->results[index + 1];
 
+		if (chunk_id >= gss->num_chunks || !gss->pds_chunks[chunk_id])
+			elog(ERROR, "Bug? data-store of GpuSort missing (chunk-id: %d)",
+				 chunk_id);
+		pds = gss->pds_chunks[chunk_id];
 
-
+		if (pgstrom_fetch_data_store(slot, pds, item_id, &gss->tuple_buf))
+		{
+			gss->sorted_index++;
+			return slot;
+		}
+	}
 	return NULL;
 }
 
 static void
 gpusort_end(CustomScanState *node)
-{}
+{
+	GpuScanState   *gss = (GpuScanState *) node;
+	int				i;
+
+	Assert(dlist_is_empty(&gss->pending_chunks));
+	Assert(dlist_is_empty(&gss->running_chunks));
+	Assert(!gss->sorted_chunks);
+
+	if (gss->sorted_results)
+		dsm_detach(gss->sorted_results);
+
+	for (i=0; i < gss->num_chunks; i++)
+	{
+		pgstrom_data_store *pds = gss->pds_chunks[i];
+		pgstrom_untrack_object(&pds->sobj);
+		pgstrom_put_data_store(pds);
+	}
+
+	if (gss->dprog_key)
+	{
+		pgstrom_untrack_object((StromObject *)gss->dprog_key);
+        pgstrom_put_devprog_key(gss->dprog_key);
+	}
+
+	if (gss->mqueue)
+	{
+		pgstrom_untrack_object(&gss->mqueue->sobj);
+		pgstrom_close_queue(gss->mqueue);
+	}
+}
 
 static void
 gpusort_rescan(CustomScanState *node)
-{}
+{
+	GpuScanState   *gss = (GpuScanState *) node;
+
+	if (!gss->sort_done)
+		return;
+
+	/* must drop pointer to sort result tuple */
+	ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
+
+	/*
+     * If subnode is to be rescanned then we forget previous sort results; we
+     * have to re-read the subplan and re-sort.  Also must re-sort if the
+     * bounded-sort parameters changed or we didn't select randomAccess.
+     *
+     * Otherwise we can just rewind and rescan the sorted output.
+     */
+	if (outerPlanState(gss)->chgParam != NULL)
+	{
+		gss->sort_done = false;
+		/*
+		 * Release the previous read
+		 */
+		Assert(dlist_is_empty(&gss->pending_chunks));
+		Assert(dlist_is_empty(&gss->running_chunks));
+		Assert(!gss->sorted_chunks);
+
+		if (gss->sorted_results)
+			dsm_detach(gss->sorted_results);
+
+		for (i=0; i < gss->num_chunks; i++)
+		{
+			pgstrom_data_store *pds = gss->pds_chunks[i];
+			pgstrom_untrack_object(&pds->sobj);
+			pgstrom_put_data_store(pds);
+		}
+
+		/*
+		 * if chgParam of subnode is not null then plan will be re-scanned
+		 * by first ExecProcNode, so we don't need to call ExecReScan() here.
+		 */
+    }
+    else
+	{
+		/* otherwise, just rewind the pointer */
+		gss->sorted_index = 0;
+	}
+}
 
 static void
 gpusort_explain(CustomScanState *node, List *ancestors, ExplainState *es)
-{}
+{
+	GpuSortState   *gss = (GpuSortState *) node;
+	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
+	GpuSortInfo	   *gs_info = deform_gpusort_info(cscan);
+	List		   *context;
+	List		   *sort_keys = NIL;
+	bool			use_prefix;
+	int				i;
+
+	/* shows sorting keys */
+	context = deparse_context_for_planstate((Node *) node,
+											ancestors,
+											es->rtable,
+											es->rtable_names);
+	use_prefix = (list_length(es->rtable) > 1 || es->verbose);
+
+	for (i=0; i < gs_info->numCols; i++)
+	{
+		AttrNumber		resno = gs_info->sortColIdx[i];
+		TargetEntry	   *tle;
+		char		   *exprstr;
+
+		tle = get_tle_by_resno(cscan->scan.plan.targetlist, resno);
+		if (!tle)
+			elog(ERROR, "no tlist entry for key %d", resno);
+		exprstr = deparse_expression((Node *) tle->expr, context,
+                                     use_prefix, true);
+		sort_keys = lappend(sort_keys, exprstr);
+	}
+	if (sort_keys != NIL)
+		ExplainPropertyList("Sort Key", sort_keys, es);
+
+	/* shows resource comsumption, if executed */
+	if (es->analyze && gss->sort_done)
+	{
+		const char *sort_method;
+		const char	sort_resource[128];
+		const char *sort_storage;
+		Size		total_consumption;
+
+		if (gss->num_chunks > 1)
+			sort_method = "GPU:bitonic + CPU:merge";
+		else
+			sort_method = "GPU:bitonic";
+
+		total_consumption = (Size)gss->num_chunks * gss->chunk_size;
+		total_consumption += dsm_segment_map_length(gss->sorted_result);
+		if (total_consumption >= (Size)(1UL << 43))
+			snprintf(sort_resource, sizeof(sort_resource), "%.2fTb",
+					 (double)total_consumption / (double)(1UL << 40));
+		else if (total_consumption >= (Size)(1UL << 33))
+			snprintf(sort_resource, sizeof(sort_resource), "%.2fGb",
+					 (double)total_consumption / (double)(1UL << 30));
+		else if (total_consumption >= (Size)(1UL << 23))
+			snprintf(sort_resource, sizeof(sort_resource), "%zuMb",
+					 total_consumption >> 20);
+		else
+			snprintf(sort_resource, sizeof(sort_resource), "%zuKb",
+					 total_consumption >> 10);
+
+		/* full on-memory storage might be an option according to the size */
+		sort_storage = "Disk";
+
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			appendStringInfoSpaces(es->str, es->indent * 2);
+			appendStringInfo(es->str, "Sort Method: %s %s used: %s\n",
+							 sort_method,
+							 sort_storage,
+							 sort_resource);
+		}
+		else
+		{
+			ExplainPropertyText("Sort Method", sort_method, es);
+			ExplainPropertyLong("Sort Space Used", sort_resource, es);
+			ExplainPropertyText("Sort Space Type", sort_storage, es);
+		}
+	}
+}
 
 /*
  * Entrypoint of GpuSort
@@ -1063,5 +1232,702 @@ pgstrom_init_gpusort(void)
 	gpusort_exec_methods.ExplainCustomScan	= gpusort_explain;
 }
 
+/* ================================================================
+ *
+ * Routines for CPU sorting
+ *
+ * ================================================================
+ */
 
 
+
+
+static void
+gpusort_entrypoint_cpusort_worker(Datum main_arg)
+{
+	pgstrom_cpusort *cpusort = (pgstrom_cpusort *) DatumGetPointer(main_arg);
+
+
+
+
+}
+
+/* ================================================================
+ *
+ * Routines for GPU sorting
+ *
+ * ================================================================
+ */
+typedef struct
+{
+	pgstrom_message *msg;
+	cl_program		program;
+	cl_mem			m_gpusort;
+	cl_mem			m_kds;
+	cl_kernel		kern_prep;
+	cl_kernel	   *kern_sort;
+	cl_uint			kern_sort_nums;
+	cl_uint			ev_dma_recv;	/* event index of DMA recv */
+	cl_uint			ev_index;
+	cl_event		events[FLEXIBLE_ARRAY_MEMBER];
+} clstate_gpusort;
+
+static void
+clserv_respond_gpusort(cl_event event, cl_int ev_status, void *private)
+{
+
+
+
+}
+
+static cl_int
+compute_bitonic_workgroup_size(clstate_gpusort *clgss, size_t nhalf,
+							   size_t *p_gwork_sz, size_t *p_lwork_sz)
+{
+	static struct {
+		const char *kern_name;
+		size_t		kern_lmem;
+	} kern_calls[] = {
+		{ "gpusort_bitonic_local", 2 * sizeof(cl_uint) },
+		{ "gpusort_bitonic_merge",     sizeof(cl_uint) },
+	};
+	size_t		least_sz = nhalf;
+	size_t		lwork_sz;
+	size_t		gwork_sz;
+	cl_kernel	kernel;
+	cl_int		i, rc;
+
+	for (i=0; i < lengthof(kern_calls); i++)
+	{
+		kernel = clCreateKernel(clgpa->program,
+								kern_calls[i].kern_name,
+								&rc);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+			return rc;
+		}
+
+		if(!clserv_compute_workgroup_size(&gwork_sz,
+										  &lwork_sz,
+										  kernel,
+										  clgpa->dindex,
+										  true,
+										  nhalf,
+										  kern_calls[i].kern_lmem))
+		{
+			clserv_log("failed on clserv_compute_workgroup_size");
+			clReleaseKernel(kernel);
+			return StromError_OpenCLInternal;
+		}
+		clReleaseKernel(kernel);
+
+		least_sz = Min(least_sz, lwork_sz);
+	}
+	/*
+	 * NOTE: Local workgroup size is the largest 2^N value less than
+	 * or equal to the least one of expected kernels.
+	 */
+	lwork_sz = 1UL << (get_next_log2(least_sz + 1) - 1);
+	gwork_sz = ((nhalf + lwork_sz - 1) / lwork_sz) * lwork_sz;
+
+	*p_lwork_sz = lwork_sz;
+	*p_gwork_sz = gwork_sz;
+
+	return CL_SUCCESS;
+}
+
+/*
+ * clserv_launch_gpusort_preparation
+ *
+ * launcher of:
+ *   __kernel void
+ *   gpusort_preparation(__global kern_gpusort *kgsort)
+ */
+static cl_int
+clserv_launch_gpusort_preparation(clstate_gpusort *clgss, size_t nitems)
+{
+	cl_int		rc;
+	size_t		gwork_sz;
+	size_t		lwork_sz;
+
+	clgss->kern_prep = clCreateKernel(clgss->program,
+									  "gpusort_preparation",
+									  &rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	if (!clserv_compute_workgroup_size(&gwork_sz,
+									   &lwork_sz,
+									   clgpa->kern_prep,
+									   clgpa->dindex,
+									   true,
+									   nitems,
+									   sizeof(cl_uint)))
+	{
+		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
+		return StromError_OpenCLInternal;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_prep,
+						0,		/* __global kern_gpusort *kgsort */
+						sizeof(cl_mem),
+						&clgss->m_gpusort);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clEnqueueNDRangeKernel(clgss->kcmdq,
+								clgss->kern_prep,
+								1,
+								NULL,
+								&gwork_sz,
+								&lwork_sz,
+								clgss->ev_index,
+								&clgss->events[0],
+								&clgss->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	clgss->ev_kern_prep = clgpa->ev_index++;
+	clgss->msg.pfm.num_kern_prep++;
+
+	return CL_SUCCESS;
+}
+
+/*
+ * clserv_launch_bitonic_local
+ *
+ * launcher of:
+ *   __kernel void
+ *   gpusort_bitonic_local(__global kern_gpusort *kgsort,
+ *                         __global kern_data_store *kds,
+ *                         __global kern_data_store *ktoast,
+ *                         KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+ */
+static cl_int
+clserv_launch_bitonic_local(clstate_gpusort *clgss,
+							size_t gwork_sz, size_t lwork_sz)
+{
+	cl_kernel	kernel;
+	cl_int		rc;
+
+	kernel = clCreateKernel(clgpa->program,
+							"gpusort_bitonic_local",
+						    &rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+		return rc;
+	}
+	clgss->kern_sort[clgss->kern_sort_nums++] = kernel;
+
+	rc = clSetKernelArg(kernel,
+						0,		/* __global kern_gpusort *kgsort */
+						sizeof(cl_mem),
+						&clgss->m_gpusort);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						1,		/* __global kern_data_store *kds */
+						sizeof(cl_mem),
+						&clgss->m_kds);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						2,		/* __global kern_data_store *ktoast */
+						sizeof(cl_mem),
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						3,		/* KERN_DYNAMIC_LOCAL_WORKMEM_ARG */
+						2 * sizeof(cl_uint) * lwork_sz,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clEnqueueNDRangeKernel(clgss->kcmdq,
+								kernel,
+								1,
+								NULL,
+								&gwork_sz,
+								&lwork_sz,
+								1,
+								&clgss->events[clgss->ev_index - 1],
+								&clgss->events[clgss->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+    clgss->ev_index++;
+    clgss->msg.pfm.num_kern_sort++;
+
+	return CL_SUCCESS;
+}
+
+/*
+ * clserv_launch_bitonic_step
+ *
+ * launcher of:
+ *   __kernel void
+ *   gpusort_bitonic_step(__global kern_gpusort *kgsort,
+ *                        cl_int bitonic_unitsz,
+ *                        __global kern_data_store *kds,
+ *                        __global kern_data_store *ktoast,
+ *                        KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+ */
+static cl_int
+clserv_launch_bitonic_step(clstate_gpusort *clgss, bool reversing,
+						   size_t unitsz, size_t work_sz)
+{
+	cl_kernel	kernel;
+	cl_int		bitonic_unitsz;
+	cl_int		rc;
+	size_t		gwork_sz;
+	size_t		lwork_sz;
+
+	kernel = clCreateKernel(clgss->program,
+							"gpusort_bitonic_step",
+							&rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+		return rc;
+	}
+	clgss->kern_sort[clgss->kern_sort_nums++] = kernel;
+
+	rc = clSetKernelArg(kernel,
+						0,		/* __global kern_gpusort *kgsort */
+						sizeof(cl_mem),
+						&clgss->m_gpusort);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	/*
+	 * NOTE: bitonic_unitsz informs kernel function the unit size of
+	 * sorting block and its direction. Sign of the value indicates
+	 * the direction, and absolute value indicates the sorting block
+	 * size. For example, -5 means reversing direction (because of
+	 * negative sign), and 32 (= 2^5) for sorting block size.
+	 */
+	bitonic_unitsz = (!reversing ? unitsz : -unitsz);
+	rc = clSetKernelArg(kernel,
+						1,		/* cl_int bitonic_unitsz */
+						sizeof(cl_int),
+						&bitonic_unitsz);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						2,		/* __global kern_data_store *kds */
+						sizeof(cl_mem),
+						&clgss->m_kds);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						3,		/* __global kern_data_store *ktoast */
+						sizeof(cl_mem),
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						4,		/* KERN_DYNAMIC_LOCAL_WORKMEM_ARG */
+						sizeof(cl_uint) * lwork_sz,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clEnqueueNDRangeKernel(clgss->kcmdq,
+								kernel,
+								1,
+								NULL,
+								&gwork_sz,
+								&lwork_sz,
+								1,
+								&clgpa->events[clgss->ev_index - 1],
+								&clgpa->events[clgss->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	clgss->ev_index++;
+	clgss->msg.pfm.num_kern_sort++;
+
+	return CL_SUCCESS;
+}
+
+/*
+ * clserv_launch_bitonic_merge
+ *
+ * launcher of:
+ *   __kernel void
+ *   gpusort_bitonic_merge(__global kern_gpupreagg *kgpreagg,
+ *                         __global kern_data_store *kds,
+ *                         __global kern_data_store *ktoast,
+ *                         KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+ */
+static cl_int
+clserv_launch_bitonic_merge(clstate_gpusort *clgss,
+                            size_t gwork_sz, size_t lwork_sz)
+{
+	cl_kernel	kernel;
+	cl_int		rc;
+
+	kernel = clCreateKernel(clgss->program,
+							"gpusort_bitonic_merge",
+							&rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+		return rc;
+	}
+	clgss->kern_sort[clgss->kern_sort_nums++] = kernel;
+
+	rc = clSetKernelArg(kernel,
+						0,		/* __global kern_gpusort *kgsort */
+						sizeof(cl_mem),
+						&clgss->m_gpusort);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						1,		/* __global kern_data_store *kds */
+						sizeof(cl_mem),
+						&clgss->m_kds);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						2,		/* __global kern_data_store *ktoast */
+						sizeof(cl_mem),
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						3,		/* KERN_DYNAMIC_LOCAL_WORKMEM_ARG */
+						2 * sizeof(cl_uint) * lwork_sz,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clEnqueueNDRangeKernel(clgss->kcmdq,
+								kernel,
+								1,
+								NULL,
+								&gwork_sz,
+								&lwork_sz,
+								1,
+								&clgss->events[clgss->ev_index - 1],
+								&clgss->events[clgss->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	clgss->ev_index++;
+	clgss->msg.pfm.num_kern_sort++;
+
+	return CL_SUCCESS;
+}
+
+static void
+clserv_process_gpusort(pgstrom_message *msg)
+{
+	pgstrom_gpusort	   *gpusort = (pgstrom_gpusort *) msg;
+	pgstrom_data_store *pds = gpusort->pds;
+	kern_data_store	   *kds = pds->kds;
+	clstate_gpusort	   *clgss;
+	cl_uint				nitems = kds->nitems;
+	size_t				nhalf;
+	size_t				gwork_sz;
+	size_t				lwork_sz;
+	size_t				nsteps;
+	size_t				launches;
+	size_t				i, j;
+
+	Assert(StromTagIs(gpusort, GpuSort));
+	Assert(kds->format == KDS_FORMAT_ROW_FMAP);
+
+	/*
+	 * state object of gpusort
+	 */
+	clgss = calloc(1, offsetof(clstate_gpusort, events[1000]));
+	if (!clgss)
+	{
+		rc = CL_OUT_OF_HOST_MEMORY;
+		goto error;
+	}
+
+	/*
+	 * First of all, it looks up a program object to be run on
+	 * the supplied row-store. We may have three cases.
+	 * 1) NULL; it means the required program is under asynchronous
+	 *    build, and the message is kept on its internal structure
+	 *    to be enqueued again. In this case, we have nothing to do
+	 *    any more on the invocation.
+	 * 2) BAD_OPENCL_PROGRAM; it means previous compile was failed
+	 *    and unavailable to run this program anyway. So, we need
+	 *    to reply StromError_ProgramCompile error to inform the
+	 *    backend this program.
+	 * 3) valid cl_program object; it is an ideal result. pre-compiled
+	 *    program object was on the program cache, and cl_program
+	 *    object is ready to use.
+	 */
+	clgss->program = clserv_lookup_device_program(gpreagg->dprog_key,
+												  &gpreagg->msg);
+	if (!clgss->program)
+	{
+		free(clgss);
+		return;		/* message is in waitq, being retried later */
+	}
+	if (clgss->program == BAD_OPENCL_PROGRAM)
+	{
+		rc = CL_BUILD_PROGRAM_FAILURE;
+		goto error;
+	}
+
+	/*
+	 * choose a device to run
+	 */
+	clgss->dindex = pgstrom_opencl_device_schedule(&gpusort->msg);
+	clgss->kcmdq = opencl_cmdq[clgss->dindex];
+
+	/*
+	 * construction of kernel buffer objects
+	 *
+	 * m_gpusort - control data of gpusort
+	 * m_kds     - data store of records to be sorted
+	 */
+	length = KERN_GPUSORT_LENGTH(&gpusort->kern);
+	clgss->m_gpusort = clCreateBuffer(opencl_context,
+									  CL_MEM_READ_WRITE,
+									  length,
+									  NULL,
+									  &rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
+		goto error;
+	}
+
+	length = KERN_DATA_STORE_LENGTH(kds);
+	clgss->m_kds = clCreateBuffer(opencl_context,
+								  CL_MEM_READ_WRITE,
+								  length,
+								  NULL,
+								  &rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
+		goto error;
+	}
+
+	/*
+	 * OK, Enqueue DMA send requests prior to kernel execution
+	 */
+	/* __global kern_gpusort *kgpusort */
+	offset = KERN_GPUSORT_DMASEND_OFFSET(&gpusort->kern);
+	length = KERN_GPUSORT_DMASEND_LENGTH(&gpusort->kern);
+	rc = clEnqueueWriteBuffer(clgss->kcmdq,
+							  clgss->m_gpusort,
+							  CL_FALSE,
+							  offset,
+							  length,
+							  &gpusort->kern,
+							  0,
+							  NULL,
+							  &clgss->events[clgss->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
+		goto error;
+	}
+	clgss->ev_index++;
+	gpusort->msg.pfm.bytes_dma_send += length;
+	gpreagg->msg.pfm.num_dma_send++;
+
+	/* __global kern_data_store *kds */
+	length = KERN_DATA_STORE_LENGTH(kds);
+	rc = clEnqueueWriteBuffer(clgss->kcmdq,
+							  clgss->m_kds,
+							  CL_FALSE,
+							  0,
+							  length,
+							  kds,
+							  0,
+							  NULL,
+							  &clgss->events[clgss->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
+		goto error;
+	}
+	clgss->ev_index++;
+    gpusort->msg.pfm.bytes_dma_send += length;
+    gpreagg->msg.pfm.num_dma_send++;
+
+	/* kick, gpusort_preparation kernel function */
+	rc = clserv_launch_gpusort_preparation(clgss, nitems);
+	if (rc != CL_SUCCESS)
+		goto error;
+
+	/* kick, a series of gpusort_bitonic_*() functions */
+	nhalf = (nitems + 1) / 2;
+
+	rc = compute_bitonic_workgroup_size(clgss, nhalf, &gwork_sz, &lwork_sz);
+	if (rc != CL_SUCCESS)
+		goto error;
+
+	nsteps = get_next_log2(nhalf / lwork_sz) + 1;
+	launches = (nsteps + 1) * nsteps / 2 + nsteps + 1;
+
+	clgss->kern_sort = calloc(launches, sizeof(cl_kernel));
+	if (!clgss->kern_cost)
+		goto error;
+
+	/* Sorting in each work groups */
+	rc = clserv_launch_bitonic_local(clgss, gwork_sz, lwork_sz);
+	if (rc != CL_SUCCESS)
+		goto error;
+
+	/* Sorting inter workgroups */
+	for (i = 2 * lwork_sz; i < gsort_sz; i *= 2)
+	{
+		for (j = i; j > lwork_sz; j /= 2)
+		{
+			cl_uint		unitsz = 2 * j;
+			bool		reversing = (j == i) ? true : false;
+			size_t		work_sz;
+
+			work_sz = (((nitems + unitsz - 1) / unitsz) * unitsz / 2);
+			rc = clserv_launch_bitonic_step(clgss, reversing, unitsz, work_sz);
+			if (rc != CL_SUCCESS)
+				goto error;
+		}
+		rc = clserv_launch_bitonic_merge(clgss, gwork_sz, lwork_sz);
+		if (rc != CL_SUCCESS)
+			goto error;
+	}
+
+	/*
+	 * Write back result buffer to the host memory
+	 */
+	offset = KERN_GPUSORT_DMARECV_OFFSET(&gpusort->kern);
+	length = KERN_GPUSORT_DMARECV_LENGTH(&gpusort->kern);
+	rc =  clEnqueueReadBuffer(clgss->kcmdq,
+							  clgss->m_gpusort,
+							  CL_FALSE,
+							  offset,
+							  length,
+							  (char *)(&gpusort->kern) + offset,
+							  1,
+							  &clgss->events[clgpa->ev_index - 1],
+							  &clgss->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueReadBuffer: %s",
+				   opencl_strerror(rc));
+		goto error;
+	}
+	clgss->ev_index++;
+	gpusort->msg.pfm.bytes_dma_recv += length;
+    gpusort->msg.pfm.num_dma_recv++;
+
+	/*
+	 * Last, registers a callback to handle post gpusort process
+	 */
+	rc = clSetEventCallback(clgss->events[clgpa->ev_index - 1],
+							CL_COMPLETE,
+							clserv_respond_gpusort,
+							clgss);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetEventCallback: %s", opencl_strerror(rc));
+		goto error;
+	}
+	return;
+
+error:
+	if (clgss)
+	{
+		if (clgss->ev_index > 0)
+		{
+			clWaitForEvents(clgss->ev_index, clgss->events);
+			while (clgss->ev_index > 0)
+				clReleaseEvent(clgss->events[--clgss->ev_index]);
+		}
+		if (clgss->m_gpusort)
+			clReleaseMemObject(clgss->m_gpusort);
+		if (clgss->m_kds)
+			clReleaseMemObject(clgss->m_kds);
+		if (clgss->kern_prep)
+			clReleaseKernel(clgss->kern_prep);
+		for (i=0; i < clgss->kern_sort_nums; i++)
+			clReleaseKernel(clgss->kern_sort[i]);
+		if (clgss->program && clgss->program != BAD_OPENCL_PROGRAM)
+			clReleaseProgram(clgpa->program);
+		if (clgss->kern_sort)
+			free(clgss->kern_sort);
+	}
+	gpusort->msg.errcode = rc;
+	pgstrom_reply_message(&gpusort->msg);
+}
