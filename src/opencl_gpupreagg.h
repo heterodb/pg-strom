@@ -643,9 +643,6 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 									attnum,
 									get_global_id(0),
 									dest_index);
-				/* also, fixup varlena datum if needed */
-				pg_fixup_tupslot_varlena(&errcode, kds_dst, ktoast,
-										 attnum, dest_index);
 			}
 			continue;
 		}
@@ -811,11 +808,23 @@ gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
 	 */
 	for (attnum = 0; attnum < nattrs; attnum++)
 	{
-		/*
-		 * nothing to do for grouping-keys
-		 */
-		if (gpagg_atts[attnum] != GPUPREAGG_FIELD_IS_AGGFUNC)
+		cl_char		attkind = gpagg_atts[attnum];
+
+		if (attkind == GPUPREAGG_FIELD_IS_NULL)
 			continue;
+		if (attkind == GPUPREAGG_FIELD_IS_GROUPKEY)
+		{
+			/*
+			 * NOTE: KDS_FORMAT_TUPSLOT keep varlena datum as an offset
+			 * from head of the ktoast, so we need to fixup it to become
+			 * a valid address on host address space, prior to DMA write
+			 * back.
+			 */
+			if (get_global_id(0) == owner_index)
+				pg_fixup_tupslot_varlena(&errcode, kds_dst, ktoast,
+										 attnum, get_global_id(0));
+			continue;
+		}
 
 		/*
 		 * Reduction, using global atomic operation
