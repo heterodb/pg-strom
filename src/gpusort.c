@@ -1238,18 +1238,104 @@ pgstrom_init_gpusort(void)
  *
  * ================================================================
  */
+static void
+gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
+{
+	SortSupportData		*sort_keys;
+	pgstrom_data_store **pds_chunks = cpusort->pds_chunks;
+	kern_resultbuf	   *ritems = dsm_segment_address(cpusort->ritems_dsm);
+	kern_resultbuf	   *litems = dsm_segment_address(cpusort->litems_dsm);
+	kern_resultbuf	   *oitems = dsm_segment_address(cpusort->oitems_dsm);
+	TupleTableSlot	   *rslot = MakeSingleTupleTableSlot(cpusort->tupdesc);
+	TupleTableSlot	   *lslot = MakeSingleTupleTableSlot(cpusort->tupdesc);
+	HeapTupleData		tuple;
+	long				rindex;
+	long				lindex;
+	int					rchunk_id;
+	int					ritem_id;
+	int					lchunk_id;
+	int					litem_id;
+	int					i;
+
+	/*
+	 * Set up sorting keys
+	 */
+	sort_keys = palloc0(sizeof(SortSupportData) * cpusort->numCols);
+	for (i=0; i < cpusort->numCols; i++)
+	{
+		SortSupport	ssup = sort_keys + i;
+
+		ssup->ssup_cxt = CurrentMemoryContext;
+		ssup->ssup_collation = cpusort->collations[i];
+		ssup->ssup_nulls_first = cpusort->nullsFirst[i];
+		ssup->ssup_attno = cpusort->sortColIdx[i];
+		PrepareSortSupportFromOrderingOp(cpusort->sortOperators[i], ssup);
+	}
+
+	/*
+	 * Begin merge sorting
+	 */
+	rindex = 0;
+	rchunk_id = ritems->results[0];
+	ritem_id  = ritems->results[1];
+	Assert(rchunk_id < cpusort->num_chunks);
+	pds = cpusort->pds_chunks[rchunk_id];
+	if (!pgstrom_fetch_data_store(rslot, pds, ritem_id, &tuple))
+		elog(ERROR, "failed to fetch sorting tuple in (%d,%d)",
+			 rchunk_id, ritem_id);
+
+	lindex = 0;
+	lchunk_id = litems->results[0];
+	litem_id  = litems->results[1];
+	Assert(lchunk_id < cpusort->num_chunks);
+	pds = cpusort->pds_chunks[lchunk_id];
+	if (!pgstrom_fetch_data_store(lslot, pds, litem_id, &tuple))
+		elog(ERROR, "failed to fetch sorting tuple in (%d,%d)",
+             lchunk_id, litem_id);
+
+	see comparetup_heap;
+	if negative, put litems;
+	if positive, put ritems;
+	if zero, put both items
+					 
+
+		
 
 
 
+
+}
 
 static void
 gpusort_entrypoint_cpusort_worker(Datum main_arg)
 {
 	pgstrom_cpusort *cpusort = (pgstrom_cpusort *) DatumGetPointer(main_arg);
 
+	/* We're now ready to receive signals */
+	BackgroundWorkerUnblockSignals();
 
+	/* Connect to our database */
+	BackgroundWorkerInitializeConnection(cpusort->dbanem, NULL);
 
+	/*
+	 * XXX - Eventually, we should use parallel-context to share
+	 * the transaction snapshot, initialize misc stuff and so on.
+	 * But just at this moment, we create a new transaction state
+	 * to simplifies the implementation.
+	 */
+	StartTransactionCommand();
+	PushActiveSnapshot(GetTransactionSnapshot());
 
+	CurrentMemoryContext = AllocSetContextCreate(TopMemoryContext,
+												 "cpusort",
+												 ALLOCSET_DEFAULT_MINSIZE,
+												 ALLOCSET_DEFAULT_INITSIZE,
+												 ALLOCSET_DEFAULT_MAXSIZE);
+	/* handle cpu sorting */
+	gpusort_exec_cpusort(cpusort);
+
+	/* we should have no side-effect */
+	CommitTransactionCommand();
 }
 
 /* ================================================================
