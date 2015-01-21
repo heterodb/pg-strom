@@ -131,8 +131,11 @@ typedef struct
 	cl_char			__padding__[4];
 	union {
 		cl_short	short_val;
+		cl_ushort	ushort_val;
 		cl_int		int_val;
+		cl_uint		uint_val;
 		cl_long		long_val;
+		cl_ulong	ulong_val;
 		cl_float	float_val;
 		cl_double	double_val;
 	};
@@ -919,28 +922,27 @@ ATOMIC_DOUBLE_TEMPLATE(g,add)
 
 #ifdef PG_NUMERIC_TYPE_DEFINED
 
-#define ATOMIC_NUMERIC_MINMAX_TEMPLATE(prefix,op_name,ineq_op)	\
-	cl_ulong													\
-	prefix##atomic_##op_name(__private int *errcode,			\
-							 volatile prefix##space cl_ulong *ptr,	\
-							 cl_ulong numeric_value)			\
-	{															\
-		pg_numeric_t x, y, z;									\
-		pg_int4_t	comp;										\
-		ulong		oldval;										\
-		ulong		newval;										\
-		ulong		curval = *ptr;								\
-																\
-		do {													\
-			x.isnull = false;									\
-			y.isnull = false;									\
-			x.value = oldval = curval;							\
-			y.value = numeric_value;							\
-			comp = pgfn_numeric_cmp(errcode, x, y);				\
-			newval = comp.value ineq_op 0 ? x.value : y.value;	\
-		} while ((curval = atom_cmpxchg((prefix##space ulong *) ptr, \
-										oldval, newval)) != oldval); \
-		return oldval;											\
+#define ATOMIC_NUMERIC_MINMAX_TEMPLATE(prefix,op_name,ineq_op)			\
+	cl_ulong															\
+	prefix##atomic_##op_name##_numeric(__private int *errcode,			\
+									   volatile prefix##space cl_ulong *ptr, \
+									   cl_ulong numeric_value)			\
+	{																	\
+		pg_numeric_t x, y, z;											\
+		pg_int4_t	comp;												\
+		ulong		oldval;												\
+		ulong		newval;												\
+		ulong		curval = *ptr;										\
+																		\
+		do {															\
+			x.isnull = false;											\
+			y.isnull = false;											\
+			x.value = oldval = curval;									\
+			y.value = numeric_value;									\
+			comp = pgfn_numeric_cmp(errcode, x, y);						\
+			newval = comp.value ineq_op 0 ? x.value : y.value;			\
+		} while ((curval = atom_cmpxchg(ptr, oldval, newval)) != oldval); \
+		return oldval;													\
 	}
 
 ATOMIC_NUMERIC_MINMAX_TEMPLATE(l,max,>)
@@ -951,7 +953,7 @@ ATOMIC_NUMERIC_MINMAX_TEMPLATE(g,min,<)
 #define ATOMIC_NUMERIC_ADD_TEMPLATE(prefix)								\
 	cl_ulong															\
 	prefix##atomic_add_numeric(__private int *errcode,					\
-							   volatile prefix##space cl_long *ptr,		\
+							   volatile prefix##space cl_ulong *ptr,	\
 							   cl_ulong numeric_value)					\
 	{																	\
 		pg_numeric_t x, y, z;											\
@@ -966,8 +968,7 @@ ATOMIC_NUMERIC_MINMAX_TEMPLATE(g,min,<)
 			y.value = numeric_value;									\
 			z = pgfn_numeric_add(errcode, x, y);						\
 			newval = z.value;											\
-		} while ((curval = atom_cmpxchg((prefix##space ulong *)ptr,		\
-										oldval, newval)) != oldval);	\
+		} while ((curval = atom_cmpxchg(ptr, oldval, newval)) != oldval); \
 		return oldval;													\
 	}
 
@@ -999,15 +1000,15 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			atom_max(&(accum)->long_val, (newval)->long_val))
 #define AGGCALC_LOCAL_PMAX_FLOAT(errcode,accum,newval)		\
-    AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
+	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			latomic_max_float(&(accum)->float_val, (newval)->float_val))
 #define AGGCALC_LOCAL_PMAX_DOUBLE(errcode,accum,newval)		\
 	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			latomic_max_double(&(accum)->double_val, (newval)->double_val))
 #define AGGCALC_LOCAL_PMAX_NUMERIC(errcode,accum,newval)	\
 	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
-			latomic_max_numeric((errcode), &(accum)->long_val, \
-								(newval)->long_val))
+			latomic_max_numeric((errcode), &(accum)->ulong_val, \
+								(newval)->ulong_val))
 
 /* calculation for local partial min */
 #define AGGCALC_LOCAL_PMIN_SHORT(errcode,accum,newval)		\
@@ -1020,15 +1021,15 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			atom_min(&(accum)->long_val, (newval)->long_val))
 #define AGGCALC_LOCAL_PMIN_FLOAT(errcode,accum,newval)		\
-    AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
+	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			latomic_min_float(&(accum)->float_val, (newval)->float_val))
 #define AGGCALC_LOCAL_PMIN_DOUBLE(errcode,accum,newval)		\
 	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
 			latomic_min_double(&(accum)->double_val, (newval)->double_val))
 #define AGGCALC_LOCAL_PMIN_NUMERIC(errcode,accum,newval)	\
 	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
-			latomic_min_numeric((errcode), &(accum)->long_val, \
-								(newval)->long_val))
+			latomic_min_numeric((errcode), &(accum)->ulong_val, \
+								(newval)->ulong_val))
 
 /* calculation for local partial add */
 #define AGGCALC_LOCAL_PADD_SHORT(errcode,accum,newval)		\
@@ -1048,8 +1049,8 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 			latomic_add_double(&(accum)->double_val, (newval)->double_val))
 #define AGGCALC_LOCAL_PADD_NUMERIC(errcode,accum,newval)	\
 	AGGCALC_LOCAL_TEMPLATE(accum,newval,					\
-			latomic_add_numeric((errcode),&(accum)->long_val, \
-								(newval)->long_val))
+			latomic_add_numeric((errcode),&(accum)->ulong_val, \
+								(newval)->ulong_val))
 
 /*
  * Helper macros for gpupreagg_global_calc
@@ -1085,17 +1086,17 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 								  new_isnull,new_value)			\
 	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
 		gatomic_max_float((__global cl_float *)(accum_value),	\
-						  as_float((cl_uint)(new_value)))
+						  as_float((cl_uint)(new_value))))
 #define AGGCALC_GLOBAL_PMAX_DOUBLE(errcode,accum_isnull,accum_value,	\
 								   new_isnull,new_value)		\
 	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
 		gatomic_max_double((__global cl_double *)(accum_value),	\
-						   as_double(new_value)))
+						   as_double(new_value))))
 #define AGGCALC_GLOBAL_PMAX_NUMERIC(errcode,accum_isnull,accum_value,	\
 									new_isnull,new_value)		\
 	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
-		gatomic_max_numeric((__global cl_long *)(accum_value),	\
-							(cl_long)(new_value)))
+		gatomic_max_numeric((errcode),(__global cl_ulong *)(accum_value), \
+							(cl_ulong)(new_value)))
 /* calculation for global partial min */
 #define AGGCALC_GLOBAL_PMIN_SHORT(errcode,accum_isnull,accum_value,	\
 								  new_isnull,new_value)			\
@@ -1113,17 +1114,17 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 								  new_isnull,new_value)			\
 	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
 		gatomic_min_float((__global cl_float *)(accum_value),	\
-						  as_float((cl_uint)(new_value)))
+						  as_float((cl_uint)(new_value))))
 #define AGGCALC_GLOBAL_PMIN_DOUBLE(errcode,accum_isnull,accum_value,	\
 								   new_isnull,new_value)		\
 	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
 		gatomic_min_double((__global cl_double *)(accum_value),	\
-						   as_double(new_value)))
+						   as_double(new_value))))
 #define AGGCALC_GLOBAL_PMIN_NUMERIC(errcode,accum_isnull,accum_value,	\
 									new_isnull,new_value)		\
 	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
-		gatomic_min_numeric((__global cl_long *)(accum_value),	\
-							(cl_long)(new_value)))
+		gatomic_min_numeric((errcode),(__global cl_ulong *)(accum_value), \
+							(cl_ulong)(new_value)))
 /* calculation for global partial add */
 #define AGGCALC_GLOBAL_PADD_SHORT(errcode,accum_isnull,accum_value,	\
 								  new_isnull,new_value)			\
@@ -1141,7 +1142,7 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 								  new_isnull,new_value)			\
 	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
 		gatomic_add_float((__global cl_float *)(accum_value),	\
-						  as_float((cl_uint)(new_value)))
+						  as_float((cl_uint)(new_value))))
 #define AGGCALC_GLOBAL_PADD_DOUBLE(errcode,accum_isnull,accum_value,	\
 								   new_isnull,new_value)		\
 	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
@@ -1150,8 +1151,8 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 #define AGGCALC_GLOBAL_PADD_NUMERIC(errcode,accum_isnull,accum_value,	\
 									new_isnull,new_value)		\
 	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
-		gatomic_add_numeric((errcode),(__global cl_long *)(accum_value), \
-							(cl_long)(new_value)))
+		gatomic_add_numeric((errcode),(__global cl_ulong *)(accum_value), \
+							(cl_ulong)(new_value)))
 #else
 /* Host side representation of kern_gpupreagg. It can perform as a message
  * object of PG-Strom, has key of OpenCL device program, a source row/column

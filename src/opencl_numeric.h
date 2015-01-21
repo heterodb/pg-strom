@@ -368,29 +368,10 @@ pg_numeric_param(__global kern_parambuf *kparams,
 	return result;
 }
 
-pg_bool_t
-pgfn_numeric_isnull(__private int *errcode,
-					pg_numeric_t arg)
-{
-	pg_bool_t	result;
-
-	result.isnull = false;
-	result.value  = arg.isnull;
-	return result;
-}
-
-pg_bool_t
-pgfn_numeric_isnotnull(__private int *errcode,
-					   pg_numeric_t arg)
-{
-	pg_bool_t	result;
-
-	result.isnull = false;
-	result.value = !arg.isnull;
-	return result;
-}
-
-
+/* NULL check functions */
+STROMCL_SIMPLE_NULLTEST_TEMPLATE(numeric)
+/* CRC32 calculation function */
+STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(numeric,cl_long)
 /* to avoid conflicts with auto-generated data type */
 #define PG_NUMERIC_TYPE_DEFINED
 

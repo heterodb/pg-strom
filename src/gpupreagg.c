@@ -1934,7 +1934,7 @@ gpupreagg_codegen_projection_misc(StringInfo body, FuncExpr *func,
 
 		default:
 			elog(ERROR, "Bug? device type %s is not expected",
-				 dtype->type_name);
+				 format_type_be(type_oid));
 	}
 	dtype = pgstrom_devtype_lookup_and_track(type_oid, pc->context);
 	if (!dtype)
