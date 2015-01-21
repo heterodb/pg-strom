@@ -1,7 +1,9 @@
+--#
+--#       Gpu PreAggregate TestCases with RECHECK
+--#
+set pg_strom.debug_force_gpupreagg to on;
 set client_min_messages to notice;
 set extra_float_digits to -3;
-set pg_strom.debug_force_gpupreagg to on;
-set pg_strom.enabled=on;
 -- NO RECHECK
 select sum(0);
  sum 
