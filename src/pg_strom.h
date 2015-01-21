@@ -230,7 +230,7 @@ typedef struct {
 typedef struct {
 	StromObject		sobj;
 	dlist_node		chain;	/* link to free queues list in mqueue.c */
-	pid_t			owner;
+	PGPROC		   *owner;
 	int				refcnt;
 	pthread_mutex_t	lock;
 	pthread_cond_t	cond;
@@ -275,7 +275,7 @@ typedef struct {
 #define DEVKERNEL_NEEDS_GPUSCAN		0x0200
 #define DEVKERNEL_NEEDS_HASHJOIN	0x0400
 #define DEVKERNEL_NEEDS_GPUPREAGG	0x0800
-
+#define DEVKERNEL_NEEDS_GPUSORT		0x1000
 
 struct devtype_info;
 struct devfunc_info;
@@ -726,6 +726,7 @@ extern const char *pgstrom_opencl_common_code;
 extern const char *pgstrom_opencl_gpuscan_code;
 extern const char *pgstrom_opencl_gpupreagg_code;
 extern const char *pgstrom_opencl_hashjoin_code;
+extern const char *pgstrom_opencl_gpusort_code;
 extern const char *pgstrom_opencl_mathlib_code;
 extern const char *pgstrom_opencl_textlib_code;
 extern const char *pgstrom_opencl_timelib_code;
