@@ -1248,9 +1248,9 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 	kern_resultbuf	   *oitems = dsm_segment_address(cpusort->oitems_dsm);
 	TupleTableSlot	   *rslot = MakeSingleTupleTableSlot(cpusort->tupdesc);
 	TupleTableSlot	   *lslot = MakeSingleTupleTableSlot(cpusort->tupdesc);
-	HeapTupleData		tuple;
-	long				rindex;
-	long				lindex;
+	long				rindex = 0;
+	long				lindex = 0;
+	long				oindex = 0;
 	int					rchunk_id;
 	int					ritem_id;
 	int					lchunk_id;
@@ -1275,35 +1275,81 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 	/*
 	 * Begin merge sorting
 	 */
-	rindex = 0;
-	rchunk_id = ritems->results[0];
-	ritem_id  = ritems->results[1];
-	Assert(rchunk_id < cpusort->num_chunks);
-	pds = cpusort->pds_chunks[rchunk_id];
-	if (!pgstrom_fetch_data_store(rslot, pds, ritem_id, &tuple))
-		elog(ERROR, "failed to fetch sorting tuple in (%d,%d)",
-			 rchunk_id, ritem_id);
+	while (lindex < litems->nitems && rindex < ritems->nitems)
+	{
+		HeapTupleData dummy;
+		int		comp = 0;
 
-	lindex = 0;
-	lchunk_id = litems->results[0];
-	litem_id  = litems->results[1];
-	Assert(lchunk_id < cpusort->num_chunks);
-	pds = cpusort->pds_chunks[lchunk_id];
-	if (!pgstrom_fetch_data_store(lslot, pds, litem_id, &tuple))
-		elog(ERROR, "failed to fetch sorting tuple in (%d,%d)",
-             lchunk_id, litem_id);
+		if (TupIsNull(lslot))
+		{
+			lchunk_id = litems->results[2 * lindex];
+			litem_id = litems->results[2 * lindex + 1];
+			Assert(lchunk_id < cpusort->num_chunks);
+			pds = cpusort->pds_chunks[lchunk_id];
+			if (!pgstrom_fetch_data_store(lslot, pds, litem_id, &dummy))
+				elog(ERROR, "failed to fetch sorting tuple in (%d,%d)",
+					 lchunk_id, litem_id);
+			lindex++;
+		}
 
-	see comparetup_heap;
-	if negative, put litems;
-	if positive, put ritems;
-	if zero, put both items
-					 
+		if (TupIsNull(rslot))
+		{
+			rchunk_id = ritems->results[2 * rindex];
+			ritem_id = ritems->results[2 * rindex + 1];
+			Assert(rchunk_id < cpusort->num_chunks);
+			pds = cpusort->pds_chunks[rchunk_id];
+			if (!gstrom_fetch_data_store(rslot, pds, ritem_id, &dummy))
+				elog(ERROR, "failed to fetch sorting tuple in (%d,%d)",
+					 rchunk_id, ritem_id);
+			rindex++;
+		}
 
-		
+		for (i=0; i < cpusort->numCols; i++)
+		{
+			SortSupport ssup = sort_keys + i;
+			AttrNumber	attno = ssup->ssup_attno;
 
+			comp = ApplySortComparator(lslot->tts_values[attno],
+									   lslot->tts_isnull[attno],
+									   rslot->tts_values[attno],
+									   rslot->tts_isnull[attno],
+									   ssup);
+			if (comp != 0)
+				break;
+		}
+		if (comp <= 0)
+		{
+			oitems->results[2 * oindex] = lchunk_id;
+			oitems->results[2 * oindex + 1] = litem_id;
+			oindex++;
+			ExecClearTuple(lslot);
+		}
 
+		if (comp >= 0)
+		{
+			oitems->results[2 * oindex] = rchunk_id;
+			oitems->results[2 * oindex + 1] = ritem_id;
+			oindex++;
+			ExecClearTuple(rslot);
+		}
+	}
+	while (lindex < litems->nitems)
+	{
+		oitems->results[2 * oindex] = litems->results[2 * lindex];
+		oitems->results[2 * oindex + 1] = litems->results[2 * lindex + 1];
+		oindex++;
+		lindex++;
+	}
 
-
+	while (rindex < ritems->nitems)
+	{
+		oitems->results[2 * oindex] = ritems->results[2 * rindex];
+		oitems->results[2 * oindex + 1] = ritems->results[2 * rindex + 1];
+		oindex++;
+		rindex++;
+	}
+	Assert(oindex == litems->nitems + ritems->nitems);
+	oitems->nitems = oindex;
 }
 
 static void
@@ -1433,9 +1479,9 @@ compute_bitonic_workgroup_size(clstate_gpusort *clgss, size_t nhalf,
 static cl_int
 clserv_launch_gpusort_preparation(clstate_gpusort *clgss, size_t nitems)
 {
-	cl_int		rc;
 	size_t		gwork_sz;
 	size_t		lwork_sz;
+	cl_int		rc;
 
 	clgss->kern_prep = clCreateKernel(clgss->program,
 									  "gpusort_preparation",
@@ -1462,6 +1508,26 @@ clserv_launch_gpusort_preparation(clstate_gpusort *clgss, size_t nitems)
 						0,		/* __global kern_gpusort *kgsort */
 						sizeof(cl_mem),
 						&clgss->m_gpusort);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_prep,
+						1,		/* cl_int chunk_id */
+						sizeof(cl_int),
+						&gpusort->chunk_id);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_prep,
+						2,		/* KERN_DYNAMIC_LOCAL_WORKMEM_ARG */
+						sizeof(cl_int) * lwork_sz,
+						NULL);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));

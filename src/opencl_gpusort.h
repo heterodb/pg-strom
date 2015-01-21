@@ -116,17 +116,31 @@ static cl_int gpusort_keycomp(__private cl_int *errcode,
  * gpusort_preparation - fill up krowmap->rindex array.
  */
 __kernel void
-gpusort_preparation(__global kern_gpusort *kgsort)
+gpusort_preparation(__global kern_gpusort *kgsort,
+					cl_int chunk_id,
+					KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
-	__global kern_row_map  *krowmap = KERN_GPUSORT_KROWMAP(kgsort);
-	size_t		nvalids = krowmap->nvalids;
+	__global kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgsort);
+	size_t		nitems = kresults->nitems;
 	size_t		index;
+	int			errcode = StromError_Success;
 
-	/* put initial value of rindex */
+	if (kresults->nrels != 2)
+	{
+		STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption);
+		goto out;
+	}
+
+	/* put initial value of row-index */
 	for (index = get_global_id(0);
-		 index < nvalids;
+		 index < nitems;
 		 index += get_global_size(0))
-		krowmap->rindex[index] = index;
+	{
+		kresults->results[2 * index] = chunk_id;
+		kresults->results[2 * index + 1] = index;
+	}
+out:
+	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
 }
 
 /*
@@ -141,10 +155,64 @@ gpusort_bitonic_local(__global kern_gpusort *kgsort,
 					  __global kern_data_store *ktoast,
 					  KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
-	cl_int		errcode = StromError_Success;
+	__global kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgsort);
+	__local cl_int *localIdx = LOCAL_WORKMEM;
+	cl_uint			nitems = kds->nitems;
+	size_t			localID = get_local_id(0);
+	size_t			globalID = get_global_id(0);
+	size_t			localSize = get_local_size(0);
+	size_t			prtID = globalID / localSize;	/* partition ID */
+	size_t			prtSize = localSize * 2;		/* partition Size */
+	size_t			prtPos = prtID * prtSize;		/* partition Position */
+	size_t			localEntry;
+	size_t			blockSize;
+	size_t			unitSize;
 
+	/* create row index and then store to localIdx */
+	localEntry = ((prtPos + prtSize < nitems) ? prtSize : (nitems - prtPos));
+	if (localID < localEntry)
+		localIdx[localID] = prtPos + localID;
 
+	if (localSize + localID < localEntry)
+		localIdx[localSize + localID] = prtPos + localSize + localID;
+    barrier(CLK_LOCAL_MEM_FENCE);
 
+	/* bitonic sorting */
+	for (blockSize = 2; blockSize <= prtSize; blockSize *= 2)
+	{
+		for (unitSize = blockSize; 2 <= unitSize; unitSize /= 2)
+        {
+			size_t	unitMask		= unitSize - 1;
+			size_t	halfUnitSize	= unitSize / 2;
+			bool	reversing  = (unitSize == blockSize ? true : false);
+			size_t	idx0 = ((localID / halfUnitSize) * unitSize
+							+ localID % halfUnitSize);
+            size_t	idx1 = ((reversing == true)
+							? ((idx0 & ~unitMask) | (~idx0 & unitMask))
+							: (halfUnitSize + idx0));
+
+            if(idx1 < localEntry)
+			{
+				cl_int	pos0 = localIdx[idx0];
+				cl_int	pos1 = localIdx[idx1];
+
+				if (gpupreagg_keycomp(&errcode, kds, ktoast, pos0, pos1) > 0)
+				{
+					/* swap them */
+					localIdx[idx0] = pos1;
+					localIdx[idx1] = pos0;
+				}
+			}
+			barrier(CLK_LOCAL_MEM_FENCE);
+		}
+	}
+
+	if (localID < localEntry)
+		kresults->results[2 * (prtPos + localID) + 1] =
+			localIdx[2 * localID + 1];
+	if (localSize + localID < localEntry)
+		kresults->results[2 * (prtPos + localSize + localID) + 1] =
+			localIdx[2 * (localSize + localID) + 1];
 out:
 	kern_writeback_error_status(&kgsort->status, errcode, LOCAL_WORKMEM);
 }
@@ -163,13 +231,34 @@ gpusort_bitonic_step(__global kern_gpusort *kgsort,
 					 __global kern_data_store *ktoast,
 					 KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
+	__global kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgsort);
 	cl_int		errcode = StromError_Success;
 	cl_bool		reversing = (bitonic_unitsz < 0 ? true : false);
 	size_t		unitsz = (bitonic_unitsz < 0
 						  ? -bitonic_unitsz
 						  : bitonic_unitsz);
+	cl_uint		nitems = kds->nitems;
+	size_t		globalID = get_global_id(0);
+	size_t		halfUnitSize = unitsz / 2;
+	size_t		unitMask = unitsz - 1;
+	cl_int		idx0, idx1;
+	cl_int		pos0, pos1;
 
+	idx0 = (globalID / halfUnitSize) * unitsz + globalID % halfUnitSize;
+	idx1 = (reversing
+			? ((idx0 & ~unitMask) | (~idx0 & unitMask))
+			: (idx0 + halfUnitSize));
+	if (idx1 >= nitems)
+		goto out;
 
+	pos0 = kresults->results[2 * idx0 + 1];
+	pos1 = kresults->results[2 * idx1 + 1];
+	if (gpupreagg_keycomp(&errcode, kds, ktoast, pos0, pos1) > 0)
+	{
+		/* swap them */
+		kresults->results[2 * idx0 + 1] = pos1;
+		kresults->results[2 * idx1 + 1] = pos0;
+	}
 out:
 	kern_writeback_error_status(&kgsort->status, errcode, LOCAL_WORKMEM);
 }
@@ -186,10 +275,61 @@ gpusort_bitonic_merge(__global kern_gpupreagg *kgpreagg,
 					  __global kern_data_store *ktoast,
 					  KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
-	cl_int		errcode = StromError_Success;
+	__global kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgsort);
+	__local cl_int *localIdx = LOCAL_WORKMEM;
+	cl_int			errcode = StromError_Success;
+	cl_uint			nitems = kds->nitems;
+    size_t			localID = get_local_id(0);
+    size_t			globalID = get_global_id(0);
+    size_t			localSize = get_local_size(0);
+	size_t			prtID = globalID / localSize;	/* partition ID */
+	size_t			prtSize = localSize * 2;		/* partition Size */
+	size_t			prtPos = prtID * prtSize;		/* partition Position */
+	size_t			localEntry;
+	size_t			blockSize;
+	size_t			unitSize = prtSize;
 
+	/* Load index to localIdx */
+	localEntry = (prtPos+prtSize < nitems) ? prtSize : (nitems-prtPos);
+	if (localID < localEntry)
+		localIdx[localID] =
+			kresults->results[2 * (prtPos + localID) + 1];
 
+	if(localSize + localID < localEntry)
+		localIdx[localSize + localID] =
+			kresults->results[2 * (prtPos + localSize + localID) + 1];
+	barrier(CLK_LOCAL_MEM_FENCE);
 
+	/* merge two sorted blocks */
+	for (unitSize = blockSize; unitSize >= 2; unitSize /= 2)
+	{
+		size_t	halfUnitSize = unitSize / 2;
+		size_t	idx0, idx1;
+
+		idx0 = localID / halfUnitSize * unitSize + localID % halfUnitSize;
+		idx1 = halfUnitSize + idx0;
+
+        if (idx1 < localEntry)
+		{
+			size_t	pos0 = localIdx[idx0];
+			size_t	pos1 = localIdx[idx1];
+
+			if (gpupreagg_keycomp(&errcode, kds, ktoast, pos0, pos1) > 0)
+			{
+				/* swap them */
+				localIdx[idx0] = pos1;
+                localIdx[idx1] = pos0;
+			}
+		}
+		barrier(CLK_LOCAL_MEM_FENCE);
+	}
+
+	if (localID < localEntry)
+		kresults->results[2 * (prtPos + localID) + 1] = localIdx[localID];
+
+	if (localSize + localID < localEntry)
+		kresults->results[2 * (prtPos + localSize + localID) + 1]
+			= localIdx[localSize + localID];
 out:
 	kern_writeback_error_status(&kgsort->status, errcode, LOCAL_WORKMEM);
 }
