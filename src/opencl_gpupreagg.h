@@ -928,7 +928,7 @@ ATOMIC_DOUBLE_TEMPLATE(g,add)
 									   volatile prefix##space cl_ulong *ptr, \
 									   cl_ulong numeric_value)			\
 	{																	\
-		pg_numeric_t x, y, z;											\
+		pg_numeric_t x, y;												\
 		pg_int4_t	comp;												\
 		ulong		oldval;												\
 		ulong		newval;												\
@@ -1091,7 +1091,7 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 								   new_isnull,new_value)		\
 	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
 		gatomic_max_double((__global cl_double *)(accum_value),	\
-						   as_double(new_value))))
+						   as_double(new_value)))
 #define AGGCALC_GLOBAL_PMAX_NUMERIC(errcode,accum_isnull,accum_value,	\
 									new_isnull,new_value)		\
 	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
@@ -1119,7 +1119,7 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 								   new_isnull,new_value)		\
 	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\
 		gatomic_min_double((__global cl_double *)(accum_value),	\
-						   as_double(new_value))))
+						   as_double(new_value)))
 #define AGGCALC_GLOBAL_PMIN_NUMERIC(errcode,accum_isnull,accum_value,	\
 									new_isnull,new_value)		\
 	AGGCALC_GLOBAL_TEMPLATE(new_isnull,accum_isnull,			\

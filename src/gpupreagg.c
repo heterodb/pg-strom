@@ -1761,7 +1761,7 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			/* covariance takes only float8 datatype */
 			appendStringInfo(&body,
 							 "  case %d:\n"
-							 "    AGGCALC_%s_PSUM_%s(%s);\n"
+							 "    AGGCALC_%s_PADD_%s(%s);\n"
 							 "    break;\n",
 							 tle->resno - 1,
 							 aggcalc_class,
@@ -1975,6 +1975,7 @@ gpupreagg_codegen_projection_psum_x2(StringInfo body, FuncExpr *func,
 	devtype_info   *dtype;
 	devfunc_info   *dfunc;
 	const char	   *temp_label;
+	const char	   *zero_label;
 
 	if (exprType(clause) == FLOAT8OID)
 	{
@@ -1986,6 +1987,7 @@ gpupreagg_codegen_projection_psum_x2(StringInfo body, FuncExpr *func,
 		if (!dtype)
 			elog(ERROR, "device function lookup failed: %u", F_FLOAT8MUL);
 		temp_label = "temp_float8x";
+		zero_label = "0.0";
 	}
 	else if (exprType(clause) == NUMERICOID)
 	{
@@ -1997,18 +1999,23 @@ gpupreagg_codegen_projection_psum_x2(StringInfo body, FuncExpr *func,
 		if (!dtype)
 			elog(ERROR, "device function lookup failed: %u", F_NUMERIC_MUL);
 		temp_label = "temp_numeric";
+		zero_label = "PG_NUMERIC_ZERO";
 	}
 	else
 		elog(ERROR, "Bug? psum_x2 expect float8 or numeric");
 
 	appendStringInfo(
 		body,
-		"  temp_float8x = %s;\n"
-		"  if (temp_float8x.isnull)\n"
-		"    temp_float8x.value = 0.0;\n"
+		"  %s = %s;\n"
+		"  if (%s.isnull)\n"
+		"    %s.value = %s;\n"
 		"  pg_%s_vstore(%s,%s,errcode,%u,%s,\n"
 		"               pgfn_%s(errcode, %s, %s));\n",
+		temp_label,
 		pgstrom_codegen_expression(clause, pc->context),
+		temp_label,
+		temp_label,
+		zero_label,
 		dtype->type_name,
 		pc->kds_label,
 		pc->ktoast_label,
