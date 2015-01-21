@@ -1,10 +1,11 @@
 --#
 --#       Gpu PreAggregate TestCases with GROUP BY.
 --#
+set pg_strom.debug_force_gpupreagg to on;
 set client_min_messages to warning;
 set extra_float_digits to -3;
 -- smallint
-select key, avg(smlint_x)            from gpupreagg_test  group by key order by key;
+select key, avg(smlint_x)            from strom_test  group by key order by key;
  key |           avg           
 -----+-------------------------
    1 |     16.6401273885350318
@@ -40,7 +41,7 @@ select key, avg(smlint_x)            from gpupreagg_test  group by key order by 
      |                        
 (31 rows)
 
-select key, count(smlint_x)          from gpupreagg_test  group by key order by key;
+select key, count(smlint_x)          from strom_test  group by key order by key;
  key | count 
 -----+-------
    1 |   942
@@ -76,7 +77,7 @@ select key, count(smlint_x)          from gpupreagg_test  group by key order by 
      |     0
 (31 rows)
 
-select key, max(smlint_x)            from gpupreagg_test  group by key order by key;
+select key, max(smlint_x)            from strom_test  group by key order by key;
  key | max 
 -----+-----
    1 |  33
@@ -112,7 +113,7 @@ select key, max(smlint_x)            from gpupreagg_test  group by key order by 
      |    
 (31 rows)
 
-select key, min(smlint_x)            from gpupreagg_test  group by key order by key;
+select key, min(smlint_x)            from strom_test  group by key order by key;
  key | min 
 -----+-----
    1 |   0
@@ -148,7 +149,7 @@ select key, min(smlint_x)            from gpupreagg_test  group by key order by 
      |    
 (31 rows)
 
-select key, sum(smlint_x)            from gpupreagg_test  group by key order by key;
+select key, sum(smlint_x)            from strom_test  group by key order by key;
  key |  sum   
 -----+--------
    1 |  15675
@@ -184,7 +185,7 @@ select key, sum(smlint_x)            from gpupreagg_test  group by key order by 
      |       
 (31 rows)
 
-select key, stddev(smlint_x)         from gpupreagg_test  group by key order by key;
+select key, stddev(smlint_x)         from strom_test  group by key order by key;
  key |       stddev        
 -----+---------------------
    1 |  9.4325168011370996
@@ -220,7 +221,7 @@ select key, stddev(smlint_x)         from gpupreagg_test  group by key order by 
      |                    
 (31 rows)
 
-select key, stddev_pop(smlint_x)     from gpupreagg_test  group by key order by key;
+select key, stddev_pop(smlint_x)     from strom_test  group by key order by key;
  key |     stddev_pop      
 -----+---------------------
    1 |  9.4275088279669217
@@ -256,7 +257,7 @@ select key, stddev_pop(smlint_x)     from gpupreagg_test  group by key order by 
      |                    
 (31 rows)
 
-select key, stddev_samp(smlint_x)    from gpupreagg_test  group by key order by key;
+select key, stddev_samp(smlint_x)    from strom_test  group by key order by key;
  key |     stddev_samp     
 -----+---------------------
    1 |  9.4325168011370996
@@ -292,7 +293,7 @@ select key, stddev_samp(smlint_x)    from gpupreagg_test  group by key order by 
      |                    
 (31 rows)
 
-select key, variance(smlint_x)       from gpupreagg_test  group by key order by key;
+select key, variance(smlint_x)       from strom_test  group by key order by key;
  key |       variance       
 -----+----------------------
    1 |  88.9723732037336618
@@ -328,7 +329,7 @@ select key, variance(smlint_x)       from gpupreagg_test  group by key order by 
      |                     
 (31 rows)
 
-select key, var_pop(smlint_x)        from gpupreagg_test  group by key order by key;
+select key, var_pop(smlint_x)        from strom_test  group by key order by key;
  key |       var_pop        
 -----+----------------------
    1 |  88.8779227013942418
@@ -364,7 +365,7 @@ select key, var_pop(smlint_x)        from gpupreagg_test  group by key order by 
      |                     
 (31 rows)
 
-select key, var_samp(smlint_x)       from gpupreagg_test  group by key order by key;
+select key, var_samp(smlint_x)       from strom_test  group by key order by key;
  key |       var_samp       
 -----+----------------------
    1 |  88.9723732037336618
@@ -400,7 +401,7 @@ select key, var_samp(smlint_x)       from gpupreagg_test  group by key order by 
      |                     
 (31 rows)
 
-select key,corr(smlint_x,smlint_z) from gpupreagg_mix  group by key order by key;
+select key,corr(smlint_x,smlint_z) from strom_mix  group by key order by key;
  key |       corr        
 -----+-------------------
    1 |  -0.0158671092557
@@ -415,7 +416,7 @@ select key,corr(smlint_x,smlint_z) from gpupreagg_mix  group by key order by key
   10 |  0.00725107556923
 (10 rows)
 
-select key,covar_pop(smlint_x,smlint_z) from gpupreagg_mix  group by key order by key;
+select key,covar_pop(smlint_x,smlint_z) from strom_mix  group by key order by key;
  key |   covar_pop    
 -----+----------------
    1 | -2.78236586841
@@ -430,7 +431,7 @@ select key,covar_pop(smlint_x,smlint_z) from gpupreagg_mix  group by key order b
   10 |  1.29991542701
 (10 rows)
 
-select key,covar_samp(smlint_x,smlint_z) from gpupreagg_mix  group by key order by key;
+select key,covar_samp(smlint_x,smlint_z) from strom_mix  group by key order by key;
  key |   covar_samp   
 -----+----------------
    1 | -2.78545395483
@@ -445,7 +446,7 @@ select key,covar_samp(smlint_x,smlint_z) from gpupreagg_mix  group by key order 
   10 |  1.30136460808
 (10 rows)
 
-select key,corr(smlint_y,smlint_z) from gpupreagg_mix  group by key order by key;
+select key,corr(smlint_y,smlint_z) from strom_mix  group by key order by key;
  key |       corr        
 -----+-------------------
    1 |  -0.0215681108049
@@ -460,7 +461,7 @@ select key,corr(smlint_y,smlint_z) from gpupreagg_mix  group by key order by key
   10 |   0.0359550924932
 (10 rows)
 
-select key,covar_pop(smlint_y,smlint_z) from gpupreagg_mix  group by key order by key;
+select key,covar_pop(smlint_y,smlint_z) from strom_mix  group by key order by key;
  key |   covar_pop    
 -----+----------------
    1 | -3.86440038619
@@ -475,7 +476,7 @@ select key,covar_pop(smlint_y,smlint_z) from gpupreagg_mix  group by key order b
   10 |  6.51593122058
 (10 rows)
 
-select key,covar_samp(smlint_y,smlint_z) from gpupreagg_mix  group by key order by key;
+select key,covar_samp(smlint_y,smlint_z) from strom_mix  group by key order by key;
  key |   covar_samp   
 -----+----------------
    1 | -3.86866102609
@@ -491,7 +492,7 @@ select key,covar_samp(smlint_y,smlint_z) from gpupreagg_mix  group by key order 
 (10 rows)
 
 --integer
-select key, avg(integer_x)            from gpupreagg_test  group by key order by key;
+select key, avg(integer_x)            from strom_test  group by key order by key;
  key |          avg          
 -----+-----------------------
    1 |  1092510.915094339623
@@ -527,7 +528,7 @@ select key, avg(integer_x)            from gpupreagg_test  group by key order by
      |                      
 (31 rows)
 
-select key, count(integer_x)          from gpupreagg_test  group by key order by key;
+select key, count(integer_x)          from strom_test  group by key order by key;
  key | count 
 -----+-------
    1 |   954
@@ -563,7 +564,7 @@ select key, count(integer_x)          from gpupreagg_test  group by key order by
      |     0
 (31 rows)
 
-select key, max(integer_x)            from gpupreagg_test  group by key order by key;
+select key, max(integer_x)            from strom_test  group by key order by key;
  key |   max   
 -----+---------
    1 | 2145854
@@ -599,7 +600,7 @@ select key, max(integer_x)            from gpupreagg_test  group by key order by
      |        
 (31 rows)
 
-select key, min(integer_x)            from gpupreagg_test  group by key order by key;
+select key, min(integer_x)            from strom_test  group by key order by key;
  key |   min    
 -----+----------
    1 |     1345
@@ -635,7 +636,7 @@ select key, min(integer_x)            from gpupreagg_test  group by key order by
      |         
 (31 rows)
 
-select key, sum(integer_x)            from gpupreagg_test  group by key order by key;
+select key, sum(integer_x)            from strom_test  group by key order by key;
  key |     sum     
 -----+-------------
    1 |  1042255413
@@ -671,7 +672,7 @@ select key, sum(integer_x)            from gpupreagg_test  group by key order by
      |            
 (31 rows)
 
-select key, stddev(integer_x)         from gpupreagg_test  group by key order by key;
+select key, stddev(integer_x)         from strom_test  group by key order by key;
  key |     stddev      
 -----+-----------------
    1 | 617152.70194370
@@ -707,7 +708,7 @@ select key, stddev(integer_x)         from gpupreagg_test  group by key order by
      |                
 (31 rows)
 
-select key, stddev_pop(integer_x)     from gpupreagg_test  group by key order by key;
+select key, stddev_pop(integer_x)     from strom_test  group by key order by key;
  key |   stddev_pop    
 -----+-----------------
    1 | 616829.16184181
@@ -743,7 +744,7 @@ select key, stddev_pop(integer_x)     from gpupreagg_test  group by key order by
      |                
 (31 rows)
 
-select key, stddev_samp(integer_x)    from gpupreagg_test  group by key order by key;
+select key, stddev_samp(integer_x)    from strom_test  group by key order by key;
  key |   stddev_samp   
 -----+-----------------
    1 | 617152.70194370
@@ -779,7 +780,7 @@ select key, stddev_samp(integer_x)    from gpupreagg_test  group by key order by
      |                
 (31 rows)
 
-select key, variance(integer_x)       from gpupreagg_test  group by key order by key;
+select key, variance(integer_x)       from strom_test  group by key order by key;
  key |       variance        
 -----+-----------------------
    1 | 380877457516.41355996
@@ -815,7 +816,7 @@ select key, variance(integer_x)       from gpupreagg_test  group by key order by
      |                      
 (31 rows)
 
-select key, var_pop(integer_x)        from gpupreagg_test  group by key order by key;
+select key, var_pop(integer_x)        from strom_test  group by key order by key;
  key |        var_pop        
 -----+-----------------------
    1 | 380478214898.47182667
@@ -851,7 +852,7 @@ select key, var_pop(integer_x)        from gpupreagg_test  group by key order by
      |                      
 (31 rows)
 
-select key, var_samp(integer_x)       from gpupreagg_test  group by key order by key;
+select key, var_samp(integer_x)       from strom_test  group by key order by key;
  key |       var_samp        
 -----+-----------------------
    1 | 380877457516.41355996
@@ -887,7 +888,7 @@ select key, var_samp(integer_x)       from gpupreagg_test  group by key order by
      |                      
 (31 rows)
 
-select key,corr(integer_x,integer_z) from gpupreagg_mix  group by key order by key;
+select key,corr(integer_x,integer_z) from strom_mix  group by key order by key;
  key |       corr        
 -----+-------------------
    1 |   0.0382236081194
@@ -902,7 +903,7 @@ select key,corr(integer_x,integer_z) from gpupreagg_mix  group by key order by k
   10 |   0.0683210630925
 (10 rows)
 
-select key,covar_pop(integer_x,integer_z) from gpupreagg_mix  group by key order by key;
+select key,covar_pop(integer_x,integer_z) from strom_mix  group by key order by key;
  key |   covar_pop    
 -----+----------------
    1 |  29305820853.1
@@ -917,7 +918,7 @@ select key,covar_pop(integer_x,integer_z) from gpupreagg_mix  group by key order
   10 |  51785198341.6
 (10 rows)
 
-select key,covar_samp(integer_x,integer_z) from gpupreagg_mix  group by key order by key;
+select key,covar_samp(integer_x,integer_z) from strom_mix  group by key order by key;
  key |   covar_samp   
 -----+----------------
    1 |  29338095986.2
@@ -932,7 +933,7 @@ select key,covar_samp(integer_x,integer_z) from gpupreagg_mix  group by key orde
   10 |  51841732400.9
 (10 rows)
 
-select key,corr(integer_y,integer_z) from gpupreagg_mix  group by key order by key;
+select key,corr(integer_y,integer_z) from strom_mix  group by key order by key;
  key |       corr       
 -----+------------------
    1 |  -0.021607217408
@@ -947,7 +948,7 @@ select key,corr(integer_y,integer_z) from gpupreagg_mix  group by key order by k
   10 |  0.0508899812234
 (10 rows)
 
-select key,covar_pop(integer_y,integer_z) from gpupreagg_mix  group by key order by key;
+select key,covar_pop(integer_y,integer_z) from strom_mix  group by key order by key;
  key |   covar_pop    
 -----+----------------
    1 | -16696034821.9
@@ -962,7 +963,7 @@ select key,covar_pop(integer_y,integer_z) from gpupreagg_mix  group by key order
   10 |  39622612735.7
 (10 rows)
 
-select key,covar_samp(integer_y,integer_z) from gpupreagg_mix  group by key order by key;
+select key,covar_samp(integer_y,integer_z) from strom_mix  group by key order by key;
  key |   covar_samp   
 -----+----------------
    1 |   -16714606607
@@ -978,7 +979,7 @@ select key,covar_samp(integer_y,integer_z) from gpupreagg_mix  group by key orde
 (10 rows)
 
 --bigint
-select key, avg(bigint_x)            from gpupreagg_test  group by key order by key;
+select key, avg(bigint_x)            from strom_test  group by key order by key;
  key |          avg           
 -----+------------------------
    1 |  4516318046434256.4854
@@ -1014,7 +1015,7 @@ select key, avg(bigint_x)            from gpupreagg_test  group by key order by 
      |                       
 (31 rows)
 
-select key, count(bigint_x)          from gpupreagg_test  group by key order by key;
+select key, count(bigint_x)          from strom_test  group by key order by key;
  key | count 
 -----+-------
    1 |   960
@@ -1050,7 +1051,7 @@ select key, count(bigint_x)          from gpupreagg_test  group by key order by 
      |     0
 (31 rows)
 
-select key, max(bigint_x)            from gpupreagg_test  group by key order by key;
+select key, max(bigint_x)            from strom_test  group by key order by key;
  key |       max        
 -----+------------------
    1 | 9203540446272290
@@ -1086,7 +1087,7 @@ select key, max(bigint_x)            from gpupreagg_test  group by key order by 
      |                 
 (31 rows)
 
-select key, min(bigint_x)            from gpupreagg_test  group by key order by key;
+select key, min(bigint_x)            from strom_test  group by key order by key;
  key |        min        
 -----+-------------------
    1 |    10159337116795
@@ -1122,7 +1123,7 @@ select key, min(bigint_x)            from gpupreagg_test  group by key order by 
      |                  
 (31 rows)
 
-select key, sum(bigint_x)            from gpupreagg_test  group by key order by key;
+select key, sum(bigint_x)            from strom_test  group by key order by key;
  key |         sum          
 -----+----------------------
    1 |  4335665324576886226
@@ -1158,7 +1159,7 @@ select key, sum(bigint_x)            from gpupreagg_test  group by key order by 
      |                     
 (31 rows)
 
-select key, stddev(bigint_x)         from gpupreagg_test  group by key order by key;
+select key, stddev(bigint_x)         from strom_test  group by key order by key;
  key |      stddev      
 -----+------------------
    1 | 2692212451815744
@@ -1194,7 +1195,7 @@ select key, stddev(bigint_x)         from gpupreagg_test  group by key order by 
      |                 
 (31 rows)
 
-select key, stddev_pop(bigint_x)     from gpupreagg_test  group by key order by key;
+select key, stddev_pop(bigint_x)     from strom_test  group by key order by key;
  key |    stddev_pop    
 -----+------------------
    1 | 2690809892485431
@@ -1230,7 +1231,7 @@ select key, stddev_pop(bigint_x)     from gpupreagg_test  group by key order by 
      |                 
 (31 rows)
 
-select key, stddev_samp(bigint_x)    from gpupreagg_test  group by key order by key;
+select key, stddev_samp(bigint_x)    from strom_test  group by key order by key;
  key |   stddev_samp    
 -----+------------------
    1 | 2692212451815744
@@ -1266,7 +1267,7 @@ select key, stddev_samp(bigint_x)    from gpupreagg_test  group by key order by 
      |                 
 (31 rows)
 
-select key, variance(bigint_x)       from gpupreagg_test  group by key order by key;
+select key, variance(bigint_x)       from strom_test  group by key order by key;
  key |             variance             
 -----+----------------------------------
    1 |  7248007885711742128769406973299
@@ -1302,7 +1303,7 @@ select key, variance(bigint_x)       from gpupreagg_test  group by key order by 
      |                                 
 (31 rows)
 
-select key, var_pop(bigint_x)        from gpupreagg_test  group by key order by key;
+select key, var_pop(bigint_x)        from strom_test  group by key order by key;
  key |             var_pop              
 -----+----------------------------------
    1 |  7240457877497459064051938841035
@@ -1338,7 +1339,7 @@ select key, var_pop(bigint_x)        from gpupreagg_test  group by key order by 
      |                                 
 (31 rows)
 
-select key, var_samp(bigint_x)       from gpupreagg_test  group by key order by key;
+select key, var_samp(bigint_x)       from strom_test  group by key order by key;
  key |             var_samp             
 -----+----------------------------------
    1 |  7248007885711742128769406973299
@@ -1374,7 +1375,7 @@ select key, var_samp(bigint_x)       from gpupreagg_test  group by key order by 
      |                                 
 (31 rows)
 
-select key,corr(bigint_x,bigint_z) from gpupreagg_mix  group by key order by key;
+select key,corr(bigint_x,bigint_z) from strom_mix  group by key order by key;
  key |       corr        
 -----+-------------------
    1 | -0.00232738207506
@@ -1389,7 +1390,7 @@ select key,corr(bigint_x,bigint_z) from gpupreagg_mix  group by key order by key
   10 |  -0.0323624616354
 (10 rows)
 
-select key,covar_pop(bigint_x,bigint_z) from gpupreagg_mix  group by key order by key;
+select key,covar_pop(bigint_x,bigint_z) from strom_mix  group by key order by key;
  key |     covar_pop      
 -----+--------------------
    1 |  -3.3405731511e+28
@@ -1404,7 +1405,7 @@ select key,covar_pop(bigint_x,bigint_z) from gpupreagg_mix  group by key order b
   10 |  -4.6682249056e+29
 (10 rows)
 
-select key,covar_samp(bigint_x,bigint_z) from gpupreagg_mix  group by key order by key;
+select key,covar_samp(bigint_x,bigint_z) from strom_mix  group by key order by key;
  key |     covar_samp     
 -----+--------------------
    1 | -3.34422006502e+28
@@ -1419,7 +1420,7 @@ select key,covar_samp(bigint_x,bigint_z) from gpupreagg_mix  group by key order 
   10 | -4.67338316517e+29
 (10 rows)
 
-select key,corr(bigint_y,bigint_z) from gpupreagg_mix  group by key order by key;
+select key,corr(bigint_y,bigint_z) from strom_mix  group by key order by key;
  key |        corr        
 -----+--------------------
    1 |   0.00812160122092
@@ -1434,7 +1435,7 @@ select key,corr(bigint_y,bigint_z) from gpupreagg_mix  group by key order by key
   10 |    0.0126455236811
 (10 rows)
 
-select key,covar_pop(bigint_y,bigint_z) from gpupreagg_mix  group by key order by key;
+select key,covar_pop(bigint_y,bigint_z) from strom_mix  group by key order by key;
  key |     covar_pop      
 -----+--------------------
    1 |  1.14204540415e+29
@@ -1449,7 +1450,7 @@ select key,covar_pop(bigint_y,bigint_z) from gpupreagg_mix  group by key order b
   10 |  1.80695081299e+29
 (10 rows)
 
-select key,covar_samp(bigint_y,bigint_z) from gpupreagg_mix  group by key order by key;
+select key,covar_samp(bigint_y,bigint_z) from strom_mix  group by key order by key;
  key |     covar_samp     
 -----+--------------------
    1 |  1.14332285986e+29
@@ -1465,7 +1466,7 @@ select key,covar_samp(bigint_y,bigint_z) from gpupreagg_mix  group by key order 
 (10 rows)
 
 --real
-select key, avg(real_x)            from gpupreagg_test  group by key order by key;
+select key, avg(real_x)            from strom_test  group by key order by key;
  key |        avg        
 -----+-------------------
    1 |    0.504476891242
@@ -1501,7 +1502,7 @@ select key, avg(real_x)            from gpupreagg_test  group by key order by ke
      |                  
 (31 rows)
 
-select key, count(real_x)          from gpupreagg_test  group by key order by key;
+select key, count(real_x)          from strom_test  group by key order by key;
  key | count 
 -----+-------
    1 |   952
@@ -1537,7 +1538,7 @@ select key, count(real_x)          from gpupreagg_test  group by key order by ke
      |     0
 (31 rows)
 
-select key, max(real_x)            from gpupreagg_test  group by key order by key;
+select key, max(real_x)            from strom_test  group by key order by key;
  key |   max   
 -----+---------
    1 |       1
@@ -1573,7 +1574,7 @@ select key, max(real_x)            from gpupreagg_test  group by key order by ke
      |        
 (31 rows)
 
-select key, min(real_x)            from gpupreagg_test  group by key order by key;
+select key, min(real_x)            from strom_test  group by key order by key;
  key |  min   
 -----+--------
    1 | 0.0005
@@ -1609,7 +1610,7 @@ select key, min(real_x)            from gpupreagg_test  group by key order by ke
      |       
 (31 rows)
 
-select key, sum(real_x)            from gpupreagg_test  group by key order by key;
+select key, sum(real_x)            from strom_test  group by key order by key;
  key |  sum  
 -----+-------
    1 |   480
@@ -1645,7 +1646,7 @@ select key, sum(real_x)            from gpupreagg_test  group by key order by ke
      |      
 (31 rows)
 
-select key, stddev(real_x)         from gpupreagg_test  group by key order by key;
+select key, stddev(real_x)         from strom_test  group by key order by key;
  key |     stddev     
 -----+----------------
    1 | 0.287870634921
@@ -1681,7 +1682,7 @@ select key, stddev(real_x)         from gpupreagg_test  group by key order by ke
      |               
 (31 rows)
 
-select key, stddev_pop(real_x)     from gpupreagg_test  group by key order by key;
+select key, stddev_pop(real_x)     from strom_test  group by key order by key;
  key |   stddev_pop   
 -----+----------------
    1 | 0.287719402635
@@ -1717,7 +1718,7 @@ select key, stddev_pop(real_x)     from gpupreagg_test  group by key order by ke
      |               
 (31 rows)
 
-select key, stddev_samp(real_x)    from gpupreagg_test  group by key order by key;
+select key, stddev_samp(real_x)    from strom_test  group by key order by key;
  key |  stddev_samp   
 -----+----------------
    1 | 0.287870634921
@@ -1753,7 +1754,7 @@ select key, stddev_samp(real_x)    from gpupreagg_test  group by key order by ke
      |               
 (31 rows)
 
-select key, variance(real_x)       from gpupreagg_test  group by key order by key;
+select key, variance(real_x)       from strom_test  group by key order by key;
  key |    variance     
 -----+-----------------
    1 | 0.0828695024496
@@ -1789,7 +1790,7 @@ select key, variance(real_x)       from gpupreagg_test  group by key order by ke
      |                
 (31 rows)
 
-select key, var_pop(real_x)        from gpupreagg_test  group by key order by key;
+select key, var_pop(real_x)        from strom_test  group by key order by key;
  key |     var_pop     
 -----+-----------------
    1 | 0.0827824546529
@@ -1825,7 +1826,7 @@ select key, var_pop(real_x)        from gpupreagg_test  group by key order by ke
      |                
 (31 rows)
 
-select key, var_samp(real_x)       from gpupreagg_test  group by key order by key;
+select key, var_samp(real_x)       from strom_test  group by key order by key;
  key |    var_samp     
 -----+-----------------
    1 | 0.0828695024496
@@ -1861,7 +1862,7 @@ select key, var_samp(real_x)       from gpupreagg_test  group by key order by ke
      |                
 (31 rows)
 
-select key,corr(real_x,real_z) from gpupreagg_mix  group by key order by key;
+select key,corr(real_x,real_z) from strom_mix  group by key order by key;
  key |       corr        
 -----+-------------------
    1 |  -0.0226745308926
@@ -1876,7 +1877,7 @@ select key,corr(real_x,real_z) from gpupreagg_mix  group by key order by key;
   10 |  0.00465477382718
 (10 rows)
 
-select key,covar_pop(real_x,real_z) from gpupreagg_mix  group by key order by key;
+select key,covar_pop(real_x,real_z) from strom_mix  group by key order by key;
  key |     covar_pop      
 -----+--------------------
    1 |  -0.00377260666845
@@ -1891,7 +1892,7 @@ select key,covar_pop(real_x,real_z) from gpupreagg_mix  group by key order by ke
   10 |   0.00078602084201
 (10 rows)
 
-select key,covar_samp(real_x,real_z) from gpupreagg_mix  group by key order by key;
+select key,covar_samp(real_x,real_z) from strom_mix  group by key order by key;
  key |     covar_samp     
 -----+--------------------
    1 |  -0.00377679380127
@@ -1906,7 +1907,7 @@ select key,covar_samp(real_x,real_z) from gpupreagg_mix  group by key order by k
   10 |  0.000786877073864
 (10 rows)
 
-select key,corr(real_y,real_z) from gpupreagg_mix  group by key order by key;
+select key,corr(real_y,real_z) from strom_mix  group by key order by key;
  key |       corr        
 -----+-------------------
    1 |  -0.0228241120716
@@ -1921,7 +1922,7 @@ select key,corr(real_y,real_z) from gpupreagg_mix  group by key order by key;
   10 |  0.00990676283413
 (10 rows)
 
-select key,covar_pop(real_y,real_z) from gpupreagg_mix  group by key order by key;
+select key,covar_pop(real_y,real_z) from strom_mix  group by key order by key;
  key |     covar_pop      
 -----+--------------------
    1 |  -0.00387955945658
@@ -1936,7 +1937,7 @@ select key,covar_pop(real_y,real_z) from gpupreagg_mix  group by key order by ke
   10 |   0.00166983997665
 (10 rows)
 
-select key,covar_samp(real_y,real_z) from gpupreagg_mix  group by key order by key;
+select key,covar_samp(real_y,real_z) from strom_mix  group by key order by key;
  key |     covar_samp     
 -----+--------------------
    1 |  -0.00388390386806
@@ -1952,7 +1953,7 @@ select key,covar_samp(real_y,real_z) from gpupreagg_mix  group by key order by k
 (10 rows)
 
 --float
-select key, avg(float_x)            from gpupreagg_test  group by key order by key;
+select key, avg(float_x)            from strom_test  group by key order by key;
  key |        avg        
 -----+-------------------
    1 |    0.517954838058
@@ -1988,7 +1989,7 @@ select key, avg(float_x)            from gpupreagg_test  group by key order by k
      |                  
 (31 rows)
 
-select key, count(float_x)          from gpupreagg_test  group by key order by key;
+select key, count(float_x)          from strom_test  group by key order by key;
  key | count 
 -----+-------
    1 |   962
@@ -2024,7 +2025,7 @@ select key, count(float_x)          from gpupreagg_test  group by key order by k
      |     0
 (31 rows)
 
-select key, max(float_x)            from gpupreagg_test  group by key order by key;
+select key, max(float_x)            from strom_test  group by key order by key;
  key |       max        
 -----+------------------
    1 |   0.996401201934
@@ -2060,7 +2061,7 @@ select key, max(float_x)            from gpupreagg_test  group by key order by k
      |                 
 (31 rows)
 
-select key, min(float_x)            from gpupreagg_test  group by key order by key;
+select key, min(float_x)            from strom_test  group by key order by key;
  key |       min       
 -----+-----------------
    1 | 0.0020891358145
@@ -2096,7 +2097,7 @@ select key, min(float_x)            from gpupreagg_test  group by key order by k
      |                
 (31 rows)
 
-select key, sum(float_x)            from gpupreagg_test  group by key order by key;
+select key, sum(float_x)            from strom_test  group by key order by key;
  key |      sum       
 -----+----------------
    1 |  498.272554212
@@ -2132,7 +2133,7 @@ select key, sum(float_x)            from gpupreagg_test  group by key order by k
      |               
 (31 rows)
 
-select key, stddev(float_x)         from gpupreagg_test  group by key order by key;
+select key, stddev(float_x)         from strom_test  group by key order by key;
  key |     stddev     
 -----+----------------
    1 | 0.288342551366
@@ -2168,7 +2169,7 @@ select key, stddev(float_x)         from gpupreagg_test  group by key order by k
      |               
 (31 rows)
 
-select key, stddev_pop(float_x)     from gpupreagg_test  group by key order by key;
+select key, stddev_pop(float_x)     from strom_test  group by key order by key;
  key |   stddev_pop   
 -----+----------------
    1 | 0.288192646208
@@ -2204,7 +2205,7 @@ select key, stddev_pop(float_x)     from gpupreagg_test  group by key order by k
      |               
 (31 rows)
 
-select key, stddev_samp(float_x)    from gpupreagg_test  group by key order by key;
+select key, stddev_samp(float_x)    from strom_test  group by key order by key;
  key |  stddev_samp   
 -----+----------------
    1 | 0.288342551366
@@ -2240,7 +2241,7 @@ select key, stddev_samp(float_x)    from gpupreagg_test  group by key order by k
      |               
 (31 rows)
 
-select key, variance(float_x)       from gpupreagg_test  group by key order by key;
+select key, variance(float_x)       from strom_test  group by key order by key;
  key |    variance     
 -----+-----------------
    1 | 0.0831414269282
@@ -2276,7 +2277,7 @@ select key, variance(float_x)       from gpupreagg_test  group by key order by k
      |                
 (31 rows)
 
-select key, var_pop(float_x)        from gpupreagg_test  group by key order by key;
+select key, var_pop(float_x)        from strom_test  group by key order by key;
  key |     var_pop     
 -----+-----------------
    1 | 0.0830550013285
@@ -2312,7 +2313,7 @@ select key, var_pop(float_x)        from gpupreagg_test  group by key order by k
      |                
 (31 rows)
 
-select key, var_samp(float_x)       from gpupreagg_test  group by key order by key;
+select key, var_samp(float_x)       from strom_test  group by key order by key;
  key |    var_samp     
 -----+-----------------
    1 | 0.0831414269282
@@ -2348,7 +2349,7 @@ select key, var_samp(float_x)       from gpupreagg_test  group by key order by k
      |                
 (31 rows)
 
-select key,corr(float_x,float_z) from gpupreagg_mix  group by key order by key;
+select key,corr(float_x,float_z) from strom_mix  group by key order by key;
  key |       corr        
 -----+-------------------
    1 |  -0.0551066364982
@@ -2363,7 +2364,7 @@ select key,corr(float_x,float_z) from gpupreagg_mix  group by key order by key;
   10 |   0.0381979840373
 (10 rows)
 
-select key,covar_pop(float_x,float_z) from gpupreagg_mix  group by key order by key;
+select key,covar_pop(float_x,float_z) from strom_mix  group by key order by key;
  key |     covar_pop      
 -----+--------------------
    1 |  -0.00960460461502
@@ -2378,7 +2379,7 @@ select key,covar_pop(float_x,float_z) from gpupreagg_mix  group by key order by 
   10 |   0.00635859535088
 (10 rows)
 
-select key,covar_samp(float_x,float_z) from gpupreagg_mix  group by key order by key;
+select key,covar_samp(float_x,float_z) from strom_mix  group by key order by key;
  key |     covar_samp     
 -----+--------------------
    1 |  -0.00961522917765
@@ -2393,7 +2394,7 @@ select key,covar_samp(float_x,float_z) from gpupreagg_mix  group by key order by
   10 |    0.0063654993632
 (10 rows)
 
-select key,corr(float_y,float_z) from gpupreagg_mix  group by key order by key;
+select key,corr(float_y,float_z) from strom_mix  group by key order by key;
  key |       corr        
 -----+-------------------
    1 |  -0.0158838533404
@@ -2408,7 +2409,7 @@ select key,corr(float_y,float_z) from gpupreagg_mix  group by key order by key;
   10 |   0.0473726574687
 (10 rows)
 
-select key,covar_pop(float_y,float_z) from gpupreagg_mix  group by key order by key;
+select key,covar_pop(float_y,float_z) from strom_mix  group by key order by key;
  key |     covar_pop      
 -----+--------------------
    1 |  -0.00273880069197
@@ -2423,7 +2424,7 @@ select key,covar_pop(float_y,float_z) from gpupreagg_mix  group by key order by 
   10 |   0.00777716946224
 (10 rows)
 
-select key,covar_samp(float_y,float_z) from gpupreagg_mix  group by key order by key;
+select key,covar_samp(float_y,float_z) from strom_mix  group by key order by key;
  key |     covar_samp     
 -----+--------------------
    1 |  -0.00274187454235
@@ -2439,7 +2440,7 @@ select key,covar_samp(float_y,float_z) from gpupreagg_mix  group by key order by
 (10 rows)
 
 --numeric
-select key, avg(nume_x)            from gpupreagg_test  group by key order by key;
+select key, avg(nume_x)            from strom_test  group by key order by key;
  key |           avg           
 -----+-------------------------
    1 |  0.47978746774016962980
@@ -2475,7 +2476,7 @@ select key, avg(nume_x)            from gpupreagg_test  group by key order by ke
      |                        
 (31 rows)
 
-select key, count(nume_x)          from gpupreagg_test  group by key order by key;
+select key, count(nume_x)          from strom_test  group by key order by key;
  key | count 
 -----+-------
    1 |   948
@@ -2511,7 +2512,7 @@ select key, count(nume_x)          from gpupreagg_test  group by key order by ke
      |     0
 (31 rows)
 
-select key, max(nume_x)            from gpupreagg_test  group by key order by key;
+select key, max(nume_x)            from strom_test  group by key order by key;
  key |          max           
 -----+------------------------
    1 |      0.995276160072535
@@ -2547,7 +2548,7 @@ select key, max(nume_x)            from gpupreagg_test  group by key order by ke
      |                       
 (31 rows)
 
-select key, min(nume_x)            from gpupreagg_test  group by key order by key;
+select key, min(nume_x)            from strom_test  group by key order by key;
  key |          min          
 -----+-----------------------
    1 |  0.000203380361199379
@@ -2583,7 +2584,7 @@ select key, min(nume_x)            from gpupreagg_test  group by key order by ke
      |                      
 (31 rows)
 
-select key, sum(nume_x)            from gpupreagg_test  group by key order by key;
+select key, sum(nume_x)            from strom_test  group by key order by key;
  key |           sum            
 -----+--------------------------
    1 |   454.838519417680809049
@@ -2619,7 +2620,7 @@ select key, sum(nume_x)            from gpupreagg_test  group by key order by ke
      |                         
 (31 rows)
 
-select key, stddev(nume_x)         from gpupreagg_test  group by key order by key;
+select key, stddev(nume_x)         from strom_test  group by key order by key;
  key |                   stddev                   
 -----+--------------------------------------------
    1 |     0.290009254232895026833836137419545211
@@ -2655,7 +2656,7 @@ select key, stddev(nume_x)         from gpupreagg_test  group by key order by ke
      |                                           
 (31 rows)
 
-select key, stddev_pop(nume_x)     from gpupreagg_test  group by key order by key;
+select key, stddev_pop(nume_x)     from strom_test  group by key order by key;
  key |                 stddev_pop                 
 -----+--------------------------------------------
    1 |     0.289856255407035128072447102616870638
@@ -2691,7 +2692,7 @@ select key, stddev_pop(nume_x)     from gpupreagg_test  group by key order by ke
      |                                           
 (31 rows)
 
-select key, stddev_samp(nume_x)    from gpupreagg_test  group by key order by key;
+select key, stddev_samp(nume_x)    from strom_test  group by key order by key;
  key |                stddev_samp                 
 -----+--------------------------------------------
    1 |     0.290009254232895026833836137419545211
@@ -2727,7 +2728,7 @@ select key, stddev_samp(nume_x)    from gpupreagg_test  group by key order by ke
      |                                           
 (31 rows)
 
-select key, variance(nume_x)       from gpupreagg_test  group by key order by key;
+select key, variance(nume_x)       from strom_test  group by key order by key;
  key |                  variance                  
 -----+--------------------------------------------
    1 |     0.084105367540719942039021693866500838
@@ -2763,7 +2764,7 @@ select key, variance(nume_x)       from gpupreagg_test  group by key order by ke
      |                                           
 (31 rows)
 
-select key, var_pop(nume_x)        from gpupreagg_test  group by key order by key;
+select key, var_pop(nume_x)        from strom_test  group by key order by key;
  key |                  var_pop                   
 -----+--------------------------------------------
    1 |     0.084016648798588380918727367185207061
@@ -2799,7 +2800,7 @@ select key, var_pop(nume_x)        from gpupreagg_test  group by key order by ke
      |                                           
 (31 rows)
 
-select key, var_samp(nume_x)       from gpupreagg_test  group by key order by key;
+select key, var_samp(nume_x)       from strom_test  group by key order by key;
  key |                  var_samp                  
 -----+--------------------------------------------
    1 |     0.084105367540719942039021693866500838
@@ -2835,7 +2836,7 @@ select key, var_samp(nume_x)       from gpupreagg_test  group by key order by ke
      |                                           
 (31 rows)
 
-select key,corr(nume_x,nume_z) from gpupreagg_mix  group by key order by key;
+select key,corr(nume_x,nume_z) from strom_mix  group by key order by key;
  key |       corr        
 -----+-------------------
    1 |  -0.0094455110671
@@ -2850,7 +2851,7 @@ select key,corr(nume_x,nume_z) from gpupreagg_mix  group by key order by key;
   10 |   0.0516156113334
 (10 rows)
 
-select key,covar_pop(nume_x,nume_z) from gpupreagg_mix  group by key order by key;
+select key,covar_pop(nume_x,nume_z) from strom_mix  group by key order by key;
  key |     covar_pop     
 -----+-------------------
    1 | -0.00156597570414
@@ -2865,7 +2866,7 @@ select key,covar_pop(nume_x,nume_z) from gpupreagg_mix  group by key order by ke
   10 |  0.00870616839605
 (10 rows)
 
-select key,covar_samp(nume_x,nume_z) from gpupreagg_mix  group by key order by key;
+select key,covar_samp(nume_x,nume_z) from strom_mix  group by key order by key;
  key |    covar_samp     
 -----+-------------------
    1 | -0.00156772149645
@@ -2880,7 +2881,7 @@ select key,covar_samp(nume_x,nume_z) from gpupreagg_mix  group by key order by k
   10 |  0.00871580977855
 (10 rows)
 
-select key,corr(nume_y,nume_z) from gpupreagg_mix  group by key order by key;
+select key,corr(nume_y,nume_z) from strom_mix  group by key order by key;
  key |       corr        
 -----+-------------------
    1 |  -0.0191460855361
@@ -2895,7 +2896,7 @@ select key,corr(nume_y,nume_z) from gpupreagg_mix  group by key order by key;
   10 |   0.0475034765332
 (10 rows)
 
-select key,covar_pop(nume_y,nume_z) from gpupreagg_mix  group by key order by key;
+select key,covar_pop(nume_y,nume_z) from strom_mix  group by key order by key;
  key |     covar_pop      
 -----+--------------------
    1 |  -0.00309735658058
@@ -2910,7 +2911,7 @@ select key,covar_pop(nume_y,nume_z) from gpupreagg_mix  group by key order by ke
   10 |   0.00797110722964
 (10 rows)
 
-select key,covar_samp(nume_y,nume_z) from gpupreagg_mix  group by key order by key;
+select key,covar_samp(nume_y,nume_z) from strom_mix  group by key order by key;
  key |     covar_samp     
 -----+--------------------
    1 |  -0.00310078665431
@@ -2926,7 +2927,7 @@ select key,covar_samp(nume_y,nume_z) from gpupreagg_mix  group by key order by k
 (10 rows)
 
 --smallserial
-select key, avg(smlsrl_x)            from gpupreagg_test  group by key order by key;
+select key, avg(smlsrl_x)            from strom_test  group by key order by key;
  key |            avg             
 -----+----------------------------
    1 |        16.8070000000000000
@@ -2962,7 +2963,7 @@ select key, avg(smlsrl_x)            from gpupreagg_test  group by key order by 
      | 0.000000000000000000000000
 (31 rows)
 
-select key, count(smlsrl_x)          from gpupreagg_test  group by key order by key;
+select key, count(smlsrl_x)          from strom_test  group by key order by key;
  key | count 
 -----+-------
    1 |  1000
@@ -2998,7 +2999,7 @@ select key, count(smlsrl_x)          from gpupreagg_test  group by key order by 
      | 10000
 (31 rows)
 
-select key, max(smlsrl_x)            from gpupreagg_test  group by key order by key;
+select key, max(smlsrl_x)            from strom_test  group by key order by key;
  key | max 
 -----+-----
    1 |  33
@@ -3034,7 +3035,7 @@ select key, max(smlsrl_x)            from gpupreagg_test  group by key order by 
      |   0
 (31 rows)
 
-select key, min(smlsrl_x)            from gpupreagg_test  group by key order by key;
+select key, min(smlsrl_x)            from strom_test  group by key order by key;
  key | min 
 -----+-----
    1 |   0
@@ -3070,7 +3071,7 @@ select key, min(smlsrl_x)            from gpupreagg_test  group by key order by 
      |   0
 (31 rows)
 
-select key, sum(smlsrl_x)            from gpupreagg_test  group by key order by key;
+select key, sum(smlsrl_x)            from strom_test  group by key order by key;
  key |  sum   
 -----+--------
    1 |  16807
@@ -3106,7 +3107,7 @@ select key, sum(smlsrl_x)            from gpupreagg_test  group by key order by 
      |      0
 (31 rows)
 
-select key, stddev(smlsrl_x)         from gpupreagg_test  group by key order by key;
+select key, stddev(smlsrl_x)         from strom_test  group by key order by key;
  key |       stddev        
 -----+---------------------
    1 |  9.3756948891617977
@@ -3142,7 +3143,7 @@ select key, stddev(smlsrl_x)         from gpupreagg_test  group by key order by 
      |                   0
 (31 rows)
 
-select key, stddev_pop(smlsrl_x)     from gpupreagg_test  group by key order by key;
+select key, stddev_pop(smlsrl_x)     from strom_test  group by key order by key;
  key |     stddev_pop      
 -----+---------------------
    1 |  9.3710058691690083
@@ -3178,7 +3179,7 @@ select key, stddev_pop(smlsrl_x)     from gpupreagg_test  group by key order by 
      |                   0
 (31 rows)
 
-select key, stddev_samp(smlsrl_x)    from gpupreagg_test  group by key order by key;
+select key, stddev_samp(smlsrl_x)    from strom_test  group by key order by key;
  key |     stddev_samp     
 -----+---------------------
    1 |  9.3756948891617977
@@ -3214,7 +3215,7 @@ select key, stddev_samp(smlsrl_x)    from gpupreagg_test  group by key order by 
      |                   0
 (31 rows)
 
-select key, variance(smlsrl_x)       from gpupreagg_test  group by key order by key;
+select key, variance(smlsrl_x)       from strom_test  group by key order by key;
  key |       variance       
 -----+----------------------
    1 |  87.9036546546546547
@@ -3250,7 +3251,7 @@ select key, variance(smlsrl_x)       from gpupreagg_test  group by key order by 
      |                    0
 (31 rows)
 
-select key, var_pop(smlsrl_x)        from gpupreagg_test  group by key order by key;
+select key, var_pop(smlsrl_x)        from strom_test  group by key order by key;
  key |       var_pop        
 -----+----------------------
    1 |  87.8157510000000000
@@ -3286,7 +3287,7 @@ select key, var_pop(smlsrl_x)        from gpupreagg_test  group by key order by 
      |                    0
 (31 rows)
 
-select key, var_samp(smlsrl_x)       from gpupreagg_test  group by key order by key;
+select key, var_samp(smlsrl_x)       from strom_test  group by key order by key;
  key |       var_samp       
 -----+----------------------
    1 |  87.9036546546546547
@@ -3322,7 +3323,7 @@ select key, var_samp(smlsrl_x)       from gpupreagg_test  group by key order by 
      |                    0
 (31 rows)
 
-select key,corr(smlsrl_x,smlsrl_z) from gpupreagg_mix  group by key order by key;
+select key,corr(smlsrl_x,smlsrl_z) from strom_mix  group by key order by key;
  key |       corr        
 -----+-------------------
    1 |   0.0155828535281
@@ -3337,7 +3338,7 @@ select key,corr(smlsrl_x,smlsrl_z) from gpupreagg_mix  group by key order by key
   10 |  -0.0171341742435
 (10 rows)
 
-select key,covar_pop(smlsrl_x,smlsrl_z) from gpupreagg_mix  group by key order by key;
+select key,covar_pop(smlsrl_x,smlsrl_z) from strom_mix  group by key order by key;
  key | covar_pop 
 -----+-----------
    1 |  2.800136
@@ -3352,7 +3353,7 @@ select key,covar_pop(smlsrl_x,smlsrl_z) from gpupreagg_mix  group by key order b
   10 | -3.024972
 (10 rows)
 
-select key,covar_samp(smlsrl_x,smlsrl_z) from gpupreagg_mix  group by key order by key;
+select key,covar_samp(smlsrl_x,smlsrl_z) from strom_mix  group by key order by key;
  key |    covar_samp    
 -----+------------------
    1 |    2.80293893894
@@ -3367,7 +3368,7 @@ select key,covar_samp(smlsrl_x,smlsrl_z) from gpupreagg_mix  group by key order 
   10 |           -3.028
 (10 rows)
 
-select key,corr(smlsrl_y,smlsrl_z) from gpupreagg_mix  group by key order by key;
+select key,corr(smlsrl_y,smlsrl_z) from strom_mix  group by key order by key;
  key |       corr        
 -----+-------------------
    1 |  0.00189404111357
@@ -3382,7 +3383,7 @@ select key,corr(smlsrl_y,smlsrl_z) from gpupreagg_mix  group by key order by key
   10 |   0.0581759023389
 (10 rows)
 
-select key,covar_pop(smlsrl_y,smlsrl_z) from gpupreagg_mix  group by key order by key;
+select key,covar_pop(smlsrl_y,smlsrl_z) from strom_mix  group by key order by key;
  key | covar_pop 
 -----+-----------
    1 |   0.33756
@@ -3397,7 +3398,7 @@ select key,covar_pop(smlsrl_y,smlsrl_z) from gpupreagg_mix  group by key order b
   10 |  10.37712
 (10 rows)
 
-select key,covar_samp(smlsrl_y,smlsrl_z) from gpupreagg_mix  group by key order by key;
+select key,covar_samp(smlsrl_y,smlsrl_z) from strom_mix  group by key order by key;
  key |   covar_samp    
 -----+-----------------
    1 |  0.337897897898
@@ -3413,7 +3414,7 @@ select key,covar_samp(smlsrl_y,smlsrl_z) from gpupreagg_mix  group by key order 
 (10 rows)
 
 --serial
-select key, avg(serial_x)            from gpupreagg_test  group by key order by key;
+select key, avg(serial_x)            from strom_test  group by key order by key;
  key |            avg             
 -----+----------------------------
    1 |       1044050.624000000000
@@ -3449,7 +3450,7 @@ select key, avg(serial_x)            from gpupreagg_test  group by key order by 
      | 0.000000000000000000000000
 (31 rows)
 
-select key, count(serial_x)          from gpupreagg_test  group by key order by key;
+select key, count(serial_x)          from strom_test  group by key order by key;
  key | count 
 -----+-------
    1 |  1000
@@ -3485,7 +3486,7 @@ select key, count(serial_x)          from gpupreagg_test  group by key order by 
      | 10000
 (31 rows)
 
-select key, max(serial_x)            from gpupreagg_test  group by key order by key;
+select key, max(serial_x)            from strom_test  group by key order by key;
  key |   max   
 -----+---------
    1 | 2145533
@@ -3521,7 +3522,7 @@ select key, max(serial_x)            from gpupreagg_test  group by key order by 
      |       0
 (31 rows)
 
-select key, min(serial_x)            from gpupreagg_test  group by key order by key;
+select key, min(serial_x)            from strom_test  group by key order by key;
  key |   min    
 -----+----------
    1 |     1791
@@ -3557,7 +3558,7 @@ select key, min(serial_x)            from gpupreagg_test  group by key order by 
      |        0
 (31 rows)
 
-select key, sum(serial_x)            from gpupreagg_test  group by key order by key;
+select key, sum(serial_x)            from strom_test  group by key order by key;
  key |     sum     
 -----+-------------
    1 |  1044050624
@@ -3593,7 +3594,7 @@ select key, sum(serial_x)            from gpupreagg_test  group by key order by 
      |           0
 (31 rows)
 
-select key, stddev(serial_x)         from gpupreagg_test  group by key order by key;
+select key, stddev(serial_x)         from strom_test  group by key order by key;
  key |     stddev      
 -----+-----------------
    1 | 613656.56955072
@@ -3629,7 +3630,7 @@ select key, stddev(serial_x)         from gpupreagg_test  group by key order by 
      |               0
 (31 rows)
 
-select key, stddev_pop(serial_x)     from gpupreagg_test  group by key order by key;
+select key, stddev_pop(serial_x)     from strom_test  group by key order by key;
  key |   stddev_pop    
 -----+-----------------
    1 | 613349.66452050
@@ -3665,7 +3666,7 @@ select key, stddev_pop(serial_x)     from gpupreagg_test  group by key order by 
      |               0
 (31 rows)
 
-select key, stddev_samp(serial_x)    from gpupreagg_test  group by key order by key;
+select key, stddev_samp(serial_x)    from strom_test  group by key order by key;
  key |   stddev_samp   
 -----+-----------------
    1 | 613656.56955072
@@ -3701,7 +3702,7 @@ select key, stddev_samp(serial_x)    from gpupreagg_test  group by key order by 
      |               0
 (31 rows)
 
-select key, variance(serial_x)       from gpupreagg_test  group by key order by key;
+select key, variance(serial_x)       from strom_test  group by key order by key;
  key |       variance        
 -----+-----------------------
    1 | 376574385352.75938338
@@ -3737,7 +3738,7 @@ select key, variance(serial_x)       from gpupreagg_test  group by key order by 
      |                     0
 (31 rows)
 
-select key, var_pop(serial_x)        from gpupreagg_test  group by key order by key;
+select key, var_pop(serial_x)        from strom_test  group by key order by key;
  key |        var_pop        
 -----+-----------------------
    1 | 376197810967.40662400
@@ -3773,7 +3774,7 @@ select key, var_pop(serial_x)        from gpupreagg_test  group by key order by 
      |                     0
 (31 rows)
 
-select key, var_samp(serial_x)       from gpupreagg_test  group by key order by key;
+select key, var_samp(serial_x)       from strom_test  group by key order by key;
  key |       var_samp        
 -----+-----------------------
    1 | 376574385352.75938338
@@ -3809,7 +3810,7 @@ select key, var_samp(serial_x)       from gpupreagg_test  group by key order by 
      |                     0
 (31 rows)
 
-select key,corr(serial_x,serial_z) from gpupreagg_mix  group by key order by key;
+select key,corr(serial_x,serial_z) from strom_mix  group by key order by key;
  key |       corr        
 -----+-------------------
    1 | -0.00329240492063
@@ -3824,7 +3825,7 @@ select key,corr(serial_x,serial_z) from gpupreagg_mix  group by key order by key
   10 |   0.0450778970345
 (10 rows)
 
-select key,covar_pop(serial_x,serial_z) from gpupreagg_mix  group by key order by key;
+select key,covar_pop(serial_x,serial_z) from strom_mix  group by key order by key;
  key |   covar_pop    
 -----+----------------
    1 | -2475591922.22
@@ -3839,7 +3840,7 @@ select key,covar_pop(serial_x,serial_z) from gpupreagg_mix  group by key order b
   10 |  34496536738.7
 (10 rows)
 
-select key,covar_samp(serial_x,serial_z) from gpupreagg_mix  group by key order by key;
+select key,covar_samp(serial_x,serial_z) from strom_mix  group by key order by key;
  key |   covar_samp   
 -----+----------------
    1 | -2478069992.21
@@ -3854,7 +3855,7 @@ select key,covar_samp(serial_x,serial_z) from gpupreagg_mix  group by key order 
   10 |  34531067806.5
 (10 rows)
 
-select key,corr(serial_y,serial_z) from gpupreagg_mix  group by key order by key;
+select key,corr(serial_y,serial_z) from strom_mix  group by key order by key;
  key |       corr        
 -----+-------------------
    1 |  -0.0400835720653
@@ -3869,7 +3870,7 @@ select key,corr(serial_y,serial_z) from gpupreagg_mix  group by key order by key
   10 |   0.0342214804786
 (10 rows)
 
-select key,covar_pop(serial_y,serial_z) from gpupreagg_mix  group by key order by key;
+select key,covar_pop(serial_y,serial_z) from strom_mix  group by key order by key;
  key |   covar_pop    
 -----+----------------
    1 |   -30433455394
@@ -3884,7 +3885,7 @@ select key,covar_pop(serial_y,serial_z) from gpupreagg_mix  group by key order b
   10 |  26568714172.8
 (10 rows)
 
-select key,covar_samp(serial_y,serial_z) from gpupreagg_mix  group by key order by key;
+select key,covar_samp(serial_y,serial_z) from strom_mix  group by key order by key;
  key |   covar_samp   
 -----+----------------
    1 | -30463919313.3
@@ -3900,7 +3901,7 @@ select key,covar_samp(serial_y,serial_z) from gpupreagg_mix  group by key order 
 (10 rows)
 
 --bigserial
-select key, avg(bigsrl_x)            from gpupreagg_test  group by key order by key;
+select key, avg(bigsrl_x)            from strom_test  group by key order by key;
  key |            avg             
 -----+----------------------------
    1 |      4487416992954893.4620
@@ -3936,7 +3937,7 @@ select key, avg(bigsrl_x)            from gpupreagg_test  group by key order by 
      | 0.000000000000000000000000
 (31 rows)
 
-select key, count(bigsrl_x)          from gpupreagg_test  group by key order by key;
+select key, count(bigsrl_x)          from strom_test  group by key order by key;
  key | count 
 -----+-------
    1 |  1000
@@ -3972,7 +3973,7 @@ select key, count(bigsrl_x)          from gpupreagg_test  group by key order by 
      | 10000
 (31 rows)
 
-select key, max(bigsrl_x)            from gpupreagg_test  group by key order by key;
+select key, max(bigsrl_x)            from strom_test  group by key order by key;
  key |       max        
 -----+------------------
    1 | 9213799147457478
@@ -4008,7 +4009,7 @@ select key, max(bigsrl_x)            from gpupreagg_test  group by key order by 
      |                0
 (31 rows)
 
-select key, min(bigsrl_x)            from gpupreagg_test  group by key order by key;
+select key, min(bigsrl_x)            from strom_test  group by key order by key;
  key |        min        
 -----+-------------------
    1 |     1299627038999
@@ -4044,7 +4045,7 @@ select key, min(bigsrl_x)            from gpupreagg_test  group by key order by 
      |                 0
 (31 rows)
 
-select key, sum(bigsrl_x)            from gpupreagg_test  group by key order by key;
+select key, sum(bigsrl_x)            from strom_test  group by key order by key;
  key |         sum          
 -----+----------------------
    1 |  4487416992954893462
@@ -4080,7 +4081,7 @@ select key, sum(bigsrl_x)            from gpupreagg_test  group by key order by 
      |                    0
 (31 rows)
 
-select key, stddev(bigsrl_x)         from gpupreagg_test  group by key order by key;
+select key, stddev(bigsrl_x)         from strom_test  group by key order by key;
  key |      stddev      
 -----+------------------
    1 | 2626544487221622
@@ -4116,7 +4117,7 @@ select key, stddev(bigsrl_x)         from gpupreagg_test  group by key order by 
      |                0
 (31 rows)
 
-select key, stddev_pop(bigsrl_x)     from gpupreagg_test  group by key order by key;
+select key, stddev_pop(bigsrl_x)     from strom_test  group by key order by key;
  key |    stddev_pop    
 -----+------------------
    1 | 2625230886495688
@@ -4152,7 +4153,7 @@ select key, stddev_pop(bigsrl_x)     from gpupreagg_test  group by key order by 
      |                0
 (31 rows)
 
-select key, stddev_samp(bigsrl_x)    from gpupreagg_test  group by key order by key;
+select key, stddev_samp(bigsrl_x)    from strom_test  group by key order by key;
  key |   stddev_samp    
 -----+------------------
    1 | 2626544487221622
@@ -4188,7 +4189,7 @@ select key, stddev_samp(bigsrl_x)    from gpupreagg_test  group by key order by 
      |                0
 (31 rows)
 
-select key, variance(bigsrl_x)       from gpupreagg_test  group by key order by key;
+select key, variance(bigsrl_x)       from strom_test  group by key order by key;
  key |             variance             
 -----+----------------------------------
    1 |  6898735943354291202773723457962
@@ -4224,7 +4225,7 @@ select key, variance(bigsrl_x)       from gpupreagg_test  group by key order by 
      |                                0
 (31 rows)
 
-select key, var_pop(bigsrl_x)        from gpupreagg_test  group by key order by key;
+select key, var_pop(bigsrl_x)        from strom_test  group by key order by key;
  key |             var_pop              
 -----+----------------------------------
    1 |  6891837207410936911570949734504
@@ -4260,7 +4261,7 @@ select key, var_pop(bigsrl_x)        from gpupreagg_test  group by key order by 
      |                                0
 (31 rows)
 
-select key, var_samp(bigsrl_x)       from gpupreagg_test  group by key order by key;
+select key, var_samp(bigsrl_x)       from strom_test  group by key order by key;
  key |             var_samp             
 -----+----------------------------------
    1 |  6898735943354291202773723457962
@@ -4296,7 +4297,7 @@ select key, var_samp(bigsrl_x)       from gpupreagg_test  group by key order by 
      |                                0
 (31 rows)
 
-select key,corr(bigsrl_x,bigsrl_z) from gpupreagg_mix  group by key order by key;
+select key,corr(bigsrl_x,bigsrl_z) from strom_mix  group by key order by key;
  key |       corr       
 -----+------------------
    1 |  0.0140852062628
@@ -4311,7 +4312,7 @@ select key,corr(bigsrl_x,bigsrl_z) from gpupreagg_mix  group by key order by key
   10 | -0.0323275335167
 (10 rows)
 
-select key,covar_pop(bigsrl_x,bigsrl_z) from gpupreagg_mix  group by key order by key;
+select key,covar_pop(bigsrl_x,bigsrl_z) from strom_mix  group by key order by key;
  key |     covar_pop      
 -----+--------------------
    1 |  1.96056937068e+29
@@ -4326,7 +4327,7 @@ select key,covar_pop(bigsrl_x,bigsrl_z) from gpupreagg_mix  group by key order b
   10 | -4.68270275664e+29
 (10 rows)
 
-select key,covar_samp(bigsrl_x,bigsrl_z) from gpupreagg_mix  group by key order by key;
+select key,covar_samp(bigsrl_x,bigsrl_z) from strom_mix  group by key order by key;
  key |     covar_samp     
 -----+--------------------
    1 |  1.96253190259e+29
@@ -4341,7 +4342,7 @@ select key,covar_samp(bigsrl_x,bigsrl_z) from gpupreagg_mix  group by key order 
   10 | -4.68739014679e+29
 (10 rows)
 
-select key,corr(bigsrl_y,bigsrl_z) from gpupreagg_mix  group by key order by key;
+select key,corr(bigsrl_y,bigsrl_z) from strom_mix  group by key order by key;
  key |       corr        
 -----+-------------------
    1 | -0.00523395421774
@@ -4356,7 +4357,7 @@ select key,corr(bigsrl_y,bigsrl_z) from gpupreagg_mix  group by key order by key
   10 |  -0.0375687660452
 (10 rows)
 
-select key,covar_pop(bigsrl_y,bigsrl_z) from gpupreagg_mix  group by key order by key;
+select key,covar_pop(bigsrl_y,bigsrl_z) from strom_mix  group by key order by key;
  key |     covar_pop      
 -----+--------------------
    1 | -7.40794163127e+28
@@ -4371,7 +4372,7 @@ select key,covar_pop(bigsrl_y,bigsrl_z) from gpupreagg_mix  group by key order b
   10 | -5.39022690062e+29
 (10 rows)
 
-select key,covar_samp(bigsrl_y,bigsrl_z) from gpupreagg_mix  group by key order by key;
+select key,covar_samp(bigsrl_y,bigsrl_z) from strom_mix  group by key order by key;
  key |     covar_samp     
 -----+--------------------
    1 | -7.41535698826e+28
