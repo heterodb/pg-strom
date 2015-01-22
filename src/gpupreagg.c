@@ -4674,9 +4674,12 @@ pgstrom_int8_avg_accum(PG_FUNCTION_ARGS)
 										  ObjectIdGetDatum(0),
 										  Int32GetDatum(-1));
 	}
-	state->N += nrows;
-	addNum = DirectFunctionCall1(int8_numeric, PG_GETARG_DATUM(2));
-	state->sumX = DirectFunctionCall2(numeric_add, state->sumX, addNum);
+	if (!PG_ARGISNULL(2))
+	{
+		state->N += nrows;
+		addNum = DirectFunctionCall1(int8_numeric, PG_GETARG_DATUM(2));
+		state->sumX = DirectFunctionCall2(numeric_add, state->sumX, addNum);
+	}
 	MemoryContextSwitchTo(oldcxt);
 
 	PG_RETURN_POINTER(state);
@@ -4708,10 +4711,13 @@ pgstrom_numeric_avg_accum(PG_FUNCTION_ARGS)
 										  ObjectIdGetDatum(0),
 										  Int32GetDatum(-1));
 	}
-	state->N += nrows;
-	state->sumX = DirectFunctionCall2(numeric_add,
-									  state->sumX,
-									  PG_GETARG_DATUM(2));
+	if (!PG_ARGISNULL(2))
+	{
+		state->N += nrows;
+		state->sumX = DirectFunctionCall2(numeric_add,
+										  state->sumX,
+										  PG_GETARG_DATUM(2));
+	}
 	MemoryContextSwitchTo(oldcxt);
 
 	PG_RETURN_POINTER(state);
@@ -4890,13 +4896,16 @@ pgstrom_numeric_var_accum(PG_FUNCTION_ARGS)
 										   ObjectIdGetDatum(0),
 										   Int32GetDatum(-1));
 	}
-	state->N += nrows;
-	state->sumX = DirectFunctionCall2(numeric_add,
-									  state->sumX,
-									  PG_GETARG_DATUM(2));
-	state->sumX2 = DirectFunctionCall2(numeric_add,
-									   state->sumX2,
-									   PG_GETARG_DATUM(3));
+	if (!PG_ARGISNULL(2) && !PG_ARGISNULL(3))
+	{
+		state->N += nrows;
+		state->sumX = DirectFunctionCall2(numeric_add,
+										  state->sumX,
+										  PG_GETARG_DATUM(2));
+		state->sumX2 = DirectFunctionCall2(numeric_add,
+										   state->sumX2,
+										   PG_GETARG_DATUM(3));
+	}
 	MemoryContextSwitchTo(oldcxt);
 
 	PG_RETURN_POINTER(state);
