@@ -316,7 +316,7 @@ gpuscan_try_replace_relscan(Plan *plan,
 		if (bms_is_member(x, attr_refs))
 		{
 			if (!pgstrom_codegen_available_expression(tle->expr))
-				return plan;
+				return NULL;
 		}
 	}
 
@@ -341,7 +341,7 @@ gpuscan_try_replace_relscan(Plan *plan,
 		if (temp->dev_quals == NIL)
 		{
 			*p_upper_quals = NIL;
-			return plan;	/* nothing to do anymore */
+			return plan;	/* available to use bulk-loading as-is */
 		}
 		*p_upper_quals = copyObject(temp->dev_quals);
 	}

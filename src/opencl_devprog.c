@@ -298,6 +298,27 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 		cl_uint			ofs;
 		cl_uint			count = 0;
 		static size_t	common_code_length = 0;
+		static const char *platform_specific = NULL;
+
+		/* check platform specific configuration */
+		if (!platform_specific)
+		{
+			const pgstrom_device_info   *dev_info = pgstrom_get_device_info(0);
+			const pgstrom_platform_info	*pl_info = dev_info->pl_info;
+
+			/*
+			 * AMD's runtime makes compiler crash!, if FLEXIBLE_ARRAY_MEMBER
+			 * is empty or zero.
+			 */
+			if (strncmp(pl_info->pl_name, "AMD ", 4) == 0)
+			{
+				platform_specific = " -DFLEXIBLE_ARRAY_MEMBER=1";
+			}
+			else
+			{
+				platform_specific = " -DFLEXIBLE_ARRAY_MEMBER=0";
+			}
+		}
 
 		/* common opencl header */
 		if (!common_code_length)
@@ -446,12 +467,12 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 #ifdef PGSTROM_DEBUG
 					   " -Werror"
 #endif
-					   " -DOPENCL_DEVICE_CODE -DHOSTPTRLEN=%u -DBLCKSZ=%u"
+					   " -DOPENCL_DEVICE_CODE -DHOSTPTRLEN=%u -DBLCKSZ=%u %s"
 					   " -DITEMID_OFFSET_SHIFT=%u"
 					   " -DITEMID_FLAGS_SHIFT=%u"
 					   " -DITEMID_LENGTH_SHIFT=%u"
 					   " -DMAXIMUM_ALIGNOF=%u",
-					   SIZEOF_VOID_P, BLCKSZ,
+					   SIZEOF_VOID_P, BLCKSZ, platform_specific,
 					   itemid_offset_shift,
 					   itemid_flags_shift,
 					   itemid_length_shift,
