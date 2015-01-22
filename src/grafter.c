@@ -44,7 +44,10 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan **p_curr_plan)
 				ModifyTable *mtplan = (ModifyTable *) plan;
 
 				foreach (lc, mtplan->plans)
-					grafter_try_replace_recurse(pstmt, &lc->data.ptr_value);
+				{
+					Plan  **p_subplan = (Plan **) &lc->data.ptr_value;
+					grafter_try_replace_recurse(pstmt, p_subplan);
+				}
 			}
 			break;
 		case T_Append:
@@ -52,7 +55,10 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan **p_curr_plan)
 				Append *aplan = (Append *) plan;
 
 				foreach (lc, aplan->appendplans)
-					grafter_try_replace_recurse(pstmt, &lc->data.ptr_value);
+				{
+					Plan  **p_subplan = (Plan **) &lc->data.ptr_value;
+					grafter_try_replace_recurse(pstmt, p_subplan);
+				}
 			}
 			break;
 		case T_MergeAppend:
@@ -60,7 +66,10 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan **p_curr_plan)
 				MergeAppend *maplan = (MergeAppend *) plan;
 
 				foreach (lc, maplan->mergeplans)
-					grafter_try_replace_recurse(pstmt, &lc->data.ptr_value);
+				{
+					Plan  **p_subplan = (Plan **) &lc->data.ptr_value;
+					grafter_try_replace_recurse(pstmt, p_subplan);
+				}
 			}
 			break;
 		case T_BitmapAnd:
@@ -68,7 +77,10 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan **p_curr_plan)
 				BitmapAnd  *baplan = (BitmapAnd *) plan;
 
 				foreach (lc, baplan->bitmapplans)
-					grafter_try_replace_recurse(pstmt, &lc->data.ptr_value);
+				{
+					Plan  **p_subplan = (Plan **) &lc->data.ptr_value;
+					grafter_try_replace_recurse(pstmt, p_subplan);
+				}
 			}
 			break;
 		case T_BitmapOr:
@@ -76,7 +88,10 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan **p_curr_plan)
 				BitmapOr   *boplan = (BitmapOr *) plan;
 
 				foreach (lc, boplan->bitmapplans)
-					grafter_try_replace_recurse(pstmt, &lc->data.ptr_value);
+				{
+					Plan  **p_subplan = (Plan **) &lc->data.ptr_value;
+					grafter_try_replace_recurse(pstmt, p_subplan);
+				}
 			}
 			break;
 		default:
@@ -85,10 +100,10 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan **p_curr_plan)
 	}
 
 	/* also walk down left and right child plan sub-tree, if any */
-	if (newnode->lefttree)
-		grafter_try_replace_recurse(pstmt, &newnode->lefttree);
-	if (newnode->righttree)
-		grafter_try_replace_recurse(pstmt, &newnode->righttree);
+	if (plan->lefttree)
+		grafter_try_replace_recurse(pstmt, &plan->lefttree);
+	if (plan->righttree)
+		grafter_try_replace_recurse(pstmt, &plan->righttree);
 
 	switch (nodeTag(plan))
 	{
@@ -103,7 +118,6 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan **p_curr_plan)
 			/* nothing to do, keep existing one */
 			break;
 	}
-	return newnode;
 }
 
 static PlannedStmt *
@@ -126,7 +140,10 @@ pgstrom_grafter_entrypoint(Query *parse,
 		grafter_try_replace_recurse(result, &result->planTree);
 
 		foreach (cell, result->subplans)
-			grafter_try_replace_recurse(result, &cell->data.ptr_value);
+		{
+			Plan  **p_subplan = (Plan **) &cell->data.ptr_value;
+			grafter_try_replace_recurse(result, p_subplan);
+		}
 	}
 	return result;
 }

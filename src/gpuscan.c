@@ -707,7 +707,6 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	TupleDesc			tupdesc = RelationGetDescr(rel);
 	Snapshot			snapshot = gss->css.ss.ps.state->es_snapshot;
 	bool				end_of_scan = false;
-	Size				length;
 	pgstrom_data_store *pds;
 	struct timeval tv1, tv2;
 
@@ -720,8 +719,8 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 
 	while (!gpuscan && !end_of_scan)
 	{
-		length = (pgstrom_chunk_size << 20);
-		pds = pgstrom_create_data_store_row(tupdesc, length, gss->tuple_width);
+		pds = pgstrom_create_data_store_row(tupdesc, pgstrom_chunk_size(),
+											gss->tuple_width);
 		PG_TRY();
 		{
 			while (gss->curr_blknum < gss->last_blknum &&

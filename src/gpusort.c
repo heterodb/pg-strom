@@ -16,8 +16,27 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
+#include "access/nbtree.h"
+#include "access/xact.h"
+#include "nodes/nodeFuncs.h"
+#include "nodes/makefuncs.h"
+#include "optimizer/cost.h"
+#include "parser/parsetree.h"
+#include "postmaster/bgworker.h"
+#include "storage/dsm.h"
+#include "storage/latch.h"
+#include "utils/builtins.h"
+#include "utils/guc.h"
+#include "utils/lsyscache.h"
+#include "utils/memutils.h"
+#include "utils/ruleutils.h"
+#include "utils/snapmgr.h"
 #include "pg_strom.h"
+#include "opencl_gpusort.h"
 #include <math.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static CustomScanMethods	gpusort_scan_methods;
 static CustomExecMethods	gpusort_exec_methods;
@@ -45,6 +64,7 @@ form_gpusort_info(CustomScan *cscan, GpuSortInfo *gs_info)
 {
 	List   *privs = NIL;
 	List   *temp;
+	int		i;
 
 	privs = lappend(privs, makeString(pstrdup(gs_info->kern_source)));
 	privs = lappend(privs, makeInteger(gs_info->extra_flags));
@@ -67,7 +87,7 @@ form_gpusort_info(CustomScan *cscan, GpuSortInfo *gs_info)
 	/* nullsFirst */
 	for (temp = NIL, i=0; i < gs_info->numCols; i++)
 		temp = lappend_int(temp, gs_info->nullsFirst[i]);
-	privs = lappend(privs, tmep);
+	privs = lappend(privs, temp);
 
 	cscan->custom_private = privs;
 }
@@ -123,6 +143,35 @@ deform_gpusort_info(CustomScan *cscan)
 	return gs_info;
 }
 
+/*
+ * pgstrom_cpusort - information of CPU sorting. It shall be allocated on
+ * the private memory, then dynamic worker will be able to reference the copy
+ * because of process fork(2). It means, we don't mention about Windows
+ * platform at this moment. :-)
+ */
+typedef struct
+{
+	dlist_node		chain;
+	BackgroundWorkerHandle *bgw_handle;	/* valid, if running */
+
+	dsm_segment	   *ritems_dsm;
+	dsm_segment	   *litems_dsm;
+	dsm_segment	   *oitems_dsm;
+
+	/* sorting chunks */
+	uint			num_chunks;
+	pgstrom_data_store **pds_chunks;
+	/* sorting keys */
+	TupleDesc		tupdesc;
+	int				numCols;
+	AttrNumber	   *sortColIdx;
+	Oid			   *sortOperators;
+	Oid			   *collations;
+	bool		   *nullsFirst;
+} pgstrom_cpusort;
+
+
+
 typedef struct
 {
 	CustomScanState	css;
@@ -158,33 +207,6 @@ typedef struct
 	cl_long			sorted_index;	/* index of the final index on scan */
 	HeapTupleData	tuple_buf;		/* temp buffer during scan */
 } GpuSortState;
-
-/*
- * CpuSortInfo - State object for CPU sorting. It shall be allocated on the
- * private memory, then dynamic worker will be able to reference the copy
- * because of process fork(2). It means, we don't mention about Windows
- * platform at this moment. :-)
- */
-typedef struct
-{
-	dlist_node		chain;
-	BackgroundWorkerHandle *bgw_handle;	/* valid, if running */
-
-	dsm_segment	   *ritems_dsm;
-	dsm_segment	   *litems_dsm;
-	dsm_segment	   *oitems_dsm;
-
-	/* sorting chunks */
-	uint			num_chunks;
-	pgstrom_data_store **pds_chunks;
-	/* sorting keys */
-	TupleDesc		tupdesc;
-	int				numCols;
-	AttrNumber	   *sortColIdx;
-	Oid			   *sortOperators;
-	Oid			   *collations;
-	bool		   *nullsFirst;
-} pgstrom_cpusort;
 
 /*
  * static function declarations
@@ -232,7 +254,7 @@ gpusort_check_buffer_path(char **newval, void **extra, GucSource source)
 
 	if (access(pathname, F_OK | R_OK | W_OK | X_OK) != 0)
 	{
-		if (errno == EACCESS)
+		if (errno == EACCES)
 			elog(ERROR, "Permission denied on GpuSort buffer path \"%s\"",
 				 pathname);
 		else
@@ -265,7 +287,6 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 	Cost	subplan_total = subplan->total_cost;
 	double	ntuples = subplan->plan_rows;
 	int		width = subplan->plan_width;
-	int		nattrs = list_length(subplan->targetlist);
 	Cost	cpu_comp_cost = 2.0 * cpu_operator_cost;
 	Cost	gpu_comp_cost = 2.0 * pgstrom_gpu_operator_cost;
 	Cost	startup_cost = subplan_total;
@@ -336,6 +357,7 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 	for (i=0; i < sort->numCols; i++)
 	{
 		TargetEntry *tle;
+		Var		   *varnode;
 		AttrNumber	colidx = sort->sortColIdx[i];
 		Oid			sort_op = sort->sortOperators[i];
 		Oid			sort_func;
@@ -344,6 +366,7 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 		Oid			opcintype;
 		int16		strategy;
 		bool		null_first = sort->nullsFirst[i];
+		bool		is_reverse;
 		devtype_info *dtype;
 		devfunc_info *dfunc;
 
@@ -363,20 +386,24 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 			elog(ERROR, "missing support function %d(%u,%u) in opfamily %u",
 				 BTORDER_PROC, opcintype, opcintype, opfamily);
 
-		/* Sanity check of the data type */
+		/* Sanity check of the expression */
 		tle = get_tle_by_resno(sort->plan.targetlist, colidx);
-		if (exprType(tle->expr) != sort_type)
-			elog(ERROR, "Bug? type mismatch tlist:%u /catalog:%u",
-				 exprType(tle->expr), sort_type);
+		if (!tle || IsA(tle->expr, Var))
+			elog(ERROR, "Bug? resno %d not found on tlist or not varnode: %s",
+				 colidx, nodeToString(tle->expr));
+		varnode = (Var *) tle->expr;
+		if (varnode->vartype != sort_type)
+			elog(ERROR, "Bug? type mismatch \"%s\" is expected, but \"%s\"",
+				 format_type_be(sort_type),
+				 format_type_be(varnode->vartype));
 
 		/* device type for comparison */
-		sort_type = exprType((Node *) varnode);
 		dtype = pgstrom_devtype_lookup_and_track(sort_type, context);
 		if (!dtype)
 			elog(ERROR, "device type %u lookup failed", sort_type);
 
 		/* device function for comparison */
-		sort_func = sort_type->type_cmpfunc;
+		sort_func = dtype->type_cmpfunc;
 		dfunc = pgstrom_devfunc_lookup_and_track(sort_func, context);
 		if (!dfunc)
 			elog(ERROR, "device function %u lookup failed", sort_func);
@@ -389,9 +416,9 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 			"  pg_%s_t KVAR_Y%d"
 			" = pg_%s_vref(kds,ktoast,errcode,%d,y_index);\n",
 			dtype->type_name, i+1,
-			dtype->type_name, attno,
+			dtype->type_name, colidx,
 			dtype->type_name, i+1,
-			dtype->type_name, attno);
+			dtype->type_name, colidx);
 
 		/* logic to compare */
 		appendStringInfo(
@@ -411,8 +438,8 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 			i+1, i+1,
 			dfunc->func_name, i+1, i+1,
 			is_reverse ? "-comp.value" : "comp.value",
-			i+1, i+1, nullfirst ? -1 : 1,
-			i+1, i+1, nullfirst ? 1 : -1);
+			i+1, i+1, null_first ? -1 : 1,
+			i+1, i+1, null_first ? 1 : -1);
 	}
 	/* make a comparison function */
 	appendStringInfo(&result,
@@ -443,14 +470,15 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 {
 	Sort	   *sort = (Sort *)(*p_plan);
 	List	   *tlist = sort->plan.targetlist;
-	List	   *rtable = pstmt->rtable;
 	ListCell   *cell;
 	Cost		startup_cost;
 	Cost		total_cost;
 	long		num_chunks;
 	Size		chunk_size;
+	CustomScan *cscan;
 	Plan	   *subplan;
 	GpuSortInfo	gs_info;
+	codegen_context context;
 	int			i;
 
 	/* ensure the plan is Sort */
@@ -462,10 +490,9 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	for (i=0; i < sort->numCols; i++)
 	{
 		TargetEntry	   *tle = get_tle_by_resno(tlist, sort->sortColIdx[i]);
-		Var			   *sort_key = (Var *) tle->expr;
+		Var			   *varnode = (Var *) tle->expr;
 		devfunc_info   *dfunc;
 		devtype_info   *dtype;
-		bool			is_reverse;
 
 		/*
 		 * Target-entry of Sort plan should be a var-node that references
@@ -473,10 +500,10 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 		 * contains formula. So, we can expect a simple var-node towards
 		 * outer relation here.
 		 */
-		if (!IsA(sort_key, Var) || sort_key->varno != OUTER_VAR)
+		if (!IsA(varnode, Var) || varnode->varno != OUTER_VAR)
 			return;
 
-		dtype = pgstrom_devtype_lookup(exprType(sort_key));
+		dtype = pgstrom_devtype_lookup(exprType((Node *) varnode));
 		if (!dtype || !OidIsValid(dtype->type_cmpfunc))
 			return;
 
@@ -509,9 +536,9 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	cscan->methods = &gpusort_scan_methods;
 	foreach (cell, subplan->targetlist)
 	{
-		TargetList *tle = lfirst(cell);
-		TargetList *tle_new;
-		Var		   *varnode;
+		TargetEntry	   *tle = lfirst(cell);
+		TargetEntry	   *tle_new;
+		Var			   *varnode;
 
 		/* alternative targetlist */
 		varnode = makeVar(INDEX_VAR,
@@ -539,7 +566,7 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	outerPlan(cscan) = subplan;
 
 	pgstrom_init_codegen_context(&context);
-	gs_info.kern_source = gpusort_codegen(sort, &context);
+	gs_info.kern_source = pgstrom_gpusort_codegen(sort, &context);
 	gs_info.extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSORT |
 		(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
 	gs_info.used_params = context.used_params;
@@ -572,15 +599,14 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	GpuSortState   *gss = (GpuSortState *) node;
 	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
 	GpuSortInfo	   *gs_info = deform_gpusort_info(cscan);
-	PlanState	   *ps = node->ss.ps;
-	
+	PlanState	   *ps = &node->ss.ps;
 
 	/* for GPU bitonic sorting */
 	gss->kparams = pgstrom_create_kern_parambuf(gs_info->used_params,
 												ps->ps_ExprContext);
 	Assert(gs_info->kern_source != NULL);
-	gss->dprog_key = pgstrom_get_devprog_key(ghj_info->kernel_source,
-											 ghj_info->extra_flags);
+	gss->dprog_key = pgstrom_get_devprog_key(gs_info->kernel_source,
+											 gs_info->extra_flags);
 	gss->kern_source = gs_info->kern_source;
 	pgstrom_track_object((StromObject *)gss->dprog_key, 0);
 
@@ -1298,7 +1324,7 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 			ritem_id = ritems->results[2 * rindex + 1];
 			Assert(rchunk_id < cpusort->num_chunks);
 			pds = cpusort->pds_chunks[rchunk_id];
-			if (!gstrom_fetch_data_store(rslot, pds, ritem_id, &dummy))
+			if (!pgstrom_fetch_data_store(rslot, pds, ritem_id, &dummy))
 				elog(ERROR, "failed to fetch sorting tuple in (%d,%d)",
 					 rchunk_id, ritem_id);
 			rindex++;

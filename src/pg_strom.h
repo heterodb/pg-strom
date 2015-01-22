@@ -313,7 +313,7 @@ typedef struct pgstrom_data_store {
 	volatile int		refcnt;
 	kern_data_store	   *kds;		/* reference to kern_data_store */
 	size_t				kds_length;	/* length of kds */
-	const char		   *kds_fname;	/* if KDS_FORMAT_ROW_FMAP */
+	char			   *kds_fname;	/* if KDS_FORMAT_ROW_FMAP */
 	int					kds_fdesc;	/* !!NOTE: valid only the backend */
 	struct pgstrom_data_store *ktoast;
 	ResourceOwner		resowner;	/* !!NOTE: private address!!*/
@@ -477,7 +477,7 @@ extern void pgstrom_init_codegen(void);
 /*
  * datastore.c
  */
-extern Size pgstrom_chunk_size();
+extern Size pgstrom_chunk_size(void);
 
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,

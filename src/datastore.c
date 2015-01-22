@@ -19,17 +19,23 @@
 #include "postgres.h"
 #include "access/relscan.h"
 #include "access/sysattr.h"
+#include "catalog/catalog.h"
+#include "catalog/pg_tablespace.h"
 #include "catalog/pg_type.h"
+#include "commands/tablespace.h"
 #include "miscadmin.h"
 #include "port.h"
 #include "storage/bufmgr.h"
+#include "storage/fd.h"
 #include "storage/predicate.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/tqual.h"
 #include "pg_strom.h"
 #include "opencl_numeric.h"
+#include <sys/mman.h>
 
 /*
  * GUC variables
@@ -520,7 +526,7 @@ __pgstrom_create_data_store_row_flat(const char *filename, int lineno,
  * get_pgstrom_temp_filename - logic is almost same as OpenTemporaryFile,
  * but it returns cstring of filename, for OpenTransientFile and mmap(2)
  */
-static const char *
+static char *
 get_pgstrom_temp_filename(void)
 {
 	char	tempdirpath[MAXPGPATH];
@@ -568,7 +574,6 @@ __pgstrom_create_data_store_row_fmap(const char *filename, int lineno,
 	int			kds_fdesc;
 	Size		kds_length = STROMALIGN(length);
 	cl_uint		nrooms;
-
 
 	kds_fname = get_pgstrom_temp_filename();
 	kds_fdesc = OpenTransientFile(kds_fname,
@@ -622,15 +627,15 @@ kern_data_store *
 pgstrom_map_data_store_row_fmap(pgstrom_data_store *pds, int *p_fdesc)
 {
 	kern_data_store	   *kds;
-	int		fdesc;
+	int					kds_fdesc;
 
 	/* we expect this function is called by clserver */
 	Assert(pgstrom_i_am_clserv);
 	/* only file-mapped row store is valid */
 	Assert(pds->kds_fname != NULL);
 
-	fdesc = open(pds->kds_fname, O_RDWR, 0);
-	if (fdesc < 0)
+	kds_fdesc = open(pds->kds_fname, O_RDWR, 0);
+	if (kds_fdesc < 0)
 	{
 		clserv_log("failed to open \"%s\" (%s)",
 				   pds->kds_fname, strerror(errno));
@@ -645,11 +650,11 @@ pgstrom_map_data_store_row_fmap(pgstrom_data_store *pds, int *p_fdesc)
 	{
 		clserv_log("failed to map \"%s\" (%s)",
 				   pds->kds_fname, strerror(errno));
-		close(fdesc);
+		close(kds_fdesc);
 		return NULL;
 	}
 	Assert(kds->format == KDS_FORMAT_ROW_FMAP);
-	*p_fdesc = fdesc;
+	*p_fdesc = kds_fdesc;
 	return kds;
 }
 

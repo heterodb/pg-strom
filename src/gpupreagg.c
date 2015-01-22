@@ -516,7 +516,7 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 	 * cost estimation of internal sorting by GPU.
 	 */
 	rows_per_chunk =
-		((double)((pgstrom_chunk_size << 20) / BLCKSZ)) *
+		((double)((pgstrom_chunk_size()) / BLCKSZ)) *
 		((double)(BLCKSZ - MAXALIGN(SizeOfPageHeaderData))) /
         ((double)(sizeof(ItemIdData) +
 				  MAXALIGN(sizeof(HeapTupleHeaderData) +
@@ -2610,8 +2610,8 @@ gpupreagg_load_next_outer(GpuPreAggState *gpas)
 
 			if (!pds)
 			{
-				Size	chunk_size = pgstrom_chunk_size << 20;
-				pds = pgstrom_create_data_store_row_flat(tupdesc, chunk_size);
+				pds = pgstrom_create_data_store_row_flat(tupdesc,
+														 pgstrom_chunk_size());
 				pgstrom_track_object(&pds->sobj, 0);
 			}
 			/* insert tuple to the data-store */
