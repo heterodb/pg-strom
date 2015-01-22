@@ -25,7 +25,7 @@
  */
 #ifdef OPENCL_DEVICE_CODE
 
-#if PLATFORM_CL_VERSION < CL_VERSION_1_2
+#if __OPENC_VERSION__ < 120
 /* NOTE: cl_khr_fp64 extension got merged at OpenCL 1.2 */
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
 #endif
