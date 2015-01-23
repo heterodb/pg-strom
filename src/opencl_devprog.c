@@ -417,14 +417,14 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 			count++;
 		}
 		/* gpusort device implementation */
-		if (dprog->extra_flags & DEVKERNRL_NEEDS_GPUSORT)
+		if (dprog->extra_flags & DEVKERNEL_NEEDS_GPUSORT)
 		{
 			static size_t	gpusort_code_length = 0;
 
 			if (!gpusort_code_length)
 				gpusort_code_length = strlen(pgstrom_opencl_gpusort_code);
-			source[count] = pgstrom_opencl_gpusort_code;
-			source[count] = gpusort_code_length;
+			sources[count] = pgstrom_opencl_gpusort_code;
+			lengths[count] = gpusort_code_length;
 			count++;
 		}
 

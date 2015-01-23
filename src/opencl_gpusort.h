@@ -76,7 +76,7 @@ typedef struct
 } kern_gpusort;
 
 #define KERN_GPUSORT_PARAMBUF(kgsort)				\
-	((__global kern_parambuf *)(&(kgsort)->kparams)
+	((__global kern_parambuf *)(&(kgsort)->kparams))
 #define KERN_GPUSORT_PARAMBUF_LENGTH(kgsort)		\
 	(KERN_GPUSORT_PARAMBUF(kgsort)->length)
 #define KERN_GPUSORT_RESULTBUF(kgsort)			\
