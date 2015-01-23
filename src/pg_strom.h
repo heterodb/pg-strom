@@ -206,7 +206,7 @@ typedef struct {
 	cl_uint		num_kern_gagg;	/* number of global reduction kernel exec */
 	cl_ulong	time_kern_prep;	/* time to execute preparation kernel */
 	cl_ulong	time_kern_lagg;	/* time to execute local reduction kernel */
-	cl_ulong	time_kern_gagg;	/* time to execute local reduction kernel */
+	cl_ulong	time_kern_gagg;	/* time to execute global reduction kernel */
 	/*-- for debugging usage --*/
 	cl_ulong	time_debug1;	/* time for debugging purpose.1 */
 	cl_ulong	time_debug2;	/* time for debugging purpose.2 */

@@ -811,23 +811,8 @@ gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
 	 */
 	for (attnum = 0; attnum < nattrs; attnum++)
 	{
-		cl_char		attkind = gpagg_atts[attnum];
-
-		if (attkind == GPUPREAGG_FIELD_IS_NULL)
+		if (gpagg_atts[attnum] != GPUPREAGG_FIELD_IS_AGGFUNC)
 			continue;
-		if (attkind == GPUPREAGG_FIELD_IS_GROUPKEY)
-		{
-			/*
-			 * NOTE: KDS_FORMAT_TUPSLOT keep varlena datum as an offset
-			 * from head of the ktoast, so we need to fixup it to become
-			 * a valid address on host address space, prior to DMA write
-			 * back.
-			 */
-			if (get_global_id(0) == owner_index)
-				pg_fixup_tupslot_varlena(&errcode, kds_dst, ktoast,
-										 attnum, get_global_id(0));
-			continue;
-		}
 
 		/*
 		 * Reduction, using global atomic operation
@@ -856,6 +841,48 @@ gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
 out:
     /* write-back execution status into host-side */
     kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
+}
+
+/*
+ * gpupreagg_fixup_varlena
+ *
+ * In case when varlena datum (excludes numeric) is used in grouping-key,
+ * datum on kds with tupslot format has not-interpretable for host systems.
+ * So, we need to fix up its value to adjust offset by hostptr.
+ */
+__kernel void
+gpupreagg_fixup_varlena(__global kern_gpupreagg *kgpreagg,
+						__global kern_data_store *kds_dst,
+						__global kern_data_store *ktoast,
+						KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+{
+	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	__global varlena   *kparam_0 = kparam_get_value(kparams, 0);
+	__global cl_char   *gpagg_atts = (__global cl_char *) VARDATA(kparam_0);
+	__global kern_row_map *krowmap = KERN_GPUPREAGG_KROWMAP(kgpreagg);
+	cl_int				errcode = StromError_Success;
+	cl_uint				nattrs = kds_dst->ncols;
+	cl_uint				nitems = krowmap->nvalids;
+
+	if (get_global_id(0) < nitems)
+	{
+		cl_uint			attnum;
+		cl_uint			rowidx;
+
+		for (attnum = 0; attnum < nattrs; attnum++)
+		{
+			if (gpagg_atts[attnum] != GPUPREAGG_FIELD_IS_GROUPKEY)
+				continue;
+
+			rowidx = krowmap->rindex[get_global_id(0)];
+			pg_fixup_tupslot_varlena(&errcode,
+									 kds_dst, ktoast,
+									 attnum, rowidx);
+		}
+	}
+out:
+	/* write-back execution status into host-side */
+	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
 }
 
 /* ----------------------------------------------------------------
@@ -1163,7 +1190,7 @@ typedef struct
 	pgstrom_message	msg;		/* = StromTag_GpuPreAgg */
 	Datum			dprog_key;	/* key of device program */
 	bool			local_reduction;/* true, if it needs local reduction */
-	bool			needs_grouping;	/* true, if it needs grouping step */
+	bool			has_varlena;	/* true, if it has varlena grouping keys */
 	double			num_groups;	/* estimated number of groups */
 	pgstrom_data_store *pds;	/* source data-store */
 	pgstrom_data_store *pds_dest; /* result data-store */
