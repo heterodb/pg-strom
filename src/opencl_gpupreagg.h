@@ -880,7 +880,6 @@ gpupreagg_fixup_varlena(__global kern_gpupreagg *kgpreagg,
 									 attnum, rowidx);
 		}
 	}
-out:
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
 }
