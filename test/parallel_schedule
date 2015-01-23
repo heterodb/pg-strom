@@ -22,7 +22,7 @@ test: misc_gpa
 # GpuScan pattern
 # ----------
 # GpuScan parallel test-cases.
-test: explain_gs zero_gs normal_gs
+test: explain_gs zero_gs normal_gs overflow_gs
 
 # ----------
 # GpuHashJoin pattern
