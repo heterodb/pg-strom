@@ -2592,6 +2592,12 @@ retry:
 	if (!bulk)
 		goto retry;
 
+	/*
+	 * Older krowmap is no longer supported.
+	 */
+	if (bulk->nvalids >= 0)
+		elog(ERROR, "Bulk-load with rowmap no longer supported");
+
 	return pgstrom_create_gpuhashjoin(ghjs, bulk, result_format);
 }
 

@@ -2957,7 +2957,12 @@ gpupreagg_load_next_outer(GpuPreAggState *gpas)
 		gpas->pfm.time_outer_load += timeval_diff(&tv1, &tv2);
 	}
 	if (bulk)
+	{
+		/* Older style no longer supported */
+		if (bulk->nvalids >= 0)
+			elog(ERROR, "Bulk-load with rowmap no longer supported");
 		gpupreagg = pgstrom_create_gpupreagg(gpas, bulk);
+	}
 
 	return gpupreagg;
 }
@@ -2975,7 +2980,6 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas)
 	pgstrom_gpupreagg  *gpreagg = gpas->curr_chunk;
 	pgstrom_data_store *pds = gpreagg->pds;
 	kern_data_store	   *kds = pds->kds;
-	kern_row_map	   *krowmap = KERN_GPUPREAGG_KROWMAP(&gpreagg->kern);
 	TupleTableSlot	   *slot_in;
 	TupleTableSlot	   *slot_out = NULL;
 	cl_uint				row_index;
@@ -2988,21 +2992,9 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas)
 		slot_in = gpas->bulk_slot;
 
 retry:
-	/*
-	 * identify the kds_index to be fetched
-	 */
-	if (krowmap->nvalids < 0)
-	{
-		if (gpas->curr_index >= kds->nitems)
-			return NULL;
-		row_index = gpas->curr_index++;
-	}
-	else
-	{
-		if (gpas->curr_index >= krowmap->nvalids)
-			return NULL;
-		row_index = krowmap->rindex[gpas->curr_index++];
-	}
+	if (gpas->curr_index >= kds->nitems)
+		return NULL;
+	row_index = gpas->curr_index++;
 
 	/*
 	 * Fetch a tuple from the data-store
