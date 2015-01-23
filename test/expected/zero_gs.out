@@ -1,0 +1,194 @@
+--#
+--#       Gpu Scan TestCases on Zero record Table 
+--#
+set enable_seqscan to off;
+set enable_bitmapscan to off;
+set enable_indexscan to off;
+set random_page_cost=1000000;   --# force off index_scan.
+set enable_gpuhashjoin to off;
+set enable_gpupreagg to off;
+set client_min_messages to warning;
+-- normal
+select  smlint_x    from strom_zero_test order by id limit 100;
+ smlint_x 
+----------
+(0 rows)
+
+select  integer_x    from strom_zero_test order by id limit 100;
+ integer_x 
+-----------
+(0 rows)
+
+select  bigint_x    from strom_zero_test order by id limit 100;
+ bigint_x 
+----------
+(0 rows)
+
+select  real_x    from strom_zero_test order by id limit 100;
+ real_x 
+--------
+(0 rows)
+
+select  float_x    from strom_zero_test order by id limit 100;
+ float_x 
+---------
+(0 rows)
+
+select  nume_x    from strom_zero_test order by id limit 100;
+ nume_x 
+--------
+(0 rows)
+
+select  smlsrl_x    from strom_zero_test order by id limit 100;
+ smlsrl_x 
+----------
+(0 rows)
+
+select  serial_x    from strom_zero_test order by id limit 100;
+ serial_x 
+----------
+(0 rows)
+
+select  bigsrl_x    from strom_zero_test order by id limit 100;
+ bigsrl_x 
+----------
+(0 rows)
+
+-- where
+select  smlint_x    from strom_zero_test where abs(smlint_x) between 1 and 1000 order by id limit 100;
+ smlint_x 
+----------
+(0 rows)
+
+select  integer_x    from strom_zero_test where abs(integer_x) between 100000 and 1000000 order by id limit 100;
+ integer_x 
+-----------
+(0 rows)
+
+select  bigint_x    from strom_zero_test where abs(bigint_x) between 1000000000000 and 10000000000000 order by id limit 100;
+ bigint_x 
+----------
+(0 rows)
+
+select  real_x    from strom_zero_test where abs(real_x) between 0.001 and 0.01 order by id limit 100;
+ real_x 
+--------
+(0 rows)
+
+select  float_x    from strom_zero_test where abs(float_x) between 0.001 and 0.01 order by id limit 100;
+ float_x 
+---------
+(0 rows)
+
+select  nume_x    from strom_zero_test where abs(nume_x) between 0.001 and 0.01 order by id limit 100;
+ nume_x 
+--------
+(0 rows)
+
+select  smlsrl_x    from strom_zero_test where abs(smlsrl_x) between 1 and 1000 order by id limit 100;
+ smlsrl_x 
+----------
+(0 rows)
+
+select  serial_x    from strom_zero_test where abs(serial_x) between 100000 and 1000000 order by id limit 100;
+ serial_x 
+----------
+(0 rows)
+
+select  bigsrl_x    from strom_zero_test where abs(bigsrl_x) between 1000000000000 and 10000000000000 order by id limit 100;
+ bigsrl_x 
+----------
+(0 rows)
+
+-- NULL
+select  id,smlint_x    from strom_zero_test where abs(smlint_x) IS NULL order by id limit 100;
+ id | smlint_x 
+----+----------
+(0 rows)
+
+select  id,integer_x    from strom_zero_test where abs(integer_x) IS NULL order by id limit 100;
+ id | integer_x 
+----+-----------
+(0 rows)
+
+select  id,bigint_x    from strom_zero_test where abs(bigint_x) IS NULL order by id limit 100;
+ id | bigint_x 
+----+----------
+(0 rows)
+
+select  id,real_x    from strom_zero_test where abs(real_x) IS NULL order by id limit 100;
+ id | real_x 
+----+--------
+(0 rows)
+
+select  id,float_x    from strom_zero_test where abs(float_x) IS NULL order by id limit 100;
+ id | float_x 
+----+---------
+(0 rows)
+
+select  id,nume_x    from strom_zero_test where abs(nume_x) IS NULL order by id limit 100;
+ id | nume_x 
+----+--------
+(0 rows)
+
+select  id,smlsrl_x    from strom_zero_test where abs(smlsrl_x) IS NULL order by id limit 100;
+ id | smlsrl_x 
+----+----------
+(0 rows)
+
+select  id,serial_x    from strom_zero_test where abs(serial_x) IS NULL order by id limit 100;
+ id | serial_x 
+----+----------
+(0 rows)
+
+select  id,bigsrl_x    from strom_zero_test where abs(bigsrl_x) IS NULL order by id limit 100;
+ id | bigsrl_x 
+----+----------
+(0 rows)
+
+-- NOT NULL
+select  id,smlint_x    from strom_zero_test where abs(smlint_x) IS NOT NULL order by id limit 100;
+ id | smlint_x 
+----+----------
+(0 rows)
+
+select  id,integer_x    from strom_zero_test where abs(integer_x) IS NOT NULL order by id limit 100;
+ id | integer_x 
+----+-----------
+(0 rows)
+
+select  id,bigint_x    from strom_zero_test where abs(bigint_x) IS NOT NULL order by id limit 100;
+ id | bigint_x 
+----+----------
+(0 rows)
+
+select  id,real_x    from strom_zero_test where abs(real_x) IS NOT NULL order by id limit 100;
+ id | real_x 
+----+--------
+(0 rows)
+
+select  id,float_x    from strom_zero_test where abs(float_x) IS NOT NULL order by id limit 100;
+ id | float_x 
+----+---------
+(0 rows)
+
+select  id,nume_x    from strom_zero_test where abs(nume_x) IS NOT NULL order by id limit 100;
+ id | nume_x 
+----+--------
+(0 rows)
+
+select  id,smlsrl_x    from strom_zero_test where abs(smlsrl_x) IS NOT NULL order by id limit 100;
+ id | smlsrl_x 
+----+----------
+(0 rows)
+
+select  id,serial_x    from strom_zero_test where abs(serial_x) IS NOT NULL order by id limit 100;
+ id | serial_x 
+----+----------
+(0 rows)
+
+select  id,bigsrl_x    from strom_zero_test where abs(bigsrl_x) IS NOT NULL order by id limit 100;
+ id | bigsrl_x 
+----+----------
+(0 rows)
+
