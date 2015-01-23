@@ -25,7 +25,7 @@
  */
 #ifdef OPENCL_DEVICE_CODE
 
-#if __OPENCL_VERSION__ < CL_VERSION_1_2
+#if __OPENCL_VERSION__ < 120
 /* NOTE: cl_khr_fp64 extension got merged at OpenCL 1.2 */
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
 #endif
@@ -37,7 +37,7 @@
 #endif
 
 /* Misc definitions */
-#define FLEXIBLE_ARRAY_MEMBER	1	/* instead of 0, to avoid AMD's bug! */
+//#define FLEXIBLE_ARRAY_MEMBER -- AMD's runtime has problem
 #define offsetof(TYPE, FIELD)   ((uintptr_t) &((TYPE *)0)->FIELD)
 #define lengthof(ARRAY)			(sizeof(ARRAY) / sizeof((ARRAY)[0]))
 #define BITS_PER_BYTE			8

@@ -381,6 +381,7 @@ fp_config_to_cstring(cl_device_fp_config fp_conf)
 	char	buf[256];
 	int		ofs = 0;
 
+	buf[0] = '\0';
 	if ((fp_conf & CL_FP_DENORM) != 0)
 		ofs += sprintf(buf + ofs, "%sDenorm", ofs > 0 ? ", " : "");
 	if ((fp_conf & CL_FP_INF_NAN) != 0)
