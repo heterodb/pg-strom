@@ -53,6 +53,7 @@ static CustomScanMethods		multihash_plan_methods;
 static PGStromExecMethods		gpuhashjoin_exec_methods;
 static PGStromExecMethods		multihash_exec_methods;
 static bool						enable_gpuhashjoin;
+static bool						debug_force_gpuhashjoin;
 
 /*
  *                              (depth=0)
@@ -616,7 +617,7 @@ initial_cost_gpuhashjoin(PlannerInfo *root,
 	 */
 	hashjointuples = gpath->cpath.path.parent->rows;
 	row_population_ratio = Max(1.0, hashjointuples / gpath->outer_path->rows);
-	if (row_population_ratio > 10.0)
+	if (row_population_ratio > 10.0 && !debug_force_gpuhashjoin)
 	{
 		elog(DEBUG1, "row population ratio (%.2f) too large, give up",
 			 row_population_ratio);
@@ -3717,6 +3718,16 @@ pgstrom_init_gpuhashjoin(void)
 							 NULL,
 							 &enable_gpuhashjoin,
 							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
+	/* debug_force_gpuhashjoin parameter */
+	DefineCustomBoolVariable("pg_strom.debug_force_gpuhashjoin",
+							 "Force GpuHashJoin regardless of the cost (debug)",
+							 NULL,
+							 &debug_force_gpuhashjoin,
+							 false,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
