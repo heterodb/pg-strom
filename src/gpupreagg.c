@@ -63,6 +63,7 @@ typedef struct
 	Bitmapset	   *outer_attrefs;	/* bitmap of referenced outer attributes */
 	Bitmapset	   *tlist_attrefs;	/* bitmap of referenced tlist attributes */
 	bool			has_numeric;	/* if true, result contains numeric val */
+	bool			has_varlena;	/* if true, result contains varlena val */
 } GpuPreAggInfo;
 
 static inline void
@@ -106,6 +107,7 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, temp);
 	bms_free(tempset);
 	privs = lappend(privs, makeInteger(gpa_info->has_numeric));
+	privs = lappend(privs, makeInteger(gpa_info->has_varlena));
 
 	cscan->custom_private = privs;
 	cscan->custom_exprs = exprs;
@@ -157,6 +159,7 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->tlist_attrefs = tempset;
 
 	gpa_info->has_numeric = intVal(list_nth(privs, pindex++));
+	gpa_info->has_varlena = intVal(list_nth(privs, pindex++));
 
 	return gpa_info;
 }
@@ -183,9 +186,8 @@ typedef struct
 	Datum			dprog_key;
 	kern_parambuf  *kparams;
 	bool			local_reduction;
-	bool			needs_grouping;
-
 	bool			has_numeric;
+	bool			has_varlena;
 
 	pgstrom_gpupreagg  *curr_chunk;
 	cl_uint			curr_index;
@@ -1188,7 +1190,8 @@ gpupreagg_rewrite_expr(Agg *agg,
 					   List **p_pre_tlist,
 					   Bitmapset **p_attr_refs,
 					   int	*p_extra_flags,
-					   bool *p_has_numeric)
+					   bool *p_has_numeric,
+					   bool *p_has_varlena)
 {
 	gpupreagg_rewrite_context context;
 	Plan	   *outer_plan = outerPlan(agg);
@@ -1197,6 +1200,7 @@ gpupreagg_rewrite_expr(Agg *agg,
 	List	   *agg_quals = NIL;
 	Bitmapset  *attr_refs = NULL;
 	bool		has_numeric = false;
+	bool		has_varlena = false;
 	ListCell   *cell;
 	int			i;
 
@@ -1242,6 +1246,8 @@ gpupreagg_rewrite_expr(Agg *agg,
 			/* check types that needs special treatment */
 			if (type_oid == NUMERICOID)
 				has_numeric = true;
+			else if ((dtype->type_flags & DEVTYPE_IS_VARLENA) != 0)
+				has_varlena = true;
 
 			varnode = (Expr *) makeVar(INDEX_VAR,
 									   tle->resno,
@@ -1284,13 +1290,17 @@ gpupreagg_rewrite_expr(Agg *agg,
 	{
 		TargetEntry	   *oldtle = lfirst(cell);
 		TargetEntry	   *newtle = flatCopyTargetEntry(oldtle);
+		Oid				type_oid;
 
 		newtle->expr = (Expr *)gpupreagg_rewrite_mutator((Node *)oldtle->expr,
 														 &context);
 		if (context.gpupreagg_invalid)
 			return false;
-		if (exprType((Node *)newtle->expr) == NUMERICOID)
+		type_oid = exprType((Node *)newtle->expr);
+		if (type_oid == NUMERICOID)
 			has_numeric = true;
+		else if (get_typlen(type_oid) < 0)
+			has_varlena = true;
 		agg_tlist = lappend(agg_tlist, newtle);
 	}
 
@@ -1298,13 +1308,17 @@ gpupreagg_rewrite_expr(Agg *agg,
 	{
 		Expr	   *old_expr = lfirst(cell);
 		Expr	   *new_expr;
+		Oid			type_oid;
 
 		new_expr = (Expr *)gpupreagg_rewrite_mutator((Node *)old_expr,
 													 &context);
 		if (context.gpupreagg_invalid)
 			return false;
-		if (exprType((Node *)new_expr) == NUMERICOID)
+		type_oid = exprType((Node *)new_expr);
+		if (type_oid == NUMERICOID)
 			has_numeric = true;
+		else if (get_typlen(type_oid) < 0)
+			has_varlena = true;
 		agg_quals = lappend(agg_quals, new_expr);
 	}
 	*p_pre_tlist = context.pre_tlist;
@@ -1313,6 +1327,7 @@ gpupreagg_rewrite_expr(Agg *agg,
 	*p_attr_refs = context.attr_refs;
 	*p_extra_flags = context.extra_flags;
 	*p_has_numeric = has_numeric;
+	*p_has_varlena = has_varlena;
 	return true;
 }
 
@@ -2432,6 +2447,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	Bitmapset	   *attr_refs = NULL;
 	List		   *outer_quals = NIL;
 	bool			has_numeric = false;
+	bool			has_varlena = false;
 	ListCell	   *cell;
 	AggStrategy		new_agg_strategy;
 	AggClauseCosts	agg_clause_costs;
@@ -2456,7 +2472,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 								&pre_tlist,
 								&attr_refs,
 								&extra_flags,
-								&has_numeric))
+								&has_numeric,
+								&has_varlena))
 		return;
 
 	/*
@@ -2637,6 +2654,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 						   FirstLowInvalidHeapAttributeNumber);
 	}
 	gpa_info.has_numeric = has_numeric;
+	gpa_info.has_varlena = has_varlena;
 	form_gpupreagg_info(cscan, &gpa_info);
 
 	/*
@@ -2755,8 +2773,8 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	 * init misc stuff
 	 */
 	gpas->local_reduction = true;	/* tentative */
-	gpas->needs_grouping = (gpa_info->numCols > 0);
 	gpas->has_numeric = gpa_info->has_numeric;
+	gpas->has_varlena = gpa_info->has_varlena;
 	gpas->curr_chunk = NULL;
 	gpas->curr_index = 0;
 	gpas->curr_recheck = false;
@@ -2832,7 +2850,7 @@ pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
 	/* other fields also */
 	gpupreagg->dprog_key = pgstrom_retain_devprog_key(gpas->dprog_key);
 	gpupreagg->local_reduction = gpas->local_reduction;
-	gpupreagg->needs_grouping = gpas->needs_grouping;
+	gpupreagg->has_varlena = gpas->has_varlena;
 	gpupreagg->num_groups = gpas->num_groups;
 	gpupreagg->pds = pds;
 	/*
@@ -3386,15 +3404,18 @@ typedef struct
 	cl_kernel			kern_init;	/* global hash init */
 	cl_kernel			kern_lagg;	/* local reduction */
 	cl_kernel			kern_gagg;	/* global reduction */
+	cl_kernel			kern_fixvar;/* fixup varlena (if any) */
 	cl_mem				m_gpreagg;
 	cl_mem				m_kds_in;	/* kds of input relation */
 	cl_mem				m_kds_src;	/* kds of aggregation source */
 	cl_mem				m_kds_dst;	/* kds of aggregation results */
 	cl_mem				m_ghash;	/* global hashslot */
 	cl_uint				ev_kern_prep;	/* event index of kern_prep */
-	cl_uint				ev_kern_init;	/* event index of kern_init */
 	cl_uint				ev_kern_lagg;	/* event index of kern_lagg */
+	cl_uint				ev_kern_init;	/* event index of kern_init */
 	cl_uint				ev_kern_gagg;	/* event index of kern_gagg */
+	cl_uint				ev_kern_fixvar;	/* event index of kern_fixvar */
+	cl_uint				ev_dma_recv;	/* event index of DMA recv */
 	cl_uint				ev_limit;
 	cl_uint				ev_index;
 	cl_event			events[FLEXIBLE_ARRAY_MEMBER];
@@ -3470,26 +3491,6 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 			goto skip_perfmon;
 		gpreagg->msg.pfm.time_kern_prep += (tv_end - tv_start) / 1000;
 
-		if (clgpa->kern_init)
-		{
-			i = clgpa->ev_kern_init;
-			rc = clGetEventProfilingInfo(clgpa->events[i],
-										 CL_PROFILING_COMMAND_START,
-										 sizeof(cl_ulong),
-										 &tv_start,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			rc = clGetEventProfilingInfo(clgpa->events[i],
-										 CL_PROFILING_COMMAND_END,
-										 sizeof(cl_ulong),
-										 &tv_end,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			gpreagg->msg.pfm.time_kern_prep += (tv_end - tv_start) / 1000;
-		}
-
 		/*
 		 * Local reduction kernel execution time (if any)
 		 */
@@ -3515,7 +3516,28 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 
 		/*
 		 * Global reduction kernel execution time
+		 * (incl. global hash table init / fixup varlena datum)
 		 */
+		if (clgpa->kern_init)
+		{
+			i = clgpa->ev_kern_init;
+			rc = clGetEventProfilingInfo(clgpa->events[i],
+										 CL_PROFILING_COMMAND_START,
+										 sizeof(cl_ulong),
+										 &tv_start,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			rc = clGetEventProfilingInfo(clgpa->events[i],
+										 CL_PROFILING_COMMAND_END,
+										 sizeof(cl_ulong),
+										 &tv_end,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			gpreagg->msg.pfm.time_kern_prep += (tv_end - tv_start) / 1000;
+		}
+
 		i = clgpa->ev_kern_gagg;
 		rc = clGetEventProfilingInfo(clgpa->events[i],
 									 CL_PROFILING_COMMAND_START,
@@ -3533,12 +3555,32 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 			goto skip_perfmon;
 		gpreagg->msg.pfm.time_kern_gagg += (tv_end - tv_start) / 1000;
 
+		if (clgpa->kern_fixvar)
+		{
+			i = clgpa->ev_kern_fixvar;
+			rc = clGetEventProfilingInfo(clgpa->events[i],
+										 CL_PROFILING_COMMAND_START,
+										 sizeof(cl_ulong),
+										 &tv_start,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			rc = clGetEventProfilingInfo(clgpa->events[i],
+										 CL_PROFILING_COMMAND_END,
+										 sizeof(cl_ulong),
+										 &tv_end,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			gpreagg->msg.pfm.time_kern_gagg += (tv_end - tv_start) / 1000;
+		}
+
 		/*
 		 * DMA recv time - last two event should be DMA receive request
 		 */
 		tv_start = ~0UL;
 		tv_end = 0;
-		for (i = clgpa->ev_kern_gagg + 1; i < clgpa->ev_index; i++)
+		for (i = clgpa->ev_dma_recv; i < clgpa->ev_index; i++)
 		{
 			rc = clGetEventProfilingInfo(clgpa->events[i],
 										 CL_PROFILING_COMMAND_START,
@@ -3590,6 +3632,8 @@ clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
 		clReleaseKernel(clgpa->kern_lagg);
 	if (clgpa->kern_gagg)
 		clReleaseKernel(clgpa->kern_gagg);
+	if (clgpa->kern_fixvar)
+		clReleaseKernel(clgpa->kern_fixvar);
 	if (clgpa->program && clgpa->program != BAD_OPENCL_PROGRAM)
 		clReleaseProgram(clgpa->program);
 	free(clgpa);
@@ -3771,7 +3815,7 @@ clserv_launch_init_hashslot(clstate_gpupreagg *clgpa, cl_uint nitems)
 		return rc;
 	}
 	clgpa->ev_kern_init = clgpa->ev_index++;
-	clgpa->gpreagg->msg.pfm.num_kern_prep++;
+	clgpa->gpreagg->msg.pfm.num_kern_gagg++;
 
 	return CL_SUCCESS;
 }
@@ -3998,6 +4042,102 @@ clserv_launch_global_reduction(clstate_gpupreagg *clgpa, cl_uint nitems)
 		return rc;
 	}
 	clgpa->ev_kern_gagg = clgpa->ev_index++;
+	clgpa->gpreagg->msg.pfm.num_kern_gagg++;
+
+	return CL_SUCCESS;
+}
+
+static cl_int
+clserv_launch_fixup_varlena(clstate_gpupreagg *clgpa, cl_uint nitems)
+{
+	size_t		gwork_sz;
+	size_t		lwork_sz;
+	cl_int		rc;
+
+	/*
+	 * __kernel void
+	 * gpupreagg_fixup_varlena(__global kern_gpupreagg *kgpreagg,
+	 *                         __global kern_data_store *kds_dst,
+	 *                         __global kern_data_store *ktoast,
+	 *                         KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+	 */
+	clgpa->kern_fixvar = clCreateKernel(clgpa->program,
+										"gpupreagg_fixup_varlena",
+										&rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	if (!clserv_compute_workgroup_size(&gwork_sz,
+									   &lwork_sz,
+									   clgpa->kern_fixvar,
+									   clgpa->dindex,
+									   true,
+									   nitems,
+									   sizeof(cl_uint)))
+	{
+		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
+		return StromError_OpenCLInternal;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_fixvar,
+						0,		/* kern_gpupreagg *kgpreagg */
+						sizeof(cl_mem),
+						&clgpa->m_gpreagg);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_fixvar,
+						1,		/* kern_data_store *kds_dst */
+						sizeof(cl_mem),
+						&clgpa->m_kds_dst);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_fixvar,
+						2,		/* kern_data_store *ktoast */
+						sizeof(cl_mem),
+						&clgpa->m_kds_in);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_fixvar,
+						3,		/* KERN_DYNAMIC_LOCAL_WORKMEM_ARG */
+						sizeof(cl_uint) * lwork_sz,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
+								clgpa->kern_fixvar,
+								1,
+								NULL,
+								&gwork_sz,
+								&lwork_sz,
+								1,
+								&clgpa->events[clgpa->ev_index - 1],
+								&clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	clgpa->ev_kern_fixvar = clgpa->ev_index++;
 	clgpa->gpreagg->msg.pfm.num_kern_gagg++;
 
 	return CL_SUCCESS;
@@ -4254,10 +4394,18 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		if (rc != CL_SUCCESS)
 			goto error;
 	}
-	/* finally, kicj gpupreagg_global_reduction */
+	/* finally, kick gpupreagg_global_reduction */
 	rc = clserv_launch_global_reduction(clgpa, nitems);
 	if (rc != CL_SUCCESS)
 		goto error;
+
+	/* finally, fixup varlena datum if any */
+	if (gpreagg->has_varlena)
+	{
+		rc = clserv_launch_fixup_varlena(clgpa, nitems);
+		if (rc != CL_SUCCESS)
+			goto error;
+	}
 
 	/* writing back the result buffer */
 	length = KERN_DATA_STORE_LENGTH(kds_dest);
@@ -4276,7 +4424,7 @@ clserv_process_gpupreagg(pgstrom_message *message)
 				   opencl_strerror(rc));
 		goto error;
 	}
-	clgpa->ev_index++;
+	clgpa->ev_dma_recv = clgpa->ev_index++;
 	gpreagg->msg.pfm.bytes_dma_recv += length;
 	gpreagg->msg.pfm.num_dma_recv++;
 
@@ -4345,6 +4493,8 @@ error:
 			clReleaseKernel(clgpa->kern_lagg);
 		if (clgpa->kern_gagg)
 			clReleaseKernel(clgpa->kern_gagg);
+		if (clgpa->kern_fixvar)
+			clReleaseKernel(clgpa->kern_fixvar);
 		if (clgpa->program && clgpa->program != BAD_OPENCL_PROGRAM)
 			clReleaseProgram(clgpa->program);
 	}

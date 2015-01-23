@@ -929,6 +929,8 @@ construct_opencl_device_info(void)
 		for (j=0, k=0; j < n_devices; j++)
 		{
 			dev_info = collect_opencl_device_info(devices[j]);
+			if (!dev_info)
+				continue;
 			dev_info->pl_info = pl_info;
 			dev_info->dev_index = k;
 
