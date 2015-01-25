@@ -311,6 +311,7 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 		Var		   *varnode;
 		AttrNumber	colidx = sort->sortColIdx[i];
 		Oid			sort_op = sort->sortOperators[i];
+		Oid			sort_collid = sort->collations[i];
 		Oid			sort_func;
 		Oid			sort_type;
 		Oid			opfamily;
@@ -354,7 +355,9 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 
 		/* device function for comparison */
 		sort_func = dtype->type_cmpfunc;
-		dfunc = pgstrom_devfunc_lookup_and_track(sort_func, context);
+		dfunc = pgstrom_devfunc_lookup_and_track(sort_func,
+												 sort_collid,
+												 context);
 		if (!dfunc)
 			elog(ERROR, "device function %u lookup failed", sort_func);
 
@@ -457,7 +460,8 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 		if (!dtype || !OidIsValid(dtype->type_cmpfunc))
 			return;
 
-		dfunc = pgstrom_devfunc_lookup(dtype->type_cmpfunc);
+		dfunc = pgstrom_devfunc_lookup(dtype->type_cmpfunc,
+									   sort->collations[i]);
 		if (!dfunc)
 			return;
 	}
