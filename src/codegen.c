@@ -60,12 +60,10 @@ static struct {
 	/* date and time datatypes */
 	{ DATEOID,		"cl_int",	F_DATE_EQ,	F_DATE_CMP,
 	  DEVFUNC_NEEDS_TIMELIB },
-#ifdef HAVE_INT64_TIMESTAMP
 	{ TIMEOID,		"cl_long",	F_TIME_EQ,	F_DATE_CMP,
 	  DEVFUNC_NEEDS_TIMELIB },
 	{ TIMESTAMPOID,	"cl_long",	F_TIMESTAMP_EQ, F_TIMESTAMP_CMP,
 	  DEVFUNC_NEEDS_TIMELIB },
-#endif
 	/* variable length datatypes */
 	{ BPCHAROID,	"varlena",	F_BPCHAREQ,	F_BPCHARCMP,
 	  DEVFUNC_NEEDS_TEXTLIB },
