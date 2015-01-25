@@ -54,15 +54,8 @@ typedef long		cl_long;
 typedef ulong		cl_ulong;
 typedef float		cl_float;
 typedef double		cl_double;
-#if HOSTPTRLEN == 8
 typedef cl_ulong	hostptr_t;
 typedef cl_ulong	Datum;
-#elif HOSTPTRLEN == 4
-typedef cl_uint		hostptr_t;
-typedef cl_uint		Datum;
-#else
-#error unexpected host pointer length
-#endif	/* HOSTPTRLEN */
 
 #define INT64CONST(x)	((cl_long) x##L)
 #define UINT64CONST(x)	((cl_ulong) x##UL)
