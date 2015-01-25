@@ -39,6 +39,31 @@
 /*
  * --------------------------------------------------------------------
  *
+ * Configuration sections
+ *
+ * NOTE: We uses configuration of the host PostgreSQL system, instead of
+ * own configure script, not to mismatch prerequisites for module build.
+ * However, some (possible) configuration will lead unexpected behavior.
+ * So, we put some checks to prevent unexpected host configurations.
+ *
+ * --------------------------------------------------------------------
+ */
+#if SIZEOF_DATUM != 8
+#error PG-Strom expects 64bit platform
+#endif
+#ifndef USE_FLOAT4_BYVAL
+#error PG-Strom expects float32 is referenced by value, not reference
+#endif
+#ifndef USE_FLOAT8_BYVAL
+#error PG-Strom expexts float64 is referenced by value, not reference
+#endif
+#ifndef HAVE_INT64_TIMESTAMP
+#error PG-Strom expects timestamp has 64bit integer format
+#endif
+
+/*
+ * --------------------------------------------------------------------
+ *
  * Type Definitions
  *
  * --------------------------------------------------------------------
