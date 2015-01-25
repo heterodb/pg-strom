@@ -1221,7 +1221,8 @@ gpupreagg_rewrite_expr(Agg *agg,
 				return false;
 			/* data type of the grouping key must have comparison function */
 			if (!OidIsValid(dtype->type_cmpfunc) ||
-				!pgstrom_devfunc_lookup(dtype->type_cmpfunc))
+				!pgstrom_devfunc_lookup(dtype->type_cmpfunc,
+										InvalidOid))
 				return false;
 			/* check types that needs special treatment */
 			if (type_oid == NUMERICOID)
@@ -1347,7 +1348,9 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 		if (!OidIsValid(dtype->type_cmpfunc))
 			elog(ERROR, "Bug? type (%u) has no comparison function",
 				 var->vartype);
-		dfunc = pgstrom_devfunc_lookup_and_track(dtype->type_cmpfunc, context);
+		dfunc = pgstrom_devfunc_lookup_and_track(dtype->type_cmpfunc,
+												 InvalidOid,
+												 context);
 
 		/* variable declarations */
 		appendStringInfo(&decl,
@@ -1760,6 +1763,7 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 				{
 					use_temp_float8x = true;
 					dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL,
+															 InvalidOid,
 															 context);
 					dtype = pgstrom_devtype_lookup_and_track(FLOAT8OID,
 															 context);
@@ -1772,6 +1776,7 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 				{
 					use_temp_numeric = true;
 					dfunc = pgstrom_devfunc_lookup_and_track(F_NUMERIC_MUL,
+															 InvalidOid,
 															 context);
 					dtype = pgstrom_devtype_lookup_and_track(NUMERICOID,
 															 context);
@@ -1850,6 +1855,7 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 				else if (strcmp(func_name, "pcov_x2") == 0)
 				{
 					dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL,
+															 InvalidOid,
 															 context);
 					appendStringInfo(
 						&body,
@@ -1862,6 +1868,7 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 				else if (strcmp(func_name, "pcov_y2") == 0)
 				{
 					dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL,
+															 InvalidOid,
                                                              context);
 					appendStringInfo(
 						&body,
@@ -1874,6 +1881,7 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 				else if (strcmp(func_name, "pcov_xy") == 0)
 				{
 					dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL,
+															 InvalidOid,
                                                              context);
 					appendStringInfo(
 						&body,

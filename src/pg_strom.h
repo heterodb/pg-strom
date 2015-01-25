@@ -299,6 +299,7 @@ typedef struct devfunc_info {
 	const char *func_name;	/* name of SQL function */
 	List	   *func_args;	/* list of devtype_info */
 	devtype_info *func_rettype;
+	Oid			func_collid;/* OID of collation, if collation aware */
 	const char *func_alias;	/* name of declared device function */
 	const char *func_decl;	/* declaration of device function */
 } devfunc_info;
@@ -458,10 +459,11 @@ typedef struct {
 } codegen_context;
 
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
-extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid);
+extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid, Oid func_collid);
 extern devtype_info *pgstrom_devtype_lookup_and_track(Oid type_oid,
 											  codegen_context *context);
 extern devfunc_info *pgstrom_devfunc_lookup_and_track(Oid func_oid,
+													  Oid func_collid,
 											  codegen_context *context);
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern char *pgstrom_codegen_func_declarations(codegen_context *context);

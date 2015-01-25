@@ -69,7 +69,6 @@ static struct {
 	/* variable length datatypes */
 	{ BPCHAROID,	"varlena",	F_BPCHAREQ,	F_BPCHARCMP,
 	  DEVFUNC_NEEDS_TEXTLIB },
-	//{ VARCHAROID,	"varlena",	InvalidOid,	InvalidOid, 0 },
 	{ NUMERICOID,	"varlena",	F_NUMERIC_EQ, F_NUMERIC_CMP,
 	  DEVFUNC_NEEDS_NUMERIC },
 	{ BYTEAOID,		"varlena",	F_BYTEAEQ,	F_BYTEACMP, 0 },
@@ -145,25 +144,6 @@ pgstrom_devtype_lookup(Oid type_oid)
 }
 
 /*
- * collation checks - device does not understand text locale,
- * so all the locale we can handle is the binary comparable ones.
- * we have to ensure the collation is binary comparable.
- */
-static bool
-devtype_runnable_collation(Oid collation)
-{
-	/*
-	 * Usually, core backend looks up a particular collation id,
-	 * if it is varlena data type. (If failed to lookup, an error
-	 * shall be reported). Elsewhere, it shall be a fixed-length
-	 * datum that has no collation anyway.
-	 */
-	if (!OidIsValid(collation))
-		return true;
-	return lc_collate_is_c(collation);
-}
-
-/*
  * Catalog of functions supported by device code
  *
  * naming convension of functions:
@@ -186,6 +166,7 @@ devtype_runnable_collation(Oid collation)
  *
  * attributes:
  * 'a' : this function needs an alias, instead of SQL function name
+ * 'c' : this function is locale aware, so unavailable if not simple collation
  * 'n' : this function needs opencl_numeric.h
  * 's' : this function needs opencl_textlib.h
  * 't' : this function needs opencl_timelib.h
@@ -613,20 +594,20 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	/*
 	 * Text functions
 	 * ---------------------- */
-	{ "bpchareq", 2, {BPCHAROID,BPCHAROID},   "s/F:bpchareq" },
-	{ "bpcharne", 2, {BPCHAROID,BPCHAROID},   "s/F:bpcharne" },
-	{ "bpcharlt", 2, {BPCHAROID,BPCHAROID},   "s/F:bpcharlt" },
-	{ "bpcharle", 2, {BPCHAROID,BPCHAROID},   "s/F:bpcharle" },
-	{ "bpchargt", 2, {BPCHAROID,BPCHAROID},   "s/F:bpchargt" },
-	{ "bpcharge", 2, {BPCHAROID,BPCHAROID},   "s/F:bpcharge" },
-	{ "bpcharcmp", 2, {BPCHAROID, BPCHAROID}, "s/F:bpcharcmp"},
-	{ "texteq", 2, {TEXTOID, TEXTOID},  "s/F:texteq" },
-	{ "textne", 2, {TEXTOID, TEXTOID},  "s/F:textne" },
-	{ "text_lt", 2, {TEXTOID, TEXTOID}, "s/F:text_lt" },
-	{ "text_le", 2, {TEXTOID, TEXTOID}, "s/F:text_le" },
-	{ "text_gt", 2, {TEXTOID, TEXTOID}, "s/F:text_gt" },
-	{ "text_ge", 2, {TEXTOID, TEXTOID}, "s/F:text_ge" },
-	{ "bttextcmp",   2, {TEXTOID, TEXTOID}, "s/F:text_cmp" },
+	{ "bpchareq",  2, {BPCHAROID,BPCHAROID},  "s/F:bpchareq" },
+	{ "bpcharne",  2, {BPCHAROID,BPCHAROID},  "s/F:bpcharne" },
+	{ "bpcharlt",  2, {BPCHAROID,BPCHAROID},  "sc/F:bpcharlt" },
+	{ "bpcharle",  2, {BPCHAROID,BPCHAROID},  "sc/F:bpcharle" },
+	{ "bpchargt",  2, {BPCHAROID,BPCHAROID},  "sc/F:bpchargt" },
+	{ "bpcharge",  2, {BPCHAROID,BPCHAROID},  "sc/F:bpcharge" },
+	{ "bpcharcmp", 2, {BPCHAROID, BPCHAROID}, "sc/F:bpcharcmp"},
+	{ "texteq",    2, {TEXTOID, TEXTOID},     "s/F:texteq" },
+	{ "textne",    2, {TEXTOID, TEXTOID},     "s/F:textne" },
+	{ "text_lt",   2, {TEXTOID, TEXTOID},     "sc/F:text_lt" },
+	{ "text_le",   2, {TEXTOID, TEXTOID},     "sc/F:text_le" },
+	{ "text_gt",   2, {TEXTOID, TEXTOID},     "sc/F:text_gt" },
+	{ "text_ge",   2, {TEXTOID, TEXTOID},     "sc/F:text_ge" },
+	{ "bttextcmp", 2, {TEXTOID, TEXTOID},     "sc/F:text_cmp" },
 };
 
 static void
@@ -865,7 +846,8 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 							   Oid func_namespace,
 							   int func_nargs,
 							   Oid func_argtypes[],
-							   Oid func_rettype)
+							   Oid func_rettype,
+							   Oid func_collid)
 {
 	devfunc_info   *entry;
 	ListCell	   *cell;
@@ -883,7 +865,9 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 			strcmp(func_name, entry->func_name) == 0 &&
 			func_nargs == list_length(entry->func_args) &&
 			memcmp(func_argtypes, entry->func_argtypes,
-				   sizeof(Oid) * func_nargs) == 0)
+				   sizeof(Oid) * func_nargs) == 0 &&
+			(!OidIsValid(entry->func_collid) ||
+			 entry->func_collid == func_collid))
 		{
 			Assert(entry->func_rettype->type_oid == func_rettype);
 			if (entry->func_flags & DEVINFO_IS_NEGATIVE)
@@ -910,87 +894,113 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 	entry->func_argtypes = palloc(sizeof(Oid) * func_nargs);
 	memcpy(entry->func_argtypes, func_argtypes, sizeof(Oid) * func_nargs);
 
-	if (func_namespace == PG_CATALOG_NAMESPACE)
+	/*
+	 * At this moment, only (part-of) built-in functions are supported
+	 * to run on GPU devices.
+	 */
+	if (func_namespace != PG_CATALOG_NAMESPACE)
 	{
-		for (i=0; i < lengthof(devfunc_common_catalog); i++)
+		entry->func_flags = DEVINFO_IS_NEGATIVE;
+		goto out;
+	}
+
+	for (i=0; i < lengthof(devfunc_common_catalog); i++)
+	{
+		devfunc_catalog_t  *procat = devfunc_common_catalog + i;
+
+		if (strcmp(procat->func_name, func_name) == 0 &&
+			procat->func_nargs == func_nargs &&
+			memcmp(procat->func_argtypes, func_argtypes,
+				   sizeof(Oid) * func_nargs) == 0)
 		{
-			devfunc_catalog_t  *procat = devfunc_common_catalog + i;
+			const char *template = procat->func_template;
+			const char *pos;
+			const char *end;
+			int32		flags = 0;
+			bool		has_alias = false;
+			bool		has_collation = false;
 
-			if (strcmp(procat->func_name, func_name) == 0 &&
-				procat->func_nargs == func_nargs &&
-				memcmp(procat->func_argtypes, func_argtypes,
-					   sizeof(Oid) * func_nargs) == 0)
+			entry->func_rettype = pgstrom_devtype_lookup(func_rettype);
+			if (!entry->func_rettype)
+				elog(ERROR, "Bug? unsupported device function result type");
+			for (j=0; j < func_nargs; j++)
 			{
-				const char *template = procat->func_template;
-				const char *pos;
-				const char *end;
-				int32		flags = 0;
-				bool		has_alias = false;
-
-				entry->func_rettype = pgstrom_devtype_lookup(func_rettype);
-				if (!entry->func_rettype)
-					elog(ERROR, "Bug? device function result type is not supported");
-				for (j=0; j < func_nargs; j++)
-				{
-					devtype_info   *dtype
-						= pgstrom_devtype_lookup(func_argtypes[j]);
-					if (!dtype)
-						elog(ERROR, "Bug? device function argument type is not supported");
-					entry->func_args = lappend(entry->func_args, dtype);
-				}
-				/* fetch attribute */
-				end = strchr(template, '/');
-				if (end)
-				{
-					for (pos = template; pos < end; pos++)
-					{
-						switch (*pos)
-						{
-							case 'a':
-								has_alias = true;
-								break;
-							case 'n':
-								flags |= DEVFUNC_NEEDS_NUMERIC;
-								break;
-							case 'm':
-								flags |= DEVFUNC_NEEDS_MATHLIB;
-								break;
-							case 's':
-								flags |= DEVFUNC_NEEDS_TEXTLIB;
-								break;
-							case 't':
-								flags |= DEVFUNC_NEEDS_TIMELIB;
-								break;
-							default:
-								elog(NOTICE,
-									 "Bug? unkwnon devfunc property: %c",
-									 *pos);
-								break;
-						}
-					}
-					template = end + 1;
-				}
-				entry->func_flags = flags;
-
-				if (strncmp(template, "c:", 2) == 0)
-					devfunc_setup_cast(entry, procat, has_alias);
-				else if (strncmp(template, "b:", 2) == 0)
-					devfunc_setup_oper_both(entry, procat, has_alias);
-				else if (strncmp(template, "l:", 2) == 0 ||
-						 strncmp(template, "r:", 2) == 0)
-					devfunc_setup_oper_either(entry, procat, has_alias);
-				else if (strncmp(template, "f:", 2) == 0)
-					devfunc_setup_func_decl(entry, procat, has_alias);
-				else if (strncmp(template, "F:", 2) == 0)
-					devfunc_setup_func_impl(entry, procat, has_alias);
-				else
-				{
-					elog(NOTICE, "Bug? unknown devfunc template: '%s'",
-						 template);
-					entry->func_flags = DEVINFO_IS_NEGATIVE;
-				}
-				goto out;
+				devtype_info   *dtype
+					= pgstrom_devtype_lookup(func_argtypes[j]);
+				if (!dtype)
+					elog(ERROR, "Bug? unsupported device function arguments");
+				entry->func_args = lappend(entry->func_args, dtype);
 			}
+			/* fetch attribute */
+			end = strchr(template, '/');
+			if (end)
+			{
+				for (pos = template; pos < end; pos++)
+				{
+					switch (*pos)
+					{
+						case 'a':
+							has_alias = true;
+							break;
+						case 'c':
+							has_collation = true;
+							break;
+						case 'n':
+							flags |= DEVFUNC_NEEDS_NUMERIC;
+							break;
+						case 'm':
+							flags |= DEVFUNC_NEEDS_MATHLIB;
+							break;
+						case 's':
+							flags |= DEVFUNC_NEEDS_TEXTLIB;
+							break;
+						case 't':
+							flags |= DEVFUNC_NEEDS_TIMELIB;
+							break;
+						default:
+							elog(NOTICE,
+								 "Bug? unkwnon devfunc property: %c",
+								 *pos);
+							break;
+					}
+				}
+				template = end + 1;
+			}
+			entry->func_flags = flags;
+
+			/* In case when function is collation aware but not supported
+			 * to run on GPU device, we have to give up.
+			 */
+			if (!has_collation)
+				entry->func_collid = InvalidOid;
+			else
+			{
+				entry->func_collid = func_collid;
+				if (OidIsValid(func_collid) && !lc_collate_is_c(func_collid))
+				{
+					entry->func_flags = DEVINFO_IS_NEGATIVE;
+					goto out;
+				}
+			}
+
+			if (strncmp(template, "c:", 2) == 0)
+				devfunc_setup_cast(entry, procat, has_alias);
+			else if (strncmp(template, "b:", 2) == 0)
+				devfunc_setup_oper_both(entry, procat, has_alias);
+			else if (strncmp(template, "l:", 2) == 0 ||
+					 strncmp(template, "r:", 2) == 0)
+				devfunc_setup_oper_either(entry, procat, has_alias);
+			else if (strncmp(template, "f:", 2) == 0)
+				devfunc_setup_func_decl(entry, procat, has_alias);
+			else if (strncmp(template, "F:", 2) == 0)
+				devfunc_setup_func_impl(entry, procat, has_alias);
+			else
+			{
+				elog(NOTICE, "Bug? unknown device function template: '%s'",
+					 template);
+				entry->func_flags = DEVINFO_IS_NEGATIVE;
+			}
+			goto out;
 		}
 	}
 	entry->func_flags = DEVINFO_IS_NEGATIVE;
@@ -1005,7 +1015,7 @@ out:
 }
 
 devfunc_info *
-pgstrom_devfunc_lookup(Oid func_oid)
+pgstrom_devfunc_lookup(Oid func_oid, Oid func_collid)
 {
 	Form_pg_proc	proc;
 	HeapTuple		tuple;
@@ -1020,7 +1030,8 @@ pgstrom_devfunc_lookup(Oid func_oid)
 										   proc->pronamespace,
 										   proc->pronargs,
 										   proc->proargtypes.values,
-										   proc->prorettype);
+										   proc->prorettype,
+										   func_collid);
 	ReleaseSysCache(tuple);
 
 	return dfunc;
@@ -1041,9 +1052,10 @@ pgstrom_devtype_lookup_and_track(Oid type_oid, codegen_context *context)
 }
 
 devfunc_info *
-pgstrom_devfunc_lookup_and_track(Oid func_oid, codegen_context *context)
+pgstrom_devfunc_lookup_and_track(Oid func_oid, Oid func_collid,
+								 codegen_context *context)
 {
-	devfunc_info   *dfunc = pgstrom_devfunc_lookup(func_oid);
+	devfunc_info   *dfunc = pgstrom_devfunc_lookup(func_oid, func_collid);
 	devtype_info   *dtype;
 	ListCell	   *cell;
 
@@ -1082,8 +1094,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		Const  *con = (Const *) node;
 		cl_uint	index = 0;
 
-		if (!devtype_runnable_collation(con->constcollid) ||
-			!pgstrom_devtype_lookup_and_track(con->consttype, context))
+		if (!pgstrom_devtype_lookup_and_track(con->consttype, context))
 			return false;
 
 		foreach (cell, context->used_params)
@@ -1110,8 +1121,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		Param  *param = (Param *) node;
 		int		index = 0;
 
-		if (!devtype_runnable_collation(param->paramcollid) ||
-			param->paramkind != PARAM_EXTERN ||
+		if (param->paramkind != PARAM_EXTERN ||
 			!pgstrom_devtype_lookup_and_track(param->paramtype, context))
 			return false;
 
@@ -1139,8 +1149,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		AttrNumber	varattno = var->varattno;
 		ListCell   *cell;
 
-		if (!devtype_runnable_collation(var->varcollid) ||
-			!pgstrom_devtype_lookup_and_track(var->vartype, context))
+		if (!pgstrom_devtype_lookup_and_track(var->vartype, context))
 			return false;
 
 		/* Fixup varattno when pseudo-scan tlist exists, because varattno
@@ -1179,12 +1188,9 @@ codegen_expression_walker(Node *node, codegen_context *context)
 	{
 		FuncExpr   *func = (FuncExpr *) node;
 
-		/* no collation support */
-		if (!devtype_runnable_collation(func->funccollid) ||
-			!devtype_runnable_collation(func->inputcollid))
-			return false;
-
-		dfunc = pgstrom_devfunc_lookup_and_track(func->funcid, context);
+		dfunc = pgstrom_devfunc_lookup_and_track(func->funcid,
+												 func->inputcollid,
+												 context);
 		if (!dfunc)
 			return false;
 		appendStringInfo(&context->str,
@@ -1205,12 +1211,8 @@ codegen_expression_walker(Node *node, codegen_context *context)
 	{
 		OpExpr	   *op = (OpExpr *) node;
 
-		/* no collation support */
-		if (!devtype_runnable_collation(op->opcollid) ||
-			!devtype_runnable_collation(op->inputcollid))
-			return false;
-
 		dfunc = pgstrom_devfunc_lookup_and_track(get_opcode(op->opno),
+												 op->inputcollid,
 												 context);
 		if (!dfunc)
 			return false;
@@ -1336,7 +1338,8 @@ codegen_expression_walker(Node *node, codegen_context *context)
 												   InvalidOid,
 												   nargs,
 												   argtypes,
-												   BOOLOID);
+												   BOOLOID,
+												   InvalidOid);
 			if (!dfunc)
 				dfunc = devfunc_setup_boolop(b->boolop, namebuf, nargs);
 			context->func_defs = list_append_unique_ptr(context->func_defs,
@@ -1390,6 +1393,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 				if (!dtype)
 					return false;
 				dfunc = pgstrom_devfunc_lookup_and_track(dtype->type_eqfunc,
+														 caseexpr->casecollid,
 														 context);
 				if (!dfunc)
 					return false;
@@ -1680,8 +1684,7 @@ pgstrom_codegen_available_expression(Expr *expr)
 	{
 		Const  *con = (Const *) expr;
 
-		if (!devtype_runnable_collation(con->constcollid) ||
-			!pgstrom_devtype_lookup(con->consttype))
+		if (!pgstrom_devtype_lookup(con->consttype))
 			return false;
 		return true;
 	}
@@ -1689,8 +1692,7 @@ pgstrom_codegen_available_expression(Expr *expr)
 	{
 		Param  *param = (Param *) expr;
 
-		if (!devtype_runnable_collation(param->paramcollid) ||
-			param->paramkind != PARAM_EXTERN ||
+		if (param->paramkind != PARAM_EXTERN ||
 			!pgstrom_devtype_lookup(param->paramtype))
 			return false;
 		return true;
@@ -1699,8 +1701,7 @@ pgstrom_codegen_available_expression(Expr *expr)
 	{
 		Var	   *var = (Var *) expr;
 
-		if (!devtype_runnable_collation(var->varcollid) ||
-			!pgstrom_devtype_lookup(var->vartype))
+		if (!pgstrom_devtype_lookup(var->vartype))
 			return false;
 		return true;
 	}
@@ -1708,10 +1709,7 @@ pgstrom_codegen_available_expression(Expr *expr)
 	{
 		FuncExpr   *func = (FuncExpr *) expr;
 
-		if (!devtype_runnable_collation(func->funccollid) ||
-			!devtype_runnable_collation(func->inputcollid))
-			return false;
-		if (!pgstrom_devfunc_lookup(func->funcid))
+		if (!pgstrom_devfunc_lookup(func->funcid, func->inputcollid))
 			return false;
 		return pgstrom_codegen_available_expression((Expr *) func->args);
 	}
@@ -1719,10 +1717,8 @@ pgstrom_codegen_available_expression(Expr *expr)
 	{
 		OpExpr	   *op = (OpExpr *) expr;
 
-		if (!devtype_runnable_collation(op->opcollid) ||
-			!devtype_runnable_collation(op->inputcollid))
-			return false;
-		if (!pgstrom_devfunc_lookup(get_opcode(op->opno)))
+		if (!pgstrom_devfunc_lookup(get_opcode(op->opno),
+									op->inputcollid))
 			return false;
 		return pgstrom_codegen_available_expression((Expr *) op->args);
 	}
@@ -1744,8 +1740,6 @@ pgstrom_codegen_available_expression(Expr *expr)
 	{
 		RelabelType *relabel = (RelabelType *) expr;
 
-		if (!devtype_runnable_collation(relabel->resultcollid))
-			return false;
 		if (!pgstrom_devtype_lookup(relabel->resulttype))
 			return false;
 		return pgstrom_codegen_available_expression((Expr *) relabel->arg);
@@ -1755,8 +1749,6 @@ pgstrom_codegen_available_expression(Expr *expr)
 		CaseExpr   *caseexpr = (CaseExpr *) expr;
 		ListCell   *cell;
 
-		if (!devtype_runnable_collation(caseexpr->casecollid))
-			return false;
 		if (!pgstrom_devtype_lookup(caseexpr->casetype))
 			return false;
 
@@ -1765,8 +1757,10 @@ pgstrom_codegen_available_expression(Expr *expr)
 			Oid				expr_type = exprType((Node *)caseexpr->arg);
 			devtype_info   *dtype = pgstrom_devtype_lookup(expr_type);
 
+			Assert(caseexpr->casetype == dtype->type_oid);
 			if (!OidIsValid(dtype->type_eqfunc) ||
-				!pgstrom_devfunc_lookup(dtype->type_eqfunc))
+				!pgstrom_devfunc_lookup(dtype->type_eqfunc,
+										caseexpr->casecollid))
 				return false;
 		}
 
