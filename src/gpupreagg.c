@@ -1241,7 +1241,8 @@ gpupreagg_rewrite_expr(Agg *agg,
 				return false;
 			/* data type of the grouping key must have comparison function */
 			if (!OidIsValid(dtype->type_cmpfunc) ||
-				!pgstrom_devfunc_lookup(dtype->type_cmpfunc))
+				!pgstrom_devfunc_lookup(dtype->type_cmpfunc,
+										InvalidOid))
 				return false;
 			/* check types that needs special treatment */
 			if (type_oid == NUMERICOID)
@@ -1523,7 +1524,9 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 		if (!OidIsValid(dtype->type_cmpfunc))
 			elog(ERROR, "Bug? type (%u) has no comparison function",
 				 var->vartype);
-		dfunc = pgstrom_devfunc_lookup_and_track(dtype->type_cmpfunc, context);
+		dfunc = pgstrom_devfunc_lookup_and_track(dtype->type_cmpfunc,
+												 InvalidOid,
+												 context);
 
 		/* variable declarations */
 		appendStringInfo(&decl,
@@ -1998,7 +2001,9 @@ gpupreagg_codegen_projection_psum_x2(StringInfo body, FuncExpr *func,
 		dtype = pgstrom_devtype_lookup_and_track(FLOAT8OID, pc->context);
 		if (!dtype)
 			elog(ERROR, "device type lookup failed: %u", FLOAT8OID);
-		dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL, pc->context);
+		dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL,
+												 InvalidOid,
+												 pc->context);
 		if (!dtype)
 			elog(ERROR, "device function lookup failed: %u", F_FLOAT8MUL);
 		temp_label = "temp_float8x";
@@ -2010,7 +2015,9 @@ gpupreagg_codegen_projection_psum_x2(StringInfo body, FuncExpr *func,
 		dtype = pgstrom_devtype_lookup_and_track(NUMERICOID, pc->context);
 		if (!dtype)
 			elog(ERROR, "device type lookup failed: %u", NUMERICOID);
-		dfunc = pgstrom_devfunc_lookup_and_track(F_NUMERIC_MUL, pc->context);
+		dfunc = pgstrom_devfunc_lookup_and_track(F_NUMERIC_MUL,
+												 InvalidOid,
+												 pc->context);
 		if (!dtype)
 			elog(ERROR, "device function lookup failed: %u", F_NUMERIC_MUL);
 		temp_label = "temp_numeric";
@@ -2099,7 +2106,9 @@ gpupreagg_codegen_projection_corr(StringInfo body, FuncExpr *func,
 	}
 	else if (strcmp(func_name, "pcov_x2") == 0)
 	{
-		dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL, pc->context);
+		dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL,
+												 InvalidOid,
+												 pc->context);
 		appendStringInfo(
 			body,
 			"  else\n"
@@ -2110,7 +2119,9 @@ gpupreagg_codegen_projection_corr(StringInfo body, FuncExpr *func,
 	}
 	else if (strcmp(func_name, "pcov_y2") == 0)
 	{
-		dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL, pc->context);
+		dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL,
+												 InvalidOid,
+												 pc->context);
 		appendStringInfo(
 			body,
 			"  else\n"
@@ -2121,7 +2132,9 @@ gpupreagg_codegen_projection_corr(StringInfo body, FuncExpr *func,
 	}
 	else if (strcmp(func_name, "pcov_xy") == 0)
 	{
-		dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL, pc->context);
+		dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL,
+												 InvalidOid,
+												 pc->context);
 		appendStringInfo(
 			body,
 			"  else\n"
