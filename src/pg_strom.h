@@ -398,6 +398,26 @@ BulkExecProcNode(PlanState *node)
  */
 
 /*
+ * cuda_mmgr.c
+ */
+extern MemoryContext
+HostPinMemContextCreate(MemoryContext parent,
+                        const char *name,
+                        Size minContextSize,
+                        Size initBlockSize,
+                        Size maxBlockSize);
+/*
+ * cuda_control.c
+ */
+extern void pgstrom_init_cuda_control(void);
+
+/*
+ * cuda_program.c
+ */
+extern void pgstrom_init_cuda_program(void);
+
+
+/*
  * shmem.c
  */
 #define SHMEM_BLOCKSZ_BITS_MAX	34			/* 16GB */
