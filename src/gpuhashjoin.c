@@ -2798,7 +2798,7 @@ gpuhashjoin_exec(CustomScanState *node)
 		ghjs->curr_index = 0;
 	}
 	/* can valid tuple be fetched? */
-	if (TupIsNull(ps_slot));
+	if (TupIsNull(ps_slot))
 		return ps_slot;
 
 	/* needs to apply projection? */
