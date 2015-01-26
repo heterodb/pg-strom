@@ -11,6 +11,7 @@ OPENCL_OBJS = opencl_common.o \
 	opencl_gpuscan.o \
 	opencl_gpupreagg.o \
 	opencl_hashjoin.o \
+	opencl_gpusort.o \
 	opencl_mathlib.o \
 	opencl_textlib.o \
 	opencl_timelib.o \

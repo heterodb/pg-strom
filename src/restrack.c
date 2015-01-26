@@ -56,6 +56,7 @@ typedef struct {
 	 StromTagIs(sobject,GpuScan)	||	\
 	 StromTagIs(sobject,GpuPreAgg)	||	\
 	 StromTagIs(sobject,GpuHashJoin)||	\
+	 StromTagIs(sobject,GpuSort)	||	\
 	 StromTagIs(sobject,HashJoinTable))
 
 #define RESTRACK_HASHSZ		100

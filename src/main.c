@@ -270,6 +270,7 @@ _PG_init(void)
 	pgstrom_init_gpuscan();
 	pgstrom_init_gpuhashjoin();
 	pgstrom_init_gpupreagg();
+	pgstrom_init_gpusort();
 
 	/* miscellaneous initializations */
 	pgstrom_init_misc_guc();

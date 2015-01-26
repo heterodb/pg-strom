@@ -310,7 +310,17 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 					!pgstrom_restrack_cleanup_context())
 					ReleaseBuffer(bitem->buffer);
 			}
-			pgstrom_shmem_free(kds);
+			if (kds->format != KDS_FORMAT_ROW_FMAP)
+				pgstrom_shmem_free(kds);
+			else
+			{
+				Assert(pds->kds_fname != NULL);
+				rc = munmap(kds, kds->length);
+				if (rc != 0)
+					elog(LOG, "Bug? failed to unmap kds:%p of \"%s\" (%s)",
+						 pds->kds, pds->kds_fname, strerror(errno));
+				CloseTransientFile(pds->kds_fdesc);
+			}
 		}
 	}
 	PG_CATCH();
@@ -324,15 +334,6 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 		!pgstrom_i_am_clserv &&
 		!pgstrom_restrack_cleanup_context())
 		ResourceOwnerDelete(pds->resowner);
-
-	if (pds->kds_fname != NULL && !pgstrom_i_am_clserv)
-	{
-		rc = munmap(pds->kds, pds->kds_length);
-		if (rc != 0)
-			elog(LOG, "Bug? failed to unmap kds:%p of \"%s\" (%s)",
-				 pds->kds, pds->kds_fname, strerror(errno));
-		CloseTransientFile(pds->kds_fdesc);
-	}
 	if (pds->ktoast)
 		pgstrom_release_data_store(pds->ktoast);
 	if (pds->local_pages)
@@ -584,6 +585,12 @@ __pgstrom_create_data_store_row_fmap(const char *filename, int lineno,
                 (errcode_for_file_access(),
 				 errmsg("could not create file-mapped data store \"%s\"",
 						kds_fname)));
+
+	if (ftruncate(kds_fdesc, kds_length) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not truncate file \"%s\" to %zu: %m",
+						kds_fname, kds_length)));
 
 	kds = mmap(NULL, kds_length,
 			   PROT_READ | PROT_WRITE,

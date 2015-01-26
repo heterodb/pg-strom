@@ -36,8 +36,9 @@
 #include "pg_strom.h"
 #include "opencl_gpusort.h"
 #include <math.h>
-#include <sys/types.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 static CustomScanMethods	gpusort_scan_methods;
@@ -339,7 +340,7 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 
 		/* Sanity check of the expression */
 		tle = get_tle_by_resno(sort->plan.targetlist, colidx);
-		if (!tle || IsA(tle->expr, Var))
+		if (!tle || !IsA(tle->expr, Var))
 			elog(ERROR, "Bug? resno %d not found on tlist or not varnode: %s",
 				 colidx, nodeToString(tle->expr));
 		varnode = (Var *) tle->expr;
@@ -555,6 +556,9 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	GpuSortInfo	   *gs_info = deform_gpusort_info(cscan);
 	PlanState	   *ps = &node->ss.ps;
 
+	/* initialize child exec node */
+	outerPlanState(gss) = ExecInitNode(outerPlan(cscan), estate, eflags);
+
 	/* for GPU bitonic sorting */
 	gss->kparams = pgstrom_create_kern_parambuf(gs_info->used_params,
 												ps->ps_ExprContext);
@@ -569,7 +573,6 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 
 	/* Is perfmon needed? */
 	gss->pfm.enabled = pgstrom_perfmon_enabled;
-
 
 	/**/
 	gss->num_chunks = 0;
@@ -848,9 +851,9 @@ gpusort_check_gpu_tasks(GpuSortState *gss)
 		gpusort = (pgstrom_gpusort *) msg;
 		kresults = KERN_GPUSORT_RESULTBUF(&gpusort->kern);
 
-		if (kresults->errcode != StromError_Success)
+		if (msg->errcode != StromError_Success)
 		{
-			if (kresults->errcode == CL_BUILD_PROGRAM_FAILURE)
+			if (msg->errcode == CL_BUILD_PROGRAM_FAILURE)
 			{
 				const char *buildlog
 					= pgstrom_get_devprog_errmsg(gpusort->dprog_key);
@@ -858,7 +861,7 @@ gpusort_check_gpu_tasks(GpuSortState *gss)
 				ereport(ERROR,
 						(errcode(ERRCODE_INTERNAL_ERROR),
 						 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
-								pgstrom_strerror(gpusort->msg.errcode),
+								pgstrom_strerror(msg->errcode),
 								gss->kern_source),
 						 errdetail("%s", buildlog)));
 			}
@@ -867,7 +870,7 @@ gpusort_check_gpu_tasks(GpuSortState *gss)
 				ereport(ERROR,
 						(errcode(ERRCODE_INTERNAL_ERROR),
 						 errmsg("PG-Strom: OpenCL execution error (%s)",
-								pgstrom_strerror(kresults->errcode))));
+								pgstrom_strerror(msg->errcode))));
 			}
 		}
 		cpusort = gpusort_merge_gpu_chunks(gss, gpusort);
@@ -1097,6 +1100,8 @@ gpusort_end(CustomScanState *node)
 		pgstrom_untrack_object(&gss->mqueue->sobj);
 		pgstrom_close_queue(gss->mqueue);
 	}
+	/* Clean up subtree */
+    ExecEndNode(outerPlanState(node));
 }
 
 static void
@@ -1444,6 +1449,8 @@ gpusort_entrypoint_cpusort(Datum main_arg)
 typedef struct
 {
 	pgstrom_message *msg;
+	kern_data_store	*kds;
+	int				kds_fdesc;
 	cl_command_queue kcmdq;
 	cl_program		program;
 	cl_int			dindex;
@@ -1461,9 +1468,163 @@ typedef struct
 static void
 clserv_respond_gpusort(cl_event event, cl_int ev_status, void *private)
 {
+	clstate_gpusort	   *clgss = (clstate_gpusort *) private;
+	pgstrom_gpusort	   *gpusort = (pgstrom_gpusort *)clgss->msg;
+	kern_resultbuf	   *kresult = KERN_GPUSORT_RESULTBUF(&gpusort->kern);
+	cl_int				i, rc;
 
+	if (ev_status == CL_COMPLETE)
+		gpusort->msg.errcode = kresult->errcode;
+	else
+	{
+		clserv_log("unexpected CL_EVENT_COMMAND_EXECUTION_STATUS: %d",
+				   ev_status);
+		gpusort->msg.errcode = StromError_OpenCLInternal;
+	}
 
+	/* collect performance statistics */
+	if (gpusort->msg.pfm.enabled)
+	{
+		cl_ulong	tv_start;
+		cl_ulong	tv_end;
+		cl_ulong	temp;
 
+		/*
+		 * Time of all the DMA send
+		 */
+		tv_start = ~0UL;
+		tv_end = 0;
+		for (i=0; i < clgss->ev_kern_prep; i++)
+		{
+			rc = clGetEventProfilingInfo(clgss->events[i],
+										 CL_PROFILING_COMMAND_START,
+										 sizeof(cl_ulong),
+										 &temp,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			tv_start = Min(tv_start, temp);
+
+			rc = clGetEventProfilingInfo(clgss->events[i],
+										 CL_PROFILING_COMMAND_END,
+										 sizeof(cl_ulong),
+										 &temp,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			tv_end = Max(tv_end, temp);
+		}
+		gpusort->msg.pfm.time_dma_send += (tv_end - tv_start) / 1000;
+
+		/*
+		 * Prep kernel execution time
+		 */
+		i = clgss->ev_kern_prep;
+		rc = clGetEventProfilingInfo(clgss->events[i],
+									 CL_PROFILING_COMMAND_START,
+									 sizeof(cl_ulong),
+									 &tv_start,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+		rc = clGetEventProfilingInfo(clgss->events[i],
+									 CL_PROFILING_COMMAND_END,
+									 sizeof(cl_ulong),
+									 &tv_end,
+									 NULL);
+		if (rc != CL_SUCCESS)
+			goto skip_perfmon;
+		gpusort->msg.pfm.time_kern_prep += (tv_end - tv_start) / 1000;
+
+		/*
+		 * Sort kernel execution time
+		 */
+		tv_start = ~0UL;
+		tv_end = 0;
+		for (i=clgss->ev_kern_prep + 1; i < clgss->ev_dma_recv; i++)
+		{
+			rc = clGetEventProfilingInfo(clgss->events[i],
+										 CL_PROFILING_COMMAND_START,
+										 sizeof(cl_ulong),
+										 &temp,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			tv_start = Min(tv_start, temp);
+
+			rc = clGetEventProfilingInfo(clgss->events[i],
+										 CL_PROFILING_COMMAND_END,
+										 sizeof(cl_ulong),
+										 &temp,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			tv_end = Max(tv_end, temp);
+		}
+		gpusort->msg.pfm.time_kern_sort += (tv_end - tv_start) / 1000;
+
+		/*
+		 * DMA recv time
+		 */
+		tv_start = ~0UL;
+        tv_end = 0;
+        for (i=clgss->ev_dma_recv; i < clgss->ev_index; i++)
+		{
+			rc = clGetEventProfilingInfo(clgss->events[clgss->ev_index - i],
+										 CL_PROFILING_COMMAND_START,
+										 sizeof(cl_ulong),
+										 &temp,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			tv_start = Min(tv_start, temp);
+
+			rc = clGetEventProfilingInfo(clgss->events[clgss->ev_index - i],
+										 CL_PROFILING_COMMAND_END,
+										 sizeof(cl_ulong),
+										 &temp,
+										 NULL);
+			if (rc != CL_SUCCESS)
+				goto skip_perfmon;
+			tv_end = Max(tv_end, temp);
+		}
+		gpusort->msg.pfm.time_dma_recv += (tv_end - tv_start) / 1000;
+
+	skip_perfmon:
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clGetEventProfilingInfo (%s)",
+					   opencl_strerror(rc));
+			gpusort->msg.pfm.enabled = false;	/* turn off profiling */
+		}
+	}
+
+	/*
+	 * release opencl resources
+	 */
+	while (clgss->ev_index > 0)
+		clReleaseEvent(clgss->events[--clgss->ev_index]);
+	if (clgss->m_gpusort)
+		clReleaseMemObject(clgss->m_gpusort);
+	if (clgss->m_kds)
+		clReleaseMemObject(clgss->m_kds);
+	if (clgss->kern_prep)
+		clReleaseKernel(clgss->kern_prep);
+	for (i=0; i < clgss->kern_sort_nums; i++)
+		clReleaseKernel(clgss->kern_sort[i]);
+	if (clgss->program && clgss->program != BAD_OPENCL_PROGRAM)
+		clReleaseProgram(clgss->program);
+	if (clgss->kds)
+	{
+		munmap(clgss->kds, clgss->kds->length);
+		close(clgss->kds_fdesc);
+	}
+	if (clgss->kern_sort)
+		free(clgss->kern_sort);
+	free(clgss);
+
+	/* reply the result to backend side */
+	pgstrom_reply_message(&gpusort->msg);
 }
 
 static cl_int
@@ -1533,7 +1694,7 @@ compute_bitonic_workgroup_size(clstate_gpusort *clgss, size_t nhalf,
 static cl_int
 clserv_launch_gpusort_preparation(clstate_gpusort *clgss, size_t nitems)
 {
-	pgstrom_gpusort *gpusort = (pgstrom_gpusort *)clgss->msg;
+	pgstrom_gpusort *gpusort = (pgstrom_gpusort *) clgss->msg;
 	size_t		gwork_sz;
 	size_t		lwork_sz;
 	cl_int		rc;
@@ -1813,7 +1974,7 @@ clserv_launch_bitonic_step(clstate_gpusort *clgss, bool reversing,
  *
  * launcher of:
  *   __kernel void
- *   gpusort_bitonic_merge(__global kern_gpupreagg *kgpreagg,
+ *   gpusort_bitonic_merge(__global kern_gpusort *kgpusort,
  *                         __global kern_data_store *kds,
  *                         __global kern_data_store *ktoast,
  *                         KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
@@ -1901,9 +2062,8 @@ clserv_process_gpusort(pgstrom_message *msg)
 {
 	pgstrom_gpusort	   *gpusort = (pgstrom_gpusort *) msg;
 	pgstrom_data_store *pds = gpusort->pds;
-	kern_data_store	   *kds = pds->kds;
 	clstate_gpusort	   *clgss;
-	cl_uint				nitems = kds->nitems;
+	cl_uint				nitems;
 	Size				length;
 	Size				offset;
 	size_t				nhalf;
@@ -1915,7 +2075,6 @@ clserv_process_gpusort(pgstrom_message *msg)
 	cl_int				rc;
 
 	Assert(StromTagIs(gpusort, GpuSort));
-	Assert(kds->format == KDS_FORMAT_ROW_FMAP);
 
 	/*
 	 * state object of gpusort
@@ -1926,6 +2085,7 @@ clserv_process_gpusort(pgstrom_message *msg)
 		rc = CL_OUT_OF_HOST_MEMORY;
 		goto error;
 	}
+	clgss->msg = &gpusort->msg;
 
 	/*
 	 * First of all, it looks up a program object to be run on
@@ -1956,6 +2116,15 @@ clserv_process_gpusort(pgstrom_message *msg)
 	}
 
 	/*
+	 * Map kern_data_store based on KDS_
+	 */
+	clgss->kds = pgstrom_map_data_store_row_fmap(pds, &clgss->kds_fdesc);
+	if (!clgss->kds)
+		goto error;
+	Assert(pds->kds_length == clgss->kds->length);
+	nitems = clgss->kds->nitems;
+
+	/*
 	 * choose a device to run
 	 */
 	clgss->dindex = pgstrom_opencl_device_schedule(&gpusort->msg);
@@ -1979,7 +2148,7 @@ clserv_process_gpusort(pgstrom_message *msg)
 		goto error;
 	}
 
-	length = KERN_DATA_STORE_LENGTH(kds);
+	length = KERN_DATA_STORE_LENGTH(clgss->kds);
 	clgss->m_kds = clCreateBuffer(opencl_context,
 								  CL_MEM_READ_WRITE,
 								  length,
@@ -2016,13 +2185,13 @@ clserv_process_gpusort(pgstrom_message *msg)
 	gpusort->msg.pfm.num_dma_send++;
 
 	/* __global kern_data_store *kds */
-	length = KERN_DATA_STORE_LENGTH(kds);
+	length = KERN_DATA_STORE_LENGTH(clgss->kds);
 	rc = clEnqueueWriteBuffer(clgss->kcmdq,
 							  clgss->m_kds,
 							  CL_FALSE,
 							  0,
 							  length,
-							  kds,
+							  clgss->kds,
 							  0,
 							  NULL,
 							  &clgss->events[clgss->ev_index]);
@@ -2137,6 +2306,11 @@ error:
 			clReleaseProgram(clgss->program);
 		if (clgss->kern_sort)
 			free(clgss->kern_sort);
+		if (clgss->kds)
+		{
+			munmap(clgss->kds, clgss->kds->length);
+			close(clgss->kds_fdesc);
+		}
 	}
 	gpusort->msg.errcode = rc;
 	pgstrom_reply_message(&gpusort->msg);

@@ -75,32 +75,32 @@ typedef struct
 	/* kern_resultbuf (nrels = 2) shall be located next to the kparams */
 } kern_gpusort;
 
-#define KERN_GPUSORT_PARAMBUF(kgsort)				\
-	((__global kern_parambuf *)(&(kgsort)->kparams))
-#define KERN_GPUSORT_PARAMBUF_LENGTH(kgsort)		\
-	(KERN_GPUSORT_PARAMBUF(kgsort)->length)
-#define KERN_GPUSORT_RESULTBUF(kgsort)			\
-	((__global kern_resultbuf *)				\
-	 ((__global char *)&(kgsort)->kparams +		\
-	  STROMALIGN((kgsort)->kparams.length)))
-#define KERN_GPUSORT_RESULTBUF_LENGTH(kgsort)			\
+#define KERN_GPUSORT_PARAMBUF(kgpusort)				\
+	((__global kern_parambuf *)(&(kgpusort)->kparams))
+#define KERN_GPUSORT_PARAMBUF_LENGTH(kgpusort)		\
+	(KERN_GPUSORT_PARAMBUF(kgpusort)->length)
+#define KERN_GPUSORT_RESULTBUF(kgpusort)			\
+	((__global kern_resultbuf *)					\
+	 ((__global char *)&(kgpusort)->kparams +		\
+	  STROMALIGN((kgpusort)->kparams.length)))
+#define KERN_GPUSORT_RESULTBUF_LENGTH(kgpusort)			\
 	STROMALIGN(offsetof(kern_resultbuf,					\
-		results[KERN_GPUSORT_RESULTBUF(kgsort)->nrels *	\
-				KERN_GPUSORT_RESULTBUF(kgsort)->nrooms]))
-#define KERN_GPUSORT_LENGTH(kgsort)				\
-	(offsetof(kern_gpusort, kparams) +			\
-	 KERN_GPUSORT_PARAMBUF_LENGTH(kgsort) +		\
-	 KERN_GPUSORT_RESULTBUF_LENGTH(kgsort))
-#define KERN_GPUSORT_DMASEND_OFFSET(kgsort)		\
+		results[KERN_GPUSORT_RESULTBUF(kgpusort)->nrels *	\
+				KERN_GPUSORT_RESULTBUF(kgpusort)->nrooms]))
+#define KERN_GPUSORT_LENGTH(kgpusort)				\
+	(offsetof(kern_gpusort, kparams) +				\
+	 KERN_GPUSORT_PARAMBUF_LENGTH(kgpusort) +		\
+	 KERN_GPUSORT_RESULTBUF_LENGTH(kgpusort))
+#define KERN_GPUSORT_DMASEND_OFFSET(kgpusort)		\
 	offsetof(kern_gpusort, kparams)
-#define KERN_GPUSORT_DMASEND_LENGTH(kgsort)			\
-	(KERN_GPUSORT_LENGTH(kgsort) -					\
+#define KERN_GPUSORT_DMASEND_LENGTH(kgpusort)		\
+	(KERN_GPUSORT_LENGTH(kgpusort) -				\
 	 offsetof(kern_gpusort, kparams))
-#define KERN_GPUSORT_DMARECV_OFFSET(kgsort)			\
-	((uintptr_t)KERN_GPUSORT_RESULTBUF(kgsort) -	\
-	 (uintptr_t)(kgsort))
-#define KERN_GPUSORT_DMARECV_LENGTH(kgsort)			\
-	KERN_GPUSORT_RESULTBUF_LENGTH(kgsort)
+#define KERN_GPUSORT_DMARECV_OFFSET(kgpusort)		\
+	((uintptr_t)KERN_GPUSORT_RESULTBUF(kgpusort) -	\
+	 (uintptr_t)(kgpusort))
+#define KERN_GPUSORT_DMARECV_LENGTH(kgpusort)		\
+	KERN_GPUSORT_RESULTBUF_LENGTH(kgpusort)
 
 #ifdef OPENCL_DEVICE_CODE
 /*
@@ -116,11 +116,11 @@ static cl_int gpusort_keycomp(__private cl_int *errcode,
  * gpusort_preparation - fill up krowmap->rindex array.
  */
 __kernel void
-gpusort_preparation(__global kern_gpusort *kgsort,
+gpusort_preparation(__global kern_gpusort *kgpusort,
 					cl_int chunk_id,
 					KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
-	__global kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgsort);
+	__global kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgpusort);
 	size_t		nitems = kresults->nitems;
 	size_t		index;
 	int			errcode = StromError_Success;
@@ -150,13 +150,14 @@ out:
  * reaches the workgroup-size (that is expected to power of 2).
  */
 __kernel void
-gpusort_bitonic_local(__global kern_gpusort *kgsort,
+gpusort_bitonic_local(__global kern_gpusort *kgpusort,
 					  __global kern_data_store *kds,
 					  __global kern_data_store *ktoast,
 					  KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
-	__global kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgsort);
+	__global kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgpusort);
 	__local cl_int *localIdx = LOCAL_WORKMEM;
+	cl_int			errcode = StromError_Success;
 	cl_uint			nitems = kds->nitems;
 	size_t			localID = get_local_id(0);
 	size_t			globalID = get_global_id(0);
@@ -196,7 +197,7 @@ gpusort_bitonic_local(__global kern_gpusort *kgsort,
 				cl_int	pos0 = localIdx[idx0];
 				cl_int	pos1 = localIdx[idx1];
 
-				if (gpupreagg_keycomp(&errcode, kds, ktoast, pos0, pos1) > 0)
+				if (gpusort_keycomp(&errcode, kds, ktoast, pos0, pos1) > 0)
 				{
 					/* swap them */
 					localIdx[idx0] = pos1;
@@ -214,7 +215,7 @@ gpusort_bitonic_local(__global kern_gpusort *kgsort,
 		kresults->results[2 * (prtPos + localSize + localID) + 1] =
 			localIdx[2 * (localSize + localID) + 1];
 out:
-	kern_writeback_error_status(&kgsort->status, errcode, LOCAL_WORKMEM);
+	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
 }
 
 /*
@@ -225,13 +226,13 @@ out:
  * control synchronization of each step not to overrun.
  */
 __kernel void
-gpusort_bitonic_step(__global kern_gpusort *kgsort,
+gpusort_bitonic_step(__global kern_gpusort *kgpusort,
 					 cl_int bitonic_unitsz,
 					 __global kern_data_store *kds,
 					 __global kern_data_store *ktoast,
 					 KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
-	__global kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgsort);
+	__global kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgpusort);
 	cl_int		errcode = StromError_Success;
 	cl_bool		reversing = (bitonic_unitsz < 0 ? true : false);
 	size_t		unitsz = (bitonic_unitsz < 0
@@ -253,14 +254,14 @@ gpusort_bitonic_step(__global kern_gpusort *kgsort,
 
 	pos0 = kresults->results[2 * idx0 + 1];
 	pos1 = kresults->results[2 * idx1 + 1];
-	if (gpupreagg_keycomp(&errcode, kds, ktoast, pos0, pos1) > 0)
+	if (gpusort_keycomp(&errcode, kds, ktoast, pos0, pos1) > 0)
 	{
 		/* swap them */
 		kresults->results[2 * idx0 + 1] = pos1;
 		kresults->results[2 * idx1 + 1] = pos0;
 	}
 out:
-	kern_writeback_error_status(&kgsort->status, errcode, LOCAL_WORKMEM);
+	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
 }
 
 /*
@@ -270,12 +271,12 @@ out:
  * than or equal to the workgroup size.
  */
 __kernel void
-gpusort_bitonic_merge(__global kern_gpupreagg *kgpreagg,
+gpusort_bitonic_merge(__global kern_gpusort *kgpusort,
 					  __global kern_data_store *kds,
 					  __global kern_data_store *ktoast,
 					  KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
-	__global kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgsort);
+	__global kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgpusort);
 	__local cl_int *localIdx = LOCAL_WORKMEM;
 	cl_int			errcode = StromError_Success;
 	cl_uint			nitems = kds->nitems;
@@ -314,7 +315,7 @@ gpusort_bitonic_merge(__global kern_gpupreagg *kgpreagg,
 			size_t	pos0 = localIdx[idx0];
 			size_t	pos1 = localIdx[idx1];
 
-			if (gpupreagg_keycomp(&errcode, kds, ktoast, pos0, pos1) > 0)
+			if (gpusort_keycomp(&errcode, kds, ktoast, pos0, pos1) > 0)
 			{
 				/* swap them */
 				localIdx[idx0] = pos1;
@@ -331,7 +332,7 @@ gpusort_bitonic_merge(__global kern_gpupreagg *kgpreagg,
 		kresults->results[2 * (prtPos + localSize + localID) + 1]
 			= localIdx[localSize + localID];
 out:
-	kern_writeback_error_status(&kgsort->status, errcode, LOCAL_WORKMEM);
+	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
 }
 
 #else

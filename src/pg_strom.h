@@ -190,6 +190,7 @@ StromTagGetLabel(StromObject *sobject)
 		StromTagGetLabelEntry(GpuPreAgg);
 		StromTagGetLabelEntry(GpuHashJoin);
 		StromTagGetLabelEntry(HashJoinTable);
+		StromTagGetLabelEntry(GpuSort);
 		default:
 			snprintf(msgbuf, sizeof(msgbuf),
 					 "unknown tag (%u)", sobject->stag);
@@ -226,7 +227,7 @@ typedef struct {
 	/*-- (special perfmon for gpuhashjoin) --*/
 	cl_uint		num_kern_proj;	/* number of projection kernel execution */
 	cl_ulong	time_kern_proj;	/* time to execute projection kernel */
-	/*-- (special perfmon for gpupreagg) --*/
+	/*-- (special perfmon for gpupreagg, gpusort) --*/
 	cl_uint		num_kern_prep;	/* number of preparation kernel execution */
 	cl_uint		num_kern_sort;	/* number of sort kernel execution */
 	cl_ulong	time_kern_prep;	/* time to execute preparation kernel */
