@@ -1061,6 +1061,8 @@ gpusort_exec_sort(GpuSortState *gss)
                 elog(ERROR, "failed on WaitLatch due to Postmaster die");
 		}
 	}
+	/* OK, data was sorted */
+	gss->sort_done = true;
 
 	/*
 	 * Once we got the sorting completed, just one chunk should be attached
@@ -1091,11 +1093,13 @@ gpusort_exec(CustomScanState *node)
 	if (!gss->sort_done)
 		gpusort_exec_sort(gss);
 
+	Assert(gss->sorted_result != NULL);
 	/* Does outer relation has any rows to read? */
 	if (!gss->sorted_result)
 		return NULL;
 
 	kresults = dsm_segment_address(gss->sorted_result);
+
 	if (gss->sorted_index < kresults->nitems)
 	{
 		cl_long		index = 2 * gss->sorted_index;
@@ -1181,7 +1185,10 @@ gpusort_rescan(CustomScanState *node)
 		Assert(!gss->sorted_chunk);
 
 		if (gss->sorted_result)
+		{
 			dsm_detach(gss->sorted_result);
+			gss->sorted_result = NULL;
+		}
 
 		for (i=0; i < gss->num_chunks; i++)
 		{
@@ -1245,9 +1252,9 @@ gpusort_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		Size		total_consumption;
 
 		if (gss->num_chunks > 1)
-			sort_method = "GPU:bitonic + CPU:merge";
+			sort_method = "GPU/Bitonic + CPU/Merge";
 		else
-			sort_method = "GPU:bitonic";
+			sort_method = "GPU/Bitonic";
 
 		total_consumption = (Size)gss->num_chunks * gss->chunk_size;
 		total_consumption += dsm_segment_map_length(gss->sorted_result);

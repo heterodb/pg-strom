@@ -198,6 +198,9 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 	if (row_index >= kds->nitems)
 		return false;	/* out of range */
 
+	/* make clear the result tuple-slot */
+	ExecClearTuple(slot);
+
 	/* in case of row-store */
 	if (kds->format == KDS_FORMAT_ROW)
 	{
