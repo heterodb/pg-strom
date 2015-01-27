@@ -2031,20 +2031,23 @@ gpupreagg_codegen_projection_psum_x2(StringInfo body, FuncExpr *func,
 		"  %s = %s;\n"
 		"  if (%s.isnull)\n"
 		"    %s.value = %s;\n"
-		"  pg_%s_vstore(%s,%s,errcode,%u,%s,\n"
-		"               pgfn_%s(errcode, %s, %s));\n",
+		"  else\n"
+		"    %s = pgfn_%s(errcode, %s, %s);\n"
+		"  pg_%s_vstore(%s,%s,errcode,%u,%s,%s);\n",
 		temp_label,
-		pgstrom_codegen_expression(clause, pc->context),
+        pgstrom_codegen_expression(clause, pc->context),
 		temp_label,
 		temp_label,
 		zero_label,
-		dtype->type_name,
-		pc->kds_label,
-		pc->ktoast_label,
-		pc->tle->resno - 1,
-		pc->rowidx_label,
+		temp_label,
 		dfunc->func_alias,
 		temp_label,
+		temp_label,
+		dtype->type_name,
+		pc->kds_label,
+        pc->ktoast_label,
+        pc->tle->resno - 1,
+        pc->rowidx_label,
 		temp_label);
 }
 
