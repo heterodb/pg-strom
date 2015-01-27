@@ -256,7 +256,8 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 	width = MAXALIGN(width + sizeof(cl_uint) +
 					 offsetof(HeapTupleHeaderData, t_bits) +
 					 BITMAPLEN(list_length(subplan->targetlist)));
-	chunk_size = (Size)((double)width * ntuples * 1.15) + 1024;
+	chunk_size = (Size)((double)width * ntuples * 1.10) + 1024;
+
 	if (pgstrom_shmem_maxalloc() > chunk_size)
 		num_chunks = 1;
 	else
@@ -370,14 +371,14 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 			"  pg_%s_t KVAR_Y%d"
 			" = pg_%s_vref(kds,ktoast,errcode,%d,y_index);\n",
 			dtype->type_name, i+1,
-			dtype->type_name, colidx,
+			dtype->type_name, colidx - 1,
 			dtype->type_name, i+1,
-			dtype->type_name, colidx);
+			dtype->type_name, colidx - 1);
 
 		/* logic to compare */
 		appendStringInfo(
 			&body,
-			"  /* sort key comparison on the resource %d */"
+			"  /* sort key comparison on the resource %d */\n"
 			"  if (!KVAR_X%d.isnull && !KVAR_Y%d.isnull)\n"
 			"  {\n"
 			"    comp = pgfn_%s(errcode, KVAR_X%d, KVAR_Y%d);\n"
@@ -405,8 +406,9 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 					 "                size_t x_index,\n"
 					 "                size_t y_index)\n"
 					 "{\n"
-					 "%s\n"		/* variables declaration */
+					 "%s"		/* variables declaration */
 					 "  pg_int4_t comp;\n"
+					 "\n"
 					 "%s"		/* comparison body */
 					 "  return 0;\n"
 					 "}\n",
@@ -871,8 +873,6 @@ gpusort_check_gpu_tasks(GpuSortState *gss)
 		Assert(gss->num_gpu_running > 0);
 		gss->num_gpu_running--;
 
-		if (msg->pfm.enabled)
-			pgstrom_perfmon_add(&gss->pfm, &msg->pfm);
 		Assert(StromTagIs(msg, GpuSort));
 		gpusort = (pgstrom_gpusort *) msg;
 		kresults = KERN_GPUSORT_RESULTBUF(&gpusort->kern);

@@ -181,7 +181,7 @@ gpusort_bitonic_local(__global kern_gpusort *kgpusort,
 	/* bitonic sorting */
 	for (blockSize = 2; blockSize <= prtSize; blockSize *= 2)
 	{
-		for (unitSize = blockSize; 2 <= unitSize; unitSize /= 2)
+		for (unitSize = blockSize; unitSize >= 2; unitSize /= 2)
         {
 			size_t	unitMask		= unitSize - 1;
 			size_t	halfUnitSize	= unitSize / 2;
@@ -214,7 +214,7 @@ gpusort_bitonic_local(__global kern_gpusort *kgpusort,
 	if (localSize + localID < localEntry)
 		kresults->results[2 * (prtPos + localSize + localID) + 1]
 			= localIdx[localSize + localID];
-out:
+
 	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
 }
 
@@ -284,17 +284,16 @@ gpusort_bitonic_merge(__global kern_gpusort *kgpusort,
     size_t			globalID = get_global_id(0);
     size_t			localSize = get_local_size(0);
 	size_t			prtID = globalID / localSize;	/* partition ID */
-	size_t			prtSize = localSize * 2;		/* partition Size */
+	size_t			prtSize = 2 * localSize;		/* partition Size */
 	size_t			prtPos = prtID * prtSize;		/* partition Position */
 	size_t			localEntry;
-	size_t			blockSize;
+	size_t			blockSize = prtSize;
 	size_t			unitSize = prtSize;
 
 	/* Load index to localIdx */
 	localEntry = (prtPos+prtSize < nitems) ? prtSize : (nitems-prtPos);
 	if (localID < localEntry)
-		localIdx[localID] =
-			kresults->results[2 * (prtPos + localID) + 1];
+		localIdx[localID] = kresults->results[2 * (prtPos + localID) + 1];
 
 	if(localSize + localID < localEntry)
 		localIdx[localSize + localID] =
@@ -331,7 +330,7 @@ gpusort_bitonic_merge(__global kern_gpusort *kgpusort,
 	if (localSize + localID < localEntry)
 		kresults->results[2 * (prtPos + localSize + localID) + 1]
 			= localIdx[localSize + localID];
-out:
+
 	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
 }
 
