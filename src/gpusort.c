@@ -630,7 +630,7 @@ pgstrom_release_gpusort(pgstrom_message *msg)
 static pgstrom_gpusort *
 pgstrom_create_gpusort(GpuSortState *gss)
 {
-	pgstrom_gpusort	   *gpusort;
+	pgstrom_gpusort	   *gpusort = NULL;
 	kern_resultbuf	   *kresults;
 	pgstrom_data_store *pds = NULL;
 	TupleTableSlot	   *slot;
@@ -638,6 +638,10 @@ pgstrom_create_gpusort(GpuSortState *gss)
 	cl_uint				nitems;
 	Size				length;
 	cl_int				chunk_id = -1;
+	struct timeval		tv1, tv2;
+
+	if (gss->pfm.enabled)
+		gettimeofday(&tv1, NULL);
 
 	/*
 	 * Load tuples from the underlying plan node
@@ -666,6 +670,7 @@ pgstrom_create_gpusort(GpuSortState *gss)
 		{
 			tupdesc = gss->css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
 			pds = pgstrom_create_data_store_row_fmap(tupdesc, gss->chunk_size);
+
 			chunk_id = gss->num_chunks++;
 			if (chunk_id >= gss->num_chunks_limit)
 			{
@@ -690,8 +695,9 @@ pgstrom_create_gpusort(GpuSortState *gss)
 		}
 	}
 
+	/* can we read any tuples? */
 	if (!pds)
-		return NULL;
+		goto out;
 
 	/* Makea a pgstrom_gpusort object based on the data-store */
 	nitems = pds->kds->nitems;
@@ -719,8 +725,14 @@ pgstrom_create_gpusort(GpuSortState *gss)
 	memset(kresults, 0, sizeof(kern_resultbuf));
 	kresults->nrels = 2;
 	kresults->nrooms = nitems;
+	kresults->nitems = nitems;	/* no records will lost */
 	pgstrom_track_object(&gpusort->msg.sobj, 0);
-
+out:
+	if (gss->pfm.enabled)
+	{
+		gettimeofday(&tv2, NULL);
+		gss->pfm.time_outer_load += timeval_diff(&tv1, &tv2);
+	}
 	return gpusort;
 }
 
@@ -810,11 +822,11 @@ gpusort_merge_gpu_chunks(GpuSortState *gss, pgstrom_gpusort *gpusort)
 		memcpy(kresults_cpu, kresults_gpu, length);
 
 		/* pds is still valid, but gpusort is no longer referenced */
+		pgstrom_untrack_object(&gpusort->msg.sobj);
 		pgstrom_put_message(&gpusort->msg);
 
 		/* to be merged with next chunk */
 		gss->sorted_chunk = cpusort;
-
 		return NULL;
 	}
 	cpusort = gss->sorted_chunk;
@@ -830,7 +842,12 @@ gpusort_merge_gpu_chunks(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	kresults_cpu = dsm_segment_address(cpusort->litems_dsm);
 	memcpy(kresults_cpu, kresults_gpu, length);
 
+	elog(INFO, "merge gpu + cpu chunks (%u + %u) -> %u",
+		 kresults_gpu->nitems, kresults_cpu->nitems,
+		 kresults_gpu->nitems + kresults_cpu->nitems);
+
 	/* pds is still valid, but gpusort is no longer referenced */
+	pgstrom_untrack_object(&gpusort->msg.sobj);
 	pgstrom_put_message(&gpusort->msg);
 
 	/* OK, ritems/litems are filled, let's kick the CPU merge sort */
@@ -882,6 +899,10 @@ gpusort_check_gpu_tasks(GpuSortState *gss)
 								pgstrom_strerror(msg->errcode))));
 			}
 		}
+		/* add performance information */
+		if (msg->pfm.enabled)
+			pgstrom_perfmon_add(&gss->pfm, &msg->pfm);
+		/* try to form it to cpusort, and merge */
 		cpusort = gpusort_merge_gpu_chunks(gss, gpusort);
 		if (cpusort)
 			dlist_push_tail(&gss->pending_cpu_chunks, &cpusort->chain);
@@ -979,6 +1000,7 @@ static void
 gpusort_exec_sort(GpuSortState *gss)
 {
 	pgstrom_gpusort	   *gpusort;
+	pgstrom_cpusort	   *cpusort;
 	int					rc;
 
 	while (!gss->scan_done ||
@@ -1039,9 +1061,21 @@ gpusort_exec_sort(GpuSortState *gss)
                 elog(ERROR, "failed on WaitLatch due to Postmaster die");
 		}
 	}
+
 	/*
-	 * XXX - needs to revise condition for loop
+	 * Once we got the sorting completed, just one chunk should be attached
+	 * on the gss->sorted_chunk. If NULL, it means outer relation has no
+	 * rows anywhere.
 	 */
+	cpusort = gss->sorted_chunk;
+	if (!cpusort)
+		gss->sorted_result = NULL;
+	else
+	{
+		gss->sorted_result = cpusort->oitems_dsm;
+		pfree(cpusort);
+		gss->sorted_chunk = NULL;
+	}
 	gss->sorted_index = 0;
 }
 
@@ -1056,6 +1090,10 @@ gpusort_exec(CustomScanState *node)
 
 	if (!gss->sort_done)
 		gpusort_exec_sort(gss);
+
+	/* Does outer relation has any rows to read? */
+	if (!gss->sorted_result)
+		return NULL;
 
 	kresults = dsm_segment_address(gss->sorted_result);
 	if (gss->sorted_index < kresults->nitems)
@@ -1244,6 +1282,9 @@ gpusort_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 			ExplainPropertyText("Sort Space Type", sort_storage, es);
 		}
 	}
+	show_device_kernel(gss->dprog_key, es);
+	if (es->analyze && gss->pfm.enabled)
+		pgstrom_perfmon_explain(&gss->pfm, es);
 }
 
 /*
@@ -1899,6 +1940,17 @@ clserv_launch_bitonic_step(clstate_gpusort *clgss, bool reversing,
 	}
 	clgss->kern_sort[clgss->kern_sort_nums++] = kernel;
 
+	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
+									   kernel,
+									   clgss->dindex,
+									   false,
+									   work_sz,
+									   sizeof(int)))
+	{
+		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
+		return StromError_OpenCLInternal;
+	}
+
 	rc = clSetKernelArg(kernel,
 						0,		/* __global kern_gpusort *kgsort */
 						sizeof(cl_mem),
@@ -2236,7 +2288,6 @@ clserv_process_gpusort(pgstrom_message *msg)
 	rc = clserv_launch_bitonic_local(clgss, gwork_sz, lwork_sz);
 	if (rc != CL_SUCCESS)
 		goto error;
-
 	/* Sorting inter workgroups */
 	for (i = 2 * lwork_sz; i < gwork_sz; i *= 2)
 	{
@@ -2276,7 +2327,7 @@ clserv_process_gpusort(pgstrom_message *msg)
 				   opencl_strerror(rc));
 		goto error;
 	}
-	clgss->ev_index++;
+	clgss->ev_dma_recv = clgss->ev_index++;
 	gpusort->msg.pfm.bytes_dma_recv += length;
     gpusort->msg.pfm.num_dma_recv++;
 

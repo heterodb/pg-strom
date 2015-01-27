@@ -209,11 +209,11 @@ gpusort_bitonic_local(__global kern_gpusort *kgpusort,
 	}
 
 	if (localID < localEntry)
-		kresults->results[2 * (prtPos + localID) + 1] =
-			localIdx[2 * localID + 1];
+		kresults->results[2 * (prtPos + localID) + 1]
+			= localIdx[localID];
 	if (localSize + localID < localEntry)
-		kresults->results[2 * (prtPos + localSize + localID) + 1] =
-			localIdx[2 * (localSize + localID) + 1];
+		kresults->results[2 * (prtPos + localSize + localID) + 1]
+			= localIdx[localSize + localID];
 out:
 	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
 }

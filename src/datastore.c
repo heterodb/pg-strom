@@ -320,6 +320,7 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 					elog(LOG, "Bug? failed to unmap kds:%p of \"%s\" (%s)",
 						 pds->kds, pds->kds_fname, strerror(errno));
 				CloseTransientFile(pds->kds_fdesc);
+				unlink(pds->kds_fname);
 			}
 		}
 	}
