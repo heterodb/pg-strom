@@ -473,6 +473,15 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	cost_gpusort(&startup_cost, &total_cost,
 				 &num_chunks, &chunk_size,
 				 subplan);
+
+	elog(DEBUG1,
+		 "GpuSort (cost=%.2f..%.2f) has%sadvantage to Sort (cost=%.2f..%.2f)",
+		 startup_cost,
+		 total_cost,
+		 total_cost >= sort->plan.total_cost ? " no " : " ",
+		 sort->plan.startup_cost,
+		 sort->plan.total_cost);
+
 	if (!debug_force_gpusort && total_cost >= sort->plan.total_cost)
 		return;
 
