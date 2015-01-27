@@ -2597,6 +2597,14 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 				   &newcost_agg,
 				   &newcost_sort,
 				   &newcost_gpreagg);
+	elog(DEBUG1,
+		 "GpuPreAgg (cost=%.2f..%.2f) has%sadvantage to Agg(cost=%.2f...%.2f)",
+		 newcost_agg.startup_cost,
+		 newcost_agg.total_cost,
+		 agg->plan.total_cost <= newcost_agg.total_cost ? " no " : " ",
+		 agg->plan.startup_cost,
+		 agg->plan.total_cost);
+
 	if (!debug_force_gpupreagg &&
 		agg->plan.total_cost <= newcost_agg.total_cost)
 		return;
