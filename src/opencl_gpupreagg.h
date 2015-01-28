@@ -1204,13 +1204,13 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 #define AGGCALC_GLOBAL_PMAX_FLOAT(errcode,accum_isnull,accum_value,		\
 								  new_isnull,new_value)					\
 	AGGCALC_GLOBAL_TEMPLATE_FLOAT(errcode,accum_isnull,accum_value,		\
-		new_isnull,(cl_float)(new_value),CHECK_OVERFLOW_NONE,			\
+	    new_isnull,as_float((cl_uint)(new_value)),CHECK_OVERFLOW_NONE, \
 		gatomic_max_float((__global cl_float *)(accum_value),			\
 						  as_float((cl_uint)(new_value))))
 #define AGGCALC_GLOBAL_PMAX_DOUBLE(errcode,accum_isnull,accum_value,	\
 								   new_isnull,new_value)				\
 	AGGCALC_GLOBAL_TEMPLATE_DOUBLE(errcode,accum_isnull,accum_value,	\
-		new_isnull,(cl_double)(new_value),CHECK_OVERFLOW_NONE,			\
+		new_isnull,as_double(new_value),CHECK_OVERFLOW_NONE,			\
 		gatomic_max_double((__global cl_double *)(accum_value),			\
 						   as_double(new_value)))
 #define AGGCALC_GLOBAL_PMAX_NUMERIC(errcode,accum_isnull,accum_value,	\
@@ -1238,13 +1238,13 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 #define AGGCALC_GLOBAL_PMIN_FLOAT(errcode,accum_isnull,accum_value,		\
 								  new_isnull,new_value)					\
 	AGGCALC_GLOBAL_TEMPLATE_FLOAT(errcode,accum_isnull,accum_value,		\
-		new_isnull,(cl_float)(new_value),CHECK_OVERFLOW_NONE,			\
+	    new_isnull,as_float((cl_uint)(new_value)),CHECK_OVERFLOW_NONE,	\
 		gatomic_min_float((__global cl_float *)(accum_value),			\
 						  as_float((cl_uint)(new_value))))
 #define AGGCALC_GLOBAL_PMIN_DOUBLE(errcode,accum_isnull,accum_value,	\
 								   new_isnull,new_value)				\
 	AGGCALC_GLOBAL_TEMPLATE_DOUBLE(errcode,accum_isnull,accum_value,	\
-		new_isnull,(cl_double)(new_value),CHECK_OVERFLOW_NONE,			\
+		new_isnull,as_double(new_value),CHECK_OVERFLOW_NONE,			\
 		gatomic_min_double((__global cl_double *)(accum_value),			\
 						   as_double(new_value)))
 #define AGGCALC_GLOBAL_PMIN_NUMERIC(errcode,accum_isnull,accum_value,	\
@@ -1272,13 +1272,13 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 #define AGGCALC_GLOBAL_PADD_FLOAT(errcode,accum_isnull,accum_value,		\
 								  new_isnull,new_value)					\
 	AGGCALC_GLOBAL_TEMPLATE_FLOAT(errcode,accum_isnull,accum_value,		\
-		new_isnull,(cl_float)(new_value),CHECK_OVERFLOW_FLOAT,			\
+	    new_isnull,as_float((cl_uint)(new_value)),CHECK_OVERFLOW_FLOAT,	\
 		gatomic_add_float((__global cl_float *)(accum_value),			\
 						  as_float((cl_uint)(new_value))))
 #define AGGCALC_GLOBAL_PADD_DOUBLE(errcode,accum_isnull,accum_value,	\
 								   new_isnull,new_value)				\
 	AGGCALC_GLOBAL_TEMPLATE_DOUBLE(errcode,accum_isnull,accum_value,	\
-		new_isnull,(cl_double)(new_value),CHECK_OVERFLOW_FLOAT,			\
+		new_isnull,as_double(new_value),CHECK_OVERFLOW_FLOAT,			\
 		gatomic_add_double((__global cl_double *)(accum_value),			\
 						   as_double(new_value)))
 #define AGGCALC_GLOBAL_PADD_NUMERIC(errcode,accum_isnull,accum_value,	\
