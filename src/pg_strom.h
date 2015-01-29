@@ -244,6 +244,54 @@ typedef struct {
 	 ((tv1)->tv_sec * 1000000L + (tv1)->tv_usec))
 
 /*
+ *
+ *
+ *
+ *
+ */
+typedef struct
+{
+	dlist_node		chain;
+	int				refcnt;
+	ResourceOwner	resowner;
+	MemoryContext	memcxt;
+	dlist_head		state_list;
+	cl_int			num_context;
+	CUcontext		dev_context[FLEXIBLE_ARRAY_MEMBER];
+} GpuContext;
+
+typedef struct GpuTaskState
+{
+	dlist_node		chain;
+	GpuContext	   *gcontext;
+	CUmodule		kern_module;
+	s_lock			lock;	/* protection of the list below */
+	dlist_head		running_tasks;
+	dlist_head		pending_tasks;
+	dlist_head		completed_tasks;
+	void		  (*cb_cleanup)(struct GpuTaskState *gtstate);
+	pgstrom_perfmon	pfm_sum;
+} GpuTaskState;
+
+typedef struct GpuTask
+{
+	dlist_node		chain;
+	GpuTaskState   *gstate;
+	CUstream		stream;
+	cl_int			dindex;
+	cl_int			errcode;
+	void		  (*cb_process)(struct GpuTask *gtask);
+	void		  (*cb_release)(struct GpuTask *gtask);
+	pgstrom_perfmon	pfm;
+} GpuTask;
+
+
+
+
+
+
+#if 0
+/*
  * pgstrom_queue
  *
  * A message queue allocated on shared memory, to send messages to/from
@@ -273,6 +321,7 @@ typedef struct pgstrom_message {
 	void	(*cb_release)(struct pgstrom_message *message);
 	pgstrom_perfmon	pfm;
 } pgstrom_message;
+#endif
 
 /*
  * Kernel Param/Const buffer
