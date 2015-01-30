@@ -188,13 +188,11 @@ pgstrom_fixup_kernel_numeric(Datum datum)
 }
 
 bool
-pgstrom_fetch_data_store(TupleTableSlot *slot,
-						 pgstrom_data_store *pds,
-						 size_t row_index,
-						 HeapTuple tuple)
+kern_fetch_data_store(TupleTableSlot *slot,
+					  kern_data_store *kds,
+					  size_t row_index,
+					  HeapTuple tuple)
 {
-	kern_data_store *kds = pds->kds;
-
 	if (row_index >= kds->nitems)
 		return false;	/* out of range */
 
@@ -264,6 +262,15 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 	}
 	elog(ERROR, "Bug? unexpected data-store format: %d", kds->format);
 	return false;
+}
+
+bool
+pgstrom_fetch_data_store(TupleTableSlot *slot,
+						 pgstrom_data_store *pds,
+						 size_t row_index,
+						 HeapTuple tuple)
+{
+	return kern_fetch_data_store(slot, pds->kds, row_index, tuple);
 }
 
 void
@@ -635,42 +642,36 @@ __pgstrom_create_data_store_row_fmap(const char *filename, int lineno,
 }
 
 kern_data_store *
-pgstrom_map_data_store_row_fmap(pgstrom_data_store *pds, int *p_fdesc)
+filemap_kern_data_store(const char *kds_fname, size_t kds_length, int *p_fdesc)
 {
 	kern_data_store	   *kds;
 	int					kds_fdesc;
 
-	/* we expect this function is called by clserver */
-	Assert(pgstrom_i_am_clserv);
-	/* only file-mapped row store is valid */
-	Assert(pds->kds_fname != NULL);
-
-	kds_fdesc = open(pds->kds_fname, O_RDWR, 0);
+	kds_fdesc = open(kds_fname, O_RDWR, 0);
 	if (kds_fdesc < 0)
 	{
-		clserv_log("failed to open \"%s\" (%s)",
-				   pds->kds_fname, strerror(errno));
+		clserv_log("failed to open \"%s\" (%s)", kds_fname, strerror(errno));
 		return NULL;
 	}
 
-	kds = mmap(NULL, pds->kds_length,
+	kds = mmap(NULL, kds_length,
 			   PROT_READ | PROT_WRITE,
 			   MAP_SHARED | MAP_POPULATE,
 			   kds_fdesc, 0);
 	if (kds == MAP_FAILED)
 	{
-		clserv_log("failed to map \"%s\" (%s)",
-				   pds->kds_fname, strerror(errno));
+		clserv_log("failed to map \"%s\" (%s)", kds_fname, strerror(errno));
 		close(kds_fdesc);
 		return NULL;
 	}
 	Assert(kds->format == KDS_FORMAT_ROW_FMAP);
-	*p_fdesc = kds_fdesc;
+	if (p_fdesc)
+		*p_fdesc = kds_fdesc;
 	return kds;
 }
 
 void
-pgstrom_unmap_data_store_row_fmap(kern_data_store *kds, int fdesc)
+fileunmap_kern_data_store(kern_data_store *kds, int fdesc)
 {
 	int		rc;
 

@@ -515,6 +515,10 @@ extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
 									 pgstrom_data_store *pds,
 									 size_t row_index,
 									 HeapTuple tuple);
+extern bool kern_fetch_data_store(TupleTableSlot *slot,
+								  kern_data_store *kds,
+								  size_t row_index,
+								  HeapTuple tuple);
 extern void pgstrom_release_data_store(pgstrom_data_store *pds);
 extern pgstrom_data_store *
 __pgstrom_create_data_store_row(const char *filename, int lineno,
@@ -538,9 +542,9 @@ __pgstrom_create_data_store_row_fmap(const char *filename, int lineno,
 	__pgstrom_create_data_store_row_fmap(__FILE__,__LINE__,		\
 										 (tupdesc),(length))
 extern kern_data_store *
-pgstrom_map_data_store_row_fmap(pgstrom_data_store *pds, int *p_fdesc);
+filemap_kern_data_store(const char *kds_fname, size_t kds_length, int *fdesc);
 extern void
-pgstrom_unmap_data_store_row_fmap(kern_data_store *kds, int fdesc);
+fileunmap_kern_data_store(kern_data_store *kds, int fdesc);
 
 extern pgstrom_data_store *
 __pgstrom_create_data_store_tupslot(const char *filename, int lineno,

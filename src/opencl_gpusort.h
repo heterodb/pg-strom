@@ -168,14 +168,12 @@ gpusort_bitonic_local(__global kern_gpusort *kgpusort,
 	size_t			localEntry;
 	size_t			blockSize;
 	size_t			unitSize;
+	size_t			i;
 
 	/* create row index and then store to localIdx */
 	localEntry = ((prtPos + prtSize < nitems) ? prtSize : (nitems - prtPos));
-	if (localID < localEntry)
-		localIdx[localID] = prtPos + localID;
-
-	if (localSize + localID < localEntry)
-		localIdx[localSize + localID] = prtPos + localSize + localID;
+	for (i = localID; i < localEntry; i += localSize)
+		localIdx[i] = prtPos + i;
     barrier(CLK_LOCAL_MEM_FENCE);
 
 	/* bitonic sorting */
@@ -207,14 +205,12 @@ gpusort_bitonic_local(__global kern_gpusort *kgpusort,
 			barrier(CLK_LOCAL_MEM_FENCE);
 		}
 	}
+	/* write back local sorted result */
+	for (i=localID; i < localEntry; i+=localSize)
+		kresults->results[2 * (prtPos + i) + 1] = localIdx[i];
+	barrier(CLK_LOCAL_MEM_FENCE);
 
-	if (localID < localEntry)
-		kresults->results[2 * (prtPos + localID) + 1]
-			= localIdx[localID];
-	if (localSize + localID < localEntry)
-		kresults->results[2 * (prtPos + localSize + localID) + 1]
-			= localIdx[localSize + localID];
-
+	/* any error during run-time? */
 	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
 }
 
@@ -289,15 +285,12 @@ gpusort_bitonic_merge(__global kern_gpusort *kgpusort,
 	size_t			localEntry;
 	size_t			blockSize = prtSize;
 	size_t			unitSize = prtSize;
+	size_t			i;
 
-	/* Load index to localIdx */
+	/* Load index to localIdx[] */
 	localEntry = (prtPos+prtSize < nitems) ? prtSize : (nitems-prtPos);
-	if (localID < localEntry)
-		localIdx[localID] = kresults->results[2 * (prtPos + localID) + 1];
-
-	if(localSize + localID < localEntry)
-		localIdx[localSize + localID] =
-			kresults->results[2 * (prtPos + localSize + localID) + 1];
+	for (i = localID; localID < localEntry; i += localSize)
+		localIdx[i] = kresults->results[2 * (prtPos + i)];
 	barrier(CLK_LOCAL_MEM_FENCE);
 
 	/* merge two sorted blocks */
@@ -323,13 +316,10 @@ gpusort_bitonic_merge(__global kern_gpusort *kgpusort,
 		}
 		barrier(CLK_LOCAL_MEM_FENCE);
 	}
-
-	if (localID < localEntry)
-		kresults->results[2 * (prtPos + localID) + 1] = localIdx[localID];
-
-	if (localSize + localID < localEntry)
-		kresults->results[2 * (prtPos + localSize + localID) + 1]
-			= localIdx[localSize + localID];
+	/* Save index to kresults[] */
+	for (i = localID; i < localEntry; i += localSize)
+		kresults->results[2 * (prtPos + i) + 1] = localIdx[i];
+	barrier(CLK_LOCAL_MEM_FENCE);
 
 	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
 }
