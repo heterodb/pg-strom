@@ -169,14 +169,22 @@ pgstrom_release_gpucontext(GpuContext *gcontext)
 		Assert(gstate->gcontext == gcontext);
 		dlist_delete(&gtstate->chain);
 
-		/* release common resources */
-		if (gstate->kern_module)
+		/* release cuda module, if any */
+		if (gstate->cuda_module)
 		{
-			rc = cuModuleUnload(gstate->kern_module);
+			rc = cuModuleUnload(gstate->cuda_module);
 			if (rc != CUDA_SUCCESS)
 				elog(WARNING, "failed on cuModuleUnload: %s",
 					 cuda_strerror(rc));
 		}
+		/* release cuda binary image, if any */
+		if (gstate->cuda_program && 
+			gstate->cuda_program != CUDA_BINARY_BUILD_IN_PROGRESS &&
+			gstate->cuda_program != CUDA_BINARY_BUILD_FAILURE)
+		{
+			pgstrom_put_cuda_program(gstate->cuda_program);
+		}
+
 		/* release specific resources */
 		if (gstate->cb_cleanup)
 			gstate->cb_cleanup(gtstate);

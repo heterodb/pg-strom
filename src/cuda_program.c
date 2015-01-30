@@ -23,14 +23,17 @@
 typedef struct
 {
 	dlist_node	chain;
-	int			shift;	/* memory block class of this entry */
-	pg_crc32	crc;	/* extra_flags + cuda_source */
+	dlist_node	lru_chain;
+	int			shift;	/* block class of this entry */
+	int			refcnt;	/* 0 means free entry */
+	pg_crc32	crc;	/* hash value by extra_flags + cuda_source */
 	int			extra_flags;
-	int			refcnt;
 	char	   *cuda_source;
 	Size		cuda_source_len;
 	char	   *cuda_binary;
 	Size		cuda_binary;
+	char	   *build_log;
+	Size		build_log_len;
 	char		data[FLEXIBLE_ARRAY_MEMBER];
 } program_cache_entry;
 
@@ -48,6 +51,7 @@ typedef struct
 	long		num_free[PGCACHE_MAX_BITS];
 	dlist_head	free_list[PGCACHE_MAX_BITS];
 	dlist_head	active_list[PGCACHE_HASH_SIZE];
+	dlist_head	lru_list;
 	program_cache_entry *entry_begin;	/* start address of entries */
 	program_cache_entry *entry_end;		/* end address of entries */
 	Bitmapset	waiting_backends;	/* flexible length */
@@ -58,44 +62,48 @@ static Size		program_cache_size;
 static volatile program_cache_head *pgcache_head;
 
 /*
+ * pgstrom_program_cache_*
  *
- * XXX - caller must have lock of supplied zone
+ * a simple buddy memory allocation on the shared memory segment.
  */
 static bool
 pgstrom_program_cache_split(int shift)
 {
-	shmem_block	   *block;
+	program_cache_entry *entry;
 	dlist_node	   *dnode;
 	int				index;
 	int				i;
 
 	Assert(shift > PGCACHE_MIN_BITS && shift <= PGCACHE_MAX_BITS);
-	if (dlist_is_empty(&zone->free_list[shift]))
+	if (dlist_is_empty(&pgcache_head->free_list[shift]))
 	{
 		if (shift == SHMEM_BLOCKSZ_BITS_RANGE ||
 			!pgstrom_program_cache_split(shift + 1))
 			return false;
 	}
-	Assert(!dlist_is_empty(&zone->free_list[shift]));
+	Assert(!dlist_is_empty(&pgcache_head->free_list[shift]));
 
-	dnode = dlist_pop_head_node(&zone->free_list[shift]);
-	zone->num_free[shift]--;
+	dnode = dlist_pop_head_node(&pgcache_head->free_list[shift]);
+	pgcache_head->num_free[shift]--;
 
-	block = dlist_container(shmem_block, chain, dnode);
-	block->blocksz = (1 << (shift-1)) * SHMEM_BLOCKSZ;
-	index = block - &zone->blocks[0];
-	Assert((index & ((1UL << shift) - 1)) == 0);
-	dlist_push_tail(&zone->free_list[shift-1], &block->chain);
+	entry = dlist_container(program_cache_entry, chain, dnode);
+	Assert(entry_1->shift == shift);
+	Assert((((uintptr_t)entry -
+			 (uintptr_t)pgcache_head->data) & ((1UL << shift) - 1)) == 0);
+	shift--;
 
-	/* is it exactly block head? */
-	for (i=1; i < (1 << shift); i++)
-		Assert(!BLOCK_IS_ACTIVE(block+i) && !BLOCK_IS_FREE(block+i));
+	/* earlier half */
+	entry->shift = shift;
+	entry->refcnt = 0;
+	dlist_push_tail(&pgcache_head->free_list[shift], &entry->chain);
+	pgcache_head->num_free[shift]++;
 
-	block += (1 << (shift - 1));
-	block->blocksz = (1 << (shift-1)) * SHMEM_BLOCKSZ;
-	dlist_push_tail(&zone->free_list[shift-1], &block->chain);
-
-	zone->num_free[shift-1] += 2;
+	/* later half */
+	entry = (program_cache_entry *)((char *)entry + (1UL << shift));
+	entry->shift = shift;
+	entry->refcnt = 0;
+	dlist_push_tail(&pgcache_head->free_list[shift], &entry->chain);
+	pgcache_head->num_free[shift]++;
 
 	return true;
 }
@@ -104,12 +112,11 @@ static pgcache_entry *
 pgstrom_program_cache_alloc(Size required)
 {
 	program_cache_entry *entry;
-	dlist_node	*dnode;
-	Size	total_size;
-	int		shift;
-	int		index;
-	void   *address;
-	int		i;
+	dlist_node *dnode;
+	Size		total_size;
+	int			shift;
+	int			i;
+	uint	   *magic;
 
 	total_size = offsetof(program_cache_entry,
 						  data[required + sizeof(cl_uint)]);
@@ -119,7 +126,7 @@ pgstrom_program_cache_alloc(Size required)
 	shift = get_next_log2(total_size);
 	if (dlist_is_empty(&pgcache_head->free_list[shift]))
 	{
-		if (!pgstrom_shmem_zone_block_split(shift + 1))
+		if (!pgstrom_program_cache_split(shift + 1))
 			return NULL;
 	}
 	Assert(!dlist_is_empty(&pgcache_head->free_list[shift]));
@@ -131,7 +138,8 @@ pgstrom_program_cache_alloc(Size required)
 	memset(entry, 0, sizeof(program_cache_entry));
 	entry->shift = shift;
 	entry->refcnt = 1;
-	*((cl_uint *)(entry->data + required)) = PGCACHE_MAGIC;
+	magic = (uint *)((char *)entry + (1UL << shift) - sizeof(cl_uint));
+	*magic = PGCACHE_MAGIC;
 
 	/* update statictics */
 	pgcache_head->num_free[shift]--;
@@ -143,13 +151,13 @@ pgstrom_program_cache_alloc(Size required)
 static void
 pgstrom_program_cache_free(program_cache_entry *entry)
 {
-	program_cache_entry *buddy;
 	int			shift = entry->shift;
 	Size		offset;
 
 	Assert(entry->refcnt == 0);
 
 	offset = (uintptr_t)entry - (uintptr_t)pgcache_head->entry_begin;
+	Assert((offset & ((1UL << shift) - 1)) == 0);
 	pgcache_head->num_active[shift]--;
 
 	/* try to merge buddy entry, if it is also free */
@@ -177,6 +185,126 @@ pgstrom_program_cache_free(program_cache_entry *entry)
 	}
 	pgcache_head->num_free[shift]++;
 	dlist_push_head(&pgcache_head->free_list[shift], &chunk->chain);
+}
+
+
+
+
+
+statuc viud
+pgstrom_build_cuda_program(Datum cuda_program)
+{
+	program_cache_entry *entry;
+	static size_t	common_code_length = 0;
+
+
+	entry = (program_cache_entry *) DatumGetPointer(cuda_program);
+
+	// mktemp
+
+	// generate file
+
+	if (!common_code_length)
+		common_code_length = strlen(pgstrom_cuda_common_code);
+
+	// target capability?
+
+	system(nvcc ....);
+
+	// make a new entry
+
+	// remove temporary file (or retain for debug)
+
+	// set latches
+
+}
+
+
+
+static const void *
+pgstrom_get_cuda_program(const char *source, int32 extra_flags)
+{
+	program_cache_entry	*entry;
+	Size		source_len = strlen(source);
+	Size		required;
+	pg_crc32	crc;
+
+	/* makes a hash value */
+	INIT_CRC32C(crc);
+	COMP_CRC32C(crc, &extra_flags, sizeof(int32));
+	COMP_CRC32C(crc, source, source_len);
+	FIN_CRC32C(crc);
+
+retry:
+	hindex = crc % PGCACHE_HASH_SIZE;
+	SpinLockAcquire(&pgcache_head->lock);
+	dlist_foreach (iter, &pgcache_head->active_list[hindex])
+	{
+		entry = dlist_container(program_cache_entry, chain, iter.cur);
+
+		if (entry->crc == crc &&
+			entry->extra_flags == extra_flags &&
+			entry->cuda_source_len == source_len &&
+			strcmp(entry->cuda_source, source) == 0)
+		{
+			if (!entry->cuda_binary)
+				entry = NULL;
+			else if (entry->cuda_binary == CUDA_PROGRAM_BUILD_FAILURE)
+				entry = CUDA_PROGRAM_BUILD_FAILURE;
+			else
+			{
+				entry->refcnt++;
+				dlist_move_head(&pgcache_head->lru_list, &entry->lru_chain);
+			}
+			SpinLockRelease(&pgcache_head->lock);
+
+			return (void *) entry;
+		}
+	}
+	/* Not found on the existing cache */
+	required = offsetof(program_cache_entry, data[source_len + 1]);
+	entry = pgstrom_program_cache_alloc(required);
+	entry->crc = crc;
+	entry->extra_flags = extra_flags;
+	strcpy(entry->data, source);
+	entry->cuda_source = entry->data;
+	entry->cuda_source_len = source_len;
+	entry->cuda_binary = NULL;
+	entry->cuda_binary_len = 0;
+
+	/* acquired by program builder */
+	entry->refcnt++;
+
+	/* Kick a dynamic background worker to build */
+	snprintf(worker.bgw_name, sizeof(worker.bgw_name),
+			 "nvcc launcher - crc %08x", crc);
+	worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
+	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+	worker.bgw_restart_time = BGW_NEVER_RESTART;
+	worker.bgw_main = pgstrom_build_cuda_program;
+	worker.bgw_main_arg = PointerGetDatum(entry);
+
+	if (!RegisterDynamicBackgroundWorker(&worker, NULL))
+	{
+		SpinLockRelease(&pgcache_head->lock);
+		elog(LOG, "failed to launch nvcc asynchronous mode, try synchronous");
+		pgstrom_build_cuda_program(PointerGetDatum(entry));
+		goto retry;
+	}
+	SpinLockRelease(&pgcache_head->lock);
+	return NULL;	/* now build the device kernel... */
+}
+
+static void
+pgstrom_put_cuda_program(const void *cuda_program)
+{
+	program_cache_entry	*entry = (program_cache_entry *) cuda_program;
+
+	SpinLockAcquire(&pgcache_head->lock);
+	Assert(entry->refcnt > 0);
+	if (--entry->refcnt == 0)
+		pgstrom_program_cache_free(entry);
+	SpinLockRelease(&pgcache_head->lock);
 }
 
 
@@ -215,6 +343,7 @@ pgstrom_startup_cuda_program(void)
 		dlist_init(&pgcache_head->free_list[i]);
 	for (i=0; i < PGCACHE_HASH_SIZE; i++)
 		dlist_init(&pgcache_head->active_list[i]);
+	dlist_init(&pgcache_head->lru_list);
 
 	total_procs = MaxBackends + NUM_AUXILIARY_PROCS + max_prepared_xacts;
 	nwords = (total_procs + BITS_PER_BITMAPWORD - 1) / BITS_PER_BITMAPWORD;

@@ -260,12 +260,15 @@ typedef struct
 	CUcontext		dev_context[FLEXIBLE_ARRAY_MEMBER];
 } GpuContext;
 
+#define CUDA_PROGRAM_BUILD_FAILURE			((void *)(-1UL))
+
 typedef struct GpuTaskState
 {
 	dlist_node		chain;
 	GpuContext	   *gcontext;
-	CUmodule		kern_module;
-	s_lock			lock;	/* protection of the list below */
+	const void	   *cuda_program;	/* pre-built program image */
+	CUmodule		cuda_module;	/* module object built from cuda_binary */
+	s_lock			lock;			/* protection of the list below */
 	dlist_head		running_tasks;
 	dlist_head		pending_tasks;
 	dlist_head		completed_tasks;
