@@ -2514,7 +2514,7 @@ clserv_process_gpusort(pgstrom_message *msg)
 		goto error;
 
 	/* kick, a series of gpusort_bitonic_*() functions */
-	nhalf = (nitems + 1) / 2;
+	nhalf = 1UL << (get_next_log2(nitems + 1) - 1);
 
 	rc = compute_bitonic_workgroup_size(clgss, nhalf, &gwork_sz, &lwork_sz);
 	if (rc != CL_SUCCESS)
