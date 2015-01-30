@@ -29,6 +29,8 @@ test: explain_gs zero_gs normal_gs overflow_gs
 # ----------
 # GpuHashJoin parallel test-cases.
 test: explain_ghj normal_ghj nobulk_ghj
+# GpuHashJoin bugfix test-cases.
+test: bugfix_ghj
 
 # ----------
 # GpuSort pattern
