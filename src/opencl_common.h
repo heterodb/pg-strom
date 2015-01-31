@@ -93,10 +93,10 @@ typedef cl_ulong	Datum;
 #else	/* OPENCL_DEVICE_CODE */
 #include "access/htup_details.h"
 #include "storage/itemptr.h"
-#define __global	/* address space qualifier is noise on host */
-#define __local		/* address space qualifier is noise on host */
-#define __private	/* address space qualifier is noise on host */
-#define __constant	/* address space qualifier is noise on host */
+#define __device__		/* address space qualifier is noise on host */
+#define __global__		/* address space qualifier is noise on host */
+#define __constant__	/* address space qualifier is noise on host */
+#define __shared__		/* address space qualifier is noise on host */
 typedef uintptr_t	hostptr_t;
 #endif
 
@@ -350,32 +350,16 @@ typedef struct {
 	cl_short		attcacheoff;
 } kern_colmeta;
 
-/*
- * kern_rowitem packs an index of block and tuple item. 
- * block_id points a particular block in the block array of this data-store.
- * item_id points a particular tuple item within the block.
- */
-typedef union {
-	struct {
-		cl_ushort	blk_index;		/* if ROW format */
-		cl_ushort	item_offset;	/* if ROW format */
-	};
-	cl_uint			htup_offset;	/* if FLAT_ROW format */
-} kern_rowitem;
 
-typedef struct {
-#ifdef OPENCL_DEVICE_CODE
-	cl_int			buffer;
-	hostptr_t		page;
-#else
-	Buffer			buffer;
-	Page			page;
-#endif
-} kern_blkitem;
+typedef struct
+{
+	uint16				t_len;		/* length of tuple */
+	ItemPointerData		t_self;		/* SelfItemPointer */
+	HeapTupleHeaderData	htup;
+} kern_tupitem;
 
 #define KDS_FORMAT_ROW			1
-#define KDS_FORMAT_ROW_FLAT		2
-#define KDS_FORMAT_TUPSLOT		3
+#define KDS_FORMAT_SLOT			2
 
 typedef struct {
 	hostptr_t		hostptr;	/* address of kds on the host */
@@ -384,8 +368,6 @@ typedef struct {
 	cl_uint			ncols;		/* number of columns in this store */
 	cl_uint			nitems; 	/* number of rows in this store */
 	cl_uint			nrooms;		/* number of available rows in this store */
-	cl_uint			nblocks;	/* number of blocks in this store */
-	cl_uint			maxblocks;	/* max available blocks in this store */
 	cl_char			format;		/* one of KDS_FORMAT_* above */
 	cl_char			tdhasoid;	/* copy of TupleDesc.tdhasoid */
 	cl_uint			tdtypeid;	/* copy of TupleDesc.tdtypeid */
@@ -393,50 +375,28 @@ typedef struct {
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_data_store;
 
-/* access macro for row-format */
-#define KERN_DATA_STORE_BLKITEM(kds,blk_index)				\
-	(((__global kern_blkitem *)								\
-	  ((__global cl_char *)(kds) +							\
-	   STROMALIGN(offsetof(kern_data_store,					\
-						   colmeta[(kds)->ncols]))))		\
-	 + (blk_index))
-#define KERN_DATA_STORE_ROWITEM(kds,row_index)					\
-	(((__global kern_rowitem *)									\
-	  ((__global cl_char *)(kds) +								\
-	   STROMALIGN(offsetof(kern_data_store,						\
-						   colmeta[(kds)->ncols])) +			\
-	   STROMALIGN(sizeof(kern_blkitem) * (kds)->maxblocks)))	\
-	 + (row_index))
+/* head address of data body */
+#define KERN_DATA_STORE_BODY(kds)				\
+	((__device__ char *)(kds) +					\
+	 STROMALIGN(offsetof(kern_data_store,		\
+						 colmeta[(kds)->ncols])))
 
-#define KERN_DATA_STORE_ROWBLOCK(kds,blk_index)							\
-	((__global PageHeaderData *)										\
-	 ((__global cl_char *)(kds) +										\
-	  (TYPEALIGN(BLCKSZ,												\
-				 STROMALIGN(offsetof(kern_data_store,					\
-									 colmeta[(kds)->ncols])) +			\
-				 STROMALIGN(sizeof(kern_blkitem) * (kds)->maxblocks) +	\
-				 STROMALIGN(sizeof(kern_rowitem) * (kds)->nitems))		\
-	   + BLCKSZ * (blk_index))))
+/* access macro for row-format */
+#define KERN_DATA_STORE_TUPITEM(kds,kds_index)				\
+	((__device__ kern_tupitem *)							\
+	 ((__device__ char *)(kds) +							\
+	  ((__device__ uint *)KERN_DATA_STORE_BODY(kds))[(kds_index)]))
 
 /* access macro for tuple-slot format */
-#define KERN_DATA_STORE_VALUES(kds,row_index)				\
-	((__global Datum *)										\
-	 (((__global cl_char *)(kds) +							\
-	   STROMALIGN(offsetof(kern_data_store,					\
-						   colmeta[(kds)->ncols]))) +		\
+#define KERN_DATA_STORE_VALUES(kds,kds_index)				\
+	((__device__ Datum *)									\
+	 (KERN_DATA_STORE_BODY(kds) +							\
 	  LONGALIGN((sizeof(Datum) +							\
-				 sizeof(cl_char)) *	(kds)->ncols) * (row_index)))
+				 sizeof(char)) * (kds)->ncols) * (kds_index)))
 
-#define KERN_DATA_STORE_ISNULL(kds,row_index)				\
-	((__global cl_char *)									\
-	 (KERN_DATA_STORE_VALUES((kds),(row_index)) + (kds)->ncols))
-
-/* length of kern_data_store */
-#define KERN_DATA_STORE_LENGTH(kds)										\
-	((kds)->format == KDS_FORMAT_ROW ?									\
-	 ((uintptr_t)KERN_DATA_STORE_ROWBLOCK((kds), (kds)->nblocks) -		\
-	  (uintptr_t)(kds)) :												\
-	 STROMALIGN((kds)->length))
+#define KERN_DATA_STORE_ISNULL(kds,kds_index)				\
+	((__device__ char *)									\
+	 (KERN_DATA_STORE_VALUES((kds),(kds_index)) + (kds)->ncols))
 
 /*
  * kern_parambuf
@@ -451,14 +411,14 @@ typedef struct {
 	cl_uint		poffset[FLEXIBLE_ARRAY_MEMBER];	/* offset of params */
 } kern_parambuf;
 
-HOST_STATIC_INLINE __global void *
-kparam_get_value(__global kern_parambuf *kparams, cl_uint pindex)
+HOST_STATIC_INLINE __device__ void *
+kparam_get_value(__device__ kern_parambuf *kparams, cl_uint pindex)
 {
 	if (pindex >= kparams->nparams)
 		return NULL;
 	if (kparams->poffset[pindex] == 0)
 		return NULL;
-	return (__global char *)kparams + kparams->poffset[pindex];
+	return (__device__ char *)kparams + kparams->poffset[pindex];
 }
 
 /*

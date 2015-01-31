@@ -16,9 +16,16 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
+#include "access/twophase.h"
+#include "postmaster/bgworker.h"
 #include "storage/ipc.h"
+#include "storage/proc.h"
 #include "storage/shmem.h"
+#include "utils/guc.h"
+#include "utils/pg_crc.h"
 #include "pg_strom.h"
+#include <sys/stat.h>
+#include <sys/types.h>
 
 typedef struct
 {
@@ -45,7 +52,7 @@ typedef struct
 	((uintptr_t)(entry) + (1UL << (entry)->shift) - sizeof(uint) -	\
 	 (uintptr_t)(entry)->error_msg)
 
-#define CUDA_PROGRAM_BUILD_FAILURE			((void *)(-1UL))
+#define CUDA_PROGRAM_BUILD_FAILURE			((void *)(~0UL))
 
 #define PGCACHE_MIN_BITS		10		/* 1KB */
 #define PGCACHE_MAX_BITS		24		/* 16MB */	
@@ -53,7 +60,7 @@ typedef struct
 
 typedef struct
 {
-	slock_t		lock;
+	volatile slock_t lock;
 	dlist_head	free_list[PGCACHE_MAX_BITS + 1];
 	dlist_head	active_list[PGCACHE_HASH_SIZE];
 	dlist_head	lru_list;
@@ -69,25 +76,25 @@ typedef struct
 static shmem_startup_hook_type shmem_startup_next;
 static Size		program_cache_size;
 static char	   *pgstrom_nvcc_path;
-static volatile program_cache_head *pgcache_head;
+static program_cache_head *pgcache_head;
 static int		itemid_offset_shift;
 static int		itemid_flags_shift;
 static int		itemid_length_shift;
 
 /* ---- static functions ---- */
-static pgcache_entry *pgstrom_program_cache_alloc(Size required);
+static program_cache_entry *pgstrom_program_cache_alloc(Size required);
 static void pgstrom_program_cache_free(program_cache_entry *entry);
 
 /*****/
 static void
 pgstrom_wakeup_backends(void)
 {
-	volatile PGPROC *proc;
-	bitmapword	bitmap;
-	int			i, j, k;
+	struct PGPROC  *proc;
+	bitmapword		bitmap;
+	int				i, j;
 
 	SpinLockAcquire(&pgcache_head->lock);
-	for (i=0; i < pgcache_head->waiting_backends; i++)
+	for (i=0; i < pgcache_head->waiting_backends.nwords; i++)
 	{
 		bitmap = pgcache_head->waiting_backends.words[i];
 		if (!bitmap)
@@ -98,8 +105,8 @@ pgstrom_wakeup_backends(void)
 			if ((bitmap & (1 << j)) == 0)
 				continue;
 			Assert(i * BITS_PER_BITMAPWORD + j < TOTAL_PROCS);
-			proc = ProcGlobal->allProcs[i * BITS_PER_BITMAPWORD + j];
-			SetLatch(proc->latch);
+			proc = &ProcGlobal->allProcs[i * BITS_PER_BITMAPWORD + j];
+			SetLatch(&proc->procLatch);
 		}
 		pgcache_head->waiting_backends.words[i] = 0;
 	}
@@ -119,8 +126,8 @@ pgstrom_program_cache_reclaim(int shift_min)
 
 		entry = dlist_container(program_cache_entry, lru_chain, dnode);
 		/* remove from the list not to be reclaimed again */
-		list_delete(&entry->chain);
-		list_delete(&entry->lru_chain);
+		dlist_delete(&entry->chain);
+		dlist_delete(&entry->lru_chain);
 		memset(&entry->chain, 0, sizeof(dlist_node));
 		memset(&entry->lru_chain, 0, sizeof(dlist_node));
 
@@ -149,13 +156,11 @@ pgstrom_program_cache_split(int shift)
 {
 	program_cache_entry *entry;
 	dlist_node	   *dnode;
-	int				index;
-	int				i;
 
 	Assert(shift > PGCACHE_MIN_BITS && shift <= PGCACHE_MAX_BITS);
 	if (dlist_is_empty(&pgcache_head->free_list[shift]))
 	{
-		if (shift == SHMEM_BLOCKSZ_BITS_RANGE ||
+		if (shift == PGCACHE_MAX_BITS ||
 			!pgstrom_program_cache_split(shift + 1))
 			return false;
 	}
@@ -164,9 +169,9 @@ pgstrom_program_cache_split(int shift)
 	dnode = dlist_pop_head_node(&pgcache_head->free_list[shift]);
 
 	entry = dlist_container(program_cache_entry, chain, dnode);
-	Assert(entry_1->shift == shift);
-	Assert((((uintptr_t)entry -
-			 (uintptr_t)pgcache_head->data) & ((1UL << shift) - 1)) == 0);
+	Assert(entry->shift == shift);
+	Assert((((uintptr_t)entry - (uintptr_t)pgcache_head->entry_begin)
+			& ((1UL << shift) - 1)) == 0);
 	shift--;
 
 	/* earlier half */
@@ -183,15 +188,13 @@ pgstrom_program_cache_split(int shift)
 	return true;
 }
 
-static pgcache_entry *
+static program_cache_entry *
 pgstrom_program_cache_alloc(Size required)
 {
 	program_cache_entry *entry;
 	dlist_node *dnode;
 	Size		total_size;
 	int			shift;
-	int			i;
-	uint	   *magic;
 
 	total_size = offsetof(program_cache_entry, data[0])
 		+ MAXALIGN(required)
@@ -220,7 +223,7 @@ pgstrom_program_cache_alloc(Size required)
 	}
 	Assert(!dlist_is_empty(&pgcache_head->free_list[shift]));
 
-	dnode = dlist_pop_head_node(&pgcache_head-->free_list[shift]);
+	dnode = dlist_pop_head_node(&pgcache_head->free_list[shift]);
 	entry = dlist_container(program_cache_entry, chain, dnode);
 	Assert(entry->shift == shift);
 
@@ -261,17 +264,19 @@ pgstrom_program_cache_free(program_cache_entry *entry)
 		/* OK, chunk and buddy can be merged */
 
 		dlist_delete(&buddy->chain);
-		if (buddy < chunk)
-			chunk = buddy;
-		chunk->shift = ++shift;
+		if (buddy < entry)
+			entry = buddy;
+		entry->shift = ++shift;
 	}
-	dlist_push_head(&pgcache_head->free_list[shift], &chunk->chain);
+	dlist_push_head(&pgcache_head->free_list[shift], &entry->chain);
 }
 
 static void
-pgstrom_write_cuda_program(FILE *filp, program_cache_entry *entry)
+pgstrom_write_cuda_program(FILE *filp, program_cache_entry *entry,
+						   const char *pathname)
 {
 	static size_t	common_code_length = 0;
+	size_t			nbytes;
 
 	/*
 	 * Common PG-Strom device routine
@@ -355,8 +360,8 @@ pgstrom_write_cuda_program(FILE *filp, program_cache_entry *entry)
 		static size_t	hashjoin_code_length = 0;
 
 		if (!hashjoin_code_length)
-			hashjoin_code_length = strlen(pgstrom_opencl_hashjoin_code);
-		nbytes = fwrite(pgstrom_opencl_hashjoin_code,
+			hashjoin_code_length = strlen(pgstrom_cuda_hashjoin_code);
+		nbytes = fwrite(pgstrom_cuda_hashjoin_code,
 						hashjoin_code_length, 1, filp);
 		if (nbytes != hashjoin_code_length)
 			elog(ERROR, "could not write to file \"%s\": %m", pathname);
@@ -409,11 +414,15 @@ __build_cuda_program(program_cache_entry *old_entry)
 	Size		cuda_binary_len = 0;
 	char	   *build_log = NULL;
 	Size		build_log_len = 0;
+	Size		required;
+	int			hindex;
+	int			rc;
 	StringInfoData buf;
+	program_cache_entry *new_entry;
 
 	/* make a basename of the tempfiles */
 	uniq_id = ((uintptr_t)old_entry -
-			   (uintptr_t)pgcache_head->data) >> PGCACHE_MIN_BITS;
+			   (uintptr_t)pgcache_head->entry_begin) >> PGCACHE_MIN_BITS;
 	snprintf(basename, sizeof(basename), "%s/code_%08x",
 			 PGSTROM_TEMP_DIR, uniq_id);
 
@@ -433,7 +442,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 			elog(ERROR, "could not create source file \"%s\": %m", pathname);
 	}
 	/* Write out the source code */
-	pgstrom_write_cuda_program(filp, old_entry);
+	pgstrom_write_cuda_program(filp, old_entry, pathname);
 	/* OK, done */
 	FreeFile(filp);
 
@@ -454,7 +463,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 		" -DITEMID_FLAGS_SHIFT=%u"
 		" -DITEMID_LENGTH_SHIFT=%u"
 		" -DMAXIMUM_ALIGNOF=%u"
-		" 2>%s.log"
+		" 2>%s.log",
 		pgstrom_nvcc_path,
 		basename,
 		SIZEOF_VOID_P, BLCKSZ,
@@ -467,7 +476,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 	/*
 	 * Run nvcc compiler
 	 */
-	rc = system(cmdline);
+	rc = system(cmdline.data);
 
 	/*
 	 * Read binary file (if any)
@@ -520,7 +529,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 	required = MAXALIGN(old_entry->cuda_source_len + 1);
 	if (cuda_binary)
 		required += MAXALIGN(cuda_binary_len + 1);
-	required += MAXALIGN(strlen(cmdline) + 1);
+	required += MAXALIGN(strlen(cmdline.data) + 1);
 	required += MAXALIGN(build_log_len + 1);
 
 	SpinLockAcquire(&pgcache_head->lock);
@@ -533,7 +542,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 
 	new_entry->crc = old_entry->crc;
 	new_entry->extra_flags = old_entry->extra_flags;
-	new_entry->cuda_source = new_entry->data + offset;
+	new_entry->cuda_source = new_entry->data;
 	memcpy(new_entry->cuda_source,
 		   old_entry->cuda_source,
 		   old_entry->cuda_source_len + 1);
@@ -548,7 +557,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 		snprintf(new_entry->error_msg,
 				 new_entry->error_msg_len,
 				 "cuda kernel build: failed\n%s\%s",
-				 cmdline, build_log);
+				 cmdline.data, build_log);
 	}
 	else
 	{
@@ -561,13 +570,13 @@ __build_cuda_program(program_cache_entry *old_entry)
 		snprintf(new_entry->error_msg,
                  new_entry->error_msg_len,
 				 "cuda kernel build: success\n%s\n%s",
-				 cmdline, build_log);
+				 cmdline.data, build_log);
 	}
 
 	/*
 	 * Add new_entry to the hash slot
 	 */
-	hindex = crc % PGCACHE_HASH_SIZE;
+	hindex = new_entry->crc % PGCACHE_HASH_SIZE;
 	dlist_push_head(&pgcache_head->active_list[hindex], &new_entry->chain);
 	dlist_push_head(&pgcache_head->lru_list, &new_entry->lru_chain);
 
@@ -603,7 +612,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 
 
 
-statuc viud
+static void
 pgstrom_build_cuda_program(Datum cuda_program)
 {
 	program_cache_entry *entry = (program_cache_entry *) cuda_program;
@@ -639,15 +648,16 @@ pgstrom_build_cuda_program(Datum cuda_program)
 	pgstrom_wakeup_backends();
 }
 
-
-
-static const void *
+const void *
 pgstrom_get_cuda_program(const char *source, int32 extra_flags)
 {
 	program_cache_entry	*entry;
 	Size		source_len = strlen(source);
 	Size		required;
+	int			hindex;
+	dlist_iter	iter;
 	pg_crc32	crc;
+	BackgroundWorker worker;
 
 	/* makes a hash value */
 	INIT_CRC32C(crc);
@@ -726,7 +736,7 @@ retry:
 	return NULL;	/* now build the device kernel... */
 }
 
-static void
+void
 pgstrom_put_cuda_program(const void *cuda_program)
 {
 	program_cache_entry	*entry = (program_cache_entry *) cuda_program;
@@ -757,6 +767,8 @@ pgstrom_put_cuda_program(const void *cuda_program)
 static void
 pgstrom_startup_cuda_program(void)
 {
+	program_cache_entry *entry;
+	bool		found;
 	int			i, nwords;
 	int			shift;
 	char	   *curr_addr;
@@ -773,7 +785,7 @@ pgstrom_startup_cuda_program(void)
 
 	/* initialize program cache header */
 	memset(pgcache_head, 0, sizeof(program_cache_head));
-	LWLockInitialize(&pgcache_head->mutex);
+	SpinLockInit(&pgcache_head->lock);
 	for (i=0; i < PGCACHE_MAX_BITS; i++)
 		dlist_init(&pgcache_head->free_list[i]);
 	for (i=0; i < PGCACHE_HASH_SIZE; i++)
@@ -785,7 +797,7 @@ pgstrom_startup_cuda_program(void)
 	tempset->nwords = nwords;
 	memset(tempset->words, 0, sizeof(bitmapword) * nwords);
 	pgcache_head->entry_begin =
-		(pgcache_entry *) BUFFERALIGN(tempset->words + nwords);
+		(program_cache_entry *) BUFFERALIGN(tempset->words + nwords);
 
 	/* makes free entries */
 	curr_addr = (char *) pgcache_head->entry_begin;
@@ -798,13 +810,13 @@ pgstrom_startup_cuda_program(void)
 			shift--;
 			continue;
 		}
-		entry = (pgcache_entry *) curr_addr;
+		entry = (program_cache_entry *) curr_addr;
 		memset(entry, 0, sizeof(program_cache_entry));
 		dlist_push_tail(&pgcache_head->free_list[shift], &entry->chain);
 
 		curr_addr += (1UL << shift);
 	}
-	pgcache_head->entry_end = curr_addr;
+	pgcache_head->entry_end = (program_cache_entry *)curr_addr;
 }
 
 void
@@ -812,6 +824,7 @@ pgstrom_init_cuda_program(void)
 {
 	static int	__program_cache_size;
 	ItemIdData	item_id;
+	uint		code;
 
 	DefineCustomStringVariable("pg_strom.nvcc_path",
 							   "path to nvcc (NVIDIA CUDA Compiler)",

@@ -16,6 +16,13 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
+#include "catalog/pg_type.h"
+#include "funcapi.h"
+#include "lib/ilist.h"
+#include "utils/builtins.h"
+#include "utils/memutils.h"
+#include "utils/pg_crc.h"
+#include "utils/resowner.h"
 #include "pg_strom.h"
 
 /* available devices set by postmaster startup */
@@ -41,8 +48,9 @@ static CUdevice	   *cuda_devices = NULL;
 static void
 pgstrom_init_cuda(void)
 {
+	CUdevice	device;
 	CUresult	rc;
-	CUresult	device;
+	ListCell   *cell;
 	int			i = 0;
 
 	rc = cuInit(0);
@@ -56,7 +64,7 @@ pgstrom_init_cuda(void)
 	{
 		int		ordinal = lfirst_int(cell);
 
-		rc = cuDeviceGet(&device, orginal);
+		rc = cuDeviceGet(&device, ordinal);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuDeviceGet: %s", cuda_strerror(rc));
 		cuda_devices[i++] = device;
@@ -89,9 +97,8 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 		pgstrom_init_cuda();
 
 	/* make a new memory context */
-	snprintf(namebuf, sizeof(namebuf), "GPU DMA Buffer: %s",
-			 !resowner->name ? "annonymous resource" : resowner->name);
-	length_init = 4 * (1UL << get_next_log2(pgstrom_chunk_size()));
+	snprintf(namebuf, sizeof(namebuf), "GPU DMA Buffer (%p)", resowner);
+	length_init = 4 * (1UL << get_next_log2(pgstrom_chunk_size << 20));
 	length_max = 1024 * length_init;
 	memcxt = HostPinMemContextCreate(NULL,
 									 namebuf,
@@ -102,7 +109,8 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 	gcontext->refcnt = 1;
 	gcontext->resowner = resowner;
 	gcontext->memcxt = memcxt;
-	dlist_init(gcontext->state_list);
+	dlist_init(&gcontext->state_list);
+	dlist_init(&gcontext->pds_list);
 
 	return gcontext;
 }
@@ -156,7 +164,11 @@ pgstrom_release_gpucontext(GpuContext *gcontext)
 	/* Ensure all the concurrent tasks getting completed */
 	for (i=0; i < gcontext->num_context; i++)
 	{
-		rc = cuCtxSynchronize(gcontext->dev_context[i]);
+		rc = cuCtxSetCurrent(gcontext->dev_context[i]);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuCtxSetCurrent: %s", cuda_strerror(rc));
+
+		rc = cuCtxSynchronize();
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuCtxSynchronize: %s", cuda_strerror(rc));
 	}
@@ -166,32 +178,41 @@ pgstrom_release_gpucontext(GpuContext *gcontext)
 	{
 		GpuTaskState *gtstate = dlist_container(GpuTaskState, chain, iter.cur);
 
-		Assert(gstate->gcontext == gcontext);
+		Assert(gtstate->gcontext == gcontext);
 		dlist_delete(&gtstate->chain);
 
 		/* release cuda module, if any */
-		if (gstate->cuda_module)
+		if (gtstate->cuda_module)
 		{
-			rc = cuModuleUnload(gstate->cuda_module);
+			rc = cuModuleUnload(gtstate->cuda_module);
 			if (rc != CUDA_SUCCESS)
 				elog(WARNING, "failed on cuModuleUnload: %s",
 					 cuda_strerror(rc));
 		}
 		/* release cuda binary image, if any */
-		if (gstate->cuda_program && 
-			gstate->cuda_program != CUDA_BINARY_BUILD_IN_PROGRESS &&
-			gstate->cuda_program != CUDA_BINARY_BUILD_FAILURE)
-		{
-			pgstrom_put_cuda_program(gstate->cuda_program);
-		}
+		if (gtstate->cuda_program)
+			pgstrom_put_cuda_program(gtstate->cuda_program);
 
 		/* release specific resources */
-		if (gstate->cb_cleanup)
-			gstate->cb_cleanup(gtstate);
-		Assert(dlist_is_empty(&gstate->running_tasks));
-		Assert(dlist_is_empty(&gstate->pending_tasks));
-		Assert(dlist_is_empty(&gstate->completed_tasks));
+		if (gtstate->cb_cleanup)
+			gtstate->cb_cleanup(gtstate);
+		Assert(dlist_is_empty(&gtstate->running_tasks));
+		Assert(dlist_is_empty(&gtstate->pending_tasks));
+		Assert(dlist_is_empty(&gtstate->completed_tasks));
 	}
+
+	/*
+	 * Release pgstrom_data_store; because KDS_FORMAT_ROW may have mmap(2)
+	 * state in case of file-mapped data-store, so we have to ensure
+	 * these temporary files are removed and unmapped.
+	 */
+	dlist_foreach_modify(iter, &gcontext->pds_list)
+	{
+		pgstrom_data_store *pds = dlist_container(pgstrom_data_store,
+												  chain, iter.cur);
+		pgstrom_file_unmap_data_store(pds);
+	}
+
 	/* OK, release this GpuContext */
 	for (i=0; i < gcontext->num_context; i++)
 	{
@@ -199,6 +220,8 @@ pgstrom_release_gpucontext(GpuContext *gcontext)
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuCtxDestroy: %s", cuda_strerror(rc));
 	}
+	/* Ensure CUDA context is empty */
+	cuCtxSetCurrent(NULL);
 
 	/* OK, release the memory context that includes gcontext itself */
 	MemoryContextDelete(gcontext->memcxt);
@@ -259,8 +282,8 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 	SpinLockRelease(&gcontext_lock);
 }
 
-bool
-pgstrom_check_device_capability(int orginal, CUdevice device)
+static bool
+pgstrom_check_device_capability(int ordinal, CUdevice device)
 {
 	bool		result = true;
 	char		dev_name[256];
@@ -280,7 +303,7 @@ pgstrom_check_device_capability(int orginal, CUdevice device)
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuDeviceGetName: %s", cuda_strerror(rc));
 
-	rc = cuDeviceTotalMem(&dev_memsz, device);
+	rc = cuDeviceTotalMem(&dev_mem_sz, device);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuDeviceTotalMem: %s", cuda_strerror(rc));
 
@@ -360,7 +383,7 @@ pgstrom_check_device_capability(int orginal, CUdevice device)
 void
 pgstrom_init_cuda_control(void)
 {
-	CUrevice	device;
+	CUdevice	device;
 	CUresult	rc;
 	int			i, count;
 
@@ -406,12 +429,12 @@ pgstrom_init_cuda_control(void)
 const char *
 cuda_strerror(CUresult errcode)
 {
-	__thread static char buffer[512];
+	static __thread char buffer[512];
 	const char *error_val;
 	const char *error_str;
 
 	if (cuGetErrorName(errcode, &error_val) == CUDA_SUCCESS &&
-		cuGetErrorString(errcode, &error_val) == CUDA_SUCCESS)
+		cuGetErrorString(errcode, &error_str) == CUDA_SUCCESS)
 		snprintf(buffer, sizeof(buffer), "%s - %s", error_val, error_str);
 	else
 		snprintf(buffer, sizeof(buffer), "%d - unknown", (int)errcode);
@@ -436,8 +459,8 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 {
 	static struct {
 		CUdevice_attribute	attrib;
-		int					attkind;
 		const char		   *attname;
+		int					attkind;
 	} catalog[] = {
 		{CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
 		 "max threads per block", DEVATTR_INT},
@@ -525,12 +548,14 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 		 "Unique id if device is on a multi-GPU board", DEVATTR_INT},
 	};
 	FuncCallContext *fncxt;
+	CUresult	rc;
 	int			dindex;
 	int			aindex;
-	char	   *att_name;
+	const char *att_name;
 	char	   *att_value;
 	Datum		values[3];
 	bool		isnull[3];
+	HeapTuple	tuple;
 
 	if (SRF_IS_FIRSTCALL())
 	{
@@ -586,10 +611,10 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 	}
 	else
 	{
-		size_t	att_value;
+		int		property;
 
-		rc = cuDeviceGetAttribute(&att_value,
-								  catalog[aindex],
+		rc = cuDeviceGetAttribute(&property,
+								  catalog[aindex].attrib,
 								  cuda_devices[dindex]);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuDeviceGetAttribute: %s",
@@ -599,21 +624,21 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 		switch (catalog[aindex].attkind)
 		{
 			case DEVATTR_BOOL:
-				att_value = psprintf("%s", att_value != 0 ? "True" : "False");
+				att_value = psprintf("%s", property != 0 ? "True" : "False");
 				break;
 			case DEVATTR_INT:
-				att_value = psprintf("%d", att_value);
+				att_value = psprintf("%d", property);
 				break;
 			case DEVATTR_KB:
-				att_value = psprintf("%d KBytes", att_value / 1024);
+				att_value = psprintf("%d KBytes", property / 1024);
 				break;
 			case DEVATTR_MHZ:
-				att_value = psprintf("%d MHz", att_value / 1000);
+				att_value = psprintf("%d MHz", property / 1000);
 				break;
 			case DEVATTR_COMP_MODE:
 				break;
 			case DEVATTR_BITS:
-				att_value = psprintf("%d bits", att_value);
+				att_value = psprintf("%d bits", property);
 				break;
 			default:
 				elog(ERROR, "Bug? unexpected device attribute type");

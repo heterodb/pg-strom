@@ -255,26 +255,11 @@ _PG_init(void)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 		errmsg("PG-Strom must be loaded via shared_preload_libraries")));
 
-	/* load OpenCL runtime and initialize entrypoints */
-	pgstrom_init_opencl_entry();
+	/* initialization of CUDA related stuff */
+	pgstrom_init_cuda_control();
+	pgstrom_init_cuda_program();
 
-	/* initialization of device info on postmaster stage */
-	pgstrom_init_opencl_devinfo();
-	pgstrom_init_opencl_devprog();
-
-	/* initialization of message queue on postmaster stage */
-	pgstrom_init_mqueue();
-
-	/* initialization of resource tracking subsystem */
-	pgstrom_init_restrack();
-
-	/* initialize shared memory segment and memory context stuff */
-	pgstrom_init_shmem();
-
-	/* registration of OpenCL background worker process */
-	pgstrom_init_opencl_server();
-
-	/* registration of custom-plan providers */
+	/* registration of custom-scan providers */
 	pgstrom_init_gpuscan();
 	pgstrom_init_gpuhashjoin();
 	pgstrom_init_gpupreagg();
