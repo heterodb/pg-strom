@@ -64,11 +64,25 @@
 /*
  * --------------------------------------------------------------------
  *
+ * Constant Definitions
+ *
+ * --------------------------------------------------------------------
+ */
+#define PGSTROM_TEMP_DIR	"pg_strom_temp"
+
+
+
+
+
+/*
+ * --------------------------------------------------------------------
+ *
  * Type Definitions
  *
  * --------------------------------------------------------------------
  */
 
+#if 0
 /*
  * pgstrom_platform_info
  *
@@ -150,7 +164,7 @@ typedef struct {
 	Size		buflen;
 	char		buffer[FLEXIBLE_ARRAY_MEMBER];
 } pgstrom_device_info;
-
+#endif
 /*
  * Tag of shared memory object classes
  */
@@ -259,8 +273,6 @@ typedef struct
 	cl_int			num_context;
 	CUcontext		dev_context[FLEXIBLE_ARRAY_MEMBER];
 } GpuContext;
-
-#define CUDA_PROGRAM_BUILD_FAILURE			((void *)(-1UL))
 
 typedef struct GpuTaskState
 {
