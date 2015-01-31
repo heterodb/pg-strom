@@ -1316,7 +1316,7 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 		temp = pgstrom_codegen_expression(expr, context);
 		appendStringInfo(
 			body,
-			"hash_%u = pg_%s_hashkey(pg_crc32_table, hash_%u, %s);\n",
+			"hash_%u = pg_%s_comp_crc32(pg_crc32_table, hash_%u, %s);\n",
 			depth, dtype->type_name, depth, temp);
 		pfree(temp);
 	}
@@ -1455,17 +1455,13 @@ gpuhashjoin_codegen_type_declarations(codegen_context *context)
 		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
 		{
 			appendStringInfo(&str,
-							 "STROMCL_VARLENA_HASHKEY_TEMPLATE(%s)\n"
 							 "STROMCL_VARLENA_HASHREF_TEMPLATE(%s)\n",
-							 dtype->type_name,
 							 dtype->type_name);
 		}
 		else
 		{
 			appendStringInfo(&str,
-							 "STROMCL_SIMPLE_HASHKEY_TEMPLATE(%s,%s)\n"
 							 "STROMCL_SIMPLE_HASHREF_TEMPLATE(%s,%s)\n",
-							 dtype->type_name, dtype->type_base,
 							 dtype->type_name, dtype->type_base);
 		}
     }
@@ -2595,6 +2591,12 @@ retry:
 	 */
 	if (!bulk)
 		goto retry;
+
+	/*
+	 * Older krowmap is no longer supported.
+	 */
+	if (bulk->nvalids >= 0)
+		elog(ERROR, "Bulk-load with rowmap no longer supported");
 
 	return pgstrom_create_gpuhashjoin(ghjs, bulk, result_format);
 }

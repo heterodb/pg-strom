@@ -475,9 +475,11 @@ pgstrom_perfmon_add(pgstrom_perfmon *pfm_sum, pgstrom_perfmon *pfm_item)
 	pfm_sum->time_kern_proj		+= pfm_item->time_kern_proj;
 	/* for gpupreagg */
 	pfm_sum->num_kern_prep		+= pfm_item->num_kern_prep;
-	pfm_sum->num_kern_sort		+= pfm_item->num_kern_sort;
+	pfm_sum->num_kern_lagg		+= pfm_item->num_kern_lagg;
+	pfm_sum->num_kern_gagg		+= pfm_item->num_kern_gagg;
 	pfm_sum->time_kern_prep		+= pfm_item->time_kern_prep;
-	pfm_sum->time_kern_sort		+= pfm_item->time_kern_sort;
+	pfm_sum->time_kern_lagg		+= pfm_item->time_kern_lagg;
+	pfm_sum->time_kern_gagg		+= pfm_item->time_kern_gagg;
 	/* for debugging */
 	pfm_sum->time_debug1		+= pfm_item->time_debug1;
 	pfm_sum->time_debug2		+= pfm_item->time_debug2;
@@ -607,15 +609,27 @@ pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 	}
 
 	/* only gpupreagg */
-	if (pfm->num_kern_sort > 0)
+	if (pfm->num_kern_lagg > 0)
 	{
 		multi_kernel = true;
 		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 usecond_unitary_format((double)pfm->time_kern_sort),
-				 usecond_unitary_format((double)pfm->time_kern_sort /
-										(double)pfm->num_kern_sort),
-				 pfm->num_kern_sort);
-        ExplainPropertyText("sort kernel exec", buf, es);
+				 usecond_unitary_format((double)pfm->time_kern_lagg),
+				 usecond_unitary_format((double)pfm->time_kern_lagg /
+										(double)pfm->num_kern_lagg),
+				 pfm->num_kern_gagg);
+        ExplainPropertyText("lagg kernel exec", buf, es);
+	}
+
+	/* only gpupreagg */
+	if (pfm->num_kern_gagg > 0)
+	{
+		multi_kernel = true;
+		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
+				 usecond_unitary_format((double)pfm->time_kern_gagg),
+				 usecond_unitary_format((double)pfm->time_kern_gagg /
+										(double)pfm->num_kern_gagg),
+				 pfm->num_kern_gagg);
+        ExplainPropertyText("gagg kernel exec", buf, es);
 	}
 
 	/* only gpuhashjoin */

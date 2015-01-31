@@ -900,3 +900,422 @@ typedef struct
 
 #endif	/* !OPENCL_DEVICE_CODE */
 #endif	/* OPENCL_GPUSORT_H */
+
+
+
+/*
+ *
+ * DEADCODE from GPUPREAGG
+ *
+ */
+
+#if 0
+/*
+ * gpupreagg_reduction - entrypoint of the main logic for GpuPreAgg.
+ * The both of kern_data_store have identical form that reflects running 
+ * total and final results. rindex will show the sorted order according
+ * to the gpupreagg_keycomp() being constructed on the fly.
+ * This function makes grouping at first, then run data reduction within
+ * the same group. 
+ */
+#define INVALID_GROUPID	-1
+
+__kernel void
+gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
+					__global kern_data_store *kds_src,
+					__global kern_data_store *kds_dst,
+					__global kern_data_store *ktoast,
+					KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+{
+	__global kern_parambuf	*kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	__global cl_int			*rindex  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
+	__local pagg_datum *l_data
+		= (__local pagg_datum *)STROMALIGN(LOCAL_WORKMEM);
+	__global varlena   *kparam_0 = kparam_get_value(kparams, 0);
+	__global cl_char   *gpagg_atts = (__global cl_char *) VARDATA(kparam_0);
+
+	cl_int pindex		= 0;
+
+	cl_int ncols		= kds_src->ncols;
+	cl_int nrows		= kds_src->nitems;
+	cl_int errcode		= StromError_Success;
+
+	cl_int localID		= get_local_id(0);
+	cl_int globalID		= get_global_id(0);
+    cl_int localSize	= get_local_size(0);
+
+	cl_int prtID		= globalID / localSize;	/* partition ID */
+	cl_int prtSize		= localSize;			/* partition Size */
+	cl_int prtMask		= prtSize - 1;			/* partition Mask */
+	cl_int prtPos		= prtID * prtSize;		/* partition Position */
+
+	cl_int localEntry  = (prtPos+prtSize < nrows) ? prtSize : (nrows-prtPos);
+
+	/* Sanity check of gpagg_atts array */
+	if (VARSIZE_EXHDR(kparam_0) != ncols)
+	{
+		STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption);
+		goto out;
+	}
+
+	/* Check no data for this work group */
+	if(localEntry <= 0) {
+		goto out;
+	}
+
+	/* Generate group id of local work group. */
+	cl_int groupID;
+	cl_uint ngroups;
+	cl_int isNewID = 0;
+	{
+		if (localID == 0) 
+		{
+			isNewID = 1;
+		}
+		else if (localID < localEntry)
+		{
+			int rv = gpupreagg_keycomp(&errcode, kds_src, ktoast,
+									   rindex[globalID-1], rindex[globalID]);
+			isNewID = (rv != 0) ? 1 : 0;
+		}
+		groupID = (arithmetic_stairlike_add(isNewID, LOCAL_WORKMEM, &ngroups) 
+				   + isNewID - 1);
+	}
+
+	/* allocation of result buffer */
+	__local cl_uint base;
+	{
+		if (get_local_id(0) == 0)
+			base = atomic_add(&kds_dst->nitems, ngroups);
+		barrier(CLK_LOCAL_MEM_FENCE);
+
+		if (kds_dst->nrooms < base + ngroups) {
+			errcode = StromError_DataStoreNoSpace;
+			goto out;
+		}
+	}
+
+	/* Aggregate for each item. */
+	for (cl_int cindex=0; cindex < ncols; cindex++)
+	{
+		/*
+		 * In case when this column is either a grouping-key or not-
+		 * referenced one (thus, not a partial aggregation), all we
+		 * need to do is copying the data from the source to the
+		 * destination; without modification anything.
+		 */
+		if (gpagg_atts[cindex] != GPUPREAGG_FIELD_IS_AGGFUNC)
+		{
+			if (isNewID) {
+				gpupreagg_data_move(&errcode, kds_src, kds_dst, ktoast,
+									cindex,
+									rindex[globalID],	/* source rowid */
+									base + groupID);	/* destination rowid */
+				/* also, fixup varlena datum if needed */
+				pg_fixup_tupslot_varlena(&errcode, kds_dst, ktoast,
+										 cindex, base + groupID);
+			}
+			continue;
+		}
+		pindex++;
+
+		/* Load aggregate item */
+		l_data[localID].group_id = INVALID_GROUPID;
+		if(localID < localEntry) {
+			gpupreagg_data_load(&l_data[localID], &errcode, kds_src, ktoast,
+								cindex, rindex[globalID]);
+			l_data[localID].group_id = groupID;
+		}
+		barrier(CLK_LOCAL_MEM_FENCE);
+
+		// Reduction
+		for(int unitSize=2; unitSize<=prtSize; unitSize*=2) {
+			if(localID % unitSize == unitSize/2  &&  localID < localEntry) {
+				cl_int dstID = localID - unitSize/2;
+				if(l_data[localID].group_id == l_data[dstID].group_id) {
+					// Marge this aggregate data to lower.
+					gpupreagg_aggcalc(&errcode, cindex,
+									  &l_data[dstID], &l_data[localID]);
+					l_data[localID].group_id = INVALID_GROUPID;
+				}
+			}
+			barrier(CLK_LOCAL_MEM_FENCE);
+
+			if(localID % unitSize == unitSize/2  &&  localID < localEntry) {
+				if(l_data[localID].group_id != INVALID_GROUPID  &&
+				   localID + unitSize/2 < localEntry) {
+					cl_int dstID = localID + unitSize/2;
+					if(l_data[localID].group_id == l_data[dstID].group_id) {
+						// Marge this aggregate data to upper.
+						gpupreagg_aggcalc(&errcode, cindex,
+										  &l_data[dstID], &l_data[localID]);
+						l_data[localID].group_id = INVALID_GROUPID;
+					}
+				}
+			}
+			barrier(CLK_LOCAL_MEM_FENCE);
+		}
+
+		// write back aggregate data
+		if(l_data[localID].group_id != INVALID_GROUPID) {
+			gpupreagg_data_store(&l_data[localID], &errcode, kds_dst, ktoast,
+								 cindex, base + groupID);
+			/*
+			 * varlena should never appear here, so we don't need to
+			 * put pg_fixup_tupslot_varlena() here
+			 */
+		}
+		barrier(CLK_LOCAL_MEM_FENCE);
+	}
+out:
+	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
+}
+
+/*
+ * gpupreagg_set_rindex
+ *
+ * It makes pseudo rindex value according to the global-id, instead of
+ * the sorting by grouping keys. Aggregate functions can be run without
+ * grouping keys (that simpliy generate one row consists of the results
+ * of aggregate functions only). In this case, we can assume all the
+ * records are in a same group, thus rindex[] can be determined without
+ * key comparison.
+ */
+__kernel void
+gpupreagg_set_rindex(__global kern_gpupreagg *kgpreagg,
+					 __global kern_data_store *kds,
+					 KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+{
+	__global kern_parambuf	*kparams  = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	__global cl_int			*rindex	  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
+
+	cl_int nrows		= kds->nitems;
+	cl_int errcode		= StromError_Success;
+	cl_int globalID		= get_global_id(0);
+
+	if(globalID < nrows)
+		rindex[globalID] = globalID;
+
+	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
+}
+
+/*
+ * gpupreagg_bitonic_local
+ *
+ * It tries to apply each steps of bitonic-sorting until its unitsize
+ * reaches the workgroup-size (that is expected to power of 2).
+ */
+__kernel void
+gpupreagg_bitonic_local(__global kern_gpupreagg *kgpreagg,
+						__global kern_data_store *kds,
+						__global kern_data_store *ktoast,
+						KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+{
+	__global kern_parambuf	*kparams  = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	__global cl_int			*rindex	  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
+	__local  cl_int			*localIdx = LOCAL_WORKMEM;
+
+	cl_int nrows		= kds->nitems;
+	cl_int errcode		= StromError_Success;
+
+    cl_int localID		= get_local_id(0);
+    cl_int globalID		= get_global_id(0);
+    cl_int localSize	= get_local_size(0);
+
+    cl_int prtID		= globalID / localSize; /* partition ID */
+    cl_int prtSize		= localSize * 2;		/* partition Size */
+    cl_int prtMask		= prtSize - 1;			/* partition Mask */
+    cl_int prtPos		= prtID * prtSize;		/* partition Position */
+
+    cl_int localEntry	= ((prtPos + prtSize < nrows)
+						   ? prtSize
+						   : (nrows - prtPos));
+
+    // create row index and then store to localIdx
+    if(localID < localEntry)
+		localIdx[localID] = prtPos + localID;
+
+    if(localSize + localID < localEntry)
+		localIdx[localSize + localID] = prtPos + localSize + localID;
+
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+
+	// bitonic sort
+	for(int blockSize=2; blockSize<=prtSize; blockSize*=2)
+	{
+		int blockMask		= blockSize - 1;
+		int halfBlockSize	= blockSize / 2;
+		int halfBlockMask	= halfBlockSize -1;
+
+		for(int unitSize=blockSize; 2<=unitSize; unitSize/=2)
+		{
+			int unitMask		= unitSize - 1;
+			int halfUnitSize	= unitSize / 2;
+			int halfUnitMask	= halfUnitSize - 1;
+
+			bool reversing	= unitSize == blockSize ? true : false;
+			int idx0 = ((localID / halfUnitSize) * unitSize
+						+ localID % halfUnitSize);
+			int idx1 = ((reversing == true)
+						? ((idx0 & ~unitMask) | (~idx0 & unitMask))
+						: (halfUnitSize + idx0));
+
+			if(idx1 < localEntry) {
+				cl_int pos0 = localIdx[idx0];
+				cl_int pos1 = localIdx[idx1];
+				cl_int rv   = gpupreagg_keycomp(&errcode, kds, ktoast,
+												pos0, pos1);
+
+				if(0 < rv) {
+					// swap
+					localIdx[idx0] = pos1;
+					localIdx[idx1] = pos0;
+				}
+			}
+			barrier(CLK_LOCAL_MEM_FENCE);
+		}
+    }
+
+    if(localID < localEntry)
+		rindex[prtPos + localID] = localIdx[localID];
+
+    if(localSize + localID < localEntry)
+		rindex[prtPos + localSize + localID] = localIdx[localSize + localID];
+
+	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
+}
+
+
+
+/*
+ * gpupreagg_bitonic_step
+ *
+ * It tries to apply individual steps of bitonic-sorting for each step,
+ * but does not have restriction of workgroup size. The host code has to
+ * control synchronization of each step not to overrun.
+ */
+__kernel void
+gpupreagg_bitonic_step(__global kern_gpupreagg *kgpreagg,
+					   cl_int bitonic_unitsz,
+					   __global kern_data_store *kds,
+					   __global kern_data_store *ktoast,
+					   KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+{
+	__global kern_parambuf	*kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	__global cl_int			*rindex	 = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
+
+	cl_int	nrows	  = kds->nitems;
+	cl_bool reversing = (bitonic_unitsz < 0 ? true : false);
+	size_t	unitsz    = (bitonic_unitsz < 0 
+						 ? -bitonic_unitsz 
+						 : bitonic_unitsz);
+	cl_int	errcode	  = StromError_Success;
+
+	cl_int	globalID		= get_global_id(0);
+	cl_int	halfUnitSize	= unitsz / 2;
+	cl_int	unitMask		= unitsz - 1;
+
+	cl_int	idx0;
+	cl_int	idx1;
+
+	idx0 = (globalID / halfUnitSize) * unitsz + globalID % halfUnitSize;
+	idx1 = (reversing
+			? ((idx0 & ~unitMask) | (~idx0 & unitMask))
+			: (idx0 + halfUnitSize));
+	if(nrows <= idx1)
+		goto out;
+
+	cl_int	pos0	= rindex[idx0];
+	cl_int	pos1	= rindex[idx1];
+	cl_int	rv;
+
+	rv = gpupreagg_keycomp(&errcode, kds, ktoast, pos0, pos1);
+	if(0 < rv) {
+		/* Swap */
+		rindex[idx0] = pos1;
+		rindex[idx1] = pos0;
+	}
+out:
+	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
+}
+
+/*
+ * gpupreagg_bitonic_merge
+ *
+ * It handles the merging step of bitonic-sorting if unitsize becomes less
+ * than or equal to the workgroup size.
+ */
+__kernel void
+gpupreagg_bitonic_merge(__global kern_gpupreagg *kgpreagg,
+						__global kern_data_store *kds,
+						__global kern_data_store *ktoast,
+						KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+{
+	__global kern_parambuf	*kparams  = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	__global cl_int			*rindex	  = KERN_GPUPREAGG_SORT_RINDEX(kgpreagg);
+	__local	 cl_int			*localIdx = LOCAL_WORKMEM;
+
+	cl_int nrows		= kds->nitems;
+	cl_int errcode		= StromError_Success;
+
+    cl_int localID		= get_local_id(0);
+    cl_int globalID		= get_global_id(0);
+    cl_int localSize	= get_local_size(0);
+
+    cl_int prtID		= globalID / localSize; /* partition ID */
+    cl_int prtSize		= localSize * 2;		/* partition Size */
+    cl_int prtMask		= prtSize - 1;			/* partition Mask */
+    cl_int prtPos		= prtID * prtSize;		/* partition Position */
+
+    cl_int localEntry	= (prtPos+prtSize < nrows) ? prtSize : (nrows-prtPos);
+
+
+    // load index to localIdx
+    if(localID < localEntry)
+		localIdx[localID] = rindex[prtPos + localID];
+
+    if(localSize + localID < localEntry)
+		localIdx[localSize + localID] = rindex[prtPos + localSize + localID];
+
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+
+	// marge sorted block
+	int blockSize		= prtSize;
+	int blockMask		= blockSize - 1;
+	int halfBlockSize	= blockSize / 2;
+	int halfBlockMask	= halfBlockSize -1;
+
+	for(int unitSize=blockSize; 2<=unitSize; unitSize/=2)
+	{
+		int unitMask		= unitSize - 1;
+		int halfUnitSize	= unitSize / 2;
+		int halfUnitMask	= halfUnitSize - 1;
+
+		int idx0 = localID / halfUnitSize * unitSize + localID % halfUnitSize;
+		int idx1 = halfUnitSize + idx0;
+
+		if(idx1 < localEntry) {
+			cl_int pos0 = localIdx[idx0];
+			cl_int pos1 = localIdx[idx1];
+			cl_int rv = gpupreagg_keycomp(&errcode, kds, ktoast, pos0, pos1);
+
+			if(0 < rv) {
+				// swap
+				localIdx[idx0] = pos1;
+				localIdx[idx1] = pos0;
+			}
+		}
+		barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if(localID < localEntry)
+		rindex[prtPos + localID] = localIdx[localID];
+
+    if(localSize + localID < localEntry)
+		rindex[prtPos + localSize + localID] = localIdx[localSize + localID];
+
+	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
+}
+#endif

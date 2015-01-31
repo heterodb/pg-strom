@@ -281,8 +281,7 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 			{
 				kern_blkitem   *bitem = KERN_DATA_STORE_BLKITEM(kds, i);
 
-				if (BufferIsLocal(bitem->buffer) ||
-					BufferIsInvalid(bitem->buffer))
+				if (BufferIsInvalid(bitem->buffer))
 					continue;
 				if (!pgstrom_i_am_clserv &&
 					!pgstrom_restrack_cleanup_context())
@@ -672,7 +671,7 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 			bitem->page = page;
 		else
 		{
-			Page	dup_page;
+			Page		dup_page;
 
 			/*
 			 * NOTE: We expect seldom cases requires to mix shared buffers
@@ -693,8 +692,8 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 			}
 			dup_page = (Page)(pds->local_pages + BLCKSZ * kds->nblocks);
 			memcpy(dup_page, page, BLCKSZ);
+
 			bitem->page = dup_page;
-			ReleaseBuffer(buffer);
 		}
 		kds->nblocks++;
 	out:
