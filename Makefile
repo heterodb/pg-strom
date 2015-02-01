@@ -5,36 +5,31 @@ DATA = src/pg_strom--1.0.sql
 # Source file of CPU portion
 STROM_OBJS = main.o codegen.o grafter.o datastore.o \
 		cuda_control.o cuda_program.o cuda_mmgr.o \
-		gpuscan.o gpuhashjoin.o gpupreagg.o
+		gpuscan.o #gpuhashjoin.o gpupreagg.o
 
 # Source file of GPU portion
-OPENCL_OBJS = opencl_common.o \
-	opencl_gpuscan.o \
-	opencl_gpupreagg.o \
-	opencl_hashjoin.o \
-	opencl_mathlib.o \
-	opencl_textlib.o \
-	opencl_timelib.o \
-	opencl_numeric.o
-OPENCL_SOURCES = $(addprefix src/,$(OPENCL_OBJS:.o=.c))
+CUDA_OBJS = device_common.o \
+	device_gpuscan.o \
+	device_gpupreagg.o \
+	device_hashjoin.o \
+	device_mathlib.o \
+	device_textlib.o \
+	device_timelib.o \
+	device_numeric.o
+CUDA_SOURCES = $(addprefix src/,$(CUDA_OBJS:.o=.c))
 
-# Header and Libraries of OpenCL (to be autoconf?)
-IPATH_LIST := /usr/include \
-	/usr/local/cuda/include \
-	/opt/AMDAPP*/include
-LPATH_LIST := /usr/lib64 \
-	/usr/lib \
-	/usr/local/cuda/lib64 \
-	/usr/local/cuda/lib
+# Header and Libraries of CUDA
+IPATH_LIST := /usr/local/cuda/include
+LPATH_LIST := /usr/local/cuda/lib64 /usr/local/cuda/lib
+
 IPATH := $(shell for x in $(IPATH_LIST);	\
-           do test -e "$$x/CL/cl.h" && (echo -I $$x; break); done)
+           do test -e "$$x/cuda.h" && (echo -I $$x; break); done)
 LPATH := $(shell for x in $(LPATH_LIST);	\
-           do test -e "$$x/libOpenCL.so" && (echo -L $$x; break); done)
+           do test -e "$$x/libcuda.so" && (echo -L $$x; break); done)
 
 # Module definition
 MODULE_big = pg_strom
-OBJS =  $(addprefix src/,$(STROM_OBJS)) \
-	$(addprefix src/,$(OPENCL_OBJS))
+OBJS =  $(addprefix src/,$(STROM_OBJS)) $(addprefix src/,$(CUDA_OBJS))
 
 # Regression test options
 REGRESS = --schedule=test/parallel_schedule
@@ -58,15 +53,14 @@ PGSTROM_DEBUG := $(shell $(PG_CONFIG) --configure | \
 	grep -q "'--enable-debug'" && \
 	echo "-Wall -DPGSTROM_DEBUG=1 -O0")
 PG_CPPFLAGS := $(PGSTROM_DEBUG) $(IPATH)
-SHLIB_LINK := $(LPATH)
+SHLIB_LINK := $(LPATH) -lcuda
 EXTRA_CLEAN := $(OPENCL_SOURCES)
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
-$(OPENCL_SOURCES): $(OPENCL_SOURCES:.c=.h)
+$(CUDA_SOURCES): $(CUDA_SOURCES:.c=.h)
 	@(echo "const char *pgstrom_$(@:src/%.c=%)_code ="; \
 	  sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
 	      -e 's/^/  "/g' -e 's/$$/\\n"/g' < $*.h; \
 	  echo ";") > $@
-

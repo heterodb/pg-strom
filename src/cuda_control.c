@@ -247,6 +247,34 @@ pgstrom_put_gpucontext(GpuContext *gcontext)
 		pgstrom_release_gpucontext(gcontext);
 }
 
+void
+pgstrom_assign_stream(GpuContext *gcontext, GpuTask *task)
+{
+	CUdevice	cuda_device;
+	CUcontext	cuda_context;
+	CUstream	cuda_stream;
+	CUresult	rc;
+	int			index;
+
+	index = (gcontext->cur_context++ % gcontext->num_context);
+	cuda_context = gcontext->dev_context[index];
+	rc = cuCtxGetDevice(&cuda_device);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuCtxGetDevice: %s", cuda_strerror(rc));
+
+	rc = cuCtxSetCurrent(cuda_context);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuCtxPushCurrent: %s", cuda_strerror(rc));
+
+	rc = cuStreamCreate(&cuda_stream, CU_STREAM_NON_BLOCKING);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuStreamCreate: %s", cuda_strerror(rc));
+
+	task->cuda_device = cuda_device;
+	task->cuda_context = cuda_context;
+	task->cuda_stream = cuda_stream;
+}
+
 static void
 gpucontext_cleanup_callback(ResourceReleasePhase phase,
 							bool is_commit,

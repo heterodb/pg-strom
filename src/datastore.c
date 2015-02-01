@@ -27,7 +27,7 @@
 #include "utils/rel.h"
 #include "utils/tqual.h"
 #include "pg_strom.h"
-#include "opencl_numeric.h"
+#include "device_numeric.h"
 #include <sys/mman.h>
 
 /*
@@ -232,8 +232,6 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 	}
 	else
 	{
-		/* not attached on the GpuContext */
-		Assert(!pds->chain.prev && !pds->chain.next);
 		pfree(pds->kds);
 	}
 	pfree(pds);

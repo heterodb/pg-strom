@@ -38,7 +38,7 @@ static bool	guc_pgstrom_enabled;
 static bool guc_pgstrom_enabled_global;
 bool	pgstrom_perfmon_enabled;
 bool	pgstrom_debug_bulkload_enabled;
-bool	pgstrom_show_device_kernel;
+bool	pgstrom_debug_print_kernel;
 int		pgstrom_chunk_size;
 int		pgstrom_max_async_chunks;
 int		pgstrom_min_async_chunks;
@@ -131,10 +131,10 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
                              GUC_NOT_IN_SAMPLE,
                              NULL, NULL, NULL);
-	DefineCustomBoolVariable("pg_strom.show_device_kernel",
-							 "Enables to show device kernel on EXPLAIN",
+	DefineCustomBoolVariable("pg_strom.debug_print_kernel",
+							 "Enables to print kernel code on EXPLAIN VERBOSE",
 							 NULL,
-							 &pgstrom_show_device_kernel,
+							 &pgstrom_debug_print_kernel,
 							 false,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
@@ -283,10 +283,7 @@ _PG_init(void)
 const char *
 pgstrom_strerror(cl_int errcode)
 {
-	static char		unknown_buf[256];
-
-	if (errcode < 0)
-		return opencl_strerror(errcode);
+	static __thread char	unknown_buf[256];
 
 	switch (errcode)
 	{
@@ -392,17 +389,13 @@ show_instrumentation_count(const char *qlabel, int which,
 }
 
 void
-show_device_kernel(Datum dprog_key, ExplainState *es)
+print_device_kernel(const char *kern_source, int32 extra_flags,
+					ExplainState *es)
 {
 	StringInfoData	str;
-	const char *kernel_source;
-	int32		extra_flags;
 
-	if (!dprog_key || !es->verbose || !pgstrom_show_device_kernel)
+	if (!kern_source || !es->verbose || !pgstrom_debug_print_kernel)
 		return;
-
-	kernel_source = pgstrom_get_devprog_kernel_source(dprog_key);
-	extra_flags = pgstrom_get_devprog_extra_flags(dprog_key);
 
 	initStringInfo(&str);
 	/*
@@ -426,7 +419,7 @@ show_device_kernel(Datum dprog_key, ExplainState *es)
 		appendStringInfo(&str, "#include \"opencl_textlib.h\"\n");
 	if (extra_flags & DEVFUNC_NEEDS_NUMERIC)
 		appendStringInfo(&str, "#include \"opencl_numeric.h\"\n");
-	appendStringInfo(&str, "\n%s", kernel_source);
+	appendStringInfo(&str, "\n%s", kern_source);
 
 	ExplainPropertyText("Kernel Source", str.data, es);
 

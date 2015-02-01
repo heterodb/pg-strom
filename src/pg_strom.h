@@ -31,12 +31,7 @@
 #include <limits.h>
 #include <sys/time.h>
 #include "cuda.h"
-#ifdef __APPLE__
-#include <OpenCL/opencl.h>
-#else
-#include <CL/cl.h>
-#endif
-#include "opencl_common.h"
+#include "device_common.h"
 
 /*
  * --------------------------------------------------------------------
@@ -193,6 +188,7 @@ typedef struct
 	dlist_head		state_list;		/* list of GpuTaskState */
 	dlist_head		pds_list;		/* list of pgstrom_data_store */
 	cl_int			num_context;
+	cl_int			cur_context;
 	CUcontext		dev_context[FLEXIBLE_ARRAY_MEMBER];
 } GpuContext;
 
@@ -213,9 +209,10 @@ typedef struct GpuTaskState
 typedef struct GpuTask
 {
 	dlist_node		chain;
-	GpuTaskState   *gstate;
-	CUstream		stream;
-	cl_int			dindex;
+	GpuTaskState   *gts;
+	CUstream		cuda_stream;
+	CUdevice		cuda_device;	/* just reference, no cleanup needed */
+	CUcontext		cuda_context;	/* just reference, no cleanup needed */
 	cl_int			errcode;
 	void		  (*cb_process)(struct GpuTask *gtask);
 	void		  (*cb_release)(struct GpuTask *gtask);
@@ -361,15 +358,17 @@ HostPinMemContextCreate(MemoryContext parent,
 extern void pgstrom_init_cuda_control(void);
 extern GpuContext *pgstrom_get_gpucontext(void);
 extern void pgstrom_put_gpucontext(GpuContext *gcontext);
+extern void pgstrom_assign_cuda_stream(GpuContext *gcontext, GpuTask *task);
 extern const char *cuda_strerror(CUresult errcode);
 extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 
 /*
  * cuda_program.c
  */
-extern const void *pgstrom_get_cuda_program(const char *source,
-											int32 extra_flags);
-extern void pgstrom_put_cuda_program(const void *cuda_program);
+extern bool pgstrom_get_cuda_program(GpuTaskState *gts,
+									 const char *source,
+									 int32 extra_flags);
+extern void pgstrom_put_cuda_program(GpuTaskState *gts);
 extern void pgstrom_init_cuda_program(void);
 
 /*
@@ -530,7 +529,9 @@ extern void show_scan_qual(List *qual, const char *qlabel,
 						   ExplainState *es);
 extern void show_instrumentation_count(const char *qlabel, int which,
 									   PlanState *planstate, ExplainState *es);
-extern void show_device_kernel(Datum dprog_key, ExplainState *es);
+extern void print_device_kernel(const char *kern_source,
+								int32 extra_flags,
+								ExplainState *es);
 extern void pgstrom_perfmon_add(pgstrom_perfmon *pfm_sum,
 								pgstrom_perfmon *pfm_item);
 extern void pgstrom_perfmon_explain(pgstrom_perfmon *pfm,

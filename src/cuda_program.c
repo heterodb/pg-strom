@@ -242,6 +242,8 @@ pgstrom_program_cache_free(program_cache_entry *entry)
 	Size		offset;
 
 	Assert(entry->refcnt == 0);
+	Assert(!entry->chain.next && !entry->chain.prev);
+	Assert(!entry->lru_chain.next && !entry->lru_chain.prev);
 
 	offset = (uintptr_t)entry - (uintptr_t)pgcache_head->entry_begin;
 	Assert((offset & ((1UL << shift) - 1)) == 0);
@@ -648,8 +650,9 @@ pgstrom_build_cuda_program(Datum cuda_program)
 	pgstrom_wakeup_backends();
 }
 
-const void *
-pgstrom_get_cuda_program(const char *source, int32 extra_flags)
+bool
+pgstrom_get_cuda_program(GpuTaskState *gts,
+						 const char *source, int32 extra_flags)
 {
 	program_cache_entry	*entry;
 	Size		source_len = strlen(source);
@@ -657,6 +660,7 @@ pgstrom_get_cuda_program(const char *source, int32 extra_flags)
 	int			hindex;
 	dlist_iter	iter;
 	pg_crc32	crc;
+	CUresult	rc;
 	BackgroundWorker worker;
 
 	/* makes a hash value */
@@ -687,14 +691,27 @@ retry:
 			if (!entry->cuda_binary)
 			{
 				SpinLockRelease(&pgcache_head->lock);
-				return NULL;
+				return false;
 			}
 			/* OK, this kernel is already built */
 			entry->refcnt++;
 			dlist_move_head(&pgcache_head->lru_list, &entry->lru_chain);
 			SpinLockRelease(&pgcache_head->lock);
 
-			return (const void *) entry;
+			/* Also, load it on the private space */
+			rc = cuModuleLoadData(&gts->cuda_module, entry->cuda_binary);
+			if (rc != CUDA_SUCCESS)
+			{
+				SpinLockAcquire(&pgcache_head->lock);
+				Assert(entry->refcnt > 0);
+				if (--entry->refcnt == 0)
+					pgstrom_program_cache_free(entry);
+				SpinLockRelease(&pgcache_head->lock);
+
+				elog(ERROR, "failed on cuModuleLoadData (%s)",
+					 cuda_strerror(rc));
+			}
+			return true;
 		}
 	}
 	/* Not found on the existing cache */
@@ -733,36 +750,35 @@ retry:
 		goto retry;
 	}
 	SpinLockRelease(&pgcache_head->lock);
-	return NULL;	/* now build the device kernel... */
+
+	return false;	/* now build the device kernel */
 }
 
 void
-pgstrom_put_cuda_program(const void *cuda_program)
+pgstrom_put_cuda_program(GpuTaskState *gts)
 {
-	program_cache_entry	*entry = (program_cache_entry *) cuda_program;
+	const program_cache_entry *pc_entry = gts->cuda_program;
+	CUresult		rc;
+
+	if (!pc_entry)
+	{
+		Assert(!gts->cuda_module);
+		return;
+	}
 
 	SpinLockAcquire(&pgcache_head->lock);
-	Assert(entry->refcnt > 0);
-	if (--entry->refcnt == 0)
-	{
-		/* Unless entries are not reclaimed, refcnt never goes to zero */
-		Assert(!entry->chain.prev && !entry->chain.next);
-		Assert(!entry->lru_chain.prev && !entry->lru_chain.next);
-		pgstrom_program_cache_free(entry);
-	}
+	Assert(pc_entry->refcnt > 0);
+	if (--pc_entry->refcnt == 0)
+		pgstrom_program_cache_free(pc_entry);
 	SpinLockRelease(&pgcache_head->lock);
+
+	if (pc_entry->cuda_module)
+	{
+		rc = cuModuleUnload(pc_entry->cuda_module);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuModuleUnload : %s", cuda_strerror(rc));
+	}
 }
-
-
-
-
-
-
-
-
-
-
-
 
 static void
 pgstrom_startup_cuda_program(void)

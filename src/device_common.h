@@ -1,7 +1,7 @@
 /*
- * opencl_common.h
+ * device_common.h
  *
- * A common header for OpenCL device code
+ * A common header for CUDA device code
  * --
  * Copyright 2011-2014 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014 (C) The PG-Strom Development Team
@@ -15,8 +15,26 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#ifndef OPENCL_COMMON_H
-#define OPENCL_COMMON_H
+#ifndef DEVICE_COMMON_H
+#define DEVICE_COMMON_H
+
+/*
+ * Basic type definition - because of historical reason, we use "cl_"
+ * prefix for the definition of data types below. It might imply
+ * something related to OpenCL, but what we intend at this moment is
+ * "CUDA Language".
+ */
+typedef char			cl_bool;
+typedef char			cl_char;
+typedef unsigned char	cl_uchar;
+typedef short			cl_short;
+typedef unsigned short	cl_ushort;
+typedef int				cl_int;
+typedef unsigned int	cl_uint;
+typedef long			cl_long;
+typedef unsigned long	cl_ulong;
+typedef float			cl_float;
+typedef double			cl_double;
 
 /*
  * OpenCL intermediator always adds -DOPENCL_DEVICE_CODE on kernel build,
@@ -39,23 +57,12 @@
 #endif
 
 /* Misc definitions */
-//#define FLEXIBLE_ARRAY_MEMBER -- AMD's runtime has problem
+#define FLEXIBLE_ARRAY_MEMBER
 #define offsetof(TYPE, FIELD)   ((uintptr_t) &((TYPE *)0)->FIELD)
 #define lengthof(ARRAY)			(sizeof(ARRAY) / sizeof((ARRAY)[0]))
 #define BITS_PER_BYTE			8
 
-/* basic type definitions */
-typedef bool		cl_bool;
-typedef char		cl_char;
-typedef uchar		cl_uchar;
-typedef short		cl_short;
-typedef ushort		cl_ushort;
-typedef int			cl_int;
-typedef uint		cl_uint;
-typedef long		cl_long;
-typedef ulong		cl_ulong;
-typedef float		cl_float;
-typedef double		cl_double;
+/* Another basic type definitions */
 typedef cl_ulong	hostptr_t;
 typedef cl_ulong	Datum;
 

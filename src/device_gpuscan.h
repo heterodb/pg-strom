@@ -1,10 +1,10 @@
 /*
- * opencl_gpuscan.h
+ * device_gpuscan.h
  *
- * OpenCL device code specific to GpuScan logic
+ * CUDA device code specific to GpuScan logic
  * --
- * Copyright 2011-2014 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014 (C) The PG-Strom Development Team
+ * Copyright 2011-2015 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2015 (C) The PG-Strom Development Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -15,8 +15,8 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#ifndef OPENCL_GPUSCAN_H
-#define OPENCL_GPUSCAN_H
+#ifndef DEVICE_GPUSCAN_H
+#define DEVICE_GPUSCAN_H
 
 /*
  * Sequential Scan using GPU/MIC acceleration
@@ -178,20 +178,5 @@ gpuscan_qual(__global kern_gpuscan *kgpuscan,	/* in/out */
 	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
 }
 
-#else	/* OPENCL_DEVICE_CODE */
-
-/*
- * Host side representation of kern_gpuscan. It has a program-id to be
- * executed on the OpenCL device, and either of row- or column- store
- * to be processed, in addition to the kern_gpuscan buffer including
- * kern_parambuf for constant values.
- */
-typedef struct {
-	pgstrom_message		msg;		/* = StromTag_GpuScan */
-	Datum				dprog_key;	/* key of device program */
-	pgstrom_data_store *pds;		/* = StromTag_DataStore */
-	kern_gpuscan		kern;
-} pgstrom_gpuscan;
-
 #endif	/* OPENCL_DEVICE_CODE */
-#endif	/* OPENCL_GPUSCAN_H */
+#endif	/* DEVICE_GPUSCAN_H */
