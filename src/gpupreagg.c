@@ -4696,8 +4696,6 @@ PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_y2);
 Datum
 gpupreagg_corr_psum_xy(PG_FUNCTION_ARGS)
 {
-	float8		val_xy;
-
 	Assert(PG_NARGS() == 3);
 	/* Aggregate Filter */
 	if (PG_ARGISNULL(0) || !PG_GETARG_BOOL(0))
