@@ -289,8 +289,8 @@ gpusort_bitonic_merge(__global kern_gpusort *kgpusort,
 
 	/* Load index to localIdx[] */
 	localEntry = (prtPos+prtSize < nitems) ? prtSize : (nitems-prtPos);
-	for (i = localID; localID < localEntry; i += localSize)
-		localIdx[i] = kresults->results[2 * (prtPos + i)];
+	for (i = localID; i < localEntry; i += localSize)
+		localIdx[i] = kresults->results[2 * (prtPos + i) + 1];
 	barrier(CLK_LOCAL_MEM_FENCE);
 
 	/* merge two sorted blocks */

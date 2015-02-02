@@ -1919,7 +1919,7 @@ clserv_respond_gpusort(cl_event event, cl_int ev_status, void *private)
 }
 
 static cl_int
-compute_bitonic_workgroup_size(clstate_gpusort *clgss, size_t nhalf,
+compute_bitonic_workgroup_size(clstate_gpusort *clgss, size_t nitems,
 							   size_t *p_gwork_sz, size_t *p_lwork_sz)
 {
 	static struct {
@@ -1929,7 +1929,7 @@ compute_bitonic_workgroup_size(clstate_gpusort *clgss, size_t nhalf,
 		{ "gpusort_bitonic_local", 2 * sizeof(cl_uint) },
 		{ "gpusort_bitonic_merge",     sizeof(cl_uint) },
 	};
-	size_t		least_sz = nhalf;
+	size_t		least_sz = (nitems + 1) / 2;
 	size_t		lwork_sz;
 	size_t		gwork_sz;
 	cl_kernel	kernel;
@@ -1951,7 +1951,7 @@ compute_bitonic_workgroup_size(clstate_gpusort *clgss, size_t nhalf,
 										  kernel,
 										  clgss->dindex,
 										  true,
-										  nhalf,
+										  (nitems + 1) / 2,
 										  kern_calls[i].kern_lmem))
 		{
 			clserv_log("failed on clserv_compute_workgroup_size");
@@ -1967,7 +1967,7 @@ compute_bitonic_workgroup_size(clstate_gpusort *clgss, size_t nhalf,
 	 * or equal to the least one of expected kernels.
 	 */
 	lwork_sz = 1UL << (get_next_log2(least_sz + 1) - 1);
-	gwork_sz = ((nhalf + lwork_sz - 1) / lwork_sz) * lwork_sz;
+	gwork_sz = (((nitems + 1) / 2 + lwork_sz - 1) / lwork_sz) * lwork_sz;
 
 	*p_lwork_sz = lwork_sz;
 	*p_gwork_sz = gwork_sz;
@@ -2514,12 +2514,14 @@ clserv_process_gpusort(pgstrom_message *msg)
 		goto error;
 
 	/* kick, a series of gpusort_bitonic_*() functions */
-	nhalf = 1UL << (get_next_log2(nitems + 1) - 1);
-
-	rc = compute_bitonic_workgroup_size(clgss, nhalf, &gwork_sz, &lwork_sz);
+	rc = compute_bitonic_workgroup_size(clgss, nitems, &gwork_sz, &lwork_sz);
 	if (rc != CL_SUCCESS)
 		goto error;
 
+	/* NOTE: nhalf is the least power of two value that is larger than or
+	 * equal to half of the nitems.
+	 */
+	nhalf = 1UL << (get_next_log2(nitems + 1) - 1);
 	nsteps = get_next_log2(nhalf / lwork_sz) + 1;
 	launches = (nsteps + 1) * nsteps / 2 + nsteps + 1;
 
@@ -2533,12 +2535,12 @@ clserv_process_gpusort(pgstrom_message *msg)
 		goto error;
 
 	/* Sorting inter workgroups */
-	for (i = 2 * lwork_sz; i < gwork_sz; i *= 2)
+	for (i = lwork_sz; i < nhalf; i *= 2)
 	{
-		for (j = i; j > lwork_sz; j /= 2)
+		for (j = 2 * i; j > lwork_sz; j /= 2)
 		{
 			cl_uint		unitsz = 2 * j;
-			bool		reversing = (j == i) ? true : false;
+			bool		reversing = (j == 2 * i) ? true : false;
 			size_t		work_sz;
 
 			work_sz = (((nitems + unitsz - 1) / unitsz) * unitsz / 2);
