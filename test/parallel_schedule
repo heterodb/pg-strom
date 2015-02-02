@@ -14,15 +14,15 @@ test: test_init
 # GpuPreAgg Pattern
 # ----------
 # GpuPreAgg parallel test-cases.
-test: explain_gpa zero_gpa where_gpa nogrp_gpa recheck_gpa group_gpa overflow_gpa
+#test: explain_gpa zero_gpa where_gpa nogrp_gpa recheck_gpa group_gpa overflow_gpa
 # GpuPreAgg Complex test-case
-test: misc_gpa
+#test: misc_gpa
 
 # ----------
 # GpuScan pattern
 # ----------
 # GpuScan parallel test-cases.
-test: explain_gs zero_gs normal_gs overflow_gs
+test: explain_gs zero_gs normal_gs recheck_gs 
 
 # ----------
 # GpuHashJoin pattern
