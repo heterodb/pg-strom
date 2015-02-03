@@ -159,7 +159,7 @@ typedef struct
 	dsm_segment	   *litems_dsm;
 	dsm_segment	   *ritems_dsm;
 	dsm_segment	   *oitems_dsm;
-
+	pgstrom_perfmon	pfm;
 	union
 	{
 		struct
@@ -199,6 +199,7 @@ typedef struct
 	dsm_handle	litems_dsmhnd;
 	dsm_handle	ritems_dsmhnd;
 	volatile bool cpusort_worker_done;	/* set prior to setLatch() by worker */
+	volatile long time_cpu_sort;	/* performance info */
 	/* connection information */
 	Size		database_name;		/* offset from data[] */
 	/* file mapped data store */
@@ -1189,13 +1190,13 @@ gpusort_check_cpu_tasks(GpuSortState *gss)
 		if (status == BGWH_STARTED ||
 			status == BGWH_STOPPED)
 		{
-			if (status == BGWH_STARTED)
-			{
-				pgstrom_flat_cpusort *pfc = (pgstrom_flat_cpusort *)
-					dsm_segment_address(cpusort->oitems_dsm);
-				if (!pfc->cpusort_worker_done)
-					continue;
-			}
+			pgstrom_flat_cpusort *pfc = (pgstrom_flat_cpusort *)
+				dsm_segment_address(cpusort->oitems_dsm);
+
+			/* not yet finished? */
+			if (status == BGWH_STARTED && !pfc->cpusort_worker_done)
+				continue;
+
 			dlist_delete(&cpusort->chain);
 			memset(&cpusort->chain, 0, sizeof(dlist_node));
 			gss->num_cpu_running--;
@@ -1213,6 +1214,18 @@ gpusort_check_cpu_tasks(GpuSortState *gss)
 						(errcode(kresults->errcode),
 						 errmsg("GpuSort worker: %s",
 								(char *)kresults->results)));
+
+			/* accumlate performance counter */
+			if (cpusort->pfm.enabled)
+			{
+				struct timeval tv;
+
+				gettimeofday(&tv, NULL);
+				cpusort->pfm.time_cpu_sort_real
+					+= timeval_diff(&cpusort->pfm.tv, &tv);
+				cpusort->pfm.time_cpu_sort = pfc->time_cpu_sort;
+				pgstrom_perfmon_add(&gss->pfm, &cpusort->pfm);
+			}
 
 			oldcxt = MemoryContextSwitchTo(gss->css.ss.ps.state->es_query_cxt);
 			cpusort = gpusort_merge_cpu_chunks(gss, cpusort);
@@ -1247,6 +1260,14 @@ gpusort_kick_pending_tasks(GpuSortState *gss)
 		dsm_hnd = dsm_segment_handle(cpusort->oitems_dsm);
 		gss->num_cpu_pending--;
 
+		/* init performance counter */
+		if (gss->pfm.enabled)
+		{
+			memset(&cpusort->pfm, 0, sizeof(pgstrom_perfmon));
+			cpusort->pfm.enabled = gss->pfm.enabled;
+			gettimeofday(&cpusort->pfm.tv, NULL);
+		}
+
 		/*
 		 * Set up dynamic background worker
 		 */
@@ -1269,6 +1290,7 @@ gpusort_kick_pending_tasks(GpuSortState *gss)
 		{
 			dlist_push_tail(&gss->running_cpu_chunks, &cpusort->chain);
 			gss->num_cpu_running++;
+			gss->pfm.num_cpu_sort++;
 		}
 	}
 }
@@ -1331,13 +1353,19 @@ gpusort_exec_sort(GpuSortState *gss)
 			else
 				timeout =       400L;	/* 0.4sec */
 
-			gettimeofday(&tv1, NULL);
+			if (gss->pfm.enabled)
+				gettimeofday(&tv1, NULL);
+
 			rc = WaitLatch(&MyProc->procLatch,
 						   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
 						   timeout);
-			gettimeofday(&tv2, NULL);
 			ResetLatch(&MyProc->procLatch);
 
+			if (gss->pfm.enabled)
+			{
+				gettimeofday(&tv2, NULL);
+				gss->pfm.time_bgw_sync += timeval_diff(&tv1, &tv2);
+			}
 			/* emergency bailout if postmaster has died */
 			if (rc & WL_POSTMASTER_DEATH)
 				elog(ERROR, "failed on WaitLatch due to Postmaster die");
@@ -1771,6 +1799,7 @@ gpusort_entrypoint_cpusort(Datum main_arg)
 	pgstrom_cpusort	   *cpusort;
 	pgstrom_flat_cpusort *pfc;
 	kern_resultbuf	   *kresults;
+	struct timeval		tv1, tv2;
 
 	/* We're now ready to receive signals */
 	BackgroundWorkerUnblockSignals();
@@ -1820,8 +1849,12 @@ gpusort_entrypoint_cpusort(Datum main_arg)
 		StartTransactionCommand();
 		PushActiveSnapshot(GetTransactionSnapshot());
 
+		gettimeofday(&tv1, NULL);
+
 		/* handle CPU merge sorting */
 		gpusort_exec_cpusort(cpusort);
+
+		gettimeofday(&tv2, NULL);
 
 		/* we should have no side-effect */
 		PopActiveSnapshot();
@@ -1848,6 +1881,7 @@ gpusort_entrypoint_cpusort(Datum main_arg)
 
 	/* Inform the corrdinator worker got finished */
 	pfc->cpusort_worker_done = true;
+	pfc->time_cpu_sort = timeval_diff(&tv1, &tv2);
 	pg_memory_barrier();
 	SetLatch(&master->procLatch);
 }
@@ -1973,7 +2007,7 @@ clserv_respond_gpusort(cl_event event, cl_int ev_status, void *private)
 				goto skip_perfmon;
 			tv_end = Max(tv_end, temp);
 		}
-		gpusort->msg.pfm.time_kern_sort += (tv_end - tv_start) / 1000;
+		gpusort->msg.pfm.time_gpu_sort += (tv_end - tv_start) / 1000;
 
 		/*
 		 * DMA recv time
@@ -2266,7 +2300,7 @@ clserv_launch_bitonic_local(clstate_gpusort *clgss,
 		return rc;
 	}
     clgss->ev_index++;
-    clgss->msg->pfm.num_kern_sort++;
+    clgss->msg->pfm.num_gpu_sort++;
 
 	return CL_SUCCESS;
 }
@@ -2387,7 +2421,7 @@ clserv_launch_bitonic_step(clstate_gpusort *clgss, bool reversing,
 		return rc;
 	}
 	clgss->ev_index++;
-	clgss->msg->pfm.num_kern_sort++;
+	clgss->msg->pfm.num_gpu_sort++;
 
 	return CL_SUCCESS;
 }
@@ -2475,7 +2509,7 @@ clserv_launch_bitonic_merge(clstate_gpusort *clgss,
 		return rc;
 	}
 	clgss->ev_index++;
-	clgss->msg->pfm.num_kern_sort++;
+	clgss->msg->pfm.num_gpu_sort++;
 
 	return CL_SUCCESS;
 }

@@ -227,13 +227,21 @@ typedef struct {
 	/*-- (special perfmon for gpuhashjoin) --*/
 	cl_uint		num_kern_proj;	/* number of projection kernel execution */
 	cl_ulong	time_kern_proj;	/* time to execute projection kernel */
-	/*-- (special perfmon for gpupreagg, gpusort) --*/
+	/*-- (special perfmon for gpupreagg) --*/
 	cl_uint		num_kern_prep;	/* number of preparation kernel execution */
 	cl_uint		num_kern_lagg;	/* number of local reduction kernel exec */
 	cl_uint		num_kern_gagg;	/* number of global reduction kernel exec */
 	cl_ulong	time_kern_prep;	/* time to execute preparation kernel */
 	cl_ulong	time_kern_lagg;	/* time to execute local reduction kernel */
 	cl_ulong	time_kern_gagg;	/* time to execute global reduction kernel */
+	/*-- (special perfmon for gpusort) --*/
+	cl_uint		num_gpu_sort;	/* number of GPU bitonic sort execution */
+	cl_uint		num_cpu_sort;	/* number of GPU merge sort execution */
+	cl_ulong	time_gpu_sort;	/* time to execute GPU bitonic sort */
+	cl_ulong	time_cpu_sort;	/* time to execute CPU merge sort */
+	cl_ulong	time_cpu_sort_real;	/* real time to execute CPU merge sort */
+	cl_ulong	time_bgw_sync;	/* time to synchronich BGWorkers */
+
 	/*-- for debugging usage --*/
 	cl_ulong	time_debug1;	/* time for debugging purpose.1 */
 	cl_ulong	time_debug2;	/* time for debugging purpose.2 */

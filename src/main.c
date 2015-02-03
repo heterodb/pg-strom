@@ -426,6 +426,8 @@ show_device_kernel(Datum dprog_key, ExplainState *es)
 		appendStringInfo(&str, "#include \"opencl_hashjoin.h\"\n");
 	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
 		appendStringInfo(&str, "#include \"opencl_gpupreagg.h\"\n");
+	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT)
+		appendStringInfo(&str, "#include \"opencl_gpusort.h\"\n");
 	if (extra_flags & DEVFUNC_NEEDS_MATHLIB)
 		appendStringInfo(&str, "#include \"opencl_mathlib.h\"\n");
 	if (extra_flags & DEVFUNC_NEEDS_TIMELIB)
@@ -473,6 +475,14 @@ pgstrom_perfmon_add(pgstrom_perfmon *pfm_sum, pgstrom_perfmon *pfm_item)
 	pfm_sum->time_kern_prep		+= pfm_item->time_kern_prep;
 	pfm_sum->time_kern_lagg		+= pfm_item->time_kern_lagg;
 	pfm_sum->time_kern_gagg		+= pfm_item->time_kern_gagg;
+	/* for gpusort */
+	pfm_sum->num_gpu_sort		+= pfm_item->num_gpu_sort;
+	pfm_sum->num_cpu_sort		+= pfm_item->num_cpu_sort;
+	pfm_sum->time_gpu_sort		+= pfm_item->time_gpu_sort;
+	pfm_sum->time_cpu_sort		+= pfm_item->time_cpu_sort;
+	pfm_sum->time_cpu_sort_real	+= pfm_item->time_cpu_sort_real;
+	pfm_sum->time_bgw_sync		+= pfm_item->time_bgw_sync;
+
 	/* for debugging */
 	pfm_sum->time_debug1		+= pfm_item->time_debug1;
 	pfm_sum->time_debug2		+= pfm_item->time_debug2;
@@ -589,7 +599,7 @@ pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 		ExplainPropertyText("DMA recv", buf, es);
 	}
 
-	/* only gpupreagg */
+	/* only gpupreagg or gpusort */
 	if (pfm->num_kern_prep > 0)
 	{
 		multi_kernel = true;
@@ -635,6 +645,38 @@ pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
 										(double)pfm->num_kern_proj),
 				 pfm->num_kern_exec);
 		ExplainPropertyText("proj kernel exec", buf, es);
+	}
+
+	/* only gpusort */
+	if (pfm->num_gpu_sort > 0)
+	{
+		multi_kernel = true;
+		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
+				 usecond_unitary_format((double)pfm->time_gpu_sort),
+				 usecond_unitary_format((double)pfm->time_gpu_sort /
+										(double)pfm->num_gpu_sort),
+				 pfm->num_gpu_sort);
+		ExplainPropertyText("GPU sort exec", buf, es);
+	}
+
+	/* only gpusort */
+	if (pfm->num_cpu_sort > 0)
+	{
+		cl_ulong	overhead;
+
+		multi_kernel = true;
+		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
+				 usecond_unitary_format((double)pfm->time_cpu_sort),
+				 usecond_unitary_format((double)pfm->time_cpu_sort /
+										(double)pfm->num_cpu_sort),
+				 pfm->num_cpu_sort);
+		ExplainPropertyText("CPU sort exec", buf, es);
+
+		overhead = pfm->time_cpu_sort_real - pfm->time_cpu_sort;
+		snprintf(buf, sizeof(buf), "overhead: %s, sync: %s",
+				 usecond_unitary_format((double)overhead),
+				 usecond_unitary_format((double)pfm->time_bgw_sync));
+		ExplainPropertyText("Background Worker", buf, es);
 	}
 
 	if (pfm->num_kern_exec > 0)
