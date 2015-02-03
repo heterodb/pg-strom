@@ -3449,3 +3449,571 @@ clserv_process_gpusort(pgstrom_message *msg)
 	Assert(dlist_length(&gpusort->gs_chunks) == 1);
 	clserv_process_gpusort_single(gpusort);
 }
+
+
+
+
+
+
+
+/*
+ *
+ * DEADCODE of SORT BASED GPUPREAGG
+ *
+ */
+#if 0
+static cl_int
+clserv_launch_set_rindex(clstate_gpupreagg *clgpa, cl_uint nvalids)
+{
+	cl_int		rc;
+	size_t		gwork_sz;
+	size_t		lwork_sz;
+
+
+	/* Return without dispatch the kernel function if no data in the chunk.
+	 */
+	if (nvalids == 0)
+		return CL_SUCCESS;
+
+	/* __kernel void
+	 * gpupreagg_set_rindex(__global kern_gpupreagg *kgpreagg,
+	 *                      __global kern_data_store *kds,
+	 *                      __local void *local_memory)
+	 */
+	clgpa->kern_set_rindex = clCreateKernel(clgpa->program,
+											"gpupreagg_set_rindex",
+											&rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	/* calculation of workgroup size with assumption of a device thread
+	 * consums "sizeof(cl_int)" local memory per thread.
+	 */
+	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
+									   clgpa->kern_set_rindex,
+									   clgpa->dindex,
+									   true,
+									   nvalids,
+									   sizeof(cl_uint)))
+	{
+		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
+		return StromError_OpenCLInternal;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_set_rindex,
+						0,		/* __global kern_gpupreagg *kgpreagg */
+						sizeof(cl_mem),
+						&clgpa->m_gpreagg);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_set_rindex,
+						1,		/* __global kern_data_store *kds_src */
+						sizeof(cl_mem),
+						&clgpa->m_kds_src);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_set_rindex,
+						2,		/* __local void *local_memory */
+						sizeof(cl_int) * lwork_sz,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
+								clgpa->kern_set_rindex,
+								1,
+								NULL,
+								&gwork_sz,
+                                &lwork_sz,
+								1,
+								&clgpa->events[clgpa->ev_index - 1],
+								&clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	clgpa->ev_index++;
+	clgpa->gpreagg->msg.pfm.num_kern_sort++;
+
+	return CL_SUCCESS;
+}
+
+static cl_int
+clserv_launch_bitonic_local(clstate_gpupreagg *clgpa,
+							size_t gwork_sz, size_t lwork_sz)
+{
+	cl_kernel	kernel;
+	cl_int		rc;
+
+	/* __kernel void
+	 * gpupreagg_bitonic_local(__global kern_gpupreagg *kgpreagg,
+	 *                         __global kern_data_store *kds,
+	 *                         __global kern_data_store *ktoast,
+	 *                         __local void *local_memory)
+	 */
+	kernel = clCreateKernel(clgpa->program,
+							"gpupreagg_bitonic_local",
+							&rc);
+	if (rc != CL_SUCCESS)
+    {
+        clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+        return rc;
+    }
+	clgpa->kern_sort[clgpa->kern_sort_nums++] = kernel;
+
+	rc = clSetKernelArg(kernel,
+						0,		/* __kern_gpupreagg *kgpreagg */
+						sizeof(cl_mem),
+						&clgpa->m_gpreagg);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						1,      /* __global kern_data_store *kds */
+						sizeof(cl_mem),
+						&clgpa->m_kds_src);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						2,		/* __global kern_data_store *ktoast */
+						sizeof(cl_mem),
+						&clgpa->m_kds_in);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						3,		/* __local void *local_memory */
+						2 * sizeof(cl_uint) * lwork_sz,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
+								kernel,
+								1,
+								NULL,
+								&gwork_sz,
+								&lwork_sz,
+								1,
+								&clgpa->events[clgpa->ev_index - 1],
+								&clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	clgpa->ev_index++;
+	clgpa->gpreagg->msg.pfm.num_kern_sort++;
+
+	return CL_SUCCESS;
+}
+
+static cl_int
+clserv_launch_bitonic_step(clstate_gpupreagg *clgpa,
+						   bool reversing, cl_uint unitsz, size_t work_sz)
+{
+	cl_kernel	kernel;
+	cl_int		bitonic_unitsz;
+	cl_int		rc;
+	size_t		gwork_sz;
+	size_t		lwork_sz;
+
+	/*
+	 * __kernel void
+	 * gpupreagg_bitonic_step(__global kern_gpupreagg *kgpreagg,
+	 *                        cl_int bitonic_unitsz,
+	 *                        __global kern_data_store *kds,
+	 *                        __global kern_data_store *ktoast,
+	 *                        __local void *local_memory)
+	 */
+	kernel = clCreateKernel(clgpa->program,
+							"gpupreagg_bitonic_step",
+							&rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+		return rc;
+	}
+	clgpa->kern_sort[clgpa->kern_sort_nums++] = kernel;
+
+	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
+									   kernel,
+									   clgpa->dindex,
+									   false,
+									   work_sz,
+									   sizeof(int)))
+	{
+		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
+		return StromError_OpenCLInternal;
+	}
+
+	rc = clSetKernelArg(kernel,
+						0,		/* __kern_gpupreagg *kgpreagg */
+						sizeof(cl_mem),
+						&clgpa->m_gpreagg);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	/*
+	 * NOTE: bitonic_unitsz informs kernel function the unit size of
+	 * sorting block and its direction. Sign of the value indicates
+	 * the direction, and absolute value indicates the sorting block
+	 * size. For example, -5 means reversing direction (because of
+	 * negative sign), and 32 (= 2^5) for sorting block size.
+	 */
+	bitonic_unitsz = (!reversing ? unitsz : -unitsz);
+	rc = clSetKernelArg(kernel,
+						1,	/* cl_int bitonic_unitsz */
+						sizeof(cl_int),
+						&bitonic_unitsz);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						2,      /* __global kern_data_store *kds */
+						sizeof(cl_mem),
+						&clgpa->m_kds_src);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						3,		/* __global kern_data_store *ktoast */
+						sizeof(cl_mem),
+						&clgpa->m_kds_in);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						4,		/* __local void *local_memory */
+						sizeof(cl_uint) * lwork_sz,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
+								kernel,
+								1,
+								NULL,
+								&gwork_sz,
+								&lwork_sz,
+								1,
+								&clgpa->events[clgpa->ev_index - 1],
+								&clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	clgpa->ev_index++;
+	clgpa->gpreagg->msg.pfm.num_kern_sort++;
+
+	return CL_SUCCESS;
+}
+
+static cl_int
+clserv_launch_bitonic_merge(clstate_gpupreagg *clgpa,
+							size_t gwork_sz, size_t lwork_sz)
+{
+	cl_kernel	kernel;
+	cl_int		rc;
+
+	/* __kernel void
+	 * gpupreagg_bitonic_merge(__global kern_gpupreagg *kgpreagg,
+	 *                         __global kern_data_store *kds,
+	 *                         __global kern_data_store *ktoast,
+	 *                         __local void *local_memory)
+	 */
+	kernel = clCreateKernel(clgpa->program,
+							"gpupreagg_bitonic_merge",
+							&rc);
+	if (rc != CL_SUCCESS)
+    {
+        clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+        return rc;
+    }
+	clgpa->kern_sort[clgpa->kern_sort_nums++] = kernel;
+
+	rc = clSetKernelArg(kernel,
+						0,		/* __kern_gpupreagg *kgpreagg */
+						sizeof(cl_mem),
+						&clgpa->m_gpreagg);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						1,      /* __global kern_data_store *kds */
+						sizeof(cl_mem),
+						&clgpa->m_kds_src);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						2,		/* __global kern_data_store *ktoast */
+						sizeof(cl_mem),
+						&clgpa->m_kds_in);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(kernel,
+						3,		/* __local void *local_memory */
+						2 * sizeof(cl_uint) * lwork_sz,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
+								kernel,
+								1,
+								NULL,
+								&gwork_sz,
+								&lwork_sz,
+								1,
+								&clgpa->events[clgpa->ev_index - 1],
+								&clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	clgpa->ev_index++;
+	clgpa->gpreagg->msg.pfm.num_kern_sort++;
+
+	return CL_SUCCESS;
+}
+
+static cl_int
+clserv_launch_preagg_reduction(clstate_gpupreagg *clgpa, cl_uint nvalids)
+{
+	cl_int		rc;
+	size_t		gwork_sz;
+	size_t		lwork_sz;
+
+	/* __kernel void
+	 * gpupreagg_reduction(__global kern_gpupreagg *kgpreagg,
+	 *                     __global kern_data_store *kds_src,
+	 *                     __global kern_data_store *kds_dst,
+	 *                     __global kern_data_store *ktoast,
+	 *                     __local void *local_memory)
+	 */
+	clgpa->kern_pagg = clCreateKernel(clgpa->program,
+									  "gpupreagg_reduction",
+									  &rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	/* calculation of workgroup size with assumption of a device thread
+	 * consums "sizeof(pagg_datum) + sizeof(cl_uint)" local memory per
+	 * thread, that is larger than usual cl_uint cases.
+	 */
+	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
+									   clgpa->kern_pagg,
+									   clgpa->dindex,
+									   true,
+									   nvalids,
+									   sizeof(pagg_datum)))
+	{
+		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
+		return StromError_OpenCLInternal;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_pagg,
+						0,		/* __global kern_gpupreagg *kgpreagg */
+						sizeof(cl_mem),
+						&clgpa->m_gpreagg);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_pagg,
+						1,		/* __global kern_data_store *kds_src */
+						sizeof(cl_mem),
+						&clgpa->m_kds_src);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_pagg,
+						2,		/* __global kern_data_store *kds_dst */
+						sizeof(cl_mem),
+						&clgpa->m_kds_dst);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_pagg,
+						3,		/* __global kern_data_store *ktoast */
+						sizeof(cl_mem),
+						&clgpa->m_kds_in);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_pagg,
+						4,		/* __local void *local_memory */
+						sizeof(pagg_datum) * lwork_sz + STROMALIGN_LEN,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
+								clgpa->kern_pagg,
+								1,
+								NULL,
+								&gwork_sz,
+                                &lwork_sz,
+								1,
+								&clgpa->events[clgpa->ev_index - 1],
+								&clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	clgpa->ev_kern_pagg = clgpa->ev_index++;
+	clgpa->gpreagg->msg.pfm.num_kern_exec++;
+
+	return CL_SUCCESS;
+}
+
+/*
+ * bitonic_compute_workgroup_size
+ *
+ * Bitonic-sorting logic will compare and exchange items being located
+ * on distance of 2^N unit size. Its kernel entrypoint depends on the
+ * unit size that depends on maximum available local workgroup size
+ * for the kernel code. Because it depends on kernel resource consumption,
+ * we need to ask runtime the max available local workgroup size prior
+ * to the kernel enqueue.
+ */
+static cl_int
+bitonic_compute_workgroup_size(clstate_gpupreagg *clgpa,
+							   cl_uint nhalf,
+							   size_t *p_gwork_sz,
+							   size_t *p_lwork_sz)
+{
+	static struct {
+		const char *kern_name;
+		size_t		kern_lmem;
+	} kern_calls[] = {
+		{ "gpupreagg_bitonic_local", 2 * sizeof(cl_uint) },
+		{ "gpupreagg_bitonic_merge",     sizeof(cl_uint) },
+	};
+	size_t		least_sz = nhalf;
+	size_t		lwork_sz;
+	size_t		gwork_sz;
+	cl_kernel	kernel;
+	cl_int		i, rc;
+
+	for (i=0; i < lengthof(kern_calls); i++)
+	{
+		kernel = clCreateKernel(clgpa->program,
+								kern_calls[i].kern_name,
+								&rc);
+		if (rc != CL_SUCCESS)
+		{
+			clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+			return rc;
+		}
+
+		if(!clserv_compute_workgroup_size(&gwork_sz,
+										  &lwork_sz,
+										  kernel,
+										  clgpa->dindex,
+										  true,
+										  nhalf,
+										  kern_calls[i].kern_lmem))
+		{
+			clserv_log("failed on clserv_compute_workgroup_size");
+			clReleaseKernel(kernel);
+			return StromError_OpenCLInternal;
+		}
+		clReleaseKernel(kernel);
+
+		least_sz = Min(least_sz, lwork_sz);
+	}
+	/*
+	 * NOTE: Local workgroup size is the largest 2^N value less than or
+	 * equal to the least one of expected kernels.
+	 */
+	lwork_sz = 1UL << (get_next_log2(least_sz + 1) - 1);
+	gwork_sz = ((nhalf + lwork_sz - 1) / lwork_sz) * lwork_sz;
+
+	*p_lwork_sz = lwork_sz;
+	*p_gwork_sz = gwork_sz;
+
+	return CL_SUCCESS;
+}
+#endif
+
