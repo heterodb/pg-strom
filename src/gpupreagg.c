@@ -263,10 +263,10 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	},
 	/* COUNT(*) = SUM(NROWS(*|X)) */
 	{ "count", 0, {},
-	  "c:sum", 1, {INT4OID},
+	  "s:count", 1, {INT4OID},
 	  {ALTFUNC_EXPR_NROWS}, 0},
 	{ "count", 1, {ANYOID},
-	  "c:sum", 1, {INT4OID},
+	  "s:count", 1, {INT4OID},
 	  {ALTFUNC_EXPR_NROWS}, 0},
 	/* MAX(X) = MAX(PMAX(X)) */
 	{ "max", 1, {INT2OID},   "c:max", 1, {INT2OID},   {ALTFUNC_EXPR_PMAX}, 0},
@@ -4599,7 +4599,9 @@ gpupreagg_psum_x2_float(PG_FUNCTION_ARGS)
 	Assert(PG_NARGS() == 1);
 	if (PG_ARGISNULL(0))
 		PG_RETURN_NULL();
-	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(0) * PG_GETARG_FLOAT8(0));
+	PG_RETURN_DATUM(DirectFunctionCall2(float8mul,
+										PG_GETARG_FLOAT8(0),
+										PG_GETARG_FLOAT8(0)));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_psum_x2_float);
 
@@ -4667,7 +4669,10 @@ gpupreagg_corr_psum_x2(PG_FUNCTION_ARGS)
 	/* NULL checks */
 	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
 		PG_RETURN_NULL();
-	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(0) * PG_GETARG_FLOAT8(0));
+	/* calculation of X*X with overflow checks */
+	PG_RETURN_DATUM(DirectFunctionCall2(float8mul,
+										PG_GETARG_FLOAT8(0),
+										PG_GETARG_FLOAT8(0)));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_x2);
 
@@ -4681,7 +4686,10 @@ gpupreagg_corr_psum_y2(PG_FUNCTION_ARGS)
 	/* NULL checks */
 	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
 		PG_RETURN_NULL();
-	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(1) * PG_GETARG_FLOAT8(1));
+	/* calculation of X*X with overflow checks */
+	PG_RETURN_DATUM(DirectFunctionCall2(float8mul,
+										PG_GETARG_FLOAT8(1),
+										PG_GETARG_FLOAT8(1)));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_y2);
 
@@ -4695,7 +4703,10 @@ gpupreagg_corr_psum_xy(PG_FUNCTION_ARGS)
 	/* NULL checks */
 	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
 		PG_RETURN_NULL();
-	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(0) * PG_GETARG_FLOAT8(1));
+	/* calculation of X*X with overflow checks */
+	PG_RETURN_DATUM(DirectFunctionCall2(float8mul,
+										PG_GETARG_FLOAT8(0),
+										PG_GETARG_FLOAT8(1)));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_xy);
 
@@ -4755,54 +4766,25 @@ PG_FUNCTION_INFO_V1(pgstrom_avg_int8_accum);
 Datum
 pgstrom_sum_int8_accum(PG_FUNCTION_ARGS)
 {
-	ArrayType  *transarray = PG_GETARG_ARRAYTYPE_P(0);
-	int64		psumX = PG_GETARG_INT64(1);
-	int64	   *transvalues;
-	int64		newSumX;
+	int64		newval;
 
-	transvalues = check_int64_array(transarray, 2);
-	newSumX = transvalues[1] + psumX;
-
-	if (AggCheckCallContext(fcinfo, NULL))
+	if (PG_ARGISNULL(0))
 	{
-		transvalues[0] = 0;	/* dummy */
-		transvalues[1] = newSumX;
-
-		PG_RETURN_ARRAYTYPE_P(transarray);
+		if (PG_ARGISNULL(1))
+			PG_RETURN_NULL();   /* still no non-null */
+		/* This is the first non-null input. */
+		newval = PG_GETARG_INT64(1);
 	}
 	else
 	{
-		Datum		transdatums[2];
-		ArrayType  *result;
+		newval = PG_GETARG_INT64(0);
 
-		transdatums[0] = Int64GetDatumFast(0);	/* dummy */
-		transdatums[1] = Int64GetDatumFast(newSumX);
-
-		result = construct_array(transdatums, 2,
-								 INT8OID,
-								 sizeof(int64), FLOAT8PASSBYVAL, 'd');
-		PG_RETURN_ARRAYTYPE_P(result);
+		if (!PG_ARGISNULL(1))
+			newval += PG_GETARG_INT64(1);
 	}
+	PG_RETURN_INT64(newval);
 }
 PG_FUNCTION_INFO_V1(pgstrom_sum_int8_accum);
-
-/*
- * The built-in final sum() function that accept int8 generates numeric
- * value, but it does not fit the specification of original int2/int4.
- * So, we put our original implementation that accepet nrows(int4) and
- * partial sum (int8) then generate total sum in int8 form.
- */
-Datum
-pgstrom_sum_int8_final(PG_FUNCTION_ARGS)
-{
-	ArrayType  *transarray = PG_GETARG_ARRAYTYPE_P(0);
-	int64      *transvalues;
-
-	transvalues = check_int64_array(transarray, 2);
-
-	PG_RETURN_INT64(transvalues[1]);
-}
-PG_FUNCTION_INFO_V1(pgstrom_sum_int8_final);
 
 /*
  * numeric_agg_state - self version of aggregation internal state; that
