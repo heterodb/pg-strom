@@ -20,15 +20,32 @@
 #include "access/relscan.h"
 #include "catalog/pg_type.h"
 #include "storage/bufmgr.h"
+#include "storage/fd.h"
 #include "storage/predicate.h"
 #include "utils/builtins.h"
 #include "utils/bytea.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/tqual.h"
 #include "pg_strom.h"
 #include "device_numeric.h"
 #include <sys/mman.h>
+
+/*
+ * GUC variables
+ */
+static int		pgstrom_chunk_size_kb;
+static char	   *pgstrom_temp_tablespace;
+
+/*
+ * pgstrom_chunk_size - configured chunk size
+ */
+Size
+pgstrom_chunk_size(void)
+{
+	return ((Size)pgstrom_chunk_size_kb) << 10;
+}
 
 /*
  * pgstrom_create_param_buffer
@@ -166,13 +183,11 @@ pgstrom_fixup_kernel_numeric(Datum datum)
 }
 
 bool
-pgstrom_fetch_data_store(TupleTableSlot *slot,
-						 pgstrom_data_store *pds,
-						 size_t row_index,
-						 HeapTuple tuple)
+kern_fetch_data_store(TupleTableSlot *slot,
+					  kern_data_store *kds,
+					  size_t row_index,
+					  HeapTuple tuple)
 {
-	kern_data_store *kds = pds->kds;
-
 	if (row_index >= kds->nitems)
 		return false;	/* out of range */
 
@@ -181,6 +196,7 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 	{
 		kern_tupitem   *tup_item = KERN_DATA_STORE_TUPITEM(kds, row_index);
 
+		ExecClearTuple(slot);
 		tuple->t_len = tup_item->t_len;
 		tuple->t_self = tup_item->t_self;
 		//tuple->t_tableOid = InvalidOid;
@@ -211,6 +227,15 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 	}
 	elog(ERROR, "Bug? unexpected data-store format: %d", kds->format);
 	return false;
+}
+
+bool
+pgstrom_fetch_data_store(TupleTableSlot *slot,
+						 pgstrom_data_store *pds,
+						 size_t row_index,
+						 HeapTuple tuple)
+{
+	return kern_fetch_data_store(slot, pds->kds, row_index, tuple);
 }
 
 void
@@ -726,4 +751,27 @@ pgstrom_dump_data_store(pgstrom_data_store *pds)
 		}
 		pfree(buf.data);
 	}
+}
+
+void
+pgstrom_init_datastore(void)
+{
+	DefineCustomIntVariable("pg_strom.chunk_size",
+							"default size of pgstrom_data_store",
+							NULL,
+							&pgstrom_chunk_size_kb,
+							15872,
+							4096,
+							MAX_KILOBYTES,
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
+							NULL, NULL, NULL);
+	DefineCustomStringVariable("pg_strom.temp_tablespace",
+							   "tablespace of file mapped data store",
+							   NULL,
+							   &pgstrom_temp_tablespace,
+							   NULL,
+							   PGC_USERSET,
+							   GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
 }

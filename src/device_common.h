@@ -979,7 +979,8 @@ kern_get_datum(__global kern_data_store *kds,
 		return NULL;
 	if (kds->format == KDS_FORMAT_ROW)
 		return kern_get_datum_rs(kds, colidx, rowidx);
-	if (kds->format == KDS_FORMAT_ROW_FLAT)
+	if (kds->format == KDS_FORMAT_ROW_FLAT ||
+		kds->format == KDS_FORMAT_ROW_FMAP)
 		return kern_get_datum_rsflat(kds, colidx, rowidx);
 	if (kds->format == KDS_FORMAT_TUPSLOT)
 		return kern_get_datum_tupslot(kds,ktoast,colidx,rowidx);
@@ -1478,7 +1479,7 @@ memcpy(__global void *__dst, __global const void *__src, size_t len)
  * Also note that this function internally use barrier(), so unable to
  * use within if-blocks.
  */
-static cl_uint
+cl_uint
 arithmetic_stairlike_add(cl_uint my_value, __local cl_uint *items,
 						 __private cl_uint *total_sum)
 {

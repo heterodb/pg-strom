@@ -765,7 +765,6 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	TupleDesc			tupdesc = RelationGetDescr(rel);
 	Snapshot			snapshot = gss->css.ss.ps.state->es_snapshot;
 	bool				end_of_scan = false;
-	Size				length;
 	pgstrom_data_store *pds;
 	struct timeval tv1, tv2;
 

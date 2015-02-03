@@ -91,6 +91,7 @@ typedef enum {
 	StromTag_GpuHashJoin,
 	StromTag_HashJoinTable,
 	StromTag_GpuPreAgg,
+	StromTag_GpuSort,
 } StromTag;
 
 typedef struct {
@@ -117,6 +118,7 @@ StromTagGetLabel(StromObject *sobject)
 		StromTagGetLabelEntry(GpuPreAgg);
 		StromTagGetLabelEntry(GpuHashJoin);
 		StromTagGetLabelEntry(HashJoinTable);
+		StromTagGetLabelEntry(GpuSort);
 		default:
 			snprintf(msgbuf, sizeof(msgbuf),
 					 "unknown tag (%u)", sobject->stag);
@@ -160,6 +162,14 @@ typedef struct {
 	cl_ulong	time_kern_prep;	/* time to execute preparation kernel */
 	cl_ulong	time_kern_lagg;	/* time to execute local reduction kernel */
 	cl_ulong	time_kern_gagg;	/* time to execute global reduction kernel */
+	/*-- (special perfmon for gpusort) --*/
+	cl_uint		num_gpu_sort;	/* number of GPU bitonic sort execution */
+	cl_uint		num_cpu_sort;	/* number of GPU merge sort execution */
+	cl_ulong	time_gpu_sort;	/* time to execute GPU bitonic sort */
+	cl_ulong	time_cpu_sort;	/* time to execute CPU merge sort */
+	cl_ulong	time_cpu_sort_real;	/* real time to execute CPU merge sort */
+	cl_ulong	time_bgw_sync;	/* time to synchronich BGWorkers */
+
 	/*-- for debugging usage --*/
 	cl_ulong	time_debug1;	/* time for debugging purpose.1 */
 	cl_ulong	time_debug2;	/* time for debugging purpose.2 */
@@ -245,7 +255,6 @@ typedef struct {
 #define DEVKERNEL_NEEDS_HASHJOIN	0x0400
 #define DEVKERNEL_NEEDS_GPUPREAGG	0x0800
 #define DEVKERNEL_NEEDS_GPUSORT		0x1000
-
 
 struct devtype_info;
 struct devfunc_info;
@@ -410,6 +419,8 @@ extern void pgstrom_init_codegen(void);
 /*
  * datastore.c
  */
+extern Size pgstrom_chunk_size(void);
+
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
@@ -418,6 +429,10 @@ extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
 									 pgstrom_data_store *pds,
 									 size_t row_index,
 									 HeapTuple tuple);
+extern bool kern_fetch_data_store(TupleTableSlot *slot,
+								  kern_data_store *kds,
+								  size_t row_index,
+								  HeapTuple tuple);
 extern void pgstrom_release_data_store(pgstrom_data_store *pds);
 extern pgstrom_data_store *
 pgstrom_create_data_store_row(GpuContext *gcontext,
@@ -442,6 +457,7 @@ extern int pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 extern bool pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 											TupleTableSlot *slot);
 extern void pgstrom_dump_data_store(pgstrom_data_store *pds);
+extern void pgstrom_init_datastore(void);
 
 /*
  * gpuscan.c
@@ -511,12 +527,17 @@ extern Datum pgstrom_numeric_stddev_samp(PG_FUNCTION_ARGS);
 extern Datum pgstrom_numeric_stddev_pop(PG_FUNCTION_ARGS);
 
 /*
+ * gpusort.c
+ */
+extern void pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan);
+extern void pgstrom_init_gpusort(void);
+
+/*
  * main.c
  */
 extern bool	pgstrom_enabled(void);
 extern bool pgstrom_perfmon_enabled;
 extern bool pgstrom_debug_bulkload_enabled;
-extern int	pgstrom_chunk_size;
 extern int	pgstrom_max_async_chunks;
 extern int	pgstrom_min_async_chunks;
 extern double pgstrom_gpu_setup_cost;

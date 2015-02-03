@@ -537,8 +537,7 @@ retry:
 	 * Update estimated hashtable_size, but ensure hashtable_size
 	 * shall be allocated at least
 	 */
-	gpath->hashtable_size = Max(hashtable_size,
-								pgstrom_chunk_size << 20);
+	gpath->hashtable_size = Max(hashtable_size, pgstrom_chunk_size());
 
 	/*
 	 * Update JoinCostWorkspace according to numbatches
@@ -2540,7 +2539,7 @@ retry:
 			if (!pds)
 			{
 				pds = pgstrom_create_data_store_row(tupdesc,
-													pgstrom_chunk_size << 20,
+													pgstrom_chunk_size(),
 													ghjs->ntups_per_page);
 				pgstrom_track_object(&pds->sobj, 0);
 			}
