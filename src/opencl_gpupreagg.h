@@ -319,7 +319,7 @@ gpupreagg_data_store(__local pagg_datum *pdatum,
 	if (cmeta.attlen == sizeof(cl_short))
 	{
 		isnull[colidx] = pdatum->isnull;
-		values[colidx] = pdatum->short_val;
+		values[colidx] = pdatum->int_val;
 	}
 	else if (cmeta.attlen == sizeof(cl_int))	/* also, cl_float */
 	{
