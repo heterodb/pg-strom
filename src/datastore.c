@@ -276,14 +276,35 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 void
 pgstrom_release_data_store(pgstrom_data_store *pds)
 {
+	kern_data_store	   *kds = pds->kds;
 	ResourceOwner		saved_owner;
 	int					i, rc;
+
+	/*
+	 * NOTE: Special case handling for file-mapped row store case.
+	 * We assume OpenCL server has no code path the tries to release
+	 * pds/kds without unmapping the file-mapped area.
+	 * This case will be eliminated once we moved to CUDA later...
+	 */
+	if (pds->kds_fname != NULL)
+	{
+		if (!pgstrom_i_am_clserv)
+		{
+			Assert(kds->format == KDS_FORMAT_ROW_FMAP);
+			rc = munmap(kds, kds->length);
+			if (rc != 0)
+				elog(LOG, "Bug? failed to unmap kds:%p of \"%s\" (%s)",
+					 pds->kds, pds->kds_fname, strerror(errno));
+			CloseTransientFile(pds->kds_fdesc);
+		}
+		unlink(pds->kds_fname);
+		pgstrom_shmem_free(pds);
+		return;
+	}
 
 	saved_owner = CurrentResourceOwner;
 	PG_TRY();
 	{
-		kern_data_store	   *kds = pds->kds;
-
 		CurrentResourceOwner = pds->resowner;
 
 		/*
@@ -320,18 +341,7 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 					!pgstrom_restrack_cleanup_context())
 					ReleaseBuffer(bitem->buffer);
 			}
-			if (kds->format != KDS_FORMAT_ROW_FMAP)
-				pgstrom_shmem_free(kds);
-			else
-			{
-				Assert(pds->kds_fname != NULL);
-				rc = munmap(kds, kds->length);
-				if (rc != 0)
-					elog(LOG, "Bug? failed to unmap kds:%p of \"%s\" (%s)",
-						 pds->kds, pds->kds_fname, strerror(errno));
-				CloseTransientFile(pds->kds_fdesc);
-				unlink(pds->kds_fname);
-			}
+			pgstrom_shmem_free(kds);
 		}
 	}
 	PG_CATCH();

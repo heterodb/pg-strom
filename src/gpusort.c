@@ -27,6 +27,7 @@
 #include "storage/dsm.h"
 #include "storage/latch.h"
 #include "storage/proc.h"
+#include "storage/procsignal.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -192,25 +193,32 @@ typedef struct
 
 typedef struct
 {
-	Size		dsm_length;
-	Size		kresults_offset;
+	Size		dsm_length;			/* total length of this structure */
+	Size		kresults_offset;	/* offset from data[] */
+	PGPROC	   *master_proc;		/* PGPROC reference on shared memory */
 	dsm_handle	litems_dsmhnd;
 	dsm_handle	ritems_dsmhnd;
+	volatile bool cpusort_worker_done;	/* set prior to setLatch() by worker */
 	/* connection information */
-	Size		database_name;	/* offset */
+	Size		database_name;		/* offset from data[] */
 	/* file mapped data store */
 	uint		max_chunk_id;
-	Size		kern_chunks;	/* offset */
+	Size		kern_chunks;		/* offset from data[] */
 	/* row format definition */
-	Size		tupdesc;		/* offset */
+	Size		tupdesc;			/* offset from data[] */
 	/* sorting keys */
 	uint		numCols;
-	Size		sortColIdx;		/* offset */
-	Size		sortOperators;	/* offset */
-	Size		collations;		/* offset */
-	Size		nullsFirst;		/* offset */
+	Size		sortColIdx;			/* offset from data[] */
+	Size		sortOperators;		/* offset from data[] */
+	Size		collations;			/* offset from data[] */
+	Size		nullsFirst;			/* offset from data[] */
 	char		data[FLEXIBLE_ARRAY_MEMBER];
 } pgstrom_flat_cpusort;
+
+#define PFCSEG_GET_KRESULTS(dsmseg)										\
+	((kern_resultbuf *)													\
+	 (((pgstrom_flat_cpusort *)dsm_segment_address(dsmseg))->data +		\
+	  ((pgstrom_flat_cpusort *)dsm_segment_address(dsmseg))->kresults_offset))
 
 typedef struct
 {
@@ -241,6 +249,7 @@ typedef struct
 	pgstrom_cpusort *sorted_chunk;	/* sorted but no pair chunk yet */
 	cl_int			num_gpu_running;
 	cl_int			num_cpu_running;
+	cl_int			num_cpu_pending;
 	dlist_head		pending_cpu_chunks;	/* chunks waiting for cpu sort */
 	dlist_head		running_cpu_chunks;	/* chunks in running by bgworker */
 	bool			scan_done;		/* if true, no tuples to read any more */
@@ -282,6 +291,7 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 	double	nrows_per_chunk;
 	long	num_chunks;
 	Size	chunk_size;
+	Size	max_chunk_size = pgstrom_shmem_maxalloc();
 
 	if (ntuples < 2.0)
 		ntuples = 2.0;
@@ -294,12 +304,12 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 					 BITMAPLEN(list_length(subplan->targetlist)));
 	chunk_size = (Size)((double)width * ntuples * 1.10) + 1024;
 
-	if (pgstrom_shmem_maxalloc() > chunk_size)
+	if (max_chunk_size > chunk_size)
 		num_chunks = 1;
 	else
 	{
-		nrows_per_chunk = 
-			(double)(pgstrom_shmem_maxalloc() - 1024) / ((double)width * 1.25);
+		nrows_per_chunk =
+			(double)(max_chunk_size - 1024) / ((double)width * 1.25);
 		chunk_size = (Size)((double)width * nrows_per_chunk * 1.25);
 		num_chunks = Max(1.0, floor(ntuples / nrows_per_chunk + 0.9999));
 	}
@@ -639,6 +649,7 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->sorted_chunk = NULL;
 	gss->num_gpu_running = 0;
 	gss->num_cpu_running = 0;
+	gss->num_cpu_pending = 0;
 	dlist_init(&gss->pending_cpu_chunks);
 	dlist_init(&gss->running_cpu_chunks);
 	gss->scan_done = false;
@@ -787,51 +798,50 @@ form_pgstrom_cpusort(GpuSortState *gss,
 	Size			kresults_offset;
 	Size			length;
 	long			nitems;
-	int				i;
+	int				index;
 	dsm_segment	   *dsm_seg;
-	pgstrom_flat_cpusort *pfc;
+	pgstrom_flat_cpusort  pfc;
+	pgstrom_flat_cpusort *pfc_buf;
 	kern_resultbuf *kresults;
 
+	memset(&pfc, 0, sizeof(pgstrom_flat_cpusort));
+	initStringInfo(&buf);
+
 	/* compute total number of items */
-	pfc = dsm_segment_address(l_cpusort->oitems_dsm);
-	kresults = (kern_resultbuf *)(pfc->data + pfc->kresults_offset);
+	kresults = PFCSEG_GET_KRESULTS(l_cpusort->oitems_dsm);
 	Assert(kresults->nrels == 2);
 	nitems = kresults->nitems;
 
-	pfc = dsm_segment_address(r_cpusort->oitems_dsm);
-	kresults = (kern_resultbuf *)(pfc->data + pfc->kresults_offset);
+	kresults = PFCSEG_GET_KRESULTS(r_cpusort->oitems_dsm);
 	Assert(kresults->nrels == 2);
 	nitems += kresults->nitems;
 
-	/* makes fixed length portion  */
-	initStringInfo(&buf);
-	enlargeStringInfo(&buf, sizeof(pgstrom_flat_cpusort));
-	pfc = (pgstrom_flat_cpusort *) buf.data;
-	buf.len = offsetof(pgstrom_flat_cpusort, data[0]);
-
 	/* DSM handles of litems_dsm and ritems_dsm */
-	pfc->litems_dsmhnd = dsm_segment_handle(l_cpusort->oitems_dsm);
-	pfc->ritems_dsmhnd = dsm_segment_handle(r_cpusort->oitems_dsm);
+	pfc.litems_dsmhnd = dsm_segment_handle(l_cpusort->oitems_dsm);
+	pfc.ritems_dsmhnd = dsm_segment_handle(r_cpusort->oitems_dsm);
+
+	/* Index of this process */
+	pfc.master_proc = MyProc;
 
 	/* name of target database */
-	pfc->database_name = buf.len;
+	pfc.database_name = buf.len;
 	length = strlen(gss->database_name) + 1;
 	enlargeStringInfo(&buf, MAXALIGN(length));
 	strcpy(buf.data + buf.len, gss->database_name);
 	buf.len += MAXALIGN(length);
 
 	/* length of kern_data_store array */
-	pfc->max_chunk_id = gss->num_chunks;
+	pfc.max_chunk_id = gss->num_chunks;
 
 	/* put filename of file-mapped kds and its length; being involved */
-	pfc->kern_chunks = buf.len;
+	pfc.kern_chunks = buf.len;
 	chunk_ids = bms_union(l_cpusort->h.chunk_ids, r_cpusort->h.chunk_ids);
-	while ((i = bms_first_member(chunk_ids)) >= 0)
+	while ((index = bms_first_member(chunk_ids)) >= 0)
 	{
-		char   *kds_fname = gss->pds_chunks[i]->kds_fname;
-		size_t	kds_len = gss->pds_chunks[i]->kds_length;
+		char   *kds_fname = gss->pds_chunks[index]->kds_fname;
+		size_t	kds_len = gss->pds_chunks[index]->kds_length;
 
-		appendBinaryStringInfo(&buf, (const char *)&i, sizeof(int));
+		appendBinaryStringInfo(&buf, (const char *)&index, sizeof(int));
 		appendBinaryStringInfo(&buf, (const char *)&kds_len, sizeof(size_t));
 
 		length = strlen(kds_fname) + 1;
@@ -839,44 +849,46 @@ form_pgstrom_cpusort(GpuSortState *gss,
 		strcpy(buf.data + buf.len, kds_fname);
 		buf.len += MAXALIGN(length);
 	}
-	i = -1;		/* end of chunks marker */
-	appendBinaryStringInfo(&buf, (const char *)&i, sizeof(int));
+	bms_free(chunk_ids);
+	index = -1;		/* end of chunks marker */
+	appendBinaryStringInfo(&buf, (const char *)&index, sizeof(int));
 
 	/* tuple descriptor */
+	pfc.tupdesc = buf.len;
 	enlargeStringInfo(&buf, MAXALIGN(sizeof(*tupdesc)));
 	memcpy(buf.data + buf.len, tupdesc, sizeof(*tupdesc));
 	buf.len += MAXALIGN(sizeof(*tupdesc));
-	for (i=0; i < tupdesc->natts; i++)
+	for (index=0; index < tupdesc->natts; index++)
 	{
 		enlargeStringInfo(&buf, MAXALIGN(ATTRIBUTE_FIXED_PART_SIZE));
 		memcpy(buf.data + buf.len,
-			   tupdesc->attrs[i],
+			   tupdesc->attrs[index],
 			   ATTRIBUTE_FIXED_PART_SIZE);
 		buf.len += MAXALIGN(ATTRIBUTE_FIXED_PART_SIZE);
 	}
 
 	/* number of sorting keys */
-	pfc->numCols = gss->numCols;
+	pfc.numCols = gss->numCols;
 	/* sortColIdx */
-	pfc->sortColIdx = buf.len;
+	pfc.sortColIdx = buf.len;
 	length = sizeof(AttrNumber) * gss->numCols;
 	enlargeStringInfo(&buf, MAXALIGN(length));
 	memcpy(buf.data + buf.len, gss->sortColIdx, length);
 	buf.len += MAXALIGN(length);
 	/* sortOperators */
-	pfc->sortOperators = buf.len;
+	pfc.sortOperators = buf.len;
 	length = sizeof(Oid) * gss->numCols;
 	enlargeStringInfo(&buf, MAXALIGN(length));
     memcpy(buf.data + buf.len, gss->sortOperators, length);
 	buf.len += MAXALIGN(length);
 	/* collations */
-	pfc->collations = buf.len;
+	pfc.collations = buf.len;
 	length = sizeof(Oid) * gss->numCols;
     enlargeStringInfo(&buf, MAXALIGN(length));
 	memcpy(buf.data + buf.len, gss->collations, length);
 	buf.len += MAXALIGN(length);
 	/* nullsFirst */
-	pfc->nullsFirst = buf.len;
+	pfc.nullsFirst = buf.len;
 	length = sizeof(bool) * gss->numCols;
 	enlargeStringInfo(&buf, MAXALIGN(length));
     memcpy(buf.data + buf.len, gss->nullsFirst, length);
@@ -884,21 +896,27 @@ form_pgstrom_cpusort(GpuSortState *gss,
 
 	/* result buffer */
 	kresults_offset = buf.len;
-	enlargeStringInfo(&buf, MAXALIGN(sizeof(kern_resultbuf)));
+	enlargeStringInfo(&buf, MAXALIGN(sizeof(kern_resultbuf)) + 80);
 	kresults = (kern_resultbuf *)(buf.data + buf.len);
 	memset(kresults, 0, sizeof(kern_resultbuf));
 	kresults->nrels = 2;
 	kresults->nrooms = nitems;
 	kresults->nitems = nitems;
+	kresults->errcode = ERRCODE_INTERNAL_ERROR;
+	snprintf((char *)kresults->results, sizeof(cl_int) * 2 * nitems,
+			 "An internal error on worker prior to DSM attachment");
+	buf.len += MAXALIGN(sizeof(kern_resultbuf)) + 80;
 
 	/* allocation and setup of DSM */
 	dsm_length = kresults_offset +
 		MAXALIGN(offsetof(kern_resultbuf, results[2 * nitems]));
-	pfc->dsm_length = dsm_length;
-	pfc->kresults_offset = kresults_offset;
+	pfc.dsm_length = dsm_length;
+	pfc.kresults_offset = kresults_offset;
 
 	dsm_seg = dsm_create(dsm_length);
-	memcpy(dsm_segment_address(dsm_seg), buf.data, buf.len);
+	pfc_buf = dsm_segment_address(dsm_seg);
+	memcpy(pfc_buf, &pfc, sizeof(pgstrom_flat_cpusort));
+	memcpy(pfc_buf->data, buf.data, buf.len);
 
 	/* release temp buffer */
 	pfree(buf.data);
@@ -911,59 +929,60 @@ deform_pgstrom_cpusort(dsm_segment *dsm_seg)
 {
 	pgstrom_cpusort *cpusort = palloc0(sizeof(pgstrom_cpusort));
 	pgstrom_flat_cpusort *pfc = dsm_segment_address(dsm_seg);
-	pgstrom_flat_cpusort *pfc_in;
 	char	   *pos = pfc->data;
 	TupleDesc	tupdesc;
-	int			i;
+	int			index;
 
 	/* input/output result buffers */
 	cpusort->litems_dsm = dsm_attach(pfc->litems_dsmhnd);
-	pfc_in = dsm_segment_address(cpusort->litems_dsm);
-	cpusort->w.l_kresults = (kern_resultbuf *)
-		((char *)pfc_in + pfc_in->kresults_offset);
+	if (!cpusort->litems_dsm)
+		elog(ERROR, "failed to attach dsm segment: %u", pfc->litems_dsmhnd);
+	cpusort->w.l_kresults = PFCSEG_GET_KRESULTS(cpusort->litems_dsm);
 
 	cpusort->ritems_dsm = dsm_attach(pfc->ritems_dsmhnd);
-	pfc_in = dsm_segment_address(cpusort->ritems_dsm);
-	cpusort->w.r_kresults = (kern_resultbuf *)
-		((char *)pfc_in + pfc_in->kresults_offset);
+    if (!cpusort->ritems_dsm)
+        elog(ERROR, "failed to attach dsm segment: %u", pfc->ritems_dsmhnd);
+	cpusort->w.r_kresults = PFCSEG_GET_KRESULTS(cpusort->ritems_dsm);
 
-	cpusort->oitems_dsm = dsm_seg;	/* itself */
-	cpusort->w.o_kresults = (kern_resultbuf *)
-		((char *)pfc + pfc->kresults_offset);
+	cpusort->oitems_dsm = dsm_seg;	/* myself */
+	cpusort->w.o_kresults = PFCSEG_GET_KRESULTS(cpusort->oitems_dsm);
 
 	/* database connection */
-	cpusort->w.database_name = (char *)pfc + pfc->database_name;
+	cpusort->w.database_name = pfc->data + pfc->database_name;
 
 	/* size of kern_data_store array */
 	cpusort->w.max_chunk_id = pfc->max_chunk_id;
 	cpusort->w.kern_chunks = palloc0(sizeof(kern_data_store *) *
 									 cpusort->w.max_chunk_id);
 	/* chunks to be mapped */
-	pos = (char *)pfc + pfc->kern_chunks;
+	pos = pfc->data + pfc->kern_chunks;
 	while (true)
 	{
 		Size		kds_length;
 		const char *kds_fname;
 
-		i = *((int *) pos);
-		if (i < 0)
+		index = *((int *) pos);
+		pos += sizeof(int);
+		if (index < 0)
 			break;		/* end of chunks that are involved */
-		if (i >= cpusort->w.max_chunk_id)
-			elog(ERROR, "Bug? chunk-id is out of range");
+		//Assert(index < cpusort->w.max_chunk_id);
+		if (index >= cpusort->w.max_chunk_id)
+			elog(ERROR, "Bug? chunk-id is out of range %d for %d",
+				 index, cpusort->w.max_chunk_id);
 
 		kds_length = *((size_t *) pos);
 		pos += sizeof(size_t);
 		kds_fname = pos;
-		pos += sizeof(MAXALIGN(strlen(kds_fname) + 1));
+		pos += MAXALIGN(strlen(kds_fname) + 1);
 
-		cpusort->w.kern_chunks[i]
+		cpusort->w.kern_chunks[index]
 			= filemap_kern_data_store(kds_fname, kds_length, NULL);
-		if (!cpusort->w.kern_chunks[i])
+		if (!cpusort->w.kern_chunks[index])
 			elog(ERROR, "Bug? unable to map \"%s\" (len=%zu)",
 				 kds_fname, kds_length);
 	}
 	/* tuple descriptor */
-	tupdesc = (TupleDesc) pos;
+	tupdesc = (TupleDesc)(pfc->data + pfc->tupdesc);
 	cpusort->w.tupdesc = palloc0(sizeof(*tupdesc));
 	cpusort->w.tupdesc->natts = tupdesc->natts;
 	cpusort->w.tupdesc->attrs =
@@ -971,19 +990,20 @@ deform_pgstrom_cpusort(dsm_segment *dsm_seg)
 	cpusort->w.tupdesc->tdtypeid = tupdesc->tdtypeid;
 	cpusort->w.tupdesc->tdtypmod = tupdesc->tdtypmod;
 	cpusort->w.tupdesc->tdhasoid = tupdesc->tdhasoid;
+	cpusort->w.tupdesc->tdrefcount = -1;	/* not counting */
 	pos += MAXALIGN(sizeof(*tupdesc));
 
-	for (i=0; i < tupdesc->natts; i++)
+	for (index=0; index < tupdesc->natts; index++)
 	{
-		cpusort->w.tupdesc->attrs[i] = (Form_pg_attribute) pos;
+		cpusort->w.tupdesc->attrs[index] = (Form_pg_attribute) pos;
 		pos += MAXALIGN(ATTRIBUTE_FIXED_PART_SIZE);
 	}
 	/* sorting keys */
 	cpusort->w.numCols = pfc->numCols;
-	cpusort->w.sortColIdx = (AttrNumber *)((char *) pfc + pfc->sortColIdx);
-	cpusort->w.sortOperators = (Oid *)((char *) pfc + pfc->sortOperators);
-	cpusort->w.collations = (Oid *)((char *) pfc + pfc->collations);
-	cpusort->w.nullsFirst = (bool *)((char *) pfc + pfc->nullsFirst);
+	cpusort->w.sortColIdx = (AttrNumber *)(pfc->data + pfc->sortColIdx);
+	cpusort->w.sortOperators = (Oid *)(pfc->data + pfc->sortOperators);
+	cpusort->w.collations = (Oid *)(pfc->data + pfc->collations);
+	cpusort->w.nullsFirst = (bool *)(pfc->data + pfc->nullsFirst);
 
 	return cpusort;
 }
@@ -993,6 +1013,8 @@ gpusort_merge_cpu_chunks(GpuSortState *gss, pgstrom_cpusort *cpusort_1)
 {
 	pgstrom_cpusort	   *cpusort_2;
 	dsm_segment		   *dsm_seg;
+
+	Assert(CurrentMemoryContext == gss->css.ss.ps.state->es_query_cxt);
 
 	/* ritems and litems are no longer referenced */
 	if (cpusort_1->ritems_dsm)
@@ -1046,18 +1068,20 @@ gpusort_merge_gpu_chunks(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	pgstrom_cpusort	   *cpusort;
 	pgstrom_flat_cpusort *pfc;
 	EState			   *estate = gss->css.ss.ps.state;
-	MemoryContext		memcxt = estate->es_query_cxt;
+	MemoryContext		oldcxt;
 	kern_resultbuf	   *kresults_gpu;
 	Size				kresults_len;
 	Size				dsm_length;
 
+	oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
+
 	/*
 	 * Transform the supplied gpusort to the simplified cpusort form
 	 */
-	cpusort = MemoryContextAllocZero(memcxt, sizeof(pgstrom_cpusort));
+	cpusort = palloc0(sizeof(pgstrom_cpusort));
 	kresults_gpu = KERN_GPUSORT_RESULTBUF(&gpusort->kern);
-	kresults_len =  MAXALIGN(offsetof(kern_resultbuf,
-									  results[2 * kresults_gpu->nitems]));
+	kresults_len = MAXALIGN(offsetof(kern_resultbuf,
+									 results[2 * kresults_gpu->nitems]));
 	dsm_length = MAXALIGN(offsetof(pgstrom_flat_cpusort,
 								   data[kresults_len]));
 	cpusort->oitems_dsm = dsm_create(dsm_length);
@@ -1070,7 +1094,7 @@ gpusort_merge_gpu_chunks(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	pfc = dsm_segment_address(cpusort->oitems_dsm);
 	memset(pfc, 0, sizeof(pgstrom_flat_cpusort));
 	pfc->dsm_length = dsm_length;
-	pfc->kresults_offset = offsetof(pgstrom_flat_cpusort, data[0]);
+	pfc->kresults_offset = 0;
 	memcpy(pfc->data, kresults_gpu, kresults_len);
 
 	/* pds is still valid, but gpusort is no longer referenced */
@@ -1080,7 +1104,11 @@ gpusort_merge_gpu_chunks(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	/*
 	 * Finally, merge this cpusort chunk with a chunk preliminary sorted.
 	 */
-	return gpusort_merge_cpu_chunks(gss, cpusort);
+	cpusort = gpusort_merge_cpu_chunks(gss, cpusort);
+
+	MemoryContextSwitchTo(oldcxt);
+
+	return cpusort;
 }
 
 static void
@@ -1131,7 +1159,10 @@ gpusort_check_gpu_tasks(GpuSortState *gss)
 		/* try to form it to cpusort, and merge */
 		cpusort = gpusort_merge_gpu_chunks(gss, gpusort);
 		if (cpusort)
+		{
 			dlist_push_tail(&gss->pending_cpu_chunks, &cpusort->chain);
+			gss->num_cpu_pending++;
+		}
 	}
 }
 
@@ -1149,19 +1180,24 @@ gpusort_check_cpu_tasks(GpuSortState *gss)
 		BgwHandleStatus		status;
 		kern_resultbuf	   *kresults;
 		pid_t				bgw_pid;
+		MemoryContext		oldcxt;
 
 		cpusort = dlist_container(pgstrom_cpusort, chain, iter.cur);
 		status = GetBackgroundWorkerPid(cpusort->h.bgw_handle, &bgw_pid);
 
 		/* emergency. kills all the backend and raise an error */
-		if (status == BGWH_POSTMASTER_DIED)
+		if (status == BGWH_STARTED ||
+			status == BGWH_STOPPED)
 		{
-			/* TODO: terminate any other running workers*/
-			elog(ERROR, "Bug? Postmaster or BgWorker got dead, bogus status");
-		}
-		else if (status == BGWH_STOPPED)
-		{
+			if (status == BGWH_STARTED)
+			{
+				pgstrom_flat_cpusort *pfc = (pgstrom_flat_cpusort *)
+					dsm_segment_address(cpusort->oitems_dsm);
+				if (!pfc->cpusort_worker_done)
+					continue;
+			}
 			dlist_delete(&cpusort->chain);
+			memset(&cpusort->chain, 0, sizeof(dlist_node));
 			gss->num_cpu_running--;
 
 			/*
@@ -1171,16 +1207,26 @@ gpusort_check_cpu_tasks(GpuSortState *gss)
 			 * message on the kern_resultbuf if error happen.
 			 * we may need to make a common format later.
 			 */
-			kresults = dsm_segment_address(cpusort->oitems_dsm);
+			kresults = PFCSEG_GET_KRESULTS(cpusort->oitems_dsm);
 			if (kresults->errcode != ERRCODE_SUCCESSFUL_COMPLETION)
 				ereport(ERROR,
 						(errcode(kresults->errcode),
 						 errmsg("GpuSort worker: %s",
 								(char *)kresults->results)));
 
+			oldcxt = MemoryContextSwitchTo(gss->css.ss.ps.state->es_query_cxt);
 			cpusort = gpusort_merge_cpu_chunks(gss, cpusort);
 			if (cpusort)
+			{
 				dlist_push_tail(&gss->pending_cpu_chunks, &cpusort->chain);
+				gss->num_cpu_pending++;
+			}
+			MemoryContextSwitchTo(oldcxt);
+		}
+		else if (status == BGWH_POSTMASTER_DIED)
+		{
+			/* TODO: kills another running workers */
+			elog(ERROR, "Bug? Postmaster or BGWorker crashed, bogus status");
 		}
 	}
 }
@@ -1191,12 +1237,15 @@ gpusort_kick_pending_tasks(GpuSortState *gss)
 	BackgroundWorker	worker;
 	pgstrom_cpusort	   *cpusort;
 	dlist_node		   *dnode;
+	dsm_handle 			dsm_hnd;
 
 	while (!dlist_is_empty(&gss->pending_cpu_chunks) &&
 		   gss->num_cpu_running < gpusort_max_workers)
 	{
 		dnode = dlist_pop_head_node(&gss->pending_cpu_chunks);
 		cpusort = dlist_container(pgstrom_cpusort, chain, dnode);
+		dsm_hnd = dsm_segment_handle(cpusort->oitems_dsm);
+		gss->num_cpu_pending--;
 
 		/*
 		 * Set up dynamic background worker
@@ -1209,11 +1258,13 @@ gpusort_kick_pending_tasks(GpuSortState *gss)
 		worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
 		worker.bgw_restart_time = BGW_NEVER_RESTART;
 		worker.bgw_main = gpusort_entrypoint_cpusort;
-		/* XXX - form/deform operation on DSM will be needed on windows */
-		worker.bgw_main_arg = PointerGetDatum(cpusort);
+		worker.bgw_main_arg = PointerGetDatum(dsm_hnd);
 
 		if (!RegisterDynamicBackgroundWorker(&worker, &cpusort->h.bgw_handle))
+		{
 			dlist_push_head(&gss->pending_cpu_chunks, &cpusort->chain);
+			gss->num_cpu_pending++;
+		}
 		else
 		{
 			dlist_push_tail(&gss->running_cpu_chunks, &cpusort->chain);
@@ -1229,10 +1280,7 @@ gpusort_exec_sort(GpuSortState *gss)
 	pgstrom_cpusort	   *cpusort;
 	int					rc;
 
-	while (!gss->scan_done ||
-		   gss->num_gpu_running > 0 ||
-		   gss->num_cpu_running > 0 ||
-		   !dlist_is_empty(&gss->pending_cpu_chunks))
+	while (true)
 	{
 		CHECK_FOR_INTERRUPTS();
 
@@ -1271,20 +1319,28 @@ gpusort_exec_sort(GpuSortState *gss)
 		if (gss->scan_done)
 		{
 			long	timeout;
+			struct timeval tv1, tv2;
+
+			if (gss->num_gpu_running == 0 &&
+				gss->num_cpu_running == 0 &&
+				dlist_is_empty(&gss->pending_cpu_chunks))
+				break;
 
 			if (gss->num_gpu_running > 0 || gss->num_cpu_running > 0)
-				timeout = 20 * 1000L;	/* 20sec */
+				timeout = 5 * 1000L;	/* 20sec */
 			else
 				timeout =       400L;	/* 0.4sec */
 
+			gettimeofday(&tv1, NULL);
 			rc = WaitLatch(&MyProc->procLatch,
 						   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
 						   timeout);
+			gettimeofday(&tv2, NULL);
 			ResetLatch(&MyProc->procLatch);
 
 			/* emergency bailout if postmaster has died */
-            if (rc & WL_POSTMASTER_DEATH)
-                elog(ERROR, "failed on WaitLatch due to Postmaster die");
+			if (rc & WL_POSTMASTER_DEATH)
+				elog(ERROR, "failed on WaitLatch due to Postmaster die");
 		}
 	}
 	/* OK, data was sorted */
@@ -1313,20 +1369,32 @@ gpusort_exec(CustomScanState *node)
 {
 	GpuSortState	   *gss = (GpuSortState *) node;
 	TupleTableSlot	   *slot = node->ss.ps.ps_ResultTupleSlot;
-	pgstrom_flat_cpusort *pfc;
 	kern_resultbuf	   *kresults;
 	pgstrom_data_store *pds;
 
 	if (!gss->sort_done)
-		gpusort_exec_sort(gss);
+	{
+		bool	save_set_latch_on_sigusr1 = set_latch_on_sigusr1;
+
+		PG_TRY();
+		{
+			gpusort_exec_sort(gss);
+		}
+		PG_CATCH();
+		{
+			set_latch_on_sigusr1 = save_set_latch_on_sigusr1;
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		set_latch_on_sigusr1 = save_set_latch_on_sigusr1;
+	}
 
 	Assert(gss->sorted_result != NULL);
 	/* Does outer relation has any rows to read? */
 	if (!gss->sorted_result)
 		return NULL;
 
-	pfc = dsm_segment_address(gss->sorted_result);
-	kresults = (kern_resultbuf *)((char *) pfc + pfc->kresults_offset);
+	kresults = PFCSEG_GET_KRESULTS(gss->sorted_result);
 
 	if (gss->sorted_index < kresults->nitems)
 	{
@@ -1630,7 +1698,6 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 			if (!kern_fetch_data_store(lslot, kds, litem_id, &dummy))
 				elog(ERROR, "failed to fetch sorting tuple in (%d,%d)",
 					 lchunk_id, litem_id);
-			lindex++;
 		}
 
 		if (TupIsNull(rslot))
@@ -1642,7 +1709,6 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 			if (!kern_fetch_data_store(rslot, kds, ritem_id, &dummy))
 				elog(ERROR, "failed to fetch sorting tuple in (%d,%d)",
 					 rchunk_id, ritem_id);
-			rindex++;
 		}
 
 		for (i=0; i < cpusort->w.numCols; i++)
@@ -1663,6 +1729,7 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 			oitems->results[2 * oindex] = lchunk_id;
 			oitems->results[2 * oindex + 1] = litem_id;
 			oindex++;
+			lindex++;
 			ExecClearTuple(lslot);
 		}
 
@@ -1671,6 +1738,7 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 			oitems->results[2 * oindex] = rchunk_id;
 			oitems->results[2 * oindex + 1] = ritem_id;
 			oindex++;
+			rindex++;
 			ExecClearTuple(rslot);
 		}
 	}
@@ -1696,39 +1764,92 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 static void
 gpusort_entrypoint_cpusort(Datum main_arg)
 {
+	MemoryContext		cpusort_mcxt;
 	dsm_handle			dsm_hnd = (dsm_handle) main_arg;
 	dsm_segment		   *dsm_seg;
+	PGPROC			   *master;
 	pgstrom_cpusort	   *cpusort;
+	pgstrom_flat_cpusort *pfc;
+	kern_resultbuf	   *kresults;
 
 	/* We're now ready to receive signals */
 	BackgroundWorkerUnblockSignals();
-
+	/* Makes up resource owner and memory context */
+	Assert(CurrentResourceOwner == NULL);
+	CurrentResourceOwner = ResourceOwnerCreate(NULL, "CpuSort");
+	cpusort_mcxt = AllocSetContextCreate(TopMemoryContext,
+										 "CpuSort",
+										 ALLOCSET_DEFAULT_MINSIZE,
+										 ALLOCSET_DEFAULT_INITSIZE,
+										 ALLOCSET_DEFAULT_MAXSIZE);
+	CurrentMemoryContext = cpusort_mcxt;
 	/* Deform caller's request */
 	dsm_seg = dsm_attach(dsm_hnd);
-	cpusort = deform_pgstrom_cpusort(dsm_seg);
-
-	/* Connect to our database */
-	BackgroundWorkerInitializeConnection(cpusort->w.database_name, NULL);
-
+	if (!dsm_seg)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("unable to map dynamic shared memory segment %u",
+						(uint)dsm_hnd)));
 	/*
-	 * XXX - Eventually, we should use parallel-context to share
-	 * the transaction snapshot, initialize misc stuff and so on.
-	 * But just at this moment, we create a new transaction state
-	 * to simplifies the implementation.
+	 * Initialization of error status. The kresults->errcode is initialized
+	 * to an error code to deal with dsm_attach() got failed, so we have to
+	 * clear the code first of all. Later ereport() shall be traped by
+	 * PG_TRY() block, then we put appropriate error message here.
 	 */
-	StartTransactionCommand();
-	PushActiveSnapshot(GetTransactionSnapshot());
+	pfc = dsm_segment_address(dsm_seg);
+	kresults = (kern_resultbuf *)(pfc->data + pfc->kresults_offset);
+	kresults->errcode = 0;
 
-	CurrentMemoryContext = AllocSetContextCreate(TopMemoryContext,
-												 "cpusort",
-												 ALLOCSET_DEFAULT_MINSIZE,
-												 ALLOCSET_DEFAULT_INITSIZE,
-												 ALLOCSET_DEFAULT_MAXSIZE);
-	/* handle CPU merge sorting */
-	gpusort_exec_cpusort(cpusort);
+	/* get reference to the master process */
+	master = pfc->master_proc;
 
-	/* we should have no side-effect */
-	CommitTransactionCommand();
+	PG_TRY();
+	{
+		/* deform CpuSort request to the usual format */
+		cpusort = deform_pgstrom_cpusort(dsm_seg);
+
+		/* Connect to our database */
+		BackgroundWorkerInitializeConnection(cpusort->w.database_name, NULL);
+
+		/*
+		 * XXX - Eventually, we should use parallel-context to share
+		 * the transaction snapshot, initialize misc stuff and so on.
+		 * But just at this moment, we create a new transaction state
+		 * to simplifies the implementation.
+		 */
+		StartTransactionCommand();
+		PushActiveSnapshot(GetTransactionSnapshot());
+
+		/* handle CPU merge sorting */
+		gpusort_exec_cpusort(cpusort);
+
+		/* we should have no side-effect */
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+	}
+	PG_CATCH();
+	{
+		MemoryContext	ecxt = MemoryContextSwitchTo(cpusort_mcxt);
+		ErrorData	   *edata = CopyErrorData();
+		Size			buflen;
+
+		kresults->errcode = edata->sqlerrcode;
+		buflen = sizeof(cl_int) * kresults->nrels * kresults->nrooms;
+		snprintf((char *)kresults->results, buflen, "%s (%s, %s:%d)",
+				 edata->message, edata->funcname,
+				 edata->filename, edata->lineno);
+		MemoryContextSwitchTo(ecxt);
+
+		SetLatch(&master->procLatch);
+
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	/* Inform the corrdinator worker got finished */
+	pfc->cpusort_worker_done = true;
+	pg_memory_barrier();
+	SetLatch(&master->procLatch);
 }
 
 /* ================================================================
