@@ -93,9 +93,8 @@ typedef cl_ulong	Datum;
  * version 340.xx. So, we declared the local_workmem as cl_ulong * pointer
  * as a workaround.
  */
-#define KERN_DYNAMIC_LOCAL_WORKMEM_ARG			\
-	__local cl_ulong *__pgstrom_local_workmem
-#define LOCAL_WORKMEM		(__local void *)(__pgstrom_local_workmem)
+#define SHARED_WORKMEM		(__shared__ void *)(__pgstrom_local_workmem)
+extern __shared__ cl_ulong	__pgstrom_local_workmem[];
 
 #else	/* OPENCL_DEVICE_CODE */
 #include "access/htup_details.h"

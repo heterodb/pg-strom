@@ -138,10 +138,12 @@ typedef struct {
 	cl_ulong	time_inner_load;	/* time to load the inner relation */
 	cl_ulong	time_outer_load;	/* time to load the outer relation */
 	cl_ulong	time_materialize;	/* time to materialize the result */
-	/*-- perfmon for message exchanging --*/
-	cl_ulong	time_in_sendq;		/* waiting time in the server mqueue */
-	cl_ulong	time_in_recvq;		/* waiting time in the response mqueue */
-	cl_ulong	time_kern_build;	/* max time to build opencl kernel */
+	/*-- perfmon to launch CUDA kernel --*/
+	cl_double	time_launch_cuda;	/* time to kick CUDA commands */
+
+	
+
+
 	/*-- perfmon for DMA send/recv --*/
 	cl_uint		num_dma_send;	/* number of DMA send request */
 	cl_uint		num_dma_recv;	/* number of DMA receive request */
@@ -179,9 +181,10 @@ typedef struct {
 	struct timeval	tv;	/* result of gettimeofday(2) when enqueued */
 } pgstrom_perfmon;
 
-#define timeval_diff(tv1,tv2)						\
-	(((tv2)->tv_sec * 1000000L + (tv2)->tv_usec) -	\
-	 ((tv1)->tv_sec * 1000000L + (tv1)->tv_usec))
+/* time interval in milliseconds */
+#define timeval_diff(tv1,tv2)									\
+	(((double)(((tv2)->tv_sec * 1000000L + (tv2)->tv_usec) -	\
+			   ((tv1)->tv_sec * 1000000L + (tv2)->tv_usec))) / 1000000000.0 \
 
 /*
  *

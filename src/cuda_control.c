@@ -329,15 +329,25 @@ static void
 pgstrom_compute_workgroup_size(size_t *p_grid_size,
 							   size_t *p_block_size,
 							   CUfunction function,
+							   CUdevice device,
 							   bool maximum_blocksize,
 							   size_t nitems,
-							   size_t dynamic_shmem_per_block,
 							   size_t dynamic_shmem_per_thread)
 {
 	int			grid_size;
 	int			block_size;
 	int			block_size_min;
+	int			maximum_shmem_per_block;
+	int			dynamic_shmem_per_block;
+	int			warp_size;
 	CUresult	rc;
+
+	/* get statically allocated shared memory */
+	rc = cuFuncGetAttribute(&dynamic_shmem_per_block,
+							CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
+							function);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuFuncGetAttribute", cuda_strerror(rc));
 
 	if (maximum_blocksize)
 	{
@@ -345,7 +355,30 @@ pgstrom_compute_workgroup_size(size_t *p_grid_size,
 								CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
 								function);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuFuncGetAttribute: %s", cuda_strerror(rc));
+			elog(ERROR, "failed on cuFuncGetAttribute: %s",
+				 cuda_strerror(rc));
+
+		rc = cuDeviceGetAttribute(&maximum_shmem_per_block,
+							CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK,
+								  device);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuDeviceGetAttribute: %s",
+				 cuda_strerror(rc));
+
+		rc = cuDeviceGetAttribute(&warp_size,
+								  CU_DEVICE_ATTRIBUTE_WARP_SIZE,
+								  device);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuDeviceGetAttribute: %s",
+				 cuda_strerror(rc));
+
+		while (dynamic_shmem_per_block +
+			   dynamic_shmem_per_thread * block_size > maximum_shmem_per_block)
+			block_size--;
+
+		if (block_size < warp_size)
+			elog(ERROR, "Expected block size is too small (%zu)", block_size);
+
 		*p_block_size = block_size;
 		*p_grid_size = (nitems + block_size - 1) / block_size;
 	}
@@ -355,42 +388,16 @@ pgstrom_compute_workgroup_size(size_t *p_grid_size,
 		rc = cuOccupancyMaxPotentialBlockSize(&grid_size,
 											  &block_size,
 											  function,
-											  dynamic_shmem_size_per_block,
+											  dynamic_shmem_per_block,
 											  cuda_max_threads_per_block);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuOccupancyMaxPotentialBlockSize: %s",
 				 cuda_strerror(rc));
 
-
-
-
 		*p_grid_size = grid_size;
 		*p_block_size = block_size;
-
-
-
-
 	}
-
-
-
-
-
-	__dynamic_shmem_per_thread = dynamic_shmem_per_thread;
-
-A
-
-	cuOccupancyMaxPotentialBlockSize
-
-
-	CUresult cuOccupancyMaxPotentialBlockSize ( int* minGridSize, int* blockSize, CUfunction func, CUoccupancyB2DSize blockSizeToDynamicSMemSize, size_t dynamicSMemSize, int  blockSizeLimit )
-
 }
-
-
-
-
-
 
 static bool
 pgstrom_check_device_capability(int ordinal, CUdevice device)

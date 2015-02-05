@@ -124,9 +124,10 @@ typedef struct {
 typedef struct
 {
 	GpuTask			task;
+	CUfunction		kern_qual;
+	void		   *kern_qual_args[4];
 	CUdeviceptr		m_gpuscan;
 	CUdeviceptr		m_kds;
-	CUfunction		kern_qual;
 	CUevent 		ev_dma_send_start;
 	CUevent			ev_dma_send_stop;	/* also, start kernel exec */
 	CUevent			ev_dma_recv_start;	/* also, stop kernel exec */
@@ -1453,55 +1454,87 @@ clserv_respond_gpuscan(cl_event event, cl_int ev_status, void *private)
 	pgstrom_reply_message(&gpuscan->msg);
 }
 
-/*
- * clserv_process_gpuscan
- *
- * entrypoint of kernel gpuscan implementation
- */
-static bool
-pgstrom_process_gpuscan(GpuTask *task)
+static void
+gpuscan_cleanup_cuda_resources(pgstrom_gpuscan *gpuscan)
 {
-	GpuTaskState	   *task->gts;
-	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) task;
-	pgstrom_data_store *pds = gpuscan->pds;
+
+	if (gpuscan->ev_dma_recv_stop)
+	{
+		rc = cuEventDestroy(gpuscan->ev_dma_recv_stop);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuEventDestroy: %s", cuda_strerror(rc));
+	}
+
+	if (gpuscan->ev_dma_recv_start)
+	{
+		rc = cuEventDestroy(gpuscan->ev_dma_recv_start);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuEventDestroy: %s", cuda_strerror(rc));
+	}
+
+	if (gpuscan->ev_dma_send_stop)
+	{
+		rc = cuEventDestroy(gpuscan->ev_dma_send_stop);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuEventDestroy: %s", cuda_strerror(rc));
+	}
+
+	if (gpuscan->ev_dma_send_start)
+	{
+		rc = cuEventDestroy(gpuscan->ev_dma_send_start);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuEventDestroy: %s", cuda_strerror(rc));
+	}
+
+	if (gpuscan->m_kds)
+	{
+		rc = cuMemFree(gpuscan->m_kds);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuMemFree: %s", cuda_strerror(rc));
+	}
+
+	if (gpuscan->m_gpuscan)
+	{
+		rc = cuMemFree(gpuscan->m_gpuscan);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuMemFree: %s", cuda_strerror(rc));
+	}
+
+	/* ensure pointers being NULL */
+	gpuscan->kern_qual = NULL;
+	gpuscan->m_gpuscan = 0UL;
+	gpuscan->m_kds = 0UL;
+	gpuscan->ev_dma_send_start = NULL;
+	gpuscan->ev_dma_send_stop  = NULL;
+	gpuscan->ev_dma_recv_start = NULL;
+	gpuscan->ev_dma_recv_stop  = NULL;
+}
+
+static void
+pgstrom_respond_gpuscan(pgstrom_gpuscan *gpuscan)
+{
 
 
-	pgstrom_perfmon	   *pfm = &gpuscan->msg.pfm;
+
+
+
+
+}
+
+static bool
+__pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
+{
 	pgstrom_data_store *pds = gpuscan->pds;
 	kern_data_store	   *kds = pds->kds;
-	clstate_gpuscan	   *clgss = NULL;
-	cl_program			program;
-	cl_command_queue	kcmdq;
-	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
-	int					dindex;
-	cl_int				rc;
-	size_t				length;
-	size_t				offset;
-	size_t				gwork_sz;
-	size_t				lwork_sz;
+	size_t				grid_size;
+	size_t				block_size;
 
-
-	if (gpuscan->task.pfm.enabled)
-		gettimeofday(&tv1, nULL);
-
-	Assert(!gpuscan->m_gpuscan &&
-		   !gpuscan->m_kds &&
-		   !gpuscan->kern_qual &&
-		   !gpuscan->ev_dma_send_start &&
-		   !gpuscan->ev_dma_send_stop &&
-		   !gpuscan->ev_dma_recv_start &&
-		   !gpuscan->ev_dma_recv_stop);
-
-	PG_TRY();
-	{
-		/*
-		 * Switch CUDA context
-		 */
-		rc = cuCtxSetCurrent(gpuscan->task.cuda_context);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuCtxSetCurrent: %s", cuda_strerror(rc));
-
-
+	/*
+	 * Switch CUDA context
+	 */
+	rc = cuCtxSetCurrent(gpuscan->task.cuda_context);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuCtxSetCurrent: %s", cuda_strerror(rc));
 
 	/*
 	 * Kernel function lookup
@@ -1510,70 +1543,107 @@ pgstrom_process_gpuscan(GpuTask *task)
 							 gts->cuda_module,
 							 "gpuscan_qual");
 	if (rc != CUDA_SUCCESS)
-		goto error;
+		elog(ERROR, "failed on cuModuleGetFunction: %s",
+			 cuda_strerror(rc));
 
 	/*
 	 * Allocation of device memory
 	 */
-	rc = cuMemAlloc(&gpuscan->m_gpuscan, );
+	length = KERN_GPUSCAN_LENGTH(&gpuscan->kern);
+	rc = cuMemAlloc(&gpuscan->m_gpuscan, length);
 	if (rc != CUDA_SUCCESS)
-		goto error;
+	{
+		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+			goto out_of_resource;
+		elog(ERROR, "failed on cuMemAlloc: %s", cuda_strerror(rc));
+	}
 
-	rc = cuMemAlloc(&gpuscan->m_kds, );
+	length = KERN_DATA_STORE_LENGTH(pds->kds);
+	rc = cuMemAlloc(&gpuscan->m_kds, length);
 	if (rc != CUDA_SUCCESS)
-		goto error;
+	{
+		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+			goto out_of_resource;
+		elog(ERROR, "failed on cuMemAlloc: %s", cuda_strerror(rc));
+	}
 
 	/*
 	 * Creation of event objects
 	 */
 	rc = cuEventCreate(&gpuscan->ev_dma_send_start, CU_EVENT_DEFAULT);
 	if (rc != CUDA_SUCCESS)
-		goto error;
+		elog(ERROR, "failed on cuEventCreate: %s", cuda_strerror(rc));
 
 	rc = cuEventCreate(&gpuscan->ev_dma_send_stop, CU_EVENT_DEFAULT);
 	if (rc != CUDA_SUCCESS)
-		goto error;
+		elog(ERROR, "failed on cuEventCreate: %s", cuda_strerror(rc));
 
 	rc = cuEventCreate(&gpuscan->ev_dma_recv_start, CU_EVENT_DEFAULT);
 	if (rc != CUDA_SUCCESS)
-		goto error;
+		elog(ERROR, "failed on cuEventCreate: %s", cuda_strerror(rc));
 
 	rc = cuEventCreate(&gpuscan->ev_dma_recv_stop, CU_EVENT_DEFAULT);
 	if (rc != CUDA_SUCCESS)
-		goto error;
+		elog(ERROR, "failed on cuEventCreate: %s", cuda_strerror(rc));
 
 	/*
 	 * OK, enqueue a series of requests
 	 */
-	rc = cuMemcpyHtoDAsync(gpuscan->m_gpuscan, src-host, size-bytes,
+	offset = KERN_GPUSCAN_DMASEND_OFFSET(&gpuscan->kern);
+	length = KERN_GPUSCAN_DMASEND_LENGTH(&gpuscan->kern);
+	rc = cuMemcpyHtoDAsync(gpuscan->m_gpuscan,
+						   (char *)&gpuscan->kern + offset,
+						   length,
 						   gpuscan->task.stream);
 	if (rc != CUDA_SUCCESS)
-		goto error;
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", cuda_strerror(rc));
+	pfm->bytes_dma_send += length;
+	pfm->num_dma_send++;
 
-	rc = cuMemcpyHtoDAsync(gpuscan->m_kds, src-host, size-bytes,
+	rc = cuMemcpyHtoDAsync(gpuscan->m_kds,
+						   kds,
+						   kds->length,
 						   gpuscan->task.stream);
 	if (rc != CUDA_SUCCESS)
-		goto error;
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", cuda_strerror(rc));
+	pfm->bytes_dma_send += kds->length;
+    pfm->num_dma_send++;
 
 	/*
 	 * Launch kernel function
 	 */
+	pgstrom_compute_workgroup_size(&grid_size,
+								   &block_size,
+								   gpuscan->kern_qual,
+								   gpuscan->task.device,
+								   false,
+								   kds->nitems,
+								   sizeof(cl_uint));
+	gpuscan->kern_qual_args[0] = &gpuscan->m_gpuscan;
+	gpuscan->kern_qual_args[1] = &gpuscan->m_kds;
+
 	rc = cuLaunchKernel(gpuscan->kern_qual,
-						gridX,Y,Z,
-						blockX,Y,Z,
+						grid_size, 1, 1,
+						block_size, 1, 1,
+						sizeof(uint) * block_size,
 						gpuscan->task.stream,
-						void **kernel_params,
-						void **extra);
+						gpuscan->kern_qual_args,
+						NULL);
 	if (rc != CUDA_SUCCESS)
-		goto error;
+		elog(ERROR, "failed on cuLaunchKernel: %s", cuda_strerror(rc));
+	gpuscan->task.pfm.num_kern_exec++;
 
 	/*
 	 * Recv DMA call
 	 */
-	rc = cuMemcpyDtoHAsync(src_host, gpuscan->m_gpuscan + XXX, size-bytes,
+	offset = KERN_GPUSCAN_DMARECV_OFFSET(&gpuscan->kern);
+	length = KERN_GPUSCAN_DMARECV_LENGTH(&gpuscan->kern);
+	rc = cuMemcpyDtoHAsync(kresults,
+						   gpuscan->m_gpuscan + offset,
+						   length,
 						   gpuscan->task.stream);
 	if (rc != CUDA_SUCCESS)
-		goto error;
+		elog(ERROR, "cuMemcpyDtoHAsync: %s", cuda_strerror(rc));
 
 	/*
 	 * Register callback
@@ -1584,316 +1654,56 @@ pgstrom_process_gpuscan(GpuTask *task)
 	if (rc != CUDA_SUCCESS)
 		goto error;
 
-	if (gpuscan->task.pfm.enabled)
+	return true;
+
+out_of_resource:
+	pgstrom_cleanup_gpuscan(gpuscan);
+	return false;
+}
+
+/*
+ * clserv_process_gpuscan
+ *
+ * entrypoint of kernel gpuscan implementation
+ */
+static bool
+pgstrom_process_gpuscan(GpuTask *task)
+{
+	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) task;
+	CUresult			rc;
+	bool				status;
+	struct timeval		tv1, tv2;
+
+	if (task->pfm.enabled)
+		gettimeofday(&tv1, NULL);
+
+	PG_TRY();
 	{
-		gettimeofday(&tv2, nULL);
-		gpuscan->task.pfm.time_launch += timeval_diff(&tv1, &tv2);
-	}
-
-
+		status = __pgstrom_process_gpuscan(gpuscan);
+		SpinLockAcquire(&gts->lock);
+		if (status)
+		{
+			dlist_push_tail(&gts->running_tasks, &gpuscan->chain);
+			gts->num_running_tasks++;
+		}
+		else
+		{
+			dlist_push_head(&gts->pending_tasks, &gpuscan->chain);
+			gts->num_pending_tasks++;
+		}
+		SpinLockRelease(&gts->lock);
 	}
 	PG_CATCH();
 	{
-		rc = cuStreamSynchronize(gpuscan->task.stream);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuStreamSynchronize: %s", strerror(rc));
-
-
-
+		pgstrom_cleanup_gpuscan(gpuscan);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
-
-
-
-
-
-
-
-	typedef struct
+	if (task->pfm.enabled)
 	{
-		GpuTask         task;
-		CUdeviceptr     m_gpuscan;
-		CUdeviceptr     m_kds;
-		CUfunction      kern_qual;
-		CUevent         ev_dma_send_start;
-		CUevent         ev_dma_send_stop;   /* also, start kernel exec */
-		CUevent         ev_dma_recv_start;  /* also, stop kernel exec */
-		CUevent         ev_dma_recv_stop;
-		pgstrom_data_store *pds;
-		kern_gpuscan    kern;
-	} pgstrom_gpuscan;
-
-
-
-	/* sanity checks */
-	Assert(StromTagIs(gpuscan, GpuScan));
-	Assert(kds->format == KDS_FORMAT_ROW);
-	Assert(kresults->nrels == 1);
-	if (kds->nitems == 0)
-	{
-		msg->errcode = StromError_BadRequestMessage;
-		pgstrom_reply_message(msg);
-		return;
+		gettimeofday(&tv2, NULL);
+		task->pfm.time_launch_cuda = timeval_diff(&tv1, &tv2);
 	}
-
-	/*
-	 * First of all, it looks up a program object to be run on
-	 * the supplied row-store. We may have three cases.
-	 * 1) NULL; it means the required program is under asynchronous
-	 *    build, and the message is kept on its internal structure
-	 *    to be enqueued again. In this case, we have nothing to do
-	 *    any more on the invocation.
-	 * 2) BAD_OPENCL_PROGRAM; it means previous compile was failed
-	 *    and unavailable to run this program anyway. So, we need
-	 *    to reply StromError_ProgramCompile error to inform the
-	 *    backend this program.
-	 * 3) valid cl_program object; it is an ideal result. pre-compiled
-	 *    program object was on the program cache, and cl_program
-	 *    object is ready to use.
-	 */
-	program = clserv_lookup_device_program(gpuscan->dprog_key,
-										   &gpuscan->msg);
-	if (!program)
-		return;		/* message is in waitq, retry it! */
-	if (program == BAD_OPENCL_PROGRAM)
-	{
-		rc = CL_BUILD_PROGRAM_FAILURE;
-		goto error;
-	}
-
-	/*
-	 * create a state object
-	 */
-	clgss = calloc(1, offsetof(clstate_gpuscan, events[20 + kds->nblocks]));
-	if (!clgss)
-	{
-		clReleaseProgram(program);
-		rc = CL_OUT_OF_HOST_MEMORY;
-		goto error;
-	}
-	clgss->msg = msg;
-	clgss->program = program;
-
-	/*
-	 * lookup kernel function for gpuscan
-	 */
-	clgss->kernel = clCreateKernel(clgss->program, "gpuscan_qual", &rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	/*
-	 * choose a device to execute this kernel, and compute an optimal
-	 * workgroup-size of this kernel
-	 */
-	dindex = pgstrom_opencl_device_schedule(&gpuscan->msg);
-	kcmdq = opencl_cmdq[dindex];	
-	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
-									   clgss->kernel, dindex,
-									   false,	/* smaller WG-sz is better */
-									   kds->nitems, sizeof(cl_uint)))
-		goto error;
-
-	/* allocation of device memory for kern_gpuscan argument */
-	clgss->m_gpuscan = clCreateBuffer(opencl_context,
-									  CL_MEM_READ_WRITE,
-									  KERN_GPUSCAN_LENGTH(&gpuscan->kern),
-									  NULL,
-									  &rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	/* allocation of device memory for kern_data_store argument */
-	clgss->m_dstore = clCreateBuffer(opencl_context,
-									 CL_MEM_READ_WRITE,
-									 KERN_DATA_STORE_LENGTH(kds),
-									 NULL,
-									 &rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	/*
-	 * allocation of device memory for toast buffer, but never required
-	 */
-	clgss->m_ktoast = NULL;
-
-	/*
-	 * OK, all the device memory and kernel objects acquired.
-	 * Let's prepare kernel invocation.
-	 *
-	 * The kernel call is:
-	 * pg_bool_t
-	 * gpuscan_qual_eval(__global kern_gpuscan *kgpuscan,
-	 *                   __global kern_data_store *kds,
-	 *                   __global kern_data_store *ktoast,
-	 *                   __local void *local_workbuf)
-	 */
-	rc = clSetKernelArg(clgss->kernel,
-						0,		/* kern_gpuscan */
-						sizeof(cl_mem),
-						&clgss->m_gpuscan);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	rc = clSetKernelArg(clgss->kernel,
-						1,		/* kern_data_store */
-						sizeof(cl_mem),
-						&clgss->m_dstore);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	rc = clSetKernelArg(clgss->kernel,
-						2,		/* kds of toast buffer; always NULL */
-						sizeof(cl_mem),
-						&clgss->m_ktoast);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	rc = clSetKernelArg(clgss->kernel,
-						3,		/* local_workmem */
-						sizeof(cl_uint) * lwork_sz,
-						NULL);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	/*
-     * OK, enqueue DMA transfer, kernel execution, then DMA writeback.
-     *
-	 * (1) gpuscan (incl. kparams) - DMA send
-	 * (2) kern_data_store - DMA send
-	 * (3) execution of kernel function
-	 * (4) write back vrelation - DMA recv
-	 */
-
-	/* kern_gpuscan */
-	offset = KERN_GPUSCAN_DMASEND_OFFSET(&gpuscan->kern);
-	length = KERN_GPUSCAN_DMASEND_LENGTH(&gpuscan->kern);
-	rc = clEnqueueWriteBuffer(kcmdq,
-							  clgss->m_gpuscan,
-							  CL_FALSE,
-							  offset,
-							  length,
-							  &gpuscan->kern,
-							  0,
-							  NULL,
-							  &clgss->events[clgss->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-	clgss->ev_index++;
-	pfm->bytes_dma_send += length;
-	pfm->num_dma_send++;
-
-	/* kern_data_store, via common routine */
-	rc = clserv_dmasend_data_store(pds,
-								   kcmdq,
-								   clgss->m_dstore,
-								   clgss->m_ktoast,
-								   0,
-								   NULL,
-								   &clgss->ev_index,
-								   clgss->events,
-								   pfm);
-	if (rc != CL_SUCCESS)
-		goto error;
-
-	/* execution of kernel function */
-	rc = clEnqueueNDRangeKernel(kcmdq,
-								clgss->kernel,
-								1,
-								NULL,
-								&gwork_sz,
-								&lwork_sz,
-								clgss->ev_index,
-								&clgss->events[0],
-								&clgss->events[clgss->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueNDRangeKernel: %s",
-				   opencl_strerror(rc));
-		goto error;
-	}
-	clgss->ev_index++;
-	pfm->num_kern_exec++;
-
-	/* write back result vrelation */
-	offset = KERN_GPUSCAN_DMARECV_OFFSET(&gpuscan->kern);
-	length = KERN_GPUSCAN_DMARECV_LENGTH(&gpuscan->kern);
-	rc = clEnqueueReadBuffer(kcmdq,
-							 clgss->m_gpuscan,
-							 CL_FALSE,
-							 offset,
-							 length,
-							 kresults,
-							 1,
-							 &clgss->events[clgss->ev_index - 1],
-							 &clgss->events[clgss->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueReadBuffer: %s",
-				   opencl_strerror(rc));
-		goto error;
-	}
-	clgss->ev_index++;
-	pfm->bytes_dma_recv += length;
-	pfm->num_dma_recv++;
-
-	/*
-	 * Last, registers a callback routine that replies the message
-	 * to the backend
-	 */
-	rc = clSetEventCallback(clgss->events[clgss->ev_index - 1],
-							CL_COMPLETE,
-							clserv_respond_gpuscan,
-							clgss);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetEventCallback: %s", opencl_strerror(rc));
-		goto error;
-	}
-	return;
-
-error:
-	if (clgss)
-	{
-		if (clgss->ev_index > 0)
-			clWaitForEvents(clgss->ev_index, clgss->events);
-		if (clgss->m_ktoast)
-			clReleaseMemObject(clgss->m_ktoast);
-		if (clgss->m_dstore)
-			clReleaseMemObject(clgss->m_dstore);
-		if (clgss->m_gpuscan)
-			clReleaseMemObject(clgss->m_gpuscan);
-		if (clgss->kernel)
-			clReleaseKernel(clgss->kernel);
-		if (clgss->program)
-			clReleaseProgram(clgss->program);
-		free(clgss);
-	}
-	gpuscan->msg.errcode = rc;
-	pgstrom_reply_message(&gpuscan->msg);
+	return status;
 }
