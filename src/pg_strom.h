@@ -227,9 +227,11 @@ typedef struct {
 	cl_ulong	time_kern_proj;	/* time to execute projection kernel */
 	/*-- (special perfmon for gpupreagg) --*/
 	cl_uint		num_kern_prep;	/* number of preparation kernel execution */
-	cl_uint		num_kern_sort;	/* number of sort kernel execution */
+	cl_uint		num_kern_lagg;	/* number of local reduction kernel exec */
+	cl_uint		num_kern_gagg;	/* number of global reduction kernel exec */
 	cl_ulong	time_kern_prep;	/* time to execute preparation kernel */
-	cl_ulong	time_kern_sort;	/* time to execute sort kernel */
+	cl_ulong	time_kern_lagg;	/* time to execute local reduction kernel */
+	cl_ulong	time_kern_gagg;	/* time to execute global reduction kernel */
 	/*-- for debugging usage --*/
 	cl_ulong	time_debug1;	/* time for debugging purpose.1 */
 	cl_ulong	time_debug2;	/* time for debugging purpose.2 */
