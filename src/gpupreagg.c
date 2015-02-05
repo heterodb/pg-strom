@@ -4641,7 +4641,7 @@ gpupreagg_corr_psum_x(PG_FUNCTION_ARGS)
 	/* NULL checks */
 	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
 		PG_RETURN_NULL();
-	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(0));
+	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(1));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_x);
 
@@ -4655,7 +4655,7 @@ gpupreagg_corr_psum_y(PG_FUNCTION_ARGS)
 	/* NULL checks */
 	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
 		PG_RETURN_NULL();
-	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(1));
+	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(2));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_y);
 
@@ -4671,8 +4671,8 @@ gpupreagg_corr_psum_x2(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	/* calculation of X*X with overflow checks */
 	PG_RETURN_DATUM(DirectFunctionCall2(float8mul,
-										PG_GETARG_FLOAT8(0),
-										PG_GETARG_FLOAT8(0)));
+										PG_GETARG_FLOAT8(1),
+										PG_GETARG_FLOAT8(1)));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_x2);
 
@@ -4688,8 +4688,8 @@ gpupreagg_corr_psum_y2(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	/* calculation of X*X with overflow checks */
 	PG_RETURN_DATUM(DirectFunctionCall2(float8mul,
-										PG_GETARG_FLOAT8(1),
-										PG_GETARG_FLOAT8(1)));
+										PG_GETARG_FLOAT8(2),
+										PG_GETARG_FLOAT8(2)));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_y2);
 
@@ -4705,8 +4705,8 @@ gpupreagg_corr_psum_xy(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	/* calculation of X*X with overflow checks */
 	PG_RETURN_DATUM(DirectFunctionCall2(float8mul,
-										PG_GETARG_FLOAT8(0),
-										PG_GETARG_FLOAT8(1)));
+										PG_GETARG_FLOAT8(1),
+										PG_GETARG_FLOAT8(2)));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_xy);
 
@@ -5221,7 +5221,7 @@ pgstrom_covariance_float8_accum(PG_FUNCTION_ARGS)
 	newSumX2 = transvalues[2] + psumX2;
 	check_float8_valid(newSumX2, isinf(transvalues[2]) || isinf(psumX2), true);
 	newSumY = transvalues[3] + psumY;
-	check_float8_valid(newSumX, isinf(transvalues[3]) || isinf(psumY), true);
+	check_float8_valid(newSumY, isinf(transvalues[3]) || isinf(psumY), true);
 	newSumY2 = transvalues[4] + psumY2;
 	check_float8_valid(newSumY2, isinf(transvalues[4]) || isinf(psumY2), true);
 	newSumXY = transvalues[5] + psumXY;
