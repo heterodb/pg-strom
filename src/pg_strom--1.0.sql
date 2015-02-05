@@ -121,6 +121,16 @@ CREATE FUNCTION pgstrom.nrows(bool, bool, bool, bool)
   AS 'MODULE_PATHNAME', 'gpupreagg_partial_nrows'
   LANGUAGE C CALLED ON NULL INPUT;
 
+--
+-- Alternative aggregate function for count(int4)
+--
+CREATE AGGREGATE pgstrom.count(int4)
+(
+  sfunc = pg_catalog.int4_sum,
+  stype = int8,
+  initcond = 0
+);
+
 -- Definition of Partial MAX
 CREATE FUNCTION pgstrom.pmax(int2)
   RETURNS int2
@@ -234,16 +244,6 @@ CREATE FUNCTION pgstrom.avg_int8_accum(int8[], int4, int8)
   AS 'MODULE_PATHNAME', 'pgstrom_avg_int8_accum'
   LANGUAGE C STRICT;
 
-CREATE FUNCTION pgstrom.sum_int8_accum(int8[], int8)
-  RETURNS int8[]
-  AS 'MODULE_PATHNAME', 'pgstrom_sum_int8_accum'
-  LANGUAGE C STRICT;
-
-CREATE FUNCTION pgstrom.sum_int8_final(int8[])
-  RETURNS int8
-  AS 'MODULE_PATHNAME', 'pgstrom_sum_int8_final'
-  LANGUAGE C STRICT;
-
 CREATE AGGREGATE pgstrom.avg(int4, int8)
 (
   sfunc = pgstrom.avg_int8_accum,
@@ -252,12 +252,15 @@ CREATE AGGREGATE pgstrom.avg(int4, int8)
   initcond = '{0,0}'
 );
 
+CREATE FUNCTION pgstrom.sum_int8_accum(int8, int8)
+  RETURNS int8
+  AS 'MODULE_PATHNAME', 'pgstrom_sum_int8_accum'
+  LANGUAGE C CALLED ON NULL INPUT;;
+
 CREATE AGGREGATE pgstrom.sum(int8)
 (
   sfunc = pgstrom.sum_int8_accum,
-  stype = int8[],
-  finalfunc = pgstrom.sum_int8_final,
-  initcond = '{0,0}'
+  stype = int8
 );
 
 --
