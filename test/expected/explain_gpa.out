@@ -1665,10 +1665,10 @@ explain (verbose, costs off, timing off) select key,count(smlint_x)          fro
                                                                                                           QUERY PLAN                                                                                                          
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (sum((pgstrom.nrows((smlint_x IS NOT NULL)))))
+   Output: key, (pgstrom.count((pgstrom.nrows((smlint_x IS NOT NULL)))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, sum((pgstrom.nrows((smlint_x IS NOT NULL))))
+         Output: key, pgstrom.count((pgstrom.nrows((smlint_x IS NOT NULL))))
          Group Key: strom_test.key
          ->  Custom Scan (GpuPreAgg)
                Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((smlint_x IS NOT NULL))
@@ -1871,10 +1871,10 @@ explain (verbose, costs off, timing off) select key,count(integer_x)          fr
                                                                                                           QUERY PLAN                                                                                                           
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (sum((pgstrom.nrows((integer_x IS NOT NULL)))))
+   Output: key, (pgstrom.count((pgstrom.nrows((integer_x IS NOT NULL)))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, sum((pgstrom.nrows((integer_x IS NOT NULL))))
+         Output: key, pgstrom.count((pgstrom.nrows((integer_x IS NOT NULL))))
          Group Key: strom_test.key
          ->  Custom Scan (GpuPreAgg)
                Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((integer_x IS NOT NULL))
@@ -2061,10 +2061,10 @@ explain (verbose, costs off, timing off) select key,avg(bigint_x)            fro
                                                                                                                       QUERY PLAN                                                                                                                      
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (pgstrom.avg_numeric((pgstrom.nrows((bigint_x IS NOT NULL))), (pgstrom.psum(bigint_x))))
+   Output: key, (pgstrom.avg_int8((pgstrom.nrows((bigint_x IS NOT NULL))), (pgstrom.psum(bigint_x))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, pgstrom.avg_numeric((pgstrom.nrows((bigint_x IS NOT NULL))), (pgstrom.psum(bigint_x)))
+         Output: key, pgstrom.avg_int8((pgstrom.nrows((bigint_x IS NOT NULL))), (pgstrom.psum(bigint_x)))
          Group Key: strom_test.key
          ->  Custom Scan (GpuPreAgg)
                Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((bigint_x IS NOT NULL)), pgstrom.psum(bigint_x)
@@ -2077,10 +2077,10 @@ explain (verbose, costs off, timing off) select key,count(bigint_x)          fro
                                                                                                           QUERY PLAN                                                                                                          
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (sum((pgstrom.nrows((bigint_x IS NOT NULL)))))
+   Output: key, (pgstrom.count((pgstrom.nrows((bigint_x IS NOT NULL)))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, sum((pgstrom.nrows((bigint_x IS NOT NULL))))
+         Output: key, pgstrom.count((pgstrom.nrows((bigint_x IS NOT NULL))))
          Group Key: strom_test.key
          ->  Custom Scan (GpuPreAgg)
                Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((bigint_x IS NOT NULL))
@@ -2122,17 +2122,20 @@ explain (verbose, costs off, timing off) select key,min(bigint_x)            fro
 (11 rows)
 
 explain (verbose, costs off, timing off) select key,sum(bigint_x)            from strom_test group by key order by key;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
+                                                                                                  QUERY PLAN                                                                                                   
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (sum(bigint_x))
+   Output: key, (sum((pgstrom.psum(bigint_x))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, sum(bigint_x)
+         Output: key, sum((pgstrom.psum(bigint_x)))
          Group Key: strom_test.key
-         ->  Seq Scan on public.strom_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(8 rows)
+         ->  Custom Scan (GpuPreAgg)
+               Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.psum(bigint_x)
+               Bulkload: On
+               ->  Custom Scan (GpuScan) on public.strom_test
+                     Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(11 rows)
 
 explain (verbose, costs off, timing off) select key,stddev(bigint_x)         from strom_test group by key order by key;
                                                      QUERY PLAN                                                      
@@ -2280,10 +2283,10 @@ explain (verbose, costs off, timing off) select key,count(real_x)          from 
                                                                                                          QUERY PLAN                                                                                                         
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (sum((pgstrom.nrows((real_x IS NOT NULL)))))
+   Output: key, (pgstrom.count((pgstrom.nrows((real_x IS NOT NULL)))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, sum((pgstrom.nrows((real_x IS NOT NULL))))
+         Output: key, pgstrom.count((pgstrom.nrows((real_x IS NOT NULL))))
          Group Key: strom_test.key
          ->  Custom Scan (GpuPreAgg)
                Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((real_x IS NOT NULL))
@@ -2504,10 +2507,10 @@ explain (verbose, costs off, timing off) select key,count(float_x)          from
                                                                                                          QUERY PLAN                                                                                                          
 -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (sum((pgstrom.nrows((float_x IS NOT NULL)))))
+   Output: key, (pgstrom.count((pgstrom.nrows((float_x IS NOT NULL)))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, sum((pgstrom.nrows((float_x IS NOT NULL))))
+         Output: key, pgstrom.count((pgstrom.nrows((float_x IS NOT NULL))))
          Group Key: strom_test.key
          ->  Custom Scan (GpuPreAgg)
                Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((float_x IS NOT NULL))
@@ -2712,10 +2715,10 @@ explain (verbose, costs off, timing off) select key,avg(nume_x)            from 
                                                                                                                     QUERY PLAN                                                                                                                    
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (pgstrom.avg((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x))))
+   Output: key, (pgstrom.avg_numeric((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, pgstrom.avg((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)))
+         Output: key, pgstrom.avg_numeric((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)))
          Group Key: strom_test.key
          ->  Custom Scan (GpuPreAgg)
                Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x)
@@ -2728,10 +2731,10 @@ explain (verbose, costs off, timing off) select key,count(nume_x)          from 
                                                                                                          QUERY PLAN                                                                                                         
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (sum((pgstrom.nrows((nume_x IS NOT NULL)))))
+   Output: key, (pgstrom.count((pgstrom.nrows((nume_x IS NOT NULL)))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, sum((pgstrom.nrows((nume_x IS NOT NULL))))
+         Output: key, pgstrom.count((pgstrom.nrows((nume_x IS NOT NULL))))
          Group Key: strom_test.key
          ->  Custom Scan (GpuPreAgg)
                Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((nume_x IS NOT NULL))
@@ -2789,82 +2792,100 @@ explain (verbose, costs off, timing off) select key,sum(nume_x)            from 
 (11 rows)
 
 explain (verbose, costs off, timing off) select key,stddev(nume_x)         from strom_test group by key order by key;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
+                                                                                                                                QUERY PLAN                                                                                                                                 
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (stddev(nume_x))
+   Output: key, (pgstrom.stddev((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, stddev(nume_x)
+         Output: key, pgstrom.stddev((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
          Group Key: strom_test.key
-         ->  Seq Scan on public.strom_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(8 rows)
+         ->  Custom Scan (GpuPreAgg)
+               Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
+               Bulkload: On
+               ->  Custom Scan (GpuScan) on public.strom_test
+                     Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(11 rows)
 
 explain (verbose, costs off, timing off) select key,stddev_pop(nume_x)     from strom_test group by key order by key;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
+                                                                                                                                QUERY PLAN                                                                                                                                 
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (stddev_pop(nume_x))
+   Output: key, (pgstrom.stddev_pop((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, stddev_pop(nume_x)
+         Output: key, pgstrom.stddev_pop((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
          Group Key: strom_test.key
-         ->  Seq Scan on public.strom_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(8 rows)
+         ->  Custom Scan (GpuPreAgg)
+               Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
+               Bulkload: On
+               ->  Custom Scan (GpuScan) on public.strom_test
+                     Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(11 rows)
 
 explain (verbose, costs off, timing off) select key,stddev_samp(nume_x)    from strom_test group by key order by key;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
+                                                                                                                                QUERY PLAN                                                                                                                                 
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (stddev_samp(nume_x))
+   Output: key, (pgstrom.stddev_samp((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, stddev_samp(nume_x)
+         Output: key, pgstrom.stddev_samp((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
          Group Key: strom_test.key
-         ->  Seq Scan on public.strom_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(8 rows)
+         ->  Custom Scan (GpuPreAgg)
+               Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
+               Bulkload: On
+               ->  Custom Scan (GpuScan) on public.strom_test
+                     Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(11 rows)
 
 explain (verbose, costs off, timing off) select key,variance(nume_x)       from strom_test group by key order by key;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
+                                                                                                                                QUERY PLAN                                                                                                                                 
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (variance(nume_x))
+   Output: key, (pgstrom.variance((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, variance(nume_x)
+         Output: key, pgstrom.variance((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
          Group Key: strom_test.key
-         ->  Seq Scan on public.strom_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(8 rows)
+         ->  Custom Scan (GpuPreAgg)
+               Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
+               Bulkload: On
+               ->  Custom Scan (GpuScan) on public.strom_test
+                     Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(11 rows)
 
 explain (verbose, costs off, timing off) select key,var_pop(nume_x)        from strom_test group by key order by key;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
+                                                                                                                                QUERY PLAN                                                                                                                                 
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (var_pop(nume_x))
+   Output: key, (pgstrom.var_pop((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, var_pop(nume_x)
+         Output: key, pgstrom.var_pop((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
          Group Key: strom_test.key
-         ->  Seq Scan on public.strom_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(8 rows)
+         ->  Custom Scan (GpuPreAgg)
+               Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
+               Bulkload: On
+               ->  Custom Scan (GpuScan) on public.strom_test
+                     Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(11 rows)
 
 explain (verbose, costs off, timing off) select key,var_samp(nume_x)       from strom_test group by key order by key;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
+                                                                                                                                QUERY PLAN                                                                                                                                 
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (var_samp(nume_x))
+   Output: key, (pgstrom.var_samp((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, var_samp(nume_x)
+         Output: key, pgstrom.var_samp((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
          Group Key: strom_test.key
-         ->  Seq Scan on public.strom_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(8 rows)
+         ->  Custom Scan (GpuPreAgg)
+               Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
+               Bulkload: On
+               ->  Custom Scan (GpuScan) on public.strom_test
+                     Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(11 rows)
 
 explain (verbose, costs off, timing off) select key,corr(nume_x,nume_x) from strom_test group by key order by key;
                                                                                                                                                                                                                                                                                                                                             QUERY PLAN                                                                                                                                                                                                                                                                                                                                             
@@ -2934,10 +2955,10 @@ explain (verbose, costs off, timing off) select key,count(smlsrl_x)          fro
                                                                                                           QUERY PLAN                                                                                                          
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (sum((pgstrom.nrows((smlsrl_x IS NOT NULL)))))
+   Output: key, (pgstrom.count((pgstrom.nrows((smlsrl_x IS NOT NULL)))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, sum((pgstrom.nrows((smlsrl_x IS NOT NULL))))
+         Output: key, pgstrom.count((pgstrom.nrows((smlsrl_x IS NOT NULL))))
          Group Key: strom_test.key
          ->  Custom Scan (GpuPreAgg)
                Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((smlsrl_x IS NOT NULL))
@@ -3140,10 +3161,10 @@ explain (verbose, costs off, timing off) select key,count(serial_x)          fro
                                                                                                           QUERY PLAN                                                                                                          
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (sum((pgstrom.nrows((serial_x IS NOT NULL)))))
+   Output: key, (pgstrom.count((pgstrom.nrows((serial_x IS NOT NULL)))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, sum((pgstrom.nrows((serial_x IS NOT NULL))))
+         Output: key, pgstrom.count((pgstrom.nrows((serial_x IS NOT NULL))))
          Group Key: strom_test.key
          ->  Custom Scan (GpuPreAgg)
                Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((serial_x IS NOT NULL))
@@ -3330,10 +3351,10 @@ explain (verbose, costs off, timing off) select key,avg(bigsrl_x)            fro
                                                                                                                       QUERY PLAN                                                                                                                      
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (pgstrom.avg_numeric((pgstrom.nrows((bigsrl_x IS NOT NULL))), (pgstrom.psum(bigsrl_x))))
+   Output: key, (pgstrom.avg_int8((pgstrom.nrows((bigsrl_x IS NOT NULL))), (pgstrom.psum(bigsrl_x))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, pgstrom.avg_numeric((pgstrom.nrows((bigsrl_x IS NOT NULL))), (pgstrom.psum(bigsrl_x)))
+         Output: key, pgstrom.avg_int8((pgstrom.nrows((bigsrl_x IS NOT NULL))), (pgstrom.psum(bigsrl_x)))
          Group Key: strom_test.key
          ->  Custom Scan (GpuPreAgg)
                Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((bigsrl_x IS NOT NULL)), pgstrom.psum(bigsrl_x)
@@ -3346,10 +3367,10 @@ explain (verbose, costs off, timing off) select key,count(bigsrl_x)          fro
                                                                                                           QUERY PLAN                                                                                                          
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (sum((pgstrom.nrows((bigsrl_x IS NOT NULL)))))
+   Output: key, (pgstrom.count((pgstrom.nrows((bigsrl_x IS NOT NULL)))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, sum((pgstrom.nrows((bigsrl_x IS NOT NULL))))
+         Output: key, pgstrom.count((pgstrom.nrows((bigsrl_x IS NOT NULL))))
          Group Key: strom_test.key
          ->  Custom Scan (GpuPreAgg)
                Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((bigsrl_x IS NOT NULL))
@@ -3391,17 +3412,20 @@ explain (verbose, costs off, timing off) select key,min(bigsrl_x)            fro
 (11 rows)
 
 explain (verbose, costs off, timing off) select key,sum(bigsrl_x)            from strom_test group by key order by key;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
+                                                                                                  QUERY PLAN                                                                                                   
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (sum(bigsrl_x))
+   Output: key, (sum((pgstrom.psum(bigsrl_x))))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, sum(bigsrl_x)
+         Output: key, sum((pgstrom.psum(bigsrl_x)))
          Group Key: strom_test.key
-         ->  Seq Scan on public.strom_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(8 rows)
+         ->  Custom Scan (GpuPreAgg)
+               Output: NULL::integer, key, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.psum(bigsrl_x)
+               Bulkload: On
+               ->  Custom Scan (GpuScan) on public.strom_test
+                     Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(11 rows)
 
 explain (verbose, costs off, timing off) select key,stddev(bigsrl_x)         from strom_test group by key order by key;
                                                      QUERY PLAN                                                      
@@ -6256,7 +6280,7 @@ explain (verbose, costs off, timing off) select count(smlint_x)          from st
                                                                                                             QUERY PLAN                                                                                                            
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: sum((pgstrom.nrows((smlint_x IS NOT NULL))))
+   Output: pgstrom.count((pgstrom.nrows((smlint_x IS NOT NULL))))
    ->  Custom Scan (GpuPreAgg)
          Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((smlint_x IS NOT NULL))
          Bulkload: On
@@ -6406,7 +6430,7 @@ explain (verbose, costs off, timing off) select count(integer_x)          from s
                                                                                                             QUERY PLAN                                                                                                             
 -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: sum((pgstrom.nrows((integer_x IS NOT NULL))))
+   Output: pgstrom.count((pgstrom.nrows((integer_x IS NOT NULL))))
    ->  Custom Scan (GpuPreAgg)
          Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((integer_x IS NOT NULL))
          Bulkload: On
@@ -6544,7 +6568,7 @@ explain (verbose, costs off, timing off) select avg(bigint_x)            from st
                                                                                                                         QUERY PLAN                                                                                                                        
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: pgstrom.avg_numeric((pgstrom.nrows((bigint_x IS NOT NULL))), (pgstrom.psum(bigint_x)))
+   Output: pgstrom.avg_int8((pgstrom.nrows((bigint_x IS NOT NULL))), (pgstrom.psum(bigint_x)))
    ->  Custom Scan (GpuPreAgg)
          Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((bigint_x IS NOT NULL)), pgstrom.psum(bigint_x)
          Bulkload: On
@@ -6556,7 +6580,7 @@ explain (verbose, costs off, timing off) select count(bigint_x)          from st
                                                                                                             QUERY PLAN                                                                                                            
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: sum((pgstrom.nrows((bigint_x IS NOT NULL))))
+   Output: pgstrom.count((pgstrom.nrows((bigint_x IS NOT NULL))))
    ->  Custom Scan (GpuPreAgg)
          Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((bigint_x IS NOT NULL))
          Bulkload: On
@@ -6589,13 +6613,16 @@ explain (verbose, costs off, timing off) select min(bigint_x)            from st
 (7 rows)
 
 explain (verbose, costs off, timing off) select sum(bigint_x)            from strom_zero_test ;
-                                                  QUERY PLAN                                                   
----------------------------------------------------------------------------------------------------------------
+                                                                                                    QUERY PLAN                                                                                                     
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: sum(bigint_x)
-   ->  Seq Scan on public.strom_zero_test
-         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(4 rows)
+   Output: sum((pgstrom.psum(bigint_x)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.psum(bigint_x)
+         Bulkload: On
+         ->  Custom Scan (GpuScan) on public.strom_zero_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(7 rows)
 
 explain (verbose, costs off, timing off) select stddev(bigint_x)         from strom_zero_test ;
                                                   QUERY PLAN                                                   
@@ -6703,7 +6730,7 @@ explain (verbose, costs off, timing off) select count(real_x)          from stro
                                                                                                            QUERY PLAN                                                                                                           
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: sum((pgstrom.nrows((real_x IS NOT NULL))))
+   Output: pgstrom.count((pgstrom.nrows((real_x IS NOT NULL))))
    ->  Custom Scan (GpuPreAgg)
          Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((real_x IS NOT NULL))
          Bulkload: On
@@ -6871,7 +6898,7 @@ explain (verbose, costs off, timing off) select count(float_x)          from str
                                                                                                            QUERY PLAN                                                                                                            
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: sum((pgstrom.nrows((float_x IS NOT NULL))))
+   Output: pgstrom.count((pgstrom.nrows((float_x IS NOT NULL))))
    ->  Custom Scan (GpuPreAgg)
          Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((float_x IS NOT NULL))
          Bulkload: On
@@ -7027,7 +7054,7 @@ explain (verbose, costs off, timing off) select avg(nume_x)            from stro
                                                                                                                       QUERY PLAN                                                                                                                      
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: pgstrom.avg((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)))
+   Output: pgstrom.avg_numeric((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)))
    ->  Custom Scan (GpuPreAgg)
          Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x)
          Bulkload: On
@@ -7039,7 +7066,7 @@ explain (verbose, costs off, timing off) select count(nume_x)          from stro
                                                                                                            QUERY PLAN                                                                                                           
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: sum((pgstrom.nrows((nume_x IS NOT NULL))))
+   Output: pgstrom.count((pgstrom.nrows((nume_x IS NOT NULL))))
    ->  Custom Scan (GpuPreAgg)
          Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((nume_x IS NOT NULL))
          Bulkload: On
@@ -7084,58 +7111,76 @@ explain (verbose, costs off, timing off) select sum(nume_x)            from stro
 (7 rows)
 
 explain (verbose, costs off, timing off) select stddev(nume_x)         from strom_zero_test ;
-                                                  QUERY PLAN                                                   
----------------------------------------------------------------------------------------------------------------
+                                                                                                                                  QUERY PLAN                                                                                                                                   
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: stddev(nume_x)
-   ->  Seq Scan on public.strom_zero_test
-         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(4 rows)
+   Output: pgstrom.stddev((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
+         Bulkload: On
+         ->  Custom Scan (GpuScan) on public.strom_zero_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(7 rows)
 
 explain (verbose, costs off, timing off) select stddev_pop(nume_x)     from strom_zero_test ;
-                                                  QUERY PLAN                                                   
----------------------------------------------------------------------------------------------------------------
+                                                                                                                                  QUERY PLAN                                                                                                                                   
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: stddev_pop(nume_x)
-   ->  Seq Scan on public.strom_zero_test
-         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(4 rows)
+   Output: pgstrom.stddev_pop((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
+         Bulkload: On
+         ->  Custom Scan (GpuScan) on public.strom_zero_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(7 rows)
 
 explain (verbose, costs off, timing off) select stddev_samp(nume_x)    from strom_zero_test ;
-                                                  QUERY PLAN                                                   
----------------------------------------------------------------------------------------------------------------
+                                                                                                                                  QUERY PLAN                                                                                                                                   
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: stddev_samp(nume_x)
-   ->  Seq Scan on public.strom_zero_test
-         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(4 rows)
+   Output: pgstrom.stddev_samp((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
+         Bulkload: On
+         ->  Custom Scan (GpuScan) on public.strom_zero_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(7 rows)
 
 explain (verbose, costs off, timing off) select variance(nume_x)       from strom_zero_test ;
-                                                  QUERY PLAN                                                   
----------------------------------------------------------------------------------------------------------------
+                                                                                                                                  QUERY PLAN                                                                                                                                   
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: variance(nume_x)
-   ->  Seq Scan on public.strom_zero_test
-         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(4 rows)
+   Output: pgstrom.variance((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
+         Bulkload: On
+         ->  Custom Scan (GpuScan) on public.strom_zero_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(7 rows)
 
 explain (verbose, costs off, timing off) select var_pop(nume_x)        from strom_zero_test ;
-                                                  QUERY PLAN                                                   
----------------------------------------------------------------------------------------------------------------
+                                                                                                                                  QUERY PLAN                                                                                                                                   
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: var_pop(nume_x)
-   ->  Seq Scan on public.strom_zero_test
-         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(4 rows)
+   Output: pgstrom.var_pop((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
+         Bulkload: On
+         ->  Custom Scan (GpuScan) on public.strom_zero_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(7 rows)
 
 explain (verbose, costs off, timing off) select var_samp(nume_x)       from strom_zero_test ;
-                                                  QUERY PLAN                                                   
----------------------------------------------------------------------------------------------------------------
+                                                                                                                                  QUERY PLAN                                                                                                                                   
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: var_samp(nume_x)
-   ->  Seq Scan on public.strom_zero_test
-         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(4 rows)
+   Output: pgstrom.var_samp((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
+         Bulkload: On
+         ->  Custom Scan (GpuScan) on public.strom_zero_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(7 rows)
 
 explain (verbose, costs off, timing off) select corr(nume_x,nume_x) from strom_zero_test ;
                                                                                                                                                                                                                                                                                                                                               QUERY PLAN                                                                                                                                                                                                                                                                                                                                               
@@ -7189,7 +7234,7 @@ explain (verbose, costs off, timing off) select count(smlsrl_x)          from st
                                                                                                             QUERY PLAN                                                                                                            
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: sum((pgstrom.nrows((smlsrl_x IS NOT NULL))))
+   Output: pgstrom.count((pgstrom.nrows((smlsrl_x IS NOT NULL))))
    ->  Custom Scan (GpuPreAgg)
          Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((smlsrl_x IS NOT NULL))
          Bulkload: On
@@ -7339,7 +7384,7 @@ explain (verbose, costs off, timing off) select count(serial_x)          from st
                                                                                                             QUERY PLAN                                                                                                            
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: sum((pgstrom.nrows((serial_x IS NOT NULL))))
+   Output: pgstrom.count((pgstrom.nrows((serial_x IS NOT NULL))))
    ->  Custom Scan (GpuPreAgg)
          Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((serial_x IS NOT NULL))
          Bulkload: On
@@ -7477,7 +7522,7 @@ explain (verbose, costs off, timing off) select avg(bigsrl_x)            from st
                                                                                                                         QUERY PLAN                                                                                                                        
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: pgstrom.avg_numeric((pgstrom.nrows((bigsrl_x IS NOT NULL))), (pgstrom.psum(bigsrl_x)))
+   Output: pgstrom.avg_int8((pgstrom.nrows((bigsrl_x IS NOT NULL))), (pgstrom.psum(bigsrl_x)))
    ->  Custom Scan (GpuPreAgg)
          Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((bigsrl_x IS NOT NULL)), pgstrom.psum(bigsrl_x)
          Bulkload: On
@@ -7489,7 +7534,7 @@ explain (verbose, costs off, timing off) select count(bigsrl_x)          from st
                                                                                                             QUERY PLAN                                                                                                            
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: sum((pgstrom.nrows((bigsrl_x IS NOT NULL))))
+   Output: pgstrom.count((pgstrom.nrows((bigsrl_x IS NOT NULL))))
    ->  Custom Scan (GpuPreAgg)
          Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.nrows((bigsrl_x IS NOT NULL))
          Bulkload: On
@@ -7522,13 +7567,16 @@ explain (verbose, costs off, timing off) select min(bigsrl_x)            from st
 (7 rows)
 
 explain (verbose, costs off, timing off) select sum(bigsrl_x)            from strom_zero_test ;
-                                                  QUERY PLAN                                                   
----------------------------------------------------------------------------------------------------------------
+                                                                                                    QUERY PLAN                                                                                                     
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: sum(bigsrl_x)
-   ->  Seq Scan on public.strom_zero_test
-         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(4 rows)
+   Output: sum((pgstrom.psum(bigsrl_x)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.psum(bigsrl_x)
+         Bulkload: On
+         ->  Custom Scan (GpuScan) on public.strom_zero_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(7 rows)
 
 explain (verbose, costs off, timing off) select stddev(bigsrl_x)         from strom_zero_test ;
                                                   QUERY PLAN                                                   
