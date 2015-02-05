@@ -310,6 +310,88 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 	SpinLockRelease(&gcontext_lock);
 }
 
+
+
+
+
+/*
+ *
+ *
+ */
+static __thread __dynamic_shmem_per_thread;
+static size_t
+dynamic_shmem_size_per_block(int blockSize)
+{
+	return dynamic_shmem_size_per_thread * (size_t)blockSize;
+}
+
+static void
+pgstrom_compute_workgroup_size(size_t *p_grid_size,
+							   size_t *p_block_size,
+							   CUfunction function,
+							   bool maximum_blocksize,
+							   size_t nitems,
+							   size_t dynamic_shmem_per_block,
+							   size_t dynamic_shmem_per_thread)
+{
+	int			grid_size;
+	int			block_size;
+	int			block_size_min;
+	CUresult	rc;
+
+	if (maximum_blocksize)
+	{
+		rc = cuFuncGetAttribute(&block_size,
+								CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+								function);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuFuncGetAttribute: %s", cuda_strerror(rc));
+		*p_block_size = block_size;
+		*p_grid_size = (nitems + block_size - 1) / block_size;
+	}
+	else
+	{
+		__dynamic_shmem_per_thread = dynamic_shmem_per_thread;
+		rc = cuOccupancyMaxPotentialBlockSize(&grid_size,
+											  &block_size,
+											  function,
+											  dynamic_shmem_size_per_block,
+											  cuda_max_threads_per_block);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuOccupancyMaxPotentialBlockSize: %s",
+				 cuda_strerror(rc));
+
+
+
+
+		*p_grid_size = grid_size;
+		*p_block_size = block_size;
+
+
+
+
+	}
+
+
+
+
+
+	__dynamic_shmem_per_thread = dynamic_shmem_per_thread;
+
+A
+
+	cuOccupancyMaxPotentialBlockSize
+
+
+	CUresult cuOccupancyMaxPotentialBlockSize ( int* minGridSize, int* blockSize, CUfunction func, CUoccupancyB2DSize blockSizeToDynamicSMemSize, size_t dynamicSMemSize, int  blockSizeLimit )
+
+}
+
+
+
+
+
+
 static bool
 pgstrom_check_device_capability(int ordinal, CUdevice device)
 {

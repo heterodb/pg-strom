@@ -757,6 +757,8 @@ pgstrom_create_gpuscan(GpuScanState *gss, pgstrom_data_store *pds)
 	return gpuscan;
 }
 
+
+
 static pgstrom_gpuscan *
 pgstrom_load_gpuscan(GpuScanState *gss)
 {
@@ -882,6 +884,59 @@ gpuscan_next_tuple(GpuScanState *gss)
 }
 
 /*
+ *
+ *
+ *
+ */
+static void
+pgstrom_launch_pending_tasks(GpuTaskState *gts)
+{
+	dlist_node	   *dnode;
+	GpuTask		   *gtask;
+	bool			launch;
+
+	/*
+	 * Unless kernel build is completed, we cannot launch it.
+	 */
+	if (!gts->cuda_module &&
+		!pgstrom_load_cuda_program(gts))
+		return;
+
+	SpinLockAcquire(&gts->lock);
+	while (!dlist_is_empty(&gts->pending_tasks))
+	{
+		dnode = dlist_pop_head_node(&gts->pending_tasks);
+		gtask = dlist_container(GpuTask, chain, dnode);
+		gts->num_pending_tasks--;
+		memset(&gtask->chain, 0, sizeof(dlist_dnode));
+		SpinLockRelease(&gts->lock);
+
+		launch = gtask->cb_process(gtask);
+
+		SpinLockAcquire(&gts->lock);
+		/*
+		 * NOTE: cb_process may complete task immediately, prior to get
+		 * the spinlock again. So, we need to ensure gtask is not
+		 * linked to the completed list at this moment.
+		 */
+		if (!gtask->chain.prev && !gtask->chain.next)
+		{
+			if (launch)
+			{
+				dlist_push_tail(&gts->running_tasks, &gtask->chain);
+				gts->num_running_tasks++;
+			}
+			else
+			{
+				dlist_push_head(&gts->pending_tasks, &gtask->chain);
+				gts->num_pending_tasks++;
+			}
+		}
+	}
+	SpinLockRelease(&gts->lock);
+}
+
+/*
  * pgstrom_fetch_gpuscan
  *
  * It loads a chunk from the target relation, then enqueue the GpuScan
@@ -902,87 +957,67 @@ pgstrom_fetch_gpuscan(GpuScanState *gss)
 	if (!gss->kern_source)
 		return pgstrom_load_gpuscan(gss);
 
-	/* A valid device code shall have message queue */
-	Assert(gss->mqueue != NULL);
-
-	/*
-	 * Try to keep number of gpuscan chunks being asynchronously executed
-	 * larger than minimum multiplicity, unless it does not exceed
-	 * maximum one and OpenCL server does not return a new response.
-	 */
-	while (gss->num_running <= pgstrom_max_async_chunks)
+retry:
+	SpinLockAcquire(&gss->gts.lock);
+	while (pgstrom_max_async_chunks > (gss->gts.num_running_tasks +
+									   gss->gts.num_pending_tasks +
+									   gss->gts.num_completed_tasks))
 	{
-		pgstrom_gpuscan	*gpuscan = pgstrom_load_gpuscan(gss);
-
-		if (!gpuscan)
-			break;	/* scan reached end of the relation */
-
-		if (!pgstrom_enqueue_message(&gpuscan->msg))
-		{
-			pgstrom_put_message(&gpuscan->msg);
-			elog(ERROR, "failed to enqueue pgstrom_gpuscan message");
-		}
-		gss->num_running++;
-
-		if (gss->num_running > pgstrom_min_async_chunks &&
-			(msg = pgstrom_try_dequeue_message(gss->mqueue)) != NULL)
-		{
-			gss->num_running--;
-			dlist_push_tail(&gss->ready_chunks, &msg->chain);
+		/* no urgent reason why to make the scan progress */
+		if (!dlist_is_empty(&gss->gts.completed_tasks) &&
+			pgstrom_max_async_chunks < (gss->gts.num_running_tasks +
+										gss->gts.num_pending_tasks))
 			break;
-		}
+		SpinLockRelease(&gss->gts.lock);
+
+		gpuscan = pgstrom_load_gpuscan(gss);
+
+		SpinLockAcquire(&gss->gts.lock);
+		if (!gpuscan)
+			break;
+		dlist_push_tail(&gss->gts.pending_tasks, gpuscan->task.chain);
+		gss->gts.num_pending_tasks++;
+		SpinLockRelease(&gss->gts.lock);
+
+		pgstrom_launch_pending_tasks(gss);
+
+		SpinLockAcquire(&gss->gts.lock);
 	}
 
 	/*
-	 * Wait for server's response if no available chunks were replied.
+	 * Wait for the response from asynchronous task, if not completed
 	 */
-	if (dlist_is_empty(&gss->ready_chunks))
+	if (dlist_is_empty(&gss->gts.completed_tasks))
 	{
-		/* OK, no more chunks to be scanned */
-		if (gss->num_running == 0)
-			return NULL;
+		SpinLockRelease(&gss->gts.lock);
 
-		/* Synchronization, if needed */
-		msg = pgstrom_dequeue_message(gss->mqueue);
-		if (!msg)
-			elog(ERROR, "message queue wait timeout");
-		gss->num_running--;
-		dlist_push_tail(&gss->ready_chunks, &msg->chain);
+		rc = WaitLatch(&MyProc->procLatch,
+					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+					   5 * 1000L);
+        ResetLatch(&MyProc->procLatch);
+		if (rc & WL_POSTMASTER_DEATH)
+			elog(ERROR, "Emergency bail out because of Postmaster crash");
+		/* flush pending tasks first */
+		pgstrom_launch_pending_tasks(gss);
+		goto retry;
 	}
 
 	/*
-	 * Picks up next available chunks if any
+	 * Picks up next available chunk if any
 	 */
-	Assert(!dlist_is_empty(&gss->ready_chunks));
-	gpuscan = dlist_container(pgstrom_gpuscan, msg.chain,
-							  dlist_pop_head_node(&gss->ready_chunks));
-	Assert(StromTagIs(gpuscan, GpuScan));
+	dnode = dlist_pop_head_node(&gss->gts.completed_tasks);
+	gpuscan = dlist_container(pgstrom_gpuscan, gts.chain, dnode);
+	SpinLockRelease(&gss->gts.lock);
 
 	/*
-	 * Raise an error, if any error was reported
+	 * Raise an error, if any run-time error was reported
 	 */
-	if (gpuscan->msg.errcode != StromError_Success)
-	{
-		if (gpuscan->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
-		{
-			const char *buildlog
-				= pgstrom_get_devprog_errmsg(gpuscan->dprog_key);
+	if (gpuscan->task.errcode != StromError_Success)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("PG-Strom: CUDA execution error (%s)",
+						cuda_strerror(gpuscan->task.errcode))));
 
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
-							pgstrom_strerror(gpuscan->msg.errcode),
-							gss->kern_source),
-					 errdetail("%s", buildlog)));
-		}
-		else
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("PG-Strom: OpenCL execution error (%s)",
-							pgstrom_strerror(gpuscan->msg.errcode))));
-		}
-	}
 	return gpuscan;
 }
 
@@ -994,22 +1029,27 @@ gpuscan_fetch_tuple(CustomScanState *node)
 
 	ExecClearTuple(slot);
 
+	/*
+	 * Once any asynchronous event happen, we try to check status of the
+	 * running, pending and completed tasks, then read more chunks and
+	 * kick asynchronous kernel call.
+	 */
+	if (TestLatch(&MyProc->procLatch))
+		pgstrom_try_preload_gpuscan(gss);
+
 	while (!gss->curr_chunk || !(slot = gpuscan_next_tuple(gss)))
 	{
 		pgstrom_gpuscan	   *gpuscan = gss->curr_chunk;
 
-		/*
-		 * Release the current gpuscan chunk being already scanned
-		 */
+		/* Release the current gpuscan chunk which is already scanned */
 		if (gpuscan)
 		{
-			dlist_delete(&gpuscan->chain);
-			if (gpuscan->task.pfm.enabled)
+			if (gss->pfm.enabled)
 				pgstrom_perfmon_add(&gss->gts.pfm, &gpuscan->task.pfm);
-			pgstrom_release_gpuscan(gpuscan);
 			gss->curr_chunk = NULL;
-            gss->curr_index = 0;
+			gss->curr_index = 0;
 		}
+		/* Fetch next chunk to be scanned */
 		gpuscan = pgstrom_fetch_gpuscan(gss);
 		if (!gpuscan)
 			break;
@@ -1034,7 +1074,7 @@ gpuscan_exec(CustomScanState *node)
 					(ExecScanRecheckMtd) gpuscan_recheck);
 }
 
-static void *
+static pgstrom_data_store *
 gpuscan_exec_bulk(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *) node;
@@ -1046,123 +1086,49 @@ gpuscan_exec_bulk(CustomScanState *node)
 	cl_int			   *rindex;
 	HeapTupleData		tuple;
 
+	/* note: bulkload shall not be chosen with qualifier */
+	Assert(!gss->css.ss.ps.qual && !gss->dev_quals);
+
+	/* no more blocks to read */
+	if (gss->curr_blknum > gss->last_blknum)
+		return NULL;
+
 	/* must provide our own instrumentation support */
 	if (node->ss.ps.instrument)
 		InstrStartNode(node->ss.ps.instrument);
 
+	if (gss->pfm.enabled)
+		gettimeofday(&tv1, NULL);
+
 	while (true)
 	{
-		gpuscan = pgstrom_fetch_gpuscan(gss);
-		if (!gpuscan)
-		{
-			if (node->ss.ps.instrument)
-				InstrStopNode(node->ss.ps.instrument, (double) 0.0);
-			return NULL;
-		}
+		pds = pgstrom_create_data_store_row(gss->gts.gcontext,
+											tupdesc,
+											pgstrom_chunk_size(),
+											NULL);
+		/* fill up this data store */
+		while (gss->curr_blknum < gss->last_blknum &&
+			   pgstrom_data_store_insert_block(pds, rel,
+											   gss->curr_blknum,
+											   snapshot, true) >= 0)
+			gss->curr_blknum++;
 
-		/* update perfmon info */
-		if (gpuscan->msg.pfm.enabled)
-			pgstrom_perfmon_add(&gss->pfm, &gpuscan->msg.pfm);
-
-		/*
-		 * Make a bulk-slot according to the result
-		 */
-		kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
-		bulk = palloc0(offsetof(pgstrom_bulkslot, rindex[kresults->nitems]));
-		bulk->pds = pgstrom_get_data_store(gpuscan->pds);
-		bulk->nvalids = 0;	/* to be set later */
-		pgstrom_track_object(&bulk->pds->sobj, 0);
-
-		/* No longer gpuscan is referenced any more. The associated
-		 * data-store is not actually released because its refcnt is
-		 * already incremented above.
-		 */
-		pgstrom_untrack_object(&gpuscan->msg.sobj);
-		pgstrom_put_message(&gpuscan->msg);
-
-		/*
-		 * If any, it may take host side checks
-		 * - Recheck of device qualifier, if result is nagative
-		 * - Host qualifier checks, if any.
-		 */
-		if (kresults->all_visible)
-		{
-			if (!host_qual)
-			{
-				bulk->nvalids = -1;	/* all the rows are valid */
-				break;
-			}
-			nitems = bulk->pds->kds->nitems;
-			rindex = NULL;
-			Assert(nitems <= kresults->nitems);
-		}
-		else
-		{
-			nitems = kresults->nitems;
-			rindex = kresults->results;
-		}
-
-		for (i=0, j=0; i < nitems; i++)
-		{
-			cl_uint		row_index = (!rindex ? i + 1 : rindex[i]);
-			bool		do_recheck = false;
-
-			Assert(row_index != 0);
-			if (row_index > 0)
-				row_index--;
-			else
-			{
-				row_index = -row_index - 1;
-				do_recheck = true;
-			}
-
-			if (host_qual || do_recheck)
-			{
-				ExprContext	   *econtext = gss->css.ss.ps.ps_ExprContext;
-				TupleTableSlot *slot = gss->css.ss.ss_ScanTupleSlot;
-
-				if (!pgstrom_fetch_data_store(slot,
-											  bulk->pds,
-											  row_index,
-											  &tuple))
-					elog(ERROR, "Bug? invalid row-index was in the result");
-				econtext->ecxt_scantuple = slot;
-
-				/* Recheck of device qualifier, if needed */
-				if (do_recheck)
-				{
-					Assert(gss->dev_quals != NULL);
-					if (!ExecQual(gss->dev_quals, econtext, false))
-						continue;
-				}
-				/* Check of host qualifier, if needed */
-				if (host_qual)
-				{
-					if (!ExecQual(host_qual, econtext, false))
-						continue;
-				}
-			}
-			bulk->rindex[j++] = row_index;
-		}
-		bulk->nvalids = j;
-
-		if (bulk->nvalids > 0)
+		if (pds->kds->nitems > 0)
 			break;
-
-		/* If this chunk has no valid items, it does not make sense to
-		 * return upper level this chunk.
-		 */
-		pgstrom_untrack_object(&bulk->pds->sobj);
-		pgstrom_put_data_store(bulk->pds);
-		pfree(bulk);
+		pgstrom_release_data_store(pds);
+        pds = NULL;
 	}
-	/* must provide our own instrumentation support */
+	/* update perfmon statistics */
+	if (gss->pfm.enabled)
+	{
+		gettimeofday(&tv2, NULL);
+		gss->pfm.time_outer_load += timeval_diff(&tv1, &tv2);
+	}
+
 	if (node->ss.ps.instrument)
-		InstrStopNode(node->ss.ps.instrument,
-					  bulk->nvalids < 0 ?
-					  (double) bulk->pds->kds->nitems :
-					  (double) bulk->nvalids);
-	return bulk;
+        InstrStopNode(node->ss.ps.instrument,
+					  !pds ? 0.0 : (double) pds->kds->nitems);
+	return pds;
 }
 
 static void
@@ -1492,10 +1458,14 @@ clserv_respond_gpuscan(cl_event event, cl_int ev_status, void *private)
  *
  * entrypoint of kernel gpuscan implementation
  */
-static void
-clserv_process_gpuscan(pgstrom_message *msg)
+static bool
+pgstrom_process_gpuscan(GpuTask *task)
 {
-	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) msg;
+	GpuTaskState	   *task->gts;
+	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) task;
+	pgstrom_data_store *pds = gpuscan->pds;
+
+
 	pgstrom_perfmon	   *pfm = &gpuscan->msg.pfm;
 	pgstrom_data_store *pds = gpuscan->pds;
 	kern_data_store	   *kds = pds->kds;
@@ -1509,6 +1479,153 @@ clserv_process_gpuscan(pgstrom_message *msg)
 	size_t				offset;
 	size_t				gwork_sz;
 	size_t				lwork_sz;
+
+
+	if (gpuscan->task.pfm.enabled)
+		gettimeofday(&tv1, nULL);
+
+	Assert(!gpuscan->m_gpuscan &&
+		   !gpuscan->m_kds &&
+		   !gpuscan->kern_qual &&
+		   !gpuscan->ev_dma_send_start &&
+		   !gpuscan->ev_dma_send_stop &&
+		   !gpuscan->ev_dma_recv_start &&
+		   !gpuscan->ev_dma_recv_stop);
+
+	PG_TRY();
+	{
+		/*
+		 * Switch CUDA context
+		 */
+		rc = cuCtxSetCurrent(gpuscan->task.cuda_context);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuCtxSetCurrent: %s", cuda_strerror(rc));
+
+
+
+	/*
+	 * Kernel function lookup
+	 */
+	rc = cuModuleGetFunction(&gpuscan->kern_qual,
+							 gts->cuda_module,
+							 "gpuscan_qual");
+	if (rc != CUDA_SUCCESS)
+		goto error;
+
+	/*
+	 * Allocation of device memory
+	 */
+	rc = cuMemAlloc(&gpuscan->m_gpuscan, );
+	if (rc != CUDA_SUCCESS)
+		goto error;
+
+	rc = cuMemAlloc(&gpuscan->m_kds, );
+	if (rc != CUDA_SUCCESS)
+		goto error;
+
+	/*
+	 * Creation of event objects
+	 */
+	rc = cuEventCreate(&gpuscan->ev_dma_send_start, CU_EVENT_DEFAULT);
+	if (rc != CUDA_SUCCESS)
+		goto error;
+
+	rc = cuEventCreate(&gpuscan->ev_dma_send_stop, CU_EVENT_DEFAULT);
+	if (rc != CUDA_SUCCESS)
+		goto error;
+
+	rc = cuEventCreate(&gpuscan->ev_dma_recv_start, CU_EVENT_DEFAULT);
+	if (rc != CUDA_SUCCESS)
+		goto error;
+
+	rc = cuEventCreate(&gpuscan->ev_dma_recv_stop, CU_EVENT_DEFAULT);
+	if (rc != CUDA_SUCCESS)
+		goto error;
+
+	/*
+	 * OK, enqueue a series of requests
+	 */
+	rc = cuMemcpyHtoDAsync(gpuscan->m_gpuscan, src-host, size-bytes,
+						   gpuscan->task.stream);
+	if (rc != CUDA_SUCCESS)
+		goto error;
+
+	rc = cuMemcpyHtoDAsync(gpuscan->m_kds, src-host, size-bytes,
+						   gpuscan->task.stream);
+	if (rc != CUDA_SUCCESS)
+		goto error;
+
+	/*
+	 * Launch kernel function
+	 */
+	rc = cuLaunchKernel(gpuscan->kern_qual,
+						gridX,Y,Z,
+						blockX,Y,Z,
+						gpuscan->task.stream,
+						void **kernel_params,
+						void **extra);
+	if (rc != CUDA_SUCCESS)
+		goto error;
+
+	/*
+	 * Recv DMA call
+	 */
+	rc = cuMemcpyDtoHAsync(src_host, gpuscan->m_gpuscan + XXX, size-bytes,
+						   gpuscan->task.stream);
+	if (rc != CUDA_SUCCESS)
+		goto error;
+
+	/*
+	 * Register callback
+	 */
+	rc = cuStreamAddCallback(gpuscan->task.stream,
+							 pgstrom_respond_gpuscan,
+							 gpuscan, 0);
+	if (rc != CUDA_SUCCESS)
+		goto error;
+
+	if (gpuscan->task.pfm.enabled)
+	{
+		gettimeofday(&tv2, nULL);
+		gpuscan->task.pfm.time_launch += timeval_diff(&tv1, &tv2);
+	}
+
+
+	}
+	PG_CATCH();
+	{
+		rc = cuStreamSynchronize(gpuscan->task.stream);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuStreamSynchronize: %s", strerror(rc));
+
+
+
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+
+
+
+
+
+
+
+	typedef struct
+	{
+		GpuTask         task;
+		CUdeviceptr     m_gpuscan;
+		CUdeviceptr     m_kds;
+		CUfunction      kern_qual;
+		CUevent         ev_dma_send_start;
+		CUevent         ev_dma_send_stop;   /* also, start kernel exec */
+		CUevent         ev_dma_recv_start;  /* also, stop kernel exec */
+		CUevent         ev_dma_recv_stop;
+		pgstrom_data_store *pds;
+		kern_gpuscan    kern;
+	} pgstrom_gpuscan;
+
+
 
 	/* sanity checks */
 	Assert(StromTagIs(gpuscan, GpuScan));

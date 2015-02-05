@@ -39,7 +39,6 @@ static bool guc_pgstrom_enabled_global;
 bool	pgstrom_perfmon_enabled;
 bool	pgstrom_debug_bulkload_enabled;
 bool	pgstrom_debug_print_kernel;
-int		pgstrom_chunk_size;
 int		pgstrom_max_async_chunks;
 int		pgstrom_min_async_chunks;
 

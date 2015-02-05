@@ -3,7 +3,6 @@ EXTENSION = pg_strom
 DATA = src/pg_strom--1.0.sql
 
 # Source file of CPU portion
-<<<<<<< HEAD
 STROM_OBJS = main.o codegen.o grafter.o datastore.o \
 		cuda_control.o cuda_program.o cuda_mmgr.o \
 		gpuscan.o #gpuhashjoin.o gpupreagg.o
@@ -22,22 +21,6 @@ CUDA_SOURCES = $(addprefix src/,$(CUDA_OBJS:.o=.c))
 # Header and Libraries of CUDA
 IPATH_LIST := /usr/local/cuda/include
 LPATH_LIST := /usr/local/cuda/lib64 /usr/local/cuda/lib
-=======
-STROM_OBJS = main.o shmem.o codegen.o mqueue.o restrack.o grafter.o \
-        datastore.o gpuscan.o gpuhashjoin.o gpupreagg.o gpusort.o \
-        opencl_entry.o opencl_serv.o opencl_devinfo.o opencl_devprog.o
-# Source file of GPU portion
-OPENCL_OBJS = opencl_common.o \
-	opencl_gpuscan.o \
-	opencl_gpupreagg.o \
-	opencl_hashjoin.o \
-	opencl_gpusort.o \
-	opencl_mathlib.o \
-	opencl_textlib.o \
-	opencl_timelib.o \
-	opencl_numeric.o
-OPENCL_SOURCES = $(addprefix src/,$(OPENCL_OBJS:.o=.c))
->>>>>>> 012cfb49541d9309610e97d0953cc43244d268f8
 
 IPATH := $(shell for x in $(IPATH_LIST);	\
            do test -e "$$x/cuda.h" && (echo -I $$x; break); done)

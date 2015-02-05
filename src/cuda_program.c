@@ -33,10 +33,10 @@ typedef struct
 	dlist_node	lru_chain;
 	int			shift;	/* block class of this entry */
 	int			refcnt;	/* 0 means free entry */
-	pg_crc32	crc;	/* hash value by extra_flags + cuda_source */
+	pg_crc32	crc;	/* hash value by extra_flags + kern_source */
 	int			extra_flags;
-	char	   *cuda_source;
-	Size		cuda_source_len;
+	char	   *kern_source;
+	Size		kern_source_len;
 	char	   *cuda_binary;
 	Size		cuda_binary_len;
 	char	   *error_msg;
@@ -68,9 +68,6 @@ typedef struct
 	program_cache_entry *entry_end;		/* end address of entries */
 	Bitmapset	waiting_backends;	/* flexible length */
 } program_cache_head;
-
-#define TOTAL_PROCS				\
-	(MaxBackends + NUM_AUXILIARY_PROCS + max_prepared_xacts)
 
 /* ---- static variables ---- */
 static shmem_startup_hook_type shmem_startup_next;
@@ -104,7 +101,7 @@ pgstrom_wakeup_backends(void)
 		{
 			if ((bitmap & (1 << j)) == 0)
 				continue;
-			Assert(i * BITS_PER_BITMAPWORD + j < TOTAL_PROCS);
+			Assert(i * BITS_PER_BITMAPWORD + j < ProcGlobal->allProcCount);
 			proc = &ProcGlobal->allProcs[i * BITS_PER_BITMAPWORD + j];
 			SetLatch(&proc->procLatch);
 		}
@@ -242,8 +239,6 @@ pgstrom_program_cache_free(program_cache_entry *entry)
 	Size		offset;
 
 	Assert(entry->refcnt == 0);
-	Assert(!entry->chain.next && !entry->chain.prev);
-	Assert(!entry->lru_chain.next && !entry->lru_chain.prev);
 
 	offset = (uintptr_t)entry - (uintptr_t)pgcache_head->entry_begin;
 	Assert((offset & ((1UL << shift) - 1)) == 0);
@@ -271,6 +266,23 @@ pgstrom_program_cache_free(program_cache_entry *entry)
 		entry->shift = ++shift;
 	}
 	dlist_push_head(&pgcache_head->free_list[shift], &entry->chain);
+}
+
+static void
+pgstrom_put_cuda_program(program_cache_entry *entry)
+{
+	SpinLockAcquire(&pgcache_head->lock);
+	if (--entry->refcnt == 0)
+	{
+		/*
+		 * NOTE: unless pgstrom_program_cache_reclaim() detach
+		 * entries, it never goes to refcnt == 0.
+		 */
+		Assert(!entry->chain.next && !entry->chain.prev);
+		Assert(!entry->lru_chain.next && !entry->lru_chain.prev);
+		pgstrom_program_cache_free(entry);
+	}
+	SpinLockRelease(&pgcache_head->lock);
 }
 
 static void
@@ -393,9 +405,9 @@ pgstrom_write_cuda_program(FILE *filp, program_cache_entry *entry,
 			elog(ERROR, "could not write to file \"%s\": %m", pathname);
 	}
 	/* source code generated on the fly */
-	nbytes = fwrite(entry->cuda_source,
-					entry->cuda_source_len, 1, filp);
-	if (nbytes != entry->cuda_source_len)
+	nbytes = fwrite(entry->kern_source,
+					entry->kern_source_len, 1, filp);
+	if (nbytes != entry->kern_source_len)
 		elog(ERROR, "could not write to file \"%s\": %m", pathname);
 
 
@@ -528,7 +540,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 	/*
 	 * Make a new entry, instead of the old one
 	 */
-	required = MAXALIGN(old_entry->cuda_source_len + 1);
+	required = MAXALIGN(old_entry->kern_source_len + 1);
 	if (cuda_binary)
 		required += MAXALIGN(cuda_binary_len + 1);
 	required += MAXALIGN(strlen(cmdline.data) + 1);
@@ -544,17 +556,17 @@ __build_cuda_program(program_cache_entry *old_entry)
 
 	new_entry->crc = old_entry->crc;
 	new_entry->extra_flags = old_entry->extra_flags;
-	new_entry->cuda_source = new_entry->data;
-	memcpy(new_entry->cuda_source,
-		   old_entry->cuda_source,
-		   old_entry->cuda_source_len + 1);
-	new_entry->cuda_source_len = old_entry->cuda_source_len;
+	new_entry->kern_source = new_entry->data;
+	memcpy(new_entry->kern_source,
+		   old_entry->kern_source,
+		   old_entry->kern_source_len + 1);
+	new_entry->kern_source_len = old_entry->kern_source_len;
 
 	if (!cuda_binary)
 	{
 		new_entry->cuda_binary = CUDA_PROGRAM_BUILD_FAILURE;
-		new_entry->error_msg = (new_entry->cuda_source +
-								MAXALIGN(new_entry->cuda_source_len + 1));
+		new_entry->error_msg = (new_entry->kern_source +
+								MAXALIGN(new_entry->kern_source_len + 1));
 		new_entry->error_msg_len = PGCACHE_ERRORMSG_LEN(new_entry);
 		snprintf(new_entry->error_msg,
 				 new_entry->error_msg_len,
@@ -563,8 +575,8 @@ __build_cuda_program(program_cache_entry *old_entry)
 	}
 	else
 	{
-		new_entry->cuda_binary = (new_entry->cuda_source +
-								  MAXALIGN(new_entry->cuda_source_len + 1));
+		new_entry->cuda_binary = (new_entry->kern_source +
+								  MAXALIGN(new_entry->kern_source_len + 1));
 		new_entry->cuda_binary_len = cuda_binary_len;
 		new_entry->error_msg = (new_entry->cuda_binary +
 								MAXALIGN(new_entry->cuda_binary_len + 1));
@@ -640,9 +652,7 @@ pgstrom_build_cuda_program(Datum cuda_program)
 					 errdata->message);
 			entry->cuda_binary = CUDA_PROGRAM_BUILD_FAILURE;
 		}
-		SpinLockRelease(&pgcache_head->lock);
 		pgstrom_put_cuda_program(entry);
-		pgstrom_wakeup_backends();
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -651,11 +661,12 @@ pgstrom_build_cuda_program(Datum cuda_program)
 }
 
 bool
-pgstrom_get_cuda_program(GpuTaskState *gts,
-						 const char *source, int32 extra_flags)
+pgstrom_load_cuda_program(GpuTaskState *gts)
 {
 	program_cache_entry	*entry;
-	Size		source_len = strlen(source);
+	cl_uint		extra_flags = gts->extra_flags;
+	const char *kern_source = gts->kern_source;
+	Size		kern_source_len = strlen(kern_source);
 	Size		required;
 	int			hindex;
 	dlist_iter	iter;
@@ -666,7 +677,7 @@ pgstrom_get_cuda_program(GpuTaskState *gts,
 	/* makes a hash value */
 	INIT_CRC32C(crc);
 	COMP_CRC32C(crc, &extra_flags, sizeof(int32));
-	COMP_CRC32C(crc, source, source_len);
+	COMP_CRC32C(crc, kern_source, kern_source_len);
 	FIN_CRC32C(crc);
 
 retry:
@@ -678,16 +689,19 @@ retry:
 
 		if (entry->crc == crc &&
 			entry->extra_flags == extra_flags &&
-			entry->cuda_source_len == source_len &&
-			strcmp(entry->cuda_source, source) == 0)
+			entry->kern_source_len == kern_source_len &&
+			strcmp(entry->kern_source, kern_source) == 0)
 		{
+			/* Move this entry to the head of LRU list */
+			dlist_move_head(&pgcache_head->lru_list, &entry->lru_chain);
+
 			/* This kernel build already lead an error */
 			if (entry->cuda_binary == CUDA_PROGRAM_BUILD_FAILURE)
 			{
 				SpinLockRelease(&pgcache_head->lock);
 				elog(ERROR, "%s", entry->error_msg);
 			}
-			/* Still kernel build is in progress */
+			/* Kernel build is still in-progress */
 			if (!entry->cuda_binary)
 			{
 				SpinLockRelease(&pgcache_head->lock);
@@ -695,37 +709,32 @@ retry:
 			}
 			/* OK, this kernel is already built */
 			entry->refcnt++;
-			dlist_move_head(&pgcache_head->lru_list, &entry->lru_chain);
 			SpinLockRelease(&pgcache_head->lock);
 
 			/* Also, load it on the private space */
 			rc = cuModuleLoadData(&gts->cuda_module, entry->cuda_binary);
 			if (rc != CUDA_SUCCESS)
 			{
-				SpinLockAcquire(&pgcache_head->lock);
-				Assert(entry->refcnt > 0);
-				if (--entry->refcnt == 0)
-					pgstrom_program_cache_free(entry);
-				SpinLockRelease(&pgcache_head->lock);
-
+				pgstrom_put_cuda_program(entry);
 				elog(ERROR, "failed on cuModuleLoadData (%s)",
 					 cuda_strerror(rc));
 			}
+			pgstrom_put_cuda_program(entry);
 			return true;
 		}
 	}
 	/* Not found on the existing cache */
-	required = offsetof(program_cache_entry, data[source_len + 1]);
+	required = offsetof(program_cache_entry, data[kern_source_len + 1]);
 	entry = pgstrom_program_cache_alloc(required);
 	entry->crc = crc;
 	entry->extra_flags = extra_flags;
-	strcpy(entry->data, source);
-	entry->cuda_source = entry->data;
-	entry->cuda_source_len = source_len;
+	strcpy(entry->data, kern_source);
+	entry->kern_source = entry->data;
+	entry->kern_source_len = kern_source_len;
 	entry->cuda_binary = NULL;
 	entry->cuda_binary_len = 0;
 	/* remaining area for error message */
-	entry->error_msg = entry->data + MAXALIGN(source_len + 1);
+	entry->error_msg = entry->data + MAXALIGN(kern_source_len + 1);
 	entry->error_msg_len = PGCACHE_ERRORMSG_LEN(entry);
 
 	/* to be acquired by program builder */
@@ -752,32 +761,6 @@ retry:
 	SpinLockRelease(&pgcache_head->lock);
 
 	return false;	/* now build the device kernel */
-}
-
-void
-pgstrom_put_cuda_program(GpuTaskState *gts)
-{
-	const program_cache_entry *pc_entry = gts->cuda_program;
-	CUresult		rc;
-
-	if (!pc_entry)
-	{
-		Assert(!gts->cuda_module);
-		return;
-	}
-
-	SpinLockAcquire(&pgcache_head->lock);
-	Assert(pc_entry->refcnt > 0);
-	if (--pc_entry->refcnt == 0)
-		pgstrom_program_cache_free(pc_entry);
-	SpinLockRelease(&pgcache_head->lock);
-
-	if (pc_entry->cuda_module)
-	{
-		rc = cuModuleUnload(pc_entry->cuda_module);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuModuleUnload : %s", cuda_strerror(rc));
-	}
 }
 
 static void
@@ -808,7 +791,8 @@ pgstrom_startup_cuda_program(void)
 		dlist_init(&pgcache_head->active_list[i]);
 	dlist_init(&pgcache_head->lru_list);
 
-	nwords = (TOTAL_PROCS + BITS_PER_BITMAPWORD - 1) / BITS_PER_BITMAPWORD;
+	nwords = (ProcGlobal->allProcCount +
+			  BITS_PER_BITMAPWORD - 1) / BITS_PER_BITMAPWORD;
 	tempset = &pgcache_head->waiting_backends;
 	tempset->nwords = nwords;
 	memset(tempset->words, 0, sizeof(bitmapword) * nwords);

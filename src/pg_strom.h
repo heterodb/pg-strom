@@ -206,12 +206,16 @@ typedef struct GpuTaskState
 {
 	dlist_node		chain;
 	GpuContext	   *gcontext;
-	const void	   *cuda_program;	/* pre-built program image */
+	const char	   *kern_source;
+	cl_uint			extra_flags;
 	CUmodule		cuda_module;	/* module object built from cuda_binary */
 	slock_t			lock;			/* protection of the list below */
 	dlist_head		running_tasks;
 	dlist_head		pending_tasks;
 	dlist_head		completed_tasks;
+	cl_uint			num_running_tasks;
+	cl_uint			num_pending_tasks;
+	cl_uint			num_completed_tasks;
 	void		  (*cb_cleanup)(struct GpuTaskState *gtstate);
 	pgstrom_perfmon	pfm_sum;
 } GpuTaskState;
