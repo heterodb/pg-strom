@@ -438,6 +438,9 @@ typedef struct {
 	 ((uintptr_t)KERN_DATA_STORE_ROWBLOCK((kds), (kds)->nblocks) -		\
 	  (uintptr_t)(kds)) :												\
 	 STROMALIGN((kds)->length))
+/* length of the header portion of kern_data_store */
+#define KERN_DATA_STORE_HEAD_LENGTH(kds)			\
+	offsetof(kern_data_store, colmeta[(kds)->ncols])
 
 /*
  * kern_parambuf

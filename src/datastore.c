@@ -290,12 +290,12 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 	{
 		if (!pgstrom_i_am_clserv)
 		{
-			Assert(kds->format == KDS_FORMAT_ROW_FMAP);
 			rc = munmap(kds, kds->length);
 			if (rc != 0)
 				elog(LOG, "Bug? failed to unmap kds:%p of \"%s\" (%s)",
 					 pds->kds, pds->kds_fname, strerror(errno));
-			CloseTransientFile(pds->kds_fdesc);
+			if (pds->kds_fdesc >= 0)
+				CloseTransientFile(pds->kds_fdesc);
 		}
 		unlink(pds->kds_fname);
 		pgstrom_shmem_free(pds);
@@ -477,6 +477,7 @@ __pgstrom_create_data_store_row(const char *filename, int lineno,
 		pds->refcnt = 1;
 		pds->kds = kds;
 		pds->kds_length = kds->length;
+		pds->kds_offset = 0;	/* never used */
 		pds->kds_fdesc = -1;	/* never used */
 		pds->ktoast = NULL;		/* never used */
 		pds->resowner = ResourceOwnerCreate(CurrentResourceOwner,
@@ -535,6 +536,7 @@ __pgstrom_create_data_store_row_flat(const char *filename, int lineno,
 	pds->refcnt = 1;
 	pds->kds = kds;
 	pds->kds_length = kds->length;
+	pds->kds_offset = 0;	/* never used */
 	pds->kds_fdesc = -1;	/* never used */
 	pds->ktoast = NULL;		/* never used */
 	pds->resowner = NULL;	/* never used */
@@ -640,6 +642,7 @@ __pgstrom_create_data_store_row_fmap(const char *filename, int lineno,
 	pds->refcnt = 1;
 	pds->kds = kds;
 	pds->kds_length = kds->length;
+	pds->kds_offset = 0;
 	pds->kds_fname = (char *)(pds + 1);
 	strcpy(pds->kds_fname, kds_fname);
 	pds->kds_fdesc = kds_fdesc;
@@ -650,34 +653,88 @@ __pgstrom_create_data_store_row_fmap(const char *filename, int lineno,
 	return pds;
 }
 
-kern_data_store *
-filemap_kern_data_store(const char *kds_fname, size_t kds_length, int *p_fdesc)
+/*
+ * pgstrom_extend_data_store_tupslot
+ *
+ * It is used to GpuSort to construct file-mapped data store.
+ * Because of tuple extraction cost, tupslot format is better than row
+ * format.
+ */
+pgstrom_data_store *
+__pgstrom_extend_data_store_tupslot(const char *filename, int lineno,
+									pgstrom_data_store *pds_toast,
+									TupleDesc tupdesc, cl_uint nrooms)
 {
+	pgstrom_data_store *pds;
 	kern_data_store	   *kds;
-	int					kds_fdesc;
+	char	   *kds_fname;
+	int			kds_fdesc;
+	Size		required;
+	Size		toast_offset;
 
-	kds_fdesc = open(kds_fname, O_RDWR, 0);
-	if (kds_fdesc < 0)
+	/* base PDS has to be file-mapped row-store */
+	Assert(pds_toast->kds_fname != NULL);
+	kds_fname = pds_toast->kds_fname;
+	kds_fdesc = pds_toast->kds_fdesc;
+
+	/* requirement for kern_data_store */
+	required = (STROMALIGN(offsetof(kern_data_store,
+									colmeta[tupdesc->natts])) +
+				(LONGALIGN(sizeof(bool) * tupdesc->natts) +
+				 LONGALIGN(sizeof(Datum) * tupdesc->natts)) * nrooms);
+
+	/* round up by BLCKSZ, as alternative of os dependent pagesize */
+	toast_offset = TYPEALIGN(BLCKSZ, pds_toast->kds_length);
+	if (ftruncate(kds_fdesc, toast_offset + required) != 0)
 	{
-		clserv_log("failed to open \"%s\" (%s)", kds_fname, strerror(errno));
-		return NULL;
+		close(kds_fdesc);
+		ereport(ERROR,
+                (errcode_for_file_access(),
+                 errmsg("could not truncate file \"%s\" to %zu: %m",
+						kds_fname, toast_offset + required)));
 	}
-
-	kds = mmap(NULL, kds_length,
+	/* mmap later portion of this file */
+	kds = mmap(NULL, required,
 			   PROT_READ | PROT_WRITE,
 			   MAP_SHARED | MAP_POPULATE,
-			   kds_fdesc, 0);
+			   kds_fdesc, toast_offset);
 	if (kds == MAP_FAILED)
 	{
-		clserv_log("failed to map \"%s\" (%s)", kds_fname, strerror(errno));
 		close(kds_fdesc);
-		return NULL;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not mmap file \"%s\" with len=%zu: %m",
+						kds_fname, required)));
 	}
-	Assert(kds->format == KDS_FORMAT_ROW_FMAP);
-	if (p_fdesc)
-		*p_fdesc = kds_fdesc;
-	return kds;
+	/* setup kern_data_store */
+	init_kern_data_store(kds, tupdesc, required,
+						 KDS_FORMAT_TUPSLOT, 0, nrooms, true);
+	/* allocation of pgstrom_data_store */
+	pds = __pgstrom_shmem_alloc(filename, lineno,
+								sizeof(pgstrom_data_store) +
+								strlen(kds_fname) + 1);
+	if (!pds)
+	{
+		munmap(kds, required);
+		close(kds_fdesc);
+		elog(ERROR, "out of shared memory");
+	}
+	pds->sobj.stag = StromTag_DataStore;
+	SpinLockInit(&pds->lock);
+	pds->refcnt = 1;
+	pds->kds = kds;
+	pds->kds_length = kds->length;
+	pds->kds_offset = toast_offset;
+	pds->kds_fname = (char *)(pds + 1);
+	strcpy(pds->kds_fname, kds_fname);
+	pds->kds_fdesc = -1;	/* not owned by this chunk */
+	pds->ktoast = pds_toast;
+	pds->resowner = NULL;	/* never used */
+	pds->local_pages = NULL;/* never used */
+
+	return pds;
 }
+
 
 void
 fileunmap_kern_data_store(kern_data_store *kds, int fdesc)

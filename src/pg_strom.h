@@ -349,7 +349,8 @@ typedef struct pgstrom_data_store {
 	slock_t				lock;
 	volatile int		refcnt;
 	kern_data_store	   *kds;		/* reference to kern_data_store */
-	size_t				kds_length;	/* length of kds */
+	size_t				kds_length;	/* length of kds file */
+	size_t				kds_offset;	/* offset of kds file */
 	char			   *kds_fname;	/* if KDS_FORMAT_ROW_FMAP */
 	int					kds_fdesc;	/* !!NOTE: valid only the backend */
 	struct pgstrom_data_store *ktoast;
@@ -551,6 +552,15 @@ __pgstrom_create_data_store_row_fmap(const char *filename, int lineno,
 #define pgstrom_create_data_store_row_fmap(tupdesc,length)		\
 	__pgstrom_create_data_store_row_fmap(__FILE__,__LINE__,		\
 										 (tupdesc),(length))
+
+extern pgstrom_data_store *
+__pgstrom_extend_data_store_tupslot(const char *filename, int lineno,
+                                    pgstrom_data_store *pds_toast,
+                                    TupleDesc tupdesc, cl_uint nrooms);
+#define pgstrom_extend_data_store_tupslot(pds_toast,tupdesc,nrooms)	\
+	__pgstrom_extend_data_store_tupslot(__FILE__,__LINE__,			\
+										(pds_toast),(tupdesc),(nrooms))
+
 extern kern_data_store *
 filemap_kern_data_store(const char *kds_fname, size_t kds_length, int *fdesc);
 extern void
@@ -902,6 +912,7 @@ typealign_get_width(char type_align)
 		return sizeof(cl_int);
 	else if (type_align == 'd')
 		return sizeof(cl_long);
+	Assert(false);
 	elog(ERROR, "unexpected type alignment: %c", type_align);
 	return -1;	/* be compiler quiet */
 }
