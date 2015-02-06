@@ -27,6 +27,10 @@ test: explain_gs zero_gs normal_gs overflow_gs
 # ----------
 # GpuHashJoin pattern
 # ----------
+# GpuHashJoin parallel test-cases.
+test: explain_ghj normal_ghj nobulk_ghj
+# GpuHashJoin closed issue test-cases.
+test: varremap_ghj
 
 # ----------
 # GpuSort pattern
