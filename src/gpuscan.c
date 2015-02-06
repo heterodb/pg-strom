@@ -124,6 +124,7 @@ typedef struct {
 typedef struct
 {
 	GpuTask			task;
+	dlist_node		chain;
 	CUfunction		kern_qual;
 	void		   *kern_qual_args[4];
 	CUdeviceptr		m_gpuscan;
@@ -649,62 +650,70 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
  * assumed to be released by the backend process.
  */
 static void
-pgstrom_release_gpuscan(GpuTask *gputask)
+__pgstrom_release_gpuscan(pgstrom_gpuscan *gpuscan)
 {
-	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) gputask;
-	CUresult			rc;
-
-	if (gpuscan->pds)
-		pgstrom_release_data_store(gpuscan->pds);
-
-	if (gputask->stream)
+	if (gpuscan->ev_dma_recv_stop)
 	{
-		rc = cuStreamDestroy(gputask->stream);
+		rc = cuEventDestroy(gpuscan->ev_dma_recv_stop);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuStreamDestroy: %s", cuda_strerror(rc));
+			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
 	}
 
-	if (gpuscan->m_gpuscan)
+	if (gpuscan->ev_dma_recv_start)
 	{
-		rc = cuMemFree(gpuscan->m_gpuscan);
+		rc = cuEventDestroy(gpuscan->ev_dma_recv_start);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuMemFree: %s", cuda_strerror(rc));
+			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
 	}
 
-	if (gpuscan->m_kds)
+	if (gpuscan->ev_dma_send_stop)
 	{
-		rc = cuMemFree(gpuscan->m_kds);
+		rc = cuEventDestroy(gpuscan->ev_dma_send_stop);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuMemFree: %s", cuda_strerror(rc));
+			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
 	}
 
 	if (gpuscan->ev_dma_send_start)
 	{
 		rc = cuEventDestroy(gpuscan->ev_dma_send_start);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventDestroy: %s", cuda_strerror(rc));
+			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
 	}
 
-	if (gpuscan->ev_dma_send_stop)
+	if (gpuscan->m_kds)
 	{
-		rc = cuEventDestroy(gpuscan->ev_dma_send_start);
+		rc = cuMemFree(gpuscan->m_kds);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventDestroy: %s", cuda_strerror(rc));
+			elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
 	}
 
-	if (gpuscan->ev_dma_recv_start)
+	if (gpuscan->m_gpuscan)
 	{
-		rc = cuEventDestroy(gpuscan->ev_dma_send_start);
+		rc = cuMemFree(gpuscan->m_gpuscan);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventDestroy: %s", cuda_strerror(rc));
+			elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
 	}
 
-	if (gpuscan->ev_dma_recv_stop)
-	{
-		rc = cuEventDestroy(gpuscan->ev_dma_send_start);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventDestroy: %s", cuda_strerror(rc));
-	}
+	/* ensure pointers being NULL */
+	gpuscan->kern_qual = NULL;
+	gpuscan->m_gpuscan = 0UL;
+	gpuscan->m_kds = 0UL;
+	gpuscan->ev_dma_send_start = NULL;
+	gpuscan->ev_dma_send_stop  = NULL;
+	gpuscan->ev_dma_recv_start = NULL;
+	gpuscan->ev_dma_recv_stop  = NULL;
+}
+
+static void
+pgstrom_release_gpuscan(GpuTask *gputask)
+{
+	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) gputask;
+
+	if (gpuscan->pds)
+		pgstrom_release_data_store(gpuscan->pds);
+
+	__pgstrom_release_gpuscan(gpuscan);
+
 	pfree(gpuscan);
 }
 
@@ -726,25 +735,21 @@ pgstrom_create_gpuscan(GpuScanState *gss, pgstrom_data_store *pds)
 		length += STROMALIGN(offsetof(kern_resultbuf, results[nitems]));
 
 	gpuscan = MemoryContextAllocZero(gcontext->memcxt, length);
-	memset(gpuscan, 0, sizeof(pgstrom_gpuscan));
-
 	/* setting up */
-	gpuscan->task.gts = &gss->gts;
-	pgstrom_assign_stream(&gpuscan->task);
-	gpuscan->task.errcode = 0;
-	gpuscan->task.cb_process = pgstrom_process_gpuscan;
-	gpuscan->task.cb_release = pgstrom_release_gpuscan;
+	pgstrom_init_gputask(&gss->gts, &gpuscan->task,
+						 pgstrom_process_gpuscan,
+						 pgstrom_release_gpuscan);
 	gpuscan->pds = pds;
-	/* copy kern_parambuf */
+	/* setting up kern_parambuf */
 	Assert(gss->kparams->length == STROMALIGN(gss->kparams->length));
-	memcpy(KERN_GPUSCAN_PARAMBUF(&gpuscan->kern),
-		   gss->kparams,
-		   gss->kparams->length);
-	/* setting up resultbuf */
+    memcpy(KERN_GPUSCAN_PARAMBUF(&gpuscan->kern),
+           gss->kparams,
+           gss->kparams->length);
+	/* setting up kern_resultbuf */
 	kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
-	memset(kresults, 0, sizeof(kern_resultbuf));
-	kresults->nrels = 1;
-	kresults->nrooms = nitems;
+    memset(kresults, 0, sizeof(kern_resultbuf));
+    kresults->nrels = 1;
+    kresults->nrooms = nitems;
 
 	/* If GpuScan does not kick GPU Kernek execution, we treat
 	 * this chunk as all-visible one, without reference to
@@ -753,12 +758,10 @@ pgstrom_create_gpuscan(GpuScanState *gss, pgstrom_data_store *pds)
 	if (!gss->kern_source)
 	{
 		kresults->all_visible = true;
-        kresults->nitems = nitems;
+		kresults->nitems = nitems;
 	}
 	return gpuscan;
 }
-
-
 
 static pgstrom_gpuscan *
 pgstrom_load_gpuscan(GpuScanState *gss)
@@ -937,6 +940,45 @@ pgstrom_launch_pending_tasks(GpuTaskState *gts)
 	SpinLockRelease(&gts->lock);
 }
 
+static void
+pgstrom_accum_gpuscan_perfmon(GpuScanState *gss, pgstrom_gpuscan *gpuscan)
+{
+	float		elapsed;
+	CUresult	rc;
+
+	/* Time for DMA send */
+	rc = cuEventElapsedTime(&elapsed,
+							gpuscan->ev_dma_send_start,
+							gpuscan->ev_dma_send_stop);
+	if (rc != CUDA_ERROR)
+		goto error;
+	gpuscan->task.pfm.time_dma_send += elapsed;
+
+	/* Time for kernel exec */
+	rc = cuEventElapsedTime(&elapsed,
+							gpuscan->ev_dma_send_stop,
+							gpuscan->ev_dma_recv_start);
+	if (rc != CUDA_ERROR)
+		goto error;
+	gpuscan->task.pfm.time_kern_exec += elapsed;
+
+	/* Time for DMA recv*/
+	rc = cuEventElapsedTime(&elapsed,
+							gpuscan->ev_dma_recv_start,
+							gpuscan->ev_dma_recv_stop);
+	if (rc != CUDA_ERROR)
+		goto error;
+	gpuscan->task.pfm.time_dma_recv += elapsed;
+
+	/* accumulate them */
+	pgstrom_perfmon_add(&gss->gts.pfm, &gpuscan->task.pfm);
+	return;
+
+error:
+	elog(WARNING, "failed on cuEventElapsedTime: %s", errorText(rc));
+	gss->gts.pfm.enabled = false;
+}
+
 /*
  * pgstrom_fetch_gpuscan
  *
@@ -1011,13 +1053,23 @@ retry:
 	SpinLockRelease(&gss->gts.lock);
 
 	/*
+	 *
+	 *
+	 */
+	if (gss->gts.pfm.enabled)
+		pgstrom_accum_gpuscan_perfmon(gss, gpuscan);
+
+	/* release CUDA resources */
+	__pgstrom_release_gpuscan(gpuscan);
+
+	/*
 	 * Raise an error, if any run-time error was reported
 	 */
 	if (gpuscan->task.errcode != StromError_Success)
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("PG-Strom: CUDA execution error (%s)",
-						cuda_strerror(gpuscan->task.errcode))));
+						errorText(gpuscan->task.errcode))));
 
 	return gpuscan;
 }
@@ -1304,6 +1356,8 @@ pgstrom_init_gpuscan(void)
 	set_rel_pathlist_hook = gpuscan_add_scan_path;
 }
 
+#if 0
+
 /*
  * GpuScan message handler
  * ------------------------------------------------------------
@@ -1453,6 +1507,7 @@ clserv_respond_gpuscan(cl_event event, cl_int ev_status, void *private)
 	/* respond to the backend side */
 	pgstrom_reply_message(&gpuscan->msg);
 }
+#endif
 
 static void
 gpuscan_cleanup_cuda_resources(pgstrom_gpuscan *gpuscan)
@@ -1462,42 +1517,42 @@ gpuscan_cleanup_cuda_resources(pgstrom_gpuscan *gpuscan)
 	{
 		rc = cuEventDestroy(gpuscan->ev_dma_recv_stop);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventDestroy: %s", cuda_strerror(rc));
+			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
 	}
 
 	if (gpuscan->ev_dma_recv_start)
 	{
 		rc = cuEventDestroy(gpuscan->ev_dma_recv_start);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventDestroy: %s", cuda_strerror(rc));
+			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
 	}
 
 	if (gpuscan->ev_dma_send_stop)
 	{
 		rc = cuEventDestroy(gpuscan->ev_dma_send_stop);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventDestroy: %s", cuda_strerror(rc));
+			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
 	}
 
 	if (gpuscan->ev_dma_send_start)
 	{
 		rc = cuEventDestroy(gpuscan->ev_dma_send_start);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventDestroy: %s", cuda_strerror(rc));
+			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
 	}
 
 	if (gpuscan->m_kds)
 	{
 		rc = cuMemFree(gpuscan->m_kds);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuMemFree: %s", cuda_strerror(rc));
+			elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
 	}
 
 	if (gpuscan->m_gpuscan)
 	{
 		rc = cuMemFree(gpuscan->m_gpuscan);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuMemFree: %s", cuda_strerror(rc));
+			elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
 	}
 
 	/* ensure pointers being NULL */
@@ -1511,14 +1566,24 @@ gpuscan_cleanup_cuda_resources(pgstrom_gpuscan *gpuscan)
 }
 
 static void
-pgstrom_respond_gpuscan(pgstrom_gpuscan *gpuscan)
+pgstrom_respond_gpuscan(CUstream stream, CUresult status, void *private)
 {
+	pgstrom_gpuscan	   *gpuscan = private;
+	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
+	GpuTaskState	   *gts = gpuscan->task.gts;
 
+	SpinLockAcquire(&gts->lock);
+	if (status != CUDA_SUCCESS)
+		gpuscan->task.errcode = status;
+	else
+		gpuscan->task.errcode = kresults->errcode;
 
-
-
-
-
+	if (gpuscan->task.errcode == StromError_Success)
+		dlist_push_tail(&gts->completed_tasks, &task->chain);
+	else
+		dlist_push_head(&gts->completed_tasks, &task->chain);
+	gts->num_completed_tasks++;
+	SpinLockRelease(&gts->lock);
 }
 
 static bool
@@ -1534,7 +1599,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	 */
 	rc = cuCtxSetCurrent(gpuscan->task.cuda_context);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuCtxSetCurrent: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuCtxSetCurrent: %s", errorText(rc));
 
 	/*
 	 * Kernel function lookup
@@ -1544,7 +1609,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 							 "gpuscan_qual");
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetFunction: %s",
-			 cuda_strerror(rc));
+			 errorText(rc));
 
 	/*
 	 * Allocation of device memory
@@ -1555,7 +1620,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	{
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			goto out_of_resource;
-		elog(ERROR, "failed on cuMemAlloc: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuMemAlloc: %s", errorText(rc));
 	}
 
 	length = KERN_DATA_STORE_LENGTH(pds->kds);
@@ -1564,7 +1629,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	{
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			goto out_of_resource;
-		elog(ERROR, "failed on cuMemAlloc: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuMemAlloc: %s", errorText(rc));
 	}
 
 	/*
@@ -1572,19 +1637,19 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	 */
 	rc = cuEventCreate(&gpuscan->ev_dma_send_start, CU_EVENT_DEFAULT);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuEventCreate: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 
 	rc = cuEventCreate(&gpuscan->ev_dma_send_stop, CU_EVENT_DEFAULT);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuEventCreate: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 
 	rc = cuEventCreate(&gpuscan->ev_dma_recv_start, CU_EVENT_DEFAULT);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuEventCreate: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 
 	rc = cuEventCreate(&gpuscan->ev_dma_recv_stop, CU_EVENT_DEFAULT);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuEventCreate: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 
 	/*
 	 * OK, enqueue a series of requests
@@ -1596,7 +1661,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 						   length,
 						   gpuscan->task.stream);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 	pfm->bytes_dma_send += length;
 	pfm->num_dma_send++;
 
@@ -1605,7 +1670,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 						   kds->length,
 						   gpuscan->task.stream);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 	pfm->bytes_dma_send += kds->length;
     pfm->num_dma_send++;
 
@@ -1630,7 +1695,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 						gpuscan->kern_qual_args,
 						NULL);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuLaunchKernel: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 	gpuscan->task.pfm.num_kern_exec++;
 
 	/*
@@ -1643,7 +1708,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 						   length,
 						   gpuscan->task.stream);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "cuMemcpyDtoHAsync: %s", cuda_strerror(rc));
+		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
 
 	/*
 	 * Register callback
@@ -1657,7 +1722,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	return true;
 
 out_of_resource:
-	pgstrom_cleanup_gpuscan(gpuscan);
+	gpuscan_cleanup_cuda_resources(gpuscan);
 	return false;
 }
 
@@ -1695,7 +1760,7 @@ pgstrom_process_gpuscan(GpuTask *task)
 	}
 	PG_CATCH();
 	{
-		pgstrom_cleanup_gpuscan(gpuscan);
+		gpuscan_cleanup_cuda_resources(gpuscan);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();

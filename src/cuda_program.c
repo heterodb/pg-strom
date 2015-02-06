@@ -717,7 +717,7 @@ retry:
 			{
 				pgstrom_put_cuda_program(entry);
 				elog(ERROR, "failed on cuModuleLoadData (%s)",
-					 cuda_strerror(rc));
+					 errorText(rc));
 			}
 			pgstrom_put_cuda_program(entry);
 			return true;

@@ -339,7 +339,7 @@ alloc_block_malloc(size_t bytesize)
 	if (rc != CUDA_SUCCESS)
 	{
 		if (rc != CUDA_ERROR_OUT_OF_MEMORY)
-			elog(ERROR, "failed on cuMemHostAlloc: %s", cuda_strerror(rc));
+			elog(ERROR, "failed on cuMemHostAlloc: %s", errorText(rc));
 		return NULL;
 	}
 	return (AllocBlock) ptr;
@@ -352,7 +352,7 @@ alloc_block_free(AllocBlock block)
 
 	rc = cuMemFreeHost((void *)block);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuMemFreeHost: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuMemFreeHost: %s", errorText(rc));
 }
 
 /* ----------

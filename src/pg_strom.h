@@ -149,11 +149,12 @@ typedef struct {
 	cl_uint		num_dma_recv;	/* number of DMA receive request */
 	cl_ulong	bytes_dma_send;	/* bytes of DMA send */
 	cl_ulong	bytes_dma_recv;	/* bytes of DMA receive */
-	cl_ulong	time_dma_send;	/* time to send host=>device data */
-	cl_ulong	time_dma_recv;	/* time to receive device=>host data */
+	cl_double	time_dma_send;	/* time to send host=>device data */
+	cl_double	time_dma_recv;	/* time to receive device=>host data */
 	/*-- perfmon for kernel execution --*/
 	cl_uint		num_kern_exec;	/* number of main kernel execution */
-	cl_ulong	time_kern_exec;	/* time to execute main kernel */
+	cl_double	time_kern_exec;	/* time to execute main kernel */
+
 	/*-- (special perfmon for gpuhashjoin) --*/
 	cl_uint		num_kern_proj;	/* number of projection kernel execution */
 	cl_ulong	time_kern_proj;	/* time to execute projection kernel */
@@ -213,6 +214,7 @@ typedef struct GpuTaskState
 	cl_uint			extra_flags;
 	CUmodule		cuda_module;	/* module object built from cuda_binary */
 	slock_t			lock;			/* protection of the list below */
+	dlist_head		tracked_tasks;	/* for resource tracking */
 	dlist_head		running_tasks;
 	dlist_head		pending_tasks;
 	dlist_head		completed_tasks;
@@ -225,7 +227,8 @@ typedef struct GpuTaskState
 
 typedef struct GpuTask
 {
-	dlist_node		chain;
+	dlist_node		chain;		/* link to task state list */
+	dlist_node		tracker;	/* link to task tracker list */
 	GpuTaskState   *gts;
 	CUstream		cuda_stream;
 	CUdevice		cuda_device;	/* just reference, no cleanup needed */

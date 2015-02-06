@@ -55,7 +55,7 @@ pgstrom_init_cuda(void)
 
 	rc = cuInit(0);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuInit: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuInit: %s", errorText(rc));
 
 	cuda_num_devices = list_length(cuda_device_ordinals);
 	cuda_devices = MemoryContextAllocZero(TopMemoryContext,
@@ -66,7 +66,7 @@ pgstrom_init_cuda(void)
 
 		rc = cuDeviceGet(&device, ordinal);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuDeviceGet: %s", cuda_strerror(rc));
+			elog(ERROR, "failed on cuDeviceGet: %s", errorText(rc));
 		cuda_devices[i++] = device;
 	}
 }
@@ -155,9 +155,10 @@ pgstrom_get_gpucontext(void)
 }
 
 static void
-pgstrom_release_gpucontext(GpuContext *gcontext)
+pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 {
-	dlist_mutable_iter	iter;
+	dlist_mutable_iter	siter;
+	dlist_mutable_iter	titer;
 	CUresult	rc;
 	int			i;
 
@@ -166,39 +167,50 @@ pgstrom_release_gpucontext(GpuContext *gcontext)
 	{
 		rc = cuCtxSetCurrent(gcontext->dev_context[i]);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuCtxSetCurrent: %s", cuda_strerror(rc));
+			elog(WARNING, "failed on cuCtxSetCurrent: %s", errorText(rc));
 
 		rc = cuCtxSynchronize();
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuCtxSynchronize: %s", cuda_strerror(rc));
+			elog(WARNING, "failed on cuCtxSynchronize: %s", errorText(rc));
 	}
 
 	/* Release underlying TaskState, if any */
-	dlist_foreach_modify(iter, &gcontext->state_list)
+	dlist_foreach_modify(siter, &gcontext->state_list)
 	{
-		GpuTaskState *gtstate = dlist_container(GpuTaskState, chain, iter.cur);
+		GpuTaskState *gts = dlist_container(GpuTaskState, chain, siter.cur);
 
-		Assert(gtstate->gcontext == gcontext);
-		dlist_delete(&gtstate->chain);
+		Assert(gts->gcontext == gcontext);
+		dlist_delete(&gts->chain);
 
 		/* release cuda module, if any */
-		if (gtstate->cuda_module)
+		if (gts->cuda_module)
 		{
-			rc = cuModuleUnload(gtstate->cuda_module);
+			rc = cuModuleUnload(gts->cuda_module);
 			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on cuModuleUnload: %s",
-					 cuda_strerror(rc));
+				elog(WARNING, "failed on cuModuleUnload: %s", errorText(rc));
 		}
-		/* release cuda binary image, if any */
-		if (gtstate->cuda_program)
-			pgstrom_put_cuda_program(gtstate->cuda_program);
+		/* release task objects */
+		dlist_foreach_modify(titer, &gst->tracked_tasks)
+		{
+			GpuTask *task = dlist_container(GpuTask, tracker, titer.cur);
 
-		/* release specific resources */
-		if (gtstate->cb_cleanup)
-			gtstate->cb_cleanup(gtstate);
-		Assert(dlist_is_empty(&gtstate->running_tasks));
-		Assert(dlist_is_empty(&gtstate->pending_tasks));
-		Assert(dlist_is_empty(&gtstate->completed_tasks));
+			Assert(task->gts == gts);
+			dlist_delete(&task->chain);
+			dlist_delete(&task->tracker);
+			if (is_commit)
+				elog(WARNING, "Unreferenced GpuTask leak: %p", task);
+			task->cb_release(task);
+		}
+		/* release task state */
+		if (is_commit)
+			elog(WARNING, "Unreferenced GpuTaskState leak: %p", gts);
+		if (gts->cb_cleanup)
+			gts->cb_cleanup(gts);
+
+		Assert(dlist_is_empty(&gts->tracked_tasks));
+		Assert(dlist_is_empty(&gts->running_tasks));
+		Assert(dlist_is_empty(&gts->pending_tasks));
+		Assert(dlist_is_empty(&gts->completed_tasks));
 	}
 
 	/*
@@ -218,7 +230,7 @@ pgstrom_release_gpucontext(GpuContext *gcontext)
 	{
 		rc = cuCtxDestroy(gcontext->dev_context[i]);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuCtxDestroy: %s", cuda_strerror(rc));
+			elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
 	}
 	/* Ensure CUDA context is empty */
 	cuCtxSetCurrent(NULL);
@@ -244,12 +256,15 @@ pgstrom_put_gpucontext(GpuContext *gcontext)
 	SpinLockRelease(&gcontext_lock);
 
 	if (do_release)
-		pgstrom_release_gpucontext(gcontext);
+		pgstrom_release_gpucontext(gcontext, true);
 }
 
 void
-pgstrom_assign_stream(GpuContext *gcontext, GpuTask *task)
+pgstrom_init_gputask(GpuTaskState *gts, GpuTask *task,
+					 void (*cb_process)(GpuTask *task),
+					 void (*cb_release)(GpuTask *task))
 {
+	GpuContext *gcontext = gts->gcontext;
 	CUdevice	cuda_device;
 	CUcontext	cuda_context;
 	CUstream	cuda_stream;
@@ -260,19 +275,25 @@ pgstrom_assign_stream(GpuContext *gcontext, GpuTask *task)
 	cuda_context = gcontext->dev_context[index];
 	rc = cuCtxGetDevice(&cuda_device);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuCtxGetDevice: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuCtxGetDevice: %s", errorText(rc));
 
 	rc = cuCtxSetCurrent(cuda_context);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuCtxPushCurrent: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
 
 	rc = cuStreamCreate(&cuda_stream, CU_STREAM_NON_BLOCKING);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuStreamCreate: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuStreamCreate: %s", errorText(rc));
 
+	memset(task, 0, sizeof(GpuTask));
+	task->gts = gts;
+	task->cuda_stream = cuda_stream;
 	task->cuda_device = cuda_device;
 	task->cuda_context = cuda_context;
-	task->cuda_stream = cuda_stream;
+	/* tracked by GpuTaskState */
+	SpinLockAcquire(&gts->lock);
+	dlist_push_tail(&gts->tracked_tasks, &task->tracker);
+	SpinLockRelease(&gts->lock);
 }
 
 static void
@@ -303,7 +324,7 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 			if (is_commit)
 				elog(WARNING, "Probably, someone forgot to put GpuContext");
 
-			pgstrom_release_gpucontext(gcontext);
+			pgstrom_release_gpucontext(gcontext, is_commit);
 			return;
 		}
 	}
@@ -347,7 +368,7 @@ pgstrom_compute_workgroup_size(size_t *p_grid_size,
 							CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
 							function);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuFuncGetAttribute", cuda_strerror(rc));
+		elog(ERROR, "failed on cuFuncGetAttribute", errorText(rc));
 
 	if (maximum_blocksize)
 	{
@@ -356,21 +377,21 @@ pgstrom_compute_workgroup_size(size_t *p_grid_size,
 								function);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuFuncGetAttribute: %s",
-				 cuda_strerror(rc));
+				 errorText(rc));
 
 		rc = cuDeviceGetAttribute(&maximum_shmem_per_block,
 							CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK,
 								  device);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuDeviceGetAttribute: %s",
-				 cuda_strerror(rc));
+				 errorText(rc));
 
 		rc = cuDeviceGetAttribute(&warp_size,
 								  CU_DEVICE_ATTRIBUTE_WARP_SIZE,
 								  device);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuDeviceGetAttribute: %s",
-				 cuda_strerror(rc));
+				 errorText(rc));
 
 		while (dynamic_shmem_per_block +
 			   dynamic_shmem_per_thread * block_size > maximum_shmem_per_block)
@@ -392,7 +413,7 @@ pgstrom_compute_workgroup_size(size_t *p_grid_size,
 											  cuda_max_threads_per_block);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuOccupancyMaxPotentialBlockSize: %s",
-				 cuda_strerror(rc));
+				 errorText(rc));
 
 		*p_grid_size = grid_size;
 		*p_block_size = block_size;
@@ -418,51 +439,51 @@ pgstrom_check_device_capability(int ordinal, CUdevice device)
 
 	rc = cuDeviceGetName(dev_name, sizeof(dev_name), device);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetName: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuDeviceGetName: %s", errorText(rc));
 
 	rc = cuDeviceTotalMem(&dev_mem_sz, device);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceTotalMem: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuDeviceTotalMem: %s", errorText(rc));
 
 	attrib = CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK;
 	rc = cuDeviceGetAttribute(&dev_max_threads_per_block, attrib, device);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
 	attrib = CU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE;
 	rc = cuDeviceGetAttribute(&dev_mem_clk, attrib, device);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
 	attrib = CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH;
 	rc = cuDeviceGetAttribute(&dev_mem_width, attrib, device);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
 	attrib = CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE;
 	rc = cuDeviceGetAttribute(&dev_l2_sz, attrib, device);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
 	attrib = CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR;
 	rc = cuDeviceGetAttribute(&dev_cap_major, attrib, device);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
 	attrib = CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR;
 	rc = cuDeviceGetAttribute(&dev_cap_minor, attrib, device);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
 	attrib = CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT;
 	rc = cuDeviceGetAttribute(&dev_mpu_nums, attrib, device);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
 	attrib = CU_DEVICE_ATTRIBUTE_CLOCK_RATE;
 	rc = cuDeviceGetAttribute(&dev_mpu_clk, attrib, device);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", cuda_strerror(rc));
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
 	/*
 	 * device older than Kepler is not supported
@@ -509,20 +530,20 @@ pgstrom_init_cuda_control(void)
 	 */
 	rc = cuInit(0);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuInit(%s)", cuda_strerror(rc));
+		elog(ERROR, "failed on cuInit(%s)", errorText(rc));
 
 	/*
 	 * construct a list of available devices
 	 */
 	rc = cuDeviceGetCount(&count);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetCount(%s)", cuda_strerror(rc));
+		elog(ERROR, "failed on cuDeviceGetCount(%s)", errorText(rc));
 
 	for (i=0; i < count; i++)
 	{
 		rc = cuDeviceGet(&device, i);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuDeviceGet(%s)", cuda_strerror(rc));
+			elog(ERROR, "failed on cuDeviceGet(%s)", errorText(rc));
 		if (pgstrom_check_device_capability(i, device))
 			cuda_device_ordinals = lappend_int(cuda_device_ordinals, i);
 	}
@@ -539,23 +560,51 @@ pgstrom_init_cuda_control(void)
 }
 
 /*
- * cuda_strerror
+ * errorText
  *
  * translation from cuda error code to text representation
  */
 const char *
-cuda_strerror(CUresult errcode)
+errorText(int errcode)
 {
 	static __thread char buffer[512];
 	const char *error_val;
 	const char *error_str;
 
-	if (cuGetErrorName(errcode, &error_val) == CUDA_SUCCESS &&
-		cuGetErrorString(errcode, &error_str) == CUDA_SUCCESS)
-		snprintf(buffer, sizeof(buffer), "%s - %s", error_val, error_str);
-	else
-		snprintf(buffer, sizeof(buffer), "%d - unknown", (int)errcode);
-
+	switch (errcode)
+	{
+		case StromError_CpuReCheck:
+			snprintf(buffer, sizeof(buffer), "CPU ReCheck");
+			break;
+		case StromError_CudaInternal:
+			snprintf(buffer, sizeof(buffer), "CUDA Internal Error");
+			break;
+		case StromError_OutOfMemory:
+			snprintf(buffer, sizeof(buffer), "Out of memory");
+			break;
+		case StromError_OutOfSharedMemory:
+			snprintf(buffer, sizeof(buffer), "Out of shared memory");
+			break;
+		case StromError_DataStoreCorruption:
+			snprintf(buffer, sizeof(buffer), "Data store corruption");
+			break;
+		case StromError_DataStoreNoSpace:
+			snprintf(buffer, sizeof(buffer), "Data store no space");
+			break;
+		case StromError_DataStoreOutOfRange:
+			snprintf(buffer, sizeof(buffer), "Data store out of range");
+			break;
+		case StromError_SanityCheckViolation:
+			snprintf(buffer, sizeof(buffer), "Sanity check violation");
+			break;
+		default:
+			if (cuGetErrorName(errcode, &error_val) == CUDA_SUCCESS &&
+				cuGetErrorString(errcode, &error_str) == CUDA_SUCCESS)
+				snprintf(buffer, sizeof(buffer), "%s - %s",
+						 error_val, error_str);
+			else
+				snprintf(buffer, sizeof(buffer), "%d - unknown", errcode);
+	}
 	return buffer;
 }
 
@@ -712,7 +761,7 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 
 		rc = cuDeviceGetName(dev_name, sizeof(dev_name), cuda_devices[dindex]);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuDeviceGetName: %s", cuda_strerror(rc));
+			elog(ERROR, "failed on cuDeviceGetName: %s", errorText(rc));
 		att_name = "Device name";
 		att_value = pstrdup(dev_name);
 	}
@@ -722,7 +771,7 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 
 		rc = cuDeviceTotalMem(&dev_memsz, cuda_devices[dindex]);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuDeviceTotalMem: %s", cuda_strerror(rc));
+			elog(ERROR, "failed on cuDeviceTotalMem: %s", errorTex(rc));
 		att_name = "Total global memory size";
 		att_value = psprintf("%zu MBytes", dev_memsz >> 20);
 	}
@@ -735,7 +784,7 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 								  cuda_devices[dindex]);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuDeviceGetAttribute: %s",
-				 cuda_strerror(rc));
+				 errorText(rc));
 
 		att_name = catalog[aindex].attname;
 		switch (catalog[aindex].attkind)

@@ -119,22 +119,15 @@ typedef uintptr_t	hostptr_t;
 /*
  * Error code definition
  */
-#define StromError_Success				0	/* OK */
-#define StromError_RowFiltered			1	/* Row-clause was false */
-#define StromError_CpuReCheck			2	/* To be re-checked by CPU */
-#define StromError_ServerNotReady		100	/* OpenCL server is not ready */
-#define StromError_BadRequestMessage	101	/* Bad request message */
-#define StromError_OpenCLInternal		102	/* OpenCL internal error */
-#define StromError_OutOfSharedMemory	105	/* out of shared memory */
-#define StromError_OutOfMemory			106	/* out of host memory */
-#define StromError_DataStoreCorruption	300	/* Row/Column Store Corrupted */
-#define StromError_DataStoreNoSpace		301	/* No Space in Row/Column Store */
-#define StromError_DataStoreOutOfRange	302	/* Out of range in Data Store */
-#define StromError_DataStoreReCheck		303	/* Row/Column Store be rechecked */
-#define StromError_SanityCheckViolation	999	/* SanityCheckViolation */
-
-/* significant error; that abort transaction on the host code */
-#define StromErrorIsSignificant(errcode)	((errcode) >= 100 || (errcode) < 0)
+#define StromError_Success					   0 /* OK */
+#define StromError_CpuReCheck				1000 /* To be re-checked by CPU */
+#define StromError_CudaInternal				1001 /* CUDA internal error */
+#define StromError_OutOfMemory				1002 /* Out of memory */
+#define StromError_OutOfSharedMemory		1003 /* Out of shared memory */
+#define StromError_DataStoreCorruption		2000 /* KDS corrupted */
+#define StromError_DataStoreNoSpace			2001 /* KDS has no space */
+#define StromError_DataStoreOutOfRange		2002 /* out of KDS range access */
+#define StromError_SanityCheckViolation		2003 /* sanity check violation */
 
 #ifdef OPENCL_DEVICE_CODE
 /*
