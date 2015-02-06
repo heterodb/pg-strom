@@ -145,6 +145,9 @@ gpusort_preparation(__global kern_gpusort *kgpusort,
 		STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption);
 		goto out;
 	}
+	/* kds also has same nitems */
+	if (get_global_id(0) == 0)
+		kds->nitems = nitems;
 
 	/* put initial value of row-index */
 	for (index = get_global_id(0);
