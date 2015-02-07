@@ -321,25 +321,35 @@ pg_numeric_from_varlena(__private int *errcode, __global varlena *vl_val)
  * tries to fetch fixed-length variable.
  */
 pg_numeric_t
+pg_numeric_datum_ref(__private int *errcode,
+					 __global void *datum,
+					 cl_bool internal_format)
+{
+	pg_numeric_t	result;
+
+	if (!datum)
+		result.isnull = true;
+	else if (!internal_format)
+		result = pg_numeric_from_varlena(errcode, (__global varlena *) datum);
+	else
+	{
+		result.isnull = false;
+		result.value = *((__global cl_ulong *) datum);
+	}
+	return result;
+}
+
+pg_numeric_t
 pg_numeric_vref(__global kern_data_store *kds,
 				__global kern_data_store *ktoast,
 				__private int *errcode,
 				cl_uint colidx,
 				cl_uint rowidx)
 {
-	__global void  *addr = kern_get_datum(kds,ktoast,colidx,rowidx);
-	pg_numeric_t	result;
+	__global void  *datum = kern_get_datum(kds,ktoast,colidx,rowidx);
+	cl_bool			internal_format = (kds->colmeta[colidx].attlen > 0);
 
-	if (!addr)
-		result.isnull = true;
-	else if (kds->colmeta[colidx].attlen < 0)
-		result = pg_numeric_from_varlena(errcode, (__global varlena *)addr);
-	else
-	{
-		result.isnull = false;
-		result.value  = *((__global cl_ulong *) addr);
-	}
-	return result;
+	return pg_numeric_datum_ref(errcode,datum,internal_format);
 }
 
 /* pg_numeric_vstore() is same as template */

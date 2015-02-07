@@ -15,3 +15,29 @@ select sum(1E-33);
 select sum(1E+49);
 select sum(1E+1000);
 select sum(1E-1000);
+
+-- division by zero with GpuPreAggregate
+prepare p1 as select sum(smlint_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) execute p1;
+execute p1;
+deallocate p1;
+
+prepare p1 as select sum(integer_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) execute p1;
+execute p1;
+deallocate p1;
+
+prepare p1 as select sum(bigint_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) execute p1;
+execute p1;
+deallocate p1;
+
+prepare p1 as select sum(real_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) execute p1;
+execute p1;
+deallocate p1;
+
+prepare p1 as select sum(float_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) execute p1;
+execute p1;
+deallocate p1;

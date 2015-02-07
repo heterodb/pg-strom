@@ -18,6 +18,7 @@
 #include "postgres.h"
 #include "access/nbtree.h"
 #include "access/xact.h"
+#include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/makefuncs.h"
@@ -61,6 +62,7 @@ typedef struct
 	Oid		   *sortOperators;	/* OIDs of operators to sort them by */
 	Oid		   *collations;		/* OIDs of collations */
 	bool	   *nullsFirst;		/* NULLS FIRST/LAST directions */
+	bool		varlena_keys;	/* True, if here are varlena keys */
 } GpuSortInfo;
 
 static inline void
@@ -92,6 +94,8 @@ form_gpusort_info(CustomScan *cscan, GpuSortInfo *gs_info)
 	for (temp = NIL, i=0; i < gs_info->numCols; i++)
 		temp = lappend_int(temp, gs_info->nullsFirst[i]);
 	privs = lappend(privs, temp);
+	/* varlena_keys */
+	privs = lappend(privs, makeInteger(gs_info->varlena_keys));
 
 	cscan->custom_private = privs;
 }
@@ -143,6 +147,8 @@ deform_gpusort_info(CustomScan *cscan)
 	i = 0;
 	foreach (cell, temp)
 		gs_info->nullsFirst[i] = lfirst_int(cell);
+	/* varlena_keys */
+	gs_info->varlena_keys = intVal(list_nth(privs, pindex++));
 
 	return gs_info;
 }
@@ -177,10 +183,12 @@ typedef struct
 			/* database connection */
 			char		   *database_name;
 			/* sorting chunks */
+			uint			varlena_keys;
 			uint			max_chunk_id;
+			kern_data_store **kern_toasts;
 			kern_data_store	**kern_chunks;
 			/* tuple descriptor */
-			TupleDesc		tupdesc;
+			TupleDesc		keydesc;
 			/* sorting keys */
 			int				numCols;
 			AttrNumber	   *sortColIdx;
@@ -202,13 +210,13 @@ typedef struct
 	volatile long time_cpu_sort;	/* performance info */
 	/* connection information */
 	Size		database_name;		/* offset from data[] */
+	/* existence of varlena sorting keys */
+	uint		varlena_keys;
 	/* file mapped data store */
 	uint		max_chunk_id;
 	Size		kern_chunks;		/* offset from data[] */
-	/* row format definition */
-	Size		tupdesc;			/* offset from data[] */
 	/* sorting keys */
-	uint		numCols;
+	Size		keydesc;			/* offset from data[] */
 	Size		sortColIdx;			/* offset from data[] */
 	Size		sortOperators;		/* offset from data[] */
 	Size		collations;			/* offset from data[] */
@@ -229,6 +237,7 @@ typedef struct
 	uint			num_chunks;
 	uint			num_chunks_limit;
 	pgstrom_data_store **pds_chunks;
+	pgstrom_data_store **pds_toasts;
 
 	/* for GPU bitonic sorting */
 	pgstrom_queue  *mqueue;
@@ -239,11 +248,13 @@ typedef struct
 
 	/* copied from the plan node */
 	Size			chunk_size;		/* expected best size of sorting chunk */
+	TupleDesc		keydesc;		/* tupledesc for sorting key */
     int				numCols;		/* number of sort-key columns */
     AttrNumber	   *sortColIdx;		/* their indexes in the target list */
     Oid			   *sortOperators;	/* OIDs of operators to sort them by */
 	Oid			   *collations;		/* OIDs of collations */
 	bool		   *nullsFirst;		/* NULLS FIRST/LAST directions */
+	bool			varlena_keys;	/* True, if varlena sorting key exists */
 
 	/* running status */
 	char		   *database_name;	/* name of the current database */
@@ -341,17 +352,99 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 	*p_chunk_size = chunk_size;
 }
 
+/*
+ * make a projection function
+ */
+static void
+gpusort_projection_addcase(StringInfo body,
+						   devtype_info *dtype,
+						   int kds_index,
+						   int ktoast_index)
+{
+	if (dtype->type_length > 0)
+	{
+		const char *type_cast;
+
+		if (dtype->type_length == sizeof(cl_uchar))
+			type_cast = "cl_uchar";
+		else if (dtype->type_length == sizeof(cl_ushort))
+			type_cast = "cl_ushort";
+		else if (dtype->type_length == sizeof(cl_uint))
+			type_cast = "cl_uint";
+		else if (dtype->type_length == sizeof(cl_ulong))
+			type_cast = "cl_ulong";
+		else
+			elog(ERROR, "unexpected length of data type");
+
+		appendStringInfo(
+			body,
+			"    case %d:\n"
+			"      datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
+			"      if (!datum)\n"
+			"        ts_isnull[colidx] = true;\n"
+			"      else\n"
+			"      {\n"
+			"        ts_isnull[colidx] = false;\n"
+			"        ts_values[colidx] = *((__global %s *) datum);\n"
+			"      }\n"
+			"      break;\n",
+			kds_index,
+			ktoast_index,
+			type_cast);
+	}
+	else if (dtype->type_oid == NUMERICOID)
+	{
+		appendStringInfo(
+			body,
+			"    case %d:\n"
+			"      datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
+			"      if (!datum)\n"
+			"        ts_isnull[colidx] = true;\n"
+			"      else\n"
+			"      {\n"
+			"        pg_numeric_t temp\n"
+			"          = pg_numeric_from_varlena(errcode, datum);\n"
+			"        ts_isnull[colidx] = temp.isnull;\n"
+			"        ts_values[colidx] = temp.value;\n"
+			"      }\n"
+			"      break;\n",
+			kds_index,
+			ktoast_index);
+	}
+	else
+	{
+		Assert((dtype->type_flags & DEVTYPE_IS_VARLENA) != 0);
+		appendStringInfo(
+			body,
+			"    case %d:\n"
+			"      datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
+			"      if (!datum)\n"
+			"        ts_isnull[colidx] = true;\n"
+			"      else\n"
+			"      {\n"
+			"        ts_isnull[colidx] = false;\n"
+			"        ts_values[colidx] = (Datum)\n"
+			"            ((__global char *)datum -\n"
+			"             (__global char *)&ktoast->hostptr);\n"
+			"      }\n"
+			"      break;\n",
+			kds_index,
+			ktoast_index);
+	}
+}
 
 static char *
 pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 {
-	StringInfoData	decl;
-	StringInfoData	body;
+	StringInfoData	pj_body;
+	StringInfoData	kc_decl;
+	StringInfoData	kc_body;
 	StringInfoData	result;
-	int		i;
+	int				i;
 
-	initStringInfo(&decl);
-	initStringInfo(&body);
+	initStringInfo(&pj_body);
+	initStringInfo(&kc_decl);
+	initStringInfo(&kc_body);
 	initStringInfo(&result);
 
 	for (i=0; i < sort->numCols; i++)
@@ -410,21 +503,29 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 		if (!dfunc)
 			elog(ERROR, "device function %u lookup failed", sort_func);
 
-		/* reference to X-variable / Y-variable */
+		/* add projection case */
+		gpusort_projection_addcase(&pj_body, dtype, i, colidx - 1);
+
+		/*
+		 * reference to X-variable / Y-variable
+		 *
+		 * Because KDS has tuple-slot format, colidx should be index
+		 * from the sortkyes array, not resno on host-side.
+		 */
 		appendStringInfo(
-			&decl,
+			&kc_decl,
 			"  pg_%s_t KVAR_X%d"
 			" = pg_%s_vref(kds,ktoast,errcode,%d,x_index);\n"
 			"  pg_%s_t KVAR_Y%d"
 			" = pg_%s_vref(kds,ktoast,errcode,%d,y_index);\n",
 			dtype->type_name, i+1,
-			dtype->type_name, colidx - 1,
+			dtype->type_name, i,
 			dtype->type_name, i+1,
-			dtype->type_name, colidx - 1);
+			dtype->type_name, i);
 
 		/* logic to compare */
 		appendStringInfo(
-			&body,
+			&kc_body,
 			"  /* sort key comparison on the resource %d */\n"
 			"  if (!KVAR_X%d.isnull && !KVAR_Y%d.isnull)\n"
 			"  {\n"
@@ -443,27 +544,54 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 			i+1, i+1, null_first ? -1 : 1,
 			i+1, i+1, null_first ? 1 : -1);
 	}
+	/* functions declarations */
+	appendStringInfo(&result, "%s\n",
+					 pgstrom_codegen_func_declarations(context));
+	/* make a projection function */
+	appendStringInfo(
+		&result,
+		"static void\n"
+		"gpusort_projection(__private cl_int *errcode,\n"
+		"                   __global Datum *ts_values,\n"
+		"                   __global cl_char *ts_isnull,\n"
+		"                   cl_int colidx,\n"
+		"                   __global kern_data_store *ktoast,\n"
+		"                   __global HeapTupleHeaderData *htup)\n"
+		"{\n"
+		"  __global void *datum;\n"
+		"\n"
+		"  switch (colidx)\n"
+		"  {\n"
+		"%s"
+		"    default:\n"
+		"      /* do nothing */\n"
+		"      break;\n"
+		"  }\n"
+		"}\n",
+		pj_body.data);
+
 	/* make a comparison function */
-	appendStringInfo(&result,
-					 "%s\n"		/* function declaration */
-					 "static cl_int\n"
-					 "gpusort_keycomp(__private cl_int *errcode,\n"
-					 "                __global kern_data_store *kds,\n"
-					 "                __global kern_data_store *ktoast,\n"
-					 "                size_t x_index,\n"
-					 "                size_t y_index)\n"
-					 "{\n"
-					 "%s"		/* variables declaration */
-					 "  pg_int4_t comp;\n"
-					 "\n"
-					 "%s"		/* comparison body */
-					 "  return 0;\n"
-					 "}\n",
-					 pgstrom_codegen_func_declarations(context),
-					 decl.data,
-					 body.data);
-	pfree(decl.data);
-	pfree(body.data);
+	appendStringInfo(
+		&result,
+		"static cl_int\n"
+		"gpusort_keycomp(__private cl_int *errcode,\n"
+		"                __global kern_data_store *kds,\n"
+		"                __global kern_data_store *ktoast,\n"
+		"                size_t x_index,\n"
+		"                size_t y_index)\n"
+		"{\n"
+		"%s"		/* variables declaration */
+		"  pg_int4_t comp;\n"
+		"\n"
+		"%s"		/* comparison body */
+		"  return 0;\n"
+		"}\n",
+		kc_decl.data,
+		kc_body.data);
+
+	pfree(pj_body.data);
+	pfree(kc_decl.data);
+	pfree(kc_body.data);
 
 	return result.data;
 }
@@ -482,6 +610,7 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	Plan	   *subplan;
 	GpuSortInfo	gs_info;
 	codegen_context context;
+	bool		varlena_keys = false;
 	int			i;
 
 	/* ensure the plan is Sort */
@@ -514,6 +643,10 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 									   sort->collations[i]);
 		if (!dfunc)
 			return;
+
+		/* Does key contain varlena data type? */
+		if ((dtype->type_flags & DEVTYPE_IS_VARLENA) != 0)
+			varlena_keys = true;
 	}
 
 	/*
@@ -590,6 +723,7 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	gs_info.sortOperators = sort->sortOperators;
 	gs_info.collations = sort->collations;
 	gs_info.nullsFirst = sort->nullsFirst;
+	gs_info.varlena_keys = varlena_keys;
 	form_gpusort_info(cscan, &gs_info);
 
 	*p_plan = &cscan->scan.plan;
@@ -613,6 +747,9 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
 	GpuSortInfo	   *gs_info = deform_gpusort_info(cscan);
 	PlanState	   *ps = &node->ss.ps;
+	TupleDesc		tupdesc = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
+	TupleDesc		keydesc;
+	int				i;
 
 	/* initialize child exec node */
 	outerPlanState(gss) = ExecInitNode(outerPlan(cscan), estate, eflags);
@@ -637,6 +774,8 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->num_chunks_limit = gs_info->num_chunks + 32;
 	gss->pds_chunks = palloc0(sizeof(pgstrom_data_store *) *
 							  gss->num_chunks_limit);
+	gss->pds_toasts = palloc0(sizeof(pgstrom_data_store *) *
+							  gss->num_chunks_limit);
 	gss->chunk_size = gs_info->chunk_size;
 
 	gss->numCols = gs_info->numCols;
@@ -644,6 +783,16 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->sortOperators = gs_info->sortOperators;
 	gss->collations = gs_info->collations;
 	gss->nullsFirst = gs_info->nullsFirst;
+	gss->varlena_keys = gs_info->varlena_keys;
+	keydesc = CreateTemplateTupleDesc(gss->numCols, false);
+	for (i=0; i < gss->numCols; i++)
+	{
+		AttrNumber	anum = gss->sortColIdx[i];
+		memcpy(keydesc->attrs + i,
+			   tupdesc->attrs + anum - 1,
+			   ATTRIBUTE_FIXED_PART_SIZE);
+	}
+	gss->keydesc = keydesc;
 
 	/* running status */
 	gss->database_name = get_database_name(MyDatabaseId);
@@ -682,7 +831,8 @@ pgstrom_create_gpusort(GpuSortState *gss)
 {
 	pgstrom_gpusort	   *gpusort = NULL;
 	kern_resultbuf	   *kresults;
-	pgstrom_data_store *pds = NULL;
+	pgstrom_data_store *pds_row = NULL;
+	pgstrom_data_store *pds_slot = NULL;
 	TupleTableSlot	   *slot;
 	TupleDesc			tupdesc;
 	cl_uint				nitems;
@@ -716,41 +866,47 @@ pgstrom_create_gpusort(GpuSortState *gss)
 		Assert(!TupIsNull(slot));
 
 		/* Makes a sorting chunk on the first tuple */
-		if (!pds)
+		if (!pds_row)
 		{
 			tupdesc = gss->css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
-			pds = pgstrom_create_data_store_row_fmap(tupdesc, gss->chunk_size);
-
-			chunk_id = gss->num_chunks++;
-			if (chunk_id >= gss->num_chunks_limit)
-			{
-				pgstrom_data_store **new_pds_chunks;
-
-				/* expand array twice */
-				gss->num_chunks_limit = 2 * gss->num_chunks_limit;
-				new_pds_chunks = repalloc(gss->pds_chunks,
-										  sizeof(pgstrom_data_store *) *
-										  gss->num_chunks_limit);
-				pfree(gss->pds_chunks);
-				gss->pds_chunks = new_pds_chunks;
-			}
-			gss->pds_chunks[chunk_id] = pds;
-			pgstrom_track_object(&pds->sobj, 0);
+			pds_row = pgstrom_create_data_store_row_fmap(tupdesc,
+														 gss->chunk_size);
+			pgstrom_track_object(&pds_row->sobj, 0);
 		}
-		/* Then, insert this tuple to the data store */
-		if (!pgstrom_data_store_insert_tuple(pds, slot))
+		/* Insert this tuple to the data store */
+		if (!pgstrom_data_store_insert_tuple(pds_row, slot))
 		{
 			gss->overflow_slot = slot;
 			break;
 		}
 	}
-
-	/* can we read any tuples? */
-	if (!pds)
+	/* Did we read any tuples? */
+	if (!pds_row)
 		goto out;
+	/* Expand file-mapped pds for space of tuple-slot also */
+	nitems = pds_row->kds->nitems;
+	pds_slot = pgstrom_extend_data_store_tupslot(pds_row,
+												 gss->keydesc, nitems);
+	Assert(pds_slot->ktoast == pds_row);
+	pgstrom_track_object(&pds_slot->sobj, 0);
 
-	/* Makea a pgstrom_gpusort object based on the data-store */
-	nitems = pds->kds->nitems;
+	/* save this chunk on the global array */
+	chunk_id = gss->num_chunks++;
+	if (chunk_id >= gss->num_chunks_limit)
+	{
+		uint		new_limit = 2 * gss->num_chunks_limit;
+
+		/* expand the array twice */
+		gss->pds_chunks = repalloc(gss->pds_chunks,
+								   sizeof(pgstrom_data_store *) * new_limit);
+		gss->pds_toasts = repalloc(gss->pds_toasts,
+								   sizeof(pgstrom_data_store *) * new_limit);
+		gss->num_chunks_limit = new_limit;
+	}
+	gss->pds_chunks[chunk_id] = pds_slot;
+	gss->pds_toasts[chunk_id] = pds_row;
+
+	/* Make a pgstrom_gpusort object based on the data-store */
 	length = (STROMALIGN(offsetof(pgstrom_gpusort, kern.kparams)) +
 			  STROMALIGN(gss->kparams->length) +
 			  STROMALIGN(offsetof(kern_resultbuf, results[2 * nitems])));
@@ -760,14 +916,14 @@ pgstrom_create_gpusort(GpuSortState *gss)
 
 	/* common field of pgstrom_gpusort */
 	pgstrom_init_message(&gpusort->msg,
-                         StromTag_GpuSort,
+						 StromTag_GpuSort,
 						 gss->mqueue,
 						 clserv_process_gpusort,
 						 pgstrom_release_gpusort,
 						 gss->pfm.enabled);
 	gpusort->dprog_key = pgstrom_retain_devprog_key(gss->dprog_key);
 	gpusort->chunk_id = chunk_id;
-	gpusort->pds = pgstrom_get_data_store(pds);
+	gpusort->pds = pgstrom_get_data_store(pds_slot);
 	memcpy(KERN_GPUSORT_PARAMBUF(&gpusort->kern),
 		   gss->kparams,
 		   gss->kparams->length);
@@ -791,8 +947,7 @@ form_pgstrom_cpusort(GpuSortState *gss,
 					 pgstrom_cpusort *l_cpusort,
 					 pgstrom_cpusort *r_cpusort)
 {
-	TupleTableSlot *slot = gss->css.ss.ss_ScanTupleSlot;
-	TupleDesc		tupdesc = slot->tts_tupleDescriptor;
+	TupleDesc		tupdesc = gss->keydesc;
 	Bitmapset	   *chunk_ids;
 	StringInfoData	buf;
 	Size			dsm_length;
@@ -831,6 +986,8 @@ form_pgstrom_cpusort(GpuSortState *gss,
 	strcpy(buf.data + buf.len, gss->database_name);
 	buf.len += MAXALIGN(length);
 
+	/* existance of varlena sorting key */
+	pfc.varlena_keys = gss->varlena_keys;
 	/* length of kern_data_store array */
 	pfc.max_chunk_id = gss->num_chunks;
 
@@ -839,11 +996,18 @@ form_pgstrom_cpusort(GpuSortState *gss,
 	chunk_ids = bms_union(l_cpusort->h.chunk_ids, r_cpusort->h.chunk_ids);
 	while ((index = bms_first_member(chunk_ids)) >= 0)
 	{
-		char   *kds_fname = gss->pds_chunks[index]->kds_fname;
-		size_t	kds_len = gss->pds_chunks[index]->kds_length;
+		pgstrom_data_store *pds = gss->pds_chunks[index];
+		char	   *kds_fname = pds->kds_fname;
+		size_t		kds_len = pds->kds_length;
+		size_t		kds_ofs = pds->kds_offset;
+
+		Assert(strcmp(kds_fname, gss->pds_toasts[index]->kds_fname) == 0);
+		Assert(kds_ofs >= gss->pds_toasts[index]->kds_length);
+		Assert(gss->pds_toasts[index]->kds_offset == 0);
 
 		appendBinaryStringInfo(&buf, (const char *)&index, sizeof(int));
 		appendBinaryStringInfo(&buf, (const char *)&kds_len, sizeof(size_t));
+		appendBinaryStringInfo(&buf, (const char *)&kds_ofs, sizeof(size_t));
 
 		length = strlen(kds_fname) + 1;
 		enlargeStringInfo(&buf, MAXALIGN(length));
@@ -854,8 +1018,9 @@ form_pgstrom_cpusort(GpuSortState *gss,
 	index = -1;		/* end of chunks marker */
 	appendBinaryStringInfo(&buf, (const char *)&index, sizeof(int));
 
-	/* tuple descriptor */
-	pfc.tupdesc = buf.len;
+	/* tuple descriptor of sorting keys */
+	Assert(tupdesc->natts == gss->numCols);
+	pfc.keydesc = buf.len;
 	enlargeStringInfo(&buf, MAXALIGN(sizeof(*tupdesc)));
 	memcpy(buf.data + buf.len, tupdesc, sizeof(*tupdesc));
 	buf.len += MAXALIGN(sizeof(*tupdesc));
@@ -867,9 +1032,6 @@ form_pgstrom_cpusort(GpuSortState *gss,
 			   ATTRIBUTE_FIXED_PART_SIZE);
 		buf.len += MAXALIGN(ATTRIBUTE_FIXED_PART_SIZE);
 	}
-
-	/* number of sorting keys */
-	pfc.numCols = gss->numCols;
 	/* sortColIdx */
 	pfc.sortColIdx = buf.len;
 	length = sizeof(AttrNumber) * gss->numCols;
@@ -931,7 +1093,7 @@ deform_pgstrom_cpusort(dsm_segment *dsm_seg)
 	pgstrom_cpusort *cpusort = palloc0(sizeof(pgstrom_cpusort));
 	pgstrom_flat_cpusort *pfc = dsm_segment_address(dsm_seg);
 	char	   *pos = pfc->data;
-	TupleDesc	tupdesc;
+	TupleDesc	keydesc;
 	int			index;
 
 	/* input/output result buffers */
@@ -951,16 +1113,24 @@ deform_pgstrom_cpusort(dsm_segment *dsm_seg)
 	/* database connection */
 	cpusort->w.database_name = pfc->data + pfc->database_name;
 
+	/* existence of varlena sorting keys */
+	cpusort->w.varlena_keys = pfc->varlena_keys;
+
 	/* size of kern_data_store array */
 	cpusort->w.max_chunk_id = pfc->max_chunk_id;
 	cpusort->w.kern_chunks = palloc0(sizeof(kern_data_store *) *
+									 cpusort->w.max_chunk_id);
+	cpusort->w.kern_toasts = palloc0(sizeof(kern_data_store *) *
 									 cpusort->w.max_chunk_id);
 	/* chunks to be mapped */
 	pos = pfc->data + pfc->kern_chunks;
 	while (true)
 	{
 		Size		kds_length;
+		Size		kds_offset;
 		const char *kds_fname;
+		int			kds_fdesc;
+		char	   *map_addr;
 
 		index = *((int *) pos);
 		pos += sizeof(int);
@@ -973,34 +1143,66 @@ deform_pgstrom_cpusort(dsm_segment *dsm_seg)
 
 		kds_length = *((size_t *) pos);
 		pos += sizeof(size_t);
+		kds_offset = *((size_t *) pos);
+		pos += sizeof(size_t);
 		kds_fname = pos;
 		pos += MAXALIGN(strlen(kds_fname) + 1);
 
-		cpusort->w.kern_chunks[index]
-			= filemap_kern_data_store(kds_fname, kds_length, NULL);
-		if (!cpusort->w.kern_chunks[index])
-			elog(ERROR, "Bug? unable to map \"%s\" (len=%zu)",
-				 kds_fname, kds_length);
+		kds_fdesc = open(kds_fname, O_RDWR, 0);
+		if (kds_fdesc < 0)
+			elog(ERROR, "failed to open \"%s\": %m", kds_fname);
+
+		if (cpusort->w.varlena_keys)
+		{
+			Assert(kds_offset >= BLCKSZ);
+			map_addr = mmap(NULL, kds_offset + kds_length,
+							PROT_READ | PROT_WRITE,
+							MAP_SHARED | MAP_POPULATE,
+							kds_fdesc, 0);
+			if (map_addr == MAP_FAILED)
+			{
+				close(kds_fdesc);
+				elog(ERROR, "failed to mmap \"%s\": %m", kds_fname);
+			}
+			cpusort->w.kern_toasts[index] = (kern_data_store *)map_addr;
+			cpusort->w.kern_chunks[index] =
+				(kern_data_store *)(map_addr + kds_offset);
+		}
+		else
+		{
+			map_addr = mmap(NULL, kds_length,
+							PROT_READ | PROT_WRITE,
+							MAP_SHARED | MAP_POPULATE,
+							kds_fdesc, kds_offset);
+			if (map_addr == MAP_FAILED)
+			{
+				close(kds_fdesc);
+				elog(ERROR, "failed to mmap \"%s\": %m", kds_fname);
+			}
+			cpusort->w.kern_toasts[index] = NULL;
+            cpusort->w.kern_chunks[index] = (kern_data_store *)map_addr;
+		}
+		close(kds_fdesc);	/* close on unmap */
 	}
 	/* tuple descriptor */
-	tupdesc = (TupleDesc)(pfc->data + pfc->tupdesc);
-	cpusort->w.tupdesc = palloc0(sizeof(*tupdesc));
-	cpusort->w.tupdesc->natts = tupdesc->natts;
-	cpusort->w.tupdesc->attrs =
-		palloc0(ATTRIBUTE_FIXED_PART_SIZE * tupdesc->natts);
-	cpusort->w.tupdesc->tdtypeid = tupdesc->tdtypeid;
-	cpusort->w.tupdesc->tdtypmod = tupdesc->tdtypmod;
-	cpusort->w.tupdesc->tdhasoid = tupdesc->tdhasoid;
-	cpusort->w.tupdesc->tdrefcount = -1;	/* not counting */
-	pos += MAXALIGN(sizeof(*tupdesc));
+	keydesc = (TupleDesc)(pfc->data + pfc->keydesc);
+	cpusort->w.keydesc = palloc0(sizeof(*keydesc));
+	cpusort->w.keydesc->natts = keydesc->natts;
+	cpusort->w.keydesc->attrs =
+		palloc0(ATTRIBUTE_FIXED_PART_SIZE * keydesc->natts);
+	cpusort->w.keydesc->tdtypeid = keydesc->tdtypeid;
+	cpusort->w.keydesc->tdtypmod = keydesc->tdtypmod;
+	cpusort->w.keydesc->tdhasoid = keydesc->tdhasoid;
+	cpusort->w.keydesc->tdrefcount = -1;	/* not counting */
+	pos += MAXALIGN(sizeof(*keydesc));
 
-	for (index=0; index < tupdesc->natts; index++)
+	for (index=0; index < keydesc->natts; index++)
 	{
-		cpusort->w.tupdesc->attrs[index] = (Form_pg_attribute) pos;
+		cpusort->w.keydesc->attrs[index] = (Form_pg_attribute) pos;
 		pos += MAXALIGN(ATTRIBUTE_FIXED_PART_SIZE);
 	}
 	/* sorting keys */
-	cpusort->w.numCols = pfc->numCols;
+	cpusort->w.numCols = keydesc->natts;
 	cpusort->w.sortColIdx = (AttrNumber *)(pfc->data + pfc->sortColIdx);
 	cpusort->w.sortOperators = (Oid *)(pfc->data + pfc->sortOperators);
 	cpusort->w.collations = (Oid *)(pfc->data + pfc->collations);
@@ -1014,6 +1216,7 @@ gpusort_merge_cpu_chunks(GpuSortState *gss, pgstrom_cpusort *cpusort_1)
 {
 	pgstrom_cpusort	   *cpusort_2;
 	dsm_segment		   *dsm_seg;
+	int					x, y;
 
 	Assert(CurrentMemoryContext == gss->css.ss.ps.state->es_query_cxt);
 
@@ -1054,8 +1257,12 @@ gpusort_merge_cpu_chunks(GpuSortState *gss, pgstrom_cpusort *cpusort_1)
 	cpusort_2->ritems_dsm = cpusort_2->oitems_dsm;
 	cpusort_2->oitems_dsm = dsm_seg;
 	cpusort_2->h.bgw_handle = NULL;
+	x = bms_num_members(cpusort_1->h.chunk_ids);
+	y = bms_num_members(cpusort_2->h.chunk_ids);
 	cpusort_2->h.chunk_ids = bms_union(cpusort_1->h.chunk_ids,
 									   cpusort_2->h.chunk_ids);
+	elog(INFO, "CpuSort merge: %d + %d => %d", x, y,
+		 bms_num_members(cpusort_2->h.chunk_ids));
 	/* release either of them */
 	pfree(cpusort_1);
 	gss->sorted_chunk = NULL;
@@ -1118,7 +1325,6 @@ gpusort_check_gpu_tasks(GpuSortState *gss)
 	pgstrom_message	   *msg;
 	pgstrom_gpusort	   *gpusort;
 	pgstrom_cpusort	   *cpusort;
-	kern_resultbuf	   *kresults;
 
 	/*
 	 * Check status of GPU co-routine
@@ -1130,7 +1336,6 @@ gpusort_check_gpu_tasks(GpuSortState *gss)
 
 		Assert(StromTagIs(msg, GpuSort));
 		gpusort = (pgstrom_gpusort *) msg;
-		kresults = KERN_GPUSORT_RESULTBUF(&gpusort->kern);
 
 		if (msg->errcode != StromError_Success)
 		{
@@ -1433,8 +1638,8 @@ gpusort_exec(CustomScanState *node)
 		if (chunk_id >= gss->num_chunks || !gss->pds_chunks[chunk_id])
 			elog(ERROR, "Bug? data-store of GpuSort missing (chunk-id: %d)",
 				 chunk_id);
-		pds = gss->pds_chunks[chunk_id];
 
+		pds = gss->pds_toasts[chunk_id];
 		if (pgstrom_fetch_data_store(slot, pds, item_id, &gss->tuple_buf))
 		{
 			gss->sorted_index++;
@@ -1460,8 +1665,11 @@ gpusort_end(CustomScanState *node)
 	for (i=0; i < gss->num_chunks; i++)
 	{
 		pgstrom_data_store *pds = gss->pds_chunks[i];
+		pgstrom_data_store *ptoast = gss->pds_toasts[i];
 		pgstrom_untrack_object(&pds->sobj);
 		pgstrom_put_data_store(pds);
+		pgstrom_untrack_object(&ptoast->sobj);
+		pgstrom_put_data_store(ptoast);
 	}
 
 	if (gss->dprog_key)
@@ -1680,11 +1888,16 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 {
 	SortSupportData	   *sort_keys;
 	kern_data_store	   *kds;
+	kern_data_store	   *ltoast;
+	kern_data_store	   *rtoast;
 	kern_resultbuf	   *litems = cpusort->w.l_kresults;
 	kern_resultbuf	   *ritems = cpusort->w.r_kresults;
 	kern_resultbuf	   *oitems = cpusort->w.o_kresults;
-	TupleTableSlot	   *rslot = MakeSingleTupleTableSlot(cpusort->w.tupdesc);
-	TupleTableSlot	   *lslot = MakeSingleTupleTableSlot(cpusort->w.tupdesc);
+	Datum			   *rts_values = NULL;
+	Datum			   *lts_values = NULL;
+	cl_char			   *rts_isnull = NULL;
+	cl_char			   *lts_isnull = NULL;
+	TupleDesc			keydesc = cpusort->w.keydesc;
 	long				rindex = 0;
 	long				lindex = 0;
 	long				oindex = 0;
@@ -1714,40 +1927,55 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 	 */
 	while (lindex < litems->nitems && rindex < ritems->nitems)
 	{
-		HeapTupleData dummy;
 		int		comp = 0;
 
-		if (TupIsNull(lslot))
+		if (!lts_values)
 		{
 			lchunk_id = litems->results[2 * lindex];
 			litem_id = litems->results[2 * lindex + 1];
 			Assert(lchunk_id < cpusort->w.max_chunk_id);
 			kds = cpusort->w.kern_chunks[lchunk_id];
-			if (!kern_fetch_data_store(lslot, kds, litem_id, &dummy))
-				elog(ERROR, "failed to fetch sorting tuple in (%d,%d)",
-					 lchunk_id, litem_id);
+			Assert(litem_id < kds->nitems);
+			if (litem_id >= kds->nitems)
+				elog(ERROR, "item-id %u is out of range in the chunk %u",
+					 litem_id, lchunk_id);
+			lts_values = KERN_DATA_STORE_VALUES(kds, litem_id);
+		    lts_isnull = KERN_DATA_STORE_ISNULL(kds, litem_id);
+			ltoast = cpusort->w.kern_toasts[lchunk_id];
 		}
 
-		if (TupIsNull(rslot))
+		if (!rts_values)
 		{
 			rchunk_id = ritems->results[2 * rindex];
-			ritem_id = ritems->results[2 * rindex + 1];
-			Assert(rchunk_id < cpusort->w.max_chunk_id);
+            ritem_id = ritems->results[2 * rindex + 1];
+            Assert(rchunk_id < cpusort->w.max_chunk_id);
 			kds = cpusort->w.kern_chunks[rchunk_id];
-			if (!kern_fetch_data_store(rslot, kds, ritem_id, &dummy))
-				elog(ERROR, "failed to fetch sorting tuple in (%d,%d)",
-					 rchunk_id, ritem_id);
+			if (ritem_id >= kds->nitems)
+				elog(ERROR, "item-id %u is out of range in the chunk %u",
+					 ritem_id, rchunk_id);
+			rts_values = KERN_DATA_STORE_VALUES(kds, ritem_id);
+		    rts_isnull = KERN_DATA_STORE_ISNULL(kds, ritem_id);
+			rtoast = cpusort->w.kern_toasts[rchunk_id];
 		}
 
-		for (i=0; i < cpusort->w.numCols; i++)
+		for (i=0; i < keydesc->natts; i++)
 		{
 			SortSupport ssup = sort_keys + i;
-			AttrNumber	attno = ssup->ssup_attno;
+			Form_pg_attribute attr = keydesc->attrs[i];
 
-			comp = ApplySortComparator(lslot->tts_values[attno],
-									   lslot->tts_isnull[attno],
-									   rslot->tts_values[attno],
-									   rslot->tts_isnull[attno],
+			/* toast datum has to be fixed up */
+			if (attr->attlen < 0)
+			{
+				Assert(ltoast != NULL && rtoast != NULL);
+				if (!lts_isnull[i])
+					lts_values[i] += (uintptr_t)&ltoast->hostptr;
+				if (!rts_isnull[i])
+					rts_values[i] += (uintptr_t)&rtoast->hostptr;
+			}
+			comp = ApplySortComparator(rts_values[i],
+									   rts_isnull[i],
+									   lts_values[i],
+									   lts_isnull[i],
 									   ssup);
 			if (comp != 0)
 				break;
@@ -1758,7 +1986,8 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 			oitems->results[2 * oindex + 1] = litem_id;
 			oindex++;
 			lindex++;
-			ExecClearTuple(lslot);
+			lts_values = NULL;
+			lts_isnull = NULL;
 		}
 
 		if (comp >= 0)
@@ -1767,26 +1996,25 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 			oitems->results[2 * oindex + 1] = ritem_id;
 			oindex++;
 			rindex++;
-			ExecClearTuple(rslot);
+			rts_values = NULL;
+			rts_isnull = NULL;
 		}
 	}
-	while (lindex < litems->nitems)
+	/* move remaining left chunk-id/item-id, if any */
+	if (lindex < litems->nitems)
 	{
-		oitems->results[2 * oindex] = litems->results[2 * lindex];
-		oitems->results[2 * oindex + 1] = litems->results[2 * lindex + 1];
-		oindex++;
-		lindex++;
+		memcpy(oitems->results + 2 * oindex,
+			   litems->results + 2 * lindex,
+			   2 * sizeof(cl_int) * (litems->nitems - lindex));
 	}
-
-	while (rindex < ritems->nitems)
+	/* move remaining right chunk-id/item-id, if any */
+	if (rindex < ritems->nitems)
 	{
-		oitems->results[2 * oindex] = ritems->results[2 * rindex];
-		oitems->results[2 * oindex + 1] = ritems->results[2 * rindex + 1];
-		oindex++;
-		rindex++;
+		memcpy(oitems->results + 2 * oindex,
+			   ritems->results + 2 * rindex,
+			   2 * sizeof(cl_int) * (ritems->nitems - rindex));
 	}
-	Assert(oindex == litems->nitems + ritems->nitems);
-	oitems->nitems = oindex;
+	oitems->nitems = litems->nitems + ritems->nitems;
 }
 
 static void
@@ -1880,8 +2108,8 @@ gpusort_entrypoint_cpusort(Datum main_arg)
 	PG_END_TRY();
 
 	/* Inform the corrdinator worker got finished */
-	pfc->cpusort_worker_done = true;
 	pfc->time_cpu_sort = timeval_diff(&tv1, &tv2);
+	pfc->cpusort_worker_done = true;
 	pg_memory_barrier();
 	SetLatch(&master->procLatch);
 }
@@ -1896,12 +2124,15 @@ typedef struct
 {
 	pgstrom_message *msg;
 	kern_data_store	*kds;
-	int				kds_fdesc;
+	kern_data_store	*ktoast;
+	char		   *map_addr;
+	size_t			map_length;
 	cl_command_queue kcmdq;
 	cl_program		program;
 	cl_int			dindex;
 	cl_mem			m_gpusort;
 	cl_mem			m_kds;
+	cl_mem			m_ktoast;
 	cl_kernel		kern_prep;
 	cl_kernel	   *kern_sort;
 	cl_uint			kern_sort_nums;
@@ -1934,6 +2165,7 @@ clserv_respond_gpusort(cl_event event, cl_int ev_status, void *private)
 		cl_ulong	tv_start;
 		cl_ulong	tv_end;
 		cl_ulong	temp;
+		cl_ulong	last = 0;
 
 		/*
 		 * Time of all the DMA send
@@ -1987,6 +2219,7 @@ clserv_respond_gpusort(cl_event event, cl_int ev_status, void *private)
 		 */
 		tv_start = ~0UL;
 		tv_end = 0;
+		last = 0;
 		for (i=clgss->ev_kern_prep + 1; i < clgss->ev_dma_recv; i++)
 		{
 			rc = clGetEventProfilingInfo(clgss->events[i],
@@ -1998,6 +2231,9 @@ clserv_respond_gpusort(cl_event event, cl_int ev_status, void *private)
 				goto skip_perfmon;
 			tv_start = Min(tv_start, temp);
 
+			if (last != 0)
+				gpusort->msg.pfm.time_debug1 += (temp - last) / 1000;
+
 			rc = clGetEventProfilingInfo(clgss->events[i],
 										 CL_PROFILING_COMMAND_END,
 										 sizeof(cl_ulong),
@@ -2006,6 +2242,7 @@ clserv_respond_gpusort(cl_event event, cl_int ev_status, void *private)
 			if (rc != CL_SUCCESS)
 				goto skip_perfmon;
 			tv_end = Max(tv_end, temp);
+			last = temp;
 		}
 		gpusort->msg.pfm.time_gpu_sort += (tv_end - tv_start) / 1000;
 
@@ -2054,17 +2291,16 @@ clserv_respond_gpusort(cl_event event, cl_int ev_status, void *private)
 		clReleaseMemObject(clgss->m_gpusort);
 	if (clgss->m_kds)
 		clReleaseMemObject(clgss->m_kds);
+	if (clgss->m_ktoast)
+		clReleaseMemObject(clgss->m_ktoast);
 	if (clgss->kern_prep)
 		clReleaseKernel(clgss->kern_prep);
 	for (i=0; i < clgss->kern_sort_nums; i++)
 		clReleaseKernel(clgss->kern_sort[i]);
 	if (clgss->program && clgss->program != BAD_OPENCL_PROGRAM)
 		clReleaseProgram(clgss->program);
-	if (clgss->kds)
-	{
-		munmap(clgss->kds, clgss->kds->length);
-		close(clgss->kds_fdesc);
-	}
+	if (clgss->map_addr)
+		munmap(clgss->map_addr, clgss->map_length);
 	if (clgss->kern_sort)
 		free(clgss->kern_sort);
 	free(clgss);
@@ -2177,7 +2413,27 @@ clserv_launch_gpusort_preparation(clstate_gpusort *clgss, size_t nitems)
 	}
 
 	rc = clSetKernelArg(clgss->kern_prep,
-						1,		/* cl_int chunk_id */
+						1,		/* __global kern_data_store *kds */
+						sizeof(cl_mem),
+						&clgss->m_kds);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgss->kern_prep,
+						2,		/* __global kern_data_store *ktoast */
+						sizeof(cl_mem),
+						&clgss->m_ktoast);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgss->kern_prep,
+						3,		/* cl_int chunk_id */
 						sizeof(cl_int),
 						&gpusort->chunk_id);
 	if (rc != CL_SUCCESS)
@@ -2187,7 +2443,7 @@ clserv_launch_gpusort_preparation(clstate_gpusort *clgss, size_t nitems)
 	}
 
 	rc = clSetKernelArg(clgss->kern_prep,
-						2,		/* KERN_DYNAMIC_LOCAL_WORKMEM_ARG */
+						4,		/* KERN_DYNAMIC_LOCAL_WORKMEM_ARG */
 						sizeof(cl_int) * lwork_sz,
 						NULL);
 	if (rc != CL_SUCCESS)
@@ -2267,7 +2523,7 @@ clserv_launch_bitonic_local(clstate_gpusort *clgss,
 	rc = clSetKernelArg(kernel,
 						2,		/* __global kern_data_store *ktoast */
 						sizeof(cl_mem),
-						NULL);
+						&clgss->m_ktoast);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
@@ -2388,7 +2644,7 @@ clserv_launch_bitonic_step(clstate_gpusort *clgss, bool reversing,
 	rc = clSetKernelArg(kernel,
 						3,		/* __global kern_data_store *ktoast */
 						sizeof(cl_mem),
-						NULL);
+						&clgss->m_ktoast);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
@@ -2476,7 +2732,7 @@ clserv_launch_bitonic_merge(clstate_gpusort *clgss,
 	rc = clSetKernelArg(kernel,
 						2,		/* __global kern_data_store *ktoast */
 						sizeof(cl_mem),
-						NULL);
+						&clgss->m_ktoast);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
@@ -2529,6 +2785,7 @@ clserv_process_gpusort(pgstrom_message *msg)
 	size_t				nsteps;
 	size_t				launches;
 	size_t				i, j;
+	int					map_fdesc;
 	cl_int				rc;
 
 	Assert(StromTagIs(gpusort, GpuSort));
@@ -2575,13 +2832,30 @@ clserv_process_gpusort(pgstrom_message *msg)
 	/*
 	 * Map kern_data_store based on KDS_
 	 */
-	clgss->kds = filemap_kern_data_store(pds->kds_fname,
-										 pds->kds_length,
-										 &clgss->kds_fdesc);
-	if (!clgss->kds)
+	map_fdesc = open(pds->kds_fname, O_RDWR, 0);
+	if (map_fdesc < 0)
+	{
+		clserv_log("failed to open \"%s\" :%m", pds->kds_fname);
 		goto error;
+	}
+	clgss->map_length = pds->kds_offset + pds->kds_length;
+	clgss->map_addr = mmap(NULL, clgss->map_length,
+						   PROT_READ | PROT_WRITE,
+						   MAP_SHARED | MAP_POPULATE,
+						   map_fdesc, 0);
+	if (clgss->map_addr == MAP_FAILED)
+	{
+		clserv_log("failed to mmap \"%s\" :%m", pds->kds_fname);
+		close(map_fdesc);
+		goto error;
+	}
+	close(map_fdesc);	/* close on unmap */
+
+	clgss->ktoast = (kern_data_store *) clgss->map_addr;
+	clgss->kds = (kern_data_store *)(clgss->map_addr + pds->kds_offset);
+	Assert(pds->kds_offset >= clgss->ktoast->length);
 	Assert(pds->kds_length == clgss->kds->length);
-	nitems = clgss->kds->nitems;
+	nitems = clgss->ktoast->nitems;
 
 	/*
 	 * choose a device to run
@@ -2593,7 +2867,8 @@ clserv_process_gpusort(pgstrom_message *msg)
 	 * construction of kernel buffer objects
 	 *
 	 * m_gpusort - control data of gpusort
-	 * m_kds     - data store of records to be sorted
+	 * m_kds     - data store of row-flat format
+	 * m_ktoast  - data store of tup-slot format
 	 */
 	length = KERN_GPUSORT_LENGTH(&gpusort->kern);
 	clgss->m_gpusort = clCreateBuffer(opencl_context,
@@ -2613,6 +2888,18 @@ clserv_process_gpusort(pgstrom_message *msg)
 								  length,
 								  NULL,
 								  &rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
+		goto error;
+	}
+
+	length = KERN_DATA_STORE_LENGTH(clgss->ktoast);
+	clgss->m_ktoast = clCreateBuffer(opencl_context,
+									 CL_MEM_READ_WRITE,
+									 length,
+									 NULL,
+									 &rc);
 	if (rc != CL_SUCCESS)
 	{
 		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
@@ -2643,14 +2930,34 @@ clserv_process_gpusort(pgstrom_message *msg)
 	gpusort->msg.pfm.bytes_dma_send += length;
 	gpusort->msg.pfm.num_dma_send++;
 
-	/* __global kern_data_store *kds */
-	length = KERN_DATA_STORE_LENGTH(clgss->kds);
+	/* __global kern_data_store *kds (header only) */
+	length = KERN_DATA_STORE_HEAD_LENGTH(clgss->kds);
 	rc = clEnqueueWriteBuffer(clgss->kcmdq,
 							  clgss->m_kds,
 							  CL_FALSE,
 							  0,
 							  length,
 							  clgss->kds,
+							  0,
+							  NULL,
+							  &clgss->events[clgss->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
+		goto error;
+	}
+	clgss->ev_index++;
+	gpusort->msg.pfm.bytes_dma_send += length;
+	gpusort->msg.pfm.num_dma_send++;
+
+	/* __global kern_data_store *ktoast */
+	length = KERN_DATA_STORE_LENGTH(clgss->ktoast);
+	rc = clEnqueueWriteBuffer(clgss->kcmdq,
+							  clgss->m_ktoast,
+							  CL_FALSE,
+							  0,
+							  length,
+							  clgss->ktoast,
 							  0,
 							  NULL,
 							  &clgss->events[clgss->ev_index]);
@@ -2732,6 +3039,26 @@ clserv_process_gpusort(pgstrom_message *msg)
 	gpusort->msg.pfm.bytes_dma_recv += length;
     gpusort->msg.pfm.num_dma_recv++;
 
+	length = KERN_DATA_STORE_LENGTH(clgss->kds);
+	rc = clEnqueueReadBuffer(clgss->kcmdq,
+							 clgss->m_kds,
+							 CL_FALSE,
+							 0,
+							 length,
+							 (char *)clgss->kds,
+							 1,
+							 &clgss->events[clgss->ev_index - 1],
+							 &clgss->events[clgss->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueReadBuffer: %s",
+				   opencl_strerror(rc));
+		goto error;
+	}
+	clgss->ev_index++;
+	gpusort->msg.pfm.bytes_dma_recv += length;
+	gpusort->msg.pfm.num_dma_recv++;
+
 	/*
 	 * Last, registers a callback to handle post gpusort process
 	 */
@@ -2759,6 +3086,8 @@ error:
 			clReleaseMemObject(clgss->m_gpusort);
 		if (clgss->m_kds)
 			clReleaseMemObject(clgss->m_kds);
+		if (clgss->m_ktoast)
+			clReleaseMemObject(clgss->m_ktoast);
 		if (clgss->kern_prep)
 			clReleaseKernel(clgss->kern_prep);
 		for (i=0; i < clgss->kern_sort_nums; i++)
@@ -2767,11 +3096,8 @@ error:
 			clReleaseProgram(clgss->program);
 		if (clgss->kern_sort)
 			free(clgss->kern_sort);
-		if (clgss->kds)
-		{
-			munmap(clgss->kds, clgss->kds->length);
-			close(clgss->kds_fdesc);
-		}
+		if (clgss->map_addr)
+			munmap(clgss->map_addr, clgss->map_length);
 	}
 	gpusort->msg.errcode = rc;
 	pgstrom_reply_message(&gpusort->msg);

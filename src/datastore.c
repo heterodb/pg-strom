@@ -241,19 +241,21 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 void
 pgstrom_release_data_store(pgstrom_data_store *pds)
 {
-	/* detach from the GpuContext */
-	if (pds->chain.prev != NULL && pds->chain.next != NULL)
-		dlist_delete(&pds->chain);
-
+	/* release relevant toast store, if any */
 	if (pds->ktoast)
 		pgstrom_release_data_store(pds->ktoast);
 
+	/* detach from the GpuContext */
+	dlist_delete(&pds->chain);
+
+	/* release the data store body */
 	if (pds->kds_fname)
 	{
-		/* detach from the GpuContext */
-		Assert(pds->chain.prev != NULL && pds->chain.next != NULL);
-		dlist_delete(&pds->chain);
 		pgstrom_file_unmap_data_store(pds);
+		/* unlink the backend file also */
+		if (unlink(pds->kds_fname) != 0)
+			elog(WARNING, "failed on unlink(\"%s\") : %m", pds->kds_fname);
+		pfree(pds->kds_fname);
 	}
 	else
 	{
@@ -329,109 +331,64 @@ init_kern_data_store(kern_data_store *kds,
 	}
 }
 
-/*
- * Helper routine to map kern_data_store
- */
-static void
-__pgstrom_file_map_data_store(pgstrom_data_store *pds)
+pgstrom_data_store *
+pgstrom_create_data_store_row(GpuContext *gcontext,
+							  TupleDesc tupdesc, Size length,
+							  bool file_mapped)
 {
-	int		kds_fdesc = -1;
+	pgstrom_data_store *pds;
+	MemoryContext	gmcxt = gcontext->memcxt;
+	const char	   *kds_fname;
+	int				kds_fdesc;
+	Size			kds_length;
 
-	PG_TRY();
+	/* Is file-mapped? */
+	kds_fname = (file_mapped ? get_pgstrom_temp_filename() : NULL);
+
+	/* allocation of pds */
+	pds = MemoryContextAllocZero(gmcxt, sizeof(pgstrom_data_store));
+	dlist_push_tail(&gcontext->pds_list, &pds->chain);
+
+	/* allocation of kds */
+	pds->kds_length = (STROMALIGN(offsetof(kern_data_store,
+										   colmeta[tupdesc->natts])) +
+					   STROMALIGN(length));
+	pds->kds_offset = 0;
+
+	if (!kds_fname)
+		pds->kds = MemoryContextAlloc(gmcxt, pds->kds_length);
+	else
 	{
-		kds_fdesc = OpenTransientFile(pds->kds_fname,
+		pds->kds_fname = MemoryContextStrdup(gmcxt, kds_fname);
+
+		kds_fdesc = OpenTransientFile(kds_fname,
 									  O_RDWR | O_CREAT | O_TRUNC | PG_BINARY,
-									  S_IRUSR | S_IWUSR);
+									  0600);
 		if (kds_fdesc < 0)
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not open temporary file \"%s\" : %m",
-							pds->kds_fname)));
+					 errmsg("could not create file-mapped data store \"%s\"",
+							kds_fname)));
+		
 
 		if (ftruncate(kds_fdesc, pds->kds_length) != 0)
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not truncate temporary file \"%s\" : %m",
-							pds->kds_fname)));
+					 errmsg("could not truncate file \"%s\" to %zu: %m",
+							kds_fname, kds_length)));
 
-		pds->kds = mmap(NULL, pds->kds_length,
+		pds->kds = mmap(NULL, kds_length,
 						PROT_READ | PROT_WRITE,
 						MAP_SHARED | MAP_POPULATE,
 						kds_fdesc, 0);
 		if (pds->kds == MAP_FAILED)
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not map temporary file \"%s\" : %m",
-							pds->kds_fname)));
-		pds->kds_fdesc = kds_fdesc;
-	}
-	PG_CATCH();
-	{
-		if (kds_fdesc >= 0)
-			unlink(pds->kds_fname);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-}
+					 errmsg("could not mmap \"%s\" with length=%zu: %m",
+							kds_fname, kds_length)));
 
-/*
- * NOTE: This routine assumes usage by dynamic background worker.
- */
-pgstrom_data_store *
-pgstrom_file_map_data_store(const char *kds_fname, Size kds_length)
-{
-	pgstrom_data_store *pds = palloc0(sizeof(pgstrom_data_store));
-
-	pds->kds_fname = pstrdup(kds_fname);
-	pds->kds_length = kds_length;
-	__pgstrom_file_map_data_store(pds);
-
-	return pds;
-}
-
-void
-pgstrom_file_unmap_data_store(pgstrom_data_store *pds)
-{
-	if (munmap(pds->kds, pds->kds_length) != 0)
-		ereport(WARNING,
-				(errcode_for_file_access(),
-				 errmsg("could not unmap temporary file \"%s\": %m",
-					 pds->kds_fname)));
-	Assert(pds->kds_fdesc >= 0);
-	if (CloseTransientFile(pds->kds_fdesc) != 0)
-		ereport(WARNING,
-				(errcode_for_file_access(),
-				 errmsg("could not close temporary file \"%s\": %m",
-						pds->kds_fname)));
-	if (unlink(pds->kds_fname) != 0)
-		ereport(WARNING,
-				(errcode_for_file_access(),
-				 errmsg("could not unlink temporary file \"%s\": %m",
-						pds->kds_fname)));
-}
-
-pgstrom_data_store *
-pgstrom_create_data_store_row(GpuContext *gcontext,
-							  TupleDesc tupdesc, Size length,
-							  char *file_name)
-{
-	MemoryContext		gmcxt = gcontext->memcxt;
-	pgstrom_data_store *pds;
-
-	/* allocation of pds */
-	pds = MemoryContextAllocZero(gmcxt, sizeof(pgstrom_data_store));
-
-	/* allocation of kds */
-	pds->kds_length = (STROMALIGN(offsetof(kern_data_store,
-										   colmeta[tupdesc->natts])) +
-					   STROMALIGN(length));
-
-	if (!file_name)
-		pds->kds = MemoryContextAlloc(gmcxt, pds->kds_length);
-	else
-	{
-		pds->kds_fname = MemoryContextStrdup(gmcxt, file_name);
-		__pgstrom_file_map_data_store(pds);
+		/* kds is still mapped - not to manage file desc by ourself */
+		CloseTransientFile(kds_fdesc);
 	}
 	pds->ktoast = NULL;	/* never used */
 
@@ -441,46 +398,137 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 	 */
 	init_kern_data_store(pds->kds, tupdesc, pds->kds_length,
 						 KDS_FORMAT_ROW, INT_MAX, false);
-	/*
-	 * NOTE: file-mapped data store has to be unmaped and unlinked
-	 * on error cleanup. So, it shall be linked.
-	 */
-	if (pds->kds_fname)
-		dlist_push_tail(&gcontext->pds_list, &pds->chain);
-	else
-		memset(&pds->chain, 0, sizeof(dlist_node));
-
 	return pds;
 }
 
 pgstrom_data_store *
 pgstrom_create_data_store_slot(GpuContext *gcontext,
 							   TupleDesc tupdesc, cl_uint nrooms,
-							   bool internal_format)
+							   bool internal_format,
+							   pgstrom_data_store *ktoast)
 {
-	MemoryContext		gmcxt = gcontext->memcxt;
 	pgstrom_data_store *pds;
-	Size				kds_length;
+	MemoryContext	gmcxt = gcontext->memcxt;
+	Size			kds_offset;
+	int				kds_fdesc;
 
 	/* allocation of pds */
 	pds = MemoryContextAllocZero(gmcxt, sizeof(pgstrom_data_store));
+	dlist_push_tail(&gcontext->pds_list, &pds->chain);
 
 	/* allocation of kds */
-	kds_length = (STROMALIGN(offsetof(kern_data_store,
-									  colmeta[tupdesc->natts])) +
-				  (LONGALIGN(sizeof(bool) * tupdesc->natts) +
-				   LONGALIGN(sizeof(Datum) * tupdesc->natts)) * nrooms);
-	pds->kds = MemoryContextAlloc(gmcxt, kds_length);
-	pds->kds_length = kds_length;
-	pds->ktoast = NULL;		/* caller shall assign */
+	pds->kds_length = (STROMALIGN(offsetof(kern_data_store,
+										   colmeta[tupdesc->natts])) +
+					   (LONGALIGN(sizeof(bool) * tupdesc->natts) +
+						LONGALIGN(sizeof(Datum) * tupdesc->natts)) * nrooms);
+
+	if (!ktoast || !ktoast->kds_fname)
+		pds->kds = MemoryContextAlloc(gmcxt, kds_length);
+	else
+	{
+		/* append KDS after the ktoast file */
+		kds_offset = TYPEALIGN(BLCKSZ, ktoast->kds_length);
+
+		pds->kds_fname = MemoryContextStrdup(gmcxt, ktoast->kds_fname);
+		kds_fdesc = OpenTransientFile(pds->kds_fname,
+									  O_RDWR | PG_BINARY, 0600);
+		if (kds_fdesc < 0)
+			ereport(ERROR,
+                    (errcode_for_file_access(),
+					 errmsg("could not open file-mapped data store \"%s\"",
+							pds->kds_fname)));
+
+		if (ftruncate(kds_fdesc, kds_offset + pds->kds_length) != 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not truncate file \"%s\" to %zu: %m",
+							pds->kds_fname, kds_offset + pds->kds_length)));
+
+		pds->kds = mmap(NULL, kds_length,
+						PROT_READ | PROT_WRITE,
+						MAP_SHARED | MAP_POPULATE,
+						kds_fdesc, kds_offset);
+		if (pds->kds == MAP_FAILED)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not mmap \"%s\" with len/ofs=%zu/%zu: %m",
+							pds->kds_fname, pds->kds_length, kds_offset)));
+
+		/* kds is still mapped - not to manage file desc by ourself */
+		CloseTransientFile(kds_fdesc);
+	}
+	pds->ktoast = ktoast;
 
 	init_kern_data_store(pds->kds, tupdesc, kds_length,
 						 KDS_FORMAT_SLOT, nrooms, internal_format);
-	/* slot-data-store never has backend filemap */
-	memset(&pds->chain, 0, sizeof(dlist_node));
+	return pds;
+}
+
+/*
+ * pgstrom_file_mmap_data_store
+ *
+ * This routine assume that dynamic background worker maps shared-file
+ * to process it. So, here is no GpuContext.
+ */
+pgstrom_data_store *
+pgstrom_file_mmap_data_store(const char *kds_fname,
+                             Size kds_offset, Size kds_length)
+{
+	pgstrom_data_store *pds;
+	int		kds_fdesc;
+
+	Assert(kds_offset == TYPE_ALIGN(BLCKSZ, kds_offset));
+
+	pds = palloc0(sizeof(pgstrom_data_store));
+	pds->kds_fname = pstrdup(kds_fname);
+	pds->kds_offset = kds_offset;
+	pds->kds_length = kds_length;
+
+	kds_fdesc = OpenTransientFile(pds->kds_fname,
+								  O_RDWR | PG_BINARY, 0600);
+	if (kds_fdesc < 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open file-mapped data store \"%s\"",
+						pds->kds_fname)));
+
+	if (ftruncate(kds_fdesc, kds_offset + kds_length) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not truncate file \"%s\" to %zu: %m",
+						pds->kds_fname, kds_offset + kds_length)));
+
+	pds->kds = mmap(NULL, kds_length,
+					PROT_READ | PROT_WRITE,
+					MAP_SHARED | MAP_POPULATE,
+					kds_fdesc, kds_offset);
+	if (pds->kds == MAP_FAILED)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not mmap \"%s\" with len/ofs=%zu/%zu: %m",
+						pds->kds_fname, pds->kds_length, kds_offset)));
+
+	/* kds is still mapped - not to manage file desc by ourself */
+	CloseTransientFile(kds_fdesc);
 
 	return pds;
 }
+
+void
+pgstrom_file_unmap_data_store(pgstrom_data_store *pds)
+{
+	Assert(pds->kds_fname != NULL);
+
+	if (munmap(pds->kds, pds->kds_length) != 0)
+		ereport(WARNING,
+				(errcode_for_file_access(),
+				 errmsg("could not unmap file \"%s\" from %p-%p: %m",
+						pds->kds_fname,
+						(char *)pds->kds,
+						(char *)pds->kds + pds->kds_length)));
+}
+
+
 
 int
 pgstrom_data_store_insert_block(pgstrom_data_store *pds,

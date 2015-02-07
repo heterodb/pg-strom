@@ -254,7 +254,7 @@ typedef struct {
  */
 #define DEVINFO_IS_NEGATIVE			0x0001
 #define DEVTYPE_IS_VARLENA			0x0002
-#define DEVTYPE_IS_BUILTIN			0x0004
+#define DEVTYPE_HAS_INTERNAL_FORMAT	0x0004
 #define DEVFUNC_NEEDS_TIMELIB		0x0008
 #define DEVFUNC_NEEDS_TEXTLIB		0x0010
 #define DEVFUNC_NEEDS_NUMERIC		0x0020
@@ -299,14 +299,16 @@ typedef struct devfunc_info {
  */
 typedef struct pgstrom_data_store
 {
-	dlist_node	chain;
+	dlist_node	chain;		/* link to GpuContext->pds_list */
 	FileName	kds_fname;	/* filename, if file-mapped */
-	int			kds_fdesc;	/* file descriptor, if file-mapped */
-	Size		kds_length;	/* copy of kds->length */
+	Size		kds_offset;	/* offset of mapped file */
+	Size		kds_length;	/* length of the kernel data store */
 	kern_data_store *kds;
 	struct pgstrom_data_store *ktoast;
 } pgstrom_data_store;
 
+#if 0
+// no longer used
 /*
  * pgstrom_bulk_slot
  *
@@ -320,7 +322,7 @@ typedef struct
 	cl_int			nvalids;	/* length of rindex. -1 means all valid */
 	cl_uint			rindex[FLEXIBLE_ARRAY_MEMBER];
 } pgstrom_bulkslot;
-
+#endif
 typedef pgstrom_data_store *(*pgstromExecBulkScan)(CustomScanState *node);
 
 /* --------------------------------------------------------------------
@@ -453,9 +455,11 @@ extern pgstrom_data_store *
 pgstrom_create_data_store_slot(GpuContext *gcontext,
 							   TupleDesc tupdesc,
 							   cl_uint nrooms,
-							   bool internal_format);
+							   bool internal_format,
+							   pgstrom_data_store *ktoast);
 extern pgstrom_data_store *
-pgstrom_file_map_data_store(const char *kds_fname, Size kds_length);
+pgstrom_file_mmap_data_store(const char *kds_fname,
+							 Size kds_offset, Size kds_length);
 extern void
 pgstrom_file_unmap_data_store(pgstrom_data_store *pds);
 
@@ -717,6 +721,7 @@ typealign_get_width(char type_align)
 		return sizeof(cl_int);
 	else if (type_align == 'd')
 		return sizeof(cl_long);
+	Assert(false);
 	elog(ERROR, "unexpected type alignment: %c", type_align);
 	return -1;	/* be compiler quiet */
 }

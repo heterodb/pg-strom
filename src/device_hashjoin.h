@@ -861,63 +861,18 @@ out:
 /*
  * Template of variable reference on the hash-entry
  */
-#define STROMCL_SIMPLE_HASHREF_TEMPLATE(NAME,BASE)				\
-	pg_##NAME##_t												\
-	pg_##NAME##_hashref(__global kern_hashtable *khtable,		\
-						__global kern_hashentry *kentry,		\
-						__private int *p_errcode,				\
-						cl_uint colidx)							\
-	{															\
-		pg_##NAME##_t result;									\
-		__global BASE *addr										\
-			= kern_get_datum_tuple(khtable->colmeta,			\
-								   &kentry->htup,				\
-								   colidx);						\
-		if (!addr)												\
-			result.isnull = true;								\
-		else													\
-		{														\
-			result.isnull = false;								\
-			result.value = *addr;								\
-		}														\
-		return result;											\
-	}
-
-pg_varlena_t
-pg_varlena_hashref(__global kern_hashtable *khtable,
-				   __global kern_hashentry *kentry,
-				   __private int *p_errcode,
-				   cl_uint colidx)
-{
-	pg_varlena_t	result;
-	__global varlena *vl_ptr
-		= kern_get_datum_tuple(khtable->colmeta,
-							   &kentry->htup,
-							   colidx);
-	if (!vl_ptr)
-		result.isnull = true;
-	else if (VARATT_IS_4B_U(vl_ptr) || VARATT_IS_1B(vl_ptr))
-	{
-		result.value = vl_ptr;
-		result.isnull = false;
-	}
-	else
-	{
-		result.isnull = true;
-		STROM_SET_ERROR(p_errcode, StromError_CpuReCheck);
-	}
-	return result;
-}
-
-#define STROMCL_VARLENA_HASHREF_TEMPLATE(NAME)				\
-	pg_##NAME##_t											\
-	pg_##NAME##_hashref(__global kern_hashtable *khtable,	\
-						__global kern_hashentry *kentry,	\
-						__private int *p_errcode,			\
-						cl_uint colidx)						\
-	{														\
-		return pg_varlena_hashref(khtable, kentry,			\
-								  p_errcode, colidx);		\
+#define STROMCL_ANYTYPE_HASHREF_TEMPLATE(NAME)						\
+	pg_##NAME##_t													\
+	pg_##NAME##_hashref(__global kern_hashtable *khtable,			\
+						__global kern_hashentry *kentry,			\
+						__private int *p_errcode,					\
+						cl_uint colidx)								\
+	{																\
+		__global void *datum										\
+			= kern_get_datum_tuple(khtable->colmeta,				\
+								   &kentry->htup,					\
+								   colidx);							\
+		return pg_##NAME##_datum_ref(p_errcode, datum, false);		\
 	}
 
 #else	/* OPENCL_DEVICE_CODE */
