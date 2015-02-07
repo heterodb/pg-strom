@@ -543,6 +543,23 @@ static __global Datum *pg_common_vstore(__global kern_data_store *kds,
 	} pg_##NAME##_t;
 
 #define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)			\
+	static inline pg_##NAME##_t								\
+	pg_##NAME##_datum_ref(__private int *errcode,			\
+						  __global void *datum,				\
+						  cl_bool internal_format)			\
+	{														\
+		pg_##NAME##_t	result;								\
+															\
+		if (!datum)											\
+			result.isnull = true;							\
+		else												\
+		{													\
+			result.isnull = false;							\
+			result.value = *((__global BASE *) datum);		\
+		}													\
+		return result;										\
+	}														\
+															\
 	pg_##NAME##_t											\
 	pg_##NAME##_vref(__global kern_data_store *kds,			\
 					 __global kern_data_store *ktoast,		\
@@ -550,18 +567,9 @@ static __global Datum *pg_common_vstore(__global kern_data_store *kds,
 					 cl_uint colidx,						\
 					 cl_uint rowidx)						\
 	{														\
-		pg_##NAME##_t result;								\
-		__global BASE *addr									\
+		__global void  *datum								\
 			= kern_get_datum(kds,ktoast,colidx,rowidx);		\
-															\
-		if (!addr)											\
-			result.isnull = true;							\
-		else												\
-		{													\
-			result.isnull = false;							\
-			result.value = *addr;							\
-		}													\
-		return result;										\
+		return pg_##NAME##_datum_ref(errcode,datum,false);	\
 	}
 
 #define STROMCL_SIMPLE_VARSTORE_TEMPLATE(NAME,BASE)			\
@@ -1169,17 +1177,15 @@ pg_dump_data_store(__global kern_data_store *kds, __constant const char *label)
  */
 STROMCL_SIMPLE_DATATYPE_TEMPLATE(varlena, __global varlena *)
 
-pg_varlena_t
-pg_varlena_vref(__global kern_data_store *kds,
-				__global kern_data_store *ktoast,
-				__private int *errcode,
-				cl_uint colidx,
-				cl_uint rowidx)
+static inline pg_varlena_t
+pg_varlena_datum_ref(__private int *errcode,
+					 __global void *datum,
+					 cl_bool internal_format)
 {
-	pg_varlena_t result;
-	__global varlena *vl_val = kern_get_datum(kds,ktoast,colidx,rowidx);
+	__global varlena   *vl_val = datum;
+	pg_varlena_t		result;
 
-	if (!vl_val)
+	if (!datum)
 		result.isnull = true;
 	else
 	{
@@ -1196,6 +1202,20 @@ pg_varlena_vref(__global kern_data_store *kds,
 	}
 	return result;
 }
+
+#if 1
+pg_varlena_t
+pg_varlena_vref(__global kern_data_store *kds,
+				__global kern_data_store *ktoast,
+				__private int *errcode,
+				cl_uint colidx,
+				cl_uint rowidx)
+{
+	__global void *datum = kern_get_datum(kds,ktoast,colidx,rowidx);
+
+	return pg_varlena_datum_ref(errcode,datum,false);
+}
+#endif
 
 static inline void
 pg_varlena_vstore(__global kern_data_store *kds,
@@ -1268,19 +1288,29 @@ pg_varlena_comp_crc32(__local cl_uint *crc32_table,
 	return hash;
 }
 
-#define STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)			\
+#define STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)				\
 	typedef pg_varlena_t	pg_##NAME##_t;
 
-#define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)			\
-	pg_##NAME##_t										\
-	pg_##NAME##_vref(__global kern_data_store *kds,		\
-					 __global kern_data_store *ktoast,	\
-					 __private int *errcode,			\
-					 cl_uint colidx,					\
-					 cl_uint rowidx)					\
-	{													\
-		return pg_varlena_vref(kds,ktoast,errcode,		\
-							   colidx,rowidx);			\
+#define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)				\
+	pg_##NAME##_t											\
+	pg_##NAME##_datum_ref(__private int *errcode,			\
+						  __global void *datum,				\
+						  cl_bool internal_format)			\
+	{														\
+		return pg_varlena_datum_ref(errcode,datum,			\
+									internal_format);		\
+	}														\
+															\
+	pg_##NAME##_t											\
+	pg_##NAME##_vref(__global kern_data_store *kds,			\
+					 __global kern_data_store *ktoast,		\
+					 __private int *errcode,				\
+					 cl_uint colidx,						\
+					 cl_uint rowidx)						\
+	{														\
+		__global void  *datum								\
+			= kern_get_datum(kds,ktoast,colidx,rowidx);		\
+		return pg_varlena_datum_ref(errcode,datum,false);	\
 	}
 
 #define STROMCL_VARLENA_VARSTORE_TEMPLATE(NAME)				\

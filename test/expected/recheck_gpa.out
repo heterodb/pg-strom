@@ -52,3 +52,84 @@ NOTICE:  GpuPreAgg: 1 chunks were re-checked by CPU
  0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001
 (1 row)
 
+-- division by zero with GpuPreAggregate
+prepare p1 as select sum(smlint_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) execute p1;
+                                                                                                                 QUERY PLAN                                                                                                                  
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: pgstrom.sum((pgstrom.psum(((smlint_x / (id % 1000)))::bigint)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.psum(((smlint_x / (id % 1000)))::bigint)
+         Bulkload: On
+         ->  Custom Scan (GpuScan) on public.strom_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(7 rows)
+
+execute p1;
+ERROR:  division by zero
+deallocate p1;
+prepare p1 as select sum(integer_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) execute p1;
+                                                                                                                  QUERY PLAN                                                                                                                  
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: pgstrom.sum((pgstrom.psum(((integer_x / (id % 1000)))::bigint)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.psum(((integer_x / (id % 1000)))::bigint)
+         Bulkload: On
+         ->  Custom Scan (GpuScan) on public.strom_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(7 rows)
+
+execute p1;
+ERROR:  division by zero
+deallocate p1;
+prepare p1 as select sum(bigint_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) execute p1;
+                                                                                                            QUERY PLAN                                                                                                             
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: sum((pgstrom.psum((bigint_x / (id % 1000)))))
+   ->  Custom Scan (GpuPreAgg)
+         Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.psum((bigint_x / (id % 1000)))
+         Bulkload: On
+         ->  Custom Scan (GpuScan) on public.strom_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(7 rows)
+
+execute p1;
+ERROR:  division by zero
+deallocate p1;
+prepare p1 as select sum(real_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) execute p1;
+                                                                                                                     QUERY PLAN                                                                                                                      
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: sum((pgstrom.psum((real_x / ((id % 1000))::double precision))))
+   ->  Custom Scan (GpuPreAgg)
+         Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.psum((real_x / ((id % 1000))::double precision))
+         Bulkload: On
+         ->  Custom Scan (GpuScan) on public.strom_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(7 rows)
+
+execute p1;
+ERROR:  division by zero
+deallocate p1;
+prepare p1 as select sum(float_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) execute p1;
+                                                                                                                      QUERY PLAN                                                                                                                      
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: sum((pgstrom.psum((float_x / ((id % 1000))::double precision))))
+   ->  Custom Scan (GpuPreAgg)
+         Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.psum((float_x / ((id % 1000))::double precision))
+         Bulkload: On
+         ->  Custom Scan (GpuScan) on public.strom_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(7 rows)
+
+execute p1;
+ERROR:  division by zero
+deallocate p1;
