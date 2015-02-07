@@ -140,7 +140,8 @@ gpusort_preparation(__global kern_gpusort *kgpusort,
 	int			errcode = StromError_Success;
 
 	if (kresults->nrels != 2 ||
-		kresults->nitems != nitems)
+		kresults->nitems != nitems ||
+		kds->nrooms < nitems)
 	{
 		STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption);
 		goto out;

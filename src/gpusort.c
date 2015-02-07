@@ -504,9 +504,14 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 			elog(ERROR, "device function %u lookup failed", sort_func);
 
 		/* add projection case */
-		gpusort_projection_addcase(&pj_body, dtype, i, colidx);
+		gpusort_projection_addcase(&pj_body, dtype, i, colidx - 1);
 
-		/* reference to X-variable / Y-variable */
+		/*
+		 * reference to X-variable / Y-variable
+		 *
+		 * Because KDS has tuple-slot format, colidx should be index
+		 * from the sortkyes array, not resno on host-side.
+		 */
 		appendStringInfo(
 			&kc_decl,
 			"  pg_%s_t KVAR_X%d"
@@ -514,9 +519,9 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 			"  pg_%s_t KVAR_Y%d"
 			" = pg_%s_vref(kds,ktoast,errcode,%d,y_index);\n",
 			dtype->type_name, i+1,
-			dtype->type_name, colidx - 1,
+			dtype->type_name, i,
 			dtype->type_name, i+1,
-			dtype->type_name, colidx - 1);
+			dtype->type_name, i);
 
 		/* logic to compare */
 		appendStringInfo(
@@ -1318,7 +1323,6 @@ gpusort_check_gpu_tasks(GpuSortState *gss)
 	pgstrom_message	   *msg;
 	pgstrom_gpusort	   *gpusort;
 	pgstrom_cpusort	   *cpusort;
-	kern_resultbuf	   *kresults;
 
 	/*
 	 * Check status of GPU co-routine
@@ -1330,7 +1334,6 @@ gpusort_check_gpu_tasks(GpuSortState *gss)
 
 		Assert(StromTagIs(msg, GpuSort));
 		gpusort = (pgstrom_gpusort *) msg;
-		kresults = KERN_GPUSORT_RESULTBUF(&gpusort->kern);
 
 		if (msg->errcode != StromError_Success)
 		{
@@ -1633,8 +1636,8 @@ gpusort_exec(CustomScanState *node)
 		if (chunk_id >= gss->num_chunks || !gss->pds_chunks[chunk_id])
 			elog(ERROR, "Bug? data-store of GpuSort missing (chunk-id: %d)",
 				 chunk_id);
-		pds = gss->pds_chunks[chunk_id];
 
+		pds = gss->pds_toasts[chunk_id];
 		if (pgstrom_fetch_data_store(slot, pds, item_id, &gss->tuple_buf))
 		{
 			gss->sorted_index++;
