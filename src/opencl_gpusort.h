@@ -139,13 +139,21 @@ gpusort_preparation(__global kern_gpusort *kgpusort,
 	size_t		index;
 	int			errcode = StromError_Success;
 
+	/* sanity checks */
 	if (kresults->nrels != 2 ||
 		kresults->nitems != nitems ||
-		kds->nrooms < nitems)
+		ktoast->format != KDS_FORMAT_ROW_FMAP ||
+		kds->format != KDS_FORMAT_TUPSLOT)
 	{
 		STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption);
 		goto out;
 	}
+	if (kds->nrooms < nitems)
+	{
+		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
+		goto out;
+	}
+
 	/* kds also has same nitems */
 	if (get_global_id(0) == 0)
 		kds->nitems = nitems;
