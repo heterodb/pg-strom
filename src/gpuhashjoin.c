@@ -1452,19 +1452,9 @@ gpuhashjoin_codegen_type_declarations(codegen_context *context)
 	{
 		devtype_info   *dtype = lfirst(cell);
 
-		if (dtype->type_flags & DEVTYPE_IS_VARLENA)
-		{
-			appendStringInfo(&str,
-							 "STROMCL_VARLENA_HASHREF_TEMPLATE(%s)\n",
-							 dtype->type_name);
-		}
-		else
-		{
-			appendStringInfo(&str,
-							 "STROMCL_SIMPLE_HASHREF_TEMPLATE(%s,%s)\n",
-							 dtype->type_name, dtype->type_base);
-		}
-    }
+		appendStringInfo(&str, "STROMCL_ANYTYPE_HASHREF_TEMPLATE(%s)\n",
+						 dtype->type_name);
+	}
     appendStringInfoChar(&str, '\n');
 
     return str.data;
