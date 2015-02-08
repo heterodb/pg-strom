@@ -69,10 +69,13 @@ typedef struct
 	Bitmapset	waiting_backends;	/* flexible length */
 } program_cache_head;
 
-/* ---- static variables ---- */
-static shmem_startup_hook_type shmem_startup_next;
+/* ---- GUC variables ---- */
 static Size		program_cache_size;
 static char	   *pgstrom_nvcc_path;
+bool			enable_cudaprog_optimize;
+
+/* ---- static variables ---- */
+static shmem_startup_hook_type shmem_startup_next;
 static program_cache_head *pgcache_head;
 static int		itemid_offset_shift;
 static int		itemid_flags_shift;
@@ -846,6 +849,15 @@ pgstrom_init_cuda_program(void)
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							NULL, NULL, NULL);
 	program_cache_size = (Size)__program_cache_size * 1024L;
+
+	DefineCustomBoolVariable("pg_strom.enable_program_optimize",
+							 "enables optimization on device program build",
+							 NULL,
+							 &enable_cudaprog_optimize,
+							 true,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 
 	/*
 	 * NOTE: Here is no C standard for bitfield layout (thus, OpenCL does not

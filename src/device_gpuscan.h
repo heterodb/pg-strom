@@ -65,12 +65,12 @@ typedef struct {
 } kern_gpuscan;
 
 #define KERN_GPUSCAN_PARAMBUF(kgpuscan)			\
-	((__global kern_parambuf *)(&(kgpuscan)->kparams))
+	((__device__ kern_parambuf *)(&(kgpuscan)->kparams))
 #define KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan)	\
 	STROMALIGN((kgpuscan)->kparams.length)
 #define KERN_GPUSCAN_RESULTBUF(kgpuscan)		\
-	((__global kern_resultbuf *)				\
-	 ((__global char *)&(kgpuscan)->kparams +	\
+	((__device__ kern_resultbuf *)				\
+	 ((__device__ char *)&(kgpuscan)->kparams +	\
 	  STROMALIGN((kgpuscan)->kparams.length)))
 #define KERN_GPUSCAN_RESULTBUF_LENGTH(kgpuscan)	\
 	STROMALIGN(offsetof(kern_resultbuf,			\
@@ -89,16 +89,16 @@ typedef struct {
 #define KERN_GPUSCAN_DMARECV_LENGTH(kgpuscan)	\
 	KERN_GPUSCAN_RESULTBUF_LENGTH(kgpuscan)
 
-#ifdef OPENCL_DEVICE_CODE
+#ifdef CUDA_DEVICE_CODE
 /*
  * gpuscan_writeback_row_error
  *
  * It writes back the calculation result of gpuscan.
  */
-static void
-gpuscan_writeback_row_error(__global kern_resultbuf *kresults,
+static __device__ void
+gpuscan_writeback_row_error(__device__ kern_resultbuf *kresults,
 							int errcode,
-							__local void *workmem)
+							__shared__ void *workmem)
 {
 	__local cl_uint *p_base = workmem;
 	cl_uint		base;
@@ -140,25 +140,25 @@ gpuscan_writeback_row_error(__global kern_resultbuf *kresults,
 /*
  * forward declaration of the function to be generated on the fly
  */
-static pg_bool_t
+static __device__ pg_bool_t
 gpuscan_qual_eval(__private cl_int *errcode,
-				  __global kern_parambuf *kparams,
-				  __global kern_data_store *kds,
-				  __global kern_data_store *ktoast,
+				  __device__ kern_parambuf *kparams,
+				  __device__ kern_data_store *kds,
+				  __device__ kern_data_store *ktoast,
 				  size_t kds_index);
 /*
  * kernel entrypoint of gpuscan
  */
-__kernel void
-gpuscan_qual(__global kern_gpuscan *kgpuscan,	/* in/out */
-			 __global kern_data_store *kds,		/* in */
-			 __global kern_data_store *ktoast,	/* always NULL */
+__global__ void
+gpuscan_qual(__device__ kern_gpuscan *kgpuscan,	/* in/out */
+			 __device__ kern_data_store *kds,		/* in */
+			 __device__ kern_data_store *ktoast,	/* always NULL */
 			 KERN_DYNAMIC_LOCAL_WORKMEM_ARG)	/* in */
 {
 	pg_bool_t	rc;
 	cl_int		errcode = StromError_Success;
-	__global kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
-	__global kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
+	__device__ kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
+	__device__ kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
 
 	if (get_global_id(0) < kds->nitems)
 		rc = gpuscan_qual_eval(&errcode, kparams, kds, ktoast,
@@ -178,5 +178,5 @@ gpuscan_qual(__global kern_gpuscan *kgpuscan,	/* in/out */
 	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
 }
 
-#endif	/* OPENCL_DEVICE_CODE */
+#endif	/* CUDA_DEVICE_CODE */
 #endif	/* DEVICE_GPUSCAN_H */

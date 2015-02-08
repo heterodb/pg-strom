@@ -154,11 +154,9 @@ pgstrom_get_gpucontext(void)
 	return gcontext;
 }
 
-static void
-pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
+void
+pgstrom_sync_gpucontext(GpuContext *gcontext)
 {
-	dlist_mutable_iter	siter;
-	dlist_mutable_iter	titer;
 	CUresult	rc;
 	int			i;
 
@@ -173,6 +171,18 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuCtxSynchronize: %s", errorText(rc));
 	}
+}
+
+static void
+pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
+{
+	dlist_mutable_iter	siter;
+	dlist_mutable_iter	titer;
+	CUresult	rc;
+	int			i;
+
+	/* Ensure all the concurrent tasks getting completed */
+	pgstrom_sync_gpucontext(gcontext);
 
 	/* Release underlying TaskState, if any */
 	dlist_foreach_modify(siter, &gcontext->state_list)
@@ -188,6 +198,7 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 			rc = cuModuleUnload(gts->cuda_module);
 			if (rc != CUDA_SUCCESS)
 				elog(WARNING, "failed on cuModuleUnload: %s", errorText(rc));
+			gts->cuda_module = NULL;
 		}
 		/* release task objects */
 		dlist_foreach_modify(titer, &gst->tracked_tasks)
@@ -195,7 +206,6 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 			GpuTask *task = dlist_container(GpuTask, tracker, titer.cur);
 
 			Assert(task->gts == gts);
-			dlist_delete(&task->chain);
 			dlist_delete(&task->tracker);
 			if (is_commit)
 				elog(WARNING, "Unreferenced GpuTask leak: %p", task);
@@ -222,7 +232,9 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 	{
 		pgstrom_data_store *pds = dlist_container(pgstrom_data_store,
 												  chain, iter.cur);
-		pgstrom_file_unmap_data_store(pds);
+		dlist_delete(&pds->chain);
+		if (pds->kds_fname)
+			pgstrom_file_unmap_data_store(pds);
 	}
 
 	/* OK, release this GpuContext */
@@ -257,6 +269,30 @@ pgstrom_put_gpucontext(GpuContext *gcontext)
 
 	if (do_release)
 		pgstrom_release_gpucontext(gcontext, true);
+}
+
+void
+pgstrom_init_gputaststate(GpuContext *gcontext, GpuTaskState *gts,
+						  const char *kern_source, int extra_flags,
+						  void (*cb_cleanup)(GpuTaskState *gts))
+{
+	dlist_push_tail(&gcontext->state_list, &gts->chain);
+	gts->gcontext = gcontext;
+	gts->kern_source = kern_source;
+	gts->extra_flags = extra_flags;
+	SpinLockInit(&gts->lock);
+	dlist_init(&gts->tracked_tasks);
+	dlist_init(&gts->running_tasks);
+	dlist_init(&gts->pending_tasks);
+	dlist_init(&gts->completed_tasks);
+	gts->num_running_tasks = 0;
+	gts->num_pending_tasks = 0;
+	gts->num_completed_tasks = 0;
+	gts->cb_cleanup = cb_cleanup;
+	memset(&gts->pfm_accum, 0, sizeof(pgstrom_perfmon));
+	/* try to load binary module, or kick run-time compiler, if any */
+	if (kern_source != NULL)
+		pgstrom_load_cuda_program(gts);
 }
 
 void
@@ -346,7 +382,7 @@ dynamic_shmem_size_per_block(int blockSize)
 	return dynamic_shmem_size_per_thread * (size_t)blockSize;
 }
 
-static void
+void
 pgstrom_compute_workgroup_size(size_t *p_grid_size,
 							   size_t *p_block_size,
 							   CUfunction function,

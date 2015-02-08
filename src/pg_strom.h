@@ -65,7 +65,6 @@
  *
  * --------------------------------------------------------------------
  */
-#define PGSTROM_TEMP_DIR	"pg_strom_temp"
 
 
 
@@ -80,70 +79,17 @@
  */
 
 /*
- * Tag of shared memory object classes
- */
-typedef enum {
-	StromTag_DevProgram = 1001,
-	StromTag_MsgQueue,
-	StromTag_ParamBuf,
-	StromTag_DataStore,
-	StromTag_GpuScan,
-	StromTag_GpuHashJoin,
-	StromTag_HashJoinTable,
-	StromTag_GpuPreAgg,
-	StromTag_GpuSort,
-} StromTag;
-
-typedef struct {
-	StromTag	stag;			/* StromTag_* */
-} StromObject;
-
-#define StromTagIs(PTR,IDENT) \
-	(((StromObject *)(PTR))->stag == StromTag_##IDENT)
-
-static inline const char *
-StromTagGetLabel(StromObject *sobject)
-{
-	static char msgbuf[80];
-#define StromTagGetLabelEntry(IDENT)		\
-	case StromTag_##IDENT: return #IDENT
-
-	switch (sobject->stag)
-	{
-		StromTagGetLabelEntry(DevProgram);
-		StromTagGetLabelEntry(MsgQueue);
-		StromTagGetLabelEntry(ParamBuf);
-		StromTagGetLabelEntry(DataStore);
-		StromTagGetLabelEntry(GpuScan);
-		StromTagGetLabelEntry(GpuPreAgg);
-		StromTagGetLabelEntry(GpuHashJoin);
-		StromTagGetLabelEntry(HashJoinTable);
-		StromTagGetLabelEntry(GpuSort);
-		default:
-			snprintf(msgbuf, sizeof(msgbuf),
-					 "unknown tag (%u)", sobject->stag);
-			break;
-	}
-#undef StromTagGetLabelEntry
-	return msgbuf;
-}
-
-/*
  * Performance monitor structure
  */
 typedef struct {
 	cl_bool		enabled;
 	cl_uint		num_samples;
 	/*-- perfmon to load and materialize --*/
-	cl_ulong	time_inner_load;	/* time to load the inner relation */
-	cl_ulong	time_outer_load;	/* time to load the outer relation */
-	cl_ulong	time_materialize;	/* time to materialize the result */
+	cl_double	time_inner_load;	/* time to load the inner relation */
+	cl_double	time_outer_load;	/* time to load the outer relation */
+	cl_double	time_materialize;	/* time to materialize the result */
 	/*-- perfmon to launch CUDA kernel --*/
 	cl_double	time_launch_cuda;	/* time to kick CUDA commands */
-
-	
-
-
 	/*-- perfmon for DMA send/recv --*/
 	cl_uint		num_dma_send;	/* number of DMA send request */
 	cl_uint		num_dma_recv;	/* number of DMA receive request */
@@ -151,33 +97,38 @@ typedef struct {
 	cl_ulong	bytes_dma_recv;	/* bytes of DMA receive */
 	cl_double	time_dma_send;	/* time to send host=>device data */
 	cl_double	time_dma_recv;	/* time to receive device=>host data */
-	/*-- perfmon for kernel execution --*/
-	cl_uint		num_kern_exec;	/* number of main kernel execution */
-	cl_double	time_kern_exec;	/* time to execute main kernel */
-
+	/*-- (special perfmon for gpuscan) --*/
+	cl_uint		num_kern_qual;	/* number of qual eval kernel execution */
+	cl_double	time_kern_qual;	/* time to execute qual eval kernel */
 	/*-- (special perfmon for gpuhashjoin) --*/
+	cl_uint		num_kern_join;	/* number of hash-join kernel execution */
 	cl_uint		num_kern_proj;	/* number of projection kernel execution */
-	cl_ulong	time_kern_proj;	/* time to execute projection kernel */
+	cl_double	time_kern_join;	/* time to execute hash-join kernel */
+	cl_double	time_kern_proj;	/* time to execute projection kernel */
 	/*-- (special perfmon for gpupreagg) --*/
 	cl_uint		num_kern_prep;	/* number of preparation kernel execution */
 	cl_uint		num_kern_lagg;	/* number of local reduction kernel exec */
 	cl_uint		num_kern_gagg;	/* number of global reduction kernel exec */
-	cl_ulong	time_kern_prep;	/* time to execute preparation kernel */
-	cl_ulong	time_kern_lagg;	/* time to execute local reduction kernel */
-	cl_ulong	time_kern_gagg;	/* time to execute global reduction kernel */
+	cl_double	time_kern_prep;	/* time to execute preparation kernel */
+	cl_double	time_kern_lagg;	/* time to execute local reduction kernel */
+	cl_double	time_kern_gagg;	/* time to execute global reduction kernel */
 	/*-- (special perfmon for gpusort) --*/
+	cl_uint		num_prep_sort;	/* number of GPU sort preparation kernel */
 	cl_uint		num_gpu_sort;	/* number of GPU bitonic sort execution */
 	cl_uint		num_cpu_sort;	/* number of GPU merge sort execution */
-	cl_ulong	time_gpu_sort;	/* time to execute GPU bitonic sort */
-	cl_ulong	time_cpu_sort;	/* time to execute CPU merge sort */
-	cl_ulong	time_cpu_sort_real;	/* real time to execute CPU merge sort */
-	cl_ulong	time_bgw_sync;	/* time to synchronich BGWorkers */
+	cl_double	time_prep_sort;	/* time to execute GPU sort prep kernel */
+	cl_double	time_gpu_sort;	/* time to execute GPU bitonic sort */
+	cl_double	time_cpu_sort;	/* time to execute CPU merge sort */
+	cl_double	time_cpu_sort_real;	/* real time to execute CPU merge sort */
+	cl_double	time_cpu_sort_min;	/* min time to execute CPU merge sort */
+	cl_double	time_cpu_sort_max;	/* max time to execute CPU merge sort */
+	cl_double	time_bgw_sync;	/* time to synchronize bgworkers*/
 
 	/*-- for debugging usage --*/
-	cl_ulong	time_debug1;	/* time for debugging purpose.1 */
-	cl_ulong	time_debug2;	/* time for debugging purpose.2 */
-	cl_ulong	time_debug3;	/* time for debugging purpose.3 */
-	cl_ulong	time_debug4;	/* time for debugging purpose.4 */
+	cl_double	time_debug1;	/* time for debugging purpose.1 */
+	cl_double	time_debug2;	/* time for debugging purpose.2 */
+	cl_double	time_debug3;	/* time for debugging purpose.3 */
+	cl_double	time_debug4;	/* time for debugging purpose.4 */
 
 	struct timeval	tv;	/* result of gettimeofday(2) when enqueued */
 } pgstrom_perfmon;
@@ -185,7 +136,7 @@ typedef struct {
 /* time interval in milliseconds */
 #define timeval_diff(tv1,tv2)									\
 	(((double)(((tv2)->tv_sec * 1000000L + (tv2)->tv_usec) -	\
-			   ((tv1)->tv_sec * 1000000L + (tv2)->tv_usec))) / 1000000000.0 \
+			   ((tv1)->tv_sec * 1000000L + (tv2)->tv_usec))) / 1000000000.0)
 
 /*
  *
@@ -222,7 +173,7 @@ typedef struct GpuTaskState
 	cl_uint			num_pending_tasks;
 	cl_uint			num_completed_tasks;
 	void		  (*cb_cleanup)(struct GpuTaskState *gtstate);
-	pgstrom_perfmon	pfm_sum;
+	pgstrom_perfmon	pfm_accum;
 } GpuTaskState;
 
 typedef struct GpuTask
@@ -234,20 +185,10 @@ typedef struct GpuTask
 	CUdevice		cuda_device;	/* just reference, no cleanup needed */
 	CUcontext		cuda_context;	/* just reference, no cleanup needed */
 	cl_int			errcode;
-	void		  (*cb_process)(struct GpuTask *gtask);
+	bool		  (*cb_process)(struct GpuTask *gtask);
 	void		  (*cb_release)(struct GpuTask *gtask);
 	pgstrom_perfmon	pfm;
 } GpuTask;
-
-/*
- * Kernel Param/Const buffer
- */
-typedef struct {
-	StromObject		sobj;
-	slock_t			lock;
-	int				refcnt;
-	kern_parambuf	kern;
-} pgstrom_parambuf;
 
 /*
  * Type declarations for code generator
@@ -307,22 +248,6 @@ typedef struct pgstrom_data_store
 	struct pgstrom_data_store *ktoast;
 } pgstrom_data_store;
 
-#if 0
-// no longer used
-/*
- * pgstrom_bulk_slot
- *
- * A data structure to move a chunk of data with keeping pgstrom_data_store
- * data format on shared memory segment. It reduces cost for data copy.
- */
-typedef struct
-{
-	NodeTag			type;
-	pgstrom_data_store *pds;
-	cl_int			nvalids;	/* length of rindex. -1 means all valid */
-	cl_uint			rindex[FLEXIBLE_ARRAY_MEMBER];
-} pgstrom_bulkslot;
-#endif
 typedef pgstrom_data_store *(*pgstromExecBulkScan)(CustomScanState *node);
 
 /* --------------------------------------------------------------------
@@ -376,20 +301,35 @@ HostPinMemContextCreate(MemoryContext parent,
 /*
  * cuda_control.c
  */
-extern void pgstrom_init_cuda_control(void);
 extern GpuContext *pgstrom_get_gpucontext(void);
+extern void pgstrom_sync_gpucontext(GpuContext *gcontext);
 extern void pgstrom_put_gpucontext(GpuContext *gcontext);
-extern void pgstrom_assign_cuda_stream(GpuContext *gcontext, GpuTask *task);
-extern const char *cuda_strerror(CUresult errcode);
+
+extern void pgstrom_init_gputaststate(GpuContext *gcontext,
+									  GpuTaskState *gts,
+									  const char *kern_source,
+									  int extra_flags,
+									  void (*cb_cleanup)(GpuTaskState *gts));
+extern void pgstrom_init_gputask(GpuTaskState *gts, GpuTask *task,
+								 void (*cb_process)(GpuTask *task),
+								 void (*cb_release)(GpuTask *task));
+extern void pgstrom_compute_workgroup_size(size_t *p_grid_size,
+										   size_t *p_block_size,
+										   CUfunction function,
+										   CUdevice device,
+										   bool maximum_blocksize,
+										   size_t nitems,
+										   size_t dynamic_shmem_per_thread);
+extern void pgstrom_init_cuda_control(void);
+
+extern const char *errorText(int errcode);
 extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 
 /*
  * cuda_program.c
  */
-extern bool pgstrom_get_cuda_program(GpuTaskState *gts,
-									 const char *source,
-									 int32 extra_flags);
-extern void pgstrom_put_cuda_program(GpuTaskState *gts);
+extern bool	enable_cudaprog_optimize;
+extern bool pgstrom_load_cuda_program(GpuTaskState *gts);
 extern void pgstrom_init_cuda_program(void);
 
 /*
@@ -450,7 +390,7 @@ extern pgstrom_data_store *
 pgstrom_create_data_store_row(GpuContext *gcontext,
 							  TupleDesc tupdesc,
 							  Size length,
-							  char *file_name);
+							  bool file_mapped);
 extern pgstrom_data_store *
 pgstrom_create_data_store_slot(GpuContext *gcontext,
 							   TupleDesc tupdesc,
@@ -567,8 +507,8 @@ extern void show_instrumentation_count(const char *qlabel, int which,
 extern void print_device_kernel(const char *kern_source,
 								int32 extra_flags,
 								ExplainState *es);
-extern void pgstrom_perfmon_add(pgstrom_perfmon *pfm_sum,
-								pgstrom_perfmon *pfm_item);
+extern void pgstrom_perfmon_accum(pgstrom_perfmon *accum,
+								  const pgstrom_perfmon *pfm);
 extern void pgstrom_perfmon_explain(pgstrom_perfmon *pfm,
 									ExplainState *es);
 extern void _outToken(StringInfo str, const char *s);

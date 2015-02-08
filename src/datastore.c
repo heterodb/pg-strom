@@ -18,6 +18,8 @@
  */
 #include "postgres.h"
 #include "access/relscan.h"
+#include "catalog/catalog.h"
+#include "catalog/pg_tablespace.h"
 #include "catalog/pg_type.h"
 #include "storage/bufmgr.h"
 #include "storage/fd.h"
@@ -31,12 +33,15 @@
 #include "pg_strom.h"
 #include "device_numeric.h"
 #include <sys/mman.h>
+#include <sys/stat.h>
+
+/* path for temporary prefix */
+#define PGSTROM_TEMP_FILE_PREFIX	"pg_strom_tmep"
 
 /*
  * GUC variables
  */
 static int		pgstrom_chunk_size_kb;
-static char	   *pgstrom_temp_tablespace;
 
 /*
  * pgstrom_chunk_size - configured chunk size
@@ -338,12 +343,6 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 {
 	pgstrom_data_store *pds;
 	MemoryContext	gmcxt = gcontext->memcxt;
-	const char	   *kds_fname;
-	int				kds_fdesc;
-	Size			kds_length;
-
-	/* Is file-mapped? */
-	kds_fname = (file_mapped ? get_pgstrom_temp_filename() : NULL);
 
 	/* allocation of pds */
 	pds = MemoryContextAllocZero(gmcxt, sizeof(pgstrom_data_store));
@@ -355,29 +354,73 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 					   STROMALIGN(length));
 	pds->kds_offset = 0;
 
-	if (!kds_fname)
+	if (!file_mapped)
 		pds->kds = MemoryContextAlloc(gmcxt, pds->kds_length);
 	else
 	{
-		pds->kds_fname = MemoryContextStrdup(gmcxt, kds_fname);
+		Oid			tablespace_oid = GetNextTempTableSpace();
+		char		tempdirpath[MAXPGPATH];
+		char		tempfilepath[MAXPGPATH];
+		int			file_flags;
+		int			kds_fdesc;
+		static long	tempFileCounter = 0;
 
-		kds_fdesc = OpenTransientFile(kds_fname,
-									  O_RDWR | O_CREAT | O_TRUNC | PG_BINARY,
-									  0600);
+		/*
+		 * overall logic came from OpenTemporaryFileInTablespace()
+		 */
+		if (tablespace_oid == DEFAULTTABLESPACE_OID ||
+			tablespace_oid == GLOBALTABLESPACE_OID)
+		{
+			/* The default tablespace is {datadir}/base */
+			snprintf(tempdirpath, sizeof(tempdirpath), "base/%s",
+					 PG_TEMP_FILES_DIR);
+		}
+		else
+		{
+			/* All other tablespaces are accessed via symlinks */
+			snprintf(tempdirpath, sizeof(tempdirpath), "pg_tblspc/%u/%s/%s",
+					 tablespace_oid,
+					 TABLESPACE_VERSION_DIRECTORY,
+					 PG_TEMP_FILES_DIR);
+		}
+		/*
+		 * Generate a tempfile name that should be unique within the current
+		 * database instance.
+		 */
+		snprintf(tempfilepath, sizeof(tempfilepath), "%s/%s%d.%ld",
+				 tempdirpath, PGSTROM_TEMP_FILE_PREFIX,
+				 MyProcPid, tempFileCounter++);
+		pds->kds_fname = MemoryContextStrdup(gmcxt, tempfilepath);
+
+		/* Try to open it */
+		file_flags = O_RDWR | O_CREAT | O_TRUNC | PG_BINARY;
+		kds_fdesc = OpenTransientFile(pds->kds_fname, file_flags, 0600);
 		if (kds_fdesc < 0)
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not create file-mapped data store \"%s\"",
-							kds_fname)));
+		{
+			/*
+			 * We might need to create the tablespace's tempfile directory,
+			 * if no one has yet done so. However, no error check needed,
+			 * because concurrent mkdir(3) can happen and OpenTransientFile
+			 * below eventually raise an error.
+			 */
+			mkdir(tempdirpath, S_IRWXU);
+
+			kds_fdesc = OpenTransientFile(pds->kds_fname, file_flags, 0600);
+			if (kds_fdesc < 0)
+				ereport(ERROR,
+						(errcode_for_file_access(),
+				errmsg("could not create file-mapped data store \"%s\": %m",
+					   pds->kds_fname)));
+		}
 		
 
 		if (ftruncate(kds_fdesc, pds->kds_length) != 0)
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not truncate file \"%s\" to %zu: %m",
-							kds_fname, kds_length)));
+							pds->kds_fname, pds->kds_length)));
 
-		pds->kds = mmap(NULL, kds_length,
+		pds->kds = mmap(NULL, pds->kds_length,
 						PROT_READ | PROT_WRITE,
 						MAP_SHARED | MAP_POPULATE,
 						kds_fdesc, 0);
@@ -385,7 +428,7 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not mmap \"%s\" with length=%zu: %m",
-							kds_fname, kds_length)));
+							pds->kds_fname, pds->kds_length)));
 
 		/* kds is still mapped - not to manage file desc by ourself */
 		CloseTransientFile(kds_fdesc);
@@ -409,7 +452,6 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 {
 	pgstrom_data_store *pds;
 	MemoryContext	gmcxt = gcontext->memcxt;
-	Size			kds_offset;
 	int				kds_fdesc;
 
 	/* allocation of pds */
@@ -423,11 +465,11 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 						LONGALIGN(sizeof(Datum) * tupdesc->natts)) * nrooms);
 
 	if (!ktoast || !ktoast->kds_fname)
-		pds->kds = MemoryContextAlloc(gmcxt, kds_length);
+		pds->kds = MemoryContextAlloc(gmcxt, pds->kds_length);
 	else
 	{
 		/* append KDS after the ktoast file */
-		kds_offset = TYPEALIGN(BLCKSZ, ktoast->kds_length);
+		pds->kds_offset = TYPEALIGN(BLCKSZ, ktoast->kds_length);
 
 		pds->kds_fname = MemoryContextStrdup(gmcxt, ktoast->kds_fname);
 		kds_fdesc = OpenTransientFile(pds->kds_fname,
@@ -438,28 +480,30 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 					 errmsg("could not open file-mapped data store \"%s\"",
 							pds->kds_fname)));
 
-		if (ftruncate(kds_fdesc, kds_offset + pds->kds_length) != 0)
+		if (ftruncate(kds_fdesc, pds->kds_offset + pds->kds_length) != 0)
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not truncate file \"%s\" to %zu: %m",
-							pds->kds_fname, kds_offset + pds->kds_length)));
+							pds->kds_fname,
+							pds->kds_offset + pds->kds_length)));
 
-		pds->kds = mmap(NULL, kds_length,
+		pds->kds = mmap(NULL, pds->kds_length,
 						PROT_READ | PROT_WRITE,
 						MAP_SHARED | MAP_POPULATE,
-						kds_fdesc, kds_offset);
+						kds_fdesc, pds->kds_offset);
 		if (pds->kds == MAP_FAILED)
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not mmap \"%s\" with len/ofs=%zu/%zu: %m",
-							pds->kds_fname, pds->kds_length, kds_offset)));
+							pds->kds_fname,
+							pds->kds_length, pds->kds_offset)));
 
 		/* kds is still mapped - not to manage file desc by ourself */
 		CloseTransientFile(kds_fdesc);
 	}
 	pds->ktoast = ktoast;
 
-	init_kern_data_store(pds->kds, tupdesc, kds_length,
+	init_kern_data_store(pds->kds, tupdesc, pds->kds_length,
 						 KDS_FORMAT_SLOT, nrooms, internal_format);
 	return pds;
 }
@@ -477,7 +521,7 @@ pgstrom_file_mmap_data_store(const char *kds_fname,
 	pgstrom_data_store *pds;
 	int		kds_fdesc;
 
-	Assert(kds_offset == TYPE_ALIGN(BLCKSZ, kds_offset));
+	Assert(kds_offset == TYPEALIGN(BLCKSZ, kds_offset));
 
 	pds = palloc0(sizeof(pgstrom_data_store));
 	pds->kds_fname = pstrdup(kds_fname);
@@ -733,8 +777,8 @@ pgstrom_dump_data_store(pgstrom_data_store *pds)
 	int					i, j;
 
 	elog(INFO,
-		 "pds {kds_fname=%s kds_fdesc=%d kds_length=%zu kds=%p ktoast=%p}",
-		 pds->kds_fname, pds->kds_fdesc, pds->kds_length,
+		 "pds {kds_fname=%s kds_offset=%zu kds_length=%zu kds=%p ktoast=%p}",
+		 pds->kds_fname, pds->kds_offset, pds->kds_length,
 		 pds->kds, pds->ktoast);
 	elog(INFO,
 		 "kds {hostptr=%lu length=%u usage=%u ncols=%u nitems=%u nrooms=%u"
@@ -814,12 +858,4 @@ pgstrom_init_datastore(void)
 							PGC_USERSET,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							NULL, NULL, NULL);
-	DefineCustomStringVariable("pg_strom.temp_tablespace",
-							   "tablespace of file mapped data store",
-							   NULL,
-							   &pgstrom_temp_tablespace,
-							   NULL,
-							   PGC_USERSET,
-							   GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
 }

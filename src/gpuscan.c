@@ -3,8 +3,8 @@
  *
  * Sequential scan accelerated by GPU processors
  * ----
- * Copyright 2011-2014 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014 (C) The PG-Strom Development Team
+ * Copyright 2011-2015 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2015 (C) The PG-Strom Development Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -36,6 +36,8 @@
 #include "optimizer/var.h"
 #include "parser/parsetree.h"
 #include "storage/bufmgr.h"
+#include "storage/latch.h"
+#include "storage/proc.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -101,6 +103,22 @@ deform_gpuscan_info(Plan *plan)
 	return result;
 }
 
+typedef struct
+{
+	GpuTask			task;
+	dlist_node		chain;
+	CUfunction		kern_qual;
+	void		   *kern_qual_args[4];
+	CUdeviceptr		m_gpuscan;
+	CUdeviceptr		m_kds;
+	CUevent 		ev_dma_send_start;
+	CUevent			ev_dma_send_stop;	/* also, start kernel exec */
+	CUevent			ev_dma_recv_start;	/* also, stop kernel exec */
+	CUevent			ev_dma_recv_stop;
+	pgstrom_data_store *pds;
+	kern_gpuscan	kern;
+} pgstrom_gpuscan;
+
 typedef struct {
 	CustomScanState	css;
 	GpuTaskState	gts;
@@ -121,24 +139,8 @@ typedef struct {
 	pgstrom_perfmon	pfm;	/* sum of performance counter */
 } GpuScanState;
 
-typedef struct
-{
-	GpuTask			task;
-	dlist_node		chain;
-	CUfunction		kern_qual;
-	void		   *kern_qual_args[4];
-	CUdeviceptr		m_gpuscan;
-	CUdeviceptr		m_kds;
-	CUevent 		ev_dma_send_start;
-	CUevent			ev_dma_send_stop;	/* also, start kernel exec */
-	CUevent			ev_dma_recv_start;	/* also, stop kernel exec */
-	CUevent			ev_dma_recv_stop;
-	pgstrom_data_store *pds;
-	kern_gpuscan	kern;
-} pgstrom_gpuscan;
-
-/* static functions */
-static void clserv_process_gpuscan(pgstrom_message *msg);
+/* forward declarations */
+static void pgstrom_process_gpuscan(GpuTask *task);
 
 /*
  * cost_gpuscan
@@ -500,9 +502,9 @@ create_gpuscan_plan(PlannerInfo *root,
 	cscan->scan.scanrelid = rel->relid;
 
 	gs_info.kern_source = kern_source;
-	gs_info.extra_flags = context.extra_flags |
-		DEVKERNEL_NEEDS_GPUSCAN |
-		(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
+	gs_info.extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSCAN;
+	if (!enable_cudaprog_optimize)
+		gs_info.extra_flags |= DEVKERNEL_DISABLE_OPTIMIZE;
 	gs_info.used_params = context.used_params;
 	gs_info.used_vars = context.used_vars;
 	gs_info.dev_quals = dev_quals;
@@ -588,45 +590,24 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	Relation		scan_rel = node->ss.ss_currentRelation;
 	GpuScanState   *gss = (GpuScanState *) node;
 	GpuScanInfo	   *gs_info = deform_gpuscan_info(node->ss.ps.plan);
-	CUresult		rc;
-
-	BlockNumber		relpages;
-	double			reltuples;
-	double			allvisfrac;
 
 	/* gpuscan should not have inner/outer plan right now */
 	Assert(outerPlan(node) == NULL);
 	Assert(innerPlan(node) == NULL);
 
-	/*
-	 * Setup GpuTaskState
-	 */
-	gss->gts.gcontext = gcontext;
-	if (gs_info->kern_source)
-	{
-		if (!pgstrom_get_cuda_program(&gss->gts,
-									  gs_info->kern_source,
-									  gs_info->extra_flags))
-			elog(INFO, "no built binary, so kick nvcc");
-	}
-	SpinLockInit(&gss->gts.lock);
-	dlist_init(&gss->gts.running_tasks);
-	dlist_init(&gss->gts.pending_tasks);
-	dlist_init(&gss->gts.completed_tasks);
-	gss->gts.cb_cleanup = gpuscan_end_cleanup;
-
+	/* GpuTaskState setup */
+	pgstrom_init_gputaststate(gcontext, &gss->gts,
+							  gs_info->kern_source,
+							  gs_info->extra_flags,
+							  NULL);
 	/* initialize the start/end position */
 	gss->curr_blknum = 0;
 	gss->last_blknum = RelationGetNumberOfBlocks(scan_rel);
 	/* initialize device qualifiers also, for fallback */
 	gss->dev_quals = (List *)
-		ExecInitExpr((Expr *) gsinfo->dev_quals, &gss->css.ss.ps);
+		ExecInitExpr((Expr *) gs_info->dev_quals, &gss->css.ss.ps);
 	/* 'tableoid' should not change during relation scan */
 	gss->scan_tuple.t_tableOid = RelationGetRelid(scan_rel);
-
-	/* save the kernel source/extra params */
-	gss->kern_source = gsinfo->kern_source;
-	gss->extra_params = gsinfo->extra_params;
 	/* kernel constant parameter buffer */
 	gss->kparams = pgstrom_create_kern_parambuf(gs_info->used_params,
 												gss->css.ss.ps.ps_ExprContext);
@@ -652,6 +633,8 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 static void
 __pgstrom_release_gpuscan(pgstrom_gpuscan *gpuscan)
 {
+	CUresult	rc;
+
 	if (gpuscan->ev_dma_recv_stop)
 	{
 		rc = cuEventDestroy(gpuscan->ev_dma_recv_stop);
@@ -785,8 +768,8 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	{
 		pds = pgstrom_create_data_store_row(gss->gts.gcontext,
 											tupdesc,
-											pgstrom_chunk_size << 20,
-											NULL);
+											pgstrom_chunk_size(),
+											false);
 		/* fill up this data-store */
 		while (gss->curr_blknum < gss->last_blknum &&
 			   pgstrom_data_store_insert_block(pds, rel,
@@ -820,7 +803,7 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	if (gss->pfm.enabled)
 	{
 		gettimeofday(&tv2, NULL);
-		gss->pfm.time_outer_load += timeval_diff(&tv1, &tv2);
+		gpuscan->task.pfm.time_outer_load += timeval_diff(&tv1, &tv2);
 	}
 	return gpuscan;
 }
@@ -912,7 +895,7 @@ pgstrom_launch_pending_tasks(GpuTaskState *gts)
 		dnode = dlist_pop_head_node(&gts->pending_tasks);
 		gtask = dlist_container(GpuTask, chain, dnode);
 		gts->num_pending_tasks--;
-		memset(&gtask->chain, 0, sizeof(dlist_dnode));
+		memset(&gtask->chain, 0, sizeof(dlist_node));
 		SpinLockRelease(&gts->lock);
 
 		launch = gtask->cb_process(gtask);
@@ -950,7 +933,7 @@ pgstrom_accum_gpuscan_perfmon(GpuScanState *gss, pgstrom_gpuscan *gpuscan)
 	rc = cuEventElapsedTime(&elapsed,
 							gpuscan->ev_dma_send_start,
 							gpuscan->ev_dma_send_stop);
-	if (rc != CUDA_ERROR)
+	if (rc != CUDA_SUCCESS)
 		goto error;
 	gpuscan->task.pfm.time_dma_send += elapsed;
 
@@ -958,25 +941,25 @@ pgstrom_accum_gpuscan_perfmon(GpuScanState *gss, pgstrom_gpuscan *gpuscan)
 	rc = cuEventElapsedTime(&elapsed,
 							gpuscan->ev_dma_send_stop,
 							gpuscan->ev_dma_recv_start);
-	if (rc != CUDA_ERROR)
+	if (rc != CUDA_SUCCESS)
 		goto error;
-	gpuscan->task.pfm.time_kern_exec += elapsed;
+	gpuscan->task.pfm.time_kern_qual += elapsed;
 
 	/* Time for DMA recv*/
 	rc = cuEventElapsedTime(&elapsed,
 							gpuscan->ev_dma_recv_start,
 							gpuscan->ev_dma_recv_stop);
-	if (rc != CUDA_ERROR)
+	if (rc != CUDA_SUCCESS)
 		goto error;
 	gpuscan->task.pfm.time_dma_recv += elapsed;
 
 	/* accumulate them */
-	pgstrom_perfmon_add(&gss->gts.pfm, &gpuscan->task.pfm);
+	pgstrom_perfmon_accum(&gss->gts.pfm_accum, &gpuscan->task.pfm);
 	return;
 
 error:
 	elog(WARNING, "failed on cuEventElapsedTime: %s", errorText(rc));
-	gss->gts.pfm.enabled = false;
+	gss->gts.pfm_accum.enabled = false;
 }
 
 /*
@@ -989,8 +972,9 @@ error:
 static pgstrom_gpuscan *
 pgstrom_fetch_gpuscan(GpuScanState *gss)
 {
-	pgstrom_message	   *msg;
-	pgstrom_gpuscan	   *gpuscan;
+	pgstrom_gpuscan *gpuscan;
+	dlist_node	   *dnode;
+	int				rc;
 
 	/*
 	 * In case when no device code will be executed, we don't need to have
@@ -1018,11 +1002,11 @@ retry:
 		SpinLockAcquire(&gss->gts.lock);
 		if (!gpuscan)
 			break;
-		dlist_push_tail(&gss->gts.pending_tasks, gpuscan->task.chain);
+		dlist_push_tail(&gss->gts.pending_tasks, &gpuscan->task.chain);
 		gss->gts.num_pending_tasks++;
 		SpinLockRelease(&gss->gts.lock);
 
-		pgstrom_launch_pending_tasks(gss);
+		pgstrom_launch_pending_tasks(&gss->gts);
 
 		SpinLockAcquire(&gss->gts.lock);
 	}
@@ -1041,7 +1025,7 @@ retry:
 		if (rc & WL_POSTMASTER_DEATH)
 			elog(ERROR, "Emergency bail out because of Postmaster crash");
 		/* flush pending tasks first */
-		pgstrom_launch_pending_tasks(gss);
+		pgstrom_launch_pending_tasks(&gss->gts);
 		goto retry;
 	}
 
@@ -1049,14 +1033,15 @@ retry:
 	 * Picks up next available chunk if any
 	 */
 	dnode = dlist_pop_head_node(&gss->gts.completed_tasks);
-	gpuscan = dlist_container(pgstrom_gpuscan, gts.chain, dnode);
+	gpuscan = dlist_container(pgstrom_gpuscan, task.chain, dnode);
+	memset(&gpuscan->task.chain, 0, sizeof(dlist_node));
 	SpinLockRelease(&gss->gts.lock);
 
 	/*
 	 *
 	 *
 	 */
-	if (gss->gts.pfm.enabled)
+	if (gss->gts.pfm_accum.enabled)
 		pgstrom_accum_gpuscan_perfmon(gss, gpuscan);
 
 	/* release CUDA resources */
@@ -1098,7 +1083,7 @@ gpuscan_fetch_tuple(CustomScanState *node)
 		if (gpuscan)
 		{
 			if (gss->pfm.enabled)
-				pgstrom_perfmon_add(&gss->gts.pfm, &gpuscan->task.pfm);
+				pgstrom_perfmon_accum(&gss->gts.pfm_accum, &gpuscan->task.pfm);
 			gss->curr_chunk = NULL;
 			gss->curr_index = 0;
 		}
@@ -1131,13 +1116,12 @@ static pgstrom_data_store *
 gpuscan_exec_bulk(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *) node;
-	List			   *host_qual = node->ss.ps.qual;
-	pgstrom_gpuscan	   *gpuscan;
-	kern_resultbuf	   *kresults;
-	pgstrom_bulkslot   *bulk;
-	cl_uint				i, j, nitems;
-	cl_int			   *rindex;
-	HeapTupleData		tuple;
+	Relation			rel = node->ss.ss_currentRelation;
+	TupleTableSlot	   *slot = node->ss.ss_ScanTupleSlot;
+	TupleDesc			tupdesc = slot->tts_tupleDescriptor;
+	Snapshot			snapshot = node->ss.ps.state->es_snapshot;
+	pgstrom_data_store *pds;
+	struct timeval		tv1, tv2;
 
 	/* note: bulkload shall not be chosen with qualifier */
 	Assert(!gss->css.ss.ps.qual && !gss->dev_quals);
@@ -1158,7 +1142,7 @@ gpuscan_exec_bulk(CustomScanState *node)
 		pds = pgstrom_create_data_store_row(gss->gts.gcontext,
 											tupdesc,
 											pgstrom_chunk_size(),
-											NULL);
+											false);
 		/* fill up this data store */
 		while (gss->curr_blknum < gss->last_blknum &&
 			   pgstrom_data_store_insert_block(pds, rel,
@@ -1355,159 +1339,6 @@ pgstrom_init_gpuscan(void)
 	set_rel_pathlist_next = set_rel_pathlist_hook;
 	set_rel_pathlist_hook = gpuscan_add_scan_path;
 }
-
-#if 0
-
-/*
- * GpuScan message handler
- * ------------------------------------------------------------
- * Note that below routines are executed in the context of OpenCL
- * intermediation server, thus, usual PostgreSQL internal APIs are
- * not available, and need to pay attention that routines work in
- * another process's address space.
- */
-typedef struct
-{
-	pgstrom_message	*msg;
-	cl_program		program;
-	cl_kernel		kernel;
-	cl_mem			m_gpuscan;
-	cl_mem			m_dstore;
-	cl_mem			m_ktoast;
-	cl_uint			ev_index;
-	cl_event		events[20];
-} clstate_gpuscan;
-
-static void
-clserv_respond_gpuscan(cl_event event, cl_int ev_status, void *private)
-{
-	clstate_gpuscan	   *clgss = private;
-	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *)clgss->msg;
-	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
-	cl_int				status;
-	cl_int				rc;
-
-	/* put error code */
-	if (ev_status != CL_COMPLETE)
-	{
-		clserv_log("unexpected CL_EVENT_COMMAND_EXECUTION_STATUS: %d",
-				   ev_status);
-		gpuscan->msg.errcode = StromError_OpenCLInternal;
-	}
-	else
-	{
-		gpuscan->msg.errcode = kresults->errcode;
-	}
-
-	/*
-	 * collect performance statistics
-	 */
-	if (gpuscan->msg.pfm.enabled)
-	{
-		cl_ulong    dma_send_begin;
-		cl_ulong    dma_send_end;
-		cl_ulong    kern_exec_begin;
-		cl_ulong    kern_exec_end;
-		cl_ulong    dma_recv_begin;
-		cl_ulong    dma_recv_end;
-		cl_ulong	temp;
-		cl_int		i, n;
-
-		n = clgss->ev_index - 2;
-		dma_send_begin = (cl_ulong)(~0);
-		dma_send_end = (cl_ulong) 0;
-		for (i=0; i < n; i++)
-		{
-			rc = clGetEventProfilingInfo(clgss->events[i],
-										 CL_PROFILING_COMMAND_START,
-										 sizeof(cl_ulong),
-										 &temp,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			if (i==0 || dma_send_begin > temp)
-				dma_send_begin = temp;
-
-			rc = clGetEventProfilingInfo(clgss->events[i],
-										 CL_PROFILING_COMMAND_END,
-										 sizeof(cl_ulong),
-										 &temp,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			if (i==0 || dma_send_end < temp)
-				dma_send_end = temp;
-		}
-
-		rc = clGetEventProfilingInfo(clgss->events[clgss->ev_index - 2],
-									 CL_PROFILING_COMMAND_START,
-									 sizeof(cl_ulong),
-									 &kern_exec_begin,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
-
-		rc = clGetEventProfilingInfo(clgss->events[clgss->ev_index - 2],
-									 CL_PROFILING_COMMAND_END,
-									 sizeof(cl_ulong),
-									 &kern_exec_end,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
-
-		rc = clGetEventProfilingInfo(clgss->events[clgss->ev_index - 1],
-									 CL_PROFILING_COMMAND_START,
-									 sizeof(cl_ulong),
-									 &dma_recv_begin,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
-
-		rc = clGetEventProfilingInfo(clgss->events[clgss->ev_index - 1],
-									 CL_PROFILING_COMMAND_END,
-									 sizeof(cl_ulong),
-									 &dma_recv_end,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
-
-		gpuscan->msg.pfm.time_dma_send
-			+= (dma_send_end - dma_send_begin) / 1000;
-		gpuscan->msg.pfm.time_kern_exec
-			+= (kern_exec_end - kern_exec_begin) / 1000;
-		gpuscan->msg.pfm.time_dma_recv
-			+= (dma_recv_end - dma_recv_begin) / 1000;
-	skip_perfmon:
-		if (rc != CL_SUCCESS)
-		{
-			clserv_log("failed on clGetEventProfilingInfo (%s)",
-					   opencl_strerror(rc));
-			gpuscan->msg.pfm.enabled = false;
-		}
-	}
-
-	rc = clGetEventInfo(clgss->events[clgss->ev_index - 2],
-						CL_EVENT_COMMAND_EXECUTION_STATUS,
-						sizeof(cl_int),
-						&status,
-						NULL);
-	Assert(rc == CL_SUCCESS);
-
-	/* release opencl objects */
-	while (clgss->ev_index > 0)
-		clReleaseEvent(clgss->events[--clgss->ev_index]);
-	if (clgss->m_ktoast)
-		clReleaseMemObject(clgss->m_ktoast);
-	clReleaseMemObject(clgss->m_dstore);
-	clReleaseMemObject(clgss->m_gpuscan);
-	clReleaseKernel(clgss->kernel);
-	clReleaseProgram(clgss->program);
-	free(clgss);
-
-	/* respond to the backend side */
-	pgstrom_reply_message(&gpuscan->msg);
-}
-#endif
 
 static void
 gpuscan_cleanup_cuda_resources(pgstrom_gpuscan *gpuscan)

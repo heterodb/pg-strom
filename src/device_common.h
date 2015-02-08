@@ -41,20 +41,12 @@ typedef double			cl_double;
  * but not for the host code, so this #if ... #endif block is available
  * only OpenCL device code.
  */
-#ifdef OPENCL_DEVICE_CODE
-
-#if __OPENCL_VERSION__ < 120
-/* NOTE: cl_khr_fp64 extension got merged at OpenCL 1.2 */
-#pragma OPENCL EXTENSION cl_khr_fp64 : enable
-#endif
-#pragma OPENCL EXTENSION cl_khr_byte_addressable_store : enable
-#pragma OPENCL EXTENSION cl_khr_int64_base_atomics : enable
-#pragma OPENCL EXTENSION cl_khr_int64_extended_atomics : enable 
+#ifdef CUDA_DEVICE_CODE
 
 /* NULL definition */
-#ifndef NULL
-#define NULL	((__global void *) 0UL)
-#endif
+//#ifndef NULL
+//#define NULL	((__global void *) 0UL)
+//#endif
 
 /* Misc definitions */
 #define FLEXIBLE_ARRAY_MEMBER
@@ -96,7 +88,7 @@ typedef cl_ulong	Datum;
 #define SHARED_WORKMEM		(__shared__ void *)(__pgstrom_local_workmem)
 extern __shared__ cl_ulong	__pgstrom_local_workmem[];
 
-#else	/* OPENCL_DEVICE_CODE */
+#else	/* CUDA_DEVICE_CODE */
 #include "access/htup_details.h"
 #include "storage/itemptr.h"
 #define __device__		/* address space qualifier is noise on host */
@@ -110,7 +102,7 @@ typedef uintptr_t	hostptr_t;
  * HOST_STATIC_INLINE is a qualifier of function that performs as static
  * inline function on the host side implementation.
  */
-#ifdef OPENCL_DEVICE_CODE
+#ifdef CUDA_DEVICE_CODE
 #define HOST_STATIC_INLINE
 #else
 #define HOST_STATIC_INLINE		static inline
@@ -129,7 +121,15 @@ typedef uintptr_t	hostptr_t;
 #define StromError_DataStoreOutOfRange		2002 /* out of KDS range access */
 #define StromError_SanityCheckViolation		2003 /* sanity check violation */
 
-#ifdef OPENCL_DEVICE_CODE
+/*
+ * Misc support macros
+ */
+#ifndef container_of
+#define container_of(type,field,ptr)				\
+	((type *)((char *) (ptr) - offsetof(type, field)))
+#endif
+
+#ifdef CUDA_DEVICE_CODE
 /*
  * It sets an error code unless no significant error code is already set.
  * Also, CpuReCheck has higher priority than RowFiltered because CpuReCheck
@@ -150,6 +150,7 @@ STROM_SET_ERROR(__private cl_int *p_error, cl_int errcode)
 		*p_error = errcode;
 }
 
+#if 0
 /*
  * Data type definitions for row oriented data format
  * ---------------------------------------------------
@@ -178,9 +179,9 @@ typedef cl_uint	TransactionId;
 typedef cl_uint	ItemIdData;
 typedef __global ItemIdData ItemId;
 
-#define ItemIdGetLength(itemId)		(((itemId) >> ITEMID_LENGTH_SHIFT) & 0x7fff)
-#define ItemIdGetOffset(itemId)		(((itemId) >> ITEMID_OFFSET_SHIFT) & 0x7fff)
-#define ItemIdGetFlags(itemId)		(((itemId) >> ITEMID_FLAGS_SHIFT)  & 0x0003)
+#define ItemIdGetLength(itemId)	(((itemId) >> ITEMID_LENGTH_SHIFT) & 0x7fff)
+#define ItemIdGetOffset(itemId)	(((itemId) >> ITEMID_OFFSET_SHIFT) & 0x7fff)
+#define ItemIdGetFlags(itemId)	(((itemId) >> ITEMID_FLAGS_SHIFT)  & 0x0003)
 
 typedef struct PageHeaderData
 {
@@ -205,6 +206,7 @@ typedef PageHeaderData *PageHeader;
 	(((__global PageHeaderData *)(page))->pd_lower <= SizeOfPageHeaderData \
 	 ? 0 : ((((__global PageHeaderData *)(page))->pd_lower -			\
 			 SizeOfPageHeaderData) / sizeof(ItemIdData)))
+#endif
 
 /*
  * We need to re-define HeapTupleHeaderData and t_infomask related stuff
@@ -458,7 +460,7 @@ typedef struct {
 	cl_int		rindex[FLEXIBLE_ARRAY_MEMBER];
 } kern_row_map;
 
-#ifdef OPENCL_DEVICE_CODE
+#ifdef CUDA_DEVICE_CODE
 /*
  * PostgreSQL Data Type support in OpenCL kernel
  *
@@ -1688,5 +1690,5 @@ pgfn_boolop_not(__private cl_int *errcode, pg_bool_t result)
 	return result;
 }
 
-#endif	/* OPENCL_DEVICE_CODE */
+#endif	/* CUDA_DEVICE_CODE */
 #endif	/* OPENCL_COMMON_H */
