@@ -73,7 +73,7 @@ typedef struct
 static Size		program_cache_size;
 static char	   *pgstrom_nvcc_path;
 static bool		debug_optimize_cuda_program;
-statir bool		debug_retain_cuda_program;
+static bool		debug_retain_cuda_program;
 
 /* ---- static variables ---- */
 static shmem_startup_hook_type shmem_startup_next;
@@ -290,7 +290,7 @@ pgstrom_put_cuda_program(program_cache_entry *entry)
 }
 
 static void
-pgstrom_write_cuda_program(FILE *filp, program_cache_entry *entry,
+pgstrom_write_cuda_program(int fdesc, program_cache_entry *entry,
 						   const char *pathname)
 {
 	static size_t	common_code_length = 0;
@@ -301,8 +301,9 @@ pgstrom_write_cuda_program(FILE *filp, program_cache_entry *entry,
 	 */
 	if (!common_code_length)
 		common_code_length = strlen(pgstrom_cuda_common_code);
-	nbytes = fwrite(pgstrom_cuda_common_code,
-					common_code_length, 1, filp);
+	nbytes = write(fdesc,
+				   pgstrom_cuda_common_code,
+				   common_code_length);
 	if (nbytes != common_code_length)
 		elog(ERROR, "could not write to file \"%s\": %m", pathname);
 
@@ -316,8 +317,9 @@ pgstrom_write_cuda_program(FILE *filp, program_cache_entry *entry,
 
 		if (!mathlib_code_length)
 			mathlib_code_length = strlen(pgstrom_cuda_mathlib_code);
-		nbytes = fwrite(pgstrom_cuda_mathlib_code,
-						mathlib_code_length, 1, filp);
+		nbytes = write(fdesc,
+					   pgstrom_cuda_mathlib_code,
+					   mathlib_code_length);
 		if (nbytes != mathlib_code_length)
 			elog(ERROR, "could not write to file \"%s\": %m", pathname);
 	}
@@ -328,8 +330,9 @@ pgstrom_write_cuda_program(FILE *filp, program_cache_entry *entry,
 
 		if (!timelib_code_length)
 			timelib_code_length = strlen(pgstrom_cuda_timelib_code);
-		nbytes = fwrite(pgstrom_cuda_timelib_code,
-						timelib_code_length, 1, filp);
+		nbytes = write(fdesc,
+					   pgstrom_cuda_timelib_code,
+					   timelib_code_length);
 		if (nbytes != timelib_code_length)
 			elog(ERROR, "could not write to file \"%s\": %m", pathname);
 	}
@@ -340,8 +343,9 @@ pgstrom_write_cuda_program(FILE *filp, program_cache_entry *entry,
 
 		if (!textlib_code_length)
 			textlib_code_length = strlen(pgstrom_cuda_textlib_code);
-		nbytes = fwrite(pgstrom_cuda_textlib_code,
-						textlib_code_length, 1, filp);
+		nbytes = write(fdesc,
+					   pgstrom_cuda_textlib_code,
+					   textlib_code_length);
 		if (nbytes != textlib_code_length)
 			elog(ERROR, "could not write to file \"%s\": %m", pathname);
 	}
@@ -352,8 +356,9 @@ pgstrom_write_cuda_program(FILE *filp, program_cache_entry *entry,
 
 		if (!numeric_code_length)
 			numeric_code_length = strlen(pgstrom_cuda_numeric_code);
-		nbytes = fwrite(pgstrom_cuda_numeric_code,
-						numeric_code_length, 1, filp);
+		nbytes = write(fdesc,
+					   pgstrom_cuda_numeric_code,
+					   numeric_code_length);
 		if (nbytes != numeric_code_length)
 			elog(ERROR, "could not write to file \"%s\": %m", pathname);
 	}
@@ -367,8 +372,9 @@ pgstrom_write_cuda_program(FILE *filp, program_cache_entry *entry,
 
 		if (!gpuscan_code_length)
 			gpuscan_code_length = strlen(pgstrom_cuda_gpuscan_code);
-		nbytes = fwrite(pgstrom_cuda_gpuscan_code,
-						gpuscan_code_length, 1, filp);
+		nbytes = write(fdesc,
+					   pgstrom_cuda_gpuscan_code,
+					   gpuscan_code_length);
 		if (nbytes != gpuscan_code_length)
 			elog(ERROR, "could not write to file \"%s\": %m", pathname);
 	}
@@ -379,8 +385,9 @@ pgstrom_write_cuda_program(FILE *filp, program_cache_entry *entry,
 
 		if (!hashjoin_code_length)
 			hashjoin_code_length = strlen(pgstrom_cuda_hashjoin_code);
-		nbytes = fwrite(pgstrom_cuda_hashjoin_code,
-						hashjoin_code_length, 1, filp);
+		nbytes = write(fdesc,
+					   pgstrom_cuda_hashjoin_code,
+					   hashjoin_code_length);
 		if (nbytes != hashjoin_code_length)
 			elog(ERROR, "could not write to file \"%s\": %m", pathname);
 	}
@@ -391,8 +398,9 @@ pgstrom_write_cuda_program(FILE *filp, program_cache_entry *entry,
 
 		if (!gpupreagg_code_length)
 			gpupreagg_code_length = strlen(pgstrom_cuda_gpupreagg_code);
-		nbytes = fwrite(pgstrom_cuda_gpupreagg_code,
-						gpupreagg_code_length, 1, filp);
+		nbytes = write(fdesc,
+					   pgstrom_cuda_gpupreagg_code,
+					   gpupreagg_code_length);
 		if (nbytes != gpupreagg_code_length)
 			elog(ERROR, "could not write to file \"%s\": %m", pathname);
 	}
@@ -403,30 +411,30 @@ pgstrom_write_cuda_program(FILE *filp, program_cache_entry *entry,
 
 		if (!gpusort_code_length)
 			gpusort_code_length = strlen(pgstrom_cuda_gpusort_code);
-		nbytes = fwrite(pgstrom_cuda_gpusort_code,
-						gpusort_code_length, 1, filp);
+		nbytes = write(fdesc,
+					   pgstrom_cuda_gpusort_code,
+					   gpusort_code_length);
 		if (nbytes != gpusort_code_length)
 			elog(ERROR, "could not write to file \"%s\": %m", pathname);
 	}
 	/* source code generated on the fly */
-	nbytes = fwrite(entry->kern_source,
-					entry->kern_source_len, 1, filp);
+	nbytes = write(fdesc,
+				   entry->kern_source,
+				   entry->kern_source_len);
 	if (nbytes != entry->kern_source_len)
 		elog(ERROR, "could not write to file \"%s\": %m", pathname);
-
-
-
 }
 
 static void
 __build_cuda_program(program_cache_entry *old_entry)
 {
+	const char *source_pathname;
 	char		basename[MAXPGPATH];
 	char		pathname[MAXPGPATH];
 	StringInfoData cmdline;
-	uint		uniq_id;
+	int			fdesc;
 	FILE	   *filp;
-	size_t		filp_unitsz = 2048;
+	size_t		filp_unitsz = 4096;
 	size_t		nbytes;
 	char	   *cuda_binary = NULL;
 	Size		cuda_binary_len = 0;
@@ -440,65 +448,24 @@ __build_cuda_program(program_cache_entry *old_entry)
 	program_cache_entry *new_entry;
 
 	/*
-	 * write out 
+	 * Write out the source program
 	 */
-	tablespace_oid = GetNextTempTableSpace();
-	if (!OidIsValid(tablespace_oid))
-		tablespace_oid = (OidIsValid(MyDatabaseTableSpace)
-						  ? MyDatabaseTableSpace
-						  : DEFAULTTABLESPACE_OID);
-	if (tablespace_oid == DEFAULTTABLESPACE_OID ||
-		tablespace_oid == GLOBALTABLESPACE_OID)
-	{
-
-	}
-
-	if (!OidIsValid(tablespace_oid) ? MyDatabaseTableSpace
-
-	if (!OidIsValid(tablespace_oid) ||
-		
-
-
-
-
-
-	/* make a basename of the tempfiles */
-	uniq_id = ((uintptr_t)old_entry -
-			   (uintptr_t)pgcache_head->entry_begin) >> PGCACHE_MIN_BITS;
-	snprintf(basename, sizeof(basename), "%s/code_%08x",
-			 PGSTROM_TEMP_DIR, uniq_id);
-
-	snprintf(pathname, sizeof(pathname), "%s.gpu", basename);
-	filp = AllocateFile(pathname, PG_BINARY_W);
-	if (!filp)
-	{
-		/*
-		 * NOTE: we don't check error code because we have no reasonable
-		 * way to prevent concurrent mkdir(3). If actually it failed,
-		 * the AllocateFile() will fail eventually.
-		 */
-		mkdir(PGSTROM_TEMP_DIR, S_IRWXU);
-
-		filp = AllocateFile(pathname, PG_BINARY_W);
-		if (!filp)
-			elog(ERROR, "could not create source file \"%s\": %m", pathname);
-	}
-	/* Write out the source code */
-	pgstrom_write_cuda_program(filp, old_entry, pathname);
-	/* OK, done */
-	FreeFile(filp);
-
+	fdesc = pgstrom_open_tempfile(".gpu", &source_pathname);
+	pgstrom_write_cuda_program(fdesc, old_entry, source_pathname);
+	CloseTransientFile(fdesc);
+	strncpy(basename, source_pathname, sizeof(basename));
+	basename[strlen(source_pathname) - 4] = '\0';
 
 	/*
 	 * Makes a command line to be kicked
 	 */
-	if ((entry->extra_flags & DEVKERNEL_DISABLE_OPTIMIZE) != 0)
+	if ((old_entry->extra_flags & DEVKERNEL_DISABLE_OPTIMIZE) != 0)
 		opt_optimize = " -Xptxas '-O0'";
 
 	initStringInfo(&cmdline);
 	appendStringInfo(
 		&cmdline,
-		"%s %s.gpu --ptx %s"
+		"%s %s --ptx %s"
 		" -DFLEXIBLE_ARRAY_MEMBER"
 #ifdef PGSTROM_DEBUG
 		" -Werror -G"
@@ -511,7 +478,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 		" -DMAXIMUM_ALIGNOF=%u"
 		" 2>%s.log",
 		pgstrom_nvcc_path,
-		basename,
+		source_pathname,
 		opt_optimize,
 		SIZEOF_VOID_P, BLCKSZ,
 		itemid_offset_shift,

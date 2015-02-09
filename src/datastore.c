@@ -57,15 +57,14 @@ pgstrom_chunk_size(void)
  * setting. Note that we never gueran
  */
 int
-pgstrom_temp_pathname(const char *p_dirpath,
-					  const char *p_filepath,
-					  const char *file_suffix)
+pgstrom_open_tempfile(const char *file_suffix,
+					  const char **p_tempfilepath)
 {
-	static __thread char tempdirname[MAXPGPATH];
-	static __thread char tempfilename[MAXPGPATH];
+	static long	tempFileCounter = 0;
+	static char	tempfilepath[MAXPGPATH];
+	char		tempdirpath[MAXPGPATH];
 	int			file_desc;
 	int			file_flags;
-	size_t		offset;
 	Oid			tablespace_oid = GetNextTempTableSpace();
 
 	if (!OidIsValid(tablespace_oid))
@@ -78,7 +77,7 @@ pgstrom_temp_pathname(const char *p_dirpath,
 	{
 		/* The default tablespace is {datadir}/base */
 		snprintf(tempdirpath, sizeof(tempdirpath),
-				 "base/%s",PG_TEMP_FILES_DIR);
+				 "base/%s", PG_TEMP_FILES_DIR);
 	}
 	else
 	{
@@ -118,6 +117,8 @@ pgstrom_temp_pathname(const char *p_dirpath,
 					 errmsg("could not create temporary file \"%s\": %m",
 							tempfilepath)));
 	}
+	if (p_tempfilepath)
+		*p_tempfilepath = tempfilepath;
 	return file_desc;
 }
 
@@ -427,61 +428,11 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 		pds->kds = MemoryContextAlloc(gmcxt, pds->kds_length);
 	else
 	{
-		Oid			tablespace_oid = GetNextTempTableSpace();
-		char		tempdirpath[MAXPGPATH];
-		char		tempfilepath[MAXPGPATH];
-		int			file_flags;
+		const char *kds_fname;
 		int			kds_fdesc;
-		static long	tempFileCounter = 0;
 
-		/*
-		 * overall logic came from OpenTemporaryFileInTablespace()
-		 */
-		if (tablespace_oid == DEFAULTTABLESPACE_OID ||
-			tablespace_oid == GLOBALTABLESPACE_OID)
-		{
-			/* The default tablespace is {datadir}/base */
-			snprintf(tempdirpath, sizeof(tempdirpath), "base/%s",
-					 PG_TEMP_FILES_DIR);
-		}
-		else
-		{
-			/* All other tablespaces are accessed via symlinks */
-			snprintf(tempdirpath, sizeof(tempdirpath), "pg_tblspc/%u/%s/%s",
-					 tablespace_oid,
-					 TABLESPACE_VERSION_DIRECTORY,
-					 PG_TEMP_FILES_DIR);
-		}
-		/*
-		 * Generate a tempfile name that should be unique within the current
-		 * database instance.
-		 */
-		snprintf(tempfilepath, sizeof(tempfilepath), "%s/%s%d.%ld",
-				 tempdirpath, PGSTROM_TEMP_FILE_PREFIX,
-				 MyProcPid, tempFileCounter++);
-		pds->kds_fname = MemoryContextStrdup(gmcxt, tempfilepath);
-
-		/* Try to open it */
-		file_flags = O_RDWR | O_CREAT | O_TRUNC | PG_BINARY;
-		kds_fdesc = OpenTransientFile(pds->kds_fname, file_flags, 0600);
-		if (kds_fdesc < 0)
-		{
-			/*
-			 * We might need to create the tablespace's tempfile directory,
-			 * if no one has yet done so. However, no error check needed,
-			 * because concurrent mkdir(3) can happen and OpenTransientFile
-			 * below eventually raise an error.
-			 */
-			mkdir(tempdirpath, S_IRWXU);
-
-			kds_fdesc = OpenTransientFile(pds->kds_fname, file_flags, 0600);
-			if (kds_fdesc < 0)
-				ereport(ERROR,
-						(errcode_for_file_access(),
-				errmsg("could not create file-mapped data store \"%s\": %m",
-					   pds->kds_fname)));
-		}
-		
+		kds_fdesc = pgstrom_open_tempfile(".map", &kds_fname);
+		pds->kds_fname = MemoryContextStrdup(gmcxt, kds_fname);
 
 		if (ftruncate(kds_fdesc, pds->kds_length) != 0)
 			ereport(ERROR,

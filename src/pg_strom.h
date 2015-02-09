@@ -373,7 +373,8 @@ extern void pgstrom_init_codegen(void);
  * datastore.c
  */
 extern Size pgstrom_chunk_size(void);
-
+extern int	pgstrom_open_tempfile(const char *file_suffix,
+								  const char **p_tempfilepath);
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);

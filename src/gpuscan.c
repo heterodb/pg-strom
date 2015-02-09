@@ -503,8 +503,6 @@ create_gpuscan_plan(PlannerInfo *root,
 
 	gs_info.kern_source = kern_source;
 	gs_info.extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSCAN;
-	if (!enable_cudaprog_optimize)
-		gs_info.extra_flags |= DEVKERNEL_DISABLE_OPTIMIZE;
 	gs_info.used_params = context.used_params;
 	gs_info.used_vars = context.used_vars;
 	gs_info.dev_quals = dev_quals;
@@ -691,10 +689,6 @@ static void
 pgstrom_release_gpuscan(GpuTask *gputask)
 {
 	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) gputask;
-
-	/* it shall be already detached from the list */
-	Assert(!gputask->chain.prev && !gputask->chain.next);
-	Assert(!gputask->tracker.prev && !gputask->tracker.next);
 
 	if (gpuscan->pds)
 		pgstrom_release_data_store(gpuscan->pds);
@@ -1071,14 +1065,6 @@ gpuscan_fetch_tuple(CustomScanState *node)
 
 	ExecClearTuple(slot);
 
-	/*
-	 * Once any asynchronous event happen, we try to check status of the
-	 * running, pending and completed tasks, then read more chunks and
-	 * kick asynchronous kernel call.
-	 */
-	if (TestLatch(&MyProc->procLatch))
-		pgstrom_try_preload_gpuscan(gss);
-
 	while (!gss->curr_chunk || !(slot = gpuscan_next_tuple(gss)))
 	{
 		pgstrom_gpuscan	   *gpuscan = gss->curr_chunk;
@@ -1086,8 +1072,10 @@ gpuscan_fetch_tuple(CustomScanState *node)
 		/* Release the current gpuscan chunk which is already scanned */
 		if (gpuscan)
 		{
-			if (gss->pfm.enabled)
-				pgstrom_perfmon_accum(&gss->gts.pfm_accum, &gpuscan->task.pfm);
+			SpinLockAcquire(&gss->gts.lock);
+			dlist_delete(&gpuscan->task.tracker);
+			SpinLockRelease(&gss->gts.lock);
+			pgstrom_release_gpuscan(&gpuscan->task);
 			gss->curr_chunk = NULL;
 			gss->curr_index = 0;
 		}

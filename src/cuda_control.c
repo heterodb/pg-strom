@@ -176,8 +176,6 @@ pgstrom_sync_gpucontext(GpuContext *gcontext)
 static void
 pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 {
-	dlist_mutable_iter	siter;
-	dlist_mutable_iter	titer;
 	CUresult	rc;
 	int			i;
 
@@ -185,9 +183,10 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 	pgstrom_sync_gpucontext(gcontext);
 
 	/* Release underlying TaskState, if any */
-	dlist_foreach_modify(siter, &gcontext->state_list)
+	while (!dlist_is_empty(&gcontext->state_list))
 	{
-		GpuTaskState *gts = dlist_container(GpuTaskState, chain, siter.cur);
+		dlist_node	   *dnode = dlist_pop_head_node(&gcontext->state_list);
+		GpuTaskState   *gts = dlist_container(GpuTaskState, chain, dnode);
 
 		Assert(gts->gcontext == gcontext);
 		dlist_delete(&gts->chain);
@@ -201,9 +200,10 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 			gts->cuda_module = NULL;
 		}
 		/* release task objects */
-		dlist_foreach_modify(titer, &gts->tracked_tasks)
+		while (!dlist_is_empty(&gts->tracked_tasks))
 		{
-			GpuTask *task = dlist_container(GpuTask, tracker, titer.cur);
+			dlist_node *dnode = dlist_pop_head_node(&gts->tracked_tasks);
+			GpuTask	   *task = dlist_container(GpuTask, tracker, dnode);
 
 			Assert(task->gts == gts);
 			dlist_delete(&task->tracker);
@@ -216,11 +216,6 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 			elog(WARNING, "Unreferenced GpuTaskState leak: %p", gts);
 		if (gts->cb_cleanup)
 			gts->cb_cleanup(gts);
-
-		Assert(dlist_is_empty(&gts->tracked_tasks));
-		Assert(dlist_is_empty(&gts->running_tasks));
-		Assert(dlist_is_empty(&gts->pending_tasks));
-		Assert(dlist_is_empty(&gts->completed_tasks));
 	}
 
 	/*
@@ -228,11 +223,11 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 	 * state in case of file-mapped data-store, so we have to ensure
 	 * these temporary files are removed and unmapped.
 	 */
-	dlist_foreach_modify(titer, &gcontext->pds_list)
+	while (!dlist_is_empty(&gcontext->pds_list))
 	{
-		pgstrom_data_store *pds = dlist_container(pgstrom_data_store,
-												  chain, titer.cur);
-		dlist_delete(&pds->chain);
+		dlist_node *dnode = dlist_pop_head_node(&gcontext->pds_list);
+		pgstrom_data_store *pds
+			= dlist_container(pgstrom_data_store, chain, dnode);
 		if (pds->kds_fname)
 			pgstrom_file_unmap_data_store(pds);
 	}
@@ -302,16 +297,13 @@ pgstrom_cleanup_gputaskstate(GpuTaskState *gts)
 		gputask = dlist_container(GpuTask, tracker, iter.cur);
 
 		dlist_delete(&gputask->tracker);
-		dlist_delete(&gputask->chain);
-		memset(&gputask->tracker, 0, sizeof(dlist_node));
-		memset(&gputask->chain, 0, sizeof(dlist_node));
 		SpinLockRelease(&gts->lock);
 		gputask->cb_release(gputask);
 		SpinLockAcquire(&gts->lock);
 	}
-	Assert(dlist_is_empty(&gts->running_tasks));
-	Assert(dlist_is_empty(&gts->pending_tasks));
-	Assert(dlist_is_empty(&gts->completed_tasks));
+	dlist_init(&gts->running_tasks);
+	dlist_init(&gts->pending_tasks);
+	dlist_init(&gts->completed_tasks);
 	gts->num_running_tasks = 0;
     gts->num_pending_tasks = 0;
 	gts->num_completed_tasks = 0;
