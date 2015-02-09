@@ -140,7 +140,7 @@ typedef struct {
 } GpuScanState;
 
 /* forward declarations */
-static void pgstrom_process_gpuscan(GpuTask *task);
+static bool pgstrom_process_gpuscan(GpuTask *task);
 
 /*
  * cost_gpuscan
@@ -692,6 +692,10 @@ pgstrom_release_gpuscan(GpuTask *gputask)
 {
 	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) gputask;
 
+	/* it shall be already detached from the list */
+	Assert(!gputask->chain.prev && !gputask->chain.next);
+	Assert(!gputask->tracker.prev && !gputask->tracker.next);
+
 	if (gpuscan->pds)
 		pgstrom_release_data_store(gpuscan->pds);
 
@@ -1172,114 +1176,34 @@ static void
 gpuscan_end(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *)node;
-	pgstrom_gpuscan	   *gpuscan;
+	CUresult			rc;
 
-	if (gss->curr_chunk)
+	/* clean-up and release any concurrent tasks */
+	pgstrom_cleanup_gputaskstate(&gss->gts);
+
+	/* release cuda module, if any */
+	if (gss->gts.cuda_module)
 	{
-		gpuscan = gss->curr_chunk;
-
-		pgstrom_untrack_object(&gpuscan->msg.sobj);
-		pgstrom_put_message(&gpuscan->msg);
-		gss->curr_chunk = NULL;
+		rc = cuModuleUnload(gss->gts.cuda_module);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuModuleUnload: %s", errorText(rc));
+		gss->gts.cuda_module = NULL;
 	}
-
-	while (gss->num_running > 0)
-	{
-		gpuscan = (pgstrom_gpuscan *)pgstrom_dequeue_message(gss->mqueue);
-		if (!gpuscan)
-			elog(ERROR, "message queue wait timeout");
-		pgstrom_untrack_object(&gpuscan->msg.sobj);
-		pgstrom_put_message(&gpuscan->msg);
-		gss->num_running--;
-	}
-
-	if (gss->num_rechecked > 0)
-		elog(NOTICE, "GpuScan: %u records were re-checked by CPU",
-			 gss->num_rechecked);
-
-	if (gss->dprog_key)
-	{
-		pgstrom_untrack_object((StromObject *)gss->dprog_key);
-		pgstrom_put_devprog_key(gss->dprog_key);
-	}
-
-	if (gss->mqueue)
-	{
-		pgstrom_untrack_object(&gss->mqueue->sobj);
-		pgstrom_close_queue(gss->mqueue);
-	}
+	/* put reference to the GpuContext */
+	pgstrom_put_gpucontext(gss->gts.gcontext);
 }
 
 static void
 gpuscan_rescan(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *) node;
-	pgstrom_message	   *msg;
-	pgstrom_gpuscan	   *gpuscan;
-	dlist_mutable_iter	iter;
 
-	/*
-	 * If asynchronous requests are still running, we need to synchronize
-	 * their completion first.
-	 *
-	 * TODO: if we track all the pgstrom_gpuscan objects being enqueued
-	 * locally, all we need to do should be just decrements reference
-	 * counter. It may be a future enhancement.
-	 */
-	gpuscan = gss->curr_chunk;
-	if (gpuscan)
-	{
-		pgstrom_untrack_object(&gpuscan->msg.sobj);
-		pgstrom_put_message(&gpuscan->msg);
-		gss->curr_chunk = NULL;
-		gss->curr_index = 0;
-	}
+	/* clean-up and release any concurrent tasks */
+    pgstrom_cleanup_gputaskstate(&gss->gts);
 
-	while (gss->num_running > 0)
-	{
-		msg = pgstrom_dequeue_message(gss->mqueue);
-		if (!msg)
-			elog(ERROR, "message queue wait timeout");
-		gss->num_running--;
-		dlist_push_tail(&gss->ready_chunks, &msg->chain);
-	}
-
-	dlist_foreach_modify (iter, &gss->ready_chunks)
-	{
-		gpuscan = dlist_container(pgstrom_gpuscan, msg.chain, iter.cur);
-		Assert(StromTagIs(gpuscan, GpuScan));
-
-		dlist_delete(&gpuscan->msg.chain);
-		if (gpuscan->msg.errcode != StromError_Success)
-		{
-			if (gpuscan->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
-			{
-				const char *buildlog
-					= pgstrom_get_devprog_errmsg(gpuscan->dprog_key);
-
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
-								pgstrom_strerror(gpuscan->msg.errcode),
-								gss->kern_source),
-						 errdetail("%s", buildlog)));
-			}
-			else
-			{
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("PG-Strom: OpenCL execution error (%s)",
-								pgstrom_strerror(gpuscan->msg.errcode))));
-            }
-		}
-		pgstrom_untrack_object(&gpuscan->msg.sobj);
-		pgstrom_put_message(&gpuscan->msg);
-	}
-
-	/*
-	 * OK, asynchronous jobs were cleared. revert scan state to the head.
-	 */
+	/* OK, rewind the position to read */
 	gss->curr_blknum = 0;
+	gss->curr_index = 0;
 }
 
 static void
@@ -1295,7 +1219,7 @@ gpuscan_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		show_instrumentation_count("Rows Removed by Device Fileter",
 								   2, &gss->css.ss.ps, es);
 	}
-	show_device_kernel(gss->dprog_key, es);
+	print_device_kernel(&gss->gts, es);
 
 	if (es->analyze && gss->pfm.enabled)
 		pgstrom_perfmon_explain(&gss->pfm, es);
@@ -1343,6 +1267,7 @@ pgstrom_init_gpuscan(void)
 static void
 gpuscan_cleanup_cuda_resources(pgstrom_gpuscan *gpuscan)
 {
+	CUresult	rc;
 
 	if (gpuscan->ev_dma_recv_stop)
 	{
@@ -1410,9 +1335,9 @@ pgstrom_respond_gpuscan(CUstream stream, CUresult status, void *private)
 		gpuscan->task.errcode = kresults->errcode;
 
 	if (gpuscan->task.errcode == StromError_Success)
-		dlist_push_tail(&gts->completed_tasks, &task->chain);
+		dlist_push_tail(&gts->completed_tasks, &gpuscan->task.chain);
 	else
-		dlist_push_head(&gts->completed_tasks, &task->chain);
+		dlist_push_head(&gts->completed_tasks, &gpuscan->task.chain);
 	gts->num_completed_tasks++;
 	SpinLockRelease(&gts->lock);
 }
@@ -1420,10 +1345,14 @@ pgstrom_respond_gpuscan(CUstream stream, CUresult status, void *private)
 static bool
 __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 {
+	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
 	pgstrom_data_store *pds = gpuscan->pds;
 	kern_data_store	   *kds = pds->kds;
+	size_t				offset;
+	size_t				length;
 	size_t				grid_size;
 	size_t				block_size;
+	CUresult			rc;
 
 	/*
 	 * Switch CUDA context
@@ -1436,7 +1365,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	 * Kernel function lookup
 	 */
 	rc = cuModuleGetFunction(&gpuscan->kern_qual,
-							 gts->cuda_module,
+							 gpuscan->task.gts->cuda_module,
 							 "gpuscan_qual");
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetFunction: %s",
@@ -1490,20 +1419,20 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	rc = cuMemcpyHtoDAsync(gpuscan->m_gpuscan,
 						   (char *)&gpuscan->kern + offset,
 						   length,
-						   gpuscan->task.stream);
+						   gpuscan->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	pfm->bytes_dma_send += length;
-	pfm->num_dma_send++;
+	gpuscan->task.pfm.bytes_dma_send += length;
+	gpuscan->task.pfm.num_dma_send++;
 
 	rc = cuMemcpyHtoDAsync(gpuscan->m_kds,
 						   kds,
 						   kds->length,
-						   gpuscan->task.stream);
+						   gpuscan->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	pfm->bytes_dma_send += kds->length;
-    pfm->num_dma_send++;
+	gpuscan->task.pfm.bytes_dma_send += kds->length;
+    gpuscan->task.pfm.num_dma_send++;
 
 	/*
 	 * Launch kernel function
@@ -1511,7 +1440,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	pgstrom_compute_workgroup_size(&grid_size,
 								   &block_size,
 								   gpuscan->kern_qual,
-								   gpuscan->task.device,
+								   gpuscan->task.cuda_device,
 								   false,
 								   kds->nitems,
 								   sizeof(cl_uint));
@@ -1522,12 +1451,12 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 						grid_size, 1, 1,
 						block_size, 1, 1,
 						sizeof(uint) * block_size,
-						gpuscan->task.stream,
+						gpuscan->task.cuda_stream,
 						gpuscan->kern_qual_args,
 						NULL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-	gpuscan->task.pfm.num_kern_exec++;
+	gpuscan->task.pfm.num_kern_qual++;
 
 	/*
 	 * Recv DMA call
@@ -1537,18 +1466,18 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	rc = cuMemcpyDtoHAsync(kresults,
 						   gpuscan->m_gpuscan + offset,
 						   length,
-						   gpuscan->task.stream);
+						   gpuscan->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
 
 	/*
 	 * Register callback
 	 */
-	rc = cuStreamAddCallback(gpuscan->task.stream,
+	rc = cuStreamAddCallback(gpuscan->task.cuda_stream,
 							 pgstrom_respond_gpuscan,
 							 gpuscan, 0);
 	if (rc != CUDA_SUCCESS)
-		goto error;
+		elog(ERROR, "cuStreamAddCallback: %s", errorText(rc));
 
 	return true;
 
@@ -1566,7 +1495,7 @@ static bool
 pgstrom_process_gpuscan(GpuTask *task)
 {
 	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) task;
-	CUresult			rc;
+	GpuTaskState	   *gts = gpuscan->task.gts;
 	bool				status;
 	struct timeval		tv1, tv2;
 

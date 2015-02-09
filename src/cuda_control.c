@@ -98,7 +98,7 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 
 	/* make a new memory context */
 	snprintf(namebuf, sizeof(namebuf), "GPU DMA Buffer (%p)", resowner);
-	length_init = 4 * (1UL << get_next_log2(pgstrom_chunk_size << 20));
+	length_init = 4 * (1UL << get_next_log2(pgstrom_chunk_size()));
 	length_max = 1024 * length_init;
 	memcxt = HostPinMemContextCreate(NULL,
 									 namebuf,
@@ -201,7 +201,7 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 			gts->cuda_module = NULL;
 		}
 		/* release task objects */
-		dlist_foreach_modify(titer, &gst->tracked_tasks)
+		dlist_foreach_modify(titer, &gts->tracked_tasks)
 		{
 			GpuTask *task = dlist_container(GpuTask, tracker, titer.cur);
 
@@ -228,10 +228,10 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 	 * state in case of file-mapped data-store, so we have to ensure
 	 * these temporary files are removed and unmapped.
 	 */
-	dlist_foreach_modify(iter, &gcontext->pds_list)
+	dlist_foreach_modify(titer, &gcontext->pds_list)
 	{
 		pgstrom_data_store *pds = dlist_container(pgstrom_data_store,
-												  chain, iter.cur);
+												  chain, titer.cur);
 		dlist_delete(&pds->chain);
 		if (pds->kds_fname)
 			pgstrom_file_unmap_data_store(pds);
@@ -271,6 +271,53 @@ pgstrom_put_gpucontext(GpuContext *gcontext)
 		pgstrom_release_gpucontext(gcontext, true);
 }
 
+/*
+ * pgstrom_cleanup_gputaskstate
+ *
+ * cleanup any active tasks and release cuda related resource, to end or
+ * rescan executor.
+ */
+void
+pgstrom_cleanup_gputaskstate(GpuTaskState *gts)
+{
+	dlist_mutable_iter iter;
+	GpuTask		   *gputask;
+
+	/* synchronize all the concurrent task, if any */
+	pgstrom_sync_gpucontext(gts->gcontext);
+
+	SpinLockAcquire(&gts->lock);
+	gputask = gts->curr_task;
+	if (gputask)
+	{
+		dlist_delete(&gputask->tracker);
+		memset(&gputask->tracker, 0, sizeof(dlist_node));
+		gts->curr_task = NULL;
+		SpinLockRelease(&gts->lock);
+		gputask->cb_release(gputask);
+		SpinLockAcquire(&gts->lock);
+	}
+	dlist_foreach_modify(iter, &gts->tracked_tasks)
+	{
+		gputask = dlist_container(GpuTask, tracker, iter.cur);
+
+		dlist_delete(&gputask->tracker);
+		dlist_delete(&gputask->chain);
+		memset(&gputask->tracker, 0, sizeof(dlist_node));
+		memset(&gputask->chain, 0, sizeof(dlist_node));
+		SpinLockRelease(&gts->lock);
+		gputask->cb_release(gputask);
+		SpinLockAcquire(&gts->lock);
+	}
+	Assert(dlist_is_empty(&gts->running_tasks));
+	Assert(dlist_is_empty(&gts->pending_tasks));
+	Assert(dlist_is_empty(&gts->completed_tasks));
+	gts->num_running_tasks = 0;
+    gts->num_pending_tasks = 0;
+	gts->num_completed_tasks = 0;
+	SpinLockRelease(&gts->lock);
+}
+
 void
 pgstrom_init_gputaststate(GpuContext *gcontext, GpuTaskState *gts,
 						  const char *kern_source, int extra_flags,
@@ -297,7 +344,7 @@ pgstrom_init_gputaststate(GpuContext *gcontext, GpuTaskState *gts,
 
 void
 pgstrom_init_gputask(GpuTaskState *gts, GpuTask *task,
-					 void (*cb_process)(GpuTask *task),
+					 bool (*cb_process)(GpuTask *task),
 					 void (*cb_release)(GpuTask *task))
 {
 	GpuContext *gcontext = gts->gcontext;
@@ -375,11 +422,11 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
  *
  *
  */
-static __thread __dynamic_shmem_per_thread;
+static __thread int __dynamic_shmem_per_thread;
 static size_t
 dynamic_shmem_size_per_block(int blockSize)
 {
-	return dynamic_shmem_size_per_thread * (size_t)blockSize;
+	return __dynamic_shmem_per_thread * (size_t)blockSize;
 }
 
 void
@@ -393,18 +440,17 @@ pgstrom_compute_workgroup_size(size_t *p_grid_size,
 {
 	int			grid_size;
 	int			block_size;
-	int			block_size_min;
 	int			maximum_shmem_per_block;
-	int			dynamic_shmem_per_block;
+	int			static_shmem_per_block;
 	int			warp_size;
 	CUresult	rc;
 
 	/* get statically allocated shared memory */
-	rc = cuFuncGetAttribute(&dynamic_shmem_per_block,
+	rc = cuFuncGetAttribute(&static_shmem_per_block,
 							CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
 							function);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuFuncGetAttribute", errorText(rc));
+		elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
 
 	if (maximum_blocksize)
 	{
@@ -429,12 +475,12 @@ pgstrom_compute_workgroup_size(size_t *p_grid_size,
 			elog(ERROR, "failed on cuDeviceGetAttribute: %s",
 				 errorText(rc));
 
-		while (dynamic_shmem_per_block +
+		while (static_shmem_per_block +
 			   dynamic_shmem_per_thread * block_size > maximum_shmem_per_block)
-			block_size--;
+			block_size <<= 1;
 
 		if (block_size < warp_size)
-			elog(ERROR, "Expected block size is too small (%zu)", block_size);
+			elog(ERROR, "Expected block size is too small (%d)", block_size);
 
 		*p_block_size = block_size;
 		*p_grid_size = (nitems + block_size - 1) / block_size;
@@ -445,7 +491,8 @@ pgstrom_compute_workgroup_size(size_t *p_grid_size,
 		rc = cuOccupancyMaxPotentialBlockSize(&grid_size,
 											  &block_size,
 											  function,
-											  dynamic_shmem_per_block,
+											  dynamic_shmem_size_per_block,
+											  static_shmem_per_block,
 											  cuda_max_threads_per_block);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuOccupancyMaxPotentialBlockSize: %s",
@@ -807,7 +854,7 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 
 		rc = cuDeviceTotalMem(&dev_memsz, cuda_devices[dindex]);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuDeviceTotalMem: %s", errorTex(rc));
+			elog(ERROR, "failed on cuDeviceTotalMem: %s", errorText(rc));
 		att_name = "Total global memory size";
 		att_value = psprintf("%zu MBytes", dev_memsz >> 20);
 	}

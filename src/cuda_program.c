@@ -29,7 +29,7 @@
 
 typedef struct
 {
-	dlist_node	chain;
+	dlist_node	hash_chain;
 	dlist_node	lru_chain;
 	int			shift;	/* block class of this entry */
 	int			refcnt;	/* 0 means free entry */
@@ -72,7 +72,8 @@ typedef struct
 /* ---- GUC variables ---- */
 static Size		program_cache_size;
 static char	   *pgstrom_nvcc_path;
-bool			enable_cudaprog_optimize;
+static bool		debug_optimize_cuda_program;
+statir bool		debug_retain_cuda_program;
 
 /* ---- static variables ---- */
 static shmem_startup_hook_type shmem_startup_next;
@@ -126,9 +127,9 @@ pgstrom_program_cache_reclaim(int shift_min)
 
 		entry = dlist_container(program_cache_entry, lru_chain, dnode);
 		/* remove from the list not to be reclaimed again */
-		dlist_delete(&entry->chain);
+		dlist_delete(&entry->hash_chain);
 		dlist_delete(&entry->lru_chain);
-		memset(&entry->chain, 0, sizeof(dlist_node));
+		memset(&entry->hash_chain, 0, sizeof(dlist_node));
 		memset(&entry->lru_chain, 0, sizeof(dlist_node));
 
 		if (--entry->refcnt == 0)
@@ -168,7 +169,7 @@ pgstrom_program_cache_split(int shift)
 
 	dnode = dlist_pop_head_node(&pgcache_head->free_list[shift]);
 
-	entry = dlist_container(program_cache_entry, chain, dnode);
+	entry = dlist_container(program_cache_entry, hash_chain, dnode);
 	Assert(entry->shift == shift);
 	Assert((((uintptr_t)entry - (uintptr_t)pgcache_head->entry_begin)
 			& ((1UL << shift) - 1)) == 0);
@@ -177,13 +178,13 @@ pgstrom_program_cache_split(int shift)
 	/* earlier half */
 	entry->shift = shift;
 	entry->refcnt = 0;
-	dlist_push_tail(&pgcache_head->free_list[shift], &entry->chain);
+	dlist_push_tail(&pgcache_head->free_list[shift], &entry->hash_chain);
 
 	/* later half */
 	entry = (program_cache_entry *)((char *)entry + (1UL << shift));
 	entry->shift = shift;
 	entry->refcnt = 0;
-	dlist_push_tail(&pgcache_head->free_list[shift], &entry->chain);
+	dlist_push_tail(&pgcache_head->free_list[shift], &entry->hash_chain);
 
 	return true;
 }
@@ -224,7 +225,7 @@ pgstrom_program_cache_alloc(Size required)
 	Assert(!dlist_is_empty(&pgcache_head->free_list[shift]));
 
 	dnode = dlist_pop_head_node(&pgcache_head->free_list[shift]);
-	entry = dlist_container(program_cache_entry, chain, dnode);
+	entry = dlist_container(program_cache_entry, hash_chain, dnode);
 	Assert(entry->shift == shift);
 
 	memset(entry, 0, sizeof(program_cache_entry));
@@ -263,12 +264,12 @@ pgstrom_program_cache_free(program_cache_entry *entry)
 			break;
 		/* OK, chunk and buddy can be merged */
 
-		dlist_delete(&buddy->chain);
+		dlist_delete(&buddy->hash_chain);
 		if (buddy < entry)
 			entry = buddy;
 		entry->shift = ++shift;
 	}
-	dlist_push_head(&pgcache_head->free_list[shift], &entry->chain);
+	dlist_push_head(&pgcache_head->free_list[shift], &entry->hash_chain);
 }
 
 static void
@@ -281,7 +282,7 @@ pgstrom_put_cuda_program(program_cache_entry *entry)
 		 * NOTE: unless pgstrom_program_cache_reclaim() detach
 		 * entries, it never goes to refcnt == 0.
 		 */
-		Assert(!entry->chain.next && !entry->chain.prev);
+		Assert(!entry->hash_chain.next && !entry->hash_chain.prev);
 		Assert(!entry->lru_chain.next && !entry->lru_chain.prev);
 		pgstrom_program_cache_free(entry);
 	}
@@ -433,9 +434,33 @@ __build_cuda_program(program_cache_entry *old_entry)
 	Size		build_log_len = 0;
 	Size		required;
 	int			hindex;
+	const char *opt_optimize = "";
 	int			rc;
 	StringInfoData buf;
 	program_cache_entry *new_entry;
+
+	/*
+	 * write out 
+	 */
+	tablespace_oid = GetNextTempTableSpace();
+	if (!OidIsValid(tablespace_oid))
+		tablespace_oid = (OidIsValid(MyDatabaseTableSpace)
+						  ? MyDatabaseTableSpace
+						  : DEFAULTTABLESPACE_OID);
+	if (tablespace_oid == DEFAULTTABLESPACE_OID ||
+		tablespace_oid == GLOBALTABLESPACE_OID)
+	{
+
+	}
+
+	if (!OidIsValid(tablespace_oid) ? MyDatabaseTableSpace
+
+	if (!OidIsValid(tablespace_oid) ||
+		
+
+
+
+
 
 	/* make a basename of the tempfiles */
 	uniq_id = ((uintptr_t)old_entry -
@@ -463,13 +488,17 @@ __build_cuda_program(program_cache_entry *old_entry)
 	/* OK, done */
 	FreeFile(filp);
 
+
 	/*
 	 * Makes a command line to be kicked
 	 */
+	if ((entry->extra_flags & DEVKERNEL_DISABLE_OPTIMIZE) != 0)
+		opt_optimize = " -Xptxas '-O0'";
+
 	initStringInfo(&cmdline);
 	appendStringInfo(
 		&cmdline,
-		"%s %s.gpu --ptx "
+		"%s %s.gpu --ptx %s"
 		" -DFLEXIBLE_ARRAY_MEMBER"
 #ifdef PGSTROM_DEBUG
 		" -Werror -G"
@@ -483,6 +512,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 		" 2>%s.log",
 		pgstrom_nvcc_path,
 		basename,
+		opt_optimize,
 		SIZEOF_VOID_P, BLCKSZ,
 		itemid_offset_shift,
 		itemid_flags_shift,
@@ -594,15 +624,17 @@ __build_cuda_program(program_cache_entry *old_entry)
 	 * Add new_entry to the hash slot
 	 */
 	hindex = new_entry->crc % PGCACHE_HASH_SIZE;
-	dlist_push_head(&pgcache_head->active_list[hindex], &new_entry->chain);
-	dlist_push_head(&pgcache_head->lru_list, &new_entry->lru_chain);
+	dlist_push_head(&pgcache_head->active_list[hindex],
+					&new_entry->hash_chain);
+	dlist_push_head(&pgcache_head->lru_list,
+					&new_entry->lru_chain);
 
 	/*
 	 * Also, old_entry shall not be referenced no longer
 	 */
-	dlist_delete(&old_entry->chain);
+	dlist_delete(&old_entry->hash_chain);
 	dlist_delete(&old_entry->lru_chain);
-	memset(&old_entry->chain, 0, sizeof(dlist_node));
+	memset(&old_entry->hash_chain, 0, sizeof(dlist_node));
 	memset(&old_entry->lru_chain, 0, sizeof(dlist_node));
 	if (--old_entry->refcnt == 0)
 		pgstrom_program_cache_free(old_entry);
@@ -677,6 +709,10 @@ pgstrom_load_cuda_program(GpuTaskState *gts)
 	CUresult	rc;
 	BackgroundWorker worker;
 
+	/* Is optimization available? */
+	if (!debug_optimize_cuda_program)
+		extra_flags |= DEVKERNEL_DISABLE_OPTIMIZE;
+
 	/* makes a hash value */
 	INIT_CRC32C(crc);
 	COMP_CRC32C(crc, &extra_flags, sizeof(int32));
@@ -688,7 +724,7 @@ retry:
 	SpinLockAcquire(&pgcache_head->lock);
 	dlist_foreach (iter, &pgcache_head->active_list[hindex])
 	{
-		entry = dlist_container(program_cache_entry, chain, iter.cur);
+		entry = dlist_container(program_cache_entry, hash_chain, iter.cur);
 
 		if (entry->crc == crc &&
 			entry->extra_flags == extra_flags &&
@@ -742,7 +778,7 @@ retry:
 
 	/* to be acquired by program builder */
 	entry->refcnt++;
-	dlist_push_head(&pgcache_head->active_list[hindex], &entry->chain);
+	dlist_push_head(&pgcache_head->active_list[hindex], &entry->hash_chain);
 	dlist_push_head(&pgcache_head->lru_list, &entry->lru_chain);
 
 	/* Kick a dynamic background worker to build */
@@ -815,7 +851,7 @@ pgstrom_startup_cuda_program(void)
 		}
 		entry = (program_cache_entry *) curr_addr;
 		memset(entry, 0, sizeof(program_cache_entry));
-		dlist_push_tail(&pgcache_head->free_list[shift], &entry->chain);
+		dlist_push_tail(&pgcache_head->free_list[shift], &entry->hash_chain);
 
 		curr_addr += (1UL << shift);
 	}
@@ -850,11 +886,19 @@ pgstrom_init_cuda_program(void)
 							NULL, NULL, NULL);
 	program_cache_size = (Size)__program_cache_size * 1024L;
 
-	DefineCustomBoolVariable("pg_strom.enable_program_optimize",
-							 "enables optimization on device program build",
+	DefineCustomBoolVariable("pg_strom.debug_optimize_program",
+							 "enabled optimization on program build",
 							 NULL,
-							 &enable_cudaprog_optimize,
+							 &debug_optimize_cuda_program,
 							 true,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	DefineCustomBoolVariable("pg_strom.debug_retain_program",
+							 "retain CUDA program file generated on the fly",
+							 NULL,
+							 &debug_retain_cuda_program,
+							 false,
 							 PGC_SUSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);

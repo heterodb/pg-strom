@@ -164,11 +164,12 @@ typedef struct GpuTaskState
 	const char	   *kern_source;
 	cl_uint			extra_flags;
 	CUmodule		cuda_module;	/* module object built from cuda_binary */
-	slock_t			lock;			/* protection of the list below */
+	slock_t			lock;			/* protection of the fields below */
+	struct GpuTask *curr_task;		/* a task currently processed */
 	dlist_head		tracked_tasks;	/* for resource tracking */
-	dlist_head		running_tasks;
-	dlist_head		pending_tasks;
-	dlist_head		completed_tasks;
+	dlist_head		running_tasks;	/* list for running tasks */
+	dlist_head		pending_tasks;	/* list for pending tasks */
+	dlist_head		completed_tasks;/* list for completed tasks */
 	cl_uint			num_running_tasks;
 	cl_uint			num_pending_tasks;
 	cl_uint			num_completed_tasks;
@@ -248,7 +249,7 @@ typedef struct pgstrom_data_store
 	struct pgstrom_data_store *ktoast;
 } pgstrom_data_store;
 
-typedef pgstrom_data_store *(*pgstromExecBulkScan)(CustomScanState *node);
+typedef pgstrom_data_store *(*pgstromExecBulkScan_type)(CustomScanState *node);
 
 /* --------------------------------------------------------------------
  *
@@ -259,7 +260,7 @@ typedef pgstrom_data_store *(*pgstromExecBulkScan)(CustomScanState *node);
 typedef struct
 {
 	CustomExecMethods	c;
-	void   *(*ExecCustomBulk)(CustomScanState *node);
+	pgstromExecBulkScan_type ExecCustomBulk;
 } PGStromExecMethods;
 
 static inline void *
@@ -305,13 +306,14 @@ extern GpuContext *pgstrom_get_gpucontext(void);
 extern void pgstrom_sync_gpucontext(GpuContext *gcontext);
 extern void pgstrom_put_gpucontext(GpuContext *gcontext);
 
+extern void pgstrom_cleanup_gputaskstate(GpuTaskState *gts);
 extern void pgstrom_init_gputaststate(GpuContext *gcontext,
 									  GpuTaskState *gts,
 									  const char *kern_source,
 									  int extra_flags,
 									  void (*cb_cleanup)(GpuTaskState *gts));
 extern void pgstrom_init_gputask(GpuTaskState *gts, GpuTask *task,
-								 void (*cb_process)(GpuTask *task),
+								 bool (*cb_process)(GpuTask *task),
 								 void (*cb_release)(GpuTask *task));
 extern void pgstrom_compute_workgroup_size(size_t *p_grid_size,
 										   size_t *p_block_size,
@@ -328,7 +330,6 @@ extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 /*
  * cuda_program.c
  */
-extern bool	enable_cudaprog_optimize;
 extern bool pgstrom_load_cuda_program(GpuTaskState *gts);
 extern void pgstrom_init_cuda_program(void);
 
@@ -504,8 +505,7 @@ extern void show_scan_qual(List *qual, const char *qlabel,
 						   ExplainState *es);
 extern void show_instrumentation_count(const char *qlabel, int which,
 									   PlanState *planstate, ExplainState *es);
-extern void print_device_kernel(const char *kern_source,
-								int32 extra_flags,
+extern void print_device_kernel(GpuTaskState *gts,
 								ExplainState *es);
 extern void pgstrom_perfmon_accum(pgstrom_perfmon *accum,
 								  const pgstrom_perfmon *pfm);

@@ -53,6 +53,75 @@ pgstrom_chunk_size(void)
 }
 
 /*
+ * pgstrom_temp_dirpath - makes a temporary file according to the system
+ * setting. Note that we never gueran
+ */
+int
+pgstrom_temp_pathname(const char *p_dirpath,
+					  const char *p_filepath,
+					  const char *file_suffix)
+{
+	static __thread char tempdirname[MAXPGPATH];
+	static __thread char tempfilename[MAXPGPATH];
+	int			file_desc;
+	int			file_flags;
+	size_t		offset;
+	Oid			tablespace_oid = GetNextTempTableSpace();
+
+	if (!OidIsValid(tablespace_oid))
+		tablespace_oid = (OidIsValid(MyDatabaseTableSpace)
+						  ? MyDatabaseTableSpace :
+						  DEFAULTTABLESPACE_OID);
+
+	if (tablespace_oid == DEFAULTTABLESPACE_OID ||
+		tablespace_oid == GLOBALTABLESPACE_OID)
+	{
+		/* The default tablespace is {datadir}/base */
+		snprintf(tempdirpath, sizeof(tempdirpath),
+				 "base/%s",PG_TEMP_FILES_DIR);
+	}
+	else
+	{
+		/* All other tablespaces are accessed via symlinks */
+		snprintf(tempdirpath, sizeof(tempdirpath),
+				 "pg_tblspc/%u/%s/%s",
+				 tablespace_oid,
+				 TABLESPACE_VERSION_DIRECTORY,
+				 PG_TEMP_FILES_DIR);
+	}
+
+	/*
+	 * Generate a tempfile name that should be unique within the current
+	 * database instance.
+	 */
+	snprintf(tempfilepath, sizeof(tempfilepath), "%s/%s%d.%ld%s",
+			 tempdirpath, PGSTROM_TEMP_FILE_PREFIX,
+			 MyProcPid, tempFileCounter++,
+			 !file_suffix ? "" : file_suffix);
+
+	file_flags = O_RDWR | O_CREAT | O_TRUNC | PG_BINARY;
+	file_desc = OpenTransientFile(tempfilepath, file_flags, 0600);
+	if (file_desc < 0)
+	{
+		/*
+		 * We might need to create the tablespace's tempfile directory,
+		 * if no one has yet done so. However, no error check needed,
+		 * because concurrent mkdir() can happen and OpenTransientFile
+		 * below eventually raise an error.
+		 */
+		mkdir(tempdirpath, S_IRWXU);
+
+		file_desc = OpenTransientFile(tempfilepath, file_flags, 0600);
+		if (file_desc < 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not create temporary file \"%s\": %m",
+							tempfilepath)));
+	}
+	return file_desc;
+}
+
+/*
  * pgstrom_create_param_buffer
  *
  * It construct a param-buffer on the shared memory segment, according to

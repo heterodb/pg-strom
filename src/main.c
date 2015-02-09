@@ -335,9 +335,10 @@ show_instrumentation_count(const char *qlabel, int which,
 }
 
 void
-print_device_kernel(const char *kern_source, int32 extra_flags,
-					ExplainState *es)
+print_device_kernel(GpuTaskState *gts, ExplainState *es)
 {
+	const char	   *kern_source = gts->kern_source;
+	int				extra_flags = gts->extra_flags;
 	StringInfoData	str;
 
 	if (!kern_source || !es->verbose || !pgstrom_debug_print_kernel)

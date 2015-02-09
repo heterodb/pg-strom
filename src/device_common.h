@@ -399,11 +399,9 @@ typedef struct {
 	 (KERN_DATA_STORE_VALUES((kds),(kds_index)) + (kds)->ncols))
 
 /* length of kern_data_store */
-#define KERN_DATA_STORE_LENGTH(kds)										\
-	((kds)->format == KDS_FORMAT_ROW ?									\
-	 ((uintptr_t)KERN_DATA_STORE_ROWBLOCK((kds), (kds)->nblocks) -		\
-	  (uintptr_t)(kds)) :												\
-	 STROMALIGN((kds)->length))
+#define KERN_DATA_STORE_LENGTH(kds)		\
+	STROMALIGN((kds)->length)
+
 /* length of the header portion of kern_data_store */
 #define KERN_DATA_STORE_HEAD_LENGTH(kds)			\
 	offsetof(kern_data_store, colmeta[(kds)->ncols])
