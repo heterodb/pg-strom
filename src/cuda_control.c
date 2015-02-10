@@ -32,7 +32,6 @@ static size_t		cuda_max_threads_per_block = INT_MAX;
 static int			cuda_compute_capability = INT_MAX;
 
 /* stuffs related to GpuContext */
-static slock_t		gcontext_lock;
 static dlist_head	gcontext_hash[100];
 static GpuContext  *gcontext_last = NULL;
 
@@ -83,34 +82,83 @@ gpucontext_hash_index(ResourceOwner resowner)
 	return crc % lengthof(gcontext_hash);
 }
 
-
 static GpuContext *
 pgstrom_create_gpucontext(ResourceOwner resowner)
 {
-	GpuContext	   *gcontext;
-	MemoryContext	memcxt;
+	GpuContext	   *gcontext = NULL;
+	MemoryContext	memcxt = NULL;
+	CUcontext		cuda_context;
+	Size			length_gcxt;
 	Size			length_init;
 	Size			length_max;
 	char			namebuf[200];
+	int				index;
+	CUresult		rc;
 
 	if (cuda_num_devices < 0)
 		pgstrom_init_cuda();
+	if (cuda_num_devices < 1)
+		elog(ERROR, "No cuda device were detected");
 
-	/* make a new memory context */
-	snprintf(namebuf, sizeof(namebuf), "GPU DMA Buffer (%p)", resowner);
-	length_init = 4 * (1UL << get_next_log2(pgstrom_chunk_size()));
-	length_max = 1024 * length_init;
-	memcxt = HostPinMemContextCreate(NULL,
-									 namebuf,
-									 0,		/* no pre-allocation */
-									 length_init,
-									 length_max);
-	gcontext = MemoryContextAllocZero(memcxt, sizeof(GpuContext));
-	gcontext->refcnt = 1;
-	gcontext->resowner = resowner;
-	gcontext->memcxt = memcxt;
-	dlist_init(&gcontext->state_list);
-	dlist_init(&gcontext->pds_list);
+	/* make a first CUcontext */
+	rc = cuCtxCreate(&cuda_context, CU_CTX_SCHED_AUTO, cuda_devices[0]);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
+
+	PG_TRY();
+	{
+		/* make a new memory context */
+		snprintf(namebuf, sizeof(namebuf), "GPU DMA Buffer (%p)", resowner);
+		length_init = 4 * (1UL << get_next_log2(pgstrom_chunk_size()));
+		length_max = 1024 * length_init;
+		memcxt = HostPinMemContextCreate(NULL,
+										 namebuf,
+										 cuda_context,
+										 0,		/* no pre-allocation */
+										 length_init,
+										 length_max);
+		length_gcxt = offsetof(GpuContext, cuda_context[cuda_num_devices]);
+		gcontext = MemoryContextAllocZero(memcxt, length_gcxt);
+		gcontext->refcnt = 2;
+		gcontext->resowner = resowner;
+		gcontext->memcxt = memcxt;
+		dlist_init(&gcontext->state_list);
+		dlist_init(&gcontext->pds_list);
+		gcontext->cuda_context[0] = cuda_context;
+		for (index=1; index < cuda_num_devices; index++)
+		{
+			rc = cuCtxCreate(&gcontext->cuda_context[index],
+							 CU_CTX_SCHED_AUTO,
+							 cuda_devices[index]);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
+		}
+		gcontext->num_context = cuda_num_devices;
+		gcontext->cur_context = 0;
+		elog(INFO, "create a new gpucontext=%p", gcontext);
+	}
+	PG_CATCH();
+	{
+		if (!gcontext)
+		{
+			rc = cuCtxDestroy(cuda_context);
+			if (rc != CUDA_SUCCESS)
+				elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
+		}
+		else
+		{
+			while (index > 0)
+			{
+				rc = cuCtxDestroy(gcontext->cuda_context[--index]);
+				if (rc != CUDA_SUCCESS)
+					elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
+			}
+		}
+		if (memcxt != NULL)
+			MemoryContextDelete(memcxt);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	return gcontext;
 }
@@ -122,13 +170,12 @@ pgstrom_get_gpucontext(void)
 	dlist_iter	iter;
 	int			hindex;
 
-	SpinLockAcquire(&gcontext_lock);
 	if (gcontext_last != NULL &&
 		gcontext_last->resowner == CurrentResourceOwner)
 	{
 		gcontext = gcontext_last;
 		gcontext->refcnt++;
-		SpinLockRelease(&gcontext_lock);
+		elog(INFO, "get gcontext 1 = %p", gcontext);
 		return gcontext;
 	}
 	/* not a last one, so search a hash table */
@@ -140,7 +187,7 @@ pgstrom_get_gpucontext(void)
 		if (gcontext->resowner == CurrentResourceOwner)
 		{
 			gcontext->refcnt++;
-			SpinLockRelease(&gcontext_lock);
+			elog(INFO, "get gcontext 2 = %p", gcontext);
 			return gcontext;
 		}
 	}
@@ -150,7 +197,7 @@ pgstrom_get_gpucontext(void)
 	 */
 	gcontext = pgstrom_create_gpucontext(CurrentResourceOwner);
 	dlist_push_tail(&gcontext_hash[hindex], &gcontext->chain);
-	SpinLockRelease(&gcontext_lock);
+
 	return gcontext;
 }
 
@@ -163,7 +210,7 @@ pgstrom_sync_gpucontext(GpuContext *gcontext)
 	/* Ensure all the concurrent tasks getting completed */
 	for (i=0; i < gcontext->num_context; i++)
 	{
-		rc = cuCtxSetCurrent(gcontext->dev_context[i]);
+		rc = cuCtxSetCurrent(gcontext->cuda_context[i]);
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuCtxSetCurrent: %s", errorText(rc));
 
@@ -176,6 +223,7 @@ pgstrom_sync_gpucontext(GpuContext *gcontext)
 static void
 pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 {
+	CUcontext	cuda_context;
 	CUresult	rc;
 	int			i;
 
@@ -189,7 +237,6 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 		GpuTaskState   *gts = dlist_container(GpuTaskState, chain, dnode);
 
 		Assert(gts->gcontext == gcontext);
-		dlist_delete(&gts->chain);
 
 		/* release cuda module, if any */
 		if (gts->cuda_module)
@@ -206,7 +253,6 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 			GpuTask	   *task = dlist_container(GpuTask, tracker, dnode);
 
 			Assert(task->gts == gts);
-			dlist_delete(&task->tracker);
 			if (is_commit)
 				elog(WARNING, "Unreferenced GpuTask leak: %p", task);
 			task->cb_release(task);
@@ -232,38 +278,45 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 			pgstrom_file_unmap_data_store(pds);
 	}
 
-	/* OK, release this GpuContext */
-	for (i=0; i < gcontext->num_context; i++)
+	/* Ensure CUDA context is empty */
+	rc = cuCtxSetCurrent(NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(WARNING, "failed on cuCtxSetCurrent(NULL): %s", errorText(rc));
+
+	/*
+	 * NOTE: Be careful to drop the primary CUDA context because it also
+	 * removes/unmaps all the memory region allocated by cuMemHostAlloc()
+	 * that includes the GpuContext object and MemoryContext.
+	 * So, we have to drop non-primary CUDA context, memory context, then
+	 * the primary CUDA context.
+	 */
+	cuda_context = gcontext->cuda_context[0];
+	for (i = gcontext->num_context - 1; i > 0; i--)
 	{
-		rc = cuCtxDestroy(gcontext->dev_context[i]);
+		rc = cuCtxDestroy(gcontext->cuda_context[i]);
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
 	}
-	/* Ensure CUDA context is empty */
-	cuCtxSetCurrent(NULL);
-
-	/* OK, release the memory context that includes gcontext itself */
+	/* release  */
 	MemoryContextDelete(gcontext->memcxt);
+
+	/* Drop the primary CUDA context */
+	rc = cuCtxDestroy(cuda_context);
+	if (rc != CUDA_SUCCESS)
+		elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
 }
 
 void
 pgstrom_put_gpucontext(GpuContext *gcontext)
 {
-	bool	do_release = false;
-
-	SpinLockAcquire(&gcontext_lock);
 	Assert(gcontext->refcnt > 0);
 	if (--gcontext->refcnt == 0)
 	{
 		if (gcontext_last == gcontext)
 			gcontext_last = NULL;
 		dlist_delete(&gcontext->chain);
-		do_release = true;
-	}
-	SpinLockRelease(&gcontext_lock);
-
-	if (do_release)
 		pgstrom_release_gpucontext(gcontext, true);
+	}
 }
 
 /*
@@ -311,14 +364,36 @@ pgstrom_cleanup_gputaskstate(GpuTaskState *gts)
 }
 
 void
+pgstrom_release_gputaskstate(GpuTaskState *gts)
+{
+	CUresult	rc;
+
+	/* unlink this GpuTaskState from the GpuContext */
+	dlist_delete(&gts->chain);
+
+	/* clean-up and release any concurrent tasks */
+	pgstrom_cleanup_gputaskstate(gts);
+
+	/* release cuda module, if any */
+	if (gts->cuda_module)
+	{
+		rc = cuModuleUnload(gts->cuda_module);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuModuleUnload: %s", errorText(rc));
+		gts->cuda_module = NULL;
+	}
+	/* put reference to the GpuContext */
+	pgstrom_put_gpucontext(gts->gcontext);
+}
+
+void
 pgstrom_init_gputaststate(GpuContext *gcontext, GpuTaskState *gts,
-						  const char *kern_source, int extra_flags,
 						  void (*cb_cleanup)(GpuTaskState *gts))
 {
 	dlist_push_tail(&gcontext->state_list, &gts->chain);
 	gts->gcontext = gcontext;
-	gts->kern_source = kern_source;
-	gts->extra_flags = extra_flags;
+	gts->kern_source = NULL;	/* to be set later */
+	gts->extra_flags = 0;		/* to be set later */
 	SpinLockInit(&gts->lock);
 	dlist_init(&gts->tracked_tasks);
 	dlist_init(&gts->running_tasks);
@@ -329,9 +404,6 @@ pgstrom_init_gputaststate(GpuContext *gcontext, GpuTaskState *gts,
 	gts->num_completed_tasks = 0;
 	gts->cb_cleanup = cb_cleanup;
 	memset(&gts->pfm_accum, 0, sizeof(pgstrom_perfmon));
-	/* try to load binary module, or kick run-time compiler, if any */
-	if (kern_source != NULL)
-		pgstrom_load_cuda_program(gts);
 }
 
 void
@@ -347,7 +419,7 @@ pgstrom_init_gputask(GpuTaskState *gts, GpuTask *task,
 	int			index;
 
 	index = (gcontext->cur_context++ % gcontext->num_context);
-	cuda_context = gcontext->dev_context[index];
+	cuda_context = gcontext->cuda_context[index];
 	rc = cuCtxGetDevice(&cuda_device);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuCtxGetDevice: %s", errorText(rc));
@@ -365,6 +437,8 @@ pgstrom_init_gputask(GpuTaskState *gts, GpuTask *task,
 	task->cuda_stream = cuda_stream;
 	task->cuda_device = cuda_device;
 	task->cuda_context = cuda_context;
+	task->cb_process = cb_process;
+	task->cb_release = cb_release;
 	/* tracked by GpuTaskState */
 	SpinLockAcquire(&gts->lock);
 	dlist_push_tail(&gts->tracked_tasks, &task->tracker);
@@ -383,7 +457,6 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 	if (phase != RESOURCE_RELEASE_AFTER_LOCKS)
 		return;
 
-	SpinLockAcquire(&gcontext_lock);
 	dlist_foreach_modify(iter, &gcontext_hash[hindex])
 	{
 		GpuContext *gcontext = dlist_container(GpuContext, chain, iter.cur);
@@ -394,16 +467,14 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 			if (gcontext_last == gcontext)
 				gcontext_last = NULL;
 			dlist_delete(&gcontext->chain);
-			SpinLockRelease(&gcontext_lock);
 
-			if (is_commit)
+			if (is_commit && gcontext->refcnt > 1)
 				elog(WARNING, "Probably, someone forgot to put GpuContext");
 
 			pgstrom_release_gpucontext(gcontext, is_commit);
 			return;
 		}
 	}
-	SpinLockRelease(&gcontext_lock);
 }
 
 
@@ -509,6 +580,7 @@ pgstrom_check_device_capability(int ordinal, CUdevice device)
 	int			dev_mpu_nums;
 	int			dev_mpu_clk;
 	int			dev_max_threads_per_block;
+	int			num_cores;
 	CUresult	rc;
 	CUdevice_attribute attrib;
 
@@ -561,10 +633,31 @@ pgstrom_check_device_capability(int ordinal, CUdevice device)
 		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
 	/*
-	 * device older than Kepler is not supported
+	 * CUDA device older than Kepler is not supported
 	 */
 	if (dev_cap_major < 3)
 		result = false;
+
+	/*
+	 * Number of CUDA cores (just for log messages)
+	 */
+	if (dev_cap_major == 1)
+		num_cores = 8;
+	else if (dev_cap_major == 2)
+	{
+		if (dev_cap_minor == 0)
+			num_cores = 32;
+		else if (dev_cap_minor == 1)
+			num_cores = 48;
+		else
+			num_cores = -1;
+	}
+	else if (dev_cap_major == 3)
+		num_cores = 192;
+	else if (dev_cap_major == 5)
+		num_cores = 128;
+	else
+		num_cores = -1;		/* unknown */
 
 	/*
 	 * Track referenced device property
@@ -577,9 +670,10 @@ pgstrom_check_device_capability(int ordinal, CUdevice device)
 								  100 * dev_cap_major + dev_cap_minor);
 
 	/* Log the brief CUDA device properties */
-	elog(LOG, "CUDA device[%d] %s (%d of SMs (%dMHz), L2 %dKB, RAM %zuMB (%dbits, %dKHz), computing capability %d.%d%s",
+	elog(LOG, "GPU[%d] %s (%d CUDA cores, %d SMs, %dMHz), L2 %dKB, RAM %zuMB (%dbits, %dKHz), computing capability %d.%d%s",
 		 ordinal,
 		 dev_name,
+		 num_cores > 0 ? num_cores * dev_mpu_nums : -1,
 		 dev_mpu_nums,
 		 dev_mpu_clk / 1000,
 		 dev_l2_sz >> 10,
@@ -596,6 +690,7 @@ pgstrom_check_device_capability(int ordinal, CUdevice device)
 void
 pgstrom_init_cuda_control(void)
 {
+	MemoryContext oldcxt;
 	CUdevice	device;
 	CUresult	rc;
 	int			i, count;
@@ -614,6 +709,7 @@ pgstrom_init_cuda_control(void)
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuDeviceGetCount(%s)", errorText(rc));
 
+	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 	for (i=0; i < count; i++)
 	{
 		rc = cuDeviceGet(&device, i);
@@ -622,13 +718,13 @@ pgstrom_init_cuda_control(void)
 		if (pgstrom_check_device_capability(i, device))
 			cuda_device_ordinals = lappend_int(cuda_device_ordinals, i);
 	}
+	MemoryContextSwitchTo(oldcxt);
 	if (cuda_device_ordinals == NIL)
-		elog(ERROR, "no CUDA device found on the system");
+		elog(ERROR, "No CUDA devices, PG-Strom was disabled");
 
 	/*
 	 * initialization of GpuContext related stuff
 	 */
-	SpinLockInit(&gcontext_lock);
 	for (i=0; i < lengthof(gcontext_hash); i++)
 		dlist_init(&gcontext_hash[i]);
 	RegisterResourceReleaseCallback(gpucontext_cleanup_callback, NULL);

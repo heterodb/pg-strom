@@ -196,6 +196,8 @@ typedef struct AllocSetContext
 	/* Info about storage allocated in this context: */
 	AllocBlock	blocks;			/* head of list of blocks in this set */
 	AllocChunk	freelist[ALLOCSET_NUM_FREELISTS];		/* free chunk lists */
+	/* A CUDA context that owns this memory context */
+	CUcontext	cuda_context;
 	/* Allocation parameters for this context: */
 	Size		initBlockSize;	/* initial block size */
 	Size		maxBlockSize;	/* maximum block size */
@@ -330,18 +332,24 @@ static const unsigned char LogTable256[256] =
  * allocate and release host pinned memory for DMA optimization.
  */
 static AllocBlock
-alloc_block_malloc(size_t bytesize)
+alloc_block_malloc(CUcontext cuda_context, size_t bytesize)
 {
 	void	   *ptr;
 	CUresult	rc;
 
+	rc = cuCtxPushCurrent(cuda_context);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+
 	rc = cuMemHostAlloc(&ptr, bytesize, CU_MEMHOSTALLOC_PORTABLE);
 	if (rc != CUDA_SUCCESS)
 	{
+		cuCtxPopCurrent(NULL);
 		if (rc != CUDA_ERROR_OUT_OF_MEMORY)
 			elog(ERROR, "failed on cuMemHostAlloc: %s", errorText(rc));
 		return NULL;
 	}
+	cuCtxPopCurrent(NULL);
 	return (AllocBlock) ptr;
 }
 
@@ -484,6 +492,7 @@ randomize_mem(char *ptr, size_t size)
 MemoryContext
 HostPinMemContextCreate(MemoryContext parent,
 						const char *name,
+						CUcontext cuda_context,
 						Size minContextSize,
 						Size initBlockSize,
 						Size maxBlockSize)
@@ -496,7 +505,6 @@ HostPinMemContextCreate(MemoryContext parent,
 											 &AllocSetMethods,
 											 parent,
 											 name);
-
 	/*
 	 * Make sure alloc parameters are reasonable, and save them.
 	 *
@@ -509,6 +517,7 @@ HostPinMemContextCreate(MemoryContext parent,
 	if (maxBlockSize < initBlockSize)
 		maxBlockSize = initBlockSize;
 	Assert(AllocHugeSizeIsValid(maxBlockSize)); /* must be safe to double */
+	context->cuda_context = cuda_context;
 	context->initBlockSize = initBlockSize;
 	context->maxBlockSize = maxBlockSize;
 	context->nextBlockSize = initBlockSize;
@@ -540,7 +549,7 @@ HostPinMemContextCreate(MemoryContext parent,
 		Size		blksize = MAXALIGN(minContextSize);
 		AllocBlock	block;
 
-		block = alloc_block_malloc(blksize);
+		block = alloc_block_malloc(context->cuda_context, blksize);
 		if (block == NULL)
 		{
 			MemoryContextStats(TopMemoryContext);
@@ -562,7 +571,6 @@ HostPinMemContextCreate(MemoryContext parent,
 		VALGRIND_MAKE_MEM_NOACCESS(block->freeptr,
 								   blksize - ALLOC_BLOCKHDRSZ);
 	}
-
 	return (MemoryContext) context;
 }
 
@@ -719,7 +727,7 @@ AllocSetAlloc(MemoryContext context, Size size)
 	{
 		chunk_size = MAXALIGN(size);
 		blksize = chunk_size + ALLOC_BLOCKHDRSZ + ALLOC_CHUNKHDRSZ;
-		block = alloc_block_malloc(blksize);
+		block = alloc_block_malloc(set->cuda_context, blksize);
 		if (block == NULL)
 		{
 			MemoryContextStats(TopMemoryContext);
@@ -900,7 +908,7 @@ AllocSetAlloc(MemoryContext context, Size size)
 			blksize <<= 1;
 
 		/* Try to allocate it */
-		block = alloc_block_malloc(blksize);
+		block = alloc_block_malloc(set->cuda_context, blksize);
 
 		/*
 		 * We could be asking for pretty big blocks here, so cope if malloc
@@ -911,7 +919,7 @@ AllocSetAlloc(MemoryContext context, Size size)
 			blksize >>= 1;
 			if (blksize < required_size)
 				break;
-			block = alloc_block_malloc(blksize);
+			block = alloc_block_malloc(set->cuda_context, blksize);
 		}
 
 		if (block == NULL)

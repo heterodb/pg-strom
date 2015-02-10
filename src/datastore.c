@@ -31,7 +31,7 @@
 #include "utils/rel.h"
 #include "utils/tqual.h"
 #include "pg_strom.h"
-#include "device_numeric.h"
+#include "cuda_numeric.h"
 #include <sys/mman.h>
 #include <sys/stat.h>
 

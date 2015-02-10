@@ -38,7 +38,7 @@ static bool	guc_pgstrom_enabled;
 static bool guc_pgstrom_enabled_global;
 bool	pgstrom_perfmon_enabled;
 bool	pgstrom_debug_bulkload_enabled;
-bool	pgstrom_debug_print_kernel;
+bool	pgstrom_debug_kernel_source;
 int		pgstrom_max_async_chunks;
 int		pgstrom_min_async_chunks;
 
@@ -130,10 +130,10 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
                              GUC_NOT_IN_SAMPLE,
                              NULL, NULL, NULL);
-	DefineCustomBoolVariable("pg_strom.debug_print_kernel",
-							 "Enables to print kernel code on EXPLAIN VERBOSE",
+	DefineCustomBoolVariable("pg_strom.debug_kernel_source",
+							 "Enables to show kernel source on EXPLAIN",
 							 NULL,
-							 &pgstrom_debug_print_kernel,
+							 &pgstrom_debug_kernel_source,
 							 false,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
@@ -247,12 +247,14 @@ _PG_init(void)
 	/* initialization of CUDA related stuff */
 	pgstrom_init_cuda_control();
 	pgstrom_init_cuda_program();
+	/* initialization of data store support */
+	pgstrom_init_datastore();
 
 	/* registration of custom-scan providers */
 	pgstrom_init_gpuscan();
-	pgstrom_init_gpuhashjoin();
-	pgstrom_init_gpupreagg();
-	pgstrom_init_gpusort();
+	//pgstrom_init_gpuhashjoin();
+	//pgstrom_init_gpupreagg();
+	//pgstrom_init_gpusort();
 
 	/* miscellaneous initializations */
 	pgstrom_init_misc_guc();
@@ -335,13 +337,13 @@ show_instrumentation_count(const char *qlabel, int which,
 }
 
 void
-print_device_kernel(GpuTaskState *gts, ExplainState *es)
+pgstrom_explain_kernel_source(GpuTaskState *gts, ExplainState *es)
 {
 	const char	   *kern_source = gts->kern_source;
 	int				extra_flags = gts->extra_flags;
 	StringInfoData	str;
 
-	if (!kern_source || !es->verbose || !pgstrom_debug_print_kernel)
+	if (!kern_source || !es->verbose || !pgstrom_debug_kernel_source)
 		return;
 
 	initStringInfo(&str);
@@ -351,23 +353,23 @@ print_device_kernel(GpuTaskState *gts, ExplainState *es)
 	 * Practically, clCreateProgramWithSource() accepts multiple cstrings
 	 * as if external files are included.
 	 */
-	appendStringInfo(&str, "#include \"opencl_common.h\"\n");
+	appendStringInfo(&str, "#include \"cuda_common.h\"\n");
 	if (extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
-		appendStringInfo(&str, "#include \"opencl_gpuscan.h\"\n");
+		appendStringInfo(&str, "#include \"cuda_gpuscan.h\"\n");
 	if (extra_flags & DEVKERNEL_NEEDS_HASHJOIN)
-		appendStringInfo(&str, "#include \"opencl_hashjoin.h\"\n");
+		appendStringInfo(&str, "#include \"cuda_hashjoin.h\"\n");
 	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
-		appendStringInfo(&str, "#include \"opencl_gpupreagg.h\"\n");
+		appendStringInfo(&str, "#include \"cuda_gpupreagg.h\"\n");
 	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT)
-		appendStringInfo(&str, "#include \"opencl_gpusort.h\"\n");
+		appendStringInfo(&str, "#include \"cuda_gpusort.h\"\n");
 	if (extra_flags & DEVFUNC_NEEDS_MATHLIB)
-		appendStringInfo(&str, "#include \"opencl_mathlib.h\"\n");
+		appendStringInfo(&str, "#include \"cuda_mathlib.h\"\n");
 	if (extra_flags & DEVFUNC_NEEDS_TIMELIB)
-		appendStringInfo(&str, "#include \"opencl_timelib.h\"\n");
+		appendStringInfo(&str, "#include \"cuda_timelib.h\"\n");
 	if (extra_flags & DEVFUNC_NEEDS_TEXTLIB)
-		appendStringInfo(&str, "#include \"opencl_textlib.h\"\n");
+		appendStringInfo(&str, "#include \"cuda_textlib.h\"\n");
 	if (extra_flags & DEVFUNC_NEEDS_NUMERIC)
-		appendStringInfo(&str, "#include \"opencl_numeric.h\"\n");
+		appendStringInfo(&str, "#include \"cuda_numeric.h\"\n");
 	appendStringInfo(&str, "\n%s", kern_source);
 
 	ExplainPropertyText("Kernel Source", str.data, es);
@@ -376,7 +378,7 @@ print_device_kernel(GpuTaskState *gts, ExplainState *es)
 }
 
 void
-pgstrom_perfmon_accum(pgstrom_perfmon *accum, const pgstrom_perfmon *pfm)
+pgstrom_accum_perfmon(pgstrom_perfmon *accum, const pgstrom_perfmon *pfm)
 {
 	if (!accum->enabled)
 		return;
@@ -454,7 +456,7 @@ usecond_unitary_format(double usecond)
 }
 
 void
-pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
+pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 {
 	char		buf[256];
 

@@ -8,14 +8,15 @@ STROM_OBJS = main.o codegen.o grafter.o datastore.o \
 		gpuscan.o #gpuhashjoin.o gpupreagg.o
 
 # Source file of GPU portion
-CUDA_OBJS = device_common.o \
-	device_gpuscan.o \
-	device_gpupreagg.o \
-	device_hashjoin.o \
-	device_mathlib.o \
-	device_textlib.o \
-	device_timelib.o \
-	device_numeric.o
+CUDA_OBJS = cuda_common.o \
+	cuda_gpuscan.o \
+	cuda_gpupreagg.o \
+	cuda_hashjoin.o \
+	cuda_gpusort.o \
+	cuda_mathlib.o \
+	cuda_textlib.o \
+	cuda_timelib.o \
+	cuda_numeric.o
 CUDA_SOURCES = $(addprefix src/,$(CUDA_OBJS:.o=.c))
 
 # Header and Libraries of CUDA
@@ -54,7 +55,7 @@ PGSTROM_DEBUG := $(shell $(PG_CONFIG) --configure | \
 	echo "-Wall -DPGSTROM_DEBUG=1 -O0")
 PG_CPPFLAGS := $(PGSTROM_DEBUG) $(IPATH)
 SHLIB_LINK := $(LPATH) -lcuda
-EXTRA_CLEAN := $(OPENCL_SOURCES)
+EXTRA_CLEAN := $(CUDA_SOURCES)
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)

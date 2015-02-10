@@ -818,6 +818,8 @@ pgstrom_startup_cuda_program(void)
 		}
 		entry = (program_cache_entry *) curr_addr;
 		memset(entry, 0, sizeof(program_cache_entry));
+		entry->shift = shift;
+		entry->refcnt = 0;
 		dlist_push_tail(&pgcache_head->free_list[shift], &entry->hash_chain);
 
 		curr_addr += (1UL << shift);

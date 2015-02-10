@@ -26,12 +26,12 @@
 #include "storage/fd.h"
 #include "storage/spin.h"
 #include "utils/resowner.h"
+#include <cuda.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <limits.h>
 #include <sys/time.h>
-#include "cuda.h"
-#include "device_common.h"
+#include "cuda_common.h"
 
 /*
  * --------------------------------------------------------------------
@@ -154,7 +154,7 @@ typedef struct
 	dlist_head		pds_list;		/* list of pgstrom_data_store */
 	cl_int			num_context;
 	cl_int			cur_context;
-	CUcontext		dev_context[FLEXIBLE_ARRAY_MEMBER];
+	CUcontext		cuda_context[FLEXIBLE_ARRAY_MEMBER];
 } GpuContext;
 
 typedef struct GpuTaskState
@@ -296,6 +296,7 @@ BulkExecProcNode(PlanState *node)
 extern MemoryContext
 HostPinMemContextCreate(MemoryContext parent,
                         const char *name,
+						CUcontext cuda_context,
                         Size minContextSize,
                         Size initBlockSize,
                         Size maxBlockSize);
@@ -307,10 +308,9 @@ extern void pgstrom_sync_gpucontext(GpuContext *gcontext);
 extern void pgstrom_put_gpucontext(GpuContext *gcontext);
 
 extern void pgstrom_cleanup_gputaskstate(GpuTaskState *gts);
+extern void pgstrom_release_gputaskstate(GpuTaskState *gts);
 extern void pgstrom_init_gputaststate(GpuContext *gcontext,
 									  GpuTaskState *gts,
-									  const char *kern_source,
-									  int extra_flags,
 									  void (*cb_cleanup)(GpuTaskState *gts));
 extern void pgstrom_init_gputask(GpuTaskState *gts, GpuTask *task,
 								 bool (*cb_process)(GpuTask *task),
@@ -506,11 +506,11 @@ extern void show_scan_qual(List *qual, const char *qlabel,
 						   ExplainState *es);
 extern void show_instrumentation_count(const char *qlabel, int which,
 									   PlanState *planstate, ExplainState *es);
-extern void print_device_kernel(GpuTaskState *gts,
-								ExplainState *es);
-extern void pgstrom_perfmon_accum(pgstrom_perfmon *accum,
+extern void pgstrom_explain_kernel_source(GpuTaskState *gts,
+										  ExplainState *es);
+extern void pgstrom_accum_perfmon(pgstrom_perfmon *accum,
 								  const pgstrom_perfmon *pfm);
-extern void pgstrom_perfmon_explain(pgstrom_perfmon *pfm,
+extern void pgstrom_explain_perfmon(pgstrom_perfmon *pfm,
 									ExplainState *es);
 extern void _outToken(StringInfo str, const char *s);
 extern Value *formBitmapset(const Bitmapset *bms);

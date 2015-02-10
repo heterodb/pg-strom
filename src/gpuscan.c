@@ -47,7 +47,7 @@
 #include "utils/syscache.h"
 #include "utils/tqual.h"
 #include "pg_strom.h"
-#include "device_gpuscan.h"
+#include "cuda_gpuscan.h"
 
 static set_rel_pathlist_hook_type	set_rel_pathlist_next;
 static CustomPathMethods		gpuscan_path_methods;
@@ -128,8 +128,6 @@ typedef struct {
 	HeapTupleData	scan_tuple;
 	List		   *dev_quals;
 
-	const char	   *kern_source;
-	int32			extra_flags;
 	kern_parambuf  *kparams;
 
 	pgstrom_gpuscan *curr_chunk;
@@ -573,18 +571,21 @@ pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,
 static Node *
 gpuscan_create_scan_state(CustomScan *cscan)
 {
-	GpuScanState   *gss = palloc0(sizeof(GpuScanState));
-
+	GpuContext	   *gcontext = pgstrom_get_gpucontext();
+	GpuScanState   *gss = MemoryContextAllocZero(gcontext->memcxt,
+												 sizeof(GpuScanState));
+	/* Set tag and executor callbacks */
 	NodeSetTag(gss, T_CustomScanState);
 	gss->css.methods = &gpuscan_exec_methods.c;
+	/* GpuTaskState setup */
+	pgstrom_init_gputaststate(gcontext, &gss->gts, NULL);
 
-	return (Node *)gss;
+	return (Node *) gss;
 }
 
 static void
 gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 {
-	GpuContext	   *gcontext = pgstrom_get_gpucontext();
 	Relation		scan_rel = node->ss.ss_currentRelation;
 	GpuScanState   *gss = (GpuScanState *) node;
 	GpuScanInfo	   *gs_info = deform_gpuscan_info(node->ss.ps.plan);
@@ -593,11 +594,6 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	Assert(outerPlan(node) == NULL);
 	Assert(innerPlan(node) == NULL);
 
-	/* GpuTaskState setup */
-	pgstrom_init_gputaststate(gcontext, &gss->gts,
-							  gs_info->kern_source,
-							  gs_info->extra_flags,
-							  NULL);
 	/* initialize the start/end position */
 	gss->curr_blknum = 0;
 	gss->last_blknum = RelationGetNumberOfBlocks(scan_rel);
@@ -606,6 +602,9 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 		ExecInitExpr((Expr *) gs_info->dev_quals, &gss->css.ss.ps);
 	/* 'tableoid' should not change during relation scan */
 	gss->scan_tuple.t_tableOid = RelationGetRelid(scan_rel);
+	/* assign kernel source and flags */
+	gss->gts.kern_source = gs_info->kern_source;
+	gss->gts.extra_flags = gs_info->extra_flags;
 	/* kernel constant parameter buffer */
 	gss->kparams = pgstrom_create_kern_parambuf(gs_info->used_params,
 												gss->css.ss.ps.ps_ExprContext);
@@ -710,7 +709,7 @@ pgstrom_create_gpuscan(GpuScanState *gss, pgstrom_data_store *pds)
 
 	length = (STROMALIGN(offsetof(pgstrom_gpuscan, kern.kparams)) +
 			  STROMALIGN(gss->kparams->length));
-	if (!gss->kern_source)
+	if (!gss->gts.kern_source)
 		length += STROMALIGN(offsetof(kern_resultbuf, results[0]));
 	else
 		length += STROMALIGN(offsetof(kern_resultbuf, results[nitems]));
@@ -736,7 +735,7 @@ pgstrom_create_gpuscan(GpuScanState *gss, pgstrom_data_store *pds)
 	 * this chunk as all-visible one, without reference to
 	 * results[] row-index.
 	 */
-	if (!gss->kern_source)
+	if (!gss->gts.kern_source)
 	{
 		kresults->all_visible = true;
 		kresults->nitems = nitems;
@@ -796,7 +795,7 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 				end_of_scan = true;
 		}
 	}
-
+	elog(INFO, "createa a chunk: %p", gpuscan);
 	/* update perfmon statistics */
 	if (gss->pfm.enabled)
 	{
@@ -952,7 +951,7 @@ pgstrom_accum_gpuscan_perfmon(GpuScanState *gss, pgstrom_gpuscan *gpuscan)
 	gpuscan->task.pfm.time_dma_recv += elapsed;
 
 	/* accumulate them */
-	pgstrom_perfmon_accum(&gss->gts.pfm_accum, &gpuscan->task.pfm);
+	pgstrom_accum_perfmon(&gss->gts.pfm_accum, &gpuscan->task.pfm);
 	return;
 
 error:
@@ -979,7 +978,7 @@ pgstrom_fetch_gpuscan(GpuScanState *gss)
 	 * asynchronous execution. So, just return a chunk with synchronous
 	 * manner.
 	 */
-	if (!gss->kern_source)
+	if (!gss->gts.kern_source)
 		return pgstrom_load_gpuscan(gss);
 
 retry:
@@ -1164,21 +1163,8 @@ static void
 gpuscan_end(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *)node;
-	CUresult			rc;
 
-	/* clean-up and release any concurrent tasks */
-	pgstrom_cleanup_gputaskstate(&gss->gts);
-
-	/* release cuda module, if any */
-	if (gss->gts.cuda_module)
-	{
-		rc = cuModuleUnload(gss->gts.cuda_module);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuModuleUnload: %s", errorText(rc));
-		gss->gts.cuda_module = NULL;
-	}
-	/* put reference to the GpuContext */
-	pgstrom_put_gpucontext(gss->gts.gcontext);
+	pgstrom_release_gputaskstate(&gss->gts);
 }
 
 static void
@@ -1207,10 +1193,10 @@ gpuscan_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		show_instrumentation_count("Rows Removed by Device Fileter",
 								   2, &gss->css.ss.ps, es);
 	}
-	print_device_kernel(&gss->gts, es);
+	pgstrom_explain_kernel_source(&gss->gts, es);
 
 	if (es->analyze && gss->pfm.enabled)
-		pgstrom_perfmon_explain(&gss->pfm, es);
+		pgstrom_explain_perfmon(&gss->pfm, es);
 }
 
 void
