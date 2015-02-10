@@ -33,6 +33,7 @@ typedef struct
 	dlist_node	lru_chain;
 	int			shift;	/* block class of this entry */
 	int			refcnt;	/* 0 means free entry */
+	bool		retain_cuda_program;
 	pg_crc32	crc;	/* hash value by extra_flags + kern_source */
 	int			extra_flags;
 	char	   *kern_source;
@@ -450,7 +451,27 @@ __build_cuda_program(program_cache_entry *old_entry)
 	/*
 	 * Write out the source program
 	 */
+	initStringInfo(&buf);
+	appendStringInfo(&buf,
+					 "#define CUDA_DEVICE_CODE\n"
+					 "#define HOSTPTRLEN %u\n"
+					 "#define BLCKSZ %u\n"
+					 "#define ITEMID_OFFSET_SHIFT %u\n"
+					 "#define ITEMID_FLAGS_SHIFT %u\n"
+					 "#define ITEMID_LENGTH_SHIFT %u\n"
+					 "#define MAXIMUM_ALIGNOF %u\n"
+					 "\n",
+					 SIZEOF_VOID_P,
+					 BLCKSZ,
+					 itemid_offset_shift,
+					 itemid_flags_shift,
+					 itemid_length_shift,
+					 MAXIMUM_ALIGNOF);
+
 	fdesc = pgstrom_open_tempfile(".gpu", &source_pathname);
+	nbytes = write(fdesc, buf.data, buf.len);
+	if (nbytes != buf.len)
+		elog(ERROR, "could not write to file \"%s\": %m", source_pathname);
 	pgstrom_write_cuda_program(fdesc, old_entry, source_pathname);
 	CloseTransientFile(fdesc);
 	strncpy(basename, source_pathname, sizeof(basename));
@@ -465,26 +486,14 @@ __build_cuda_program(program_cache_entry *old_entry)
 	initStringInfo(&cmdline);
 	appendStringInfo(
 		&cmdline,
-		"%s %s --ptx %s"
-		" -DFLEXIBLE_ARRAY_MEMBER"
+		"env LANG=C %s %s --ptx %s"
 #ifdef PGSTROM_DEBUG
-		" -Werror -G"
+		" -G -Werror cross-execution-space-call"
 #endif
-		" -DCUDA_DEVICE_CODE"
-		" -DHOSTPTRLEN=%u -DBLCKSZ=%u"
-		" -DITEMID_OFFSET_SHIFT=%u"
-		" -DITEMID_FLAGS_SHIFT=%u"
-		" -DITEMID_LENGTH_SHIFT=%u"
-		" -DMAXIMUM_ALIGNOF=%u"
 		" 2>%s.log",
 		pgstrom_nvcc_path,
 		source_pathname,
 		opt_optimize,
-		SIZEOF_VOID_P, BLCKSZ,
-		itemid_offset_shift,
-		itemid_flags_shift,
-		itemid_length_shift,
-		MAXIMUM_ALIGNOF,
 		basename);
 
 	/*
@@ -570,7 +579,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 		new_entry->error_msg_len = PGCACHE_ERRORMSG_LEN(new_entry);
 		snprintf(new_entry->error_msg,
 				 new_entry->error_msg_len,
-				 "cuda kernel build: failed\n%s\%s",
+				 "cuda kernel build: failed\ncommand: %s\n%s",
 				 cmdline.data, build_log);
 	}
 	else
@@ -623,6 +632,12 @@ __build_cuda_program(program_cache_entry *old_entry)
 		snprintf(pathname, sizeof(pathname), "%s.log", basename);
 		if (unlink(pathname) != 0)
 			elog(WARNING, "could not cleanup \"%s\" : %m", pathname);
+	}
+
+	if (!old_entry->retain_cuda_program)
+	{
+		if (unlink(source_pathname) != 0)
+			elog(WARNING, "could not cleanup \"%s\" : %m", source_pathname);
 	}
 }
 
@@ -732,6 +747,7 @@ retry:
 	/* Not found on the existing cache */
 	required = offsetof(program_cache_entry, data[kern_source_len + 1]);
 	entry = pgstrom_program_cache_alloc(required);
+	entry->retain_cuda_program = debug_retain_cuda_program;
 	entry->crc = crc;
 	entry->extra_flags = extra_flags;
 	strcpy(entry->data, kern_source);

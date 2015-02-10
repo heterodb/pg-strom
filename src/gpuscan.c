@@ -795,7 +795,7 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 				end_of_scan = true;
 		}
 	}
-	elog(INFO, "createa a chunk: %p", gpuscan);
+
 	/* update perfmon statistics */
 	if (gss->pfm.enabled)
 	{

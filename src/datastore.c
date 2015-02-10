@@ -36,7 +36,7 @@
 #include <sys/stat.h>
 
 /* path for temporary prefix */
-#define PGSTROM_TEMP_FILE_PREFIX	"pg_strom_tmep"
+#define PGSTROM_TEMP_FILE_PREFIX	"strom_"
 
 /*
  * GUC variables

@@ -15,8 +15,8 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#ifndef DEVICE_COMMON_H
-#define DEVICE_COMMON_H
+#ifndef CUDA_COMMON_H
+#define CUDA_COMMON_H
 
 /*
  * Basic type definition - because of historical reason, we use "cl_"
@@ -1689,4 +1689,4 @@ pgfn_boolop_not(__private cl_int *errcode, pg_bool_t result)
 }
 
 #endif	/* CUDA_DEVICE_CODE */
-#endif	/* OPENCL_COMMON_H */
+#endif	/* CUDA_COMMON_H */
