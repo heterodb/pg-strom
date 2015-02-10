@@ -455,13 +455,18 @@ __build_cuda_program(program_cache_entry *old_entry)
 	appendStringInfo(&buf,
 					 "#define CUDA_DEVICE_CODE\n"
 					 "#define HOSTPTRLEN %u\n"
+					 "#define DEVICEPTRLEN %u\n"
 					 "#define BLCKSZ %u\n"
 					 "#define ITEMID_OFFSET_SHIFT %u\n"
 					 "#define ITEMID_FLAGS_SHIFT %u\n"
 					 "#define ITEMID_LENGTH_SHIFT %u\n"
 					 "#define MAXIMUM_ALIGNOF %u\n"
+					 "\n"
+					 "#include \"cuda_runtime.h\"\n"
+					 "#include \"crt/device_runtime.h\"\n"
 					 "\n",
 					 SIZEOF_VOID_P,
+					 sizeof(CUdeviceptr),
 					 BLCKSZ,
 					 itemid_offset_shift,
 					 itemid_flags_shift,
@@ -517,6 +522,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 			nbytes = fread(buf.data + buf.len, 1, filp_unitsz, filp);
 			if (nbytes < filp_unitsz && ferror(filp) != 0)
 				elog(ERROR, "could not read from \"%s\": %m", pathname);
+			buf.len += nbytes;
 		} while (nbytes == filp_unitsz);
 
 		cuda_binary = buf.data;
@@ -539,7 +545,12 @@ __build_cuda_program(program_cache_entry *old_entry)
 		nbytes = fread(buf.data + buf.len, 1, filp_unitsz, filp);
 		if (nbytes < filp_unitsz && ferror(filp) != 0)
 			elog(ERROR, "could not read from \"%s\": %m", pathname);
+		buf.len += nbytes;
 	} while (nbytes == filp_unitsz);
+
+	if (old_entry->retain_cuda_program)
+		appendStringInfo(&buf, "\nsource file: %s/%s\n",
+						 DataDir, source_pathname);
 
 	build_log = buf.data;
 	build_log_len = buf.len;

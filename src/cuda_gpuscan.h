@@ -1,5 +1,5 @@
 /*
- * device_gpuscan.h
+ * cuda_gpuscan.h
  *
  * CUDA device code specific to GpuScan logic
  * --
@@ -15,8 +15,8 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#ifndef DEVICE_GPUSCAN_H
-#define DEVICE_GPUSCAN_H
+#ifndef CUDA_GPUSCAN_H
+#define CUDA_GPUSCAN_H
 
 /*
  * Sequential Scan using GPU/MIC acceleration
@@ -91,17 +91,14 @@ typedef struct {
 
 #ifdef CUDA_DEVICE_CODE
 /*
- * gpuscan_writeback_row_error
+ * gpuscan_writeback_results
  *
  * It writes back the calculation result of gpuscan.
  */
-static __device__ void
-gpuscan_writeback_row_error(__device__ kern_resultbuf *kresults,
-							int errcode,
-							__shared__ void *workmem)
+__device__ void
+gpuscan_writeback_results(kern_resultbuf *kresults, int result)
 {
-	__local cl_uint *p_base = workmem;
-	cl_uint		base;
+	__shared__ cl_uint base;
 	cl_uint		binary;
 	cl_uint		offset;
 	cl_uint		nitems;
@@ -112,71 +109,69 @@ gpuscan_writeback_row_error(__device__ kern_resultbuf *kresults,
 	 * then stairlike-add returns a relative offset within workgroup,
 	 * and we can adjust this offset by global base index.
 	 */
-	binary = (get_global_id(0) < kresults->nrooms &&
-			  (errcode == StromError_Success ||
-			   errcode == StromError_CpuReCheck)) ? 1 : 0;
-
-	offset = arithmetic_stairlike_add(binary, workmem, &nitems);
-
+	binary = (result != 0 ? 1 : 0);
+	offset = arithmetic_stairlike_add(binary, &nitems);
 	if (get_local_id(0) == 0)
-		*p_base = atomic_add(&kresults->nitems, nitems);
-	barrier(CLK_LOCAL_MEM_FENCE);
-	base = *p_base;
+		base = atomic_add(&kresults->nitems, nitems);
+	__syncthreads();
 
 	/*
 	 * Write back the row-index that passed evaluation of the qualifier,
 	 * or needs re-check on the host side. In case of re-check, row-index
 	 * shall be a negative number.
 	 */
-	if (get_global_id(0) >= kresults->nrooms)
-		return;
-
-	if (errcode == StromError_Success)
+	if (result > 0)
 		kresults->results[base + offset] = (get_global_id(0) + 1);
-	else if (errcode == StromError_CpuReCheck)
+	else if (result < 0)
 		kresults->results[base + offset] = -(get_global_id(0) + 1);
 }
 
 /*
  * forward declaration of the function to be generated on the fly
  */
-static __device__ pg_bool_t
-gpuscan_qual_eval(__private cl_int *errcode,
-				  __device__ kern_parambuf *kparams,
-				  __device__ kern_data_store *kds,
-				  __device__ kern_data_store *ktoast,
+__device__ cl_bool
+gpuscan_qual_eval(cl_int *errcode,
+				  kern_parambuf *kparams,
+				  kern_data_store *kds,
+				  kern_data_store *ktoast,
 				  size_t kds_index);
 /*
  * kernel entrypoint of gpuscan
  */
 __global__ void
-gpuscan_qual(__device__ kern_gpuscan *kgpuscan,	/* in/out */
-			 __device__ kern_data_store *kds,		/* in */
-			 __device__ kern_data_store *ktoast,	/* always NULL */
-			 KERN_DYNAMIC_LOCAL_WORKMEM_ARG)	/* in */
+gpuscan_qual(kern_gpuscan *kgpuscan,	/* in/out */
+			 kern_data_store *kds,		/* in */
+			 kern_data_store *ktoast)	/* always NULL */
 {
-	pg_bool_t	rc;
-	cl_int		errcode = StromError_Success;
-	__device__ kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
-	__device__ kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
+	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
+	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
+	cl_int			errcode = StromError_Success;
+	cl_int			rc = 0;
 
 	if (get_global_id(0) < kds->nitems)
-		rc = gpuscan_qual_eval(&errcode, kparams, kds, ktoast,
-							   get_global_id(0));
-	else
-		rc.isnull = true;
-
-	STROM_SET_ERROR(&errcode,
-					!rc.isnull && rc.value != 0
-					? StromError_Success
-					: StromError_RowFiltered);
-
-	/* writeback error code */
-	gpuscan_writeback_row_error(kresults, errcode, LOCAL_WORKMEM);
-	if (!StromErrorIsSignificant(errcode))
-		errcode = StromError_Success;	/* clear the minor error */
-	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
+	{
+		if (gpuscan_qual_eval(&errcode, kparams, kds, ktoast,
+							  get_global_id(0)))
+		{
+			if (errcode == StromError_Success)
+				rc = 1;
+			else if (errcode == StromError_CpuReCheck)
+			{
+				rc = -1;
+				errcode = StromError_Success;	/* row-level rechecks */
+			}
+		}
+		else if (errcode == StromError_CpuReCheck)
+		{
+			rc = -1;
+			errcode = StromError_Success;		/* row-level rechecks */
+		}
+	}
+	/* writeback the results */
+	gpuscan_writeback_results(kresults, rc);
+	/* chunk level error, if any */
+	kern_writeback_error_status(&kresults->errcode, errcode);
 }
 
 #endif	/* CUDA_DEVICE_CODE */
-#endif	/* DEVICE_GPUSCAN_H */
+#endif	/* CUDA_GPUSCAN_H */
