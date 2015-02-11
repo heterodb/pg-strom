@@ -878,9 +878,8 @@ pgfn_numeric_add(int *errcode,
 	return v;
 }
 
-
-pg_numeric_t
-pgfn_numeric_sub(__private int *errcode,
+__device__ pg_numeric_t
+pgfn_numeric_sub(int *errcode,
 				 pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_numeric_t arg = pgfn_numeric_uminus(errcode, arg2);
@@ -888,9 +887,8 @@ pgfn_numeric_sub(__private int *errcode,
 	return pgfn_numeric_add(errcode, arg1, arg);
 }
 
-
-pg_numeric_t
-pgfn_numeric_mul(__private int *errcode,
+__device__ pg_numeric_t
+pgfn_numeric_mul(int *errcode,
 				 pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_numeric_t	v;
@@ -983,14 +981,12 @@ pgfn_numeric_mul(__private int *errcode,
 	return v;
 }
 
-
-
 /*
  * Numeric comparison functions
  * ----------------------------------------------------------------
  */
-static int
-numeric_cmp(__private cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
+__device__ int
+numeric_cmp(cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	int			expo1 = PG_NUMERIC_EXPONENT(arg1.value);
 	int			sign1 = PG_NUMERIC_SIGN(arg1.value);
@@ -1050,8 +1046,8 @@ numeric_cmp(__private cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
 	return ret;
 }
 
-pg_bool_t
-pgfn_numeric_eq(__private cl_int *errcode,
+__device__ pg_bool_t
+pgfn_numeric_eq(cl_int *errcode,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_bool_t	result;
@@ -1068,8 +1064,8 @@ pgfn_numeric_eq(__private cl_int *errcode,
 	return result;
 }
 
-pg_bool_t
-pgfn_numeric_ne(__private cl_int *errcode,
+__device__ pg_bool_t
+pgfn_numeric_ne(cl_int *errcode,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_bool_t	result;
@@ -1086,9 +1082,8 @@ pgfn_numeric_ne(__private cl_int *errcode,
 	return result;
 }
 
-
-pg_bool_t
-pgfn_numeric_lt(__private cl_int *errcode,
+__device__ pg_bool_t
+pgfn_numeric_lt(cl_int *errcode,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_bool_t	result;
@@ -1105,9 +1100,8 @@ pgfn_numeric_lt(__private cl_int *errcode,
 	return result;
 }
 
-
-pg_bool_t
-pgfn_numeric_le(__private cl_int *errcode,
+__device__ pg_bool_t
+pgfn_numeric_le(cl_int *errcode,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_bool_t	result;
@@ -1124,9 +1118,8 @@ pgfn_numeric_le(__private cl_int *errcode,
 	return result;
 }
 
-
-pg_bool_t
-pgfn_numeric_gt(__private cl_int *errcode,
+__device__ pg_bool_t
+pgfn_numeric_gt(cl_int *errcode,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_bool_t	result;
@@ -1143,9 +1136,8 @@ pgfn_numeric_gt(__private cl_int *errcode,
 	return result;
 }
 
-
-pg_bool_t
-pgfn_numeric_ge(__private cl_int *errcode,
+__device__ pg_bool_t
+pgfn_numeric_ge(cl_int *errcode,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_bool_t	result;
@@ -1162,10 +1154,9 @@ pgfn_numeric_ge(__private cl_int *errcode,
 	return result;
 }
 
-
-pg_int4_t
-pgfn_numeric_cmp(__private cl_int *errcode,
-				pg_numeric_t arg1, pg_numeric_t arg2)
+__device__ pg_int4_t
+pgfn_numeric_cmp(cl_int *errcode,
+				 pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_int4_t	result;
 
@@ -1181,5 +1172,5 @@ pgfn_numeric_cmp(__private cl_int *errcode,
 	return result;
 }
 
-#endif /* OPENCL_DEVICE_CODE */
-#endif /* OPENCL_NUMERIC_H */
+#endif /* CUDA_DEVICE_CODE */
+#endif /* CUDA_NUMERIC_H */
