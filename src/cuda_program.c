@@ -434,9 +434,8 @@ __build_cuda_program(program_cache_entry *old_entry)
 	char		pathname[MAXPGPATH];
 	StringInfoData cmdline;
 	int			fdesc;
-	FILE	   *filp;
-	size_t		filp_unitsz = 4096;
-	size_t		nbytes;
+	ssize_t		filp_unitsz = 4096;
+	ssize_t		nbytes;
 	char	   *cuda_binary = NULL;
 	Size		cuda_binary_len = 0;
 	char	   *build_log = NULL;
@@ -460,7 +459,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 					 "#define ITEMID_OFFSET_SHIFT %u\n"
 					 "#define ITEMID_FLAGS_SHIFT %u\n"
 					 "#define ITEMID_LENGTH_SHIFT %u\n"
-					 "#define MAXIMUM_ALIGNOF %u\n"
+					 "#define MAXIMUM_ALIGNOF %lu\n"
 					 "\n"
 					 "#include \"cuda_runtime.h\"\n"
 					 "#include \"crt/device_runtime.h\"\n"
@@ -491,13 +490,14 @@ __build_cuda_program(program_cache_entry *old_entry)
 	initStringInfo(&cmdline);
 	appendStringInfo(
 		&cmdline,
-		"env LANG=C %s %s --ptx %s"
+		"env LANG=C %s %s --ptx -o %s.ptx %s"
 #ifdef PGSTROM_DEBUG
 		" -G -Werror cross-execution-space-call"
 #endif
-		" 2>%s.log",
+		" >& %s.log",
 		pgstrom_nvcc_path,
 		source_pathname,
+		basename,
 		opt_optimize,
 		basename);
 
@@ -512,50 +512,44 @@ __build_cuda_program(program_cache_entry *old_entry)
 	if (rc == 0)
 	{
 		snprintf(pathname, sizeof(pathname), "%s.ptx", basename);
-		filp = AllocateFile(pathname, PG_BINARY_R);
-		if (!filp)
-			elog(ERROR, "could not open \"%s\": %m", pathname);
+		fdesc = OpenTransientFile(pathname, O_RDONLY | PG_BINARY, 0);
+		if (fdesc >= 0)
+		{
+			initStringInfo(&buf);
+			do {
+				enlargeStringInfo(&buf, filp_unitsz);
+				nbytes = read(fdesc, buf.data + buf.len, filp_unitsz);
+				if (nbytes < 0)
+					elog(ERROR, "could not read from \"%s\": %m", pathname);
+				buf.len += nbytes;
+			} while (nbytes == filp_unitsz);
+			CloseTransientFile(fdesc);
 
-		initStringInfo(&buf);
-		do {
-			enlargeStringInfo(&buf, filp_unitsz);
-			nbytes = fread(buf.data + buf.len, 1, filp_unitsz, filp);
-			if (nbytes < filp_unitsz && ferror(filp) != 0)
-				elog(ERROR, "could not read from \"%s\": %m", pathname);
-			buf.len += nbytes;
-		} while (nbytes == filp_unitsz);
-
-		cuda_binary = buf.data;
-		cuda_binary_len = buf.len;
-
-		FreeFile(filp);
+			cuda_binary = buf.data;
+			cuda_binary_len = buf.len;
+		}
 	}
 
 	/*
 	 * Read build-log file (if any)
 	 */
 	snprintf(pathname, sizeof(pathname), "%s.log", basename);
-	filp = AllocateFile(pathname, PG_BINARY_R);
-	if (!filp)
-		elog(ERROR, "could not open \"%s\": %m", pathname);
+	fdesc = OpenTransientFile(pathname, O_RDONLY | PG_BINARY, 0);
+	if (fdesc >= 0)
+	{
+		initStringInfo(&buf);
+		do {
+			enlargeStringInfo(&buf, filp_unitsz);
+			nbytes = read(fdesc, buf.data + buf.len, filp_unitsz);
+			if (nbytes < 0)
+				elog(ERROR, "could not read from \"%s\": %m", pathname);
+			buf.len += nbytes;
+		} while (nbytes == filp_unitsz);
+		CloseTransientFile(fdesc);
 
-	initStringInfo(&buf);
-	do {
-		enlargeStringInfo(&buf, filp_unitsz);
-		nbytes = fread(buf.data + buf.len, 1, filp_unitsz, filp);
-		if (nbytes < filp_unitsz && ferror(filp) != 0)
-			elog(ERROR, "could not read from \"%s\": %m", pathname);
-		buf.len += nbytes;
-	} while (nbytes == filp_unitsz);
-
-	if (old_entry->retain_cuda_program)
-		appendStringInfo(&buf, "\nsource file: %s/%s\n",
-						 DataDir, source_pathname);
-
-	build_log = buf.data;
-	build_log_len = buf.len;
-
-	FreeFile(filp);
+		build_log = buf.data;
+		build_log_len = buf.len;
+	}
 
 	/*
 	 * Make a new entry, instead of the old one
@@ -603,7 +597,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 		new_entry->error_msg_len = PGCACHE_ERRORMSG_LEN(new_entry);
 		snprintf(new_entry->error_msg,
                  new_entry->error_msg_len,
-				 "cuda kernel build: success\n%s\n%s",
+				 "cuda kernel build: success\ncommand: %s\n%s",
 				 cmdline.data, build_log);
 	}
 
@@ -658,6 +652,8 @@ static void
 pgstrom_build_cuda_program(Datum cuda_program)
 {
 	program_cache_entry *entry = (program_cache_entry *) cuda_program;
+	MemoryContext	memcxt = CurrentMemoryContext;
+	MemoryContext	oldcxt;
 
 	Assert(entry->cuda_binary == NULL);
 
@@ -667,7 +663,10 @@ pgstrom_build_cuda_program(Datum cuda_program)
 	}
 	PG_CATCH();
 	{
-		ErrorData  *errdata = CopyErrorData();
+		ErrorData  *errdata;
+
+		oldcxt = MemoryContextSwitchTo(memcxt);
+		errdata = CopyErrorData();
 
 		SpinLockAcquire(&pgcache_head->lock);
 		if (!entry->cuda_binary)
@@ -680,7 +679,9 @@ pgstrom_build_cuda_program(Datum cuda_program)
 					 errdata->message);
 			entry->cuda_binary = CUDA_PROGRAM_BUILD_FAILURE;
 		}
+		SpinLockRelease(&pgcache_head->lock);
 		pgstrom_put_cuda_program(entry);
+		MemoryContextSwitchTo(oldcxt);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -692,14 +693,17 @@ bool
 pgstrom_load_cuda_program(GpuTaskState *gts)
 {
 	program_cache_entry	*entry;
-	cl_uint		extra_flags = gts->extra_flags;
-	const char *kern_source = gts->kern_source;
-	Size		kern_source_len = strlen(kern_source);
-	Size		required;
-	int			hindex;
-	dlist_iter	iter;
-	pg_crc32	crc;
-	CUresult	rc;
+	GpuContext	   *gcontext = gts->gcontext;
+	cl_uint			extra_flags = gts->extra_flags;
+	const char	   *kern_source = gts->kern_source;
+	Size			kern_source_len = strlen(kern_source);
+	Size			required;
+	int				hindex;
+	dlist_iter		iter;
+	pg_crc32		crc;
+	CUresult		rc;
+	CUmodule	   *cuda_modules = NULL;
+	int				i, num_context;
 	BackgroundWorker worker;
 
 	/* Is optimization available? */
@@ -743,14 +747,47 @@ retry:
 			entry->refcnt++;
 			SpinLockRelease(&pgcache_head->lock);
 
-			/* Also, load it on the private space */
-			rc = cuModuleLoadData(&gts->cuda_module, entry->cuda_binary);
-			if (rc != CUDA_SUCCESS)
+			/*
+			 * Let's load this module for each context
+			 */
+			num_context = gcontext->num_context;
+			PG_TRY();
 			{
-				pgstrom_put_cuda_program(entry);
-				elog(ERROR, "failed on cuModuleLoadData (%s)",
-					 errorText(rc));
+				cuda_modules = MemoryContextAllocZero(gcontext->memcxt,
+													  sizeof(CUmodule) *
+													  num_context);
+				for (i=0; i < num_context; i++)
+				{
+					rc = cuCtxSetCurrent(gcontext->cuda_context[i]);
+					if (rc != CUDA_SUCCESS)
+						elog(ERROR, "failed on cuCtxSetCurrent (%s)",
+							 errorText(rc));
+
+					rc = cuModuleLoadData(&cuda_modules[i],
+										  entry->cuda_binary);
+					if (rc != CUDA_SUCCESS)
+						elog(ERROR, "failed on cuModuleLoadData (%s)",
+							 errorText(rc));
+				}
+				rc = cuCtxSetCurrent(NULL);
+				if (rc != CUDA_SUCCESS)
+					elog(ERROR, "failed on cuCtxSetCurrent (%s)",
+						 errorText(rc));
+				gts->cuda_modules = cuda_modules;
 			}
+			PG_CATCH();
+			{
+				while (cuda_modules && i > 0)
+				{
+					rc = cuModuleUnload(cuda_modules[--i]);
+					if (rc != CUDA_SUCCESS)
+						elog(WARNING, "failed on cuModuleUnload (%s)",
+							 errorText(rc));
+				}
+				pgstrom_put_cuda_program(entry);
+				PG_RE_THROW();
+			}
+			PG_END_TRY();
 			pgstrom_put_cuda_program(entry);
 			return true;
 		}

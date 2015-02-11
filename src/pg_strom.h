@@ -163,7 +163,7 @@ typedef struct GpuTaskState
 	GpuContext	   *gcontext;
 	const char	   *kern_source;
 	cl_uint			extra_flags;
-	CUmodule		cuda_module;	/* module object built from cuda_binary */
+	CUmodule	   *cuda_modules;	/* CUmodules for each CUDA context */
 	slock_t			lock;			/* protection of the fields below */
 	struct GpuTask *curr_task;		/* a task currently processed */
 	dlist_head		tracked_tasks;	/* for resource tracking */
@@ -182,9 +182,10 @@ typedef struct GpuTask
 	dlist_node		chain;		/* link to task state list */
 	dlist_node		tracker;	/* link to task tracker list */
 	GpuTaskState   *gts;
-	CUstream		cuda_stream;
-	CUdevice		cuda_device;	/* just reference, no cleanup needed */
 	CUcontext		cuda_context;	/* just reference, no cleanup needed */
+	CUdevice		cuda_device;	/* just reference, no cleanup needed */
+	CUmodule		cuda_module;	/* just reference, no cleanup needed */
+	CUstream		cuda_stream;	/* owned for each GpuTask */
 	cl_int			errcode;
 	bool		  (*cb_process)(struct GpuTask *gtask);
 	void		  (*cb_release)(struct GpuTask *gtask);
@@ -315,6 +316,7 @@ extern void pgstrom_init_gputaststate(GpuContext *gcontext,
 extern void pgstrom_init_gputask(GpuTaskState *gts, GpuTask *task,
 								 bool (*cb_process)(GpuTask *task),
 								 void (*cb_release)(GpuTask *task));
+extern void pgstrom_launch_pending_tasks(GpuTaskState *gts);
 extern void pgstrom_compute_workgroup_size(size_t *p_grid_size,
 										   size_t *p_block_size,
 										   CUfunction function,

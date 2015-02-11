@@ -1,10 +1,10 @@
 /*
- * opencl_timelib.h
+ * cuda_timelib.h
  *
  * Collection of date/time functions for OpenCL devices
  * --
- * Copyright 2011-2014 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014 (C) The PG-Strom Development Team
+ * Copyright 2011-2015 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2015 (C) The PG-Strom Development Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -15,9 +15,9 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#ifndef OPENCL_TIMELIB_H
-#define OPENCL_TIMELIB_H
-#ifdef OPENCL_DEVICE_CODE
+#ifndef CUDA_TIMELIB_H
+#define CUDA_TIMELIB_H
+#ifdef CUDA_DEVICE_CODE
 
 /* definitions copied from date.h */
 typedef cl_int		DateADT;
@@ -120,7 +120,7 @@ STROMCL_SIMPLE_TYPE_TEMPLATE(int4,cl_int);
 /*
  * Support routines
  */
-static inline cl_int
+__device__ __forceinline__ cl_int
 date2j(cl_int y, cl_int m, cl_int d)
 {
 	int		julian;
@@ -145,7 +145,7 @@ date2j(cl_int y, cl_int m, cl_int d)
 	return julian;
 }
 
-static inline void
+__device__ __forceinline__ void
 j2date(cl_int jd, int *year, int *month, int *day)
 {
 	cl_uint		julian;
@@ -170,7 +170,7 @@ j2date(cl_int jd, int *year, int *month, int *day)
 	*month = (quad + 10) % MONTHS_PER_YEAR + 1;
 }
 
-static inline void
+__device__ __forceinline__ void
 dt2time(Timestamp jd, cl_int *hour, cl_int *min, cl_int *sec, cl_int *fsec)
 {
 	TimeOffset  time;
@@ -186,7 +186,7 @@ dt2time(Timestamp jd, cl_int *hour, cl_int *min, cl_int *sec, cl_int *fsec)
 }
 
 /* simplified version; no timezone support now */
-static cl_bool
+__device__ cl_bool
 timestamp2tm(Timestamp dt, struct pg_tm *tm, fsec_t *fsec)
 {
 	cl_long		date;	/* Timestamp in original */
@@ -224,8 +224,8 @@ timestamp2tm(Timestamp dt, struct pg_tm *tm, fsec_t *fsec)
  * Type cast functions
  *
  * --------------------------------------------------------------- */
-pg_date_t
-pgfn_timestamp_date(__private cl_int *errcode, pg_timestamp_t arg1)
+__device__ pg_date_t
+pgfn_timestamp_date(cl_int *errcode, pg_timestamp_t arg1)
 {
 	pg_date_t		result;
 	struct pg_tm	tm;
@@ -256,8 +256,8 @@ pgfn_timestamp_date(__private cl_int *errcode, pg_timestamp_t arg1)
 	return result;
 }
 
-pg_time_t
-pgfn_timestamp_time(__private cl_int *errcode, pg_timestamp_t arg1)
+__device__ pg_time_t
+pgfn_timestamp_time(cl_int *errcode, pg_timestamp_t arg1)
 {
 	pg_time_t		result;
 	struct pg_tm	tm;
@@ -284,8 +284,8 @@ pgfn_timestamp_time(__private cl_int *errcode, pg_timestamp_t arg1)
 	return result;
 }
 
-pg_timestamp_t
-pgfn_date_timestamp(__private cl_int *errcode, pg_date_t arg1)
+__device__ pg_timestamp_t
+pgfn_date_timestamp(cl_int *errcode, pg_date_t arg1)
 {
 	pg_timestamp_t	result;
 
@@ -321,8 +321,8 @@ pgfn_date_timestamp(__private cl_int *errcode, pg_date_t arg1)
 /*
  * Time/Date operators
  */
-pg_date_t
-pgfn_date_pli(__private cl_int *errcode, pg_date_t arg1, pg_int4_t arg2)
+__device__ pg_date_t
+pgfn_date_pli(cl_int *errcode, pg_date_t arg1, pg_int4_t arg2)
 {
 	pg_date_t	result;
 
@@ -339,8 +339,8 @@ pgfn_date_pli(__private cl_int *errcode, pg_date_t arg1, pg_int4_t arg2)
 	return result;
 }
 
-pg_date_t
-pgfn_date_mii(__private cl_int *errcode, pg_date_t arg1, pg_int4_t arg2)
+__device__ pg_date_t
+pgfn_date_mii(cl_int *errcode, pg_date_t arg1, pg_int4_t arg2)
 {
 	pg_date_t	result;
 
@@ -357,8 +357,8 @@ pgfn_date_mii(__private cl_int *errcode, pg_date_t arg1, pg_int4_t arg2)
 	return result;
 }
 
-pg_int4_t
-pgfn_date_mi(__private cl_int *errcode, pg_date_t arg1, pg_date_t arg2)
+__device__ pg_int4_t
+pgfn_date_mi(cl_int *errcode, pg_date_t arg1, pg_date_t arg2)
 {
 	pg_int4_t	result;
 
@@ -377,8 +377,8 @@ pgfn_date_mi(__private cl_int *errcode, pg_date_t arg1, pg_date_t arg2)
 	return result;
 }
 
-pg_timestamp_t
-pgfn_datetime_pl(__private cl_int *errcode, pg_date_t arg1, pg_time_t arg2)
+__device__ pg_timestamp_t
+pgfn_datetime_pl(cl_int *errcode, pg_date_t arg1, pg_time_t arg2)
 {
 	pg_timestamp_t	result;
 
@@ -393,14 +393,14 @@ pgfn_datetime_pl(__private cl_int *errcode, pg_date_t arg1, pg_time_t arg2)
 	return result;
 }
 
-pg_date_t
-pgfn_integer_pl_date(__private cl_int *errcode, pg_int4_t arg1, pg_date_t arg2)
+__device__ pg_date_t
+pgfn_integer_pl_date(cl_int *errcode, pg_int4_t arg1, pg_date_t arg2)
 {
 	return pgfn_date_pli(errcode, arg2, arg1);
 }
 
-pg_timestamp_t
-pgfn_timedata_pl(__private cl_int *errcode, pg_time_t arg1, pg_date_t arg2)
+__device__ pg_timestamp_t
+pgfn_timedata_pl(cl_int *errcode, pg_time_t arg1, pg_date_t arg2)
 {
 	return pgfn_datetime_pl(errcode, arg2, arg1);
 }
@@ -408,8 +408,8 @@ pgfn_timedata_pl(__private cl_int *errcode, pg_time_t arg1, pg_date_t arg2)
 /*
  * Date comparison
  */
-pg_bool_t
-pgfn_date_eq_timestamp(__private cl_int *errcode,
+__device__ pg_bool_t
+pgfn_date_eq_timestamp(cl_int *errcode,
 					   pg_date_t arg1, pg_timestamp_t arg2)
 {
 	pg_bool_t		result;
@@ -425,8 +425,8 @@ pgfn_date_eq_timestamp(__private cl_int *errcode,
 	return result;
 }
 
-pg_bool_t
-pgfn_date_ne_timestamp(__private cl_int *errcode,
+__device__ pg_bool_t
+pgfn_date_ne_timestamp(cl_int *errcode,
 					   pg_date_t arg1, pg_timestamp_t arg2)
 {
 	pg_bool_t		result;
@@ -442,8 +442,8 @@ pgfn_date_ne_timestamp(__private cl_int *errcode,
 	return result;
 }
 
-pg_bool_t
-pgfn_date_lt_timestamp(__private cl_int *errcode,
+__device__ pg_bool_t
+pgfn_date_lt_timestamp(cl_int *errcode,
 					   pg_date_t arg1, pg_timestamp_t arg2)
 {
 	pg_bool_t		result;
@@ -459,8 +459,8 @@ pgfn_date_lt_timestamp(__private cl_int *errcode,
 	return result;
 }
 
-pg_bool_t
-pgfn_date_le_timestamp(__private cl_int *errcode,
+__device__ pg_bool_t
+pgfn_date_le_timestamp(cl_int *errcode,
 					   pg_date_t arg1, pg_timestamp_t arg2)
 {
 	pg_bool_t		result;
@@ -476,8 +476,8 @@ pgfn_date_le_timestamp(__private cl_int *errcode,
 	return result;
 }
 
-pg_bool_t
-pgfn_date_gt_timestamp(__private cl_int *errcode,
+__device__ pg_bool_t
+pgfn_date_gt_timestamp(cl_int *errcode,
 					   pg_date_t arg1, pg_timestamp_t arg2)
 {
 	pg_bool_t		result;
@@ -493,8 +493,8 @@ pgfn_date_gt_timestamp(__private cl_int *errcode,
 	return result;
 }
 
-pg_bool_t
-pgfn_date_ge_timestamp(__private cl_int *errcode,
+__device__ pg_bool_t
+pgfn_date_ge_timestamp(cl_int *errcode,
 					   pg_date_t arg1, pg_timestamp_t arg2)
 {
 	pg_bool_t		result;
@@ -510,8 +510,8 @@ pgfn_date_ge_timestamp(__private cl_int *errcode,
 	return result;
 }
 
-pg_int4_t
-date_cmp_timestamp(__private cl_int *errcode,
+__device__ pg_int4_t
+date_cmp_timestamp(cl_int *errcode,
 				   pg_date_t arg1, pg_timestamp_t arg2)
 {
 	pg_int4_t		result;
@@ -535,8 +535,8 @@ date_cmp_timestamp(__private cl_int *errcode,
 /*
  * Timestamp comparison
  */
-pg_bool_t
-pgfn_timestamp_eq_date(__private cl_int *errcode,
+__device__ pg_bool_t
+pgfn_timestamp_eq_date(cl_int *errcode,
 					   pg_timestamp_t arg1, pg_date_t arg2)
 {
 	pg_bool_t		result;
@@ -552,8 +552,8 @@ pgfn_timestamp_eq_date(__private cl_int *errcode,
 	return result;
 }
 
-pg_bool_t
-pgfn_timestamp_ne_date(__private cl_int *errcode,
+__device__ pg_bool_t
+pgfn_timestamp_ne_date(cl_int *errcode,
 					   pg_timestamp_t arg1, pg_date_t arg2)
 {
 	pg_bool_t		result;
@@ -569,8 +569,8 @@ pgfn_timestamp_ne_date(__private cl_int *errcode,
 	return result;
 }
 
-pg_bool_t
-pgfn_timestamp_lt_date(__private cl_int *errcode,
+__device__ pg_bool_t
+pgfn_timestamp_lt_date(cl_int *errcode,
 					   pg_timestamp_t arg1, pg_date_t arg2)
 {
 	pg_bool_t		result;
@@ -586,8 +586,8 @@ pgfn_timestamp_lt_date(__private cl_int *errcode,
 	return result;
 }
 
-pg_bool_t
-pgfn_timestamp_le_date(__private cl_int *errcode,
+__device__ pg_bool_t
+pgfn_timestamp_le_date(cl_int *errcode,
 					   pg_timestamp_t arg1, pg_date_t arg2)
 {
 	pg_bool_t		result;
@@ -603,8 +603,8 @@ pgfn_timestamp_le_date(__private cl_int *errcode,
 	return result;
 }
 
-pg_bool_t
-pgfn_timestamp_gt_date(__private cl_int *errcode,
+__device__ pg_bool_t
+pgfn_timestamp_gt_date(cl_int *errcode,
 					   pg_timestamp_t arg1, pg_date_t arg2)
 {
 	pg_bool_t		result;
@@ -620,8 +620,8 @@ pgfn_timestamp_gt_date(__private cl_int *errcode,
 	return result;
 }
 
-pg_bool_t
-pgfn_timestamp_ge_date(__private cl_int *errcode,
+__device__ pg_bool_t
+pgfn_timestamp_ge_date(cl_int *errcode,
 					   pg_timestamp_t arg1, pg_date_t arg2)
 {
 	pg_bool_t		result;
@@ -637,8 +637,8 @@ pgfn_timestamp_ge_date(__private cl_int *errcode,
 	return result;
 }
 
-pg_int4_t
-pgfn_timestamp_cmp_date(__private cl_int *errcode,
+__device__ pg_int4_t
+pgfn_timestamp_cmp_date(cl_int *errcode,
 						pg_timestamp_t arg1, pg_date_t arg2)
 {
 	pg_int4_t		result;
@@ -659,5 +659,5 @@ pgfn_timestamp_cmp_date(__private cl_int *errcode,
 	return result;
 }
 
-#endif	/* OPENCL_DEVICE_CODE */
-#endif	/* OPENCL_TIMELIB_H */
+#endif	/* CUDA_DEVICE_CODE */
+#endif	/* CUDA_TIMELIB_H */

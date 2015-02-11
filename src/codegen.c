@@ -622,8 +622,8 @@ devfunc_setup_cast(devfunc_info *entry,
 									dtype->type_name,
 									entry->func_rettype->type_name));
 	entry->func_decl
-		= psprintf("static pg_%s_t pgfn_%s"
-				   "(__private int *errcode, pg_%s_t arg)\n"
+		= psprintf("__device__ pg_%s_t\n"
+				   "pgfn_%s(int *errcode, pg_%s_t arg)\n"
 				   "{\n"
 				   "    pg_%s_t result;\n"
 				   "    result.value  = (%s)arg.value;\n"
@@ -654,8 +654,8 @@ devfunc_setup_oper_both(devfunc_info *entry,
 									dtype1->type_name,
 									dtype2->type_name));
 	entry->func_decl
-		= psprintf("static pg_%s_t pgfn_%s"
-				   "(__private int *errcode, pg_%s_t arg1, pg_%s_t arg2)\n"
+		= psprintf("__device__ pg_%s_t\n"
+				   "pgfn_%s(int *errcode, pg_%s_t arg1, pg_%s_t arg2)\n"
 				   "{\n"
 				   "    pg_%s_t result;\n"
 				   "    result.value = (%s)(arg1.value %s arg2.value);\n"
@@ -687,8 +687,8 @@ devfunc_setup_oper_either(devfunc_info *entry,
 									entry->func_name,
 									dtype->type_name));
 	entry->func_decl
-		= psprintf("static pg_%s_t pgfn_%s"
-				   "(__private int *errcode, pg_%s_t arg)\n"
+		= psprintf("__device__ pg_%s_t\n"
+				   "pgfn_%s(int *errcode, pg_%s_t arg)\n"
 				   "{\n"
 				   "    pg_%s_t result;\n"
 				   "    result.value = (%s)(%sarg%s);\n"
@@ -732,10 +732,11 @@ devfunc_setup_func_decl(devfunc_info *entry,
 
 	/* declaration */
 	resetStringInfo(&str);
-	appendStringInfo(&str, "static pg_%s_t pgfn_%s(",
+	appendStringInfo(&str,
+					 "__device__ pg_%s_t\n"
+					 "pgfn_%s(int *errcode",
 					 entry->func_rettype->type_name,
 					 entry->func_alias);
-	appendStringInfo(&str, "__private int *errcode");
 	index = 1;
 	foreach (cell, entry->func_args)
 	{
@@ -808,8 +809,9 @@ devfunc_setup_boolop(BoolExprType boolop, const char *fn_name, int fn_nargs)
 	entry->func_name = pstrdup(fn_name);
 	entry->func_alias = entry->func_name;	/* never has alias */
 
-	appendStringInfo(&str, "static pg_%s_t pgfn_%s("
-					 "__private int *errcode",
+	appendStringInfo(&str,
+					 "__device__ pg_%s_t\n"
+					 "pgfn_%s(int *errcode",
 					 dtype->type_name, entry->func_alias);
 	for (i=0; i < fn_nargs; i++)
 		appendStringInfo(&str, ", pg_%s_t arg%u",

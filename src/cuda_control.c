@@ -239,12 +239,16 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 		Assert(gts->gcontext == gcontext);
 
 		/* release cuda module, if any */
-		if (gts->cuda_module)
+		if (gts->cuda_modules)
 		{
-			rc = cuModuleUnload(gts->cuda_module);
-			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on cuModuleUnload: %s", errorText(rc));
-			gts->cuda_module = NULL;
+			for (i=0; i < gcontext->num_context; i++)
+			{
+				rc = cuModuleUnload(gts->cuda_modules[i]);
+				if (rc != CUDA_SUCCESS)
+					elog(WARNING, "failed on cuModuleUnload: %s",
+						 errorText(rc));
+			}
+			gts->cuda_modules = NULL;
 		}
 		/* release task objects */
 		while (!dlist_is_empty(&gts->tracked_tasks))
@@ -366,7 +370,9 @@ pgstrom_cleanup_gputaskstate(GpuTaskState *gts)
 void
 pgstrom_release_gputaskstate(GpuTaskState *gts)
 {
+	GpuContext *gcontext = gts->gcontext;
 	CUresult	rc;
+	int			i;
 
 	/* unlink this GpuTaskState from the GpuContext */
 	dlist_delete(&gts->chain);
@@ -375,12 +381,16 @@ pgstrom_release_gputaskstate(GpuTaskState *gts)
 	pgstrom_cleanup_gputaskstate(gts);
 
 	/* release cuda module, if any */
-	if (gts->cuda_module)
+	if (gts->cuda_modules)
 	{
-		rc = cuModuleUnload(gts->cuda_module);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuModuleUnload: %s", errorText(rc));
-		gts->cuda_module = NULL;
+		for (i=0; i < gcontext->num_context; i++)
+		{
+			rc = cuModuleUnload(gts->cuda_modules[i]);
+			if (rc != CUDA_SUCCESS)
+				elog(WARNING, "failed on cuModuleUnload: %s",
+					 errorText(rc));
+		}
+		gts->cuda_modules = NULL;
 	}
 	/* put reference to the GpuContext */
 	pgstrom_put_gpucontext(gts->gcontext);
@@ -394,6 +404,7 @@ pgstrom_init_gputaststate(GpuContext *gcontext, GpuTaskState *gts,
 	gts->gcontext = gcontext;
 	gts->kern_source = NULL;	/* to be set later */
 	gts->extra_flags = 0;		/* to be set later */
+	gts->cuda_modules = NULL;
 	SpinLockInit(&gts->lock);
 	dlist_init(&gts->tracked_tasks);
 	dlist_init(&gts->running_tasks);
@@ -444,6 +455,104 @@ pgstrom_init_gputask(GpuTaskState *gts, GpuTask *task,
 	dlist_push_tail(&gts->tracked_tasks, &task->tracker);
 	SpinLockRelease(&gts->lock);
 }
+
+/*
+ *
+ *
+ *
+ */
+void
+pgstrom_launch_pending_tasks(GpuTaskState *gts)
+{
+	GpuContext	   *gcontext = gts->gcontext;
+	GpuTask		   *gtask;
+	dlist_node	   *dnode;
+	bool			launch;
+
+	/*
+	 * Unless kernel build is completed, we cannot launch it.
+	 */
+	if (!gts->cuda_modules)
+	{
+		if (!pgstrom_load_cuda_program(gts))
+			return;
+	}
+
+	SpinLockAcquire(&gts->lock);
+	while (!dlist_is_empty(&gts->pending_tasks))
+	{
+		dnode = dlist_pop_head_node(&gts->pending_tasks);
+		gtask = dlist_container(GpuTask, chain, dnode);
+		gts->num_pending_tasks--;
+		memset(&gtask->chain, 0, sizeof(dlist_node));
+		SpinLockRelease(&gts->lock);
+
+		/*
+		 * Assign CUDA resources, if not yet
+		 */
+		if (!gtask->cuda_stream)
+		{
+			CUcontext	cuda_context;
+			CUdevice	cuda_device;
+			CUmodule	cuda_module;
+			CUstream	cuda_stream;
+			CUresult	rc;
+			int			index;
+
+			index = (gcontext->cur_context++ % gcontext->num_context);
+			cuda_context = gcontext->cuda_context[index];
+			cuda_module = gts->cuda_modules[index];
+			rc = cuCtxPushCurrent(cuda_context);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+
+			rc = cuCtxGetDevice(&cuda_device);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuCtxGetDevice: %s", errorText(rc));
+
+			rc = cuStreamCreate(&cuda_stream, CU_STREAM_NON_BLOCKING);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuStreamCreate: %s", errorText(rc));
+
+			gtask->cuda_context = cuda_context;
+			gtask->cuda_device = cuda_device;
+			gtask->cuda_module = cuda_module;
+			gtask->cuda_stream = cuda_stream;
+		}
+		/*
+		 * Then, tries to launch this task.
+		 */
+		launch = gtask->cb_process(gtask);
+
+		/*
+		 * NOTE: cb_process may complete task immediately, prior to get
+		 * the spinlock again. So, we need to ensure gtask is not
+		 * linked to the completed list at this moment.
+		 */
+		SpinLockAcquire(&gts->lock);
+		if (!gtask->chain.prev && !gtask->chain.next)
+		{
+			if (launch)
+			{
+				dlist_push_tail(&gts->running_tasks, &gtask->chain);
+				gts->num_running_tasks++;
+			}
+			else
+			{
+				dlist_push_head(&gts->pending_tasks, &gtask->chain);
+				gts->num_pending_tasks++;
+			}
+		}
+	}
+	SpinLockRelease(&gts->lock);
+}
+
+
+
+
+
+
+
 
 static void
 gpucontext_cleanup_callback(ResourceReleasePhase phase,

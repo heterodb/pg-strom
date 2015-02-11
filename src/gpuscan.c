@@ -433,15 +433,15 @@ gpuscan_codegen_quals(PlannerInfo *root,
 	/* qualifier definition with row-store */
 	appendStringInfo(
 		&str,
-		"static pg_bool_t\n"
-		"gpuscan_qual_eval(__private cl_int *errcode,\n"
-		"                  __global kern_parambuf *kparams,\n"
-		"                  __global kern_data_store *kds,\n"
-		"                  __global kern_data_store *ktoast,\n"
+		"__device__ cl_bool\n"
+		"gpuscan_qual_eval(cl_int *errcode,\n"
+		"                  kern_parambuf *kparams,\n"
+		"                  kern_data_store *kds,\n"
+		"                  kern_data_store *ktoast,\n"
 		"                  size_t kds_index)\n"
 		"{\n"
 		"%s"
-		"  return %s;\n"
+		"  return EVAL(%s);\n"
 		"}\n", decl.data, expr_code);
 	return str.data;
 }
@@ -866,59 +866,6 @@ gpuscan_next_tuple(GpuScanState *gss)
 		gss->pfm.time_materialize += timeval_diff(&tv1, &tv2);
 	}
 	return slot;
-}
-
-/*
- *
- *
- *
- */
-static void
-pgstrom_launch_pending_tasks(GpuTaskState *gts)
-{
-	dlist_node	   *dnode;
-	GpuTask		   *gtask;
-	bool			launch;
-
-	/*
-	 * Unless kernel build is completed, we cannot launch it.
-	 */
-	if (!gts->cuda_module &&
-		!pgstrom_load_cuda_program(gts))
-		return;
-
-	SpinLockAcquire(&gts->lock);
-	while (!dlist_is_empty(&gts->pending_tasks))
-	{
-		dnode = dlist_pop_head_node(&gts->pending_tasks);
-		gtask = dlist_container(GpuTask, chain, dnode);
-		gts->num_pending_tasks--;
-		memset(&gtask->chain, 0, sizeof(dlist_node));
-		SpinLockRelease(&gts->lock);
-
-		launch = gtask->cb_process(gtask);
-
-		SpinLockAcquire(&gts->lock);
-		/*
-		 * NOTE: cb_process may complete task immediately, prior to get
-		 * the spinlock again. So, we need to ensure gtask is not
-		 * linked to the completed list at this moment.
-		 */
-		if (!gtask->chain.prev && !gtask->chain.next)
-		{
-			if (launch)
-			{
-				dlist_push_tail(&gts->running_tasks, &gtask->chain);
-				gts->num_running_tasks++;
-			}
-			else
-			{
-				dlist_push_head(&gts->pending_tasks, &gtask->chain);
-				gts->num_pending_tasks++;
-			}
-		}
-	}
-	SpinLockRelease(&gts->lock);
 }
 
 static void
@@ -1351,7 +1298,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	 * Kernel function lookup
 	 */
 	rc = cuModuleGetFunction(&gpuscan->kern_qual,
-							 gpuscan->task.gts->cuda_module,
+							 gpuscan->task.cuda_module,
 							 "gpuscan_qual");
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetFunction: %s",
