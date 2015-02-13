@@ -1097,9 +1097,11 @@ gpuhashjoin_codegen_qual(StringInfo body,
 	}
 	else
 	{
+		List   *save_pseudo_tlist = context->pseudo_tlist;
 		Node   *outer_quals = (Node *) ghj_info->outer_quals;
 		char   *expr_code;
 
+		context->pseudo_tlist = NIL;
 		expr_code = pgstrom_codegen_expression(outer_quals, context);
 		appendStringInfo(
 			body,
@@ -1110,6 +1112,7 @@ gpuhashjoin_codegen_qual(StringInfo body,
 			pgstrom_codegen_param_declarations(context),
 			pgstrom_codegen_var_declarations(context),
 			expr_code);
+		context->pseudo_tlist = save_pseudo_tlist;
 	}
 }
 
