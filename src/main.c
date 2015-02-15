@@ -356,11 +356,9 @@ show_scan_qual(List *qual, const char *qlabel,
 	node = (Node *) make_ands_explicit(qual);
 
 	/* Set up deparsing context */
-	context = deparse_context_for_planstate((Node *) planstate,
-											ancestors,
-											es->rtable,
-											es->rtable_names);
-
+	context = set_deparse_context_planstate(es->deparse_cxt,
+											(Node *) planstate,
+											ancestors);
 	/* Deparse the expression */
 	exprstr = deparse_expression(node, context, useprefix, false);
 

@@ -3094,10 +3094,9 @@ gpuhashjoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	initStringInfo(&str);
 
 	/* name lookup context */
-	context = deparse_context_for_planstate((Node *) &node->ss.ps,
-											ancestors,
-											es->rtable,
-											es->rtable_names);
+	context = set_deparse_context_planstate(es->deparse_cxt,
+											(Node *) node,
+											ancestors);
 	/* pseudo scan tlist if verbose mode */
 	if (es->verbose)
 	{
@@ -3650,10 +3649,9 @@ multihash_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	ListCell	   *cell;
 
 	/* set up deparsing context */
-	context = deparse_context_for_planstate((Node *) &node->ss.ps,
-                                            ancestors,
-                                            es->rtable,
-                                            es->rtable_names);
+	context = set_deparse_context_planstate(es->deparse_cxt,
+											(Node *) node,
+											ancestors);
 	/* shows hash keys */
 	initStringInfo(&str);
 	foreach (cell, mh_info->hash_keys)

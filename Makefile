@@ -56,7 +56,7 @@ endif
 PG_CONFIG = pg_config
 PGSTROM_DEBUG := $(shell $(PG_CONFIG) --configure | \
 	grep -q "'--enable-debug'" && \
-	echo "-Wall -DPGSTROM_DEBUG=1 -O0")
+	echo "-Wall -DPGSTROM_DEBUG=1")
 PG_CPPFLAGS := $(PGSTROM_DEBUG) $(IPATH)
 SHLIB_LINK := $(LPATH)
 EXTRA_CLEAN := $(OPENCL_SOURCES)

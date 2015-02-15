@@ -236,7 +236,6 @@ pgstrom_opencl_main(Datum main_arg)
 	 */
     pqsignal(SIGHUP, SIG_IGN);
     pqsignal(SIGTERM, pgstrom_opencl_sigterm);
-	ImmediateInterruptOK = false;
 
     /* We're now ready to receive signals */
     BackgroundWorkerUnblockSignals();
