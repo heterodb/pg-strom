@@ -2016,7 +2016,7 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 		ssup->ssup_cxt = CurrentMemoryContext;
 		ssup->ssup_collation = cpusort->w.collations[i];
 		ssup->ssup_nulls_first = cpusort->w.nullsFirst[i];
-		ssup->ssup_attno = cpusort->w.sortColIdx[i];
+		ssup->ssup_attno = (AttrNumber) i; //cpusort->w.sortColIdx[i];
 		PrepareSortSupportFromOrderingOp(cpusort->w.sortOperators[i], ssup);
 	}
 
@@ -2045,14 +2045,14 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 		if (!rts_values)
 		{
 			rchunk_id = ritems->results[2 * rindex];
-            ritem_id = ritems->results[2 * rindex + 1];
-            Assert(rchunk_id < cpusort->w.max_chunk_id);
+			ritem_id = ritems->results[2 * rindex + 1];
+			Assert(rchunk_id < cpusort->w.max_chunk_id);
 			kds = cpusort->w.kern_chunks[rchunk_id];
 			if (ritem_id >= kds->nitems)
 				elog(ERROR, "item-id %u is out of range in the chunk %u",
 					 ritem_id, rchunk_id);
 			rts_values = KERN_DATA_STORE_VALUES(kds, ritem_id);
-		    rts_isnull = KERN_DATA_STORE_ISNULL(kds, ritem_id);
+			rts_isnull = KERN_DATA_STORE_ISNULL(kds, ritem_id);
 			rtoast = cpusort->w.kern_toasts[rchunk_id];
 		}
 
@@ -2078,7 +2078,8 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 			if (comp != 0)
 				break;
 		}
-		if (comp <= 0)
+
+		if (comp >= 0)
 		{
 			oitems->results[2 * oindex] = lchunk_id;
 			oitems->results[2 * oindex + 1] = litem_id;
@@ -2088,7 +2089,7 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 			lts_isnull = NULL;
 		}
 
-		if (comp >= 0)
+		if (comp <= 0)
 		{
 			oitems->results[2 * oindex] = rchunk_id;
 			oitems->results[2 * oindex + 1] = ritem_id;
@@ -2098,6 +2099,8 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 			rts_isnull = NULL;
 		}
 	}
+	elog(LOG, "oindex=%lu lindex=%lu rindex=%lu", oindex, lindex, rindex);
+
 	/* move remaining left chunk-id/item-id, if any */
 	if (lindex < litems->nitems)
 	{
