@@ -1075,7 +1075,8 @@ form_pgstrom_cpusort(GpuSortState *gss,
 	buf.len += MAXALIGN(sizeof(kern_resultbuf)) + 80;
 
 	/* allocation and setup of DSM */
-	dsm_length = kresults_offset +
+	dsm_length = MAXALIGN(offsetof(pgstrom_flat_cpusort, data)) +
+		MAXALIGN(kresults_offset) +
 		MAXALIGN(offsetof(kern_resultbuf, results[2 * nitems]));
 	pfc.dsm_length = dsm_length;
 	pfc.kresults_offset = kresults_offset;
@@ -2099,14 +2100,13 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 			rts_isnull = NULL;
 		}
 	}
-	elog(LOG, "oindex=%lu lindex=%lu rindex=%lu", oindex, lindex, rindex);
-
 	/* move remaining left chunk-id/item-id, if any */
 	if (lindex < litems->nitems)
 	{
 		memcpy(oitems->results + 2 * oindex,
 			   litems->results + 2 * lindex,
 			   2 * sizeof(cl_int) * (litems->nitems - lindex));
+		Assert(rindex == ritems->nitems);
 	}
 	/* move remaining right chunk-id/item-id, if any */
 	if (rindex < ritems->nitems)
@@ -2114,6 +2114,7 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 		memcpy(oitems->results + 2 * oindex,
 			   ritems->results + 2 * rindex,
 			   2 * sizeof(cl_int) * (ritems->nitems - rindex));
+		Assert(lindex == litems->nitems);
 	}
 	oitems->nitems = litems->nitems + ritems->nitems;
 }
