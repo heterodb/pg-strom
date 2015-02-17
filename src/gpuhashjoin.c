@@ -19,6 +19,7 @@
 
 #include "access/sysattr.h"
 #include "catalog/pg_type.h"
+#include "common/pg_crc.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -39,7 +40,6 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
-#include "utils/pg_crc.h"
 #include "utils/ruleutils.h"
 #include "utils/selfuncs.h"
 #include "pg_strom.h"
@@ -3095,10 +3095,9 @@ gpuhashjoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	initStringInfo(&str);
 
 	/* name lookup context */
-	context = deparse_context_for_planstate((Node *) &node->ss.ps,
-											ancestors,
-											es->rtable,
-											es->rtable_names);
+	context = set_deparse_context_planstate(es->deparse_cxt,
+											(Node *) node,
+											ancestors);
 	/* pseudo scan tlist if verbose mode */
 	if (es->verbose)
 	{
@@ -3651,10 +3650,9 @@ multihash_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	ListCell	   *cell;
 
 	/* set up deparsing context */
-	context = deparse_context_for_planstate((Node *) &node->ss.ps,
-                                            ancestors,
-                                            es->rtable,
-                                            es->rtable_names);
+	context = set_deparse_context_planstate(es->deparse_cxt,
+											(Node *) node,
+											ancestors);
 	/* shows hash keys */
 	initStringInfo(&str);
 	foreach (cell, mh_info->hash_keys)
