@@ -258,6 +258,7 @@ typedef struct
 	Oid			   *collations;		/* OIDs of collations */
 	bool		   *nullsFirst;		/* NULLS FIRST/LAST directions */
 	bool			varlena_keys;	/* True, if varlena sorting key exists */
+	SortSupportData *ssup_keys;		/* executable comparison function */
 
 	/* running status */
 	char		   *database_name;	/* name of the current database */
@@ -1219,6 +1220,141 @@ deform_pgstrom_cpusort(dsm_segment *dsm_seg)
 	return cpusort;
 }
 
+/*
+ * gpusort_fallback_gpu_chunks
+ *
+ * Fallback routine towards a particular GpuSort chunk, if GPU device
+ * gave up sorting on device side.
+ */
+static inline int
+gpusort_fallback_compare(GpuSortState *gss,
+						 kern_data_store *kds, cl_uint index,
+						 Datum *p_values, bool *p_isnull)
+{
+	Datum	   *x_values = (Datum *) KERN_DATA_STORE_VALUES(kds, index);
+	bool	   *x_isnull = (bool *) KERN_DATA_STORE_ISNULL(kds, index);
+	int			i, comp;
+
+	for (i=0; i < gss->numCols; i++)
+	{
+		SortSupport		ssup = gss->ssup_keys + i;
+
+		comp = ApplySortComparator(x_values[i],
+								   x_isnull[i],
+								   p_values[i],
+								   p_isnull[i],
+								   ssup);
+		if (comp != 0)
+			return comp;
+	}
+	return 0;
+}
+
+static void
+gpusort_fallback_quicksort(GpuSortState *gss,
+						   kern_resultbuf *kresults,
+						   kern_data_store *kds,
+						   cl_uint l_index, cl_uint r_index)
+{
+	if (l_index < r_index)
+	{
+		cl_uint		i = l_index;
+		cl_uint		j = r_index;
+		cl_uint		p_index = (l_index + r_index) / 2;
+		Datum	   *p_values = (Datum *) KERN_DATA_STORE_VALUES(kds, p_index);
+		bool	   *p_isnull = (bool *) KERN_DATA_STORE_ISNULL(kds, p_index);
+		int			temp;
+
+		while (true)
+		{
+			while (gpusort_fallback_compare(gss, kds, i,
+											p_values, p_isnull) < 0)
+				i++;
+			while (gpusort_fallback_compare(gss, kds, j,
+											p_values, p_isnull) > 0)
+				j--;
+			if (i >= j)
+				break;
+			/* swap index */
+			temp = kresults->results[2 * i + 1];
+			kresults->results[2 * i + 1] = kresults->results[2 * j + 1];
+			kresults->results[2 * j + 1] = temp;
+			/* make index advanced */
+			i++;
+			j--;
+		}
+		gpusort_fallback_quicksort(gss, kresults, kds, l_index, i - 1);
+		gpusort_fallback_quicksort(gss, kresults, kds, j + 1, r_index);
+	}
+}
+
+static void
+gpusort_fallback_gpu_chunks(GpuSortState *gss, pgstrom_gpusort *gpusort)
+{
+	SortSupportData	   *ssup_keys = gss->ssup_keys;
+	kern_resultbuf	   *kresults = KERN_GPUSORT_RESULTBUF(&gpusort->kern);
+	pgstrom_data_store *pds = gpusort->pds;
+	kern_data_store	   *kds = pds->kds;
+	kern_data_store	   *ktoast = pds->ktoast->kds;
+	TupleTableSlot	   *slot;
+	Datum			   *tts_values;
+	bool			   *tts_isnull;
+	cl_uint				i, j, k, nitems = kds->nitems;
+
+	/* initialize SortSupportData, if first time */
+	if (!ssup_keys)
+	{
+		EState	   *estate = gss->css.ss.ps.state;
+		Size		len = sizeof(SortSupportData) * gss->numCols;
+
+		ssup_keys = MemoryContextAllocZero(estate->es_query_cxt, len);
+		for (i=0; i < gss->numCols; i++)
+		{
+			SortSupport		ssup = ssup_keys + i;
+
+			ssup->ssup_cxt = estate->es_query_cxt;
+			ssup->ssup_collation = gss->collations[i];
+			ssup->ssup_nulls_first = gss->nullsFirst[i];
+			ssup->ssup_attno = gss->sortColIdx[i];
+			PrepareSortSupportFromOrderingOp(gss->sortOperators[i], ssup);
+		}
+		gss->ssup_keys = ssup_keys;
+	}
+	/* preparation of rindex[] */
+	Assert(kresults->nrels == 2);
+	slot = gss->css.ss.ss_ScanTupleSlot;
+	for (i=0; i < nitems; i++)
+	{
+		kresults->results[2 * i] = gpusort->chunk_id;
+		kresults->results[2 * i + 1] = i;
+
+		tts_values = (Datum *) KERN_DATA_STORE_VALUES(kds, i);
+		tts_isnull = (bool *) KERN_DATA_STORE_ISNULL(kds, i);
+
+		if (!kern_fetch_data_store(slot, ktoast, i, NULL))
+			elog(ERROR, "failed to fetch a tuple from data-store");
+		slot_getallattrs(slot);
+
+		/*
+		 * TODO: need to consider how to fixup varlena datum
+		 *
+		 *
+		 */
+		for (j=0; j < gss->numCols; j++)
+		{
+			k = gss->sortColIdx[j] - 1;
+			tts_values[j] = slot->tts_values[k];
+			tts_isnull[j] = slot->tts_isnull[k];
+		}
+	}
+	/* fallback execution with QuickSort */
+	gpusort_fallback_quicksort(gss, kresults, pds->kds, 0, kds->nitems - 1);
+
+	/* restore error status */
+	kresults->errcode = StromError_Success;
+	kresults->nitems = kds->nitems;
+}
+
 static pgstrom_cpusort *
 gpusort_merge_cpu_chunks(GpuSortState *gss, pgstrom_cpusort *cpusort_1)
 {
@@ -1426,7 +1562,12 @@ gpusort_check_gpu_tasks(GpuSortState *gss)
 
 		if (msg->errcode != StromError_Success)
 		{
-			if (msg->errcode == CL_BUILD_PROGRAM_FAILURE)
+			if (msg->errcode == StromError_CpuReCheck)
+			{
+				/* GPU raised an error, run single chunk sort by CPU */
+				gpusort_fallback_gpu_chunks(gss, gpusort);
+			}
+			else if (msg->errcode == CL_BUILD_PROGRAM_FAILURE)
 			{
 				const char *buildlog
 					= pgstrom_get_devprog_errmsg(gpusort->dprog_key);
