@@ -19,6 +19,7 @@
 
 #include "access/sysattr.h"
 #include "catalog/pg_type.h"
+#include "common/pg_crc.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -39,7 +40,6 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
-#include "utils/pg_crc.h"
 #include "utils/ruleutils.h"
 #include "utils/selfuncs.h"
 #include "pg_strom.h"

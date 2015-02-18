@@ -18,6 +18,7 @@
 #include "postgres.h"
 #include "access/htup_details.h"
 #include "catalog/pg_type.h"
+#include "common/pg_crc.h"
 #include "funcapi.h"
 #include "lib/ilist.h"
 #include "storage/barrier.h"
@@ -27,7 +28,6 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
-#include "utils/pg_crc.h"
 #include "pg_strom.h"
 #include <limits.h>
 #include <unistd.h>
