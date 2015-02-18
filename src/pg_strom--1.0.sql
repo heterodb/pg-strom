@@ -209,7 +209,7 @@ CREATE FUNCTION pgstrom.psum_x2(numeric)
   AS 'MODULE_PATHNAME', 'gpupreagg_psum_x2_numeric'
   LANGUAGE C CALLED ON NULL INPUT;
   
--- Definition of Partial SUM for covariance (only float8)
+-- Definition of Partial SUM for covariance/least square method (only float8)
 CREATE FUNCTION pgstrom.pcov_x(bool, float8, float8)
   RETURNS float8
   AS 'MODULE_PATHNAME', 'gpupreagg_corr_psum_x'
@@ -435,7 +435,7 @@ CREATE AGGREGATE pgstrom.var_pop(int4, numeric, numeric)
 );
 
 --
--- PreAgg functions for covariance (with float8)
+-- PreAgg functions for covariance/least square method (with float8)
 --
 CREATE FUNCTION pgstrom.covariance_float8_accum(float8[], int4, float8, float8,
                                                 float8, float8, float8)
@@ -470,4 +470,81 @@ CREATE AGGREGATE pgstrom.covar_samp(int4, float8, float8,
   initcond = '{0,0,0,0,0,0}'
 );
 
+CREATE AGGREGATE pgstrom.regr_avgx(int4, float8, float8,
+                                   float8, float8, float8)
+(
+  sfunc = pgstrom.covariance_float8_accum,
+  stype = float8[],
+  finalfunc = pg_catalog.float8_regr_avgx,
+  initcond = '{0,0,0,0,0,0}'
+);
 
+CREATE AGGREGATE pgstrom.regr_avgy(int4, float8, float8,
+                                   float8, float8, float8)
+(
+  sfunc = pgstrom.covariance_float8_accum,
+  stype = float8[],
+  finalfunc = pg_catalog.float8_regr_avgy,
+  initcond = '{0,0,0,0,0,0}'
+);
+
+CREATE AGGREGATE pgstrom.regr_count(int4)
+(
+  sfunc = pg_catalog.int84pl,
+  stype = int8,
+  initcond = '0'
+);
+
+CREATE AGGREGATE pgstrom.regr_intercept(int4, float8, float8,
+                                        float8, float8, float8)
+(
+  sfunc = pgstrom.covariance_float8_accum,
+  stype = float8[],
+  finalfunc = pg_catalog.float8_regr_intercept,
+  initcond = '{0,0,0,0,0,0}'
+);
+
+CREATE AGGREGATE pgstrom.regr_r2(int4, float8, float8,
+                                 float8, float8, float8)
+(
+  sfunc = pgstrom.covariance_float8_accum,
+  stype = float8[],
+  finalfunc = pg_catalog.float8_regr_r2,
+  initcond = '{0,0,0,0,0,0}'
+);
+
+CREATE AGGREGATE pgstrom.regr_slope(int4, float8, float8,
+                                    float8, float8, float8)
+(
+  sfunc = pgstrom.covariance_float8_accum,
+  stype = float8[],
+  finalfunc = pg_catalog.float8_regr_slope,
+  initcond = '{0,0,0,0,0,0}'
+);
+
+CREATE AGGREGATE pgstrom.regr_sxx(int4, float8, float8,
+                                  float8, float8, float8)
+(
+  sfunc = pgstrom.covariance_float8_accum,
+  stype = float8[],
+  finalfunc = pg_catalog.float8_regr_sxx,
+  initcond = '{0,0,0,0,0,0}'
+);
+
+CREATE AGGREGATE pgstrom.regr_sxy(int4, float8, float8,
+                                  float8, float8, float8)
+(
+  sfunc = pgstrom.covariance_float8_accum,
+  stype = float8[],
+  finalfunc = pg_catalog.float8_regr_sxy,
+  initcond = '{0,0,0,0,0,0}'
+);
+
+CREATE AGGREGATE pgstrom.regr_syy(int4, float8, float8,
+                                  float8, float8, float8)
+(
+  sfunc = pgstrom.covariance_float8_accum,
+  stype = float8[],
+  finalfunc = pg_catalog.float8_regr_syy,
+  initcond = '{0,0,0,0,0,0}'
+);

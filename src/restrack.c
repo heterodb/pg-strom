@@ -16,8 +16,8 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
+#include "common/pg_crc.h"
 #include "utils/memutils.h"
-#include "utils/pg_crc.h"
 #include "utils/resowner.h"
 #include "pg_strom.h"
 #include "opencl_hashjoin.h"

@@ -17,6 +17,7 @@
  */
 #include "postgres.h"
 #include "catalog/pg_type.h"
+#include "common/pg_crc.h"
 #include "funcapi.h"
 #include "storage/barrier.h"
 #include "storage/ipc.h"
@@ -24,7 +25,6 @@
 #include "storage/spin.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
-#include "utils/pg_crc.h"
 #include <limits.h>
 #include "pg_strom.h"
 

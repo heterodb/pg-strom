@@ -171,6 +171,7 @@ typedef struct
 		struct
 		{
 			BackgroundWorkerHandle *bgw_handle;	/* valid, if running */
+			cl_uint			mc_class;
 			Bitmapset	   *chunk_ids;
 		} h;
 		struct
@@ -229,6 +230,8 @@ typedef struct
 	 (((pgstrom_flat_cpusort *)dsm_segment_address(dsmseg))->data +		\
 	  ((pgstrom_flat_cpusort *)dsm_segment_address(dsmseg))->kresults_offset))
 
+#define MAX_MERGECHUNKS_CLASS		10		/* 1024 chunks are enough large */
+
 typedef struct
 {
 	CustomScanState	css;
@@ -258,7 +261,8 @@ typedef struct
 
 	/* running status */
 	char		   *database_name;	/* name of the current database */
-	pgstrom_cpusort *sorted_chunk;	/* sorted but no pair chunk yet */
+	/* chunks already sorted but no pair yet */
+	pgstrom_cpusort	*sorted_chunks[MAX_MERGECHUNKS_CLASS];
 	cl_int			num_gpu_running;
 	cl_int			num_cpu_running;
 	cl_int			num_cpu_pending;
@@ -358,8 +362,8 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 static void
 gpusort_projection_addcase(StringInfo body,
 						   devtype_info *dtype,
-						   int kds_index,
-						   int ktoast_index)
+						   int src_colidx,
+						   int dst_colidx)
 {
 	if (dtype->type_length > 0)
 	{
@@ -378,58 +382,66 @@ gpusort_projection_addcase(StringInfo body,
 
 		appendStringInfo(
 			body,
-			"    case %d:\n"
-			"      datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
-			"      if (!datum)\n"
-			"        ts_isnull[colidx] = true;\n"
-			"      else\n"
-			"      {\n"
-			"        ts_isnull[colidx] = false;\n"
-			"        ts_values[colidx] = *((__global %s *) datum);\n"
-			"      }\n"
-			"      break;\n",
-			kds_index,
-			ktoast_index,
+			"\n"
+			"  /* sortkey %d projection */\n"
+			"  datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
+			"  if (!datum)\n"
+			"    ts_isnull[%d] = true;\n"
+			"  else\n"
+			"  {\n"
+			"    ts_isnull[%d] = false;\n"
+			"    ts_values[%d] = *((__global %s *) datum);\n"
+			"  }\n",
+			dst_colidx + 1,
+			src_colidx,
+			dst_colidx,
+			dst_colidx,
+			dst_colidx,
 			type_cast);
 	}
 	else if (dtype->type_oid == NUMERICOID)
 	{
 		appendStringInfo(
 			body,
-			"    case %d:\n"
-			"      datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
-			"      if (!datum)\n"
-			"        ts_isnull[colidx] = true;\n"
-			"      else\n"
-			"      {\n"
-			"        pg_numeric_t temp\n"
-			"          = pg_numeric_from_varlena(errcode, datum);\n"
-			"        ts_isnull[colidx] = temp.isnull;\n"
-			"        ts_values[colidx] = temp.value;\n"
-			"      }\n"
-			"      break;\n",
-			kds_index,
-			ktoast_index);
+			"\n"
+			"  /* sortkey %d projection */\n"
+			"  datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
+			"  if (!datum)\n"
+			"    ts_isnull[%d] = true;\n"
+			"  else\n"
+			"  {\n"
+			"    pg_numeric_t temp =\n"
+			"      pg_numeric_from_varlena(errcode, datum);\n"
+			"    ts_isnull[%d] = temp.isnull;\n"
+			"    ts_values[%d] = temp.value;\n"
+			"  }\n",
+			dst_colidx + 1,
+            src_colidx,
+			dst_colidx,
+			dst_colidx,
+			dst_colidx);
 	}
 	else
 	{
 		Assert((dtype->type_flags & DEVTYPE_IS_VARLENA) != 0);
 		appendStringInfo(
 			body,
-			"    case %d:\n"
-			"      datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
-			"      if (!datum)\n"
-			"        ts_isnull[colidx] = true;\n"
-			"      else\n"
-			"      {\n"
-			"        ts_isnull[colidx] = false;\n"
-			"        ts_values[colidx] = (Datum)\n"
-			"            ((__global char *)datum -\n"
-			"             (__global char *)&ktoast->hostptr);\n"
-			"      }\n"
-			"      break;\n",
-			kds_index,
-			ktoast_index);
+			"\n"
+			"  /* sortkey %d projection */\n"
+			"  datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
+			"  if (!datum)\n"
+			"    ts_isnull[%d] = true;\n"
+			"  else\n"
+			"  {\n"
+			"    ts_isnull[%d] = false;\n"
+			"    ts_values[%d] = (Datum)((__global char *)datum -\n"
+			"                            (__global char *)&ktoast->hostptr);\n"
+			"  }\n",
+			dst_colidx + 1,
+            src_colidx,
+			dst_colidx,
+			dst_colidx,
+			dst_colidx);
 	}
 }
 
@@ -504,7 +516,7 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 			elog(ERROR, "device function %u lookup failed", sort_func);
 
 		/* add projection case */
-		gpusort_projection_addcase(&pj_body, dtype, i, colidx - 1);
+		gpusort_projection_addcase(&pj_body, dtype, colidx - 1, i);
 
 		/*
 		 * reference to X-variable / Y-variable
@@ -554,19 +566,11 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 		"gpusort_projection(__private cl_int *errcode,\n"
 		"                   __global Datum *ts_values,\n"
 		"                   __global cl_char *ts_isnull,\n"
-		"                   cl_int colidx,\n"
 		"                   __global kern_data_store *ktoast,\n"
 		"                   __global HeapTupleHeaderData *htup)\n"
 		"{\n"
 		"  __global void *datum;\n"
-		"\n"
-		"  switch (colidx)\n"
-		"  {\n"
 		"%s"
-		"    default:\n"
-		"      /* do nothing */\n"
-		"      break;\n"
-		"  }\n"
 		"}\n",
 		pj_body.data);
 
@@ -709,6 +713,9 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 								  tle->resjunk);
 		cscan->custom_ps_tlist = lappend(cscan->custom_ps_tlist, tle_new);
 	}
+	/* informs our preference to fetch tuples */
+	if (IsA(subplan, CustomScan))
+		((CustomScan *) subplan)->flags |= CUSTOMPATH_PREFERE_ROW_FORMAT;
 	outerPlan(cscan) = subplan;
 
 	pgstrom_init_codegen_context(&context);
@@ -796,7 +803,7 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 
 	/* running status */
 	gss->database_name = get_database_name(MyDatabaseId);
-	gss->sorted_chunk = NULL;
+	memset(gss->sorted_chunks, 0, sizeof(gss->sorted_chunks));
 	gss->num_gpu_running = 0;
 	gss->num_cpu_running = 0;
 	gss->num_cpu_pending = 0;
@@ -1071,7 +1078,8 @@ form_pgstrom_cpusort(GpuSortState *gss,
 	buf.len += MAXALIGN(sizeof(kern_resultbuf)) + 80;
 
 	/* allocation and setup of DSM */
-	dsm_length = kresults_offset +
+	dsm_length = MAXALIGN(offsetof(pgstrom_flat_cpusort, data)) +
+		MAXALIGN(kresults_offset) +
 		MAXALIGN(offsetof(kern_resultbuf, results[2 * nitems]));
 	pfc.dsm_length = dsm_length;
 	pfc.kresults_offset = kresults_offset;
@@ -1216,7 +1224,8 @@ gpusort_merge_cpu_chunks(GpuSortState *gss, pgstrom_cpusort *cpusort_1)
 {
 	pgstrom_cpusort	   *cpusort_2;
 	dsm_segment		   *dsm_seg;
-	int					x, y;
+	cl_uint				mc_class = cpusort_1->h.mc_class;
+	int					i, n, x, y;
 
 	Assert(CurrentMemoryContext == gss->css.ss.ps.state->es_query_cxt);
 
@@ -1242,12 +1251,88 @@ gpusort_merge_cpu_chunks(GpuSortState *gss, pgstrom_cpusort *cpusort_1)
 	 * In case of no buddy at this moment, we have to wait for the next
 	 * chunk to be merged. Or, this chunk might be the final result.
 	 */
-	if (!gss->sorted_chunk)
+	Assert(mc_class < MAX_MERGECHUNKS_CLASS);
+	if (!gss->sorted_chunks[mc_class])
 	{
-		gss->sorted_chunk = cpusort_1;
-		return NULL;
+		pgstrom_cpusort *temp;
+		dlist_iter	iter;
+		bool		has_smaller = (gss->num_gpu_running > 0 ? true : false);
+
+		/* Unless scan phase does not completed, we try to merge chunks
+		 * with same size.
+		 */
+		if (!gss->scan_done)
+		{
+			gss->sorted_chunks[mc_class] = cpusort_1;
+			return NULL;
+		}
+
+		/* If here is running or pending chunks with same merge-chunk class,
+		 * it may be a good candidate to merge.
+		 */
+		dlist_foreach (iter, &gss->running_cpu_chunks)
+		{
+			temp = dlist_container(pgstrom_cpusort, chain, iter.cur);
+			if (temp->h.mc_class == mc_class)
+			{
+				gss->sorted_chunks[mc_class] = cpusort_1;
+				return NULL;
+			}
+			else if (temp->h.mc_class < mc_class)
+				has_smaller = true;
+		}
+
+		dlist_foreach (iter, &gss->pending_cpu_chunks)
+		{
+			temp = dlist_container(pgstrom_cpusort, chain, iter.cur);
+			if (temp->h.mc_class == mc_class)
+			{
+				gss->sorted_chunks[mc_class] = cpusort_1;
+				return NULL;
+			}
+			else if (temp->h.mc_class < mc_class)
+				has_smaller = true;
+		}
+
+		/* wait until smaller chunk is sorted, if any */
+		if (has_smaller)
+		{
+			gss->sorted_chunks[mc_class] = cpusort_1;
+			return NULL;
+		}
+
+		/* elsewhere, picks up a pair of smallest two chunks that is
+		 * already sorted, but smaller than or equal to this mc_class.
+		 */
+		gss->sorted_chunks[mc_class] = cpusort_1;
+		cpusort_1 = cpusort_2 = NULL;
+		for (i=0; i <= mc_class; i++)
+		{
+			if (!gss->sorted_chunks[i])
+				continue;
+			if (!cpusort_1)
+			{
+				cpusort_1 = gss->sorted_chunks[i];
+				Assert(cpusort_1->h.mc_class == i);
+			}
+			else if (!cpusort_2)
+			{
+				cpusort_2 = gss->sorted_chunks[i];
+				Assert(cpusort_2->h.mc_class == i);
+				break;
+			}
+		}
+		Assert(cpusort_1 != NULL);
+		if (!cpusort_2)
+			return NULL;
+		gss->sorted_chunks[cpusort_1->h.mc_class] = NULL;
+		gss->sorted_chunks[cpusort_2->h.mc_class] = NULL;
 	}
-	cpusort_2 = gss->sorted_chunk;
+	else
+	{
+		cpusort_2 = gss->sorted_chunks[mc_class];
+		gss->sorted_chunks[mc_class] = NULL;
+	}
 	Assert(cpusort_2->oitems_dsm != NULL
 		   && !cpusort_2->ritems_dsm
 		   && !cpusort_2->litems_dsm);
@@ -1261,11 +1346,12 @@ gpusort_merge_cpu_chunks(GpuSortState *gss, pgstrom_cpusort *cpusort_1)
 	y = bms_num_members(cpusort_2->h.chunk_ids);
 	cpusort_2->h.chunk_ids = bms_union(cpusort_1->h.chunk_ids,
 									   cpusort_2->h.chunk_ids);
-	elog(INFO, "CpuSort merge: %d + %d => %d", x, y,
-		 bms_num_members(cpusort_2->h.chunk_ids));
+	n = bms_num_members(cpusort_2->h.chunk_ids);
+	cpusort_2->h.mc_class = get_next_log2(n);
+	elog(INFO, "CpuSort merge: %d + %d => %d (class: %d)", x, y, n,
+		 cpusort_2->h.mc_class);
 	/* release either of them */
 	pfree(cpusort_1);
-	gss->sorted_chunk = NULL;
 
 	return cpusort_2;
 }
@@ -1296,6 +1382,7 @@ gpusort_merge_gpu_chunks(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	cpusort->litems_dsm = NULL;
 	cpusort->ritems_dsm = NULL;
 	cpusort->h.bgw_handle = NULL;
+	cpusort->h.mc_class = 0;
 	cpusort->h.chunk_ids = bms_make_singleton(gpusort->chunk_id);
 
 	/* make dummy pgstrom_flat_cpusort */
@@ -1505,7 +1592,7 @@ gpusort_exec_sort(GpuSortState *gss)
 {
 	pgstrom_gpusort	   *gpusort;
 	pgstrom_cpusort	   *cpusort;
-	int					rc;
+	int					i, rc;
 
 	while (true)
 	{
@@ -1524,7 +1611,7 @@ gpusort_exec_sort(GpuSortState *gss)
 		}
 		/*
 		 * Check status of the asynchronous tasks. If finished, task shall
-		 * be chained to gss->sorted_chunk or moved to pending_chunks if
+		 * be chained to gss->sorted_chunks or moved to pending_chunks if
 		 * it has merged with a buddy.
 		 * Once all the chunks are moved to the pending_chunks, then we will
 		 * kick background worker jobs unless it does not touch upper limit.
@@ -1554,7 +1641,7 @@ gpusort_exec_sort(GpuSortState *gss)
 				break;
 
 			if (gss->num_gpu_running > 0 || gss->num_cpu_running > 0)
-				timeout = 5 * 1000L;	/* 20sec */
+				timeout = 5 * 1000L;	/* 5sec */
 			else
 				timeout =       400L;	/* 0.4sec */
 
@@ -1578,20 +1665,30 @@ gpusort_exec_sort(GpuSortState *gss)
 	}
 	/* OK, data was sorted */
 	gss->sort_done = true;
+	elog(INFO, "Sort done");
 
 	/*
 	 * Once we got the sorting completed, just one chunk should be attached
 	 * on the gss->sorted_chunk. If NULL, it means outer relation has no
 	 * rows anywhere.
 	 */
-	cpusort = gss->sorted_chunk;
+	for (cpusort=NULL, i=0; i < MAX_MERGECHUNKS_CLASS; i++)
+	{
+		if (gss->sorted_chunks[i])
+		{
+			if (cpusort)
+				elog(ERROR, "Bug? multiple chunk fraction still remain");
+			cpusort = gss->sorted_chunks[i];
+			Assert(cpusort->h.mc_class == i);
+		}
+	}
 	if (!cpusort)
 		gss->sorted_result = NULL;
 	else
 	{
 		gss->sorted_result = cpusort->oitems_dsm;
+		gss->sorted_chunks[cpusort->h.mc_class] = NULL;
 		pfree(cpusort);
-		gss->sorted_chunk = NULL;
 	}
 	gss->sorted_index = 0;
 }
@@ -1657,7 +1754,10 @@ gpusort_end(CustomScanState *node)
 
 	Assert(dlist_is_empty(&gss->pending_cpu_chunks));
 	Assert(dlist_is_empty(&gss->running_cpu_chunks));
-	Assert(!gss->sorted_chunk);
+#ifdef USE_ASSERT_CHECKING
+	for (i=0; i < MAX_MERGECHUNKS_CLASS; i++)
+		Assert(!gss->sorted_chunks[i]);
+#endif
 
 	if (gss->sorted_result)
 		dsm_detach(gss->sorted_result);
@@ -1714,7 +1814,10 @@ gpusort_rescan(CustomScanState *node)
 		 */
 		Assert(dlist_is_empty(&gss->pending_cpu_chunks));
 		Assert(dlist_is_empty(&gss->running_cpu_chunks));
-		Assert(!gss->sorted_chunk);
+#ifdef USE_ASSERT_CHECKING
+		for (i=0; i < MAX_MERGECHUNKS_CLASS; i++)
+			Assert(!gss->sorted_chunks[i]);
+#endif
 
 		if (gss->sorted_result)
 		{
@@ -1753,10 +1856,9 @@ gpusort_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	int				i;
 
 	/* shows sorting keys */
-	context = deparse_context_for_planstate((Node *) node,
-											ancestors,
-											es->rtable,
-											es->rtable_names);
+	context = set_deparse_context_planstate(es->deparse_cxt,
+											(Node *) node,
+											ancestors);
 	use_prefix = (list_length(es->rtable) > 1 || es->verbose);
 
 	for (i=0; i < gs_info->numCols; i++)
@@ -1918,7 +2020,7 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 		ssup->ssup_cxt = CurrentMemoryContext;
 		ssup->ssup_collation = cpusort->w.collations[i];
 		ssup->ssup_nulls_first = cpusort->w.nullsFirst[i];
-		ssup->ssup_attno = cpusort->w.sortColIdx[i];
+		ssup->ssup_attno = (AttrNumber) i; //cpusort->w.sortColIdx[i];
 		PrepareSortSupportFromOrderingOp(cpusort->w.sortOperators[i], ssup);
 	}
 
@@ -1947,14 +2049,14 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 		if (!rts_values)
 		{
 			rchunk_id = ritems->results[2 * rindex];
-            ritem_id = ritems->results[2 * rindex + 1];
-            Assert(rchunk_id < cpusort->w.max_chunk_id);
+			ritem_id = ritems->results[2 * rindex + 1];
+			Assert(rchunk_id < cpusort->w.max_chunk_id);
 			kds = cpusort->w.kern_chunks[rchunk_id];
 			if (ritem_id >= kds->nitems)
 				elog(ERROR, "item-id %u is out of range in the chunk %u",
 					 ritem_id, rchunk_id);
 			rts_values = KERN_DATA_STORE_VALUES(kds, ritem_id);
-		    rts_isnull = KERN_DATA_STORE_ISNULL(kds, ritem_id);
+			rts_isnull = KERN_DATA_STORE_ISNULL(kds, ritem_id);
 			rtoast = cpusort->w.kern_toasts[rchunk_id];
 		}
 
@@ -1980,7 +2082,8 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 			if (comp != 0)
 				break;
 		}
-		if (comp <= 0)
+
+		if (comp >= 0)
 		{
 			oitems->results[2 * oindex] = lchunk_id;
 			oitems->results[2 * oindex + 1] = litem_id;
@@ -1990,7 +2093,7 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 			lts_isnull = NULL;
 		}
 
-		if (comp >= 0)
+		if (comp <= 0)
 		{
 			oitems->results[2 * oindex] = rchunk_id;
 			oitems->results[2 * oindex + 1] = ritem_id;
@@ -2006,6 +2109,7 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 		memcpy(oitems->results + 2 * oindex,
 			   litems->results + 2 * lindex,
 			   2 * sizeof(cl_int) * (litems->nitems - lindex));
+		Assert(rindex == ritems->nitems);
 	}
 	/* move remaining right chunk-id/item-id, if any */
 	if (rindex < ritems->nitems)
@@ -2013,6 +2117,7 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 		memcpy(oitems->results + 2 * oindex,
 			   ritems->results + 2 * rindex,
 			   2 * sizeof(cl_int) * (ritems->nitems - rindex));
+		Assert(lindex == litems->nitems);
 	}
 	oitems->nitems = litems->nitems + ritems->nitems;
 }

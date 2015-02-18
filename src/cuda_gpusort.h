@@ -118,7 +118,6 @@ static cl_int gpusort_keycomp(__private cl_int *errcode,
 static void gpusort_projection(__private cl_int *errcode,
 							   __global Datum *ts_values,
 							   __global cl_char *ts_isnull,
-							   cl_int colidx,
 							   __global kern_data_store *ktoast,
 							   __global HeapTupleHeaderData *htup);
 
@@ -180,18 +179,12 @@ gpusort_preparation(__global kern_gpusort *kgpusort,
 			STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption);
 			goto out;
 		}
-
-		ncols = kds->ncols;
 		ts_values = KERN_DATA_STORE_VALUES(kds, get_global_id(0));
 		ts_isnull = KERN_DATA_STORE_ISNULL(kds, get_global_id(0));
-		for (index = 0; index < ncols; index++)
-		{
-			gpusort_projection(&errcode,
-							   ts_values,
-							   ts_isnull,
-							   index,
-							   ktoast, htup);
-		}
+		gpusort_projection(&errcode,
+						   ts_values,
+						   ts_isnull,
+						   ktoast, htup);
 	}
 out:
 	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
