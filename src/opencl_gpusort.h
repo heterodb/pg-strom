@@ -120,6 +120,14 @@ static void gpusort_projection(__private cl_int *errcode,
 							   __global cl_char *ts_isnull,
 							   __global kern_data_store *ktoast,
 							   __global HeapTupleHeaderData *htup);
+/*
+ * Fixup special internal variables (numeric, at this moment)
+ */
+static void gpusort_fixup_variables(__private cl_int *errcode,
+									__global Datum *ts_values,
+									__global cl_char *ts_isnull,
+									__global kern_data_store *ktoast,
+									__global HeapTupleHeaderData *htup);
 
 /*
  * gpusort_preparation - fill up krowmap->rindex array and setup
@@ -368,6 +376,37 @@ gpusort_bitonic_merge(__global kern_gpusort *kgpusort,
 		kresults->results[2 * (prtPos + i) + 1] = localIdx[i];
 	barrier(CLK_LOCAL_MEM_FENCE);
 
+	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
+}
+
+__kernel void
+gpusort_fixup_datastore(__global kern_gpusort *kgpusort,
+						__global kern_data_store *kds,
+						__global kern_data_store *ktoast,
+						KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+{
+	__global kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgpusort);
+	int			errcode = StromError_Success;
+
+	if (get_global_id(0) < nitems)
+	{
+		__global HeapTupleHeaderData *htup;
+		__global Datum	   *ts_values;
+		__global cl_char   *ts_isnull;
+
+		htup = kern_get_tuple_rsflat(ktoast, get_global_id(0));
+		if (!htup)
+			STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption);
+		else
+		{
+			ts_values = KERN_DATA_STORE_VALUES(kds, get_global_id(0));
+			ts_isnull = KERN_DATA_STORE_ISNULL(kds, get_global_id(0));
+			gpusort_fixup_variables(&errcode,
+									ts_values,
+									ts_isnull,
+									ktoast, htup);
+		}
+	}
 	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
 }
 

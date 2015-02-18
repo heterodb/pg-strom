@@ -322,7 +322,10 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 	chunk_size = (Size)((double)width * ntuples * 1.10) + 1024;
 
 	if (max_chunk_size > chunk_size)
+	{
+		nrows_per_chunk = ntuples;
 		num_chunks = 1;
+	}
 	else
 	{
 		nrows_per_chunk =
@@ -446,16 +449,48 @@ gpusort_projection_addcase(StringInfo body,
 	}
 }
 
+static void
+gpusort_fixupvar_addcase(StringInfo body,
+						 devtype_info *dtype,
+						 int src_colidx,
+						 int dst_colidx)
+{
+	if (dtype->type_oid == NUMERICOID)
+	{
+		Assert((dtype->type_flags & DEVTYPE_IS_VARLENA) != 0);
+		appendStringInfo(
+			body,
+			"\n"
+			"  /* sortkey %d fixup */\n"
+			"  datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
+			"  if (!datum)\n"
+			"    ts_isnull[%d] = true;\n"
+			"  else\n"
+			"  {\n"
+			"    ts_isnull[%d] = false;\n"
+			"    ts_values[%d] = (Datum)((__global char *)datum -\n"
+			"                            (__global char *)&ktoast->hostptr);\n"
+			"  }\n",
+			dst_colidx + 1,
+            src_colidx,
+			dst_colidx,
+			dst_colidx,
+			dst_colidx);
+	}
+}
+
 static char *
 pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 {
 	StringInfoData	pj_body;
+	StringInfoData	fv_body;
 	StringInfoData	kc_decl;
 	StringInfoData	kc_body;
 	StringInfoData	result;
 	int				i;
 
 	initStringInfo(&pj_body);
+	initStringInfo(&fv_body);
 	initStringInfo(&kc_decl);
 	initStringInfo(&kc_body);
 	initStringInfo(&result);
@@ -518,6 +553,8 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 
 		/* add projection case */
 		gpusort_projection_addcase(&pj_body, dtype, colidx - 1, i);
+		/* add fixup-var case */
+		gpusort_fixupvar_addcase(&pj_body, dtype, colidx - 1, i);
 
 		/*
 		 * reference to X-variable / Y-variable
@@ -574,6 +611,20 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 		"%s"
 		"}\n",
 		pj_body.data);
+	/* make a fixup-var function */
+	appendStringInfo(
+        &result,
+		"static void\n"
+		"gpusort_fixup_variables(__private cl_int *errcode,\n"
+		"                        __global Datum *ts_values,\n"
+		"                        __global cl_char *ts_isnull,\n"
+		"                        __global kern_data_store *ktoast,\n"
+		"                        __global HeapTupleHeaderData *htup)\n"
+		"{\n"
+		"  __global void *datum;\n"
+		"%s"
+		"}\n",
+		fv_body.data);
 
 	/* make a comparison function */
 	appendStringInfo(
@@ -1299,7 +1350,7 @@ gpusort_fallback_gpu_chunks(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	TupleTableSlot	   *slot;
 	Datum			   *tts_values;
 	bool			   *tts_isnull;
-	cl_uint				i, j, k, nitems = kds->nitems;
+	cl_uint				i, j, nitems = kds->nitems;
 
 	/* initialize SortSupportData, if first time */
 	if (!ssup_keys)
@@ -1335,20 +1386,42 @@ gpusort_fallback_gpu_chunks(GpuSortState *gss, pgstrom_gpusort *gpusort)
 			elog(ERROR, "failed to fetch a tuple from data-store");
 		slot_getallattrs(slot);
 
-		/*
-		 * TODO: need to consider how to fixup varlena datum
-		 *
-		 *
-		 */
+		/* NOTE: varlena is store as host accessable pointer */
 		for (j=0; j < gss->numCols; j++)
 		{
-			k = gss->sortColIdx[j] - 1;
-			tts_values[j] = slot->tts_values[k];
-			tts_isnull[j] = slot->tts_isnull[k];
+			SortSupport		ssup = ssup_keys + i;
+
+			tts_values[j] = slot->tts_values[ssup->ssup_attno - 1];
+            tts_isnull[j] = slot->tts_isnull[ssup->ssup_attno - 1];
 		}
 	}
 	/* fallback execution with QuickSort */
 	gpusort_fallback_quicksort(gss, kresults, pds->kds, 0, kds->nitems - 1);
+
+	/* varlena datum should be offset from ktoast, as if GPU doing */
+	if (gss->varlena_keys)
+	{
+		TupleDesc	tupdesc
+			= gss->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor;
+
+		for (i=0; i < nitems; i++)
+		{
+			tts_values = (Datum *) KERN_DATA_STORE_VALUES(kds, i);
+			tts_isnull = (bool *) KERN_DATA_STORE_ISNULL(kds, i);
+
+			for (j=0; j < gss->numCols; j++)
+			{
+				SortSupport		ssup = ssup_keys + i;
+				Form_pg_attribute attr = tupdesc->attrs[ssup->ssup_attno - 1];
+
+				if (!tts_isnull[j] && attr->attlen < 0)
+				{
+					Assert(tts_values[j] > (uintptr_t)&ktoast->hostptr);
+					tts_values[j] -= (uintptr_t)&ktoast->hostptr;
+				}
+			}
+		}
+	}
 
 	/* restore error status */
 	kresults->errcode = StromError_Success;
@@ -2131,8 +2204,8 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 {
 	SortSupportData	   *sort_keys;
 	kern_data_store	   *kds;
-	kern_data_store	   *ltoast;
-	kern_data_store	   *rtoast;
+	kern_data_store	   *ltoast = NULL;
+	kern_data_store	   *rtoast = NULL;
 	kern_resultbuf	   *litems = cpusort->w.l_kresults;
 	kern_resultbuf	   *ritems = cpusort->w.r_kresults;
 	kern_resultbuf	   *oitems = cpusort->w.o_kresults;
@@ -2144,10 +2217,10 @@ gpusort_exec_cpusort(pgstrom_cpusort *cpusort)
 	long				rindex = 0;
 	long				lindex = 0;
 	long				oindex = 0;
-	int					rchunk_id;
-	int					ritem_id;
-	int					lchunk_id;
-	int					litem_id;
+	int					rchunk_id = 0;
+	int					ritem_id = 0;
+	int					lchunk_id = 0;
+	int					litem_id = 0;
 	int					i;
 
 	/*
@@ -2380,6 +2453,7 @@ typedef struct
 	cl_mem			m_kds;
 	cl_mem			m_ktoast;
 	cl_kernel		kern_prep;
+	cl_kernel		kern_fixds;
 	cl_kernel	   *kern_sort;
 	cl_uint			kern_sort_nums;
 	cl_uint			ev_kern_prep;
@@ -2541,6 +2615,8 @@ clserv_respond_gpusort(cl_event event, cl_int ev_status, void *private)
 		clReleaseMemObject(clgss->m_ktoast);
 	if (clgss->kern_prep)
 		clReleaseKernel(clgss->kern_prep);
+	if (clgss->kern_fixds)
+		clReleaseKernel(clgss->kern_fixds);
 	for (i=0; i < clgss->kern_sort_nums; i++)
 		clReleaseKernel(clgss->kern_sort[i]);
 	if (clgss->program && clgss->program != BAD_OPENCL_PROGRAM)
@@ -3016,6 +3092,105 @@ clserv_launch_bitonic_merge(clstate_gpusort *clgss,
 	return CL_SUCCESS;
 }
 
+/*
+ * clserv_launch_gpusort_fixds
+ *
+ * launcher of:
+ * __kernel void
+ * gpusort_fixup_datastore(__global kern_gpusort *kgpusort,
+ *                         __global kern_data_store *kds,
+ *                         __global kern_data_store *ktoast,
+ *                         KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+ */
+static cl_int
+clserv_launch_gpusort_fixds(clstate_gpusort *clgss, size_t nitems)
+{
+	size_t		gwork_sz;
+	size_t		lwork_sz;
+	cl_int		rc;
+
+	clgss->kern_prep = clCreateKernel(clgss->program,
+									  "gpusort_fixup_datastore",
+									  &rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	if (!clserv_compute_workgroup_size(&gwork_sz,
+									   &lwork_sz,
+									   clgss->kern_prep,
+									   clgss->dindex,
+									   true,
+									   nitems,
+									   sizeof(cl_uint)))
+	{
+		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
+		return StromError_OpenCLInternal;
+	}
+
+	rc = clSetKernelArg(clgss->kern_prep,
+						0,		/* __global kern_gpusort *kgsort */
+						sizeof(cl_mem),
+						&clgss->m_gpusort);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgss->kern_prep,
+						1,		/* __global kern_data_store *kds */
+						sizeof(cl_mem),
+						&clgss->m_kds);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgss->kern_prep,
+						2,		/* __global kern_data_store *ktoast */
+						sizeof(cl_mem),
+						&clgss->m_ktoast);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgss->kern_prep,
+						3,		/* KERN_DYNAMIC_LOCAL_WORKMEM_ARG */
+						sizeof(cl_int) * lwork_sz,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clEnqueueNDRangeKernel(clgss->kcmdq,
+								clgss->kern_prep,
+								1,
+								NULL,
+								&gwork_sz,
+								&lwork_sz,
+								clgss->ev_index,
+								&clgss->events[0],
+								&clgss->events[clgss->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	clgss->ev_kern_prep = clgss->ev_index++;
+	clgss->msg->pfm.num_kern_prep++;
+
+	return CL_SUCCESS;
+}
+
 static void
 clserv_process_gpusort(pgstrom_message *msg)
 {
@@ -3026,8 +3201,8 @@ clserv_process_gpusort(pgstrom_message *msg)
 	Size				length;
 	Size				offset;
 	size_t				nhalf;
-	size_t				gwork_sz;
-	size_t				lwork_sz;
+	size_t				gwork_sz = 0;
+	size_t				lwork_sz = 0;
 	size_t				nsteps;
 	size_t				launches;
 	size_t				i, j;
@@ -3262,6 +3437,13 @@ clserv_process_gpusort(pgstrom_message *msg)
 	}
 
 	/*
+	 * fixup special internal format (like, numeric), if needed
+	 */
+	rc = clserv_launch_gpusort_fixds(clgss, nitems);
+	if (rc != CL_SUCCESS)
+		goto error;
+
+	/*
 	 * Write back result buffer to the host memory
 	 */
 	offset = KERN_GPUSORT_DMARECV_OFFSET(&gpusort->kern);
@@ -3336,6 +3518,8 @@ error:
 			clReleaseMemObject(clgss->m_ktoast);
 		if (clgss->kern_prep)
 			clReleaseKernel(clgss->kern_prep);
+		if (clgss->kern_fixds)
+			clReleaseKernel(clgss->kern_fixds);
 		for (i=0; i < clgss->kern_sort_nums; i++)
 			clReleaseKernel(clgss->kern_sort[i]);
 		if (clgss->program && clgss->program != BAD_OPENCL_PROGRAM)
