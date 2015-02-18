@@ -406,6 +406,23 @@ BulkExecProcNode(PlanState *node)
 }
 
 /*
+ * Extra flags of CustomPath/Scan node.
+ *
+ * CUSTOMPATH_SUPPORT_BULKLOAD is set, if this CustomScan node support
+ * bulkload mode and parent node can cann BulkExecProcNode() instead of
+ * the usual ExecProcNode().
+ *
+ * CUSTOMPATH_PREFERE_ROW_FORMAT is set by parent node to inform
+ * preferable format of tuple delivered row-by-row mode. Usually, we put
+ * a record with format of either of tts_tuple or tts_values/tts_isnull.
+ * It informs child node a preferable output if parent can collaborate.
+ * Note that this flag never enforce the child node format. It's just
+ * a hint.
+ */
+#define CUSTOMPATH_SUPPORT_BULKLOAD			0x10000000
+#define CUSTOMPATH_PREFERE_ROW_FORMAT		0x20000000
+
+/*
  * --------------------------------------------------------------------
  *
  * Function Declarations

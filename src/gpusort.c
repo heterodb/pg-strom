@@ -362,8 +362,8 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 static void
 gpusort_projection_addcase(StringInfo body,
 						   devtype_info *dtype,
-						   int kds_index,
-						   int ktoast_index)
+						   int src_colidx,
+						   int dst_colidx)
 {
 	if (dtype->type_length > 0)
 	{
@@ -382,58 +382,66 @@ gpusort_projection_addcase(StringInfo body,
 
 		appendStringInfo(
 			body,
-			"    case %d:\n"
-			"      datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
-			"      if (!datum)\n"
-			"        ts_isnull[colidx] = true;\n"
-			"      else\n"
-			"      {\n"
-			"        ts_isnull[colidx] = false;\n"
-			"        ts_values[colidx] = *((__global %s *) datum);\n"
-			"      }\n"
-			"      break;\n",
-			kds_index,
-			ktoast_index,
+			"\n"
+			"  /* sortkey %d projection */\n"
+			"  datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
+			"  if (!datum)\n"
+			"    ts_isnull[%d] = true;\n"
+			"  else\n"
+			"  {\n"
+			"    ts_isnull[%d] = false;\n"
+			"    ts_values[%d] = *((__global %s *) datum);\n"
+			"  }\n",
+			dst_colidx + 1,
+			src_colidx,
+			dst_colidx,
+			dst_colidx,
+			dst_colidx,
 			type_cast);
 	}
 	else if (dtype->type_oid == NUMERICOID)
 	{
 		appendStringInfo(
 			body,
-			"    case %d:\n"
-			"      datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
-			"      if (!datum)\n"
-			"        ts_isnull[colidx] = true;\n"
-			"      else\n"
-			"      {\n"
-			"        pg_numeric_t temp\n"
-			"          = pg_numeric_from_varlena(errcode, datum);\n"
-			"        ts_isnull[colidx] = temp.isnull;\n"
-			"        ts_values[colidx] = temp.value;\n"
-			"      }\n"
-			"      break;\n",
-			kds_index,
-			ktoast_index);
+			"\n"
+			"  /* sortkey %d projection */\n"
+			"  datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
+			"  if (!datum)\n"
+			"    ts_isnull[%d] = true;\n"
+			"  else\n"
+			"  {\n"
+			"    pg_numeric_t temp =\n"
+			"      pg_numeric_from_varlena(errcode, datum);\n"
+			"    ts_isnull[%d] = temp.isnull;\n"
+			"    ts_values[%d] = temp.value;\n"
+			"  }\n",
+			dst_colidx + 1,
+            src_colidx,
+			dst_colidx,
+			dst_colidx,
+			dst_colidx);
 	}
 	else
 	{
 		Assert((dtype->type_flags & DEVTYPE_IS_VARLENA) != 0);
 		appendStringInfo(
 			body,
-			"    case %d:\n"
-			"      datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
-			"      if (!datum)\n"
-			"        ts_isnull[colidx] = true;\n"
-			"      else\n"
-			"      {\n"
-			"        ts_isnull[colidx] = false;\n"
-			"        ts_values[colidx] = (Datum)\n"
-			"            ((__global char *)datum -\n"
-			"             (__global char *)&ktoast->hostptr);\n"
-			"      }\n"
-			"      break;\n",
-			kds_index,
-			ktoast_index);
+			"\n"
+			"  /* sortkey %d projection */\n"
+			"  datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
+			"  if (!datum)\n"
+			"    ts_isnull[%d] = true;\n"
+			"  else\n"
+			"  {\n"
+			"    ts_isnull[%d] = false;\n"
+			"    ts_values[%d] = (Datum)((__global char *)datum -\n"
+			"                            (__global char *)&ktoast->hostptr);\n"
+			"  }\n",
+			dst_colidx + 1,
+            src_colidx,
+			dst_colidx,
+			dst_colidx,
+			dst_colidx);
 	}
 }
 
@@ -508,7 +516,7 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 			elog(ERROR, "device function %u lookup failed", sort_func);
 
 		/* add projection case */
-		gpusort_projection_addcase(&pj_body, dtype, i, colidx - 1);
+		gpusort_projection_addcase(&pj_body, dtype, colidx - 1, i);
 
 		/*
 		 * reference to X-variable / Y-variable
@@ -558,19 +566,11 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 		"gpusort_projection(__private cl_int *errcode,\n"
 		"                   __global Datum *ts_values,\n"
 		"                   __global cl_char *ts_isnull,\n"
-		"                   cl_int colidx,\n"
 		"                   __global kern_data_store *ktoast,\n"
 		"                   __global HeapTupleHeaderData *htup)\n"
 		"{\n"
 		"  __global void *datum;\n"
-		"\n"
-		"  switch (colidx)\n"
-		"  {\n"
 		"%s"
-		"    default:\n"
-		"      /* do nothing */\n"
-		"      break;\n"
-		"  }\n"
 		"}\n",
 		pj_body.data);
 
@@ -713,6 +713,9 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 								  tle->resjunk);
 		cscan->custom_ps_tlist = lappend(cscan->custom_ps_tlist, tle_new);
 	}
+	/* informs our preference to fetch tuples */
+	if (IsA(subplan, CustomScan))
+		((CustomScan *) subplan)->flags |= CUSTOMPATH_PREFERE_ROW_FORMAT;
 	outerPlan(cscan) = subplan;
 
 	pgstrom_init_codegen_context(&context);
