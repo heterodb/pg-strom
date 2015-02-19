@@ -42,6 +42,7 @@
 #include "utils/syscache.h"
 #include <math.h>
 #include "pg_strom.h"
+#include "opencl_common.h"
 #include "opencl_numeric.h"
 #include "opencl_gpupreagg.h"
 

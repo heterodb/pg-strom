@@ -17,7 +17,6 @@
  */
 #ifndef OPENCL_NUMERIC_H
 #define OPENCL_NUMERIC_H
-#ifdef OPENCL_DEVICE_CODE
 
 
 #define CL_CHAR_BIT			8
@@ -136,8 +135,6 @@ typedef struct {
 	bool		isnull;
 } pg_numeric_t;
 
-#endif	/* OPENCL_DEVICE_CODE */
-
 #define PG_NUMERIC_EXPONENT_BITS	6
 #define PG_NUMERIC_EXPONENT_POS		58
 #define PG_NUMERIC_EXPONENT_MASK	(((0x1UL << (PG_NUMERIC_EXPONENT_BITS)) - 1) << (PG_NUMERIC_EXPONENT_POS))
@@ -167,14 +164,15 @@ typedef struct {
 #define PG_NUMERIC_MIN				\
 	PG_NUMERIC_SET(PG_NUMERIC_EXPONENT_MAX,1,PG_NUMERIC_MANTISSA_MAX)
 
-#ifdef OPENCL_DEVICE_CODE
 
-static pg_numeric_t
-pg_numeric_from_varlena(__private int *errcode, __global varlena *vl_val)
+static inline pg_numeric_t
+pg_numeric_from_varlena(__private int *errcode,
+						__global struct varlena *vl_val)
 {
 	pg_numeric_t		result;
 	union NumericChoice	numData;
-
+	__global cl_char   *pSrc;
+	cl_int				len;
 
 	if (vl_val == NULL)
 	{
@@ -183,8 +181,8 @@ pg_numeric_from_varlena(__private int *errcode, __global varlena *vl_val)
 		return result;
 	}
 
-	__global cl_char *pSrc = VARDATA_ANY(vl_val);
-	cl_int len = VARSIZE_ANY_EXHDR(vl_val);
+	pSrc = VARDATA_ANY(vl_val);
+	len  = VARSIZE_ANY_EXHDR(vl_val);
 
 	if (sizeof(numData) < len) {
 		// Numeric data is too large.
@@ -201,7 +199,8 @@ pg_numeric_from_varlena(__private int *errcode, __global varlena *vl_val)
 		// OpenCL memcpy does not support private memory.
 		__private cl_char *dst = (__private cl_char *) &numData;
 		__global  cl_char *src = (__global  cl_char *) pSrc;
-		for(int i=0; i<len; i++) {
+		int i;
+		for(i=0; i<len; i++) {
 			dst[i] = src[i];
 		}
 	}
@@ -312,6 +311,7 @@ pg_numeric_from_varlena(__private int *errcode, __global varlena *vl_val)
 	return result;
 }
 
+#ifdef OPENCL_DEVICE_CODE
 /*
  * pg_numeric_vref
  *
@@ -393,6 +393,8 @@ static pg_int8_t
 numeric_to_integer(__private int *errcode, pg_numeric_t arg, cl_int size)
 {
 	pg_int8_t	v;
+	int		    sign, expo;
+	cl_ulong	mant;
 
 
 	if (arg.isnull == true) {
@@ -401,51 +403,57 @@ numeric_to_integer(__private int *errcode, pg_numeric_t arg, cl_int size)
 		return v;
 	}
 
-	int	     expo = PG_NUMERIC_EXPONENT(arg.value);
-	int		 sign = PG_NUMERIC_SIGN(arg.value);
-	cl_ulong mant = PG_NUMERIC_MANTISSA(arg.value);
+	expo = PG_NUMERIC_EXPONENT(arg.value);
+	sign = PG_NUMERIC_SIGN(arg.value);
+	mant = PG_NUMERIC_MANTISSA(arg.value);
 	
 	if (mant == 0) {
 		v.isnull = false;
 		v.value  = 0;
 	}
 
-	int  exp = abs(expo);
-	long mag = 1;
-	for(int i=0; i<exp; i++) {
-		if((mag * 10) < mag) {
-			v.isnull = true;
-			v.value  = 0;
-			return v;
+	{
+		int  exp = abs(expo);
+		long mag = 1;
+
+		for(int i=0; i<exp; i++) {
+			if((mag * 10) < mag) {
+				v.isnull = true;
+				v.value  = 0;
+				return v;
+			}
+			mag *= 10;
 		}
-		mag *= 10;
+
+		if (expo < 0) {
+			// Round off if exponent is minus.
+			mant = (mant + mag/2) / mag;
+
+		} else {
+			// Overflow check
+			if ((mant * mag) / mag != mant) {
+				v.isnull = true;
+				v.value  = 0;
+				*errcode = StromError_CpuReCheck;
+				return v;
+			}
+
+			mant *= mag;
+		}
 	}
 
-	if (expo < 0) {
-		// Round off if exponent is minus.
-		mant = (mant + mag/2) / mag;
-
-	} else {
-		// Overflow check
-		if ((mant * mag) / mag != mant) {
+	// Overflow check
+	{
+		int      nbits       = size * CL_CHAR_BIT;
+		cl_ulong max_val     = (1UL << (nbits - 1)) - 1;
+		cl_ulong abs_min_val = (1UL << (nbits - 1));
+		if((sign == 0 && max_val < mant) ||
+		   (sign != 0 && abs_min_val < mant)) {
 			v.isnull = true;
 			v.value  = 0;
 			*errcode = StromError_CpuReCheck;
 			return v;
 		}
-
-		mant *= mag;
-	}
-
-	// Overflow check
-	int      nbits       = size * CL_CHAR_BIT;
-	cl_ulong max_val     = (1UL << (nbits - 1)) - 1;
-	cl_ulong abs_min_val = (1UL << (nbits - 1));
-	if((sign == 0 && max_val < mant) || (sign != 0 && abs_min_val < mant)) {
-		v.isnull = true;
-		v.value  = 0;
-		*errcode = StromError_CpuReCheck;
-		return v;
 	}
 
 	v.isnull = false;
@@ -458,6 +466,9 @@ static pg_float8_t
 numeric_to_float(__private int *errcode, pg_numeric_t arg)
 {
 	pg_float8_t	v;
+	int			expo, sign;
+	ulong		mant;
+	double		fvalue;
 
 
 	if (arg.isnull == true) {
@@ -466,10 +477,9 @@ numeric_to_float(__private int *errcode, pg_numeric_t arg)
 		return v;
 	}
 
-
-	int   expo = PG_NUMERIC_EXPONENT(arg.value);
-	int	  sign = PG_NUMERIC_SIGN(arg.value);
-	ulong mant = PG_NUMERIC_MANTISSA(arg.value);
+	expo = PG_NUMERIC_EXPONENT(arg.value);
+	sign = PG_NUMERIC_SIGN(arg.value);
+	mant = PG_NUMERIC_MANTISSA(arg.value);
 
 	if (mant == 0) {
 		v.isnull = false;
@@ -478,7 +488,7 @@ numeric_to_float(__private int *errcode, pg_numeric_t arg)
 	}
 
 
-	double	fvalue = (double)mant * exp10((double)expo);
+	fvalue = (double)mant * exp10((double)expo);
 
 	if (isinf(fvalue) || isnan(fvalue)) {
 		v.isnull = true;
@@ -608,6 +618,8 @@ static pg_numeric_t
 float_to_numeric(__private int *errcode, pg_float8_t arg, int dig)
 {
 	pg_numeric_t	v;
+	int				sign, expo;
+	ulong			mant;
 
 
 	if (arg.isnull) {
@@ -630,42 +642,42 @@ float_to_numeric(__private int *errcode, pg_float8_t arg, int dig)
 	}
 
 
-	int		sign;
-	double	fval;
+	{
+		double	fval, fmant, thrMax, thrMin;
+		int		fexpo;
 
-	if (0 <= arg.value) {
-		sign = 0;
-		fval = arg.value;
-	} else {
-		sign = 1;
-		fval = -arg.value;
+		if (0 <= arg.value) {
+			sign = 0;
+			fval = arg.value;
+		} else {
+			sign = 1;
+			fval = -arg.value;
+		}
+
+		fexpo = ceil(log10(fval)) + 1;
+		fmant = fval * (double)exp10((double)(dig - fexpo));
+		if(isinf(fmant)) {
+			v.isnull = true;
+			v.value  = 0;
+			*errcode = StromError_CpuReCheck;
+			return v;
+		}
+
+		expo  = fexpo - dig;
+
+		thrMax = exp10((double)(dig));
+		while(thrMax < fmant) {
+			fmant /= 10;
+			expo ++;
+		}
+		thrMin = thrMax / 10;
+		while(fmant < thrMin) {
+			fmant *= 10;
+			expo --;
+		}
+
+		mant = fmant + 0.5;
 	}
-
-	int		fexpo = ceil(log10(fval)) + 1;
-	double  fmant = fval * (double)exp10((double)(dig - fexpo));
-	if(isinf(fmant)) {
-		v.isnull = true;
-		v.value  = 0;
-		*errcode = StromError_CpuReCheck;
-		return v;
-	}
-
-	int		expo  = fexpo - dig;
-	ulong	mant;
-
-	double  thrMax = exp10((double)(dig));
-	while(thrMax < fmant) {
-		fmant /= 10;
-		expo ++;
-	}
-
-	double  thrMin = thrMax / 10;
-	while(fmant < thrMin) {
-		fmant *= 10;
-		expo --;
-	}
-
-	mant = fmant + 0.5;
 
 
 	// normalize
@@ -787,6 +799,8 @@ pgfn_numeric_add(__private int *errcode,
 				 pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_numeric_t	v;
+	int			expo1, expo2, sign1, sign2;
+	cl_ulong	mant1, mant2;
 
 
 	if (arg1.isnull || arg2.isnull) {
@@ -795,13 +809,13 @@ pgfn_numeric_add(__private int *errcode,
 		return v;
 	}
 
-	int			expo1 = PG_NUMERIC_EXPONENT(arg1.value);
-	int			sign1 = PG_NUMERIC_SIGN(arg1.value);
-	cl_ulong	mant1 = PG_NUMERIC_MANTISSA(arg1.value);
+	expo1 = PG_NUMERIC_EXPONENT(arg1.value);
+	sign1 = PG_NUMERIC_SIGN(arg1.value);
+	mant1 = PG_NUMERIC_MANTISSA(arg1.value);
 
-	int			expo2 = PG_NUMERIC_EXPONENT(arg2.value);
-	int			sign2 = PG_NUMERIC_SIGN(arg2.value);
-	cl_ulong	mant2 = PG_NUMERIC_MANTISSA(arg2.value);
+	expo2 = PG_NUMERIC_EXPONENT(arg2.value);
+	sign2 = PG_NUMERIC_SIGN(arg2.value);
+	mant2 = PG_NUMERIC_MANTISSA(arg2.value);
 
 	// Change the number of digits
 	if (expo1 != expo2) {
@@ -904,6 +918,8 @@ pgfn_numeric_mul(__private int *errcode,
 				 pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_numeric_t	v;
+	int				expo1, expo2, sign1, sign2;
+	cl_ulong		mant1, mant2;
 
 	if (arg1.isnull || arg2.isnull) {
 		v.isnull = true;
@@ -911,13 +927,13 @@ pgfn_numeric_mul(__private int *errcode,
 		return v;
 	}
 
-	int			expo1 = PG_NUMERIC_EXPONENT(arg1.value);
-	int			sign1 = PG_NUMERIC_SIGN(arg1.value);
-	cl_ulong	mant1 = PG_NUMERIC_MANTISSA(arg1.value);
+	expo1 = PG_NUMERIC_EXPONENT(arg1.value);
+	sign1 = PG_NUMERIC_SIGN(arg1.value);
+	mant1 = PG_NUMERIC_MANTISSA(arg1.value);
 
-	int			expo2 = PG_NUMERIC_EXPONENT(arg2.value);
-	int			sign2 = PG_NUMERIC_SIGN(arg2.value);
-	cl_ulong	mant2 = PG_NUMERIC_MANTISSA(arg2.value);
+	expo2 = PG_NUMERIC_EXPONENT(arg2.value);
+	sign2 = PG_NUMERIC_SIGN(arg2.value);
+	mant2 = PG_NUMERIC_MANTISSA(arg2.value);
 
 	// Set 0, if mantissa is 0.
 	if (mant1 == 0UL || mant2 == 0UL) {
@@ -1002,6 +1018,10 @@ pgfn_numeric_mul(__private int *errcode,
 static int
 numeric_cmp(__private cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
 {
+	int			i, ret, expoDiff;
+	cl_ulong	mantL, mantR;
+	ulong	 	mag;
+
 	int			expo1 = PG_NUMERIC_EXPONENT(arg1.value);
 	int			sign1 = PG_NUMERIC_SIGN(arg1.value);
 	cl_ulong	mant1 = PG_NUMERIC_MANTISSA(arg1.value);
@@ -1022,11 +1042,7 @@ numeric_cmp(__private cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
 	}
 
 	// Compair the exponential/matissa.
-	int		 expoDiff = min(PG_MAX_DIGITS, (int)(abs(expo1 - expo2)));
-
-	cl_ulong mantL, mantR;
-	ulong	 mag;
-	int		 i, ret;
+	expoDiff = min(PG_MAX_DIGITS, (int)(abs(expo1 - expo2)));
 
 	if (expo1 < expo2) {
 		mantL = mant1;

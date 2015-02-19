@@ -733,8 +733,8 @@ STROMCL_SIMPLE_TYPE_TEMPLATE(float8, cl_double)
  * unless it is NOT referenced in the device code. It can understand the
  * length of these values, unlike contents.
  */
-typedef struct {
-	cl_int		vl_len;
+typedef struct varlena {
+	cl_char		vl_len_[4];		/* Do not touch this field directly! */
 	cl_char		vl_dat[1];
 } varlena;
 

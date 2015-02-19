@@ -44,6 +44,7 @@
 #include "utils/selfuncs.h"
 #include "pg_strom.h"
 #include "opencl_hashjoin.h"
+#include "opencl_numeric.h"
 
 /* static variables */
 static set_join_pathlist_hook_type set_join_pathlist_next;
@@ -339,6 +340,7 @@ typedef struct {
 	List		   *hash_keys;
 	List		   *hash_keylen;
 	List		   *hash_keybyval;
+	List		   *hash_keytype;
 } MultiHashState;
 
 /* declaration of static functions */
@@ -3221,6 +3223,7 @@ multihash_begin(CustomScanState *node, EState *estate, int eflags)
 	List		   *hash_keys = NIL;
 	List		   *hash_keylen = NIL;
 	List		   *hash_keybyval = NIL;
+	List		   *hash_keytype = NIL;
 	ListCell	   *cell;
 
 	/* check for unsupported flags */
@@ -3244,19 +3247,22 @@ multihash_begin(CustomScanState *node, EState *estate, int eflags)
 	 */
 	foreach (cell, mh_info->hash_keys)
 	{
+		Oid			type_oid = exprType(lfirst(cell));
 		int16		typlen;
 		bool		typbyval;
 
-		get_typlenbyval(exprType(lfirst(cell)), &typlen, &typbyval);
+		get_typlenbyval(type_oid, &typlen, &typbyval);
 
 		hash_keys = lappend(hash_keys,
 							ExecInitExpr(lfirst(cell), &mhs->css.ss.ps));
 		hash_keylen = lappend_int(hash_keylen, typlen);
 		hash_keybyval = lappend_int(hash_keybyval, typbyval);
+		hash_keytype = lappend_oid(hash_keytype, type_oid);
 	}
 	mhs->hash_keys = hash_keys;
 	mhs->hash_keylen = hash_keylen;
 	mhs->hash_keybyval = hash_keybyval;
+	mhs->hash_keytype = hash_keytype;
 
 	/*
 	 * initialize child nodes
@@ -3426,6 +3432,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		ListCell	   *lc1;
 		ListCell	   *lc2;
 		ListCell	   *lc3;
+		ListCell	   *lc4;
 
 		if (!mhs->outer_overflow)
 			scan_slot = ExecProcNode(outerPlanState(mhs));
@@ -3461,19 +3468,34 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		/* calculation of a hash value of this entry */
 		INIT_CRC32C(hash);
 		econtext->ecxt_scantuple = scan_slot;
-		forthree (lc1, mhs->hash_keys,
-				  lc2, mhs->hash_keylen,
-				  lc3, mhs->hash_keybyval)
+		forfour(lc1, mhs->hash_keys,
+				lc2, mhs->hash_keylen,
+				lc3, mhs->hash_keybyval,
+				lc4, mhs->hash_keytype)
 		{
 			ExprState  *clause = lfirst(lc1);
 			int			keylen = lfirst_int(lc2);
 			bool		keybyval = lfirst_int(lc3);
+			Oid			keytype = lfirst_oid(lc4);
+			int			errcode;
 			Datum		value;
 			bool		isnull;
 
 			value = ExecEvalExpr(clause, econtext, &isnull, NULL);
 			if (isnull)
 				continue;
+
+			/* fixup host representation to special internal format. */
+			if (keytype == NUMERICOID)
+			{
+				pg_numeric_t	temp
+					= pg_numeric_from_varlena(&errcode, (struct varlena *)
+											  DatumGetPointer(value));
+				keylen = sizeof(temp.value);
+				keybyval = true;
+				value = temp.value;
+			}
+
 			if (keylen > 0)
 			{
 				if (keybyval)
