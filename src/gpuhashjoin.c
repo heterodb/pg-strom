@@ -2598,7 +2598,6 @@ static bool
 gpuhashjoin_next_tuple(GpuHashJoinState *ghjs)
 {
 	TupleTableSlot		   *ps_slot = ghjs->css.ss.ss_ScanTupleSlot;
-	TupleDesc				tupdesc = ps_slot->tts_tupleDescriptor;
 	pgstrom_gpuhashjoin	   *gpuhashjoin = ghjs->curr_ghjoin;
 	pgstrom_data_store	   *pds_dest = gpuhashjoin->pds_dest;
 	kern_data_store		   *kds_dest = pds_dest->kds;

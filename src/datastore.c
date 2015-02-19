@@ -785,6 +785,10 @@ __pgstrom_create_data_store_tupslot(const char *filename, int lineno,
 	SpinLockInit(&pds->lock);
 	pds->refcnt = 1;
 	pds->kds = kds;
+	pds->kds_length = kds->length;
+	pds->kds_offset = 0;
+	pds->kds_fname = NULL;	/* never used */
+	pds->kds_fdesc = -1;	/* never used */
 	pds->ktoast = NULL;		/* assigned on demand */
 	pds->resowner = NULL;	/* never used for tuple-slot */
 	pds->local_pages = NULL;/* never used for tuple-slot */
