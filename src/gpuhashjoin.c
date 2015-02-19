@@ -319,6 +319,7 @@ typedef struct
 	pgstrom_gpuhashjoin *curr_ghjoin;
 	cl_uint			curr_index;
 	bool			curr_recheck;
+	HeapTupleData	curr_tuple;
 	cl_int			num_running;
 	dlist_head		ready_pscans;
 
@@ -2606,28 +2607,18 @@ gpuhashjoin_next_tuple(GpuHashJoinState *ghjs)
 	/*
 	 * TODO: All fallback code here
 	 */
-	Assert(kds_dest->format == KDS_FORMAT_TUPSLOT);
-
 	if (ghjs->pfm.enabled)
 		gettimeofday(&tv1, NULL);
 
 	while (ghjs->curr_index < kds_dest->nitems)
 	{
-		Datum		   *tts_values;
-		cl_char		   *tts_isnull;
 		int				index = ghjs->curr_index++;
 
 		/* fetch a result tuple */
-		ExecClearTuple(ps_slot);
-		tts_values = KERN_DATA_STORE_VALUES(kds_dest, index);
-		tts_isnull = KERN_DATA_STORE_ISNULL(kds_dest, index);
-		Assert(tts_values != NULL && tts_isnull != NULL);
-		memcpy(ps_slot->tts_values, tts_values,
-			   sizeof(Datum) * tupdesc->natts);
-		memcpy(ps_slot->tts_isnull, tts_isnull,
-			   sizeof(bool) * tupdesc->natts);
-		ExecStoreVirtualTuple(ps_slot);
-
+		pgstrom_fetch_data_store(ps_slot,
+								 pds_dest,
+								 index,
+								 &ghjs->curr_tuple);
 		if (ghjs->css.ss.ps.qual != NIL)
 		{
 			ExprContext	   *econtext = ghjs->css.ss.ps.ps_ExprContext;
@@ -2760,6 +2751,7 @@ gpuhashjoin_exec(CustomScanState *node)
 	while (!ghjs->curr_ghjoin || !gpuhashjoin_next_tuple(ghjs))
 	{
 		pgstrom_message	   *msg;
+		int					result_format;
 
 		/*
 		 * Release previous hashjoin chunk that
@@ -2779,8 +2771,13 @@ gpuhashjoin_exec(CustomScanState *node)
 		/*
 		 * Fetch a next hashjoin chunk already processed
 		 */
+		if ((ghjs->css.flags & CUSTOMPATH_PREFERE_ROW_FORMAT) == 0)
+			result_format = KDS_FORMAT_TUPSLOT;
+		else
+			result_format = KDS_FORMAT_ROW_FLAT;
+
 		ghjoin = pgstrom_fetch_gpuhashjoin(ghjs, &ghjs->curr_recheck,
-										   KDS_FORMAT_TUPSLOT);
+										   result_format);
 		if (!ghjoin)
 		{
 			ExecClearTuple(ps_slot);

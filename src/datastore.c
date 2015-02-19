@@ -225,19 +225,19 @@ kern_fetch_data_store(TupleTableSlot *slot,
 	if (kds->format == KDS_FORMAT_ROW_FLAT ||
 		kds->format == KDS_FORMAT_ROW_FMAP)
 	{
-		TupleDesc		tupdesc = slot->tts_tupleDescriptor;
 		kern_rowitem   *ritem = KERN_DATA_STORE_ROWITEM(kds, row_index);
+		kern_tupitem   *titem;
 		HeapTupleHeader	htup;
 
 		Assert(ritem->htup_offset < kds->length);
-		htup = (HeapTupleHeader)((char *)kds + ritem->htup_offset);
+		titem = (kern_tupitem *)((char *)kds + ritem->htup_offset);
+		htup = &titem->htup;
 
 		memset(tuple, 0, sizeof(HeapTupleData));
+		tuple->t_len = titem->t_len;
+		tuple->t_self = titem->t_self;
 		tuple->t_data = htup;
-		heap_deform_tuple(tuple, tupdesc,
-						  slot->tts_values,
-						  slot->tts_isnull);
-		ExecStoreVirtualTuple(slot);
+		ExecStoreTuple(tuple, slot, InvalidBuffer, false);
 
 		return true;
 	}
@@ -478,6 +478,7 @@ __pgstrom_create_data_store_row(const char *filename, int lineno,
 		pds->kds = kds;
 		pds->kds_length = kds->length;
 		pds->kds_offset = 0;	/* never used */
+		pds->kds_fname = NULL;	/* never used */
 		pds->kds_fdesc = -1;	/* never used */
 		pds->ktoast = NULL;		/* never used */
 		pds->resowner = ResourceOwnerCreate(CurrentResourceOwner,
@@ -537,6 +538,7 @@ __pgstrom_create_data_store_row_flat(const char *filename, int lineno,
 	pds->kds = kds;
 	pds->kds_length = kds->length;
 	pds->kds_offset = 0;	/* never used */
+	pds->kds_fname = NULL;	/* never used */
 	pds->kds_fdesc = -1;	/* never used */
 	pds->ktoast = NULL;		/* never used */
 	pds->resowner = NULL;	/* never used */
@@ -1065,24 +1067,29 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 	{
 		HeapTuple		tuple;
 		kern_rowitem   *ritem = KERN_DATA_STORE_ROWITEM(kds, kds->nitems);
+		kern_tupitem   *titem;
 		uintptr_t		usage;
-		char		   *dest_addr;
+		Size			item_len;
 
 		/* reference a HeapTuple in TupleTableSlot */
 		tuple = ExecFetchSlotTuple(slot);
 
 		/* check whether the tuple touches the watermark */
+		item_len = LONGALIGN(offsetof(kern_tupitem, htup) + tuple->t_len);
 		usage = ((uintptr_t)(ritem + 1) -
-				 (uintptr_t)(kds) +			/* from head */
-				 kds->usage +				/* from tail */
-				 LONGALIGN(tuple->t_len));	/* newly added */
+				 (uintptr_t)(kds) +		/* from head */
+				 kds->usage +			/* from tail */
+				 item_len);				/* newly added */
 		if (usage > kds->length)
 			return false;
 
-		dest_addr = ((char *)kds + kds->length -
-					 kds->usage - LONGALIGN(tuple->t_len));
-		memcpy(dest_addr, tuple->t_data, tuple->t_len);
-		ritem->htup_offset = (hostptr_t)((char *)dest_addr - (char *)kds);
+		titem = (kern_tupitem *)
+			((char *)kds + kds->length - kds->usage - item_len);
+		titem->t_len = tuple->t_len;
+		titem->t_self = tuple->t_self;
+		memcpy(&titem->htup, tuple->t_data, tuple->t_len);
+
+		ritem->htup_offset = (hostptr_t)((char *)titem - (char *)kds);
 		kds->usage += LONGALIGN(tuple->t_len);
 		kds->nitems++;
 
@@ -1285,8 +1292,9 @@ pgstrom_dump_data_store(pgstrom_data_store *pds)
 		for (i=0; i < kds->nitems; i++)
 		{
 			kern_rowitem *ritem = KERN_DATA_STORE_ROWITEM(kds, i);
-			HeapTupleHeaderData *htup =
-				(HeapTupleHeaderData *)((char *)kds + ritem->htup_offset);
+			kern_tupitem *titem = (kern_tupitem *)
+				((char *)kds + ritem->htup_offset);
+			HeapTupleHeaderData *htup = &titem->htup;
 			cl_int		natts = (htup->t_infomask2 & HEAP_NATTS_MASK);
 			cl_int		curr = htup->t_hoff;
 			cl_int		vl_len;

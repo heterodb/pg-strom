@@ -373,6 +373,13 @@ typedef struct {
 #endif
 } kern_blkitem;
 
+typedef struct
+{
+	cl_ushort			t_len;		/* length of tuple */
+	ItemPointerData		t_self;		/* SelfItemPointer */
+	HeapTupleHeaderData	htup;
+} kern_tupitem;
+
 #define KDS_FORMAT_ROW			1
 #define KDS_FORMAT_ROW_FLAT		2
 #define KDS_FORMAT_TUPSLOT		3
@@ -972,6 +979,7 @@ static inline __global HeapTupleHeaderData *
 kern_get_tuple_rsflat(__global kern_data_store *kds, cl_uint rowidx)
 {
 	__global kern_rowitem *kritem;
+	__global kern_tupitem *ktitem;
 
 	if (rowidx >= kds->nitems)
 		return NULL;	/* likely a BUG */
@@ -980,8 +988,9 @@ kern_get_tuple_rsflat(__global kern_data_store *kds, cl_uint rowidx)
 	/* simple sanity check */
 	if (kritem->htup_offset >= kds->length)
 		return NULL;
-	return (__global HeapTupleHeaderData *)
+	ktitem = (__global kern_tupitem *)
 		((__global char *)kds + kritem->htup_offset);
+	return &ktitem->htup;
 }
 
 static inline __global void *
