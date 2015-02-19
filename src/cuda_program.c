@@ -17,12 +17,12 @@
  */
 #include "postgres.h"
 #include "access/twophase.h"
+#include "common/pg_crc.h"
 #include "postmaster/bgworker.h"
 #include "storage/ipc.h"
 #include "storage/proc.h"
 #include "storage/shmem.h"
 #include "utils/guc.h"
-#include "utils/pg_crc.h"
 #include "pg_strom.h"
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -454,12 +454,12 @@ __build_cuda_program(program_cache_entry *old_entry)
 	appendStringInfo(&buf,
 					 "#define CUDA_DEVICE_CODE\n"
 					 "#define HOSTPTRLEN %u\n"
-					 "#define DEVICEPTRLEN %u\n"
+					 "#define DEVICEPTRLEN %lu\n"
 					 "#define BLCKSZ %u\n"
 					 "#define ITEMID_OFFSET_SHIFT %u\n"
 					 "#define ITEMID_FLAGS_SHIFT %u\n"
 					 "#define ITEMID_LENGTH_SHIFT %u\n"
-					 "#define MAXIMUM_ALIGNOF %lu\n"
+					 "#define MAXIMUM_ALIGNOF %u\n"
 					 "\n"
 					 "#include \"cuda_runtime.h\"\n"
 					 "#include \"crt/device_runtime.h\"\n"

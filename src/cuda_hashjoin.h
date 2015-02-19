@@ -516,6 +516,9 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 		cl_uint		i, ncols = kds_dest->ncols;
 		cl_uint		datalen = 0;
 
+		/* t_len and ctid */
+		required += offsetof(kern_tupitem, htup);
+
 		for (i=0; i < ncols; i++)
 		{
 			kern_colmeta	cmeta = kds_dest->colmeta[i];
@@ -557,7 +560,7 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 					datalen += VARSIZE_ANY(datum);
 			}
 		}
-		required = offsetof(HeapTupleHeaderData, t_bits);
+		required += offsetof(HeapTupleHeaderData, t_bits);
 		if (heap_hasnull)
 			required += bitmaplen(ncols);
 		if (kds->tdhasoid)
@@ -599,6 +602,7 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 	{
 		__global HeapTupleHeaderData *htup;
 		__global kern_rowitem *ritem;
+		__global kern_tupitem *titem;
 		cl_uint		htup_offset;
 		cl_uint		i, ncols = kds_dest->ncols;
 		cl_uint		curr;
@@ -609,8 +613,9 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 		ritem->htup_offset = htup_offset;
 
 		/* build a heap-tuple */
-		htup = (__global HeapTupleHeaderData *)
+		titem = (__global kern_tupitem *)
 			((__global char *)kds_dest + htup_offset);
+		htup = &titem->htup;
 
 		SET_VARSIZE(&htup->t_choice.t_datum, required);
 		htup->t_choice.t_datum.datum_typmod = kds_dest->tdtypmod;
@@ -702,6 +707,7 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 					htup->t_bits[i >> 3] |= (1 << (i & 0x07));
 			}
 		}
+		titem->t_len = curr;
 	}
 out:
 	/* write-back execution status into host-side */

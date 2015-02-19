@@ -388,7 +388,7 @@ gpusort_fixup_datastore(__global kern_gpusort *kgpusort,
 	__global kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgpusort);
 	int			errcode = StromError_Success;
 
-	if (get_global_id(0) < nitems)
+	if (get_global_id(0) < kds->nitems)
 	{
 		__global HeapTupleHeaderData *htup;
 		__global Datum	   *ts_values;
