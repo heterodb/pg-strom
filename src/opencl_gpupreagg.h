@@ -221,6 +221,17 @@ gpupreagg_global_calc(__private cl_int *errcode,
 					  size_t newval_index);
 
 /*
+ * Reduction operation with no atomic operations. It can be used if no
+ * GROUP-BY clause is given, because all the rows shall be eventually
+ * consolidated into one aggregated row.
+ */
+static void
+gpupreagg_nogroup_calc(__private cl_int *errcode,
+					   cl_int attnum,
+					   __private pagg_datum *accum,
+					   __private pagg_datum *newval);
+
+/*
  * translate a kern_data_store (input) into an output form
  * (auto generated function)
  */
@@ -849,6 +860,40 @@ gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
 out:
     /* write-back execution status into host-side */
     kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
+}
+
+/*
+ * gpupreagg_nogroup_reduction
+ *
+ * It makes aggregation if no GROUP-BY clause given. We can omit atomic-
+ * operations in this case, because all the rows are eventually consolidated
+ * to just one record, thus usual reduction operation is sufficient.
+ */
+__kernel void
+gpupreagg_nogroup_reduction(__global kern_gpupreagg *kgpreagg,
+							__global kern_data_store *kds_src,
+							__global kern_data_store *kds_dst,
+							__global kern_data_store *ktoast,
+							__global pagg_hashslot *g_hashslot,
+							KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+{
+	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	__global varlena   *kparam_0 = kparam_get_value(kparams, 0);
+	__global cl_char   *gpagg_atts = (__global cl_char *) VARDATA(kparam_0);
+
+	pagg_datum			datum;
+
+	/* loop for each columns */
+
+	/* if not GPUPREAGG_FIELD_IS_AGGFUNC, do nothing */
+
+	/* load this value from kds_src onto datum */
+
+	/* do reduction */
+
+	/* store this value to kds_dst from datum */
+
+
 }
 
 /*
