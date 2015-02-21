@@ -247,7 +247,6 @@ kern_fetch_data_store(TupleTableSlot *slot,
 		Datum  *tts_values = (Datum *)KERN_DATA_STORE_VALUES(kds, row_index);
 		bool   *tts_isnull = (bool *)KERN_DATA_STORE_ISNULL(kds, row_index);
 
-		ExecClearTuple(slot);
 		slot->tts_values = tts_values;
 		slot->tts_isnull = tts_isnull;
 		ExecStoreVirtualTuple(slot);
