@@ -993,14 +993,18 @@ pgstrom_create_gpusort(GpuSortState *gss)
 		/* Makes a sorting chunk on the first tuple */
 		if (!pds_row)
 		{
-			
-
-
-
-
+			/* NOTE: maximum number of items is also restricted with
+			 * max available consumption by tuple-store.
+			 */
+			nitems = (gss->chunk_size -
+					  STROMALIGN(offsetof(kern_data_store,
+										  colmeta[tupdesc->natts])))
+				/ LONGALIGN((sizeof(Datum) +
+							 sizeof(cl_char)) * tupdesc->natts);
 
 			pds_row = pgstrom_create_data_store_row_fmap(tupdesc,
 														 gss->chunk_size);
+			pds_row->kds->nrooms = nitems;
 			pgstrom_track_object(&pds_row->sobj, 0);
 		}
 		/* Insert this tuple to the data store */
