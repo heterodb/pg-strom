@@ -610,7 +610,8 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 
 static void
 devfunc_setup_cast(devfunc_info *entry,
-				   devfunc_catalog_t *procat, bool has_alias)
+				   devfunc_catalog_t *procat,
+				   const char *extra, bool has_alias)
 {
 	devtype_info   *dtype = linitial(entry->func_args);
 
@@ -640,7 +641,7 @@ devfunc_setup_cast(devfunc_info *entry,
 static void
 devfunc_setup_oper_both(devfunc_info *entry,
 						devfunc_catalog_t *procat,
-						bool has_alias)
+						const char *extra, bool has_alias)
 {
 	devtype_info   *dtype1 = linitial(entry->func_args);
 	devtype_info   *dtype2 = lsecond(entry->func_args);
@@ -668,16 +669,17 @@ devfunc_setup_oper_both(devfunc_info *entry,
 				   dtype2->type_name,
 				   entry->func_rettype->type_name,
 				   entry->func_rettype->type_base,
-				   procat->func_template + 2);
+				   extra);
 }
 
 static void
 devfunc_setup_oper_either(devfunc_info *entry,
 						  devfunc_catalog_t *procat,
+						  const char *left_extra,
+						  const char *right_extra,
 						  bool has_alias)
 {
 	devtype_info   *dtype = linitial(entry->func_args);
-	const char	   *templ = procat->func_template;
 
 	Assert(procat->func_nargs == 1);
 	entry->func_name = pstrdup(procat->func_name);
@@ -700,18 +702,34 @@ devfunc_setup_oper_either(devfunc_info *entry,
 				   dtype->type_name,
 				   entry->func_rettype->type_name,
 				   entry->func_rettype->type_base,
-				   strncmp(templ, "l:", 2) == 0 ? templ + 2 : "",
-				   strncmp(templ, "r:", 2) == 0 ? templ + 2 : "");
+				   !left_extra ? "" : left_extra,
+				   !right_extra ? "" : right_extra);
+}
+
+static void
+devfunc_setup_oper_left(devfunc_info *entry,
+						devfunc_catalog_t *procat,
+						const char *extra, bool has_alias)
+{
+	devfunc_setup_oper_either(entry, procat, extra, NULL, has_alias);
+}
+
+static void
+devfunc_setup_oper_right(devfunc_info *entry,
+						 devfunc_catalog_t *procat,
+						 const char *extra, bool has_alias)
+{
+	devfunc_setup_oper_either(entry, procat, NULL, extra, has_alias);
 }
 
 static void
 devfunc_setup_func_decl(devfunc_info *entry,
-						devfunc_catalog_t *procat, bool has_alias)
+						devfunc_catalog_t *procat,
+						const char *extra, bool has_alias)
 {
 	StringInfoData	str;
 	ListCell	   *cell;
 	int				index;
-	const char	   *builtin_name = strchr(procat->func_template, ':') + 1;
 
 	initStringInfo(&str);
 
@@ -766,7 +784,7 @@ devfunc_setup_func_decl(devfunc_info *entry,
 					 "    if (!result.isnull)\n"
 					 "        result.value = (%s) %s(",
 					 entry->func_rettype->type_base,
-					 builtin_name);
+					 extra);
 	index = 1;
 	foreach (cell, entry->func_args)
 	{
@@ -782,14 +800,13 @@ devfunc_setup_func_decl(devfunc_info *entry,
 
 static void
 devfunc_setup_func_impl(devfunc_info *entry,
-						devfunc_catalog_t *procat, bool has_alias)
+						devfunc_catalog_t *procat,
+						const char *extra, bool has_alias)
 {
-	const char *func_alias = strchr(procat->func_template, ':') + 1;
-
 	entry->func_name = pstrdup(procat->func_name);
 	if (has_alias)
 		elog(ERROR, "Bug? implimented device function should not have alias");
-	entry->func_alias = func_alias;
+	entry->func_alias = extra;
 }
 
 static devfunc_info *
@@ -912,6 +929,7 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 				   sizeof(Oid) * func_nargs) == 0)
 		{
 			const char *template = procat->func_template;
+			const char *extra;
 			const char *pos;
 			const char *end;
 			int32		flags = 0;
@@ -981,17 +999,19 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 				}
 			}
 
+			extra = template + 2;
 			if (strncmp(template, "c:", 2) == 0)
-				devfunc_setup_cast(entry, procat, has_alias);
+				devfunc_setup_cast(entry, procat, extra, has_alias);
 			else if (strncmp(template, "b:", 2) == 0)
-				devfunc_setup_oper_both(entry, procat, has_alias);
-			else if (strncmp(template, "l:", 2) == 0 ||
-					 strncmp(template, "r:", 2) == 0)
-				devfunc_setup_oper_either(entry, procat, has_alias);
+				devfunc_setup_oper_both(entry, procat, extra, has_alias);
+			else if (strncmp(template, "l:", 2) == 0)
+				devfunc_setup_oper_left(entry, procat, extra, has_alias);
+			else if (strncmp(template, "r:", 2) == 0)
+				devfunc_setup_oper_right(entry, procat, extra, has_alias);
 			else if (strncmp(template, "f:", 2) == 0)
-				devfunc_setup_func_decl(entry, procat, has_alias);
+				devfunc_setup_func_decl(entry, procat, extra, has_alias);
 			else if (strncmp(template, "F:", 2) == 0)
-				devfunc_setup_func_impl(entry, procat, has_alias);
+				devfunc_setup_func_impl(entry, procat, extra, has_alias);
 			else
 			{
 				elog(NOTICE, "Bug? unknown device function template: '%s'",
