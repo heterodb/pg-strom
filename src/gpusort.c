@@ -1538,77 +1538,80 @@ gpusort_merge_cpu_chunks(GpuSortState *gss, pgstrom_cpusort *cpusort_1)
 	Assert(mc_class < MAX_MERGECHUNKS_CLASS);
 	if (!gss->sorted_chunks[mc_class])
 	{
+		dlist_iter		iter;
 		pgstrom_cpusort *temp;
-		dlist_iter	iter;
-		bool		has_smaller = (gss->num_gpu_running > 0 ? true : false);
+		bool			has_smaller;
 
-		/* Unless scan phase does not completed, we try to merge chunks
-		 * with same size.
+		/* once cpusort_1 is put as partially sorted chunk */
+		gss->sorted_chunks[mc_class] = cpusort_1;
+
+		/*
+		 * Unless scan of outer relation does not completed, we try to
+		 * keep merging chunks with same size.
 		 */
 		if (!gss->scan_done)
-		{
-			gss->sorted_chunks[mc_class] = cpusort_1;
 			return NULL;
-		}
 
-		/* If here is running or pending chunks with same merge-chunk class,
-		 * it may be a good candidate to merge.
+		/*
+		 * Once we forget the given cpusort_1, and find out the smallest
+		 * one that is now waiting for merging.
 		 */
-		dlist_foreach (iter, &gss->running_cpu_chunks)
+		for (i=0; i < MAX_MERGECHUNKS_CLASS; i++)
 		{
-			temp = dlist_container(pgstrom_cpusort, chain, iter.cur);
-			if (temp->h.mc_class == mc_class)
-			{
-				gss->sorted_chunks[mc_class] = cpusort_1;
-				return NULL;
-			}
-			else if (temp->h.mc_class < mc_class)
-				has_smaller = true;
-		}
-
-		dlist_foreach (iter, &gss->pending_cpu_chunks)
-		{
-			temp = dlist_container(pgstrom_cpusort, chain, iter.cur);
-			if (temp->h.mc_class == mc_class)
-			{
-				gss->sorted_chunks[mc_class] = cpusort_1;
-				return NULL;
-			}
-			else if (temp->h.mc_class < mc_class)
-				has_smaller = true;
-		}
-
-		/* wait until smaller chunk is sorted, if any */
-		if (has_smaller)
-		{
-			gss->sorted_chunks[mc_class] = cpusort_1;
-			return NULL;
-		}
-
-		/* elsewhere, picks up a pair of smallest two chunks that is
-		 * already sorted, but smaller than or equal to this mc_class.
-		 */
-		gss->sorted_chunks[mc_class] = cpusort_1;
-		cpusort_1 = cpusort_2 = NULL;
-		for (i=0; i <= mc_class; i++)
-		{
-			if (!gss->sorted_chunks[i])
-				continue;
-			if (!cpusort_1)
+			if (gss->sorted_chunks[i])
 			{
 				cpusort_1 = gss->sorted_chunks[i];
 				Assert(cpusort_1->h.mc_class == i);
+				break;
 			}
-			else if (!cpusort_2)
+		}
+		mc_class = cpusort_1->h.mc_class;
+
+		/*
+		 * If we have any running or pending chunks with same merge-chunk
+		 * class, it may be a good candidate to merge.
+		 */
+		has_smaller = (gss->num_gpu_running > 0 ? true : false);
+		dlist_foreach (iter, &gss->running_cpu_chunks)
+		{
+			temp = dlist_container(pgstrom_cpusort, chain, iter.cur);
+			if (temp->h.mc_class == cpusort_1->h.mc_class)
+				return NULL;
+			else if (temp->h.mc_class < cpusort_1->h.mc_class)
+				has_smaller = true;
+		}
+		dlist_foreach (iter, &gss->pending_cpu_chunks)
+		{
+			temp = dlist_container(pgstrom_cpusort, chain, iter.cur);
+			if (temp->h.mc_class == cpusort_1->h.mc_class)
+				return NULL;
+			else if (temp->h.mc_class < cpusort_1->h.mc_class)
+				has_smaller = true;
+		}
+
+		/* wait until smaller chunk gets sorted, if any */
+		if (has_smaller)
+			return NULL;
+
+		/*
+		 * Elsewhere, picks up a pair of smallest two chunks that are
+		 * already sorted, to merge them on next step.
+		 */
+		cpusort_2 = NULL;
+		for (i=cpusort_1->h.mc_class + 1; i < MAX_MERGECHUNKS_CLASS; i++)
+		{
+			if (gss->sorted_chunks[i])
 			{
 				cpusort_2 = gss->sorted_chunks[i];
 				Assert(cpusort_2->h.mc_class == i);
 				break;
 			}
 		}
-		Assert(cpusort_1 != NULL);
+
+		/* no merginable pair found? */
 		if (!cpusort_2)
 			return NULL;
+		/* OK, let's merge this two chunks */
 		gss->sorted_chunks[cpusort_1->h.mc_class] = NULL;
 		gss->sorted_chunks[cpusort_2->h.mc_class] = NULL;
 	}
