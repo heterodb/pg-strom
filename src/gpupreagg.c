@@ -2771,7 +2771,9 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 								 tle->resjunk);
 		cscan->custom_ps_tlist = lappend(cscan->custom_ps_tlist, ps_tle);
 	}
-	outerPlan(cscan)              = outer_node;
+	if (IsA(outer_node, CustomScan))
+		((CustomScan *) outer_node)->flags |= CUSTOMPATH_PREFERE_ROW_FORMAT;
+	outerPlan(cscan)		= outer_node;
 
 	/* also set up private information */
 	memset(&gpa_info, 0, sizeof(GpuPreAggInfo));

@@ -260,6 +260,20 @@ gpuscan_add_scan_path(PlannerInfo *root,
 				 pathnode->path.param_info,
 				 host_quals, dev_quals, false);
 
+	/* check bulk-load capability */
+	if (host_quals == NIL)
+	{
+		foreach (cell, baserel->reltargetlist)
+		{
+			TargetEntry *tle = lfirst(cell);
+
+			if (!IsA(tle->expr, Var) &&
+				!pgstrom_codegen_available_expression(tle->expr))
+				break;
+		}
+		if (!cell)
+			pathnode->flags |= CUSTOMPATH_SUPPORT_BULKLOAD;
+	}
 	add_path(baserel, &pathnode->path);
 }
 
