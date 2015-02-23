@@ -167,7 +167,7 @@ pg_numeric_from_varlena(__private int *errcode,
 {
 	pg_numeric_t		result;
 	union NumericChoice	numData;
-	__global cl_char   *pSrc;
+	__global char	   *pSrc;
 	cl_int				len;
 
 	if (vl_val == NULL)
