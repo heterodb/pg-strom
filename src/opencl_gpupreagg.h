@@ -228,8 +228,8 @@ gpupreagg_global_calc(__private cl_int *errcode,
 static void
 gpupreagg_nogroup_calc(__private cl_int *errcode,
 					   cl_int attnum,
-					   __private pagg_datum *accum,
-					   __private pagg_datum *newval);
+					   __local pagg_datum *accum,
+					   __local pagg_datum *newval);
 
 /*
  * translate a kern_data_store (input) into an output form
@@ -874,27 +874,74 @@ gpupreagg_nogroup_reduction(__global kern_gpupreagg *kgpreagg,
 							__global kern_data_store *kds_src,
 							__global kern_data_store *kds_dst,
 							__global kern_data_store *ktoast,
-							__global pagg_hashslot *g_hashslot,
 							KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
-	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	__global varlena   *kparam_0 = kparam_get_value(kparams, 0);
-	__global cl_char   *gpagg_atts = (__global cl_char *) VARDATA(kparam_0);
+	__global kern_parambuf *kparams    = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	__global varlena       *kparam_0   = kparam_get_value(kparams, 0);
+	__global cl_char       *gpagg_atts = (__global cl_char *)VARDATA(kparam_0);
+	__local  pagg_datum    *l_datum    = (__local pagg_datum *)LOCAL_WORKMEM;
+	cl_uint	nitems 		= kds_src->nitems;
+	cl_uint	nattrs		= kds_src->ncols;
+	cl_int	errcode		= StromError_Success;
+	size_t	lid			= get_local_id(0);
+	size_t	gid			= get_global_id(0);
+	size_t	lsz			= get_local_size(0);
+	size_t	dest_index	= gid / lsz;
 
-	pagg_datum			datum;
 
 	/* loop for each columns */
+	if (gid < nitems)
+	{
+		int attnum;
 
-	/* if not GPUPREAGG_FIELD_IS_AGGFUNC, do nothing */
+		for (attnum = 0; attnum < nattrs; attnum++)
+		{
+			size_t	distance;
 
-	/* load this value from kds_src onto datum */
+			/* if not GPUPREAGG_FIELD_IS_AGGFUNC, do nothing */
+			if (gpagg_atts[attnum] != GPUPREAGG_FIELD_IS_AGGFUNC)
+			{
+				if (lid == 0)
+				{
+					gpupreagg_data_move(&errcode, kds_src, kds_dst, ktoast,
+										attnum,	gid, dest_index);
+				}
+				continue;
+			}
 
-	/* do reduction */
+			/* load this value from kds_src onto datum */
+			gpupreagg_data_load(&l_datum[lid], &errcode,
+								kds_src, ktoast, attnum, gid);
+			barrier(CLK_LOCAL_MEM_FENCE);
 
-	/* store this value to kds_dst from datum */
+			/* do reduction */
+			for(distance=2; distance<lsz; distance*=2)
+			{
+				if(lid % distance == 0  &&  (lid + distance/2) < nitems)
+				{
+					gpupreagg_nogroup_calc(&errcode,
+										   attnum,
+										   &l_datum[lid],
+										   &l_datum[lid + distance/2]);
+				}
+				barrier(CLK_LOCAL_MEM_FENCE);
+			}
+			barrier(CLK_LOCAL_MEM_FENCE);
 
+			/* store this value to kds_dst from datum */
+			if(lid == 0)
+			{
+				gpupreagg_data_store(&l_datum[lid], &errcode,
+									 kds_dst, ktoast, attnum, dest_index);
+			}
+			barrier(CLK_LOCAL_MEM_FENCE);
+		}
+	}
 
+	/* write-back execution status into host-side */
+	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
 }
+
 
 /*
  * gpupreagg_fixup_varlena
@@ -1332,6 +1379,167 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 		new_isnull,(cl_ulong)(new_value),CHECK_OVERFLOW_NUMERIC,		\
 		gatomic_add_numeric((errcode),(__global cl_ulong *)(accum_value), \
 							(cl_ulong)(new_value)))
+
+/*
+ * Helper macros for gpupreagg_nogroup_calc
+ */
+#define MAX(x,y)			(((x)<(y)) ? (y) : (x))
+#define MIN(x,y)			(((x)<(y)) ? (x) : (y))
+#define ADD(x,y)			((x) + (y))
+
+#define NUMERIC_MAX(x,y)	\
+	pgfn_numeric_max(errcode, *(pg_numeric_t *)&(x), *(pg_numeric_t *)&(y))
+#define NUMERIC_MIN(x,y)	\
+	pgfn_numeric_min(errcode, *(pg_numeric_t *)&(x), *(pg_numeric_t *)&(y))
+#define NUMERIC_ADD(x,y)	\
+	pgfn_numeric_add(errcode, *(pg_numeric_t *)&(x), *(pg_numeric_t *)&(y))
+
+#define AGGCALC_NOGROUP_TEMPLATE(TYPE,errcode,							\
+								 accum_isnull,accum_val,				\
+								 newval_isnull,newval_val,				\
+								 OVERFLOW,FUNC_CALL)					\
+	do {																\
+		if (!(newval_isnull))											\
+		{																\
+			TYPE old = FUNC_CALL;										\
+			if (OVERFLOW(old, (newval_val)))							\
+			{															\
+				STROM_SET_ERROR(errcode, StromError_CpuReCheck);		\
+			}															\
+			(accum_isnull) = false;										\
+		}																\
+	} while (0)
+
+#define AGGCALC_NOGROUP_TEMPLATE_SHORT(errcode,accum,newval,			\
+									   OVERFLOW,FUNC_CALL)				\
+	AGGCALC_NOGROUP_TEMPLATE(cl_int,errcode,							\
+							 (accum)->isnull,(accum)->int_val,			\
+							 (newval)->isnull,(newval)->int_val,		\
+							 OVERFLOW,FUNC_CALL)
+#define AGGCALC_NOGROUP_TEMPLATE_INT(errcode,accum,newval,				\
+									 OVERFLOW,FUNC_CALL)				\
+	AGGCALC_NOGROUP_TEMPLATE(cl_int,errcode,							\
+							 (accum)->isnull,(accum)->int_val,			\
+							 (newval)->isnull,(newval)->int_val,		\
+							 OVERFLOW,FUNC_CALL)
+#define AGGCALC_NOGROUP_TEMPLATE_LONG(errcode,accum,newval,				\
+									  OVERFLOW,FUNC_CALL)				\
+	AGGCALC_NOGROUP_TEMPLATE(cl_long,errcode,							\
+							 (accum)->isnull,(accum)->long_val,			\
+							 (newval)->isnull,(newval)->long_val,		\
+							 OVERFLOW,FUNC_CALL)
+#define AGGCALC_NOGROUP_TEMPLATE_FLOAT(errcode,accum,newval,			\
+									   OVERFLOW,FUNC_CALL)				\
+	AGGCALC_NOGROUP_TEMPLATE(cl_float,errcode,							\
+							 (accum)->isnull,(accum)->float_val,		\
+							 (newval)->isnull,(newval)->float_val,		\
+							 OVERFLOW,FUNC_CALL)
+#define AGGCALC_NOGROUP_TEMPLATE_DOUBLE(errcode,accum,newval,			\
+										OVERFLOW,FUNC_CALL)				\
+	AGGCALC_NOGROUP_TEMPLATE(cl_double,errcode,							\
+							 (accum)->isnull,(accum)->double_val,		\
+							 (newval)->isnull,(newval)->double_val,		\
+							 OVERFLOW,FUNC_CALL)
+#define AGGCALC_NOGROUP_TEMPLATE_NUMERIC(errcode,accum,newval,			\
+										 OVERFLOW,FUNC_CALL)			\
+	AGGCALC_NOGROUP_TEMPLATE(pg_numeric_t,errcode,						\
+							 (accum)->isnull,(accum)->ulong_val,		\
+							 (newval)->isnull,(newval)->ulong_val,		\
+							 OVERFLOW,FUNC_CALL)
+
+/* calculation for no group partial max */
+#define AGGCALC_NOGROUP_PMAX_SHORT(errcode,accum,newval)				\
+	AGGCALC_NOGROUP_TEMPLATE_SHORT(errcode,accum,newval,				\
+								   CHECK_OVERFLOW_NONE,					\
+								   MAX((accum)->int_val,				\
+									   (newval)->int_val))
+#define AGGCALC_NOGROUP_PMAX_INT(errcode,accum,newval)					\
+	AGGCALC_NOGROUP_TEMPLATE_INT(errcode,accum,newval,					\
+								 CHECK_OVERFLOW_NONE,					\
+								 MAX((accum)->int_val,					\
+									 (newval)->int_val))
+#define AGGCALC_NOGROUP_PMAX_LONG(errcode,accum,newval)					\
+	AGGCALC_NOGROUP_TEMPLATE_LONG(errcode,accum,newval,					\
+								  CHECK_OVERFLOW_NONE,					\
+								  MAX((accum)->long_val,				\
+									  (newval)->long_val))
+#define AGGCALC_NOGROUP_PMAX_FLOAT(errcode,accum,newval)				\
+	AGGCALC_NOGROUP_TEMPLATE_FLOAT(errcode,accum,newval,				\
+								   CHECK_OVERFLOW_NONE,					\
+								   MAX((accum)->float_val,				\
+									   (newval)->float_val))
+#define AGGCALC_NOGROUP_PMAX_DOUBLE(errcode,accum,newval)				\
+	AGGCALC_NOGROUP_TEMPLATE_DOUBLE(errcode,accum,newval,				\
+									CHECK_OVERFLOW_NONE,				\
+									MAX((accum)->double_val,			\
+										(newval)->double_val))
+#define AGGCALC_NOGROUP_PMAX_NUMERIC(errcode,accum,newval)				\
+	AGGCALC_NOGROUP_TEMPLATE_NUMERIC(errcode,accum,newval,				\
+									 CHECK_OVERFLOW_NONE,				\
+									 NUMERIC_MAX((errcode),				\
+												 (accum)->ulong_val,	\
+												 (newval)->ulong_val))
+
+/* calculation for no group partial min */
+#define AGGCALC_NOGROUP_PMIN_SHORT(errcode,accum,newval)				\
+	AGGCALC_NOGROUP_TEMPLATE_SHORT(errcode,accum,newval,				\
+								   CHECK_OVERFLOW_NONE,					\
+								   MIN((accum)->int_val, (newval)->int_val))
+#define AGGCALC_NOGROUP_PMIN_INT(errcode,accum,newval)					\
+	AGGCALC_NOGROUP_TEMPLATE_INT(errcode,accum,newval,					\
+								 CHECK_OVERFLOW_NONE,					\
+								 MIN((accum)->int_val, (newval)->int_val))
+#define AGGCALC_NOGROUP_PMIN_LONG(errcode,accum,newval)					\
+	AGGCALC_NOGROUP_TEMPLATE_LONG(errcode,accum,newval,					\
+								  CHECK_OVERFLOW_NONE,					\
+								  MIN((accum)->long_val, (newval)->long_val))
+#define AGGCALC_NOGROUP_PMIN_FLOAT(errcode,accum,newval)				\
+	AGGCALC_NOGROUP_TEMPLATE_FLOAT(errcode,accum,newval,				\
+								   CHECK_OVERFLOW_NONE,					\
+								   MIN((accum)->float_val,				\
+									   (newval)->float_val))
+#define AGGCALC_NOGROUP_PMIN_DOUBLE(errcode,accum,newval)				\
+	AGGCALC_NOGROUP_TEMPLATE_DOUBLE(errcode,accum,newval,				\
+									CHECK_OVERFLOW_NONE,				\
+									MIN((accum)->double_val,			\
+										(newval)->double_val))
+#define AGGCALC_NOGROUP_PMIN_NUMERIC(errcode,accum,newval)				\
+	AGGCALC_NOGROUP_TEMPLATE_NUMERIC(errcode,accum,newval,				\
+									 CHECK_OVERFLOW_NONE,				\
+									 NUMERIC_MIN((errcode),				\
+												 (accum)->ulong_val,	\
+												 (newval)->ulong_val))
+
+/* calculation for no group partial add */
+#define AGGCALC_NOGROUP_PADD_SHORT(errcode,accum,newval)				\
+	AGGCALC_NOGROUP_TEMPLATE_SHORT(errcode,accum,newval,				\
+								   CHECK_OVERFLOW_SHORT,				\
+								   ADD((accum)->int_val, (newval)->int_val))
+#define AGGCALC_NOGROUP_PADD_INT(errcode,accum,newval)					\
+	AGGCALC_NOGROUP_TEMPLATE_INT(errcode,accum,newval,					\
+								 CHECK_OVERFLOW_INT,					\
+								 ADD((accum)->int_val, (newval)->int_val))
+#define AGGCALC_NOGROUP_PADD_LONG(errcode,accum,newval)					\
+	AGGCALC_NOGROUP_TEMPLATE_LONG(errcode,accum,newval,					\
+								  CHECK_OVERFLOW_INT,					\
+								  ADD((accum)->long_val, (newval)->long_val))
+#define AGGCALC_NOGROUP_PADD_FLOAT(errcode,accum,newval)				\
+    AGGCALC_NOGROUP_TEMPLATE_FLOAT(errcode,accum,newval,				\
+								   CHECK_OVERFLOW_FLOAT,				\
+								   ADD((accum)->float_val,				\
+									   (newval)->float_val))
+#define AGGCALC_NOGROUP_PADD_DOUBLE(errcode,accum,newval)				\
+	AGGCALC_NOGROUP_TEMPLATE_DOUBLE(errcode,accum,newval,				\
+									CHECK_OVERFLOW_FLOAT,				\
+									ADD((accum)->double_val,			\
+										(newval)->double_val))
+#define AGGCALC_NOGROUP_PADD_NUMERIC(errcode,accum,newval)				\
+	AGGCALC_NOGROUP_TEMPLATE_NUMERIC(errcode,accum,newval,				\
+									 CHECK_OVERFLOW_NUMERIC,			\
+									 NUMERIC_ADD((errcode),				\
+												 (accum)->ulong_val,	\
+												 (newval)->ulong_val))
+
 #else
 /* Host side representation of kern_gpupreagg. It can perform as a message
  * object of PG-Strom, has key of OpenCL device program, a source row/column
@@ -1341,6 +1549,7 @@ typedef struct
 {
 	pgstrom_message	msg;		/* = StromTag_GpuPreAgg */
 	Datum			dprog_key;	/* key of device program */
+	bool			needs_grouping;	/* true, if it takes GROUP BY clause */
 	bool			local_reduction;/* true, if it needs local reduction */
 	bool			has_varlena;	/* true, if it has varlena grouping keys */
 	double			num_groups;	/* estimated number of groups */
