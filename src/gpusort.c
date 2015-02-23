@@ -322,6 +322,10 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 
 	if (ntuples < 2.0)
 		ntuples = 2.0;
+	/*
+	 * Fixed cost to kick GPU kernel
+	 */
+	startup_cost += pgstrom_gpu_setup_cost;
 
 	/*
 	 * calculate expected number of rows per chunk and number of chunks.
@@ -559,7 +563,6 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 	for (i=0; i < sort->numCols; i++)
 	{
 		TargetEntry *tle;
-		Var		   *varnode;
 		AttrNumber	colidx = sort->sortColIdx[i];
 		Oid			sort_op = sort->sortOperators[i];
 		Oid			sort_collid = sort->collations[i];
@@ -572,7 +575,9 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 		devtype_info *dtype;
 		devfunc_info *dfunc;
 
-		/* Find the operator in pg_amop */
+		/*
+		 * Get direction of the sorting
+		 */
 		if (!get_ordering_op_properties(sort_op,
 										&opfamily,
 										&sort_type,
@@ -581,25 +586,15 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 				 sort_op);
 		is_reverse = (strategy == BTGreaterStrategyNumber);
 
-		/* Find the sort support function */
-		sort_func = get_opfamily_proc(opfamily, sort_type, sort_type,
-									  BTORDER_PROC);
-		if (!OidIsValid(sort_func))
-			elog(ERROR, "missing support function %d(%u,%u) in opfamily %u",
-				 BTORDER_PROC, sort_type, sort_type, opfamily);
-
-		/* Sanity check of the expression */
+		/*
+		 * device type lookup for comparison
+		 */
 		tle = get_tle_by_resno(sort->plan.targetlist, colidx);
 		if (!tle || !IsA(tle->expr, Var))
 			elog(ERROR, "Bug? resno %d not found on tlist or not varnode: %s",
 				 colidx, nodeToString(tle->expr));
-		varnode = (Var *) tle->expr;
-		if (varnode->vartype != sort_type)
-			elog(ERROR, "Bug? type mismatch \"%s\" is expected, but \"%s\"",
-				 format_type_be(sort_type),
-				 format_type_be(varnode->vartype));
+		sort_type = exprType((Node *) tle->expr);
 
-		/* device type for comparison */
 		dtype = pgstrom_devtype_lookup_and_track(sort_type, context);
 		if (!dtype)
 			elog(ERROR, "device type %u lookup failed", sort_type);

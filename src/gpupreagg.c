@@ -1329,7 +1329,10 @@ gpupreagg_rewrite_expr(Agg *agg,
 			dtype = pgstrom_devtype_lookup(type_oid);
 			/* grouping key must be a supported data type */
 			if (!dtype)
+			{
+				elog(INFO, "unavailable type_oid = %u, type_mode = %d", type_oid, type_mod);
 				return false;
+			}
 			/* data type of the grouping key must have comparison function */
 			if (!OidIsValid(dtype->type_cmpfunc) ||
 				!pgstrom_devfunc_lookup(dtype->type_cmpfunc,

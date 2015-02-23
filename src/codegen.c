@@ -31,6 +31,7 @@
 #include "utils/memutils.h"
 #include "utils/pg_locale.h"
 #include "utils/syscache.h"
+#include "utils/typcache.h"
 #include "pg_strom.h"
 
 static MemoryContext	devinfo_memcxt;
@@ -46,32 +47,26 @@ static List	   *devfunc_info_slot[1024];
 static struct {
 	Oid				type_oid;
 	const char	   *type_base;
-	Oid				type_eqfunc;	/* function to check equality */
-	Oid				type_cmpfunc;	/* function to compare two values */
 	int32			type_flags;		/* library to declare this type */
 } devtype_catalog[] = {
 	/* basic datatypes */
-	{ BOOLOID,		"cl_bool",	F_BOOLEQ,	F_BTBOOLCMP,	0 },
-	{ INT2OID,		"cl_short",	F_INT2EQ,	F_BTINT2CMP,	0 },
-	{ INT4OID,		"cl_int",	F_INT4EQ,	F_BTINT4CMP,	0 },
-	{ INT8OID,		"cl_long",	F_INT8EQ,	F_BTINT8CMP,	0 },
-	{ FLOAT4OID,	"cl_float",	F_FLOAT4EQ,	F_BTFLOAT4CMP,	0 },
-	{ FLOAT8OID,	"cl_double",F_FLOAT8EQ,	F_BTFLOAT8CMP,	0 },
+	{ BOOLOID,		"cl_bool",	0 },
+	{ INT2OID,		"cl_short",	0 },
+	{ INT4OID,		"cl_int",	0 },
+	{ INT8OID,		"cl_long",	0 },
+	{ FLOAT4OID,	"cl_float",	0 },
+	{ FLOAT8OID,	"cl_double",0 },
 	/* date and time datatypes */
-	{ DATEOID,		"cl_int",	F_DATE_EQ,	F_DATE_CMP,
-	  DEVFUNC_NEEDS_TIMELIB },
-	{ TIMEOID,		"cl_long",	F_TIME_EQ,	F_DATE_CMP,
-	  DEVFUNC_NEEDS_TIMELIB },
-	{ TIMESTAMPOID,	"cl_long",	F_TIMESTAMP_EQ, F_TIMESTAMP_CMP,
-	  DEVFUNC_NEEDS_TIMELIB },
+	{ DATEOID,		"cl_int",	DEVFUNC_NEEDS_TIMELIB },
+	{ TIMEOID,		"cl_long",	DEVFUNC_NEEDS_TIMELIB },
+	{ TIMESTAMPOID,	"cl_long",	DEVFUNC_NEEDS_TIMELIB },
 	/* variable length datatypes */
-	{ BPCHAROID,	"varlena",	F_BPCHAREQ,	F_BPCHARCMP,
-	  DEVFUNC_NEEDS_TEXTLIB },
-	{ NUMERICOID,	"varlena",	F_NUMERIC_EQ, F_NUMERIC_CMP,
+	{ BPCHAROID,	"varlena",	DEVFUNC_NEEDS_TEXTLIB },
+	{ VARCHAROID,	"varlena",	DEVFUNC_NEEDS_TEXTLIB },
+	{ NUMERICOID,	"varlena",
 	  DEVFUNC_NEEDS_NUMERIC | DEVTYPE_HAS_INTERNAL_FORMAT },
-	{ BYTEAOID,		"varlena",	F_BYTEAEQ,	F_BYTEACMP, 0 },
-	{ TEXTOID,		"varlena",	F_TEXTEQ,	F_BTTEXTCMP,
-	  DEVFUNC_NEEDS_TEXTLIB },
+	{ BYTEAOID,		"varlena",	0 },
+	{ TEXTOID,		"varlena",	DEVFUNC_NEEDS_TEXTLIB },
 };
 
 devtype_info *
@@ -110,27 +105,31 @@ pgstrom_devtype_lookup(Oid type_oid)
 	entry->type_oid = type_oid;
 	if (typeform->typlen < 0)
 		entry->type_flags |= DEVTYPE_IS_VARLENA;
-	if (typeform->typnamespace != PG_CATALOG_NAMESPACE)
-		entry->type_flags |= DEVINFO_IS_NEGATIVE;
-	else
-	{
-		for (i=0; i < lengthof(devtype_catalog); i++)
-		{
-			if (devtype_catalog[i].type_oid != type_oid)
-				continue;
 
-			entry->type_flags |= devtype_catalog[i].type_flags;
-			entry->type_length = typeform->typlen;
-			entry->type_align = typealign_get_width(typeform->typalign);
-			entry->type_name = pstrdup(NameStr(typeform->typname));
-			entry->type_base = pstrdup(devtype_catalog[i].type_base);
-			entry->type_eqfunc = devtype_catalog[i].type_eqfunc; 
-			entry->type_cmpfunc = devtype_catalog[i].type_cmpfunc;
-			break;
-		}
-		if (i == lengthof(devtype_catalog))
-			entry->type_flags |= DEVINFO_IS_NEGATIVE;
+	for (i=0; i < lengthof(devtype_catalog); i++)
+	{
+		TypeCacheEntry *tcache;
+
+		if (devtype_catalog[i].type_oid != type_oid)
+			continue;
+
+		tcache = lookup_type_cache(type_oid,
+								   TYPECACHE_EQ_OPR |
+								   TYPECACHE_CMP_PROC);
+
+		entry->type_flags |= devtype_catalog[i].type_flags;
+		entry->type_length = typeform->typlen;
+		entry->type_align = typealign_get_width(typeform->typalign);
+		entry->type_name = pstrdup(NameStr(typeform->typname));
+		entry->type_base = pstrdup(devtype_catalog[i].type_base);
+
+		entry->type_eqfunc = get_opcode(tcache->eq_opr);
+		entry->type_cmpfunc = tcache->cmp_proc;
+		break;
 	}
+	if (i == lengthof(devtype_catalog))
+		entry->type_flags |= DEVINFO_IS_NEGATIVE;
+
 	devtype_info_slot[hash] = lappend(devtype_info_slot[hash], entry);
 
 	MemoryContextSwitchTo(oldcxt);
