@@ -279,6 +279,10 @@ typedef struct
 	bool			sort_done;		/* if true, now ready to fetch records */
 	cl_int			cpusort_seqno;	/* seqno of cpusort to launch */
 
+	/* random access capability */
+	bool			randomAccess;
+	cl_long			markpos_index;
+
 	/* final result */
 	dsm_segment	   *sorted_result;	/* final index of the sorted result */
 	cl_long			sorted_index;	/* index of the final index on scan */
@@ -884,6 +888,17 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
 	GpuSortInfo	   *gs_info = deform_gpusort_info(cscan);
 	PlanState	   *ps = &node->ss.ps;
+
+	/* Like built-in Sort node doing, we shall provide random access
+	 * capability to the sort output, including backward scan or
+	 * mark/restore. We also prefer to materialize the sort output
+	 * if we might be called on to rewind and replay it many times.
+	 */
+	gss->randomAccess = (eflags & (EXEC_FLAG_REWIND |
+								   EXEC_FLAG_BACKWARD |
+								   EXEC_FLAG_MARK)) != 0;
+	eflags &= ~(EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK);
+	gss->markpos_index = -1;
 
 	/* initialize child exec node */
 	outerPlanState(gss) = ExecInitNode(outerPlan(cscan), estate, eflags);
@@ -2140,6 +2155,29 @@ gpusort_rescan(CustomScanState *node)
 }
 
 static void
+gpusort_mark_pos(CustomScanState *node)
+{
+	GpuSortState   *gss = (GpuSortState *) node;
+
+	if (gss->sort_done)
+	{
+		gss->markpos_index = gss->sorted_index;
+	}
+}
+
+static void
+gpusort_restore_pos(CustomScanState *node)
+{
+	GpuSortState   *gss = (GpuSortState *) node;
+
+	if (!gss->sort_done)
+	{
+		Assert(gss->markpos_index >= 0);
+		gss->sorted_index = gss->markpos_index;
+	}
+}
+
+static void
 gpusort_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	GpuSortState   *gss = (GpuSortState *) node;
@@ -2271,6 +2309,8 @@ pgstrom_init_gpusort(void)
 	gpusort_exec_methods.ExecCustomScan		= gpusort_exec;
 	gpusort_exec_methods.EndCustomScan		= gpusort_end;
 	gpusort_exec_methods.ReScanCustomScan	= gpusort_rescan;
+	gpusort_exec_methods.MarkPosCustomScan	= gpusort_mark_pos;
+	gpusort_exec_methods.RestrPosCustomScan	= gpusort_restore_pos;
 	gpusort_exec_methods.ExplainCustomScan	= gpusort_explain;
 }
 
