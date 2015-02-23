@@ -51,6 +51,13 @@ static CustomExecMethods		gpupreagg_exec_methods;
 static bool						enable_gpupreagg;
 static bool						debug_force_gpupreagg;
 
+typedef enum
+{
+	AGGCALC_LOCAL_REDUCTION,
+	AGGCALC_GLOBAL_REDUCTION,
+	AGGCALC_NOGROUP_REDUCTION
+} AggCalcMode_t;
+
 typedef struct
 {
 	int				numCols;		/* number of grouping columns */
@@ -186,6 +193,7 @@ typedef struct
 	const char	   *kern_source;
 	Datum			dprog_key;
 	kern_parambuf  *kparams;
+	bool			needs_grouping;
 	bool			local_reduction;
 	bool			has_numeric;
 	bool			has_varlena;
@@ -1725,7 +1733,7 @@ aggcalc_method_of_typeoid(Oid type_oid)
 
 static char *
 gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
-						  bool is_global_aggcalc, codegen_context *context)
+						  AggCalcMode_t mode, codegen_context *context)
 {
 	Oid				namespace_oid = get_namespace_oid("pgstrom", false);
 	StringInfoData	body;
@@ -1734,8 +1742,8 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	ListCell	   *cell;
 
 	initStringInfo(&body);
-	if (!is_global_aggcalc)
-	{
+	switch(mode) {
+	case AGGCALC_LOCAL_REDUCTION:
 		appendStringInfo(
 			&body,
 			"static void\n"
@@ -1746,9 +1754,8 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			"{\n");
 		aggcalc_class = "LOCAL";
         aggcalc_args = "errcode,accum,newval";
-	}
-	else
-	{
+		break;
+	case AGGCALC_GLOBAL_REDUCTION:
 		appendStringInfo(
 			&body,
 			"static void\n"
@@ -1776,6 +1783,22 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			"\n");
 		aggcalc_class = "GLOBAL";
 		aggcalc_args = "errcode,accum_isnull,accum_value,new_isnull,new_value";
+		break;
+	case AGGCALC_NOGROUP_REDUCTION:
+		appendStringInfo(
+			&body,
+			"static void\n"
+			"gpupreagg_nogroup_calc(__private cl_int *errcode,\n"
+			"                       cl_int attnum,\n"
+			"                       __local pagg_datum *accum,\n"
+			"                       __local pagg_datum *newval)\n"
+			"{\n");
+		aggcalc_class = "NOGROUP";
+        aggcalc_args = "errcode,accum,newval";
+		break;
+	default:
+		elog(ERROR, "Invalid GpuPreAgg calc mode (%u)", mode);
+		break;
 	}
 
 	appendStringInfo(
@@ -2491,6 +2514,7 @@ gpupreagg_codegen(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	const char	   *fn_keycomp;
 	const char	   *fn_local_calc;
 	const char	   *fn_global_calc;
+	const char	   *fn_nogroup_calc;
 	const char	   *fn_projection;
 
 	/*
@@ -2508,9 +2532,17 @@ gpupreagg_codegen(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	/* generate a key comparison function */
 	fn_keycomp = gpupreagg_codegen_keycomp(cscan, gpa_info, context);
 	/* generate a gpupreagg_local_calc function */
-	fn_local_calc = gpupreagg_codegen_aggcalc(cscan, gpa_info, false, context);
+	fn_local_calc = gpupreagg_codegen_aggcalc(cscan, gpa_info,
+											  AGGCALC_LOCAL_REDUCTION,
+											  context);
 	/* generate a gpupreagg_global_calc function */
-	fn_global_calc = gpupreagg_codegen_aggcalc(cscan, gpa_info, true, context);
+	fn_global_calc = gpupreagg_codegen_aggcalc(cscan, gpa_info,
+											   AGGCALC_GLOBAL_REDUCTION,
+											   context);
+	/* generate a gpupreagg_global_calc function */
+	fn_nogroup_calc = gpupreagg_codegen_aggcalc(cscan, gpa_info,
+												AGGCALC_NOGROUP_REDUCTION,
+												context);
 	/* generate an initial data loading function */
 	fn_projection = gpupreagg_codegen_projection(cscan, gpa_info, context);
 
@@ -2523,6 +2555,7 @@ gpupreagg_codegen(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 					 "%s\n"		/* gpupreagg_keycomp() */
 					 "%s\n"		/* gpupreagg_local_calc() */
 					 "%s\n"		/* gpupreagg_global_calc() */
+					 "%s\n"		/* gpupreagg_nogroup_calc() */
 					 "%s\n",	/* gpupreagg_projection() */
 					 pgstrom_codegen_func_declarations(context),
 					 fn_qualeval,
@@ -2530,6 +2563,7 @@ gpupreagg_codegen(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 					 fn_keycomp,
 					 fn_local_calc,
 					 fn_global_calc,
+					 fn_nogroup_calc,
 					 fn_projection);
 	return str.data;
 }
@@ -2887,6 +2921,7 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	/*
 	 * init misc stuff
 	 */
+	gpas->needs_grouping = (gpa_info->numCols > 0 ? true : false);
 	gpas->local_reduction = true;	/* tentative */
 	gpas->has_numeric = gpa_info->has_numeric;
 	gpas->has_varlena = gpa_info->has_varlena;
@@ -2964,6 +2999,7 @@ pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
     gpupreagg->msg.pfm.enabled = gpas->pfm.enabled;
 	/* other fields also */
 	gpupreagg->dprog_key = pgstrom_retain_devprog_key(gpas->dprog_key);
+	gpupreagg->needs_grouping = gpas->needs_grouping;
 	gpupreagg->local_reduction = gpas->local_reduction;
 	gpupreagg->has_varlena = gpas->has_varlena;
 	gpupreagg->num_groups = gpas->num_groups;
@@ -4163,6 +4199,119 @@ clserv_launch_global_reduction(clstate_gpupreagg *clgpa, cl_uint nitems)
 }
 
 static cl_int
+clserv_launch_nogroup_reduction(clstate_gpupreagg *clgpa,
+								cl_uint i_steps, cl_uint nitems)
+{
+	size_t		gwork_sz;
+	size_t		lwork_sz;
+	cl_int		rc;
+
+	/*
+	 * __kernel void
+	 * gpupreagg_nogroup_reduction(__global kern_gpupreagg *kgpreagg,
+	 *                             __global kern_data_store *kds_src,
+	 *                             __global kern_data_store *kds_dst,
+	 *                             __global kern_data_store *ktoast,
+	 *                             KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+	 */
+	clgpa->kern_lagg = clCreateKernel(clgpa->program,
+									  "gpupreagg_nogroup_reduction",
+									  &rc);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	if (!clserv_compute_workgroup_size(&gwork_sz,
+									   &lwork_sz,
+									   clgpa->kern_lagg,
+									   clgpa->dindex,
+									   true,
+									   nitems,
+									   Max(sizeof(pagg_datum),
+										   sizeof(cl_int))))
+	{
+		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
+		return StromError_OpenCLInternal;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_lagg,
+						0,		/* kern_gpupreagg *kgpreagg */
+						sizeof(cl_mem),
+						&clgpa->m_gpreagg);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_lagg,
+						1,		/* kern_data_store *kds_src */
+						sizeof(cl_mem),
+						i_steps % 2 == 0
+						? &clgpa->m_kds_src
+						: &clgpa->m_kds_dst);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_lagg,
+						2,		/* kern_data_store *kds_dst */
+						sizeof(cl_mem),
+						i_steps % 2 == 0
+						? &clgpa->m_kds_dst
+						: &clgpa->m_kds_src);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_lagg,
+						3,		/* kern_data_store *ktoast */
+						sizeof(cl_mem),
+						&clgpa->m_kds_in);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clSetKernelArg(clgpa->kern_lagg,
+						4,		/* KERN_DYNAMIC_LOCAL_WORKMEM_ARG */
+						sizeof(pagg_datum) * lwork_sz,
+						NULL);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
+		return rc;
+	}
+
+	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
+								clgpa->kern_lagg,
+								1,
+								NULL,
+								&gwork_sz,
+								&lwork_sz,
+								1,
+								&clgpa->events[clgpa->ev_index - 1],
+								&clgpa->events[clgpa->ev_index]);
+	if (rc != CL_SUCCESS)
+	{
+		clserv_log("failed on clEnqueueNDRangeKernel: %s",
+				   opencl_strerror(rc));
+		return rc;
+	}
+	clgpa->ev_kern_lagg = clgpa->ev_index++;
+	clgpa->gpreagg->msg.pfm.num_kern_lagg++;
+
+	return CL_SUCCESS;
+}
+
+static cl_int
 clserv_launch_fixup_varlena(clstate_gpupreagg *clgpa, cl_uint nitems)
 {
 	size_t		gwork_sz;
@@ -4494,25 +4643,47 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		goto error;
 
 	/*
-	 * kick, gpupreagg_local_reduction, or gpupreagg_init_global_hashslot
-	 * instead if no local reduction is expected.
+	 * 
+	 *
+	 *
+	 *
 	 */
-	if (gpreagg->local_reduction)
+	if (gpreagg->needs_grouping)
 	{
-		rc = clserv_launch_local_reduction(clgpa, nitems);
+		/*
+		 * Kick gpupreagg_local_reduction or gpupreagg_init_global_hashslot
+		 * according to the necessity. Local reduction will not work when
+		 * (expected) number of groups is enough large, so we skip this
+		 * step expect for hash initialization prior to global reduction.
+		 */
+		if (gpreagg->local_reduction)
+		{
+			rc = clserv_launch_local_reduction(clgpa, nitems);
+			if (rc != CL_SUCCESS)
+				goto error;
+		}
+		else
+		{
+			rc = clserv_launch_init_hashslot(clgpa, nitems);
+			if (rc != CL_SUCCESS)
+				goto error;
+		}
+		/* finally, kick gpupreagg_global_reduction */
+		rc = clserv_launch_global_reduction(clgpa, nitems);
 		if (rc != CL_SUCCESS)
 			goto error;
 	}
 	else
 	{
-		rc = clserv_launch_init_hashslot(clgpa, nitems);
-		if (rc != CL_SUCCESS)
-			goto error;
+		/* 1st path: data reduction (kds_src => kds_dst) */
+		clserv_launch_nogroup_reduction(clgpa, 0, nitems);
+
+		/* 2nd path: data reduction (kds_dst => kds_src) */
+		clserv_launch_nogroup_reduction(clgpa, 1, nitems);
+
+		/* 3rd path: data reduction (kds_src => kds_dst) */
+		clserv_launch_nogroup_reduction(clgpa, 2, nitems);
 	}
-	/* finally, kick gpupreagg_global_reduction */
-	rc = clserv_launch_global_reduction(clgpa, nitems);
-	if (rc != CL_SUCCESS)
-		goto error;
 
 	/* finally, fixup varlena datum if any */
 	if (gpreagg->has_varlena)
