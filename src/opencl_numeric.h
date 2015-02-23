@@ -18,10 +18,6 @@
 #ifndef OPENCL_NUMERIC_H
 #define OPENCL_NUMERIC_H
 
-
-#define CL_CHAR_BIT			8
-
-
 /* PostgreSQL numeric data type */
 #if 0
 #define PG_DEC_DIGITS		1
@@ -171,7 +167,7 @@ pg_numeric_from_varlena(__private int *errcode,
 {
 	pg_numeric_t		result;
 	union NumericChoice	numData;
-	__global cl_char   *pSrc;
+	__global char	   *pSrc;
 	cl_int				len;
 
 	if (vl_val == NULL)
@@ -444,7 +440,7 @@ numeric_to_integer(__private int *errcode, pg_numeric_t arg, cl_int size)
 
 	// Overflow check
 	{
-		int      nbits       = size * CL_CHAR_BIT;
+		int      nbits       = size * BITS_PER_BYTE;
 		cl_ulong max_val     = (1UL << (nbits - 1)) - 1;
 		cl_ulong abs_min_val = (1UL << (nbits - 1));
 		if((sign == 0 && max_val < mant) ||
@@ -596,7 +592,7 @@ integer_to_numeric(__private int *errcode, pg_int8_t arg, cl_int size)
 		expo ++;
 	}
 
-	if(PG_NUMERIC_MANTISSA_BITS < size * CL_CHAR_BIT - 1) {
+	if(PG_NUMERIC_MANTISSA_BITS < size * BITS_PER_BYTE - 1) {
 		// Error check
 		if (mant & ~PG_NUMERIC_MANTISSA_MASK) {
 			v.isnull = true;
