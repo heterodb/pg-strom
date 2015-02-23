@@ -938,6 +938,10 @@ gpupreagg_nogroup_reduction(__global kern_gpupreagg *kgpreagg,
 		}
 	}
 
+	if(gid == 0) {
+		kds_dst->nitems = (nitems + lsz - 1) / lsz;
+	}
+
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
 }
@@ -1387,12 +1391,18 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 #define MIN(x,y)			(((x)<(y)) ? (x) : (y))
 #define ADD(x,y)			((x) + (y))
 
-#define NUMERIC_MAX(x,y)	\
-	pgfn_numeric_max(errcode, *(pg_numeric_t *)&(x), *(pg_numeric_t *)&(y))
+#define NUMERIC_MAX(x,y)							\
+	pgfn_numeric_max(errcode,						\
+					 *(__local pg_numeric_t *)&(x),	\
+					 *(__local pg_numeric_t *)&(y))
 #define NUMERIC_MIN(x,y)	\
-	pgfn_numeric_min(errcode, *(pg_numeric_t *)&(x), *(pg_numeric_t *)&(y))
+	pgfn_numeric_min(errcode,						\
+					 *(__local pg_numeric_t *)&(x), \
+					 *(__local pg_numeric_t *)&(y))
 #define NUMERIC_ADD(x,y)	\
-	pgfn_numeric_add(errcode, *(pg_numeric_t *)&(x), *(pg_numeric_t *)&(y))
+	pgfn_numeric_add(errcode,						\
+					 *(__local pg_numeric_t *)&(x), \
+					 *(__local pg_numeric_t *)&(y))
 
 #define AGGCALC_NOGROUP_TEMPLATE(TYPE,errcode,							\
 								 accum_isnull,accum_val,				\
