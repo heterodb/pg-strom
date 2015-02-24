@@ -774,6 +774,7 @@ extern void show_scan_qual(List *qual, const char *qlabel,
 						   ExplainState *es);
 extern void show_instrumentation_count(const char *qlabel, int which,
 									   PlanState *planstate, ExplainState *es);
+extern void show_custom_flags(CustomScanState *css, ExplainState *es);
 extern void show_device_kernel(Datum dprog_key, ExplainState *es);
 extern void pgstrom_perfmon_add(pgstrom_perfmon *pfm_sum,
 								pgstrom_perfmon *pfm_item);

@@ -263,15 +263,20 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	/* check bulk-load capability */
 	if (host_quals == NIL)
 	{
+		bool		support_bulkload = true;
+
 		foreach (cell, baserel->reltargetlist)
 		{
 			Expr	   *expr = lfirst(cell);
 
 			if (!IsA(expr, Var) &&
 				!pgstrom_codegen_available_expression(expr))
+			{
+				support_bulkload = false;
 				break;
+			}
 		}
-		if (!cell)
+		if (support_bulkload)
 			pathnode->flags |= CUSTOMPATH_SUPPORT_BULKLOAD;
 	}
 	add_path(baserel, &pathnode->path);
@@ -1258,6 +1263,7 @@ gpuscan_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		show_instrumentation_count("Rows Removed by Device Fileter",
 								   2, &gss->css.ss.ps, es);
 	}
+	show_custom_flags(&gss->css, es);
 	show_device_kernel(gss->dprog_key, es);
 
 	if (es->analyze && gss->pfm.enabled)

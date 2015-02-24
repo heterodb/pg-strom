@@ -2251,6 +2251,7 @@ gpusort_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 			ExplainPropertyText("Sort Space Type", sort_storage, es);
 		}
 	}
+	show_custom_flags(&gss->css, es);
 	show_device_kernel(gss->dprog_key, es);
 	if (es->analyze && gss->pfm.enabled)
 		pgstrom_perfmon_explain(&gss->pfm, es);

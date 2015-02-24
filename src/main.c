@@ -398,6 +398,28 @@ show_instrumentation_count(const char *qlabel, int which,
 }
 
 void
+show_custom_flags(CustomScanState *css, ExplainState *es)
+{
+	StringInfoData	str;
+
+	if (!es->verbose)
+		return;
+
+	initStringInfo(&str);
+	if ((css->flags & CUSTOMPATH_PREFERE_ROW_FORMAT) != 0)
+		appendStringInfo(&str, "likely-heap-tuple");
+	else
+		appendStringInfo(&str, "likely-tuple-slot");
+
+	if ((css->flags & CUSTOMPATH_SUPPORT_BULKLOAD) != 0)
+		appendStringInfo(&str, ", bulkload-supported");
+
+	ExplainPropertyText("Features", str.data, es);
+
+	pfree(str.data);
+}
+
+void
 show_device_kernel(Datum dprog_key, ExplainState *es)
 {
 	StringInfoData	str;
