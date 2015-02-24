@@ -3488,9 +3488,18 @@ gpupreagg_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 	GpuPreAggInfo  *gpa_info
 		= deform_gpupreagg_info((CustomScan *) node->ss.ps.plan);
+	const char	   *policy;
 
 	ExplainPropertyText("Bulkload",
 						gpas->outer_bulkload ? "On" : "Off", es);
+	if (!gpas->needs_grouping)
+		policy = "NoGroup";
+	else if (gpas->local_reduction)
+		policy = "Local + Global";
+	else
+		policy = "Global";
+	ExplainPropertyText("Reduction", policy, es);
+
 	show_device_kernel(gpas->dprog_key, es);
 	if (gpa_info->outer_quals != NIL)
 	{

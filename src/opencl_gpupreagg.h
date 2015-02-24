@@ -942,7 +942,6 @@ gpupreagg_nogroup_reduction(__global kern_gpupreagg *kgpreagg,
 	{
 		krowmap->rindex[dest_index] = dest_index;
 	}
-	errcode = 0;
 
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
