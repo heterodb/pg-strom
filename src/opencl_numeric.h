@@ -1208,35 +1208,35 @@ pgfn_numeric_cmp(__private cl_int *errcode,
 pg_numeric_t
 pgfn_numeric_max(__private cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
 {
-	pg_bool_t v = pgfn_numric_ge(errcode, arg1, arg2);
-	if (v.isnull) {
-		pg_numeric_t result;
-		result.isnull = true;
-		result.value  = 0;
-		return NULL;
+	pg_bool_t v = pgfn_numeric_ge(errcode, arg1, arg2);
+
+	if (v.isnull)
+	{
+		pg_numeric_t	temp;
+
+		temp.isnull = true;
+		temp.value = 0;
+
+		return temp;
 	}
-	if (v.value)
-		return arg1;
-
-	return arg2;
+	return (v.value ? arg1 : arg2);
 }
-
-
 
 pg_numeric_t
 pgfn_numeric_min(__private cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
 {
-	pg_bool_t v = pgfn_numric_ge(errcode, arg1, arg2);
-	if (v.isnull) {
-		pg_numeric_t result;
-		result.isnull = true;
-		result.value  = 0;
-		return NULL;
-	}
-	if (v.value)
-		return arg2;
+	pg_bool_t v = pgfn_numeric_ge(errcode, arg1, arg2);
 
-	return arg1;
+	if (v.isnull)
+	{
+		pg_numeric_t	temp;
+
+		temp.isnull = true;
+		temp.value = 0;
+
+		return temp;
+	}
+	return (v.value ? arg2 : arg1);
 }
 
 #endif /* OPENCL_DEVICE_CODE */

@@ -1391,16 +1391,16 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 #define MIN(x,y)			(((x)<(y)) ? (x) : (y))
 #define ADD(x,y)			((x) + (y))
 
-#define NUMERIC_MAX(x,y)							\
-	pgfn_numeric_max(errcode,						\
+#define NUMERIC_MAX(errcode,x,y)					\
+	pgfn_numeric_max((errcode),						\
 					 *(__local pg_numeric_t *)&(x),	\
 					 *(__local pg_numeric_t *)&(y))
-#define NUMERIC_MIN(x,y)	\
-	pgfn_numeric_min(errcode,						\
+#define NUMERIC_MIN(errcode,x,y)					\
+	pgfn_numeric_min((errcode),						\
 					 *(__local pg_numeric_t *)&(x), \
 					 *(__local pg_numeric_t *)&(y))
-#define NUMERIC_ADD(x,y)	\
-	pgfn_numeric_add(errcode,						\
+#define NUMERIC_ADD(errcode,x,y)					\
+	pgfn_numeric_add((errcode),						\
 					 *(__local pg_numeric_t *)&(x), \
 					 *(__local pg_numeric_t *)&(y))
 

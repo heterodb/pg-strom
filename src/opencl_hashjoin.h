@@ -470,6 +470,8 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 	cl_uint				nrels = kresults->nrels;
 	cl_bool				heap_hasnull = false;
 	cl_uint				t_hoff;
+	cl_uint				t_len;
+	cl_uint				data_len;
 	cl_uint				required;
 	cl_uint				offset;
 	cl_uint				total_len;
@@ -514,11 +516,12 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 	if (get_global_id(0) < kresults->nitems)
 	{
 		cl_uint		i, ncols = kds_dest->ncols;
-		cl_uint		datalen = 0;
 
 		/* t_len and ctid */
-		required += offsetof(kern_tupitem, htup);
+		required = offsetof(kern_tupitem, htup);
 
+		/* estimation of data length */
+		data_len = 0;
 		for (i=0; i < ncols; i++)
 		{
 			kern_colmeta	cmeta = kds_dest->colmeta[i];
@@ -552,21 +555,21 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 			{
 				/* att_align_datum */
 				if (cmeta.attlen > 0 || !VARATT_IS_1B(datum))
-					datalen = TYPEALIGN(cmeta.attalign, datalen);
+					data_len = TYPEALIGN(cmeta.attalign, data_len);
 				/* att_addlength_datum */
 				if (cmeta.attlen > 0)
-					datalen += cmeta.attlen;
+					data_len += cmeta.attlen;
 				else
-					datalen += VARSIZE_ANY(datum);
+					data_len += VARSIZE_ANY(datum);
 			}
 		}
-		required += offsetof(HeapTupleHeaderData, t_bits);
+		t_hoff = offsetof(HeapTupleHeaderData, t_bits);
 		if (heap_hasnull)
-			required += bitmaplen(ncols);
+			t_hoff += bitmaplen(ncols);
 		if (kds->tdhasoid)
-			required += sizeof(cl_uint);
-		t_hoff = required = MAXALIGN(required);
-		required += MAXALIGN(datalen);
+			t_hoff += sizeof(cl_uint);
+		t_hoff = MAXALIGN(t_hoff);
+		required += t_hoff + MAXALIGN(data_len);
 	}
 	else
 		required = 0;
@@ -615,14 +618,18 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 		/* build a heap-tuple */
 		titem = (__global kern_tupitem *)
 			((__global char *)kds_dest + htup_offset);
+		titem->t_len = t_hoff + data_len;
+		titem->t_self.ip_blkid.bi_hi = 0x1234;	/* InvalidBlockNumber */
+		titem->t_self.ip_blkid.bi_lo = 0x5678;
+		titem->t_self.ip_posid = 0x9876;		/* InvalidOffsetNumber */
 		htup = &titem->htup;
 
 		SET_VARSIZE(&htup->t_choice.t_datum, required);
 		htup->t_choice.t_datum.datum_typmod = kds_dest->tdtypmod;
 		htup->t_choice.t_datum.datum_typeid = kds_dest->tdtypeid;
-		htup->t_ctid.ip_blkid.bi_hi = 0;
-		htup->t_ctid.ip_blkid.bi_lo = 0;
-		htup->t_ctid.ip_posid = 0;
+		htup->t_ctid.ip_blkid.bi_hi = 0x2345;
+		htup->t_ctid.ip_blkid.bi_lo = 0x6789;
+		htup->t_ctid.ip_posid = 0x1369;
 		htup->t_infomask2 = (ncols & HEAP_NATTS_MASK);
 		htup->t_infomask = (heap_hasnull ? HEAP_HASNULL : 0);
 		htup->t_hoff = t_hoff;
