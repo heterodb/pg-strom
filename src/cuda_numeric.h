@@ -1183,5 +1183,39 @@ pgfn_numeric_cmp(cl_int *errcode,
 	return result;
 }
 
+__device__ pg_numeric_t
+pgfn_numeric_max(cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
+{
+	pg_bool_t v = pgfn_numeric_ge(errcode, arg1, arg2);
+
+	if (v.isnull)
+	{
+		pg_numeric_t	temp;
+
+		temp.isnull = true;
+		temp.value = 0;
+
+		return temp;
+	}
+	return (v.value ? arg1 : arg2);
+}
+
+__device__ pg_numeric_t
+pgfn_numeric_min(cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
+{
+	pg_bool_t v = pgfn_numeric_ge(errcode, arg1, arg2);
+
+	if (v.isnull)
+	{
+		pg_numeric_t	temp;
+
+		temp.isnull = true;
+		temp.value = 0;
+
+		return temp;
+	}
+	return (v.value ? arg2 : arg1);
+}
+
 #endif /* CUDA_DEVICE_CODE */
 #endif /* CUDA_NUMERIC_H */

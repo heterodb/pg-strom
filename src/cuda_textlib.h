@@ -283,5 +283,13 @@ pgfn_text_cmp(__private cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
 	return result;
 }
 
+/*
+ * varchar(*) type definition
+ */
+#ifndef PG_VARCHAR_TYPE_DEFINED
+#define PG_VARCHAR_TYPE_DEFINED
+STROMCL_VARLENA_TYPE_TEMPLATE(varchar)
+#endif
+
 #endif	/* CUDA_DEVICE_CODE */
 #endif	/* CUDA_TEXTLIB_H */
