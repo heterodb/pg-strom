@@ -4648,12 +4648,12 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		goto error;
 
 	/*
-	 * 
-	 *
-	 *
-	 *
+	 * NOTE: At this moment, nogroup reduction still does not working.
+	 * So, we temporary comment out the code path, to walk on the usual
+	 * atomic based reduction.
 	 */
-	if (gpreagg->needs_grouping)
+	//if (gpreagg->needs_grouping)
+	if (true)
 	{
 		/*
 		 * Kick gpupreagg_local_reduction or gpupreagg_init_global_hashslot
@@ -4681,13 +4681,19 @@ clserv_process_gpupreagg(pgstrom_message *message)
 	else
 	{
 		/* 1st path: data reduction (kds_src => kds_dst) */
-		clserv_launch_nogroup_reduction(clgpa, 0, nitems);
+		rc = clserv_launch_nogroup_reduction(clgpa, 0, nitems);
+		if (rc != CL_SUCCESS)
+			goto error;
 
 		/* 2nd path: data reduction (kds_dst => kds_src) */
-		clserv_launch_nogroup_reduction(clgpa, 1, nitems);
+		rc = clserv_launch_nogroup_reduction(clgpa, 1, nitems);
+		if (rc != CL_SUCCESS)
+			goto error;
 
 		/* 3rd path: data reduction (kds_src => kds_dst) */
-		clserv_launch_nogroup_reduction(clgpa, 2, nitems);
+		rc = clserv_launch_nogroup_reduction(clgpa, 2, nitems);
+		if (rc != CL_SUCCESS)
+			goto error;
 	}
 
 	/* finally, fixup varlena datum if any */

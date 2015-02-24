@@ -880,6 +880,7 @@ gpupreagg_nogroup_reduction(__global kern_gpupreagg *kgpreagg,
 	__global varlena       *kparam_0   = kparam_get_value(kparams, 0);
 	__global cl_char       *gpagg_atts = (__global cl_char *)VARDATA(kparam_0);
 	__local  pagg_datum    *l_datum    = (__local pagg_datum *)LOCAL_WORKMEM;
+	__global kern_row_map  *krowmap    = KERN_GPUPREAGG_KROWMAP(kgpreagg);
 	cl_uint	nitems 		= kds_src->nitems;
 	cl_uint	nattrs		= kds_src->ncols;
 	cl_int	errcode		= StromError_Success;
@@ -888,59 +889,60 @@ gpupreagg_nogroup_reduction(__global kern_gpupreagg *kgpreagg,
 	size_t	lsz			= get_local_size(0);
 	size_t	dest_index	= gid / lsz;
 
+	int	attnum;
+
 
 	/* loop for each columns */
-	if (gid < nitems)
+	for (attnum = 0; attnum < nattrs; attnum++)
 	{
-		int attnum;
+		size_t	distance;
 
-		for (attnum = 0; attnum < nattrs; attnum++)
+		/* if not GPUPREAGG_FIELD_IS_AGGFUNC, do nothing */
+		if (gpagg_atts[attnum] != GPUPREAGG_FIELD_IS_AGGFUNC)
 		{
-			size_t	distance;
+			if (gid < nitems  &&  lid == 0)
+				gpupreagg_data_move(&errcode, kds_src, kds_dst, ktoast,
+									attnum,	gid, dest_index);
+			continue;
+		}
 
-			/* if not GPUPREAGG_FIELD_IS_AGGFUNC, do nothing */
-			if (gpagg_atts[attnum] != GPUPREAGG_FIELD_IS_AGGFUNC)
-			{
-				if (lid == 0)
-				{
-					gpupreagg_data_move(&errcode, kds_src, kds_dst, ktoast,
-										attnum,	gid, dest_index);
-				}
-				continue;
-			}
-
-			/* load this value from kds_src onto datum */
+		/* load this value from kds_src onto datum */
+		if (gid < nitems)
 			gpupreagg_data_load(&l_datum[lid], &errcode,
 								kds_src, ktoast, attnum, gid);
-			barrier(CLK_LOCAL_MEM_FENCE);
+		barrier(CLK_LOCAL_MEM_FENCE);
 
-			/* do reduction */
-			for(distance=2; distance<lsz; distance*=2)
-			{
-				if(lid % distance == 0  &&  (lid + distance/2) < nitems)
-				{
-					gpupreagg_nogroup_calc(&errcode,
-										   attnum,
-										   &l_datum[lid],
-										   &l_datum[lid + distance/2]);
-				}
-				barrier(CLK_LOCAL_MEM_FENCE);
-			}
-			barrier(CLK_LOCAL_MEM_FENCE);
-
-			/* store this value to kds_dst from datum */
-			if(lid == 0)
-			{
-				gpupreagg_data_store(&l_datum[lid], &errcode,
-									 kds_dst, ktoast, attnum, dest_index);
-			}
+		/* do reduction */
+		for(distance=2; distance<lsz; distance*=2)
+		{
+			if(lid % distance == 0  &&  (lid + distance/2) < nitems)
+				gpupreagg_nogroup_calc(&errcode,
+									   attnum,
+									   &l_datum[lid],
+									   &l_datum[lid + distance/2]);
 			barrier(CLK_LOCAL_MEM_FENCE);
 		}
+
+		/* store this value to kds_dst from datum */
+		if (gid < nitems  &&  lid == 0)
+			gpupreagg_data_store(&l_datum[lid], &errcode,
+								 kds_dst, ktoast, attnum, dest_index);
+		barrier(CLK_LOCAL_MEM_FENCE);
 	}
 
-	if(gid == 0) {
+	/*
+	 * Fixup kern_rowmap/kds->nitems
+	 */
+	if (gid == 0)
+	{
+		krowmap->nvalids = (nitems + lsz - 1) / lsz;
 		kds_dst->nitems = (nitems + lsz - 1) / lsz;
 	}
+	if (lid == 0)
+	{
+		krowmap->rindex[dest_index] = dest_index;
+	}
+	errcode = 0;
 
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
@@ -1411,11 +1413,12 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 	do {																\
 		if (!(newval_isnull))											\
 		{																\
-			TYPE old = FUNC_CALL;										\
-			if (OVERFLOW(old, (newval_val)))							\
+			TYPE tmp = FUNC_CALL;										\
+			if (OVERFLOW((accum_val), (newval_val)))					\
 			{															\
 				STROM_SET_ERROR(errcode, StromError_CpuReCheck);		\
 			}															\
+			(accum_val)    = tmp;										\
 			(accum_isnull) = false;										\
 		}																\
 	} while (0)

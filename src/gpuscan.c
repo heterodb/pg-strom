@@ -265,10 +265,10 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	{
 		foreach (cell, baserel->reltargetlist)
 		{
-			Node	   *node = lfirst(cell);
+			Expr	   *expr = lfirst(cell);
 
-			if (!IsA(node, Var) &&
-				!pgstrom_codegen_available_expression(node))
+			if (!IsA(expr, Var) &&
+				!pgstrom_codegen_available_expression(expr))
 				break;
 		}
 		if (!cell)
