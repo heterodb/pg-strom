@@ -264,25 +264,6 @@ typedef struct
 	pgstromExecBulkScan_type ExecCustomBulk;
 } PGStromExecMethods;
 
-static inline void *
-BulkExecProcNode(PlanState *node)
-{
-	CHECK_FOR_INTERRUPTS();
-
-	if (node->chgParam != NULL)		/* something changed */
-		ExecReScan(node);			/* let ReScan handle this */
-
-	/* rough check, not sufficient... */
-	if (IsA(node, CustomScanState))
-	{
-		CustomScanState *css = (CustomScanState *) node;
-		PGStromExecMethods *methods = (PGStromExecMethods *) css->methods;
-		Assert(methods->ExecCustomBulk != NULL);
-		return methods->ExecCustomBulk(css);
-	}
-	elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
-}
-
 /*
  * Extra flags of CustomPath/Scan node.
  *
@@ -397,6 +378,10 @@ extern int	pgstrom_open_tempfile(const char *file_suffix,
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
+extern Plan *pgstrom_try_replace_plannode(Plan *child_plan,
+										  List *range_tables,
+										  List **pullup_quals);
+extern void *BulkExecProcNode(PlanState *node);
 extern Datum pgstrom_fixup_kernel_numeric(Datum numeric_datum);
 extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
 									 pgstrom_data_store *pds,
@@ -437,10 +422,10 @@ extern void pgstrom_init_datastore(void);
 /*
  * gpuscan.c
  */
-extern Plan *gpuscan_try_replace_relscan(Plan *plan,
-										 List *range_table,
-										 Bitmapset *attr_refs,
-										 List **p_upper_quals);
+extern Plan *gpuscan_pullup_devquals(Plan *plannode, List **pullup_quals);
+extern Plan *gpuscan_try_replace_seqscan(SeqScan *seqscan,
+										 List *range_tables,
+										 List **pullup_quals);
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern void pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,

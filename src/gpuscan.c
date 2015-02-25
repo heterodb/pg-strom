@@ -189,6 +189,8 @@ cost_gpuscan(CustomPath *pathnode, PlannerInfo *root,
 
 	/* CPU costs */
 	cost_qual_eval(&host_cost, host_quals, root);
+
+	/* Adjustment for param info */
 	if (param_info)
 	{
 		QualCost	param_cost;
@@ -308,16 +310,14 @@ gpuscan_add_scan_path(PlannerInfo *root,
  * loading functionality.
  */
 Plan *
-gpuscan_try_replace_relscan(Plan *plan,
-							List *range_table,
-							Bitmapset *attr_refs,
-							List **p_upper_quals)
+gpuscan_try_replace_seqscan(SeqScan *seqscan,
+							List *range_tables,
+							List **pullup_quals)
 {
 	CustomScan	   *cscan;
 	GpuScanInfo		gs_info;
 	RangeTblEntry  *rte;
 	Relation		rel;
-	Index			scanrelid;
 	ListCell	   *lc;
 	BlockNumber		num_pages;
 	double			num_tuples;
@@ -328,11 +328,8 @@ gpuscan_try_replace_relscan(Plan *plan,
 	if (!enable_gpuscan)
 		return NULL;
 
-	if (!IsA(plan, SeqScan) && !pgstrom_plan_is_gpuscan(plan))
-		return NULL;
-
-	scanrelid = ((Scan *) plan)->scanrelid;
-	rte = rt_fetch(scanrelid, range_table);
+	Assert(IsA(seqscan, SeqScan));
+	rte = rt_fetch(seqscan->scanrelid, range_tables);
 	if (rte->rtekind != RTE_RELATION)
 		return NULL;	/* usually, shouldn't happen */
 	if (rte->relkind != RELKIND_RELATION &&
@@ -341,59 +338,40 @@ gpuscan_try_replace_relscan(Plan *plan,
 		return NULL;	/* usually, shouldn't happen */
 
 	/*
-	 * All the referenced target-entry must be constructable on the
-	 * device side, even if not a simple var reference.
+	 * Target-entry must be a simle varnode or device executable
+	 * expression because it shall be calculated on device-side
+	 * if it takes projection
 	 */
-	foreach (lc, plan->targetlist)
+	foreach (lc, seqscan->plan.targetlist)
 	{
-		TargetEntry *tle = lfirst(lc);
-		int		x = tle->resno - FirstLowInvalidHeapAttributeNumber;
+		TargetEntry	   *tle = lfirst(lc);
 
-		if (bms_is_member(x, attr_refs))
-		{
-			if (!pgstrom_codegen_available_expression(tle->expr))
-				return NULL;
-		}
+		if (!IsA(tle->expr, Var) &&
+			!pgstrom_codegen_available_expression(tle->expr))
+			return NULL;
 	}
 
 	/*
-     * Check whether the plan qualifiers can be executable on device
-     */
-	if (IsA(plan, SeqScan))
-	{
-		if (!pgstrom_codegen_available_expression((Expr *)plan->qual))
-			return NULL;
-		*p_upper_quals = copyObject(plan->qual);
-	}
-	else if (pgstrom_plan_is_gpuscan(plan))
-	{
-		GpuScanInfo	   *temp;
-
-		/* unable run bulk-loading with host qualifiers */
-		if (plan->qual != NIL)
-			return NULL;
-
-		temp = deform_gpuscan_info(plan);
-		if (temp->dev_quals == NIL)
-		{
-			*p_upper_quals = NIL;
-			return plan;	/* available to use bulk-loading as-is */
-		}
-		*p_upper_quals = copyObject(temp->dev_quals);
-	}
-	else
-		elog(ERROR, "Bug? unexpected plan node: %s", nodeToString(plan));
+	 * Check whether the plan qualifiers is executable on device.
+	 * Any host-only qualifier prevents bulk-loading.
+	 */
+	if (!pgstrom_codegen_available_expression((Expr *) seqscan->plan.qual))
+		return NULL;
+	*pullup_quals = copyObject(seqscan->plan.qual);
 
 	/*
-	 * OK, it was SeqScan with all device executable (or no) qualifiers,
-	 * or, GpuScan without host qualifiers.
+	 * OK, SeqScan with all device executable (or no) qualifiers, and
+	 * no projection problems. So, GpuScan with bulk-load will ba a better
+	 * choice than SeqScan.
 	 */
 	cscan = makeNode(CustomScan);
-    cscan->scan.plan.plan_width = plan->plan_width;
-    cscan->scan.plan.targetlist = copyObject(plan->targetlist);
-    cscan->scan.plan.qual = NIL;
-    cscan->scan.scanrelid = scanrelid;
-    cscan->flags = 0;
+	cscan->scan.plan.plan_width = seqscan->plan.plan_width;
+	cscan->scan.plan.targetlist = copyObject(seqscan->plan.targetlist);
+	cscan->scan.plan.qual = NIL;
+	cscan->scan.plan.extParam = bms_copy(seqscan->plan.extParam);
+	cscan->scan.plan.allParam = bms_copy(seqscan->plan.allParam);
+	cscan->scan.scanrelid = seqscan->scanrelid;
+	cscan->flags = CUSTOMPATH_SUPPORT_BULKLOAD;
 	memset(&gs_info, 0, sizeof(GpuScanInfo));
 	form_gpuscan_info(cscan, &gs_info);
 	cscan->methods = &gpuscan_plan_methods;
@@ -412,11 +390,42 @@ gpuscan_try_replace_relscan(Plan *plan,
 	cscan->scan.plan.total_cost = cscan->scan.plan.startup_cost
 		+ spc_seq_page_cost * num_pages;
 	cscan->scan.plan.plan_rows = num_tuples;
-    cscan->scan.plan.plan_width = plan->plan_width;
+    cscan->scan.plan.plan_width = seqscan->plan.plan_width;
 
 	heap_close(rel, NoLock);
 
 	return &cscan->scan.plan;
+}
+
+/*
+ * gpuscan_pullup_devquals - construct an equivalen GpuScan node, but
+ * no device qualifiers which is pulled-up. In case of bulk-loading,
+ * it is more reasonable to run device qualifier on upper node, than
+ * individually.
+ */
+Plan *
+gpuscan_pullup_devquals(Plan *plannode, List **pullup_quals)
+{
+	CustomScan	   *cscan_old = (CustomScan *) plannode;
+	CustomScan	   *cscan_new;
+	GpuScanInfo		*gs_info;
+
+	Assert(pgstrom_plan_is_gpuscan(plannode));
+	gs_info = deform_gpuscan_info(cscan_old);
+
+	/* in case of nothing to be changed */
+	if (gs_info->dev_quals == NIL)
+	{
+		Assert(gs_info->kern_source == NULL);
+		*pullup_quals = NULL;
+		return &cscan_old->scan.plan;
+	}
+	*pullup_quals = copyObject(gs_info->dev_quals);
+	cscan_new = copyObject(cscan_old);
+	memset(gs_info, 0, sizeof(GpuScanInfo));
+	form_gpuscan_info(cscan_new, gs_info);
+
+	return &cscan_new->scan.plan;
 }
 
 /*
@@ -1085,6 +1094,7 @@ static pgstrom_data_store *
 gpuscan_exec_bulk(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *) node;
+<<<<<<< HEAD
 	Relation			rel = node->ss.ss_currentRelation;
 	TupleTableSlot	   *slot = node->ss.ss_ScanTupleSlot;
 	TupleDesc			tupdesc = slot->tts_tupleDescriptor;
@@ -1102,12 +1112,18 @@ gpuscan_exec_bulk(CustomScanState *node)
 	/* must provide our own instrumentation support */
 	if (node->ss.ps.instrument)
 		InstrStartNode(node->ss.ps.instrument);
+=======
+	pgstrom_gpuscan	   *gpuscan;
+	kern_resultbuf	   *kresults;
+	pgstrom_bulkslot   *bulk = NULL;
+>>>>>>> 66562309c0afc393580a884b3c231ab668008fd9
 
 	if (gss->pfm.enabled)
 		gettimeofday(&tv1, NULL);
 
 	while (true)
 	{
+<<<<<<< HEAD
 		pds = pgstrom_create_data_store_row(gss->gts.gcontext,
 											tupdesc,
 											pgstrom_chunk_size(),
@@ -1135,6 +1151,53 @@ gpuscan_exec_bulk(CustomScanState *node)
         InstrStopNode(node->ss.ps.instrument,
 					  !pds ? 0.0 : (double) pds->kds->nitems);
 	return pds;
+=======
+		gpuscan = pgstrom_fetch_gpuscan(gss);
+		if (!gpuscan)
+			return NULL;
+
+		/* update perfmon info */
+		if (gpuscan->msg.pfm.enabled)
+			pgstrom_perfmon_add(&gss->pfm, &gpuscan->msg.pfm);
+
+		/*
+		 * Make a bulk-slot according to the result
+		 */
+		kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
+		bulk = palloc0(offsetof(pgstrom_bulkslot, rindex[kresults->nitems]));
+		bulk->pds = pgstrom_get_data_store(gpuscan->pds);
+		bulk->nvalids = -1;		/* only -1 is valid */
+		pgstrom_track_object(&bulk->pds->sobj, 0);
+
+		/* No longer gpuscan is referenced any more. The associated
+		 * data-store is not actually released because its refcnt is
+		 * already incremented above.
+		 */
+		pgstrom_untrack_object(&gpuscan->msg.sobj);
+		pgstrom_put_message(&gpuscan->msg);
+
+		/*
+		 * If any, it may take host side checks
+		 * - Recheck of device qualifier, if result is nagative
+		 * - Host qualifier checks, if any.
+		 */
+		Assert(kresults->all_visible);
+		Assert(!node->ss.ps.qual);
+
+		if (bulk->pds->kds->nitems > 0)
+			break;
+
+		/*
+		 * If this chunk has no valid items, it does not make sense to
+		 * return this chunk to upper execution node.
+		 */
+		pgstrom_untrack_object(&bulk->pds->sobj);
+        pgstrom_put_data_store(bulk->pds);
+        pfree(bulk);
+		bulk = NULL;
+	}
+	return bulk;
+>>>>>>> 66562309c0afc393580a884b3c231ab668008fd9
 }
 
 static void

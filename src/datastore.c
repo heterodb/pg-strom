@@ -238,6 +238,90 @@ pgstrom_create_kern_parambuf(List *used_params,
 	return kpbuf;
 }
 
+/* ------------------------------------------------------------
+ *
+ * Routines to support bulk-loading between PG-Strom nodes
+ *
+ * ------------------------------------------------------------
+ */
+Plan *
+pgstrom_try_replace_plannode(Plan *plannode, List *range_tables,
+							 List **pullup_quals)
+{
+	if (IsA(plannode, CustomScan))
+	{
+		CustomScan *cscan = (CustomScan *) plannode;
+
+		if ((cscan->flags & CUSTOMPATH_SUPPORT_BULKLOAD) == 0)
+			return NULL;
+		/* GpuScan may want to pull-up device qualifiers */
+		if (pgstrom_plan_is_gpuscan(plannode))
+			return gpuscan_pullup_devquals(plannode, pullup_quals);
+		*pullup_quals = NIL;
+		return plannode;
+	}
+	else if (IsA(plannode, SeqScan))
+	{
+		return gpuscan_try_replace_seqscan((SeqScan *) plannode,
+										   range_tables,
+										   pullup_quals);
+	}
+	return NULL;
+}
+
+/*
+ * BulkExecProcNode
+ *
+ * It runs the bulk-exec method of the supplied plannode.
+ *
+ * TODO: It will take 'chunk_size' argument to specify expected size of
+ * the chunk, and to adjust it.
+ */
+void *
+BulkExecProcNode(PlanState *node)
+{
+	CHECK_FOR_INTERRUPTS();
+
+	if (node->chgParam != NULL)		/* something changed */
+		ExecReScan(node);			/* let ReScan handle this */
+
+	/* rough check, not sufficient... */
+	if (IsA(node, CustomScanState))
+	{
+		CustomScanState	   *css = (CustomScanState *) node;
+		PGStromExecMethods *methods = (PGStromExecMethods *) css->methods;
+		pgstrom_bulkslot   *bulkslot;
+
+		Assert(methods->ExecCustomBulk != NULL);
+
+		/* must provide our own instrumentation support */
+		if (node->instrument)
+			InstrStartNode(node->instrument);
+
+		/* do bulk execution */
+		bulkslot = methods->ExecCustomBulk(css);
+		if (bulkslot && bulkslot->nvalids >= 0)
+			elog(ERROR, "Bug? bulkslot with rowmap is obsoleted manner");
+
+		/* must provide our own instrumentation support */
+		if (node->instrument)
+		{
+			if (!bulkslot)
+				InstrStopNode(node->instrument, 0.0);
+			else
+				InstrStopNode(node->instrument,
+							  (double) bulkslot->pds->kds->nitems);
+		}
+		return bulkslot;
+	}
+	elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
+}
+
+/*
+ * pgstrom_fixup_kernel_numeric
+ *
+ * It fixes up internal numeric representation
+ */
 Datum
 pgstrom_fixup_kernel_numeric(Datum datum)
 {
