@@ -1392,19 +1392,6 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 #define MIN(x,y)			(((x)<(y)) ? (x) : (y))
 #define ADD(x,y)			((x) + (y))
 
-#define NUMERIC_MAX(errcode,x,y)					\
-	pgfn_numeric_max((errcode),						\
-					 *(__local pg_numeric_t *)&(x),	\
-					 *(__local pg_numeric_t *)&(y))
-#define NUMERIC_MIN(errcode,x,y)					\
-	pgfn_numeric_min((errcode),						\
-					 *(__local pg_numeric_t *)&(x), \
-					 *(__local pg_numeric_t *)&(y))
-#define NUMERIC_ADD(errcode,x,y)					\
-	pgfn_numeric_add((errcode),						\
-					 *(__local pg_numeric_t *)&(x), \
-					 *(__local pg_numeric_t *)&(y))
-
 #define AGGCALC_NOGROUP_TEMPLATE(TYPE,errcode,							\
 								 accum_isnull,accum_val,				\
 								 newval_isnull,newval_val,				\
@@ -1452,12 +1439,25 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 							 (accum)->isnull,(accum)->double_val,		\
 							 (newval)->isnull,(newval)->double_val,		\
 							 OVERFLOW,FUNC_CALL)
-#define AGGCALC_NOGROUP_TEMPLATE_NUMERIC(errcode,accum,newval,			\
-										 OVERFLOW,FUNC_CALL)			\
-	AGGCALC_NOGROUP_TEMPLATE(pg_numeric_t,errcode,						\
-							 (accum)->isnull,(accum)->ulong_val,		\
-							 (newval)->isnull,(newval)->ulong_val,		\
-							 OVERFLOW,FUNC_CALL)
+
+#define AGGCALC_NOGROUP_TEMPLATE_NUMERIC(errcode,accum_val,new_val,	\
+										 FUNC_CALL)					\
+	do {															\
+		pg_numeric_t	x, y, z;									\
+																	\
+		if (!(new_val)->isnull)										\
+		{															\
+			x.isnull = false;										\
+			x.value = (accum_val)->ulong_val;						\
+			y.isnull = false;										\
+			y.value = (new_val)->ulong_val;							\
+			z = FUNC_CALL((errcode), x, y);							\
+			if (z.isnull)											\
+				STROM_SET_ERROR(errcode, StromError_CpuReCheck);	\
+			(accum_val)->ulong_val = z.value;						\
+			(accum_val)->isnull = z.isnull;							\
+		}															\
+	} while (0)
 
 /* calculation for no group partial max */
 #define AGGCALC_NOGROUP_PMAX_SHORT(errcode,accum,newval)				\
@@ -1487,10 +1487,7 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 										(newval)->double_val))
 #define AGGCALC_NOGROUP_PMAX_NUMERIC(errcode,accum,newval)				\
 	AGGCALC_NOGROUP_TEMPLATE_NUMERIC(errcode,accum,newval,				\
-									 CHECK_OVERFLOW_NONE,				\
-									 NUMERIC_MAX((errcode),				\
-												 (accum)->ulong_val,	\
-												 (newval)->ulong_val))
+									 pgfn_numeric_max)
 
 /* calculation for no group partial min */
 #define AGGCALC_NOGROUP_PMIN_SHORT(errcode,accum,newval)				\
@@ -1517,10 +1514,7 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 										(newval)->double_val))
 #define AGGCALC_NOGROUP_PMIN_NUMERIC(errcode,accum,newval)				\
 	AGGCALC_NOGROUP_TEMPLATE_NUMERIC(errcode,accum,newval,				\
-									 CHECK_OVERFLOW_NONE,				\
-									 NUMERIC_MIN((errcode),				\
-												 (accum)->ulong_val,	\
-												 (newval)->ulong_val))
+									 pgfn_numeric_min)
 
 /* calculation for no group partial add */
 #define AGGCALC_NOGROUP_PADD_SHORT(errcode,accum,newval)				\
@@ -1547,10 +1541,7 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 										(newval)->double_val))
 #define AGGCALC_NOGROUP_PADD_NUMERIC(errcode,accum,newval)				\
 	AGGCALC_NOGROUP_TEMPLATE_NUMERIC(errcode,accum,newval,				\
-									 CHECK_OVERFLOW_NUMERIC,			\
-									 NUMERIC_ADD((errcode),				\
-												 (accum)->ulong_val,	\
-												 (newval)->ulong_val))
+									 pgfn_numeric_add)
 
 #else
 /* Host side representation of kern_gpupreagg. It can perform as a message
