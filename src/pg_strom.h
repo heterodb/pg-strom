@@ -525,6 +525,8 @@ extern void show_scan_qual(List *qual, const char *qlabel,
 						   ExplainState *es);
 extern void show_instrumentation_count(const char *qlabel, int which,
 									   PlanState *planstate, ExplainState *es);
+extern void pgstrom_explain_custom_flags(CustomScanState *css,
+										 ExplainState *es);
 extern void pgstrom_explain_kernel_source(GpuTaskState *gts,
 										  ExplainState *es);
 extern void pgstrom_accum_perfmon(pgstrom_perfmon *accum,

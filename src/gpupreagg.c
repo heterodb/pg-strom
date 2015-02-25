@@ -3500,6 +3500,7 @@ gpupreagg_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		policy = "Global";
 	ExplainPropertyText("Reduction", policy, es);
 
+	show_custom_flags(&gpas->css, es);
 	show_device_kernel(gpas->dprog_key, es);
 	if (gpa_info->outer_quals != NIL)
 	{

@@ -913,9 +913,9 @@ gpupreagg_nogroup_reduction(__global kern_gpupreagg *kgpreagg,
 		barrier(CLK_LOCAL_MEM_FENCE);
 
 		/* do reduction */
-		for(distance=2; distance<lsz; distance*=2)
+		for (distance = 2; distance <= lsz; distance *= 2)
 		{
-			if(lid % distance == 0  &&  (lid + distance/2) < nitems)
+			if (lid % distance == 0  &&  (lid + distance / 2) < nitems)
 				gpupreagg_nogroup_calc(&errcode,
 									   attnum,
 									   &l_datum[lid],

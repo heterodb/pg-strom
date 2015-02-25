@@ -335,6 +335,28 @@ show_instrumentation_count(const char *qlabel, int which,
 }
 
 void
+pgstrom_explain_custom_flags(CustomScanState *css, ExplainState *es)
+{
+	StringInfoData	str;
+
+	if (!es->verbose)
+		return;
+
+	initStringInfo(&str);
+	if ((css->flags & CUSTOMPATH_PREFERE_ROW_FORMAT) != 0)
+		appendStringInfo(&str, "likely-heap-tuple");
+	else
+		appendStringInfo(&str, "likely-tuple-slot");
+
+	if ((css->flags & CUSTOMPATH_SUPPORT_BULKLOAD) != 0)
+		appendStringInfo(&str, ", bulkload-supported");
+
+	ExplainPropertyText("Features", str.data, es);
+
+	pfree(str.data);
+}
+
+void
 pgstrom_explain_kernel_source(GpuTaskState *gts, ExplainState *es)
 {
 	const char	   *kern_source = gts->kern_source;

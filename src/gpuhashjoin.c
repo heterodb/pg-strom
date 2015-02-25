@@ -780,6 +780,8 @@ try_gpuhashjoin_path(PlannerInfo *root,
 	GpuHashJoinPath	   *gpath;
 	Relids				required_outer;
 	JoinCostWorkspace	workspace;
+	ListCell		   *cell;
+	bool				support_bulkload;
 
 	required_outer = calc_non_nestloop_required_outer(outer_path,
 													  inner_path);
@@ -794,6 +796,30 @@ try_gpuhashjoin_path(PlannerInfo *root,
 	 * PlaceHolderVars that need to be computed at the join.
 	 */
 	required_outer = bms_add_members(required_outer, extra_lateral_rels);
+
+	/*
+	 * Check availability of bulkload in this joinrel. If child
+	 * GpuHashJoin is merginable, both of nodes have to support
+	 * bulkload.
+	 */
+	if (host_clauses != NIL)
+		support_bulkload = false;
+	else
+	{
+		support_bulkload = true;
+
+		foreach (cell, joinrel->reltargetlist)
+		{
+			Expr   *expr = lfirst(cell);
+
+			if (!IsA(expr, Var) &&
+				!pgstrom_codegen_available_expression(expr))
+			{
+				support_bulkload = false;
+				break;
+			}
+		}
+	}
 
 	/*
 	 * creation of gpuhashjoin path, without merging underlying gpuhashjoin.
@@ -811,7 +837,7 @@ try_gpuhashjoin_path(PlannerInfo *root,
 								  bms_copy(required_outer),
 								  &restrict_clauses);
 	gpath->cpath.path.pathkeys = NIL;
-	gpath->cpath.flags = 0;
+	gpath->cpath.flags = (support_bulkload ? CUSTOMPATH_SUPPORT_BULKLOAD : 0);
 	gpath->cpath.methods = &gpuhashjoin_path_methods;
 	gpath->outer_path = outer_path;
 	gpath->num_rels = 1;
@@ -843,6 +869,12 @@ try_gpuhashjoin_path(PlannerInfo *root,
 		GpuHashJoinPath	*outer_ghj = (GpuHashJoinPath *) outer_path;
 		int		num_rels = outer_ghj->num_rels;
 
+		if (support_bulkload)
+		{
+			if ((outer_ghj->cpath.flags & CUSTOMPATH_SUPPORT_BULKLOAD) == 0)
+				support_bulkload = false;
+		}
+
 		Assert(num_rels > 0);
 		gpath = palloc0(offsetof(GpuHashJoinPath, inners[num_rels + 1]));
 		NodeSetTag(gpath, T_CustomPath);
@@ -857,7 +889,8 @@ try_gpuhashjoin_path(PlannerInfo *root,
 									  bms_copy(required_outer),
 									  &restrict_clauses);
 		gpath->cpath.path.pathkeys = NIL;
-		gpath->cpath.flags = 0;
+		gpath->cpath.flags
+			= (support_bulkload ? CUSTOMPATH_SUPPORT_BULKLOAD : 0);
 		gpath->cpath.methods = &gpuhashjoin_path_methods;
 		gpath->num_rels = num_rels + 1;
 		gpath->outer_path = outer_ghj->outer_path;
@@ -1883,15 +1916,11 @@ create_gpuhashjoin_plan(PlannerInfo *root,
 	codegen_context context;
 	int			i;
 
-
-
-
-
 	ghjoin = makeNode(CustomScan);
 	ghjoin->scan.plan.targetlist = tlist;
 	ghjoin->scan.plan.qual = NIL;
 	ghjoin->scan.scanrelid = 0;	/* not related to any relation */
-	ghjoin->flags = 0;
+	ghjoin->flags = best_path->flags;
 	ghjoin->methods = &gpuhashjoin_plan_methods;
 
 	memset(&ghj_info, 0, sizeof(GpuHashJoinInfo));
@@ -2820,7 +2849,6 @@ gpuhashjoin_exec_bulk(CustomScanState *node)
 	{
 		bool		needs_rechecks;
 		cl_uint		nitems;
-		cl_uint		i, j;
 
 		ghjoin = pgstrom_fetch_gpuhashjoin(ghjs, &needs_rechecks,
 										   KDS_FORMAT_ROW_FLAT);
@@ -2847,7 +2875,7 @@ gpuhashjoin_exec_bulk(CustomScanState *node)
 		 * Make a bulk-slot according to the result
 		 */
 		nitems = pds_dest->kds->nitems;
-		bulk = palloc0(offsetof(pgstrom_bulkslot, rindex[nitems]));
+		bulk = palloc0(sizeof(pgstrom_bulkslot));
 		bulk->pds = pgstrom_get_data_store(pds_dest);
 		bulk->nvalids = -1;
 		pgstrom_track_object(&pds_dest->sobj, 0);
@@ -2857,8 +2885,10 @@ gpuhashjoin_exec_bulk(CustomScanState *node)
 		 * incremented above
 		 */
 		pgstrom_untrack_object(&ghjoin->msg.sobj);
-        pgstrom_put_message(&ghjoin->msg);
+		pgstrom_put_message(&ghjoin->msg);
 
+		Assert(!node->ss.ps.qual);
+#if 0
 		/*
 		 * Reduce results if host-only qualifiers
 		 */
@@ -2883,15 +2913,19 @@ gpuhashjoin_exec_bulk(CustomScanState *node)
 
 		if ((bulk->nvalids < 0 ? nitems : bulk->nvalids) > 0)
 			break;
-
+#endif
 		/* If this chunk has no valid items, it does not make sense to
 		 * return upper level this chunk. So, release this data-store
 		 * and tries to fetch next one.
 		 */
-		pgstrom_untrack_object(&bulk->pds->sobj);
-		pgstrom_put_data_store(bulk->pds);
-		pfree(bulk);
-		bulk = NULL;
+		if (nitems == 0)
+		{
+			pgstrom_untrack_object(&bulk->pds->sobj);
+			pgstrom_put_data_store(bulk->pds);
+			pfree(bulk);
+			bulk = NULL;
+		}
+		break;
 	}
 
 	/* must provide our own instrumentation support */
@@ -3158,6 +3192,7 @@ gpuhashjoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	}
 	ExplainPropertyText("Bulkload", ghjs->outer_bulkload ? "On" : "Off", es);
 
+	show_custom_flags(&ghjs->css, es);
 	show_device_kernel(ghjs->dprog_key, es);
 
 	if (es->analyze && ghjs->pfm.enabled)

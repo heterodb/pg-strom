@@ -2020,8 +2020,7 @@ gpusort_exec(CustomScanState *node)
 		PG_END_TRY();
 		set_latch_on_sigusr1 = save_set_latch_on_sigusr1;
 	}
-
-	Assert(gss->sorted_result != NULL);
+	Assert(gss->num_chunks == 0 || gss->sorted_result != NULL);
 	/* Does outer relation has any rows to read? */
 	if (!gss->sorted_result)
 		return NULL;
@@ -2205,8 +2204,11 @@ gpusort_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	if (sort_keys != NIL)
 		ExplainPropertyList("Sort Key", sort_keys, es);
 
-	/* shows resource comsumption, if executed */
-	if (es->analyze && gss->sort_done)
+	/*
+	 * shows resource consumption, if executed and have more than zero
+	 * rows.
+	 */
+	if (es->analyze && gss->sort_done && gss->sorted_result)
 	{
 		const char *sort_method;
 		const char *sort_storage;
@@ -2251,6 +2253,7 @@ gpusort_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 			ExplainPropertyText("Sort Space Type", sort_storage, es);
 		}
 	}
+	show_custom_flags(&gss->css, es);
 	show_device_kernel(gss->dprog_key, es);
 	if (es->analyze && gss->pfm.enabled)
 		pgstrom_perfmon_explain(&gss->pfm, es);
