@@ -4658,12 +4658,15 @@ clserv_process_gpupreagg(pgstrom_message *message)
 		goto error;
 
 	/*
-	 * NOTE: At this moment, nogroup reduction still does not working.
-	 * So, we temporary comment out the code path, to walk on the usual
-	 * atomic based reduction.
+	 * We need to pay attention on the case for aggregation without GROUP
+	 * BY clause, because atomic based implementation will make heavy
+	 * memory conflict on a particular destination address.
+	 * In this case, normal reduction operation is the best to operate.
+	 *
+	 * Elsewhere, we take usual atomic-based grouping. It is the best way
+	 * to group rows into multiple aggregations, rather than sorting.
 	 */
-	//if (gpreagg->needs_grouping)
-	if (true)
+	if (gpreagg->needs_grouping)
 	{
 		/*
 		 * Kick gpupreagg_local_reduction or gpupreagg_init_global_hashslot
