@@ -386,25 +386,6 @@ typedef struct
 	void   *(*ExecCustomBulk)(CustomScanState *node);
 } PGStromExecMethods;
 
-static inline void *
-BulkExecProcNode(PlanState *node)
-{
-	CHECK_FOR_INTERRUPTS();
-
-	if (node->chgParam != NULL)		/* something changed */
-		ExecReScan(node);			/* let ReScan handle this */
-
-	/* rough check, not sufficient... */
-	if (IsA(node, CustomScanState))
-	{
-		CustomScanState *css = (CustomScanState *) node;
-		PGStromExecMethods *methods = (PGStromExecMethods *) css->methods;
-		Assert(methods->ExecCustomBulk != NULL);
-		return methods->ExecCustomBulk(css);
-	}
-	elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
-}
-
 /*
  * Extra flags of CustomPath/Scan node.
  *
@@ -538,6 +519,10 @@ extern Size pgstrom_chunk_size(void);
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
+extern Plan *pgstrom_try_replace_plannode(Plan *child_plan,
+										  List *range_tables,
+										  List **pullup_quals);
+extern void *BulkExecProcNode(PlanState *node);
 extern Datum pgstrom_fixup_kernel_numeric(Datum numeric_datum);
 extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
 									 pgstrom_data_store *pds,
@@ -769,9 +754,6 @@ extern double pgstrom_gpu_operator_cost;
 extern double pgstrom_gpu_tuple_cost;
 extern void _PG_init(void);
 extern const char *pgstrom_strerror(cl_int errcode);
-extern Plan *pgstrom_try_replace_plannode(Plan *child_plan,
-										  List *range_tables,
-										  List **pullup_quals);
 extern void show_scan_qual(List *qual, const char *qlabel,
 						   PlanState *planstate, List *ancestors,
 						   ExplainState *es);

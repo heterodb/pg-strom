@@ -2642,15 +2642,11 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		 */
 		sort_node = NULL;
 		outer_node = outerPlan(agg);
-		alter_node = gpuscan_try_replace_relscan(outer_node,
-												 pstmt->rtable,
-												 attr_refs,
-												 &outer_quals);
+		alter_node = pgstrom_try_replace_plannode(outer_node,
+												  pstmt->rtable,
+												  &outer_quals);
 		if (alter_node)
-		{
 			outer_node = alter_node;
-			outer_bulkload = true;
-		}
 		new_agg_strategy = agg->aggstrategy;
 	}
 	else if (IsA(outerPlan(agg), Sort))
@@ -2663,15 +2659,11 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		 */
 		sort_node = (Sort *)outerPlan(agg);
 		outer_node = outerPlan(sort_node);
-		alter_node = gpuscan_try_replace_relscan(outer_node,
-												 pstmt->rtable,
-												 attr_refs,
-												 &outer_quals);
+		alter_node = pgstrom_try_replace_plannode(outer_node,
+												  pstmt->rtable,
+												  &outer_quals);
 		if (alter_node)
-		{
 			outer_node = alter_node;
-			outer_bulkload = true;
-		}
 		new_agg_strategy = agg->aggstrategy;
 	}
 	else
@@ -2687,15 +2679,11 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		 */
 		sort_node = NULL;
 		outer_node = outerPlan(agg);
-		alter_node = gpuscan_try_replace_relscan(outer_node,
-												 pstmt->rtable,
-												 attr_refs,
-												 &outer_quals);
+		alter_node = pgstrom_try_replace_plannode(outer_node,
+												  pstmt->rtable,
+												  &outer_quals);
 		if (alter_node)
-		{
 			outer_node = alter_node;
-			outer_bulkload = true;
-		}
 		new_agg_strategy = AGG_HASHED;
 
 		/*
@@ -2714,6 +2702,15 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 						 hash_agg_entry_size(agg_clause_costs.numAggs));
 		if (hashentrysize * agg->plan.plan_rows > work_mem * 1024L)
 			return;
+	}
+
+	/* check availability of outer bulkload */
+	if (IsA(outer_node, CustomScan))
+	{
+		int		custom_flags = ((CustomScan *) outer_node)->flags;
+
+		if ((custom_flags & CUSTOMPATH_SUPPORT_BULKLOAD) != 0)
+			outer_bulkload = true;
 	}
 
 	/*

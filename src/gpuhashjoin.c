@@ -344,6 +344,32 @@ typedef struct {
 	List		   *hash_keytype;
 } MultiHashState;
 
+/*
+ * BulkExecMultiHashNode
+ *
+ * Unlike BulkExecProcNode, it assumes the plannode returns MultiHashNode
+ * object, without any sanity checks.
+ */
+static MultiHashNode *
+BulkExecMultiHashNode(PlanState *plannode)
+{
+	CHECK_FOR_INTERRUPTS();
+
+	if (plannode->chgParam != NULL)		/* something changed */
+		ExecReScan(plannode);			/* let ReScan handle this */
+
+	/* rough check, not sufficient... */
+	if (IsA(plannode, CustomScanState))
+	{
+		CustomScanState	   *css = (CustomScanState *) plannode;
+		PGStromExecMethods *methods = (PGStromExecMethods *) css->methods;
+		Assert(methods->ExecCustomBulk != NULL);
+		return methods->ExecCustomBulk(css);
+	}
+	elog(ERROR, "unrecognized node type: %d", (int) nodeTag(plannode));
+}
+
+
 /* declaration of static functions */
 static void clserv_process_gpuhashjoin(pgstrom_message *message);
 
@@ -2030,41 +2056,27 @@ create_gpuhashjoin_plan(PlannerInfo *root,
 	if (IsA(outer_plan, SeqScan) || IsA(outer_plan, CustomScan))
 	{
 		Query	   *parse = root->parse;
-		Index		outer_scanrelid = ((Scan *) outer_plan)->scanrelid;
-		Bitmapset  *outer_attrefs = NULL;
 		List	   *outer_quals = NULL;
 		Plan	   *alter_plan;
 
-		pull_varattnos((Node *)ghjoin->scan.plan.targetlist,
-					   outer_scanrelid,
-					   &outer_attrefs);
-		pull_varattnos((Node *)ghj_info.hash_clauses,
-					   outer_scanrelid,
-					   &outer_attrefs);
-		pull_varattnos((Node *)ghj_info.qual_clauses,
-					   outer_scanrelid,
-					   &outer_attrefs);
-		pull_varattnos((Node *)ghj_info.host_clauses,
-					   outer_scanrelid,
-					   &outer_attrefs);
-		alter_plan = gpuscan_try_replace_relscan(outer_plan,
-												 parse->rtable,
-												 outer_attrefs,
-												 &outer_quals);
+		alter_plan = pgstrom_try_replace_plannode(outer_plan,
+												  parse->rtable,
+												  &outer_quals);
 		if (alter_plan)
 		{
 			ghj_info.outer_quals = build_flatten_qualifier(outer_quals);
-			ghj_info.outer_bulkload = true;
-			outerPlan(ghjoin) = alter_plan;
+			outer_plan = alter_plan;
 		}
-		else
-			outerPlan(ghjoin) = outer_plan;
-
-		bms_free(outer_attrefs);
 	}
-	else
-		outerPlan(ghjoin) = outer_plan;
+	/* check bulkload availability */
+	if (IsA(outer_plan, CustomScan))
+	{
+		int		custom_flags = ((CustomScan *) outer_plan)->flags;
 
+		if ((custom_flags & CUSTOMPATH_SUPPORT_BULKLOAD) != 0)
+			ghj_info.outer_bulkload = true;
+	}
+	outerPlan(ghjoin) = outer_plan;
 	gpath->outer_plan = outer_plan;	/* for convenience below */
 
 	/*
@@ -2492,7 +2504,7 @@ retry:
 		MultiHashNode  *mhnode;
 
 		/* load an inner hash-table */
-		mhnode = (MultiHashNode *) BulkExecProcNode(inner_ps);
+		mhnode = BulkExecMultiHashNode(inner_ps);
 		if (!mhnode)
 		{
 			if (ghjs->pfm.enabled)
@@ -2841,10 +2853,6 @@ gpuhashjoin_exec_bulk(CustomScanState *node)
 	pgstrom_data_store	   *pds_dest;
 	pgstrom_bulkslot	   *bulk = NULL;
 
-	/* must provide our own instrumentation support */
-	if (node->ss.ps.instrument)
-		InstrStartNode(node->ss.ps.instrument);
-
 	while (true)
 	{
 		bool		needs_rechecks;
@@ -2887,57 +2895,20 @@ gpuhashjoin_exec_bulk(CustomScanState *node)
 		pgstrom_untrack_object(&ghjoin->msg.sobj);
 		pgstrom_put_message(&ghjoin->msg);
 
+		/* We never have host-only qualifiers */
 		Assert(!node->ss.ps.qual);
-#if 0
-		/*
-		 * Reduce results if host-only qualifiers
-		 */
-		if (node->ss.ps.qual)
-		{
-			ExprContext	   *econtext = ghjs->css.ss.ps.ps_ExprContext;
-			TupleTableSlot *slot = ghjs->css.ss.ss_ScanTupleSlot;
-			HeapTupleData	tuple;
 
-			for (i=0, j=0; i < nitems; i++)
-			{
-				if (!pgstrom_fetch_data_store(slot, bulk->pds, i, &tuple))
-					elog(ERROR, "Bug? unable to fetch a result slot");
-				econtext->ecxt_scantuple = slot;
-
-				if (!ghjs->css.ss.ps.qual ||
-					ExecQual(ghjs->css.ss.ps.qual, econtext, false))
-					bulk->rindex[j++] = i;
-			}
-			bulk->nvalids = j;
-		}
-
-		if ((bulk->nvalids < 0 ? nitems : bulk->nvalids) > 0)
+		if (nitems > 0)
 			break;
-#endif
+
 		/* If this chunk has no valid items, it does not make sense to
 		 * return upper level this chunk. So, release this data-store
 		 * and tries to fetch next one.
 		 */
-		if (nitems == 0)
-		{
-			pgstrom_untrack_object(&bulk->pds->sobj);
-			pgstrom_put_data_store(bulk->pds);
-			pfree(bulk);
-			bulk = NULL;
-		}
-		break;
-	}
-
-	/* must provide our own instrumentation support */
-    if (node->ss.ps.instrument)
-	{
-		if (!bulk)
-			InstrStopNode(node->ss.ps.instrument, 0.0);
-		else
-			InstrStopNode(node->ss.ps.instrument,
-						  bulk->nvalids < 0 ?
-						  (double) bulk->pds->kds->nitems :
-						  (double) bulk->nvalids);
+		pgstrom_untrack_object(&bulk->pds->sobj);
+		pgstrom_put_data_store(bulk->pds);
+		pfree(bulk);
+		bulk = NULL;
 	}
 	return bulk;
 }
@@ -3586,13 +3557,13 @@ multihash_exec_bulk(CustomScanState *node)
 	inner_ps = innerPlanState(mhs);
 	if (inner_ps)
 	{
-		mhnode = (MultiHashNode *) BulkExecProcNode(inner_ps);
+		mhnode = BulkExecMultiHashNode(inner_ps);
 		if (!mhnode)
 		{
 			if (mhs->outer_done)
 				goto out;
 			ExecReScan(inner_ps);
-			mhnode = (MultiHashNode *) BulkExecProcNode(inner_ps);
+			mhnode = BulkExecMultiHashNode(inner_ps);
 			if (!mhnode)
 				goto out;
 			scan_forward = true;

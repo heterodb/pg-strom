@@ -1017,27 +1017,15 @@ static void *
 gpuscan_exec_bulk(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *) node;
-	List			   *host_qual = node->ss.ps.qual;
 	pgstrom_gpuscan	   *gpuscan;
 	kern_resultbuf	   *kresults;
-	pgstrom_bulkslot   *bulk;
-	cl_uint				i, j, nitems;
-	cl_int			   *rindex;
-	HeapTupleData		tuple;
-
-	/* must provide our own instrumentation support */
-	if (node->ss.ps.instrument)
-		InstrStartNode(node->ss.ps.instrument);
+	pgstrom_bulkslot   *bulk = NULL;
 
 	while (true)
 	{
 		gpuscan = pgstrom_fetch_gpuscan(gss);
 		if (!gpuscan)
-		{
-			if (node->ss.ps.instrument)
-				InstrStopNode(node->ss.ps.instrument, (double) 0.0);
 			return NULL;
-		}
 
 		/* update perfmon info */
 		if (gpuscan->msg.pfm.enabled)
@@ -1049,7 +1037,7 @@ gpuscan_exec_bulk(CustomScanState *node)
 		kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
 		bulk = palloc0(offsetof(pgstrom_bulkslot, rindex[kresults->nitems]));
 		bulk->pds = pgstrom_get_data_store(gpuscan->pds);
-		bulk->nvalids = 0;	/* to be set later */
+		bulk->nvalids = -1;		/* only -1 is valid */
 		pgstrom_track_object(&bulk->pds->sobj, 0);
 
 		/* No longer gpuscan is referenced any more. The associated
@@ -1064,83 +1052,21 @@ gpuscan_exec_bulk(CustomScanState *node)
 		 * - Recheck of device qualifier, if result is nagative
 		 * - Host qualifier checks, if any.
 		 */
-		if (kresults->all_visible)
-		{
-			if (!host_qual)
-			{
-				bulk->nvalids = -1;	/* all the rows are valid */
-				break;
-			}
-			nitems = bulk->pds->kds->nitems;
-			rindex = NULL;
-			Assert(nitems <= kresults->nitems);
-		}
-		else
-		{
-			nitems = kresults->nitems;
-			rindex = kresults->results;
-		}
+		Assert(kresults->all_visible);
+		Assert(!node->ss.ps.qual);
 
-		for (i=0, j=0; i < nitems; i++)
-		{
-			cl_uint		row_index = (!rindex ? i + 1 : rindex[i]);
-			bool		do_recheck = false;
-
-			Assert(row_index != 0);
-			if (row_index > 0)
-				row_index--;
-			else
-			{
-				row_index = -row_index - 1;
-				do_recheck = true;
-			}
-
-			if (host_qual || do_recheck)
-			{
-				ExprContext	   *econtext = gss->css.ss.ps.ps_ExprContext;
-				TupleTableSlot *slot = gss->css.ss.ss_ScanTupleSlot;
-
-				if (!pgstrom_fetch_data_store(slot,
-											  bulk->pds,
-											  row_index,
-											  &tuple))
-					elog(ERROR, "Bug? invalid row-index was in the result");
-				econtext->ecxt_scantuple = slot;
-
-				/* Recheck of device qualifier, if needed */
-				if (do_recheck)
-				{
-					Assert(gss->dev_quals != NULL);
-					if (!ExecQual(gss->dev_quals, econtext, false))
-						continue;
-				}
-				/* Check of host qualifier, if needed */
-				if (host_qual)
-				{
-					if (!ExecQual(host_qual, econtext, false))
-						continue;
-				}
-			}
-			bulk->rindex[j++] = row_index;
-		}
-		bulk->nvalids = j;
-
-		if (bulk->nvalids > 0)
+		if (bulk->pds->kds->nitems > 0)
 			break;
 
-		/* If this chunk has no valid items, it does not make sense to
-		 * return upper level this chunk.
+		/*
+		 * If this chunk has no valid items, it does not make sense to
+		 * return this chunk to upper execution node.
 		 */
 		pgstrom_untrack_object(&bulk->pds->sobj);
-		pgstrom_put_data_store(bulk->pds);
-		pfree(bulk);
+        pgstrom_put_data_store(bulk->pds);
+        pfree(bulk);
+		bulk = NULL;
 	}
-	/* must provide our own instrumentation support */
-	if (node->ss.ps.instrument)
-		InstrStopNode(node->ss.ps.instrument,
-					  bulk->nvalids < 0 ?
-					  (double) bulk->pds->kds->nitems :
-					  (double) bulk->nvalids);
 	return bulk;
 }
 
