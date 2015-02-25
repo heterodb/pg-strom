@@ -627,10 +627,10 @@ extern void pgstrom_init_restrack(void);
 /*
  * gpuscan.c
  */
-extern Plan *gpuscan_try_replace_relscan(Plan *plan,
-										 List *range_table,
-										 Bitmapset *attr_refs,
-										 List **p_upper_quals);
+extern Plan *gpuscan_pullup_devquals(Plan *plannode, List **pullup_quals);
+extern Plan *gpuscan_try_replace_seqscan(SeqScan *seqscan,
+										 List *range_tables,
+										 List **pullup_quals);
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern void pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,
@@ -769,6 +769,9 @@ extern double pgstrom_gpu_operator_cost;
 extern double pgstrom_gpu_tuple_cost;
 extern void _PG_init(void);
 extern const char *pgstrom_strerror(cl_int errcode);
+extern Plan *pgstrom_try_replace_plannode(Plan *child_plan,
+										  List *range_tables,
+										  List **pullup_quals);
 extern void show_scan_qual(List *qual, const char *qlabel,
 						   PlanState *planstate, List *ancestors,
 						   ExplainState *es);

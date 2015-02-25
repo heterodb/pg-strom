@@ -332,6 +332,42 @@ pgstrom_strerror(cl_int errcode)
 
 /* ------------------------------------------------------------
  *
+ * Routines to support bulk-loading between PG-Strom nodes
+ *
+ * ------------------------------------------------------------
+ */
+Plan *
+pgstrom_try_replace_plannode(Plan *plannode, List *range_tables,
+							 List **pullup_quals)
+{
+	if (IsA(plannode, CustomScan))
+	{
+		CustomScan *cscan = (CustomScan *) plannode;
+
+		if ((cscan->flags & CUSTOMPATH_SUPPORT_BULKLOAD) == 0)
+			return NULL;
+		/* GpuScan may want to pull-up device qualifiers */
+		if (pgstrom_plan_is_gpuscan(plannode))
+			return gpuscan_pullup_devquals(plannode, pullup_quals);
+		*pullup_quals = NIL;
+		return plannode;
+	}
+	else if (IsA(plannode, SeqScan))
+	{
+		return gpuscan_try_replace_seqscan((SeqScan *) plannode,
+										   range_tables,
+										   pullup_quals);
+	}
+	return NULL;
+}
+
+
+
+
+
+
+/* ------------------------------------------------------------
+ *
  * Routines copied from core PostgreSQL implementation
  *
  * ------------------------------------------------------------
