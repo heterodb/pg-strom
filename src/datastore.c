@@ -277,7 +277,7 @@ pgstrom_try_replace_plannode(Plan *plannode, List *range_tables,
  * TODO: It will take 'chunk_size' argument to specify expected size of
  * the chunk, and to adjust it.
  */
-void *
+pgstrom_data_store *
 BulkExecProcNode(PlanState *node)
 {
 	CHECK_FOR_INTERRUPTS();
@@ -290,7 +290,7 @@ BulkExecProcNode(PlanState *node)
 	{
 		CustomScanState	   *css = (CustomScanState *) node;
 		PGStromExecMethods *methods = (PGStromExecMethods *) css->methods;
-		pgstrom_bulkslot   *bulkslot;
+		pgstrom_data_store *pds;
 
 		Assert(methods->ExecCustomBulk != NULL);
 
@@ -299,20 +299,14 @@ BulkExecProcNode(PlanState *node)
 			InstrStartNode(node->instrument);
 
 		/* do bulk execution */
-		bulkslot = methods->ExecCustomBulk(css);
-		if (bulkslot && bulkslot->nvalids >= 0)
-			elog(ERROR, "Bug? bulkslot with rowmap is obsoleted manner");
+		pds = methods->ExecCustomBulk(css);
 
 		/* must provide our own instrumentation support */
 		if (node->instrument)
-		{
-			if (!bulkslot)
-				InstrStopNode(node->instrument, 0.0);
-			else
-				InstrStopNode(node->instrument,
-							  (double) bulkslot->pds->kds->nitems);
-		}
-		return bulkslot;
+			InstrStopNode(node->instrument,
+						  !pds ? 0.0 : (double)pds->kds->nitems);
+		Assert(!pds || pds->kds->nitems > 0);
+		return pds;
 	}
 	elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
 }

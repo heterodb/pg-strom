@@ -250,7 +250,7 @@ typedef struct pgstrom_data_store
 	struct pgstrom_data_store *ktoast;
 } pgstrom_data_store;
 
-typedef pgstrom_data_store *(*pgstromExecBulkScan_type)(CustomScanState *node);
+typedef void *(*pgstromExecBulkScan_type)(CustomScanState *node);
 
 /* --------------------------------------------------------------------
  *
@@ -381,7 +381,7 @@ pgstrom_create_kern_parambuf(List *used_params,
 extern Plan *pgstrom_try_replace_plannode(Plan *child_plan,
 										  List *range_tables,
 										  List **pullup_quals);
-extern void *BulkExecProcNode(PlanState *node);
+extern pgstrom_data_store *BulkExecProcNode(PlanState *node);
 extern Datum pgstrom_fixup_kernel_numeric(Datum numeric_datum);
 extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
 									 pgstrom_data_store *pds,

@@ -411,7 +411,7 @@ gpuscan_pullup_devquals(Plan *plannode, List **pullup_quals)
 	GpuScanInfo		*gs_info;
 
 	Assert(pgstrom_plan_is_gpuscan(plannode));
-	gs_info = deform_gpuscan_info(cscan_old);
+	gs_info = deform_gpuscan_info(&cscan_old->scan.plan);
 
 	/* in case of nothing to be changed */
 	if (gs_info->dev_quals == NIL)
@@ -1090,40 +1090,22 @@ gpuscan_exec(CustomScanState *node)
 					(ExecScanRecheckMtd) gpuscan_recheck);
 }
 
-static pgstrom_data_store *
+static void *
 gpuscan_exec_bulk(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *) node;
-<<<<<<< HEAD
 	Relation			rel = node->ss.ss_currentRelation;
 	TupleTableSlot	   *slot = node->ss.ss_ScanTupleSlot;
 	TupleDesc			tupdesc = slot->tts_tupleDescriptor;
 	Snapshot			snapshot = node->ss.ps.state->es_snapshot;
-	pgstrom_data_store *pds;
+	pgstrom_data_store *pds = NULL;
 	struct timeval		tv1, tv2;
-
-	/* note: bulkload shall not be chosen with qualifier */
-	Assert(!gss->css.ss.ps.qual && !gss->dev_quals);
-
-	/* no more blocks to read */
-	if (gss->curr_blknum > gss->last_blknum)
-		return NULL;
-
-	/* must provide our own instrumentation support */
-	if (node->ss.ps.instrument)
-		InstrStartNode(node->ss.ps.instrument);
-=======
-	pgstrom_gpuscan	   *gpuscan;
-	kern_resultbuf	   *kresults;
-	pgstrom_bulkslot   *bulk = NULL;
->>>>>>> 66562309c0afc393580a884b3c231ab668008fd9
 
 	if (gss->pfm.enabled)
 		gettimeofday(&tv1, NULL);
 
-	while (true)
+	while (gss->curr_blknum < gss->last_blknum)
 	{
-<<<<<<< HEAD
 		pds = pgstrom_create_data_store_row(gss->gts.gcontext,
 											tupdesc,
 											pgstrom_chunk_size(),
@@ -1146,58 +1128,7 @@ gpuscan_exec_bulk(CustomScanState *node)
 		gettimeofday(&tv2, NULL);
 		gss->pfm.time_outer_load += timeval_diff(&tv1, &tv2);
 	}
-
-	if (node->ss.ps.instrument)
-        InstrStopNode(node->ss.ps.instrument,
-					  !pds ? 0.0 : (double) pds->kds->nitems);
 	return pds;
-=======
-		gpuscan = pgstrom_fetch_gpuscan(gss);
-		if (!gpuscan)
-			return NULL;
-
-		/* update perfmon info */
-		if (gpuscan->msg.pfm.enabled)
-			pgstrom_perfmon_add(&gss->pfm, &gpuscan->msg.pfm);
-
-		/*
-		 * Make a bulk-slot according to the result
-		 */
-		kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
-		bulk = palloc0(offsetof(pgstrom_bulkslot, rindex[kresults->nitems]));
-		bulk->pds = pgstrom_get_data_store(gpuscan->pds);
-		bulk->nvalids = -1;		/* only -1 is valid */
-		pgstrom_track_object(&bulk->pds->sobj, 0);
-
-		/* No longer gpuscan is referenced any more. The associated
-		 * data-store is not actually released because its refcnt is
-		 * already incremented above.
-		 */
-		pgstrom_untrack_object(&gpuscan->msg.sobj);
-		pgstrom_put_message(&gpuscan->msg);
-
-		/*
-		 * If any, it may take host side checks
-		 * - Recheck of device qualifier, if result is nagative
-		 * - Host qualifier checks, if any.
-		 */
-		Assert(kresults->all_visible);
-		Assert(!node->ss.ps.qual);
-
-		if (bulk->pds->kds->nitems > 0)
-			break;
-
-		/*
-		 * If this chunk has no valid items, it does not make sense to
-		 * return this chunk to upper execution node.
-		 */
-		pgstrom_untrack_object(&bulk->pds->sobj);
-        pgstrom_put_data_store(bulk->pds);
-        pfree(bulk);
-		bulk = NULL;
-	}
-	return bulk;
->>>>>>> 66562309c0afc393580a884b3c231ab668008fd9
 }
 
 static void
