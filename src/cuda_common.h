@@ -24,17 +24,22 @@
  * something related to OpenCL, but what we intend at this moment is
  * "CUDA Language".
  */
-typedef char			cl_bool;
-typedef char			cl_char;
-typedef unsigned char	cl_uchar;
-typedef short			cl_short;
-typedef unsigned short	cl_ushort;
-typedef int				cl_int;
-typedef unsigned int	cl_uint;
-typedef long			cl_long;
-typedef unsigned long	cl_ulong;
-typedef float			cl_float;
-typedef double			cl_double;
+typedef char				cl_bool;
+typedef char				cl_char;
+typedef unsigned char		cl_uchar;
+typedef short				cl_short;
+typedef unsigned short		cl_ushort;
+typedef int					cl_int;
+typedef unsigned int		cl_uint;
+#ifdef CUDA_DEVICE_CODE
+typedef long long			cl_long;
+typedef unsigned long long	cl_ulong;
+#else
+typedef long				cl_long;
+typedef unsigned long		cl_ulong;
+#endif
+typedef float				cl_float;
+typedef double				cl_double;
 
 /*
  * OpenCL intermediator always adds -DOPENCL_DEVICE_CODE on kernel build,
@@ -223,59 +228,57 @@ typedef struct {
  *
  * It stores row- and column-oriented values in the kernel space.
  *
- * +---------------------------------------------------+
- * | length                                            |
- * +---------------------------------------------------+
- * | ncols                                             |
- * +---------------------------------------------------+
- * | nitems                                            |
- * +---------------------------------------------------+
- * | nrooms                                            |
- * +---------------------------------------------------+
- * | format                                            |
- * +---------------------------------------------------+
- * | colmeta[0]                                        | aligned to
- * | colmeta[1]                                        | STROMALIGN()
- * |   :                                               |    |
- * | colmeta[M-1]                                      |    V
- * +----------------+-----------------+----------------+-------
- * | <row-format>   | <row-flat-form> |<tupslot-format>|
- * +----------------+-----------------+----------------+
- * | blkitems[0]    | rowitems[0]     | values/isnull  |
- * | blkitems[1]    | rowitems[1]     | pair of the    |
- * |    :           | rowitems[2]     | 1st row        |
- * | blkitems[N-1]  |    :            | +--------------+
- * +----------------+ rowitems[N-2]   | values[0]      |
- * | rowitems[0]    | rowitems[N-1]   |   :            |
- * | rowitems[1]    +-----------------+ values[M-1]    |
- * | rowitems[2]    |                 | +--------------+
- * |    :           +-----------------+ | isnull[0]    |
- * | rowitems[K-1]  | HeapTupleData   | |  :           |
- * +----------------+  tuple[N-1]     | | isnull[M-1]  |
- * | alignment to ..|  <contents>     +-+--------------+
- * | BLCKSZ.........+-----------------+ values/isnull  |
- * +----------------+       :         | pair of the    |
- * | blocks[0]      |       :         | 2nd row        |
- * | PageHeaderData | Row-flat form   | +--------------+
- * |      :         | consumes buffer | | values[0]    |
- * | pd_linep[]     |                 | |  :           |
- * |      :         |                 | | values[M-1]  |
- * +----------------+       ^         | +--------------+
- * | blocks[1]      |       :         | | isnull[0]    |
- * | PageHeaderData |       :         | |   :          |
- * |      :         |       :         | | isnull[M-1]  |
- * | pd_linep[]     |       :         +-+--------------+
- * |      :         |       :         |     :          |
- * +----------------+       :         +----------------+
- * |      :         +-----------------+ values/isnull  |
- * |      :         | HeapTupleData   | pair of the    |
- * +----------------+  tuple[1]       | Nth row        |
- * | blocks[N-1]    |  <contents>     | +--------------+
- * | PageHeaderData +-----------------+ | values[0]    |
- * |      :         | HeapTupleData   | |   :          |
- * | pd_linep[]     |  tuple[0]       | | values[M-1]  |
- * |      :         |  <contents>     | |   :          |
- * +----------------+-----------------+-+--------------+
+ * +--------------------------------+
+ * | hostptr                        |
+ * +--------------------------------+
+ * | length                         |
+ * +--------------------------------+
+ * | ncols                          |
+ * +--------------------------------+
+ * | nitems                         |
+ * +--------------------------------+
+ * | nrooms                         |
+ * +--------------------------------+
+ * | format                         |
+ * +--------------------------------+
+ * | colmeta[0]                     | aligned to
+ * | colmeta[1]                     | STROMALIGN()
+ * |   :                            |    |
+ * | colmeta[M-1]                   |    V
+ * +----------------+---------------+---------
+ * |  <row-format>  | <slot-format> |
+ * +----------------+---------------+
+ * | tup_offset[0]  | values/isnull |
+ * | tup_offset[1]  | pair of the   |
+ * |    :           | 1st row       |
+ * | tup_offset[N-1]| +-------------+
+ * +----------------+ | values[0]   |
+ * |    :           | |    :        |
+ * |    :           | | values[N-1] |
+ * +----------------+ +-------------+
+ * | htup_item[N-1] | | isnull[0]   |
+ * | +--------------+ |    :        |
+ * | | t_len        | | isnull[N-1] |
+ * | +--------------+-+-------------+
+ * | | t_self       | values/isnull |
+ * | +--------------+ pair of the   |
+ * | | heap_tuple   | 2nd row       |
+ * | |   :          | +-------------+
+ * | |   :          | | values[0]   |
+ * +-+--------------+ |    :        |
+ * |     :          | | values[N-1] |
+ * |     :          | +-------------+
+ * +----------------+ | isnull[0]   |
+ * | htup_item[0]   | |    :        |
+ * | +--------------+ | isnull[N-1] |
+ * | | t_len        +-+-------------+
+ * | +--------------+       :       |
+ * | | t_self       |       :       |
+ * | +--------------+       :       |
+ * | | heap_tuple   |       :       |
+ * | |   :          |       :       |
+ * | |   :          |       :       |
+ * +-+--------------+---------------+
  */
 typedef struct {
 	/* true, if column is held by value. Elsewhere, a reference */

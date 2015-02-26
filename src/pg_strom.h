@@ -315,6 +315,7 @@ extern void pgstrom_init_gputask(GpuTaskState *gts, GpuTask *task,
 								 bool (*cb_process)(GpuTask *task),
 								 void (*cb_release)(GpuTask *task));
 extern void pgstrom_launch_pending_tasks(GpuTaskState *gts);
+extern bool pgstrom_waitfor_ready_tasks(GpuTaskState *gts);
 extern void pgstrom_compute_workgroup_size(size_t *p_grid_size,
 										   size_t *p_block_size,
 										   CUfunction function,

@@ -20,6 +20,9 @@
 #include "common/pg_crc.h"
 #include "funcapi.h"
 #include "lib/ilist.h"
+#include "storage/latch.h"
+#include "storage/proc.h"
+#include "storage/procsignal.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "utils/resowner.h"
@@ -547,12 +550,61 @@ pgstrom_launch_pending_tasks(GpuTaskState *gts)
 	SpinLockRelease(&gts->lock);
 }
 
+bool
+pgstrom_waitfor_ready_tasks(GpuTaskState *gts)
+{
+	bool	save_set_latch_on_sigusr1 = set_latch_on_sigusr1;
+	bool	wait_latch = false;
+	bool	short_timeout = false;
+	int		rc;
 
+	PG_TRY();
+	{
+		set_latch_on_sigusr1 = true;
 
+		if (!gts->cuda_modules)
+		{
+			if (!pgstrom_load_cuda_program(gts))
+				wait_latch = true;
+		}
 
+		if (!wait_latch)
+		{
+			SpinLockAcquire(&gts->lock);
+			if (dlist_is_empty(&gts->completed_tasks))
+				wait_latch = true;
+			/*
+			 * NOTE: We suggest shorter timeout if task is pending
+			 * due to out of resources, because it may be able to
+			 * be launched once any concurrent task is completed.
+			 */
+			if (dlist_is_empty(&gts->pending_tasks))
+				short_timeout = true;
+			SpinLockRelease(&gts->lock);
+		}
 
+		if (wait_latch)
+		{
+			rc = WaitLatch(&MyProc->procLatch,
+						   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+						   !short_timeout ? 5000 : 200);
+			ResetLatch(&MyProc->procLatch);
+			if (rc & WL_POSTMASTER_DEATH)
+				elog(ERROR, "Emergency bail out because of Postmaster crash");
+			/* flush pending tasks first */
+			pgstrom_launch_pending_tasks(gts);
+		}
+	}
+	PG_CATCH();
+	{
+		set_latch_on_sigusr1 = save_set_latch_on_sigusr1;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	set_latch_on_sigusr1 = save_set_latch_on_sigusr1;
 
-
+	return wait_latch;
+}
 
 static void
 gpucontext_cleanup_callback(ResourceReleasePhase phase,

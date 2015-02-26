@@ -947,8 +947,6 @@ pgstrom_fetch_gpuscan(GpuScanState *gss)
 {
 	pgstrom_gpuscan *gpuscan;
 	dlist_node	   *dnode;
-	bool			save_set_latch_on_sigusr1;
-	int				rc;
 
 	/*
 	 * In case when no device code will be executed, we don't need to have
@@ -958,64 +956,45 @@ pgstrom_fetch_gpuscan(GpuScanState *gss)
 	if (!gss->gts.kern_source)
 		return pgstrom_load_gpuscan(gss);
 
-	save_set_latch_on_sigusr1 = set_latch_on_sigusr1;
-	PG_TRY();
+	/*
+	 * We try to keep at least pgstrom_min_async_chunks of chunks are
+	 * in running, unless it is smaller than pgstrom_max_async_chunks.
+	 */
+retry:
+	SpinLockAcquire(&gss->gts.lock);
+	while (pgstrom_max_async_chunks > (gss->gts.num_running_tasks +
+									   gss->gts.num_pending_tasks +
+									   gss->gts.num_completed_tasks))
 	{
-	retry:
+		/* no urgent reason why to make the scan progress */
+		if (!dlist_is_empty(&gss->gts.completed_tasks) &&
+			pgstrom_max_async_chunks < (gss->gts.num_running_tasks +
+										gss->gts.num_pending_tasks))
+			break;
+		SpinLockRelease(&gss->gts.lock);
+
+		gpuscan = pgstrom_load_gpuscan(gss);
+
 		SpinLockAcquire(&gss->gts.lock);
-		while (pgstrom_max_async_chunks > (gss->gts.num_running_tasks +
-										   gss->gts.num_pending_tasks +
-										   gss->gts.num_completed_tasks))
-		{
-			/* no urgent reason why to make the scan progress */
-			if (!dlist_is_empty(&gss->gts.completed_tasks) &&
-				pgstrom_max_async_chunks < (gss->gts.num_running_tasks +
-											gss->gts.num_pending_tasks))
-				break;
-			SpinLockRelease(&gss->gts.lock);
+		if (!gpuscan)
+			break;
+		dlist_push_tail(&gss->gts.pending_tasks, &gpuscan->task.chain);
+		gss->gts.num_pending_tasks++;
+		SpinLockRelease(&gss->gts.lock);
 
-			gpuscan = pgstrom_load_gpuscan(gss);
+		pgstrom_launch_pending_tasks(&gss->gts);
 
-			SpinLockAcquire(&gss->gts.lock);
-			if (!gpuscan)
-				break;
-			dlist_push_tail(&gss->gts.pending_tasks, &gpuscan->task.chain);
-			gss->gts.num_pending_tasks++;
-			SpinLockRelease(&gss->gts.lock);
-
-			pgstrom_launch_pending_tasks(&gss->gts);
-
-			SpinLockAcquire(&gss->gts.lock);
-		}
-
-		/*
-		 * Wait for the response from asynchronous task, if not completed
-		 */
-		if (dlist_is_empty(&gss->gts.completed_tasks))
-		{
-			SpinLockRelease(&gss->gts.lock);
-
-			rc = WaitLatch(&MyProc->procLatch,
-						   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-						   5 * 1000L);
-			ResetLatch(&MyProc->procLatch);
-			if (rc & WL_POSTMASTER_DEATH)
-				elog(ERROR, "Emergency bail out because of Postmaster crash");
-			/* flush pending tasks first */
-			pgstrom_launch_pending_tasks(&gss->gts);
-			goto retry;
-		}
+		SpinLockAcquire(&gss->gts.lock);
 	}
-	PG_CATCH();
-	{
-		set_latch_on_sigusr1 = save_set_latch_on_sigusr1;
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
+	SpinLockRelease(&gss->gts.lock);
+
+	if (pgstrom_waitfor_ready_tasks(&gss->gts))
+		goto retry;
 
 	/*
 	 * Picks up next available chunk if any
 	 */
+	SpinLockAcquire(&gss->gts.lock);
 	dnode = dlist_pop_head_node(&gss->gts.completed_tasks);
 	gpuscan = dlist_container(pgstrom_gpuscan, task.chain, dnode);
 	memset(&gpuscan->task.chain, 0, sizeof(dlist_node));
