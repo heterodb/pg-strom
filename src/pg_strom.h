@@ -324,7 +324,7 @@ extern void pgstrom_compute_workgroup_size(size_t *p_grid_size,
 										   size_t nitems,
 										   size_t dynamic_shmem_per_thread);
 extern void pgstrom_init_cuda_control(void);
-
+extern void nvcc_cmdline_add_device_capability(StringInfo cmdline);
 extern const char *errorText(int errcode);
 extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 

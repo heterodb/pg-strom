@@ -24,12 +24,14 @@
 #include "storage/proc.h"
 #include "storage/procsignal.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 #include "pg_strom.h"
 
 /* available devices set by postmaster startup */
 static List		   *cuda_device_ordinals = NIL;
+static List		   *cuda_device_capabilities = NIL;
 static size_t		cuda_max_malloc_size = INT_MAX;
 static size_t		cuda_max_threads_per_block = INT_MAX;
 static int			cuda_compute_capability = INT_MAX;
@@ -728,7 +730,7 @@ pgstrom_compute_workgroup_size(size_t *p_grid_size,
 }
 
 static bool
-pgstrom_check_device_capability(int ordinal, CUdevice device)
+pgstrom_check_device_capability(int ordinal, CUdevice device, int *dev_cap)
 {
 	bool		result = true;
 	char		dev_name[256];
@@ -844,6 +846,8 @@ pgstrom_check_device_capability(int ordinal, CUdevice device)
 		 dev_cap_major,
 		 dev_cap_minor,
 		 !result ? ", NOT SUPPORTED" : "");
+	/* track device capability */
+	*dev_cap = dev_cap_major * 10 + dev_cap_minor;
 
 	return result;
 }
@@ -851,10 +855,28 @@ pgstrom_check_device_capability(int ordinal, CUdevice device)
 void
 pgstrom_init_cuda_control(void)
 {
-	MemoryContext oldcxt;
-	CUdevice	device;
-	CUresult	rc;
-	int			i, count;
+	static char	   *cuda_visible_devices;
+	MemoryContext	oldcxt;
+	CUdevice		device;
+	CUresult		rc;
+	int				i, count;
+
+	/*
+	 * GPU variables related to CUDA environment
+	 */
+	DefineCustomStringVariable("pg_strom.cuda_visible_devices",
+							   "CUDA_VISIBLE_DEVICES of CUDA runtime",
+							   NULL,
+							   &cuda_visible_devices,
+							   NULL,
+							   PGC_POSTMASTER,
+							   GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
+	if (cuda_visible_devices)
+	{
+		if (setenv("CUDA_VISIBLE_DEVICES", cuda_visible_devices, 1) != 0)
+			elog(ERROR, "failed to set CUDA_VISIBLE_DEVICES");
+	}
 
 	/*
 	 * initialization of CUDA runtime
@@ -873,15 +895,23 @@ pgstrom_init_cuda_control(void)
 	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 	for (i=0; i < count; i++)
 	{
+		int		dev_cap;
+
 		rc = cuDeviceGet(&device, i);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuDeviceGet(%s)", errorText(rc));
-		if (pgstrom_check_device_capability(i, device))
+		if (pgstrom_check_device_capability(i, device, &dev_cap))
+		{
 			cuda_device_ordinals = lappend_int(cuda_device_ordinals, i);
+			cuda_device_capabilities =
+				list_append_unique_int(cuda_device_capabilities, dev_cap);
+		}
 	}
 	MemoryContextSwitchTo(oldcxt);
 	if (cuda_device_ordinals == NIL)
 		elog(ERROR, "No CUDA devices, PG-Strom was disabled");
+	if (list_length(cuda_device_capabilities) > 1)
+		elog(WARNING, "Mixture of multiple GPU device capabilities");
 
 	/*
 	 * initialization of GpuContext related stuff
@@ -889,6 +919,23 @@ pgstrom_init_cuda_control(void)
 	for (i=0; i < lengthof(gcontext_hash); i++)
 		dlist_init(&gcontext_hash[i]);
 	RegisterResourceReleaseCallback(gpucontext_cleanup_callback, NULL);
+}
+
+/*
+ * nvcc_cmdline_add_device_capability
+ *
+ * add device specific nvcc cmdline options
+ */
+void
+nvcc_cmdline_add_device_capability(StringInfo cmdline)
+{
+	ListCell   *lc;
+
+	foreach (lc, cuda_device_capabilities)
+	{
+		appendStringInfo(cmdline, " -gencode arch=compute_%d,code=sm_%d a",
+						 lfirst_int(lc), lfirst_int(lc));
+	}
 }
 
 /*

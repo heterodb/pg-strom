@@ -453,7 +453,6 @@ __build_cuda_program(program_cache_entry *old_entry)
 	Size		required;
 	Size		usage;
 	int			hindex;
-	const char *opt_optimize = "";
 	int			rc;
 	StringInfoData buf;
 	program_cache_entry *new_entry;
@@ -495,22 +494,19 @@ __build_cuda_program(program_cache_entry *old_entry)
 	/*
 	 * Makes a command line to be kicked
 	 */
-	if ((old_entry->extra_flags & DEVKERNEL_DISABLE_OPTIMIZE) != 0)
-		opt_optimize = " -Xptxas '-O0'";
-
 	initStringInfo(&cmdline);
-	appendStringInfo(
-		&cmdline,
-		"env LANG=C %s %s --ptx -o %s.ptx %s"
+	appendStringInfo(&cmdline,
+					 "env LANG=C %s %s --ptx -o %s.ptx",
+					 pgstrom_nvcc_path,
+					 source_pathname,
+					 basename);
+	if ((old_entry->extra_flags & DEVKERNEL_DISABLE_OPTIMIZE) != 0)
+		appendStringInfo(&cmdline, " -Xptxas '-O0'");
+	nvcc_cmdline_add_device_capability(&cmdline);
 #ifdef PGSTROM_DEBUG
-		" -G -Werror cross-execution-space-call"
+	appendStringInfo(&cmdline, " -G -Werror cross-execution-space-call");
 #endif
-		" >& %s.log",
-		pgstrom_nvcc_path,
-		source_pathname,
-		basename,
-		opt_optimize,
-		basename);
+	appendStringInfo(&cmdline, " >& %s.log", basename);
 
 	/*
 	 * Run nvcc compiler

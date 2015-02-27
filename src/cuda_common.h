@@ -137,6 +137,15 @@ typedef uintptr_t	hostptr_t;
 
 #ifdef CUDA_DEVICE_CODE
 /*
+ * Hint for compiler
+ */
+#if __CUDA_ARCH__ < 200
+#define __likely_max_threads__		__launch_bounds__(512)
+#else
+#define __likely_max_threads__		__launch_bounds__(1024)
+#endif
+
+/*
  * It sets an error code unless no significant error code is already set.
  * Also, CpuReCheck has higher priority than RowFiltered because CpuReCheck
  * implies device cannot run the given expression completely.
