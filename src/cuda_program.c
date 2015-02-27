@@ -462,6 +462,10 @@ __build_cuda_program(program_cache_entry *old_entry)
 	 */
 	initStringInfo(&buf);
 	appendStringInfo(&buf,
+					 "#include \"cuda_runtime.h\"\n"
+					 "#include \"crt/device_runtime.h\"\n"
+					 "#include \"common_functions.h\"\n"
+					 "\n"
 					 "#define CUDA_DEVICE_CODE\n"
 					 "#define HOSTPTRLEN %u\n"
 					 "#define DEVICEPTRLEN %lu\n"
@@ -470,9 +474,6 @@ __build_cuda_program(program_cache_entry *old_entry)
 					 "#define ITEMID_FLAGS_SHIFT %u\n"
 					 "#define ITEMID_LENGTH_SHIFT %u\n"
 					 "#define MAXIMUM_ALIGNOF %u\n"
-					 "\n"
-					 "#include \"cuda_runtime.h\"\n"
-					 "#include \"crt/device_runtime.h\"\n"
 					 "\n",
 					 SIZEOF_VOID_P,
 					 sizeof(CUdeviceptr),
@@ -511,6 +512,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 	/*
 	 * Run nvcc compiler
 	 */
+	elog(LOG, "command: %s", cmdline.data);
 	rc = system(cmdline.data);
 
 	/*
@@ -531,9 +533,11 @@ __build_cuda_program(program_cache_entry *old_entry)
 				buf.len += nbytes;
 			} while (nbytes == filp_unitsz);
 			CloseTransientFile(fdesc);
-
-			cuda_binary = buf.data;
-			cuda_binary_len = buf.len;
+			if (buf.len > 0)
+			{
+				cuda_binary = buf.data;
+				cuda_binary_len = buf.len;
+			}
 		}
 	}
 
@@ -554,8 +558,11 @@ __build_cuda_program(program_cache_entry *old_entry)
 		} while (nbytes == filp_unitsz);
 		CloseTransientFile(fdesc);
 
-		build_log = buf.data;
-		build_log_len = buf.len;
+		if (buf.len > 0)
+		{
+			build_log = buf.data;
+			build_log_len = buf.len;
+		}
 	}
 
 	/*
@@ -566,6 +573,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 		required += MAXALIGN(cuda_binary_len + 1);
 	required += MAXALIGN(strlen(cmdline.data) + 1);
 	required += MAXALIGN(build_log_len + 1);
+	required += 512;	/* margin for error message */
 
 	SpinLockAcquire(&pgcache_head->lock);
 	new_entry = pgstrom_program_cache_alloc(required);
@@ -652,7 +660,9 @@ __build_cuda_program(program_cache_entry *old_entry)
 			elog(WARNING, "could not cleanup \"%s\" : %m", pathname);
 	}
 
-	if (!old_entry->retain_cuda_program)
+	if (old_entry->retain_cuda_program)
+		elog(LOG, "source code: \"%s/%s\"", DataDir, source_pathname);
+	else
 	{
 		if (unlink(source_pathname) != 0)
 			elog(WARNING, "could not cleanup \"%s\" : %m", source_pathname);

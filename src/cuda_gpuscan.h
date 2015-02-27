@@ -99,6 +99,7 @@ __device__ void
 gpuscan_writeback_results(kern_resultbuf *kresults, int result)
 {
 	__shared__ cl_uint base;
+	size_t		result_index = get_global_id() + 1;
 	cl_uint		binary;
 	cl_uint		offset;
 	cl_uint		nitems;
@@ -111,7 +112,7 @@ gpuscan_writeback_results(kern_resultbuf *kresults, int result)
 	 */
 	binary = (result != 0 ? 1 : 0);
 	offset = arithmetic_stairlike_add(binary, &nitems);
-	if (get_local_id(0) == 0)
+	if (get_local_id() == 0)
 		base = atomic_add(&kresults->nitems, nitems);
 	__syncthreads();
 
@@ -121,9 +122,9 @@ gpuscan_writeback_results(kern_resultbuf *kresults, int result)
 	 * shall be a negative number.
 	 */
 	if (result > 0)
-		kresults->results[base + offset] = (get_global_id(0) + 1);
+		kresults->results[base + offset] =  result_index;
 	else if (result < 0)
-		kresults->results[base + offset] = -(get_global_id(0) + 1);
+		kresults->results[base + offset] = -result_index;
 }
 
 /*
@@ -145,13 +146,13 @@ gpuscan_qual(kern_gpuscan *kgpuscan,	/* in/out */
 {
 	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
 	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
+	size_t			kds_index = get_global_id();
 	cl_int			errcode = StromError_Success;
 	cl_int			rc = 0;
 
-	if (get_global_id(0) < kds->nitems)
+	if (kds_index < kds->nitems)
 	{
-		if (gpuscan_qual_eval(&errcode, kparams, kds, ktoast,
-							  get_global_id(0)))
+		if (gpuscan_qual_eval(&errcode, kparams, kds, ktoast, kds_index))
 		{
 			if (errcode == StromError_Success)
 				rc = 1;

@@ -95,6 +95,15 @@ typedef cl_ulong	Datum;
 #define SHARED_WORKMEM		((void *) __pgstrom_dynamic_shared_workmem)
 __shared__ cl_ulong			__pgstrom_dynamic_shared_workmem[];
 
+/*
+ * MEMO: Manner like OpenCL style.
+ */
+#define get_local_id()			(threadIdx.x)
+#define get_local_size()		(blockDim.x)
+#define get_global_id()			(threadIdx.x + blockIdx.x * blockDim.x)
+#define get_global_size()		(blockDim.x * gridDim.x)
+
+
 #else	/* CUDA_DEVICE_CODE */
 #include "access/htup_details.h"
 #include "storage/itemptr.h"
@@ -873,7 +882,7 @@ kern_get_datum(kern_data_store *kds,
 	if (colidx >= kds->ncols || rowidx >= kds->nitems)
 		return NULL;
 	if (kds->format == KDS_FORMAT_ROW)
-		return kern_get_datum_rs(kds, colidx, rowidx);
+		return kern_get_datum_row(kds, colidx, rowidx);
 	if (kds->format == KDS_FORMAT_SLOT)
 		return kern_get_datum_slot(kds,ktoast,colidx,rowidx);
 	/* TODO: put StromError_DataStoreCorruption error here */
@@ -971,27 +980,6 @@ pg_fixup_tupslot_varlena(int *errcode,
 		STROM_SET_ERROR(errcode, StromError_SanityCheckViolation);
 }
 
-#if 0
-static inline void
-pg_dump_data_store(__global kern_data_store *kds, __constant const char *label)
-{
-	cl_uint		i;
-
-	printf("gid=%zu: kds(%s) {length=%u usage=%u ncols=%u nitems=%u nrooms=%u "
-		   "nblocks=%u maxblocks=%u format=%d}\n",
-		   get_global_id(0), label,
-		   kds->length, kds->usage, kds->ncols,
-		   kds->nitems, kds->nrooms,
-		   kds->nblocks, kds->maxblocks, kds->format);
-	for (i=0; i < kds->ncols; i++)
-		printf("gid=%zu: kds(%s) colmeta[%d] "
-			   "{attnotnull=%d attalign=%d attlen=%d}\n",
-			   get_global_id(0), label, i,
-			   kds->colmeta[i].attnotnull,
-			   kds->colmeta[i].attalign,
-			   kds->colmeta[i].attlen);
-}
-#endif
 /*
  * functions to reference variable length variables
  */
@@ -1231,26 +1219,26 @@ cl_uint
 arithmetic_stairlike_add(cl_uint my_value, cl_uint *total_sum)
 {
 	cl_uint	   *items = SHARED_WORKMEM;
-	size_t		wkgrp_sz = get_local_size(0);
+	size_t		unitsz = get_local_size();
 	cl_int		i, j;
 
 	/* set initial value */
-	items[get_local_id(0)] = my_value;
+	items[get_local_id()] = my_value;
 	__syncthreads();
 
-	for (i=1; wkgrp_sz > 0; i++, wkgrp_sz >>= 1)
+	for (i=1; unitsz > 0; i++, unitsz >>= 1)
 	{
 		/* index of last item in the earlier half of each 2^i unit */
-		j = (get_local_id(0) & ~((1 << i) - 1)) | ((1 << (i-1)) - 1);
+		j = (get_local_id() & ~((1 << i) - 1)) | ((1 << (i-1)) - 1);
 
 		/* add item[j] if it is later half in the 2^i unit */
-		if ((get_local_id(0) & (1 << (i - 1))) != 0)
-			items[get_local_id(0)] += items[j];
+		if ((get_local_id() & (1 << (i - 1))) != 0)
+			items[get_local_id()] += items[j];
 		__syncthreads();
 	}
 	if (total_sum)
-		*total_sum = items[get_local_size(0) - 1];
-	return items[get_local_id(0)] - my_value;
+		*total_sum = items[get_local_size() - 1];
+	return items[get_local_id()] - my_value;
 }
 
 /*
@@ -1266,33 +1254,33 @@ static void
 kern_writeback_error_status(cl_int *error_status, int own_errcode)
 {
 	cl_int	   *error_temp = SHARED_WORKMEM;
-	size_t		wkgrp_sz;
+	size_t		unitsz;
 	size_t		mask;
 	size_t		buddy;
 	cl_int		errcode_0;
 	cl_int		errcode_1;
 	cl_int		i;
 
-	error_temp[get_local_id(0)] = own_errcode;
+	error_temp[get_local_id()] = own_errcode;
 	__syncthreads();
 
-	for (i=1, wkgrp_sz = get_local_size(0);
-		 wkgrp_sz > 0;
-		 i++, wkgrp_sz >>= 1)
+	for (i=1, unitsz = get_local_size();
+		 unitsz > 0;
+		 i++, unitsz >>= 1)
 	{
 		mask = (1 << i) - 1;
 
-		if ((get_local_id(0) & mask) == 0)
+		if ((get_local_id() & mask) == 0)
 		{
-			buddy = get_local_id(0) + (1 << (i - 1));
+			buddy = get_local_id() + (1 << (i - 1));
 
-			errcode_0 = error_temp[get_local_id(0)];
-			errcode_1 = (buddy < get_local_size(0)
+			errcode_0 = error_temp[get_local_id()];
+			errcode_1 = (buddy < get_local_size()
 						 ? error_temp[buddy]
 						 : StromError_Success);
 			if (errcode_0 == StromError_Success &&
 				errcode_1 != StromError_Success)
-				error_temp[get_local_id(0)] = errcode_1;
+				error_temp[get_local_id()] = errcode_1;
 		}
 		__syncthreads();
 	}
@@ -1304,7 +1292,7 @@ kern_writeback_error_status(cl_int *error_status, int own_errcode)
 	 * StromError_Success.
 	 */
 	errcode_0 = error_temp[0];
-	if (get_local_id(0) == 0)
+	if (get_local_id() == 0)
 		atomic_cmpxchg(error_status, StromError_Success, errcode_0);
 }
 

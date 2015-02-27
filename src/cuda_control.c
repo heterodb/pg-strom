@@ -833,11 +833,11 @@ pgstrom_check_device_capability(int ordinal, CUdevice device, int *dev_cap)
 								  100 * dev_cap_major + dev_cap_minor);
 
 	/* Log the brief CUDA device properties */
-	elog(LOG, "GPU[%d] %s (%d CUDA cores, %d SMs, %dMHz), L2 %dKB, RAM %zuMB (%dbits, %dKHz), computing capability %d.%d%s",
+	elog(LOG, "GPU%d %s (%d %s, %dMHz), L2 %dKB, RAM %zuMB (%dbits, %dKHz), capability %d.%d%s",
 		 ordinal,
 		 dev_name,
-		 num_cores > 0 ? num_cores * dev_mpu_nums : -1,
-		 dev_mpu_nums,
+		 num_cores > 0 ? num_cores * dev_mpu_nums : dev_mpu_nums,
+		 num_cores > 0 ? "CUDA cores" : "SMs",
 		 dev_mpu_clk / 1000,
 		 dev_l2_sz >> 10,
 		 dev_mem_sz >> 20,
@@ -933,7 +933,7 @@ nvcc_cmdline_add_device_capability(StringInfo cmdline)
 
 	foreach (lc, cuda_device_capabilities)
 	{
-		appendStringInfo(cmdline, " -gencode arch=compute_%d,code=sm_%d a",
+		appendStringInfo(cmdline, " -gencode arch=compute_%d,code=sm_%d",
 						 lfirst_int(lc), lfirst_int(lc));
 	}
 }
