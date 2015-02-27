@@ -1334,18 +1334,15 @@ gpupreagg_rewrite_expr(Agg *agg,
 			if (tle->resno != agg->grpColIdx[i])
 				continue;
 
-			dtype = pgstrom_devtype_lookup(type_oid);
 			/* grouping key must be a supported data type */
+			dtype = pgstrom_devtype_lookup(type_oid);
 			if (!dtype)
-			{
-				elog(INFO, "unavailable type_oid = %u, type_mode = %d", type_oid, type_mod);
 				return false;
-			}
-			/* data type of the grouping key must have comparison function */
-			if (!OidIsValid(dtype->type_cmpfunc) ||
-				!pgstrom_devfunc_lookup(dtype->type_cmpfunc,
-										InvalidOid))
+			/* grouping key type must have equality function on device */
+			if (!OidIsValid(dtype->type_eqfunc) ||
+				!pgstrom_devfunc_lookup(dtype->type_eqfunc, type_coll))
 				return false;
+
 			/* check types that needs special treatment */
 			if (type_oid == NUMERICOID)
 				has_numeric = true;
@@ -1581,16 +1578,16 @@ gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 }
 
 /*
- * gpupreagg_codegen_keycomp - code generator of kernel gpupreagg_keycomp();
+ * gpupreagg_codegen_keycomp - code generator of kernel gpupreagg_keymatch();
  * that compares two records indexed by x_index and y_index in kern_data_store,
  * then returns -1 if X < Y, 0 if X = Y or 1 if X > Y.
  *
- * static cl_int
- * gpupreagg_keycomp(__private cl_int *errcode,
- *                   __global kern_data_store *kds,
- *                   __global kern_data_store *ktoast,
- *                   size_t x_index,
- *                   size_t y_index);
+ * static cl_bool
+ * gpupreagg_keymatch(__private cl_int *errcode,
+ *                    __global kern_data_store *kds,
+ *                    __global kern_data_store *ktoast,
+ *                    size_t x_index,
+ *                    size_t y_index);
  */
 static char *
 gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
@@ -1623,13 +1620,12 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 		/* find a function to compare this data-type */
 		/* find a datatype for comparison */
 		dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
-		if (!OidIsValid(dtype->type_cmpfunc))
-			elog(ERROR, "Bug? type (%u) has no comparison function",
+		if (!OidIsValid(dtype->type_eqfunc))
+			elog(ERROR, "Bug? type (%u) has no equality function",
 				 var->vartype);
-		dfunc = pgstrom_devfunc_lookup_and_track(dtype->type_cmpfunc,
-												 InvalidOid,
+		dfunc = pgstrom_devfunc_lookup_and_track(dtype->type_eqfunc,
+												 var->varcollid,
 												 context);
-
 		/* variable declarations */
 		appendStringInfo(&decl,
 						 "  pg_%s_t xkeyval_%u;\n"
@@ -1650,14 +1646,12 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			"  ykeyval_%u = pg_%s_vref(kds,ktoast,errcode,%u,y_index);\n"
 			"  if (!xkeyval_%u.isnull && !ykeyval_%u.isnull)\n"
 			"  {\n"
-			"    comp = pgfn_%s(errcode, xkeyval_%u, ykeyval_%u);\n"
-			"    if (!comp.isnull && comp.value != 0)\n"
-			"      return comp.value;\n"
+			"    if (!EVAL(pgfn_%s(errcode, xkeyval_%u, ykeyval_%u)))\n"
+			"      return false;\n"
 			"  }\n"
-			"  else if (xkeyval_%u.isnull  && !ykeyval_%u.isnull)\n"
-			"    return -1;\n"
-			"  else if (!xkeyval_%u.isnull &&  ykeyval_%u.isnull)\n"
-			"    return 1;\n",
+			"  else if ((xkeyval_%u.isnull  && !ykeyval_%u.isnull) ||"
+			"           (!xkeyval_%u.isnull &&  ykeyval_%u.isnull))\n"
+			"      return false;\n",
 			resno, dtype->type_name, resno - 1,
 			resno, dtype->type_name, resno - 1,
 			resno, resno,
@@ -1678,20 +1672,18 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 
 	/* make a whole key-compare function */
 	appendStringInfo(&str,
-					 "static cl_int\n"
-					 "gpupreagg_keycomp(__private int *errcode,\n"
-					 "                  __global kern_data_store *kds,\n"
-					 "                  __global kern_data_store *ktoast,\n"
-					 "                  size_t x_index,\n"
-					 "                  size_t y_index)\n"
+					 "static cl_bool\n"
+					 "gpupreagg_keymatch(__private int *errcode,\n"
+					 "                   __global kern_data_store *kds,\n"
+					 "                   __global kern_data_store *ktoast,\n"
+					 "                   size_t x_index,\n"
+					 "                   size_t y_index)\n"
 					 "{\n"
 					 "%s"	/* variable/params declarations */
-					 "%s"	/* definition of pg_int4_t comp */
 					 "%s"
-					 "  return 0;\n"
+					 "  return true;\n"
 					 "}\n",
 					 decl.data,
-					 gpa_info->numCols > 0 ? "  pg_int4_t comp;\n" : "",
 					 body.data);
 	pfree(decl.data);
 	pfree(body.data);

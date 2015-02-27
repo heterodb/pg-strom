@@ -39,6 +39,13 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan **p_curr_plan)
 			pgstrom_try_insert_gpupreagg(pstmt, (Agg *) plan);
 			break;
 
+		case T_SubqueryScan:
+			{
+				SubqueryScan   *subquery = (SubqueryScan *) plan;
+				Plan		  **p_subplan = &subquery->subplan;
+				grafter_try_replace_recurse(pstmt, p_subplan);
+			}
+			break;
 		case T_ModifyTable:
 			{
 				ModifyTable *mtplan = (ModifyTable *) plan;
