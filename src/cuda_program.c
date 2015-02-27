@@ -33,8 +33,9 @@ typedef struct
 	dlist_node	lru_chain;
 	int			shift;	/* block class of this entry */
 	int			refcnt;	/* 0 means free entry */
-	bool		retain_cuda_program;
 	pg_crc32	crc;	/* hash value by extra_flags + kern_source */
+	bool		retain_cuda_program;
+	Bitmapset  *waiting_backends;
 	int			extra_flags;
 	char	   *kern_source;
 	Size		kern_source_len;
@@ -59,6 +60,9 @@ typedef struct
 #define PGCACHE_MAX_BITS		24		/* 16MB */	
 #define PGCACHE_HASH_SIZE		1024
 
+#define WORDNUM(x)		((x) / BITS_PER_BITMAPWORD)
+#define BITNUM(x)		((x) % BITS_PER_BITMAPWORD)
+
 typedef struct
 {
 	volatile slock_t lock;
@@ -67,7 +71,7 @@ typedef struct
 	dlist_head	lru_list;
 	program_cache_entry *entry_begin;	/* start address of entries */
 	program_cache_entry *entry_end;		/* end address of entries */
-	Bitmapset	waiting_backends;	/* flexible length */
+	char		data[FLEXIBLE_ARRAY_MEMBER];
 } program_cache_head;
 
 /* ---- GUC variables ---- */
@@ -87,18 +91,22 @@ static int		itemid_length_shift;
 static program_cache_entry *pgstrom_program_cache_alloc(Size required);
 static void pgstrom_program_cache_free(program_cache_entry *entry);
 
-/*****/
+/*
+ * pgstrom_wakeup_backends
+ *
+ * wake up the backends that may be blocked for kernel build.
+ * we expects caller already hold pgcache_head->lock
+ */
 static void
-pgstrom_wakeup_backends(void)
+pgstrom_wakeup_backends(Bitmapset *waiting_backends)
 {
 	struct PGPROC  *proc;
 	bitmapword		bitmap;
 	int				i, j;
 
-	SpinLockAcquire(&pgcache_head->lock);
-	for (i=0; i < pgcache_head->waiting_backends.nwords; i++)
+	for (i=0; i < waiting_backends->nwords; i++)
 	{
-		bitmap = pgcache_head->waiting_backends.words[i];
+		bitmap = waiting_backends->words[i];
 		if (!bitmap)
 			continue;
 
@@ -110,12 +118,14 @@ pgstrom_wakeup_backends(void)
 			proc = &ProcGlobal->allProcs[i * BITS_PER_BITMAPWORD + j];
 			SetLatch(&proc->procLatch);
 		}
-		pgcache_head->waiting_backends.words[i] = 0;
 	}
-	SpinLockRelease(&pgcache_head->lock);
 }
 
-/*****/
+/*
+ * pgstrom_program_cache_reclaim
+ *
+ * it tries to reclaim the shared memory if highly memory presure.
+ */
 static bool
 pgstrom_program_cache_reclaim(int shift_min)
 {
@@ -441,6 +451,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 	char	   *build_log = NULL;
 	Size		build_log_len = 0;
 	Size		required;
+	Size		usage;
 	int			hindex;
 	const char *opt_optimize = "";
 	int			rc;
@@ -567,39 +578,42 @@ __build_cuda_program(program_cache_entry *old_entry)
 		SpinLockRelease(&pgcache_head->lock);
 		elog(ERROR, "out of shared memory");
 	}
-
+	usage = 0;
 	new_entry->crc = old_entry->crc;
+	new_entry->retain_cuda_program = old_entry->retain_cuda_program;
+	new_entry->waiting_backends = NULL;		/* no need to set latch */
 	new_entry->extra_flags = old_entry->extra_flags;
-	new_entry->kern_source = new_entry->data;
+	new_entry->kern_source = new_entry->data + usage;
 	memcpy(new_entry->kern_source,
 		   old_entry->kern_source,
 		   old_entry->kern_source_len + 1);
 	new_entry->kern_source_len = old_entry->kern_source_len;
+	usage += MAXALIGN(new_entry->kern_source_len + 1);
 
 	if (!cuda_binary)
 	{
 		new_entry->cuda_binary = CUDA_PROGRAM_BUILD_FAILURE;
-		new_entry->error_msg = (new_entry->kern_source +
-								MAXALIGN(new_entry->kern_source_len + 1));
-		new_entry->error_msg_len = PGCACHE_ERRORMSG_LEN(new_entry);
-		snprintf(new_entry->error_msg,
-				 new_entry->error_msg_len,
-				 "cuda kernel build: failed\ncommand: %s\n%s",
-				 cmdline.data, build_log);
+		new_entry->cuda_binary_len = 0;
 	}
 	else
 	{
-		new_entry->cuda_binary = (new_entry->kern_source +
-								  MAXALIGN(new_entry->kern_source_len + 1));
+		new_entry->cuda_binary = new_entry->data + usage;
 		new_entry->cuda_binary_len = cuda_binary_len;
-		new_entry->error_msg = (new_entry->cuda_binary +
-								MAXALIGN(new_entry->cuda_binary_len + 1));
-		new_entry->error_msg_len = PGCACHE_ERRORMSG_LEN(new_entry);
-		snprintf(new_entry->error_msg,
-                 new_entry->error_msg_len,
-				 "cuda kernel build: success\ncommand: %s\n%s",
-				 cmdline.data, build_log);
+		memcpy(new_entry->cuda_binary,
+			   cuda_binary,
+			   cuda_binary_len + 1);
+		usage += MAXALIGN(cuda_binary_len + 1);
 	}
+
+	new_entry->error_msg = new_entry->data + usage;
+	new_entry->error_msg_len = PGCACHE_ERRORMSG_LEN(new_entry);
+	snprintf(new_entry->error_msg,
+			 new_entry->error_msg_len,
+			 "cuda kernel build: %s\n"
+			 "command: %s\n%s",
+			 !cuda_binary ? "failed" : "success",
+			 cmdline.data,
+			 build_log);
 
 	/*
 	 * Add new_entry to the hash slot
@@ -611,8 +625,11 @@ __build_cuda_program(program_cache_entry *old_entry)
 					&new_entry->lru_chain);
 
 	/*
-	 * Also, old_entry shall not be referenced no longer
+	 * Also, waking up blocking tasks and drop old_entry
+	 * which shall not be referenced no longer.
 	 */
+	pgstrom_wakeup_backends(old_entry->waiting_backends);
+
 	dlist_delete(&old_entry->hash_chain);
 	dlist_delete(&old_entry->lru_chain);
 	memset(&old_entry->hash_chain, 0, sizeof(dlist_node));
@@ -679,6 +696,7 @@ pgstrom_build_cuda_program(Datum cuda_program)
 					 errdata->message);
 			entry->cuda_binary = CUDA_PROGRAM_BUILD_FAILURE;
 		}
+		pgstrom_wakeup_backends(entry->waiting_backends);
 		SpinLockRelease(&pgcache_head->lock);
 		pgstrom_put_cuda_program(entry);
 		MemoryContextSwitchTo(oldcxt);
@@ -686,7 +704,6 @@ pgstrom_build_cuda_program(Datum cuda_program)
 	}
 	PG_END_TRY();
 	pgstrom_put_cuda_program(entry);
-	pgstrom_wakeup_backends();
 }
 
 bool
@@ -698,6 +715,8 @@ pgstrom_load_cuda_program(GpuTaskState *gts)
 	const char	   *kern_source = gts->kern_source;
 	Size			kern_source_len = strlen(kern_source);
 	Size			required;
+	Size			usage;
+	int				nwords;
 	int				hindex;
 	dlist_iter		iter;
 	pg_crc32		crc;
@@ -740,6 +759,9 @@ retry:
 			/* Kernel build is still in-progress */
 			if (!entry->cuda_binary)
 			{
+				Bitmapset  *waiting_backends = entry->waiting_backends;
+				waiting_backends->words[WORDNUM(MyProc->pgprocno)]
+					|= (1 << BITNUM(MyProc->pgprocno));
 				SpinLockRelease(&pgcache_head->lock);
 				return false;
 			}
@@ -793,19 +815,39 @@ retry:
 		}
 	}
 	/* Not found on the existing cache */
-	required = offsetof(program_cache_entry, data[kern_source_len + 1]);
+	required = offsetof(program_cache_entry, data[0]);
+	nwords = (ProcGlobal->allProcCount +
+			  BITS_PER_BITMAPWORD - 1) / BITS_PER_BITMAPWORD;
+	required += MAXALIGN(offsetof(Bitmapset, words[nwords]));
+	required += MAXALIGN(kern_source_len + 1);
+	required += 512;	/* margin for error message */
+	usage = 0;
+
 	entry = pgstrom_program_cache_alloc(required);
-	entry->retain_cuda_program = debug_retain_cuda_program;
 	entry->crc = crc;
+	entry->retain_cuda_program = debug_retain_cuda_program;
+	/* bitmap for waiting backends */
+	entry->waiting_backends = (Bitmapset *) entry->data;
+	entry->waiting_backends->nwords = nwords;
+	memset(entry->waiting_backends->words, 0, sizeof(bitmapword) * nwords);
+	usage += MAXALIGN(offsetof(Bitmapset, words[nwords]));
+	/* device kernel source */
 	entry->extra_flags = extra_flags;
-	strcpy(entry->data, kern_source);
-	entry->kern_source = entry->data;
+	entry->kern_source = (char *)(entry->data + usage);
+	memcpy(entry->kern_source, kern_source, kern_source_len + 1);
 	entry->kern_source_len = kern_source_len;
+	usage += MAXALIGN(kern_source_len + 1);
+	/* no cuda binary yet */
 	entry->cuda_binary = NULL;
-	entry->cuda_binary_len = 0;
-	/* remaining area for error message */
-	entry->error_msg = entry->data + MAXALIGN(kern_source_len + 1);
+    entry->cuda_binary_len = 0;
+	/* remaining are for error message */
+	entry->error_msg = (char *)(entry->data + usage);
 	entry->error_msg_len = PGCACHE_ERRORMSG_LEN(entry);
+
+	/* at least, caller is waiting for build */
+	entry->waiting_backends = entry->waiting_backends;
+	entry->waiting_backends->words[WORDNUM(MyProc->pgprocno)]
+		|= (1 << BITNUM(MyProc->pgprocno));
 
 	/* to be acquired by program builder */
 	entry->refcnt++;
@@ -838,11 +880,10 @@ pgstrom_startup_cuda_program(void)
 {
 	program_cache_entry *entry;
 	bool		found;
-	int			i, nwords;
+	int			i;
 	int			shift;
 	char	   *curr_addr;
 	char	   *end_addr;
-	Bitmapset  *tempset;
 
 	if (shmem_startup_next)
 		(*shmem_startup_next)();
@@ -860,14 +901,8 @@ pgstrom_startup_cuda_program(void)
 	for (i=0; i < PGCACHE_HASH_SIZE; i++)
 		dlist_init(&pgcache_head->active_list[i]);
 	dlist_init(&pgcache_head->lru_list);
-
-	nwords = (ProcGlobal->allProcCount +
-			  BITS_PER_BITMAPWORD - 1) / BITS_PER_BITMAPWORD;
-	tempset = &pgcache_head->waiting_backends;
-	tempset->nwords = nwords;
-	memset(tempset->words, 0, sizeof(bitmapword) * nwords);
-	pgcache_head->entry_begin =
-		(program_cache_entry *) BUFFERALIGN(tempset->words + nwords);
+	pgcache_head->entry_begin = (program_cache_entry *)
+		BUFFERALIGN(pgcache_head->data);
 
 	/* makes free entries */
 	curr_addr = (char *) pgcache_head->entry_begin;
