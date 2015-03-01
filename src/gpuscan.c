@@ -960,45 +960,51 @@ pgstrom_fetch_gpuscan(GpuScanState *gss)
 	 * We try to keep at least pgstrom_min_async_chunks of chunks are
 	 * in running, unless it is smaller than pgstrom_max_async_chunks.
 	 */
-retry:
-	SpinLockAcquire(&gss->gts.lock);
-	while (pgstrom_max_async_chunks > (gss->gts.num_running_tasks +
-									   gss->gts.num_pending_tasks +
-									   gss->gts.num_completed_tasks))
-	{
-		/* no urgent reason why to make the scan progress */
-		if (!dlist_is_empty(&gss->gts.completed_tasks) &&
-			pgstrom_max_async_chunks < (gss->gts.num_running_tasks +
-										gss->gts.num_pending_tasks))
-			break;
-		SpinLockRelease(&gss->gts.lock);
-
-		gpuscan = pgstrom_load_gpuscan(gss);
-
+	do {
+		CHECK_FOR_INTERRUPTS();
 		SpinLockAcquire(&gss->gts.lock);
-		if (!gpuscan)
-			break;
-		dlist_push_tail(&gss->gts.pending_tasks, &gpuscan->task.chain);
-		gss->gts.num_pending_tasks++;
+		while (pgstrom_max_async_chunks > (gss->gts.num_running_tasks +
+										   gss->gts.num_pending_tasks +
+										   gss->gts.num_completed_tasks))
+		{
+			/* no urgent reason why to make the scan progress */
+			if (!dlist_is_empty(&gss->gts.completed_tasks) &&
+				pgstrom_max_async_chunks < (gss->gts.num_running_tasks +
+											gss->gts.num_pending_tasks))
+				break;
+			SpinLockRelease(&gss->gts.lock);
+
+			gpuscan = pgstrom_load_gpuscan(gss);
+
+			SpinLockAcquire(&gss->gts.lock);
+			if (!gpuscan)
+			{
+				elog(INFO, "scan done");
+				break;
+			}
+			dlist_push_tail(&gss->gts.pending_tasks,
+							&gpuscan->task.chain);
+			gss->gts.num_pending_tasks++;
+			SpinLockRelease(&gss->gts.lock);
+
+			pgstrom_launch_pending_tasks(&gss->gts);
+
+			SpinLockAcquire(&gss->gts.lock);
+		}
 		SpinLockRelease(&gss->gts.lock);
-
-		pgstrom_launch_pending_tasks(&gss->gts);
-
-		SpinLockAcquire(&gss->gts.lock);
-	}
-	SpinLockRelease(&gss->gts.lock);
-
-	if (pgstrom_waitfor_ready_tasks(&gss->gts))
-		goto retry;
+	} while (pgstrom_waitfor_ready_tasks(&gss->gts));
 
 	/*
 	 * Picks up next available chunk if any
 	 */
 	SpinLockAcquire(&gss->gts.lock);
+	gss->gts.num_completed_tasks--;
 	dnode = dlist_pop_head_node(&gss->gts.completed_tasks);
 	gpuscan = dlist_container(pgstrom_gpuscan, task.chain, dnode);
 	memset(&gpuscan->task.chain, 0, sizeof(dlist_node));
 	SpinLockRelease(&gss->gts.lock);
+
+	elog(INFO, "pick up gpuscan %p", gpuscan);
 
 	/*
 	 *
@@ -1260,12 +1266,19 @@ pgstrom_respond_gpuscan(CUstream stream, CUresult status, void *private)
 	else
 		gpuscan->task.errcode = kresults->errcode;
 
+	/* remove from the running_tasks list */
+	dlist_delete(&gpuscan->task.chain);
+	gts->num_running_tasks--;
+	/* then, attach it on the completed_tasks list */
 	if (gpuscan->task.errcode == StromError_Success)
 		dlist_push_tail(&gts->completed_tasks, &gpuscan->task.chain);
 	else
 		dlist_push_head(&gts->completed_tasks, &gpuscan->task.chain);
 	gts->num_completed_tasks++;
 	SpinLockRelease(&gts->lock);
+
+	SetLatch(&MyProc->procLatch);
+	elog(INFO, "pgstrom_respond_gpuscan (gpuscan=%p, rc=%s)", gpuscan, errorText(gpuscan->task.errcode));
 }
 
 static bool
@@ -1274,7 +1287,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
 	pgstrom_data_store *pds = gpuscan->pds;
 	kern_data_store	   *kds = pds->kds;
-	CUdeviceptr			m_ktoast = NULL;
+	CUdeviceptr			m_ktoast = 0UL;
 	size_t				offset;
 	size_t				length;
 	size_t				grid_size;
@@ -1432,18 +1445,7 @@ pgstrom_process_gpuscan(GpuTask *task)
 	PG_TRY();
 	{
 		status = __pgstrom_process_gpuscan(gpuscan);
-		SpinLockAcquire(&gts->lock);
-		if (status)
-		{
-			dlist_push_tail(&gts->running_tasks, &gpuscan->chain);
-			gts->num_running_tasks++;
-		}
-		else
-		{
-			dlist_push_head(&gts->pending_tasks, &gpuscan->chain);
-			gts->num_pending_tasks++;
-		}
-		SpinLockRelease(&gts->lock);
+		elog(INFO, "pgstrom_process_gpuscan (gpuscan=%p, launch=%d)", gpuscan, status);
 	}
 	PG_CATCH();
 	{
