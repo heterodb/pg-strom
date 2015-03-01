@@ -138,7 +138,7 @@ gpuscan_qual_eval(cl_int *errcode,
 /*
  * kernel entrypoint of gpuscan
  */
-extern "C" __global__ void
+__global__ void
 gpuscan_qual(kern_gpuscan *kgpuscan,	/* in/out */
 			 kern_data_store *kds,		/* in */
 			 kern_data_store *ktoast)	/* always NULL */

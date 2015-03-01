@@ -471,8 +471,7 @@ pgstrom_write_cuda_program(int fdesc, program_cache_entry *entry,
 static void
 __build_cuda_program(program_cache_entry *old_entry)
 {
-	const char *source_pathname;
-	char		basename[MAXPGPATH];
+	const char *basename;
 	char		pathname[MAXPGPATH];
 	StringInfoData cmdline;
 	int			fdesc;
@@ -480,8 +479,10 @@ __build_cuda_program(program_cache_entry *old_entry)
 	ssize_t		nbytes;
 	char	   *cuda_binary = NULL;
 	Size		cuda_binary_len = 0;
+	bool		cuda_binary_exist = false;
 	char	   *build_log = NULL;
 	Size		build_log_len = 0;
+	bool		build_log_exist = false;
 	Size		required;
 	Size		usage;
 	int			hindex;
@@ -511,14 +512,12 @@ __build_cuda_program(program_cache_entry *old_entry)
 					 itemid_length_shift,
 					 MAXIMUM_ALIGNOF);
 
-	fdesc = pgstrom_open_tempfile(".cu", &source_pathname);
+	fdesc = pgstrom_open_tempfile(NULL, &basename);
 	nbytes = write(fdesc, buf.data, buf.len);
 	if (nbytes != buf.len)
-		elog(ERROR, "could not write to file \"%s\": %m", source_pathname);
-	pgstrom_write_cuda_program(fdesc, old_entry, source_pathname);
+		elog(ERROR, "could not write to file \"%s\": %m", basename);
+	pgstrom_write_cuda_program(fdesc, old_entry, basename);
 	CloseTransientFile(fdesc);
-	strncpy(basename, source_pathname, sizeof(basename));
-	basename[strlen(source_pathname) - 3] = '\0';
 
 	/*
 	 * Makes a command line to be kicked
@@ -527,7 +526,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 	appendStringInfo(&cmdline,
 					 "env LANG=C %s -x cu %s --ptx -o %s.ptx",
 					 pgstrom_nvcc_path,
-					 source_pathname,
+					 basename,
 					 basename);
 	if ((old_entry->extra_flags & DEVKERNEL_DISABLE_OPTIMIZE) != 0)
 		appendStringInfo(&cmdline, " -Xptxas '-O0'");
@@ -546,11 +545,11 @@ __build_cuda_program(program_cache_entry *old_entry)
 	/*
 	 * Read binary file (if any)
 	 */
-	if (rc == 0)
+	snprintf(pathname, sizeof(pathname), "%s.ptx", basename);
+	fdesc = OpenTransientFile(pathname, O_RDONLY | PG_BINARY, 0);
+	if (fdesc >= 0)
 	{
-		snprintf(pathname, sizeof(pathname), "%s.ptx", basename);
-		fdesc = OpenTransientFile(pathname, O_RDONLY | PG_BINARY, 0);
-		if (fdesc >= 0)
+		if (rc == 0)
 		{
 			initStringInfo(&buf);
 			do {
@@ -560,13 +559,15 @@ __build_cuda_program(program_cache_entry *old_entry)
 					elog(ERROR, "could not read from \"%s\": %m", pathname);
 				buf.len += nbytes;
 			} while (nbytes == filp_unitsz);
-			CloseTransientFile(fdesc);
+
 			if (buf.len > 0)
 			{
 				cuda_binary = buf.data;
 				cuda_binary_len = buf.len;
 			}
 		}
+		CloseTransientFile(fdesc);
+		cuda_binary_exist = true;
 	}
 
 	/*
@@ -584,13 +585,14 @@ __build_cuda_program(program_cache_entry *old_entry)
 				elog(ERROR, "could not read from \"%s\": %m", pathname);
 			buf.len += nbytes;
 		} while (nbytes == filp_unitsz);
-		CloseTransientFile(fdesc);
 
 		if (buf.len > 0)
 		{
 			build_log = buf.data;
 			build_log_len = buf.len;
 		}
+		CloseTransientFile(fdesc);
+		build_log_exist = true;
 	}
 
 	/*
@@ -674,27 +676,27 @@ __build_cuda_program(program_cache_entry *old_entry)
 	/*
 	 * Remove temporary files (or retain for debug)
 	 */
-	if (cuda_binary && !old_entry->retain_cuda_program)
+	if (cuda_binary_exist)
 	{
 		snprintf(pathname, sizeof(pathname), "%s.ptx", basename);
 		if (unlink(pathname) != 0)
 			elog(WARNING, "could not cleanup \"%s\" : %m", pathname);
 	}
 
-	if (build_log && !old_entry->retain_cuda_program)
+	if (build_log_exist)
 	{
 		snprintf(pathname, sizeof(pathname), "%s.log", basename);
 		if (unlink(pathname) != 0)
 			elog(WARNING, "could not cleanup \"%s\" : %m", pathname);
 	}
 
-	if (old_entry->retain_cuda_program)
-		elog(LOG, "source code: \"%s/%s\"", DataDir, source_pathname);
-	else
+	if (!old_entry->retain_cuda_program)
 	{
-		if (unlink(source_pathname) != 0)
-			elog(WARNING, "could not cleanup \"%s\" : %m", source_pathname);
+		if (unlink(basename) != 0)
+			elog(WARNING, "could not cleanup \"%s\" : %m", basename);
 	}
+	else
+		elog(LOG, "source code: \"%s/%s\"", DataDir, basename);
 }
 
 

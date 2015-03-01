@@ -1274,6 +1274,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
 	pgstrom_data_store *pds = gpuscan->pds;
 	kern_data_store	   *kds = pds->kds;
+	CUdeviceptr			m_ktoast = NULL;
 	size_t				offset;
 	size_t				length;
 	size_t				grid_size;
@@ -1365,6 +1366,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 								   sizeof(cl_uint));
 	gpuscan->kern_qual_args[0] = &gpuscan->m_gpuscan;
 	gpuscan->kern_qual_args[1] = &gpuscan->m_kds;
+	gpuscan->kern_qual_args[2] = &m_ktoast;
 
 	rc = cuLaunchKernel(gpuscan->kern_qual,
 						grid_size, 1, 1,
