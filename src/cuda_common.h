@@ -49,12 +49,22 @@ typedef double				cl_double;
 #ifdef CUDA_DEVICE_CODE
 
 /* Misc definitions */
-#ifndef offsetof
-#define offsetof(TYPE, FIELD)   ((CUdeviceptr) &((TYPE *)0)->FIELD)
+#ifdef offsetof
+#undef offsetof
 #endif
-#ifndef lengthof
+#define offsetof(TYPE,FIELD)	((devptr_t) &((TYPE *)0)->FIELD)
+
+#ifdef lengthof
+#undef lengthof
+#endif
 #define lengthof(ARRAY)			(sizeof(ARRAY) / sizeof((ARRAY)[0]))
+
+#ifdef container_of
+#undef container_of
 #endif
+#define container_of(TYPE,FIELD,PTR)			\
+	((TYPE *)((char *) (PTR) - offsetof(TYPE, FIELD)))
+
 #define BITS_PER_BYTE			8
 #define FLEXIBLE_ARRAY_MEMBER
 #define true			((cl_bool) 1)
@@ -92,8 +102,8 @@ typedef cl_ulong	Datum;
  * version 340.xx. So, we declared the local_workmem as cl_ulong * pointer
  * as a workaround.
  */
-#define SHARED_WORKMEM		((void *) __pgstrom_dynamic_shared_workmem)
-__shared__ cl_ulong			__pgstrom_dynamic_shared_workmem[];
+#define SHARED_WORKMEM(TYPE)	((TYPE *) __pgstrom_dynamic_shared_workmem)
+extern __shared__ cl_ulong __pgstrom_dynamic_shared_workmem[];
 
 /*
  * MEMO: Manner like OpenCL style.
@@ -135,14 +145,6 @@ typedef uintptr_t	hostptr_t;
 #define StromError_DataStoreNoSpace			2001 /* KDS has no space */
 #define StromError_DataStoreOutOfRange		2002 /* out of KDS range access */
 #define StromError_SanityCheckViolation		2003 /* sanity check violation */
-
-/*
- * Misc support macros
- */
-#ifndef container_of
-#define container_of(type,field,ptr)				\
-	((type *)((char *) (ptr) - offsetof(type, field)))
-#endif
 
 #ifdef CUDA_DEVICE_CODE
 /*
@@ -443,15 +445,18 @@ typedef struct {
  */
 
 /* forward declaration of access interface to kern_data_store */
-__device__ static void *kern_get_datum(kern_data_store *kds,
-									   kern_data_store *ktoast,
-									   cl_uint colidx, cl_uint rowidx);
+__device__ __forceinline__
+void *kern_get_datum(kern_data_store *kds,
+					 kern_data_store *ktoast,
+					 cl_uint colidx, cl_uint rowidx);
 /* forward declaration of writer interface to kern_data_store */
-__device__ static Datum *pg_common_vstore(kern_data_store *kds,
-										  kern_data_store *ktoast,
-										  int *errcode,
-										  cl_uint colidx, cl_uint rowidx,
-										  cl_bool isnull);
+__device__
+Datum *pg_common_vstore(kern_data_store *kds,
+						kern_data_store *ktoast,
+						int *errcode,
+						cl_uint colidx,
+						cl_uint rowidx,
+						cl_bool isnull);
 
 /*
  * Template of variable classes: fixed-length referenced by value
@@ -571,7 +576,7 @@ __device__ static Datum *pg_common_vstore(kern_data_store *kds,
 #define EQ_CRC32C(crc1,crc2)	((crc1) == (crc2))
 
 #define STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)			\
-	cl_uint														\
+	__device__ cl_uint											\
 	pg_##NAME##_comp_crc32(const cl_uint *crc32_table,			\
 						   cl_uint hash, pg_##NAME##_t datum)	\
 	{															\
@@ -873,7 +878,7 @@ kern_get_datum_slot(kern_data_store *kds,
 	return (char *)(&ktoast->hostptr) + values[colidx];
 }
 
-__device__ void *
+__device__ __forceinline__ void *
 kern_get_datum(kern_data_store *kds,
 			   kern_data_store *ktoast,
 			   cl_uint colidx, cl_uint rowidx)
@@ -933,7 +938,7 @@ pg_common_vstore(kern_data_store *kds,
  * up pointers in the tuple store.
  * In case of any other format, we don't need to modify the data.
  */
-void
+__device__ void
 pg_fixup_tupslot_varlena(int *errcode,
 						 kern_data_store *kds,
 						 kern_data_store *ktoast,
@@ -990,7 +995,7 @@ pg_varlena_datum_ref(int *errcode,
 					 void *datum,
 					 cl_bool internal_format)
 {
-	varlena		   *vl_val = datum;
+	varlena		   *vl_val = (varlena *) datum;
 	pg_varlena_t	result;
 
 	if (!datum)
@@ -1044,7 +1049,7 @@ pg_varlena_vstore(kern_data_store *kds,
 	 */
 }
 
-static inline pg_varlena_t
+__device__ pg_varlena_t
 pg_varlena_param(kern_parambuf *kparams,
 				 int *errcode,
 				 cl_uint param_id)
@@ -1075,7 +1080,7 @@ pg_varlena_param(kern_parambuf *kparams,
 
 STROMCL_SIMPLE_NULLTEST_TEMPLATE(varlena)
 
-cl_uint
+__device__ cl_uint
 pg_varlena_comp_crc32(const cl_uint *crc32_table,
 					  cl_uint hash, pg_varlena_t datum)
 {
@@ -1098,7 +1103,7 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 	typedef pg_varlena_t	pg_##NAME##_t;
 
 #define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)				\
-	pg_##NAME##_t											\
+	__device__ __forceinline__ pg_##NAME##_t				\
 	pg_##NAME##_datum_ref(int *errcode,						\
 						  void *datum,						\
 						  cl_bool internal_format)			\
@@ -1107,7 +1112,7 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 									internal_format);		\
 	}														\
 															\
-	pg_##NAME##_t											\
+	__device__ __forceinline__ pg_##NAME##_t				\
 	pg_##NAME##_vref(kern_data_store *kds,					\
 					 kern_data_store *ktoast,				\
 					 int *errcode,							\
@@ -1120,7 +1125,7 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 	}
 
 #define STROMCL_VARLENA_VARSTORE_TEMPLATE(NAME)				\
-	void													\
+	__device__ __forceinline__ void							\
 	pg_##NAME##_vstore(kern_data_store *kds,				\
 					   kern_data_store *ktoast,				\
 					   int *errcode,						\
@@ -1133,7 +1138,7 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 	}
 
 #define STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)						\
-	pg_##NAME##_t													\
+	__device__ __forceinline__ pg_##NAME##_t						\
 	pg_##NAME##_param(kern_parambuf *kparams,						\
 					  int *errcode, cl_uint param_id)				\
 	{																\
@@ -1141,19 +1146,19 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 	}
 
 #define STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)						\
-	pg_bool_t														\
+	__device__ __forceinline__ pg_bool_t							\
 	pgfn_##NAME##_isnull(int *errcode, pg_##NAME##_t arg)			\
 	{																\
 		return pgfn_varlena_isnull(errcode, arg);					\
 	}																\
-	pg_bool_t														\
+	__device__ __forceinline__ pg_bool_t							\
 	pgfn_##NAME##_isnotnull(int *errcode, pg_##NAME##_t arg)		\
 	{																\
 		return pgfn_varlena_isnotnull(errcode, arg);				\
 	}
 
 #define STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)					\
-	cl_uint															\
+	__device__ __forceinline__ cl_uint								\
 	pg_##NAME##_comp_crc32(const cl_uint *crc32_table,				\
 						   cl_uint hash, pg_##NAME##_t datum)		\
 	{																\
@@ -1215,10 +1220,10 @@ STROMCL_VARLENA_TYPE_TEMPLATE(bytea)
  * Also note that this function internally use barrier(), so unable to
  * use within if-blocks.
  */
-cl_uint
+__device__ static cl_uint
 arithmetic_stairlike_add(cl_uint my_value, cl_uint *total_sum)
 {
-	cl_uint	   *items = SHARED_WORKMEM;
+	cl_uint	   *items = SHARED_WORKMEM(cl_uint);
 	size_t		unitsz = get_local_size();
 	cl_int		i, j;
 
@@ -1250,10 +1255,10 @@ arithmetic_stairlike_add(cl_uint my_value, cl_uint *total_sum)
  * NOTE: It does not look at significance of the error, so caller has
  * to clear its error code if it is a minor one.
  */
-static void
+__device__ static void
 kern_writeback_error_status(cl_int *error_status, int own_errcode)
 {
-	cl_int	   *error_temp = SHARED_WORKMEM;
+	cl_int	   *error_temp = SHARED_WORKMEM(cl_int);
 	size_t		unitsz;
 	size_t		mask;
 	size_t		buddy;
@@ -1293,7 +1298,7 @@ kern_writeback_error_status(cl_int *error_status, int own_errcode)
 	 */
 	errcode_0 = error_temp[0];
 	if (get_local_id() == 0)
-		atomic_cmpxchg(error_status, StromError_Success, errcode_0);
+		atomicCAS(error_status, StromError_Success, errcode_0);
 }
 
 /* ------------------------------------------------------------
@@ -1307,6 +1312,7 @@ kern_writeback_error_status(cl_int *error_status, int own_errcode)
  * bool variable.
  */
 __device__ __forceinline__
+static cl_bool
 EVAL(pg_bool_t arg)
 {
 	if (!arg.isnull && arg.value != 0)

@@ -65,13 +65,12 @@ typedef struct {
 } kern_gpuscan;
 
 #define KERN_GPUSCAN_PARAMBUF(kgpuscan)			\
-	((__device__ kern_parambuf *)(&(kgpuscan)->kparams))
+	((kern_parambuf *)(&(kgpuscan)->kparams))
 #define KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan)	\
 	STROMALIGN((kgpuscan)->kparams.length)
 #define KERN_GPUSCAN_RESULTBUF(kgpuscan)		\
-	((__device__ kern_resultbuf *)				\
-	 ((__device__ char *)&(kgpuscan)->kparams +	\
-	  STROMALIGN((kgpuscan)->kparams.length)))
+	((kern_resultbuf *)((char *)&(kgpuscan)->kparams +				\
+						STROMALIGN((kgpuscan)->kparams.length)))
 #define KERN_GPUSCAN_RESULTBUF_LENGTH(kgpuscan)	\
 	STROMALIGN(offsetof(kern_resultbuf,			\
 		results[KERN_GPUSCAN_RESULTBUF(kgpuscan)->nrels * \
@@ -113,7 +112,7 @@ gpuscan_writeback_results(kern_resultbuf *kresults, int result)
 	binary = (result != 0 ? 1 : 0);
 	offset = arithmetic_stairlike_add(binary, &nitems);
 	if (get_local_id() == 0)
-		base = atomic_add(&kresults->nitems, nitems);
+		base = atomicAdd(&kresults->nitems, nitems);
 	__syncthreads();
 
 	/*
@@ -139,7 +138,7 @@ gpuscan_qual_eval(cl_int *errcode,
 /*
  * kernel entrypoint of gpuscan
  */
-__global__ void
+extern "C" __global__ void
 gpuscan_qual(kern_gpuscan *kgpuscan,	/* in/out */
 			 kern_data_store *kds,		/* in */
 			 kern_data_store *ktoast)	/* always NULL */

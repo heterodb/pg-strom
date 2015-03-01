@@ -140,7 +140,6 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 		}
 		gcontext->num_context = cuda_num_devices;
 		gcontext->cur_context = 0;
-		elog(INFO, "create a new gpucontext=%p", gcontext);
 	}
 	PG_CATCH();
 	{
@@ -180,7 +179,6 @@ pgstrom_get_gpucontext(void)
 	{
 		gcontext = gcontext_last;
 		gcontext->refcnt++;
-		elog(INFO, "get gcontext 1 = %p", gcontext);
 		return gcontext;
 	}
 	/* not a last one, so search a hash table */
@@ -192,7 +190,6 @@ pgstrom_get_gpucontext(void)
 		if (gcontext->resowner == CurrentResourceOwner)
 		{
 			gcontext->refcnt++;
-			elog(INFO, "get gcontext 2 = %p", gcontext);
 			return gcontext;
 		}
 	}
@@ -427,32 +424,8 @@ pgstrom_init_gputask(GpuTaskState *gts, GpuTask *task,
 					 bool (*cb_process)(GpuTask *task),
 					 void (*cb_release)(GpuTask *task))
 {
-	GpuContext *gcontext = gts->gcontext;
-	CUdevice	cuda_device;
-	CUcontext	cuda_context;
-	CUstream	cuda_stream;
-	CUresult	rc;
-	int			index;
-
-	index = (gcontext->cur_context++ % gcontext->num_context);
-	cuda_context = gcontext->cuda_context[index];
-	rc = cuCtxGetDevice(&cuda_device);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuCtxGetDevice: %s", errorText(rc));
-
-	rc = cuCtxSetCurrent(cuda_context);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
-
-	rc = cuStreamCreate(&cuda_stream, CU_STREAM_NON_BLOCKING);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuStreamCreate: %s", errorText(rc));
-
 	memset(task, 0, sizeof(GpuTask));
 	task->gts = gts;
-	task->cuda_stream = cuda_stream;
-	task->cuda_device = cuda_device;
-	task->cuda_context = cuda_context;
 	task->cb_process = cb_process;
 	task->cb_release = cb_release;
 	/* tracked by GpuTaskState */
@@ -523,6 +496,10 @@ pgstrom_launch_pending_tasks(GpuTaskState *gts)
 			gtask->cuda_device = cuda_device;
 			gtask->cuda_module = cuda_module;
 			gtask->cuda_stream = cuda_stream;
+
+			rc = cuCtxPopCurrent(NULL);
+			if (rc != CUDA_SUCCESS)
+				elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
 		}
 		/*
 		 * Then, tries to launch this task.

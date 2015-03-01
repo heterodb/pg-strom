@@ -184,8 +184,8 @@ typedef struct GpuTask
 	GpuTaskState   *gts;
 	CUcontext		cuda_context;	/* just reference, no cleanup needed */
 	CUdevice		cuda_device;	/* just reference, no cleanup needed */
-	CUmodule		cuda_module;	/* just reference, no cleanup needed */
 	CUstream		cuda_stream;	/* owned for each GpuTask */
+	CUmodule		cuda_module;	/* just reference, no cleanup needed */
 	cl_int			errcode;
 	bool		  (*cb_process)(struct GpuTask *gtask);
 	void		  (*cb_release)(struct GpuTask *gtask);

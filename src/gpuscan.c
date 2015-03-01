@@ -1281,13 +1281,6 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	CUresult			rc;
 
 	/*
-	 * Switch CUDA context
-	 */
-	rc = cuCtxSetCurrent(gpuscan->task.cuda_context);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuCtxSetCurrent: %s", errorText(rc));
-
-	/*
 	 * Kernel function lookup
 	 */
 	rc = cuModuleGetFunction(&gpuscan->kern_qual,
@@ -1423,10 +1416,16 @@ pgstrom_process_gpuscan(GpuTask *task)
 	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) task;
 	GpuTaskState	   *gts = gpuscan->task.gts;
 	bool				status;
+	CUresult			rc;
 	struct timeval		tv1, tv2;
 
 	if (task->pfm.enabled)
 		gettimeofday(&tv1, NULL);
+
+	/* Switch CUDA Context */
+	rc = cuCtxPushCurrent(gpuscan->task.cuda_context);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
 
 	PG_TRY();
 	{
@@ -1446,10 +1445,17 @@ pgstrom_process_gpuscan(GpuTask *task)
 	}
 	PG_CATCH();
 	{
+		rc = cuCtxPopCurrent(NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
 		gpuscan_cleanup_cuda_resources(gpuscan);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+
+	rc = cuCtxPopCurrent(NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
 
 	if (task->pfm.enabled)
 	{

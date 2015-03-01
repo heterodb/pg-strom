@@ -304,8 +304,31 @@ static void
 pgstrom_write_cuda_program(int fdesc, program_cache_entry *entry,
 						   const char *pathname)
 {
-	static size_t	common_code_length = 0;
-	size_t			nbytes;
+	static size_t		common_code_length = 0;
+	static const char  *codeblock_head =
+		"#ifdef __cplusplus\n"
+		"extern \"C\" {\n"
+		"#endif	/* __cplusplus */\n";
+	static size_t		codeblock_head_length = 0;
+	static const char  *codeblock_end =
+		"#ifdef __cplusplus\n"
+		"}\n"
+		"#endif	/* __cplusplus */\n";
+	static size_t		codeblock_end_length;
+	size_t				nbytes;
+
+	/*
+	 * We need to prevent compiler to deal with function/variable symbols
+	 * according to C++ manner, because it adjust symbol names to support
+	 * overloading, then it makes cuModuleGetFunction confusable.
+	 */
+	if (!codeblock_head_length)
+		codeblock_head_length = strlen(codeblock_head);
+	nbytes = write(fdesc,
+				   codeblock_head,
+				   codeblock_head_length);
+	if (nbytes != codeblock_head_length)
+		elog(ERROR, "could not write to file \"%s\": %m", pathname);
 
 	/*
 	 * Common PG-Strom device routine
@@ -434,6 +457,15 @@ pgstrom_write_cuda_program(int fdesc, program_cache_entry *entry,
 				   entry->kern_source_len);
 	if (nbytes != entry->kern_source_len)
 		elog(ERROR, "could not write to file \"%s\": %m", pathname);
+
+	/* close none-c++ code block */
+	if (!codeblock_end_length)
+		codeblock_end_length = strlen(codeblock_end);
+	nbytes = write(fdesc,
+				   codeblock_end,
+				   codeblock_end_length);
+	if (nbytes != codeblock_end_length)
+		elog(ERROR, "could not write to file \"%s\": %m", pathname);
 }
 
 static void
@@ -462,10 +494,6 @@ __build_cuda_program(program_cache_entry *old_entry)
 	 */
 	initStringInfo(&buf);
 	appendStringInfo(&buf,
-					 "#include \"cuda_runtime.h\"\n"
-					 "#include \"crt/device_runtime.h\"\n"
-					 "#include \"common_functions.h\"\n"
-					 "\n"
 					 "#define CUDA_DEVICE_CODE\n"
 					 "#define HOSTPTRLEN %u\n"
 					 "#define DEVICEPTRLEN %lu\n"
@@ -483,21 +511,21 @@ __build_cuda_program(program_cache_entry *old_entry)
 					 itemid_length_shift,
 					 MAXIMUM_ALIGNOF);
 
-	fdesc = pgstrom_open_tempfile(".gpu", &source_pathname);
+	fdesc = pgstrom_open_tempfile(".cu", &source_pathname);
 	nbytes = write(fdesc, buf.data, buf.len);
 	if (nbytes != buf.len)
 		elog(ERROR, "could not write to file \"%s\": %m", source_pathname);
 	pgstrom_write_cuda_program(fdesc, old_entry, source_pathname);
 	CloseTransientFile(fdesc);
 	strncpy(basename, source_pathname, sizeof(basename));
-	basename[strlen(source_pathname) - 4] = '\0';
+	basename[strlen(source_pathname) - 3] = '\0';
 
 	/*
 	 * Makes a command line to be kicked
 	 */
 	initStringInfo(&cmdline);
 	appendStringInfo(&cmdline,
-					 "env LANG=C %s %s --ptx -o %s.ptx",
+					 "env LANG=C %s -x cu %s --ptx -o %s.ptx",
 					 pgstrom_nvcc_path,
 					 source_pathname,
 					 basename);
@@ -646,14 +674,14 @@ __build_cuda_program(program_cache_entry *old_entry)
 	/*
 	 * Remove temporary files (or retain for debug)
 	 */
-	if (cuda_binary)
+	if (cuda_binary && !old_entry->retain_cuda_program)
 	{
 		snprintf(pathname, sizeof(pathname), "%s.ptx", basename);
 		if (unlink(pathname) != 0)
 			elog(WARNING, "could not cleanup \"%s\" : %m", pathname);
 	}
 
-	if (build_log)
+	if (build_log && !old_entry->retain_cuda_program)
 	{
 		snprintf(pathname, sizeof(pathname), "%s.log", basename);
 		if (unlink(pathname) != 0)
