@@ -34,6 +34,7 @@
 #include "cuda_numeric.h"
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 
 /* path for temporary prefix */
 #define PGSTROM_TEMP_FILE_PREFIX	"strom_"
