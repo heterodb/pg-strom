@@ -408,6 +408,7 @@ pgstrom_accum_perfmon(pgstrom_perfmon *accum, const pgstrom_perfmon *pfm)
 	accum->time_outer_load		+= pfm->time_outer_load;
 	accum->time_materialize		+= pfm->time_materialize;
 	accum->time_launch_cuda		+= pfm->time_launch_cuda;
+	accum->time_sync_tasks		+= pfm->time_sync_tasks;
 	accum->num_dma_send			+= pfm->num_dma_send;
 	accum->num_dma_recv			+= pfm->num_dma_recv;
 	accum->bytes_dma_send		+= pfm->bytes_dma_send;
@@ -464,15 +465,13 @@ bytesz_unitary_format(double nbytes)
 }
 
 static char *
-usecond_unitary_format(double usecond)
+milliseconds_unitary_format(double milliseconds)
 {
-	if (usecond > 300.0 * 1000.0 * 1000.0)
-		return psprintf("%.2fmin", usecond / (60.0 * 1000.0 * 1000.0));
-	else if (usecond > 8000.0 * 1000.0)
-		return psprintf("%.2fsec", usecond / (1000.0 * 1000.0));
-	else if (usecond > 8000.0)
-		return psprintf("%.2fms", usecond / 1000.0);
-	return psprintf("%uus", (unsigned int)usecond);
+	if (milliseconds > 300000.0)	/* more then 5min */
+		return psprintf("%.2fmin", milliseconds / 60000.0);
+	else if (milliseconds > 8000.0)	/* more than 8sec */
+		return psprintf("%.2fsec", milliseconds / 1000.0);
+	return psprintf("%.2fms", milliseconds);
 }
 
 void
@@ -489,32 +488,39 @@ pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 	if (pfm->time_inner_load > 0.0)
 	{
 		snprintf(buf, sizeof(buf), "%s",
-				 usecond_unitary_format(pfm->time_inner_load));
+				 milliseconds_unitary_format(pfm->time_inner_load));
 		ExplainPropertyText("total time for inner load", buf, es);
 
 		snprintf(buf, sizeof(buf), "%s",
-				 usecond_unitary_format(pfm->time_outer_load));
+				 milliseconds_unitary_format(pfm->time_outer_load));
 		ExplainPropertyText("total time for outer load", buf, es);
 	}
 	else
 	{
 		snprintf(buf, sizeof(buf), "%s",
-				 usecond_unitary_format(pfm->time_outer_load));
+				 milliseconds_unitary_format(pfm->time_outer_load));
 		ExplainPropertyText("total time to load", buf, es);
 	}
 
 	if (pfm->time_materialize > 0.0)
 	{
 		snprintf(buf, sizeof(buf), "%s",
-                 usecond_unitary_format(pfm->time_materialize));
+                 milliseconds_unitary_format(pfm->time_materialize));
 		ExplainPropertyText("total time to materialize", buf, es);
 	}
 
 	if (pfm->time_launch_cuda > 0.0)
 	{
 		snprintf(buf, sizeof(buf), "%s",
-				 usecond_unitary_format(pfm->time_launch_cuda));
+				 milliseconds_unitary_format(pfm->time_launch_cuda));
 		ExplainPropertyText("total time to CUDA commands", buf, es);
+	}
+
+	if (pfm->time_sync_tasks > 0.0)
+	{
+		snprintf(buf, sizeof(buf), "%s",
+				 milliseconds_unitary_format(pfm->time_sync_tasks));
+		ExplainPropertyText("total time to synchronize", buf, es);
 	}
 
 	if (pfm->num_dma_send > 0)
@@ -525,7 +531,7 @@ pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 				 "%s/sec, len: %s, time: %s, count: %u",
 				 bytesz_unitary_format(band),
 				 bytesz_unitary_format((double)pfm->bytes_dma_send),
-				 usecond_unitary_format(pfm->time_dma_send),
+				 milliseconds_unitary_format(pfm->time_dma_send),
 				 pfm->num_dma_send);
 		ExplainPropertyText("DMA send", buf, es);
 	}
@@ -538,7 +544,7 @@ pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 				 "%s/sec, len: %s, time: %s, count: %u",
 				 bytesz_unitary_format(band),
 				 bytesz_unitary_format((double)pfm->bytes_dma_recv),
-				 usecond_unitary_format(pfm->time_dma_recv),
+				 milliseconds_unitary_format(pfm->time_dma_recv),
 				 pfm->num_dma_recv);
 		ExplainPropertyText("DMA recv", buf, es);
 	}
@@ -547,19 +553,19 @@ pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 	if (pfm->num_kern_qual > 0)
 	{
 		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 usecond_unitary_format(pfm->time_kern_qual),
-                 usecond_unitary_format(pfm->time_kern_qual /
-										(double)pfm->num_kern_prep),
-                 pfm->num_kern_prep);
+				 milliseconds_unitary_format(pfm->time_kern_qual),
+                 milliseconds_unitary_format(pfm->time_kern_qual /
+											 (double)pfm->num_kern_qual),
+                 pfm->num_kern_qual);
 		ExplainPropertyText("Qual kernel exec", buf, es);
 	}
 	/* in case of gpuhashjoin */
 	if (pfm->num_kern_join > 0)
 	{
 		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 usecond_unitary_format(pfm->time_kern_join),
-                 usecond_unitary_format(pfm->time_kern_join /
-										(double)pfm->num_kern_join),
+				 milliseconds_unitary_format(pfm->time_kern_join),
+                 milliseconds_unitary_format(pfm->time_kern_join /
+											 (double)pfm->num_kern_join),
                  pfm->num_kern_join);
 		ExplainPropertyText("Hash-join main kernel", buf, es);
 	}
@@ -567,9 +573,9 @@ pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 	if (pfm->num_kern_proj > 0)
 	{
 		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 usecond_unitary_format(pfm->time_kern_proj),
-                 usecond_unitary_format(pfm->time_kern_proj /
-										(double)pfm->num_kern_proj),
+				 milliseconds_unitary_format(pfm->time_kern_proj),
+                 milliseconds_unitary_format(pfm->time_kern_proj /
+											 (double)pfm->num_kern_proj),
                  pfm->num_kern_proj);
 		ExplainPropertyText("Hash-join projection", buf, es);
 	}
@@ -577,9 +583,9 @@ pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 	if (pfm->num_kern_prep > 0)
 	{
 		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 usecond_unitary_format(pfm->time_kern_prep),
-				 usecond_unitary_format(pfm->time_kern_prep /
-										(double)pfm->num_kern_prep),
+				 milliseconds_unitary_format(pfm->time_kern_prep),
+				 milliseconds_unitary_format(pfm->time_kern_prep /
+											 (double)pfm->num_kern_prep),
 				 pfm->num_kern_prep);
         ExplainPropertyText("Aggregate preparation", buf, es);
 	}
@@ -587,9 +593,9 @@ pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 	if (pfm->num_kern_lagg > 0)
 	{
 		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 usecond_unitary_format((double)pfm->time_kern_lagg),
-				 usecond_unitary_format((double)pfm->time_kern_lagg /
-										(double)pfm->num_kern_lagg),
+				 milliseconds_unitary_format((double)pfm->time_kern_lagg),
+				 milliseconds_unitary_format((double)pfm->time_kern_lagg /
+											 (double)pfm->num_kern_lagg),
 				 pfm->num_kern_gagg);
         ExplainPropertyText("Local reduction kernel", buf, es);
 	}
@@ -598,9 +604,9 @@ pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 	if (pfm->num_prep_sort > 0)
 	{
 		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 usecond_unitary_format(pfm->time_prep_sort),
-				 usecond_unitary_format(pfm->time_prep_sort /
-										(double)pfm->num_gpu_sort),
+				 milliseconds_unitary_format(pfm->time_prep_sort),
+				 milliseconds_unitary_format(pfm->time_prep_sort /
+											 (double)pfm->num_gpu_sort),
 				 pfm->num_gpu_sort);
 		ExplainPropertyText("GPU sort prep", buf, es);
 	}
@@ -608,9 +614,9 @@ pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 	if (pfm->num_gpu_sort > 0)
 	{
 		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 usecond_unitary_format(pfm->time_gpu_sort),
-				 usecond_unitary_format(pfm->time_gpu_sort /
-										(double)pfm->num_gpu_sort),
+				 milliseconds_unitary_format(pfm->time_gpu_sort),
+				 milliseconds_unitary_format(pfm->time_gpu_sort /
+											 (double)pfm->num_gpu_sort),
 				 pfm->num_gpu_sort);
 		ExplainPropertyText("GPU sort exec", buf, es);
 	}
@@ -620,16 +626,16 @@ pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 		cl_double	overhead;
 
 		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 usecond_unitary_format(pfm->time_cpu_sort),
-				 usecond_unitary_format(pfm->time_cpu_sort /
-										(double)pfm->num_cpu_sort),
+				 milliseconds_unitary_format(pfm->time_cpu_sort),
+				 milliseconds_unitary_format(pfm->time_cpu_sort /
+											 (double)pfm->num_cpu_sort),
 				 pfm->num_cpu_sort);
 		ExplainPropertyText("CPU sort exec", buf, es);
 
 		overhead = pfm->time_cpu_sort_real - pfm->time_cpu_sort;
 		snprintf(buf, sizeof(buf), "overhead: %s, sync: %s",
-				 usecond_unitary_format(overhead),
-				 usecond_unitary_format(pfm->time_bgw_sync));
+				 milliseconds_unitary_format(overhead),
+				 milliseconds_unitary_format(pfm->time_bgw_sync));
 		ExplainPropertyText("BGWorker", buf, es);
 	}
 
@@ -637,25 +643,25 @@ pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 	if (pfm->time_debug1 > 0.0)
 	{
 		snprintf(buf, sizeof(buf), "debug1: %s",
-				 usecond_unitary_format(pfm->time_debug1));
+				 milliseconds_unitary_format(pfm->time_debug1));
 		ExplainPropertyText("debug-1", buf, es);
 	}
 	if (pfm->time_debug2 > 0.0)
 	{
 		snprintf(buf, sizeof(buf), "debug2: %s",
-				 usecond_unitary_format(pfm->time_debug2));
+				 milliseconds_unitary_format(pfm->time_debug2));
 		ExplainPropertyText("debug-2", buf, es);
 	}
 	if (pfm->time_debug3 > 0.0)
 	{
 		snprintf(buf, sizeof(buf), "debug3: %s",
-				 usecond_unitary_format(pfm->time_debug3));
+				 milliseconds_unitary_format(pfm->time_debug3));
 		ExplainPropertyText("debug-3", buf, es);
 	}
 	if (pfm->time_debug4 > 0.0)
 	{
 		snprintf(buf, sizeof(buf), "debug4: %s",
-				 usecond_unitary_format(pfm->time_debug4));
+				 milliseconds_unitary_format(pfm->time_debug4));
 		ExplainPropertyText("debug-4", buf, es);
 	}
 }

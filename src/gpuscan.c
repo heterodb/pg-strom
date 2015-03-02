@@ -134,8 +134,7 @@ typedef struct {
 	pgstrom_gpuscan *curr_chunk;
 	uint32			curr_index;
 	cl_uint			num_rechecked;
-	cl_uint			num_running;
-	pgstrom_perfmon	pfm;	/* sum of performance counter */
+//	cl_uint			num_running;
 } GpuScanState;
 
 /* forward declarations */
@@ -641,9 +640,6 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->curr_chunk = NULL;
 	gss->curr_index = 0;
     gss->num_rechecked = 0;
-
-	/* Is perfmon needed? */
-	gss->pfm.enabled = pgstrom_perfmon_enabled;
 }
 
 /*
@@ -787,8 +783,7 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	if (gss->curr_blknum > gss->last_blknum)
 		return NULL;
 
-	if (gss->pfm.enabled)
-		gettimeofday(&tv1, NULL);
+	PERFMON_BEGIN(&gss->gts.pfm_accum, &tv1);
 
 	while (!gpuscan && !end_of_scan)
 	{
@@ -824,13 +819,8 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 				end_of_scan = true;
 		}
 	}
+	PERFMON_END(&gss->gts.pfm_accum, time_outer_load, &tv1, &tv2);
 
-	/* update perfmon statistics */
-	if (gss->pfm.enabled)
-	{
-		gettimeofday(&tv2, NULL);
-		gpuscan->task.pfm.time_outer_load += timeval_diff(&tv1, &tv2);
-	}
 	return gpuscan;
 }
 
@@ -847,8 +837,7 @@ gpuscan_next_tuple(GpuScanState *gss)
 	if (!gpuscan)
 		return false;
 
-	if (gss->pfm.enabled)
-		gettimeofday(&tv1, NULL);
+	PERFMON_BEGIN(&gss->gts.pfm_accum, &tv1);
 
    	while (gss->curr_index < kresults->nitems)
 	{
@@ -888,11 +877,8 @@ gpuscan_next_tuple(GpuScanState *gss)
 		}
 		break;
 	}
-	if (gss->pfm.enabled)
-	{
-		gettimeofday(&tv2, NULL);
-		gss->pfm.time_materialize += timeval_diff(&tv1, &tv2);
-	}
+	PERFMON_END(&gss->gts.pfm_accum, time_materialize, &tv1, &tv2);
+
 	return slot;
 }
 
@@ -901,6 +887,10 @@ pgstrom_accum_gpuscan_perfmon(GpuScanState *gss, pgstrom_gpuscan *gpuscan)
 {
 	float		elapsed;
 	CUresult	rc;
+
+	rc = cuCtxPushCurrent(gpuscan->task.cuda_context);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
 
 	/* Time for DMA send */
 	rc = cuEventElapsedTime(&elapsed,
@@ -928,11 +918,17 @@ pgstrom_accum_gpuscan_perfmon(GpuScanState *gss, pgstrom_gpuscan *gpuscan)
 
 	/* accumulate them */
 	pgstrom_accum_perfmon(&gss->gts.pfm_accum, &gpuscan->task.pfm);
+
+	rc = cuCtxPopCurrent(NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuCtxPopCurrent: %s", errorText(rc));
+
 	return;
 
 error:
 	elog(WARNING, "failed on cuEventElapsedTime: %s", errorText(rc));
 	gss->gts.pfm_accum.enabled = false;
+	Assert(false);
 }
 
 /*
@@ -947,6 +943,7 @@ pgstrom_fetch_gpuscan(GpuScanState *gss)
 {
 	pgstrom_gpuscan *gpuscan;
 	dlist_node	   *dnode;
+	struct timeval tv1, tv2;
 
 	/*
 	 * In case when no device code will be executed, we don't need to have
@@ -963,33 +960,51 @@ pgstrom_fetch_gpuscan(GpuScanState *gss)
 	do {
 		CHECK_FOR_INTERRUPTS();
 		SpinLockAcquire(&gss->gts.lock);
-		while (pgstrom_max_async_chunks > (gss->gts.num_running_tasks +
-										   gss->gts.num_pending_tasks +
-										   gss->gts.num_completed_tasks))
+		if (!gss->gts.scan_done)
 		{
-			/* no urgent reason why to make the scan progress */
-			if (!dlist_is_empty(&gss->gts.completed_tasks) &&
-				pgstrom_max_async_chunks < (gss->gts.num_running_tasks +
-											gss->gts.num_pending_tasks))
-				break;
-			SpinLockRelease(&gss->gts.lock);
-
-			gpuscan = pgstrom_load_gpuscan(gss);
-
-			SpinLockAcquire(&gss->gts.lock);
-			if (!gpuscan)
+			while (pgstrom_max_async_chunks > (gss->gts.num_running_tasks +
+											   gss->gts.num_pending_tasks +
+											   gss->gts.num_completed_tasks))
 			{
-				elog(INFO, "scan done");
+				/* no urgent reason why to make the scan progress */
+				if (!dlist_is_empty(&gss->gts.completed_tasks) &&
+					pgstrom_max_async_chunks < (gss->gts.num_running_tasks +
+												gss->gts.num_pending_tasks))
+					break;
+				SpinLockRelease(&gss->gts.lock);
+
+				gpuscan = pgstrom_load_gpuscan(gss);
+
+				SpinLockAcquire(&gss->gts.lock);
+				if (!gpuscan)
+				{
+					gss->gts.scan_done = true;
+					elog(INFO, "scan done");
+					break;
+				}
+				dlist_push_tail(&gss->gts.pending_tasks,
+								&gpuscan->task.chain);
+				gss->gts.num_pending_tasks++;
+				SpinLockRelease(&gss->gts.lock);
+
+				pgstrom_launch_pending_tasks(&gss->gts);
+
+				SpinLockAcquire(&gss->gts.lock);
+			}
+		}
+		else
+		{
+			if (gss->gts.num_pending_tasks > 0)
+			{
+				SpinLockRelease(&gss->gts.lock);
+				pgstrom_launch_pending_tasks(&gss->gts);
+				SpinLockAcquire(&gss->gts.lock);
+			}
+			else if (gss->gts.num_running_tasks == 0)
+			{
+				SpinLockRelease(&gss->gts.lock);
 				break;
 			}
-			dlist_push_tail(&gss->gts.pending_tasks,
-							&gpuscan->task.chain);
-			gss->gts.num_pending_tasks++;
-			SpinLockRelease(&gss->gts.lock);
-
-			pgstrom_launch_pending_tasks(&gss->gts);
-
-			SpinLockAcquire(&gss->gts.lock);
 		}
 		SpinLockRelease(&gss->gts.lock);
 	} while (pgstrom_waitfor_ready_tasks(&gss->gts));
@@ -998,13 +1013,17 @@ pgstrom_fetch_gpuscan(GpuScanState *gss)
 	 * Picks up next available chunk if any
 	 */
 	SpinLockAcquire(&gss->gts.lock);
+	if (gss->gts.num_completed_tasks == 0)
+	{
+		Assert(dlist_is_empty(&gss->gts.completed_tasks));
+		SpinLockRelease(&gss->gts.lock);
+		return NULL;
+	}
 	gss->gts.num_completed_tasks--;
 	dnode = dlist_pop_head_node(&gss->gts.completed_tasks);
 	gpuscan = dlist_container(pgstrom_gpuscan, task.chain, dnode);
 	memset(&gpuscan->task.chain, 0, sizeof(dlist_node));
 	SpinLockRelease(&gss->gts.lock);
-
-	elog(INFO, "pick up gpuscan %p", gpuscan);
 
 	/*
 	 *
@@ -1014,7 +1033,9 @@ pgstrom_fetch_gpuscan(GpuScanState *gss)
 		pgstrom_accum_gpuscan_perfmon(gss, gpuscan);
 
 	/* release CUDA resources */
+	PERFMON_BEGIN(&gss->gts.pfm_accum, &tv1);
 	__pgstrom_release_gpuscan(gpuscan);
+	PERFMON_END(&gss->gts.pfm_accum, time_debug2, &tv1, &tv2);
 
 	/*
 	 * Raise an error, if any run-time error was reported
@@ -1024,7 +1045,6 @@ pgstrom_fetch_gpuscan(GpuScanState *gss)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("PG-Strom: CUDA execution error (%s)",
 						errorText(gpuscan->task.errcode))));
-
 	return gpuscan;
 }
 
@@ -1086,8 +1106,7 @@ gpuscan_exec_bulk(CustomScanState *node)
 	pgstrom_data_store *pds = NULL;
 	struct timeval		tv1, tv2;
 
-	if (gss->pfm.enabled)
-		gettimeofday(&tv1, NULL);
+	PERFMON_BEGIN(&gss->gts.pfm_accum, &tv1);
 
 	while (gss->curr_blknum < gss->last_blknum)
 	{
@@ -1107,12 +1126,9 @@ gpuscan_exec_bulk(CustomScanState *node)
 		pgstrom_release_data_store(pds);
         pds = NULL;
 	}
-	/* update perfmon statistics */
-	if (gss->pfm.enabled)
-	{
-		gettimeofday(&tv2, NULL);
-		gss->pfm.time_outer_load += timeval_diff(&tv1, &tv2);
-	}
+
+	PERFMON_END(&gss->gts.pfm_accum, time_outer_load, &tv1, &tv2);
+
 	return pds;
 }
 
@@ -1153,8 +1169,8 @@ gpuscan_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	pgstrom_explain_custom_flags(&gss->css, es);
 	pgstrom_explain_kernel_source(&gss->gts, es);
 
-	if (es->analyze && gss->pfm.enabled)
-		pgstrom_explain_perfmon(&gss->pfm, es);
+	if (es->analyze && gss->gts.pfm_accum.enabled)
+		pgstrom_explain_perfmon(&gss->gts.pfm_accum, es);
 }
 
 void
@@ -1278,7 +1294,6 @@ pgstrom_respond_gpuscan(CUstream stream, CUresult status, void *private)
 	SpinLockRelease(&gts->lock);
 
 	SetLatch(&MyProc->procLatch);
-	elog(INFO, "pgstrom_respond_gpuscan (gpuscan=%p, rc=%s)", gpuscan, errorText(gpuscan->task.errcode));
 }
 
 static bool
@@ -1326,27 +1341,38 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	}
 
 	/*
-	 * Creation of event objects
+	 * Creation of event objects, if any
 	 */
-	rc = cuEventCreate(&gpuscan->ev_dma_send_start, CU_EVENT_DEFAULT);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+	if (gpuscan->task.pfm.enabled)
+	{
+		rc = cuEventCreate(&gpuscan->ev_dma_send_start, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 
-	rc = cuEventCreate(&gpuscan->ev_dma_send_stop, CU_EVENT_DEFAULT);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+		rc = cuEventCreate(&gpuscan->ev_dma_send_stop, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 
-	rc = cuEventCreate(&gpuscan->ev_dma_recv_start, CU_EVENT_DEFAULT);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+		rc = cuEventCreate(&gpuscan->ev_dma_recv_start, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 
-	rc = cuEventCreate(&gpuscan->ev_dma_recv_stop, CU_EVENT_DEFAULT);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+		rc = cuEventCreate(&gpuscan->ev_dma_recv_stop, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+	}
 
 	/*
 	 * OK, enqueue a series of requests
 	 */
+	if (gpuscan->task.pfm.enabled)
+	{
+		rc = cuEventRecord(gpuscan->ev_dma_send_start,
+						   gpuscan->task.cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
+	}
+
 	offset = KERN_GPUSCAN_DMASEND_OFFSET(&gpuscan->kern);
 	length = KERN_GPUSCAN_DMASEND_LENGTH(&gpuscan->kern);
 	rc = cuMemcpyHtoDAsync(gpuscan->m_gpuscan,
@@ -1366,6 +1392,14 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 	gpuscan->task.pfm.bytes_dma_send += kds->length;
     gpuscan->task.pfm.num_dma_send++;
+
+	if (gpuscan->task.pfm.enabled)
+	{
+		rc = cuEventRecord(gpuscan->ev_dma_send_stop,
+						   gpuscan->task.cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
+	}
 
 	/*
 	 * Launch kernel function
@@ -1395,6 +1429,14 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	/*
 	 * Recv DMA call
 	 */
+	if (gpuscan->task.pfm.enabled)
+	{
+		rc = cuEventRecord(gpuscan->ev_dma_recv_start,
+						   gpuscan->task.cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
+	}
+
 	offset = KERN_GPUSCAN_DMARECV_OFFSET(&gpuscan->kern);
 	length = KERN_GPUSCAN_DMARECV_LENGTH(&gpuscan->kern);
 	rc = cuMemcpyDtoHAsync(kresults,
@@ -1403,6 +1445,14 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 						   gpuscan->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
+
+	if (gpuscan->task.pfm.enabled)
+	{
+		rc = cuEventRecord(gpuscan->ev_dma_recv_stop,
+						   gpuscan->task.cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
+	}
 
 	/*
 	 * Register callback
@@ -1429,13 +1479,8 @@ static bool
 pgstrom_process_gpuscan(GpuTask *task)
 {
 	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) task;
-	GpuTaskState	   *gts = gpuscan->task.gts;
 	bool				status;
 	CUresult			rc;
-	struct timeval		tv1, tv2;
-
-	if (task->pfm.enabled)
-		gettimeofday(&tv1, NULL);
 
 	/* Switch CUDA Context */
 	rc = cuCtxPushCurrent(gpuscan->task.cuda_context);
@@ -1445,7 +1490,6 @@ pgstrom_process_gpuscan(GpuTask *task)
 	PG_TRY();
 	{
 		status = __pgstrom_process_gpuscan(gpuscan);
-		elog(INFO, "pgstrom_process_gpuscan (gpuscan=%p, launch=%d)", gpuscan, status);
 	}
 	PG_CATCH();
 	{
@@ -1461,10 +1505,5 @@ pgstrom_process_gpuscan(GpuTask *task)
 	if (rc != CUDA_SUCCESS)
 		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
 
-	if (task->pfm.enabled)
-	{
-		gettimeofday(&tv2, NULL);
-		task->pfm.time_launch_cuda = timeval_diff(&tv1, &tv2);
-	}
 	return status;
 }

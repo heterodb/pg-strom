@@ -407,6 +407,7 @@ pgstrom_init_gputaststate(GpuContext *gcontext, GpuTaskState *gts,
 	gts->kern_source = NULL;	/* to be set later */
 	gts->extra_flags = 0;		/* to be set later */
 	gts->cuda_modules = NULL;
+	gts->scan_done = false;
 	SpinLockInit(&gts->lock);
 	dlist_init(&gts->tracked_tasks);
 	dlist_init(&gts->running_tasks);
@@ -417,6 +418,7 @@ pgstrom_init_gputaststate(GpuContext *gcontext, GpuTaskState *gts,
 	gts->num_completed_tasks = 0;
 	gts->cb_cleanup = cb_cleanup;
 	memset(&gts->pfm_accum, 0, sizeof(pgstrom_perfmon));
+	gts->pfm_accum.enabled = pgstrom_perfmon_enabled;
 }
 
 void
@@ -432,6 +434,7 @@ pgstrom_init_gputask(GpuTaskState *gts, GpuTask *task,
 	SpinLockAcquire(&gts->lock);
 	dlist_push_tail(&gts->tracked_tasks, &task->tracker);
 	SpinLockRelease(&gts->lock);
+	task->pfm.enabled = gts->pfm_accum.enabled;
 }
 
 /*
@@ -446,6 +449,7 @@ pgstrom_launch_pending_tasks(GpuTaskState *gts)
 	GpuTask		   *gtask;
 	dlist_node	   *dnode;
 	bool			launch;
+	struct timeval	tv1, tv2;
 
 	/*
 	 * Unless kernel build is completed, we cannot launch it.
@@ -459,6 +463,8 @@ pgstrom_launch_pending_tasks(GpuTaskState *gts)
 	SpinLockAcquire(&gts->lock);
 	while (!dlist_is_empty(&gts->pending_tasks))
 	{
+		PERFMON_BEGIN(&gts->pfm_accum, &tv1);
+
 		dnode = dlist_pop_head_node(&gts->pending_tasks);
 		gtask = dlist_container(GpuTask, chain, dnode);
 		gts->num_pending_tasks--;
@@ -525,6 +531,7 @@ pgstrom_launch_pending_tasks(GpuTaskState *gts)
 				gts->num_pending_tasks++;
 			}
 		}
+		PERFMON_END(&gts->pfm_accum, time_launch_cuda, &tv1, &tv2);
 	}
 	SpinLockRelease(&gts->lock);
 }
@@ -564,12 +571,19 @@ pgstrom_waitfor_ready_tasks(GpuTaskState *gts)
 
 		if (wait_latch)
 		{
+			struct timeval	tv1, tv2;
+
+			PERFMON_BEGIN(&gts->pfm_accum, &tv1);
+
 			rc = WaitLatch(&MyProc->procLatch,
 						   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
 						   !short_timeout ? 5000 : 200);
 			ResetLatch(&MyProc->procLatch);
 			if (rc & WL_POSTMASTER_DEATH)
 				elog(ERROR, "Emergency bail out because of Postmaster crash");
+
+			PERFMON_END(&gts->pfm_accum, time_sync_tasks, &tv1, &tv2);
+
 			/* flush pending tasks first */
 			pgstrom_launch_pending_tasks(gts);
 		}

@@ -90,6 +90,7 @@ typedef struct {
 	cl_double	time_materialize;	/* time to materialize the result */
 	/*-- perfmon to launch CUDA kernel --*/
 	cl_double	time_launch_cuda;	/* time to kick CUDA commands */
+	cl_double	time_sync_tasks;	/* time to synchronize tasks */
 	/*-- perfmon for DMA send/recv --*/
 	cl_uint		num_dma_send;	/* number of DMA send request */
 	cl_uint		num_dma_recv;	/* number of DMA receive request */
@@ -134,9 +135,22 @@ typedef struct {
 } pgstrom_perfmon;
 
 /* time interval in milliseconds */
-#define timeval_diff(tv1,tv2)									\
-	(((double)(((tv2)->tv_sec * 1000000L + (tv2)->tv_usec) -	\
-			   ((tv1)->tv_sec * 1000000L + (tv2)->tv_usec))) / 1000000000.0)
+#define PERFMON_BEGIN(pfm_accum,tv1)			\
+	do {										\
+		if ((pfm_accum)->enabled)				\
+			gettimeofday((tv1), NULL);			\
+	} while(0)
+
+#define PERFMON_END(pfm_accum,field,tv1,tv2)							\
+	do {																\
+		if ((pfm_accum)->enabled)										\
+		{																\
+			gettimeofday((tv2), NULL);									\
+			(pfm_accum)->field +=										\
+				((double)(((tv2)->tv_sec - (tv1)->tv_sec) * 1000000L +	\
+						  ((tv2)->tv_usec - (tv1)->tv_usec)) / 1000.0);	\
+		}																\
+	} while(0)
 
 /*
  *
@@ -164,6 +178,7 @@ typedef struct GpuTaskState
 	const char	   *kern_source;
 	cl_uint			extra_flags;
 	CUmodule	   *cuda_modules;	/* CUmodules for each CUDA context */
+	bool			scan_done;		/* no rows to read, if true */
 	slock_t			lock;			/* protection of the fields below */
 	struct GpuTask *curr_task;		/* a task currently processed */
 	dlist_head		tracked_tasks;	/* for resource tracking */
