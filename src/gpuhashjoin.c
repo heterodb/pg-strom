@@ -19,6 +19,7 @@
 
 #include "access/sysattr.h"
 #include "catalog/pg_type.h"
+#include "common/pg_crc.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -39,11 +40,11 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
-#include "utils/pg_crc.h"
 #include "utils/ruleutils.h"
 #include "utils/selfuncs.h"
 #include "pg_strom.h"
 #include "opencl_hashjoin.h"
+#include "opencl_numeric.h"
 
 /* static variables */
 static set_join_pathlist_hook_type set_join_pathlist_next;
@@ -319,6 +320,7 @@ typedef struct
 	pgstrom_gpuhashjoin *curr_ghjoin;
 	cl_uint			curr_index;
 	bool			curr_recheck;
+	HeapTupleData	curr_tuple;
 	cl_int			num_running;
 	dlist_head		ready_pscans;
 
@@ -339,7 +341,34 @@ typedef struct {
 	List		   *hash_keys;
 	List		   *hash_keylen;
 	List		   *hash_keybyval;
+	List		   *hash_keytype;
 } MultiHashState;
+
+/*
+ * BulkExecMultiHashNode
+ *
+ * Unlike BulkExecProcNode, it assumes the plannode returns MultiHashNode
+ * object, without any sanity checks.
+ */
+static MultiHashNode *
+BulkExecMultiHashNode(PlanState *plannode)
+{
+	CHECK_FOR_INTERRUPTS();
+
+	if (plannode->chgParam != NULL)		/* something changed */
+		ExecReScan(plannode);			/* let ReScan handle this */
+
+	/* rough check, not sufficient... */
+	if (IsA(plannode, CustomScanState))
+	{
+		CustomScanState	   *css = (CustomScanState *) plannode;
+		PGStromExecMethods *methods = (PGStromExecMethods *) css->methods;
+		Assert(methods->ExecCustomBulk != NULL);
+		return methods->ExecCustomBulk(css);
+	}
+	elog(ERROR, "unrecognized node type: %d", (int) nodeTag(plannode));
+}
+
 
 /* declaration of static functions */
 static void clserv_process_gpuhashjoin(pgstrom_message *message);
@@ -537,8 +566,7 @@ retry:
 	 * Update estimated hashtable_size, but ensure hashtable_size
 	 * shall be allocated at least
 	 */
-	gpath->hashtable_size = Max(hashtable_size,
-								pgstrom_chunk_size << 20);
+	gpath->hashtable_size = Max(hashtable_size, pgstrom_chunk_size());
 
 	/*
 	 * Update JoinCostWorkspace according to numbatches
@@ -778,6 +806,8 @@ try_gpuhashjoin_path(PlannerInfo *root,
 	GpuHashJoinPath	   *gpath;
 	Relids				required_outer;
 	JoinCostWorkspace	workspace;
+	ListCell		   *cell;
+	bool				support_bulkload;
 
 	required_outer = calc_non_nestloop_required_outer(outer_path,
 													  inner_path);
@@ -792,6 +822,30 @@ try_gpuhashjoin_path(PlannerInfo *root,
 	 * PlaceHolderVars that need to be computed at the join.
 	 */
 	required_outer = bms_add_members(required_outer, extra_lateral_rels);
+
+	/*
+	 * Check availability of bulkload in this joinrel. If child
+	 * GpuHashJoin is merginable, both of nodes have to support
+	 * bulkload.
+	 */
+	if (host_clauses != NIL)
+		support_bulkload = false;
+	else
+	{
+		support_bulkload = true;
+
+		foreach (cell, joinrel->reltargetlist)
+		{
+			Expr   *expr = lfirst(cell);
+
+			if (!IsA(expr, Var) &&
+				!pgstrom_codegen_available_expression(expr))
+			{
+				support_bulkload = false;
+				break;
+			}
+		}
+	}
 
 	/*
 	 * creation of gpuhashjoin path, without merging underlying gpuhashjoin.
@@ -809,7 +863,7 @@ try_gpuhashjoin_path(PlannerInfo *root,
 								  bms_copy(required_outer),
 								  &restrict_clauses);
 	gpath->cpath.path.pathkeys = NIL;
-	gpath->cpath.flags = 0;
+	gpath->cpath.flags = (support_bulkload ? CUSTOMPATH_SUPPORT_BULKLOAD : 0);
 	gpath->cpath.methods = &gpuhashjoin_path_methods;
 	gpath->outer_path = outer_path;
 	gpath->num_rels = 1;
@@ -841,6 +895,12 @@ try_gpuhashjoin_path(PlannerInfo *root,
 		GpuHashJoinPath	*outer_ghj = (GpuHashJoinPath *) outer_path;
 		int		num_rels = outer_ghj->num_rels;
 
+		if (support_bulkload)
+		{
+			if ((outer_ghj->cpath.flags & CUSTOMPATH_SUPPORT_BULKLOAD) == 0)
+				support_bulkload = false;
+		}
+
 		Assert(num_rels > 0);
 		gpath = palloc0(offsetof(GpuHashJoinPath, inners[num_rels + 1]));
 		NodeSetTag(gpath, T_CustomPath);
@@ -855,7 +915,8 @@ try_gpuhashjoin_path(PlannerInfo *root,
 									  bms_copy(required_outer),
 									  &restrict_clauses);
 		gpath->cpath.path.pathkeys = NIL;
-		gpath->cpath.flags = 0;
+		gpath->cpath.flags
+			= (support_bulkload ? CUSTOMPATH_SUPPORT_BULKLOAD : 0);
 		gpath->cpath.methods = &gpuhashjoin_path_methods;
 		gpath->num_rels = num_rels + 1;
 		gpath->outer_path = outer_ghj->outer_path;
@@ -1881,15 +1942,11 @@ create_gpuhashjoin_plan(PlannerInfo *root,
 	codegen_context context;
 	int			i;
 
-
-
-
-
 	ghjoin = makeNode(CustomScan);
 	ghjoin->scan.plan.targetlist = tlist;
 	ghjoin->scan.plan.qual = NIL;
 	ghjoin->scan.scanrelid = 0;	/* not related to any relation */
-	ghjoin->flags = 0;
+	ghjoin->flags = best_path->flags;
 	ghjoin->methods = &gpuhashjoin_plan_methods;
 
 	memset(&ghj_info, 0, sizeof(GpuHashJoinInfo));
@@ -1999,41 +2056,27 @@ create_gpuhashjoin_plan(PlannerInfo *root,
 	if (IsA(outer_plan, SeqScan) || IsA(outer_plan, CustomScan))
 	{
 		Query	   *parse = root->parse;
-		Index		outer_scanrelid = ((Scan *) outer_plan)->scanrelid;
-		Bitmapset  *outer_attrefs = NULL;
 		List	   *outer_quals = NULL;
 		Plan	   *alter_plan;
 
-		pull_varattnos((Node *)ghjoin->scan.plan.targetlist,
-					   outer_scanrelid,
-					   &outer_attrefs);
-		pull_varattnos((Node *)ghj_info.hash_clauses,
-					   outer_scanrelid,
-					   &outer_attrefs);
-		pull_varattnos((Node *)ghj_info.qual_clauses,
-					   outer_scanrelid,
-					   &outer_attrefs);
-		pull_varattnos((Node *)ghj_info.host_clauses,
-					   outer_scanrelid,
-					   &outer_attrefs);
-		alter_plan = gpuscan_try_replace_relscan(outer_plan,
-												 parse->rtable,
-												 outer_attrefs,
-												 &outer_quals);
+		alter_plan = pgstrom_try_replace_plannode(outer_plan,
+												  parse->rtable,
+												  &outer_quals);
 		if (alter_plan)
 		{
 			ghj_info.outer_quals = build_flatten_qualifier(outer_quals);
-			ghj_info.outer_bulkload = true;
-			outerPlan(ghjoin) = alter_plan;
+			outer_plan = alter_plan;
 		}
-		else
-			outerPlan(ghjoin) = outer_plan;
-
-		bms_free(outer_attrefs);
 	}
-	else
-		outerPlan(ghjoin) = outer_plan;
+	/* check bulkload availability */
+	if (IsA(outer_plan, CustomScan))
+	{
+		int		custom_flags = ((CustomScan *) outer_plan)->flags;
 
+		if ((custom_flags & CUSTOMPATH_SUPPORT_BULKLOAD) != 0)
+			ghj_info.outer_bulkload = true;
+	}
+	outerPlan(ghjoin) = outer_plan;
 	gpath->outer_plan = outer_plan;	/* for convenience below */
 
 	/*
@@ -2461,7 +2504,7 @@ retry:
 		MultiHashNode  *mhnode;
 
 		/* load an inner hash-table */
-		mhnode = (MultiHashNode *) BulkExecProcNode(inner_ps);
+		mhnode = BulkExecMultiHashNode(inner_ps);
 		if (!mhnode)
 		{
 			if (ghjs->pfm.enabled)
@@ -2533,7 +2576,7 @@ retry:
 			if (!pds)
 			{
 				pds = pgstrom_create_data_store_row(tupdesc,
-													pgstrom_chunk_size << 20,
+													pgstrom_chunk_size(),
 													ghjs->ntups_per_page);
 				pgstrom_track_object(&pds->sobj, 0);
 			}
@@ -2598,7 +2641,6 @@ static bool
 gpuhashjoin_next_tuple(GpuHashJoinState *ghjs)
 {
 	TupleTableSlot		   *ps_slot = ghjs->css.ss.ss_ScanTupleSlot;
-	TupleDesc				tupdesc = ps_slot->tts_tupleDescriptor;
 	pgstrom_gpuhashjoin	   *gpuhashjoin = ghjs->curr_ghjoin;
 	pgstrom_data_store	   *pds_dest = gpuhashjoin->pds_dest;
 	kern_data_store		   *kds_dest = pds_dest->kds;
@@ -2607,28 +2649,18 @@ gpuhashjoin_next_tuple(GpuHashJoinState *ghjs)
 	/*
 	 * TODO: All fallback code here
 	 */
-	Assert(kds_dest->format == KDS_FORMAT_TUPSLOT);
-
 	if (ghjs->pfm.enabled)
 		gettimeofday(&tv1, NULL);
 
 	while (ghjs->curr_index < kds_dest->nitems)
 	{
-		Datum		   *tts_values;
-		cl_char		   *tts_isnull;
 		int				index = ghjs->curr_index++;
 
 		/* fetch a result tuple */
-		ExecClearTuple(ps_slot);
-		tts_values = KERN_DATA_STORE_VALUES(kds_dest, index);
-		tts_isnull = KERN_DATA_STORE_ISNULL(kds_dest, index);
-		Assert(tts_values != NULL && tts_isnull != NULL);
-		memcpy(ps_slot->tts_values, tts_values,
-			   sizeof(Datum) * tupdesc->natts);
-		memcpy(ps_slot->tts_isnull, tts_isnull,
-			   sizeof(bool) * tupdesc->natts);
-		ExecStoreVirtualTuple(ps_slot);
-
+		pgstrom_fetch_data_store(ps_slot,
+								 pds_dest,
+								 index,
+								 &ghjs->curr_tuple);
 		if (ghjs->css.ss.ps.qual != NIL)
 		{
 			ExprContext	   *econtext = ghjs->css.ss.ps.ps_ExprContext;
@@ -2761,6 +2793,7 @@ gpuhashjoin_exec(CustomScanState *node)
 	while (!ghjs->curr_ghjoin || !gpuhashjoin_next_tuple(ghjs))
 	{
 		pgstrom_message	   *msg;
+		int					result_format;
 
 		/*
 		 * Release previous hashjoin chunk that
@@ -2780,8 +2813,13 @@ gpuhashjoin_exec(CustomScanState *node)
 		/*
 		 * Fetch a next hashjoin chunk already processed
 		 */
+		if ((ghjs->css.flags & CUSTOMPATH_PREFERE_ROW_FORMAT) == 0)
+			result_format = KDS_FORMAT_TUPSLOT;
+		else
+			result_format = KDS_FORMAT_ROW_FLAT;
+
 		ghjoin = pgstrom_fetch_gpuhashjoin(ghjs, &ghjs->curr_recheck,
-										   KDS_FORMAT_TUPSLOT);
+										   result_format);
 		if (!ghjoin)
 		{
 			ExecClearTuple(ps_slot);
@@ -2815,15 +2853,10 @@ gpuhashjoin_exec_bulk(CustomScanState *node)
 	pgstrom_data_store	   *pds_dest;
 	pgstrom_bulkslot	   *bulk = NULL;
 
-	/* must provide our own instrumentation support */
-	if (node->ss.ps.instrument)
-		InstrStartNode(node->ss.ps.instrument);
-
 	while (true)
 	{
 		bool		needs_rechecks;
 		cl_uint		nitems;
-		cl_uint		i, j;
 
 		ghjoin = pgstrom_fetch_gpuhashjoin(ghjs, &needs_rechecks,
 										   KDS_FORMAT_ROW_FLAT);
@@ -2850,7 +2883,7 @@ gpuhashjoin_exec_bulk(CustomScanState *node)
 		 * Make a bulk-slot according to the result
 		 */
 		nitems = pds_dest->kds->nitems;
-		bulk = palloc0(offsetof(pgstrom_bulkslot, rindex[nitems]));
+		bulk = palloc0(sizeof(pgstrom_bulkslot));
 		bulk->pds = pgstrom_get_data_store(pds_dest);
 		bulk->nvalids = -1;
 		pgstrom_track_object(&pds_dest->sobj, 0);
@@ -2860,31 +2893,12 @@ gpuhashjoin_exec_bulk(CustomScanState *node)
 		 * incremented above
 		 */
 		pgstrom_untrack_object(&ghjoin->msg.sobj);
-        pgstrom_put_message(&ghjoin->msg);
+		pgstrom_put_message(&ghjoin->msg);
 
-		/*
-		 * Reduce results if host-only qualifiers
-		 */
-		if (node->ss.ps.qual)
-		{
-			ExprContext	   *econtext = ghjs->css.ss.ps.ps_ExprContext;
-			TupleTableSlot *slot = ghjs->css.ss.ss_ScanTupleSlot;
-			HeapTupleData	tuple;
+		/* We never have host-only qualifiers */
+		Assert(!node->ss.ps.qual);
 
-			for (i=0, j=0; i < nitems; i++)
-			{
-				if (!pgstrom_fetch_data_store(slot, bulk->pds, i, &tuple))
-					elog(ERROR, "Bug? unable to fetch a result slot");
-				econtext->ecxt_scantuple = slot;
-
-				if (!ghjs->css.ss.ps.qual ||
-					ExecQual(ghjs->css.ss.ps.qual, econtext, false))
-					bulk->rindex[j++] = i;
-			}
-			bulk->nvalids = j;
-		}
-
-		if ((bulk->nvalids < 0 ? nitems : bulk->nvalids) > 0)
+		if (nitems > 0)
 			break;
 
 		/* If this chunk has no valid items, it does not make sense to
@@ -2895,18 +2909,6 @@ gpuhashjoin_exec_bulk(CustomScanState *node)
 		pgstrom_put_data_store(bulk->pds);
 		pfree(bulk);
 		bulk = NULL;
-	}
-
-	/* must provide our own instrumentation support */
-    if (node->ss.ps.instrument)
-	{
-		if (!bulk)
-			InstrStopNode(node->ss.ps.instrument, 0.0);
-		else
-			InstrStopNode(node->ss.ps.instrument,
-						  bulk->nvalids < 0 ?
-						  (double) bulk->pds->kds->nitems :
-						  (double) bulk->nvalids);
 	}
 	return bulk;
 }
@@ -3095,10 +3097,9 @@ gpuhashjoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	initStringInfo(&str);
 
 	/* name lookup context */
-	context = deparse_context_for_planstate((Node *) &node->ss.ps,
-											ancestors,
-											es->rtable,
-											es->rtable_names);
+	context = set_deparse_context_planstate(es->deparse_cxt,
+											(Node *) node,
+											ancestors);
 	/* pseudo scan tlist if verbose mode */
 	if (es->verbose)
 	{
@@ -3162,6 +3163,7 @@ gpuhashjoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	}
 	ExplainPropertyText("Bulkload", ghjs->outer_bulkload ? "On" : "Off", es);
 
+	show_custom_flags(&ghjs->css, es);
 	show_device_kernel(ghjs->dprog_key, es);
 
 	if (es->analyze && ghjs->pfm.enabled)
@@ -3222,6 +3224,7 @@ multihash_begin(CustomScanState *node, EState *estate, int eflags)
 	List		   *hash_keys = NIL;
 	List		   *hash_keylen = NIL;
 	List		   *hash_keybyval = NIL;
+	List		   *hash_keytype = NIL;
 	ListCell	   *cell;
 
 	/* check for unsupported flags */
@@ -3245,19 +3248,22 @@ multihash_begin(CustomScanState *node, EState *estate, int eflags)
 	 */
 	foreach (cell, mh_info->hash_keys)
 	{
+		Oid			type_oid = exprType(lfirst(cell));
 		int16		typlen;
 		bool		typbyval;
 
-		get_typlenbyval(exprType(lfirst(cell)), &typlen, &typbyval);
+		get_typlenbyval(type_oid, &typlen, &typbyval);
 
 		hash_keys = lappend(hash_keys,
 							ExecInitExpr(lfirst(cell), &mhs->css.ss.ps));
 		hash_keylen = lappend_int(hash_keylen, typlen);
 		hash_keybyval = lappend_int(hash_keybyval, typbyval);
+		hash_keytype = lappend_oid(hash_keytype, type_oid);
 	}
 	mhs->hash_keys = hash_keys;
 	mhs->hash_keylen = hash_keylen;
 	mhs->hash_keybyval = hash_keybyval;
+	mhs->hash_keytype = hash_keytype;
 
 	/*
 	 * initialize child nodes
@@ -3427,6 +3433,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		ListCell	   *lc1;
 		ListCell	   *lc2;
 		ListCell	   *lc3;
+		ListCell	   *lc4;
 
 		if (!mhs->outer_overflow)
 			scan_slot = ExecProcNode(outerPlanState(mhs));
@@ -3462,19 +3469,34 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		/* calculation of a hash value of this entry */
 		INIT_CRC32C(hash);
 		econtext->ecxt_scantuple = scan_slot;
-		forthree (lc1, mhs->hash_keys,
-				  lc2, mhs->hash_keylen,
-				  lc3, mhs->hash_keybyval)
+		forfour(lc1, mhs->hash_keys,
+				lc2, mhs->hash_keylen,
+				lc3, mhs->hash_keybyval,
+				lc4, mhs->hash_keytype)
 		{
 			ExprState  *clause = lfirst(lc1);
 			int			keylen = lfirst_int(lc2);
 			bool		keybyval = lfirst_int(lc3);
+			Oid			keytype = lfirst_oid(lc4);
+			int			errcode;
 			Datum		value;
 			bool		isnull;
 
 			value = ExecEvalExpr(clause, econtext, &isnull, NULL);
 			if (isnull)
 				continue;
+
+			/* fixup host representation to special internal format. */
+			if (keytype == NUMERICOID)
+			{
+				pg_numeric_t	temp
+					= pg_numeric_from_varlena(&errcode, (struct varlena *)
+											  DatumGetPointer(value));
+				keylen = sizeof(temp.value);
+				keybyval = true;
+				value = temp.value;
+			}
+
 			if (keylen > 0)
 			{
 				if (keybyval)
@@ -3535,13 +3557,13 @@ multihash_exec_bulk(CustomScanState *node)
 	inner_ps = innerPlanState(mhs);
 	if (inner_ps)
 	{
-		mhnode = (MultiHashNode *) BulkExecProcNode(inner_ps);
+		mhnode = BulkExecMultiHashNode(inner_ps);
 		if (!mhnode)
 		{
 			if (mhs->outer_done)
 				goto out;
 			ExecReScan(inner_ps);
-			mhnode = (MultiHashNode *) BulkExecProcNode(inner_ps);
+			mhnode = BulkExecMultiHashNode(inner_ps);
 			if (!mhnode)
 				goto out;
 			scan_forward = true;
@@ -3651,10 +3673,9 @@ multihash_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	ListCell	   *cell;
 
 	/* set up deparsing context */
-	context = deparse_context_for_planstate((Node *) &node->ss.ps,
-                                            ancestors,
-                                            es->rtable,
-                                            es->rtable_names);
+	context = set_deparse_context_planstate(es->deparse_cxt,
+											(Node *) node,
+											ancestors);
 	/* shows hash keys */
 	initStringInfo(&str);
 	foreach (cell, mh_info->hash_keys)

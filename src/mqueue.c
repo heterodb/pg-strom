@@ -20,6 +20,7 @@
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "storage/ipc.h"
+#include "storage/proc.h"
 #include "storage/shmem.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
@@ -123,7 +124,7 @@ pgstrom_create_queue(void)
 	/* mark it as active one */
 	Assert(StromTagIs(mqueue, MsgQueue));
 	memset(&mqueue->chain, 0, sizeof(dlist_node));
-	mqueue->owner = getpid();
+	mqueue->owner = MyProc;
 	mqueue->refcnt = 1;
 	dlist_init(&mqueue->qhead);
 	mqueue->closed = false;
@@ -244,6 +245,7 @@ pgstrom_reply_message(pgstrom_message *message)
 			Assert(message->cb_release != NULL);
 			(*message->cb_release)(message);
 		}
+		SetLatch(&respq->owner->procLatch);
 	}
 }
 
@@ -448,7 +450,7 @@ pgstrom_close_queue(pgstrom_queue *mqueue)
 	if (--mqueue->refcnt == 0)
 	{
 		queue_release = true;
-		mqueue->owner = 0;
+		mqueue->owner = NULL;
 	}
 	pthread_mutex_unlock(&mqueue->lock);
 
@@ -500,7 +502,7 @@ pgstrom_put_queue(pgstrom_queue *mqueue)
 		 */
 		Assert(mqueue->closed);
 		queue_release = true;
-		mqueue->owner = 0;
+		mqueue->owner = NULL;
 	}
 	pthread_mutex_unlock(&mqueue->lock);
 
@@ -584,7 +586,7 @@ pgstrom_init_message(pgstrom_message *message,
  */
 typedef struct {
 	void	   *mqueue;
-	pid_t		owner;
+	pid_t		owner_pid;
 	char		state;	/* 'a' = active, 'c' = closed, 'f' = free*/
 	int			refcnt;
 } mqueue_info;
@@ -627,7 +629,7 @@ pgstrom_mqueue_info(PG_FUNCTION_ARGS)
 			/* server mqueue */
 			mq_info = palloc(sizeof(mqueue_info));
 			mq_info->mqueue = &mqueue_shm_values->serv_mqueue;
-			mq_info->owner = mqueue_shm_values->serv_mqueue.owner;
+			mq_info->owner_pid = 0;		/* usuall NULL */
 			mq_info->state = mqueue_shm_values->serv_mqueue.closed ? 'c' : 'a';
 			mq_info->refcnt = mqueue_shm_values->serv_mqueue.refcnt;
 			mq_list = lappend(mq_list, mq_info);
@@ -641,7 +643,7 @@ pgstrom_mqueue_info(PG_FUNCTION_ARGS)
 				{
 					mq_info = palloc(sizeof(mqueue_info));
 					mq_info->mqueue = &mqueues[i];
-					mq_info->owner = mqueues[i].owner;
+					mq_info->owner_pid = mqueues[i].owner->pid;
 					if (!mqueues[i].chain.prev || !mqueues[i].chain.next)
 						mq_info->state = (mqueues[i].closed ? 'c' : 'a');
 					else
@@ -678,7 +680,7 @@ pgstrom_mqueue_info(PG_FUNCTION_ARGS)
 	memset(isnull, 0, sizeof(isnull));
 	snprintf(buf, sizeof(buf), "%p", mq_info->mqueue);
 	values[0] = CStringGetTextDatum(buf);
-	values[1] = Int32GetDatum(mq_info->owner);
+	values[1] = Int32GetDatum(mq_info->owner_pid);
 	snprintf(buf, sizeof(buf), "%s",
 			 (mq_info->state == 'a' ? "active" :
 			  (mq_info->state == 'c' ? "closed" :
@@ -717,7 +719,7 @@ pgstrom_startup_mqueue(void)
 	mqueue = &mqueue_shm_values->serv_mqueue;
 	memset(mqueue, 0, sizeof(pgstrom_queue));
 	mqueue->sobj.stag = StromTag_MsgQueue;
-	mqueue->owner = -1;
+	mqueue->owner = NULL;
 	if (pthread_mutex_init(&mqueue->lock, &mutex_attr) != 0)
 		elog(ERROR, "failed on pthread_mutex_init for server mqueue");
     if (pthread_cond_init(&mqueue->cond, &cond_attr) != 0)

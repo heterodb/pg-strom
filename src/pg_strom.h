@@ -163,6 +163,7 @@ typedef enum {
 	StromTag_GpuHashJoin,
 	StromTag_HashJoinTable,
 	StromTag_GpuPreAgg,
+	StromTag_GpuSort,
 } StromTag;
 
 typedef struct {
@@ -189,6 +190,7 @@ StromTagGetLabel(StromObject *sobject)
 		StromTagGetLabelEntry(GpuPreAgg);
 		StromTagGetLabelEntry(GpuHashJoin);
 		StromTagGetLabelEntry(HashJoinTable);
+		StromTagGetLabelEntry(GpuSort);
 		default:
 			snprintf(msgbuf, sizeof(msgbuf),
 					 "unknown tag (%u)", sobject->stag);
@@ -232,6 +234,14 @@ typedef struct {
 	cl_ulong	time_kern_prep;	/* time to execute preparation kernel */
 	cl_ulong	time_kern_lagg;	/* time to execute local reduction kernel */
 	cl_ulong	time_kern_gagg;	/* time to execute global reduction kernel */
+	/*-- (special perfmon for gpusort) --*/
+	cl_uint		num_gpu_sort;	/* number of GPU bitonic sort execution */
+	cl_uint		num_cpu_sort;	/* number of GPU merge sort execution */
+	cl_ulong	time_gpu_sort;	/* time to execute GPU bitonic sort */
+	cl_ulong	time_cpu_sort;	/* time to execute CPU merge sort */
+	cl_ulong	time_cpu_sort_real;	/* real time to execute CPU merge sort */
+	cl_ulong	time_bgw_sync;	/* time to synchronich BGWorkers */
+
 	/*-- for debugging usage --*/
 	cl_ulong	time_debug1;	/* time for debugging purpose.1 */
 	cl_ulong	time_debug2;	/* time for debugging purpose.2 */
@@ -256,7 +266,7 @@ typedef struct {
 typedef struct {
 	StromObject		sobj;
 	dlist_node		chain;	/* link to free queues list in mqueue.c */
-	pid_t			owner;
+	PGPROC		   *owner;
 	int				refcnt;
 	pthread_mutex_t	lock;
 	pthread_cond_t	cond;
@@ -301,7 +311,7 @@ typedef struct {
 #define DEVKERNEL_NEEDS_GPUSCAN		0x0200
 #define DEVKERNEL_NEEDS_HASHJOIN	0x0400
 #define DEVKERNEL_NEEDS_GPUPREAGG	0x0800
-
+#define DEVKERNEL_NEEDS_GPUSORT		0x1000
 
 struct devtype_info;
 struct devfunc_info;
@@ -339,6 +349,10 @@ typedef struct pgstrom_data_store {
 	slock_t				lock;
 	volatile int		refcnt;
 	kern_data_store	   *kds;		/* reference to kern_data_store */
+	size_t				kds_length;	/* length of kds file */
+	size_t				kds_offset;	/* offset of kds file */
+	char			   *kds_fname;	/* if KDS_FORMAT_ROW_FMAP */
+	int					kds_fdesc;	/* !!NOTE: valid only the backend */
 	struct pgstrom_data_store *ktoast;
 	ResourceOwner		resowner;	/* !!NOTE: private address!!*/
 	char			   *local_pages;/* duplication of local pages */
@@ -372,24 +386,22 @@ typedef struct
 	void   *(*ExecCustomBulk)(CustomScanState *node);
 } PGStromExecMethods;
 
-static inline void *
-BulkExecProcNode(PlanState *node)
-{
-	CHECK_FOR_INTERRUPTS();
-
-	if (node->chgParam != NULL)		/* something changed */
-		ExecReScan(node);			/* let ReScan handle this */
-
-	/* rough check, not sufficient... */
-	if (IsA(node, CustomScanState))
-	{
-		CustomScanState *css = (CustomScanState *) node;
-		PGStromExecMethods *methods = (PGStromExecMethods *) css->methods;
-		Assert(methods->ExecCustomBulk != NULL);
-		return methods->ExecCustomBulk(css);
-	}
-	elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
-}
+/*
+ * Extra flags of CustomPath/Scan node.
+ *
+ * CUSTOMPATH_SUPPORT_BULKLOAD is set, if this CustomScan node support
+ * bulkload mode and parent node can cann BulkExecProcNode() instead of
+ * the usual ExecProcNode().
+ *
+ * CUSTOMPATH_PREFERE_ROW_FORMAT is set by parent node to inform
+ * preferable format of tuple delivered row-by-row mode. Usually, we put
+ * a record with format of either of tts_tuple or tts_values/tts_isnull.
+ * It informs child node a preferable output if parent can collaborate.
+ * Note that this flag never enforce the child node format. It's just
+ * a hint.
+ */
+#define CUSTOMPATH_SUPPORT_BULKLOAD			0x10000000
+#define CUSTOMPATH_PREFERE_ROW_FORMAT		0x20000000
 
 /*
  * --------------------------------------------------------------------
@@ -502,14 +514,24 @@ extern void pgstrom_init_codegen(void);
 /*
  * datastore.c
  */
+extern Size pgstrom_chunk_size(void);
+
 extern kern_parambuf *
 pgstrom_create_kern_parambuf(List *used_params,
                              ExprContext *econtext);
+extern Plan *pgstrom_try_replace_plannode(Plan *child_plan,
+										  List *range_tables,
+										  List **pullup_quals);
+extern void *BulkExecProcNode(PlanState *node);
 extern Datum pgstrom_fixup_kernel_numeric(Datum numeric_datum);
 extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
 									 pgstrom_data_store *pds,
 									 size_t row_index,
 									 HeapTuple tuple);
+extern bool kern_fetch_data_store(TupleTableSlot *slot,
+								  kern_data_store *kds,
+								  size_t row_index,
+								  HeapTuple tuple);
 extern void pgstrom_release_data_store(pgstrom_data_store *pds);
 extern pgstrom_data_store *
 __pgstrom_create_data_store_row(const char *filename, int lineno,
@@ -525,6 +547,27 @@ __pgstrom_create_data_store_row_flat(const char *filename, int lineno,
 #define pgstrom_create_data_store_row_flat(tupdesc,length)		\
 	__pgstrom_create_data_store_row_flat(__FILE__,__LINE__,		\
 										 (tupdesc),(length))
+
+extern pgstrom_data_store *
+__pgstrom_create_data_store_row_fmap(const char *filename, int lineno,
+									 TupleDesc tupdesc, Size length);
+#define pgstrom_create_data_store_row_fmap(tupdesc,length)		\
+	__pgstrom_create_data_store_row_fmap(__FILE__,__LINE__,		\
+										 (tupdesc),(length))
+
+extern pgstrom_data_store *
+__pgstrom_extend_data_store_tupslot(const char *filename, int lineno,
+                                    pgstrom_data_store *pds_toast,
+                                    TupleDesc tupdesc, cl_uint nrooms);
+#define pgstrom_extend_data_store_tupslot(pds_toast,tupdesc,nrooms)	\
+	__pgstrom_extend_data_store_tupslot(__FILE__,__LINE__,			\
+										(pds_toast),(tupdesc),(nrooms))
+
+extern kern_data_store *
+filemap_kern_data_store(const char *kds_fname, size_t kds_length, int *fdesc);
+extern void
+fileunmap_kern_data_store(kern_data_store *kds, int fdesc);
+
 extern pgstrom_data_store *
 __pgstrom_create_data_store_tupslot(const char *filename, int lineno,
 									TupleDesc tupdesc, cl_uint nrooms,
@@ -552,6 +595,7 @@ extern cl_int clserv_dmasend_data_store(pgstrom_data_store *pds,
 										cl_event *events,
 										pgstrom_perfmon *pfm);
 extern void pgstrom_dump_data_store(pgstrom_data_store *pds);
+extern void pgstrom_init_datastore(void);
 
 /*
  * restrack.c
@@ -568,10 +612,10 @@ extern void pgstrom_init_restrack(void);
 /*
  * gpuscan.c
  */
-extern Plan *gpuscan_try_replace_relscan(Plan *plan,
-										 List *range_table,
-										 Bitmapset *attr_refs,
-										 List **p_upper_quals);
+extern Plan *gpuscan_pullup_devquals(Plan *plannode, List **pullup_quals);
+extern Plan *gpuscan_try_replace_seqscan(SeqScan *seqscan,
+										 List *range_tables,
+										 List **pullup_quals);
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern void pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,
@@ -631,6 +675,12 @@ extern Datum pgstrom_numeric_var_samp(PG_FUNCTION_ARGS);
 extern Datum pgstrom_numeric_var_pop(PG_FUNCTION_ARGS);
 extern Datum pgstrom_numeric_stddev_samp(PG_FUNCTION_ARGS);
 extern Datum pgstrom_numeric_stddev_pop(PG_FUNCTION_ARGS);
+
+/*
+ * gpusort.c
+ */
+extern void pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan);
+extern void pgstrom_init_gpusort(void);
 
 /*
  * opencl_devinfo.c
@@ -697,7 +747,6 @@ extern void __clserv_log(const char *funcname,
 extern bool	pgstrom_enabled(void);
 extern bool pgstrom_perfmon_enabled;
 extern bool pgstrom_debug_bulkload_enabled;
-extern int	pgstrom_chunk_size;
 extern int	pgstrom_max_async_chunks;
 extern int	pgstrom_min_async_chunks;
 extern double pgstrom_gpu_setup_cost;
@@ -710,6 +759,7 @@ extern void show_scan_qual(List *qual, const char *qlabel,
 						   ExplainState *es);
 extern void show_instrumentation_count(const char *qlabel, int which,
 									   PlanState *planstate, ExplainState *es);
+extern void show_custom_flags(CustomScanState *css, ExplainState *es);
 extern void show_device_kernel(Datum dprog_key, ExplainState *es);
 extern void pgstrom_perfmon_add(pgstrom_perfmon *pfm_sum,
 								pgstrom_perfmon *pfm_item);
@@ -731,6 +781,7 @@ extern const char *pgstrom_opencl_common_code;
 extern const char *pgstrom_opencl_gpuscan_code;
 extern const char *pgstrom_opencl_gpupreagg_code;
 extern const char *pgstrom_opencl_hashjoin_code;
+extern const char *pgstrom_opencl_gpusort_code;
 extern const char *pgstrom_opencl_mathlib_code;
 extern const char *pgstrom_opencl_textlib_code;
 extern const char *pgstrom_opencl_timelib_code;
@@ -864,8 +915,19 @@ typealign_get_width(char type_align)
 		return sizeof(cl_int);
 	else if (type_align == 'd')
 		return sizeof(cl_long);
+	Assert(false);
 	elog(ERROR, "unexpected type alignment: %c", type_align);
 	return -1;	/* be compiler quiet */
 }
+
+#ifndef forfour
+#define forfour(cell1, list1, cell2, list2, cell3, list3, cell4, list4)	\
+	for ((cell1) = list_head(list1), (cell2) = list_head(list2),	\
+		 (cell3) = list_head(list3), (cell4) = list_head(list4);	\
+		 (cell1) != NULL && (cell2) != NULL &&						\
+		 (cell3) != NULL && (cell4) != NULL;						\
+		 (cell1) = lnext(cell1), (cell2) = lnext(cell2),			\
+		 (cell3) = lnext(cell3), (cell4) = lnext(cell4))
+#endif
 
 #endif	/* PG_STROM_H */

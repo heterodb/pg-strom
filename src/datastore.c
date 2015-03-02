@@ -19,17 +19,38 @@
 #include "postgres.h"
 #include "access/relscan.h"
 #include "access/sysattr.h"
+#include "catalog/catalog.h"
+#include "catalog/pg_tablespace.h"
 #include "catalog/pg_type.h"
+#include "commands/tablespace.h"
 #include "miscadmin.h"
 #include "port.h"
 #include "storage/bufmgr.h"
+#include "storage/fd.h"
 #include "storage/predicate.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/tqual.h"
 #include "pg_strom.h"
 #include "opencl_numeric.h"
+#include <sys/mman.h>
+
+/*
+ * GUC variables
+ */
+static int		pgstrom_chunk_size_kb;
+static char	   *pgstrom_temp_tablespace;
+
+/*
+ * pgstrom_chunk_size - configured chunk size
+ */
+Size
+pgstrom_chunk_size(void)
+{
+	return ((Size)pgstrom_chunk_size_kb) << 10;
+}
 
 /*
  * pgstrom_create_param_buffer
@@ -147,6 +168,90 @@ pgstrom_create_kern_parambuf(List *used_params,
 	return kpbuf;
 }
 
+/* ------------------------------------------------------------
+ *
+ * Routines to support bulk-loading between PG-Strom nodes
+ *
+ * ------------------------------------------------------------
+ */
+Plan *
+pgstrom_try_replace_plannode(Plan *plannode, List *range_tables,
+							 List **pullup_quals)
+{
+	if (IsA(plannode, CustomScan))
+	{
+		CustomScan *cscan = (CustomScan *) plannode;
+
+		if ((cscan->flags & CUSTOMPATH_SUPPORT_BULKLOAD) == 0)
+			return NULL;
+		/* GpuScan may want to pull-up device qualifiers */
+		if (pgstrom_plan_is_gpuscan(plannode))
+			return gpuscan_pullup_devquals(plannode, pullup_quals);
+		*pullup_quals = NIL;
+		return plannode;
+	}
+	else if (IsA(plannode, SeqScan))
+	{
+		return gpuscan_try_replace_seqscan((SeqScan *) plannode,
+										   range_tables,
+										   pullup_quals);
+	}
+	return NULL;
+}
+
+/*
+ * BulkExecProcNode
+ *
+ * It runs the bulk-exec method of the supplied plannode.
+ *
+ * TODO: It will take 'chunk_size' argument to specify expected size of
+ * the chunk, and to adjust it.
+ */
+void *
+BulkExecProcNode(PlanState *node)
+{
+	CHECK_FOR_INTERRUPTS();
+
+	if (node->chgParam != NULL)		/* something changed */
+		ExecReScan(node);			/* let ReScan handle this */
+
+	/* rough check, not sufficient... */
+	if (IsA(node, CustomScanState))
+	{
+		CustomScanState	   *css = (CustomScanState *) node;
+		PGStromExecMethods *methods = (PGStromExecMethods *) css->methods;
+		pgstrom_bulkslot   *bulkslot;
+
+		Assert(methods->ExecCustomBulk != NULL);
+
+		/* must provide our own instrumentation support */
+		if (node->instrument)
+			InstrStartNode(node->instrument);
+
+		/* do bulk execution */
+		bulkslot = methods->ExecCustomBulk(css);
+		if (bulkslot && bulkslot->nvalids >= 0)
+			elog(ERROR, "Bug? bulkslot with rowmap is obsoleted manner");
+
+		/* must provide our own instrumentation support */
+		if (node->instrument)
+		{
+			if (!bulkslot)
+				InstrStopNode(node->instrument, 0.0);
+			else
+				InstrStopNode(node->instrument,
+							  (double) bulkslot->pds->kds->nitems);
+		}
+		return bulkslot;
+	}
+	elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
+}
+
+/*
+ * pgstrom_fixup_kernel_numeric
+ *
+ * It fixes up internal numeric representation
+ */
 Datum
 pgstrom_fixup_kernel_numeric(Datum datum)
 {
@@ -167,15 +272,16 @@ pgstrom_fixup_kernel_numeric(Datum datum)
 }
 
 bool
-pgstrom_fetch_data_store(TupleTableSlot *slot,
-						 pgstrom_data_store *pds,
-						 size_t row_index,
-						 HeapTuple tuple)
+kern_fetch_data_store(TupleTableSlot *slot,
+					  kern_data_store *kds,
+					  size_t row_index,
+					  HeapTuple tuple)
 {
-	kern_data_store *kds = pds->kds;
-
 	if (row_index >= kds->nitems)
 		return false;	/* out of range */
+
+	/* make clear the result tuple-slot */
+	ExecClearTuple(slot);
 
 	/* in case of row-store */
 	if (kds->format == KDS_FORMAT_ROW)
@@ -200,21 +306,22 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 		return true;
 	}
 	/* in case of row-flat-store */
-	if (kds->format == KDS_FORMAT_ROW_FLAT)
+	if (kds->format == KDS_FORMAT_ROW_FLAT ||
+		kds->format == KDS_FORMAT_ROW_FMAP)
 	{
-		TupleDesc		tupdesc = slot->tts_tupleDescriptor;
 		kern_rowitem   *ritem = KERN_DATA_STORE_ROWITEM(kds, row_index);
+		kern_tupitem   *titem;
 		HeapTupleHeader	htup;
 
 		Assert(ritem->htup_offset < kds->length);
-		htup = (HeapTupleHeader)((char *)kds + ritem->htup_offset);
+		titem = (kern_tupitem *)((char *)kds + ritem->htup_offset);
+		htup = &titem->htup;
 
 		memset(tuple, 0, sizeof(HeapTupleData));
+		tuple->t_len = titem->t_len;
+		tuple->t_self = titem->t_self;
 		tuple->t_data = htup;
-		heap_deform_tuple(tuple, tupdesc,
-						  slot->tts_values,
-						  slot->tts_isnull);
-		ExecStoreVirtualTuple(slot);
+		ExecStoreTuple(tuple, slot, InvalidBuffer, false);
 
 		return true;
 	}
@@ -224,7 +331,6 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 		Datum  *tts_values = (Datum *)KERN_DATA_STORE_VALUES(kds, row_index);
 		bool   *tts_isnull = (bool *)KERN_DATA_STORE_ISNULL(kds, row_index);
 
-		ExecClearTuple(slot);
 		slot->tts_values = tts_values;
 		slot->tts_isnull = tts_isnull;
 		ExecStoreVirtualTuple(slot);
@@ -241,17 +347,47 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 	return false;
 }
 
+bool
+pgstrom_fetch_data_store(TupleTableSlot *slot,
+						 pgstrom_data_store *pds,
+						 size_t row_index,
+						 HeapTuple tuple)
+{
+	return kern_fetch_data_store(slot, pds->kds, row_index, tuple);
+}
+
 void
 pgstrom_release_data_store(pgstrom_data_store *pds)
 {
+	kern_data_store	   *kds = pds->kds;
 	ResourceOwner		saved_owner;
-	int					i;
+	int					i, rc;
+
+	/*
+	 * NOTE: Special case handling for file-mapped row store case.
+	 * We assume OpenCL server has no code path the tries to release
+	 * pds/kds without unmapping the file-mapped area.
+	 * This case will be eliminated once we moved to CUDA later...
+	 */
+	if (pds->kds_fname != NULL)
+	{
+		if (!pgstrom_i_am_clserv)
+		{
+			rc = munmap(kds, kds->length);
+			if (rc != 0)
+				elog(LOG, "Bug? failed to unmap kds:%p of \"%s\" (%s)",
+					 pds->kds, pds->kds_fname, strerror(errno));
+			if (pds->kds_fdesc >= 0)
+				CloseTransientFile(pds->kds_fdesc);
+		}
+		unlink(pds->kds_fname);
+		pgstrom_shmem_free(pds);
+		return;
+	}
 
 	saved_owner = CurrentResourceOwner;
 	PG_TRY();
 	{
-		kern_data_store	   *kds = pds->kds;
-
 		CurrentResourceOwner = pds->resowner;
 
 		/*
@@ -423,7 +559,11 @@ __pgstrom_create_data_store_row(const char *filename, int lineno,
 		SpinLockInit(&pds->lock);
 		pds->refcnt = 1;
 		pds->kds = kds;
-		pds->ktoast = NULL;	/* never used */
+		pds->kds_length = kds->length;
+		pds->kds_offset = 0;	/* never used */
+		pds->kds_fname = NULL;	/* never used */
+		pds->kds_fdesc = -1;	/* never used */
+		pds->ktoast = NULL;		/* never used */
 		pds->resowner = ResourceOwnerCreate(CurrentResourceOwner,
 											"pgstrom_data_store");
 		pds->local_pages = NULL;	/* allocation on demand */
@@ -479,11 +619,219 @@ __pgstrom_create_data_store_row_flat(const char *filename, int lineno,
 	SpinLockInit(&pds->lock);
 	pds->refcnt = 1;
 	pds->kds = kds;
+	pds->kds_length = kds->length;
+	pds->kds_offset = 0;	/* never used */
+	pds->kds_fname = NULL;	/* never used */
+	pds->kds_fdesc = -1;	/* never used */
 	pds->ktoast = NULL;		/* never used */
 	pds->resowner = NULL;	/* never used */
 	pds->local_pages = NULL;/* never used */
 
 	return pds;
+}
+
+/*
+ * get_pgstrom_temp_filename - logic is almost same as OpenTemporaryFile,
+ * but it returns cstring of filename, for OpenTransientFile and mmap(2)
+ */
+static char *
+get_pgstrom_temp_filename(void)
+{
+	char	tempdirpath[MAXPGPATH];
+	char	tempfilepath[MAXPGPATH];
+	Oid		tablespace_oid = InvalidOid;
+	static long tempFileCounter = 0;
+
+	if (pgstrom_temp_tablespace != NULL)
+		tablespace_oid = get_tablespace_oid(pgstrom_temp_tablespace, false);
+
+	if (!OidIsValid(tablespace_oid) ||
+		tablespace_oid == DEFAULTTABLESPACE_OID ||
+		tablespace_oid == GLOBALTABLESPACE_OID)
+	{
+		/* The default tablespace is {datadir}/base */
+		snprintf(tempdirpath, sizeof(tempdirpath), "base/%s",
+				 PG_TEMP_FILES_DIR);
+	}
+	else
+	{
+		/* All other tablespaces are accessed via symlinks */
+		snprintf(tempdirpath, sizeof(tempdirpath), "pg_tblspc/%u/%s/%s",
+				 tablespace_oid,
+				 TABLESPACE_VERSION_DIRECTORY,
+				 PG_TEMP_FILES_DIR);
+    }
+
+	/*
+	 * Generate a tempfile name that should be unique within the current
+	 * database instance.
+	 */
+	snprintf(tempfilepath, sizeof(tempfilepath), "%s/strom_tmp%d.%ld",
+			 tempdirpath, MyProcPid, tempFileCounter++);
+
+	return pstrdup(tempfilepath);
+}
+
+pgstrom_data_store *
+__pgstrom_create_data_store_row_fmap(const char *filename, int lineno,
+									 TupleDesc tupdesc, Size length)
+{
+	pgstrom_data_store *pds;
+	kern_data_store	   *kds;
+	char	   *kds_fname;
+	int			kds_fdesc;
+	Size		kds_length = STROMALIGN(length);
+	cl_uint		nrooms;
+
+	kds_fname = get_pgstrom_temp_filename();
+	kds_fdesc = OpenTransientFile(kds_fname,
+								  O_RDWR | O_CREAT | O_TRUNC | PG_BINARY,
+								  0600);
+	if (kds_fdesc < 0)
+		ereport(ERROR,
+                (errcode_for_file_access(),
+				 errmsg("could not create file-mapped data store \"%s\"",
+						kds_fname)));
+
+	if (ftruncate(kds_fdesc, kds_length) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not truncate file \"%s\" to %zu: %m",
+						kds_fname, kds_length)));
+
+	kds = mmap(NULL, kds_length,
+			   PROT_READ | PROT_WRITE,
+			   MAP_SHARED | MAP_POPULATE,
+			   kds_fdesc, 0);
+	if (kds == MAP_FAILED)
+		elog(ERROR, "failed to map file-mapped data store \"%s\"", kds_fname);
+
+	/* OK, let's initialize the file-mapped kern_data_store */
+	nrooms = (STROMALIGN_DOWN(kds_length) -
+			  STROMALIGN(offsetof(kern_data_store,
+								  colmeta[tupdesc->natts])))
+		/ sizeof(kern_rowitem);
+	init_kern_data_store(kds, tupdesc, kds_length,
+						 KDS_FORMAT_ROW_FMAP, 0, nrooms, false);
+	/* Also, allocation of pgstrom_data_store */
+	pds = __pgstrom_shmem_alloc(filename, lineno,
+								sizeof(pgstrom_data_store) +
+								strlen(kds_fname) + 1);
+	if (!pds)
+	{
+		pgstrom_shmem_free(kds);
+		elog(ERROR, "out of shared memory");
+	}
+	pds->sobj.stag = StromTag_DataStore;
+	SpinLockInit(&pds->lock);
+	pds->refcnt = 1;
+	pds->kds = kds;
+	pds->kds_length = kds->length;
+	pds->kds_offset = 0;
+	pds->kds_fname = (char *)(pds + 1);
+	strcpy(pds->kds_fname, kds_fname);
+	pds->kds_fdesc = kds_fdesc;
+	pds->ktoast = NULL;		/* never used */
+	pds->resowner = NULL;	/* never used */
+	pds->local_pages = NULL;/* never used */
+
+	return pds;
+}
+
+/*
+ * pgstrom_extend_data_store_tupslot
+ *
+ * It is used to GpuSort to construct file-mapped data store.
+ * Because of tuple extraction cost, tupslot format is better than row
+ * format.
+ */
+pgstrom_data_store *
+__pgstrom_extend_data_store_tupslot(const char *filename, int lineno,
+									pgstrom_data_store *pds_toast,
+									TupleDesc tupdesc, cl_uint nrooms)
+{
+	pgstrom_data_store *pds;
+	kern_data_store	   *kds;
+	char	   *kds_fname;
+	int			kds_fdesc;
+	Size		required;
+	Size		toast_offset;
+
+	/* base PDS has to be file-mapped row-store */
+	Assert(pds_toast->kds_fname != NULL);
+	kds_fname = pds_toast->kds_fname;
+	kds_fdesc = pds_toast->kds_fdesc;
+
+	/* requirement for kern_data_store */
+	required = (STROMALIGN(offsetof(kern_data_store,
+									colmeta[tupdesc->natts])) +
+				(LONGALIGN(sizeof(bool) * tupdesc->natts) +
+				 LONGALIGN(sizeof(Datum) * tupdesc->natts)) * nrooms);
+
+	/* round up by BLCKSZ, as alternative of os dependent pagesize */
+	toast_offset = TYPEALIGN(BLCKSZ, pds_toast->kds_length);
+	if (ftruncate(kds_fdesc, toast_offset + required) != 0)
+	{
+		close(kds_fdesc);
+		ereport(ERROR,
+                (errcode_for_file_access(),
+                 errmsg("could not truncate file \"%s\" to %zu: %m",
+						kds_fname, toast_offset + required)));
+	}
+	/* mmap later portion of this file */
+	kds = mmap(NULL, required,
+			   PROT_READ | PROT_WRITE,
+			   MAP_SHARED | MAP_POPULATE,
+			   kds_fdesc, toast_offset);
+	if (kds == MAP_FAILED)
+	{
+		close(kds_fdesc);
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not mmap file \"%s\" with len=%zu: %m",
+						kds_fname, required)));
+	}
+	/* setup kern_data_store */
+	init_kern_data_store(kds, tupdesc, required,
+						 KDS_FORMAT_TUPSLOT, 0, nrooms, true);
+	/* allocation of pgstrom_data_store */
+	pds = __pgstrom_shmem_alloc(filename, lineno,
+								sizeof(pgstrom_data_store) +
+								strlen(kds_fname) + 1);
+	if (!pds)
+	{
+		munmap(kds, required);
+		close(kds_fdesc);
+		elog(ERROR, "out of shared memory");
+	}
+	pds->sobj.stag = StromTag_DataStore;
+	SpinLockInit(&pds->lock);
+	pds->refcnt = 1;
+	pds->kds = kds;
+	pds->kds_length = kds->length;
+	pds->kds_offset = toast_offset;
+	pds->kds_fname = (char *)(pds + 1);
+	strcpy(pds->kds_fname, kds_fname);
+	pds->kds_fdesc = -1;	/* not owned by this chunk */
+	pds->ktoast = pds_toast;
+	pds->resowner = NULL;	/* never used */
+	pds->local_pages = NULL;/* never used */
+
+	return pds;
+}
+
+
+void
+fileunmap_kern_data_store(kern_data_store *kds, int fdesc)
+{
+	int		rc;
+
+	rc = munmap(kds, kds->length);
+	if (rc != 0)
+		clserv_log("failed to unmap kds:%p (%s)", kds, strerror(errno));
+	rc = close(fdesc);
+	if (rc != 0)
+		clserv_log("failed to close file:%d (%s)", fdesc, strerror(errno));
 }
 
 pgstrom_data_store *
@@ -520,6 +868,10 @@ __pgstrom_create_data_store_tupslot(const char *filename, int lineno,
 	SpinLockInit(&pds->lock);
 	pds->refcnt = 1;
 	pds->kds = kds;
+	pds->kds_length = kds->length;
+	pds->kds_offset = 0;
+	pds->kds_fname = NULL;	/* never used */
+	pds->kds_fdesc = -1;	/* never used */
 	pds->ktoast = NULL;		/* assigned on demand */
 	pds->resowner = NULL;	/* never used for tuple-slot */
 	pds->local_pages = NULL;/* never used for tuple-slot */
@@ -797,28 +1149,34 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 
 		return true;
 	}
-	else if (kds->format == KDS_FORMAT_ROW_FLAT)
+	else if (kds->format == KDS_FORMAT_ROW_FLAT ||
+			 kds->format == KDS_FORMAT_ROW_FMAP)
 	{
 		HeapTuple		tuple;
 		kern_rowitem   *ritem = KERN_DATA_STORE_ROWITEM(kds, kds->nitems);
+		kern_tupitem   *titem;
 		uintptr_t		usage;
-		char		   *dest_addr;
+		Size			item_len;
 
 		/* reference a HeapTuple in TupleTableSlot */
 		tuple = ExecFetchSlotTuple(slot);
 
 		/* check whether the tuple touches the watermark */
+		item_len = LONGALIGN(offsetof(kern_tupitem, htup) + tuple->t_len);
 		usage = ((uintptr_t)(ritem + 1) -
-				 (uintptr_t)(kds) +			/* from head */
-				 kds->usage +				/* from tail */
-				 LONGALIGN(tuple->t_len));	/* newly added */
+				 (uintptr_t)(kds) +		/* from head */
+				 kds->usage +			/* from tail */
+				 item_len);				/* newly added */
 		if (usage > kds->length)
 			return false;
 
-		dest_addr = ((char *)kds + kds->length -
-					 kds->usage - LONGALIGN(tuple->t_len));
-		memcpy(dest_addr, tuple->t_data, tuple->t_len);
-		ritem->htup_offset = (hostptr_t)((char *)dest_addr - (char *)kds);
+		titem = (kern_tupitem *)
+			((char *)kds + kds->length - kds->usage - item_len);
+		titem->t_len = tuple->t_len;
+		titem->t_self = tuple->t_self;
+		memcpy(&titem->htup, tuple->t_data, tuple->t_len);
+
+		ritem->htup_offset = (hostptr_t)((char *)titem - (char *)kds);
 		kds->usage += LONGALIGN(tuple->t_len);
 		kds->nitems++;
 
@@ -1021,8 +1379,9 @@ pgstrom_dump_data_store(pgstrom_data_store *pds)
 		for (i=0; i < kds->nitems; i++)
 		{
 			kern_rowitem *ritem = KERN_DATA_STORE_ROWITEM(kds, i);
-			HeapTupleHeaderData *htup =
-				(HeapTupleHeaderData *)((char *)kds + ritem->htup_offset);
+			kern_tupitem *titem = (kern_tupitem *)
+				((char *)kds + ritem->htup_offset);
+			HeapTupleHeaderData *htup = &titem->htup;
 			cl_int		natts = (htup->t_infomask2 & HEAP_NATTS_MASK);
 			cl_int		curr = htup->t_hoff;
 			cl_int		vl_len;
@@ -1089,4 +1448,27 @@ pgstrom_dump_data_store(pgstrom_data_store *pds)
 		}
 	}
 #undef PDS_DUMP
+}
+
+void
+pgstrom_init_datastore(void)
+{
+	DefineCustomIntVariable("pg_strom.chunk_size",
+							"default size of pgstrom_data_store",
+							NULL,
+							&pgstrom_chunk_size_kb,
+							15872,
+							4096,
+							MAX_KILOBYTES,
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
+							NULL, NULL, NULL);
+	DefineCustomStringVariable("pg_strom.temp_tablespace",
+							   "tablespace of file mapped data store",
+							   NULL,
+							   &pgstrom_temp_tablespace,
+							   NULL,
+							   PGC_USERSET,
+							   GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
 }

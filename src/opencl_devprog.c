@@ -17,6 +17,7 @@
  */
 #include "postgres.h"
 #include "catalog/pg_type.h"
+#include "common/pg_crc.h"
 #include "funcapi.h"
 #include "storage/barrier.h"
 #include "storage/ipc.h"
@@ -24,7 +25,6 @@
 #include "storage/spin.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
-#include "utils/pg_crc.h"
 #include <limits.h>
 #include "pg_strom.h"
 
@@ -416,6 +416,17 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 			lengths[count] = gpupreagg_code_length;
 			count++;
 		}
+		/* gpusort device implementation */
+		if (dprog->extra_flags & DEVKERNEL_NEEDS_GPUSORT)
+		{
+			static size_t	gpusort_code_length = 0;
+
+			if (!gpusort_code_length)
+				gpusort_code_length = strlen(pgstrom_opencl_gpusort_code);
+			sources[count] = pgstrom_opencl_gpusort_code;
+			lengths[count] = gpusort_code_length;
+			count++;
+		}
 
 		/* source code of this program */
 		sources[count] = dprog->source;
@@ -478,6 +489,9 @@ clserv_lookup_device_program(Datum dprog_key, pgstrom_message *message)
 		if (dprog->extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
 			ofs += snprintf(build_opts + ofs, sizeof(build_opts) - ofs,
 							" -DKERNEL_IS_GPUPREAGG=1");
+		if (dprog->extra_flags & DEVKERNEL_NEEDS_GPUSORT)
+			ofs += snprintf(build_opts + ofs, sizeof(build_opts) - ofs,
+							" -DKERNEL_IS_GPUSORT=1");
 
 		rc = clBuildProgram(program,
 							opencl_num_devices,

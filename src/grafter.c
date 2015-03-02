@@ -21,16 +21,13 @@
 
 static planner_hook_type	planner_hook_next;
 
-static Plan *
-grafter_try_replace_recurse(PlannedStmt *pstmt, Plan *plan)
+static void
+grafter_try_replace_recurse(PlannedStmt *pstmt, Plan **p_curr_plan)
 {
-	Plan	   *newnode = plan;
-	Plan	   *temp;
-	List	   *newlist = NIL;
+	Plan	   *plan = *p_curr_plan;
 	ListCell   *lc;
 
-	if (!plan)
-		return NULL;
+	Assert(plan != NULL);
 
 	switch (nodeTag(plan))
 	{
@@ -42,64 +39,66 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan *plan)
 			pgstrom_try_insert_gpupreagg(pstmt, (Agg *) plan);
 			break;
 
+		case T_SubqueryScan:
+			{
+				SubqueryScan   *subquery = (SubqueryScan *) plan;
+				Plan		  **p_subplan = &subquery->subplan;
+				grafter_try_replace_recurse(pstmt, p_subplan);
+			}
+			break;
 		case T_ModifyTable:
 			{
-				ModifyTable *mtplan = (ModifyTable *) newnode;
+				ModifyTable *mtplan = (ModifyTable *) plan;
 
 				foreach (lc, mtplan->plans)
 				{
-					temp = grafter_try_replace_recurse(pstmt, lfirst(lc));
-					newlist = lappend(newlist, temp);
+					Plan  **p_subplan = (Plan **) &lc->data.ptr_value;
+					grafter_try_replace_recurse(pstmt, p_subplan);
 				}
-				mtplan->plans = newlist;
 			}
 			break;
 		case T_Append:
 			{
-				Append *aplan = (Append *) newnode;
+				Append *aplan = (Append *) plan;
 
 				foreach (lc, aplan->appendplans)
 				{
-					temp = grafter_try_replace_recurse(pstmt, lfirst(lc));
-					newlist = lappend(newlist, temp);
+					Plan  **p_subplan = (Plan **) &lc->data.ptr_value;
+					grafter_try_replace_recurse(pstmt, p_subplan);
 				}
-				aplan->appendplans = newlist;
 			}
 			break;
 		case T_MergeAppend:
 			{
-				MergeAppend *maplan = (MergeAppend *) newnode;
+				MergeAppend *maplan = (MergeAppend *) plan;
 
 				foreach (lc, maplan->mergeplans)
 				{
-					temp = grafter_try_replace_recurse(pstmt, lfirst(lc));
-					newlist = lappend(newlist, temp);
+					Plan  **p_subplan = (Plan **) &lc->data.ptr_value;
+					grafter_try_replace_recurse(pstmt, p_subplan);
 				}
-				maplan->mergeplans = newlist;
 			}
 			break;
 		case T_BitmapAnd:
 			{
-				BitmapAnd  *baplan = (BitmapAnd *) newnode;
+				BitmapAnd  *baplan = (BitmapAnd *) plan;
 
 				foreach (lc, baplan->bitmapplans)
 				{
-					temp = grafter_try_replace_recurse(pstmt, lfirst(lc));
-					newlist = lappend(newlist, temp);
+					Plan  **p_subplan = (Plan **) &lc->data.ptr_value;
+					grafter_try_replace_recurse(pstmt, p_subplan);
 				}
-				baplan->bitmapplans = newlist;
 			}
 			break;
 		case T_BitmapOr:
 			{
-				BitmapOr   *boplan = (BitmapOr *) newnode;
+				BitmapOr   *boplan = (BitmapOr *) plan;
 
 				foreach (lc, boplan->bitmapplans)
 				{
-					temp = grafter_try_replace_recurse(pstmt, lfirst(lc));
-					newlist = lappend(newlist, temp);
+					Plan  **p_subplan = (Plan **) &lc->data.ptr_value;
+					grafter_try_replace_recurse(pstmt, p_subplan);
 				}
-				boplan->bitmapplans = newlist;
 			}
 			break;
 		default:
@@ -108,12 +107,24 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan *plan)
 	}
 
 	/* also walk down left and right child plan sub-tree, if any */
-	newnode->lefttree
-		= grafter_try_replace_recurse(pstmt, newnode->lefttree);
-	newnode->righttree
-		= grafter_try_replace_recurse(pstmt, newnode->righttree);
+	if (plan->lefttree)
+		grafter_try_replace_recurse(pstmt, &plan->lefttree);
+	if (plan->righttree)
+		grafter_try_replace_recurse(pstmt, &plan->righttree);
 
-	return newnode;
+	switch (nodeTag(plan))
+	{
+		case T_Sort:
+			/* Try to replace Sort node by GpuSort node if cost of
+			 * the alternative plan is enough reasonable to replace.
+			 */
+			pgstrom_try_insert_gpusort(pstmt, p_curr_plan);
+			break;
+
+		default:
+			/* nothing to do, keep existing one */
+			break;
+	}
 }
 
 static PlannedStmt *
@@ -130,20 +141,16 @@ pgstrom_grafter_entrypoint(Query *parse,
 
 	if (pgstrom_enabled())
 	{
-		List	   *sub_plans = NIL;
 		ListCell   *cell;
 
-		result->planTree = grafter_try_replace_recurse(result,
-													   result->planTree);
+		Assert(result->planTree != NULL);
+		grafter_try_replace_recurse(result, &result->planTree);
+
 		foreach (cell, result->subplans)
 		{
-			Plan   *old_plan = lfirst(cell);
-			Plan   *new_plan;
-
-			new_plan = grafter_try_replace_recurse(result, old_plan);
-			sub_plans = lappend(sub_plans, new_plan);
+			Plan  **p_subplan = (Plan **) &cell->data.ptr_value;
+			grafter_try_replace_recurse(result, p_subplan);
 		}
-		result->subplans = sub_plans;
 	}
 	return result;
 }

@@ -373,9 +373,17 @@ typedef struct {
 #endif
 } kern_blkitem;
 
+typedef struct
+{
+	cl_ushort			t_len;		/* length of tuple */
+	ItemPointerData		t_self;		/* SelfItemPointer */
+	HeapTupleHeaderData	htup;
+} kern_tupitem;
+
 #define KDS_FORMAT_ROW			1
 #define KDS_FORMAT_ROW_FLAT		2
 #define KDS_FORMAT_TUPSLOT		3
+#define KDS_FORMAT_ROW_FMAP		4
 
 typedef struct {
 	hostptr_t		hostptr;	/* address of kds on the host */
@@ -437,6 +445,9 @@ typedef struct {
 	 ((uintptr_t)KERN_DATA_STORE_ROWBLOCK((kds), (kds)->nblocks) -		\
 	  (uintptr_t)(kds)) :												\
 	 STROMALIGN((kds)->length))
+/* length of the header portion of kern_data_store */
+#define KERN_DATA_STORE_HEAD_LENGTH(kds)			\
+	offsetof(kern_data_store, colmeta[(kds)->ncols])
 
 /*
  * kern_parambuf
@@ -733,8 +744,8 @@ STROMCL_SIMPLE_TYPE_TEMPLATE(float8, cl_double)
  * unless it is NOT referenced in the device code. It can understand the
  * length of these values, unlike contents.
  */
-typedef struct {
-	cl_int		vl_len;
+typedef struct varlena {
+	cl_char		vl_len_[4];		/* Do not touch this field directly! */
 	cl_char		vl_dat[1];
 } varlena;
 
@@ -968,6 +979,7 @@ static inline __global HeapTupleHeaderData *
 kern_get_tuple_rsflat(__global kern_data_store *kds, cl_uint rowidx)
 {
 	__global kern_rowitem *kritem;
+	__global kern_tupitem *ktitem;
 
 	if (rowidx >= kds->nitems)
 		return NULL;	/* likely a BUG */
@@ -976,8 +988,9 @@ kern_get_tuple_rsflat(__global kern_data_store *kds, cl_uint rowidx)
 	/* simple sanity check */
 	if (kritem->htup_offset >= kds->length)
 		return NULL;
-	return (__global HeapTupleHeaderData *)
+	ktitem = (__global kern_tupitem *)
 		((__global char *)kds + kritem->htup_offset);
+	return &ktitem->htup;
 }
 
 static inline __global void *
@@ -1020,7 +1033,8 @@ kern_get_datum(__global kern_data_store *kds,
 		return NULL;
 	if (kds->format == KDS_FORMAT_ROW)
 		return kern_get_datum_rs(kds, colidx, rowidx);
-	if (kds->format == KDS_FORMAT_ROW_FLAT)
+	if (kds->format == KDS_FORMAT_ROW_FLAT ||
+		kds->format == KDS_FORMAT_ROW_FMAP)
 		return kern_get_datum_rsflat(kds, colidx, rowidx);
 	if (kds->format == KDS_FORMAT_TUPSLOT)
 		return kern_get_datum_tupslot(kds,ktoast,colidx,rowidx);
@@ -1541,7 +1555,7 @@ memcpy(__global void *__dst, __global const void *__src, size_t len)
  * Also note that this function internally use barrier(), so unable to
  * use within if-blocks.
  */
-static cl_uint
+cl_uint
 arithmetic_stairlike_add(cl_uint my_value, __local cl_uint *items,
 						 __private cl_uint *total_sum)
 {
