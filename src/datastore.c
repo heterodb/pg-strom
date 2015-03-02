@@ -36,6 +36,8 @@
 #include "pg_strom.h"
 #include "opencl_numeric.h"
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 /*
  * GUC variables
@@ -635,7 +637,7 @@ __pgstrom_create_data_store_row_flat(const char *filename, int lineno,
  * but it returns cstring of filename, for OpenTransientFile and mmap(2)
  */
 static char *
-get_pgstrom_temp_filename(void)
+get_pgstrom_temp_filename(bool create_directory)
 {
 	char	tempdirpath[MAXPGPATH];
 	char	tempfilepath[MAXPGPATH];
@@ -663,6 +665,18 @@ get_pgstrom_temp_filename(void)
     }
 
 	/*
+	 * Ensure to create temporary directory if caller wants.
+	 * According to the manner in OpenTemporaryFileInTablespace(),
+	 * we don't check result of mkdir(2) because concurrent task
+	 * may create same directory randomly.
+	 * If upcoming file creation failed, it failed to create actually.
+	 */
+	if (create_directory)
+	{
+		mkdir(tempdirpath, S_IRWXU);
+	}
+
+	/*
 	 * Generate a tempfile name that should be unique within the current
 	 * database instance.
 	 */
@@ -683,15 +697,22 @@ __pgstrom_create_data_store_row_fmap(const char *filename, int lineno,
 	Size		kds_length = STROMALIGN(length);
 	cl_uint		nrooms;
 
-	kds_fname = get_pgstrom_temp_filename();
+	kds_fname = get_pgstrom_temp_filename(false);
 	kds_fdesc = OpenTransientFile(kds_fname,
 								  O_RDWR | O_CREAT | O_TRUNC | PG_BINARY,
 								  0600);
 	if (kds_fdesc < 0)
-		ereport(ERROR,
-                (errcode_for_file_access(),
-				 errmsg("could not create file-mapped data store \"%s\"",
-						kds_fname)));
+	{
+		kds_fname = get_pgstrom_temp_filename(true);
+		kds_fdesc = OpenTransientFile(kds_fname,
+									  O_RDWR | O_CREAT | O_TRUNC | PG_BINARY,
+									  0600);
+		if (kds_fdesc < 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not create file-mapped data store \"%s\"",
+							kds_fname)));
+	}
 
 	if (ftruncate(kds_fdesc, kds_length) != 0)
 		ereport(ERROR,
