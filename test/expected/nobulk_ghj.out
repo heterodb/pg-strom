@@ -8,6 +8,7 @@ set enable_nestloop to off;
 -- off to any scan plan
 set enable_indexscan to off;
 set enable_bitmapscan to off;
+set enable_gpusort to off;
 --smallint
 select a.id,case when a.smlint_x = b.smlint_x then a.smlint_x else 0 end from 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as a

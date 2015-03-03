@@ -12,6 +12,7 @@ set enable_indexscan to off;
 set enable_bitmapscan to off;
 set enable_seqscan to off;
 
+set enable_gpusort to off;
 set client_min_messages to warning;
 
 -- #109

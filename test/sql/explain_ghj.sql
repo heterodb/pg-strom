@@ -10,6 +10,7 @@ set enable_gpuhashjoin to on;
 set enable_gpupreagg to off;
 set enable_mergejoin to off;
 set enable_nestloop to off;
+set enable_gpusort to off;
 set client_min_messages to warning;
 
 set pg_strom.enabled=off;
@@ -158,6 +159,7 @@ set enable_gpuhashjoin to on;
 set enable_gpupreagg to off;
 set enable_mergejoin to off;
 set enable_nestloop to off;
+set enable_gpusort to off;
 set client_min_messages to warning;
 
 set pg_strom.enabled=on;

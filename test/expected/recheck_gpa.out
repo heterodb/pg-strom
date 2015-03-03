@@ -2,6 +2,7 @@
 --#       Gpu PreAggregate TestCases with RECHECK
 --#
 set pg_strom.debug_force_gpupreagg to on;
+set enable_gpusort to off;
 set client_min_messages to notice;
 set extra_float_digits to -3;
 -- NO RECHECK
@@ -62,9 +63,12 @@ explain (verbose on, costs off) execute p1;
    ->  Custom Scan (GpuPreAgg)
          Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.psum(((smlint_x / (id % 1000)))::bigint)
          Bulkload: On
+         Reduction: NoGroup
+         Features: likely-tuple-slot
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(7 rows)
+               Features: likely-tuple-slot
+(10 rows)
 
 execute p1;
 ERROR:  division by zero
@@ -78,9 +82,12 @@ explain (verbose on, costs off) execute p1;
    ->  Custom Scan (GpuPreAgg)
          Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.psum(((integer_x / (id % 1000)))::bigint)
          Bulkload: On
+         Reduction: NoGroup
+         Features: likely-tuple-slot
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(7 rows)
+               Features: likely-tuple-slot
+(10 rows)
 
 execute p1;
 ERROR:  division by zero
@@ -94,9 +101,12 @@ explain (verbose on, costs off) execute p1;
    ->  Custom Scan (GpuPreAgg)
          Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.psum((bigint_x / (id % 1000)))
          Bulkload: On
+         Reduction: NoGroup
+         Features: likely-tuple-slot
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(7 rows)
+               Features: likely-tuple-slot
+(10 rows)
 
 execute p1;
 ERROR:  division by zero
@@ -110,9 +120,12 @@ explain (verbose on, costs off) execute p1;
    ->  Custom Scan (GpuPreAgg)
          Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.psum((real_x / ((id % 1000))::double precision))
          Bulkload: On
+         Reduction: NoGroup
+         Features: likely-tuple-slot
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(7 rows)
+               Features: likely-tuple-slot
+(10 rows)
 
 execute p1;
 ERROR:  division by zero
@@ -126,9 +139,12 @@ explain (verbose on, costs off) execute p1;
    ->  Custom Scan (GpuPreAgg)
          Output: NULL::integer, NULL::integer, NULL::smallint, NULL::integer, NULL::bigint, NULL::real, NULL::double precision, NULL::numeric, NULL::smallint, NULL::integer, NULL::bigint, pgstrom.psum((float_x / ((id % 1000))::double precision))
          Bulkload: On
+         Reduction: NoGroup
+         Features: likely-tuple-slot
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(7 rows)
+               Features: likely-tuple-slot
+(10 rows)
 
 execute p1;
 ERROR:  division by zero

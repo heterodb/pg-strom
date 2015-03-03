@@ -8,6 +8,7 @@ set enable_indexscan to off;
 set random_page_cost=1000000;   --# force off index_scan.
 set enable_gpuhashjoin to off;
 set enable_gpupreagg to off;
+set enable_gpusort to off;
 set client_min_messages to warning;
 
 set pg_strom.enabled=off;
@@ -57,6 +58,7 @@ explain (verbose, costs off, timing off) select  id,serial_x    from strom_test 
 explain (verbose, costs off, timing off) select  id,bigsrl_x    from strom_test where abs(bigsrl_x) IS NOT NULL order by id limit 100;
 
 set pg_strom.enabled=on;
+set enable_gpusort to off;
 -- normal
 explain (verbose, costs off, timing off) select  smlint_x    from strom_test order by id limit 100;
 explain (verbose, costs off, timing off) select  integer_x    from strom_test order by id limit 100;
