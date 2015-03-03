@@ -2,16 +2,11 @@
 --#       Gpu Hash Join TestCases without BulkLoad 
 --#
 
--- off to any join plan
-set enable_hashjoin to off;
-set enable_mergejoin to off;
-set enable_nestloop to off;
--- off to any scan plan
-set enable_indexscan to off;
-set enable_bitmapscan to off;
-
+set gpu_setup_cost=0;
+set enable_gpupreagg to off;
 set enable_gpusort to off;
-
+set random_page_cost=1000000;   --# force off index_scan.                                                                                                                                          
+set client_min_messages to warning;
 
 --smallint
 select a.id,case when a.smlint_x = b.smlint_x then a.smlint_x else 0 end from 

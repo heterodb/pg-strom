@@ -1,18 +1,12 @@
 --#
 --#       Gpu HashJoin Explain TestCases. 
 --#
-set enable_seqscan to off;
-set enable_bitmapscan to off;
-set enable_indexscan to off;
-set random_page_cost=1000000;   --# force off index_scan.
-set enable_gpuhashjoin to on;
+set gpu_setup_cost=0;
 set enable_gpupreagg to off;
-set enable_mergejoin to off;
-set enable_nestloop to off;
 set enable_gpusort to off;
+set random_page_cost=1000000;   --# force off index_scan.
 set client_min_messages to warning;
 set pg_strom.enabled=off;
-set enable_hashjoin to on;
 ---
 --- BULKLOAD ON
 ---
@@ -22,23 +16,21 @@ explain (verbose, costs off, timing off) select a.id,case when a.smlint_x = b.sm
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 ) as b
  on a.smlint_x=b.smlint_x and a.id=b.id order by a.id;
-                                                                                                                  QUERY PLAN                                                                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Output: strom_test.id, (CASE WHEN (strom_test.smlint_x = strom_test_1.smlint_x) THEN (strom_test.smlint_x)::integer ELSE 0 END)
    Sort Key: strom_test.id
-   ->  Hash Join
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.smlint_x = strom_test_1.smlint_x) THEN (strom_test.smlint_x)::integer ELSE 0 END
-         Hash Cond: ((strom_test.smlint_x = strom_test_1.smlint_x) AND (strom_test.id = strom_test_1.id))
+         Join Filter: ((strom_test.smlint_x = strom_test_1.smlint_x) AND (strom_test.id = strom_test_1.id))
          ->  Seq Scan on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
-         ->  Hash
-               Output: strom_test_1.smlint_x, strom_test_1.id
-               ->  Seq Scan on public.strom_test strom_test_1
-                     Output: strom_test_1.smlint_x, strom_test_1.id
-                     Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-(14 rows)
+         ->  Seq Scan on public.strom_test strom_test_1
+               Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
+               Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+(12 rows)
 
 --integer
 explain (verbose, costs off, timing off) select a.id,case when a.integer_x = b.integer_x then a.integer_x else 0 end from 
@@ -46,23 +38,21 @@ explain (verbose, costs off, timing off) select a.id,case when a.integer_x = b.i
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 ) as b
  on a.integer_x=b.integer_x and a.id=b.id order by a.id;
-                                                                                                                  QUERY PLAN                                                                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Output: strom_test.id, (CASE WHEN (strom_test.integer_x = strom_test_1.integer_x) THEN strom_test.integer_x ELSE 0 END)
    Sort Key: strom_test.id
-   ->  Hash Join
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.integer_x = strom_test_1.integer_x) THEN strom_test.integer_x ELSE 0 END
-         Hash Cond: ((strom_test.integer_x = strom_test_1.integer_x) AND (strom_test.id = strom_test_1.id))
+         Join Filter: ((strom_test.integer_x = strom_test_1.integer_x) AND (strom_test.id = strom_test_1.id))
          ->  Seq Scan on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
-         ->  Hash
-               Output: strom_test_1.integer_x, strom_test_1.id
-               ->  Seq Scan on public.strom_test strom_test_1
-                     Output: strom_test_1.integer_x, strom_test_1.id
-                     Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-(14 rows)
+         ->  Seq Scan on public.strom_test strom_test_1
+               Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
+               Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+(12 rows)
 
 --bigint
 explain (verbose, costs off, timing off) select a.id,case when a.bigint_x = b.bigint_x then a.bigint_x else 0 end from 
@@ -70,23 +60,21 @@ explain (verbose, costs off, timing off) select a.id,case when a.bigint_x = b.bi
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 ) as b
  on a.bigint_x=b.bigint_x and a.id=b.id order by a.id;
-                                                                                                                  QUERY PLAN                                                                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Output: strom_test.id, (CASE WHEN (strom_test.bigint_x = strom_test_1.bigint_x) THEN strom_test.bigint_x ELSE 0::bigint END)
    Sort Key: strom_test.id
-   ->  Hash Join
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.bigint_x = strom_test_1.bigint_x) THEN strom_test.bigint_x ELSE 0::bigint END
-         Hash Cond: ((strom_test.bigint_x = strom_test_1.bigint_x) AND (strom_test.id = strom_test_1.id))
+         Join Filter: ((strom_test.bigint_x = strom_test_1.bigint_x) AND (strom_test.id = strom_test_1.id))
          ->  Seq Scan on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
-         ->  Hash
-               Output: strom_test_1.bigint_x, strom_test_1.id
-               ->  Seq Scan on public.strom_test strom_test_1
-                     Output: strom_test_1.bigint_x, strom_test_1.id
-                     Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-(14 rows)
+         ->  Seq Scan on public.strom_test strom_test_1
+               Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
+               Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+(12 rows)
 
 --real
 explain (verbose, costs off, timing off) select a.id,case when a.real_x = b.real_x then a.real_x else 0 end from 
@@ -94,23 +82,21 @@ explain (verbose, costs off, timing off) select a.id,case when a.real_x = b.real
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 ) as b
  on a.real_x=b.real_x and a.id=b.id order by a.id;
-                                                                                                                  QUERY PLAN                                                                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Output: strom_test.id, (CASE WHEN (strom_test.real_x = strom_test_1.real_x) THEN strom_test.real_x ELSE 0::real END)
    Sort Key: strom_test.id
-   ->  Hash Join
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.real_x = strom_test_1.real_x) THEN strom_test.real_x ELSE 0::real END
-         Hash Cond: ((strom_test.real_x = strom_test_1.real_x) AND (strom_test.id = strom_test_1.id))
+         Join Filter: ((strom_test.real_x = strom_test_1.real_x) AND (strom_test.id = strom_test_1.id))
          ->  Seq Scan on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
-         ->  Hash
-               Output: strom_test_1.real_x, strom_test_1.id
-               ->  Seq Scan on public.strom_test strom_test_1
-                     Output: strom_test_1.real_x, strom_test_1.id
-                     Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-(14 rows)
+         ->  Seq Scan on public.strom_test strom_test_1
+               Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
+               Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+(12 rows)
 
 --float
 explain (verbose, costs off, timing off) select a.id,case when a.float_x = b.float_x then a.float_x else 0 end from 
@@ -118,23 +104,21 @@ explain (verbose, costs off, timing off) select a.id,case when a.float_x = b.flo
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 ) as b
  on a.float_x=b.float_x and a.id=b.id order by a.id;
-                                                                                                                  QUERY PLAN                                                                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Output: strom_test.id, (CASE WHEN (strom_test.float_x = strom_test_1.float_x) THEN strom_test.float_x ELSE 0::double precision END)
    Sort Key: strom_test.id
-   ->  Hash Join
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.float_x = strom_test_1.float_x) THEN strom_test.float_x ELSE 0::double precision END
-         Hash Cond: ((strom_test.float_x = strom_test_1.float_x) AND (strom_test.id = strom_test_1.id))
+         Join Filter: ((strom_test.float_x = strom_test_1.float_x) AND (strom_test.id = strom_test_1.id))
          ->  Seq Scan on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
-         ->  Hash
-               Output: strom_test_1.float_x, strom_test_1.id
-               ->  Seq Scan on public.strom_test strom_test_1
-                     Output: strom_test_1.float_x, strom_test_1.id
-                     Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-(14 rows)
+         ->  Seq Scan on public.strom_test strom_test_1
+               Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
+               Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+(12 rows)
 
 --numeric
 explain (verbose, costs off, timing off) select a.id,case when a.nume_x = b.nume_x then a.nume_x else 0 end from 
@@ -142,23 +126,21 @@ explain (verbose, costs off, timing off) select a.id,case when a.nume_x = b.nume
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 ) as b
  on a.nume_x=b.nume_x and a.id=b.id order by a.id;
-                                                                                                                  QUERY PLAN                                                                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Output: strom_test.id, (CASE WHEN (strom_test.nume_x = strom_test_1.nume_x) THEN strom_test.nume_x ELSE 0::numeric END)
    Sort Key: strom_test.id
-   ->  Hash Join
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.nume_x = strom_test_1.nume_x) THEN strom_test.nume_x ELSE 0::numeric END
-         Hash Cond: ((strom_test.nume_x = strom_test_1.nume_x) AND (strom_test.id = strom_test_1.id))
+         Join Filter: ((strom_test.nume_x = strom_test_1.nume_x) AND (strom_test.id = strom_test_1.id))
          ->  Seq Scan on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
-         ->  Hash
-               Output: strom_test_1.nume_x, strom_test_1.id
-               ->  Seq Scan on public.strom_test strom_test_1
-                     Output: strom_test_1.nume_x, strom_test_1.id
-                     Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-(14 rows)
+         ->  Seq Scan on public.strom_test strom_test_1
+               Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
+               Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+(12 rows)
 
 --small serial
 explain (verbose, costs off, timing off) select a.id,case when a.smlsrl_x = b.smlsrl_x then a.smlsrl_x else 0 end from 
@@ -166,23 +148,21 @@ explain (verbose, costs off, timing off) select a.id,case when a.smlsrl_x = b.sm
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 ) as b
  on a.smlsrl_x=b.smlsrl_x and a.id=b.id order by a.id;
-                                                                                                                  QUERY PLAN                                                                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Output: strom_test.id, (CASE WHEN (strom_test.smlsrl_x = strom_test_1.smlsrl_x) THEN (strom_test.smlsrl_x)::integer ELSE 0 END)
    Sort Key: strom_test.id
-   ->  Hash Join
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.smlsrl_x = strom_test_1.smlsrl_x) THEN (strom_test.smlsrl_x)::integer ELSE 0 END
-         Hash Cond: ((strom_test.smlsrl_x = strom_test_1.smlsrl_x) AND (strom_test.id = strom_test_1.id))
+         Join Filter: ((strom_test.smlsrl_x = strom_test_1.smlsrl_x) AND (strom_test.id = strom_test_1.id))
          ->  Seq Scan on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
-         ->  Hash
-               Output: strom_test_1.smlsrl_x, strom_test_1.id
-               ->  Seq Scan on public.strom_test strom_test_1
-                     Output: strom_test_1.smlsrl_x, strom_test_1.id
-                     Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-(14 rows)
+         ->  Seq Scan on public.strom_test strom_test_1
+               Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
+               Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+(12 rows)
 
 --serial
 explain (verbose, costs off, timing off) select a.id,case when a.serial_x = b.serial_x then a.serial_x else 0 end from 
@@ -190,23 +170,21 @@ explain (verbose, costs off, timing off) select a.id,case when a.serial_x = b.se
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 ) as b
  on a.serial_x=b.serial_x and a.id=b.id order by a.id;
-                                                                                                                  QUERY PLAN                                                                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Output: strom_test.id, (CASE WHEN (strom_test.serial_x = strom_test_1.serial_x) THEN strom_test.serial_x ELSE 0 END)
    Sort Key: strom_test.id
-   ->  Hash Join
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.serial_x = strom_test_1.serial_x) THEN strom_test.serial_x ELSE 0 END
-         Hash Cond: ((strom_test.serial_x = strom_test_1.serial_x) AND (strom_test.id = strom_test_1.id))
+         Join Filter: ((strom_test.serial_x = strom_test_1.serial_x) AND (strom_test.id = strom_test_1.id))
          ->  Seq Scan on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
-         ->  Hash
-               Output: strom_test_1.serial_x, strom_test_1.id
-               ->  Seq Scan on public.strom_test strom_test_1
-                     Output: strom_test_1.serial_x, strom_test_1.id
-                     Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-(14 rows)
+         ->  Seq Scan on public.strom_test strom_test_1
+               Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
+               Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+(12 rows)
 
 --big serial
 explain (verbose, costs off, timing off) select a.id,case when a.bigsrl_x = b.bigsrl_x then a.bigsrl_x else 0 end from 
@@ -214,23 +192,21 @@ explain (verbose, costs off, timing off) select a.id,case when a.bigsrl_x = b.bi
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 ) as b
  on a.bigsrl_x=b.bigsrl_x and a.id=b.id order by a.id;
-                                                                                                                  QUERY PLAN                                                                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Output: strom_test.id, (CASE WHEN (strom_test.bigsrl_x = strom_test_1.bigsrl_x) THEN strom_test.bigsrl_x ELSE 0::bigint END)
    Sort Key: strom_test.id
-   ->  Hash Join
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.bigsrl_x = strom_test_1.bigsrl_x) THEN strom_test.bigsrl_x ELSE 0::bigint END
-         Hash Cond: ((strom_test.bigsrl_x = strom_test_1.bigsrl_x) AND (strom_test.id = strom_test_1.id))
+         Join Filter: ((strom_test.bigsrl_x = strom_test_1.bigsrl_x) AND (strom_test.id = strom_test_1.id))
          ->  Seq Scan on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
-         ->  Hash
-               Output: strom_test_1.bigsrl_x, strom_test_1.id
-               ->  Seq Scan on public.strom_test strom_test_1
-                     Output: strom_test_1.bigsrl_x, strom_test_1.id
-                     Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-(14 rows)
+         ->  Seq Scan on public.strom_test strom_test_1
+               Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
+               Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+(12 rows)
 
 ---
 --- BULKLOAD OFF
@@ -241,23 +217,21 @@ explain (verbose, costs off, timing off) select a.id,case when a.smlint_x = b.sm
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as b
  on a.smlint_x=b.smlint_x and a.id=b.id order by a.id;
-                                                                                                                  QUERY PLAN                                                                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Output: strom_test.id, (CASE WHEN (strom_test.smlint_x = strom_test_1.smlint_x) THEN (strom_test.smlint_x)::integer ELSE 0 END)
    Sort Key: strom_test.id
-   ->  Hash Join
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.smlint_x = strom_test_1.smlint_x) THEN (strom_test.smlint_x)::integer ELSE 0 END
-         Hash Cond: ((strom_test.smlint_x = strom_test_1.smlint_x) AND (strom_test.id = strom_test_1.id))
+         Join Filter: ((strom_test.smlint_x = strom_test_1.smlint_x) AND (strom_test.id = strom_test_1.id))
          ->  Seq Scan on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0) AND ((strom_test.id)::text !~~ ''::text))
-         ->  Hash
-               Output: strom_test_1.smlint_x, strom_test_1.id
-               ->  Seq Scan on public.strom_test strom_test_1
-                     Output: strom_test_1.smlint_x, strom_test_1.id
-                     Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0) AND ((strom_test_1.id)::text !~~ ''::text))
-(14 rows)
+         ->  Seq Scan on public.strom_test strom_test_1
+               Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
+               Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0) AND ((strom_test_1.id)::text !~~ ''::text))
+(12 rows)
 
 --integer
 explain (verbose, costs off, timing off) select a.id,case when a.integer_x = b.integer_x then a.integer_x else 0 end from 
@@ -265,23 +239,21 @@ explain (verbose, costs off, timing off) select a.id,case when a.integer_x = b.i
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as b
  on a.integer_x=b.integer_x and a.id=b.id order by a.id;
-                                                                                                                  QUERY PLAN                                                                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Output: strom_test.id, (CASE WHEN (strom_test.integer_x = strom_test_1.integer_x) THEN strom_test.integer_x ELSE 0 END)
    Sort Key: strom_test.id
-   ->  Hash Join
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.integer_x = strom_test_1.integer_x) THEN strom_test.integer_x ELSE 0 END
-         Hash Cond: ((strom_test.integer_x = strom_test_1.integer_x) AND (strom_test.id = strom_test_1.id))
+         Join Filter: ((strom_test.integer_x = strom_test_1.integer_x) AND (strom_test.id = strom_test_1.id))
          ->  Seq Scan on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0) AND ((strom_test.id)::text !~~ ''::text))
-         ->  Hash
-               Output: strom_test_1.integer_x, strom_test_1.id
-               ->  Seq Scan on public.strom_test strom_test_1
-                     Output: strom_test_1.integer_x, strom_test_1.id
-                     Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0) AND ((strom_test_1.id)::text !~~ ''::text))
-(14 rows)
+         ->  Seq Scan on public.strom_test strom_test_1
+               Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
+               Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0) AND ((strom_test_1.id)::text !~~ ''::text))
+(12 rows)
 
 --bigint
 explain (verbose, costs off, timing off) select a.id,case when a.bigint_x = b.bigint_x then a.bigint_x else 0 end from 
@@ -289,23 +261,21 @@ explain (verbose, costs off, timing off) select a.id,case when a.bigint_x = b.bi
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as b
  on a.bigint_x=b.bigint_x and a.id=b.id order by a.id;
-                                                                                                                  QUERY PLAN                                                                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Output: strom_test.id, (CASE WHEN (strom_test.bigint_x = strom_test_1.bigint_x) THEN strom_test.bigint_x ELSE 0::bigint END)
    Sort Key: strom_test.id
-   ->  Hash Join
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.bigint_x = strom_test_1.bigint_x) THEN strom_test.bigint_x ELSE 0::bigint END
-         Hash Cond: ((strom_test.bigint_x = strom_test_1.bigint_x) AND (strom_test.id = strom_test_1.id))
+         Join Filter: ((strom_test.bigint_x = strom_test_1.bigint_x) AND (strom_test.id = strom_test_1.id))
          ->  Seq Scan on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0) AND ((strom_test.id)::text !~~ ''::text))
-         ->  Hash
-               Output: strom_test_1.bigint_x, strom_test_1.id
-               ->  Seq Scan on public.strom_test strom_test_1
-                     Output: strom_test_1.bigint_x, strom_test_1.id
-                     Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0) AND ((strom_test_1.id)::text !~~ ''::text))
-(14 rows)
+         ->  Seq Scan on public.strom_test strom_test_1
+               Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
+               Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0) AND ((strom_test_1.id)::text !~~ ''::text))
+(12 rows)
 
 --real
 explain (verbose, costs off, timing off) select a.id,case when a.real_x = b.real_x then a.real_x else 0 end from 
@@ -313,23 +283,21 @@ explain (verbose, costs off, timing off) select a.id,case when a.real_x = b.real
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as b
  on a.real_x=b.real_x and a.id=b.id order by a.id;
-                                                                                                                  QUERY PLAN                                                                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Output: strom_test.id, (CASE WHEN (strom_test.real_x = strom_test_1.real_x) THEN strom_test.real_x ELSE 0::real END)
    Sort Key: strom_test.id
-   ->  Hash Join
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.real_x = strom_test_1.real_x) THEN strom_test.real_x ELSE 0::real END
-         Hash Cond: ((strom_test.real_x = strom_test_1.real_x) AND (strom_test.id = strom_test_1.id))
+         Join Filter: ((strom_test.real_x = strom_test_1.real_x) AND (strom_test.id = strom_test_1.id))
          ->  Seq Scan on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0) AND ((strom_test.id)::text !~~ ''::text))
-         ->  Hash
-               Output: strom_test_1.real_x, strom_test_1.id
-               ->  Seq Scan on public.strom_test strom_test_1
-                     Output: strom_test_1.real_x, strom_test_1.id
-                     Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0) AND ((strom_test_1.id)::text !~~ ''::text))
-(14 rows)
+         ->  Seq Scan on public.strom_test strom_test_1
+               Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
+               Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0) AND ((strom_test_1.id)::text !~~ ''::text))
+(12 rows)
 
 --float
 explain (verbose, costs off, timing off) select a.id,case when a.float_x = b.float_x then a.float_x else 0 end from 
@@ -337,23 +305,21 @@ explain (verbose, costs off, timing off) select a.id,case when a.float_x = b.flo
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as b
  on a.float_x=b.float_x and a.id=b.id order by a.id;
-                                                                                                                  QUERY PLAN                                                                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Output: strom_test.id, (CASE WHEN (strom_test.float_x = strom_test_1.float_x) THEN strom_test.float_x ELSE 0::double precision END)
    Sort Key: strom_test.id
-   ->  Hash Join
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.float_x = strom_test_1.float_x) THEN strom_test.float_x ELSE 0::double precision END
-         Hash Cond: ((strom_test.float_x = strom_test_1.float_x) AND (strom_test.id = strom_test_1.id))
+         Join Filter: ((strom_test.float_x = strom_test_1.float_x) AND (strom_test.id = strom_test_1.id))
          ->  Seq Scan on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0) AND ((strom_test.id)::text !~~ ''::text))
-         ->  Hash
-               Output: strom_test_1.float_x, strom_test_1.id
-               ->  Seq Scan on public.strom_test strom_test_1
-                     Output: strom_test_1.float_x, strom_test_1.id
-                     Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0) AND ((strom_test_1.id)::text !~~ ''::text))
-(14 rows)
+         ->  Seq Scan on public.strom_test strom_test_1
+               Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
+               Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0) AND ((strom_test_1.id)::text !~~ ''::text))
+(12 rows)
 
 --numeric
 explain (verbose, costs off, timing off) select a.id,case when a.nume_x = b.nume_x then a.nume_x else 0 end from 
@@ -361,23 +327,21 @@ explain (verbose, costs off, timing off) select a.id,case when a.nume_x = b.nume
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as b
  on a.nume_x=b.nume_x and a.id=b.id order by a.id;
-                                                                                                                  QUERY PLAN                                                                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Output: strom_test.id, (CASE WHEN (strom_test.nume_x = strom_test_1.nume_x) THEN strom_test.nume_x ELSE 0::numeric END)
    Sort Key: strom_test.id
-   ->  Hash Join
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.nume_x = strom_test_1.nume_x) THEN strom_test.nume_x ELSE 0::numeric END
-         Hash Cond: ((strom_test.nume_x = strom_test_1.nume_x) AND (strom_test.id = strom_test_1.id))
+         Join Filter: ((strom_test.nume_x = strom_test_1.nume_x) AND (strom_test.id = strom_test_1.id))
          ->  Seq Scan on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0) AND ((strom_test.id)::text !~~ ''::text))
-         ->  Hash
-               Output: strom_test_1.nume_x, strom_test_1.id
-               ->  Seq Scan on public.strom_test strom_test_1
-                     Output: strom_test_1.nume_x, strom_test_1.id
-                     Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0) AND ((strom_test_1.id)::text !~~ ''::text))
-(14 rows)
+         ->  Seq Scan on public.strom_test strom_test_1
+               Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
+               Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0) AND ((strom_test_1.id)::text !~~ ''::text))
+(12 rows)
 
 --small serial
 explain (verbose, costs off, timing off) select a.id,case when a.smlsrl_x = b.smlsrl_x then a.smlsrl_x else 0 end from 
@@ -385,23 +349,21 @@ explain (verbose, costs off, timing off) select a.id,case when a.smlsrl_x = b.sm
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as b
  on a.smlsrl_x=b.smlsrl_x and a.id=b.id order by a.id;
-                                                                                                                  QUERY PLAN                                                                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Output: strom_test.id, (CASE WHEN (strom_test.smlsrl_x = strom_test_1.smlsrl_x) THEN (strom_test.smlsrl_x)::integer ELSE 0 END)
    Sort Key: strom_test.id
-   ->  Hash Join
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.smlsrl_x = strom_test_1.smlsrl_x) THEN (strom_test.smlsrl_x)::integer ELSE 0 END
-         Hash Cond: ((strom_test.smlsrl_x = strom_test_1.smlsrl_x) AND (strom_test.id = strom_test_1.id))
+         Join Filter: ((strom_test.smlsrl_x = strom_test_1.smlsrl_x) AND (strom_test.id = strom_test_1.id))
          ->  Seq Scan on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0) AND ((strom_test.id)::text !~~ ''::text))
-         ->  Hash
-               Output: strom_test_1.smlsrl_x, strom_test_1.id
-               ->  Seq Scan on public.strom_test strom_test_1
-                     Output: strom_test_1.smlsrl_x, strom_test_1.id
-                     Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0) AND ((strom_test_1.id)::text !~~ ''::text))
-(14 rows)
+         ->  Seq Scan on public.strom_test strom_test_1
+               Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
+               Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0) AND ((strom_test_1.id)::text !~~ ''::text))
+(12 rows)
 
 --serial
 explain (verbose, costs off, timing off) select a.id,case when a.serial_x = b.serial_x then a.serial_x else 0 end from 
@@ -409,23 +371,21 @@ explain (verbose, costs off, timing off) select a.id,case when a.serial_x = b.se
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as b
  on a.serial_x=b.serial_x and a.id=b.id order by a.id;
-                                                                                                                  QUERY PLAN                                                                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Output: strom_test.id, (CASE WHEN (strom_test.serial_x = strom_test_1.serial_x) THEN strom_test.serial_x ELSE 0 END)
    Sort Key: strom_test.id
-   ->  Hash Join
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.serial_x = strom_test_1.serial_x) THEN strom_test.serial_x ELSE 0 END
-         Hash Cond: ((strom_test.serial_x = strom_test_1.serial_x) AND (strom_test.id = strom_test_1.id))
+         Join Filter: ((strom_test.serial_x = strom_test_1.serial_x) AND (strom_test.id = strom_test_1.id))
          ->  Seq Scan on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0) AND ((strom_test.id)::text !~~ ''::text))
-         ->  Hash
-               Output: strom_test_1.serial_x, strom_test_1.id
-               ->  Seq Scan on public.strom_test strom_test_1
-                     Output: strom_test_1.serial_x, strom_test_1.id
-                     Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0) AND ((strom_test_1.id)::text !~~ ''::text))
-(14 rows)
+         ->  Seq Scan on public.strom_test strom_test_1
+               Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
+               Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0) AND ((strom_test_1.id)::text !~~ ''::text))
+(12 rows)
 
 --big serial
 explain (verbose, costs off, timing off) select a.id,case when a.bigsrl_x = b.bigsrl_x then a.bigsrl_x else 0 end from 
@@ -433,36 +393,23 @@ explain (verbose, costs off, timing off) select a.id,case when a.bigsrl_x = b.bi
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as b
  on a.bigsrl_x=b.bigsrl_x and a.id=b.id order by a.id;
-                                                                                                                  QUERY PLAN                                                                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Output: strom_test.id, (CASE WHEN (strom_test.bigsrl_x = strom_test_1.bigsrl_x) THEN strom_test.bigsrl_x ELSE 0::bigint END)
    Sort Key: strom_test.id
-   ->  Hash Join
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.bigsrl_x = strom_test_1.bigsrl_x) THEN strom_test.bigsrl_x ELSE 0::bigint END
-         Hash Cond: ((strom_test.bigsrl_x = strom_test_1.bigsrl_x) AND (strom_test.id = strom_test_1.id))
+         Join Filter: ((strom_test.bigsrl_x = strom_test_1.bigsrl_x) AND (strom_test.id = strom_test_1.id))
          ->  Seq Scan on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0) AND ((strom_test.id)::text !~~ ''::text))
-         ->  Hash
-               Output: strom_test_1.bigsrl_x, strom_test_1.id
-               ->  Seq Scan on public.strom_test strom_test_1
-                     Output: strom_test_1.bigsrl_x, strom_test_1.id
-                     Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0) AND ((strom_test_1.id)::text !~~ ''::text))
-(14 rows)
+         ->  Seq Scan on public.strom_test strom_test_1
+               Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
+               Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0) AND ((strom_test_1.id)::text !~~ ''::text))
+(12 rows)
 
-set enable_seqscan to off;
-set enable_bitmapscan to off;
-set enable_indexscan to off;
-set random_page_cost=1000000;   --# force off index_scan.
-set enable_gpuhashjoin to on;
-set enable_gpupreagg to off;
-set enable_mergejoin to off;
-set enable_nestloop to off;
-set enable_gpusort to off;
-set client_min_messages to warning;
 set pg_strom.enabled=on;
-set enable_hashjoin to off;
 ---
 --- BULKLOAD ON
 ---
@@ -472,30 +419,24 @@ explain (verbose, costs off, timing off) select a.id,case when a.smlint_x = b.sm
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 ) as b
  on a.smlint_x=b.smlint_x and a.id=b.id order by a.id;
-                                                                                                                                QUERY PLAN                                                                                                                                
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuSort)
    Output: strom_test.id, (CASE WHEN (strom_test.smlint_x = strom_test_1.smlint_x) THEN (strom_test.smlint_x)::integer ELSE 0 END)
    Sort Key: strom_test.id
-   ->  Custom Scan (GpuHashJoin)
+   Features: likely-tuple-slot
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.smlint_x = strom_test_1.smlint_x) THEN (strom_test.smlint_x)::integer ELSE 0 END
-         Pseudo scan: strom_test.id, strom_test.smlint_x, strom_test_1.smlint_x, (strom_test_1.id)
-         Hash clause 1: ((strom_test.smlint_x = strom_test_1.smlint_x) AND (strom_test.id = strom_test_1.id))
-         Bulkload: Off
-         Features: likely-tuple-slot, bulkload-supported
+         Join Filter: ((strom_test.smlint_x = strom_test_1.smlint_x) AND (strom_test.id = strom_test_1.id))
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
                Features: likely-tuple-slot
-         ->  Custom Scan (MultiHash)
+         ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-               hash keys: strom_test_1.smlint_x, strom_test_1.id
-               nBatches: 1  Buckets: 1000  Memory Usage: 98.04%
-               ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
-                     Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-                     Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-                     Features: likely-tuple-slot
-(21 rows)
+               Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+               Features: likely-tuple-slot
+(15 rows)
 
 --integer
 explain (verbose, costs off, timing off) select a.id,case when a.integer_x = b.integer_x then a.integer_x else 0 end from 
@@ -503,30 +444,24 @@ explain (verbose, costs off, timing off) select a.id,case when a.integer_x = b.i
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 ) as b
  on a.integer_x=b.integer_x and a.id=b.id order by a.id;
-                                                                                                                                QUERY PLAN                                                                                                                                
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuSort)
    Output: strom_test.id, (CASE WHEN (strom_test.integer_x = strom_test_1.integer_x) THEN strom_test.integer_x ELSE 0 END)
    Sort Key: strom_test.id
-   ->  Custom Scan (GpuHashJoin)
+   Features: likely-tuple-slot
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.integer_x = strom_test_1.integer_x) THEN strom_test.integer_x ELSE 0 END
-         Pseudo scan: strom_test.id, strom_test.integer_x, strom_test_1.integer_x, (strom_test_1.id)
-         Hash clause 1: ((strom_test.integer_x = strom_test_1.integer_x) AND (strom_test.id = strom_test_1.id))
-         Bulkload: Off
-         Features: likely-tuple-slot, bulkload-supported
+         Join Filter: ((strom_test.integer_x = strom_test_1.integer_x) AND (strom_test.id = strom_test_1.id))
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
                Features: likely-tuple-slot
-         ->  Custom Scan (MultiHash)
+         ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-               hash keys: strom_test_1.integer_x, strom_test_1.id
-               nBatches: 1  Buckets: 1000  Memory Usage: 98.04%
-               ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
-                     Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-                     Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-                     Features: likely-tuple-slot
-(21 rows)
+               Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+               Features: likely-tuple-slot
+(15 rows)
 
 --bigint
 explain (verbose, costs off, timing off) select a.id,case when a.bigint_x = b.bigint_x then a.bigint_x else 0 end from 
@@ -534,30 +469,24 @@ explain (verbose, costs off, timing off) select a.id,case when a.bigint_x = b.bi
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 ) as b
  on a.bigint_x=b.bigint_x and a.id=b.id order by a.id;
-                                                                                                                                QUERY PLAN                                                                                                                                
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuSort)
    Output: strom_test.id, (CASE WHEN (strom_test.bigint_x = strom_test_1.bigint_x) THEN strom_test.bigint_x ELSE 0::bigint END)
    Sort Key: strom_test.id
-   ->  Custom Scan (GpuHashJoin)
+   Features: likely-tuple-slot
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.bigint_x = strom_test_1.bigint_x) THEN strom_test.bigint_x ELSE 0::bigint END
-         Pseudo scan: strom_test.id, strom_test.bigint_x, strom_test_1.bigint_x, (strom_test_1.id)
-         Hash clause 1: ((strom_test.bigint_x = strom_test_1.bigint_x) AND (strom_test.id = strom_test_1.id))
-         Bulkload: Off
-         Features: likely-tuple-slot, bulkload-supported
+         Join Filter: ((strom_test.bigint_x = strom_test_1.bigint_x) AND (strom_test.id = strom_test_1.id))
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
                Features: likely-tuple-slot
-         ->  Custom Scan (MultiHash)
+         ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-               hash keys: strom_test_1.bigint_x, strom_test_1.id
-               nBatches: 1  Buckets: 1000  Memory Usage: 98.30%
-               ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
-                     Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-                     Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-                     Features: likely-tuple-slot
-(21 rows)
+               Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+               Features: likely-tuple-slot
+(15 rows)
 
 --real
 explain (verbose, costs off, timing off) select a.id,case when a.real_x = b.real_x then a.real_x else 0 end from 
@@ -565,30 +494,24 @@ explain (verbose, costs off, timing off) select a.id,case when a.real_x = b.real
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 ) as b
  on a.real_x=b.real_x and a.id=b.id order by a.id;
-                                                                                                                                QUERY PLAN                                                                                                                                
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuSort)
    Output: strom_test.id, (CASE WHEN (strom_test.real_x = strom_test_1.real_x) THEN strom_test.real_x ELSE 0::real END)
    Sort Key: strom_test.id
-   ->  Custom Scan (GpuHashJoin)
+   Features: likely-tuple-slot
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.real_x = strom_test_1.real_x) THEN strom_test.real_x ELSE 0::real END
-         Pseudo scan: strom_test.id, strom_test.real_x, strom_test_1.real_x, (strom_test_1.id)
-         Hash clause 1: ((strom_test.real_x = strom_test_1.real_x) AND (strom_test.id = strom_test_1.id))
-         Bulkload: Off
-         Features: likely-tuple-slot, bulkload-supported
+         Join Filter: ((strom_test.real_x = strom_test_1.real_x) AND (strom_test.id = strom_test_1.id))
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
                Features: likely-tuple-slot
-         ->  Custom Scan (MultiHash)
+         ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-               hash keys: strom_test_1.real_x, strom_test_1.id
-               nBatches: 1  Buckets: 1000  Memory Usage: 98.04%
-               ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
-                     Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-                     Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-                     Features: likely-tuple-slot
-(21 rows)
+               Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+               Features: likely-tuple-slot
+(15 rows)
 
 --float
 explain (verbose, costs off, timing off) select a.id,case when a.float_x = b.float_x then a.float_x else 0 end from 
@@ -596,30 +519,24 @@ explain (verbose, costs off, timing off) select a.id,case when a.float_x = b.flo
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 ) as b
  on a.float_x=b.float_x and a.id=b.id order by a.id;
-                                                                                                                                QUERY PLAN                                                                                                                                
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuSort)
    Output: strom_test.id, (CASE WHEN (strom_test.float_x = strom_test_1.float_x) THEN strom_test.float_x ELSE 0::double precision END)
    Sort Key: strom_test.id
-   ->  Custom Scan (GpuHashJoin)
+   Features: likely-tuple-slot
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.float_x = strom_test_1.float_x) THEN strom_test.float_x ELSE 0::double precision END
-         Pseudo scan: strom_test.id, strom_test.float_x, strom_test_1.float_x, (strom_test_1.id)
-         Hash clause 1: ((strom_test.float_x = strom_test_1.float_x) AND (strom_test.id = strom_test_1.id))
-         Bulkload: Off
-         Features: likely-tuple-slot, bulkload-supported
+         Join Filter: ((strom_test.float_x = strom_test_1.float_x) AND (strom_test.id = strom_test_1.id))
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
                Features: likely-tuple-slot
-         ->  Custom Scan (MultiHash)
+         ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-               hash keys: strom_test_1.float_x, strom_test_1.id
-               nBatches: 1  Buckets: 1000  Memory Usage: 98.30%
-               ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
-                     Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-                     Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-                     Features: likely-tuple-slot
-(21 rows)
+               Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+               Features: likely-tuple-slot
+(15 rows)
 
 --numeric
 explain (verbose, costs off, timing off) select a.id,case when a.nume_x = b.nume_x then a.nume_x else 0 end from 
@@ -627,30 +544,24 @@ explain (verbose, costs off, timing off) select a.id,case when a.nume_x = b.nume
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 ) as b
  on a.nume_x=b.nume_x and a.id=b.id order by a.id;
-                                                                                                                                QUERY PLAN                                                                                                                                
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuSort)
    Output: strom_test.id, (CASE WHEN (strom_test.nume_x = strom_test_1.nume_x) THEN strom_test.nume_x ELSE 0::numeric END)
    Sort Key: strom_test.id
-   ->  Custom Scan (GpuHashJoin)
+   Features: likely-tuple-slot
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.nume_x = strom_test_1.nume_x) THEN strom_test.nume_x ELSE 0::numeric END
-         Pseudo scan: strom_test.id, strom_test.nume_x, strom_test_1.nume_x, (strom_test_1.id)
-         Hash clause 1: ((strom_test.nume_x = strom_test_1.nume_x) AND (strom_test.id = strom_test_1.id))
-         Bulkload: Off
-         Features: likely-tuple-slot, bulkload-supported
+         Join Filter: ((strom_test.nume_x = strom_test_1.nume_x) AND (strom_test.id = strom_test_1.id))
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
                Features: likely-tuple-slot
-         ->  Custom Scan (MultiHash)
+         ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-               hash keys: strom_test_1.nume_x, strom_test_1.id
-               nBatches: 1  Buckets: 1000  Memory Usage: 98.78%
-               ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
-                     Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-                     Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-                     Features: likely-tuple-slot
-(21 rows)
+               Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+               Features: likely-tuple-slot
+(15 rows)
 
 --small serial
 explain (verbose, costs off, timing off) select a.id,case when a.smlsrl_x = b.smlsrl_x then a.smlsrl_x else 0 end from 
@@ -658,30 +569,24 @@ explain (verbose, costs off, timing off) select a.id,case when a.smlsrl_x = b.sm
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 ) as b
  on a.smlsrl_x=b.smlsrl_x and a.id=b.id order by a.id;
-                                                                                                                                QUERY PLAN                                                                                                                                
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuSort)
    Output: strom_test.id, (CASE WHEN (strom_test.smlsrl_x = strom_test_1.smlsrl_x) THEN (strom_test.smlsrl_x)::integer ELSE 0 END)
    Sort Key: strom_test.id
-   ->  Custom Scan (GpuHashJoin)
+   Features: likely-tuple-slot
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.smlsrl_x = strom_test_1.smlsrl_x) THEN (strom_test.smlsrl_x)::integer ELSE 0 END
-         Pseudo scan: strom_test.id, strom_test.smlsrl_x, strom_test_1.smlsrl_x, (strom_test_1.id)
-         Hash clause 1: ((strom_test.smlsrl_x = strom_test_1.smlsrl_x) AND (strom_test.id = strom_test_1.id))
-         Bulkload: Off
-         Features: likely-tuple-slot, bulkload-supported
+         Join Filter: ((strom_test.smlsrl_x = strom_test_1.smlsrl_x) AND (strom_test.id = strom_test_1.id))
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
                Features: likely-tuple-slot
-         ->  Custom Scan (MultiHash)
+         ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-               hash keys: strom_test_1.smlsrl_x, strom_test_1.id
-               nBatches: 1  Buckets: 1000  Memory Usage: 98.04%
-               ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
-                     Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-                     Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-                     Features: likely-tuple-slot
-(21 rows)
+               Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+               Features: likely-tuple-slot
+(15 rows)
 
 --serial
 explain (verbose, costs off, timing off) select a.id,case when a.serial_x = b.serial_x then a.serial_x else 0 end from 
@@ -689,30 +594,24 @@ explain (verbose, costs off, timing off) select a.id,case when a.serial_x = b.se
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 ) as b
  on a.serial_x=b.serial_x and a.id=b.id order by a.id;
-                                                                                                                                QUERY PLAN                                                                                                                                
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuSort)
    Output: strom_test.id, (CASE WHEN (strom_test.serial_x = strom_test_1.serial_x) THEN strom_test.serial_x ELSE 0 END)
    Sort Key: strom_test.id
-   ->  Custom Scan (GpuHashJoin)
+   Features: likely-tuple-slot
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.serial_x = strom_test_1.serial_x) THEN strom_test.serial_x ELSE 0 END
-         Pseudo scan: strom_test.id, strom_test.serial_x, strom_test_1.serial_x, (strom_test_1.id)
-         Hash clause 1: ((strom_test.serial_x = strom_test_1.serial_x) AND (strom_test.id = strom_test_1.id))
-         Bulkload: Off
-         Features: likely-tuple-slot, bulkload-supported
+         Join Filter: ((strom_test.serial_x = strom_test_1.serial_x) AND (strom_test.id = strom_test_1.id))
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
                Features: likely-tuple-slot
-         ->  Custom Scan (MultiHash)
+         ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-               hash keys: strom_test_1.serial_x, strom_test_1.id
-               nBatches: 1  Buckets: 1000  Memory Usage: 98.04%
-               ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
-                     Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-                     Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-                     Features: likely-tuple-slot
-(21 rows)
+               Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+               Features: likely-tuple-slot
+(15 rows)
 
 --big serial
 explain (verbose, costs off, timing off) select a.id,case when a.bigsrl_x = b.bigsrl_x then a.bigsrl_x else 0 end from 
@@ -720,30 +619,24 @@ explain (verbose, costs off, timing off) select a.id,case when a.bigsrl_x = b.bi
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 ) as b
  on a.bigsrl_x=b.bigsrl_x and a.id=b.id order by a.id;
-                                                                                                                                QUERY PLAN                                                                                                                                
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuSort)
    Output: strom_test.id, (CASE WHEN (strom_test.bigsrl_x = strom_test_1.bigsrl_x) THEN strom_test.bigsrl_x ELSE 0::bigint END)
    Sort Key: strom_test.id
-   ->  Custom Scan (GpuHashJoin)
+   Features: likely-tuple-slot
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.bigsrl_x = strom_test_1.bigsrl_x) THEN strom_test.bigsrl_x ELSE 0::bigint END
-         Pseudo scan: strom_test.id, strom_test.bigsrl_x, strom_test_1.bigsrl_x, (strom_test_1.id)
-         Hash clause 1: ((strom_test.bigsrl_x = strom_test_1.bigsrl_x) AND (strom_test.id = strom_test_1.id))
-         Bulkload: Off
-         Features: likely-tuple-slot, bulkload-supported
+         Join Filter: ((strom_test.bigsrl_x = strom_test_1.bigsrl_x) AND (strom_test.id = strom_test_1.id))
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
                Features: likely-tuple-slot
-         ->  Custom Scan (MultiHash)
+         ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-               hash keys: strom_test_1.bigsrl_x, strom_test_1.id
-               nBatches: 1  Buckets: 1000  Memory Usage: 98.30%
-               ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
-                     Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-                     Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-                     Features: likely-tuple-slot
-(21 rows)
+               Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+               Features: likely-tuple-slot
+(15 rows)
 
 ---
 --- BULKLOAD OFF
@@ -754,32 +647,26 @@ explain (verbose, costs off, timing off) select a.id,case when a.smlint_x = b.sm
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as b
  on a.smlint_x=b.smlint_x and a.id=b.id order by a.id;
-                                                                                                                                QUERY PLAN                                                                                                                                
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuSort)
    Output: strom_test.id, (CASE WHEN (strom_test.smlint_x = strom_test_1.smlint_x) THEN (strom_test.smlint_x)::integer ELSE 0 END)
    Sort Key: strom_test.id
-   ->  Custom Scan (GpuHashJoin)
+   Features: likely-tuple-slot
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.smlint_x = strom_test_1.smlint_x) THEN (strom_test.smlint_x)::integer ELSE 0 END
-         Pseudo scan: strom_test.id, strom_test.smlint_x, strom_test_1.smlint_x, (strom_test_1.id)
-         Hash clause 1: ((strom_test.smlint_x = strom_test_1.smlint_x) AND (strom_test.id = strom_test_1.id))
-         Bulkload: Off
-         Features: likely-tuple-slot, bulkload-supported
+         Join Filter: ((strom_test.smlint_x = strom_test_1.smlint_x) AND (strom_test.id = strom_test_1.id))
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id)::text !~~ ''::text)
                Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
                Features: likely-tuple-slot
-         ->  Custom Scan (MultiHash)
+         ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-               hash keys: strom_test_1.smlint_x, strom_test_1.id
-               nBatches: 1  Buckets: 1000  Memory Usage: 98.04%
-               ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
-                     Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-                     Filter: ((strom_test_1.id)::text !~~ ''::text)
-                     Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-                     Features: likely-tuple-slot
-(23 rows)
+               Filter: ((strom_test_1.id)::text !~~ ''::text)
+               Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+               Features: likely-tuple-slot
+(17 rows)
 
 --integer
 explain (verbose, costs off, timing off) select a.id,case when a.integer_x = b.integer_x then a.integer_x else 0 end from 
@@ -787,32 +674,26 @@ explain (verbose, costs off, timing off) select a.id,case when a.integer_x = b.i
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as b
  on a.integer_x=b.integer_x and a.id=b.id order by a.id;
-                                                                                                                                QUERY PLAN                                                                                                                                
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuSort)
    Output: strom_test.id, (CASE WHEN (strom_test.integer_x = strom_test_1.integer_x) THEN strom_test.integer_x ELSE 0 END)
    Sort Key: strom_test.id
-   ->  Custom Scan (GpuHashJoin)
+   Features: likely-tuple-slot
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.integer_x = strom_test_1.integer_x) THEN strom_test.integer_x ELSE 0 END
-         Pseudo scan: strom_test.id, strom_test.integer_x, strom_test_1.integer_x, (strom_test_1.id)
-         Hash clause 1: ((strom_test.integer_x = strom_test_1.integer_x) AND (strom_test.id = strom_test_1.id))
-         Bulkload: Off
-         Features: likely-tuple-slot, bulkload-supported
+         Join Filter: ((strom_test.integer_x = strom_test_1.integer_x) AND (strom_test.id = strom_test_1.id))
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id)::text !~~ ''::text)
                Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
                Features: likely-tuple-slot
-         ->  Custom Scan (MultiHash)
+         ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-               hash keys: strom_test_1.integer_x, strom_test_1.id
-               nBatches: 1  Buckets: 1000  Memory Usage: 98.04%
-               ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
-                     Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-                     Filter: ((strom_test_1.id)::text !~~ ''::text)
-                     Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-                     Features: likely-tuple-slot
-(23 rows)
+               Filter: ((strom_test_1.id)::text !~~ ''::text)
+               Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+               Features: likely-tuple-slot
+(17 rows)
 
 --bigint
 explain (verbose, costs off, timing off) select a.id,case when a.bigint_x = b.bigint_x then a.bigint_x else 0 end from 
@@ -820,32 +701,26 @@ explain (verbose, costs off, timing off) select a.id,case when a.bigint_x = b.bi
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as b
  on a.bigint_x=b.bigint_x and a.id=b.id order by a.id;
-                                                                                                                                QUERY PLAN                                                                                                                                
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuSort)
    Output: strom_test.id, (CASE WHEN (strom_test.bigint_x = strom_test_1.bigint_x) THEN strom_test.bigint_x ELSE 0::bigint END)
    Sort Key: strom_test.id
-   ->  Custom Scan (GpuHashJoin)
+   Features: likely-tuple-slot
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.bigint_x = strom_test_1.bigint_x) THEN strom_test.bigint_x ELSE 0::bigint END
-         Pseudo scan: strom_test.id, strom_test.bigint_x, strom_test_1.bigint_x, (strom_test_1.id)
-         Hash clause 1: ((strom_test.bigint_x = strom_test_1.bigint_x) AND (strom_test.id = strom_test_1.id))
-         Bulkload: Off
-         Features: likely-tuple-slot, bulkload-supported
+         Join Filter: ((strom_test.bigint_x = strom_test_1.bigint_x) AND (strom_test.id = strom_test_1.id))
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id)::text !~~ ''::text)
                Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
                Features: likely-tuple-slot
-         ->  Custom Scan (MultiHash)
+         ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-               hash keys: strom_test_1.bigint_x, strom_test_1.id
-               nBatches: 1  Buckets: 1000  Memory Usage: 98.30%
-               ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
-                     Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-                     Filter: ((strom_test_1.id)::text !~~ ''::text)
-                     Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-                     Features: likely-tuple-slot
-(23 rows)
+               Filter: ((strom_test_1.id)::text !~~ ''::text)
+               Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+               Features: likely-tuple-slot
+(17 rows)
 
 --real
 explain (verbose, costs off, timing off) select a.id,case when a.real_x = b.real_x then a.real_x else 0 end from 
@@ -853,32 +728,26 @@ explain (verbose, costs off, timing off) select a.id,case when a.real_x = b.real
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as b
  on a.real_x=b.real_x and a.id=b.id order by a.id;
-                                                                                                                                QUERY PLAN                                                                                                                                
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuSort)
    Output: strom_test.id, (CASE WHEN (strom_test.real_x = strom_test_1.real_x) THEN strom_test.real_x ELSE 0::real END)
    Sort Key: strom_test.id
-   ->  Custom Scan (GpuHashJoin)
+   Features: likely-tuple-slot
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.real_x = strom_test_1.real_x) THEN strom_test.real_x ELSE 0::real END
-         Pseudo scan: strom_test.id, strom_test.real_x, strom_test_1.real_x, (strom_test_1.id)
-         Hash clause 1: ((strom_test.real_x = strom_test_1.real_x) AND (strom_test.id = strom_test_1.id))
-         Bulkload: Off
-         Features: likely-tuple-slot, bulkload-supported
+         Join Filter: ((strom_test.real_x = strom_test_1.real_x) AND (strom_test.id = strom_test_1.id))
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id)::text !~~ ''::text)
                Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
                Features: likely-tuple-slot
-         ->  Custom Scan (MultiHash)
+         ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-               hash keys: strom_test_1.real_x, strom_test_1.id
-               nBatches: 1  Buckets: 1000  Memory Usage: 98.04%
-               ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
-                     Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-                     Filter: ((strom_test_1.id)::text !~~ ''::text)
-                     Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-                     Features: likely-tuple-slot
-(23 rows)
+               Filter: ((strom_test_1.id)::text !~~ ''::text)
+               Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+               Features: likely-tuple-slot
+(17 rows)
 
 --float
 explain (verbose, costs off, timing off) select a.id,case when a.float_x = b.float_x then a.float_x else 0 end from 
@@ -886,32 +755,26 @@ explain (verbose, costs off, timing off) select a.id,case when a.float_x = b.flo
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as b
  on a.float_x=b.float_x and a.id=b.id order by a.id;
-                                                                                                                                QUERY PLAN                                                                                                                                
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuSort)
    Output: strom_test.id, (CASE WHEN (strom_test.float_x = strom_test_1.float_x) THEN strom_test.float_x ELSE 0::double precision END)
    Sort Key: strom_test.id
-   ->  Custom Scan (GpuHashJoin)
+   Features: likely-tuple-slot
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.float_x = strom_test_1.float_x) THEN strom_test.float_x ELSE 0::double precision END
-         Pseudo scan: strom_test.id, strom_test.float_x, strom_test_1.float_x, (strom_test_1.id)
-         Hash clause 1: ((strom_test.float_x = strom_test_1.float_x) AND (strom_test.id = strom_test_1.id))
-         Bulkload: Off
-         Features: likely-tuple-slot, bulkload-supported
+         Join Filter: ((strom_test.float_x = strom_test_1.float_x) AND (strom_test.id = strom_test_1.id))
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id)::text !~~ ''::text)
                Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
                Features: likely-tuple-slot
-         ->  Custom Scan (MultiHash)
+         ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-               hash keys: strom_test_1.float_x, strom_test_1.id
-               nBatches: 1  Buckets: 1000  Memory Usage: 98.30%
-               ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
-                     Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-                     Filter: ((strom_test_1.id)::text !~~ ''::text)
-                     Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-                     Features: likely-tuple-slot
-(23 rows)
+               Filter: ((strom_test_1.id)::text !~~ ''::text)
+               Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+               Features: likely-tuple-slot
+(17 rows)
 
 --numeric
 explain (verbose, costs off, timing off) select a.id,case when a.nume_x = b.nume_x then a.nume_x else 0 end from 
@@ -919,32 +782,26 @@ explain (verbose, costs off, timing off) select a.id,case when a.nume_x = b.nume
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as b
  on a.nume_x=b.nume_x and a.id=b.id order by a.id;
-                                                                                                                                QUERY PLAN                                                                                                                                
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuSort)
    Output: strom_test.id, (CASE WHEN (strom_test.nume_x = strom_test_1.nume_x) THEN strom_test.nume_x ELSE 0::numeric END)
    Sort Key: strom_test.id
-   ->  Custom Scan (GpuHashJoin)
+   Features: likely-tuple-slot
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.nume_x = strom_test_1.nume_x) THEN strom_test.nume_x ELSE 0::numeric END
-         Pseudo scan: strom_test.id, strom_test.nume_x, strom_test_1.nume_x, (strom_test_1.id)
-         Hash clause 1: ((strom_test.nume_x = strom_test_1.nume_x) AND (strom_test.id = strom_test_1.id))
-         Bulkload: Off
-         Features: likely-tuple-slot, bulkload-supported
+         Join Filter: ((strom_test.nume_x = strom_test_1.nume_x) AND (strom_test.id = strom_test_1.id))
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id)::text !~~ ''::text)
                Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
                Features: likely-tuple-slot
-         ->  Custom Scan (MultiHash)
+         ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-               hash keys: strom_test_1.nume_x, strom_test_1.id
-               nBatches: 1  Buckets: 1000  Memory Usage: 98.78%
-               ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
-                     Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-                     Filter: ((strom_test_1.id)::text !~~ ''::text)
-                     Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-                     Features: likely-tuple-slot
-(23 rows)
+               Filter: ((strom_test_1.id)::text !~~ ''::text)
+               Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+               Features: likely-tuple-slot
+(17 rows)
 
 --small serial
 explain (verbose, costs off, timing off) select a.id,case when a.smlsrl_x = b.smlsrl_x then a.smlsrl_x else 0 end from 
@@ -952,32 +809,26 @@ explain (verbose, costs off, timing off) select a.id,case when a.smlsrl_x = b.sm
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as b
  on a.smlsrl_x=b.smlsrl_x and a.id=b.id order by a.id;
-                                                                                                                                QUERY PLAN                                                                                                                                
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuSort)
    Output: strom_test.id, (CASE WHEN (strom_test.smlsrl_x = strom_test_1.smlsrl_x) THEN (strom_test.smlsrl_x)::integer ELSE 0 END)
    Sort Key: strom_test.id
-   ->  Custom Scan (GpuHashJoin)
+   Features: likely-tuple-slot
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.smlsrl_x = strom_test_1.smlsrl_x) THEN (strom_test.smlsrl_x)::integer ELSE 0 END
-         Pseudo scan: strom_test.id, strom_test.smlsrl_x, strom_test_1.smlsrl_x, (strom_test_1.id)
-         Hash clause 1: ((strom_test.smlsrl_x = strom_test_1.smlsrl_x) AND (strom_test.id = strom_test_1.id))
-         Bulkload: Off
-         Features: likely-tuple-slot, bulkload-supported
+         Join Filter: ((strom_test.smlsrl_x = strom_test_1.smlsrl_x) AND (strom_test.id = strom_test_1.id))
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id)::text !~~ ''::text)
                Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
                Features: likely-tuple-slot
-         ->  Custom Scan (MultiHash)
+         ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-               hash keys: strom_test_1.smlsrl_x, strom_test_1.id
-               nBatches: 1  Buckets: 1000  Memory Usage: 98.04%
-               ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
-                     Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-                     Filter: ((strom_test_1.id)::text !~~ ''::text)
-                     Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-                     Features: likely-tuple-slot
-(23 rows)
+               Filter: ((strom_test_1.id)::text !~~ ''::text)
+               Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+               Features: likely-tuple-slot
+(17 rows)
 
 --serial
 explain (verbose, costs off, timing off) select a.id,case when a.serial_x = b.serial_x then a.serial_x else 0 end from 
@@ -985,32 +836,26 @@ explain (verbose, costs off, timing off) select a.id,case when a.serial_x = b.se
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as b
  on a.serial_x=b.serial_x and a.id=b.id order by a.id;
-                                                                                                                                QUERY PLAN                                                                                                                                
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuSort)
    Output: strom_test.id, (CASE WHEN (strom_test.serial_x = strom_test_1.serial_x) THEN strom_test.serial_x ELSE 0 END)
    Sort Key: strom_test.id
-   ->  Custom Scan (GpuHashJoin)
+   Features: likely-tuple-slot
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.serial_x = strom_test_1.serial_x) THEN strom_test.serial_x ELSE 0 END
-         Pseudo scan: strom_test.id, strom_test.serial_x, strom_test_1.serial_x, (strom_test_1.id)
-         Hash clause 1: ((strom_test.serial_x = strom_test_1.serial_x) AND (strom_test.id = strom_test_1.id))
-         Bulkload: Off
-         Features: likely-tuple-slot, bulkload-supported
+         Join Filter: ((strom_test.serial_x = strom_test_1.serial_x) AND (strom_test.id = strom_test_1.id))
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id)::text !~~ ''::text)
                Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
                Features: likely-tuple-slot
-         ->  Custom Scan (MultiHash)
+         ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-               hash keys: strom_test_1.serial_x, strom_test_1.id
-               nBatches: 1  Buckets: 1000  Memory Usage: 98.04%
-               ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
-                     Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-                     Filter: ((strom_test_1.id)::text !~~ ''::text)
-                     Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-                     Features: likely-tuple-slot
-(23 rows)
+               Filter: ((strom_test_1.id)::text !~~ ''::text)
+               Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+               Features: likely-tuple-slot
+(17 rows)
 
 --big serial
 explain (verbose, costs off, timing off) select a.id,case when a.bigsrl_x = b.bigsrl_x then a.bigsrl_x else 0 end from 
@@ -1018,30 +863,24 @@ explain (verbose, costs off, timing off) select a.id,case when a.bigsrl_x = b.bi
  inner join 
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as b
  on a.bigsrl_x=b.bigsrl_x and a.id=b.id order by a.id;
-                                                                                                                                QUERY PLAN                                                                                                                                
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuSort)
    Output: strom_test.id, (CASE WHEN (strom_test.bigsrl_x = strom_test_1.bigsrl_x) THEN strom_test.bigsrl_x ELSE 0::bigint END)
    Sort Key: strom_test.id
-   ->  Custom Scan (GpuHashJoin)
+   Features: likely-tuple-slot
+   ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.bigsrl_x = strom_test_1.bigsrl_x) THEN strom_test.bigsrl_x ELSE 0::bigint END
-         Pseudo scan: strom_test.id, strom_test.bigsrl_x, strom_test_1.bigsrl_x, (strom_test_1.id)
-         Hash clause 1: ((strom_test.bigsrl_x = strom_test_1.bigsrl_x) AND (strom_test.id = strom_test_1.id))
-         Bulkload: Off
-         Features: likely-tuple-slot, bulkload-supported
+         Join Filter: ((strom_test.bigsrl_x = strom_test_1.bigsrl_x) AND (strom_test.id = strom_test_1.id))
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                Filter: ((strom_test.id)::text !~~ ''::text)
                Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000) AND ((strom_test.id % 100) = 0))
                Features: likely-tuple-slot
-         ->  Custom Scan (MultiHash)
+         ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-               hash keys: strom_test_1.bigsrl_x, strom_test_1.id
-               nBatches: 1  Buckets: 1000  Memory Usage: 98.30%
-               ->  Custom Scan (GpuScan) on public.strom_test strom_test_1
-                     Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
-                     Filter: ((strom_test_1.id)::text !~~ ''::text)
-                     Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
-                     Features: likely-tuple-slot
-(23 rows)
+               Filter: ((strom_test_1.id)::text !~~ ''::text)
+               Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
+               Features: likely-tuple-slot
+(17 rows)
 
