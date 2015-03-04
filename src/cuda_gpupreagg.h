@@ -803,6 +803,8 @@ gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
 	/*
 	 * Allocation of a slot of kern_rowmap to point which slot is
 	 * responsible to grouping key.
+	 * All the threads that are not responsible to the grouping-key,
+	 * it updates the value of responsible thread.
 	 *
 	 * NOTE: Length of kern_row_map should be same as kds->nrooms.
 	 * So, we can use kds->nrooms to check array boundary.
@@ -819,6 +821,10 @@ gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
 		goto out;
 	}
 	dest_index = base_index + index;
+
+	if (get_global_id(0) < nitems &&
+		get_global_id(0) == owner_index)
+		krowmap->rindex[dest_index] = get_global_id(0);
 
 	/*
 	 * Global reduction for each column
@@ -842,19 +848,15 @@ gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
 		 * identifier on the kern_row_map. Once kernel execution gets done,
 		 * this index points the location of aggregate value.
 		 */
-		if (get_global_id(0) < nitems)
+		if (get_global_id(0) < nitems &&
+			get_global_id(0) != owner_index)
 		{
-			if (get_global_id(0) == owner_index)
-				krowmap->rindex[dest_index] = get_global_id(0);
-			else
-			{
-				gpupreagg_global_calc(&errcode,
-									  attnum,
-									  kds_dst,
-									  ktoast,
-									  owner_index,
-									  get_global_id(0));
-			}
+			gpupreagg_global_calc(&errcode,
+								  attnum,
+								  kds_dst,
+								  ktoast,
+								  owner_index,
+								  get_global_id(0));
 		}
 	}
 out:
