@@ -5082,8 +5082,11 @@ pgstrom_int8_avg_accum(PG_FUNCTION_ARGS)
 
 	if (!AggCheckCallContext(fcinfo, &aggcxt))
 		elog(ERROR, "aggregate function called in non-aggregate context");
-	if (nrows < 0 || PG_ARGISNULL(1))
-		elog(ERROR, "Bug? negative or NULL nrows was given");
+
+	if (PG_ARGISNULL(1))
+		nrows = 0;
+	else if (nrows < 0)
+		elog(ERROR, "Bug? negative nrows were given");
 
 	/* make a state object and update it */
 	oldcxt = MemoryContextSwitchTo(aggcxt);
@@ -5097,7 +5100,8 @@ pgstrom_int8_avg_accum(PG_FUNCTION_ARGS)
 										  ObjectIdGetDatum(0),
 										  Int32GetDatum(-1));
 	}
-	if (!PG_ARGISNULL(2))
+
+	if (nrows > 0 && !PG_ARGISNULL(2))
 	{
 		state->N += nrows;
 		addNum = DirectFunctionCall1(int8_numeric, PG_GETARG_DATUM(2));
@@ -5119,8 +5123,11 @@ pgstrom_numeric_avg_accum(PG_FUNCTION_ARGS)
 
 	if (!AggCheckCallContext(fcinfo, &aggcxt))
 		elog(ERROR, "aggregate function called in non-aggregate context");
-	if (nrows < 0 || PG_ARGISNULL(1))
-		elog(ERROR, "Bug? negative or NULL nrows was given");
+
+	if (PG_ARGISNULL(1))
+		nrows = 0;
+	else if (nrows < 0)
+		elog(ERROR, "Bug? negative nrows were given");
 
 	/* make a state object and update it */
 	oldcxt = MemoryContextSwitchTo(aggcxt);
@@ -5134,7 +5141,8 @@ pgstrom_numeric_avg_accum(PG_FUNCTION_ARGS)
 										  ObjectIdGetDatum(0),
 										  Int32GetDatum(-1));
 	}
-	if (!PG_ARGISNULL(2))
+
+	if (nrows > 0 && !PG_ARGISNULL(2))
 	{
 		state->N += nrows;
 		state->sumX = DirectFunctionCall2(numeric_add,
@@ -5300,8 +5308,10 @@ pgstrom_numeric_var_accum(PG_FUNCTION_ARGS)
 	if (!AggCheckCallContext(fcinfo, &aggcxt))
 		elog(ERROR, "aggregate function called in non-aggregate context");
 
-	if (nrows < 0 || PG_ARGISNULL(1))
-		elog(ERROR, "Bug? negative or NULL nrows was given");
+	if (PG_ARGISNULL(1))
+		nrows = 0;
+	else if (nrows < 0)
+		elog(ERROR, "Bug? negative nrows were given");
 
 	/* make a state object and update it */
 	oldcxt = MemoryContextSwitchTo(aggcxt);
@@ -5319,7 +5329,8 @@ pgstrom_numeric_var_accum(PG_FUNCTION_ARGS)
 										   ObjectIdGetDatum(0),
 										   Int32GetDatum(-1));
 	}
-	if (!PG_ARGISNULL(2) && !PG_ARGISNULL(3))
+
+	if (nrows > 0 && !PG_ARGISNULL(2) && !PG_ARGISNULL(3))
 	{
 		state->N += nrows;
 		state->sumX = DirectFunctionCall2(numeric_add,
