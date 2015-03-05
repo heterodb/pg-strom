@@ -333,6 +333,8 @@ HostPinMemContextCreate(MemoryContext parent,
 /*
  * cuda_control.c
  */
+extern CUdeviceptr gpuMemAlloc(GpuTask *gtask, size_t bytesize);
+extern void gpuMemFree(GpuTask *gtask, CUdeviceptr dptr);
 extern GpuContext *pgstrom_get_gpucontext(void);
 extern void pgstrom_sync_gpucontext(GpuContext *gcontext);
 extern void pgstrom_put_gpucontext(GpuContext *gcontext);

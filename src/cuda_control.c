@@ -44,16 +44,12 @@ static GpuContext  *gcontext_last = NULL;
 static int			cuda_num_devices = -1;
 static CUdevice	   *cuda_devices = NULL;
 
-/* management structure of device memory */
-typedef struct GpuMemChunk
-{
-	dlist_node		addr_chain;	/* link to addr_chunks */
-	dlist_node		free_chain;	/* link to free_chunks, or zero if active */
-	dlist_node		hash_chain;	/* link to hash_table, or zero if free  */
-	CUdeviceptr		chunk_addr;
-	size_t			chunk_size;
-} GpuMemChunk;
-
+/* ----------------------------------------------------------------
+ *
+ * Routine to support lightwight userspace device memory allocator
+ *
+ * ----------------------------------------------------------------
+ */
 typedef struct GpuMemBlock
 {
 	dlist_node		chain;			/* link to active/unused_blocks */
@@ -63,6 +59,16 @@ typedef struct GpuMemBlock
 	dlist_head		addr_chunks;	/* chunks in order of address */
 	dlist_head		free_chunks;	/* free chunks */
 } GpuMemBlock;
+
+typedef struct GpuMemChunk
+{
+	GpuMemBlock	   *gm_block;	/* memory block this chunk belong to */
+	dlist_node		addr_chain;	/* link to addr_chunks */
+	dlist_node		free_chain;	/* link to free_chunks, or zero if active */
+	dlist_node		hash_chain;	/* link to hash_table, or zero if free  */
+	CUdeviceptr		chunk_addr;
+	size_t			chunk_size;
+} GpuMemChunk;
 
 static inline void
 gpuMemHeadInit(GpuMemHead *gm_head)
@@ -77,6 +83,18 @@ gpuMemHeadInit(GpuMemHead *gm_head)
 		dlist_init(&gm_head->hash_slots[i]);
 }
 
+static inline int
+gpuMemHashIndex(GpuMemHead *gm_head, CUdeviceptr chunk_addr)
+{
+	pg_crc32    crc;
+
+	INIT_CRC32C(crc);
+	COMP_CRC32C(crc, &chunk_addr, sizeof(CUdeviceptr));
+	FIN_CRC32C(crc);
+
+	return crc % lengthof(gm_head->hash_slots);
+}
+
 CUdeviceptr
 gpuMemAlloc(GpuTask *gtask, size_t bytesize)
 {
@@ -89,7 +107,6 @@ gpuMemAlloc(GpuTask *gtask, size_t bytesize)
 	dlist_iter		iter;
 	CUdeviceptr		block_addr;
 	CUresult		rc;
-	pg_crc32		crc;
 	int				index;
 	size_t			required;
 
@@ -168,8 +185,9 @@ gpuMemAlloc(GpuTask *gtask, size_t bytesize)
 	else
 	{
 		dnode = dlist_pop_head_node(&gm_head->unused_chunks);
-		gm_chunk = dlist_container(GpuMemChunk, free_chain, dnode);
+		gm_chunk = dlist_container(GpuMemChunk, addr_chain, dnode);
 	}
+	gm_chunk->gm_block = gm_block;
 	dlist_push_head(&gm_block->addr_chunks, &gm_chunk->addr_chain);
 	dlist_push_head(&gm_block->free_chunks, &gm_chunk->free_chain);
 	memset(&gm_chunk->hash_chain, 0, sizeof(dlist_node));
@@ -194,11 +212,7 @@ found:
 			memset(&gm_chunk->free_chain, 0, sizeof(dlist_node));
 			gm_block->free_size -= gm_chunk->chunk_size;
 
-			INIT_CRC32C(crc);
-			COMP_CRC32C(crc, &gm_chunk->chunk_addr, sizeof(CUdeviceptr));
-			FIN_CRC32C(crc);
-			index = crc % lengthof(gm_head->hash_slots);
-
+			index = gpuMemHashIndex(gm_head, gm_chunk->chunk_addr);
 			dlist_push_tail(&gm_head->hash_slots[index],
 							&gm_chunk->hash_chain);
 			return gm_chunk->chunk_addr;
@@ -211,19 +225,17 @@ found:
 		else
 		{
 			dnode = dlist_pop_head_node(&gm_head->unused_chunks);
-			new_chunk = dlist_container(GpuMemChunk, free_chain, dnode);
+			new_chunk = dlist_container(GpuMemChunk, addr_chain, dnode);
 		}
+		new_chunk->gm_block = gm_block;
 		new_chunk->chunk_addr = gm_chunk->chunk_addr;
 		new_chunk->chunk_size = bytesize;
 		gm_chunk->chunk_addr += bytesize;
 		gm_chunk->chunk_size -= bytesize;
 		dlist_insert_before(&gm_chunk->addr_chain, &new_chunk->addr_chain);
 		memset(&new_chunk->free_chain, 0, sizeof(dlist_node));
-		INIT_CRC32C(crc);
-		COMP_CRC32C(crc, &new_chunk->chunk_addr, sizeof(CUdeviceptr));
-		FIN_CRC32C(crc);
-		index = crc % lengthof(gm_head->hash_slots);
 
+		index = gpuMemHashIndex(gm_head, new_chunk->chunk_addr);
 		dlist_push_tail(&gm_head->hash_slots[index],
 						&new_chunk->hash_chain);
 		gm_block->free_size -= bytesize;
@@ -233,26 +245,130 @@ found:
 	elog(ERROR, "Bug? we could not find a free chunk in GpuMemBlock");
 }
 
-CUresult
-gpuMemFree(GpuTask *gtask, CUdeviceptr dptr)
+void
+gpuMemFree(GpuTask *gtask, CUdeviceptr chunk_addr)
 {
-	/* find hash to get GpuMemChunk */
-	/* release ... */
+	GpuContext	   *gcontext = gtask->gts->gcontext;
+	GpuMemHead	   *gm_head;
+	GpuMemBlock	   *gm_block;
+	GpuMemChunk	   *gm_chunk;
+	GpuMemChunk	   *gm_prev;
+	GpuMemChunk	   *gm_next;
+	dlist_node	   *dnode;
+	dlist_iter		iter;
+	CUresult		rc;
+	int				index;
 
+	/* find out the cuda-context */
+	Assert(gtask->cuda_index < gcontext->num_context);
+	gm_head = &gcontext->gpu[gtask->cuda_index].cuda_memory;
+
+	index = gpuMemHashIndex(gm_head, chunk_addr);
+	dlist_foreach(iter, &gm_head->hash_slots[index])
+	{
+		gm_chunk = dlist_container(GpuMemChunk, hash_chain, iter.cur);
+		if (gm_chunk->chunk_addr == chunk_addr)
+			goto found;
+	}
+	elog(ERROR, "Bug? device address %llu was not tracked", chunk_addr);
+
+found:
+	/* unlink from the hash */
+	dlist_delete(&gm_chunk->hash_chain);
+	memset(&gm_chunk->hash_chain, 0, sizeof(dlist_node));
+
+	/* sanity check; chunks should be within block */
+	gm_block = gm_chunk->gm_block;
+	Assert(gm_chunk->chunk_addr >= gm_block->block_addr &&
+		   (gm_chunk->chunk_addr + gm_chunk->chunk_size) <=
+		   (gm_block->block_addr + gm_block->block_size));
+	gm_block->free_size += gm_chunk->chunk_size;
+	Assert(gm_block->free_size <= gm_block->block_size);
+
+	/* back to the free_list */
+	Assert(!gm_chunk->free_chain.prev && !gm_chunk->free_chain.next);
+	dlist_push_head(&gm_block->free_chunks, &gm_chunk->free_chain);
+
+	if (dlist_has_prev(&gm_block->addr_chunks,
+					   &gm_chunk->addr_chain))
+	{
+		dnode = dlist_prev_node(&gm_block->addr_chunks,
+								&gm_chunk->addr_chain);
+		gm_prev = dlist_container(GpuMemChunk, addr_chain, dnode);
+		Assert(gm_prev->chunk_addr +
+			   gm_prev->chunk_size == gm_chunk->chunk_addr);
+		if (gm_prev->free_chain.prev && gm_prev->free_chain.next)
+		{
+			Assert(!gm_prev->hash_chain.prev &&
+				   !gm_prev->hash_chain.next);
+			/* OK, it can be merged */
+			dlist_delete(&gm_chunk->addr_chain);
+			dlist_delete(&gm_chunk->free_chain);
+			gm_prev->chunk_size += gm_chunk->chunk_size;
+
+			/* GpuMemChunk entry may be reused soon */
+			dlist_push_head(&gm_head->unused_chunks, &gm_chunk->addr_chain);
+
+			gm_chunk = gm_prev;
+		}
+		else
+			Assert(!gm_prev->free_chain.prev && !gm_prev->free_chain.next);
+	}
+
+	if (dlist_has_next(&gm_block->addr_chunks,
+					   &gm_chunk->addr_chain))
+	{
+		dnode = dlist_next_node(&gm_block->addr_chunks,
+								&gm_chunk->addr_chain);
+		gm_next = dlist_container(GpuMemChunk, addr_chain, dnode);
+		Assert(gm_chunk->chunk_addr +
+			   gm_chunk->chunk_size == gm_next->chunk_addr);
+		if (gm_next->free_chain.prev && gm_prev->free_chain.next)
+		{
+			Assert(!gm_next->hash_chain.prev &&
+				   !gm_next->hash_chain.next);
+			/* OK, it can be merged */
+			dlist_delete(&gm_next->addr_chain);
+			dlist_delete(&gm_next->free_chain);
+			gm_chunk->chunk_size += gm_next->chunk_size;
+
+			/* GpuMemChunk entry may be reused soon */
+			dlist_push_head(&gm_head->unused_chunks, &gm_next->addr_chain);
+		}
+		else
+			Assert(!gm_next->free_chain.prev && !gm_prev->free_chain.next);
+	}
+
+	/*
+	 * Try to check GpuMemBlock is still active or not
+	 */
+	if (!dlist_has_prev(&gm_block->addr_chunks, &gm_chunk->addr_chain) &&
+		!dlist_has_next(&gm_block->addr_chunks, &gm_chunk->addr_chain))
+	{
+		Assert(gm_chunk->free_chain.prev && gm_chunk->free_chain.next);
+		Assert(!gm_chunk->hash_chain.prev && !gm_chunk->hash_chain.next);
+		Assert(gm_block->block_addr == gm_chunk->chunk_addr &&
+			   gm_block->block_size == gm_chunk->chunk_size);
+		/* OK, it looks to up an empty block */
+		dlist_delete(&gm_block->chain);
+		memset(&gm_block->chain, 0, sizeof(dlist_node));
+
+		/* One empty block shall be kept, but no more */
+		if (!gm_head->empty_block)
+			gm_head->empty_block = gm_block;
+		else
+		{
+			rc = cuMemFree(gm_block->block_addr);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuMemFree: %s", errorText(rc));
+
+			memset(gm_chunk, 0, sizeof(GpuMemChunk));
+			dlist_push_head(&gm_head->unused_chunks, &gm_chunk->addr_chain);
+			memset(gm_block, 0, sizeof(GpuMemBlock));
+			dlist_push_head(&gm_head->unused_blocks, &gm_block->chain);
+		}
+	}
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
