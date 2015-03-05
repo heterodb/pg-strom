@@ -158,6 +158,16 @@ typedef struct {
  *
  *
  */
+struct GpuMemBlock;
+typedef struct
+{
+	struct GpuMemBlock *empty_block;
+	dlist_head		active_blocks;
+	dlist_head		unused_chunks;
+	dlist_head		unused_blocks;
+	dlist_head		hash_slots[59];	/* hash to find out GpuMemChunk */
+} GpuMemHead;
+
 typedef struct
 {
 	dlist_node		chain;
@@ -171,7 +181,7 @@ typedef struct
 	struct {
 		CUdevice	cuda_device;
 		CUcontext	cuda_context;
-		dlist_head	cuda_dmem_list;	/* list of device memory structure */
+		GpuMemHead	cuda_memory;	/* wrapper of device memory allocation */
 	} gpu[FLEXIBLE_ARRAY_MEMBER];
 } GpuContext;
 
@@ -202,6 +212,7 @@ typedef struct GpuTask
 	dlist_node		chain;		/* link to task state list */
 	dlist_node		tracker;	/* link to task tracker list */
 	GpuTaskState   *gts;
+	cl_uint			cuda_index;		/* index of the cuda_context */
 	CUcontext		cuda_context;	/* just reference, no cleanup needed */
 	CUdevice		cuda_device;	/* just reference, no cleanup needed */
 	CUstream		cuda_stream;	/* owned for each GpuTask */

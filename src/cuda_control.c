@@ -44,6 +44,220 @@ static GpuContext  *gcontext_last = NULL;
 static int			cuda_num_devices = -1;
 static CUdevice	   *cuda_devices = NULL;
 
+/* management structure of device memory */
+typedef struct GpuMemChunk
+{
+	dlist_node		addr_chain;	/* link to addr_chunks */
+	dlist_node		free_chain;	/* link to free_chunks, or zero if active */
+	dlist_node		hash_chain;	/* link to hash_table, or zero if free  */
+	CUdeviceptr		chunk_addr;
+	size_t			chunk_size;
+} GpuMemChunk;
+
+typedef struct GpuMemBlock
+{
+	dlist_node		chain;			/* link to active/unused_blocks */
+	CUdeviceptr		block_addr;
+	size_t			block_size;
+	size_t			free_size;
+	dlist_head		addr_chunks;	/* chunks in order of address */
+	dlist_head		free_chunks;	/* free chunks */
+} GpuMemBlock;
+
+static inline void
+gpuMemHeadInit(GpuMemHead *gm_head)
+{
+	int		i;
+
+	gm_head->empty_block = NULL;
+	dlist_init(&gm_head->active_blocks);
+	dlist_init(&gm_head->unused_chunks);
+	dlist_init(&gm_head->unused_blocks);
+	for (i=0; i < lengthof(gm_head->hash_slots); i++)
+		dlist_init(&gm_head->hash_slots[i]);
+}
+
+CUdeviceptr
+gpuMemAlloc(GpuTask *gtask, size_t bytesize)
+{
+	GpuContext	   *gcontext = gtask->gts->gcontext;
+	GpuMemHead	   *gm_head;
+	GpuMemBlock	   *gm_block;
+	GpuMemChunk	   *gm_chunk;
+	GpuMemChunk	   *new_chunk;
+	dlist_node	   *dnode;
+	dlist_iter		iter;
+	CUdeviceptr		block_addr;
+	CUresult		rc;
+	pg_crc32		crc;
+	int				index;
+	size_t			required;
+
+	/* round up to 1KB align */
+	bytesize = TYPEALIGN(1024, bytesize);
+
+	/* try to find out preliminary allocated block */
+	Assert(gtask->cuda_index < gcontext->num_context);
+	gm_head = &gcontext->gpu[gtask->cuda_index].cuda_memory;
+
+	dlist_foreach(iter, &gm_head->active_blocks)
+	{
+		gm_block = dlist_container(GpuMemBlock, chain, iter.cur);
+		if (gm_block->free_size > bytesize)
+			goto found;
+	}
+
+	if (gm_head->empty_block)
+	{
+		gm_block = gm_head->empty_block;
+		if (gm_block->free_size > bytesize)
+		{
+			Assert(!gm_block->chain.prev && !gm_block->chain.next);
+			gm_head->empty_block = NULL;
+			dlist_push_head(&gm_head->active_blocks, &gm_block->chain);
+			goto found;
+		}
+	}
+	/*
+	 * no space available on the preliminary allocated block,
+	 * so we try to allocate device memory in advance.
+	 *
+	 * NOTE: we should give more practical estimation for
+	 * device memory requirement. smaller number of kernel
+	 * driver call makes better performance!
+	 */
+	required = pgstrom_chunk_size() * 11;
+	required = TYPEALIGN(1024 * 1024, required);	/* round up to 1MB */
+#ifdef USE_ASSERT_CHECKING
+	{
+		/*
+		 * We expect caller already set appropriate cuda_context
+		 * on the current thread. Ensure the context here.
+		 */
+		CUcontext	curr_context;
+
+		rc = cuCtxGetCurrent(&curr_context);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuCtxGetCurrent: %s", errorText(rc));
+		Assert(curr_context == gtask->cuda_context);
+	}
+#endif
+	rc = cuMemAlloc(&block_addr, required);
+	if (rc != CUDA_SUCCESS)
+	{
+		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+			return 0UL;		/* need to wait... */
+		elog(ERROR, "failed on cuMemAlloc: %s", errorText(rc));
+	}
+
+	if (!dlist_is_empty(&gm_head->unused_blocks))
+		gm_block = MemoryContextAlloc(gcontext->memcxt, sizeof(GpuMemBlock));
+	else
+	{
+		dnode = dlist_pop_head_node(&gm_head->unused_blocks);
+		gm_block = dlist_container(GpuMemBlock, chain, dnode);
+	}
+	gm_block->block_addr = block_addr;
+	gm_block->block_size = required;
+	gm_block->free_size = required;
+	dlist_init(&gm_block->addr_chunks);
+	dlist_init(&gm_block->free_chunks);
+
+	if (!dlist_is_empty(&gm_head->unused_chunks))
+		gm_chunk = MemoryContextAlloc(gcontext->memcxt, sizeof(GpuMemChunk));
+	else
+	{
+		dnode = dlist_pop_head_node(&gm_head->unused_chunks);
+		gm_chunk = dlist_container(GpuMemChunk, free_chain, dnode);
+	}
+	dlist_push_head(&gm_block->addr_chunks, &gm_chunk->addr_chain);
+	dlist_push_head(&gm_block->free_chunks, &gm_chunk->free_chain);
+	memset(&gm_chunk->hash_chain, 0, sizeof(dlist_node));
+	gm_chunk->chunk_addr = block_addr;
+	gm_chunk->chunk_size = required;
+
+	dlist_push_head(&gm_head->active_blocks, &gm_block->chain);
+
+found:
+	dlist_foreach(iter, &gm_block->free_chunks)
+	{
+		gm_chunk = dlist_container(GpuMemChunk, free_chain, iter.cur);
+
+		Assert(!gm_chunk->hash_chain.prev && !gm_chunk->hash_chain.next);
+		if (gm_chunk->chunk_size < bytesize)
+			continue;
+
+		/* no need to split, just replace free chunk */
+		if (gm_chunk->chunk_size == bytesize)
+		{
+			dlist_delete(&gm_chunk->free_chain);
+			memset(&gm_chunk->free_chain, 0, sizeof(dlist_node));
+			gm_block->free_size -= gm_chunk->chunk_size;
+
+			INIT_CRC32C(crc);
+			COMP_CRC32C(crc, &gm_chunk->chunk_addr, sizeof(CUdeviceptr));
+			FIN_CRC32C(crc);
+			index = crc % lengthof(gm_head->hash_slots);
+
+			dlist_push_tail(&gm_head->hash_slots[index],
+							&gm_chunk->hash_chain);
+			return gm_chunk->chunk_addr;
+		}
+
+		/* larger free chunk found, so let's split it */
+		if (!dlist_is_empty(&gm_head->unused_chunks))
+			new_chunk = MemoryContextAlloc(gcontext->memcxt,
+										   sizeof(GpuMemChunk));
+		else
+		{
+			dnode = dlist_pop_head_node(&gm_head->unused_chunks);
+			new_chunk = dlist_container(GpuMemChunk, free_chain, dnode);
+		}
+		new_chunk->chunk_addr = gm_chunk->chunk_addr;
+		new_chunk->chunk_size = bytesize;
+		gm_chunk->chunk_addr += bytesize;
+		gm_chunk->chunk_size -= bytesize;
+		dlist_insert_before(&gm_chunk->addr_chain, &new_chunk->addr_chain);
+		memset(&new_chunk->free_chain, 0, sizeof(dlist_node));
+		INIT_CRC32C(crc);
+		COMP_CRC32C(crc, &new_chunk->chunk_addr, sizeof(CUdeviceptr));
+		FIN_CRC32C(crc);
+		index = crc % lengthof(gm_head->hash_slots);
+
+		dlist_push_tail(&gm_head->hash_slots[index],
+						&new_chunk->hash_chain);
+		gm_block->free_size -= bytesize;
+
+		return new_chunk->chunk_addr;
+	}
+	elog(ERROR, "Bug? we could not find a free chunk in GpuMemBlock");
+}
+
+CUresult
+gpuMemFree(GpuTask *gtask, CUdeviceptr dptr)
+{
+	/* find hash to get GpuMemChunk */
+	/* release ... */
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 /*
  * pgstrom_cuda_init
  *
@@ -131,7 +345,7 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 		dlist_init(&gcontext->pds_list);
 		gcontext->gpu[0].cuda_context = cuda_context;
 		gcontext->gpu[0].cuda_device = cuda_devices[0];
-		dlist_init(&gcontext->gpu[0].cuda_dmem_list);
+		gpuMemHeadInit(&gcontext->gpu[0].cuda_memory);
 		for (index=1; index < cuda_num_devices; index++)
 		{
 			rc = cuCtxCreate(&gcontext->gpu[index].cuda_context,
@@ -140,7 +354,7 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
 			gcontext->gpu[index].cuda_device = cuda_devices[index];
-			dlist_init(&gcontext->gpu[index].cuda_dmem_list);
+			gpuMemHeadInit(&gcontext->gpu[index].cuda_memory);
 		}
 		gcontext->num_context = cuda_num_devices;
 		gcontext->next_context = (MyProc->pgprocno % cuda_num_devices);
@@ -503,6 +717,7 @@ pgstrom_launch_pending_tasks(GpuTaskState *gts)
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuStreamCreate: %s", errorText(rc));
 
+			gtask->cuda_index = index;
 			gtask->cuda_context = cuda_context;
 			gtask->cuda_device = cuda_device;
 			gtask->cuda_module = cuda_module;
