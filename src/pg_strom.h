@@ -167,12 +167,17 @@ typedef struct
 	dlist_head		state_list;		/* list of GpuTaskState */
 	dlist_head		pds_list;		/* list of pgstrom_data_store */
 	cl_int			num_context;
-	cl_int			cur_context;
-	CUcontext		cuda_context[FLEXIBLE_ARRAY_MEMBER];
+	cl_int			next_context;
+	struct {
+		CUdevice	cuda_device;
+		CUcontext	cuda_context;
+		dlist_head	cuda_dmem_list;	/* list of device memory structure */
+	} gpu[FLEXIBLE_ARRAY_MEMBER];
 } GpuContext;
 
 typedef struct GpuTaskState
 {
+//	CustomScanState	css;
 	dlist_node		chain;
 	GpuContext	   *gcontext;
 	const char	   *kern_source;

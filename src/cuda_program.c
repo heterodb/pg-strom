@@ -816,9 +816,9 @@ retry:
 													  num_context);
 				for (i=0; i < num_context; i++)
 				{
-					rc = cuCtxSetCurrent(gcontext->cuda_context[i]);
+					rc = cuCtxPushCurrent(gcontext->gpu[i].cuda_context);
 					if (rc != CUDA_SUCCESS)
-						elog(ERROR, "failed on cuCtxSetCurrent (%s)",
+						elog(ERROR, "failed on cuCtxPushCurrent (%s)",
 							 errorText(rc));
 
 					rc = cuModuleLoadData(&cuda_modules[i],
@@ -827,9 +827,9 @@ retry:
 						elog(ERROR, "failed on cuModuleLoadData (%s)",
 							 errorText(rc));
 				}
-				rc = cuCtxSetCurrent(NULL);
+				rc = cuCtxPopCurrent(NULL);
 				if (rc != CUDA_SUCCESS)
-					elog(ERROR, "failed on cuCtxSetCurrent (%s)",
+					elog(ERROR, "failed on cuCtxPopCurrent (%s)",
 						 errorText(rc));
 				gts->cuda_modules = cuda_modules;
 			}

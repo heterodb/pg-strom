@@ -122,24 +122,28 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 										 0,		/* no pre-allocation */
 										 length_init,
 										 length_max);
-		length_gcxt = offsetof(GpuContext, cuda_context[cuda_num_devices]);
+		length_gcxt = offsetof(GpuContext, gpu[cuda_num_devices]);
 		gcontext = MemoryContextAllocZero(memcxt, length_gcxt);
 		gcontext->refcnt = 2;
 		gcontext->resowner = resowner;
 		gcontext->memcxt = memcxt;
 		dlist_init(&gcontext->state_list);
 		dlist_init(&gcontext->pds_list);
-		gcontext->cuda_context[0] = cuda_context;
+		gcontext->gpu[0].cuda_context = cuda_context;
+		gcontext->gpu[0].cuda_device = cuda_devices[0];
+		dlist_init(&gcontext->gpu[0].cuda_dmem_list);
 		for (index=1; index < cuda_num_devices; index++)
 		{
-			rc = cuCtxCreate(&gcontext->cuda_context[index],
+			rc = cuCtxCreate(&gcontext->gpu[index].cuda_context,
 							 CU_CTX_SCHED_AUTO,
 							 cuda_devices[index]);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
+			gcontext->gpu[index].cuda_device = cuda_devices[index];
+			dlist_init(&gcontext->gpu[index].cuda_dmem_list);
 		}
 		gcontext->num_context = cuda_num_devices;
-		gcontext->cur_context = 0;
+		gcontext->next_context = (MyProc->pgprocno % cuda_num_devices);
 	}
 	PG_CATCH();
 	{
@@ -153,7 +157,7 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 		{
 			while (index > 0)
 			{
-				rc = cuCtxDestroy(gcontext->cuda_context[--index]);
+				rc = cuCtxDestroy(gcontext->gpu[--index].cuda_context);
 				if (rc != CUDA_SUCCESS)
 					elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
 			}
@@ -212,13 +216,17 @@ pgstrom_sync_gpucontext(GpuContext *gcontext)
 	/* Ensure all the concurrent tasks getting completed */
 	for (i=0; i < gcontext->num_context; i++)
 	{
-		rc = cuCtxSetCurrent(gcontext->cuda_context[i]);
+		rc = cuCtxPushCurrent(gcontext->gpu[i].cuda_context);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuCtxSetCurrent: %s", errorText(rc));
+			elog(WARNING, "failed on cuCtxPushCurrent: %s", errorText(rc));
 
 		rc = cuCtxSynchronize();
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuCtxSynchronize: %s", errorText(rc));
+
+		rc = cuCtxPopCurrent(NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
 	}
 }
 
@@ -296,10 +304,10 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 	 * So, we have to drop non-primary CUDA context, memory context, then
 	 * the primary CUDA context.
 	 */
-	cuda_context = gcontext->cuda_context[0];
+	cuda_context = gcontext->gpu[0].cuda_context;
 	for (i = gcontext->num_context - 1; i > 0; i--)
 	{
-		rc = cuCtxDestroy(gcontext->cuda_context[i]);
+		rc = cuCtxDestroy(gcontext->gpu[i].cuda_context);
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
 	}
@@ -483,16 +491,13 @@ pgstrom_launch_pending_tasks(GpuTaskState *gts)
 			CUresult	rc;
 			int			index;
 
-			index = (gcontext->cur_context++ % gcontext->num_context);
-			cuda_context = gcontext->cuda_context[index];
+			index = (gcontext->next_context++ % gcontext->num_context);
+			cuda_device = gcontext->gpu[index].cuda_device;
+			cuda_context = gcontext->gpu[index].cuda_context;
 			cuda_module = gts->cuda_modules[index];
 			rc = cuCtxPushCurrent(cuda_context);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
-
-			rc = cuCtxGetDevice(&cuda_device);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuCtxGetDevice: %s", errorText(rc));
 
 			rc = cuStreamCreate(&cuda_stream, CU_STREAM_NON_BLOCKING);
 			if (rc != CUDA_SUCCESS)
