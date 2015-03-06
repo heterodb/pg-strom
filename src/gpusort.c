@@ -746,6 +746,10 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	bool		varlena_keys = false;
 	int			i;
 
+	/* nothing to do, if feature is turned off */
+	if (!pgstrom_enabled() || !enable_gpusort)
+	  return;
+
 	/* ensure the plan is Sort */
 	Assert(IsA(sort, Sort));
 	Assert(sort->plan.qual == NIL);
@@ -1645,7 +1649,7 @@ gpusort_merge_cpu_chunks(GpuSortState *gss, pgstrom_cpusort *cpusort_1)
 									   cpusort_2->h.chunk_ids);
 	n = bms_num_members(cpusort_2->h.chunk_ids);
 	cpusort_2->h.mc_class = get_next_log2(n);
-	elog(INFO, "CpuSort merge: %d + %d => %d (class: %d)", x, y, n,
+	elog(DEBUG1, "CpuSort merge: %d + %d => %d (class: %d)", x, y, n,
 		 cpusort_2->h.mc_class);
 	/* release either of them */
 	pfree(cpusort_1);
@@ -1967,7 +1971,7 @@ gpusort_exec_sort(GpuSortState *gss)
 	}
 	/* OK, data was sorted */
 	gss->sort_done = true;
-	elog(INFO, "Sort done");
+	elog(DEBUG1, "Sort done");
 
 	/*
 	 * Once we got the sorting completed, just one chunk should be attached
