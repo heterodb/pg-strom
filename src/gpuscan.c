@@ -686,18 +686,10 @@ __pgstrom_release_gpuscan(pgstrom_gpuscan *gpuscan)
 	}
 
 	if (gpuscan->m_kds)
-	{
-		rc = cuMemFree(gpuscan->m_kds);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
-	}
+		gpuMemFree(&gpuscan->task, gpuscan->m_kds);
 
 	if (gpuscan->m_gpuscan)
-	{
-		rc = cuMemFree(gpuscan->m_gpuscan);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
-	}
+		gpuMemFree(&gpuscan->task, gpuscan->m_gpuscan);
 
 	/* ensure pointers being NULL */
 	gpuscan->kern_qual = NULL;
@@ -713,10 +705,12 @@ static void
 pgstrom_release_gpuscan(GpuTask *gputask)
 {
 	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) gputask;
+	struct timeval		tv1, tv2;
 
+	PERFMON_BEGIN(&gputask->gts->pfm_accum, &tv1);
 	if (gpuscan->pds)
 		pgstrom_release_data_store(gpuscan->pds);
-
+	PERFMON_END(&gputask->gts->pfm_accum, time_debug3, &tv1, &tv2);
 	__pgstrom_release_gpuscan(gpuscan);
 
 	pfree(gpuscan);
@@ -958,6 +952,7 @@ pgstrom_fetch_gpuscan(GpuScanState *gss)
 	 * in running, unless it is smaller than pgstrom_max_async_chunks.
 	 */
 	do {
+		PERFMON_BEGIN(&gss->gts.pfm_accum, &tv1);
 		CHECK_FOR_INTERRUPTS();
 		SpinLockAcquire(&gss->gts.lock);
 		if (!gss->gts.scan_done)
@@ -1007,6 +1002,7 @@ pgstrom_fetch_gpuscan(GpuScanState *gss)
 			}
 		}
 		SpinLockRelease(&gss->gts.lock);
+		PERFMON_END(&gss->gts.pfm_accum, time_debug2, &tv1, &tv2);
 	} while (pgstrom_waitfor_ready_tasks(&gss->gts));
 
 	/*
@@ -1033,9 +1029,7 @@ pgstrom_fetch_gpuscan(GpuScanState *gss)
 		pgstrom_accum_gpuscan_perfmon(gss, gpuscan);
 
 	/* release CUDA resources */
-	PERFMON_BEGIN(&gss->gts.pfm_accum, &tv1);
 	__pgstrom_release_gpuscan(gpuscan);
-	PERFMON_END(&gss->gts.pfm_accum, time_debug2, &tv1, &tv2);
 
 	/*
 	 * Raise an error, if any run-time error was reported
@@ -1053,7 +1047,9 @@ gpuscan_fetch_tuple(CustomScanState *node)
 {
 	GpuScanState   *gss = (GpuScanState *) node;
 	TupleTableSlot *slot = gss->css.ss.ss_ScanTupleSlot;
+	struct timeval tv1, tv2;
 
+	PERFMON_BEGIN(&gss->gts.pfm_accum, &tv1);
 	ExecClearTuple(slot);
 
 	while (!gss->curr_chunk || !(slot = gpuscan_next_tuple(gss)))
@@ -1077,6 +1073,7 @@ gpuscan_fetch_tuple(CustomScanState *node)
 		gss->curr_chunk = gpuscan;
 		gss->curr_index = 0;
 	}
+	PERFMON_END(&gss->gts.pfm_accum, time_debug1, &tv1, &tv2);
 	return slot;
 }
 
@@ -1246,18 +1243,10 @@ gpuscan_cleanup_cuda_resources(pgstrom_gpuscan *gpuscan)
 	}
 
 	if (gpuscan->m_kds)
-	{
-		rc = cuMemFree(gpuscan->m_kds);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
-	}
+		gpuMemFree(&gpuscan->task, gpuscan->m_kds);
 
 	if (gpuscan->m_gpuscan)
-	{
-		rc = cuMemFree(gpuscan->m_gpuscan);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
-	}
+		gpuMemFree(&gpuscan->task, gpuscan->m_gpuscan);
 
 	/* ensure pointers being NULL */
 	gpuscan->kern_qual = NULL;
@@ -1323,22 +1312,14 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	 * Allocation of device memory
 	 */
 	length = KERN_GPUSCAN_LENGTH(&gpuscan->kern);
-	rc = cuMemAlloc(&gpuscan->m_gpuscan, length);
-	if (rc != CUDA_SUCCESS)
-	{
-		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
-			goto out_of_resource;
-		elog(ERROR, "failed on cuMemAlloc: %s", errorText(rc));
-	}
+	gpuscan->m_gpuscan = gpuMemAlloc(&gpuscan->task, length);
+	if (!gpuscan->m_gpuscan)
+		goto out_of_resource;
 
 	length = KERN_DATA_STORE_LENGTH(pds->kds);
-	rc = cuMemAlloc(&gpuscan->m_kds, length);
-	if (rc != CUDA_SUCCESS)
-	{
-		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
-			goto out_of_resource;
-		elog(ERROR, "failed on cuMemAlloc: %s", errorText(rc));
-	}
+	gpuscan->m_kds = gpuMemAlloc(&gpuscan->task, length);
+	if (!gpuscan->m_kds)
+		goto out_of_resource;
 
 	/*
 	 * Creation of event objects, if any

@@ -167,7 +167,7 @@ gpuMemAlloc(GpuTask *gtask, size_t bytesize)
 		elog(ERROR, "failed on cuMemAlloc: %s", errorText(rc));
 	}
 
-	if (!dlist_is_empty(&gm_head->unused_blocks))
+	if (dlist_is_empty(&gm_head->unused_blocks))
 		gm_block = MemoryContextAlloc(gcontext->memcxt, sizeof(GpuMemBlock));
 	else
 	{
@@ -180,7 +180,7 @@ gpuMemAlloc(GpuTask *gtask, size_t bytesize)
 	dlist_init(&gm_block->addr_chunks);
 	dlist_init(&gm_block->free_chunks);
 
-	if (!dlist_is_empty(&gm_head->unused_chunks))
+	if (dlist_is_empty(&gm_head->unused_chunks))
 		gm_chunk = MemoryContextAlloc(gcontext->memcxt, sizeof(GpuMemChunk));
 	else
 	{
@@ -219,7 +219,7 @@ found:
 		}
 
 		/* larger free chunk found, so let's split it */
-		if (!dlist_is_empty(&gm_head->unused_chunks))
+		if (dlist_is_empty(&gm_head->unused_chunks))
 			new_chunk = MemoryContextAlloc(gcontext->memcxt,
 										   sizeof(GpuMemChunk));
 		else
@@ -248,7 +248,8 @@ found:
 void
 gpuMemFree(GpuTask *gtask, CUdeviceptr chunk_addr)
 {
-	GpuContext	   *gcontext = gtask->gts->gcontext;
+	GpuTaskState   *gts = gtask->gts;
+	GpuContext	   *gcontext = gts->gcontext;
 	GpuMemHead	   *gm_head;
 	GpuMemBlock	   *gm_block;
 	GpuMemChunk	   *gm_chunk;
@@ -258,6 +259,7 @@ gpuMemFree(GpuTask *gtask, CUdeviceptr chunk_addr)
 	dlist_iter		iter;
 	CUresult		rc;
 	int				index;
+	struct timeval	tv1, tv2;
 
 	/* find out the cuda-context */
 	Assert(gtask->cuda_index < gcontext->num_context);
@@ -273,6 +275,8 @@ gpuMemFree(GpuTask *gtask, CUdeviceptr chunk_addr)
 	elog(ERROR, "Bug? device address %llu was not tracked", chunk_addr);
 
 found:
+	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
+
 	/* unlink from the hash */
 	dlist_delete(&gm_chunk->hash_chain);
 	memset(&gm_chunk->hash_chain, 0, sizeof(dlist_node));
@@ -323,7 +327,7 @@ found:
 		gm_next = dlist_container(GpuMemChunk, addr_chain, dnode);
 		Assert(gm_chunk->chunk_addr +
 			   gm_chunk->chunk_size == gm_next->chunk_addr);
-		if (gm_next->free_chain.prev && gm_prev->free_chain.next)
+		if (gm_next->free_chain.prev && gm_next->free_chain.next)
 		{
 			Assert(!gm_next->hash_chain.prev &&
 				   !gm_next->hash_chain.next);
@@ -336,7 +340,7 @@ found:
 			dlist_push_head(&gm_head->unused_chunks, &gm_next->addr_chain);
 		}
 		else
-			Assert(!gm_next->free_chain.prev && !gm_prev->free_chain.next);
+			Assert(!gm_next->free_chain.prev && !gm_next->free_chain.next);
 	}
 
 	/*
@@ -358,9 +362,19 @@ found:
 			gm_head->empty_block = gm_block;
 		else
 		{
+			rc = cuCtxPushCurrent(gtask->cuda_context);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+
 			rc = cuMemFree(gm_block->block_addr);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuMemFree: %s", errorText(rc));
+
+			rc = cuCtxPopCurrent(NULL);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuCtxPopCurrent: %s", errorText(rc));
+
+			elog(INFO, "cuMemFree(%zu)", (size_t)gm_block->block_addr);
 
 			memset(gm_chunk, 0, sizeof(GpuMemChunk));
 			dlist_push_head(&gm_head->unused_chunks, &gm_chunk->addr_chain);
@@ -368,6 +382,7 @@ found:
 			dlist_push_head(&gm_head->unused_blocks, &gm_block->chain);
 		}
 	}
+	PERFMON_END(&gts->pfm_accum, time_debug4, &tv1, &tv2);
 }
 
 
@@ -446,6 +461,7 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 		snprintf(namebuf, sizeof(namebuf), "GPU DMA Buffer (%p)", resowner);
 		length_init = 4 * (1UL << get_next_log2(pgstrom_chunk_size()));
 		length_max = 1024 * length_init;
+		elog(INFO, "length_init = %zu length_max = %zu", length_init, length_max);
 		memcxt = HostPinMemContextCreate(NULL,
 										 namebuf,
 										 cuda_context,
