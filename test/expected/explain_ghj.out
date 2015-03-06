@@ -421,10 +421,9 @@ explain (verbose, costs off, timing off) select a.id,case when a.smlint_x = b.sm
  on a.smlint_x=b.smlint_x and a.id=b.id order by a.id;
                                                                                                                              QUERY PLAN                                                                                                                             
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuSort)
+ Sort
    Output: strom_test.id, (CASE WHEN (strom_test.smlint_x = strom_test_1.smlint_x) THEN (strom_test.smlint_x)::integer ELSE 0 END)
    Sort Key: strom_test.id
-   Features: likely-tuple-slot
    ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.smlint_x = strom_test_1.smlint_x) THEN (strom_test.smlint_x)::integer ELSE 0 END
          Join Filter: ((strom_test.smlint_x = strom_test_1.smlint_x) AND (strom_test.id = strom_test_1.id))
@@ -436,7 +435,7 @@ explain (verbose, costs off, timing off) select a.id,case when a.smlint_x = b.sm
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
                Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
                Features: likely-tuple-slot
-(15 rows)
+(14 rows)
 
 --integer
 explain (verbose, costs off, timing off) select a.id,case when a.integer_x = b.integer_x then a.integer_x else 0 end from 
@@ -446,10 +445,9 @@ explain (verbose, costs off, timing off) select a.id,case when a.integer_x = b.i
  on a.integer_x=b.integer_x and a.id=b.id order by a.id;
                                                                                                                              QUERY PLAN                                                                                                                             
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuSort)
+ Sort
    Output: strom_test.id, (CASE WHEN (strom_test.integer_x = strom_test_1.integer_x) THEN strom_test.integer_x ELSE 0 END)
    Sort Key: strom_test.id
-   Features: likely-tuple-slot
    ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.integer_x = strom_test_1.integer_x) THEN strom_test.integer_x ELSE 0 END
          Join Filter: ((strom_test.integer_x = strom_test_1.integer_x) AND (strom_test.id = strom_test_1.id))
@@ -461,7 +459,7 @@ explain (verbose, costs off, timing off) select a.id,case when a.integer_x = b.i
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
                Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
                Features: likely-tuple-slot
-(15 rows)
+(14 rows)
 
 --bigint
 explain (verbose, costs off, timing off) select a.id,case when a.bigint_x = b.bigint_x then a.bigint_x else 0 end from 
@@ -471,10 +469,9 @@ explain (verbose, costs off, timing off) select a.id,case when a.bigint_x = b.bi
  on a.bigint_x=b.bigint_x and a.id=b.id order by a.id;
                                                                                                                              QUERY PLAN                                                                                                                             
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuSort)
+ Sort
    Output: strom_test.id, (CASE WHEN (strom_test.bigint_x = strom_test_1.bigint_x) THEN strom_test.bigint_x ELSE 0::bigint END)
    Sort Key: strom_test.id
-   Features: likely-tuple-slot
    ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.bigint_x = strom_test_1.bigint_x) THEN strom_test.bigint_x ELSE 0::bigint END
          Join Filter: ((strom_test.bigint_x = strom_test_1.bigint_x) AND (strom_test.id = strom_test_1.id))
@@ -486,7 +483,7 @@ explain (verbose, costs off, timing off) select a.id,case when a.bigint_x = b.bi
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
                Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
                Features: likely-tuple-slot
-(15 rows)
+(14 rows)
 
 --real
 explain (verbose, costs off, timing off) select a.id,case when a.real_x = b.real_x then a.real_x else 0 end from 
@@ -496,10 +493,9 @@ explain (verbose, costs off, timing off) select a.id,case when a.real_x = b.real
  on a.real_x=b.real_x and a.id=b.id order by a.id;
                                                                                                                              QUERY PLAN                                                                                                                             
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuSort)
+ Sort
    Output: strom_test.id, (CASE WHEN (strom_test.real_x = strom_test_1.real_x) THEN strom_test.real_x ELSE 0::real END)
    Sort Key: strom_test.id
-   Features: likely-tuple-slot
    ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.real_x = strom_test_1.real_x) THEN strom_test.real_x ELSE 0::real END
          Join Filter: ((strom_test.real_x = strom_test_1.real_x) AND (strom_test.id = strom_test_1.id))
@@ -511,7 +507,7 @@ explain (verbose, costs off, timing off) select a.id,case when a.real_x = b.real
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
                Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
                Features: likely-tuple-slot
-(15 rows)
+(14 rows)
 
 --float
 explain (verbose, costs off, timing off) select a.id,case when a.float_x = b.float_x then a.float_x else 0 end from 
@@ -521,10 +517,9 @@ explain (verbose, costs off, timing off) select a.id,case when a.float_x = b.flo
  on a.float_x=b.float_x and a.id=b.id order by a.id;
                                                                                                                              QUERY PLAN                                                                                                                             
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuSort)
+ Sort
    Output: strom_test.id, (CASE WHEN (strom_test.float_x = strom_test_1.float_x) THEN strom_test.float_x ELSE 0::double precision END)
    Sort Key: strom_test.id
-   Features: likely-tuple-slot
    ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.float_x = strom_test_1.float_x) THEN strom_test.float_x ELSE 0::double precision END
          Join Filter: ((strom_test.float_x = strom_test_1.float_x) AND (strom_test.id = strom_test_1.id))
@@ -536,7 +531,7 @@ explain (verbose, costs off, timing off) select a.id,case when a.float_x = b.flo
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
                Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
                Features: likely-tuple-slot
-(15 rows)
+(14 rows)
 
 --numeric
 explain (verbose, costs off, timing off) select a.id,case when a.nume_x = b.nume_x then a.nume_x else 0 end from 
@@ -546,10 +541,9 @@ explain (verbose, costs off, timing off) select a.id,case when a.nume_x = b.nume
  on a.nume_x=b.nume_x and a.id=b.id order by a.id;
                                                                                                                              QUERY PLAN                                                                                                                             
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuSort)
+ Sort
    Output: strom_test.id, (CASE WHEN (strom_test.nume_x = strom_test_1.nume_x) THEN strom_test.nume_x ELSE 0::numeric END)
    Sort Key: strom_test.id
-   Features: likely-tuple-slot
    ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.nume_x = strom_test_1.nume_x) THEN strom_test.nume_x ELSE 0::numeric END
          Join Filter: ((strom_test.nume_x = strom_test_1.nume_x) AND (strom_test.id = strom_test_1.id))
@@ -561,7 +555,7 @@ explain (verbose, costs off, timing off) select a.id,case when a.nume_x = b.nume
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
                Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
                Features: likely-tuple-slot
-(15 rows)
+(14 rows)
 
 --small serial
 explain (verbose, costs off, timing off) select a.id,case when a.smlsrl_x = b.smlsrl_x then a.smlsrl_x else 0 end from 
@@ -571,10 +565,9 @@ explain (verbose, costs off, timing off) select a.id,case when a.smlsrl_x = b.sm
  on a.smlsrl_x=b.smlsrl_x and a.id=b.id order by a.id;
                                                                                                                              QUERY PLAN                                                                                                                             
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuSort)
+ Sort
    Output: strom_test.id, (CASE WHEN (strom_test.smlsrl_x = strom_test_1.smlsrl_x) THEN (strom_test.smlsrl_x)::integer ELSE 0 END)
    Sort Key: strom_test.id
-   Features: likely-tuple-slot
    ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.smlsrl_x = strom_test_1.smlsrl_x) THEN (strom_test.smlsrl_x)::integer ELSE 0 END
          Join Filter: ((strom_test.smlsrl_x = strom_test_1.smlsrl_x) AND (strom_test.id = strom_test_1.id))
@@ -586,7 +579,7 @@ explain (verbose, costs off, timing off) select a.id,case when a.smlsrl_x = b.sm
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
                Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
                Features: likely-tuple-slot
-(15 rows)
+(14 rows)
 
 --serial
 explain (verbose, costs off, timing off) select a.id,case when a.serial_x = b.serial_x then a.serial_x else 0 end from 
@@ -596,10 +589,9 @@ explain (verbose, costs off, timing off) select a.id,case when a.serial_x = b.se
  on a.serial_x=b.serial_x and a.id=b.id order by a.id;
                                                                                                                              QUERY PLAN                                                                                                                             
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuSort)
+ Sort
    Output: strom_test.id, (CASE WHEN (strom_test.serial_x = strom_test_1.serial_x) THEN strom_test.serial_x ELSE 0 END)
    Sort Key: strom_test.id
-   Features: likely-tuple-slot
    ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.serial_x = strom_test_1.serial_x) THEN strom_test.serial_x ELSE 0 END
          Join Filter: ((strom_test.serial_x = strom_test_1.serial_x) AND (strom_test.id = strom_test_1.id))
@@ -611,7 +603,7 @@ explain (verbose, costs off, timing off) select a.id,case when a.serial_x = b.se
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
                Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
                Features: likely-tuple-slot
-(15 rows)
+(14 rows)
 
 --big serial
 explain (verbose, costs off, timing off) select a.id,case when a.bigsrl_x = b.bigsrl_x then a.bigsrl_x else 0 end from 
@@ -621,10 +613,9 @@ explain (verbose, costs off, timing off) select a.id,case when a.bigsrl_x = b.bi
  on a.bigsrl_x=b.bigsrl_x and a.id=b.id order by a.id;
                                                                                                                              QUERY PLAN                                                                                                                             
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuSort)
+ Sort
    Output: strom_test.id, (CASE WHEN (strom_test.bigsrl_x = strom_test_1.bigsrl_x) THEN strom_test.bigsrl_x ELSE 0::bigint END)
    Sort Key: strom_test.id
-   Features: likely-tuple-slot
    ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.bigsrl_x = strom_test_1.bigsrl_x) THEN strom_test.bigsrl_x ELSE 0::bigint END
          Join Filter: ((strom_test.bigsrl_x = strom_test_1.bigsrl_x) AND (strom_test.id = strom_test_1.id))
@@ -636,7 +627,7 @@ explain (verbose, costs off, timing off) select a.id,case when a.bigsrl_x = b.bi
                Output: strom_test_1.id, strom_test_1.key, strom_test_1.smlint_x, strom_test_1.integer_x, strom_test_1.bigint_x, strom_test_1.real_x, strom_test_1.float_x, strom_test_1.nume_x, strom_test_1.smlsrl_x, strom_test_1.serial_x, strom_test_1.bigsrl_x
                Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
                Features: likely-tuple-slot
-(15 rows)
+(14 rows)
 
 ---
 --- BULKLOAD OFF
@@ -649,10 +640,9 @@ explain (verbose, costs off, timing off) select a.id,case when a.smlint_x = b.sm
  on a.smlint_x=b.smlint_x and a.id=b.id order by a.id;
                                                                                                                              QUERY PLAN                                                                                                                             
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuSort)
+ Sort
    Output: strom_test.id, (CASE WHEN (strom_test.smlint_x = strom_test_1.smlint_x) THEN (strom_test.smlint_x)::integer ELSE 0 END)
    Sort Key: strom_test.id
-   Features: likely-tuple-slot
    ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.smlint_x = strom_test_1.smlint_x) THEN (strom_test.smlint_x)::integer ELSE 0 END
          Join Filter: ((strom_test.smlint_x = strom_test_1.smlint_x) AND (strom_test.id = strom_test_1.id))
@@ -666,7 +656,7 @@ explain (verbose, costs off, timing off) select a.id,case when a.smlint_x = b.sm
                Filter: ((strom_test_1.id)::text !~~ ''::text)
                Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
                Features: likely-tuple-slot
-(17 rows)
+(16 rows)
 
 --integer
 explain (verbose, costs off, timing off) select a.id,case when a.integer_x = b.integer_x then a.integer_x else 0 end from 
@@ -676,10 +666,9 @@ explain (verbose, costs off, timing off) select a.id,case when a.integer_x = b.i
  on a.integer_x=b.integer_x and a.id=b.id order by a.id;
                                                                                                                              QUERY PLAN                                                                                                                             
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuSort)
+ Sort
    Output: strom_test.id, (CASE WHEN (strom_test.integer_x = strom_test_1.integer_x) THEN strom_test.integer_x ELSE 0 END)
    Sort Key: strom_test.id
-   Features: likely-tuple-slot
    ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.integer_x = strom_test_1.integer_x) THEN strom_test.integer_x ELSE 0 END
          Join Filter: ((strom_test.integer_x = strom_test_1.integer_x) AND (strom_test.id = strom_test_1.id))
@@ -693,7 +682,7 @@ explain (verbose, costs off, timing off) select a.id,case when a.integer_x = b.i
                Filter: ((strom_test_1.id)::text !~~ ''::text)
                Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
                Features: likely-tuple-slot
-(17 rows)
+(16 rows)
 
 --bigint
 explain (verbose, costs off, timing off) select a.id,case when a.bigint_x = b.bigint_x then a.bigint_x else 0 end from 
@@ -703,10 +692,9 @@ explain (verbose, costs off, timing off) select a.id,case when a.bigint_x = b.bi
  on a.bigint_x=b.bigint_x and a.id=b.id order by a.id;
                                                                                                                              QUERY PLAN                                                                                                                             
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuSort)
+ Sort
    Output: strom_test.id, (CASE WHEN (strom_test.bigint_x = strom_test_1.bigint_x) THEN strom_test.bigint_x ELSE 0::bigint END)
    Sort Key: strom_test.id
-   Features: likely-tuple-slot
    ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.bigint_x = strom_test_1.bigint_x) THEN strom_test.bigint_x ELSE 0::bigint END
          Join Filter: ((strom_test.bigint_x = strom_test_1.bigint_x) AND (strom_test.id = strom_test_1.id))
@@ -720,7 +708,7 @@ explain (verbose, costs off, timing off) select a.id,case when a.bigint_x = b.bi
                Filter: ((strom_test_1.id)::text !~~ ''::text)
                Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
                Features: likely-tuple-slot
-(17 rows)
+(16 rows)
 
 --real
 explain (verbose, costs off, timing off) select a.id,case when a.real_x = b.real_x then a.real_x else 0 end from 
@@ -730,10 +718,9 @@ explain (verbose, costs off, timing off) select a.id,case when a.real_x = b.real
  on a.real_x=b.real_x and a.id=b.id order by a.id;
                                                                                                                              QUERY PLAN                                                                                                                             
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuSort)
+ Sort
    Output: strom_test.id, (CASE WHEN (strom_test.real_x = strom_test_1.real_x) THEN strom_test.real_x ELSE 0::real END)
    Sort Key: strom_test.id
-   Features: likely-tuple-slot
    ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.real_x = strom_test_1.real_x) THEN strom_test.real_x ELSE 0::real END
          Join Filter: ((strom_test.real_x = strom_test_1.real_x) AND (strom_test.id = strom_test_1.id))
@@ -747,7 +734,7 @@ explain (verbose, costs off, timing off) select a.id,case when a.real_x = b.real
                Filter: ((strom_test_1.id)::text !~~ ''::text)
                Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
                Features: likely-tuple-slot
-(17 rows)
+(16 rows)
 
 --float
 explain (verbose, costs off, timing off) select a.id,case when a.float_x = b.float_x then a.float_x else 0 end from 
@@ -757,10 +744,9 @@ explain (verbose, costs off, timing off) select a.id,case when a.float_x = b.flo
  on a.float_x=b.float_x and a.id=b.id order by a.id;
                                                                                                                              QUERY PLAN                                                                                                                             
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuSort)
+ Sort
    Output: strom_test.id, (CASE WHEN (strom_test.float_x = strom_test_1.float_x) THEN strom_test.float_x ELSE 0::double precision END)
    Sort Key: strom_test.id
-   Features: likely-tuple-slot
    ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.float_x = strom_test_1.float_x) THEN strom_test.float_x ELSE 0::double precision END
          Join Filter: ((strom_test.float_x = strom_test_1.float_x) AND (strom_test.id = strom_test_1.id))
@@ -774,7 +760,7 @@ explain (verbose, costs off, timing off) select a.id,case when a.float_x = b.flo
                Filter: ((strom_test_1.id)::text !~~ ''::text)
                Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
                Features: likely-tuple-slot
-(17 rows)
+(16 rows)
 
 --numeric
 explain (verbose, costs off, timing off) select a.id,case when a.nume_x = b.nume_x then a.nume_x else 0 end from 
@@ -784,10 +770,9 @@ explain (verbose, costs off, timing off) select a.id,case when a.nume_x = b.nume
  on a.nume_x=b.nume_x and a.id=b.id order by a.id;
                                                                                                                              QUERY PLAN                                                                                                                             
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuSort)
+ Sort
    Output: strom_test.id, (CASE WHEN (strom_test.nume_x = strom_test_1.nume_x) THEN strom_test.nume_x ELSE 0::numeric END)
    Sort Key: strom_test.id
-   Features: likely-tuple-slot
    ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.nume_x = strom_test_1.nume_x) THEN strom_test.nume_x ELSE 0::numeric END
          Join Filter: ((strom_test.nume_x = strom_test_1.nume_x) AND (strom_test.id = strom_test_1.id))
@@ -801,7 +786,7 @@ explain (verbose, costs off, timing off) select a.id,case when a.nume_x = b.nume
                Filter: ((strom_test_1.id)::text !~~ ''::text)
                Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
                Features: likely-tuple-slot
-(17 rows)
+(16 rows)
 
 --small serial
 explain (verbose, costs off, timing off) select a.id,case when a.smlsrl_x = b.smlsrl_x then a.smlsrl_x else 0 end from 
@@ -811,10 +796,9 @@ explain (verbose, costs off, timing off) select a.id,case when a.smlsrl_x = b.sm
  on a.smlsrl_x=b.smlsrl_x and a.id=b.id order by a.id;
                                                                                                                              QUERY PLAN                                                                                                                             
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuSort)
+ Sort
    Output: strom_test.id, (CASE WHEN (strom_test.smlsrl_x = strom_test_1.smlsrl_x) THEN (strom_test.smlsrl_x)::integer ELSE 0 END)
    Sort Key: strom_test.id
-   Features: likely-tuple-slot
    ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.smlsrl_x = strom_test_1.smlsrl_x) THEN (strom_test.smlsrl_x)::integer ELSE 0 END
          Join Filter: ((strom_test.smlsrl_x = strom_test_1.smlsrl_x) AND (strom_test.id = strom_test_1.id))
@@ -828,7 +812,7 @@ explain (verbose, costs off, timing off) select a.id,case when a.smlsrl_x = b.sm
                Filter: ((strom_test_1.id)::text !~~ ''::text)
                Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
                Features: likely-tuple-slot
-(17 rows)
+(16 rows)
 
 --serial
 explain (verbose, costs off, timing off) select a.id,case when a.serial_x = b.serial_x then a.serial_x else 0 end from 
@@ -838,10 +822,9 @@ explain (verbose, costs off, timing off) select a.id,case when a.serial_x = b.se
  on a.serial_x=b.serial_x and a.id=b.id order by a.id;
                                                                                                                              QUERY PLAN                                                                                                                             
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuSort)
+ Sort
    Output: strom_test.id, (CASE WHEN (strom_test.serial_x = strom_test_1.serial_x) THEN strom_test.serial_x ELSE 0 END)
    Sort Key: strom_test.id
-   Features: likely-tuple-slot
    ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.serial_x = strom_test_1.serial_x) THEN strom_test.serial_x ELSE 0 END
          Join Filter: ((strom_test.serial_x = strom_test_1.serial_x) AND (strom_test.id = strom_test_1.id))
@@ -855,7 +838,7 @@ explain (verbose, costs off, timing off) select a.id,case when a.serial_x = b.se
                Filter: ((strom_test_1.id)::text !~~ ''::text)
                Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
                Features: likely-tuple-slot
-(17 rows)
+(16 rows)
 
 --big serial
 explain (verbose, costs off, timing off) select a.id,case when a.bigsrl_x = b.bigsrl_x then a.bigsrl_x else 0 end from 
@@ -865,10 +848,9 @@ explain (verbose, costs off, timing off) select a.id,case when a.bigsrl_x = b.bi
  on a.bigsrl_x=b.bigsrl_x and a.id=b.id order by a.id;
                                                                                                                              QUERY PLAN                                                                                                                             
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuSort)
+ Sort
    Output: strom_test.id, (CASE WHEN (strom_test.bigsrl_x = strom_test_1.bigsrl_x) THEN strom_test.bigsrl_x ELSE 0::bigint END)
    Sort Key: strom_test.id
-   Features: likely-tuple-slot
    ->  Nested Loop
          Output: strom_test.id, CASE WHEN (strom_test.bigsrl_x = strom_test_1.bigsrl_x) THEN strom_test.bigsrl_x ELSE 0::bigint END
          Join Filter: ((strom_test.bigsrl_x = strom_test_1.bigsrl_x) AND (strom_test.id = strom_test_1.id))
@@ -882,5 +864,5 @@ explain (verbose, costs off, timing off) select a.id,case when a.bigsrl_x = b.bi
                Filter: ((strom_test_1.id)::text !~~ ''::text)
                Device Filter: ((strom_test_1.id >= 20001) AND (strom_test_1.id <= 30000) AND ((strom_test_1.id % 100) = 0))
                Features: likely-tuple-slot
-(17 rows)
+(16 rows)
 
