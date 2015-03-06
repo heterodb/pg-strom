@@ -485,6 +485,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 	bool		build_log_exist = false;
 	Size		required;
 	Size		usage;
+	int			cuda_cap;
 	int			hindex;
 	int			rc;
 	StringInfoData buf;
@@ -530,7 +531,10 @@ __build_cuda_program(program_cache_entry *old_entry)
 					 basename);
 	if ((old_entry->extra_flags & DEVKERNEL_DISABLE_OPTIMIZE) != 0)
 		appendStringInfo(&cmdline, " -Xptxas '-O0'");
-	nvcc_cmdline_add_device_capability(&cmdline);
+	cuda_cap = pgstrom_baseline_cuda_capability();
+	appendStringInfo(&cmdline,
+					 " -gencode arch=compute_%d,code=sm_%d",
+					 cuda_cap, cuda_cap);
 #ifdef PGSTROM_DEBUG
 	appendStringInfo(&cmdline, " -G -Werror cross-execution-space-call");
 #endif

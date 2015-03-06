@@ -1157,7 +1157,7 @@ pgstrom_check_device_capability(int ordinal, CUdevice device, int *dev_cap)
 	cuda_max_threads_per_block = Min(cuda_max_threads_per_block,
 									 dev_max_threads_per_block);
 	cuda_compute_capability = Min(cuda_compute_capability,
-								  100 * dev_cap_major + dev_cap_minor);
+								  10 * dev_cap_major + dev_cap_minor);
 
 	/* Log the brief CUDA device properties */
 	elog(LOG, "GPU%d %s (%d %s, %dMHz), L2 %dKB, RAM %zuMB (%dbits, %dKHz), capability %d.%d%s",
@@ -1249,20 +1249,14 @@ pgstrom_init_cuda_control(void)
 }
 
 /*
- * nvcc_cmdline_add_device_capability
+ * pgstrom_baseline_cuda_capability
  *
- * add device specific nvcc cmdline options
+ * it returns the baseline cuda capability to be compiled.
  */
-void
-nvcc_cmdline_add_device_capability(StringInfo cmdline)
+int
+pgstrom_baseline_cuda_capability(void)
 {
-	ListCell   *lc;
-
-	foreach (lc, cuda_device_capabilities)
-	{
-		appendStringInfo(cmdline, " -gencode arch=compute_%d,code=sm_%d",
-						 lfirst_int(lc), lfirst_int(lc));
-	}
+	return cuda_compute_capability;
 }
 
 /*
