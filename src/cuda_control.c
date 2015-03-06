@@ -465,7 +465,6 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 		memcxt = HostPinMemContextCreate(NULL,
 										 namebuf,
 										 cuda_context,
-										 0,		/* no pre-allocation */
 										 length_init,
 										 length_max);
 		length_gcxt = offsetof(GpuContext, gpu[cuda_num_devices]);

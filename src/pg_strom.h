@@ -327,9 +327,8 @@ extern MemoryContext
 HostPinMemContextCreate(MemoryContext parent,
                         const char *name,
 						CUcontext cuda_context,
-                        Size minContextSize,
-                        Size initBlockSize,
-                        Size maxBlockSize);
+                        Size block_size_init,
+                        Size block_size_max);
 /*
  * cuda_control.c
  */
