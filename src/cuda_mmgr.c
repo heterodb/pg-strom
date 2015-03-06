@@ -91,6 +91,7 @@ cudaHostMemSplit(cudaHostMemHead *chm_head, int chm_class)
 
 	chm_chunk2 = (cudaHostMemChunk *)((char *)chm_chunk1 +
 									  chm_chunk1->chunk_size);
+	chm_chunk2->chm_block = chm_chunk1->chm_block;
 	chm_chunk2->chunk_size = chm_chunk1->chunk_size;
 	dlist_insert_after(&chm_chunk1->addr_chain,
 					   &chm_chunk2->addr_chain);
@@ -138,6 +139,7 @@ cudaHostMemAllocBlock(cudaHostMemHead *chm_head, int least_class)
 
 	/* init first chunk */
 	chm_chunk = &chm_block->first_chunk;
+	chm_chunk->chm_block = chm_block;
 	chm_chunk->chunk_size = block_size;
 	memset(&chm_chunk->chunk_head, 0, sizeof(StandardChunkHeader));
 	dlist_push_head(&chm_block->addr_chunks, &chm_chunk->addr_chain);

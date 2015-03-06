@@ -26,7 +26,7 @@ LPATH_LIST := /usr/local/cuda/lib64 /usr/local/cuda/lib
 IPATH := $(shell for x in $(IPATH_LIST);	\
            do test -e "$$x/cuda.h" && (echo -I $$x; break); done)
 LPATH := $(shell for x in $(LPATH_LIST);	\
-           do test -e "$$x/libcuda.so" && (echo -L $$x; break); done)
+           do test -e "$$x/libnvrtc.so" && (echo -L $$x; break); done)
 
 # Module definition
 MODULE_big = pg_strom
@@ -54,7 +54,7 @@ PGSTROM_DEBUG := $(shell $(PG_CONFIG) --configure | \
 	grep -q "'--enable-debug'" && \
 	echo "-Wall -DPGSTROM_DEBUG=1 -O0")
 PG_CPPFLAGS := $(PGSTROM_DEBUG) $(IPATH)
-SHLIB_LINK := $(LPATH) -lcuda
+SHLIB_LINK := $(LPATH) -lcuda -lnvrtc
 EXTRA_CLEAN := $(CUDA_SOURCES)
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)

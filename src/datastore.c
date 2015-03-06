@@ -762,7 +762,7 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 			continue;
 
 		/* put tuple */
-		kds->usage += LONGALIGN(tup.t_len);
+		kds->usage += LONGALIGN(offsetof(kern_tupitem, htup) + tup.t_len);
 		tup_item = (kern_tupitem *)((char *)kds + kds->length - kds->usage);
 		tup_index[ntup] = (uintptr_t)tup_item - (uintptr_t)kds;
 		tup_item->t_len = tup.t_len;
