@@ -24,6 +24,7 @@
 #include "storage/shmem.h"
 #include "utils/guc.h"
 #include "pg_strom.h"
+#include <nvrtc.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -38,11 +39,8 @@ typedef struct
 	Bitmapset  *waiting_backends;
 	int			extra_flags;
 	char	   *kern_source;
-	Size		kern_source_len;
-	char	   *cuda_binary;
-	Size		cuda_binary_len;
+	char	   *ptx_image;
 	char	   *error_msg;
-	Size		error_msg_len;
 	char		data[FLEXIBLE_ARRAY_MEMBER];
 } program_cache_entry;
 
@@ -50,10 +48,11 @@ typedef struct
 #define PGCACHE_FREE_ENTRY(entry)		((entry)->refcnt > 0)
 #define PGCACHE_MAGIC					0xabadcafe
 #define PGCACHE_MIN_ERRORMSG_BUFSIZE	256
-#define PGCACHE_ERRORMSG_LEN(entry)									\
-	((uintptr_t)(entry) + (1UL << (entry)->shift) - sizeof(uint) -	\
+#define PGCACHE_ERRORMSG_LEN(entry)				\
+	((uintptr_t)(entry) +						\
+	 (1UL << (entry)->shift) -					\
+	 sizeof(uint) -								\
 	 (uintptr_t)(entry)->error_msg)
-
 #define CUDA_PROGRAM_BUILD_FAILURE			((void *)(~0UL))
 
 #define PGCACHE_MIN_BITS		10		/* 1KB */
@@ -83,9 +82,6 @@ static bool		debug_retain_cuda_program;
 /* ---- static variables ---- */
 static shmem_startup_hook_type shmem_startup_next;
 static program_cache_head *pgcache_head;
-static int		itemid_offset_shift;
-static int		itemid_flags_shift;
-static int		itemid_length_shift;
 
 /* ---- static functions ---- */
 static program_cache_entry *pgstrom_program_cache_alloc(Size required);
@@ -300,313 +296,190 @@ pgstrom_put_cuda_program(program_cache_entry *entry)
 	SpinLockRelease(&pgcache_head->lock);
 }
 
-static void
-pgstrom_write_cuda_program(int fdesc, program_cache_entry *entry,
-						   const char *pathname)
+static char *
+pgstrom_write_cuda_program(program_cache_entry *entry)
 {
-	static size_t		common_code_length = 0;
-	static const char  *codeblock_head =
-		"#ifdef __cplusplus\n"
-		"extern \"C\" {\n"
-		"#endif	/* __cplusplus */\n";
-	static size_t		codeblock_head_length = 0;
-	static const char  *codeblock_end =
-		"#ifdef __cplusplus\n"
-		"}\n"
-		"#endif	/* __cplusplus */\n";
-	static size_t		codeblock_end_length;
-	size_t				nbytes;
+	StringInfoData		source;
 
-	/*
-	 * We need to prevent compiler to deal with function/variable symbols
-	 * according to C++ manner, because it adjust symbol names to support
-	 * overloading, then it makes cuModuleGetFunction confusable.
-	 */
-	if (!codeblock_head_length)
-		codeblock_head_length = strlen(codeblock_head);
-	nbytes = write(fdesc,
-				   codeblock_head,
-				   codeblock_head_length);
-	if (nbytes != codeblock_head_length)
-		elog(ERROR, "could not write to file \"%s\": %m", pathname);
-
-	/*
-	 * Common PG-Strom device routine
-	 */
-	if (!common_code_length)
-		common_code_length = strlen(pgstrom_cuda_common_code);
-	nbytes = write(fdesc,
-				   pgstrom_cuda_common_code,
-				   common_code_length);
-	if (nbytes != common_code_length)
-		elog(ERROR, "could not write to file \"%s\": %m", pathname);
-
-	/*
-	 * Supplemental CUDA libraries
-	 */
-	/* cuda mathlib.h */
-	if (entry->extra_flags & DEVFUNC_NEEDS_MATHLIB)
-	{
-		static size_t	mathlib_code_length = 0;
-
-		if (!mathlib_code_length)
-			mathlib_code_length = strlen(pgstrom_cuda_mathlib_code);
-		nbytes = write(fdesc,
-					   pgstrom_cuda_mathlib_code,
-					   mathlib_code_length);
-		if (nbytes != mathlib_code_length)
-			elog(ERROR, "could not write to file \"%s\": %m", pathname);
-	}
-	/* cuda timelib.h */
-	if (entry->extra_flags & DEVFUNC_NEEDS_TIMELIB)
-	{
-		static size_t	timelib_code_length = 0;
-
-		if (!timelib_code_length)
-			timelib_code_length = strlen(pgstrom_cuda_timelib_code);
-		nbytes = write(fdesc,
-					   pgstrom_cuda_timelib_code,
-					   timelib_code_length);
-		if (nbytes != timelib_code_length)
-			elog(ERROR, "could not write to file \"%s\": %m", pathname);
-	}
-	/* cuda textlib.h */
-	if (entry->extra_flags & DEVFUNC_NEEDS_TEXTLIB)
-	{
-		static size_t	textlib_code_length = 0;
-
-		if (!textlib_code_length)
-			textlib_code_length = strlen(pgstrom_cuda_textlib_code);
-		nbytes = write(fdesc,
-					   pgstrom_cuda_textlib_code,
-					   textlib_code_length);
-		if (nbytes != textlib_code_length)
-			elog(ERROR, "could not write to file \"%s\": %m", pathname);
-	}
-	/* cuda numeric.h */
-	if (entry->extra_flags & DEVFUNC_NEEDS_NUMERIC)
-	{
-		static size_t  numeric_code_length = 0;
-
-		if (!numeric_code_length)
-			numeric_code_length = strlen(pgstrom_cuda_numeric_code);
-		nbytes = write(fdesc,
-					   pgstrom_cuda_numeric_code,
-					   numeric_code_length);
-		if (nbytes != numeric_code_length)
-			elog(ERROR, "could not write to file \"%s\": %m", pathname);
-	}
-	/*
-	 * main logic of each GPU tasks (scan, sort, join and aggregate)
-	 */
-	/* gpuscan */
-	if (entry->extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
-	{
-		static size_t	gpuscan_code_length = 0;
-
-		if (!gpuscan_code_length)
-			gpuscan_code_length = strlen(pgstrom_cuda_gpuscan_code);
-		nbytes = write(fdesc,
-					   pgstrom_cuda_gpuscan_code,
-					   gpuscan_code_length);
-		if (nbytes != gpuscan_code_length)
-			elog(ERROR, "could not write to file \"%s\": %m", pathname);
-	}
-	/* gpuhashjoin */
-	if (entry->extra_flags & DEVKERNEL_NEEDS_HASHJOIN)
-	{
-		static size_t	hashjoin_code_length = 0;
-
-		if (!hashjoin_code_length)
-			hashjoin_code_length = strlen(pgstrom_cuda_hashjoin_code);
-		nbytes = write(fdesc,
-					   pgstrom_cuda_hashjoin_code,
-					   hashjoin_code_length);
-		if (nbytes != hashjoin_code_length)
-			elog(ERROR, "could not write to file \"%s\": %m", pathname);
-	}
-	/* gpupreagg */
-	if (entry->extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
-	{
-		static size_t	gpupreagg_code_length = 0;
-
-		if (!gpupreagg_code_length)
-			gpupreagg_code_length = strlen(pgstrom_cuda_gpupreagg_code);
-		nbytes = write(fdesc,
-					   pgstrom_cuda_gpupreagg_code,
-					   gpupreagg_code_length);
-		if (nbytes != gpupreagg_code_length)
-			elog(ERROR, "could not write to file \"%s\": %m", pathname);
-	}
-	/* gpusort */
-	if (entry->extra_flags & DEVKERNEL_NEEDS_GPUSORT)
-	{
-		static size_t	gpusort_code_length = 0;
-
-		if (!gpusort_code_length)
-			gpusort_code_length = strlen(pgstrom_cuda_gpusort_code);
-		nbytes = write(fdesc,
-					   pgstrom_cuda_gpusort_code,
-					   gpusort_code_length);
-		if (nbytes != gpusort_code_length)
-			elog(ERROR, "could not write to file \"%s\": %m", pathname);
-	}
-	/* source code generated on the fly */
-	nbytes = write(fdesc,
-				   entry->kern_source,
-				   entry->kern_source_len);
-	if (nbytes != entry->kern_source_len)
-		elog(ERROR, "could not write to file \"%s\": %m", pathname);
-
-	/* close none-c++ code block */
-	if (!codeblock_end_length)
-		codeblock_end_length = strlen(codeblock_end);
-	nbytes = write(fdesc,
-				   codeblock_end,
-				   codeblock_end_length);
-	if (nbytes != codeblock_end_length)
-		elog(ERROR, "could not write to file \"%s\": %m", pathname);
-}
-
-static void
-__build_cuda_program(program_cache_entry *old_entry)
-{
-	const char *basename;
-	char		pathname[MAXPGPATH];
-	StringInfoData cmdline;
-	int			fdesc;
-	ssize_t		filp_unitsz = 4096;
-	ssize_t		nbytes;
-	char	   *cuda_binary = NULL;
-	Size		cuda_binary_len = 0;
-	bool		cuda_binary_exist = false;
-	char	   *build_log = NULL;
-	Size		build_log_len = 0;
-	bool		build_log_exist = false;
-	Size		required;
-	Size		usage;
-	int			cuda_cap;
-	int			hindex;
-	int			rc;
-	StringInfoData buf;
-	program_cache_entry *new_entry;
-
-	/*
-	 * Write out the source program
-	 */
-	initStringInfo(&buf);
-	appendStringInfo(&buf,
+	initStringInfo(&source);
+	appendStringInfo(&source,
 					 "#define CUDA_DEVICE_CODE\n"
 					 "#define HOSTPTRLEN %u\n"
 					 "#define DEVICEPTRLEN %lu\n"
 					 "#define BLCKSZ %u\n"
-					 "#define ITEMID_OFFSET_SHIFT %u\n"
-					 "#define ITEMID_FLAGS_SHIFT %u\n"
-					 "#define ITEMID_LENGTH_SHIFT %u\n"
 					 "#define MAXIMUM_ALIGNOF %u\n"
 					 "\n",
 					 SIZEOF_VOID_P,
 					 sizeof(CUdeviceptr),
 					 BLCKSZ,
-					 itemid_offset_shift,
-					 itemid_flags_shift,
-					 itemid_length_shift,
 					 MAXIMUM_ALIGNOF);
 
-	fdesc = pgstrom_open_tempfile(NULL, &basename);
-	nbytes = write(fdesc, buf.data, buf.len);
-	if (nbytes != buf.len)
-		elog(ERROR, "could not write to file \"%s\": %m", basename);
-	pgstrom_write_cuda_program(fdesc, old_entry, basename);
-	CloseTransientFile(fdesc);
+	/* disable C++ feature */
+	appendStringInfo(&source,
+					 "#ifdef __cplusplus\n"
+					 "extern \"C\" {\n"
+					 "#endif	/* __cplusplus */\n");
+	/* Common PG-Strom device routine */
+	appendStringInfoString(&source, pgstrom_cuda_common_code);
+
+	/* PG-Strom CUDA device code libraries */
+
+	/* cuda mathlib.h */
+	if (entry->extra_flags & DEVFUNC_NEEDS_MATHLIB)
+		appendStringInfoString(&source, pgstrom_cuda_mathlib_code);
+	/* cuda timelib.h */
+	if (entry->extra_flags & DEVFUNC_NEEDS_TIMELIB)
+		appendStringInfoString(&source, pgstrom_cuda_timelib_code);
+	/* cuda textlib.h */
+	if (entry->extra_flags & DEVFUNC_NEEDS_TEXTLIB)
+		appendStringInfoString(&source, pgstrom_cuda_textlib_code);
+	/* cuda numeric.h */
+	if (entry->extra_flags & DEVFUNC_NEEDS_NUMERIC)
+		appendStringInfoString(&source, pgstrom_cuda_numeric_code);
+
+	/* Main logic of each GPU tasks */
+
+	/* GpuScan */
+	if (entry->extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
+		appendStringInfoString(&source, pgstrom_cuda_gpuscan_code);
+	/* GpuHashJoin */
+	if (entry->extra_flags & DEVKERNEL_NEEDS_HASHJOIN)
+		appendStringInfoString(&source, pgstrom_cuda_hashjoin_code);
+	/* GpuPreAgg */
+	if (entry->extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
+		appendStringInfoString(&source, pgstrom_cuda_gpupreagg_code);
+	/* GpuSort */
+	if (entry->extra_flags & DEVKERNEL_NEEDS_GPUSORT)
+		appendStringInfoString(&source, pgstrom_cuda_gpusort_code);
+
+	/* Source code generated on the fly */
+	appendStringInfoString(&source, entry->kern_source);
+
+	/* disable C++ feature */
+	appendStringInfo(&source,
+					 "#ifdef __cplusplus\n"
+					 "}\n"
+					 "#endif /* __cplusplus */\n");
+	return source.data;
+}
+
+static void
+__build_cuda_program(program_cache_entry *old_entry)
+{
+	char		   *source;
+	char		   *source_pathname = NULL;
+	nvrtcProgram	program;
+	nvrtcResult		rc;
+	const char	   *options[10];
+	int				opt_index = 0;
+	char		   *ptx_image;
+	char		   *build_log;
+	size_t			length;
+	Size			required;
+	Size			usage;
+	int				hindex;
+	bool			build_failure = false;
+	program_cache_entry *new_entry;
 
 	/*
-	 * Makes a command line to be kicked
+	 * Make a nvrtcProgram object
 	 */
-	initStringInfo(&cmdline);
-	appendStringInfo(&cmdline,
-					 "env LANG=C %s -x cu %s --ptx -o %s.ptx",
-					 pgstrom_nvcc_path,
-					 basename,
-					 basename);
-	if ((old_entry->extra_flags & DEVKERNEL_DISABLE_OPTIMIZE) != 0)
-		appendStringInfo(&cmdline, " -Xptxas '-O0'");
-	cuda_cap = pgstrom_baseline_cuda_capability();
-	appendStringInfo(&cmdline,
-					 " -gencode arch=compute_%d,code=sm_%d",
-					 cuda_cap, cuda_cap);
+	source = pgstrom_write_cuda_program(old_entry);
+	rc = nvrtcCreateProgram(&program,
+							source,
+							NULL,
+							0,
+							NULL,
+							NULL);
+	if (rc != NVRTC_SUCCESS)
+		elog(ERROR, "failed on nvrtcCreateProgram: %s",
+			 nvrtcGetErrorString(rc));
+
+	/*
+	 * Put command line options
+	 */
+	options[opt_index++] =
+		psprintf("--gpu-architecture=compute_%u",
+				 pgstrom_baseline_cuda_capability());
 #ifdef PGSTROM_DEBUG
-	appendStringInfo(&cmdline, " -G -Werror cross-execution-space-call");
+	options[opt_index++] = "--device-debug";
+	options[opt_index++] = "--generate-line-info";
 #endif
-	appendStringInfo(&cmdline, " >& %s.log", basename);
+	options[opt_index++] = "--use_fast_math";
 
 	/*
-	 * Run nvcc compiler
+	 * Save the source file, if needed
 	 */
-	elog(LOG, "command: %s", cmdline.data);
-	rc = system(cmdline.data);
-
-	/*
-	 * Read binary file (if any)
-	 */
-	snprintf(pathname, sizeof(pathname), "%s.ptx", basename);
-	fdesc = OpenTransientFile(pathname, O_RDONLY | PG_BINARY, 0);
-	if (fdesc >= 0)
+	if (old_entry->retain_cuda_program)
 	{
-		if (rc == 0)
-		{
-			initStringInfo(&buf);
-			do {
-				enlargeStringInfo(&buf, filp_unitsz);
-				nbytes = read(fdesc, buf.data + buf.len, filp_unitsz);
-				if (nbytes < 0)
-					elog(ERROR, "could not read from \"%s\": %m", pathname);
-				buf.len += nbytes;
-			} while (nbytes == filp_unitsz);
+		char	pathname[128];
+		int		fdesc;
 
-			if (buf.len > 0)
-			{
-				cuda_binary = buf.data;
-				cuda_binary_len = buf.len;
-			}
+		strcpy(pathname, "/tmp/pg_strom_XXXXXX.gpu");
+		fdesc = mkstemps(pathname, 4);
+		if (fdesc >= 0)
+		{
+			write(fdesc, source, strlen(source));
+			close(fdesc);
+			source_pathname = pstrdup(pathname);
 		}
-		CloseTransientFile(fdesc);
-		cuda_binary_exist = true;
 	}
 
 	/*
-	 * Read build-log file (if any)
+	 * Kick runtime compiler
 	 */
-	snprintf(pathname, sizeof(pathname), "%s.log", basename);
-	fdesc = OpenTransientFile(pathname, O_RDONLY | PG_BINARY, 0);
-	if (fdesc >= 0)
+	rc = nvrtcCompileProgram(program, opt_index, options);
+	if (rc != NVRTC_SUCCESS)
 	{
-		initStringInfo(&buf);
-		do {
-			enlargeStringInfo(&buf, filp_unitsz);
-			nbytes = read(fdesc, buf.data + buf.len, filp_unitsz);
-			if (nbytes < 0)
-				elog(ERROR, "could not read from \"%s\": %m", pathname);
-			buf.len += nbytes;
-		} while (nbytes == filp_unitsz);
-
-		if (buf.len > 0)
-		{
-			build_log = buf.data;
-			build_log_len = buf.len;
-		}
-		CloseTransientFile(fdesc);
-		build_log_exist = true;
+		if (rc != NVRTC_ERROR_COMPILATION)
+			elog(ERROR, "failed on nvrtcCompileProgram: %s",
+				 nvrtcGetErrorString(rc));
+		else
+			build_failure = true;
 	}
+
+	/*
+	 * Read PTX Binary
+	 */
+	if (build_failure)
+		ptx_image = NULL;
+	else
+	{
+		rc = nvrtcGetPTXSize(program, &length);
+		if (rc != NVRTC_SUCCESS)
+			elog(ERROR, "failed on nvrtcGetPTXSize: %s",
+				 nvrtcGetErrorString(rc));
+		ptx_image = palloc(length + 1);
+
+		rc = nvrtcGetPTX(program, ptx_image);
+		if (rc != NVRTC_SUCCESS)
+			elog(ERROR, "failed on nvrtcGetPTX: %s",
+				 nvrtcGetErrorString(rc));
+		ptx_image[length] = '\0';	/* may not be necessary */
+	}
+
+	/*
+	 * Read Log Output
+	 */
+	rc = nvrtcGetProgramLogSize(program, &length);
+	if (rc != NVRTC_SUCCESS)
+		elog(ERROR, "failed on nvrtcGetProgramLogSize: %s",
+			 nvrtcGetErrorString(rc));
+	build_log = palloc(length + 1);
+
+	rc = nvrtcGetProgramLog(program, build_log);
+	if (rc != NVRTC_SUCCESS)
+		elog(ERROR, "failed on nvrtcGetProgramLog: %s",
+			 nvrtcGetErrorString(rc));
+	build_log[length] = '\0';	/* may not be necessary? */
 
 	/*
 	 * Make a new entry, instead of the old one
 	 */
-	required = MAXALIGN(old_entry->kern_source_len + 1);
-	if (cuda_binary)
-		required += MAXALIGN(cuda_binary_len + 1);
-	required += MAXALIGN(strlen(cmdline.data) + 1);
-	required += MAXALIGN(build_log_len + 1);
+	required = MAXALIGN(strlen(old_entry->kern_source) + 1);
+	if (ptx_image)
+		required += MAXALIGN(strlen(ptx_image) + 1);
+	required += MAXALIGN(strlen(build_log) + 1);
 	required += 512;	/* margin for error message */
 
 	SpinLockAcquire(&pgcache_head->lock);
@@ -618,41 +491,37 @@ __build_cuda_program(program_cache_entry *old_entry)
 	}
 	usage = 0;
 	new_entry->crc = old_entry->crc;
-	new_entry->retain_cuda_program = old_entry->retain_cuda_program;
+	new_entry->retain_cuda_program = false;
 	new_entry->waiting_backends = NULL;		/* no need to set latch */
 	new_entry->extra_flags = old_entry->extra_flags;
 	new_entry->kern_source = new_entry->data + usage;
+	length = strlen(old_entry->kern_source);
 	memcpy(new_entry->kern_source,
-		   old_entry->kern_source,
-		   old_entry->kern_source_len + 1);
-	new_entry->kern_source_len = old_entry->kern_source_len;
-	usage += MAXALIGN(new_entry->kern_source_len + 1);
+		   old_entry->kern_source, length + 1);
+	usage += MAXALIGN(length + 1);
 
-	if (!cuda_binary)
-	{
-		new_entry->cuda_binary = CUDA_PROGRAM_BUILD_FAILURE;
-		new_entry->cuda_binary_len = 0;
-	}
+	if (!ptx_image)
+		new_entry->ptx_image = CUDA_PROGRAM_BUILD_FAILURE;
 	else
 	{
-		new_entry->cuda_binary = new_entry->data + usage;
-		new_entry->cuda_binary_len = cuda_binary_len;
-		memcpy(new_entry->cuda_binary,
-			   cuda_binary,
-			   cuda_binary_len + 1);
-		usage += MAXALIGN(cuda_binary_len + 1);
+		new_entry->ptx_image = new_entry->data + usage;
+		length = strlen(ptx_image);
+		memcpy(new_entry->ptx_image, ptx_image, length + 1);
+		usage += MAXALIGN(length + 1);
 	}
-
 	new_entry->error_msg = new_entry->data + usage;
-	new_entry->error_msg_len = PGCACHE_ERRORMSG_LEN(new_entry);
-	snprintf(new_entry->error_msg,
-			 new_entry->error_msg_len,
-			 "cuda kernel build: %s\n"
-			 "command: %s\n%s",
-			 !cuda_binary ? "failed" : "success",
-			 cmdline.data,
-			 build_log);
-
+	length = PGCACHE_ERRORMSG_LEN(new_entry);
+	if (source_pathname)
+		snprintf(new_entry->error_msg, length,
+				 "source: %s\nbuild: %s\n%s",
+				 source_pathname,
+				 !ptx_image ? "failed" : "success",
+				 build_log);
+	else
+		snprintf(new_entry->error_msg, length,
+				 "build: %s\n%s",
+				 !ptx_image ? "failed" : "success",
+				 build_log);
 	/*
 	 * Add new_entry to the hash slot
 	 */
@@ -676,31 +545,6 @@ __build_cuda_program(program_cache_entry *old_entry)
 		pgstrom_program_cache_free(old_entry);
 
 	SpinLockRelease(&pgcache_head->lock);
-
-	/*
-	 * Remove temporary files (or retain for debug)
-	 */
-	if (cuda_binary_exist)
-	{
-		snprintf(pathname, sizeof(pathname), "%s.ptx", basename);
-		if (unlink(pathname) != 0)
-			elog(WARNING, "could not cleanup \"%s\" : %m", pathname);
-	}
-
-	if (build_log_exist)
-	{
-		snprintf(pathname, sizeof(pathname), "%s.log", basename);
-		if (unlink(pathname) != 0)
-			elog(WARNING, "could not cleanup \"%s\" : %m", pathname);
-	}
-
-	if (!old_entry->retain_cuda_program)
-	{
-		if (unlink(basename) != 0)
-			elog(WARNING, "could not cleanup \"%s\" : %m", basename);
-	}
-	else
-		elog(LOG, "source code: \"%s/%s\"", DataDir, basename);
 }
 
 
@@ -712,7 +556,7 @@ pgstrom_build_cuda_program(Datum cuda_program)
 	MemoryContext	memcxt = CurrentMemoryContext;
 	MemoryContext	oldcxt;
 
-	Assert(entry->cuda_binary == NULL);
+	Assert(entry->ptx_image == NULL);
 
 	PG_TRY();
 	{
@@ -726,15 +570,15 @@ pgstrom_build_cuda_program(Datum cuda_program)
 		errdata = CopyErrorData();
 
 		SpinLockAcquire(&pgcache_head->lock);
-		if (!entry->cuda_binary)
+		if (!entry->ptx_image)
 		{
-			snprintf(entry->error_msg, entry->error_msg_len,
+			snprintf(entry->error_msg, PGCACHE_ERRORMSG_LEN(entry),
 					 "(%s:%d, %s) %s",
 					 errdata->filename,
 					 errdata->lineno,
 					 errdata->funcname,
 					 errdata->message);
-			entry->cuda_binary = CUDA_PROGRAM_BUILD_FAILURE;
+			entry->ptx_image = CUDA_PROGRAM_BUILD_FAILURE;
 		}
 		pgstrom_wakeup_backends(entry->waiting_backends);
 		SpinLockRelease(&pgcache_head->lock);
@@ -784,20 +628,19 @@ retry:
 
 		if (entry->crc == crc &&
 			entry->extra_flags == extra_flags &&
-			entry->kern_source_len == kern_source_len &&
 			strcmp(entry->kern_source, kern_source) == 0)
 		{
 			/* Move this entry to the head of LRU list */
 			dlist_move_head(&pgcache_head->lru_list, &entry->lru_chain);
 
 			/* This kernel build already lead an error */
-			if (entry->cuda_binary == CUDA_PROGRAM_BUILD_FAILURE)
+			if (entry->ptx_image == CUDA_PROGRAM_BUILD_FAILURE)
 			{
 				SpinLockRelease(&pgcache_head->lock);
 				elog(ERROR, "%s", entry->error_msg);
 			}
 			/* Kernel build is still in-progress */
-			if (!entry->cuda_binary)
+			if (!entry->ptx_image)
 			{
 				Bitmapset  *waiting_backends = entry->waiting_backends;
 				waiting_backends->words[WORDNUM(MyProc->pgprocno)]
@@ -826,9 +669,9 @@ retry:
 							 errorText(rc));
 
 					rc = cuModuleLoadData(&cuda_modules[i],
-										  entry->cuda_binary);
+										  entry->ptx_image);
 					if (rc != CUDA_SUCCESS)
-						elog(ERROR, "failed on cuModuleLoadData (%s)",
+						elog(ERROR, "failed on cuModuleLoadData (%s)\n",
 							 errorText(rc));
 				}
 				rc = cuCtxPopCurrent(NULL);
@@ -875,14 +718,11 @@ retry:
 	entry->extra_flags = extra_flags;
 	entry->kern_source = (char *)(entry->data + usage);
 	memcpy(entry->kern_source, kern_source, kern_source_len + 1);
-	entry->kern_source_len = kern_source_len;
 	usage += MAXALIGN(kern_source_len + 1);
 	/* no cuda binary yet */
-	entry->cuda_binary = NULL;
-    entry->cuda_binary_len = 0;
+	entry->ptx_image = NULL;
 	/* remaining are for error message */
 	entry->error_msg = (char *)(entry->data + usage);
-	entry->error_msg_len = PGCACHE_ERRORMSG_LEN(entry);
 
 	/* at least, caller is waiting for build */
 	entry->waiting_backends = entry->waiting_backends;
@@ -970,8 +810,9 @@ void
 pgstrom_init_cuda_program(void)
 {
 	static int	__program_cache_size;
-	ItemIdData	item_id;
-	uint		code;
+	int			major;
+	int			minor;
+	nvrtcResult	rc;
 
 	DefineCustomStringVariable("pg_strom.nvcc_path",
 							   "path to nvcc (NVIDIA CUDA Compiler)",
@@ -1010,33 +851,12 @@ pgstrom_init_cuda_program(void)
 							 PGC_SUSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-
-	/*
-	 * NOTE: Here is no C standard for bitfield layout (thus, OpenCL does not
-	 * support bitfields), so we need to tell run-time compiler exact layout
-	 * of the ItemIdData structure.
-	 */
-	Assert(sizeof(item_id) == sizeof(code));
-	memset(&item_id, 0, sizeof(ItemIdData));
-	item_id.lp_off = 1;
-	memcpy(&code, &item_id, sizeof(ItemIdData));
-	for (itemid_offset_shift = 0;
-		 ((code >> itemid_offset_shift) & 0x0001) == 0;
-		 itemid_offset_shift++);
-
-	memset(&item_id, 0, sizeof(ItemIdData));
-	item_id.lp_flags = 1;
-	memcpy(&code, &item_id, sizeof(ItemIdData));
-	for (itemid_flags_shift = 0;
-		 ((code >> itemid_flags_shift) & 0x0001) == 0;
-		 itemid_flags_shift++);
-
-	memset(&item_id, 0, sizeof(ItemIdData));
-	item_id.lp_len = 1;
-	memcpy(&code, &item_id, sizeof(ItemIdData));
-	for (itemid_length_shift = 0;
-		 ((code >> itemid_length_shift) & 0x0001) == 0;
-		 itemid_length_shift++);
+	/* CUDA online compiler */
+	rc = nvrtcVersion(&major, &minor);
+	if (rc != NVRTC_SUCCESS)
+		elog(ERROR, "failed on nvrtcVersion: %s", nvrtcGetErrorString(rc));
+	elog(LOG, "NVRTC - CUDA Runtime Compilation vertion %d.%d",
+		 major, minor);
 
 	/* allocation of static shared memory */
 	RequestAddinShmemSpace(program_cache_size);

@@ -1201,6 +1201,8 @@ pgstrom_init_cuda_control(void)
 	MemoryContext	oldcxt;
 	CUdevice		device;
 	CUresult		rc;
+	FILE		   *filp;
+	int				version;
 	int				i, count;
 
 	/*
@@ -1226,6 +1228,35 @@ pgstrom_init_cuda_control(void)
 	rc = cuInit(0);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuInit(%s)", errorText(rc));
+
+	/*
+	 * Logs CUDA runtime version
+	 */
+	rc = cuDriverGetVersion(&version);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuDriverGetVersion: %s", errorText(rc));
+	elog(LOG, "CUDA Runtime version %d.%d.%d",
+		 (version / 1000),
+		 (version % 1000) / 10,
+		 (version % 10));
+
+	/*
+	 * Logs nVIDIA driver version
+	 */
+	filp = AllocateFile("/sys/module/nvidia/version", "r");
+	if (!filp)
+		elog(LOG, "NVIDIA driver version: not loaded");
+	else
+	{
+		int		major;
+		int		minor;
+
+		if (fscanf(filp, "%d.%d", &major, &minor) != 2)
+			elog(LOG, "NVIDIA driver version: unknown");
+		else
+			elog(LOG, "NVIDIA driver version: %d.%d", major, minor);
+		FreeFile(filp);
+	}
 
 	/*
 	 * construct a list of available devices

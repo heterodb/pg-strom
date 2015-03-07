@@ -757,7 +757,7 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 		else
 			valid = HeapTupleSatisfiesVisibility(&tup, snapshot, buffer);
 
-		CheckForSerializableConflictOut(valid, rel, &tup, buffer, snapshot);
+		//CheckForSerializableConflictOut(valid, rel, &tup, buffer, snapshot);
 		if (!valid)
 			continue;
 

@@ -66,7 +66,7 @@ typedef double				cl_double;
 	((TYPE *)((char *) (PTR) - offsetof(TYPE, FIELD)))
 
 #define BITS_PER_BYTE			8
-#define FLEXIBLE_ARRAY_MEMBER
+#define FLEXIBLE_ARRAY_MEMBER	1
 #define true			((cl_bool) 1)
 #define false			((cl_bool) 0)
 
@@ -91,6 +91,19 @@ typedef cl_ulong	Datum;
 #define LONGALIGN_DOWN(LEN)     TYPEALIGN_DOWN(sizeof(cl_long), (LEN))
 #define MAXALIGN(LEN)			TYPEALIGN(MAXIMUM_ALIGNOF, (LEN))
 #define MAXALIGN_DOWN(LEN)		TYPEALIGN_DOWN(MAXIMUM_ALIGNOF, (LEN))
+
+/*
+ * Limitation of types
+ */
+#define SHRT_MAX		32767
+#define SHRT_MIN		(-32767-1)
+#define USHRT_MAX		65535
+#define INT_MAX			2147483647
+#define INT_MIN			(-INT_MAX - 1)
+#define UINT_MAX		4294967295U
+#define LONG_MAX		0x7FFFFFFFFFFFFFFFLL
+#define LONG_MIN        (-LONG_MAX - 1LL)
+#define ULONG_MAX		0xFFFFFFFFFFFFFFFFULL
 
 /*
  * MEMO: We takes dynamic local memory using cl_ulong data-type because of
