@@ -121,7 +121,6 @@ typedef struct
 } pgstrom_gpuscan;
 
 typedef struct {
-	CustomScanState	css;
 	GpuTaskState	gts;
 
 	BlockNumber		curr_blknum;
@@ -134,7 +133,6 @@ typedef struct {
 	pgstrom_gpuscan *curr_chunk;
 	uint32			curr_index;
 	cl_uint			num_rechecked;
-//	cl_uint			num_running;
 } GpuScanState;
 
 /* forward declarations */
@@ -577,18 +575,18 @@ pgstrom_plan_is_gpuscan(const Plan *plan)
  * (Once CustomPlan become CustomScan, no need to be a API)
  */
 void
-pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,
+pgstrom_gpuscan_setup_bulkslot(PlanState *outer_planstate,
 							   ProjectionInfo **p_bulk_proj,
 							   TupleTableSlot **p_bulk_slot)
 {
-	GpuScanState   *gss = (GpuScanState *) outer_ps;
+	CustomScanState *css = (CustomScanState *) outer_planstate;
 
-	if (!IsA(gss, CustomScanState) ||
-		gss->css.methods != &gpuscan_exec_methods.c)
+	if (!IsA(css, CustomScanState) ||
+		css->methods != &gpuscan_exec_methods.c)
 		elog(ERROR, "Bug? PlanState node is not GpuScanState");
 
-	*p_bulk_proj = gss->css.ss.ps.ps_ProjInfo;
-	*p_bulk_slot = gss->css.ss.ss_ScanTupleSlot;
+	*p_bulk_proj = css->ss.ps.ps_ProjInfo;
+	*p_bulk_slot = css->ss.ss_ScanTupleSlot;
 }
 
 /*
@@ -604,7 +602,7 @@ gpuscan_create_scan_state(CustomScan *cscan)
 												 sizeof(GpuScanState));
 	/* Set tag and executor callbacks */
 	NodeSetTag(gss, T_CustomScanState);
-	gss->css.methods = &gpuscan_exec_methods.c;
+	gss->gts.css.methods = &gpuscan_exec_methods.c;
 	/* GpuTaskState setup */
 	pgstrom_init_gputaststate(gcontext, &gss->gts, NULL);
 
@@ -627,7 +625,7 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->last_blknum = RelationGetNumberOfBlocks(scan_rel);
 	/* initialize device qualifiers also, for fallback */
 	gss->dev_quals = (List *)
-		ExecInitExpr((Expr *) gs_info->dev_quals, &gss->css.ss.ps);
+		ExecInitExpr((Expr *) gs_info->dev_quals, &gss->gts.css.ss.ps);
 	/* 'tableoid' should not change during relation scan */
 	gss->scan_tuple.t_tableOid = RelationGetRelid(scan_rel);
 	/* assign kernel source and flags */
@@ -635,7 +633,7 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->gts.extra_flags = gs_info->extra_flags;
 	/* kernel constant parameter buffer */
 	gss->kparams = pgstrom_create_kern_parambuf(gs_info->used_params,
-												gss->css.ss.ps.ps_ExprContext);
+											gss->gts.css.ss.ps.ps_ExprContext);
 	/* other run-time parameters */
 	gss->curr_chunk = NULL;
 	gss->curr_index = 0;
@@ -766,9 +764,9 @@ static pgstrom_gpuscan *
 pgstrom_load_gpuscan(GpuScanState *gss)
 {
 	pgstrom_gpuscan	   *gpuscan = NULL;
-	Relation			rel = gss->css.ss.ss_currentRelation;
+	Relation			rel = gss->gts.css.ss.ss_currentRelation;
 	TupleDesc			tupdesc = RelationGetDescr(rel);
-	Snapshot			snapshot = gss->css.ss.ps.state->es_snapshot;
+	Snapshot			snapshot = gss->gts.css.ss.ps.state->es_snapshot;
 	bool				end_of_scan = false;
 	pgstrom_data_store *pds;
 	struct timeval tv1, tv2;
@@ -851,7 +849,7 @@ gpuscan_next_tuple(GpuScanState *gss)
 		}
 		Assert(i_result > 0);
 
-		slot = gss->css.ss.ss_ScanTupleSlot;
+		slot = gss->gts.css.ss.ss_ScanTupleSlot;
 		if (!pgstrom_fetch_data_store(slot, pds, i_result - 1,
 									  &gss->scan_tuple))
 			elog(ERROR, "failed to fetch a record from pds: %d", i_result);
@@ -859,7 +857,7 @@ gpuscan_next_tuple(GpuScanState *gss)
 
 		if (do_recheck)
 		{
-			ExprContext *econtext = gss->css.ss.ps.ps_ExprContext;
+			ExprContext *econtext = gss->gts.css.ss.ps.ps_ExprContext;
 
 			Assert(gss->dev_quals != NULL);
 			econtext->ecxt_scantuple = slot;
@@ -1046,7 +1044,7 @@ static TupleTableSlot *
 gpuscan_fetch_tuple(CustomScanState *node)
 {
 	GpuScanState   *gss = (GpuScanState *) node;
-	TupleTableSlot *slot = gss->css.ss.ss_ScanTupleSlot;
+	TupleTableSlot *slot = gss->gts.css.ss.ss_ScanTupleSlot;
 	struct timeval tv1, tv2;
 
 	PERFMON_BEGIN(&gss->gts.pfm_accum, &tv1);
@@ -1154,16 +1152,16 @@ static void
 gpuscan_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	GpuScanState   *gss = (GpuScanState *) node;
-	GpuScanInfo	   *gsinfo = deform_gpuscan_info(gss->css.ss.ps.plan);
+	GpuScanInfo	   *gsinfo = deform_gpuscan_info(gss->gts.css.ss.ps.plan);
 
 	if (gsinfo->dev_quals != NIL)
 	{
 		show_scan_qual(gsinfo->dev_quals, "Device Filter",
-					   &gss->css.ss.ps, ancestors, es);
+					   &gss->gts.css.ss.ps, ancestors, es);
 		show_instrumentation_count("Rows Removed by Device Fileter",
-								   2, &gss->css.ss.ps, es);
+								   2, &gss->gts.css.ss.ps, es);
 	}
-	pgstrom_explain_custom_flags(&gss->css, es);
+	pgstrom_explain_custom_flags(&gss->gts.css, es);
 	pgstrom_explain_kernel_source(&gss->gts, es);
 
 	if (es->analyze && gss->gts.pfm_accum.enabled)

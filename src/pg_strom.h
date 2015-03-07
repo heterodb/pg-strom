@@ -187,7 +187,7 @@ typedef struct
 
 typedef struct GpuTaskState
 {
-//	CustomScanState	css;
+	CustomScanState	css;
 	dlist_node		chain;
 	GpuContext	   *gcontext;
 	const char	   *kern_source;
