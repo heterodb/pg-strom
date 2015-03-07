@@ -185,7 +185,10 @@ typedef struct
 	} gpu[FLEXIBLE_ARRAY_MEMBER];
 } GpuContext;
 
-typedef struct GpuTaskState
+typedef struct GpuTask		GpuTask;
+typedef struct GpuTaskState	GpuTaskState;
+
+struct GpuTaskState
 {
 	CustomScanState	css;
 	dlist_node		chain;
@@ -200,14 +203,22 @@ typedef struct GpuTaskState
 	dlist_head		running_tasks;	/* list for running tasks */
 	dlist_head		pending_tasks;	/* list for pending tasks */
 	dlist_head		completed_tasks;/* list for completed tasks */
+	dlist_head		ready_tasks;	/* list for ready tasks */
 	cl_uint			num_running_tasks;
 	cl_uint			num_pending_tasks;
-	cl_uint			num_completed_tasks;
-	void		  (*cb_cleanup)(struct GpuTaskState *gtstate);
+	cl_uint			num_ready_tasks;
+	/* callbacks */
+	bool		  (*cb_task_process)(GpuTask *gtask);
+	void		  (*cb_task_complete)(GpuTask *gtask);
+	void		  (*cb_task_fallback)(GpuTask *gtask);
+	void		  (*cb_task_release)(GpuTask *gtask);
+	GpuTask		 *(*cb_load_next)(GpuTaskState *gts);
+	void		  (*cb_cleanup)(GpuTaskState *gts);
+	/* performance counter  */
 	pgstrom_perfmon	pfm_accum;
-} GpuTaskState;
+};
 
-typedef struct GpuTask
+struct GpuTask
 {
 	dlist_node		chain;		/* link to task state list */
 	dlist_node		tracker;	/* link to task tracker list */
@@ -218,10 +229,8 @@ typedef struct GpuTask
 	CUstream		cuda_stream;	/* owned for each GpuTask */
 	CUmodule		cuda_module;	/* just reference, no cleanup needed */
 	cl_int			errcode;
-	bool		  (*cb_process)(struct GpuTask *gtask);
-	void		  (*cb_release)(struct GpuTask *gtask);
 	pgstrom_perfmon	pfm;
-} GpuTask;
+};
 
 /*
  * Type declarations for code generator
@@ -281,14 +290,14 @@ typedef struct pgstrom_data_store
 	struct pgstrom_data_store *ktoast;
 } pgstrom_data_store;
 
-typedef void *(*pgstromExecBulkScan_type)(CustomScanState *node);
-
 /* --------------------------------------------------------------------
  *
  * Private enhancement of CustomScan Interface
  *
  * --------------------------------------------------------------------
  */
+typedef void *(*pgstromExecBulkScan_type)(CustomScanState *node);
+
 typedef struct
 {
 	CustomExecMethods	c;
@@ -340,14 +349,9 @@ extern void pgstrom_put_gpucontext(GpuContext *gcontext);
 
 extern void pgstrom_cleanup_gputaskstate(GpuTaskState *gts);
 extern void pgstrom_release_gputaskstate(GpuTaskState *gts);
-extern void pgstrom_init_gputaststate(GpuContext *gcontext,
-									  GpuTaskState *gts,
-									  void (*cb_cleanup)(GpuTaskState *gts));
-extern void pgstrom_init_gputask(GpuTaskState *gts, GpuTask *task,
-								 bool (*cb_process)(GpuTask *task),
-								 void (*cb_release)(GpuTask *task));
-extern void pgstrom_launch_pending_tasks(GpuTaskState *gts);
-extern bool pgstrom_waitfor_ready_tasks(GpuTaskState *gts);
+extern void pgstrom_init_gputaststate(GpuContext *gcontext, GpuTaskState *gts);
+extern void pgstrom_init_gputask(GpuTaskState *gts, GpuTask *gtask);
+extern GpuTask *pgstrom_fetch_gputask(GpuTaskState *gts);
 extern void pgstrom_compute_workgroup_size(size_t *p_grid_size,
 										   size_t *p_block_size,
 										   CUfunction function,

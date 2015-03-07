@@ -259,7 +259,6 @@ gpuMemFree(GpuTask *gtask, CUdeviceptr chunk_addr)
 	dlist_iter		iter;
 	CUresult		rc;
 	int				index;
-	struct timeval	tv1, tv2;
 
 	/* find out the cuda-context */
 	Assert(gtask->cuda_index < gcontext->num_context);
@@ -275,8 +274,6 @@ gpuMemFree(GpuTask *gtask, CUdeviceptr chunk_addr)
 	elog(ERROR, "Bug? device address %llu was not tracked", chunk_addr);
 
 found:
-	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
-
 	/* unlink from the hash */
 	dlist_delete(&gm_chunk->hash_chain);
 	memset(&gm_chunk->hash_chain, 0, sizeof(dlist_node));
@@ -382,7 +379,6 @@ found:
 			dlist_push_head(&gm_head->unused_blocks, &gm_block->chain);
 		}
 	}
-	PERFMON_END(&gts->pfm_accum, time_debug4, &tv1, &tv2);
 }
 
 
@@ -461,7 +457,7 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 		snprintf(namebuf, sizeof(namebuf), "GPU DMA Buffer (%p)", resowner);
 		length_init = 4 * (1UL << get_next_log2(pgstrom_chunk_size()));
 		length_max = 1024 * length_init;
-		elog(INFO, "length_init = %zu length_max = %zu", length_init, length_max);
+
 		memcxt = HostPinMemContextCreate(NULL,
 										 namebuf,
 										 cuda_context,
@@ -609,12 +605,12 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 		while (!dlist_is_empty(&gts->tracked_tasks))
 		{
 			dlist_node *dnode = dlist_pop_head_node(&gts->tracked_tasks);
-			GpuTask	   *task = dlist_container(GpuTask, tracker, dnode);
+			GpuTask	   *gtask = dlist_container(GpuTask, tracker, dnode);
 
-			Assert(task->gts == gts);
+			Assert(gtask->gts == gts);
 			if (is_commit)
-				elog(WARNING, "Unreferenced GpuTask leak: %p", task);
-			task->cb_release(task);
+				elog(WARNING, "Unreferenced GpuTask leak: %p", gtask);
+			gts->cb_task_release(gtask);
 		}
 		/* release task state */
 		if (is_commit)
@@ -687,38 +683,42 @@ pgstrom_put_gpucontext(GpuContext *gcontext)
 void
 pgstrom_cleanup_gputaskstate(GpuTaskState *gts)
 {
-	dlist_mutable_iter iter;
-	GpuTask		   *gputask;
+	dlist_node	   *dnode;
+	GpuTask		   *gtask;
 
 	/* synchronize all the concurrent task, if any */
 	pgstrom_sync_gpucontext(gts->gcontext);
 
 	SpinLockAcquire(&gts->lock);
-	gputask = gts->curr_task;
-	if (gputask)
+	if (gts->curr_task)
 	{
-		dlist_delete(&gputask->tracker);
-		memset(&gputask->tracker, 0, sizeof(dlist_node));
+		gtask = gts->curr_task;
+		Assert(gtask->gts == gts);
+		dlist_delete(&gtask->tracker);
+		memset(&gtask->tracker, 0, sizeof(dlist_node));
 		gts->curr_task = NULL;
 		SpinLockRelease(&gts->lock);
-		gputask->cb_release(gputask);
+		gts->cb_task_release(gtask);
 		SpinLockAcquire(&gts->lock);
 	}
-	dlist_foreach_modify(iter, &gts->tracked_tasks)
-	{
-		gputask = dlist_container(GpuTask, tracker, iter.cur);
 
-		dlist_delete(&gputask->tracker);
+	while (!dlist_is_empty(&gts->tracked_tasks))
+	{
+		dnode = dlist_pop_head_node(&gts->tracked_tasks);
+		gtask = dlist_container(GpuTask, tracker, dnode);
 		SpinLockRelease(&gts->lock);
-		gputask->cb_release(gputask);
+
+		gts->cb_task_release(gtask);
+
 		SpinLockAcquire(&gts->lock);
 	}
 	dlist_init(&gts->running_tasks);
 	dlist_init(&gts->pending_tasks);
 	dlist_init(&gts->completed_tasks);
+	dlist_init(&gts->ready_tasks);
 	gts->num_running_tasks = 0;
     gts->num_pending_tasks = 0;
-	gts->num_completed_tasks = 0;
+	gts->num_ready_tasks = 0;
 	SpinLockRelease(&gts->lock);
 }
 
@@ -752,8 +752,7 @@ pgstrom_release_gputaskstate(GpuTaskState *gts)
 }
 
 void
-pgstrom_init_gputaststate(GpuContext *gcontext, GpuTaskState *gts,
-						  void (*cb_cleanup)(GpuTaskState *gts))
+pgstrom_init_gputaststate(GpuContext *gcontext, GpuTaskState *gts)
 {
 	dlist_push_tail(&gcontext->state_list, &gts->chain);
 	gts->gcontext = gcontext;
@@ -768,26 +767,49 @@ pgstrom_init_gputaststate(GpuContext *gcontext, GpuTaskState *gts,
 	dlist_init(&gts->completed_tasks);
 	gts->num_running_tasks = 0;
 	gts->num_pending_tasks = 0;
-	gts->num_completed_tasks = 0;
-	gts->cb_cleanup = cb_cleanup;
+	gts->num_ready_tasks = 0;
+	/* NOTE: caller has to set callbacks */
+	gts->cb_task_process = NULL;
+	gts->cb_task_complete = NULL;
+	gts->cb_task_release = NULL;
+	gts->cb_task_fallback = NULL;
+	gts->cb_load_next = NULL;
+	gts->cb_cleanup = NULL;
 	memset(&gts->pfm_accum, 0, sizeof(pgstrom_perfmon));
 	gts->pfm_accum.enabled = pgstrom_perfmon_enabled;
 }
 
-void
-pgstrom_init_gputask(GpuTaskState *gts, GpuTask *task,
-					 bool (*cb_process)(GpuTask *task),
-					 void (*cb_release)(GpuTask *task))
+/*
+ * check_completed_tasks
+ *
+ * It tries to move tasks in completed_tasks to ready_tasks after
+ * device resource release. CUDA runtime hold device resources
+ * until these are explicitly released, we should release these
+ * resources as soon as possible we can.
+ *
+ * NOTE: spinlock has to be acquired before call
+ */
+static inline void
+check_completed_tasks(GpuTaskState *gts)
 {
-	memset(task, 0, sizeof(GpuTask));
-	task->gts = gts;
-	task->cb_process = cb_process;
-	task->cb_release = cb_release;
-	/* tracked by GpuTaskState */
-	SpinLockAcquire(&gts->lock);
-	dlist_push_tail(&gts->tracked_tasks, &task->tracker);
-	SpinLockRelease(&gts->lock);
-	task->pfm.enabled = gts->pfm_accum.enabled;
+	GpuTask		   *gtask;
+	dlist_node	   *dnode;
+
+	while (!dlist_is_empty(&gts->completed_tasks))
+	{
+		dnode = dlist_pop_head_node(&gts->completed_tasks);
+		gtask = dlist_container(GpuTask, chain, dnode);
+		Assert(gtask->gts == gts);
+		SpinLockRelease(&gts->lock);
+
+		/* release CUDA resources, but retain gputask itself */
+		gts->cb_task_complete(gtask);
+
+		/* then, move to the ready_tasks */
+		SpinLockAcquire(&gts->lock);
+		dlist_push_tail(&gts->ready_tasks, &gtask->chain);
+		gts->num_ready_tasks++;
+	}
 }
 
 /*
@@ -795,8 +817,8 @@ pgstrom_init_gputask(GpuTaskState *gts, GpuTask *task,
  *
  *
  */
-void
-pgstrom_launch_pending_tasks(GpuTaskState *gts)
+static void
+launch_pending_tasks(GpuTaskState *gts)
 {
 	GpuContext	   *gcontext = gts->gcontext;
 	GpuTask		   *gtask;
@@ -813,7 +835,6 @@ pgstrom_launch_pending_tasks(GpuTaskState *gts)
 			return;
 	}
 
-	SpinLockAcquire(&gts->lock);
 	while (!dlist_is_empty(&gts->pending_tasks))
 	{
 		PERFMON_BEGIN(&gts->pfm_accum, &tv1);
@@ -861,7 +882,7 @@ pgstrom_launch_pending_tasks(GpuTaskState *gts)
 		/*
 		 * Then, tries to launch this task.
 		 */
-		launch = gtask->cb_process(gtask);
+		launch = gts->cb_task_process(gtask);
 
 		/*
 		 * NOTE: cb_process may complete task immediately, prior to get
@@ -884,11 +905,10 @@ pgstrom_launch_pending_tasks(GpuTaskState *gts)
 		}
 		PERFMON_END(&gts->pfm_accum, time_launch_cuda, &tv1, &tv2);
 	}
-	SpinLockRelease(&gts->lock);
 }
 
-bool
-pgstrom_waitfor_ready_tasks(GpuTaskState *gts)
+static bool
+waitfor_ready_tasks(GpuTaskState *gts)
 {
 	bool	save_set_latch_on_sigusr1 = set_latch_on_sigusr1;
 	bool	wait_latch = false;
@@ -908,7 +928,8 @@ pgstrom_waitfor_ready_tasks(GpuTaskState *gts)
 		if (!wait_latch)
 		{
 			SpinLockAcquire(&gts->lock);
-			if (dlist_is_empty(&gts->completed_tasks))
+			if (dlist_is_empty(&gts->completed_tasks) &&
+				dlist_is_empty(&gts->ready_tasks))
 				wait_latch = true;
 			/*
 			 * NOTE: We suggest shorter timeout if task is pending
@@ -934,9 +955,6 @@ pgstrom_waitfor_ready_tasks(GpuTaskState *gts)
 				elog(ERROR, "Emergency bail out because of Postmaster crash");
 
 			PERFMON_END(&gts->pfm_accum, time_sync_tasks, &tv1, &tv2);
-
-			/* flush pending tasks first */
-			pgstrom_launch_pending_tasks(gts);
 		}
 	}
 	PG_CATCH();
@@ -948,6 +966,142 @@ pgstrom_waitfor_ready_tasks(GpuTaskState *gts)
 	set_latch_on_sigusr1 = save_set_latch_on_sigusr1;
 
 	return wait_latch;
+}
+
+/*
+ * pgstrom_fetch_gpuscan
+ *
+ * It loads a chunk from the target relation, then enqueue the GpuScan
+ * chunk to be processed by OpenCL devices if valid device kernel was
+ * constructed. Elsewhere, it works as a wrapper of pgstrom_load_gpuscan,
+ */
+GpuTask *
+pgstrom_fetch_gputask(GpuTaskState *gts)
+{
+	GpuTask		   *gtask;
+	dlist_node	   *dnode;
+
+	/*
+	 * In case when no device code will be executed, we don't need to have
+	 * asynchronous execution. So, just return a chunk with synchronous
+	 * manner.
+	 */
+	if (!gts->kern_source)
+	{
+		gtask = gts->cb_load_next(gts);
+		Assert(gtask->gts == gts);
+		return gtask;
+	}
+
+	/*
+	 * We try to keep at least pgstrom_min_async_chunks of chunks are
+	 * in running, unless it is smaller than pgstrom_max_async_chunks.
+	 */
+	do {
+		CHECK_FOR_INTERRUPTS();
+
+		SpinLockAcquire(&gts->lock);
+		check_completed_tasks(gts);
+		launch_pending_tasks(gts);
+
+		if (!gts->scan_done)
+		{
+			while (pgstrom_max_async_chunks > (gts->num_running_tasks +
+											   gts->num_pending_tasks +
+											   gts->num_ready_tasks))
+			{
+				/* no urgent reason why to make the scan progress */
+				if (!dlist_is_empty(&gts->ready_tasks) &&
+					pgstrom_max_async_chunks < (gts->num_running_tasks +
+												gts->num_pending_tasks))
+					break;
+				SpinLockRelease(&gts->lock);
+
+				gtask = gts->cb_load_next(gts);
+				Assert(!gtask || gtask->gts == gts);
+
+				SpinLockAcquire(&gts->lock);
+				check_completed_tasks(gts);
+
+				if (!gtask)
+				{
+					gts->scan_done = true;
+					elog(INFO, "scan done");
+					break;
+				}
+				dlist_push_tail(&gts->pending_tasks, &gtask->chain);
+				gts->num_pending_tasks++;
+
+				/* kick pending tasks */
+				launch_pending_tasks(gts);
+			}
+		}
+		else
+		{
+			if (gts->num_pending_tasks > 0)
+				launch_pending_tasks(gts);
+			else if (gts->num_running_tasks == 0)
+			{
+				SpinLockRelease(&gts->lock);
+				break;
+			}
+		}
+		SpinLockRelease(&gts->lock);
+	} while (waitfor_ready_tasks(gts));
+
+	/*
+	 * Picks up next available chunk if any
+	 */
+	SpinLockAcquire(&gts->lock);
+	if (gts->num_ready_tasks == 0)
+	{
+		Assert(dlist_is_empty(&gts->ready_tasks));
+		SpinLockRelease(&gts->lock);
+		return NULL;
+	}
+	gts->num_ready_tasks--;
+	dnode = dlist_pop_head_node(&gts->ready_tasks);
+	gtask = dlist_container(GpuTask, chain, dnode);
+    memset(&gtask->chain, 0, sizeof(dlist_node));
+	SpinLockRelease(&gts->lock);
+
+	/*
+	 * Error handling
+	 */
+	if (gtask->errcode != StromError_Success)
+	{
+		if (gtask->errcode == StromError_CpuReCheck &&
+			gts->cb_task_fallback != NULL)
+		{
+			gts->cb_task_fallback(gtask);
+		}
+		else
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("PG-Strom: CUDA execution error (%s)",
+							errorText(gtask->errcode))));
+		}
+	}
+	return gtask;
+}
+
+
+
+
+
+
+
+void
+pgstrom_init_gputask(GpuTaskState *gts, GpuTask *gtask)
+{
+	memset(gtask, 0, sizeof(GpuTask));
+	gtask->gts = gts;
+	/* to be tracked by GpuTaskState */
+	SpinLockAcquire(&gts->lock);
+	dlist_push_tail(&gts->tracked_tasks, &gtask->tracker);
+	SpinLockRelease(&gts->lock);
+	gtask->pfm.enabled = gts->pfm_accum.enabled;
 }
 
 static void
@@ -1066,8 +1220,8 @@ pgstrom_compute_workgroup_size(size_t *p_grid_size,
 			elog(ERROR, "failed on cuOccupancyMaxPotentialBlockSize: %s",
 				 errorText(rc));
 
-		*p_grid_size = grid_size;
 		*p_block_size = block_size;
+		*p_grid_size = (nitems + block_size - 1) / block_size;
 	}
 }
 
