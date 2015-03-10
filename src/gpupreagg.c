@@ -2047,7 +2047,7 @@ gpupreagg_codegen_projection_misc(StringInfo body, FuncExpr *func,
 			pc->use_temp_float8x = true;
 			temp_val = "temp_float8x";
 			max_const = "DBL_MAX";
-			min_const = "-DBL_MIN";
+			min_const = "-DBL_MAX";
 			zero_const = "0.0";
 			break;
 
