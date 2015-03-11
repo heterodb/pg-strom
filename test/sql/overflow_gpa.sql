@@ -1,6 +1,13 @@
 --#
 --#       Gpu PreAggregate OverFlowed TestCases.
 --#
+--#   "About Calculation errors in floating-point number"
+--#
+--#   Some queries have been adjusted so as not affected 
+--#   by the floating point error on pg_strom.
+--#   Please refer to the following for more information.
+--#   https://github.com/pg-strom/devel/wiki/Known-Issues
+--#
 
 set pg_strom.debug_force_gpupreagg to on;
 set enable_gpusort to off;
@@ -99,9 +106,9 @@ select key, stddev_samp(nume_x)::numeric     from strom_overflow_test  group by 
 select key, variance(nume_x)::numeric        from strom_overflow_test  group by key order by key;
 select key, var_pop(nume_x)::numeric         from strom_overflow_test  group by key order by key;
 select key, var_samp(nume_x)::numeric        from strom_overflow_test  group by key order by key;
-select key,corr(nume_x,nume_x)::numeric  from strom_overflow_test  group by key order by key;
-select key,covar_pop(nume_x,nume_x)::numeric  from strom_overflow_test  group by key order by key;
-select key,covar_samp(nume_x,nume_x)::numeric  from strom_overflow_test  group by key order by key;
+select key,round(corr(nume_x,nume_x)::numeric,14)  from strom_overflow_test  group by key order by key;
+select key,trunc(covar_pop(nume_x,nume_x)::numeric*1e-42,13)  from strom_overflow_test  group by key order by key;
+select key,trunc(covar_samp(nume_x,nume_x)::numeric*1e-42,13)  from strom_overflow_test  group by key order by key;
 
 --smallserial
 select key, avg(smlsrl_x)::smallint            from strom_overflow_test  group by key order by key;

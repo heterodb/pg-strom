@@ -1,5 +1,12 @@
 --#
 --#       Gpu PreAggregate TestCases with GROUP BY.
+--# 
+--#   "About Calculation errors in floating-point number"
+--#
+--#   Some queries have been adjusted so as not affected 
+--#   by the floating point error on pg_strom.
+--#   Please refer to the following for more information.
+--#   https://github.com/pg-strom/devel/wiki/Known-Issues
 --#
 
 set pg_strom.debug_force_gpupreagg to on;
@@ -57,53 +64,53 @@ select key, stddev_samp(bigint_x)    from strom_test  group by key order by key;
 select key, variance(bigint_x)       from strom_test  group by key order by key;
 select key, var_pop(bigint_x)        from strom_test  group by key order by key;
 select key, var_samp(bigint_x)       from strom_test  group by key order by key;
-select key,corr(bigint_x,bigint_z) from strom_mix  group by key order by key;
-select key,covar_pop(bigint_x,bigint_z) from strom_mix  group by key order by key;
-select key,covar_samp(bigint_x,bigint_z) from strom_mix  group by key order by key;
-select key,corr(bigint_y,bigint_z) from strom_mix  group by key order by key;
-select key,covar_pop(bigint_y,bigint_z) from strom_mix  group by key order by key;
-select key,covar_samp(bigint_y,bigint_z) from strom_mix  group by key order by key;
+select key,trunc(corr(bigint_x,bigint_z)::numeric,13)   from strom_mix  group by key order by key;
+select key,trunc(covar_pop(bigint_x,bigint_z)::numeric*1e-30,13)   from strom_mix  group by key order by key;
+select key,trunc(covar_samp(bigint_x,bigint_z)::numeric*1e-30,13)   from strom_mix  group by key order by key;
+select key,trunc(corr(bigint_y,bigint_z)::numeric,13)   from strom_mix  group by key order by key;
+select key,trunc(covar_pop(bigint_y,bigint_z)::numeric*1e-30,13)   from strom_mix  group by key order by key;
+select key,trunc(covar_samp(bigint_y,bigint_z)::numeric*1e-30,13)   from strom_mix  group by key order by key;
 
 --real
-select key, avg(real_x)            from strom_test  group by key order by key;
+select key,trunc(avg(real_x)::numeric,3)            from strom_test  group by key order by key;
 select key, count(real_x)          from strom_test  group by key order by key;
 select key, max(real_x)            from strom_test  group by key order by key;
 select key, min(real_x)            from strom_test  group by key order by key;
-select key, sum(real_x)            from strom_test  group by key order by key;
-select key, stddev(real_x)         from strom_test  group by key order by key;
-select key, stddev_pop(real_x)     from strom_test  group by key order by key;
-select key, stddev_samp(real_x)    from strom_test  group by key order by key;
-select key, variance(real_x)       from strom_test  group by key order by key;
-select key, var_pop(real_x)        from strom_test  group by key order by key;
-select key, var_samp(real_x)       from strom_test  group by key order by key;
-select key,corr(real_x,real_z) from strom_mix  group by key order by key;
-select key,covar_pop(real_x,real_z) from strom_mix  group by key order by key;
-select key,covar_samp(real_x,real_z) from strom_mix  group by key order by key;
-select key,corr(real_y,real_z) from strom_mix  group by key order by key;
-select key,covar_pop(real_y,real_z) from strom_mix  group by key order by key;
-select key,covar_samp(real_y,real_z) from strom_mix  group by key order by key;
+select key,trunc(sum(real_x)::numeric/1000,3)               from strom_test  group by key order by key;
+select key,trunc(stddev(real_x)::numeric,3)             from strom_test  group by key order by key;
+select key,trunc(stddev_pop(real_x)::numeric,3)           from strom_test  group by key order by key;
+select key,trunc(stddev_samp(real_x)::numeric,3)          from strom_test  group by key order by key;
+select key,trunc(variance(real_x)::numeric,3)             from strom_test  group by key order by key;
+select key,trunc(var_pop(real_x)::numeric,3)              from strom_test  group by key order by key;
+select key,trunc(var_samp(real_x)::numeric,3)             from strom_test  group by key order by key;
+select key,trunc(corr(real_x,real_z)::numeric,3)    from strom_mix  group by key order by key;
+select key,trunc(covar_pop(real_x,real_z)::numeric,3)    from strom_mix  group by key order by key;
+select key,trunc(covar_samp(real_x,real_z)::numeric,3)    from strom_mix  group by key order by key;
+select key,trunc(corr(real_y,real_z)::numeric,3)    from strom_mix  group by key order by key;
+select key,trunc(covar_pop(real_y,real_z)::numeric,3)    from strom_mix  group by key order by key;
+select key,trunc(covar_samp(real_y,real_z)::numeric,3)    from strom_mix  group by key order by key;
 
 --float
-select key, avg(float_x)            from strom_test  group by key order by key;
+select key,trunc(avg(float_x)::numeric,13)            from strom_test  group by key order by key;  
 select key, count(float_x)          from strom_test  group by key order by key;
 select key, max(float_x)            from strom_test  group by key order by key;
 select key, min(float_x)            from strom_test  group by key order by key;
-select key, sum(float_x)            from strom_test  group by key order by key;
-select key, stddev(float_x)         from strom_test  group by key order by key;
-select key, stddev_pop(float_x)     from strom_test  group by key order by key;
-select key, stddev_samp(float_x)    from strom_test  group by key order by key;
-select key, variance(float_x)       from strom_test  group by key order by key;
-select key, var_pop(float_x)        from strom_test  group by key order by key;
-select key, var_samp(float_x)       from strom_test  group by key order by key;
-select key,corr(float_x,float_z) from strom_mix  group by key order by key;
-select key,covar_pop(float_x,float_z) from strom_mix  group by key order by key;
-select key,covar_samp(float_x,float_z) from strom_mix  group by key order by key;
-select key,corr(float_y,float_z) from strom_mix  group by key order by key;
-select key,covar_pop(float_y,float_z) from strom_mix  group by key order by key;
-select key,covar_samp(float_y,float_z) from strom_mix  group by key order by key;
+select key,trunc(sum(float_x)::numeric/1000,13)            from strom_test  group by key order by key;
+select key,trunc(stddev(float_x)::numeric,13)         from strom_test  group by key order by key;
+select key,trunc(stddev_pop(float_x)::numeric,13)     from strom_test  group by key order by key;
+select key,trunc(stddev_samp(float_x)::numeric,13)    from strom_test  group by key order by key;
+select key,trunc(variance(float_x)::numeric,13)       from strom_test  group by key order by key;
+select key,trunc(var_pop(float_x)::numeric,13)        from strom_test  group by key order by key;
+select key,trunc(var_samp(float_x)::numeric,13)       from strom_test  group by key order by key;
+select key,trunc(corr(float_x,float_z)::numeric,13)   from strom_mix  group by key order by key;
+select key,trunc(covar_pop(float_x,float_z)::numeric,13)   from strom_mix  group by key order by key;
+select key,trunc(covar_samp(float_x,float_z)::numeric,13)   from strom_mix  group by key order by key;
+select key,trunc(corr(float_y,float_z)::numeric,13)   from strom_mix  group by key order by key;
+select key,trunc(covar_pop(float_y,float_z)::numeric,13)   from strom_mix  group by key order by key;
+select key,trunc(covar_samp(float_y,float_z)::numeric,13)   from strom_mix  group by key order by key;
 
 --numeric
-select key, avg(nume_x)            from strom_test  group by key order by key;
+select key,trunc(avg(nume_x)::numeric,13)            from strom_test  group by key order by key;
 select key, count(nume_x)          from strom_test  group by key order by key;
 select key, max(nume_x)            from strom_test  group by key order by key;
 select key, min(nume_x)            from strom_test  group by key order by key;
@@ -114,12 +121,12 @@ select key, stddev_samp(nume_x)    from strom_test  group by key order by key;
 select key, variance(nume_x)       from strom_test  group by key order by key;
 select key, var_pop(nume_x)        from strom_test  group by key order by key;
 select key, var_samp(nume_x)       from strom_test  group by key order by key;
-select key,corr(nume_x,nume_z) from strom_mix  group by key order by key;
-select key,covar_pop(nume_x,nume_z) from strom_mix  group by key order by key;
-select key,covar_samp(nume_x,nume_z) from strom_mix  group by key order by key;
-select key,corr(nume_y,nume_z) from strom_mix  group by key order by key;
-select key,covar_pop(nume_y,nume_z) from strom_mix  group by key order by key;
-select key,covar_samp(nume_y,nume_z) from strom_mix  group by key order by key;
+select key,trunc(corr(nume_x,nume_z)::numeric,13)   from strom_mix  group by key order by key;
+select key,trunc(covar_pop(nume_x,nume_z)::numeric,13)   from strom_mix  group by key order by key;
+select key,trunc(covar_samp(nume_x,nume_z)::numeric,13)   from strom_mix  group by key order by key;
+select key,trunc(corr(nume_y,nume_z)::numeric,13)   from strom_mix  group by key order by key;
+select key,trunc(covar_pop(nume_y,nume_z)::numeric,13)   from strom_mix  group by key order by key;
+select key,trunc(covar_samp(nume_y,nume_z)::numeric,13)   from strom_mix  group by key order by key;
 
 --smallserial
 select key, avg(smlsrl_x)            from strom_test  group by key order by key;
@@ -171,9 +178,9 @@ select key, stddev_samp(bigsrl_x)    from strom_test  group by key order by key;
 select key, variance(bigsrl_x)       from strom_test  group by key order by key;
 select key, var_pop(bigsrl_x)        from strom_test  group by key order by key;
 select key, var_samp(bigsrl_x)       from strom_test  group by key order by key;
-select key,corr(bigsrl_x,bigsrl_z) from strom_mix  group by key order by key;
-select key,covar_pop(bigsrl_x,bigsrl_z) from strom_mix  group by key order by key;
-select key,covar_samp(bigsrl_x,bigsrl_z) from strom_mix  group by key order by key;
-select key,corr(bigsrl_y,bigsrl_z) from strom_mix  group by key order by key;
+select key,trunc(corr(bigsrl_x,bigsrl_z)::numeric,13) from strom_mix  group by key order by key;
+select key,trunc(covar_pop(bigsrl_x,bigsrl_z)::numeric*1e-30,13) from strom_mix  group by key order by key;
+select key,trunc(covar_samp(bigsrl_x,bigsrl_z)::numeric*1e-30,13) from strom_mix  group by key order by key;
+select key,trunc(corr(bigsrl_y,bigsrl_z)::numeric,13) from strom_mix  group by key order by key;
 select key,covar_pop(bigsrl_y,bigsrl_z) from strom_mix  group by key order by key;
 select key,covar_samp(bigsrl_y,bigsrl_z) from strom_mix  group by key order by key;
