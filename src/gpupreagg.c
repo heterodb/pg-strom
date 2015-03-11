@@ -990,6 +990,13 @@ make_gpupreagg_refnode(Aggref *aggref, List **prep_tlist, int *extra_flags)
 	Form_pg_proc proc_form;
 	int			i;
 
+	/*
+	 * Right now, aggregate functions with DISTINCT or ORDER BY are not
+	 * supported by GpuPreAgg
+	 */
+	if (aggref->aggorder || aggref->aggdistinct)
+		return NULL;
+
 	/* Only aggregated functions listed on the catalog above is supported. */
 	aggfn_cat = aggfunc_lookup_by_oid(aggref->aggfnoid);
 	if (!aggfn_cat)
