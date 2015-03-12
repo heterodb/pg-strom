@@ -20,13 +20,11 @@ CUDA_OBJS = cuda_common.o \
 CUDA_SOURCES = $(addprefix src/,$(CUDA_OBJS:.o=.c))
 
 # Header and Libraries of CUDA
-IPATH_LIST := /usr/local/cuda/include
-LPATH_LIST := /usr/local/cuda/lib64 /usr/local/cuda/lib
-
-IPATH := $(shell for x in $(IPATH_LIST);	\
-           do test -e "$$x/cuda.h" && (echo -I $$x; break); done)
-LPATH := $(shell for x in $(LPATH_LIST);	\
-           do test -e "$$x/libnvrtc.so" && (echo -L $$x; break); done)
+CUDA_PATH_LIST := /usr/local/cuda /usr/local/cuda-*
+CUDA_PATH := $(shell for x in $(CUDA_PATH_LIST);	\
+			   do test -e "$$x/include/cuda.h" && echo $$x; done | head -1)
+IPATH := $(CUDA_PATH)/include
+LPATH := $(CUDA_PATH)/lib64
 
 # Module definition
 MODULE_big = pg_strom
@@ -53,8 +51,9 @@ PG_CONFIG = pg_config
 PGSTROM_DEBUG := $(shell $(PG_CONFIG) --configure | \
 	grep -q "'--enable-debug'" && \
 	echo "-Wall -DPGSTROM_DEBUG=1 -O0")
-PG_CPPFLAGS := $(PGSTROM_DEBUG) $(IPATH)
-SHLIB_LINK := $(LPATH) -lcuda -lnvrtc
+PG_CPPFLAGS := $(PGSTROM_DEBUG) -I $(IPATH)
+SHLIB_LINK := -L $(LPATH) -lnvrtc -lcuda
+
 EXTRA_CLEAN := $(CUDA_SOURCES)
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
