@@ -251,7 +251,7 @@ typedef struct
 #define KERN_HASHJOIN_DMA_RECVLEN(khashjoin)	\
 	KERN_HASHJOIN_RESULTBUF_LENGTH(khashjoin)
 
-#ifdef OPENCL_DEVICE_CODE
+#ifdef __CUDACC__
 
 /*
  * gpuhashjoin_qual_eval
@@ -888,7 +888,7 @@ out:
 		return pg_##NAME##_datum_ref(p_errcode, datum, false);		\
 	}
 
-#else	/* OPENCL_DEVICE_CODE */
+#else	/* __CUDACC__ */
 
 typedef struct pgstrom_multihash_tables
 {
@@ -918,5 +918,5 @@ typedef struct
 	kern_hashjoin		khashjoin;		/* kern_hashjoin of this request */
 } pgstrom_gpuhashjoin;
 
-#endif	/* OPENCL_DEVICE_CODE */
+#endif	/* __CUDACC__ */
 #endif	/* OPENCL_HASHJOIN_H */

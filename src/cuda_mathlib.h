@@ -17,7 +17,7 @@
  */
 #ifndef CUDA_MATH_H
 #define CUDA_MATH_H
-#ifdef CUDA_DEVICE_CODE
+#ifdef __CUDACC__
 
 /*
  * Utility macros
@@ -834,5 +834,5 @@ pgfn_dpi(cl_int *errcode)
 }
 
 
-#endif	/* CUDA_DEVICE_CODE */
+#endif	/* __CUDACC__ */
 #endif	/* CUDA_MATH_H */

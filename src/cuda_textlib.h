@@ -17,7 +17,7 @@
  */
 #ifndef CUDA_TEXTLIB_H
 #define CUDA_TEXTLIB_H
-#ifdef CUDA_DEVICE_CODE
+#ifdef __CUDACC__
 
 /* ----------------------------------------------------------------
  *
@@ -291,5 +291,5 @@ pgfn_text_cmp(__private cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
 STROMCL_VARLENA_TYPE_TEMPLATE(varchar)
 #endif
 
-#endif	/* CUDA_DEVICE_CODE */
+#endif	/* __CUDACC__ */
 #endif	/* CUDA_TEXTLIB_H */

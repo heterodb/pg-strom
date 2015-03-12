@@ -31,7 +31,7 @@ typedef short				cl_short;
 typedef unsigned short		cl_ushort;
 typedef int					cl_int;
 typedef unsigned int		cl_uint;
-#ifdef CUDA_DEVICE_CODE
+#ifdef __CUDACC__
 typedef long long			cl_long;
 typedef unsigned long long	cl_ulong;
 #else
@@ -46,7 +46,7 @@ typedef double				cl_double;
  * but not for the host code, so this #if ... #endif block is available
  * only OpenCL device code.
  */
-#ifdef CUDA_DEVICE_CODE
+#ifdef __CUDACC__
 
 /* Misc definitions */
 #ifdef offsetof
@@ -127,7 +127,7 @@ extern __shared__ cl_ulong __pgstrom_dynamic_shared_workmem[];
 #define get_global_size()		(blockDim.x * gridDim.x)
 
 
-#else	/* CUDA_DEVICE_CODE */
+#else	/* __CUDACC__ */
 #include "access/htup_details.h"
 #include "storage/itemptr.h"
 #define __device__		/* address space qualifier is noise on host */
@@ -142,7 +142,7 @@ typedef uintptr_t	hostptr_t;
  * use __forceinline__ because compiler optimization usually makes
  * more reasonable decision than mankind.
  */
-#ifdef CUDA_DEVICE_CODE
+#ifdef __CUDACC__
 #define STATIC_IF_INLINE
 #endif
 
@@ -159,7 +159,7 @@ typedef uintptr_t	hostptr_t;
 #define StromError_DataStoreOutOfRange		2002 /* out of KDS range access */
 #define StromError_SanityCheckViolation		2003 /* sanity check violation */
 
-#ifdef CUDA_DEVICE_CODE
+#ifdef __CUDACC__
 /*
  * Hint for compiler
  */
@@ -430,7 +430,7 @@ typedef struct {
 	cl_int		rindex[FLEXIBLE_ARRAY_MEMBER];
 } kern_row_map;
 
-#ifdef CUDA_DEVICE_CODE
+#ifdef __CUDACC__
 /*
  * PostgreSQL Data Type support in OpenCL kernel
  *
@@ -1410,5 +1410,5 @@ pgfn_boolop_not(cl_int *errcode, pg_bool_t result)
 	return result;
 }
 
-#endif	/* CUDA_DEVICE_CODE */
+#endif	/* __CUDACC__ */
 #endif	/* CUDA_COMMON_H */

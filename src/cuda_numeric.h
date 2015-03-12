@@ -306,7 +306,7 @@ pg_numeric_from_varlena(int *errcode, struct varlena *vl_val)
 	return result;
 }
 
-#ifdef CUDA_DEVICE_CODE
+#ifdef __CUDACC__
 
 /*
  * pg_numeric_to_varlena
@@ -1240,5 +1240,5 @@ pgfn_numeric_min(cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
 	return (v.value ? arg2 : arg1);
 }
 
-#endif /* CUDA_DEVICE_CODE */
+#endif /* __CUDACC__ */
 #endif /* CUDA_NUMERIC_H */

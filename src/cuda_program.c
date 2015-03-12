@@ -303,7 +303,6 @@ pgstrom_write_cuda_program(program_cache_entry *entry)
 
 	initStringInfo(&source);
 	appendStringInfo(&source,
-					 "#define CUDA_DEVICE_CODE\n"
 					 "#define HOSTPTRLEN %u\n"
 					 "#define DEVICEPTRLEN %lu\n"
 					 "#define BLCKSZ %u\n"
