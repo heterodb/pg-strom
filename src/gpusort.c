@@ -814,8 +814,9 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	cscan->scan.plan.plan_rows = sort->plan.plan_rows;
 	cscan->scan.plan.plan_width = sort->plan.plan_width;
 	cscan->scan.plan.targetlist = NIL;
-	cscan->scan.scanrelid = 0;
-	cscan->custom_ps_tlist = NIL;
+	cscan->scan.scanrelid       = 0;
+	cscan->custom_ps_tlist      = NIL;
+	cscan->custom_relids        = NULL;
 	cscan->methods = &gpusort_scan_methods;
 	foreach (cell, subplan->targetlist)
 	{

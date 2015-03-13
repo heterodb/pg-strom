@@ -2741,6 +2741,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	cscan->scan.plan.qual         = NIL;
 	cscan->scan.scanrelid         = 0;
 	cscan->flags                  = 0;
+	cscan->custom_ps_tlist        = NIL;
+	cscan->custom_relids          = NULL;
 	cscan->methods                = &gpupreagg_scan_methods;
 	foreach (cell, outer_node->targetlist)
 	{

@@ -357,6 +357,7 @@ gpuscan_try_replace_seqscan(SeqScan *seqscan,
 	cscan->flags = CUSTOMPATH_SUPPORT_BULKLOAD;
 	memset(&gs_info, 0, sizeof(GpuScanInfo));
 	form_gpuscan_info(cscan, &gs_info);
+	cscan->custom_relids = bms_make_singleton(seqscan->scanrelid);
 	cscan->methods = &gpuscan_plan_methods;
 
 	/*
