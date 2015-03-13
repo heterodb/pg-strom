@@ -322,10 +322,8 @@ pg_numeric_from_varlena(int *errcode, struct varlena *vl_val)
  * written varlena datum.
  * Once an error happen, it returns 0, then set some value on errcode.
  */
-static size_t
-pg_numeric_to_varlena(__private int *errcode,
-					  pg_numeric_t arg,
-					  __global struct varlena *vl_val)
+__device__ size_t
+pg_numeric_to_varlena(int *errcode, pg_numeric_t arg, varlena *vl_val)
 {
 
 
@@ -1242,5 +1240,5 @@ pgfn_numeric_min(cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
 	return (v.value ? arg2 : arg1);
 }
 
-#endif /* CUDA_DEVICE_CODE */
+#endif /* __CUDACC__ */
 #endif /* CUDA_NUMERIC_H */

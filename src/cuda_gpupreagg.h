@@ -151,7 +151,7 @@ typedef struct
 #define GPUPREAGG_FIELD_IS_GROUPKEY		1
 #define GPUPREAGG_FIELD_IS_AGGFUNC		2
 
-#ifdef OPENCL_DEVICE_CODE
+#ifdef __CUDACC__
 
 /* macro to check overflow on accumlate operation*/
 #define CHECK_OVERFLOW_NONE(x,y)		(0)
@@ -1562,5 +1562,5 @@ typedef struct
 	pgstrom_data_store *pds_dest; /* result data-store */
 	kern_gpupreagg	kern;		/* kernel portion to be sent */
 } pgstrom_gpupreagg;
-#endif	/* OPENCL_DEVICE_CODE */
+#endif	/* __CUDACC__ */
 #endif	/* OPENCL_GPUPREAGG_H */

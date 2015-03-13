@@ -88,7 +88,7 @@ typedef struct {
 #define KERN_GPUSCAN_DMARECV_LENGTH(kgpuscan)	\
 	KERN_GPUSCAN_RESULTBUF_LENGTH(kgpuscan)
 
-#ifdef CUDA_DEVICE_CODE
+#ifdef __CUDACC__
 /*
  * gpuscan_writeback_results
  *
@@ -173,5 +173,5 @@ gpuscan_qual(kern_gpuscan *kgpuscan,	/* in/out */
 	kern_writeback_error_status(&kresults->errcode, errcode);
 }
 
-#endif	/* CUDA_DEVICE_CODE */
+#endif	/* __CUDACC__ */
 #endif	/* CUDA_GPUSCAN_H */

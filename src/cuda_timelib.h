@@ -17,7 +17,7 @@
  */
 #ifndef CUDA_TIMELIB_H
 #define CUDA_TIMELIB_H
-#ifdef CUDA_DEVICE_CODE
+#ifdef __CUDACC__
 
 /* definitions copied from date.h */
 typedef cl_int		DateADT;
@@ -659,5 +659,5 @@ pgfn_timestamp_cmp_date(cl_int *errcode,
 	return result;
 }
 
-#endif	/* CUDA_DEVICE_CODE */
+#endif	/* __CUDACC__ */
 #endif	/* CUDA_TIMELIB_H */
