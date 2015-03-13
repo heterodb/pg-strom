@@ -2047,7 +2047,7 @@ gpupreagg_codegen_projection_misc(StringInfo body, FuncExpr *func,
 			pc->use_temp_float8x = true;
 			temp_val = "temp_float8x";
 			max_const = "DBL_MAX";
-			min_const = "-DBL_MIN";
+			min_const = "-DBL_MAX";
 			zero_const = "0.0";
 			break;
 
@@ -2741,6 +2741,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	cscan->scan.plan.qual         = NIL;
 	cscan->scan.scanrelid         = 0;
 	cscan->flags                  = 0;
+	cscan->custom_ps_tlist        = NIL;
+	cscan->custom_relids          = NULL;
 	cscan->methods                = &gpupreagg_scan_methods;
 	foreach (cell, outer_node->targetlist)
 	{

@@ -306,7 +306,32 @@ pg_numeric_from_varlena(int *errcode, struct varlena *vl_val)
 	return result;
 }
 
-#ifdef CUDA_DEVICE_CODE
+#ifdef __CUDACC__
+
+/*
+ * pg_numeric_to_varlena
+ *
+ * It transform the supplied pg_numeric_t value into usual varlena form.
+ * Caller is responsible not to call for NULL values; thus this function
+ * expects the "pg_numeric_t arg" is not NULL.
+ * One other supplied argument "struct varlena *vl_val" is a pointer to
+ * the global memory region that at least has XXXX bytes which is possible
+ * maximum size for pg_numeric_t representation.
+ * Once this function transform the supplied argument and put it on the
+ * global memory with varlena format, it returns total length of the
+ * written varlena datum.
+ * Once an error happen, it returns 0, then set some value on errcode.
+ */
+static size_t
+pg_numeric_to_varlena(__private int *errcode,
+					  pg_numeric_t arg,
+					  __global struct varlena *vl_val)
+{
+
+
+	return 0;
+}
+
 /*
  * pg_numeric_vref
  *

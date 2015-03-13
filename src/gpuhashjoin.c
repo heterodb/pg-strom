@@ -1980,6 +1980,7 @@ create_gpuhashjoin_plan(PlannerInfo *root,
 		mhash->scan.scanrelid = 0;
 		mhash->flags = 0;
 		mhash->custom_ps_tlist = scan_plan->targetlist;
+		mhash->custom_relids = NULL;
 		mhash->methods = &multihash_plan_methods;
 
 		memset(&mh_info, 0, sizeof(MultiHashInfo));
