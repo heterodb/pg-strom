@@ -133,35 +133,32 @@ typedef struct
 } kern_multihash;
 
 #define KERN_HASHTABLE(kmhash, depth)								\
-	((__global kern_hashtable *)((__global char *)(kmhash) +		\
-								 (kmhash)->htable_offset[(depth)]))
+	((kern_hashtable *)((char *)(kmhash) +							\
+						(kmhash)->htable_offset[(depth)]))
 #define KERN_HASHTABLE_SLOT(khtable)								\
-	((__global cl_uint *)((__global char *)(khtable)+				\
-						  LONGALIGN(offsetof(kern_hashtable,		\
-											 colmeta[(khtable)->ncols]))))
+	((cl_uint *)((char *)(khtable) +								\
+				 LONGALIGN(offsetof(kern_hashtable,					\
+									colmeta[(khtable)->ncols]))))
 #define KERN_HASHENTRY_SIZE(khentry)								\
 	LONGALIGN(offsetof(kern_hashentry, htup) + (khentry)->t_len)
 
-static inline __global kern_hashentry *
-KERN_HASH_FIRST_ENTRY(__global kern_hashtable *khtable, cl_uint hash)
+STATIC_INLINE kern_hashentry *
+KERN_HASH_FIRST_ENTRY(kern_hashtable *khtable, cl_uint hash)
 {
-	__global cl_uint *slot = KERN_HASHTABLE_SLOT(khtable);
+	cl_uint	   *slot = KERN_HASHTABLE_SLOT(khtable);
 	cl_uint		index = hash % khtable->nslots;
 
 	if (slot[index] == 0)
 		return NULL;
-	return (__global kern_hashentry *)((__global char *) khtable +
-									   slot[index]);
+	return (kern_hashentry *)((char *) khtable + slot[index]);
 }
 
-static inline __global kern_hashentry *
-KERN_HASH_NEXT_ENTRY(__global kern_hashtable *khtable,
-					 __global kern_hashentry *khentry)
+STATIC_INLINE kern_hashentry *
+KERN_HASH_NEXT_ENTRY(kern_hashtable *khtable, kern_hashentry *khentry)
 {
 	if (khentry->next == 0)
 		return NULL;
-	return (__global kern_hashentry *)((__global char *)khtable +
-									   khentry->next);
+	return (kern_hashentry *)((char *)khtable + khentry->next);
 }
 
 /*
@@ -204,51 +201,32 @@ KERN_HASH_NEXT_ENTRY(__global kern_hashtable *khtable,
  * | +-----------------+  |  |
  * | | __padding__[]   |  |  V
  * +-+-----------------+ ------
- * | kern_row_map      |  ^  Region to be sent to the m_rowmap device memory,
- * | +-----------------+  |  on demand.
- * | | nvalids         |  |
- * | +-----------------+  |
- * | | rindex[0]       |  |
- * | | rindex[1]       |  |
- * | |   :             |  |
- * | | rindex[N-1]     |  V
- * +-+-----------------+ ---
  */
 typedef struct
 {
 	kern_parambuf	kparams;
 } kern_hashjoin;
 
-#define KERN_HASHJOIN_PARAMBUF(khashjoin)					\
-	((__global kern_parambuf *)(&(khashjoin)->kparams))
-#define KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin)			\
+#define KERN_HASHJOIN_PARAMBUF(khashjoin)			\
+	((kern_parambuf *)(&(khashjoin)->kparams))
+#define KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin)	\
 	STROMALIGN(KERN_HASHJOIN_PARAMBUF(khashjoin)->length)
-#define KERN_HASHJOIN_RESULTBUF(khashjoin)					\
-	((__global kern_resultbuf *)							\
-	 ((__global char *)KERN_HASHJOIN_PARAMBUF(khashjoin) +	\
-	  KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin)))
-#define KERN_HASHJOIN_RESULTBUF_LENGTH(khashjoin)			\
+#define KERN_HASHJOIN_RESULTBUF(khashjoin)			\
+	((kern_resultbuf *)((char *)KERN_HASHJOIN_PARAMBUF(khashjoin) +	\
+						KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin)))
+#define KERN_HASHJOIN_RESULTBUF_LENGTH(khashjoin)	\
 	STROMALIGN(offsetof(kern_resultbuf, results[0]))
-#define KERN_HASHJOIN_ROWMAP(khashjoin)						\
-	((__global kern_row_map *)								\
-	 ((__global char *)KERN_HASHJOIN_RESULTBUF(khashjoin) +	\
-	  KERN_HASHJOIN_RESULTBUF_LENGTH(khashjoin)))
-#define KERN_HASHJOIN_ROWMAP_LENGTH(khashjoin)		\
-	(KERN_HASHJOIN_ROWMAP(khashjoin)->nvalids < 0 ?	\
-	 STROMALIGN(offsetof(kern_row_map, rindex[0])) :\
-	 STROMALIGN(offsetof(kern_row_map,				\
-				rindex[KERN_HASHJOIN_ROWMAP(khashjoin)->nvalids])))
-#define KERN_HASHJOIN_DMA_SENDPTR(khashjoin)	\
+#define KERN_HASHJOIN_DMA_SENDPTR(khashjoin)		\
 	KERN_HASHJOIN_PARAMBUF(khashjoin)
 #define KERN_HASHJOIN_DMA_SENDOFS(khashjoin)		0UL
 #define KERN_HASHJOIN_DMA_SENDLEN(khashjoin)		\
-	((uintptr_t)KERN_HASHJOIN_ROWMAP(khashjoin) -	\
-	 (uintptr_t)KERN_HASHJOIN_PARAMBUF(khashjoin))
-#define KERN_HASHJOIN_DMA_RECVPTR(khashjoin)	\
+	(KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin) +		\
+	 KERN_HASHJOIN_RESULTBUF_LENGTH(khashjoin))
+#define KERN_HASHJOIN_DMA_RECVPTR(khashjoin)		\
 	KERN_HASHJOIN_RESULTBUF(khashjoin)
-#define KERN_HASHJOIN_DMA_RECVOFS(khashjoin)	\
+#define KERN_HASHJOIN_DMA_RECVOFS(khashjoin)		\
 	KERN_HASHJOIN_PARAMBUF_LENGTH(khashjoin)
-#define KERN_HASHJOIN_DMA_RECVLEN(khashjoin)	\
+#define KERN_HASHJOIN_DMA_RECVLEN(khashjoin)		\
 	KERN_HASHJOIN_RESULTBUF_LENGTH(khashjoin)
 
 #ifdef __CUDACC__
@@ -258,11 +236,11 @@ typedef struct
  *
  * simple evaluation of qualifier, if any
  */
-static bool
-gpuhashjoin_qual_eval(__private cl_int *errcode,
-					  __global kern_parambuf *kparams,
-					  __global kern_data_store *kds,
-					  __global kern_data_store *ktoast,
+__device__ static bool
+gpuhashjoin_qual_eval(cl_int *errcode,
+					  kern_parambuf *kparams,
+					  kern_data_store *kds,
+					  kern_data_store *ktoast,
 					  size_t kds_index);
 
 /*
@@ -272,15 +250,15 @@ gpuhashjoin_qual_eval(__private cl_int *errcode,
  * hash-tables and kds/ktoast pair, then stores its result on the "results"
  * array. caller already acquires (n_matches * n_rels) slot from "results".
  */
-static cl_uint
-gpuhashjoin_execute(__private cl_int *errcode,
-					__global kern_parambuf *kparams,
-					__global kern_multihash *kmhash,
-					__local cl_uint *crc32_table,
-					__global kern_data_store *kds,
-					__global kern_data_store *ktoast,
+__device__ static cl_uint
+gpuhashjoin_execute(cl_int *errcode,
+					kern_parambuf *kparams,
+					kern_multihash *kmhash,
+					cl_uint *crc32_table,	/* shared memory */
+					kern_data_store *kds,
+					kern_data_store *ktoast,
 					size_t kds_index,
-					__global cl_int *rbuffer);
+					cl_int *rbuffer);
 
 /*
  * kern_gpuhashjoin_main
@@ -294,13 +272,12 @@ gpuhashjoin_execute(__private cl_int *errcode,
  * returns StromError_DataStoreNoSpace to inform host system this hashjoin
  * needs larger result buffer.
  */
-__kernel void
+__global__ void
 kern_gpuhashjoin_main(__global kern_hashjoin *khashjoin,
 					  __global kern_multihash *kmhash,
 					  __global kern_data_store *kds,
 					  __global kern_data_store *ktoast,
-					  __global kern_row_map   *krowmap,
-					  KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+					  __global kern_row_map   *krowmap)
 {
 	__global kern_parambuf  *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
 	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
@@ -443,11 +420,11 @@ out:
  *
  *
  */
-static void
+__device__ static void
 gpuhashjoin_projection_mapping(cl_int dest_colidx,
 								__private cl_uint *src_depth,
 								__private cl_uint *src_colidx);
-static void
+__device__ static void
 gpuhashjoin_projection_datum(__private cl_int *errcode,
 							 __global Datum *slot_values,
 							 __global cl_char *slot_isnull,
@@ -456,28 +433,28 @@ gpuhashjoin_projection_datum(__private cl_int *errcode,
 							 hostptr_t hostaddr,
 							 __global void *datum);
 
-__kernel void
-kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
-								__global kern_multihash *kmhash,	/* in */
-								__global kern_data_store *kds,		/* in */
-								__global kern_data_store *ktoast,	/* in */
-								__global kern_data_store *kds_dest,	/* out */
+__global__ void
+kern_gpuhashjoin_projection_row(kern_hashjoin *khashjoin,	/* in */
+								kern_multihash *kmhash,		/* in */
+								kern_data_store *kds,		/* in */
+								kern_data_store *ktoast,	/* in */
+								kern_data_store *kds_dest,	/* out */
 								KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
-	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
-	__global cl_int	   *rbuffer;
-	__global void	   *datum;
-	cl_uint				nrels = kresults->nrels;
-	cl_bool				heap_hasnull = false;
-	cl_uint				t_hoff;
-	cl_uint				t_len;
-	cl_uint				data_len;
-	cl_uint				required;
-	cl_uint				offset;
-	cl_uint				total_len;
-	cl_uint				usage_head;
-	__local cl_uint		usage_prev;
-	cl_int				errcode = StromError_Success;
+	kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
+	cl_int		   *rbuffer;
+	void		   *datum;
+	cl_uint			nrels = kresults->nrels;
+	cl_bool			heap_hasnull = false;
+	cl_uint			t_hoff;
+	cl_uint			t_len;
+	cl_uint			data_len;
+	cl_uint			required;
+	cl_uint			offset;
+	cl_uint			total_len;
+	cl_uint			usage_head;
+	__shared__ cl_uint usage_prev;
+	cl_int			errcode = StromError_Success;
 
 	/* Case of overflow; it shall be retried or executed by CPU instead,
 	 * so no projection is needed anyway. We quickly exit the kernel.
@@ -721,12 +698,12 @@ out:
 	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
 }
 
-__kernel void
-kern_gpuhashjoin_projection_slot(__global kern_hashjoin *khashjoin,	/* in */
-								 __global kern_multihash *kmhash,	/* in */
-								 __global kern_data_store *kds,		/* in */
-								 __global kern_data_store *ktoast,	/* in */
-								 __global kern_data_store *kds_dest, /* out */
+__global__ void
+kern_gpuhashjoin_projection_slot(kern_hashjoin *khashjoin,	/* in */
+								 kern_multihash *kmhash,	/* in */
+								 kern_data_store *kds,		/* in */
+								 kern_data_store *ktoast,	/* in */
+								 kern_data_store *kds_dest, /* out */
 								 KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
 {
 	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
@@ -887,36 +864,6 @@ out:
 								   colidx);							\
 		return pg_##NAME##_datum_ref(p_errcode, datum, false);		\
 	}
-
-#else	/* __CUDACC__ */
-
-typedef struct pgstrom_multihash_tables
-{
-	StromObject		sobj;		/* = StromTab_HashJoinTable */
-	Size			length;		/* max available length of this mhash */
-	Size			usage;		/* current usage of this mhash */
-	double			ntuples;	/* number of tuples in this mhash */
-	bool			is_divided;	/* true, if not whole of the inner relation */
-	slock_t			lock;		/* protection of the fields below */
-	cl_int			refcnt;		/* reference counter of this hash table */
-	cl_int			dindex;		/* device to load the hash table */
-	cl_int			n_kernel;	/* number of active running kernel */
-	cl_mem			m_hash;		/* in-kernel buffer object. Once n_kernel
-								 * backed to zero, valid m_hash needs to
-								 * be released. */
-	cl_event		ev_hash;	/* event to load hash table to kernel */
-	kern_multihash	kern;
-} pgstrom_multihash_tables;
-
-typedef struct
-{
-	pgstrom_message		msg;		/* = StromTag_GpuHashJoin */
-	Datum				dprog_key;	/* device key for gpuhashjoin */
-	pgstrom_multihash_tables *mhtables;	/* inner hashjoin tables */
-	pgstrom_data_store *pds;		/* data store of outer relation */
-	pgstrom_data_store *pds_dest;	/* data store of result buffer */
-	kern_hashjoin		khashjoin;		/* kern_hashjoin of this request */
-} pgstrom_gpuhashjoin;
 
 #endif	/* __CUDACC__ */
 #endif	/* OPENCL_HASHJOIN_H */

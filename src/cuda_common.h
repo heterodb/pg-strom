@@ -138,12 +138,19 @@ typedef uintptr_t	hostptr_t;
 #endif
 
 /*
- * STATIC_IF_INLINE performs same as host code doing, however, we never
- * use __forceinline__ because compiler optimization usually makes
- * more reasonable decision than mankind.
+ * Template of static function declarations
+ *
+ * CUDA compilar raises warning if static functions are not used, but
+ * we can restain this message with"unused" attribute of function/values.
+ * STATIC_INLINE / STATIC_FUNCTION packs common attributes to be
+ * assigned on host/device functions
  */
 #ifdef __CUDACC__
-#define STATIC_IF_INLINE
+#define STATIC_INLINE	__device__ __forceinline__ static
+#define STATIC_FUNCTION	__device__ static __attribute__ ((unused))
+#else
+#define STATIC_INLINE	STATIC_IF_INLINE
+#define STATIC_FUNCTION
 #endif
 
 /*

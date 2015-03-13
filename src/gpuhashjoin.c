@@ -43,8 +43,8 @@
 #include "utils/ruleutils.h"
 #include "utils/selfuncs.h"
 #include "pg_strom.h"
-#include "opencl_hashjoin.h"
-#include "opencl_numeric.h"
+#include "cuda_hashjoin.h"
+#include "cuda_numeric.h"
 
 /* static variables */
 static set_join_pathlist_hook_type set_join_pathlist_next;
@@ -263,18 +263,51 @@ deform_multihash_info(CustomScan *cscan)
 }
 
 
+/*
+ * multiple-hashatables
+ */
+typedef struct
+{
+	Size			length;		/* max available length of this mhash */
+	Size			usage;		/* current usage of this mhash */
+	double			ntuples;	/* number of tuples in this mhash */
+	bool			is_divided;	/* true, if not whole of the inner relation */
+	slock_t			lock;		/* protection of the fields below */
+	cl_int			refcnt;		/* reference counter of this hash table */
+	cl_int			dindex;		/* device to load the hash table */
+	cl_int			n_kernel;	/* number of active running kernel */
+	CUdeviceptr		m_hash;		/* in-kernel buffer object. Once n_kernel
+								 * backed to zero, valid m_hash needs to
+								 * be released. */
+	kern_multihash	kern;
+} pgstrom_multihash_tables;
 
-
-
-
-
-
-
-
-
-
-
-
+/*
+ * task for each gpuhashjoin request
+ */
+typedef struct
+{
+	GpuTask			task;
+	CUfunction		kern_main;
+	void		   *kern_main_args[5];
+	CUfunction		kern_proj;
+	void		   *kern_proj_args[5];
+	CUdeviceptr		m_join;
+	CUdeviceptr		m_hash;
+	CUdeviceptr		m_kds;
+	CUdeviceptr		m_ktoast;
+	CUdeviceptr		m_kresult;
+	bool			hash_loader; /* true, if this context loads hash table */
+	CUevent			ev_dma_send_start;
+	CUevent			ev_dma_send_stop;
+	CUevent			ev_kern_main_end;
+	CUevent			ev_dma_recv_start;
+	CUevent			ev_dma_recv_stop;
+	pgstrom_multihash_tables   *mhtables;	/* inner hashjoin tables */
+	pgstrom_data_store *pds_src;	/* data store of outer relation */
+	pgstrom_data_store *pds_dst;	/* data store of result buffer */
+	kern_hashjoin	kern;	/* kern_hashjoin of this request */
+} pgstrom_gpuhashjoin;
 
 /*
  * MultiHashNode - a data structure to be returned from MultiHash node;
@@ -289,7 +322,7 @@ typedef struct {
 
 typedef struct
 {
-	CustomScanState css;
+	GpuTaskState	gts;
 	List		   *join_types;
 	ExprState	   *outer_quals;
 	List		   *hash_clauses;
@@ -313,16 +346,14 @@ typedef struct
 	TupleTableSlot *outer_overflow;
 
 	kern_parambuf  *kparams;
-	const char	   *kernel_source;
-	Datum			dprog_key;
-	pgstrom_queue  *mqueue;
 
-	pgstrom_gpuhashjoin *curr_ghjoin;
+//	pgstrom_gpuhashjoin *curr_ghjoin;
+	int				result_format;
 	cl_uint			curr_index;
 	bool			curr_recheck;
 	HeapTupleData	curr_tuple;
-	cl_int			num_running;
-	dlist_head		ready_pscans;
+//	cl_int			num_running;
+//	dlist_head		ready_pscans;
 
 	pgstrom_perfmon	pfm;
 } GpuHashJoinState;
@@ -343,6 +374,21 @@ typedef struct {
 	List		   *hash_keybyval;
 	List		   *hash_keytype;
 } MultiHashState;
+
+/*
+ * static functions
+ */
+static bool pgstrom_process_gpuhashjoin(GpuTask *gtask);
+static void pgstrom_complete_gpuhashjoin(GpuTask *gtask);
+static void pgstrom_fallback_gpuhashjoin(GpuTask *gtask);
+static void pgstrom_release_gpuhashjoin(GpuTask *gtask);
+static GpuTask *pgstrom_load_gpuhashjoin(GpuTaskState *gts);
+
+static pgstrom_multihash_tables *
+multihash_get_tables(pgstrom_multihash_tables *mhtables);
+extern void multihash_put_tables(pgstrom_multihash_tables *mhtables);
+
+
 
 /*
  * BulkExecMultiHashNode
@@ -368,10 +414,6 @@ BulkExecMultiHashNode(PlanState *plannode)
 	}
 	elog(ERROR, "unrecognized node type: %d", (int) nodeTag(plannode));
 }
-
-
-/* declaration of static functions */
-static void clserv_process_gpuhashjoin(pgstrom_message *message);
 
 /*
  * path_is_gpuhashjoin - returns true, if supplied pathnode is gpuhashjoin
@@ -556,7 +598,7 @@ retry:
 	 * we try to split the largest chunk then retry the size
 	 * estimation.
 	 */
-	if (hashtable_size > pgstrom_shmem_maxalloc())
+	if (hashtable_size > gpuMemMaxAllocSize())
 	{
 		gpath->inners[i_largest].nloops++;
 		goto retry;
@@ -2103,8 +2145,7 @@ create_gpuhashjoin_plan(PlannerInfo *root,
 								(Node *)ghjoin->custom_ps_tlist, true);
 	ghj_info.kernel_source =
 		gpuhashjoin_codegen(root, ghjoin, &ghj_info, &context);
-	ghj_info.extra_flags = context.extra_flags |
-		(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
+	ghj_info.extra_flags = context.extra_flags;
 	ghj_info.used_params = context.used_params;
 
 	form_gpuhashjoin_info(ghjoin, &ghj_info);
@@ -2179,11 +2220,20 @@ gpuhashjoin_textout_path(StringInfo str, const CustomPath *node)
 static Node *
 gpuhashjoin_create_scan_state(CustomScan *cscan)
 {
+	GpuContext		   *gcontext = pgstrom_get_gpucontext();
 	GpuHashJoinState   *ghjs = palloc0(sizeof(GpuHashJoinState));
 
 	NodeSetTag(ghjs, T_CustomScanState);
-	ghjs->css.flags = cscan->flags;
-	ghjs->css.methods = &gpuhashjoin_exec_methods.c;
+	ghjs->gts.css.flags = cscan->flags;
+	ghjs->gts.css.methods = &gpuhashjoin_exec_methods.c;
+	/* GpuTaskState setup */
+	pgstrom_init_gputaststate(gcontext, &ghjs->gts);
+	ghjs->gts.cb_task_process = pgstrom_process_gpuhashjoin;
+	ghjs->gts.cb_task_complete = pgstrom_complete_gpuhashjoin;
+	ghjs->gts.cb_task_fallback = NULL;   /* to be implemented later */
+	ghjs->gts.cb_task_release = pgstrom_release_gpuhashjoin;
+	ghjs->gts.cb_load_next = pgstrom_load_gpuhashjoin;
+	ghjs->gts.cb_cleanup = NULL;
 
 	return (Node *) ghjs;
 }
@@ -2282,8 +2332,8 @@ gpuhashjoin_begin(CustomScanState *node, EState *estate, int eflags)
 	{
 		if (!lfirst(cell))
 			continue;
-		ghjs->css.ss.ps.qual = lappend(ghjs->css.ss.ps.qual,
-									   ExecInitExpr(lfirst(cell), ps));
+		ghjs->gts.css.ss.ps.qual = lappend(ghjs->gts.css.ss.ps.qual,
+										   ExecInitExpr(lfirst(cell), ps));
 	}
 
 	/* XXX - it may need to sort by depth/resno */
@@ -2311,8 +2361,8 @@ gpuhashjoin_begin(CustomScanState *node, EState *estate, int eflags)
 	 * referenced by device only, so it leads unnecessary projection.
 	 */
 	tupdesc = ExecCleanTypeFromTL(ghjoin->custom_ps_tlist, false);
-	ExecAssignScanType(&ghjs->css.ss, tupdesc);
-	ExecAssignScanProjectionInfo(&ghjs->css.ss);
+	ExecAssignScanType(&ghjs->gts.css.ss, tupdesc);
+	ExecAssignScanProjectionInfo(&ghjs->gts.css.ss);
 
 	/*
 	 * initialize outer scan state
@@ -2328,157 +2378,127 @@ gpuhashjoin_begin(CustomScanState *node, EState *estate, int eflags)
 	ghjs->kparams = pgstrom_create_kern_parambuf(ghj_info->used_params,
 												 ps->ps_ExprContext);
 	Assert(ghj_info->kernel_source != NULL);
-	ghjs->kernel_source = ghj_info->kernel_source;
-	ghjs->dprog_key = pgstrom_get_devprog_key(ghj_info->kernel_source,
-											  ghj_info->extra_flags);
-	pgstrom_track_object((StromObject *)ghjs->dprog_key, 0);
-
-	ghjs->mqueue = pgstrom_create_queue();
-	pgstrom_track_object(&ghjs->mqueue->sobj, 0);
+	ghjs->gts.kern_source = ghj_info->kernel_source;
+	ghjs->gts.extra_flags = ghj_info->extra_flags;
+	pgstrom_load_cuda_program(&ghjs->gts);
 
 	/*
 	 * initialize misc stuff
 	 */
-	ghjs->curr_ghjoin = NULL;
+	if ((ghjs->gts.css.flags & CUSTOMPATH_PREFERE_ROW_FORMAT) == 0)
+		ghjs->result_format = KDS_FORMAT_ROW;
+	else
+		ghjs->result_format = KDS_FORMAT_SLOT;
 	ghjs->curr_index = 0;
 	ghjs->curr_recheck = false;
-	ghjs->num_running = 0;
-	dlist_init(&ghjs->ready_pscans);
+//	ghjs->num_running = 0;
+//	dlist_init(&ghjs->ready_pscans);
 
 	/* Is perfmon needed? */
 	ghjs->pfm.enabled = pgstrom_perfmon_enabled;
 }
 
 static void
-pgstrom_release_gpuhashjoin(pgstrom_message *message)
+pgstrom_release_gpuhashjoin(GpuTask *gtask)
 {
-	pgstrom_gpuhashjoin *gpuhashjoin = (pgstrom_gpuhashjoin *) message;
+	pgstrom_gpuhashjoin *gpuhashjoin = (pgstrom_gpuhashjoin *) gtask;
 
-	/* unlink message queue and device program */
-	pgstrom_put_queue(gpuhashjoin->msg.respq);
-    pgstrom_put_devprog_key(gpuhashjoin->dprog_key);
-
-	/* unlink hashjoin-table */
-	multihash_put_tables(gpuhashjoin->mhtables);
-
-	/* unlink outer data store */
-	if (gpuhashjoin->pds)
-		pgstrom_put_data_store(gpuhashjoin->pds);
-
+	/* unlink hashjoin-table, if remained */
+	if (gpuhashjoin->mhtables)
+		multihash_put_tables(gpuhashjoin->mhtables);
+	/* unlink source data store */
+	if (gpuhashjoin->pds_src)
+		pfree(gpuhashjoin->pds_src);
 	/* unlink destination data store */
-	if (gpuhashjoin->pds_dest)
-		pgstrom_put_data_store(gpuhashjoin->pds_dest);
-
-	/* release this message itself */
-	pgstrom_shmem_free(gpuhashjoin);
+	if (gpuhashjoin->pds_dst)
+		pfree(gpuhashjoin->pds_dst);
+	/* release this gpu-task itself */
+	pfree(gtask);
 }
 
 static pgstrom_gpuhashjoin *
 pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs,
-						   pgstrom_bulkslot *bulk,
+						   pgstrom_data_store *pds_src,
 						   int result_format)
 {
-	pgstrom_multihash_tables *mhtables = ghjs->mhtables;
+	GpuContext		   *gcontext = ghjs->gts.gcontext;
 	pgstrom_gpuhashjoin	*gpuhashjoin;
-	pgstrom_data_store *pds_dest;
-	pgstrom_data_store *pds = bulk->pds;
-	kern_data_store	   *kds = pds->kds;
-	cl_int				nvalids = bulk->nvalids;
-	cl_int				nrels = mhtables->kern.ntables;
+	pgstrom_data_store *pds_dst;
+	kern_data_store	   *kds = pds_src->kds;
 	cl_uint				nrooms;
 	Size				required;
 	TupleDesc			tupdesc;
 	kern_hashjoin	   *khashjoin;
 	kern_resultbuf	   *kresults;
 	kern_parambuf	   *kparams;
-	kern_row_map	   *krowmap;
 
 	/*
-	 * Allocation of pgstrom_gpuhashjoin message object
+	 * Allocation of pgstrom_gpuhashjoin gputask object
 	 */
-	required = (offsetof(pgstrom_gpuhashjoin, khashjoin) +
+	required = (offsetof(pgstrom_gpuhashjoin, kern) +
 				STROMALIGN(ghjs->kparams->length) +
-				STROMALIGN(sizeof(kern_resultbuf)) +
-				(nvalids < 0 ?
-				 STROMALIGN(offsetof(kern_row_map, rindex[0])) :
-				 STROMALIGN(offsetof(kern_row_map, rindex[nvalids]))));
-	gpuhashjoin = pgstrom_shmem_alloc(required);
-	if (!gpuhashjoin)
-		elog(ERROR, "out of shared memory");
+				STROMALIGN(offsetof(kern_row_map, rindex[0])));
+	gpuhashjoin = MemoryContextAllocZero(gcontext->memcxt, required);
+	pgstrom_init_gputask(&ghjs->gts, &gpuhashjoin->task);
+	gpuhashjoin->mhtables = multihash_get_tables(ghjs->mhtables);
+	gpuhashjoin->pds_src = pds_src;
+	gpuhashjoin->pds_dst = NULL;
 
-	/* initialization of the common message field */
-	pgstrom_init_message(&gpuhashjoin->msg,
-						 StromTag_GpuHashJoin,
-						 ghjs->mqueue,
-						 clserv_process_gpuhashjoin,
-						 pgstrom_release_gpuhashjoin,
-						 ghjs->pfm.enabled);
-	/* initialization of other fields also */
-	gpuhashjoin->dprog_key = pgstrom_retain_devprog_key(ghjs->dprog_key);
-	gpuhashjoin->mhtables = multihash_get_tables(mhtables);
-	gpuhashjoin->pds = pds;
-	gpuhashjoin->pds_dest = NULL;		/* to be set below */
-	khashjoin = &gpuhashjoin->khashjoin;
+	/*
+	 * Set up kern_hashjoin
+	 */
+	khashjoin = &gpuhashjoin->kern;
 
-	/* setup kern_parambuf */
 	kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
 	memcpy(kparams, ghjs->kparams, ghjs->kparams->length);
 
-	/* setup kern_resultbuf */
-	nrooms = (cl_uint)((double)(nvalids < 0 ? kds->nitems : nvalids) *
-					   ghjs->row_population_ratio * 1.1);
 	kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
-    memset(kresults, 0, sizeof(kern_resultbuf));
-	kresults->nrels = nrels + 1;
+	nrooms = (cl_uint)((double)kds->nitems * ghjs->row_population_ratio * 1.1);
+	memset(kresults, 0, sizeof(kern_resultbuf));
+	kresults->nrels = gpuhashjoin->mhtables->kern.ntables + 1;
 	kresults->nrooms = nrooms;
 	kresults->nitems = 0;
 	kresults->errcode = StromError_Success;
 
-	/* setup kern_row_map */
-	krowmap = KERN_HASHJOIN_ROWMAP(khashjoin);
-	if (nvalids < 0)
-		krowmap->nvalids = -1;
-	else
-	{
-		krowmap->nvalids = nvalids;
-		memcpy(krowmap->rindex, bulk->rindex, sizeof(cl_int) * nvalids);
-	}
-
-	/*
-	 * Once a pgstrom_data_store connected to the pgstrom_gpuhashjoin
-	 * structure, it becomes pgstrom_release_gpuhashjoin's role to
-	 * unlink this data-store. So, we don't need to track individual
-	 * data-store no longer.
-	 */
-	pgstrom_untrack_object(&pds->sobj);
-	pgstrom_track_object(&gpuhashjoin->msg.sobj, 0);
-
 	/*
 	 * allocation of the destination data-store
 	 */
-	tupdesc = ghjs->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor;
-	if (result_format == KDS_FORMAT_TUPSLOT)
-		pds_dest = pgstrom_create_data_store_tupslot(tupdesc, nrooms, false);
-	else if (result_format == KDS_FORMAT_ROW_FLAT)
+	tupdesc = ghjs->gts.css.ss.ss_ScanTupleSlot->tts_tupleDescriptor;
+	if (result_format == KDS_FORMAT_SLOT)
+		pds_dst = pgstrom_create_data_store_slot(gcontext, tupdesc,
+												 nrooms, false, pds_src);
+	else if (result_format == KDS_FORMAT_ROW)
 	{
-		int		plan_width = ghjs->css.ss.ps.plan->plan_width;
+		Size	tuplen;
 		Size	length;
 
 		length = (STROMALIGN(offsetof(kern_data_store,
 									  colmeta[tupdesc->natts])) +
-				  STROMALIGN(sizeof(kern_rowitem) * nrooms) +
-				  (MAXALIGN(offsetof(HeapTupleHeaderData,
-									 t_bits[BITMAPLEN(tupdesc->natts)]) +
-							(tupdesc->tdhasoid ? sizeof(Oid) : 0)) +
-				   MAXALIGN(plan_width)) * nrooms);
-		pds_dest = pgstrom_create_data_store_row_flat(tupdesc, length);
+				  STROMALIGN(sizeof(cl_uint) * nrooms));
+		tuplen = MAXALIGN(offsetof(HeapTupleHeaderData,
+								   t_bits[BITMAPLEN(tupdesc->natts)]) +
+						  (tupdesc->tdhasoid ? sizeof(Oid) : 0));
+		tuplen += MAXALIGN(ghjs->gts.css.ss.ps.plan->plan_width);
+		length += tuplen * nrooms;
+
+		pds_dst = pgstrom_create_data_store_row(gcontext, tupdesc,
+												length, false);
 	}
 	else
 		elog(ERROR, "Bug? unexpected result format: %d", result_format);
-	gpuhashjoin->pds_dest = pds_dest;
+
+	gpuhashjoin->pds_dst = pds_dst;
 
 	return gpuhashjoin;
 }
+
+static GpuTask *
+pgstrom_load_gpuhashjoin(GpuTaskState *gts)
+{
+	GpuHashJoinState *ghjs = (GpuHashJoinState *) gts;
+	int			result_format = ghjs->result_format;
+	
+
 
 static pgstrom_gpuhashjoin *
 gpuhashjoin_load_next_chunk(GpuHashJoinState *ghjs, int result_format)
@@ -2499,7 +2519,7 @@ retry:
 	if (ghjs->pfm.enabled)
 		gettimeofday(&tv1, NULL);
 
-	if (ghjs->outer_done || !ghjs->mhtables)
+	if (ghjs->gts.scan_done || !ghjs->mhtables)
 	{
 		PlanState	   *inner_ps = innerPlanState(ghjs);
 		MultiHashNode  *mhnode;
@@ -2854,6 +2874,10 @@ gpuhashjoin_exec_bulk(CustomScanState *node)
 	pgstrom_data_store	   *pds_dest;
 	pgstrom_bulkslot	   *bulk = NULL;
 
+	/* force to return row-format */
+	ghjs->result_format = KDS_FORMAT_ROW;
+
+
 	while (true)
 	{
 		bool		needs_rechecks;
@@ -3176,7 +3200,7 @@ gpuhashjoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
  * Callback routines for MultiHash node
  *
  * ---------------------------------------------------------------- */
-pgstrom_multihash_tables *
+static pgstrom_multihash_tables *
 multihash_get_tables(pgstrom_multihash_tables *mhtables)
 {
 	SpinLockAcquire(&mhtables->lock);
@@ -3187,7 +3211,7 @@ multihash_get_tables(pgstrom_multihash_tables *mhtables)
 	return mhtables;
 }
 
-void
+static void
 multihash_put_tables(pgstrom_multihash_tables *mhtables)
 {
 	bool	do_release = false;

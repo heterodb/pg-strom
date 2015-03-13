@@ -95,6 +95,18 @@ gpuMemHashIndex(GpuMemHead *gm_head, CUdeviceptr chunk_addr)
 	return crc % lengthof(gm_head->hash_slots);
 }
 
+/*
+ * gpuMemMaxAllocSize
+ *
+ * it return the max size of device memory allocation for all the
+ * installed deviced.
+ */
+Size
+gpuMemMaxAllocSize(void)
+{
+	return cuda_max_malloc_size;
+}
+
 CUdeviceptr
 gpuMemAlloc(GpuTask *gtask, size_t bytesize)
 {
@@ -112,6 +124,11 @@ gpuMemAlloc(GpuTask *gtask, size_t bytesize)
 
 	/* round up to 1KB align */
 	bytesize = TYPEALIGN(1024, bytesize);
+
+	/* is it reasonable size to allocate? */
+	if (bytesize > cuda_max_malloc_size)
+		elog(ERROR, "too large device memory request %zu bytes, max %zu",
+			 bytesize, cuda_max_malloc_size);
 
 	/* try to find out preliminary allocated block */
 	Assert(gtask->cuda_index < gcontext->num_context);
@@ -143,7 +160,7 @@ gpuMemAlloc(GpuTask *gtask, size_t bytesize)
 	 * device memory requirement. smaller number of kernel
 	 * driver call makes better performance!
 	 */
-	required = pgstrom_chunk_size() * 11;
+	required = Max(pgstrom_chunk_size() * 11, bytesize);
 	required = TYPEALIGN(1024 * 1024, required);	/* round up to 1MB */
 #ifdef USE_ASSERT_CHECKING
 	{

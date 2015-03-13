@@ -57,6 +57,9 @@
 #ifndef HAVE_INT64_TIMESTAMP
 #error PG-Strom expects timestamp has 64bit integer format
 #endif
+#ifndef PG_USE_INLINE
+#error PG-Strom expects inline function is supported by compiler
+#endif
 
 /*
  * --------------------------------------------------------------------
@@ -341,6 +344,7 @@ HostPinMemContextCreate(MemoryContext parent,
 /*
  * cuda_control.c
  */
+extern Size gpuMemMaxAllocSize(void);
 extern CUdeviceptr gpuMemAlloc(GpuTask *gtask, size_t bytesize);
 extern void gpuMemFree(GpuTask *gtask, CUdeviceptr dptr);
 extern GpuContext *pgstrom_get_gpucontext(void);
@@ -473,12 +477,6 @@ extern void pgstrom_init_gpuscan(void);
 /*
  * gpuhashjoin.c
  */
-struct pgstrom_multihash_tables;/* to avoid include opencl_hashjoin.h here */
-extern struct pgstrom_multihash_tables *
-multihash_get_tables(struct pgstrom_multihash_tables *mhtables);
-extern void
-multihash_put_tables(struct pgstrom_multihash_tables *mhtables);
-
 extern bool pgstrom_plan_is_gpuhashjoin(const Plan *plan);
 extern bool pgstrom_plan_is_multihash(const Plan *plan);
 extern void pgstrom_gpuhashjoin_setup_bulkslot(PlanState *outer_ps,
