@@ -138,7 +138,7 @@ deform_gpusort_info(CustomScan *cscan)
 	gs_info->collations = palloc0(sizeof(Oid) * gs_info->numCols);
 	i = 0;
 	foreach (cell, temp)
-		gs_info->collations[i] = lfirst_oid(cell);
+		gs_info->collations[i++] = lfirst_oid(cell);
 
 	/* nullsFirst */
 	temp = list_nth(privs, pindex++);
@@ -146,7 +146,7 @@ deform_gpusort_info(CustomScan *cscan)
 	gs_info->nullsFirst = palloc0(sizeof(bool) * gs_info->numCols);
 	i = 0;
 	foreach (cell, temp)
-		gs_info->nullsFirst[i] = lfirst_int(cell);
+		gs_info->nullsFirst[i++] = lfirst_int(cell);
 	/* varlena_keys */
 	gs_info->varlena_keys = intVal(list_nth(privs, pindex++));
 
