@@ -2169,7 +2169,7 @@ gpusort_restore_pos(CustomScanState *node)
 {
 	GpuSortState   *gss = (GpuSortState *) node;
 
-	if (!gss->sort_done)
+	if (gss->sort_done)
 	{
 		Assert(gss->markpos_index >= 0);
 		gss->sorted_index = gss->markpos_index;
