@@ -17,7 +17,11 @@
  */
 #include "postgres.h"
 #include "pg_strom.h"
+#ifdef __APPLE__
+#include <OpenCL/opencl.h>
+#else
 #include <CL/cl.h>
+#endif
 #include <dlfcn.h>
 
 /*

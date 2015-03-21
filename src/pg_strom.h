@@ -36,6 +36,12 @@
 #endif
 #include "opencl_common.h"
 
+#ifdef __APPLE__
+#define ulong unsigned long
+/* Mac OS X does not define O_CLOEXEC, MAP_POPULATE or MADV_DONTFORK   */ 
+#define MAP_POPULATE 0 
+#endif
+
 /*
  * --------------------------------------------------------------------
  *
