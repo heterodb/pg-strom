@@ -2,6 +2,7 @@
 --#       Gpu Scan TestCases with CPU Recheck
 --#
 
+set enable_gpusort to off;
 set client_min_messages to notice;
 
 -- NO RECHECK

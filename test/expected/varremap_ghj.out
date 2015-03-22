@@ -2,14 +2,10 @@
 ---#	GpuHashJoin Closed Issue (Remapping of variable) Test Cases
 ---#    #109, ...
 ---#
--- any join plan to off
-set enable_hashjoin to off;
-set enable_mergejoin to off;
-set enable_nestloop to off;
--- any scan plan to off
-set enable_indexscan to off;
-set enable_bitmapscan to off;
-set enable_seqscan to off;
+set gpu_setup_cost=0;
+set enable_gpupreagg to off;
+set enable_gpusort to off;
+set random_page_cost=1000000;   --# force off index_scan.                                                                                                                                          
 set client_min_messages to warning;
 -- #109
 drop table if exists i109;

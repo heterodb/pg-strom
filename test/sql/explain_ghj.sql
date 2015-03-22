@@ -2,18 +2,13 @@
 --#       Gpu HashJoin Explain TestCases. 
 --#
 
-set enable_seqscan to off;
-set enable_bitmapscan to off;
-set enable_indexscan to off;
-set random_page_cost=1000000;   --# force off index_scan.
-set enable_gpuhashjoin to on;
+set gpu_setup_cost=0;
 set enable_gpupreagg to off;
-set enable_mergejoin to off;
-set enable_nestloop to off;
+set enable_gpusort to off;
+set random_page_cost=1000000;   --# force off index_scan.
 set client_min_messages to warning;
 
 set pg_strom.enabled=off;
-set enable_hashjoin to on;
 ---
 --- BULKLOAD ON
 ---
@@ -150,18 +145,7 @@ explain (verbose, costs off, timing off) select a.id,case when a.bigsrl_x = b.bi
  on a.bigsrl_x=b.bigsrl_x and a.id=b.id order by a.id;
 
 
-set enable_seqscan to off;
-set enable_bitmapscan to off;
-set enable_indexscan to off;
-set random_page_cost=1000000;   --# force off index_scan.
-set enable_gpuhashjoin to on;
-set enable_gpupreagg to off;
-set enable_mergejoin to off;
-set enable_nestloop to off;
-set client_min_messages to warning;
-
 set pg_strom.enabled=on;
-set enable_hashjoin to off;
 ---
 --- BULKLOAD ON
 ---
