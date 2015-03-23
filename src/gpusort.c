@@ -1226,7 +1226,7 @@ form_pgstrom_cpusort(GpuSortState *gss,
 	pfc.dsm_length = dsm_length;
 	pfc.kresults_offset = kresults_offset;
 
-	dsm_seg = dsm_create(dsm_length);
+	dsm_seg = dsm_create(dsm_length, 0);
 	pfc_buf = dsm_segment_address(dsm_seg);
 	memcpy(pfc_buf, &pfc, sizeof(pgstrom_flat_cpusort));
 	memcpy(pfc_buf->data, buf.data, buf.len);
@@ -1680,7 +1680,7 @@ gpusort_merge_gpu_chunks(GpuSortState *gss, pgstrom_gpusort *gpusort)
 									 results[2 * kresults_gpu->nitems]));
 	dsm_length = MAXALIGN(offsetof(pgstrom_flat_cpusort,
 								   data[kresults_len]));
-	cpusort->oitems_dsm = dsm_create(dsm_length);
+	cpusort->oitems_dsm = dsm_create(dsm_length, 0);
 	cpusort->litems_dsm = NULL;
 	cpusort->ritems_dsm = NULL;
 	cpusort->h.bgw_handle = NULL;
