@@ -385,9 +385,11 @@ gpusort_projection_addcase(StringInfo body,
 						   bool type_byval,
 						   bool is_sortkey)
 {
-	if (type_len > 0)
+	if (type_byval)
 	{
 		const char *type_cast;
+
+		Assert(type_len > 0);
 
 		if (type_len == sizeof(cl_uchar))
 			type_cast = "cl_uchar";
@@ -403,7 +405,7 @@ gpusort_projection_addcase(StringInfo body,
 		appendStringInfo(
 			body,
 			"\n"
-			"  /* sortkey %d projection */\n"
+			"  /* %s %d projection */\n"
 			"  datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
 			"  if (!datum)\n"
 			"    ts_isnull[%d] = true;\n"
@@ -412,6 +414,7 @@ gpusort_projection_addcase(StringInfo body,
 			"    ts_isnull[%d] = false;\n"
 			"    ts_values[%d] = *((__global %s *) datum);\n"
 			"  }\n",
+			is_sortkey ? "sortkey" : "attribute",
 			resno,
 			resno - 1,
 			resno - 1,
@@ -448,7 +451,8 @@ gpusort_projection_addcase(StringInfo body,
 	else if (is_sortkey)
 	{
 		/*
-		 * ts_values[] for sortkey has to be offset from ktoast
+		 * variables with !type_byval but referenced as sortkey has to
+		 * be fixed up as an offset from the ktoast.
 		 */
 		appendStringInfo(
 			body,
@@ -472,12 +476,13 @@ gpusort_projection_addcase(StringInfo body,
 	else
 	{
 		/*
-		 * Elsewhere, varlena datum in host accessible pointer
+		 * Elsewhere, variables are host accessible pointer; either of
+		 * varlena datum or fixed-length variables with !type_byval.
 		 */
 		appendStringInfo(
 			body,
 			"\n"
-			"  /* sortkey %d projection */\n"
+			"  /* attribute %d projection */\n"
 			"  datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
 			"  if (!datum)\n"
 			"    ts_isnull[%d] = true;\n"
@@ -529,7 +534,7 @@ gpusort_fixupvar_addcase(StringInfo body,
 			resno - 1,
 			resno - 1);
 	}
-	else if (type_len < 0)
+	else if (!type_byval)
 	{
 		appendStringInfo(
 			body,
