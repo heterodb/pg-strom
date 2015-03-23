@@ -138,7 +138,7 @@ deform_gpusort_info(CustomScan *cscan)
 	gs_info->collations = palloc0(sizeof(Oid) * gs_info->numCols);
 	i = 0;
 	foreach (cell, temp)
-		gs_info->collations[i] = lfirst_oid(cell);
+		gs_info->collations[i++] = lfirst_oid(cell);
 
 	/* nullsFirst */
 	temp = list_nth(privs, pindex++);
@@ -146,7 +146,7 @@ deform_gpusort_info(CustomScan *cscan)
 	gs_info->nullsFirst = palloc0(sizeof(bool) * gs_info->numCols);
 	i = 0;
 	foreach (cell, temp)
-		gs_info->nullsFirst[i] = lfirst_int(cell);
+		gs_info->nullsFirst[i++] = lfirst_int(cell);
 	/* varlena_keys */
 	gs_info->varlena_keys = intVal(list_nth(privs, pindex++));
 
@@ -1226,7 +1226,7 @@ form_pgstrom_cpusort(GpuSortState *gss,
 	pfc.dsm_length = dsm_length;
 	pfc.kresults_offset = kresults_offset;
 
-	dsm_seg = dsm_create(dsm_length);
+	dsm_seg = dsm_create(dsm_length, 0);
 	pfc_buf = dsm_segment_address(dsm_seg);
 	memcpy(pfc_buf, &pfc, sizeof(pgstrom_flat_cpusort));
 	memcpy(pfc_buf->data, buf.data, buf.len);
@@ -1680,7 +1680,7 @@ gpusort_merge_gpu_chunks(GpuSortState *gss, pgstrom_gpusort *gpusort)
 									 results[2 * kresults_gpu->nitems]));
 	dsm_length = MAXALIGN(offsetof(pgstrom_flat_cpusort,
 								   data[kresults_len]));
-	cpusort->oitems_dsm = dsm_create(dsm_length);
+	cpusort->oitems_dsm = dsm_create(dsm_length, 0);
 	cpusort->litems_dsm = NULL;
 	cpusort->ritems_dsm = NULL;
 	cpusort->h.bgw_handle = NULL;
@@ -2169,7 +2169,7 @@ gpusort_restore_pos(CustomScanState *node)
 {
 	GpuSortState   *gss = (GpuSortState *) node;
 
-	if (!gss->sort_done)
+	if (gss->sort_done)
 	{
 		Assert(gss->markpos_index >= 0);
 		gss->sorted_index = gss->markpos_index;

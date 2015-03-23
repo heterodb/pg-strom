@@ -3,6 +3,7 @@
 --#
 
 set pg_strom.debug_force_gpupreagg to on;
+set enable_gpusort to off;
 set client_min_messages to notice;
 set extra_float_digits to -3;
 
