@@ -385,7 +385,7 @@ gpusort_projection_addcase(StringInfo body,
 						   bool type_byval,
 						   bool is_sortkey)
 {
-	if (type_len > 0)
+	if (type_len > 0 && is_sortkey)
 	{
 		const char *type_cast;
 
