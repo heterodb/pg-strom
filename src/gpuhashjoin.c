@@ -270,7 +270,7 @@ typedef struct
 {
 	Size			length;		/* max available length of this mhash */
 	Size			usage;		/* current usage of this mhash */
-	double			ntuples;	/* number of tuples in this mhash */
+	cl_ulong		ntuples;	/* number of tuples in this mhash */
 	bool			is_divided;	/* true, if not whole of the inner relation */
 	slock_t			lock;		/* protection of the fields below */
 	cl_int			refcnt;		/* reference counter of this hash table */
@@ -308,17 +308,6 @@ typedef struct
 	pgstrom_data_store *pds_dst;	/* data store of result buffer */
 	kern_hashjoin	kern;	/* kern_hashjoin of this request */
 } pgstrom_gpuhashjoin;
-
-/*
- * MultiHashNode - a data structure to be returned from MultiHash node;
- * that contains a pgstrom_multihash_tables object on shared memory
- * region and related tuplestore/tupleslot for each inner relations.
- */
-typedef struct {
-	Node		type;	/* T_Invalid */
-	pgstrom_multihash_tables *mhtables;
-	int				nrels;
-} MultiHashNode;
 
 typedef struct
 {
@@ -359,7 +348,8 @@ typedef struct
 } GpuHashJoinState;
 
 typedef struct {
-	CustomScanState css;
+	CustomScanState	css;
+	GpuContext	   *gcontext;
 	int				depth;
 	cl_uint			nslots;
 	cl_int			nbatches_plan;
@@ -386,18 +376,17 @@ static GpuTask *pgstrom_load_gpuhashjoin(GpuTaskState *gts);
 
 static pgstrom_multihash_tables *
 multihash_get_tables(pgstrom_multihash_tables *mhtables);
-extern void multihash_put_tables(pgstrom_multihash_tables *mhtables);
-
-
+static void
+multihash_put_tables(pgstrom_multihash_tables *mhtables);
 
 /*
- * BulkExecMultiHashNode
+ * BulkExecMultiHashTables
  *
  * Unlike BulkExecProcNode, it assumes the plannode returns MultiHashNode
  * object, without any sanity checks.
  */
-static MultiHashNode *
-BulkExecMultiHashNode(PlanState *plannode)
+static pgstrom_multihash_tables *
+BulkExecMultiHashTables(PlanState *plannode)
 {
 	CHECK_FOR_INTERRUPTS();
 
@@ -2416,7 +2405,7 @@ pgstrom_release_gpuhashjoin(GpuTask *gtask)
 	pfree(gtask);
 }
 
-static pgstrom_gpuhashjoin *
+static GpuTask *
 pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs,
 						   pgstrom_data_store *pds_src,
 						   int result_format)
@@ -2489,51 +2478,40 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs,
 
 	gpuhashjoin->pds_dst = pds_dst;
 
-	return gpuhashjoin;
+	return &gpuhashjoin->task;
 }
 
 static GpuTask *
 pgstrom_load_gpuhashjoin(GpuTaskState *gts)
 {
-	GpuHashJoinState *ghjs = (GpuHashJoinState *) gts;
-	int			result_format = ghjs->result_format;
-	
-
-
-static pgstrom_gpuhashjoin *
-gpuhashjoin_load_next_chunk(GpuHashJoinState *ghjs, int result_format)
-{
+	GpuHashJoinState   *ghjs = (GpuHashJoinState *) gts;
 	PlanState		   *subnode = outerPlanState(ghjs);
 	TupleDesc			tupdesc = ExecGetResultType(subnode);
-	pgstrom_bulkslot	bulkdata;
-	pgstrom_bulkslot   *bulk = NULL;
+	pgstrom_data_store *pds = NULL;
+	int					result_format = ghjs->result_format;
 	struct timeval		tv1, tv2, tv3;
 
 	/*
-	 * Logic to fetch inner multihash-table looks like nested-loop.
-	 * If all the underlying inner scan already scaned its outer relation,
-	 * current depth makes advance its scan pointer with reset of underlying
-	 * scan pointer, or returns NULL if it is already reached end of scan.
-	 */
+     * Logic to fetch inner multihash-table looks like nested-loop.
+     * If all the underlying inner scan already scaned its outer relation,
+     * current depth makes advance its scan pointer with reset of underlying
+     * scan pointer, or returns NULL if it is already reached end of scan.
+     */
 retry:
-	if (ghjs->pfm.enabled)
-		gettimeofday(&tv1, NULL);
+	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
 
 	if (ghjs->gts.scan_done || !ghjs->mhtables)
 	{
-		PlanState	   *inner_ps = innerPlanState(ghjs);
-		MultiHashNode  *mhnode;
+		PlanState	   *mhstate = innerPlanState(ghjs);
+		pgstrom_multihash_tables *mhtables;
 
 		/* load an inner hash-table */
-		mhnode = BulkExecMultiHashNode(inner_ps);
-		if (!mhnode)
+		mhtables = BulkExecMultiHashTables(mhstate);
+		if (!mhtables)
 		{
-			if (ghjs->pfm.enabled)
-			{
-				gettimeofday(&tv2, NULL);
-				ghjs->pfm.time_inner_load += timeval_diff(&tv1, &tv2);
-			}
-			return NULL;	/* end of inner multi-hashtable */
+			PERFMON_END(&gts->pfm_accum,
+						time_inner_load, &tv1, &tv2);
+			return NULL;	/* end of inner multi-hashtable  */
 		}
 
 		/*
@@ -2547,34 +2525,25 @@ retry:
 		 */
 		if (ghjs->mhtables)
 		{
-			pgstrom_multihash_tables *mhtables = ghjs->mhtables;
-
-			Assert(ghjs->outer_done);	/* should not be the first call */
-			pgstrom_untrack_object(&mhtables->sobj);
-			multihash_put_tables(mhtables);
+			Assert(ghjs->gts.scan_done);
+			multihash_put_tables(ghjs->mhtables);
 			ghjs->mhtables = NULL;
 		}
-		ghjs->mhtables = mhnode->mhtables;
-		pfree(mhnode);
+		ghjs->mhtables = mhtables;
 
 		/*
 		 * Rewind the outer scan pointer, if it is not first time.
 		 */
-		if (ghjs->outer_done)
+		if (ghjs->gts.scan_done)
 		{
 			ExecReScan(outerPlanState(ghjs));
-			ghjs->outer_done = false;
+			ghjs->gts.scan_done = false;
 		}
 	}
-
-	if (ghjs->pfm.enabled)
-		gettimeofday(&tv2, NULL);
+	PERFMON_BEGIN(&gts->pfm_accum, &tv2);
 
 	if (!ghjs->outer_bulkload)
 	{
-		/* Scan the outer relation using row-by-row mode */
-		pgstrom_data_store *pds = NULL;
-
 		while (true)
 		{
 			TupleTableSlot *slot;
@@ -2589,17 +2558,17 @@ retry:
 				slot = ExecProcNode(subnode);
 				if (TupIsNull(slot))
 				{
-					ghjs->outer_done = true;
+					ghjs->gts.scan_done = true;
 					break;
 				}
 			}
 			/* create a new data-store if not constructed yet */
 			if (!pds)
 			{
-				pds = pgstrom_create_data_store_row(tupdesc,
+				pds = pgstrom_create_data_store_row(ghjs->gts.gcontext,
+													tupdesc,
 													pgstrom_chunk_size(),
-													ghjs->ntups_per_page);
-				pgstrom_track_object(&pds->sobj, 0);
+													false);
 			}
 			/* insert the tuple on the data-store */
 			if (!pgstrom_data_store_insert_tuple(pds, slot))
@@ -2608,37 +2577,15 @@ retry:
 				break;
 			}
 		}
-
-		if (pds)
-		{
-			memset(&bulkdata, 0, sizeof(pgstrom_bulkslot));
-			bulkdata.pds = pds;
-			bulkdata.nvalids = -1;	/* all valid */
-			bulk = &bulkdata;
-		}
 	}
 	else
 	{
-		/*
-		 * FIXME: Right now, bulk-loading is supported only when target-list
-		 * of the underlyin relation has compatible layout.
-		 * It reduces the cases when we can apply bulk loding, however, it
-		 * can be revised later.
-		 * An idea is to fix-up target list on planner stage to fit bulk-
-		 * loading.
-		 */
-
-		/* load a bunch of records at once */
-		bulk = (pgstrom_bulkslot *) BulkExecProcNode(subnode);
-		if (!bulk)
-			ghjs->outer_done = true;
+		pds = BulkExecProcNode(subnode);
+		if (!pds)
+			ghjs->gts.scan_done = true;
 	}
-	if (ghjs->pfm.enabled)
-	{
-		gettimeofday(&tv3, NULL);
-		ghjs->pfm.time_inner_load += timeval_diff(&tv1, &tv2);
-		ghjs->pfm.time_outer_load += timeval_diff(&tv2, &tv3);
-	}
+	PERFMON_END(&gts->pfm_accum, time_inner_load, &tv1, &tv2);
+	PERFMON_END(&gts->pfm_accum, time_outer_load, &tv2, &tv3);
 
 	/*
 	 * We also need to check existence of next inner hash-chunks, even if
@@ -2646,223 +2593,97 @@ retry:
 	 * we have to rewind the outer relation scan, then makes relations
 	 * join with the next inner hash chunks.
 	 */
-	if (!bulk)
+	if (!pds)
 		goto retry;
 
-	/*
-	 * Older krowmap is no longer supported.
-	 */
-	if (bulk->nvalids >= 0)
-		elog(ERROR, "Bulk-load with rowmap no longer supported");
-
-	return pgstrom_create_gpuhashjoin(ghjs, bulk, result_format);
+	return pgstrom_create_gpuhashjoin(ghjs, pds, result_format);
 }
 
 static bool
 gpuhashjoin_next_tuple(GpuHashJoinState *ghjs)
 {
-	TupleTableSlot		   *ps_slot = ghjs->css.ss.ss_ScanTupleSlot;
-	pgstrom_gpuhashjoin	   *gpuhashjoin = ghjs->curr_ghjoin;
-	pgstrom_data_store	   *pds_dest = gpuhashjoin->pds_dest;
-	kern_data_store		   *kds_dest = pds_dest->kds;
+	TupleTableSlot		   *ps_slot = ghjs->gts.css.ss.ss_ScanTupleSlot;
+	pgstrom_gpuhashjoin	   *gpuhashjoin =
+		(pgstrom_gpuhashjoin *)ghjs->gts.curr_task;
+	pgstrom_data_store	   *pds_dst = gpuhashjoin->pds_dst;
+	kern_data_store		   *kds_dst = pds_dst->kds;
 	struct timeval			tv1, tv2;
 
-	/*
-	 * TODO: All fallback code here
-	 */
-	if (ghjs->pfm.enabled)
-		gettimeofday(&tv1, NULL);
+	PERFMON_BEGIN(&ghjs->gts.pfm_accum, &tv1);
 
-	while (ghjs->curr_index < kds_dest->nitems)
+	while (ghjs->curr_index < kds_dst->nitems)
 	{
-		int				index = ghjs->curr_index++;
+		int			index = ghjs->curr_index++;
 
 		/* fetch a result tuple */
 		pgstrom_fetch_data_store(ps_slot,
-								 pds_dest,
+								 pds_dst,
 								 index,
 								 &ghjs->curr_tuple);
-		if (ghjs->css.ss.ps.qual != NIL)
+		if (ghjs->gts.css.ss.ps.qual != NIL)
 		{
-			ExprContext	   *econtext = ghjs->css.ss.ps.ps_ExprContext;
+			ExprContext	   *econtext = ghjs->gts.css.ss.ps.ps_ExprContext;
 
 			econtext->ecxt_scantuple = ps_slot;
-			if (!ExecQual(ghjs->css.ss.ps.qual, econtext, false))
+			if (!ExecQual(ghjs->gts.css.ss.ps.qual, econtext, false))
 				continue;	/* try to fetch next tuple */
 		}
-
-		if (ghjs->pfm.enabled)
-		{
-			gettimeofday(&tv2, NULL);
-			ghjs->pfm.time_materialize += timeval_diff(&tv1, &tv2);
-		}
+		PERFMON_END(&ghjs->gts.pfm_accum, time_materialize, &tv1, &tv2);
 		return true;
 	}
-
-	if (ghjs->pfm.enabled)
-	{
-		gettimeofday(&tv2, NULL);
-		ghjs->pfm.time_materialize += timeval_diff(&tv1, &tv2);
-	}
+	PERFMON_END(&ghjs->gts.pfm_accum, time_materialize, &tv1, &tv2);
 	ExecClearTuple(ps_slot);
 	return false;
 }
 
-static pgstrom_gpuhashjoin *
-pgstrom_fetch_gpuhashjoin(GpuHashJoinState *ghjs,
-						  bool *needs_recheck,
-						  int result_format)
+static TupleTableSlot *
+gpuhashjoin_fetch_tuple(CustomScanState *node)
 {
-	pgstrom_message	   *msg;
-	pgstrom_gpuhashjoin *ghjoin;
-	dlist_node			*dnode;
+	GpuHashJoinState   *ghjs = (GpuHashJoinState *) node;
+	TupleTableSlot	   *slot = ghjs->gts.css.ss.ss_ScanTupleSlot;
 
-	/*
-	 * Keep number of asynchronous hashjoin request a particular level,
-	 * unless it does not exceed pgstrom_max_async_chunks and any new
-	 * response is not replied during the loading.
-	 */
-	while (ghjs->num_running <= pgstrom_max_async_chunks)
+	ExecClearTuple(slot);
+
+	while (!ghjs->gts.curr_task || !gpuhashjoin_next_tuple(ghjs))
 	{
 		pgstrom_gpuhashjoin *ghjoin
-			= gpuhashjoin_load_next_chunk(ghjs, result_format);
+			= (pgstrom_gpuhashjoin *) ghjs->gts.curr_task;
+
+		/* release the current gpuhashjoin chunk if any */
+		if (ghjoin)
+		{
+			SpinLockAcquire(&ghjs->gts.lock);
+			dlist_delete(&ghjoin->task.tracker);
+			ghjs->gts.curr_task = NULL;
+			ghjs->gts.curr_index = 0;
+			SpinLockRelease(&ghjs->gts.lock);
+			pgstrom_release_gpuhashjoin(&ghjoin->task);
+		}
+		/* fetch next chunk to be scanned */
+		ghjoin = (pgstrom_gpuhashjoin *) pgstrom_fetch_gputask(&ghjs->gts);
 		if (!ghjoin)
-			break;	/* outer scan reached to end of the relation */
-
-		if (!pgstrom_enqueue_message(&ghjoin->msg))
-		{
-			pgstrom_put_message(&ghjoin->msg);
-			elog(ERROR, "failed to enqueue pgstrom_gpuhashjoin message");
-		}
-		ghjs->num_running++;
-
-		msg = pgstrom_try_dequeue_message(ghjs->mqueue);
-		if (msg)
-		{
-			ghjs->num_running--;
-			dlist_push_tail(&ghjs->ready_pscans, &msg->chain);
 			break;
-		}
+		SpinLockAcquire(&ghjs->gts.lock);
+		ghjs->gts.curr_task = &ghjoin->task;
+		ghjs->gts.curr_index = 0;
+		SpinLockRelease(&ghjs->gts.lock);
 	}
+	return slot;
+}
 
-	/*
-	 * wait for server's response if no available chunks were replied
-	 */
-	if (dlist_is_empty(&ghjs->ready_pscans))
-	{
-		if (ghjs->num_running == 0)
-			return NULL;
-		msg = pgstrom_dequeue_message(ghjs->mqueue);
-		if (!msg)
-			elog(ERROR, "message queue wait timeout");
-		ghjs->num_running--;
-		dlist_push_tail(&ghjs->ready_pscans, &msg->chain);
-	}
-
-	/*
-	 * picks up next available chunks, if any
-	 */
-	Assert(!dlist_is_empty(&ghjs->ready_pscans));
-	dnode = dlist_pop_head_node(&ghjs->ready_pscans);
-	ghjoin = dlist_container(pgstrom_gpuhashjoin, msg.chain, dnode);
-
-	/*
-	 * Raise an error, if significan error was reported
-	 */
-	if (ghjoin->msg.errcode != StromError_Success)
-	{
-#if 0
-		/* FIXME: Go to fallback case if CPUReCheck or OutOfSharedMemory */
-		if (ghjoin->msg.errcode == StromError_CpuReCheck ||
-			ghjoin->msg.errcode == StromError_OutOfSharedMemory)
-			*needs_recheck = true;
-		else
-#endif
-		if (ghjoin->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
-		{
-			const char *buildlog
-				= pgstrom_get_devprog_errmsg(ghjoin->dprog_key);
-
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
-							pgstrom_strerror(ghjoin->msg.errcode),
-							ghjs->kernel_source),
-					 errdetail("%s", buildlog)));
-		}
-		else
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("PG-Strom: OpenCL execution error (%s)",
-							pgstrom_strerror(ghjoin->msg.errcode))));
-		}
-	}
-	else
-		*needs_recheck = false;
-	return ghjoin;
+static bool
+gpuhashjoin_recheck(CustomScanState *node, TupleTableSlot *slot)
+{
+	/* There are no access-method-specific conditions to recheck. */
+	return true;
 }
 
 static TupleTableSlot *
 gpuhashjoin_exec(CustomScanState *node)
 {
-	GpuHashJoinState   *ghjs = (GpuHashJoinState *) node;
-	TupleTableSlot	   *ps_slot = ghjs->css.ss.ss_ScanTupleSlot;
-	ProjectionInfo	   *ps_proj = ghjs->css.ss.ps.ps_ProjInfo;
-	pgstrom_gpuhashjoin *ghjoin;
-
-	while (!ghjs->curr_ghjoin || !gpuhashjoin_next_tuple(ghjs))
-	{
-		pgstrom_message	   *msg;
-		int					result_format;
-
-		/*
-		 * Release previous hashjoin chunk that
-		 * should be already fetched.
-		 */
-		if (ghjs->curr_ghjoin)
-		{
-			msg = &ghjs->curr_ghjoin->msg;
-			if (msg->pfm.enabled)
-				pgstrom_perfmon_add(&ghjs->pfm, &msg->pfm);
-			Assert(msg->refcnt == 1);
-			pgstrom_untrack_object(&msg->sobj);
-			pgstrom_put_message(msg);
-			ghjs->curr_ghjoin = NULL;
-			ghjs->curr_index = 0;
-		}
-		/*
-		 * Fetch a next hashjoin chunk already processed
-		 */
-		if ((ghjs->css.flags & CUSTOMPATH_PREFERE_ROW_FORMAT) == 0)
-			result_format = KDS_FORMAT_TUPSLOT;
-		else
-			result_format = KDS_FORMAT_ROW_FLAT;
-
-		ghjoin = pgstrom_fetch_gpuhashjoin(ghjs, &ghjs->curr_recheck,
-										   result_format);
-		if (!ghjoin)
-		{
-			ExecClearTuple(ps_slot);
-			break;
-		}
-		ghjs->curr_ghjoin = ghjoin;
-		ghjs->curr_index = 0;
-	}
-	/* can valid tuple be fetched? */
-	if (TupIsNull(ps_slot))
-		return ps_slot;
-
-	/* needs to apply projection? */
-	if (ps_proj)
-	{
-		ExprContext	   *econtext = ghjs->css.ss.ps.ps_ExprContext;
-		ExprDoneCond	is_done;
-
-		econtext->ecxt_scantuple = ps_slot;
-		return ExecProject(ps_proj, &is_done);
-	}
-	return ps_slot;
+	return ExecScan(&node->ss,
+					(ExecScanAccessMtd) gpuhashjoin_fetch_tuple,
+					(ExecScanRecheckMtd) gpuhashjoin_recheck);
 }
 
 static void *
@@ -2871,179 +2692,61 @@ gpuhashjoin_exec_bulk(CustomScanState *node)
 	GpuHashJoinState	   *ghjs = (GpuHashJoinState *) node;
 	pgstrom_gpuhashjoin	   *ghjoin;
 	pgstrom_data_store	   *pds;
-	pgstrom_data_store	   *pds_dest;
-	pgstrom_bulkslot	   *bulk = NULL;
 
 	/* force to return row-format */
 	ghjs->result_format = KDS_FORMAT_ROW;
 
+	/* fetch next chunk to be processed */
+	ghjoin = (pgstrom_gpuhashjoin *) pgstrom_fetch_gputask(&ghjs->gts);
+	if (!ghjoin)
+		return NULL;
 
-	while (true)
-	{
-		bool		needs_rechecks;
-		cl_uint		nitems;
+	/* extrace pgstrom_data_store */
+	pds = ghjoin->pds_dst;
+	ghjoin->pds_dst = NULL;
+	pgstrom_release_gpuhashjoin(&ghjoin->task);
 
-		ghjoin = pgstrom_fetch_gpuhashjoin(ghjs, &needs_rechecks,
-										   KDS_FORMAT_ROW_FLAT);
-		if (!ghjoin)
-			break;
-		if (needs_rechecks)
-		{
-			/* fill up kds_dest by CPU */
-			elog(ERROR, "CPU Recheck not implemented yet");
-		}
-
-		/* source kds performs as ktoast of pds_dest */
-		pds = ghjoin->pds;
-		pds_dest = ghjoin->pds_dest;
-		Assert(pds->kds->format == KDS_FORMAT_ROW ||
-			   pds->kds->format == KDS_FORMAT_ROW_FLAT);
-		Assert(pds_dest->kds->format == KDS_FORMAT_ROW_FLAT);
-
-		/* update perfmon info */
-		if (ghjoin->msg.pfm.enabled)
-			pgstrom_perfmon_add(&ghjs->pfm, &ghjoin->msg.pfm);
-
-		/*
-		 * Make a bulk-slot according to the result
-		 */
-		nitems = pds_dest->kds->nitems;
-		bulk = palloc0(sizeof(pgstrom_bulkslot));
-		bulk->pds = pgstrom_get_data_store(pds_dest);
-		bulk->nvalids = -1;
-		pgstrom_track_object(&pds_dest->sobj, 0);
-
-		/* No longer gpuhashjoin is referenced any more. Its pds_dest
-		 * shall not be actually released because its refcnt is already
-		 * incremented above
-		 */
-		pgstrom_untrack_object(&ghjoin->msg.sobj);
-		pgstrom_put_message(&ghjoin->msg);
-
-		/* We never have host-only qualifiers */
-		Assert(!node->ss.ps.qual);
-
-		if (nitems > 0)
-			break;
-
-		/* If this chunk has no valid items, it does not make sense to
-		 * return upper level this chunk. So, release this data-store
-		 * and tries to fetch next one.
-		 */
-		pgstrom_untrack_object(&bulk->pds->sobj);
-		pgstrom_put_data_store(bulk->pds);
-		pfree(bulk);
-		bulk = NULL;
-	}
-	return bulk;
+	return pds;
 }
 
 static void
 gpuhashjoin_end(CustomScanState *node)
 {
 	GpuHashJoinState	   *ghjs = (GpuHashJoinState *) node;
-	pgstrom_gpuhashjoin	   *ghjoin;
-
-	/* release asynchronous jobs */
-	if (ghjs->curr_ghjoin)
-	{
-		ghjoin = ghjs->curr_ghjoin;
-		pgstrom_untrack_object(&ghjoin->msg.sobj);
-        pgstrom_put_message(&ghjoin->msg);
-	}
-
-	while (ghjs->num_running > 0)
-	{
-		ghjoin = (pgstrom_gpuhashjoin *)pgstrom_dequeue_message(ghjs->mqueue);
-		if (!ghjoin)
-			elog(ERROR, "message queue wait timeout");
-		pgstrom_untrack_object(&ghjoin->msg.sobj);
-        pgstrom_put_message(&ghjoin->msg);
-		ghjs->num_running--;
-	}
 
 	/*
-	 * clean out multiple hash tables on the portion of shared memory
-	 * regison (because private memory stuff shall be released in-auto.
-	 */
-	if (ghjs->mhtables)
-	{
-		pgstrom_multihash_tables   *mhtables = ghjs->mhtables;
-		pgstrom_untrack_object(&mhtables->sobj);
-		multihash_put_tables(mhtables);
-	}
-
-	/*
-	 * clean out kernel source and message queue
-	 */
-	Assert(ghjs->dprog_key);
-	pgstrom_untrack_object((StromObject *)ghjs->dprog_key);
-	pgstrom_put_devprog_key(ghjs->dprog_key);
-
-	Assert(ghjs->mqueue);
-	pgstrom_untrack_object(&ghjs->mqueue->sobj);
-	pgstrom_close_queue(ghjs->mqueue);
-
-	/*
-	 * clean up subtrees
+	 * Clean up subtrees
 	 */
 	ExecEndNode(outerPlanState(node));
 	ExecEndNode(innerPlanState(node));
+
+	pgstrom_release_gputaskstate(&ghjs->gts);
 }
 
 static void
 gpuhashjoin_rescan(CustomScanState *node)
 {
-	GpuHashJoinState	   *ghjs = (GpuHashJoinState *) node;
-	pgstrom_gpuhashjoin	   *ghjoin;
+	GpuHashJoinState		 *ghjs = (GpuHashJoinState *) node;
 	pgstrom_multihash_tables *mhtables = ghjs->mhtables;
 
-	/* release asynchronous jobs, if any */
-	if (ghjs->curr_ghjoin)
-	{
-		ghjoin = ghjs->curr_ghjoin;
-		pgstrom_untrack_object(&ghjoin->msg.sobj);
-		pgstrom_put_message(&ghjoin->msg);
-		ghjs->curr_ghjoin = NULL;
-		ghjs->curr_index = 0;
-		ghjs->curr_recheck = false;
-	}
+	/* clean-up and release any concurrent tasks */
+	pgstrom_cleanup_gputaskstate(&ghjs->gts);
 
-	while (ghjs->num_running > 0)
-	{
-		ghjoin = (pgstrom_gpuhashjoin *)pgstrom_dequeue_message(ghjs->mqueue);
-		if (!ghjoin)
-			elog(ERROR, "message queue wait timeout");
-		pgstrom_untrack_object(&ghjoin->msg.sobj);
-		pgstrom_put_message(&ghjoin->msg);
-		ghjs->num_running--;
-	}
+	/* rewind the outer relation, also */
+	ghjs->gts.scan_done = false;
+	ghjs->outer_overflow = NULL;
+	ExecReScan(outerPlanState(ghjs));
 
 	/*
-	 * TODO: we may reuse inner hash table, if flat hash table (that is not
-	 * divided to multiple portions) and no parameter changes.
-	 * However, gpuhashjoin_load_next_chunk() releases the hash-table when
-	 * our scan reached end of the scan... needs to fix up.
+	 * we reuse the inner hash table if it is flat (that means mhtables
+	 * is not divided into multiple portions) and no parameter changed.
 	 */
-	if (!mhtables || mhtables->is_divided ||
+	if (mhtables->is_divided ||
 		innerPlanState(ghjs)->chgParam != NULL)
 	{
-		ExecReScan(innerPlanState(ghjs));
-
-		/* also, rewind the outer relation */
-		ghjs->outer_done = false;
-		ghjs->outer_overflow = NULL;
-		ExecReScan(outerPlanState(ghjs));
-
-		/* release the previous one */
-		if (mhtables)
-		{
-			pgstrom_untrack_object(&mhtables->sobj);
-			multihash_put_tables(mhtables);
-			ghjs->mhtables = NULL;
-		}
+		pfree(mhtables);
+		ghjs->mhtables = NULL;
 	}
-	/* elsewhere, we can reuse pre-built inner multihash-tables */
 }
 
 /*
@@ -3097,7 +2800,7 @@ static Node *
 gpuhashjoin_remap_raw_expression(GpuHashJoinState *ghjs, Node *node)
 {
 	gpuhashjoin_remap_raw_expression_context context;
-	CustomScan *cscan = (CustomScan *) ghjs->css.ss.ps.plan;
+	CustomScan *cscan = (CustomScan *) ghjs->gts.css.ss.ps.plan;
 
 	context.ps_tlist = cscan->custom_ps_tlist;
 	context.ps_depth = ghjs->ps_src_depth;
@@ -3188,11 +2891,11 @@ gpuhashjoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	}
 	ExplainPropertyText("Bulkload", ghjs->outer_bulkload ? "On" : "Off", es);
 
-	show_custom_flags(&ghjs->css, es);
-	show_device_kernel(ghjs->dprog_key, es);
+	pgstrom_explain_custom_flags(&ghjs->gts.css, es);
+	pgstrom_explain_kernel_source(&ghjs->gts, es);
 
 	if (es->analyze && ghjs->pfm.enabled)
-		pgstrom_perfmon_explain(&ghjs->pfm, es);
+		pgstrom_explain_perfmon(&ghjs->gts.pfm_accum, es);
 }
 
 /* ----------------------------------------------------------------
@@ -3220,12 +2923,12 @@ multihash_put_tables(pgstrom_multihash_tables *mhtables)
 	Assert(mhtables->refcnt > 0);
 	if (--mhtables->refcnt == 0)
 	{
-		Assert(mhtables->n_kernel == 0 && mhtables->m_hash == NULL);
+		Assert(mhtables->n_kernel == 0 && !mhtables->m_hash);
 		do_release = true;
 	}
 	SpinLockRelease(&mhtables->lock);
 	if (do_release)
-		pgstrom_shmem_free(mhtables);
+		pfree(mhtables);
 }
 
 static Node *
@@ -3236,6 +2939,7 @@ multihash_create_scan_state(CustomScan *cscan)
 	NodeSetTag(mhs, T_CustomScanState);
 	mhs->css.flags = cscan->flags;
 	mhs->css.methods = &multihash_exec_methods.c;
+	mhs->gcontext = pgstrom_get_gpucontext();
 
 	return (Node *) mhs;
 }
@@ -3304,63 +3008,61 @@ multihash_exec(CustomScanState *node)
 	return NULL;
 }
 
-static bool
+static pgstrom_multihash_tables *
 expand_multihash_tables(MultiHashState *mhs,
-						pgstrom_multihash_tables **p_mhtables, Size consumed)
+						pgstrom_multihash_tables *mhtables_old,
+						Size required)
 {
-
-	pgstrom_multihash_tables *mhtables_old = *p_mhtables;
 	pgstrom_multihash_tables *mhtables_new;
-	Size	length_old = mhtables_old->length;
-	Size	allocated;
+	GpuContext *gcontext = mhs->gcontext;
+	Size		length_new;
+	Size		consumed;
 
-	mhtables_new = pgstrom_shmem_alloc_alap(2 * length_old, &allocated);
-	if (!mhtables_new)
-		return false;	/* out of shmem, or too large to allocate */
+	/* estimate new length */
+	length_new = mhtables_old->length;
+	while (required > mhs->threshold * length_new)
+		length_new += length_new;
+	Assert(length_new > mhtables_old->length);
+
+	/* allocate a new one */
+	mhtables_new = MemoryContextAlloc(gcontext->memcxt, length_new);
 	memcpy(mhtables_new, mhtables_old,
 		   offsetof(pgstrom_multihash_tables, kern) +
 		   mhtables_old->usage + consumed);
-
 	mhtables_new->length =
-		allocated - offsetof(pgstrom_multihash_tables, kern);
+		length_new - offsetof(pgstrom_multihash_tables, kern);
 	mhtables_new->kern.hostptr = (hostptr_t)&mhtables_new->kern.hostptr;
 	Assert(mhtables_new->length > mhtables_old->length);
+
 	elog(INFO, "pgstrom_multihash_tables was expanded %zu (%p) => %zu (%p)",
 		 mhtables_old->length, mhtables_old,
 		 mhtables_new->length, mhtables_new);
-	pgstrom_track_object(&mhtables_new->sobj, 0);
 
-	pgstrom_untrack_object(&mhtables_old->sobj);
 	multihash_put_tables(mhtables_old);
-
 	/* update hashtable_size of MultiHashState */
 	do {
 		Assert(IsA(mhs, CustomScanState) &&
 			   mhs->css.methods == &multihash_exec_methods.c);
-		mhs->hashtable_size = allocated;
+		mhs->hashtable_size = length_new;
 		mhs = (MultiHashState *) innerPlanState(mhs);
 	} while (mhs);
 
-	*p_mhtables = mhtables_new;
-
-	return true;
+	return mhtables_new;
 }
 
 static void
 multihash_preload_khashtable(MultiHashState *mhs,
-							 pgstrom_multihash_tables **p_mhtables,
+							 pgstrom_multihash_tables *mhtables,
 							 bool scan_forward)
 {
 	TupleDesc		tupdesc = ExecGetResultType(outerPlanState(mhs));
 	ExprContext	   *econtext = mhs->css.ss.ps.ps_ExprContext;
 	int				depth = mhs->depth;
-	pgstrom_multihash_tables *mhtables = *p_mhtables;
 	kern_hashtable *khtable;
 	kern_hashentry *hentry;
 	Size			required;
 	Size			consumed;
 	cl_uint		   *hash_slots;
-	cl_uint			ntuples = 0;
 	int				attcacheoff;
 	int				attalign;
 	int				i;
@@ -3372,7 +3074,6 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	 * First of all, construct a kern_hashtable on the tail of current
 	 * usage pointer of mhtables.
 	 */
-	Assert(StromTagIs(mhtables, HashJoinTable));
 	Assert(mhtables->kern.htable_offset[depth] == 0);
 	Assert(mhtables->usage == LONGALIGN(mhtables->usage));
 	mhtables->kern.htable_offset[depth] = mhtables->usage;
@@ -3381,12 +3082,8 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	{
 		Assert(mhs->curr_chunk);
 		required = mhtables->usage + mhs->curr_chunk->length;
-		while (required > mhs->threshold * mhtables->length)
-		{
-			if (!expand_multihash_tables(mhs, p_mhtables, 0))
-				elog(ERROR, "No multi-hashtables expandable any more");
-			mhtables = *p_mhtables;
-		}
+		if (required > mhs->threshold * mhtables->length)
+			mhtables = expand_multihash_tables(mhs, mhtables, required);
 		memcpy((char *)&mhtables->kern + mhtables->usage,
 			   mhs->curr_chunk,
 			   mhs->curr_chunk->length);
@@ -3404,12 +3101,9 @@ multihash_preload_khashtable(MultiHashState *mhs,
 				LONGALIGN(offsetof(kern_hashtable,
 								   colmeta[tupdesc->natts])) +
 				LONGALIGN(sizeof(cl_uint) * mhs->nslots));
-	while (required > mhs->threshold * mhtables->length)
-	{
-		if (!expand_multihash_tables(mhs, &mhtables, 0))
-			elog(ERROR, "No multi-hashtables expandable any more");
-		mhtables = *p_mhtables;
-	}
+	if (required > mhs->threshold * mhtables->length)
+		mhtables = expand_multihash_tables(mhs, mhtables, required);
+
 	khtable = (kern_hashtable *)((char *)&mhtables->kern + mhtables->usage);
 	khtable->ncols = tupdesc->natts;
 	khtable->nslots = mhs->nslots;
@@ -3444,6 +3138,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	memset(hash_slots, 0, sizeof(cl_uint) * khtable->nslots);
 	consumed = LONGALIGN((uintptr_t)&hash_slots[khtable->nslots] -
 						 (uintptr_t)khtable);
+	mhtables->usage += consumed;
 
 	/*
 	 * Nest, fill up tuples fetched from the outer relation into
@@ -3478,14 +3173,9 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		entry_size = LONGALIGN(offsetof(kern_hashentry, htup) +
 							   scan_tuple->t_len);
 		required = mhtables->usage + consumed + entry_size;
-		while (required > mhs->threshold * mhtables->length)
+		if (required > mhs->threshold * mhtables->length)
 		{
-			if (!expand_multihash_tables(mhs, p_mhtables, consumed))
-			{
-				mhs->outer_overflow = scan_slot;
-				goto out;
-			}
-			mhtables = *p_mhtables;
+			mhtables = expand_multihash_tables(mhs, mhtables, required);
 			khtable = (kern_hashtable *)
 				((char *)&mhtables->kern + mhtables->usage);
 			hash_slots = KERN_HASHTABLE_SLOT(khtable);
@@ -3541,7 +3231,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		/* allocation of hash entry and insert it */
 		hentry = (kern_hashentry *)((char *)khtable + consumed);
 		hentry->hash = hash;
-		hentry->rowid = ntuples;	/* actually not used... */
+		hentry->rowid = (cl_uint) mhtables->ntuples;	/* not in use */
 		hentry->t_len = scan_tuple->t_len;
 		memcpy(&hentry->htup, scan_tuple->t_data, scan_tuple->t_len);
 
@@ -3551,12 +3241,10 @@ multihash_preload_khashtable(MultiHashState *mhs,
 
 		/* increment buffer consumption */
 		consumed += entry_size;
+		mhtables->usage += entry_size;
 		/* increment number of tuples read */
-		ntuples++;
+		mhtables->ntuples++;
 	}
-out:
-	mhtables->ntuples += (double) ntuples;
-	mhtables->usage += consumed;
 	Assert(mhtables->usage < mhtables->length);
 	khtable->length = consumed;
 	if (mhs->curr_chunk || !mhs->outer_done)
@@ -3570,8 +3258,8 @@ static void *
 multihash_exec_bulk(CustomScanState *node)
 {
 	MultiHashState *mhs = (MultiHashState *) node;
-	MultiHashNode  *mhnode = NULL;
-	PlanState	   *inner_ps;	/* underlying MultiHash, if any */
+	pgstrom_multihash_tables *mhtables;
+	PlanState	   *mhstate;	/* underlying MultiHash, if any */
 	bool			scan_forward = false;
 	int				depth = mhs->depth;
 
@@ -3579,29 +3267,27 @@ multihash_exec_bulk(CustomScanState *node)
 	if (node->ss.ps.instrument)
 		InstrStartNode(node->ss.ps.instrument);
 
-	inner_ps = innerPlanState(mhs);
-	if (inner_ps)
+	mhstate = innerPlanState(mhs);
+	if (mhstate)
 	{
-		mhnode = BulkExecMultiHashNode(inner_ps);
-		if (!mhnode)
+		mhtables = BulkExecMultiHashTables(mhstate);
+		if (!mhtables)
 		{
 			if (mhs->outer_done)
 				goto out;
-			ExecReScan(inner_ps);
-			mhnode = BulkExecMultiHashNode(inner_ps);
-			if (!mhnode)
+			ExecReScan(mhstate);
+			mhtables = BulkExecMultiHashTables(mhstate);
+			if (!mhtables)
 				goto out;
 			scan_forward = true;
 		}
 		else if (!mhs->curr_chunk)
 			scan_forward = true;
-		Assert(mhnode);
 	}
 	else
 	{
-		/* no more deep hash-table, so create a MultiHashNode */
-		pgstrom_multihash_tables *mhtables;
-		int			nrels = depth;
+		/* no more deep hash-table, so create a new pgstrom_multihash_tables */
+		int			ntables = depth;
 		Size		usage;
 		Size		allocated;
 
@@ -3614,51 +3300,48 @@ multihash_exec_bulk(CustomScanState *node)
 		mhnode->nrels = nrels;
 
 		/* allocation of multihash_tables on shared memory */
-		mhtables = pgstrom_shmem_alloc_alap(mhs->hashtable_size, &allocated);
-		if (!mhtables)
-			elog(ERROR, "out of shared memory");
-
+		mhtables = MemoryContextAlloc(gcontext->memcxt,
+									  mhs->hashtable_size);
 		/* initialize multihash_tables */
 		usage = STROMALIGN(offsetof(kern_multihash,
-									htable_offset[nrels + 1]));
+									htable_offset[ntables + 1]));
 		memset(mhtables, 0, usage);
-
-		mhtables->sobj.stag = StromTag_HashJoinTable;
 		mhtables->length =
-			(allocated - offsetof(pgstrom_multihash_tables, kern));
+			mhs->hashtable_size - offsetof(pgstrom_multihash_tables, kern);
 		mhtables->usage = usage;
 		mhtables->ntuples = 0.0;
 		SpinLockInit(&mhtables->lock);
 		mhtables->refcnt = 1;
-		mhtables->dindex = -1;		/* set by opencl-server */
-		mhtables->n_kernel = 0;		/* set by opencl-server */
-		mhtables->m_hash = NULL;	/* set by opencl-server */
-		mhtables->ev_hash = NULL;	/* set by opencl-server */
+		mhtables->dindex = -1;		/* set by CUDA handler  */
+		mhtables->n_kernel = 0;		/* set by CUDA handler */
+		mhtables->m_hash = 0UL;		/* set by CUDA handler */
 
 		memcpy(mhtables->kern.pg_crc32_table,
 			   pg_crc32c_table,
 			   sizeof(uint32) * 256);
 		mhtables->kern.hostptr = (hostptr_t) &mhtables->kern.hostptr;
-		mhtables->kern.ntables = nrels;
-		memset(mhtables->kern.htable_offset, 0, sizeof(cl_uint) * (nrels + 1));
-		pgstrom_track_object(&mhtables->sobj, 0);
-
-		mhnode->mhtables = mhtables;
+		mhtables->kern.ntables = ntables;
+		memset(mhtables->kern.htable_offset,
+			   0,
+			   sizeof(cl_uint) * (ntables + 1));
 	}
+	Assert(mhtables != NULL);
+	mhs->mhtables = mhs;
+
 	/*
 	 * construct a kernel hash-table that stores all the inner-keys
 	 * in this level, being loaded from the outer relation
 	 */
-	multihash_preload_khashtable(mhs, &mhnode->mhtables, scan_forward);
+	multihash_preload_khashtable(mhs, mhtables, scan_forward);
 out:
 	/* must provide our own instrumentation support */
 	if (node->ss.ps.instrument)
 		InstrStopNode(node->ss.ps.instrument,
-					  !mhnode ? 0.0 : mhnode->mhtables->ntuples);
-	if (mhnode)
+					  !mhtables ? 0.0 : mhtables->ntuples);
+	if (mhtables)
 		mhs->nbatches_exec++;
 
-	return mhnode;
+	return mhtables;
 }
 
 static void
