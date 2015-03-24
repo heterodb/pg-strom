@@ -1,5 +1,7 @@
 --#
 --#       Gpu Text Sort TestCases. 
+--#  [TODO] Do not test commented-out queries until GPUSort supports TOAST data process. 
+--#         If will support it, please remake expected outs and test_init.sql
 --#
 set gpu_setup_cost=0;
 set random_page_cost=1000000;   --# force off index_scan.   
@@ -8,139 +10,94 @@ set client_min_messages to warning;
 select * from (select row_number() over (order by char_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
  rowid | id  
 -------+-----
-   100 | 672
-   200 | 496
-   300 | 365
-   400 | 517
-   500 | 915
-   600 | 922
-   700 | 238
-   800 | 610
-   900 | 714
-  1000 | 261
+   100 | 799
+   200 | 391
+   300 | 325
+   400 |  24
+   500 | 667
+   600 | 715
+   700 | 419
+   800 | 576
+   900 | 888
+  1000 | 872
 (10 rows)
 
 select * from (select row_number() over (order by char_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
  rowid | id  
 -------+-----
-   100 | 513
-   200 | 902
-   300 | 943
-   400 | 922
-   500 |  58
-   600 | 251
-   700 | 207
-   800 | 147
-   900 | 859
-  1000 | 749
+   100 | 806
+   200 | 143
+   300 | 400
+   400 | 379
+   500 | 523
+   600 | 155
+   700 |   1
+   800 |  57
+   900 | 961
+  1000 | 800
 (10 rows)
 
 select * from (select row_number() over (order by nchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
  rowid | id  
 -------+-----
-   100 | 843
-   200 | 868
-   300 | 739
-   400 | 790
-   500 | 829
-   600 | 815
-   700 | 855
-   800 | 705
-   900 | 722
-  1000 | 738
+   100 | 643
+   200 | 233
+   300 | 272
+   400 | 516
+   500 | 549
+   600 | 181
+   700 | 230
+   800 | 475
+   900 | 713
+  1000 | 449
 (10 rows)
 
 select * from (select row_number() over (order by nchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
  rowid | id  
 -------+-----
-   100 | 342
-   200 | 996
-   300 | 350
-   400 | 652
-   500 | 876
-   600 | 677
-   700 | 574
-   800 | 160
-   900 | 849
-  1000 | 425
+   100 | 935
+   200 | 585
+   300 | 236
+   400 | 778
+   500 | 708
+   600 |  37
+   700 | 570
+   800 | 104
+   900 | 604
+  1000 | 849
 (10 rows)
 
 select * from (select row_number() over (order by vchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
  rowid | id  
 -------+-----
-   100 | 132
-   200 | 935
-   300 | 537
-   400 | 382
-   500 | 826
-   600 | 215
-   700 | 364
-   800 | 693
-   900 | 834
-  1000 | 338
+   100 | 386
+   200 | 852
+   300 | 261
+   400 |  71
+   500 | 352
+   600 | 496
+   700 | 395
+   800 |  19
+   900 | 411
+  1000 |  59
 (10 rows)
 
-set select * from (select row_number() over (order by vchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-ERROR:  syntax error at or near "select"
-LINE 1: set select * from (select row_number() over (order by vchar_...
-            ^
-select * from (select row_number() over (order by nvchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+select * from (select row_number() over (order by vchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
  rowid | id  
 -------+-----
-   100 |  58
-   200 | 251
-   300 | 826
-   400 | 646
-   500 | 791
-   600 | 810
-   700 | 836
-   800 | 330
-   900 | 729
-  1000 | 547
+   100 | 755
+   200 | 952
+   300 | 398
+   400 | 188
+   500 | 170
+   600 | 642
+   700 | 700
+   800 | 833
+   900 | 588
+  1000 | 351
 (10 rows)
 
-select * from (select row_number() over (order by nvchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
- rowid | id  
--------+-----
-   100 |  11
-   200 | 535
-   300 | 105
-   400 | 583
-   500 | 979
-   600 | 406
-   700 | 644
-   800 | 983
-   900 | 243
-  1000 | 928
-(10 rows)
-
-select * from (select row_number() over (order by text_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
- rowid | id  
--------+-----
-   100 | 619
-   200 | 705
-   300 | 351
-   400 | 879
-   500 | 706
-   600 | 893
-   700 | 815
-   800 | 110
-   900 | 353
-  1000 | 593
-(10 rows)
-
-select * from (select row_number() over (order by text_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
- rowid | id  
--------+-----
-   100 | 730
-   200 | 339
-   300 | 816
-   400 | 132
-   500 | 957
-   600 | 863
-   700 | 337
-   800 | 550
-   900 | 962
-  1000 | 375
-(10 rows)
-
+-- select * from (select row_number() over (order by nvchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+-- select * from (select row_number() over (order by nvchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+-- select * from (select row_number() over (order by text_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+-- select * from (select row_number() over (order by text_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;

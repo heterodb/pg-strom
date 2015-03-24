@@ -7,6 +7,7 @@ set random_page_cost=1000000;   --# force off index_scan.
 set enable_gpusort to on;                                                                                                                                       
 set client_min_messages to warning;
 set enable_gpuhashjoin to off;
+set enable_hashjoin to off;
 
 --smallint
 prepare t1 as select * from (select row_number() over (order by t1.smlint_x desc) as rowid,t1.smlint_x,t2.smlint_x from strom_test t1, strom_test t2 where t1.smlint_x=t2.smlint_x and t1.id%100=0) as t where t.rowid%1000=0;

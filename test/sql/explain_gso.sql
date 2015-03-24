@@ -1,5 +1,7 @@
 --#
 --#       Gpu Scan Explain TestCases. 
+--#  [TODO] Do not test commented-out queries until GPUSort supports TOAST data process. 
+--#         If will support it, please remake expected outs and test_init.sql
 --#
 
 set enable_hashagg to off;      --# force off HashAggregate
@@ -96,6 +98,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, nume_x from strom_test where id between 30001 and 40000 group by nume_x ) as t;
 
 --merge
+set enable_hashjoin to off;
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by t1.smlint_x desc) as rowid,t1.smlint_x,t2.smlint_x from strom_test t1, strom_test t2 where t1.smlint_x=t2.smlint_x and t1.id%100=0) as t where t.rowid%1000=0;
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by t1.smlint_x asc) as rowid,t1.smlint_x,t2.smlint_x from strom_test t1, strom_test t2 where t1.smlint_x=t2.smlint_x and t1.id%100=0) as t where t.rowid%1000=0;
 
@@ -163,11 +166,11 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by nvchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by nvchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+-- explain (verbose, costs off, timing off) select * from (select row_number() over (order by nvchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+-- explain (verbose, costs off, timing off) select * from (select row_number() over (order by nvchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by text_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by text_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+-- explain (verbose, costs off, timing off) select * from (select row_number() over (order by text_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+-- explain (verbose, costs off, timing off) select * from (select row_number() over (order by text_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 
 set pg_strom.enabled=on;
 set gpu_setup_cost=0;
@@ -263,6 +266,9 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, nume_x from strom_test where id between 30001 and 40000 group by nume_x ) as t;
 
 --merge
+set enable_hashjoin to off;
+set enable_gpuhashjoin to off;
+
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by t1.smlint_x desc) as rowid,t1.smlint_x,t2.smlint_x from strom_test t1, strom_test t2 where t1.smlint_x=t2.smlint_x and t1.id%100=0) as t where t.rowid%1000=0;
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by t1.smlint_x asc) as rowid,t1.smlint_x,t2.smlint_x from strom_test t1, strom_test t2 where t1.smlint_x=t2.smlint_x and t1.id%100=0) as t where t.rowid%1000=0;
 
@@ -330,9 +336,9 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by nvchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by nvchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+-- explain (verbose, costs off, timing off) select * from (select row_number() over (order by nvchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+-- explain (verbose, costs off, timing off) select * from (select row_number() over (order by nvchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by text_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by text_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+-- explain (verbose, costs off, timing off) select * from (select row_number() over (order by text_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+-- explain (verbose, costs off, timing off) select * from (select row_number() over (order by text_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 
