@@ -268,18 +268,19 @@ DROP INDEX strom_test_key_idx;
 --# [TODO] Do not define commented-out types until GPUSort supports TOAST data process.
 DROP TABLE IF EXISTS strom_string_test CASCADE;
 CREATE TABLE strom_string_test(
-       id integer,
-       char_x char(1) COLLATE "C",
-       nchar_x char(1000) COLLATE "C",
-       vchar_x varchar(1) COLLATE "C",
-       -- nvchar_x varchar(1000) COLLATE "C",
-       -- text_x text COLLATE "C"
+       id integer
+       ,char_x char(1) COLLATE "C"
+       ,nchar_x char(1000) COLLATE "C"
+       ,vchar_x varchar(1) COLLATE "C"
+       -- ,nvchar_x varchar(1000) COLLATE "C"
+       -- ,text_x text COLLATE "C"
 );
 
 INSERT INTO strom_string_test SELECT
-       	    		      generate_series(1,1000),
-			      substring(md5(random()::text),1,1),
-			      rpad(md5(random()::text),1000,md5(random()::text)),
-			      substring(md5(random()::text),1,1),
-			      -- rpad(md5(random()::text),1000,md5(random()::text)),
-			      -- rpad(md5(random()::text),5000,md5(random()::text)) ;
+       	    		      generate_series(1,1000)
+			      ,substring(md5(random()::text),1,1)
+			      ,rpad(md5(random()::text),1000,md5(random()::text))
+			      ,substring(md5(random()::text),1,1)
+			      -- ,rpad(md5(random()::text),1000,md5(random()::text))
+			      -- ,rpad(md5(random()::text),5000,md5(random()::text))
+			      ;
