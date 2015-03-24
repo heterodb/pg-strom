@@ -38,7 +38,8 @@ typedef cl_short	NumericDigit;
 #endif
 
 #define PG_MAX_DIGITS		18	/* Max digits of 57 bit mantissa. */
-#define PG_MAX_DATA			((PG_MAX_DIGITS + PG_DEC_DIGITS - 1) / \
+#define PG_MAX_DATA			(((PG_MAX_DIGITS + (PG_DEC_DIGITS - 1)) +	\
+							  (PG_DEC_DIGITS - 1)) /					\
 							 PG_DEC_DIGITS)
 
 struct NumericShort
@@ -90,10 +91,26 @@ union NumericChoice
 
 #define NUMERIC_DSCALE_MASK			0x3FFF
 
-#define NUMERIC_DIGITS(n)   (NUMERIC_IS_SHORT(n) ? (n)->n_short.n_data : (n)->n_long.n_data)
-#define NUMERIC_SIGN(n) 	(NUMERIC_IS_SHORT(n) ? (((n)->n_short.n_header & NUMERIC_SHORT_SIGN_MASK) ? NUMERIC_NEG : NUMERIC_POS) : NUMERIC_FLAGBITS(n))
-#define NUMERIC_DSCALE(n)	(NUMERIC_IS_SHORT(n) ? ((n)->n_short.n_header & NUMERIC_SHORT_DSCALE_MASK) >> NUMERIC_SHORT_DSCALE_SHIFT : ((n)->n_long.n_sign_dscale & NUMERIC_DSCALE_MASK))
-#define NUMERIC_WEIGHT(n)	(NUMERIC_IS_SHORT(n) ? (((n)->n_short.n_header & NUMERIC_SHORT_WEIGHT_SIGN_MASK ? ~NUMERIC_SHORT_WEIGHT_MASK : 0) | ((n)->n_short.n_header & NUMERIC_SHORT_WEIGHT_MASK)) : ((n)->n_long.n_weight))
+#define NUMERIC_DIGITS(n)												\
+	(NUMERIC_IS_SHORT(n) ? (n)->n_short.n_data : (n)->n_long.n_data)
+#define NUMERIC_SIGN(n)									  \
+	(NUMERIC_IS_SHORT(n)								  \
+	 ? (((n)->n_short.n_header & NUMERIC_SHORT_SIGN_MASK) \
+		? NUMERIC_NEG									  \
+		: NUMERIC_POS)									  \
+	 : NUMERIC_FLAGBITS(n))
+#define NUMERIC_DSCALE(n)												\
+	(NUMERIC_IS_SHORT(n) ?												\
+	 (((n)->n_short.n_header & NUMERIC_SHORT_DSCALE_MASK) >>			\
+	  NUMERIC_SHORT_DSCALE_SHIFT)										\
+	 : ((n)->n_long.n_sign_dscale & NUMERIC_DSCALE_MASK))
+#define NUMERIC_WEIGHT(n)												\
+	(NUMERIC_IS_SHORT(n)												\
+	 ? (((n)->n_short.n_header & NUMERIC_SHORT_WEIGHT_SIGN_MASK			\
+		 ? ~NUMERIC_SHORT_WEIGHT_MASK									\
+		 : 0) |															\
+		((n)->n_short.n_header & NUMERIC_SHORT_WEIGHT_MASK))			\
+	 : ((n)->n_long.n_weight))
 
 
 /* IEEE 754 FORMAT */
@@ -133,17 +150,22 @@ typedef struct {
 
 #define PG_NUMERIC_EXPONENT_BITS	6
 #define PG_NUMERIC_EXPONENT_POS		58
-#define PG_NUMERIC_EXPONENT_MASK	(((0x1UL << (PG_NUMERIC_EXPONENT_BITS)) - 1) << (PG_NUMERIC_EXPONENT_POS))
-#define PG_NUMERIC_EXPONENT_MAX		((1 << ((PG_NUMERIC_EXPONENT_BITS) - 1)) - 1)
-#define PG_NUMERIC_EXPONENT_MIN		(0 - (1 << ((PG_NUMERIC_EXPONENT_BITS) - 1)))
+#define PG_NUMERIC_EXPONENT_MASK	\
+	(((0x1UL << (PG_NUMERIC_EXPONENT_BITS)) - 1) << (PG_NUMERIC_EXPONENT_POS))
+#define PG_NUMERIC_EXPONENT_MAX		\
+	((1 << ((PG_NUMERIC_EXPONENT_BITS) - 1)) - 1)
+#define PG_NUMERIC_EXPONENT_MIN		\
+	(0 - (1 << ((PG_NUMERIC_EXPONENT_BITS) - 1)))
 
 #define PG_NUMERIC_SIGN_BITS		1
 #define PG_NUMERIC_SIGN_POS			57
-#define PG_NUMERIC_SIGN_MASK		(((0x1UL << (PG_NUMERIC_SIGN_BITS)) - 1) << (PG_NUMERIC_SIGN_POS))
+#define PG_NUMERIC_SIGN_MASK		\
+	(((0x1UL << (PG_NUMERIC_SIGN_BITS)) - 1) << (PG_NUMERIC_SIGN_POS))
 
 #define PG_NUMERIC_MANTISSA_BITS	57
 #define PG_NUMERIC_MANTISSA_POS		0
-#define PG_NUMERIC_MANTISSA_MASK	(((0x1UL << (PG_NUMERIC_MANTISSA_BITS)) - 1) << (PG_NUMERIC_MANTISSA_POS))
+#define PG_NUMERIC_MANTISSA_MASK	\
+	(((0x1UL << (PG_NUMERIC_MANTISSA_BITS)) - 1) << (PG_NUMERIC_MANTISSA_POS))
 #define PG_NUMERIC_MANTISSA_MAX		((0x1UL << (PG_NUMERIC_MANTISSA_BITS)) - 1)
 
 #define PG_NUMERIC_EXPONENT(num)	((cl_long)(num) >> 58)
@@ -252,8 +274,14 @@ pg_numeric_from_varlena(__private int *errcode,
 			return result;
 		}
 
+		// zero check
 		mant = mant * base + mantLast;
 
+		if (mant == 0) {
+			result.isnull = false;
+			result.value  = PG_NUMERIC_SET(0, 0, 0);
+			return result;
+		}
 
 		// Normalize
 		while (mant % 10 == 0  &&  expo < PG_NUMERIC_EXPONENT_MAX) {
@@ -323,15 +351,121 @@ pg_numeric_from_varlena(__private int *errcode,
  * written varlena datum.
  * Once an error happen, it returns 0, then set some value on errcode.
  */
+#define NUMERIC_TO_VERLENA_USE_SHORT_FORMAT
+
 static size_t
 pg_numeric_to_varlena(__private int *errcode,
 					  pg_numeric_t arg,
 					  __global struct varlena *vl_val)
 {
+	__global varattrib_4b * 		pHeader;
+	__global union NumericChoice *	pNumData;
 
 
-	return 0;
+	if (vl_val == NULL)
+	{
+		// No destination buffer
+		*errcode = StromError_OpenCLInternal;
+		return 0;
+	}
+
+	if ((cl_long)vl_val % sizeof(cl_int))
+	{
+		// Alignment error.
+		// Must be set 4 byte alignment for varlena buffer.
+		*errcode = StromError_OpenCLInternal;
+		return 0;
+	}
+
+	if (arg.isnull)
+	{
+		// The caller function set NULL to bitmapt if arg is NULL.
+		// And then, does not call this function.
+		*errcode = StromError_OpenCLInternal;
+		return 0;
+	}
+
+	pHeader  = (__global varattrib_4b *)vl_val;
+	pNumData = (__global union NumericChoice *)((__global char *)pHeader + 
+												VARHDRSZ);
+
+	// generate numeric data
+	{
+		int			sign = PG_NUMERIC_SIGN(arg.value);
+		int 		expo = PG_NUMERIC_EXPONENT(arg.value);
+		cl_ulong	mant = PG_NUMERIC_MANTISSA(arg.value);
+
+		int	digits, dscale, weight, mag, nData, modExpo, tmpDigits;
+		__global NumericDigit *pNData;
+
+		{
+			cl_ulong tmp = mant;
+			for (digits=0; tmp != 0; digits++, tmp/=10)
+				;
+		}
+
+		dscale = expo < 0 ? -expo : 0;
+
+		modExpo = expo % PG_DEC_DIGITS;
+		if (modExpo < 0)
+			modExpo = PG_DEC_DIGITS + modExpo;
+
+		tmpDigits = digits + expo - 1;
+		if (tmpDigits < 0)
+			tmpDigits = tmpDigits - (PG_DEC_DIGITS-1);
+		weight = tmpDigits / PG_DEC_DIGITS;
+
+		nData  = (digits + modExpo + (PG_DEC_DIGITS - 1)) / PG_DEC_DIGITS;
+
+		{
+			int i;
+			mag = 1;
+			for(i=0; i<modExpo; i++) {
+				mag *= 10;
+			}
+		}
+
+#ifdef NUMERIC_TO_VERLENA_USE_SHORT_FORMAT
+		// create the data of the short format.
+		pHeader->va_4byte.va_header = (offsetof(struct NumericShort, n_data) + 
+									   nData * sizeof(NumericDigit) + 
+									   VARHDRSZ) << 2;
+		pNumData->n_short.n_header =
+			NUMERIC_SHORT |
+			(sign ? NUMERIC_SHORT_SIGN_MASK : 0) |
+			(dscale & NUMERIC_SHORT_DSCALE_MASK) |
+			(weight &
+			 (NUMERIC_SHORT_WEIGHT_SIGN_MASK | NUMERIC_SHORT_WEIGHT_MASK));
+		pNData = pNumData->n_short.n_data;
+#else
+		// create the data of the long format
+		pHeader->va_4byte.va_header = (offsetof(struct NumericLong, n_data) + 
+									   nData * sizeof(NumericDigit) + 
+									   VARHDRSZ) << 2;
+		pNumData->n_long.n_sign_dscale = ((sign ? NUMERIC_SIGN_MASK : 0) |
+										  (dscale & NUMERIC_SHORT_SCALE_MASK));
+		pNumData->n_long.n_weight = weight;
+		pNData = pNumData->n_long.n_data;
+#endif
+
+		if(0 < nData) {
+			pNData[nData-1] = (mant % (PG_NBASE/mag)) * mag;
+			mant /= (PG_NBASE/mag);
+
+			{
+				int i;
+				for(i=nData-2; 0<=i; i--)
+				{
+					pNData[i] = mant % PG_NBASE;
+					mant /= PG_NBASE;
+				}
+			}
+		}
+	}
+
+	return pHeader->va_4byte.va_header;
 }
+
 
 /*
  * pg_numeric_vref
