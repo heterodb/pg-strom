@@ -291,9 +291,9 @@ pg_numeric_from_varlena(__private int *errcode,
 
 		if (PG_NUMERIC_EXPONENT_MAX < expo) {
 			// Exponent is overflow.
-			int expoDiff = expo - PG_NUMERIC_EXPONENT_MAX;
-			int		i;
-			ulong	mag;
+			int			expoDiff = expo - PG_NUMERIC_EXPONENT_MAX;
+			int			i;
+			cl_ulong	mag;
 
 			if (PG_MAX_DIGITS <= expoDiff) {
 				// magnify is overflow
@@ -622,7 +622,7 @@ numeric_to_float(__private int *errcode, pg_numeric_t arg)
 {
 	pg_float8_t	v;
 	int			expo, sign;
-	ulong		mant;
+	cl_ulong	mant;
 	double		fvalue;
 
 
@@ -774,7 +774,7 @@ float_to_numeric(__private int *errcode, pg_float8_t arg, int dig)
 {
 	pg_numeric_t	v;
 	int				sign, expo;
-	ulong			mant;
+	cl_ulong		mant;
 
 
 	if (arg.isnull) {
@@ -843,9 +843,9 @@ float_to_numeric(__private int *errcode, pg_float8_t arg, int dig)
 
 	if (PG_NUMERIC_EXPONENT_MAX < expo) {
 		// Exponent is overflow.
-		int expoDiff = expo - PG_NUMERIC_EXPONENT_MAX;
-		int		i;
-		ulong	mag;
+		int 		expoDiff = expo - PG_NUMERIC_EXPONENT_MAX;
+		int			i;
+		cl_ulong	mag;
 
 		if (PG_MAX_DIGITS <= expoDiff) {
 			// magnify is overflow
@@ -974,10 +974,10 @@ pgfn_numeric_add(__private int *errcode,
 
 	// Change the number of digits
 	if (expo1 != expo2) {
-		int 	 expoDiff = abs(expo1 - expo2);
-		cl_ulong value	  = (expo1 < expo2) ? (mant2) : (mant1);
-		ulong    mag;
-		int      i;
+		int			expoDiff = abs(expo1 - expo2);
+		cl_ulong	value	  = (expo1 < expo2) ? (mant2) : (mant1);
+		cl_ulong	mag;
+		int			i;
 
 		if (PG_MAX_DIGITS <= expoDiff) {
 			// magnify is overflow
@@ -1120,10 +1120,9 @@ pgfn_numeric_mul(__private int *errcode,
 
 	if (PG_NUMERIC_EXPONENT_MAX < expo1) {
 		// Exponent is overflow.
-		int expoDiff = expo1 - PG_NUMERIC_EXPONENT_MAX;
-
-		ulong mag;
-		int	i;
+		int			expoDiff = expo1 - PG_NUMERIC_EXPONENT_MAX;
+		cl_ulong	mag;
+		int			i;
 
 		if (PG_MAX_DIGITS <= expoDiff) {
 			// magnify is overflow
@@ -1175,7 +1174,7 @@ numeric_cmp(__private cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	int			i, ret, expoDiff;
 	cl_ulong	mantL, mantR;
-	ulong	 	mag;
+	cl_ulong 	mag;
 
 	int			expo1 = PG_NUMERIC_EXPONENT(arg1.value);
 	int			sign1 = PG_NUMERIC_SIGN(arg1.value);

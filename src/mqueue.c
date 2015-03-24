@@ -263,8 +263,8 @@ pgstrom_sync_dequeue_message(pgstrom_queue *mqueue)
 	pgstrom_message *result = NULL;
 	struct timeval	basetv;
 	struct timespec	timeout;
-	ulong	timeleft = ((ulong)pgstrom_mqueue_timeout) * 1000000UL;
-	int		rc;
+	cl_ulong		timeleft = ((cl_ulong)pgstrom_mqueue_timeout) * 1000000UL;
+	int				rc;
 
 	rc = gettimeofday(&basetv, NULL);
 	Assert(rc == 0);

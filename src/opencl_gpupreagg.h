@@ -1031,11 +1031,11 @@ ATOMIC_FLOAT_TEMPLATE(g,add)
 	prefix##atomic_##op_name##_double(volatile prefix##space double *ptr, \
 									  double value)						\
 	{																	\
-		ulong	oldval = as_ulong(*ptr);								\
-		ulong	newval = as_ulong(op_name(as_double(oldval), value));	\
-		ulong	curval;													\
+		cl_ulong	oldval = as_ulong(*ptr);							\
+		cl_ulong	newval = as_ulong(op_name(as_double(oldval), value)); \
+		cl_ulong	curval;												\
 																		\
-		while ((curval = atom_cmpxchg((prefix##space ulong *) ptr,		\
+		while ((curval = atom_cmpxchg((prefix##space cl_ulong *) ptr,	\
 									  oldval, newval)) != oldval)		\
 		{																\
 			oldval = curval;											\
@@ -1063,9 +1063,9 @@ ATOMIC_DOUBLE_TEMPLATE(g,add)
 	{																	\
 		pg_numeric_t x, y;												\
 		pg_int4_t	comp;												\
-		ulong		oldval;												\
-		ulong		newval;												\
-		ulong		curval = *ptr;										\
+		cl_ulong	oldval;												\
+		cl_ulong	newval;												\
+		cl_ulong	curval = *ptr;										\
 																		\
 		do {															\
 			x.isnull = false;											\
@@ -1090,9 +1090,9 @@ ATOMIC_NUMERIC_MINMAX_TEMPLATE(g,min,<)
 							   cl_ulong numeric_value)					\
 	{																	\
 		pg_numeric_t x, y, z;											\
-		ulong	oldval;													\
-		ulong	newval;													\
-		ulong	curval = *((prefix##space cl_ulong *)ptr);				\
+		cl_ulong	oldval;												\
+		cl_ulong	newval;												\
+		cl_ulong	curval = *((prefix##space cl_ulong *)ptr);			\
 																		\
 		do {															\
 			x.isnull = false;											\
