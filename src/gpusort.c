@@ -1312,7 +1312,11 @@ deform_pgstrom_cpusort(dsm_segment *dsm_seg)
 			Assert(kds_offset >= BLCKSZ);
 			map_addr = mmap(NULL, kds_offset + kds_length,
 							PROT_READ | PROT_WRITE,
-							MAP_SHARED | MAP_POPULATE,
+							MAP_SHARED 
+#ifdef MAP_POPULATE
+			   				| MAP_POPULATE 
+#endif
+							,
 							kds_fdesc, 0);
 			if (map_addr == MAP_FAILED)
 			{
@@ -1327,7 +1331,11 @@ deform_pgstrom_cpusort(dsm_segment *dsm_seg)
 		{
 			map_addr = mmap(NULL, kds_length,
 							PROT_READ | PROT_WRITE,
-							MAP_SHARED | MAP_POPULATE,
+							MAP_SHARED 
+#ifdef MAP_POPULATE
+			   				| MAP_POPULATE 
+#endif
+							,
 							kds_fdesc, kds_offset);
 			if (map_addr == MAP_FAILED)
 			{
@@ -3404,7 +3412,11 @@ clserv_process_gpusort(pgstrom_message *msg)
 	clgss->map_length = pds->kds_offset + pds->kds_length;
 	clgss->map_addr = mmap(NULL, clgss->map_length,
 						   PROT_READ | PROT_WRITE,
-						   MAP_SHARED | MAP_POPULATE,
+						   MAP_SHARED
+#ifdef MAP_POPULATE
+			   | MAP_POPULATE 
+#endif
+						    ,
 						   map_fdesc, 0);
 	if (clgss->map_addr == MAP_FAILED)
 	{
