@@ -2766,7 +2766,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		ps_tle = makeTargetEntry((Expr *) varnode,
 								 list_length(cscan->custom_ps_tlist) + 1,
 								 tle->resname ? pstrdup(tle->resname) : NULL,
-								 tle->resjunk);
+								 false);
 		cscan->custom_ps_tlist = lappend(cscan->custom_ps_tlist, ps_tle);
 	}
 	if (IsA(outer_node, CustomScan))
