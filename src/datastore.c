@@ -520,7 +520,10 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 
 		pds->kds = mmap(NULL, pds->kds_length,
 						PROT_READ | PROT_WRITE,
-						MAP_SHARED | MAP_POPULATE,
+#ifdef MAP_POPULATE
+						MAP_POPULATE |
+#endif
+						MAP_SHARED,
 						kds_fdesc, 0);
 		if (pds->kds == MAP_FAILED)
 			ereport(ERROR,
@@ -642,7 +645,10 @@ pgstrom_file_mmap_data_store(const char *kds_fname,
 
 	pds->kds = mmap(NULL, kds_length,
 					PROT_READ | PROT_WRITE,
-					MAP_SHARED | MAP_POPULATE,
+#ifdef MAP_POPULATE
+					MAP_POPULATE |
+#endif
+					MAP_SHARED,
 					kds_fdesc, kds_offset);
 	if (pds->kds == MAP_FAILED)
 		ereport(ERROR,
