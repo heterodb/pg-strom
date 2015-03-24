@@ -1,5 +1,6 @@
 --#
 --#       Gpu Text Sort TestCases. 
+--#  [TODO] Do not test commented-out queries until GPUSort supports TOAST data process 
 --#
 
 set gpu_setup_cost=0;
@@ -17,8 +18,8 @@ select * from (select row_number() over (order by nchar_x asc) as rowid,id from 
 select * from (select row_number() over (order by vchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 set select * from (select row_number() over (order by vchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 
-select * from (select row_number() over (order by nvchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-select * from (select row_number() over (order by nvchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+-- select * from (select row_number() over (order by nvchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+-- select * from (select row_number() over (order by nvchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 
-select * from (select row_number() over (order by text_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-select * from (select row_number() over (order by text_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+-- select * from (select row_number() over (order by text_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+-- select * from (select row_number() over (order by text_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
