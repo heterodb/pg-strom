@@ -17,7 +17,6 @@
  */
 #include "postgres.h"
 #include "pg_strom.h"
-#include <CL/cl.h>
 #include <dlfcn.h>
 
 /*

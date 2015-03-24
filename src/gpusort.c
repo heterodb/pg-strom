@@ -849,7 +849,7 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 		tle_new = makeTargetEntry((Expr *) varnode,
 								  list_length(cscan->custom_ps_tlist) + 1,
 								  tle->resname ? pstrdup(tle->resname) : NULL,
-								  tle->resjunk);
+								  false);
 		cscan->custom_ps_tlist = lappend(cscan->custom_ps_tlist, tle_new);
 	}
 	/* informs our preference to fetch tuples */
