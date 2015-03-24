@@ -722,7 +722,10 @@ __pgstrom_create_data_store_row_fmap(const char *filename, int lineno,
 
 	kds = mmap(NULL, kds_length,
 			   PROT_READ | PROT_WRITE,
-			   MAP_SHARED | MAP_POPULATE,
+#ifdef MAP_POPULATE
+			   MAP_POPULATE |
+#endif
+			   MAP_SHARED,
 			   kds_fdesc, 0);
 	if (kds == MAP_FAILED)
 		elog(ERROR, "failed to map file-mapped data store \"%s\"", kds_fname);
@@ -802,7 +805,10 @@ __pgstrom_extend_data_store_tupslot(const char *filename, int lineno,
 	/* mmap later portion of this file */
 	kds = mmap(NULL, required,
 			   PROT_READ | PROT_WRITE,
-			   MAP_SHARED | MAP_POPULATE,
+#ifdef MAP_POPULATE
+			   MAP_POPULATE |
+#endif
+			   MAP_SHARED,
 			   kds_fdesc, toast_offset);
 	if (kds == MAP_FAILED)
 	{
