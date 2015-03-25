@@ -467,6 +467,10 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 	rc = cuCtxCreate(&cuda_context, CU_CTX_SCHED_AUTO, cuda_devices[0]);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
+	/* also change the L1/Shared configuration */
+	rc = cuCtxSetCacheConfig(CU_FUNC_CACHE_PREFER_SHARED);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuCtxSetCacheConfig: %s", errorText(rc));
 
 	PG_TRY();
 	{
@@ -497,6 +501,12 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 							 cuda_devices[index]);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
+
+			rc = cuCtxSetCacheConfig(CU_FUNC_CACHE_PREFER_SHARED);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuCtxSetCacheConfig: %s",
+					 errorText(rc));
+
 			gcontext->gpu[index].cuda_device = cuda_devices[index];
 			gpuMemHeadInit(&gcontext->gpu[index].cuda_memory);
 		}
