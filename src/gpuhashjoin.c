@@ -3490,27 +3490,6 @@ pgstrom_init_gpuhashjoin(void)
  *
  * ---------------------------------------------------------------- */
 
-typedef struct
-{
-	pgstrom_gpuhashjoin *gpuhashjoin;
-	cl_command_queue kcmdq;
-	cl_program		program;
-	cl_kernel		kern_main;
-	cl_kernel		kern_proj;
-	cl_mem			m_join;
-	cl_mem			m_hash;
-	cl_mem			m_dstore;
-	cl_mem			m_ktoast;
-	cl_mem			m_rowmap;
-	cl_mem			m_kresult;
-	cl_int			dindex;
-	bool			hash_loader;/* true, if this context loads hash table */
-	cl_uint			ev_kern_main;	/* event index of kern_main */
-	cl_uint			ev_kern_proj;	/* event index of kern_proj */
-	cl_uint			ev_index;
-	cl_event		events[30];
-} clstate_gpuhashjoin;
-
 static void
 clserv_respond_hashjoin(cl_event event, cl_int ev_status, void *private)
 {
@@ -3904,6 +3883,73 @@ __pgstrom_process_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
 
 		
 	}
+
+	/*
+	 * __global void
+	 * kern_gpuhashjoin_main(kern_hashjoin *khashjoin,
+	 *                       kern_multihash *kmhash,
+	 *                       kern_data_store *kds,
+	 *                       kern_data_store *ktoast)
+	 */
+	pgstrom_compute_workgroup_size(&grid_size,
+								   &block_size,
+								   ghjoin->kern_main,
+								   ghjoin->task.cuda_device,
+								   false,
+								   kds_dest->nrooms,
+								   sizeof(cl_uint));
+	ghjoin->kern_main_args[0] = &ghjoin->m_join;
+	ghjoin->kern_main_args[1] = &ghjoin->m_hash;
+	ghjoin->kern_main_args[2] = &ghjoin->m_kds;
+	ghjoin->kern_main_args[3] = &ghjoin->m_ktoast;
+
+	rc = cuLaunchKernel(ghjoin->kern_qual,
+						grid_size, 1, 1,
+						block_size, 1, 1,
+						sizeof(uint) * block_size,
+						gpuscan->task.cuda_stream,
+						gpuscan->kern_qual_args,
+						NULL);
+    if (rc != CUDA_SUCCESS)
+        elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+    gpuscan->task.pfm.num_kern_qual++;
+
+
+
+
+	/*
+	 * __global__ void
+	 * kern_gpuhashjoin_projection_row(kern_hashjoin *khashjoin,
+	 * 								   kern_multihash *kmhash,
+	 *                                 kern_data_store *kds,
+	 *                                 kern_data_store *ktoast,
+	 *                                 kern_data_store *kds_dest)
+	 */
+	pgstrom_compute_workgroup_size(&grid_size,
+								   &block_size,
+								   ghjoin->kern_proj,
+								   ghjoin->task.cuda_device,
+								   false,
+								   kds->nitems,
+								   sizeof(cl_uint));
+	ghjoin->kern_proj_args[0] = &ghjoin->m_join;
+	ghjoin->kern_proj_args[1] = &ghjoin->m_hash;
+	ghjoin->kern_proj_args[2] = &ghjoin->m_kds;
+	ghjoin->kern_proj_args[3] = &ghjoin->m_ktoast;
+	ghjoin->kern_proj_args[4] = &ghjoin->m_kresult;
+
+	rc = cuLaunchKernel(ghjoin->kern_proj,
+						grid_size, 1, 1,
+						block_size, 1, 1,
+						sizeof(uint) * block_size,
+						gpuscan->task.cuda_stream,
+						gpuscan->kern_proj_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+	gpuscan->task.pfm.num_kern_qual++;
+
+
 
 
 
