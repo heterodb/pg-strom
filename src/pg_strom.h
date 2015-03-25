@@ -202,8 +202,8 @@ struct GpuTaskState
 	bool			scan_done;		/* no rows to read, if true */
 	bool			scan_bulk;		/* bulk outer load, if true */
 	cl_uint			curr_index;		/* current position on the curr_task */
-	slock_t			lock;			/* protection of the fields below */
 	struct GpuTask *curr_task;		/* a task currently processed */
+	slock_t			lock;			/* protection of the fields below */
 	dlist_head		tracked_tasks;	/* for resource tracking */
 	dlist_head		running_tasks;	/* list for running tasks */
 	dlist_head		pending_tasks;	/* list for pending tasks */

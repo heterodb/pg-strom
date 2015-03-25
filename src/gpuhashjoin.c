@@ -272,14 +272,10 @@ typedef struct
 	Size			usage;		/* current usage of this mhash */
 	cl_ulong		ntuples;	/* number of tuples in this mhash */
 	bool			is_divided;	/* true, if not whole of the inner relation */
-	slock_t			lock;		/* protection of the fields below */
-	cl_int			refcnt;		/* reference counter of this hash table */
-	cl_int			dindex;		/* device to load the hash table */
-	cl_int			n_kernel;	/* number of active running kernel */
-	CUdeviceptr		m_hash;		/* in-kernel buffer object. Once n_kernel
-								 * backed to zero, valid m_hash needs to
-								 * be released. */
-	kern_multihash	kern;
+	CUdeviceptr	   *m_hash;		/* Gpu memory for each cuda context */
+	CUevent		   *ev_load;	/* Sync object for each cuda context */
+	bool		   *is_loaded;	/* True, if DMA send had been kicked */
+	kern_multihash	kern;		/* in-kernel structure; to be sent */
 } pgstrom_multihash_tables;
 
 /*
@@ -2255,9 +2251,9 @@ multihash_dump_tables(pgstrom_multihash_tables *mhtables)
 	int		i, j;
 
 	initStringInfo(&str);
-	for (i=1; i <= mhtables->kern.ntables; i++)
+	for (i=1; i <= mhtables->kern->ntables; i++)
 	{
-		kern_hashtable *khash = KERN_HASHTABLE(&mhtables->kern, i);
+		kern_hashtable *khash = KERN_HASHTABLE(mhtables->kern, i);
 
 		elog(INFO, "----hashtable[%d] {nslots=%u ncols=%u} ------------",
 			 i, khash->nslots, khash->ncols);
@@ -2444,7 +2440,7 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs,
 	kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
 	nrooms = (cl_uint)((double)kds->nitems * ghjs->row_population_ratio * 1.1);
 	memset(kresults, 0, sizeof(kern_resultbuf));
-	kresults->nrels = gpuhashjoin->mhtables->kern.ntables + 1;
+	kresults->nrels = gpuhashjoin->mhtables->kern->ntables + 1;
 	kresults->nrooms = nrooms;
 	kresults->nitems = 0;
 	kresults->errcode = StromError_Success;
@@ -3258,6 +3254,7 @@ static void *
 multihash_exec_bulk(CustomScanState *node)
 {
 	MultiHashState *mhs = (MultiHashState *) node;
+	GpuContext	   *gcontext = mhs->gcontext;
 	pgstrom_multihash_tables *mhtables;
 	PlanState	   *mhstate;	/* underlying MultiHash, if any */
 	bool			scan_forward = false;
@@ -3289,17 +3286,12 @@ multihash_exec_bulk(CustomScanState *node)
 		/* no more deep hash-table, so create a new pgstrom_multihash_tables */
 		int			ntables = depth;
 		Size		usage;
-		Size		allocated;
 
 		if (mhs->outer_done)
 			goto out;
 		scan_forward = true;
 
-		mhnode = palloc0(sizeof(MultiHashNode));
-		NodeSetTag(mhnode, T_Invalid);
-		mhnode->nrels = nrels;
-
-		/* allocation of multihash_tables on shared memory */
+		/* allocation of multihash_tables on pinned memory */
 		mhtables = MemoryContextAlloc(gcontext->memcxt,
 									  mhs->hashtable_size);
 		/* initialize multihash_tables */
@@ -3310,12 +3302,16 @@ multihash_exec_bulk(CustomScanState *node)
 			mhs->hashtable_size - offsetof(pgstrom_multihash_tables, kern);
 		mhtables->usage = usage;
 		mhtables->ntuples = 0.0;
-		SpinLockInit(&mhtables->lock);
-		mhtables->refcnt = 1;
-		mhtables->dindex = -1;		/* set by CUDA handler  */
-		mhtables->n_kernel = 0;		/* set by CUDA handler */
-		mhtables->m_hash = 0UL;		/* set by CUDA handler */
-
+		mhtables->is_divided = false;
+		mhtables->m_hash = MemoryContextAllocZero(gcontext->memcxt,
+												  sizeof(CUdeviceptr) *
+												  gcontext->num_context);
+		mhtables->ev_load = MemoryContextAllocZero(gcontext->memcxt,
+												   sizeof(CUevent) *
+												   gcontext->num_context);
+		mhtables->is_loaded = MemoryContextAllocZero(gcontext->memcxt,
+													 sizeof(bool) *
+													 gcontext->num_context);
 		memcpy(mhtables->kern.pg_crc32_table,
 			   pg_crc32c_table,
 			   sizeof(uint32) * 256);
@@ -3326,7 +3322,6 @@ multihash_exec_bulk(CustomScanState *node)
 			   sizeof(cl_uint) * (ntables + 1));
 	}
 	Assert(mhtables != NULL);
-	mhs->mhtables = mhs;
 
 	/*
 	 * construct a kernel hash-table that stores all the inner-keys
@@ -3813,6 +3808,165 @@ clserv_respond_hashjoin(cl_event event, cl_int ev_status, void *private)
 	/* otherwise, hash-join is successfully done */
 	pgstrom_reply_message(&gpuhashjoin->msg);
 }
+
+static bool
+__pgstrom_process_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
+{
+	pgstrom_multihash_tables *mhtables = ghjoin->mhtables;
+	pgstrom_data_store *pds_src = ghjoin->pds_src;
+	pgstrom_data_store *pds_dst = ghjoin->pds_dst;
+	CUresult		rc;
+
+	/*
+	 * kernel function lookup
+	 */
+	rc = cuModuleGetFunction(&ghjoin->kern_main,
+							 ghjoin->task.cuda_module,
+							 "kern_gpuhashjoin_main");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+	rc = cuModuleGetFunction(&ghjoin->kern_proj,
+							 ghjoin->task.cuda_module,
+							 pds_dst->kds->format == KDS_FORMAT_ROW
+							 ? "kern_gpuhashjoin_projection_row"
+							 : "kern_gpuhashjoin_projection_slot");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+	/*
+	 * Allocation of device memory for hash table. If someone already
+	 * allocated it, we shall reuse this segment.
+	 */
+	if (!mhtables->m_hash[cuda_index])
+	{
+		CUdeviceptr m_hash = gpuMemAlloc(&ghjoin->task, mhtables->length);
+
+		if (!m_hash)
+			goto out_of_resource;
+		mhtables->m_hash[cuda_index] = m_hash;
+	}
+
+	/*
+	 * Allocation of device memory for each chunks
+	 */
+
+	/* __global kern_hashjoin *khashjoin */
+	length = (KERN_HASHJOIN_PARAMBUF_LENGTH(&ghjoin->khashjoin) +
+			  KERN_HASHJOIN_RESULTBUF_LENGTH(&ghjoin->khashjoin) +
+			  sizeof(cl_int) * kresults->nrels * kresults->nrooms);
+	ghjoin->m_join = gpuMemAlloc(&ghjoin->task, length);
+	if (!ghjoin->m_join)
+		goto out_of_resource;
+
+	/* __global kern_data_store *kds */
+	length = KERN_DATA_STORE_LENGTH(kds);
+	ghjoin->m_dstore = gpuMemAlloc(&ghjoin->task, length);
+	if (!ghjoin->m_dstore)
+		goto out_of_resource;
+
+	/* __global kern_data_store *ktoast, if needed */
+	if (!pds_src->ktoast)
+		ghjoin->m_ktoast = 0UL;
+	else
+	{
+		pgstrom_data_store *ktoast = pds->ktoast;
+
+		length = KERN_DATA_STORE_LENGTH(ktoast->kds);
+		ghjoin->m_ktoast = gpuMemAlloc(&ghjoin->task, length);
+		if (!ghjoin->m_ktoast)
+			goto out_of_resource;
+	}
+
+	/* __global kern_data_store *kds_dst */
+	length = KERN_DATA_STORE_LENGTH(pds_dst->kds);
+	ghjoin->m_kresult = gpuMemAlloc(&ghjoin->task, length);
+	if (!ghjoin->m_kresult)
+		goto out_of_resource;
+
+	/*
+	 * OK, all the device memory and kernel objects are successfully
+	 * constructed. Let's enqueue DMA send/recv and kernel invocations.
+	 */
+	if (!mhtables->is_loaded[cuda_index])
+	{
+		/* kick DMA send of hash table */
+
+
+
+
+
+	}
+	else
+	{
+		/* synchronize load of hash table */
+		rc = cuStreamWaitEvent(cuda_stream, mhtables->ev_load[cuda_index]);
+
+		
+	}
+
+
+
+
+
+	/*
+	 * Creation of event objects, if any
+	 */
+	if (ghjoin->task.pfm.enabled)
+	{}
+
+	/*
+	 * OK, enqueue a series of requests
+	 */
+	if (ghjoin->task.pfm.enabled)
+	{
+
+	}
+
+	
+
+
+
+out_of_resource:
+
+
+
+}
+
+static bool
+pgstrom_process_gpuhashjoin(GpuTask *gtask)
+{
+	pgstrom_gpuhashjoin	*ghjoin = (pgstrom_gpuhashjoin *) gtask;
+	bool		status;
+	CUresult	rc;
+
+	/* Switch CUDA Context */
+	rc = cuCtxPushCurrent(gtask->cuda_context);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+	PG_TRY();
+	{
+		status = __pgstrom_process_gpuhashjoin(ghjoin);
+	}
+	PG_CATCH();
+	{
+		rc = cuCtxPopCurrent(NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+		gpuhashjoin_cleanup_cuda_resources(ghjoin);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	/* Reset CUDA Context */
+	rc = cuCtxPopCurrent(NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+
+	return status;
+}
+
+
 
 static void
 clserv_process_gpuhashjoin(pgstrom_message *message)
