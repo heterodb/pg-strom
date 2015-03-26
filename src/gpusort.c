@@ -318,7 +318,6 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 	double	nrows_per_chunk;
 	long	num_chunks;
 	Size	chunk_size;
-	Size	max_chunk_size = pgstrom_shmem_maxalloc();
 
 	if (ntuples < 2.0)
 		ntuples = 2.0;
