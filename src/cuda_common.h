@@ -426,6 +426,10 @@ typedef struct {
 	cl_int		results[FLEXIBLE_ARRAY_MEMBER];
 } kern_resultbuf;
 
+#define KERN_GET_RESULT(kresults, index)		\
+	((kresults)->results + (kresults)->nrels * (index))
+
+#if 0
 /*
  * kern_row_map
  *
@@ -436,6 +440,7 @@ typedef struct {
 	cl_int		nvalids;	/* # of valid rows. -1 means all visible */
 	cl_int		rindex[FLEXIBLE_ARRAY_MEMBER];
 } kern_row_map;
+#endif
 
 #ifdef __CUDACC__
 /*
