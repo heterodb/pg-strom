@@ -143,11 +143,6 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by smlint_x  asc,integer_x desc,bigint_x  asc,real_x desc,float_x  asc,nume_x desc) as rowid,* from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by smlint_x desc,integer_x  asc,bigint_x desc,real_x  asc,float_x desc,nume_x  asc) as rowid,* from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
 
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x desc,nume_x desc,smlint_x desc,integer_x desc,bigint_x desc,real_x desc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x  asc,nume_x  asc,smlint_x  asc,integer_x  asc,bigint_x  asc,real_x  asc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x  asc,nume_x desc,smlint_x  asc,integer_x desc,bigint_x  asc,real_x desc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x desc,nume_x  asc,smlint_x desc,integer_x  asc,bigint_x desc,real_x  asc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
-
 --gpusort on zero table
 explain (verbose, costs off, timing off) select * from strom_zero_test order by smlint_x;
 explain (verbose, costs off, timing off) select * from strom_zero_test order by integer_x;
@@ -157,14 +152,14 @@ explain (verbose, costs off, timing off) select * from strom_zero_test order by 
 explain (verbose, costs off, timing off) select * from strom_zero_test order by nume_x;
 
 --gpusort by text-key
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by char_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by char_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from (select row_number() over (order by char_x desc) as rowid,char_x from strom_string_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from (select row_number() over (order by char_x asc) as rowid,char_x from strom_string_test) as t where t.rowid%100=0;
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by nchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by nchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x desc) as rowid,vchar_x from strom_string_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x asc) as rowid,vchar_x from strom_string_test) as t where t.rowid%100=0;
 
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by nvchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by nvchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
@@ -313,11 +308,6 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by smlint_x  asc,integer_x desc,bigint_x  asc,real_x desc,float_x  asc,nume_x desc) as rowid,* from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by smlint_x desc,integer_x  asc,bigint_x desc,real_x  asc,float_x desc,nume_x  asc) as rowid,* from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
 
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x desc,nume_x desc,smlint_x desc,integer_x desc,bigint_x desc,real_x desc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x  asc,nume_x  asc,smlint_x  asc,integer_x  asc,bigint_x  asc,real_x  asc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x  asc,nume_x desc,smlint_x  asc,integer_x desc,bigint_x  asc,real_x desc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x desc,nume_x  asc,smlint_x desc,integer_x  asc,bigint_x desc,real_x  asc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
-
 --gpusort on zero table
 explain (verbose, costs off, timing off) select * from strom_zero_test order by smlint_x;
 explain (verbose, costs off, timing off) select * from strom_zero_test order by integer_x;
@@ -327,18 +317,17 @@ explain (verbose, costs off, timing off) select * from strom_zero_test order by 
 explain (verbose, costs off, timing off) select * from strom_zero_test order by nume_x;
 
 --gpusort by text-key
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by char_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by char_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from (select row_number() over (order by char_x desc) as rowid,char_x from strom_string_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from (select row_number() over (order by char_x asc) as rowid,char_x from strom_string_test) as t where t.rowid%100=0;
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by nchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by nchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x desc) as rowid,vchar_x from strom_string_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x asc) as rowid,vchar_x from strom_string_test) as t where t.rowid%100=0;
 
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by nvchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by nvchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by text_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by text_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-

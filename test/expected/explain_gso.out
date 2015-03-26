@@ -1819,70 +1819,6 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
                      Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
 (11 rows)
 
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x desc,nume_x desc,smlint_x desc,integer_x desc,bigint_x desc,real_x desc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
-                                                                                                                          QUERY PLAN                                                                                                                           
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Subquery Scan on t
-   Output: t.rowid, t.id, t.key, t.smlint_x, t.integer_x, t.bigint_x, t.real_x, t.float_x, t.nume_x, t.smlsrl_x, t.serial_x, t.bigsrl_x
-   Filter: ((t.rowid % 1000::bigint) = 0)
-   ->  WindowAgg
-         Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-         ->  Sort
-               Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Sort Key: strom_test.float_x DESC, strom_test.nume_x DESC, strom_test.smlint_x DESC, strom_test.integer_x DESC, strom_test.bigint_x DESC, strom_test.real_x DESC
-               ->  Seq Scan on public.strom_test
-                     Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-                     Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
-(11 rows)
-
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x  asc,nume_x  asc,smlint_x  asc,integer_x  asc,bigint_x  asc,real_x  asc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
-                                                                                                                          QUERY PLAN                                                                                                                           
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Subquery Scan on t
-   Output: t.rowid, t.id, t.key, t.smlint_x, t.integer_x, t.bigint_x, t.real_x, t.float_x, t.nume_x, t.smlsrl_x, t.serial_x, t.bigsrl_x
-   Filter: ((t.rowid % 1000::bigint) = 0)
-   ->  WindowAgg
-         Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-         ->  Sort
-               Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
-               ->  Seq Scan on public.strom_test
-                     Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-                     Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
-(11 rows)
-
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x  asc,nume_x desc,smlint_x  asc,integer_x desc,bigint_x  asc,real_x desc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
-                                                                                                                          QUERY PLAN                                                                                                                           
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Subquery Scan on t
-   Output: t.rowid, t.id, t.key, t.smlint_x, t.integer_x, t.bigint_x, t.real_x, t.float_x, t.nume_x, t.smlsrl_x, t.serial_x, t.bigsrl_x
-   Filter: ((t.rowid % 1000::bigint) = 0)
-   ->  WindowAgg
-         Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-         ->  Sort
-               Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Sort Key: strom_test.float_x, strom_test.nume_x DESC, strom_test.smlint_x, strom_test.integer_x DESC, strom_test.bigint_x, strom_test.real_x DESC
-               ->  Seq Scan on public.strom_test
-                     Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-                     Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
-(11 rows)
-
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x desc,nume_x  asc,smlint_x desc,integer_x  asc,bigint_x desc,real_x  asc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
-                                                                                                                          QUERY PLAN                                                                                                                           
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Subquery Scan on t
-   Output: t.rowid, t.id, t.key, t.smlint_x, t.integer_x, t.bigint_x, t.real_x, t.float_x, t.nume_x, t.smlsrl_x, t.serial_x, t.bigsrl_x
-   Filter: ((t.rowid % 1000::bigint) = 0)
-   ->  WindowAgg
-         Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-         ->  Sort
-               Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Sort Key: strom_test.float_x DESC, strom_test.nume_x, strom_test.smlint_x DESC, strom_test.integer_x, strom_test.bigint_x DESC, strom_test.real_x
-               ->  Seq Scan on public.strom_test
-                     Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-                     Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
-(11 rows)
-
 --gpusort on zero table
 explain (verbose, costs off, timing off) select * from strom_zero_test order by smlint_x;
                                                   QUERY PLAN                                                   
@@ -1945,34 +1881,34 @@ explain (verbose, costs off, timing off) select * from strom_zero_test order by 
 (5 rows)
 
 --gpusort by text-key
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by char_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-                                      QUERY PLAN                                       
----------------------------------------------------------------------------------------
+explain (verbose, costs off, timing off) select * from (select row_number() over (order by char_x desc) as rowid,char_x from strom_string_test) as t where t.rowid%100=0;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
  Subquery Scan on t
-   Output: t.rowid, t.id
+   Output: t.rowid, t.char_x
    Filter: ((t.rowid % 100::bigint) = 0)
    ->  WindowAgg
-         Output: row_number() OVER (?), strom_string_test.id, strom_string_test.char_x
+         Output: row_number() OVER (?), strom_string_test.char_x
          ->  Sort
-               Output: strom_string_test.char_x, strom_string_test.id
+               Output: strom_string_test.char_x
                Sort Key: strom_string_test.char_x COLLATE "C" DESC
                ->  Seq Scan on public.strom_string_test
-                     Output: strom_string_test.char_x, strom_string_test.id
+                     Output: strom_string_test.char_x
 (10 rows)
 
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by char_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-                                      QUERY PLAN                                       
----------------------------------------------------------------------------------------
+explain (verbose, costs off, timing off) select * from (select row_number() over (order by char_x asc) as rowid,char_x from strom_string_test) as t where t.rowid%100=0;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Subquery Scan on t
-   Output: t.rowid, t.id
+   Output: t.rowid, t.char_x
    Filter: ((t.rowid % 100::bigint) = 0)
    ->  WindowAgg
-         Output: row_number() OVER (?), strom_string_test.id, strom_string_test.char_x
+         Output: row_number() OVER (?), strom_string_test.char_x
          ->  Sort
-               Output: strom_string_test.char_x, strom_string_test.id
+               Output: strom_string_test.char_x
                Sort Key: strom_string_test.char_x COLLATE "C"
                ->  Seq Scan on public.strom_string_test
-                     Output: strom_string_test.char_x, strom_string_test.id
+                     Output: strom_string_test.char_x
 (10 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by nchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
@@ -2005,34 +1941,34 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
                      Output: strom_string_test.nchar_x, strom_string_test.id
 (10 rows)
 
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-                                       QUERY PLAN                                       
-----------------------------------------------------------------------------------------
+explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x desc) as rowid,vchar_x from strom_string_test) as t where t.rowid%100=0;
+                             QUERY PLAN                             
+--------------------------------------------------------------------
  Subquery Scan on t
-   Output: t.rowid, t.id
+   Output: t.rowid, t.vchar_x
    Filter: ((t.rowid % 100::bigint) = 0)
    ->  WindowAgg
-         Output: row_number() OVER (?), strom_string_test.id, strom_string_test.vchar_x
+         Output: row_number() OVER (?), strom_string_test.vchar_x
          ->  Sort
-               Output: strom_string_test.vchar_x, strom_string_test.id
+               Output: strom_string_test.vchar_x
                Sort Key: strom_string_test.vchar_x COLLATE "C" DESC
                ->  Seq Scan on public.strom_string_test
-                     Output: strom_string_test.vchar_x, strom_string_test.id
+                     Output: strom_string_test.vchar_x
 (10 rows)
 
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-                                       QUERY PLAN                                       
-----------------------------------------------------------------------------------------
+explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x asc) as rowid,vchar_x from strom_string_test) as t where t.rowid%100=0;
+                            QUERY PLAN                            
+------------------------------------------------------------------
  Subquery Scan on t
-   Output: t.rowid, t.id
+   Output: t.rowid, t.vchar_x
    Filter: ((t.rowid % 100::bigint) = 0)
    ->  WindowAgg
-         Output: row_number() OVER (?), strom_string_test.id, strom_string_test.vchar_x
+         Output: row_number() OVER (?), strom_string_test.vchar_x
          ->  Sort
-               Output: strom_string_test.vchar_x, strom_string_test.id
+               Output: strom_string_test.vchar_x
                Sort Key: strom_string_test.vchar_x COLLATE "C"
                ->  Seq Scan on public.strom_string_test
-                     Output: strom_string_test.vchar_x, strom_string_test.id
+                     Output: strom_string_test.vchar_x
 (10 rows)
 
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by nvchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
@@ -4077,78 +4013,6 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
                      Features: likely-tuple-slot
 (13 rows)
 
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x desc,nume_x desc,smlint_x desc,integer_x desc,bigint_x desc,real_x desc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
-                                                                                                                          QUERY PLAN                                                                                                                           
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Subquery Scan on t
-   Output: t.rowid, t.id, t.key, t.smlint_x, t.integer_x, t.bigint_x, t.real_x, t.float_x, t.nume_x, t.smlsrl_x, t.serial_x, t.bigsrl_x
-   Filter: ((t.rowid % 1000::bigint) = 0)
-   ->  WindowAgg
-         Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-         ->  Custom Scan (GpuSort)
-               Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
-               Features: likely-tuple-slot
-               ->  Custom Scan (GpuScan) on public.strom_test
-                     Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-                     Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
-                     Features: likely-tuple-slot
-(13 rows)
-
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x  asc,nume_x  asc,smlint_x  asc,integer_x  asc,bigint_x  asc,real_x  asc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
-                                                                                                                          QUERY PLAN                                                                                                                           
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Subquery Scan on t
-   Output: t.rowid, t.id, t.key, t.smlint_x, t.integer_x, t.bigint_x, t.real_x, t.float_x, t.nume_x, t.smlsrl_x, t.serial_x, t.bigsrl_x
-   Filter: ((t.rowid % 1000::bigint) = 0)
-   ->  WindowAgg
-         Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-         ->  Custom Scan (GpuSort)
-               Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
-               Features: likely-tuple-slot
-               ->  Custom Scan (GpuScan) on public.strom_test
-                     Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-                     Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
-                     Features: likely-tuple-slot
-(13 rows)
-
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x  asc,nume_x desc,smlint_x  asc,integer_x desc,bigint_x  asc,real_x desc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
-                                                                                                                          QUERY PLAN                                                                                                                           
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Subquery Scan on t
-   Output: t.rowid, t.id, t.key, t.smlint_x, t.integer_x, t.bigint_x, t.real_x, t.float_x, t.nume_x, t.smlsrl_x, t.serial_x, t.bigsrl_x
-   Filter: ((t.rowid % 1000::bigint) = 0)
-   ->  WindowAgg
-         Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-         ->  Custom Scan (GpuSort)
-               Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
-               Features: likely-tuple-slot
-               ->  Custom Scan (GpuScan) on public.strom_test
-                     Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-                     Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
-                     Features: likely-tuple-slot
-(13 rows)
-
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x desc,nume_x  asc,smlint_x desc,integer_x  asc,bigint_x desc,real_x  asc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
-                                                                                                                          QUERY PLAN                                                                                                                           
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Subquery Scan on t
-   Output: t.rowid, t.id, t.key, t.smlint_x, t.integer_x, t.bigint_x, t.real_x, t.float_x, t.nume_x, t.smlsrl_x, t.serial_x, t.bigsrl_x
-   Filter: ((t.rowid % 1000::bigint) = 0)
-   ->  WindowAgg
-         Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-         ->  Custom Scan (GpuSort)
-               Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
-               Features: likely-tuple-slot
-               ->  Custom Scan (GpuScan) on public.strom_test
-                     Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-                     Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
-                     Features: likely-tuple-slot
-(13 rows)
-
 --gpusort on zero table
 explain (verbose, costs off, timing off) select * from strom_zero_test order by smlint_x;
                                                   QUERY PLAN                                                   
@@ -4217,36 +4081,36 @@ explain (verbose, costs off, timing off) select * from strom_zero_test order by 
 (6 rows)
 
 --gpusort by text-key
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by char_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-                                      QUERY PLAN                                       
----------------------------------------------------------------------------------------
+explain (verbose, costs off, timing off) select * from (select row_number() over (order by char_x desc) as rowid,char_x from strom_string_test) as t where t.rowid%100=0;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Subquery Scan on t
-   Output: t.rowid, t.id
+   Output: t.rowid, t.char_x
    Filter: ((t.rowid % 100::bigint) = 0)
    ->  WindowAgg
-         Output: row_number() OVER (?), strom_string_test.id, strom_string_test.char_x
+         Output: row_number() OVER (?), strom_string_test.char_x
          ->  Custom Scan (GpuSort)
-               Output: strom_string_test.char_x, strom_string_test.id
+               Output: strom_string_test.char_x
                Sort Key: strom_string_test.char_x
                Features: likely-tuple-slot
                ->  Seq Scan on public.strom_string_test
-                     Output: strom_string_test.char_x, strom_string_test.id
+                     Output: strom_string_test.char_x
 (11 rows)
 
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by char_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-                                      QUERY PLAN                                       
----------------------------------------------------------------------------------------
+explain (verbose, costs off, timing off) select * from (select row_number() over (order by char_x asc) as rowid,char_x from strom_string_test) as t where t.rowid%100=0;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Subquery Scan on t
-   Output: t.rowid, t.id
+   Output: t.rowid, t.char_x
    Filter: ((t.rowid % 100::bigint) = 0)
    ->  WindowAgg
-         Output: row_number() OVER (?), strom_string_test.id, strom_string_test.char_x
+         Output: row_number() OVER (?), strom_string_test.char_x
          ->  Custom Scan (GpuSort)
-               Output: strom_string_test.char_x, strom_string_test.id
+               Output: strom_string_test.char_x
                Sort Key: strom_string_test.char_x
                Features: likely-tuple-slot
                ->  Seq Scan on public.strom_string_test
-                     Output: strom_string_test.char_x, strom_string_test.id
+                     Output: strom_string_test.char_x
 (11 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by nchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
@@ -4281,36 +4145,36 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
                      Output: strom_string_test.nchar_x, strom_string_test.id
 (11 rows)
 
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-                                       QUERY PLAN                                       
-----------------------------------------------------------------------------------------
+explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x desc) as rowid,vchar_x from strom_string_test) as t where t.rowid%100=0;
+                            QUERY PLAN                            
+------------------------------------------------------------------
  Subquery Scan on t
-   Output: t.rowid, t.id
+   Output: t.rowid, t.vchar_x
    Filter: ((t.rowid % 100::bigint) = 0)
    ->  WindowAgg
-         Output: row_number() OVER (?), strom_string_test.id, strom_string_test.vchar_x
+         Output: row_number() OVER (?), strom_string_test.vchar_x
          ->  Custom Scan (GpuSort)
-               Output: strom_string_test.vchar_x, strom_string_test.id
+               Output: strom_string_test.vchar_x
                Sort Key: strom_string_test.vchar_x
                Features: likely-tuple-slot
                ->  Seq Scan on public.strom_string_test
-                     Output: strom_string_test.vchar_x, strom_string_test.id
+                     Output: strom_string_test.vchar_x
 (11 rows)
 
-explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
-                                       QUERY PLAN                                       
-----------------------------------------------------------------------------------------
+explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x asc) as rowid,vchar_x from strom_string_test) as t where t.rowid%100=0;
+                            QUERY PLAN                            
+------------------------------------------------------------------
  Subquery Scan on t
-   Output: t.rowid, t.id
+   Output: t.rowid, t.vchar_x
    Filter: ((t.rowid % 100::bigint) = 0)
    ->  WindowAgg
-         Output: row_number() OVER (?), strom_string_test.id, strom_string_test.vchar_x
+         Output: row_number() OVER (?), strom_string_test.vchar_x
          ->  Custom Scan (GpuSort)
-               Output: strom_string_test.vchar_x, strom_string_test.id
+               Output: strom_string_test.vchar_x
                Sort Key: strom_string_test.vchar_x
                Features: likely-tuple-slot
                ->  Seq Scan on public.strom_string_test
-                     Output: strom_string_test.vchar_x, strom_string_test.id
+                     Output: strom_string_test.vchar_x
 (11 rows)
 
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by nvchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;

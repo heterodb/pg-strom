@@ -7,34 +7,34 @@ set gpu_setup_cost=0;
 set random_page_cost=1000000;   --# force off index_scan.   
 set enable_gpusort to on;                                                                                                                                       
 set client_min_messages to warning;
-select * from (select row_number() over (order by char_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
- rowid | id  
--------+-----
-   100 | 799
-   200 | 391
-   300 | 325
-   400 |  24
-   500 | 667
-   600 | 715
-   700 | 419
-   800 | 576
-   900 | 888
-  1000 | 872
+select * from (select row_number() over (order by char_x desc) as rowid,char_x from strom_string_test) as t where t.rowid%100=0;
+ rowid | char_x 
+-------+--------
+   100 | e
+   200 | c
+   300 | b
+   400 | 9
+   500 | 8
+   600 | 6
+   700 | 4
+   800 | 3
+   900 | 1
+  1000 | 0
 (10 rows)
 
-select * from (select row_number() over (order by char_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
- rowid | id  
--------+-----
-   100 | 806
-   200 | 143
-   300 | 400
-   400 | 379
-   500 | 523
-   600 | 155
-   700 |   1
-   800 |  57
-   900 | 961
-  1000 | 800
+select * from (select row_number() over (order by char_x asc) as rowid,char_x from strom_string_test) as t where t.rowid%100=0;
+ rowid | char_x 
+-------+--------
+   100 | 1
+   200 | 3
+   300 | 4
+   400 | 6
+   500 | 8
+   600 | 9
+   700 | b
+   800 | c
+   900 | e
+  1000 | f
 (10 rows)
 
 select * from (select row_number() over (order by nchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
@@ -67,34 +67,34 @@ select * from (select row_number() over (order by nchar_x asc) as rowid,id from 
   1000 | 849
 (10 rows)
 
-select * from (select row_number() over (order by vchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
- rowid | id  
--------+-----
-   100 | 386
-   200 | 852
-   300 | 261
-   400 |  71
-   500 | 352
-   600 | 496
-   700 | 395
-   800 |  19
-   900 | 411
-  1000 |  59
+select * from (select row_number() over (order by vchar_x desc) as rowid,vchar_x from strom_string_test) as t where t.rowid%100=0;
+ rowid | vchar_x 
+-------+---------
+   100 | e
+   200 | c
+   300 | b
+   400 | 9
+   500 | 7
+   600 | 6
+   700 | 4
+   800 | 3
+   900 | 1
+  1000 | 0
 (10 rows)
 
-select * from (select row_number() over (order by vchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
- rowid | id  
--------+-----
-   100 | 755
-   200 | 952
-   300 | 398
-   400 | 188
-   500 | 170
-   600 | 642
-   700 | 700
-   800 | 833
-   900 | 588
-  1000 | 351
+select * from (select row_number() over (order by vchar_x asc) as rowid,vchar_x from strom_string_test) as t where t.rowid%100=0;
+ rowid | vchar_x 
+-------+---------
+   100 | 1
+   200 | 3
+   300 | 4
+   400 | 6
+   500 | 7
+   600 | 9
+   700 | b
+   800 | c
+   900 | e
+  1000 | f
 (10 rows)
 
 -- select * from (select row_number() over (order by nvchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;

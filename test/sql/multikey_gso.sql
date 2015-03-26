@@ -31,8 +31,3 @@ select * from (select row_number() over (order by smlint_x desc,integer_x desc,b
 select * from (select row_number() over (order by smlint_x  asc,integer_x  asc,bigint_x  asc,real_x  asc,float_x  asc,nume_x  asc) as rowid,* from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
 select * from (select row_number() over (order by smlint_x  asc,integer_x desc,bigint_x  asc,real_x desc,float_x  asc,nume_x desc) as rowid,* from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
 select * from (select row_number() over (order by smlint_x desc,integer_x  asc,bigint_x desc,real_x  asc,float_x desc,nume_x  asc) as rowid,* from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
-
-select * from (select row_number() over (order by float_x desc,nume_x desc,smlint_x desc,integer_x desc,bigint_x desc,real_x desc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
-select * from (select row_number() over (order by float_x  asc,nume_x  asc,smlint_x  asc,integer_x  asc,bigint_x  asc,real_x  asc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
-select * from (select row_number() over (order by float_x  asc,nume_x desc,smlint_x  asc,integer_x desc,bigint_x  asc,real_x desc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
-select * from (select row_number() over (order by float_x desc,nume_x  asc,smlint_x desc,integer_x  asc,bigint_x desc,real_x  asc) as rowid,* from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
