@@ -182,7 +182,7 @@ typedef uintptr_t	hostptr_t;
  * implies device cannot run the given expression completely.
  * (Usually, due to compressed or external varlena datum)
  */
-__device__ STATIC_IF_INLINE void
+__device__ STATIC_INLINE void
 STROM_SET_ERROR(cl_int *p_error, cl_int errcode)
 {
 	cl_int	oldcode = *p_error;
@@ -398,7 +398,7 @@ typedef struct {
 	cl_uint		poffset[FLEXIBLE_ARRAY_MEMBER];	/* offset of params */
 } kern_parambuf;
 
-__device__ STATIC_IF_INLINE void *
+__device__ STATIC_INLINE void *
 kparam_get_value(kern_parambuf *kparams, cl_uint pindex)
 {
 	if (pindex >= kparams->nparams)

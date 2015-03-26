@@ -721,19 +721,8 @@ pgstrom_cleanup_gputaskstate(GpuTaskState *gts)
 	/* synchronize all the concurrent task, if any */
 	pgstrom_sync_gpucontext(gts->gcontext);
 
+	/* release tasks tracked by this task state */
 	SpinLockAcquire(&gts->lock);
-	if (gts->curr_task)
-	{
-		gtask = gts->curr_task;
-		Assert(gtask->gts == gts);
-		dlist_delete(&gtask->tracker);
-		memset(&gtask->tracker, 0, sizeof(dlist_node));
-		gts->curr_task = NULL;
-		SpinLockRelease(&gts->lock);
-		gts->cb_task_release(gtask);
-		SpinLockAcquire(&gts->lock);
-	}
-
 	while (!dlist_is_empty(&gts->tracked_tasks))
 	{
 		dnode = dlist_pop_head_node(&gts->tracked_tasks);
@@ -763,6 +752,7 @@ pgstrom_release_gputaskstate(GpuTaskState *gts)
 
 	/* unlink this GpuTaskState from the GpuContext */
 	dlist_delete(&gts->chain);
+	memset(&gts->chain, 0, sizeof(dlist_node));
 
 	/* clean-up and release any concurrent tasks */
 	pgstrom_cleanup_gputaskstate(gts);

@@ -2208,7 +2208,8 @@ static Node *
 gpuhashjoin_create_scan_state(CustomScan *cscan)
 {
 	GpuContext		   *gcontext = pgstrom_get_gpucontext();
-	GpuHashJoinState   *ghjs = palloc0(sizeof(GpuHashJoinState));
+	GpuHashJoinState   *ghjs =
+		MemoryContextAllocZero(gcontext->memcxt, sizeof(GpuHashJoinState));
 
 	NodeSetTag(ghjs, T_CustomScanState);
 	ghjs->gts.css.flags = cscan->flags;
@@ -2425,7 +2426,7 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs,
 	 */
 	required = (offsetof(pgstrom_gpuhashjoin, kern) +
 				STROMALIGN(ghjs->kparams->length) +
-				STROMALIGN(offsetof(kern_row_map, rindex[0])));
+				STROMALIGN(offsetof(kern_resultbuf, results[0])));
 	gpuhashjoin = MemoryContextAllocZero(gcontext->memcxt, required);
 	pgstrom_init_gputask(&ghjs->gts, &gpuhashjoin->task);
 	gpuhashjoin->mhtables = multihash_get_tables(ghjs->mhtables);
@@ -3366,11 +3367,18 @@ out:
 static void
 multihash_end(CustomScanState *node)
 {
+	MultiHashState *mhs = (MultiHashState *) node;
+
 	/*
 	 * shut down the subplan
 	 */
 	ExecEndNode(outerPlanState(node));
 	ExecEndNode(innerPlanState(node));
+
+	/*
+	 * release GpuContext
+	 */
+	pgstrom_put_gpucontext(mhs->gcontext);
 }
 
 static void
