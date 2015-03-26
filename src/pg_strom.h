@@ -155,6 +155,51 @@ typedef struct {
 		}																\
 	} while(0)
 
+#define CUDA_EVENT_RECORD(node,ev_field)						\
+	do {														\
+		if (((GpuTask *)(node))->pfm.enabled)					\
+		{														\
+			CUresult __rc =	cuEventRecord((node)->ev_field,		\
+										  ((GpuTask *)(node))->cuda_stream); \
+			if (__rc != CUDA_SUCCESS)							\
+				elog(ERROR, "failed on cuEventRecord: %s",		\
+					 errorText(__rc));							\
+		}														\
+	} while(0)
+
+#define CUDA_EVENT_DESTROY(node,ev_field)						\
+	do {														\
+		if ((node)->ev_field)									\
+		{														\
+			CUresult __rc = cuEventDestroy((node)->ev_field);	\
+			if (__rc != CUDA_SUCCESS)							\
+				elog(WARNING, "failed on cuEventDestroy: %s",	\
+					 errorText(__rc));							\
+		}														\
+	} while(0)
+
+#define CUDA_EVENT_ELAPSED(node,pfm_field,ev_start,ev_stop)			\
+	do {															\
+		CUresult	__rc;											\
+		float		__elapsed;										\
+																	\
+		if ((node)->ev_start != NULL && (node)->ev_stop != NULL)	\
+		{															\
+			__rc = cuEventElapsedTime(&__elapsed,					\
+									  (node)->ev_start,				\
+									  (node)->ev_stop);				\
+			if (__rc != CUDA_SUCCESS)								\
+				elog(ERROR, "failed on cuEventElapsedTime: %s",		\
+					 errorText(__rc));								\
+			((GpuTask *)(node))->pfm.pfm_field += __elapsed;		\
+		}															\
+	} while(0)
+
+
+
+
+
+
 /*
  *
  *
@@ -214,7 +259,7 @@ struct GpuTaskState
 	cl_uint			num_ready_tasks;
 	/* callbacks */
 	bool		  (*cb_task_process)(GpuTask *gtask);
-	void		  (*cb_task_complete)(GpuTask *gtask);
+	bool		  (*cb_task_complete)(GpuTask *gtask);
 	void		  (*cb_task_fallback)(GpuTask *gtask);
 	void		  (*cb_task_release)(GpuTask *gtask);
 	GpuTask		 *(*cb_load_next)(GpuTaskState *gts);
@@ -347,6 +392,12 @@ HostPinMemContextCreate(MemoryContext parent,
  * cuda_control.c
  */
 extern Size gpuMemMaxAllocSize(void);
+extern CUdeviceptr __gpuMemAlloc(GpuContext *gcontext,
+								 int cuda_index,
+								 size_t bytesize);
+extern void __gpuMemFree(GpuContext *gcontext,
+						 int cuda_index,
+						 CUdeviceptr dptr);
 extern CUdeviceptr gpuMemAlloc(GpuTask *gtask, size_t bytesize);
 extern void gpuMemFree(GpuTask *gtask, CUdeviceptr dptr);
 extern GpuContext *pgstrom_get_gpucontext(void);

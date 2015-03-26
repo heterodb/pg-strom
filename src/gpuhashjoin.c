@@ -37,6 +37,8 @@
 #include "parser/parsetree.h"
 #include "parser/parse_coerce.h"
 #include "storage/ipc.h"
+#include "storage/latch.h"
+#include "storage/proc.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -272,9 +274,10 @@ typedef struct
 	Size			usage;		/* current usage of this mhash */
 	cl_ulong		ntuples;	/* number of tuples in this mhash */
 	bool			is_divided;	/* true, if not whole of the inner relation */
+	cl_int			refcnt;		/* reference counter */
 	CUdeviceptr	   *m_hash;		/* Gpu memory for each cuda context */
-	CUevent		   *ev_load;	/* Sync object for each cuda context */
-	bool		   *is_loaded;	/* True, if DMA send had been kicked */
+	CUevent		   *ev_loaded;	/* Sync object for each cuda context *
+								 * NULL means DMA already kicked */
 	kern_multihash	kern;		/* in-kernel structure; to be sent */
 } pgstrom_multihash_tables;
 
@@ -290,9 +293,8 @@ typedef struct
 	void		   *kern_proj_args[5];
 	CUdeviceptr		m_join;
 	CUdeviceptr		m_hash;
-	CUdeviceptr		m_kds;
-	CUdeviceptr		m_ktoast;
-	CUdeviceptr		m_kresult;
+	CUdeviceptr		m_kds_src;
+	CUdeviceptr		m_kds_dst;
 	bool			hash_loader; /* true, if this context loads hash table */
 	CUevent			ev_dma_send_start;
 	CUevent			ev_dma_send_stop;
@@ -365,7 +367,7 @@ typedef struct {
  * static functions
  */
 static bool pgstrom_process_gpuhashjoin(GpuTask *gtask);
-static void pgstrom_complete_gpuhashjoin(GpuTask *gtask);
+static bool pgstrom_complete_gpuhashjoin(GpuTask *gtask);
 static void pgstrom_fallback_gpuhashjoin(GpuTask *gtask);
 static void pgstrom_release_gpuhashjoin(GpuTask *gtask);
 static GpuTask *pgstrom_load_gpuhashjoin(GpuTaskState *gts);
@@ -373,7 +375,7 @@ static GpuTask *pgstrom_load_gpuhashjoin(GpuTaskState *gts);
 static pgstrom_multihash_tables *
 multihash_get_tables(pgstrom_multihash_tables *mhtables);
 static void
-multihash_put_tables(pgstrom_multihash_tables *mhtables);
+multihash_put_tables(GpuContext *gcontext, pgstrom_multihash_tables *mhtables);
 
 /*
  * BulkExecMultiHashTables
@@ -2215,7 +2217,7 @@ gpuhashjoin_create_scan_state(CustomScan *cscan)
 	pgstrom_init_gputaststate(gcontext, &ghjs->gts);
 	ghjs->gts.cb_task_process = pgstrom_process_gpuhashjoin;
 	ghjs->gts.cb_task_complete = pgstrom_complete_gpuhashjoin;
-	ghjs->gts.cb_task_fallback = NULL;   /* to be implemented later */
+	ghjs->gts.cb_task_fallback = pgstrom_fallback_gpuhashjoin;
 	ghjs->gts.cb_task_release = pgstrom_release_gpuhashjoin;
 	ghjs->gts.cb_load_next = pgstrom_load_gpuhashjoin;
 	ghjs->gts.cb_cleanup = NULL;
@@ -2251,9 +2253,9 @@ multihash_dump_tables(pgstrom_multihash_tables *mhtables)
 	int		i, j;
 
 	initStringInfo(&str);
-	for (i=1; i <= mhtables->kern->ntables; i++)
+	for (i=1; i <= mhtables->kern.ntables; i++)
 	{
-		kern_hashtable *khash = KERN_HASHTABLE(mhtables->kern, i);
+		kern_hashtable *khash = KERN_HASHTABLE(&mhtables->kern, i);
 
 		elog(INFO, "----hashtable[%d] {nslots=%u ncols=%u} ------------",
 			 i, khash->nslots, khash->ncols);
@@ -2390,7 +2392,8 @@ pgstrom_release_gpuhashjoin(GpuTask *gtask)
 
 	/* unlink hashjoin-table, if remained */
 	if (gpuhashjoin->mhtables)
-		multihash_put_tables(gpuhashjoin->mhtables);
+		multihash_put_tables(gtask->gts->gcontext,
+							 gpuhashjoin->mhtables);
 	/* unlink source data store */
 	if (gpuhashjoin->pds_src)
 		pfree(gpuhashjoin->pds_src);
@@ -2440,7 +2443,7 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs,
 	kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
 	nrooms = (cl_uint)((double)kds->nitems * ghjs->row_population_ratio * 1.1);
 	memset(kresults, 0, sizeof(kern_resultbuf));
-	kresults->nrels = gpuhashjoin->mhtables->kern->ntables + 1;
+	kresults->nrels = gpuhashjoin->mhtables->kern.ntables + 1;
 	kresults->nrooms = nrooms;
 	kresults->nitems = 0;
 	kresults->errcode = StromError_Success;
@@ -2522,7 +2525,8 @@ retry:
 		if (ghjs->mhtables)
 		{
 			Assert(ghjs->gts.scan_done);
-			multihash_put_tables(ghjs->mhtables);
+			multihash_put_tables(ghjs->gts.gcontext,
+								 ghjs->mhtables);
 			ghjs->mhtables = NULL;
 		}
 		ghjs->mhtables = mhtables;
@@ -2902,29 +2906,44 @@ gpuhashjoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 static pgstrom_multihash_tables *
 multihash_get_tables(pgstrom_multihash_tables *mhtables)
 {
-	SpinLockAcquire(&mhtables->lock);
 	Assert(mhtables->refcnt > 0);
 	mhtables->refcnt++;
-	SpinLockRelease(&mhtables->lock);
 
 	return mhtables;
 }
 
 static void
-multihash_put_tables(pgstrom_multihash_tables *mhtables)
+multihash_put_tables(GpuContext *gcontext, pgstrom_multihash_tables *mhtables)
 {
-	bool	do_release = false;
-
-	SpinLockAcquire(&mhtables->lock);
-	Assert(mhtables->refcnt > 0);
 	if (--mhtables->refcnt == 0)
 	{
-		Assert(mhtables->n_kernel == 0 && !mhtables->m_hash);
-		do_release = true;
-	}
-	SpinLockRelease(&mhtables->lock);
-	if (do_release)
+		CUresult	rc;
+		int			i;
+
+		for (i=0; i < gcontext->num_context; i++)
+		{
+			rc = cuCtxPushCurrent(gcontext->gpu[i].cuda_context);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+
+			if (mhtables->m_hash[i])
+				__gpuMemFree(gcontext, i, mhtables->m_hash[i]);
+
+			if (mhtables->ev_loaded[i])
+			{
+				rc = cuEventDestroy(mhtables->ev_loaded[i]);
+				if (rc != CUDA_SUCCESS)
+					elog(ERROR, "failed on cuEventDestroy: %s", errorText(rc));
+			}
+
+			rc = cuCtxPopCurrent(NULL);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuCtxPopCurrent: %s", errorText(rc));
+		}
+		pfree(mhtables->m_hash);
+		pfree(mhtables->ev_loaded);
 		pfree(mhtables);
+	}
 }
 
 static Node *
@@ -3007,12 +3026,14 @@ multihash_exec(CustomScanState *node)
 static pgstrom_multihash_tables *
 expand_multihash_tables(MultiHashState *mhs,
 						pgstrom_multihash_tables *mhtables_old,
-						Size required)
+						Size consumed, Size required)
 {
 	pgstrom_multihash_tables *mhtables_new;
 	GpuContext *gcontext = mhs->gcontext;
 	Size		length_new;
-	Size		consumed;
+
+	/* sanity check */
+	Assert(consumed <= required);
 
 	/* estimate new length */
 	length_new = mhtables_old->length;
@@ -3022,11 +3043,8 @@ expand_multihash_tables(MultiHashState *mhs,
 
 	/* allocate a new one */
 	mhtables_new = MemoryContextAlloc(gcontext->memcxt, length_new);
-	memcpy(mhtables_new, mhtables_old,
-		   offsetof(pgstrom_multihash_tables, kern) +
-		   mhtables_old->usage + consumed);
-	mhtables_new->length =
-		length_new - offsetof(pgstrom_multihash_tables, kern);
+	memcpy(mhtables_new, mhtables_old, consumed);
+	mhtables_new->length = length_new;
 	mhtables_new->kern.hostptr = (hostptr_t)&mhtables_new->kern.hostptr;
 	Assert(mhtables_new->length > mhtables_old->length);
 
@@ -3034,7 +3052,12 @@ expand_multihash_tables(MultiHashState *mhs,
 		 mhtables_old->length, mhtables_old,
 		 mhtables_new->length, mhtables_new);
 
-	multihash_put_tables(mhtables_old);
+	/* NOTE: must not use multihash_put_tables() here, because it releases
+	 * m_hash[] and ev_loaded[] array. Also, we don't need to pay attention
+	 * for concurrent task during inner preloading.
+	 */
+	pfree(mhtables_old);
+
 	/* update hashtable_size of MultiHashState */
 	do {
 		Assert(IsA(mhs, CustomScanState) &&
@@ -3072,15 +3095,19 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	 */
 	Assert(mhtables->kern.htable_offset[depth] == 0);
 	Assert(mhtables->usage == LONGALIGN(mhtables->usage));
-	mhtables->kern.htable_offset[depth] = mhtables->usage;
+	mhtables->kern.htable_offset[depth] =
+		mhtables->usage - offsetof(pgstrom_multihash_tables, kern);
 
 	if (!scan_forward)
 	{
 		Assert(mhs->curr_chunk);
 		required = mhtables->usage + mhs->curr_chunk->length;
 		if (required > mhs->threshold * mhtables->length)
-			mhtables = expand_multihash_tables(mhs, mhtables, required);
-		memcpy((char *)&mhtables->kern + mhtables->usage,
+		{
+			mhtables = expand_multihash_tables(mhs, mhtables,
+											   mhtables->usage, required);
+		}
+		memcpy((char *)mhtables + mhtables->usage,
 			   mhs->curr_chunk,
 			   mhs->curr_chunk->length);
 		mhtables->usage += mhs->curr_chunk->length;
@@ -3098,9 +3125,11 @@ multihash_preload_khashtable(MultiHashState *mhs,
 								   colmeta[tupdesc->natts])) +
 				LONGALIGN(sizeof(cl_uint) * mhs->nslots));
 	if (required > mhs->threshold * mhtables->length)
-		mhtables = expand_multihash_tables(mhs, mhtables, required);
-
-	khtable = (kern_hashtable *)((char *)&mhtables->kern + mhtables->usage);
+	{
+		mhtables = expand_multihash_tables(mhs, mhtables,
+										   mhtables->usage, required);
+	}
+	khtable = (kern_hashtable *)((char *)mhtables + mhtables->usage);
 	khtable->ncols = tupdesc->natts;
 	khtable->nslots = mhs->nslots;
 	khtable->is_outer = false;	/* Only INNER is supported right now */
@@ -3134,7 +3163,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 	memset(hash_slots, 0, sizeof(cl_uint) * khtable->nslots);
 	consumed = LONGALIGN((uintptr_t)&hash_slots[khtable->nslots] -
 						 (uintptr_t)khtable);
-	mhtables->usage += consumed;
+	Assert(mhtables->usage + consumed == required);
 
 	/*
 	 * Nest, fill up tuples fetched from the outer relation into
@@ -3171,9 +3200,10 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		required = mhtables->usage + consumed + entry_size;
 		if (required > mhs->threshold * mhtables->length)
 		{
-			mhtables = expand_multihash_tables(mhs, mhtables, required);
-			khtable = (kern_hashtable *)
-				((char *)&mhtables->kern + mhtables->usage);
+			mhtables = expand_multihash_tables(mhs, mhtables,
+											   mhtables->usage + consumed,
+											   required);
+			khtable = (kern_hashtable *)((char *)mhtables + mhtables->usage);
 			hash_slots = KERN_HASHTABLE_SLOT(khtable);
 		}
 
@@ -3237,11 +3267,11 @@ multihash_preload_khashtable(MultiHashState *mhs,
 
 		/* increment buffer consumption */
 		consumed += entry_size;
-		mhtables->usage += entry_size;
 		/* increment number of tuples read */
 		mhtables->ntuples++;
 	}
-	Assert(mhtables->usage < mhtables->length);
+	Assert(mhtables->usage + consumed <= mhtables->length);
+	mhtables->usage += consumed;
 	khtable->length = consumed;
 	if (mhs->curr_chunk || !mhs->outer_done)
 		mhtables->is_divided = true;
@@ -3295,31 +3325,25 @@ multihash_exec_bulk(CustomScanState *node)
 		mhtables = MemoryContextAlloc(gcontext->memcxt,
 									  mhs->hashtable_size);
 		/* initialize multihash_tables */
-		usage = STROMALIGN(offsetof(kern_multihash,
-									htable_offset[ntables + 1]));
+		usage = offsetof(pgstrom_multihash_tables, kern) +
+			STROMALIGN(offsetof(kern_multihash, htable_offset[ntables + 1]));
 		memset(mhtables, 0, usage);
-		mhtables->length =
-			mhs->hashtable_size - offsetof(pgstrom_multihash_tables, kern);
+		mhtables->length = mhs->hashtable_size;
 		mhtables->usage = usage;
 		mhtables->ntuples = 0.0;
+		mhtables->refcnt = 1;
 		mhtables->is_divided = false;
 		mhtables->m_hash = MemoryContextAllocZero(gcontext->memcxt,
 												  sizeof(CUdeviceptr) *
 												  gcontext->num_context);
-		mhtables->ev_load = MemoryContextAllocZero(gcontext->memcxt,
-												   sizeof(CUevent) *
-												   gcontext->num_context);
-		mhtables->is_loaded = MemoryContextAllocZero(gcontext->memcxt,
-													 sizeof(bool) *
+		mhtables->ev_loaded = MemoryContextAllocZero(gcontext->memcxt,
+													 sizeof(CUevent) *
 													 gcontext->num_context);
 		memcpy(mhtables->kern.pg_crc32_table,
 			   pg_crc32c_table,
 			   sizeof(uint32) * 256);
 		mhtables->kern.hostptr = (hostptr_t) &mhtables->kern.hostptr;
 		mhtables->kern.ntables = ntables;
-		memset(mhtables->kern.htable_offset,
-			   0,
-			   sizeof(cl_uint) * (ntables + 1));
 	}
 	Assert(mhtables != NULL);
 
@@ -3422,6 +3446,449 @@ multihash_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	}
 }
 
+/* ----------------------------------------------------------------
+ *
+ * GpuTask handlers of GpuHashJoin
+ *
+ * ----------------------------------------------------------------
+ */
+static void
+gpuhashjoin_cleanup_cuda_resources(pgstrom_gpuhashjoin *ghjoin)
+{
+	CUDA_EVENT_DESTROY(ghjoin, ev_dma_send_start);
+	CUDA_EVENT_DESTROY(ghjoin, ev_dma_send_stop);
+	CUDA_EVENT_DESTROY(ghjoin, ev_kern_main_end);
+	CUDA_EVENT_DESTROY(ghjoin, ev_dma_recv_start);
+	CUDA_EVENT_DESTROY(ghjoin, ev_dma_recv_stop);
+
+	if (ghjoin->m_join)
+		gpuMemFree(&ghjoin->task, ghjoin->m_join);
+	if (ghjoin->m_kds_src)
+		gpuMemFree(&ghjoin->task, ghjoin->m_kds_src);
+	if (ghjoin->m_kds_dst)
+		gpuMemFree(&ghjoin->task, ghjoin->m_kds_dst);
+
+	/* clear the pointers */
+	ghjoin->kern_main = NULL;
+	memset(ghjoin->kern_main_args, 0, sizeof(ghjoin->kern_main_args));
+	ghjoin->kern_proj = NULL;
+	memset(ghjoin->kern_proj_args, 0, sizeof(ghjoin->kern_proj_args));
+	ghjoin->m_join = 0UL;
+	ghjoin->m_kds_src = 0UL;
+	ghjoin->m_kds_dst = 0UL;
+	ghjoin->hash_loader = false;
+	ghjoin->ev_dma_send_start = NULL;
+	ghjoin->ev_dma_send_stop = NULL;
+	ghjoin->ev_kern_main_end = NULL;
+	ghjoin->ev_dma_recv_start = NULL;
+	ghjoin->ev_dma_recv_stop = NULL;
+}
+
+static void
+pgstrom_fallback_gpuhashjoin(GpuTask *gtask)
+{
+	elog(INFO, "GpuHashJoin fallback handler is not implemented yet");
+}
+
+static bool
+pgstrom_complete_gpuhashjoin(GpuTask *gtask)
+{
+	pgstrom_gpuhashjoin *ghjoin = (pgstrom_gpuhashjoin *) gtask;
+	GpuTaskState   *gts = gtask->gts;
+
+	if (gts->pfm_accum.enabled)
+	{
+		CUDA_EVENT_ELAPSED(ghjoin, time_dma_send,
+						   ev_dma_send_start,
+						   ev_dma_send_stop);
+		CUDA_EVENT_ELAPSED(ghjoin, time_kern_join,
+						   ev_dma_send_stop,
+						   ev_kern_main_end);
+		CUDA_EVENT_ELAPSED(ghjoin, time_kern_proj,
+						   ev_kern_main_end,
+						   ev_dma_recv_start);
+		CUDA_EVENT_ELAPSED(ghjoin, time_dma_recv,
+						   ev_dma_recv_start,
+						   ev_dma_recv_stop);
+		pgstrom_accum_perfmon(&gts->pfm_accum, &ghjoin->task.pfm);
+	}
+	gpuhashjoin_cleanup_cuda_resources(ghjoin);
+
+	/*
+	 * StromError_DataStoreNoSpace indicates pds_dst was smaller than
+	 * what GpuHashJoin required. So, we expand the buffer and kick
+	 * this gputask again.
+	 */
+	if (ghjoin->task.errcode == StromError_DataStoreNoSpace)
+	{
+		GpuContext		   *gcontext = gts->gcontext;
+		kern_resultbuf	   *kresults = KERN_HASHJOIN_RESULTBUF(&ghjoin->kern);
+		pgstrom_data_store *pds = ghjoin->pds_dst;
+		kern_data_store	   *old_kds = pds->kds;
+		kern_data_store	   *new_kds;
+		cl_uint				ncols = old_kds->ncols;
+		cl_uint				nitems = old_kds->nitems;
+		Size				required;
+
+		/* GpuHashJoin should not take file-mapped data store */
+		Assert(pds->kds_fname == NULL);
+
+		/* adjust kern_resultbuf */
+		kresults->nrooms = nitems;
+		kresults->nitems = 0;
+		kresults->errcode = StromError_Success;
+
+		/* re-allocation of pgstrom_data_store */
+		if (old_kds->format == KDS_FORMAT_ROW)
+		{
+			elog(INFO, "GpuHashJoin input again (length: %u => %u)",
+				 old_kds->length, old_kds->usage);
+			required = (KERN_DATA_STORE_HEAD_LENGTH(old_kds) +
+						STROMALIGN(sizeof(cl_uint) * nitems) +
+						STROMALIGN(old_kds->usage));
+			new_kds = MemoryContextAlloc(gcontext->memcxt, required);
+			memcpy(new_kds, old_kds, KERN_DATA_STORE_HEAD_LENGTH(old_kds));
+			new_kds->hostptr = (hostptr_t) &new_kds->hostptr;
+			new_kds->length = required;
+			new_kds->usage = 0;
+			new_kds->nrooms = nitems;
+			new_kds->nitems = 0;
+		}
+		else if (old_kds->format == KDS_FORMAT_SLOT)
+		{
+			elog(INFO, "GpuHashJoin input again (nrooms: %u => %u)",
+				 old_kds->nrooms, nitems);
+			required = STROMALIGN(KERN_DATA_STORE_HEAD_LENGTH(old_kds) +
+								  (LONGALIGN(sizeof(Datum) * ncols) +
+								   LONGALIGN(sizeof(bool) * ncols)) * nitems);
+			new_kds = MemoryContextAlloc(gcontext->memcxt, required);
+			memcpy(new_kds, old_kds, KERN_DATA_STORE_HEAD_LENGTH(old_kds));
+			new_kds->hostptr = (hostptr_t) &new_kds->hostptr;
+            new_kds->length = required;
+            new_kds->usage = 0;
+            new_kds->nrooms = nitems;
+            new_kds->nitems = 0;
+		}
+		else
+			elog(ERROR, "Bug? unexpected KDS format: %d", old_kds->format);
+
+		pds->kds = new_kds;
+		pfree(old_kds);
+
+		return true;	/* retry! */
+	}
+	return false;
+}
+
+static void
+pgstrom_respond_gpuhashjoin(CUstream stream, CUresult status, void *private)
+{
+	pgstrom_gpuhashjoin	*ghjoin = private;
+	GpuTaskState		*gts = ghjoin->task.gts;
+	kern_resultbuf		*kresults = KERN_HASHJOIN_RESULTBUF(&ghjoin->kern);
+
+	SpinLockAcquire(&gts->lock);
+	if (status != CUDA_SUCCESS)
+		ghjoin->task.errcode = status;
+	else
+		ghjoin->task.errcode = kresults->errcode;
+
+	/* remove from the running_tasks list */
+	dlist_delete(&ghjoin->task.chain);
+	gts->num_running_tasks--;
+	/* then, attach it on the completed_tasks list */
+	if (ghjoin->task.errcode == StromError_Success)
+		dlist_push_tail(&gts->completed_tasks, &ghjoin->task.chain);
+	else
+		dlist_push_head(&gts->completed_tasks, &ghjoin->task.chain);
+	SpinLockRelease(&gts->lock);
+
+	SetLatch(&MyProc->procLatch);
+}
+
+static bool
+__pgstrom_process_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
+{
+	pgstrom_multihash_tables *mhtables = ghjoin->mhtables;
+	pgstrom_data_store *pds_src = ghjoin->pds_src;
+	pgstrom_data_store *pds_dst = ghjoin->pds_dst;
+	kern_resultbuf	   *kresults = KERN_HASHJOIN_RESULTBUF(&ghjoin->kern);
+	int			cuda_index = ghjoin->task.cuda_index;
+	Size		offset;
+	Size		length;
+	size_t		grid_size;
+	size_t		block_size;
+	CUevent		ev_loaded;
+	CUresult	rc;
+
+	/*
+	 * sanity checks
+	 */
+	Assert(pds_src->kds->format == KDS_FORMAT_ROW);
+	Assert(!pds_src->ktoast);
+	Assert(pds_dst->kds->format == KDS_FORMAT_ROW ||
+		   pds_dst->kds->format == KDS_FORMAT_SLOT);
+
+	/*
+	 * kernel function lookup
+	 */
+	rc = cuModuleGetFunction(&ghjoin->kern_main,
+							 ghjoin->task.cuda_module,
+							 "kern_gpuhashjoin_main");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+	rc = cuModuleGetFunction(&ghjoin->kern_proj,
+							 ghjoin->task.cuda_module,
+							 pds_dst->kds->format == KDS_FORMAT_ROW
+							 ? "kern_gpuhashjoin_projection_row"
+							 : "kern_gpuhashjoin_projection_slot");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+	/*
+	 * Allocation of device memory for hash table. If someone already
+	 * allocated it, we shall reuse this segment.
+	 */
+	if (!mhtables->m_hash[cuda_index])
+	{
+		CUdeviceptr m_hash = gpuMemAlloc(&ghjoin->task, mhtables->length);
+
+		if (!m_hash)
+			goto out_of_resource;
+		mhtables->m_hash[cuda_index] = m_hash;
+	}
+	Assert(mhtables->m_hash[cuda_index] != 0UL);
+
+	/*
+	 * Allocation of device memory for each chunks
+	 */
+
+	/* __global kern_hashjoin *khashjoin */
+	length = (KERN_HASHJOIN_PARAMBUF_LENGTH(&ghjoin->kern) +
+			  KERN_HASHJOIN_RESULTBUF_LENGTH(&ghjoin->kern) +
+			  sizeof(cl_int) * kresults->nrels * kresults->nrooms);
+	ghjoin->m_join = gpuMemAlloc(&ghjoin->task, length);
+	if (!ghjoin->m_join)
+		goto out_of_resource;
+
+	/* __global kern_data_store *kds_src */
+	length = KERN_DATA_STORE_LENGTH(pds_src->kds);
+	ghjoin->m_kds_src = gpuMemAlloc(&ghjoin->task, length);
+	if (!ghjoin->m_kds_src)
+		goto out_of_resource;
+
+	/* __global kern_data_store *kds_dst */
+	length = KERN_DATA_STORE_LENGTH(pds_dst->kds);
+	ghjoin->m_kds_dst = gpuMemAlloc(&ghjoin->task, length);
+	if (!ghjoin->m_kds_dst)
+		goto out_of_resource;
+
+	/*
+	 * OK, all the device memory and kernel objects are successfully
+	 * constructed. Let's enqueue DMA send/recv and kernel invocations.
+	 */
+	CUDA_EVENT_RECORD(ghjoin, ev_dma_send_start);
+
+	if (!mhtables->ev_loaded[cuda_index])
+	{
+		rc = cuEventCreate(&ev_loaded, CU_EVENT_DISABLE_TIMING);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+
+		rc = cuMemcpyHtoDAsync(mhtables->m_hash[cuda_index],
+							   &mhtables->kern,
+							   length,
+							   ghjoin->task.cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+
+		rc = cuEventRecord(ev_loaded, ghjoin->task.cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
+
+		mhtables->ev_loaded[cuda_index] = ev_loaded;
+		ghjoin->hash_loader = true;
+	}
+	else
+	{
+		ev_loaded = mhtables->ev_loaded[cuda_index];
+		rc = cuStreamWaitEvent(ghjoin->task.cuda_stream, ev_loaded, 0);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuStreamWaitEvent: %s", errorText(rc));
+		ghjoin->hash_loader = false;
+	}
+
+	/* DMA Send: __global kern_hashjoin *khashjoin */
+	length = KERN_HASHJOIN_DMA_SENDLEN(&ghjoin->kern);
+	rc = cuMemcpyHtoDAsync(ghjoin->m_join,
+						   KERN_HASHJOIN_DMA_SENDPTR(&ghjoin->kern),
+						   length,
+						   ghjoin->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+	ghjoin->task.pfm.bytes_dma_send += length;
+	ghjoin->task.pfm.num_dma_send++;
+
+	/* DMA Send: __global kern_data_store *kds_src */
+	length = KERN_DATA_STORE_LENGTH(pds_src->kds);
+	rc = cuMemcpyHtoDAsync(ghjoin->m_kds_src,
+						   pds_src->kds,
+						   length,
+						   ghjoin->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+	ghjoin->task.pfm.bytes_dma_send += length;
+	ghjoin->task.pfm.num_dma_send++;
+
+	/* DMA Send: __global kern_data_store *kds_dst */
+	length = KERN_DATA_STORE_HEAD_LENGTH(pds_dst->kds);
+	rc = cuMemcpyHtoDAsync(ghjoin->m_kds_src,
+						   pds_dst->kds,
+						   length,
+						   ghjoin->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+	ghjoin->task.pfm.bytes_dma_send += length;
+	ghjoin->task.pfm.num_dma_send++;
+
+	CUDA_EVENT_RECORD(ghjoin, ev_dma_send_stop);
+
+	/*
+	 * Launch: __global void
+	 * kern_gpuhashjoin_main(kern_hashjoin *khashjoin,
+	 *                       kern_multihash *kmhash,
+	 *                       kern_data_store *kds)
+	 */
+	pgstrom_compute_workgroup_size(&grid_size,
+								   &block_size,
+								   ghjoin->kern_main,
+								   ghjoin->task.cuda_device,
+								   false,
+								   pds_src->kds->nitems,
+								   sizeof(cl_uint));
+	ghjoin->kern_main_args[0] = &ghjoin->m_join;
+	ghjoin->kern_main_args[1] = &ghjoin->m_hash;
+	ghjoin->kern_main_args[2] = &ghjoin->m_kds_src;
+
+	rc = cuLaunchKernel(ghjoin->kern_main,
+						grid_size, 1, 1,
+						block_size, 1, 1,
+						sizeof(uint) * block_size,
+						ghjoin->task.cuda_stream,
+						ghjoin->kern_main_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+	ghjoin->task.pfm.num_kern_join++;
+
+	CUDA_EVENT_RECORD(ghjoin, ev_kern_main_end);
+
+	/*
+	 * Launch: __global__ void
+	 * kern_gpuhashjoin_projection_row(kern_hashjoin *khashjoin,
+	 * 								   kern_multihash *kmhash,
+	 *                                 kern_data_store *kds_src,
+	 *                                 kern_data_store *kds_dst)
+	 */
+	pgstrom_compute_workgroup_size(&grid_size,
+								   &block_size,
+								   ghjoin->kern_proj,
+								   ghjoin->task.cuda_device,
+								   false,
+								   pds_dst->kds->nrooms,
+								   sizeof(cl_uint));
+	ghjoin->kern_proj_args[0] = &ghjoin->m_join;
+	ghjoin->kern_proj_args[1] = &ghjoin->m_hash;
+	ghjoin->kern_proj_args[2] = &ghjoin->m_kds_src;
+	ghjoin->kern_proj_args[3] = &ghjoin->m_kds_dst;
+
+	rc = cuLaunchKernel(ghjoin->kern_proj,
+						grid_size, 1, 1,
+						block_size, 1, 1,
+						sizeof(uint) * block_size,
+						ghjoin->task.cuda_stream,
+						ghjoin->kern_proj_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+	ghjoin->task.pfm.num_kern_proj++;
+
+	CUDA_EVENT_RECORD(ghjoin, ev_dma_recv_start);
+
+	/* DMA Recv: __global kern_hashjoin *khashjoin */
+	offset = KERN_HASHJOIN_DMA_RECVOFS(&ghjoin->kern);
+	length = KERN_HASHJOIN_DMA_RECVLEN(&ghjoin->kern);
+	rc = cuMemcpyDtoHAsync(KERN_HASHJOIN_DMA_RECVPTR(&ghjoin->kern),
+						   ghjoin->m_join + offset,
+						   length,
+						   ghjoin->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
+	ghjoin->task.pfm.bytes_dma_recv += length;
+	ghjoin->task.pfm.num_dma_recv++;
+
+	/* DMA Recv: __global kern_data_store *kds_dst */
+	rc = cuMemcpyDtoHAsync(pds_dst->kds,
+						   ghjoin->m_kds_dst,
+						   length,
+						   ghjoin->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
+	ghjoin->task.pfm.bytes_dma_recv += length;
+	ghjoin->task.pfm.num_dma_recv++;
+
+	CUDA_EVENT_RECORD(ghjoin, ev_dma_recv_stop);
+
+	/*
+	 * Register callback
+	 */
+	rc = cuStreamAddCallback(ghjoin->task.cuda_stream,
+							 pgstrom_respond_gpuhashjoin,
+							 ghjoin, 0);
+    if (rc != CUDA_SUCCESS)
+        elog(ERROR, "cuStreamAddCallback: %s", errorText(rc));
+
+	return true;
+
+out_of_resource:
+	gpuhashjoin_cleanup_cuda_resources(ghjoin);
+	return false;
+}
+
+static bool
+pgstrom_process_gpuhashjoin(GpuTask *gtask)
+{
+	pgstrom_gpuhashjoin	*ghjoin = (pgstrom_gpuhashjoin *) gtask;
+	bool		status;
+	CUresult	rc;
+
+	/* Switch CUDA Context */
+	rc = cuCtxPushCurrent(gtask->cuda_context);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+	PG_TRY();
+	{
+		status = __pgstrom_process_gpuhashjoin(ghjoin);
+	}
+	PG_CATCH();
+	{
+		rc = cuCtxPopCurrent(NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+		gpuhashjoin_cleanup_cuda_resources(ghjoin);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	/* Reset CUDA Context */
+	rc = cuCtxPopCurrent(NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+
+	return status;
+}
+
 /*
  * pgstrom_init_gpuhashjoin
  *
@@ -3482,1179 +3949,4 @@ pgstrom_init_gpuhashjoin(void)
 	/* hook registration */
 	set_join_pathlist_next = set_join_pathlist_hook;
 	set_join_pathlist_hook = gpuhashjoin_add_join_path;
-}
-
-/* ----------------------------------------------------------------
- *
- * NOTE: below is the code being run on OpenCL server context
- *
- * ---------------------------------------------------------------- */
-
-static void
-clserv_respond_hashjoin(cl_event event, cl_int ev_status, void *private)
-{
-	clstate_gpuhashjoin	*clghj = (clstate_gpuhashjoin *) private;
-	pgstrom_gpuhashjoin *gpuhashjoin = clghj->gpuhashjoin;
-	pgstrom_multihash_tables *mhtables = gpuhashjoin->mhtables;
-	kern_resultbuf		*kresults
-		= KERN_HASHJOIN_RESULTBUF(&gpuhashjoin->khashjoin);
-
-	if (ev_status == CL_COMPLETE)
-		gpuhashjoin->msg.errcode = kresults->errcode;
-	else
-	{
-		clserv_log("unexpected CL_EVENT_COMMAND_EXECUTION_STATUS: %d",
-				   ev_status);
-		gpuhashjoin->msg.errcode = StromError_OpenCLInternal;
-	}
-
-	/* collect performance statistics */
-	if (gpuhashjoin->msg.pfm.enabled)
-	{
-		pgstrom_perfmon *pfm = &gpuhashjoin->msg.pfm;
-		cl_ulong	tv_start;
-		cl_ulong	tv_end;
-		cl_ulong	temp;
-		cl_int		i, rc;
-
-		/* Time to load hash-tables should be counted on the context that
-		 * actually kicked DMA send request only.
-		 */
-		if (clghj->hash_loader)
-		{
-			rc = clGetEventProfilingInfo(clghj->events[0],
-										 CL_PROFILING_COMMAND_START,
-										 sizeof(cl_ulong),
-										 &tv_start,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			rc = clGetEventProfilingInfo(clghj->events[0],
-										 CL_PROFILING_COMMAND_END,
-										 sizeof(cl_ulong),
-										 &tv_end,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			pfm->time_dma_send += (tv_end - tv_start) / 1000;
-		}
-
-		/*
-		 * DMA send time of hashjoin headers and row-/column-store
-		 */
-		tv_start = ~0;
-		tv_end = 0;
-		for (i=1; i < clghj->ev_kern_main; i++)
-		{
-			rc = clGetEventProfilingInfo(clghj->events[i],
-                                         CL_PROFILING_COMMAND_START,
-                                         sizeof(cl_ulong),
-                                         &temp,
-                                         NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			tv_start = Min(tv_start, temp);
-
-			rc = clGetEventProfilingInfo(clghj->events[i],
-										 CL_PROFILING_COMMAND_END,
-										 sizeof(cl_ulong),
-										 &temp,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			tv_end = Max(tv_end, temp);
-		}
-		pfm->time_dma_send += (tv_end - tv_start) / 1000;
-
-		/*
-		 * Main kernel execution time
-		 */
-		rc = clGetEventProfilingInfo(clghj->events[clghj->ev_kern_main],
-									 CL_PROFILING_COMMAND_START,
-									 sizeof(cl_ulong),
-									 &tv_start,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
-
-		rc = clGetEventProfilingInfo(clghj->events[clghj->ev_kern_main],
-									 CL_PROFILING_COMMAND_END,
-									 sizeof(cl_ulong),
-									 &tv_end,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
-		pfm->time_kern_exec += (tv_end - tv_start) / 1000;
-
-		/*
-		 * Projection kernel execution time
-		 */
-		rc = clGetEventProfilingInfo(clghj->events[clghj->ev_kern_proj],
-									 CL_PROFILING_COMMAND_START,
-									 sizeof(cl_ulong),
-									 &tv_start,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
-
-		rc = clGetEventProfilingInfo(clghj->events[clghj->ev_kern_proj],
-									 CL_PROFILING_COMMAND_END,
-									 sizeof(cl_ulong),
-									 &tv_end,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
-		pfm->time_kern_proj += (tv_end - tv_start) / 1000;
-
-		/*
-		 * DMA recv time
-		 */
-		tv_start = ~0;
-		tv_end = 0;
-		for (i=clghj->ev_kern_proj + 1; i < clghj->ev_index; i++)
-		{
-			rc = clGetEventProfilingInfo(clghj->events[i],
-										 CL_PROFILING_COMMAND_START,
-										 sizeof(cl_ulong),
-										 &temp,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			tv_start = Min(tv_start, temp);
-
-			rc = clGetEventProfilingInfo(clghj->events[i],
-										 CL_PROFILING_COMMAND_END,
-										 sizeof(cl_ulong),
-										 &temp,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			tv_end = Max(tv_end, temp);
-		}
-		pfm->time_dma_recv += (tv_end - tv_start) / 1000;
-
-	skip_perfmon:
-		if (rc != CL_SUCCESS)
-		{
-			clserv_log("failed on clGetEventProfilingInfo (%s)",
-					   opencl_strerror(rc));
-			pfm->enabled = false;	/* turn off profiling */
-		}
-	}
-
-	/*
-	 * release opencl resources
-	 *
-	 * NOTE: The first event object (a.k.a hjtable->ev_hash) and memory
-	 * object of hash table (a.k.a hjtable->m_hash) has to be released
-	 * under the hjtable->lock
-	 */
-	while (clghj->ev_index > 1)
-		clReleaseEvent(clghj->events[--clghj->ev_index]);
-	if (clghj->m_kresult)
-		clReleaseMemObject(clghj->m_kresult);
-	if (clghj->m_rowmap)
-		clReleaseMemObject(clghj->m_rowmap);
-	if (clghj->m_ktoast)
-		clReleaseMemObject(clghj->m_ktoast);
-	if (clghj->m_dstore)
-		clReleaseMemObject(clghj->m_dstore);
-	if (clghj->m_join)
-		clReleaseMemObject(clghj->m_join);
-	if (clghj->kern_main)
-		clReleaseKernel(clghj->kern_main);
-	if (clghj->kern_proj)
-		clReleaseKernel(clghj->kern_proj);
-	if (clghj->program)
-		clReleaseProgram(clghj->program);
-
-	/* Unload hashjoin-table, if no longer referenced */
-	SpinLockAcquire(&mhtables->lock);
-	Assert(mhtables->n_kernel > 0);
-	clReleaseMemObject(mhtables->m_hash);
-	clReleaseEvent(mhtables->ev_hash);
-	if (--mhtables->n_kernel == 0)
-	{
-		mhtables->m_hash = NULL;
-		mhtables->ev_hash = NULL;
-	}
-	SpinLockRelease(&mhtables->lock);	
-	free(clghj);
-
-	/*
-	 * A hash-join operation may produce unpredicated number of rows;
-	 * larger than capability of kern_resultbuf being allocated in-
-	 * advance. In this case, kernel code returns the error code of
-	 * StromError_DataStoreNoSpace, so we try again with larger result-
-	 * buffer.
-	 */
-	if (gpuhashjoin->msg.errcode == StromError_DataStoreNoSpace)
-	{
-		/*
-		 * Expand the result buffer then retry, if rough estimation didn't
-		 * give enough space to store the result
-		 */
-		pgstrom_data_store *old_pds = gpuhashjoin->pds_dest;
-		pgstrom_data_store *new_pds;
-		kern_data_store	   *old_kds = old_pds->kds;
-		kern_data_store	   *new_kds;
-		kern_resultbuf	   *kresults;
-		cl_uint				ncols = old_kds->ncols;
-		cl_uint				nitems = old_kds->nitems;
-		Size				head_len;
-		Size				required;
-
-		/* adjust kern_resultbuf */
-		kresults = KERN_HASHJOIN_RESULTBUF(&gpuhashjoin->khashjoin);
-		clserv_log("GHJ input kresults (%u=>%u)", kresults->nrooms, nitems);
-		kresults->nrooms = nitems;
-		kresults->nitems = 0;
-		kresults->errcode = StromError_Success;
-
-		head_len = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
-		if (old_kds->format == KDS_FORMAT_TUPSLOT)
-		{
-			clserv_log("GHJ input again (nrooms: %u => %u)",
-					   old_kds->nrooms, nitems);
-			required = STROMALIGN(head_len +
-								  (LONGALIGN(sizeof(Datum) * ncols) +
-								   LONGALIGN(sizeof(bool) * ncols)) * nitems);
-			new_kds = pgstrom_shmem_alloc(required);
-			if (!new_kds)
-			{
-				gpuhashjoin->msg.errcode = StromError_OutOfSharedMemory;
-				pgstrom_reply_message(&gpuhashjoin->msg);
-				return;
-			}
-			memcpy(new_kds, old_kds, head_len);
-			new_kds->hostptr = (hostptr_t) &new_kds->hostptr;
-			new_kds->length = required;
-			new_kds->usage = 0;
-			new_kds->nrooms = nitems;
-			new_kds->nitems = 0;
-		}
-		else if (old_kds->format == KDS_FORMAT_ROW_FLAT)
-		{
-			clserv_log("GHJ input again (length: %u => %u)",
-					   old_kds->length, old_kds->usage);
-			required = head_len +
-				STROMALIGN(sizeof(kern_blkitem) * old_kds->maxblocks) +
-				STROMALIGN(sizeof(kern_rowitem) * nitems) +
-				STROMALIGN(old_kds->usage);
-			new_kds = pgstrom_shmem_alloc(required);
-			if (!new_kds)
-			{
-				gpuhashjoin->msg.errcode = StromError_OutOfSharedMemory;
-				pgstrom_reply_message(&gpuhashjoin->msg);
-				return;
-			}
-			memcpy(new_kds, old_kds, head_len);
-			new_kds->hostptr = (hostptr_t) &new_kds->hostptr;
-			new_kds->length = required;
-			new_kds->usage = 0;
-			new_kds->nrooms = (required - head_len) / sizeof(kern_rowitem);
-			new_kds->nitems = 0;
-		}
-		else
-		{
-			gpuhashjoin->msg.errcode = StromError_DataStoreCorruption;
-			pgstrom_reply_message(&gpuhashjoin->msg);
-			return;
-		}
-		/* allocate a new pgstrom_data_store */
-		new_pds = pgstrom_shmem_alloc(sizeof(pgstrom_data_store));
-		if (!new_pds)
-		{
-			pgstrom_shmem_free(new_kds);
-			gpuhashjoin->msg.errcode = StromError_OutOfSharedMemory;
-            pgstrom_reply_message(&gpuhashjoin->msg);
-            return;
-		}
-		memset(new_pds, 0, sizeof(pgstrom_data_store));
-		new_pds->sobj.stag = StromTag_DataStore;
-		SpinLockInit(&new_pds->lock);
-		new_pds->refcnt = 1;
-		new_pds->kds = new_kds;
-
-		/* replace an old pds by new pds */
-		gpuhashjoin->pds_dest = new_pds;
-		pgstrom_put_data_store(old_pds);
-
-		/* retry gpuhashjoin with larger result buffer */
-		pgstrom_enqueue_message(&gpuhashjoin->msg);
-		return;
-	}
-	/* otherwise, hash-join is successfully done */
-	pgstrom_reply_message(&gpuhashjoin->msg);
-}
-
-static bool
-__pgstrom_process_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
-{
-	pgstrom_multihash_tables *mhtables = ghjoin->mhtables;
-	pgstrom_data_store *pds_src = ghjoin->pds_src;
-	pgstrom_data_store *pds_dst = ghjoin->pds_dst;
-	CUresult		rc;
-
-	/*
-	 * kernel function lookup
-	 */
-	rc = cuModuleGetFunction(&ghjoin->kern_main,
-							 ghjoin->task.cuda_module,
-							 "kern_gpuhashjoin_main");
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
-
-	rc = cuModuleGetFunction(&ghjoin->kern_proj,
-							 ghjoin->task.cuda_module,
-							 pds_dst->kds->format == KDS_FORMAT_ROW
-							 ? "kern_gpuhashjoin_projection_row"
-							 : "kern_gpuhashjoin_projection_slot");
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
-
-	/*
-	 * Allocation of device memory for hash table. If someone already
-	 * allocated it, we shall reuse this segment.
-	 */
-	if (!mhtables->m_hash[cuda_index])
-	{
-		CUdeviceptr m_hash = gpuMemAlloc(&ghjoin->task, mhtables->length);
-
-		if (!m_hash)
-			goto out_of_resource;
-		mhtables->m_hash[cuda_index] = m_hash;
-	}
-
-	/*
-	 * Allocation of device memory for each chunks
-	 */
-
-	/* __global kern_hashjoin *khashjoin */
-	length = (KERN_HASHJOIN_PARAMBUF_LENGTH(&ghjoin->khashjoin) +
-			  KERN_HASHJOIN_RESULTBUF_LENGTH(&ghjoin->khashjoin) +
-			  sizeof(cl_int) * kresults->nrels * kresults->nrooms);
-	ghjoin->m_join = gpuMemAlloc(&ghjoin->task, length);
-	if (!ghjoin->m_join)
-		goto out_of_resource;
-
-	/* __global kern_data_store *kds */
-	length = KERN_DATA_STORE_LENGTH(kds);
-	ghjoin->m_dstore = gpuMemAlloc(&ghjoin->task, length);
-	if (!ghjoin->m_dstore)
-		goto out_of_resource;
-
-	/* __global kern_data_store *ktoast, if needed */
-	if (!pds_src->ktoast)
-		ghjoin->m_ktoast = 0UL;
-	else
-	{
-		pgstrom_data_store *ktoast = pds->ktoast;
-
-		length = KERN_DATA_STORE_LENGTH(ktoast->kds);
-		ghjoin->m_ktoast = gpuMemAlloc(&ghjoin->task, length);
-		if (!ghjoin->m_ktoast)
-			goto out_of_resource;
-	}
-
-	/* __global kern_data_store *kds_dst */
-	length = KERN_DATA_STORE_LENGTH(pds_dst->kds);
-	ghjoin->m_kresult = gpuMemAlloc(&ghjoin->task, length);
-	if (!ghjoin->m_kresult)
-		goto out_of_resource;
-
-	/*
-	 * OK, all the device memory and kernel objects are successfully
-	 * constructed. Let's enqueue DMA send/recv and kernel invocations.
-	 */
-	if (!mhtables->is_loaded[cuda_index])
-	{
-		/* kick DMA send of hash table */
-
-
-
-
-
-	}
-	else
-	{
-		/* synchronize load of hash table */
-		rc = cuStreamWaitEvent(cuda_stream, mhtables->ev_load[cuda_index]);
-
-		
-	}
-
-	/*
-	 * __global void
-	 * kern_gpuhashjoin_main(kern_hashjoin *khashjoin,
-	 *                       kern_multihash *kmhash,
-	 *                       kern_data_store *kds,
-	 *                       kern_data_store *ktoast)
-	 */
-	pgstrom_compute_workgroup_size(&grid_size,
-								   &block_size,
-								   ghjoin->kern_main,
-								   ghjoin->task.cuda_device,
-								   false,
-								   kds_dest->nrooms,
-								   sizeof(cl_uint));
-	ghjoin->kern_main_args[0] = &ghjoin->m_join;
-	ghjoin->kern_main_args[1] = &ghjoin->m_hash;
-	ghjoin->kern_main_args[2] = &ghjoin->m_kds;
-	ghjoin->kern_main_args[3] = &ghjoin->m_ktoast;
-
-	rc = cuLaunchKernel(ghjoin->kern_qual,
-						grid_size, 1, 1,
-						block_size, 1, 1,
-						sizeof(uint) * block_size,
-						gpuscan->task.cuda_stream,
-						gpuscan->kern_qual_args,
-						NULL);
-    if (rc != CUDA_SUCCESS)
-        elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-    gpuscan->task.pfm.num_kern_qual++;
-
-
-
-
-	/*
-	 * __global__ void
-	 * kern_gpuhashjoin_projection_row(kern_hashjoin *khashjoin,
-	 * 								   kern_multihash *kmhash,
-	 *                                 kern_data_store *kds,
-	 *                                 kern_data_store *ktoast,
-	 *                                 kern_data_store *kds_dest)
-	 */
-	pgstrom_compute_workgroup_size(&grid_size,
-								   &block_size,
-								   ghjoin->kern_proj,
-								   ghjoin->task.cuda_device,
-								   false,
-								   kds->nitems,
-								   sizeof(cl_uint));
-	ghjoin->kern_proj_args[0] = &ghjoin->m_join;
-	ghjoin->kern_proj_args[1] = &ghjoin->m_hash;
-	ghjoin->kern_proj_args[2] = &ghjoin->m_kds;
-	ghjoin->kern_proj_args[3] = &ghjoin->m_ktoast;
-	ghjoin->kern_proj_args[4] = &ghjoin->m_kresult;
-
-	rc = cuLaunchKernel(ghjoin->kern_proj,
-						grid_size, 1, 1,
-						block_size, 1, 1,
-						sizeof(uint) * block_size,
-						gpuscan->task.cuda_stream,
-						gpuscan->kern_proj_args,
-						NULL);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-	gpuscan->task.pfm.num_kern_qual++;
-
-
-
-
-
-
-
-	/*
-	 * Creation of event objects, if any
-	 */
-	if (ghjoin->task.pfm.enabled)
-	{}
-
-	/*
-	 * OK, enqueue a series of requests
-	 */
-	if (ghjoin->task.pfm.enabled)
-	{
-
-	}
-
-	
-
-
-
-out_of_resource:
-
-
-
-}
-
-static bool
-pgstrom_process_gpuhashjoin(GpuTask *gtask)
-{
-	pgstrom_gpuhashjoin	*ghjoin = (pgstrom_gpuhashjoin *) gtask;
-	bool		status;
-	CUresult	rc;
-
-	/* Switch CUDA Context */
-	rc = cuCtxPushCurrent(gtask->cuda_context);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
-	PG_TRY();
-	{
-		status = __pgstrom_process_gpuhashjoin(ghjoin);
-	}
-	PG_CATCH();
-	{
-		rc = cuCtxPopCurrent(NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-		gpuhashjoin_cleanup_cuda_resources(ghjoin);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-
-	/* Reset CUDA Context */
-	rc = cuCtxPopCurrent(NULL);
-	if (rc != CUDA_SUCCESS)
-		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-
-	return status;
-}
-
-
-
-static void
-clserv_process_gpuhashjoin(pgstrom_message *message)
-{
-	pgstrom_gpuhashjoin *gpuhashjoin = (pgstrom_gpuhashjoin *) message;
-	pgstrom_multihash_tables *mhtables = gpuhashjoin->mhtables;
-	pgstrom_data_store *pds = gpuhashjoin->pds;
-	pgstrom_data_store *pds_dest = gpuhashjoin->pds_dest;
-	kern_data_store	   *kds = pds->kds;
-	kern_data_store	   *kds_dest = pds_dest->kds;
-	clstate_gpuhashjoin	*clghj = NULL;
-	kern_row_map	   *krowmap;
-	kern_resultbuf	   *kresults;
-	size_t				nitems;
-	size_t				gwork_sz;
-	size_t				lwork_sz;
-	Size				offset;
-	Size				length;
-	void			   *dmaptr;
-	cl_int				rc;
-
-	Assert(StromTagIs(gpuhashjoin, GpuHashJoin));
-	Assert(StromTagIs(gpuhashjoin->mhtables, HashJoinTable));
-	Assert(StromTagIs(gpuhashjoin->pds, DataStore));
-	krowmap = KERN_HASHJOIN_ROWMAP(&gpuhashjoin->khashjoin);
-	kresults = KERN_HASHJOIN_RESULTBUF(&gpuhashjoin->khashjoin);
-
-	/* state object of gpuhashjoin */
-	clghj = calloc(1, (sizeof(clstate_gpuhashjoin) +
-					   sizeof(cl_event) * kds->nblocks));
-	if (!clghj)
-	{
-		rc = CL_OUT_OF_HOST_MEMORY;
-		goto error;
-	}
-	clghj->gpuhashjoin = gpuhashjoin;
-
-	/*
-	 * First of all, it looks up a program object to be run on
-	 * the supplied row-store. We may have three cases.
-	 * 1) NULL; it means the required program is under asynchronous
-	 *    build, and the message is kept on its internal structure
-	 *    to be enqueued again. In this case, we have nothing to do
-	 *    any more on the invocation.
-	 * 2) BAD_OPENCL_PROGRAM; it means previous compile was failed
-	 *    and unavailable to run this program anyway. So, we need
-	 *    to reply StromError_ProgramCompile error to inform the
-	 *    backend this program.
-	 * 3) valid cl_program object; it is an ideal result. pre-compiled
-	 *    program object was on the program cache, and cl_program
-	 *    object is ready to use.
-	 */
-	clghj->program = clserv_lookup_device_program(gpuhashjoin->dprog_key,
-                                                  &gpuhashjoin->msg);
-    if (!clghj->program)
-    {
-        free(clghj);
-		return;	/* message is in waitq, being retried later */
-    }
-    if (clghj->program == BAD_OPENCL_PROGRAM)
-    {
-        rc = CL_BUILD_PROGRAM_FAILURE;
-        goto error;
-    }
-
-	/*
-     * Allocation of kernel memory for hash table. If someone already
-     * allocated it, we can reuse it.
-     */
-	SpinLockAcquire(&mhtables->lock);
-	if (mhtables->n_kernel == 0)
-	{
-		int		dindex;
-
-		Assert(!mhtables->m_hash && !mhtables->ev_hash);
-
-		dindex = pgstrom_opencl_device_schedule(&gpuhashjoin->msg);
-		mhtables->dindex = dindex;
-		clghj->dindex = dindex;
-		clghj->kcmdq = opencl_cmdq[dindex];
-		clghj->m_hash = clCreateBuffer(opencl_context,
-                                       CL_MEM_READ_WRITE,
-									   mhtables->length,
-									   NULL,
-									   &rc);
-		if (rc != CL_SUCCESS)
-		{
-			SpinLockRelease(&mhtables->lock);
-			goto error;
-		}
-
-		rc = clEnqueueWriteBuffer(clghj->kcmdq,
-								  clghj->m_hash,
-								  CL_FALSE,
-								  0,
-                                  mhtables->length,
-								  &mhtables->kern,
-								  0,
-								  NULL,
-								  &clghj->events[clghj->ev_index]);
-		if (rc != CL_SUCCESS)
-		{
-			clReleaseMemObject(clghj->m_hash);
-			clghj->m_hash = NULL;
-			SpinLockRelease(&mhtables->lock);
-			goto error;
-        }
-		mhtables->m_hash = clghj->m_hash;
-		mhtables->ev_hash = clghj->events[clghj->ev_index];
-		clghj->ev_index++;
-		clghj->hash_loader = true;
-		gpuhashjoin->msg.pfm.bytes_dma_send += mhtables->length;
-		gpuhashjoin->msg.pfm.num_dma_send++;
-	}
-	else
-	{
-		Assert(mhtables->m_hash && mhtables->ev_hash);
-		rc = clRetainMemObject(mhtables->m_hash);
-		Assert(rc == CL_SUCCESS);
-		rc = clRetainEvent(mhtables->ev_hash);
-		Assert(rc == CL_SUCCESS);
-
-		clghj->dindex = mhtables->dindex;
-		clghj->kcmdq = opencl_cmdq[clghj->dindex];
-		clghj->m_hash = mhtables->m_hash;
-		clghj->events[clghj->ev_index++] = mhtables->ev_hash;
-	}
-	mhtables->n_kernel++;
-	SpinLockRelease(&mhtables->lock);
-
-	/*
-	 * __kernel void
-	 * kern_gpuhashjoin_main(__global kern_hashjoin *khashjoin,
-	 *                        __global kern_multihash *kmhash,
-	 *                        __global kern_data_store *kds,
-	 *                        __global kern_data_store *ktoast,
-	 *                        KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
-	 */
-	clghj->kern_main = clCreateKernel(clghj->program,
-									  "kern_gpuhashjoin_main",
-									  &rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	/*
-	 * __kernel void
-	 * kern_gpuhashjoin_projection(__global kern_hashjoin *khashjoin,
-	 *                             __global kern_multihash *kmhash,
-	 *                             __global kern_data_store *kds,
-	 *                             __global kern_data_store *ktoast,
-	 *                             __global kern_data_store *kds_dest,
-	 *                             KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
-	 */
-	if (pds_dest->kds->format == KDS_FORMAT_TUPSLOT)
-		clghj->kern_proj = clCreateKernel(clghj->program,
-										  "kern_gpuhashjoin_projection_slot",
-										  &rc);
-	else if (pds_dest->kds->format == KDS_FORMAT_ROW_FLAT)
-		clghj->kern_proj = clCreateKernel(clghj->program,
-										  "kern_gpuhashjoin_projection_row",
-										  &rc);
-	else
-	{
-		clserv_log("pds_dest has unexpected format");
-		goto error;
-	}
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	/* buffer object of __global kern_hashjoin *khashjoin */
-	length = (KERN_HASHJOIN_PARAMBUF_LENGTH(&gpuhashjoin->khashjoin) +
-			  KERN_HASHJOIN_RESULTBUF_LENGTH(&gpuhashjoin->khashjoin) +
-			  sizeof(cl_int) * kresults->nrels * kresults->nrooms);
-	clghj->m_join = clCreateBuffer(opencl_context,
-								   CL_MEM_READ_WRITE,
-								   length,
-								   NULL,
-								   &rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-        goto error;
-	}
-
-	/* buffer object of __global kern_data_store *kds */
-	clghj->m_dstore = clCreateBuffer(opencl_context,
-									 CL_MEM_READ_WRITE,
-									 KERN_DATA_STORE_LENGTH(kds),
-									 NULL,
-									 &rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	/* buffer object of __global kern_data_store *ktoast, if needed */
-	if (!pds->ktoast)
-		clghj->m_ktoast = NULL;
-	else
-	{
-		pgstrom_data_store *ktoast = pds->ktoast;
-
-		clghj->m_ktoast = clCreateBuffer(opencl_context,
-										 CL_MEM_READ_WRITE,
-										 KERN_DATA_STORE_LENGTH(ktoast->kds),
-										 NULL,
-										 &rc);
-		if (rc != CL_SUCCESS)
-		{
-			clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-			goto error;
-		}
-	}
-
-	/* buffer object of __global kern_row_map *krowmap */
-	if (krowmap->nvalids < 0)
-		clghj->m_rowmap = NULL;
-	else
-	{
-		length = STROMALIGN(offsetof(kern_row_map,
-									 rindex[krowmap->nvalids]));
-		clghj->m_rowmap = clCreateBuffer(opencl_context,
-                                         CL_MEM_READ_WRITE,
-										 length,
-										 NULL,
-										 &rc);
-		if (rc != CL_SUCCESS)
-		{
-			clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-			goto error;
-		}
-	}
-
-	/* buffer object of __global kern_data_store *kds_dest */
-	clghj->m_kresult = clCreateBuffer(opencl_context,
-									  CL_MEM_READ_WRITE,
-									  STROMALIGN(kds_dest->length),
-									  NULL,
-									  &rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	/*
-	 * OK, all the device memory and kernel objects are successfully
-	 * constructed. Let's enqueue DMA send/recv and kernel invocations.
-	 */
-
-	/* Enqueue DMA send of kern_hashjoin */
-	dmaptr = KERN_HASHJOIN_DMA_SENDPTR(&gpuhashjoin->khashjoin);
-	offset = KERN_HASHJOIN_DMA_SENDOFS(&gpuhashjoin->khashjoin);
-	length = KERN_HASHJOIN_DMA_SENDLEN(&gpuhashjoin->khashjoin);
-	rc = clEnqueueWriteBuffer(clghj->kcmdq,
-							  clghj->m_join,
-							  CL_FALSE,
-							  offset,
-							  length,
-							  dmaptr,
-							  0,
-							  NULL,
-							  &clghj->events[clghj->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
-        goto error;
-	}
-	clghj->ev_index++;
-    gpuhashjoin->msg.pfm.bytes_dma_send += length;
-    gpuhashjoin->msg.pfm.num_dma_send++;
-
-	/*
-	 * Enqueue DMA send of kern_rowmap, if any
-	 */
-	if (clghj->m_rowmap)
-	{
-		length = STROMALIGN(offsetof(kern_row_map,
-									 rindex[krowmap->nvalids]));
-		rc = clEnqueueWriteBuffer(clghj->kcmdq,
-								  clghj->m_rowmap,
-								  CL_FALSE,
-								  0,
-								  length,
-								  krowmap,
-								  0,
-								  NULL,
-								  &clghj->events[clghj->ev_index]);
-		if (rc != CL_SUCCESS)
-		{
-			clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-			goto error;
-		}
-		clghj->ev_index++;
-		gpuhashjoin->msg.pfm.bytes_dma_send += length;
-		gpuhashjoin->msg.pfm.num_dma_send++;
-	}
-
-	/*
-	 * Enqueue DMA send of kern_data_store
-	 * according to the type of data store
-	 */
-	rc = clserv_dmasend_data_store(pds,
-								   clghj->kcmdq,
-								   clghj->m_dstore,
-								   clghj->m_ktoast,
-								   0,
-								   NULL,
-								   &clghj->ev_index,
-								   clghj->events,
-								   &gpuhashjoin->msg.pfm);
-	if (rc != CL_SUCCESS)
-		goto error;
-
-	/*
-	 * Enqueue DMA send of destination kern_data_store
-	 */
-	length = STROMALIGN(offsetof(kern_data_store, colmeta[kds_dest->ncols]));
-	rc = clEnqueueWriteBuffer(clghj->kcmdq,
-                              clghj->m_kresult,
-							  CL_FALSE,
-							  0,
-							  length,
-							  kds_dest,
-							  0,
-							  NULL,
-							  &clghj->events[clghj->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-	clghj->ev_index++;
-	gpuhashjoin->msg.pfm.bytes_dma_send += length;
-	gpuhashjoin->msg.pfm.num_dma_send++;
-
-	/*
-	 * __kernel void
-	 * kern_gpuhashjoin_main(__global kern_hashjoin *khashjoin,
-	 *                       __global kern_multihash *kmhash,
-	 *                       __global kern_data_store *kds,
-	 *                       __global kern_data_store *ktoast,
-	 *                       __global kern_row_map   *krowmap,
-	 *                       KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
-	 */
-
-	/* Get an optimal workgroup-size of this kernel */
-	nitems = (krowmap->nvalids < 0 ? kds->nitems : krowmap->nvalids);
-	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
-									   clghj->kern_main,
-									   clghj->dindex,
-									   true,	/* larger is better? */
-									   nitems,
-									   sizeof(cl_uint)))
-		goto error;
-
-	rc = clSetKernelArg(clghj->kern_main,
-						0,	/* __global kern_hashjoin *khashjoin */
-						sizeof(cl_mem),
-						&clghj->m_join);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	rc = clSetKernelArg(clghj->kern_main,
-						1,	/* __global kern_multihash *kmhash */
-						sizeof(cl_mem),
-						&clghj->m_hash);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	rc = clSetKernelArg(clghj->kern_main,
-						2,	/* __global kern_data_store *kds */
-						sizeof(cl_mem),
-						&clghj->m_dstore);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	rc = clSetKernelArg(clghj->kern_main,
-						3,	/*  __global kern_data_store *ktoast */
-						sizeof(cl_mem),
-						&clghj->m_ktoast);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	rc = clSetKernelArg(clghj->kern_main,
-						4,	/*  __global kern_row_map *krowmap */
-						sizeof(cl_mem),
-						&clghj->m_rowmap);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	rc = clSetKernelArg(clghj->kern_main,
-						5,	/* KERN_DYNAMIC_LOCAL_WORKMEM_ARG */
-						sizeof(cl_uint) * lwork_sz,
-						NULL);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	rc = clEnqueueNDRangeKernel(clghj->kcmdq,
-								clghj->kern_main,
-								1,
-								NULL,
-								&gwork_sz,
-								&lwork_sz,
-								clghj->ev_index,
-								&clghj->events[0],
-								&clghj->events[clghj->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueNDRangeKernel: %s",
-				   opencl_strerror(rc));
-		clserv_log("gwork_sz=%zu lwork_sz=%zu", gwork_sz, lwork_sz);
-		goto error;
-	}
-	clghj->ev_kern_main = clghj->ev_index;
-	clghj->ev_index++;
-	gpuhashjoin->msg.pfm.num_kern_exec++;
-
-	/*
-	 * __kernel void
-	 * kern_gpuhashjoin_projection(__global kern_hashjoin *khashjoin,
-	 *                             __global kern_multihash *kmhash,
-	 *                             __global kern_data_store *kds,
-	 *                             __global kern_data_store *ktoast,
-	 *                             __global kern_data_store *kds_dest,
-	 *                             KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
-	 */
-
-	/* Get an optimal workgroup-size of this kernel */
-	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
-									   clghj->kern_proj,
-									   clghj->dindex,
-									   false,   /* smaller is better */
-									   kds_dest->nrooms,
-									   sizeof(cl_uint)))
-		goto error;
-
-	rc = clSetKernelArg(clghj->kern_proj,
-						0,	/* __global kern_hashjoin *khashjoin */
-						sizeof(cl_mem),
-						&clghj->m_join);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	rc = clSetKernelArg(clghj->kern_proj,
-						1,	/* __global kern_multihash *kmhash */
-						sizeof(cl_mem),
-						&clghj->m_hash);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	rc = clSetKernelArg(clghj->kern_proj,
-						2,	/* __global kern_data_store *kds */
-						sizeof(cl_mem),
-						&clghj->m_dstore);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	rc = clSetKernelArg(clghj->kern_proj,
-						3,	/*  __global kern_data_store *ktoast */
-						sizeof(cl_mem),
-						&clghj->m_ktoast);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	rc = clSetKernelArg(clghj->kern_proj,
-						4,	/* __global kern_data_store *kds_dest */
-						sizeof(cl_mem),
-						&clghj->m_kresult);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	rc = clSetKernelArg(clghj->kern_proj,
-						5,	/* __local void *local_workbuf */
-						sizeof(cl_uint) * lwork_sz,
-						NULL);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	rc = clEnqueueNDRangeKernel(clghj->kcmdq,
-								clghj->kern_proj,
-								1,
-								NULL,
-								&gwork_sz,
-								&lwork_sz,
-								1,
-								&clghj->events[clghj->ev_index - 1],
-								&clghj->events[clghj->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueNDRangeKernel: %s",
-				   opencl_strerror(rc));
-		goto error;
-	}
-	clghj->ev_kern_proj = clghj->ev_index;
-	clghj->ev_index++;
-	gpuhashjoin->msg.pfm.num_kern_proj++;
-
-	/*
-	 * Write back result status
-	 */
-	dmaptr = KERN_HASHJOIN_DMA_RECVPTR(&gpuhashjoin->khashjoin);
-	offset = KERN_HASHJOIN_DMA_RECVOFS(&gpuhashjoin->khashjoin);
-	length = KERN_HASHJOIN_DMA_RECVLEN(&gpuhashjoin->khashjoin);
-	rc = clEnqueueReadBuffer(clghj->kcmdq,
-							 clghj->m_join,
-							 CL_FALSE,
-							 offset,
-							 length,
-							 dmaptr,
-							 1,
-							 &clghj->events[clghj->ev_index - 1],
-							 &clghj->events[clghj->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueReadBuffer: %s",
-				   opencl_strerror(rc));
-		goto error;
-	}
-	clghj->ev_index++;
-    gpuhashjoin->msg.pfm.bytes_dma_recv += length;
-    gpuhashjoin->msg.pfm.num_dma_recv++;
-
-	/*
-	 * Write back projection data-store
-	 */
-	rc = clEnqueueReadBuffer(clghj->kcmdq,
-							 clghj->m_kresult,
-							 CL_FALSE,
-							 0,
-							 kds_dest->length,
-							 kds_dest,
-							 1,
-							 &clghj->events[clghj->ev_index - 1],
-							 &clghj->events[clghj->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueReadBuffer: %s",
-				   opencl_strerror(rc));
-		goto error;
-	}
-	clghj->ev_index++;
-	gpuhashjoin->msg.pfm.bytes_dma_recv += kds_dest->length;
-	gpuhashjoin->msg.pfm.num_dma_recv++;
-
-	/*
-	 * Last, registers a callback to handle post join process; that generate
-	 * a pseudo scan relation
-	 */
-	rc = clSetEventCallback(clghj->events[clghj->ev_index - 1],
-							CL_COMPLETE,
-							clserv_respond_hashjoin,
-							clghj);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetEventCallback: %s", opencl_strerror(rc));
-		goto error;
-	}
-	return;
-
-error:
-	if (clghj)
-	{
-		if (clghj->ev_index > 0)
-		{
-			clWaitForEvents(clghj->ev_index, clghj->events);
-			/* NOTE: first event has to be released under mhtables->lock */
-			while (clghj->ev_index > 1)
-				clReleaseEvent(clghj->events[--clghj->ev_index]);
-		}
-		if (clghj->m_kresult)
-			clReleaseMemObject(clghj->m_kresult);
-		if (clghj->m_ktoast)
-			clReleaseMemObject(clghj->m_ktoast);
-		if (clghj->m_dstore)
-			clReleaseMemObject(clghj->m_dstore);
-		if (clghj->m_join)
-			clReleaseMemObject(clghj->m_join);
-		if (clghj->m_hash)
-		{
-			SpinLockAcquire(&mhtables->lock);
-			Assert(mhtables->n_kernel > 0);
-			clReleaseMemObject(mhtables->m_hash);
-			clReleaseEvent(mhtables->ev_hash);
-			if (--mhtables->n_kernel == 0)
-			{
-				mhtables->m_hash = NULL;
-				mhtables->ev_hash = NULL;
-			}
-			SpinLockRelease(&mhtables->lock);
-		}
-		if (clghj->kern_main)
-			clReleaseKernel(clghj->kern_main);
-		if (clghj->kern_proj)
-			clReleaseKernel(clghj->kern_proj);
-		if (clghj->program && clghj->program != BAD_OPENCL_PROGRAM)
-			clReleaseProgram(clghj->program);
-		free(clghj);
-	}
-	gpuhashjoin->msg.errcode = rc;
-	pgstrom_reply_message(&gpuhashjoin->msg);
 }

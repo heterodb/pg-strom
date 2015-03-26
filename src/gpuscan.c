@@ -137,7 +137,7 @@ typedef struct {
 
 /* forward declarations */
 static bool pgstrom_process_gpuscan(GpuTask *gtask);
-static void pgstrom_complete_gpuscan(GpuTask *gtask);
+static bool pgstrom_complete_gpuscan(GpuTask *gtask);
 static void pgstrom_release_gpuscan(GpuTask *gtask);
 static GpuTask *pgstrom_load_gpuscan(GpuTaskState *gts);
 
@@ -651,127 +651,6 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 }
 
 /*
- * pgstrom_complete_gpuscan
- *
- *
- *
- *
- */
-static void
-gpuscan_accum_perfmon(GpuTaskState *gts, pgstrom_gpuscan *gpuscan)
-{
-	float		elapsed;
-	CUresult	rc;
-
-	if (!gts->pfm_accum.enabled ||
-		!gpuscan->ev_dma_send_start ||
-		!gpuscan->ev_dma_send_stop ||
-		!gpuscan->ev_dma_recv_start ||
-        !gpuscan->ev_dma_recv_stop)
-		return;
-
-	rc = cuCtxPushCurrent(gpuscan->task.cuda_context);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
-
-	/* Time for DMA send */
-	rc = cuEventElapsedTime(&elapsed,
-							gpuscan->ev_dma_send_start,
-							gpuscan->ev_dma_send_stop);
-	if (rc != CUDA_SUCCESS)
-		goto error;
-	gpuscan->task.pfm.time_dma_send += elapsed;
-
-	/* Time for kernel exec */
-	rc = cuEventElapsedTime(&elapsed,
-							gpuscan->ev_dma_send_stop,
-							gpuscan->ev_dma_recv_start);
-	if (rc != CUDA_SUCCESS)
-		goto error;
-	gpuscan->task.pfm.time_kern_qual += elapsed;
-
-	/* Time for DMA recv*/
-	rc = cuEventElapsedTime(&elapsed,
-							gpuscan->ev_dma_recv_start,
-							gpuscan->ev_dma_recv_stop);
-	if (rc != CUDA_SUCCESS)
-		goto error;
-	gpuscan->task.pfm.time_dma_recv += elapsed;
-
-	/* accumulate them */
-	pgstrom_accum_perfmon(&gts->pfm_accum, &gpuscan->task.pfm);
-
-	rc = cuCtxPopCurrent(NULL);
-	if (rc != CUDA_SUCCESS)
-		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-
-	return;
-
-error:
-	elog(WARNING, "failed on cuEventElapsedTime: %s", errorText(rc));
-
-	rc = cuCtxPopCurrent(NULL);
-	if (rc != CUDA_SUCCESS)
-		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-	gts->pfm_accum.enabled = false;
-}
-
-static void
-pgstrom_complete_gpuscan(GpuTask *gtask)
-{
-	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) gtask;
-	GpuTaskState	   *gts = gtask->gts;
-	CUresult			rc;
-
-	/* collect performance information */
-	gpuscan_accum_perfmon(gts, gpuscan);
-
-	/* release CUDA resources */
-	if (gpuscan->ev_dma_recv_stop)
-	{
-		rc = cuEventDestroy(gpuscan->ev_dma_recv_stop);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
-	}
-
-	if (gpuscan->ev_dma_recv_start)
-	{
-		rc = cuEventDestroy(gpuscan->ev_dma_recv_start);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
-	}
-
-	if (gpuscan->ev_dma_send_stop)
-	{
-		rc = cuEventDestroy(gpuscan->ev_dma_send_stop);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
-	}
-
-	if (gpuscan->ev_dma_send_start)
-	{
-		rc = cuEventDestroy(gpuscan->ev_dma_send_start);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
-	}
-
-	if (gpuscan->m_kds)
-		gpuMemFree(&gpuscan->task, gpuscan->m_kds);
-
-	if (gpuscan->m_gpuscan)
-		gpuMemFree(&gpuscan->task, gpuscan->m_gpuscan);
-
-	/* ensure pointers being NULL */
-	gpuscan->kern_qual = NULL;
-	gpuscan->m_gpuscan = 0UL;
-	gpuscan->m_kds = 0UL;
-	gpuscan->ev_dma_send_start = NULL;
-	gpuscan->ev_dma_send_stop  = NULL;
-	gpuscan->ev_dma_recv_start = NULL;
-	gpuscan->ev_dma_recv_stop  = NULL;
-}
-
-/*
  * pgstrom_release_gpuscan
  *
  * Callback handler when reference counter of pgstrom_gpuscan object
@@ -1120,35 +999,10 @@ pgstrom_init_gpuscan(void)
 static void
 gpuscan_cleanup_cuda_resources(pgstrom_gpuscan *gpuscan)
 {
-	CUresult	rc;
-
-	if (gpuscan->ev_dma_recv_stop)
-	{
-		rc = cuEventDestroy(gpuscan->ev_dma_recv_stop);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
-	}
-
-	if (gpuscan->ev_dma_recv_start)
-	{
-		rc = cuEventDestroy(gpuscan->ev_dma_recv_start);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
-	}
-
-	if (gpuscan->ev_dma_send_stop)
-	{
-		rc = cuEventDestroy(gpuscan->ev_dma_send_stop);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
-	}
-
-	if (gpuscan->ev_dma_send_start)
-	{
-		rc = cuEventDestroy(gpuscan->ev_dma_send_start);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
-	}
+	CUDA_EVENT_DESTROY(gpuscan,ev_dma_recv_stop);
+	CUDA_EVENT_DESTROY(gpuscan,ev_dma_recv_start);
+	CUDA_EVENT_DESTROY(gpuscan,ev_dma_send_stop);
+	CUDA_EVENT_DESTROY(gpuscan,ev_dma_send_start);
 
 	if (gpuscan->m_kds)
 		gpuMemFree(&gpuscan->task, gpuscan->m_kds);
@@ -1164,6 +1018,37 @@ gpuscan_cleanup_cuda_resources(pgstrom_gpuscan *gpuscan)
 	gpuscan->ev_dma_send_stop  = NULL;
 	gpuscan->ev_dma_recv_start = NULL;
 	gpuscan->ev_dma_recv_stop  = NULL;
+}
+
+/*
+ * pgstrom_complete_gpuscan
+ *
+ *
+ *
+ *
+ */
+static bool
+pgstrom_complete_gpuscan(GpuTask *gtask)
+{
+	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) gtask;
+	GpuTaskState	   *gts = gtask->gts;
+
+	if (gts->pfm_accum.enabled)
+	{
+		CUDA_EVENT_ELAPSED(gpuscan, time_dma_send,
+						   ev_dma_send_start,
+						   ev_dma_send_stop);
+		CUDA_EVENT_ELAPSED(gpuscan, time_kern_qual,
+						   ev_dma_send_stop,
+						   ev_dma_recv_start);
+		CUDA_EVENT_ELAPSED(gpuscan, time_dma_recv,
+						   ev_dma_recv_start,
+						   ev_dma_recv_stop);
+		pgstrom_accum_perfmon(&gts->pfm_accum, &gpuscan->task.pfm);
+	}
+	gpuscan_cleanup_cuda_resources(gpuscan);
+
+	return false;
 }
 
 static void

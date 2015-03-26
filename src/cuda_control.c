@@ -108,9 +108,8 @@ gpuMemMaxAllocSize(void)
 }
 
 CUdeviceptr
-gpuMemAlloc(GpuTask *gtask, size_t bytesize)
+__gpuMemAlloc(GpuContext *gcontext, int cuda_index, size_t bytesize)
 {
-	GpuContext	   *gcontext = gtask->gts->gcontext;
 	GpuMemHead	   *gm_head;
 	GpuMemBlock	   *gm_block;
 	GpuMemChunk	   *gm_chunk;
@@ -131,8 +130,8 @@ gpuMemAlloc(GpuTask *gtask, size_t bytesize)
 			 bytesize, cuda_max_malloc_size);
 
 	/* try to find out preliminary allocated block */
-	Assert(gtask->cuda_index < gcontext->num_context);
-	gm_head = &gcontext->gpu[gtask->cuda_index].cuda_memory;
+	Assert(cuda_index < gcontext->num_context);
+	gm_head = &gcontext->gpu[cuda_index].cuda_memory;
 
 	dlist_foreach(iter, &gm_head->active_blocks)
 	{
@@ -173,7 +172,7 @@ gpuMemAlloc(GpuTask *gtask, size_t bytesize)
 		rc = cuCtxGetCurrent(&curr_context);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuCtxGetCurrent: %s", errorText(rc));
-		Assert(curr_context == gtask->cuda_context);
+		Assert(curr_context == gcontext->gpu[cuda_index].cuda_context);
 	}
 #endif
 	rc = cuMemAlloc(&block_addr, required);
@@ -262,11 +261,15 @@ found:
 	elog(ERROR, "Bug? we could not find a free chunk in GpuMemBlock");
 }
 
-void
-gpuMemFree(GpuTask *gtask, CUdeviceptr chunk_addr)
+CUdeviceptr
+gpuMemAlloc(GpuTask *gtask, size_t bytesize)
 {
-	GpuTaskState   *gts = gtask->gts;
-	GpuContext	   *gcontext = gts->gcontext;
+	return __gpuMemAlloc(gtask->gts->gcontext, gtask->cuda_index, bytesize);
+}
+
+void
+__gpuMemFree(GpuContext *gcontext, int cuda_index, CUdeviceptr chunk_addr)
+{
 	GpuMemHead	   *gm_head;
 	GpuMemBlock	   *gm_block;
 	GpuMemChunk	   *gm_chunk;
@@ -278,8 +281,8 @@ gpuMemFree(GpuTask *gtask, CUdeviceptr chunk_addr)
 	int				index;
 
 	/* find out the cuda-context */
-	Assert(gtask->cuda_index < gcontext->num_context);
-	gm_head = &gcontext->gpu[gtask->cuda_index].cuda_memory;
+	Assert(cuda_index < gcontext->num_context);
+	gm_head = &gcontext->gpu[cuda_index].cuda_memory;
 
 	index = gpuMemHashIndex(gm_head, chunk_addr);
 	dlist_foreach(iter, &gm_head->hash_slots[index])
@@ -376,7 +379,7 @@ found:
 			gm_head->empty_block = gm_block;
 		else
 		{
-			rc = cuCtxPushCurrent(gtask->cuda_context);
+			rc = cuCtxPushCurrent(gcontext->gpu[cuda_index].cuda_context);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
 
@@ -398,9 +401,11 @@ found:
 	}
 }
 
-
-
-
+void
+gpuMemFree(GpuTask *gtask, CUdeviceptr chunk_addr)
+{
+	__gpuMemFree(gtask->gts->gcontext, gtask->cuda_index, chunk_addr);
+}
 
 /*
  * pgstrom_cuda_init
@@ -821,6 +826,7 @@ check_completed_tasks(GpuTaskState *gts)
 {
 	GpuTask		   *gtask;
 	dlist_node	   *dnode;
+	bool			retry;
 
 	while (!dlist_is_empty(&gts->completed_tasks))
 	{
@@ -829,13 +835,33 @@ check_completed_tasks(GpuTaskState *gts)
 		Assert(gtask->gts == gts);
 		SpinLockRelease(&gts->lock);
 
-		/* release CUDA resources, but retain gputask itself */
-		gts->cb_task_complete(gtask);
+		/*
+		 * NOTE: cb_task_complete() callback can require cuda_control
+		 * to input itself the pending queue again, in case when kernel
+		 * execution is failed  because of smaller resource estimation
+		 * for example.
+		 * Elsewhere, it will be moved to the ready-queue next to the
+		 * release of device resources. If errcode introduce kernel got
+		 * an error, it shall be chained to the head, to inform this
+		 * error as early as possible.
+		 */
+		retry = gts->cb_task_complete(gtask);
 
 		/* then, move to the ready_tasks */
 		SpinLockAcquire(&gts->lock);
-		dlist_push_tail(&gts->ready_tasks, &gtask->chain);
-		gts->num_ready_tasks++;
+		if (retry)
+		{
+			dlist_push_head(&gts->pending_tasks, &gtask->chain);
+			gts->num_running_tasks++;
+		}
+		else
+		{
+			if (gtask->errcode != StromError_Success)
+				dlist_push_head(&gts->ready_tasks, &gtask->chain);
+			else
+				dlist_push_tail(&gts->ready_tasks, &gtask->chain);
+			gts->num_ready_tasks++;
+		}
 	}
 }
 
