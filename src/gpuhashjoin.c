@@ -2368,7 +2368,8 @@ gpuhashjoin_begin(CustomScanState *node, EState *estate, int eflags)
 	Assert(ghj_info->kernel_source != NULL);
 	ghjs->gts.kern_source = ghj_info->kernel_source;
 	ghjs->gts.extra_flags = ghj_info->extra_flags;
-	pgstrom_load_cuda_program(&ghjs->gts);
+	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+		pgstrom_preload_cuda_program(&ghjs->gts);
 
 	/*
 	 * initialize misc stuff

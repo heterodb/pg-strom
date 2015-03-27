@@ -641,6 +641,10 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	/* assign kernel source and flags */
 	gss->gts.kern_source = gs_info->kern_source;
 	gss->gts.extra_flags = gs_info->extra_flags;
+	if (gss->gts.kern_source != NULL &&
+		(eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+		pgstrom_preload_cuda_program(&gss->gts);
+
 	/* kernel constant parameter buffer */
 	gss->kparams = pgstrom_create_kern_parambuf(gs_info->used_params,
 											gss->gts.css.ss.ps.ps_ExprContext);

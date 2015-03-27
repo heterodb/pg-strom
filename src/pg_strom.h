@@ -425,6 +425,7 @@ extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
  * cuda_program.c
  */
 extern bool pgstrom_load_cuda_program(GpuTaskState *gts);
+extern void pgstrom_preload_cuda_program(GpuTaskState *gts);
 extern void pgstrom_init_cuda_program(void);
 
 /*

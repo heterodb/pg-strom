@@ -386,7 +386,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 	source = pgstrom_write_cuda_program(old_entry);
 	rc = nvrtcCreateProgram(&program,
 							source,
-							NULL,
+							"autogen",
 							0,
 							NULL,
 							NULL);
@@ -589,8 +589,8 @@ pgstrom_build_cuda_program(Datum cuda_program)
 	pgstrom_put_cuda_program(entry);
 }
 
-bool
-pgstrom_load_cuda_program(GpuTaskState *gts)
+static bool
+__pgstrom_load_cuda_program(GpuTaskState *gts, bool is_preload)
 {
 	program_cache_entry	*entry;
 	GpuContext	   *gcontext = gts->gcontext;
@@ -636,7 +636,9 @@ retry:
 			if (entry->ptx_image == CUDA_PROGRAM_BUILD_FAILURE)
 			{
 				SpinLockRelease(&pgcache_head->lock);
-				elog(ERROR, "%s", entry->error_msg);
+				if (!is_preload)
+					elog(ERROR, "%s", entry->error_msg);
+				return false;
 			}
 			/* Kernel build is still in-progress */
 			if (!entry->ptx_image)
@@ -752,6 +754,18 @@ retry:
 	SpinLockRelease(&pgcache_head->lock);
 
 	return false;	/* now build the device kernel */
+}
+
+bool
+pgstrom_load_cuda_program(GpuTaskState *gts)
+{
+	return __pgstrom_load_cuda_program(gts, false);
+}
+
+void
+pgstrom_preload_cuda_program(GpuTaskState *gts)
+{
+	__pgstrom_load_cuda_program(gts, true);
 }
 
 static void
