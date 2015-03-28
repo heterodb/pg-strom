@@ -146,11 +146,15 @@ typedef uintptr_t	hostptr_t;
  * assigned on host/device functions
  */
 #ifdef __CUDACC__
-#define STATIC_INLINE	__device__ __forceinline__ static
-#define STATIC_FUNCTION	__device__ static __attribute__ ((unused))
+#define STATIC_INLINE(RET_TYPE)						\
+	__device__ __forceinline__ static RET_TYPE __attribute__ ((unused))
+#define STATIC_FUNCTION(RET_TYPE)					\
+	__device__ static RET_TYPE __attribute__ ((unused))
+#define KERNEL_FUNCTION(RET_TYPE)	__global__ RET_TYPE
 #else
-#define STATIC_INLINE	STATIC_IF_INLINE
-#define STATIC_FUNCTION
+#define STATIC_INLINE(RET_TYPE)		static inline RET_TYPE
+#define STATIC_FUNCTION(RET_TYPE)	static RET_TYPE
+#define KERNEL_FUNCTION(RET_TYPE)	RET_TYPE
 #endif
 
 /*
@@ -182,7 +186,7 @@ typedef uintptr_t	hostptr_t;
  * implies device cannot run the given expression completely.
  * (Usually, due to compressed or external varlena datum)
  */
-__device__ STATIC_INLINE void
+STATIC_INLINE(void)
 STROM_SET_ERROR(cl_int *p_error, cl_int errcode)
 {
 	cl_int	oldcode = *p_error;
@@ -398,7 +402,7 @@ typedef struct {
 	cl_uint		poffset[FLEXIBLE_ARRAY_MEMBER];	/* offset of params */
 } kern_parambuf;
 
-__device__ STATIC_INLINE void *
+STATIC_INLINE(void *)
 kparam_get_value(kern_parambuf *kparams, cl_uint pindex)
 {
 	if (pindex >= kparams->nparams)
@@ -429,19 +433,6 @@ typedef struct {
 #define KERN_GET_RESULT(kresults, index)		\
 	((kresults)->results + (kresults)->nrels * (index))
 
-#if 0
-/*
- * kern_row_map
- *
- * It informs kernel code which rows are valid, and which ones are not, if
- * kern_data_store contains mixed 
- */
-typedef struct {
-	cl_int		nvalids;	/* # of valid rows. -1 means all visible */
-	cl_int		rindex[FLEXIBLE_ARRAY_MEMBER];
-} kern_row_map;
-#endif
-
 #ifdef __CUDACC__
 /*
  * PostgreSQL Data Type support in OpenCL kernel
@@ -470,18 +461,18 @@ typedef struct {
  */
 
 /* forward declaration of access interface to kern_data_store */
-__device__ __forceinline__
-void *kern_get_datum(kern_data_store *kds,
-					 kern_data_store *ktoast,
-					 cl_uint colidx, cl_uint rowidx);
+STATIC_INLINE(void *)
+kern_get_datum(kern_data_store *kds,
+			   kern_data_store *ktoast,
+			   cl_uint colidx, cl_uint rowidx);
 /* forward declaration of writer interface to kern_data_store */
-__device__
-Datum *pg_common_vstore(kern_data_store *kds,
-						kern_data_store *ktoast,
-						int *errcode,
-						cl_uint colidx,
-						cl_uint rowidx,
-						cl_bool isnull);
+STATIC_INLINE(Datum *)
+pg_common_vstore(kern_data_store *kds,
+				 kern_data_store *ktoast,
+				 int *errcode,
+				 cl_uint colidx,
+				 cl_uint rowidx,
+				 cl_bool isnull);
 
 /*
  * Template of variable classes: fixed-length referenced by value
@@ -494,7 +485,7 @@ Datum *pg_common_vstore(kern_data_store *kds,
 	} pg_##NAME##_t;
 
 #define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)			\
-	__device__ pg_##NAME##_t								\
+	STATIC_FUNCTION(pg_##NAME##_t)							\
 	pg_##NAME##_datum_ref(int *errcode,						\
 						  void *datum,						\
 						  cl_bool internal_format)			\
@@ -524,7 +515,7 @@ Datum *pg_common_vstore(kern_data_store *kds,
 	}
 
 #define STROMCL_SIMPLE_VARSTORE_TEMPLATE(NAME,BASE)			\
-	__device__ void											\
+	STATIC_FUNCTION(void)									\
 	pg_##NAME##_vstore(kern_data_store *kds,				\
 					   kern_data_store *ktoast,				\
 					   int *errcode,						\
@@ -549,7 +540,7 @@ Datum *pg_common_vstore(kern_data_store *kds,
 	}
 
 #define STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)			\
-	__device__ pg_##NAME##_t								\
+	STATIC_FUNCTION(pg_##NAME##_t)							\
 	pg_##NAME##_param(kern_parambuf *kparams,				\
 					  int *errcode,							\
 					  cl_uint param_id)						\
@@ -572,7 +563,7 @@ Datum *pg_common_vstore(kern_data_store *kds,
 	}
 
 #define STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)				\
-	__device__ pg_bool_t									\
+	STATIC_FUNCTION(pg_bool_t)								\
 	pgfn_##NAME##_isnull(int *errcode, pg_##NAME##_t arg)	\
 	{														\
 		pg_bool_t result;									\
@@ -582,7 +573,7 @@ Datum *pg_common_vstore(kern_data_store *kds,
 		return result;										\
 	}														\
 															\
-	__device__ pg_bool_t										\
+	STATIC_FUNCTION(pg_bool_t)								\
 	pgfn_##NAME##_isnotnull(int *errcode, pg_##NAME##_t arg)\
 	{														\
 		pg_bool_t result;									\
@@ -601,7 +592,7 @@ Datum *pg_common_vstore(kern_data_store *kds,
 #define EQ_CRC32C(crc1,crc2)	((crc1) == (crc2))
 
 #define STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)			\
-	__device__ cl_uint											\
+	STATIC_FUNCTION(cl_uint)									\
 	pg_##NAME##_comp_crc32(const cl_uint *crc32_table,			\
 						   cl_uint hash, pg_##NAME##_t datum)	\
 	{															\
@@ -813,7 +804,7 @@ typedef struct varatt_indirect
  * so no need to worry about correctness of the calculation, however,
  * needs to be care about address of the variables being referenced.
  */
-__device__ void *
+STATIC_FUNCTION(void *)
 kern_get_datum_tuple(kern_colmeta *colmeta,
 					 HeapTupleHeaderData *htup,
 					 cl_uint colidx)
@@ -862,7 +853,7 @@ kern_get_datum_tuple(kern_colmeta *colmeta,
 	return NULL;
 }
 
-__device__ HeapTupleHeaderData *
+STATIC_FUNCTION(HeapTupleHeaderData *)
 kern_get_tuple_row(kern_data_store *kds, cl_uint rowidx)
 {
 	kern_tupitem   *tupitem;
@@ -873,7 +864,7 @@ kern_get_tuple_row(kern_data_store *kds, cl_uint rowidx)
 	return &tupitem->htup;
 }
 
-__device__ void *
+STATIC_FUNCTION(void *)
 kern_get_datum_row(kern_data_store *kds,
 				   cl_uint colidx, cl_uint rowidx)
 {
@@ -887,7 +878,7 @@ kern_get_datum_row(kern_data_store *kds,
 	return kern_get_datum_tuple(kds->colmeta, htup, colidx);
 }
 
-__device__ void *
+STATIC_FUNCTION(void *)
 kern_get_datum_slot(kern_data_store *kds,
 					kern_data_store *ktoast,
 					cl_uint colidx, cl_uint rowidx)
@@ -903,7 +894,7 @@ kern_get_datum_slot(kern_data_store *kds,
 	return (char *)(&ktoast->hostptr) + values[colidx];
 }
 
-__device__ __forceinline__ void *
+STATIC_INLINE(void *)
 kern_get_datum(kern_data_store *kds,
 			   kern_data_store *ktoast,
 			   cl_uint colidx, cl_uint rowidx)
@@ -922,7 +913,7 @@ kern_get_datum(kern_data_store *kds,
 /*
  * common function to store a value on tuple-slot format
  */
-__device__ Datum *
+STATIC_FUNCTION(Datum *)
 pg_common_vstore(kern_data_store *kds,
 				 kern_data_store *ktoast,
 				 int *errcode,
@@ -963,7 +954,7 @@ pg_common_vstore(kern_data_store *kds,
  * up pointers in the tuple store.
  * In case of any other format, we don't need to modify the data.
  */
-__device__ void
+STATIC_FUNCTION(void)
 pg_fixup_tupslot_varlena(int *errcode,
 						 kern_data_store *kds,
 						 kern_data_store *ktoast,
@@ -1015,7 +1006,7 @@ pg_fixup_tupslot_varlena(int *errcode,
  */
 STROMCL_SIMPLE_DATATYPE_TEMPLATE(varlena, varlena *)
 
-__device__ pg_varlena_t
+STATIC_FUNCTION(pg_varlena_t)
 pg_varlena_datum_ref(int *errcode,
 					 void *datum,
 					 cl_bool internal_format)
@@ -1041,7 +1032,7 @@ pg_varlena_datum_ref(int *errcode,
 	return result;
 }
 
-__device__ pg_varlena_t
+STATIC_FUNCTION(pg_varlena_t)
 pg_varlena_vref(kern_data_store *kds,
 				kern_data_store *ktoast,
 				int *errcode,
@@ -1053,7 +1044,7 @@ pg_varlena_vref(kern_data_store *kds,
 	return pg_varlena_datum_ref(errcode,datum,false);
 }
 
-__device__ void
+STATIC_FUNCTION(void)
 pg_varlena_vstore(kern_data_store *kds,
 				  kern_data_store *ktoast,
 				  int *errcode,
@@ -1074,7 +1065,7 @@ pg_varlena_vstore(kern_data_store *kds,
 	 */
 }
 
-__device__ pg_varlena_t
+STATIC_FUNCTION(pg_varlena_t)
 pg_varlena_param(kern_parambuf *kparams,
 				 int *errcode,
 				 cl_uint param_id)
@@ -1105,7 +1096,7 @@ pg_varlena_param(kern_parambuf *kparams,
 
 STROMCL_SIMPLE_NULLTEST_TEMPLATE(varlena)
 
-__device__ cl_uint
+STATIC_FUNCTION(cl_uint)
 pg_varlena_comp_crc32(const cl_uint *crc32_table,
 					  cl_uint hash, pg_varlena_t datum)
 {
@@ -1128,7 +1119,7 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 	typedef pg_varlena_t	pg_##NAME##_t;
 
 #define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)				\
-	__device__ __forceinline__ pg_##NAME##_t				\
+	STATIC_INLINE(pg_##NAME##_t)							\
 	pg_##NAME##_datum_ref(int *errcode,						\
 						  void *datum,						\
 						  cl_bool internal_format)			\
@@ -1137,7 +1128,7 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 									internal_format);		\
 	}														\
 															\
-	__device__ __forceinline__ pg_##NAME##_t				\
+	STATIC_INLINE(pg_##NAME##_t)							\
 	pg_##NAME##_vref(kern_data_store *kds,					\
 					 kern_data_store *ktoast,				\
 					 int *errcode,							\
@@ -1150,7 +1141,7 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 	}
 
 #define STROMCL_VARLENA_VARSTORE_TEMPLATE(NAME)				\
-	__device__ __forceinline__ void							\
+	STATIC_INLINE(void)										\
 	pg_##NAME##_vstore(kern_data_store *kds,				\
 					   kern_data_store *ktoast,				\
 					   int *errcode,						\
@@ -1163,7 +1154,7 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 	}
 
 #define STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)						\
-	__device__ __forceinline__ pg_##NAME##_t						\
+	STATIC_INLINE(pg_##NAME##_t)									\
 	pg_##NAME##_param(kern_parambuf *kparams,						\
 					  int *errcode, cl_uint param_id)				\
 	{																\
@@ -1171,19 +1162,19 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 	}
 
 #define STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)						\
-	__device__ __forceinline__ pg_bool_t							\
+	STATIC_INLINE(pg_bool_t)										\
 	pgfn_##NAME##_isnull(int *errcode, pg_##NAME##_t arg)			\
 	{																\
 		return pgfn_varlena_isnull(errcode, arg);					\
 	}																\
-	__device__ __forceinline__ pg_bool_t							\
+	STATIC_INLINE(pg_bool_t)										\
 	pgfn_##NAME##_isnotnull(int *errcode, pg_##NAME##_t arg)		\
 	{																\
 		return pgfn_varlena_isnotnull(errcode, arg);				\
 	}
 
 #define STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)					\
-	__device__ __forceinline__ cl_uint								\
+	STATIC_INLINE(cl_uint)											\
 	pg_##NAME##_comp_crc32(const cl_uint *crc32_table,				\
 						   cl_uint hash, pg_##NAME##_t datum)		\
 	{																\
@@ -1245,7 +1236,7 @@ STROMCL_VARLENA_TYPE_TEMPLATE(bytea)
  * Also note that this function internally use barrier(), so unable to
  * use within if-blocks.
  */
-__device__ static cl_uint
+STATIC_FUNCTION(cl_uint)
 arithmetic_stairlike_add(cl_uint my_value, cl_uint *total_sum)
 {
 	cl_uint	   *items = SHARED_WORKMEM(cl_uint);
@@ -1280,7 +1271,7 @@ arithmetic_stairlike_add(cl_uint my_value, cl_uint *total_sum)
  * NOTE: It does not look at significance of the error, so caller has
  * to clear its error code if it is a minor one.
  */
-__device__ static void
+STATIC_FUNCTION(void)
 kern_writeback_error_status(cl_int *error_status, int own_errcode)
 {
 	cl_int	   *error_temp = SHARED_WORKMEM(cl_int);
@@ -1336,8 +1327,7 @@ kern_writeback_error_status(cl_int *error_status, int own_errcode)
 /* A utility function to evaluate pg_bool_t value as if built-in
  * bool variable.
  */
-__device__ __forceinline__
-static cl_bool
+STATIC_INLINE(cl_bool)
 EVAL(pg_bool_t arg)
 {
 	if (!arg.isnull && arg.value != 0)
@@ -1363,7 +1353,7 @@ EVAL(pg_bool_t arg)
 /*
  * Functions for BooleanTest
  */
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_bool_is_true(cl_int *errcode, pg_bool_t result)
 {
 	result.value = (!result.isnull && result.value);
@@ -1371,7 +1361,7 @@ pgfn_bool_is_true(cl_int *errcode, pg_bool_t result)
 	return result;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_bool_is_not_true(cl_int *errcode, pg_bool_t result)
 {
 	result.value = (result.isnull || !result.value);
@@ -1379,7 +1369,7 @@ pgfn_bool_is_not_true(cl_int *errcode, pg_bool_t result)
 	return result;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_bool_is_false(cl_int *errcode, pg_bool_t result)
 {
 	result.value = (!result.isnull && !result.value);
@@ -1387,7 +1377,7 @@ pgfn_bool_is_false(cl_int *errcode, pg_bool_t result)
 	return result;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_bool_is_not_false(cl_int *errcode, pg_bool_t result)
 {
 	result.value = (result.isnull || result.value);
@@ -1395,7 +1385,7 @@ pgfn_bool_is_not_false(cl_int *errcode, pg_bool_t result)
 	return result;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_bool_is_unknown(cl_int *errcode, pg_bool_t result)
 {
 	result.value = result.isnull;
@@ -1403,7 +1393,7 @@ pgfn_bool_is_unknown(cl_int *errcode, pg_bool_t result)
 	return result;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_bool_is_not_unknown(cl_int *errcode, pg_bool_t result)
 {
 	result.value = !result.isnull;
@@ -1414,7 +1404,7 @@ pgfn_bool_is_not_unknown(cl_int *errcode, pg_bool_t result)
 /*
  * Functions for BoolOp (EXPR_AND and EXPR_OR shall be constructed on demand)
  */
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_boolop_not(cl_int *errcode, pg_bool_t result)
 {
 	result.value = !result.value;

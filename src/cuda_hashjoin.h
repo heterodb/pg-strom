@@ -142,7 +142,7 @@ typedef struct
 #define KERN_HASHENTRY_SIZE(khentry)								\
 	LONGALIGN(offsetof(kern_hashentry, htup) + (khentry)->t_len)
 
-STATIC_INLINE kern_hashentry *
+STATIC_INLINE(kern_hashentry *)
 KERN_HASH_FIRST_ENTRY(kern_hashtable *khtable, cl_uint hash)
 {
 	cl_uint	   *slot = KERN_HASHTABLE_SLOT(khtable);
@@ -153,7 +153,7 @@ KERN_HASH_FIRST_ENTRY(kern_hashtable *khtable, cl_uint hash)
 	return (kern_hashentry *)((char *) khtable + slot[index]);
 }
 
-STATIC_INLINE kern_hashentry *
+STATIC_INLINE(kern_hashentry *)
 KERN_HASH_NEXT_ENTRY(kern_hashtable *khtable, kern_hashentry *khentry)
 {
 	if (khentry->next == 0)
@@ -236,7 +236,7 @@ typedef struct
  *
  * simple evaluation of qualifier, if any
  */
-__device__ static bool
+STATIC_FUNCTION(bool)
 gpuhashjoin_qual_eval(cl_int *errcode,
 					  kern_parambuf *kparams,
 					  kern_data_store *kds,
@@ -250,7 +250,7 @@ gpuhashjoin_qual_eval(cl_int *errcode,
  * hash-tables and kds/ktoast pair, then stores its result on the "results"
  * array. caller already acquires (n_matches * n_rels) slot from "results".
  */
-__device__ static cl_uint
+STATIC_FUNCTION(cl_uint)
 gpuhashjoin_execute(cl_int *errcode,
 					kern_parambuf *kparams,
 					kern_multihash *kmhash,
@@ -272,21 +272,21 @@ gpuhashjoin_execute(cl_int *errcode,
  * returns StromError_DataStoreNoSpace to inform host system this hashjoin
  * needs larger result buffer.
  */
-__global void
+KERNEL_FUNCTION(void)
 kern_gpuhashjoin_main(kern_hashjoin *khashjoin,
 					  kern_multihash *kmhash,
 					  kern_data_store *kds)
 {
-	__global kern_parambuf  *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
-	__global kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
+	kern_parambuf  *kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
+	kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
 	cl_int			errcode = StromError_Success;
 	cl_uint			n_matches;
 	cl_uint			offset;
 	cl_uint			nitems;
 	size_t			kds_index = get_global_id();
 	size_t			crc_index;
-	__local cl_uint	base;
-	__local cl_uint	crc32_table[256];
+	__shared__ cl_uint base;
+	__shared__ cl_uint crc32_table[256];
 
 	/* sanity check - kresults must have sufficient width of slots for the
 	 * required hash-tables within kern_multihash.
@@ -305,9 +305,9 @@ kern_gpuhashjoin_main(kern_hashjoin *khashjoin,
 	 * amount of computing core stall because of RAM access latency.
 	 * So, we try to move them into local shared memory at the beginning.
 	 */
-	for (crc_index = get_local_id(0);
+	for (crc_index = get_local_id();
 		 crc_index < 256;
-		 crc_index += get_local_size(0))
+		 crc_index += get_local_size())
 	{
 		crc32_table[crc_index] = kmhash->pg_crc32_table[crc_index];
 	}
@@ -319,7 +319,7 @@ kern_gpuhashjoin_main(kern_hashjoin *khashjoin,
 	 * relation (that is kern_data_store), then exclude this thread if
 	 * record shouldn't be visible
 	 */
-	if (!gpuhashjoin_qual_eval(&errcode, kparams, kds, ktoast, kds_index))
+	if (!gpuhashjoin_qual_eval(&errcode, kparams, kds, NULL, kds_index))
 		kds_index = kds->nitems;	/* ensure this thread is not visible */
 
 	/* 1st-stage: At first, we walks on the hash tables to count number of
@@ -333,7 +333,7 @@ kern_gpuhashjoin_main(kern_hashjoin *khashjoin,
 										kparams,
 										kmhash,
 										crc32_table,
-										kds, ktoast,
+										kds, NULL,
 										kds_index,
 										NULL);
 	else
@@ -343,7 +343,7 @@ kern_gpuhashjoin_main(kern_hashjoin *khashjoin,
 	 * XXX - calculate total number of matched tuples being searched
 	 * by this workgroup
 	 */
-	offset = arithmetic_stairlike_add(n_matches, LOCAL_WORKMEM, &nitems);
+	offset = arithmetic_stairlike_add(n_matches, &nitems);
 
 	/*
 	 * XXX - allocation of result buffer. A tuple takes 2 * sizeof(cl_uint)
@@ -361,7 +361,7 @@ kern_gpuhashjoin_main(kern_hashjoin *khashjoin,
 	if (get_local_id() == 0)
 	{
 		if (nitems > 0)
-			base = atomic_add(&kresults->nitems, nitems);
+			base = atomicAdd(&kresults->nitems, nitems);
 		else
 			base = 0;
 	}
@@ -391,13 +391,13 @@ kern_gpuhashjoin_main(kern_hashjoin *khashjoin,
 										kparams,
 										kmhash,
 										crc32_table,
-										kds, ktoast,
+										kds, NULL,
 										kds_index,
 										rbuffer);
 	}
 out:
 	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
+	kern_writeback_error_status(&kresults->errcode, errcode);
 }
 
 /*
@@ -406,20 +406,20 @@ out:
  *
  *
  */
-__device__ static void
+STATIC_FUNCTION(void)
 gpuhashjoin_projection_mapping(cl_int dest_colidx,
-								__private cl_uint *src_depth,
-								__private cl_uint *src_colidx);
-__device__ static void
-gpuhashjoin_projection_datum(__private cl_int *errcode,
-							 __global Datum *slot_values,
-							 __global cl_char *slot_isnull,
+							   cl_uint *src_depth,
+							   cl_uint *src_colidx);
+STATIC_FUNCTION(void)
+gpuhashjoin_projection_datum(cl_int *errcode,
+							 Datum *slot_values,
+							 cl_char *slot_isnull,
 							 cl_int depth,
 							 cl_int colidx,
 							 hostptr_t hostaddr,
-							 __global void *datum);
+							 void *datum);
 
-__global void
+KERNEL_FUNCTION(void)
 kern_gpuhashjoin_projection_row(kern_hashjoin *khashjoin,	/* in */
 								kern_multihash *kmhash,		/* in */
 								kern_data_store *kds_src,	/* in */
@@ -431,7 +431,6 @@ kern_gpuhashjoin_projection_row(kern_hashjoin *khashjoin,	/* in */
 	cl_uint			nrels = kresults->nrels;
 	cl_bool			heap_hasnull = false;
 	cl_uint			t_hoff;
-	cl_uint			t_len;
 	cl_uint			data_len;
 	cl_uint			required;
 	cl_uint			offset;
@@ -446,15 +445,15 @@ kern_gpuhashjoin_projection_row(kern_hashjoin *khashjoin,	/* in */
 	 * should already set it.
 	 */
 	if (kresults->nitems > kresults->nrooms ||
-		kresults->nitems > kds_dest->nrooms)
+		kresults->nitems > kds_dst->nrooms)
 	{
 		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
 		goto out;
 	}
 
-	/* update nitems of kds_dest. note that get_global_id(0) is not always
+	/* update nitems of kds_dst. note that get_global_id(0) is not always
      * called earlier than other thread. So, we should not expect nitems
-	 * of kds_dest is initialized.
+	 * of kds_dst is initialized.
 	 */
 	if (get_global_id() == 0)
 		kds_dst->nitems = kresults->nitems;
@@ -534,11 +533,11 @@ kern_gpuhashjoin_projection_row(kern_hashjoin *khashjoin,	/* in */
 	/*
 	 * Step.2 - takes advance usage counter of kds_dst->usage
 	 */
-	offset = arithmetic_stairlike_add(required, LOCAL_WORKMEM, &total_len);
+	offset = arithmetic_stairlike_add(required, &total_len);
 	if (get_local_id() == 0)
 	{
 		if (total_len > 0)
-			usage_prev = atomic_add(&kds_dst->usage, total_len);
+			usage_prev = atomicAdd(&kds_dst->usage, total_len);
 		else
 			usage_prev = 0;
 	}
@@ -548,7 +547,7 @@ kern_gpuhashjoin_projection_row(kern_hashjoin *khashjoin,	/* in */
 	usage_head = (STROMALIGN(offsetof(kern_data_store,
 									  colmeta[kds_dst->ncols])) +
 				  STROMALIGN(sizeof(cl_uint) * kresults->nitems));
-	if (usage_head + usage_prev + total_len > kds_dest->length)
+	if (usage_head + usage_prev + total_len > kds_dst->length)
 	{
 		errcode = StromError_DataStoreNoSpace;
 		goto out;
@@ -563,7 +562,7 @@ kern_gpuhashjoin_projection_row(kern_hashjoin *khashjoin,	/* in */
 		kern_tupitem   *titem;
 		cl_uint		   *htup_index;
 		cl_uint			htup_offset;
-		cl_uint			i, ncols = kds_dest->ncols;
+		cl_uint			i, ncols = kds_dst->ncols;
 		cl_uint			curr;
 
 		/* setup kern_tupitem */
@@ -579,8 +578,8 @@ kern_gpuhashjoin_projection_row(kern_hashjoin *khashjoin,	/* in */
 		htup = &titem->htup;
 
 		SET_VARSIZE(&htup->t_choice.t_datum, required);
-		htup->t_choice.t_datum.datum_typmod = kds_dest->tdtypmod;
-		htup->t_choice.t_datum.datum_typeid = kds_dest->tdtypeid;
+		htup->t_choice.t_datum.datum_typmod = kds_dst->tdtypmod;
+		htup->t_choice.t_datum.datum_typeid = kds_dst->tdtypeid;
 		htup->t_ctid.ip_blkid.bi_hi = 0x2345;
 		htup->t_ctid.ip_blkid.bi_lo = 0x6789;
 		htup->t_ctid.ip_posid = 0x1369;
@@ -665,14 +664,14 @@ kern_gpuhashjoin_projection_row(kern_hashjoin *khashjoin,	/* in */
 	}
 out:
 	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
+	kern_writeback_error_status(&kresults->errcode, errcode);
 }
 
-__global void
+KERNEL_FUNCTION(void)
 kern_gpuhashjoin_projection_slot(kern_hashjoin *khashjoin,	/* in */
 								 kern_multihash *kmhash,	/* in */
 								 kern_data_store *kds_src,	/* in */
-								 kern_data_store *kds_dest) /* out */
+								 kern_data_store *kds_dst) /* out */
 {
 	kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
 	cl_int	   *rbuffer;
@@ -682,7 +681,7 @@ kern_gpuhashjoin_projection_slot(kern_hashjoin *khashjoin,	/* in */
 	cl_int		depth;
 	cl_int		errcode = StromError_Success;
 
-	/* Update the nitems of kds_dest */
+	/* Update the nitems of kds_dst */
 	if (get_global_id() == 0)
 		kds_dst->nitems = kresults->nitems;
 
@@ -698,7 +697,7 @@ kern_gpuhashjoin_projection_slot(kern_hashjoin *khashjoin,	/* in */
 		goto out;
 	}
 	/* Do projection if thread is responsible */
-	if (get_global_id(0) >= kresults->nitems)
+	if (get_global_id() >= kresults->nitems)
 		goto out;
 	/* Ensure format of the kern_data_store */
 	if (kds_src->format != KDS_FORMAT_ROW ||
@@ -731,7 +730,7 @@ kern_gpuhashjoin_projection_slot(kern_hashjoin *khashjoin,	/* in */
 			p_colmeta = kds_src->colmeta;
 
 			htup = kern_get_tuple_row(kds_src, rbuffer[0] - 1);
-			baseaddr = (__global char *)&kds_src->hostptr;
+			baseaddr = (char *)&kds_src->hostptr;
 			hostaddr = kds_src->hostptr;
 		}
 		else
@@ -791,30 +790,29 @@ kern_gpuhashjoin_projection_slot(kern_hashjoin *khashjoin,	/* in */
 										 slot_isnull,
 										 depth,
 										 i,
-										 hostaddr + ((uintptr_t) datum -
-													 (uintptr_t) baseaddr),
+										 hostaddr + ((char *) datum -
+													 (char *) baseaddr),
 										 datum);
 		}
 	}
 out:
 	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
+	kern_writeback_error_status(&kresults->errcode, errcode);
 }
 
 /*
  * Template of variable reference on the hash-entry
  */
 #define STROMCL_ANYTYPE_HASHREF_TEMPLATE(NAME)						\
-	pg_##NAME##_t													\
-	pg_##NAME##_hashref(__global kern_hashtable *khtable,			\
-						__global kern_hashentry *kentry,			\
-						__private int *p_errcode,					\
+	STATIC_FUNCTION(pg_##NAME##_t)									\
+	pg_##NAME##_hashref(kern_hashtable *khtable,					\
+						kern_hashentry *kentry,						\
+						int *p_errcode,								\
 						cl_uint colidx)								\
 	{																\
-		__global void *datum										\
-			= kern_get_datum_tuple(khtable->colmeta,				\
-								   &kentry->htup,					\
-								   colidx);							\
+		void *datum = kern_get_datum_tuple(khtable->colmeta,		\
+										   &kentry->htup,			\
+										   colidx);					\
 		return pg_##NAME##_datum_ref(p_errcode, datum, false);		\
 	}
 

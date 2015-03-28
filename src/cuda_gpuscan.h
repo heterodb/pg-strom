@@ -94,7 +94,7 @@ typedef struct {
  *
  * It writes back the calculation result of gpuscan.
  */
-__device__ void
+STATIC_FUNCTION(void)
 gpuscan_writeback_results(kern_resultbuf *kresults, int result)
 {
 	__shared__ cl_uint base;
@@ -129,7 +129,7 @@ gpuscan_writeback_results(kern_resultbuf *kresults, int result)
 /*
  * forward declaration of the function to be generated on the fly
  */
-__device__ cl_bool
+STATIC_FUNCTION(cl_bool)
 gpuscan_qual_eval(cl_int *errcode,
 				  kern_parambuf *kparams,
 				  kern_data_store *kds,
@@ -138,7 +138,7 @@ gpuscan_qual_eval(cl_int *errcode,
 /*
  * kernel entrypoint of gpuscan
  */
-__global__ void
+KERNEL_FUNCTION(void)
 gpuscan_qual(kern_gpuscan *kgpuscan,	/* in/out */
 			 kern_data_store *kds,		/* in */
 			 kern_data_store *ktoast)	/* always NULL */

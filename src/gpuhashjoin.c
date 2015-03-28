@@ -1171,11 +1171,11 @@ gpuhashjoin_codegen_qual(StringInfo body,
 {
 	appendStringInfo(
         body,
-		"static bool\n"
-		"gpuhashjoin_qual_eval(__private cl_int *errcode,\n"
-		"                      __global kern_parambuf *kparams,\n"
-		"                      __global kern_data_store *kds,\n"
-		"                      __global kern_data_store *ktoast,\n"
+		"__device__ static bool\n"
+		"gpuhashjoin_qual_eval(cl_int *errcode,\n"
+		"                      kern_parambuf *kparams,\n"
+		"                      kern_data_store *kds,\n"
+		"                      kern_data_store *ktoast,\n"
 		"                      size_t kds_index)\n");
 	if (!ghj_info->outer_quals)
 	{
@@ -1220,10 +1220,10 @@ gpuhashjoin_codegen_projection(StringInfo body,
 	appendStringInfo(
 		body,
 		"\n"
-		"static void\n"
+		"__device__ static void\n"
 		"gpuhashjoin_projection_mapping(cl_int dest_colidx,\n"
-		"                               __private cl_uint *src_depth,\n"
-		"                               __private cl_uint *src_colidx)\n"
+		"                               cl_uint *src_depth,\n"
+		"                               cl_uint *src_colidx)\n"
 		"{\n"
 		"  switch (dest_colidx)\n"
 		"  {\n");
@@ -1257,14 +1257,14 @@ gpuhashjoin_codegen_projection(StringInfo body,
 	/* projection-datum function */
 	appendStringInfo(
         body,
-		"static void\n"
-		"gpuhashjoin_projection_datum(__private cl_int *errcode,\n"
-		"                             __global Datum *slot_values,\n"
-		"                             __global cl_char *slot_isnull,\n"
+		"__device__ static void\n"
+		"gpuhashjoin_projection_datum(cl_int *errcode,\n"
+		"                             Datum *slot_values,\n"
+		"                             cl_char *slot_isnull,\n"
 		"                             cl_int depth,\n"
 		"                             cl_int colidx,\n"
 		"                             hostptr_t hostaddr,\n"
-		"                             __global void *datum)\n"
+		"                             void *datum)\n"
 		"{\n"
 		"  switch (depth)\n"
 		"  {\n");
@@ -1320,8 +1320,7 @@ gpuhashjoin_codegen_projection(StringInfo body,
 				{
 					appendStringInfo(
 						body,
-						"        slot_values[%d]"
-						" = (Datum)(*((__global %s *) datum));\n",
+						"        slot_values[%d] = (Datum)(*((%s *)datum));\n",
 						tle->resno - 1,
 						cl_type);
 				}
@@ -1522,7 +1521,7 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 			appendStringInfo(
 				body,
 				"  rbuffer[%d] = (cl_int)"
-				"((uintptr_t)kentry_%d - (uintptr_t)khtable_%d);\n",
+				"((char *)kentry_%d - (char *)khtable_%d);\n",
 				i, i, i);
 		appendStringInfo(
             body,
@@ -1574,15 +1573,15 @@ gpuhashjoin_codegen(PlannerInfo *root,
 	/* declaration of gpuhashjoin_execute */
 	appendStringInfo(
 		&decl,
-		"static cl_uint\n"
-		"gpuhashjoin_execute(__private cl_int *errcode,\n"
-		"                    __global kern_parambuf *kparams,\n"
-		"                    __global kern_multihash *kmhash,\n"
-		"                    __local cl_uint *pg_crc32_table,\n"
-		"                    __global kern_data_store *kds,\n"
-		"                    __global kern_data_store *ktoast,\n"
+		"__device__ static cl_uint\n"
+		"gpuhashjoin_execute(cl_int *errcode,\n"
+		"                    kern_parambuf *kparams,\n"
+		"                    kern_multihash *kmhash,\n"
+		"                    cl_uint *pg_crc32_table,\n"
+		"                    kern_data_store *kds,\n"
+		"                    kern_data_store *ktoast,\n"
 		"                    size_t kds_index,\n"
-		"                    __global cl_int *rbuffer)\n"
+		"                    cl_int *rbuffer)\n"
 		"{\n"
 		);
 	/* reference to each hash table */
@@ -1590,8 +1589,7 @@ gpuhashjoin_codegen(PlannerInfo *root,
 	{
 		appendStringInfo(
 			&decl,
-			"__global kern_hashtable *khtable_%d"
-			" = KERN_HASHTABLE(kmhash,%d);\n",
+			"kern_hashtable *khtable_%d = KERN_HASHTABLE(kmhash,%d);\n",
 			depth, depth);
 	}
 	/* variable for individual hash entries */
@@ -1599,7 +1597,7 @@ gpuhashjoin_codegen(PlannerInfo *root,
 	{
 		appendStringInfo(
 			&decl,
-			"__global kern_hashentry *kentry_%d;\n",
+			"kern_hashentry *kentry_%d;\n",
 			depth);
 	}
 
