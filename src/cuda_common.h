@@ -153,7 +153,7 @@ typedef uintptr_t	hostptr_t;
 #define KERNEL_FUNCTION(RET_TYPE)	__global__ RET_TYPE
 #else
 #define STATIC_INLINE(RET_TYPE)		static inline RET_TYPE
-#define STATIC_FUNCTION(RET_TYPE)	static RET_TYPE
+#define STATIC_FUNCTION(RET_TYPE)	static inline RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)	RET_TYPE
 #endif
 

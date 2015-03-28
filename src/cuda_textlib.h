@@ -30,7 +30,7 @@
 STROMCL_VARLENA_TYPE_TEMPLATE(bpchar)
 #endif
 
-__device__ __forceinline__ cl_int
+INLINE_FUNCTION(cl_int)
 bpchar_truelen(varlena *arg)
 {
 	cl_char	   *s = VARDATA_ANY(arg);
@@ -45,7 +45,7 @@ bpchar_truelen(varlena *arg)
 	return i + 1;
 }
 
-__device__ cl_int
+STATIC_FUNCTION(cl_int)
 bpchar_compare(cl_int *errcode, varlena *arg1, varlena *arg2)
 {
 	cl_char	   *s1 = VARDATA_ANY(arg1);
@@ -69,7 +69,7 @@ bpchar_compare(cl_int *errcode, varlena *arg1, varlena *arg2)
 	return 0;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_bpchareq(cl_int *errcode, pg_bpchar_t arg1, pg_bpchar_t arg2)
 {
 	pg_bool_t	result;
@@ -82,7 +82,7 @@ pgfn_bpchareq(cl_int *errcode, pg_bpchar_t arg1, pg_bpchar_t arg2)
 	return result;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_bpcharne(cl_int *errcode, pg_bpchar_t arg1, pg_bpchar_t arg2)
 {
 	pg_bool_t	result;
@@ -95,7 +95,7 @@ pgfn_bpcharne(cl_int *errcode, pg_bpchar_t arg1, pg_bpchar_t arg2)
 	return result;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_bpcharlt(cl_int *errcode, pg_bpchar_t arg1, pg_bpchar_t arg2)
 {
 	pg_bool_t	result;
@@ -108,7 +108,7 @@ pgfn_bpcharlt(cl_int *errcode, pg_bpchar_t arg1, pg_bpchar_t arg2)
 	return result;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_bpcharle(cl_int *errcode, pg_bpchar_t arg1, pg_bpchar_t arg2)
 {
 	pg_bool_t	result;
@@ -121,7 +121,7 @@ pgfn_bpcharle(cl_int *errcode, pg_bpchar_t arg1, pg_bpchar_t arg2)
 	return result;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_bpchargt(cl_int *errcode, pg_bpchar_t arg1, pg_bpchar_t arg2)
 {
 	pg_bool_t	result;
@@ -134,7 +134,7 @@ pgfn_bpchargt(cl_int *errcode, pg_bpchar_t arg1, pg_bpchar_t arg2)
 	return result;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_bpcharge(cl_int *errcode, pg_bpchar_t arg1, pg_bpchar_t arg2)
 {
 	pg_bool_t	result;
@@ -147,8 +147,8 @@ pgfn_bpcharge(cl_int *errcode, pg_bpchar_t arg1, pg_bpchar_t arg2)
 	return result;
 }
 
-__device__ pg_int4_t
-pgfn_bpcharcmp(__private cl_int *errcode, pg_bpchar_t arg1, pg_bpchar_t arg2)
+STATIC_FUNCTION(pg_int4_t)
+pgfn_bpcharcmp(cl_int *errcode, pg_bpchar_t arg1, pg_bpchar_t arg2)
 {
 	pg_int4_t	result;
 
@@ -169,7 +169,7 @@ pgfn_bpcharcmp(__private cl_int *errcode, pg_bpchar_t arg1, pg_bpchar_t arg2)
 STROMCL_VARLENA_TYPE_TEMPLATE(text)
 #endif
 
-__device__ cl_int
+STATIC_FUNCTION(cl_int)
 text_compare(cl_int *errcode, varlena *arg1, varlena *arg2)
 {
 	cl_char	   *s1 = VARDATA_ANY(arg1);
@@ -194,7 +194,7 @@ text_compare(cl_int *errcode, varlena *arg1, varlena *arg2)
 	return 0;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_texteq(cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
 {
 	pg_bool_t	result;
@@ -207,7 +207,7 @@ pgfn_texteq(cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
 	return result;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_textne(cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
 {
 	pg_bool_t	result;
@@ -220,7 +220,7 @@ pgfn_textne(cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
 	return result;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_text_lt(cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
 {
 	pg_bool_t	result;
@@ -233,7 +233,7 @@ pgfn_text_lt(cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
 	return result;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_text_le(cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
 {
 	pg_bool_t	result;
@@ -246,7 +246,7 @@ pgfn_text_le(cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
 	return result;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_text_gt(cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
 {
 	pg_bool_t	result;
@@ -259,8 +259,8 @@ pgfn_text_gt(cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
 	return result;
 }
 
-__device__ pg_bool_t
-pgfn_text_ge(__private cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
+STATIC_FUNCTION(pg_bool_t)
+pgfn_text_ge(cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
 {
 	pg_bool_t	result;
 
@@ -272,8 +272,8 @@ pgfn_text_ge(__private cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
 	return result;
 }
 
-__device__ pg_int4_t
-pgfn_text_cmp(__private cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
+STATIC_FUNCTION(pg_int4_t)
+pgfn_text_cmp(cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
 {
 	pg_int4_t	result;
 

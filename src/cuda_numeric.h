@@ -182,8 +182,7 @@ typedef struct {
 #define PG_NUMERIC_MIN				\
 	PG_NUMERIC_SET(PG_NUMERIC_EXPONENT_MAX,1,PG_NUMERIC_MANTISSA_MAX)
 
-
-__device__ static inline pg_numeric_t
+STATIC_FUNCTION(pg_numeric_t)
 pg_numeric_from_varlena(int *errcode, struct varlena *vl_val)
 {
 	pg_numeric_t		result;
@@ -352,7 +351,7 @@ pg_numeric_from_varlena(int *errcode, struct varlena *vl_val)
  */
 #define NUMERIC_TO_VERLENA_USE_SHORT_FORMAT
 
-__device__ size_t
+INLINE_FUNCTION(size_t)
 pg_numeric_to_varlena(int *errcode, pg_numeric_t arg, varlena *vl_val)
 {
 	__global varattrib_4b * 		pHeader;
@@ -472,7 +471,7 @@ pg_numeric_to_varlena(int *errcode, pg_numeric_t arg, varlena *vl_val)
  * to reference varlena variable. Otherwise, in case when attlen > 0, it
  * tries to fetch fixed-length variable.
  */
-__device__ pg_numeric_t
+STATIC_FUNCTION(pg_numeric_t)
 pg_numeric_datum_ref(int *errcode,
 					 void *datum,
 					 cl_bool internal_format)
@@ -491,7 +490,7 @@ pg_numeric_datum_ref(int *errcode,
 	return result;
 }
 
-__device__ pg_numeric_t
+STATIC_FUNCTION(pg_numeric_t)
 pg_numeric_vref(kern_data_store *kds,
 				kern_data_store *ktoast,
 				int *errcode,
@@ -507,7 +506,7 @@ pg_numeric_vref(kern_data_store *kds,
 /* pg_numeric_vstore() is same as template */
 STROMCL_SIMPLE_VARSTORE_TEMPLATE(numeric, cl_ulong)
 
-__device__ pg_numeric_t
+STATIC_FUNCTION(pg_numeric_t)
 pg_numeric_param(kern_parambuf *kparams,
 				 int *errcode,
 				 cl_uint param_id)
@@ -541,7 +540,7 @@ STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(numeric,cl_long)
  * Numeric format translation functions
  * ----------------------------------------------------------------
  */
-__device__ pg_int8_t
+STATIC_FUNCTION(pg_int8_t)
 numeric_to_integer(int *errcode, pg_numeric_t arg, cl_int size)
 {
 	pg_int8_t	v;
@@ -614,7 +613,7 @@ numeric_to_integer(int *errcode, pg_numeric_t arg, cl_int size)
 	return v;
 }
 
-__device__ pg_float8_t
+STATIC_FUNCTION(pg_float8_t)
 numeric_to_float(int *errcode, pg_numeric_t arg)
 {
 	pg_float8_t	v;
@@ -655,7 +654,7 @@ numeric_to_float(int *errcode, pg_numeric_t arg)
 	return v;
 }
 
-__device__ pg_int2_t
+STATIC_FUNCTION(pg_int2_t)
 pgfn_numeric_int2(int *errcode, pg_numeric_t arg)
 {
 	pg_int2_t v;
@@ -667,7 +666,7 @@ pgfn_numeric_int2(int *errcode, pg_numeric_t arg)
 	return v;
 }
 
-__device__ pg_int4_t
+STATIC_FUNCTION(pg_int4_t)
 pgfn_numeric_int4(int *errcode, pg_numeric_t arg)
 {
 	pg_int4_t v;
@@ -679,14 +678,14 @@ pgfn_numeric_int4(int *errcode, pg_numeric_t arg)
 	return v;
 }
 
-__device__ pg_int8_t
+STATIC_FUNCTION(pg_int8_t)
 pgfn_numeric_int8(int *errcode, pg_numeric_t arg)
 {
 	pg_int8_t v;
 	return numeric_to_integer(errcode, arg, sizeof(v.value));
 }
 
-__device__ pg_float4_t
+STATIC_FUNCTION(pg_float4_t)
 pgfn_numeric_float4(int *errcode, pg_numeric_t arg)
 {
 
@@ -702,13 +701,13 @@ pgfn_numeric_float4(int *errcode, pg_numeric_t arg)
 	return v;
 }
 
-__device__ pg_float8_t
+STATIC_FUNCTION(pg_float8_t)
 pgfn_numeric_float8(int *errcode, pg_numeric_t arg)
 {
 	return numeric_to_float(errcode, arg);
 }
 
-__device__ pg_numeric_t
+STATIC_FUNCTION(pg_numeric_t)
 integer_to_numeric(int *errcode, pg_int8_t arg, cl_int size)
 {
 	pg_numeric_t	v;
@@ -760,7 +759,7 @@ integer_to_numeric(int *errcode, pg_int8_t arg, cl_int size)
 	return v;
 }
 
-__device__ pg_numeric_t
+STATIC_FUNCTION(pg_numeric_t)
 float_to_numeric(int *errcode, pg_float8_t arg, int dig)
 {
 	pg_numeric_t	v;
@@ -876,34 +875,34 @@ float_to_numeric(int *errcode, pg_float8_t arg, int dig)
 	return v;
 }
 
-__device__ pg_numeric_t
+STATIC_FUNCTION(pg_numeric_t)
 pgfn_int2_numeric(int *errcode, pg_int2_t arg)
 {
 	pg_int8_t tmp = { arg.value, arg.isnull };
 	return integer_to_numeric(errcode, tmp, sizeof(arg.value));
 }
 
-__device__ pg_numeric_t
+STATIC_FUNCTION(pg_numeric_t)
 pgfn_int4_numeric(int *errcode, pg_int4_t arg)
 {
 	pg_int8_t tmp = { arg.value, arg.isnull };
 	return integer_to_numeric(errcode, tmp, sizeof(arg.value));
 }
 
-__device__ pg_numeric_t
+STATIC_FUNCTION(pg_numeric_t)
 pgfn_int8_numeric(int *errcode, pg_int8_t arg)
 {
 	return integer_to_numeric(errcode, arg, sizeof(arg.value));
 }
 
-__device__ pg_numeric_t
+STATIC_FUNCTION(pg_numeric_t)
 pgfn_float4_numeric(int *errcode, pg_float4_t arg)
 {
 	pg_float8_t tmp = { (cl_double)arg.value, arg.isnull };
 	return float_to_numeric(errcode, tmp, FLT_DIG);
 }
 
-__device__ pg_numeric_t
+STATIC_FUNCTION(pg_numeric_t)
 pgfn_float8_numeric(int *errcode, pg_float8_t arg)
 {
 	return float_to_numeric(errcode, arg, DBL_DIG);
@@ -913,14 +912,14 @@ pgfn_float8_numeric(int *errcode, pg_float8_t arg)
  * Numeric operator functions
  * ----------------------------------------------------------------
  */
-__device__ pg_numeric_t
+STATIC_FUNCTION(pg_numeric_t)
 pgfn_numeric_uplus(int *errcode, pg_numeric_t arg)
 {
 	/* return the value as-is */
 	return arg;
 }
 
-__device__ pg_numeric_t
+STATIC_FUNCTION(pg_numeric_t)
 pgfn_numeric_uminus(int *errcode, pg_numeric_t arg)
 {
 	/* reverse the sign bit */
@@ -928,7 +927,7 @@ pgfn_numeric_uminus(int *errcode, pg_numeric_t arg)
 	return arg;
 }
 
-__device__ pg_numeric_t
+STATIC_FUNCTION(pg_numeric_t)
 pgfn_numeric_abs(int *errcode, pg_numeric_t arg)
 {
 	/* clear the sign bit */
@@ -936,7 +935,7 @@ pgfn_numeric_abs(int *errcode, pg_numeric_t arg)
 	return arg;
 }
 
-__device__ pg_numeric_t
+STATIC_FUNCTION(pg_numeric_t)
 pgfn_numeric_add(int *errcode,
 				 pg_numeric_t arg1, pg_numeric_t arg2)
 {
@@ -1044,7 +1043,7 @@ pgfn_numeric_add(int *errcode,
 	return v;
 }
 
-__device__ pg_numeric_t
+STATIC_FUNCTION(pg_numeric_t)
 pgfn_numeric_sub(int *errcode,
 				 pg_numeric_t arg1, pg_numeric_t arg2)
 {
@@ -1053,7 +1052,7 @@ pgfn_numeric_sub(int *errcode,
 	return pgfn_numeric_add(errcode, arg1, arg);
 }
 
-__device__ pg_numeric_t
+STATIC_FUNCTION(pg_numeric_t)
 pgfn_numeric_mul(int *errcode,
 				 pg_numeric_t arg1, pg_numeric_t arg2)
 {
@@ -1152,7 +1151,7 @@ pgfn_numeric_mul(int *errcode,
  * Numeric comparison functions
  * ----------------------------------------------------------------
  */
-__device__ int
+STATIC_FUNCTION(int)
 numeric_cmp(cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	int			i, ret, expoDiff;
@@ -1213,7 +1212,7 @@ numeric_cmp(cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
 	return ret;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_numeric_eq(cl_int *errcode,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
@@ -1231,7 +1230,7 @@ pgfn_numeric_eq(cl_int *errcode,
 	return result;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_numeric_ne(cl_int *errcode,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
@@ -1249,7 +1248,7 @@ pgfn_numeric_ne(cl_int *errcode,
 	return result;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_numeric_lt(cl_int *errcode,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
@@ -1267,7 +1266,7 @@ pgfn_numeric_lt(cl_int *errcode,
 	return result;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_numeric_le(cl_int *errcode,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
@@ -1285,7 +1284,7 @@ pgfn_numeric_le(cl_int *errcode,
 	return result;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_numeric_gt(cl_int *errcode,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
@@ -1303,7 +1302,7 @@ pgfn_numeric_gt(cl_int *errcode,
 	return result;
 }
 
-__device__ pg_bool_t
+STATIC_FUNCTION(pg_bool_t)
 pgfn_numeric_ge(cl_int *errcode,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
@@ -1321,7 +1320,7 @@ pgfn_numeric_ge(cl_int *errcode,
 	return result;
 }
 
-__device__ pg_int4_t
+STATIC_FUNCTION(pg_int4_t)
 pgfn_numeric_cmp(cl_int *errcode,
 				 pg_numeric_t arg1, pg_numeric_t arg2)
 {
@@ -1339,7 +1338,7 @@ pgfn_numeric_cmp(cl_int *errcode,
 	return result;
 }
 
-__device__ pg_numeric_t
+STATIC_FUNCTION(pg_numeric_t)
 pgfn_numeric_max(cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_bool_t v = pgfn_numeric_ge(errcode, arg1, arg2);
@@ -1356,7 +1355,7 @@ pgfn_numeric_max(cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
 	return (v.value ? arg1 : arg2);
 }
 
-__device__ pg_numeric_t
+STATIC_FUNCTION(pg_numeric_t)
 pgfn_numeric_min(cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_bool_t v = pgfn_numeric_ge(errcode, arg1, arg2);
