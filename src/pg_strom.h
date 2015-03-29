@@ -211,8 +211,8 @@ typedef struct
 {
 	struct GpuMemBlock *empty_block;
 	dlist_head		active_blocks;
-	dlist_head		unused_chunks;
-	dlist_head		unused_blocks;
+	dlist_head		unused_chunks;	/* cache for GpuMemChunk entries */
+	dlist_head		unused_blocks;	/* cache for GpuMemBlock entries */
 	dlist_head		hash_slots[59];	/* hash to find out GpuMemChunk */
 } GpuMemHead;
 
@@ -544,36 +544,6 @@ extern void pgstrom_init_gpuhashjoin(void);
 extern void pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg);
 extern bool pgstrom_plan_is_gpupreagg(const Plan *plan);
 extern void pgstrom_init_gpupreagg(void);
-
-extern Datum gpupreagg_partial_nrows(PG_FUNCTION_ARGS);
-extern Datum gpupreagg_pseudo_expr(PG_FUNCTION_ARGS);
-extern Datum gpupreagg_psum_int(PG_FUNCTION_ARGS);
-extern Datum gpupreagg_psum_float4(PG_FUNCTION_ARGS);
-extern Datum gpupreagg_psum_float8(PG_FUNCTION_ARGS);
-extern Datum gpupreagg_psum_x2_float(PG_FUNCTION_ARGS);
-extern Datum gpupreagg_psum_numeric(PG_FUNCTION_ARGS);
-extern Datum gpupreagg_psum_x2_numeric(PG_FUNCTION_ARGS);
-extern Datum gpupreagg_corr_psum_x(PG_FUNCTION_ARGS);
-extern Datum gpupreagg_corr_psum_y(PG_FUNCTION_ARGS);
-extern Datum gpupreagg_corr_psum_x2(PG_FUNCTION_ARGS);
-extern Datum gpupreagg_corr_psum_y2(PG_FUNCTION_ARGS);
-extern Datum gpupreagg_corr_psum_xy(PG_FUNCTION_ARGS);
-
-extern Datum pgstrom_avg_int8_accum(PG_FUNCTION_ARGS);	/* name confusing? */
-extern Datum pgstrom_sum_int8_accum(PG_FUNCTION_ARGS);	/* name confusing? */
-extern Datum pgstrom_sum_int8_final(PG_FUNCTION_ARGS);	/* name confusing? */
-extern Datum pgstrom_sum_float8_accum(PG_FUNCTION_ARGS);
-extern Datum pgstrom_variance_float8_accum(PG_FUNCTION_ARGS);
-extern Datum pgstrom_covariance_float8_accum(PG_FUNCTION_ARGS);
-
-extern Datum pgstrom_int8_avg_accum(PG_FUNCTION_ARGS);
-extern Datum pgstrom_numeric_avg_accum(PG_FUNCTION_ARGS);
-extern Datum pgstrom_numeric_avg_final(PG_FUNCTION_ARGS);
-extern Datum pgstrom_numeric_var_accum(PG_FUNCTION_ARGS);
-extern Datum pgstrom_numeric_var_samp(PG_FUNCTION_ARGS);
-extern Datum pgstrom_numeric_var_pop(PG_FUNCTION_ARGS);
-extern Datum pgstrom_numeric_stddev_samp(PG_FUNCTION_ARGS);
-extern Datum pgstrom_numeric_stddev_pop(PG_FUNCTION_ARGS);
 
 /*
  * gpusort.c

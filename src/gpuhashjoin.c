@@ -292,7 +292,6 @@ typedef struct
 	CUfunction		kern_proj;
 	void		   *kern_proj_args[5];
 	CUdeviceptr		m_join;
-	CUdeviceptr		m_hash;
 	CUdeviceptr		m_kds_src;
 	CUdeviceptr		m_kds_dst;
 	bool			hash_loader; /* true, if this context loads hash table */
@@ -3521,6 +3520,8 @@ pgstrom_complete_gpuhashjoin(GpuTask *gtask)
 	}
 	gpuhashjoin_cleanup_cuda_resources(ghjoin);
 
+	elog(INFO, "complete ghjoin %p", ghjoin);
+
 	/*
 	 * StromError_DataStoreNoSpace indicates pds_dst was smaller than
 	 * what GpuHashJoin required. So, we expand the buffer and kick
@@ -3610,6 +3611,8 @@ pgstrom_respond_gpuhashjoin(CUstream stream, CUresult status, void *private)
 		dlist_push_head(&gts->completed_tasks, &ghjoin->task.chain);
 	SpinLockRelease(&gts->lock);
 
+	elog(INFO, "respond ghjoin %p", ghjoin);
+
 	SetLatch(&MyProc->procLatch);
 }
 
@@ -3621,8 +3624,10 @@ __pgstrom_process_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
 	pgstrom_data_store *pds_dst = ghjoin->pds_dst;
 	kern_resultbuf	   *kresults = KERN_HASHJOIN_RESULTBUF(&ghjoin->kern);
 	int			cuda_index = ghjoin->task.cuda_index;
+	CUdeviceptr	m_hash;
 	Size		offset;
 	Size		length;
+	size_t		nitems;
 	size_t		grid_size;
 	size_t		block_size;
 	CUevent		ev_loaded;
@@ -3657,15 +3662,16 @@ __pgstrom_process_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
 	 * Allocation of device memory for hash table. If someone already
 	 * allocated it, we shall reuse this segment.
 	 */
-	if (!mhtables->m_hash[cuda_index])
+	if (mhtables->m_hash[cuda_index])
+		m_hash = mhtables->m_hash[cuda_index];
+	else
 	{
-		CUdeviceptr m_hash = gpuMemAlloc(&ghjoin->task, mhtables->length);
-
+		m_hash = gpuMemAlloc(&ghjoin->task, mhtables->length);
 		if (!m_hash)
 			goto out_of_resource;
 		mhtables->m_hash[cuda_index] = m_hash;
 	}
-	Assert(mhtables->m_hash[cuda_index] != 0UL);
+	Assert(m_hash != 0UL);
 
 	/*
 	 * Allocation of device memory for each chunks
@@ -3703,7 +3709,7 @@ __pgstrom_process_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 
-		rc = cuMemcpyHtoDAsync(mhtables->m_hash[cuda_index],
+		rc = cuMemcpyHtoDAsync(m_hash,
 							   &mhtables->kern,
 							   length,
 							   ghjoin->task.cuda_stream);
@@ -3750,7 +3756,7 @@ __pgstrom_process_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
 
 	/* DMA Send: __global kern_data_store *kds_dst */
 	length = KERN_DATA_STORE_HEAD_LENGTH(pds_dst->kds);
-	rc = cuMemcpyHtoDAsync(ghjoin->m_kds_src,
+	rc = cuMemcpyHtoDAsync(ghjoin->m_kds_dst,
 						   pds_dst->kds,
 						   length,
 						   ghjoin->task.cuda_stream);
@@ -3767,15 +3773,18 @@ __pgstrom_process_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
 	 *                       kern_multihash *kmhash,
 	 *                       kern_data_store *kds)
 	 */
+	nitems = pds_src->kds->nitems;
 	pgstrom_compute_workgroup_size(&grid_size,
 								   &block_size,
 								   ghjoin->kern_main,
 								   ghjoin->task.cuda_device,
 								   false,
-								   pds_src->kds->nitems,
+								   nitems,
 								   sizeof(cl_uint));
+	elog(INFO, "ghjoin = %p, m_join = %lx m_hash = %lx m_kds_src = %lx", ghjoin, ghjoin->m_join, m_hash, ghjoin->m_kds_src);
+
 	ghjoin->kern_main_args[0] = &ghjoin->m_join;
-	ghjoin->kern_main_args[1] = &ghjoin->m_hash;
+	ghjoin->kern_main_args[1] = &m_hash;
 	ghjoin->kern_main_args[2] = &ghjoin->m_kds_src;
 
 	rc = cuLaunchKernel(ghjoin->kern_main,
@@ -3788,6 +3797,8 @@ __pgstrom_process_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 	ghjoin->task.pfm.num_kern_join++;
+
+	elog(INFO, "launch main! ghjoin = %p grid_sz=%zu block_sz=%zu", ghjoin, grid_size, block_size);
 
 	CUDA_EVENT_RECORD(ghjoin, ev_kern_main_end);
 
@@ -3803,10 +3814,10 @@ __pgstrom_process_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
 								   ghjoin->kern_proj,
 								   ghjoin->task.cuda_device,
 								   false,
-								   pds_dst->kds->nrooms,
+								   nitems,
 								   sizeof(cl_uint));
 	ghjoin->kern_proj_args[0] = &ghjoin->m_join;
-	ghjoin->kern_proj_args[1] = &ghjoin->m_hash;
+	ghjoin->kern_proj_args[1] = &m_hash;
 	ghjoin->kern_proj_args[2] = &ghjoin->m_kds_src;
 	ghjoin->kern_proj_args[3] = &ghjoin->m_kds_dst;
 
@@ -3820,6 +3831,8 @@ __pgstrom_process_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 	ghjoin->task.pfm.num_kern_proj++;
+
+	elog(INFO, "launch proj! ghjoin = %p grid_sz=%zu block_sz=%zu", ghjoin, grid_size, block_size);
 
 	CUDA_EVENT_RECORD(ghjoin, ev_dma_recv_start);
 

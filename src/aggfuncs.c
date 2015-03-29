@@ -24,6 +24,39 @@
 #include <math.h>
 #include "pg_strom.h"
 
+/*
+ * declarations
+ */
+Datum gpupreagg_partial_nrows(PG_FUNCTION_ARGS);
+Datum gpupreagg_pseudo_expr(PG_FUNCTION_ARGS);
+Datum gpupreagg_psum_int(PG_FUNCTION_ARGS);
+Datum gpupreagg_psum_float4(PG_FUNCTION_ARGS);
+Datum gpupreagg_psum_float8(PG_FUNCTION_ARGS);
+Datum gpupreagg_psum_x2_float(PG_FUNCTION_ARGS);
+Datum gpupreagg_psum_numeric(PG_FUNCTION_ARGS);
+Datum gpupreagg_psum_x2_numeric(PG_FUNCTION_ARGS);
+Datum gpupreagg_corr_psum_x(PG_FUNCTION_ARGS);
+Datum gpupreagg_corr_psum_y(PG_FUNCTION_ARGS);
+Datum gpupreagg_corr_psum_x2(PG_FUNCTION_ARGS);
+Datum gpupreagg_corr_psum_y2(PG_FUNCTION_ARGS);
+Datum gpupreagg_corr_psum_xy(PG_FUNCTION_ARGS);
+
+Datum pgstrom_avg_int8_accum(PG_FUNCTION_ARGS);	/* name confusing? */
+Datum pgstrom_sum_int8_accum(PG_FUNCTION_ARGS);	/* name confusing? */
+Datum pgstrom_sum_int8_final(PG_FUNCTION_ARGS);	/* name confusing? */
+Datum pgstrom_sum_float8_accum(PG_FUNCTION_ARGS);
+Datum pgstrom_variance_float8_accum(PG_FUNCTION_ARGS);
+Datum pgstrom_covariance_float8_accum(PG_FUNCTION_ARGS);
+
+Datum pgstrom_int8_avg_accum(PG_FUNCTION_ARGS);
+Datum pgstrom_numeric_avg_accum(PG_FUNCTION_ARGS);
+Datum pgstrom_numeric_avg_final(PG_FUNCTION_ARGS);
+Datum pgstrom_numeric_var_accum(PG_FUNCTION_ARGS);
+Datum pgstrom_numeric_var_samp(PG_FUNCTION_ARGS);
+Datum pgstrom_numeric_var_pop(PG_FUNCTION_ARGS);
+Datum pgstrom_numeric_stddev_samp(PG_FUNCTION_ARGS);
+Datum pgstrom_numeric_stddev_pop(PG_FUNCTION_ARGS);
+
 /* gpupreagg_partial_nrows - placeholder function that generate number
  * of rows being included in this partial group.
  */

@@ -53,9 +53,9 @@ static CUdevice	   *cuda_devices = NULL;
 typedef struct GpuMemBlock
 {
 	dlist_node		chain;			/* link to active/unused_blocks */
-	CUdeviceptr		block_addr;
-	size_t			block_size;
-	size_t			free_size;
+	CUdeviceptr		block_addr;		/* head of device address */
+	size_t			block_size;		/* length of the block */
+	size_t			max_free_size;	/* max available space in this block */
 	dlist_head		addr_chunks;	/* chunks in order of address */
 	dlist_head		free_chunks;	/* free chunks */
 } GpuMemBlock;
@@ -107,6 +107,58 @@ gpuMemMaxAllocSize(void)
 	return cuda_max_malloc_size;
 }
 
+/*
+ * gpuMemDump
+ *
+ * For debug, it dumps all the device memory chunks
+ */
+static void
+__gpuMemDump(GpuMemBlock *gm_block, bool is_active)
+{
+	GpuMemChunk	   *gm_chunk;
+	dlist_iter		iter;
+
+	elog(INFO, "GpuMemBlock: %p - %p (size: %zu, free: %zu, %s)",
+		 (char *)(gm_block->block_addr),
+		 (char *)(gm_block->block_addr + gm_block->block_size),
+		 gm_block->block_size,
+		 gm_block->max_free_size,
+		 is_active ? "active" : "unused");
+
+	dlist_foreach (iter, &gm_block->addr_chunks)
+	{
+		gm_chunk = dlist_container(GpuMemChunk, addr_chain, iter.cur);
+
+		elog(INFO, "GpuMemChunk: %p - %p (offset: %08zx size: %08zx, %s)",
+			 (char *)(gm_chunk->chunk_addr),
+			 (char *)(gm_chunk->chunk_addr + gm_chunk->chunk_size),
+			 (char *)gm_chunk->chunk_addr - (char *)gm_block->block_addr,
+			 gm_chunk->chunk_size,
+			 (!gm_chunk->free_chain.prev &&
+			  !gm_chunk->free_chain.next) ? "active" : "free");
+	}
+}
+
+static void
+gpuMemDump(GpuContext *gcontext, int cuda_index)
+{
+	GpuMemHead	   *gm_head = &gcontext->gpu[cuda_index].cuda_memory;
+	GpuMemBlock	   *gm_block;
+	dlist_iter		iter;
+
+	dlist_foreach (iter, &gm_head->active_blocks)
+	{
+		gm_block = dlist_container(GpuMemBlock, chain, iter.cur);
+		__gpuMemDump(gm_block, true);
+	}
+
+	dlist_foreach (iter, &gm_head->unused_blocks)
+	{
+		gm_block = dlist_container(GpuMemBlock, chain, iter.cur);
+		__gpuMemDump(gm_block, false);
+	}
+}
+
 CUdeviceptr
 __gpuMemAlloc(GpuContext *gcontext, int cuda_index, size_t bytesize)
 {
@@ -136,14 +188,14 @@ __gpuMemAlloc(GpuContext *gcontext, int cuda_index, size_t bytesize)
 	dlist_foreach(iter, &gm_head->active_blocks)
 	{
 		gm_block = dlist_container(GpuMemBlock, chain, iter.cur);
-		if (gm_block->free_size > bytesize)
+		if (gm_block->max_free_size > bytesize)
 			goto found;
 	}
 
 	if (gm_head->empty_block)
 	{
 		gm_block = gm_head->empty_block;
-		if (gm_block->free_size > bytesize)
+		if (gm_block->max_free_size > bytesize)
 		{
 			Assert(!gm_block->chain.prev && !gm_block->chain.next);
 			gm_head->empty_block = NULL;
@@ -192,7 +244,7 @@ __gpuMemAlloc(GpuContext *gcontext, int cuda_index, size_t bytesize)
 	}
 	gm_block->block_addr = block_addr;
 	gm_block->block_size = required;
-	gm_block->free_size = required;
+	gm_block->max_free_size = required;
 	dlist_init(&gm_block->addr_chunks);
 	dlist_init(&gm_block->free_chunks);
 
@@ -226,11 +278,21 @@ found:
 		{
 			dlist_delete(&gm_chunk->free_chain);
 			memset(&gm_chunk->free_chain, 0, sizeof(dlist_node));
-			gm_block->free_size -= gm_chunk->chunk_size;
 
 			index = gpuMemHashIndex(gm_head, gm_chunk->chunk_addr);
 			dlist_push_tail(&gm_head->hash_slots[index],
 							&gm_chunk->hash_chain);
+			if (gm_block->max_free_size == gm_chunk->chunk_size)
+			{
+				gm_block->max_free_size = 0;
+				dlist_foreach(iter, &gm_block->free_chunks)
+				{
+					GpuMemChunk	   *temp
+						= dlist_container(GpuMemChunk, free_chain, iter.cur);
+					gm_block->max_free_size = Max(gm_block->max_free_size,
+												  temp->chunk_size);
+				}
+			}
 			return gm_chunk->chunk_addr;
 		}
 
@@ -254,11 +316,21 @@ found:
 		index = gpuMemHashIndex(gm_head, new_chunk->chunk_addr);
 		dlist_push_tail(&gm_head->hash_slots[index],
 						&new_chunk->hash_chain);
-		gm_block->free_size -= bytesize;
-
+		if (gm_block->max_free_size == gm_chunk->chunk_size + bytesize)
+		{
+			gm_block->max_free_size = 0;
+			dlist_foreach(iter, &gm_block->free_chunks)
+			{
+				GpuMemChunk    *temp
+					= dlist_container(GpuMemChunk, free_chain, iter.cur);
+				gm_block->max_free_size = Max(gm_block->max_free_size,
+											  temp->chunk_size);
+			}
+		}
 		return new_chunk->chunk_addr;
 	}
-	elog(ERROR, "Bug? we could not find a free chunk in GpuMemBlock");
+	gpuMemDump(gcontext, cuda_index);
+	elog(ERROR, "Bug? we could not find a free chunk in GpuMemBlock (%zu)", bytesize);
 }
 
 CUdeviceptr
@@ -303,8 +375,8 @@ found:
 	Assert(gm_chunk->chunk_addr >= gm_block->block_addr &&
 		   (gm_chunk->chunk_addr + gm_chunk->chunk_size) <=
 		   (gm_block->block_addr + gm_block->block_size));
-	gm_block->free_size += gm_chunk->chunk_size;
-	Assert(gm_block->free_size <= gm_block->block_size);
+	gm_block->max_free_size = Max(gm_block->max_free_size,
+								  gm_chunk->chunk_size);
 
 	/* back to the free_list */
 	Assert(!gm_chunk->free_chain.prev && !gm_chunk->free_chain.next);
@@ -326,6 +398,10 @@ found:
 			dlist_delete(&gm_chunk->addr_chain);
 			dlist_delete(&gm_chunk->free_chain);
 			gm_prev->chunk_size += gm_chunk->chunk_size;
+
+			/* update max_free_size if needed */
+			gm_block->max_free_size = Max(gm_block->max_free_size,
+										  gm_prev->chunk_size);
 
 			/* GpuMemChunk entry may be reused soon */
 			dlist_push_head(&gm_head->unused_chunks, &gm_chunk->addr_chain);
@@ -353,6 +429,10 @@ found:
 			dlist_delete(&gm_next->free_chain);
 			gm_chunk->chunk_size += gm_next->chunk_size;
 
+			/* update max_free_size if needed */
+			gm_block->max_free_size = Max(gm_block->max_free_size,
+										  gm_chunk->chunk_size);
+
 			/* GpuMemChunk entry may be reused soon */
 			dlist_push_head(&gm_head->unused_chunks, &gm_next->addr_chain);
 		}
@@ -370,6 +450,7 @@ found:
 		Assert(!gm_chunk->hash_chain.prev && !gm_chunk->hash_chain.next);
 		Assert(gm_block->block_addr == gm_chunk->chunk_addr &&
 			   gm_block->block_size == gm_chunk->chunk_size);
+		Assert(gm_block->max_free_size == gm_block->block_size);
 		/* OK, it looks to up an empty block */
 		dlist_delete(&gm_block->chain);
 		memset(&gm_block->chain, 0, sizeof(dlist_node));
@@ -391,7 +472,7 @@ found:
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuCtxPopCurrent: %s", errorText(rc));
 
-			elog(INFO, "cuMemFree(%zu)", (size_t)gm_block->block_addr);
+			elog(INFO, "cuMemFree(%08zx)", (size_t)gm_block->block_addr);
 
 			memset(gm_chunk, 0, sizeof(GpuMemChunk));
 			dlist_push_head(&gm_head->unused_chunks, &gm_chunk->addr_chain);

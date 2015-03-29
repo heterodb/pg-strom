@@ -261,6 +261,23 @@ gpuhashjoin_execute(cl_int *errcode,
 					cl_int *rbuffer);
 
 /*
+ * gpuhashjoin_projection_mapping/_datum
+ *
+ * support routine of projection
+ */
+STATIC_FUNCTION(void)
+gpuhashjoin_projection_mapping(cl_int dest_colidx,
+							   cl_uint *src_depth,
+							   cl_uint *src_colidx);
+STATIC_FUNCTION(void)
+gpuhashjoin_projection_datum(cl_int *errcode,
+							 Datum *slot_values,
+							 cl_char *slot_isnull,
+							 cl_int depth,
+							 cl_int colidx,
+							 hostptr_t hostaddr,
+							 void *datum);
+/*
  * kern_gpuhashjoin_main
  *
  * entrypoint of kernel gpuhashjoin implementation. Its job can be roughly
@@ -293,7 +310,7 @@ kern_gpuhashjoin_main(kern_hashjoin *khashjoin,
 	 */
 	if (kresults->nrels != kmhash->ntables + 1)
 	{
-		errcode = StromError_DataStoreCorruption;
+		errcode = StromError_DataStoreCorruption + 1000;
 		goto out;
 	}
 
@@ -401,32 +418,20 @@ out:
 }
 
 /*
- * kern_gpuhashjoin_projection_xxx
+ * kern_gpuhashjoin_projection_row
  *
- *
- *
+ * It puts hashjoin results on the data-store with row-format.
+ * This function takes __syncthreads()
  */
-STATIC_FUNCTION(void)
-gpuhashjoin_projection_mapping(cl_int dest_colidx,
-							   cl_uint *src_depth,
-							   cl_uint *src_colidx);
-STATIC_FUNCTION(void)
-gpuhashjoin_projection_datum(cl_int *errcode,
-							 Datum *slot_values,
-							 cl_char *slot_isnull,
-							 cl_int depth,
-							 cl_int colidx,
-							 hostptr_t hostaddr,
-							 void *datum);
-
-KERNEL_FUNCTION(void)
-kern_gpuhashjoin_projection_row(kern_hashjoin *khashjoin,	/* in */
-								kern_multihash *kmhash,		/* in */
-								kern_data_store *kds_src,	/* in */
-								kern_data_store *kds_dst)	/* out */
+STATIC_FUNCTION(bool)
+__gpuhashjoin_projection_row(cl_int *p_errcode,			/* in/out */
+							 kern_resultbuf *kresults,	/* in */
+							 size_t res_index,			/* in */
+							 kern_multihash *kmhash,	/* in */
+							 kern_data_store *kds_src,	/* in */
+							 kern_data_store *kds_dst)	/* out */
 {
-	kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
-	cl_int		   *rbuffer;
+	cl_int		   *rbuffer = KERN_GET_RESULT(kresults, res_index);
 	void		   *datum;
 	cl_uint			nrels = kresults->nrels;
 	cl_bool			heap_hasnull = false;
@@ -437,42 +442,11 @@ kern_gpuhashjoin_projection_row(kern_hashjoin *khashjoin,	/* in */
 	cl_uint			total_len;
 	cl_uint			usage_head;
 	__shared__ cl_uint usage_prev;
-	cl_int			errcode = StromError_Success;
-
-	/* Case of overflow; it shall be retried or executed by CPU instead,
-	 * so no projection is needed anyway. We quickly exit the kernel.
-	 * No need to set an error code because kern_gpuhashjoin_main()
-	 * should already set it.
-	 */
-	if (kresults->nitems > kresults->nrooms ||
-		kresults->nitems > kds_dst->nrooms)
-	{
-		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
-		goto out;
-	}
-
-	/* update nitems of kds_dst. note that get_global_id(0) is not always
-     * called earlier than other thread. So, we should not expect nitems
-	 * of kds_dst is initialized.
-	 */
-	if (get_global_id() == 0)
-		kds_dst->nitems = kresults->nitems;
-
-	/* Ensure format of the kern_data_store (source/destination) */
-	if (kds_src->format != KDS_FORMAT_ROW ||
-		kds_dst->format != KDS_FORMAT_ROW)
-	{
-		STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption);
-		goto out;
-	}
-
-	/* combination of rows in this join */
-	rbuffer = kresults->results + nrels * get_global_id();
 
 	/*
 	 * Step.1 - compute length of the joined tuple
 	 */
-	if (get_global_id() < kresults->nitems)
+	if (res_index < kresults->nitems)
 	{
 		cl_uint		i, ncols = kds_dst->ncols;
 
@@ -549,8 +523,8 @@ kern_gpuhashjoin_projection_row(kern_hashjoin *khashjoin,	/* in */
 				  STROMALIGN(sizeof(cl_uint) * kresults->nitems));
 	if (usage_head + usage_prev + total_len > kds_dst->length)
 	{
-		errcode = StromError_DataStoreNoSpace;
-		goto out;
+		*p_errcode = StromError_DataStoreNoSpace;
+		return false;
 	}
 
 	/*
@@ -662,26 +636,24 @@ kern_gpuhashjoin_projection_row(kern_hashjoin *khashjoin,	/* in */
 		}
 		titem->t_len = curr;
 	}
-out:
-	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kresults->errcode, errcode);
+	return true;
 }
 
 KERNEL_FUNCTION(void)
-kern_gpuhashjoin_projection_slot(kern_hashjoin *khashjoin,	/* in */
-								 kern_multihash *kmhash,	/* in */
-								 kern_data_store *kds_src,	/* in */
-								 kern_data_store *kds_dst) /* out */
+kern_gpuhashjoin_projection_row(kern_hashjoin *khashjoin,	/* in */
+								kern_multihash *kmhash,		/* in */
+								kern_data_store *kds_src,	/* in */
+								kern_data_store *kds_dst)	/* out */
 {
 	kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
-	cl_int	   *rbuffer;
-	Datum	   *slot_values;
-	cl_char	   *slot_isnull;
-	cl_int		nrels = kresults->nrels;
-	cl_int		depth;
-	cl_int		errcode = StromError_Success;
+	size_t			res_index;
+	size_t			res_limit;
+	cl_int			errcode = StromError_Success;
 
-	/* Update the nitems of kds_dst */
+	/* update nitems of kds_dst. note that get_global_id(0) is not always
+     * called earlier than other thread. So, we should not expect nitems
+	 * of kds_dst is initialized.
+	 */
 	if (get_global_id() == 0)
 		kds_dst->nitems = kresults->nitems;
 
@@ -696,21 +668,49 @@ kern_gpuhashjoin_projection_slot(kern_hashjoin *khashjoin,	/* in */
 		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
 		goto out;
 	}
-	/* Do projection if thread is responsible */
-	if (get_global_id() >= kresults->nitems)
-		goto out;
-	/* Ensure format of the kern_data_store */
+
+	/* Ensure format of the kern_data_store (source/destination) */
 	if (kds_src->format != KDS_FORMAT_ROW ||
-		kds_dst->format != KDS_FORMAT_SLOT)
+		kds_dst->format != KDS_FORMAT_ROW)
 	{
-		STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption);
+		STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption + 2000);
 		goto out;
 	}
 
-	/* Extract each tuple and projection */
-	rbuffer = kresults->results + nrels * get_global_id();
-	slot_values = KERN_DATA_STORE_VALUES(kds_dst, get_global_id());
-	slot_isnull = KERN_DATA_STORE_ISNULL(kds_dst, get_global_id());
+	/* Do projection if thread is responsible */
+	res_limit = ((kresults->nitems + get_local_size() - 1) /
+				 get_local_size()) * get_local_size();
+	for (res_index = get_global_id();
+		 res_index < res_limit;
+		 res_index += get_global_size())
+	{
+		if (!__gpuhashjoin_projection_row(&errcode, kresults, res_index,
+										  kmhash, kds_src, kds_dst))
+			break;
+	}
+out:
+	/* write-back execution status into host-side */
+	kern_writeback_error_status(&kresults->errcode, errcode);
+}
+
+/*
+ * kern_gpuhashjoin_projection_slot
+ *
+ * It puts hashjoin results on the data-store with slot format
+ */
+STATIC_FUNCTION(bool)
+__gpuhashjoin_projection_slot(cl_int *p_errcode,		/* in/out */
+							  kern_resultbuf *kresults,	/* in */
+							  size_t res_index,			/* in */
+							  kern_multihash *kmhash,	/* in */
+							  kern_data_store *kds_src,	/* in */
+							  kern_data_store *kds_dst) /* out */
+{
+	cl_int	   *rbuffer = KERN_GET_RESULT(kresults, res_index);
+	Datum	   *slot_values = KERN_DATA_STORE_VALUES(kds_dst, res_index);
+	cl_char	   *slot_isnull = KERN_DATA_STORE_ISNULL(kds_dst, res_index);
+	cl_int		nrels = kresults->nrels;
+	cl_int		depth;
 
 	for (depth=0; depth < nrels; depth++)
 	{
@@ -751,7 +751,7 @@ kern_gpuhashjoin_projection_slot(kern_hashjoin *khashjoin,	/* in */
 		if (!htup)
 		{
 			for (i=0; i < ncols; i++)
-				gpuhashjoin_projection_datum(&errcode,
+				gpuhashjoin_projection_datum(p_errcode,
 											 slot_values,
 											 slot_isnull,
 											 depth,
@@ -785,7 +785,7 @@ kern_gpuhashjoin_projection_slot(kern_hashjoin *khashjoin,	/* in */
 						   : VARSIZE_ANY(datum));
 			}
 			/* put datum */
-			gpuhashjoin_projection_datum(&errcode,
+			gpuhashjoin_projection_datum(p_errcode,
 										 slot_values,
 										 slot_isnull,
 										 depth,
@@ -794,6 +794,54 @@ kern_gpuhashjoin_projection_slot(kern_hashjoin *khashjoin,	/* in */
 													 (char *) baseaddr),
 										 datum);
 		}
+	}
+	return true;
+}
+
+KERNEL_FUNCTION(void)
+kern_gpuhashjoin_projection_slot(kern_hashjoin *khashjoin,	/* in */
+								 kern_multihash *kmhash,	/* in */
+								 kern_data_store *kds_src,	/* in */
+								 kern_data_store *kds_dst) /* out */
+{
+	kern_resultbuf *kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
+	size_t		res_index;
+	size_t		res_limit;
+	cl_int		errcode = StromError_Success;
+
+	/* Update the nitems of kds_dst */
+	if (get_global_id() == 0)
+		kds_dst->nitems = kresults->nitems;
+
+	/* Case of overflow; it shall be retried or executed by CPU instead,
+	 * so no projection is needed anyway. We quickly exit the kernel.
+	 * No need to set an error code because kern_gpuhashjoin_main()
+	 * should already set it.
+	 */
+	if (kresults->nitems > kresults->nrooms ||
+		kresults->nitems > kds_dst->nrooms)
+	{
+		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
+		goto out;
+	}
+
+	/* Ensure format of the kern_data_store */
+	if (kds_src->format != KDS_FORMAT_ROW ||
+		kds_dst->format != KDS_FORMAT_SLOT)
+	{
+		STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption + 3000);
+		goto out;
+	}
+
+	/* Do projection if thread is responsible */
+	res_limit = kresults->nitems;
+	for (res_index = get_global_id();
+		 res_index < res_limit;
+		 res_index += get_global_size())
+	{
+		if (!__gpuhashjoin_projection_slot(&errcode, kresults, res_index,
+										   kmhash, kds_src, kds_dst))
+			break;
 	}
 out:
 	/* write-back execution status into host-side */
