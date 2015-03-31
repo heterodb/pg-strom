@@ -332,7 +332,7 @@ typedef struct devfunc_info {
  */
 typedef struct pgstrom_data_store
 {
-	dlist_node	chain;		/* link to GpuContext->pds_list */
+	dlist_node	pds_chain;		/* link to GpuContext->pds_list */
 	FileName	kds_fname;	/* filename, if file-mapped */
 	Size		kds_offset;	/* offset of mapped file */
 	Size		kds_length;	/* length of the kernel data store */

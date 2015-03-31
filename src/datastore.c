@@ -399,7 +399,8 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 		pgstrom_release_data_store(pds->ktoast);
 
 	/* detach from the GpuContext */
-	dlist_delete(&pds->chain);
+	dlist_delete(&pds->pds_chain);
+	memset(&pds->pds_chain, 0, sizeof(dlist_node));
 
 	/* release the data store body */
 	if (pds->kds_fname)
@@ -494,7 +495,7 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 
 	/* allocation of pds */
 	pds = MemoryContextAllocZero(gmcxt, sizeof(pgstrom_data_store));
-	dlist_push_tail(&gcontext->pds_list, &pds->chain);
+	dlist_push_tail(&gcontext->pds_list, &pds->pds_chain);
 
 	/* allocation of kds */
 	pds->kds_length = (STROMALIGN(offsetof(kern_data_store,
@@ -557,7 +558,7 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 
 	/* allocation of pds */
 	pds = MemoryContextAllocZero(gmcxt, sizeof(pgstrom_data_store));
-	dlist_push_tail(&gcontext->pds_list, &pds->chain);
+	dlist_push_tail(&gcontext->pds_list, &pds->pds_chain);
 
 	/* allocation of kds */
 	pds->kds_length = (STROMALIGN(offsetof(kern_data_store,

@@ -472,7 +472,10 @@ found:
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuCtxPopCurrent: %s", errorText(rc));
 
-			elog(INFO, "cuMemFree(%08zx)", (size_t)gm_block->block_addr);
+			elog(INFO, "cuMemFree(%08zx - %08zx, size=%zuMB)",
+				 (size_t)gm_block->block_addr,
+				 ((size_t)gm_block->block_addr + gm_block->block_size),
+				 ((size_t)gm_block->block_size) >> 20);
 
 			memset(gm_chunk, 0, sizeof(GpuMemChunk));
 			dlist_push_head(&gm_head->unused_chunks, &gm_chunk->addr_chain);
@@ -741,7 +744,7 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 	{
 		dlist_node *dnode = dlist_pop_head_node(&gcontext->pds_list);
 		pgstrom_data_store *pds
-			= dlist_container(pgstrom_data_store, chain, dnode);
+			= dlist_container(pgstrom_data_store, pds_chain, dnode);
 		if (pds->kds_fname)
 			pgstrom_file_unmap_data_store(pds);
 	}
