@@ -1,11 +1,11 @@
 /*
- * opencl_gpupreagg.h
+ * cuda_gpupreagg.h
  *
  * Preprocess of aggregate using GPU acceleration, to reduce number of
  * rows to be processed by CPU; including the Sort reduction.
  * --
- * Copyright 2011-2014 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014 (C) The PG-Strom Development Team
+ * Copyright 2011-2015 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2015 (C) The PG-Strom Development Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -16,8 +16,8 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#ifndef OPENCL_GPUPREAGG_H
-#define OPENCL_GPUPREAGG_H
+#ifndef CUDA_GPUPREAGG_H
+#define CUDA_GPUPREAGG_H
 
 /*
  * Sequential Scan using GPU/MIC acceleration
@@ -25,42 +25,38 @@
  * It packs a kern_parambuf and kern_resultbuf structure within a continuous
  * memory ares, to transfer (usually) small chunk by one DMA call.
  *
- * +----------------+  -----
- * | status         |    ^
- * +----------------+    |
- * | hash_size      |    |
- * +----------------+    |
- * | pg_crc32_table |    |
- * |      :         |    |
- * +----------------+    |
- * | kern_parambuf  |    |
- * | +--------------+    |
- * | | length   o--------------+
- * | +--------------+    |     | kern_row_map is located just after
- * | | nparams      |    |     | the kern_parambuf (because of DMA
- * | +--------------+    |     | optimization), so head address of
- * | | poffset[0]   |    |     | kern_gpuscan + parambuf.length
- * | | poffset[1]   |    |     | points kern_row_map.
- * | |    :         |    |     |
- * | | poffset[M-1] |    |     |
- * | +--------------+    |     |
- * | | variable     |    |     |
- * | | length field |    |     |
- * | | for Param /  |    |     |
- * | | Const values |    |     |
- * | |     :        |    |     |
- * +-+--------------+ <--------+
- * | kern_row_map   |    |
- * | +--------------+    |
- * | | nvalids (=N) |    |
- * | +--------------+    |
- * | | rindex[0]    |    |
- * | | rindex[1]    |    |
- * | |    :         |    |
- * | | rindex[N]    |    V
- * +-+--------------+  -----
+ * +----------------+
+ * | status         |
+ * +----------------+
+ * | hash_size      |
+ * +----------------+
+ * | pg_crc32_table |
+ * |      :         |
+ * +----------------+ ---
+ * | kern_parambuf  |  ^
+ * | +--------------+  | kparams.length
+ * | | length       |  |
+ * | +--------------+  |
+ * | | nparams      |  |
+ * | +--------------+  |
+ * | |    :         |  |
+ * | |    :         |  v
+ * +-+--------------+ ---
+ * | kern_resultbuf |
+ * | +--------------+
+ * | | nrels        |
+ * | +--------------+
+ * | | nrooms       |
+ * | +--------------+
+ * | | nitems       |
+ * | +--------------+
+ * | | errcode      |
+ * | +--------------+
+ * | | results[]    |
+ * | |    :         |
+ * | |    :         |
+ * +-+--------------+
  */
-
 typedef struct
 {
 	cl_int			status;				/* result of kernel execution */
@@ -69,32 +65,28 @@ typedef struct
 	cl_uint			pg_crc32_table[256];	/* master CRC32 table */
 	kern_parambuf	kparams;
 	/*
-	 *  kern_row_map shall be located next to kern_parmbuf
+	 * kern_resultbuf with nrels==1 shall be located next to kern_parambuf
 	 */
 } kern_gpupreagg;
 
 /* macro definitions to reference packed values */
-#define KERN_GPUPREAGG_PARAMBUF(kgpreagg)				\
-	((__global kern_parambuf *)(&(kgpreagg)->kparams))
-#define KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg)		\
+#define KERN_GPUPREAGG_PARAMBUF(kgpreagg)			\
+	((kern_parambuf *)(&(kgpreagg)->kparams))
+#define KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg)	\
 	(KERN_GPUPREAGG_PARAMBUF(kgpreagg)->length)
-#define KERN_GPUPREAGG_KROWMAP(kgpreagg)				\
-	((__global kern_row_map *)							\
-	 ((__global char *)(kgpreagg) +						\
-	  STROMALIGN(offsetof(kern_gpupreagg, kparams) +	\
-				 KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg))))
-#define KERN_GPUPREAGG_BUFFER_SIZE(kgpreagg, nitems)	\
-	((uintptr_t)(KERN_GPUPREAGG_KROWMAP(kgpreagg)->rindex +	(nitems)) -	\
-	 (uintptr_t)(kgpreagg))
+#define KERN_GPUPREAGG_RESULTBUF(kgpreagg)							\
+	((kern_resultbuf *)((char *)KERN_GPUPREAGG_PARAMBUF(kgpreagg)	\
+						+ KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg)))
+
 #define KERN_GPUPREAGG_DMASEND_OFFSET(kgpreagg)			0
-#define KERN_GPUPREAGG_DMASEND_LENGTH(kgpreagg)						\
-	((uintptr_t)(KERN_GPUPREAGG_KROWMAP(kgpreagg)->rindex +			\
-				 (KERN_GPUPREAGG_KROWMAP(kgpreagg)->nvalids < 0 ?	\
-				  0 : KERN_GPUPREAGG_KROWMAP(kgpreagg)->nvalids)) -	\
+#define KERN_GPUPREAGG_DMASEND_LENGTH(kgpreagg)			\
+	(offsetof(kern_gpupreagg, kparams) +				\
+	 KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg))
+#define KERN_GPUPREAGG_DMARECV_OFFSET(kgpreagg)			\
+	((uintptr_t)KERN_GPUPREAGG_RESULTBUF(kgpreagg) -	\
 	 (uintptr_t)(kgpreagg))
-#define KERN_GPUPREAGG_DMARECV_OFFSET(kgpreagg)			0
-#define KERN_GPUPREAGG_DMARECV_LENGTH(kgpreagg,nitems)					\
-	((uintptr_t)(KERN_GPUPREAGG_KROWMAP(kgpreagg)->rindex + (nitems)) -	\
+#define KERN_GPUPREAGG_DMARECV_LENGTH(kgpreagg,nitems)	\
+	((uintptr_t)(KERN_GPUPREAGG_RESULTBUF(kgpreagg)->results + (nitems)) - \
 	 (uintptr_t)(kgpreagg))
 
 /*
@@ -157,7 +149,7 @@ typedef struct
 #define CHECK_OVERFLOW_NONE(x,y)		(0)
 
 #define CHECK_OVERFLOW_SHORT(x,y)				\
-	(((x)+(y)) < CL_SHRT_MIN || CL_SHRT_MAX < ((x)+(y)))
+	(((x)+(y)) < SHRT_MIN || SHRT_MAX < ((x)+(y)))
 
 #define CHECK_OVERFLOW_INT(x,y)					\
 	((((x) < 0) == ((y) < 0)) && (((x) + (y) < 0) != ((x) < 0)))
@@ -171,11 +163,11 @@ typedef struct
 /*
  * hash value calculation function - to be generated by PG-Strom on the fly
  */
-static cl_uint
-gpupreagg_hashvalue(__private cl_int *errcode,
-					__local cl_uint *crc32_table,
-					__global kern_data_store *kds,
-					__global kern_data_store *ktoast,
+STATIC_FUNCTION(cl_uint)
+gpupreagg_hashvalue(cl_int *errcode,
+					cl_uint *crc32_table,	/* __shared__ memory */
+					kern_data_store *kds,
+					kern_data_store *ktoast,
 					size_t kds_index);
 
 /*
@@ -187,10 +179,10 @@ gpupreagg_hashvalue(__private cl_int *errcode,
  * than record[Y].
  * (auto generated function)
  */
-static cl_bool
-gpupreagg_keymatch(__private cl_int *errcode,
-				   __global kern_data_store *kds,
-				   __global kern_data_store *ktoast,
+STATIC_FUNCTION(cl_bool)
+gpupreagg_keymatch(cl_int *errcode,
+				   kern_data_store *kds,
+				   kern_data_store *ktoast,
 				   size_t x_index,
 				   size_t y_index);
 
@@ -200,11 +192,11 @@ gpupreagg_keymatch(__private cl_int *errcode,
  * It aggregates the newval to accum using atomic operation on the
  * local pagg_datum array
  */
-static void
-gpupreagg_local_calc(__private cl_int *errcode,
+STATIC_FUNCTION(void)
+gpupreagg_local_calc(cl_int *errcode,
 					 cl_int attnum,
-					 __local pagg_datum *accum,
-					 __local pagg_datum *newval);
+					 pagg_datum *accum,
+					 pagg_datum *newval);
 
 /*
  * global calculation function - to be generated by PG-Strom on the fly
@@ -212,11 +204,11 @@ gpupreagg_local_calc(__private cl_int *errcode,
  * It also aggregates the newval to accum using atomic operation on
  * the global kern_data_store
  */
-static void
-gpupreagg_global_calc(__private cl_int *errcode,
+STATIC_FUNCTION(void)
+gpupreagg_global_calc(cl_int *errcode,
 					  cl_int attnum,
-					  __global kern_data_store *kds,
-					  __global kern_data_store *ktoast,
+					  kern_data_store *kds,
+					  kern_data_store *ktoast,
 					  size_t accum_index,
 					  size_t newval_index);
 
@@ -225,48 +217,48 @@ gpupreagg_global_calc(__private cl_int *errcode,
  * GROUP-BY clause is given, because all the rows shall be eventually
  * consolidated into one aggregated row.
  */
-static void
-gpupreagg_nogroup_calc(__private cl_int *errcode,
+STATIC_FUNCTION(void)
+gpupreagg_nogroup_calc(cl_int *errcode,
 					   cl_int attnum,
-					   __local pagg_datum *accum,
-					   __local pagg_datum *newval);
+					   pagg_datum *accum,
+					   pagg_datum *newval);
 
 /*
  * translate a kern_data_store (input) into an output form
  * (auto generated function)
  */
-static void
-gpupreagg_projection(__private cl_int *errcode,
-					 __global kern_parambuf *kparams,
-					 __global kern_data_store *kds_in,
-					 __global kern_data_store *kds_src,
-					 __global void *ktoast,
+STATIC_FUNCTION(void)
+gpupreagg_projection(cl_int *errcode,
+					 kern_parambuf *kparams,
+					 kern_data_store *kds_in,
+					 kern_data_store *kds_src,
+					 void *ktoast,
 					 size_t rowidx_in,
 					 size_t rowidx_out);
 /*
  * check qualifiers being pulled-up from the outer relation.
  * if not valid, this record shall not be processed.
  */
-static bool
-gpupreagg_qual_eval(__private cl_int *errcode,
-					__global kern_parambuf *kparams,
-					__global kern_data_store *kds,
-					__global kern_data_store *ktoast,
+STATIC_FUNCTION(bool)
+gpupreagg_qual_eval(cl_int *errcode,
+					kern_parambuf *kparams,
+					kern_data_store *kds,
+					kern_data_store *ktoast,
 					size_t kds_index);
 
 /*
  * load the data from kern_data_store to pagg_datum structure
  */
-static void
-gpupreagg_data_load(__local pagg_datum *pdatum,
-					__private cl_int *errcode,
-					__global kern_data_store *kds,
-					__global kern_data_store *ktoast,
+STATIC_FUNCTION(void)
+gpupreagg_data_load(pagg_datum *pdatum,		/* __shared__ */
+					cl_int *errcode,
+					kern_data_store *kds,
+					kern_data_store *ktoast,
 					cl_uint colidx, cl_uint rowidx)
 {
-	kern_colmeta		cmeta;
-	__global Datum	   *values;
-	__global cl_char   *isnull;
+	kern_colmeta	cmeta;
+	Datum		   *values;
+	cl_char		   *isnull;
 
 	if (kds->format != KDS_FORMAT_TUPSLOT ||
 		colidx >= kds->ncols)
@@ -302,16 +294,16 @@ gpupreagg_data_load(__local pagg_datum *pdatum,
 /*
  * store the data from pagg_datum structure to kern_data_store
  */
-static void
-gpupreagg_data_store(__local pagg_datum *pdatum,
-					 __private cl_int *errcode,
-					 __global kern_data_store *kds,
-					 __global kern_data_store *ktoast,
+STATIC_FUNCTION(void)
+gpupreagg_data_store(pagg_datum *pdatum,	/* __shared__ */
+					 cl_int *errcode,
+					 kern_data_store *kds,
+					 kern_data_store *ktoast,
 					 cl_uint colidx, cl_uint rowidx)
 {
-	kern_colmeta		cmeta;
-	__global Datum	   *values;
-	__global cl_char   *isnull;
+	kern_colmeta	cmeta;
+	Datum		   *values;
+	cl_char		   *isnull;
 
 	if (kds->format != KDS_FORMAT_TUPSLOT ||
 		colidx >= kds->ncols)
@@ -353,19 +345,19 @@ gpupreagg_data_store(__local pagg_datum *pdatum,
  * resource number of varlena key is not changed. So, all we need to
  * do is copying the offset value, not varlena body itself.
  */
-static void
-gpupreagg_data_move(__private cl_int *errcode,
-					__global kern_data_store *kds_src,
-					__global kern_data_store *kds_dst,
-					__global kern_data_store *ktoast,
+STATIC_FUNCTION(void)
+gpupreagg_data_move(cl_int *errcode,
+					kern_data_store *kds_src,
+					kern_data_store *kds_dst,
+					kern_data_store *ktoast,
 					cl_uint colidx,
 					cl_uint rowidx_src,
 					cl_uint rowidx_dst)
 {
-	__global Datum	   *src_values;
-	__global Datum	   *dst_values;
-	__global cl_char   *src_isnull;
-	__global cl_char   *dst_isnull;
+	Datum	   *src_values;
+	Datum	   *dst_values;
+	cl_char	   *src_isnull;
+	cl_char	   *dst_isnull;
 
 	/*
 	 * XXX - Paranoire checks?
@@ -402,29 +394,18 @@ gpupreagg_data_move(__private cl_int *errcode,
  * give this kern_data_store (never used for data-store in the later
  * stage) as toast buffer if the source kds has row-format.
  */
-__kernel void
-gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
-					  __global kern_data_store *kds_in,
-					  __global kern_data_store *kds_src,
-					  KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+KERNEL_FUNCTION(void)
+gpupreagg_preparation(kern_gpupreagg *kgpreagg,
+					  kern_data_store *kds_in,	/* in: KDS_FORMAT_ROW */
+					  kern_data_store *kds_src)	/* out: KDS_FORMAT_SLOT */
 {
-	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	__global kern_row_map  *krowmap = KERN_GPUPREAGG_KROWMAP(kgpreagg);
-	cl_int					errcode = StromError_Success;
-	cl_uint					offset;
-	cl_uint					nitems;
-	size_t					kds_index;
-	__local cl_uint			base;
-
-	/*
-	 * filters out invisible rows
-	 */
-	if (krowmap->nvalids < 0)
-		kds_index = get_global_id(0);
-	else if (get_global_id(0) < krowmap->nvalids)
-		kds_index = (size_t) krowmap->rindex[get_global_id(0)];
-	else
-		kds_index = kds_in->nitems;	/* ensure this thread is out of range */
+	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	kern_resultbuf *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
+	cl_int			errcode = StromError_Success;
+	cl_uint			offset;
+	cl_uint			nitems;
+	size_t			kds_index = get_global_id();
+	__shared__ cl_uint base;
 
 	/* check qualifiers */
 	if (kds_index < kds_in->nitems)
@@ -437,18 +418,17 @@ gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 	 * group.
 	 */
 	offset = arithmetic_stairlike_add(kds_index < kds_in->nitems ? 1 : 0,
-									  LOCAL_WORKMEM,
 									  &nitems);
 
 	/* Allocation of the result slot on the kds_src. */
-	if (get_local_id(0) == 0)
+	if (get_local_id() == 0)
 	{
 		if (nitems > 0)
-			base = atomic_add(&kds_src->nitems, nitems);
+			base = atomicAdd(&kds_src->nitems, nitems);
 		else
 			base = 0;
 	}
-	barrier(CLK_LOCAL_MEM_FENCE);
+	__syncthreads();
 
 	/* out of range check -- usually, should not happen */
 	if (base + nitems > kds_src->nrooms)
@@ -470,7 +450,7 @@ gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
 	}
 out:
 	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
+	kern_writeback_error_status(&kresults->errcode, errcode);
 }
 
 /*
@@ -480,16 +460,12 @@ out:
  * if gpupreagg_local_reduction() is not called. It initialized
  * the global hash-table and kern_row_map->nvalids.
  */
-__kernel void
-gpupreagg_init_global_hashslot(__global kern_gpupreagg *kgpreagg,
-							   __global pagg_hashslot *g_hashslot)
+KERNEL_FUNCTION(void)
+gpupreagg_init_global_hashslot(kern_gpupreagg *kgpreagg,
+							   pagg_hashslot *g_hashslot)
 {
-	__global kern_row_map *krowmap = KERN_GPUPREAGG_KROWMAP(kgpreagg);
-	size_t					hash_size;
-	size_t					curr_index;
-
-	if (get_global_id(0) == 0)
-		krowmap->nvalids = 0;
+	size_t		hash_size;
+	size_t		curr_index;
 
 	hash_size = kgpreagg->hash_size;
 	for (curr_index = get_global_id(0);
@@ -504,18 +480,17 @@ gpupreagg_init_global_hashslot(__global kern_gpupreagg *kgpreagg,
 /*
  * gpupreagg_local_reduction
  */
-__kernel void
-gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
-						  __global kern_data_store *kds_src,
-						  __global kern_data_store *kds_dst,
-						  __global kern_data_store *ktoast,
-						  __global pagg_hashslot *g_hashslot,
-						  KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+KERNEL_FUNCTION(void)
+gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
+						  kern_data_store *kds_src,
+						  kern_data_store *kds_dst,
+						  kern_data_store *ktoast,
+						  pagg_hashslot *g_hashslot)
 {
-	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	__global varlena   *kparam_0 = kparam_get_value(kparams, 0);
-	__global cl_char   *gpagg_atts = (__global cl_char *) VARDATA(kparam_0);
-	size_t				hash_size = 2 * get_local_size(0);
+	kern_parambuf	   *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	varlena			   *kparam_0 = kparam_get_value(kparams, 0);
+	cl_char			   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
+	size_t				hash_size = 2 * get_local_size();
 	size_t				dest_index;
 	cl_uint				owner_index;
 	cl_uint				hash_value;
@@ -528,10 +503,10 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 	pagg_hashslot		old_slot;
 	pagg_hashslot		new_slot;
 	pagg_hashslot		cur_slot;
-	__local cl_uint		crc32_table[256];
-	__local size_t		base_index;
-	__local pagg_datum *l_datum;
-	__local pagg_hashslot *l_hashslot;
+	cl_uint			   *crc32_table;
+	pagg_datum		   *l_datum;
+	pagg_hashslot	   *l_hashslot;
+	__shared__ size_t	base_index;
 
 	/* next stage expect g_hashslot is correctly initialized */
 	gpupreagg_init_global_hashslot(kgpreagg, g_hashslot);
@@ -542,16 +517,17 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 	 * so it makes performance advantage to move the master table from
 	 * gloabl to the local memory first.
 	 */
-	for (index = get_local_id(0);
+	crc32_table = SHARED_WORKMEM(cl_uint);
+	for (index = get_local_id();
 		 index < lengthof(crc32_table);
-		 index += get_local_size(0))
+		 index += get_local_size())
 		crc32_table[index] = kgpreagg->pg_crc32_table[index];
-	barrier(CLK_LOCAL_MEM_FENCE);
+	__syncthreads();
 
-	if (get_global_id(0) < nitems)
+	if (get_global_id() < nitems)
 		hash_value = gpupreagg_hashvalue(&errcode, crc32_table,
 										 kds_src, ktoast,
-										 get_global_id(0));
+										 get_global_id());
 
 	/*
 	 * Find a hash-slot to determine the item index that represents
@@ -565,17 +541,17 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 	 * to the grouping key. We cannot help the later case, so retry
 	 * the steps with next hash-slot.
 	 */
-	l_hashslot = (__local pagg_hashslot *)LOCAL_WORKMEM;
-	for (index = get_local_id(0);
+	l_hashslot = SHARED_WORKMEM(pagg_hashslot);
+	for (index = get_local_id();
 		 index < hash_size;
-		 index += get_local_size(0))
+		 index += get_local_size())
 	{
 		l_hashslot[index].hash = 0;
 		l_hashslot[index].index = (cl_uint)(0xffffffff);
 	}
-	barrier(CLK_LOCAL_MEM_FENCE);
+	__syncthreads();
 
-	if (get_global_id(0) < nitems)
+	if (get_global_id() < nitems)
 	{
 		new_slot.hash = hash_value;
 		new_slot.index = get_local_id(0);
@@ -597,12 +573,12 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 		else
 		{
 			size_t	buddy_index
-				= (get_global_id(0) - get_local_id(0) + cur_slot.index);
+				= (get_global_id() - get_local_id() + cur_slot.index);
 
 			if (cur_slot.hash == new_slot.hash &&
 				gpupreagg_keymatch(&errcode,
 								   kds_src, ktoast,
-								   get_global_id(0),
+								   get_global_id(),
 								   buddy_index))
 			{
 				owner_index = cur_slot.index;
@@ -616,7 +592,7 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 	}
 	else
 		owner_index = (cl_uint)(0xffffffff);
-    barrier(CLK_LOCAL_MEM_FENCE);
+    __syncthreads();
 
 	/*
 	 * Make a reservation on the destination kern_data_store
@@ -624,11 +600,11 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 	 * have same hash-index with get_local_id(0)) takes a place on the
 	 * destination kern_data_store.
 	 */
-	index = arithmetic_stairlike_add(get_local_id(0) == owner_index ? 1 : 0,
-									 LOCAL_WORKMEM, &ngroups);
-	if (get_local_id(0) == 0)
-		base_index = atomic_add(&kds_dst->nitems, ngroups);
-	barrier(CLK_LOCAL_MEM_FENCE);
+	index = arithmetic_stairlike_add(get_local_id() == owner_index ? 1 : 0,
+									 &ngroups);
+	if (get_local_id() == 0)
+		base_index = atomicAdd(&kds_dst->nitems, ngroups);
+	__syncthreads();
 	if (kds_dst->nrooms < base_index + ngroups)
 	{
 		errcode = StromError_DataStoreNoSpace;
@@ -647,7 +623,7 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 	 * NOTE: local memory shall be reused to l_datum array, so l_hashslot[]
 	 * array is no longer available across here
 	 */
-	l_datum = (__local pagg_datum *)LOCAL_WORKMEM;
+	l_datum = SHARED_WORKMEM(pagg_datum);
 	for (attnum = 0; attnum < nattrs; attnum++)
 	{
 		/*
@@ -658,7 +634,7 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 		 */
 		if (gpagg_atts[attnum] != GPUPREAGG_FIELD_IS_AGGFUNC)
 		{
-			if (owner_index == get_local_id(0))
+			if (owner_index == get_local_id())
 			{
 				gpupreagg_data_move(&errcode,
 									kds_src, kds_dst, ktoast,
@@ -670,28 +646,28 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 		}
 
 		/* Load aggregation item to pagg_datum */
-		if (get_global_id(0) < nitems)
+		if (get_global_id() < nitems)
 		{
-			gpupreagg_data_load(l_datum + get_local_id(0),
+			gpupreagg_data_load(l_datum + get_local_id(),
 								&errcode,
 								kds_src, ktoast,
-								attnum, get_global_id(0));
+								attnum, get_global_id());
 		}
-		barrier(CLK_LOCAL_MEM_FENCE);
+		__syncthreads();
 
 		/* Reduction, using local atomic operation */
-		if (get_global_id(0) < nitems &&
-			get_local_id(0) != owner_index)
+		if (get_global_id() < nitems &&
+			get_local_id() != owner_index)
 		{
 			gpupreagg_local_calc(&errcode,
 								 attnum,
 								 l_datum + owner_index,
-								 l_datum + get_local_id(0));
+								 l_datum + get_local_id());
 		}
-		barrier(CLK_LOCAL_MEM_FENCE);
+		__syncthreads();
 
 		/* Move the value that is aggregated */
-		if (owner_index == get_local_id(0))
+		if (owner_index == get_local_id())
 		{
 			gpupreagg_data_store(l_datum + owner_index,
 								 &errcode,
@@ -702,27 +678,26 @@ gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
 			 * put pg_fixup_tupslot_varlena() here
 			 */
 		}
-		barrier(CLK_LOCAL_MEM_FENCE);
+		__syncthreads();
 	}
 out:
 	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
+	kern_writeback_error_status(&kresults->errcode, errcode);
 }
 
 /*
  * gpupreagg_global_reduction
  */
-__kernel void
-gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
-                           __global kern_data_store *kds_dst,
-                           __global kern_data_store *ktoast,
-                           __global pagg_hashslot *g_hashslot,
-                           KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+KERNEL_FUNCTION(void)
+gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
+						   kern_data_store *kds_dst,
+						   kern_data_store *ktoast,
+						   pagg_hashslot *g_hashslot)
 {
-	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	__global varlena   *kparam_0 = kparam_get_value(kparams, 0);
-	__global cl_char   *gpagg_atts = (__global cl_char *) VARDATA(kparam_0);
-	__global kern_row_map *krowmap = KERN_GPUPREAGG_KROWMAP(kgpreagg);
+	kern_parambuf	   *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	kern_resultbuf	   *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
+	varlena			   *kparam_0 = kparam_get_value(kparams, 0);
+	cl_char			   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
 	size_t				hash_size = kgpreagg->hash_size;
 	size_t				dest_index;
 	size_t				owner_index;
@@ -736,8 +711,8 @@ gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
 	pagg_hashslot		old_slot;
 	pagg_hashslot		new_slot;
 	pagg_hashslot		cur_slot;
-	__local cl_uint		crc32_table[256];
-	__local size_t		base_index;
+	cl_uint			   *crc32_table;
+	__shared__ size_t	base_index;
 
 	/*
 	 * calculation of the hash value of grouping keys in this record.
@@ -745,17 +720,18 @@ gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
 	 * so it makes performance advantage to move the master table from
 	 * gloabl to the local memory first.
 	 */
-	for (index = get_local_id(0);
+	crc32_table = SHARED_WORKMEM(cl_uint);	/* 1KB */
+	for (index = get_local_id();
 		 index < lengthof(crc32_table);
-		 index += get_local_size(0))
+		 index += get_local_size())
 		crc32_table[index] = kgpreagg->pg_crc32_table[index];
-	barrier(CLK_LOCAL_MEM_FENCE);
+	__syncthreads();
 
-	if (get_global_id(0) < nitems)
+	if (get_global_id() < nitems)
 	{
 		hash_value = gpupreagg_hashvalue(&errcode, crc32_table,
 										 kds_dst, ktoast,
-										 get_global_id(0));
+										 get_global_id());
 		/*
 		 * Find a hash-slot to determine the item index that represents
 		 * a particular group-keys.
@@ -786,7 +762,7 @@ gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
 		else if (cur_slot.hash == new_slot.hash &&
 				 gpupreagg_keymatch(&errcode,
 									kds_dst, ktoast,
-									get_global_id(0),
+									get_global_id(),
 									cur_slot.index))
 		{
 			owner_index = cur_slot.index;
@@ -809,22 +785,22 @@ gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
 	 * NOTE: Length of kern_row_map should be same as kds->nrooms.
 	 * So, we can use kds->nrooms to check array boundary.
 	 */
-	barrier(CLK_LOCAL_MEM_FENCE);
-	index = arithmetic_stairlike_add(get_global_id(0) == owner_index ? 1 : 0,
-									 LOCAL_WORKMEM, &ngroups);
-	if (get_local_id(0) == 0)
-		base_index = atomic_add(&krowmap->nvalids, ngroups);
-	barrier(CLK_LOCAL_MEM_FENCE);
-	if (kds_dst->nrooms < base_index + ngroups)
+	__syncthreads();
+	index = arithmetic_stairlike_add(get_global_id() == owner_index ? 1 : 0,
+									 &ngroups);
+	if (get_local_id() == 0)
+		base_index = atomicAdd(&kresults->nitems, ngroups);
+	__syncthreads();
+	if (kresults->nrooms <= base_index + ngroups)
 	{
 		errcode = StromError_DataStoreNoSpace;
 		goto out;
 	}
 	dest_index = base_index + index;
 
-	if (get_global_id(0) < nitems &&
-		get_global_id(0) == owner_index)
-		krowmap->rindex[dest_index] = get_global_id(0);
+	if (get_global_id() < nitems &&
+		get_global_id() == owner_index)
+		kresults->results[dest_index] = get_global_id();
 
 	/*
 	 * Global reduction for each column
@@ -856,12 +832,12 @@ gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
 								  kds_dst,
 								  ktoast,
 								  owner_index,
-								  get_global_id(0));
+								  get_global_id());
 		}
 	}
 out:
-    /* write-back execution status into host-side */
-    kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
+	/* write-back execution status into host-side */
+	kern_writeback_error_status(&kresults->errcode, errcode);
 }
 
 /*
@@ -871,28 +847,25 @@ out:
  * operations in this case, because all the rows are eventually consolidated
  * to just one record, thus usual reduction operation is sufficient.
  */
-__kernel void
-gpupreagg_nogroup_reduction(__global kern_gpupreagg *kgpreagg,
-							__global kern_data_store *kds_src,
-							__global kern_data_store *kds_dst,
-							__global kern_data_store *ktoast,
-							KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+KERNEL_FUNCTION(void)
+gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
+							kern_data_store *kds_src,
+							kern_data_store *kds_dst,
+							kern_data_store *ktoast)
 {
-	__global kern_parambuf *kparams    = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	__global varlena       *kparam_0   = kparam_get_value(kparams, 0);
-	__global cl_char       *gpagg_atts = (__global cl_char *)VARDATA(kparam_0);
-	__local  pagg_datum    *l_datum    = (__local pagg_datum *)LOCAL_WORKMEM;
-	__global kern_row_map  *krowmap    = KERN_GPUPREAGG_KROWMAP(kgpreagg);
-	cl_uint	nitems 		= kds_src->nitems;
-	cl_uint	nattrs		= kds_src->ncols;
-	cl_int	errcode		= StromError_Success;
-	size_t	lid			= get_local_id(0);
-	size_t	gid			= get_global_id(0);
-	size_t	lsz			= get_local_size(0);
-	size_t	dest_index	= gid / lsz;
-
-	int	attnum;
-
+	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	kern_resultbuf *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
+	varlena		   *kparam_0   = kparam_get_value(kparams, 0);
+	cl_char		   *gpagg_atts = (cl_char *)VARDATA(kparam_0);
+	pagg_datum	   *l_datum = SHARED_WORKMEM(pagg_datum);
+	cl_uint			nitems = kds_src->nitems;
+	cl_uint			nattrs = kds_src->ncols;
+	cl_int			errcode = StromError_Success;
+	size_t			lid = get_local_id();
+	size_t			gid = get_global_id();
+	size_t			lsz = get_local_size();
+	size_t			dest_index	= gid / lsz;
+	int				attnum;
 
 	/* loop for each columns */
 	for (attnum = 0; attnum < nattrs; attnum++)
@@ -902,7 +875,7 @@ gpupreagg_nogroup_reduction(__global kern_gpupreagg *kgpreagg,
 		/* if not GPUPREAGG_FIELD_IS_AGGFUNC, do nothing */
 		if (gpagg_atts[attnum] != GPUPREAGG_FIELD_IS_AGGFUNC)
 		{
-			if (gid < nitems  &&  lid == 0)
+			if (gid < nitems  && lid == 0)
 				gpupreagg_data_move(&errcode, kds_src, kds_dst, ktoast,
 									attnum,	gid, dest_index);
 			continue;
@@ -910,26 +883,26 @@ gpupreagg_nogroup_reduction(__global kern_gpupreagg *kgpreagg,
 
 		/* load this value from kds_src onto datum */
 		if (gid < nitems)
-			gpupreagg_data_load(&l_datum[lid], &errcode,
+			gpupreagg_data_load(&l_datum[get_lobal_id()], &errcode,
 								kds_src, ktoast, attnum, gid);
-		barrier(CLK_LOCAL_MEM_FENCE);
+		__syncthreads();
 
 		/* do reduction */
 		for (distance = 2; distance <= lsz; distance *= 2)
 		{
-			if (lid % distance == 0  &&  (gid + distance / 2) < nitems)
+			if (lid % distance == 0 && (gid + distance / 2) < nitems)
 				gpupreagg_nogroup_calc(&errcode,
 									   attnum,
 									   &l_datum[lid],
-									   &l_datum[lid + distance/2]);
-			barrier(CLK_LOCAL_MEM_FENCE);
+									   &l_datum[lid + distance / 2]);
+			__syncthreads();
 		}
 
 		/* store this value to kds_dst from datum */
 		if (gid < nitems  &&  lid == 0)
 			gpupreagg_data_store(&l_datum[lid], &errcode,
 								 kds_dst, ktoast, attnum, dest_index);
-		barrier(CLK_LOCAL_MEM_FENCE);
+		__syncthreads();
 	}
 
 	/*
@@ -946,7 +919,7 @@ gpupreagg_nogroup_reduction(__global kern_gpupreagg *kgpreagg,
 	}
 
 	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
+	kern_writeback_error_status(&kresults->errcode, errcode);
 }
 
 
@@ -957,21 +930,20 @@ gpupreagg_nogroup_reduction(__global kern_gpupreagg *kgpreagg,
  * datum on kds with tupslot format has not-interpretable for host systems.
  * So, we need to fix up its value to adjust offset by hostptr.
  */
-__kernel void
-gpupreagg_fixup_varlena(__global kern_gpupreagg *kgpreagg,
-						__global kern_data_store *kds_dst,
-						__global kern_data_store *ktoast,
-						KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
+KERNEL_FUNCTION(void)
+gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
+						kern_data_store *kds_dst,
+						kern_data_store *ktoast)
 {
-	__global kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	__global varlena   *kparam_0 = kparam_get_value(kparams, 0);
-	__global cl_char   *gpagg_atts = (__global cl_char *) VARDATA(kparam_0);
-	__global kern_row_map *krowmap = KERN_GPUPREAGG_KROWMAP(kgpreagg);
-	cl_int				errcode = StromError_Success;
-	cl_uint				nattrs = kds_dst->ncols;
-	cl_uint				nitems = krowmap->nvalids;
+	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	kern_resultbuf *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
+	varlena		   *kparam_0 = kparam_get_value(kparams, 0);
+	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
+	cl_int			errcode = StromError_Success;
+	cl_uint			nattrs = kds_dst->ncols;
+	cl_uint			nitems = krowmap->nvalids;
 
-	if (get_global_id(0) < nitems)
+	if (get_global_id() < nitems)
 	{
 		cl_uint			attnum;
 		cl_uint			rowidx;
@@ -988,7 +960,7 @@ gpupreagg_fixup_varlena(__global kern_gpupreagg *kgpreagg,
 		}
 	}
 	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kgpreagg->status, errcode, LOCAL_WORKMEM);
+	kern_writeback_error_status(&kresults->errcode, errcode);
 }
 
 /* ----------------------------------------------------------------
@@ -997,117 +969,132 @@ gpupreagg_fixup_varlena(__global kern_gpupreagg *kgpreagg,
  *
  * ----------------------------------------------------------------
  */
-#define lspace	__local
-#define gspace	__global
 #define add(x,y)	(x)+(y)
 
-#define ATOMIC_FLOAT_TEMPLATE(prefix, op_name)							\
-	float																\
-	prefix##atomic_##op_name##_float(volatile prefix##space float *ptr,	\
-									 float value)						\
+#define ATOMIC_FLOAT_TEMPLATE(op_name)									\
+	STATIC_INLINE(float)												\
+	atomic_##op_name##_float(volatile float *ptr, float value)			\
 	{																	\
-		uint	oldval = as_uint(*ptr);									\
-		uint	newval = as_uint(op_name(as_float(oldval), value));		\
-		uint	curval;													\
+		cl_int		curval = __float_as_int(*ptr);						\
+		cl_int		oldval;												\
+		cl_int		newval;												\
 																		\
-		while ((curval = atomic_cmpxchg((prefix##space uint *) ptr,		\
-										oldval, newval)) != oldval)		\
-		{																\
+		do {															\
 			oldval = curval;											\
-			newval = as_uint(op_name(as_float(oldval),value));			\
-		}																\
-		return as_float(oldval);										\
+			newval = __float_as_int(op_name(__int_as_float(oldval),		\
+											value));					\
+		} while ((curval = atomicCAS((cl_int *) ptr,					\
+									 oldval, newval)) != oldval);		\
+		return __int_as_float(oldval);									\
 	}
 
-ATOMIC_FLOAT_TEMPLATE(l,max)
-ATOMIC_FLOAT_TEMPLATE(l,min)
-ATOMIC_FLOAT_TEMPLATE(l,add)
-ATOMIC_FLOAT_TEMPLATE(g,max)
-ATOMIC_FLOAT_TEMPLATE(g,min)
-ATOMIC_FLOAT_TEMPLATE(g,add)
+ATOMIC_FLOAT_TEMPLATE(max)
+ATOMIC_FLOAT_TEMPLATE(min)
+#if __CUDA_ARCH__ < 350
+ATOMIC_FLOAT_TEMPLATE(add)
+#else
+STATIC_INLINE(float)
+atomic_add_float(volatile float *ptr, float value)
+{
+	return atomicAdd(ptr, value);
+}
+#endif
 
 #define ATOMIC_DOUBLE_TEMPLATE(prefix, op_name)							\
-	double																\
-	prefix##atomic_##op_name##_double(volatile prefix##space double *ptr, \
-									  double value)						\
+	STATIC_INLINE(double)												\
+	atomic_##op_name##_double(volatile double *ptr, double value)		\
 	{																	\
-		cl_ulong	oldval = as_ulong(*ptr);							\
-		cl_ulong	newval = as_ulong(op_name(as_double(oldval), value)); \
-		cl_ulong	curval;												\
+		cl_long		curval = __double_as_longlong(*ptr);				\
+		cl_long		oldval;												\
+		cl_long		newval;												\
+		double		temp;												\
 																		\
-		while ((curval = atom_cmpxchg((prefix##space cl_ulong *) ptr,	\
-									  oldval, newval)) != oldval)		\
-		{																\
+		do {															\
 			oldval = curval;											\
-			newval = as_ulong(op_name(as_double(oldval),value));		\
-		}																\
-		return as_double(oldval);										\
+			temp = op_name(__longlong_as_double(oldval), temp);			\
+			newval = __double_as_longlong(temp);						\
+		} while ((curval = atomicCAS((cl_long *) ptr,					\
+									 oldval, newval)) != oldval);		\
+		return __longlong_as_double(oldval);							\
 	}
 
-ATOMIC_DOUBLE_TEMPLATE(l,min)
-ATOMIC_DOUBLE_TEMPLATE(l,max)
-ATOMIC_DOUBLE_TEMPLATE(l,add)
-ATOMIC_DOUBLE_TEMPLATE(g,min)
-ATOMIC_DOUBLE_TEMPLATE(g,max)
-ATOMIC_DOUBLE_TEMPLATE(g,add)
+ATOMIC_DOUBLE_TEMPLATE(min)
+ATOMIC_DOUBLE_TEMPLATE(max)
+ATOMIC_DOUBLE_TEMPLATE(add)
 
 #undef add
 
 #ifdef PG_NUMERIC_TYPE_DEFINED
 
-#define ATOMIC_NUMERIC_MINMAX_TEMPLATE(prefix,op_name,ineq_op)			\
-	cl_ulong															\
-	prefix##atomic_##op_name##_numeric(__private int *errcode,			\
-									   volatile prefix##space cl_ulong *ptr, \
-									   cl_ulong numeric_value)			\
-	{																	\
-		pg_numeric_t x, y;												\
-		pg_int4_t	comp;												\
-		cl_ulong	oldval;												\
-		cl_ulong	newval;												\
-		cl_ulong	curval = *ptr;										\
-																		\
-		do {															\
-			x.isnull = false;											\
-			y.isnull = false;											\
-			x.value = oldval = curval;									\
-			y.value = numeric_value;									\
-			comp = pgfn_numeric_cmp(errcode, x, y);						\
-			newval = comp.value ineq_op 0 ? x.value : y.value;			\
-		} while ((curval = atom_cmpxchg(ptr, oldval, newval)) != oldval); \
-		return oldval;													\
-	}
+STATIC_INLINE(cl_ulong)
+atomic_min_numeric(cl_int *errcode,
+				   volatile cl_ulong *ptr,
+				   cl_ulong numeric_value)
+{
+	pg_numeric_t	x, y;
+	pg_int4_t		comp;
+	cl_ulong		oldval;
+	cl_ulong		curval = *ptr;
+	cl_ulong		newval;
 
-ATOMIC_NUMERIC_MINMAX_TEMPLATE(l,max,>)
-ATOMIC_NUMERIC_MINMAX_TEMPLATE(l,min,<)
-ATOMIC_NUMERIC_MINMAX_TEMPLATE(g,max,>)
-ATOMIC_NUMERIC_MINMAX_TEMPLATE(g,min,<)
+	do {
+		x.isnull = false;
+		y.isnull = false;
+		x.value = oldval = curval;
+		y.value = numeric_value;
+		comp = pgfn_numeric_cmp(errcode, x, y);
+		if (comp.value < 0)
+			break;
+	} while ((curval = atomicCAS(ptr, oldval, newval)) != oldval);
 
-#define ATOMIC_NUMERIC_ADD_TEMPLATE(prefix)								\
-	cl_ulong															\
-	prefix##atomic_add_numeric(__private int *errcode,					\
-							   volatile prefix##space cl_ulong *ptr,	\
-							   cl_ulong numeric_value)					\
-	{																	\
-		pg_numeric_t x, y, z;											\
-		cl_ulong	oldval;												\
-		cl_ulong	newval;												\
-		cl_ulong	curval = *((prefix##space cl_ulong *)ptr);			\
-																		\
-		do {															\
-			x.isnull = false;											\
-			y.isnull = false;											\
-			x.value = oldval = curval;									\
-			y.value = numeric_value;									\
-			z = pgfn_numeric_add(errcode, x, y);						\
-			newval = z.value;											\
-		} while ((curval = atom_cmpxchg(ptr, oldval, newval)) != oldval); \
-		return oldval;													\
-	}
+	return oldval;
+}
 
-ATOMIC_NUMERIC_ADD_TEMPLATE(l)
-ATOMIC_NUMERIC_ADD_TEMPLATE(g)
+STATIC_INLINE(cl_ulong)
+atomic_max_numeric(cl_int *errcode,
+				   volatile cl_ulong *ptr,
+				   cl_ulong numeric_value)
+{
+	pg_numeric_t	x, y;
+	pg_int4_t		comp;
+	cl_ulong		oldval;
+	cl_ulong		curval = *ptr;
+	cl_ulong		newval;
 
+	do {
+		x.isnull = false;
+		y.isnull = false;
+		x.value = oldval = curval;
+		y.value = numeric_value;
+		comp = pgfn_numeric_cmp(errcode, x, y);
+		if (comp.value > 0)
+			break;
+	} while ((curval = atomicCAS(ptr, oldval, newval)) != oldval);
+
+	return oldval;
+}
+
+STATIC_INLINE(cl_ulong)
+atomic_add_numeric(cl_int *errcode,
+				   volatile cl_ulong *ptr,
+				   cl_ulong numeric_value)
+{
+	pg_numeric_t x, y, z;
+	cl_ulong	oldval;
+	cl_ulong	curval = *ptr;
+	cl_ulong	newval;
+
+	do {
+		x.isnull = false;
+		y.isnull = false;
+		x.value = oldval = curval;
+		y.value = numeric_value;
+		z = pgfn_numeric_add(errcode, x, y);
+		newval = z.value;
+	} while ((curval = atomicCAS(ptr, oldval, newval)) != oldval);
+
+	return oldval;
+}
 #endif
 
 /*
@@ -1169,66 +1156,66 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 /* calculation for local partial max */
 #define AGGCALC_LOCAL_PMAX_SHORT(errcode,accum,newval)					\
 	AGGCALC_LOCAL_TEMPLATE_SHORT(errcode,accum,newval,CHECK_OVERFLOW_NONE,	\
-			atomic_max(&(accum)->int_val, (newval)->int_val))
+			atomicMax(&(accum)->int_val, (newval)->int_val))
 #define AGGCALC_LOCAL_PMAX_INT(errcode,accum,newval)					\
 	AGGCALC_LOCAL_TEMPLATE_INT(errcode,accum,newval,CHECK_OVERFLOW_NONE, \
-			atomic_max(&(accum)->int_val, (newval)->int_val))
+			atomicMax(&(accum)->int_val, (newval)->int_val))
 #define AGGCALC_LOCAL_PMAX_LONG(errcode,accum,newval)					\
 	AGGCALC_LOCAL_TEMPLATE_LONG(errcode,accum,newval,CHECK_OVERFLOW_NONE, \
-			atom_max(&(accum)->long_val, (newval)->long_val))
+			atomicMax(&(accum)->long_val, (newval)->long_val))
 #define AGGCALC_LOCAL_PMAX_FLOAT(errcode,accum,newval)					\
 	AGGCALC_LOCAL_TEMPLATE_FLOAT(errcode,accum,newval,CHECK_OVERFLOW_NONE, \
-			latomic_max_float(&(accum)->float_val, (newval)->float_val))
+			atomic_max_float(&(accum)->float_val, (newval)->float_val))
 #define AGGCALC_LOCAL_PMAX_DOUBLE(errcode,accum,newval)					\
 	AGGCALC_LOCAL_TEMPLATE_DOUBLE(errcode,accum,newval,CHECK_OVERFLOW_NONE, \
-			latomic_max_double(&(accum)->double_val, (newval)->double_val))
+			atomic_max_double(&(accum)->double_val, (newval)->double_val))
 #define AGGCALC_LOCAL_PMAX_NUMERIC(errcode,accum,newval)				\
 	AGGCALC_LOCAL_TEMPLATE_NUMERIC(errcode,accum,newval,CHECK_OVERFLOW_NONE, \
-			latomic_max_numeric((errcode), &(accum)->ulong_val,			\
-								(newval)->ulong_val))
+			atomic_max_numeric((errcode), &(accum)->ulong_val,			\
+							   (newval)->ulong_val))
 
 /* calculation for local partial min */
 #define AGGCALC_LOCAL_PMIN_SHORT(errcode,accum,newval)					\
 	AGGCALC_LOCAL_TEMPLATE_SHORT(errcode,accum,newval,CHECK_OVERFLOW_NONE, \
-			atomic_min(&(accum)->int_val, (newval)->int_val))
+			atomicMin(&(accum)->int_val, (newval)->int_val))
 #define AGGCALC_LOCAL_PMIN_INT(errcode,accum,newval)					\
 	AGGCALC_LOCAL_TEMPLATE_INT(errcode,accum,newval,CHECK_OVERFLOW_NONE, \
-			atomic_min(&(accum)->int_val, (newval)->int_val))
+			atomicMin(&(accum)->int_val, (newval)->int_val))
 #define AGGCALC_LOCAL_PMIN_LONG(errcode,accum,newval)					\
 	AGGCALC_LOCAL_TEMPLATE_LONG(errcode,accum,newval,CHECK_OVERFLOW_NONE, \
-			atom_min(&(accum)->long_val, (newval)->long_val))
+			atomicMin(&(accum)->long_val, (newval)->long_val))
 #define AGGCALC_LOCAL_PMIN_FLOAT(errcode,accum,newval)					\
 	AGGCALC_LOCAL_TEMPLATE_FLOAT(errcode,accum,newval,CHECK_OVERFLOW_NONE, \
-			latomic_min_float(&(accum)->float_val, (newval)->float_val))
+			atomic_min_float(&(accum)->float_val, (newval)->float_val))
 #define AGGCALC_LOCAL_PMIN_DOUBLE(errcode,accum,newval)					\
 	AGGCALC_LOCAL_TEMPLATE_DOUBLE(errcode,accum,newval,CHECK_OVERFLOW_NONE, \
-			latomic_min_double(&(accum)->double_val, (newval)->double_val))
+			atomic_min_double(&(accum)->double_val, (newval)->double_val))
 #define AGGCALC_LOCAL_PMIN_NUMERIC(errcode,accum,newval)				\
 	AGGCALC_LOCAL_TEMPLATE_NUMERIC(errcode,accum,newval,CHECK_OVERFLOW_NONE, \
-			latomic_min_numeric((errcode), &(accum)->ulong_val,			\
-								(newval)->ulong_val))
+			atomic_min_numeric((errcode), &(accum)->ulong_val,			\
+							   (newval)->ulong_val))
 
 /* calculation for local partial add */
 #define AGGCALC_LOCAL_PADD_SHORT(errcode,accum,newval)					\
 	AGGCALC_LOCAL_TEMPLATE_SHORT(errcode,accum,newval,CHECK_OVERFLOW_SHORT,	\
-			atomic_add(&(accum)->int_val, (newval)->int_val))
+			atomicAdd(&(accum)->int_val, (newval)->int_val))
 #define AGGCALC_LOCAL_PADD_INT(errcode,accum,newval)					\
 	AGGCALC_LOCAL_TEMPLATE_INT(errcode,accum,newval,CHECK_OVERFLOW_INT,	\
-			atomic_add(&(accum)->int_val, (newval)->int_val))
+			atomicAdd(&(accum)->int_val, (newval)->int_val))
 #define AGGCALC_LOCAL_PADD_LONG(errcode,accum,newval)					\
 	AGGCALC_LOCAL_TEMPLATE_LONG(errcode,accum,newval,CHECK_OVERFLOW_INT, \
-			atom_add(&(accum)->long_val, (newval)->long_val))
+			atomAdd(&(accum)->long_val, (newval)->long_val))
 #define AGGCALC_LOCAL_PADD_FLOAT(errcode,accum,newval)					\
     AGGCALC_LOCAL_TEMPLATE_FLOAT(errcode,accum,newval,CHECK_OVERFLOW_FLOAT, \
-			latomic_add_float(&(accum)->float_val, (newval)->float_val))
+			atomic_add_float(&(accum)->float_val, (newval)->float_val))
 #define AGGCALC_LOCAL_PADD_DOUBLE(errcode,accum,newval)					\
 	AGGCALC_LOCAL_TEMPLATE_DOUBLE(errcode,accum,newval,CHECK_OVERFLOW_FLOAT, \
-			latomic_add_double(&(accum)->double_val, (newval)->double_val))
+			atomic_add_double(&(accum)->double_val, (newval)->double_val))
 #define AGGCALC_LOCAL_PADD_NUMERIC(errcode,accum,newval)				\
 	AGGCALC_LOCAL_TEMPLATE_NUMERIC(errcode,accum,newval,				\
 		    CHECK_OVERFLOW_NUMERIC,										\
-			latomic_add_numeric((errcode),&(accum)->ulong_val,			\
-								(newval)->ulong_val))
+			atomic_add_numeric((errcode),&(accum)->ulong_val,			\
+							   (newval)->ulong_val))
 
 /*
  * Helper macros for gpupreagg_global_calc
@@ -1240,152 +1227,204 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
  *   __global char  *accum_isnull;
  *   __global Datum *accum_value;
  */
-#define AGGCALC_GLOBAL_TEMPLATE(TYPE,errcode,accum_isnull,accum_value,	\
-								new_isnull,new_value,OVERFLOW,			\
-								ATOMIC_FUNC_CALL)						\
-	if (!(new_isnull))													\
-	{																	\
-		TYPE old = ATOMIC_FUNC_CALL;									\
-		if (OVERFLOW(old, (new_value)))									\
-		{																\
-			STROM_SET_ERROR(errcode, StromError_CpuReCheck);			\
-		}																\
-		*(accum_isnull) = false;										\
+#define AGGCALC_GLOBAL_TEMPLATE(TYPE,errcode,						\
+								accum_isnull,accum_value,			\
+								new_isnull,new_value,OVERFLOW,		\
+								ATOMIC_FUNC_CALL)					\
+	if (!(new_isnull))												\
+	{																\
+		TYPE old = ATOMIC_FUNC_CALL;								\
+		if (OVERFLOW(old, (new_value)))								\
+		{															\
+			STROM_SET_ERROR(errcode, StromError_CpuReCheck);		\
+		}															\
+		*(accum_isnull) = false;									\
 	}
 
-#define AGGCALC_GLOBAL_TEMPLATE_SHORT(errcode,accum_isnull,accum_value,	\
-									  new_isnull,new_value,				\
-									  OVERFLOW,ATOMIC_FUNC_CALL)		\
-	AGGCALC_GLOBAL_TEMPLATE(cl_int,errcode,accum_isnull,accum_value,	\
-							new_isnull,new_value,OVERFLOW,ATOMIC_FUNC_CALL)
-#define AGGCALC_GLOBAL_TEMPLATE_INT(errcode,accum_isnull,accum_value,	\
-									new_isnull,new_value,				\
-									OVERFLOW,ATOMIC_FUNC_CALL)			\
-	AGGCALC_GLOBAL_TEMPLATE(cl_int,errcode,accum_isnull,accum_value,	\
-							new_isnull,new_value,OVERFLOW,ATOMIC_FUNC_CALL)
-#define AGGCALC_GLOBAL_TEMPLATE_LONG(errcode,accum_isnull,accum_value,	\
-									 new_isnull,new_value,				\
-									 OVERFLOW,ATOMIC_FUNC_CALL)			\
-	AGGCALC_GLOBAL_TEMPLATE(cl_long,errcode,accum_isnull,accum_value,	\
-							new_isnull,new_value,OVERFLOW,ATOMIC_FUNC_CALL)
-#define AGGCALC_GLOBAL_TEMPLATE_FLOAT(errcode,accum_isnull,accum_value,	\
-									  new_isnull,new_value,				\
-									  OVERFLOW,ATOMIC_FUNC_CALL)		\
-	AGGCALC_GLOBAL_TEMPLATE(cl_float,errcode,accum_isnull,accum_value,	\
-							new_isnull,new_value,OVERFLOW,ATOMIC_FUNC_CALL)
-#define AGGCALC_GLOBAL_TEMPLATE_DOUBLE(errcode,accum_isnull,accum_value, \
-									   new_isnull,new_value,			\
-									   OVERFLOW,ATOMIC_FUNC_CALL)		\
-	AGGCALC_GLOBAL_TEMPLATE(cl_double,errcode,accum_isnull,accum_value,	\
-							new_isnull,new_value,OVERFLOW,ATOMIC_FUNC_CALL)
-#define AGGCALC_GLOBAL_TEMPLATE_NUMERIC(errcode,accum_isnull,accum_value, \
-										new_isnull,new_value,			\
-										OVERFLOW,ATOMIC_FUNC_CALL)		\
-	AGGCALC_GLOBAL_TEMPLATE(cl_ulong,errcode,accum_isnull,accum_value,	\
-							new_isnull,new_value,OVERFLOW,ATOMIC_FUNC_CALL)
+#define AGGCALC_GLOBAL_TEMPLATE_SHORT(errcode,						\
+									  accum_isnull,accum_value,		\
+									  new_isnull,new_value,			\
+									  OVERFLOW,ATOMIC_FUNC_CALL)	\
+	AGGCALC_GLOBAL_TEMPLATE(cl_int, errcode,						\
+							accum_isnull,accum_value,				\
+							new_isnull,new_value,					\
+							OVERFLOW,ATOMIC_FUNC_CALL)
+#define AGGCALC_GLOBAL_TEMPLATE_INT(errcode,						\
+									accum_isnull,accum_value,		\
+									new_isnull,new_value,			\
+									OVERFLOW,ATOMIC_FUNC_CALL)		\
+	AGGCALC_GLOBAL_TEMPLATE(cl_int,errcode,							\
+							accum_isnull,accum_value,				\
+							new_isnull,new_value,					\
+							OVERFLOW,ATOMIC_FUNC_CALL)
+#define AGGCALC_GLOBAL_TEMPLATE_LONG(errcode,						\
+									 accum_isnull,accum_value,		\
+									 new_isnull,new_value,			\
+									 OVERFLOW,ATOMIC_FUNC_CALL)		\
+	AGGCALC_GLOBAL_TEMPLATE(cl_long,errcode,						\
+							accum_isnull,accum_value,				\
+							new_isnull,new_value,					\
+							OVERFLOW,ATOMIC_FUNC_CALL)
+#define AGGCALC_GLOBAL_TEMPLATE_FLOAT(errcode,						\
+									  accum_isnull,accum_value,		\
+									  new_isnull,new_value,			\
+									  OVERFLOW,ATOMIC_FUNC_CALL)	\
+	AGGCALC_GLOBAL_TEMPLATE(cl_float,errcode,						\
+							accum_isnull,accum_value,				\
+							new_isnull,new_value,					\
+							OVERFLOW,ATOMIC_FUNC_CALL)
+#define AGGCALC_GLOBAL_TEMPLATE_DOUBLE(errcode,						\
+									   accum_isnull,accum_value,	\
+									   new_isnull,new_value,		\
+									   OVERFLOW,ATOMIC_FUNC_CALL)	\
+	AGGCALC_GLOBAL_TEMPLATE(cl_double,errcode,						\
+							accum_isnull,accum_value,				\
+							new_isnull,new_value,					\
+							OVERFLOW,ATOMIC_FUNC_CALL)
+#define AGGCALC_GLOBAL_TEMPLATE_NUMERIC(errcode,					\
+										accum_isnull,accum_value,	\
+										new_isnull,new_value,		\
+										OVERFLOW,ATOMIC_FUNC_CALL)	\
+	AGGCALC_GLOBAL_TEMPLATE(cl_ulong,errcode,						\
+							accum_isnull,accum_value,				\
+							new_isnull,new_value,					\
+							OVERFLOW,ATOMIC_FUNC_CALL)
 
 /* calculation for global partial max */
-#define AGGCALC_GLOBAL_PMAX_SHORT(errcode,accum_isnull,accum_value,		\
-								  new_isnull,new_value)					\
-	AGGCALC_GLOBAL_TEMPLATE_SHORT(errcode,accum_isnull,accum_value,		\
-	    new_isnull,(cl_int)(new_value), CHECK_OVERFLOW_NONE,			\
-		atomic_max((__global cl_int *)(accum_value), (cl_int)(new_value)))
-#define AGGCALC_GLOBAL_PMAX_INT(errcode,accum_isnull,accum_value,		\
-								new_isnull,new_value)					\
-	AGGCALC_GLOBAL_TEMPLATE_INT(errcode,accum_isnull,accum_value,		\
-		new_isnull,(cl_int)(new_value),CHECK_OVERFLOW_NONE,				\
-		atomic_max((__global cl_int *)(accum_value), (cl_int)(new_value)))
-#define AGGCALC_GLOBAL_PMAX_LONG(errcode,accum_isnull,accum_value,		\
-								 new_isnull,new_value)					\
-	AGGCALC_GLOBAL_TEMPLATE_LONG(errcode,accum_isnull,accum_value,		\
-		new_isnull,(cl_long)(new_value),CHECK_OVERFLOW_NONE, 			\
-		atom_max((__global cl_long *)(accum_value), (cl_long)(new_value)))
-#define AGGCALC_GLOBAL_PMAX_FLOAT(errcode,accum_isnull,accum_value,		\
-								  new_isnull,new_value)					\
-	AGGCALC_GLOBAL_TEMPLATE_FLOAT(errcode,accum_isnull,accum_value,		\
-	    new_isnull,as_float((cl_uint)(new_value)),CHECK_OVERFLOW_NONE, \
-		gatomic_max_float((__global cl_float *)(accum_value),			\
-						  as_float((cl_uint)(new_value))))
-#define AGGCALC_GLOBAL_PMAX_DOUBLE(errcode,accum_isnull,accum_value,	\
-								   new_isnull,new_value)				\
-	AGGCALC_GLOBAL_TEMPLATE_DOUBLE(errcode,accum_isnull,accum_value,	\
-		new_isnull,as_double(new_value),CHECK_OVERFLOW_NONE,			\
-		gatomic_max_double((__global cl_double *)(accum_value),			\
-						   as_double(new_value)))
-#define AGGCALC_GLOBAL_PMAX_NUMERIC(errcode,accum_isnull,accum_value,	\
-									new_isnull,new_value)				\
-	AGGCALC_GLOBAL_TEMPLATE_NUMERIC(errcode,accum_isnull,accum_value,	\
-		new_isnull,(cl_ulong)(new_value),CHECK_OVERFLOW_NONE,			\
-		gatomic_max_numeric((errcode),(__global cl_ulong *)(accum_value), \
-							(cl_ulong)(new_value)))
+#define AGGCALC_GLOBAL_PMAX_SHORT(errcode,accum_isnull,accum_value,	\
+								  new_isnull,new_value)				\
+	AGGCALC_GLOBAL_TEMPLATE_SHORT(									\
+		errcode,accum_isnull,accum_value,							\
+		new_isnull,(cl_int)(new_value), CHECK_OVERFLOW_NONE,		\
+		atomicMax((cl_int *)(accum_value), (cl_int)(new_value)))
+#define AGGCALC_GLOBAL_PMAX_INT(errcode,accum_isnull,accum_value,	\
+								new_isnull,new_value)				\
+	AGGCALC_GLOBAL_TEMPLATE_INT(									\
+		errcode,accum_isnull,accum_value,							\
+		new_isnull,(cl_int)(new_value),CHECK_OVERFLOW_NONE,			\
+		atomicMax((cl_int *)(accum_value), (cl_int)(new_value)))
+#define AGGCALC_GLOBAL_PMAX_LONG(errcode,accum_isnull,accum_value,	\
+								 new_isnull,new_value)				\
+	AGGCALC_GLOBAL_TEMPLATE_LONG(\
+		errcode,accum_isnull,accum_value,							\
+		new_isnull,(cl_long)(new_value),CHECK_OVERFLOW_NONE,		\
+		atomicMax((cl_long *)(accum_value), (cl_long)(new_value)))
+#define AGGCALC_GLOBAL_PMAX_FLOAT(errcode,accum_isnull,accum_value,	\
+								  new_isnull,new_value)				\
+	AGGCALC_GLOBAL_TEMPLATE_FLOAT(									\
+		errcode,accum_isnull,accum_value,							\
+		new_isnull, __int_as_float((cl_uint)(new_value)),			\
+		CHECK_OVERFLOW_NONE,										\
+		atomic_max_float((cl_float *)(accum_value),					\
+						 __int_as_float((cl_uint)(new_value))))
+#define AGGCALC_GLOBAL_PMAX_DOUBLE(errcode,accum_isnull,accum_value,\
+								   new_isnull,new_value)			\
+	AGGCALC_GLOBAL_TEMPLATE_DOUBLE(									\
+		errcode,accum_isnull,accum_value,							\
+		new_isnull, __longlong_as_double(new_value),				\
+		CHECK_OVERFLOW_NONE,										\
+		atomic_max_double((cl_double *)(accum_value),				\
+						  __longlong_as_double(new_value)))
+#define AGGCALC_GLOBAL_PMAX_NUMERIC(errcode,accum_isnull,accum_value, \
+									new_isnull,new_value)			\
+	AGGCALC_GLOBAL_TEMPLATE_NUMERIC(								\
+		errcode, accum_isnull, accum_value,							\
+		new_isnull, (cl_ulong)(new_value),							\
+		CHECK_OVERFLOW_NONE,										\
+		atomic_max_numeric((errcode),(cl_ulong *)(accum_value),		\
+						   (cl_ulong)(new_value)))
 /* calculation for global partial min */
-#define AGGCALC_GLOBAL_PMIN_SHORT(errcode,accum_isnull,accum_value,		\
-								  new_isnull,new_value)					\
-	AGGCALC_GLOBAL_TEMPLATE_SHORT(errcode,accum_isnull,accum_value,		\
-		new_isnull,(cl_int)(new_value),CHECK_OVERFLOW_NONE,				\
-		atomic_min((__global cl_int *)(accum_value), (cl_int)(new_value)))
-#define AGGCALC_GLOBAL_PMIN_INT(errcode,accum_isnull,accum_value,		\
-								new_isnull,new_value)					\
-	AGGCALC_GLOBAL_TEMPLATE_INT(errcode,accum_isnull,accum_value,		\
-		new_isnull,(cl_int)(new_value),CHECK_OVERFLOW_NONE,				\
-		atomic_min((__global cl_int *)(accum_value), (cl_int)(new_value)))
-#define AGGCALC_GLOBAL_PMIN_LONG(errcode,accum_isnull,accum_value,		\
-								 new_isnull,new_value)					\
-	AGGCALC_GLOBAL_TEMPLATE_LONG(errcode,accum_isnull,accum_value,		\
-		new_isnull,(cl_long)(new_value),CHECK_OVERFLOW_NONE,			\
-		atom_min((__global cl_long *)(accum_value), (cl_long)(new_value)))
-#define AGGCALC_GLOBAL_PMIN_FLOAT(errcode,accum_isnull,accum_value,		\
-								  new_isnull,new_value)					\
-	AGGCALC_GLOBAL_TEMPLATE_FLOAT(errcode,accum_isnull,accum_value,		\
-	    new_isnull,as_float((cl_uint)(new_value)),CHECK_OVERFLOW_NONE,	\
-		gatomic_min_float((__global cl_float *)(accum_value),			\
-						  as_float((cl_uint)(new_value))))
-#define AGGCALC_GLOBAL_PMIN_DOUBLE(errcode,accum_isnull,accum_value,	\
-								   new_isnull,new_value)				\
-	AGGCALC_GLOBAL_TEMPLATE_DOUBLE(errcode,accum_isnull,accum_value,	\
-		new_isnull,as_double(new_value),CHECK_OVERFLOW_NONE,			\
-		gatomic_min_double((__global cl_double *)(accum_value),			\
-						   as_double(new_value)))
-#define AGGCALC_GLOBAL_PMIN_NUMERIC(errcode,accum_isnull,accum_value,	\
-									new_isnull,new_value)				\
-	AGGCALC_GLOBAL_TEMPLATE_NUMERIC(errcode,accum_isnull,accum_value,	\
-		new_isnull,(cl_ulong)(new_value),CHECK_OVERFLOW_NONE, 			\
-		gatomic_min_numeric((errcode),(__global cl_ulong *)(accum_value), \
-							(cl_ulong)(new_value)))
+#define AGGCALC_GLOBAL_PMIN_SHORT(errcode,accum_isnull,accum_value,	\
+								  new_isnull,new_value)				\
+	AGGCALC_GLOBAL_TEMPLATE_SHORT(									\
+		errcode,accum_isnull,accum_value,							\
+		new_isnull,(cl_int)(new_value),								\
+		CHECK_OVERFLOW_NONE,										\
+		atomicMin((cl_int *)(accum_value),(cl_int)(new_value)))
+#define AGGCALC_GLOBAL_PMIN_INT(errcode,accum_isnull,accum_value,	\
+								new_isnull,new_value)				\
+	AGGCALC_GLOBAL_TEMPLATE_INT(									\
+		errcode,accum_isnull,accum_value,							\
+		new_isnull,(cl_int)(new_value),								\
+		CHECK_OVERFLOW_NONE,										\
+		atomicMin((cl_int *)(accum_value),(cl_int)(new_value)))
+#define AGGCALC_GLOBAL_PMIN_LONG(errcode,accum_isnull,accum_value,	\
+								 new_isnull,new_value)				\
+	AGGCALC_GLOBAL_TEMPLATE_LONG(\
+		errcode,accum_isnull,accum_value,							\
+		new_isnull,(cl_long)(new_value),							\
+		CHECK_OVERFLOW_NONE,										\
+		atomicMin((cl_long *)(accum_value),(cl_long)(new_value)))
+#define AGGCALC_GLOBAL_PMIN_FLOAT(errcode,accum_isnull,accum_value,	\
+								  new_isnull,new_value)				\
+	AGGCALC_GLOBAL_TEMPLATE_FLOAT(									\
+		errcode,accum_isnull,accum_value,							\
+		new_isnull,__int_as_float((cl_uint)(new_value)),			\
+		CHECK_OVERFLOW_NONE,										\
+		atomic_min_float((cl_float *)(accum_value),					\
+						 __int_as_float((cl_uint)(new_value))))
+#define AGGCALC_GLOBAL_PMIN_DOUBLE(errcode,accum_isnull,accum_value,\
+								   new_isnull,new_value)			\
+	AGGCALC_GLOBAL_TEMPLATE_DOUBLE(									\
+		errcode, accum_isnull, accum_value,							\
+		new_isnull,__longlong_as_double(new_value),					\
+		CHECK_OVERFLOW_NONE,										\
+		atomic_min_double((cl_double *)(accum_value),				\
+						  __longlong_as_double(new_value)))
+#define AGGCALC_GLOBAL_PMIN_NUMERIC(errcode,accum_isnull,accum_value, \
+									new_isnull,new_value)			\
+	AGGCALC_GLOBAL_TEMPLATE_NUMERIC(								\
+		errcode,accum_isnull,accum_value,							\
+		new_isnull,(cl_ulong)(new_value),CHECK_OVERFLOW_NONE,		\
+		atomic_min_numeric((errcode),(cl_ulong *)(accum_value),		\
+						   (cl_ulong)(new_value)))
 /* calculation for global partial add */
-#define AGGCALC_GLOBAL_PADD_SHORT(errcode,accum_isnull,accum_value,		\
-								  new_isnull,new_value)					\
-	AGGCALC_GLOBAL_TEMPLATE_SHORT(errcode,accum_isnull,accum_value,		\
-		new_isnull,(cl_int)(new_value),CHECK_OVERFLOW_SHORT,			\
-		atomic_add((__global cl_int *)(accum_value), (cl_int)(new_value)))
-#define AGGCALC_GLOBAL_PADD_INT(errcode,accum_isnull,accum_value,		\
-								new_isnull,new_value)					\
-	AGGCALC_GLOBAL_TEMPLATE_INT(errcode,accum_isnull,accum_value,		\
-		new_isnull,(cl_int)(new_value),CHECK_OVERFLOW_INT,				\
-		atomic_add((__global cl_int *)(accum_value), (cl_int)(new_value)))
-#define AGGCALC_GLOBAL_PADD_LONG(errcode,accum_isnull,accum_value,		\
-								 new_isnull,new_value)					\
-	AGGCALC_GLOBAL_TEMPLATE_LONG(errcode,accum_isnull,accum_value,		\
-		new_isnull,(cl_long)(new_value),CHECK_OVERFLOW_INT,				\
-		atom_add((__global cl_long *)(accum_value), (cl_long)(new_value)))
-#define AGGCALC_GLOBAL_PADD_FLOAT(errcode,accum_isnull,accum_value,		\
-								  new_isnull,new_value)					\
-	AGGCALC_GLOBAL_TEMPLATE_FLOAT(errcode,accum_isnull,accum_value,		\
-	    new_isnull,as_float((cl_uint)(new_value)),CHECK_OVERFLOW_FLOAT,	\
-		gatomic_add_float((__global cl_float *)(accum_value),			\
-						  as_float((cl_uint)(new_value))))
-#define AGGCALC_GLOBAL_PADD_DOUBLE(errcode,accum_isnull,accum_value,	\
-								   new_isnull,new_value)				\
-	AGGCALC_GLOBAL_TEMPLATE_DOUBLE(errcode,accum_isnull,accum_value,	\
-		new_isnull,as_double(new_value),CHECK_OVERFLOW_FLOAT,			\
-		gatomic_add_double((__global cl_double *)(accum_value),			\
-						   as_double(new_value)))
-#define AGGCALC_GLOBAL_PADD_NUMERIC(errcode,accum_isnull,accum_value,	\
-									new_isnull,new_value)				\
-	AGGCALC_GLOBAL_TEMPLATE(ulong,errcode,accum_isnull,accum_value,		\
-		new_isnull,(cl_ulong)(new_value),CHECK_OVERFLOW_NUMERIC,		\
-		gatomic_add_numeric((errcode),(__global cl_ulong *)(accum_value), \
-							(cl_ulong)(new_value)))
+#define AGGCALC_GLOBAL_PADD_SHORT(errcode,accum_isnull,accum_value,	\
+								  new_isnull,new_value)				\
+	AGGCALC_GLOBAL_TEMPLATE_SHORT(									\
+		errcode,accum_isnull,accum_value,							\
+		new_isnull,(cl_int)(new_value),								\
+		CHECK_OVERFLOW_SHORT,										\
+		atomicAdd((cl_int *)(accum_value), (cl_int)(new_value)))
+#define AGGCALC_GLOBAL_PADD_INT(errcode,accum_isnull,accum_value,	\
+								new_isnull,new_value)				\
+	AGGCALC_GLOBAL_TEMPLATE_INT(									\
+		errcode,accum_isnull,accum_value,							\
+		new_isnull,(cl_int)(new_value),								\
+		CHECK_OVERFLOW_INT,											\
+		atomicAdd((cl_int *)(accum_value), (cl_int)(new_value)))
+#define AGGCALC_GLOBAL_PADD_LONG(errcode,accum_isnull,accum_value,	\
+								 new_isnull,new_value)				\
+	AGGCALC_GLOBAL_TEMPLATE_LONG(									\
+		errcode,accum_isnull,accum_value,							\
+		new_isnull,(cl_long)(new_value),							\
+		CHECK_OVERFLOW_INT,											\
+		atomicAdd((cl_long *)(accum_value), (cl_long)(new_value)))
+#define AGGCALC_GLOBAL_PADD_FLOAT(errcode,accum_isnull,accum_value,	\
+								  new_isnull,new_value)				\
+	AGGCALC_GLOBAL_TEMPLATE_FLOAT(									\
+		errcode,accum_isnull,accum_value,							\
+	    new_isnull,__int_as_float((cl_uint)(new_value)),			\
+		CHECK_OVERFLOW_FLOAT,										\
+		atomic_add_float((cl_float *)(accum_value),					\
+						 __int_as_float((cl_uint)(new_value))))
+#define AGGCALC_GLOBAL_PADD_DOUBLE(errcode,accum_isnull,accum_value,\
+								   new_isnull,new_value)			\
+	AGGCALC_GLOBAL_TEMPLATE_DOUBLE(									\
+		errcode,accum_isnull,accum_value,							\
+		new_isnull,__longlong_as_double(new_value),					\
+		CHECK_OVERFLOW_FLOAT,										\
+		atomic_add_double((cl_double *)(accum_value),				\
+						  __longlong_as_double(new_value)))
+#define AGGCALC_GLOBAL_PADD_NUMERIC(errcode,accum_isnull,accum_value, \
+									new_isnull,new_value)			\
+	AGGCALC_GLOBAL_TEMPLATE(										\
+		ulong,errcode,accum_isnull,accum_value,						\
+		new_isnull,(cl_ulong)(new_value),							\
+		CHECK_OVERFLOW_NUMERIC,										\
+		atomic_add_numeric((errcode),								\
+						   (cl_ulong *)(accum_value),				\
+						   (cl_ulong)(new_value)))
 
 /*
  * Helper macros for gpupreagg_nogroup_calc
@@ -1394,54 +1433,55 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 #define MIN(x,y)			(((x)<(y)) ? (x) : (y))
 #define ADD(x,y)			((x) + (y))
 
-#define AGGCALC_NOGROUP_TEMPLATE(TYPE,errcode,							\
-								 accum_isnull,accum_val,				\
-								 newval_isnull,newval_val,				\
-								 OVERFLOW,FUNC_CALL)					\
-	do {																\
-		if (!(newval_isnull))											\
-		{																\
-			TYPE tmp = FUNC_CALL;										\
-			if (OVERFLOW((accum_val), (newval_val)))					\
-			{															\
-				STROM_SET_ERROR(errcode, StromError_CpuReCheck);		\
-			}															\
-			(accum_val)    = tmp;										\
-			(accum_isnull) = false;										\
-		}																\
+#define AGGCALC_NOGROUP_TEMPLATE(TYPE,errcode,						\
+								 accum_isnull,accum_val,			\
+								 newval_isnull,newval_val,			\
+								 OVERFLOW,FUNC_CALL)				\
+	do {															\
+		if (!(newval_isnull))										\
+		{															\
+			TYPE tmp = FUNC_CALL;									\
+			if (OVERFLOW((accum_val), (newval_val)))				\
+			{														\
+				STROM_SET_ERROR(errcode, StromError_CpuReCheck);	\
+			}														\
+			(accum_val)    = tmp;									\
+			(accum_isnull) = false;									\
+		}															\
 	} while (0)
 
-#define AGGCALC_NOGROUP_TEMPLATE_SHORT(errcode,accum,newval,			\
-									   OVERFLOW,FUNC_CALL)				\
-	AGGCALC_NOGROUP_TEMPLATE(cl_int,errcode,							\
-							 (accum)->isnull,(accum)->int_val,			\
-							 (newval)->isnull,(newval)->int_val,		\
+#define AGGCALC_NOGROUP_TEMPLATE_SHORT(errcode,accum,newval,		\
+									   OVERFLOW,FUNC_CALL)			\
+	AGGCALC_NOGROUP_TEMPLATE(cl_int,errcode,						\
+							 (accum)->isnull,(accum)->int_val,		\
+							 (newval)->isnull,(newval)->int_val,	\
 							 OVERFLOW,FUNC_CALL)
-#define AGGCALC_NOGROUP_TEMPLATE_INT(errcode,accum,newval,				\
-									 OVERFLOW,FUNC_CALL)				\
-	AGGCALC_NOGROUP_TEMPLATE(cl_int,errcode,							\
-							 (accum)->isnull,(accum)->int_val,			\
-							 (newval)->isnull,(newval)->int_val,		\
+#define AGGCALC_NOGROUP_TEMPLATE_INT(errcode,accum,newval,			\
+									 OVERFLOW,FUNC_CALL)			\
+	AGGCALC_NOGROUP_TEMPLATE(cl_int,errcode,						\
+							 (accum)->isnull,(accum)->int_val,		\
+							 (newval)->isnull,(newval)->int_val,	\
 							 OVERFLOW,FUNC_CALL)
-#define AGGCALC_NOGROUP_TEMPLATE_LONG(errcode,accum,newval,				\
-									  OVERFLOW,FUNC_CALL)				\
-	AGGCALC_NOGROUP_TEMPLATE(cl_long,errcode,							\
-							 (accum)->isnull,(accum)->long_val,			\
-							 (newval)->isnull,(newval)->long_val,		\
+#define AGGCALC_NOGROUP_TEMPLATE_LONG(errcode,accum,newval,			\
+									  OVERFLOW,FUNC_CALL)			\
+	AGGCALC_NOGROUP_TEMPLATE(cl_long,errcode,						\
+							 (accum)->isnull,(accum)->long_val,		\
+							 (newval)->isnull,(newval)->long_val,	\
 							 OVERFLOW,FUNC_CALL)
-#define AGGCALC_NOGROUP_TEMPLATE_FLOAT(errcode,accum,newval,			\
-									   OVERFLOW,FUNC_CALL)				\
-	AGGCALC_NOGROUP_TEMPLATE(cl_float,errcode,							\
-							 (accum)->isnull,(accum)->float_val,		\
-							 (newval)->isnull,(newval)->float_val,		\
+#define AGGCALC_NOGROUP_TEMPLATE_FLOAT(errcode,accum,newval,		\
+									   OVERFLOW,FUNC_CALL)			\
+	AGGCALC_NOGROUP_TEMPLATE(cl_float,errcode,						\
+							 (accum)->isnull,(accum)->float_val,	\
+							 (newval)->isnull,(newval)->float_val,	\
 							 OVERFLOW,FUNC_CALL)
-#define AGGCALC_NOGROUP_TEMPLATE_DOUBLE(errcode,accum,newval,			\
-										OVERFLOW,FUNC_CALL)				\
-	AGGCALC_NOGROUP_TEMPLATE(cl_double,errcode,							\
-							 (accum)->isnull,(accum)->double_val,		\
-							 (newval)->isnull,(newval)->double_val,		\
+#define AGGCALC_NOGROUP_TEMPLATE_DOUBLE(errcode,accum,newval,		\
+										OVERFLOW,FUNC_CALL)			\
+	AGGCALC_NOGROUP_TEMPLATE(cl_double,errcode,						\
+							 (accum)->isnull,(accum)->double_val,	\
+							 (newval)->isnull,(newval)->double_val,	\
 							 OVERFLOW,FUNC_CALL)
 
+#ifdef PG_NUMERIC_TYPE_DEFINED
 #define AGGCALC_NOGROUP_TEMPLATE_NUMERIC(errcode,accum_val,new_val,	\
 										 FUNC_CALL)					\
 	do {															\
@@ -1460,107 +1500,96 @@ ATOMIC_NUMERIC_ADD_TEMPLATE(g)
 			(accum_val)->isnull = z.isnull;							\
 		}															\
 	} while (0)
+#endif
 
 /* calculation for no group partial max */
-#define AGGCALC_NOGROUP_PMAX_SHORT(errcode,accum,newval)				\
-	AGGCALC_NOGROUP_TEMPLATE_SHORT(errcode,accum,newval,				\
-								   CHECK_OVERFLOW_NONE,					\
-								   MAX((accum)->int_val,				\
+#define AGGCALC_NOGROUP_PMAX_SHORT(errcode,accum,newval)	\
+	AGGCALC_NOGROUP_TEMPLATE_SHORT(errcode,accum,newval,	\
+								   CHECK_OVERFLOW_NONE,		\
+								   MAX((accum)->int_val,	\
 									   (newval)->int_val))
-#define AGGCALC_NOGROUP_PMAX_INT(errcode,accum,newval)					\
-	AGGCALC_NOGROUP_TEMPLATE_INT(errcode,accum,newval,					\
-								 CHECK_OVERFLOW_NONE,					\
-								 MAX((accum)->int_val,					\
+#define AGGCALC_NOGROUP_PMAX_INT(errcode,accum,newval)		\
+	AGGCALC_NOGROUP_TEMPLATE_INT(errcode,accum,newval,		\
+								 CHECK_OVERFLOW_NONE,		\
+								 MAX((accum)->int_val,		\
 									 (newval)->int_val))
-#define AGGCALC_NOGROUP_PMAX_LONG(errcode,accum,newval)					\
-	AGGCALC_NOGROUP_TEMPLATE_LONG(errcode,accum,newval,					\
-								  CHECK_OVERFLOW_NONE,					\
-								  MAX((accum)->long_val,				\
+#define AGGCALC_NOGROUP_PMAX_LONG(errcode,accum,newval)		\
+	AGGCALC_NOGROUP_TEMPLATE_LONG(errcode,accum,newval,		\
+								  CHECK_OVERFLOW_NONE,		\
+								  MAX((accum)->long_val,	\
 									  (newval)->long_val))
-#define AGGCALC_NOGROUP_PMAX_FLOAT(errcode,accum,newval)				\
-	AGGCALC_NOGROUP_TEMPLATE_FLOAT(errcode,accum,newval,				\
-								   CHECK_OVERFLOW_NONE,					\
-								   MAX((accum)->float_val,				\
+#define AGGCALC_NOGROUP_PMAX_FLOAT(errcode,accum,newval)	\
+	AGGCALC_NOGROUP_TEMPLATE_FLOAT(errcode,accum,newval,	\
+								   CHECK_OVERFLOW_NONE,		\
+								   MAX((accum)->float_val,	\
 									   (newval)->float_val))
-#define AGGCALC_NOGROUP_PMAX_DOUBLE(errcode,accum,newval)				\
-	AGGCALC_NOGROUP_TEMPLATE_DOUBLE(errcode,accum,newval,				\
-									CHECK_OVERFLOW_NONE,				\
-									MAX((accum)->double_val,			\
+#define AGGCALC_NOGROUP_PMAX_DOUBLE(errcode,accum,newval)	\
+	AGGCALC_NOGROUP_TEMPLATE_DOUBLE(errcode,accum,newval,	\
+									CHECK_OVERFLOW_NONE,	\
+									MAX((accum)->double_val,\
 										(newval)->double_val))
-#define AGGCALC_NOGROUP_PMAX_NUMERIC(errcode,accum,newval)				\
-	AGGCALC_NOGROUP_TEMPLATE_NUMERIC(errcode,accum,newval,				\
+#define AGGCALC_NOGROUP_PMAX_NUMERIC(errcode,accum,newval)	\
+	AGGCALC_NOGROUP_TEMPLATE_NUMERIC(errcode,accum,newval,	\
 									 pgfn_numeric_max)
 
 /* calculation for no group partial min */
-#define AGGCALC_NOGROUP_PMIN_SHORT(errcode,accum,newval)				\
-	AGGCALC_NOGROUP_TEMPLATE_SHORT(errcode,accum,newval,				\
-								   CHECK_OVERFLOW_NONE,					\
-								   MIN((accum)->int_val, (newval)->int_val))
-#define AGGCALC_NOGROUP_PMIN_INT(errcode,accum,newval)					\
-	AGGCALC_NOGROUP_TEMPLATE_INT(errcode,accum,newval,					\
-								 CHECK_OVERFLOW_NONE,					\
-								 MIN((accum)->int_val, (newval)->int_val))
-#define AGGCALC_NOGROUP_PMIN_LONG(errcode,accum,newval)					\
-	AGGCALC_NOGROUP_TEMPLATE_LONG(errcode,accum,newval,					\
-								  CHECK_OVERFLOW_NONE,					\
-								  MIN((accum)->long_val, (newval)->long_val))
-#define AGGCALC_NOGROUP_PMIN_FLOAT(errcode,accum,newval)				\
-	AGGCALC_NOGROUP_TEMPLATE_FLOAT(errcode,accum,newval,				\
-								   CHECK_OVERFLOW_NONE,					\
-								   MIN((accum)->float_val,				\
+#define AGGCALC_NOGROUP_PMIN_SHORT(errcode,accum,newval)	\
+	AGGCALC_NOGROUP_TEMPLATE_SHORT(errcode,accum,newval,	\
+								   CHECK_OVERFLOW_NONE,		\
+								   MIN((accum)->int_val,	\
+									   (newval)->int_val))
+#define AGGCALC_NOGROUP_PMIN_INT(errcode,accum,newval)		\
+	AGGCALC_NOGROUP_TEMPLATE_INT(errcode,accum,newval,		\
+								 CHECK_OVERFLOW_NONE,		\
+								 MIN((accum)->int_val,		\
+									 (newval)->int_val))
+#define AGGCALC_NOGROUP_PMIN_LONG(errcode,accum,newval)		\
+	AGGCALC_NOGROUP_TEMPLATE_LONG(errcode,accum,newval,		\
+								  CHECK_OVERFLOW_NONE,		\
+								  MIN((accum)->long_val,	\
+									  (newval)->long_val))
+#define AGGCALC_NOGROUP_PMIN_FLOAT(errcode,accum,newval)	\
+	AGGCALC_NOGROUP_TEMPLATE_FLOAT(errcode,accum,newval,	\
+								   CHECK_OVERFLOW_NONE,		\
+								   MIN((accum)->float_val,	\
 									   (newval)->float_val))
-#define AGGCALC_NOGROUP_PMIN_DOUBLE(errcode,accum,newval)				\
-	AGGCALC_NOGROUP_TEMPLATE_DOUBLE(errcode,accum,newval,				\
-									CHECK_OVERFLOW_NONE,				\
-									MIN((accum)->double_val,			\
+#define AGGCALC_NOGROUP_PMIN_DOUBLE(errcode,accum,newval)	\
+	AGGCALC_NOGROUP_TEMPLATE_DOUBLE(errcode,accum,newval,	\
+									CHECK_OVERFLOW_NONE,	\
+									MIN((accum)->double_val,\
 										(newval)->double_val))
-#define AGGCALC_NOGROUP_PMIN_NUMERIC(errcode,accum,newval)				\
-	AGGCALC_NOGROUP_TEMPLATE_NUMERIC(errcode,accum,newval,				\
+#define AGGCALC_NOGROUP_PMIN_NUMERIC(errcode,accum,newval)	\
+	AGGCALC_NOGROUP_TEMPLATE_NUMERIC(errcode,accum,newval,	\
 									 pgfn_numeric_min)
 
 /* calculation for no group partial add */
-#define AGGCALC_NOGROUP_PADD_SHORT(errcode,accum,newval)				\
-	AGGCALC_NOGROUP_TEMPLATE_SHORT(errcode,accum,newval,				\
-								   CHECK_OVERFLOW_SHORT,				\
-								   ADD((accum)->int_val, (newval)->int_val))
-#define AGGCALC_NOGROUP_PADD_INT(errcode,accum,newval)					\
-	AGGCALC_NOGROUP_TEMPLATE_INT(errcode,accum,newval,					\
-								 CHECK_OVERFLOW_INT,					\
-								 ADD((accum)->int_val, (newval)->int_val))
-#define AGGCALC_NOGROUP_PADD_LONG(errcode,accum,newval)					\
-	AGGCALC_NOGROUP_TEMPLATE_LONG(errcode,accum,newval,					\
-								  CHECK_OVERFLOW_INT,					\
-								  ADD((accum)->long_val, (newval)->long_val))
-#define AGGCALC_NOGROUP_PADD_FLOAT(errcode,accum,newval)				\
-    AGGCALC_NOGROUP_TEMPLATE_FLOAT(errcode,accum,newval,				\
-								   CHECK_OVERFLOW_FLOAT,				\
-								   ADD((accum)->float_val,				\
+#define AGGCALC_NOGROUP_PADD_SHORT(errcode,accum,newval)	\
+	AGGCALC_NOGROUP_TEMPLATE_SHORT(errcode,accum,newval,	\
+								   CHECK_OVERFLOW_SHORT,	\
+								   ADD((accum)->int_val,	\
+									   (newval)->int_val))
+#define AGGCALC_NOGROUP_PADD_INT(errcode,accum,newval)		\
+	AGGCALC_NOGROUP_TEMPLATE_INT(errcode,accum,newval,		\
+								 CHECK_OVERFLOW_INT,		\
+								 ADD((accum)->int_val,		\
+									 (newval)->int_val))
+#define AGGCALC_NOGROUP_PADD_LONG(errcode,accum,newval)		\
+	AGGCALC_NOGROUP_TEMPLATE_LONG(errcode,accum,newval,		\
+								  CHECK_OVERFLOW_INT,		\
+								  ADD((accum)->long_val,	\
+									  (newval)->long_val))
+#define AGGCALC_NOGROUP_PADD_FLOAT(errcode,accum,newval)	\
+    AGGCALC_NOGROUP_TEMPLATE_FLOAT(errcode,accum,newval,	\
+								   CHECK_OVERFLOW_FLOAT,	\
+								   ADD((accum)->float_val,	\
 									   (newval)->float_val))
-#define AGGCALC_NOGROUP_PADD_DOUBLE(errcode,accum,newval)				\
-	AGGCALC_NOGROUP_TEMPLATE_DOUBLE(errcode,accum,newval,				\
-									CHECK_OVERFLOW_FLOAT,				\
-									ADD((accum)->double_val,			\
+#define AGGCALC_NOGROUP_PADD_DOUBLE(errcode,accum,newval)	\
+	AGGCALC_NOGROUP_TEMPLATE_DOUBLE(errcode,accum,newval,	\
+									CHECK_OVERFLOW_FLOAT,	\
+									ADD((accum)->double_val,\
 										(newval)->double_val))
-#define AGGCALC_NOGROUP_PADD_NUMERIC(errcode,accum,newval)				\
-	AGGCALC_NOGROUP_TEMPLATE_NUMERIC(errcode,accum,newval,				\
+#define AGGCALC_NOGROUP_PADD_NUMERIC(errcode,accum,newval)	\
+	AGGCALC_NOGROUP_TEMPLATE_NUMERIC(errcode,accum,newval,	\
 									 pgfn_numeric_add)
-
-#else
-/* Host side representation of kern_gpupreagg. It can perform as a message
- * object of PG-Strom, has key of OpenCL device program, a source row/column
- * store and a destination kern_data_store.
- */
-typedef struct
-{
-	pgstrom_message	msg;		/* = StromTag_GpuPreAgg */
-	Datum			dprog_key;	/* key of device program */
-	bool			needs_grouping;	/* true, if it takes GROUP BY clause */
-	bool			local_reduction;/* true, if it needs local reduction */
-	bool			has_varlena;	/* true, if it has varlena grouping keys */
-	double			num_groups;	/* estimated number of groups */
-	pgstrom_data_store *pds;	/* source data-store */
-	pgstrom_data_store *pds_dest; /* result data-store */
-	kern_gpupreagg	kern;		/* kernel portion to be sent */
-} pgstrom_gpupreagg;
 #endif	/* __CUDACC__ */
-#endif	/* OPENCL_GPUPREAGG_H */
+#endif	/* CUDA_GPUPREAGG_H */

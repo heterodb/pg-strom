@@ -208,6 +208,45 @@ typedef struct
 	pgstrom_perfmon	pfm;		/* performance counter */
 } GpuPreAggState;
 
+/* Host side representation of kern_gpupreagg. It can perform as a message
+ * object of PG-Strom, has key of OpenCL device program, a source row/column
+ * store and a destination kern_data_store.
+ */
+typedef struct
+{
+	GpuTask			task;
+	bool			needs_grouping;	/* true, if it takes GROUP BY clause */
+	bool			local_reduction;/* true, if it needs local reduction */
+	bool			has_varlena;	/* true, if it has varlena grouping keys */
+	double			num_groups;		/* estimated number of groups */
+	CUfunction		kern_prep;
+	void		   *kern_prep_args[3];
+	CUfunction		kern_lagg;
+	void		   *kern_lagg_args[5];
+	CUfunction		kern_gagg;
+	void		   *kern_gagg_args[4];
+	CUfunction		kern_nogrp;
+	void		   *kern_nogrp_args[4];
+	CUfunction		kern_fixvar;
+	void		   *kern_fixvar_args[3];
+	CUdeviceptr		m_gpreagg;
+	CUdeviceptr		m_kds_in;		/* kds_in : input stream */
+	CUdeviceptr		m_kds_src;		/* kds_src : slot form of kds_in */
+	CUdeviceptr		m_kds_dst;		/* kds_dst : final aggregation result */
+	CUdeviceptr		m_ghash;		/* global hash slot */
+	CUevent			ev_dma_send_start;
+	CUevent			ev_dma_send_stop;
+	CUevent			ev_kern_prep_end;
+	CUevent			ev_kern_lagg_end;
+	CUevent			ev_kern_gagg_end;
+	CUevent			ev_dma_recv_start;
+	CUevent			ev_dma_recv_stop;
+	pgstrom_data_store *pds_in;		/* source data-store */
+	pgstrom_data_store *pds_dst;	/* result data-store */
+	kern_gpupreagg	kern;
+} pgstrom_gpupreagg;
+
+
 /* declaration of static functions */
 static void clserv_process_gpupreagg(pgstrom_message *message);
 
