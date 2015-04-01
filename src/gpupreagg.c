@@ -179,33 +179,33 @@ deform_gpupreagg_info(CustomScan *cscan)
 
 typedef struct
 {
-	CustomScanState	css;
+	GpuTaskState	gts;
 	ProjectionInfo *bulk_proj;
 	TupleTableSlot *bulk_slot;
 	double			num_groups;		/* estimated number of groups */
 	double			ntups_per_page;	/* average number of tuples per page */
 	List		   *outer_quals;
-	bool			outer_done;
-	bool			outer_bulkload;
+	//bool			outer_done;
+	//bool			outer_bulkload;
 	TupleTableSlot *outer_overflow;
 
-	pgstrom_queue  *mqueue;
-	const char	   *kern_source;
-	Datum			dprog_key;
-	kern_parambuf  *kparams;
+//	pgstrom_queue  *mqueue;
+//	const char	   *kern_source;
+//	Datum			dprog_key;
+//	kern_parambuf  *kparams;
 	bool			needs_grouping;
 	bool			local_reduction;
 	bool			has_numeric;
 	bool			has_varlena;
 
-	pgstrom_gpupreagg  *curr_chunk;
-	cl_uint			curr_index;
+//	pgstrom_gpupreagg  *curr_chunk;
+//	cl_uint			curr_index;
 	bool			curr_recheck;
 	cl_uint			num_rechecks;
-	cl_uint			num_running;
-	dlist_head		ready_chunks;
+//	cl_uint			num_running;
+//	dlist_head		ready_chunks;
 
-	pgstrom_perfmon	pfm;		/* performance counter */
+//	pgstrom_perfmon	pfm;		/* performance counter */
 } GpuPreAggState;
 
 /* Host side representation of kern_gpupreagg. It can perform as a message
@@ -246,9 +246,12 @@ typedef struct
 	kern_gpupreagg	kern;
 } pgstrom_gpupreagg;
 
-
 /* declaration of static functions */
-static void clserv_process_gpupreagg(pgstrom_message *message);
+static bool		pgstrom_process_gpupreagg(GpuTask *gtask);
+static bool		pgstrom_complete_gpupreagg(GpuTask *gtask);
+static void		pgstrom_fallback_gpupreagg(GpuTask *gtask);
+static void		pgstrom_release_gpupreagg(GpuTask *gtask);
+static GpuTask *pgstrom_load_gpupreagg(GpuTask *gtask);
 
 /*
  * Arguments of alternative functions.
@@ -1501,11 +1504,11 @@ gpupreagg_codegen_qual_eval(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	initStringInfo(&str);
 	appendStringInfo(
         &str,
-        "static bool\n"
-        "gpupreagg_qual_eval(__private cl_int *errcode,\n"
-        "                    __global kern_parambuf *kparams,\n"
-        "                    __global kern_data_store *kds,\n"
-        "                    __global kern_data_store *ktoast,\n"
+        "STATIC_FUNCTION(bool)\n"
+        "gpupreagg_qual_eval(cl_int *errcode,\n"
+        "                    kern_parambuf *kparams,\n"
+        "                    kern_data_store *kds,\n"
+        "                    kern_data_store *ktoast,\n"
         "                    size_t kds_index)\n"
         "{\n");
 
@@ -1565,11 +1568,11 @@ gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	context->param_refs = NULL;
 
 	appendStringInfo(&decl,
-					 "static cl_uint\n"
-					 "gpupreagg_hashvalue(__private cl_int *errcode,\n"
-					 "                    __local cl_uint *crc32_table,\n"
-					 "                    __global kern_data_store *kds,\n"
-					 "                    __global kern_data_store *ktoast,\n"
+					 "STATIC_FUNCTION(cl_uint)\n"
+					 "gpupreagg_hashvalue(cl_int *errcode,\n"
+					 "                    cl_uint *crc32_table,\n"
+					 "                    kern_data_store *kds,\n"
+					 "                    kern_data_store *ktoast,\n"
 					 "                    size_t kds_index)\n"
 					 "{\n");
 	appendStringInfo(&body,
@@ -1718,10 +1721,10 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 
 	/* make a whole key-compare function */
 	appendStringInfo(&str,
-					 "static cl_bool\n"
-					 "gpupreagg_keymatch(__private int *errcode,\n"
-					 "                   __global kern_data_store *kds,\n"
-					 "                   __global kern_data_store *ktoast,\n"
+					 "STATIC_FUNCTION(cl_bool)\n"
+					 "gpupreagg_keymatch(int *errcode,\n"
+					 "                   kern_data_store *kds,\n"
+					 "                   kern_data_store *ktoast,\n"
 					 "                   size_t x_index,\n"
 					 "                   size_t y_index)\n"
 					 "{\n"
@@ -1787,11 +1790,11 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	case AGGCALC_LOCAL_REDUCTION:
 		appendStringInfo(
 			&body,
-			"static void\n"
-			"gpupreagg_local_calc(__private cl_int *errcode,\n"
+			"STATIC_FUNCTION(void)\n"
+			"gpupreagg_local_calc(cl_int *errcode,\n"
 			"                     cl_int attnum,\n"
-			"                     __local pagg_datum *accum,\n"
-			"                     __local pagg_datum *newval)\n"
+			"                     pagg_datum *accum,\n"
+			"                     pagg_datum *newval)\n"
 			"{\n");
 		aggcalc_class = "LOCAL";
         aggcalc_args = "errcode,accum,newval";
@@ -1799,20 +1802,20 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	case AGGCALC_GLOBAL_REDUCTION:
 		appendStringInfo(
 			&body,
-			"static void\n"
-			"gpupreagg_global_calc(__private cl_int *errcode,\n"
+			"STATIC_FUNCTION(void)\n"
+			"gpupreagg_global_calc(cl_int *errcode,\n"
 			"                      cl_int attnum,\n"
-			"                      __global kern_data_store *kds,\n"
-			"                      __global kern_data_store *ktoast,\n"
+			"                      kern_data_store *kds,\n"
+			"                      kern_data_store *ktoast,\n"
 			"                      size_t accum_index,\n"
 			"                      size_t newval_index)\n"
 			"{\n"
-			"  __global char  *accum_isnull;\n"
-			"  __global Datum *accum_value;\n"
-			"  char            new_isnull;\n"
-			"  Datum           new_value;\n"
+			"  char    *accum_isnull;\n"
+			"  Datum   *accum_value;\n"
+			"  char     new_isnull;\n"
+			"  Datum    new_value;\n"
 			"\n"
-			"  if (kds->format != KDS_FORMAT_TUPSLOT)\n"
+			"  if (kds->format != KDS_FORMAT_SLOT)\n"
 			"  {\n"
 			"    STROM_SET_ERROR(errcode,StromError_SanityCheckViolation);\n"
 			"    return;\n"
@@ -1828,11 +1831,11 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	case AGGCALC_NOGROUP_REDUCTION:
 		appendStringInfo(
 			&body,
-			"static void\n"
-			"gpupreagg_nogroup_calc(__private cl_int *errcode,\n"
+			"STATIC_FUNCTION(void)\n"
+			"gpupreagg_nogroup_calc(cl_int *errcode,\n"
 			"                       cl_int attnum,\n"
-			"                       __local pagg_datum *accum,\n"
-			"                       __local pagg_datum *newval)\n"
+			"                       pagg_datum *accum,\n"
+			"                       pagg_datum *newval)\n"
 			"{\n");
 		aggcalc_class = "NOGROUP";
         aggcalc_args = "errcode,accum,newval";
@@ -2525,13 +2528,13 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 
 	appendStringInfo(
 		&str,
-		"static void\n"
-		"gpupreagg_projection(__private cl_int *errcode,\n"
-		"            __global kern_parambuf *kparams,\n"
-		"            __global kern_data_store *kds_in,\n"
-		"            __global kern_data_store *kds_src,\n"
-		"            __global void *ktoast,\n"
-		"            size_t rowidx_in, size_t rowidx_out)\n"
+		"STATIC_FUNCTION(void)\n"
+		"gpupreagg_projection(cl_int *errcode,\n"
+		"                     kern_parambuf *kparams,\n"
+		"                     kern_data_store *kds_in,\n"
+		"                     kern_data_store *kds_src,\n"
+		"                     kern_data_store *ktoast,\n"
+		"                     size_t rowidx_in, size_t rowidx_out)\n"
 		"{\n"
 		"%s"
 		"%s"
@@ -2888,7 +2891,16 @@ gpupreagg_create_scan_state(CustomScan *cscan)
 	GpuPreAggState *gpas = palloc0(sizeof(GpuPreAggState));
 
 	NodeSetTag(gpas, T_CustomScanState);
-	gpas->css.methods = &gpupreagg_exec_methods;
+	gpas->gts.css.flags = cscan->flags;
+	gpas->gts.css.methods = &gpupreagg_exec_methods;
+	/* GpuTaskState setup */
+	pgstrom_init_gputaskstate(gcontext, &ghjs->gts);
+	gpas->gts.cb_task_process = pgstrom_process_gpupreagg;
+	gpas->gts.cb_task_complete = pgstrom_complete_gpupreagg;
+	gpas->gts.cb_task_fallback = pgstrom_fallback_gpupreagg;
+	gpas->gts.cb_task_release = pgstrom_release_gpupreagg;
+	gpas->gts.cb_load_next = pgstrom_load_gpupreagg;
+	gpas->gts.cb_cleanup = NULL;
 
 	return (Node *) gpas;
 }
@@ -2913,9 +2925,9 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	 * initialize child node
 	 */
 	outerPlanState(gpas) = ExecInitNode(outerPlan(cscan), estate, eflags);
-	gpas->outer_bulkload =
+	gpas->gts.scan_bulk =
 		(!pgstrom_debug_bulkload_enabled ? false : gpa_info->outer_bulkload);
-	gpas->outer_done = false;
+	//gpas->outer_done = false;
 	gpas->outer_overflow = NULL;
 
 	outer_width = outerPlanState(gpas)->plan->plan_width;
@@ -2928,7 +2940,7 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	/*
 	 * initialize result tuple type and projection info
 	 */
-	if (gpas->outer_bulkload)
+	if (gpas->gts.scan_bulk)
 	{
 		CustomScanState *ocss = (CustomScanState *) outerPlanState(gpas);
 
@@ -2953,12 +2965,10 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	/*
 	 * Setting up kernel program and message queue
 	 */
-	gpas->kern_source = gpa_info->kern_source;
-	gpas->dprog_key = pgstrom_get_devprog_key(gpa_info->kern_source,
-											  gpa_info->extra_flags);
-	pgstrom_track_object((StromObject *)gpas->dprog_key, 0);
-	gpas->mqueue = pgstrom_create_queue();
-	pgstrom_track_object(&gpas->mqueue->sobj, 0);
+	gpas->gts.kern_source = gpa_info->kern_source;
+	gpas->gts.extra_flags = gpa_info->extra_flags;
+	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+        pgstrom_preload_cuda_program(&gpas->gts);
 
 	/*
 	 * init misc stuff
@@ -2967,35 +2977,70 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	gpas->local_reduction = true;	/* tentative */
 	gpas->has_numeric = gpa_info->has_numeric;
 	gpas->has_varlena = gpa_info->has_varlena;
-	gpas->curr_chunk = NULL;
-	gpas->curr_index = 0;
+	//gpas->curr_chunk = NULL;
+	//gpas->curr_index = 0;
 	gpas->curr_recheck = false;
 	gpas->num_rechecks = 0;
-	dlist_init(&gpas->ready_chunks);
-
-	/*
-	 * Is perfmon needed?
-	 */
-	gpas->pfm.enabled = pgstrom_perfmon_enabled;
 }
 
 static void
-pgstrom_release_gpupreagg(pgstrom_message *message)
+gpupreagg_cleanup_cuda_resources(pgstrom_gpupreagg *gpreagg)
 {
-	pgstrom_gpupreagg *gpupreagg = (pgstrom_gpupreagg *) message;
+	if (gpreagg->m_gpreagg)
+		gpuMemFree(&gpreagg->task, gpreagg->m_gpreagg);
+	if (gpreagg->m_kds_in)
+		gpuMemFree(&gpreagg->task, gpreagg->m_kds_in);
+	if (gpreagg->m_kds_src)
+		gpuMemFree(&gpreagg->task, gpreagg->m_kds_src);
+	if (gpreagg->m_kds_dst)
+		gpuMemFree(&gpreagg->task, gpreagg->m_kds_dst);
 
-	/* unlink message queue and device program */
-	pgstrom_put_queue(gpupreagg->msg.respq);
-	pgstrom_put_devprog_key(gpupreagg->dprog_key);
+	CUDA_EVENT_DESTROY(gpreagg, ev_dma_send_start);
+	CUDA_EVENT_DESTROY(gpreagg, ev_dma_send_stop);
+	CUDA_EVENT_DESTROY(gpreagg, ev_kern_prep_end);
+	CUDA_EVENT_DESTROY(gpreagg, ev_kern_lagg_end);
+	CUDA_EVENT_DESTROY(gpreagg, ev_kern_gagg_end);
+	CUDA_EVENT_DESTROY(gpreagg, ev_dma_recv_start);
+	CUDA_EVENT_DESTROY(gpreagg, ev_dma_recv_stop);
 
-	/* unlink source data-store */
-	pgstrom_put_data_store(gpupreagg->pds);
+	/* clear the pointers */
+	gpreagg->kern_prep = NULL;
+	memset(gpreagg->kern_prep_args, 0, sizeof(gpreagg->kern_prep_args));
+	gpreagg->kern_lagg = NULL;
+	memset(gpreagg->kern_lagg_args, 0, sizeof(gpreagg->kern_lagg_args));
+	gpreagg->kern_gagg = NULL;
+	memset(gpreagg->kern_gagg_args, 0, sizeof(gpreagg->kern_gagg_args));
+	gpreagg->kern_nogrp = NULL;
+	memset(gpreagg->kern_nogrp_args, 0, sizeof(gpreagg->kern_nogrp_args));
+	gpreagg->kern_fixvar = NULL;
+	memset(gpreagg->kern_fixvar_args, 0, sizeof(gpreagg->kern_fixvar_args));
+	gpreagg->m_gpreagg = 0UL;
+	gpreagg->m_kds_in = 0UL;
+	gpreagg->m_kds_src = 0UL;
+	gpreagg->m_kds_dst = 0UL;
+	gpreagg->m_ghash = 0UL;
+	gpreagg->ev_dma_send_start = NULL;
+	gpreagg->ev_dma_send_stop = NULL;
+	gpreagg->ev_kern_prep_end = NULL;
+	gpreagg->ev_kern_lagg_end = NULL;
+	gpreagg->ev_kern_gagg_end = NULL;
+	gpreagg->ev_dma_recv_start = NULL;
+	gpreagg->ev_dma_recv_stop = NULL;
+}
 
-	/* unlink result data-store */
-	if (gpupreagg->pds_dest)
-		pgstrom_put_data_store(gpupreagg->pds_dest);
+static void
+pgstrom_release_gpupreagg(GpuTask *gtask)
+{
+	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) gpreagg;
 
-	pgstrom_shmem_free(gpupreagg);
+	/* cleanup cuda resources, if any */
+	gpupreagg_cleanup_cuda_resources(gpreagg);
+
+	if (gpreagg->pds_in)
+		pgstrom_release_data_store(gpreagg->pds_in);
+	if (gpreagg->pds_dst)
+		pgstrom_release_data_store(gpreagg->pds_dst);
+	pfree(gpreagg);
 }
 
 static pgstrom_gpupreagg *

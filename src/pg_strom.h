@@ -144,15 +144,15 @@ typedef struct {
 			gettimeofday((tv1), NULL);			\
 	} while(0)
 
-#define PERFMON_END(pfm_accum,field,tv1,tv2)							\
-	do {																\
-		if ((pfm_accum)->enabled)										\
-		{																\
-			gettimeofday((tv2), NULL);									\
-			(pfm_accum)->field +=										\
+#define PERFMON_END(pfm_accum,field,tv1,tv2)					\
+	do {														\
+		if ((pfm_accum)->enabled)								\
+		{														\
+			gettimeofday((tv2), NULL);							\
+			(pfm_accum)->field +=								\
 				((double)(((tv2)->tv_sec - (tv1)->tv_sec) * 1000000L +	\
 						  ((tv2)->tv_usec - (tv1)->tv_usec)) / 1000.0);	\
-		}																\
+		}														\
 	} while(0)
 
 #define CUDA_EVENT_RECORD(node,ev_field)						\
@@ -178,26 +178,22 @@ typedef struct {
 		}														\
 	} while(0)
 
-#define CUDA_EVENT_ELAPSED(node,pfm_field,ev_start,ev_stop)			\
-	do {															\
-		CUresult	__rc;											\
-		float		__elapsed;										\
-																	\
-		if ((node)->ev_start != NULL && (node)->ev_stop != NULL)	\
-		{															\
-			__rc = cuEventElapsedTime(&__elapsed,					\
-									  (node)->ev_start,				\
-									  (node)->ev_stop);				\
-			if (__rc != CUDA_SUCCESS)								\
-				elog(ERROR, "failed on cuEventElapsedTime: %s",		\
-					 errorText(__rc));								\
-			((GpuTask *)(node))->pfm.pfm_field += __elapsed;		\
-		}															\
+#define CUDA_EVENT_ELAPSED(node,pfm_field,ev_start,ev_stop)		\
+	do {														\
+		CUresult	__rc;										\
+		float		__elapsed;									\
+																\
+		if ((node)->ev_start != NULL && (node)->ev_stop != NULL)\
+		{														\
+			__rc = cuEventElapsedTime(&__elapsed,				\
+									  (node)->ev_start,			\
+									  (node)->ev_stop);			\
+			if (__rc != CUDA_SUCCESS)							\
+				elog(ERROR, "failed on cuEventElapsedTime: %s",	\
+					 errorText(__rc));							\
+			((GpuTask *)(node))->pfm.pfm_field += __elapsed;	\
+		}														\
 	} while(0)
-
-
-
-
 
 
 /*

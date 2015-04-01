@@ -232,7 +232,7 @@ gpupreagg_projection(cl_int *errcode,
 					 kern_parambuf *kparams,
 					 kern_data_store *kds_in,
 					 kern_data_store *kds_src,
-					 void *ktoast,
+					 kern_data_store *ktoast,	/* never used */
 					 size_t rowidx_in,
 					 size_t rowidx_out);
 /*
