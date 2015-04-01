@@ -26,11 +26,12 @@
 #define HOSTMEM_CHUNKSZ_MIN_BIT		8
 #define HOSTMEM_CHUNKSZ_MAX			(1UL << HOSTMEM_CHUNKSZ_MAX_BIT)
 #define HOSTMEM_CHUNKSZ_MIN			(1UL << HOSTMEM_CHUNKSZ_MIN_BIT)
-#define HOSTMEM_CHUNK_DATA(chunk)	\
-	(((char *)&(chunk)->chunk_head) + STANDARDCHUNKHEADERSIZE)
+#define HOSTMEM_CHUNK_DATA(chunk)	((chunk)->chunk_data)
 #define HOSTMEM_CHUNK_MAGIC_CODE		0xdeadbeaf
-#define HOSTMEM_CHUNK_MAGIC(chunk)					\
-	*((cl_uint *)(HOSTMEM_CHUNK_DATA(chunk) + (chunk)->chunk_head.size))
+#define HOSTMEM_CHUNK_MAGIC(chunk)				\
+	*((cl_uint *)((char *)(chunk) +				\
+				  (chunk)->chunk_head.size -	\
+				  sizeof(cl_uint)))
 
 struct cudaHostMemBlock;
 
@@ -39,8 +40,13 @@ typedef struct
 	struct cudaHostMemBlock *chm_block;	/* block that owns this chunk */
 	dlist_node		addr_chain;	/* link to addr_chunks */
 	dlist_node		free_chain;	/* link to free_chunks, or zero if active */
-	Size			chunk_size;	/* size of this chunk; to be 2^N */
 	StandardChunkHeader chunk_head;
+	/*
+	 * chunk_head.context : MemoryContext that owns this block
+	 * chunk_head.size    : size of this chunk; to be 2^N
+	 * chunk_head.requested_size : size actually requested
+	 */
+	char			chunk_data[FLEXIBLE_ARRAY_MEMBER];
 } cudaHostMemChunk;
 
 typedef struct cudaHostMemBlock
@@ -69,8 +75,8 @@ typedef struct
 static bool
 cudaHostMemSplit(cudaHostMemHead *chm_head, int chm_class)
 {
-	cudaHostMemChunk   *chm_chunk1;
-	cudaHostMemChunk   *chm_chunk2;
+	cudaHostMemChunk   *chunk1;
+	cudaHostMemChunk   *chunk2;
 	dlist_node		   *dnode;
 
 	Assert(chm_class > HOSTMEM_CHUNKSZ_MIN_BIT);
@@ -84,22 +90,22 @@ cudaHostMemSplit(cudaHostMemHead *chm_head, int chm_class)
 	}
 	Assert(!dlist_is_empty(&chm_head->free_chunks[chm_class]));
 	dnode = dlist_pop_head_node(&chm_head->free_chunks[chm_class]);
-	chm_chunk1 = dlist_container(cudaHostMemChunk, free_chain, dnode);
-	Assert((chm_chunk1->chunk_size & (chm_chunk1->chunk_size - 1)) == 0);
-	Assert(chm_class == get_next_log2(chm_chunk1->chunk_size - 1));
-	chm_chunk1->chunk_size /= 2;
+	chunk1 = dlist_container(cudaHostMemChunk, free_chain, dnode);
+	Assert((chunk1->chunk_head.size & (chunk1->chunk_head.size - 1)) == 0);
+	Assert(chm_class == get_next_log2(chunk1->chunk_head.size));
+	chunk1->chunk_head.size /= 2;
 
-	chm_chunk2 = (cudaHostMemChunk *)((char *)chm_chunk1 +
-									  chm_chunk1->chunk_size);
-	chm_chunk2->chm_block = chm_chunk1->chm_block;
-	chm_chunk2->chunk_size = chm_chunk1->chunk_size;
-	dlist_insert_after(&chm_chunk1->addr_chain,
-					   &chm_chunk2->addr_chain);
+	chunk2 = (cudaHostMemChunk *)((char *)chunk1 + chunk1->chunk_head.size);
+	chunk2->chm_block = chunk1->chm_block;
+	chunk2->chunk_head.context = chunk1->chunk_head.context;
+	chunk2->chunk_head.size = chunk1->chunk_head.size;
 
+	dlist_insert_after(&chunk1->addr_chain,
+					   &chunk2->addr_chain);
 	dlist_push_tail(&chm_head->free_chunks[chm_class - 1],
-					&chm_chunk1->free_chain);
+					&chunk1->free_chain);
 	dlist_push_tail(&chm_head->free_chunks[chm_class - 1],
-                    &chm_chunk2->free_chain);
+                    &chunk2->free_chain);
 	return true;
 }
 
@@ -139,15 +145,16 @@ cudaHostMemAllocBlock(cudaHostMemHead *chm_head, int least_class)
 
 	/* init first chunk */
 	chm_chunk = &chm_block->first_chunk;
+	memset(chm_chunk, 0, sizeof(cudaHostMemChunk));
 	chm_chunk->chm_block = chm_block;
-	chm_chunk->chunk_size = block_size;
-	memset(&chm_chunk->chunk_head, 0, sizeof(StandardChunkHeader));
-	dlist_push_head(&chm_block->addr_chunks, &chm_chunk->addr_chain);
+	chm_chunk->chunk_head.size = block_size;
+	chm_chunk->chunk_head.context = &chm_head->header;
+	/* add chunk to addr list */
+	dlist_push_tail(&chm_block->addr_chunks, &chm_chunk->addr_chain);
 
 	/* add chunk to free list */
-	index = get_next_log2(block_size - 1);
-	dlist_push_tail(&chm_head->free_chunks[index],
-					&chm_chunk->free_chain);
+	index = get_next_log2(chm_chunk->chunk_head.size);
+	dlist_push_tail(&chm_head->free_chunks[index], &chm_chunk->free_chain);
 }
 
 static void *
@@ -160,12 +167,11 @@ cudaHostMemAlloc(MemoryContext context, Size required)
 	int					chunk_class;
 
 	/* formalize the required size to 2^N of chunk_size */
-	chunk_size = MAXALIGN(offsetof(cudaHostMemChunk, chunk_head) +
-						  STANDARDCHUNKHEADERSIZE +
+	chunk_size = MAXALIGN(offsetof(cudaHostMemChunk, chunk_data) +
 						  required +
 						  sizeof(cl_uint));
 	chunk_size = Max(chunk_size, HOSTMEM_CHUNKSZ_MIN);
-	chunk_class = get_next_log2(chunk_size - 1);
+	chunk_class = get_next_log2(chunk_size);
 	chunk_size = (1UL << chunk_class);	/* to be 2^N bytes */
 	if (chunk_size > chm_head->block_size_max)
 		elog(ERROR, "pinned memory requiest %zu bytes too large", required);
@@ -184,11 +190,9 @@ retry:
 
 	dnode = dlist_pop_head_node(&chm_head->free_chunks[chunk_class]);
 	chm_chunk = dlist_container(cudaHostMemChunk, free_chain, dnode);
-	Assert(chm_chunk->chunk_size == chunk_size);
-
 	memset(&chm_chunk->free_chain, 0, sizeof(dlist_node));
-	chm_chunk->chunk_head.context = &chm_head->header;
-	chm_chunk->chunk_head.size = required;
+	Assert(chm_chunk->chunk_head.context = &chm_head->header);
+	Assert(chm_chunk->chunk_head.size == chunk_size);
 #ifdef MEMORY_CONTEXT_CHECKING
 	chm_chunk->chunk_head.requested_size = required;
 #endif
@@ -208,20 +212,20 @@ cudaHostMemFree(MemoryContext context, void *pointer)
 	uintptr_t			offset;
 	int					index;
 
-	chunk = (cudaHostMemChunk *)((char *)pointer -
-								 offsetof(cudaHostMemChunk, chunk_head) -
-								 STANDARDCHUNKHEADERSIZE);
+	chunk = (cudaHostMemChunk *)
+		((char *)pointer - offsetof(cudaHostMemChunk, chunk_data));
 	Assert(HOSTMEM_CHUNK_MAGIC(chunk) == HOSTMEM_CHUNK_MAGIC_CODE);
 	chm_block = chunk->chm_block;
 
 	while (true)
 	{
-		Assert((chunk->chunk_size & (chunk->chunk_size - 1)) == 0);
+		Assert((chunk->chunk_head.size & (chunk->chunk_head.size - 1)) == 0);
 		Assert(!chunk->free_chain.prev && !chunk->free_chain.next);
 		Assert(chunk->chm_block == chm_block);
 
-		offset = (uintptr_t)chunk - (uintptr_t)chm_block;
-		if ((offset & chunk->chunk_size) == 0)
+		offset = (uintptr_t)chunk - (uintptr_t)&chm_block->first_chunk;
+		Assert((offset & (chunk->chunk_head.size - 1)) == 0);
+		if ((offset & chunk->chunk_head.size) == 0)
 		{
 			/* this chunk should be merged with next chunk */
 			if (!dlist_has_next(&chm_block->addr_chunks,
@@ -235,13 +239,16 @@ cudaHostMemFree(MemoryContext context, void *pointer)
 			if (!buddy->free_chain.prev || !buddy->free_chain.next)
 				break;
 			/* buddy has to be same size */
-			if (chunk->chunk_size != buddy->chunk_size)
+			if (chunk->chunk_head.size != buddy->chunk_head.size)
 				break;
+			Assert((uintptr_t)chunk +
+				   chunk->chunk_head.size == (uintptr_t)buddy);
 
 			/* OK, merge */
 			dlist_delete(&buddy->addr_chain);
 			dlist_delete(&buddy->free_chain);
-			chunk->chunk_size *= 2;
+			chunk->chunk_head.size += chunk->chunk_head.size;
+			HOSTMEM_CHUNK_MAGIC(chunk) = HOSTMEM_CHUNK_MAGIC_CODE;
 		}
 		else
 		{
@@ -257,19 +264,21 @@ cudaHostMemFree(MemoryContext context, void *pointer)
 			if (!buddy->free_chain.prev || !buddy->free_chain.next)
 				break;
 			/* buddy has to be same size */
-			if (chunk->chunk_size != buddy->chunk_size)
+			if (chunk->chunk_head.size != buddy->chunk_head.size)
 				break;
-
+			Assert((uintptr_t)chunk -
+				   chunk->chunk_head.size == (uintptr_t)buddy);
 			/* OK, merge */
 			dlist_delete(&chunk->addr_chain);
 			dlist_delete(&buddy->free_chain);
 			memset(&buddy->free_chain, 0, sizeof(dlist_node));
-			buddy->chunk_size *= 2;
+			buddy->chunk_head.size += buddy->chunk_head.size;
+			HOSTMEM_CHUNK_MAGIC(buddy) = HOSTMEM_CHUNK_MAGIC_CODE;
 			chunk = buddy;
 		}
 	}
 	/* OK, add chunk to free list */
-	index = get_next_log2(chunk->chunk_size - 1);
+	index = get_next_log2(chunk->chunk_head.size);
 	Assert(index >= HOSTMEM_CHUNKSZ_MIN_BIT &&
 		   index <= HOSTMEM_CHUNKSZ_MAX_BIT);
 	dlist_push_head(&chm_head->free_chunks[index], &chunk->free_chain);
@@ -282,29 +291,27 @@ cudaHostMemRealloc(MemoryContext context, void *pointer, Size size)
 	Size				length;
 	void			   *result;
 
-	chm_chunk = (cudaHostMemChunk *)((char *)pointer -
-									 offsetof(cudaHostMemChunk, chunk_head) -
-									 STANDARDCHUNKHEADERSIZE);
+	chm_chunk = (cudaHostMemChunk *)
+		((char *)pointer - offsetof(cudaHostMemChunk, chunk_data));
 
 	/* if newsize is still in margin, nothing to do */
-	length = (offsetof(cudaHostMemChunk, chunk_head) +
-			  STANDARDCHUNKHEADERSIZE +
-			  size +
-			  sizeof(cl_uint));
-	if (length < chm_chunk->chunk_size)
+	length = MAXALIGN(offsetof(cudaHostMemChunk, chunk_data) +
+					  size +
+					  sizeof(cl_uint));
+	if (length <= chm_chunk->chunk_head.size)
 	{
-		chm_chunk->chunk_head.size = size;
+#ifdef MEMORY_CONTEXT_CHECKING
+		chm_chunk->chunk_head.requested_size = size;
+#endif
 		HOSTMEM_CHUNK_MAGIC(chm_chunk) = HOSTMEM_CHUNK_MAGIC_CODE;
 		return pointer;
 	}
-	/* elsewher, alloc new chunk and copy old contents */
+	/* elsewhere, alloc new chunk and copy old contents */
 	result = cudaHostMemAlloc(context, size);
-	length = (chm_chunk->chunk_size -
-			  offsetof(cudaHostMemChunk, chunk_head) -
-			  STANDARDCHUNKHEADERSIZE -
-			  sizeof(cl_uint));
+	length = (chm_chunk->chunk_head.size -
+			  offsetof(cudaHostMemChunk, chunk_data));
 	memcpy(result, pointer, length);
-
+	/* release old one */
 	cudaHostMemFree(context, pointer);
 
 	return result;
@@ -390,7 +397,7 @@ cudaHostMemStats(MemoryContext context, int level)
 									 dlist_tail_node(&chm_block->addr_chunks));
 		elog(INFO, "---- cuda host memory block [%p - %p] ----",
 			 (char *)head_chunk,
-			 (char *)tail_chunk + tail_chunk->chunk_size - 1);
+			 (char *)tail_chunk + tail_chunk->chunk_head.size - 1);
 
 		dlist_foreach(iter2, &chm_block->addr_chunks)
 		{
@@ -398,10 +405,10 @@ cudaHostMemStats(MemoryContext context, int level)
 				= dlist_container(cudaHostMemChunk, addr_chain, iter2.cur);
 			elog(INFO, "%p - %p %s (size: %zu%s)",
 				 (char *)chm_chunk,
-				 (char *)chm_chunk + chm_chunk->chunk_size,
+				 (char *)chm_chunk + chm_chunk->chunk_head.size,
 				 (!chm_chunk->free_chain.prev &&
 				  !chm_chunk->free_chain.next) ? "active" : "free",
-				 chm_chunk->chunk_size,
+				 chm_chunk->chunk_head.size,
 				 (!chm_chunk->free_chain.prev &&
 				  !chm_chunk->free_chain.next &&
 				  HOSTMEM_CHUNK_MAGIC(chm_chunk) != HOSTMEM_CHUNK_MAGIC_CODE

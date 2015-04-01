@@ -1,10 +1,10 @@
 /*
- * opencl_hashjoin.h
+ * cuda_hashjoin.h
  *
  * Parallel hash join accelerated by OpenCL device
  * --
- * Copyright 2011-2014 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014 (C) The PG-Strom Development Team
+ * Copyright 2011-2015 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2015 (C) The PG-Strom Development Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -15,8 +15,8 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#ifndef OPENCL_HASHJOIN_H
-#define OPENCL_HASHJOIN_H
+#ifndef CUDA_HASHJOIN_H
+#define CUDA_HASHJOIN_H
 
 /*
  * Format of kernel hash table; to be prepared
@@ -440,7 +440,6 @@ __gpuhashjoin_projection_row(cl_int *p_errcode,			/* in/out */
 	cl_uint			required;
 	cl_uint			offset;
 	cl_uint			total_len;
-	cl_uint			usage_head;
 	__shared__ cl_uint usage_prev;
 
 	/*
@@ -517,11 +516,10 @@ __gpuhashjoin_projection_row(cl_int *p_errcode,			/* in/out */
 	}
 	__syncthreads();
 
-	/* Check expected usage of the buffer */
-	usage_head = (STROMALIGN(offsetof(kern_data_store,
-									  colmeta[kds_dst->ncols])) +
-				  STROMALIGN(sizeof(cl_uint) * kresults->nitems));
-	if (usage_head + usage_prev + total_len > kds_dst->length)
+	/* check expected usage of the buffer */
+	if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
+		STROMALIGN(sizeof(cl_uint) * kresults->nitems) +
+		usage_prev + total_len > kds_dst->length)
 	{
 		*p_errcode = StromError_DataStoreNoSpace;
 		return false;
@@ -865,4 +863,4 @@ out:
 	}
 
 #endif	/* __CUDACC__ */
-#endif	/* OPENCL_HASHJOIN_H */
+#endif	/* CUDA_HASHJOIN_H */

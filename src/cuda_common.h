@@ -387,7 +387,7 @@ typedef struct {
 
 /* length of the header portion of kern_data_store */
 #define KERN_DATA_STORE_HEAD_LENGTH(kds)			\
-	offsetof(kern_data_store, colmeta[(kds)->ncols])
+	STROMALIGN(offsetof(kern_data_store, colmeta[(kds)->ncols]))
 
 /*
  * kern_parambuf

@@ -926,7 +926,7 @@ check_completed_tasks(GpuTaskState *gts)
 		if (retry)
 		{
 			dlist_push_head(&gts->pending_tasks, &gtask->chain);
-			gts->num_running_tasks++;
+			gts->num_pending_tasks++;
 		}
 		else
 		{
