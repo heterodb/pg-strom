@@ -76,6 +76,9 @@ typedef struct
 #define KERN_GPUPREAGG_RESULTBUF(kgpreagg)							\
 	((kern_resultbuf *)((char *)KERN_GPUPREAGG_PARAMBUF(kgpreagg)	\
 						+ KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg)))
+#define KERN_GPUPREAGG_LENGTH(kgpreagg,nitems)			\
+	((uintptr_t)(KERN_GPUPREAGG_RESULTBUF(kgpreagg)->results + (nitems)) - \
+	 (uintptr_t)(kgpreagg))
 
 #define KERN_GPUPREAGG_DMASEND_OFFSET(kgpreagg)			0
 #define KERN_GPUPREAGG_DMASEND_LENGTH(kgpreagg)			\
@@ -85,8 +88,7 @@ typedef struct
 	((uintptr_t)KERN_GPUPREAGG_RESULTBUF(kgpreagg) -	\
 	 (uintptr_t)(kgpreagg))
 #define KERN_GPUPREAGG_DMARECV_LENGTH(kgpreagg,nitems)	\
-	((uintptr_t)(KERN_GPUPREAGG_RESULTBUF(kgpreagg)->results + (nitems)) - \
-	 (uintptr_t)(kgpreagg))
+	KERN_GPUPREAGG_LENGTH(kgpreagg,nitems)
 
 /*
  * NOTE: hashtable of gpupreagg is an array of pagg_hashslot.
@@ -396,7 +398,8 @@ gpupreagg_data_move(cl_int *errcode,
 KERNEL_FUNCTION(void)
 gpupreagg_preparation(kern_gpupreagg *kgpreagg,
 					  kern_data_store *kds_in,	/* in: KDS_FORMAT_ROW */
-					  kern_data_store *kds_src)	/* out: KDS_FORMAT_SLOT */
+					  kern_data_store *kds_src,	/* out: KDS_FORMAT_SLOT */
+					  pagg_hashslot *g_hashslot)
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_resultbuf *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
@@ -404,7 +407,19 @@ gpupreagg_preparation(kern_gpupreagg *kgpreagg,
 	cl_uint			offset;
 	cl_uint			nitems;
 	size_t			kds_index = get_global_id();
+	size_t			hash_size;
+	size_t			hash_index;
 	__shared__ cl_uint base;
+
+	/* init global hash slot */
+	hash_size = kgpreagg->hash_size;;
+	for (hash_index = get_global_id(0);
+		 hash_index < hash_size;
+		 hash_index += get_global_size(0))
+	{
+		g_hashslot[hash_index].hash = 0;
+		g_hashslot[hash_index].index = (cl_uint)(0xffffffff);
+	}
 
 	/* check qualifiers */
 	if (kds_index < kds_in->nitems)
@@ -453,38 +468,13 @@ out:
 }
 
 /*
- * gpupreagg_init_global_hashslot
- *
- * It intends to be called prior to gpupreagg_global_reduction(),
- * if gpupreagg_local_reduction() is not called. It initialized
- * the global hash-table and kern_row_map->nvalids.
- */
-KERNEL_FUNCTION(void)
-gpupreagg_init_global_hashslot(kern_gpupreagg *kgpreagg,
-							   pagg_hashslot *g_hashslot)
-{
-	size_t		hash_size;
-	size_t		curr_index;
-
-	hash_size = kgpreagg->hash_size;
-	for (curr_index = get_global_id(0);
-		 curr_index < hash_size;
-		 curr_index += get_global_size(0))
-	{
-		g_hashslot[curr_index].hash = 0;
-        g_hashslot[curr_index].index = (cl_uint)(0xffffffff);
-	}
-}
-
-/*
  * gpupreagg_local_reduction
  */
 KERNEL_FUNCTION(void)
 gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 						  kern_data_store *kds_src,
 						  kern_data_store *kds_dst,
-						  kern_data_store *ktoast,
-						  pagg_hashslot *g_hashslot)
+						  kern_data_store *ktoast)
 {
 	kern_parambuf	   *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	varlena			   *kparam_0 = kparam_get_value(kparams, 0);
@@ -506,9 +496,6 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 	pagg_datum		   *l_datum;
 	pagg_hashslot	   *l_hashslot;
 	__shared__ size_t	base_index;
-
-	/* next stage expect g_hashslot is correctly initialized */
-	gpupreagg_init_global_hashslot(kgpreagg, g_hashslot);
 
 	/*
 	 * calculation of the hash value of grouping keys in this record.

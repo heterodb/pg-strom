@@ -979,10 +979,6 @@ gpuscan_cleanup_cuda_resources(pgstrom_gpuscan *gpuscan)
 	gpuscan->kern_qual = NULL;
 	gpuscan->m_gpuscan = 0UL;
 	gpuscan->m_kds = 0UL;
-	gpuscan->ev_dma_send_start = NULL;
-	gpuscan->ev_dma_send_stop  = NULL;
-	gpuscan->ev_dma_recv_start = NULL;
-	gpuscan->ev_dma_recv_stop  = NULL;
 }
 
 /*
@@ -1103,13 +1099,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	/*
 	 * OK, enqueue a series of requests
 	 */
-	if (gpuscan->task.pfm.enabled)
-	{
-		rc = cuEventRecord(gpuscan->ev_dma_send_start,
-						   gpuscan->task.cuda_stream);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
-	}
+	CUDA_EVENT_RECORD(gpuscan, ev_dma_send_start);
 
 	offset = KERN_GPUSCAN_DMASEND_OFFSET(&gpuscan->kern);
 	length = KERN_GPUSCAN_DMASEND_LENGTH(&gpuscan->kern);
@@ -1131,13 +1121,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	gpuscan->task.pfm.bytes_dma_send += kds->length;
     gpuscan->task.pfm.num_dma_send++;
 
-	if (gpuscan->task.pfm.enabled)
-	{
-		rc = cuEventRecord(gpuscan->ev_dma_send_stop,
-						   gpuscan->task.cuda_stream);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
-	}
+	CUDA_EVENT_RECORD(gpuscan, ev_dma_send_stop);
 
 	/*
 	 * Launch kernel function
@@ -1167,13 +1151,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	/*
 	 * Recv DMA call
 	 */
-	if (gpuscan->task.pfm.enabled)
-	{
-		rc = cuEventRecord(gpuscan->ev_dma_recv_start,
-						   gpuscan->task.cuda_stream);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
-	}
+	CUDA_EVENT_RECORD(gpuscan, ev_dma_recv_start);
 
 	offset = KERN_GPUSCAN_DMARECV_OFFSET(&gpuscan->kern);
 	length = KERN_GPUSCAN_DMARECV_LENGTH(&gpuscan->kern);
@@ -1186,13 +1164,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	gpuscan->task.pfm.bytes_dma_recv += length;
 	gpuscan->task.pfm.num_dma_recv++;
 
-	if (gpuscan->task.pfm.enabled)
-	{
-		rc = cuEventRecord(gpuscan->ev_dma_recv_stop,
-						   gpuscan->task.cuda_stream);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
-	}
+	CUDA_EVENT_RECORD(gpuscan, ev_dma_recv_stop);
 
 	/*
 	 * Register callback
@@ -1233,10 +1205,10 @@ pgstrom_process_gpuscan(GpuTask *task)
 	}
 	PG_CATCH();
 	{
+		gpuscan_cleanup_cuda_resources(gpuscan);
 		rc = cuCtxPopCurrent(NULL);
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-		gpuscan_cleanup_cuda_resources(gpuscan);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();

@@ -196,7 +196,6 @@ typedef struct {
 		}														\
 	} while(0)
 
-
 /*
  *
  *
