@@ -3644,7 +3644,30 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	 *                       kern_data_store *kds_src,
 	 *                       pagg_hashslot *g_hashslot)
 	 */
+	pgstrom_compute_workgroup_size(&grid_size,
+								   &block_size,
+								   gpreagg->kern_prep,
+								   gpreagg->task.cuda_device,
+								   false,
+								   nitems,
+								   sizeof(cl_uint));
 
+	gpreagg->kern_prep_args[0] = gpreagg->m_gpreagg;
+	gpreagg->kern_prep_args[1] = gpreagg->m_kds_in;
+	gpreagg->kern_prep_args[2] = gpreagg->m_kds_src;
+	gpreagg->kern_prep_args[3] = gpreagg->m_ghash;
+
+	rc = cuLaunchKernel(gpreagg->kern_prep,
+						grid_size, 1, 1,
+                        block_size, 1, 1,
+						sizeof(cl_uint) * block_size,
+						gpreagg->task.cuda_stream,
+						gpreagg->kern_prep_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+	gpreagg->task.pfm.num_kern_prep++;
+	CUDA_EVENT_RECORD(gpreagg, ev_kern_prep_end);
 
 	if (gpreagg->needs_grouping)
 	{
@@ -3656,10 +3679,31 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 			 *                           kern_data_store *kds_dst,
 			 *                           kern_data_store *ktoast)
 			 */
+			pgstrom_compute_workgroup_size(&grid_size,
+										   &block_size,
+										   gpreagg->kern_lagg,
+										   gpreagg->task.cuda_device,
+										   true,
+										   nitems,
+										   Max(sizeof(pagg_hashslot),
+											   sizeof(pagg_datum)));
+			gpreagg->kern_lagg_args[0] = gpreagg->m_gpreagg;
+			gpreagg->kern_lagg_args[1] = gpreagg->m_kds_src;
+			gpreagg->kern_lagg_args[2] = gpreagg->m_kds_dst;
+			gpreagg->kern_lagg_args[3] = gpreagg->m_kds_in;
 
-
-
-
+			rc = cuLaunchKernel(gpreagg->kern_lagg,
+								grid_size, 1, 1,
+								block_size, 1, 1,
+								Max(sizeof(pagg_hashslot),
+									sizeof(pagg_datum)) * block_size,
+								gpreagg->task.cuda_stream,
+								gpreagg->kern_lagg_args,
+								NULL);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+			gpreagg->task.pfm.num_kern_lagg++;
+			CUDA_EVENT_RECORD(gpreagg, ev_kern_lagg_end);
 		}
 
 		/* KERNEL_FUNCTION(void)
@@ -3668,9 +3712,29 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		 *                            kern_data_store *ktoast,
 		 *                            pagg_hashslot *g_hashslot)
 		 */
+		pgstrom_compute_workgroup_size(&grid_size,
+									   &block_size,
+									   gpreagg->kern_gagg,
+									   gpreagg->task.cuda_device,
+									   false,
+									   nitems,
+									   sizeof(cl_uint));
+		gpreagg->kern_gagg_args[0] = gpreagg->m_gpreagg;
+		gpreagg->kern_gagg_args[1] = gpreagg->m_kds_dst;
+		gpreagg->kern_gagg_args[2] = gpreagg->m_kds_in;
+		gpreagg->kern_gagg_args[3] = gpreagg->m_ghash;
 
-
-
+		rc = cuLaunchKernel(gpreagg->kern_gagg,
+							grid_size, 1, 1,
+							block_size, 1, 1,
+							sizeof(cl_uint) * block_size,
+							gpreagg->task.cuda_stream,
+							gpreagg->kern_gagg_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+		gpreagg->task.pfm.num_kern_gagg++;
+		CUDA_EVENT_RECORD(gpreagg, ev_kern_gagg_end);
 	}
 	else
 	{
@@ -3680,15 +3744,92 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		 *                             kern_data_store *kds_dst,
 		 *                             kern_data_store *ktoast)
 		 */
-
+		pgstrom_compute_workgroup_size(&grid_size,
+									   &block_size,
+									   gpreagg->kern_nogrp,
+									   gpreagg->task.cuda_device,
+									   true,
+									   nitems,
+									   Max(sizeof(pagg_datum),
+										   sizeof(cl_uint)));
+		gpreagg->kern_nogrp_args[0] = gpreagg->m_gpreagg;
+		gpreagg->kern_nogrp_args[1] = gpreagg->m_kds_src;
+		gpreagg->kern_nogrp_args[2] = gpreagg->m_kds_dst;
+		gpreagg->kern_nogrp_args[3] = gpreagg->m_kds_in;
 
 		/* 1st path: data reduction (kds_src => kds_dst) */
+		rc = cuLaunchKernel(gpreagg->kern_nogrp,
+							grid_size, 1, 1,
+							block_size, 1, 1,
+							Max(sizeof(pagg_datum),
+								sizeof(cl_uint)) * block_size,
+							gpreagg->task.cuda_stream,
+							gpreagg->kern_nogrp_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+            elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+		gpreagg->task.pfm.num_kern_nogrp++;
 
 		/* 2nd path: data reduction (kds_dst => kds_src) */
+		gpreagg->kern_nogrp_args[1] = gpreagg->m_kds_dst;
+		gpreagg->kern_nogrp_args[2] = gpreagg->m_kds_src;
+		rc = cuLaunchKernel(gpreagg->kern_nogrp,
+							grid_size, 1, 1,
+							block_size, 1, 1,
+							Max(sizeof(pagg_datum),
+								sizeof(cl_uint)) * block_size,
+							gpreagg->task.cuda_stream,
+							gpreagg->kern_nogrp_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+            elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+		gpreagg->task.pfm.num_kern_nogrp++;
 
 		/* 3rd path: data reduction (kds_src => kds_dst) */
+		gpreagg->kern_nogrp_args[1] = gpreagg->m_kds_src;
+		gpreagg->kern_nogrp_args[2] = gpreagg->m_kds_dst;
+		rc = cuLaunchKernel(gpreagg->kern_nogrp,
+							grid_size, 1, 1,
+							block_size, 1, 1,
+							Max(sizeof(pagg_datum),
+								sizeof(cl_uint)) * block_size,
+							gpreagg->task.cuda_stream,
+							gpreagg->kern_nogrp_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+            elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+		gpreagg->task.pfm.num_kern_nogrp++;
+        CUDA_EVENT_RECORD(gpreagg, ev_kern_nogrp_end);
+	}
 
+	if (gpreagg->has_varlena)
+	{
+		/* KERNEL_FUNCTION(void)
+		 * gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
+		 *                         kern_data_store *kds_dst,
+		 *                         kern_data_store *ktoast)
+		 */
+		pgstrom_compute_workgroup_size(&grid_size,
+									   &block_size,
+									   gpreagg->kern_fixvar,
+									   gpreagg->task.cuda_device,
+									   false,
+									   nitems,
+									   sizeof(cl_uint));
+		gpreagg->kern_fixvar_args[0] = gpreagg->m_gpreagg;
+		gpreagg->kern_fixvar_args[1] = gpreagg->m_kds_dst;
+		gpreagg->kern_ficvar_args[2] = gpreagg->m_kds_in;
 
+		rc = cuLaunchKernel(gpreagg->kern_fixvar,
+							grid_size, 1, 1,
+							block_size, 1, 1,
+							sizeof(cl_uint) * block_size,
+							gpreagg->task.cuda_stream,
+							gpreagg->kern_fixvar_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+		gpreagg->task.pfm.num_kern_fixvar++;
 	}
 
 	/*
@@ -3699,7 +3840,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	offset = KERN_GPUPREAGG_DMARECV_OFFSET(&gpreagg->kern);
 	length = KERN_GPUPREAGG_DMARECV_LENGTH(&gpreagg->kern);
 	rc = cuMemcpyDtoHAsync(kresults,
-						   gpreagg->m_gpuscan + offset,
+						   gpreagg->m_gpupreagg + offset,
                            length,
                            gpreagg->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
@@ -3833,7 +3974,7 @@ pgstrom_init_gpupreagg(void)
  * NOTE: below is the code being run on OpenCL server context
  *
  * ---------------------------------------------------------------- */
-
+#if 0
 typedef struct
 {
 	pgstrom_gpupreagg  *gpreagg;
@@ -5085,3 +5226,4 @@ error:
 	gpreagg->msg.errcode = rc;
 	pgstrom_reply_message(&gpreagg->msg);
 }
+#endif
