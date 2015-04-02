@@ -369,7 +369,8 @@ static bool pgstrom_process_gpuhashjoin(GpuTask *gtask);
 static bool pgstrom_complete_gpuhashjoin(GpuTask *gtask);
 static void pgstrom_fallback_gpuhashjoin(GpuTask *gtask);
 static void pgstrom_release_gpuhashjoin(GpuTask *gtask);
-static GpuTask *pgstrom_load_gpuhashjoin(GpuTaskState *gts);
+static GpuTask *gpuhashjoin_next_chunk(GpuTaskState *gts);
+static TupleTableSlot *gpuhashjoin_next_tuple(GpuTaskState *gts);
 
 static pgstrom_multihash_tables *
 multihash_get_tables(pgstrom_multihash_tables *mhtables);
@@ -2217,7 +2218,8 @@ gpuhashjoin_create_scan_state(CustomScan *cscan)
 	ghjs->gts.cb_task_complete = pgstrom_complete_gpuhashjoin;
 	ghjs->gts.cb_task_fallback = pgstrom_fallback_gpuhashjoin;
 	ghjs->gts.cb_task_release = pgstrom_release_gpuhashjoin;
-	ghjs->gts.cb_load_next = pgstrom_load_gpuhashjoin;
+	ghjs->gts.cb_next_chunk = gpuhashjoin_next_chunk;
+	ghjs->gts.cb_next_tuple = gpuhashjoin_next_tuple;
 	ghjs->gts.cb_cleanup = NULL;
 
 	return (Node *) ghjs;
@@ -2480,7 +2482,7 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs,
 }
 
 static GpuTask *
-pgstrom_load_gpuhashjoin(GpuTaskState *gts)
+gpuhashjoin_next_chunk(GpuTaskState *gts)
 {
 	GpuHashJoinState   *ghjs = (GpuHashJoinState *) gts;
 	PlanState		   *subnode = outerPlanState(ghjs);
@@ -2598,10 +2600,11 @@ retry:
 	return pgstrom_create_gpuhashjoin(ghjs, pds, result_format);
 }
 
-static bool
-gpuhashjoin_next_tuple(GpuHashJoinState *ghjs)
+static TupleTableSlot *
+gpuhashjoin_next_tuple(GpuTaskState *gts)
 {
-	TupleTableSlot		   *ps_slot = ghjs->gts.css.ss.ss_ScanTupleSlot;
+	GpuHashJoinState	   *ghjs = (GpuHashJoinState *) gts;
+	TupleTableSlot		   *ps_slot = gts->css.ss.ss_ScanTupleSlot;
 	pgstrom_gpuhashjoin	   *gpuhashjoin =
 		(pgstrom_gpuhashjoin *)ghjs->gts.curr_task;
 	pgstrom_data_store	   *pds_dst = gpuhashjoin->pds_dst;
@@ -2628,13 +2631,14 @@ gpuhashjoin_next_tuple(GpuHashJoinState *ghjs)
 				continue;	/* try to fetch next tuple */
 		}
 		PERFMON_END(&ghjs->gts.pfm_accum, time_materialize, &tv1, &tv2);
-		return true;
+		return ps_slot;
 	}
 	PERFMON_END(&ghjs->gts.pfm_accum, time_materialize, &tv1, &tv2);
 	ExecClearTuple(ps_slot);
-	return false;
+	return NULL;
 }
 
+#if 0
 static TupleTableSlot *
 gpuhashjoin_fetch_tuple(CustomScanState *node)
 {
@@ -2676,13 +2680,14 @@ gpuhashjoin_recheck(CustomScanState *node, TupleTableSlot *slot)
 	/* There are no access-method-specific conditions to recheck. */
 	return true;
 }
+#endif
 
 static TupleTableSlot *
 gpuhashjoin_exec(CustomScanState *node)
 {
 	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) gpuhashjoin_fetch_tuple,
-					(ExecScanRecheckMtd) gpuhashjoin_recheck);
+					(ExecScanAccessMtd) pgstrom_exec_gputask,
+					(ExecScanRecheckMtd) pgstrom_recheck_gputask);
 }
 
 static void *

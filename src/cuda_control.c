@@ -825,6 +825,9 @@ pgstrom_cleanup_gputaskstate(GpuTaskState *gts)
     gts->num_pending_tasks = 0;
 	gts->num_ready_tasks = 0;
 	SpinLockRelease(&gts->lock);
+
+	gts->curr_task = NULL;
+	gts->curr_index = 0;
 }
 
 void
@@ -879,7 +882,8 @@ pgstrom_init_gputaststate(GpuContext *gcontext, GpuTaskState *gts)
 	gts->cb_task_complete = NULL;
 	gts->cb_task_release = NULL;
 	gts->cb_task_fallback = NULL;
-	gts->cb_load_next = NULL;
+	gts->cb_next_chunk = NULL;
+	gts->cb_next_tuple = NULL;
 	gts->cb_cleanup = NULL;
 	memset(&gts->pfm_accum, 0, sizeof(pgstrom_perfmon));
 	gts->pfm_accum.enabled = pgstrom_perfmon_enabled;
@@ -1096,7 +1100,7 @@ waitfor_ready_tasks(GpuTaskState *gts)
 }
 
 /*
- * pgstrom_fetch_gpuscan
+ * pgstrom_fetch_gputask
  *
  * It loads a chunk from the target relation, then enqueue the GpuScan
  * chunk to be processed by OpenCL devices if valid device kernel was
@@ -1115,7 +1119,7 @@ pgstrom_fetch_gputask(GpuTaskState *gts)
 	 */
 	if (!gts->kern_source)
 	{
-		gtask = gts->cb_load_next(gts);
+		gtask = gts->cb_next_chunk(gts);
 		Assert(gtask->gts == gts);
 		return gtask;
 	}
@@ -1144,7 +1148,7 @@ pgstrom_fetch_gputask(GpuTaskState *gts)
 					break;
 				SpinLockRelease(&gts->lock);
 
-				gtask = gts->cb_load_next(gts);
+				gtask = gts->cb_next_chunk(gts);
 				Assert(!gtask || gtask->gts == gts);
 
 				SpinLockAcquire(&gts->lock);
@@ -1213,11 +1217,43 @@ pgstrom_fetch_gputask(GpuTaskState *gts)
 	return gtask;
 }
 
+TupleTableSlot *
+pgstrom_exec_gputask(GpuTaskState *gts)
+{
+	TupleTableSlot *slot = gts->css.ss.ss_ScanTupleSlot;
 
+	ExecClearTuple(slot);
 
+	while (!gts->curr_task || !(slot = gts->cb_next_tuple(gts)))
+	{
+		GpuTask	   *gtask = gts->curr_task;
 
+		/* release the current GpuTask object that was already scanned */
+		if (gtask)
+		{
+			SpinLockAcquire(&gts->lock);
+			dlist_delete(&gtask->tracker);
+			SpinLockRelease(&gts->lock);
+			gts->cb_task_release(gtask);
+			gts->curr_task = NULL;
+			gts->curr_index = 0;
+		}
+		/* reload next chunk to be scanned */
+		gtask = pgstrom_fetch_gputask(gts);
+		if (!gtask)
+			break;
+		gts->curr_task = gtask;
+		gts->curr_index = 0;
+	}
+	return slot;
+}
 
-
+bool
+pgstrom_recheck_gputask(GpuTaskState *gts, TupleTableSlot *slot)
+{
+	/* no GpuTaskState class needs recheck */
+	return true;
+}
 
 void
 pgstrom_init_gputask(GpuTaskState *gts, GpuTask *gtask)

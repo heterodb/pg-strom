@@ -175,6 +175,7 @@ typedef struct {
 			if (__rc != CUDA_SUCCESS)							\
 				elog(WARNING, "failed on cuEventDestroy: %s",	\
 					 errorText(__rc));							\
+			(node)->ev_field = NULL;							\
 		}														\
 	} while(0)
 
@@ -258,7 +259,8 @@ struct GpuTaskState
 	bool		  (*cb_task_complete)(GpuTask *gtask);
 	void		  (*cb_task_fallback)(GpuTask *gtask);
 	void		  (*cb_task_release)(GpuTask *gtask);
-	GpuTask		 *(*cb_load_next)(GpuTaskState *gts);
+	GpuTask		 *(*cb_next_chunk)(GpuTaskState *gts);
+	TupleTableSlot *(*cb_next_tuple)(GpuTaskState *gts);
 	void		  (*cb_cleanup)(GpuTaskState *gts);
 	/* performance counter  */
 	pgstrom_perfmon	pfm_accum;
@@ -405,6 +407,8 @@ extern void pgstrom_release_gputaskstate(GpuTaskState *gts);
 extern void pgstrom_init_gputaststate(GpuContext *gcontext, GpuTaskState *gts);
 extern void pgstrom_init_gputask(GpuTaskState *gts, GpuTask *gtask);
 extern GpuTask *pgstrom_fetch_gputask(GpuTaskState *gts);
+extern TupleTableSlot *pgstrom_exec_gputask(GpuTaskState *gts);
+extern bool pgstrom_recheck_gputask(GpuTaskState *gts, TupleTableSlot *slot);
 extern void pgstrom_compute_workgroup_size(size_t *p_grid_size,
 										   size_t *p_block_size,
 										   CUfunction function,

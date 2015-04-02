@@ -59,9 +59,8 @@
  */
 typedef struct
 {
-	cl_int			status;				/* result of kernel execution */
-	cl_uint			hash_size;			/* size of global hash-slots */
-	char			__padding__[8];		/* 16bytes alignment */
+	cl_uint			hash_size;				/* size of global hash-slots */
+	char			__padding__[4];			/* alignment */
 	cl_uint			pg_crc32_table[256];	/* master CRC32 table */
 	kern_parambuf	kparams;
 	/*

@@ -117,6 +117,7 @@ typedef struct
 	CUevent			ev_dma_recv_start;	/* also, stop kernel exec */
 	CUevent			ev_dma_recv_stop;
 	pgstrom_data_store *pds;
+	kern_resultbuf *kresults;
 	kern_gpuscan	kern;
 } pgstrom_gpuscan;
 
@@ -130,8 +131,8 @@ typedef struct {
 
 	kern_parambuf  *kparams;
 
-	pgstrom_gpuscan *curr_chunk;
-	uint32			curr_index;
+//	pgstrom_gpuscan *curr_chunk;
+//	uint32			curr_index;
 	cl_uint			num_rechecked;
 } GpuScanState;
 
@@ -139,7 +140,8 @@ typedef struct {
 static bool pgstrom_process_gpuscan(GpuTask *gtask);
 static bool pgstrom_complete_gpuscan(GpuTask *gtask);
 static void pgstrom_release_gpuscan(GpuTask *gtask);
-static GpuTask *pgstrom_load_gpuscan(GpuTaskState *gts);
+static GpuTask *gpuscan_next_chunk(GpuTaskState *gts);
+static TupleTableSlot *gpuscan_next_tuple(GpuTaskState *gts);
 
 /*
  * cost_gpuscan
@@ -613,7 +615,8 @@ gpuscan_create_scan_state(CustomScan *cscan)
 	gss->gts.cb_task_complete = pgstrom_complete_gpuscan;
 	gss->gts.cb_task_fallback = NULL;	/* to be implemented later */
 	gss->gts.cb_task_release = pgstrom_release_gpuscan;
-	gss->gts.cb_load_next = pgstrom_load_gpuscan;
+	gss->gts.cb_next_chunk = gpuscan_next_chunk;
+	gss->gts.cb_next_tuple = gpuscan_next_tuple;
 	gss->gts.cb_cleanup = NULL;
 
 	return (Node *) gss;
@@ -649,8 +652,8 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->kparams = pgstrom_create_kern_parambuf(gs_info->used_params,
 											gss->gts.css.ss.ps.ps_ExprContext);
 	/* other run-time parameters */
-	gss->curr_chunk = NULL;
-	gss->curr_index = 0;
+	//gss->curr_chunk = NULL;
+	//gss->curr_index = 0;
     gss->num_rechecked = 0;
 }
 
@@ -704,7 +707,7 @@ pgstrom_create_gpuscan(GpuScanState *gss, pgstrom_data_store *pds)
            gss->kparams,
            gss->kparams->length);
 	/* setting up kern_resultbuf */
-	kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
+	kresults = gpuscan->kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
     memset(kresults, 0, sizeof(kern_resultbuf));
     kresults->nrels = 1;
     kresults->nrooms = nitems;
@@ -722,7 +725,7 @@ pgstrom_create_gpuscan(GpuScanState *gss, pgstrom_data_store *pds)
 }
 
 static GpuTask *
-pgstrom_load_gpuscan(GpuTaskState *gts)
+gpuscan_next_chunk(GpuTaskState *gts)
 {
 	pgstrom_gpuscan	   *gpuscan = NULL;
 	GpuScanState	   *gss = (GpuScanState *) gts;
@@ -779,29 +782,27 @@ pgstrom_load_gpuscan(GpuTaskState *gts)
 }
 
 static TupleTableSlot *
-gpuscan_next_tuple(GpuScanState *gss)
+gpuscan_next_tuple(GpuTaskState *gts)
 {
-	pgstrom_gpuscan	   *gpuscan = gss->curr_chunk;
-	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
+	GpuScanState	   *gss = (GpuScanState *) gts;
+	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) gts->curr_task;
+	pgstrom_data_store *pds = gpuscan->pds;
+	kern_resultbuf	   *kresults = gpuscan->kresults;
 	TupleTableSlot	   *slot = NULL;
 	cl_int				i_result;
 	bool				do_recheck = false;
 	struct timeval		tv1, tv2;
 
-	if (!gpuscan)
-		return false;
+	Assert(kresults == KERN_GPUSCAN_RESULTBUF(&gpuscan->kern));
 
 	PERFMON_BEGIN(&gss->gts.pfm_accum, &tv1);
-
-   	while (gss->curr_index < kresults->nitems)
+	while (gss->gts.curr_index < kresults->nitems)
 	{
-		pgstrom_data_store *pds = gpuscan->pds;
-
 		if (kresults->all_visible)
-			i_result = ++gss->curr_index;
+			i_result = ++gss->gts.curr_index;
 		else
 		{
-			i_result = kresults->results[gss->curr_index++];
+			i_result = kresults->results[gss->gts.curr_index++];
 			if (i_result < 0)
 			{
 				i_result = -i_result;
@@ -837,50 +838,11 @@ gpuscan_next_tuple(GpuScanState *gss)
 }
 
 static TupleTableSlot *
-gpuscan_fetch_tuple(CustomScanState *node)
-{
-	GpuScanState   *gss = (GpuScanState *) node;
-	TupleTableSlot *slot = gss->gts.css.ss.ss_ScanTupleSlot;
-
-	ExecClearTuple(slot);
-
-	while (!gss->curr_chunk || !(slot = gpuscan_next_tuple(gss)))
-	{
-		pgstrom_gpuscan	   *gpuscan = gss->curr_chunk;
-
-		/* Release the current gpuscan chunk which is already scanned */
-		if (gpuscan)
-		{
-			SpinLockAcquire(&gss->gts.lock);
-			dlist_delete(&gpuscan->task.tracker);
-			SpinLockRelease(&gss->gts.lock);
-			pgstrom_release_gpuscan(&gpuscan->task);
-			gss->curr_chunk = NULL;
-			gss->curr_index = 0;
-		}
-		/* Fetch next chunk to be scanned */
-		gpuscan = (pgstrom_gpuscan *) pgstrom_fetch_gputask(&gss->gts);
-		if (!gpuscan)
-			break;
-		gss->curr_chunk = gpuscan;
-		gss->curr_index = 0;
-	}
-	return slot;
-}
-
-static bool
-gpuscan_recheck(CustomScanState *node, TupleTableSlot *slot)
-{
-	/* There are no access-method-specific conditions to recheck. */
-	return true;
-}
-
-static TupleTableSlot *
 gpuscan_exec(CustomScanState *node)
 {
 	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) gpuscan_fetch_tuple,
-					(ExecScanRecheckMtd) gpuscan_recheck);
+					(ExecScanAccessMtd) pgstrom_exec_gputask,
+					(ExecScanRecheckMtd) pgstrom_recheck_gputask);
 }
 
 static void *
@@ -938,7 +900,6 @@ gpuscan_rescan(CustomScanState *node)
 
 	/* OK, rewind the position to read */
 	gss->curr_blknum = 0;
-	gss->curr_index = 0;
 }
 
 static void

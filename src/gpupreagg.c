@@ -42,9 +42,9 @@
 #include "utils/syscache.h"
 #include <math.h>
 #include "pg_strom.h"
-#include "opencl_common.h"
-#include "opencl_numeric.h"
-#include "opencl_gpupreagg.h"
+#include "cuda_common.h"
+#include "cuda_numeric.h"
+#include "cuda_gpupreagg.h"
 
 static CustomScanMethods		gpupreagg_scan_methods;
 static CustomExecMethods		gpupreagg_exec_methods;
@@ -200,7 +200,7 @@ typedef struct
 
 //	pgstrom_gpupreagg  *curr_chunk;
 //	cl_uint			curr_index;
-	bool			curr_recheck;
+//	bool			curr_recheck;
 	cl_uint			num_rechecks;
 //	cl_uint			num_running;
 //	dlist_head		ready_chunks;
@@ -215,6 +215,7 @@ typedef struct
 typedef struct
 {
 	GpuTask			task;
+	bool			needs_fallback;	/* true, if StromError_CpuReCheck */
 	bool			needs_grouping;	/* true, if it takes GROUP BY clause */
 	bool			local_reduction;/* true, if it needs local reduction */
 	bool			has_varlena;	/* true, if it has varlena grouping keys */
@@ -243,15 +244,17 @@ typedef struct
 	CUevent			ev_dma_recv_stop;
 	pgstrom_data_store *pds_in;		/* source data-store */
 	pgstrom_data_store *pds_dst;	/* result data-store */
+	kern_resultbuf *kresults;
 	kern_gpupreagg	kern;
 } pgstrom_gpupreagg;
 
 /* declaration of static functions */
-static bool		pgstrom_process_gpupreagg(GpuTask *gtask);
-static bool		pgstrom_complete_gpupreagg(GpuTask *gtask);
-static void		pgstrom_fallback_gpupreagg(GpuTask *gtask);
-static void		pgstrom_release_gpupreagg(GpuTask *gtask);
-static GpuTask *pgstrom_load_gpupreagg(GpuTask *gtask);
+static bool		gpupreagg_task_process(GpuTask *gtask);
+static bool		gpupreagg_task_complete(GpuTask *gtask);
+static void		gpupreagg_task_fallback(GpuTask *gtask);
+static void		gpupreagg_task_release(GpuTask *gtask);
+static GpuTask *gpupreagg_next_chunk(GpuTaskState *gts);
+static TupleTableSlot *gpupreagg_next_tuple(GpuTaskState *gts);
 
 /*
  * Arguments of alternative functions.
@@ -2895,11 +2898,12 @@ gpupreagg_create_scan_state(CustomScan *cscan)
 	gpas->gts.css.methods = &gpupreagg_exec_methods;
 	/* GpuTaskState setup */
 	pgstrom_init_gputaskstate(gcontext, &ghjs->gts);
-	gpas->gts.cb_task_process = pgstrom_process_gpupreagg;
-	gpas->gts.cb_task_complete = pgstrom_complete_gpupreagg;
-	gpas->gts.cb_task_fallback = pgstrom_fallback_gpupreagg;
-	gpas->gts.cb_task_release = pgstrom_release_gpupreagg;
-	gpas->gts.cb_load_next = pgstrom_load_gpupreagg;
+	gpas->gts.cb_task_process = gpupreagg_task_process;
+	gpas->gts.cb_task_complete = gpupreagg_task_complete;
+	gpas->gts.cb_task_fallback = gpupreagg_task_fallback;
+	gpas->gts.cb_task_release = gpupreagg_task_release;
+	gpas->gts.cb_next_chunk = gpupreagg_next_chunk;
+	gpas->gts.cb_next_tuple = gpupreagg_next_tuple;
 	gpas->gts.cb_cleanup = NULL;
 
 	return (Node *) gpas;
@@ -2983,177 +2987,79 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	gpas->num_rechecks = 0;
 }
 
-static void
-gpupreagg_cleanup_cuda_resources(pgstrom_gpupreagg *gpreagg)
-{
-	if (gpreagg->m_gpreagg)
-		gpuMemFree(&gpreagg->task, gpreagg->m_gpreagg);
-	if (gpreagg->m_kds_in)
-		gpuMemFree(&gpreagg->task, gpreagg->m_kds_in);
-	if (gpreagg->m_kds_src)
-		gpuMemFree(&gpreagg->task, gpreagg->m_kds_src);
-	if (gpreagg->m_kds_dst)
-		gpuMemFree(&gpreagg->task, gpreagg->m_kds_dst);
-
-	CUDA_EVENT_DESTROY(gpreagg, ev_dma_send_start);
-	CUDA_EVENT_DESTROY(gpreagg, ev_dma_send_stop);
-	CUDA_EVENT_DESTROY(gpreagg, ev_kern_prep_end);
-	CUDA_EVENT_DESTROY(gpreagg, ev_kern_lagg_end);
-	CUDA_EVENT_DESTROY(gpreagg, ev_kern_gagg_end);
-	CUDA_EVENT_DESTROY(gpreagg, ev_dma_recv_start);
-	CUDA_EVENT_DESTROY(gpreagg, ev_dma_recv_stop);
-
-	/* clear the pointers */
-	gpreagg->kern_prep = NULL;
-	memset(gpreagg->kern_prep_args, 0, sizeof(gpreagg->kern_prep_args));
-	gpreagg->kern_lagg = NULL;
-	memset(gpreagg->kern_lagg_args, 0, sizeof(gpreagg->kern_lagg_args));
-	gpreagg->kern_gagg = NULL;
-	memset(gpreagg->kern_gagg_args, 0, sizeof(gpreagg->kern_gagg_args));
-	gpreagg->kern_nogrp = NULL;
-	memset(gpreagg->kern_nogrp_args, 0, sizeof(gpreagg->kern_nogrp_args));
-	gpreagg->kern_fixvar = NULL;
-	memset(gpreagg->kern_fixvar_args, 0, sizeof(gpreagg->kern_fixvar_args));
-	gpreagg->m_gpreagg = 0UL;
-	gpreagg->m_kds_in = 0UL;
-	gpreagg->m_kds_src = 0UL;
-	gpreagg->m_kds_dst = 0UL;
-	gpreagg->m_ghash = 0UL;
-	gpreagg->ev_dma_send_start = NULL;
-	gpreagg->ev_dma_send_stop = NULL;
-	gpreagg->ev_kern_prep_end = NULL;
-	gpreagg->ev_kern_lagg_end = NULL;
-	gpreagg->ev_kern_gagg_end = NULL;
-	gpreagg->ev_dma_recv_start = NULL;
-	gpreagg->ev_dma_recv_stop = NULL;
-}
-
-static void
-pgstrom_release_gpupreagg(GpuTask *gtask)
-{
-	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) gpreagg;
-
-	/* cleanup cuda resources, if any */
-	gpupreagg_cleanup_cuda_resources(gpreagg);
-
-	if (gpreagg->pds_in)
-		pgstrom_release_data_store(gpreagg->pds_in);
-	if (gpreagg->pds_dst)
-		pgstrom_release_data_store(gpreagg->pds_dst);
-	pfree(gpreagg);
-}
-
 static pgstrom_gpupreagg *
-pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
+gpupreagg_task_create(GpuPreAggState *gpas, pgstrom_data_store *pds_in)
 {
-	pgstrom_gpupreagg  *gpupreagg;
+	GpuContext		   *gcontext = gpas->gtx.gcontext;
+	pgstrom_gpupreagg  *gpreagg;
 	kern_parambuf	   *kparams;
 	kern_row_map	   *krowmap;
-	pgstrom_data_store *pds = bulk->pds;
 	kern_data_store	   *kds = pds->kds;
-	pgstrom_data_store *pds_dest;
+	pgstrom_data_store *pds_dst;
 	TupleDesc			tupdesc;
-	cl_int				nvalids = bulk->nvalids;
-	cl_uint				nitems = kds->nitems;
+	size_t				nitems = kds->nitems;
 	Size				required;
 
-	/*
-	 * Allocation of pgtrom_gpupreagg message object
-	 *
-	 * NOTE: kern_row_map is also used to buffer of kds_index.
-	 * So, even if we have no input row-map, at least nitems's
-	 * slot needed to be allocated.
-	 */
-	required = STROMALIGN(offsetof(pgstrom_gpupreagg,
-								   kern.kparams) +
-						  gpas->kparams->length);
-	if (nvalids < 0)
-		required += STROMALIGN(offsetof(kern_row_map, rindex[nitems]));
-	else
-		required += STROMALIGN(offsetof(kern_row_map, rindex[nvalids]));
-	gpupreagg = pgstrom_shmem_alloc(required);
-	if (!gpupreagg)
-		elog(ERROR, "out of shared memory");
+	/* allocation of pgtrom_gpupreagg */
+	required = (STROMALIGN(offsetof(pgstrom_gpupreagg, kern.kparams) +
+						   gpas->kparams->length) +
+				STROMALIGN(offsetof(kern_resultbuf, result[nitems])));
+	gpreagg = MemoryContextAllocZero(gcontext->memcxt, required);
 
-	/* initialize the common message field */
-	memset(gpupreagg, 0, required);
-	gpupreagg->msg.sobj.stag = StromTag_GpuPreAgg;
-	SpinLockInit(&gpupreagg->msg.lock);
-	gpupreagg->msg.refcnt = 1;
-    gpupreagg->msg.respq = pgstrom_get_queue(gpas->mqueue);
-    gpupreagg->msg.cb_process = clserv_process_gpupreagg;
-    gpupreagg->msg.cb_release = pgstrom_release_gpupreagg;
-    gpupreagg->msg.pfm.enabled = gpas->pfm.enabled;
-	/* other fields also */
-	gpupreagg->dprog_key = pgstrom_retain_devprog_key(gpas->dprog_key);
-	gpupreagg->needs_grouping = gpas->needs_grouping;
-	gpupreagg->local_reduction = gpas->local_reduction;
-	gpupreagg->has_varlena = gpas->has_varlena;
-	gpupreagg->num_groups = gpas->num_groups;
-	gpupreagg->pds = pds;
-	/*
-	 * Once a row/column data-store connected to the pgstrom_gpupreagg
-	 * structure, it becomes pgstrom_release_gpupreagg()'s role to
-	 * unlink this data-store. So, we don't need to track individual
-	 * data-store no longer.
-	 */
-	pgstrom_untrack_object(&pds->sobj);
-	pgstrom_track_object(&gpupreagg->msg.sobj, 0);
+	/* initialize GpuTask object */
+	pgstrom_init_gputask(&gpas->gts, &gpreagg->task);
+	gpreagg->needs_fallback = false;
+	gpreagg->needs_grouping = gpas->needs_grouping;
+	gpreagg->local_reduction = gpas->local_reduction;
+	gpreagg->has_varlena = gpas->has_varlena;
+	gpreagg->num_groups = gpas->num_groups;
+	gpreagg->pds_in = pds_in;
+	gpreagg->pds_dst = pds_dst;
 
-	/*
-	 * Also initialize kern_gpupreagg portion
-	 */
-	gpupreagg->kern.status = StromError_Success;
-	gpupreagg->kern.hash_size = (nvalids < 0 ? nitems : nvalids);
-	memcpy(gpupreagg->kern.pg_crc32_table,
+	/* also initialize kern_gpupreagg portion */
+	gpreagg->kern.hash_size = nitems;
+	memcpy(gpreagg->kern.pg_crc32_table,
 		   pg_crc32c_table,
 		   sizeof(uint32) * 256);
 	/* kern_parambuf */
-	kparams = KERN_GPUPREAGG_PARAMBUF(&gpupreagg->kern);
+	kparams = KERN_GPUPREAGG_PARAMBUF(&gpreagg->kern);
 	memcpy(kparams, gpas->kparams, gpas->kparams->length);
-	/* kern_row_map */
-	krowmap = KERN_GPUPREAGG_KROWMAP(&gpupreagg->kern);
-	if (nvalids < 0)
-		krowmap->nvalids = -1;
-	else
-	{
-		krowmap->nvalids = nvalids;
-		memcpy(krowmap->rindex, bulk->rindex, sizeof(cl_uint) * nvalids);
-	}
+	/* kern_resultbuf */
+	kresults = gpreagg->kresults = KERN_GPUPREAGG_RESULTBUF(&gpreagg->kern);
+	kresults->nrels = 1;
+	kresults->nrooms = nitems;
+	kresults->nitems = 0;
+	kresults->errcode = StromError_Success;
+	kresults->has_rechecks = false;
+	kresults->all_visible = true;
 
-	/*
-	 * Allocation of the result data-store
-	 */
-	tupdesc = gpas->css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
-	pds_dest = pgstrom_create_data_store_tupslot(tupdesc,
-												 (nvalids < 0
-												  ? nitems
-												  : nvalids),
-												 gpas->has_numeric);
-	if (!pds_dest)
-		elog(ERROR, "out of shared memory");
-	gpupreagg->pds_dest = pds_dest;
+	/* allocation of result buffer */
+	tupdesc = gpas->gts.css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
+	pds_dst = pgstrom_create_data_store_slot(gcontext,
+											 tupdesc,
+											 nitems,
+											 gpas->has_numeric,
+											 pds_in);
+	gpreagg->pds_dst = pds_dst;
 
-	return gpupreagg;
+	return gpreagg;
 }
 
-static pgstrom_gpupreagg *
-gpupreagg_load_next_outer(GpuPreAggState *gpas)
+static GpuTask *
+gpupreagg_next_chunk(GpuTaskState *gts)
 {
+	GpuContext		   *gcontext = gts->gcontext;
+	GpuPreAggState	   *gpas = (GpuPreAggState *) gts;
 	PlanState		   *subnode = outerPlanState(gpas);
-	pgstrom_gpupreagg  *gpupreagg = NULL;
 	pgstrom_data_store *pds = NULL;
-	pgstrom_bulkslot	bulkdata;
-	pgstrom_bulkslot   *bulk = NULL;
 	struct timeval		tv1, tv2;
 
-	if (gpas->outer_done)
+	if (gpas->gts.scan_done)
 		return NULL;
 
-	if (gpas->pfm.enabled)
-		gettimeofday(&tv1, NULL);
+	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
 
-	if (!gpas->outer_bulkload)
+	if (!gpas->gts.scan_bulk)
 	{
 		/* Scan the outer relation using row-by-row mode */
 		TupleDesc		tupdesc
@@ -3173,54 +3079,37 @@ gpupreagg_load_next_outer(GpuPreAggState *gpas)
 				slot = ExecProcNode(subnode);
 				if (TupIsNull(slot))
 				{
-					gpas->outer_done = true;
+					gpas->gts.scan_done = true;
 					break;
 				}
 			}
 
 			if (!pds)
-			{
-				pds = pgstrom_create_data_store_row_flat(tupdesc,
-														 pgstrom_chunk_size());
-				pgstrom_track_object(&pds->sobj, 0);
-			}
-			/* insert tuple to the data-store */
+				pds = pgstrom_create_data_store_row(gcontext,
+													tupdesc,
+													pgstrom_chunk_size(),
+													false);
+			/* insert a tuple to the data-store */
 			if (!pgstrom_data_store_insert_tuple(pds, slot))
 			{
 				gpas->outer_overflow = slot;
 				break;
 			}
 		}
-
-		if (pds)
-		{
-			memset(&bulkdata, 0, sizeof(pgstrom_bulkslot));
-			bulkdata.pds = pds;
-			bulkdata.nvalids = -1;	/* all valid */
-			bulk = &bulkdata;
-		}
 	}
 	else
 	{
 		/* Load a bunch of records at once */
-		bulk = (pgstrom_bulkslot *) BulkExecProcNode(subnode);
-        if (!bulk)
-			gpas->outer_done = true;
+		pds = BulkExecProcNode(subnode);
+		if (!pds)
+			gpas->gts.scan_done = true;
 	}
-	if (gpas->pfm.enabled)
-	{
-		gettimeofday(&tv2, NULL);
-		gpas->pfm.time_outer_load += timeval_diff(&tv1, &tv2);
-	}
-	if (bulk)
-	{
-		/* Older style no longer supported */
-		if (bulk->nvalids >= 0)
-			elog(ERROR, "Bulk-load with rowmap no longer supported");
-		gpupreagg = pgstrom_create_gpupreagg(gpas, bulk);
-	}
+	PERFMON_END(&gts->pfm_accum, time_outer_load, &tv1, &tv2);
 
-	return gpupreagg;
+	if (!pds)
+		return NULL;	/* no more tuples to read */
+
+	return (GpuTask *) gpupreagg_task_create(gpas, pds);
 }
 
 /*
@@ -3320,26 +3209,27 @@ retry:
 }
 
 static TupleTableSlot *
-gpupreagg_next_tuple(GpuPreAggState *gpas)
+gpupreagg_next_tuple(GpuTaskState *gts)
 {
-	pgstrom_gpupreagg  *gpreagg = gpas->curr_chunk;
-	kern_row_map       *krowmap = KERN_GPUPREAGG_KROWMAP(&gpreagg->kern);
-	pgstrom_data_store *pds_dest = gpreagg->pds_dest;
+	GpuPreAggState	   *gpas = (GpuPreAggState *) gts;
+	pgstrom_gpupreagg  *gpreagg = gpas->gts.curr_chunk;
+	kern_resultbuf	   *kresults = gpreagg->kresults;
+	pgstrom_data_store *pds_dst = gpreagg->pds_dst;
 	TupleTableSlot	   *slot = NULL;
 	HeapTupleData		tuple;
 	struct timeval		tv1, tv2;
 
-	if (gpas->pfm.enabled)
-		gettimeofday(&tv1, NULL);
+	Assert(kresults == KERN_GPUPREAGG_KRESULTS(&gpreagg->kern));
 
-	if (gpas->curr_recheck)
+	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
+	if (gpreagg->needs_fallback)
 		slot = gpupreagg_next_tuple_fallback(gpas);
-	else if (gpas->curr_index < krowmap->nvalids)
+	else if (gpas->gts.curr_index < kresults->nitems)
 	{
-		size_t		row_index = krowmap->rindex[gpas->curr_index++];
+		size_t		index = kresults->result[gpas->gts.curr_index++];
 
-		slot = gpas->css.ss.ps.ps_ResultTupleSlot;
-		if (!pgstrom_fetch_data_store(slot, pds_dest, row_index, &tuple))
+		slot = gts->css.ss.ps.ps_ResultTupleSlot;
+		if (!pgstrom_fetch_data_store(slot, pds_dst, index, &tuple))
 		{
 			elog(NOTICE, "Bug? empty slot was specified by kern_row_map");
 			slot = NULL;
@@ -3370,124 +3260,17 @@ gpupreagg_next_tuple(GpuPreAggState *gpas)
 			Assert(!slot->tts_tuple);
 		}
 	}
+	PERFMON_END(&gts->pfm_accum, time_materialize, &tv1, &tv2);
 
-	if (gpas->pfm.enabled)
-	{
-		gettimeofday(&tv2, NULL);
-		gpas->pfm.time_materialize += timeval_diff(&tv1, &tv2);
-	}
 	return slot;
 }
 
 static TupleTableSlot *
 gpupreagg_exec(CustomScanState *node)
 {
-	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
-	TupleTableSlot	   *slot = NULL;
-	pgstrom_gpupreagg  *gpreagg;
-
-	while (!gpas->curr_chunk || !(slot = gpupreagg_next_tuple(gpas)))
-	{
-		pgstrom_message	   *msg;
-		dlist_node		   *dnode;
-
-		/* release current gpupreagg chunk being already fetched */
-		if (gpas->curr_chunk)
-		{
-			msg = &gpas->curr_chunk->msg;
-			if (msg->pfm.enabled)
-				pgstrom_perfmon_add(&gpas->pfm, &msg->pfm);
-			Assert(msg->refcnt == 1);
-			pgstrom_untrack_object(&msg->sobj);
-			pgstrom_put_message(msg);
-			gpas->curr_chunk = NULL;
-			gpas->curr_index = 0;
-			gpas->curr_recheck = false;
-		}
-
-		/*
-		 * Keep number of asynchronous partial aggregate request a particular
-		 * level unless it does not exceed pgstrom_max_async_chunks and any
-		 * new response is not replied during the loading.
-		 */
-		while (!gpas->outer_done &&
-			   gpas->num_running <= pgstrom_max_async_chunks)
-		{
-			gpreagg = gpupreagg_load_next_outer(gpas);
-			if (!gpreagg)
-				break;	/* outer scan reached to end of the relation */
-
-			if (!pgstrom_enqueue_message(&gpreagg->msg))
-			{
-				pgstrom_put_message(&gpreagg->msg);
-				elog(ERROR, "failed to enqueue pgstrom_gpuhashjoin message");
-			}
-            gpas->num_running++;
-
-			msg = pgstrom_try_dequeue_message(gpas->mqueue);
-			if (msg)
-			{
-				gpas->num_running--;
-				dlist_push_tail(&gpas->ready_chunks, &msg->chain);
-				break;
-			}
-		}
-
-		/*
-		 * wait for server's response if no available chunks were replied
-		 */
-		if (dlist_is_empty(&gpas->ready_chunks))
-		{
-			/* OK, no more request should be fetched */
-			if (gpas->num_running == 0)
-				break;
-			msg = pgstrom_dequeue_message(gpas->mqueue);
-			if (!msg)
-				elog(ERROR, "message queue wait timeout");
-			gpas->num_running--;
-			dlist_push_tail(&gpas->ready_chunks, &msg->chain);
-		}
-
-		/*
-		 * picks up next available chunks, if any
-		 */
-		Assert(!dlist_is_empty(&gpas->ready_chunks));
-		dnode = dlist_pop_head_node(&gpas->ready_chunks);
-		gpreagg = dlist_container(pgstrom_gpupreagg, msg.chain, dnode);
-
-		/*
-		 * Raise an error, if significan error was reported
-		 */
-		if (gpreagg->msg.errcode == StromError_Success)
-			gpas->curr_recheck = false;
-		else if (gpreagg->msg.errcode == StromError_CpuReCheck)
-		{
-			gpas->curr_recheck = true;	/* fallback by CPU */
-			gpas->num_rechecks++;
-		}
-		else if (gpreagg->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
-		{
-			const char *buildlog
-				= pgstrom_get_devprog_errmsg(gpas->dprog_key);
-
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
-							pgstrom_strerror(gpreagg->msg.errcode),
-							gpas->kern_source),
-					 errdetail("%s", buildlog)));
-		}
-		else
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("PG-Strom: OpenCL execution error (%s)",
-							pgstrom_strerror(gpreagg->msg.errcode))));
-		}
-		gpas->curr_chunk = gpreagg;
-		gpas->curr_index = 0;
-	}
-	return slot;
+	return ExecScan(&node->ss,
+					(ExecScanAccessMtd) pgstrom_exec_gputask,
+					(ExecScanRecheckMtd) pgstrom_recheck_gputask);
 }
 
 static void
@@ -3594,6 +3377,108 @@ gpupreagg_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	if (es->analyze && gpas->pfm.enabled)
 		pgstrom_perfmon_explain(&gpas->pfm, es);
 }
+
+/*
+ * gpupreagg_cleanup_cuda_resources
+ *
+ * handler to release all the cuda resource, but gpreagg is still retained
+ */
+static void
+gpupreagg_cleanup_cuda_resources(pgstrom_gpupreagg *gpreagg)
+{
+	if (gpreagg->m_gpreagg)
+		gpuMemFree(&gpreagg->task, gpreagg->m_gpreagg);
+	if (gpreagg->m_kds_in)
+		gpuMemFree(&gpreagg->task, gpreagg->m_kds_in);
+	if (gpreagg->m_kds_src)
+		gpuMemFree(&gpreagg->task, gpreagg->m_kds_src);
+	if (gpreagg->m_kds_dst)
+		gpuMemFree(&gpreagg->task, gpreagg->m_kds_dst);
+
+	CUDA_EVENT_DESTROY(gpreagg, ev_dma_send_start);
+	CUDA_EVENT_DESTROY(gpreagg, ev_dma_send_stop);
+	CUDA_EVENT_DESTROY(gpreagg, ev_kern_prep_end);
+	CUDA_EVENT_DESTROY(gpreagg, ev_kern_lagg_end);
+	CUDA_EVENT_DESTROY(gpreagg, ev_kern_gagg_end);
+	CUDA_EVENT_DESTROY(gpreagg, ev_dma_recv_start);
+	CUDA_EVENT_DESTROY(gpreagg, ev_dma_recv_stop);
+
+	/* clear the pointers */
+	gpreagg->kern_prep = NULL;
+	memset(gpreagg->kern_prep_args, 0, sizeof(gpreagg->kern_prep_args));
+	gpreagg->kern_lagg = NULL;
+	memset(gpreagg->kern_lagg_args, 0, sizeof(gpreagg->kern_lagg_args));
+	gpreagg->kern_gagg = NULL;
+	memset(gpreagg->kern_gagg_args, 0, sizeof(gpreagg->kern_gagg_args));
+	gpreagg->kern_nogrp = NULL;
+	memset(gpreagg->kern_nogrp_args, 0, sizeof(gpreagg->kern_nogrp_args));
+	gpreagg->kern_fixvar = NULL;
+	memset(gpreagg->kern_fixvar_args, 0, sizeof(gpreagg->kern_fixvar_args));
+	gpreagg->m_gpreagg = 0UL;
+	gpreagg->m_kds_in = 0UL;
+	gpreagg->m_kds_src = 0UL;
+	gpreagg->m_kds_dst = 0UL;
+	gpreagg->m_ghash = 0UL;
+}
+
+static void
+gpupreagg_task_release(GpuTask *gtask)
+{
+	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) gpreagg;
+
+	/* cleanup cuda resources, if any */
+	gpupreagg_cleanup_cuda_resources(gpreagg);
+
+	if (gpreagg->pds_in)
+		pgstrom_release_data_store(gpreagg->pds_in);
+	if (gpreagg->pds_dst)
+		pgstrom_release_data_store(gpreagg->pds_dst);
+	pfree(gpreagg);
+}
+
+/*
+ *
+ */
+static void
+gpupreagg_task_fallback(GpuTask *gtask)
+{
+	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) gtask;
+
+	gpreagg->needs_fallback = true;
+}
+
+/*
+ * gpupreagg_task_complete
+ */
+static bool
+gpupreagg_task_complete(GpuTask *gtask)
+{}
+
+/*
+ * gpupreagg_task_process
+ */
+static bool
+gpupreagg_task_process(GpuTask *gtask)
+{}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /*
  * entrypoint of GpuPreAgg
