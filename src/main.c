@@ -453,9 +453,11 @@ pgstrom_accum_perfmon(pgstrom_perfmon *accum, const pgstrom_perfmon *pfm)
 	accum->num_kern_prep		+= pfm->num_kern_prep;
 	accum->num_kern_lagg		+= pfm->num_kern_lagg;
 	accum->num_kern_gagg		+= pfm->num_kern_gagg;
+	accum->num_kern_nogrp		+= pfm->num_kern_nogrp;
 	accum->time_kern_prep		+= pfm->time_kern_prep;
 	accum->time_kern_lagg		+= pfm->time_kern_lagg;
 	accum->time_kern_gagg		+= pfm->time_kern_gagg;
+	accum->time_kern_nogrp		+= pfm->time_kern_nogrp;
 	/* in case of gpusort */
 	accum->num_prep_sort		+= pfm->num_prep_sort;
 	accum->num_gpu_sort			+= pfm->num_gpu_sort;
@@ -622,8 +624,28 @@ pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 				 milliseconds_unitary_format((double)pfm->time_kern_lagg),
 				 milliseconds_unitary_format((double)pfm->time_kern_lagg /
 											 (double)pfm->num_kern_lagg),
-				 pfm->num_kern_gagg);
+				 pfm->num_kern_lagg);
         ExplainPropertyText("Local reduction kernel", buf, es);
+	}
+
+	if (pfm->num_kern_gagg > 0)
+	{
+		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
+				 milliseconds_unitary_format((double)pfm->time_kern_gagg),
+				 milliseconds_unitary_format((double)pfm->time_kern_gagg /
+											 (double)pfm->num_kern_gagg),
+				 pfm->num_kern_gagg);
+        ExplainPropertyText("Global reduction kernel", buf, es);
+	}
+
+	if (pfm->num_kern_nogrp > 0)
+	{
+		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
+				 milliseconds_unitary_format((double)pfm->time_kern_nogrp),
+				 milliseconds_unitary_format((double)pfm->time_kern_nogrp /
+											 (double)pfm->num_kern_nogrp),
+				 pfm->num_kern_nogrp);
+        ExplainPropertyText("NoGroup reduction kernel", buf, es);
 	}
 
 	/* in case of gpusort */

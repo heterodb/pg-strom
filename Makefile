@@ -5,7 +5,7 @@ DATA = src/pg_strom--1.0.sql
 # Source file of CPU portion
 STROM_OBJS = main.o codegen.o grafter.o datastore.o aggfuncs.o \
 		cuda_control.o cuda_program.o cuda_mmgr.o \
-		gpuscan.o gpuhashjoin.o gpupreagg.o \ gpusort.o
+		gpuscan.o gpuhashjoin.o gpupreagg.o # gpusort.o
 
 # Source file of GPU portion
 CUDA_OBJS = cuda_common.o \

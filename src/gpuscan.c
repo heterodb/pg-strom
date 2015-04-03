@@ -610,7 +610,7 @@ gpuscan_create_scan_state(CustomScan *cscan)
 	NodeSetTag(gss, T_CustomScanState);
 	gss->gts.css.methods = &gpuscan_exec_methods.c;
 	/* GpuTaskState setup */
-	pgstrom_init_gputaststate(gcontext, &gss->gts);
+	pgstrom_init_gputaskstate(gcontext, &gss->gts);
 	gss->gts.cb_task_process = pgstrom_process_gpuscan;
 	gss->gts.cb_task_complete = pgstrom_complete_gpuscan;
 	gss->gts.cb_task_fallback = NULL;	/* to be implemented later */

@@ -2213,7 +2213,7 @@ gpuhashjoin_create_scan_state(CustomScan *cscan)
 	ghjs->gts.css.flags = cscan->flags;
 	ghjs->gts.css.methods = &gpuhashjoin_exec_methods.c;
 	/* GpuTaskState setup */
-	pgstrom_init_gputaststate(gcontext, &ghjs->gts);
+	pgstrom_init_gputaskstate(gcontext, &ghjs->gts);
 	ghjs->gts.cb_task_process = pgstrom_process_gpuhashjoin;
 	ghjs->gts.cb_task_complete = pgstrom_complete_gpuhashjoin;
 	ghjs->gts.cb_task_fallback = pgstrom_fallback_gpuhashjoin;
