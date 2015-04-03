@@ -752,6 +752,8 @@ extern int	pgstrom_min_async_chunks;
 extern double pgstrom_gpu_setup_cost;
 extern double pgstrom_gpu_operator_cost;
 extern double pgstrom_gpu_tuple_cost;
+extern double pgstrom_row_population_max;
+extern double pgstrom_row_population_margin;
 extern void _PG_init(void);
 extern const char *pgstrom_strerror(cl_int errcode);
 extern void show_scan_qual(List *qual, const char *qlabel,
