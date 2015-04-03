@@ -47,6 +47,10 @@ double	pgstrom_gpu_setup_cost;
 double	pgstrom_gpu_operator_cost;
 double	pgstrom_gpu_tuple_cost;
 
+/* buffer usage */
+double	pgstrom_row_population_max;
+double	pgstrom_row_population_margin;
+
 /*
  * global_guc_values - segment for global GUC variables
  *
@@ -195,6 +199,28 @@ pgstrom_init_misc_guc(void)
                              PGC_USERSET,
                              GUC_NOT_IN_SAMPLE,
                              NULL, NULL, NULL);
+
+	DefineCustomRealVariable("pg_strom.row_population_max",
+							 "hard limit of row population ratio",
+							 NULL,
+							 &pgstrom_row_population_max,
+							 12.0,
+							 0,
+							 DBL_MAX,
+                             PGC_USERSET,
+                             GUC_NOT_IN_SAMPLE,
+                             NULL, NULL, NULL);
+
+	DefineCustomRealVariable("pg_strom.row_population_margin",
+							 "safety margin if row will populate",
+							 NULL,
+							 &pgstrom_row_population_margin,
+							 0.25,
+							 0.0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 }
 
 /*

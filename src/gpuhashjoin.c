@@ -673,17 +673,17 @@ initial_cost_gpuhashjoin(PlannerInfo *root,
 	 */
 	hashjointuples = gpath->cpath.path.parent->rows;
 	row_population_ratio = Max(1.0, hashjointuples / gpath->outer_path->rows);
-	if (row_population_ratio > 10.0)
+	if (row_population_ratio > pgstrom_row_population_max)
 	{
 		elog(DEBUG1, "row population ratio (%.2f) too large, give up",
 			 row_population_ratio);
 		return false;
 	}
-	else if (row_population_ratio > 5.0)
+	else if (row_population_ratio > pgstrom_row_population_max / 2.0)
 	{
-		elog(NOTICE, "row population ratio (%.2f) too large, rounded to 5.0",
-			 row_population_ratio);
-		row_population_ratio = 5.0;
+		elog(NOTICE, "row population ratio (%.2f) too large, rounded to %.2f",
+			 row_population_ratio, pgstrom_row_population_max / 2.0);
+		row_population_ratio = pgstrom_row_population_max / 2.0;
 	}
 	gpath->row_population_ratio = row_population_ratio;
 
@@ -2440,9 +2440,10 @@ pgstrom_create_gpuhashjoin(GpuHashJoinState *ghjs,
 
 	kparams = KERN_HASHJOIN_PARAMBUF(khashjoin);
 	memcpy(kparams, ghjs->kparams, ghjs->kparams->length);
-
 	kresults = KERN_HASHJOIN_RESULTBUF(khashjoin);
-	nrooms = (cl_uint)((double)kds->nitems * ghjs->row_population_ratio * 1.1);
+	nrooms = (cl_uint)((double)kds->nitems *
+					   (ghjs->row_population_ratio *
+						(1.0 + pgstrom_row_population_margin)));
 	memset(kresults, 0, sizeof(kern_resultbuf));
 	kresults->nrels = gpuhashjoin->mhtables->kern.ntables + 1;
 	kresults->nrooms = nrooms;
