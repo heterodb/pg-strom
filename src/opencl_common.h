@@ -754,6 +754,9 @@ typedef struct varlena {
 #define VARSIZE(PTR)		VARSIZE_4B(PTR)
 #define VARSIZE_EXHDR(PTR)	(VARSIZE(PTR) - VARHDRSZ)
 
+#define VARSIZE_SHORT(PTR)	VARSIZE_1B(PTR)
+#define VARDATA_SHORT(PTR)	VARDATA_1B(PTR)
+
 typedef union
 {
 	struct						/* Normal varlena (4-byte length) */
@@ -827,6 +830,12 @@ typedef struct varatt_indirect
 	((((__global varattrib_1b *) (PTR))->va_header) == 0x01)
 #define VARATT_IS_COMPRESSED(PTR)		VARATT_IS_4B_C(PTR)
 #define VARATT_IS_EXTERNAL(PTR)			VARATT_IS_1B_E(PTR)
+#define VARATT_IS_EXTERNAL_ONDISK(PTR) \
+	(VARATT_IS_EXTERNAL(PTR) && VARTAG_EXTERNAL(PTR) == VARTAG_ONDISK)
+#define VARATT_IS_EXTERNAL_INDIRECT(PTR) \
+	(VARATT_IS_EXTERNAL(PTR) && VARTAG_EXTERNAL(PTR) == VARTAG_INDIRECT)
+#define VARATT_IS_SHORT(PTR)				VARATT_IS_1B(PTR)
+#define VARATT_IS_EXTENDED(PTR)				(!VARATT_IS_4B_U(PTR))
 #define VARATT_NOT_PAD_BYTE(PTR) \
 	(*((__global cl_uchar *) (PTR)) != 0)
 
@@ -836,6 +845,9 @@ typedef struct varatt_indirect
 	((((__global varattrib_1b *) (PTR))->va_header >> 1) & 0x7F)
 #define VARTAG_1B_E(PTR) \
 	(((__global varattrib_1b_e *) (PTR))->va_tag)
+
+#define VARRAWSIZE_4B_C(PTR)	\
+	(((__global varattrib_4b *) (PTR))->va_compressed.va_rawsize)
 
 #define VARSIZE_ANY_EXHDR(PTR) \
 	(VARATT_IS_1B_E(PTR) ? VARSIZE_EXTERNAL(PTR)-VARHDRSZ_EXTERNAL : \
@@ -855,6 +867,43 @@ typedef struct varatt_indirect
 #define SET_VARSIZE(PTR, len)						\
 	(((__global varattrib_4b *)						\
 	  (PTR))->va_4byte.va_header = (((cl_uint) (len)) << 2))
+
+/*
+ * toast_raw_datum_size - return the raw (detoasted) size of a varlena
+ * datum (including the VARHDRSZ header)
+ */
+static size_t
+toast_raw_datum_size(__private cl_int *errcode, __global varlena *attr)
+{
+	size_t		result;
+
+retry:
+	if (VARATT_IS_EXTERNAL(attr))
+	{
+		/* should not appear in kernel space */
+		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		result = 0;
+	}
+	else if (VARATT_IS_COMPRESSED(attr))
+	{
+		/* here, va_rawsize is just the payload size */
+		result = VARRAWSIZE_4B_C(attr) + VARHDRSZ;
+	}
+	else if (VARATT_IS_SHORT(attr))
+	{
+		/*
+		 * we have to normalize the header length to VARHDRSZ or else the
+		 * callers of this function will be confused.
+		 */
+		result = VARSIZE_SHORT(attr) - VARHDRSZ_SHORT + VARHDRSZ;
+	}
+	else
+	{
+		/* plain untoasted datum */
+		result = VARSIZE(attr);
+	}
+	return result;
+}
 
 /*
  * kern_get_datum

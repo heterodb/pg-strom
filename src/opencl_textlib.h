@@ -159,6 +159,20 @@ pgfn_bpcharcmp(__private cl_int *errcode, pg_bpchar_t arg1, pg_bpchar_t arg2)
 	return result;
 }
 
+pg_int4_t
+pgfn_bpcharlen(__private cl_int *errcode, pg_bpchar_t arg1)
+{
+	pg_int4_t	result;
+
+	/* NOTE: At this moment, we don't support any special encodings,
+	 * so no multibytes character is assumed.
+	 */
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+		result.value = bpchar_truelen(arg1.value);
+	return result;
+}
+
 /* ----------------------------------------------------------------
  *
  * Basic Text comparison functions
@@ -282,6 +296,20 @@ pgfn_text_cmp(__private cl_int *errcode, pg_text_t arg1, pg_text_t arg2)
 	result.isnull = (arg1.isnull | arg2.isnull);
 	if (!result.isnull)
 		result.value = text_compare(errcode, arg1.value, arg2.value);
+	return result;
+}
+
+pg_int4_t
+pgfn_textlen(__private cl_int *errcode, pg_text_t arg1)
+{
+	pg_int4_t	result;
+
+	/* NOTE: At this moment, we don't support any special encodings,
+	 * so no multibytes character is assumed.
+	 */
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+		result.value = toast_raw_datum_size(errcode, arg1.value);
 	return result;
 }
 

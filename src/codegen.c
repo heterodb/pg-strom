@@ -598,6 +598,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "bpchargt",  2, {BPCHAROID,BPCHAROID},  "sc/F:bpchargt" },
 	{ "bpcharge",  2, {BPCHAROID,BPCHAROID},  "sc/F:bpcharge" },
 	{ "bpcharcmp", 2, {BPCHAROID, BPCHAROID}, "sc/F:bpcharcmp"},
+	{ "length",    1, {BPCHAROID},            "sc/F:bpcharlen"},
 	{ "texteq",    2, {TEXTOID, TEXTOID},     "s/F:texteq" },
 	{ "textne",    2, {TEXTOID, TEXTOID},     "s/F:textne" },
 	{ "text_lt",   2, {TEXTOID, TEXTOID},     "sc/F:text_lt" },
@@ -605,6 +606,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "text_gt",   2, {TEXTOID, TEXTOID},     "sc/F:text_gt" },
 	{ "text_ge",   2, {TEXTOID, TEXTOID},     "sc/F:text_ge" },
 	{ "bttextcmp", 2, {TEXTOID, TEXTOID},     "sc/F:text_cmp" },
+	{ "length",    1, {TEXTOID},              "sc/F:textlen" },
 };
 
 static void
