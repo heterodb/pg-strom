@@ -861,7 +861,7 @@ pgstrom_release_gputaskstate(GpuTaskState *gts)
 }
 
 void
-pgstrom_init_gputaststate(GpuContext *gcontext, GpuTaskState *gts)
+pgstrom_init_gputaskstate(GpuContext *gcontext, GpuTaskState *gts)
 {
 	dlist_push_tail(&gcontext->state_list, &gts->chain);
 	gts->gcontext = gcontext;

@@ -512,10 +512,10 @@ __build_cuda_program(program_cache_entry *old_entry)
 	length = PGCACHE_ERRORMSG_LEN(new_entry);
 	if (source_pathname)
 		snprintf(new_entry->error_msg, length,
-				 "source: %s\nbuild: %s\n%s",
-				 source_pathname,
+				 "build: %s\n%s\nsource: %s\n",
 				 !ptx_image ? "failed" : "success",
-				 build_log);
+				 build_log,
+ 				 source_pathname);
 	else
 		snprintf(new_entry->error_msg, length,
 				 "build: %s\n%s",
@@ -767,6 +767,14 @@ pgstrom_preload_cuda_program(GpuTaskState *gts)
 {
 	__pgstrom_load_cuda_program(gts, true);
 }
+
+Datum
+pgstrom_program_info(PG_FUNCTION_ARGS)
+{
+	elog(ERROR, "not implemented yet");
+	PG_RETURN_NULL();
+}
+PG_FUNCTION_INFO_V1(pgstrom_program_info);
 
 static void
 pgstrom_startup_cuda_program(void)

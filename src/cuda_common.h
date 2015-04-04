@@ -779,7 +779,7 @@ typedef struct varatt_indirect
 	(((varattrib_1b_e *) (PTR))->va_tag)
 
 #define VARRAWSIZE_4B_C(PTR)	\
-	(((__global varattrib_4b *) (PTR))->va_compressed.va_rawsize)
+	(((varattrib_4b *) (PTR))->va_compressed.va_rawsize)
 
 #define VARSIZE_ANY_EXHDR(PTR) \
 	(VARATT_IS_1B_E(PTR) ? VARSIZE_EXTERNAL(PTR)-VARHDRSZ_EXTERNAL : \
@@ -808,7 +808,6 @@ toast_raw_datum_size(cl_int *errcode, varlena *attr)
 {
 	size_t		result;
 
-retry:
 	if (VARATT_IS_EXTERNAL(attr))
 	{
 		/* should not appear in kernel space */

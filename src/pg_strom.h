@@ -430,6 +430,7 @@ extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 extern bool pgstrom_load_cuda_program(GpuTaskState *gts);
 extern void pgstrom_preload_cuda_program(GpuTaskState *gts);
 extern void pgstrom_init_cuda_program(void);
+extern Datum pgstrom_program_info(PG_FUNCTION_ARGS);
 
 /*
  * codegen.c

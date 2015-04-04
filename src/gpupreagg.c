@@ -211,7 +211,7 @@ typedef struct
 	bool			has_varlena;	/* true, if it has varlena grouping keys */
 	double			num_groups;		/* estimated number of groups */
 	CUfunction		kern_prep;
-	void		   *kern_prep_args[3];
+	void		   *kern_prep_args[4];
 	CUfunction		kern_lagg;
 	void		   *kern_lagg_args[5];
 	CUfunction		kern_gagg;
@@ -2879,9 +2879,10 @@ pgstrom_plan_is_gpupreagg(const Plan *plan)
 static Node *
 gpupreagg_create_scan_state(CustomScan *cscan)
 {
-	GpuPreAggState *gpas = palloc0(sizeof(GpuPreAggState));
-	GpuContext	   *gcontext = gpas->gts.gcontext;
-
+	GpuContext	   *gcontext = pgstrom_get_gpucontext();
+	GpuPreAggState *gpas = MemoryContextAllocZero(gcontext->memcxt,
+												  sizeof(GpuPreAggState));
+	/* Set tag and executor callbacks */
 	NodeSetTag(gpas, T_CustomScanState);
 	gpas->gts.css.flags = cscan->flags;
 	gpas->gts.css.methods = &gpupreagg_exec_methods;
@@ -3016,13 +3017,18 @@ gpupreagg_task_create(GpuPreAggState *gpas, pgstrom_data_store *pds_in)
 	kresults->has_rechecks = false;
 	kresults->all_visible = true;
 
-	/* allocation of result buffer */
+	/*
+	 * allocation of the result buffer
+	 *
+	 * note: GpuPreAgg does not have bulk-load output so, no need to have
+	 *       relevant toast buffer.
+	 */
 	tupdesc = gpas->gts.css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
 	gpreagg->pds_dst = pgstrom_create_data_store_slot(gcontext,
 													  tupdesc,
 													  nitems,
 													  gpas->has_numeric,
-													  pds_in);
+													  NULL);
 	return gpreagg;
 }
 
@@ -3240,7 +3246,7 @@ gpupreagg_end(CustomScanState *node)
 			 gpas->num_rechecks);
 
 	/* Cleanup and relase any concurrent tasks */
-	pgstrom_cleanup_gputaskstate(&gpas->gts);
+	pgstrom_release_gputaskstate(&gpas->gts);
 	/* Clean up subtree */
 	ExecEndNode(outerPlanState(node));
 }
@@ -3332,7 +3338,9 @@ gpupreagg_cleanup_cuda_resources(pgstrom_gpupreagg *gpreagg)
 static void
 gpupreagg_task_release(GpuTask *gtask)
 {
-	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) gpreagg;
+	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) gtask;
+
+	fprintf(stderr, "gpupreagg_task_release called %p\n", gpreagg);
 
 	/* cleanup cuda resources, if any */
 	gpupreagg_cleanup_cuda_resources(gpreagg);

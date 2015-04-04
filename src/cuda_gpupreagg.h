@@ -108,7 +108,7 @@ typedef union
 	struct {
 		cl_uint	hash;	/* hash value of the entry */
 		cl_uint	index;	/* loca/global thread-id that is responsible for */
-	};
+	} s;
 } pagg_hashslot;
 
 /*
@@ -261,8 +261,7 @@ gpupreagg_data_load(pagg_datum *pdatum,		/* __shared__ */
 	Datum		   *values;
 	cl_char		   *isnull;
 
-	if (kds->format != KDS_FORMAT_TUPSLOT ||
-		colidx >= kds->ncols)
+	if (kds->format != KDS_FORMAT_SLOT || colidx >= kds->ncols)
 	{
 		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 		return;
@@ -306,8 +305,7 @@ gpupreagg_data_store(pagg_datum *pdatum,	/* __shared__ */
 	Datum		   *values;
 	cl_char		   *isnull;
 
-	if (kds->format != KDS_FORMAT_TUPSLOT ||
-		colidx >= kds->ncols)
+	if (kds->format != KDS_FORMAT_SLOT || colidx >= kds->ncols)
 	{
 		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 		return;
@@ -363,8 +361,8 @@ gpupreagg_data_move(cl_int *errcode,
 	/*
 	 * XXX - Paranoire checks?
 	 */
-	if (kds_src->format != KDS_FORMAT_TUPSLOT ||
-		kds_dst->format != KDS_FORMAT_TUPSLOT)
+	if (kds_src->format != KDS_FORMAT_SLOT ||
+		kds_dst->format != KDS_FORMAT_SLOT)
 	{
 		STROM_SET_ERROR(errcode, StromError_DataStoreCorruption);
 		return;
@@ -413,12 +411,12 @@ gpupreagg_preparation(kern_gpupreagg *kgpreagg,
 
 	/* init global hash slot */
 	hash_size = kgpreagg->hash_size;;
-	for (hash_index = get_global_id(0);
+	for (hash_index = get_global_id();
 		 hash_index < hash_size;
-		 hash_index += get_global_size(0))
+		 hash_index += get_global_size())
 	{
-		g_hashslot[hash_index].hash = 0;
-		g_hashslot[hash_index].index = (cl_uint)(0xffffffff);
+		g_hashslot[hash_index].s.hash = 0;
+		g_hashslot[hash_index].s.index = (cl_uint)(0xffffffff);
 	}
 
 	/* check qualifiers */
@@ -476,26 +474,27 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 						  kern_data_store *kds_dst,
 						  kern_data_store *ktoast)
 {
-	kern_parambuf	   *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	varlena			   *kparam_0 = kparam_get_value(kparams, 0);
-	cl_char			   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
-	size_t				hash_size = 2 * get_local_size();
-	size_t				dest_index;
-	cl_uint				owner_index;
-	cl_uint				hash_value;
-	cl_uint				nitems = kds_src->nitems;
-	cl_uint				nattrs = kds_src->ncols;
-	cl_uint				ngroups;
-	cl_uint				index;
-	cl_uint				attnum;
-	cl_int				errcode = StromError_Success;
-	pagg_hashslot		old_slot;
-	pagg_hashslot		new_slot;
-	pagg_hashslot		cur_slot;
-	cl_uint			   *crc32_table;
-	pagg_datum		   *l_datum;
-	pagg_hashslot	   *l_hashslot;
-	__shared__ size_t	base_index;
+	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	kern_resultbuf *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
+	varlena		   *kparam_0 = (varlena *)kparam_get_value(kparams, 0);
+	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
+	size_t			hash_size = 2 * get_local_size();
+	size_t			dest_index;
+	cl_uint			owner_index;
+	cl_uint			hash_value;
+	cl_uint			nitems = kds_src->nitems;
+	cl_uint			nattrs = kds_src->ncols;
+	cl_uint			ngroups;
+	cl_uint			index;
+	cl_uint			attnum;
+	cl_int			errcode = StromError_Success;
+	pagg_hashslot	old_slot;
+	pagg_hashslot	new_slot;
+	pagg_hashslot	cur_slot;
+	cl_uint		   *crc32_table;
+	pagg_datum	   *l_datum;
+	pagg_hashslot  *l_hashslot;
+	__shared__ size_t base_index;
 
 	/*
 	 * calculation of the hash value of grouping keys in this record.
@@ -532,42 +531,42 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 		 index < hash_size;
 		 index += get_local_size())
 	{
-		l_hashslot[index].hash = 0;
-		l_hashslot[index].index = (cl_uint)(0xffffffff);
+		l_hashslot[index].s.hash = 0;
+		l_hashslot[index].s.index = (cl_uint)(0xffffffff);
 	}
 	__syncthreads();
 
 	if (get_global_id() < nitems)
 	{
-		new_slot.hash = hash_value;
-		new_slot.index = get_local_id(0);
-		old_slot.hash = 0;
-		old_slot.index = (cl_uint)(0xffffffff);
+		new_slot.s.hash = hash_value;
+		new_slot.s.index = get_local_id();
+		old_slot.s.hash = 0;
+		old_slot.s.index = (cl_uint)(0xffffffff);
 		index = hash_value % hash_size;
 
 	retry:
-		cur_slot.value = atom_cmpxchg(&l_hashslot[index].value,
-									  old_slot.value,
-									  new_slot.value);
+		cur_slot.value = atomicCAS(&l_hashslot[index].value,
+								   old_slot.value,
+								   new_slot.value);
 		if (cur_slot.value == old_slot.value)
 		{
 			/* Hash slot was empty, so this thread shall be responsible
 			 * to this grouping-key.
 			 */
-			owner_index = new_slot.index;
+			owner_index = new_slot.s.index;
 		}
 		else
 		{
 			size_t	buddy_index
-				= (get_global_id() - get_local_id() + cur_slot.index);
+				= (get_global_id() - get_local_id() + cur_slot.s.index);
 
-			if (cur_slot.hash == new_slot.hash &&
+			if (cur_slot.s.hash == new_slot.s.hash &&
 				gpupreagg_keymatch(&errcode,
 								   kds_src, ktoast,
 								   get_global_id(),
 								   buddy_index))
 			{
-				owner_index = cur_slot.index;
+				owner_index = cur_slot.s.index;
 			}
 			else
 			{
@@ -625,7 +624,7 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 				gpupreagg_data_move(&errcode,
 									kds_src, kds_dst, ktoast,
 									attnum,
-									get_global_id(0),
+									get_global_id(),
 									dest_index);
 			}
 			continue;
@@ -680,25 +679,25 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 						   kern_data_store *ktoast,
 						   pagg_hashslot *g_hashslot)
 {
-	kern_parambuf	   *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	kern_resultbuf	   *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
-	varlena			   *kparam_0 = kparam_get_value(kparams, 0);
-	cl_char			   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
-	size_t				hash_size = kgpreagg->hash_size;
-	size_t				dest_index;
-	size_t				owner_index;
-	cl_uint				hash_value;
-	cl_uint				nitems = kds_dst->nitems;
-	cl_uint				ngroups;
-	cl_uint				index;
-	cl_uint				nattrs = kds_dst->ncols;
-	cl_uint				attnum;
-	cl_int				errcode = StromError_Success;
-	pagg_hashslot		old_slot;
-	pagg_hashslot		new_slot;
-	pagg_hashslot		cur_slot;
-	cl_uint			   *crc32_table;
-	__shared__ size_t	base_index;
+	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	kern_resultbuf *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
+	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
+	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
+	size_t			hash_size = kgpreagg->hash_size;
+	size_t			dest_index;
+	size_t			owner_index;
+	cl_uint			hash_value;
+	cl_uint			nitems = kds_dst->nitems;
+	cl_uint			ngroups;
+	cl_uint			index;
+	cl_uint			nattrs = kds_dst->ncols;
+	cl_uint			attnum;
+	cl_int			errcode = StromError_Success;
+	pagg_hashslot	old_slot;
+	pagg_hashslot	new_slot;
+	pagg_hashslot	cur_slot;
+	cl_uint		   *crc32_table;
+	__shared__ size_t base_index;
 
 	/*
 	 * calculation of the hash value of grouping keys in this record.
@@ -729,29 +728,29 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 		 * to the grouping key. We cannot help the later case, so retry
 		 * the steps with next hash-slot.
 		 */
-		new_slot.hash = hash_value;
-		new_slot.index = get_global_id(0);
-		old_slot.hash = 0;
-		old_slot.index = (cl_uint)(0xffffffff);
+		new_slot.s.hash = hash_value;
+		new_slot.s.index = get_global_id();
+		old_slot.s.hash = 0;
+		old_slot.s.index = (cl_uint)(0xffffffff);
 		index = hash_value % hash_size;
 	retry:
-		cur_slot.value = atom_cmpxchg(&g_hashslot[index].value,
-									  old_slot.value,
-									  new_slot.value);
+		cur_slot.value = atomicCAS(&g_hashslot[index].value,
+								   old_slot.value,
+								   new_slot.value);
 		if (cur_slot.value == old_slot.value)
 		{
 			/* Hash slot was empty, so this thread shall be responsible
 			 * to this grouping-key.
 			 */
-			owner_index = new_slot.index;
+			owner_index = new_slot.s.index;
 		}
-		else if (cur_slot.hash == new_slot.hash &&
+		else if (cur_slot.s.hash == new_slot.s.hash &&
 				 gpupreagg_keymatch(&errcode,
 									kds_dst, ktoast,
 									get_global_id(),
-									cur_slot.index))
+									cur_slot.s.index))
 		{
-			owner_index = cur_slot.index;
+			owner_index = cur_slot.s.index;
 		}
 		else
 		{
@@ -810,8 +809,8 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 		 * identifier on the kern_row_map. Once kernel execution gets done,
 		 * this index points the location of aggregate value.
 		 */
-		if (get_global_id(0) < nitems &&
-			get_global_id(0) != owner_index)
+		if (get_global_id() < nitems &&
+			get_global_id() != owner_index)
 		{
 			gpupreagg_global_calc(&errcode,
 								  attnum,
@@ -841,7 +840,7 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_resultbuf *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
-	varlena		   *kparam_0   = kparam_get_value(kparams, 0);
+	varlena		   *kparam_0 = (varlena *)kparam_get_value(kparams, 0);
 	cl_char		   *gpagg_atts = (cl_char *)VARDATA(kparam_0);
 	pagg_datum	   *l_datum = SHARED_WORKMEM(pagg_datum);
 	cl_uint			nitems = kds_src->nitems;
@@ -869,7 +868,7 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 
 		/* load this value from kds_src onto datum */
 		if (gid < nitems)
-			gpupreagg_data_load(&l_datum[get_lobal_id()], &errcode,
+			gpupreagg_data_load(&l_datum[get_local_id()], &errcode,
 								kds_src, ktoast, attnum, gid);
 		__syncthreads();
 
@@ -896,12 +895,12 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 	 */
 	if (gid == 0)
 	{
-		krowmap->nvalids = (nitems + lsz - 1) / lsz;
+		kresults->nitems = (nitems + lsz - 1) / lsz;
 		kds_dst->nitems = (nitems + lsz - 1) / lsz;
 	}
 	if (lid == 0)
 	{
-		krowmap->rindex[dest_index] = dest_index;
+		kresults->results[dest_index] = dest_index;
 	}
 
 	/* write-back execution status into host-side */
@@ -923,11 +922,11 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_resultbuf *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
-	varlena		   *kparam_0 = kparam_get_value(kparams, 0);
+	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
 	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
 	cl_int			errcode = StromError_Success;
 	cl_uint			nattrs = kds_dst->ncols;
-	cl_uint			nitems = krowmap->nvalids;
+	cl_uint			nitems = kresults->nitems;
 
 	if (get_global_id() < nitems)
 	{
@@ -939,7 +938,7 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
 			if (gpagg_atts[attnum] != GPUPREAGG_FIELD_IS_GROUPKEY)
 				continue;
 
-			rowidx = krowmap->rindex[get_global_id(0)];
+			rowidx = kresults->results[get_global_id()];
 			pg_fixup_tupslot_varlena(&errcode,
 									 kds_dst, ktoast,
 									 attnum, rowidx);
@@ -961,15 +960,15 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
 	STATIC_INLINE(float)												\
 	atomic_##op_name##_float(volatile float *ptr, float value)			\
 	{																	\
-		cl_int		curval = __float_as_int(*ptr);						\
-		cl_int		oldval;												\
-		cl_int		newval;												\
+		cl_uint		curval = __float_as_int(*ptr);						\
+		cl_uint		oldval;												\
+		cl_uint		newval;												\
 																		\
 		do {															\
 			oldval = curval;											\
 			newval = __float_as_int(op_name(__int_as_float(oldval),		\
 											value));					\
-		} while ((curval = atomicCAS((cl_int *) ptr,					\
+		} while ((curval = atomicCAS((cl_uint *) ptr,					\
 									 oldval, newval)) != oldval);		\
 		return __int_as_float(oldval);									\
 	}
@@ -986,20 +985,20 @@ atomic_add_float(volatile float *ptr, float value)
 }
 #endif
 
-#define ATOMIC_DOUBLE_TEMPLATE(prefix, op_name)							\
+#define ATOMIC_DOUBLE_TEMPLATE(op_name)									\
 	STATIC_INLINE(double)												\
 	atomic_##op_name##_double(volatile double *ptr, double value)		\
 	{																	\
-		cl_long		curval = __double_as_longlong(*ptr);				\
-		cl_long		oldval;												\
-		cl_long		newval;												\
+		cl_ulong	curval = __double_as_longlong(*ptr);				\
+		cl_ulong	oldval;												\
+		cl_ulong	newval;												\
 		double		temp;												\
 																		\
 		do {															\
 			oldval = curval;											\
 			temp = op_name(__longlong_as_double(oldval), temp);			\
 			newval = __double_as_longlong(temp);						\
-		} while ((curval = atomicCAS((cl_long *) ptr,					\
+		} while ((curval = atomicCAS((cl_ulong *) ptr,					\
 									 oldval, newval)) != oldval);		\
 		return __longlong_as_double(oldval);							\
 	}

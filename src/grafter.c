@@ -36,7 +36,7 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan **p_curr_plan)
 			 * Try to inject GpuPreAgg plan if cost of the aggregate plan
 			 * is enough expensive to justify preprocess by GPU.
 			 */
-			//pgstrom_try_insert_gpupreagg(pstmt, (Agg *) plan);
+			pgstrom_try_insert_gpupreagg(pstmt, (Agg *) plan);
 			break;
 
 		case T_SubqueryScan:

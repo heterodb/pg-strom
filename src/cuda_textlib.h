@@ -30,7 +30,7 @@
 STROMCL_VARLENA_TYPE_TEMPLATE(bpchar)
 #endif
 
-INLINE_FUNCTION(cl_int)
+STATIC_INLINE(cl_int)
 bpchar_truelen(varlena *arg)
 {
 	cl_char	   *s = VARDATA_ANY(arg);
