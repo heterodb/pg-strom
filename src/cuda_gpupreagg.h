@@ -69,21 +69,24 @@ typedef struct
 } kern_gpupreagg;
 
 /* macro definitions to reference packed values */
-#define KERN_GPUPREAGG_PARAMBUF(kgpreagg)			\
-	((kern_parambuf *)(&(kgpreagg)->kparams))
-#define KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg)	\
-	(KERN_GPUPREAGG_PARAMBUF(kgpreagg)->length)
-#define KERN_GPUPREAGG_RESULTBUF(kgpreagg)							\
-	((kern_resultbuf *)((char *)KERN_GPUPREAGG_PARAMBUF(kgpreagg)	\
-						+ KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg)))
+#define KERN_GPUPREAGG_PARAMBUF(kgpreagg)				\
+	(&(kgpreagg)->kparams)
+#define KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg)		\
+	((kgpreagg)->kparams.length)
+#define KERN_GPUPREAGG_RESULTBUF(kgpreagg)				\
+	((kern_resultbuf *)									\
+	 ((char *)KERN_GPUPREAGG_PARAMBUF(kgpreagg)			\
+	  + KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg)))
+
 #define KERN_GPUPREAGG_LENGTH(kgpreagg,nitems)			\
 	((uintptr_t)(KERN_GPUPREAGG_RESULTBUF(kgpreagg)->results + (nitems)) - \
 	 (uintptr_t)(kgpreagg))
 
-#define KERN_GPUPREAGG_DMASEND_OFFSET(kgpreagg)			0
+#define KERN_GPUPREAGG_DMASEND_OFFSET(kgpreagg)		0
 #define KERN_GPUPREAGG_DMASEND_LENGTH(kgpreagg)			\
 	(offsetof(kern_gpupreagg, kparams) +				\
-	 KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg))
+	 KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg) +			\
+	 offsetof(kern_resultbuf, results[0]))
 #define KERN_GPUPREAGG_DMARECV_OFFSET(kgpreagg)			\
 	((uintptr_t)KERN_GPUPREAGG_RESULTBUF(kgpreagg) -	\
 	 (uintptr_t)(kgpreagg))
@@ -776,6 +779,7 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	if (get_local_id() == 0)
 		base_index = atomicAdd(&kresults->nitems, ngroups);
 	__syncthreads();
+
 	if (kresults->nrooms <= base_index + ngroups)
 	{
 		errcode = StromError_DataStoreNoSpace;
