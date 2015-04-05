@@ -118,7 +118,7 @@ grafter_try_replace_recurse(PlannedStmt *pstmt, Plan **p_curr_plan)
 			/* Try to replace Sort node by GpuSort node if cost of
 			 * the alternative plan is enough reasonable to replace.
 			 */
-			pgstrom_try_insert_gpusort(pstmt, p_curr_plan);
+			//pgstrom_try_insert_gpusort(pstmt, p_curr_plan);
 			break;
 
 		default:
