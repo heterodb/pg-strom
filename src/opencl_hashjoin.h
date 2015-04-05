@@ -479,6 +479,13 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 	__local cl_uint		usage_prev;
 	cl_int				errcode = StromError_Success;
 
+	/* update nitems of kds_dest. note that get_global_id(0) is not always
+	 * called earlier than other thread. So, we should not expect nitems
+	 * of kds_dest is initialized.
+	 */
+	if (get_global_id(0) == 0)
+		kds_dest->nitems = kresults->nitems;
+
 	/* Case of overflow; it shall be retried or executed by CPU instead,
 	 * so no projection is needed anyway. We quickly exit the kernel.
 	 * No need to set an error code because kern_gpuhashjoin_main()
@@ -490,13 +497,6 @@ kern_gpuhashjoin_projection_row(__global kern_hashjoin *khashjoin,	/* in */
 		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
 		goto out;
 	}
-
-	/* update nitems of kds_dest. note that get_global_id(0) is not always
-     * called earlier than other thread. So, we should not expect nitems
-	 * of kds_dest is initialized.
-	 */
-	if (get_global_id(0) == 0)
-		kds_dest->nitems = kresults->nitems;
 
 	/* Ensure format of the kern_data_store (source/destination) */
 	if ((kds->format != KDS_FORMAT_ROW &&
