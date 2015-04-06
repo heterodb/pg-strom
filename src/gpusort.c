@@ -318,7 +318,6 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 	double	nrows_per_chunk;
 	long	num_chunks;
 	Size	chunk_size;
-	Size	max_chunk_size = pgstrom_shmem_maxalloc();
 
 	if (ntuples < 2.0)
 		ntuples = 2.0;
@@ -330,22 +329,18 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 	/*
 	 * calculate expected number of rows per chunk and number of chunks.
 	 */
-	width = MAXALIGN(width + sizeof(cl_uint) +
-					 offsetof(HeapTupleHeaderData, t_bits) +
-					 BITMAPLEN(list_length(subplan->targetlist)));
-	chunk_size = (Size)((double)width * ntuples * 1.10) + 1024;
-
-	if (max_chunk_size > chunk_size)
+	chunk_size = pgstrom_chunk_size();
+	nrows_per_chunk =
+		((double)((chunk_size / BLCKSZ)) *
+		((double)(BLCKSZ - MAXALIGN(SizeOfPageHeaderData))) /
+		(MAXALIGN(width + sizeof(ItemIdData) +
+			offsetof(HeapTupleHeaderData, t_bits) +
+			BITMAPLEN(list_length(subplan->targetlist)))));
+	if ( (num_chunks = ceil(ntuples / nrows_per_chunk)) <= 1)
 	{
-		nrows_per_chunk = ntuples;
+		/* TODO: need to estimate ntuples correctly.*/
+		//chunk_size = (Size)((double)width * ntuples * 1.10) + 1024;
 		num_chunks = 1;
-	}
-	else
-	{
-		nrows_per_chunk =
-			(double)(max_chunk_size - 1024) / ((double)width * 1.25);
-		chunk_size = (Size)((double)width * nrows_per_chunk * 1.25);
-		num_chunks = Max(1.0, floor(ntuples / nrows_per_chunk + 0.9999));
 	}
 
 	/*
@@ -368,8 +363,8 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 	run_cost += cpu_operator_cost * ntuples;
 
 	/* result */
-    *p_startup_cost = startup_cost;
-    *p_total_cost = startup_cost + run_cost;
+	*p_startup_cost = startup_cost;
+	*p_total_cost = startup_cost + run_cost;
 	*p_num_chunks = num_chunks;
 	*p_chunk_size = chunk_size;
 }
