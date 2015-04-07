@@ -104,6 +104,10 @@ typedef cl_ulong	Datum;
 #define LONG_MAX		0x7FFFFFFFFFFFFFFFLL
 #define LONG_MIN        (-LONG_MAX - 1LL)
 #define ULONG_MAX		0xFFFFFFFFFFFFFFFFULL
+#define FLT_MAX			0x1.fffffep127f
+#define FLT_MIN			0x1.0p-126f
+#define DBL_MAX			0x1.fffffffffffffp1023
+#define DBL_MIN			0x1.0p-1022
 
 /*
  * MEMO: We takes dynamic local memory using cl_ulong data-type because of
