@@ -956,132 +956,147 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
 
 /* ----------------------------------------------------------------
  *
- * Own version of atomic functions; for float, double and numeric
+ * A thin abstraction layer for atomic functions
+ *
+ * Due to hardware capability difference we have to implement
+ * alternative one using atomicCAS operation. For simplification.
+ * we wrap all the atomic functions using:
+ *   pg_atomic_(min|max|add)_<type>(<type> *addr, <type> value) 
  *
  * ----------------------------------------------------------------
  */
 #define add(x,y)	(x)+(y)
 
-#define ATOMIC_FLOAT_TEMPLATE(op_name)									\
-	STATIC_INLINE(float)												\
-	atomic_##op_name##_float(float *ptr, float value)					\
-	{																	\
-		cl_uint		curval = __float_as_int(*ptr);						\
+STATIC_INLINE(cl_int)
+pg_atomic_min_int(cl_int *errcode, cl_int *addr, cl_int value)
+{
+	return __iAtomicMin(addr, value);
+}
+STATIC_INLINE(cl_int)
+pg_atomic_max_int(cl_int *errcode, cl_int *addr, cl_int value)
+{
+	return __iAtomicMax(addr, value);
+}
+STATIC_INLINE(cl_int)
+pg_atomic_add_int(cl_int *errcode, cl_int *addr, cl_int value)
+{
+	return __iAtomicAnd(addr, value);
+}
+
+
+#define PG_ATOMIC_LONG_TEMPLATE(oper,addr,value)					\
+	do {															\
+		cl_ulong	curval = (cl_ulong *) (addr);					\
+		cl_ulong	oldval;											\
+		cl_ulong	newval;											\
+																	\
+		do {														\
+			oldval = curval;										\
+			newval = oper(oldval, (value));							\
+		} while ((curval = atomicCAS((cl_ulong *) (addr),			\
+									 oldval, newval)) != oldval);	\
+		return (cl_long) oldval;									\
+	} while(0)
+
+STATIC_INLINE(cl_long)
+pg_atomic_min_long(cl_int *errcode, cl_long *addr, cl_long value)
+{
+#if __CUDA_ARCH__ < 350
+	PG_ATOMIC_LONG_TEMPLATE(min, addr, value);
+#else
+	return __illAtomicMin(addr, value);	
+#endif
+}
+
+STATIC_INLINE(cl_long)
+pg_atomic_max_long(cl_int *errcode, cl_long *addr, cl_long value)
+{
+#if __CUDA_ARCH__ < 350
+	PG_ATOMIC_LONG_TEMPLATE(max, addr, value);
+#else
+	return __illAtomicMin(addr, value);	
+#endif
+}
+
+STATIC_INLINE(cl_long)
+pg_atomic_add_long(cl_int *errcode, cl_long *addr, cl_long value)
+{
+	return (cl_long) atomicAdd((cl_ulong *) addr, (cl_ulong) value);
+}
+
+#define PG_ATOMIC_FLOAT_TEMPLATE(oper,addr,value)						\
+	do {																\
+		cl_uint		curval = __float_as_int(*(addr));					\
 		cl_uint		oldval;												\
 		cl_uint		newval;												\
 		float		temp;												\
 																		\
 		do {															\
 			oldval = curval;											\
-			temp = op_name(__int_as_float(oldval), value);				\
+			temp = op_name(__int_as_float(oldval), (value));			\
 			newval = __float_as_int(temp);								\
-		} while ((curval = atomicCAS((cl_uint *) ptr,					\
+		} while ((curval = atomicCAS((cl_uint *) (addr),				\
 									 oldval, newval)) != oldval);		\
 		return __int_as_float(oldval);									\
-	}
+	} while(0)
 
-ATOMIC_FLOAT_TEMPLATE(max)
-ATOMIC_FLOAT_TEMPLATE(min)
-#if __CUDA_ARCH__ < 350
-ATOMIC_FLOAT_TEMPLATE(add)
-#else
-STATIC_INLINE(float)
-atomic_add_float(float *ptr, float value)
+STATIC_INLINE(cl_float)
+pg_atomic_float_min(cl_int *errcode, cl_float *addr, float value)
 {
-	return atomicAdd(ptr, value);
+	PG_ATOMIC_FLOAT_TEMPLATE(min, addr, value);
 }
-#endif
 
-#define ATOMIC_DOUBLE_TEMPLATE(op_name)									\
-	STATIC_INLINE(double)												\
-	atomic_##op_name##_double(double *ptr, double value)				\
-	{																	\
-		cl_ulong	curval = __double_as_longlong(*ptr);				\
+STATIC_INLINE(cl_float)
+pg_atomic_float_max(cl_int *errcode, cl_float *addr, float value)
+{
+	PG_ATOMIC_FLOAT_TEMPLATE(max, addr, value);
+}
+
+STATIC_INLINE(cl_float)
+pg_atomic_float_add(cl_int *errcode, cl_float *addr, float value)
+{
+#if __CUDA_ARCH__ < 350
+	PG_ATOMIC_FLOAT_TEMPLATE(add, addr, value);
+#else
+	return atomicAdd(addr, value);
+#endif
+}
+
+#define PG_ATOMIC_DOUBLE_TEMPLATE(oper,addr,value)						\
+	do {																\
+		cl_ulong	curval = __double_as_longlong(*(addr));				\
 		cl_ulong	oldval;												\
 		cl_ulong	newval;												\
 		double		temp;												\
 																		\
 		do {															\
 			oldval = curval;											\
-			temp = op_name(__longlong_as_double(oldval), value);		\
+			temp = op_name(__longlong_as_double(oldval), (value));		\
 			newval = __double_as_longlong(temp);						\
-		} while ((curval = atomicCAS((cl_ulong *) ptr,					\
+		} while ((curval = atomicCAS((cl_ulong *) (addr),				\
 									 oldval, newval)) != oldval);		\
 		return __longlong_as_double(oldval);							\
 	}
 
-ATOMIC_DOUBLE_TEMPLATE(min)
-ATOMIC_DOUBLE_TEMPLATE(max)
-ATOMIC_DOUBLE_TEMPLATE(add)
+STATIC_INLINE(cl_double)
+pg_atomic_double_min(cl_int *errcode, cl_double *addr, cl_double value)
+{
+	PG_ATOMIC_DOUBLE_TEMPLATE(min, addr, value);
+}
+
+STATIC_INLINE(cl_double)
+pg_atomic_double_max(cl_int *errocode, cl_double *addr, cl_double value)
+{
+	PG_ATOMIC_DOUBLE_TEMPLATE(max, addr, value);
+}
+
+STATIC_INLINE(cl_double)
+pg_atomic_double_add(cl_int *errcode, cl_double *addr, cl_double value)
+{
+	PG_ATOMIC_DOUBLE_TEMPLATE(add, addr, value);
+}
 
 #undef add
-
-#ifdef PG_NUMERIC_TYPE_DEFINED
-
-STATIC_INLINE(cl_ulong)
-atomic_min_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
-{
-	pg_numeric_t	x, y;
-	pg_int4_t		comp;
-	cl_ulong		oldval;
-	cl_ulong		curval = *ptr;
-	cl_ulong		newval;
-
-	do {
-		x.isnull = false;
-		y.isnull = false;
-		x.value = oldval = curval;
-		y.value = numeric_value;
-		comp = pgfn_numeric_cmp(errcode, x, y);
-		if (comp.value < 0)
-			break;
-	} while ((curval = atomicCAS(ptr, oldval, newval)) != oldval);
-
-	return oldval;
-}
-
-STATIC_INLINE(cl_ulong)
-atomic_max_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
-{
-	pg_numeric_t	x, y;
-	pg_int4_t		comp;
-	cl_ulong		oldval;
-	cl_ulong		curval = *ptr;
-	cl_ulong		newval;
-
-	do {
-		x.isnull = false;
-		y.isnull = false;
-		x.value = oldval = curval;
-		y.value = numeric_value;
-		comp = pgfn_numeric_cmp(errcode, x, y);
-		if (comp.value > 0)
-			break;
-	} while ((curval = atomicCAS(ptr, oldval, newval)) != oldval);
-
-	return oldval;
-}
-
-STATIC_INLINE(cl_ulong)
-atomic_add_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
-{
-	pg_numeric_t x, y, z;
-	cl_ulong	oldval;
-	cl_ulong	curval = *ptr;
-	cl_ulong	newval;
-
-	do {
-		x.isnull = false;
-		y.isnull = false;
-		x.value = oldval = curval;
-		y.value = numeric_value;
-		z = pgfn_numeric_add(errcode, x, y);
-		newval = z.value;
-	} while ((curval = atomicCAS(ptr, oldval, newval)) != oldval);
-
-	return oldval;
-}
-#endif
 
 /*
  * Helper macros for gpupreagg_local_calc

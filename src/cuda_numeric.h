@@ -1148,6 +1148,73 @@ pgfn_numeric_mul(int *errcode,
 }
 
 /*
+ * Atomic operation support
+ */
+STATIC_INLINE(cl_ulong)
+atomic_min_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
+{
+	pg_numeric_t	x, y;
+	pg_int4_t		comp;
+	cl_ulong		oldval;
+	cl_ulong		curval = *ptr;
+	cl_ulong		newval;
+
+	do {
+		x.isnull = false;
+		y.isnull = false;
+		x.value = oldval = curval;
+		y.value = numeric_value;
+		comp = pgfn_numeric_cmp(errcode, x, y);
+		if (comp.value < 0)
+			break;
+	} while ((curval = atomicCAS(ptr, oldval, newval)) != oldval);
+
+	return oldval;
+}
+
+STATIC_INLINE(cl_ulong)
+atomic_max_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
+{
+	pg_numeric_t	x, y;
+	pg_int4_t		comp;
+	cl_ulong		oldval;
+	cl_ulong		curval = *ptr;
+	cl_ulong		newval;
+
+	do {
+		x.isnull = false;
+		y.isnull = false;
+		x.value = oldval = curval;
+		y.value = numeric_value;
+		comp = pgfn_numeric_cmp(errcode, x, y);
+		if (comp.value > 0)
+			break;
+	} while ((curval = atomicCAS(ptr, oldval, newval)) != oldval);
+
+	return oldval;
+}
+
+STATIC_INLINE(cl_ulong)
+atomic_add_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
+{
+	pg_numeric_t x, y, z;
+	cl_ulong	oldval;
+	cl_ulong	curval = *ptr;
+	cl_ulong	newval;
+
+	do {
+		x.isnull = false;
+		y.isnull = false;
+		x.value = oldval = curval;
+		y.value = numeric_value;
+		z = pgfn_numeric_add(errcode, x, y);
+		newval = z.value;
+	} while ((curval = atomicCAS(ptr, oldval, newval)) != oldval);
+
+	return oldval;
+}
+
+/*
  * Numeric comparison functions
  * ----------------------------------------------------------------
  */
