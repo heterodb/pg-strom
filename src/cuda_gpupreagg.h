@@ -471,7 +471,7 @@ out:
 /*
  * gpupreagg_local_reduction
  */
-KERNEL_FUNCTION(void)
+KERNEL_FUNCTION_MAXTHREADS(void)
 gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 						  kern_data_store *kds_src,
 						  kern_data_store *kds_dst,
@@ -789,7 +789,9 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 
 	if (get_global_id() < nitems &&
 		get_global_id() == owner_index)
+	{
 		kresults->results[dest_index] = get_global_id();
+	}
 
 	/*
 	 * Global reduction for each column
@@ -836,7 +838,7 @@ out:
  * operations in this case, because all the rows are eventually consolidated
  * to just one record, thus usual reduction operation is sufficient.
  */
-KERNEL_FUNCTION(void)
+KERNEL_FUNCTION_MAXTHREADS(void)
 gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 							kern_data_store *kds_src,
 							kern_data_store *kds_dst,
@@ -962,16 +964,17 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
 
 #define ATOMIC_FLOAT_TEMPLATE(op_name)									\
 	STATIC_INLINE(float)												\
-	atomic_##op_name##_float(volatile float *ptr, float value)			\
+	atomic_##op_name##_float(float *ptr, float value)					\
 	{																	\
 		cl_uint		curval = __float_as_int(*ptr);						\
 		cl_uint		oldval;												\
 		cl_uint		newval;												\
+		float		temp;												\
 																		\
 		do {															\
 			oldval = curval;											\
-			newval = __float_as_int(op_name(__int_as_float(oldval),		\
-											value));					\
+			temp = op_name(__int_as_float(oldval), value);				\
+			newval = __float_as_int(temp);								\
 		} while ((curval = atomicCAS((cl_uint *) ptr,					\
 									 oldval, newval)) != oldval);		\
 		return __int_as_float(oldval);									\
@@ -983,7 +986,7 @@ ATOMIC_FLOAT_TEMPLATE(min)
 ATOMIC_FLOAT_TEMPLATE(add)
 #else
 STATIC_INLINE(float)
-atomic_add_float(volatile float *ptr, float value)
+atomic_add_float(float *ptr, float value)
 {
 	return atomicAdd(ptr, value);
 }
@@ -991,7 +994,7 @@ atomic_add_float(volatile float *ptr, float value)
 
 #define ATOMIC_DOUBLE_TEMPLATE(op_name)									\
 	STATIC_INLINE(double)												\
-	atomic_##op_name##_double(volatile double *ptr, double value)		\
+	atomic_##op_name##_double(double *ptr, double value)				\
 	{																	\
 		cl_ulong	curval = __double_as_longlong(*ptr);				\
 		cl_ulong	oldval;												\
@@ -1000,7 +1003,7 @@ atomic_add_float(volatile float *ptr, float value)
 																		\
 		do {															\
 			oldval = curval;											\
-			temp = op_name(__longlong_as_double(oldval), temp);			\
+			temp = op_name(__longlong_as_double(oldval), value);		\
 			newval = __double_as_longlong(temp);						\
 		} while ((curval = atomicCAS((cl_ulong *) ptr,					\
 									 oldval, newval)) != oldval);		\
@@ -1016,9 +1019,7 @@ ATOMIC_DOUBLE_TEMPLATE(add)
 #ifdef PG_NUMERIC_TYPE_DEFINED
 
 STATIC_INLINE(cl_ulong)
-atomic_min_numeric(cl_int *errcode,
-				   volatile cl_ulong *ptr,
-				   cl_ulong numeric_value)
+atomic_min_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
 {
 	pg_numeric_t	x, y;
 	pg_int4_t		comp;
@@ -1040,9 +1041,7 @@ atomic_min_numeric(cl_int *errcode,
 }
 
 STATIC_INLINE(cl_ulong)
-atomic_max_numeric(cl_int *errcode,
-				   volatile cl_ulong *ptr,
-				   cl_ulong numeric_value)
+atomic_max_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
 {
 	pg_numeric_t	x, y;
 	pg_int4_t		comp;
@@ -1064,9 +1063,7 @@ atomic_max_numeric(cl_int *errcode,
 }
 
 STATIC_INLINE(cl_ulong)
-atomic_add_numeric(cl_int *errcode,
-				   volatile cl_ulong *ptr,
-				   cl_ulong numeric_value)
+atomic_add_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
 {
 	pg_numeric_t x, y, z;
 	cl_ulong	oldval;
@@ -1193,7 +1190,7 @@ atomic_add_numeric(cl_int *errcode,
 			atomicAdd(&(accum)->int_val, (newval)->int_val))
 #define AGGCALC_LOCAL_PADD_LONG(errcode,accum,newval)					\
 	AGGCALC_LOCAL_TEMPLATE_LONG(errcode,accum,newval,CHECK_OVERFLOW_INT, \
-			atomAdd(&(accum)->long_val, (newval)->long_val))
+			atomicAdd(&(accum)->long_val, (newval)->long_val))
 #define AGGCALC_LOCAL_PADD_FLOAT(errcode,accum,newval)					\
     AGGCALC_LOCAL_TEMPLATE_FLOAT(errcode,accum,newval,CHECK_OVERFLOW_FLOAT, \
 			atomic_add_float(&(accum)->float_val, (newval)->float_val))

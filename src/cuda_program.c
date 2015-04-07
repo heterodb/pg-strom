@@ -35,7 +35,6 @@ typedef struct
 	int			shift;	/* block class of this entry */
 	int			refcnt;	/* 0 means free entry */
 	pg_crc32	crc;	/* hash value by extra_flags + kern_source */
-	bool		retain_cuda_program;
 	Bitmapset  *waiting_backends;
 	int			extra_flags;
 	char	   *kern_source;
@@ -75,9 +74,7 @@ typedef struct
 
 /* ---- GUC variables ---- */
 static Size		program_cache_size;
-static char	   *pgstrom_nvcc_path;
-static bool		debug_optimize_cuda_program;
-static bool		debug_retain_cuda_program;
+static bool		enable_cuda_coredump;
 
 /* ---- static variables ---- */
 static shmem_startup_hook_type shmem_startup_next;
@@ -366,7 +363,7 @@ static void
 __build_cuda_program(program_cache_entry *old_entry)
 {
 	char		   *source;
-	char		   *source_pathname = NULL;
+	char		   *source_pathname;
 	nvrtcProgram	program;
 	nvrtcResult		rc;
 	const char	   *options[10];
@@ -384,6 +381,22 @@ __build_cuda_program(program_cache_entry *old_entry)
 	 * Make a nvrtcProgram object
 	 */
 	source = pgstrom_write_cuda_program(old_entry);
+	source_pathname = "pg_strom.autogen";
+	if (enable_cuda_coredump)
+	{
+		char	pathname[128];
+		int		fdesc;
+
+		strcpy(pathname, "/tmp/pg_strom_XXXXXX.gpu");
+		fdesc = mkstemps(pathname, 4);
+		if (fdesc >= 0)
+		{
+			write(fdesc, source, strlen(source));
+			close(fdesc);
+			source_pathname = pstrdup(pathname);
+		}
+	}
+
 	rc = nvrtcCreateProgram(&program,
 							source,
 							"autogen",
@@ -405,24 +418,6 @@ __build_cuda_program(program_cache_entry *old_entry)
 	options[opt_index++] = "--generate-line-info";
 #endif
 	options[opt_index++] = "--use_fast_math";
-
-	/*
-	 * Save the source file, if needed
-	 */
-	if (old_entry->retain_cuda_program)
-	{
-		char	pathname[128];
-		int		fdesc;
-
-		strcpy(pathname, "/tmp/pg_strom_XXXXXX.gpu");
-		fdesc = mkstemps(pathname, 4);
-		if (fdesc >= 0)
-		{
-			write(fdesc, source, strlen(source));
-			close(fdesc);
-			source_pathname = pstrdup(pathname);
-		}
-	}
 
 	/*
 	 * Kick runtime compiler
@@ -490,7 +485,6 @@ __build_cuda_program(program_cache_entry *old_entry)
 	}
 	usage = 0;
 	new_entry->crc = old_entry->crc;
-	new_entry->retain_cuda_program = false;
 	new_entry->waiting_backends = NULL;		/* no need to set latch */
 	new_entry->extra_flags = old_entry->extra_flags;
 	new_entry->kern_source = new_entry->data + usage;
@@ -545,8 +539,6 @@ __build_cuda_program(program_cache_entry *old_entry)
 
 	SpinLockRelease(&pgcache_head->lock);
 }
-
-
 
 static void
 pgstrom_build_cuda_program(Datum cuda_program)
@@ -607,10 +599,6 @@ __pgstrom_load_cuda_program(GpuTaskState *gts, bool is_preload)
 	CUmodule	   *cuda_modules = NULL;
 	int				i, num_context;
 	BackgroundWorker worker;
-
-	/* Is optimization available? */
-	if (!debug_optimize_cuda_program)
-		extra_flags |= DEVKERNEL_DISABLE_OPTIMIZE;
 
 	/* makes a hash value */
 	INIT_CRC32C(crc);
@@ -709,7 +697,6 @@ retry:
 
 	entry = pgstrom_program_cache_alloc(required);
 	entry->crc = crc;
-	entry->retain_cuda_program = debug_retain_cuda_program;
 	/* bitmap for waiting backends */
 	entry->waiting_backends = (Bitmapset *) entry->data;
 	entry->waiting_backends->nwords = nwords;
@@ -835,15 +822,9 @@ pgstrom_init_cuda_program(void)
 	int			minor;
 	nvrtcResult	rc;
 
-	DefineCustomStringVariable("pg_strom.nvcc_path",
-							   "path to nvcc (NVIDIA CUDA Compiler)",
-							   NULL,
-							   &pgstrom_nvcc_path,
-							   "/usr/local/cuda/bin/nvcc",
-							   PGC_SIGHUP,
-							   GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
-
+	/*
+	 * allocation of shared memory segment size
+	 */
 	DefineCustomIntVariable("pg_strom.program_cache_size",
 							"size of shared program cache",
 							NULL,
@@ -856,23 +837,34 @@ pgstrom_init_cuda_program(void)
 							NULL, NULL, NULL);
 	program_cache_size = (Size)__program_cache_size * 1024L;
 
-	DefineCustomBoolVariable("pg_strom.debug_optimize_program",
-							 "enabled optimization on program build",
+	/*
+	 * turn on/off cuda coredump feature
+	 */
+	DefineCustomBoolVariable("pg_strom.enable_cuda_coredump",
+							 "enables GPU coredump feature",
 							 NULL,
-							 &debug_optimize_cuda_program,
+							 &enable_cuda_coredump,
+#ifdef PGSTROM_DEBUG
 							 true,
-							 PGC_SUSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	DefineCustomBoolVariable("pg_strom.debug_retain_program",
-							 "retain CUDA program file generated on the fly",
-							 NULL,
-							 &debug_retain_cuda_program,
+#else
 							 false,
-							 PGC_SUSET,
+#endif
+							 PGC_POSTMASTER,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-	/* CUDA online compiler */
+#if 0
+	/* it is buggy on libcuda.so.346.46 driver  */
+	if (enable_cuda_coredump)
+	{
+		if (setenv("CUDA_ENABLE_CPU_COREDUMP_ON_EXCEPTION", "0", 1) != 0 ||
+			setenv("CUDA_ENABLE_COREDUMP_ON_EXCEPTION", "1", 1) != 0)
+			elog(ERROR, "failed on set environment variable for core dump");
+	}
+#endif
+
+	/*
+	 * Init CUDA run-time compiler library
+	 */
 	rc = nvrtcVersion(&major, &minor);
 	if (rc != NVRTC_SUCCESS)
 		elog(ERROR, "failed on nvrtcVersion: %s", nvrtcGetErrorString(rc));

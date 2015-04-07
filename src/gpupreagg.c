@@ -3129,6 +3129,7 @@ retry:
 	/*
 	 * Fetch a tuple from the data-store
 	 */
+	ExecClearTuple(slot);
 	if (!pgstrom_fetch_data_store(slot, pds, row_index, &tuple))
 	{
 		if (gpas->gts.scan_bulk)
@@ -3191,6 +3192,7 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 		size_t		index = kresults->results[gpas->gts.curr_index++];
 
 		slot = gts->css.ss.ps.ps_ResultTupleSlot;
+		ExecClearTuple(slot);
 		if (!pgstrom_fetch_data_store(slot, pds_dst, index, &tuple))
 		{
 			elog(NOTICE, "Bug? empty slot was specified by kern_resultbuf");
@@ -3223,16 +3225,13 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 		}
 	}
 	PERFMON_END(&gts->pfm_accum, time_materialize, &tv1, &tv2);
-
 	return slot;
 }
 
 static TupleTableSlot *
 gpupreagg_exec(CustomScanState *node)
 {
-	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) pgstrom_exec_gputask,
-					(ExecScanRecheckMtd) pgstrom_recheck_gputask);
+	return pgstrom_exec_gputask((GpuTaskState *) node);
 }
 
 static void
@@ -3339,8 +3338,6 @@ static void
 gpupreagg_task_release(GpuTask *gtask)
 {
 	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) gtask;
-
-	fprintf(stderr, "gpupreagg_task_release called %p\n", gpreagg);
 
 	/* cleanup cuda resources, if any */
 	gpupreagg_cleanup_cuda_resources(gpreagg);
@@ -3481,6 +3478,14 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuModuleGetFunction : %s", errorText(rc));
 	}
+	else
+	{
+		rc = cuModuleGetFunction(&gpreagg->kern_nogrp,
+								 gpreagg->task.cuda_module,
+								 "gpupreagg_nogroup_reduction");
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuModuleGetFunction : %s", errorText(rc));
+	}
 	if (gpreagg->has_varlena)
 	{
 		rc = cuModuleGetFunction(&gpreagg->kern_fixvar,
@@ -3611,7 +3616,6 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	gpreagg->kern_prep_args[1] = &gpreagg->m_kds_in;
 	gpreagg->kern_prep_args[2] = &gpreagg->m_kds_src;
 	gpreagg->kern_prep_args[3] = &gpreagg->m_ghash;
-
 	rc = cuLaunchKernel(gpreagg->kern_prep,
 						grid_size, 1, 1,
                         block_size, 1, 1,
@@ -3646,7 +3650,6 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 			gpreagg->kern_lagg_args[1] = &gpreagg->m_kds_src;
 			gpreagg->kern_lagg_args[2] = &gpreagg->m_kds_dst;
 			gpreagg->kern_lagg_args[3] = &gpreagg->m_kds_in;
-
 			rc = cuLaunchKernel(gpreagg->kern_lagg,
 								grid_size, 1, 1,
 								block_size, 1, 1,
@@ -3725,8 +3728,10 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		gpreagg->task.pfm.num_kern_nogrp++;
 
 		/* 2nd path: data reduction (kds_dst => kds_src) */
+		gpreagg->kern_nogrp_args[0] = &gpreagg->m_gpreagg;
 		gpreagg->kern_nogrp_args[1] = &gpreagg->m_kds_dst;
 		gpreagg->kern_nogrp_args[2] = &gpreagg->m_kds_src;
+		gpreagg->kern_nogrp_args[3] = &gpreagg->m_kds_in;
 		rc = cuLaunchKernel(gpreagg->kern_nogrp,
 							grid_size, 1, 1,
 							block_size, 1, 1,
@@ -3740,8 +3745,10 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		gpreagg->task.pfm.num_kern_nogrp++;
 
 		/* 3rd path: data reduction (kds_src => kds_dst) */
+		gpreagg->kern_nogrp_args[0] = &gpreagg->m_gpreagg;
 		gpreagg->kern_nogrp_args[1] = &gpreagg->m_kds_src;
 		gpreagg->kern_nogrp_args[2] = &gpreagg->m_kds_dst;
+		gpreagg->kern_nogrp_args[3] = &gpreagg->m_kds_in;
 		rc = cuLaunchKernel(gpreagg->kern_nogrp,
 							grid_size, 1, 1,
 							block_size, 1, 1,
@@ -3800,7 +3807,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
     gpreagg->task.pfm.bytes_dma_recv += length;
     gpreagg->task.pfm.num_dma_recv++;
 
-	length = KERN_DATA_STORE_HEAD_LENGTH(pds_dst->kds);
+	length = KERN_DATA_STORE_LENGTH(pds_dst->kds);
 	rc = cuMemcpyDtoHAsync(pds_dst->kds,
 						   gpreagg->m_kds_dst,
 						   length,

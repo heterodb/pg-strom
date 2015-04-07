@@ -151,10 +151,20 @@ typedef uintptr_t	hostptr_t;
 #define STATIC_FUNCTION(RET_TYPE)					\
 	__device__ static RET_TYPE __attribute__ ((unused))
 #define KERNEL_FUNCTION(RET_TYPE)	__global__ RET_TYPE
+#if __CUDA_ARCH__ < 200
+#define KERNEL_FUNCTION_MAXTHREADS(RET_TYPE)	\
+	__global__ RET_TYPE __launch_bounds__(512)
+#else
+#define KERNEL_FUNCTION_MAXTHREADS(RET_TYPE)	\
+	__global__ RET_TYPE __launch_bounds__(1024)
+#endif
+
+
 #else
 #define STATIC_INLINE(RET_TYPE)		static inline RET_TYPE
 #define STATIC_FUNCTION(RET_TYPE)	static inline RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)	RET_TYPE
+#define KERNEL_FUNCTION_MAXTHREADS(RET_TYPE)	KERNEL_FUNCTION(RET_TYPE)
 #endif
 
 /*
@@ -171,15 +181,6 @@ typedef uintptr_t	hostptr_t;
 #define StromError_SanityCheckViolation		2003 /* sanity check violation */
 
 #ifdef __CUDACC__
-/*
- * Hint for compiler
- */
-#if __CUDA_ARCH__ < 200
-#define __likely_max_threads__		__launch_bounds__(512)
-#else
-#define __likely_max_threads__		__launch_bounds__(1024)
-#endif
-
 /*
  * It sets an error code unless no significant error code is already set.
  * Also, CpuReCheck has higher priority than RowFiltered because CpuReCheck
