@@ -268,6 +268,10 @@ struct GpuTaskState
 	/* performance counter  */
 	pgstrom_perfmon	pfm_accum;
 };
+#define GTS_GET_SCAN_TUPDESC(gts)				\
+	(((GpuTaskState *)(gts))->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor)
+#define GTS_GET_RESULT_TUPDESC(gts)				\
+  (((GpuTaskState *)(gts))->css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor)
 
 struct GpuTask
 {

@@ -561,10 +561,7 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 	dlist_push_tail(&gcontext->pds_list, &pds->pds_chain);
 
 	/* allocation of kds */
-	pds->kds_length = (STROMALIGN(offsetof(kern_data_store,
-										   colmeta[tupdesc->natts])) +
-					   (LONGALIGN(sizeof(bool) * tupdesc->natts) +
-						LONGALIGN(sizeof(Datum) * tupdesc->natts)) * nrooms);
+	pds->kds_length = KERN_DATA_STORE_SLOT_LENGTH_ESTIMATION(tupdesc, nrooms);
 
 	if (!ktoast || !ktoast->kds_fname)
 		pds->kds = MemoryContextAlloc(gmcxt, pds->kds_length);

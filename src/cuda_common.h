@@ -394,6 +394,13 @@ typedef struct {
 #define KERN_DATA_STORE_HEAD_LENGTH(kds)			\
 	STROMALIGN(offsetof(kern_data_store, colmeta[(kds)->ncols]))
 
+/* length estimation of kern_data_store/KDS_FORMAT_SLOT */
+#define KERN_DATA_STORE_SLOT_LENGTH_ESTIMATION(tupdesc,nrooms)	\
+	(STROMALIGN(offsetof(kern_data_store,						\
+						 colmeta[(tupdesc)->natts])) +			\
+	 (LONGALIGN(sizeof(bool) * tupdesc->natts) +				\
+	  LONGALIGN(sizeof(Datum) * tupdesc->natts)) * (nrooms))
+
 /*
  * kern_parambuf
  *
