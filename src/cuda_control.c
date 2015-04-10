@@ -881,7 +881,7 @@ pgstrom_init_gputaskstate(GpuContext *gcontext, GpuTaskState *gts)
 	gts->cb_task_process = NULL;
 	gts->cb_task_complete = NULL;
 	gts->cb_task_release = NULL;
-	gts->cb_task_fallback = NULL;
+	gts->cb_task_polling = NULL;
 	gts->cb_next_chunk = NULL;
 	gts->cb_next_tuple = NULL;
 	gts->cb_cleanup = NULL;
@@ -904,41 +904,52 @@ check_completed_tasks(GpuTaskState *gts)
 {
 	GpuTask		   *gtask;
 	dlist_node	   *dnode;
-	bool			retry;
+
+	/*
+	 * Allows GpuTaskState to check additional concurrent tasks,
+	 * like dynamic background workers based on CPUs, if it has
+	 * hybrid approach implementation.
+	 * If and when concurrent task got completed, typically,
+	 * callback detach task from the running_tasks and reconnect
+	 * to completed_tasks
+	 */
+	if (gts->cb_task_polling)
+		gts->cb_task_polling(gts);
 
 	while (!dlist_is_empty(&gts->completed_tasks))
 	{
 		dnode = dlist_pop_head_node(&gts->completed_tasks);
 		gtask = dlist_container(GpuTask, chain, dnode);
+		gts->num_completed_tasks--;
 		Assert(gtask->gts == gts);
 		SpinLockRelease(&gts->lock);
 
 		/*
-		 * NOTE: cb_task_complete() callback can require cuda_control
-		 * to input itself the pending queue again, in case when kernel
-		 * execution is failed  because of smaller resource estimation
-		 * for example.
-		 * Elsewhere, it will be moved to the ready-queue next to the
-		 * release of device resources. If errcode introduce kernel got
-		 * an error, it shall be chained to the head, to inform this
-		 * error as early as possible.
+		 * NOTE: cb_task_complete() allows task object to clean-up
+		 * cuda resources in the earliest path, and some other task
+		 * specific operations that have to be done in the backend
+		 * context.
+		 * Usually, it returns 'true' then task object is chained
+		 * to the queue of ready_tasks. Elsewhere, callback side
+		 * shall do all the necessary stuff - like retrying with
+		 * larger buffer.
 		 */
-		retry = gts->cb_task_complete(gtask);
+		if (gts->cb_task_complete(gtask))
+		{
+			/* release common cuda fields and its stream */
+			pgstrom_cleanup_gputask_cuda_resources(gtask);
 
-		/* then, move to the ready_tasks */
-		SpinLockAcquire(&gts->lock);
-		if (retry)
-		{
-			dlist_push_head(&gts->pending_tasks, &gtask->chain);
-			gts->num_pending_tasks++;
-		}
-		else
-		{
+			SpinLockAcquire(&gts->lock);
 			if (gtask->errcode != StromError_Success)
 				dlist_push_head(&gts->ready_tasks, &gtask->chain);
 			else
 				dlist_push_tail(&gts->ready_tasks, &gtask->chain);
 			gts->num_ready_tasks++;
+		}
+		else
+		{
+			/* all the exception handling was done on the callback */
+			SpinLockAcquire(&gts->lock);
 		}
 	}
 }
@@ -979,7 +990,7 @@ launch_pending_tasks(GpuTaskState *gts)
 		/*
 		 * Assign CUDA resources, if not yet
 		 */
-		if (!gtask->cuda_stream)
+		if (!gtask->cuda_stream && !gtask->no_cuda_setup)
 		{
 			CUcontext	cuda_context;
 			CUdevice	cuda_device;
@@ -1201,18 +1212,10 @@ pgstrom_fetch_gputask(GpuTaskState *gts)
 	 */
 	if (gtask->errcode != StromError_Success)
 	{
-		if (gtask->errcode == StromError_CpuReCheck &&
-			gts->cb_task_fallback != NULL)
-		{
-			gts->cb_task_fallback(gtask);
-		}
-		else
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("PG-Strom: CUDA execution error (%s)",
-							errorText(gtask->errcode))));
-		}
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("PG-Strom: CUDA execution error (%s)",
+						errorText(gtask->errcode))));
 	}
 	return gtask;
 }
@@ -1265,6 +1268,29 @@ pgstrom_init_gputask(GpuTaskState *gts, GpuTask *gtask)
 	dlist_push_tail(&gts->tracked_tasks, &gtask->tracker);
 	SpinLockRelease(&gts->lock);
 	gtask->pfm.enabled = gts->pfm_accum.enabled;
+}
+
+/*
+ * pgstrom_cleanup_gputask_cuda_resources
+ *
+ * it clears a common cuda resources; assigned on cb_task_process
+ */
+void
+pgstrom_cleanup_gputask_cuda_resources(GpuTask *gtask)
+{
+	CUresult	rc;
+
+	if (gtask->cuda_stream)
+	{
+		rc = cuStreamDestroy(gtask->cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuStreamDestroy: %s", errorText(rc));
+	}
+	gtask->cuda_index = 0;
+	gtask->cuda_context = NULL;
+	gtask->cuda_device = 0UL;
+	gtask->cuda_stream = NULL;
+	gtask->cuda_module = NULL;
 }
 
 static void

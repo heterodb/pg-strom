@@ -367,7 +367,6 @@ typedef struct {
  */
 static bool pgstrom_process_gpuhashjoin(GpuTask *gtask);
 static bool pgstrom_complete_gpuhashjoin(GpuTask *gtask);
-static void pgstrom_fallback_gpuhashjoin(GpuTask *gtask);
 static void pgstrom_release_gpuhashjoin(GpuTask *gtask);
 static GpuTask *gpuhashjoin_next_chunk(GpuTaskState *gts);
 static TupleTableSlot *gpuhashjoin_next_tuple(GpuTaskState *gts);
@@ -2216,7 +2215,6 @@ gpuhashjoin_create_scan_state(CustomScan *cscan)
 	pgstrom_init_gputaskstate(gcontext, &ghjs->gts);
 	ghjs->gts.cb_task_process = pgstrom_process_gpuhashjoin;
 	ghjs->gts.cb_task_complete = pgstrom_complete_gpuhashjoin;
-	ghjs->gts.cb_task_fallback = pgstrom_fallback_gpuhashjoin;
 	ghjs->gts.cb_task_release = pgstrom_release_gpuhashjoin;
 	ghjs->gts.cb_next_chunk = gpuhashjoin_next_chunk;
 	ghjs->gts.cb_next_tuple = gpuhashjoin_next_tuple;
@@ -3496,12 +3494,6 @@ gpuhashjoin_cleanup_cuda_resources(pgstrom_gpuhashjoin *ghjoin)
 	ghjoin->ev_dma_recv_stop = NULL;
 }
 
-static void
-pgstrom_fallback_gpuhashjoin(GpuTask *gtask)
-{
-	elog(INFO, "GpuHashJoin fallback handler is not implemented yet");
-}
-
 static bool
 pgstrom_complete_gpuhashjoin(GpuTask *gtask)
 {
@@ -3587,9 +3579,17 @@ pgstrom_complete_gpuhashjoin(GpuTask *gtask)
 		pds->kds = new_kds;
 		pfree(old_kds);
 
-		return true;	/* retry! */
+		/*
+		 * OK, chain this task on the pending_tasks queue again
+		 */
+		SpinLockAcquire(&gts->lock);
+		dlist_push_head(&gts->pending_tasks, &ghjoin->task.chain);
+		gts->num_pending_tasks++;
+		SpinLockRelease(&gts->lock);
+
+		return false;	/* exceptional path! */
 	}
-	return false;
+	return true;
 }
 
 static void
@@ -3613,6 +3613,7 @@ pgstrom_respond_gpuhashjoin(CUstream stream, CUresult status, void *private)
 		dlist_push_tail(&gts->completed_tasks, &ghjoin->task.chain);
 	else
 		dlist_push_head(&gts->completed_tasks, &ghjoin->task.chain);
+	gts->num_completed_tasks++;
 	SpinLockRelease(&gts->lock);
 
 	SetLatch(&MyProc->procLatch);

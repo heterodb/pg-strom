@@ -256,12 +256,13 @@ struct GpuTaskState
 	dlist_head		ready_tasks;	/* list for ready tasks */
 	cl_uint			num_running_tasks;
 	cl_uint			num_pending_tasks;
+	cl_uint			num_completed_tasks;
 	cl_uint			num_ready_tasks;
 	/* callbacks */
 	bool		  (*cb_task_process)(GpuTask *gtask);
 	bool		  (*cb_task_complete)(GpuTask *gtask);
-	void		  (*cb_task_fallback)(GpuTask *gtask);
 	void		  (*cb_task_release)(GpuTask *gtask);
+	void		  (*cb_task_polling)(GpuTaskState *gts);
 	GpuTask		 *(*cb_next_chunk)(GpuTaskState *gts);
 	TupleTableSlot *(*cb_next_tuple)(GpuTaskState *gts);
 	void		  (*cb_cleanup)(GpuTaskState *gts);
@@ -278,6 +279,7 @@ struct GpuTask
 	dlist_node		chain;		/* link to task state list */
 	dlist_node		tracker;	/* link to task tracker list */
 	GpuTaskState   *gts;
+	bool			no_cuda_setup;	/* true, if no need to set up stream */
 	cl_uint			cuda_index;		/* index of the cuda_context */
 	CUcontext		cuda_context;	/* just reference, no cleanup needed */
 	CUdevice		cuda_device;	/* just reference, no cleanup needed */
@@ -416,6 +418,7 @@ extern void pgstrom_init_gputask(GpuTaskState *gts, GpuTask *gtask);
 extern GpuTask *pgstrom_fetch_gputask(GpuTaskState *gts);
 extern TupleTableSlot *pgstrom_exec_gputask(GpuTaskState *gts);
 extern bool pgstrom_recheck_gputask(GpuTaskState *gts, TupleTableSlot *slot);
+extern void pgstrom_cleanup_gputask_cuda_resources(GpuTask *gtask);
 extern void pgstrom_compute_workgroup_size(size_t *p_grid_size,
 										   size_t *p_block_size,
 										   CUfunction function,
@@ -495,6 +498,10 @@ extern bool kern_fetch_data_store(TupleTableSlot *slot,
 								  size_t row_index,
 								  HeapTuple tuple);
 extern void pgstrom_release_data_store(pgstrom_data_store *pds);
+extern pgstrom_data_store *
+pgstrom_expand_data_store(GpuContext *gcontext,
+						  pgstrom_data_store *pds_old,
+						  Size kds_length_new);
 extern pgstrom_data_store *
 pgstrom_create_data_store_row(GpuContext *gcontext,
 							  TupleDesc tupdesc,

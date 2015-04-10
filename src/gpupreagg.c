@@ -240,7 +240,6 @@ typedef struct
 /* declaration of static functions */
 static bool		gpupreagg_task_process(GpuTask *gtask);
 static bool		gpupreagg_task_complete(GpuTask *gtask);
-static void		gpupreagg_task_fallback(GpuTask *gtask);
 static void		gpupreagg_task_release(GpuTask *gtask);
 static GpuTask *gpupreagg_next_chunk(GpuTaskState *gts);
 static TupleTableSlot *gpupreagg_next_tuple(GpuTaskState *gts);
@@ -2890,7 +2889,6 @@ gpupreagg_create_scan_state(CustomScan *cscan)
 	pgstrom_init_gputaskstate(gcontext, &gpas->gts);
 	gpas->gts.cb_task_process = gpupreagg_task_process;
 	gpas->gts.cb_task_complete = gpupreagg_task_complete;
-	gpas->gts.cb_task_fallback = gpupreagg_task_fallback;
 	gpas->gts.cb_task_release = gpupreagg_task_release;
 	gpas->gts.cb_next_chunk = gpupreagg_next_chunk;
 	gpas->gts.cb_next_tuple = gpupreagg_next_tuple;
@@ -3350,17 +3348,6 @@ gpupreagg_task_release(GpuTask *gtask)
 }
 
 /*
- *
- */
-static void
-gpupreagg_task_fallback(GpuTask *gtask)
-{
-	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) gtask;
-
-	gpreagg->needs_fallback = true;
-}
-
-/*
  * gpupreagg_task_complete
  */
 static bool
@@ -3405,7 +3392,7 @@ gpupreagg_task_complete(GpuTask *gtask)
                            ev_dma_recv_stop);
 	}
 	gpupreagg_cleanup_cuda_resources(gpreagg);	
-	return false;
+	return true;
 }
 
 /*
@@ -3424,6 +3411,13 @@ gpupreagg_task_respond(CUstream stream, CUresult status, void *private)
 	else
 		gpreagg->task.errcode = kresults->errcode;
 
+	/* mark a flag, if GPU required to retry it on CPU side */
+	if (gpreagg->task.errcode == StromError_CpuReCheck)
+	{
+		gpreagg->needs_fallback = true;
+		gpreagg->task.errcode = StromError_Success;
+	}
+
 	/* remove from the running_tasks list */
 	dlist_delete(&gpreagg->task.chain);
 	gts->num_running_tasks--;
@@ -3432,6 +3426,7 @@ gpupreagg_task_respond(CUstream stream, CUresult status, void *private)
 		dlist_push_tail(&gts->completed_tasks, &gpreagg->task.chain);
 	else
 		dlist_push_head(&gts->completed_tasks, &gpreagg->task.chain);
+	gts->num_completed_tasks++;
 	SpinLockRelease(&gts->lock);
 
 	SetLatch(&MyProc->procLatch);

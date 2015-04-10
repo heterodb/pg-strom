@@ -486,6 +486,14 @@ init_kern_data_store(kern_data_store *kds,
 }
 
 pgstrom_data_store *
+pgstrom_expand_data_store(GpuContext *gcontext,
+						  pgstrom_data_store *pds_old,
+						  Size kds_length_new)
+{
+	elog(ERROR, "pgstrom_expand_data_store not implemented yet");
+}
+
+pgstrom_data_store *
 pgstrom_create_data_store_row(GpuContext *gcontext,
 							  TupleDesc tupdesc, Size length,
 							  bool file_mapped)

@@ -405,4 +405,4 @@ gpusort_fixup_datastore(kern_gpusort *kgpusort,
 	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
 }
 #endif	/* __CUDACC__ */
-#endif	/* OPENCL_GPUSORT_H */
+#endif	/* CUDA_GPUSORT_H */

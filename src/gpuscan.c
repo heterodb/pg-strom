@@ -613,7 +613,6 @@ gpuscan_create_scan_state(CustomScan *cscan)
 	pgstrom_init_gputaskstate(gcontext, &gss->gts);
 	gss->gts.cb_task_process = pgstrom_process_gpuscan;
 	gss->gts.cb_task_complete = pgstrom_complete_gpuscan;
-	gss->gts.cb_task_fallback = NULL;	/* to be implemented later */
 	gss->gts.cb_task_release = pgstrom_release_gpuscan;
 	gss->gts.cb_next_chunk = gpuscan_next_chunk;
 	gss->gts.cb_next_tuple = gpuscan_next_tuple;
@@ -1009,7 +1008,7 @@ pgstrom_complete_gpuscan(GpuTask *gtask)
 	}
 	gpuscan_cleanup_cuda_resources(gpuscan);
 
-	return false;
+	return true;
 }
 
 static void
@@ -1033,6 +1032,7 @@ pgstrom_respond_gpuscan(CUstream stream, CUresult status, void *private)
 		dlist_push_tail(&gts->completed_tasks, &gpuscan->task.chain);
 	else
 		dlist_push_head(&gts->completed_tasks, &gpuscan->task.chain);
+	gts->num_completed_tasks++;
 	SpinLockRelease(&gts->lock);
 
 	SetLatch(&MyProc->procLatch);
