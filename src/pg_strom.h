@@ -398,6 +398,14 @@ HostPinMemContextCreate(MemoryContext parent,
 /*
  * cuda_control.c
  */
+typedef enum {
+	ResourceContextNormal,
+	ResourceContextCommit,
+	ResourceContextAbort,
+} PGStromResourceContext;
+
+extern PGStromResourceContext pgstrom_resource_context(void);
+
 extern Size gpuMemMaxAllocSize(void);
 extern CUdeviceptr __gpuMemAlloc(GpuContext *gcontext,
 								 int cuda_index,

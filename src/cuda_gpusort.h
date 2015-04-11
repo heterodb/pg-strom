@@ -141,15 +141,14 @@ gpusort_preparation(kern_gpusort *kgpusort,		/* in */
 {
 	kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgpusort);
 	size_t		nitems = ktoast->nitems;
-	size_t		ncols;
 	size_t		index;
 	int			errcode = StromError_Success;
 
 	/* sanity checks */
 	if (kresults->nrels != 2 ||
 		kresults->nitems != nitems ||
-		ktoast->format != KDS_FORMAT_ROW_FMAP ||
-		kds->format != KDS_FORMAT_TUPSLOT)
+		ktoast->format != KDS_FORMAT_ROW ||
+		kds->format != KDS_FORMAT_SLOT)
 	{
 		STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption);
 		goto out;
@@ -161,40 +160,40 @@ gpusort_preparation(kern_gpusort *kgpusort,		/* in */
 	}
 
 	/* kds also has same nitems */
-	if (get_global_id(0) == 0)
+	if (get_global_id() == 0)
 		kds->nitems = nitems;
 
 	/* put initial value of row-index */
-	for (index = get_global_id(0);
+	for (index = get_global_id();
 		 index < nitems;
-		 index += get_global_size(0))
+		 index += get_global_size())
 	{
 		kresults->results[2 * index] = chunk_id;
 		kresults->results[2 * index + 1] = index;
 	}
 
 	/* projection of kds */
-	if (get_global_id(0) < nitems)
+	if (get_global_id() < nitems)
 	{
-		__global HeapTupleHeaderData *htup;
-		__global Datum	   *ts_values;
-		__global cl_char   *ts_isnull;
+		HeapTupleHeaderData *htup;
+		Datum	   *ts_values;
+		cl_char	   *ts_isnull;
 
-		htup = kern_get_tuple_rsflat(ktoast, get_global_id(0));
+		htup = kern_get_tuple_row(ktoast, get_global_id());
 		if (!htup)
 		{
 			STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption);
 			goto out;
 		}
-		ts_values = KERN_DATA_STORE_VALUES(kds, get_global_id(0));
-		ts_isnull = KERN_DATA_STORE_ISNULL(kds, get_global_id(0));
+		ts_values = KERN_DATA_STORE_VALUES(kds, get_global_id());
+		ts_isnull = KERN_DATA_STORE_ISNULL(kds, get_global_id());
 		gpusort_projection(&errcode,
 						   ts_values,
 						   ts_isnull,
 						   ktoast, htup);
 	}
 out:
-	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
+	kern_writeback_error_status(&kresults->errcode, errcode);
 }
 
 /*
@@ -209,25 +208,25 @@ gpusort_bitonic_local(kern_gpusort *kgpusort,
 					  kern_data_store *ktoast)
 {
 	kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgpusort);
-	__local cl_int *localIdx = LOCAL_WORKMEM;
-	cl_int			errcode = StromError_Success;
-	cl_uint			nitems = kds->nitems;
-	size_t			localID = get_local_id(0);
-	size_t			globalID = get_global_id(0);
-	size_t			localSize = get_local_size(0);
-	size_t			prtID = globalID / localSize;	/* partition ID */
-	size_t			prtSize = localSize * 2;		/* partition Size */
-	size_t			prtPos = prtID * prtSize;		/* partition Position */
-	size_t			localEntry;
-	size_t			blockSize;
-	size_t			unitSize;
-	size_t			i;
+	cl_int	   *localIdx = SHARED_WORKMEM(cl_int);
+	cl_int		errcode = StromError_Success;
+	cl_uint		nitems = kds->nitems;
+	size_t		localID = get_local_id();
+	size_t		globalID = get_global_id();
+	size_t		localSize = get_local_size();
+	size_t		prtID = globalID / localSize;	/* partition ID */
+	size_t		prtSize = localSize * 2;		/* partition Size */
+	size_t		prtPos = prtID * prtSize;		/* partition Position */
+	size_t		localEntry;
+	size_t		blockSize;
+	size_t		unitSize;
+	size_t		i;
 
 	/* create row index and then store to localIdx */
 	localEntry = ((prtPos + prtSize < nitems) ? prtSize : (nitems - prtPos));
 	for (i = localID; i < localEntry; i += localSize)
 		localIdx[i] = prtPos + i;
-    barrier(CLK_LOCAL_MEM_FENCE);
+    __syncthreads();
 
 	/* bitonic sorting */
 	for (blockSize = 2; blockSize <= prtSize; blockSize *= 2)
@@ -255,16 +254,16 @@ gpusort_bitonic_local(kern_gpusort *kgpusort,
 					localIdx[idx1] = pos0;
 				}
 			}
-			barrier(CLK_LOCAL_MEM_FENCE);
+			__syncthreads();
 		}
 	}
 	/* write back local sorted result */
 	for (i=localID; i < localEntry; i+=localSize)
 		kresults->results[2 * (prtPos + i) + 1] = localIdx[i];
-	barrier(CLK_LOCAL_MEM_FENCE);
+	__syncthreads();
 
 	/* any error during run-time? */
-	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
+	kern_writeback_error_status(&kresults->errcode, errcode);
 }
 
 /*
@@ -287,7 +286,7 @@ gpusort_bitonic_step(kern_gpusort *kgpusort,
 						  ? -bitonic_unitsz
 						  : bitonic_unitsz);
 	cl_uint		nitems = kds->nitems;
-	size_t		globalID = get_global_id(0);
+	size_t		globalID = get_global_id();
 	size_t		halfUnitSize = unitsz / 2;
 	size_t		unitMask = unitsz - 1;
 	cl_int		idx0, idx1;
@@ -309,7 +308,7 @@ gpusort_bitonic_step(kern_gpusort *kgpusort,
 		kresults->results[2 * idx1 + 1] = pos0;
 	}
 out:
-	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
+	kern_writeback_error_status(&kresults->errcode, errcode);
 }
 
 /*
@@ -324,25 +323,25 @@ gpusort_bitonic_merge(kern_gpusort *kgpusort,
 					  kern_data_store *ktoast)
 {
 	kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgpusort);
-	__local cl_int *localIdx = LOCAL_WORKMEM;
-	cl_int			errcode = StromError_Success;
-	cl_uint			nitems = kds->nitems;
-    size_t			localID = get_local_id(0);
-    size_t			globalID = get_global_id(0);
-    size_t			localSize = get_local_size(0);
-	size_t			prtID = globalID / localSize;	/* partition ID */
-	size_t			prtSize = 2 * localSize;		/* partition Size */
-	size_t			prtPos = prtID * prtSize;		/* partition Position */
-	size_t			localEntry;
-	size_t			blockSize = prtSize;
-	size_t			unitSize = prtSize;
-	size_t			i;
+	cl_int	   *localIdx = SHARED_WORKMEM(cl_int);
+	cl_int		errcode = StromError_Success;
+	cl_uint		nitems = kds->nitems;
+    size_t		localID = get_local_id();
+    size_t		globalID = get_global_id();
+    size_t		localSize = get_local_size();
+	size_t		prtID = globalID / localSize;	/* partition ID */
+	size_t		prtSize = 2 * localSize;		/* partition Size */
+	size_t		prtPos = prtID * prtSize;		/* partition Position */
+	size_t		localEntry;
+	size_t		blockSize = prtSize;
+	size_t		unitSize = prtSize;
+	size_t		i;
 
 	/* Load index to localIdx[] */
 	localEntry = (prtPos+prtSize < nitems) ? prtSize : (nitems-prtPos);
 	for (i = localID; i < localEntry; i += localSize)
 		localIdx[i] = kresults->results[2 * (prtPos + i) + 1];
-	barrier(CLK_LOCAL_MEM_FENCE);
+	__syncthreads();
 
 	/* merge two sorted blocks */
 	for (unitSize = blockSize; unitSize >= 2; unitSize /= 2)
@@ -365,14 +364,14 @@ gpusort_bitonic_merge(kern_gpusort *kgpusort,
                 localIdx[idx1] = pos0;
 			}
 		}
-		barrier(CLK_LOCAL_MEM_FENCE);
+		__syncthreads();
 	}
 	/* Save index to kresults[] */
 	for (i = localID; i < localEntry; i += localSize)
 		kresults->results[2 * (prtPos + i) + 1] = localIdx[i];
-	barrier(CLK_LOCAL_MEM_FENCE);
+	__syncthreads();
 
-	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
+	kern_writeback_error_status(&kresults->errcode, errcode);
 }
 
 KERNEL_FUNCTION(void)
@@ -383,26 +382,26 @@ gpusort_fixup_datastore(kern_gpusort *kgpusort,
 	kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgpusort);
 	int			errcode = StromError_Success;
 
-	if (get_global_id(0) < kds->nitems)
+	if (get_global_id() < kds->nitems)
 	{
-		__global HeapTupleHeaderData *htup;
-		__global Datum	   *ts_values;
-		__global cl_char   *ts_isnull;
+		HeapTupleHeaderData *htup;
+		Datum	   *ts_values;
+		cl_char	   *ts_isnull;
 
-		htup = kern_get_tuple_rsflat(ktoast, get_global_id(0));
+		htup = kern_get_tuple_row(ktoast, get_global_id());
 		if (!htup)
 			STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption);
 		else
 		{
-			ts_values = KERN_DATA_STORE_VALUES(kds, get_global_id(0));
-			ts_isnull = KERN_DATA_STORE_ISNULL(kds, get_global_id(0));
+			ts_values = KERN_DATA_STORE_VALUES(kds, get_global_id());
+			ts_isnull = KERN_DATA_STORE_ISNULL(kds, get_global_id());
 			gpusort_fixup_variables(&errcode,
 									ts_values,
 									ts_isnull,
 									ktoast, htup);
 		}
 	}
-	kern_writeback_error_status(&kresults->errcode, errcode, LOCAL_WORKMEM);
+	kern_writeback_error_status(&kresults->errcode, errcode);
 }
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_GPUSORT_H */

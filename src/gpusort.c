@@ -1325,13 +1325,17 @@ gpusort_task_release(GpuTask *gtask)
 {
 	pgstrom_gpusort	   *gpusort = (pgstrom_gpusort *) gtask;
 
-	if (gpusort->litems_dsm)
-		dsm_detach(gpusort->litems_dsm);
-	if (gpusort->ritems_dsm)
-		dsm_detach(gpusort->ritems_dsm);
-	if (gpusort->oitems_dsm)
-		dsm_detach(gpusort->oitems_dsm);
-
+	if (pgstrom_resource_context() == ResourceContextNormal)
+	{
+		if (gpusort->litems_dsm)
+			dsm_detach(gpusort->litems_dsm);
+		if (gpusort->ritems_dsm)
+			dsm_detach(gpusort->ritems_dsm);
+		if (gpusort->oitems_dsm)
+			dsm_detach(gpusort->oitems_dsm);
+		if (gpusort->bgw_handle)
+			pfree(gpusort->bgw_handle);
+	}
 	gpusort_cleanup_cuda_resources(gpusort);
 
 	pfree(gtask);
@@ -1787,6 +1791,7 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	 */
 	length = (STROMALIGN(gss->kparams->length) +
 			  STROMALIGN(offsetof(kern_resultbuf, results[2 * nitems])));
+	elog(INFO, "m_gpusort length=%zu", length);
 	gpusort->m_gpusort = gpuMemAlloc(&gpusort->task, length);
 	if (!gpusort->m_gpusort)
 		goto out_of_resource;
@@ -1820,6 +1825,16 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 	}
 
+	offset = STROMALIGN(gss->kparams->length);
+	length = dsm_segment_map_length(gpusort->oitems_dsm); //offsetof(kern_resultbuf, results[2 * nitems]);
+	elog(INFO, "addr=%p length=%zu", dsm_segment_address(gpusort->oitems_dsm), length);
+	rc = cuMemHostRegister(dsm_segment_address(gpusort->oitems_dsm),
+						   length,
+						   0);
+	Assert(rc == CUDA_SUCCESS);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemHostRegister: %s", errorText(rc));
+
 	/*
 	 * OK, enqueue a series of commands
 	 */
@@ -1835,9 +1850,9 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	gpusort->task.pfm.num_dma_send++;
 
 	offset = STROMALIGN(gss->kparams->length);
-	length = offsetof(kern_resultbuf, results[2 * nitems]);
+	length = offsetof(kern_resultbuf, results[0]);
 	rc = cuMemcpyHtoDAsync(gpusort->m_gpusort + offset,
-						   dsm_segment_address(gpusort->litems_dsm),
+						   kresults,
 						   length,
 						   gpusort->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
@@ -2084,13 +2099,12 @@ form_pgstrom_flat_gpusort_base(GpuSortState *gss, cl_int chunk_id)
 	dsm_segment		   *dsm_seg;
 	kern_resultbuf	   *kresults;
 	Size				dsm_length;
-	pgstrom_data_store *pds;
+	pgstrom_data_store *ptoast;
 	size_t				nitems;
 	pgstrom_flat_gpusort *pfg;
 
-	pds = gss->pds_chunks[chunk_id];
-	nitems = pds->kds->nitems;
-
+	ptoast = gss->pds_toasts[chunk_id];
+	nitems = ptoast->kds->nitems;
 	dsm_length = (STROMALIGN(offsetof(pgstrom_flat_gpusort, data)) +
 				  STROMALIGN(offsetof(kern_resultbuf, results[2 * nitems])));
 	dsm_seg = dsm_create(dsm_length, 0);

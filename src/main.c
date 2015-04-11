@@ -86,9 +86,22 @@ pgstrom_enabled(void)
 static void
 pg_strom_enabled_global_assign(bool newval, void *extra)
 {
-	SpinLockAcquire(&global_guc_values->lock);
-	global_guc_values->pgstrom_enabled_global = newval;
-	SpinLockRelease(&global_guc_values->lock);
+	/*
+	 * NOTE: we cannot save state on the shared memory segment
+	 * during _PG_init() because it is not initialized yet.
+	 * So, we once save the "pg_strom.enabled_global" state on
+	 * a private variable, then initialize the shared state
+	 * using this private variable. Once shared memory segment
+	 * is allocated, we shall reference the shared memory side.
+	 */
+	if (!global_guc_values)
+		guc_pgstrom_enabled_global = newval;
+	else
+	{
+		SpinLockAcquire(&global_guc_values->lock);
+		global_guc_values->pgstrom_enabled_global = newval;
+		SpinLockRelease(&global_guc_values->lock);
+	}
 }
 
 /*
@@ -97,19 +110,23 @@ pg_strom_enabled_global_assign(bool newval, void *extra)
 static const char *
 pg_strom_enabled_global_show(void)
 {
-	bool	rc;
+	bool	state;
 
-	SpinLockAcquire(&global_guc_values->lock);
-	rc = global_guc_values->pgstrom_enabled_global;
-	SpinLockRelease(&global_guc_values->lock);
-
-	return rc ? "on" : "off";
+	if (!global_guc_values)
+		state = guc_pgstrom_enabled_global;	/* private variable! */
+	else
+	{
+		SpinLockAcquire(&global_guc_values->lock);
+		state = global_guc_values->pgstrom_enabled_global;
+		SpinLockRelease(&global_guc_values->lock);
+	}
+	return state ? "on" : "off";
 }
 
 static void
 pgstrom_init_misc_guc(void)
 {
-	/* GUC variables according to the device information */
+	/* turn on/off PG-Strom feature */
 	DefineCustomBoolVariable("pg_strom.enabled",
 							 "Enables the planner's use of PG-Strom",
 							 NULL,
@@ -118,6 +135,19 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	/* turn on/off PG-Strom feature on all the instance */
+	DefineCustomBoolVariable("pg_strom.enabled_global",
+							 "Enables the planner's use of PG-Strom in global",
+							 NULL,
+							 &guc_pgstrom_enabled_global,
+							 true,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE |
+							 GUC_SUPERUSER_ONLY,
+							 NULL,
+							 pg_strom_enabled_global_assign,
+							 pg_strom_enabled_global_show);
+	/* turn on/off performance monitor on EXPLAIN ANALYZE */
 	DefineCustomBoolVariable("pg_strom.perfmon",
 							 "Enables the performance monitor of PG-Strom",
 							 NULL,
@@ -232,6 +262,8 @@ static void
 pgstrom_startup_global_guc(void)
 {
 	bool	found;
+	char   *result = NULL;
+	char   *varname = NULL;
 
 	if (shmem_startup_hook_next)
 		(*shmem_startup_hook_next)();
@@ -244,19 +276,7 @@ pgstrom_startup_global_guc(void)
 	/* segment initialization */
 	memset(global_guc_values, 0, MAXALIGN(sizeof(*global_guc_values)));
 	SpinLockInit(&global_guc_values->lock);
-
-	/* add pg_strom.enabled_global parameter */
-	DefineCustomBoolVariable("pg_strom.enabled_global",
-							 "Enables the planner's use of PG-Strom in global",
-							 NULL,
-							 &guc_pgstrom_enabled_global,
-							 true,
-							 PGC_SUSET,
-							 GUC_NOT_IN_SAMPLE |
-							 GUC_SUPERUSER_ONLY,
-							 NULL,
-							 pg_strom_enabled_global_assign,
-							 pg_strom_enabled_global_show);
+	global_guc_values->pgstrom_enabled_global = guc_pgstrom_enabled_global;
 }
 
 void
@@ -280,7 +300,7 @@ _PG_init(void)
 	pgstrom_init_gpuscan();
 	pgstrom_init_gpuhashjoin();
 	pgstrom_init_gpupreagg();
-	//pgstrom_init_gpusort();
+	pgstrom_init_gpusort();
 
 	/* miscellaneous initializations */
 	pgstrom_init_misc_guc();

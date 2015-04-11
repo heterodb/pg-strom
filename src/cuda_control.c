@@ -1293,35 +1293,61 @@ pgstrom_cleanup_gputask_cuda_resources(GpuTask *gtask)
 	gtask->cuda_module = NULL;
 }
 
+/*
+ *
+ */
+static PGStromResourceContext current_resource_context = ResourceContextNormal;
+
+PGStromResourceContext
+pgstrom_resource_context(void)
+{
+	return current_resource_context;
+}
+
 static void
 gpucontext_cleanup_callback(ResourceReleasePhase phase,
 							bool is_commit,
 							bool is_toplevel,
 							void *arg)
 {
-	dlist_mutable_iter iter;
-	int			hindex = gpucontext_hash_index(CurrentResourceOwner);
+	dlist_mutable_iter		iter;
+	PGStromResourceContext	saved_resource_context;
+	int						hindex;
 
 	if (phase != RESOURCE_RELEASE_AFTER_LOCKS)
 		return;
 
+	hindex = gpucontext_hash_index(CurrentResourceOwner);
 	dlist_foreach_modify(iter, &gcontext_hash[hindex])
 	{
 		GpuContext *gcontext = dlist_container(GpuContext, chain, iter.cur);
 
-		if (gcontext->resowner == CurrentResourceOwner)
+		if (gcontext->resowner != CurrentResourceOwner)
+			continue;
+
+		/* OK, GpuContext to be released */
+		if (gcontext_last == gcontext)
+			gcontext_last = NULL;
+		dlist_delete(&gcontext->chain);
+
+		if (is_commit && gcontext->refcnt > 1)
+			elog(WARNING, "Probably, someone forgot to put GpuContext");
+
+		saved_resource_context = current_resource_context;
+		current_resource_context = (is_commit
+									? ResourceContextCommit
+									: ResourceContextAbort);
+		PG_TRY();
 		{
-			/* OK, GpuContext to be released */
-			if (gcontext_last == gcontext)
-				gcontext_last = NULL;
-			dlist_delete(&gcontext->chain);
-
-			if (is_commit && gcontext->refcnt > 1)
-				elog(WARNING, "Probably, someone forgot to put GpuContext");
-
 			pgstrom_release_gpucontext(gcontext, is_commit);
-			return;
 		}
+		PG_CATCH();
+		{
+			current_resource_context = saved_resource_context;
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		return;
 	}
 }
 
