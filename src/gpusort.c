@@ -1163,7 +1163,7 @@ gpusort_next_chunk(GpuTaskState *gts)
 	/*
 	 * Load tuples from the underlying plan node
 	 */
-	for (;;)
+	while (!gss->gts.scan_done)
 	{
 		if (gss->overflow_slot != NULL)
 		{
@@ -1477,8 +1477,9 @@ gpusort_merge_chunks(GpuSortState *gss, pgstrom_gpusort *gpusort_1)
 static bool
 gpusort_task_complete(GpuTask *gtask)
 {
+	GpuSortState	   *gss = (GpuSortState *) gtask->gts;
 	pgstrom_gpusort	   *gpusort = (pgstrom_gpusort *) gtask;
-	GpuSortState	   *gss = (GpuSortState *) gpusort->task.gts;
+	pgstrom_gpusort	   *newsort;
 
 	if (gpusort->mc_class == 0)
 	{
@@ -1548,8 +1549,8 @@ gpusort_task_complete(GpuTask *gtask)
 	 * for the upcoming merginable chunk, or it is the final result of
 	 * bitonic sorting.
 	 */
-	gpusort = gpusort_merge_chunks(gss, gpusort);
-	if (gpusort)
+	newsort = gpusort_merge_chunks(gss, gpusort);
+	if (newsort)
 	{
 		/*
 		 * If supplied gpusort chould find a pair to be merged,
@@ -1557,7 +1558,7 @@ gpusort_task_complete(GpuTask *gtask)
 		 * two input stream) again.
 		 */
 		SpinLockAcquire(&gss->gts.lock);
-		dlist_push_head(&gss->gts.pending_tasks, &gpusort->task.chain);
+		dlist_push_head(&gss->gts.pending_tasks, &newsort->task.chain);
 		gss->gts.num_pending_tasks++;
 		SpinLockRelease(&gss->gts.lock);
 	}
@@ -1791,10 +1792,10 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	 */
 	length = (STROMALIGN(gss->kparams->length) +
 			  STROMALIGN(offsetof(kern_resultbuf, results[2 * nitems])));
-	elog(INFO, "m_gpusort length=%zu", length);
 	gpusort->m_gpusort = gpuMemAlloc(&gpusort->task, length);
 	if (!gpusort->m_gpusort)
 		goto out_of_resource;
+	elog(INFO, "m_gpusort=%zx length=%zu", (Size)gpusort->m_gpusort, length);
 
 	length = KERN_DATA_STORE_LENGTH(pds->kds);
 	gpusort->m_kds = gpuMemAlloc(&gpusort->task, length);
@@ -1825,8 +1826,9 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 	}
 
+#if 1
 	offset = STROMALIGN(gss->kparams->length);
-	length = dsm_segment_map_length(gpusort->oitems_dsm); //offsetof(kern_resultbuf, results[2 * nitems]);
+	length = dsm_segment_map_length(gpusort->oitems_dsm);
 	elog(INFO, "addr=%p length=%zu", dsm_segment_address(gpusort->oitems_dsm), length);
 	rc = cuMemHostRegister(dsm_segment_address(gpusort->oitems_dsm),
 						   length,
@@ -1834,6 +1836,7 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	Assert(rc == CUDA_SUCCESS);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemHostRegister: %s", errorText(rc));
+#endif
 
 	/*
 	 * OK, enqueue a series of commands
@@ -1941,6 +1944,12 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 	gpusort->task.pfm.num_kern_prep++;
 
+#if 1
+	rc = cuStreamSynchronize(gpusort->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuStreamSynchronize: %s", errorText(rc));
+#endif
+
 	/*
 	 * DMA Recv
 	 */
@@ -1948,6 +1957,7 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 
 	offset = STROMALIGN(gss->kparams->length);
 	length = STROMALIGN(offsetof(kern_resultbuf, results[2 * nitems]));
+	elog(INFO, "m_gpusort=%zx offset=%zu length=%zu kresults=%p", (Size)gpusort->m_gpusort, offset, length, kresults);
 	rc = cuMemcpyDtoHAsync(kresults,
 						   gpusort->m_gpusort + offset,
 						   length,
@@ -2107,11 +2117,12 @@ form_pgstrom_flat_gpusort_base(GpuSortState *gss, cl_int chunk_id)
 	nitems = ptoast->kds->nitems;
 	dsm_length = (STROMALIGN(offsetof(pgstrom_flat_gpusort, data)) +
 				  STROMALIGN(offsetof(kern_resultbuf, results[2 * nitems])));
+	elog(INFO, "dsm_length = %zu", dsm_length);
 	dsm_seg = dsm_create(dsm_length, 0);
 	pfg = dsm_segment_address(dsm_seg);
 	memset(pfg, 0, sizeof(pgstrom_flat_gpusort));
 	pfg->dsm_length = dsm_length;
-	pfg->kresults_ofs = STROMALIGN(offsetof(pgstrom_flat_gpusort, data[0]));
+	pfg->kresults_ofs = 0;
 
 	kresults = GPUSORT_GET_KRESULTS(dsm_seg);
 	memset(kresults, 0, sizeof(kern_resultbuf));
