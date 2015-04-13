@@ -21,6 +21,7 @@
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "storage/ipc.h"
+#include "storage/pg_shmem.h"
 #include "storage/shmem.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
@@ -93,8 +94,14 @@ pg_strom_enabled_global_assign(bool newval, void *extra)
 	 * a private variable, then initialize the shared state
 	 * using this private variable. Once shared memory segment
 	 * is allocated, we shall reference the shared memory side.
+	 *
+	 * Also note that some worker process may detach shared-
+	 * memory segment on starting-up, so we also need to check
+	 * the shared memory segment is still valid. PG-Strom works
+	 * only backend process with valid shared memory segment.
+	 * So, here is no actual problem even if dummy behavior.
 	 */
-	if (!global_guc_values)
+	if (!UsedShmemSegAddr || !global_guc_values)
 		guc_pgstrom_enabled_global = newval;
 	else
 	{
@@ -112,7 +119,7 @@ pg_strom_enabled_global_show(void)
 {
 	bool	state;
 
-	if (!global_guc_values)
+	if (!UsedShmemSegAddr || !global_guc_values)
 		state = guc_pgstrom_enabled_global;	/* private variable! */
 	else
 	{
