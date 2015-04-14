@@ -269,8 +269,6 @@ static void
 pgstrom_startup_global_guc(void)
 {
 	bool	found;
-	char   *result = NULL;
-	char   *varname = NULL;
 
 	if (shmem_startup_hook_next)
 		(*shmem_startup_hook_next)();

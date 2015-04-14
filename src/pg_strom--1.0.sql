@@ -6,7 +6,7 @@ CREATE SCHEMA IF NOT EXISTS pgstrom;
 --
 -- pg_strom installation queries
 --
-CREATE TYPE __pgstrom_cuda_device_info AS (
+CREATE TYPE __pgstrom_device_info AS (
   id		int4,
   property	text,
   value		text

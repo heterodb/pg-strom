@@ -1892,17 +1892,19 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 	}
 	else
 	{
+		int		pindex = aindex - 2;
 		int		property;
 
 		rc = cuDeviceGetAttribute(&property,
-								  catalog[aindex].attrib,
+								  catalog[pindex].attrib,
 								  cuda_devices[dindex]);
+		Assert(rc == CUDA_SUCCESS);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuDeviceGetAttribute: %s",
 				 errorText(rc));
 
-		att_name = catalog[aindex].attname;
-		switch (catalog[aindex].attkind)
+		att_name = catalog[pindex].attname;
+		switch (catalog[pindex].attkind)
 		{
 			case DEVATTR_BOOL:
 				att_value = psprintf("%s", property != 0 ? "True" : "False");
@@ -1917,6 +1919,24 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 				att_value = psprintf("%d MHz", property / 1000);
 				break;
 			case DEVATTR_COMP_MODE:
+				switch (property)
+				{
+					case CU_COMPUTEMODE_DEFAULT:
+						att_value = "Default";
+						break;
+					case CU_COMPUTEMODE_EXCLUSIVE:
+						att_value = "Exclusive";
+						break;
+					case CU_COMPUTEMODE_PROHIBITED:
+						att_value = "Prohibited";
+						break;
+					case CU_COMPUTEMODE_EXCLUSIVE_PROCESS:
+						att_value = "Exclusive Process";
+						break;
+					default:
+						att_value = "Unknown";
+						break;
+				}
 				break;
 			case DEVATTR_BITS:
 				att_value = psprintf("%d bits", property);
