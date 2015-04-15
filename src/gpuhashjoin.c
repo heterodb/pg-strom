@@ -3640,7 +3640,7 @@ __pgstrom_process_gpuhashjoin(pgstrom_gpuhashjoin *ghjoin)
 	 * sanity checks
 	 */
 	Assert(pds_src->kds->format == KDS_FORMAT_ROW);
-	Assert(!pds_src->ktoast);
+	Assert(!pds_src->ptoast);
 	Assert(pds_dst->kds->format == KDS_FORMAT_ROW ||
 		   pds_dst->kds->format == KDS_FORMAT_SLOT);
 

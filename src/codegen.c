@@ -1461,7 +1461,6 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	walker_context.param_refs = bms_copy(context->param_refs);
 	walker_context.var_label  = context->var_label;
 	walker_context.kds_label  = context->kds_label;
-	walker_context.ktoast_label  = context->ktoast_label;
 	walker_context.kds_index_label = context->kds_index_label;
 	walker_context.extra_flags = context->extra_flags;
 	walker_context.pseudo_tlist = context->pseudo_tlist;
@@ -1579,7 +1578,6 @@ pgstrom_codegen_var_declarations(codegen_context *context)
 			var->varattno,
 			dtype->type_name,
 			context->kds_label,
-			//context->ktoast_label,
 			var->varattno - 1,
 			context->kds_index_label);
 	}
@@ -1632,7 +1630,6 @@ pgstrom_codegen_bulk_var_declarations(codegen_context *context,
 				tle->resno,
 				dtype->type_name,
 				context->kds_label,
-				//context->ktoast_label,
 				outer_var->varattno - 1,
 				context->kds_index_label);
 		}
@@ -1669,7 +1666,6 @@ pgstrom_codegen_bulk_var_declarations(codegen_context *context,
 			var->varattno,
 			dtype->type_name,
 			context->kds_label,
-			//context->ktoast_label,
 			var->varattno - 1,
 			context->kds_index_label);
 	}
@@ -1820,7 +1816,6 @@ pgstrom_init_codegen_context(codegen_context *context)
 
 	context->var_label = "KVAR";
 	context->kds_label = "kds";
-	context->ktoast_label = "ktoast";
 	context->kds_index_label = "kds_index";
 }
 

@@ -402,8 +402,8 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 	}
 
 	/* release relevant toast store, if any */
-	if (pds->ktoast)
-		pgstrom_release_data_store(pds->ktoast);
+	if (pds->ptoast)
+		pgstrom_release_data_store(pds->ptoast);
 	/* release body of the data store */
 	if (!pds->kds_fname)
 		pfree(pds->kds);
@@ -418,7 +418,7 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 							pds->kds_fname,
 							(char *)pds->kds,
 							(char *)pds->kds + mmap_length - 1)));
-		if (!pds->ktoast)
+		if (!pds->ptoast)
 		{
 			/* Also unlink the backend file, if responsible */
 			if (unlink(pds->kds_fname) != 0)
@@ -556,7 +556,7 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 		/* kds is still mapped - not to manage file desc by ourself */
 		CloseTransientFile(kds_fdesc);
 	}
-	pds->ktoast = NULL;	/* never used */
+	pds->ptoast = NULL;	/* never used */
 
 	/*
 	 * initialize common part of kds. Note that row-format cannot
@@ -571,7 +571,7 @@ pgstrom_data_store *
 pgstrom_create_data_store_slot(GpuContext *gcontext,
 							   TupleDesc tupdesc, cl_uint nrooms,
 							   bool internal_format,
-							   pgstrom_data_store *ktoast)
+							   pgstrom_data_store *ptoast)
 {
 	pgstrom_data_store *pds;
 	MemoryContext	gmcxt = gcontext->memcxt;
@@ -583,7 +583,7 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 	/* allocation of kds */
 	pds->kds_length = KERN_DATA_STORE_SLOT_LENGTH_ESTIMATION(tupdesc, nrooms);
 
-	if (!ktoast || !ktoast->kds_fname)
+	if (!ptoast || !ptoast->kds_fname)
 		pds->kds = MemoryContextAlloc(gmcxt, pds->kds_length);
 	else
 	{
@@ -591,9 +591,9 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 		size_t		mmap_length;
 
 		/* append KDS after the ktoast file */
-		pds->kds_offset = TYPEALIGN(BLCKSZ, ktoast->kds_length);
+		pds->kds_offset = TYPEALIGN(BLCKSZ, ptoast->kds_length);
 
-		pds->kds_fname = MemoryContextStrdup(gmcxt, ktoast->kds_fname);
+		pds->kds_fname = MemoryContextStrdup(gmcxt, ptoast->kds_fname);
 		kds_fdesc = OpenTransientFile(pds->kds_fname,
 									  O_RDWR | PG_BINARY, 0600);
 		if (kds_fdesc < 0)
@@ -628,11 +628,11 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 	 * toast buffer shall be released with main data-store together,
 	 * so we don't need to track it individually.
 	 */
-	if (ktoast)
+	if (ptoast)
 	{
-		dlist_delete(&ktoast->pds_chain);
-		memset(&ktoast->pds_chain, 0, sizeof(dlist_node));
-		pds->ktoast = ktoast;
+		dlist_delete(&ptoast->pds_chain);
+		memset(&ptoast->pds_chain, 0, sizeof(dlist_node));
+		pds->ptoast = ptoast;
 	}
 	init_kern_data_store(pds->kds, tupdesc, pds->kds_length,
 						 KDS_FORMAT_SLOT, nrooms, internal_format);
@@ -700,11 +700,6 @@ pgstrom_file_mmap_data_store(FileName kds_fname,
 	}
 	/* kds is still mapped - not to manage file desc by ourself */
 	CloseTransientFile(kds_fdesc);
-}
-
-void
-pgstrom_file_unmap_data_store(pgstrom_data_store *pds)
-{
 }
 
 int
@@ -912,7 +907,7 @@ pgstrom_dump_data_store(pgstrom_data_store *pds)
 	elog(INFO,
 		 "pds {kds_fname=%s kds_offset=%zu kds_length=%zu kds=%p ktoast=%p}",
 		 pds->kds_fname, pds->kds_offset, pds->kds_length,
-		 pds->kds, pds->ktoast);
+		 pds->kds, pds->ptoast);
 	elog(INFO,
 		 "kds {hostptr=%lu length=%u usage=%u ncols=%u nitems=%u nrooms=%u"
 		 " format=%s tdhasoid=%s tdtypeid=%u tdtypmod=%d}",

@@ -344,7 +344,7 @@ typedef struct pgstrom_data_store
 	Size		kds_offset;	/* offset of mapped file */
 	Size		kds_length;	/* length of the kernel data store */
 	kern_data_store *kds;
-	struct pgstrom_data_store *ktoast;
+	struct pgstrom_data_store *ptoast;
 } pgstrom_data_store;
 
 /* --------------------------------------------------------------------
@@ -459,7 +459,6 @@ typedef struct {
 	Bitmapset  *param_refs;	/* referenced parameters */
 	const char *var_label;	/* prefix of var reference, if exist */
 	const char *kds_label;	/* label to reference kds, if exist */
-	const char *ktoast_label;/* label to reference ktoast, if exist */
 	const char *kds_index_label; /* label to reference kds_index, if exist */
 	List	   *pseudo_tlist;/* pseudo tlist expression, if any */
 	int			extra_flags;/* external libraries to be included */
@@ -520,15 +519,13 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 							   TupleDesc tupdesc,
 							   cl_uint nrooms,
 							   bool internal_format,
-							   pgstrom_data_store *ktoast);
+							   pgstrom_data_store *ptoast);
 extern void
 pgstrom_file_mmap_data_store(FileName kds_fname,
 							 Size kds_offset,
 							 Size kds_length,
 							 kern_data_store **p_kds,
 							 kern_data_store **p_ktoast);
-extern void
-pgstrom_file_unmap_data_store(pgstrom_data_store *pds);
 
 extern int pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 										   Relation rel,
