@@ -1573,13 +1573,13 @@ pgstrom_codegen_var_declarations(codegen_context *context)
 		Assert(dtype != NULL);
 		appendStringInfo(
 			&str,
-			"  pg_%s_t %s_%u = pg_%s_vref(%s,%s,errcode,%u,%s);\n",
+			"  pg_%s_t %s_%u = pg_%s_vref(%s,errcode,%u,%s);\n",
 			dtype->type_name,
 			context->var_label,
 			var->varattno,
 			dtype->type_name,
 			context->kds_label,
-			context->ktoast_label,
+			//context->ktoast_label,
 			var->varattno - 1,
 			context->kds_index_label);
 	}
@@ -1626,13 +1626,13 @@ pgstrom_codegen_bulk_var_declarations(codegen_context *context,
 			Assert(outer_var->vartype == type_oid);
 			appendStringInfo(
 				&buf2,
-				"  pg_%s_t %s_%u = pg_%s_vref(%s,%s,errcode,%u,%s);\n",
+				"  pg_%s_t %s_%u = pg_%s_vref(%s,errcode,%u,%s);\n",
 				dtype->type_name,
 				context->var_label,
 				tle->resno,
 				dtype->type_name,
 				context->kds_label,
-				context->ktoast_label,
+				//context->ktoast_label,
 				outer_var->varattno - 1,
 				context->kds_index_label);
 		}
@@ -1664,12 +1664,12 @@ pgstrom_codegen_bulk_var_declarations(codegen_context *context,
 		dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
 		appendStringInfo(
 			&buf1,
-			"  pg_%s_t OVAR_%u = pg_%s_vref(%s,%s,errcode,%u,%s);\n",
+			"  pg_%s_t OVAR_%u = pg_%s_vref(%s,errcode,%u,%s);\n",
 			dtype->type_name,
 			var->varattno,
 			dtype->type_name,
 			context->kds_label,
-			context->ktoast_label,
+			//context->ktoast_label,
 			var->varattno - 1,
 			context->kds_index_label);
 	}

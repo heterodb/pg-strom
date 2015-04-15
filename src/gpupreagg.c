@@ -1591,11 +1591,11 @@ gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 				 var->vartype);
 
 		/* variable declarations */
-		appendStringInfo(&decl,
-						 "  pg_%s_t keyval_%u"
-						 " = pg_%s_vref(kds,ktoast,errcode,%u,kds_index);\n",
-						 dtype->type_name, resno,
-						 dtype->type_name, resno - 1);
+		appendStringInfo(
+			&decl,
+			"  pg_%s_t keyval_%u = pg_%s_vref(kds,errcode,%u,kds_index);\n",
+			dtype->type_name, resno,
+			dtype->type_name, resno - 1);
 
 		/* crc32 computing */
 		appendStringInfo(
@@ -1682,14 +1682,14 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 		 */
 		appendStringInfo(
 			&body,
-			"  xkeyval_%u = pg_%s_vref(kds,ktoast,errcode,%u,x_index);\n"
-			"  ykeyval_%u = pg_%s_vref(kds,ktoast,errcode,%u,y_index);\n"
+			"  xkeyval_%u = pg_%s_vref(kds,errcode,%u,x_index);\n"
+			"  ykeyval_%u = pg_%s_vref(kds,errcode,%u,y_index);\n"
 			"  if (!xkeyval_%u.isnull && !ykeyval_%u.isnull)\n"
 			"  {\n"
 			"    if (!EVAL(pgfn_%s(errcode, xkeyval_%u, ykeyval_%u)))\n"
 			"      return false;\n"
 			"  }\n"
-			"  else if ((xkeyval_%u.isnull  && !ykeyval_%u.isnull) ||"
+			"  else if ((xkeyval_%u.isnull  && !ykeyval_%u.isnull) ||\n"
 			"           (!xkeyval_%u.isnull &&  ykeyval_%u.isnull))\n"
 			"      return false;\n",
 			resno, dtype->type_name, resno - 1,
@@ -2014,10 +2014,10 @@ gpupreagg_codegen_projection_nrows(StringInfo body, FuncExpr *func,
 						 "  temp_int4.isnull = false;\n"
 						 "  temp_int4.value = 1;\n");
 	appendStringInfo(body,
-					 "  pg_%s_vstore(%s,%s,errcode,%u,%s,temp_int4);\n",
+					 "  pg_%s_vstore(%s,errcode,%u,%s,temp_int4);\n",
 					 dtype->type_name,
 					 pc->kds_label,
-					 pc->ktoast_label,
+					 //pc->ktoast_label,
 					 pc->tle->resno - 1,
 					 pc->rowidx_label);
 }
@@ -2125,10 +2125,10 @@ gpupreagg_codegen_projection_misc(StringInfo body, FuncExpr *func,
 		elog(ERROR, "unexpected partial aggregate function: %s", func_name);
 
 	appendStringInfo(body,
-					 "  pg_%s_vstore(%s,%s,errcode,%u,%s,%s);\n",
+					 "  pg_%s_vstore(%s,errcode,%u,%s,%s);\n",
 					 dtype->type_name,
 					 pc->kds_label,
-					 pc->ktoast_label,
+					 //pc->ktoast_label,
 					 pc->tle->resno - 1,
 					 pc->rowidx_label,
 					 temp_val);
@@ -2182,7 +2182,7 @@ gpupreagg_codegen_projection_psum_x2(StringInfo body, FuncExpr *func,
 		"    %s.value = %s;\n"
 		"  else\n"
 		"    %s = pgfn_%s(errcode, %s, %s);\n"
-		"  pg_%s_vstore(%s,%s,errcode,%u,%s,%s);\n",
+		"  pg_%s_vstore(%s,errcode,%u,%s,%s);\n",
 		temp_label,
         pgstrom_codegen_expression(clause, pc->context),
 		temp_label,
@@ -2194,7 +2194,7 @@ gpupreagg_codegen_projection_psum_x2(StringInfo body, FuncExpr *func,
 		temp_label,
 		dtype->type_name,
 		pc->kds_label,
-        pc->ktoast_label,
+        //pc->ktoast_label,
         pc->tle->resno - 1,
         pc->rowidx_label,
 		temp_label);
@@ -2304,10 +2304,10 @@ gpupreagg_codegen_projection_corr(StringInfo body, FuncExpr *func,
 		body,
 		"  if (temp_float8x.isnull)\n"
 		"    temp_float8x.value = 0.0;\n"
-		"  pg_%s_vstore(%s,%s,errcode,%u,%s,temp_float8x);\n",
+		"  pg_%s_vstore(%s,errcode,%u,%s,temp_float8x);\n",
 		dtype->type_name,
 		pc->kds_label,
-		pc->ktoast_label,
+		//pc->ktoast_label,
 		pc->tle->resno - 1,
 		pc->rowidx_label);
 }
@@ -2374,11 +2374,11 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			appendStringInfo(
 				&body,
 				"  /* projection for resource %u */\n"
-				"  pg_%s_vstore(%s,%s,errcode,%u,%s,KVAR_%u);\n",
+				"  pg_%s_vstore(%s,errcode,%u,%s,KVAR_%u);\n",
 				pc.tle->resno - 1,
 				dtype->type_name,
 				pc.kds_label,
-				pc.ktoast_label,
+				//pc.ktoast_label,
 				pc.tle->resno - 1,
 				pc.rowidx_label,
 				var->varattno);
@@ -2398,10 +2398,10 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			appendStringInfo(
 				&body,
 				"  /* projection for resource %u */\n"
-				"  pg_common_vstore(%s,%s,errcode,%u,%s,true);\n",
+				"  pg_common_vstore(%s,errcode,%u,%s,0,true);\n",
 				pc.tle->resno - 1,
 				pc.kds_label,
-				pc.ktoast_label,
+				//pc.ktoast_label,
 				pc.tle->resno - 1,
 				pc.rowidx_label);
 		}
@@ -2481,8 +2481,8 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
 			appendStringInfo(
 				&decl1,
-				"  pg_%s_t KVAR_%u"
-				" = pg_%s_vref(kds_in,ktoast,errcode,%u,rowidx_in);\n",
+				"  pg_%s_t KVAR_%u "
+				"= pg_%s_vref(kds_in,errcode,%u,rowidx_in);\n",
 				dtype->type_name,
 				tle->resno,
 				dtype->type_name,
@@ -2524,7 +2524,6 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 		"                     kern_parambuf *kparams,\n"
 		"                     kern_data_store *kds_in,\n"
 		"                     kern_data_store *kds_src,\n"
-		"                     kern_data_store *ktoast,\n"
 		"                     size_t rowidx_in, size_t rowidx_out)\n"
 		"{\n"
 		"%s"

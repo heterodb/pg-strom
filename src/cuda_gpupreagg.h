@@ -221,7 +221,6 @@ gpupreagg_projection(cl_int *errcode,
 					 kern_parambuf *kparams,
 					 kern_data_store *kds_in,
 					 kern_data_store *kds_src,
-					 kern_data_store *ktoast,	/* never used */
 					 size_t rowidx_in,
 					 size_t rowidx_out);
 /*
@@ -444,7 +443,6 @@ gpupreagg_preparation(kern_gpupreagg *kgpreagg,
 							 kparams,
 							 kds_in,			/* input kds */
 							 kds_src,			/* source of reduction kds */
-							 NULL,				/* never use toast */
 							 kds_index,			/* rowidx of kds_in */
 							 base + offset);	/* rowidx of kds_src */
 	}
@@ -918,23 +916,51 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
 	cl_int			errcode = StromError_Success;
 	cl_uint			nattrs = kds_dst->ncols;
 	cl_uint			nitems = kresults->nitems;
+	cl_uint			colidx;
+	cl_uint			rowidx;
+	Datum		   *ts_values;
+	cl_bool		   *ts_isnull;
+	size_t			offset;
+	size_t			ktoast_length = ktoast->length;
+	kern_colmeta	cmeta;
+
+	/* Sanity checks */
+	if (kds_dst->format != KDS_FORMAT_SLOT ||
+		ktoast->format != KDS_FORMAT_ROW)
+	{
+		STROM_SET_ERROR(&errcode, StromError_SanityCheckViolation);
+		goto out;
+	}
 
 	if (get_global_id() < nitems)
 	{
-		cl_uint			attnum;
-		cl_uint			rowidx;
+		rowidx = kresults->results[get_global_id()];
+		ts_values = KERN_DATA_STORE_VALUES(kds_dst, rowidx);
+		ts_isnull = KERN_DATA_STORE_ISNULL(kds_dst, rowidx);
 
-		for (attnum = 0; attnum < nattrs; attnum++)
+		for (colidx = 0; colidx < nattrs; colidx++)
 		{
-			if (gpagg_atts[attnum] != GPUPREAGG_FIELD_IS_GROUPKEY)
+			if (gpagg_atts[colidx] != GPUPREAGG_FIELD_IS_GROUPKEY)
 				continue;
-
-			rowidx = kresults->results[get_global_id()];
-			pg_fixup_tupslot_varlena(&errcode,
-									 kds_dst, ktoast,
-									 attnum, rowidx);
+			/* fixed length variable? */
+			cmeta = kds_dst->colmeta[colidx];
+			if (cmeta.attbyval)
+				continue;
+			/* null variable? */
+			if (ts_isnull[colidx])
+				continue;
+			/* fixup pointer variables */
+			offset = ((size_t)ts_values[colidx] - (size_t)&ktoast->hostptr);
+			if (offset < ktoast_length)
+				ts_values[colidx] = ktoast->hostptr + offset;
+			else
+			{
+				STROM_SET_ERROR(&errcode, StromError_DataStoreOutOfRange);
+				break;
+			}
 		}
 	}
+out:
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kresults->errcode, errcode);
 }
@@ -967,7 +993,7 @@ pg_atomic_max_int(cl_int *addr, cl_int value)
 STATIC_INLINE(cl_int)
 pg_atomic_add_int(cl_int *addr, cl_int value)
 {
-	return __iAtomicAnd(addr, value);
+	return __iAtomicAdd(addr, value);
 }
 
 
