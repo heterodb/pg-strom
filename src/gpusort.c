@@ -1595,7 +1595,8 @@ gpusort_task_complete(GpuTask *gtask)
 			dlist_push_tail(&gss->gts.ready_tasks, &gpusort->task.chain);
 			gss->gts.num_ready_tasks++;
 
-			elog(INFO, "sort done");
+			elog(DEBUG1, "sort done (%s)",
+				 gss->gts.css.methods->CustomName);
 			gss->sort_done = true;	/* congratulation! */
 		}
 		SpinLockRelease(&gss->gts.lock);

@@ -1224,7 +1224,8 @@ pgstrom_fetch_gputask(GpuTaskState *gts)
 				if (!gtask)
 				{
 					gts->scan_done = true;
-					elog(INFO, "scan done");
+					elog(DEBUG1, "scan done (%s)",
+						 gts->css.methods->CustomName);
 					break;
 				}
 				dlist_push_tail(&gts->pending_tasks, &gtask->chain);
