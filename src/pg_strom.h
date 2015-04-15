@@ -246,7 +246,7 @@ struct GpuTaskState
 	CUmodule	   *cuda_modules;	/* CUmodules for each CUDA context */
 	bool			scan_done;		/* no rows to read, if true */
 	bool			scan_bulk;		/* bulk outer load, if true */
-	cl_uint			curr_index;		/* current position on the curr_task */
+	cl_long			curr_index;		/* current position on the curr_task */
 	struct GpuTask *curr_task;		/* a task currently processed */
 	slock_t			lock;			/* protection of the fields below */
 	dlist_head		tracked_tasks;	/* for resource tracking */
@@ -521,9 +521,12 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 							   cl_uint nrooms,
 							   bool internal_format,
 							   pgstrom_data_store *ktoast);
-extern pgstrom_data_store *
-pgstrom_file_mmap_data_store(const char *kds_fname,
-							 Size kds_offset, Size kds_length);
+extern void
+pgstrom_file_mmap_data_store(FileName kds_fname,
+							 Size kds_offset,
+							 Size kds_length,
+							 kern_data_store **p_kds,
+							 kern_data_store **p_ktoast);
 extern void
 pgstrom_file_unmap_data_store(pgstrom_data_store *pds);
 

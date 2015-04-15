@@ -271,8 +271,8 @@ typedef struct
 	cl_long			markpos_index;
 
 	/* final result */
-	dsm_segment	   *sorted_result;	/* final index of the sorted result */
-	cl_long			sorted_index;	/* index of the final index on scan */
+	//dsm_segment	   *sorted_result;	/* final index of the sorted result */
+	//cl_long			sorted_index;	/* index of the final index on scan */
 	HeapTupleData	tuple_buf;		/* temp buffer during scan */
 	TupleTableSlot *overflow_slot;
 } GpuSortState;
@@ -343,6 +343,8 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 
 	if (max_chunk_size > chunk_size)
 	{
+		if (chunk_size < pgstrom_chunk_size())
+			chunk_size = pgstrom_chunk_size();
 		nrows_per_chunk = ntuples;
 		num_chunks = 1;
 	}
@@ -958,8 +960,8 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->cpusort_seqno = 0;
 
 	/* final results */
-	gss->sorted_result = NULL;
-	gss->sorted_index = 0;
+//	gss->sorted_result = NULL;
+//	gss->sorted_index = 0;
 	gss->overflow_slot = NULL;
 }
 
@@ -987,8 +989,8 @@ gpusort_end(CustomScanState *node)
 	for (i=0; i < gss->num_chunks; i++)
 		pgstrom_release_data_store(gss->pds_chunks[i]);
 	/* Release results buffer of DSM */
-	if (gss->sorted_result)
-		dsm_detach(gss->sorted_result);
+//	if (gss->sorted_result)
+//		dsm_detach(gss->sorted_result);
 
 	/* Clean up subtree */
     ExecEndNode(outerPlanState(node));
@@ -1027,7 +1029,7 @@ gpusort_rescan(CustomScanState *node)
     else
 	{
 		/* otherwise, just rewind the pointer */
-		gss->sorted_index = 0;
+		gss->gts.curr_index = 0;
 	}
 }
 
@@ -1038,7 +1040,7 @@ gpusort_mark_pos(CustomScanState *node)
 
 	if (gss->sort_done)
 	{
-		gss->markpos_index = gss->sorted_index;
+		gss->markpos_index = gss->gts.curr_index;
 	}
 }
 
@@ -1050,7 +1052,7 @@ gpusort_restore_pos(CustomScanState *node)
 	if (gss->sort_done)
 	{
 		Assert(gss->markpos_index >= 0);
-		gss->sorted_index = gss->markpos_index;
+		gss->gts.curr_index = gss->markpos_index;
 	}
 }
 
@@ -1091,20 +1093,26 @@ gpusort_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	 * shows resource consumption, if executed and have more than zero
 	 * rows.
 	 */
-	if (es->analyze && gss->sort_done && gss->sorted_result)
+	if (es->analyze && gss->sort_done)
 	{
 		const char *sort_method;
 		const char *sort_storage;
 		char		sort_resource[128];
-		Size		total_consumption;
+		Size		total_consumption = 0UL;
 
 		if (gss->num_chunks > 1)
 			sort_method = "GPU/Bitonic + CPU/Merge";
 		else
 			sort_method = "GPU/Bitonic";
 
-		total_consumption = (Size)gss->num_chunks * gss->chunk_size;
-		total_consumption += dsm_segment_map_length(gss->sorted_result);
+		for (i=0; i < gss->num_chunks; i++)
+		{
+			pgstrom_data_store *pds = gss->pds_chunks[i];
+			pgstrom_data_store *ptoast = gss->pds_toasts[i];
+
+			total_consumption += TYPEALIGN(BLCKSZ, pds->kds_length);
+			total_consumption += TYPEALIGN(BLCKSZ, ptoast->kds_length);
+		}
 		if (total_consumption >= (Size)(1UL << 43))
 			snprintf(sort_resource, sizeof(sort_resource), "%.2fTb",
 					 (double)total_consumption / (double)(1UL << 40));
@@ -1245,6 +1253,7 @@ gpusort_next_chunk(GpuTaskState *gts)
 	gpusort->ritems_dsm = NULL;
 	gpusort->oitems_dsm = oitems_dsm;
 	gpusort->chunk_id = chunk_id;
+	gpusort->chunk_id_map = bms_make_singleton(chunk_id);
 out:
 	PERFMON_END(&gts->pfm_accum, time_outer_load, &tv1, &tv2);
 
@@ -1273,6 +1282,8 @@ gpusort_next_tuple(GpuTaskState *gts)
 		cl_long		index = 2 * gss->gts.curr_index++;
 		cl_int		chunk_id = kresults->results[index];
 		cl_int		item_id = kresults->results[index + 1];
+
+		ExecClearTuple(slot);
 
 		if (chunk_id >= gss->num_chunks || !gss->pds_chunks[chunk_id])
 			elog(ERROR, "Bug? data-store of GpuSort missing (chunk-id: %d)",
@@ -1325,7 +1336,7 @@ gpusort_task_release(GpuTask *gtask)
 {
 	pgstrom_gpusort	   *gpusort = (pgstrom_gpusort *) gtask;
 
-	if (pgstrom_resource_context() == ResourceContextNormal)
+	if (pgstrom_resource_context() != ResourceContextAbort)
 	{
 		if (gpusort->litems_dsm)
 			dsm_detach(gpusort->litems_dsm);
@@ -1333,8 +1344,11 @@ gpusort_task_release(GpuTask *gtask)
 			dsm_detach(gpusort->ritems_dsm);
 		if (gpusort->oitems_dsm)
 			dsm_detach(gpusort->oitems_dsm);
-		if (gpusort->bgw_handle)
-			pfree(gpusort->bgw_handle);
+		if (pgstrom_resource_context() == ResourceContextNormal)
+		{
+			if (gpusort->bgw_handle)
+				pfree(gpusort->bgw_handle);
+		}
 	}
 	gpusort_cleanup_cuda_resources(gpusort);
 
@@ -1575,9 +1589,14 @@ gpusort_task_complete(GpuTask *gtask)
 			gss->gts.num_running_tasks == 0 &&
 			gss->gts.num_pending_tasks == 0)
 		{
+			Assert(gss->sorted_chunks[gpusort->mc_class] == gpusort);
 			Assert(gss->num_chunks == bms_num_members(gpusort->chunk_id_map));
+			gss->sorted_chunks[gpusort->mc_class] = NULL;
 			dlist_push_tail(&gss->gts.ready_tasks, &gpusort->task.chain);
 			gss->gts.num_ready_tasks++;
+
+			elog(INFO, "sort done");
+			gss->sort_done = true;	/* congratulation! */
 		}
 		SpinLockRelease(&gss->gts.lock);
 	}
@@ -1897,6 +1916,7 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 								   false,
 								   nitems,
 								   sizeof(cl_uint));
+	elog(INFO, "kern_prep grid_size=%zu block_size=%zu nitems=%zu", grid_size, block_size, (size_t)nitems);
 	kernel_args[0] = &gpusort->m_gpusort;
 	kernel_args[1] = &gpusort->m_kds;
 	kernel_args[2] = &gpusort->m_ktoast;
@@ -2117,7 +2137,7 @@ form_pgstrom_flat_gpusort_base(GpuSortState *gss, cl_int chunk_id)
 	nitems = ptoast->kds->nitems;
 	dsm_length = (STROMALIGN(offsetof(pgstrom_flat_gpusort, data)) +
 				  STROMALIGN(offsetof(kern_resultbuf, results[2 * nitems])));
-	elog(INFO, "dsm_length = %zu", dsm_length);
+	elog(INFO, "dsm_length = %zu nitems=%zu", dsm_length, nitems);
 	dsm_seg = dsm_create(dsm_length, 0);
 	pfg = dsm_segment_address(dsm_seg);
 	memset(pfg, 0, sizeof(pgstrom_flat_gpusort));
@@ -2319,9 +2339,7 @@ deform_pgstrom_flat_gpusort(dsm_segment *dsm_seg)
 	{
 		Size		kds_length;
 		Size		kds_offset;
-		const char *kds_fname;
-		int			kds_fdesc;
-		char	   *map_addr;
+		FileName	kds_fname;
 
 		index = *((int *) pos);
 		pos += sizeof(int);
@@ -2338,41 +2356,11 @@ deform_pgstrom_flat_gpusort(dsm_segment *dsm_seg)
 		kds_fname = pos;
 		pos += MAXALIGN(strlen(kds_fname) + 1);
 
-		kds_fdesc = open(kds_fname, O_RDWR, 0);
-		if (kds_fdesc < 0)
-			elog(ERROR, "failed to open \"%s\": %m", kds_fname);
-
-		if (gpusort->varlena_keys)
-		{
-			Assert(kds_offset >= BLCKSZ);
-			map_addr = mmap(NULL, kds_offset + kds_length,
-							PROT_READ | PROT_WRITE,
-							MAP_SHARED | MAP_POPULATE,
-							kds_fdesc, 0);
-			if (map_addr == MAP_FAILED)
-			{
-				close(kds_fdesc);
-				elog(ERROR, "failed to mmap \"%s\": %m", kds_fname);
-			}
-			gpusort->kern_toasts[index] = (kern_data_store *)map_addr;
-			gpusort->kern_chunks[index] =
-				(kern_data_store *)(map_addr + kds_offset);
-		}
-		else
-		{
-			map_addr = mmap(NULL, kds_length,
-							PROT_READ | PROT_WRITE,
-							MAP_SHARED | MAP_POPULATE,
-							kds_fdesc, kds_offset);
-			if (map_addr == MAP_FAILED)
-			{
-				close(kds_fdesc);
-				elog(ERROR, "failed to mmap \"%s\": %m", kds_fname);
-			}
-			gpusort->kern_toasts[index] = NULL;
-			gpusort->kern_chunks[index] = (kern_data_store *)map_addr;
-		}
-		close(kds_fdesc);	/* close on unmap */
+		pgstrom_file_mmap_data_store(kds_fname, kds_offset, kds_length,
+									 gpusort->kern_chunks + index,
+									 gpusort->varlena_keys
+									 ? gpusort->kern_toasts + index
+									 : NULL);
 	}
 	/* tuple descriptor */
 	tupdesc = (TupleDesc)(pfg->data + pfg->tupdesc);

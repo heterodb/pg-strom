@@ -742,11 +742,10 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 	 */
 	while (!dlist_is_empty(&gcontext->pds_list))
 	{
-		dlist_node *dnode = dlist_pop_head_node(&gcontext->pds_list);
-		pgstrom_data_store *pds
-			= dlist_container(pgstrom_data_store, pds_chain, dnode);
-		if (pds->kds_fname)
-			pgstrom_file_unmap_data_store(pds);
+		pgstrom_data_store	   *pds =
+			dlist_container(pgstrom_data_store, pds_chain,
+							dlist_head_node(&gcontext->pds_list));
+		pgstrom_release_data_store(pds);
 	}
 
 	/* Ensure CUDA context is empty */
@@ -1049,55 +1048,112 @@ launch_pending_tasks(GpuTaskState *gts)
 	}
 }
 
+/*
+ *
+ *
+ *
+ *
+ *
+ *
+ */
+static bool
+__waitfor_ready_tasks(GpuTaskState *gts)
+{
+	bool	retry_next = true;
+	bool	wait_latch = true;
+	bool	short_timeout = false;
+	int		rc;
+
+	/*
+	 * Unless CUDA module is not loaded, we cannot launch process
+	 * of GpuTask callback. So, we go on the long-waut path.
+	 */
+	if (gts->cuda_modules || pgstrom_load_cuda_program(gts))
+	{
+		SpinLockAcquire(&gts->lock);
+		if (!dlist_is_empty(&gts->ready_tasks))
+		{
+			/*
+			 * If we already has a ready chunk, no need to wait for
+			 * the concurrent tasks. So, break loop immediately.
+			 */
+			wait_latch = false;
+			retry_next = false;
+		}
+		else if (!dlist_is_empty(&gts->completed_tasks))
+		{
+			/*
+			 * Even if we have no ready chunk yet, completed tasks
+			 * will produce ready chunks immediately, without job
+			 * synchronization.
+			 */
+			wait_latch = false;
+			retry_next = true;
+		}
+		else if (!dlist_is_empty(&gts->pending_tasks))
+		{
+			/*
+			 * Existence of pending tasks implies lack of device
+			 * resources (like memory). Shorter blocking may allow
+			 * to device resource polling. :-)
+			 */
+			short_timeout = true;
+		}
+		else if (!dlist_is_empty(&gts->running_tasks))
+		{
+			/*
+			 * Even if no pending task we have, running task will
+			 * wake-up our thread once it got completed. So, long-
+			 * wait is sufficient to run.
+			 */
+		}
+		else if (!gts->scan_done)
+		{
+			/*
+			 * No ready, completed, running and pending tasks, even
+			 * if scan is not completed, implies relation scan ratio
+			 * is slower than GPU computing performance. So, we move
+			 * to load the next chunk without blocking.
+			 */
+			wait_latch = false;
+			retry_next = true;
+		}
+		else
+		{
+			wait_latch = false;
+			retry_next = false;
+		}
+		SpinLockRelease(&gts->lock);
+	}
+
+	if (wait_latch)
+	{
+		struct timeval	tv1, tv2;
+
+		PERFMON_BEGIN(&gts->pfm_accum, &tv1);
+
+		rc = WaitLatch(&MyProc->procLatch,
+					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+					   !short_timeout ? 5000 : 200);
+		ResetLatch(&MyProc->procLatch);
+		if (rc & WL_POSTMASTER_DEATH)
+			elog(ERROR, "Emergency bail out because of Postmaster crash");
+
+		PERFMON_END(&gts->pfm_accum, time_sync_tasks, &tv1, &tv2);
+	}
+	return retry_next;
+}
+
 static bool
 waitfor_ready_tasks(GpuTaskState *gts)
 {
 	bool	save_set_latch_on_sigusr1 = set_latch_on_sigusr1;
-	bool	wait_latch = false;
-	bool	short_timeout = false;
-	int		rc;
+	bool	status;
 
+	set_latch_on_sigusr1 = true;
 	PG_TRY();
 	{
-		set_latch_on_sigusr1 = true;
-
-		if (!gts->cuda_modules)
-		{
-			if (!pgstrom_load_cuda_program(gts))
-				wait_latch = true;
-		}
-
-		if (!wait_latch)
-		{
-			SpinLockAcquire(&gts->lock);
-			if (dlist_is_empty(&gts->completed_tasks) &&
-				dlist_is_empty(&gts->ready_tasks))
-				wait_latch = true;
-			/*
-			 * NOTE: We suggest shorter timeout if task is pending
-			 * due to out of resources, because it may be able to
-			 * be launched once any concurrent task is completed.
-			 */
-			if (dlist_is_empty(&gts->pending_tasks))
-				short_timeout = true;
-			SpinLockRelease(&gts->lock);
-		}
-
-		if (wait_latch)
-		{
-			struct timeval	tv1, tv2;
-
-			PERFMON_BEGIN(&gts->pfm_accum, &tv1);
-
-			rc = WaitLatch(&MyProc->procLatch,
-						   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-						   !short_timeout ? 5000 : 200);
-			ResetLatch(&MyProc->procLatch);
-			if (rc & WL_POSTMASTER_DEATH)
-				elog(ERROR, "Emergency bail out because of Postmaster crash");
-
-			PERFMON_END(&gts->pfm_accum, time_sync_tasks, &tv1, &tv2);
-		}
+		status = __waitfor_ready_tasks(gts);
 	}
 	PG_CATCH();
 	{
@@ -1107,7 +1163,7 @@ waitfor_ready_tasks(GpuTaskState *gts)
 	PG_END_TRY();
 	set_latch_on_sigusr1 = save_set_latch_on_sigusr1;
 
-	return wait_latch;
+	return status;
 }
 
 /*

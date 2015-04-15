@@ -77,12 +77,13 @@ typedef struct
 
 #define KERN_GPUSORT_PARAMBUF(kgpusort)			(&(kgpusort)->kparams)
 #define KERN_GPUSORT_PARAMBUF_LENGTH(kgpusort)	((kgpusort)->kparams.length)
-#define KERN_GPUSORT_RESULTBUF(kgpusort)					\
-	((kern_resultbuf *)(KERN_GPUSORT_PARAMBUF(kgpusort) +	\
-						KERN_GPUSORT_PARAMBUF_LENGTH(kgpusort)))
-#define KERN_GPUSORT_RESULTBUF_LENGTH(kgpusort)			\
-	STROMALIGN(offsetof(kern_resultbuf,					\
-		results[KERN_GPUSORT_RESULTBUF(kgpusort)->nrels *	\
+#define KERN_GPUSORT_RESULTBUF(kgpusort)			\
+	((kern_resultbuf *)								\
+	 ((char *)KERN_GPUSORT_PARAMBUF(kgpusort) +		\
+	  KERN_GPUSORT_PARAMBUF_LENGTH(kgpusort)))
+#define KERN_GPUSORT_RESULTBUF_LENGTH(kgpusort)		\
+	STROMALIGN(offsetof(kern_resultbuf,				\
+		results[KERN_GPUSORT_RESULTBUF(kgpusort)->nrels * \
 				KERN_GPUSORT_RESULTBUF(kgpusort)->nrooms]))
 #define KERN_GPUSORT_LENGTH(kgpusort)				\
 	(offsetof(kern_gpusort, kparams) +				\
@@ -214,19 +215,19 @@ gpusort_bitonic_local(kern_gpusort *kgpusort,
 	size_t		localID = get_local_id();
 	size_t		globalID = get_global_id();
 	size_t		localSize = get_local_size();
-	size_t		prtID = globalID / localSize;	/* partition ID */
 	size_t		prtSize = localSize * 2;		/* partition Size */
+	size_t		prtID = globalID / prtSize;		/* partition ID */
 	size_t		prtPos = prtID * prtSize;		/* partition Position */
 	size_t		localEntry;
 	size_t		blockSize;
 	size_t		unitSize;
 	size_t		i;
 
-	/* create row index and then store to localIdx */
-	localEntry = ((prtPos + prtSize < nitems) ? prtSize : (nitems - prtPos));
+	/* Load index to localIdx[] */
+	localEntry = (prtPos + prtSize < nitems) ? prtSize : (nitems - prtPos);
 	for (i = localID; i < localEntry; i += localSize)
-		localIdx[i] = prtPos + i;
-    __syncthreads();
+		localIdx[i] = kresults->results[2 * (prtPos + i) + 1];
+	__syncthreads();
 
 	/* bitonic sorting */
 	for (blockSize = 2; blockSize <= prtSize; blockSize *= 2)
@@ -329,8 +330,8 @@ gpusort_bitonic_merge(kern_gpusort *kgpusort,
     size_t		localID = get_local_id();
     size_t		globalID = get_global_id();
     size_t		localSize = get_local_size();
-	size_t		prtID = globalID / localSize;	/* partition ID */
 	size_t		prtSize = 2 * localSize;		/* partition Size */
+	size_t		prtID = globalID / prtSize;		/* partition ID */
 	size_t		prtPos = prtID * prtSize;		/* partition Position */
 	size_t		localEntry;
 	size_t		blockSize = prtSize;
