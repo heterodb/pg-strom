@@ -393,6 +393,9 @@ gpusort_projection_addcase(StringInfo body,
 						   bool type_byval,
 						   bool is_sortkey)
 {
+	if (body->len == 0)
+		appendStringInfo(body, "  void *datum;\n");
+
 	if (type_byval)
 	{
 		const char *type_cast;
@@ -522,6 +525,9 @@ gpusort_fixupvar_addcase(StringInfo body,
 
 	if (type_oid == NUMERICOID)
 	{
+		if (body->len == 0)
+			appendStringInfo(body, "  void *datum;\n");
+
 		appendStringInfo(
 			body,
 			"\n"
@@ -544,6 +550,9 @@ gpusort_fixupvar_addcase(StringInfo body,
 	}
 	else if (!type_byval)
 	{
+		if (body->len == 0)
+			appendStringInfo(body, "  void *datum;\n");
+
 		appendStringInfo(
 			body,
 			"\n"
@@ -637,8 +646,8 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 		appendStringInfo(
 			&kc_body,
 			"  /* sort key comparison on the resource %d */\n"
-			"  KVAR_X%d = pg_%s_vref(kds,ktoast,errcode,%d,x_index);\n"
-			"  KVAR_Y%d = pg_%s_vref(kds,ktoast,errcode,%d,y_index);\n"
+			"  KVAR_X%d = pg_%s_vref(kds,errcode,%d,x_index);\n"
+			"  KVAR_Y%d = pg_%s_vref(kds,errcode,%d,y_index);\n"
 			"  if (!KVAR_X%d.isnull && !KVAR_Y%d.isnull)\n"
 			"  {\n"
 			"    comp = pgfn_%s(errcode, KVAR_X%d, KVAR_Y%d);\n"
@@ -697,7 +706,6 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 		"                   kern_data_store *ktoast,\n"
 		"                   HeapTupleHeaderData *htup)\n"
 		"{\n"
-		"  void *datum;\n"
 		"%s"
 		"}\n\n",
 		pj_body.data);
@@ -711,7 +719,6 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 		"                        kern_data_store *ktoast,\n"
 		"                        HeapTupleHeaderData *htup)\n"
 		"{\n"
-		"  void *datum;\n"
 		"%s"
 		"}\n\n",
 		fv_body.data);
@@ -1673,11 +1680,15 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 									   sort_kernels[i],
 									   gpusort->task.cuda_device,
 									   true,
-									   nitems,
+									   (nitems + 1) / 2,
 									   shmem_unitsz[i]);
 		block_size = Min(block_size, block_temp);
 	}
-	grid_size = (nitems + block_size - 1) / block_size;
+	/*
+	 * NOTE: block_size has to be common, and the least 2^N value less
+	 * than or equal to the least block_size in the kernels above.
+	 */
+	block_size = 1UL << (get_next_log2(block_size + 1) - 1);
 
 	/*
 	 * OK, launch the series of GpuSort kernels
@@ -1697,6 +1708,7 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 	kernel_args[2] = &gpusort->m_ktoast;
 	kernel_args[3] = &bitonic_unitsz;
 
+	grid_size = ((nitems + 1) / 2 + block_size - 1) / block_size;
 	rc = cuLaunchKernel(gpusort->kern_bitonic_local,
 						grid_size, 1, 1,
 						block_size, 1, 1,
@@ -1706,6 +1718,8 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 						NULL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+	elog(INFO, "gpusort_bitonic_local(gridSz=%zu,blockSz=%zu)",
+		 grid_size, block_size);
 	gpusort->task.pfm.num_gpu_sort++;
 
 	/* Sorting inter blocks */
@@ -1714,6 +1728,7 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 		for (j = 2 * i; j > block_size; j /= 2)
 		{
 			cl_uint		unitsz = 2 * j;
+			size_t		work_size;
 
 			/*
 			 * KERNEL_FUNCTION_MAXTHREADS(void)
@@ -1722,8 +1737,11 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 			 *                      kern_data_store *ktoast,
 			 *                      cl_int bitonic_unitsz)
 			 */
+			/* 4th argument of the kernel */
 			bitonic_unitsz = ((j == 2 * i) ? -unitsz : unitsz);
 
+			work_size = (((nitems + unitsz - 1) / unitsz) * unitsz / 2);
+			grid_size = (work_size + block_size - 1) / block_size;
 			rc = cuLaunchKernel(gpusort->kern_bitonic_step,
 								grid_size, 1, 1,
 								block_size, 1, 1,
@@ -1733,6 +1751,8 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 								NULL);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+			elog(INFO, "gpusort_bitonic_step(gridSz=%zu,blockSz=%zu,unitsz=%d)",
+				 grid_size, block_size,bitonic_unitsz);
 			gpusort->task.pfm.num_gpu_sort++;
 		}
 
@@ -1742,6 +1762,7 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 		 *                       kern_data_store *kds,
 		 *                       kern_data_store *ktoast)
 		 */
+		grid_size = ((nitems + 1) / 2 + block_size - 1) / block_size;
 		rc = cuLaunchKernel(gpusort->kern_bitonic_merge,
 							grid_size, 1, 1,
 							block_size, 1, 1,
@@ -1751,6 +1772,8 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 							NULL);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+		elog(INFO, "gpusort_bitonic_merge(gridSz=%zu,blockSz=%zu)",
+			 grid_size, block_size);
 		gpusort->task.pfm.num_gpu_sort++;
 	}
 }
@@ -1815,7 +1838,6 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	gpusort->m_gpusort = gpuMemAlloc(&gpusort->task, length);
 	if (!gpusort->m_gpusort)
 		goto out_of_resource;
-	elog(INFO, "m_gpusort=%zx length=%zu", (Size)gpusort->m_gpusort, length);
 
 	length = KERN_DATA_STORE_LENGTH(pds->kds);
 	gpusort->m_kds = gpuMemAlloc(&gpusort->task, length);
@@ -1954,7 +1976,7 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	kernel_args[0] = &gpusort->m_gpusort;
 	kernel_args[1] = &gpusort->m_kds;
 	kernel_args[2] = &gpusort->m_ktoast;
-	rc = cuLaunchKernel(gpusort->kern_prep,
+	rc = cuLaunchKernel(gpusort->kern_fixup,
 						grid_size, 1, 1,
 						block_size, 1, 1,
 						sizeof(cl_uint) * block_size,
@@ -1964,12 +1986,6 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 	gpusort->task.pfm.num_kern_prep++;
-
-#if 1
-	rc = cuStreamSynchronize(gpusort->task.cuda_stream);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuStreamSynchronize: %s", errorText(rc));
-#endif
 
 	/*
 	 * DMA Recv

@@ -215,8 +215,8 @@ gpusort_bitonic_local(kern_gpusort *kgpusort,
 	size_t		localID = get_local_id();
 	size_t		globalID = get_global_id();
 	size_t		localSize = get_local_size();
+	size_t		prtID = globalID / localSize;	/* partition ID */
 	size_t		prtSize = localSize * 2;		/* partition Size */
-	size_t		prtID = globalID / prtSize;		/* partition ID */
 	size_t		prtPos = prtID * prtSize;		/* partition Position */
 	size_t		localEntry;
 	size_t		blockSize;
@@ -330,8 +330,8 @@ gpusort_bitonic_merge(kern_gpusort *kgpusort,
     size_t		localID = get_local_id();
     size_t		globalID = get_global_id();
     size_t		localSize = get_local_size();
+	size_t		prtID = globalID / localSize;	/* partition ID */
 	size_t		prtSize = 2 * localSize;		/* partition Size */
-	size_t		prtID = globalID / prtSize;		/* partition ID */
 	size_t		prtPos = prtID * prtSize;		/* partition Position */
 	size_t		localEntry;
 	size_t		blockSize = prtSize;
