@@ -333,13 +333,8 @@ typedef struct
 
 	kern_parambuf  *kparams;
 
-//	pgstrom_gpuhashjoin *curr_ghjoin;
 	int				result_format;
-//	cl_uint			curr_index;
-//	bool			curr_recheck;
 	HeapTupleData	curr_tuple;
-//	cl_int			num_running;
-//	dlist_head		ready_pscans;
 
 	pgstrom_perfmon	pfm;
 } GpuHashJoinState;
@@ -1170,7 +1165,7 @@ gpuhashjoin_codegen_qual(StringInfo body,
 {
 	appendStringInfo(
         body,
-		"__device__ static bool\n"
+		"STATIC_FUNCTION(bool)\n"
 		"gpuhashjoin_qual_eval(cl_int *errcode,\n"
 		"                      kern_parambuf *kparams,\n"
 		"                      kern_data_store *kds,\n"
@@ -1219,7 +1214,7 @@ gpuhashjoin_codegen_projection(StringInfo body,
 	appendStringInfo(
 		body,
 		"\n"
-		"__device__ static void\n"
+		"STATIC_FUNCTION(void)\n"
 		"gpuhashjoin_projection_mapping(cl_int dest_colidx,\n"
 		"                               cl_uint *src_depth,\n"
 		"                               cl_uint *src_colidx)\n"
@@ -1256,7 +1251,7 @@ gpuhashjoin_codegen_projection(StringInfo body,
 	/* projection-datum function */
 	appendStringInfo(
         body,
-		"__device__ static void\n"
+		"STATIC_FUNCTION(void)\n"
 		"gpuhashjoin_projection_datum(cl_int *errcode,\n"
 		"                             Datum *slot_values,\n"
 		"                             cl_char *slot_isnull,\n"
@@ -1572,7 +1567,7 @@ gpuhashjoin_codegen(PlannerInfo *root,
 	/* declaration of gpuhashjoin_execute */
 	appendStringInfo(
 		&decl,
-		"__device__ static cl_uint\n"
+		"STATIC_FUNCTION(cl_uint)\n"
 		"gpuhashjoin_execute(cl_int *errcode,\n"
 		"                    kern_parambuf *kparams,\n"
 		"                    kern_multihash *kmhash,\n"
@@ -1628,7 +1623,7 @@ gpuhashjoin_codegen(PlannerInfo *root,
 
 			appendStringInfo(&body,
 							 "pg_%s_t KVAR_%u = "
-							 "pg_%s_vref(kds,ktoast,errcode,%u,kds_index);\n",
+							 "pg_%s_vref(kds,errcode,%u,kds_index);\n",
 							 dtype->type_name,
 							 tle->resno,
 							 dtype->type_name,
@@ -2375,10 +2370,6 @@ gpuhashjoin_begin(CustomScanState *node, EState *estate, int eflags)
 		ghjs->result_format = KDS_FORMAT_ROW;
 	else
 		ghjs->result_format = KDS_FORMAT_SLOT;
-//	ghjs->curr_index = 0;
-//	ghjs->curr_recheck = false;
-//	ghjs->num_running = 0;
-//	dlist_init(&ghjs->ready_pscans);
 
 	/* Is perfmon needed? */
 	ghjs->pfm.enabled = pgstrom_perfmon_enabled;

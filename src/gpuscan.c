@@ -464,7 +464,7 @@ gpuscan_codegen_quals(PlannerInfo *root,
 	/* qualifier definition with row-store */
 	appendStringInfo(
 		&str,
-		"__device__ cl_bool\n"
+		"STATIC_FUNCTION(cl_bool)\n"
 		"gpuscan_qual_eval(cl_int *errcode,\n"
 		"                  kern_parambuf *kparams,\n"
 		"                  kern_data_store *kds,\n"
