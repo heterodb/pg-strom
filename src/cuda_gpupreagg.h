@@ -91,7 +91,7 @@ typedef struct
 	((uintptr_t)KERN_GPUPREAGG_RESULTBUF(kgpreagg) -	\
 	 (uintptr_t)(kgpreagg))
 #define KERN_GPUPREAGG_DMARECV_LENGTH(kgpreagg,nitems)	\
-	KERN_GPUPREAGG_LENGTH(kgpreagg,nitems)
+	offsetof(kern_resultbuf, results[(nitems)])
 
 /*
  * NOTE: hashtable of gpupreagg is an array of pagg_hashslot.
