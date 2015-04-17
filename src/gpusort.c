@@ -271,8 +271,6 @@ typedef struct
 	cl_long			markpos_index;
 
 	/* final result */
-	//dsm_segment	   *sorted_result;	/* final index of the sorted result */
-	//cl_long			sorted_index;	/* index of the final index on scan */
 	HeapTupleData	tuple_buf;		/* temp buffer during scan */
 	TupleTableSlot *overflow_slot;
 } GpuSortState;
@@ -459,36 +457,11 @@ gpusort_projection_addcase(StringInfo body,
 			resno - 1,
 			resno - 1);
 	}
-	else if (is_sortkey)
-	{
-		/*
-		 * variables with !type_byval but referenced as sortkey has to
-		 * be fixed up as an offset from the ktoast.
-		 */
-		appendStringInfo(
-			body,
-			"\n"
-			"  /* sortkey %d projection */\n"
-			"  datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
-			"  if (!datum)\n"
-			"    ts_isnull[%d] = true;\n"
-			"  else\n"
-			"  {\n"
-			"    ts_isnull[%d] = false;\n"
-			"    ts_values[%d] = (Datum)\n"
-			"      ((char *)datum - (char *)&ktoast->hostptr);\n"
-			"  }\n",
-			resno,
-			resno - 1,
-			resno - 1,
-			resno - 1,
-			resno - 1);
-	}
 	else
 	{
 		/*
-		 * Elsewhere, variables are host accessible pointer; either of
-		 * varlena datum or fixed-length variables with !type_byval.
+		 * Elsewhere, variables are device accessible pointer; either
+		 * of varlena datum or fixed-length variables with !type_byval.
 		 */
 		appendStringInfo(
 			body,
@@ -500,9 +473,7 @@ gpusort_projection_addcase(StringInfo body,
 			"  else\n"
 			"  {\n"
 			"    ts_isnull[%d] = false;\n"
-			"    ts_values[%d] = (Datum)(((char *)datum -\n"
-			"                             (char *)&ktoast->hostptr) +\n"
-			"                             ktoast->hostptr);\n"
+			"    ts_values[%d] = PointerGetDatum(datum);\n"
 			"  }\n",
 			resno,
 			resno - 1,
@@ -520,49 +491,32 @@ gpusort_fixupvar_addcase(StringInfo body,
 						 bool type_byval,
 						 bool is_sortkey)
 {
-	if (!is_sortkey)
+	if (type_byval)
 		return;
 
-	if (type_oid == NUMERICOID)
-	{
-		if (body->len == 0)
-			appendStringInfo(body, "  void *datum;\n");
+	if (body->len == 0)
+		appendStringInfo(body, "  void *datum;\n");
 
-		appendStringInfo(
-			body,
-			"\n"
-			"  /* sortkey %d fixup */\n"
-			"  datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
-			"  if (!datum)\n"
-			"    ts_isnull[%d] = true;\n"
-			"  else\n"
-			"  {\n"
-			"    ts_isnull[%d] = false;\n"
-			"    ts_values[%d] = (Datum)(((char *)datum -\n"
-			"                             (char *)&ktoast->hostptr) +\n"
-			"                             ktoast->hostptr);\n"
-			"  }\n",
-			resno,
-			resno - 1,
-			resno - 1,
-			resno - 1,
-			resno - 1);
-	}
-	else if (!type_byval)
-	{
-		if (body->len == 0)
-			appendStringInfo(body, "  void *datum;\n");
-
-		appendStringInfo(
-			body,
-			"\n"
-			"  /* sortkey %d fixup */\n"
-			"  if (!ts_isnull[%d])\n"
-			"    ts_values[%d] += (Datum)ktoast->hostptr;\n",
-			resno,
-			resno - 1,
-			resno - 1);
-	}
+   	appendStringInfo(
+		body,
+		"\n"
+		"  /* varlena %s %d fixup */\n"
+		"  datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
+		"  if (!datum)\n"
+		"    ts_isnull[%d] = true;\n"
+		"  else\n"
+		"  {\n"
+		"    ts_isnull[%d] = false;\n"
+		"    ts_values[%d] = (Datum)((hostptr_t)datum -\n"
+		"                            (hostptr_t)&ktoast->hostptr +\n"
+		"                            ktoast->hostptr);\n"
+		"  }\n",
+		is_sortkey ? "sortkey" : "attribute",
+		resno,
+		resno - 1,
+		resno - 1,
+		resno - 1,
+		resno - 1);
 }
 
 static char *
@@ -965,10 +919,6 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	memset(gss->sorted_chunks, 0, sizeof(gss->sorted_chunks));
 	gss->sort_done = false;
 	gss->cpusort_seqno = 0;
-
-	/* final results */
-//	gss->sorted_result = NULL;
-//	gss->sorted_index = 0;
 	gss->overflow_slot = NULL;
 }
 
@@ -995,9 +945,6 @@ gpusort_end(CustomScanState *node)
 	/* Release data chunks */
 	for (i=0; i < gss->num_chunks; i++)
 		pgstrom_release_data_store(gss->pds_chunks[i]);
-	/* Release results buffer of DSM */
-//	if (gss->sorted_result)
-//		dsm_detach(gss->sorted_result);
 
 	/* Clean up subtree */
     ExecEndNode(outerPlanState(node));
@@ -2486,7 +2433,6 @@ gpusort_fallback_quicksort(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	pgstrom_data_store *ptoast = gss->pds_chunks[gpusort->chunk_id];
 	kern_data_store	   *kds = pds->kds;
 	kern_data_store	   *ktoast = ptoast->kds;
-	//TupleTableSlot	   *slot;
 	Datum			   *tts_values;
 	bool			   *tts_isnull;
 	size_t				i, j, nitems = ktoast->nitems;

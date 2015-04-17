@@ -36,9 +36,6 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-/* path for temporary prefix */
-#define PGSTROM_TEMP_FILE_PREFIX	"strom_"
-
 /*
  * GUC variables
  */
@@ -57,9 +54,8 @@ pgstrom_chunk_size(void)
  * pgstrom_temp_dirpath - makes a temporary file according to the system
  * setting. Note that we never gueran
  */
-int
-pgstrom_open_tempfile(const char *file_suffix,
-					  const char **p_tempfilepath)
+static int
+pgstrom_open_tempfile(const char **p_tempfilepath)
 {
 	static long	tempFileCounter = 0;
 	static char	tempfilepath[MAXPGPATH];
@@ -94,10 +90,10 @@ pgstrom_open_tempfile(const char *file_suffix,
 	 * Generate a tempfile name that should be unique within the current
 	 * database instance.
 	 */
-	snprintf(tempfilepath, sizeof(tempfilepath), "%s/%s%d.%ld%s",
-			 tempdirpath, PGSTROM_TEMP_FILE_PREFIX,
-			 MyProcPid, tempFileCounter++,
-			 !file_suffix ? "" : file_suffix);
+	snprintf(tempfilepath, sizeof(tempfilepath),
+			 "%s/%s_strom_%d.%ld.map",
+			 tempdirpath, PG_TEMP_FILE_PREFIX,
+			 MyProcPid, tempFileCounter++);
 
 	file_flags = O_RDWR | O_CREAT | O_TRUNC | PG_BINARY;
 	file_desc = OpenTransientFile(tempfilepath, file_flags, 0600);
@@ -530,7 +526,7 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 		int			kds_fdesc;
 		size_t		mmap_length;
 
-		kds_fdesc = pgstrom_open_tempfile(".map", &kds_fname);
+		kds_fdesc = pgstrom_open_tempfile(&kds_fname);
 		pds->kds_fname = MemoryContextStrdup(gmcxt, kds_fname);
 
 		mmap_length = TYPEALIGN(BLCKSZ, pds->kds_length);

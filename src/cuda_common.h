@@ -74,6 +74,8 @@ typedef double				cl_double;
 typedef cl_ulong	hostptr_t;
 typedef size_t		devptr_t;
 typedef cl_ulong	Datum;
+#define PointerGetDatum(X)		((Datum) (X))
+#define DatumGetPointer(X)		((cl_char *) (X))
 
 #define INT64CONST(x)	((cl_long) x##L)
 #define UINT64CONST(x)	((cl_ulong) x##UL)
@@ -106,8 +108,12 @@ typedef cl_ulong	Datum;
 #define ULONG_MAX		0xFFFFFFFFFFFFFFFFULL
 #define FLT_MAX			0x1.fffffep127f
 #define FLT_MIN			0x1.0p-126f
+#define FLT_DIG			6
+#define FLT_MANT_DIG	24
 #define DBL_MAX			0x1.fffffffffffffp1023
 #define DBL_MIN			0x1.0p-1022
+#define DBL_DIG			15
+#define DBL_MANT_DIG	53
 
 /*
  * MEMO: We takes dynamic local memory using cl_ulong data-type because of

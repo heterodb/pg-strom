@@ -351,17 +351,16 @@ pg_numeric_from_varlena(int *errcode, struct varlena *vl_val)
  */
 #define NUMERIC_TO_VERLENA_USE_SHORT_FORMAT
 
-INLINE_FUNCTION(size_t)
+STATIC_INLINE(size_t)
 pg_numeric_to_varlena(int *errcode, pg_numeric_t arg, varlena *vl_val)
 {
-	__global varattrib_4b * 		pHeader;
-	__global union NumericChoice *	pNumData;
-
+	varattrib_4b		   *pHeader;
+	union NumericChoice	   *pNumData;
 
 	if (vl_val == NULL)
 	{
 		// No destination buffer
-		*errcode = StromError_OpenCLInternal;
+		*errcode = StromError_CudaInternal;
 		return 0;
 	}
 
@@ -369,7 +368,7 @@ pg_numeric_to_varlena(int *errcode, pg_numeric_t arg, varlena *vl_val)
 	{
 		// Alignment error.
 		// Must be set 4 byte alignment for varlena buffer.
-		*errcode = StromError_OpenCLInternal;
+		*errcode = StromError_CudaInternal;
 		return 0;
 	}
 
@@ -377,22 +376,26 @@ pg_numeric_to_varlena(int *errcode, pg_numeric_t arg, varlena *vl_val)
 	{
 		// The caller function set NULL to bitmapt if arg is NULL.
 		// And then, does not call this function.
-		*errcode = StromError_OpenCLInternal;
+		*errcode = StromError_CudaInternal;
 		return 0;
 	}
 
-	pHeader  = (__global varattrib_4b *)vl_val;
-	pNumData = (__global union NumericChoice *)((__global char *)pHeader + 
-												VARHDRSZ);
+	pHeader  = (varattrib_4b *)vl_val;
+	pNumData = (union NumericChoice *)((char *)pHeader + VARHDRSZ);
 
 	// generate numeric data
 	{
 		int			sign = PG_NUMERIC_SIGN(arg.value);
 		int 		expo = PG_NUMERIC_EXPONENT(arg.value);
 		cl_ulong	mant = PG_NUMERIC_MANTISSA(arg.value);
-
-		int	digits, dscale, weight, mag, nData, modExpo, tmpDigits;
-		__global NumericDigit *pNData;
+		NumericDigit   *pNData;
+		int			digits;
+		int			dscale;
+		int			weight;
+		int			mag;
+		int			nData;
+		int			modExpo;
+		int			tmpDigits;
 
 		{
 			cl_ulong tmp = mant;
@@ -444,13 +447,14 @@ pg_numeric_to_varlena(int *errcode, pg_numeric_t arg, varlena *vl_val)
 		pNData = pNumData->n_long.n_data;
 #endif
 
-		if(0 < nData) {
+		if (0 < nData)
+		{
 			pNData[nData-1] = (mant % (PG_NBASE/mag)) * mag;
 			mant /= (PG_NBASE/mag);
 
 			{
 				int i;
-				for(i=nData-2; 0<=i; i--)
+				for (i = nData - 2; 0 <= i; i--)
 				{
 					pNData[i] = mant % PG_NBASE;
 					mant /= PG_NBASE;
@@ -481,23 +485,22 @@ pg_numeric_datum_ref(int *errcode,
 	if (!datum)
 		result.isnull = true;
 	else if (!internal_format)
-		result = pg_numeric_from_varlena(errcode, (__global varlena *) datum);
+		result = pg_numeric_from_varlena(errcode, (varlena *) datum);
 	else
 	{
 		result.isnull = false;
-		result.value = *((__global cl_ulong *) datum);
+		result.value = *((cl_ulong *) datum);
 	}
 	return result;
 }
 
 STATIC_FUNCTION(pg_numeric_t)
 pg_numeric_vref(kern_data_store *kds,
-				kern_data_store *ktoast,
 				int *errcode,
 				cl_uint colidx,
 				cl_uint rowidx)
 {
-	void	   *datum = kern_get_datum(kds,ktoast,colidx,rowidx);
+	void	   *datum = kern_get_datum(kds,colidx,rowidx);
 	cl_bool		internal_format = (kds->colmeta[colidx].attlen > 0);
 
 	return pg_numeric_datum_ref(errcode,datum,internal_format);
@@ -511,14 +514,13 @@ pg_numeric_param(kern_parambuf *kparams,
 				 int *errcode,
 				 cl_uint param_id)
 {
-	__global varlena *vl_val;
+	varlena		   *vl_val;
 	pg_numeric_t	result;
 
 	if (param_id < kparams->nparams &&
 		kparams->poffset[param_id] > 0)
 	{
-		vl_val = (__global varlena *)
-			((__global char *)kparams + kparams->poffset[param_id]);
+		vl_val = (varlena *)((char *)kparams + kparams->poffset[param_id]);
 		/* only uncompressed & inline datum */
 		if (VARATT_IS_4B_U(vl_val) || VARATT_IS_1B(vl_val))
 			return pg_numeric_from_varlena(errcode, vl_val);
@@ -1377,13 +1379,12 @@ pgfn_numeric_min(cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
  * Atomic operation support
  */
 STATIC_INLINE(cl_ulong)
-atomic_min_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
+pg_atomic_min_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
 {
 	pg_numeric_t	x, y;
 	pg_int4_t		comp;
 	cl_ulong		oldval;
 	cl_ulong		curval = *ptr;
-	cl_ulong		newval;
 
 	do {
 		x.isnull = false;
@@ -1393,19 +1394,18 @@ atomic_min_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
 		comp = pgfn_numeric_cmp(errcode, x, y);
 		if (comp.value < 0)
 			break;
-	} while ((curval = atomicCAS(ptr, oldval, newval)) != oldval);
+	} while ((curval = atomicCAS(ptr, oldval, numeric_value)) != oldval);
 
 	return oldval;
 }
 
 STATIC_INLINE(cl_ulong)
-atomic_max_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
+pg_atomic_max_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
 {
 	pg_numeric_t	x, y;
 	pg_int4_t		comp;
 	cl_ulong		oldval;
 	cl_ulong		curval = *ptr;
-	cl_ulong		newval;
 
 	do {
 		x.isnull = false;
@@ -1415,13 +1415,13 @@ atomic_max_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
 		comp = pgfn_numeric_cmp(errcode, x, y);
 		if (comp.value > 0)
 			break;
-	} while ((curval = atomicCAS(ptr, oldval, newval)) != oldval);
+	} while ((curval = atomicCAS(ptr, oldval, numeric_value)) != oldval);
 
 	return oldval;
 }
 
 STATIC_INLINE(cl_ulong)
-atomic_add_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
+pg_atomic_add_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
 {
 	pg_numeric_t x, y, z;
 	cl_ulong	oldval;
