@@ -2885,11 +2885,7 @@ gpuhashjoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	}
 	ExplainPropertyText("Bulkload", ghjs->outer_bulkload ? "On" : "Off", es);
 
-	pgstrom_explain_custom_flags(&ghjs->gts.css, es);
-	pgstrom_explain_kernel_source(&ghjs->gts, es);
-
-	if (es->analyze && ghjs->pfm.enabled)
-		pgstrom_explain_perfmon(&ghjs->gts.pfm_accum, es);
+	pgstrom_explain_gputaskstate(&ghjs->gts, es);
 }
 
 /* ----------------------------------------------------------------

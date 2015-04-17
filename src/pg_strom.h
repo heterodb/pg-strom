@@ -243,6 +243,7 @@ struct GpuTaskState
 	GpuContext	   *gcontext;
 	const char	   *kern_source;
 	cl_uint			extra_flags;
+	const char	   *source_pathname;
 	CUmodule	   *cuda_modules;	/* CUmodules for each CUDA context */
 	bool			scan_done;		/* no rows to read, if true */
 	bool			scan_bulk;		/* bulk outer load, if true */
@@ -292,19 +293,19 @@ struct GpuTask
 /*
  * Type declarations for code generator
  */
-#define DEVINFO_IS_NEGATIVE			0x0001
-#define DEVTYPE_IS_VARLENA			0x0002
-#define DEVTYPE_HAS_INTERNAL_FORMAT	0x0004
-#define DEVFUNC_NEEDS_TIMELIB		0x0008
-#define DEVFUNC_NEEDS_TEXTLIB		0x0010
-#define DEVFUNC_NEEDS_NUMERIC		0x0020
-#define DEVFUNC_NEEDS_MATHLIB		0x0040
-#define DEVFUNC_INCL_FLAGS			0x0078
-#define DEVKERNEL_DISABLE_OPTIMIZE	0x0100
-#define DEVKERNEL_NEEDS_GPUSCAN		0x0200
-#define DEVKERNEL_NEEDS_HASHJOIN	0x0400
-#define DEVKERNEL_NEEDS_GPUPREAGG	0x0800
-#define DEVKERNEL_NEEDS_GPUSORT		0x1000
+#define DEVINFO_IS_NEGATIVE				0x00000001
+#define DEVTYPE_IS_VARLENA				0x00000002
+#define DEVTYPE_HAS_INTERNAL_FORMAT		0x00000004
+#define DEVFUNC_NEEDS_TIMELIB			0x00000008
+#define DEVFUNC_NEEDS_TEXTLIB			0x00000010
+#define DEVFUNC_NEEDS_NUMERIC			0x00000020
+#define DEVFUNC_NEEDS_MATHLIB			0x00000040
+#define DEVFUNC_INCL_FLAGS				0x00000078
+#define DEVKERNEL_NEEDS_GPUSCAN			0x00010000
+#define DEVKERNEL_NEEDS_HASHJOIN		0x00020000
+#define DEVKERNEL_NEEDS_GPUPREAGG		0x00040000
+#define DEVKERNEL_NEEDS_GPUSORT			0x00080000
+#define DEVKERNRL_NEEDS_GPUNESTLOOP		0x00100000
 
 struct devtype_info;
 struct devfunc_info;
@@ -442,6 +443,8 @@ extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 /*
  * cuda_program.c
  */
+extern const char *pgstrom_cuda_source_file(const char *kern_source,
+											uint32 extra_flags);
 extern bool pgstrom_load_cuda_program(GpuTaskState *gts);
 extern void pgstrom_preload_cuda_program(GpuTaskState *gts);
 extern void pgstrom_init_cuda_program(void);
@@ -592,14 +595,10 @@ extern void show_scan_qual(List *qual, const char *qlabel,
 						   ExplainState *es);
 extern void show_instrumentation_count(const char *qlabel, int which,
 									   PlanState *planstate, ExplainState *es);
-extern void pgstrom_explain_custom_flags(CustomScanState *css,
-										 ExplainState *es);
-extern void pgstrom_explain_kernel_source(GpuTaskState *gts,
-										  ExplainState *es);
 extern void pgstrom_accum_perfmon(pgstrom_perfmon *accum,
 								  const pgstrom_perfmon *pfm);
-extern void pgstrom_explain_perfmon(pgstrom_perfmon *pfm,
-									ExplainState *es);
+extern void
+pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es);
 extern void _outToken(StringInfo str, const char *s);
 extern Value *formBitmapset(const Bitmapset *bms);
 extern Bitmapset *deformBitmapset(const Value *value);

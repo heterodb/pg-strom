@@ -914,11 +914,7 @@ gpuscan_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		show_instrumentation_count("Rows Removed by Device Fileter",
 								   2, &gss->gts.css.ss.ps, es);
 	}
-	pgstrom_explain_custom_flags(&gss->gts.css, es);
-	pgstrom_explain_kernel_source(&gss->gts, es);
-
-	if (es->analyze && gss->gts.pfm_accum.enabled)
-		pgstrom_explain_perfmon(&gss->gts.pfm_accum, es);
+	pgstrom_explain_gputaskstate(&gss->gts, es);
 }
 
 void

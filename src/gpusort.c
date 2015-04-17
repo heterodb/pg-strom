@@ -1098,10 +1098,7 @@ gpusort_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 			ExplainPropertyText("Sort Space Type", sort_storage, es);
 		}
 	}
-	pgstrom_explain_custom_flags(&gss->gts.css, es);
-	pgstrom_explain_kernel_source(&gss->gts, es);
-	if (es->analyze && gss->gts.pfm_accum.enabled)
-		pgstrom_explain_perfmon(&gss->gts.pfm_accum, es);
+	pgstrom_explain_gputaskstate(&gss->gts, es);
 }
 
 static GpuTask *

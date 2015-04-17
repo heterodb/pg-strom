@@ -17,6 +17,8 @@
  */
 #include "postgres.h"
 #include "access/twophase.h"
+#include "catalog/catalog.h"
+#include "catalog/pg_tablespace.h"
 #include "common/pg_crc.h"
 #include "postmaster/bgworker.h"
 #include "storage/ipc.h"
@@ -86,7 +88,7 @@ typedef struct
 
 /* ---- GUC variables ---- */
 static Size		program_cache_size;
-static bool		enable_cuda_coredump;
+static bool		pgstrom_enable_cuda_coredump;
 
 /* ---- static variables ---- */
 static shmem_startup_hook_type shmem_startup_next;
@@ -339,8 +341,13 @@ pgstrom_put_cuda_program(program_cache_entry *entry)
 	SpinLockRelease(&pgcache_head->lock);
 }
 
+/*
+ * construct_flat_cuda_source
+ *
+ * It makes a flat cstring kernel source.
+ */
 static char *
-pgstrom_write_cuda_program(program_cache_entry *entry)
+construct_flat_cuda_source(const char *kern_source, uint32 extra_flags)
 {
 	StringInfoData		source;
 
@@ -367,35 +374,35 @@ pgstrom_write_cuda_program(program_cache_entry *entry)
 	/* PG-Strom CUDA device code libraries */
 
 	/* cuda mathlib.h */
-	if (entry->extra_flags & DEVFUNC_NEEDS_MATHLIB)
+	if (extra_flags & DEVFUNC_NEEDS_MATHLIB)
 		appendStringInfoString(&source, pgstrom_cuda_mathlib_code);
 	/* cuda timelib.h */
-	if (entry->extra_flags & DEVFUNC_NEEDS_TIMELIB)
+	if (extra_flags & DEVFUNC_NEEDS_TIMELIB)
 		appendStringInfoString(&source, pgstrom_cuda_timelib_code);
 	/* cuda textlib.h */
-	if (entry->extra_flags & DEVFUNC_NEEDS_TEXTLIB)
+	if (extra_flags & DEVFUNC_NEEDS_TEXTLIB)
 		appendStringInfoString(&source, pgstrom_cuda_textlib_code);
 	/* cuda numeric.h */
-	if (entry->extra_flags & DEVFUNC_NEEDS_NUMERIC)
+	if (extra_flags & DEVFUNC_NEEDS_NUMERIC)
 		appendStringInfoString(&source, pgstrom_cuda_numeric_code);
 
 	/* Main logic of each GPU tasks */
 
 	/* GpuScan */
-	if (entry->extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
+	if (extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
 		appendStringInfoString(&source, pgstrom_cuda_gpuscan_code);
 	/* GpuHashJoin */
-	if (entry->extra_flags & DEVKERNEL_NEEDS_HASHJOIN)
+	if (extra_flags & DEVKERNEL_NEEDS_HASHJOIN)
 		appendStringInfoString(&source, pgstrom_cuda_hashjoin_code);
 	/* GpuPreAgg */
-	if (entry->extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
+	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
 		appendStringInfoString(&source, pgstrom_cuda_gpupreagg_code);
 	/* GpuSort */
-	if (entry->extra_flags & DEVKERNEL_NEEDS_GPUSORT)
+	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT)
 		appendStringInfoString(&source, pgstrom_cuda_gpusort_code);
 
 	/* Source code generated on the fly */
-	appendStringInfoString(&source, entry->kern_source);
+	appendStringInfoString(&source, kern_source);
 
 	/* disable C++ feature */
 	appendStringInfo(&source,
@@ -405,11 +412,94 @@ pgstrom_write_cuda_program(program_cache_entry *entry)
 	return source.data;
 }
 
+/*
+ * writeout_cuda_source_file
+ *
+ * It makes a temporary file to write-out cuda source.
+ */
+static const char *
+writeout_cuda_source_file(char *cuda_source)
+{
+	static long	sourceFileCounter = 0;
+	static char	tempfilepath[MAXPGPATH];
+	char		tempdirpath[MAXPGPATH];
+	Oid			tablespace_oid;
+	File		filp;
+
+	tablespace_oid = (OidIsValid(MyDatabaseTableSpace)
+					  ? MyDatabaseTableSpace
+					  : DEFAULTTABLESPACE_OID);
+	if (tablespace_oid == DEFAULTTABLESPACE_OID ||
+		tablespace_oid == GLOBALTABLESPACE_OID)
+	{
+		/* The default tablespace is {datadir}/base */
+		snprintf(tempdirpath, sizeof(tempdirpath), "base/%s",
+				 PG_TEMP_FILES_DIR);
+	}
+	else
+	{
+		/* All other tablespaces are accessed via symlinks */
+		snprintf(tempdirpath, sizeof(tempdirpath), "pg_tblspc/%u/%s/%s",
+				 tablespace_oid,
+				 TABLESPACE_VERSION_DIRECTORY,
+				 PG_TEMP_FILES_DIR);
+	}
+
+	/*
+	 * Generate a tempfile name that should be unique within the current
+	 * database instance.
+	 */
+	snprintf(tempfilepath, sizeof(tempfilepath), "%s/%s/%s_strom_%d.%ld.gpu",
+			 DataDir, tempdirpath, PG_TEMP_FILE_PREFIX, MyProcPid,
+			 sourceFileCounter++);
+
+	/*
+	 * Open the file.  Note: we don't use O_EXCL, in case there is an orphaned
+	 * temp file that can be reused.
+	 */
+	filp = PathNameOpenFile(tempfilepath,
+							O_RDWR | O_CREAT | O_TRUNC | PG_BINARY,
+							0600);
+	if (filp <= 0)
+	{
+		/*
+		 * We might need to create the tablespace's tempfile directory, if no
+		 * one has yet done so.
+		 *
+		 * Don't check for error from mkdir; it could fail if someone else
+		 * just did the same thing.  If it doesn't work then we'll bomb out on
+		 * the second create attempt, instead.
+		 */
+		mkdir(tempdirpath, S_IRWXU);
+
+		filp = PathNameOpenFile(tempfilepath,
+								O_RDWR | O_CREAT | O_TRUNC | PG_BINARY,
+								0600);
+		if (filp <= 0)
+			elog(ERROR, "could not create temporary file \"%s\": %m",
+				 tempfilepath);
+	}
+
+	FileWrite(filp, cuda_source, strlen(cuda_source));
+
+	FileClose(filp);
+
+	return tempfilepath;
+}
+
+const char *
+pgstrom_cuda_source_file(const char *kern_source, uint32 extra_flags)
+{
+	char   *cuda_source = construct_flat_cuda_source(kern_source,
+													 extra_flags);
+	return writeout_cuda_source_file(cuda_source);
+}
+
 static void
 __build_cuda_program(program_cache_entry *old_entry)
 {
 	char		   *source;
-	char		   *source_pathname;
+	const char	   *source_pathname = NULL;
 	nvrtcProgram	program;
 	nvrtcResult		rc;
 	const char	   *options[10];
@@ -426,26 +516,11 @@ __build_cuda_program(program_cache_entry *old_entry)
 	/*
 	 * Make a nvrtcProgram object
 	 */
-	source = pgstrom_write_cuda_program(old_entry);
-	source_pathname = "pg_strom.autogen";
-	if (enable_cuda_coredump)
-	{
-		char	pathname[128];
-		int		fdesc;
-
-		strcpy(pathname, "/tmp/pg_strom_XXXXXX.gpu");
-		fdesc = mkstemps(pathname, 4);
-		if (fdesc >= 0)
-		{
-			write(fdesc, source, strlen(source));
-			close(fdesc);
-			source_pathname = pstrdup(pathname);
-		}
-	}
-
+	source = construct_flat_cuda_source(old_entry->kern_source,
+										old_entry->extra_flags);
 	rc = nvrtcCreateProgram(&program,
 							source,
-							"autogen",
+							"pg_strom",
 							0,
 							NULL,
 							NULL);
@@ -471,12 +546,18 @@ __build_cuda_program(program_cache_entry *old_entry)
 	rc = nvrtcCompileProgram(program, opt_index, options);
 	if (rc != NVRTC_SUCCESS)
 	{
-		if (rc != NVRTC_ERROR_COMPILATION)
+		if (rc == NVRTC_ERROR_COMPILATION)
+			build_failure = true;
+		else
 			elog(ERROR, "failed on nvrtcCompileProgram: %s",
 				 nvrtcGetErrorString(rc));
-		else
-			build_failure = true;
 	}
+
+	/*
+	 * Save the source file, if required or build failure
+	 */
+	if (build_failure)
+		source_pathname = writeout_cuda_source_file(source);
 
 	/*
 	 * Read PTX Binary
@@ -555,7 +636,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 				 "build: %s\n%s\nsource: %s\n",
 				 !ptx_image ? "failed" : "success",
 				 build_log,
- 				 source_pathname);
+				 source_pathname);
 	else
 		snprintf(new_entry->error_msg, length,
 				 "build: %s\n%s",
@@ -887,24 +968,21 @@ pgstrom_init_cuda_program(void)
 	DefineCustomBoolVariable("pg_strom.debug.cuda_coredump",
 							 "Turn on/off GPU coredump feature",
 							 NULL,
-							 &enable_cuda_coredump,
-#ifdef PGSTROM_DEBUG
-							 true,
-#else
+							 &pgstrom_enable_cuda_coredump,
 							 false,
-#endif
 							 PGC_POSTMASTER,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-#if 0
-	/* it is buggy on libcuda.so.346.46 driver  */
-	if (enable_cuda_coredump)
+	if (pgstrom_enable_cuda_coredump)
 	{
+		elog(WARNING,
+			 "pg_strom.debug.cuda_coredump = on is danger configuration. "
+			 "It may lead random/unexpected system crash.");
+
 		if (setenv("CUDA_ENABLE_CPU_COREDUMP_ON_EXCEPTION", "0", 1) != 0 ||
 			setenv("CUDA_ENABLE_COREDUMP_ON_EXCEPTION", "1", 1) != 0)
 			elog(ERROR, "failed on set environment variable for core dump");
 	}
-#endif
 
 	/*
 	 * Init CUDA run-time compiler library

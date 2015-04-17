@@ -38,8 +38,8 @@ PG_MODULE_MAGIC;
 static bool	guc_pgstrom_enabled;
 static bool guc_pgstrom_enabled_global;
 bool	pgstrom_perfmon_enabled;
+static bool pgstrom_debug_kernel_source;
 bool	pgstrom_debug_bulkload_enabled;
-bool	pgstrom_debug_kernel_source;
 int		pgstrom_max_async_chunks;
 int		pgstrom_min_async_chunks;
 
@@ -163,6 +163,16 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	/* turn on/off cuda kernel source saving */
+	DefineCustomBoolVariable("pg_strom.debug.kernel_source",
+							 "Turn on/off to display the kernel source path",
+							 NULL,
+							 &pgstrom_debug_kernel_source,
+							 false,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
 	DefineCustomBoolVariable("pg_strom.debug_bulkload_enabled",
 							 "Enables the bulk-loading mode of PG-Strom",
 							 NULL,
@@ -171,14 +181,6 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
                              GUC_NOT_IN_SAMPLE,
                              NULL, NULL, NULL);
-	DefineCustomBoolVariable("pg_strom.debug_kernel_source",
-							 "Enables to show kernel source on EXPLAIN",
-							 NULL,
-							 &pgstrom_debug_kernel_source,
-							 false,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
 	DefineCustomIntVariable("pg_strom.min_async_chunks",
 							"least number of chunks to be run asynchronously",
 							NULL,
@@ -386,69 +388,6 @@ show_instrumentation_count(const char *qlabel, int which,
 }
 
 void
-pgstrom_explain_custom_flags(CustomScanState *css, ExplainState *es)
-{
-	StringInfoData	str;
-
-	if (!es->verbose)
-		return;
-
-	initStringInfo(&str);
-	if ((css->flags & CUSTOMPATH_PREFERE_ROW_FORMAT) != 0)
-		appendStringInfo(&str, "likely-heap-tuple");
-	else
-		appendStringInfo(&str, "likely-tuple-slot");
-
-	if ((css->flags & CUSTOMPATH_SUPPORT_BULKLOAD) != 0)
-		appendStringInfo(&str, ", bulkload-supported");
-
-	ExplainPropertyText("Features", str.data, es);
-
-	pfree(str.data);
-}
-
-void
-pgstrom_explain_kernel_source(GpuTaskState *gts, ExplainState *es)
-{
-	const char	   *kern_source = gts->kern_source;
-	int				extra_flags = gts->extra_flags;
-	StringInfoData	str;
-
-	if (!kern_source || !es->verbose || !pgstrom_debug_kernel_source)
-		return;
-
-	initStringInfo(&str);
-	/*
-	 * In case of EXPLAIN command context, we show the built-in logics
-	 * like a usual #include preprocessor command.
-	 * Practically, clCreateProgramWithSource() accepts multiple cstrings
-	 * as if external files are included.
-	 */
-	appendStringInfo(&str, "#include \"cuda_common.h\"\n");
-	if (extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
-		appendStringInfo(&str, "#include \"cuda_gpuscan.h\"\n");
-	if (extra_flags & DEVKERNEL_NEEDS_HASHJOIN)
-		appendStringInfo(&str, "#include \"cuda_hashjoin.h\"\n");
-	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
-		appendStringInfo(&str, "#include \"cuda_gpupreagg.h\"\n");
-	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT)
-		appendStringInfo(&str, "#include \"cuda_gpusort.h\"\n");
-	if (extra_flags & DEVFUNC_NEEDS_MATHLIB)
-		appendStringInfo(&str, "#include \"cuda_mathlib.h\"\n");
-	if (extra_flags & DEVFUNC_NEEDS_TIMELIB)
-		appendStringInfo(&str, "#include \"cuda_timelib.h\"\n");
-	if (extra_flags & DEVFUNC_NEEDS_TEXTLIB)
-		appendStringInfo(&str, "#include \"cuda_textlib.h\"\n");
-	if (extra_flags & DEVFUNC_NEEDS_NUMERIC)
-		appendStringInfo(&str, "#include \"cuda_numeric.h\"\n");
-	appendStringInfo(&str, "\n%s", kern_source);
-
-	ExplainPropertyText("Kernel Source", str.data, es);
-
-	pfree(str.data);
-}
-
-void
 pgstrom_accum_perfmon(pgstrom_perfmon *accum, const pgstrom_perfmon *pfm)
 {
 	if (!accum->enabled)
@@ -527,7 +466,7 @@ milliseconds_unitary_format(double milliseconds)
 	return psprintf("%.2fms", milliseconds);
 }
 
-void
+static void
 pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 {
 	char		buf[256];
@@ -737,6 +676,56 @@ pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 				 milliseconds_unitary_format(pfm->time_debug4));
 		ExplainPropertyText("debug-4", buf, es);
 	}
+}
+
+/*
+ * pgstrom_explain_gputaskstate
+ *
+ * common additional explain output for all the GpuTaskState nodes
+ */
+void
+pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es)
+{
+	/*
+	 * Explain custom-flags
+	 */
+	if (es->verbose)
+	{
+		StringInfoData	buf;
+		uint32			cflags = gts->css.flags;
+
+		initStringInfo(&buf);
+
+		if ((cflags & CUSTOMPATH_PREFERE_ROW_FORMAT) != 0)
+			appendStringInfo(&buf, "format: heap-tuple");
+		else
+			appendStringInfo(&buf, "format: tuple-slot");
+
+		if ((cflags & CUSTOMPATH_SUPPORT_BULKLOAD) != 0)
+			appendStringInfo(&buf, ", bulkload: supported");
+		else
+			appendStringInfo(&buf, ", bulkload: unsupported");
+
+		ExplainPropertyText("Features", buf.data, es);
+
+		pfree(buf.data);
+	}
+
+	/*
+	 * Show source path of the GPU kernel
+	 */
+	if (es->verbose && pgstrom_debug_kernel_source)
+	{
+		const char *cuda_source = pgstrom_cuda_source_file(gts->kern_source,
+														   gts->extra_flags);
+		ExplainPropertyText("Kernel Source", cuda_source, es);
+	}
+
+	/*
+	 * Show performance information
+	 */
+	if (es->analyze && gts->pfm_accum.enabled)
+		pgstrom_explain_perfmon(&gts->pfm_accum, es);
 }
 
 /*

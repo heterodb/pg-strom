@@ -3283,10 +3283,7 @@ gpupreagg_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		show_instrumentation_count("Rows Removed by Device Fileter",
                                    2, &gpas->gts.css.ss.ps, es);
 	}
-	pgstrom_explain_custom_flags(&gpas->gts.css, es);
-	pgstrom_explain_kernel_source(&gpas->gts, es);
-	if (es->analyze && gpas->gts.pfm_accum.enabled)
-		pgstrom_explain_perfmon(&gpas->gts.pfm_accum, es);
+	pgstrom_explain_gputaskstate(&gpas->gts, es);
 }
 
 /*
