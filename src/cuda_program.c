@@ -43,9 +43,21 @@ typedef struct
 	char		data[FLEXIBLE_ARRAY_MEMBER];
 } program_cache_entry;
 
-#define PGCACHE_ACTIVE_ENTRY(entry)		((entry)->refcnt == 0)
-#define PGCACHE_FREE_ENTRY(entry)		((entry)->refcnt > 0)
+#define PGCACHE_ACTIVE_ENTRY(entry)				\
+	((entry)->lru_chain.prev && (entry)->lru_chain.next)
+#define PGCACHE_FREE_ENTRY(entry)				\
+	(!(entry)->lru_chain.prev && !(entry)->lru_chain.next)
 #define PGCACHE_MAGIC					0xabadcafe
+#define PGCACHE_MAGIC_CODE(entry)				\
+	*((cl_uint *)((char *)(entry) + (1UL << (entry)->shift) - sizeof(cl_uint)))
+#define PGCACHE_CHECK_ACTIVE(entry)				\
+	Assert(PGCACHE_ACTIVE_ENTRY(entry) &&		\
+		   (entry)->refcnt > 0 &&				\
+		   PGCACHE_MAGIC_CODE(entry) == PGCACHE_MAGIC)
+#define PGCACHE_CHECK_FREE(entry)				\
+	Assert(PGCACHE_FREE_ENTRY(entry) &&			\
+		   (entry)->refcnt == 0 &&				\
+		   PGCACHE_MAGIC_CODE(entry) == PGCACHE_MAGIC)
 #define PGCACHE_MIN_ERRORMSG_BUFSIZE	256
 #define PGCACHE_ERRORMSG_LEN(entry)				\
 	((uintptr_t)(entry) +						\
@@ -78,7 +90,7 @@ static bool		enable_cuda_coredump;
 
 /* ---- static variables ---- */
 static shmem_startup_hook_type shmem_startup_next;
-static program_cache_head *pgcache_head;
+static program_cache_head *pgcache_head = NULL;
 
 /* ---- static functions ---- */
 static program_cache_entry *pgstrom_program_cache_alloc(Size required);
@@ -130,6 +142,7 @@ pgstrom_program_cache_reclaim(int shift_min)
 		int			shift;
 
 		entry = dlist_container(program_cache_entry, lru_chain, dnode);
+		PGCACHE_CHECK_ACTIVE(entry);
 		/* remove from the list not to be reclaimed again */
 		dlist_delete(&entry->hash_chain);
 		dlist_delete(&entry->lru_chain);
@@ -180,14 +193,18 @@ pgstrom_program_cache_split(int shift)
 	shift--;
 
 	/* earlier half */
+	memset(entry, 0, offsetof(program_cache_entry, data[0]));
 	entry->shift = shift;
 	entry->refcnt = 0;
+	PGCACHE_MAGIC_CODE(entry) = PGCACHE_MAGIC;
 	dlist_push_tail(&pgcache_head->free_list[shift], &entry->hash_chain);
 
 	/* later half */
 	entry = (program_cache_entry *)((char *)entry + (1UL << shift));
+	memset(entry, 0, offsetof(program_cache_entry, data[0]));
 	entry->shift = shift;
 	entry->refcnt = 0;
+	PGCACHE_MAGIC_CODE(entry) = PGCACHE_MAGIC;
 	dlist_push_tail(&pgcache_head->free_list[shift], &entry->hash_chain);
 
 	return true;
@@ -222,9 +239,11 @@ pgstrom_program_cache_alloc(Size required)
 		 * to reclaim entries according to LRU.
 		 * If both of them make no sense, we give up!
 		 */
-		if (!pgstrom_program_cache_split(shift + 1) &&
-			!pgstrom_program_cache_reclaim(shift))
-			return NULL;
+		while (!pgstrom_program_cache_split(shift + 1))
+		{
+			if (!pgstrom_program_cache_reclaim(shift))
+				return NULL;
+		}
 	}
 	Assert(!dlist_is_empty(&pgcache_head->free_list[shift]));
 
@@ -235,7 +254,7 @@ pgstrom_program_cache_alloc(Size required)
 	memset(entry, 0, sizeof(program_cache_entry));
 	entry->shift = shift;
 	entry->refcnt = 1;
-	*((uint *)((char *)entry + (1UL << shift) - sizeof(uint))) = PGCACHE_MAGIC;
+	PGCACHE_MAGIC_CODE(entry) = PGCACHE_MAGIC;
 
 	return entry;
 }
@@ -247,6 +266,8 @@ pgstrom_program_cache_free(program_cache_entry *entry)
 	Size		offset;
 
 	Assert(entry->refcnt == 0);
+	Assert(!entry->hash_chain.next && !entry->hash_chain.prev);
+	Assert(!entry->lru_chain.next && !entry->lru_chain.prev);
 
 	offset = (uintptr_t)entry - (uintptr_t)pgcache_head->entry_begin;
 	Assert((offset & ((1UL << shift) - 1)) == 0);
@@ -262,17 +283,41 @@ pgstrom_program_cache_free(program_cache_entry *entry)
 		else
 			buddy = (program_cache_entry *)((char *)entry - (1UL << shift));
 
-		if (buddy >= pgcache_head->entry_end ||	/* out of range? */
-			buddy->shift != shift ||			/* same size? */
-			PGCACHE_ACTIVE_ENTRY(buddy))		/* and free entry? */
+		if (buddy >= pgcache_head->entry_end ||		/* out of range? */
+			buddy->shift != shift ||				/* same size? */
+			PGCACHE_ACTIVE_ENTRY(buddy))			/* and free entry? */
 			break;
-		/* OK, chunk and buddy can be merged */
+#if 0
+		/* Sanity check - buddy should be in free list */
+		do {
+			dlist_head	   *free_list = pgcache_head->free_list + shift;
+			dlist_iter		iter;
+			bool			found = false;
 
-		dlist_delete(&buddy->hash_chain);
+			dlist_foreach (iter, free_list)
+			{
+				program_cache_entry *temp
+					= dlist_container(program_cache_entry,
+									  hash_chain, iter.cur);
+				if (temp == buddy)
+				{
+					found = true;
+					break;
+				}
+			}
+			Assert(found);
+		} while(0);
+#endif
+		/* OK, chunk and buddy can be merged */
+		PGCACHE_CHECK_FREE(buddy);
+		dlist_delete(&buddy->hash_chain);	/* remove from free_list */
+		memset(&buddy->hash_chain, 0, sizeof(dlist_node));
 		if (buddy < entry)
 			entry = buddy;
 		entry->shift = ++shift;
+		PGCACHE_MAGIC_CODE(entry) = PGCACHE_MAGIC;
 	}
+	PGCACHE_CHECK_FREE(entry);
 	dlist_push_head(&pgcache_head->free_list[shift], &entry->hash_chain);
 }
 
@@ -283,8 +328,9 @@ pgstrom_put_cuda_program(program_cache_entry *entry)
 	if (--entry->refcnt == 0)
 	{
 		/*
-		 * NOTE: unless pgstrom_program_cache_reclaim() detach
-		 * entries, it never goes to refcnt == 0.
+		 * NOTE: unless either pgstrom_program_cache_reclaim() or
+		 * __build_cuda_program() don't detach entry from active
+		 * entries hash, it never goes to refcnt == 0.
 		 */
 		Assert(!entry->hash_chain.next && !entry->hash_chain.prev);
 		Assert(!entry->lru_chain.next && !entry->lru_chain.prev);
@@ -525,8 +571,8 @@ __build_cuda_program(program_cache_entry *old_entry)
 					&new_entry->lru_chain);
 
 	/*
-	 * Also, waking up blocking tasks and drop old_entry
-	 * which shall not be referenced no longer.
+	 * Waking up blocking tasks, and detach old_entry from
+	 * the hash/lru list to ensure nobody will grab it.
 	 */
 	pgstrom_wakeup_backends(old_entry->waiting_backends);
 
@@ -534,8 +580,6 @@ __build_cuda_program(program_cache_entry *old_entry)
 	dlist_delete(&old_entry->lru_chain);
 	memset(&old_entry->hash_chain, 0, sizeof(dlist_node));
 	memset(&old_entry->lru_chain, 0, sizeof(dlist_node));
-	if (--old_entry->refcnt == 0)
-		pgstrom_program_cache_free(old_entry);
 
 	SpinLockRelease(&pgcache_head->lock);
 }
@@ -638,6 +682,7 @@ retry:
 				return false;
 			}
 			/* OK, this kernel is already built */
+			Assert(entry->refcnt > 0);
 			entry->refcnt++;
 			SpinLockRelease(&pgcache_head->lock);
 
@@ -718,7 +763,6 @@ retry:
 		|= (1 << BITNUM(MyProc->pgprocno));
 
 	/* to be acquired by program builder */
-	entry->refcnt++;
 	dlist_push_head(&pgcache_head->active_list[hindex], &entry->hash_chain);
 	dlist_push_head(&pgcache_head->lru_list, &entry->lru_chain);
 
@@ -840,8 +884,8 @@ pgstrom_init_cuda_program(void)
 	/*
 	 * turn on/off cuda coredump feature
 	 */
-	DefineCustomBoolVariable("pg_strom.enable_cuda_coredump",
-							 "enables GPU coredump feature",
+	DefineCustomBoolVariable("pg_strom.debug.cuda_coredump",
+							 "Turn on/off GPU coredump feature",
 							 NULL,
 							 &enable_cuda_coredump,
 #ifdef PGSTROM_DEBUG

@@ -1054,19 +1054,19 @@ pg_atomic_add_long(cl_long *addr, cl_long value)
 	} while(0)
 
 STATIC_INLINE(cl_float)
-pg_atomic_float_min(cl_float *addr, float value)
+pg_atomic_min_float(cl_float *addr, float value)
 {
 	PG_ATOMIC_FLOAT_TEMPLATE(Min, addr, value);
 }
 
 STATIC_INLINE(cl_float)
-pg_atomic_float_max(cl_float *addr, float value)
+pg_atomic_max_float(cl_float *addr, float value)
 {
 	PG_ATOMIC_FLOAT_TEMPLATE(Max, addr, value);
 }
 
 STATIC_INLINE(cl_float)
-pg_atomic_float_add(cl_float *addr, float value)
+pg_atomic_add_float(cl_float *addr, float value)
 {
 #if __CUDA_ARCH__ < 350
 	PG_ATOMIC_FLOAT_TEMPLATE(Add, addr, value);
