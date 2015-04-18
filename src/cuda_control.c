@@ -1316,8 +1316,6 @@ pgstrom_fetch_gputask(GpuTaskState *gts)
 				Assert(!gtask || gtask->gts == gts);
 
 				SpinLockAcquire(&gts->lock);
-				check_completed_tasks(gts);
-
 				if (!gtask)
 				{
 					gts->scan_done = true;
@@ -1329,6 +1327,7 @@ pgstrom_fetch_gputask(GpuTaskState *gts)
 				gts->num_pending_tasks++;
 
 				/* kick pending tasks */
+				check_completed_tasks(gts);
 				launch_pending_tasks(gts);
 			}
 		}

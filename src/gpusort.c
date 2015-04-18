@@ -970,10 +970,15 @@ gpusort_rescan(CustomScanState *node)
 	 */
 	if (outerPlanState(gss)->chgParam != NULL)
 	{
+		Size	length = sizeof(pgstrom_data_store *) * gss->num_chunks_limit;
+
 		/* cleanup and release any concurrent tasks */
 		pgstrom_cleanup_gputaskstate(&gss->gts);
 		gss->sort_done = false;
 		memset(gss->sorted_chunks, 0, sizeof(gss->sorted_chunks));
+		memset(gss->pds_chunks, 0, length);
+		memset(gss->pds_toasts, 0, length);
+		gss->num_chunks = 0;
 
 		/*
 		 * if chgParam of subnode is not null then plan will be re-scanned by
@@ -1429,7 +1434,9 @@ gpusort_merge_chunks(GpuSortState *gss, pgstrom_gpusort *gpusort_1)
 		 gpusort_1->mc_class);
 	Assert(gpusort_1->mc_class > 0);
 	/* release either of them */
-	pgstrom_cleanup_gputask_cuda_resources(&gpusort_2->task);
+	SpinLockAcquire(&gss->gts.lock);
+	dlist_delete(&gpusort_2->task.tracker);
+	SpinLockRelease(&gss->gts.lock);
 	gpusort_task_release(&gpusort_2->task);
 
 	/* mark not to assign cuda_stream again */
@@ -1662,7 +1669,7 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 						NULL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-	elog(INFO, "gpusort_bitonic_local(gridSz=%zu,blockSz=%zu)",
+	elog(DEBUG2, "gpusort_bitonic_local(gridSz=%zu,blockSz=%zu)",
 		 grid_size, block_size);
 	gpusort->task.pfm.num_gpu_sort++;
 
@@ -1695,7 +1702,8 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 								NULL);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-			elog(INFO, "gpusort_bitonic_step(gridSz=%zu,blockSz=%zu,unitsz=%d)",
+			elog(DEBUG2,
+				 "gpusort_bitonic_step(gridSz=%zu,blockSz=%zu,unitsz=%d)",
 				 grid_size, block_size,bitonic_unitsz);
 			gpusort->task.pfm.num_gpu_sort++;
 		}
@@ -1716,7 +1724,8 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 							NULL);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-		elog(INFO, "gpusort_bitonic_merge(gridSz=%zu,blockSz=%zu)",
+		elog(DEBUG2,
+			 "gpusort_bitonic_merge(gridSz=%zu,blockSz=%zu)",
 			 grid_size, block_size);
 		gpusort->task.pfm.num_gpu_sort++;
 	}
@@ -1815,7 +1824,6 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 #if 1
 	offset = STROMALIGN(gss->kparams->length);
 	length = dsm_segment_map_length(gpusort->oitems_dsm);
-	elog(INFO, "addr=%p length=%zu", dsm_segment_address(gpusort->oitems_dsm), length);
 	rc = cuMemHostRegister(dsm_segment_address(gpusort->oitems_dsm),
 						   length,
 						   0);
@@ -1883,7 +1891,6 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 								   false,
 								   nitems,
 								   sizeof(cl_uint));
-	elog(INFO, "kern_prep grid_size=%zu block_size=%zu nitems=%zu", grid_size, block_size, (size_t)nitems);
 	kernel_args[0] = &gpusort->m_gpusort;
 	kernel_args[1] = &gpusort->m_kds;
 	kernel_args[2] = &gpusort->m_ktoast;
@@ -1897,6 +1904,8 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 						NULL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+	elog(DEBUG2, "kern_prep grid_size=%zu block_size=%zu nitems=%zu",
+		 grid_size, block_size, (size_t)nitems);
 	gpusort->task.pfm.num_kern_prep++;
 
 	/*
@@ -1938,7 +1947,6 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 
 	offset = STROMALIGN(gss->kparams->length);
 	length = STROMALIGN(offsetof(kern_resultbuf, results[2 * nitems]));
-	elog(INFO, "m_gpusort=%zx offset=%zu length=%zu kresults=%p", (Size)gpusort->m_gpusort, offset, length, kresults);
 	rc = cuMemcpyDtoHAsync(kresults,
 						   gpusort->m_gpusort + offset,
 						   length,
@@ -2098,7 +2106,6 @@ form_pgstrom_flat_gpusort_base(GpuSortState *gss, cl_int chunk_id)
 	nitems = ptoast->kds->nitems;
 	dsm_length = (STROMALIGN(offsetof(pgstrom_flat_gpusort, data)) +
 				  STROMALIGN(offsetof(kern_resultbuf, results[2 * nitems])));
-	elog(INFO, "dsm_length = %zu nitems=%zu", dsm_length, nitems);
 	dsm_seg = dsm_create(dsm_length, 0);
 	pfg = dsm_segment_address(dsm_seg);
 	memset(pfg, 0, sizeof(pgstrom_flat_gpusort));
@@ -2164,6 +2171,8 @@ form_pgstrom_flat_gpusort(GpuSortState *gss,
 	 * put filename of file-mapped kds and its length
 	 */
 	pfg.kern_chunks = buf.len;
+	Assert(bms_is_empty(bms_intersect(l_gpusort->chunk_id_map,
+									  r_gpusort->chunk_id_map)));
 	chunk_id_map = bms_union(l_gpusort->chunk_id_map,
 							 r_gpusort->chunk_id_map);
 	while ((index = bms_first_member(chunk_id_map)) >= 0)
@@ -2666,7 +2675,7 @@ bgw_cpusort_exec(pgstrom_gpusort *gpusort)
 			Form_pg_attribute attr = tupdesc->attrs[anum];
 
 			/* toast datum has to be fixed up */
-			if (attr->attlen < 0)
+			if (!attr->attbyval)
 			{
 				Assert(ltoast != NULL && rtoast != NULL);
 				if (!l_isnull)
