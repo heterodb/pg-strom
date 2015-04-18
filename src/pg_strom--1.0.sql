@@ -17,14 +17,16 @@ CREATE FUNCTION pgstrom_device_info()
   LANGUAGE C STRICT;
 
 CREATE TYPE __pgstrom_program_info AS (
-  key  		text,
-  refcnt	int4,
-  state		text,
-  crc		text,
-  flags		int4,
-  length	int4,
-  source	text,
-  errmsg	text
+  addr			int8,
+  length		int8,
+  active		bool,
+  status		text,
+  crc32			int4,
+  flags			int4,
+  kern_source	text,
+  ptx_image		text,
+  error_msg		text,
+  backends		text
 );
 CREATE FUNCTION pgstrom_program_info()
   RETURNS SETOF __pgstrom_program_info

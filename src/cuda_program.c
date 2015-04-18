@@ -19,11 +19,14 @@
 #include "access/twophase.h"
 #include "catalog/catalog.h"
 #include "catalog/pg_tablespace.h"
+#include "catalog/pg_type.h"
 #include "common/pg_crc.h"
+#include "funcapi.h"
 #include "postmaster/bgworker.h"
 #include "storage/ipc.h"
 #include "storage/proc.h"
 #include "storage/shmem.h"
+#include "utils/builtins.h"
 #include "utils/guc.h"
 #include "pg_strom.h"
 #include <nvrtc.h>
@@ -880,11 +883,195 @@ pgstrom_preload_cuda_program(GpuTaskState *gts)
 	__pgstrom_load_cuda_program(gts, true);
 }
 
+/*
+ * pgstrom_program_info
+ *
+ * A SQL function to dump cached CUDA programs
+ */
+typedef struct
+{
+	int64		addr;
+	int64		length;
+	bool		active;
+	const char *status;
+	int32		crc32;
+	int32		flags;
+	text	   *kern_source;
+	text	   *ptx_image;
+	text	   *error_msg;
+	text	   *backends;
+} program_info;
+
+static List *
+__collect_program_info(void)
+{
+	program_cache_entry *entry = pgcache_head->entry_begin;
+	List	   *results = NIL;
+
+	while (entry < pgcache_head->entry_end)
+	{
+		program_info   *pinfo = palloc0(sizeof(program_info));
+
+		pinfo->addr = (int64) entry;
+		pinfo->length = (1UL << entry->shift);
+		pinfo->active = PGCACHE_ACTIVE_ENTRY(entry);
+		if (entry->ptx_image == CUDA_PROGRAM_BUILD_FAILURE)
+			pinfo->status = "Build Failed";
+		else if (!entry->ptx_image)
+			pinfo->status = "In Progress";
+		else
+			pinfo->status = "Ready";
+		pinfo->crc32 = entry->crc;
+		pinfo->flags = entry->extra_flags;
+		if (entry->kern_source)
+			pinfo->kern_source = cstring_to_text(entry->kern_source);
+		if (entry->ptx_image)
+			pinfo->ptx_image = cstring_to_text(entry->ptx_image);
+		if (entry->error_msg)
+			pinfo->error_msg = cstring_to_text(entry->error_msg);
+		if (entry->waiting_backends)
+		{
+			StringInfoData	buf;
+			struct PGPROC  *proc;
+			int				i = -1;
+
+			initStringInfo(&buf);
+			while ((i = bms_next_member(entry->waiting_backends, i)) >= 0)
+			{
+				Assert(i < ProcGlobal->allProcCount);
+				proc = &ProcGlobal->allProcs[i];
+
+				if (buf.len > 0)
+					appendStringInfo(&buf, ", ");
+				appendStringInfo(&buf, "%d (pid: %u)",
+								 proc->backendId, proc->pid);
+			}
+			if (buf.len > 0)
+				pinfo->backends = cstring_to_text(buf.data);
+			pfree(buf.data);
+		}
+		results = lappend(results, pinfo);
+
+		/* next entry */
+		entry = (program_cache_entry *)((char *)entry + (1UL << entry->shift));
+	}
+	return results;
+}
+
+static List *
+collect_program_info(void)
+{
+	List   *results;
+
+	SpinLockAcquire(&pgcache_head->lock);
+	PG_TRY();
+	{
+		results = __collect_program_info();
+	}
+	PG_CATCH();
+	{
+		SpinLockRelease(&pgcache_head->lock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	SpinLockRelease(&pgcache_head->lock);
+
+	return results;
+}
+
 Datum
 pgstrom_program_info(PG_FUNCTION_ARGS)
 {
-	elog(ERROR, "not implemented yet");
-	PG_RETURN_NULL();
+	FuncCallContext *fncxt;
+	program_info   *pinfo;
+	List		   *pinfo_list;
+	Datum			values[10];
+	bool			isnull[10];
+	HeapTuple		tuple;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		TupleDesc		tupdesc;
+		MemoryContext	oldcxt;
+
+		fncxt = SRF_FIRSTCALL_INIT();
+		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(10, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "addr",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "length",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "active",
+						   BOOLOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "status",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "crc32",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 6, "flags",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 7, "kern_source",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 8, "ptx_image",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 9, "error_msg",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 10, "backends",
+						   TEXTOID, -1, 0);
+		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
+		fncxt->user_fctx = collect_program_info();
+
+		MemoryContextSwitchTo(oldcxt);
+	}
+	fncxt = SRF_PERCALL_SETUP();
+
+	/* fetch the first entry */
+	pinfo_list = fncxt->user_fctx;
+	if (pinfo_list == NIL)
+		SRF_RETURN_DONE(fncxt);
+	pinfo = linitial(pinfo_list);
+	fncxt->user_fctx = list_delete_first(pinfo_list);
+
+	/* make a heap-tuple */
+	memset(isnull, 0, sizeof(isnull));
+	values[0] = Int64GetDatum(pinfo->addr);
+	values[1] = Int64GetDatum(pinfo->length);
+	values[2] = BoolGetDatum(pinfo->active);
+	if (!pinfo->active)
+	{
+		isnull[3] = true;
+		isnull[4] = true;
+		isnull[5] = true;
+		isnull[6] = true;
+		isnull[7] = true;
+		isnull[8] = true;
+		isnull[9] = true;
+	}
+	else
+	{
+		values[3] = CStringGetTextDatum(pinfo->status);
+		values[4] = Int32GetDatum(pinfo->crc32);
+		values[5] = Int32GetDatum(pinfo->flags);
+		if (!pinfo->kern_source)
+			isnull[6] = true;
+		else
+			values[6] = PointerGetDatum(pinfo->kern_source);
+		if (!pinfo->ptx_image)
+			isnull[7] = true;
+		else
+			values[7] = PointerGetDatum(pinfo->ptx_image);
+		if (!pinfo->error_msg)
+			isnull[8] = true;
+		else
+			values[8] = PointerGetDatum(pinfo->error_msg);
+		if (!pinfo->backends)
+			isnull[9] = true;
+		else
+			values[9] = PointerGetDatum(pinfo->backends);
+	}
+	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
+
+	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
 }
 PG_FUNCTION_INFO_V1(pgstrom_program_info);
 
