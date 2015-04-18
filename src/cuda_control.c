@@ -1073,10 +1073,9 @@ launch_pending_tasks(GpuTaskState *gts)
 			return;
 	}
 
+	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
 	while (!dlist_is_empty(&gts->pending_tasks))
 	{
-		PERFMON_BEGIN(&gts->pfm_accum, &tv1);
-
 		dnode = dlist_pop_head_node(&gts->pending_tasks);
 		gtask = dlist_container(GpuTask, chain, dnode);
 		gts->num_pending_tasks--;
@@ -1137,12 +1136,19 @@ launch_pending_tasks(GpuTaskState *gts)
 			}
 			else
 			{
+				/*
+				 * NOTE: In case when callback required to keep the
+				 * GpuTask in the pending queue, it implies device
+				 * resources are in starvation. It does not make
+				 * sense to enqueue tasks any more, at this moment.
+				 */
 				dlist_push_head(&gts->pending_tasks, &gtask->chain);
 				gts->num_pending_tasks++;
+				break;
 			}
 		}
-		PERFMON_END(&gts->pfm_accum, time_launch_cuda, &tv1, &tv2);
 	}
+	PERFMON_END(&gts->pfm_accum, time_launch_cuda, &tv1, &tv2);
 }
 
 /*
