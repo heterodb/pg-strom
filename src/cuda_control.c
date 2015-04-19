@@ -20,6 +20,7 @@
 #include "common/pg_crc.h"
 #include "funcapi.h"
 #include "lib/ilist.h"
+#include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/proc.h"
 #include "storage/procsignal.h"
@@ -32,6 +33,7 @@
 /* available devices set by postmaster startup */
 static List		   *cuda_device_ordinals = NIL;
 static List		   *cuda_device_capabilities = NIL;
+static List		   *cuda_device_mem_sizes = NIL;	/* in MB */
 static size_t		cuda_max_malloc_size = INT_MAX;
 static size_t		cuda_max_threads_per_block = INT_MAX;
 static int			cuda_compute_capability = INT_MAX;
@@ -44,9 +46,38 @@ static GpuContext  *gcontext_last = NULL;
 static int			cuda_num_devices = -1;
 static CUdevice	   *cuda_devices = NULL;
 
+/* misc static variables */
+static shmem_startup_hook_type shmem_startup_next;
+
 /* ----------------------------------------------------------------
  *
- * Routine to support lightwight userspace device memory allocator
+ * Routines to share the status of device resource consumption
+ *
+ * ----------------------------------------------------------------
+ */
+typedef struct {
+	volatile slock_t lock;
+	cl_uint			num_devices;
+	cl_uint			num_backends;
+	struct {
+		size_t		gmem_size;
+		size_t		gmem_used;
+	} gpu[FLEXIBLE_ARRAY_MEMBER];
+} GpuScoreBoard;
+
+static GpuScoreBoard	   *gpu_score_board;
+
+static void
+cleanup_cuda_score_board(int code, Datum arg)
+{
+	/*
+	 * decrement usage of gmem_used for each active GpuContext
+	 */
+}
+
+/* ----------------------------------------------------------------
+ *
+ * Routines to support lightwight userspace device memory allocator
  *
  * ----------------------------------------------------------------
  */
@@ -1600,7 +1631,8 @@ pgstrom_compute_workgroup_size(size_t *p_grid_size,
 }
 
 static bool
-pgstrom_check_device_capability(int ordinal, CUdevice device, int *dev_cap)
+pgstrom_check_device_capability(int ordinal, CUdevice device,
+								int *dev_cap, size_t *dev_memsz)
 {
 	bool		result = true;
 	char		dev_name[256];
@@ -1718,8 +1750,41 @@ pgstrom_check_device_capability(int ordinal, CUdevice device, int *dev_cap)
 		 !result ? ", NOT SUPPORTED" : "");
 	/* track device capability */
 	*dev_cap = dev_cap_major * 10 + dev_cap_minor;
+	*dev_memsz = dev_mem_sz;
 
 	return result;
+}
+
+static void
+pgstrom_startup_cuda_control(void)
+{
+	cl_int		i, num_devices;
+	ListCell   *lc;
+	bool		found;
+
+	if (shmem_startup_next)
+		(*shmem_startup_next)();
+
+	Assert(list_length(cuda_device_ordinals) ==
+		   list_length(cuda_device_mem_sizes));
+	num_devices = list_length(cuda_device_mem_sizes);
+	gpu_score_board = ShmemInitStruct("PG-Strom GPU Score Board",
+									  offsetof(GpuScoreBoard,
+											   gpu[num_devices]), &found);
+	if (found)
+		elog(ERROR, "Bug? shared memory for GPU score board already exists");
+
+	/* initialize fields */
+	SpinLockInit(&gpu_score_board->lock);
+	gpu_score_board->num_devices = num_devices;
+	gpu_score_board->num_backends = 0;
+	i = 0;
+	foreach (lc, cuda_device_mem_sizes)
+	{
+		size_t		dev_memsz = lfirst_int(lc);
+		gpu_score_board->gpu[i].gmem_size = (dev_memsz << 20);
+		gpu_score_board->gpu[i].gmem_used = 0;
+	}
 }
 
 void
@@ -1797,15 +1862,18 @@ pgstrom_init_cuda_control(void)
 	for (i=0; i < count; i++)
 	{
 		int		dev_cap;
+		size_t	dev_memsz;
 
 		rc = cuDeviceGet(&device, i);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuDeviceGet(%s)", errorText(rc));
-		if (pgstrom_check_device_capability(i, device, &dev_cap))
+		if (pgstrom_check_device_capability(i, device, &dev_cap, &dev_memsz))
 		{
 			cuda_device_ordinals = lappend_int(cuda_device_ordinals, i);
 			cuda_device_capabilities =
 				list_append_unique_int(cuda_device_capabilities, dev_cap);
+			cuda_device_mem_sizes =
+				lappend_int(cuda_device_mem_sizes, (int)(dev_memsz >> 20));
 		}
 	}
 	MemoryContextSwitchTo(oldcxt);
@@ -1820,6 +1888,15 @@ pgstrom_init_cuda_control(void)
 	for (i=0; i < lengthof(gcontext_hash); i++)
 		dlist_init(&gcontext_hash[i]);
 	RegisterResourceReleaseCallback(gpucontext_cleanup_callback, NULL);
+
+	/*
+	 * allocation of static shared memory for resource scoreboard
+	 */
+	
+	RequestAddinShmemSpace(MAXALIGN(offsetof(GpuScoreBoard, gpu[count])));
+	shmem_startup_next = shmem_startup_hook;
+	shmem_startup_hook = pgstrom_startup_cuda_control;
+	on_shmem_exit(cleanup_cuda_score_board, 0);
 }
 
 /*
