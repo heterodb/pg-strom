@@ -2497,32 +2497,6 @@ gpusort_fallback_quicksort(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	/* fallback execution with QuickSort */
 	__gpusort_fallback_quicksort(gss, kresults, kds, 0, nitems - 1);
 
-	// TODO: host accessible varlena shall be returned on fixup stage
-
-	/* varlena datum should be offset from ktoast, as if GPU doing */
-	if (gss->varlena_keys)
-	{
-		TupleDesc	tupdesc = GTS_GET_SCAN_TUPDESC(gss);
-
-		for (i=0; i < nitems; i++)
-		{
-			tts_values = (Datum *) KERN_DATA_STORE_VALUES(kds, i);
-			tts_isnull = (bool *) KERN_DATA_STORE_ISNULL(kds, i);
-
-			for (j=0; j < gss->numCols; j++)
-			{
-				SortSupport		ssup = ssup_keys + i;
-				Form_pg_attribute attr = tupdesc->attrs[ssup->ssup_attno - 1];
-
-				if (!tts_isnull[j] && attr->attlen < 0)
-				{
-					Assert(tts_values[j] > (uintptr_t)&ktoast->hostptr);
-					tts_values[j] -= (uintptr_t)&ktoast->hostptr;
-				}
-			}
-		}
-	}
-
 	/* restore error status */
 	kresults->errcode = StromError_Success;
 	kresults->nitems = kds->nitems;
