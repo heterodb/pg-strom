@@ -1168,9 +1168,7 @@ gpusort_next_chunk(GpuTaskState *gts)
 				break;
 			}
 			gss->chunk_size += gss->chunk_size;
-			ptoast = pgstrom_expand_data_store(gcontext,
-											   ptoast,
-											   gss->chunk_size);
+			pgstrom_expand_data_store(gcontext, ptoast, gss->chunk_size);
 		}
 	}
 	/* Did we read any tuples? */

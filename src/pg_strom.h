@@ -506,10 +506,9 @@ extern bool kern_fetch_data_store(TupleTableSlot *slot,
 								  size_t row_index,
 								  HeapTuple tuple);
 extern void pgstrom_release_data_store(pgstrom_data_store *pds);
-extern pgstrom_data_store *
-pgstrom_expand_data_store(GpuContext *gcontext,
-						  pgstrom_data_store *pds_old,
-						  Size kds_length_new);
+extern void pgstrom_expand_data_store(GpuContext *gcontext,
+									  pgstrom_data_store *pds,
+									  Size kds_length_new);
 extern pgstrom_data_store *
 pgstrom_create_data_store_row(GpuContext *gcontext,
 							  TupleDesc tupdesc,

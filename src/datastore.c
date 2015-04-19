@@ -492,12 +492,82 @@ init_kern_data_store(kern_data_store *kds,
 	}
 }
 
-pgstrom_data_store *
+void
 pgstrom_expand_data_store(GpuContext *gcontext,
-						  pgstrom_data_store *pds_old,
+						  pgstrom_data_store *pds,
 						  Size kds_length_new)
 {
-	elog(ERROR, "pgstrom_expand_data_store not implemented yet");
+	kern_data_store	   *kds_old = pds->kds;
+	kern_data_store	   *kds_new;
+	Size				kds_length_old = kds_old->length;
+	Size				kds_usage = kds_old->usage;
+	Size				kds_offset;
+	cl_uint				i, nitems = kds_old->nitems;
+
+	/* sanity checks */
+	Assert(pds->kds_offset == 0);
+	Assert(pds->kds_length == kds_length_old);
+	Assert(pds->ptoast == NULL);
+	Assert(kds_old->format == KDS_FORMAT_ROW);
+
+	/* no need to expand? */
+	if (kds_length_old >= kds_length_new)
+		return;
+	kds_offset = kds_length_new - kds_length_old;
+
+	if (!pds->kds_fname)
+	{
+		cl_uint	   *tup_index_old;
+		cl_uint	   *tup_index_new;
+
+		kds_new = MemoryContextAlloc(gcontext->memcxt,
+									 kds_length_new);
+		memcpy(kds_new, kds_old, KERN_DATA_STORE_HEAD_LENGTH(kds_old));
+		kds_new->hostptr = (hostptr_t)&kds_new->hostptr;
+		kds_new->length = kds_length_new;
+
+		memcpy((char *)kds_new + kds_length_new - kds_usage,
+			   (char *)kds_old + kds_length_old - kds_usage,
+			   kds_usage);
+
+		tup_index_old = (cl_uint *)KERN_DATA_STORE_BODY(kds_old);
+		tup_index_new = (cl_uint *)KERN_DATA_STORE_BODY(kds_new);
+		for (i=0; i < nitems; i++)
+			tup_index_new[i] = tup_index_old[i] + kds_offset;
+		pfree(kds_old);
+	}
+	else
+	{
+		size_t		mmap_length = TYPEALIGN(BLCKSZ, kds_length_new);
+		cl_uint	   *tup_index;
+
+		/* expand the size of underlying file */
+		if (truncate(pds->kds_fname, mmap_length))
+			ereport(ERROR,
+                    (errcode_for_file_access(),
+                     errmsg("could not truncate file \"%s\" to %zu: %m",
+                            pds->kds_fname, mmap_length)));
+		/* remap area */
+		kds_new = mremap(kds_old, TYPEALIGN(BLCKSZ, kds_length_old),
+						 mmap_length, MREMAP_MAYMOVE);
+		if (kds_new == MAP_FAILED)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not mremap \"%s\" with length=%zu: %m",
+							pds->kds_fname, mmap_length)));
+		kds_new->hostptr = (hostptr_t)&kds_new->hostptr;
+		kds_new->length = kds_length_new;
+
+		memmove((char *)kds_new + kds_length_new - kds_usage,
+				(char *)kds_new + kds_length_old - kds_usage,
+				kds_usage);
+
+		tup_index = (cl_uint *)KERN_DATA_STORE_BODY(kds_new);
+		for (i=0; i < nitems; i++)
+			tup_index[i] += kds_offset;
+	}
+	pds->kds_length = kds_length_new;
+	pds->kds = kds_new;
 }
 
 pgstrom_data_store *
