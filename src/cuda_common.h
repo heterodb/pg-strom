@@ -1267,6 +1267,32 @@ kern_writeback_error_status(cl_int *error_status, int own_errcode)
 
 /* ------------------------------------------------------------
  *
+ * Support macro for data format transformation
+ *
+ * ------------------------------------------------------------
+ */
+#define KDS_TRANSFORM_ROW2SLOT_TEMPLATE(label,errcode,\
+										kds_row,kds_slot,kds_index)
+
+#define KDS_TRANSFORM_SLOT2ROW_TEMPLATE(label,errcode,\
+										kds_slot,kds_row,kds_index)
+
+
+/* ------------------------------------------------------------
+ *
+ * Support macro to reference heap-tuple efficiently
+ *
+ * ------------------------------------------------------------
+ */
+#define HTUP_EXTRACT_BEGIN(errcode,colmeta,htup)
+
+
+#define HTUP_EXTRACT_END(errcode,colmeta,htup)
+
+
+
+/* ------------------------------------------------------------
+ *
  * Declarations of common built-in functions
  *
  * ------------------------------------------------------------
