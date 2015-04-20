@@ -47,7 +47,7 @@ typedef struct
 {
 	CustomPath		cpath;
 	Path		   *outer_path;
-	Size			inner_relsize;
+	Size			mrs_size;	/* size of multi-rel-store */
 	double			row_population_ratio;
 	int				num_rels;
 	struct {
@@ -65,7 +65,7 @@ typedef struct
 typedef struct
 {
 	int			num_rels;
-	Size		inner_relsize;
+	Size		mrs_size;
 	double		row_population_ratio;
 	char	   *kern_source;
 	int			extra_flags;
@@ -88,12 +88,12 @@ deform_gpunestloop_info(CustomScan *cscan)
 {}
 
 /*
- * GNLInnerInfo - state object of CustomScan(GNLInner)
+ * MultiRelStoreInfo - state object of CustomScan(MultiRelStore)
  */
 typedef struct
 {
 
-} GNLInnerInfo;
+} MultiRelStoreInfo;
 
 static inline void
 form_gnl_inner_info(CustomScan *cscan, GNLInnerInfo *ginner_info)
@@ -116,7 +116,7 @@ typedef struct
 } GpuNestLoopState;
 
 /*
- * GNLInnerState - execution state object of GpuNestedLoopInner
+ * MultiRelStoreState - execution state object of MultiRelStore
  */
 typedef struct
 {
@@ -124,32 +124,35 @@ typedef struct
 	GpuContext	   *gcontext;
 	int				depth;
 	double			threshold;
-} GNLInnerState;
+} MultiRelStoreState;
 
 
 
 
 
 /*
- * estimate_innertables_size
+ * estimate_multi_relation_store_size
  *
- * It estimates size of the inner multi-tables buffer
+ * It estimates size of inner multi relation store
  */
 static bool
-estimate_innertables_size(PlannerInfo *root,
-						  GpuNestedLoopPath *gpath,
-						  Relids required_outer,
-						  JoinCostWorkspace *workspace)
+estimate_multi_relation_store_size(PlannerInfo *root,
+								   GpuNestedLoopPath *gpath,
+								   Relids required_outer,
+								   Cost startup_cost,
+								   Cost total_cost)
 {
-	Size		inner_relsize;
-	int			num_batches;
-	int			num_batches_init = -1;
-	Cost		startup_cost;
-	Cost		total_cost;
+	Cost		startup_cost = gpath->cpath.path.startup_cost;
+	Cost		total_cost = gpath->cpath.path.total_cost;
+	Size		mrs_size;
+	Size		largest_size;
+	long		num_batches;
+	long		num_batches_init = -1;
+	int			i_largest;
 
 retry:
-	inner_relsize = LONGALIGN(offsetof(kern_multitables,
-									   tables[gpath->num_rels]));
+	mrs_size = LONGALIGN(offsetof(kern_multi_relstore,
+								  rels[gpath->num_rels]));
 	numbatches = 1;
 	largest_size = 0;
 	i_largest = -1;
@@ -189,7 +192,7 @@ retry:
 		gpath->inners[i].table_size = table_size;
 
 		/* expand estimated inner multi-tables size */
-		inner_relsize += table_size;
+		mrs_size += table_size;
 	}
 	if (num_batches_init < 0)
 		num_batches_init = num_batches;
@@ -200,7 +203,7 @@ retry:
 	{
 		threshold_size += gpath->inners[i].table_size;
 		gpath->inners[i].threshold
-			= (double) threshold_size / (double) inner_relsize;
+			= (double) threshold_size / (double) mrs_size;
 	}
 
 	/*
@@ -211,10 +214,9 @@ retry:
 	 *is to give up this path, instead of incredible number of
 	 * numbatches!
 	 */
-	startup_cost = workspace->startup_cost;
-	total_cost = (workspace->startup_cost +
-				  workspace->run_cost * ((double) num_batches /
-										 (double) num_batches_init));
+	total_cost = startup_cost +
+		(total_cost - startup_cost) * ((double) num_batches /
+									   (double) num_batches_init);
 	if (!add_path_precheck(gpath->cpath.path.parent,
 						   startup_cost, total_cost,
 						   NULL, required_outer))
@@ -225,7 +227,7 @@ retry:
 	 * allocatable limitation, we try to split the largest table
 	 * then retry the estimation.
 	 */
-	if (inner_relsize > gpuMemMaxAllocSize())
+	if (mrs_size > gpuMemMaxAllocSize())
 	{
 		gpath->inners[i_largest].nloops++;
 		goto retry;
@@ -238,30 +240,29 @@ retry:
 	gpath->inner_relsize = Max(inner_relsize, pgstrom_chunk_size());
 
 	/*
-     * Update JoinCostWorkspace according to numbatches
-     */
-	workspace->run_cost *= ((double) num_batches /
-							(double) num_batches_init);
-	workspace->total_cost = workspace->startup_cost + workspace->run_cost;
+	 * Update cost estimation value
+	 */
+	gpath->cpath.path.startup_cost = startup_cost;
+	gpath->cpath.path.total_cost = startup_cost + run_cost;
 
 	return true;	/* ok */
 }
 
 /*
- * initial_cost_gpunestloop
+ * cost_gpunestloop
  *
- * routine of initial rough cost estimation for GpuNestedLoop
+ * estimation of GpuNestedLoop cost
  */
 static bool
-initial_cost_gpunestloop(PlannerInfo *root,
-						 GpuNestedLoopPath *gpath,
-						 Relids required_outer,
-						 JoinCostWorkspace *workspace)
+cost_gpunestloop(PlannerInfo *root,
+				 GpuNestedLoopPath *gpath,
+				 Relids required_outer)
 {
 	Path	   *outer_path;
 	Path	   *inner_path;
 	Cost		startup_cost;
 	Cost		run_cost;
+	QualCost	qual_cost;
 	int			num_rels;
 	List	   *join_clause;
 	double		row_population_ratio;
@@ -282,18 +283,21 @@ initial_cost_gpunestloop(PlannerInfo *root,
 	/*
 	 * Cost to run GpuNestedLoop logic
 	 */
-	run_cost = outer_path->total_cost - outer_path->startup_cost;
+	cost_qual_eval(&qual_cost, join_clause, root);
+	qual_cost.per_tuple *= (pgstrom_gpu_operator_cost / cpu_operator_cost);
+
+	run_cost = (outer_path->total_cost - outer_path->startup_cost +
+				inner_path->total_cost - inner_path->startup_cost);
 	run_cost += (pgstrom_gpu_operator_cost *
-				 list_length(join_clause) *
+				 qual_cost.per_tuple *
 				 outer_path->rows *
 				 inner_path->rows);
-	/*
-	 * Setup join cost workspace
-	 */
-	workspace->startup_cost = startup_cost;
-	workspace->run_cost = run_cost;
-	workspace->total_cost = startup_cost + run_cost;
-	workspace->numbatches = 1;
+	run_cost += cpu_tuple_cost * gpath->cpath.path.rows;
+	if (num_rels > 1)
+		run_cost -= cpu_tuple_cost * outer_path->rows;
+
+	gpath->cpath.path.startup_cost = startup_cost;
+	gpath->cpath.path.total_cost = startup_cost + run_cost;
 
 	/*
 	 * estimation of row-population ratio; that is a ratio between
@@ -328,21 +332,6 @@ initial_cost_gpunestloop(PlannerInfo *root,
 	return true;
 }
 
-/*
- * final_cost_gpunestloop
- *
- * routine of final detailed cost estimation for GpuNestedLoop
- */
-static void
-final_cost_gpunestloop(PlannerInfo *root,
-					   GpuNestedLoopPath *gpath,
-					   JoinCostWorkspace *workspace)
-{
-	
-	
-	
-}
-
 static void
 try_gpunestloop_path(PlannerInfo *root,
 					 RelOptInfo *joinrel,
@@ -356,7 +345,6 @@ try_gpunestloop_path(PlannerInfo *root,
 {
 	GpuNestLoop		   *gpath;
 	ParamPathInfo	   *param_info;
-	JoinCostWorkspace	workspace;
 	Relids				required_outer;
 	bool				support_bulkload = true;
 
@@ -389,6 +377,14 @@ try_gpunestloop_path(PlannerInfo *root,
 		}
 	}
 
+	/* make a param-info */
+	param_info = get_joinrel_parampathinfo(root,
+										   joinrel,
+										   outer_path,
+										   inner_path,
+										   sjinfo,
+										   bms_copy(required_outer),
+										   &restrict_clauses);
 	/*
 	 * Creation of GpuNestedLoop Path, without merging child GpuNestedLoop
 	 */
@@ -396,14 +392,7 @@ try_gpunestloop_path(PlannerInfo *root,
 	NodeSetTag(gpath, T_CustomPath);
 	gpath->cpath.path.pathtype = T_CustomScan;
 	gpath->cpath.path.parent = joinrel;
-	gpath->cpath.path.param_info = param_info =
-		get_joinrel_parampathinfo(root,
-								  joinrel,
-								  outer_path,
-								  inner_path,
-								  sjinfo,
-								  bms_copy(required_outer),
-								  &restrict_clauses);
+	gpath->cpath.path.param_info = param_info;
 	gpath->cpath.path.rows = (param_info
 							  ? param_info->ppi_rows
 							  : joinrel->rows);
@@ -418,17 +407,8 @@ try_gpunestloop_path(PlannerInfo *root,
 	gpath->inners[0].nloops = 1;
 
 	/* cost estimation and check availability */
-	if (initial_cost_gpunestloop(root, gpath, required_outer, &workspace))
-	{
-		if (add_path_precheck(joinrel,
-							  workspace.startup_cost,
-                              workspace.total_cost,
-                              NULL, required_outer))
-		{
-			final_cost_gpunestloop(root, gpath, &workspace);
-			add_path(joinrel, &gpath->cpath.path);
-		}
-	}
+	if (cost_gpunestloop(root, gpath, required_outer))
+		add_path(joinrel, &gpath->cpath.path);
 
 	/*
 	 * creation of more efficient path, if underlying outer-path is also
@@ -448,14 +428,7 @@ try_gpunestloop_path(PlannerInfo *root,
 		gpath = palloc0(offsetof(GpuHashJoinPath, inners[num_rels + 1]));
 		gpath->cpath.path.pathtype = T_CustomScan;
 		gpath->cpath.path.parent = joinrel;
-		gpath->cpath.path.param_info = param_info =
-			get_joinrel_parampathinfo(root,
-									  joinrel,
-									  outer_path,
-									  inner_path,
-									  sjinfo,
-									  bms_copy(required_outer),
-									  &restrict_clauses);
+		gpath->cpath.path.param_info = param_info;
 		gpath->cpath.path.rows = (param_info
 								  ? param_info->ppi_rows
 								  : joinrel->rows);
@@ -474,17 +447,8 @@ try_gpunestloop_path(PlannerInfo *root,
 		gpath->inners[num_rels].nloops = 1;
 
 		/* cost estimation and check availability */
-		if (initial_cost_gpunestloop(root, gpath, required_outer, &workspace))
-		{
-			if (add_path_precheck(joinrel,
-								  workspace.startup_cost,
-								  workspace.total_cost,
-								  NULL, required_outer))
-			{
-				final_cost_gpunestloop(root, gpath, &workspace);
-				add_path(joinrel, &gpath->cpath.path);
-			}
-		}
+		if (cost_gpunestloop(root, gpath, required_outer))
+			add_path(joinrel, &gpath->cpath.path);
 	}
 	bms_free(required_outer);
 }
@@ -564,7 +528,6 @@ gpunestloop_add_join_path(PlannerInfo *root,
 							 cheapest_total_inner,
 							 restrictlist);
 	}
-
 	try_gpunestloop_path(root,
 						 joinrel,
 						 jointype,
@@ -573,10 +536,170 @@ gpunestloop_add_join_path(PlannerInfo *root,
 						 restrictlist);
 }
 
+static Plan *
+create_gpunestloop_plan(PlannerInfo *root,
+						RelOptInfo *rel,
+						CustomPath *best_path,
+						List *tlist,
+						List *clauses)
+{
+	GpuNestLoopPath	   *gpath = (GpuNestLoopPath *) best_path;
+	GpuNestLoopInfo		gnl_info;
+	CustomScan		   *gnl_scan;
+
+	gnl_scan = makeNode(CustomScan);
+	gnl_scan->scan.plan.targetlist = tlist;
+	gnl_scan->scan.plan.qual = NIL;
+	gnl_scan->flags = best_path->flags;
+	gnl_scan->methods = &gpunestloop_plan_methods;
+
+	for (i=0; i < gpath->num_rels; i++)
+	{
+		MultiRelStore	mrs_info;
+		CustomScan	   *mrs_scan;
+		Plan		   *scan_plan;
+		JoinType		join_type = gpath->inners[i].join_type;
+		List		   *join_clause = gpath->inners[i].join_clause;
+
+		/* make a plan node of the child inner path */
+		scan_plan = create_plan_recurse(root, gpath->inners[i].scan_path);
+
+		mrs_scan = makeNode(CustomScan);
+		mrs_scan->scan.plan.startup_cost = scan_plan->total_cost;
+		mrs_scan->scan.plan.total_cost = scan_plan->total_cost;
+		mrs_scan->scan.plan.plan_rows = scan_plan->plan_rows;
+		mrs_scan->scan.plan.plan_width = scan_plan->plan_width;
+		mrs_scan->scan.plan.targetlist = scan_plan->targetlist;
+		mrs_scan->scan.plan.qual = NIL;
+		mrs_scan->scan.scanrelid = 0;
+        mrs_scan->flags = 0;
+        mrs_scan->custom_ps_tlist = scan_plan->targetlist;
+        mrs_scan->custom_relids = NULL;
+        mrs_scan->methods = &multi_rel_store_plan_methods;
+
+		memset(&mrs_info, 0, sizeof(MultiRelStore));
+		mrs_info.depth = i + 1;
+		mrs_info.nloops = gpath->inners[i].nloops;
+		mrs_info.threshold = gpath->inners[i].threshold;
+		mrs_info.mrs_size = gpatg->mrs_size;
+
+		form_multi_rel_store_info(mrs_scan, &mrs_info);
+
+		/* also add properties of gnl_info */
+		gnl_info.join_types = lappend_int(gnl_info.join_types,
+										  (int) gpath->inners[i].join_type);
+		gnl_info.join_clauses = lappend(gnl_info.join_clauses,
+										build_flatten_qualifier(join_clause));
+
+		/* chain it under the GpuNestLoop */
+		outerPlan(mrs_scan) = scan_plan;
+		if (prev_plan)
+			innerPlan(prev_plan) = &mrs_scan->scan.plan;
+		else
+			innerPlan(gnl_scan) = &mrs_scan->scan.plan;
+		prev_plan = &mrs_scan->scan.plan;
+	}
+
+	/*
+	 * Creation of the underlying outer Plan node. In case of SeqScan,
+	 * it may make sense to replace it with GpuScan for bulk-loading.
+	 */
+	outer_plan = create_plan_recurse(root, gpath->outer_path);
+	if (IsA(outer_plan, SeqScan) || IsA(outer_plan, CustomScan))
+	{
+		Query	   *parse = root->parse;
+		List	   *outer_quals = NULL;
+		Plan	   *alter_plan;
+
+		alter_plan = pgstrom_try_replace_plannode(outer_plan,
+												  parse->rtable,
+												  &outer_quals);
+		if (alter_plan)
+		{
+			mrs_info.outer_quals = build_flatten_qualifier(outer_quals);
+			outer_plan = alter_plan;
+		}
+	}
+
+	/* check bulkload availability */
+	if (IsA(outer_plan, CustomScan))
+	{
+		int		custom_flags = ((CustomScan *) outer_plan)->flags;
+
+		if ((custom_flags & CUSTOMPATH_SUPPORT_BULKLOAD) != 0)
+            gnl_info.outer_bulkload = true;
+	}
+	outerPlan(gnl_scan) = outer_plan;
+
+	/*
+	 * Build a pseudo-scan targetlist
+	 */
 
 
 
+	/*
+	 * Kernel code generation
+	 */
 
+
+	form_gpunestloop_info(gnl_scan, &gnl_info);
+
+	return &gnl_scan->scan.plan;
+}
+
+static void
+gpunestloop_textout_path(StringInfo str, const CustomPath *node)
+{
+	GpuNestLoopPath *gpath = (GpuNestLoopPath *) node;
+	int			i;
+
+	/* outer_path */
+	appendStringInfo(str, " :outer_path %s",
+					 nodeToString(gpath->outer_path));
+	/* mrs_size */
+	appendStringInfo(str, " :mrs_size %zu",
+					 gpath->mrs_size);
+
+	/* row_population_ratio */
+	appendStringInfo(str, " :row_population_ratio %.2f",
+					 gpath->row_population_ratio);
+	/* num_rels */
+	appendStringInfo(str, " :num_rels %d", gpath->num_rels);
+
+	/* inners */
+	appendStringInfo(str, " :inners (");
+	for (i=0; i < gpath->num_rels; i++)
+	{
+		appendStringInfo(str, "{");
+		/* scan_path */
+		appendStringInfo(str, " :scan_path %s",
+						 nodeToString(gpath->inners[i].scan_path));
+		/* join_type */
+		appendStringInfo(str, " :join_type %d",
+						 (int)gpath->inners[i].join_type);
+		/* join_clause */
+		appendStringInfo(str, " :join_clause %s",
+						 nodeToString(gpath->inners[i].join_clause));
+		/* threshold */
+		appendStringInfo(str, " :threshold %.2f",
+						 gpath->inners[i].threshold);
+		/* nloops */
+		appendStringInfo(str, " :nslots %d",
+						 gpath->inners[i].nloops);
+		appendStringInfo(str, "}");
+	}
+	appendStringInfo(str, ")");
+}
+
+static Node *
+gpunestedloop_create_scan_state(CustomScan *node)
+{
+	GpuNestLoop	   *gnl = (GpuNestLoop *) node;
+	GpuNestLoopState   *gnls;
+
+
+	return (Node *) gnls;
+}
 
 static void
 gpunestloop_begin(CustomScanState *node, EState *estate, int eflags)
