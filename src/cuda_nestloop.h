@@ -28,8 +28,35 @@ typedef struct
 } kern_nestloop;
 
 
+typedef struct
+{
+	hostptr_t		hostptr;	/* address of this multihash on the host */
+	cl_uint			ntables;	/* number of  */
+	struct {
+		cl_uint		kds_offset;	/* offset of the kern_data_store */
+		cl_uint		rmap_offset;/* offset of the reference map, if any */
+	} tables[FLEXIBLE_ARRAY_MEMBER];
+} kern_multi_tables;
+
+
+
+
 
 #ifdef __CUDACC__
+
+
+#define GPUNESTLOOP_KERNEL_MAIN_TEMPLATE(depth)	\
+
+KERNEL_FUNCTION(void)
+gpunestloop_main(kern_nestloop *knl,
+				 kern_multi_tables *km_tables,
+				 kern_data_store *kds,
+{
+
+
+
+}
+
 
 
 
