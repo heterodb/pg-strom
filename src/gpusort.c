@@ -2437,9 +2437,7 @@ gpusort_fallback_quicksort(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	pgstrom_data_store *ptoast = gss->pds_chunks[gpusort->chunk_id];
 	kern_data_store	   *kds = pds->kds;
 	kern_data_store	   *ktoast = ptoast->kds;
-	Datum			   *tts_values;
-	bool			   *tts_isnull;
-	size_t				i, j, nitems = ktoast->nitems;
+	size_t				i, nitems = ktoast->nitems;
 
 	/* initialize SortSupportData, if first time */
 	if (!ssup_keys)
