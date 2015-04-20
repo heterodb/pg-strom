@@ -39,8 +39,7 @@ static size_t		cuda_max_threads_per_block = INT_MAX;
 static int			cuda_compute_capability = INT_MAX;
 
 /* stuffs related to GpuContext */
-static dlist_head	gcontext_hash[100];
-static GpuContext  *gcontext_last = NULL;
+static dlist_head	gcontext_list;
 
 /* CUDA runtime stuff per backend process */
 static int			cuda_num_devices = -1;
@@ -650,18 +649,6 @@ pgstrom_init_cuda(void)
 	}
 }
 
-static inline int
-gpucontext_hash_index(ResourceOwner resowner)
-{
-	pg_crc32	crc;
-
-	INIT_CRC32C(crc);
-	COMP_CRC32C(crc, resowner, sizeof(ResourceOwner));
-	FIN_CRC32C(crc);
-
-	return crc % lengthof(gcontext_hash);
-}
-
 static GpuContext *
 pgstrom_create_gpucontext(ResourceOwner resowner)
 {
@@ -761,33 +748,26 @@ pgstrom_get_gpucontext(void)
 {
 	GpuContext *gcontext;
 	dlist_iter	iter;
-	int			hindex;
 
-	if (gcontext_last != NULL &&
-		gcontext_last->resowner == CurrentResourceOwner)
-	{
-		gcontext = gcontext_last;
-		gcontext->refcnt++;
-		return gcontext;
-	}
-	/* not a last one, so search a hash table */
-	hindex = gpucontext_hash_index(CurrentResourceOwner);
-	dlist_foreach (iter, &gcontext_hash[hindex])
+	/* Does the current resource owner already have a GpuContext? */
+	dlist_foreach (iter, &gcontext_list)
 	{
 		gcontext = dlist_container(GpuContext, chain, iter.cur);
 
 		if (gcontext->resowner == CurrentResourceOwner)
 		{
+			dlist_move_head(&gcontext_list, &gcontext->chain);
 			gcontext->refcnt++;
 			return gcontext;
 		}
 	}
+
 	/*
 	 * Hmm... no gpu context is not attached this resource owner,
 	 * so create a new one.
 	 */
 	gcontext = pgstrom_create_gpucontext(CurrentResourceOwner);
-	dlist_push_tail(&gcontext_hash[hindex], &gcontext->chain);
+	dlist_push_head(&gcontext_list, &gcontext->chain);
 
 	return gcontext;
 }
@@ -910,8 +890,6 @@ pgstrom_put_gpucontext(GpuContext *gcontext)
 	Assert(gcontext->refcnt > 0);
 	if (--gcontext->refcnt == 0)
 	{
-		if (gcontext_last == gcontext)
-			gcontext_last = NULL;
 		dlist_delete(&gcontext->chain);
 		pgstrom_release_gpucontext(gcontext, true);
 	}
@@ -1500,44 +1478,40 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 							bool is_toplevel,
 							void *arg)
 {
-	dlist_mutable_iter		iter;
 	PGStromResourceContext	saved_resource_context;
-	int						hindex;
+	dlist_iter		iter;
 
 	if (phase != RESOURCE_RELEASE_AFTER_LOCKS)
 		return;
 
-	hindex = gpucontext_hash_index(CurrentResourceOwner);
-	dlist_foreach_modify(iter, &gcontext_hash[hindex])
+	dlist_foreach(iter, &gcontext_list)
 	{
 		GpuContext *gcontext = dlist_container(GpuContext, chain, iter.cur);
 
-		if (gcontext->resowner != CurrentResourceOwner)
-			continue;
-
-		/* OK, GpuContext to be released */
-		if (gcontext_last == gcontext)
-			gcontext_last = NULL;
-		dlist_delete(&gcontext->chain);
-
-		if (is_commit && gcontext->refcnt > 1)
-			elog(WARNING, "Probably, someone forgot to put GpuContext");
-
-		saved_resource_context = current_resource_context;
-		current_resource_context = (is_commit
-									? ResourceContextCommit
-									: ResourceContextAbort);
-		PG_TRY();
+		if (gcontext->resowner == CurrentResourceOwner)
 		{
-			pgstrom_release_gpucontext(gcontext, is_commit);
+			/* OK, GpuContext to be released */
+			dlist_delete(&gcontext->chain);
+
+			if (is_commit && gcontext->refcnt > 1)
+				elog(WARNING, "Probably, someone forgot to put GpuContext");
+
+			saved_resource_context = current_resource_context;
+			current_resource_context = (is_commit
+										? ResourceContextCommit
+										: ResourceContextAbort);
+			PG_TRY();
+			{
+				pgstrom_release_gpucontext(gcontext, is_commit);
+			}
+			PG_CATCH();
+			{
+				current_resource_context = saved_resource_context;
+				PG_RE_THROW();
+			}
+			PG_END_TRY();
+			return;
 		}
-		PG_CATCH();
-		{
-			current_resource_context = saved_resource_context;
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-		return;
 	}
 }
 
@@ -1885,8 +1859,7 @@ pgstrom_init_cuda_control(void)
 	/*
 	 * initialization of GpuContext related stuff
 	 */
-	for (i=0; i < lengthof(gcontext_hash); i++)
-		dlist_init(&gcontext_hash[i]);
+	dlist_init(&gcontext_list);
 	RegisterResourceReleaseCallback(gpucontext_cleanup_callback, NULL);
 
 	/*
