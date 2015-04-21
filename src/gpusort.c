@@ -315,14 +315,17 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 	Cost	subplan_total = subplan->total_cost;
 	double	ntuples = subplan->plan_rows;
 	int		width = subplan->plan_width;
+	int		nattrs = list_length(subplan->targetlist);
 	Cost	cpu_comp_cost = 2.0 * cpu_operator_cost;
 	Cost	gpu_comp_cost = 2.0 * pgstrom_gpu_operator_cost;
 	Cost	startup_cost = subplan_total;
 	Cost	run_cost = 0.0;
 	double	nrows_per_chunk;
 	long	num_chunks;
+	double	chunk_margin = 1.10;
+	Size	chunk_head;
 	Size	chunk_size;
-	Size	max_chunk_size = gpuMemMaxAllocSize();
+	Size	chunk_size_both;
 
 	if (ntuples < 2.0)
 		ntuples = 2.0;
@@ -334,12 +337,18 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 	/*
 	 * calculate expected number of rows per chunk and number of chunks.
 	 */
-	width = MAXALIGN(width + sizeof(cl_uint) +
+	chunk_head = STROMALIGN(offsetof(kern_data_store, colmeta[nattrs]));
+	width = MAXALIGN(offsetof(kern_tupitem, htup) +
 					 offsetof(HeapTupleHeaderData, t_bits) +
-					 BITMAPLEN(list_length(subplan->targetlist)));
-	chunk_size = (Size)((double)width * ntuples * 1.10) + 1024;
+					 MAXALIGN(BITMAPLEN(nattrs)) +
+					 MAXALIGN(width));
+	chunk_size = chunk_head +
+		(sizeof(cl_uint) + width) * ntuples * chunk_margin;
+	chunk_size_both = chunk_size + chunk_head +
+		(LONGALIGN(sizeof(bool) * nattrs) +
+		 LONGALIGN(sizeof(Datum) * nattrs)) * ntuples * chunk_margin;
 
-	if (max_chunk_size > chunk_size)
+	if (gpuMemMaxAllocSize() > chunk_size_both)
 	{
 		if (chunk_size < pgstrom_chunk_size())
 			chunk_size = pgstrom_chunk_size();
@@ -349,8 +358,12 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 	else
 	{
 		nrows_per_chunk =
-			(double)(max_chunk_size - 1024) / ((double)width * 1.25);
-		chunk_size = (Size)((double)width * nrows_per_chunk * 1.25);
+			(double)(gpuMemMaxAllocSize() - 2 * chunk_head) /
+			((sizeof(cl_uint) + width +
+			  LONGALIGN(sizeof(bool) * nattrs) +
+			  LONGALIGN(sizeof(Datum) * nattrs)) * chunk_margin);
+		chunk_size = chunk_head +
+			(sizeof(cl_uint) + width) * nrows_per_chunk * chunk_margin;
 		num_chunks = Max(1.0, floor(ntuples / nrows_per_chunk + 0.9999));
 	}
 
@@ -1158,22 +1171,29 @@ gpusort_next_chunk(GpuTaskState *gts)
 		/* Insert this tuple to the data store */
 		if (!pgstrom_data_store_insert_tuple(ptoast, slot))
 		{
+			gss->overflow_slot = slot;
+
+			/* Even if insertion of the tuple would be unavailable,
+			 * we try to expand the ptoast as long as the expected
+			 * length of kds + ktoast is less than max allocatable
+			 * device memory.
+			 */
 			nitems = ptoast->kds->nitems;
-			length = KERN_DATA_STORE_SLOT_LENGTH_ESTIMATION(tupdesc,
-															2 * nitems);
-			if (2 * gss->chunk_size > gpuMemMaxAllocSize() ||
-				length > gpuMemMaxAllocSize())
-			{
-				gss->overflow_slot = slot;
+			length = 2 * gss->chunk_size +	/* for ktoast */
+				KERN_DATA_STORE_SLOT_LENGTH_ESTIMATION(tupdesc, 2 * nitems);
+			if (length > gpuMemMaxAllocSize())
 				break;
-			}
+			/* OK, expand it and try again */
 			gss->chunk_size += gss->chunk_size;
 			pgstrom_expand_data_store(gcontext, ptoast, gss->chunk_size);
 		}
 	}
 	/* Did we read any tuples? */
 	if (!ptoast)
-		goto out;
+	{
+		PERFMON_END(&gts->pfm_accum, time_outer_load, &tv1, &tv2);
+		return NULL;
+	}
 	/* Expand the backend file of the data chunk */
 	nitems = ptoast->kds->nitems;
 	pds = pgstrom_create_data_store_slot(gcontext, tupdesc,
@@ -1208,7 +1228,6 @@ gpusort_next_chunk(GpuTaskState *gts)
 	gpusort->oitems_dsm = oitems_dsm;
 	gpusort->chunk_id = chunk_id;
 	gpusort->chunk_id_map = bms_make_singleton(chunk_id);
-out:
 	PERFMON_END(&gts->pfm_accum, time_outer_load, &tv1, &tv2);
 
 	return &gpusort->task;
