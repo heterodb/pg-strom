@@ -347,8 +347,42 @@ gpunestloop_projection_row(kern_nestloop *knestloop,
 						   kern_data_store *kds_src,
 						   kern_data_store *kds_dst)
 {
-	
-	
+	kern_resultbuf *kresults;
+	cl_int		   *rbuffer;
+	cl_int			depth = knestloop->max_depth;
+	cl_int			errcode = StromError_Success;
+
+	/* sanity checks */
+	assert(kds_src->format == KDS_FORMAT_ROW);
+	assert(kds_dst->format == KDS_FORMAT_ROW);
+
+	kresults = KERN_NESTLOOP_OUT_RESULTSBUF(knestloop, depth);
+	assert(kresults->nrels == depth + 1);
+
+	for (index = get_global_id();
+		 index < kresults->nitems;
+		 index += get_global_size())
+	{
+		rbuffer = KERN_GET_RESULT(kresults, index);
+		/*
+		 * rbuffer[0] -> index to 'kds_src'
+		 * rbuffer[i; i > 0] -> index to kern_data_store that can be
+		 *   picked up using KERN_MULTI_RELSTORE_INNER_KDS(kmrels, depth)
+		 *
+		 * rbuffer[*} may be -1, in this case, null shall be put.
+		 */
+
+
+
+
+
+
+
+
+
+	}
+out:
+	kern_writeback_error_status(&knestloop->errcode, errcode);		
 }
 
 KERNEL_FUNCTION(void)
@@ -357,8 +391,39 @@ gpunestloop_projection_slot(kern_nestloop *knestloop,
 							kern_data_store *kds_src,
 							kern_data_store *kds_dst)
 {
-	
-	
+	kern_resultbuf *kresults;
+	cl_int		   *rbuffer;
+	cl_int			depth = knestloop->max_depth;
+	cl_int			errcode = StromError_Success;
+
+	/* sanity checks */
+	assert(kds_src->format == KDS_FORMAT_ROW);
+	assert(kds_dst->format == KDS_FORMAT_SLOT);
+
+	kresults = KERN_NESTLOOP_OUT_RESULTSBUF(knestloop, depth);
+	assert(kresults->nrels == depth + 1);
+
+	for (index = get_global_id();
+		 index < kresults->nitems;
+		 index += get_global_size())
+	{
+		rbuffer = KERN_GET_RESULT(kresults, index);
+		/*
+		 * rbuffer[0] -> index to 'kds_src'
+		 * rbuffer[i; i > 0] -> index to kern_data_store that can be
+		 *   picked up using KERN_MULTI_RELSTORE_INNER_KDS(kmrels, depth)
+		 *
+		 * rbuffer[*} may be -1, in this case, null shall be put.
+		 */
+
+
+
+
+
+
+	}
+out:
+	kern_writeback_error_status(&knestloop->errcode, errcode);		
 }
 
 #endif	/* __CUDACC__ */
