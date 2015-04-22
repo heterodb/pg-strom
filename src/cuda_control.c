@@ -1299,7 +1299,7 @@ pgstrom_fetch_gputask(GpuTaskState *gts)
 	if (!gts->kern_source)
 	{
 		gtask = gts->cb_next_chunk(gts);
-		Assert(gtask->gts == gts);
+		Assert(!gtask || gtask->gts == gts);
 		return gtask;
 	}
 
