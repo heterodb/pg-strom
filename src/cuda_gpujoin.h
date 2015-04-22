@@ -1,7 +1,8 @@
 /*
- * cuda_nestloop.h
+ * cuda_gpujoin.h
  *
- * Parallel hash join accelerated by OpenCL device
+ * GPU accelerated parallel relations join based on hash-join or
+ * nested-loop logic.
  * --
  * Copyright 2011-2015 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2015 (C) The PG-Strom Development Team
@@ -15,81 +16,150 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#ifndef CUDA_NESTLOOP_H
-#define CUDA_NESTLOOP_H
+#ifndef CUDA_GPUJOIN_H
+#define CUDA_GPUJOIN_H
 
+/*
+ * definition of the inner relations structure. it can load multiple
+ * kern_data_store or kern_hash_table.
+ */
+typedef struct
+{
+	cl_uint			pg_crc32_table[256];
+	cl_uint			nrels;			/* number of relations */
+	struct
+	{
+		cl_uint		table_offset;	/* offset to KDS or Hash table */
+		cl_uint		match_offset;	/* offset to outer match map, if any */
+	} rels[FLEXIBLE_ARRAY_MEMBER];
+} kern_multirels;
 
+#define KERN_MULTIRELS_INNER_KDS(kmrels, depth)							\
+	((kern_data_store *)												\
+	 (((depth) > 1 && (depth) <= (kmrels)->nrels)						\
+	  ? ((char *)(kmrels) + (kmrels)->rels[(depth) - 1].table_offset)	\
+	  : NULL)))
 
+#define KERN_MULTIRELS_INNER_HASH(kmrels, depth)						\
+	((kern_hashtable *)													\
+	 (((depth) > 1 && (depth) <= (kmrels)->nrels)						\
+	  ? ((char *)(kmrels) + (kmrels)->rels[(depth) - 1].table_offset)	\
+	  : NULL)))
+
+#define KERN_MULTIRELS_MATCHED_MAP(kmrels, depth)
+	((cl_bool *)														\
+	 (((depth) > 1 && (depth) <= (kmrels)->nrels &&						\
+	   (kmrels)->rels[(depth) - 1].match_offset > 0)					\
+	  ? ((char *)(kmrels) + (kmrels)->rels[(depth) - 1].match_offset)   \
+	  : NULL)))
+
+/*
+ * Hash table and entry
+ */
+typedef struct
+{
+	cl_uint			next;   /* offset of the next */
+	cl_uint			hash;   /* 32-bit hash value */
+	kern_tupitem	htup;	/* tuple of the inner relation */
+} kern_hashentry;
+
+typedef struct
+{
+	hostptr_t		hostptr;
+	cl_uint			length;		/* length of this hashtable chunk */
+	cl_uint			ncols;		/* number of inner relation's columns */
+	cl_uint			nslots;		/* width of hash slot */
+	cl_uint			hash_min;	/* minimum hash value */
+	cl_uint			hash_max;	/* maximum hash value */
+	cl_char			__padding__[4];
+	kern_colmeta    colmeta[FLEXIBLE_ARRAY_MEMBER];
+} kern_hashtable;
+
+#define KERN_HASHTABLE_SLOT(khtable)					\
+	((cl_uint *)((char *)(khtable) +					\
+				 LONGALIGN(offsetof(kern_hashtable,		\
+									colmeta[(khtable)->ncols]))))
+
+STATIC_INLINE(kern_hashentry *)
+KERN_HASH_FIRST_ENTRY(kern_hashtable *khtable, cl_uint hash)
+{
+	cl_uint	   *slot = KERN_HASHTABLE_SLOT(khtable);
+	cl_uint		index = hash % khtable->nslots;
+
+	if (slot[index] == 0)
+		return NULL;
+	return (kern_hashentry *)((char *) khtable + slot[index]);
+}
+
+STATIC_INLINE(kern_hashentry *)
+KERN_HASH_NEXT_ENTRY(kern_hashtable *khtable, kern_hashentry *khentry)
+{
+	if (khentry->next == 0)
+		return NULL;
+	return (kern_hashentry *)((char *)khtable + khentry->next);
+}
+
+/*
+ * kern_gpujoin - control object of GpuJoin
+ */
 typedef struct
 {
 	size_t			kresults_1_offset;
 	size_t			kresults_2_offset;
-	size_t			kresults_length;
+	size_t			kresults_total_items;
 	cl_uint			max_depth;
 	cl_int			errcode;
 	kern_parambuf	kparams;
-} kern_nestloop;
+} kern_gpujoin;
 
-#define KERN_NESTLOOP_PARAMBUF(knestloop)			\
-	((kern_parambuf *)(&(knestloop)->kparams))
-#define KERN_NESTLOOP_PARAMBUF_LENGTH(knestloop)	\
-	STROMALIGN(KERN_NESTLOOP_PARAMBUF(knestloop)->length)
-#define KERN_NESTLOOP_IN_RESULTSBUF(knestloop, depth)		\
-	((kern_resultbuf *)((char *)(knestloop) +				\
-						(((depth) & 0x01)					\
-						 ? (knestloop)->kresults_1_offset	\
-						 : (knestloop)->kresults_2_offset))))
-#define KERN_NESTLOOP_OUT_RESULTSBUF(knestloop, depth)		\
-	((kern_resultbuf *)((char *)(knestloop) +				\
-						(((depth) & 0x01)					\
-						 ? (knestloop)->kresults_2_offset	\
-						 : (knestloop)->kresults_1_offset))))
-
-typedef struct
-{
-	hostptr_t		hostptr;	/* address of this multihash on the host */
-	cl_uint			nrels;		/* number of relations */
-	struct {
-		cl_uint		kds_offset;	/* offset of the kern_data_store */
-		cl_uint		rmap_offset;/* offset of the reference map, if any */
-	} rels[FLEXIBLE_ARRAY_MEMBER];
-} kern_multi_relstore;
-
-#define KERN_MULTI_RELSTORE_INNER_KDS(kmrels, depth)				\
-	((kern_data_store *)											\
-	 ((depth) > 1 && (depth) <= (kmrels)->nrels						\
-	  ? ((char *)(kmrels) + (kmrels)->rels[(depth) - 1].kds_offset)	\
-	  : NULL))
-
-#define KERN_MULTI_RELSTORE_REFERENCE_MAP(kmrels, depth)			\
-	((cl_bool *)													\
-	 ((depth) > 1 && (depth) <= (kmrels)->nrels &&					\
-	  (kmrels)->rels[(depth) - 1].rmap_offset > 0					\
-	  ? ((char *)(kmrels) + (kmrels)->rels[(depth) - 1].rmap_offset)\
-	  : NULL))
+#define KERN_GPUJOIN_PARAMBUF(kgjoin)			\
+	((kern_parambuf *)(&(kgjoin)->kparams))
+#define KERN_GPUJOIN_PARAMBUF_LENGTH(kgjoin)	\
+	STROMALIGN(KERN_GPUJOIN_PARAMBUF(kgjoin)->length)
+#define KERN_GPUJOIN_IN_RESULTBUF(kgjoin,depth)			\
+	((kern_resultbuf *)((char *)(kgjoin) +				\
+						(((depth) & 0x01)				\
+						 ? (kgjoin)->kresults_2_offset	\
+						 : (kgjoin)->kresults_1_offset)))
+#define KERN_GPUJOIN_OUT_RESULTBUF(kgjoin,depth)		\
+	((kern_resultbuf *)((char *)(kgjoin) +				\
+						(((depth) & 0x01)				\
+						 ? (kgjoin)->kresults_2_offset  \
+						 : (kgjoin)->kresults_1_offset)))
 
 
 
 #ifdef __CUDACC__
 STATIC_FUNCTION(cl_bool)
-gpunestloop_qual_eval(cl_int *errcode,
-					  kern_parambuf *kparams,
-                      kern_data_store *kds,
-					  size_t kds_index);
+gpujoin_outer_qual(cl_int *errcode,
+				   kern_parambuf *kparams,
+				   kern_data_store *kds,
+				   size_t kds_index);
 
 STATIC_FUNCTION(cl_bool)
-gpunestloop_execute(cl_int *errcode,
-					kern_parambuf *kparams,
-					kern_multi_relstore *kmrels,
-					kern_data_store *kds,
-					int depth,
-					cl_int *outer_index,
-					cl_int inner_index);
+gpujoin_exec_nestloop(cl_int *errcode,
+					  kern_parambuf *kparams,
+					  kern_multi_relstore *kmrels,
+					  kern_data_store *kds,
+					  int depth,
+					  cl_int *outer_index,
+					  cl_int inner_index);
 
 STATIC_FUNCTION(void)
-gpunestloop_projection_mapping(cl_int dest_colidx,
+gpujoin_projection_dest_to_src(cl_int dest_colidx,
 							   cl_int *src_depth,
 							   cl_int *src_colidx);
+
+STATIC_FUNCTION(cl_int)
+gpujoin_projection_src_to_dest(cl_int src_depth,
+							   cl_int src_colidx);
+
+
+
+
+
+
+
 
 KERNEL_FUNCTION(void)
 gpunestloop_prep(kern_nestloop *knestloop,
@@ -427,4 +497,4 @@ out:
 }
 
 #endif	/* __CUDACC__ */
-#endif	/* CUDA_NESTLOOP_H */
+#endif	/* CUDA_GPUJOIN_H */
