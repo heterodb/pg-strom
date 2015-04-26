@@ -20,54 +20,102 @@
 #define CUDA_GPUJOIN_H
 
 /*
+ * Hash-Join and Nested-Loop are supported right now
+ */
+#define GPUJOIN_LOGIC_HASHJOIN		1
+#define GPUJOIN_LOGIC_NESTLOOP		2
+
+/*
  * definition of the inner relations structure. it can load multiple
  * kern_data_store or kern_hash_table.
  */
 typedef struct
 {
-	cl_uint			pg_crc32_table[256];
+	cl_uint			pg_crc32_table[256];	/* used to hashjoin */
 	cl_uint			nrels;			/* number of relations */
 	struct
 	{
-		cl_uint		table_offset;	/* offset to KDS or Hash table */
+		cl_uint		inner_offset;	/* offset to KDS or Hash table */
 		cl_uint		match_offset;	/* offset to outer match map, if any */
-	} rels[FLEXIBLE_ARRAY_MEMBER];
+	} krels[FLEXIBLE_ARRAY_MEMBER];
 } kern_multirels;
 
 #define KERN_MULTIRELS_INNER_KDS(kmrels, depth)							\
 	((kern_data_store *)												\
-	 (((depth) > 1 && (depth) <= (kmrels)->nrels)						\
-	  ? ((char *)(kmrels) + (kmrels)->rels[(depth) - 1].table_offset)	\
-	  : NULL)))
+	 ((char *)(kmrels) + (kmrels)->rels[(depth) - 1].inner_offset))
 
 #define KERN_MULTIRELS_INNER_HASH(kmrels, depth)						\
 	((kern_hashtable *)													\
-	 (((depth) > 1 && (depth) <= (kmrels)->nrels)						\
-	  ? ((char *)(kmrels) + (kmrels)->rels[(depth) - 1].table_offset)	\
-	  : NULL)))
+	 ((char *)(kmrels) + (kmrels)->rels[(depth) - 1].inner_offset))
 
-#define KERN_MULTIRELS_MATCHED_MAP(kmrels, depth)
+#define KERN_MULTIRELS_MATCH_MAP(kmrels, depth, match_buffer)
 	((cl_bool *)														\
-	 (((depth) > 1 && (depth) <= (kmrels)->nrels &&						\
-	   (kmrels)->rels[(depth) - 1].match_offset > 0)					\
-	  ? ((char *)(kmrels) + (kmrels)->rels[(depth) - 1].match_offset)   \
-	  : NULL)))
+	 ((kmrels)->rels[(depth) - 1].match_offset > 0						\
+	  ? ((char *)(match_buffer) +										\
+		 (kmrels)->rels[(depth) - 1].match_offset) : NULL))
 
 /*
  * Hash table and entry
+ *
+ *
+ * +-------------------+
+ * | kern_hashtable    |
+ * | +-----------------+
+ * | |   :             |
+ * | | ncols (=M)      |
+ * | | nitems (=K)     |
+ * | | nslots (=N)     |
+ * | |   :             |
+ * | +-----------------+
+ * | | colmeta[0]      |
+ * | |   :             |
+ * | | colmeta[M-1]    |
+ * +-+-----------------+
+ * | cl_uint           |
+ * |   hash_slot[0]    |
+ * |     :             |
+ * |   hash_slot[K-2] o-----+
+ * |   hash_slot[K-1]  |    |
+ * +-------------------+ <--+
+ * | kern_hashentry    |
+ * | +-----------------|
+ * | | hash            |
+ * | | next          o------+
+ * | | rowid           |    |
+ * | | htup            |    |
+ * +-+-----------------+    |
+ * |     :             |    |
+ * +-------------------+ <--+  <---+
+ * | kern_hashentry    |           |
+ * | +-----------------|           |
+ * | | hash            |           |
+ * | | next            |           |
+ * | | rowid           |           |
+ * | | htup            |           |
+ * +-+-----------------+           |
+ * | cl_uint           |           |
+ * |   row_index[0]    |           |
+ * |   row_index[1]  o-------------+
+ * |     :             |
+ * |   row_offset[N-1] |
+ * +-------------------+
  */
 typedef struct
 {
-	cl_uint			next;   /* offset of the next */
 	cl_uint			hash;   /* 32-bit hash value */
-	kern_tupitem	htup;	/* tuple of the inner relation */
+	cl_uint			next;   /* offset of the next */
+	cl_uint			rowid;	/* identifier of this hash entry */
+	cl_uint			t_len;	/* length of the tuple */
+	HeapTupleHeaderData htup;	/* tuple of the inner relation */
 } kern_hashentry;
 
 typedef struct
 {
 	hostptr_t		hostptr;
 	cl_uint			length;		/* length of this hashtable chunk */
+	cl_uint			usage;		/* usage of this hashtable chunk */
 	cl_uint			ncols;		/* number of inner relation's columns */
+	cl_uint			nitems;		/* number of inner relation's items */
 	cl_uint			nslots;		/* width of hash slot */
 	cl_uint			hash_min;	/* minimum hash value */
 	cl_uint			hash_max;	/* maximum hash value */

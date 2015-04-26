@@ -305,7 +305,7 @@ struct GpuTask
 #define DEVKERNEL_NEEDS_HASHJOIN		0x00020000
 #define DEVKERNEL_NEEDS_GPUPREAGG		0x00040000
 #define DEVKERNEL_NEEDS_GPUSORT			0x00080000
-#define DEVKERNRL_NEEDS_GPUNESTLOOP		0x00100000
+#define DEVKERNRL_NEEDS_GPUJOIN			0x00100000
 
 struct devtype_info;
 struct devfunc_info;
@@ -509,6 +509,7 @@ extern void pgstrom_release_data_store(pgstrom_data_store *pds);
 extern void pgstrom_expand_data_store(GpuContext *gcontext,
 									  pgstrom_data_store *pds,
 									  Size kds_length_new);
+extern void pgstrom_shrink_data_store(pgstrom_data_store *pds);
 extern pgstrom_data_store *
 pgstrom_create_data_store_row(GpuContext *gcontext,
 							  TupleDesc tupdesc,
@@ -550,6 +551,37 @@ extern void pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,
 										   ProjectionInfo **p_bulk_proj,
 										   TupleTableSlot **p_bulk_slot);
 extern void pgstrom_init_gpuscan(void);
+
+/*
+ * multirels.c
+ */
+struct pgstrom_multirels;
+
+typedef struct
+{
+	Size			length;
+	Size			length_head;
+	Size			usage;
+	bool			is_divided;
+	kern_multirels *kmrels;
+	void		   *prels[FLEXIBLE_ARRAY_MEMBER];
+} pgstrom_multirels;
+
+extern bool	pgstrom_plan_is_multirels(const Plan *plan);
+extern CustomScan *
+pgstrom_create_multirels_plan(PlannerInfo *root,
+							  int depth, Path *outer_path,
+							  int nbatches, Size buffer_size, double threshold,
+							  int nslots, List *hash_keys);
+extern void	pgstrom_init_multirels(void);
+
+/*
+ * gpujoin.c
+ */
+
+
+
+
 
 /*
  * gpuhashjoin.c
