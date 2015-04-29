@@ -557,22 +557,17 @@ extern void pgstrom_init_gpuscan(void);
  */
 struct pgstrom_multirels;
 
-typedef struct
-{
-	Size			length;
-	Size			length_head;
-	Size			usage;
-	bool			is_divided;
-	kern_multirels *kmrels;
-	void		   *prels[FLEXIBLE_ARRAY_MEMBER];
-} pgstrom_multirels;
-
 extern bool	pgstrom_plan_is_multirels(const Plan *plan);
 extern CustomScan *
 pgstrom_create_multirels_plan(PlannerInfo *root,
 							  int depth, Path *outer_path,
 							  int nbatches, Size buffer_size, double threshold,
 							  int nslots, List *hash_keys);
+extern struct pgstrom_multirels *
+pgstrom_multirels_exec_bulk(PlanState *plannode);
+extern Size pgstrom_multirels_get_length(struct pgstrom_multirels *pmrels);
+extern void pgstrom_multirels_dma_send(struct pgstrom_multirels *pmrels);
+exterb void pgstrom_multirels_dma_recv(struct pgstrom_multirels *pmrels);
 extern void	pgstrom_init_multirels(void);
 
 /*

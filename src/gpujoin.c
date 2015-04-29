@@ -22,19 +22,17 @@
 
 
 /* forward declaration of the GTS callbacks */
-static bool	gpunestloop_task_process(GpuTask *gtask);
-static bool	gpunestloop_task_complete(GpuTask *gtask);
-static void	gpunestloop_task_release(GpuTask *gtask);
-static GpuTask *gpunestloop_next_chunk(GpuTaskState *gts);
-static TupleTableSlot *gpunestloop_next_tuple(GpuTaskState *gts);
+static bool	gpujoin_task_process(GpuTask *gtask);
+static bool	gpujoin_task_complete(GpuTask *gtask);
+static void	gpujoin_task_release(GpuTask *gtask);
+static GpuTask *gpujoin_next_chunk(GpuTaskState *gts);
+static TupleTableSlot *gpujoin_next_tuple(GpuTaskState *gts);
 
 /* static variables */
 static set_join_pathlist_hook_type set_join_pathlist_next;
-static CustomPathMethods	gpunestloop_path_methods;
-static CustomScanMethods	gpunestloop_plan_methods;
-static PGStromExecMethods	gpunestloop_exec_methods;
-static CustomScanMethods	multitables_plan_methods;
-static PGStromExecMethods	multitables_exec_methods;
+static CustomPathMethods	gpujoin_path_methods;
+static CustomScanMethods	gpujoin_plan_methods;
+static PGStromExecMethods	gpujoin_exec_methods;
 static bool					enable_gpunestloop;
 
 /*
@@ -49,15 +47,17 @@ typedef struct
 	Path		   *outer_path;
 	Size			mrs_size;	/* size of multi-rel-store */
 	double			row_population_ratio;
+	List		   *host_quals;
 	int				num_rels;
 	struct {
 		Path	   *scan_path;
 		JoinType	join_type;
-		List	   *join_clause;
+		List	   *hash_quals;
+		List	   *join_quals;
 		double		threshold;
 		int			nloops;
 	} inners[FLEXIBLE_ARRAY_MEMBER];
-} GpuNestLoopPath;
+} GpuJoinPath;
 
 /*
  * GpuNestLoopInfo - state object of CustomScan(GpuNestedLoop)
@@ -398,7 +398,7 @@ try_gpunestloop_path(PlannerInfo *root,
 							  : joinrel->rows);
 	gpath->cpath.path.pathkeys = NIL;
 	gpath->cpath.flags = (support_bulkload ? CUSTOMPATH_SUPPORT_BULKLOAD : 0);
-	gpath->cpath.methods = &gpunestloop_path_methods;
+	gpath->cpath.methods = &gpujoin_path_methods;
 	gpath->outer_path = outer_path;
 	gpath->num_rels = 1;
 	gpath->inners[0].scan_path = inner_path;
@@ -551,7 +551,7 @@ create_gpunestloop_plan(PlannerInfo *root,
 	gnl_scan->scan.plan.targetlist = tlist;
 	gnl_scan->scan.plan.qual = NIL;
 	gnl_scan->flags = best_path->flags;
-	gnl_scan->methods = &gpunestloop_plan_methods;
+	gnl_scan->methods = &gpujoin_plan_methods;
 
 	for (i=0; i < gpath->num_rels; i++)
 	{
@@ -741,26 +741,25 @@ pgstrom_init_gpunestloop(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* setup path methods */
-	gpunestloop_path_methods.CustomName				= "GpuNestedLoop";
-	gpunestloop_path_methods.PlanCustomPath			= create_gpunestloop_plan;
-	gpunestloop_path_methods.TextOutCustomPath		= gpunestloop_textout_path;
+	gpujoin_path_methods.CustomName				= "GpuJoin";
+	gpujoin_path_methods.PlanCustomPath			= create_gpunestloop_plan;
+	gpujoin_path_methods.TextOutCustomPath		= gpunestloop_textout_path;
 
 	/* setup plan methods */
-	gpunestloop_plan_methods.CustomName				= "GpuNestedLoop";
-	gpunestloop_plan_methods.CreateCustomScanState
-		= gpunestedloop_create_scan_state;
-	gpunestloop_plan_methods.TextOutCustomScan		= NULL;
+	gpujoin_methods.CustomName					= "GpuJoin";
+	gpujoin_plan_methods.CreateCustomScanState	= gpujoin_create_scan_state;
+	gpujoin_plan_methods.TextOutCustomScan		= NULL;
 
 	/* setup exec methods */
-	gpunestloop_exec_methods.c.CustomName			= "GpuNestedLoop";
-	gpunestloop_exec_methods.c.BeginCustomScan		= gpunestloop_begin;
-	gpunestloop_exec_methods.c.ExecCustomScan		= gpunestloop_exec;
-	gpunestloop_exec_methods.c.EndCustomScan		= gpunestloop_end;
-	gpunestloop_exec_methods.c.ReScanCustomScan		= gpunestloop_rescan;
-	gpunestloop_exec_methods.c.MarkPosCustomScan	= NULL;
-	gpunestloop_exec_methods.c.RestrPosCustomScan	= NULL;
-	gpunestloop_exec_methods.c.ExplainCustomScan	= gpunestloop_explain;
-	gpunestloop_exec_methods.ExecCustomBulk			= gpunestloop_exec_bulk;
+	gpujoin_exec_methods.c.CustomName			= "GpuNestedLoop";
+	gpujoin_exec_methods.c.BeginCustomScan		= gpunestloop_begin;
+	gpujoin_exec_methods.c.ExecCustomScan		= gpunestloop_exec;
+	gpujoin_exec_methods.c.EndCustomScan		= gpunestloop_end;
+	gpujoin_exec_methods.c.ReScanCustomScan		= gpunestloop_rescan;
+	gpujoin_exec_methods.c.MarkPosCustomScan	= NULL;
+	gpujoin_exec_methods.c.RestrPosCustomScan	= NULL;
+	gpujoin_exec_methods.c.ExplainCustomScan	= gpunestloop_explain;
+	gpujoin_exec_methods.ExecCustomBulk			= gpunestloop_exec_bulk;
 
 	/* hook registration */
 	set_join_pathlist_next = set_join_pathlist_hook;

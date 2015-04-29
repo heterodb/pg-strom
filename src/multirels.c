@@ -20,17 +20,33 @@
 #include "cuda_gpujoin.h"
 
 /* static variables */
+static CustomPathMethods	multirels_path_methods;
 static CustomScanMethods	multirels_plan_methods;
 static PGStromExecMethods	multirels_exec_methods;
+
+/*
+ * MultiRelsPath - path of inner relation
+ */
+typedef struct
+{
+	CustomPath	cpath;
+	Path	   *outer_path;
+	JoinType	join_type;
+	List	   *hash_quals;
+	List	   *join_quals;
+	List	   *host_quals;
+	int			nslots;
+	int			nbatches;
+} MultiRelsPath;
 
 /*
  * MultiRelsInfo - state object of CustomScan(MultiRels)
  */
 typedef struct
 {
-	int			depth;		/* depth of this inner relation */
-	int			nbatches;	/* expected number of batches */
-	Size		total_size;
+	int			depth;			/* depth of this inner relation */
+	int			nbatches;		/* expected number of batches */
+	Size		total_length;	/* expected length of pgstrom_multirels */
 	double		proportion;
 
 	/* width of hash-slot if hash-join case */
@@ -56,8 +72,8 @@ typedef struct
 	int				depth;
 	int				nbatches_plan;
 	int				nbatches_exec;
-	Size			total_size;		/* entire kern_multirels buffer */
-	double			proportion;		/* 0.00 - 1.00 towards total size */
+	Size			length_total;	/* total length to be pgstrom_multirels */
+	double			proportion;		/* 0.00 - 1.00 towards total length */
 
 	TupleTableSlot *outer_overflow;
 	bool			outer_done;
@@ -66,11 +82,28 @@ typedef struct
 
 	/* for hash-join, below */
 	cl_uint			nslots;
+	Size		   *hslots_size;
+	cl_uint		   *hslots_nums;
 	List		   *hash_keys;
 	List		   *hash_keylen;
 	List		   *hash_keybyval;
 	List		   *hash_keytype;
 } MultiRelsState;
+
+/*
+ * pgstrom_multirels
+ *
+ *
+ */
+typedef struct pgstrom_multirels
+{
+	Size		total_length;	/* total (expected) length of the buffer */
+	Size		head_length;	/* length of the header portion */
+	Size		usage_length;	/* length actually in use */
+	kern_multirels *kmrels;
+	void	   *prels[FLEXIBLE_ARRAY_MEMBER];
+} pgstrom_multirels;
+
 
 /*
  * form_multirels_info
@@ -85,7 +118,7 @@ form_multirels_info(CustomScan *cscan, MultiRelsInfo *mr_info)
 	privs = lappend(privs, makeInteger(mr_info->logic));
 	privs = lappend(privs, makeInteger(mr_info->nbatches));
 	privs = lappend(privs, makeInteger(mr_info->total_size));
-	privs = lappend(privs, makeInteger((long)(mr_info->proportion * 1000000.0)));
+	privs = lappend(privs, makeInteger((long)(mr_info->proportion * 10000.0)));
 	privs = lappend(privs, makeInteger(mr_info->nslots));
 	exprs = lappend(exprs, mr_info->hash_keys);
 
@@ -109,7 +142,7 @@ deform_multirels_info(CustomScan *cscan)
 	mr_info->logic = intVal(list_nth(privs, pindex++));
 	mr_info->nbatches = intVal(list_nth(privs, pindex++));
 	mr_info->total_size = intVal(list_nth(privs, pindex++));
-	mr_info->proportion = (double)intVal(list_nth(privs, pindex++)) / 1000000.0;
+	mr_info->proportion = (double)intVal(list_nth(privs, pindex++)) / 10000.0;
 	mr_info->nslots = intVal(list_nth(privs, pindex++));
 	mr_info->hash_keys = list_nth(exprs, eindex++);
 
@@ -211,6 +244,8 @@ multirels_begin(CustomScanState *node, EState *estate, int eflags)
 	mrs->total_size = mr_info->total_size;
 	mrs->proportion = mr_info->proportion;
 	mrs->nslots = mr_info->nslots;
+	mrs->hslots_size = palloc0(sizeof(Size) * mrs->nslots);
+	mrs->hslots_nums = palloc0(sizeof(cl_uint) * mrs->nslots);
 
 	mrs->outer_overflow = NULL;
 	mrs->outer_done = NULL;
@@ -253,45 +288,35 @@ multirels_exec(CustomScanState *node)
 	return NULL;
 }
 
-static Size
-multirels_expand_total_size(MultiRelsState *mrs)
+static bool
+multirels_expand_total_length(MultiRelsState *mrs, pgstrom_multirels *pmrels)
 {
 	MultiRelsState *temp;
-	Size		total_size_new;
-
-	for (temp = mrs;
-		 innerPlanState(temp) != NULL;
-		 temp = innerPlanState(temp))
-	{
-		Assert(IsA(temp, CustomScanState) &&
-			   mrs->css.methods == &multirels_exec_methods.c);
-	}
-	total_size_new = 2 * temp->total_size;
+	Size		total_length_new = 2 * pmrels->total_length;
 
 	/*
-	 * If no more physical space to expand, we give up.
+	 * No more physical space to expand, we will give up
 	 */
-	if (total_size_new > gpuMemMaxAllocSize())
-		return 0;
+	if (total_length_new > gpuMemMaxAllocSize())
+		return false;
 
 	/*
-	 * Update initial length of pgstrom_multirels
+	 * Update expected total length of pgstrom_multirels
 	 */
-	temp = mrs;
-	do {
-		temp->total_size = total_size_new;
-		temp = (MultiRelsState *) innerPlanState(mrs);
-	} while (temp);
+	for (temp = mrs; temp != NULL; temp = innerPlanState(temp))
+		temp->total_length = total_length_new;
+	pmrels->total_length = total_length_new;
 
-	return total_size_new;
+	return true;
 }
 
 static kern_hashtable *
-create_kern_multihash(MultiRelsState *mrs, pgstrom_multirels *pmrels)
+create_kern_hashtable(MultiRelsState *mrs, pgstrom_multirels *pmrels)
 {
 	kern_hashtable *khtable;
 	TupleTableSlot *scan_slot = mrs->css.ss.ss_ScanTupleSlot;
     TupleDesc		scan_desc = scan_slot->tts_tupleDescriptor;
+	int				natts = scan_desc->natts;
 	Size			chunk_size;
 	Size			required;
 	cl_uint		   *hash_slot;
@@ -302,22 +327,21 @@ create_kern_multihash(MultiRelsState *mrs, pgstrom_multirels *pmrels)
 	required = (LONGALIGN(offsetof(kern_hashtable,
 								   colmeta[scan_desc->natts])) +
 				LONGALIGN(sizeof(cl_uint) * mrs->nslots));
-	chunk_size = (Size)(mrs->proportion *
-						(double)(pmrels->length - pmrels->length_head));
-	while (chunk_size < required)
-	{
-		new_length = multirels_expand_total_size(mrs);
-		if (new_length == 0)
-			elog(ERROR, "failed to allocate minimum required memory");
-		chunk_size = (Size)(mrs->proportion *
-							(double)(new_length - pmrels->length_head));
-	}
+	do {
+		Size	body_length = pmrels->total_length - pmrels->head_length;
 
+		chunk_size = (Size)(mrs->proportion * (double)body_length);
+		if (required < chunk_size)
+			break;
+		if (!multirels_expand_total_size(mrs, pmrels))
+			elog(ERROR, "failed to assign minimum required memory");
+	}
 	khtable = MemoryContextAlloc(mrs->gcontext, chunk_size);
 	khtable->length = chunk_size;
-	khtable->ncols = tupdesc->natts;
+	khtable->usage = required;
+	khtable->ncols = natts;
 	khtable->nitems = 0;
-    khtable->nslots = mhs->nslots;
+	khtable->nslots = mrs->nslots;
 	khtable->hash_min = 0;
 	khtable->hash_max = UINT_MAX;
 
@@ -326,7 +350,7 @@ create_kern_multihash(MultiRelsState *mrs, pgstrom_multirels *pmrels)
 		attcacheoff += sizeof(Oid);
 	attcacheoff = MAXALIGN(attcacheoff);
 
-	for (i=0; i < scan_desc->natts; i++)
+	for (i=0; i < natts; i++)
 	{
 		Form_pg_attribute attr = scan_desc->attrs[i];
 
@@ -352,30 +376,19 @@ create_kern_multihash(MultiRelsState *mrs, pgstrom_multirels *pmrels)
 	return khtable;
 }
 
-static kern_multihash *
-expand_kern_multihash()
-{}
-
-static bool
-insert_kern_multihash(MultiRelsState *mrs, TupleTableSlot *slot)
+static pg_crc32
+get_tuple_hashvalue(MultiRelsState *mrs, HeapTuple tuple)
 {
-	HeapTuple	tuple = ExecFetchSlotTuple(slot);
-	pg_crc32	hash;
-	ListCell   *lc1;
-	ListCell   *lc2;
-	ListCell   *lc3;
-	ListCell   *lc4;
-	Size		required;
-
-	/* do we have enough space to store? */
-	required = khtable->usage + MAXALIGN(tuple->t_len) +
-		STROMALIGN(sizeof(cl_uint) * (khtable->nitems + 1));
-	if (required > khtable->length)
-		return false;
+	ExprContext	   *econtext = mrs->css.ss.ps.ps_ExprContext;
+	pg_crc32		hash;
+	ListCell	   *lc1;
+	ListCell	   *lc2;
+	ListCell	   *lc3;
+	ListCell	   *lc4;
 
 	/* calculation of a hash value of this entry */
-	INIT_CRC32C(hash);
 	econtext->ecxt_scantuple = slot;
+	INIT_CRC32C(hash);
 	forfour (lc1, mrs->hash_keys,
 			 lc2, mrs->hash_keylen,
 			 lc3, mrs->hash_keybyval,
@@ -420,34 +433,139 @@ insert_kern_multihash(MultiRelsState *mrs, TupleTableSlot *slot)
 	}
 	FIN_CRC32C(hash);
 
-	/* put this tuple on the hash table */
-	hentry = (kern_hashentry *)((char *)khtable + khtable->usage);
-	hentry->hash = hash;
-	hentry->rowid = 0;	/* to be set */
-	hentry->t_len = tuple->t_len;
-	memcpy(&hentry->htup, tuple->t_data, tuple->t_len);
-
-	i = hash % khtable->nslots;
-	hentry->next = hash_slot[i];
-	hash_slot[i] = (uintptr_t)hentry - (uintptr_t)khtable;
-
-	/* increment usage */
-	khtable->usage += MAXALIGN(offsetof(kern_hashentry, htup) + tuple->t_len);
-
-	return true;
+	return hash;
 }
-
-
-
-
-
-
-
 
 static kern_multirels *
 multirels_preload_hash(MultiRelsState *mrs, double *ntuples)
 {
-	elog(ERROR, "Not implemented yet");	
+	TupleTableSlot *scan_slot = mrs->css.ss.ss_ScanTupleSlot;
+	TupleDesc		scan_desc = scan_slot->tts_tupleDescriptor;
+	kern_hashentry *khentry;
+	HeapTuple		tuple;
+	Size			entry_size;
+	Size			chunk_size;
+	int				index;
+	Tuplestorestate *tup_store = NULL;
+
+	khtable = create_kern_hashtable(mrs, pmrels);
+
+	while (!mrs->outer_done)
+	{
+		if (!mrs->outer_overflow)
+			scan_slot = ExecProcNode(outerPlanState(mrs));
+		else
+		{
+			scan_slot = mrs->outer_overflow;
+			mrs->outer_overflow = NULL;
+		}
+
+		if (TupIsNull(scan_slot))
+		{
+			mrs->outer_done = true;
+			break;
+		}
+		tuple = ExecFetchSlotTuple(scan_slot);
+		hash = get_tuple_hashvalue(mrs, tuple);
+		entry_size = MAXALIGN(offsetof(kern_hashentry, htup) + tuple->t_len);
+
+		/*
+		 * Once we switched to the Tuplestore instead of kern_hashtable,
+		 * we try to materialize the inner relation once, then split it
+		 * to the suitable scale.
+		 */
+		if (tup_store)
+		{
+			tuplestore_puttuple(tup_store, tuple);
+			index = hash % khtable->nslots;
+			mrs->hslots_size[index] += entry_size;
+			mrs->hslots_nums[index]++;
+			continue;
+		}
+
+		/* do we have enough space to store? */
+		required = STROMALIGN(khtable->usage + entry_size) +
+			STROMALIGN(sizeof(cl_uint) * (khtable->nitems + 1));
+		if (required <= khtable->length)
+		{
+			khentry = (kern_hashentry *)((char *)khtable + khtable->usage);
+			khentry->hash = hash;
+			khentry->rowid = 0;		/* to be set later */
+			khentry->t_len = tuple->t_len;
+			memcpy(&hentry->htup, tuple->t_data, tuple->t_len);
+
+			index = hash % khtable->nslots;
+			hentry->next = hash_slot[index];
+			hash_slot[index] = (cl_uint)((uintptr_t)hentry -
+										 (uintptr_t)khtable);
+			/* usage increment */
+			khtable->nitems ++;
+			khtable->usage += entry_size;
+			mrs->hslots_size[index] += entry_size;
+			mrs->hslots_nums[index]++;
+			/* increment number of tuples read */
+			ntuples++;
+		}
+		else
+		{
+			Assert(mrs->outer_overflow == NULL);
+			mrs->outer_overflow = scan_slot;
+
+			if (multirels_expand_total_length(mrs, pmrels))
+			{
+				Size	chunk_size_new = (Size)
+					(mrs->proportion *(double)(pmrels->total_length -
+											   pmrels->head_length));
+				khtable = repalloc(khtable, chunk_size_new);
+				khtable->hostptr = (hostptr_t)&khtable->hostptr;
+				khtable->length = chunk_size_new;
+			}
+			else
+			{
+				kern_hashentry *khentry;
+				cl_uint		   *hslot;
+				HeapTupleData	tupData;
+
+				/* clear the statistics */
+				memset(mrs->hslots_size, 0, sizeof(Size) * mrs->nslots);
+
+				/*
+				 * In case when we cannot expand a single kern_hashtable
+				 * chunk any more, we switch to use tuple-store to keep
+				 * contents of the inner relation once.
+				 *
+				 * NOTE: Does it make sense only when outer join?
+				 */
+				tup_store = tuplestore_begin_heap(false, false, work_mem);
+				hslot = KERN_HASHTABLE_SLOT(khtable);
+				for (index = 0; index < khtable->nslots; index++)
+				{
+					for (khentry = KERN_HASH_FIRST_ENTRY(khtable, index);
+						 khentry != NULL;
+						 khentry = KERN_HASH_NEXT_ENTRY(khtable, khentry))
+					{
+						tupData.t_len = khentry->t_len;
+						tupData.t_data = &khentry->htup;
+						tuplestore_puttuple(tup_store, &tupData);
+					}
+				}
+			}
+		}
+	}
+
+
+	if (tup_store)
+	{
+		Assert(khtable != NULL);
+
+		// Load the contents to hash table according to the consumption
+		// tracked by mrs->hslots_size[] array.
+
+		elog(ERROR, "not implemented yet");
+
+	}
+	*p_ntuples = (double)ntuples;
+	return khtables;
 }
 
 static pgstrom_data_store *
@@ -502,7 +620,7 @@ multirels_preload_heap(MultiRelsState *mrs,
 			 * If no more physical space is expected, we give up to preload
 			 * entire relation on this store.
 			 */
-			new_length = multirels_expand_total_size(mrs);
+			new_length = multirels_expand_total_length(mrs);
 			if (new_length == 0)
 				break;
 
@@ -533,16 +651,15 @@ multirels_exec_bulk(CustomScanState *node)
 	if (node->ss.ps.instrument)
 		InstrStartNode(node->ss.ps.instrument);
 
-	mrs_child = innerPlanState(mrs);
-	if (mrs_child)
+	if (innerPlanState(mrs))
 	{
-		pmrels = BulkExecMultiRels(mrs_child);
+		pmrels = BulkExecMultiRels(innerPlanState(mrs));
 		if (!pmrels)
 		{
 			if (mrs->outer_done)
 				goto out;
 			ExecReScan(mrs);
-			pmrels = BulkExecMultiRels(mrs_child);
+			pmrels = BulkExecMultiRels(innerPlanState(mrs));
 			if (!pmrels)
 				goto out;
 			scan_forward = true;
@@ -565,9 +682,10 @@ multirels_exec_bulk(CustomScanState *node)
 		length = (STROMALIGN(offsetof(pgstrom_multirels, prels[nrels])) +
 				  STROMALIGN(offsetof(kern_multirels, krels[nrels])));
 		pmrels = MemoryContextAllocZero(gcontext->memcxt, length);
-		pmrels->length = mrs->inner_size;
-		pmrels->usage = STROMALIGN(offsetof(kern_multirels, krels[nrels]));
-		pmrels->is_divided = false;
+		pmrels->total_length = mrs->total_length;
+		pmrels->head_length = STROMALIGN(offsetof(kern_multirels,
+												  krels[nrels]));
+		pmrels->usage_length = pmrels->head_length;
 
 		kmrels = (kern_multirels *)(pmrels->prels + nrels);
 		memcpy(kmrels->pg_crc32_table,
@@ -700,6 +818,11 @@ multirels_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 void
 pgstrom_init_multirels(void)
 {
+	/* setup path methods */
+	multirels_path_methods.CustomName			= "MultiRels";
+	multirels_path_methods.PlanCustomPath		= create_multirels_plan;
+	multirels_path_methods.TextOutCustomPath	= multirels_textout_path;
+
 	/* setup plan methods */
 	multirels_plan_methods.CustomName			= "MultiRels";
 	multirels_plan_methods.CreateCustomScanState
