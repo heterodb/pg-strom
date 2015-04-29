@@ -45,16 +45,21 @@ typedef struct
 {
 	CustomPath		cpath;
 	Path		   *outer_path;
-	List		   *host_quals;
 	Size			total_length;
+	double			kresults_ratio;
 	int				num_rels;
+	List		   *host_quals;
 	struct {
+		double		rows;			/* rows to be generated in this depth */
+		Cost		startup_cost;	/* outer scan cost + something */
+		Cost		total_cost;		/* outer scan cost + something */
 		Path	   *scan_path;
 		JoinType	join_type;
-		List	   *hash_quals;		/* valid, if hash-join */
-		List	   *join_quals;		/* other join condition */
+		List	   *hash_quals;		/* valid quals, if hash-join */
+		List	   *join_quals;		/* all the device quals, incl hash_quals */
 		double		row_growth_ratio;
-		double		buffer_usage_ratio;
+		double		buffer_portion;
+		Size		chunk_size;
 		int			nbatches;
 	} inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinPath;
@@ -76,15 +81,15 @@ typedef struct
 } GpuJoinInfo;
 
 static inline void
-form_gpunestloop_info(CustomScan *cscan, GpuNestLoopInfo *gnl_info)
+form_gpujoin_info(CustomScan *cscan, GpuNestLoopInfo *gnl_info)
 {}
 
 static inline GpuNestLoopInfo *
-deform_gpunestloop_info(CustomScan *cscan)
+deform_gpujoin_info(CustomScan *cscan)
 {}
 
 /*
- * GpuNestLoopState - execution state object of GpuNestLoop
+ * GpuJoinState - execution state object of GpuJoin
  */
 typedef struct
 {
@@ -95,224 +100,369 @@ typedef struct
 
 } GpuNestLoopState;
 
-
-/*
- * estimate_multi_relation_store_size
- *
- * It estimates size of inner multi relation store
- */
-static bool
-estimate_multi_relation_store_size(PlannerInfo *root,
-								   GpuNestedLoopPath *gpath,
-								   Relids required_outer,
-								   Cost startup_cost,
-								   Cost total_cost)
+/*****/
+static inline bool
+path_is_gpujoin(Path *path)
 {
-	Cost		startup_cost = gpath->cpath.path.startup_cost;
-	Cost		total_cost = gpath->cpath.path.total_cost;
-	Size		mrs_size;
-	Size		largest_size;
-	long		num_batches;
-	long		num_batches_init = -1;
-	int			i_largest;
+	CustpmPath *cpath = (CustpmPath *) path;
 
-retry:
-	mrs_size = LONGALIGN(offsetof(kern_multi_relstore,
-								  rels[gpath->num_rels]));
-	numbatches = 1;
-	largest_size = 0;
-	i_largest = -1;
-	for (i=0; i < gpath->num_rels; i++)
+	if (!IsA(cpath, CustomPath))
+		return false;
+	if (cpath->methods != &gpujoin_path_methods)
+		return false;
+	return true;
+}
+
+static bool
+path_is_mergeable_gpujoin(Path *pathnode)
+{
+	RelOptInfo	   *joinrel = pathnode->parent;
+	GpuJoinPath	   *gpath = (GpuJoinPath *) pathnode;
+	ListCell	   *lc;
+
+	if (!path_is_gpujoin(pathnode))
+		return false;
+
+	/*
+	 * Only last depth can have host only clauses
+	 */
+	if (gpath->host_quals != NIL)
+		return false;
+
+	/*
+	 * Target-list must be simple var-nodes only
+	 */
+	foreach (lc, joinrel->reltargetlist)
 	{
-		Path	   *inner_path = gpath->inners[i].scan_path;
-		RelOptInfo *inner_rel = inner_path->parent;
-		Size		table_size;
-		Size		tuple_size;
+		Expr   *expr = lfirst(lc);
 
-		numbatches *= gpath->inners[i].nloops;
-
-		/* force a plausible relation size if no information.
-		 * It expects 15% of margin to avoid unnecessary multi-
-		 * tables split
-		 */
-		ntuples = Max(1.15 * inner_path->rows, 1000.0);
-		if (gpath->inners[i].nloops > 0)
-			ntuples /= (double) gpath->inners[i].nloops;
-
-		/*
-		 * estimate length of each table entry
-		 */
-		tuple_size = (MAXALIGN(offsetof(kern_tupitem, htup)) +
-					  MAXALIGN(offsetof(HeapTupleHeaderData,
-										t_bits[BITMAPLEN(ncols)])) +
-					  MAXALIGN(inner_rel->width));
-		table_size = (MAXALIGN(offsetof(kern_data_store, colmeta[ncols])) +
-					  MAXALIGN(sizeof(cl_uint) * ntuples) +
-					  MAXALIGN(tuple_size * ntuples));
-
-		if (largest_size < table_size)
-		{
-			largest_size = table_size;
-			i_largest = i;
-		}
-		gpath->inners[i].table_size = table_size;
-
-		/* expand estimated inner multi-tables size */
-		mrs_size += table_size;
-	}
-	if (num_batches_init < 0)
-		num_batches_init = num_batches;
-
-	/* also, compute threshold of each chunk */
-	threshold_size = 0;
-	for (i = gpath->num_rels - 1; i >= 0; i--)
-	{
-		threshold_size += gpath->inners[i].table_size;
-		gpath->inners[i].threshold
-			= (double) threshold_size / (double) mrs_size;
+		if (!IsA(expr, Var))
+			return false;
 	}
 
 	/*
-	 * NOTE: In case when extreme number of rows are expected,
-	 * it does not make sense to split inner multi-tables because
-	 * increasion of numbatches also increases the total cost by
-	 * iteration of outer scan. In this case, the best strategy
-	 *is to give up this path, instead of incredible number of
-	 * numbatches!
+	 * TODO: Any other condition to be checked?
 	 */
-	total_cost = startup_cost +
-		(total_cost - startup_cost) * ((double) num_batches /
-									   (double) num_batches_init);
-	if (!add_path_precheck(gpath->cpath.path.parent,
-						   startup_cost, total_cost,
+	return true;
+}
+
+/*
+ * cost_gpujoin
+ *
+ * estimation of GpuJoin cost
+ */
+static bool
+cost_gpujoin(PlannerInfo *root,
+			 GpuJoinPath *gpath,
+			 Relids required_outer)
+{
+	Path	   *outer_path = gpath->outer_path;
+	Cost		startup_cost;
+	Cost		run_cost;
+	Cost		gpu_startup_cost;
+	Cost		gpu_run_cost;
+	QualCost	host_cost;
+	QualCost   *join_cost;
+	double		gpu_cpu_ratio;
+	double		kresults_ratio;
+	double		kresults_ratio_max;
+	double		outer_ntuples;
+	double		inner_ntuples;
+	Size		total_length;
+	int			i, num_rels = gpath->num_rels;
+
+	/*
+	 * Buffer size estimation
+	 */
+	kresults_ratio = kresults_ratio_max = 1.0;
+	for (i=0; i < num_rels; i++)
+	{
+		kresults_ratio = ((double)(i + 2) *
+						  gpath->inners[i].row_growth_ratio *
+						  kresults_ratio);
+		kresults_ratio_max = Max(kresults_ratio, kresults_ratio_max);
+	}
+	gpath->kresults_ratio = kresults_ratio_max;
+
+	/*
+	 * Cost of per-tuple evaluation
+	 */
+	gpu_cpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
+	join_cost = palloc0(sizeof(QualCost) * num_rels);
+	for (i=0; i < num_rels; i++)
+	{
+		cost_qual_eval(join_cost + i, join_quals, root);
+		join_cost[i].per_tuple *= gpu_cpu_ratio;
+	}
+	cost_qual_eval(&host_cost, host_quals, root);
+
+	/*
+	 * Estimation of multi-relations buffer size
+	 */
+retry:
+	gpu_startup_cost = 0.0;
+	gpu_run_cost = 0.0;
+	total_length = STROMALIGN(offsetof(kern_multirels,
+									   krels[num_rels]));
+	num_batches = 1;
+	largest_size = 0;
+	largest_index = -1;
+	outer_ntuples = outer_path->rows;
+	for (i=0; i < num_rels; i++)
+	{
+		Path	   *inner_path = gpath->inners[i].scan_path;
+		RelOptInfo *inner_rel = inner_path->parent;
+		cl_uint		ncols = list_length(inner_rel->reltargetlist);
+		cl_uint		nslots;
+
+		/* force a plausible relation size if no information.
+		 * It expects 15% of margin to avoid unnecessary hash-
+		 * table split
+		 */
+		inner_ntuples = (Max(1.15 * inner_path->rows, 1000.0)
+						 / gpath->inners[i].nbatches);
+
+		if (gpath->inners[i].hash_quals != NIL)
+		{
+			entry_size = (offsetof(kern_hashentry, htup) +
+						  MAXALIGN(offsetof(HeapTupleHeaderData,
+											t_bits[BITMAPLEN(ncols)])) +
+						  MAXALIGN(inner_rel->width));
+			/* header portion of kern_hashtable */
+			chunk_size = STROMALIGN(offsetof(kern_hashtable,
+											 colmeta[ncols]));
+			/* hash entry slot */
+			chunk_size += STROMALIGN(sizeof(cl_uint) * (Size)inner_ntuples);
+			/* kern_hashentry body */
+			chunk_size += STROMALIGN(entry_size * (Size)inner_ntuples);
+			/* row-index of the tuples */
+			chunk_size += STROMALIGN(sizeof(cl_uint) * (Size)inner_ntuples);
+		}
+		else
+		{
+			entry_size = (offsetof(kern_tupitem, htup) +
+						  MAXALIGN(offsetof(HeapTupleHeaderData,
+											t_bits[BITMAPLEN(ncols)])) +
+						  MAXALIGN(inner_rel->width));
+			/* header portion of kern_data_store */
+			chunk_size += STROMALIGN(offsetof(kern_data_store,
+											  colmeta[ncols]));
+			/* row-index of the tuples */
+			chunk_size += STROMALIGN(sizeof(cl_uint) * (Size)inner_ntuples);
+			/* kern_tupitem body */
+			chunk_size += STROMALIGN(entry_size * (Size)inner_ntuples);
+		}
+		gpath->inners[i].chunk_size = chunk_size;
+
+		if (largest_index < 0 || largest_size < chunk_size)
+		{
+			largest_size = chunk_size;
+			largest_index = i;
+		}
+		total_length += chunk_size;
+
+		/*
+		 * Cost calculation in this depth
+		 */
+
+		/* cost to load tuples onto the buffer */
+		startup_cost = (inner_path->total_cost +
+						cpu_tuple_cost * inner_path->rows);
+		/* cost to compute hash value, if any */
+		if (gpath->inners[i].hash_quals != NIL)
+			startup_cost += (cpu_operator_cost * inner_path->rows *
+							 list_length(gpath->inners[i].hash_quals));
+		/* fixed cost to initialize/setup/use GPU device */
+		startup_cost += pgstrom_gpu_setup_cost;
+
+		/* cost to execute previous stage */
+		if (i == 0)
+			startup_cost += (outer_path->total_cost +
+							 cpu_tuple_cost * outer_path->rows);
+		else
+			startup_cost += (gpath->inners[i-1].startup_cost +
+							 gpath->inners[i-1].run_cost);
+		/* iteration of outer scan/join */
+		startup_cost *= (double) gpath->inners[i].nbatches;
+
+		/* cost to evaluate join qualifiers */
+		if (gpath->inners[i].hash_quals != NIL)
+			run_cost = (join_cost[i].per_tuple
+						* outer_ntuples
+						* clamp_row_est(inner_ntuples) * 0.5
+						* (double) gpath->inners[i].nbatches);
+		else
+			run_cost = (join_cost[i].per_tuple
+						* outer_ntuples
+						* clamp_row_est(inner_ntuples)
+						* (double) gpath->inners[i].nbatches);
+
+		if (gpath->inners[i].hash_quals != NIL)
+		{
+			/* In case of Hash-Join logic */
+			gpath->inners[i].startup_cost += join_cost[i].startup;
+			gpath->inners[i].run_cost = join_cost[i].per_tuple
+				* outer_ntuples
+				* (double) gpath->inners[i].nbatches;
+		}
+		else
+		{
+			/* In case of Nest-Loop logic */
+			gpath->inners[i].startup_cost += join_cost[i].startup;
+			gpath->inners[i].run_cost = join_cost[i].per_tuple
+				* outer_ntuples
+				* clamp_row_est(inner_ntuples)
+				* (double) gpath->inners[i].nbatches;
+		}
+		outer_ntuples = gpath->inners[i].rows;
+	}
+	/* put cost value on the gpath */
+	gpath->startup_cost = gpath->inners[num_rels - 1].startup_cost;
+	gpath->total_cost = (gpath->inners[num_rels - 1].startup_cost +
+						 gpath->inners[num_rels - 1].run_cost);
+
+    /*
+     * NOTE: In case when extreme number of rows are expected,
+     * it does not make sense to split hash-tables because
+     * increasion of numbatches also increases the total cost
+     * by iteration of outer scan. In this case, the best
+     * strategy is to give up this path, instead of incredible
+     * number of numbatches!
+     */
+	if (!add_path_precheck(joinrel,
+						   startup_cost + gpu_startup_cost,
+						   startup_cost + gpu_startup_cost +
+						   run_cost + gpu_run_cost,
 						   NULL, required_outer))
 		return false;
 
 	/*
-	 * If size of inner multi-tables is still larger than device
-	 * allocatable limitation, we try to split the largest table
-	 * then retry the estimation.
+	 * If size of inner multi-relations buffer is still larger than
+	 * device allocatable limitation, we try to split the largest
+	 * relation then retry the estimation.
 	 */
-	if (mrs_size > gpuMemMaxAllocSize())
+	if (total_length > gpuMemMaxAllocSize())
 	{
-		gpath->inners[i_largest].nloops++;
+		gpath->inners[largest_index].nbatches++;
 		goto retry;
 	}
 
 	/*
-	 * Update estimated hashtable_size, but ensure hashtable_size
-	 * shall be allocated at least
+	 * Update estimated multi-relations buffer length and portion
+	 * of the 
 	 */
-	gpath->inner_relsize = Max(inner_relsize, pgstrom_chunk_size());
-
-	/*
-	 * Update cost estimation value
-	 */
-	gpath->cpath.path.startup_cost = startup_cost;
-	gpath->cpath.path.total_cost = startup_cost + run_cost;
-
-	return true;	/* ok */
-}
-
-/*
- * cost_gpunestloop
- *
- * estimation of GpuNestedLoop cost
- */
-static bool
-cost_gpunestloop(PlannerInfo *root,
-				 GpuNestedLoopPath *gpath,
-				 Relids required_outer)
-{
-	Path	   *outer_path;
-	Path	   *inner_path;
-	Cost		startup_cost;
-	Cost		run_cost;
-	QualCost	qual_cost;
-	int			num_rels;
-	List	   *join_clause;
-	double		row_population_ratio;
-
-	num_rels = gpath->num_rels;
-	join_clause = gpath->inners[num_rels - 1].join_clause;
-	outer_path = gpath->outer_path;
-	inner_path = gpath->inners[num_rels - 1].scan_path;
-
-	/*
-	 * Cost to construct inner multi-tables; to be processed by CPU
-	 */
-	startup_cost = outer_path->startup_cost + inner_path->startup_cost;
-	if (num_rels == 1)
-		startup_cost += pgstrom_gpu_setup_cost;
-	startup_cost += cpu_tuple_cost * inner_path->rows;
-
-	/*
-	 * Cost to run GpuNestedLoop logic
-	 */
-	cost_qual_eval(&qual_cost, join_clause, root);
-	qual_cost.per_tuple *= (pgstrom_gpu_operator_cost / cpu_operator_cost);
-
-	run_cost = (outer_path->total_cost - outer_path->startup_cost +
-				inner_path->total_cost - inner_path->startup_cost);
-	run_cost += (pgstrom_gpu_operator_cost *
-				 qual_cost.per_tuple *
-				 outer_path->rows *
-				 inner_path->rows);
-	run_cost += cpu_tuple_cost * gpath->cpath.path.rows;
-	if (num_rels > 1)
-		run_cost -= cpu_tuple_cost * outer_path->rows;
-
-	gpath->cpath.path.startup_cost = startup_cost;
-	gpath->cpath.path.total_cost = startup_cost + run_cost;
-
-	/*
-	 * estimation of row-population ratio; that is a ratio between
-	 * output rows and input rows come from outer relation stream.
-	 * We use approx_tuple_count here because we need an estimation
-	 * based JOIN_INNER semantics.
-	 */
-	row_population_ratio = gpath->cpath.path.rows / outer_path->rows;
-	if (row_population_ratio > pgstrom_row_population_max)
+	gpath->total_length = total_length;
+	for (i=0; i < num_rels; i++)
 	{
-		elog(DEBUG1, "row population ratio (%.2f) too large, give up",
-			 row_population_ratio);
-		return false;
+		gpath->inners[i].buffer_portion =
+			((double)gpath->inners[i].chunk_size / (double)total_length);
 	}
-	else if (row_population_ratio > pgstrom_row_population_max / 2.0)
-	{
-		elog(NOTICE, "row population ratio (%.2f) too large, rounded to %.2f",
-			 row_population_ratio, pgstrom_row_population_max / 2.0);
-		row_population_ratio = pgstrom_row_population_max / 2.0;
-	}
-	gpath->row_population_ratio = row_population_ratio;
-
-	/*
-	 * Estimation of inner multitable size and number of outer loops
-	 * according to the split of kern_data_store.
-	 * In case of estimated plan cost is too large to win the existing
-	 * paths, it breaks to find out this path.
-	 */
-	if (!estimate_innertables_size(root, gpath, required_outer, workspace))
-		return false;
-
 	return true;
 }
 
-static void
-try_gpunestloop_path(PlannerInfo *root,
-					 RelOptInfo *joinrel,
-					 JoinType jointype,
-					 SpecialJoinInfo *sjinfo,
-					 Relids param_source_rels,
-					 Relids extra_lateral_rels,
-					 Path *outer_path,
-					 Path *inner_path,
-					 List *restrict_clauses)
+static GpuJoinPath *
+create_gpujoin_path(PlannerInfo *root,
+					RelOptInfo *joinrel,
+					JoinType jointype,
+					Path *outer_path,
+					Path *inner_path,					
+					ParamPathInfo *param_info,
+					List *hash_quals,
+					List *join_quals,
+					List *host_quals,
+					bool can_bulkload,
+					bool try_merge)
 {
-	GpuNestLoop		   *gpath;
-	ParamPathInfo	   *param_info;
-	Relids				required_outer;
-	bool				support_bulkload = true;
+	GpuJoinPath	   *result;
+	GpuJoinPath	   *source;
+	double			row_growth_ratio;
+	int				num_rels;
+
+	/*
+	 * 'row_growth_ratio' is used to compute size of result buffer 
+	 * for GPU kernel execution. If joinrel contains host-only
+	 * qualifiers, we need to estimate number of rows at the time
+	 * of host-only qualifiers.
+	 */
+	if (host_quals == NIL)
+		row_growth_ratio = joinrel->rows / outer_path->rows;
+	else
+	{
+		RelOptInfo		dummy;
+
+		set_joinrel_size_estimates(root, &dummy,
+								   outer_path->parent,
+								   inner_path->parent,
+								   sjinfo,
+								   join_quals);
+		row_growth_ratio = dummy.rows / outer_path->rows;
+	}
+
+
+	if (!try_merge)
+		num_rels = 1;
+	else
+	{
+		Assert(path_is_mergeable_gpujoin(outer_path));
+		source = (GpuJoinPath *) outer_path;
+		outer_path = source->outer_path;
+		num_rels = source->num_rels + 1;
+		/* source path also has to support bulkload */
+		if ((source->cpath.flags & CUSTOMPATH_SUPPORT_BULKLOAD) == 0)
+			can_bulkload = false;
+	}
+
+	result = palloc0(offsetof(GpuJoinPath, inners[num_rels]));
+	NodeSetTag(result, T_CustomPath);
+	result->cpath.path.pathtype = T_CustomScan;
+	result->cpath.path.parent = joinrel;
+	result->cpath.path.param_info = param_info;
+	result->cpath.path.pathkeys = NIL;
+	result->cpath.flags = (can_bulkload ? CUSTOMPATH_SUPPORT_BULKLOAD : 0);
+	result->cpath.methods = &gpujoin_path_mathods;
+	result->outer_path = outer_path;
+	result->total_length = 0;
+	result->num_rels = num_rels;
+	result->host_quals = host_quals;
+	if (source)
+	{
+		memcpy(result->inners, source->inners,
+			   offsetof(GpuHashJoinPath, inners[num_rels]) -
+               offsetof(GpuHashJoinPath, inners[0]));
+	}
+	result->inners[num_rels - 1].rows = joinrel->rows;
+	result->inners[num_rels - 1].startup_cost = ;
+	result->inners[num_rels - 1].total_cost = ;
+	result->inners[num_rels - 1].scan_path = inner_path;
+	result->inners[num_rels - 1].join_type = join_type;
+	result->inners[num_rels - 1].hash_quals = hash_quals;
+	result->inners[num_rels - 1].join_quals = join_quals;
+	result->inners[num_rels - 1].row_growth_ratio = row_growth_ratio;
+	result->inners[num_rels - 1].buffer_portion = 0.0;	/* to be set later */
+	result->inners[num_rels - 1].nbatches = 1;			/* to be set later */
+
+	return result;
+}
+
+static void
+try_gpujoin_path(PlannerInfo *root,
+				 RelOptInfo *joinrel,
+				 JoinType jointype,
+				 SpecialJoinInfo *sjinfo,
+				 SemiAntiJoinFactors *semifactors,
+				 Relids param_source_rels,
+				 Relids extra_lateral_rels,
+				 Path *outer_path,
+				 Path *inner_path,
+				 ParamPathInfo *param_info,
+				 List *hash_quals,
+				 List *join_quals,
+				 List *host_quals)
+{
+	GpuJoinPath	   *gpath;
+	ParamPathInfo  *param_info;
+	Relids			required_outer;
+	cl_uint			can_bulkload = 0;
 
 	required_outer = calc_non_nestloop_required_outer(outer_path,
 													  inner_path);
@@ -321,6 +471,7 @@ try_gpunestloop_path(PlannerInfo *root,
 		bms_free(required_outer);
 		return;
 	}
+
 	/*
 	 * Independently of that, add parameterization needed for any
 	 * PlaceHolderVars that need to be computed at the join.
@@ -328,95 +479,80 @@ try_gpunestloop_path(PlannerInfo *root,
 	required_outer = bms_add_members(required_outer, extra_lateral_rels);
 
 	/*
-	 * Check availability of bulkload in this joinrel. If child GpuNestedLoop
+	 * Check availability of bulkload in this joinrel. If child GpuJoin
 	 * is merginable, both of nodes have to support bulkload.
 	 */
-	foreach (lc, joinrel->reltargetlist)
+	if (host_quals == NIL)
 	{
-		Expr	   *expr = lfirst(lc);
-
-		if (!IsA(expr, Var) &&
-			!pgstrom_codegen_available_expression(expr))
+		foreach (lc, joinrel->reltargetlist)
 		{
-			support_bulkload = false;
-			break;
+			Expr   *expr = lfirst(lc);
+
+			if (!IsA(expr, Var) &&
+				!pgstrom_codegen_available_expression(expr))
+				break;
 		}
+		if (lc == NULL)
+			can_bulkload = CUSTOMPATH_SUPPORT_BULKLOAD;
 	}
 
-	/* make a param-info */
+	/*
+	 * ParamPathInfo of this join
+	 */
 	param_info = get_joinrel_parampathinfo(root,
 										   joinrel,
 										   outer_path,
 										   inner_path,
 										   sjinfo,
-										   bms_copy(required_outer),
+										   required_outer,
 										   &restrict_clauses);
-	/*
-	 * Creation of GpuNestedLoop Path, without merging child GpuNestedLoop
-	 */
-	gpath = palloc0(offsetof(GpuNestedLoopPath, inners[1]));
-	NodeSetTag(gpath, T_CustomPath);
-	gpath->cpath.path.pathtype = T_CustomScan;
-	gpath->cpath.path.parent = joinrel;
-	gpath->cpath.path.param_info = param_info;
-	gpath->cpath.path.rows = (param_info
-							  ? param_info->ppi_rows
-							  : joinrel->rows);
-	gpath->cpath.path.pathkeys = NIL;
-	gpath->cpath.flags = (support_bulkload ? CUSTOMPATH_SUPPORT_BULKLOAD : 0);
-	gpath->cpath.methods = &gpujoin_path_methods;
-	gpath->outer_path = outer_path;
-	gpath->num_rels = 1;
-	gpath->inners[0].scan_path = inner_path;
-	gpath->inners[0].jointype = jointype;
-	gpath->inners[0].join_clause = restrict_clauses;
-	gpath->inners[0].nloops = 1;
-
-	/* cost estimation and check availability */
-	if (cost_gpunestloop(root, gpath, required_outer))
-		add_path(joinrel, &gpath->cpath.path);
 
 	/*
-	 * creation of more efficient path, if underlying outer-path is also
-	 * GpuNestedLoop that shall be merginable
+	 * Try GpuHashJoin logic
 	 */
-	if (path_is_mergeable_gpunestloop(outer_path))
+	if (hash_qual != NIL)
 	{
-		GpuNestedLoopPath  *outer_gnl = (GpuNestedLoopPath *) outer_path;
-		int		num_rels = outer_gnl->num_rels;
-
-		if (support_bulkload)
-		{
-			if ((outer_ghj->cpath.flags & CUSTOMPATH_SUPPORT_BULKLOAD) == 0)
-				support_bulkload = false;
-		}
-		Assert(num_rels > 0);
-		gpath = palloc0(offsetof(GpuHashJoinPath, inners[num_rels + 1]));
-		gpath->cpath.path.pathtype = T_CustomScan;
-		gpath->cpath.path.parent = joinrel;
-		gpath->cpath.path.param_info = param_info;
-		gpath->cpath.path.rows = (param_info
-								  ? param_info->ppi_rows
-								  : joinrel->rows);
-		gpath->cpath.path.pathkeys = NIL;
-		gpath->cpath.flags
-			= (support_bulkload ? CUSTOMPATH_SUPPORT_BULKLOAD : 0);
-		gpath->num_rels = num_rels + 1;
-		gpath->outer_path = outer_gnl->outer_path;
-		memcpy(gpath->inners,
-			   outer_gnl->inners,
-			   offsetof(GpuNestedLoopPath, inners[num_rels]) -
-			   offsetof(GpuNestedLoopPath, inners[0]));
-		gpath->inners[num_rels].scan_path = inner_path;
-        gpath->inners[num_rels].jointype = jointype;
-		gpath->inners[num_rels].join_clause = restrict_clauses;
-		gpath->inners[num_rels].nloops = 1;
-
-		/* cost estimation and check availability */
-		if (cost_gpunestloop(root, gpath, required_outer))
+		gpath = create_gpujoin_path(root, joinrel, jointype,
+									outer_path, inner_path, param_info,
+									hash_quals, join_quals, host_quals,
+									can_bulkload, false);
+		if (cost_gpujoin(root, gpath, required_outer))
 			add_path(joinrel, &gpath->cpath.path);
+
+		if (path_is_merginable_gpujoin(outer_path))
+		{
+			gpath = create_gpujoin_path(root, joinrel, jointype,
+										outer_path, inner_path, param_info,
+										hash_quals, join_quals, host_quals,
+										can_bulkload, true);
+			if (cost_gpujoin(root, gpath, required_outer))
+				add_path(joinrel, &gpath->cpath.path);
+		}
 	}
-	bms_free(required_outer);
+
+	/*
+	 * Try GpuNestLoop logic
+	 */
+	if (jointype == JOIN_INNER || jointype == JOIN_RIGHT)
+	{
+		gpath = create_gpujoin_path(root, joinrel, jointype,
+									outer_path, inner_path, param_info,
+									NIL, join_quals, host_quals,
+									can_bulkload, false);
+		if (cost_gpujoin(root, gpath, required_outer))
+			add_path(joinrel, &gpath->cpath.path);
+
+		if (path_is_merginable_gpujoin(outer_path))
+		{
+			gpath = create_gpujoin_path(root, joinrel, jointype,
+										outer_path, inner_path, param_info,
+										NIL, join_quals, host_quals,
+										can_bulkload, true);
+			if (cost_gpujoin(root, gpath, required_outer))
+				add_path(joinrel, &gpath->cpath.path);
+		}
+	}
+	return;
 }
 
 /*
@@ -483,44 +619,34 @@ gpujoin_add_join_path(PlannerInfo *root,
 			host_quals = lappend(host_quals, rinfo);
 			continue;
 		}
+		/* otherwise, device executable expression */
+		join_quals = lappend(join_quals, rinfo);
 
 		/*
 		 * If processing an outer join, only use its own join clauses
 		 * for hashing.  For inner joins we need not be so picky.
 		 */
 		if (IS_OUTER_JOIN(jointype) && rinfo->is_pushed_down)
-		{
-			join_quals = lappend(join_quals, rinfo);
 			continue;
-		}
 
 		/* Is it hash-joinable clause? */
 		if (!rinfo->can_join || !OidIsValid(rinfo->hashjoinoperator))
-		{
-			join_clauses = lappend(join_clauses, rinfo);
 			continue;
-		}
 
 		/*
 		 * Check if clause has the form "outer op inner" or "inner op outer".
+		 * If suitable, we may be able to choose GpuHashJoin logic.
 		 *
-		 * Logic is copied from clause_sides_match_join
+		 * See clause_sides_match_join also.
 		 */
-		if (bms_is_subset(rinfo->left_relids, outerrel->relids) &&
-			bms_is_subset(rinfo->right_relids, innerrel->relids))
-			rinfo->outer_is_left = true;    /* lefthand side is outer */
-		else if (bms_is_subset(rinfo->left_relids, innerrel->relids) &&
-				 bms_is_subset(rinfo->right_relids, outerrel->relids))
-			rinfo->outer_is_left = false;   /* righthand side is outer */
-		else
+		if ((bms_is_subset(rinfo->left_relids, outerrel->relids) &&
+			 bms_is_subset(rinfo->right_relids, innerrel->relids)) ||
+			(bms_is_subset(rinfo->left_relids, innerrel->relids) &&
+			 bms_is_subset(rinfo->right_relids, outerrel->relids)))
 		{
-			/* no good for these input relations */
-			join_quals = lappend(join_quals, rinfo);
-            continue;
-        }
-
-		/* OK, it is hash-joinable qualifier */
-		hash_quals = lappend(hash_quals, rinfo);
+			/* OK, it is hash-joinable qualifier */
+			hash_quals = lappend(hash_quals, rinfo);
+		}
 	}
 
 	/*
@@ -533,53 +659,95 @@ gpujoin_add_join_path(PlannerInfo *root,
 		PATH_PARAM_BY_REL(cheapest_total_inner, outerrel))
 		return;
 
-	/*
-	 * Let's try to make GpuNestLoop paths
-	 */
 	if (cheapest_startup_outer)
 	{
+		/* GpuHashJoin logic, if possible */
 		if (hash_quals != NIL)
-		{
-			try_gpuhashjoin_path(root, ...);
-
-		}
-		try_gpunestloop_path(root,
+			try_gpujoin_path(root,
 							 joinrel,
 							 jointype,
 							 cheapest_startup_outer,
 							 cheapest_total_inner,
-							 restrictlist);
+							 hash_quals,
+							 join_quals,
+							 host_quals);
+
+		/* GpuNestLoop logic, if possible */
+		if (jointype == JOIN_INNER || jointype == JOIN_RIGHT)
+			try_gpujoin_path(root,
+							 joinrel,
+							 jointype,
+							 cheapest_startup_outer,
+							 cheapest_total_inner,
+							 NIL,
+							 join_quals,
+							 host_quals);
 	}
 
-	if (hash_quals != NIL)
+	if (cheapest_startup_outer != cheapest_total_outer)
 	{
-		tyr_gpuhashjoin_path(root, ...);
+		/* GpuHashJoin logic, if possible */
+		if (hash_quals != NIL)
+			try_gpujoin_path(root,
+							 joinrel,
+							 jointype,
+							 cheapest_startup_outer,
+							 cheapest_total_inner,
+							 hash_quals,
+							 join_quals,
+							 host_quals);
 
+		/* GpuNestLoop logic, if possible */
+		if (jointype == JOIN_INNER || jointype == JOIN_RIGHT)
+			try_gpujoin_path(root,
+							 joinrel,
+							 jointype,
+							 cheapest_startup_outer,
+							 cheapest_total_inner,
+							 NIL,
+							 join_quals,
+							 host_quals);
 	}
-	try_gpunestloop_path(root,
-						 joinrel,
-						 jointype,
-						 cheapest_total_outer,
-						 cheapest_total_inner,
-						 restrictlist);
 }
 
+/*
+ * create_gpujoin_plan
+ *
+ *
+ *
+ *
+ */
 static Plan *
-create_gpunestloop_plan(PlannerInfo *root,
-						RelOptInfo *rel,
-						CustomPath *best_path,
-						List *tlist,
-						List *clauses)
+create_gpujoin_plan(PlannerInfo *root,
+					RelOptInfo *rel,
+					CustomPath *best_path,
+					List *tlist,
+					List *clauses)
 {
-	GpuNestLoopPath	   *gpath = (GpuNestLoopPath *) best_path;
-	GpuNestLoopInfo		gnl_info;
-	CustomScan		   *gnl_scan;
+	GpuJoinPath	   *gpath = (GpuJoinPath *) best_path;
+	GpuJoinInfo	   *ginfo;
+	CustomScan	   *gjoin;
+	int				i;
 
-	gnl_scan = makeNode(CustomScan);
-	gnl_scan->scan.plan.targetlist = tlist;
-	gnl_scan->scan.plan.qual = NIL;
-	gnl_scan->flags = best_path->flags;
-	gnl_scan->methods = &gpujoin_plan_methods;
+	gjoin = makeNode(CustomScan);
+	gjoin->scan.plan.targetlist = tlist;
+	gjoin->scan.plan.qual = gpath->host_quals;
+	gjoin->flags = best_path->flags;
+	gjoin->methods = &gpujoin_plan_methods;
+
+	for (i=0; i < gpath->num_rels; i++)
+	{
+		CustomScan	   *mrels
+			= pgstrom_create_multirels_plan(&kern_source, &extra_flags);
+
+		/* chain it under the GpuJoin */
+		if (prev_plan)
+			innerPlan(prev_plan) = &mrels->scan.plan;
+		else
+			innerPlan(gjoin) = &mrels->scan.plan;
+		prev_plan = &mrels->scan.plan;
+	}
+
 
 	for (i=0; i < gpath->num_rels; i++)
 	{
@@ -676,44 +844,62 @@ create_gpunestloop_plan(PlannerInfo *root,
 }
 
 static void
-gpunestloop_textout_path(StringInfo str, const CustomPath *node)
+gpujoin_textout_path(StringInfo str, const CustomPath *node)
 {
-	GpuNestLoopPath *gpath = (GpuNestLoopPath *) node;
-	int			i;
+	GpuJoinPath *gjoin = (GpuJoin *) node;
+	int		i;
 
 	/* outer_path */
 	appendStringInfo(str, " :outer_path %s",
-					 nodeToString(gpath->outer_path));
-	/* mrs_size */
-	appendStringInfo(str, " :mrs_size %zu",
-					 gpath->mrs_size);
+					 nodeToString(gjoin->outer_path));
+	/* total_length */
+	appendStringInfo(str, " :total_length %zu",
+					 gjoin->total_length);
 
-	/* row_population_ratio */
-	appendStringInfo(str, " :row_population_ratio %.2f",
-					 gpath->row_population_ratio);
+	/* kresults_ratio */
+	appendStringInfo(str, " :kresults_ratio %.2f",
+					 gjoin->kresults_ratio);
 	/* num_rels */
-	appendStringInfo(str, " :num_rels %d", gpath->num_rels);
+	appendStringInfo(str, " :num_rels %d", gjoin->num_rels);
+
+	/* host_quals */
+	appendStringInfo(str, " :host_quals %s",
+					 nodeToString(gjoin->host_quals));
 
 	/* inners */
 	appendStringInfo(str, " :inners (");
 	for (i=0; i < gpath->num_rels; i++)
 	{
 		appendStringInfo(str, "{");
+		/* rows, startup_cost, total_cost */
+		appendStringInfo(str, " :rows %.2f", gjoin->rows);
+		appendStringInfo(str, " :startup_cost %.2f", gjoin->startup_cost);
+		appendStringInfo(str, " :total_cost %.2f", gjoin->total_cost);
+
 		/* scan_path */
 		appendStringInfo(str, " :scan_path %s",
 						 nodeToString(gpath->inners[i].scan_path));
 		/* join_type */
 		appendStringInfo(str, " :join_type %d",
 						 (int)gpath->inners[i].join_type);
-		/* join_clause */
+		/* hash_quals */
+		appendStringInfo(str, " :hash_quals %s",
+						 nodeToString(gpath->inners[i].hash_quals));
+		/* join_quals */
 		appendStringInfo(str, " :join_clause %s",
-						 nodeToString(gpath->inners[i].join_clause));
-		/* threshold */
-		appendStringInfo(str, " :threshold %.2f",
-						 gpath->inners[i].threshold);
-		/* nloops */
-		appendStringInfo(str, " :nslots %d",
-						 gpath->inners[i].nloops);
+						 nodeToString(gpath->inners[i].join_quals));
+		/* row_growth_ratio */
+		appendStringInfo(str, " :row_growth_ratio %.2f",
+						 gpath->inners[i].row_growth_ratio);
+		/* buffer_portion */
+		appendStringInfo(str, " :buffer_portion %.2f",
+						 gpath->inners[i].buffer_portion);
+		/* chunk_size */
+		appendStringInfo(str, " :chunk_size %zu",
+						 gjoin->chunk_size);
+		/* nbatches */
+		appendStringInfo(str, " :nbatches %d",
+						 gpath->inners[i].nbatches);
 		appendStringInfo(str, "}");
 	}
 	appendStringInfo(str, ")");
