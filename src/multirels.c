@@ -105,6 +105,15 @@ typedef struct pgstrom_multirels
 } pgstrom_multirels;
 
 
+
+
+
+
+
+
+
+
+
 /*
  * form_multirels_info
  */

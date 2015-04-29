@@ -460,7 +460,7 @@ gpusort_projection_addcase(StringInfo body,
 			"  else\n"
 			"  {\n"
 			"    pg_numeric_t temp =\n"
-			"      pg_numeric_from_varlena(errcode, datum);\n"
+			"      pg_numeric_from_varlena(errcode, (varlena *) datum);\n"
 			"    ts_isnull[%d] = temp.isnull;\n"
 			"    ts_values[%d] = temp.value;\n"
 			"  }\n",

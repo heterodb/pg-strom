@@ -567,7 +567,7 @@ extern struct pgstrom_multirels *
 pgstrom_multirels_exec_bulk(PlanState *plannode);
 extern Size pgstrom_multirels_get_length(struct pgstrom_multirels *pmrels);
 extern void pgstrom_multirels_dma_send(struct pgstrom_multirels *pmrels);
-exterb void pgstrom_multirels_dma_recv(struct pgstrom_multirels *pmrels);
+extern void pgstrom_multirels_dma_recv(struct pgstrom_multirels *pmrels);
 extern void	pgstrom_init_multirels(void);
 
 /*

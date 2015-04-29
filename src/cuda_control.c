@@ -17,7 +17,6 @@
  */
 #include "postgres.h"
 #include "catalog/pg_type.h"
-#include "common/pg_crc.h"
 #include "funcapi.h"
 #include "lib/ilist.h"
 #include "storage/ipc.h"
@@ -27,6 +26,7 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
+#include "utils/pg_crc.h"
 #include "utils/resowner.h"
 #include "pg_strom.h"
 

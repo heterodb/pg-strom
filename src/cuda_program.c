@@ -20,7 +20,6 @@
 #include "catalog/catalog.h"
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_type.h"
-#include "common/pg_crc.h"
 #include "funcapi.h"
 #include "postmaster/bgworker.h"
 #include "storage/ipc.h"
@@ -28,6 +27,7 @@
 #include "storage/shmem.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/pg_crc.h"
 #include "pg_strom.h"
 #include <nvrtc.h>
 #include <sys/stat.h>

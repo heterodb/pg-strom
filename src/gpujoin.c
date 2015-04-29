@@ -36,48 +36,44 @@ static PGStromExecMethods	gpujoin_exec_methods;
 static bool					enable_gpunestloop;
 
 /*
- * GpuNestLoopPath
+ * GpuJoinPath
  *
- * 
+ *
  *
  */
 typedef struct
 {
 	CustomPath		cpath;
 	Path		   *outer_path;
-	Size			mrs_size;	/* size of multi-rel-store */
-	double			row_population_ratio;
 	List		   *host_quals;
+	Size			total_length;
 	int				num_rels;
 	struct {
 		Path	   *scan_path;
 		JoinType	join_type;
-		List	   *hash_quals;
-		List	   *join_quals;
-		double		threshold;
-		int			nloops;
+		List	   *hash_quals;		/* valid, if hash-join */
+		List	   *join_quals;		/* other join condition */
+		double		row_growth_ratio;
+		double		buffer_usage_ratio;
+		int			nbatches;
 	} inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinPath;
 
 /*
- * GpuNestLoopInfo - state object of CustomScan(GpuNestedLoop)
+ * GpuJoinInfo - private state object of CustomScan(GpuJoin)
  */
 typedef struct
 {
-	int			num_rels;
-	Size		mrs_size;
-	double		row_population_ratio;
 	char	   *kern_source;
 	int			extra_flags;
-	bool		outer_bulkload;	/* is outer can bulk loadable? */
-	Expr	   *outer_quals;	/* qualifier of outer scan, if any */
-	List	   *join_types;		/* list of join types */
-	List	   *join_clauses;		/* list of join quals */
-	List	   *used_params;	/* template for kparams */
-	/* supplemental information for ps_tlist */
+	/* supplemental information of ps_tlist */
 	List	   *ps_src_depth;	/* source depth of the ps_tlist entry */
 	List	   *ps_src_resno;	/* source resno of the ps_tlist entry */
-} GpuNestLoopInfo;
+
+	int			num_rels;
+
+
+} GpuJoinInfo;
 
 static inline void
 form_gpunestloop_info(CustomScan *cscan, GpuNestLoopInfo *gnl_info)
@@ -85,22 +81,6 @@ form_gpunestloop_info(CustomScan *cscan, GpuNestLoopInfo *gnl_info)
 
 static inline GpuNestLoopInfo *
 deform_gpunestloop_info(CustomScan *cscan)
-{}
-
-/*
- * MultiRelStoreInfo - state object of CustomScan(MultiRelStore)
- */
-typedef struct
-{
-
-} MultiRelStoreInfo;
-
-static inline void
-form_gnl_inner_info(CustomScan *cscan, GNLInnerInfo *ginner_info)
-{}
-
-static inline GNLInnerInfo *
-deform_gnl_inner_info(CustomScan *cscan)
 {}
 
 /*
@@ -114,20 +94,6 @@ typedef struct
 	List		   *join_clauses;
 
 } GpuNestLoopState;
-
-/*
- * MultiRelStoreState - execution state object of MultiRelStore
- */
-typedef struct
-{
-	CustomScanState	css;
-	GpuContext	   *gcontext;
-	int				depth;
-	double			threshold;
-} MultiRelStoreState;
-
-
-
 
 
 /*
@@ -453,21 +419,29 @@ try_gpunestloop_path(PlannerInfo *root,
 	bms_free(required_outer);
 }
 
+/*
+ * gpujoin_add_join_path
+ *
+ * entrypoint of the GpuJoin logic
+ */
 static void
-gpunestloop_add_join_path(PlannerInfo *root,
-						  RelOptInfo *joinrel,
-						  RelOptInfo *outerrel,
-						  RelOptInfo *innerrel,
-						  List *restrictlist,
-						  JoinType jointype,
-						  SpecialJoinInfo *sjinfo,
-						  SemiAntiJoinFactors *semifactors,
-						  Relids param_source_rels,
-						  Relids extra_lateral_rels)
+gpujoin_add_join_path(PlannerInfo *root,
+					  RelOptInfo *joinrel,
+					  RelOptInfo *outerrel,
+					  RelOptInfo *innerrel,
+					  List *restrictlist,
+					  JoinType jointype,
+					  SpecialJoinInfo *sjinfo,
+					  SemiAntiJoinFactors *semifactors,
+					  Relids param_source_rels,
+					  Relids extra_lateral_rels)
 {
 	Path	   *cheapest_startup_outer = outerrel->cheapest_startup_path;
 	Path	   *cheapest_total_outer = outerrel->cheapest_total_path;
 	Path	   *cheapest_total_inner = innerrel->cheapest_total_path;
+	List	   *host_quals = NIL;
+	List	   *hash_quals = NIL;
+	List	   *join_quals = NIL;
 	ListCell   *lc;
 
 	/* calls secondary module if exists */
@@ -482,28 +456,71 @@ gpunestloop_add_join_path(PlannerInfo *root,
 							   semifactors,
 							   param_source_rels,
 							   extra_lateral_rels);
-
-	/* Nothing to do, if either PG-Strom or GpuHashJoin is not enabled */
-	if (!pgstrom_enabled() || !enable_gpuhashjoin)
+	/* nothing to do, if PG-Strom is not enabled */
+	if (!pgstrom_enabled())
 		return;
 
-	/* Is this join-type supported? */
-	if (jointype != JOIN_INNER && jointype != JOIN_LEFT)
+	/* quick exit, if unsupported join type */
+	if (jointype != JOIN_INNER && jointype != JOIN_FULL &&
+		jointype != JOIN_RIGHT && jointype != JOIN_LEFT)
 		return;
 
-	/* All the join-clauses of GpuNestedLoop has to be executable on
-	 * the device.
+	/*
+	 * 
+	 *
+	 *
 	 */
 	foreach (lc, restrictlist)
 	{
 		RestrictInfo   *rinfo = (RestrictInfo *) lfirst(lc);
-		/*
-		 * TODO: It may be possible to implement if only last inner
-		 * relation takes host-only clauses, as long as row_population_ratio
-		 * is reasonable enough.
+
+		/* Even if clause is hash-joinable, here is no benefit
+		 * in case when clause is not runnable on CUDA device.
+		 * So, we drop them from the candidate of the join-key.
 		 */
 		if (!pgstrom_codegen_available_expression(rinfo->clause))
-			return;
+		{
+			host_quals = lappend(host_quals, rinfo);
+			continue;
+		}
+
+		/*
+		 * If processing an outer join, only use its own join clauses
+		 * for hashing.  For inner joins we need not be so picky.
+		 */
+		if (IS_OUTER_JOIN(jointype) && rinfo->is_pushed_down)
+		{
+			join_quals = lappend(join_quals, rinfo);
+			continue;
+		}
+
+		/* Is it hash-joinable clause? */
+		if (!rinfo->can_join || !OidIsValid(rinfo->hashjoinoperator))
+		{
+			join_clauses = lappend(join_clauses, rinfo);
+			continue;
+		}
+
+		/*
+		 * Check if clause has the form "outer op inner" or "inner op outer".
+		 *
+		 * Logic is copied from clause_sides_match_join
+		 */
+		if (bms_is_subset(rinfo->left_relids, outerrel->relids) &&
+			bms_is_subset(rinfo->right_relids, innerrel->relids))
+			rinfo->outer_is_left = true;    /* lefthand side is outer */
+		else if (bms_is_subset(rinfo->left_relids, innerrel->relids) &&
+				 bms_is_subset(rinfo->right_relids, outerrel->relids))
+			rinfo->outer_is_left = false;   /* righthand side is outer */
+		else
+		{
+			/* no good for these input relations */
+			join_quals = lappend(join_quals, rinfo);
+            continue;
+        }
+
+		/* OK, it is hash-joinable qualifier */
+		hash_quals = lappend(hash_quals, rinfo);
 	}
 
 	/*
@@ -521,12 +538,23 @@ gpunestloop_add_join_path(PlannerInfo *root,
 	 */
 	if (cheapest_startup_outer)
 	{
+		if (hash_quals != NIL)
+		{
+			try_gpuhashjoin_path(root, ...);
+
+		}
 		try_gpunestloop_path(root,
 							 joinrel,
 							 jointype,
 							 cheapest_startup_outer,
 							 cheapest_total_inner,
 							 restrictlist);
+	}
+
+	if (hash_quals != NIL)
+	{
+		tyr_gpuhashjoin_path(root, ...);
+
 	}
 	try_gpunestloop_path(root,
 						 joinrel,
@@ -763,5 +791,5 @@ pgstrom_init_gpunestloop(void)
 
 	/* hook registration */
 	set_join_pathlist_next = set_join_pathlist_hook;
-	set_join_pathlist_hook = gpunestloop_add_join_path;
+	set_join_pathlist_hook = gpujoin_add_join_path;
 }
