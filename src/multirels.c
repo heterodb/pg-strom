@@ -178,9 +178,15 @@ pgstrom_plan_is_multirels(const Plan *plan)
  *
  */
 CustomScan *
-pgstrom_create_multirels_plan(PlannerInfo *root, int depth, Path *outer_path,
-							  int nbatches, Size buffer_size, double threshold,
-							  int nslots, List *hash_keys)
+pgstrom_create_multirels_plan(PlannerInfo *root,
+							  int depth,
+							  Path *outer_path,
+							  JoinType join_type,
+							  Size buffer_size,
+							  double buffer_portion,
+							  int nbatches,
+							  int nslots,
+							  List *hash_inner_keys)
 {
 	CustomScan	   *cscan;
 	MultiRelsInfo	mr_info;
@@ -194,6 +200,11 @@ pgstrom_create_multirels_plan(PlannerInfo *root, int depth, Path *outer_path,
 		cscan->scan.plan.total_cost += (outer_plan->plan_rows *
 										cpu_operator_cost *
 										list_length(hash_keys));
+	if (nbatches > 1)
+		cscan->scan.plan.total_cost += ((cscan->scan.plan.total_cost -
+										cscan->scan.plan.startup_cost) *
+										(double)(nbatches - 1));
+
 	cscan->scan.plan.plan_rows = outer_plan->plan_rows;
 	cscan->scan.plan.plan_width = outer_plan->plan_width;
 	cscan->scan.plan.targetlist = outer_plan->targetlist;
@@ -207,14 +218,11 @@ pgstrom_create_multirels_plan(PlannerInfo *root, int depth, Path *outer_path,
 
 	memset(&mr_info, 0, sizeof(MultiRelsInfo));
 	mr_info.depth = depth;
-	mr_info.logic = (hash_keys != NIL
-					 ? GPUJOIN_LOGIC_HASHJOIN
-					 : GPUJOIN_LOGIC_NESTLOOP);
-	mr_info.nbatches = nbatches;
 	mr_info.buffer_size = buffer_size;
-	mr_info.threshold = threshold;
+	mr_info.buffer_portion = buffer_portion;
+	mr_info.nbatches = nbatches;
 	mr_info.nslots = nslots;
-	mr_info.hash_keys = hash_keys;
+	mr_info.hash_inner_keys = hash_inner_keys;
 	form_multirels_info(mrels, &mr_info);
 
 	return cscan;
