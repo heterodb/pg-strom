@@ -29,24 +29,29 @@ typedef struct
 	cl_uint			nrels;			/* number of relations */
 	struct
 	{
-		cl_uint		inner_offset;	/* offset to KDS or Hash table */
-		cl_uint		match_offset;	/* offset to outer match map, if any */
-	} krels[FLEXIBLE_ARRAY_MEMBER];
+		cl_uint		kds_offset;		/* offset to KDS, if any */
+		cl_uint		hash_offset;	/* offset to Hash, if any */
+		cl_uint		outer_offset;	/* offset to outer match map, if any */
+	} chunks[FLEXIBLE_ARRAY_MEMBER];
 } kern_multirels;
 
-#define KERN_MULTIRELS_INNER_KDS(kmrels, depth)							\
-	((kern_data_store *)												\
-	 ((char *)(kmrels) + (kmrels)->rels[(depth) - 1].inner_offset))
+#define KERN_MULTIRELS_INNER_KDS(kmrels, depth)				\
+	((kern_data_store *)									\
+	 ((kmrels)->chunks[(depth)-1].kds_offset == 0			\
+	  ? NULL : ((char *)(kmrels) +							\
+				(kmrels)->chunks[(depth)-1].kds_offset)))
 
-#define KERN_MULTIRELS_INNER_HASH(kmrels, depth)						\
-	((kern_hashtable *)													\
-	 ((char *)(kmrels) + (kmrels)->rels[(depth) - 1].inner_offset))
+#define KERN_MULTIRELS_INNER_HASH(kmrels, depth)			\
+	((kern_hashtable *)										\
+	 ((kmrels)->chunks[(depth)-1].hash_offset == 0			\
+	  ? NULL : ((char *)(kmrels) +							\
+				(kmrels)->chunks[(depth)-1].hash_offset)))
 
-#define KERN_MULTIRELS_MATCH_MAP(kmrels, depth, match_buffer)
-	((cl_bool *)														\
-	 ((kmrels)->rels[(depth) - 1].match_offset > 0						\
-	  ? ((char *)(match_buffer) +										\
-		 (kmrels)->rels[(depth) - 1].match_offset) : NULL))
+#define KERN_MULTIRELS_MATCH_MAP(kmrels, depth, outer_map)	\
+	((cl_bool *)											\
+	 ((kmrels)->chunks[(depth)-1].outer_offset == 0			\
+	  ? NULL : ((char *)(outer_map) +						\
+				(kmrels)->chunks[(depth)-1].outer_offset)))
 
 /*
  * Hash table and entry

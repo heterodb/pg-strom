@@ -1386,7 +1386,7 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 	 * construct a hash-key in this nest-level
 	 */
 	appendStringInfo(body, "cl_uint hash_%u;\n\n", depth);
-	appendStringInfo(body, "INIT_CRC32C(hash_%u);\n", depth);
+	appendStringInfo(body, "INIT_LEGACY_CRC32(hash_%u);\n", depth);
 	foreach (cell, hash_keys)
 	{
 		Node		   *expr = lfirst(cell);
@@ -1406,7 +1406,7 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 			depth, dtype->type_name, depth, temp);
 		pfree(temp);
 	}
-	appendStringInfo(body, "FIN_CRC32C(hash_%u);\n", depth);
+	appendStringInfo(body, "FIN_LEGACY_CRC32(hash_%u);\n", depth);
 
 	/*
 	 * construct hash-table walking according to the hash-value
@@ -1471,7 +1471,7 @@ gpuhashjoin_codegen_recurse(StringInfo body,
 	 * construct hash-key (and other qualifiers) comparison
 	 */
 	appendStringInfo(body,
-					 "if (EQ_CRC32C(kentry_%d->hash, hash_%d)",
+					 "if (EQ_LEGACY_CRC32(kentry_%d->hash, hash_%d)",
 					 depth, depth);
 	if (hash_clause)
 	{
@@ -3198,7 +3198,7 @@ multihash_preload_khashtable(MultiHashState *mhs,
 		}
 
 		/* calculation of a hash value of this entry */
-		INIT_CRC32C(hash);
+		INIT_LEGACY_CRC32(hash);
 		econtext->ecxt_scantuple = scan_slot;
 		forfour(lc1, mhs->hash_keys,
 				lc2, mhs->hash_keylen,
@@ -3231,18 +3231,18 @@ multihash_preload_khashtable(MultiHashState *mhs,
 			if (keylen > 0)
 			{
 				if (keybyval)
-					COMP_CRC32C(hash, &value, keylen);
+					COMP_LEGACY_CRC32(hash, &value, keylen);
 				else
-					COMP_CRC32C(hash, DatumGetPointer(value), keylen);
+					COMP_LEGACY_CRC32(hash, DatumGetPointer(value), keylen);
 			}
 			else
 			{
-				COMP_CRC32C(hash,
-							VARDATA_ANY(value),
-							VARSIZE_ANY_EXHDR(value));
+				COMP_LEGACY_CRC32(hash,
+								  VARDATA_ANY(value),
+								  VARSIZE_ANY_EXHDR(value));
 			}
 		}
-		FIN_CRC32C(hash);
+		FIN_LEGACY_CRC32(hash);
 
 		/* allocation of hash entry and insert it */
 		hentry = (kern_hashentry *)((char *)khtable + consumed);
@@ -3330,7 +3330,7 @@ multihash_exec_bulk(CustomScanState *node)
 													 sizeof(CUevent) *
 													 gcontext->num_context);
 		memcpy(mhtables->kern.pg_crc32_table,
-			   pg_crc32c_table,
+			   pg_crc32_table,
 			   sizeof(uint32) * 256);
 		mhtables->kern.hostptr = (hostptr_t) &mhtables->kern.hostptr;
 		mhtables->kern.ntables = ntables;

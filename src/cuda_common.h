@@ -623,9 +623,9 @@ pg_common_vstore(kern_data_store *kds,
  * Macros to calculate CRC32 value.
  * (logic was copied from pg_crc32.c)
  */
-#define INIT_CRC32C(crc)		((crc) = 0xFFFFFFFF)
-#define FIN_CRC32C(crc)			((crc) ^= 0xFFFFFFFF)
-#define EQ_CRC32C(crc1,crc2)	((crc1) == (crc2))
+#define INIT_LEGACY_CRC32(crc)		((crc) = 0xFFFFFFFF)
+#define FIN_LEGACY_CRC32(crc)		((crc) ^= 0xFFFFFFFF)
+#define EQ_LEGACY_CRC32(crc1,crc2)	((crc1) == (crc2))
 
 #define STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)			\
 	STATIC_FUNCTION(cl_uint)									\

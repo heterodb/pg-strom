@@ -247,6 +247,7 @@ struct GpuTaskState
 	CUmodule	   *cuda_modules;	/* CUmodules for each CUDA context */
 	bool			scan_done;		/* no rows to read, if true */
 	bool			scan_bulk;		/* bulk outer load, if true */
+	TupleTableSlot *scan_overflow;	/* temp buffer, if unable to load */
 	cl_long			curr_index;		/* current position on the curr_task */
 	struct GpuTask *curr_task;		/* a task currently processed */
 	slock_t			lock;			/* protection of the fields below */

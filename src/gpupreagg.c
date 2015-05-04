@@ -39,6 +39,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/numeric.h"
+#include "utils/pg_crc.h"
 #include "utils/syscache.h"
 #include <math.h>
 #include "pg_strom.h"
@@ -1569,7 +1570,7 @@ gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	appendStringInfo(&body,
 					 "  cl_uint hashval;\n"
 					 "\n"
-					 "  INIT_CRC32C(hashval);\n");
+					 "  INIT_LEGACY_CRC32(hashval);\n");
 
 	for (i=0; i < gpa_info->numCols; i++)
 	{
@@ -1607,7 +1608,7 @@ gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	Assert(bms_is_empty(context->param_refs));
 
 	appendStringInfo(&body,
-					 "  FIN_CRC32C(hashval);\n");
+					 "  FIN_LEGACY_CRC32(hashval);\n");
 	appendStringInfo(&decl,
 					 "%s\n"
 					 "  return hashval;\n"
@@ -3000,7 +3001,7 @@ gpupreagg_task_create(GpuPreAggState *gpas, pgstrom_data_store *pds_in)
 	/* also initialize kern_gpupreagg portion */
 	gpreagg->kern.hash_size = nitems;
 	memcpy(gpreagg->kern.pg_crc32_table,
-		   pg_crc32c_table,
+		   pg_crc32_table,
 		   sizeof(uint32) * 256);
 	/* kern_parambuf */
 	kparams = KERN_GPUPREAGG_PARAMBUF(&gpreagg->kern);

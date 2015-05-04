@@ -729,10 +729,10 @@ __pgstrom_load_cuda_program(GpuTaskState *gts, bool is_preload)
 	BackgroundWorker worker;
 
 	/* makes a hash value */
-	INIT_CRC32C(crc);
-	COMP_CRC32C(crc, &extra_flags, sizeof(int32));
-	COMP_CRC32C(crc, kern_source, kern_source_len);
-	FIN_CRC32C(crc);
+	INIT_LEGACY_CRC32(crc);
+	COMP_LEGACY_CRC32(crc, &extra_flags, sizeof(int32));
+	COMP_LEGACY_CRC32(crc, kern_source, kern_source_len);
+	FIN_LEGACY_CRC32(crc);
 
 retry:
 	hindex = crc % PGCACHE_HASH_SIZE;

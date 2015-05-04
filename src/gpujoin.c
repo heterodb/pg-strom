@@ -34,6 +34,7 @@ static CustomPathMethods	gpujoin_path_methods;
 static CustomScanMethods	gpujoin_plan_methods;
 static PGStromExecMethods	gpujoin_exec_methods;
 static bool					enable_gpunestloop;
+static bool					enable_gpuhashjoin;
 
 /*
  * GpuJoinPath
@@ -45,22 +46,22 @@ typedef struct
 {
 	CustomPath		cpath;
 	Path		   *outer_path;
-	Size			total_length;
+	Size			kmrels_length;
 	double			kresults_ratio;
 	int				num_rels;
 	List		   *host_quals;
 	struct {
 		double		rows;			/* rows to be generated in this depth */
-		Cost		startup_cost;	/* outer scan cost + something */
-		Cost		total_cost;		/* outer scan cost + something */
-		Path	   *scan_path;
-		JoinType	join_type;
+		Cost		startup_cost;	/* outer scan cost + materialize */
+		Cost		total_cost;		/* outer scan cost + materialize */
+		JoinType	join_type;		/* one of JOIN_* */
+		Path	   *scan_path;		/* outer scan path */
 		List	   *hash_quals;		/* valid quals, if hash-join */
 		List	   *join_quals;		/* all the device quals, incl hash_quals */
-		double		row_growth_ratio;
-		double		buffer_portion;
-		Size		chunk_size;
-		int			nbatches;
+		double		nrows_ratio;
+		double		kmrels_rate;
+		Size		chunk_size;		/* kmrels_length * kmrels_ratio */
+		int			nbatches;		/* expected iteration in this depth */
 	} inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinPath;
 
@@ -77,7 +78,6 @@ typedef struct
 	List	   *outer_quals;
 	List	   *host_quals;
 	/* for each depth */
-	List	   *hash_quals;
 	List	   *hash_outer_keys;
 	List	   *join_quals;
 	/* supplemental information of ps_tlist */
@@ -98,7 +98,6 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, makeInteger(gj_info->outer_bulkload));
 	exprs = lappend(exprs, gj_info->outer_quals);
 	exprs = lappend(exprs, gj_info->host_quals);
-	exprs = lappend(exprs, gj_info->hash_quals);
 	exprs = lappend(exprs, gj_info->hash_outer_keys);
 	exprs = lappend(exprs, gj_info->join_quals);
 	privs = lappend(privs, gj_info->ps_src_depth);
@@ -124,7 +123,6 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->outer_bulkload = intVal(list_nth(privs, pindex++));
 	gj_info->outer_quals = list_nth(exprs, eindex++);
 	gj_info->host_quals = list_nth(exprs, eindex++);
-	gj_info->hash_quals = list_nth(exprs, eindex++);
 	gj_info->hash_outer_keys = list_nth(exprs, eindex++);
 	gj_info->join_quals = list_nth(exprs, eindex++);
 	gj_info->ps_src_depth = list_nth(privs, pindex++);
@@ -139,17 +137,36 @@ deform_gpujoin_info(CustomScan *cscan)
 typedef struct
 {
 	GpuTaskState	gts;
+	kern_parambuf  *kparams;
+	
+
+
 	List		   *join_types;
 	ExprState	   *outer_quals;
-	List		   *join_clauses;
+	List		   *hash_outer_keys;
+	List		   *join_quals;
+	/*  */
+	List		   *ps_src_depth;
+	List		   *ps_src_resno;
+
+
 
 } GpuNestLoopState;
 
+/*
+ * static function declaration
+ */
+static char *gpujoin_codegen(PlannerInfo *root,
+							 CustomScan *gjoin,
+							 GpuJoinInfo *gj_info,
+							 codegen_context *context);
+
+
 /*****/
 static inline bool
-path_is_gpujoin(Path *path)
+path_is_gpujoin(Path *pathnode)
 {
-	CustpmPath *cpath = (CustpmPath *) path;
+	CustpmPath *cpath = (CustpmPath *) pathnode;
 
 	if (!IsA(cpath, CustomPath))
 		return false;
@@ -555,7 +572,7 @@ try_gpujoin_path(PlannerInfo *root,
 	/*
 	 * Try GpuHashJoin logic
 	 */
-	if (hash_qual != NIL)
+	if (enable_gpuhashjoin && hash_qual != NIL)
 	{
 		gpath = create_gpujoin_path(root, joinrel, jointype,
 									outer_path, inner_path, param_info,
@@ -578,7 +595,8 @@ try_gpujoin_path(PlannerInfo *root,
 	/*
 	 * Try GpuNestLoop logic
 	 */
-	if (jointype == JOIN_INNER || jointype == JOIN_RIGHT)
+	if (enable_gpunestloop &&
+		(jointype == JOIN_INNER || jointype == JOIN_RIGHT))
 	{
 		gpath = create_gpujoin_path(root, joinrel, jointype,
 									outer_path, inner_path, param_info,
@@ -925,6 +943,7 @@ build_pseudo_targetlist(GpuJoinPath *gpath,
 	return context.ps_tlist;
 }
 
+#if 0
 /*
  * fixup_device_expression
  *
@@ -1019,7 +1038,7 @@ fixup_device_expr(CustomScan *gjoin, GpuJoinPath *gpath, Node *node)
 	}
 	return results;
 }
-
+#endif
 
 
 
@@ -1065,7 +1084,7 @@ create_gpujoin_plan(PlannerInfo *root,
 	gj_info.host_quals = gpath->host_quals;
 	for (i=0; i < gpath->num_rels; i++)
 	{
-		CustomScan	   *mrels;
+		CustomScan	   *mplan;
 		List		   *hash_inner_keys = NIL;
 		List		   *hash_outer_keys = NIL;
 
@@ -1099,7 +1118,7 @@ create_gpujoin_plan(PlannerInfo *root,
 			else
 				elog(ERROR, "Bug? EquivalenceMember didn't fit GpuHashJoin");
 		}
-		mrels = pgstrom_create_multirels_plan(root,
+		mplan = pgstrom_create_multirels_plan(root,
 											  i + 1,	/* depth */
 											  gpath->inners[i].scan_path,
 											  gpath->inners[i].join_type,
@@ -1113,17 +1132,15 @@ create_gpujoin_plan(PlannerInfo *root,
 									 gpath->inners[i].join_type);
 		gj_info.hash_outer_keys = lappend(gj_info.hash_outer_keys,
 										  hash_outer_keys);
-		gj_info.hash_quals = lappend(gj_info.hash_quals,
-									 gpath->inners[i].hash_quals);
 		gj_info.join_quals = lappend(gj_info.join_quals,
 									 gpath->inners[i].join_quals);
 
 		/* chain it under the GpuJoin */
 		if (prev_plan)
-			innerPlan(prev_plan) = &mrels->scan.plan;
+			innerPlan(prev_plan) = &mplan->scan.plan;
 		else
-			innerPlan(gjoin) = &mrels->scan.plan;
-		prev_plan = &mrels->scan.plan;
+			innerPlan(gjoin) = &mplan->scan.plan;
+		prev_plan = &mplan->scan.plan;
 	}
 
 	/*
@@ -1259,34 +1276,213 @@ gpujoin_textout_path(StringInfo str, const CustomPath *node)
 }
 
 static Node *
-gpunestedloop_create_scan_state(CustomScan *node)
+gpujoin_create_scan_state(CustomScan *node)
 {
-	GpuNestLoop	   *gnl = (GpuNestLoop *) node;
-	GpuNestLoopState   *gnls;
+	GpuContext	   *gcontext = pgstrom_get_gpucontext();
+	GpuJoinState   *gjs;
 
+	gjs = MemoryContextAllocZero(gcontext->memcxt, sizeof(GpuJoinState));
+	NodeSetTag(gjs, T_CustomScanState);
+    gjs->gts.css.flags = cscan->flags;
+	gjs->gts.css.methods = &gpujoin_exec_methods.c;
+	/* GpuTaskState setup */
+	pgstrom_init_gputaskstate(gcontext, &gjs->gts);
+	gjs->gts.cb_task_process = gpujoin_task_process;
+	gjs->gts.cb_task_complete = gpujoin_task_complete;
+	gjs->gts.cb_task_release = gpujoin_task_release;
+	gjs->gts.cb_next_chunk = gpujoin_next_chunk;
+	gjs->gts.cb_next_tuple = gpujoin_next_tuple;
+	gjs->gts.cb_cleanup = NULL;
 
-	return (Node *) gnls;
+	return (Node *) gjs;
 }
 
 static void
-gpunestloop_begin(CustomScanState *node, EState *estate, int eflags)
-{}
+gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
+{
+	GpuJoinState   *gjs = (GpuJoinState *) node;
+	PlanState	   *ps = &gjs->gts.css.ss.ps;
+	CustomScan	   *gjoin = (CustomScan *) node->ss.ps.plan;
+	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
+
+	/*
+	 * NOTE: outer_quals, hash_outer_keys and join_quals are intended
+	 * to use fallback routine if GPU kernel required host-side to
+	 * retry a series of hash-join/nest-loop operation. So, we need to
+	 * pay attention which slot is actually referenced.
+	 * Right now, ExecEvalScalarVar can reference only three slots
+	 * simultaneously (scan, inner and outer). So, varno of varnodes
+	 * has to be initialized according to depth of the expression.
+	 *
+	 * TODO: we have to initialize above expressions carefully for
+	 * CPU fallback implementation.
+	 */
+	gjs->join_types = gj_info->join_types;
+	gjs->outer_quals = ExecInitExpr(gj_info->outer_quals, ps);
+	gjs->hash_outer_keys = ExecInitExpr(gj_info->hash_outer_keys, ps);
+	gjs->join_quals = ExecInitExpr(gj_info->join_quals, ps);
+	gjs->gts.css.ss.ps.qual = ExecInitExpr(gj_info->host_quals, ps);
+
+	/* needs to track corresponding columns */
+	gjs->ps_src_depth = gj_info->ps_src_depth;
+	gjs->ps_src_resno = gj_info->ps_src_resno;
+
+	/*
+	 * initialization of child nodes
+	 */
+	outerPlanState(gjs) = ExecInitNode(outerPlan(gjoin), estate, eflags);
+	innerPlanState(gjs) = ExecInitNode(innerPlan(gjoin), estate, eflags);
+
+	/*
+	 * initialize kernel execution parameter
+	 */
+	gjs->gts.kern_source = gj_info->kern_source;
+	gjs->gts.extra_flags = gj_info->extra_flags;
+	gjs->kparams = pgstrom_create_kern_parambuf(gj_info->used_params,
+												ps->ps_ExprContext);
+	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+		pgstrom_preload_cuda_program(&gjs->gts);
+
+	/*
+	 * initialize misc stuff
+	 */
+	if ((ghjs->gts.css.flags & CUSTOMPATH_PREFERE_ROW_FORMAT) != 0)
+		gjs->result_format = KDS_FORMAT_ROW;
+	else
+		gjs->result_format = KDS_FORMAT_SLOT;
+}
 
 static TupleTableSlot *
-gpunestloop_exec(CustomScanState *node)
-{}
+gpujoin_exec(CustomScanState *node)
+{
+	return ExecScan(&node->ss,
+					(ExecScanAccessMtd) pgstrom_exec_gputask,
+					(ExecScanRecheckMtd) pgstrom_recheck_gputask);
+}
 
 static void
-gpunestloop_end(CustomScanState *node)
-{}
+gpujoin_end(CustomScanState *node)
+{
+	GpuJoinState   *gjs = (GpuJoinState *) node;
+
+	/*
+	 * clean up subtree
+	 */
+	ExecEndNode(outerPlanState(node));
+	ExecEndNode(innerPlanState(node));
+
+	pgstrom_release_gputaskstate(&gjs->gts);
+}
 
 static void
-gpunestloop_rescan(CustomScanState *node)
-{}
+gpujoin_rescan(CustomScanState *node)
+{
+	GpuJoinState   *gjs = (GpuJoinState *) node;
+
+	/* clean-up and release any concurrent tasks */
+	pgstrom_cleanup_gputaskstate(&gjs->gts);
+
+	/* rewind the outer relation, also */
+	gjs->gts.scan_done = false;
+	gjs->outer_overflow = NULL;
+	ExecReScan(outerPlanState(gjs));
+
+	/*
+	 * we reuse the inner hash table if it is flat (that means mhtables
+	 * is not divided into multiple portions) and no parameter changed.
+	 */
+	if ((pmrels && pmrels->is_divided) ||
+		innerPlanState(ghjs)->chgParam != NULL)
+	{
+
+		gjs->pmrels = NULL;
+	}
+}
 
 static void
-gpunestloop_explain(CustomScanState *node, List *ancestors, ExplainState *es)
-{}
+gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
+{
+	GpuJoinState   *gjs = (GpuJoinState *) node;
+	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
+	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
+	List		   *context;
+	ListCell	   *cell;
+	char		   *temp;
+	char			qlabel[128];
+
+	initStringInfo(&str);
+
+	/* name lookup context */
+	context =  set_deparse_context_planstate(es->deparse_cxt,
+											 (Node *) node,
+											 ancestors);
+	/* pseudo scan tlist if verbose */
+	if (es->verbose)
+	{
+		ListCell   *cell;
+
+		resetStringInfo(&str);
+		foreach (cell, cscan->custom_ps_tlist)
+		{
+			TargetEntry	   *tle = lfirst(cell);
+
+			temp = deparse_expression((Node *)tle->expr,
+									  context, true, false);
+			if (cell != list_head(cscan->custom_ps_tlist))
+				appendStringInfo(&str, ", ");
+			if (!tle->resjunk)
+				appendStringInfo(&str, "%s", temp);
+			else
+				appendStringInfo(&str, "(%s)", temp);
+		}
+		ExplainPropertyText("Pseudo Scan", str.data, es);
+	}
+
+	/* outer bulkload */
+	ExplainPropertyText("Bulkload", ghjs->outer_bulkload ? "On" : "Off", es);
+
+	/* outer qualifier if any */
+	if (gj_info->outer_quals)
+	{
+		temp = deparse_expression(gj_info->outer_quals,
+								  context, es->verbose, false);
+		ExplainPropertyText("OuterQual", temp, es);
+	}
+
+	/* join-qualifiers */
+	depth = 1;
+	forboth (lc1, gj_info->hash_outer_keys,
+			 lc2, gj_info->join_quals)
+	{
+		Expr   *hash_outer_key = lfirst(lc1);
+		Expr   *join_qual = lfirst(lc2);
+
+		temp = deparse_expression(join_qual, context, es->verbose, false);
+		snprintf(qlabel, sizeof(qlabel), "%s (depth %d)",
+				 hash_outer_key != NIL ? "GpuHashJoin" : "GpuNestLoop",
+				 depth);
+		ExplainPropertyText(qlabel, temp, es);
+
+		if (hash_outer_key)
+		{
+			temp = deparse_expression(hash_outer_key,
+									  context, es->verbose, false);
+			snprintf(qlabel, sizeof(qlabel), "HashKey (depth %d)", depth);
+			ExplainPropertyText(qlabel, temp, es);
+		}
+	}
+	/* host qualifier if any */
+	if (gj_info->host_quals)
+	{
+		temp = deparse_expression(gj_info->host_quals,
+								  context, es->verbose, false);
+		snprintf(qlabel, sizeof(qlabel), "HostQual (depth %d)",
+				 gj_info->num_rels);
+		ExplainPropertyText(qlabel, temp, es);
+	}
+	/* other common field */
+	pgstrom_explain_gputaskstate(&gjs->gts, es);
+}
 
 /*
  * codegen for:
@@ -1357,7 +1553,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 	int			cur_depth;
 
 	Assert(cur_depth <= gj_info->num_rels);
-	is_nestloop = (!list_nth(gj_info->hash_quals, cur_depth - 1));
+	is_nestloop = (!list_nth(gj_info->hash_outer_keys, cur_depth - 1));
 
 	/*
 	 * Pick up variables in-use and append its properties in the order
@@ -1388,7 +1584,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				kernode->varoattno = tle->resno;	/* resno on the ps_tlist */
 				if (src_depth > 0 && src_depth < cur_depth)
 				{
-					if (list_nth(gj_info->hash_quals, src_depth - 1))
+					if (list_nth(gj_info->hash_outer_keys, src_depth - 1))
 						needs_khtable = true;
 					else
 						needs_kds_in = true;
@@ -1478,7 +1674,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 					"  colmeta = kds->colmeta;\n"
 					"  htup = kern_get_tuple_row(kds, rbuffer[0]);\n");
 			}
-			else if (list_nth(context->hash_quals, kernode->varno))
+			else if (list_nth(context->hash_outer_keys, kernode->varno - 1))
 			{
 				/* in case of inner hash table */
 				appendStringInfo(
@@ -1626,66 +1822,6 @@ gpujoin_codegen_join_quals(StringInfo source,
 		"  return EVAL(%s);\n"
 		"}\n\n",
 		join_code);
-}
-
-static void
-gpujoin_codegen_join_quals(StringInfo source,
-						   GpuJoinInfo *gj_info,
-						   codegen_context *context)
-{
-	int			num_rels = gj_info->num_rels;
-	int			depth;
-	const char *args;
-	ListCell   *lc;
-
-	depth = 1;
-	forboth (lc1, gj_info->join_quals,
-			 lc2, gj_info->hash_quals)
-	{
-		List   *join_qual = lfirst(lc1);
-		List   *hash_qual = lfirst(lc2);
-
-		gpujoin_codegen_join_quals_depth(source,
-										 depth,
-										 hash_qual == NIL,
-										 join_qual,
-										 gj_info->hash_quals,
-										 context);
-		depth++;
-	}
-
-	appendStrinfInfo(
-		source,
-		"STATIC_FUNCTION(cl_bool)\n"
-		"gpujoin_join_quals(cl_int *errcode,\n"
-		"                   kern_parambuf *kparams,\n"
-		"                   kern_data_store *kds,\n"
-		"                   kern_multi_relstore *kmrels,\n"
-		"                   int depth,\n"
-		"                   cl_int *outer_index,\n"
-		"                   HeapTupleHeaderData *inner_htup)\n"
-		"{\n"
-		"  switch (depth)\n"
-		"  {\n");
-
-	args = "errcode, kparams, kds, kmrels, outer_index, inner_htup";
-	for (depth = 1; depth <= num_rels; depth++)
-	{
-		appendStrinfInfo(
-			source,
-			"  case %d:\n"
-			"    return gpujoin_join_quals_depth%d(%s);\n",
-			depth, depth, args);
-	}
-
-	appendStrinfInfo(
-		source,
-		"  default:\n"
-		"    STROM_SET_ERROR(errcode,);\n"
-		"    break;\n"
-		"  }\n"
-		"  return false;\n"
-		"}\n\n");
 }
 
 /*
@@ -1940,7 +2076,7 @@ gpujoin_codegen(PlannerInfo *root,
 		"  {\n");
 
 	depth = 1;
-	foreach (cell, gj_info->hash_quals)
+	foreach (cell, gj_info->hash_outer_keys)
 	{
 		if (lfirst(cell) != NULL)
 			gpujoin_codegen_hash_value(&source, gj_info, depth, context);
@@ -1963,9 +2099,169 @@ gpujoin_codegen(PlannerInfo *root,
 	return source.data;
 }
 
+static GpuTask *
+gpujoin_next_chunk(GpuTaskState *gts)
+{
+	GpuJoinState   *gjs = (GpuJoinState *) gts;
+	PlanState	   *outer_node = outerPlanState(gjs);
+	TupleDesc		tupdesc = ExecGetResultType(outer_node);
+	pgstrom_data_store *pds = NULL;
+	int				result_format = gjs->result_format;
+	struct timeval	tv1, tv2, tv3;
+
+	/*
+     * Logic to fetch inner multi-relations looks like nested-loop.
+     * If all the underlying inner scan already scaned its outer
+	 * relation, current depth makes advance its scan pointer with
+	 * reset of underlying scan pointer, or returns NULL if it is
+	 * already reached end of scan.
+     */
+retry:
+	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
+
+	if (gjs->gts.scan_done || !gjs->pmrels)
+	{
+		PlanState  *mrs = innerPlanState(gjs);
+		void	   *pmrels;
+
+		/* unlink previous inner multi-relations */
+		if (gjs->pmrels)
+		{
+			Assert(gjs->gts.scan_done);
+			multirels_put_buffer(gjs->gts.gcontext, gjs->pmrels);
+			gjs->pmrels = NULL;
+		}
+
+		/* load an inner multi-relations buffer */
+		pmrels = BulkExecMultiRels(mrs);
+		if (!pmrels)
+		{
+			PERFMON_END(&gts->pfm_accum,
+						time_inner_load, &tv1, &tv2);
+			return NULL;	/* end of inner multi-relations */
+		}
+		gjs->pmrels = pmrels;
+
+		/*
+		 * Rewind the outer scan pointer, if it is not first time
+		 */
+		if (gjs->gts.scan_done)
+		{
+			ExecReScan(outerPlanState(gjs));
+			gjs->gts.scan_done = false;
+		}
+	}
+	PERFMON_BEGIN(&gts->pfm_accum, &tv2);
+
+	if (!gjs->outer_bulkload)
+	{
+		while (true)
+		{
+			TupleTableSlot *slot;
+
+			if (gjs->gts.scan_overflow)
+			{
+				slot = gjs->gts.scan_overflow;
+				gjs->gts.scan_overflow = slot;
+			}
+			else
+			{
+				slot = ExecProcNode(outer_node);
+				if (TupIsNull(slot))
+				{
+					gjs->gts.scan_done = true;
+					break;
+				}
+			}
+
+			/* create a new data-store if not constructed yet */
+			if (!pds)
+			{
+				pds = pgstrom_create_data_store_row(gjs->gts.gcontext,
+													tupdesc,
+													pgstrom_chunk_size(),
+													false);
+			}
+
+			/* insert the tuple on the data-store */
+			if (!pgstrom_data_store_insert_tuple(pds, slot))
+			{
+				gjs->gts.scan_overflow = slot;
+				break;
+			}
+		}
+	}
+	else
+	{
+		pds = BulkExecProcNode(outer_node);
+		if (!pds)
+			gjs->gts.scan_done = true;
+	}
+	PERFMON_END(&gjs->gts.pfm_accum, time_inner_load, &tv1, &tv2);
+	PERFMON_END(&gjs->gts.pfm_accum, time_outer_load, &tv2, &tv3);
+
+	/*
+	 * We also need to check existence of next inner hash-chunks, even if
+	 * here is no more outer records, In case of multi-relations splited-out,
+	 * we have to rewind the outer relation scan, then makes relations
+	 * join with the next inner hash chunks.
+	 */
+    if (!pds)
+        goto retry;
+
+	return gpuhashjoin_create_task(gjs, pds, result_format);
+}
+
+static TupleTableSlot *
+gpujoin_next_tuple(GpuTaskState *gts)
+{
+	GpuJoinState	   *gjs = (GpuJoinState *) gts;
+	TupleTableSlot	   *slot = gjs->gts.css.ss.ss_ScanTupleSlot;
+	pgstrom_gpujoin	   *gjoin = (pgstrom_gpujoin *)gjs->gts.curr_chunk;
+	pgstrom_data_store *pds_dst = gpuhashjoin->pds_dst;
+	kern_data_store	   *kds_dst = pds_dst->kds;
+	struct timeval		tv1, tv2;
+
+	PERFMON_BEGIN(&gjs->gts.pfm_accum, &tv1);
+
+	if (gjs->gts.curr_index < kds_dst->nitems)
+	{
+		int		index = gjs->gts.curr_index++;
+
+		/* fetch a result tuple */
+		pgstrom_fetch_data_store(slot,
+								 pds_dst,
+								 index,
+								 &gjs->curr_tuple);
+		/*
+		 * NOTE: host-only qualifiers are checked during ExecScan(),
+		 * so we don't check it here by itself.
+		 */
+	}
+	else
+		ExecClearTuple(slot);
+
+	PERFMON_END(&ghjs->gts.pfm_accum, time_materialize, &tv1, &tv2);
+	return slot;
+}
 
 
 
+
+
+
+static void
+gpujoin_task_release(GpuTask *gtask)
+{}
+
+
+static bool
+gpujoin_task_complete(GpuTask *gtask)
+{}
+
+static bool
+gpujoin_task_process(GpuTask *gtask)
+{}
 
 /*
  *
@@ -1976,17 +2272,26 @@ pgstrom_init_gpunestloop(void)
 {
 	/* turn on/off gpunestloop */
 	DefineCustomBoolVariable("pg_strom.enable_gpunestloop",
-							 "Enables the use of GPU accelerated nested-loop",
+							 "Enables the use of GpuNestLoop logic",
 							 NULL,
 							 &enable_gpunestloop,
 							 true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	/* turn on/off gpuhashjoin */
+	DefineCustomBoolVariable("pg_strom.enable_gpuhashjoin",
+							 "Enables the use of GpuHashJoin logic",
+							 NULL,
+							 &enable_gpuhashjoin,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	/* setup path methods */
 	gpujoin_path_methods.CustomName				= "GpuJoin";
-	gpujoin_path_methods.PlanCustomPath			= create_gpunestloop_plan;
-	gpujoin_path_methods.TextOutCustomPath		= gpunestloop_textout_path;
+	gpujoin_path_methods.PlanCustomPath			= create_gpujoin_plan;
+	gpujoin_path_methods.TextOutCustomPath		= gpujoin_textout_path;
 
 	/* setup plan methods */
 	gpujoin_methods.CustomName					= "GpuJoin";
@@ -1995,14 +2300,14 @@ pgstrom_init_gpunestloop(void)
 
 	/* setup exec methods */
 	gpujoin_exec_methods.c.CustomName			= "GpuNestedLoop";
-	gpujoin_exec_methods.c.BeginCustomScan		= gpunestloop_begin;
-	gpujoin_exec_methods.c.ExecCustomScan		= gpunestloop_exec;
-	gpujoin_exec_methods.c.EndCustomScan		= gpunestloop_end;
-	gpujoin_exec_methods.c.ReScanCustomScan		= gpunestloop_rescan;
+	gpujoin_exec_methods.c.BeginCustomScan		= gpujoin_begin;
+	gpujoin_exec_methods.c.ExecCustomScan		= gpujoin_exec;
+	gpujoin_exec_methods.c.EndCustomScan		= gpujoin_end;
+	gpujoin_exec_methods.c.ReScanCustomScan		= gpujoin_rescan;
 	gpujoin_exec_methods.c.MarkPosCustomScan	= NULL;
 	gpujoin_exec_methods.c.RestrPosCustomScan	= NULL;
-	gpujoin_exec_methods.c.ExplainCustomScan	= gpunestloop_explain;
-	gpujoin_exec_methods.ExecCustomBulk			= gpunestloop_exec_bulk;
+	gpujoin_exec_methods.c.ExplainCustomScan	= gpujoin_explain;
+	gpujoin_exec_methods.ExecCustomBulk			= gpujoin_exec_bulk;
 
 	/* hook registration */
 	set_join_pathlist_next = set_join_pathlist_hook;

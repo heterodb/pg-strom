@@ -118,9 +118,9 @@ gpuMemHashIndex(GpuMemHead *gm_head, CUdeviceptr chunk_addr)
 {
 	pg_crc32    crc;
 
-	INIT_CRC32C(crc);
-	COMP_CRC32C(crc, &chunk_addr, sizeof(CUdeviceptr));
-	FIN_CRC32C(crc);
+	INIT_LEGACY_CRC32(crc);
+	COMP_LEGACY_CRC32(crc, &chunk_addr, sizeof(CUdeviceptr));
+	FIN_LEGACY_CRC32(crc);
 
 	return crc % lengthof(gm_head->hash_slots);
 }
@@ -974,6 +974,8 @@ pgstrom_init_gputaskstate(GpuContext *gcontext, GpuTaskState *gts)
 	gts->extra_flags = 0;		/* to be set later */
 	gts->cuda_modules = NULL;
 	gts->scan_done = false;
+	gts->scan_bulk = false;
+	gts->scan_overflow = NULL;
 	SpinLockInit(&gts->lock);
 	dlist_init(&gts->tracked_tasks);
 	dlist_init(&gts->running_tasks);
