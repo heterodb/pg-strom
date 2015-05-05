@@ -1672,7 +1672,10 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				appendStringInfo(
 					"  /* variable load in depth-0 (outer KDS) */\n"
 					"  colmeta = kds->colmeta;\n"
-					"  htup = kern_get_tuple_row(kds, rbuffer[0]);\n");
+					"  htup = (rbuffer[0] == 0\n"
+					"    ? NULL\n"
+					"    : &((kern_tupitem *)\n"
+					"        ((char *)kds + rbuffer[0]))->htup);\n");
 			}
 			else if (list_nth(context->hash_outer_keys, kernode->varno - 1))
 			{
@@ -1688,12 +1691,18 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				if (kernode->varno < depth)
 					appendStringInfo(
 						source,
-						"  htup = kern_get_tuple_hash(khtable,rbuffer[%d]);\n",
+						"  htup = (rbuffer[%d] == 0\n"
+						"    ? NULL\n"
+						"    : &((kern_tupitem *)\n"
+						"        ((char *)khtable + rbuffer[%d]))->htup);\n",
+						kernode->varno,
 						kernode->varno);
 				else if (kernode->varno == depth)
 					appendStringInfo(
 						source,
-						"  htup = inner_htup;\n"
+						"  htup = (!inner_tupitem\n"
+						"    ? NULL\n"
+						"    : &inner_tupitem->htup);\n"
 						);
 				else
 					elog(ERROR, "Bug? too deeper varnode reference");
@@ -1712,12 +1721,18 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				if (kernode->varno < depth)
 					appendStringInfo(
 						source,
-						"  htup = kern_get_tuple_row(kds_in, rbuffer[%d]);\n",
-						kernode->varno);
+						"  htup = (rbuffer[%d] == 0\n"
+						"    ? NULL\n"
+						"    : &((kern_tupitem *)\n"
+						"        ((char *)kds_in + rbuffer[%d]))->htup);\n",
+						kernode->varno,
+                        kernode->varno);
 				else if (kernode->varno == depth)
 					appendStringInfo(
 						source,
-						"  htup = inner_htup;\n"
+						"  htup = (!inner_tupitem\n"
+						"    ? NULL\n"
+						"    : &inner_tupitem->htup);\n"
 						);
 				else
 					elog(ERROR, "Bug? too deeper varnode reference");
@@ -1731,7 +1746,9 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				source,
 				"  if (get_local_%s() == 0)\n"
 				"  {\n"
-				"    datum = kern_get_datum_tuple(colmeta, htup, %u);\n"
+				"    datum = (!htup\n"
+				"      ? NULL\n"
+				"      : kern_get_datum_tuple(colmeta, htup, %u));\n"
 				"    SHARED_WORKMEM(pg_%s_t)[get_local_%s()] =\n"
 				"      pg_%s_datum_ref(errcode, datum, false);\n"
 				"  }\n"
@@ -1750,7 +1767,9 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 		{
 			appendStringInfo(
 				source,
-				"  datum = kern_get_datum_tuple(colmeta, htup, %u);\n"
+				"  datum = (!htup\n"
+				"    ? NULL\n"
+				"    : kern_get_datum_tuple(colmeta, htup, %u));\n"
 				"  KVAR_%u = pg_%s_datum_ref(errcode,datum,false);\n",
 				kernode->varattno - 1,
 				kernode->varoattno,
@@ -1760,10 +1779,6 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 	appendStringInfoChar(source, '\n');
 }
 
-
-
-
-
 /*
  * codegen for:
  * STATIC_FUNCTION(cl_bool)
@@ -1772,7 +1787,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
  *                            kern_data_store *kds,
  *                            kern_multi_relstore *kmrels,
  *                            cl_int *outer_index,
- *                            HeapTupleHeaderData *inner_htup);
+ *                            kern_tupitem *tupitem);
  */
 static void
 gpujoin_codegen_join_quals(StringInfo source,
@@ -1804,7 +1819,7 @@ gpujoin_codegen_join_quals(StringInfo source,
 		"                           kern_data_store *kds,\n"
         "                           kern_multi_relstore *kmrels,\n"
 		"                           cl_int *outer_index,\n"
-		"                           HeapTupleHeaderData *inner_htup)\n"
+		"                           kern_tupitem *inner_tupitem)\n"
 		"{\n"
 		"  kern_colmeta *colmeta;\n"
 		"  HeapTupleHeaderData *htup;\n",
@@ -1963,12 +1978,12 @@ gpujoin_codegen_projection_forward(StringInfo source,
 /*
  * codegen for:
  * STSTIC_FUNCTION(void)
- * gpujoin_projection_reverse(cl_int dest_resno,
+ * gpujoin_projection_mapping(cl_int dest_resno,
  *                            cl_int *src_depth,
  *                            cl_int *src_colidx);
  */
 static void
-gpujoin_codegen_projection_reverse(StringInfo source,
+gpujoin_codegen_projection_mapping(StringInfo source,
 								   GpuJoinInfo *gj_info)
 {
 	ListCell   *lc1;
@@ -1978,11 +1993,11 @@ gpujoin_codegen_projection_reverse(StringInfo source,
 	appendStringInfo(
 		source,
 		"STSTIC_FUNCTION(void)\n"
-		"gpujoin_projection_reverse(cl_int dest_resno,\n"
+		"gpujoin_projection_mapping(cl_int dest_colidx,\n"
 		"                           cl_int *src_depth,\n"
 		"                           cl_int *src_colidx)\n"
 		"{\n"
-		"  switch (dest_resno)\n"
+		"  switch (dest_colidx)\n"
 		"  {\n");
 
    	forthree(lc1, context->pseudo_tlist,
@@ -2092,9 +2107,8 @@ gpujoin_codegen(PlannerInfo *root,
 		"  return (cl_uint)(-1);\n"
 		"}\n");
 
-	/* gpujoin_projection */
-	gpujoin_codegen_projection_forward(&source, gj_info);
-	gpujoin_codegen_projection_reverse(&source, gj_info);
+	/* gpujoin_projection_mapping */
+	gpujoin_codegen_projection_mapping(&source, gj_info);
 
 	return source.data;
 }

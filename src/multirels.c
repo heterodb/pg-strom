@@ -54,6 +54,7 @@ typedef struct
 {
 	CustomScanState	css;
 	GpuContext	   *gcontext;
+	JoinType		join_type;
 	int				depth;
 	int				nbatches_plan;
 	int				nbatches_exec;
@@ -71,12 +72,14 @@ typedef struct
 	 * For hash-join
 	 */
 	cl_uint			nslots;
-	Size		   *hslots_size;
-	cl_uint		   *hslots_nums;
+	cl_uint			hgram_shift;
+	cl_uint			hgram_curr;
+	Size		   *hgram_size;
 	List		   *hash_keys;
 	List		   *hash_keylen;
 	List		   *hash_keybyval;
 	List		   *hash_keytype;
+	Tuplestorestate *tupstore;	/* for JOIN_FULL or JOIN_LEFT */
 } MultiRelsState;
 
 /*
@@ -92,16 +95,6 @@ typedef struct pgstrom_multirels
 	void	  **inner_chunks;	/* array of KDS or Hash chunks */
 	kern_multirels kern;
 } pgstrom_multirels;
-
-
-
-
-
-
-
-
-
-
 
 /*
  * form_multirels_info
@@ -227,7 +220,6 @@ multirels_create_scan_state(CustomScan *cscan)
 	return (Node *) mrs;
 }
 
-
 static void
 multirels_begin(CustomScanState *node, EState *estate, int eflags)
 {
@@ -240,15 +232,22 @@ multirels_begin(CustomScanState *node, EState *estate, int eflags)
 	/* ensure the plan is MultiHash */
 	Assert(pgstrom_plan_is_multirels((Plan *) cscan));
 
+	mrs->join_type = mr_info->join_type;
 	mrs->depth = mr_info->depth;
 	mrs->nbatches_plan = mr_info->nbatches;
 	mrs->nbatches_exec = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0 ? -1 : 0);
 	mrs->kmrels_length = mr_info->kmrels_length;
 	mrs->kmrels_rate = mr_info->kmrels_rate;
 	mrs->nslots = mr_info->nslots;
-	mrs->hslots_size = palloc0(sizeof(Size) * mrs->nslots);
-	mrs->hslots_nums = palloc0(sizeof(cl_uint) * mrs->nslots);
+	if (mr_info->hash_keys)
+	{
+		cl_uint		shift;
 
+		shift = get_next_log2(mr_info->nbatches) + 4;
+		Assert(shift < sizeof(cl_uint) * BITS_PER_BYTE);
+		mrs->hgram_size = palloc0(sizeof(Size)    * (1U << shift));
+		mrs->hgram_shift = sizeof(cl_uint) * BITS_PER_BYTE - shift;
+	}
 	mrs->outer_overflow = NULL;
 	mrs->outer_done = NULL;
 	mrs->curr_pmrels = NULL;
@@ -330,14 +329,14 @@ create_kern_hashtable(MultiRelsState *mrs, pgstrom_multirels *pmrels)
 								   colmeta[scan_desc->natts])) +
 				LONGALIGN(sizeof(cl_uint) * mrs->nslots));
 	do {
-		Size	body_length = pmrels->total_length - pmrels->head_length;
-
-		chunk_size = (Size)(mrs->proportion * (double)body_length);
+		chunk_size = (Size)(mrs->kmrels_rate *
+							(double)(pmrels->kmrels_length -
+									 pmrels->length_head));
 		if (required < chunk_size)
 			break;
 		if (!multirels_expand_length(mrs, pmrels))
 			elog(ERROR, "failed to assign minimum required memory");
-	}
+	} while (true);
 	khtable = MemoryContextAlloc(mrs->gcontext, chunk_size);
 	khtable->length = chunk_size;
 	khtable->usage = required;
@@ -439,6 +438,83 @@ get_tuple_hashvalue(MultiRelsState *mrs, HeapTuple tuple)
 	return hash;
 }
 
+static bool
+multirels_preload_hash_partial(MultiRelsState *mrs, kern_hashtable *khtable)
+{
+	cl_uint	   *hash_slots;
+	cl_uint		i, limit;
+	Size		required = 0;
+
+	Assert(mrs->tupstore != NULL);
+
+	/* reset khtable's usage */
+	Assert(khtable->hostptr == (hostptr_t)&khtable->hostptr);
+	khtable->usage = (LONGALIGN(offsetof(kern_hashtable,
+										 colmeta[khtable->ncols])) +
+					  LONGALIGN(sizeof(cl_uint) * mrs->nslots));
+	khtable->nitems = 0;
+	hash_slots = KERN_HASHTABLE_SLOT(khtable);
+	memset(hash_slots, 0, sizeof(cl_uint) * khtable->nslots);
+
+	/*
+	 * find a suitable range of hash_min/hash_max
+	 */
+	limit = (1U << (sizeof(cl_uint) * BITS_PER_BYTE - mrs->hgram_shift));
+	if (mrs->hgram_curr >= limit)
+		return false;	/* no more records to read */
+	khtable->hash_min = mrs->hgram_curr * (1U << mrs->hgram_shift);
+	khtable->hash_max = UINT_MAX;
+	for (i = mrs->hgram_curr; i < limit; i++)
+	{
+		if (khtable->usage + required + mrs->hgram_size[i] > khtable->length)
+		{
+			if (required == 0)
+				elog(ERROR, "hash-key didn't distribute tuples enough");
+			khtable->hash_max = i * (1U << mrs->hgram_shift) - 1;
+			break;
+		}
+		required += mrs->hgram_size[i];
+	}
+	mrs->hgram_curr = i;
+
+	if (required == 0)
+		return false;	/* no more records to read */
+
+	/*
+	 * Load from the tuplestore
+	 */
+	while (tuplestore_gettupleslot(mrs->tup_store, true, false, slot))
+	{
+		/*
+		 * calculation of hash value, then load it to kern_hashtable
+		 * if its hash value is in-range.
+		 */
+		tuple = ExecFetchSlotTuple(slot);
+		hash = get_tuple_hashvalue(mrs, tuple);
+		if (hash >= khtable->hash_min && hash <= khtable->hash_max)
+		{
+			entry_size = MAXALIGN(offsetof(kern_hashentry, htup) +
+								  tuple->t_len);
+			khentry = (kern_hashentry *)((char *)khtable + khtable->usage);
+			khentry->hash = hash;
+			khentry->tupitem.t_len = tuple->t_len;
+			khentry->tupitem.t_self = tuple->t_self;
+			memcpy(&khentry->tupitem.htup, tuple->t_data, tuple->t_len);
+
+			index = hash % khtable->nslots;
+			hentry->next = hash_slot[index];
+			hash_slot[index] = khtable->usage;
+
+			/* usage increment */
+			khtable->nitems++;
+			khtable->usage += entry_size;
+		}
+	}
+	Assert(khtable->usage <= khtable->length);
+
+	return true;
+}
+
 static kern_multirels *
 multirels_preload_hash(MultiRelsState *mrs, double *ntuples)
 {
@@ -449,7 +525,6 @@ multirels_preload_hash(MultiRelsState *mrs, double *ntuples)
 	Size			entry_size;
 	Size			chunk_size;
 	int				index;
-	Tuplestorestate *tup_store = NULL;
 
 	khtable = create_kern_hashtable(mrs, pmrels);
 
@@ -477,37 +552,31 @@ multirels_preload_hash(MultiRelsState *mrs, double *ntuples)
 		 * we try to materialize the inner relation once, then split it
 		 * to the suitable scale.
 		 */
-		if (tup_store)
+		if (mrs->tupstore)
 		{
-			tuplestore_puttuple(tup_store, tuple);
-			index = hash % khtable->nslots;
-			mrs->hslots_size[index] += entry_size;
-			mrs->hslots_nums[index]++;
+			tuplestore_puttuple(mrs->tupstore, tuple);
+			mrs->hgram_size[hash >> mrs->hgram_shift] += entry_size;
 			continue;
 		}
 
 		/* do we have enough space to store? */
-		required = STROMALIGN(khtable->usage + entry_size) +
-			STROMALIGN(sizeof(cl_uint) * (khtable->nitems + 1));
-		if (required <= khtable->length)
+		if (khtable->usage + entry_size <= khtable->length)
 		{
 			khentry = (kern_hashentry *)((char *)khtable + khtable->usage);
 			khentry->hash = hash;
-			khentry->rowid = 0;		/* to be set later */
-			khentry->t_len = tuple->t_len;
-			memcpy(&hentry->htup, tuple->t_data, tuple->t_len);
+			khentry->tupitem.t_len = tuple->t_len;
+			khentry->tupitem.t_self = tuple->t_self;
+			memcpy(&khentry->tupitem.htup, tuple->t_data, tuple->t_len);
 
 			index = hash % khtable->nslots;
 			hentry->next = hash_slot[index];
-			hash_slot[index] = (cl_uint)((uintptr_t)hentry -
-										 (uintptr_t)khtable);
+			hash_slot[index] = khtable->usage;
+
 			/* usage increment */
 			khtable->nitems ++;
 			khtable->usage += entry_size;
-			mrs->hslots_size[index] += entry_size;
-			mrs->hslots_nums[index]++;
-			/* increment number of tuples read */
-			ntuples++;
+			/* histgram update */
+			mrs->hgram_size[hash >> mrs->hgram_shift] += entry_size;
 		}
 		else
 		{
@@ -517,29 +586,35 @@ multirels_preload_hash(MultiRelsState *mrs, double *ntuples)
 			if (multirels_expand_length(mrs, pmrels))
 			{
 				Size	chunk_size_new = (Size)
-					(mrs->proportion *(double)(pmrels->total_length -
+					(mrs->proportion *(double)(pmrels->kmrels_length -
 											   pmrels->head_length));
 				khtable = repalloc(khtable, chunk_size_new);
 				khtable->hostptr = (hostptr_t)&khtable->hostptr;
 				khtable->length = chunk_size_new;
 			}
+			else if (mrs->join_type == JOIN_INNER ||
+					 mrs->join_type == JOIN_RIGHT)
+			{
+				/*
+				 * In case of inner-join, we don't need to materialize
+				 * the underlying relation once, because join-logic don't
+				 * care about range of hash-value.
+				 */
+				break;
+			}
 			else
 			{
+				/*
+				 * If join logic is one of outer, and we cannot expand
+				 * a single kern_hashtable chunk any more, we switch to
+				 * use tuple-store to materialize the underlying relation
+				 * once. Then, we split tuples according to the hash range.
+				 */
 				kern_hashentry *khentry;
 				cl_uint		   *hslot;
 				HeapTupleData	tupData;
 
-				/* clear the statistics */
-				memset(mrs->hslots_size, 0, sizeof(Size) * mrs->nslots);
-
-				/*
-				 * In case when we cannot expand a single kern_hashtable
-				 * chunk any more, we switch to use tuple-store to keep
-				 * contents of the inner relation once.
-				 *
-				 * NOTE: Does it make sense only when outer join?
-				 */
-				tup_store = tuplestore_begin_heap(false, false, work_mem);
+				mrs->tupstore = tuplestore_begin_heap(false, false, work_mem);
 				hslot = KERN_HASHTABLE_SLOT(khtable);
 				for (index = 0; index < khtable->nslots; index++)
 				{
@@ -549,26 +624,36 @@ multirels_preload_hash(MultiRelsState *mrs, double *ntuples)
 					{
 						tupData.t_len = khentry->t_len;
 						tupData.t_data = &khentry->htup;
-						tuplestore_puttuple(tup_store, &tupData);
+						tuplestore_puttuple(mrs->tupstore, &tupData);
 					}
 				}
 			}
 		}
 	}
 
-
-	if (tup_store)
+	/*
+	 * Try to preload the kern_hashtable if inner relation was too big
+	 * to load into a single chunk, thus we materialized them on the
+	 * tuple-store once.
+	 */
+	if (mrs->tupstore &&
+		!multirels_preload_hash_partial(mrs, khtable))
 	{
-		Assert(khtable != NULL);
-
-		// Load the contents to hash table according to the consumption
-		// tracked by mrs->hslots_size[] array.
-
-		elog(ERROR, "not implemented yet");
-
+		Assert(mrs->gts.scan_done);
+		pfree(khtable);
+		khtable = NULL;
 	}
-	*p_ntuples = (double)ntuples;
-	return khtables;
+
+	/* release kern_hashtable, if no tuples were loaded */
+	if (khtable && khtable->nitems == 0)
+	{
+		pfree(khtable);
+		khtable = NULL;
+	}
+
+	*p_ntuples = (!khtable ? 0.0 : (double)khtable->nitems);
+
+	return khtable;
 }
 
 static pgstrom_data_store *
@@ -580,7 +665,6 @@ multirels_preload_heap(MultiRelsState *mrs,
 	TupleDesc		scan_dest = scan_slot->tts_tupleDescriptor;
 	HeapTuple		scan_tuple;
 	Size			chunk_size;
-	long			ntuples = 0;
 	pgstrom_data_store *pds;
 
 	/*
@@ -606,9 +690,7 @@ multirels_preload_heap(MultiRelsState *mrs,
 			break;
 		}
 
-		if (pgstrom_data_store_insert_tuple(pds, scan_slot))
-			ntuples++;
-		else
+		if (!pgstrom_data_store_insert_tuple(pds, scan_slot))
 		{
 			MultiRelsState *temp;
 			Size	new_length;
@@ -623,20 +705,28 @@ multirels_preload_heap(MultiRelsState *mrs,
 			 * If no more physical space is expected, we give up to preload
 			 * entire relation on this store.
 			 */
-			new_length = multirels_expand_length(mrs);
-			if (new_length == 0)
+			if (!multirels_expand_length(mrs, pmrels))
 				break;
-
 			/*
 			 * Once total length of the buffer got expanded, current store
 			 * also can have wider space.
 			 */
 			chunk_size = (Size)(mrs->kmrels_rate *
-								(double)(new_length - pmrels->length_head));
+								(double)(pmrels->kmrels_length -
+										 pmrels->length_head));
+			chunk_size = STROMALIGN_DOWN(chunk_size);
 			pgstrom_expand_data_store(mrs->gcontext, pds, chunk_size);
 		}
 	}
-	*p_ntuples = (double)ntuples;
+
+	if (pds->kds->nitems == 0)
+	{
+		pgstrom_release_data_store(pds);
+		pds = NULL;
+	}
+
+	*p_ntuples = (!pds ? 0.0 : (double)pds->kds->nitems);
+
 	return pds;
 }
 
