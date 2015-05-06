@@ -395,8 +395,8 @@ construct_flat_cuda_source(const char *kern_source, uint32 extra_flags)
 	if (extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
 		appendStringInfoString(&source, pgstrom_cuda_gpuscan_code);
 	/* GpuHashJoin */
-	if (extra_flags & DEVKERNEL_NEEDS_HASHJOIN)
-		appendStringInfoString(&source, pgstrom_cuda_hashjoin_code);
+	if (extra_flags & DEVKERNEL_NEEDS_GPUJOIN)
+		appendStringInfoString(&source, pgstrom_cuda_gpujoin_code);
 	/* GpuPreAgg */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
 		appendStringInfoString(&source, pgstrom_cuda_gpupreagg_code);

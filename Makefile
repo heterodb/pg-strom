@@ -5,13 +5,13 @@ DATA = src/pg_strom--1.0.sql
 # Source file of CPU portion
 STROM_OBJS = main.o codegen.o grafter.o datastore.o aggfuncs.o \
 		cuda_control.o cuda_program.o cuda_mmgr.o \
-		gpuscan.o gpuhashjoin.o gpupreagg.o gpusort.o
+		gpuscan.o gpujoin.o gpupreagg.o gpusort.o
 
 # Source file of GPU portion
 CUDA_OBJS = cuda_common.o \
 	cuda_gpuscan.o \
+	cuda_gpujoin.o \
 	cuda_gpupreagg.o \
-	cuda_hashjoin.o \
 	cuda_gpusort.o \
 	cuda_mathlib.o \
 	cuda_textlib.o \

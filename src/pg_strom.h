@@ -303,10 +303,9 @@ struct GpuTask
 #define DEVFUNC_NEEDS_MATHLIB			0x00000040
 #define DEVFUNC_INCL_FLAGS				0x00000078
 #define DEVKERNEL_NEEDS_GPUSCAN			0x00010000
-#define DEVKERNEL_NEEDS_HASHJOIN		0x00020000
+#define DEVKERNEL_NEEDS_GPUJOIN			0x00020000
 #define DEVKERNEL_NEEDS_GPUPREAGG		0x00040000
 #define DEVKERNEL_NEEDS_GPUSORT			0x00080000
-#define DEVKERNRL_NEEDS_GPUJOIN			0x00100000
 
 struct devtype_info;
 struct devfunc_info;
@@ -566,9 +565,10 @@ pgstrom_create_multirels_plan(PlannerInfo *root,
 							  int nslots, List *hash_keys);
 extern struct pgstrom_multirels *
 pgstrom_multirels_exec_bulk(PlanState *plannode);
-extern Size pgstrom_multirels_get_length(struct pgstrom_multirels *pmrels);
-extern void pgstrom_multirels_dma_send(struct pgstrom_multirels *pmrels);
-extern void pgstrom_multirels_dma_recv(struct pgstrom_multirels *pmrels);
+extern bool multirels_get_gpumem(void *__pmrels, GpuTask *gtask);
+extern void multirels_put_gpumem(void *__pmrels, GpuTask *gtask,
+								 bool is_last_call);
+extern void multirels_send_gpumem(void *__pmrels, GpuTask *gtask);
 extern void	pgstrom_init_multirels(void);
 
 /*
@@ -577,8 +577,9 @@ extern void	pgstrom_init_multirels(void);
 
 
 
+extern void	pgstrom_init_gpujoin(void);
 
-
+#if 0
 /*
  * gpuhashjoin.c
  */
@@ -588,6 +589,7 @@ extern void pgstrom_gpuhashjoin_setup_bulkslot(PlanState *outer_ps,
 											   ProjectionInfo **p_bulk_proj,
 											   TupleTableSlot **p_bulk_slot);
 extern void pgstrom_init_gpuhashjoin(void);
+#endif
 
 /*
  * gpupreagg.c
@@ -640,8 +642,8 @@ extern void pgstrom_init_grafter(void);
  */
 extern const char *pgstrom_cuda_common_code;
 extern const char *pgstrom_cuda_gpuscan_code;
+extern const char *pgstrom_cuda_gpujoin_code;
 extern const char *pgstrom_cuda_gpupreagg_code;
-extern const char *pgstrom_cuda_hashjoin_code;
 extern const char *pgstrom_cuda_gpusort_code;
 extern const char *pgstrom_cuda_mathlib_code;
 extern const char *pgstrom_cuda_textlib_code;
