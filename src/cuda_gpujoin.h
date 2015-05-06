@@ -108,6 +108,7 @@ typedef struct
 	cl_uint			usage;		/* usage of this hashtable chunk */
 	cl_uint			ncols;		/* number of inner relation's columns */
 	cl_uint			nitems;		/* number of inner relation's items */
+	/* NOTE: !fields above are compatible with kern_data_store! */
 	cl_uint			nslots;		/* width of hash slot */
 	cl_char			__dummy1__;	/* for layout compatibility to KDS */
 	cl_char			__dummy2__;	/* for layout compatibility to KDS */
@@ -132,10 +133,6 @@ KERN_HASH_FIRST_ENTRY(kern_hashtable *khtable, cl_uint hash)
 	cl_uint		index;
 
 	if (hash
-
-
-
-
 
  = hash % khtable->nslots;
 
@@ -169,6 +166,9 @@ typedef struct
 	((kern_parambuf *)(&(kgjoin)->kparams))
 #define KERN_GPUJOIN_PARAMBUF_LENGTH(kgjoin)	\
 	STROMALIGN(KERN_GPUJOIN_PARAMBUF(kgjoin)->length)
+#define KERN_GPUJOIN_HEAD_LENGTH(kgjoin)		\
+	(offsetof(kern_gpujoin, kparams) +			\
+	 KERN_GPUJOIN_PARAMBUF_LENGTH(kgjoin))
 #define KERN_GPUJOIN_IN_RESULTBUF(kgjoin,depth)			\
 	((kern_resultbuf *)((char *)(kgjoin) +				\
 						(((depth) & 0x01)				\
@@ -566,16 +566,16 @@ out:
 }
 
 /*
- * gpunestloop_outer_checkup
+ * gpujoin_exec_leftjoin
  *
  * It checks referencial map of inner relations, then if nobody didn't
  * pick up the entry, it adds an outer entry for each unreferenced one.
  */
 KERNEL_FUNCTION(void)
-gpujoin_outer_post_process(kern_gpujoin *kgjoin,
-						   kern_multi_relstore *kmrels,
-						   kern_data_store *kds,
-						   cl_int depth)
+gpujoin_exec_leftjoin(kern_gpujoin *kgjoin,
+					  kern_multi_relstore *kmrels,
+					  kern_data_store *kds,
+					  cl_int depth)
 {
 	kern_resultbuf	   *kresults_out;
 	kern_data_store	   *kds_in;

@@ -1,8 +1,9 @@
 /*
- * gpunestloop.c
+ * gpujoin.c
  *
- * GPU accelerated nested-loop implementation
-  * ----
+ * GPU accelerated relations join, based on nested-loop or hash-join
+ * algorithm.
+ * ----
  * Copyright 2011-2015 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2015 (C) The PG-Strom Development Team
  *
@@ -17,7 +18,7 @@
  */
 #include "postgres.h"
 #include "pg_strom.h"
-#include "cuda_nestloop.h"
+#include "cuda_gpujoin.h"
 
 
 
@@ -151,13 +152,41 @@ typedef struct
 
 
 
-} GpuNestLoopState;
+} GpuJoinState;
+
+/*
+ * pgstrom_gpujoin - task object of GpuJoin
+ */
+typedef struct
+{
+	GpuTask			task;
+	CUfunction		kern_prep;
+	CUfunction		kern_nestloop;
+	CUfunction		kern_hashjoin;
+	CUfunction		kern_leftjoin;
+	CUfunction		kern_proj;
+	CUdeviceptr		m_kgjoin;
+	CUdeviceptr		m_kmrels;
+	CUdeviceptr		m_kds_src;
+	CUdeviceptr		m_kds_dst;
+	bool			inner_loader;	/* true, if this task is inner loader */
+	CUevent			ev_dma_send_start;
+	CUevent			ev_dma_send_stop;
+	CUevent			ev_kern_join_end;
+	CUevent			ev_dma_recv_start;
+	CUevent			ev_dma_recv_stop;
+	void		   *pmrels;			/* inner multi relations */
+	pgstrom_data_store *pds_src;	/* data store of outer relation */
+	pgstrom_data_store *pds_dst;	/* data store of result buffer */
+	kern_gpujoin	kern;			/* kern_gpujoin of this request */
+} pgstrom_gpujoin;
+
 
 /*
  * static function declaration
  */
 static char *gpujoin_codegen(PlannerInfo *root,
-							 CustomScan *gjoin,
+							 CustomScan *cscan,
 							 GpuJoinInfo *gj_info,
 							 codegen_context *context);
 
@@ -943,117 +972,6 @@ build_pseudo_targetlist(GpuJoinPath *gpath,
 	return context.ps_tlist;
 }
 
-#if 0
-/*
- * fixup_device_expression
- *
- * Unlike host executable qualifiers, device qualifiers need to reference
- * relations before join, so varno of varnode needs to have either INNER
- * or OUTER_VAR, instead of pseudo-scan relation.
- */
-typedef struct
-{
-	GpuJoinPath	   *gpath;
-	CustomScan	   *gjoin;
-} fixup_device_expr_context;
-
-static Node *
-fixup_device_expr_mutator(Node *node, fixup_device_expr_context *context)
-{
-	if (!node)
-		return NULL;
-	if (IsA(node, Var))
-	{
-		GpuJoinPath *gpath = context->gpath;
-		Var		   *varnode = (Var *) node;
-		Var		   *newnode;
-		RelOptInfo *rel;
-		Plan	   *plan;
-		ListCell   *cell;
-		int			i, depth;
-
-		rel = gpath->outer_path->parent;
-		plan = gpath->outer_plan;
-		if (bms_is_member(varnode->varno, rel->relids))
-			depth = 0;	/* outer relation */
-		else
-		{
-			for (i=0; i < gpath->num_rels; i++)
-			{
-				rel = gpath->inners[i].scan_path->parent;
-				plan = gpath->inners[i].scan_plan;
-				if (bms_is_member(varnode->varno, rel->relids))
-					goto found;
-			}
-			if (i == gpath->num_rels)
-				elog(ERROR, "Bug? uncertain origin of Var-node: %s",
-					 nodeToString(varnode));
-			depth = i + 1;
-		}
-
-		foreach (cell, plan->targetlist)
-		{
-			TargetEntry	   *tle = lfirst(cell);
-
-			if (equal(tle->expr, varnode))
-			{
-				newnode = copyObject(varnode);
-				newnode->varnoold = varnode->varno;
-				newnode->varoattno = varnode->varattno;
-				newnode->varno = depth;
-				newnode->varattno = tle->resno;
-
-				return (Node *) newnode;
-			}
-		}
-		elog(ERROR, "Bug? uncertain origin of Var-node: %s",
-			 nodeToString(varnode));
-	}
-	return expression_tree_mutator(node, fixup_device_expr_mutator,
-								   (void *) context);
-}
-
-static Node *
-fixup_device_expr(CustomScan *gjoin, GpuJoinPath *gpath, Node *node)
-{
-	fixup_device_expr_context context;
-	List	   *results = NIL;
-	ListCell   *lc;
-
-	if (!node)
-		return NULL;
-
-	memset(&context, 0, sizeof(fixup_device_expr_context));
-	context.gpath = gpath;
-	context.gjoin = gjoin;
-
-	if (!IsA(node, List))
-		return fixup_device_expression_mutator(node, &context);
-
-	foreach (lc, (List *) node)
-	{
-		Node   *newnode
-			= fixup_device_expr_mutator((Node *) lfirst(lc), &context);
-		results = lappend(results, newnode);
-	}
-	return results;
-}
-#endif
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 /*
  * create_gpujoin_plan
  *
@@ -1070,14 +988,14 @@ create_gpujoin_plan(PlannerInfo *root,
 {
 	GpuJoinPath	   *gpath = (GpuJoinPath *) best_path;
 	GpuJoinInfo		gj_info;
-	CustomScan	   *gjoin;
+	CustomScan	   *cscan;
 	int				i;
 
-	gjoin = makeNode(CustomScan);
-	gjoin->scan.plan.targetlist = tlist;
-	gjoin->scan.plan.qual = gpath->host_quals;
-	gjoin->flags = best_path->flags;
-	gjoin->methods = &gpujoin_plan_methods;
+	cscan = makeNode(CustomScan);
+	cscan->scan.plan.targetlist = tlist;
+	cscan->scan.plan.qual = gpath->host_quals;
+	cscan->flags = best_path->flags;
+	cscan->methods = &gpujoin_plan_methods;
 
 	memset(&gj_info, 0, sizeof(GpuJoinInfo));
 	gj_info.num_rels = gpath->num_rels;
@@ -1139,7 +1057,7 @@ create_gpujoin_plan(PlannerInfo *root,
 		if (prev_plan)
 			innerPlan(prev_plan) = &mplan->scan.plan;
 		else
-			innerPlan(gjoin) = &mplan->scan.plan;
+			innerPlan(cscan) = &mplan->scan.plan;
 		prev_plan = &mplan->scan.plan;
 	}
 
@@ -1172,43 +1090,23 @@ create_gpujoin_plan(PlannerInfo *root,
 		if ((custom_flags & CUSTOMPATH_SUPPORT_BULKLOAD) != 0)
 			gj_info.outer_bulkload = true;
 	}
-	outerPlan(gjoin) = outer_plan;
+	outerPlan(cscan) = outer_plan;
 
 	/*
 	 * Build a pseudo-scan targetlist
 	 */
-	gjoin->custom_ps_tlist = build_pseudo_targetlist(gpath, &gj_info, tlist);
-
-#if 0
-	/*
-	 * Fixup device execution 
-	 *
-	 * Is it really needed?
-	 *
-	 * TODO: We have to make host executable expression. Probably, it may
-	 * reference INNER_VAR/OUTER_VAR according to context of the fallback
-	 * routine.
-	 */
-	gj_info.outer_quals = (Expr *)
-		fixup_device_expression(gjoin, gpath, (Node *)gj_info.outer_quals);
-	gj_info.hash_outer_keys = (List *)
-		fixup_device_expression(gjoin, gpath, (Node *)gj_info.hash_outer_keys);
-	gj_info.hash_quals = (List *)
-		fixup_device_expression(gjoin, gpath, (Node *)gj_info.hash_quals);
-	gj_info.join_quals = (List *)
-		fixup_device_expression(gjoin, gpath, (Node *)gj_info.join_quals);
-#endif
+	cscan->custom_ps_tlist = build_pseudo_targetlist(gpath, &gj_info, tlist);
 
 	/*
 	 * construct kernel code
 	 */
 	pgstrom_init_codegen_context(&context);
 
-	gj_info.kern_source = gpujoin_codegen(root, gjoin, gj_info, &context);
+	gj_info.kern_source = gpujoin_codegen(root, cscan, gj_info, &context);
 	gj_info.extra_flags = context.extra_flags;
 	gj_info.used_params = context.used_params;
 
-	form_gpujoin_info(gjoin, &gj_info);
+	form_gpujoin_info(cscan, &gj_info);
 
 	return &gj_info->scan.plan;
 }
@@ -1216,25 +1114,25 @@ create_gpujoin_plan(PlannerInfo *root,
 static void
 gpujoin_textout_path(StringInfo str, const CustomPath *node)
 {
-	GpuJoinPath *gjoin = (GpuJoin *) node;
+	GpuJoinPath *gpath = (GpuJoin *) node;
 	int		i;
 
 	/* outer_path */
 	appendStringInfo(str, " :outer_path %s",
-					 nodeToString(gjoin->outer_path));
+					 nodeToString(gpath->outer_path));
 	/* total_length */
 	appendStringInfo(str, " :total_length %zu",
-					 gjoin->total_length);
+					 gpath->total_length);
 
 	/* kresults_ratio */
 	appendStringInfo(str, " :kresults_ratio %.2f",
-					 gjoin->kresults_ratio);
+					 gpath->kresults_ratio);
 	/* num_rels */
-	appendStringInfo(str, " :num_rels %d", gjoin->num_rels);
+	appendStringInfo(str, " :num_rels %d", gpath->num_rels);
 
 	/* host_quals */
 	appendStringInfo(str, " :host_quals %s",
-					 nodeToString(gjoin->host_quals));
+					 nodeToString(gpath->host_quals));
 
 	/* inners */
 	appendStringInfo(str, " :inners (");
@@ -1242,9 +1140,9 @@ gpujoin_textout_path(StringInfo str, const CustomPath *node)
 	{
 		appendStringInfo(str, "{");
 		/* rows, startup_cost, total_cost */
-		appendStringInfo(str, " :rows %.2f", gjoin->rows);
-		appendStringInfo(str, " :startup_cost %.2f", gjoin->startup_cost);
-		appendStringInfo(str, " :total_cost %.2f", gjoin->total_cost);
+		appendStringInfo(str, " :rows %.2f", gpath->rows);
+		appendStringInfo(str, " :startup_cost %.2f", gpath->startup_cost);
+		appendStringInfo(str, " :total_cost %.2f", gpath->total_cost);
 
 		/* scan_path */
 		appendStringInfo(str, " :scan_path %s",
@@ -1266,7 +1164,7 @@ gpujoin_textout_path(StringInfo str, const CustomPath *node)
 						 gpath->inners[i].buffer_portion);
 		/* chunk_size */
 		appendStringInfo(str, " :chunk_size %zu",
-						 gjoin->chunk_size);
+						 gpath->chunk_size);
 		/* nbatches */
 		appendStringInfo(str, " :nbatches %d",
 						 gpath->inners[i].nbatches);
@@ -1302,7 +1200,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) node;
 	PlanState	   *ps = &gjs->gts.css.ss.ps;
-	CustomScan	   *gjoin = (CustomScan *) node->ss.ps.plan;
+	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
 
 	/*
@@ -1330,8 +1228,8 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	/*
 	 * initialization of child nodes
 	 */
-	outerPlanState(gjs) = ExecInitNode(outerPlan(gjoin), estate, eflags);
-	innerPlanState(gjs) = ExecInitNode(innerPlan(gjoin), estate, eflags);
+	outerPlanState(gjs) = ExecInitNode(outerPlan(cscan), estate, eflags);
+	innerPlanState(gjs) = ExecInitNode(innerPlan(cscan), estate, eflags);
 
 	/*
 	 * initialize kernel execution parameter
@@ -2027,7 +1925,7 @@ gpujoin_codegen_projection_mapping(StringInfo source,
 
 static char *
 gpujoin_codegen(PlannerInfo *root,
-				CustomScan *gjoin,
+				CustomScan *cscan,
 				GpuJoinInfo *gj_info,
 				codegen_context *context)
 {
@@ -2273,9 +2171,285 @@ static bool
 gpujoin_task_complete(GpuTask *gtask)
 {}
 
+static void
+gpujoin_task_respond(CUstream stream, CUresult status, void *private)
+{
+	pgstrom_gpujoin	   *gjoin = private;
+	GpuTaskState	   *gts = gjoin->task.gts;
+
+	SpinLockAcquire(&gts->lock);
+	if (status != CUDA_SUCCESS)
+		gjoin->task.errcode = status;
+
+	/* remove from the running_tasks list */
+	dlist_delete(&gjoin->task.chain);
+	gts->num_running_tasks--;
+	/* then, attach it on the completed_tasks list */
+	if (gjoin->task.errcode == StromError_Success)
+		dlist_push_tail(&gts->completed_tasks, &gjoin->task.chain);
+	else
+		dlist_push_head(&gts->completed_tasks, &gjoin->task.chain);
+	gts->num_completed_tasks++;
+	SpinLockRelease(&gts->lock);
+
+	SetLatch(&MyProc->procLatch);
+}
+
+static bool
+__gpujoin_task_process(pgstrom_gpujoin *gjoin)
+{
+	pgstrom_data_store *pds_src = gjoin->pds_src;
+	pgstrom_data_store *pds_dst = gjoin->pds_dst;
+	size_t		total_items;
+
+	/*
+	 * sanity checks
+	 */
+	Assert(pds_src->kds->format == KDS_FORMAT_ROW);
+	Assert(pds_dst->kds->format == KDS_FORMAT_ROW ||
+		   pds_dst->kds->format == KDS_FORMAT_SLOT);
+
+	/*
+	 * GPU kernel function lookup
+	 */
+	rc = cuModuleGetFunction(&gjoin->kern_prep,
+							 gjoin->task.cuda_module,
+							 "gpujoin_preparation");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+	rc = cuModuleGetFunction(&gjoin->kern_nestloop,
+							 gjoin->task.cuda_module,
+							 "gpujoin_exec_nestloop");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+	rc = cuModuleGetFunction(&gjoin->kern_hashjoin,
+							 gjoin->task.cuda_module,
+							 "gpujoin_exec_hashjoin");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+	rc = cuModuleGetFunction(&gjoin->kern_leftjoin,
+							 gjoin->task.cuda_module,
+							 "gpujoin_exec_leftjoin");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+	rc = cuModuleGetFunction(&gjoin->kern_proj,
+							 gjoin->task.cuda_module,
+							 pds_dst->kds->format == KDS_FORMAT_ROW
+							 ? "gpujoin_projection_row"
+							 : "gpujoin_projection_slot");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+	/*
+	 * Allocation of device memory for each chunks
+	 */
+
+	/* kern_gpujoin *kgjoin (includes 2x kern_resultbuf) */
+	total_items = (size_t)(mrs->kresults_ratio *
+						   (double) pds_src->kds->nitems *
+						   (1.0 + pgstrom_row_population_margin));
+	length = STRONALIGN(offsetof(kern_resultbuf, results[total_items]));
+
+	gjoin->kern.kresults_1_offset =
+		STROMALIGN(offsetof(kern_gpujoin, kparams) +
+				   KERN_GPUJOIN_PARAMBUF_LENGTH(&gjoin->kern));
+	gjoin->kern.kresults_2_offset =
+		gjoin->kern.kresults_1_offset + length;
+	gjoin->kern.kresults_total_items = total_items;
+
+	length = gjoin->kern.kresults_1_offset + 2 * length;
+	gjoin->m_kgjoin = gpuMemAlloc(&gjoin->task, length);
+	if (!gjoin->m_kgjoin)
+		goto out_of_resource;
+
+	/* kern_data_store *kds_src */
+	length = KERN_DATA_STORE_LENGTH(pds_src->kds);
+	gjoin->m_kds_src = gpuMemAlloc(&gjoin->task, length);
+	if (!gjoin->m_kds_src)
+		goto out_of_resource;
+
+	/* kern_data_store *kds_dst */
+	length = KERN_DATA_STORE_LENGTH(pds_dst->kds);
+	gjoin->m_kds_dst = gpuMemAlloc(&gjoin->task, length);
+	if (!gjoin->m_kds_dst)
+		goto out_of_resource;
+
+	/*
+	 * Creation of event objects, if needed
+	 */
+	if (gjoin->task.pfm.enabled)
+	{
+		rc = cuEventCreate(&gjoin->ev_dma_send_start, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+
+		rc = cuEventCreate(&gjoin->ev_dma_send_stop, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+
+		rc = cuEventCreate(&gjoin->ev_kern_join_end, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+
+		rc = cuEventCreate(&gjoin->ev_dma_recv_start, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+
+		rc = cuEventCreate(&gjoin->ev_dma_recv_stop, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+    }
+
+	/*
+	 * OK, all the device memory and kernel objects are successfully
+	 * constructed. Let's enqueue DMA send/recv and kernel invocations.
+	 */
+	CUDA_EVENT_RECORD(gjoin, ev_dma_send_start);
+
+	/* inner multi relations */
+	multirels_send_gpumem(gjoin->pmrels, &gjoin->task);
+	/* kern_gpujoin */
+	length = KERN_GPUJOIN_HEAD_LENGTH(&gjoin->kern);
+	rc = cuMemcpyHtoDAsync(gjoin->m_kgjoin,
+						   &gjoin->kern,
+						   length,
+						   gjoin->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+	gjoin->task.pfm.bytes_dma_send += length;
+	gjoin->task.pfm.num_dma_send++;
+
+	/* kern_data_store (src) */
+	length = KERN_DATA_STORE_LENGTH(pds_src->kds);
+	rc = cuMemcpyHtoDAsync(gjoin->m_kds_src,
+						   pds_src->kds,
+						   length,
+						   gjoin->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+	gjoin->task.pfm.bytes_dma_send += length;
+	gjoin->task.pfm.num_dma_send++;
+
+	/* kern_data_store (dst of head) */
+	length = KERN_DATA_STORE_HEAD_LENGTH(pds_dst->kds);
+	rc = cuMemcpyHtoDAsync(ghjoin->m_kds_dst,
+						   pds_dst->kds,
+						   length,
+						   gjoin->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+	gjoin->task.pfm.bytes_dma_send += length;
+	gjoin->task.pfm.num_dma_send++;
+
+	CUDA_EVENT_RECORD(gjoin, ev_dma_send_stop);
+
+	/*
+	 * OK, enqueue a series of requests
+	 */
+	depth = 1;
+	forboth (lc1, mrs->hash_outer_keys,
+			 lc2, mrs->nrows_ratio_list)
+	{
+		bool	is_nestloop = (lfirst(lc1) == NIL);
+		double	nrows_ratio = (double)lfirst_int(lc2) / 10000.0;
+		size_t	num_threads;
+
+		// call gpujoin_preparation
+
+		// call gpujoin_exec_nestloop or gpujoin_exec_hashjoin
+
+
+	}
+	// call gpujoin_projection_*
+
+	CUDA_EVENT_RECORD(gjoin, ev_dma_recv_start);
+
+	/* DMA Recv: kern_gpujoin *kgjoin */
+	length = offsetof(kern_gpujoin, kparams);
+	rc = cuMemcpyDtoHAsync(&gjoin->kern,
+						   gjoin->m_kgjoin,
+						   length,
+						   gjoin->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
+	gjoin->task.pfm.bytes_dma_recv += length;
+	gjoin->task.pfm.num_dma_recv++;
+
+	/* DMA Recv: kern_data_store *kds_dst */
+	length = KERN_DATA_STORE_LENGTH(pds_dst->kds);
+	rc = cuMemcpyDtoHAsync(pds_dst->kds,
+						   gjoin->m_kds_dst,
+						   length,
+						   gjoin->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
+	gjoin->task.pfm.bytes_dma_recv += length;
+	gjoin->task.pfm.num_dma_recv++;
+
+	CUDA_EVENT_RECORD(gjoin, ev_dma_recv_stop);
+
+	/*
+	 * Register the callback
+	 */
+	rc = cuStreamAddCallback(gjoin->task.cuda_stream,
+							 gpujoin_task_respond,
+							 gjoin, 0);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "cuStreamAddCallback: %s", errorText(rc));
+
+	return true;
+
+out_of_resource:
+	gpujoin_cleanup_cuda_resources(gjoin);
+	return false;
+}
+
 static bool
 gpujoin_task_process(GpuTask *gtask)
-{}
+{
+	pgstrom_gpujoin *gjoin = (pgstrom_gpujoin *) gtask;
+	bool		status = false;
+	bool		loaded = false;
+	CUresult	rc;
+
+	/* switch CUDA context */
+	rc = cuCtxPushCurrent(gtask->cuda_context);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+	PG_TRY();
+	{
+		loaded = multirels_get_gpumem(gjoin->pmrels, &gjoin->task);
+		if (loaded)
+		{
+			status = __gpujoin_task_process(gjoin);
+			if (!status)
+				multirels_put_gpumem(gjoin->pmrels, &gjoin->task);
+		}
+	}
+	PG_CATCH();
+	{
+		if (loaded)
+			multirels_put_gpumem(gjoin->pmrels, &gjoin->task);
+
+		rc = cuCtxPopCurrent(NULL);
+        if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+		gpujoin_cleanup_cuda_resources(gjoin);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	/* reset CUDA context */
+	rc = cuCtxPopCurrent(NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+
+	return status;
+}
 
 /*
  *

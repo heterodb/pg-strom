@@ -66,7 +66,7 @@ typedef struct
 	 */
 	bool			outer_done;
 	TupleTableSlot *outer_overflow;
-	void		   *curr_pmrels;
+	void		   *curr_chunk;
 
 	/*
 	 * For hash-join
@@ -89,11 +89,16 @@ typedef struct
  */
 typedef struct pgstrom_multirels
 {
-	Size		kmrels_length;	/* total length of the kern_multirels */
-	Size		head_length;	/* length of the header portion */
-	Size		usage_length;	/* length actually in use */
-	void	  **inner_chunks;	/* array of KDS or Hash chunks */
-	kern_multirels kern;
+	Size			kmrels_length;	/* total length of the kern_multirels */
+	Size			head_length;	/* length of the header portion */
+	Size			usage_length;	/* length actually in use */
+	Size			lomap_length;	/* length of left outer map */
+	void		  **inner_chunks;	/* array of KDS or Hash chunks */
+	cl_int		   *refcnt;			/* reference counter for each context */
+	CUdeviceptr	   *m_kmrels;		/* GPU memory for each CUDA context */
+	CUevent		   *ev_loaded;		/* Sync object for each CUDA context */
+	CUdeviceptr		m_lomaps;		/* Managed GPU memory for LEFT JOIN */
+	kern_multirels	kern;			/* header of in-kernel structure */
 } pgstrom_multirels;
 
 /*
@@ -250,7 +255,7 @@ multirels_begin(CustomScanState *node, EState *estate, int eflags)
 	}
 	mrs->outer_overflow = NULL;
 	mrs->outer_done = NULL;
-	mrs->curr_pmrels = NULL;
+	mrs->curr_chunk = NULL;
 
 	/*
 	 * initialize the expression state of hash-keys, if any
@@ -515,7 +520,7 @@ multirels_preload_hash_partial(MultiRelsState *mrs, kern_hashtable *khtable)
 	return true;
 }
 
-static kern_multirels *
+static void
 multirels_preload_hash(MultiRelsState *mrs, double *ntuples)
 {
 	TupleTableSlot *scan_slot = mrs->css.ss.ss_ScanTupleSlot;
@@ -641,22 +646,24 @@ multirels_preload_hash(MultiRelsState *mrs, double *ntuples)
 	{
 		Assert(mrs->gts.scan_done);
 		pfree(khtable);
-		khtable = NULL;
+		return;
 	}
 
 	/* release kern_hashtable, if no tuples were loaded */
 	if (khtable && khtable->nitems == 0)
 	{
 		pfree(khtable);
-		khtable = NULL;
+		return;
 	}
 
-	*p_ntuples = (!khtable ? 0.0 : (double)khtable->nitems);
+	/* OK, kern_hashtable was preloaded */
+	mrs->curr_chunk = khtable;
 
-	return khtable;
+	/* number of tuples read */
+	*p_ntuples = (double) khtable->nitems;
 }
 
-static pgstrom_data_store *
+static void
 multirels_preload_heap(MultiRelsState *mrs,
 					   pgstrom_multirels *pmrels,
 					   double *p_ntuples)
@@ -666,6 +673,7 @@ multirels_preload_heap(MultiRelsState *mrs,
 	HeapTuple		scan_tuple;
 	Size			chunk_size;
 	pgstrom_data_store *pds;
+	kern_data_store	   *kds;
 
 	/*
 	 * Make a pgstrom_data_store for materialization
@@ -719,15 +727,26 @@ multirels_preload_heap(MultiRelsState *mrs,
 		}
 	}
 
+	/* actually not loaded */
 	if (pds->kds->nitems == 0)
 	{
 		pgstrom_release_data_store(pds);
-		pds = NULL;
+		return;
 	}
 
-	*p_ntuples = (!pds ? 0.0 : (double)pds->kds->nitems);
+	/*
+	 * NOTE: all we need here is kern_data_store, not pgstrom_data_store.
+	 * So, we untrack PDS object and release it, but KDS shall be retained.
+	 */
+	kds = pds->kds;
+	Assert(pds->pds_chain.prev && pds->pds_chain.next && !pds->kds_fname);
+	dlist_delete(&pds->pds_chain);
+	pfree(pds);
 
-	return pds;
+	mrs->curr_chunk = kds;
+
+	/* number of tuples read */
+	*p_ntuples = (double)kds->nitems;
 }
 
 
@@ -757,7 +776,7 @@ multirels_exec_bulk(CustomScanState *node)
 				goto out;
 			scan_forward = true;
 		}
-		else if (!mrs->curr_pmrels)
+		else if (!mrs->curr_chunk)
 			scan_forward = true;
 	}
 	else
@@ -766,6 +785,8 @@ multirels_exec_bulk(CustomScanState *node)
 		kern_multirels *kmrels;
 		int		nrels = depth;
 		Size	head_length;
+		Size	alloc_length;
+		char   *pos;
 
 		if (mrs->outer_done)
 			goto out;
@@ -774,12 +795,25 @@ multirels_exec_bulk(CustomScanState *node)
 		/* allocation of pgstrom_multi_relations */
 		head_length = STROMALIGN(offsetof(pgstrom_multirels,
 										  kern.chunks[nrels]));
-		pmrels = MemoryContextAllocZero(gcontext->memcxt,
-										head_length + sizeof(void *) * nrels);
+		alloc_length = head_length +
+			STROMALIGN(sizeof(void *) * nrels) +
+			STROMALIGN(sizeof(cl_int) * gcontext->num_context) +
+			STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context) +
+			STROMALIGN(sizeof(CUevent) * gcontext->num_context);
+
+		pmrels = MemoryContextAllocZero(gcontext->memcxt, alloc_length);
 		pmrels->kmrels_length = mrs->kmrels_length;
 		pmrels->head_length = head_length;
 		pmrels->usage_length = head_length;
-		pmrels->inner_chunks = (void **)((char *)pmrels + head_length);
+
+		pos = (char *)pmrels + head_length;
+		pmrels->inner_chunks = (void **) pos;
+		pos += STROMALIGN(sizeof(void *) * nrels);
+		pmrels->refcnt = (cl_int *) pos;
+		pos += STROMALIGN(sizeof(cl_int) * gcontext->num_context);
+		pmrels->m_kmrels = (CUdeviceptr *) pos;
+		pos += STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context);
+		pmrels->ev_loaded = (CUevent *) pos;
 
 		memcpy(pmrels->kern.pg_crc32_table,
 			   pg_crc32c_table,
@@ -792,23 +826,36 @@ multirels_exec_bulk(CustomScanState *node)
 	}
 	Assert(pmrels != NULL);
 
+	/*
+	 * If needed, we make the outer scan advanced and load its contents
+	 * to the data-store or hash-table. Elsewhere, presious chunk shall
+	 * be used.
+	 */
 	if (scan_forward)
 	{
-		if (mrs->curr_pmrels != NULL)
+		if (mrs->curr_chunk != NULL)
 		{
-			pfree(mrs->curr_pmrels);
-			mrs->curr_pmrels = NULL;
+			pfree(mrs->curr_chunk);
+			mrs->curr_chunk = NULL;
 		}
-
 		if (mrs->hash_keys != NIL)
 			multirels_preload_hash(mrs, &ntuples);
 		else
 			multirels_preload_heap(mrs, &ntuples);
 	}
-	Assert(mrs->curr_pmrels != NULL);
-	pmrels->inner_chunks[depth - 1] = mrs->curr_pmrels;
-	pmrels->usage += mrs->curr_length;
 
+	if (!mrs->curr_chunk)
+	{
+		pfree(pmrels);
+		pmrels = NULL;	/* end of scan */
+	}
+	else
+	{
+		pmrels->inner_chunks[depth - 1] = mrs->curr_chunk;
+		pmrels->usage_length +=
+			((kern_data_store *)mrs->curr_chunk)->length;
+		Assert(pmrels->usage_length <= pmrels->kmrels_length);
+	}
 out:
 	/* must provide our own instrumentation support */
 	if (node->ss.ps.instrument)
@@ -828,10 +875,10 @@ multirels_end(CustomScanState *node)
 	/*
 	 * Release current chunk, if any
 	 */
-	if (mrs->curr_pmrels)
+	if (mrs->curr_chunk)
 	{
 		// TODO: put kds or hash here
-		mrs->curr_pmrels = NULL;
+		mrs->curr_chunk = NULL;
 	}
 
 	/*
@@ -848,6 +895,8 @@ static void
 multirels_rescan(CustomScanState *node)
 {
 	MultiRelsState *mrs = (MultiRelsState *) node;
+
+	// release curr_chunk here
 
 	if (innerPlanState(node))
 		ExecReScan(innerPlanState(node));
@@ -905,6 +954,162 @@ multirels_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 			mr_info->nslots,
 			100.0 * mr_info->kmrels_rate);
 	}
+}
+
+/*****/
+bool
+multirels_get_gpumem(void *__pmrels, GpuTask *gtask)
+{
+	pgstrom_multirels *pmrels = __pmrels;
+	cl_int		cuda_index = gtask->cuda_index;
+
+	if (pmrels->refcnt[cuda_index] == 0)
+	{
+		CUdeviceptr	m_kmrels;
+		CUdeviceptr	m_lomaps;
+
+		/* buffer for the inner multi-relations */
+		m_kmrels = gpuMemAlloc(gtask, pmrels->kmrels_length);
+		if (!m_kmrels)
+			return false;
+
+		if (pmrels->lomap_length > 0 && !pmrels->m_lomaps)
+		{
+			rc = cuMemAllocManaged(&m_lomaps,
+								   pmrels->lomap_length,
+								   CU_MEM_ATTACH_HOST);
+			if (rc != CUDA_SUCCESS)
+			{
+				if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+				{
+					gpuMemFree(gtask, m_kmrels);
+					return false;
+				}
+				elog(ERROR, "failed on cuMemAllocManaged: %s", errorText(rc));
+			}
+			/* zero clear in synchronous manner */
+			rc = cuMemsetD8(pmrels->m_lomaps, 0, pmrels->lomap_length);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuMemsetD8: %s", errorText(rc));
+		}
+		Assert(!pmrels->m_kmrels[cuda_index]);
+		Assert(!pmrels->ev_loaded[cuda_index]);
+		Assert(!pmrels->m_lomaps);
+		pmrels->m_kmrels[cuda_index] = m_kmrels;
+		pmrels->m_lomaps = m_lomaps;
+	}
+	pmrels->refcnt[cuda_index]++;
+	return true;
+}
+
+
+void
+multirels_put_gpumem(void *__pmrels, GpuTask *gtask, bool is_last_call)
+{
+	pgstrom_multirels *pmrels = __pmrels;
+	cl_int		i, cuda_index = gtask->cuda_index;
+	CUresult	rc;
+
+	Assert(pmrels->refcnt[cuda_index] > 0);
+	if (--pmrels->refcnt[cuda_index] == 0)
+	{
+		/*
+		 * Release left-outer map, if this managed memory was acquired and
+		 * this call is actually the last one.
+		 */
+		if (is_last_call && pmrels->m_lomaps)
+		{
+			bool	found = false;
+
+			for (i=0; i < gcontext->num_context; i++)
+			{
+				if (pmrels->refcnt[i] > 0)
+				{
+					found = true;
+					break;
+				}
+			}
+			if (!found)
+			{
+				rc = cuMemFree(pmrels->m_lomaps);
+				if (rc != CUDA_SUCCESS)
+					elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
+			}
+		}
+
+		/*
+		 * Also, release device memory for inner multi-relations
+		 */
+		Assert(pmrels->m_kmrels[cuda_index] != 0UL);
+		gpuMemFree(gtask, pmrels->m_kmrels[cuda_index]);
+		pmrels->m_kmrels[cuda_index] = 0UL;
+
+		/*
+		 * Also, event object if any
+		 */
+		if (pmrels->ev_loaded[cuda_index])
+		{
+			rc = cuEventDestroy(pmrels->ev_loaded[cuda_index]);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuEventDestroy: %s", errorText(rc));
+			pmrels->ev_loaded[cuda_index] = NULL;
+		}
+	}
+}
+
+void
+multirels_send_gpumem(void *__pmrels, GpuTask *gtask)
+{
+	pgstrom_multirels *pmrels = __pmrels;
+	cl_int		cuda_index = gtask->cuda_index;
+	CUstream	cuda_stream = gtask->cuda_stream;
+	CUresult	rc;
+
+	if (!pmrels->ev_loaded[cuda_index])
+	{
+		CUdeviceptr	m_kmrels = pmrels->m_kmrels[cuda_index];
+		CUevent		ev_loaded;
+		cl_int		i;
+
+		rc = cuEventCreate(&ev_loaded, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+
+		/* DMA send to the kern_multirels buffer */
+		rc = cuMemcpyHtoDAsync(m_kmrels, &pmrels->kern, pmrels->head_length,
+							   cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+
+		for (i=0; i < pmrels->kern.nrels; i++)
+		{
+			kern_data_store *kds = pmrels->inner_chunks[i];
+			Size	offset = pmrels->kern.chunks[i].chunk_offset;
+
+			rc = cuMemcpyHtoDAsync(m_kmrels + offset, kds, kds->length,
+								   cuda_stream);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		}
+		/* save the event */
+		pmrels->ev_loaded[cuda_index] = ev_loaded;
+	}
+	/* DMA Send synchronization */
+	rc = cuEventRecord(pmrels->ev_loaded[cuda_index], cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
+}
+
+void
+multirels_get_gpu_pointers(void *__pmrels, GpuTask *gtask,
+						   CUdeviceptr *p_kmrels,
+						   CUdeviceptr *p_lomaps)
+{
+	pgstrom_multirels *pmrels = __pmrels;
+	cl_int		cuda_index = gtask->cuda_index;
+
+	*p_kmrels = pmrels->m_kmrels[cuda_index];
+	*p_lomaps = pmrels->m_lomaps;
 }
 
 /*
