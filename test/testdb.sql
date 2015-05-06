@@ -11,12 +11,13 @@ CREATE TABLE t1 (aid int, atext text);
 CREATE TABLE t2 (bid int, btext text);
 CREATE TABLE t3 (cid int, ctext text);
 CREATE TABLE t4 (did int, dtext text);
-CREATE TABLE t5 (eid int, a real, b real, ymd date);
+CREATE TABLE t5 (eid int, etext text);
 
 INSERT INTO t1 (SELECT x, md5((x+1)::text) FROM generate_series(1,40000) x);
 INSERT INTO t2 (SELECT x, md5((x+2)::text) FROM generate_series(1,40000) x);
 INSERT INTO t3 (SELECT x, md5((x+3)::text) FROM generate_series(1,40000) x);
 INSERT INTO t4 (SELECT x, md5((x+4)::text) FROM generate_series(1,40000) x);
+INSERT INTO t5 (SELECT x, md5((x+4)::text) FROM generate_series(1,40000) x);
 INSERT INTO t0 (SELECT x, CASE floor(random()*26)
                           WHEN  0 THEN 'aaa'
                           WHEN  1 THEN 'bbb'
@@ -52,8 +53,5 @@ INSERT INTO t0 (SELECT x, CASE floor(random()*26)
                        floor(random() * 40000 + 1),
                        random() * 100,
                        random() * 100,
-                       md5(x::text) FROM generate_series(1,20000000) x);
+                       md5(x::text) FROM generate_series(1,10000000) x);
 
-INSERT INTO t5 (SELECT x % 40000, random() * 100, random() * 100,
-                       now()::date - floor(random() * 20)::int
-                FROM generate_series(1,4000000) x);

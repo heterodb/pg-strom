@@ -3,8 +3,8 @@
  *
  * Aggregate Pre-processing with GPU acceleration
  * ----
- * Copyright 2011-2014 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014 (C) The PG-Strom Development Team
+ * Copyright 2011-2015 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2015 (C) The PG-Strom Development Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -39,12 +39,13 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/numeric.h"
+#include "utils/pg_crc.h"
 #include "utils/syscache.h"
 #include <math.h>
 #include "pg_strom.h"
-#include "opencl_common.h"
-#include "opencl_numeric.h"
-#include "opencl_gpupreagg.h"
+#include "cuda_common.h"
+#include "cuda_numeric.h"
+#include "cuda_gpupreagg.h"
 
 static CustomScanMethods		gpupreagg_scan_methods;
 static CustomExecMethods		gpupreagg_exec_methods;
@@ -179,37 +180,70 @@ deform_gpupreagg_info(CustomScan *cscan)
 
 typedef struct
 {
-	CustomScanState	css;
+	GpuTaskState	gts;
 	ProjectionInfo *bulk_proj;
 	TupleTableSlot *bulk_slot;
 	double			num_groups;		/* estimated number of groups */
 	double			ntups_per_page;	/* average number of tuples per page */
 	List		   *outer_quals;
-	bool			outer_done;
-	bool			outer_bulkload;
+	//bool			outer_done;
+	//bool			outer_bulkload;
 	TupleTableSlot *outer_overflow;
 
-	pgstrom_queue  *mqueue;
-	const char	   *kern_source;
-	Datum			dprog_key;
 	kern_parambuf  *kparams;
 	bool			needs_grouping;
 	bool			local_reduction;
 	bool			has_numeric;
 	bool			has_varlena;
 
-	pgstrom_gpupreagg  *curr_chunk;
-	cl_uint			curr_index;
-	bool			curr_recheck;
 	cl_uint			num_rechecks;
-	cl_uint			num_running;
-	dlist_head		ready_chunks;
-
-	pgstrom_perfmon	pfm;		/* performance counter */
 } GpuPreAggState;
 
+/* Host side representation of kern_gpupreagg. It can perform as a message
+ * object of PG-Strom, has key of OpenCL device program, a source row/column
+ * store and a destination kern_data_store.
+ */
+typedef struct
+{
+	GpuTask			task;
+	bool			needs_fallback;	/* true, if StromError_CpuReCheck */
+	bool			needs_grouping;	/* true, if it takes GROUP BY clause */
+	bool			local_reduction;/* true, if it needs local reduction */
+	bool			has_varlena;	/* true, if it has varlena grouping keys */
+	double			num_groups;		/* estimated number of groups */
+	CUfunction		kern_prep;
+	void		   *kern_prep_args[4];
+	CUfunction		kern_lagg;
+	void		   *kern_lagg_args[5];
+	CUfunction		kern_gagg;
+	void		   *kern_gagg_args[4];
+	CUfunction		kern_nogrp;
+	void		   *kern_nogrp_args[4];
+	CUfunction		kern_fixvar;
+	void		   *kern_fixvar_args[3];
+	CUdeviceptr		m_gpreagg;
+	CUdeviceptr		m_kds_in;		/* kds_in : input stream */
+	CUdeviceptr		m_kds_src;		/* kds_src : slot form of kds_in */
+	CUdeviceptr		m_kds_dst;		/* kds_dst : final aggregation result */
+	CUdeviceptr		m_ghash;		/* global hash slot */
+	CUevent			ev_dma_send_start;
+	CUevent			ev_dma_send_stop;
+	CUevent			ev_kern_prep_end;
+	CUevent			ev_kern_lagg_end;
+	CUevent			ev_dma_recv_start;
+	CUevent			ev_dma_recv_stop;
+	pgstrom_data_store *pds_in;		/* source data-store */
+	pgstrom_data_store *pds_dst;	/* result data-store */
+	kern_resultbuf *kresults;
+	kern_gpupreagg	kern;
+} pgstrom_gpupreagg;
+
 /* declaration of static functions */
-static void clserv_process_gpupreagg(pgstrom_message *message);
+static bool		gpupreagg_task_process(GpuTask *gtask);
+static bool		gpupreagg_task_complete(GpuTask *gtask);
+static void		gpupreagg_task_release(GpuTask *gtask);
+static GpuTask *gpupreagg_next_chunk(GpuTaskState *gts);
+static TupleTableSlot *gpupreagg_next_tuple(GpuTaskState *gts);
 
 /*
  * Arguments of alternative functions.
@@ -1462,11 +1496,11 @@ gpupreagg_codegen_qual_eval(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	initStringInfo(&str);
 	appendStringInfo(
         &str,
-        "static bool\n"
-        "gpupreagg_qual_eval(__private cl_int *errcode,\n"
-        "                    __global kern_parambuf *kparams,\n"
-        "                    __global kern_data_store *kds,\n"
-        "                    __global kern_data_store *ktoast,\n"
+        "STATIC_FUNCTION(bool)\n"
+        "gpupreagg_qual_eval(cl_int *errcode,\n"
+        "                    kern_parambuf *kparams,\n"
+        "                    kern_data_store *kds,\n"
+        "                    kern_data_store *ktoast,\n"
         "                    size_t kds_index)\n"
         "{\n");
 
@@ -1526,17 +1560,17 @@ gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	context->param_refs = NULL;
 
 	appendStringInfo(&decl,
-					 "static cl_uint\n"
-					 "gpupreagg_hashvalue(__private cl_int *errcode,\n"
-					 "                    __local cl_uint *crc32_table,\n"
-					 "                    __global kern_data_store *kds,\n"
-					 "                    __global kern_data_store *ktoast,\n"
+					 "STATIC_FUNCTION(cl_uint)\n"
+					 "gpupreagg_hashvalue(cl_int *errcode,\n"
+					 "                    cl_uint *crc32_table,\n"
+					 "                    kern_data_store *kds,\n"
+					 "                    kern_data_store *ktoast,\n"
 					 "                    size_t kds_index)\n"
 					 "{\n");
 	appendStringInfo(&body,
 					 "  cl_uint hashval;\n"
 					 "\n"
-					 "  INIT_CRC32C(hashval);\n");
+					 "  INIT_LEGACY_CRC32(hashval);\n");
 
 	for (i=0; i < gpa_info->numCols; i++)
 	{
@@ -1558,11 +1592,11 @@ gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 				 var->vartype);
 
 		/* variable declarations */
-		appendStringInfo(&decl,
-						 "  pg_%s_t keyval_%u"
-						 " = pg_%s_vref(kds,ktoast,errcode,%u,kds_index);\n",
-						 dtype->type_name, resno,
-						 dtype->type_name, resno - 1);
+		appendStringInfo(
+			&decl,
+			"  pg_%s_t keyval_%u = pg_%s_vref(kds,errcode,%u,kds_index);\n",
+			dtype->type_name, resno,
+			dtype->type_name, resno - 1);
 
 		/* crc32 computing */
 		appendStringInfo(
@@ -1574,7 +1608,7 @@ gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	Assert(bms_is_empty(context->param_refs));
 
 	appendStringInfo(&body,
-					 "  FIN_CRC32C(hashval);\n");
+					 "  FIN_LEGACY_CRC32(hashval);\n");
 	appendStringInfo(&decl,
 					 "%s\n"
 					 "  return hashval;\n"
@@ -1649,14 +1683,14 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 		 */
 		appendStringInfo(
 			&body,
-			"  xkeyval_%u = pg_%s_vref(kds,ktoast,errcode,%u,x_index);\n"
-			"  ykeyval_%u = pg_%s_vref(kds,ktoast,errcode,%u,y_index);\n"
+			"  xkeyval_%u = pg_%s_vref(kds,errcode,%u,x_index);\n"
+			"  ykeyval_%u = pg_%s_vref(kds,errcode,%u,y_index);\n"
 			"  if (!xkeyval_%u.isnull && !ykeyval_%u.isnull)\n"
 			"  {\n"
 			"    if (!EVAL(pgfn_%s(errcode, xkeyval_%u, ykeyval_%u)))\n"
 			"      return false;\n"
 			"  }\n"
-			"  else if ((xkeyval_%u.isnull  && !ykeyval_%u.isnull) ||"
+			"  else if ((xkeyval_%u.isnull  && !ykeyval_%u.isnull) ||\n"
 			"           (!xkeyval_%u.isnull &&  ykeyval_%u.isnull))\n"
 			"      return false;\n",
 			resno, dtype->type_name, resno - 1,
@@ -1679,10 +1713,10 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 
 	/* make a whole key-compare function */
 	appendStringInfo(&str,
-					 "static cl_bool\n"
-					 "gpupreagg_keymatch(__private int *errcode,\n"
-					 "                   __global kern_data_store *kds,\n"
-					 "                   __global kern_data_store *ktoast,\n"
+					 "STATIC_FUNCTION(cl_bool)\n"
+					 "gpupreagg_keymatch(int *errcode,\n"
+					 "                   kern_data_store *kds,\n"
+					 "                   kern_data_store *ktoast,\n"
 					 "                   size_t x_index,\n"
 					 "                   size_t y_index)\n"
 					 "{\n"
@@ -1748,11 +1782,11 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	case AGGCALC_LOCAL_REDUCTION:
 		appendStringInfo(
 			&body,
-			"static void\n"
-			"gpupreagg_local_calc(__private cl_int *errcode,\n"
+			"STATIC_FUNCTION(void)\n"
+			"gpupreagg_local_calc(cl_int *errcode,\n"
 			"                     cl_int attnum,\n"
-			"                     __local pagg_datum *accum,\n"
-			"                     __local pagg_datum *newval)\n"
+			"                     pagg_datum *accum,\n"
+			"                     pagg_datum *newval)\n"
 			"{\n");
 		aggcalc_class = "LOCAL";
         aggcalc_args = "errcode,accum,newval";
@@ -1760,20 +1794,20 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	case AGGCALC_GLOBAL_REDUCTION:
 		appendStringInfo(
 			&body,
-			"static void\n"
-			"gpupreagg_global_calc(__private cl_int *errcode,\n"
+			"STATIC_FUNCTION(void)\n"
+			"gpupreagg_global_calc(cl_int *errcode,\n"
 			"                      cl_int attnum,\n"
-			"                      __global kern_data_store *kds,\n"
-			"                      __global kern_data_store *ktoast,\n"
+			"                      kern_data_store *kds,\n"
+			"                      kern_data_store *ktoast,\n"
 			"                      size_t accum_index,\n"
 			"                      size_t newval_index)\n"
 			"{\n"
-			"  __global char  *accum_isnull;\n"
-			"  __global Datum *accum_value;\n"
-			"  char            new_isnull;\n"
-			"  Datum           new_value;\n"
+			"  char    *accum_isnull;\n"
+			"  Datum   *accum_value;\n"
+			"  char     new_isnull;\n"
+			"  Datum    new_value;\n"
 			"\n"
-			"  if (kds->format != KDS_FORMAT_TUPSLOT)\n"
+			"  if (kds->format != KDS_FORMAT_SLOT)\n"
 			"  {\n"
 			"    STROM_SET_ERROR(errcode,StromError_SanityCheckViolation);\n"
 			"    return;\n"
@@ -1789,11 +1823,11 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	case AGGCALC_NOGROUP_REDUCTION:
 		appendStringInfo(
 			&body,
-			"static void\n"
-			"gpupreagg_nogroup_calc(__private cl_int *errcode,\n"
+			"STATIC_FUNCTION(void)\n"
+			"gpupreagg_nogroup_calc(cl_int *errcode,\n"
 			"                       cl_int attnum,\n"
-			"                       __local pagg_datum *accum,\n"
-			"                       __local pagg_datum *newval)\n"
+			"                       pagg_datum *accum,\n"
+			"                       pagg_datum *newval)\n"
 			"{\n");
 		aggcalc_class = "NOGROUP";
         aggcalc_args = "errcode,accum,newval";
@@ -1981,10 +2015,10 @@ gpupreagg_codegen_projection_nrows(StringInfo body, FuncExpr *func,
 						 "  temp_int4.isnull = false;\n"
 						 "  temp_int4.value = 1;\n");
 	appendStringInfo(body,
-					 "  pg_%s_vstore(%s,%s,errcode,%u,%s,temp_int4);\n",
+					 "  pg_%s_vstore(%s,errcode,%u,%s,temp_int4);\n",
 					 dtype->type_name,
 					 pc->kds_label,
-					 pc->ktoast_label,
+					 //pc->ktoast_label,
 					 pc->tle->resno - 1,
 					 pc->rowidx_label);
 }
@@ -2092,10 +2126,10 @@ gpupreagg_codegen_projection_misc(StringInfo body, FuncExpr *func,
 		elog(ERROR, "unexpected partial aggregate function: %s", func_name);
 
 	appendStringInfo(body,
-					 "  pg_%s_vstore(%s,%s,errcode,%u,%s,%s);\n",
+					 "  pg_%s_vstore(%s,errcode,%u,%s,%s);\n",
 					 dtype->type_name,
 					 pc->kds_label,
-					 pc->ktoast_label,
+					 //pc->ktoast_label,
 					 pc->tle->resno - 1,
 					 pc->rowidx_label,
 					 temp_val);
@@ -2149,7 +2183,7 @@ gpupreagg_codegen_projection_psum_x2(StringInfo body, FuncExpr *func,
 		"    %s.value = %s;\n"
 		"  else\n"
 		"    %s = pgfn_%s(errcode, %s, %s);\n"
-		"  pg_%s_vstore(%s,%s,errcode,%u,%s,%s);\n",
+		"  pg_%s_vstore(%s,errcode,%u,%s,%s);\n",
 		temp_label,
         pgstrom_codegen_expression(clause, pc->context),
 		temp_label,
@@ -2161,7 +2195,7 @@ gpupreagg_codegen_projection_psum_x2(StringInfo body, FuncExpr *func,
 		temp_label,
 		dtype->type_name,
 		pc->kds_label,
-        pc->ktoast_label,
+        //pc->ktoast_label,
         pc->tle->resno - 1,
         pc->rowidx_label,
 		temp_label);
@@ -2271,10 +2305,10 @@ gpupreagg_codegen_projection_corr(StringInfo body, FuncExpr *func,
 		body,
 		"  if (temp_float8x.isnull)\n"
 		"    temp_float8x.value = 0.0;\n"
-		"  pg_%s_vstore(%s,%s,errcode,%u,%s,temp_float8x);\n",
+		"  pg_%s_vstore(%s,errcode,%u,%s,temp_float8x);\n",
 		dtype->type_name,
 		pc->kds_label,
-		pc->ktoast_label,
+		//pc->ktoast_label,
 		pc->tle->resno - 1,
 		pc->rowidx_label);
 }
@@ -2341,11 +2375,11 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			appendStringInfo(
 				&body,
 				"  /* projection for resource %u */\n"
-				"  pg_%s_vstore(%s,%s,errcode,%u,%s,KVAR_%u);\n",
+				"  pg_%s_vstore(%s,errcode,%u,%s,KVAR_%u);\n",
 				pc.tle->resno - 1,
 				dtype->type_name,
 				pc.kds_label,
-				pc.ktoast_label,
+				//pc.ktoast_label,
 				pc.tle->resno - 1,
 				pc.rowidx_label,
 				var->varattno);
@@ -2365,10 +2399,10 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			appendStringInfo(
 				&body,
 				"  /* projection for resource %u */\n"
-				"  pg_common_vstore(%s,%s,errcode,%u,%s,true);\n",
+				"  pg_common_vstore(%s,errcode,%u,%s,0,true);\n",
 				pc.tle->resno - 1,
 				pc.kds_label,
-				pc.ktoast_label,
+				//pc.ktoast_label,
 				pc.tle->resno - 1,
 				pc.rowidx_label);
 		}
@@ -2448,8 +2482,8 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
 			appendStringInfo(
 				&decl1,
-				"  pg_%s_t KVAR_%u"
-				" = pg_%s_vref(kds_in,ktoast,errcode,%u,rowidx_in);\n",
+				"  pg_%s_t KVAR_%u "
+				"= pg_%s_vref(kds_in,errcode,%u,rowidx_in);\n",
 				dtype->type_name,
 				tle->resno,
 				dtype->type_name,
@@ -2486,13 +2520,12 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 
 	appendStringInfo(
 		&str,
-		"static void\n"
-		"gpupreagg_projection(__private cl_int *errcode,\n"
-		"            __global kern_parambuf *kparams,\n"
-		"            __global kern_data_store *kds_in,\n"
-		"            __global kern_data_store *kds_src,\n"
-		"            __global void *ktoast,\n"
-		"            size_t rowidx_in, size_t rowidx_out)\n"
+		"STATIC_FUNCTION(void)\n"
+		"gpupreagg_projection(cl_int *errcode,\n"
+		"                     kern_parambuf *kparams,\n"
+		"                     kern_data_store *kds_in,\n"
+		"                     kern_data_store *kds_src,\n"
+		"                     size_t rowidx_in, size_t rowidx_out)\n"
 		"{\n"
 		"%s"
 		"%s"
@@ -2789,8 +2822,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	 */
 	pgstrom_init_codegen_context(&context);
 	gpa_info.kern_source = gpupreagg_codegen(cscan, &gpa_info, &context);
-	gpa_info.extra_flags = extra_flags | context.extra_flags |
-		(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
+	gpa_info.extra_flags = extra_flags | context.extra_flags;
 	gpa_info.used_params = context.used_params;
 	pull_varattnos((Node *)context.used_vars,
 				   INDEX_VAR,
@@ -2846,10 +2878,21 @@ pgstrom_plan_is_gpupreagg(const Plan *plan)
 static Node *
 gpupreagg_create_scan_state(CustomScan *cscan)
 {
-	GpuPreAggState *gpas = palloc0(sizeof(GpuPreAggState));
-
+	GpuContext	   *gcontext = pgstrom_get_gpucontext();
+	GpuPreAggState *gpas = MemoryContextAllocZero(gcontext->memcxt,
+												  sizeof(GpuPreAggState));
+	/* Set tag and executor callbacks */
 	NodeSetTag(gpas, T_CustomScanState);
-	gpas->css.methods = &gpupreagg_exec_methods;
+	gpas->gts.css.flags = cscan->flags;
+	gpas->gts.css.methods = &gpupreagg_exec_methods;
+	/* GpuTaskState setup */
+	pgstrom_init_gputaskstate(gcontext, &gpas->gts);
+	gpas->gts.cb_task_process = gpupreagg_task_process;
+	gpas->gts.cb_task_complete = gpupreagg_task_complete;
+	gpas->gts.cb_task_release = gpupreagg_task_release;
+	gpas->gts.cb_next_chunk = gpupreagg_next_chunk;
+	gpas->gts.cb_next_tuple = gpupreagg_next_tuple;
+	gpas->gts.cb_cleanup = NULL;
 
 	return (Node *) gpas;
 }
@@ -2874,9 +2917,9 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	 * initialize child node
 	 */
 	outerPlanState(gpas) = ExecInitNode(outerPlan(cscan), estate, eflags);
-	gpas->outer_bulkload =
+	gpas->gts.scan_bulk =
 		(!pgstrom_debug_bulkload_enabled ? false : gpa_info->outer_bulkload);
-	gpas->outer_done = false;
+	//gpas->outer_done = false;
 	gpas->outer_overflow = NULL;
 
 	outer_width = outerPlanState(gpas)->plan->plan_width;
@@ -2889,7 +2932,7 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	/*
 	 * initialize result tuple type and projection info
 	 */
-	if (gpas->outer_bulkload)
+	if (gpas->gts.scan_bulk)
 	{
 		CustomScanState *ocss = (CustomScanState *) outerPlanState(gpas);
 
@@ -2914,12 +2957,10 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	/*
 	 * Setting up kernel program and message queue
 	 */
-	gpas->kern_source = gpa_info->kern_source;
-	gpas->dprog_key = pgstrom_get_devprog_key(gpa_info->kern_source,
-											  gpa_info->extra_flags);
-	pgstrom_track_object((StromObject *)gpas->dprog_key, 0);
-	gpas->mqueue = pgstrom_create_queue();
-	pgstrom_track_object(&gpas->mqueue->sobj, 0);
+	gpas->gts.kern_source = gpa_info->kern_source;
+	gpas->gts.extra_flags = gpa_info->extra_flags;
+	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+        pgstrom_preload_cuda_program(&gpas->gts);
 
 	/*
 	 * init misc stuff
@@ -2928,148 +2969,82 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	gpas->local_reduction = true;	/* tentative */
 	gpas->has_numeric = gpa_info->has_numeric;
 	gpas->has_varlena = gpa_info->has_varlena;
-	gpas->curr_chunk = NULL;
-	gpas->curr_index = 0;
-	gpas->curr_recheck = false;
 	gpas->num_rechecks = 0;
-	dlist_init(&gpas->ready_chunks);
-
-	/*
-	 * Is perfmon needed?
-	 */
-	gpas->pfm.enabled = pgstrom_perfmon_enabled;
-}
-
-static void
-pgstrom_release_gpupreagg(pgstrom_message *message)
-{
-	pgstrom_gpupreagg *gpupreagg = (pgstrom_gpupreagg *) message;
-
-	/* unlink message queue and device program */
-	pgstrom_put_queue(gpupreagg->msg.respq);
-	pgstrom_put_devprog_key(gpupreagg->dprog_key);
-
-	/* unlink source data-store */
-	pgstrom_put_data_store(gpupreagg->pds);
-
-	/* unlink result data-store */
-	if (gpupreagg->pds_dest)
-		pgstrom_put_data_store(gpupreagg->pds_dest);
-
-	pgstrom_shmem_free(gpupreagg);
 }
 
 static pgstrom_gpupreagg *
-pgstrom_create_gpupreagg(GpuPreAggState *gpas, pgstrom_bulkslot *bulk)
+gpupreagg_task_create(GpuPreAggState *gpas, pgstrom_data_store *pds_in)
 {
-	pgstrom_gpupreagg  *gpupreagg;
+	GpuContext		   *gcontext = gpas->gts.gcontext;
+	pgstrom_gpupreagg  *gpreagg;
 	kern_parambuf	   *kparams;
-	kern_row_map	   *krowmap;
-	pgstrom_data_store *pds = bulk->pds;
-	kern_data_store	   *kds = pds->kds;
-	pgstrom_data_store *pds_dest;
+	kern_resultbuf	   *kresults;
 	TupleDesc			tupdesc;
-	cl_int				nvalids = bulk->nvalids;
-	cl_uint				nitems = kds->nitems;
+	size_t				nitems = pds_in->kds->nitems;
 	Size				required;
 
-	/*
-	 * Allocation of pgtrom_gpupreagg message object
-	 *
-	 * NOTE: kern_row_map is also used to buffer of kds_index.
-	 * So, even if we have no input row-map, at least nitems's
-	 * slot needed to be allocated.
-	 */
-	required = STROMALIGN(offsetof(pgstrom_gpupreagg,
-								   kern.kparams) +
-						  gpas->kparams->length);
-	if (nvalids < 0)
-		required += STROMALIGN(offsetof(kern_row_map, rindex[nitems]));
-	else
-		required += STROMALIGN(offsetof(kern_row_map, rindex[nvalids]));
-	gpupreagg = pgstrom_shmem_alloc(required);
-	if (!gpupreagg)
-		elog(ERROR, "out of shared memory");
+	/* allocation of pgtrom_gpupreagg */
+	required = (STROMALIGN(offsetof(pgstrom_gpupreagg, kern.kparams) +
+						   gpas->kparams->length) +
+				STROMALIGN(offsetof(kern_resultbuf, results[nitems])));
+	gpreagg = MemoryContextAllocZero(gcontext->memcxt, required);
 
-	/* initialize the common message field */
-	memset(gpupreagg, 0, required);
-	gpupreagg->msg.sobj.stag = StromTag_GpuPreAgg;
-	SpinLockInit(&gpupreagg->msg.lock);
-	gpupreagg->msg.refcnt = 1;
-    gpupreagg->msg.respq = pgstrom_get_queue(gpas->mqueue);
-    gpupreagg->msg.cb_process = clserv_process_gpupreagg;
-    gpupreagg->msg.cb_release = pgstrom_release_gpupreagg;
-    gpupreagg->msg.pfm.enabled = gpas->pfm.enabled;
-	/* other fields also */
-	gpupreagg->dprog_key = pgstrom_retain_devprog_key(gpas->dprog_key);
-	gpupreagg->needs_grouping = gpas->needs_grouping;
-	gpupreagg->local_reduction = gpas->local_reduction;
-	gpupreagg->has_varlena = gpas->has_varlena;
-	gpupreagg->num_groups = gpas->num_groups;
-	gpupreagg->pds = pds;
-	/*
-	 * Once a row/column data-store connected to the pgstrom_gpupreagg
-	 * structure, it becomes pgstrom_release_gpupreagg()'s role to
-	 * unlink this data-store. So, we don't need to track individual
-	 * data-store no longer.
-	 */
-	pgstrom_untrack_object(&pds->sobj);
-	pgstrom_track_object(&gpupreagg->msg.sobj, 0);
+	/* initialize GpuTask object */
+	pgstrom_init_gputask(&gpas->gts, &gpreagg->task);
+	gpreagg->needs_fallback = false;
+	gpreagg->needs_grouping = gpas->needs_grouping;
+	gpreagg->local_reduction = gpas->local_reduction;
+	gpreagg->has_varlena = gpas->has_varlena;
+	gpreagg->num_groups = gpas->num_groups;
+	gpreagg->pds_in = pds_in;
 
-	/*
-	 * Also initialize kern_gpupreagg portion
-	 */
-	gpupreagg->kern.status = StromError_Success;
-	gpupreagg->kern.hash_size = (nvalids < 0 ? nitems : nvalids);
-	memcpy(gpupreagg->kern.pg_crc32_table,
-		   pg_crc32c_table,
+	/* also initialize kern_gpupreagg portion */
+	gpreagg->kern.hash_size = nitems;
+	memcpy(gpreagg->kern.pg_crc32_table,
+		   pg_crc32_table,
 		   sizeof(uint32) * 256);
 	/* kern_parambuf */
-	kparams = KERN_GPUPREAGG_PARAMBUF(&gpupreagg->kern);
+	kparams = KERN_GPUPREAGG_PARAMBUF(&gpreagg->kern);
 	memcpy(kparams, gpas->kparams, gpas->kparams->length);
-	/* kern_row_map */
-	krowmap = KERN_GPUPREAGG_KROWMAP(&gpupreagg->kern);
-	if (nvalids < 0)
-		krowmap->nvalids = -1;
-	else
-	{
-		krowmap->nvalids = nvalids;
-		memcpy(krowmap->rindex, bulk->rindex, sizeof(cl_uint) * nvalids);
-	}
+	/* kern_resultbuf */
+	kresults = gpreagg->kresults = KERN_GPUPREAGG_RESULTBUF(&gpreagg->kern);
+	kresults->nrels = 1;
+	kresults->nrooms = nitems;
+	kresults->nitems = 0;
+	kresults->errcode = StromError_Success;
+	kresults->has_rechecks = false;
+	kresults->all_visible = true;
 
 	/*
-	 * Allocation of the result data-store
+	 * allocation of the result buffer
+	 *
+	 * note: GpuPreAgg does not have bulk-load output so, no need to have
+	 *       relevant toast buffer.
 	 */
-	tupdesc = gpas->css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
-	pds_dest = pgstrom_create_data_store_tupslot(tupdesc,
-												 (nvalids < 0
-												  ? nitems
-												  : nvalids),
-												 gpas->has_numeric);
-	if (!pds_dest)
-		elog(ERROR, "out of shared memory");
-	gpupreagg->pds_dest = pds_dest;
-
-	return gpupreagg;
+	tupdesc = gpas->gts.css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
+	gpreagg->pds_dst = pgstrom_create_data_store_slot(gcontext,
+													  tupdesc,
+													  nitems,
+													  gpas->has_numeric,
+													  NULL);
+	return gpreagg;
 }
 
-static pgstrom_gpupreagg *
-gpupreagg_load_next_outer(GpuPreAggState *gpas)
+static GpuTask *
+gpupreagg_next_chunk(GpuTaskState *gts)
 {
+	GpuContext		   *gcontext = gts->gcontext;
+	GpuPreAggState	   *gpas = (GpuPreAggState *) gts;
 	PlanState		   *subnode = outerPlanState(gpas);
-	pgstrom_gpupreagg  *gpupreagg = NULL;
 	pgstrom_data_store *pds = NULL;
-	pgstrom_bulkslot	bulkdata;
-	pgstrom_bulkslot   *bulk = NULL;
 	struct timeval		tv1, tv2;
 
-	if (gpas->outer_done)
+	if (gpas->gts.scan_done)
 		return NULL;
 
-	if (gpas->pfm.enabled)
-		gettimeofday(&tv1, NULL);
+	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
 
-	if (!gpas->outer_bulkload)
+	if (!gpas->gts.scan_bulk)
 	{
 		/* Scan the outer relation using row-by-row mode */
 		TupleDesc		tupdesc
@@ -3089,54 +3064,37 @@ gpupreagg_load_next_outer(GpuPreAggState *gpas)
 				slot = ExecProcNode(subnode);
 				if (TupIsNull(slot))
 				{
-					gpas->outer_done = true;
+					gpas->gts.scan_done = true;
 					break;
 				}
 			}
 
 			if (!pds)
-			{
-				pds = pgstrom_create_data_store_row_flat(tupdesc,
-														 pgstrom_chunk_size());
-				pgstrom_track_object(&pds->sobj, 0);
-			}
-			/* insert tuple to the data-store */
+				pds = pgstrom_create_data_store_row(gcontext,
+													tupdesc,
+													pgstrom_chunk_size(),
+													false);
+			/* insert a tuple to the data-store */
 			if (!pgstrom_data_store_insert_tuple(pds, slot))
 			{
 				gpas->outer_overflow = slot;
 				break;
 			}
 		}
-
-		if (pds)
-		{
-			memset(&bulkdata, 0, sizeof(pgstrom_bulkslot));
-			bulkdata.pds = pds;
-			bulkdata.nvalids = -1;	/* all valid */
-			bulk = &bulkdata;
-		}
 	}
 	else
 	{
 		/* Load a bunch of records at once */
-		bulk = (pgstrom_bulkslot *) BulkExecProcNode(subnode);
-        if (!bulk)
-			gpas->outer_done = true;
+		pds = BulkExecProcNode(subnode);
+		if (!pds)
+			gpas->gts.scan_done = true;
 	}
-	if (gpas->pfm.enabled)
-	{
-		gettimeofday(&tv2, NULL);
-		gpas->pfm.time_outer_load += timeval_diff(&tv1, &tv2);
-	}
-	if (bulk)
-	{
-		/* Older style no longer supported */
-		if (bulk->nvalids >= 0)
-			elog(ERROR, "Bulk-load with rowmap no longer supported");
-		gpupreagg = pgstrom_create_gpupreagg(gpas, bulk);
-	}
+	PERFMON_END(&gts->pfm_accum, time_outer_load, &tv1, &tv2);
 
-	return gpupreagg;
+	if (!pds)
+		return NULL;	/* no more tuples to read */
+
+	return (GpuTask *) gpupreagg_task_create(gpas, pds);
 }
 
 /*
@@ -3147,117 +3105,95 @@ gpupreagg_load_next_outer(GpuPreAggState *gpas)
  * no performance benefit once it happen.
  */
 static TupleTableSlot *
-gpupreagg_next_tuple_fallback(GpuPreAggState *gpas)
+gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, pgstrom_gpupreagg *gpreagg)
 {
-	pgstrom_gpupreagg  *gpreagg = gpas->curr_chunk;
-	pgstrom_data_store *pds = gpreagg->pds;
-	kern_data_store	   *kds = pds->kds;
-	TupleTableSlot	   *slot_in;
-	TupleTableSlot	   *slot_out = NULL;
+	pgstrom_data_store *pds = gpreagg->pds_in;
+	TupleTableSlot	   *slot;
+	size_t				nitems = pds->kds->nitems;
 	cl_uint				row_index;
 	HeapTupleData		tuple;
 
 	/* bulk-load uses individual slot; then may have a projection */
-	if (!gpas->outer_bulkload)
-		slot_in = gpas->css.ss.ss_ScanTupleSlot;
+	if (!gpas->gts.scan_bulk)
+		slot = gpas->gts.css.ss.ss_ScanTupleSlot;
 	else
-		slot_in = gpas->bulk_slot;
+		slot = gpas->bulk_slot;
 
 retry:
-	if (gpas->curr_index >= kds->nitems)
+	if (gpas->gts.curr_index >= nitems)
 		return NULL;
-	row_index = gpas->curr_index++;
+	row_index = gpas->gts.curr_index++;
 
 	/*
 	 * Fetch a tuple from the data-store
 	 */
-	if (pgstrom_fetch_data_store(slot_in, pds, row_index, &tuple))
+	ExecClearTuple(slot);
+	if (!pgstrom_fetch_data_store(slot, pds, row_index, &tuple))
 	{
-		ProjectionInfo *projection = gpas->css.ss.ps.ps_ProjInfo;
-		ExprContext	   *econtext = gpas->css.ss.ps.ps_ExprContext;
-		ExprDoneCond	is_done;
-
-		/* reset per-tuple memory context */
-		ResetExprContext(econtext);
-
-		/*
-		 * check qualifier being pulled up from the outer scan, if any.
-		 * outer_quals assumes fetched tuple is in ecxt_scantuple (because
-		 * it came from relation-scan), we need to adjust it.
-		 */
-		if (gpas->outer_quals != NIL)
+		if (gpas->gts.scan_bulk)
 		{
-			econtext->ecxt_scantuple = slot_in;
-			if (!ExecQual(gpas->outer_quals, econtext, false))
-				goto retry;
-		}
+			ExprContext	   *econtext;
+			ExprDoneCond	is_done;
 
-		/*
-		 * In case of bulk-loading mode, it may take additional projection
-		 * because slot_in has a record type of underlying scan node, thus
-		 * we need to translate this record into the form we expected.
-		 * If bulk_proj is valid, it implies our expected input record is
-		 * incompatible from the record type of underlying scan.
-		 */
-		if (gpas->outer_bulkload)
-		{
+			/*
+			 * check qualifier being pulled up from the outer scan, if any.
+			 * Outer_quals assumes fetched tuple is stored on the
+			 * ecxt_scantuple (because it came from relation-scan), we need
+			 * to adjust it.
+			 */
+			if (gpas->outer_quals != NIL)
+			{
+				econtext = gpas->gts.css.ss.ps.ps_ExprContext;
+				econtext->ecxt_scantuple = slot;
+				if (!ExecQual(gpas->outer_quals, econtext, false))
+					goto retry;
+			}
+
+			/*
+			 * In case of bulk-load mode, it may take additional projection
+			 * because slot has a record type of underlying scan node, thus
+			 * we need to translate this record into the form we expected.
+			 * If bulk_proj is valid, it implies our expected input record is
+			 * incompatible from the record type of underlying scan.
+			 */
 			if (gpas->bulk_proj)
 			{
-				ExprContext	*bulk_econtext = gpas->bulk_proj->pi_exprContext;
-
-				bulk_econtext->ecxt_scantuple = slot_in;
-				slot_in = ExecProject(gpas->bulk_proj, &is_done);
+				econtext = gpas->bulk_proj->pi_exprContext;
+				econtext->ecxt_scantuple = slot;
+				slot = ExecProject(gpas->bulk_proj, &is_done);
 				if (is_done == ExprEndResult)
-				{
-					slot_out = NULL;
 					goto retry;
-				}
 			}
-		}
-		/* put result tuple */
-		if (!projection)
-		{
-			slot_out = gpas->css.ss.ps.ps_ResultTupleSlot;
-			ExecCopySlot(slot_out, slot_in);
-		}
-		else
-		{
-			econtext->ecxt_scantuple = slot_in;
-			slot_out = ExecProject(projection, &is_done);
-			if (is_done == ExprEndResult)
-			{
-				slot_out = NULL;
-				goto retry;
-			}
-			gpas->css.ss.ps.ps_TupFromTlist = (is_done == ExprMultipleResult);
 		}
 	}
-	return slot_out;
+	return slot;
 }
 
 static TupleTableSlot *
-gpupreagg_next_tuple(GpuPreAggState *gpas)
+gpupreagg_next_tuple(GpuTaskState *gts)
 {
-	pgstrom_gpupreagg  *gpreagg = gpas->curr_chunk;
-	kern_row_map       *krowmap = KERN_GPUPREAGG_KROWMAP(&gpreagg->kern);
-	pgstrom_data_store *pds_dest = gpreagg->pds_dest;
+	GpuPreAggState	   *gpas = (GpuPreAggState *) gts;
+	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) gpas->gts.curr_task;
+	kern_resultbuf	   *kresults = gpreagg->kresults;
+	pgstrom_data_store *pds_dst = gpreagg->pds_dst;
 	TupleTableSlot	   *slot = NULL;
 	HeapTupleData		tuple;
 	struct timeval		tv1, tv2;
 
-	if (gpas->pfm.enabled)
-		gettimeofday(&tv1, NULL);
+	Assert(kresults == KERN_GPUPREAGG_RESULTBUF(&gpreagg->kern));
 
-	if (gpas->curr_recheck)
-		slot = gpupreagg_next_tuple_fallback(gpas);
-	else if (gpas->curr_index < krowmap->nvalids)
+	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
+	if (gpreagg->needs_fallback)
+		slot = gpupreagg_next_tuple_fallback(gpas, gpreagg);
+	else if (gpas->gts.curr_index < kresults->nitems)
 	{
-		size_t		row_index = krowmap->rindex[gpas->curr_index++];
+		size_t		index = kresults->results[gpas->gts.curr_index++];
 
-		slot = gpas->css.ss.ps.ps_ResultTupleSlot;
-		if (!pgstrom_fetch_data_store(slot, pds_dest, row_index, &tuple))
+		slot = gts->css.ss.ps.ps_ResultTupleSlot;
+		ExecClearTuple(slot);
+		if (!pgstrom_fetch_data_store(slot, pds_dst, index, &tuple))
 		{
-			elog(NOTICE, "Bug? empty slot was specified by kern_row_map");
+			elog(NOTICE, "Bug? empty slot was specified by kern_resultbuf");
 			slot = NULL;
 		}
 		else if (gpas->has_numeric)
@@ -3286,162 +3222,28 @@ gpupreagg_next_tuple(GpuPreAggState *gpas)
 			Assert(!slot->tts_tuple);
 		}
 	}
-
-	if (gpas->pfm.enabled)
-	{
-		gettimeofday(&tv2, NULL);
-		gpas->pfm.time_materialize += timeval_diff(&tv1, &tv2);
-	}
+	PERFMON_END(&gts->pfm_accum, time_materialize, &tv1, &tv2);
 	return slot;
 }
 
 static TupleTableSlot *
 gpupreagg_exec(CustomScanState *node)
 {
-	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
-	TupleTableSlot	   *slot = NULL;
-	pgstrom_gpupreagg  *gpreagg;
-
-	while (!gpas->curr_chunk || !(slot = gpupreagg_next_tuple(gpas)))
-	{
-		pgstrom_message	   *msg;
-		dlist_node		   *dnode;
-
-		/* release current gpupreagg chunk being already fetched */
-		if (gpas->curr_chunk)
-		{
-			msg = &gpas->curr_chunk->msg;
-			if (msg->pfm.enabled)
-				pgstrom_perfmon_add(&gpas->pfm, &msg->pfm);
-			Assert(msg->refcnt == 1);
-			pgstrom_untrack_object(&msg->sobj);
-			pgstrom_put_message(msg);
-			gpas->curr_chunk = NULL;
-			gpas->curr_index = 0;
-			gpas->curr_recheck = false;
-		}
-
-		/*
-		 * Keep number of asynchronous partial aggregate request a particular
-		 * level unless it does not exceed pgstrom_max_async_chunks and any
-		 * new response is not replied during the loading.
-		 */
-		while (!gpas->outer_done &&
-			   gpas->num_running <= pgstrom_max_async_chunks)
-		{
-			gpreagg = gpupreagg_load_next_outer(gpas);
-			if (!gpreagg)
-				break;	/* outer scan reached to end of the relation */
-
-			if (!pgstrom_enqueue_message(&gpreagg->msg))
-			{
-				pgstrom_put_message(&gpreagg->msg);
-				elog(ERROR, "failed to enqueue pgstrom_gpuhashjoin message");
-			}
-            gpas->num_running++;
-
-			msg = pgstrom_try_dequeue_message(gpas->mqueue);
-			if (msg)
-			{
-				gpas->num_running--;
-				dlist_push_tail(&gpas->ready_chunks, &msg->chain);
-				break;
-			}
-		}
-
-		/*
-		 * wait for server's response if no available chunks were replied
-		 */
-		if (dlist_is_empty(&gpas->ready_chunks))
-		{
-			/* OK, no more request should be fetched */
-			if (gpas->num_running == 0)
-				break;
-			msg = pgstrom_dequeue_message(gpas->mqueue);
-			if (!msg)
-				elog(ERROR, "message queue wait timeout");
-			gpas->num_running--;
-			dlist_push_tail(&gpas->ready_chunks, &msg->chain);
-		}
-
-		/*
-		 * picks up next available chunks, if any
-		 */
-		Assert(!dlist_is_empty(&gpas->ready_chunks));
-		dnode = dlist_pop_head_node(&gpas->ready_chunks);
-		gpreagg = dlist_container(pgstrom_gpupreagg, msg.chain, dnode);
-
-		/*
-		 * Raise an error, if significan error was reported
-		 */
-		if (gpreagg->msg.errcode == StromError_Success)
-			gpas->curr_recheck = false;
-		else if (gpreagg->msg.errcode == StromError_CpuReCheck)
-		{
-			gpas->curr_recheck = true;	/* fallback by CPU */
-			gpas->num_rechecks++;
-		}
-		else if (gpreagg->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
-		{
-			const char *buildlog
-				= pgstrom_get_devprog_errmsg(gpas->dprog_key);
-
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
-							pgstrom_strerror(gpreagg->msg.errcode),
-							gpas->kern_source),
-					 errdetail("%s", buildlog)));
-		}
-		else
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("PG-Strom: OpenCL execution error (%s)",
-							pgstrom_strerror(gpreagg->msg.errcode))));
-		}
-		gpas->curr_chunk = gpreagg;
-		gpas->curr_index = 0;
-	}
-	return slot;
+	return pgstrom_exec_gputask((GpuTaskState *) node);
 }
 
 static void
 gpupreagg_end(CustomScanState *node)
 {
 	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
-	pgstrom_message	   *msg;
 
 	/* Debug message if needed */
 	if (gpas->num_rechecks > 0)
 		elog(NOTICE, "GpuPreAgg: %u chunks were re-checked by CPU",
 			 gpas->num_rechecks);
 
-	/* Clean up strom objects */
-	if (gpas->curr_chunk)
-	{
-		msg = &gpas->curr_chunk->msg;
-		if (msg->pfm.enabled)
-			pgstrom_perfmon_add(&gpas->pfm, &msg->pfm);
-		pgstrom_untrack_object(&msg->sobj);
-		pgstrom_put_message(msg);
-	}
-
-	while (gpas->num_running > 0)
-	{
-		msg = pgstrom_dequeue_message(gpas->mqueue);
-		if (!msg)
-			elog(ERROR, "message queue wait timeout");
-		pgstrom_untrack_object(&msg->sobj);
-        pgstrom_put_message(msg);
-		gpas->num_running--;
-	}
-
-	pgstrom_untrack_object((StromObject *)gpas->dprog_key);
-	pgstrom_put_devprog_key(gpas->dprog_key);
-	pgstrom_untrack_object(&gpas->mqueue->sobj);
-	pgstrom_close_queue(gpas->mqueue);
-
+	/* Cleanup and relase any concurrent tasks */
+	pgstrom_release_gputaskstate(&gpas->gts);
 	/* Clean up subtree */
 	ExecEndNode(outerPlanState(node));
 }
@@ -3450,33 +3252,11 @@ static void
 gpupreagg_rescan(CustomScanState *node)
 {
 	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
-	pgstrom_message	   *msg;
 
-	/* Clean up strom objects */
-	if (gpas->curr_chunk)
-	{
-		msg = &gpas->curr_chunk->msg;
-		if (msg->pfm.enabled)
-			pgstrom_perfmon_add(&gpas->pfm, &msg->pfm);
-		pgstrom_untrack_object(&msg->sobj);
-		pgstrom_put_message(msg);
-		gpas->curr_chunk = NULL;
-		gpas->curr_index = 0;
-		gpas->curr_recheck = false;
-	}
-
-	while (gpas->num_running > 0)
-	{
-		msg = pgstrom_dequeue_message(gpas->mqueue);
-		if (!msg)
-			elog(ERROR, "message queue wait timeout");
-		pgstrom_untrack_object(&msg->sobj);
-		pgstrom_put_message(msg);
-		gpas->num_running--;
-	}
-
+	/* Cleanup and relase any concurrent tasks */
+	pgstrom_cleanup_gputaskstate(&gpas->gts);
 	/* Rewind the subtree */
-	gpas->outer_done = false;
+	gpas->gts.scan_done = false;
 	ExecReScan(outerPlanState(node));
 }
 
@@ -3488,8 +3268,7 @@ gpupreagg_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		= deform_gpupreagg_info((CustomScan *) node->ss.ps.plan);
 	const char	   *policy;
 
-	ExplainPropertyText("Bulkload",
-						gpas->outer_bulkload ? "On" : "Off", es);
+	ExplainPropertyText("Bulkload", gpas->gts.scan_bulk ? "On" : "Off", es);
 	if (!gpas->needs_grouping)
 		policy = "NoGroup";
 	else if (gpas->local_reduction)
@@ -3498,18 +3277,607 @@ gpupreagg_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		policy = "Global";
 	ExplainPropertyText("Reduction", policy, es);
 
-	show_custom_flags(&gpas->css, es);
-	show_device_kernel(gpas->dprog_key, es);
 	if (gpa_info->outer_quals != NIL)
 	{
 		show_scan_qual(gpa_info->outer_quals,
-					   "Device Filter", &gpas->css.ss.ps, ancestors, es);
+					   "Device Filter", &gpas->gts.css.ss.ps, ancestors, es);
 		show_instrumentation_count("Rows Removed by Device Fileter",
-                                   2, &gpas->css.ss.ps, es);
+                                   2, &gpas->gts.css.ss.ps, es);
 	}
-	if (es->analyze && gpas->pfm.enabled)
-		pgstrom_perfmon_explain(&gpas->pfm, es);
+	pgstrom_explain_gputaskstate(&gpas->gts, es);
 }
+
+/*
+ * gpupreagg_cleanup_cuda_resources
+ *
+ * handler to release all the cuda resource, but gpreagg is still retained
+ */
+static void
+gpupreagg_cleanup_cuda_resources(pgstrom_gpupreagg *gpreagg)
+{
+	if (gpreagg->m_gpreagg)
+		gpuMemFree(&gpreagg->task, gpreagg->m_gpreagg);
+	if (gpreagg->m_kds_in)
+		gpuMemFree(&gpreagg->task, gpreagg->m_kds_in);
+	if (gpreagg->m_kds_src)
+		gpuMemFree(&gpreagg->task, gpreagg->m_kds_src);
+	if (gpreagg->m_kds_dst)
+		gpuMemFree(&gpreagg->task, gpreagg->m_kds_dst);
+
+	CUDA_EVENT_DESTROY(gpreagg, ev_dma_send_start);
+	CUDA_EVENT_DESTROY(gpreagg, ev_dma_send_stop);
+	CUDA_EVENT_DESTROY(gpreagg, ev_kern_prep_end);
+	CUDA_EVENT_DESTROY(gpreagg, ev_kern_lagg_end);
+	CUDA_EVENT_DESTROY(gpreagg, ev_dma_recv_start);
+	CUDA_EVENT_DESTROY(gpreagg, ev_dma_recv_stop);
+
+	/* clear the pointers */
+	gpreagg->kern_prep = NULL;
+	memset(gpreagg->kern_prep_args, 0, sizeof(gpreagg->kern_prep_args));
+	gpreagg->kern_lagg = NULL;
+	memset(gpreagg->kern_lagg_args, 0, sizeof(gpreagg->kern_lagg_args));
+	gpreagg->kern_gagg = NULL;
+	memset(gpreagg->kern_gagg_args, 0, sizeof(gpreagg->kern_gagg_args));
+	gpreagg->kern_nogrp = NULL;
+	memset(gpreagg->kern_nogrp_args, 0, sizeof(gpreagg->kern_nogrp_args));
+	gpreagg->kern_fixvar = NULL;
+	memset(gpreagg->kern_fixvar_args, 0, sizeof(gpreagg->kern_fixvar_args));
+	gpreagg->m_gpreagg = 0UL;
+	gpreagg->m_kds_in = 0UL;
+	gpreagg->m_kds_src = 0UL;
+	gpreagg->m_kds_dst = 0UL;
+	gpreagg->m_ghash = 0UL;
+}
+
+static void
+gpupreagg_task_release(GpuTask *gtask)
+{
+	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) gtask;
+
+	/* cleanup cuda resources, if any */
+	gpupreagg_cleanup_cuda_resources(gpreagg);
+
+	if (gpreagg->pds_in)
+		pgstrom_release_data_store(gpreagg->pds_in);
+	if (gpreagg->pds_dst)
+		pgstrom_release_data_store(gpreagg->pds_dst);
+	pfree(gpreagg);
+}
+
+/*
+ * gpupreagg_task_complete
+ */
+static bool
+gpupreagg_task_complete(GpuTask *gtask)
+{
+	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) gtask;
+
+	if (gpreagg->task.pfm.enabled)
+	{
+		CUDA_EVENT_ELAPSED(gpreagg, time_dma_send,
+						   ev_dma_send_start,
+						   ev_dma_send_stop);
+		CUDA_EVENT_ELAPSED(gpreagg, time_kern_prep,
+						   ev_dma_send_stop,
+						   ev_kern_prep_end);
+		if (gpreagg->needs_grouping)
+		{
+			if (gpreagg->local_reduction)
+			{
+				CUDA_EVENT_ELAPSED(gpreagg, time_kern_lagg,
+								   ev_kern_prep_end,
+								   ev_kern_lagg_end);
+				CUDA_EVENT_ELAPSED(gpreagg, time_kern_gagg,
+								   ev_kern_lagg_end,
+								   ev_dma_recv_start);
+			}
+			else
+			{
+				CUDA_EVENT_ELAPSED(gpreagg, time_kern_gagg,
+                                   ev_kern_prep_end,
+								   ev_dma_recv_start);
+			}
+		}
+		else
+		{
+			CUDA_EVENT_ELAPSED(gpreagg, time_kern_nogrp,
+							   ev_kern_prep_end,
+							   ev_dma_recv_start);
+		}
+		CUDA_EVENT_ELAPSED(gpreagg, time_dma_recv,
+                           ev_dma_recv_start,
+                           ev_dma_recv_stop);
+	}
+	gpupreagg_cleanup_cuda_resources(gpreagg);	
+	return true;
+}
+
+/*
+ * gpupreagg_task_respond
+ */
+static void
+gpupreagg_task_respond(CUstream stream, CUresult status, void *private)
+{
+	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) private;
+	kern_resultbuf	   *kresults = KERN_GPUPREAGG_RESULTBUF(&gpreagg->kern);
+	GpuTaskState	   *gts = gpreagg->task.gts;
+
+	SpinLockAcquire(&gts->lock);
+	if (status != CUDA_SUCCESS)
+		gpreagg->task.errcode = status;
+	else
+		gpreagg->task.errcode = kresults->errcode;
+
+	/* mark a flag, if GPU required to retry it on CPU side */
+	if (gpreagg->task.errcode == StromError_CpuReCheck)
+	{
+		gpreagg->needs_fallback = true;
+		gpreagg->task.errcode = StromError_Success;
+	}
+
+	/* remove from the running_tasks list */
+	dlist_delete(&gpreagg->task.chain);
+	gts->num_running_tasks--;
+	/* then, attach it on the completed_tasks list */
+	if (gpreagg->task.errcode == StromError_Success)
+		dlist_push_tail(&gts->completed_tasks, &gpreagg->task.chain);
+	else
+		dlist_push_head(&gts->completed_tasks, &gpreagg->task.chain);
+	gts->num_completed_tasks++;
+	SpinLockRelease(&gts->lock);
+
+	SetLatch(&MyProc->procLatch);
+}
+
+/*
+ * gpupreagg_task_process
+ */
+static bool
+__gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
+{
+	kern_resultbuf	   *kresults = gpreagg->kresults;
+	pgstrom_data_store *pds_in = gpreagg->pds_in;
+	pgstrom_data_store *pds_dst = gpreagg->pds_dst;
+	size_t				nitems = pds_in->kds->nitems;
+	size_t				offset;
+	size_t				length;
+	size_t				grid_size;
+	size_t				block_size;
+	CUresult			rc;
+
+	/*
+	 * Kernel function lookup
+	 */
+	rc = cuModuleGetFunction(&gpreagg->kern_prep,
+							 gpreagg->task.cuda_module,
+							 "gpupreagg_preparation");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction : %s", errorText(rc));
+	if (gpreagg->needs_grouping)
+	{
+		if (gpreagg->local_reduction)
+		{
+			rc = cuModuleGetFunction(&gpreagg->kern_lagg,
+									 gpreagg->task.cuda_module,
+									 "gpupreagg_local_reduction");
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuModuleGetFunction : %s",
+					 errorText(rc));
+		}
+		rc = cuModuleGetFunction(&gpreagg->kern_gagg,
+								 gpreagg->task.cuda_module,
+								 "gpupreagg_global_reduction");
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuModuleGetFunction : %s", errorText(rc));
+	}
+	else
+	{
+		rc = cuModuleGetFunction(&gpreagg->kern_nogrp,
+								 gpreagg->task.cuda_module,
+								 "gpupreagg_nogroup_reduction");
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuModuleGetFunction : %s", errorText(rc));
+	}
+	if (gpreagg->has_varlena)
+	{
+		rc = cuModuleGetFunction(&gpreagg->kern_fixvar,
+								 gpreagg->task.cuda_module,
+								 "gpupreagg_fixup_varlena");
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuModuleGetFunction : %s", errorText(rc));
+	}
+
+	/*
+	 * Allocation of device memory
+	 */
+	length = KERN_GPUPREAGG_LENGTH(&gpreagg->kern, nitems);
+	gpreagg->m_gpreagg = gpuMemAlloc(&gpreagg->task, length);
+	if (!gpreagg->m_gpreagg)
+		goto out_of_resource;
+
+	length = KERN_DATA_STORE_LENGTH(pds_in->kds);
+	gpreagg->m_kds_in = gpuMemAlloc(&gpreagg->task, length);
+	if (!gpreagg->m_kds_in)
+		goto out_of_resource;
+
+	length = KERN_DATA_STORE_LENGTH(pds_dst->kds);
+	gpreagg->m_kds_src = gpuMemAlloc(&gpreagg->task, length);
+	if (!gpreagg->m_kds_src)
+		goto out_of_resource;
+	gpreagg->m_kds_dst = gpuMemAlloc(&gpreagg->task, length);
+	if (!gpreagg->m_kds_dst)
+		goto out_of_resource;
+
+	length = STROMALIGN(gpreagg->kern.hash_size * sizeof(pagg_hashslot));
+	gpreagg->m_ghash = gpuMemAlloc(&gpreagg->task, length);
+	if (!gpreagg->m_ghash)
+		goto out_of_resource;
+
+
+	/*
+	 * Creation of event objects, if any
+	 */
+	if (gpreagg->task.pfm.enabled)
+	{
+		rc = cuEventCreate(&gpreagg->ev_dma_send_start, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+		rc = cuEventCreate(&gpreagg->ev_dma_send_stop, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+		rc = cuEventCreate(&gpreagg->ev_kern_prep_end, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+		rc = cuEventCreate(&gpreagg->ev_kern_lagg_end, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+		rc = cuEventCreate(&gpreagg->ev_dma_recv_start, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+		rc = cuEventCreate(&gpreagg->ev_dma_recv_stop, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+	}
+
+	/*
+	 * OK, enqueue a series of commands
+	 */
+	CUDA_EVENT_RECORD(gpreagg, ev_dma_send_start);
+
+	offset = KERN_GPUPREAGG_DMASEND_OFFSET(&gpreagg->kern);
+	length = KERN_GPUPREAGG_DMASEND_LENGTH(&gpreagg->kern);
+	rc = cuMemcpyHtoDAsync(gpreagg->m_gpreagg,
+						   (char *)&gpreagg->kern + offset,
+						   length,
+						   gpreagg->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+	gpreagg->task.pfm.bytes_dma_send += length;
+	gpreagg->task.pfm.num_dma_send++;
+
+	length = KERN_DATA_STORE_LENGTH(pds_in->kds);
+	rc = cuMemcpyHtoDAsync(gpreagg->m_kds_in,
+						   pds_in->kds,
+						   length,
+						   gpreagg->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+	gpreagg->task.pfm.bytes_dma_send += length;
+	gpreagg->task.pfm.num_dma_send++;
+
+	length = KERN_DATA_STORE_HEAD_LENGTH(pds_dst->kds);
+	rc = cuMemcpyHtoDAsync(gpreagg->m_kds_src,
+						   pds_dst->kds,
+						   length,
+						   gpreagg->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+	gpreagg->task.pfm.bytes_dma_send += length;
+	gpreagg->task.pfm.num_dma_send++;
+
+	rc = cuMemcpyHtoDAsync(gpreagg->m_kds_dst,
+						   pds_dst->kds,
+						   length,
+						   gpreagg->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+	gpreagg->task.pfm.bytes_dma_send += length;
+	gpreagg->task.pfm.num_dma_send++;
+
+	CUDA_EVENT_RECORD(gpreagg, ev_dma_send_stop);
+
+	/*
+	 * Launch kernel functions
+	 */
+
+	/* KERNEL_FUNCTION(void)
+	 * gpupreagg_preparation(kern_gpupreagg *kgpreagg,
+	 *                       kern_data_store *kds_in,
+	 *                       kern_data_store *kds_src,
+	 *                       pagg_hashslot *g_hashslot)
+	 */
+	pgstrom_compute_workgroup_size(&grid_size,
+								   &block_size,
+								   gpreagg->kern_prep,
+								   gpreagg->task.cuda_device,
+								   false,
+								   nitems,
+								   sizeof(cl_uint));
+
+	gpreagg->kern_prep_args[0] = &gpreagg->m_gpreagg;
+	gpreagg->kern_prep_args[1] = &gpreagg->m_kds_in;
+	gpreagg->kern_prep_args[2] = &gpreagg->m_kds_src;
+	gpreagg->kern_prep_args[3] = &gpreagg->m_ghash;
+	rc = cuLaunchKernel(gpreagg->kern_prep,
+						grid_size, 1, 1,
+                        block_size, 1, 1,
+						sizeof(cl_uint) * block_size,
+						gpreagg->task.cuda_stream,
+						gpreagg->kern_prep_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+	gpreagg->task.pfm.num_kern_prep++;
+	CUDA_EVENT_RECORD(gpreagg, ev_kern_prep_end);
+
+	if (gpreagg->needs_grouping)
+	{
+		if (gpreagg->local_reduction)
+		{
+			/* KERNEL_FUNCTION(void)
+			 * gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
+			 *                           kern_data_store *kds_src,
+			 *                           kern_data_store *kds_dst,
+			 *                           kern_data_store *ktoast)
+			 */
+			pgstrom_compute_workgroup_size(&grid_size,
+										   &block_size,
+										   gpreagg->kern_lagg,
+										   gpreagg->task.cuda_device,
+										   true,
+										   nitems,
+										   Max(sizeof(pagg_hashslot),
+											   sizeof(pagg_datum)));
+			gpreagg->kern_lagg_args[0] = &gpreagg->m_gpreagg;
+			gpreagg->kern_lagg_args[1] = &gpreagg->m_kds_src;
+			gpreagg->kern_lagg_args[2] = &gpreagg->m_kds_dst;
+			gpreagg->kern_lagg_args[3] = &gpreagg->m_kds_in;
+			rc = cuLaunchKernel(gpreagg->kern_lagg,
+								grid_size, 1, 1,
+								block_size, 1, 1,
+								Max(sizeof(pagg_hashslot),
+									sizeof(pagg_datum)) * block_size,
+								gpreagg->task.cuda_stream,
+								gpreagg->kern_lagg_args,
+								NULL);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+			gpreagg->task.pfm.num_kern_lagg++;
+			CUDA_EVENT_RECORD(gpreagg, ev_kern_lagg_end);
+		}
+
+		/* KERNEL_FUNCTION(void)
+		 * gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
+		 *                            kern_data_store *kds_dst,
+		 *                            kern_data_store *ktoast,
+		 *                            pagg_hashslot *g_hashslot)
+		 */
+		pgstrom_compute_workgroup_size(&grid_size,
+									   &block_size,
+									   gpreagg->kern_gagg,
+									   gpreagg->task.cuda_device,
+									   false,
+									   nitems,
+									   sizeof(cl_uint));
+		gpreagg->kern_gagg_args[0] = &gpreagg->m_gpreagg;
+		gpreagg->kern_gagg_args[1] = &gpreagg->m_kds_dst;
+		gpreagg->kern_gagg_args[2] = &gpreagg->m_kds_in;
+		gpreagg->kern_gagg_args[3] = &gpreagg->m_ghash;
+
+		rc = cuLaunchKernel(gpreagg->kern_gagg,
+							grid_size, 1, 1,
+							block_size, 1, 1,
+							sizeof(cl_uint) * block_size,
+							gpreagg->task.cuda_stream,
+							gpreagg->kern_gagg_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+		gpreagg->task.pfm.num_kern_gagg++;
+	}
+	else
+	{
+		/* KERNEL_FUNCTION(void)
+		 * gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
+		 *                             kern_data_store *kds_src,
+		 *                             kern_data_store *kds_dst,
+		 *                             kern_data_store *ktoast)
+		 */
+		pgstrom_compute_workgroup_size(&grid_size,
+									   &block_size,
+									   gpreagg->kern_nogrp,
+									   gpreagg->task.cuda_device,
+									   true,
+									   nitems,
+									   Max(sizeof(pagg_datum),
+										   sizeof(cl_uint)));
+		gpreagg->kern_nogrp_args[0] = &gpreagg->m_gpreagg;
+		gpreagg->kern_nogrp_args[1] = &gpreagg->m_kds_src;
+		gpreagg->kern_nogrp_args[2] = &gpreagg->m_kds_dst;
+		gpreagg->kern_nogrp_args[3] = &gpreagg->m_kds_in;
+
+		/* 1st path: data reduction (kds_src => kds_dst) */
+		rc = cuLaunchKernel(gpreagg->kern_nogrp,
+							grid_size, 1, 1,
+							block_size, 1, 1,
+							Max(sizeof(pagg_datum),
+								sizeof(cl_uint)) * block_size,
+							gpreagg->task.cuda_stream,
+							gpreagg->kern_nogrp_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+            elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+		gpreagg->task.pfm.num_kern_nogrp++;
+
+		/* 2nd path: data reduction (kds_dst => kds_src) */
+		gpreagg->kern_nogrp_args[0] = &gpreagg->m_gpreagg;
+		gpreagg->kern_nogrp_args[1] = &gpreagg->m_kds_dst;
+		gpreagg->kern_nogrp_args[2] = &gpreagg->m_kds_src;
+		gpreagg->kern_nogrp_args[3] = &gpreagg->m_kds_in;
+		rc = cuLaunchKernel(gpreagg->kern_nogrp,
+							grid_size, 1, 1,
+							block_size, 1, 1,
+							Max(sizeof(pagg_datum),
+								sizeof(cl_uint)) * block_size,
+							gpreagg->task.cuda_stream,
+							gpreagg->kern_nogrp_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+            elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+		gpreagg->task.pfm.num_kern_nogrp++;
+
+		/* 3rd path: data reduction (kds_src => kds_dst) */
+		gpreagg->kern_nogrp_args[0] = &gpreagg->m_gpreagg;
+		gpreagg->kern_nogrp_args[1] = &gpreagg->m_kds_src;
+		gpreagg->kern_nogrp_args[2] = &gpreagg->m_kds_dst;
+		gpreagg->kern_nogrp_args[3] = &gpreagg->m_kds_in;
+		rc = cuLaunchKernel(gpreagg->kern_nogrp,
+							grid_size, 1, 1,
+							block_size, 1, 1,
+							Max(sizeof(pagg_datum),
+								sizeof(cl_uint)) * block_size,
+							gpreagg->task.cuda_stream,
+							gpreagg->kern_nogrp_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+            elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+		gpreagg->task.pfm.num_kern_nogrp++;
+	}
+
+	if (gpreagg->has_varlena)
+	{
+		/* KERNEL_FUNCTION(void)
+		 * gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
+		 *                         kern_data_store *kds_dst,
+		 *                         kern_data_store *ktoast)
+		 */
+		pgstrom_compute_workgroup_size(&grid_size,
+									   &block_size,
+									   gpreagg->kern_fixvar,
+									   gpreagg->task.cuda_device,
+									   false,
+									   nitems,
+									   sizeof(cl_uint));
+		gpreagg->kern_fixvar_args[0] = &gpreagg->m_gpreagg;
+		gpreagg->kern_fixvar_args[1] = &gpreagg->m_kds_dst;
+		gpreagg->kern_fixvar_args[2] = &gpreagg->m_kds_in;
+
+		rc = cuLaunchKernel(gpreagg->kern_fixvar,
+							grid_size, 1, 1,
+							block_size, 1, 1,
+							sizeof(cl_uint) * block_size,
+							gpreagg->task.cuda_stream,
+							gpreagg->kern_fixvar_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+	}
+
+	/*
+	 * commands for DMA recv
+	 */
+	CUDA_EVENT_RECORD(gpreagg, ev_dma_recv_start);
+
+	offset = KERN_GPUPREAGG_DMARECV_OFFSET(&gpreagg->kern);
+	length = KERN_GPUPREAGG_DMARECV_LENGTH(&gpreagg->kern, nitems);
+	rc = cuMemcpyDtoHAsync(kresults,
+						   gpreagg->m_gpreagg + offset,
+                           length,
+                           gpreagg->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
+    gpreagg->task.pfm.bytes_dma_recv += length;
+    gpreagg->task.pfm.num_dma_recv++;
+
+	length = KERN_DATA_STORE_LENGTH(pds_dst->kds);
+	rc = cuMemcpyDtoHAsync(pds_dst->kds,
+						   gpreagg->m_kds_dst,
+						   length,
+						   gpreagg->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+	gpreagg->task.pfm.bytes_dma_send += length;
+	gpreagg->task.pfm.num_dma_send++;
+
+	CUDA_EVENT_RECORD(gpreagg, ev_dma_recv_stop);
+
+	/*
+	 * Register callback
+	 */
+	rc = cuStreamAddCallback(gpreagg->task.cuda_stream,
+							 gpupreagg_task_respond,
+							 gpreagg, 0);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "cuStreamAddCallback: %s", errorText(rc));
+
+	return true;
+
+out_of_resource:
+	gpupreagg_cleanup_cuda_resources(gpreagg);
+	return false;
+}
+
+static bool
+gpupreagg_task_process(GpuTask *gtask)
+{
+	pgstrom_gpupreagg *gpreagg = (pgstrom_gpupreagg *) gtask;
+	bool		status;
+	CUresult	rc;
+
+	/* Switch CUDA Context */
+	rc = cuCtxPushCurrent(gpreagg->task.cuda_context);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+
+	PG_TRY();
+	{
+		status = __gpupreagg_task_process(gpreagg);
+	}
+	PG_CATCH();
+	{
+		gpupreagg_cleanup_cuda_resources(gpreagg);
+		rc = cuCtxPopCurrent(NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	rc = cuCtxPopCurrent(NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+
+	return status;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /*
  * entrypoint of GpuPreAgg
@@ -3551,2003 +3919,3 @@ pgstrom_init_gpupreagg(void)
 	gpupreagg_exec_methods.ReScanCustomScan    = gpupreagg_rescan;
 	gpupreagg_exec_methods.ExplainCustomScan   = gpupreagg_explain;
 }
-
-/* ----------------------------------------------------------------
- *
- * NOTE: below is the code being run on OpenCL server context
- *
- * ---------------------------------------------------------------- */
-
-typedef struct
-{
-	pgstrom_gpupreagg  *gpreagg;
-	cl_command_queue	kcmdq;
-	cl_int				dindex;
-	cl_program			program;
-	cl_kernel			kern_prep;
-	cl_kernel			kern_init;	/* global hash init */
-	cl_kernel			kern_lagg;	/* local reduction */
-	cl_kernel			kern_gagg;	/* global reduction */
-	cl_kernel			kern_fixvar;/* fixup varlena (if any) */
-	cl_mem				m_gpreagg;
-	cl_mem				m_kds_in;	/* kds of input relation */
-	cl_mem				m_kds_src;	/* kds of aggregation source */
-	cl_mem				m_kds_dst;	/* kds of aggregation results */
-	cl_mem				m_ghash;	/* global hashslot */
-	cl_uint				ev_kern_prep;	/* event index of kern_prep */
-	cl_uint				ev_kern_lagg;	/* event index of kern_lagg */
-	cl_uint				ev_kern_init;	/* event index of kern_init */
-	cl_uint				ev_kern_gagg;	/* event index of kern_gagg */
-	cl_uint				ev_kern_fixvar;	/* event index of kern_fixvar */
-	cl_uint				ev_dma_recv;	/* event index of DMA recv */
-	cl_uint				ev_limit;
-	cl_uint				ev_index;
-	cl_event			events[FLEXIBLE_ARRAY_MEMBER];
-} clstate_gpupreagg;
-
-static void
-clserv_respond_gpupreagg(cl_event event, cl_int ev_status, void *private)
-{
-	clstate_gpupreagg  *clgpa = (clstate_gpupreagg *) private;
-	pgstrom_gpupreagg  *gpreagg = clgpa->gpreagg;
-	cl_int				i, rc;
-
-	if (ev_status == CL_COMPLETE)
-		gpreagg->msg.errcode = gpreagg->kern.status;
-	else
-	{
-		clserv_log("unexpected CL_EVENT_COMMAND_EXECUTION_STATUS: %d",
-				   ev_status);
-		gpreagg->msg.errcode = StromError_OpenCLInternal;
-    }
-
-	/* collect performance statistics */
-	if (gpreagg->msg.pfm.enabled)
-	{
-		cl_ulong	tv_start;
-		cl_ulong	tv_end;
-		cl_ulong	temp;
-
-		/*
-		 * Time of all the DMA send
-		 */
-		tv_start = ~0UL;
-		tv_end = 0;
-		for (i=0; i < clgpa->ev_kern_prep; i++)
-		{
-			rc = clGetEventProfilingInfo(clgpa->events[i],
-										 CL_PROFILING_COMMAND_START,
-										 sizeof(cl_ulong),
-										 &temp,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			tv_start = Min(tv_start, temp);
-
-			rc = clGetEventProfilingInfo(clgpa->events[i],
-										 CL_PROFILING_COMMAND_END,
-										 sizeof(cl_ulong),
-										 &temp,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			tv_end = Max(tv_end, temp);
-		}
-		gpreagg->msg.pfm.time_dma_send += (tv_end - tv_start) / 1000;
-
-		/*
-		 * Prep kernel execution time (includes global hash table init)
-		 */
-		i = clgpa->ev_kern_prep;
-		rc = clGetEventProfilingInfo(clgpa->events[i],
-									 CL_PROFILING_COMMAND_START,
-									 sizeof(cl_ulong),
-									 &tv_start,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
-		rc = clGetEventProfilingInfo(clgpa->events[i],
-									 CL_PROFILING_COMMAND_END,
-									 sizeof(cl_ulong),
-									 &tv_end,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
-		gpreagg->msg.pfm.time_kern_prep += (tv_end - tv_start) / 1000;
-
-		/*
-		 * Local reduction kernel execution time (if any)
-		 */
-		if (clgpa->kern_lagg)
-		{
-			i = clgpa->ev_kern_lagg;
-			rc = clGetEventProfilingInfo(clgpa->events[i],
-										 CL_PROFILING_COMMAND_START,
-										 sizeof(cl_ulong),
-										 &tv_start,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			rc = clGetEventProfilingInfo(clgpa->events[i],
-										 CL_PROFILING_COMMAND_END,
-										 sizeof(cl_ulong),
-										 &tv_end,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			gpreagg->msg.pfm.time_kern_lagg += (tv_end - tv_start) / 1000;
-		}
-
-		/*
-		 * Global reduction kernel execution time
-		 * (incl. global hash table init / fixup varlena datum)
-		 */
-		if (clgpa->kern_init)
-		{
-			i = clgpa->ev_kern_init;
-			rc = clGetEventProfilingInfo(clgpa->events[i],
-										 CL_PROFILING_COMMAND_START,
-										 sizeof(cl_ulong),
-										 &tv_start,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			rc = clGetEventProfilingInfo(clgpa->events[i],
-										 CL_PROFILING_COMMAND_END,
-										 sizeof(cl_ulong),
-										 &tv_end,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			gpreagg->msg.pfm.time_kern_prep += (tv_end - tv_start) / 1000;
-		}
-
-		i = clgpa->ev_kern_gagg;
-		rc = clGetEventProfilingInfo(clgpa->events[i],
-									 CL_PROFILING_COMMAND_START,
-									 sizeof(cl_ulong),
-									 &tv_start,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
-		rc = clGetEventProfilingInfo(clgpa->events[i],
-									 CL_PROFILING_COMMAND_END,
-									 sizeof(cl_ulong),
-									 &tv_end,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
-		gpreagg->msg.pfm.time_kern_gagg += (tv_end - tv_start) / 1000;
-
-		if (clgpa->kern_fixvar)
-		{
-			i = clgpa->ev_kern_fixvar;
-			rc = clGetEventProfilingInfo(clgpa->events[i],
-										 CL_PROFILING_COMMAND_START,
-										 sizeof(cl_ulong),
-										 &tv_start,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			rc = clGetEventProfilingInfo(clgpa->events[i],
-										 CL_PROFILING_COMMAND_END,
-										 sizeof(cl_ulong),
-										 &tv_end,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			gpreagg->msg.pfm.time_kern_gagg += (tv_end - tv_start) / 1000;
-		}
-
-		/*
-		 * DMA recv time - last two event should be DMA receive request
-		 */
-		tv_start = ~0UL;
-		tv_end = 0;
-		for (i = clgpa->ev_dma_recv; i < clgpa->ev_index; i++)
-		{
-			rc = clGetEventProfilingInfo(clgpa->events[i],
-										 CL_PROFILING_COMMAND_START,
-										 sizeof(cl_ulong),
-										 &temp,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			tv_start = Min(tv_start, temp);
-
-			rc = clGetEventProfilingInfo(clgpa->events[i],
-										 CL_PROFILING_COMMAND_END,
-										 sizeof(cl_ulong),
-										 &temp,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			tv_end = Max(tv_end, temp);
-		}
-		gpreagg->msg.pfm.time_dma_recv += (tv_end - tv_start) / 1000;
-
-	skip_perfmon:
-		if (rc != CL_SUCCESS)
-		{
-			clserv_log("failed on clGetEventProfilingInfo (%s)",
-					   opencl_strerror(rc));
-            gpreagg->msg.pfm.enabled = false;   /* turn off profiling */
-		}
-	}
-
-	/*
-	 * release opencl resources
-	 */
-	while (clgpa->ev_index > 0)
-		clReleaseEvent(clgpa->events[--clgpa->ev_index]);	
-	if (clgpa->m_gpreagg)
-		clReleaseMemObject(clgpa->m_gpreagg);
-	if (clgpa->m_kds_in)
-		clReleaseMemObject(clgpa->m_kds_in);
-	if (clgpa->m_kds_src)
-		clReleaseMemObject(clgpa->m_kds_src);
-	if (clgpa->m_kds_dst)
-		clReleaseMemObject(clgpa->m_kds_dst);
-	if (clgpa->m_ghash)
-		clReleaseMemObject(clgpa->m_ghash);
-	if (clgpa->kern_prep)
-		clReleaseKernel(clgpa->kern_prep);
-	if (clgpa->kern_lagg)
-		clReleaseKernel(clgpa->kern_lagg);
-	if (clgpa->kern_gagg)
-		clReleaseKernel(clgpa->kern_gagg);
-	if (clgpa->kern_fixvar)
-		clReleaseKernel(clgpa->kern_fixvar);
-	if (clgpa->program && clgpa->program != BAD_OPENCL_PROGRAM)
-		clReleaseProgram(clgpa->program);
-	free(clgpa);
-
-	/* dump kds */
-	// clserv_dump_kds(gpreagg->kds_dst);
-
-	/* reply the result to backend side */
-	pgstrom_reply_message(&gpreagg->msg);
-}
-
-static cl_int
-clserv_launch_preagg_preparation(clstate_gpupreagg *clgpa, cl_uint nitems)
-{
-	cl_int		rc;
-	size_t		gwork_sz;
-	size_t		lwork_sz;
-
-	/* __kernel void
-	 * gpupreagg_preparation(__global kern_gpupreagg *kgpreagg,
-	 *                       __global kern_data_store *kds_in,
-	 *                       __global kern_data_store *kds_src,
-	 *                       __local void *local_memory)
-	 */
-	clgpa->kern_prep = clCreateKernel(clgpa->program,
-									  "gpupreagg_preparation",
-									  &rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	if (!clserv_compute_workgroup_size(&gwork_sz,
-									   &lwork_sz,
-									   clgpa->kern_prep,
-									   clgpa->dindex,
-									   true,
-									   nitems,
-									   sizeof(cl_uint)))
-	{
-		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
-		return StromError_OpenCLInternal;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_prep,
-						0,		/* __kern_gpupreagg *kgpreagg */
-						sizeof(cl_mem),
-						&clgpa->m_gpreagg);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_prep,
-						1,		/* __global kern_data_store *kds_in */
-						sizeof(cl_mem),
-						&clgpa->m_kds_in);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_prep,
-						2,		/* __global kern_data_store *kds_src */
-						sizeof(cl_mem),
-						&clgpa->m_kds_src);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_prep,
-						3,
-						sizeof(cl_uint) * lwork_sz,
-						NULL);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	/*
-	 * kick gpupreagg_preparation() after all the DMA data send
-	 */
-	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
-                                clgpa->kern_prep,
-								1,
-								NULL,
-								&gwork_sz,
-								&lwork_sz,
-								clgpa->ev_index,
-								&clgpa->events[0],
-								&clgpa->events[clgpa->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueNDRangeKernel: %s",
-				   opencl_strerror(rc));
-		return rc;
-	}
-	clgpa->ev_kern_prep = clgpa->ev_index++;
-	clgpa->gpreagg->msg.pfm.num_kern_prep++;
-
-	return CL_SUCCESS;
-}
-
-static cl_int
-clserv_launch_init_hashslot(clstate_gpupreagg *clgpa, cl_uint nitems)
-{
-	size_t		gwork_sz;
-	size_t		lwork_sz;
-	cl_int		rc;
-
-	/*
-	 * __kernel void
-	 * gpupreagg_init_global_hashslot(__global kern_gpupreagg *kgpreagg,
-	 *                                __global pagg_hashslot *g_hashslot)
-	 */
-	clgpa->kern_init = clCreateKernel(clgpa->program,
-									  "gpupreagg_init_global_hashslot",
-									  &rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	if (!clserv_compute_workgroup_size(&gwork_sz,
-									   &lwork_sz,
-									   clgpa->kern_init,
-									   clgpa->dindex,
-									   true,
-									   nitems,
-									   sizeof(cl_uint)))
-	{
-		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
-		return StromError_OpenCLInternal;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_init,
-						0,		/* kern_gpupreagg *kgpreagg */
-						sizeof(cl_mem),
-						&clgpa->m_gpreagg);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_init,
-						1,		/* pagg_hashslot *g_hashslot */
-						sizeof(cl_mem),
-						&clgpa->m_ghash);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	/*
-	 * Kick gpupreagg_init_global_hashslot next to the preparation.
-	 */
-	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
-								clgpa->kern_init,
-								1,
-								NULL,
-								&gwork_sz,
-								&lwork_sz,
-								1,
-                                &clgpa->events[clgpa->ev_index - 1],
-                                &clgpa->events[clgpa->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueNDRangeKernel: %s",
-				   opencl_strerror(rc));
-		return rc;
-	}
-	clgpa->ev_kern_init = clgpa->ev_index++;
-	clgpa->gpreagg->msg.pfm.num_kern_gagg++;
-
-	return CL_SUCCESS;
-}
-
-static cl_int
-clserv_launch_local_reduction(clstate_gpupreagg *clgpa, cl_uint nitems)
-{
-	size_t		gwork_sz;
-	size_t		lwork_sz;
-	cl_int		rc;
-
-	/*
-	 * __kernel void
-	 * gpupreagg_local_reduction(__global kern_gpupreagg *kgpreagg,
-	 *                           __global kern_data_store *kds_src,
-	 *                           __global kern_data_store *kds_dst,
-	 *                           __global kern_data_store *ktoast,
-	 *                           __global pagg_hashslot *g_hashslot,
-	 *                           KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
-	 */
-	clgpa->kern_lagg = clCreateKernel(clgpa->program,
-									  "gpupreagg_local_reduction",
-									  &rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	if (!clserv_compute_workgroup_size(&gwork_sz,
-									   &lwork_sz,
-									   clgpa->kern_lagg,
-									   clgpa->dindex,
-									   true,
-									   nitems,
-									   Max(sizeof(pagg_hashslot),
-										   sizeof(pagg_datum))))
-	{
-		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
-		return StromError_OpenCLInternal;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_lagg,
-						0,		/* kern_gpupreagg *kgpreagg */
-						sizeof(cl_mem),
-						&clgpa->m_gpreagg);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_lagg,
-						1,		/* kern_data_store *kds_src */
-						sizeof(cl_mem),
-						&clgpa->m_kds_src);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_lagg,
-						2,		/* kern_data_store *kds_dst */
-						sizeof(cl_mem),
-						&clgpa->m_kds_dst);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_lagg,
-						3,		/* kern_data_store *ktoast */
-						sizeof(cl_mem),
-						&clgpa->m_kds_in);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_lagg,
-						4,		/* pagg_hashslot *g_hashslot */
-						sizeof(cl_mem),
-						&clgpa->m_ghash);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_lagg,
-						5,		/* KERN_DYNAMIC_LOCAL_WORKMEM_ARG */
-						Max(sizeof(pagg_hashslot),
-							sizeof(pagg_datum)) * lwork_sz,
-						NULL);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
-								clgpa->kern_lagg,
-								1,
-								NULL,
-								&gwork_sz,
-								&lwork_sz,
-								1,
-								&clgpa->events[clgpa->ev_index - 1],
-								&clgpa->events[clgpa->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueNDRangeKernel: %s",
-				   opencl_strerror(rc));
-		return rc;
-	}
-	clgpa->ev_kern_lagg = clgpa->ev_index++;
-	clgpa->gpreagg->msg.pfm.num_kern_lagg++;
-
-	return CL_SUCCESS;
-}
-
-static cl_int
-clserv_launch_global_reduction(clstate_gpupreagg *clgpa, cl_uint nitems)
-{
-	size_t		gwork_sz;
-	size_t		lwork_sz;
-	cl_int		rc;
-
-	/*
-	 * __kernel void
-	 * gpupreagg_global_reduction(__global kern_gpupreagg *kgpreagg,
-	 *                            __global kern_data_store *kds_dst,
-	 *                            __global kern_data_store *ktoast,
-	 *                            __global pagg_hashslot *g_hashslot,
-	 *                            KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
-	 */
-	clgpa->kern_gagg = clCreateKernel(clgpa->program,
-									  "gpupreagg_global_reduction",
-									  &rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	if (!clserv_compute_workgroup_size(&gwork_sz,
-									   &lwork_sz,
-									   clgpa->kern_gagg,
-									   clgpa->dindex,
-									   true,
-									   nitems,
-									   sizeof(cl_uint)))
-	{
-		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
-		return StromError_OpenCLInternal;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_gagg,
-						0,		/* kern_gpupreagg *kgpreagg */
-						sizeof(cl_mem),
-						&clgpa->m_gpreagg);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_gagg,
-						1,		/* kern_data_store *kds_dst */
-						sizeof(cl_mem),
-						&clgpa->m_kds_dst);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_gagg,
-						2,		/* kern_data_store *ktoast */
-						sizeof(cl_mem),
-						&clgpa->m_kds_in);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_gagg,
-						3,		/* pagg_hashslot *g_hashslot */
-						sizeof(cl_mem),
-						&clgpa->m_ghash);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_gagg,
-						4,		/* KERN_DYNAMIC_LOCAL_WORKMEM_ARG */
-						sizeof(cl_uint) * lwork_sz,
-						NULL);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
-								clgpa->kern_gagg,
-								1,
-								NULL,
-								&gwork_sz,
-								&lwork_sz,
-								1,
-								&clgpa->events[clgpa->ev_index - 1],
-								&clgpa->events[clgpa->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueNDRangeKernel: %s",
-				   opencl_strerror(rc));
-		return rc;
-	}
-	clgpa->ev_kern_gagg = clgpa->ev_index++;
-	clgpa->gpreagg->msg.pfm.num_kern_gagg++;
-
-	return CL_SUCCESS;
-}
-
-static cl_int
-clserv_launch_nogroup_reduction(clstate_gpupreagg *clgpa,
-								cl_uint i_steps, cl_uint nitems)
-{
-	size_t		gwork_sz;
-	size_t		lwork_sz;
-	cl_int		rc;
-
-	/*
-	 * __kernel void
-	 * gpupreagg_nogroup_reduction(__global kern_gpupreagg *kgpreagg,
-	 *                             __global kern_data_store *kds_src,
-	 *                             __global kern_data_store *kds_dst,
-	 *                             __global kern_data_store *ktoast,
-	 *                             KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
-	 */
-	clgpa->kern_lagg = clCreateKernel(clgpa->program,
-									  "gpupreagg_nogroup_reduction",
-									  &rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	if (!clserv_compute_workgroup_size(&gwork_sz,
-									   &lwork_sz,
-									   clgpa->kern_lagg,
-									   clgpa->dindex,
-									   true,
-									   nitems,
-									   Max(sizeof(pagg_datum),
-										   sizeof(cl_int))))
-	{
-		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
-		return StromError_OpenCLInternal;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_lagg,
-						0,		/* kern_gpupreagg *kgpreagg */
-						sizeof(cl_mem),
-						&clgpa->m_gpreagg);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_lagg,
-						1,		/* kern_data_store *kds_src */
-						sizeof(cl_mem),
-						i_steps % 2 == 0
-						? &clgpa->m_kds_src
-						: &clgpa->m_kds_dst);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_lagg,
-						2,		/* kern_data_store *kds_dst */
-						sizeof(cl_mem),
-						i_steps % 2 == 0
-						? &clgpa->m_kds_dst
-						: &clgpa->m_kds_src);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_lagg,
-						3,		/* kern_data_store *ktoast */
-						sizeof(cl_mem),
-						&clgpa->m_kds_in);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_lagg,
-						4,		/* KERN_DYNAMIC_LOCAL_WORKMEM_ARG */
-						sizeof(pagg_datum) * lwork_sz,
-						NULL);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
-								clgpa->kern_lagg,
-								1,
-								NULL,
-								&gwork_sz,
-								&lwork_sz,
-								1,
-								&clgpa->events[clgpa->ev_index - 1],
-								&clgpa->events[clgpa->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueNDRangeKernel: %s",
-				   opencl_strerror(rc));
-		return rc;
-	}
-	clgpa->ev_kern_lagg = clgpa->ev_index++;
-	clgpa->gpreagg->msg.pfm.num_kern_lagg++;
-
-	return CL_SUCCESS;
-}
-
-static cl_int
-clserv_launch_fixup_varlena(clstate_gpupreagg *clgpa, cl_uint nitems)
-{
-	size_t		gwork_sz;
-	size_t		lwork_sz;
-	cl_int		rc;
-
-	/*
-	 * __kernel void
-	 * gpupreagg_fixup_varlena(__global kern_gpupreagg *kgpreagg,
-	 *                         __global kern_data_store *kds_dst,
-	 *                         __global kern_data_store *ktoast,
-	 *                         KERN_DYNAMIC_LOCAL_WORKMEM_ARG)
-	 */
-	clgpa->kern_fixvar = clCreateKernel(clgpa->program,
-										"gpupreagg_fixup_varlena",
-										&rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateKernel: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	if (!clserv_compute_workgroup_size(&gwork_sz,
-									   &lwork_sz,
-									   clgpa->kern_fixvar,
-									   clgpa->dindex,
-									   true,
-									   nitems,
-									   sizeof(cl_uint)))
-	{
-		clserv_log("failed to compute optimal gwork_sz/lwork_sz");
-		return StromError_OpenCLInternal;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_fixvar,
-						0,		/* kern_gpupreagg *kgpreagg */
-						sizeof(cl_mem),
-						&clgpa->m_gpreagg);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_fixvar,
-						1,		/* kern_data_store *kds_dst */
-						sizeof(cl_mem),
-						&clgpa->m_kds_dst);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_fixvar,
-						2,		/* kern_data_store *ktoast */
-						sizeof(cl_mem),
-						&clgpa->m_kds_in);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clSetKernelArg(clgpa->kern_fixvar,
-						3,		/* KERN_DYNAMIC_LOCAL_WORKMEM_ARG */
-						sizeof(cl_uint) * lwork_sz,
-						NULL);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		return rc;
-	}
-
-	rc = clEnqueueNDRangeKernel(clgpa->kcmdq,
-								clgpa->kern_fixvar,
-								1,
-								NULL,
-								&gwork_sz,
-								&lwork_sz,
-								1,
-								&clgpa->events[clgpa->ev_index - 1],
-								&clgpa->events[clgpa->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueNDRangeKernel: %s",
-				   opencl_strerror(rc));
-		return rc;
-	}
-	clgpa->ev_kern_fixvar = clgpa->ev_index++;
-	clgpa->gpreagg->msg.pfm.num_kern_gagg++;
-
-	return CL_SUCCESS;
-}
-
-static void
-clserv_process_gpupreagg(pgstrom_message *message)
-{
-	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) message;
-	pgstrom_data_store *pds = gpreagg->pds;
-	kern_data_store	   *kds = pds->kds;
-	pgstrom_data_store *pds_dest = gpreagg->pds_dest;
-	kern_data_store	   *kds_dest = pds_dest->kds;
-	clstate_gpupreagg  *clgpa;
-	kern_row_map	   *krowmap;
-	cl_uint				ev_limit;
-	cl_uint				nitems = kds->nitems;
-	cl_uint				nvalids;
-	Size				offset;
-	Size				length;
-	cl_int				rc;
-
-	Assert(StromTagIs(gpreagg, GpuPreAgg));
-	Assert(kds->format == KDS_FORMAT_ROW ||
-		   kds->format == KDS_FORMAT_ROW_FLAT);
-	Assert(kds_dest->format == KDS_FORMAT_TUPSLOT);
-
-	/*
-	 * state object of gpupreagg
-	 */
-	ev_limit = 50000 + kds->nblocks;
-	clgpa = calloc(1, offsetof(clstate_gpupreagg, events[ev_limit]));
-	if (!clgpa)
-	{
-		rc = CL_OUT_OF_HOST_MEMORY;
-		goto error;
-	}
-	clgpa->gpreagg = gpreagg;
-	clgpa->ev_limit = ev_limit;
-
-	/*
-	 * First of all, it looks up a program object to be run on
-	 * the supplied row-store. We may have three cases.
-	 * 1) NULL; it means the required program is under asynchronous
-	 *    build, and the message is kept on its internal structure
-	 *    to be enqueued again. In this case, we have nothing to do
-	 *    any more on the invocation.
-	 * 2) BAD_OPENCL_PROGRAM; it means previous compile was failed
-	 *    and unavailable to run this program anyway. So, we need
-	 *    to reply StromError_ProgramCompile error to inform the
-	 *    backend this program.
-	 * 3) valid cl_program object; it is an ideal result. pre-compiled
-	 *    program object was on the program cache, and cl_program
-	 *    object is ready to use.
-	 */
-	clgpa->program = clserv_lookup_device_program(gpreagg->dprog_key,
-												  &gpreagg->msg);
-	if (!clgpa->program)
-	{
-		free(clgpa);
-		return;	/* message is in waitq, being retried later */
-	}
-	if (clgpa->program == BAD_OPENCL_PROGRAM)
-	{
-		rc = CL_BUILD_PROGRAM_FAILURE;
-		goto error;
-	}
-
-	/*
-	 * choose a device to run
-	 */
-	clgpa->dindex = pgstrom_opencl_device_schedule(&gpreagg->msg);
-	clgpa->kcmdq = opencl_cmdq[clgpa->dindex];
-
-	/*
-	 * construction of kernel buffer objects
-	 *
-	 * m_gpreagg  - control data of gpupreagg
-	 * m_kds_in   - data store of input relation stream
-	 * m_kds_src  - data store of partial aggregate source
-	 * m_kds_dst  - data store of partial aggregate destination
-	 * m_ghash    - global hash-slot
-	 */
-	krowmap = KERN_GPUPREAGG_KROWMAP(&gpreagg->kern);
-	nvalids = (krowmap->nvalids < 0 ? nitems : krowmap->nvalids);
-
-	/* allocation of m_gpreagg */
-	length = KERN_GPUPREAGG_BUFFER_SIZE(&gpreagg->kern, nvalids);
-	clgpa->m_gpreagg = clCreateBuffer(opencl_context,
-									  CL_MEM_READ_WRITE,
-									  length,
-									  NULL,
-									  &rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	/* allocation of kds_in */
-	clgpa->m_kds_in = clCreateBuffer(opencl_context,
-									 CL_MEM_READ_WRITE,
-									 KERN_DATA_STORE_LENGTH(kds),
-									 NULL,
-									 &rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-	/* allocation of kds_src */
-	clgpa->m_kds_src = clCreateBuffer(opencl_context,
-									  CL_MEM_READ_WRITE,
-									  KERN_DATA_STORE_LENGTH(kds_dest),
-									  NULL,
-									  &rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-	/* allocation of kds_dst */
-	clgpa->m_kds_dst = clCreateBuffer(opencl_context,
-									  CL_MEM_READ_WRITE,
-									  KERN_DATA_STORE_LENGTH(kds_dest),
-									  NULL,
-									  &rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-	Assert(!pds->ktoast);
-	/* allocation of g_hashslot */
-	length = STROMALIGN(gpreagg->kern.hash_size * sizeof(pagg_hashslot));
-	clgpa->m_ghash = clCreateBuffer(opencl_context,
-									CL_MEM_READ_WRITE,
-									length,
-									NULL,
-									&rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	/*
-	 * Next, enqueuing DMA send requests, prior to kernel execution.
-	 */
-	offset = KERN_GPUPREAGG_DMASEND_OFFSET(&gpreagg->kern);
-	length = KERN_GPUPREAGG_DMASEND_LENGTH(&gpreagg->kern);
-	rc = clEnqueueWriteBuffer(clgpa->kcmdq,
-							  clgpa->m_gpreagg,
-							  CL_FALSE,
-							  offset,
-							  length,
-							  &gpreagg->kern,
-							  0,
-							  NULL,
-							  &clgpa->events[clgpa->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-	clgpa->ev_index++;
-	gpreagg->msg.pfm.bytes_dma_send += length;
-	gpreagg->msg.pfm.num_dma_send++;
-
-	/*
-	 * Enqueue DMA send on the input data-store
-	 */
-	rc = clserv_dmasend_data_store(pds,
-								   clgpa->kcmdq,
-								   clgpa->m_kds_in,
-								   NULL,
-								   0,
-								   NULL,
-								   &clgpa->ev_index,
-								   clgpa->events,
-								   &gpreagg->msg.pfm);
-	if (rc != CL_SUCCESS)
-		goto error;
-
-	/*
-	 * Also, header portion of the result data-store
-	 */
-	length = offsetof(kern_data_store, colmeta[kds_dest->ncols]);
-	rc = clEnqueueWriteBuffer(clgpa->kcmdq,
-                              clgpa->m_kds_src,
-							  CL_FALSE,
-							  0,
-							  length,
-							  kds_dest,
-							  0,
-							  NULL,
-							  &clgpa->events[clgpa->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-	clgpa->ev_index++;
-	gpreagg->msg.pfm.bytes_dma_send += length;
-	gpreagg->msg.pfm.num_dma_send++;
-
-	rc = clEnqueueWriteBuffer(clgpa->kcmdq,
-							  clgpa->m_kds_dst,
-							  CL_FALSE,
-							  0,
-							  length,
-							  kds_dest,
-							  0,
-							  NULL,
-							  &clgpa->events[clgpa->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-	clgpa->ev_index++;
-	gpreagg->msg.pfm.bytes_dma_send += length;
-	gpreagg->msg.pfm.num_dma_send++;
-
-	/*
-	 * Kick the kernel functions.
-	 *
-	 * Fortunatelly, gpupreagg_preparation() is always kicked on the head
-	 * of this call-chain, thus, this function is responsible to synchronize
-	 * DMA transfer above. Rest of kernel function needs to synchronize the
-	 * previous call on itself.
-	 * The last call is always gpupreagg_reduction() also, so it can be the
-	 * only blocker of DMA receive.
-	 */
-
-	/* kick, gpupreagg_preparation() */
-	rc = clserv_launch_preagg_preparation(clgpa, nitems);
-	if (rc != CL_SUCCESS)
-		goto error;
-
-	/*
-	 * We need to pay attention on the case for aggregation without GROUP
-	 * BY clause, because atomic based implementation will make heavy
-	 * memory conflict on a particular destination address.
-	 * In this case, normal reduction operation is the best to operate.
-	 *
-	 * Elsewhere, we take usual atomic-based grouping. It is the best way
-	 * to group rows into multiple aggregations, rather than sorting.
-	 */
-	if (gpreagg->needs_grouping)
-	{
-		/*
-		 * Kick gpupreagg_local_reduction or gpupreagg_init_global_hashslot
-		 * according to the necessity. Local reduction will not work when
-		 * (expected) number of groups is enough large, so we skip this
-		 * step expect for hash initialization prior to global reduction.
-		 */
-		if (gpreagg->local_reduction)
-		{
-			rc = clserv_launch_local_reduction(clgpa, nitems);
-			if (rc != CL_SUCCESS)
-				goto error;
-		}
-		else
-		{
-			rc = clserv_launch_init_hashslot(clgpa, nitems);
-			if (rc != CL_SUCCESS)
-				goto error;
-		}
-		/* finally, kick gpupreagg_global_reduction */
-		rc = clserv_launch_global_reduction(clgpa, nitems);
-		if (rc != CL_SUCCESS)
-			goto error;
-	}
-	else
-	{
-		/* 1st path: data reduction (kds_src => kds_dst) */
-		rc = clserv_launch_nogroup_reduction(clgpa, 0, nitems);
-		if (rc != CL_SUCCESS)
-			goto error;
-
-		/* 2nd path: data reduction (kds_dst => kds_src) */
-		rc = clserv_launch_nogroup_reduction(clgpa, 1, nitems);
-		if (rc != CL_SUCCESS)
-			goto error;
-
-		/* 3rd path: data reduction (kds_src => kds_dst) */
-		rc = clserv_launch_nogroup_reduction(clgpa, 2, nitems);
-		if (rc != CL_SUCCESS)
-			goto error;
-	}
-
-	/* finally, fixup varlena datum if any */
-	if (gpreagg->has_varlena)
-	{
-		rc = clserv_launch_fixup_varlena(clgpa, nitems);
-		if (rc != CL_SUCCESS)
-			goto error;
-	}
-
-	/* writing back the result buffer */
-	length = KERN_DATA_STORE_LENGTH(kds_dest);
-	rc = clEnqueueReadBuffer(clgpa->kcmdq,
-							 clgpa->m_kds_dst,
-							 CL_FALSE,
-							 0,
-							 length,
-							 kds_dest,
-							 1,
-							 &clgpa->events[clgpa->ev_index - 1],
-							 &clgpa->events[clgpa->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueReadBuffer: %s",
-				   opencl_strerror(rc));
-		goto error;
-	}
-	clgpa->ev_dma_recv = clgpa->ev_index++;
-	gpreagg->msg.pfm.bytes_dma_recv += length;
-	gpreagg->msg.pfm.num_dma_recv++;
-
-	/* also, status and kern_row_map has to be written back */
-	offset = KERN_GPUPREAGG_DMARECV_OFFSET(&gpreagg->kern);
-	length = KERN_GPUPREAGG_DMARECV_LENGTH(&gpreagg->kern, nvalids);
-	rc = clEnqueueReadBuffer(clgpa->kcmdq,
-							 clgpa->m_gpreagg,
-							 CL_FALSE,
-							 offset,
-							 length,
-							 &gpreagg->kern,
-							 1,
-							 &clgpa->events[clgpa->ev_index - 1],
-							 &clgpa->events[clgpa->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueReadBuffer: %s",
-				   opencl_strerror(rc));
-		goto error;
-	}
-	clgpa->ev_index++;
-	gpreagg->msg.pfm.bytes_dma_recv += length;
-	gpreagg->msg.pfm.num_dma_recv++;
-	Assert(clgpa->ev_index < clgpa->ev_limit);
-
-	/*
-	 * Last, registers a callback to handle post gpupreagg process
-	 */
-	rc = clSetEventCallback(clgpa->events[clgpa->ev_index - 1],
-							CL_COMPLETE,
-							clserv_respond_gpupreagg,
-							clgpa);
-    if (rc != CL_SUCCESS)
-    {
-        clserv_log("failed on clSetEventCallback: %s", opencl_strerror(rc));
-        goto error;
-    }
-    return;
-
-error:
-	if (clgpa)
-	{
-		if (clgpa->ev_index > 0)
-		{
-			clWaitForEvents(clgpa->ev_index, clgpa->events);
-			while (clgpa->ev_index > 0)
-				clReleaseEvent(clgpa->events[--clgpa->ev_index]);
-		}
-	
-		if (clgpa->m_gpreagg)
-			clReleaseMemObject(clgpa->m_gpreagg);
-		if (clgpa->m_kds_in)
-			clReleaseMemObject(clgpa->m_kds_in);
-		if (clgpa->m_kds_src)
-			clReleaseMemObject(clgpa->m_kds_src);
-		if (clgpa->m_kds_dst)
-			clReleaseMemObject(clgpa->m_kds_dst);
-		if (clgpa->m_ghash)
-			clReleaseMemObject(clgpa->m_ghash);
-		if (clgpa->kern_prep)
-			clReleaseKernel(clgpa->kern_prep);
-		if (clgpa->kern_init)
-			clReleaseKernel(clgpa->kern_init);
-		if (clgpa->kern_lagg)
-			clReleaseKernel(clgpa->kern_lagg);
-		if (clgpa->kern_gagg)
-			clReleaseKernel(clgpa->kern_gagg);
-		if (clgpa->kern_fixvar)
-			clReleaseKernel(clgpa->kern_fixvar);
-		if (clgpa->program && clgpa->program != BAD_OPENCL_PROGRAM)
-			clReleaseProgram(clgpa->program);
-	}
-	gpreagg->msg.errcode = rc;
-	pgstrom_reply_message(&gpreagg->msg);
-}
-
-/* ----------------------------------------------------------------
- *
- * NOTE: below is the function to process enhanced aggregate operations
- *
- * ---------------------------------------------------------------- */
-
-/* gpupreagg_partial_nrows - placeholder function that generate number
- * of rows being included in this partial group.
- */
-Datum
-gpupreagg_partial_nrows(PG_FUNCTION_ARGS)
-{
-	int		i;
-
-	for (i=0; i < PG_NARGS(); i++)
-	{
-		if (PG_ARGISNULL(i) || !PG_GETARG_BOOL(i))
-			PG_RETURN_INT32(0);
-	}
-	PG_RETURN_INT32(1);
-}
-PG_FUNCTION_INFO_V1(gpupreagg_partial_nrows);
-
-/* gpupreagg_pseudo_expr - placeholder function that returns the supplied
- * variable as is (even if it is NULL). Used to MIX(), MAX() placeholder.
- */
-Datum
-gpupreagg_pseudo_expr(PG_FUNCTION_ARGS)
-{
-	PG_RETURN_DATUM(PG_GETARG_DATUM(0));
-}
-PG_FUNCTION_INFO_V1(gpupreagg_pseudo_expr);
-
-/* gpupreagg_psum_* - placeholder function that generates partial sum
- * of the arguments. _x2 generates square value of the input
- */
-Datum
-gpupreagg_psum_int(PG_FUNCTION_ARGS)
-{
-	Assert(PG_NARGS() == 1);
-	if (PG_ARGISNULL(0))
-		PG_RETURN_NULL();
-	PG_RETURN_INT64(PG_GETARG_INT64(0));
-}
-PG_FUNCTION_INFO_V1(gpupreagg_psum_int);
-
-Datum
-gpupreagg_psum_float4(PG_FUNCTION_ARGS)
-{
-	Assert(PG_NARGS() == 1);
-	if (PG_ARGISNULL(0))
-		PG_RETURN_NULL();
-	PG_RETURN_FLOAT4(PG_GETARG_FLOAT4(0));
-}
-PG_FUNCTION_INFO_V1(gpupreagg_psum_float4);
-
-Datum
-gpupreagg_psum_float8(PG_FUNCTION_ARGS)
-{
-	Assert(PG_NARGS() == 1);
-	if (PG_ARGISNULL(0))
-		PG_RETURN_NULL();
-	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(0));
-}
-PG_FUNCTION_INFO_V1(gpupreagg_psum_float8);
-
-Datum
-gpupreagg_psum_x2_float(PG_FUNCTION_ARGS)
-{
-	Assert(PG_NARGS() == 1);
-	if (PG_ARGISNULL(0))
-		PG_RETURN_NULL();
-	PG_RETURN_DATUM(DirectFunctionCall2(float8mul,
-										PG_GETARG_FLOAT8(0),
-										PG_GETARG_FLOAT8(0)));
-}
-PG_FUNCTION_INFO_V1(gpupreagg_psum_x2_float);
-
-Datum
-gpupreagg_psum_numeric(PG_FUNCTION_ARGS)
-{
-	Assert(PG_NARGS() == 1);
-	if (PG_ARGISNULL(0))
-		PG_RETURN_NULL();
-	PG_RETURN_NUMERIC(PG_GETARG_NUMERIC(0));
-}
-PG_FUNCTION_INFO_V1(gpupreagg_psum_numeric);
-
-Datum
-gpupreagg_psum_x2_numeric(PG_FUNCTION_ARGS)
-{
-	Assert(PG_NARGS() == 1);
-	if (PG_ARGISNULL(0))
-		PG_RETURN_NULL();
-
-	PG_RETURN_NUMERIC(DirectFunctionCall2(numeric_mul,
-										  PG_GETARG_DATUM(0),
-										  PG_GETARG_DATUM(0)));
-}
-PG_FUNCTION_INFO_V1(gpupreagg_psum_x2_numeric);
-
-/* gpupreagg_corr_psum - placeholder function that generates partial sum
- * of the arguments. _x2 generates square value of the input
- */
-Datum
-gpupreagg_corr_psum_x(PG_FUNCTION_ARGS)
-{
-	Assert(PG_NARGS() == 3);
-	/* Aggregate Filter */
-	if (PG_ARGISNULL(0) || !PG_GETARG_BOOL(0))
-		PG_RETURN_NULL();
-	/* NULL checks */
-	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
-		PG_RETURN_NULL();
-	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(1));
-}
-PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_x);
-
-Datum
-gpupreagg_corr_psum_y(PG_FUNCTION_ARGS)
-{
-	Assert(PG_NARGS() == 3);
-	/* Aggregate Filter */
-	if (PG_ARGISNULL(0) || !PG_GETARG_BOOL(0))
-		PG_RETURN_NULL();
-	/* NULL checks */
-	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
-		PG_RETURN_NULL();
-	PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(2));
-}
-PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_y);
-
-Datum
-gpupreagg_corr_psum_x2(PG_FUNCTION_ARGS)
-{
-	Assert(PG_NARGS() == 3);
-	/* Aggregate Filter */
-	if (PG_ARGISNULL(0) || !PG_GETARG_BOOL(0))
-		PG_RETURN_NULL();
-	/* NULL checks */
-	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
-		PG_RETURN_NULL();
-	/* calculation of X*X with overflow checks */
-	PG_RETURN_DATUM(DirectFunctionCall2(float8mul,
-										PG_GETARG_FLOAT8(1),
-										PG_GETARG_FLOAT8(1)));
-}
-PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_x2);
-
-Datum
-gpupreagg_corr_psum_y2(PG_FUNCTION_ARGS)
-{
-	Assert(PG_NARGS() == 3);
-	/* Aggregate Filter */
-	if (PG_ARGISNULL(0) || !PG_GETARG_BOOL(0))
-		PG_RETURN_NULL();
-	/* NULL checks */
-	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
-		PG_RETURN_NULL();
-	/* calculation of X*X with overflow checks */
-	PG_RETURN_DATUM(DirectFunctionCall2(float8mul,
-										PG_GETARG_FLOAT8(2),
-										PG_GETARG_FLOAT8(2)));
-}
-PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_y2);
-
-Datum
-gpupreagg_corr_psum_xy(PG_FUNCTION_ARGS)
-{
-	Assert(PG_NARGS() == 3);
-	/* Aggregate Filter */
-	if (PG_ARGISNULL(0) || !PG_GETARG_BOOL(0))
-		PG_RETURN_NULL();
-	/* NULL checks */
-	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
-		PG_RETURN_NULL();
-	/* calculation of X*X with overflow checks */
-	PG_RETURN_DATUM(DirectFunctionCall2(float8mul,
-										PG_GETARG_FLOAT8(1),
-										PG_GETARG_FLOAT8(2)));
-}
-PG_FUNCTION_INFO_V1(gpupreagg_corr_psum_xy);
-
-/*
- * ex_avg() - an enhanced average calculation that takes two arguments;
- * number of rows in this group and partial sum of the value.
- * Then, it eventually generate mathmatically compatible average value.
- */
-static int64 *
-check_int64_array(ArrayType *transarray, int n)
-{
-	if (ARR_NDIM(transarray) != 1 ||
-		ARR_DIMS(transarray)[0] != n ||
-		ARR_HASNULL(transarray) ||
-		ARR_ELEMTYPE(transarray) != INT8OID)
-		elog(ERROR, "Two elements int8 array is expected");
-	return (int64 *) ARR_DATA_PTR(transarray);
-}
-
-Datum
-pgstrom_avg_int8_accum(PG_FUNCTION_ARGS)
-{
-	ArrayType  *transarray = PG_GETARG_ARRAYTYPE_P(0);
-	int32		nrows = PG_GETARG_INT32(1);
-	int64		psumX = PG_GETARG_INT64(2);
-	int64	   *transvalues;
-	int64		newN;
-	int64		newSumX;
-
-	transvalues = check_int64_array(transarray, 2);
-	newN = transvalues[0] + nrows;
-	newSumX = transvalues[1] + psumX;
-
-	if (AggCheckCallContext(fcinfo, NULL))
-	{
-		transvalues[0] = newN;
-		transvalues[1] = newSumX;
-
-		PG_RETURN_ARRAYTYPE_P(transarray);
-	}
-	else
-	{
-		Datum		transdatums[2];
-		ArrayType  *result;
-
-		transdatums[0] = Int64GetDatumFast(newN);
-		transdatums[1] = Int64GetDatumFast(newSumX);
-
-		result = construct_array(transdatums, 2,
-								 INT8OID,
-								 sizeof(int64), FLOAT8PASSBYVAL, 'd');
-		PG_RETURN_ARRAYTYPE_P(result);
-	}
-}
-PG_FUNCTION_INFO_V1(pgstrom_avg_int8_accum);
-
-Datum
-pgstrom_sum_int8_accum(PG_FUNCTION_ARGS)
-{
-	int64		newval;
-
-	if (PG_ARGISNULL(0))
-	{
-		if (PG_ARGISNULL(1))
-			PG_RETURN_NULL();   /* still no non-null */
-		/* This is the first non-null input. */
-		newval = PG_GETARG_INT64(1);
-	}
-	else
-	{
-		newval = PG_GETARG_INT64(0);
-
-		if (!PG_ARGISNULL(1))
-			newval += PG_GETARG_INT64(1);
-	}
-	PG_RETURN_INT64(newval);
-}
-PG_FUNCTION_INFO_V1(pgstrom_sum_int8_accum);
-
-/*
- * numeric_agg_state - self version of aggregation internal state; that
- * can keep N, sum(X) and sum(X*X) in numeric data-type.
- */
-typedef struct
-{
-	int64	N;
-	Datum	sumX;
-	Datum	sumX2;
-} numeric_agg_state;
-
-Datum
-pgstrom_int8_avg_accum(PG_FUNCTION_ARGS)
-{
-	int32			nrows = PG_GETARG_INT32(1);
-	Datum			addNum;
-	MemoryContext	aggcxt;
-	MemoryContext	oldcxt;
-	numeric_agg_state *state;
-
-	if (!AggCheckCallContext(fcinfo, &aggcxt))
-		elog(ERROR, "aggregate function called in non-aggregate context");
-
-	if (PG_ARGISNULL(1))
-		nrows = 0;
-	else if (nrows < 0)
-		elog(ERROR, "Bug? negative nrows were given");
-
-	/* make a state object and update it */
-	oldcxt = MemoryContextSwitchTo(aggcxt);
-	state = PG_ARGISNULL(0) ? NULL : (numeric_agg_state *)PG_GETARG_POINTER(0);
-	if (!state)
-	{
-		state = palloc0(sizeof(numeric_agg_state));
-		state->N = 0;
-		state->sumX = DirectFunctionCall3(numeric_in,
-										  CStringGetDatum("0"),
-										  ObjectIdGetDatum(0),
-										  Int32GetDatum(-1));
-	}
-
-	if (nrows > 0 && !PG_ARGISNULL(2))
-	{
-		state->N += nrows;
-		addNum = DirectFunctionCall1(int8_numeric, PG_GETARG_DATUM(2));
-		state->sumX = DirectFunctionCall2(numeric_add, state->sumX, addNum);
-	}
-	MemoryContextSwitchTo(oldcxt);
-
-	PG_RETURN_POINTER(state);
-}
-PG_FUNCTION_INFO_V1(pgstrom_int8_avg_accum);
-
-Datum
-pgstrom_numeric_avg_accum(PG_FUNCTION_ARGS)
-{
-	int32			nrows = PG_GETARG_INT32(1);
-	MemoryContext	aggcxt;
-	MemoryContext	oldcxt;
-	numeric_agg_state *state;
-
-	if (!AggCheckCallContext(fcinfo, &aggcxt))
-		elog(ERROR, "aggregate function called in non-aggregate context");
-
-	if (PG_ARGISNULL(1))
-		nrows = 0;
-	else if (nrows < 0)
-		elog(ERROR, "Bug? negative nrows were given");
-
-	/* make a state object and update it */
-	oldcxt = MemoryContextSwitchTo(aggcxt);
-	state = PG_ARGISNULL(0) ? NULL : (numeric_agg_state *)PG_GETARG_POINTER(0);
-	if (!state)
-	{
-		state = palloc0(sizeof(numeric_agg_state));
-		state->N = 0;
-		state->sumX = DirectFunctionCall3(numeric_in,
-										  CStringGetDatum("0"),
-										  ObjectIdGetDatum(0),
-										  Int32GetDatum(-1));
-	}
-
-	if (nrows > 0 && !PG_ARGISNULL(2))
-	{
-		state->N += nrows;
-		state->sumX = DirectFunctionCall2(numeric_add,
-										  state->sumX,
-										  PG_GETARG_DATUM(2));
-	}
-	MemoryContextSwitchTo(oldcxt);
-
-	PG_RETURN_POINTER(state);
-}
-PG_FUNCTION_INFO_V1(pgstrom_numeric_avg_accum);
-
-Datum
-pgstrom_numeric_avg_final(PG_FUNCTION_ARGS)
-{
-	numeric_agg_state *state;
-	Datum		vN;
-	Datum		result;
-
-	state = PG_ARGISNULL(0) ? NULL : (numeric_agg_state *)PG_GETARG_POINTER(0);
-
-	/* If there were no non-null inputs, return NULL */
-	if (state == NULL || state->N == 0)
-		PG_RETURN_NULL();
-	/* If any NaN value is accumlated, return NaN */
-	if (numeric_is_nan(DatumGetNumeric(state->sumX)))
-		PG_RETURN_NUMERIC(state->sumX);
-
-	vN = DirectFunctionCall1(int8_numeric, Int64GetDatum(state->N));
-	result = DirectFunctionCall2(numeric_div, state->sumX, vN);
-
-	PG_RETURN_NUMERIC(result);
-}
-PG_FUNCTION_INFO_V1(pgstrom_numeric_avg_final);
-
-/* logic copied from utils/adt/float.c */
-static inline float8 *
-check_float8_array(ArrayType *transarray, int nitems)
-{
-	/*
-	 * We expect the input to be an N-element float array; verify that. We
-	 * don't need to use deconstruct_array() since the array data is just
-	 * going to look like a C array of N float8 values.
-	 */
-	if (ARR_NDIM(transarray) != 1 ||
-		ARR_DIMS(transarray)[0] != nitems ||
-		ARR_HASNULL(transarray) ||
-		ARR_ELEMTYPE(transarray) != FLOAT8OID)
-		elog(ERROR, "%d-elements float8 array is expected", nitems);
-	return (float8 *) ARR_DATA_PTR(transarray);
-}
-
-/* logic copied from utils/adt/float.c */
-static inline void
-check_float8_valid(float8 value, bool inf_is_valid, bool zero_is_valid)
-{
-	if (isinf(value) && !inf_is_valid)
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("value out of range: overflow")));
-	if (value == 0.0 && !zero_is_valid)
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("value out of range: underflow")));
-}
-
-Datum
-pgstrom_sum_float8_accum(PG_FUNCTION_ARGS)
-{
-	ArrayType  *transarray = PG_GETARG_ARRAYTYPE_P(0);
-	int32		nrows = PG_GETARG_INT32(1);
-	float8		psumX = PG_GETARG_FLOAT8(2);
-	float8	   *transvalues;
-	float8		newN;
-	float8		newSumX;
-
-	transvalues = check_float8_array(transarray, 3);
-	newN = transvalues[0] + (float8) nrows;
-	newSumX = transvalues[1] + psumX;
-	check_float8_valid(newSumX, isinf(transvalues[1]) || isinf(psumX), true);
-
-	if (AggCheckCallContext(fcinfo, NULL))
-	{
-		transvalues[0] = newN;
-		transvalues[1] = newSumX;
-		transvalues[2] = 0.0;	/* dummy */
-
-		PG_RETURN_ARRAYTYPE_P(transarray);
-	}
-	else
-	{
-		Datum		transdatums[3];
-		ArrayType  *result;
-
-		transdatums[0] = Float8GetDatumFast(newN);
-		transdatums[1] = Float8GetDatumFast(newSumX);
-		transdatums[2] = Float8GetDatumFast(0.0);
-
-		result = construct_array(transdatums, 3,
-								 FLOAT8OID,
-								 sizeof(float8), FLOAT8PASSBYVAL, 'd');
-		PG_RETURN_ARRAYTYPE_P(result);
-	}
-}
-PG_FUNCTION_INFO_V1(pgstrom_sum_float8_accum);
-
-/*
- * variance and stddev - mathmatical compatible result can be lead using
- * nrows, psum(X) and psum(X*X). So, we track these variables.
- */
-Datum
-pgstrom_variance_float8_accum(PG_FUNCTION_ARGS)
-{
-	ArrayType  *transarray = PG_GETARG_ARRAYTYPE_P(0);
-	int32		nrows = PG_GETARG_INT32(1);
-	float8		psumX = PG_GETARG_FLOAT8(2);
-	float8		psumX2 = PG_GETARG_FLOAT8(3);
-	float8	   *transvalues;
-	float8		newN;
-	float8		newSumX;
-	float8		newSumX2;
-
-	transvalues = check_float8_array(transarray, 3);
-	newN = transvalues[0] + (float8) nrows;
-	newSumX = transvalues[1] + psumX;
-	check_float8_valid(newSumX, isinf(transvalues[1]) || isinf(psumX), true);
-	newSumX2 = transvalues[2] + psumX2;
-	check_float8_valid(newSumX2, isinf(transvalues[2]) || isinf(psumX2), true);
-
-	if (AggCheckCallContext(fcinfo, NULL))
-	{
-		transvalues[0] = newN;
-		transvalues[1] = newSumX;
-		transvalues[2] = newSumX2;
-
-		PG_RETURN_ARRAYTYPE_P(transarray);
-	}
-	else
-	{
-		Datum		transdatums[3];
-		ArrayType  *result;
-
-		transdatums[0] = Float8GetDatumFast(newN);
-		transdatums[1] = Float8GetDatumFast(newSumX);
-		transdatums[2] = Float8GetDatumFast(newSumX2);
-
-		result = construct_array(transdatums, 3,
-								 FLOAT8OID,
-								 sizeof(float8), FLOAT8PASSBYVAL, 'd');
-		PG_RETURN_ARRAYTYPE_P(result);
-	}
-}
-PG_FUNCTION_INFO_V1(pgstrom_variance_float8_accum);
-
-Datum
-pgstrom_numeric_var_accum(PG_FUNCTION_ARGS)
-{
-	int32			nrows = PG_GETARG_INT32(1);
-	MemoryContext	aggcxt;
-	MemoryContext	oldcxt;
-	numeric_agg_state *state;
-
-	if (!AggCheckCallContext(fcinfo, &aggcxt))
-		elog(ERROR, "aggregate function called in non-aggregate context");
-
-	if (PG_ARGISNULL(1))
-		nrows = 0;
-	else if (nrows < 0)
-		elog(ERROR, "Bug? negative nrows were given");
-
-	/* make a state object and update it */
-	oldcxt = MemoryContextSwitchTo(aggcxt);
-	state = PG_ARGISNULL(0) ? NULL : (numeric_agg_state *)PG_GETARG_POINTER(0);
-	if (!state)
-	{
-		state = palloc0(sizeof(numeric_agg_state));
-		state->N = 0;
-		state->sumX = DirectFunctionCall3(numeric_in,
-										  CStringGetDatum("0"),
-										  ObjectIdGetDatum(0),
-										  Int32GetDatum(-1));
-		state->sumX2 = DirectFunctionCall3(numeric_in,
-										   CStringGetDatum("0"),
-										   ObjectIdGetDatum(0),
-										   Int32GetDatum(-1));
-	}
-
-	if (nrows > 0 && !PG_ARGISNULL(2) && !PG_ARGISNULL(3))
-	{
-		state->N += nrows;
-		state->sumX = DirectFunctionCall2(numeric_add,
-										  state->sumX,
-										  PG_GETARG_DATUM(2));
-		state->sumX2 = DirectFunctionCall2(numeric_add,
-										   state->sumX2,
-										   PG_GETARG_DATUM(3));
-	}
-	MemoryContextSwitchTo(oldcxt);
-
-	PG_RETURN_POINTER(state);
-}
-PG_FUNCTION_INFO_V1(pgstrom_numeric_var_accum);
-
-static Numeric
-pgstrom_numeric_stddev_internal(numeric_agg_state *state,
-								bool variance, bool sample)
-{
-	Datum	vZero;
-	Datum	vN;
-	Datum	vN2;
-	Datum	vSumX;
-	Datum	vSumX2;
-	Datum	result;
-
-	if (state == NULL)
-		return NULL;
-	/* NaN checks */
-	if (numeric_is_nan(DatumGetNumeric(state->sumX)))
-		return DatumGetNumeric(state->sumX);
-	if (numeric_is_nan(DatumGetNumeric(state->sumX2)))
-		return DatumGetNumeric(state->sumX2);
-
-	/*
-	 * Sample stddev and variance are undefined when N <= 1; population stddev
-	 * is undefined when N == 0. Return NULL in either case.
-	 */
-	if (sample ? state->N <= 1 : state->N <= 0)
-		return NULL;
-
-	/* const_zero = (Numeric)0 */
-	vZero  = DirectFunctionCall3(numeric_in,
-								 CStringGetDatum("0"),
-								 ObjectIdGetDatum(0),
-								 Int32GetDatum(-1));
-	/* vN = (Numeric)N */
-	vN = DirectFunctionCall1(int8_numeric, Int64GetDatum(state->N));
-	/* vsumX = sumX * sumX */
-	vSumX = DirectFunctionCall2(numeric_mul, state->sumX, state->sumX);
-	/* vsumX2 = N * sumX2 */
-	vSumX2 = DirectFunctionCall2(numeric_mul, state->sumX2, vN);
-	/* N * sumX2 - sumX * sumX */
-	vSumX2 = DirectFunctionCall2(numeric_sub, vSumX2, vSumX);
-
-	/* Watch out for roundoff error producing a negative numerator */
-	if (DirectFunctionCall2(numeric_cmp, vSumX2, vZero) <= 0)
-		return DatumGetNumeric(vZero);
-
-	if (!sample)
-		vN2 = DirectFunctionCall2(numeric_mul, vN, vN);	/* N * N */
-	else
-	{
-		Datum	vOne;
-		Datum	vNminus;
-
-		vOne = DirectFunctionCall3(numeric_in,
-								   CStringGetDatum("1"),
-								   ObjectIdGetDatum(0),
-								   Int32GetDatum(-1));
-		vNminus = DirectFunctionCall2(numeric_sub, vN, vOne);
-		vN2 = DirectFunctionCall2(numeric_mul, vN, vNminus); /* N * (N - 1) */
-	}
-	/* variance */
-	result = DirectFunctionCall2(numeric_div, vSumX2, vN2);
-	/* stddev? */
-	if (!variance)
-		result = DirectFunctionCall1(numeric_sqrt, result);
-
-	return DatumGetNumeric(result);
-}
-
-Datum
-pgstrom_numeric_var_samp(PG_FUNCTION_ARGS)
-{
-	numeric_agg_state *state;
-	Numeric		result;
-
-	state = PG_ARGISNULL(0) ? NULL : (numeric_agg_state *)PG_GETARG_POINTER(0);
-
-	result = pgstrom_numeric_stddev_internal(state, true, true);
-	if (!result)
-		PG_RETURN_NULL();
-
-	PG_RETURN_NUMERIC(result);
-}
-PG_FUNCTION_INFO_V1(pgstrom_numeric_var_samp);
-
-Datum
-pgstrom_numeric_stddev_samp(PG_FUNCTION_ARGS)
-{
-	numeric_agg_state *state;
-	Numeric		result;
-
-	state = PG_ARGISNULL(0) ? NULL : (numeric_agg_state *)PG_GETARG_POINTER(0);
-
-	result = pgstrom_numeric_stddev_internal(state, false, true);
-	if (!result)
-		PG_RETURN_NULL();
-
-	PG_RETURN_NUMERIC(result);
-}
-PG_FUNCTION_INFO_V1(pgstrom_numeric_stddev_samp);
-
-Datum
-pgstrom_numeric_var_pop(PG_FUNCTION_ARGS)
-{
-	numeric_agg_state *state;
-	Numeric		result;
-
-	state = PG_ARGISNULL(0) ? NULL : (numeric_agg_state *)PG_GETARG_POINTER(0);
-
-	result = pgstrom_numeric_stddev_internal(state, true, false);
-	if (!result)
-		PG_RETURN_NULL();
-
-	PG_RETURN_NUMERIC(result);
-}
-PG_FUNCTION_INFO_V1(pgstrom_numeric_var_pop);
-
-Datum
-pgstrom_numeric_stddev_pop(PG_FUNCTION_ARGS)
-{
-	numeric_agg_state *state;
-	Numeric		result;
-
-	state = PG_ARGISNULL(0) ? NULL : (numeric_agg_state *)PG_GETARG_POINTER(0);
-
-	result = pgstrom_numeric_stddev_internal(state, false, false);
-	if (!result)
-		PG_RETURN_NULL();
-
-	PG_RETURN_NUMERIC(result);
-}
-PG_FUNCTION_INFO_V1(pgstrom_numeric_stddev_pop);
-
-/*
- * covariance - mathmatical compatible result can be lead using
- * nrows, psum(X), psum(X*X), psum(Y), psum(Y*Y), psum(X*Y)
- */
-Datum
-pgstrom_covariance_float8_accum(PG_FUNCTION_ARGS)
-{
-	ArrayType  *transarray = PG_GETARG_ARRAYTYPE_P(0);
-	int32		nrows  = PG_GETARG_INT32(1);
-	float8		psumX  = PG_GETARG_FLOAT8(2);
-	float8		psumX2 = PG_GETARG_FLOAT8(3);
-	float8		psumY  = PG_GETARG_FLOAT8(4);
-	float8		psumY2 = PG_GETARG_FLOAT8(5);
-	float8		psumXY = PG_GETARG_FLOAT8(6);
-	float8	   *transvalues;
-	float8		newN;
-	float8		newSumX;
-	float8		newSumX2;
-	float8		newSumY;
-	float8		newSumY2;
-	float8		newSumXY;
-
-	transvalues = check_float8_array(transarray, 6);
-	newN = transvalues[0] + (float8) nrows;
-	newSumX = transvalues[1] + psumX;
-	check_float8_valid(newSumX, isinf(transvalues[1]) || isinf(psumX), true);
-	newSumX2 = transvalues[2] + psumX2;
-	check_float8_valid(newSumX2, isinf(transvalues[2]) || isinf(psumX2), true);
-	newSumY = transvalues[3] + psumY;
-	check_float8_valid(newSumY, isinf(transvalues[3]) || isinf(psumY), true);
-	newSumY2 = transvalues[4] + psumY2;
-	check_float8_valid(newSumY2, isinf(transvalues[4]) || isinf(psumY2), true);
-	newSumXY = transvalues[5] + psumXY;
-	check_float8_valid(newSumXY, isinf(transvalues[5]) || isinf(psumXY), true);
-
-	if (AggCheckCallContext(fcinfo, NULL))
-	{
-		transvalues[0] = newN;
-		transvalues[1] = newSumX;
-		transvalues[2] = newSumX2;
-		transvalues[3] = newSumY;
-		transvalues[4] = newSumY2;
-		transvalues[5] = newSumXY;
-
-		PG_RETURN_ARRAYTYPE_P(transarray);
-	}
-	else
-	{
-		Datum		transdatums[6];
-		ArrayType  *result;
-
-		transdatums[0] = Float8GetDatumFast(newN);
-		transdatums[1] = Float8GetDatumFast(newSumX);
-		transdatums[2] = Float8GetDatumFast(newSumX2);
-		transdatums[3] = Float8GetDatumFast(newSumY);
-		transdatums[4] = Float8GetDatumFast(newSumY2);
-		transdatums[5] = Float8GetDatumFast(newSumXY);
-
-		result = construct_array(transdatums, 6,
-								 FLOAT8OID,
-								 sizeof(float8), FLOAT8PASSBYVAL, 'd');
-		PG_RETURN_ARRAYTYPE_P(result);
-	}
-}
-PG_FUNCTION_INFO_V1(pgstrom_covariance_float8_accum);

@@ -21,6 +21,7 @@
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "storage/ipc.h"
+#include "storage/pg_shmem.h"
 #include "storage/shmem.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
@@ -37,8 +38,8 @@ PG_MODULE_MAGIC;
 static bool	guc_pgstrom_enabled;
 static bool guc_pgstrom_enabled_global;
 bool	pgstrom_perfmon_enabled;
+static bool pgstrom_debug_kernel_source;
 bool	pgstrom_debug_bulkload_enabled;
-bool	pgstrom_show_device_kernel;
 int		pgstrom_max_async_chunks;
 int		pgstrom_min_async_chunks;
 
@@ -86,9 +87,28 @@ pgstrom_enabled(void)
 static void
 pg_strom_enabled_global_assign(bool newval, void *extra)
 {
-	SpinLockAcquire(&global_guc_values->lock);
-	global_guc_values->pgstrom_enabled_global = newval;
-	SpinLockRelease(&global_guc_values->lock);
+	/*
+	 * NOTE: we cannot save state on the shared memory segment
+	 * during _PG_init() because it is not initialized yet.
+	 * So, we once save the "pg_strom.enabled_global" state on
+	 * a private variable, then initialize the shared state
+	 * using this private variable. Once shared memory segment
+	 * is allocated, we shall reference the shared memory side.
+	 *
+	 * Also note that some worker process may detach shared-
+	 * memory segment on starting-up, so we also need to check
+	 * the shared memory segment is still valid. PG-Strom works
+	 * only backend process with valid shared memory segment.
+	 * So, here is no actual problem even if dummy behavior.
+	 */
+	if (!UsedShmemSegAddr || !global_guc_values)
+		guc_pgstrom_enabled_global = newval;
+	else
+	{
+		SpinLockAcquire(&global_guc_values->lock);
+		global_guc_values->pgstrom_enabled_global = newval;
+		SpinLockRelease(&global_guc_values->lock);
+	}
 }
 
 /*
@@ -97,19 +117,23 @@ pg_strom_enabled_global_assign(bool newval, void *extra)
 static const char *
 pg_strom_enabled_global_show(void)
 {
-	bool	rc;
+	bool	state;
 
-	SpinLockAcquire(&global_guc_values->lock);
-	rc = global_guc_values->pgstrom_enabled_global;
-	SpinLockRelease(&global_guc_values->lock);
-
-	return rc ? "on" : "off";
+	if (!UsedShmemSegAddr || !global_guc_values)
+		state = guc_pgstrom_enabled_global;	/* private variable! */
+	else
+	{
+		SpinLockAcquire(&global_guc_values->lock);
+		state = global_guc_values->pgstrom_enabled_global;
+		SpinLockRelease(&global_guc_values->lock);
+	}
+	return state ? "on" : "off";
 }
 
 static void
 pgstrom_init_misc_guc(void)
 {
-	/* GUC variables according to the device information */
+	/* turn on/off PG-Strom feature */
 	DefineCustomBoolVariable("pg_strom.enabled",
 							 "Enables the planner's use of PG-Strom",
 							 NULL,
@@ -118,6 +142,19 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	/* turn on/off PG-Strom feature on all the instance */
+	DefineCustomBoolVariable("pg_strom.enabled_global",
+							 "Enables the planner's use of PG-Strom in global",
+							 NULL,
+							 &guc_pgstrom_enabled_global,
+							 true,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE |
+							 GUC_SUPERUSER_ONLY,
+							 NULL,
+							 pg_strom_enabled_global_assign,
+							 pg_strom_enabled_global_show);
+	/* turn on/off performance monitor on EXPLAIN ANALYZE */
 	DefineCustomBoolVariable("pg_strom.perfmon",
 							 "Enables the performance monitor of PG-Strom",
 							 NULL,
@@ -126,6 +163,16 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	/* turn on/off cuda kernel source saving */
+	DefineCustomBoolVariable("pg_strom.debug.kernel_source",
+							 "Turn on/off to display the kernel source path",
+							 NULL,
+							 &pgstrom_debug_kernel_source,
+							 false,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
 	DefineCustomBoolVariable("pg_strom.debug_bulkload_enabled",
 							 "Enables the bulk-loading mode of PG-Strom",
 							 NULL,
@@ -134,14 +181,6 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
                              GUC_NOT_IN_SAMPLE,
                              NULL, NULL, NULL);
-	DefineCustomBoolVariable("pg_strom.show_device_kernel",
-							 "Enables to show device kernel on EXPLAIN",
-							 NULL,
-							 &pgstrom_show_device_kernel,
-							 false,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
 	DefineCustomIntVariable("pg_strom.min_async_chunks",
 							"least number of chunks to be run asynchronously",
 							NULL,
@@ -156,7 +195,7 @@ pgstrom_init_misc_guc(void)
 							"max number of chunk to be run asynchronously",
 							NULL,
 							&pgstrom_max_async_chunks,
-							3,
+							32,
 							pgstrom_min_async_chunks + 1,
 							INT_MAX,
 							PGC_USERSET,
@@ -244,19 +283,7 @@ pgstrom_startup_global_guc(void)
 	/* segment initialization */
 	memset(global_guc_values, 0, MAXALIGN(sizeof(*global_guc_values)));
 	SpinLockInit(&global_guc_values->lock);
-
-	/* add pg_strom.enabled_global parameter */
-	DefineCustomBoolVariable("pg_strom.enabled_global",
-							 "Enables the planner's use of PG-Strom in global",
-							 NULL,
-							 &guc_pgstrom_enabled_global,
-							 true,
-							 PGC_SUSET,
-							 GUC_NOT_IN_SAMPLE |
-							 GUC_SUPERUSER_ONLY,
-							 NULL,
-							 pg_strom_enabled_global_assign,
-							 pg_strom_enabled_global_show);
+	global_guc_values->pgstrom_enabled_global = guc_pgstrom_enabled_global;
 }
 
 void
@@ -270,29 +297,13 @@ _PG_init(void)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 		errmsg("PG-Strom must be loaded via shared_preload_libraries")));
 
-	/* load OpenCL runtime and initialize entrypoints */
-	pgstrom_init_opencl_entry();
-
-	/* initialization of device info on postmaster stage */
-	pgstrom_init_opencl_devinfo();
-	pgstrom_init_opencl_devprog();
-
-	/* initialization of message queue on postmaster stage */
-	pgstrom_init_mqueue();
-
-	/* initialization of resource tracking subsystem */
-	pgstrom_init_restrack();
-
-	/* initialize shared memory segment and memory context stuff */
-	pgstrom_init_shmem();
-
-	/* registration of OpenCL background worker process */
-	pgstrom_init_opencl_server();
-
-	/* initialization of data-store */
+	/* initialization of CUDA related stuff */
+	pgstrom_init_cuda_control();
+	pgstrom_init_cuda_program();
+	/* initialization of data store support */
 	pgstrom_init_datastore();
 
-	/* registration of custom-plan providers */
+	/* registration of custom-scan providers */
 	pgstrom_init_gpuscan();
 	pgstrom_init_gpuhashjoin();
 	pgstrom_init_gpupreagg();
@@ -307,53 +318,6 @@ _PG_init(void)
 	RequestAddinShmemSpace(MAXALIGN(sizeof(*global_guc_values)));
 	shmem_startup_hook_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_global_guc;
-}
-
-/*
- * pgstrom_strerror
- *
- * translation from StromError_* to human readable form
- */
-const char *
-pgstrom_strerror(cl_int errcode)
-{
-	static char		unknown_buf[256];
-
-	if (errcode < 0)
-		return opencl_strerror(errcode);
-
-	switch (errcode)
-	{
-		case StromError_Success:
-			return "Success";
-		case StromError_RowFiltered:
-			return "Row is filtered";
-		case StromError_CpuReCheck:
-			return "To be re-checked by CPU";
-		case StromError_ServerNotReady:
-			return "OpenCL server is not ready";
-		case StromError_BadRequestMessage:
-			return "Request message is bad";
-		case StromError_OpenCLInternal:
-			return "OpenCL internal error";
-		case StromError_OutOfSharedMemory:
-			return "out of shared memory";
-		case StromError_OutOfMemory:
-			return "out of host memory";
-		case StromError_DataStoreCorruption:
-			return "data store is corrupted";
-		case StromError_DataStoreNoSpace:
-			return "data store has no space";
-		case StromError_DataStoreOutOfRange:
-			return "out of range in data store";
-		case StromError_SanityCheckViolation:
-			return "sanity check violation";
-		default:
-			snprintf(unknown_buf, sizeof(unknown_buf),
-					 "undefined strom error (code: %d)", errcode);
-			break;
-	}
-	return unknown_buf;
 }
 
 /* ------------------------------------------------------------
@@ -424,116 +388,58 @@ show_instrumentation_count(const char *qlabel, int which,
 }
 
 void
-show_custom_flags(CustomScanState *css, ExplainState *es)
+pgstrom_accum_perfmon(pgstrom_perfmon *accum, const pgstrom_perfmon *pfm)
 {
-	StringInfoData	str;
-
-	if (!es->verbose)
+	if (!accum->enabled)
 		return;
 
-	initStringInfo(&str);
-	if ((css->flags & CUSTOMPATH_PREFERE_ROW_FORMAT) != 0)
-		appendStringInfo(&str, "likely-heap-tuple");
-	else
-		appendStringInfo(&str, "likely-tuple-slot");
-
-	if ((css->flags & CUSTOMPATH_SUPPORT_BULKLOAD) != 0)
-		appendStringInfo(&str, ", bulkload-supported");
-
-	ExplainPropertyText("Features", str.data, es);
-
-	pfree(str.data);
-}
-
-void
-show_device_kernel(Datum dprog_key, ExplainState *es)
-{
-	StringInfoData	str;
-	const char *kernel_source;
-	int32		extra_flags;
-
-	if (!dprog_key || !es->verbose || !pgstrom_show_device_kernel)
-		return;
-
-	kernel_source = pgstrom_get_devprog_kernel_source(dprog_key);
-	extra_flags = pgstrom_get_devprog_extra_flags(dprog_key);
-
-	initStringInfo(&str);
-	/*
-	 * In case of EXPLAIN command context, we show the built-in logics
-	 * like a usual #include preprocessor command.
-	 * Practically, clCreateProgramWithSource() accepts multiple cstrings
-	 * as if external files are included.
-	 */
-	appendStringInfo(&str, "#include \"opencl_common.h\"\n");
-	if (extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
-		appendStringInfo(&str, "#include \"opencl_gpuscan.h\"\n");
-	if (extra_flags & DEVKERNEL_NEEDS_HASHJOIN)
-		appendStringInfo(&str, "#include \"opencl_hashjoin.h\"\n");
-	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
-		appendStringInfo(&str, "#include \"opencl_gpupreagg.h\"\n");
-	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT)
-		appendStringInfo(&str, "#include \"opencl_gpusort.h\"\n");
-	if (extra_flags & DEVFUNC_NEEDS_MATHLIB)
-		appendStringInfo(&str, "#include \"opencl_mathlib.h\"\n");
-	if (extra_flags & DEVFUNC_NEEDS_TIMELIB)
-		appendStringInfo(&str, "#include \"opencl_timelib.h\"\n");
-	if (extra_flags & DEVFUNC_NEEDS_TEXTLIB)
-		appendStringInfo(&str, "#include \"opencl_textlib.h\"\n");
-	if (extra_flags & DEVFUNC_NEEDS_NUMERIC)
-		appendStringInfo(&str, "#include \"opencl_numeric.h\"\n");
-	appendStringInfo(&str, "\n%s", kernel_source);
-
-	ExplainPropertyText("Kernel Source", str.data, es);
-
-	pfree(str.data);
-}
-
-void
-pgstrom_perfmon_add(pgstrom_perfmon *pfm_sum, pgstrom_perfmon *pfm_item)
-{
-	if (!pfm_sum->enabled)
-		return;
-
-	pfm_sum->num_samples++;
-	pfm_sum->time_inner_load	+= pfm_item->time_inner_load;
-	pfm_sum->time_outer_load	+= pfm_item->time_outer_load;
-	pfm_sum->time_materialize	+= pfm_item->time_materialize;
-	pfm_sum->time_in_sendq		+= pfm_item->time_in_sendq;
-	pfm_sum->time_in_recvq		+= pfm_item->time_in_recvq;
-	pfm_sum->time_kern_build = Max(pfm_sum->time_kern_build,
-								   pfm_item->time_kern_build);
-	pfm_sum->num_dma_send		+= pfm_item->num_dma_send;
-	pfm_sum->num_dma_recv		+= pfm_item->num_dma_recv;
-	pfm_sum->bytes_dma_send		+= pfm_item->bytes_dma_send;
-	pfm_sum->bytes_dma_recv		+= pfm_item->bytes_dma_recv;
-	pfm_sum->time_dma_send		+= pfm_item->time_dma_send;
-	pfm_sum->time_dma_recv		+= pfm_item->time_dma_recv;
-	pfm_sum->num_kern_exec		+= pfm_item->num_kern_exec;
-	pfm_sum->time_kern_exec		+= pfm_item->time_kern_exec;
-	/* for gpuhashjoin */
-	pfm_sum->num_kern_proj		+= pfm_item->num_kern_proj;
-	pfm_sum->time_kern_proj		+= pfm_item->time_kern_proj;
-	/* for gpupreagg */
-	pfm_sum->num_kern_prep		+= pfm_item->num_kern_prep;
-	pfm_sum->num_kern_lagg		+= pfm_item->num_kern_lagg;
-	pfm_sum->num_kern_gagg		+= pfm_item->num_kern_gagg;
-	pfm_sum->time_kern_prep		+= pfm_item->time_kern_prep;
-	pfm_sum->time_kern_lagg		+= pfm_item->time_kern_lagg;
-	pfm_sum->time_kern_gagg		+= pfm_item->time_kern_gagg;
-	/* for gpusort */
-	pfm_sum->num_gpu_sort		+= pfm_item->num_gpu_sort;
-	pfm_sum->num_cpu_sort		+= pfm_item->num_cpu_sort;
-	pfm_sum->time_gpu_sort		+= pfm_item->time_gpu_sort;
-	pfm_sum->time_cpu_sort		+= pfm_item->time_cpu_sort;
-	pfm_sum->time_cpu_sort_real	+= pfm_item->time_cpu_sort_real;
-	pfm_sum->time_bgw_sync		+= pfm_item->time_bgw_sync;
-
-	/* for debugging */
-	pfm_sum->time_debug1		+= pfm_item->time_debug1;
-	pfm_sum->time_debug2		+= pfm_item->time_debug2;
-	pfm_sum->time_debug3		+= pfm_item->time_debug3;
-	pfm_sum->time_debug4		+= pfm_item->time_debug4;
+	accum->num_samples++;
+	accum->time_inner_load		+= pfm->time_inner_load;
+	accum->time_outer_load		+= pfm->time_outer_load;
+	accum->time_materialize		+= pfm->time_materialize;
+	accum->time_launch_cuda		+= pfm->time_launch_cuda;
+	accum->time_sync_tasks		+= pfm->time_sync_tasks;
+	accum->num_dma_send			+= pfm->num_dma_send;
+	accum->num_dma_recv			+= pfm->num_dma_recv;
+	accum->bytes_dma_send		+= pfm->bytes_dma_send;
+	accum->bytes_dma_recv		+= pfm->bytes_dma_recv;
+	accum->time_dma_send		+= pfm->time_dma_send;
+	accum->time_dma_recv		+= pfm->time_dma_recv;
+	/* in case of gpuscan */
+	accum->num_kern_qual		+= pfm->num_kern_qual;
+	accum->time_kern_qual		+= pfm->time_kern_qual;
+	/* in case of gpuhashjoin */
+	accum->num_kern_join		+= pfm->num_kern_join;
+	accum->num_kern_proj		+= pfm->num_kern_proj;
+	accum->time_kern_join		+= pfm->time_kern_join;
+	accum->time_kern_proj		+= pfm->time_kern_proj;
+	/* in case of gpupreagg */
+	accum->num_kern_prep		+= pfm->num_kern_prep;
+	accum->num_kern_lagg		+= pfm->num_kern_lagg;
+	accum->num_kern_gagg		+= pfm->num_kern_gagg;
+	accum->num_kern_nogrp		+= pfm->num_kern_nogrp;
+	accum->time_kern_prep		+= pfm->time_kern_prep;
+	accum->time_kern_lagg		+= pfm->time_kern_lagg;
+	accum->time_kern_gagg		+= pfm->time_kern_gagg;
+	accum->time_kern_nogrp		+= pfm->time_kern_nogrp;
+	/* in case of gpusort */
+	accum->num_prep_sort		+= pfm->num_prep_sort;
+	accum->num_gpu_sort			+= pfm->num_gpu_sort;
+	accum->num_cpu_sort			+= pfm->num_cpu_sort;
+	accum->time_prep_sort		+= pfm->time_prep_sort;
+	accum->time_gpu_sort		+= pfm->time_gpu_sort;
+	accum->time_cpu_sort		+= pfm->time_cpu_sort;
+	accum->time_cpu_sort_real	+= pfm->time_cpu_sort_real;
+	accum->time_cpu_sort_min	= Min(accum->time_cpu_sort_min,
+									  pfm->time_cpu_sort);
+	accum->time_cpu_sort_max	= Max(accum->time_cpu_sort_min,
+									  pfm->time_cpu_sort);
+	accum->time_bgw_sync		+= pfm->time_bgw_sync;
+	/* for debug usage */
+	accum->time_debug1			+= pfm->time_debug1;
+	accum->time_debug2			+= pfm->time_debug2;
+	accum->time_debug3			+= pfm->time_debug3;
+	accum->time_debug4			+= pfm->time_debug4;
 }
 
 static char *
@@ -551,217 +457,275 @@ bytesz_unitary_format(double nbytes)
 }
 
 static char *
-usecond_unitary_format(double usecond)
+milliseconds_unitary_format(double milliseconds)
 {
-	if (usecond > 300.0 * 1000.0 * 1000.0)
-		return psprintf("%.2fmin", usecond / (60.0 * 1000.0 * 1000.0));
-	else if (usecond > 8000.0 * 1000.0)
-		return psprintf("%.2fsec", usecond / (1000.0 * 1000.0));
-	else if (usecond > 8000.0)
-		return psprintf("%.2fms", usecond / 1000.0);
-	return psprintf("%uus", (unsigned int)usecond);
+	if (milliseconds > 300000.0)	/* more then 5min */
+		return psprintf("%.2fmin", milliseconds / 60000.0);
+	else if (milliseconds > 8000.0)	/* more than 8sec */
+		return psprintf("%.2fsec", milliseconds / 1000.0);
+	return psprintf("%.2fms", milliseconds);
 }
 
-void
-pgstrom_perfmon_explain(pgstrom_perfmon *pfm, ExplainState *es)
+static void
+pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 {
-	bool		multi_kernel = false;
 	char		buf[256];
 
 	if (!pfm->enabled || pfm->num_samples == 0)
 		return;
 
 	/* common performance statistics */
-	ExplainPropertyInteger("number of requests", pfm->num_samples, es);
+	ExplainPropertyInteger("number of tasks", pfm->num_samples, es);
 
-	if (pfm->time_inner_load > 0)
+	if (pfm->time_inner_load > 0.0)
 	{
 		snprintf(buf, sizeof(buf), "%s",
-				 usecond_unitary_format((double)pfm->time_inner_load));
+				 milliseconds_unitary_format(pfm->time_inner_load));
 		ExplainPropertyText("total time for inner load", buf, es);
 
 		snprintf(buf, sizeof(buf), "%s",
-				 usecond_unitary_format((double)pfm->time_outer_load));
+				 milliseconds_unitary_format(pfm->time_outer_load));
 		ExplainPropertyText("total time for outer load", buf, es);
 	}
 	else
 	{
 		snprintf(buf, sizeof(buf), "%s",
-				 usecond_unitary_format((double)pfm->time_outer_load));
+				 milliseconds_unitary_format(pfm->time_outer_load));
 		ExplainPropertyText("total time to load", buf, es);
 	}
 
-	if (pfm->time_materialize > 0)
+	if (pfm->time_materialize > 0.0)
 	{
 		snprintf(buf, sizeof(buf), "%s",
-                 usecond_unitary_format((double)pfm->time_materialize));
+                 milliseconds_unitary_format(pfm->time_materialize));
 		ExplainPropertyText("total time to materialize", buf, es);
 	}
 
-	if (pfm->num_samples > 0 && (pfm->time_in_sendq > 0 ||
-								 pfm->time_in_recvq > 0))
+	if (pfm->time_launch_cuda > 0.0)
 	{
 		snprintf(buf, sizeof(buf), "%s",
-				 usecond_unitary_format((double)pfm->time_in_sendq /
-										(double)pfm->num_samples));
-		ExplainPropertyText("average time in send-mq", buf, es);
-
-		snprintf(buf, sizeof(buf), "%s",
-				 usecond_unitary_format((double)pfm->time_in_recvq /
-										(double)pfm->num_samples));
-		ExplainPropertyText("average time in recv-mq", buf, es);
+				 milliseconds_unitary_format(pfm->time_launch_cuda));
+		ExplainPropertyText("total time to CUDA commands", buf, es);
 	}
 
-	if (pfm->time_kern_build > 0)
+	if (pfm->time_sync_tasks > 0.0)
 	{
 		snprintf(buf, sizeof(buf), "%s",
-				 usecond_unitary_format((double)pfm->time_kern_build));
-		ExplainPropertyText("max time to build kernel", buf, es);
+				 milliseconds_unitary_format(pfm->time_sync_tasks));
+		ExplainPropertyText("total time to synchronize", buf, es);
 	}
 
 	if (pfm->num_dma_send > 0)
 	{
-		double	band = (((double)pfm->bytes_dma_send * 1000000.0)
-						/ (double)pfm->time_dma_send);
+		double	band =
+			((double)pfm->bytes_dma_send * 1000.0 / pfm->time_dma_send);
 		snprintf(buf, sizeof(buf),
 				 "%s/sec, len: %s, time: %s, count: %u",
 				 bytesz_unitary_format(band),
 				 bytesz_unitary_format((double)pfm->bytes_dma_send),
-				 usecond_unitary_format((double)pfm->time_dma_send),
+				 milliseconds_unitary_format(pfm->time_dma_send),
 				 pfm->num_dma_send);
 		ExplainPropertyText("DMA send", buf, es);
 	}
 
 	if (pfm->num_dma_recv > 0)
 	{
-		double	band = (((double)pfm->bytes_dma_recv * 1000000.0)
-                        / (double)pfm->time_dma_recv);
+		double	band =
+			((double)pfm->bytes_dma_recv * 1000.0 / pfm->time_dma_recv);
 		snprintf(buf, sizeof(buf),
 				 "%s/sec, len: %s, time: %s, count: %u",
 				 bytesz_unitary_format(band),
-                 bytesz_unitary_format((double)pfm->bytes_dma_recv),
-                 usecond_unitary_format((double)pfm->time_dma_recv),
+				 bytesz_unitary_format((double)pfm->bytes_dma_recv),
+				 milliseconds_unitary_format(pfm->time_dma_recv),
 				 pfm->num_dma_recv);
 		ExplainPropertyText("DMA recv", buf, es);
 	}
 
-	/* only gpupreagg or gpusort */
-	if (pfm->num_kern_prep > 0)
+	/* in case of gpuscan */
+	if (pfm->num_kern_qual > 0)
 	{
-		multi_kernel = true;
 		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 usecond_unitary_format((double)pfm->time_kern_prep),
-				 usecond_unitary_format((double)pfm->time_kern_prep /
-										(double)pfm->num_kern_prep),
-				 pfm->num_kern_prep);
-        ExplainPropertyText("prep kernel exec", buf, es);
+				 milliseconds_unitary_format(pfm->time_kern_qual),
+                 milliseconds_unitary_format(pfm->time_kern_qual /
+											 (double)pfm->num_kern_qual),
+                 pfm->num_kern_qual);
+		ExplainPropertyText("Qual kernel exec", buf, es);
+	}
+	/* in case of gpuhashjoin */
+	if (pfm->num_kern_join > 0)
+	{
+		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
+				 milliseconds_unitary_format(pfm->time_kern_join),
+                 milliseconds_unitary_format(pfm->time_kern_join /
+											 (double)pfm->num_kern_join),
+                 pfm->num_kern_join);
+		ExplainPropertyText("Hash-join main kernel", buf, es);
 	}
 
-	/* only gpupreagg */
-	if (pfm->num_kern_lagg > 0)
-	{
-		multi_kernel = true;
-		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 usecond_unitary_format((double)pfm->time_kern_lagg),
-				 usecond_unitary_format((double)pfm->time_kern_lagg /
-										(double)pfm->num_kern_lagg),
-				 pfm->num_kern_gagg);
-        ExplainPropertyText("lagg kernel exec", buf, es);
-	}
-
-	/* only gpupreagg */
-	if (pfm->num_kern_gagg > 0)
-	{
-		multi_kernel = true;
-		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 usecond_unitary_format((double)pfm->time_kern_gagg),
-				 usecond_unitary_format((double)pfm->time_kern_gagg /
-										(double)pfm->num_kern_gagg),
-				 pfm->num_kern_gagg);
-        ExplainPropertyText("gagg kernel exec", buf, es);
-	}
-
-	/* only gpuhashjoin */
 	if (pfm->num_kern_proj > 0)
 	{
-		multi_kernel = true;
 		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 usecond_unitary_format((double)pfm->time_kern_proj),
-				 usecond_unitary_format((double)pfm->time_kern_proj /
-										(double)pfm->num_kern_proj),
-				 pfm->num_kern_exec);
-		ExplainPropertyText("proj kernel exec", buf, es);
+				 milliseconds_unitary_format(pfm->time_kern_proj),
+                 milliseconds_unitary_format(pfm->time_kern_proj /
+											 (double)pfm->num_kern_proj),
+                 pfm->num_kern_proj);
+		ExplainPropertyText("Hash-join projection", buf, es);
+	}
+	/* in case of gpupreagg */
+	if (pfm->num_kern_prep > 0)
+	{
+		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
+				 milliseconds_unitary_format(pfm->time_kern_prep),
+				 milliseconds_unitary_format(pfm->time_kern_prep /
+											 (double)pfm->num_kern_prep),
+				 pfm->num_kern_prep);
+        ExplainPropertyText("Aggregate preparation", buf, es);
 	}
 
-	/* only gpusort */
+	if (pfm->num_kern_lagg > 0)
+	{
+		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
+				 milliseconds_unitary_format((double)pfm->time_kern_lagg),
+				 milliseconds_unitary_format((double)pfm->time_kern_lagg /
+											 (double)pfm->num_kern_lagg),
+				 pfm->num_kern_lagg);
+        ExplainPropertyText("Local reduction kernel", buf, es);
+	}
+
+	if (pfm->num_kern_gagg > 0)
+	{
+		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
+				 milliseconds_unitary_format((double)pfm->time_kern_gagg),
+				 milliseconds_unitary_format((double)pfm->time_kern_gagg /
+											 (double)pfm->num_kern_gagg),
+				 pfm->num_kern_gagg);
+        ExplainPropertyText("Global reduction kernel", buf, es);
+	}
+
+	if (pfm->num_kern_nogrp > 0)
+	{
+		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
+				 milliseconds_unitary_format((double)pfm->time_kern_nogrp),
+				 milliseconds_unitary_format((double)pfm->time_kern_nogrp /
+											 (double)pfm->num_kern_nogrp),
+				 pfm->num_kern_nogrp);
+        ExplainPropertyText("NoGroup reduction kernel", buf, es);
+	}
+
+	/* in case of gpusort */
+	if (pfm->num_prep_sort > 0)
+	{
+		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
+				 milliseconds_unitary_format(pfm->time_prep_sort),
+				 milliseconds_unitary_format(pfm->time_prep_sort /
+											 (double)pfm->num_gpu_sort),
+				 pfm->num_gpu_sort);
+		ExplainPropertyText("GPU sort prep", buf, es);
+	}
+
 	if (pfm->num_gpu_sort > 0)
 	{
-		multi_kernel = true;
 		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 usecond_unitary_format((double)pfm->time_gpu_sort),
-				 usecond_unitary_format((double)pfm->time_gpu_sort /
-										(double)pfm->num_gpu_sort),
+				 milliseconds_unitary_format(pfm->time_gpu_sort),
+				 milliseconds_unitary_format(pfm->time_gpu_sort /
+											 (double)pfm->num_gpu_sort),
 				 pfm->num_gpu_sort);
 		ExplainPropertyText("GPU sort exec", buf, es);
 	}
 
-	/* only gpusort */
 	if (pfm->num_cpu_sort > 0)
 	{
-		cl_ulong	overhead;
+		cl_double	overhead;
 
-		multi_kernel = true;
 		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 usecond_unitary_format((double)pfm->time_cpu_sort),
-				 usecond_unitary_format((double)pfm->time_cpu_sort /
-										(double)pfm->num_cpu_sort),
+				 milliseconds_unitary_format(pfm->time_cpu_sort),
+				 milliseconds_unitary_format(pfm->time_cpu_sort /
+											 (double)pfm->num_cpu_sort),
 				 pfm->num_cpu_sort);
 		ExplainPropertyText("CPU sort exec", buf, es);
 
 		overhead = pfm->time_cpu_sort_real - pfm->time_cpu_sort;
 		snprintf(buf, sizeof(buf), "overhead: %s, sync: %s",
-				 usecond_unitary_format((double)overhead),
-				 usecond_unitary_format((double)pfm->time_bgw_sync));
-		ExplainPropertyText("Background Worker", buf, es);
+				 milliseconds_unitary_format(overhead),
+				 milliseconds_unitary_format(pfm->time_bgw_sync));
+		ExplainPropertyText("BGWorker", buf, es);
 	}
 
-	if (pfm->num_kern_exec > 0)
-	{
-		const char	   *label =
-			(multi_kernel ? "main kernel exec" : "kernel exec");
-
-		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 usecond_unitary_format((double)pfm->time_kern_exec),
-				 usecond_unitary_format((double)pfm->time_kern_exec /
-										(double)pfm->num_kern_exec),
-				 pfm->num_kern_exec);
-		ExplainPropertyText(label, buf, es);
-	}
 	/* for debugging if any */
-	if (pfm->time_debug1 > 0)
+	if (pfm->time_debug1 > 0.0)
 	{
 		snprintf(buf, sizeof(buf), "debug1: %s",
-				 usecond_unitary_format((double)pfm->time_debug1));
+				 milliseconds_unitary_format(pfm->time_debug1));
 		ExplainPropertyText("debug-1", buf, es);
 	}
-	if (pfm->time_debug2 > 0)
+	if (pfm->time_debug2 > 0.0)
 	{
 		snprintf(buf, sizeof(buf), "debug2: %s",
-				 usecond_unitary_format((double)pfm->time_debug2));
+				 milliseconds_unitary_format(pfm->time_debug2));
 		ExplainPropertyText("debug-2", buf, es);
 	}
-	if (pfm->time_debug3 > 0)
+	if (pfm->time_debug3 > 0.0)
 	{
 		snprintf(buf, sizeof(buf), "debug3: %s",
-				 usecond_unitary_format((double)pfm->time_debug3));
+				 milliseconds_unitary_format(pfm->time_debug3));
 		ExplainPropertyText("debug-3", buf, es);
 	}
-	if (pfm->time_debug4 > 0)
+	if (pfm->time_debug4 > 0.0)
 	{
 		snprintf(buf, sizeof(buf), "debug4: %s",
-				 usecond_unitary_format((double)pfm->time_debug4));
+				 milliseconds_unitary_format(pfm->time_debug4));
 		ExplainPropertyText("debug-4", buf, es);
 	}
+}
+
+/*
+ * pgstrom_explain_gputaskstate
+ *
+ * common additional explain output for all the GpuTaskState nodes
+ */
+void
+pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es)
+{
+	/*
+	 * Explain custom-flags
+	 */
+	if (es->verbose)
+	{
+		StringInfoData	buf;
+		uint32			cflags = gts->css.flags;
+
+		initStringInfo(&buf);
+
+		if ((cflags & CUSTOMPATH_PREFERE_ROW_FORMAT) != 0)
+			appendStringInfo(&buf, "format: heap-tuple");
+		else
+			appendStringInfo(&buf, "format: tuple-slot");
+
+		if ((cflags & CUSTOMPATH_SUPPORT_BULKLOAD) != 0)
+			appendStringInfo(&buf, ", bulkload: supported");
+		else
+			appendStringInfo(&buf, ", bulkload: unsupported");
+
+		ExplainPropertyText("Features", buf.data, es);
+
+		pfree(buf.data);
+	}
+
+	/*
+	 * Show source path of the GPU kernel
+	 */
+	if (es->verbose && pgstrom_debug_kernel_source)
+	{
+		const char *cuda_source = pgstrom_cuda_source_file(gts->kern_source,
+														   gts->extra_flags);
+		ExplainPropertyText("Kernel Source", cuda_source, es);
+	}
+
+	/*
+	 * Show performance information
+	 */
+	if (es->analyze && gts->pfm_accum.enabled)
+		pgstrom_explain_perfmon(&gts->pfm_accum, es);
 }
 
 /*

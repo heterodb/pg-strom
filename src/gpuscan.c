@@ -3,8 +3,8 @@
  *
  * Sequential scan accelerated by GPU processors
  * ----
- * Copyright 2011-2014 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014 (C) The PG-Strom Development Team
+ * Copyright 2011-2015 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2015 (C) The PG-Strom Development Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -36,6 +36,9 @@
 #include "optimizer/var.h"
 #include "parser/parsetree.h"
 #include "storage/bufmgr.h"
+#include "storage/latch.h"
+#include "storage/proc.h"
+#include "storage/procsignal.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -45,7 +48,7 @@
 #include "utils/syscache.h"
 #include "utils/tqual.h"
 #include "pg_strom.h"
-#include "opencl_gpuscan.h"
+#include "cuda_gpuscan.h"
 
 static set_rel_pathlist_hook_type	set_rel_pathlist_next;
 static CustomPathMethods		gpuscan_path_methods;
@@ -86,10 +89,12 @@ form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gscan_info)
 }
 
 static GpuScanInfo *
-deform_gpuscan_info(CustomScan *cscan)
+deform_gpuscan_info(Plan *plan)
 {
 	GpuScanInfo *result = palloc0(sizeof(GpuScanInfo));
+	CustomScan	*cscan = (CustomScan *) plan;
 
+	Assert(IsA(cscan, CustomScan));
 	result->kern_source = strVal(linitial(cscan->custom_private));
 	result->extra_flags = intVal(lsecond(cscan->custom_private));
 	result->used_params = linitial(cscan->custom_exprs);
@@ -99,30 +104,44 @@ deform_gpuscan_info(CustomScan *cscan)
 	return result;
 }
 
+typedef struct
+{
+	GpuTask			task;
+	dlist_node		chain;
+	CUfunction		kern_qual;
+	void		   *kern_qual_args[4];
+	CUdeviceptr		m_gpuscan;
+	CUdeviceptr		m_kds;
+	CUevent 		ev_dma_send_start;
+	CUevent			ev_dma_send_stop;	/* also, start kernel exec */
+	CUevent			ev_dma_recv_start;	/* also, stop kernel exec */
+	CUevent			ev_dma_recv_stop;
+	pgstrom_data_store *pds;
+	kern_resultbuf *kresults;
+	kern_gpuscan	kern;
+} pgstrom_gpuscan;
+
 typedef struct {
-	CustomScanState		css;
-	HeapTupleData		scan_tuple;
-	BlockNumber			curr_blknum;
-	BlockNumber			last_blknum;
-	cl_uint				tuple_width;
-	List			   *dev_quals;
+	GpuTaskState	gts;
 
-	pgstrom_queue	   *mqueue;
-	const char		   *kern_source;
-	Datum				dprog_key;
-	kern_parambuf	   *kparams;
+	BlockNumber		curr_blknum;
+	BlockNumber		last_blknum;
+	HeapTupleData	scan_tuple;
+	List		   *dev_quals;
 
-	pgstrom_gpuscan	   *curr_chunk;
-	uint32				curr_index;
-	cl_uint				num_rechecked;
-	cl_uint				num_running;
-	dlist_head			ready_chunks;
+	kern_parambuf  *kparams;
 
-	pgstrom_perfmon		pfm;	/* sum of performance counter */
+//	pgstrom_gpuscan *curr_chunk;
+//	uint32			curr_index;
+	cl_uint			num_rechecked;
 } GpuScanState;
 
-/* static functions */
-static void clserv_process_gpuscan(pgstrom_message *msg);
+/* forward declarations */
+static bool pgstrom_process_gpuscan(GpuTask *gtask);
+static bool pgstrom_complete_gpuscan(GpuTask *gtask);
+static void pgstrom_release_gpuscan(GpuTask *gtask);
+static GpuTask *gpuscan_next_chunk(GpuTaskState *gts);
+static TupleTableSlot *gpuscan_next_tuple(GpuTaskState *gts);
 
 /*
  * cost_gpuscan
@@ -395,7 +414,7 @@ gpuscan_pullup_devquals(Plan *plannode, List **pullup_quals)
 	GpuScanInfo		*gs_info;
 
 	Assert(pgstrom_plan_is_gpuscan(plannode));
-	gs_info = deform_gpuscan_info(cscan_old);
+	gs_info = deform_gpuscan_info(&cscan_old->scan.plan);
 
 	/* in case of nothing to be changed */
 	if (gs_info->dev_quals == NIL)
@@ -445,15 +464,15 @@ gpuscan_codegen_quals(PlannerInfo *root,
 	/* qualifier definition with row-store */
 	appendStringInfo(
 		&str,
-		"static pg_bool_t\n"
-		"gpuscan_qual_eval(__private cl_int *errcode,\n"
-		"                  __global kern_parambuf *kparams,\n"
-		"                  __global kern_data_store *kds,\n"
-		"                  __global kern_data_store *ktoast,\n"
+		"STATIC_FUNCTION(cl_bool)\n"
+		"gpuscan_qual_eval(cl_int *errcode,\n"
+		"                  kern_parambuf *kparams,\n"
+		"                  kern_data_store *kds,\n"
+		"                  kern_data_store *ktoast,\n"
 		"                  size_t kds_index)\n"
 		"{\n"
 		"%s"
-		"  return %s;\n"
+		"  return EVAL(%s);\n"
 		"}\n", decl.data, expr_code);
 	return str.data;
 }
@@ -513,9 +532,7 @@ create_gpuscan_plan(PlannerInfo *root,
 	cscan->scan.scanrelid = rel->relid;
 
 	gs_info.kern_source = kern_source;
-	gs_info.extra_flags = context.extra_flags |
-		DEVKERNEL_NEEDS_GPUSCAN |
-		(!devprog_enable_optimize ? DEVKERNEL_DISABLE_OPTIMIZE : 0);
+	gs_info.extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSCAN;
 	gs_info.used_params = context.used_params;
 	gs_info.used_vars = context.used_vars;
 	gs_info.dev_quals = dev_quals;
@@ -564,18 +581,18 @@ pgstrom_plan_is_gpuscan(const Plan *plan)
  * (Once CustomPlan become CustomScan, no need to be a API)
  */
 void
-pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,
+pgstrom_gpuscan_setup_bulkslot(PlanState *outer_planstate,
 							   ProjectionInfo **p_bulk_proj,
 							   TupleTableSlot **p_bulk_slot)
 {
-	GpuScanState   *gss = (GpuScanState *) outer_ps;
+	CustomScanState *css = (CustomScanState *) outer_planstate;
 
-	if (!IsA(gss, CustomScanState) ||
-		gss->css.methods != &gpuscan_exec_methods.c)
+	if (!IsA(css, CustomScanState) ||
+		css->methods != &gpuscan_exec_methods.c)
 		elog(ERROR, "Bug? PlanState node is not GpuScanState");
 
-	*p_bulk_proj = gss->css.ss.ps.ps_ProjInfo;
-	*p_bulk_slot = gss->css.ss.ss_ScanTupleSlot;
+	*p_bulk_proj = css->ss.ps.ps_ProjInfo;
+	*p_bulk_slot = css->ss.ss_ScanTupleSlot;
 }
 
 /*
@@ -586,12 +603,22 @@ pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,
 static Node *
 gpuscan_create_scan_state(CustomScan *cscan)
 {
-	GpuScanState   *gss = palloc0(sizeof(GpuScanState));
-
+	GpuContext	   *gcontext = pgstrom_get_gpucontext();
+	GpuScanState   *gss = MemoryContextAllocZero(gcontext->memcxt,
+												 sizeof(GpuScanState));
+	/* Set tag and executor callbacks */
 	NodeSetTag(gss, T_CustomScanState);
-	gss->css.methods = &gpuscan_exec_methods.c;
+	gss->gts.css.methods = &gpuscan_exec_methods.c;
+	/* GpuTaskState setup */
+	pgstrom_init_gputaskstate(gcontext, &gss->gts);
+	gss->gts.cb_task_process = pgstrom_process_gpuscan;
+	gss->gts.cb_task_complete = pgstrom_complete_gpuscan;
+	gss->gts.cb_task_release = pgstrom_release_gpuscan;
+	gss->gts.cb_next_chunk = gpuscan_next_chunk;
+	gss->gts.cb_next_tuple = gpuscan_next_tuple;
+	gss->gts.cb_cleanup = NULL;
 
-	return (Node *)gss;
+	return (Node *) gss;
 }
 
 static void
@@ -599,55 +626,34 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 {
 	Relation		scan_rel = node->ss.ss_currentRelation;
 	GpuScanState   *gss = (GpuScanState *) node;
-	GpuScanInfo	   *gsinfo
-		= deform_gpuscan_info((CustomScan *)node->ss.ps.plan);
-	BlockNumber		relpages;
-	double			reltuples;
-	double			allvisfrac;
+	GpuScanInfo	   *gs_info = deform_gpuscan_info(node->ss.ps.plan);
 
 	/* gpuscan should not have inner/outer plan right now */
 	Assert(outerPlan(node) == NULL);
-    Assert(innerPlan(node) == NULL);
-
-	/* 'tableoid' should not change during relation scan */
-	gss->scan_tuple.t_tableOid = RelationGetRelid(scan_rel);
-
-	/* initialize device qualifiers also, for fallback */
-	gss->dev_quals = (List *)
-		ExecInitExpr((Expr *) gsinfo->dev_quals, &gss->css.ss.ps);
+	Assert(innerPlan(node) == NULL);
 
 	/* initialize the start/end position */
 	gss->curr_blknum = 0;
 	gss->last_blknum = RelationGetNumberOfBlocks(scan_rel);
-	estimate_rel_size(scan_rel, NULL,
-					  &relpages, &reltuples, &allvisfrac);
-	gss->tuple_width = (Size)((double)BLCKSZ * (double)relpages / reltuples);
+	/* initialize device qualifiers also, for fallback */
+	gss->dev_quals = (List *)
+		ExecInitExpr((Expr *) gs_info->dev_quals, &gss->gts.css.ss.ps);
+	/* 'tableoid' should not change during relation scan */
+	gss->scan_tuple.t_tableOid = RelationGetRelid(scan_rel);
+	/* assign kernel source and flags */
+	gss->gts.kern_source = gs_info->kern_source;
+	gss->gts.extra_flags = gs_info->extra_flags;
+	if (gss->gts.kern_source != NULL &&
+		(eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+		pgstrom_preload_cuda_program(&gss->gts);
 
-	/*
-	 * Setting up kernel program, if needed
-	 */
-	if (gsinfo->kern_source)
-	{
-		gss->kern_source = gsinfo->kern_source;
-		gss->dprog_key = pgstrom_get_devprog_key(gsinfo->kern_source,
-												 gsinfo->extra_flags);
-		pgstrom_track_object((StromObject *)gss->dprog_key, 0);
-
-		/* also, message queue */
-		gss->mqueue = pgstrom_create_queue();
-		pgstrom_track_object(&gss->mqueue->sobj, 0);
-	}
-	gss->kparams = pgstrom_create_kern_parambuf(gsinfo->used_params,
-												gss->css.ss.ps.ps_ExprContext);
-	/* rest of run-time parameters */
-	gss->curr_chunk = NULL;
-	gss->curr_index = 0;
-	gss->num_rechecked = 0;
-	gss->num_running = 0;
-	dlist_init(&gss->ready_chunks);
-
-	/* Is perfmon needed? */
-	gss->pfm.enabled = pgstrom_perfmon_enabled;
+	/* kernel constant parameter buffer */
+	gss->kparams = pgstrom_create_kern_parambuf(gs_info->used_params,
+											gss->gts.css.ss.ps.ps_ExprContext);
+	/* other run-time parameters */
+	//gss->curr_chunk = NULL;
+	//gss->curr_index = 0;
+    gss->num_rechecked = 0;
 }
 
 /*
@@ -661,66 +667,55 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
  * assumed to be released by the backend process.
  */
 static void
-pgstrom_release_gpuscan(pgstrom_message *msg)
+pgstrom_release_gpuscan(GpuTask *gputask)
 {
-	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) msg;
+	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) gputask;
 
-	/* unlink message queue, if any */
-	if (msg->respq)
-		pgstrom_put_queue(msg->respq);
-	/* unlink device program, if any */
-	if (gpuscan->dprog_key != 0)
-		pgstrom_put_devprog_key(gpuscan->dprog_key);
-	/* release data-store, if any */
 	if (gpuscan->pds)
-		pgstrom_put_data_store(gpuscan->pds);
-	pgstrom_shmem_free(gpuscan);
+		pgstrom_release_data_store(gpuscan->pds);
+	pgstrom_complete_gpuscan(&gpuscan->task);
+
+	pfree(gpuscan);
 }
 
 static pgstrom_gpuscan *
 pgstrom_create_gpuscan(GpuScanState *gss, pgstrom_data_store *pds)
 {
-	pgstrom_gpuscan *gpuscan;
-	kern_data_store	*kds = pds->kds;
-	kern_resultbuf	*kresults;
-	cl_uint		nitems = kds->nitems;
-	Size		length;
+	GpuContext		   *gcontext = gss->gts.gcontext;
+	pgstrom_gpuscan    *gpuscan;
+	kern_resultbuf	   *kresults;
+	kern_data_store	   *kds = pds->kds;
+	cl_uint				nitems = kds->nitems;
+	Size				length;
 
 	length = (STROMALIGN(offsetof(pgstrom_gpuscan, kern.kparams)) +
-			  STROMALIGN(gss->kparams->length) +
-			  STROMALIGN(offsetof(kern_resultbuf, results[nitems])));
-	gpuscan = pgstrom_shmem_alloc(length);
-	if (!gpuscan)
-		elog(ERROR, "out of shared memory");
-
-	/* fields of pgstrom_gpuscan */
-	pgstrom_init_message(&gpuscan->msg,
-						 StromTag_GpuScan,
-						 gss->dprog_key != 0 ? gss->mqueue : NULL,
-						 clserv_process_gpuscan,
-						 pgstrom_release_gpuscan,
-						 gss->pfm.enabled);
-	if (gss->dprog_key != 0)
-		gpuscan->dprog_key = pgstrom_retain_devprog_key(gss->dprog_key);
+			  STROMALIGN(gss->kparams->length));
+	if (!gss->gts.kern_source)
+		length += STROMALIGN(offsetof(kern_resultbuf, results[0]));
 	else
-		gpuscan->dprog_key = 0;
+		length += STROMALIGN(offsetof(kern_resultbuf, results[nitems]));
+
+	gpuscan = MemoryContextAllocZero(gcontext->memcxt, length);
+	/* setting up */
+	pgstrom_init_gputask(&gss->gts, &gpuscan->task);
+
 	gpuscan->pds = pds;
-
-	/* copy kern_parambuf */
+	/* setting up kern_parambuf */
 	Assert(gss->kparams->length == STROMALIGN(gss->kparams->length));
-	memcpy(KERN_GPUSCAN_PARAMBUF(&gpuscan->kern),
-		   gss->kparams,
-		   gss->kparams->length);
+    memcpy(KERN_GPUSCAN_PARAMBUF(&gpuscan->kern),
+           gss->kparams,
+           gss->kparams->length);
+	/* setting up kern_resultbuf */
+	kresults = gpuscan->kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
+    memset(kresults, 0, sizeof(kern_resultbuf));
+    kresults->nrels = 1;
+    kresults->nrooms = nitems;
 
-	/* setting up resultbuf */
-	kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
-	memset(kresults, 0, sizeof(kern_resultbuf));
-	kresults->nrels = 1;
-	kresults->nrooms = nitems;
-
-	/* If GpuScan does not involve kernel execution, we treat this
-	 * chunk as all-visible. */
-	if (gss->dprog_key == 0)
+	/* If GpuScan does not kick GPU Kernek execution, we treat
+	 * this chunk as all-visible one, without reference to
+	 * results[] row-index.
+	 */
+	if (!gss->gts.kern_source)
 	{
 		kresults->all_visible = true;
 		kresults->nitems = nitems;
@@ -728,13 +723,14 @@ pgstrom_create_gpuscan(GpuScanState *gss, pgstrom_data_store *pds)
 	return gpuscan;
 }
 
-static pgstrom_gpuscan *
-pgstrom_load_gpuscan(GpuScanState *gss)
+static GpuTask *
+gpuscan_next_chunk(GpuTaskState *gts)
 {
 	pgstrom_gpuscan	   *gpuscan = NULL;
-	Relation			rel = gss->css.ss.ss_currentRelation;
+	GpuScanState	   *gss = (GpuScanState *) gts;
+	Relation			rel = gss->gts.css.ss.ss_currentRelation;
 	TupleDesc			tupdesc = RelationGetDescr(rel);
-	Snapshot			snapshot = gss->css.ss.ps.state->es_snapshot;
+	Snapshot			snapshot = gss->gts.css.ss.ps.state->es_snapshot;
 	bool				end_of_scan = false;
 	pgstrom_data_store *pds;
 	struct timeval tv1, tv2;
@@ -743,84 +739,69 @@ pgstrom_load_gpuscan(GpuScanState *gss)
 	if (gss->curr_blknum > gss->last_blknum)
 		return NULL;
 
-	if (gss->pfm.enabled)
-		gettimeofday(&tv1, NULL);
+	PERFMON_BEGIN(&gss->gts.pfm_accum, &tv1);
 
 	while (!gpuscan && !end_of_scan)
 	{
-		pds = pgstrom_create_data_store_row(tupdesc, pgstrom_chunk_size(),
-											gss->tuple_width);
-		PG_TRY();
-		{
-			while (gss->curr_blknum < gss->last_blknum &&
-				   pgstrom_data_store_insert_block(pds, rel,
-												   gss->curr_blknum,
-												   snapshot, true) >= 0)
-				gss->curr_blknum++;
+		pds = pgstrom_create_data_store_row(gss->gts.gcontext,
+											tupdesc,
+											pgstrom_chunk_size(),
+											false);
+		/* fill up this data-store */
+		while (gss->curr_blknum < gss->last_blknum &&
+			   pgstrom_data_store_insert_block(pds, rel,
+											   gss->curr_blknum,
+											   snapshot, true) >= 0)
+			gss->curr_blknum++;
 
-			if (pds->kds->nitems > 0)
-				gpuscan = pgstrom_create_gpuscan(gss, pds);
-			else
-			{
-				pgstrom_put_data_store(pds);
-
-				/* NOTE: In case when it scans on a large hole (that is
-				 * continuous blocks contain invisible tuples only; may
-				 * be created by DELETE with relaxed condition),
-				 * pgstrom_data_store_insert_block() may return negative
-				 * value without valid tuples, even though we don't reach
-				 * either end of relation or chunk.
-				 * So, we need to check whether we actually touched on
-				 * the end-of-relation. If not, retry scanning.
-				 */
-				if (gss->curr_blknum >= gss->last_blknum)
-					end_of_scan = true;
-			}
-		}
-		PG_CATCH();
+		if (pds->kds->nitems > 0)
+			gpuscan = pgstrom_create_gpuscan(gss, pds);
+		else
 		{
-			pgstrom_put_data_store(pds);
-			PG_RE_THROW();
+			pgstrom_release_data_store(pds);
+
+			/* NOTE: In case when it scans on a large hole (that is
+			 * continuous blocks contain invisible tuples only; may
+			 * be created by DELETE with relaxed condition),
+			 * pgstrom_data_store_insert_block() may return negative
+			 * value without valid tuples, even though we don't reach
+			 * either end of relation or chunk.
+			 * So, we need to check whether we actually touched on
+			 * the end-of-relation. If not, retry scanning.
+			 *
+			 * XXX - Is the above behavior still right?
+			 */
+			if (gss->curr_blknum >= gss->last_blknum)
+				end_of_scan = true;
 		}
-		PG_END_TRY();
-		/* track local object */
-		if (gpuscan)
-			pgstrom_track_object(&gpuscan->msg.sobj, 0);
 	}
-	/* update perfmon statistics */
-	if (gss->pfm.enabled)
-	{
-		gettimeofday(&tv2, NULL);
-		gss->pfm.time_outer_load += timeval_diff(&tv1, &tv2);
-	}
-	return gpuscan;
+	PERFMON_END(&gss->gts.pfm_accum, time_outer_load, &tv1, &tv2);
+
+	return &gpuscan->task;
 }
 
 static TupleTableSlot *
-gpuscan_next_tuple(GpuScanState *gss)
+gpuscan_next_tuple(GpuTaskState *gts)
 {
-	pgstrom_gpuscan	   *gpuscan = gss->curr_chunk;
-	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
+	GpuScanState	   *gss = (GpuScanState *) gts;
+	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) gts->curr_task;
+	pgstrom_data_store *pds = gpuscan->pds;
+	kern_resultbuf	   *kresults = gpuscan->kresults;
 	TupleTableSlot	   *slot = NULL;
 	cl_int				i_result;
 	bool				do_recheck = false;
 	struct timeval		tv1, tv2;
 
-	if (!gpuscan)
-		return false;
+	Assert(kresults == KERN_GPUSCAN_RESULTBUF(&gpuscan->kern));
 
-	if (gss->pfm.enabled)
-		gettimeofday(&tv1, NULL);
-
-   	while (gss->curr_index < kresults->nitems)
+	PERFMON_BEGIN(&gss->gts.pfm_accum, &tv1);
+	while (gss->gts.curr_index < kresults->nitems)
 	{
-		pgstrom_data_store *pds = gpuscan->pds;
-
 		if (kresults->all_visible)
-			i_result = ++gss->curr_index;
+			i_result = ++gss->gts.curr_index;
 		else
 		{
-			i_result = kresults->results[gss->curr_index++];
+			i_result = kresults->results[gss->gts.curr_index++];
 			if (i_result < 0)
 			{
 				i_result = -i_result;
@@ -830,7 +811,7 @@ gpuscan_next_tuple(GpuScanState *gss)
 		}
 		Assert(i_result > 0);
 
-		slot = gss->css.ss.ss_ScanTupleSlot;
+		slot = gss->gts.css.ss.ss_ScanTupleSlot;
 		if (!pgstrom_fetch_data_store(slot, pds, i_result - 1,
 									  &gss->scan_tuple))
 			elog(ERROR, "failed to fetch a record from pds: %d", i_result);
@@ -838,7 +819,7 @@ gpuscan_next_tuple(GpuScanState *gss)
 
 		if (do_recheck)
 		{
-			ExprContext *econtext = gss->css.ss.ps.ps_ExprContext;
+			ExprContext *econtext = gss->gts.css.ss.ps.ps_ExprContext;
 
 			Assert(gss->dev_quals != NULL);
 			econtext->ecxt_scantuple = slot;
@@ -850,338 +831,73 @@ gpuscan_next_tuple(GpuScanState *gss)
 		}
 		break;
 	}
-	if (gss->pfm.enabled)
-	{
-		gettimeofday(&tv2, NULL);
-		gss->pfm.time_materialize += timeval_diff(&tv1, &tv2);
-	}
+	PERFMON_END(&gss->gts.pfm_accum, time_materialize, &tv1, &tv2);
+
 	return slot;
-}
-
-/*
- * pgstrom_fetch_gpuscan
- *
- * It loads a chunk from the target relation, then enqueue the GpuScan
- * chunk to be processed by OpenCL devices if valid device kernel was
- * constructed. Elsewhere, it works as a wrapper of pgstrom_load_gpuscan,
- */
-static pgstrom_gpuscan *
-pgstrom_fetch_gpuscan(GpuScanState *gss)
-{
-	pgstrom_message	   *msg;
-	pgstrom_gpuscan	   *gpuscan;
-
-	/*
-	 * In case when no device code will be executed, we don't need to have
-	 * asynchronous execution. So, just return a chunk with synchronous
-	 * manner.
-	 */
-	if (gss->dprog_key == 0)
-		return pgstrom_load_gpuscan(gss);
-
-	/* A valid device code shall have message queue */
-	Assert(gss->mqueue != NULL);
-
-	/*
-	 * Try to keep number of gpuscan chunks being asynchronously executed
-	 * larger than minimum multiplicity, unless it does not exceed
-	 * maximum one and OpenCL server does not return a new response.
-	 */
-	while (gss->num_running <= pgstrom_max_async_chunks)
-	{
-		pgstrom_gpuscan	*gpuscan = pgstrom_load_gpuscan(gss);
-
-		if (!gpuscan)
-			break;	/* scan reached end of the relation */
-
-		if (!pgstrom_enqueue_message(&gpuscan->msg))
-		{
-			pgstrom_put_message(&gpuscan->msg);
-			elog(ERROR, "failed to enqueue pgstrom_gpuscan message");
-		}
-		gss->num_running++;
-
-		if (gss->num_running > pgstrom_min_async_chunks &&
-			(msg = pgstrom_try_dequeue_message(gss->mqueue)) != NULL)
-		{
-			gss->num_running--;
-			dlist_push_tail(&gss->ready_chunks, &msg->chain);
-			break;
-		}
-	}
-
-	/*
-	 * Wait for server's response if no available chunks were replied.
-	 */
-	if (dlist_is_empty(&gss->ready_chunks))
-	{
-		/* OK, no more chunks to be scanned */
-		if (gss->num_running == 0)
-			return NULL;
-
-		/* Synchronization, if needed */
-		msg = pgstrom_dequeue_message(gss->mqueue);
-		if (!msg)
-			elog(ERROR, "message queue wait timeout");
-		gss->num_running--;
-		dlist_push_tail(&gss->ready_chunks, &msg->chain);
-	}
-
-	/*
-	 * Picks up next available chunks if any
-	 */
-	Assert(!dlist_is_empty(&gss->ready_chunks));
-	gpuscan = dlist_container(pgstrom_gpuscan, msg.chain,
-							  dlist_pop_head_node(&gss->ready_chunks));
-	Assert(StromTagIs(gpuscan, GpuScan));
-
-	/*
-	 * Raise an error, if any error was reported
-	 */
-	if (gpuscan->msg.errcode != StromError_Success)
-	{
-		if (gpuscan->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
-		{
-			const char *buildlog
-				= pgstrom_get_devprog_errmsg(gpuscan->dprog_key);
-
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
-							pgstrom_strerror(gpuscan->msg.errcode),
-							gss->kern_source),
-					 errdetail("%s", buildlog)));
-		}
-		else
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("PG-Strom: OpenCL execution error (%s)",
-							pgstrom_strerror(gpuscan->msg.errcode))));
-		}
-	}
-	return gpuscan;
-}
-
-static TupleTableSlot *
-gpuscan_fetch_tuple(CustomScanState *node)
-{
-	GpuScanState   *gss = (GpuScanState *) node;
-	TupleTableSlot *slot = gss->css.ss.ss_ScanTupleSlot;
-
-	ExecClearTuple(slot);
-
-	while (!gss->curr_chunk || !(slot = gpuscan_next_tuple(gss)))
-	{
-		pgstrom_gpuscan	   *gpuscan;
-
-		/*
-		 * Release the current gpuscan chunk being already scanned
-		 */
-		if (gss->curr_chunk)
-		{
-			pgstrom_message	   *msg = &gss->curr_chunk->msg;
-
-			if (msg->pfm.enabled)
-				pgstrom_perfmon_add(&gss->pfm, &msg->pfm);
-			Assert(msg->refcnt == 1);
-			pgstrom_untrack_object(&msg->sobj);
-			pgstrom_put_message(msg);
-			gss->curr_chunk = NULL;
-			gss->curr_index = 0;
-		}
-		gpuscan = pgstrom_fetch_gpuscan(gss);
-		if (!gpuscan)
-			break;
-		gss->curr_chunk = gpuscan;
-		gss->curr_index = 0;
-	}
-	return slot;
-}
-
-static bool
-gpuscan_recheck(CustomScanState *node, TupleTableSlot *slot)
-{
-	/* There are no access-method-specific conditions to recheck. */
-	return true;
 }
 
 static TupleTableSlot *
 gpuscan_exec(CustomScanState *node)
 {
 	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) gpuscan_fetch_tuple,
-					(ExecScanRecheckMtd) gpuscan_recheck);
+					(ExecScanAccessMtd) pgstrom_exec_gputask,
+					(ExecScanRecheckMtd) pgstrom_recheck_gputask);
 }
 
 static void *
 gpuscan_exec_bulk(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *) node;
-	pgstrom_gpuscan	   *gpuscan;
-	kern_resultbuf	   *kresults;
-	pgstrom_bulkslot   *bulk = NULL;
+	Relation			rel = node->ss.ss_currentRelation;
+	TupleTableSlot	   *slot = node->ss.ss_ScanTupleSlot;
+	TupleDesc			tupdesc = slot->tts_tupleDescriptor;
+	Snapshot			snapshot = node->ss.ps.state->es_snapshot;
+	pgstrom_data_store *pds = NULL;
+	struct timeval		tv1, tv2;
 
-	while (true)
+	PERFMON_BEGIN(&gss->gts.pfm_accum, &tv1);
+
+	while (gss->curr_blknum < gss->last_blknum)
 	{
-		gpuscan = pgstrom_fetch_gpuscan(gss);
-		if (!gpuscan)
-			return NULL;
+		pds = pgstrom_create_data_store_row(gss->gts.gcontext,
+											tupdesc,
+											pgstrom_chunk_size(),
+											false);
+		/* fill up this data store */
+		while (gss->curr_blknum < gss->last_blknum &&
+			   pgstrom_data_store_insert_block(pds, rel,
+											   gss->curr_blknum,
+											   snapshot, true) >= 0)
+			gss->curr_blknum++;
 
-		/* update perfmon info */
-		if (gpuscan->msg.pfm.enabled)
-			pgstrom_perfmon_add(&gss->pfm, &gpuscan->msg.pfm);
-
-		/*
-		 * Make a bulk-slot according to the result
-		 */
-		kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
-		bulk = palloc0(offsetof(pgstrom_bulkslot, rindex[kresults->nitems]));
-		bulk->pds = pgstrom_get_data_store(gpuscan->pds);
-		bulk->nvalids = -1;		/* only -1 is valid */
-		pgstrom_track_object(&bulk->pds->sobj, 0);
-
-		/* No longer gpuscan is referenced any more. The associated
-		 * data-store is not actually released because its refcnt is
-		 * already incremented above.
-		 */
-		pgstrom_untrack_object(&gpuscan->msg.sobj);
-		pgstrom_put_message(&gpuscan->msg);
-
-		/*
-		 * If any, it may take host side checks
-		 * - Recheck of device qualifier, if result is nagative
-		 * - Host qualifier checks, if any.
-		 */
-		Assert(kresults->all_visible);
-		Assert(!node->ss.ps.qual);
-
-		if (bulk->pds->kds->nitems > 0)
+		if (pds->kds->nitems > 0)
 			break;
-
-		/*
-		 * If this chunk has no valid items, it does not make sense to
-		 * return this chunk to upper execution node.
-		 */
-		pgstrom_untrack_object(&bulk->pds->sobj);
-        pgstrom_put_data_store(bulk->pds);
-        pfree(bulk);
-		bulk = NULL;
+		pgstrom_release_data_store(pds);
+        pds = NULL;
 	}
-	return bulk;
+
+	PERFMON_END(&gss->gts.pfm_accum, time_outer_load, &tv1, &tv2);
+
+	return pds;
 }
 
 static void
 gpuscan_end(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *)node;
-	pgstrom_gpuscan	   *gpuscan;
 
-	if (gss->curr_chunk)
-	{
-		gpuscan = gss->curr_chunk;
-
-		pgstrom_untrack_object(&gpuscan->msg.sobj);
-		pgstrom_put_message(&gpuscan->msg);
-		gss->curr_chunk = NULL;
-	}
-
-	while (gss->num_running > 0)
-	{
-		gpuscan = (pgstrom_gpuscan *)pgstrom_dequeue_message(gss->mqueue);
-		if (!gpuscan)
-			elog(ERROR, "message queue wait timeout");
-		pgstrom_untrack_object(&gpuscan->msg.sobj);
-		pgstrom_put_message(&gpuscan->msg);
-		gss->num_running--;
-	}
-
-	if (gss->num_rechecked > 0)
-		elog(NOTICE, "GpuScan: %u records were re-checked by CPU",
-			 gss->num_rechecked);
-
-	if (gss->dprog_key)
-	{
-		pgstrom_untrack_object((StromObject *)gss->dprog_key);
-		pgstrom_put_devprog_key(gss->dprog_key);
-	}
-
-	if (gss->mqueue)
-	{
-		pgstrom_untrack_object(&gss->mqueue->sobj);
-		pgstrom_close_queue(gss->mqueue);
-	}
+	pgstrom_release_gputaskstate(&gss->gts);
 }
 
 static void
 gpuscan_rescan(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *) node;
-	pgstrom_message	   *msg;
-	pgstrom_gpuscan	   *gpuscan;
-	dlist_mutable_iter	iter;
 
-	/*
-	 * If asynchronous requests are still running, we need to synchronize
-	 * their completion first.
-	 *
-	 * TODO: if we track all the pgstrom_gpuscan objects being enqueued
-	 * locally, all we need to do should be just decrements reference
-	 * counter. It may be a future enhancement.
-	 */
-	gpuscan = gss->curr_chunk;
-	if (gpuscan)
-	{
-		pgstrom_untrack_object(&gpuscan->msg.sobj);
-		pgstrom_put_message(&gpuscan->msg);
-		gss->curr_chunk = NULL;
-		gss->curr_index = 0;
-	}
+	/* clean-up and release any concurrent tasks */
+    pgstrom_cleanup_gputaskstate(&gss->gts);
 
-	while (gss->num_running > 0)
-	{
-		msg = pgstrom_dequeue_message(gss->mqueue);
-		if (!msg)
-			elog(ERROR, "message queue wait timeout");
-		gss->num_running--;
-		dlist_push_tail(&gss->ready_chunks, &msg->chain);
-	}
-
-	dlist_foreach_modify (iter, &gss->ready_chunks)
-	{
-		gpuscan = dlist_container(pgstrom_gpuscan, msg.chain, iter.cur);
-		Assert(StromTagIs(gpuscan, GpuScan));
-
-		dlist_delete(&gpuscan->msg.chain);
-		if (gpuscan->msg.errcode != StromError_Success)
-		{
-			if (gpuscan->msg.errcode == CL_BUILD_PROGRAM_FAILURE)
-			{
-				const char *buildlog
-					= pgstrom_get_devprog_errmsg(gpuscan->dprog_key);
-
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("PG-Strom: OpenCL execution error (%s)\n%s",
-								pgstrom_strerror(gpuscan->msg.errcode),
-								gss->kern_source),
-						 errdetail("%s", buildlog)));
-			}
-			else
-			{
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("PG-Strom: OpenCL execution error (%s)",
-								pgstrom_strerror(gpuscan->msg.errcode))));
-            }
-		}
-		pgstrom_untrack_object(&gpuscan->msg.sobj);
-		pgstrom_put_message(&gpuscan->msg);
-	}
-
-	/*
-	 * OK, asynchronous jobs were cleared. revert scan state to the head.
-	 */
+	/* OK, rewind the position to read */
 	gss->curr_blknum = 0;
 }
 
@@ -1189,21 +905,16 @@ static void
 gpuscan_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	GpuScanState   *gss = (GpuScanState *) node;
-	GpuScanInfo	   *gsinfo
-		= deform_gpuscan_info((CustomScan *) gss->css.ss.ps.plan);
+	GpuScanInfo	   *gsinfo = deform_gpuscan_info(gss->gts.css.ss.ps.plan);
 
 	if (gsinfo->dev_quals != NIL)
 	{
 		show_scan_qual(gsinfo->dev_quals, "Device Filter",
-					   &gss->css.ss.ps, ancestors, es);
+					   &gss->gts.css.ss.ps, ancestors, es);
 		show_instrumentation_count("Rows Removed by Device Fileter",
-								   2, &gss->css.ss.ps, es);
+								   2, &gss->gts.css.ss.ps, es);
 	}
-	show_custom_flags(&gss->css, es);
-	show_device_kernel(gss->dprog_key, es);
-
-	if (es->analyze && gss->pfm.enabled)
-		pgstrom_perfmon_explain(&gss->pfm, es);
+	pgstrom_explain_gputaskstate(&gss->gts, es);
 }
 
 void
@@ -1245,154 +956,226 @@ pgstrom_init_gpuscan(void)
 	set_rel_pathlist_hook = gpuscan_add_scan_path;
 }
 
-/*
- * GpuScan message handler
- * ------------------------------------------------------------
- * Note that below routines are executed in the context of OpenCL
- * intermediation server, thus, usual PostgreSQL internal APIs are
- * not available, and need to pay attention that routines work in
- * another process's address space.
- */
-typedef struct
+static void
+gpuscan_cleanup_cuda_resources(pgstrom_gpuscan *gpuscan)
 {
-	pgstrom_message	*msg;
-	cl_program		program;
-	cl_kernel		kernel;
-	cl_mem			m_gpuscan;
-	cl_mem			m_dstore;
-	cl_mem			m_ktoast;
-	cl_uint			ev_index;
-	cl_event		events[20];
-} clstate_gpuscan;
+	CUDA_EVENT_DESTROY(gpuscan,ev_dma_recv_stop);
+	CUDA_EVENT_DESTROY(gpuscan,ev_dma_recv_start);
+	CUDA_EVENT_DESTROY(gpuscan,ev_dma_send_stop);
+	CUDA_EVENT_DESTROY(gpuscan,ev_dma_send_start);
+
+	if (gpuscan->m_kds)
+		gpuMemFree(&gpuscan->task, gpuscan->m_kds);
+
+	if (gpuscan->m_gpuscan)
+		gpuMemFree(&gpuscan->task, gpuscan->m_gpuscan);
+
+	/* ensure pointers being NULL */
+	gpuscan->kern_qual = NULL;
+	gpuscan->m_gpuscan = 0UL;
+	gpuscan->m_kds = 0UL;
+}
+
+/*
+ * pgstrom_complete_gpuscan
+ *
+ *
+ *
+ *
+ */
+static bool
+pgstrom_complete_gpuscan(GpuTask *gtask)
+{
+	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) gtask;
+	GpuTaskState	   *gts = gtask->gts;
+
+	if (gts->pfm_accum.enabled)
+	{
+		CUDA_EVENT_ELAPSED(gpuscan, time_dma_send,
+						   ev_dma_send_start,
+						   ev_dma_send_stop);
+		CUDA_EVENT_ELAPSED(gpuscan, time_kern_qual,
+						   ev_dma_send_stop,
+						   ev_dma_recv_start);
+		CUDA_EVENT_ELAPSED(gpuscan, time_dma_recv,
+						   ev_dma_recv_start,
+						   ev_dma_recv_stop);
+		pgstrom_accum_perfmon(&gts->pfm_accum, &gpuscan->task.pfm);
+	}
+	gpuscan_cleanup_cuda_resources(gpuscan);
+
+	return true;
+}
 
 static void
-clserv_respond_gpuscan(cl_event event, cl_int ev_status, void *private)
+pgstrom_respond_gpuscan(CUstream stream, CUresult status, void *private)
 {
-	clstate_gpuscan	   *clgss = private;
-	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *)clgss->msg;
+	pgstrom_gpuscan	   *gpuscan = private;
 	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
-	cl_int				status;
-	cl_int				rc;
+	GpuTaskState	   *gts = gpuscan->task.gts;
 
-	/* put error code */
-	if (ev_status != CL_COMPLETE)
-	{
-		clserv_log("unexpected CL_EVENT_COMMAND_EXECUTION_STATUS: %d",
-				   ev_status);
-		gpuscan->msg.errcode = StromError_OpenCLInternal;
-	}
+	SpinLockAcquire(&gts->lock);
+	if (status != CUDA_SUCCESS)
+		gpuscan->task.errcode = status;
 	else
+		gpuscan->task.errcode = kresults->errcode;
+
+	/* remove from the running_tasks list */
+	dlist_delete(&gpuscan->task.chain);
+	gts->num_running_tasks--;
+	/* then, attach it on the completed_tasks list */
+	if (gpuscan->task.errcode == StromError_Success)
+		dlist_push_tail(&gts->completed_tasks, &gpuscan->task.chain);
+	else
+		dlist_push_head(&gts->completed_tasks, &gpuscan->task.chain);
+	gts->num_completed_tasks++;
+	SpinLockRelease(&gts->lock);
+
+	SetLatch(&MyProc->procLatch);
+}
+
+static bool
+__pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
+{
+	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
+	pgstrom_data_store *pds = gpuscan->pds;
+	kern_data_store	   *kds = pds->kds;
+	CUdeviceptr			m_ktoast = 0UL;
+	size_t				offset;
+	size_t				length;
+	size_t				grid_size;
+	size_t				block_size;
+	CUresult			rc;
+
+	/*
+	 * Kernel function lookup
+	 */
+	rc = cuModuleGetFunction(&gpuscan->kern_qual,
+							 gpuscan->task.cuda_module,
+							 "gpuscan_qual");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction: %s",
+			 errorText(rc));
+
+	/*
+	 * Allocation of device memory
+	 */
+	length = KERN_GPUSCAN_LENGTH(&gpuscan->kern);
+	gpuscan->m_gpuscan = gpuMemAlloc(&gpuscan->task, length);
+	if (!gpuscan->m_gpuscan)
+		goto out_of_resource;
+
+	length = KERN_DATA_STORE_LENGTH(pds->kds);
+	gpuscan->m_kds = gpuMemAlloc(&gpuscan->task, length);
+	if (!gpuscan->m_kds)
+		goto out_of_resource;
+
+	/*
+	 * Creation of event objects, if any
+	 */
+	if (gpuscan->task.pfm.enabled)
 	{
-		gpuscan->msg.errcode = kresults->errcode;
+		rc = cuEventCreate(&gpuscan->ev_dma_send_start, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+
+		rc = cuEventCreate(&gpuscan->ev_dma_send_stop, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+
+		rc = cuEventCreate(&gpuscan->ev_dma_recv_start, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+
+		rc = cuEventCreate(&gpuscan->ev_dma_recv_stop, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 	}
 
 	/*
-	 * collect performance statistics
+	 * OK, enqueue a series of requests
 	 */
-	if (gpuscan->msg.pfm.enabled)
-	{
-		cl_ulong    dma_send_begin;
-		cl_ulong    dma_send_end;
-		cl_ulong    kern_exec_begin;
-		cl_ulong    kern_exec_end;
-		cl_ulong    dma_recv_begin;
-		cl_ulong    dma_recv_end;
-		cl_ulong	temp;
-		cl_int		i, n;
+	CUDA_EVENT_RECORD(gpuscan, ev_dma_send_start);
 
-		n = clgss->ev_index - 2;
-		dma_send_begin = (cl_ulong)(~0);
-		dma_send_end = (cl_ulong) 0;
-		for (i=0; i < n; i++)
-		{
-			rc = clGetEventProfilingInfo(clgss->events[i],
-										 CL_PROFILING_COMMAND_START,
-										 sizeof(cl_ulong),
-										 &temp,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			if (i==0 || dma_send_begin > temp)
-				dma_send_begin = temp;
+	offset = KERN_GPUSCAN_DMASEND_OFFSET(&gpuscan->kern);
+	length = KERN_GPUSCAN_DMASEND_LENGTH(&gpuscan->kern);
+	rc = cuMemcpyHtoDAsync(gpuscan->m_gpuscan,
+						   (char *)&gpuscan->kern + offset,
+						   length,
+						   gpuscan->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+	gpuscan->task.pfm.bytes_dma_send += length;
+	gpuscan->task.pfm.num_dma_send++;
 
-			rc = clGetEventProfilingInfo(clgss->events[i],
-										 CL_PROFILING_COMMAND_END,
-										 sizeof(cl_ulong),
-										 &temp,
-										 NULL);
-			if (rc != CL_SUCCESS)
-				goto skip_perfmon;
-			if (i==0 || dma_send_end < temp)
-				dma_send_end = temp;
-		}
+	rc = cuMemcpyHtoDAsync(gpuscan->m_kds,
+						   kds,
+						   kds->length,
+						   gpuscan->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+	gpuscan->task.pfm.bytes_dma_send += kds->length;
+    gpuscan->task.pfm.num_dma_send++;
 
-		rc = clGetEventProfilingInfo(clgss->events[clgss->ev_index - 2],
-									 CL_PROFILING_COMMAND_START,
-									 sizeof(cl_ulong),
-									 &kern_exec_begin,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
+	CUDA_EVENT_RECORD(gpuscan, ev_dma_send_stop);
 
-		rc = clGetEventProfilingInfo(clgss->events[clgss->ev_index - 2],
-									 CL_PROFILING_COMMAND_END,
-									 sizeof(cl_ulong),
-									 &kern_exec_end,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
+	/*
+	 * Launch kernel function
+	 */
+	pgstrom_compute_workgroup_size(&grid_size,
+								   &block_size,
+								   gpuscan->kern_qual,
+								   gpuscan->task.cuda_device,
+								   false,
+								   kds->nitems,
+								   sizeof(cl_uint));
+	gpuscan->kern_qual_args[0] = &gpuscan->m_gpuscan;
+	gpuscan->kern_qual_args[1] = &gpuscan->m_kds;
+	gpuscan->kern_qual_args[2] = &m_ktoast;
 
-		rc = clGetEventProfilingInfo(clgss->events[clgss->ev_index - 1],
-									 CL_PROFILING_COMMAND_START,
-									 sizeof(cl_ulong),
-									 &dma_recv_begin,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
-
-		rc = clGetEventProfilingInfo(clgss->events[clgss->ev_index - 1],
-									 CL_PROFILING_COMMAND_END,
-									 sizeof(cl_ulong),
-									 &dma_recv_end,
-									 NULL);
-		if (rc != CL_SUCCESS)
-			goto skip_perfmon;
-
-		gpuscan->msg.pfm.time_dma_send
-			+= (dma_send_end - dma_send_begin) / 1000;
-		gpuscan->msg.pfm.time_kern_exec
-			+= (kern_exec_end - kern_exec_begin) / 1000;
-		gpuscan->msg.pfm.time_dma_recv
-			+= (dma_recv_end - dma_recv_begin) / 1000;
-	skip_perfmon:
-		if (rc != CL_SUCCESS)
-		{
-			clserv_log("failed on clGetEventProfilingInfo (%s)",
-					   opencl_strerror(rc));
-			gpuscan->msg.pfm.enabled = false;
-		}
-	}
-
-	rc = clGetEventInfo(clgss->events[clgss->ev_index - 2],
-						CL_EVENT_COMMAND_EXECUTION_STATUS,
-						sizeof(cl_int),
-						&status,
+	rc = cuLaunchKernel(gpuscan->kern_qual,
+						grid_size, 1, 1,
+						block_size, 1, 1,
+						sizeof(uint) * block_size,
+						gpuscan->task.cuda_stream,
+						gpuscan->kern_qual_args,
 						NULL);
-	Assert(rc == CL_SUCCESS);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+	gpuscan->task.pfm.num_kern_qual++;
 
-	/* release opencl objects */
-	while (clgss->ev_index > 0)
-		clReleaseEvent(clgss->events[--clgss->ev_index]);
-	if (clgss->m_ktoast)
-		clReleaseMemObject(clgss->m_ktoast);
-	clReleaseMemObject(clgss->m_dstore);
-	clReleaseMemObject(clgss->m_gpuscan);
-	clReleaseKernel(clgss->kernel);
-	clReleaseProgram(clgss->program);
-	free(clgss);
+	/*
+	 * Recv DMA call
+	 */
+	CUDA_EVENT_RECORD(gpuscan, ev_dma_recv_start);
 
-	/* respond to the backend side */
-	pgstrom_reply_message(&gpuscan->msg);
+	offset = KERN_GPUSCAN_DMARECV_OFFSET(&gpuscan->kern);
+	length = KERN_GPUSCAN_DMARECV_LENGTH(&gpuscan->kern);
+	rc = cuMemcpyDtoHAsync(kresults,
+						   gpuscan->m_gpuscan + offset,
+						   length,
+						   gpuscan->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
+	gpuscan->task.pfm.bytes_dma_recv += length;
+	gpuscan->task.pfm.num_dma_recv++;
+
+	CUDA_EVENT_RECORD(gpuscan, ev_dma_recv_stop);
+
+	/*
+	 * Register callback
+	 */
+	rc = cuStreamAddCallback(gpuscan->task.cuda_stream,
+							 pgstrom_respond_gpuscan,
+							 gpuscan, 0);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "cuStreamAddCallback: %s", errorText(rc));
+
+	return true;
+
+out_of_resource:
+	gpuscan_cleanup_cuda_resources(gpuscan);
+	return false;
 }
 
 /*
@@ -1400,291 +1183,35 @@ clserv_respond_gpuscan(cl_event event, cl_int ev_status, void *private)
  *
  * entrypoint of kernel gpuscan implementation
  */
-static void
-clserv_process_gpuscan(pgstrom_message *msg)
+static bool
+pgstrom_process_gpuscan(GpuTask *task)
 {
-	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) msg;
-	pgstrom_perfmon	   *pfm = &gpuscan->msg.pfm;
-	pgstrom_data_store *pds = gpuscan->pds;
-	kern_data_store	   *kds = pds->kds;
-	clstate_gpuscan	   *clgss = NULL;
-	cl_program			program;
-	cl_command_queue	kcmdq;
-	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
-	int					dindex;
-	cl_int				rc;
-	size_t				length;
-	size_t				offset;
-	size_t				gwork_sz;
-	size_t				lwork_sz;
+	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) task;
+	bool				status;
+	CUresult			rc;
 
-	/* sanity checks */
-	Assert(StromTagIs(gpuscan, GpuScan));
-	Assert(kds->format == KDS_FORMAT_ROW);
-	Assert(kresults->nrels == 1);
-	if (kds->nitems == 0)
+	/* Switch CUDA Context */
+	rc = cuCtxPushCurrent(gpuscan->task.cuda_context);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+
+	PG_TRY();
 	{
-		msg->errcode = StromError_BadRequestMessage;
-		pgstrom_reply_message(msg);
-		return;
+		status = __pgstrom_process_gpuscan(gpuscan);
 	}
-
-	/*
-	 * First of all, it looks up a program object to be run on
-	 * the supplied row-store. We may have three cases.
-	 * 1) NULL; it means the required program is under asynchronous
-	 *    build, and the message is kept on its internal structure
-	 *    to be enqueued again. In this case, we have nothing to do
-	 *    any more on the invocation.
-	 * 2) BAD_OPENCL_PROGRAM; it means previous compile was failed
-	 *    and unavailable to run this program anyway. So, we need
-	 *    to reply StromError_ProgramCompile error to inform the
-	 *    backend this program.
-	 * 3) valid cl_program object; it is an ideal result. pre-compiled
-	 *    program object was on the program cache, and cl_program
-	 *    object is ready to use.
-	 */
-	program = clserv_lookup_device_program(gpuscan->dprog_key,
-										   &gpuscan->msg);
-	if (!program)
-		return;		/* message is in waitq, retry it! */
-	if (program == BAD_OPENCL_PROGRAM)
+	PG_CATCH();
 	{
-		rc = CL_BUILD_PROGRAM_FAILURE;
-		goto error;
+		gpuscan_cleanup_cuda_resources(gpuscan);
+		rc = cuCtxPopCurrent(NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+		PG_RE_THROW();
 	}
+	PG_END_TRY();
 
-	/*
-	 * create a state object
-	 */
-	clgss = calloc(1, offsetof(clstate_gpuscan, events[20 + kds->nblocks]));
-	if (!clgss)
-	{
-		clReleaseProgram(program);
-		rc = CL_OUT_OF_HOST_MEMORY;
-		goto error;
-	}
-	clgss->msg = msg;
-	clgss->program = program;
+	rc = cuCtxPopCurrent(NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
 
-	/*
-	 * lookup kernel function for gpuscan
-	 */
-	clgss->kernel = clCreateKernel(clgss->program, "gpuscan_qual", &rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	/*
-	 * choose a device to execute this kernel, and compute an optimal
-	 * workgroup-size of this kernel
-	 */
-	dindex = pgstrom_opencl_device_schedule(&gpuscan->msg);
-	kcmdq = opencl_cmdq[dindex];	
-	if (!clserv_compute_workgroup_size(&gwork_sz, &lwork_sz,
-									   clgss->kernel, dindex,
-									   false,	/* smaller WG-sz is better */
-									   kds->nitems, sizeof(cl_uint)))
-		goto error;
-
-	/* allocation of device memory for kern_gpuscan argument */
-	clgss->m_gpuscan = clCreateBuffer(opencl_context,
-									  CL_MEM_READ_WRITE,
-									  KERN_GPUSCAN_LENGTH(&gpuscan->kern),
-									  NULL,
-									  &rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	/* allocation of device memory for kern_data_store argument */
-	clgss->m_dstore = clCreateBuffer(opencl_context,
-									 CL_MEM_READ_WRITE,
-									 KERN_DATA_STORE_LENGTH(kds),
-									 NULL,
-									 &rc);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clCreateBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	/*
-	 * allocation of device memory for toast buffer, but never required
-	 */
-	clgss->m_ktoast = NULL;
-
-	/*
-	 * OK, all the device memory and kernel objects acquired.
-	 * Let's prepare kernel invocation.
-	 *
-	 * The kernel call is:
-	 * pg_bool_t
-	 * gpuscan_qual_eval(__global kern_gpuscan *kgpuscan,
-	 *                   __global kern_data_store *kds,
-	 *                   __global kern_data_store *ktoast,
-	 *                   __local void *local_workbuf)
-	 */
-	rc = clSetKernelArg(clgss->kernel,
-						0,		/* kern_gpuscan */
-						sizeof(cl_mem),
-						&clgss->m_gpuscan);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	rc = clSetKernelArg(clgss->kernel,
-						1,		/* kern_data_store */
-						sizeof(cl_mem),
-						&clgss->m_dstore);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	rc = clSetKernelArg(clgss->kernel,
-						2,		/* kds of toast buffer; always NULL */
-						sizeof(cl_mem),
-						&clgss->m_ktoast);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	rc = clSetKernelArg(clgss->kernel,
-						3,		/* local_workmem */
-						sizeof(cl_uint) * lwork_sz,
-						NULL);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetKernelArg: %s", opencl_strerror(rc));
-		goto error;
-	}
-
-	/*
-     * OK, enqueue DMA transfer, kernel execution, then DMA writeback.
-     *
-	 * (1) gpuscan (incl. kparams) - DMA send
-	 * (2) kern_data_store - DMA send
-	 * (3) execution of kernel function
-	 * (4) write back vrelation - DMA recv
-	 */
-
-	/* kern_gpuscan */
-	offset = KERN_GPUSCAN_DMASEND_OFFSET(&gpuscan->kern);
-	length = KERN_GPUSCAN_DMASEND_LENGTH(&gpuscan->kern);
-	rc = clEnqueueWriteBuffer(kcmdq,
-							  clgss->m_gpuscan,
-							  CL_FALSE,
-							  offset,
-							  length,
-							  &gpuscan->kern,
-							  0,
-							  NULL,
-							  &clgss->events[clgss->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueWriteBuffer: %s", opencl_strerror(rc));
-		goto error;
-	}
-	clgss->ev_index++;
-	pfm->bytes_dma_send += length;
-	pfm->num_dma_send++;
-
-	/* kern_data_store, via common routine */
-	rc = clserv_dmasend_data_store(pds,
-								   kcmdq,
-								   clgss->m_dstore,
-								   clgss->m_ktoast,
-								   0,
-								   NULL,
-								   &clgss->ev_index,
-								   clgss->events,
-								   pfm);
-	if (rc != CL_SUCCESS)
-		goto error;
-
-	/* execution of kernel function */
-	rc = clEnqueueNDRangeKernel(kcmdq,
-								clgss->kernel,
-								1,
-								NULL,
-								&gwork_sz,
-								&lwork_sz,
-								clgss->ev_index,
-								&clgss->events[0],
-								&clgss->events[clgss->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueNDRangeKernel: %s",
-				   opencl_strerror(rc));
-		goto error;
-	}
-	clgss->ev_index++;
-	pfm->num_kern_exec++;
-
-	/* write back result vrelation */
-	offset = KERN_GPUSCAN_DMARECV_OFFSET(&gpuscan->kern);
-	length = KERN_GPUSCAN_DMARECV_LENGTH(&gpuscan->kern);
-	rc = clEnqueueReadBuffer(kcmdq,
-							 clgss->m_gpuscan,
-							 CL_FALSE,
-							 offset,
-							 length,
-							 kresults,
-							 1,
-							 &clgss->events[clgss->ev_index - 1],
-							 &clgss->events[clgss->ev_index]);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clEnqueueReadBuffer: %s",
-				   opencl_strerror(rc));
-		goto error;
-	}
-	clgss->ev_index++;
-	pfm->bytes_dma_recv += length;
-	pfm->num_dma_recv++;
-
-	/*
-	 * Last, registers a callback routine that replies the message
-	 * to the backend
-	 */
-	rc = clSetEventCallback(clgss->events[clgss->ev_index - 1],
-							CL_COMPLETE,
-							clserv_respond_gpuscan,
-							clgss);
-	if (rc != CL_SUCCESS)
-	{
-		clserv_log("failed on clSetEventCallback: %s", opencl_strerror(rc));
-		goto error;
-	}
-	return;
-
-error:
-	if (clgss)
-	{
-		if (clgss->ev_index > 0)
-			clWaitForEvents(clgss->ev_index, clgss->events);
-		if (clgss->m_ktoast)
-			clReleaseMemObject(clgss->m_ktoast);
-		if (clgss->m_dstore)
-			clReleaseMemObject(clgss->m_dstore);
-		if (clgss->m_gpuscan)
-			clReleaseMemObject(clgss->m_gpuscan);
-		if (clgss->kernel)
-			clReleaseKernel(clgss->kernel);
-		if (clgss->program)
-			clReleaseProgram(clgss->program);
-		free(clgss);
-	}
-	gpuscan->msg.errcode = rc;
-	pgstrom_reply_message(&gpuscan->msg);
+	return status;
 }
