@@ -781,7 +781,6 @@ multirels_preload_heap(MultiRelsState *mrs,
 	*p_ntuples = (double)kds->nitems;
 }
 
-
 static void *
 multirels_exec_bulk(CustomScanState *node)
 {
@@ -791,6 +790,7 @@ multirels_exec_bulk(CustomScanState *node)
 	double			ntuples = 0.0;
 	bool			scan_forward = false;
 
+	Assert(pgstrom_planstate_is_multirels(&node->ss.ps));
 	/* must provide our own instrumentation support */
 	if (node->ss.ps.instrument)
 		InstrStartNode(node->ss.ps.instrument);
@@ -914,6 +914,12 @@ out:
 	return pmrels;
 }
 
+pgstrom_multirels *
+pgstrom_multirels_exec_bulk(PlanState *plannode)
+{
+	return multirels_exec_bulk((CustomScanState *) plannode);
+}
+
 static void
 multirels_end(CustomScanState *node)
 {
@@ -1004,11 +1010,10 @@ multirels_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 
 /*****/
 bool
-multirels_get_gpumem(void *__pmrels, GpuTask *gtask,
+multirels_get_gpumem(pgstrom_multirels *pmrels, GpuTask *gtask,
 					 CUdeviceptr *p_kmrels,		/* inner relations */
 					 CUdeviceptr *p_lomaps)		/* left-outer map */
 {
-	pgstrom_multirels *pmrels = __pmrels;
 	cl_int		cuda_index = gtask->cuda_index;
 	CUresult	rc;
 
@@ -1055,9 +1060,8 @@ multirels_get_gpumem(void *__pmrels, GpuTask *gtask,
 }
 
 void
-multirels_put_gpumem(void *__pmrels, GpuTask *gtask)
+multirels_put_gpumem(pgstrom_multirels *pmrels, GpuTask *gtask)
 {
-	pgstrom_multirels *pmrels = __pmrels;
 	cl_int		cuda_index = gtask->cuda_index;
 	CUresult	rc;
 
@@ -1086,9 +1090,8 @@ multirels_put_gpumem(void *__pmrels, GpuTask *gtask)
 }
 
 void
-multirels_send_gpumem(void *__pmrels, GpuTask *gtask)
+multirels_send_gpumem(pgstrom_multirels *pmrels, GpuTask *gtask)
 {
-	pgstrom_multirels *pmrels = __pmrels;
 	cl_int		cuda_index = gtask->cuda_index;
 	CUstream	cuda_stream = gtask->cuda_stream;
 	CUresult	rc;
@@ -1129,9 +1132,8 @@ multirels_send_gpumem(void *__pmrels, GpuTask *gtask)
 }
 
 void
-multirels_free_lomaps(void *__pmrels, GpuTask *gtask)
+multirels_free_lomaps(pgstrom_multirels *pmrels, GpuTask *gtask)
 {
-	pgstrom_multirels *pmrels = __pmrels;
 	CUresult	rc;
 
 	if (pmrels->m_lomaps)

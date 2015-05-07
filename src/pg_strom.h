@@ -583,12 +583,16 @@ pgstrom_create_multirels_plan(PlannerInfo *root,
 							  List *hash_inner_keys);
 extern struct pgstrom_multirels *
 pgstrom_multirels_exec_bulk(PlanState *plannode);
-extern bool multirels_get_gpumem(void *__pmrels, GpuTask *gtask,
+extern bool multirels_get_gpumem(struct pgstrom_multirels *pmrels,
+								 GpuTask *gtask,
 								 CUdeviceptr *p_kmrels,
 								 CUdeviceptr *p_lomaps);
-extern void multirels_put_gpumem(void *__pmrels, GpuTask *gtask);
-extern void multirels_send_gpumem(void *__pmrels, GpuTask *gtask);
-extern void multirels_free_lomaps(void *__pmrels, GpuTask *gtask);
+extern void multirels_put_gpumem(struct pgstrom_multirels *pmrels,
+								 GpuTask *gtask);
+extern void multirels_send_gpumem(struct pgstrom_multirels *pmrels,
+								  GpuTask *gtask);
+extern void multirels_free_lomaps(struct pgstrom_multirels *pmrels,
+								  GpuTask *gtask);
 extern void	pgstrom_init_multirels(void);
 
 /*

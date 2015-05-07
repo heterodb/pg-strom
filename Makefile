@@ -5,7 +5,7 @@ DATA = src/pg_strom--1.0.sql
 # Source file of CPU portion
 STROM_OBJS = main.o codegen.o grafter.o datastore.o aggfuncs.o \
 		cuda_control.o cuda_program.o cuda_mmgr.o \
-		gpuscan.o gpupreagg.o gpusort.o multirels.o
+		gpuscan.o gpujoin.o gpupreagg.o gpusort.o multirels.o
 
 # Source file of GPU portion
 CUDA_OBJS = cuda_common.o \
@@ -22,7 +22,7 @@ CUDA_SOURCES = $(addprefix src/,$(CUDA_OBJS:.o=.c))
 # Header and Libraries of CUDA
 CUDA_PATH_LIST := /usr/local/cuda /usr/local/cuda-*
 CUDA_PATH := $(shell for x in $(CUDA_PATH_LIST);	\
-			   do test -e "$$x/include/cuda.h" && echo $$x; done | head -1)
+	       do test -e "$$x/include/cuda.h" && echo $$x; done | head -1)
 IPATH := $(CUDA_PATH)/include
 LPATH := $(CUDA_PATH)/lib64
 
