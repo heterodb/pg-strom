@@ -16,7 +16,14 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
+#include "catalog/pg_type.h"
+#include "nodes/nodeFuncs.h"
+#include "optimizer/planmain.h"
+#include "utils/lsyscache.h"
+#include "utils/pg_crc.h"
+#include "utils/ruleutils.h"
 #include "pg_strom.h"
+#include "cuda_numeric.h"
 #include "cuda_gpujoin.h"
 
 /* static variables */
@@ -117,7 +124,7 @@ form_multirels_info(CustomScan *cscan, MultiRelsInfo *mr_info)
 	kmrels_rate = (long)(mr_info->kmrels_rate * 1000000.0);
 	privs = lappend(privs, makeInteger(kmrels_rate));
 	privs = lappend(privs, makeInteger(mr_info->nslots));
-	exprs = lappend(exprs, mr_info->hash_keys);
+	exprs = lappend(exprs, mr_info->hash_inner_keys);
 
 	cscan->custom_private = privs;
 	cscan->custom_exprs = exprs;
@@ -142,7 +149,7 @@ deform_multirels_info(CustomScan *cscan)
 	kmrels_rate = intVal(list_nth(privs, pindex++));
 	mr_info->kmrels_rate = (double)kmrels_rate / 1000000.0;
 	mr_info->nslots = intVal(list_nth(privs, pindex++));
-	mr_info->hash_keys = list_nth(exprs, eindex++);
+	mr_info->hash_inner_keys = list_nth(exprs, eindex++);
 
 	return mr_info;
 }
@@ -162,6 +169,20 @@ pgstrom_plan_is_multirels(const Plan *plan)
 }
 
 /*
+ * pgstrom_planstate_is_multirels
+ */
+bool
+pgstrom_planstate_is_multirels(const PlanState *planstate)
+{
+	CustomScanState	*css = (CustomScanState *) planstate;
+
+	if (IsA(css, CustomScanState) &&
+		css->methods == &multirels_exec_methods.c)
+		return true;
+	return false;
+}
+
+/*
  * pgstrom_create_multirels_plan
  *
  *
@@ -169,23 +190,22 @@ pgstrom_plan_is_multirels(const Plan *plan)
 CustomScan *
 pgstrom_create_multirels_plan(PlannerInfo *root,
 							  int depth,
-							  Path *outer_path,
-							  double mrels_rows,
 							  Cost mrels_startup_cost,
 							  Cost mrels_total_cost,
 							  JoinType join_type,
-							  int nbatches,
+							  Path *outer_path,
 							  Size kmrels_length,
 							  double kmrels_rate,
+							  cl_uint nbatches,
 							  cl_uint nslots,
 							  List *hash_inner_keys)
 {
 	CustomScan	   *cscan;
 	MultiRelsInfo	mr_info;
-	Path		   *outer_plan = create_plan_recurse(root, outer_path);
+	Plan		   *outer_plan = create_plan_recurse(root, outer_path);
 
 	cscan = makeNode(CustomScan);
-	cscan->scan.plan.plan_rows = mrels_rows;
+	cscan->scan.plan.plan_rows = outer_plan->plan_rows;
 	cscan->scan.plan.startup_cost = mrels_startup_cost;
 	cscan->scan.plan.total_cost = mrels_total_cost;
 	cscan->scan.plan.plan_width = outer_plan->plan_width;
@@ -212,12 +232,12 @@ pgstrom_create_multirels_plan(PlannerInfo *root,
 }
 
 
-static void
+static Node *
 multirels_create_scan_state(CustomScan *cscan)
 {
 	MultiRelsState *mrs = palloc0(sizeof(MultiRelsState));
 
-	NodeSetTag(mhs, T_CustomScanState);
+	NodeSetTag(mrs, T_CustomScanState);
 	mrs->css.flags = cscan->flags;
 	mrs->css.methods = &multirels_exec_methods.c;
 	mrs->gcontext = pgstrom_get_gpucontext();
@@ -231,6 +251,11 @@ multirels_begin(CustomScanState *node, EState *estate, int eflags)
 	MultiRelsState *mrs = (MultiRelsState *) node;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	MultiRelsInfo  *mr_info = deform_multirels_info(cscan);
+	List		   *hash_keys = NIL;
+	List		   *hash_keylen = NIL;
+	List		   *hash_keybyval = NIL;
+	List		   *hash_keytype = NIL;
+	ListCell	   *lc;
 
 	/* check for unsupported flags */
 	Assert(!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
@@ -244,7 +269,7 @@ multirels_begin(CustomScanState *node, EState *estate, int eflags)
 	mrs->kmrels_length = mr_info->kmrels_length;
 	mrs->kmrels_rate = mr_info->kmrels_rate;
 	mrs->nslots = mr_info->nslots;
-	if (mr_info->hash_keys)
+	if (mr_info->hash_inner_keys)
 	{
 		cl_uint		shift;
 
@@ -254,24 +279,24 @@ multirels_begin(CustomScanState *node, EState *estate, int eflags)
 		mrs->hgram_shift = sizeof(cl_uint) * BITS_PER_BYTE - shift;
 	}
 	mrs->outer_overflow = NULL;
-	mrs->outer_done = NULL;
+	mrs->outer_done = false;
 	mrs->curr_chunk = NULL;
 
 	/*
 	 * initialize the expression state of hash-keys, if any
 	 */
-	foreach (lc, mr_info->hash_keys)
+	foreach (lc, mr_info->hash_inner_keys)
 	{
-		Oid		type_oid = exprType(lfirst(lc));
-		int16	type_len;
-		bool	type_byval;
-		Expr   *key_expr;
+		Oid			type_oid = exprType(lfirst(lc));
+		int16		typlen;
+		bool		typbyval;
+		ExprState  *key_expr;
 
 		get_typlenbyval(type_oid, &typlen, &typbyval);
 
 		key_expr = ExecInitExpr(lfirst(lc), &mrs->css.ss.ps);
 		hash_keys = lappend(hash_keys, key_expr);
-		hash_keylen = append_int(hash_keylen, typlen);
+		hash_keylen = lappend_int(hash_keylen, typlen);
 		hash_keybyval = lappend_int(hash_keybyval, typbyval);
 		hash_keytype = lappend_oid(hash_keytype, type_oid);
 	}
@@ -297,7 +322,7 @@ multirels_exec(CustomScanState *node)
 static bool
 multirels_expand_length(MultiRelsState *mrs, pgstrom_multirels *pmrels)
 {
-	MultiRelsState *temp;
+	MultiRelsState *temp = mrs;
 	Size		new_length = 2 * pmrels->kmrels_length;
 
 	/*
@@ -309,8 +334,12 @@ multirels_expand_length(MultiRelsState *mrs, pgstrom_multirels *pmrels)
 	/*
 	 * Update expected total length of pgstrom_multirels
 	 */
-	for (temp = mrs; temp != NULL; temp = innerPlanState(temp))
+	while (temp)
+	{
+		Assert(pgstrom_planstate_is_multirels((PlanState *) temp));
 		temp->kmrels_length = new_length;
+		temp = (MultiRelsState *)innerPlanState(temp);
+	}
 	pmrels->kmrels_length = new_length;
 
 	return true;
@@ -319,13 +348,14 @@ multirels_expand_length(MultiRelsState *mrs, pgstrom_multirels *pmrels)
 static kern_hashtable *
 create_kern_hashtable(MultiRelsState *mrs, pgstrom_multirels *pmrels)
 {
-	kern_hashtable *khtable;
+	GpuContext	   *gcontext = mrs->gcontext;
 	TupleTableSlot *scan_slot = mrs->css.ss.ss_ScanTupleSlot;
     TupleDesc		scan_desc = scan_slot->tts_tupleDescriptor;
 	int				natts = scan_desc->natts;
+	kern_hashtable *khtable;
 	Size			chunk_size;
 	Size			required;
-	cl_uint		   *hash_slot;
+	cl_uint		   *hash_slots;
 	int				attcacheoff;
 	int				attalign;
 	int				i;
@@ -336,13 +366,13 @@ create_kern_hashtable(MultiRelsState *mrs, pgstrom_multirels *pmrels)
 	do {
 		chunk_size = (Size)(mrs->kmrels_rate *
 							(double)(pmrels->kmrels_length -
-									 pmrels->length_head));
+									 pmrels->head_length));
 		if (required < chunk_size)
 			break;
 		if (!multirels_expand_length(mrs, pmrels))
 			elog(ERROR, "failed to assign minimum required memory");
 	} while (true);
-	khtable = MemoryContextAlloc(mrs->gcontext, chunk_size);
+	khtable = MemoryContextAlloc(gcontext->memcxt, chunk_size);
 	khtable->length = chunk_size;
 	khtable->usage = required;
 	khtable->ncols = natts;
@@ -352,7 +382,7 @@ create_kern_hashtable(MultiRelsState *mrs, pgstrom_multirels *pmrels)
 	khtable->hash_max = UINT_MAX;
 
 	attcacheoff = offsetof(HeapTupleHeaderData, t_bits);
-	if (tupdesc->tdhasoid)
+	if (scan_desc->tdhasoid)
 		attcacheoff += sizeof(Oid);
 	attcacheoff = MAXALIGN(attcacheoff);
 
@@ -383,7 +413,7 @@ create_kern_hashtable(MultiRelsState *mrs, pgstrom_multirels *pmrels)
 }
 
 static pg_crc32
-get_tuple_hashvalue(MultiRelsState *mrs, HeapTuple tuple)
+get_tuple_hashvalue(MultiRelsState *mrs, TupleTableSlot *slot)
 {
 	ExprContext	   *econtext = mrs->css.ss.ps.ps_ExprContext;
 	pg_crc32		hash;
@@ -394,7 +424,7 @@ get_tuple_hashvalue(MultiRelsState *mrs, HeapTuple tuple)
 
 	/* calculation of a hash value of this entry */
 	econtext->ecxt_scantuple = slot;
-	INIT_CRC32C(hash);
+	INIT_LEGACY_CRC32(hash);
 	forfour (lc1, mrs->hash_keys,
 			 lc2, mrs->hash_keylen,
 			 lc3, mrs->hash_keybyval,
@@ -427,18 +457,18 @@ get_tuple_hashvalue(MultiRelsState *mrs, HeapTuple tuple)
 		if (keylen > 0)
 		{
 			if (keybyval)
-				COMP_CRC32C(hash, &value, keylen);
+				COMP_LEGACY_CRC32(hash, &value, keylen);
 			else
-				COMP_CRC32C(hash, DatumGetPointer(value), keylen);
+				COMP_LEGACY_CRC32(hash, DatumGetPointer(value), keylen);
 		}
 		else
 		{
-			COMP_CRC32C(hash,
-						VARDATA_ANY(value),
-						VARSIZE_ANY_EXHDR(value));
+			COMP_LEGACY_CRC32(hash,
+							  VARDATA_ANY(value),
+							  VARSIZE_ANY_EXHDR(value));
 		}
 	}
-	FIN_CRC32C(hash);
+	FIN_LEGACY_CRC32(hash);
 
 	return hash;
 }
@@ -446,9 +476,12 @@ get_tuple_hashvalue(MultiRelsState *mrs, HeapTuple tuple)
 static bool
 multirels_preload_hash_partial(MultiRelsState *mrs, kern_hashtable *khtable)
 {
-	cl_uint	   *hash_slots;
-	cl_uint		i, limit;
-	Size		required = 0;
+	TupleTableSlot *tupslot = mrs->css.ss.ss_ScanTupleSlot;
+	kern_hashentry *khentry;
+	cl_uint			hash;
+	cl_uint		   *hash_slots;
+	cl_uint			i, limit;
+	Size			required = 0;
 
 	Assert(mrs->tupstore != NULL);
 
@@ -488,30 +521,32 @@ multirels_preload_hash_partial(MultiRelsState *mrs, kern_hashtable *khtable)
 	/*
 	 * Load from the tuplestore
 	 */
-	while (tuplestore_gettupleslot(mrs->tup_store, true, false, slot))
+	while (tuplestore_gettupleslot(mrs->tupstore, true, false, tupslot))
 	{
 		/*
 		 * calculation of hash value, then load it to kern_hashtable
 		 * if its hash value is in-range.
 		 */
-		tuple = ExecFetchSlotTuple(slot);
-		hash = get_tuple_hashvalue(mrs, tuple);
+		hash = get_tuple_hashvalue(mrs, tupslot);
 		if (hash >= khtable->hash_min && hash <= khtable->hash_max)
 		{
+			HeapTuple	tuple = ExecFetchSlotTuple(tupslot);
+			Size		entry_size;
+			cl_int		index;
+
 			entry_size = MAXALIGN(offsetof(kern_hashentry, htup) +
 								  tuple->t_len);
 			khentry = (kern_hashentry *)((char *)khtable + khtable->usage);
 			khentry->hash = hash;
-			khentry->tupitem.t_len = tuple->t_len;
-			khentry->tupitem.t_self = tuple->t_self;
-			memcpy(&khentry->tupitem.htup, tuple->t_data, tuple->t_len);
+			khentry->rowid = khtable->nitems++;
+			khentry->t_len = tuple->t_len;
+			memcpy(&khentry->htup, tuple->t_data, tuple->t_len);
 
 			index = hash % khtable->nslots;
-			hentry->next = hash_slot[index];
-			hash_slot[index] = khtable->usage;
+			khentry->next = hash_slots[index];
+			hash_slots[index] = khtable->usage;
 
 			/* usage increment */
-			khtable->nitems++;
 			khtable->usage += entry_size;
 		}
 	}
@@ -521,17 +556,21 @@ multirels_preload_hash_partial(MultiRelsState *mrs, kern_hashtable *khtable)
 }
 
 static void
-multirels_preload_hash(MultiRelsState *mrs, double *ntuples)
+multirels_preload_hash(MultiRelsState *mrs,
+					   pgstrom_multirels *pmrels,
+					   double *p_ntuples)
 {
 	TupleTableSlot *scan_slot = mrs->css.ss.ss_ScanTupleSlot;
-	TupleDesc		scan_desc = scan_slot->tts_tupleDescriptor;
+	kern_hashtable *khtable;
 	kern_hashentry *khentry;
 	HeapTuple		tuple;
 	Size			entry_size;
-	Size			chunk_size;
+	cl_uint		   *hash_slots;
+	cl_uint			hash;
 	int				index;
 
 	khtable = create_kern_hashtable(mrs, pmrels);
+	hash_slots = KERN_HASHTABLE_SLOT(khtable);
 
 	while (!mrs->outer_done)
 	{
@@ -549,7 +588,7 @@ multirels_preload_hash(MultiRelsState *mrs, double *ntuples)
 			break;
 		}
 		tuple = ExecFetchSlotTuple(scan_slot);
-		hash = get_tuple_hashvalue(mrs, tuple);
+		hash = get_tuple_hashvalue(mrs, scan_slot);
 		entry_size = MAXALIGN(offsetof(kern_hashentry, htup) + tuple->t_len);
 
 		/*
@@ -569,16 +608,15 @@ multirels_preload_hash(MultiRelsState *mrs, double *ntuples)
 		{
 			khentry = (kern_hashentry *)((char *)khtable + khtable->usage);
 			khentry->hash = hash;
-			khentry->tupitem.t_len = tuple->t_len;
-			khentry->tupitem.t_self = tuple->t_self;
-			memcpy(&khentry->tupitem.htup, tuple->t_data, tuple->t_len);
+			khentry->rowid = khtable->nitems ++;
+			khentry->t_len = tuple->t_len;
+			memcpy(&khentry->htup, tuple->t_data, tuple->t_len);
 
 			index = hash % khtable->nslots;
-			hentry->next = hash_slot[index];
-			hash_slot[index] = khtable->usage;
+			khentry->next = hash_slots[index];
+			hash_slots[index] = (uintptr_t)khentry - (uintptr_t)khtable;
 
 			/* usage increment */
-			khtable->nitems ++;
 			khtable->usage += entry_size;
 			/* histgram update */
 			mrs->hgram_size[hash >> mrs->hgram_shift] += entry_size;
@@ -591,8 +629,8 @@ multirels_preload_hash(MultiRelsState *mrs, double *ntuples)
 			if (multirels_expand_length(mrs, pmrels))
 			{
 				Size	chunk_size_new = (Size)
-					(mrs->proportion *(double)(pmrels->kmrels_length -
-											   pmrels->head_length));
+					(mrs->kmrels_rate *(double)(pmrels->kmrels_length -
+												pmrels->head_length));
 				khtable = repalloc(khtable, chunk_size_new);
 				khtable->hostptr = (hostptr_t)&khtable->hostptr;
 				khtable->length = chunk_size_new;
@@ -616,11 +654,9 @@ multirels_preload_hash(MultiRelsState *mrs, double *ntuples)
 				 * once. Then, we split tuples according to the hash range.
 				 */
 				kern_hashentry *khentry;
-				cl_uint		   *hslot;
 				HeapTupleData	tupData;
 
 				mrs->tupstore = tuplestore_begin_heap(false, false, work_mem);
-				hslot = KERN_HASHTABLE_SLOT(khtable);
 				for (index = 0; index < khtable->nslots; index++)
 				{
 					for (khentry = KERN_HASH_FIRST_ENTRY(khtable, index);
@@ -644,7 +680,7 @@ multirels_preload_hash(MultiRelsState *mrs, double *ntuples)
 	if (mrs->tupstore &&
 		!multirels_preload_hash_partial(mrs, khtable))
 	{
-		Assert(mrs->gts.scan_done);
+		Assert(mrs->outer_done);
 		pfree(khtable);
 		return;
 	}
@@ -669,8 +705,7 @@ multirels_preload_heap(MultiRelsState *mrs,
 					   double *p_ntuples)
 {
 	TupleTableSlot *scan_slot = mrs->css.ss.ss_ScanTupleSlot;
-	TupleDesc		scan_dest = scan_slot->tts_tupleDescriptor;
-	HeapTuple		scan_tuple;
+	TupleDesc		scan_desc = scan_slot->tts_tupleDescriptor;
 	Size			chunk_size;
 	pgstrom_data_store *pds;
 	kern_data_store	   *kds;
@@ -678,8 +713,8 @@ multirels_preload_heap(MultiRelsState *mrs,
 	/*
 	 * Make a pgstrom_data_store for materialization
 	 */
-	chunk_size = (Size)(mrs->proportion * (double)(pmrels->length -
-												   pmrels->length_head));
+	chunk_size = (Size)(mrs->kmrels_rate * (double)(pmrels->kmrels_length -
+													pmrels->head_length));
 	pds = pgstrom_create_data_store_row(mrs->gcontext,
 										scan_desc, chunk_size, false);
 	while (true)
@@ -700,9 +735,6 @@ multirels_preload_heap(MultiRelsState *mrs,
 
 		if (!pgstrom_data_store_insert_tuple(pds, scan_slot))
 		{
-			MultiRelsState *temp;
-			Size	new_length;
-
 			/* to be inserted on the next try */
 			Assert(mrs->outer_overflow == NULL);
 			mrs->outer_overflow = scan_slot;
@@ -721,7 +753,7 @@ multirels_preload_heap(MultiRelsState *mrs,
 			 */
 			chunk_size = (Size)(mrs->kmrels_rate *
 								(double)(pmrels->kmrels_length -
-										 pmrels->length_head));
+										 pmrels->head_length));
 			chunk_size = STROMALIGN_DOWN(chunk_size);
 			pgstrom_expand_data_store(mrs->gcontext, pds, chunk_size);
 		}
@@ -755,9 +787,9 @@ multirels_exec_bulk(CustomScanState *node)
 {
 	MultiRelsState *mrs = (MultiRelsState *) node;
 	GpuContext	   *gcontext = mrs->gcontext;
-	PlanState	   *mrs_child;	/* underlying MultiRels, if any */
+	pgstrom_multirels *pmrels;
 	double			ntuples = 0.0;
-
+	bool			scan_forward = false;
 
 	/* must provide our own instrumentation support */
 	if (node->ss.ps.instrument)
@@ -765,13 +797,15 @@ multirels_exec_bulk(CustomScanState *node)
 
 	if (innerPlanState(mrs))
 	{
-		pmrels = BulkExecMultiRels(innerPlanState(mrs));
+		CustomScanState *inner_ps = (CustomScanState *)innerPlanState(mrs);
+
+		pmrels = multirels_exec_bulk(inner_ps);
 		if (!pmrels)
 		{
 			if (mrs->outer_done)
 				goto out;
-			ExecReScan(mrs);
-			pmrels = BulkExecMultiRels(innerPlanState(mrs));
+			ExecReScan(&mrs->css.ss.ps);
+			pmrels = multirels_exec_bulk(inner_ps);
 			if (!pmrels)
 				goto out;
 			scan_forward = true;
@@ -782,8 +816,7 @@ multirels_exec_bulk(CustomScanState *node)
 	else
 	{
 		/* No deeper relations, so create a new pgstrom_multi_relations */
-		kern_multirels *kmrels;
-		int		nrels = depth;
+		int		nrels = mrs->depth;
 		Size	head_length;
 		Size	alloc_length;
 		char   *pos;
@@ -816,13 +849,13 @@ multirels_exec_bulk(CustomScanState *node)
 		pmrels->ev_loaded = (CUevent *) pos;
 
 		memcpy(pmrels->kern.pg_crc32_table,
-			   pg_crc32c_table,
+			   pg_crc32_table,
 			   sizeof(cl_uint) * 256);
 		pmrels->kern.nrels = nrels;
 		memset(pmrels->kern.chunks,
 			   0,
-			   offsetof(pgstrom_multirels, pmrels->kern.chunks[nrels]) -
-			   offsetof(pgstrom_multirels, pmrels->kern.chunks[0]));
+			   offsetof(pgstrom_multirels, kern.chunks[nrels]) -
+			   offsetof(pgstrom_multirels, kern.chunks[0]));
 	}
 	Assert(pmrels != NULL);
 
@@ -839,9 +872,9 @@ multirels_exec_bulk(CustomScanState *node)
 			mrs->curr_chunk = NULL;
 		}
 		if (mrs->hash_keys != NIL)
-			multirels_preload_hash(mrs, &ntuples);
+			multirels_preload_hash(mrs, pmrels, &ntuples);
 		else
-			multirels_preload_heap(mrs, &ntuples);
+			multirels_preload_heap(mrs, pmrels, &ntuples);
 	}
 
 	if (!mrs->curr_chunk)
@@ -851,9 +884,23 @@ multirels_exec_bulk(CustomScanState *node)
 	}
 	else
 	{
+		Size	chunk_length = ((kern_data_store *)mrs->curr_chunk)->length;
+		cl_uint	chunk_nitems = ((kern_data_store *)mrs->curr_chunk)->nitems;
+		int		depth = mrs->depth;
+
 		pmrels->inner_chunks[depth - 1] = mrs->curr_chunk;
-		pmrels->usage_length +=
-			((kern_data_store *)mrs->curr_chunk)->length;
+		pmrels->kern.chunks[depth - 1].chunk_offset = pmrels->usage_length;
+
+		if (mrs->join_type == JOIN_LEFT || mrs->join_type == JOIN_FULL)
+		{
+			pmrels->kern.chunks[depth - 1].left_outer = true;
+			pmrels->kern.chunks[depth - 1].lomap_offset = pmrels->lomap_length;
+			pmrels->lomap_length += STROMALIGN(sizeof(cl_bool) * chunk_nitems);
+		}
+		if (mrs->join_type == JOIN_RIGHT || mrs->join_type == JOIN_FULL)
+			pmrels->kern.chunks[depth - 1].right_outer = true;
+		/* make advance usage counter */
+		pmrels->usage_length += chunk_length;
 		Assert(pmrels->usage_length <= pmrels->kmrels_length);
 	}
 out:
@@ -932,7 +979,6 @@ multirels_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	/* shows other properties */
 	if (es->format != EXPLAIN_FORMAT_TEXT)
 	{
-		resetStringInfo(&str);
 		if (mrs->nbatches_exec >= 0)
 			ExplainPropertyInteger("nBatches", mrs->nbatches_exec, es);
 		else
@@ -958,10 +1004,13 @@ multirels_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 
 /*****/
 bool
-multirels_get_gpumem(void *__pmrels, GpuTask *gtask)
+multirels_get_gpumem(void *__pmrels, GpuTask *gtask,
+					 CUdeviceptr *p_kmrels,		/* inner relations */
+					 CUdeviceptr *p_lomaps)		/* left-outer map */
 {
 	pgstrom_multirels *pmrels = __pmrels;
 	cl_int		cuda_index = gtask->cuda_index;
+	CUresult	rc;
 
 	if (pmrels->refcnt[cuda_index] == 0)
 	{
@@ -999,46 +1048,25 @@ multirels_get_gpumem(void *__pmrels, GpuTask *gtask)
 		pmrels->m_lomaps = m_lomaps;
 	}
 	pmrels->refcnt[cuda_index]++;
+	*p_kmrels = pmrels->m_kmrels[cuda_index];
+	*p_lomaps = pmrels->m_lomaps;
+
 	return true;
 }
 
-
 void
-multirels_put_gpumem(void *__pmrels, GpuTask *gtask, bool is_last_call)
+multirels_put_gpumem(void *__pmrels, GpuTask *gtask)
 {
 	pgstrom_multirels *pmrels = __pmrels;
-	cl_int		i, cuda_index = gtask->cuda_index;
+	cl_int		cuda_index = gtask->cuda_index;
 	CUresult	rc;
 
 	Assert(pmrels->refcnt[cuda_index] > 0);
 	if (--pmrels->refcnt[cuda_index] == 0)
 	{
 		/*
-		 * Release left-outer map, if this managed memory was acquired and
-		 * this call is actually the last one.
-		 */
-		if (is_last_call && pmrels->m_lomaps)
-		{
-			bool	found = false;
-
-			for (i=0; i < gcontext->num_context; i++)
-			{
-				if (pmrels->refcnt[i] > 0)
-				{
-					found = true;
-					break;
-				}
-			}
-			if (!found)
-			{
-				rc = cuMemFree(pmrels->m_lomaps);
-				if (rc != CUDA_SUCCESS)
-					elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
-			}
-		}
-
-		/*
-		 * Also, release device memory for inner multi-relations
+		 * OK, no concurrent tasks did not reference the inner-relations
+		 * buffer any more, so release it and mark the pointer as NULL.
 		 */
 		Assert(pmrels->m_kmrels[cuda_index] != 0UL);
 		gpuMemFree(gtask, pmrels->m_kmrels[cuda_index]);
@@ -1101,15 +1129,25 @@ multirels_send_gpumem(void *__pmrels, GpuTask *gtask)
 }
 
 void
-multirels_get_gpu_pointers(void *__pmrels, GpuTask *gtask,
-						   CUdeviceptr *p_kmrels,
-						   CUdeviceptr *p_lomaps)
+multirels_free_lomaps(void *__pmrels, GpuTask *gtask)
 {
 	pgstrom_multirels *pmrels = __pmrels;
-	cl_int		cuda_index = gtask->cuda_index;
+	CUresult	rc;
 
-	*p_kmrels = pmrels->m_kmrels[cuda_index];
-	*p_lomaps = pmrels->m_lomaps;
+	if (pmrels->m_lomaps)
+	{
+#ifdef USE_ASSERT_CHECKING
+		GpuContext *gcontext = gtask->gts->gcontext;
+		int			i;
+
+		for (i=0; i < gcontext->num_context; i++)
+			Assert(pmrels->refcnt[i] == 0);
+#endif
+		rc = cuMemFree(pmrels->m_lomaps);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
+		pmrels->m_lomaps = (CUdeviceptr)(-1UL);
+	}
 }
 
 /*

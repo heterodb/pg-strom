@@ -432,9 +432,19 @@ extern void pgstrom_compute_workgroup_size(size_t *p_grid_size,
 										   size_t *p_block_size,
 										   CUfunction function,
 										   CUdevice device,
-										   bool maximum_blocksize,
+										   bool maximize_blocksize,
 										   size_t nitems,
 										   size_t dynamic_shmem_per_thread);
+extern void pgstrom_compute_workgroup_size_2d(size_t *p_grid_xsize,
+											  size_t *p_grid_ysize,
+											  size_t *p_block_xsize,
+											  size_t *p_block_ysize,
+											  CUfunction function,
+											  CUdevice device,
+											  size_t x_nitems,
+											  size_t y_nitems,
+											  size_t dynamic_shmem_per_xitems,
+											  size_t dynamic_shmem_per_yitems);
 extern void pgstrom_init_cuda_control(void);
 extern int pgstrom_baseline_cuda_capability(void);
 extern const char *errorText(int errcode);
@@ -558,17 +568,27 @@ extern void pgstrom_init_gpuscan(void);
 struct pgstrom_multirels;
 
 extern bool	pgstrom_plan_is_multirels(const Plan *plan);
+extern bool pgstrom_planstate_is_multirels(const PlanState *planstate);
 extern CustomScan *
 pgstrom_create_multirels_plan(PlannerInfo *root,
-							  int depth, Path *outer_path,
-							  int nbatches, Size buffer_size, double threshold,
-							  int nslots, List *hash_keys);
+							  int depth,
+							  Cost mrels_startup_cost,
+							  Cost mrels_total_cost,
+							  JoinType join_type,
+							  Path *outer_path,
+							  Size kmrels_length,
+							  double kmrels_rate,
+							  cl_uint nbatches,
+							  cl_uint nslots,
+							  List *hash_inner_keys);
 extern struct pgstrom_multirels *
 pgstrom_multirels_exec_bulk(PlanState *plannode);
-extern bool multirels_get_gpumem(void *__pmrels, GpuTask *gtask);
-extern void multirels_put_gpumem(void *__pmrels, GpuTask *gtask,
-								 bool is_last_call);
+extern bool multirels_get_gpumem(void *__pmrels, GpuTask *gtask,
+								 CUdeviceptr *p_kmrels,
+								 CUdeviceptr *p_lomaps);
+extern void multirels_put_gpumem(void *__pmrels, GpuTask *gtask);
 extern void multirels_send_gpumem(void *__pmrels, GpuTask *gtask);
+extern void multirels_free_lomaps(void *__pmrels, GpuTask *gtask);
 extern void	pgstrom_init_multirels(void);
 
 /*

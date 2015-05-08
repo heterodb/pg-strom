@@ -29,8 +29,11 @@ typedef struct
 	cl_uint			nrels;			/* number of relations */
 	struct
 	{
-		cl_uint		chunk_offset;	/* offset to KDS or Hash, if any */
-		cl_uint		outer_offset;	/* offset to outer match map, if any */
+		cl_uint		chunk_offset;	/* offset to KDS or Hash */
+		cl_uint		lomap_offset;	/* offset to Left-Outer Map, if any */
+		cl_bool		left_outer;		/* true, if JOIN_LEFT or JOIN_FULL */
+		cl_bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
+		cl_char		__padding__[2];
 	} chunks[FLEXIBLE_ARRAY_MEMBER];
 } kern_multirels;
 
@@ -42,11 +45,14 @@ typedef struct
 	((kern_hashtable *)										\
 	 ((char *)(kmrels) + (kmrels)->chunks[(depth)-1].chunk_offset))
 
-#define KERN_MULTIRELS_MATCH_MAP(kmrels, depth, outer_map)	\
+#define KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels, depth, left_outer_map)	\
 	((cl_bool *)											\
-	 ((kmrels)->chunks[(depth)-1].outer_offset == 0			\
-	  ? NULL : ((char *)(outer_map) +						\
-				(kmrels)->chunks[(depth)-1].outer_offset)))
+	 ((kmrels)->chunks[(depth)-1].lomap_offset == 0			\
+	  ? NULL												\
+	  : ((cl_bool *)(left_outer_map) +						\
+		 (kmrels)->chunks[(depth)-1].outer_offset)))
+#define KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, depth)	\
+	((kmrels)->chunks[(depth)-1].right_outer_join)
 
 /*
  * Hash table and entry
@@ -96,9 +102,11 @@ typedef struct
  */
 typedef struct
 {
-	cl_uint			hash;   /* 32-bit hash value */
-	cl_uint			next;   /* offset of the next */
-	kern_tupitem	tupitem;/* tuple of the inner relation */
+	cl_uint			hash;   	/* 32-bit hash value */
+	cl_uint			next;		/* offset of the next */
+	cl_uint			rowid;		/* unique identifier of this hash entry */
+	cl_uint			t_len;		/* length of the tupe itself */
+	HeapTupleHeaderData htup;	/* variable length heap-tuple */
 } kern_hashentry;
 
 typedef struct
@@ -130,11 +138,7 @@ STATIC_INLINE(kern_hashentry *)
 KERN_HASH_FIRST_ENTRY(kern_hashtable *khtable, cl_uint hash)
 {
 	cl_uint	   *slot = KERN_HASHTABLE_SLOT(khtable);
-	cl_uint		index;
-
-	if (hash
-
- = hash % khtable->nslots;
+	cl_uint		index = hash % khtable->nslots;
 
 	if (slot[index] == 0)
 		return NULL;
@@ -157,6 +161,7 @@ typedef struct
 	size_t			kresults_1_offset;
 	size_t			kresults_2_offset;
 	size_t			kresults_total_items;
+	size_t			kresults_max_items;
 	cl_uint			max_depth;
 	cl_int			errcode;
 	kern_parambuf	kparams;
@@ -207,7 +212,7 @@ gpujoin_join_quals(cl_int *errcode,
 				   kern_multi_relstore *kmrels,
 				   int depth,
 				   cl_int *outer_index,
-				   kern_tupitem *inner_tupitem);
+				   HeapTupleHeaderData *htup);
 
 /*
  * gpujoin_hash_value
@@ -321,6 +326,20 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 		kresults_out->nrooms = kgjoin->kresults_total_items / (depth + 1);
 		kresults_out->nitems = 0;
 		kresults_out->errcode = StromError_Success;
+
+		/*
+		 * Update required length of kresults if overflow.
+		 * It shall be used to calculate the length of kresults on
+		 * the next try.
+		 */
+		if (depth > 1)
+		{
+			size_t	kresults_last_items
+				= kresults_in->nrels * kresults_in->nitems;
+
+			if (kgjoin->kresults_total_items < kresults_last_items)
+				kgjoin->kresults_total_items = kresults_last_items;
+		}
 	}
 out:
 	kern_writeback_error_status(&kgjoin->errcode, errcode);
@@ -331,12 +350,14 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 					  kern_data_store *kds,
 					  kern_multi_relstore *kmrels,
 					  cl_int depth,
-					  cl_bool *left_outer_map)
+					  cl_bool *left_outer_maps)
 {
 	kern_parambuf  *kparams = KERN_NESTLOOP_PARAMBUF(kgjoin);
 	kern_resultbuf *kresults_in = KERN_GPUJOIN_IN_RESULTBUF(kgjoin, depth);
 	kern_resultbuf *kresults_out = KERN_GPUJOIN_OUT_RESULTBUF(kgjoin, depth);
 	kern_data_store *kds_in;
+	cl_bool		   *lo_map;
+	size_t			nvalids;
 	cl_int			y_index;
 	cl_int			y_offset;
 	cl_int			x_index;
@@ -355,6 +376,9 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 	assert(kresults_out->nrels == depth + 1);
 	assert(kresults_in->nrels == depth);
 
+	/* will be valid, if LEFT OUTER JOIN */
+	lo_map = KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels, depth, left_outer_maps);
+
 	/*
 	 * NOTE: size of Y-axis deterministric on the time of kernel launch.
 	 * host-side guarantees get_global_ysize() is larger then kds->nitems
@@ -366,7 +390,8 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 	assert(kds_in != NULL);
 
 	y_index = get_global_yid();
-	x_limit = ((kresults_in->nitems + get_global_xsize() - 1) /
+	nvalids = min(kresults_in->nitems, kresults_in->nrooms);
+	x_limit = ((nvalids + get_global_xsize() - 1) /
 			   get_global_xsize()) * get_global_xsize();
 	for (x_index = get_global_xid();
 		 x_index < x_limit;
@@ -377,8 +402,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 		cl_bool			is_matched;
 		__shared__ cl_int base;
 
-		if (y_index < kds_in->nitems &&
-			x_index < kresults_in->nitems)
+		if (y_index < kds_in->nitems && x_index < nvalids)
 		{
 			kern_tupitem *tupitem = KERN_DATA_STORE_TUPITEM(kds_in, y_index);
 
@@ -388,7 +412,9 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 											kmrels,
 											depth,
 											x_buffer,
-											tupitem);
+											&tupitem->htup);
+			if (is_matched && lo_map && !lo_map[y_index])
+				lo_map[y_index] = true;
 			y_offset = (uintptr_t)tupitem - (uintptr_t)kds_in;
 		}
 		else
@@ -423,18 +449,92 @@ out:
 	kern_writeback_error_status(&kresults_out->errcode, errcode);
 }
 
+/*
+ * gpujoin_leftouter_nestloop
+ *
+ * It injects unmatched tuples to kresuts_out buffer if LEFT OUTER JOIN
+ */
+KERNEL_FUNCTION(void)
+gpujoin_leftouter_nestloop(kern_gpujoin *kgjoin,
+						   kern_data_store *kds,	/* never referenced */
+						   kern_multi_relstore *kmrels,
+						   cl_int depth,
+						   cl_bool *left_outer_maps)
+{
+	kern_resultbuf *kresults_out = KERN_GPUJOIN_OUT_RESULTBUF(kgjoin, depth);
+	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+	kern_tupitem   *tupitem;
+	cl_bool		   *lo_map;
+	cl_bool			is_unmatched;
+	cl_int			num_unmatched;
+	cl_int		   *rbuffer;
+	cl_int			errcode = StromError_Success;
+	cl_int			i;
+	__shared__ cl_uint base;
+
+	lo_map = KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels, depth, left_outer_maps);
+	assert(lo_map != NULL);
+
+	/*
+	 * Cound up number of inner tuples that were not matched with outer-
+	 * relations. Then, we allocates slot in kresults_out for outer-join
+	 * tuples.
+	 */
+	if (get_global_id() < kds_in->nitems)
+		is_unmatched = !lo_map[get_global_id()];
+	else
+		is_unmatched = false;
+	offset = arithmetic_stairlike_add(is_unmatched ? 1 : 0, &num_unmatched);
+
+	/* In case when (base + num_unmatched) is larger than nrooms, it means
+	 * we don't have enough space to write back nested-loop results.
+	 * So, we have to tell the host-side to acquire larger kern_resultbuf.
+	 */
+	if (base + num_unmatched > kresults_out->nrooms)
+	{
+		errcode = StromError_DataStoreNoSpace;
+		goto out;
+	}
+
+	/*
+	 * OK, we know which row should be materialized using left outer join
+	 * manner, and result buffer was acquired. Let's put result for the
+	 * next stage.
+	 */
+	if (is_unmatched)
+	{
+		tupitem = KERN_DATA_STORE_TUPITEM(kds_in, get_global_id());
+
+		rbuffer = KERN_GET_RESULT(kresults_out, base + offset);
+		for (i=0; i < depth; i++)
+			rbuffer[i] = 0;		/* NULL */
+		rbuffer[depth] = (uintptr_t)tupitem - (uintptr_t)kds_in;
+	}
+out:
+	kern_writeback_error_status(&knestloop->errcode, errcode);
+}
+
+/*
+ * gpujoin_exec_hashjoin
+ *
+ *
+ *
+ */
 KERNEL_FUNCTION(void)
 gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 					  kern_data_store *kds,
 					  kern_multi_relstore *kmrels,
 					  cl_int depth,
-					  cl_bool *left_outer_map)
+					  cl_bool *left_outer_maps)
 {
 	kern_parambuf  *kparams = KERN_NESTLOOP_PARAMBUF(kgjoin);
 	kern_resultbuf *kresults_in = KERN_GPUJOIN_IN_RESULTBUF(kgjoin, depth);
 	kern_resultbuf *kresults_out = KERN_GPUJOIN_OUT_RESULTBUF(kgjoin, depth);
 	kern_hashtable *khtable = KERN_MULTIRELS_INNER_HASH(kmrels, depth);
+	cl_bool		   *lo_map;
+	cl_bool			right_outer_join;
 	cl_uint			hash_value;
+	size_t			nvalids;
 	cl_int			x_index;
 	cl_int			x_limit;
 	cl_int			errcode;
@@ -453,6 +553,10 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	assert(depth > 0 && depth <= kgjoin->max_depth);
 	assert(kresults_out->nrels == depth + 1);
 	assert(kresults_in->nrels == depth);
+
+	/* will be valid, if LEFT OUTER JOIN */
+	lo_map = KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels, depth, left_outer_maps);
+	right_outer_join = KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, depth);
 
 	/* move crc32 table to __local memory from __global memory.
 	 *
@@ -478,53 +582,74 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	 * We have to take the giant loop below to ensure all the outer items
 	 * getting evaluated.
 	 */
-	x_limit = ((kresults_in->nitems + get_global_xsize() - 1) /
+	nvalids = min(kresults_in->nitems, kresults_in->nrooms);
+	x_limit = ((nvalids + get_global_xsize() - 1) /
 			   get_global_xsize()) * get_global_xsize();
 	for (x_index = get_global_xid();
 		 x_index < x_limit;
 		 x_index += get_global_xsize())
 	{
-        cl_int         *x_buffer = KERN_GET_RESULT(kresults_in, x_index);
+        cl_int         *x_buffer;
         cl_int         *r_buffer;
 		cl_int			y_offset;
-        cl_bool         is_matched;
+		cl_int			num_matched;
+		cl_bool			inner_match;
+		cl_bool			outer_match;
 
 		/*
 		 * Calculation of hash-value of the outer relations.
 		 */
-		if (x_index < kresults_in->nitems)
+		if (x_index < nvalids)
+		{
+			x_buffer = KERN_GET_RESULT(kresults_in, x_index);
 			hash_value = gpujoin_hash_value(&errcode,
 											kparams,
 											kds,
 											kmrels,
 											depth,
 											x_buffer);
+			khentry = KERN_HASH_FIRST_ENTRY(khtable, hash_value);
+		}
 		else
-			hash_value = -1;
+		{
+			x_buffer = NULL;
+			khentry = NULL;
+		}
 
 		/*
 		 * walks on the hash entries
-		 *
 		 */
-		khentry = KERN_HASH_FIRST_ENTRY(khtable, hash_value);
 		do {
-			if (khentry != NULL &&
-				x_index < kresults_in->nitems)
+			if (khentry != NULL && x_buffer != NULL)
 			{
-				matched = gpujoin_join_quals(&errcode,
-											 kparams,
-											 kds,
-											 kmrels,
-											 depth,
-											 x_buffer,
-											 &khentry->tupitem);
-				y_offset = (uintptr_t)&khentry->tupitem - (uintptr_t)khtable;
+				inner_match = gpujoin_join_quals(&errcode,
+												 kparams,
+												 kds,
+												 kmrels,
+												 depth,
+												 x_buffer,
+												 &khentry->htup);
+				y_offset = (uintptr_t)&khentry->htup - (uintptr_t)khtable;
+
+				if (inner_match)
+				{
+					if (lo_map && !lo_map[khentry->rowid])
+						lo_map[khentry->rowid] = true;
+				}
+				else if (right_outer_join &&
+						 hash_value >= khtable->hash_min &&
+                         hash_value <= khtable->hash_max)
+					outer_match = true;
 			}
 			else
-				matched = false;
+			{
+				inner_match = false;
+				outer_match = false;
+			}
 
 			/* expand kresults_out->nitems */
-			offset = arithmetic_stairlike_add(matched ? 1 : 0,
+			offset = arithmetic_stairlike_add(inner_match ||
+											  outer_match ? 1 : 0,
 											  &num_matched);
 			if (get_local_id() == 0)
 			{
@@ -537,16 +662,14 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 
 			if (base + num_matched < kresults_out->nrooms)
 			{
-				if (is_matched)
+				if (inner_match)
 				{
 					rbuffer = KERN_GET_RESULT(kresults_out, base + offset);
 					for (i=0; i < depth; i++)
 						rbuffer[i] = xbuffer[i];
 					rbuffer[depth] = y_offset;
 				}
-				else if (is_right_outer &&
-						 hash_value >= khtable->hash_min &&
-						 hash_value <= khtable->hash_max)
+				else if (outer_match)
 				{
 					rbuffer = KERN_GET_RESULT(kresults_out, base + offset);
 					for (i=0; i < depth; i++)
@@ -555,91 +678,124 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 				}
 			}
 			else
+			{
 				STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
+				goto out;
+			}
 
-			/* fetch next hash entry, if any */
+			/*
+			 * Fetch next hash entry, then checks whether all the local
+			 * threads still have valid hash-entry or not.
+			 * (NOTE: this routine contains reduction operation)
+			 */
 			khentry = KERN_HASH_NEXT_ENTRY(khtable, khentry);
-		} while (num_matched == 0);
+			arithmetic_stairlike_add(kentry != NULL ? 1 : 0, &count);
+		} while (count > 0)
 	}
 out:
 	kern_writeback_error_status(&kresults_out->errcode, errcode);
 }
 
 /*
- * gpujoin_exec_leftjoin
+ * gpujoin_leftouter_hashjoin
  *
- * It checks referencial map of inner relations, then if nobody didn't
- * pick up the entry, it adds an outer entry for each unreferenced one.
+ * It injects unmatched tuples to kresuts_out buffer if LEFT OUTER JOIN.
+ * We expect kernel is launched with larger than nslots threads.
  */
 KERNEL_FUNCTION(void)
-gpujoin_exec_leftjoin(kern_gpujoin *kgjoin,
-					  kern_multi_relstore *kmrels,
-					  kern_data_store *kds,
-					  cl_int depth)
+gpujoin_leftouter_hashjoin(kern_gpujoin *kgjoin,
+						   kern_data_store *kds,	/* never referenced */
+						   kern_multi_relstore *kmrels,
+						   cl_int depth,
+						   cl_bool *left_outer_maps)
 {
-	kern_resultbuf	   *kresults_out;
-	kern_data_store	   *kds_in;
-	cl_bool			   *refmap;
-	cl_bool				is_outer;
-	cl_int				num_outer;
-	cl_int				offset;
-	cl_int			   *rbuffer;
-	cl_int				errcode = StromError_Success;
-	__shared__ cl_uint	base;
-	cl_int				i;
-
-	kresults_out = KERN_NESTLOOP_OUT_RESULTSBUF(knestloop, depth);
-	kds_in = KERN_MULTI_RELSTORE_INNER_KDS(kmrels, depth);
-	refmap = KERN_MULTI_RELSTORE_REFERENCE_MAP(kmrels, depth);
-	if (!refmap)
-	{
-		STROM_SET_ERROR(&errcode, StromError_SanityCheckViolation);
-		goto out;
-	}
+	kern_resultbuf *kresults_out = KERN_GPUJOIN_OUT_RESULTBUF(kgjoin, depth);
+	kern_hashtable *khtable = KERN_MULTIRELS_INNER_HASH(kmrels, depth);
+	kern_hashentry *khentry;
+	cl_bool		   *lo_map;
+	cl_bool			right_outer_join;
+	cl_uint			hash_value;
+	size_t			nvalids;
+	cl_int			x_index;
+	cl_int			x_limit;
+	cl_int			errcode;
+	cl_int			count;
+	__shared__ cl_uint base;
 
 	/*
-	 * check number of outer rows to be injected, then allocate slots
-	 * for outer tuples.
+	 * immediate bailout if previous stage already have error status
 	 */
-	if (get_global_id() < kds_in->nitems)
-		is_outer = !refmap[get_global_id()];
-	else
-		is_outer = false;
-	offset = arithmetic_stairlike_add(is_outer ? 1 : 0, &num_outer);
+	errcode = kresults_in->errcode;
+	if (errcode != StromError_Success)
+		goto out;
 
-	if (get_local_id() == 0)
-	{
-		if (num_outer > 0)
-			base = atomicAdd(&kresults_out->nitems, num_outer);
+	/* sanity checks */
+	assert(get_global_ysize() == 1);
+	assert(depth > 0 && depth <= kgjoin->max_depth);
+	assert(kresults_out->nrels == depth + 1);
+	assert(kresults_in->nrels == depth);
+
+	/* will be valid, if LEFT OUTER JOIN */
+	lo_map = KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels, depth, left_outer_maps);
+
+	/*
+	 * Fetch a hash-entry from each hash-slot
+	 */
+	khentry = (get_global_id() < khtable->nslots
+			   ? KERN_HASH_FIRST_ENTRY(khtable, get_global_id())
+			   : NULL);
+	do {
+		if (khentry != NULL)
+		{
+			assert(khentry->rowid < khtable->nitems);
+			is_unmatched = !lo_map[khentry->rowid];
+		}
 		else
-			base = 0;
-	}
-	__synchthreads();
+			is_unmatched = false;
+		offset = arithmetic_stairlike_add(is_unmatched ? 1 : 0,
+										  &num_unmatched);
 
-	/* In case when (base + num_outer) is larger than or equal to the nrooms,
-	 * it means we don't have enough space to write back nested-loop results.
-	 * So, we have to tell the host-side to acquire larger kern_resultbuf.
-	 */
-	if (base + num_outer > kresults_out->nrooms)
-	{
-		errcode = StromError_DataStoreNoSpace;
-		goto out;
-    }
+		/* In case when (base + num_unmatched) is larger than nrooms, it means
+		 * we don't have enough space to write back nested-loop results.
+		 * So, we have to tell the host-side to acquire larger kern_resultbuf.
+		 */
+		if (base + num_unmatched > kresults_out->nrooms)
+		{
+			errcode = StromError_DataStoreNoSpace;
+			goto out;
+		}
 
-	/*
-	 * OK, we know which row should be materialized using left outer join
-	 * manner, and result buffer was acquired. Let's put result for the
-	 * next stage.
-	 */
-	rbuffer = KERN_GET_RESULT(kresults_out, base + offset);
-	for (i=0; i < depth; i++)
-		rbuffer[i] = -1;	/* NULL */
-	rbuffer[depth] = get_global_id();
+		/*
+		 * OK, we know which row should be materialized using left outer join
+		 * manner, and result buffer was acquired. Let's put result for the
+		 * next stage.
+		 */
+		if (is_unmatched)
+		{
+			htup = &khentry->htup;
 
+			rbuffer = KERN_GET_RESULT(kresults_out, base + offset);
+			for (i=0; i < depth; i++)
+				rbuffer[i] = 0;     /* NULL */
+			rbuffer[depth] = (uintptr_t)&khentry->htup - (uintptr_t)khtable;
+		}
+
+		/*
+		 * Walk on the hash-chain until all the local threads reaches to
+		 * end of the hash-list
+		 */
+		khentry = KERN_HASH_NEXT_ENTRY(khtable, khentry);
+		arithmetic_stairlike_add(kentry != NULL ? 1 : 0, &count);
+	} while (count > 0)
 out:
-	kern_writeback_error_status(&knestloop->errcode, errcode);
+	kern_writeback_error_status(&kresults_out->errcode, errcode);
 }
 
+/*
+ * gpujoin_projection_row
+ *
+ * It makes joined relation on kds_dst
+ */
 STATIC_FUNCTION(void)
 __gpujoin_projection_row(cl_int *errcode,
 						 kern_gpujoin *kgjoin,
