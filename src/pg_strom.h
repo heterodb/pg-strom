@@ -5,7 +5,7 @@
  *
  * --
  * Copyright 2011-2014 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014 (C) The PG-Strom Development Team
+ * Copyright 2014-2015 (C) The PG-Strom Development Team
  *
  * This software is an extension of PostgreSQL; You can use, copy,
  * modify or distribute it under the terms of 'LICENSE' included
@@ -566,6 +566,7 @@ extern void pgstrom_init_gpuscan(void);
  * multirels.c
  */
 struct pgstrom_multirels;
+typedef struct pgstrom_multirels pgstrom_multirels;
 
 extern bool	pgstrom_plan_is_multirels(const Plan *plan);
 extern bool pgstrom_planstate_is_multirels(const PlanState *planstate);
@@ -583,6 +584,7 @@ pgstrom_create_multirels_plan(PlannerInfo *root,
 							  List *hash_inner_keys);
 extern struct pgstrom_multirels *
 pgstrom_multirels_exec_bulk(PlanState *plannode);
+extern size_t multirels_get_nitems(pgstrom_multirels *pmrels, int depth);
 extern bool multirels_get_gpumem(struct pgstrom_multirels *pmrels,
 								 GpuTask *gtask,
 								 CUdeviceptr *p_kmrels,

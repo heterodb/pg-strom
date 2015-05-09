@@ -1008,6 +1008,15 @@ multirels_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	}
 }
 
+/****/
+size_t
+multirels_get_nitems(pgstrom_multirels *pmrels, int depth)
+{
+	kern_data_store	   *in_kds
+		= KERN_MULTIRELS_INNER_KDS(&pmrels->kern, depth);
+	return in_kds->nitems;
+}
+
 /*****/
 bool
 multirels_get_gpumem(pgstrom_multirels *pmrels, GpuTask *gtask,
