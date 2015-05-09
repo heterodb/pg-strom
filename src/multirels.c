@@ -100,6 +100,7 @@ typedef struct pgstrom_multirels
 	Size			head_length;	/* length of the header portion */
 	Size			usage_length;	/* length actually in use */
 	Size			lomap_length;	/* length of left outer map */
+	bool			is_detached;	/* true, if pmrels is once detached */
 	void		  **inner_chunks;	/* array of KDS or Hash chunks */
 	cl_int		   *refcnt;			/* reference counter for each context */
 	CUdeviceptr	   *m_kmrels;		/* GPU memory for each CUDA context */
@@ -835,9 +836,12 @@ multirels_exec_bulk(CustomScanState *node)
 			STROMALIGN(sizeof(CUevent) * gcontext->num_context);
 
 		pmrels = MemoryContextAllocZero(gcontext->memcxt, alloc_length);
+		pmrels->gcontext = gcontext;
 		pmrels->kmrels_length = mrs->kmrels_length;
 		pmrels->head_length = head_length;
 		pmrels->usage_length = head_length;
+		pmrels->lomap_length = 0;
+		pmrels->is_detached = false;
 
 		pos = (char *)pmrels + head_length;
 		pmrels->inner_chunks = (void **) pos;
@@ -1026,6 +1030,8 @@ multirels_get_gpumem(pgstrom_multirels *pmrels, GpuTask *gtask,
 	cl_int		cuda_index = gtask->cuda_index;
 	CUresult	rc;
 
+	Assert(pmrels->gcontext == gtask->gts->gcontext);
+
 	if (pmrels->refcnt[cuda_index] == 0)
 	{
 		CUdeviceptr	m_kmrels;
@@ -1074,6 +1080,7 @@ multirels_put_gpumem(pgstrom_multirels *pmrels, GpuTask *gtask)
 	cl_int		cuda_index = gtask->cuda_index;
 	CUresult	rc;
 
+	Assert(pmrels->gcontext == gtask->gts->gcontext);
 	Assert(pmrels->refcnt[cuda_index] > 0);
 	if (--pmrels->refcnt[cuda_index] == 0)
 	{
@@ -1105,6 +1112,7 @@ multirels_send_gpumem(pgstrom_multirels *pmrels, GpuTask *gtask)
 	CUstream	cuda_stream = gtask->cuda_stream;
 	CUresult	rc;
 
+	Assert(pmrels->gcontext == gtask->gts->gcontext);
 	if (!pmrels->ev_loaded[cuda_index])
 	{
 		CUdeviceptr	m_kmrels = pmrels->m_kmrels[cuda_index];
@@ -1139,6 +1147,25 @@ multirels_send_gpumem(pgstrom_multirels *pmrels, GpuTask *gtask)
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
 }
+
+void
+multirels_detach_buffer(pgstrom_multirels *pmrels)
+{
+	GpuContext *gcontext = pmrels->gcontext;
+	int			index;
+
+	Assert(!pmrels->is_detached);
+	pmrels->is_detached = true;
+	for (index=0; index < gcontext->num_context; index++)
+	{
+		/* still someone needs this buffer */
+		if (pmrels->refcnt[index] > 0)
+			return;
+	}
+	pfree(pmrels);
+}
+
+
 
 void
 multirels_free_lomaps(pgstrom_multirels *pmrels, GpuTask *gtask)

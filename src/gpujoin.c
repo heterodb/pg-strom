@@ -202,6 +202,7 @@ typedef struct
 	CUdeviceptr		m_kmrels;
 	CUdeviceptr		m_kds_src;
 	CUdeviceptr		m_kds_dst;
+	CUdeviceptr		m_lomaps;
 	bool			inner_loader;	/* true, if this task is inner loader */
 	CUevent			ev_dma_send_start;
 	CUevent			ev_dma_send_stop;
