@@ -187,6 +187,8 @@ typedef struct
 	List		   *ps_src_resno;
 	/* buffer for row materialization  */
 	HeapTupleData	curr_tuple;
+	/* buffer for PDS on bulk-loading mode */
+	pgstrom_data_store *next_pds;
 } GpuJoinState;
 
 /*
@@ -296,8 +298,6 @@ cost_gpujoin(PlannerInfo *root,
 	Path	   *outer_path = gpath->outer_path;
 	Cost		startup_cost;
 	Cost		run_cost;
-	Cost		gpu_startup_cost;
-	Cost		gpu_run_cost;
 	QualCost	host_cost;
 	QualCost   *join_cost;
 	double		gpu_cpu_ratio;
@@ -339,8 +339,6 @@ cost_gpujoin(PlannerInfo *root,
 	 * Estimation of multi-relations buffer size
 	 */
 retry:
-	gpu_startup_cost = 0.0;
-	gpu_run_cost = 0.0;
 	kmrels_length = STROMALIGN(offsetof(kern_multirels,
 										chunks[num_rels]));
 	largest_size = 0;
@@ -438,23 +436,8 @@ retry:
 						* clamp_row_est(inner_ntuples)
 						* (double) gpath->inners[i].nbatches);
 
-		if (gpath->inners[i].hash_quals != NIL)
-		{
-			/* In case of Hash-Join logic */
-			gpath->inners[i].startup_cost += join_cost[i].startup;
-			gpath->inners[i].run_cost = join_cost[i].per_tuple
-				* outer_ntuples
-				* (double) gpath->inners[i].nbatches;
-		}
-		else
-		{
-			/* In case of Nest-Loop logic */
-			gpath->inners[i].startup_cost += join_cost[i].startup;
-			gpath->inners[i].run_cost = join_cost[i].per_tuple
-				* outer_ntuples
-				* clamp_row_est(inner_ntuples)
-				* (double) gpath->inners[i].nbatches;
-		}
+		gpath->inners[i].startup_cost += join_cost[i].startup;
+		gpath->inners[i].run_cost = run_cost;
 		outer_ntuples = gpath->inners[i].scan_path->rows;
 	}
 	/* put cost value on the gpath */
@@ -473,9 +456,8 @@ retry:
      * number of numbatches!
      */
 	if (!add_path_precheck(gpath->cpath.path.parent,
-						   startup_cost + gpu_startup_cost,
-						   startup_cost + gpu_startup_cost +
-						   run_cost + gpu_run_cost,
+						   gpath->cpath.path.startup_cost,
+						   gpath->cpath.path.total_cost,
 						   NULL, required_outer))
 		return false;
 
@@ -518,7 +500,7 @@ create_gpujoin_path(PlannerInfo *root,
 					bool try_merge)
 {
 	GpuJoinPath	   *result;
-	GpuJoinPath	   *source;
+	GpuJoinPath	   *source = NULL;
 	double			nrows_ratio;
 	int				num_rels;
 
@@ -740,6 +722,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 							   semifactors,
 							   param_source_rels,
 							   extra_lateral_rels);
+
 	/* nothing to do, if PG-Strom is not enabled */
 	if (!pgstrom_enabled())
 		return;
@@ -1383,7 +1366,7 @@ gpujoin_exec_bulk(CustomScanState *node)
 	/* extract its destination data-store */
 	pds_dst = pgjoin->pds_dst;
 	pgjoin->pds_dst = NULL;
-	gpujoin_task_release(pgjoin);
+	gpujoin_task_release(&pgjoin->task);
 
 	return pds_dst;
 }
@@ -1931,11 +1914,11 @@ gpujoin_codegen_hash_value(StringInfo source,
 	foreach (lc, hash_outer_keys)
 	{
 		Node	   *key_expr = lfirst(lc);
-		Oid			key_type;
+		Oid			key_type = exprType(key_expr);
 		devtype_info *dtype;
 		char	   *temp;
 
-		dtype = pgstrom_devtype_lookup(exprType(key_expr));
+		dtype = pgstrom_devtype_lookup(key_type);
 		if (!dtype)
 			elog(ERROR, "Bug? device type \"%s\" not found",
                  format_type_be(key_type));
@@ -2126,8 +2109,15 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 	pgjoin->pmrels = multirels_attach_buffer(gjs->curr_pmrels);
 	pgjoin->pds_src = pds_src;
 
-	// !!!!need to check last chunk!!!!
-
+	/*
+	 * Last chunk checks - this information is needed to handle left outer
+	 * join case because last chunk also kicks special kernel to generate
+	 * half-null tuples on GPU.
+	 */
+	if (!gjs->gts.scan_bulk)
+		pgjoin->is_last_chunk = (gjs->gts.scan_overflow == NULL);
+	else
+		pgjoin->is_last_chunk = (gjs->next_pds == NULL);
 
 	/* expected number of results and buffer length */
 	nrooms = (cl_uint)((double) pds_src->kds->nitems *
@@ -2138,7 +2128,7 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 	/*
 	 * Setup kern_gpujoin
 	 */
-	kgjoin = &gjoin->kern;
+	kgjoin = &pgjoin->kern;
 	kgjoin->kresults_1_offset = required;
 	kgjoin->kresults_2_offset = required +
 		STROMALIGN(offsetof(kern_resultbuf, results[total_items]));
@@ -2177,9 +2167,9 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 	else
 		elog(ERROR, "Bug? unexpected result format: %d", gjs->result_format);
 
-	gjoin->pds_dst = pds_dst;
+	pgjoin->pds_dst = pds_dst;
 
-	return &gjoin->task;
+	return &pgjoin->task;
 }
 
 
@@ -2276,9 +2266,17 @@ retry:
 	}
 	else
 	{
-		pds = BulkExecProcNode(outer_node);
-		if (!pds)
+		if (!gjs->next_pds)
+			gjs->next_pds = BulkExecProcNode(outer_node);
+
+		pds = gjs->next_pds;
+		if (pds)
+			gjs->next_pds = BulkExecProcNode(outer_node);
+		else
+		{
+			gjs->next_pds = NULL;
 			gjs->gts.scan_done = true;
+		}
 	}
 	PERFMON_END(&gjs->gts.pfm_accum, time_inner_load, &tv1, &tv2);
 	PERFMON_END(&gjs->gts.pfm_accum, time_outer_load, &tv2, &tv3);
