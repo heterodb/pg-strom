@@ -60,6 +60,7 @@ static struct {
 	{ DATEOID,		"cl_int",	DEVFUNC_NEEDS_TIMELIB },
 	{ TIMEOID,		"cl_long",	DEVFUNC_NEEDS_TIMELIB },
 	{ TIMESTAMPOID,	"cl_long",	DEVFUNC_NEEDS_TIMELIB },
+	{ TIMESTAMPTZOID,"cl_long",	DEVFUNC_NEEDS_TIMELIB },
 	/* variable length datatypes */
 	{ BPCHAROID,	"varlena",	DEVFUNC_NEEDS_TEXTLIB },
 	{ VARCHAROID,	"varlena",	DEVFUNC_NEEDS_TEXTLIB },
@@ -297,8 +298,8 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "int2abs", 1, {INT2OID}, "f:abs" },
 	{ "int4abs", 1, {INT4OID}, "f:abs" },
 	{ "int8abs", 1, {INT8OID}, "f:abs" },
-	{ "float4abs", 1, {FLOAT4OID}, "l:fabs" },
-	{ "float8abs", 1, {FLOAT8OID}, "l:fabs" },
+	{ "float4abs", 1, {FLOAT4OID}, "f:fabs" },
+	{ "float8abs", 1, {FLOAT8OID}, "f:fabs" },
 
 	/* '=' : equal operators */
 	{ "int2eq",  2, {INT2OID, INT2OID}, "b:==" },
@@ -439,11 +440,11 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	/*
      * Mathmatical functions
      */
-	{ "abs", 1, {INT2OID}, "af:abs" },
-	{ "abs", 1, {INT4OID}, "af:abs" },
-	{ "abs", 1, {INT8OID}, "af:abs" },
-	{ "abs", 1, {FLOAT4OID}, "af:fabs" },
-	{ "abs", 1, {FLOAT8OID}, "af:fabs" },
+	{ "abs", 1, {INT2OID}, "a/f:abs" },
+	{ "abs", 1, {INT4OID}, "a/f:abs" },
+	{ "abs", 1, {INT8OID}, "a/f:abs" },
+	{ "abs", 1, {FLOAT4OID}, "a/f:fabs" },
+	{ "abs", 1, {FLOAT8OID}, "a/f:fabs" },
 	{ "cbrt",  1, {FLOAT4OID}, "f:cbrt" },
 	{ "dcbrt", 1, {FLOAT8OID}, "f:cbrt" },
 	{ "ceil", 1, {FLOAT8OID}, "f:ceil" },
@@ -470,8 +471,8 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	/*
      * Trigonometric function
      */
-	{ "degrees", 1, {FLOAT4OID}, "af:degrees" },
-	{ "degrees", 1, {FLOAT8OID}, "af:degrees" },
+	{ "degrees", 1, {FLOAT4OID}, "a/f:degrees" },
+	{ "degrees", 1, {FLOAT8OID}, "a/f:degrees" },
 	{ "radians", 1, {FLOAT8OID}, "f:radians" },
 	{ "acos",    1, {FLOAT8OID}, "f:acos" },
 	{ "asin",    1, {FLOAT8OID}, "f:asin" },
@@ -587,7 +588,15 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	  "t/F:timestamp_ge_date" },
 	{ "timestamp_cmp_date", 2, {TIMESTAMPOID, DATEOID},
 	  "t/F:timestamp_cmp_date"},
-
+	/* comparison between timestamptz */
+	{ "timestamptz_eq", 2, {TIMESTAMPTZOID, TIMESTAMPTZOID}, "t/b:==" },
+	{ "timestamptz_ne", 2, {TIMESTAMPTZOID, TIMESTAMPTZOID}, "t/b:!=" },
+	{ "timestamptz_lt", 2, {TIMESTAMPTZOID, TIMESTAMPTZOID}, "t/b:<" },
+	{ "timestamptz_le", 2, {TIMESTAMPTZOID, TIMESTAMPTZOID}, "t/b:<=" },
+	{ "timestamptz_gt", 2, {TIMESTAMPTZOID, TIMESTAMPTZOID}, "t/b:>" },
+	{ "timestamptz_ge", 2, {TIMESTAMPTZOID, TIMESTAMPTZOID}, "t/b:>=" },
+	{ "timestamptz_cmp", 2, {TIMESTAMPTZOID, TIMESTAMPTZOID}, 
+	  "t/f:devfunc_int_comp" },
 	/*
 	 * Text functions
 	 * ---------------------- */
