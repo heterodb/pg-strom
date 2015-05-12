@@ -60,7 +60,7 @@ typedef struct
 	Path		   *outer_path;
 	Plan		   *outer_plan;		/* for create_gpujoin_plan convenience */
 	Size			kmrels_length;
-	double			kresults_ratio;
+	double			result_ratio;
 	int				num_rels;
 	List		   *host_quals;
 	struct {
@@ -88,7 +88,7 @@ typedef struct
 	char	   *kern_source;
 	int			extra_flags;
 	List	   *used_params;
-	double		kresults_ratio;
+	double		result_ratio;
 	List	   *nrows_ratio;
 	bool		outer_bulkload;
 	Expr	   *outer_quals;
@@ -108,14 +108,14 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 {
 	List	   *privs = NIL;
 	List	   *exprs = NIL;
-	long		kresults_ratio;
+	long		result_ratio;
 
 	privs = lappend(privs, makeInteger(gj_info->num_rels));
 	privs = lappend(privs, makeString(gj_info->kern_source));
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
 	exprs = lappend(exprs, gj_info->used_params);
-	kresults_ratio = (long)(gj_info->kresults_ratio * 1000000.0);
-	privs = lappend(privs, makeInteger(kresults_ratio));
+	result_ratio = (long)(gj_info->result_ratio * 1000000.0);
+	privs = lappend(privs, makeInteger(result_ratio));
 
 
 	privs = lappend(privs, makeInteger(gj_info->outer_bulkload));
@@ -140,14 +140,14 @@ deform_gpujoin_info(CustomScan *cscan)
 	List	   *exprs = cscan->custom_exprs;
 	int			pindex = 0;
 	int			eindex = 0;
-	long		kresults_ratio;
+	long		result_ratio;
 
 	gj_info->num_rels = intVal(list_nth(privs, pindex++));
 	gj_info->kern_source = strVal(list_nth(privs, pindex++));
 	gj_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gj_info->used_params = list_nth(exprs, eindex++);
-	kresults_ratio = intVal(list_nth(privs, pindex++));
-	gj_info->kresults_ratio = (double)kresults_ratio / 1000000.0;
+	result_ratio = intVal(list_nth(privs, pindex++));
+	gj_info->result_ratio = (double)result_ratio / 1000000.0;
 	gj_info->outer_bulkload = intVal(list_nth(privs, pindex++));
 	gj_info->outer_quals = list_nth(exprs, eindex++);
 	gj_info->host_quals = list_nth(exprs, eindex++);
@@ -168,6 +168,7 @@ typedef struct
 {
 	GpuTaskState	gts;
 	kern_parambuf  *kparams;
+	int				num_rels;
 	/* expressions to be used in fallback path */
 	List		   *join_types;
 	ExprState	   *outer_quals;
@@ -178,7 +179,8 @@ typedef struct
 	/* format of destination store */
 	int				result_format;
 	/* buffer population ratio */
-	double			kresults_ratio;
+	int				result_width;	/* result width for buffer length calc */
+	double			result_ratio;	/* estimated number of rows to outer */
 	List		   *nrows_ratio;
 	/* supplemental information to ps_tlist  */
 	List		   *ps_src_depth;
@@ -203,6 +205,7 @@ typedef struct
 	CUdeviceptr		m_kds_src;
 	CUdeviceptr		m_kds_dst;
 	CUdeviceptr		m_lomaps;
+	bool			is_last_chunk;	/* true, if this chunk is the last */
 	bool			inner_loader;	/* true, if this task is inner loader */
 	CUevent			ev_dma_send_start;
 	CUevent			ev_dma_send_stop;
@@ -298,8 +301,8 @@ cost_gpujoin(PlannerInfo *root,
 	QualCost	host_cost;
 	QualCost   *join_cost;
 	double		gpu_cpu_ratio;
-	double		kresults_ratio;
-	double		kresults_ratio_max;
+	double		result_ratio;
+	double		result_ratio_max;
 	double		outer_ntuples;
 	double		inner_ntuples;
 	Size		kmrels_length;
@@ -310,15 +313,15 @@ cost_gpujoin(PlannerInfo *root,
 	/*
 	 * Buffer size estimation
 	 */
-	kresults_ratio = kresults_ratio_max = 1.0;
+	result_ratio = result_ratio_max = 1.0;
 	for (i=0; i < num_rels; i++)
 	{
-		kresults_ratio = ((double)(i + 2) *
-						  gpath->inners[i].nrows_ratio *
-						  kresults_ratio);
-		kresults_ratio_max = Max(kresults_ratio, kresults_ratio_max);
+		result_ratio = ((double)(i + 2) *
+						gpath->inners[i].nrows_ratio *
+						result_ratio);
+		result_ratio_max = Max(result_ratio, result_ratio_max);
 	}
-	gpath->kresults_ratio = kresults_ratio_max;
+	gpath->result_ratio = result_ratio_max;
 
 	/*
 	 * Cost of per-tuple evaluation
@@ -1075,7 +1078,7 @@ create_gpujoin_plan(PlannerInfo *root,
 
 	memset(&gj_info, 0, sizeof(GpuJoinInfo));
 	gj_info.num_rels = gpath->num_rels;
-	gj_info.kresults_ratio = gpath->kresults_ratio;
+	gj_info.result_ratio = gpath->result_ratio;
 	gj_info.host_quals = gpath->host_quals;
 	for (i=0; i < gpath->num_rels; i++)
 	{
@@ -1211,8 +1214,8 @@ gpujoin_textout_path(StringInfo str, const CustomPath *node)
 					 nodeToString(gpath->outer_plan));
 	/* total_length */
 	appendStringInfo(str, " :kmrels_length %zu", gpath->kmrels_length);
-	/* kresults_ratio */
-	appendStringInfo(str, " :kresults_ratio %.2f", gpath->kresults_ratio);
+	/* result_ratio */
+	appendStringInfo(str, " :result_ratio %.2f", gpath->result_ratio);
 	/* num_rels */
 	appendStringInfo(str, " :num_rels %d", gpath->num_rels);
 	/* host_quals */
@@ -1291,6 +1294,9 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	PlanState	   *ps = &gjs->gts.css.ss.ps;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
+	TupleDesc		tupdesc = GTS_GET_RESULT_TUPDESC(gjs);
+
+	gjs->num_rels = gj_info->num_rels;
 
 	/*
 	 * NOTE: outer_quals, hash_outer_keys and join_quals are intended
@@ -1342,7 +1348,12 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 		gjs->result_format = KDS_FORMAT_SLOT;
 
 	/* expected kresults buffer expand rate */
-	gjs->kresults_ratio = gj_info->kresults_ratio;
+	gjs->result_width =
+		MAXALIGN(offsetof(HeapTupleHeaderData,
+						  t_bits[BITMAPLEN(tupdesc->natts)]) +
+				 (tupdesc->tdhasoid ? sizeof(Oid) : 0)) +
+		MAXALIGN(cscan->scan.plan.plan_width);	/* average width */
+	gjs->result_ratio = gj_info->result_ratio;
 	gjs->nrows_ratio = gj_info->nrows_ratio;
 }
 
@@ -1352,6 +1363,29 @@ gpujoin_exec(CustomScanState *node)
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstrom_exec_gputask,
 					(ExecScanRecheckMtd) pgstrom_recheck_gputask);
+}
+
+static void *
+gpujoin_exec_bulk(CustomScanState *node)
+{
+	GpuJoinState	   *gjs = (GpuJoinState *) node;
+	pgstrom_gpujoin	   *pgjoin;
+	pgstrom_data_store *pds_dst;
+
+	/* force to return row-format */
+	gjs->result_format = KDS_FORMAT_ROW;
+
+	/* fetch next chunk to be processed */
+	pgjoin = (pgstrom_gpujoin *) pgstrom_fetch_gputask(&gjs->gts);
+	if (!pgjoin)
+		return NULL;
+
+	/* extract its destination data-store */
+	pds_dst = pgjoin->pds_dst;
+	pgjoin->pds_dst = NULL;
+	gpujoin_task_release(pgjoin);
+
+	return pds_dst;
 }
 
 static void
@@ -2071,14 +2105,81 @@ gpujoin_codegen(PlannerInfo *root,
 static GpuTask *
 gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 {
+	GpuContext		   *gcontext = gjs->gts.gcontext;
+	pgstrom_gpujoin	   *pgjoin;
+	kern_gpujoin	   *kgjoin;
+	kern_parambuf	   *kparams;
+	TupleDesc			tupdesc;
+	cl_uint				nrooms;
+	cl_uint				total_items;
+	Size				required;
+	pgstrom_data_store *pds_dst;
+
+	/*
+	 * Allocation of pgstrom_gpujoin task object
+	 */
+	required = (offsetof(pgstrom_gpujoin, kern) +
+				offsetof(kern_gpujoin, kparams) +
+				STROMALIGN(gjs->kparams->length));
+	pgjoin = MemoryContextAllocZero(gcontext->memcxt, required);
+	pgstrom_init_gputask(&gjs->gts, &pgjoin->task);
+	pgjoin->pmrels = multirels_attach_buffer(gjs->curr_pmrels);
+	pgjoin->pds_src = pds_src;
+
+	// !!!!need to check last chunk!!!!
 
 
-	// make pds_dst according to the gjs->result_format
+	/* expected number of results and buffer length */
+	nrooms = (cl_uint)((double) pds_src->kds->nitems *
+                       gjs->result_ratio *
+                       (1 + pgstrom_row_population_margin));
+	total_items = nrooms * (gjs->num_rels + 1);
 
+	/*
+	 * Setup kern_gpujoin
+	 */
+	kgjoin = &gjoin->kern;
+	kgjoin->kresults_1_offset = required;
+	kgjoin->kresults_2_offset = required +
+		STROMALIGN(offsetof(kern_resultbuf, results[total_items]));
+	kgjoin->kresults_total_items = total_items;
+	kgjoin->kresults_max_items = 0;
+	kgjoin->max_depth = gjs->num_rels;
+	kgjoin->errcode = StromError_Success;
 
+	kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
+	memcpy(kparams, gjs->kparams, gjs->kparams->length);
 
+	/*
+	 * Allocation of the destination data-store
+	 */
+	tupdesc = gjs->gts.css.ss.ss_ScanTupleSlot->tts_tupleDescriptor;
+	nrooms = (cl_uint)((double) pds_src->kds->nitems *
+					   gjs->result_ratio *
+					   (1 + pgstrom_row_population_margin));
 
-	return NULL;
+	if (gjs->result_format == KDS_FORMAT_SLOT)
+	{
+		pds_dst = pgstrom_create_data_store_slot(gcontext, tupdesc,
+												 nrooms, false, pds_src);
+	}
+	else if (gjs->result_format == KDS_FORMAT_ROW)
+	{
+		Size		length;
+
+		length = (STROMALIGN(offsetof(kern_data_store,
+									  colmeta[tupdesc->natts])) +
+				  STROMALIGN(sizeof(cl_uint) * nrooms) +
+				  gjs->result_width * nrooms);
+		pds_dst = pgstrom_create_data_store_row(gcontext, tupdesc,
+												length, false);
+	}
+	else
+		elog(ERROR, "Bug? unexpected result format: %d", gjs->result_format);
+
+	gjoin->pds_dst = pds_dst;
+
+	return &gjoin->task;
 }
 
 
@@ -2110,7 +2211,7 @@ retry:
 		if (gjs->curr_pmrels)
 		{
 			Assert(gjs->gts.scan_done);
-			multirels_put_buffer(gjs->gts.gcontext, gjs->curr_pmrels);
+			multirels_detach_buffer(gjs->curr_pmrels);
 			gjs->curr_pmrels = NULL;
 		}
 
@@ -2122,7 +2223,7 @@ retry:
 						time_inner_load, &tv1, &tv2);
 			return NULL;	/* end of inner multi-relations */
 		}
-		gjs->curr_pmrels = pmrels;
+		gjs->curr_pmrels = multirels_attach_buffer(pmrels);
 
 		/*
 		 * Rewind the outer scan pointer, if it is not first time
@@ -2249,7 +2350,7 @@ gpujoin_cleanup_cuda_resources(pgstrom_gpujoin *gjoin)
 	if (gjoin->m_kds_dst)
 		gpuMemFree(&gjoin->task, gjoin->m_kds_dst);
 	if (gjoin->m_kmrels)
-		multirels_put_gpumem(gjoin->pmrels, &gjoin->task);
+		multirels_put_buffer(gjoin->pmrels, &gjoin->task);
 
 	/* clear the pointers */
 	gjoin->kern_prep = NULL;
@@ -2273,13 +2374,29 @@ gpujoin_cleanup_cuda_resources(pgstrom_gpujoin *gjoin)
 
 static void
 gpujoin_task_release(GpuTask *gtask)
-{}
+{
+	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *) gtask;
 
+	/* release all the cuda resources, if any */
+	gpujoin_cleanup_cuda_resources(pgjoin);
+	/* detach multi-relations buffer, if any */
+	if (pgjoin->pmrels)
+		multirels_detach_buffer(pgjoin->pmrels);
+	/* unlink source data store */
+	if (pgjoin->pds_src)
+		pgstrom_release_data_store(pgjoin->pds_src);
+	/* unlink destination data store */
+	if (pgjoin->pds_dst)
+		pgstrom_release_data_store(pgjoin->pds_dst);
+	/* release this gpu-task itself */
+	pfree(pgjoin);
+}
 
 static bool
 gpujoin_task_complete(GpuTask *gtask)
 {
 	pgstrom_gpujoin	   *gjoin = (pgstrom_gpujoin *) gtask;
+	kern_gpujoin	   *kgjoin = &gjoin->kern;
 	GpuTaskState	   *gts = gtask->gts;
 
 	if (gts->pfm_accum.enabled)
@@ -2309,22 +2426,113 @@ gpujoin_task_complete(GpuTask *gtask)
 	{
 		GpuContext		   *gcontext = gts->gcontext;
 		GpuJoinState	   *gjs = (GpuJoinState *) gts;
-		pgstrom_data_store *pds = gjoin->pds_dst;
-		kern_data_store	   *old_kds = pds->kds;
-		kern_data_store	   *new_kds;
+		pgstrom_data_store *pds_src = gjoin->pds_src;
+		pgstrom_data_store *pds_dst = gjoin->pds_dst;
+		kern_data_store	   *kds_old = pds_dst->kds;
+		kern_data_store	   *kds_new;
+		Size				kds_length;
+		cl_uint				ncols = kds_old->ncols;
+		cl_uint				nrooms;
+		cl_uint				total_items;
 
 		/* GpuJoin should not take file-mapped data store */
-		Assert(!pds->kds_fname);
+		Assert(!pds_dst->kds_fname);
 
-		/* Adjust kresults_ratio enough to keep all the indexes */
+		/*
+		 * NOTE: StromError_DataStoreNoSpace may happen in two cases.
+		 * First, kern_resultbuf, that stores intermediate results, does
+		 * not have enough space, thus kernel code cannot generate join
+		 * result. Second, kern_data_store of destination didn't have
+		 * enough space, thus kernel projection got failed.
+		 * The kern_gpujoin->kresults_max_items tell us which is the
+		 * cause of this error.
+		 */
+		if (kgjoin->kresults_total_items < kgjoin->kresults_max_items)
+		{
+			/*
+			 * In the first scenario, GPU projection didn't work at all.
+			 * So, we expand the kern_resultbuf first, then expand the
+			 * destination data-store according to the estimation number
+			 * of result items.
+			 */
 
+			/* kresults_max_items tells how many items are needed */
+			total_items = kgjoin->kresults_max_items *
+				(1 + pgstrom_row_population_margin);
+			nrooms = total_items / (gjs->num_rels + 1);
+			/* adjust estimation */
+			gjs->result_ratio = (double)kgjoin->kresults_max_items /
+				(double)((gjs->num_rels + 1) * pds_src->kds->nitems);
 
-		/* Adjust length of destination kern_data_store */
+			/* reset kern_gpujoin */
+			kgjoin->kresults_2_offset = kgjoin->kresults_1_offset +
+				STROMALIGN(offsetof(kern_resultbuf, results[total_items]));
+			kgjoin->kresults_total_items = total_items;
+			kgjoin->kresults_max_items = 0;
+			kgjoin->errcode = StromError_Success;
+		}
+		else
+		{
+			/*
+			 * In the second scenario, kds_old->nitems (that shall be
+			 * larger than kds_old->nrooms) and kds_usage will tell us
+			 * exact usage of the buffer
+			 */
+			if (kds_old->format == KDS_FORMAT_ROW)
+			{
+				Size	result_width;
 
+				result_width = ((Size)(kds_old->usage -
+									   KERN_DATA_STORE_HEAD_LENGTH(kds_old) -
+									   sizeof(cl_uint) * kds_old->nitems) /
+								(Size) kds_old->nitems) + 1;
+				gjs->result_width = Max(gjs->result_width,
+										MAXALIGN(result_width));
+			}
+			nrooms = kds_old->nitems;
+		}
 
+		/*
+		 * Expand kern_data_store according to the hint on previous
+		 * execution.
+		 */
+		if (kds_old->format == KDS_FORMAT_SLOT)
+		{
+			kds_length = STROMALIGN(offsetof(kern_data_store,
+											 colmeta[ncols])) +
+				(LONGALIGN(sizeof(bool) * ncols) +
+				 LONGALIGN(sizeof(Datum) * ncols)) * nrooms;
+		}
+		else if (kds_old->format == KDS_FORMAT_ROW)
+		{
+			kds_length = (STROMALIGN(offsetof(kern_data_store,
+											  colmeta[ncols])) +
+						  STROMALIGN(sizeof(cl_uint) * nrooms) +
+						  gjs->result_width * nrooms);
+		}
+		else
+			elog(ERROR, "Bug? unexpected result format: %d", kds_old->format);
 
-
-
+		if (kds_length <= kds_old->length)
+		{
+			/* no need to alloc again, just reset usage */
+			kds_old->usage = 0;
+			kds_old->nitems = 0;
+			kds_old->nrooms = nrooms;
+		}
+		else
+		{
+			kds_new = MemoryContextAllocZero(gcontext->memcxt, kds_length);
+			memcpy(kds_new, kds_old, KERN_DATA_STORE_HEAD_LENGTH(kds_old));
+			kds_new->hostptr = (hostptr_t) &kds_new->hostptr;
+			kds_new->length = kds_length;
+			kds_new->usage = 0;
+			kds_new->nitems = 0;
+			kds_new->nrooms = nrooms;
+			pds_dst->kds = kds_new;
+			pds_dst->kds_length = kds_new->length;
+			pfree(kds_old);
+		}
 
 		/*
 		 * OK, chain this task on the pending_tasks queue again
@@ -2436,7 +2644,7 @@ __gpujoin_task_process(pgstrom_gpujoin *gjoin)
 	 */
 
 	/* kern_gpujoin *kgjoin (includes 2x kern_resultbuf) */
-	total_items = (size_t)(gjs->kresults_ratio *
+	total_items = (size_t)(gjs->result_ratio *
 						   (double) pds_src->kds->nitems *
 						   (1.0 + pgstrom_row_population_margin));
 	length = STROMALIGN(offsetof(kern_resultbuf, results[total_items]));
@@ -2499,7 +2707,7 @@ __gpujoin_task_process(pgstrom_gpujoin *gjoin)
 	CUDA_EVENT_RECORD(gjoin, ev_dma_send_start);
 
 	/* inner multi relations */
-	multirels_send_gpumem(gjoin->pmrels, &gjoin->task);
+	multirels_send_buffer(gjoin->pmrels, &gjoin->task);
 	/* kern_gpujoin */
 	length = KERN_GPUJOIN_HEAD_LENGTH(&gjoin->kern);
 	rc = cuMemcpyHtoDAsync(gjoin->m_kgjoin,
@@ -2653,7 +2861,7 @@ __gpujoin_task_process(pgstrom_gpujoin *gjoin)
 			rc = cuLaunchKernel(gjoin->kern_hashjoin,
 								grid_xsize, 1, 1,
 								block_xsize, 1, 1,
-								sizeof(cl_uint) * block_size,
+								sizeof(cl_uint) * block_xsize,
 								gjoin->task.cuda_stream,
 								kern_args,
 								NULL);
@@ -2689,7 +2897,7 @@ __gpujoin_task_process(pgstrom_gpujoin *gjoin)
             rc = cuLaunchKernel(gjoin->kern_leftjoin,
                                 grid_xsize, 1, 1,
                                 block_xsize, 1, 1,
-                                sizeof(cl_uint) * block_size,
+                                sizeof(cl_uint) * block_xsize,
                                 gjoin->task.cuda_stream,
                                 kern_args,
                                 NULL);
@@ -2786,7 +2994,7 @@ gpujoin_task_process(GpuTask *gtask)
 		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
 	PG_TRY();
 	{
-		if (multirels_get_gpumem(gjoin->pmrels, &gjoin->task,
+		if (multirels_get_buffer(gjoin->pmrels, &gjoin->task,
 								 &gjoin->m_kmrels, &gjoin->m_lomaps))
 		{
 			status = __gpujoin_task_process(gjoin);

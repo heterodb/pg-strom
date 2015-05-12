@@ -96,12 +96,13 @@ typedef struct
  */
 typedef struct pgstrom_multirels
 {
+	GpuContext	   *gcontext;		/* GpuContext of this buffer */
 	Size			kmrels_length;	/* total length of the kern_multirels */
 	Size			head_length;	/* length of the header portion */
 	Size			usage_length;	/* length actually in use */
 	Size			lomap_length;	/* length of left outer map */
-	bool			is_detached;	/* true, if pmrels is once detached */
 	void		  **inner_chunks;	/* array of KDS or Hash chunks */
+	cl_int			n_attached;		/* number of attached count */
 	cl_int		   *refcnt;			/* reference counter for each context */
 	CUdeviceptr	   *m_kmrels;		/* GPU memory for each CUDA context */
 	CUevent		   *ev_loaded;		/* Sync object for each CUDA context */
@@ -841,7 +842,7 @@ multirels_exec_bulk(CustomScanState *node)
 		pmrels->head_length = head_length;
 		pmrels->usage_length = head_length;
 		pmrels->lomap_length = 0;
-		pmrels->is_detached = false;
+		pmrels->n_attached = 0;
 
 		pos = (char *)pmrels + head_length;
 		pmrels->inner_chunks = (void **) pos;
@@ -1021,9 +1022,24 @@ multirels_get_nitems(pgstrom_multirels *pmrels, int depth)
 	return in_kds->nitems;
 }
 
+/*
+ * multirels_attach_buffer
+ *
+ * It attache multirels buffer on a particular gpujoin task.
+ */
+pgstrom_multirels *
+multirels_attach_buffer(pgstrom_multirels *pmrels)
+{
+	Assert(pmrels->n_attached >= 0);
+
+	pmrels->n_attached++;
+
+	return pmrels;
+}
+
 /*****/
 bool
-multirels_get_gpumem(pgstrom_multirels *pmrels, GpuTask *gtask,
+multirels_get_buffer(pgstrom_multirels *pmrels, GpuTask *gtask,
 					 CUdeviceptr *p_kmrels,		/* inner relations */
 					 CUdeviceptr *p_lomaps)		/* left-outer map */
 {
@@ -1075,7 +1091,7 @@ multirels_get_gpumem(pgstrom_multirels *pmrels, GpuTask *gtask,
 }
 
 void
-multirels_put_gpumem(pgstrom_multirels *pmrels, GpuTask *gtask)
+multirels_put_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
 {
 	cl_int		cuda_index = gtask->cuda_index;
 	CUresult	rc;
@@ -1102,11 +1118,13 @@ multirels_put_gpumem(pgstrom_multirels *pmrels, GpuTask *gtask)
 				elog(ERROR, "failed on cuEventDestroy: %s", errorText(rc));
 			pmrels->ev_loaded[cuda_index] = NULL;
 		}
+		/* should not be dettached prior to device memory release */
+		Assert(pmrels->n_attached > 0);
 	}
 }
 
 void
-multirels_send_gpumem(pgstrom_multirels *pmrels, GpuTask *gtask)
+multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
 {
 	cl_int		cuda_index = gtask->cuda_index;
 	CUstream	cuda_stream = gtask->cuda_stream;
@@ -1151,40 +1169,28 @@ multirels_send_gpumem(pgstrom_multirels *pmrels, GpuTask *gtask)
 void
 multirels_detach_buffer(pgstrom_multirels *pmrels)
 {
-	GpuContext *gcontext = pmrels->gcontext;
-	int			index;
-
-	Assert(!pmrels->is_detached);
-	pmrels->is_detached = true;
-	for (index=0; index < gcontext->num_context; index++)
-	{
-		/* still someone needs this buffer */
-		if (pmrels->refcnt[index] > 0)
-			return;
-	}
-	pfree(pmrels);
-}
-
-
-
-void
-multirels_free_lomaps(pgstrom_multirels *pmrels, GpuTask *gtask)
-{
 	CUresult	rc;
 
-	if (pmrels->m_lomaps)
+	Assert(pmrels->n_attached > 0);
+	if (--pmrels->n_attached == 0)
 	{
 #ifdef USE_ASSERT_CHECKING
-		GpuContext *gcontext = gtask->gts->gcontext;
-		int			i;
+		GpuContext *gcontext = pmrels->gcontext;
+		int			index;
 
-		for (i=0; i < gcontext->num_context; i++)
-			Assert(pmrels->refcnt[i] == 0);
+		for (index=0; index < gcontext->num_context; index++)
+			Assert(pmrels->refcnt[index] == 0);
 #endif
-		rc = cuMemFree(pmrels->m_lomaps);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
-		pmrels->m_lomaps = (CUdeviceptr)(-1UL);
+		/* release left-outer map */
+		if (pmrels->m_lomaps)
+		{
+			rc = cuMemFree(pmrels->m_lomaps);
+			if (rc != CUDA_SUCCESS)
+				elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
+			pmrels->m_lomaps = (CUdeviceptr)(-1UL);
+		}
+		/* release multi relations buffer */
+		pfree(pmrels);
 	}
 }
 
