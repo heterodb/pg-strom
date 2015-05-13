@@ -232,6 +232,7 @@ gpujoin_join_quals(cl_int *errcode,
 STATIC_FUNCTION(cl_uint)
 gpujoin_hash_value(cl_int *errcode,
 				   kern_parambuf *kparams,
+				   cl_uint *pg_crc32_table,
 				   kern_data_store *kds,
 				   kern_multirels *kmrels,
 				   cl_int depth,
@@ -424,7 +425,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 											&tupitem->htup);
 			if (is_matched && lo_map && !lo_map[y_index])
 				lo_map[y_index] = true;
-			y_offset = (size_t)tupitem - (size_t)kds_in;
+			y_offset = (size_t)&tupitem->htup - (size_t)kds_in;
 		}
 		else
 			is_matched = false;
@@ -476,7 +477,7 @@ gpujoin_leftouter_nestloop(kern_gpujoin *kgjoin,
 	cl_bool			is_unmatched;
 	cl_uint			num_unmatched;
 	cl_uint			offset;
-	cl_int		   *rbuffer;
+	cl_int		   *r_buffer;
 	cl_int			errcode = StromError_Success;
 	__shared__ cl_uint base;
 
@@ -521,10 +522,9 @@ gpujoin_leftouter_nestloop(kern_gpujoin *kgjoin,
 	if (is_unmatched)
 	{
 		tupitem = KERN_DATA_STORE_TUPITEM(kds_in, get_global_id());
-
-		rbuffer = KERN_GET_RESULT(kresults_out, base + offset);
-		memset(rbuffer, 0, sizeof(cl_int) * depth);	/* NULL */
-		rbuffer[depth] = (size_t)tupitem - (size_t)kds_in;
+		r_buffer = KERN_GET_RESULT(kresults_out, base + offset);
+		memset(r_buffer, 0, sizeof(cl_int) * depth);	/* NULL */
+		r_buffer[depth] = (size_t)&tupitem->htup - (size_t)kds_in;
 	}
 out:
 	kern_writeback_error_status(&kresults_out->errcode, errcode);
@@ -557,7 +557,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	cl_int			x_limit;
 	cl_int			errcode;
 	__shared__ cl_uint base;
-	__shared__ cl_uint crc32_table[256];
+	__shared__ cl_uint pg_crc32_table[256];
 
 	/*
 	 * immediate bailout if previous stage already have error status
@@ -588,7 +588,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		 crc_index < 256;
 		 crc_index += get_local_size())
 	{
-		crc32_table[crc_index] = kmrels->pg_crc32_table[crc_index];
+		pg_crc32_table[crc_index] = kmrels->pg_crc32_table[crc_index];
 	}
 	__syncthreads();
 
@@ -610,9 +610,11 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
         cl_int         *x_buffer;
         cl_int         *r_buffer;
 		cl_int			y_offset;
-		cl_int			num_matched;
+		cl_uint			offset;
+		cl_uint			num_matched;
 		cl_bool			inner_match;
 		cl_bool			outer_match;
+		cl_uint			count;
 
 		/*
 		 * Calculation of hash-value of the outer relations.
@@ -622,6 +624,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			x_buffer = KERN_GET_RESULT(kresults_in, x_index);
 			hash_value = gpujoin_hash_value(&errcode,
 											kparams,
+											pg_crc32_table,
 											kds,
 											kmrels,
 											depth,
@@ -684,13 +687,13 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 				{
 					r_buffer = KERN_GET_RESULT(kresults_out, base + offset);
 					memcpy(r_buffer, x_buffer, sizeof(cl_int) * depth);
-					rbuffer[depth] = y_offset;
+					r_buffer[depth] = y_offset;
 				}
 				else if (outer_match)
 				{
-					rbuffer = KERN_GET_RESULT(kresults_out, base + offset);
+					r_buffer = KERN_GET_RESULT(kresults_out, base + offset);
 					memcpy(r_buffer, x_buffer, sizeof(cl_int) * depth);
-					rbuffer[depth] = 0;		/* inner is NULL */
+					r_buffer[depth] = 0;		/* inner is NULL */
 				}
 			}
 			else
@@ -705,8 +708,8 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			 * (NOTE: this routine contains reduction operation)
 			 */
 			khentry = KERN_HASH_NEXT_ENTRY(khtable, khentry);
-			arithmetic_stairlike_add(kentry != NULL ? 1 : 0, &count);
-		} while (count > 0)
+			arithmetic_stairlike_add(khentry != NULL ? 1 : 0, &count);
+		} while (count > 0);
 	}
 out:
 	kern_writeback_error_status(&kresults_out->errcode, errcode);
@@ -725,17 +728,13 @@ gpujoin_leftouter_hashjoin(kern_gpujoin *kgjoin,
 						   cl_int depth,
 						   cl_bool *left_outer_maps)
 {
+	kern_resultbuf *kresults_in = KERN_GPUJOIN_IN_RESULTBUF(kgjoin, depth);
 	kern_resultbuf *kresults_out = KERN_GPUJOIN_OUT_RESULTBUF(kgjoin, depth);
 	kern_hashtable *khtable = KERN_MULTIRELS_INNER_HASH(kmrels, depth);
 	kern_hashentry *khentry;
 	cl_bool		   *lo_map;
-	cl_bool			right_outer_join;
-	cl_uint			hash_value;
-	size_t			nvalids;
-	cl_int			x_index;
-	cl_int			x_limit;
 	cl_int			errcode;
-	cl_int			count;
+	cl_uint			count;
 	__shared__ cl_uint base;
 
 	/*
@@ -761,6 +760,10 @@ gpujoin_leftouter_hashjoin(kern_gpujoin *kgjoin,
 			   ? KERN_HASH_FIRST_ENTRY(khtable, get_global_id())
 			   : NULL);
 	do {
+		cl_bool		is_unmatched;
+		cl_uint		num_unmatched;
+		cl_uint		offset;
+
 		if (khentry != NULL)
 		{
 			assert(khentry->rowid < khtable->nitems);
@@ -770,6 +773,15 @@ gpujoin_leftouter_hashjoin(kern_gpujoin *kgjoin,
 			is_unmatched = false;
 		offset = arithmetic_stairlike_add(is_unmatched ? 1 : 0,
 										  &num_unmatched);
+		if (get_local_id() == 0)
+		{
+			if (num_unmatched > 0)
+				base = atomicAdd(&kresults_out->nitems, num_unmatched);
+			else
+				base = 0;
+		}
+		__syncthreads();
+
 
 		/* In case when (base + num_unmatched) is larger than nrooms, it means
 		 * we don't have enough space to write back nested-loop results.
@@ -788,12 +800,9 @@ gpujoin_leftouter_hashjoin(kern_gpujoin *kgjoin,
 		 */
 		if (is_unmatched)
 		{
-			htup = &khentry->htup;
-
-			rbuffer = KERN_GET_RESULT(kresults_out, base + offset);
-			for (i=0; i < depth; i++)
-				rbuffer[i] = 0;     /* NULL */
-			rbuffer[depth] = (size_t)&khentry->htup - (size_t)khtable;
+			cl_int *r_buffer = KERN_GET_RESULT(kresults_out, base + offset);
+			memset(r_buffer, 0, sizeof(cl_int) * depth);	/* NULL */
+			r_buffer[depth] = (size_t)&khentry->htup - (size_t)khtable;
 		}
 
 		/*
@@ -801,8 +810,8 @@ gpujoin_leftouter_hashjoin(kern_gpujoin *kgjoin,
 		 * end of the hash-list
 		 */
 		khentry = KERN_HASH_NEXT_ENTRY(khtable, khentry);
-		arithmetic_stairlike_add(kentry != NULL ? 1 : 0, &count);
-	} while (count > 0)
+		arithmetic_stairlike_add(khentry != NULL ? 1 : 0, &count);
+	} while (count > 0);
 out:
 	kern_writeback_error_status(&kresults_out->errcode, errcode);
 }
@@ -821,30 +830,39 @@ __gpujoin_projection_row(cl_int *errcode,
 						 kern_data_store *kds_src,
 						 kern_data_store *kds_dst)
 {
-	cl_int		   *rbuffer;
+	cl_int		   *r_buffer;
 	cl_int			depth;
-	cl_int			max_depth = kgjoin->max_depth;
+	cl_int			nrels = kgjoin->max_depth + 1;
+	size_t			required;
 	size_t			t_hoff;
 	size_t			data_len;
-	cl_bool			heap_hasnull;
+	cl_bool			heap_hasnull = false;
+	cl_int			src_depth;
+	cl_int			src_colidx;
+	kern_colmeta   *src_colmeta;
+	HeapTupleHeaderData *src_htup;
+	void		   *datum;
+	cl_uint			offset;
+	cl_uint			total_length;
+	__shared__ cl_uint usage_prev;
 
 	/* result buffer
 	 * -------------
-	 * rbuffer[0] -> offset from the 'kds_src'
-	 * rbuffer[i; i > 0] -> offset from the kern_data_store or
+	 * r_buffer[0] -> offset from the 'kds_src'
+	 * r_buffer[i; i > 0] -> offset from the kern_data_store or
 	 *   kern_hashtable that can be picked up using
 	 *   KERN_MULTIRELS_INNER_KDS/HASH(kmrels, depth)
-	 * rbuffer[*] may be 0, if NULL-tuple was set
+	 * r_buffer[*] may be 0, if NULL-tuple was set
 	 */
 	if (res_index < kresults->nitems)
-		rbuffer = KERN_GET_RESULT(kresults, res_index);
+		r_buffer = KERN_GET_RESULT(kresults, res_index);
 	else
-		rbuffer = NULL;
+		r_buffer = NULL;
 
 	/*
 	 * Step.1 - compute length of the joined tuple
 	 */
-	if (!rbuffer)
+	if (!r_buffer)
 		required = 0;
 	else
 	{
@@ -859,45 +877,33 @@ __gpujoin_projection_row(cl_int *errcode,
 		for (i=0; i < ncols; i++)
 		{
 			kern_colmeta	cmeta = kds_dst->colmeta[i];
-			kern_tupitem   *tupitem = NULL;
-			char		   *kchunk;
-			cl_int			src_depth;
-			cl_int			src_colidx;
 
 			/* lookup source depth and colidx */
 			gpujoin_projection_mapping(i, &src_depth, &src_colidx);
+			assert(src_depth <= nrels);
 
-			/* fetch tuple of the source */
-			if (rbuffer[src_depth] == 0)
-				tupitem = NULL;
+			/* fetch source tuple */
+			if (r_buffer[src_depth] == 0)
+				src_htup = NULL;
+			else if (src_depth == 0)
+			{
+				src_colmeta = kds_src->colmeta;
+                src_htup = GPUJOIN_REF_HTUP(kds_src, r_buffer[0]);
+			}
 			else
 			{
-				if (src_depth == 0)
-					tupitem = (kern_tupitem *)((char *)kds_src +
-											   rbuffer[0]);
-				else if (src_depth <= nrels)
-				{
-					kchunk = (char *)KERN_MULTIRELS_INNER_KDS(kmrels,
-															  src_depth);
-					tupitem = (kern_tupitem *)(kchunk, rbuffer[src_depth]);
-				}
-				else
-					tupitem = NULL;
+				kern_data_store *kchunk
+					= KERN_MULTIRELS_INNER_KDS(kmrels, src_depth);
+				src_colmeta = kchunk->colmeta;
+                src_htup = GPUJOIN_REF_HTUP(kchunk, r_buffer[src_depth]);
 			}
-
-			/* fetch column of the source */
-			if (!tupitem)
+			/* fetch datum of the source tuple */
+			if (!src_htup)
 				datum = NULL;
 			else
-			{
-				datum = kern_get_datum_tuple(colmeta,
-											 &tupitem->htup,
+				datum = kern_get_datum_tuple(src_colmeta,
+											 src_htup,
 											 src_colidx);
-			}
-
-			/*
-			 * required length depends on whether datum is NULL or non-NULL
-			 */
 			if (!datum)
 				heap_hasnull = true;
 			else
@@ -927,14 +933,14 @@ __gpujoin_projection_row(cl_int *errcode,
 	if (get_local_id() == 0)
 	{
 		if (total_length > 0)
-			base = atomicAdd(&kds_dst->usage, total_length);
+			usage_prev = atomicAdd(&kds_dst->usage, total_length);
 		else
-			base = 0;
+			usage_prev = 0;
 	}
 	/* check expected usage of the buffer */
 	if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
 		STROMALIGN(sizeof(cl_uint) * kresults->nitems) +
-		usage_prev + total_len > kds_dst->length)
+		usage_prev + total_length > kds_dst->length)
 	{
 		STROM_SET_ERROR(errcode, StromError_DataStoreNoSpace);
 		return;
@@ -953,7 +959,7 @@ __gpujoin_projection_row(cl_int *errcode,
 		cl_uint			curr;
 
 		/* setup kern_tupitem */
-		htup_offset = kds_dst->length - (base + offset + required);
+		htup_offset = kds_dst->length - (usage_prev + offset + required);
 		htup_index = (cl_uint *)KERN_DATA_STORE_BODY(kds_dst);
 		htup_index[res_index] = htup_offset;
 
@@ -981,44 +987,34 @@ __gpujoin_projection_row(cl_int *errcode,
 		for (i=0; i < ncols; i++)
 		{
 			kern_colmeta	cmeta = kds_dst->colmeta[i];
-			cl_uint			src_depth;
-			cl_uint			src_colidx;
-			kern_colmeta   *src_colmeta;
 
 			/* lookup source depth and colidx */
-            gpujoin_projection_mapping(i, &src_depth, &src_colidx);
+			gpujoin_projection_mapping(i, &src_depth, &src_colidx);
+			assert(src_depth <= nrels);
 
-			/* fetch tuple of the source */
-			if (rbuffer[src_depth] == 0)
-				tupitem = NULL;
+			/* fetch source tuple */
+			if (r_buffer[src_depth] == 0)
+				src_htup = NULL;
+			else if (src_depth == 0)
+			{
+				src_colmeta = kds_src->colmeta;
+				src_htup = GPUJOIN_REF_HTUP(kds_src, r_buffer[0]);
+			}
 			else
 			{
-				if (src_depth == 0)
-				{
-					src_colmeta = kds_src->colmeta;
-					tupitem = (kern_tupitem *)((char *)kds_src + rbuffer[0]);
-				}
-				else if (src_depth > 0 && src_depth <= nrels)
-				{
-					kern_data_store *kchunk	/* !may be a hash-table! */
-						= KERN_MULTIRELS_INNER_KDS(kmrels, src_depth);
-					src_colmeta = kchunk->colmeta;
-					tupitem = (kern_tupitem *)((char *)kchunk +
-											   rbuffer[src_depth]);
-				}
-				else
-					tupitem = NULL;
+				kern_data_store *kchunk
+					= KERN_MULTIRELS_INNER_KDS(kmrels, src_depth);
+				src_colmeta = kchunk->colmeta;
+				src_htup = GPUJOIN_REF_HTUP(kchunk, r_buffer[src_depth]);
 			}
 
-			/* fetch column of the source */
-			if (!tupitem)
+			/* fetch datum of the source tuple */
+			if (!src_htup)
 				datum = NULL;
 			else
-			{
 				datum = kern_get_datum_tuple(src_colmeta,
-											 &tupitem->htup,
+											 src_htup,
 											 src_colidx);
-			}
 
 			/* put datum on the destination kds */
 			if (!datum)
@@ -1129,8 +1125,8 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 		 res_index < res_limit;
 		 res_index += get_global_size())
 	{
-		__gpujoin_projection_row(&errcode, kresults, res_index,
-								 kmrels, kds_src, kds_dst);
+		__gpujoin_projection_row(&errcode, kgjoin, kresults,
+								 res_index, kmrels, kds_src, kds_dst);
 	}
 out:
 	/* write-back execution status to host-side */
@@ -1152,7 +1148,7 @@ __gpujoin_projection_slot(cl_int *errcode,
 	cl_int		i, ncols = kds_dst->ncols;
 
 	/* sanity checks */
-	assert(kresults->nrels == max_depth + 1);
+	assert(kresults->nrels == kgjoin->max_depth + 1);
 
 	/* result buffer
 	 * -------------

@@ -1882,6 +1882,7 @@ gpujoin_codegen_join_quals(StringInfo source,
  * STATIC_FUNCTION(cl_uint)
  * gpujoin_hash_value_depth%u(cl_int *errcode,
  *                            kern_parambuf *kparams,
+ *                            cl_uint *pg_crc32_table,
  *                            kern_data_store *kds,
  *                            kern_multirels *kmrels,
  *                            cl_int *outer_index);
@@ -1905,6 +1906,7 @@ gpujoin_codegen_hash_value(StringInfo source,
 		"STATIC_FUNCTION(cl_uint)\n"
 		"gpujoin_hash_value_depth%u(cl_int *errcode,\n"
 		"                           kern_parambuf *kparams,\n"
+		"                           cl_uint *pg_crc32_table,\n"
 		"                           kern_data_store *kds,\n"
 		"                           kern_multirels *kmrels,\n"
 		"                           cl_int *outer_index)\n"
