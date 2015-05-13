@@ -391,8 +391,8 @@ retry:
 											t_bits[BITMAPLEN(ncols)])) +
 						  MAXALIGN(inner_rel->width));
 			/* header portion of kern_data_store */
-			chunk_size += STROMALIGN(offsetof(kern_data_store,
-											  colmeta[ncols]));
+			chunk_size = STROMALIGN(offsetof(kern_data_store,
+											 colmeta[ncols]));
 			/* row-index of the tuples */
 			chunk_size += STROMALIGN(sizeof(cl_uint) * (Size)inner_ntuples);
 			/* kern_tupitem body */
@@ -452,7 +452,7 @@ retry:
 	gpath->cpath.path.total_cost
 		= (gpath->inners[num_rels - 1].startup_cost +
 		   gpath->inners[num_rels - 1].run_cost);
-	elog(INFO, "gpath cost=%.2f...%.2f rows=%.0f", gpath->cpath.path.startup_cost, gpath->cpath.path.total_cost, outer_ntuples);
+	elog(INFO, "gpath cost=%.2f...%.2f rows=%.0f kmrels_length=%zu", gpath->cpath.path.startup_cost, gpath->cpath.path.total_cost, outer_ntuples, kmrels_length);
 
     /*
      * NOTE: In case when extreme number of rows are expected,

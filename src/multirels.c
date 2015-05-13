@@ -1061,7 +1061,7 @@ multirels_get_buffer(pgstrom_multirels *pmrels, GpuTask *gtask,
 	if (pmrels->refcnt[cuda_index] == 0)
 	{
 		CUdeviceptr	m_kmrels;
-		CUdeviceptr	m_lomaps;
+		CUdeviceptr	m_lomaps = 0UL;
 
 		/* buffer for the inner multi-relations */
 		m_kmrels = gpuMemAlloc(gtask, pmrels->kmrels_length);
@@ -1202,10 +1202,11 @@ multirels_detach_buffer(pgstrom_multirels *pmrels)
 		/* release left-outer map */
 		if (pmrels->m_lomaps)
 		{
+			elog(INFO, "m_lomaps = %p", (void *)pmrels->m_lomaps);
 			rc = cuMemFree(pmrels->m_lomaps);
 			if (rc != CUDA_SUCCESS)
 				elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
-			pmrels->m_lomaps = (CUdeviceptr)(-1UL);
+			pmrels->m_lomaps = (CUdeviceptr) 0UL;
 		}
 		/* release multi relations buffer */
 		pfree(pmrels);
