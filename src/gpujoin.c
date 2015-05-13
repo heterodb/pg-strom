@@ -25,6 +25,8 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/planmain.h"
+#include "optimizer/restrictinfo.h"
+#include "optimizer/var.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/ruleutils.h"
@@ -66,12 +68,13 @@ typedef struct
 	struct {
 		Cost		startup_cost;	/* outer scan cost + materialize */
 		Cost		run_cost;		/* outer scan cost + materialize */
+		double		nrows;			/* expected number of rows in this depth */
+		double		nrows_ratio;	/* nrows ratio towards outer rows */
 		JoinType	join_type;		/* one of JOIN_* */
 		Path	   *scan_path;		/* outer scan path */
 		Plan	   *scan_plan;		/* for create_gpujoin_plan convenience */
 		List	   *hash_quals;		/* valid quals, if hash-join */
 		List	   *join_quals;		/* all the device quals, incl hash_quals */
-		double		nrows_ratio;
 		double		kmrels_rate;
 		Size		chunk_size;		/* kmrels_length * kmrels_ratio */
 		int			nbatches;		/* expected iteration in this depth */
@@ -344,6 +347,10 @@ retry:
 	largest_size = 0;
 	largest_index = -1;
 	outer_ntuples = outer_path->rows;
+
+	/* fixed cost to initialize/setup/use GPU device */
+	startup_cost = pgstrom_gpu_setup_cost;
+
 	for (i=0; i < num_rels; i++)
 	{
 		Path	   *inner_path = gpath->inners[i].scan_path;
@@ -407,38 +414,36 @@ retry:
 		/* cost to load tuples onto the buffer */
 		startup_cost = (inner_path->total_cost +
 						cpu_tuple_cost * inner_path->rows);
-		/* cost to compute hash value, if any */
+		/* cost to compute hash value, if hash-join */
 		if (gpath->inners[i].hash_quals != NIL)
 			startup_cost += (cpu_operator_cost * inner_path->rows *
 							 list_length(gpath->inners[i].hash_quals));
-		/* fixed cost to initialize/setup/use GPU device */
-		startup_cost += pgstrom_gpu_setup_cost;
-
 		/* cost to execute previous stage */
 		if (i == 0)
-			startup_cost += (outer_path->total_cost +
-							 cpu_tuple_cost * outer_path->rows);
+			run_cost = (outer_path->total_cost +
+						cpu_tuple_cost * outer_path->rows);
 		else
-			startup_cost += (gpath->inners[i-1].startup_cost +
-							 gpath->inners[i-1].run_cost);
+			run_cost = (gpath->inners[i-1].startup_cost +
+						gpath->inners[i-1].run_cost);
 		/* iteration of outer scan/join */
-		startup_cost *= (double) gpath->inners[i].nbatches;
+		run_cost *= (double) gpath->inners[i].nbatches;
 
 		/* cost to evaluate join qualifiers */
 		if (gpath->inners[i].hash_quals != NIL)
-			run_cost = (join_cost[i].per_tuple
-						* outer_ntuples
-						* clamp_row_est(inner_ntuples) * 0.5
-						* (double) gpath->inners[i].nbatches);
+			run_cost += (join_cost[i].per_tuple
+						 * outer_ntuples
+						 * (inner_ntuples / (double)gpath->inners[i].nslots)
+						 * (double) gpath->inners[i].nbatches);
 		else
-			run_cost = (join_cost[i].per_tuple
-						* outer_ntuples
-						* clamp_row_est(inner_ntuples)
-						* (double) gpath->inners[i].nbatches);
-
-		gpath->inners[i].startup_cost += join_cost[i].startup;
+			run_cost += (join_cost[i].per_tuple
+						 * outer_ntuples
+						 * clamp_row_est(inner_ntuples)
+						 * (double) gpath->inners[i].nbatches);
+		/* save the startup/run_cost in this depth */
+		gpath->inners[i].startup_cost = startup_cost;
 		gpath->inners[i].run_cost = run_cost;
-		outer_ntuples = gpath->inners[i].scan_path->rows;
+
+		outer_ntuples = gpath->inners[i].nrows;
 	}
 	/* put cost value on the gpath */
 	gpath->cpath.path.startup_cost
@@ -446,6 +451,7 @@ retry:
 	gpath->cpath.path.total_cost
 		= (gpath->inners[num_rels - 1].startup_cost +
 		   gpath->inners[num_rels - 1].run_cost);
+	elog(INFO, "gpath cost=%.2f...%.2f rows=%.0f", gpath->cpath.path.startup_cost, gpath->cpath.path.total_cost, outer_ntuples);
 
     /*
      * NOTE: In case when extreme number of rows are expected,
@@ -501,6 +507,7 @@ create_gpujoin_path(PlannerInfo *root,
 {
 	GpuJoinPath	   *result;
 	GpuJoinPath	   *source = NULL;
+	double			nrows;
 	double			nrows_ratio;
 	int				num_rels;
 
@@ -511,7 +518,7 @@ create_gpujoin_path(PlannerInfo *root,
 	 * of host-only qualifiers.
 	 */
 	if (host_quals == NIL)
-		nrows_ratio = joinrel->rows / outer_path->rows;
+		nrows = joinrel->rows;
 	else
 	{
 		RelOptInfo		dummy;
@@ -521,8 +528,9 @@ create_gpujoin_path(PlannerInfo *root,
 								   inner_path->parent,
 								   sjinfo,
 								   join_quals);
-		nrows_ratio = dummy.rows / outer_path->rows;
+		nrows = dummy.rows;
 	}
+	nrows_ratio = nrows / outer_path->rows;
 
 	if (!try_merge)
 		num_rels = 1;
@@ -543,25 +551,27 @@ create_gpujoin_path(PlannerInfo *root,
 	result->cpath.path.parent = joinrel;
 	result->cpath.path.param_info = param_info;
 	result->cpath.path.pathkeys = NIL;
+	result->cpath.path.rows = joinrel->rows;
 	result->cpath.flags = (can_bulkload ? CUSTOMPATH_SUPPORT_BULKLOAD : 0);
 	result->cpath.methods = &gpujoin_path_methods;
 	result->outer_path = outer_path;
 	result->kmrels_length = 0;		/* to be set later */
 	result->num_rels = num_rels;
 	result->host_quals = host_quals;
-	if (source)
+	if (source && num_rels > 1)
 	{
 		memcpy(result->inners, source->inners,
-			   offsetof(GpuJoinPath, inners[num_rels]) -
+			   offsetof(GpuJoinPath, inners[num_rels - 1]) -
 			   offsetof(GpuJoinPath, inners[0]));
 	}
 	result->inners[num_rels - 1].startup_cost = 0.0;	/* to be set later */
 	result->inners[num_rels - 1].run_cost = 0.0;		/* to be set later */
+	result->inners[num_rels - 1].nrows = nrows;
+	result->inners[num_rels - 1].nrows_ratio = nrows_ratio;
 	result->inners[num_rels - 1].scan_path = inner_path;
 	result->inners[num_rels - 1].join_type = jointype;
 	result->inners[num_rels - 1].hash_quals = hash_quals;
 	result->inners[num_rels - 1].join_quals = join_quals;
-	result->inners[num_rels - 1].nrows_ratio = nrows_ratio;
 	result->inners[num_rels - 1].kmrels_rate = 0.0;		/* to be set later */
 	result->inners[num_rels - 1].nbatches = 1;			/* to be set later */
 	result->inners[num_rels - 1].nslots = 0;			/* to be set later */
@@ -1062,12 +1072,13 @@ create_gpujoin_plan(PlannerInfo *root,
 	memset(&gj_info, 0, sizeof(GpuJoinInfo));
 	gj_info.num_rels = gpath->num_rels;
 	gj_info.result_ratio = gpath->result_ratio;
-	gj_info.host_quals = gpath->host_quals;
+	gj_info.host_quals = extract_actual_clauses(gpath->host_quals, false);
 	for (i=0; i < gpath->num_rels; i++)
 	{
 		CustomScan	   *mplan;
 		List		   *hash_inner_keys = NIL;
 		List		   *hash_outer_keys = NIL;
+		List		   *clauses;
 		int				nrows_ratio;
 
 		foreach (lc, gpath->inners[i].hash_quals)
@@ -1075,31 +1086,31 @@ create_gpujoin_plan(PlannerInfo *root,
 			Path		   *scan_path = gpath->inners[i].scan_path;
 			RelOptInfo	   *scan_rel = scan_path->parent;
 			RestrictInfo   *rinfo = lfirst(lc);
+			OpExpr		   *op_clause = (OpExpr *) rinfo->clause;
+			Relids			relids1;
+			Relids			relids2;
+			Node		   *arg1;
+			Node		   *arg2;
 
-			if (!rinfo->left_em || !rinfo->right_em)
-				elog(ERROR, "Bug? EquivalenceMember was not set on %s",
-					 nodeToString(rinfo));
-
-			if (!bms_is_empty(rinfo->left_em->em_relids) &&
-				bms_is_subset(rinfo->left_em->em_relids,
-							  scan_rel->relids))
+			Assert(is_opclause(op_clause));
+			arg1 = (Node *) linitial(op_clause->args);
+			arg2 = (Node *) lsecond(op_clause->args);
+			relids1 = pull_varnos(arg1);
+			relids2 = pull_varnos(arg2);
+			if (bms_is_subset(relids1, scan_rel->relids) &&
+				!bms_is_subset(relids2, scan_rel->relids))
 			{
-				hash_inner_keys = lappend(hash_inner_keys,
-										  rinfo->left_em->em_expr);
-				hash_outer_keys = lappend(hash_outer_keys,
-										  rinfo->right_em->em_expr);
+				hash_inner_keys = lappend(hash_inner_keys, arg1);
+				hash_outer_keys = lappend(hash_outer_keys, arg2);
 			}
-			else if (!bms_is_empty(rinfo->right_em->em_relids) &&
-					 bms_is_subset(rinfo->right_em->em_relids,
-								   scan_rel->relids))
+			else if (bms_is_subset(relids2, scan_rel->relids) &&
+					 !bms_is_subset(relids1, scan_rel->relids))
 			{
-				hash_inner_keys = lappend(hash_inner_keys,
-										  rinfo->right_em->em_expr);
-				hash_outer_keys = lappend(hash_outer_keys,
-										  rinfo->left_em->em_expr);
+				hash_inner_keys = lappend(hash_inner_keys, arg2);
+				hash_outer_keys = lappend(hash_outer_keys, arg1);
 			}
 			else
-				elog(ERROR, "Bug? EquivalenceMember didn't fit GpuHashJoin");
+				elog(ERROR, "Bug? hash-clause reference bogus varnos");
 		}
 		mplan = pgstrom_create_multirels_plan(root,
 											  i + 1,	/* depth */
@@ -1117,8 +1128,9 @@ create_gpujoin_plan(PlannerInfo *root,
 		/* add properties of GpuJoinInfo */
 		gj_info.join_types = lappend_int(gj_info.join_types,
 										 gpath->inners[i].join_type);
-		gj_info.join_quals = lappend(gj_info.join_quals,
-									 gpath->inners[i].join_quals);
+		clauses = extract_actual_clauses(gpath->inners[i].join_quals, false);
+		gj_info.join_quals =
+			lappend(gj_info.join_quals, build_flatten_qualifier(clauses));
 		gj_info.hash_outer_keys = lappend(gj_info.hash_outer_keys,
 										  hash_outer_keys);
 		nrows_ratio = (int)(gpath->inners[i].nrows_ratio * 10000.0);
@@ -1175,7 +1187,7 @@ create_gpujoin_plan(PlannerInfo *root,
 	context.pseudo_tlist = cscan->custom_ps_tlist;
 
 	gj_info.kern_source = gpujoin_codegen(root, cscan, &gj_info, &context);
-	gj_info.extra_flags = context.extra_flags;
+	gj_info.extra_flags = DEVKERNEL_NEEDS_GPUJOIN | context.extra_flags;
 	gj_info.used_params = context.used_params;
 
 	form_gpujoin_info(cscan, &gj_info);
@@ -1584,7 +1596,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 	int			depth;
 	char	   *param_decl;
 
-	Assert(cur_depth <= gj_info->num_rels);
+	Assert(cur_depth > 0 && cur_depth <= gj_info->num_rels);
 	is_nestloop = (!list_nth(gj_info->hash_outer_keys, cur_depth - 1));
 
 	/*
@@ -1616,10 +1628,13 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				kernode->varoattno = tle->resno;	/* resno on the ps_tlist */
 				if (src_depth < 0 || src_depth > cur_depth)
 					elog(ERROR, "Bug? device varnode out of range");
-				if (list_nth(gj_info->hash_outer_keys, src_depth - 1))
-					needs_khtable = true;
-				else
-					needs_kds_in = true;
+				else if (src_depth > 0)
+				{
+					if (list_nth(gj_info->hash_outer_keys, src_depth - 1))
+						needs_khtable = true;	/* inner hashtable reference */
+					else
+						needs_kds_in = true;	/* inner datastore reference */
+				}
 				break;
 			}
 		}
@@ -1630,22 +1645,29 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 		/*
 		 * attach 'kernode' in the order corresponding to depth/resno.
 		 */
-		lc2 = NULL;
-		foreach (lc1, kern_vars)
+		if (kern_vars == NIL)
+			kern_vars = list_make1(kernode);
+		else
 		{
-			Var	   *varnode = lfirst(lc1);
-
-			if (varnode->varno > kernode->varno ||
-				(varnode->varno == kernode->varno &&
-				 varnode->varattno > kernode->varattno))
+			lc2 = NULL;
+			foreach (lc1, kern_vars)
 			{
-				if (lc2 != NULL)
-					lappend_cell(kern_vars, lc2, kernode);
-				else
-					kern_vars = lcons(kernode, kern_vars);
-				break;
+				Var	   *varnode = lfirst(lc1);
+
+				if (varnode->varno > kernode->varno ||
+					(varnode->varno == kernode->varno &&
+					 varnode->varattno > kernode->varattno))
+				{
+					if (lc2 != NULL)
+						lappend_cell(kern_vars, lc2, kernode);
+					else
+						kern_vars = lcons(kernode, kern_vars);
+					break;
+				}
+				lc2 = lc1;
 			}
-			lc2 = lc1;
+			if (lc1 == NULL)
+				kern_vars = lappend(kern_vars, kernode);
 		}
 	}
 
@@ -1674,6 +1696,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 			dtype->type_name,
 			kernode->varoattno);
 	}
+	appendStringInfoChar(source, '\n');
 
 	/*
 	 * parameter declaration
@@ -1704,10 +1727,8 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 					source,
 					"  /* variable load in depth-0 (outer KDS) */\n"
 					"  colmeta = kds->colmeta;\n"
-					"  htup = (rbuffer[0] == 0\n"
-					"    ? NULL\n"
-					"    : &((kern_tupitem *)\n"
-					"        ((char *)kds + rbuffer[0]))->htup);\n");
+					"  htup = GPUJOIN_REF_HTUP(kds,rbuffer[0]);\n"
+					);
 			}
 			else if (list_nth(gj_info->hash_outer_keys, keynode->varno - 1))
 			{
@@ -1720,21 +1741,15 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 					"  colmeta = khtable->colmeta;\n",
 					keynode->varno,
 					keynode->varno);
-				if (keynode->varno < depth)
+				if (keynode->varno < cur_depth)
 					appendStringInfo(
 						source,
-						"  htup = (rbuffer[%d] == 0\n"
-						"    ? NULL\n"
-						"    : &((kern_tupitem *)\n"
-						"        ((char *)khtable + rbuffer[%d]))->htup);\n",
-						keynode->varno,
+						"  htup = GPUJOIN_REF_HTUP(khtable,rbuffer[%d]);\n",
 						keynode->varno);
-				else if (keynode->varno == depth)
+				else if (keynode->varno == cur_depth)
 					appendStringInfo(
 						source,
-						"  htup = (!inner_tupitem\n"
-						"    ? NULL\n"
-						"    : &inner_tupitem->htup);\n"
+						"  htup = (!i_tupitem ? NULL : &i_tupitem->htup);\n"
 						);
 				else
 					elog(ERROR, "Bug? too deeper varnode reference");
@@ -1750,21 +1765,15 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 					"  colmeta = kds_in->colmeta;\n",
 					keynode->varno,
 					keynode->varno);
-				if (keynode->varno < depth)
+				if (keynode->varno < cur_depth)
 					appendStringInfo(
 						source,
-						"  htup = (rbuffer[%d] == 0\n"
-						"    ? NULL\n"
-						"    : &((kern_tupitem *)\n"
-						"        ((char *)kds_in + rbuffer[%d]))->htup);\n",
-						keynode->varno,
-                        keynode->varno);
-				else if (keynode->varno == depth)
+						"  htup = GPUJOIN_REF_HTUP(khtable,rbuffer[%d]);\n",
+						keynode->varno);
+				else if (keynode->varno == cur_depth)
 					appendStringInfo(
 						source,
-						"  htup = (!inner_tupitem\n"
-						"    ? NULL\n"
-						"    : &inner_tupitem->htup);\n"
+						"  htup = (!i_tupitem ? NULL : &i_tupitem->htup);\n"
 						);
 				else
 					elog(ERROR, "Bug? too deeper varnode reference");
@@ -1778,37 +1787,34 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				source,
 				"  if (get_local_%s() == 0)\n"
 				"  {\n"
-				"    datum = (!htup\n"
-				"      ? NULL\n"
-				"      : kern_get_datum_tuple(colmeta, htup, %u));\n"
-				"    SHARED_WORKMEM(pg_%s_t)[get_local_%s()] =\n"
-				"      pg_%s_datum_ref(errcode, datum, false);\n"
+				"    datum = GPUJOIN_REF_DATUM(colmeta,htup,%u);\n"
+				"    SHARED_WORKMEM(pg_%s_t)[get_local_%s()]"
+				" = pg_%s_datum_ref(errcode, datum, false);\n"
 				"  }\n"
 				"  __syncthreads();\n"
-				"  KVAR_%u = SHARED_WORKMEM(pg_%s_t)[get_local_%s()];\n",
-				keynode->varno == depth ? "xid" : "yid",
+				"  KVAR_%u = SHARED_WORKMEM(pg_%s_t)[get_local_%s()];\n"
+				"\n",
+				keynode->varno == cur_depth ? "xid" : "yid",
 				keynode->varattno - 1,
 				dtype->type_name,
-				keynode->varno == depth ? "yid" : "xid",
+				keynode->varno == cur_depth ? "yid" : "xid",
 				dtype->type_name,
 				keynode->varoattno,
 				dtype->type_name,
-				keynode->varno == depth ? "yid" : "xid");
+				keynode->varno == cur_depth ? "yid" : "xid");
 		}
 		else
 		{
 			appendStringInfo(
 				source,
-				"  datum = (!htup\n"
-				"    ? NULL\n"
-				"    : kern_get_datum_tuple(colmeta, htup, %u));\n"
-				"  KVAR_%u = pg_%s_datum_ref(errcode,datum,false);\n",
+				"  datum = GPUJOIN_REF_DATUM(colmeta,htup,%u);\n"
+				"  KVAR_%u = pg_%s_datum_ref(errcode,datum,false);\n"
+				"\n",
 				keynode->varattno - 1,
 				keynode->varoattno,
 				dtype->type_name);
 		}
 	}
-	appendStringInfoChar(source, '\n');
 }
 
 /*
@@ -1817,7 +1823,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
  * gpujoin_join_quals_depth%u(cl_int *errcode,
  *                            kern_parambuf *kparams,
  *                            kern_data_store *kds,
- *                            kern_multi_relstore *kmrels,
+ *                            kern_multirels *kmrels,
  *                            cl_int *outer_index,
  *                            kern_tupitem *tupitem);
  */
@@ -1831,7 +1837,7 @@ gpujoin_codegen_join_quals(StringInfo source,
 	char	   *join_code;
 
 	Assert(cur_depth > 0 && cur_depth <= gj_info->num_rels);
-	join_qual = list_nth(gj_info->join_quals, cur_depth);
+	join_qual = list_nth(gj_info->join_quals, cur_depth - 1);
 
 	/*
 	 * make a text representation of join_qual
@@ -1849,9 +1855,9 @@ gpujoin_codegen_join_quals(StringInfo source,
 		"gpujoin_join_quals_depth%d(cl_int *errcode,\n"
 		"                           kern_parambuf *kparams,\n"
 		"                           kern_data_store *kds,\n"
-        "                           kern_multi_relstore *kmrels,\n"
+        "                           kern_multirels *kmrels,\n"
 		"                           cl_int *outer_index,\n"
-		"                           kern_tupitem *inner_tupitem)\n"
+		"                           kern_tupitem *i_tupitem)\n"
 		"{\n"
 		"  kern_colmeta *colmeta;\n"
 		"  HeapTupleHeaderData *htup;\n",
@@ -1877,7 +1883,7 @@ gpujoin_codegen_join_quals(StringInfo source,
  * gpujoin_hash_value_depth%u(cl_int *errcode,
  *                            kern_parambuf *kparams,
  *                            kern_data_store *kds,
- *                            kern_multi_relstore *kmrels,
+ *                            kern_multirels *kmrels,
  *                            cl_int *outer_index);
  */
 static void
@@ -1900,7 +1906,7 @@ gpujoin_codegen_hash_value(StringInfo source,
 		"gpujoin_hash_value_depth%u(cl_int *errcode,\n"
 		"                           kern_parambuf *kparams,\n"
 		"                           kern_data_store *kds,\n"
-		"                           kern_multi_relstore *kmrels,\n"
+		"                           kern_multirels *kmrels,\n"
 		"                           cl_int *outer_index)\n"
 		"{\n"
 		"  cl_uint hash;\n",
@@ -1910,7 +1916,10 @@ gpujoin_codegen_hash_value(StringInfo source,
 	context->param_refs = NULL;
 
 	initStringInfo(&body);
-	appendStringInfo(&body, "INIT_CRC32C(hash);\n");
+	appendStringInfo(
+		&body,
+		"  /* Hash-value calculation */\n"
+		"  INIT_LEGACY_CRC32(hash);\n");
 	foreach (lc, hash_outer_keys)
 	{
 		Node	   *key_expr = lfirst(lc);
@@ -1930,7 +1939,7 @@ gpujoin_codegen_hash_value(StringInfo source,
 			temp);
 		pfree(temp);
 	}
-	appendStringInfo(&body, "  FIN_CRC32C(hash);\n");
+	appendStringInfo(&body, "  FIN_LEGACY_CRC32(hash);\n");
 
 	/*
 	 * variable/params declaration & initialization
@@ -1941,14 +1950,15 @@ gpujoin_codegen_hash_value(StringInfo source,
 		source,
 		"%s"
 		"  return hash;\n"
-		"}\n",
+		"}\n"
+		"\n",
 		body.data);
 	pfree(body.data);
 }
 
 /*
  * codegen for:
- * STSTIC_FUNCTION(void)
+ * STATIC_FUNCTION(void)
  * gpujoin_projection_mapping(cl_int dest_resno,
  *                            cl_int *src_depth,
  *                            cl_int *src_colidx);
@@ -1964,7 +1974,7 @@ gpujoin_codegen_projection_mapping(StringInfo source,
 
 	appendStringInfo(
 		source,
-		"STSTIC_FUNCTION(void)\n"
+		"STATIC_FUNCTION(void)\n"
 		"gpujoin_projection_mapping(cl_int dest_colidx,\n"
 		"                           cl_int *src_depth,\n"
 		"                           cl_int *src_colidx)\n"
@@ -2003,11 +2013,13 @@ gpujoin_codegen(PlannerInfo *root,
 				GpuJoinInfo *gj_info,
 				codegen_context *context)
 {
+	StringInfoData decl;
 	StringInfoData source;
 	const char *args;
 	int			depth;
 	ListCell   *cell;
 
+	initStringInfo(&decl);
 	initStringInfo(&source);
 
 	/* gpujoin_outer_quals  */
@@ -2022,7 +2034,7 @@ gpujoin_codegen(PlannerInfo *root,
 		"gpujoin_join_quals(cl_int *errcode,\n"
 		"                   kern_parambuf *kparams,\n"
 		"                   kern_data_store *kds,\n"
-		"                   kern_multi_relstore *kmrels,\n"
+		"                   kern_multirels *kmrels,\n"
 		"                   int depth,\n"
 		"                   cl_int *outer_index,\n"
 		"                   HeapTupleHeaderData *inner_htup)\n"
@@ -2048,19 +2060,6 @@ gpujoin_codegen(PlannerInfo *root,
 		"  return false;\n"
 		"}\n\n");
 
-	/* gpujoin_hash_value */
-	appendStringInfo(
-		&source,
-		"STATIC_FUNCTION(cl_uint)\n"
-		"gpujoin_hash_value(cl_int *errcode,\n"
-		"                   kern_parambuf *kparams,\n"
-		"                   kern_data_store *kds,\n"
-		"                   kern_multi_relstore *kmrels,\n"
-		"                   cl_int depth,\n"
-		"                   cl_int *outer_index)\n"
-		"{\n"
-		"  switch (depth)\n"
-		"  {\n");
 
 	depth = 1;
 	foreach (cell, gj_info->hash_outer_keys)
@@ -2070,6 +2069,33 @@ gpujoin_codegen(PlannerInfo *root,
 		depth++;
 	}
 
+	/* gpujoin_hash_value */
+	appendStringInfo(
+		&source,
+		"STATIC_FUNCTION(cl_uint)\n"
+		"gpujoin_hash_value(cl_int *errcode,\n"
+		"                   kern_parambuf *kparams,\n"
+		"                   kern_data_store *kds,\n"
+		"                   kern_multirels *kmrels,\n"
+		"                   cl_int depth,\n"
+		"                   cl_int *outer_index)\n"
+		"{\n"
+		"  switch (depth)\n"
+		"  {\n");
+	depth = 1;
+	foreach (cell, gj_info->hash_outer_keys)
+	{
+		if (lfirst(cell) != NULL)
+		{
+			appendStringInfo(
+				&source,
+				"  case %u:\n"
+				"    gpujoin_hash_value_depth%u(errcode,kparams,kds,kmrels,outer_index);\n"
+				"    break;\n",
+				depth, depth);
+		}
+		depth++;
+	}
 	appendStringInfo(
 		&source,
 		"  default:\n"
@@ -2077,12 +2103,19 @@ gpujoin_codegen(PlannerInfo *root,
 		"    break;\n"
 		"  }\n"
 		"  return (cl_uint)(-1);\n"
-		"}\n");
+		"}\n"
+		"\n");
 
 	/* gpujoin_projection_mapping */
 	gpujoin_codegen_projection_mapping(&source, gj_info, context);
 
-	return source.data;
+	/* */
+	appendStringInfo(&decl, "%s\n%s",
+					 pgstrom_codegen_func_declarations(context),
+					 source.data);
+	pfree(source.data);
+
+	return decl.data;
 }
 
 static GpuTask *
@@ -2095,15 +2128,18 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 	TupleDesc			tupdesc;
 	cl_uint				nrooms;
 	cl_uint				total_items;
+	Size				kgjoin_head;
 	Size				required;
 	pgstrom_data_store *pds_dst;
 
 	/*
 	 * Allocation of pgstrom_gpujoin task object
 	 */
-	required = (offsetof(pgstrom_gpujoin, kern) +
-				offsetof(kern_gpujoin, kparams) +
-				STROMALIGN(gjs->kparams->length));
+	kgjoin_head = (offsetof(pgstrom_gpujoin, kern) +
+				   offsetof(kern_gpujoin, kparams) +
+				   STROMALIGN(gjs->kparams->length));
+	required = (kgjoin_head +
+				STROMALIGN(offsetof(kern_resultbuf, results[0])));
 	pgjoin = MemoryContextAllocZero(gcontext->memcxt, required);
 	pgstrom_init_gputask(&gjs->gts, &pgjoin->task);
 	pgjoin->pmrels = multirels_attach_buffer(gjs->curr_pmrels);
@@ -2129,8 +2165,8 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 	 * Setup kern_gpujoin
 	 */
 	kgjoin = &pgjoin->kern;
-	kgjoin->kresults_1_offset = required;
-	kgjoin->kresults_2_offset = required +
+	kgjoin->kresults_1_offset = kgjoin_head;
+	kgjoin->kresults_2_offset = kgjoin_head +
 		STROMALIGN(offsetof(kern_resultbuf, results[total_items]));
 	kgjoin->kresults_total_items = total_items;
 	kgjoin->kresults_max_items = 0;
@@ -2151,7 +2187,7 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 	if (gjs->result_format == KDS_FORMAT_SLOT)
 	{
 		pds_dst = pgstrom_create_data_store_slot(gcontext, tupdesc,
-												 nrooms, false, pds_src);
+												 nrooms, false, NULL);
 	}
 	else if (gjs->result_format == KDS_FORMAT_ROW)
 	{
@@ -2764,7 +2800,7 @@ __gpujoin_task_process(pgstrom_gpujoin *gjoin)
 		 * KERNEL_FUNCTION(void)
 		 * gpujoin_preparation(kern_gpujoin *kgjoin,
 		 *                     kern_data_store *kds,
-		 *                     kern_multi_relstore *kmrels,
+		 *                     kern_multirels *kmrels,
 		 *                     cl_int depth)
 		 */
 		num_threads = (depth > 1 ? 1 : pds_src->kds->nitems);
@@ -2801,7 +2837,7 @@ __gpujoin_task_process(pgstrom_gpujoin *gjoin)
 			 * KERNEL_FUNCTION_MAXTHREADS(void)
 			 * gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 			 *                       kern_data_store *kds,
-			 *                       kern_multi_relstore *kmrels,
+			 *                       kern_multirels *kmrels,
 			 *                       cl_int depth,
 			 *                       cl_bool *left_outer_map)
 			 */
@@ -2839,7 +2875,7 @@ __gpujoin_task_process(pgstrom_gpujoin *gjoin)
 			 * KERNEL_FUNCTION(void)
 			 * gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			 *                       kern_data_store *kds,
-			 *                       kern_multi_relstore *kmrels,
+			 *                       kern_multirels *kmrels,
 			 *                       cl_int depth,
 			 *                       cl_bool *left_outer_map)
 			 */
@@ -2873,7 +2909,7 @@ __gpujoin_task_process(pgstrom_gpujoin *gjoin)
 		 * KERNEL_FUNCTION(void)
 		 * gpujoin_exec_leftjoin(kern_gpujoin *kgjoin,
 		 *                       kern_data_store *kds,
-		 *                       kern_multi_relstore *kmrels,
+		 *                       kern_multirels *kmrels,
 		 *                       cl_int depth,
 		 *                       cl_bool *left_outer_maps)
 		 */
@@ -2910,7 +2946,7 @@ __gpujoin_task_process(pgstrom_gpujoin *gjoin)
 	 * Launch:
 	 * KERNEL_FUNCTION(void)
 	 * gpujoin_projection_(row|slot)(kern_gpujoin *kgjoin,
-	 *                               kern_multi_relstore *kmrels,
+	 *                               kern_multirels *kmrels,
 	 *                               kern_data_store *kds_src,
 	 *                               kern_data_store *kds_dst)
 	 */

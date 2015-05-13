@@ -1753,6 +1753,15 @@ pgstrom_codegen_available_expression(Expr *expr)
 
 		return pgstrom_codegen_available_expression((Expr *) booltest->arg);
 	}
+	else if (IsA(expr, BoolExpr))
+	{
+		BoolExpr	   *boolexpr = (BoolExpr *) expr;
+
+		Assert(boolexpr->boolop == AND_EXPR ||
+			   boolexpr->boolop == OR_EXPR ||
+			   boolexpr->boolop == NOT_EXPR);
+		return pgstrom_codegen_available_expression((Expr *) boolexpr->args);
+	}
 	else if (IsA(expr, RelabelType))
 	{
 		RelabelType *relabel = (RelabelType *) expr;
