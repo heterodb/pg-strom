@@ -226,7 +226,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "int8pl",  2, {INT8OID, INT8OID}, "m/F:int8pl" },
 	{ "float4pl",  2, {FLOAT4OID, FLOAT4OID}, "m/F:float4pl" },
 	{ "float48pl", 2, {FLOAT4OID, FLOAT8OID}, "m/F:float48pl" },
-	{ "float84pl", 2, {FLOAT4OID, FLOAT4OID}, "m/F:float84pl" },
+	{ "float84pl", 2, {FLOAT8OID, FLOAT4OID}, "m/F:float84pl" },
 	{ "float8pl",  2, {FLOAT8OID, FLOAT8OID}, "m/F:float8pl" },
 
 	/* '-' : subtract operators */
@@ -241,7 +241,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "int8mi",  2, {INT8OID, INT8OID}, "m/F:int8mi" },
 	{ "float4mi",  2, {FLOAT4OID, FLOAT4OID}, "m/F:float4mi" },
 	{ "float48mi", 2, {FLOAT4OID, FLOAT8OID}, "m/F:float48mi" },
-	{ "float84mi", 2, {FLOAT4OID, FLOAT4OID}, "m/F:float84mi" },
+	{ "float84mi", 2, {FLOAT8OID, FLOAT4OID}, "m/F:float84mi" },
 	{ "float8mi",  2, {FLOAT8OID, FLOAT8OID}, "m/F:float8mi" },
 
 	/* '*' : mutiply operators */
@@ -256,7 +256,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "int8mul",  2, {INT8OID, INT8OID}, "m/F:int8mul" },
 	{ "float4mul",  2, {FLOAT4OID, FLOAT4OID}, "m/F:float4mul" },
 	{ "float48mul", 2, {FLOAT4OID, FLOAT8OID}, "m/F:float48mul" },
-	{ "float84mul", 2, {FLOAT4OID, FLOAT4OID}, "m/F:float84mul" },
+	{ "float84mul", 2, {FLOAT8OID, FLOAT4OID}, "m/F:float84mul" },
 	{ "float8mul",  2, {FLOAT8OID, FLOAT8OID}, "m/F:float8mul" },
 
 	/* '/' : divide operators */
@@ -271,7 +271,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "int8div",  2, {INT8OID, INT8OID}, "m/F:int8div" },
 	{ "float4div",  2, {FLOAT4OID, FLOAT4OID}, "m/F:float4div" },
 	{ "float48div", 2, {FLOAT4OID, FLOAT8OID}, "m/F:float48div" },
-	{ "float84div", 2, {FLOAT4OID, FLOAT4OID}, "m/F:float84div" },
+	{ "float84div", 2, {FLOAT8OID, FLOAT4OID}, "m/F:float84div" },
 	{ "float8div",  2, {FLOAT8OID, FLOAT8OID}, "m/F:float8div" },
 
 	/* '%' : reminder operators */
@@ -312,7 +312,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "int8eq",  2, {INT8OID, INT8OID}, "b:==" },
 	{ "float4eq",  2, {FLOAT4OID, FLOAT4OID}, "b:==" },
 	{ "float48eq", 2, {FLOAT4OID, FLOAT8OID}, "b:==" },
-	{ "float84eq", 2, {FLOAT4OID, FLOAT4OID}, "b:==" },
+	{ "float84eq", 2, {FLOAT8OID, FLOAT4OID}, "b:==" },
 	{ "float8eq",  2, {FLOAT8OID, FLOAT8OID}, "b:==" },
 
 	/* '<>' : not equal operators */
@@ -327,7 +327,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "int8ne",  2, {INT8OID, INT8OID}, "b:!=" },
 	{ "float4ne",  2, {FLOAT4OID, FLOAT4OID}, "b:!=" },
 	{ "float48ne", 2, {FLOAT4OID, FLOAT8OID}, "b:!=" },
-	{ "float84ne", 2, {FLOAT4OID, FLOAT4OID}, "b:!=" },
+	{ "float84ne", 2, {FLOAT8OID, FLOAT4OID}, "b:!=" },
 	{ "float8ne",  2, {FLOAT8OID, FLOAT8OID}, "b:!=" },
 
 	/* '>' : equal operators */
@@ -342,7 +342,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "int8gt",  2, {INT8OID, INT8OID}, "b:>" },
 	{ "float4gt",  2, {FLOAT4OID, FLOAT4OID}, "b:>" },
 	{ "float48gt", 2, {FLOAT4OID, FLOAT8OID}, "b:>" },
-	{ "float84gt", 2, {FLOAT4OID, FLOAT4OID}, "b:>" },
+	{ "float84gt", 2, {FLOAT8OID, FLOAT4OID}, "b:>" },
 	{ "float8gt",  2, {FLOAT8OID, FLOAT8OID}, "b:>" },
 
 	/* '<' : equal operators */
@@ -357,7 +357,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "int8lt",  2, {INT8OID, INT8OID}, "b:<" },
 	{ "float4lt",  2, {FLOAT4OID, FLOAT4OID}, "b:<" },
 	{ "float48lt", 2, {FLOAT4OID, FLOAT8OID}, "b:<" },
-	{ "float84lt", 2, {FLOAT4OID, FLOAT4OID}, "b:<" },
+	{ "float84lt", 2, {FLOAT8OID, FLOAT4OID}, "b:<" },
 	{ "float8lt",  2, {FLOAT8OID, FLOAT8OID}, "b:<" },
 
 	/* '>=' : relational greater-than or equal-to */
@@ -372,7 +372,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "int8ge",  2, {INT8OID, INT8OID}, "b:>=" },
 	{ "float4ge",  2, {FLOAT4OID, FLOAT4OID}, "b:>=" },
 	{ "float48ge", 2, {FLOAT4OID, FLOAT8OID}, "b:>=" },
-	{ "float84ge", 2, {FLOAT4OID, FLOAT4OID}, "b:>=" },
+	{ "float84ge", 2, {FLOAT8OID, FLOAT4OID}, "b:>=" },
 	{ "float8ge",  2, {FLOAT8OID, FLOAT8OID}, "b:>=" },
 
 	/* '<=' : relational greater-than or equal-to */
@@ -387,7 +387,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "int8le",  2, {INT8OID, INT8OID}, "b:<=" },
 	{ "float4le",  2, {FLOAT4OID, FLOAT4OID}, "b:<=" },
 	{ "float48le", 2, {FLOAT4OID, FLOAT8OID}, "b:<=" },
-	{ "float84le", 2, {FLOAT4OID, FLOAT4OID}, "b:<=" },
+	{ "float84le", 2, {FLOAT8OID, FLOAT4OID}, "b:<=" },
 	{ "float8le",  2, {FLOAT8OID, FLOAT8OID}, "b:<=" },
 
 	/* '&' : bitwise and */
