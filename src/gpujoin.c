@@ -119,8 +119,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	exprs = lappend(exprs, gj_info->used_params);
 	result_ratio = (long)(gj_info->result_ratio * 1000000.0);
 	privs = lappend(privs, makeInteger(result_ratio));
-
-
+	privs = lappend(privs, gj_info->nrows_ratio);
 	privs = lappend(privs, makeInteger(gj_info->outer_bulkload));
 	exprs = lappend(exprs, gj_info->outer_quals);
 	exprs = lappend(exprs, gj_info->host_quals);
@@ -151,6 +150,7 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->used_params = list_nth(exprs, eindex++);
 	result_ratio = intVal(list_nth(privs, pindex++));
 	gj_info->result_ratio = (double)result_ratio / 1000000.0;
+	gj_info->nrows_ratio = list_nth(privs, pindex++);
 	gj_info->outer_bulkload = intVal(list_nth(privs, pindex++));
 	gj_info->outer_quals = list_nth(exprs, eindex++);
 	gj_info->host_quals = list_nth(exprs, eindex++);
@@ -2997,6 +2997,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 		outer_ntuples = (size_t)((double)outer_ntuples * nrows_ratio);
 		depth++;
 	}
+	Assert(pgjoin->kern.max_depth == depth - 1);
 
 	/*
 	 * Launch:

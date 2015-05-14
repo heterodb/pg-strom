@@ -261,10 +261,12 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 	cl_int			errcode = StromError_Success;
 
 	/* sanity check */
-	assert(depth > 0 && depth <= kgjoin->max_depth);
-	assert(kgjoin->kresults_1_offset > 0);
-	assert(kgjoin->kresults_2_offset > 0);
-
+	if (get_global_id() == 0)
+	{
+		assert(depth > 0 && depth <= kgjoin->max_depth);
+		assert(kgjoin->kresults_1_offset > 0);
+		assert(kgjoin->kresults_2_offset > 0);
+	}
 	kresults_in = KERN_GPUJOIN_IN_RESULTBUF(kgjoin, depth);
 	kresults_out = KERN_GPUJOIN_OUT_RESULTBUF(kgjoin, depth);
 
@@ -279,7 +281,7 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 	if (depth == 1)
 	{
 		cl_bool		is_matched;
-		cl_uint		num_matched;
+		cl_uint		count;
 		cl_uint		offset;
 		__shared__ cl_int	base;
 
@@ -295,17 +297,17 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 			is_matched = false;
 
 		/* expand kresults_in->nitems */
-		offset = arithmetic_stairlike_add(is_matched ? 1 : 0, &num_matched);
+		offset = arithmetic_stairlike_add(is_matched ? 1 : 0, &count);
 		if (get_local_id() == 0)
 		{
-			if (num_matched > 0)
-				base = atomicAdd(&kresults_in->nitems, num_matched);
+			if (count > 0)
+				base = atomicAdd(&kresults_in->nitems, count);
 			else
 				base = 0;
 		}
 		__syncthreads();
 
-		if (base + num_matched > kgjoin->kresults_total_items)
+		if (base + count > kgjoin->kresults_total_items)
 		{
 			errcode = StromError_DataStoreNoSpace;
 			goto out;
@@ -313,8 +315,9 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 
 		if (is_matched)
 		{
-			kresults_in->results[base + offset] =
-				((cl_uint *)KERN_DATA_STORE_BODY(kds))[get_global_id()];
+			HeapTupleHeaderData	   *htup
+				= kern_get_tuple_row(kds, get_global_id());
+			kresults_in->results[base + offset] = (size_t)htup - (size_t)kds;
 		}
 
 		/* init other base portion */
@@ -380,9 +383,12 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 		goto out;
 
 	/* sanity checks */
-	assert(depth > 0 && depth <= kgjoin->max_depth);
-	assert(kresults_out->nrels == depth + 1);
-	assert(kresults_in->nrels == depth);
+	if (get_global_id() == 0)
+	{
+		assert(depth > 0 && depth <= kgjoin->max_depth);
+		assert(kresults_out->nrels == depth + 1);
+		assert(kresults_in->nrels == depth);
+	}
 
 	/* will be valid, if LEFT OUTER JOIN */
 	lo_map = KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels, depth, left_outer_maps);
@@ -500,10 +506,13 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		goto out;
 
 	/* sanity checks */
-	assert(get_global_ysize() == 1);
-	assert(depth > 0 && depth <= kgjoin->max_depth);
-	assert(kresults_out->nrels == depth + 1);
-	assert(kresults_in->nrels == depth);
+	if (get_global_id() == 0)
+	{
+		assert(get_global_ysize() == 1);
+		assert(depth > 0 && depth <= kgjoin->max_depth);
+		assert(kresults_out->nrels == depth + 1);
+		assert(kresults_in->nrels == depth);
+	}
 
 	/* will be valid, if LEFT OUTER JOIN */
 	lo_map = KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels, depth, left_outer_maps);
@@ -696,9 +705,12 @@ gpujoin_leftouter_nestloop(kern_gpujoin *kgjoin,
 		goto out;
 
 	/* sanity checks */
-	assert(get_global_xsize() == 1);
-	assert(depth > 0 && depth <= kgjoin->max_depth);
-	assert(kresults_out->nrels == depth + 1);
+	if (get_global_id() == 0)
+	{
+		assert(get_global_xsize() == 1);
+		assert(depth > 0 && depth <= kgjoin->max_depth);
+		assert(kresults_out->nrels == depth + 1);
+	}
 
 	/* fetch left outer map (it should be valid) */
 	lo_map = KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels, depth, left_outer_maps);
@@ -783,9 +795,12 @@ gpujoin_leftouter_hashjoin(kern_gpujoin *kgjoin,
 		goto out;
 
 	/* sanity checks */
-	assert(get_global_ysize() == 1);
-	assert(depth > 0 && depth <= kgjoin->max_depth);
-	assert(kresults_out->nrels == depth + 1);
+	if (get_global_id() == 0)
+	{
+		assert(get_global_ysize() == 1);
+		assert(depth > 0 && depth <= kgjoin->max_depth);
+		assert(kresults_out->nrels == depth + 1);
+	}
 
 	/* will be valid, if LEFT OUTER JOIN */
 	lo_map = KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels, depth, left_outer_maps);
@@ -1128,11 +1143,14 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 	kresults = KERN_GPUJOIN_OUT_RESULTBUF(kgjoin, kgjoin->max_depth);
 
 	/* sanity checks */
-	assert(offsetof(kern_data_store, colmeta) ==
-		   offsetof(kern_hashtable, colmeta));
-	assert(kresults->nrels == kgjoin->max_depth + 1);
-	assert(kds_src->format == KDS_FORMAT_ROW &&
-		   kds_dst->format == KDS_FORMAT_ROW);
+	if (get_global_id() == 0)
+	{
+		assert(offsetof(kern_data_store, colmeta) ==
+			   offsetof(kern_hashtable, colmeta));
+		assert(kresults->nrels == kgjoin->max_depth + 1);
+		assert(kds_src->format == KDS_FORMAT_ROW &&
+			   kds_dst->format == KDS_FORMAT_ROW);
+	}
 
 	/* update nitems of kds_dst. note that get_global_id(0) is not always
 	 * called earlier than other thread. So, we should not expect nitems
@@ -1279,11 +1297,14 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 
 	kresults = KERN_GPUJOIN_OUT_RESULTBUF(kgjoin, kgjoin->max_depth);
 	/* sanity checks */
-	assert(offsetof(kern_data_store, colmeta) ==
-		   offsetof(kern_hashtable, colmeta));
-	assert(kresults->nrels == kgjoin->max_depth + 1);
-	assert(kds_src->format == KDS_FORMAT_ROW &&
-		   kds_dst->format == KDS_FORMAT_SLOT);
+	if (get_global_id() == 0)
+	{
+		assert(offsetof(kern_data_store, colmeta) ==
+			   offsetof(kern_hashtable, colmeta));
+		assert(kresults->nrels == kgjoin->max_depth + 1);
+		assert(kds_src->format == KDS_FORMAT_ROW &&
+			   kds_dst->format == KDS_FORMAT_SLOT);
+	}
 
 	/* update nitems of kds_dst. note that get_global_id(0) is not always
 	 * called earlier than other thread. So, we should not expect nitems
