@@ -120,6 +120,7 @@ form_multirels_info(CustomScan *cscan, MultiRelsInfo *mr_info)
 	List	   *privs = NIL;
 	long		kmrels_rate;
 
+	privs = lappend(privs, makeInteger(mr_info->join_type));
 	privs = lappend(privs, makeInteger(mr_info->depth));
 	privs = lappend(privs, makeInteger(mr_info->nbatches));
 	privs = lappend(privs, makeInteger(mr_info->kmrels_length));
@@ -145,6 +146,7 @@ deform_multirels_info(CustomScan *cscan)
 	int			eindex = 0;
 	long		kmrels_rate;
 
+	mr_info->join_type = intVal(list_nth(privs, pindex++));
 	mr_info->depth = intVal(list_nth(privs, pindex++));
 	mr_info->nbatches = intVal(list_nth(privs, pindex++));
 	mr_info->kmrels_length = intVal(list_nth(privs, pindex++));
@@ -1083,10 +1085,10 @@ multirels_get_buffer(pgstrom_multirels *pmrels, GpuTask *gtask,
 				}
 				elog(ERROR, "failed on cuMemAllocManaged: %s", errorText(rc));
 			}
-			/* zero clear in synchronous manner */
-			rc = cuMemsetD8(pmrels->m_lomaps, 0, pmrels->lomap_length);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuMemsetD8: %s", errorText(rc));
+			/*
+			 * Zero clear the managed memory (mapped as unified memory)
+			 */
+			memset((void *)m_lomaps, 0, pmrels->lomap_length);
 		}
 		Assert(!pmrels->m_kmrels[cuda_index]);
 		Assert(!pmrels->ev_loaded[cuda_index]);
@@ -1204,7 +1206,6 @@ multirels_detach_buffer(pgstrom_multirels *pmrels)
 		/* release left-outer map */
 		if (pmrels->m_lomaps)
 		{
-			elog(INFO, "m_lomaps = %p", (void *)pmrels->m_lomaps);
 			rc = cuMemFree(pmrels->m_lomaps);
 			if (rc != CUDA_SUCCESS)
 				elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
@@ -1223,6 +1224,14 @@ multirels_detach_buffer(pgstrom_multirels *pmrels)
 void
 pgstrom_init_multirels(void)
 {
+	/*
+	 * CUDA_MANAGED_FORCE_DEVICE_ALLOC indicates CUDA driver to allocate
+	 * managed memory on device. It (likely) gives performance benefit
+	 * when we run LEFT OUTER JOIN.
+	 */
+	if (setenv("CUDA_MANAGED_FORCE_DEVICE_ALLOC", "1", 1) != 0)
+		elog(ERROR, "failed on setenv CUDA_MANAGED_FORCE_DEVICE_ALLOC");
+
 	/* setup plan methods */
 	multirels_plan_methods.CustomName			= "MultiRels";
 	multirels_plan_methods.CreateCustomScanState

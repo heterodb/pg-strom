@@ -47,10 +47,10 @@ typedef struct
 
 #define KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels, depth, left_outer_map)	\
 	((cl_bool *)											\
-	 ((kmrels)->chunks[(depth)-1].lomap_offset == 0			\
-	  ? NULL												\
-	  : ((cl_bool *)(left_outer_map) +						\
-		 (kmrels)->chunks[(depth)-1].lomap_offset)))
+	 ((kmrels)->chunks[(depth)-1].left_outer				\
+	  ? ((cl_bool *)(left_outer_map) +						\
+		 (kmrels)->chunks[(depth)-1].lomap_offset)			\
+	  : NULL))
 #define KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, depth)	\
 	((kmrels)->chunks[(depth)-1].right_outer)
 
@@ -823,6 +823,7 @@ gpujoin_leftouter_hashjoin(kern_gpujoin *kgjoin,
 		{
 			assert(khentry->rowid < khtable->nitems);
 			needs_outer_row = !lo_map[khentry->rowid];
+			printf("rowid=%u map=%d\n", khentry->rowid, lo_map[khentry->rowid]);
 		}
 		else
 			needs_outer_row = false;
