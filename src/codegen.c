@@ -479,7 +479,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "atan",    1, {FLOAT8OID}, "f:atan" },
 	{ "atan2",   2, {FLOAT8OID, FLOAT8OID}, "f:atan2" },
 	{ "cos",     1, {FLOAT8OID}, "f:cos" },
-	//{ "cot",     1, {FLOAT8OID}, "f:" }, /* not supported in opencl */
+	{ "cot",     1, {FLOAT8OID}, "m/F:dcot" },
 	{ "sin",     1, {FLOAT8OID}, "f:sin" },
 	{ "tan",     1, {FLOAT8OID}, "f:tan" },
 

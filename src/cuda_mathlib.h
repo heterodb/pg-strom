@@ -833,6 +833,20 @@ pgfn_dpi(cl_int *errcode)
 	return result;
 }
 
+STATIC_FUNCTION(pg_float8_t)
+pgfn_dcot(cl_int *errcode, pg_float8_t arg1)
+{
+	pg_float8_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!arg1.isnull)
+	{
+		result.value = 1.0 / tan(arg1.value);
+
+		CHECKFLOATVAL(errcode, result, true /* cot(pi/2) == inf */, true);
+	}
+	return result;
+}
 
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_MATH_H */
