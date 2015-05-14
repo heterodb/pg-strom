@@ -764,6 +764,7 @@ multirels_preload_heap(MultiRelsState *mrs,
 	/* actually not loaded */
 	if (pds->kds->nitems == 0)
 	{
+		Assert(mrs->outer_done);
 		pgstrom_release_data_store(pds);
 		return;
 	}
@@ -788,7 +789,7 @@ multirels_exec_bulk(CustomScanState *node)
 {
 	MultiRelsState *mrs = (MultiRelsState *) node;
 	GpuContext	   *gcontext = mrs->gcontext;
-	pgstrom_multirels *pmrels;
+	pgstrom_multirels *pmrels = NULL;
 	double			ntuples = 0.0;
 	bool			scan_forward = false;
 
@@ -796,6 +797,7 @@ multirels_exec_bulk(CustomScanState *node)
 	/* must provide our own instrumentation support */
 	if (node->ss.ps.instrument)
 		InstrStartNode(node->ss.ps.instrument);
+	elog(INFO, "multirels_exec_bulk called");
 
 	if (innerPlanState(mrs))
 	{
@@ -1017,16 +1019,16 @@ multirels_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 size_t
 multirels_get_nitems(pgstrom_multirels *pmrels, int depth)
 {
-	kern_data_store	   *in_kds
-		= KERN_MULTIRELS_INNER_KDS(&pmrels->kern, depth);
+	kern_data_store	   *in_kds = pmrels->inner_chunks[depth - 1];
+
 	return in_kds->nitems;
 }
 
 size_t
 multirels_get_nslots(pgstrom_multirels *pmrels, int depth)
 {
-	kern_hashtable	   *in_khtable
-		= KERN_MULTIRELS_INNER_HASH(&pmrels->kern, depth);
+	kern_hashtable	   *in_khtable = pmrels->inner_chunks[depth - 1];
+
 	return in_khtable->nslots;
 }
 
@@ -1123,7 +1125,7 @@ multirels_put_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
 		{
 			rc = cuEventDestroy(pmrels->ev_loaded[cuda_index]);
 			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuEventDestroy: %s", errorText(rc));
+				elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
 			pmrels->ev_loaded[cuda_index] = NULL;
 		}
 		/* should not be dettached prior to device memory release */
@@ -1136,13 +1138,13 @@ multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
 {
 	cl_int		cuda_index = gtask->cuda_index;
 	CUstream	cuda_stream = gtask->cuda_stream;
+	CUevent		ev_loaded;
 	CUresult	rc;
 
 	Assert(pmrels->gcontext == gtask->gts->gcontext);
 	if (!pmrels->ev_loaded[cuda_index])
 	{
 		CUdeviceptr	m_kmrels = pmrels->m_kmrels[cuda_index];
-		CUevent		ev_loaded;
 		cl_int		i;
 
 		rc = cuEventCreate(&ev_loaded, CU_EVENT_DEFAULT);
@@ -1165,13 +1167,21 @@ multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 		}
+		/* DMA Send synchronization */
+		rc = cuEventRecord(ev_loaded, cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
 		/* save the event */
 		pmrels->ev_loaded[cuda_index] = ev_loaded;
 	}
-	/* DMA Send synchronization */
-	rc = cuEventRecord(pmrels->ev_loaded[cuda_index], cuda_stream);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
+	else
+	{
+		/* DMA Send synchronization, kicked by other task */
+		ev_loaded = pmrels->ev_loaded[cuda_index];
+		rc = cuStreamWaitEvent(cuda_stream, ev_loaded, 0);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuStreamWaitEvent: %s", errorText(rc));
+	}
 }
 
 void

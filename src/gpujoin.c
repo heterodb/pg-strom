@@ -2333,6 +2333,8 @@ retry:
     if (!pds)
         goto retry;
 
+	elog(INFO, "outer scan nrows=%u", pds->kds->nitems);
+
 	return gpujoin_create_task(gjs, pds);
 }
 
@@ -2882,6 +2884,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 								NULL);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+			elog(INFO, "CUDA launch gpujoin_exec_nestloop X=(%zu,%zu) Y=(%zu,%zu) depth=%u",
+				 grid_xsize, block_xsize, grid_ysize, block_ysize, depth);
 			pgjoin->task.pfm.num_kern_join++;
 
 			/*

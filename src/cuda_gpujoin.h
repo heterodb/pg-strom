@@ -407,6 +407,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 	nvalids = min(kresults_in->nitems, kresults_in->nrooms);
 	x_limit = ((nvalids + get_global_xsize() - 1) /
 			   get_global_xsize()) * get_global_xsize();
+
 	for (x_index = get_global_xid();
 		 x_index < x_limit;
 		 x_index += get_global_xsize())
@@ -420,6 +421,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 
 		if (y_index < kds_in->nitems && x_index < nvalids)
 		{
+#if 0
 			HeapTupleHeaderData	   *htup
 				= kern_get_tuple_row(kds_in, y_index);
 
@@ -436,6 +438,8 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 					lo_map[y_index] = true;
 			}
 			y_offset = (size_t)htup - (size_t)kds_in;
+#endif
+			is_matched = false;
 		}
 		else
 			is_matched = false;

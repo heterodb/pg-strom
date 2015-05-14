@@ -489,7 +489,9 @@ __gpuMemFree(GpuContext *gcontext, int cuda_index, CUdeviceptr chunk_addr)
 		if (gm_chunk->chunk_addr == chunk_addr)
 			goto found;
 	}
-	elog(ERROR, "Bug? device address %zx was not tracked", (Size)chunk_addr);
+	elog(WARNING, "Bug? device address %p was not tracked",
+		 (void *)chunk_addr);
+	return;
 
 found:
 	/* unlink from the hash */
@@ -1617,8 +1619,8 @@ pgstrom_compute_workgroup_size(size_t *p_grid_size,
  */
 void
 pgstrom_compute_workgroup_size_2d(size_t *p_grid_xsize,
-								  size_t *p_grid_ysize,
 								  size_t *p_block_xsize,
+								  size_t *p_grid_ysize,
 								  size_t *p_block_ysize,
 								  CUfunction function,
 								  CUdevice device,
