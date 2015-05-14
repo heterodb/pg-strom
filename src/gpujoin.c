@@ -1674,6 +1674,10 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 	/*
 	 * variable declarations
 	 */
+	appendStringInfo(
+		source,
+		"  HeapTupleHeaderData *htup;\n"
+		"  kern_colmeta *colmeta;\n");
 	if (needs_kds_in)
 		appendStringInfo(source, "  kern_data_store *kds_in;\n");
 	if (needs_khtable)
@@ -1727,7 +1731,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 					source,
 					"  /* variable load in depth-0 (outer KDS) */\n"
 					"  colmeta = kds->colmeta;\n"
-					"  htup = GPUJOIN_REF_HTUP(kds,rbuffer[0]);\n"
+					"  htup = GPUJOIN_REF_HTUP(kds,o_buffer[0]);\n"
 					);
 			}
 			else if (list_nth(gj_info->hash_outer_keys, keynode->varno - 1))
@@ -1744,12 +1748,12 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				if (keynode->varno < cur_depth)
 					appendStringInfo(
 						source,
-						"  htup = GPUJOIN_REF_HTUP(khtable,rbuffer[%d]);\n",
+						"  htup = GPUJOIN_REF_HTUP(khtable,o_buffer[%d]);\n",
 						keynode->varno);
 				else if (keynode->varno == cur_depth)
 					appendStringInfo(
 						source,
-						"  htup = (!i_tupitem ? NULL : &i_tupitem->htup);\n"
+						"  htup = i_htup;\n"
 						);
 				else
 					elog(ERROR, "Bug? too deeper varnode reference");
@@ -1768,12 +1772,12 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				if (keynode->varno < cur_depth)
 					appendStringInfo(
 						source,
-						"  htup = GPUJOIN_REF_HTUP(khtable,rbuffer[%d]);\n",
+						"  htup = GPUJOIN_REF_HTUP(kds_in,o_buffer[%d]);\n",
 						keynode->varno);
 				else if (keynode->varno == cur_depth)
 					appendStringInfo(
 						source,
-						"  htup = (!i_tupitem ? NULL : &i_tupitem->htup);\n"
+						"  htup = i_htup;\n"
 						);
 				else
 					elog(ERROR, "Bug? too deeper varnode reference");
@@ -1824,8 +1828,8 @@ gpujoin_codegen_var_param_decl(StringInfo source,
  *                            kern_parambuf *kparams,
  *                            kern_data_store *kds,
  *                            kern_multirels *kmrels,
- *                            cl_int *outer_index,
- *                            kern_tupitem *tupitem);
+ *                            cl_int *o_buffer,
+ *                            HeapTupleHeaderData *i_htup)
  */
 static void
 gpujoin_codegen_join_quals(StringInfo source,
@@ -1856,11 +1860,9 @@ gpujoin_codegen_join_quals(StringInfo source,
 		"                           kern_parambuf *kparams,\n"
 		"                           kern_data_store *kds,\n"
         "                           kern_multirels *kmrels,\n"
-		"                           cl_int *outer_index,\n"
-		"                           kern_tupitem *i_tupitem)\n"
-		"{\n"
-		"  kern_colmeta *colmeta;\n"
-		"  HeapTupleHeaderData *htup;\n",
+		"                           cl_int *o_buffer,\n"
+		"                           HeapTupleHeaderData *i_htup)\n"
+		"{\n",
 		cur_depth);
 	/*
 	 * variable/params declaration & initialization
@@ -1909,7 +1911,7 @@ gpujoin_codegen_hash_value(StringInfo source,
 		"                           cl_uint *pg_crc32_table,\n"
 		"                           kern_data_store *kds,\n"
 		"                           kern_multirels *kmrels,\n"
-		"                           cl_int *outer_index)\n"
+		"                           cl_int *o_buffer)\n"
 		"{\n"
 		"  cl_uint hash;\n",
 		cur_depth);
@@ -2039,12 +2041,12 @@ gpujoin_codegen(PlannerInfo *root,
 		"                   kern_multirels *kmrels,\n"
 		"                   int depth,\n"
 		"                   cl_int *outer_index,\n"
-		"                   HeapTupleHeaderData *inner_htup)\n"
+		"                   HeapTupleHeaderData *i_htup)\n"
 		"{\n"
 		"  switch (depth)\n"
 		"  {\n");
 
-	args = "errcode, kparams, kds, kmrels, outer_index, inner_htup";
+	args = "errcode, kparams, kds, kmrels, outer_index, i_htup";
 	for (depth=1; depth <= gj_info->num_rels; depth++)
 	{
 		appendStringInfo(
@@ -2077,13 +2079,15 @@ gpujoin_codegen(PlannerInfo *root,
 		"STATIC_FUNCTION(cl_uint)\n"
 		"gpujoin_hash_value(cl_int *errcode,\n"
 		"                   kern_parambuf *kparams,\n"
+		"                   cl_uint *pg_crc32_table,\n"
 		"                   kern_data_store *kds,\n"
 		"                   kern_multirels *kmrels,\n"
 		"                   cl_int depth,\n"
-		"                   cl_int *outer_index)\n"
+		"                   cl_int *o_buffer)\n"
 		"{\n"
 		"  switch (depth)\n"
 		"  {\n");
+	args = "errcode,kparams,pg_crc32_table,kds,kmrels,o_buffer";
 	depth = 1;
 	foreach (cell, gj_info->hash_outer_keys)
 	{
@@ -2092,9 +2096,9 @@ gpujoin_codegen(PlannerInfo *root,
 			appendStringInfo(
 				&source,
 				"  case %u:\n"
-				"    gpujoin_hash_value_depth%u(errcode,kparams,kds,kmrels,outer_index);\n"
+				"    gpujoin_hash_value_depth%u(%s);\n"
 				"    break;\n",
-				depth, depth);
+				depth, depth, args);
 		}
 		depth++;
 	}
