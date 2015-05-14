@@ -842,7 +842,7 @@ pgfn_dcot(cl_int *errcode, pg_float8_t arg1)
 	if (!arg1.isnull)
 	{
 		/* tan(x) cause error, EDOM, if input value is infinity */
-		CHECKFLOATVAL(errcode, arg1.value, false, true);
+		CHECKFLOATVAL(errcode, arg1, false, true);
 
 		result.value = 1.0 / tan(arg1.value);
 
