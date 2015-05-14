@@ -585,6 +585,7 @@ pgstrom_create_multirels_plan(PlannerInfo *root,
 extern struct pgstrom_multirels *
 pgstrom_multirels_exec_bulk(PlanState *plannode);
 extern size_t multirels_get_nitems(pgstrom_multirels *pmrels, int depth);
+extern size_t multirels_get_nslots(pgstrom_multirels *pmrels, int depth);
 extern pgstrom_multirels *multirels_attach_buffer(pgstrom_multirels *pmrels);
 extern bool multirels_get_buffer(pgstrom_multirels *pmrels,
 								 GpuTask *gtask,

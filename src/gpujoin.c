@@ -201,9 +201,10 @@ typedef struct
 {
 	GpuTask			task;
 	CUfunction		kern_prep;
-	CUfunction		kern_nestloop;
-	CUfunction		kern_hashjoin;
-	CUfunction		kern_leftjoin;
+	CUfunction		kern_exec_nl;	/* gpujoin_exec_nestloop */
+	CUfunction		kern_exec_hj;	/* gpujoin_exec_hashjoin */
+	CUfunction		kern_outer_nl;	/* gpujoin_leftouter_nestloop */
+	CUfunction		kern_outer_hj;	/* gpujoin_leftouter_hashjoin */
 	CUfunction		kern_proj;
 	CUdeviceptr		m_kgjoin;
 	CUdeviceptr		m_kmrels;
@@ -2375,38 +2376,39 @@ gpujoin_next_tuple(GpuTaskState *gts)
  * ----------------------------------------------------------------
  */
 static void
-gpujoin_cleanup_cuda_resources(pgstrom_gpujoin *gjoin)
+gpujoin_cleanup_cuda_resources(pgstrom_gpujoin *pgjoin)
 {
-	CUDA_EVENT_DESTROY(gjoin, ev_dma_send_start);
-	CUDA_EVENT_DESTROY(gjoin, ev_dma_send_stop);
-	CUDA_EVENT_DESTROY(gjoin, ev_kern_join_end);
-	CUDA_EVENT_DESTROY(gjoin, ev_dma_recv_start);
-	CUDA_EVENT_DESTROY(gjoin, ev_dma_recv_stop);
+	CUDA_EVENT_DESTROY(pgjoin, ev_dma_send_start);
+	CUDA_EVENT_DESTROY(pgjoin, ev_dma_send_stop);
+	CUDA_EVENT_DESTROY(pgjoin, ev_kern_join_end);
+	CUDA_EVENT_DESTROY(pgjoin, ev_dma_recv_start);
+	CUDA_EVENT_DESTROY(pgjoin, ev_dma_recv_stop);
 
-	if (gjoin->m_kgjoin)
-		gpuMemFree(&gjoin->task, gjoin->m_kgjoin);
-	if (gjoin->m_kds_src)
-		gpuMemFree(&gjoin->task, gjoin->m_kds_src);
-	if (gjoin->m_kds_dst)
-		gpuMemFree(&gjoin->task, gjoin->m_kds_dst);
-	if (gjoin->m_kmrels)
-		multirels_put_buffer(gjoin->pmrels, &gjoin->task);
+	if (pgjoin->m_kgjoin)
+		gpuMemFree(&pgjoin->task, pgjoin->m_kgjoin);
+	if (pgjoin->m_kds_src)
+		gpuMemFree(&pgjoin->task, pgjoin->m_kds_src);
+	if (pgjoin->m_kds_dst)
+		gpuMemFree(&pgjoin->task, pgjoin->m_kds_dst);
+	if (pgjoin->m_kmrels)
+		multirels_put_buffer(pgjoin->pmrels, &pgjoin->task);
 
 	/* clear the pointers */
-	gjoin->kern_prep = NULL;
-	gjoin->kern_nestloop = NULL;
-	gjoin->kern_hashjoin = NULL;
-	gjoin->kern_leftjoin = NULL;
-	gjoin->kern_proj = NULL;
-	gjoin->m_kgjoin = 0UL;
-	gjoin->m_kds_src = 0UL;
-	gjoin->m_kds_dst = 0UL;
-	gjoin->m_kmrels = 0UL;
-	gjoin->ev_dma_send_start = NULL;
-	gjoin->ev_dma_send_stop = NULL;
-	gjoin->ev_kern_join_end = NULL;
-	gjoin->ev_dma_recv_start = NULL;
-	gjoin->ev_dma_recv_stop = NULL;
+	pgjoin->kern_prep = NULL;
+	pgjoin->kern_exec_nl = NULL;
+	pgjoin->kern_exec_hj = NULL;
+	pgjoin->kern_outer_nl = NULL;
+	pgjoin->kern_outer_hj = NULL;
+	pgjoin->kern_proj = NULL;
+	pgjoin->m_kgjoin = 0UL;
+	pgjoin->m_kds_src = 0UL;
+	pgjoin->m_kds_dst = 0UL;
+	pgjoin->m_kmrels = 0UL;
+	pgjoin->ev_dma_send_start = NULL;
+	pgjoin->ev_dma_send_stop = NULL;
+	pgjoin->ev_kern_join_end = NULL;
+	pgjoin->ev_dma_recv_start = NULL;
+	pgjoin->ev_dma_recv_stop = NULL;
 }
 
 
@@ -2616,11 +2618,11 @@ gpujoin_task_respond(CUstream stream, CUresult status, void *private)
 }
 
 static bool
-__gpujoin_task_process(pgstrom_gpujoin *gjoin)
+__gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 {
-	pgstrom_data_store *pds_src = gjoin->pds_src;
-	pgstrom_data_store *pds_dst = gjoin->pds_dst;
-	GpuJoinState   *gjs = (GpuJoinState *) gjoin->task.gts;
+	pgstrom_data_store *pds_src = pgjoin->pds_src;
+	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
+	GpuJoinState   *gjs = (GpuJoinState *) pgjoin->task.gts;
 	CUdeviceptr		m_kmrels;
 	CUdeviceptr		m_lomaps;
 	Size			length;
@@ -2647,32 +2649,38 @@ __gpujoin_task_process(pgstrom_gpujoin *gjoin)
 	/*
 	 * GPU kernel function lookup
 	 */
-	rc = cuModuleGetFunction(&gjoin->kern_prep,
-							 gjoin->task.cuda_module,
+	rc = cuModuleGetFunction(&pgjoin->kern_prep,
+							 pgjoin->task.cuda_module,
 							 "gpujoin_preparation");
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
 
-	rc = cuModuleGetFunction(&gjoin->kern_nestloop,
-							 gjoin->task.cuda_module,
+	rc = cuModuleGetFunction(&pgjoin->kern_exec_nl,
+							 pgjoin->task.cuda_module,
 							 "gpujoin_exec_nestloop");
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
 
-	rc = cuModuleGetFunction(&gjoin->kern_hashjoin,
-							 gjoin->task.cuda_module,
+	rc = cuModuleGetFunction(&pgjoin->kern_exec_hj,
+							 pgjoin->task.cuda_module,
 							 "gpujoin_exec_hashjoin");
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
 
-	rc = cuModuleGetFunction(&gjoin->kern_leftjoin,
-							 gjoin->task.cuda_module,
-							 "gpujoin_exec_leftjoin");
+	rc = cuModuleGetFunction(&pgjoin->kern_outer_nl,
+							 pgjoin->task.cuda_module,
+							 "gpujoin_leftouter_nestloop");
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
 
-	rc = cuModuleGetFunction(&gjoin->kern_proj,
-							 gjoin->task.cuda_module,
+	rc = cuModuleGetFunction(&pgjoin->kern_outer_hj,
+							 pgjoin->task.cuda_module,
+							 "gpujoin_leftouter_hashjoin");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+	rc = cuModuleGetFunction(&pgjoin->kern_proj,
+							 pgjoin->task.cuda_module,
 							 pds_dst->kds->format == KDS_FORMAT_ROW
 							 ? "gpujoin_projection_row"
 							 : "gpujoin_projection_slot");
@@ -2689,53 +2697,53 @@ __gpujoin_task_process(pgstrom_gpujoin *gjoin)
 						   (1.0 + pgstrom_row_population_margin));
 	length = STROMALIGN(offsetof(kern_resultbuf, results[total_items]));
 
-	gjoin->kern.kresults_1_offset =
+	pgjoin->kern.kresults_1_offset =
 		STROMALIGN(offsetof(kern_gpujoin, kparams) +
-				   KERN_GPUJOIN_PARAMBUF_LENGTH(&gjoin->kern));
-	gjoin->kern.kresults_2_offset =
-		gjoin->kern.kresults_1_offset + length;
-	gjoin->kern.kresults_total_items = total_items;
-	gjoin->kern.kresults_max_items = total_items;	/* increment if overflow */
+				   KERN_GPUJOIN_PARAMBUF_LENGTH(&pgjoin->kern));
+	pgjoin->kern.kresults_2_offset =
+		pgjoin->kern.kresults_1_offset + length;
+	pgjoin->kern.kresults_total_items = total_items;
+	pgjoin->kern.kresults_max_items = total_items;	/* increment if overflow */
 
-	length = gjoin->kern.kresults_1_offset + 2 * length;
-	gjoin->m_kgjoin = gpuMemAlloc(&gjoin->task, length);
-	if (!gjoin->m_kgjoin)
+	length = pgjoin->kern.kresults_1_offset + 2 * length;
+	pgjoin->m_kgjoin = gpuMemAlloc(&pgjoin->task, length);
+	if (!pgjoin->m_kgjoin)
 		goto out_of_resource;
 
 	/* kern_data_store *kds_src */
 	length = KERN_DATA_STORE_LENGTH(pds_src->kds);
-	gjoin->m_kds_src = gpuMemAlloc(&gjoin->task, length);
-	if (!gjoin->m_kds_src)
+	pgjoin->m_kds_src = gpuMemAlloc(&pgjoin->task, length);
+	if (!pgjoin->m_kds_src)
 		goto out_of_resource;
 
 	/* kern_data_store *kds_dst */
 	length = KERN_DATA_STORE_LENGTH(pds_dst->kds);
-	gjoin->m_kds_dst = gpuMemAlloc(&gjoin->task, length);
-	if (!gjoin->m_kds_dst)
+	pgjoin->m_kds_dst = gpuMemAlloc(&pgjoin->task, length);
+	if (!pgjoin->m_kds_dst)
 		goto out_of_resource;
 
 	/*
 	 * Creation of event objects, if needed
 	 */
-	if (gjoin->task.pfm.enabled)
+	if (pgjoin->task.pfm.enabled)
 	{
-		rc = cuEventCreate(&gjoin->ev_dma_send_start, CU_EVENT_DEFAULT);
+		rc = cuEventCreate(&pgjoin->ev_dma_send_start, CU_EVENT_DEFAULT);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 
-		rc = cuEventCreate(&gjoin->ev_dma_send_stop, CU_EVENT_DEFAULT);
+		rc = cuEventCreate(&pgjoin->ev_dma_send_stop, CU_EVENT_DEFAULT);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 
-		rc = cuEventCreate(&gjoin->ev_kern_join_end, CU_EVENT_DEFAULT);
+		rc = cuEventCreate(&pgjoin->ev_kern_join_end, CU_EVENT_DEFAULT);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 
-		rc = cuEventCreate(&gjoin->ev_dma_recv_start, CU_EVENT_DEFAULT);
+		rc = cuEventCreate(&pgjoin->ev_dma_recv_start, CU_EVENT_DEFAULT);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 
-		rc = cuEventCreate(&gjoin->ev_dma_recv_stop, CU_EVENT_DEFAULT);
+		rc = cuEventCreate(&pgjoin->ev_dma_recv_stop, CU_EVENT_DEFAULT);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
     }
@@ -2744,44 +2752,44 @@ __gpujoin_task_process(pgstrom_gpujoin *gjoin)
 	 * OK, all the device memory and kernel objects are successfully
 	 * constructed. Let's enqueue DMA send/recv and kernel invocations.
 	 */
-	CUDA_EVENT_RECORD(gjoin, ev_dma_send_start);
+	CUDA_EVENT_RECORD(pgjoin, ev_dma_send_start);
 
 	/* inner multi relations */
-	multirels_send_buffer(gjoin->pmrels, &gjoin->task);
+	multirels_send_buffer(pgjoin->pmrels, &pgjoin->task);
 	/* kern_gpujoin */
-	length = KERN_GPUJOIN_HEAD_LENGTH(&gjoin->kern);
-	rc = cuMemcpyHtoDAsync(gjoin->m_kgjoin,
-						   &gjoin->kern,
+	length = KERN_GPUJOIN_HEAD_LENGTH(&pgjoin->kern);
+	rc = cuMemcpyHtoDAsync(pgjoin->m_kgjoin,
+						   &pgjoin->kern,
 						   length,
-						   gjoin->task.cuda_stream);
+						   pgjoin->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	gjoin->task.pfm.bytes_dma_send += length;
-	gjoin->task.pfm.num_dma_send++;
+	pgjoin->task.pfm.bytes_dma_send += length;
+	pgjoin->task.pfm.num_dma_send++;
 
 	/* kern_data_store (src) */
 	length = KERN_DATA_STORE_LENGTH(pds_src->kds);
-	rc = cuMemcpyHtoDAsync(gjoin->m_kds_src,
+	rc = cuMemcpyHtoDAsync(pgjoin->m_kds_src,
 						   pds_src->kds,
 						   length,
-						   gjoin->task.cuda_stream);
+						   pgjoin->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	gjoin->task.pfm.bytes_dma_send += length;
-	gjoin->task.pfm.num_dma_send++;
+	pgjoin->task.pfm.bytes_dma_send += length;
+	pgjoin->task.pfm.num_dma_send++;
 
 	/* kern_data_store (dst of head) */
 	length = KERN_DATA_STORE_HEAD_LENGTH(pds_dst->kds);
-	rc = cuMemcpyHtoDAsync(gjoin->m_kds_dst,
+	rc = cuMemcpyHtoDAsync(pgjoin->m_kds_dst,
 						   pds_dst->kds,
 						   length,
-						   gjoin->task.cuda_stream);
+						   pgjoin->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	gjoin->task.pfm.bytes_dma_send += length;
-	gjoin->task.pfm.num_dma_send++;
+	pgjoin->task.pfm.bytes_dma_send += length;
+	pgjoin->task.pfm.num_dma_send++;
 
-	CUDA_EVENT_RECORD(gjoin, ev_dma_send_stop);
+	CUDA_EVENT_RECORD(pgjoin, ev_dma_send_stop);
 
 	/*
 	 * OK, enqueue a series of requests
@@ -2798,7 +2806,6 @@ __gpujoin_task_process(pgstrom_gpujoin *gjoin)
 								lfirst_int(lc1) == JOIN_FULL);
 		bool	is_nestloop = (lfirst(lc2) == NIL);
 		double	nrows_ratio = (double)lfirst_int(lc3) / 10000.0;
-		size_t	inner_ntuples = multirels_get_nitems(gjoin->pmrels, depth);
 		size_t	num_threads;
 
 		/*
@@ -2812,32 +2819,35 @@ __gpujoin_task_process(pgstrom_gpujoin *gjoin)
 		num_threads = (depth > 1 ? 1 : pds_src->kds->nitems);
 		pgstrom_compute_workgroup_size(&grid_xsize,
 									   &block_xsize,
-									   gjoin->kern_prep,
-									   gjoin->task.cuda_device,
+									   pgjoin->kern_prep,
+									   pgjoin->task.cuda_device,
 									   false,
 									   num_threads,
 									   sizeof(cl_uint));
-		kern_args[0] = &gjoin->m_kgjoin;
-		kern_args[1] = &gjoin->m_kds_src;
+		kern_args[0] = &pgjoin->m_kgjoin;
+		kern_args[1] = &pgjoin->m_kds_src;
 		kern_args[2] = &m_kmrels;
 		kern_args[3] = &depth;
 
-		rc = cuLaunchKernel(gjoin->kern_prep,
+		rc = cuLaunchKernel(pgjoin->kern_prep,
 							grid_xsize, 1, 1,
 							block_xsize, 1, 1,
 							sizeof(cl_uint) * block_xsize,
-							gjoin->task.cuda_stream,
+							pgjoin->task.cuda_stream,
 							kern_args,
 							NULL);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-		gjoin->task.pfm.num_kern_join++;
+		pgjoin->task.pfm.num_kern_join++;
 
 		/*
 		 * Main logic of GpuHashJoin or GpuNestLoop
 		 */
-		if (!is_nestloop)
+		if (is_nestloop)
 		{
+			size_t	inner_ntuples
+				= multirels_get_nitems(pgjoin->pmrels, depth);
+
 			/*
 			 * Launch:
 			 * KERNEL_FUNCTION_MAXTHREADS(void)
@@ -2849,33 +2859,72 @@ __gpujoin_task_process(pgstrom_gpujoin *gjoin)
 			 */
 			pgstrom_compute_workgroup_size_2d(&grid_xsize, &block_xsize,
 											  &grid_ysize, &block_ysize,
-											  gjoin->kern_nestloop,
-                                              gjoin->task.cuda_device,
+											  pgjoin->kern_exec_nl,
+                                              pgjoin->task.cuda_device,
 											  outer_ntuples,
 											  inner_ntuples,
 											  2 * sizeof(Datum),
 											  2 * sizeof(Datum));
-			kern_args[0] = &gjoin->m_kgjoin;
-			kern_args[1] = &gjoin->m_kds_src;
+			kern_args[0] = &pgjoin->m_kgjoin;
+			kern_args[1] = &pgjoin->m_kds_src;
 			kern_args[2] = &m_kmrels;
 			kern_args[3] = &depth;
 			kern_args[4] = &m_lomaps;
 			Assert(!is_rightjoin);
 
-			rc = cuLaunchKernel(gjoin->kern_nestloop,
+			rc = cuLaunchKernel(pgjoin->kern_exec_nl,
 								grid_xsize, grid_ysize, 1,
 								block_xsize, block_ysize, 1,
 								2 * sizeof(Datum) * (block_xsize +
 													 block_ysize),
-								gjoin->task.cuda_stream,
+								pgjoin->task.cuda_stream,
 								kern_args,
 								NULL);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-			gjoin->task.pfm.num_kern_join++;
+			pgjoin->task.pfm.num_kern_join++;
+
+			/*
+			 * Launch:
+			 * KERNEL_FUNCTION(void)
+			 * gpujoin_leftouter_nestloop(kern_gpujoin *kgjoin,
+			 *                            kern_data_store *kds,
+			 *                            kern_multirels *kmrels,
+			 *                            cl_int depth,
+			 *                            cl_bool *left_outer_maps)
+			 */
+			if (is_leftjoin && pgjoin->is_last_chunk)
+			{
+				pgstrom_compute_workgroup_size(&grid_xsize,
+											   &block_xsize,
+											   pgjoin->kern_outer_nl,
+											   pgjoin->task.cuda_device,
+											   false,
+											   inner_ntuples,
+											   sizeof(cl_uint));
+				kern_args[0] = &pgjoin->m_kgjoin;
+				kern_args[1] = &pgjoin->m_kds_src;
+				kern_args[2] = &m_kmrels;
+				kern_args[3] = &depth;
+				kern_args[4] = &m_lomaps;
+
+				rc = cuLaunchKernel(pgjoin->kern_outer_nl,
+									grid_xsize, 1, 1,
+									block_xsize, 1, 1,
+									sizeof(cl_uint) * block_xsize,
+									pgjoin->task.cuda_stream,
+									kern_args,
+									NULL);
+				if (rc != CUDA_SUCCESS)
+					elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+				pgjoin->task.pfm.num_kern_join++;
+			}
 		}
 		else
 		{
+			size_t	inner_nslots
+				= multirels_get_nslots(pgjoin->pmrels, depth);
+
 			/*
 			 * Launch:
 			 * KERNEL_FUNCTION(void)
@@ -2887,65 +2936,66 @@ __gpujoin_task_process(pgstrom_gpujoin *gjoin)
 			 */
 			pgstrom_compute_workgroup_size(&grid_xsize,
 										   &block_xsize,
-										   gjoin->kern_hashjoin,
-										   gjoin->task.cuda_device,
+										   pgjoin->kern_exec_hj,
+										   pgjoin->task.cuda_device,
 										   false,
 										   outer_ntuples,
 										   sizeof(cl_uint));
-			kern_args[0] = &gjoin->m_kgjoin;
-			kern_args[1] = &gjoin->m_kds_src;
+			kern_args[0] = &pgjoin->m_kgjoin;
+			kern_args[1] = &pgjoin->m_kds_src;
 			kern_args[2] = &m_kmrels;
 			kern_args[3] = &depth;
 			kern_args[4] = &m_lomaps;
 
-			rc = cuLaunchKernel(gjoin->kern_hashjoin,
+			rc = cuLaunchKernel(pgjoin->kern_exec_hj,
 								grid_xsize, 1, 1,
 								block_xsize, 1, 1,
 								sizeof(cl_uint) * block_xsize,
-								gjoin->task.cuda_stream,
+								pgjoin->task.cuda_stream,
 								kern_args,
 								NULL);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-			gjoin->task.pfm.num_kern_join++;
-		}
+			pgjoin->task.pfm.num_kern_join++;
 
-		/*
-		 * Launch:
-		 * KERNEL_FUNCTION(void)
-		 * gpujoin_exec_leftjoin(kern_gpujoin *kgjoin,
-		 *                       kern_data_store *kds,
-		 *                       kern_multirels *kmrels,
-		 *                       cl_int depth,
-		 *                       cl_bool *left_outer_maps)
-		 */
-		if (is_leftjoin && gjoin->is_last_chunk)
-		{
-			pgstrom_compute_workgroup_size(&grid_xsize,
-                                           &block_xsize,
-										   gjoin->kern_leftjoin,
-										   gjoin->task.cuda_device,
-										   false,
-										   inner_ntuples,
-										   sizeof(cl_uint));
-			kern_args[0] = &gjoin->m_kgjoin;
-			kern_args[1] = &gjoin->m_kds_src;
-            kern_args[2] = &m_kmrels;
-            kern_args[3] = &depth;
-            kern_args[4] = &m_lomaps;
+			/*
+			 * Launch:
+			 * KERNEL_FUNCTION(void)
+			 * gpujoin_leftouter_hashjoin(kern_gpujoin *kgjoin,
+			 *                            kern_data_store *kds,
+			 *                            kern_multirels *kmrels,
+			 *                            cl_int depth,
+			 *                            cl_bool *left_outer_maps)
+			 */
+			if (is_leftjoin && pgjoin->is_last_chunk)
+			{
+				pgstrom_compute_workgroup_size(&grid_xsize,
+											   &block_xsize,
+											   pgjoin->kern_outer_hj,
+											   pgjoin->task.cuda_device,
+											   false,
+											   inner_nslots,
+											   sizeof(cl_uint));
+				kern_args[0] = &pgjoin->m_kgjoin;
+				kern_args[1] = &pgjoin->m_kds_src;
+				kern_args[2] = &m_kmrels;
+				kern_args[3] = &depth;
+				kern_args[4] = &m_lomaps;
 
-            rc = cuLaunchKernel(gjoin->kern_leftjoin,
-                                grid_xsize, 1, 1,
-                                block_xsize, 1, 1,
-                                sizeof(cl_uint) * block_xsize,
-                                gjoin->task.cuda_stream,
-                                kern_args,
-                                NULL);
-            if (rc != CUDA_SUCCESS)
-                elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-            gjoin->task.pfm.num_kern_join++;
+				rc = cuLaunchKernel(pgjoin->kern_outer_hj,
+									grid_xsize, 1, 1,
+									block_xsize, 1, 1,
+									sizeof(cl_uint) * block_xsize,
+									pgjoin->task.cuda_stream,
+									kern_args,
+									NULL);
+				if (rc != CUDA_SUCCESS)
+					elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+				pgjoin->task.pfm.num_kern_join++;
+			}
 		}
 		outer_ntuples = (size_t)((double)outer_ntuples * nrows_ratio);
+		depth++;
 	}
 
 	/*
@@ -2958,73 +3008,73 @@ __gpujoin_task_process(pgstrom_gpujoin *gjoin)
 	 */
 	pgstrom_compute_workgroup_size(&grid_xsize,
 								   &block_xsize,
-								   gjoin->kern_proj,
-								   gjoin->task.cuda_device,
+								   pgjoin->kern_proj,
+								   pgjoin->task.cuda_device,
 								   false,
 								   outer_ntuples,
 								   sizeof(cl_uint));
-	kern_args[0] = &gjoin->m_kgjoin;
+	kern_args[0] = &pgjoin->m_kgjoin;
 	kern_args[1] = &m_kmrels;
-	kern_args[2] = &gjoin->m_kds_src;
-	kern_args[3] = &gjoin->m_kds_dst;
+	kern_args[2] = &pgjoin->m_kds_src;
+	kern_args[3] = &pgjoin->m_kds_dst;
 
-	rc = cuLaunchKernel(gjoin->kern_leftjoin,
+	rc = cuLaunchKernel(pgjoin->kern_proj,
 						grid_xsize, 1, 1,
 						block_xsize, 1, 1,
 						sizeof(cl_uint) * block_xsize,
-						gjoin->task.cuda_stream,
+						pgjoin->task.cuda_stream,
 						kern_args,
 						NULL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-	gjoin->task.pfm.num_kern_join++;
+	pgjoin->task.pfm.num_kern_join++;
 
-	CUDA_EVENT_RECORD(gjoin, ev_dma_recv_start);
+	CUDA_EVENT_RECORD(pgjoin, ev_dma_recv_start);
 
 	/* DMA Recv: kern_gpujoin *kgjoin */
 	length = offsetof(kern_gpujoin, kparams);
-	rc = cuMemcpyDtoHAsync(&gjoin->kern,
-						   gjoin->m_kgjoin,
+	rc = cuMemcpyDtoHAsync(&pgjoin->kern,
+						   pgjoin->m_kgjoin,
 						   length,
-						   gjoin->task.cuda_stream);
+						   pgjoin->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
-	gjoin->task.pfm.bytes_dma_recv += length;
-	gjoin->task.pfm.num_dma_recv++;
+	pgjoin->task.pfm.bytes_dma_recv += length;
+	pgjoin->task.pfm.num_dma_recv++;
 
 	/* DMA Recv: kern_data_store *kds_dst */
 	length = KERN_DATA_STORE_LENGTH(pds_dst->kds);
 	rc = cuMemcpyDtoHAsync(pds_dst->kds,
-						   gjoin->m_kds_dst,
+						   pgjoin->m_kds_dst,
 						   length,
-						   gjoin->task.cuda_stream);
+						   pgjoin->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
-	gjoin->task.pfm.bytes_dma_recv += length;
-	gjoin->task.pfm.num_dma_recv++;
+	pgjoin->task.pfm.bytes_dma_recv += length;
+	pgjoin->task.pfm.num_dma_recv++;
 
-	CUDA_EVENT_RECORD(gjoin, ev_dma_recv_stop);
+	CUDA_EVENT_RECORD(pgjoin, ev_dma_recv_stop);
 
 	/*
 	 * Register the callback
 	 */
-	rc = cuStreamAddCallback(gjoin->task.cuda_stream,
+	rc = cuStreamAddCallback(pgjoin->task.cuda_stream,
 							 gpujoin_task_respond,
-							 gjoin, 0);
+							 pgjoin, 0);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "cuStreamAddCallback: %s", errorText(rc));
 
 	return true;
 
 out_of_resource:
-	gpujoin_cleanup_cuda_resources(gjoin);
+	gpujoin_cleanup_cuda_resources(pgjoin);
 	return false;
 }
 
 static bool
 gpujoin_task_process(GpuTask *gtask)
 {
-	pgstrom_gpujoin *gjoin = (pgstrom_gpujoin *) gtask;
+	pgstrom_gpujoin *pgjoin = (pgstrom_gpujoin *) gtask;
 	bool		status = false;
 	CUresult	rc;
 
@@ -3034,12 +3084,12 @@ gpujoin_task_process(GpuTask *gtask)
 		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
 	PG_TRY();
 	{
-		if (multirels_get_buffer(gjoin->pmrels, &gjoin->task,
-								 &gjoin->m_kmrels, &gjoin->m_lomaps))
+		if (multirels_get_buffer(pgjoin->pmrels, &pgjoin->task,
+								 &pgjoin->m_kmrels, &pgjoin->m_lomaps))
 		{
-			status = __gpujoin_task_process(gjoin);
+			status = __gpujoin_task_process(pgjoin);
 			if (!status)
-				gpujoin_cleanup_cuda_resources(gjoin);
+				gpujoin_cleanup_cuda_resources(pgjoin);
 		}
 	}
 	PG_CATCH();
@@ -3047,7 +3097,7 @@ gpujoin_task_process(GpuTask *gtask)
 		rc = cuCtxPopCurrent(NULL);
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-		gpujoin_cleanup_cuda_resources(gjoin);
+		gpujoin_cleanup_cuda_resources(pgjoin);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();

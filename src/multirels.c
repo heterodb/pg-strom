@@ -1022,6 +1022,14 @@ multirels_get_nitems(pgstrom_multirels *pmrels, int depth)
 	return in_kds->nitems;
 }
 
+size_t
+multirels_get_nslots(pgstrom_multirels *pmrels, int depth)
+{
+	kern_hashtable	   *in_khtable
+		= KERN_MULTIRELS_INNER_HASH(&pmrels->kern, depth);
+	return in_khtable->nslots;
+}
+
 /*
  * multirels_attach_buffer
  *
