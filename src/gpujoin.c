@@ -305,6 +305,7 @@ cost_gpujoin(PlannerInfo *root,
 	QualCost	host_cost;
 	QualCost   *join_cost;
 	double		gpu_cpu_ratio;
+	double		nrows_ratio;
 	double		result_ratio;
 	double		result_ratio_max;
 	double		outer_ntuples;
@@ -320,12 +321,17 @@ cost_gpujoin(PlannerInfo *root,
 	result_ratio = result_ratio_max = 1.0;
 	for (i=0; i < num_rels; i++)
 	{
+		elog(INFO, "nrows_ratio[%d] = %.2f", i, gpath->inners[i].nrows_ratio);
+
+
+
 		result_ratio = ((double)(i + 2) *
 						gpath->inners[i].nrows_ratio *
 						result_ratio);
 		result_ratio_max = Max(result_ratio, result_ratio_max);
 	}
 	gpath->result_ratio = result_ratio_max;
+	elog(INFO, "result_ratio_max = %.2f", result_ratio_max);
 
 	/*
 	 * Cost of per-tuple evaluation
@@ -1133,18 +1139,18 @@ create_gpujoin_plan(PlannerInfo *root,
 			else
 				elog(ERROR, "Bug? hash-clause reference bogus varnos");
 		}
-		mplan = pgstrom_create_multirels_plan(root,
-											  i + 1,	/* depth */
-											  gpath->inners[i].startup_cost,
-											  gpath->inners[i].startup_cost +
-											  gpath->inners[i].run_cost,
-											  gpath->inners[i].join_type,
-											  gpath->inners[i].scan_path,
-											  gpath->kmrels_length,
-											  gpath->inners[i].kmrels_rate,
-											  gpath->inners[i].nbatches,
-											  gpath->inners[i].nslots,
-											  hash_inner_keys);
+		mplan = multirels_create_plan(root,
+									  i + 1,	/* depth */
+									  gpath->inners[i].startup_cost,
+									  gpath->inners[i].startup_cost +
+									  gpath->inners[i].run_cost,
+									  gpath->inners[i].join_type,
+									  gpath->inners[i].scan_path,
+									  gpath->kmrels_length,
+									  gpath->inners[i].kmrels_rate,
+									  gpath->inners[i].nbatches,
+									  gpath->inners[i].nslots,
+									  hash_inner_keys);
 		gpath->inners[i].scan_plan = (Plan *) mplan;
 		/* add properties of GpuJoinInfo */
 		gj_info.join_types = lappend_int(gj_info.join_types,
@@ -1154,7 +1160,7 @@ create_gpujoin_plan(PlannerInfo *root,
 			lappend(gj_info.join_quals, build_flatten_qualifier(clauses));
 		gj_info.hash_outer_keys = lappend(gj_info.hash_outer_keys,
 										  hash_outer_keys);
-		nrows_ratio = (int)(gpath->inners[i].nrows_ratio * 10000.0);
+		nrows_ratio = (int)(gpath->inners[i].nrows_ratio * 1000000.0);
 		gj_info.nrows_ratio = lappend_int(gj_info.nrows_ratio, nrows_ratio);
 		/* chain it under the GpuJoin */
 		if (prev_plan)
@@ -2212,6 +2218,8 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 
 	if (gjs->result_format == KDS_FORMAT_SLOT)
 	{
+		elog(INFO, "nitems=%u result_ratio=%.2f", pds_src->kds->nitems, gjs->result_ratio);
+
 		pds_dst = pgstrom_create_data_store_slot(gcontext, tupdesc,
 												 nrooms, false, NULL);
 	}
@@ -2297,7 +2305,8 @@ retry:
 			if (gjs->gts.scan_overflow)
 			{
 				slot = gjs->gts.scan_overflow;
-				gjs->gts.scan_overflow = slot;
+				gjs->gts.scan_overflow = NULL;
+				
 			}
 			else
 			{
@@ -2352,8 +2361,6 @@ retry:
     if (!pds)
         goto retry;
 
-	elog(INFO, "outer scan nrows=%u", pds->kds->nitems);
-
 	return gpujoin_create_task(gjs, pds);
 }
 
@@ -2384,7 +2391,7 @@ gpujoin_next_tuple(GpuTaskState *gts)
 		 */
 	}
 	else
-		ExecClearTuple(slot);
+		slot = NULL;	/* try next chunk */
 
 	PERFMON_END(&gjs->gts.pfm_accum, time_materialize, &tv1, &tv2);
 	return slot;
@@ -2635,8 +2642,6 @@ gpujoin_task_respond(CUstream stream, CUresult status, void *private)
 	gts->num_completed_tasks++;
 	SpinLockRelease(&gts->lock);
 
-	fprintf(stderr, "gpujoin_task_respond for pgjoin=%p\n", pgjoin);
-
 	SetLatch(&MyProc->procLatch);
 }
 
@@ -2732,18 +2737,21 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	pgjoin->m_kgjoin = gpuMemAlloc(&pgjoin->task, length);
 	if (!pgjoin->m_kgjoin)
 		goto out_of_resource;
+	elog(INFO, "pgjoin %zuMB", length >> 20);
 
 	/* kern_data_store *kds_src */
 	length = KERN_DATA_STORE_LENGTH(pds_src->kds);
 	pgjoin->m_kds_src = gpuMemAlloc(&pgjoin->task, length);
 	if (!pgjoin->m_kds_src)
 		goto out_of_resource;
+	elog(INFO, "kds_src %zuMB", length >> 20);
 
 	/* kern_data_store *kds_dst */
 	length = KERN_DATA_STORE_LENGTH(pds_dst->kds);
 	pgjoin->m_kds_dst = gpuMemAlloc(&pgjoin->task, length);
 	if (!pgjoin->m_kds_dst)
 		goto out_of_resource;
+	elog(INFO, "kds_dst %zuMB", length >> 20);
 
 	/*
 	 * Creation of event objects, if needed
@@ -2828,7 +2836,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 		bool	is_rightjoin = (lfirst_int(lc1) == JOIN_RIGHT ||
 								lfirst_int(lc1) == JOIN_FULL);
 		bool	is_nestloop = (lfirst(lc2) == NIL);
-		double	nrows_ratio = (double)lfirst_int(lc3) / 10000.0;
+		double	nrows_ratio = (double)lfirst_int(lc3) / 1000000.0;
 		size_t	num_threads;
 
 		/*
@@ -2862,9 +2870,6 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 		pgjoin->task.pfm.num_kern_join++;
-		elog(INFO,
-			 "Launch gpujoin_preparation<<%zu,%zu>>(pgjoin=%p, depth=%d)",
-			 grid_xsize, block_xsize, pgjoin, depth);
 
 		/*
 		 * Main logic of GpuHashJoin or GpuNestLoop
@@ -2910,10 +2915,6 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 				elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 			pgjoin->task.pfm.num_kern_join++;
 
-			elog(INFO,
-				 "Launch gpujoin_exec_nestloop<<%zu,%zu>,<%zu,%zu>>(pgjoin=%p, depth=%d)",
-				 grid_xsize, block_xsize, grid_ysize, block_ysize, pgjoin, depth);
-
 			/*
 			 * Launch:
 			 * KERNEL_FUNCTION(void)
@@ -2948,10 +2949,6 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 				if (rc != CUDA_SUCCESS)
 					elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 				pgjoin->task.pfm.num_kern_join++;
-
-				elog(INFO,
-					 "Launch gpujoin_leftouter_nestloop<<%zu,%zu>>(pgjoin=%p, depth=%d)",
-					 grid_xsize, block_xsize, pgjoin, depth);
 			}
 		}
 		else
@@ -2991,9 +2988,6 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 			pgjoin->task.pfm.num_kern_join++;
-			elog(INFO,
-				 "Launch gpujoin_exec_hashjoin<<%zu,%zu>>(pgjoin=%p, depth=%d)",
-				 grid_xsize, block_xsize, pgjoin, depth);
 
 			/*
 			 * Launch:
@@ -3029,15 +3023,13 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 				if (rc != CUDA_SUCCESS)
 					elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 				pgjoin->task.pfm.num_kern_join++;
-				elog(INFO,
-					 "Launch gpujoin_leftouter_hashjoin<<%zu,%zu>>(pgjoin=%p, depth=%d)",
-					 grid_xsize, block_xsize, pgjoin, depth);
 			}
 		}
 		outer_ntuples = (size_t)((double)outer_ntuples * nrows_ratio);
 		depth++;
 	}
 	Assert(pgjoin->kern.max_depth == depth - 1);
+	CUDA_EVENT_RECORD(pgjoin, ev_kern_join_end);
 
 	/*
 	 * Launch:
@@ -3068,7 +3060,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 						NULL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-	pgjoin->task.pfm.num_kern_join++;
+	pgjoin->task.pfm.num_kern_proj++;
 
 	CUDA_EVENT_RECORD(pgjoin, ev_dma_recv_start);
 
@@ -3082,8 +3074,6 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
 	pgjoin->task.pfm.bytes_dma_recv += length;
 	pgjoin->task.pfm.num_dma_recv++;
-	elog(INFO, "Launch %s<<%zu,%zu>>(pgjoin=%p)",
-		 kern_proj_name, grid_xsize, block_xsize, pgjoin);
 
 	/* DMA Recv: kern_data_store *kds_dst */
 	length = KERN_DATA_STORE_LENGTH(pds_dst->kds);

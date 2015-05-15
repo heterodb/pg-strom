@@ -571,17 +571,17 @@ typedef struct pgstrom_multirels pgstrom_multirels;
 extern bool	pgstrom_plan_is_multirels(const Plan *plan);
 extern bool pgstrom_planstate_is_multirels(const PlanState *planstate);
 extern CustomScan *
-pgstrom_create_multirels_plan(PlannerInfo *root,
-							  int depth,
-							  Cost mrels_startup_cost,
-							  Cost mrels_total_cost,
-							  JoinType join_type,
-							  Path *outer_path,
-							  Size kmrels_length,
-							  double kmrels_rate,
-							  cl_uint nbatches,
-							  cl_uint nslots,
-							  List *hash_inner_keys);
+multirels_create_plan(PlannerInfo *root,
+					  int depth,
+					  Cost mrels_startup_cost,
+					  Cost mrels_total_cost,
+					  JoinType join_type,
+					  Path *outer_path,
+					  Size kmrels_length,
+					  double kmrels_rate,
+					  cl_uint nbatches,
+					  cl_uint nslots,
+					  List *hash_inner_keys);
 extern struct pgstrom_multirels *
 pgstrom_multirels_exec_bulk(PlanState *plannode);
 extern size_t multirels_get_nitems(pgstrom_multirels *pmrels, int depth);

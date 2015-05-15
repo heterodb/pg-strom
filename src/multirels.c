@@ -190,17 +190,17 @@ pgstrom_planstate_is_multirels(const PlanState *planstate)
  *
  */
 CustomScan *
-pgstrom_create_multirels_plan(PlannerInfo *root,
-							  int depth,
-							  Cost mrels_startup_cost,
-							  Cost mrels_total_cost,
-							  JoinType join_type,
-							  Path *outer_path,
-							  Size kmrels_length,
-							  double kmrels_rate,
-							  cl_uint nbatches,
-							  cl_uint nslots,
-							  List *hash_inner_keys)
+multirels_create_plan(PlannerInfo *root,
+					  int depth,
+					  Cost mrels_startup_cost,
+					  Cost mrels_total_cost,
+					  JoinType join_type,
+					  Path *outer_path,
+					  Size kmrels_length,
+					  double kmrels_rate,
+					  cl_uint nbatches,
+					  cl_uint nslots,
+					  List *hash_inner_keys)
 {
 	CustomScan	   *cscan;
 	MultiRelsInfo	mr_info;
@@ -1163,8 +1163,6 @@ multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
 		{
 			kern_data_store *kds = pmrels->inner_chunks[i];
 			Size	offset = pmrels->kern.chunks[i].chunk_offset;
-
-			elog(INFO, "kds/khash depth=%d offset=%zu", i+1, offset);
 
 			rc = cuMemcpyHtoDAsync(m_kmrels + offset, kds, kds->length,
 								   cuda_stream);
