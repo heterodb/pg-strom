@@ -62,13 +62,12 @@ typedef struct
 	Path		   *outer_path;
 	Plan		   *outer_plan;		/* for create_gpujoin_plan convenience */
 	Size			kmrels_length;
-	double			result_ratio;
+	double			kresults_ratio;	/* expected total-items ratio */
 	int				num_rels;
 	List		   *host_quals;
 	struct {
 		Cost		startup_cost;	/* outer scan cost + materialize */
 		Cost		run_cost;		/* outer scan cost + materialize */
-		double		nrows;			/* expected number of rows in this depth */
 		double		nrows_ratio;	/* nrows ratio towards outer rows */
 		JoinType	join_type;		/* one of JOIN_* */
 		Path	   *scan_path;		/* outer scan path */
@@ -91,7 +90,7 @@ typedef struct
 	char	   *kern_source;
 	int			extra_flags;
 	List	   *used_params;
-	double		result_ratio;
+	double		kresults_ratio;
 	List	   *nrows_ratio;
 	bool		outer_bulkload;
 	Expr	   *outer_quals;
@@ -111,14 +110,14 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 {
 	List	   *privs = NIL;
 	List	   *exprs = NIL;
-	long		result_ratio;
+	long		kresults_ratio;
 
 	privs = lappend(privs, makeInteger(gj_info->num_rels));
 	privs = lappend(privs, makeString(gj_info->kern_source));
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
 	exprs = lappend(exprs, gj_info->used_params);
-	result_ratio = (long)(gj_info->result_ratio * 1000000.0);
-	privs = lappend(privs, makeInteger(result_ratio));
+	kresults_ratio = (long)(gj_info->kresults_ratio * 1000000.0);
+	privs = lappend(privs, makeInteger(kresults_ratio));
 	privs = lappend(privs, gj_info->nrows_ratio);
 	privs = lappend(privs, makeInteger(gj_info->outer_bulkload));
 	exprs = lappend(exprs, gj_info->outer_quals);
@@ -142,14 +141,14 @@ deform_gpujoin_info(CustomScan *cscan)
 	List	   *exprs = cscan->custom_exprs;
 	int			pindex = 0;
 	int			eindex = 0;
-	long		result_ratio;
+	long		kresults_ratio;
 
 	gj_info->num_rels = intVal(list_nth(privs, pindex++));
 	gj_info->kern_source = strVal(list_nth(privs, pindex++));
 	gj_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gj_info->used_params = list_nth(exprs, eindex++);
-	result_ratio = intVal(list_nth(privs, pindex++));
-	gj_info->result_ratio = (double)result_ratio / 1000000.0;
+	kresults_ratio = intVal(list_nth(privs, pindex++));
+	gj_info->kresults_ratio = (double)kresults_ratio / 1000000.0;
 	gj_info->nrows_ratio = list_nth(privs, pindex++);
 	gj_info->outer_bulkload = intVal(list_nth(privs, pindex++));
 	gj_info->outer_quals = list_nth(exprs, eindex++);
@@ -183,7 +182,7 @@ typedef struct
 	int				result_format;
 	/* buffer population ratio */
 	int				result_width;	/* result width for buffer length calc */
-	double			result_ratio;	/* estimated number of rows to outer */
+	double			kresults_ratio;	/* estimated number of rows to outer */
 	List		   *nrows_ratio;
 	/* supplemental information to ps_tlist  */
 	List		   *ps_src_depth;
@@ -305,9 +304,7 @@ cost_gpujoin(PlannerInfo *root,
 	QualCost	host_cost;
 	QualCost   *join_cost;
 	double		gpu_cpu_ratio;
-	double		nrows_ratio;
-	double		result_ratio;
-	double		result_ratio_max;
+	double		kresults_ratio;
 	double		outer_ntuples;
 	double		inner_ntuples;
 	Size		kmrels_length;
@@ -318,20 +315,14 @@ cost_gpujoin(PlannerInfo *root,
 	/*
 	 * Buffer size estimation
 	 */
-	result_ratio = result_ratio_max = 1.0;
+	kresults_ratio = 1.0;
 	for (i=0; i < num_rels; i++)
 	{
-		elog(INFO, "nrows_ratio[%d] = %.2f", i, gpath->inners[i].nrows_ratio);
+		double	temp = (double)(i+2) * gpath->inners[i].nrows_ratio;
 
-
-
-		result_ratio = ((double)(i + 2) *
-						gpath->inners[i].nrows_ratio *
-						result_ratio);
-		result_ratio_max = Max(result_ratio, result_ratio_max);
+		kresults_ratio = Max(kresults_ratio, temp);
 	}
-	gpath->result_ratio = result_ratio_max;
-	elog(INFO, "result_ratio_max = %.2f", result_ratio_max);
+	gpath->kresults_ratio = kresults_ratio;
 
 	/*
 	 * Cost of per-tuple evaluation
@@ -450,7 +441,8 @@ retry:
 		gpath->inners[i].startup_cost = startup_cost;
 		gpath->inners[i].run_cost = run_cost;
 
-		outer_ntuples = gpath->inners[i].nrows;
+		/* number of outer items on the next depth */
+		outer_ntuples = gpath->inners[i].nrows_ratio * outer_path->rows;
 	}
 	/* put cost value on the gpath */
 	gpath->cpath.path.startup_cost
@@ -579,6 +571,7 @@ create_gpujoin_path(PlannerInfo *root,
 	result->cpath.methods = &gpujoin_path_methods;
 	result->outer_path = outer_path;
 	result->kmrels_length = 0;		/* to be set later */
+	result->kresults_ratio = 0.0;	/* to be set later */
 	result->num_rels = num_rels;
 	result->host_quals = host_quals;
 	if (source && num_rels > 1)
@@ -589,7 +582,6 @@ create_gpujoin_path(PlannerInfo *root,
 	}
 	result->inners[num_rels - 1].startup_cost = 0.0;	/* to be set later */
 	result->inners[num_rels - 1].run_cost = 0.0;		/* to be set later */
-	result->inners[num_rels - 1].nrows = nrows;
 	result->inners[num_rels - 1].nrows_ratio = nrows_ratio;
 	result->inners[num_rels - 1].scan_path = inner_path;
 	result->inners[num_rels - 1].join_type = jointype;
@@ -1098,7 +1090,7 @@ create_gpujoin_plan(PlannerInfo *root,
 
 	memset(&gj_info, 0, sizeof(GpuJoinInfo));
 	gj_info.num_rels = gpath->num_rels;
-	gj_info.result_ratio = gpath->result_ratio;
+	gj_info.kresults_ratio = gpath->kresults_ratio;
 	gj_info.host_quals = extract_actual_clauses(gpath->host_quals, false);
 	for (i=0; i < gpath->num_rels; i++)
 	{
@@ -1236,8 +1228,8 @@ gpujoin_textout_path(StringInfo str, const CustomPath *node)
 					 nodeToString(gpath->outer_plan));
 	/* total_length */
 	appendStringInfo(str, " :kmrels_length %zu", gpath->kmrels_length);
-	/* result_ratio */
-	appendStringInfo(str, " :result_ratio %.2f", gpath->result_ratio);
+	/* kresults_ratio */
+	appendStringInfo(str, " :kresults_ratio %.2f", gpath->kresults_ratio);
 	/* num_rels */
 	appendStringInfo(str, " :num_rels %d", gpath->num_rels);
 	/* host_quals */
@@ -1375,7 +1367,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 						  t_bits[BITMAPLEN(tupdesc->natts)]) +
 				 (tupdesc->tdhasoid ? sizeof(Oid) : 0)) +
 		MAXALIGN(cscan->scan.plan.plan_width);	/* average width */
-	gjs->result_ratio = gj_info->result_ratio;
+	gjs->kresults_ratio = gj_info->kresults_ratio;
 	gjs->nrows_ratio = gj_info->nrows_ratio;
 }
 
@@ -1527,20 +1519,25 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		Expr   *hash_outer_key = lfirst(lc1);
 		Expr   *join_qual = lfirst(lc2);
 
-		temp = deparse_expression((Node *)join_qual, context,
-								  es->verbose, false);
-		snprintf(qlabel, sizeof(qlabel), "%s (depth %d)",
-				 hash_outer_key != NULL ? "GpuHashJoin" : "GpuNestLoop",
-				 depth);
-		ExplainPropertyText(qlabel, temp, es);
-
+		resetStringInfo(&str);
+		appendStringInfo(&str, "Logic: %s",
+						 hash_outer_key != NULL
+						 ? "GpuHashJoin"
+						 : "GpuNestLoop");
 		if (hash_outer_key)
 		{
 			temp = deparse_expression((Node *)hash_outer_key,
-									  context, es->verbose, false);
-			snprintf(qlabel, sizeof(qlabel), "HashKey (depth %d)", depth);
-			ExplainPropertyText(qlabel, temp, es);
+                                      context, es->verbose, false);
+			appendStringInfo(&str, ", HashKeys: %s", temp);
 		}
+		temp = deparse_expression((Node *)join_qual, context,
+								  es->verbose, false);
+		appendStringInfo(&str, ", JoinQual: %s", temp);
+
+		snprintf(qlabel, sizeof(qlabel), "Depth %d", depth);
+		ExplainPropertyText(qlabel, str.data, es);
+
+		depth++;
 	}
 	/* host qualifier if any */
 	if (gj_info->host_quals)
@@ -2187,15 +2184,11 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 	else
 		pgjoin->is_last_chunk = (gjs->next_pds == NULL);
 
-	/* expected number of results and buffer length */
-	nrooms = (cl_uint)((double) pds_src->kds->nitems *
-                       gjs->result_ratio *
-                       (1 + pgstrom_row_population_margin));
-	total_items = nrooms * (gjs->num_rels + 1);
-
 	/*
 	 * Setup kern_gpujoin
 	 */
+	total_items = (double)pds_src->kds->nitems * gjs->kresults_ratio;
+
 	kgjoin = &pgjoin->kern;
 	kgjoin->kresults_1_offset = kgjoin_head;
 	kgjoin->kresults_2_offset = kgjoin_head +
@@ -2211,15 +2204,13 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 	/*
 	 * Allocation of the destination data-store
 	 */
-	tupdesc = gjs->gts.css.ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 	nrooms = (cl_uint)((double) pds_src->kds->nitems *
-					   gjs->result_ratio *
-					   (1 + pgstrom_row_population_margin));
+					   (double) llast_int(gjs->nrows_ratio) / 1000000.0 *
+					   (1.0 + pgstrom_row_population_margin));
+	tupdesc = gjs->gts.css.ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 
 	if (gjs->result_format == KDS_FORMAT_SLOT)
 	{
-		elog(INFO, "nitems=%u result_ratio=%.2f", pds_src->kds->nitems, gjs->result_ratio);
-
 		pds_dst = pgstrom_create_data_store_slot(gcontext, tupdesc,
 												 nrooms, false, NULL);
 	}
@@ -2531,8 +2522,8 @@ gpujoin_task_complete(GpuTask *gtask)
 				(1 + pgstrom_row_population_margin);
 			nrooms = total_items / (gjs->num_rels + 1);
 			/* adjust estimation */
-			gjs->result_ratio = (double)kgjoin->kresults_max_items /
-				(double)((gjs->num_rels + 1) * pds_src->kds->nitems);
+			gjs->kresults_ratio = ((double)kgjoin->kresults_max_items /
+								   (double)pds_src->kds->nitems);
 
 			/* reset kern_gpujoin */
 			kgjoin->kresults_2_offset = kgjoin->kresults_1_offset +
@@ -2720,7 +2711,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	 */
 
 	/* kern_gpujoin *kgjoin (includes 2x kern_resultbuf) */
-	total_items = (size_t)(gjs->result_ratio *
+	total_items = (size_t)(gjs->kresults_ratio *
 						   (double) pds_src->kds->nitems *
 						   (1.0 + pgstrom_row_population_margin));
 	length = STROMALIGN(offsetof(kern_resultbuf, results[total_items]));
@@ -2737,21 +2728,18 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	pgjoin->m_kgjoin = gpuMemAlloc(&pgjoin->task, length);
 	if (!pgjoin->m_kgjoin)
 		goto out_of_resource;
-	elog(INFO, "pgjoin %zuMB", length >> 20);
 
 	/* kern_data_store *kds_src */
 	length = KERN_DATA_STORE_LENGTH(pds_src->kds);
 	pgjoin->m_kds_src = gpuMemAlloc(&pgjoin->task, length);
 	if (!pgjoin->m_kds_src)
 		goto out_of_resource;
-	elog(INFO, "kds_src %zuMB", length >> 20);
 
 	/* kern_data_store *kds_dst */
 	length = KERN_DATA_STORE_LENGTH(pds_dst->kds);
 	pgjoin->m_kds_dst = gpuMemAlloc(&pgjoin->task, length);
 	if (!pgjoin->m_kds_dst)
 		goto out_of_resource;
-	elog(INFO, "kds_dst %zuMB", length >> 20);
 
 	/*
 	 * Creation of event objects, if needed
