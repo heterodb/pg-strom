@@ -375,6 +375,7 @@ create_kern_hashtable(MultiRelsState *mrs, pgstrom_multirels *pmrels)
 			elog(ERROR, "failed to assign minimum required memory");
 	} while (true);
 	khtable = MemoryContextAlloc(gcontext->memcxt, chunk_size);
+	khtable->hostptr = (hostptr_t)&khtable->hostptr;
 	khtable->length = chunk_size;
 	khtable->usage = required;
 	khtable->ncols = natts;
@@ -907,7 +908,7 @@ multirels_exec_bulk(CustomScanState *node)
 		if (mrs->join_type == JOIN_RIGHT || mrs->join_type == JOIN_FULL)
 			pmrels->kern.chunks[depth - 1].right_outer = true;
 		/* make advance usage counter */
-		pmrels->usage_length += chunk_length;
+		pmrels->usage_length += STROMALIGN(chunk_length);
 		Assert(pmrels->usage_length <= pmrels->kmrels_length);
 	}
 out:
@@ -1145,6 +1146,7 @@ multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
 	if (!pmrels->ev_loaded[cuda_index])
 	{
 		CUdeviceptr	m_kmrels = pmrels->m_kmrels[cuda_index];
+		Size		length;
 		cl_int		i;
 
 		rc = cuEventCreate(&ev_loaded, CU_EVENT_DEFAULT);
@@ -1152,8 +1154,8 @@ multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
 			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 
 		/* DMA send to the kern_multirels buffer */
-		rc = cuMemcpyHtoDAsync(m_kmrels, &pmrels->kern, pmrels->head_length,
-							   cuda_stream);
+		length = offsetof(kern_multirels, chunks[pmrels->kern.nrels]);
+		rc = cuMemcpyHtoDAsync(m_kmrels, &pmrels->kern, length, cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 
@@ -1161,6 +1163,8 @@ multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
 		{
 			kern_data_store *kds = pmrels->inner_chunks[i];
 			Size	offset = pmrels->kern.chunks[i].chunk_offset;
+
+			elog(INFO, "kds/khash depth=%d offset=%zu", i+1, offset);
 
 			rc = cuMemcpyHtoDAsync(m_kmrels + offset, kds, kds->length,
 								   cuda_stream);

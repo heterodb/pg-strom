@@ -547,6 +547,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	nvalids = min(kresults_in->nitems, kresults_in->nrooms);
 	x_limit = ((nvalids + get_global_xsize() - 1) /
 			   get_global_xsize()) * get_global_xsize();
+
 	for (x_index = get_global_xid();
 		 x_index < x_limit;
 		 x_index += get_global_xsize())
@@ -555,7 +556,6 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		cl_uint			hash_value;
         cl_int         *x_buffer;
         cl_int         *r_buffer;
-		cl_int			y_offset;
 		cl_uint			offset;
 		cl_uint			count;
 		cl_bool			is_matched;
@@ -631,7 +631,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			{
 				r_buffer = KERN_GET_RESULT(kresults_out, base + offset);
 				memcpy(r_buffer, x_buffer, sizeof(cl_int) * depth);
-				r_buffer[depth] = y_offset;
+				r_buffer[depth] = (size_t)&khentry->htup - (size_t)khtable;
 			}
 
 			/*

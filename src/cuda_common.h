@@ -645,8 +645,8 @@ pg_common_vstore(kern_data_store *kds,
 			__data.as_base = datum.value;						\
 			while (__len-- > 0)									\
 			{													\
-				__index = (hash ^ __data.as_int) & 0xff;		\
-				hash = crc32_table[__index] ^ ((hash) >> 8);	\
+				__index = (((hash) >> 24) ^ __data.as_int) & 0xff;	\
+				hash = crc32_table[__index] ^ ((hash) << 8);	\
 				__data.as_long = (__data.as_long >> 8);			\
 			}													\
 		}														\
@@ -1077,8 +1077,8 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 
 		while (__len-- > 0)
 		{
-			__index = (hash ^ *__data++) & 0xff;
-			hash = crc32_table[__index] ^ (hash >> 8);
+			__index = ((int) ((hash) >> 24) ^ *__data++) & 0xff;
+			hash = crc32_table[__index] ^ ((hash) << 8);
 		}
 	}
 	return hash;
