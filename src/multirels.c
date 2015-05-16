@@ -106,7 +106,7 @@ typedef struct pgstrom_multirels
 	cl_int		   *refcnt;			/* reference counter for each context */
 	CUdeviceptr	   *m_kmrels;		/* GPU memory for each CUDA context */
 	CUevent		   *ev_loaded;		/* Sync object for each CUDA context */
-	CUdeviceptr		m_lomaps;		/* Managed GPU memory for LEFT JOIN */
+	CUdeviceptr	   *m_lomaps;		/* Managed GPU memory for LEFT JOIN */
 	kern_multirels	kern;			/* header of in-kernel structure */
 } pgstrom_multirels;
 
@@ -839,7 +839,8 @@ multirels_exec_bulk(CustomScanState *node)
 			STROMALIGN(sizeof(void *) * nrels) +
 			STROMALIGN(sizeof(cl_int) * gcontext->num_context) +
 			STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context) +
-			STROMALIGN(sizeof(CUevent) * gcontext->num_context);
+			STROMALIGN(sizeof(CUevent) * gcontext->num_context) +
+			STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context);
 
 		pmrels = MemoryContextAllocZero(gcontext->memcxt, alloc_length);
 		pmrels->gcontext = gcontext;
@@ -857,11 +858,15 @@ multirels_exec_bulk(CustomScanState *node)
 		pmrels->m_kmrels = (CUdeviceptr *) pos;
 		pos += STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context);
 		pmrels->ev_loaded = (CUevent *) pos;
+		pos += STROMALIGN(sizeof(CUevent) * gcontext->num_context);
+		pmrels->m_lomaps = (CUdeviceptr *) pos;
+		pos += STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context);
 
 		memcpy(pmrels->kern.pg_crc32_table,
 			   pg_crc32_table,
 			   sizeof(cl_uint) * 256);
 		pmrels->kern.nrels = nrels;
+		pmrels->kern.ndevs = gcontext->num_context;
 		memset(pmrels->kern.chunks,
 			   0,
 			   offsetof(pgstrom_multirels, kern.chunks[nrels]) -
@@ -898,20 +903,22 @@ multirels_exec_bulk(CustomScanState *node)
 		cl_uint	chunk_nitems = ((kern_data_store *)mrs->curr_chunk)->nitems;
 		int		depth = mrs->depth;
 
+		/* make advance the usage counter */
 		pmrels->inner_chunks[depth - 1] = mrs->curr_chunk;
 		pmrels->kern.chunks[depth - 1].chunk_offset = pmrels->usage_length;
+		pmrels->usage_length += STROMALIGN(chunk_length);
+		Assert(pmrels->usage_length <= pmrels->kmrels_length);
 
 		if (mrs->join_type == JOIN_LEFT || mrs->join_type == JOIN_FULL)
 		{
 			pmrels->kern.chunks[depth - 1].left_outer = true;
 			pmrels->kern.chunks[depth - 1].lomap_offset = pmrels->lomap_length;
-			pmrels->lomap_length += STROMALIGN(sizeof(cl_bool) * chunk_nitems);
+			pmrels->lomap_length += (STROMALIGN(sizeof(cl_bool) *
+												chunk_nitems) *
+									 pmrels->kern.ndevs);
 		}
 		if (mrs->join_type == JOIN_RIGHT || mrs->join_type == JOIN_FULL)
 			pmrels->kern.chunks[depth - 1].right_outer = true;
-		/* make advance usage counter */
-		pmrels->usage_length += STROMALIGN(chunk_length);
-		Assert(pmrels->usage_length <= pmrels->kmrels_length);
 	}
 out:
 	/* must provide our own instrumentation support */
@@ -999,7 +1006,8 @@ multirels_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 			ExplainPropertyInteger("nBatches", mrs->nbatches_exec, es);
 		else
 			ExplainPropertyInteger("nBatches", mrs->nbatches_plan, es);
-		ExplainPropertyInteger("Buckets", mr_info->nslots, es);
+		if (mr_info->nslots > 0)
+			ExplainPropertyInteger("Buckets", mr_info->nslots, es);
 		snprintf(buffer, sizeof(buffer),
 				 "%.2f%%", 100.0 * mr_info->kmrels_rate);
 		ExplainPropertyText("Memory Usage", buffer, es);
@@ -1007,14 +1015,15 @@ multirels_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	else
 	{
 		appendStringInfoSpaces(es->str, es->indent * 2);
-		appendStringInfo(
-			es->str,
-			"nBatches: %u  Buckets: %u  Memory Usage: %.2f%%\n",
-			mrs->nbatches_exec >= 0
-			? mrs->nbatches_exec
-			: mrs->nbatches_plan,
-			mr_info->nslots,
-			100.0 * mr_info->kmrels_rate);
+		appendStringInfo(es->str, "nBatches: %u",
+						 mrs->nbatches_exec >= 0
+						 ? mrs->nbatches_exec
+						 : mrs->nbatches_plan);
+		if (mr_info->nslots > 0)
+			appendStringInfo(es->str, "  Buckets: %u",
+							 mr_info->nslots);
+		appendStringInfo(es->str, ", Buffer Usage: %.2f%%\n",
+						 100.0 * mr_info->kmrels_rate);
 	}
 }
 
@@ -1063,7 +1072,7 @@ multirels_get_buffer(pgstrom_multirels *pmrels, GpuTask *gtask,
 
 	if (pmrels->refcnt[cuda_index] == 0)
 	{
-		CUdeviceptr	m_kmrels;
+		CUdeviceptr	m_kmrels = 0UL;
 		CUdeviceptr	m_lomaps = 0UL;
 
 		/* buffer for the inner multi-relations */
@@ -1071,34 +1080,30 @@ multirels_get_buffer(pgstrom_multirels *pmrels, GpuTask *gtask,
 		if (!m_kmrels)
 			return false;
 
-		if (pmrels->lomap_length > 0 && !pmrels->m_lomaps)
+		if (pmrels->lomap_length > 0 && !pmrels->m_lomaps[cuda_index])
 		{
-			rc = cuMemAllocManaged(&m_lomaps,
-								   pmrels->lomap_length,
-								   CU_MEM_ATTACH_HOST);
-			if (rc != CUDA_SUCCESS)
+			m_lomaps = gpuMemAlloc(gtask, pmrels->lomap_length);
+			if (!m_lomaps)
 			{
-				if (rc == CUDA_ERROR_OUT_OF_MEMORY)
-				{
-					gpuMemFree(gtask, m_kmrels);
-					return false;
-				}
-				elog(ERROR, "failed on cuMemAllocManaged: %s", errorText(rc));
+				gpuMemFree(gtask, m_kmrels);
+				return false;
 			}
 			/*
-			 * Zero clear the managed memory (mapped as unified memory)
+			 * Zero clear the left-outer map in sync manner
 			 */
-			memset((void *)m_lomaps, 0, pmrels->lomap_length);
+			rc = cuMemsetD32(m_lomaps, 0, pmrels->lomap_length / sizeof(int));
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuMemsetD32: %s", errorText(rc));
 		}
 		Assert(!pmrels->m_kmrels[cuda_index]);
 		Assert(!pmrels->ev_loaded[cuda_index]);
-		Assert(!pmrels->m_lomaps);
+		Assert(!pmrels->m_lomaps[cuda_index]);
 		pmrels->m_kmrels[cuda_index] = m_kmrels;
-		pmrels->m_lomaps = m_lomaps;
+		pmrels->m_lomaps[cuda_index] = m_lomaps;
 	}
 	pmrels->refcnt[cuda_index]++;
 	*p_kmrels = pmrels->m_kmrels[cuda_index];
-	*p_lomaps = pmrels->m_lomaps;
+	*p_lomaps = pmrels->m_lomaps[cuda_index];
 
 	return true;
 }
@@ -1189,29 +1194,60 @@ multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
 }
 
 void
-multirels_detach_buffer(pgstrom_multirels *pmrels)
+multirels_gather_lomap(pgstrom_multirels *pmrels, GpuTask *gtask, int depth)
 {
+	GpuContext *gcontext = pmrels->gcontext;
+	cl_int		cuda_index = gtask->cuda_index;
+	CUstream	cuda_stream = gtask->cuda_stream;
+	CUcontext	dst_context = gtask->cuda_context;
+	CUcontext	src_context;
+	cl_bool	   *dst_lomap;
+	cl_bool	   *src_lomap;
+	size_t		nitems = multirels_get_nitems(pmrels, depth);
+	cl_int		i;
 	CUresult	rc;
 
+	Assert(pmrels->m_lomaps[cuda_index] != 0UL);
+	Assert(gcontext->gpu[cuda_index].cuda_context == gtask->cuda_context);
+	dst_lomap = KERN_MULTIRELS_LEFT_OUTER_MAP(&pmrels->kern, depth, nitems,
+											  cuda_index,
+											  pmrels->m_lomaps[cuda_index]);
+	for (i=0; i < gcontext->num_context; i++)
+	{
+		/* no need to copy from the destination device */
+		if (i == cuda_index)
+			continue;
+		/* never executed on this device */
+		if (!pmrels->m_lomaps[i])
+			continue;
+
+		src_context = gcontext->gpu[i].cuda_context;
+		src_lomap = KERN_MULTIRELS_LEFT_OUTER_MAP(&pmrels->kern, depth, nitems,
+												  i, pmrels->m_lomaps[i]);
+		rc = cuMemcpyPeerAsync((CUdeviceptr)dst_lomap, dst_context,
+							   (CUdeviceptr)src_lomap, src_context,
+							   STROMALIGN(sizeof(cl_bool) * (nitems)),
+							   cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuMemcpyPeerAsync: %s", errorText(rc));
+	}
+}
+
+void
+multirels_detach_buffer(pgstrom_multirels *pmrels)
+{
 	Assert(pmrels->n_attached > 0);
 	if (--pmrels->n_attached == 0)
 	{
-#ifdef USE_ASSERT_CHECKING
 		GpuContext *gcontext = pmrels->gcontext;
 		int			index;
 
 		for (index=0; index < gcontext->num_context; index++)
-			Assert(pmrels->refcnt[index] == 0);
-#endif
-		/* release left-outer map */
-		if (pmrels->m_lomaps)
 		{
-			rc = cuMemFree(pmrels->m_lomaps);
-			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
-			pmrels->m_lomaps = (CUdeviceptr) 0UL;
+			Assert(pmrels->refcnt[index] == 0);
+			if (pmrels->m_lomaps[index] != 0UL)
+				__gpuMemFree(gcontext, index, pmrels->m_lomaps[index]);
 		}
-		/* release multi relations buffer */
 		pfree(pmrels);
 	}
 }

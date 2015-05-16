@@ -1469,6 +1469,7 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	List		   *context;
 	ListCell	   *lc1;
 	ListCell	   *lc2;
+	ListCell	   *lc3;
 	char		   *temp;
 	char			qlabel[128];
 	int				depth;
@@ -1513,22 +1514,35 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 
 	/* join-qualifiers */
 	depth = 1;
-	forboth (lc1, gj_info->hash_outer_keys,
-			 lc2, gj_info->join_quals)
+	forthree (lc1, gj_info->join_types,
+			  lc2, gj_info->join_quals,
+			  lc3, gj_info->hash_outer_keys)
 	{
-		Expr   *hash_outer_key = lfirst(lc1);
-		Expr   *join_qual = lfirst(lc2);
+		JoinType	join_type = (JoinType) lfirst_int(lc1);
+		Expr	   *join_qual = lfirst(lc2);
+		Expr	   *hash_outer_key = lfirst(lc3);
 
 		resetStringInfo(&str);
-		appendStringInfo(&str, "Logic: %s",
-						 hash_outer_key != NULL
-						 ? "GpuHashJoin"
-						 : "GpuNestLoop");
+		if (hash_outer_key != NULL)
+		{
+			appendStringInfo(&str, "Logic: GpuHash%sJoin",
+							 join_type == JOIN_FULL ? "Full" :
+							 join_type == JOIN_LEFT ? "Left" :
+							 join_type == JOIN_RIGHT ? "Right" : "");
+		}
+		else
+		{
+			appendStringInfo(&str, "Logic: GpuNestLoop%s",
+							 join_type == JOIN_FULL ? "Full" :
+							 join_type == JOIN_LEFT ? "Left" :
+							 join_type == JOIN_RIGHT ? "Right" : "");
+		}
+
 		if (hash_outer_key)
 		{
 			temp = deparse_expression((Node *)hash_outer_key,
                                       context, es->verbose, false);
-			appendStringInfo(&str, ", HashKeys: %s", temp);
+			appendStringInfo(&str, ", HashKeys: (%s)", temp);
 		}
 		temp = deparse_expression((Node *)join_qual, context,
 								  es->verbose, false);
@@ -2874,6 +2888,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			 *                       kern_data_store *kds,
 			 *                       kern_multirels *kmrels,
 			 *                       cl_int depth,
+			 *                       cl_uint cuda_index,
 			 *                       cl_bool *left_outer_map)
 			 */
 			pgstrom_compute_workgroup_size_2d(&grid_xsize, &block_xsize,
@@ -2888,7 +2903,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			kern_args[1] = &pgjoin->m_kds_src;
 			kern_args[2] = &pgjoin->m_kmrels;
 			kern_args[3] = &depth;
-			kern_args[4] = &pgjoin->m_lomaps;
+			kern_args[4] = &pgjoin->task.cuda_index;
+			kern_args[5] = &pgjoin->m_lomaps;
 			Assert(!is_rightjoin);
 
 			rc = cuLaunchKernel(pgjoin->kern_exec_nl,
@@ -2910,10 +2926,14 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			 *                            kern_data_store *kds,
 			 *                            kern_multirels *kmrels,
 			 *                            cl_int depth,
+			 *                            cl_uint cuda_index,
 			 *                            cl_bool *left_outer_maps)
 			 */
 			if (is_leftjoin && pgjoin->is_last_chunk)
 			{
+				/* gather the left outer map, if multi-device installation */
+				multirels_gather_lomap(pgjoin->pmrels, &pgjoin->task, depth);
+
 				pgstrom_compute_workgroup_size(&grid_xsize,
 											   &block_xsize,
 											   pgjoin->kern_outer_nl,
@@ -2925,7 +2945,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 				kern_args[1] = &pgjoin->m_kds_src;
 				kern_args[2] = &pgjoin->m_kmrels;
 				kern_args[3] = &depth;
-				kern_args[4] = &pgjoin->m_lomaps;
+				kern_args[4] = &pgjoin->task.cuda_index;
+				kern_args[5] = &pgjoin->m_lomaps;
 
 				rc = cuLaunchKernel(pgjoin->kern_outer_nl,
 									grid_xsize, 1, 1,
@@ -2951,6 +2972,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			 *                       kern_data_store *kds,
 			 *                       kern_multirels *kmrels,
 			 *                       cl_int depth,
+			 *                       cl_uint cuda_index,
 			 *                       cl_bool *left_outer_map)
 			 */
 			pgstrom_compute_workgroup_size(&grid_xsize,
@@ -2964,7 +2986,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			kern_args[1] = &pgjoin->m_kds_src;
 			kern_args[2] = &pgjoin->m_kmrels;
 			kern_args[3] = &depth;
-			kern_args[4] = &pgjoin->m_lomaps;
+			kern_args[4] = &pgjoin->task.cuda_index;
+			kern_args[5] = &pgjoin->m_lomaps;
 
 			rc = cuLaunchKernel(pgjoin->kern_exec_hj,
 								grid_xsize, 1, 1,
@@ -2984,10 +3007,14 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			 *                            kern_data_store *kds,
 			 *                            kern_multirels *kmrels,
 			 *                            cl_int depth,
+			 *                            cl_uint cuda_index,
 			 *                            cl_bool *left_outer_maps)
 			 */
 			if (is_leftjoin && pgjoin->is_last_chunk)
 			{
+				/* gather the left outer map, if multi-device installation */
+				multirels_gather_lomap(pgjoin->pmrels, &pgjoin->task, depth);
+
 				pgstrom_compute_workgroup_size(&grid_xsize,
 											   &block_xsize,
 											   pgjoin->kern_outer_hj,
@@ -2999,7 +3026,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 				kern_args[1] = &pgjoin->m_kds_src;
 				kern_args[2] = &pgjoin->m_kmrels;
 				kern_args[3] = &depth;
-				kern_args[4] = &pgjoin->m_lomaps;
+				kern_args[4] = &pgjoin->task.cuda_index;
+				kern_args[5] = &pgjoin->m_lomaps;
 
 				rc = cuLaunchKernel(pgjoin->kern_outer_hj,
 									grid_xsize, 1, 1,
@@ -3106,12 +3134,11 @@ gpujoin_task_process(GpuTask *gtask)
 	PG_TRY();
 	{
 		if (multirels_get_buffer(pgjoin->pmrels, &pgjoin->task,
-								 &pgjoin->m_kmrels, &pgjoin->m_lomaps))
-		{
+								 &pgjoin->m_kmrels,
+								 &pgjoin->m_lomaps))
 			status = __gpujoin_task_process(pgjoin);
-			if (!status)
-				gpujoin_cleanup_cuda_resources(pgjoin);
-		}
+		else
+			status = false;
 	}
 	PG_CATCH();
 	{

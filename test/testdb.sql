@@ -55,3 +55,10 @@ INSERT INTO t0 (SELECT x, CASE floor(random()*26)
                        random() * 100,
                        md5(x::text) FROM generate_series(1,10000000) x);
 
+CREATE TABLE s0 (a int, x int, atext text);
+CREATE TABLE s1 (b int, y int, btext text);
+
+INSERT INTO s0 (SELECT x, floor(random() * 100), md5(x::text)
+                FROM generate_series(1,200) x);
+INSERT INTO s1 (SELECT 2*x-1, floor(random() * 100), md5(x::text)
+                FROM generate_series(1,150) x);

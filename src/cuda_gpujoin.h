@@ -27,6 +27,7 @@ typedef struct
 {
 	cl_uint			pg_crc32_table[256];	/* used to hashjoin */
 	cl_uint			nrels;			/* number of relations */
+	cl_uint			ndevs;			/* number of devices installed */
 	struct
 	{
 		cl_uint		chunk_offset;	/* offset to KDS or Hash */
@@ -45,12 +46,18 @@ typedef struct
 	((kern_hashtable *)										\
 	 ((char *)(kmrels) + (kmrels)->chunks[(depth)-1].chunk_offset))
 
-#define KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels, depth, left_outer_map)	\
-	((cl_bool *)											\
-	 ((kmrels)->chunks[(depth)-1].left_outer				\
-	  ? ((cl_bool *)(left_outer_map) +						\
-		 (kmrels)->chunks[(depth)-1].lomap_offset)			\
+#define KERN_MULTIRELS_INNER_NITEMS(kmrels, depth)	\
+	(KERN_MULTIRELS_INNER_KDS(kmrels, depth)->nitems)
+
+#define KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels,depth,nitems,			\
+									  cuda_index,left_outer_map)	\
+	((cl_bool *)													\
+	 ((kmrels)->chunks[(depth)-1].left_outer						\
+	  ? ((char *)(left_outer_map) +									\
+		 STROMALIGN(sizeof(cl_bool) * (nitems)) *					\
+		 (cuda_index))												\
 	  : NULL))
+
 #define KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, depth)	\
 	((kmrels)->chunks[(depth)-1].right_outer)
 
@@ -361,7 +368,8 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 					  kern_data_store *kds,
 					  kern_multirels *kmrels,
 					  cl_int depth,
-					  cl_bool *left_outer_maps)
+					  cl_int cuda_index,
+					  cl_bool *left_outer_map)
 {
 	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
 	kern_resultbuf *kresults_in = KERN_GPUJOIN_IN_RESULTBUF(kgjoin, depth);
@@ -390,9 +398,6 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 		assert(kresults_in->nrels == depth);
 	}
 
-	/* will be valid, if LEFT OUTER JOIN */
-	lo_map = KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels, depth, left_outer_maps);
-
 	/*
 	 * NOTE: size of Y-axis deterministric on the time of kernel launch.
 	 * host-side guarantees get_global_ysize() is larger then kds->nitems
@@ -403,6 +408,9 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 	kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 	assert(kds_in != NULL);
 
+	/* will be valid, if LEFT OUTER JOIN */
+	lo_map = KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels, depth, kds_in->nitems,
+										   cuda_index, left_outer_map);
 	y_index = get_global_yid();
 	nvalids = min(kresults_in->nitems, kresults_in->nrooms);
 	x_limit = ((nvalids + get_global_xsize() - 1) /
@@ -421,7 +429,6 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 
 		if (y_index < kds_in->nitems && x_index < nvalids)
 		{
-#if 0
 			HeapTupleHeaderData	   *htup
 				= kern_get_tuple_row(kds_in, y_index);
 
@@ -438,8 +445,6 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 					lo_map[y_index] = true;
 			}
 			y_offset = (size_t)htup - (size_t)kds_in;
-#endif
-			is_matched = false;
 		}
 		else
 			is_matched = false;
@@ -487,7 +492,8 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 					  kern_data_store *kds,
 					  kern_multirels *kmrels,
 					  cl_int depth,
-					  cl_bool *left_outer_maps)
+					  cl_int cuda_index,
+					  cl_bool *left_outer_map)
 {
 	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
 	kern_resultbuf *kresults_in = KERN_GPUJOIN_IN_RESULTBUF(kgjoin, depth);
@@ -518,9 +524,6 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		assert(kresults_in->nrels == depth);
 	}
 
-	/* will be valid, if LEFT OUTER JOIN */
-	lo_map = KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels, depth, left_outer_maps);
-
 	/* move crc32 table to __local memory from __global memory.
 	 *
 	 * NOTE: calculation of hash value (based on crc32 in GpuHashJoin) is
@@ -548,13 +551,17 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	x_limit = ((nvalids + get_global_xsize() - 1) /
 			   get_global_xsize()) * get_global_xsize();
 
+	/* will be valid, if LEFT OUTER JOIN */
+	lo_map = KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels, depth, khtable->nitems,
+										   cuda_index, left_outer_map);
+
 	for (x_index = get_global_xid();
 		 x_index < x_limit;
 		 x_index += get_global_xsize())
 	{
 		kern_hashentry *khentry = NULL;
 		cl_uint			hash_value;
-        cl_int         *x_buffer;
+        cl_int         *x_buffer = NULL;
         cl_int         *r_buffer;
 		cl_uint			offset;
 		cl_uint			count;
@@ -691,7 +698,8 @@ gpujoin_leftouter_nestloop(kern_gpujoin *kgjoin,
 						   kern_data_store *kds,	/* never referenced */
 						   kern_multirels *kmrels,
 						   cl_int depth,
-						   cl_bool *left_outer_maps)
+						   cl_int cuda_index,
+						   cl_bool *left_outer_map)
 {
 	kern_resultbuf *kresults_out = KERN_GPUJOIN_OUT_RESULTBUF(kgjoin, depth);
 	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
@@ -701,6 +709,7 @@ gpujoin_leftouter_nestloop(kern_gpujoin *kgjoin,
 	cl_uint			count;
 	cl_uint			offset;
 	cl_int		   *r_buffer;
+	cl_int			i, ndevs = kmrels->ndevs;
 	__shared__ cl_uint base;
 
 	/* if prior stage raised an error, we skip this kernel */
@@ -716,20 +725,31 @@ gpujoin_leftouter_nestloop(kern_gpujoin *kgjoin,
 		assert(kresults_out->nrels == depth + 1);
 	}
 
-	/* fetch left outer map (it should be valid) */
-	lo_map = KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels, depth, left_outer_maps);
-	assert(lo_map != NULL);
+	/*
+	 * check whether the relevant inner tuple has any matched outer tuples,
+	 * including the jobs by other devices.
+	 */
+	if (get_global_id() < kds_in->nitems)
+	{
+		cl_uint		nitems = kds_in->nitems;
+
+		needs_outer_row = false;
+		for (i=0; i < ndevs; i++)
+		{
+			lo_map = KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels, depth, nitems,
+												   i, left_outer_map);
+			assert(lo_map != NULL);
+			needs_outer_row |= (!lo_map[get_global_id()] ? 1 : 0);
+		}
+	}
+	else
+		needs_outer_row = false;
 
 	/*
 	 * Count up number of inner tuples that were not matched with outer-
 	 * relations. Then, we allocates slot in kresults_out for outer-join
 	 * tuples.
 	 */
-	if (get_global_id() < kds_in->nitems)
-		needs_outer_row = !lo_map[get_global_id()];
-	else
-		needs_outer_row = false;
-
 	offset = arithmetic_stairlike_add(needs_outer_row ? 1 : 0, &count);
 	if (get_local_id() == 0)
 	{
@@ -778,7 +798,8 @@ gpujoin_leftouter_hashjoin(kern_gpujoin *kgjoin,
 						   kern_data_store *kds,	/* never referenced */
 						   kern_multirels *kmrels,
 						   cl_int depth,
-						   cl_bool *left_outer_maps)
+						   cl_int cuda_index,
+						   cl_bool *left_outer_map)
 {
 	kern_resultbuf *kresults_out = KERN_GPUJOIN_OUT_RESULTBUF(kgjoin, depth);
 	kern_hashtable *khtable = KERN_MULTIRELS_INNER_HASH(kmrels, depth);
@@ -788,6 +809,7 @@ gpujoin_leftouter_hashjoin(kern_gpujoin *kgjoin,
 	cl_int			errcode;
 	cl_uint			offset;
 	cl_uint			count;
+	cl_int			i, ndevs = kmrels->ndevs;
 	cl_int		   *r_buffer;
 	__shared__ cl_uint base;
 
@@ -806,10 +828,6 @@ gpujoin_leftouter_hashjoin(kern_gpujoin *kgjoin,
 		assert(kresults_out->nrels == depth + 1);
 	}
 
-	/* will be valid, if LEFT OUTER JOIN */
-	lo_map = KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels, depth, left_outer_maps);
-	assert(lo_map != NULL);
-
 	/*
 	 * Fetch a hash-entry from each hash-slot
 	 */
@@ -821,13 +839,28 @@ gpujoin_leftouter_hashjoin(kern_gpujoin *kgjoin,
 	do {
 		if (khentry != NULL)
 		{
-			assert(khentry->rowid < khtable->nitems);
-			needs_outer_row = !lo_map[khentry->rowid];
-			printf("rowid=%u map=%d\n", khentry->rowid, lo_map[khentry->rowid]);
+			/*
+			 * check whether the relevant inner tuple has any matched outer
+			 * tuples, including the jobs by other devices.
+			 */
+			cl_uint		nitems = khtable->nitems;
+
+			assert(khentry->rowid < nitems);
+			needs_outer_row = false;
+			for (i=0; i < ndevs; i++)
+			{
+				lo_map = KERN_MULTIRELS_LEFT_OUTER_MAP(kmrels, depth, nitems,
+													   i, left_outer_map);
+				assert(lo_map != NULL);
+				needs_outer_row |= (!lo_map[khentry->rowid] ? 1 : 0);
+			}
 		}
 		else
 			needs_outer_row = false;
 
+		/*
+		 * Then, count up number of unmatched inner tuples
+		 */
 		offset = arithmetic_stairlike_add(needs_outer_row ? 1 : 0, &count);
 		if (get_local_id() == 0)
 		{
@@ -837,7 +870,6 @@ gpujoin_leftouter_hashjoin(kern_gpujoin *kgjoin,
 				base = 0;
 		}
 		__syncthreads();
-
 
 		/* In case when (base + num_unmatched) is larger than nrooms, it means
 		 * we don't have enough space to write back nested-loop results.
@@ -1244,6 +1276,7 @@ __gpujoin_projection_slot(cl_int *errcode,
 			src_htup = GPUJOIN_REF_HTUP(kchunk, r_buffer[src_depth]);
 			src_hostptr = &kchunk->hostptr;
 		}
+
 		/* fetch datum of the source tuple */
 		if (!src_htup)
 			datum = NULL;

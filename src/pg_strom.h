@@ -595,6 +595,8 @@ extern void multirels_put_buffer(pgstrom_multirels *pmrels,
 								 GpuTask *gtask);
 extern void multirels_send_buffer(pgstrom_multirels *pmrels,
 								  GpuTask *gtask);
+extern void multirels_gather_lomap(pgstrom_multirels *pmrels,
+								   GpuTask *gtask, int depth);
 extern void multirels_detach_buffer(pgstrom_multirels *pmrels);
 extern void	pgstrom_init_multirels(void);
 
@@ -605,18 +607,6 @@ extern void	pgstrom_init_multirels(void);
 
 
 extern void	pgstrom_init_gpujoin(void);
-
-#if 0
-/*
- * gpuhashjoin.c
- */
-extern bool pgstrom_plan_is_gpuhashjoin(const Plan *plan);
-extern bool pgstrom_plan_is_multihash(const Plan *plan);
-extern void pgstrom_gpuhashjoin_setup_bulkslot(PlanState *outer_ps,
-											   ProjectionInfo **p_bulk_proj,
-											   TupleTableSlot **p_bulk_slot);
-extern void pgstrom_init_gpuhashjoin(void);
-#endif
 
 /*
  * gpupreagg.c
