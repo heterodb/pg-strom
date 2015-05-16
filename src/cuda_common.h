@@ -360,8 +360,8 @@ typedef struct {
 
 typedef struct
 {
-	cl_ushort			t_len;		/* length of tuple */
-	ItemPointerData		t_self;		/* SelfItemPointer */
+	cl_ushort			t_len;	/* length of tuple */
+	ItemPointerData		t_self;	/* SelfItemPointer */
 	HeapTupleHeaderData	htup;
 } kern_tupitem;
 

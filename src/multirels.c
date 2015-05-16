@@ -100,13 +100,13 @@ typedef struct pgstrom_multirels
 	Size			kmrels_length;	/* total length of the kern_multirels */
 	Size			head_length;	/* length of the header portion */
 	Size			usage_length;	/* length actually in use */
-	Size			lomap_length;	/* length of left outer map */
+	Size			ojmap_length;	/* length of outer-join map */
 	void		  **inner_chunks;	/* array of KDS or Hash chunks */
 	cl_int			n_attached;		/* number of attached count */
 	cl_int		   *refcnt;			/* reference counter for each context */
 	CUdeviceptr	   *m_kmrels;		/* GPU memory for each CUDA context */
 	CUevent		   *ev_loaded;		/* Sync object for each CUDA context */
-	CUdeviceptr	   *m_lomaps;		/* Managed GPU memory for LEFT JOIN */
+	CUdeviceptr	   *m_ojmaps;		/* GPU memory for outer join maps */
 	kern_multirels	kern;			/* header of in-kernel structure */
 } pgstrom_multirels;
 
@@ -644,9 +644,9 @@ multirels_preload_hash(MultiRelsState *mrs,
 					 mrs->join_type == JOIN_RIGHT)
 			{
 				/*
-				 * In case of inner-join, we don't need to materialize
-				 * the underlying relation once, because join-logic don't
-				 * care about range of hash-value.
+				 * In case of INNER or RIGHT join, we don't need to
+				 * materialize the underlying relation once, because
+				 * its logic don't care about range of hash-value.
 				 */
 				break;
 			}
@@ -800,7 +800,6 @@ multirels_exec_bulk(CustomScanState *node)
 	/* must provide our own instrumentation support */
 	if (node->ss.ps.instrument)
 		InstrStartNode(node->ss.ps.instrument);
-	elog(INFO, "multirels_exec_bulk called");
 
 	if (innerPlanState(mrs))
 	{
@@ -847,7 +846,7 @@ multirels_exec_bulk(CustomScanState *node)
 		pmrels->kmrels_length = mrs->kmrels_length;
 		pmrels->head_length = head_length;
 		pmrels->usage_length = head_length;
-		pmrels->lomap_length = 0;
+		pmrels->ojmap_length = 0;
 		pmrels->n_attached = 0;
 
 		pos = (char *)pmrels + head_length;
@@ -859,7 +858,7 @@ multirels_exec_bulk(CustomScanState *node)
 		pos += STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context);
 		pmrels->ev_loaded = (CUevent *) pos;
 		pos += STROMALIGN(sizeof(CUevent) * gcontext->num_context);
-		pmrels->m_lomaps = (CUdeviceptr *) pos;
+		pmrels->m_ojmaps = (CUdeviceptr *) pos;
 		pos += STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context);
 
 		memcpy(pmrels->kern.pg_crc32_table,
@@ -909,16 +908,16 @@ multirels_exec_bulk(CustomScanState *node)
 		pmrels->usage_length += STROMALIGN(chunk_length);
 		Assert(pmrels->usage_length <= pmrels->kmrels_length);
 
-		if (mrs->join_type == JOIN_LEFT || mrs->join_type == JOIN_FULL)
+		if (mrs->join_type == JOIN_RIGHT || mrs->join_type == JOIN_FULL)
 		{
-			pmrels->kern.chunks[depth - 1].left_outer = true;
-			pmrels->kern.chunks[depth - 1].lomap_offset = pmrels->lomap_length;
-			pmrels->lomap_length += (STROMALIGN(sizeof(cl_bool) *
+			pmrels->kern.chunks[depth-1].right_outer = true;
+			pmrels->kern.chunks[depth-1].ojmap_offset = pmrels->ojmap_length;
+			pmrels->ojmap_length += (STROMALIGN(sizeof(cl_bool) *
 												chunk_nitems) *
 									 pmrels->kern.ndevs);
 		}
-		if (mrs->join_type == JOIN_RIGHT || mrs->join_type == JOIN_FULL)
-			pmrels->kern.chunks[depth - 1].right_outer = true;
+		if (mrs->join_type == JOIN_LEFT || mrs->join_type == JOIN_FULL)
+			pmrels->kern.chunks[depth-1].left_outer = true;
 	}
 out:
 	/* must provide our own instrumentation support */
@@ -1063,7 +1062,7 @@ multirels_attach_buffer(pgstrom_multirels *pmrels)
 bool
 multirels_get_buffer(pgstrom_multirels *pmrels, GpuTask *gtask,
 					 CUdeviceptr *p_kmrels,		/* inner relations */
-					 CUdeviceptr *p_lomaps)		/* left-outer map */
+					 CUdeviceptr *p_ojmaps)		/* left-outer map */
 {
 	cl_int		cuda_index = gtask->cuda_index;
 	CUresult	rc;
@@ -1073,17 +1072,17 @@ multirels_get_buffer(pgstrom_multirels *pmrels, GpuTask *gtask,
 	if (pmrels->refcnt[cuda_index] == 0)
 	{
 		CUdeviceptr	m_kmrels = 0UL;
-		CUdeviceptr	m_lomaps = 0UL;
+		CUdeviceptr	m_ojmaps = 0UL;
 
 		/* buffer for the inner multi-relations */
 		m_kmrels = gpuMemAlloc(gtask, pmrels->kmrels_length);
 		if (!m_kmrels)
 			return false;
 
-		if (pmrels->lomap_length > 0 && !pmrels->m_lomaps[cuda_index])
+		if (pmrels->ojmap_length > 0 && !pmrels->m_ojmaps[cuda_index])
 		{
-			m_lomaps = gpuMemAlloc(gtask, pmrels->lomap_length);
-			if (!m_lomaps)
+			m_ojmaps = gpuMemAlloc(gtask, pmrels->ojmap_length);
+			if (!m_ojmaps)
 			{
 				gpuMemFree(gtask, m_kmrels);
 				return false;
@@ -1091,19 +1090,19 @@ multirels_get_buffer(pgstrom_multirels *pmrels, GpuTask *gtask,
 			/*
 			 * Zero clear the left-outer map in sync manner
 			 */
-			rc = cuMemsetD32(m_lomaps, 0, pmrels->lomap_length / sizeof(int));
+			rc = cuMemsetD32(m_ojmaps, 0, pmrels->ojmap_length / sizeof(int));
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuMemsetD32: %s", errorText(rc));
+			Assert(!pmrels->m_ojmaps[cuda_index]);
+			pmrels->m_ojmaps[cuda_index] = m_ojmaps;
 		}
 		Assert(!pmrels->m_kmrels[cuda_index]);
 		Assert(!pmrels->ev_loaded[cuda_index]);
-		Assert(!pmrels->m_lomaps[cuda_index]);
 		pmrels->m_kmrels[cuda_index] = m_kmrels;
-		pmrels->m_lomaps[cuda_index] = m_lomaps;
 	}
 	pmrels->refcnt[cuda_index]++;
 	*p_kmrels = pmrels->m_kmrels[cuda_index];
-	*p_lomaps = pmrels->m_lomaps[cuda_index];
+	*p_ojmaps = pmrels->m_ojmaps[cuda_index];
 
 	return true;
 }
@@ -1194,7 +1193,7 @@ multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
 }
 
 void
-multirels_gather_lomap(pgstrom_multirels *pmrels, GpuTask *gtask, int depth)
+multirels_gather_ojmaps(pgstrom_multirels *pmrels, GpuTask *gtask, int depth)
 {
 	GpuContext *gcontext = pmrels->gcontext;
 	cl_int		cuda_index = gtask->cuda_index;
@@ -1207,23 +1206,23 @@ multirels_gather_lomap(pgstrom_multirels *pmrels, GpuTask *gtask, int depth)
 	cl_int		i;
 	CUresult	rc;
 
-	Assert(pmrels->m_lomaps[cuda_index] != 0UL);
+	Assert(pmrels->m_ojmaps[cuda_index] != 0UL);
 	Assert(gcontext->gpu[cuda_index].cuda_context == gtask->cuda_context);
-	dst_lomap = KERN_MULTIRELS_LEFT_OUTER_MAP(&pmrels->kern, depth, nitems,
+	dst_lomap = KERN_MULTIRELS_OUTER_JOIN_MAP(&pmrels->kern, depth, nitems,
 											  cuda_index,
-											  pmrels->m_lomaps[cuda_index]);
+											  pmrels->m_ojmaps[cuda_index]);
 	for (i=0; i < gcontext->num_context; i++)
 	{
 		/* no need to copy from the destination device */
 		if (i == cuda_index)
 			continue;
 		/* never executed on this device */
-		if (!pmrels->m_lomaps[i])
+		if (!pmrels->m_ojmaps[i])
 			continue;
 
 		src_context = gcontext->gpu[i].cuda_context;
-		src_lomap = KERN_MULTIRELS_LEFT_OUTER_MAP(&pmrels->kern, depth, nitems,
-												  i, pmrels->m_lomaps[i]);
+		src_lomap = KERN_MULTIRELS_OUTER_JOIN_MAP(&pmrels->kern, depth, nitems,
+												  i, pmrels->m_ojmaps[i]);
 		rc = cuMemcpyPeerAsync((CUdeviceptr)dst_lomap, dst_context,
 							   (CUdeviceptr)src_lomap, src_context,
 							   STROMALIGN(sizeof(cl_bool) * (nitems)),
@@ -1245,8 +1244,8 @@ multirels_detach_buffer(pgstrom_multirels *pmrels)
 		for (index=0; index < gcontext->num_context; index++)
 		{
 			Assert(pmrels->refcnt[index] == 0);
-			if (pmrels->m_lomaps[index] != 0UL)
-				__gpuMemFree(gcontext, index, pmrels->m_lomaps[index]);
+			if (pmrels->m_ojmaps[index] != 0UL)
+				__gpuMemFree(gcontext, index, pmrels->m_ojmaps[index]);
 		}
 		pfree(pmrels);
 	}

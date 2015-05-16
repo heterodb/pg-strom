@@ -595,8 +595,8 @@ extern void multirels_put_buffer(pgstrom_multirels *pmrels,
 								 GpuTask *gtask);
 extern void multirels_send_buffer(pgstrom_multirels *pmrels,
 								  GpuTask *gtask);
-extern void multirels_gather_lomap(pgstrom_multirels *pmrels,
-								   GpuTask *gtask, int depth);
+extern void multirels_gather_ojmaps(pgstrom_multirels *pmrels,
+									GpuTask *gtask, int depth);
 extern void multirels_detach_buffer(pgstrom_multirels *pmrels);
 extern void	pgstrom_init_multirels(void);
 
