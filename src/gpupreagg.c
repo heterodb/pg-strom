@@ -3886,7 +3886,7 @@ void
 pgstrom_init_gpupreagg(void)
 {
 	/* enable_gpupreagg parameter */
-	DefineCustomBoolVariable("enable_gpupreagg",
+	DefineCustomBoolVariable("pg_strom.enable_gpupreagg",
 							 "Enables the use of GPU preprocessed aggregate",
 							 NULL,
 							 &enable_gpupreagg,
@@ -3895,7 +3895,7 @@ pgstrom_init_gpupreagg(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* pg_strom.debug_force_gpupreagg */
-	DefineCustomBoolVariable("pg_strom.debug_force_gpupreagg",
+	DefineCustomBoolVariable("pg_strom.debug.force_gpupreagg",
 							 "Force GpuPreAgg regardless of the cost (debug)",
 							 NULL,
 							 &debug_force_gpupreagg,

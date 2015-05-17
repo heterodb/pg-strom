@@ -2526,7 +2526,7 @@ void
 pgstrom_init_gpusort(void)
 {
 	/* enable_gpusort parameter */
-	DefineCustomBoolVariable("enable_gpusort",
+	DefineCustomBoolVariable("pg_strom.enable_gpusort",
 							 "Enables the use of GPU accelerated sorting",
 							 NULL,
 							 &enable_gpusort,
@@ -2535,7 +2535,7 @@ pgstrom_init_gpusort(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* pg_strom.debug_force_gpusort */
-	DefineCustomBoolVariable("pg_strom.debug_force_gpusort",
+	DefineCustomBoolVariable("pg_strom.debug.force_gpusort",
 							 "Force GpuSort regardless of the cost (debug)",
 							 NULL,
 							 &debug_force_gpusort,

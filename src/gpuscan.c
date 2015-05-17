@@ -921,7 +921,7 @@ void
 pgstrom_init_gpuscan(void)
 {
 	/* enable_gpuscan */
-	DefineCustomBoolVariable("enable_gpuscan",
+	DefineCustomBoolVariable("pg_strom.enable_gpuscan",
 							 "Enables the use of GPU accelerated full-scan",
 							 NULL,
 							 &enable_gpuscan,

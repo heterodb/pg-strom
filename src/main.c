@@ -173,7 +173,7 @@ pgstrom_init_misc_guc(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
-	DefineCustomBoolVariable("pg_strom.debug_bulkload_enabled",
+	DefineCustomBoolVariable("pg_strom.debug.bulkload_enabled",
 							 "Enables the bulk-loading mode of PG-Strom",
 							 NULL,
 							 &pgstrom_debug_bulkload_enabled,
@@ -206,18 +206,18 @@ pgstrom_init_misc_guc(void)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("\"pg_strom.max_async_chunks\" must be larger than \"pg_strom.min_async_chunks\"")));
 
-	DefineCustomRealVariable("gpu_setup_cost",
+	DefineCustomRealVariable("pg_strom.gpu_setup_cost",
 							 "Cost to setup GPU device to run",
 							 NULL,
 							 &pgstrom_gpu_setup_cost,
-							 500 * DEFAULT_SEQ_PAGE_COST,
+							 1000 * DEFAULT_SEQ_PAGE_COST,
 							 0,
 							 DBL_MAX,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
-	DefineCustomRealVariable("gpu_operator_cost",
+	DefineCustomRealVariable("pg_strom.gpu_operator_cost",
 							 "Cost of processing each operators by GPU",
 							 NULL,
 							 &pgstrom_gpu_operator_cost,
@@ -228,7 +228,7 @@ pgstrom_init_misc_guc(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
-	DefineCustomRealVariable("gpu_tuple_cost",
+	DefineCustomRealVariable("pg_strom.gpu_tuple_cost",
 							 "Cost of processing each tuple for GPU",
 							 NULL,
 							 &pgstrom_gpu_tuple_cost,
