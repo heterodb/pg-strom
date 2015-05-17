@@ -27,6 +27,7 @@
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/var.h"
+#include "parser/parsetree.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/ruleutils.h"
@@ -289,6 +290,83 @@ path_is_mergeable_gpujoin(Path *pathnode)
 }
 
 /*
+ * dump_gpujoin_path
+ *
+ * Dumps candidate GpuJoinPath for debugging
+ */
+static void __attribute__ ((unused))
+dump_gpujoin_path(PlannerInfo *root,
+				  GpuJoinPath *gpath)
+{
+	Relids		outer_relids;
+	Relids		inner_relids;
+	StringInfoData buf;
+	bool		is_nestloop;
+	JoinType	join_type;
+	int			i, rtindex;
+	bool		is_first;
+	List	   *range_tables = root->parse->rtable;
+
+	/* outer relids */
+	outer_relids = gpath->outer_path->parent->relids;
+
+	/* inner relids */
+	inner_relids = NULL;
+	for (i=0; i < gpath->num_rels; i++)
+	{
+		RelOptInfo *rel = gpath->inners[i].scan_path->parent;
+
+		inner_relids = bms_union(inner_relids, rel->relids);
+	}
+
+	/* make a result */
+	initStringInfo(&buf);
+	is_nestloop = (gpath->inners[gpath->num_rels - 1].hash_quals == NIL);
+	join_type = gpath->inners[gpath->num_rels - 1].join_type;
+
+	appendStringInfo(&buf, "(");
+	is_first = true;
+	rtindex = -1;
+	while ((rtindex = bms_next_member(outer_relids, rtindex)) >= 0)
+	{
+		RangeTblEntry  *rte = rt_fetch(rtindex, range_tables);
+		Alias  *eref = rte->eref;
+
+		appendStringInfo(&buf, "%s%s",
+						 is_first ? "" : ", ",
+						 eref->aliasname);
+		is_first = false;
+	}
+	appendStringInfo(&buf, ") %s (",
+					 is_nestloop
+					 ? (join_type == JOIN_FULL ? "FNL" :
+						join_type == JOIN_LEFT ? "LNL" :
+						join_type == JOIN_RIGHT ? "RNL" : "INL")
+					 : (join_type == JOIN_FULL ? "FHJ" :
+						join_type == JOIN_LEFT ? "LHJ" :
+                        join_type == JOIN_RIGHT ? "RHJ" : "IHJ"));
+	is_first = true;
+	rtindex = -1;
+	while ((rtindex = bms_next_member(inner_relids, rtindex)) >= 0)
+	{
+		RangeTblEntry  *rte = rt_fetch(rtindex, range_tables);
+		Alias  *eref = rte->eref;
+
+		appendStringInfo(&buf, "%s%s",
+						 is_first ? "" : ", ",
+						 eref->aliasname);
+		is_first = false;
+	}
+	appendStringInfo(&buf, ")");
+
+	elog(INFO, "%s Cost=%.2f..%.2f",
+		 buf.data,
+		 gpath->cpath.path.startup_cost,
+		 gpath->cpath.path.total_cost);
+	pfree(buf.data);
+}
+
+/*
  * cost_gpujoin
  *
  * estimation of GpuJoin cost
@@ -485,6 +563,7 @@ retry:
 		gpath->inners[i].kmrels_rate =
 			((double)gpath->inners[i].chunk_size / (double)kmrels_length);
 	}
+	dump_gpujoin_path(root, gpath);
 	return true;
 }
 
