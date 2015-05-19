@@ -3895,7 +3895,7 @@ pgstrom_init_gpupreagg(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* pg_strom.debug_force_gpupreagg */
-	DefineCustomBoolVariable("pg_strom.debug.force_gpupreagg",
+	DefineCustomBoolVariable("pg_strom.debug_force_gpupreagg",
 							 "Force GpuPreAgg regardless of the cost (debug)",
 							 NULL,
 							 &debug_force_gpupreagg,

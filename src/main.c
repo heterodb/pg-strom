@@ -164,7 +164,7 @@ pgstrom_init_misc_guc(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* turn on/off cuda kernel source saving */
-	DefineCustomBoolVariable("pg_strom.debug.kernel_source",
+	DefineCustomBoolVariable("pg_strom.debug_kernel_source",
 							 "Turn on/off to display the kernel source path",
 							 NULL,
 							 &pgstrom_debug_kernel_source,
@@ -173,7 +173,7 @@ pgstrom_init_misc_guc(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
-	DefineCustomBoolVariable("pg_strom.debug.bulkload_enabled",
+	DefineCustomBoolVariable("pg_strom.debug_bulkload_enabled",
 							 "Enables the bulk-loading mode of PG-Strom",
 							 NULL,
 							 &pgstrom_debug_bulkload_enabled,

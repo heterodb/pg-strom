@@ -1152,7 +1152,7 @@ pgstrom_init_cuda_program(void)
 	/*
 	 * turn on/off cuda coredump feature
 	 */
-	DefineCustomBoolVariable("pg_strom.debug.cuda_coredump",
+	DefineCustomBoolVariable("pg_strom.debug_cuda_coredump",
 							 "Turn on/off GPU coredump feature",
 							 NULL,
 							 &pgstrom_enable_cuda_coredump,
