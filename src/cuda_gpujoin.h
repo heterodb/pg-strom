@@ -410,8 +410,8 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 										   cuda_index, outer_join_map);
 	y_index = get_global_yid();
 	nvalids = min(kresults_in->nitems, kresults_in->nrooms);
-	x_limit = ((nvalids + get_global_xsize() - 1) /
-			   get_global_xsize()) * get_global_xsize();
+	x_limit = ((nvalids + get_local_xsize() - 1) /
+			   get_local_xsize()) * get_local_xsize();
 
 	for (x_index = get_global_xid();
 		 x_index < x_limit;
@@ -545,8 +545,8 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	 * getting evaluated.
 	 */
 	nvalids = min(kresults_in->nitems, kresults_in->nrooms);
-	x_limit = ((nvalids + get_global_xsize() - 1) /
-			   get_global_xsize()) * get_global_xsize();
+	x_limit = ((nvalids + get_local_xsize() - 1) /
+			   get_local_xsize()) * get_local_xsize();
 
 	/* will be valid, if LEFT OUTER JOIN */
 	lo_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, khtable->nitems,
