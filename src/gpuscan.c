@@ -641,8 +641,9 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	/* 'tableoid' should not change during relation scan */
 	gss->scan_tuple.t_tableOid = RelationGetRelid(scan_rel);
 	/* assign kernel source and flags */
-	gss->gts.kern_source = gs_info->kern_source;
-	gss->gts.extra_flags = gs_info->extra_flags;
+	pgstrom_assign_cuda_program(&gss->gts,
+								gs_info->kern_source,
+								gs_info->extra_flags);
 	if (gss->gts.kern_source != NULL &&
 		(eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
 		pgstrom_preload_cuda_program(&gss->gts);

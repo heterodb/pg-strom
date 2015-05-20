@@ -241,8 +241,9 @@ struct GpuTaskState
 	CustomScanState	css;
 	dlist_node		chain;
 	GpuContext	   *gcontext;
-	const char	   *kern_source;
-	cl_uint			extra_flags;
+	const char	   *kern_define;	/* per session definition */
+	const char	   *kern_source;	/* GPU kernel source on the fly */
+	cl_uint			extra_flags;	/* flags for static inclusion */
 	const char	   *source_pathname;
 	CUmodule	   *cuda_modules;	/* CUmodules for each CUDA context */
 	bool			scan_done;		/* no rows to read, if true */
@@ -454,10 +455,12 @@ extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 /*
  * cuda_program.c
  */
-extern const char *pgstrom_cuda_source_file(const char *kern_source,
-											uint32 extra_flags);
+extern const char *pgstrom_cuda_source_file(GpuTaskState *gts);
 extern bool pgstrom_load_cuda_program(GpuTaskState *gts);
 extern void pgstrom_preload_cuda_program(GpuTaskState *gts);
+extern void pgstrom_assign_cuda_program(GpuTaskState *gts,
+										const char *kern_source,
+										int extra_flags);
 extern void pgstrom_init_cuda_program(void);
 extern Datum pgstrom_program_info(PG_FUNCTION_ARGS);
 

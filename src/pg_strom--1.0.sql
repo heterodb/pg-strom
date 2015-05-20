@@ -23,6 +23,7 @@ CREATE TYPE __pgstrom_program_info AS (
   status		text,
   crc32			int4,
   flags			int4,
+  kern_define   text,
   kern_source	text,
   ptx_image		text,
   error_msg		text,

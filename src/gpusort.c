@@ -904,8 +904,9 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	/* for GPU bitonic sorting */
 	gss->kparams = pgstrom_create_kern_parambuf(gs_info->used_params,
 												ps->ps_ExprContext);
-	gss->gts.kern_source = gs_info->kern_source;
-	gss->gts.extra_flags = gs_info->extra_flags;
+	pgstrom_assign_cuda_program(&gss->gts,
+								gs_info->kern_source,
+								gs_info->extra_flags);
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
 		pgstrom_preload_cuda_program(&gss->gts);
 
