@@ -110,7 +110,7 @@ BASIC_FLOAT_ADDFUNC_TEMPLATE(float8pl, float8, float8, float8)
 		if (!result.isnull)											\
 		{															\
 			result.value = arg1.value - arg2.value;					\
-			if (SAMESIGN(arg1.value, arg2.value) &&					\
+			if (!SAMESIGN(arg1.value, arg2.value) &&				\
 				!SAMESIGN(result.value, arg1.value))				\
 			{														\
 				result.isnull = true;								\
