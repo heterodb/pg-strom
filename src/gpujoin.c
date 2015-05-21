@@ -294,9 +294,8 @@ path_is_mergeable_gpujoin(Path *pathnode)
  *
  * Dumps candidate GpuJoinPath for debugging
  */
-static void __attribute__ ((unused))
-dump_gpujoin_path(PlannerInfo *root,
-				  GpuJoinPath *gpath)
+static void
+dump_gpujoin_path(PlannerInfo *root, GpuJoinPath *gpath)
 {
 	Relids		outer_relids;
 	Relids		inner_relids;
@@ -306,6 +305,9 @@ dump_gpujoin_path(PlannerInfo *root,
 	int			i, rtindex;
 	bool		is_first;
 	List	   *range_tables = root->parse->rtable;
+
+	if (client_min_messages > DEBUG1)
+		return;
 
 	/* outer relids */
 	outer_relids = gpath->outer_path->parent->relids;
@@ -359,7 +361,7 @@ dump_gpujoin_path(PlannerInfo *root,
 	}
 	appendStringInfo(&buf, ")");
 
-	elog(INFO, "%s Cost=%.2f..%.2f",
+	elog(DEBUG1, "%s Cost=%.2f..%.2f",
 		 buf.data,
 		 gpath->cpath.path.startup_cost,
 		 gpath->cpath.path.total_cost);
@@ -1421,6 +1423,12 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	 */
 	outerPlanState(gjs) = ExecInitNode(outerPlan(cscan), estate, eflags);
 	innerPlanState(gjs) = ExecInitNode(innerPlan(cscan), estate, eflags);
+
+	/*
+	 * Is bulkload available?
+	 */
+	gjs->gts.scan_bulk =
+		(!pgstrom_debug_bulkload_enabled ? false : gj_info->outer_bulkload);
 
 	/*
 	 * initialize kernel execution parameter

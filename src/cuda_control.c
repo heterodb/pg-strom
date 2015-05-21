@@ -345,7 +345,7 @@ __gpuMemAlloc(GpuContext *gcontext, int cuda_index, size_t bytesize)
 			return 0UL;		/* need to wait... */
 		elog(ERROR, "failed on cuMemAlloc: %s", errorText(rc));
 	}
-	elog(INFO, "cuMemAlloc(%08zx - %08zx, size=%zuMB)",
+	elog(DEBUG1, "cuMemAlloc(%08zx - %08zx, size=%zuMB)",
 		 (size_t)(block_addr),
 		 (size_t)(block_addr + required),
 		 (size_t)required >> 20);
@@ -602,7 +602,7 @@ found:
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuCtxPopCurrent: %s", errorText(rc));
 
-			elog(INFO, "cuMemFree(%08zx - %08zx, size=%zuMB)",
+			elog(DEBUG1, "cuMemFree(%08zx - %08zx, size=%zuMB)",
 				 (size_t)gm_block->block_addr,
 				 ((size_t)gm_block->block_addr + gm_block->block_size),
 				 ((size_t)gm_block->block_size) >> 20);

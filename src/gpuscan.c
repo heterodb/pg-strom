@@ -608,6 +608,7 @@ gpuscan_create_scan_state(CustomScan *cscan)
 												 sizeof(GpuScanState));
 	/* Set tag and executor callbacks */
 	NodeSetTag(gss, T_CustomScanState);
+	gss->gts.css.flags = cscan->flags;
 	gss->gts.css.methods = &gpuscan_exec_methods.c;
 	/* GpuTaskState setup */
 	pgstrom_init_gputaskstate(gcontext, &gss->gts);
