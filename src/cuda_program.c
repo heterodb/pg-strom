@@ -608,6 +608,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 	 * Make a new entry, instead of the old one
 	 */
 	required = MAXALIGN(strlen(old_entry->kern_source) + 1);
+	required += MAXALIGN(strlen(old_entry->kern_define) + 1);
 	if (ptx_image)
 		required += MAXALIGN(strlen(ptx_image) + 1);
 	required += MAXALIGN(strlen(build_log) + 1);
@@ -624,10 +625,17 @@ __build_cuda_program(program_cache_entry *old_entry)
 	new_entry->crc = old_entry->crc;
 	new_entry->waiting_backends = NULL;		/* no need to set latch */
 	new_entry->extra_flags = old_entry->extra_flags;
+
 	new_entry->kern_source = new_entry->data + usage;
 	length = strlen(old_entry->kern_source);
 	memcpy(new_entry->kern_source,
 		   old_entry->kern_source, length + 1);
+	usage += MAXALIGN(length + 1);
+
+	new_entry->kern_define = new_entry->data + usage;
+	length = strlen(old_entry->kern_define);
+	memcpy(new_entry->kern_define,
+		   old_entry->kern_define, length + 1);
 	usage += MAXALIGN(length + 1);
 
 	if (!ptx_image)
