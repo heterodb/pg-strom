@@ -42,6 +42,7 @@ typedef struct
 	pg_crc32	crc;	/* hash value by extra_flags + kern_source */
 	Bitmapset  *waiting_backends;
 	int			extra_flags;
+	char	   *kern_define;
 	char	   *kern_source;
 	char	   *ptx_image;
 	char	   *error_msg;
@@ -350,7 +351,8 @@ pgstrom_put_cuda_program(program_cache_entry *entry)
  * It makes a flat cstring kernel source.
  */
 static char *
-construct_flat_cuda_source(const char *kern_source, uint32 extra_flags)
+construct_flat_cuda_source(const char *kern_source,
+						   const char *kern_define, uint32 extra_flags)
 {
 	StringInfoData		source;
 
@@ -373,6 +375,9 @@ construct_flat_cuda_source(const char *kern_source, uint32 extra_flags)
 					 "#endif	/* __cplusplus */\n");
 	/* Common PG-Strom device routine */
 	appendStringInfoString(&source, pgstrom_cuda_common_code);
+
+	/* Per session definition if any */
+	appendStringInfoString(&source, kern_define);
 
 	/* PG-Strom CUDA device code libraries */
 
@@ -491,10 +496,11 @@ writeout_cuda_source_file(char *cuda_source)
 }
 
 const char *
-pgstrom_cuda_source_file(const char *kern_source, uint32 extra_flags)
+pgstrom_cuda_source_file(GpuTaskState *gts)
 {
-	char   *cuda_source = construct_flat_cuda_source(kern_source,
-													 extra_flags);
+	char   *cuda_source = construct_flat_cuda_source(gts->kern_source,
+													 gts->kern_define,
+													 gts->extra_flags);
 	return writeout_cuda_source_file(cuda_source);
 }
 
@@ -520,6 +526,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 	 * Make a nvrtcProgram object
 	 */
 	source = construct_flat_cuda_source(old_entry->kern_source,
+										old_entry->kern_define,
 										old_entry->extra_flags);
 	rc = nvrtcCreateProgram(&program,
 							source,
@@ -717,6 +724,8 @@ __pgstrom_load_cuda_program(GpuTaskState *gts, bool is_preload)
 	cl_uint			extra_flags = gts->extra_flags;
 	const char	   *kern_source = gts->kern_source;
 	Size			kern_source_len = strlen(kern_source);
+	const char	   *kern_define = gts->kern_define;
+	Size			kern_define_len = strlen(kern_define);
 	Size			required;
 	Size			usage;
 	int				nwords;
@@ -743,7 +752,8 @@ retry:
 
 		if (entry->crc == crc &&
 			entry->extra_flags == extra_flags &&
-			strcmp(entry->kern_source, kern_source) == 0)
+			strcmp(entry->kern_source, kern_source) == 0 &&
+			strcmp(entry->kern_define, kern_define) == 0)
 		{
 			/* Move this entry to the head of LRU list */
 			dlist_move_head(&pgcache_head->lru_list, &entry->lru_chain);
@@ -821,6 +831,7 @@ retry:
 			  BITS_PER_BITMAPWORD - 1) / BITS_PER_BITMAPWORD;
 	required += MAXALIGN(offsetof(Bitmapset, words[nwords]));
 	required += MAXALIGN(kern_source_len + 1);
+	required += MAXALIGN(kern_define_len + 1);
 	required += 512;	/* margin for error message */
 	usage = 0;
 
@@ -836,6 +847,9 @@ retry:
 	entry->kern_source = (char *)(entry->data + usage);
 	memcpy(entry->kern_source, kern_source, kern_source_len + 1);
 	usage += MAXALIGN(kern_source_len + 1);
+	entry->kern_define = (char *)(entry->data + usage);
+	memcpy(entry->kern_define, kern_define, kern_define_len + 1);
+	usage += MAXALIGN(kern_define_len + 1);
 	/* no cuda binary yet */
 	entry->ptx_image = NULL;
 	/* remaining are for error message */
@@ -884,6 +898,56 @@ pgstrom_preload_cuda_program(GpuTaskState *gts)
 }
 
 /*
+ * assign_timelib_session_info
+ *
+ * It construct per-session information around timelib.h.
+ */
+static void
+assign_timelib_session_info(StringInfo buf)
+{
+	appendStringInfo(
+		buf,
+		"/* ================================================\n"
+		" * session information for cuda_timelib.h\n"
+		" * ================================================ */\n");
+
+
+
+}
+
+/*
+ * pgstrom_assign_cuda_program
+ *
+ * It assigns kernel_source and extra_flags on the given GpuTaskState.
+ * Also, construct per-session specific definition according to the
+ * extra_flags.
+ */
+void
+pgstrom_assign_cuda_program(GpuTaskState *gts,
+							const char *kern_source,
+							int extra_flags)
+{
+	const char	   *kern_define;
+	StringInfoData	buf;
+
+	if ((extra_flags & (DEVFUNC_NEEDS_TIMELIB)) != 0)
+	{
+		initStringInfo(&buf);
+
+		/* put timezone info */
+		assign_timelib_session_info(&buf);
+
+		kern_define = buf.data;
+	}
+	else
+		kern_define = "";	/* no session specific code */
+
+	gts->kern_source = kern_source;
+	gts->kern_define = kern_define;
+	gts->extra_flags = extra_flags;
+}
+
+/*
  * pgstrom_program_info
  *
  * A SQL function to dump cached CUDA programs
@@ -896,6 +960,7 @@ typedef struct
 	const char *status;
 	int32		crc32;
 	int32		flags;
+	text	   *kern_define;
 	text	   *kern_source;
 	text	   *ptx_image;
 	text	   *error_msg;
@@ -923,6 +988,8 @@ __collect_program_info(void)
 			pinfo->status = "Ready";
 		pinfo->crc32 = entry->crc;
 		pinfo->flags = entry->extra_flags;
+		if (entry->kern_define)
+			pinfo->kern_define = cstring_to_text(entry->kern_define);
 		if (entry->kern_source)
 			pinfo->kern_source = cstring_to_text(entry->kern_source);
 		if (entry->ptx_image)
@@ -1010,13 +1077,15 @@ pgstrom_program_info(PG_FUNCTION_ARGS)
 						   INT4OID, -1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 6, "flags",
 						   INT4OID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 7, "kern_source",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 7, "kern_define",
 						   TEXTOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 8, "ptx_image",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 8, "kern_source",
 						   TEXTOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 9, "error_msg",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 9, "ptx_image",
 						   TEXTOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 10, "backends",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 10, "error_msg",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 11, "backends",
 						   TEXTOID, -1, 0);
 		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
 		fncxt->user_fctx = collect_program_info();
@@ -1046,28 +1115,33 @@ pgstrom_program_info(PG_FUNCTION_ARGS)
 		isnull[7] = true;
 		isnull[8] = true;
 		isnull[9] = true;
+		isnull[10] = true;
 	}
 	else
 	{
 		values[3] = CStringGetTextDatum(pinfo->status);
 		values[4] = Int32GetDatum(pinfo->crc32);
 		values[5] = Int32GetDatum(pinfo->flags);
-		if (!pinfo->kern_source)
+		if (!pinfo->kern_define)
 			isnull[6] = true;
 		else
-			values[6] = PointerGetDatum(pinfo->kern_source);
-		if (!pinfo->ptx_image)
+			values[6] = PointerGetDatum(pinfo->kern_define);
+		if (!pinfo->kern_source)
 			isnull[7] = true;
 		else
-			values[7] = PointerGetDatum(pinfo->ptx_image);
-		if (!pinfo->error_msg)
+			values[7] = PointerGetDatum(pinfo->kern_source);
+		if (!pinfo->ptx_image)
 			isnull[8] = true;
 		else
-			values[8] = PointerGetDatum(pinfo->error_msg);
-		if (!pinfo->backends)
+			values[8] = PointerGetDatum(pinfo->ptx_image);
+		if (!pinfo->error_msg)
 			isnull[9] = true;
 		else
-			values[9] = PointerGetDatum(pinfo->backends);
+			values[9] = PointerGetDatum(pinfo->error_msg);
+		if (!pinfo->backends)
+			isnull[10] = true;
+		else
+			values[10] = PointerGetDatum(pinfo->backends);
 	}
 	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
 

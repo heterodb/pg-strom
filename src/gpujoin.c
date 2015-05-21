@@ -1433,8 +1433,9 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	/*
 	 * initialize kernel execution parameter
 	 */
-	gjs->gts.kern_source = gj_info->kern_source;
-	gjs->gts.extra_flags = gj_info->extra_flags;
+	pgstrom_assign_cuda_program(&gjs->gts,
+								gj_info->kern_source,
+								gj_info->extra_flags);
 	gjs->kparams = pgstrom_create_kern_parambuf(gj_info->used_params,
 												ps->ps_ExprContext);
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)

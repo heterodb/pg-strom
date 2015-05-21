@@ -719,8 +719,8 @@ pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es)
 		gts->kern_source != NULL &&
 		pgstrom_debug_kernel_source)
 	{
-		const char *cuda_source = pgstrom_cuda_source_file(gts->kern_source,
-														   gts->extra_flags);
+		const char *cuda_source = pgstrom_cuda_source_file(gts);
+
 		ExplainPropertyText("Kernel Source", cuda_source, es);
 	}
 

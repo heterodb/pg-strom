@@ -112,6 +112,11 @@ STROMCL_SIMPLE_TYPE_TEMPLATE(time,TimeADT)
 STROMCL_SIMPLE_TYPE_TEMPLATE(timestamp,Timestamp)
 #endif
 
+#ifndef PG_TIMESTAMPTZ_TYPE_DEFINED
+#define PG_TIMESTAMPTZ_TYPE_DEFINED
+STROMCL_SIMPLE_TYPE_TEMPLATE(timestamptz,TimestampTz)
+#endif
+
 #ifndef PG_INT4_TYPE_DEFINED
 #define PG_INT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int4,cl_int);
@@ -317,6 +322,28 @@ pgfn_date_timestamp(cl_int *errcode, pg_date_t arg1)
 	}
 	return result;
 }
+
+#if 0
+STATIC_FUNCTION(pg_date_t)
+pgfn_timestamptz_date(cl_int *errcode, pg_timestamptz_t arg1)
+{}
+
+STATIC_FUNCTION(pg_time_t)
+pgfn_timestamptz_time(cl_int *errcode, pg_timestamptz_t arg1)
+{}
+
+STATIC_FUNCTION(pg_timestamp_t)
+pgfn_timestamptz_timestamp(cl_int *errcode, pg_timestamptz_t arg1)
+{}
+
+STATIC_FUNCTION(pg_timestamptz_t)
+pgfn_timestamp_timestamptz(cl_int *errcode, pg_timestamp_t arg1)
+{}
+
+STATIC_FUNCTION(pg_timestamptz_t)
+pgfn_date_timestamptz(cl_int *errcode, pg_date_t arg1)
+{}
+#endif
 
 /*
  * Time/Date operators
@@ -658,6 +685,140 @@ pgfn_timestamp_cmp_date(cl_int *errcode,
 	}
 	return result;
 }
+
+#if 0
+/*
+ * Comparison between date and timestamptz
+ */
+STATIC_FUNCTION(pg_bool_t)
+pgfn_date_lt_timestamptz(cl_int *errcode,
+						 pg_date_t arg1, pg_timestamptz_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_date_le_timestamptz(cl_int *errcode,
+						 pg_date_t arg1, pg_timestamptz_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_date_eq_timestamptz(cl_int *errcode,
+						 pg_date_t arg1, pg_timestamptz_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_date_ge_timestamptz(cl_int *errcode,
+						 pg_date_t arg1, pg_timestamptz_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_date_gt_timestamptz(cl_int *errcode,
+						 pg_date_t arg1, pg_timestamptz_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_date_ne_timestamptz(cl_int *errcode,
+						 pg_date_t arg1, pg_timestamptz_t arg2)
+{}
+
+/*
+ * Comparison between timestamptz and date
+ */
+STATIC_FUNCTION(pg_bool_t)
+pgfn_timestamptz_lt_date(cl_int *errcode,
+						 pg_timestamptz_t arg1, pg_date_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_timestamptz_le_date(cl_int *errcode,
+						 pg_timestamptz_t arg1, pg_date_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_timestamptz_eq_date(cl_int *errcode,
+						 pg_timestamptz_t arg1, pg_date_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_timestamptz_ge_date(cl_int *errcode,
+						 pg_timestamptz_t arg1, pg_date_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_timestamptz_gt_date(cl_int *errcode,
+						 pg_timestamptz_t arg1, pg_date_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_timestamptz_ne_date(cl_int *errcode,
+						 pg_timestamptz_t arg1, pg_date_t arg2)
+{}
+
+/*
+ * Comparison between timestamp and timestamptz
+ */
+STATIC_FUNCTION(pg_bool_t)
+pgfn_timestamp_lt_timestamptz(cl_int *errcode,
+							  pg_timestamp_t arg1, pg_timestamptz_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_timestamp_le_timestamptz(cl_int *errcode,
+							  pg_timestamp_t arg1, pg_timestamptz_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_timestamp_eq_timestamptz(cl_int *errcode,
+							  pg_timestamp_t arg1, pg_timestamptz_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_timestamp_ge_timestamptz(cl_int *errcode,
+							  pg_timestamp_t arg1, pg_timestamptz_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_timestamp_gt_timestamptz(cl_int *errcode,
+							  pg_timestamp_t arg1, pg_timestamptz_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_timestamp_ne_timestamptz(cl_int *errcode,
+							  pg_timestamp_t arg1, pg_timestamptz_t arg2)
+{}
+
+/*
+ * Comparison between timestamptz and timestamp
+ */
+STATIC_FUNCTION(pg_bool_t)
+pgfn_timestamptz_lt_timestamp(cl_int *errcode,
+							  pg_timestamptz_t arg1, pg_timestamp_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_timestamptz_le_timestamp(cl_int *errcode,
+							  pg_timestamptz_t arg1, pg_timestamp_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_timestamptz_eq_timestamp(cl_int *errcode,
+							  pg_timestamptz_t arg1, pg_timestamp_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_timestamptz_ge_timestamp(cl_int *errcode,
+							  pg_timestamptz_t arg1, pg_timestamp_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_timestamptz_gt_timestamp(cl_int *errcode,
+							  pg_timestamptz_t arg1, pg_timestamp_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_timestamptz_ne_timestamp(cl_int *errcode,
+							  pg_timestamptz_t arg1, pg_timestamp_t arg2)
+{}
+#endif
 
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_TIMELIB_H */

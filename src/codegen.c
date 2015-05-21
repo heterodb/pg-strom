@@ -524,6 +524,13 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "time", 1, {TIMEOID}, "ta/c:" },
 	{ "timestamp", 1, {TIMESTAMPOID}, "ta/c:" },
 	{ "timestamp", 1, {DATEOID}, "t/F:date_timestamp" },
+#if 0
+	{ "date", 1, {TIMESTAMPTZOID}, "t/F:timestamptz_date" },
+	{ "time", 1, {TIMESTAMPTZOID}, "t/F:timestamptz_time" },
+	{ "timestamp", 1, {TIMESTAMPTZOID}, "t/F:timestamptz_timestamp" },
+	{ "timestamptz", 1, {TIMESTAMPOID}, "t/F:timestamp_timestamptz" },
+	{ "timestamptz", 1, {DATE}, "t/F:date_timestamptz" },
+#endif
 	/* timedata operators */
 	{ "date_pli", 2, {DATEOID, INT4OID}, "t/F:date_pli" },
 	{ "date_mii", 2, {DATEOID, INT4OID}, "t/F:date_mii" },
@@ -597,6 +604,66 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "timestamptz_ge", 2, {TIMESTAMPTZOID, TIMESTAMPTZOID}, "t/b:>=" },
 	{ "timestamptz_cmp", 2, {TIMESTAMPTZOID, TIMESTAMPTZOID}, 
 	  "t/f:devfunc_int_comp" },
+#if 0
+	/* comparison between date and timestamptz */
+	{ "date_lt_timestamptz", 2, {DATEOID, TIMESTAMPTZOID},
+	  "t/F:date_lt_timestamptz" },
+	{ "date_le_timestamptz", 2, {DATEOID, TIMESTAMPTZOID},
+	  "t/F:date_le_timestamptz" },
+	{ "date_eq_timestamptz", 2, {DATEOID, TIMESTAMPTZOID},
+	  "t/F:date_eq_timestamptz" },
+	{ "date_ge_timestamptz", 2, {DATEOID, TIMESTAMPTZOID},
+	  "t/F:date_ge_timestamptz" },
+	{ "date_gt_timestamptz", 2, {DATEOID, TIMESTAMPTZOID},
+	  "t/F:date_gt_timestamptz" },
+	{ "date_ne_timestamptz", 2, {DATEOID, TIMESTAMPTZOID},
+	  "t/F:date_ne_timestamptz" },
+
+	/* comparison between timestamptz and date */
+	{ "timestamptz_lt_date", 2, {TIMESTAMPTZOID, DATEOID},
+	  "t/F:timestamptz_lt_date" },
+	{ "timestamptz_le_date", 2, {TIMESTAMPTZOID, DATEOID},
+	  "t/F:timestamptz_le_date" },
+	{ "timestamptz_eq_date", 2, {TIMESTAMPTZOID, DATEOID},
+	  "t/F:timestamptz_eq_date" },
+	{ "timestamptz_ge_date", 2, {TIMESTAMPTZOID, DATEOID},
+	  "t/F:timestamptz_ge_date" },
+	{ "timestamptz_gt_date", 2, {TIMESTAMPTZOID, DATEOID},
+	  "t/F:timestamptz_gt_date" },
+	{ "timestamptz_ne_date", 2, {TIMESTAMPTZOID, DATEOID},
+	  "t/F:timestamptz_ne_date" },
+
+	/* comparison between timestamp and timestamptz  */
+	{ "timestamp_lt_timestamptz", 2, {TIMESTAMPOID, TIMESTAMPTZOID},
+	  "t/F:timestamp_lt_timestamptz" },
+	{ "timestamp_le_timestamptz", 2, {TIMESTAMPOID, TIMESTAMPTZOID},
+	  "t/F:timestamp_le_timestamptz" },
+	{ "timestamp_eq_timestamptz", 2, {TIMESTAMPOID, TIMESTAMPTZOID},
+	  "t/F:timestamp_eq_timestamptz" },
+	{ "timestamp_ge_timestamptz", 2, {TIMESTAMPOID, TIMESTAMPTZOID},
+	  "t/F:timestamp_ge_timestamptz" },
+	{ "timestamp_gt_timestamptz", 2, {TIMESTAMPOID, TIMESTAMPTZOID},
+	  "t/F:timestamp_gt_timestamptz" },
+	{ "timestamp_ne_timestamptz", 2, {TIMESTAMPOID, TIMESTAMPTZOID},
+	  "t/F:timestamp_ne_timestamptz" },
+
+	/* comparison between timestamptz and timestamp  */
+	{ "timestamptz_lt_timestamp", 2, {TIMESTAMPTZOID, TIMESTAMPOID},
+      "t/F:timestamptz_lt_timestamp" },
+	{ "timestamptz_le_timestamp", 2, {TIMESTAMPTZOID, TIMESTAMPOID},
+      "t/F:timestamptz_le_timestamp" },
+	{ "timestamptz_eq_timestamp", 2, {TIMESTAMPTZOID, TIMESTAMPOID},
+      "t/F:timestamptz_eq_timestamp" },
+	{ "timestamptz_ge_timestamp", 2, {TIMESTAMPTZOID, TIMESTAMPOID},
+      "t/F:timestamptz_ge_timestamp" },
+	{ "timestamptz_gt_timestamp", 2, {TIMESTAMPTZOID, TIMESTAMPOID},
+      "t/F:timestamptz_gt_timestamp" },
+	{ "timestamptz_ne_timestamp", 2, {TIMESTAMPTZOID, TIMESTAMPOID},
+      "t/F:timestamptz_ne_timestamp" },
+	/*
+	 * TODO: overlap() SQL function
+	 */
+#endif
 	/*
 	 * Text functions
 	 * ---------------------- */

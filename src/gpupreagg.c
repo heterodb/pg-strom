@@ -2957,8 +2957,9 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	/*
 	 * Setting up kernel program and message queue
 	 */
-	gpas->gts.kern_source = gpa_info->kern_source;
-	gpas->gts.extra_flags = gpa_info->extra_flags;
+	pgstrom_assign_cuda_program(&gpas->gts,
+								gpa_info->kern_source,
+								gpa_info->extra_flags);
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
         pgstrom_preload_cuda_program(&gpas->gts);
 
