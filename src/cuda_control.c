@@ -1558,6 +1558,14 @@ pgstrom_compute_workgroup_size(size_t *p_grid_size,
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
 
+	/* get warp size of the target device */
+	rc = cuDeviceGetAttribute(&warp_size,
+							  CU_DEVICE_ATTRIBUTE_WARP_SIZE,
+							  device);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s",
+			 errorText(rc));
+
 	if (maximum_blocksize)
 	{
 		rc = cuFuncGetAttribute(&block_size,
@@ -1574,13 +1582,6 @@ pgstrom_compute_workgroup_size(size_t *p_grid_size,
 			elog(ERROR, "failed on cuDeviceGetAttribute: %s",
 				 errorText(rc));
 
-		rc = cuDeviceGetAttribute(&warp_size,
-								  CU_DEVICE_ATTRIBUTE_WARP_SIZE,
-								  device);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuDeviceGetAttribute: %s",
-				 errorText(rc));
-
 		if (static_shmem_size +
 			dynamic_shmem_per_thread * block_size > max_shmem_size)
 		{
@@ -1591,8 +1592,6 @@ pgstrom_compute_workgroup_size(size_t *p_grid_size,
 			if (static_shmem_size > max_shmem_size || block_size < warp_size)
 				elog(ERROR, "Too much GPU shared memory required");
 		}
-		*p_block_size = block_size;
-		*p_grid_size = (nitems + block_size - 1) / block_size;
 	}
 	else
 	{
@@ -1606,10 +1605,16 @@ pgstrom_compute_workgroup_size(size_t *p_grid_size,
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuOccupancyMaxPotentialBlockSize: %s",
 				 errorText(rc));
-
-		*p_block_size = block_size;
-		*p_grid_size = (nitems + block_size - 1) / block_size;
 	}
+
+	/*
+	 * Cut-off block-size, if it is larger than nitems
+	 */
+	if (block_size > nitems)
+		block_size = (nitems + warp_size - 1) & ~(warp_size - 1);
+
+	*p_block_size = block_size;
+	*p_grid_size = (nitems + block_size - 1) / block_size;
 }
 
 /*
