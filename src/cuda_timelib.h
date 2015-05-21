@@ -1196,7 +1196,7 @@ assign_timelib_session_info(StringInfo buf)
 
 	appendStringInfo(
 		buf,
-		"#endif /* __CUDACC__ */\n"
+		"#endif /* __CUDACC__ */\n");
 }
 
 #endif	/* __CUDACC__ */
