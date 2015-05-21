@@ -444,7 +444,8 @@ extern void pgstrom_compute_workgroup_size_2d(size_t *p_grid_xsize,
 											  size_t x_nitems,
 											  size_t y_nitems,
 											  size_t dynamic_shmem_per_xitems,
-											  size_t dynamic_shmem_per_yitems);
+											  size_t dynamic_shmem_per_yitems,
+											  size_t dynamic_shmem_per_thread);
 extern void pgstrom_init_cuda_control(void);
 extern int pgstrom_baseline_cuda_capability(void);
 extern const char *errorText(int errcode);

@@ -1197,26 +1197,33 @@ STATIC_FUNCTION(cl_uint)
 arithmetic_stairlike_add(cl_uint my_value, cl_uint *total_sum)
 {
 	cl_uint	   *items = SHARED_WORKMEM(cl_uint);
-	size_t		unitsz = get_local_size();
+	size_t		local_sz;
+	size_t		local_id;
+	size_t		unit_sz;
 	cl_int		i, j;
 
+	/* setup local size (pay attention, if 2D invocation) */
+	local_sz = get_local_ysize() * get_local_xsize();
+	local_id = get_local_yid() * get_local_xsize() + get_local_xid();
+	assert(local_id < local_sz);
+
 	/* set initial value */
-	items[get_local_id()] = my_value;
+	items[local_id] = my_value;
 	__syncthreads();
 
-	for (i=1; unitsz > 0; i++, unitsz >>= 1)
+	for (i=1, unit_sz = local_sz; unit_sz > 0; i++, unit_sz >>= 1)
 	{
 		/* index of last item in the earlier half of each 2^i unit */
-		j = (get_local_id() & ~((1 << i) - 1)) | ((1 << (i-1)) - 1);
+		j = (local_id & ~((1 << i) - 1)) | ((1 << (i-1)) - 1);
 
 		/* add item[j] if it is later half in the 2^i unit */
-		if ((get_local_id() & (1 << (i - 1))) != 0)
-			items[get_local_id()] += items[j];
+		if ((local_id & (1 << (i - 1))) != 0)
+			items[local_id] += items[j];
 		__syncthreads();
 	}
 	if (total_sum)
-		*total_sum = items[get_local_size() - 1];
-	return items[get_local_id()] - my_value;
+		*total_sum = items[local_sz - 1];
+	return local_id == 0 ? 0 : items[local_id - 1];
 }
 
 /*
@@ -1232,6 +1239,8 @@ STATIC_FUNCTION(void)
 kern_writeback_error_status(cl_int *error_status, int own_errcode)
 {
 	cl_int	   *error_temp = SHARED_WORKMEM(cl_int);
+	size_t		local_sz;
+	size_t		local_id;
 	size_t		unitsz;
 	size_t		mask;
 	size_t		buddy;
@@ -1239,26 +1248,29 @@ kern_writeback_error_status(cl_int *error_status, int own_errcode)
 	cl_int		errcode_1;
 	cl_int		i;
 
-	error_temp[get_local_id()] = own_errcode;
+	/* setup local size (pay attention, if 2D invocation) */
+	local_sz = get_local_ysize() * get_local_xsize();
+	local_id = get_local_yid() * get_local_xsize() + get_local_xid();
+
+	/* set initial value */
+	error_temp[local_id] = own_errcode;
 	__syncthreads();
 
-	for (i=1, unitsz = get_local_size();
-		 unitsz > 0;
-		 i++, unitsz >>= 1)
+	for (i=1, unitsz = local_sz; unitsz > 0; i++, unitsz >>= 1)
 	{
 		mask = (1 << i) - 1;
 
-		if ((get_local_id() & mask) == 0)
+		if ((local_id & mask) == 0)
 		{
-			buddy = get_local_id() + (1 << (i - 1));
+			buddy = local_id + (1 << (i - 1));
 
-			errcode_0 = error_temp[get_local_id()];
-			errcode_1 = (buddy < get_local_size()
+			errcode_0 = error_temp[local_id];
+			errcode_1 = (buddy < local_sz
 						 ? error_temp[buddy]
 						 : StromError_Success);
 			if (errcode_0 == StromError_Success &&
 				errcode_1 != StromError_Success)
-				error_temp[get_local_id()] = errcode_1;
+				error_temp[local_id] = errcode_1;
 		}
 		__syncthreads();
 	}
@@ -1270,7 +1282,7 @@ kern_writeback_error_status(cl_int *error_status, int own_errcode)
 	 * StromError_Success.
 	 */
 	errcode_0 = error_temp[0];
-	if (get_local_id() == 0)
+	if (get_local_xid() == 0 && get_local_yid() == 0)
 		atomicCAS(error_status, StromError_Success, errcode_0);
 }
 

@@ -1817,13 +1817,12 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 			dtype->type_name,
 			kernode->varoattno);
 	}
-	appendStringInfoChar(source, '\n');
 
 	/*
 	 * parameter declaration
 	 */
 	param_decl = pgstrom_codegen_param_declarations(context);
-	appendStringInfo(source, "%s", param_decl);
+	appendStringInfo(source, "%s\n", param_decl);
 
 	/*
 	 * variable initialization
@@ -1848,7 +1847,8 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 					source,
 					"  /* variable load in depth-0 (outer KDS) */\n"
 					"  colmeta = kds->colmeta;\n"
-					"  htup = GPUJOIN_REF_HTUP(kds,o_buffer[0]);\n"
+					"  htup = (!o_buffer ? NULL :\n"
+					"          GPUJOIN_REF_HTUP(kds,o_buffer[0]));\n"
 					);
 			}
 			else if (list_nth(gj_info->hash_outer_keys, keynode->varno - 1))
@@ -1865,7 +1865,8 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				if (keynode->varno < cur_depth)
 					appendStringInfo(
 						source,
-						"  htup = GPUJOIN_REF_HTUP(khtable,o_buffer[%d]);\n",
+						"  htup = (!o_buffer ? NULL :\n"
+						"          GPUJOIN_REF_HTUP(khtable,o_buffer[%d]));\n",
 						keynode->varno);
 				else if (keynode->varno == cur_depth)
 					appendStringInfo(
@@ -1889,7 +1890,8 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				if (keynode->varno < cur_depth)
 					appendStringInfo(
 						source,
-						"  htup = GPUJOIN_REF_HTUP(kds_in,o_buffer[%d]);\n",
+						"  htup = (!o_buffer ? NULL :\n"
+						"          GPUJOIN_REF_HTUP(kds_in,o_buffer[%d]));\n",
 						keynode->varno);
 				else if (keynode->varno == cur_depth)
 					appendStringInfo(
@@ -1909,11 +1911,12 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				"  if (get_local_%s() == 0)\n"
 				"  {\n"
 				"    datum = GPUJOIN_REF_DATUM(colmeta,htup,%u);\n"
-				"    SHARED_WORKMEM(pg_%s_t)[get_local_%s()]"
-				" = pg_%s_datum_ref(errcode, datum, false);\n"
+				"    SHARED_WORKMEM(pg_%s_t)[get_local_%s()]\n"
+				"      = pg_%s_datum_ref(errcode, datum, false);\n"
 				"  }\n"
 				"  __syncthreads();\n"
 				"  KVAR_%u = SHARED_WORKMEM(pg_%s_t)[get_local_%s()];\n"
+				"  __syncthreads();\n"
 				"\n",
 				keynode->varno == cur_depth ? "xid" : "yid",
 				keynode->varattno - 1,
@@ -2736,6 +2739,7 @@ gpujoin_task_respond(CUstream stream, CUresult status, void *private)
 	/* remove from the running_tasks list */
 	dlist_delete(&pgjoin->task.chain);
 	gts->num_running_tasks--;
+
 	/* then, attach it on the completed_tasks list */
 	if (pgjoin->task.errcode == StromError_Success)
 		dlist_push_tail(&gts->completed_tasks, &pgjoin->task.chain);
@@ -2834,6 +2838,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 		pgjoin->kern.kresults_1_offset + length;
 	pgjoin->kern.kresults_total_items = total_items;
 	pgjoin->kern.kresults_max_items = 0;
+	pgjoin->kern.errcode = StromError_Success;
 
 	length = pgjoin->kern.kresults_1_offset + 2 * length;
 	pgjoin->m_kgjoin = gpuMemAlloc(&pgjoin->task, length);
@@ -2972,6 +2977,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 		 */
 		if (is_nestloop)
 		{
+			size_t	shmem_size;
 			size_t	inner_ntuples
 				= multirels_get_nitems(pgjoin->pmrels, depth);
 
@@ -2995,7 +3001,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 											  outer_ntuples,
 											  inner_ntuples,
 											  2 * sizeof(Datum),
-											  2 * sizeof(Datum));
+											  2 * sizeof(Datum),
+											  sizeof(cl_uint));
 			kern_args[0] = &pgjoin->m_kgjoin;
 			kern_args[1] = &pgjoin->m_kds_src;
 			kern_args[2] = &pgjoin->m_kmrels;
@@ -3003,11 +3010,14 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			kern_args[4] = &pgjoin->task.cuda_index;
 			kern_args[5] = &pgjoin->m_ojmaps;
 
+			shmem_size = Max(2 * sizeof(Datum) * Max(block_xsize,
+													 block_ysize),
+							 sizeof(cl_uint) * block_xsize * block_ysize);
+
 			rc = cuLaunchKernel(pgjoin->kern_exec_nl,
 								grid_xsize, grid_ysize, 1,
 								block_xsize, block_ysize, 1,
-								2 * sizeof(Datum) * (block_xsize +
-													 block_ysize),
+								shmem_size,
 								pgjoin->task.cuda_stream,
 								kern_args,
 								NULL);
@@ -3201,6 +3211,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	pgjoin->task.pfm.num_dma_recv++;
 
 	CUDA_EVENT_RECORD(pgjoin, ev_dma_recv_stop);
+
+	cuStreamSynchronize(pgjoin->task.cuda_stream);
 
 	/*
 	 * Register the callback

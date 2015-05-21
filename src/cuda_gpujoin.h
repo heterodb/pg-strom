@@ -224,6 +224,11 @@ gpujoin_outer_quals(cl_int *errcode,
  *
  * Evaluation of join qualifier in the given depth. It shall return true
  * if supplied pair of the rows matches the join condition.
+ *
+ * NOTE: if x-axil (outer input) or y-axil (inner input) are out of range,
+ * we expect outer_index or inner_htup are NULL. Don't skip to call this
+ * function, because nested-loop internally uses __syncthread operation
+ * to reduce DRAM accesses.
  */
 STATIC_FUNCTION(cl_bool)
 gpujoin_join_quals(cl_int *errcode,
@@ -232,7 +237,7 @@ gpujoin_join_quals(cl_int *errcode,
 				   kern_multirels *kmrels,
 				   int depth,
 				   cl_int *outer_index,
-				   HeapTupleHeaderData *htup);
+				   HeapTupleHeaderData *inner_htup);
 
 /*
  * gpujoin_hash_value
@@ -417,40 +422,48 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 		 x_index < x_limit;
 		 x_index += get_global_xsize())
 	{
-		cl_int		   *x_buffer = KERN_GET_RESULT(kresults_in, x_index);
+		HeapTupleHeaderData *y_htup;
+		cl_int		   *x_buffer;
 		cl_int		   *r_buffer;
 		cl_bool			is_matched;
 		cl_uint			count;
 		cl_uint			offset;
 		__shared__ cl_int base;
 
-		if (y_index < kds_in->nitems && x_index < nvalids)
-		{
-			HeapTupleHeaderData	   *htup
-				= kern_get_tuple_row(kds_in, y_index);
+		/* outer input */
+		if (x_index < nvalids)
+			x_buffer = KERN_GET_RESULT(kresults_in, x_index);
+		else
+			x_buffer = NULL;
 
-			is_matched = gpujoin_join_quals(&errcode,
-											kparams,
-											kds,
-											kmrels,
-											depth,
-											x_buffer,
-											htup);
-			if (is_matched)
-			{
-				if (lo_map && !lo_map[y_index])
-					lo_map[y_index] = true;
-			}
-			y_offset = (size_t)htup - (size_t)kds_in;
+		/* inner input */
+		if (y_index < kds_in->nitems)
+			y_htup = kern_get_tuple_row(kds_in, y_index);
+		else
+			y_htup = NULL;
+
+		/* does it satisfies join condition? */
+		is_matched = gpujoin_join_quals(&errcode,
+										kparams,
+										kds,
+										kmrels,
+										depth,
+										x_buffer,
+										y_htup);
+		if (is_matched)
+		{
+			y_offset = (size_t)y_htup - (size_t)kds_in;
+			if (lo_map && !lo_map[y_index])
+				lo_map[y_index] = true;
 		}
 		else
-			is_matched = false;
+			y_offset = UINT_MAX;
 
 		/*
 		 * Expand kresults_out->nitems, and put values
 		 */
 		offset = arithmetic_stairlike_add(is_matched ? 1 : 0, &count);
-		if (get_local_id() == 0)
+		if (get_local_xid() == 0 && get_local_yid() == 0)
 		{
 			if (count > 0)
 				base = atomicAdd(&kresults_out->nitems, count);
@@ -468,7 +481,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 
 		if (is_matched)
 		{
-			assert(x_buffer != NULL);
+			assert(x_buffer != NULL && y_htup != NULL);
 			r_buffer = KERN_GET_RESULT(kresults_out, base + offset);
 			memcpy(r_buffer, x_buffer, sizeof(cl_int) * depth);
 			r_buffer[depth] = y_offset;
@@ -590,24 +603,23 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		 * walks on the hash entries
 		 */
 		do {
-			if (!khentry || khentry->hash != hash_value)
-				is_matched = false;
-			else
+			HeapTupleHeaderData *h_htup
+				= (!khentry || khentry->hash != hash_value
+				   ? NULL
+				   : &khentry->htup);
+
+			is_matched = gpujoin_join_quals(&errcode,
+											kparams,
+											kds,
+											kmrels,
+											depth,
+											x_buffer,	/* valid if in range */
+											h_htup);	/* valid if in range */
+			if (is_matched)
 			{
-				assert(x_buffer != NULL);
-				is_matched = gpujoin_join_quals(&errcode,
-												kparams,
-												kds,
-												kmrels,
-												depth,
-												x_buffer,
-												&khentry->htup);
-				if (is_matched)
-				{
-					if (lo_map && !lo_map[khentry->rowid])
-						lo_map[khentry->rowid] = true;
-					needs_outer_row = false;
-				}
+				if (lo_map && !lo_map[khentry->rowid])
+					lo_map[khentry->rowid] = true;
+				needs_outer_row = false;
 			}
 
 			/*
@@ -1359,7 +1371,7 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 		 * Update nitems of kds_dst. note that get_global_id(0) is not always
 		 * called earlier than other thread. So, we should not expect nitems
 		 * of kds_dst is initialized.
-		 */		
+		 */
 		kds_dst->nitems = kresults->nitems;
 	}
 
