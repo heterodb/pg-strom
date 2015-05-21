@@ -1778,7 +1778,10 @@ pgstrom_codegen_available_expression(Expr *expr)
 		Const  *con = (Const *) expr;
 
 		if (!pgstrom_devtype_lookup(con->consttype))
+		{
+			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
 			return false;
+		}
 		return true;
 	}
 	else if (IsA(expr, Param))
@@ -1787,7 +1790,10 @@ pgstrom_codegen_available_expression(Expr *expr)
 
 		if (param->paramkind != PARAM_EXTERN ||
 			!pgstrom_devtype_lookup(param->paramtype))
+		{
+			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
 			return false;
+		}
 		return true;
 	}
 	else if (IsA(expr, Var))
@@ -1795,15 +1801,22 @@ pgstrom_codegen_available_expression(Expr *expr)
 		Var	   *var = (Var *) expr;
 
 		if (!pgstrom_devtype_lookup(var->vartype))
+		{
+			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
 			return false;
+		}
 		return true;
 	}
 	else if (IsA(expr, FuncExpr))
 	{
 		FuncExpr   *func = (FuncExpr *) expr;
 
-		if (!pgstrom_devfunc_lookup(func->funcid, func->inputcollid))
+		if (!pgstrom_devfunc_lookup(func->funcid,
+									func->inputcollid))
+		{
+			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
 			return false;
+		}
 		return pgstrom_codegen_available_expression((Expr *) func->args);
 	}
 	else if (IsA(expr, OpExpr) || IsA(expr, DistinctExpr))
@@ -1812,7 +1825,10 @@ pgstrom_codegen_available_expression(Expr *expr)
 
 		if (!pgstrom_devfunc_lookup(get_opcode(op->opno),
 									op->inputcollid))
+		{
+			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
 			return false;
+		}
 		return pgstrom_codegen_available_expression((Expr *) op->args);
 	}
 	else if (IsA(expr, NullTest))
@@ -1820,7 +1836,10 @@ pgstrom_codegen_available_expression(Expr *expr)
 		NullTest   *nulltest = (NullTest *) expr;
 
 		if (nulltest->argisrow)
+		{
+			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
 			return false;
+		}
 		return pgstrom_codegen_available_expression((Expr *) nulltest->arg);
 	}
 	else if (IsA(expr, BooleanTest))
@@ -1843,7 +1862,10 @@ pgstrom_codegen_available_expression(Expr *expr)
 		RelabelType *relabel = (RelabelType *) expr;
 
 		if (!pgstrom_devtype_lookup(relabel->resulttype))
+		{
+			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
 			return false;
+		}
 		return pgstrom_codegen_available_expression((Expr *) relabel->arg);
 	}
 	else if (IsA(expr, CaseExpr))
@@ -1852,7 +1874,10 @@ pgstrom_codegen_available_expression(Expr *expr)
 		ListCell   *cell;
 
 		if (!pgstrom_devtype_lookup(caseexpr->casetype))
+		{
+			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
 			return false;
+		}
 
 		if (caseexpr->arg)
 		{
@@ -1863,7 +1888,11 @@ pgstrom_codegen_available_expression(Expr *expr)
 			if (!OidIsValid(dtype->type_eqfunc) ||
 				!pgstrom_devfunc_lookup(dtype->type_eqfunc,
 										caseexpr->casecollid))
+			{
+				elog(DEBUG2, "Unable to run on device: %s",
+					 nodeToString(caseexpr->arg));
 				return false;
+			}
 		}
 
 		foreach (cell, caseexpr->args)
@@ -1873,16 +1902,20 @@ pgstrom_codegen_available_expression(Expr *expr)
 			Assert(IsA(casewhen, CaseWhen));
 			if (exprType((Node *)casewhen->expr) !=
 				(caseexpr->arg ? exprType((Node *)caseexpr->arg) : BOOLOID))
+			{
+				elog(DEBUG2, "Unable to run on device: %s",
+					 nodeToString(lfirst(cell)));
 				return false;
+			}
 			if (!pgstrom_codegen_available_expression(casewhen->expr))
 				return false;
 			if (!pgstrom_codegen_available_expression(casewhen->result))
 				return false;
 		}
-		if (!pgstrom_codegen_available_expression((Expr *) caseexpr->defresult))
+		if (!pgstrom_codegen_available_expression((Expr *)caseexpr->defresult))
 			return false;
-
 	}
+	elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
 	return false;
 }
 
