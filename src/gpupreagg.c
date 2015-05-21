@@ -3351,6 +3351,7 @@ static bool
 gpupreagg_task_complete(GpuTask *gtask)
 {
 	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) gtask;
+	GpuTaskState	   *gts = gtask->gts;
 
 	if (gpreagg->task.pfm.enabled)
 	{
@@ -3387,6 +3388,7 @@ gpupreagg_task_complete(GpuTask *gtask)
 		CUDA_EVENT_ELAPSED(gpreagg, time_dma_recv,
                            ev_dma_recv_start,
                            ev_dma_recv_stop);
+		pgstrom_accum_perfmon(&gts->pfm_accum, &gpreagg->task.pfm);
 	}
 	gpupreagg_cleanup_cuda_resources(gpreagg);	
 	return true;

@@ -560,7 +560,7 @@ pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
                  milliseconds_unitary_format(pfm->time_kern_join /
 											 (double)pfm->num_kern_join),
                  pfm->num_kern_join);
-		ExplainPropertyText("Hash-join main kernel", buf, es);
+		ExplainPropertyText("GpuJoin main kernel", buf, es);
 	}
 
 	if (pfm->num_kern_proj > 0)
@@ -570,7 +570,7 @@ pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
                  milliseconds_unitary_format(pfm->time_kern_proj /
 											 (double)pfm->num_kern_proj),
                  pfm->num_kern_proj);
-		ExplainPropertyText("Hash-join projection", buf, es);
+		ExplainPropertyText("GpuJoin projection", buf, es);
 	}
 	/* in case of gpupreagg */
 	if (pfm->num_kern_prep > 0)

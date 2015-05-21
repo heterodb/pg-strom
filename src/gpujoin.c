@@ -2382,7 +2382,7 @@ retry:
 			gjs->gts.scan_done = false;
 		}
 	}
-	PERFMON_BEGIN(&gts->pfm_accum, &tv2);
+	PERFMON_END(&gjs->gts.pfm_accum, time_inner_load, &tv1, &tv2);
 
 	if (!gjs->gts.scan_bulk)
 	{
@@ -2437,7 +2437,6 @@ retry:
 			gjs->gts.scan_done = true;
 		}
 	}
-	PERFMON_END(&gjs->gts.pfm_accum, time_inner_load, &tv1, &tv2);
 	PERFMON_END(&gjs->gts.pfm_accum, time_outer_load, &tv2, &tv3);
 
 	/*
