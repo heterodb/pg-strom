@@ -3220,8 +3220,6 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 
 	CUDA_EVENT_RECORD(pgjoin, ev_dma_recv_stop);
 
-	cuStreamSynchronize(pgjoin->task.cuda_stream);
-
 	/*
 	 * Register the callback
 	 */

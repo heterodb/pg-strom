@@ -417,6 +417,41 @@ create_kern_hashtable(MultiRelsState *mrs, pgstrom_multirels *pmrels)
 	return khtable;
 }
 
+static void __attribute__ ((unused))
+dump_kern_hashtable(kern_hashtable *khtable)
+{
+	int		i;
+
+	elog(INFO,
+		 "kern_hashtable {length=%u usage=%u ncols=%u nitems=%u "
+		 "nslots=%u hash_min=%08x hash_max=%08x}",
+		 khtable->length,
+		 khtable->usage,
+		 khtable->ncols,
+		 khtable->nitems,
+		 khtable->nslots,
+		 khtable->hash_min,
+		 khtable->hash_max);
+	for (i=0; i < khtable->nslots; i++)
+	{
+		kern_hashentry *khentry;
+
+		for (khentry = KERN_HASH_FIRST_ENTRY(khtable, i);
+			 khentry != NULL;
+			 khentry = KERN_HASH_NEXT_ENTRY(khtable, khentry))
+		{
+			elog(INFO, "slot=%d khentry {hash=%08x next=%u rowid=%u t_len=%d} "
+				 "htup {natts=%d}",
+				 i,
+				 khentry->hash,
+				 khentry->next,
+				 khentry->rowid,
+				 khentry->t_len,
+				 HeapTupleHeaderGetNatts(&khentry->htup));
+		}
+	}
+}
+
 static pg_crc32
 get_tuple_hashvalue(MultiRelsState *mrs, TupleTableSlot *slot)
 {
@@ -636,9 +671,12 @@ multirels_preload_hash(MultiRelsState *mrs,
 				Size	chunk_size_new = (Size)
 					(mrs->kmrels_rate *(double)(pmrels->kmrels_length -
 												pmrels->head_length));
+				elog(DEBUG1, "kern_hashtable (depth=%d) expanded %zu => %zu",
+					 mrs->depth, (Size)khtable->length, chunk_size_new);
 				khtable = repalloc(khtable, chunk_size_new);
 				khtable->hostptr = (hostptr_t)&khtable->hostptr;
 				khtable->length = chunk_size_new;
+				hash_slots = KERN_HASHTABLE_SLOT(khtable);
 			}
 			else if (mrs->join_type == JOIN_INNER ||
 					 mrs->join_type == JOIN_RIGHT)
