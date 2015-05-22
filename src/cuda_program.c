@@ -293,7 +293,7 @@ pgstrom_program_cache_free(program_cache_entry *entry)
 			buddy->shift != shift ||				/* same size? */
 			PGCACHE_ACTIVE_ENTRY(buddy))			/* and free entry? */
 			break;
-#if 0
+#ifdef NOT_USED
 		/* Sanity check - buddy should be in free list */
 		do {
 			dlist_head	   *free_list = pgcache_head->free_list + shift;

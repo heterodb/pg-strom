@@ -186,7 +186,7 @@ gpuMemDump(GpuContext *gcontext, int cuda_index)
 		__gpuMemDump(gm_head->empty_block, false);
 }
 
-#if 0
+#ifdef NOT_USED
 static void
 __gpuMemSanityCheck(GpuMemHead *gm_head, GpuMemBlock *gm_block)
 {

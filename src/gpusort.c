@@ -2488,7 +2488,7 @@ gpusort_fallback_quicksort(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	 * receive DMA will back already flatten data store in kds/ktoast.
 	 */
 	Assert(kds->nitems == nitems);
-#if 0
+#ifdef NOT_USED
 	slot = gss->css.ss.ss_ScanTupleSlot;
 	for (i=0; i < nitems; i++)
 	{
