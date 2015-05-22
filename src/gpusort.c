@@ -2536,7 +2536,7 @@ pgstrom_init_gpusort(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* pg_strom.debug_force_gpusort */
-	DefineCustomBoolVariable("pg_strom.debug.force_gpusort",
+	DefineCustomBoolVariable("pg_strom.debug_force_gpusort",
 							 "Force GpuSort regardless of the cost (debug)",
 							 NULL,
 							 &debug_force_gpusort,
