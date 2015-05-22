@@ -28,10 +28,11 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/pg_crc.h"
-#include "pg_strom.h"
 #include <nvrtc.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include "pg_strom.h"
+#include "cuda_timelib.h"
 
 typedef struct
 {
@@ -903,24 +904,6 @@ void
 pgstrom_preload_cuda_program(GpuTaskState *gts)
 {
 	__pgstrom_load_cuda_program(gts, true);
-}
-
-/*
- * assign_timelib_session_info
- *
- * It construct per-session information around timelib.h.
- */
-static void
-assign_timelib_session_info(StringInfo buf)
-{
-	appendStringInfo(
-		buf,
-		"/* ================================================\n"
-		" * session information for cuda_timelib.h\n"
-		" * ================================================ */\n");
-
-
-
 }
 
 /*
