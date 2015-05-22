@@ -1494,15 +1494,21 @@ gpujoin_exec_bulk(CustomScanState *node)
 	/* force to return row-format */
 	gjs->result_format = KDS_FORMAT_ROW;
 
+retry:
 	/* fetch next chunk to be processed */
 	pgjoin = (pgstrom_gpujoin *) pgstrom_fetch_gputask(&gjs->gts);
 	if (!pgjoin)
 		return NULL;
 
-	/* extract its destination data-store */
 	pds_dst = pgjoin->pds_dst;
+	/* retry, if no valid rows are contained */
+	if (pds_dst->kds->nitems == 0)
+	{
+		pgstrom_release_gputask(&pgjoin->task);
+		goto retry;
+	}
+	/* release this pgstrom_gpujoin, except for pds_dst */
 	pgjoin->pds_dst = NULL;
-	/* release this pgstrom_gpujoin */
 	pgstrom_release_gputask(&pgjoin->task);
 
 	return pds_dst;
