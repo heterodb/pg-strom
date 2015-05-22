@@ -1057,7 +1057,7 @@ multirels_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 						 ? mrs->nbatches_exec
 						 : mrs->nbatches_plan);
 		if (mr_info->nslots > 0)
-			appendStringInfo(es->str, "  Buckets: %u",
+			appendStringInfo(es->str, ",  Buckets: %u",
 							 mr_info->nslots);
 		appendStringInfo(es->str, ", Buffer Usage: %.2f%%\n",
 						 100.0 * mr_info->kmrels_rate);

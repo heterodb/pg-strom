@@ -31,6 +31,7 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/ruleutils.h"
+#include <math.h>
 #include "pg_strom.h"
 #include "cuda_gpujoin.h"
 
@@ -436,6 +437,7 @@ retry:
 		cl_uint		ncols = list_length(inner_rel->reltargetlist);
 		Size		chunk_size;
 		Size		entry_size;
+		Size		htup_size;
 		Size		nslots = 0;
 
 		/* force a plausible relation size if no information.
@@ -445,12 +447,27 @@ retry:
 		inner_ntuples = (Max(1.15 * inner_path->rows, 1000.0)
 						 / gpath->inners[i].nbatches);
 
+		/*
+		 * NOTE: RelOptInfo->width is not reliable for base relations 
+		 * because this fields shows the length of attributes which
+		 * are actually referenced, however, we once load physical
+		 * tuple on the KDS/KHash buffer if base relation.
+		 */
+		htup_size = MAXALIGN(offsetof(HeapTupleHeaderData,
+									  t_bits[BITMAPLEN(ncols)]));
+		if (inner_rel->reloptkind != RELOPT_BASEREL)
+			htup_size += MAXALIGN(inner_rel->width);
+		else
+		{
+			double		heap_size = (double)
+				(BLCKSZ - SizeOfPageHeaderData) * inner_rel->pages;
+
+			htup_size += MAXALIGN(heap_size / Max(inner_rel->tuples, 1.0) -
+								  sizeof(ItemIdData) - SizeofHeapTupleHeader);
+		}
+
 		if (gpath->inners[i].hash_quals != NIL)
 		{
-			entry_size = (offsetof(kern_hashentry, htup) +
-						  MAXALIGN(offsetof(HeapTupleHeaderData,
-											t_bits[BITMAPLEN(ncols)])) +
-						  MAXALIGN(inner_rel->width));
 			/* header portion of kern_hashtable */
 			chunk_size = STROMALIGN(offsetof(kern_hashtable,
 											 colmeta[ncols]));
@@ -459,20 +476,18 @@ retry:
 			nslots = Min(nslots, gpuMemMaxAllocSize() / sizeof(void *));
 			chunk_size += STROMALIGN(sizeof(cl_uint) * (Size)nslots);
 			/* kern_hashentry body */
+			entry_size = offsetof(kern_hashentry, htup) + htup_size;
 			chunk_size += STROMALIGN(entry_size * (Size)inner_ntuples);
 		}
 		else
 		{
-			entry_size = (offsetof(kern_tupitem, htup) +
-						  MAXALIGN(offsetof(HeapTupleHeaderData,
-											t_bits[BITMAPLEN(ncols)])) +
-						  MAXALIGN(inner_rel->width));
 			/* header portion of kern_data_store */
 			chunk_size = STROMALIGN(offsetof(kern_data_store,
 											 colmeta[ncols]));
 			/* row-index of the tuples */
 			chunk_size += STROMALIGN(sizeof(cl_uint) * (Size)inner_ntuples);
 			/* kern_tupitem body */
+			entry_size = offsetof(kern_tupitem, htup) + htup_size;
 			chunk_size += STROMALIGN(entry_size * (Size)inner_ntuples);
 		}
 		gpath->inners[i].chunk_size = chunk_size;
