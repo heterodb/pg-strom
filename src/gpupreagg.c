@@ -186,8 +186,6 @@ typedef struct
 	double			num_groups;		/* estimated number of groups */
 	double			ntups_per_page;	/* average number of tuples per page */
 	List		   *outer_quals;
-	//bool			outer_done;
-	//bool			outer_bulkload;
 	TupleTableSlot *outer_overflow;
 
 	kern_parambuf  *kparams;
@@ -2919,7 +2917,7 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	outerPlanState(gpas) = ExecInitNode(outerPlan(cscan), estate, eflags);
 	gpas->gts.scan_bulk =
 		(!pgstrom_debug_bulkload_enabled ? false : gpa_info->outer_bulkload);
-	//gpas->outer_done = false;
+
 	gpas->outer_overflow = NULL;
 
 	outer_width = outerPlanState(gpas)->plan->plan_width;

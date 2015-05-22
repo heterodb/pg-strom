@@ -708,7 +708,7 @@ try_gpujoin_path(PlannerInfo *root,
 	ParamPathInfo  *param_info;
 	Relids			required_outer;
 	ListCell	   *lc;
-	cl_uint			can_bulkload = 0;
+	bool			can_bulkload = false;
 
 	required_outer = calc_non_nestloop_required_outer(outer_path,
 													  inner_path);
@@ -739,7 +739,7 @@ try_gpujoin_path(PlannerInfo *root,
 				break;
 		}
 		if (lc == NULL)
-			can_bulkload = CUSTOMPATH_SUPPORT_BULKLOAD;
+			can_bulkload = true;
 	}
 
 	/*
@@ -1500,7 +1500,8 @@ gpujoin_exec_bulk(CustomScanState *node)
 	/* extract its destination data-store */
 	pds_dst = pgjoin->pds_dst;
 	pgjoin->pds_dst = NULL;
-	gpujoin_task_release(&pgjoin->task);
+	/* release this pgstrom_gpujoin */
+	pgstrom_release_gputask(&pgjoin->task);
 
 	return pds_dst;
 }
@@ -2549,9 +2550,6 @@ gpujoin_cleanup_cuda_resources(pgstrom_gpujoin *pgjoin)
 	pgjoin->ev_dma_recv_start = NULL;
 	pgjoin->ev_dma_recv_stop = NULL;
 }
-
-
-
 
 static void
 gpujoin_task_release(GpuTask *gtask)

@@ -425,6 +425,7 @@ extern void pgstrom_cleanup_gputaskstate(GpuTaskState *gts);
 extern void pgstrom_release_gputaskstate(GpuTaskState *gts);
 extern void pgstrom_init_gputaskstate(GpuContext *gcontext, GpuTaskState *gts);
 extern void pgstrom_init_gputask(GpuTaskState *gts, GpuTask *gtask);
+extern void pgstrom_release_gputask(GpuTask *gtask);
 extern GpuTask *pgstrom_fetch_gputask(GpuTaskState *gts);
 extern TupleTableSlot *pgstrom_exec_gputask(GpuTaskState *gts);
 extern bool pgstrom_recheck_gputask(GpuTaskState *gts, TupleTableSlot *slot);

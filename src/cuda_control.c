@@ -1443,6 +1443,20 @@ pgstrom_init_gputask(GpuTaskState *gts, GpuTask *gtask)
 	gtask->pfm.enabled = gts->pfm_accum.enabled;
 }
 
+void
+pgstrom_release_gputask(GpuTask *gtask)
+{
+	GpuTaskState   *gts = gtask->gts;
+
+	/* untrack this task by GpuTaskState */
+	SpinLockAcquire(&gts->lock);
+	dlist_delete(&gtask->tracker);
+	SpinLockRelease(&gts->lock);
+
+	/* per task cleanup */
+	gts->cb_task_release(gtask);
+}
+
 /*
  * pgstrom_cleanup_gputask_cuda_resources
  *
