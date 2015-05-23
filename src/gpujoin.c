@@ -172,7 +172,6 @@ deform_gpujoin_info(CustomScan *cscan)
 typedef struct
 {
 	GpuTaskState	gts;
-	kern_parambuf  *kparams;
 	int				num_rels;
 	/* expressions to be used in fallback path */
 	List		   *join_types;
@@ -1453,10 +1452,9 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	 * initialize kernel execution parameter
 	 */
 	pgstrom_assign_cuda_program(&gjs->gts,
+								gj_info->used_params,
 								gj_info->kern_source,
 								gj_info->extra_flags);
-	gjs->kparams = pgstrom_create_kern_parambuf(gj_info->used_params,
-												ps->ps_ExprContext);
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
 		pgstrom_preload_cuda_program(&gjs->gts);
 
@@ -2278,7 +2276,6 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 	GpuContext		   *gcontext = gjs->gts.gcontext;
 	pgstrom_gpujoin	   *pgjoin;
 	kern_gpujoin	   *kgjoin;
-	kern_parambuf	   *kparams;
 	TupleDesc			tupdesc;
 	cl_uint				nrooms;
 	cl_uint				total_items;
@@ -2291,7 +2288,7 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 	 */
 	kgjoin_head = (offsetof(pgstrom_gpujoin, kern) +
 				   offsetof(kern_gpujoin, kparams) +
-				   STROMALIGN(gjs->kparams->length));
+				   STROMALIGN(gjs->gts.kern_params->length));
 	required = (kgjoin_head +
 				STROMALIGN(offsetof(kern_resultbuf, results[0])));
 	pgjoin = MemoryContextAllocZero(gcontext->memcxt, required);
@@ -2324,8 +2321,9 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 	kgjoin->max_depth = gjs->num_rels;
 	kgjoin->errcode = StromError_Success;
 
-	kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
-	memcpy(kparams, gjs->kparams, gjs->kparams->length);
+	memcpy(KERN_GPUJOIN_PARAMBUF(kgjoin),
+		   gjs->gts.kern_params,
+		   gjs->gts.kern_params->length);
 
 	/*
 	 * Allocation of the destination data-store

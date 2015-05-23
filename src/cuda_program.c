@@ -27,6 +27,7 @@
 #include "storage/shmem.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/lsyscache.h"
 #include "utils/pg_crc.h"
 #include <nvrtc.h>
 #include <sys/stat.h>
@@ -907,6 +908,119 @@ pgstrom_preload_cuda_program(GpuTaskState *gts)
 }
 
 /*
+ * construct_kern_parambuf
+ *
+ * It construct a kernel parameter buffer to deliver Const/Param nodes.
+ */
+static kern_parambuf *
+construct_kern_parambuf(List *used_params, ExprContext *econtext)
+{
+	StringInfoData	str;
+	kern_parambuf  *kparams;
+	char		padding[STROMALIGN_LEN];
+	ListCell   *cell;
+	Size		offset;
+	int			index = 0;
+	int			nparams = list_length(used_params);
+
+	/* seek to the head of variable length field */
+	offset = STROMALIGN(offsetof(kern_parambuf, poffset[nparams]));
+	initStringInfo(&str);
+	enlargeStringInfo(&str, offset);
+	memset(str.data, 0, offset);
+	str.len = offset;
+	/* walks on the Para/Const list */
+	foreach (cell, used_params)
+	{
+		Node   *node = lfirst(cell);
+
+		if (IsA(node, Const))
+		{
+			Const  *con = (Const *) node;
+
+			kparams = (kern_parambuf *)str.data;
+			if (con->constisnull)
+				kparams->poffset[index] = 0;	/* null */
+			else
+			{
+				kparams->poffset[index] = str.len;
+				if (con->constlen > 0)
+					appendBinaryStringInfo(&str,
+										   (char *)&con->constvalue,
+										   con->constlen);
+				else
+					appendBinaryStringInfo(&str,
+										   DatumGetPointer(con->constvalue),
+										   VARSIZE(con->constvalue));
+			}
+		}
+		else if (IsA(node, Param))
+		{
+			ParamListInfo param_info = econtext->ecxt_param_list_info;
+			Param  *param = (Param *) node;
+
+			if (param_info &&
+				param->paramid > 0 && param->paramid <= param_info->numParams)
+			{
+				ParamExternData	*prm = &param_info->params[param->paramid - 1];
+
+				/* give hook a chance in case parameter is dynamic */
+				if (!OidIsValid(prm->ptype) && param_info->paramFetch != NULL)
+					(*param_info->paramFetch) (param_info, param->paramid);
+
+				kparams = (kern_parambuf *)str.data;
+				if (!OidIsValid(prm->ptype))
+				{
+					elog(INFO, "debug: Param has no particular data type");
+					kparams->poffset[index++] = 0;	/* null */
+					continue;
+				}
+				/* safety check in case hook did something unexpected */
+				if (prm->ptype != param->paramtype)
+					ereport(ERROR,
+							(errcode(ERRCODE_DATATYPE_MISMATCH),
+							 errmsg("type of parameter %d (%s) does not match that when preparing the plan (%s)",
+									param->paramid,
+									format_type_be(prm->ptype),
+									format_type_be(param->paramtype))));
+				if (prm->isnull)
+					kparams->poffset[index] = 0;	/* null */
+				else
+				{
+					int		typlen = get_typlen(prm->ptype);
+
+					if (typlen == 0)
+						elog(ERROR, "cache lookup failed for type %u",
+							 prm->ptype);
+					if (typlen > 0)
+						appendBinaryStringInfo(&str,
+											   (char *)&prm->value,
+											   typlen);
+					else
+						appendBinaryStringInfo(&str,
+											   DatumGetPointer(prm->value),
+											   VARSIZE(prm->value));
+				}
+			}
+		}
+		else
+			elog(ERROR, "unexpected node: %s", nodeToString(node));
+
+		/* alignment */
+		if (STROMALIGN(str.len) != str.len)
+			appendBinaryStringInfo(&str, padding,
+								   STROMALIGN(str.len) - str.len);
+		index++;
+	}
+	Assert(STROMALIGN(str.len) == str.len);
+	kparams = (kern_parambuf *)str.data;
+	kparams->length = str.len;
+	kparams->nparams = nparams;
+
+	return kparams;
+}
+
+/*
  * pgstrom_assign_cuda_program
  *
  * It assigns kernel_source and extra_flags on the given GpuTaskState.
@@ -915,9 +1029,11 @@ pgstrom_preload_cuda_program(GpuTaskState *gts)
  */
 void
 pgstrom_assign_cuda_program(GpuTaskState *gts,
+							List *used_params,
 							const char *kern_source,
 							int extra_flags)
 {
+	ExprContext	   *econtext = gts->css.ss.ps.ps_ExprContext;
 	const char	   *kern_define;
 	StringInfoData	buf;
 
@@ -933,6 +1049,7 @@ pgstrom_assign_cuda_program(GpuTaskState *gts,
 	else
 		kern_define = "";	/* no session specific code */
 
+	gts->kern_params = construct_kern_parambuf(used_params, econtext);
 	gts->kern_source = kern_source;
 	gts->kern_define = kern_define;
 	gts->extra_flags = extra_flags;

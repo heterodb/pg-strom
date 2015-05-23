@@ -239,6 +239,7 @@ struct GpuTaskState
 {
 	CustomScanState	css;
 	GpuContext	   *gcontext;
+	kern_parambuf  *kern_params;	/* Const/Param buffer */
 	const char	   *kern_define;	/* per session definition */
 	const char	   *kern_source;	/* GPU kernel source on the fly */
 	cl_uint			extra_flags;	/* flags for static inclusion */
@@ -448,6 +449,7 @@ extern const char *pgstrom_cuda_source_file(GpuTaskState *gts);
 extern bool pgstrom_load_cuda_program(GpuTaskState *gts);
 extern void pgstrom_preload_cuda_program(GpuTaskState *gts);
 extern void pgstrom_assign_cuda_program(GpuTaskState *gts,
+										List *used_params,
 										const char *kern_source,
 										int extra_flags);
 extern void pgstrom_init_cuda_program(void);
@@ -492,9 +494,6 @@ extern void pgstrom_init_codegen(void);
  * datastore.c
  */
 extern Size pgstrom_chunk_size(void);
-extern kern_parambuf *
-pgstrom_create_kern_parambuf(List *used_params,
-                             ExprContext *econtext);
 extern Plan *pgstrom_try_replace_plannode(Plan *child_plan,
 										  List *range_tables,
 										  List **pullup_quals);

@@ -229,8 +229,6 @@ typedef struct
 {
 	GpuTaskState	gts;
 
-	kern_parambuf  *kparams;
-
 	/*
 	 * Data store saved in temporary file
 	 */
@@ -866,7 +864,6 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	GpuSortState   *gss = (GpuSortState *) node;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuSortInfo	   *gs_info = deform_gpusort_info(cscan);
-	PlanState	   *ps = &node->ss.ps;
 
 	/* activate GpuContext for device execution */
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
@@ -895,9 +892,8 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	outerPlanState(gss) = ExecInitNode(outerPlan(cscan), estate, eflags);
 
 	/* for GPU bitonic sorting */
-	gss->kparams = pgstrom_create_kern_parambuf(gs_info->used_params,
-												ps->ps_ExprContext);
 	pgstrom_assign_cuda_program(&gss->gts,
+								gs_info->used_params,
 								gs_info->kern_source,
 								gs_info->extra_flags);
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
@@ -1800,7 +1796,7 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	/*
 	 * allocation of device memory
 	 */
-	length = (STROMALIGN(gss->kparams->length) +
+	length = (STROMALIGN(gss->gts.kern_params->length) +
 			  STROMALIGN(offsetof(kern_resultbuf, results[2 * nitems])));
 	gpusort->m_gpusort = gpuMemAlloc(&gpusort->task, length);
 	if (!gpusort->m_gpusort)
@@ -1836,7 +1832,7 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	}
 
 #if 1
-	offset = STROMALIGN(gss->kparams->length);
+	offset = STROMALIGN(gss->gts.kern_params->length);
 	length = dsm_segment_map_length(gpusort->oitems_dsm);
 	rc = cuMemHostRegister(dsm_segment_address(gpusort->oitems_dsm),
 						   length,
@@ -1852,15 +1848,15 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	CUDA_EVENT_RECORD(gpusort, ev_dma_send_start);
 
 	rc = cuMemcpyHtoDAsync(gpusort->m_gpusort,
-						   gss->kparams,
-						   gss->kparams->length,
+						   gss->gts.kern_params,
+						   gss->gts.kern_params->length,
 						   gpusort->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	gpusort->task.pfm.bytes_dma_send += gss->kparams->length;
+	gpusort->task.pfm.bytes_dma_send += gss->gts.kern_params->length;
 	gpusort->task.pfm.num_dma_send++;
 
-	offset = STROMALIGN(gss->kparams->length);
+	offset = STROMALIGN(gss->gts.kern_params->length);
 	length = offsetof(kern_resultbuf, results[0]);
 	rc = cuMemcpyHtoDAsync(gpusort->m_gpusort + offset,
 						   kresults,
@@ -1959,7 +1955,7 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	 */
 	CUDA_EVENT_RECORD(gpusort, ev_dma_recv_start);
 
-	offset = STROMALIGN(gss->kparams->length);
+	offset = STROMALIGN(gss->gts.kern_params->length);
 	length = STROMALIGN(offsetof(kern_resultbuf, results[2 * nitems]));
 	rc = cuMemcpyDtoHAsync(kresults,
 						   gpusort->m_gpusort + offset,

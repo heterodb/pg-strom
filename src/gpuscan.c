@@ -112,8 +112,6 @@ typedef struct {
 	HeapTupleData	scan_tuple;
 	List		   *dev_quals;
 
-	kern_parambuf  *kparams;
-
 	cl_uint			num_rechecked;
 } GpuScanState;
 
@@ -627,15 +625,12 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->scan_tuple.t_tableOid = RelationGetRelid(scan_rel);
 	/* assign kernel source and flags */
 	pgstrom_assign_cuda_program(&gss->gts,
+								gs_info->used_params,
 								gs_info->kern_source,
 								gs_info->extra_flags);
 	if (gss->gts.kern_source != NULL &&
 		(eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
 		pgstrom_preload_cuda_program(&gss->gts);
-
-	/* kernel constant parameter buffer */
-	gss->kparams = pgstrom_create_kern_parambuf(gs_info->used_params,
-											gss->gts.css.ss.ps.ps_ExprContext);
 	/* other run-time parameters */
     gss->num_rechecked = 0;
 }
@@ -673,7 +668,7 @@ pgstrom_create_gpuscan(GpuScanState *gss, pgstrom_data_store *pds)
 	Size				length;
 
 	length = (STROMALIGN(offsetof(pgstrom_gpuscan, kern.kparams)) +
-			  STROMALIGN(gss->kparams->length));
+			  STROMALIGN(gss->gts.kern_params->length));
 	if (!gss->gts.kern_source)
 		length += STROMALIGN(offsetof(kern_resultbuf, results[0]));
 	else
@@ -685,10 +680,9 @@ pgstrom_create_gpuscan(GpuScanState *gss, pgstrom_data_store *pds)
 
 	gpuscan->pds = pds;
 	/* setting up kern_parambuf */
-	Assert(gss->kparams->length == STROMALIGN(gss->kparams->length));
     memcpy(KERN_GPUSCAN_PARAMBUF(&gpuscan->kern),
-           gss->kparams,
-           gss->kparams->length);
+		   gss->gts.kern_params,
+		   gss->gts.kern_params->length);
 	/* setting up kern_resultbuf */
 	kresults = gpuscan->kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
     memset(kresults, 0, sizeof(kern_resultbuf));

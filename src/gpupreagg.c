@@ -183,7 +183,6 @@ typedef struct
 	List		   *outer_quals;
 	TupleTableSlot *outer_overflow;
 
-	kern_parambuf  *kparams;
 	bool			needs_grouping;
 	bool			local_reduction;
 	bool			has_numeric;
@@ -2890,7 +2889,6 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	CustomScan	   *cscan = (CustomScan *) ps->plan;
 	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
 	int				outer_width;
-	Const		   *kparam_0;
 
 	/* activate GpuContext for device execution */
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
@@ -2938,22 +2936,13 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	}
 
 	/*
-	 * construction of kern_parambuf template; including system param of
-	 * GPUPREAGG_FIELD_IS_* array.
-	 * NOTE: we don't modify gpreagg->used_params here, so no need to
-	 * make a copy.
+	 * Setting up kernel program and message queue
+	 *
+	 * NOTE: GpuPreAgg always takes kparam_0 for GPUPREAGG_FIELD_IS_* array.
 	 */
 	Assert(list_length(gpa_info->used_params) >= 1);
-	kparam_0 = (Const *) linitial(gpa_info->used_params);
-	Assert(IsA(kparam_0, Const) &&
-		   kparam_0->consttype == BYTEAOID &&
-		   !kparam_0->constisnull);
-	gpas->kparams = pgstrom_create_kern_parambuf(gpa_info->used_params,
-												 ps->ps_ExprContext);
-	/*
-	 * Setting up kernel program and message queue
-	 */
 	pgstrom_assign_cuda_program(&gpas->gts,
+								gpa_info->used_params,
 								gpa_info->kern_source,
 								gpa_info->extra_flags);
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
@@ -2974,7 +2963,6 @@ gpupreagg_task_create(GpuPreAggState *gpas, pgstrom_data_store *pds_in)
 {
 	GpuContext		   *gcontext = gpas->gts.gcontext;
 	pgstrom_gpupreagg  *gpreagg;
-	kern_parambuf	   *kparams;
 	kern_resultbuf	   *kresults;
 	TupleDesc			tupdesc;
 	size_t				nitems = pds_in->kds->nitems;
@@ -2982,7 +2970,7 @@ gpupreagg_task_create(GpuPreAggState *gpas, pgstrom_data_store *pds_in)
 
 	/* allocation of pgtrom_gpupreagg */
 	required = (STROMALIGN(offsetof(pgstrom_gpupreagg, kern.kparams) +
-						   gpas->kparams->length) +
+						   gpas->gts.kern_params->length) +
 				STROMALIGN(offsetof(kern_resultbuf, results[nitems])));
 	gpreagg = MemoryContextAllocZero(gcontext->memcxt, required);
 
@@ -3001,8 +2989,9 @@ gpupreagg_task_create(GpuPreAggState *gpas, pgstrom_data_store *pds_in)
 		   pg_crc32_table,
 		   sizeof(uint32) * 256);
 	/* kern_parambuf */
-	kparams = KERN_GPUPREAGG_PARAMBUF(&gpreagg->kern);
-	memcpy(kparams, gpas->kparams, gpas->kparams->length);
+	memcpy(KERN_GPUPREAGG_PARAMBUF(&gpreagg->kern),
+		   gpas->gts.kern_params,
+		   gpas->gts.kern_params->length);
 	/* kern_resultbuf */
 	kresults = gpreagg->kresults = KERN_GPUPREAGG_RESULTBUF(&gpreagg->kern);
 	kresults->nrels = 1;
