@@ -36,7 +36,6 @@ PG_MODULE_MAGIC;
  * miscellaneous GUC parameters
  */
 static bool	guc_pgstrom_enabled;
-static bool guc_pgstrom_enabled_global;
 bool	pgstrom_perfmon_enabled;
 static bool pgstrom_debug_kernel_source;
 bool	pgstrom_debug_bulkload_enabled;
@@ -53,81 +52,12 @@ double	pgstrom_row_population_max;
 double	pgstrom_row_population_margin;
 
 /*
- * global_guc_values - segment for global GUC variables
- *
- * pg_strom.enabled_global turns on/off PG-Strom functionality of
- * all the concurrent backend, for test/benchmark purpose mainly.
- */
-static shmem_startup_hook_type shmem_startup_hook_next = NULL;
-static struct {
-	slock_t		lock;
-	bool		pgstrom_enabled_global;
-} *global_guc_values = NULL;
-
-/*
- * wrapper of pg_strom.enabled and pg_strom.enabled_global configuration
+ * accessor of static GUC variables
  */
 bool
 pgstrom_enabled(void)
 {
-	bool	rc = false;
-
-	if (guc_pgstrom_enabled)
-	{
-		SpinLockAcquire(&global_guc_values->lock);
-		rc = global_guc_values->pgstrom_enabled_global;
-		SpinLockRelease(&global_guc_values->lock);
-	}
-	return rc;
-}
-
-/*
- * assign callback of pg_strom.enabled_global
- */
-static void
-pg_strom_enabled_global_assign(bool newval, void *extra)
-{
-	/*
-	 * NOTE: we cannot save state on the shared memory segment
-	 * during _PG_init() because it is not initialized yet.
-	 * So, we once save the "pg_strom.enabled_global" state on
-	 * a private variable, then initialize the shared state
-	 * using this private variable. Once shared memory segment
-	 * is allocated, we shall reference the shared memory side.
-	 *
-	 * Also note that some worker process may detach shared-
-	 * memory segment on starting-up, so we also need to check
-	 * the shared memory segment is still valid. PG-Strom works
-	 * only backend process with valid shared memory segment.
-	 * So, here is no actual problem even if dummy behavior.
-	 */
-	if (!UsedShmemSegAddr || !global_guc_values)
-		guc_pgstrom_enabled_global = newval;
-	else
-	{
-		SpinLockAcquire(&global_guc_values->lock);
-		global_guc_values->pgstrom_enabled_global = newval;
-		SpinLockRelease(&global_guc_values->lock);
-	}
-}
-
-/*
- * show callback of pg_strom.enabled_global
- */
-static const char *
-pg_strom_enabled_global_show(void)
-{
-	bool	state;
-
-	if (!UsedShmemSegAddr || !global_guc_values)
-		state = guc_pgstrom_enabled_global;	/* private variable! */
-	else
-	{
-		SpinLockAcquire(&global_guc_values->lock);
-		state = global_guc_values->pgstrom_enabled_global;
-		SpinLockRelease(&global_guc_values->lock);
-	}
-	return state ? "on" : "off";
+	return guc_pgstrom_enabled;
 }
 
 static void
@@ -142,18 +72,6 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-	/* turn on/off PG-Strom feature on all the instance */
-	DefineCustomBoolVariable("pg_strom.enabled_global",
-							 "Enables the planner's use of PG-Strom in global",
-							 NULL,
-							 &guc_pgstrom_enabled_global,
-							 true,
-							 PGC_SUSET,
-							 GUC_NOT_IN_SAMPLE |
-							 GUC_SUPERUSER_ONLY,
-							 NULL,
-							 pg_strom_enabled_global_assign,
-							 pg_strom_enabled_global_show);
 	/* turn on/off performance monitor on EXPLAIN ANALYZE */
 	DefineCustomBoolVariable("pg_strom.perfmon",
 							 "Enables the performance monitor of PG-Strom",
@@ -262,30 +180,6 @@ pgstrom_init_misc_guc(void)
 							 NULL, NULL, NULL);
 }
 
-/*
- * pgstrom_startup_global_guc
- *
- * allocation of shared memory for global guc
- */
-static void
-pgstrom_startup_global_guc(void)
-{
-	bool	found;
-
-	if (shmem_startup_hook_next)
-		(*shmem_startup_hook_next)();
-
-	global_guc_values = ShmemInitStruct("pg_strom: global_guc",
-										MAXALIGN(sizeof(*global_guc_values)),
-										&found);
-	Assert(!found);
-
-	/* segment initialization */
-	memset(global_guc_values, 0, MAXALIGN(sizeof(*global_guc_values)));
-	SpinLockInit(&global_guc_values->lock);
-	global_guc_values->pgstrom_enabled_global = guc_pgstrom_enabled_global;
-}
-
 void
 _PG_init(void)
 {
@@ -314,11 +208,6 @@ _PG_init(void)
 	pgstrom_init_misc_guc();
 	pgstrom_init_codegen();
 	pgstrom_init_grafter();
-
-	/* allocation of shared memory */
-	RequestAddinShmemSpace(MAXALIGN(sizeof(*global_guc_values)));
-	shmem_startup_hook_next = shmem_startup_hook;
-	shmem_startup_hook = pgstrom_startup_global_guc;
 }
 
 /* ------------------------------------------------------------
