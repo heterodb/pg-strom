@@ -2628,7 +2628,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	codegen_context context;
 
 	/* nothing to do, if feature is turned off */
-	if (!pgstrom_enabled() || !enable_gpupreagg)
+	if (!pgstrom_enabled || !enable_gpupreagg)
 		return;
 
 	/* Try to construct target-list of both Agg and GpuPreAgg node.
@@ -2914,7 +2914,7 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	 */
 	outerPlanState(gpas) = ExecInitNode(outerPlan(cscan), estate, eflags);
 	gpas->gts.scan_bulk =
-		(!pgstrom_debug_bulkload_enabled ? false : gpa_info->outer_bulkload);
+		(!pgstrom_bulkload_enabled ? false : gpa_info->outer_bulkload);
 
 	gpas->outer_overflow = NULL;
 

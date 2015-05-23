@@ -724,7 +724,7 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	int			i;
 
 	/* nothing to do, if feature is turned off */
-	if (!pgstrom_enabled() || !enable_gpusort)
+	if (!pgstrom_enabled || !enable_gpusort)
 	  return;
 
 	/* ensure the plan is Sort */

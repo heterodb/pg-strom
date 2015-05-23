@@ -35,12 +35,11 @@ PG_MODULE_MAGIC;
 /*
  * miscellaneous GUC parameters
  */
-static bool	guc_pgstrom_enabled;
+bool	pgstrom_enabled;
 bool	pgstrom_perfmon_enabled;
 static bool pgstrom_debug_kernel_source;
-bool	pgstrom_debug_bulkload_enabled;
-int		pgstrom_max_async_chunks;
-int		pgstrom_min_async_chunks;
+bool	pgstrom_bulkload_enabled;
+int		pgstrom_max_async_tasks;
 
 /* cost factors */
 double	pgstrom_gpu_setup_cost;
@@ -48,17 +47,8 @@ double	pgstrom_gpu_operator_cost;
 double	pgstrom_gpu_tuple_cost;
 
 /* buffer usage */
-double	pgstrom_row_population_max;
-double	pgstrom_row_population_margin;
-
-/*
- * accessor of static GUC variables
- */
-bool
-pgstrom_enabled(void)
-{
-	return guc_pgstrom_enabled;
-}
+double	pgstrom_nrows_growth_ratio_limit;
+double	pgstrom_nrows_growth_margin;
 
 static void
 pgstrom_init_misc_guc(void)
@@ -67,7 +57,7 @@ pgstrom_init_misc_guc(void)
 	DefineCustomBoolVariable("pg_strom.enabled",
 							 "Enables the planner's use of PG-Strom",
 							 NULL,
-							 &guc_pgstrom_enabled,
+							 &pgstrom_enabled,
 							 true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
@@ -81,6 +71,15 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	/* turn on/off bulkload feature to exchange PG-Strom nodes */
+	DefineCustomBoolVariable("pg_strom.bulkload_enabled",
+							 "Enables the bulk-loading mode of PG-Strom",
+							 NULL,
+							 &pgstrom_bulkload_enabled,
+							 true,
+							 PGC_USERSET,
+                             GUC_NOT_IN_SAMPLE,
+                             NULL, NULL, NULL);
 	/* turn on/off cuda kernel source saving */
 	DefineCustomBoolVariable("pg_strom.debug_kernel_source",
 							 "Turn on/off to display the kernel source path",
@@ -90,40 +89,18 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-
-	DefineCustomBoolVariable("pg_strom.debug_bulkload_enabled",
-							 "Enables the bulk-loading mode of PG-Strom",
-							 NULL,
-							 &pgstrom_debug_bulkload_enabled,
-							 true,
-							 PGC_USERSET,
-                             GUC_NOT_IN_SAMPLE,
-                             NULL, NULL, NULL);
-	DefineCustomIntVariable("pg_strom.min_async_chunks",
-							"least number of chunks to be run asynchronously",
+	/* maximum number of GpuTask can concurrently executed */
+	DefineCustomIntVariable("pg_strom.max_async_tasks",
+							"max number of GPU tasks to be run asynchronously",
 							NULL,
-							&pgstrom_min_async_chunks,
-							2,
-							2,
-							INT_MAX,
-							PGC_USERSET,
-							GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
-	DefineCustomIntVariable("pg_strom.max_async_chunks",
-							"max number of chunk to be run asynchronously",
-							NULL,
-							&pgstrom_max_async_chunks,
+							&pgstrom_max_async_tasks,
 							32,
-							pgstrom_min_async_chunks + 1,
+							4,
 							INT_MAX,
 							PGC_USERSET,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
-	if (pgstrom_max_async_chunks <= pgstrom_min_async_chunks)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("\"pg_strom.max_async_chunks\" must be larger than \"pg_strom.min_async_chunks\"")));
-
+	/* cost factor for Gpu setup */
 	DefineCustomRealVariable("pg_strom.gpu_setup_cost",
 							 "Cost to setup GPU device to run",
 							 NULL,
@@ -134,7 +111,7 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-
+	/* cost factor for Gpu operator */
 	DefineCustomRealVariable("pg_strom.gpu_operator_cost",
 							 "Cost of processing each operators by GPU",
 							 NULL,
@@ -145,7 +122,7 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-
+	/* cost factor to process tuples in Gpu */
 	DefineCustomRealVariable("pg_strom.gpu_tuple_cost",
 							 "Cost of processing each tuple for GPU",
 							 NULL,
@@ -156,22 +133,22 @@ pgstrom_init_misc_guc(void)
                              PGC_USERSET,
                              GUC_NOT_IN_SAMPLE,
                              NULL, NULL, NULL);
-
-	DefineCustomRealVariable("pg_strom.row_population_max",
-							 "hard limit of row population ratio",
+	/* max ratio (hard limit) for row population */
+	DefineCustomRealVariable("pg_strom.nrows_growth_ratio_limit",
+							 "Hard limit of rows growth ratio",
 							 NULL,
-							 &pgstrom_row_population_max,
+							 &pgstrom_nrows_growth_ratio_limit,
 							 12.0,
 							 0,
 							 DBL_MAX,
                              PGC_USERSET,
                              GUC_NOT_IN_SAMPLE,
                              NULL, NULL, NULL);
-
-	DefineCustomRealVariable("pg_strom.row_population_margin",
-							 "safety margin if row will populate",
+	/* safety margin on row population */
+	DefineCustomRealVariable("pg_strom.nrows_growth_margin",
+							 "Safety margin if logic may grows # of rows",
 							 NULL,
-							 &pgstrom_row_population_margin,
+							 &pgstrom_nrows_growth_margin,
 							 0.25,
 							 0.0,
 							 DBL_MAX,

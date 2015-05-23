@@ -617,16 +617,15 @@ extern void pgstrom_init_gpusort(void);
 /*
  * main.c
  */
-extern bool	pgstrom_enabled(void);
-extern bool pgstrom_perfmon_enabled;
-extern bool pgstrom_debug_bulkload_enabled;
-extern int	pgstrom_max_async_chunks;
-extern int	pgstrom_min_async_chunks;
-extern double pgstrom_gpu_setup_cost;
-extern double pgstrom_gpu_operator_cost;
-extern double pgstrom_gpu_tuple_cost;
-extern double pgstrom_row_population_max;
-extern double pgstrom_row_population_margin;
+extern bool		pgstrom_enabled;
+extern bool		pgstrom_perfmon_enabled;
+extern bool		pgstrom_bulkload_enabled;
+extern int		pgstrom_max_async_tasks;
+extern double	pgstrom_gpu_setup_cost;
+extern double	pgstrom_gpu_operator_cost;
+extern double	pgstrom_gpu_tuple_cost;
+extern double	pgstrom_nrows_growth_ratio_limit;
+extern double	pgstrom_nrows_growth_margin;
 extern void _PG_init(void);
 extern const char *pgstrom_strerror(cl_int errcode);
 extern void show_scan_qual(List *qual, const char *qlabel,

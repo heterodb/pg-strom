@@ -1275,8 +1275,11 @@ pgstrom_fetch_gputask(GpuTaskState *gts)
 	}
 
 	/*
-	 * We try to keep at least pgstrom_min_async_chunks of chunks are
-	 * in running, unless it is smaller than pgstrom_max_async_chunks.
+	 * We try to keep multiple GpuTask requests being enqueued, unless
+	 * it does not reach to pgstrom_max_async_tasks.
+	 *
+	 * TODO: number of requests should be controled by GpuContext, not
+	 * GpuTaskState granuality. Needs more investigation.
 	 */
 	do {
 		CHECK_FOR_INTERRUPTS();
@@ -1287,14 +1290,14 @@ pgstrom_fetch_gputask(GpuTaskState *gts)
 
 		if (!gts->scan_done)
 		{
-			while (pgstrom_max_async_chunks > (gts->num_running_tasks +
+			while (pgstrom_max_async_tasks > (gts->num_running_tasks +
 											   gts->num_pending_tasks +
 											   gts->num_ready_tasks))
 			{
 				/* no urgent reason why to make the scan progress */
 				if (!dlist_is_empty(&gts->ready_tasks) &&
-					pgstrom_max_async_chunks < (gts->num_running_tasks +
-												gts->num_pending_tasks))
+					pgstrom_max_async_tasks < (gts->num_running_tasks +
+											   gts->num_pending_tasks))
 					break;
 				SpinLockRelease(&gts->lock);
 
