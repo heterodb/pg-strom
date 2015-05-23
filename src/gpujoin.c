@@ -17,6 +17,7 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
+#include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -1378,21 +1379,12 @@ gpujoin_textout_path(StringInfo str, const CustomPath *node)
 static Node *
 gpujoin_create_scan_state(CustomScan *node)
 {
-	GpuContext	   *gcontext = pgstrom_get_gpucontext();
-	GpuJoinState   *gjs;
+	GpuJoinState   *gjs = palloc0(sizeof(GpuJoinState));
 
-	gjs = MemoryContextAllocZero(gcontext->memcxt, sizeof(GpuJoinState));
+	/* Set tag and executor callbacks */
 	NodeSetTag(gjs, T_CustomScanState);
-    gjs->gts.css.flags = node->flags;
+	gjs->gts.css.flags = node->flags;
 	gjs->gts.css.methods = &gpujoin_exec_methods.c;
-	/* GpuTaskState setup */
-	pgstrom_init_gputaskstate(gcontext, &gjs->gts);
-	gjs->gts.cb_task_process = gpujoin_task_process;
-	gjs->gts.cb_task_complete = gpujoin_task_complete;
-	gjs->gts.cb_task_release = gpujoin_task_release;
-	gjs->gts.cb_next_chunk = gpujoin_next_chunk;
-	gjs->gts.cb_next_tuple = gpujoin_next_tuple;
-	gjs->gts.cb_cleanup = NULL;
 
 	return (Node *) gjs;
 }
@@ -1400,13 +1392,24 @@ gpujoin_create_scan_state(CustomScan *node)
 static void
 gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 {
+	GpuContext	   *gcontext = NULL;
 	GpuJoinState   *gjs = (GpuJoinState *) node;
 	PlanState	   *ps = &gjs->gts.css.ss.ps;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
 	TupleDesc		tupdesc = GTS_GET_RESULT_TUPDESC(gjs);
 
-	gjs->num_rels = gj_info->num_rels;
+	/* activate GpuContext for device execution */
+	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+		gcontext = pgstrom_get_gpucontext();
+
+	/* Setup common GpuTaskState fields */
+	pgstrom_init_gputaskstate(gcontext, &gjs->gts);
+	gjs->gts.cb_task_process = gpujoin_task_process;
+	gjs->gts.cb_task_complete = gpujoin_task_complete;
+	gjs->gts.cb_task_release = gpujoin_task_release;
+	gjs->gts.cb_next_chunk = gpujoin_next_chunk;
+	gjs->gts.cb_next_tuple = gpujoin_next_tuple;
 
 	/*
 	 * NOTE: outer_quals, hash_outer_keys and join_quals are intended
@@ -1420,6 +1423,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	 * TODO: we have to initialize above expressions carefully for
 	 * CPU fallback implementation.
 	 */
+	gjs->num_rels = gj_info->num_rels;
 	gjs->join_types = gj_info->join_types;
 	gjs->outer_quals = ExecInitExpr((Expr *)gj_info->outer_quals, ps);
 	gjs->hash_outer_keys = (List *)
@@ -2751,17 +2755,23 @@ gpujoin_task_respond(CUstream stream, CUresult status, void *private)
 	pgstrom_gpujoin	   *pgjoin = private;
 	GpuTaskState	   *gts = pgjoin->task.gts;
 
-	SpinLockAcquire(&gts->lock);
+	/* See comments in pgstrom_respond_gpuscan() */
+	if (status == CUDA_ERROR_INVALID_CONTEXT || !IsTransactionState())
+		return;
+
 	if (status != CUDA_SUCCESS)
 		pgjoin->task.errcode = status;
 	else
 		pgjoin->task.errcode = pgjoin->kern.errcode;
 
-	/* remove from the running_tasks list */
+	/*
+	 * Remove from the running_tasks list, then attach it
+	 * on the completed_tasks list
+	 */
+	SpinLockAcquire(&gts->lock);
 	dlist_delete(&pgjoin->task.chain);
 	gts->num_running_tasks--;
 
-	/* then, attach it on the completed_tasks list */
 	if (pgjoin->task.errcode == StromError_Success)
 		dlist_push_tail(&gts->completed_tasks, &pgjoin->task.chain);
 	else
@@ -3170,7 +3180,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 				pgjoin->task.pfm.num_kern_join++;
 			}
 		}
-		outer_ntuples = (size_t)((double)outer_ntuples * nrows_ratio);
+		outer_ntuples = (size_t)((double)outer_ntuples *
+								 Max(nrows_ratio, 1.0));
 		depth++;
 	}
 	Assert(pgjoin->kern.max_depth == depth - 1);

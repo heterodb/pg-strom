@@ -244,7 +244,6 @@ multirels_create_scan_state(CustomScan *cscan)
 	NodeSetTag(mrs, T_CustomScanState);
 	mrs->css.flags = cscan->flags;
 	mrs->css.methods = &multirels_exec_methods.c;
-	mrs->gcontext = pgstrom_get_gpucontext();
 
 	return (Node *) mrs;
 }
@@ -260,6 +259,10 @@ multirels_begin(CustomScanState *node, EState *estate, int eflags)
 	List		   *hash_keybyval = NIL;
 	List		   *hash_keytype = NIL;
 	ListCell	   *lc;
+
+	/* get GpuContext */
+	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+		mrs->gcontext = pgstrom_get_gpucontext();
 
 	/* check for unsupported flags */
 	Assert(!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
@@ -994,8 +997,9 @@ multirels_end(CustomScanState *node)
 	ExecEndNode(outerPlanState(node));
     ExecEndNode(innerPlanState(node));
 
-	/* Release GpuContext */
-	pgstrom_put_gpucontext(mrs->gcontext);
+	/* Release GpuContext, if any */
+	if (mrs->gcontext)
+		pgstrom_put_gpucontext(mrs->gcontext);
 }
 
 static void

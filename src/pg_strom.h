@@ -218,13 +218,12 @@ typedef struct
 
 typedef struct
 {
-	dlist_node		chain;
-	int				refcnt;
-	ResourceOwner	resowner;
-	MemoryContext	memcxt;
-	dlist_head		state_list;		/* list of GpuTaskState */
+	dlist_node		chain;			/* dual link to the global list */
+	int				refcnt;			/* reference counter */
+	ResourceOwner	resowner;		/* ResourceOwner owns this GpuContext */
+	MemoryContext	memcxt;			/* Memory context for host pinned mem */
 	dlist_head		pds_list;		/* list of pgstrom_data_store */
-	cl_int			num_context;
+	cl_int			num_context;	/* number of CUDA context */
 	cl_int			next_context;
 	struct {
 		CUdevice	cuda_device;
@@ -239,7 +238,6 @@ typedef struct GpuTaskState	GpuTaskState;
 struct GpuTaskState
 {
 	CustomScanState	css;
-	dlist_node		chain;
 	GpuContext	   *gcontext;
 	const char	   *kern_define;	/* per session definition */
 	const char	   *kern_source;	/* GPU kernel source on the fly */
@@ -268,7 +266,6 @@ struct GpuTaskState
 	void		  (*cb_task_polling)(GpuTaskState *gts);
 	GpuTask		 *(*cb_next_chunk)(GpuTaskState *gts);
 	TupleTableSlot *(*cb_next_tuple)(GpuTaskState *gts);
-	void		  (*cb_cleanup)(GpuTaskState *gts);
 	/* performance counter  */
 	pgstrom_perfmon	pfm_accum;
 };
@@ -400,14 +397,6 @@ HostPinMemContextCreate(MemoryContext parent,
 /*
  * cuda_control.c
  */
-typedef enum {
-	ResourceContextNormal,
-	ResourceContextCommit,
-	ResourceContextAbort,
-} PGStromResourceContext;
-
-extern PGStromResourceContext pgstrom_resource_context(void);
-
 extern Size gpuMemMaxAllocSize(void);
 extern CUdeviceptr __gpuMemAlloc(GpuContext *gcontext,
 								 int cuda_index,
@@ -418,7 +407,6 @@ extern void __gpuMemFree(GpuContext *gcontext,
 extern CUdeviceptr gpuMemAlloc(GpuTask *gtask, size_t bytesize);
 extern void gpuMemFree(GpuTask *gtask, CUdeviceptr dptr);
 extern GpuContext *pgstrom_get_gpucontext(void);
-extern void pgstrom_sync_gpucontext(GpuContext *gcontext);
 extern void pgstrom_put_gpucontext(GpuContext *gcontext);
 
 extern void pgstrom_cleanup_gputaskstate(GpuTaskState *gts);

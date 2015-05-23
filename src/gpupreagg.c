@@ -18,6 +18,7 @@
 #include "postgres.h"
 #include "access/nbtree.h"
 #include "access/sysattr.h"
+#include "access/xact.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_cast.h"
@@ -2876,21 +2877,12 @@ pgstrom_plan_is_gpupreagg(const Plan *plan)
 static Node *
 gpupreagg_create_scan_state(CustomScan *cscan)
 {
-	GpuContext	   *gcontext = pgstrom_get_gpucontext();
-	GpuPreAggState *gpas = MemoryContextAllocZero(gcontext->memcxt,
-												  sizeof(GpuPreAggState));
+	GpuPreAggState *gpas = palloc0(sizeof(GpuPreAggState));
+
 	/* Set tag and executor callbacks */
 	NodeSetTag(gpas, T_CustomScanState);
 	gpas->gts.css.flags = cscan->flags;
 	gpas->gts.css.methods = &gpupreagg_exec_methods;
-	/* GpuTaskState setup */
-	pgstrom_init_gputaskstate(gcontext, &gpas->gts);
-	gpas->gts.cb_task_process = gpupreagg_task_process;
-	gpas->gts.cb_task_complete = gpupreagg_task_complete;
-	gpas->gts.cb_task_release = gpupreagg_task_release;
-	gpas->gts.cb_next_chunk = gpupreagg_next_chunk;
-	gpas->gts.cb_next_tuple = gpupreagg_next_tuple;
-	gpas->gts.cb_cleanup = NULL;
 
 	return (Node *) gpas;
 }
@@ -2898,12 +2890,24 @@ gpupreagg_create_scan_state(CustomScan *cscan)
 static void
 gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 {
+	GpuContext	   *gcontext = NULL;
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 	PlanState	   *ps = &node->ss.ps;
 	CustomScan	   *cscan = (CustomScan *) ps->plan;
 	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
 	int				outer_width;
 	Const		   *kparam_0;
+
+	/* activate GpuContext for device execution */
+	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+		gcontext = pgstrom_get_gpucontext();
+	/* common GpuTaskState setup */
+	pgstrom_init_gputaskstate(gcontext, &gpas->gts);
+    gpas->gts.cb_task_process = gpupreagg_task_process;
+    gpas->gts.cb_task_complete = gpupreagg_task_complete;
+    gpas->gts.cb_task_release = gpupreagg_task_release;
+    gpas->gts.cb_next_chunk = gpupreagg_next_chunk;
+    gpas->gts.cb_next_tuple = gpupreagg_next_tuple;
 
 	/*
 	 * initialize own child expression
@@ -3403,7 +3407,10 @@ gpupreagg_task_respond(CUstream stream, CUresult status, void *private)
 	kern_resultbuf	   *kresults = KERN_GPUPREAGG_RESULTBUF(&gpreagg->kern);
 	GpuTaskState	   *gts = gpreagg->task.gts;
 
-	SpinLockAcquire(&gts->lock);
+	/* See comments in pgstrom_respond_gpuscan() */
+	if (status == CUDA_ERROR_INVALID_CONTEXT || !IsTransactionState())
+		return;
+
 	if (status != CUDA_SUCCESS)
 		gpreagg->task.errcode = status;
 	else
@@ -3416,10 +3423,14 @@ gpupreagg_task_respond(CUstream stream, CUresult status, void *private)
 		gpreagg->task.errcode = StromError_Success;
 	}
 
-	/* remove from the running_tasks list */
+	/*
+	 * Remove from the running_tasks list, then attach it
+	 * on the completed_tasks list
+	 */
+	SpinLockAcquire(&gts->lock);
 	dlist_delete(&gpreagg->task.chain);
 	gts->num_running_tasks--;
-	/* then, attach it on the completed_tasks list */
+
 	if (gpreagg->task.errcode == StromError_Success)
 		dlist_push_tail(&gts->completed_tasks, &gpreagg->task.chain);
 	else

@@ -859,22 +859,12 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 static Node *
 gpusort_create_scan_state(CustomScan *cscan)
 {
-	GpuContext	   *gcontext = pgstrom_get_gpucontext();
-	GpuSortState   *gss = MemoryContextAllocZero(gcontext->memcxt,
-												 sizeof(GpuSortState));
+	GpuSortState   *gss = palloc0(sizeof(GpuSortState));
+
 	/* Set tag and executor callbacks */
-	NodeSetTag(gss, T_CustomScanState);
-	gss->gts.css.flags = cscan->flags;
-	gss->gts.css.methods = &gpusort_exec_methods;
-	/* GpuTaskState setup */
-	pgstrom_init_gputaskstate(gcontext, &gss->gts);
-	gss->gts.cb_task_process = gpusort_task_process;
-	gss->gts.cb_task_complete = gpusort_task_complete;
-	gss->gts.cb_task_release = gpusort_task_release;
-	gss->gts.cb_task_polling = gpusort_task_polling;
-	gss->gts.cb_next_chunk = gpusort_next_chunk;
-	gss->gts.cb_next_tuple = gpusort_next_tuple;
-	gss->gts.cb_cleanup = NULL;
+    NodeSetTag(gss, T_CustomScanState);
+    gss->gts.css.flags = cscan->flags;
+    gss->gts.css.methods = &gpusort_exec_methods;
 
 	return (Node *) gss;
 }
@@ -882,10 +872,23 @@ gpusort_create_scan_state(CustomScan *cscan)
 static void
 gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 {
+	GpuContext	   *gcontext = NULL;
 	GpuSortState   *gss = (GpuSortState *) node;
-	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
+	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuSortInfo	   *gs_info = deform_gpusort_info(cscan);
 	PlanState	   *ps = &node->ss.ps;
+
+	/* activate GpuContext for device execution */
+	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+		gcontext = pgstrom_get_gpucontext();
+	/* common GpuTaskState setup */
+	pgstrom_init_gputaskstate(gcontext, &gss->gts);
+	gss->gts.cb_task_process = gpusort_task_process;
+	gss->gts.cb_task_complete = gpusort_task_complete;
+	gss->gts.cb_task_release = gpusort_task_release;
+	gss->gts.cb_task_polling = gpusort_task_polling;
+	gss->gts.cb_next_chunk = gpusort_next_chunk;
+	gss->gts.cb_next_tuple = gpusort_next_tuple;
 
 	/* Like built-in Sort node doing, we shall provide random access
 	 * capability to the sort output, including backward scan or
@@ -952,13 +955,14 @@ gpusort_end(CustomScanState *node)
 	for (i=0; i < MAX_MERGECHUNKS_CLASS; i++)
 		Assert(!gss->sorted_chunks[i]);
 #endif
-
-	/* Cleanup and relase any concurrent tasks */
+	/*
+	 * Cleanup and relase any concurrent tasks
+	 * (including pgstrom_data_store)
+	 */
 	pgstrom_release_gputaskstate(&gss->gts);
 
-	/* Release data chunks */
-	for (i=0; i < gss->num_chunks; i++)
-		pgstrom_release_data_store(gss->pds_chunks[i]);
+	//for (i=0; i < gss->num_chunks; i++)
+	//	pgstrom_release_data_store(gss->pds_chunks[i]);
 
 	/* Clean up subtree */
     ExecEndNode(outerPlanState(node));
@@ -1310,20 +1314,15 @@ gpusort_task_release(GpuTask *gtask)
 {
 	pgstrom_gpusort	   *gpusort = (pgstrom_gpusort *) gtask;
 
-	if (pgstrom_resource_context() != ResourceContextAbort)
-	{
-		if (gpusort->litems_dsm)
-			dsm_detach(gpusort->litems_dsm);
-		if (gpusort->ritems_dsm)
-			dsm_detach(gpusort->ritems_dsm);
-		if (gpusort->oitems_dsm)
-			dsm_detach(gpusort->oitems_dsm);
-		if (pgstrom_resource_context() == ResourceContextNormal)
-		{
-			if (gpusort->bgw_handle)
-				pfree(gpusort->bgw_handle);
-		}
-	}
+	if (gpusort->litems_dsm)
+		dsm_detach(gpusort->litems_dsm);
+	if (gpusort->ritems_dsm)
+		dsm_detach(gpusort->ritems_dsm);
+	if (gpusort->oitems_dsm)
+		dsm_detach(gpusort->oitems_dsm);
+	if (gpusort->bgw_handle)
+		pfree(gpusort->bgw_handle);
+
 	gpusort_cleanup_cuda_resources(gpusort);
 
 	pfree(gtask);
@@ -1590,16 +1589,23 @@ gpusort_task_respond(CUstream stream, CUresult status, void *private)
 	kern_resultbuf	   *kresults = GPUSORT_GET_KRESULTS(gpusort->oitems_dsm);
 	GpuTaskState	   *gts = gpusort->task.gts;
 
-	SpinLockAcquire(&gts->lock);
+	/* See comments in pgstrom_respond_gpuscan() */
+	if (status == CUDA_ERROR_INVALID_CONTEXT || !IsTransactionState())
+		return;
+
 	if (status != CUDA_SUCCESS)
 		gpusort->task.errcode = status;
     else
 		gpusort->task.errcode = kresults->errcode;
 
-	/* remove from the running_tasks list */
+	/*
+	 * Remove from the running_tasks list, then attach it
+	 * on the completed_tasks list
+	 */
+	SpinLockAcquire(&gts->lock);
 	dlist_delete(&gpusort->task.chain);
 	gts->num_running_tasks--;
-	/* then, attach it on the completed_tasks list */
+
 	if (gpusort->task.errcode == StromError_Success)
 		dlist_push_tail(&gts->completed_tasks, &gpusort->task.chain);
 	else

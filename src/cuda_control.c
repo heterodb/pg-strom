@@ -693,10 +693,9 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 										 length_max);
 		length_gcxt = offsetof(GpuContext, gpu[cuda_num_devices]);
 		gcontext = MemoryContextAllocZero(memcxt, length_gcxt);
-		gcontext->refcnt = 2;
+		gcontext->refcnt = 1;
 		gcontext->resowner = resowner;
 		gcontext->memcxt = memcxt;
-		dlist_init(&gcontext->state_list);
 		dlist_init(&gcontext->pds_list);
 		gcontext->gpu[0].cuda_context = cuda_context;
 		gcontext->gpu[0].cuda_device = cuda_devices[0];
@@ -761,6 +760,8 @@ pgstrom_get_gpucontext(void)
 		{
 			dlist_move_head(&gcontext_list, &gcontext->chain);
 			gcontext->refcnt++;
+			elog(DEBUG2, "Get existing GpuContext (refcnt=%d, resowner=%p)",
+				 gcontext->refcnt, gcontext->resowner);
 			return gcontext;
 		}
 	}
@@ -771,80 +772,21 @@ pgstrom_get_gpucontext(void)
 	 */
 	gcontext = pgstrom_create_gpucontext(CurrentResourceOwner);
 	dlist_push_head(&gcontext_list, &gcontext->chain);
-
+	elog(DEBUG2, "Create new GpuContext (refcnt=%d, resowner=%p)",
+		 gcontext->refcnt, gcontext->resowner);
 	return gcontext;
 }
 
-void
-pgstrom_sync_gpucontext(GpuContext *gcontext)
-{
-	CUresult	rc;
-	int			i;
-
-	/* Ensure all the concurrent tasks getting completed */
-	for (i=0; i < gcontext->num_context; i++)
-	{
-		rc = cuCtxPushCurrent(gcontext->gpu[i].cuda_context);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuCtxPushCurrent: %s", errorText(rc));
-
-		rc = cuCtxSynchronize();
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuCtxSynchronize: %s", errorText(rc));
-
-		rc = cuCtxPopCurrent(NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-	}
-}
-
 static void
-pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
+pgstrom_release_gpucontext(GpuContext *gcontext)
 {
 	CUcontext	cuda_context;
 	CUresult	rc;
 	int			i;
 
-	/* Ensure all the concurrent tasks getting completed */
-	pgstrom_sync_gpucontext(gcontext);
-
-	/* Release underlying TaskState, if any */
-	while (!dlist_is_empty(&gcontext->state_list))
-	{
-		dlist_node	   *dnode = dlist_pop_head_node(&gcontext->state_list);
-		GpuTaskState   *gts = dlist_container(GpuTaskState, chain, dnode);
-
-		Assert(gts->gcontext == gcontext);
-
-		/* release cuda module, if any */
-		if (gts->cuda_modules)
-		{
-			for (i=0; i < gcontext->num_context; i++)
-			{
-				rc = cuModuleUnload(gts->cuda_modules[i]);
-				if (rc != CUDA_SUCCESS)
-					elog(WARNING, "failed on cuModuleUnload: %s",
-						 errorText(rc));
-			}
-			gts->cuda_modules = NULL;
-		}
-		/* release task objects */
-		while (!dlist_is_empty(&gts->tracked_tasks))
-		{
-			dlist_node *dnode = dlist_pop_head_node(&gts->tracked_tasks);
-			GpuTask	   *gtask = dlist_container(GpuTask, tracker, dnode);
-
-			Assert(gtask->gts == gts);
-			if (is_commit)
-				elog(WARNING, "Unreferenced GpuTask leak: %p", gtask);
-			gts->cb_task_release(gtask);
-		}
-		/* release task state */
-		if (is_commit)
-			elog(WARNING, "Unreferenced GpuTaskState leak: %p", gts);
-		if (gts->cb_cleanup)
-			gts->cb_cleanup(gts);
-	}
+	/* detach this GpuContext from the global list */
+	dlist_delete(&gcontext->chain);
+	memset(&gcontext->chain, 0, sizeof(dlist_node));
 
 	/*
 	 * Release pgstrom_data_store; because KDS_FORMAT_ROW may have mmap(2)
@@ -859,7 +801,9 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 		pgstrom_release_data_store(pds);
 	}
 
-	/* Ensure CUDA context is empty */
+	/*
+	 * Ensure CUDA context is empty
+	 */
 	rc = cuCtxSetCurrent(NULL);
 	if (rc != CUDA_SUCCESS)
 		elog(WARNING, "failed on cuCtxSetCurrent(NULL): %s", errorText(rc));
@@ -878,7 +822,7 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool is_commit)
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
 	}
-	/* release  */
+	/* release host pinned memory context */
 	MemoryContextDelete(gcontext->memcxt);
 
 	/* Drop the primary CUDA context */
@@ -892,10 +836,7 @@ pgstrom_put_gpucontext(GpuContext *gcontext)
 {
 	Assert(gcontext->refcnt > 0);
 	if (--gcontext->refcnt == 0)
-	{
-		dlist_delete(&gcontext->chain);
-		pgstrom_release_gpucontext(gcontext, true);
-	}
+		pgstrom_release_gpucontext(gcontext);
 }
 
 /*
@@ -907,13 +848,39 @@ pgstrom_put_gpucontext(GpuContext *gcontext)
 void
 pgstrom_cleanup_gputaskstate(GpuTaskState *gts)
 {
-	dlist_node	   *dnode;
+	GpuContext	   *gcontext = gts->gcontext;
 	GpuTask		   *gtask;
+	dlist_node	   *dnode;
+	CUresult		rc;
+	int				i;
 
-	/* synchronize all the concurrent task, if any */
-	pgstrom_sync_gpucontext(gts->gcontext);
+	/*
+	 * Synchronize all the concurrent task, if any
+	 */
+	if (gcontext)
+	{
+		for (i=0; i < gcontext->num_context; i++)
+		{
+			rc = cuCtxPushCurrent(gcontext->gpu[i].cuda_context);
+			Assert(rc == CUDA_SUCCESS);
+			if (rc != CUDA_SUCCESS)
+				elog(WARNING, "failed on cuCtxPushCurrent: %s", errorText(rc));
 
-	/* release tasks tracked by this task state */
+			rc = cuCtxSynchronize();
+			Assert(rc == CUDA_SUCCESS);
+			if (rc != CUDA_SUCCESS)
+				elog(WARNING, "failed on cuCtxSynchronize: %s", errorText(rc));
+
+			rc = cuCtxPopCurrent(NULL);
+			Assert(rc == CUDA_SUCCESS);
+			if (rc != CUDA_SUCCESS)
+				elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+		}
+	}
+
+	/*
+	 * Release GpuTasks tracked by this GpuTaskState
+	 */
 	SpinLockAcquire(&gts->lock);
 	while (!dlist_is_empty(&gts->tracked_tasks))
 	{
@@ -930,7 +897,7 @@ pgstrom_cleanup_gputaskstate(GpuTaskState *gts)
 	dlist_init(&gts->completed_tasks);
 	dlist_init(&gts->ready_tasks);
 	gts->num_running_tasks = 0;
-    gts->num_pending_tasks = 0;
+	gts->num_pending_tasks = 0;
 	gts->num_ready_tasks = 0;
 	SpinLockRelease(&gts->lock);
 
@@ -945,33 +912,33 @@ pgstrom_release_gputaskstate(GpuTaskState *gts)
 	CUresult	rc;
 	int			i;
 
-	/* unlink this GpuTaskState from the GpuContext */
-	dlist_delete(&gts->chain);
-	memset(&gts->chain, 0, sizeof(dlist_node));
-
 	/* clean-up and release any concurrent tasks */
 	pgstrom_cleanup_gputaskstate(gts);
 
-	/* release cuda module, if any */
-	if (gts->cuda_modules)
+	/* put any CUDA resources, if any */
+	if (gcontext)
 	{
-		for (i=0; i < gcontext->num_context; i++)
+		/* release cuda module, if any */
+		if (gts->cuda_modules)
 		{
-			rc = cuModuleUnload(gts->cuda_modules[i]);
-			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on cuModuleUnload: %s",
-					 errorText(rc));
+			for (i=0; i < gcontext->num_context; i++)
+			{
+				rc = cuModuleUnload(gts->cuda_modules[i]);
+				if (rc != CUDA_SUCCESS)
+					elog(WARNING, "failed on cuModuleUnload: %s",
+						 errorText(rc));
+			}
+			gts->cuda_modules = NULL;
 		}
-		gts->cuda_modules = NULL;
+		/* put reference to the GpuContext */
+		pgstrom_put_gpucontext(gts->gcontext);
+		gts->gcontext = NULL;
 	}
-	/* put reference to the GpuContext */
-	pgstrom_put_gpucontext(gts->gcontext);
 }
 
 void
 pgstrom_init_gputaskstate(GpuContext *gcontext, GpuTaskState *gts)
 {
-	dlist_push_tail(&gcontext->state_list, &gts->chain);
 	gts->gcontext = gcontext;
 	gts->kern_source = NULL;	/* to be set later */
 	gts->extra_flags = 0;		/* to be set later */
@@ -994,7 +961,6 @@ pgstrom_init_gputaskstate(GpuContext *gcontext, GpuTaskState *gts)
 	gts->cb_task_polling = NULL;
 	gts->cb_next_chunk = NULL;
 	gts->cb_next_tuple = NULL;
-	gts->cb_cleanup = NULL;
 	memset(&gts->pfm_accum, 0, sizeof(pgstrom_perfmon));
 	gts->pfm_accum.enabled = pgstrom_perfmon_enabled;
 }
@@ -1483,21 +1449,12 @@ pgstrom_cleanup_gputask_cuda_resources(GpuTask *gtask)
 /*
  *
  */
-static PGStromResourceContext current_resource_context = ResourceContextNormal;
-
-PGStromResourceContext
-pgstrom_resource_context(void)
-{
-	return current_resource_context;
-}
-
 static void
 gpucontext_cleanup_callback(ResourceReleasePhase phase,
 							bool is_commit,
 							bool is_toplevel,
 							void *arg)
 {
-	PGStromResourceContext	saved_resource_context;
 	dlist_iter		iter;
 
 	if (phase != RESOURCE_RELEASE_AFTER_LOCKS)
@@ -1509,27 +1466,10 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 
 		if (gcontext->resowner == CurrentResourceOwner)
 		{
-			/* OK, GpuContext to be released */
-			dlist_delete(&gcontext->chain);
-
-			if (is_commit && gcontext->refcnt > 1)
+			if (is_commit)
 				elog(WARNING, "Probably, someone forgot to put GpuContext");
-
-			saved_resource_context = current_resource_context;
-			current_resource_context = (is_commit
-										? ResourceContextCommit
-										: ResourceContextAbort);
-			PG_TRY();
-			{
-				pgstrom_release_gpucontext(gcontext, is_commit);
-			}
-			PG_CATCH();
-			{
-				current_resource_context = saved_resource_context;
-				PG_RE_THROW();
-			}
-			PG_END_TRY();
-			return;
+			pgstrom_release_gpucontext(gcontext);
+			break;
 		}
 	}
 }

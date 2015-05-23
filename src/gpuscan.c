@@ -17,6 +17,7 @@
  */
 #include "postgres.h"
 #include "access/sysattr.h"
+#include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "catalog/pg_namespace.h"
 #include "commands/explain.h"
@@ -131,8 +132,6 @@ typedef struct {
 
 	kern_parambuf  *kparams;
 
-//	pgstrom_gpuscan *curr_chunk;
-//	uint32			curr_index;
 	cl_uint			num_rechecked;
 } GpuScanState;
 
@@ -603,21 +602,12 @@ pgstrom_gpuscan_setup_bulkslot(PlanState *outer_planstate,
 static Node *
 gpuscan_create_scan_state(CustomScan *cscan)
 {
-	GpuContext	   *gcontext = pgstrom_get_gpucontext();
-	GpuScanState   *gss = MemoryContextAllocZero(gcontext->memcxt,
-												 sizeof(GpuScanState));
+	GpuScanState   *gss = palloc0(sizeof(GpuScanState));
+
 	/* Set tag and executor callbacks */
 	NodeSetTag(gss, T_CustomScanState);
 	gss->gts.css.flags = cscan->flags;
 	gss->gts.css.methods = &gpuscan_exec_methods.c;
-	/* GpuTaskState setup */
-	pgstrom_init_gputaskstate(gcontext, &gss->gts);
-	gss->gts.cb_task_process = pgstrom_process_gpuscan;
-	gss->gts.cb_task_complete = pgstrom_complete_gpuscan;
-	gss->gts.cb_task_release = pgstrom_release_gpuscan;
-	gss->gts.cb_next_chunk = gpuscan_next_chunk;
-	gss->gts.cb_next_tuple = gpuscan_next_tuple;
-	gss->gts.cb_cleanup = NULL;
 
 	return (Node *) gss;
 }
@@ -626,12 +616,24 @@ static void
 gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 {
 	Relation		scan_rel = node->ss.ss_currentRelation;
+	GpuContext	   *gcontext = NULL;
 	GpuScanState   *gss = (GpuScanState *) node;
 	GpuScanInfo	   *gs_info = deform_gpuscan_info(node->ss.ps.plan);
 
 	/* gpuscan should not have inner/outer plan right now */
 	Assert(outerPlan(node) == NULL);
 	Assert(innerPlan(node) == NULL);
+
+	/* activate GpuContext for device execution */
+	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+		gcontext = pgstrom_get_gpucontext();
+	/* setup common GpuTaskState fields */
+	pgstrom_init_gputaskstate(gcontext, &gss->gts);
+	gss->gts.cb_task_process = pgstrom_process_gpuscan;
+	gss->gts.cb_task_complete = pgstrom_complete_gpuscan;
+	gss->gts.cb_task_release = pgstrom_release_gpuscan;
+	gss->gts.cb_next_chunk = gpuscan_next_chunk;
+	gss->gts.cb_next_tuple = gpuscan_next_tuple;
 
 	/* initialize the start/end position */
 	gss->curr_blknum = 0;
@@ -653,8 +655,6 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->kparams = pgstrom_create_kern_parambuf(gs_info->used_params,
 											gss->gts.css.ss.ps.ps_ExprContext);
 	/* other run-time parameters */
-	//gss->curr_chunk = NULL;
-	//gss->curr_index = 0;
     gss->num_rechecked = 0;
 }
 
@@ -1016,16 +1016,50 @@ pgstrom_respond_gpuscan(CUstream stream, CUresult status, void *private)
 	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
 	GpuTaskState	   *gts = gpuscan->task.gts;
 
-	SpinLockAcquire(&gts->lock);
+	/*
+	 * NOTE: We need to pay careful attention for invocation timing of
+	 * the callback registered via cuStreamAddCallback(). This routine
+	 * shall be called on the non-master thread which is managed by CUDA
+	 * runtime, so here is no guarantee resources are available.
+	 * Once a transaction gets aborted, PostgreSQL backend takes a long-
+	 * junk to the point where sigsetjmp(), then releases resources that
+	 * is allocated for each transaction.
+	 * Per-query memory context (estate->es_query_cxt) shall be released
+	 * during AbortTransaction(), then CUDA context shall be also destroyed
+	 * on the ResourceReleaseCallback().
+	 * It means, this respond callback may be kicked, by CUDA runtime,
+	 * concurrently, however, either/both of GpuTaskState or/and CUDA context
+	 * may be already gone.
+	 * So, prior to touch these resources, we need to ensure the resources
+	 * are still valid.
+	 *
+	 * FIXME: Once IsTransactionState() returned 'true', transaction may be
+	 * aborted during the rest of tasks. We need more investigation to
+	 * ensure GpuTaskState is not released here...
+	 *
+	 * If CUDA runtime gives CUDA_ERROR_INVALID_CONTEXT, it implies CUDA
+	 * context is already released. So, we should bail-out immediately.
+	 * Also, once transaction state gets turned off from TRANS_INPROGRESS,
+	 * it implies per-query memory context will be released very soon.
+	 * So, we also need to bail-out immediately.
+	 */
+	if (status == CUDA_ERROR_INVALID_CONTEXT || !IsTransactionState())
+		return;
+
+	/* OK, routine is called back in the usual context */
 	if (status != CUDA_SUCCESS)
 		gpuscan->task.errcode = status;
 	else
 		gpuscan->task.errcode = kresults->errcode;
 
-	/* remove from the running_tasks list */
+	/*
+	 * Remove from the running_tasks list, then attach it
+	 * on the completed_tasks list
+	 */
+	SpinLockAcquire(&gts->lock);
 	dlist_delete(&gpuscan->task.chain);
 	gts->num_running_tasks--;
-	/* then, attach it on the completed_tasks list */
+
 	if (gpuscan->task.errcode == StromError_Success)
 		dlist_push_tail(&gts->completed_tasks, &gpuscan->task.chain);
 	else
