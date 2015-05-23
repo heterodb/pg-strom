@@ -127,9 +127,12 @@ typedef struct
 	cl_uint			ncols;		/* number of inner relation's columns */
 	cl_uint			nitems;		/* number of inner relation's items */
 	/* NOTE: !fields above are compatible with kern_data_store! */
+	cl_uint			__dummy1__;
+	cl_char         __dummy2__;
+    cl_char         __dummy3__;
+    cl_uint         __dummy4__;
+    cl_int          __dummy5__;
 	cl_uint			nslots;		/* width of hash slot */
-	cl_char			__dummy1__;	/* for layout compatibility to KDS */
-	cl_char			__dummy2__;	/* for layout compatibility to KDS */
 	cl_uint			hash_min;	/* minimum hash value */
 	cl_uint			hash_max;	/* maximum hash value */
 	/*

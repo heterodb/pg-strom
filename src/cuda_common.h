@@ -309,40 +309,40 @@ typedef struct {
  * | colmeta[1]                     | STROMALIGN()
  * |   :                            |    |
  * | colmeta[M-1]                   |    V
- * +----------------+---------------+---------
- * |  <row-format>  | <slot-format> |
- * +----------------+---------------+
- * | tup_offset[0]  | values/isnull |
- * | tup_offset[1]  | pair of the   |
- * |    :           | 1st row       |
- * | tup_offset[N-1]| +-------------+
- * +----------------+ | values[0]   |
- * |    :           | |    :        |
- * |    :           | | values[N-1] |
- * +----------------+ +-------------+
- * | htup_item[N-1] | | isnull[0]   |
- * | +--------------+ |    :        |
- * | | t_len        | | isnull[N-1] |
- * | +--------------+-+-------------+
- * | | t_self       | values/isnull |
- * | +--------------+ pair of the   |
- * | | heap_tuple   | 2nd row       |
- * | |   :          | +-------------+
- * | |   :          | | values[0]   |
- * +-+--------------+ |    :        |
- * |     :          | | values[N-1] |
- * |     :          | +-------------+
- * +----------------+ | isnull[0]   |
- * | htup_item[0]   | |    :        |
- * | +--------------+ | isnull[N-1] |
- * | | t_len        +-+-------------+
- * | +--------------+       :       |
- * | | t_self       |       :       |
- * | +--------------+       :       |
- * | | heap_tuple   |       :       |
- * | |   :          |       :       |
- * | |   :          |       :       |
- * +-+--------------+---------------+
+ * +----------------+---------------+----------------+
+ * |  <row-format>  | <slot-format> | <hash-format>  |
+ * +----------------+---------------+----------------+
+ * | tup_offset[0]  | values/isnull | hash_slot[0]   |
+ * | tup_offset[1]  | pair of the   | hash_slot[1]   |
+ * |    :           | 1st row       |     :          |
+ * | tup_offset[N-1]| +-------------+ hash_slot[N-1] |
+ * +----------------+ | values[0]   +----------------+
+ * |    :           | |    :        |     :          |
+ * |    :           | | values[N-1] |     :          |
+ * +----------------+ +-------------+----------------+
+ * | htup_item[N-1] | | isnull[0]   | kern_hashentry |
+ * | +--------------+ |    :        | +--------------+
+ * | | t_len        | | isnull[N-1] | | hash         |
+ * | +--------------+-+-------------+ +--------------+
+ * | | t_self       | values/isnull | | next         |
+ * | +--------------+ pair of the   | +--------------+
+ * | | heap_tuple   | 2nd row       | | rowid        |
+ * | |   :          | +-------------+ +--------------+
+ * | |   :          | | values[0]   | | t_len        |
+ * +-+--------------+ |    :        | +--------------+
+ * |     :          | | values[N-1] | | htup         |
+ * |     :          | +-------------+ |   :          |
+ * +----------------+ | isnull[0]   +-+--------------+
+ * | htup_item[0]   | |    :        | kern_hashentry |
+ * | +--------------+ | isnull[N-1] | +--------------+
+ * | | t_len        +-+-------------+ | hash         |
+ * | +--------------+       :       | +--------------+
+ * | | t_self       |       :       | | next         |
+ * | +--------------+       :       | +--------------+
+ * | | heap_tuple   |       :       | | rowid        |
+ * | |   :          |       :       | +--------------+
+ * | |   :          |       :       | |    :         |
+ * +-+--------------+---------------+----------------+
  */
 typedef struct {
 	/* true, if column is held by value. Elsewhere, a reference */
@@ -357,7 +357,9 @@ typedef struct {
 	cl_short		attcacheoff;
 } kern_colmeta;
 
-
+/*
+ * kern_tupitem - individual items for KDS_FORMAT_ROW
+ */
 typedef struct
 {
 	cl_ushort			t_len;	/* length of tuple */
@@ -365,8 +367,21 @@ typedef struct
 	HeapTupleHeaderData	htup;
 } kern_tupitem;
 
+/*
+ * kern_hashitem - individual items for KDS_FORMAT_HASH
+ */
+typedef struct
+{
+	cl_uint				hash;	/* 32-bit hash value */
+	cl_uint				next;	/* offset of the next */
+	cl_uint				rowid;	/* unique identifier of this hash entry */
+	cl_uint				t_len;	/* length of the tuple itself */
+	HeapTupleHeaderData	htup;
+} kern_hashitem;
+
 #define KDS_FORMAT_ROW			1
 #define KDS_FORMAT_SLOT			2
+#define KDS_FORMAT_HASH			3	/* inner hash table for GpuHashJoin */
 
 typedef struct {
 	hostptr_t		hostptr;	/* address of kds on the host */
@@ -379,6 +394,9 @@ typedef struct {
 	cl_char			tdhasoid;	/* copy of TupleDesc.tdhasoid */
 	cl_uint			tdtypeid;	/* copy of TupleDesc.tdtypeid */
 	cl_int			tdtypmod;	/* copy of TupleDesc.tdtypmod */
+	cl_uint			nslots;		/* width of hash-slot (only HASH format) */
+	cl_uint			hash_min;	/* minimum hash-value (only HASH format) */
+	cl_uint			hash_max;	/* maximum hash-value (only HASH format) */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_data_store;
 
@@ -400,6 +418,29 @@ typedef struct {
 						 (kds)->ncols) * (kds_index)))
 #define KERN_DATA_STORE_ISNULL(kds,kds_index)				\
 	((cl_bool *)(KERN_DATA_STORE_VALUES((kds),(kds_index)) + (kds)->ncols))
+
+/* access macro for hash-format */
+#define KERN_DATA_STORE_HASHSLOT(kds)						\
+	((cl_uint *)KERN_DATA_STORE_BODY(kds))
+
+STATIC_INLINE(kern_hashitem *)
+KERN_HASH_FIRST_ITEM(kern_data_store *kds, cl_uint hash)
+{
+	cl_uint	   *slot = KERN_DATA_STORE_HASHSLOT(kds);
+	cl_uint		index = hash % kds->nslots;
+
+	if (slot[index] == 0)
+		return NULL;
+	return (kern_hashitem *)((char *)kds + slot[index]);
+}
+
+STATIC_INLINE(kern_hashitem *)
+KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
+{
+	if (!khitem || khitem->next == 0)
+		return NULL;
+	return (kern_hashitem *)((char *)kds + khitem->next);
+}
 
 /* length of kern_data_store */
 #define KERN_DATA_STORE_LENGTH(kds)		\
