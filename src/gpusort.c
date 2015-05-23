@@ -16,7 +16,6 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
-#include "access/nbtree.h"
 #include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
@@ -26,10 +25,6 @@
 #include "parser/parsetree.h"
 #include "postmaster/bgworker.h"
 #include "storage/dsm.h"
-#include "storage/latch.h"
-#include "storage/proc.h"
-#include "storage/procsignal.h"
-#include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -37,11 +32,6 @@
 #include "utils/snapmgr.h"
 #include "pg_strom.h"
 #include "cuda_gpusort.h"
-#include <math.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
 
 typedef struct
 {

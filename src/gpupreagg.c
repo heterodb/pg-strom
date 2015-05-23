@@ -16,17 +16,13 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
-#include "access/nbtree.h"
 #include "access/sysattr.h"
 #include "access/xact.h"
-#include "catalog/namespace.h"
-#include "catalog/pg_aggregate.h"
 #include "catalog/pg_cast.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "executor/nodeAgg.h"
-#include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "parser/parse_func.h"
@@ -38,8 +34,6 @@
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
-#include "utils/memutils.h"
-#include "utils/numeric.h"
 #include "utils/pg_crc.h"
 #include "utils/syscache.h"
 #include <math.h>
