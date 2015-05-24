@@ -516,6 +516,7 @@ create_gpuscan_plan(PlannerInfo *root,
 	gs_info.used_vars = context.used_vars;
 	gs_info.dev_quals = dev_quals;
 	form_gpuscan_info(cscan, &gs_info);
+	cscan->flags = best_path->flags;
 	cscan->methods = &gpuscan_plan_methods;
 
 	return &cscan->scan.plan;
