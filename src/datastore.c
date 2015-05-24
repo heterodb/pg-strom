@@ -37,12 +37,9 @@
 #include <sys/types.h>
 
 /*
- * variables declarations
+ * GUC variables
  */
 static int		pgstrom_chunk_size_kb;
-bool			pgstrom_bulkload_enabled;
-static CustomScanMethods	bulkscan_scan_methods;
-static PGStromExecMethods	bulkscan_exec_methods;
 
 /*
  * pgstrom_chunk_size - configured chunk size
@@ -926,80 +923,9 @@ pgstrom_dump_data_store(pgstrom_data_store *pds)
 	}
 }
 
-/* ================================================================
- *
- * Plan/Exec methods of BulkScan
- *
- * ================================================================ */
-typedef struct
-{
-	CustomScanState	css;
-	BlockNumber		curr_blknum;
-	BlockNumber		last_blknum;
-	HeapTupleData	scan_tuple;
-} BulkScanState;
-
-static Node *
-bulkscan_create_scan_state(CustomScan *cscan)
-{
-	BulkScanState  *bss = palloc0(sizeof(BulkScanState));
-
-	/* sanity checks */
-	Assert(cscan->scan.plan.qual == NIL);
-
-	/* Set tag and executor callbacks */
-	NodeSetTag(bss, T_CustomScanState);
-	bss->css.flags = cscan->flags;
-	bss->css.methods = &bulkscan_exec_methods.c;
-
-	return NULL;
-}
-
-static void
-bulkscan_begin(CustomScanState *node, EState *estate, int eflags)
-{
-	BulkScanState  *bss = (BulkScanState *) node;
-	Relation		scan_rel = node->ss.ss_currentRelation;
-
-	/* sanity checks */
-	Assert(outerPlan(node) == NULL);
-	Assert(innerPlan(node) == NULL);
-
-	/* init start/end position */
-	bss->curr_blknum = 0;
-	bss->last_blknum = RelationGetNumberOfBlocks(scan_rel);
-	/* 'tableoid' should not change during relation scan */
-	bss->scan_tuple.t_tableOid = RelationGetRelid(scan_rel);
-}
-
-static TupleTableSlot *
-bulkscan_exec(CustomScanState *node)
-{
-	return NULL;
-}
-
-static void *
-bulkscan_exec_bulk(CustomScanState *node)
-{
-	return NULL;
-}
-
-static void
-bulkscan_end(CustomScanState *node)
-{}
-
-static void
-bulkscan_rescan(CustomScanState *node)
-{}
-
-static void
-bulkscan_explain(CustomScanState *node, List *ancestors, ExplainState *es)
-{}
-
 void
 pgstrom_init_datastore(void)
 {
-	/* configuration of the defualt chunk size */
 	DefineCustomIntVariable("pg_strom.chunk_size",
 							"default size of pgstrom_data_store",
 							NULL,
@@ -1010,28 +936,4 @@ pgstrom_init_datastore(void)
 							PGC_USERSET,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							NULL, NULL, NULL);
-	/* turn on/off bulkload feature to exchange PG-Strom nodes */
-	DefineCustomBoolVariable("pg_strom.bulkload_enabled",
-							 "Enables the bulk-loading mode of PG-Strom",
-							 NULL,
-							 &pgstrom_bulkload_enabled,
-							 true,
-							 PGC_USERSET,
-                             GUC_NOT_IN_SAMPLE,
-                             NULL, NULL, NULL);
-
-	/* setup plan methods of BulkLoad */
-	memset(&bulkscan_scan_methods, 0, sizeof(bulkscan_scan_methods));
-	bulkscan_scan_methods.CustomName	= "BulkScan";
-	bulkscan_scan_methods.CreateCustomScanState = bulkscan_create_scan_state;
-
-	/* setup exec methods of BulkLoad */
-	memset(&bulkscan_exec_methods, 0, sizeof(bulkscan_exec_methods));
-	bulkscan_exec_methods.c.CustomName			= "BulkScan";
-	bulkscan_exec_methods.c.BeginCustomScan		= bulkscan_begin;
-	bulkscan_exec_methods.c.ExecCustomScan		= bulkscan_exec;
-	bulkscan_exec_methods.c.EndCustomScan		= bulkscan_end;
-	bulkscan_exec_methods.c.ReScanCustomScan	= bulkscan_rescan;
-	bulkscan_exec_methods.c.ExplainCustomScan	= bulkscan_explain;
-	bulkscan_exec_methods.ExecCustomBulk		= bulkscan_exec_bulk;
 }

@@ -38,6 +38,7 @@ PG_MODULE_MAGIC;
 bool	pgstrom_enabled;
 bool	pgstrom_perfmon_enabled;
 static bool pgstrom_debug_kernel_source;
+bool	pgstrom_bulkload_enabled;
 int		pgstrom_max_async_tasks;
 
 /* cost factors */
@@ -70,6 +71,15 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	/* turn on/off bulkload feature to exchange PG-Strom nodes */
+	DefineCustomBoolVariable("pg_strom.bulkload_enabled",
+							 "Enables the bulk-loading mode of PG-Strom",
+							 NULL,
+							 &pgstrom_bulkload_enabled,
+							 true,
+							 PGC_USERSET,
+                             GUC_NOT_IN_SAMPLE,
+                             NULL, NULL, NULL);
 	/* turn on/off cuda kernel source saving */
 	DefineCustomBoolVariable("pg_strom.debug_kernel_source",
 							 "Turn on/off to display the kernel source path",
