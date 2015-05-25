@@ -1160,8 +1160,8 @@ pgstrom_program_info(PG_FUNCTION_ARGS)
 	FuncCallContext *fncxt;
 	program_info   *pinfo;
 	List		   *pinfo_list;
-	Datum			values[10];
-	bool			isnull[10];
+	Datum			values[11];
+	bool			isnull[11];
 	HeapTuple		tuple;
 
 	if (SRF_IS_FIRSTCALL())
