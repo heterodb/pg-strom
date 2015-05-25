@@ -247,6 +247,7 @@ struct GpuTaskState
 	CUmodule	   *cuda_modules;	/* CUmodules for each CUDA context */
 	bool			scan_done;		/* no rows to read, if true */
 	bool			scan_bulk;		/* bulk outer load, if true */
+	double			scan_bulk_density;	/* density of bulk input, if any */
 	TupleTableSlot *scan_overflow;	/* temp buffer, if unable to load */
 	cl_long			curr_index;		/* current position on the curr_task */
 	struct GpuTask *curr_task;		/* a task currently processed */
@@ -494,6 +495,7 @@ extern void pgstrom_init_codegen(void);
  * datastore.c
  */
 extern Size pgstrom_chunk_size(void);
+extern double pgstrom_get_bulkload_density(Plan *child_plan);
 extern Plan *pgstrom_try_replace_plannode(Plan *child_plan,
 										  List *range_tables,
 										  List **pullup_quals);
@@ -543,7 +545,9 @@ extern void pgstrom_init_datastore(void);
 /*
  * gpuscan.c
  */
-extern Plan *gpuscan_pullup_devquals(Plan *plannode, List **pullup_quals);
+extern Plan *gpuscan_pullup_devquals(Plan *plannode,
+									 List *range_tables,
+									 List **pullup_quals);
 extern Plan *gpuscan_try_replace_seqscan(SeqScan *seqscan,
 										 List *range_tables,
 										 List **pullup_quals);
@@ -595,9 +599,8 @@ extern void	pgstrom_init_multirels(void);
 /*
  * gpujoin.c
  */
-
-
-
+extern bool pgstrom_plan_is_gpujoin(Plan *plannode);
+extern bool pgstrom_plan_is_gpujoin_bulkinput(Plan *plannode);
 extern void	pgstrom_init_gpujoin(void);
 
 /*
@@ -619,6 +622,7 @@ extern void pgstrom_init_gpusort(void);
 extern bool		pgstrom_enabled;
 extern bool		pgstrom_perfmon_enabled;
 extern bool		pgstrom_bulkload_enabled;
+extern double	pgstrom_bulkload_density;
 extern int		pgstrom_max_async_tasks;
 extern double	pgstrom_gpu_setup_cost;
 extern double	pgstrom_gpu_operator_cost;
@@ -692,6 +696,7 @@ dlist_length(dlist_head *head)
 	return count;
 }
 
+#ifdef NOT_USED
 static inline void
 dlist_move_tail(dlist_head *head, dlist_node *node)
 {
@@ -715,6 +720,54 @@ dlist_move_all(dlist_head *dest, dlist_head *src)
 	dlist_tail_node(src)->next = &dest->head;
 
 	dlist_init(src);
+}
+#endif
+
+/*
+ * int/float reinterpret functions
+ */
+static inline cl_double
+long_as_double(cl_long ival)
+{
+	union {
+		cl_long		ival;
+		cl_double	fval;
+	} datum;
+	datum.ival = ival;
+	return datum.fval;
+}
+
+static inline cl_long
+double_as_long(cl_double fval)
+{
+	union {
+		cl_long		ival;
+		cl_double	fval;
+	} datum;
+	datum.fval = fval;
+	return datum.ival;
+}
+
+static inline cl_float
+int_as_float(cl_int ival)
+{
+	union {
+		cl_int		ival;
+		cl_float	fval;
+	} datum;
+	datum.ival = ival;
+	return datum.fval;
+}
+
+static inline cl_int
+float_as_int(cl_float fval)
+{
+	union {
+		cl_int		ival;
+		cl_float	fval;
+	} datum;
+	datum.fval = fval;
+	return datum.ival;
 }
 
 /*

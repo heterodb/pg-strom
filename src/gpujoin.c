@@ -96,6 +96,7 @@ typedef struct
 	double		kresults_ratio;
 	List	   *nrows_ratio;
 	bool		outer_bulkload;
+	double		bulkload_density;
 	Expr	   *outer_quals;
 	List	   *host_quals;
 	/* for each depth */
@@ -114,6 +115,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	List	   *privs = NIL;
 	List	   *exprs = NIL;
 	long		kresults_ratio;
+	long		lval;
 
 	privs = lappend(privs, makeInteger(gj_info->num_rels));
 	privs = lappend(privs, makeString(gj_info->kern_source));
@@ -123,6 +125,8 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, makeInteger(kresults_ratio));
 	privs = lappend(privs, gj_info->nrows_ratio);
 	privs = lappend(privs, makeInteger(gj_info->outer_bulkload));
+	lval = double_as_long(gj_info->bulkload_density);
+	privs = lappend(privs, makeInteger(lval));
 	exprs = lappend(exprs, gj_info->outer_quals);
 	exprs = lappend(exprs, gj_info->host_quals);
 	privs = lappend(privs, gj_info->join_types);
@@ -144,6 +148,7 @@ deform_gpujoin_info(CustomScan *cscan)
 	List	   *exprs = cscan->custom_exprs;
 	int			pindex = 0;
 	int			eindex = 0;
+	double		fval;
 	long		kresults_ratio;
 
 	gj_info->num_rels = intVal(list_nth(privs, pindex++));
@@ -154,6 +159,8 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->kresults_ratio = (double)kresults_ratio / 1000000.0;
 	gj_info->nrows_ratio = list_nth(privs, pindex++);
 	gj_info->outer_bulkload = intVal(list_nth(privs, pindex++));
+	fval = long_as_double(intVal(list_nth(privs, pindex++)));
+	gj_info->bulkload_density = fval;
 	gj_info->outer_quals = list_nth(exprs, eindex++);
 	gj_info->host_quals = list_nth(exprs, eindex++);
 	gj_info->join_types = list_nth(privs, pindex++);
@@ -242,8 +249,6 @@ static char *gpujoin_codegen(PlannerInfo *root,
 #define PATH_PARAM_BY_REL(path, rel)  \
 	((path)->param_info && bms_overlap(PATH_REQ_OUTER(path), (rel)->relids))
 
-
-
 /*****/
 static inline bool
 path_is_gpujoin(Path *pathnode)
@@ -291,82 +296,162 @@ path_is_mergeable_gpujoin(Path *pathnode)
 }
 
 /*
+ * returns true, if plannode is GpuJoin
+ */
+bool
+pgstrom_plan_is_gpujoin(Plan *plannode)
+{
+	CustomScan *cscan = (CustomScan *) plannode;
+
+	if (IsA(cscan, CustomScan) &&
+		cscan->methods == &gpujoin_plan_methods)
+		return true;
+	return false;
+}
+
+/*
+ * returns true, if plannode is GpuJoin and takes bulk-input
+ */
+bool
+pgstrom_plan_is_gpujoin_bulkinput(Plan *plannode)
+{
+	if (pgstrom_plan_is_gpujoin(plannode))
+	{
+		GpuJoinInfo	   *gj_info = deform_gpujoin_info((CustomScan *) plannode);
+
+		return gj_info->outer_bulkload;
+	}
+	return false;
+}
+
+/*
  * dump_gpujoin_path
  *
  * Dumps candidate GpuJoinPath for debugging
  */
 static void
-dump_gpujoin_path(PlannerInfo *root, GpuJoinPath *gpath)
+__dump_gpujoin_path(StringInfo buf, PlannerInfo *root,
+					RelOptInfo *outer_rel, RelOptInfo *inner_rel,
+					JoinType join_type, const char *join_label)
 {
-	Relids		outer_relids;
-	Relids		inner_relids;
-	StringInfoData buf;
-	bool		is_nestloop;
-	JoinType	join_type;
-	int			i, rtindex;
-	bool		is_first;
+	Relids		outer_relids = outer_rel->relids;
+	Relids		inner_relids = inner_rel->relids;
 	List	   *range_tables = root->parse->rtable;
+	int			rtindex;
+	bool		is_first;
 
-	if (client_min_messages > DEBUG1)
-		return;
-
-	/* outer relids */
-	outer_relids = gpath->outer_path->parent->relids;
-
-	/* inner relids */
-	inner_relids = NULL;
-	for (i=0; i < gpath->num_rels; i++)
-	{
-		RelOptInfo *rel = gpath->inners[i].scan_path->parent;
-
-		inner_relids = bms_union(inner_relids, rel->relids);
-	}
-
-	/* make a result */
-	initStringInfo(&buf);
-	is_nestloop = (gpath->inners[gpath->num_rels - 1].hash_quals == NIL);
-	join_type = gpath->inners[gpath->num_rels - 1].join_type;
-
-	appendStringInfo(&buf, "(");
+	/* outer relations */
+	appendStringInfo(buf, "(");
 	is_first = true;
 	rtindex = -1;
 	while ((rtindex = bms_next_member(outer_relids, rtindex)) >= 0)
 	{
 		RangeTblEntry  *rte = rt_fetch(rtindex, range_tables);
-		Alias  *eref = rte->eref;
+		Alias		   *eref = rte->eref;
 
-		appendStringInfo(&buf, "%s%s",
+		appendStringInfo(buf, "%s%s",
 						 is_first ? "" : ", ",
 						 eref->aliasname);
 		is_first = false;
 	}
-	appendStringInfo(&buf, ") %s (",
-					 is_nestloop
-					 ? (join_type == JOIN_FULL ? "FNL" :
-						join_type == JOIN_LEFT ? "LNL" :
-						join_type == JOIN_RIGHT ? "RNL" : "INL")
-					 : (join_type == JOIN_FULL ? "FHJ" :
-						join_type == JOIN_LEFT ? "LHJ" :
-                        join_type == JOIN_RIGHT ? "RHJ" : "IHJ"));
+
+	/* join logic */
+	appendStringInfo(buf, ") %s%s (",
+					 join_type == JOIN_FULL ? "F" :
+					 join_type == JOIN_LEFT ? "L" :
+					 join_type == JOIN_RIGHT ? "R" : "I",
+					 join_label);
+
+	/* inner relations */
 	is_first = true;
 	rtindex = -1;
 	while ((rtindex = bms_next_member(inner_relids, rtindex)) >= 0)
 	{
 		RangeTblEntry  *rte = rt_fetch(rtindex, range_tables);
-		Alias  *eref = rte->eref;
+		Alias		   *eref = rte->eref;
 
-		appendStringInfo(&buf, "%s%s",
+		appendStringInfo(buf, "%s%s",
 						 is_first ? "" : ", ",
 						 eref->aliasname);
 		is_first = false;
 	}
-	appendStringInfo(&buf, ")");
+	appendStringInfo(buf, ")");
+}
 
-	elog(DEBUG1, "%s Cost=%.2f..%.2f",
-		 buf.data,
-		 gpath->cpath.path.startup_cost,
-		 gpath->cpath.path.total_cost);
-	pfree(buf.data);
+/*
+ * check_nrows_growth_ratio
+ *
+ * compute expected nrows growth ratio - too large destination buffer may
+ * give up adoption of GpuJoin.
+ */
+static double
+check_nrows_growth_ratio(PlannerInfo *root,
+						 RelOptInfo *joinrel,
+						 RelOptInfo *outer_rel,
+						 RelOptInfo *inner_rel,
+						 JoinType jointype,
+						 SpecialJoinInfo *sjinfo,
+						 List *join_quals,
+						 List *host_quals)
+{
+	StringInfoData	buf;
+	double			nrows;
+	double			nrows_ratio;
+
+	/*
+	 * 'nrows_ratio' is used to estimate size of result buffer 
+	 * for GPU kernel execution. If joinrel contains host-only
+	 * qualifiers, we need to estimate number of rows at the time
+	 * of host-only qualifiers.
+	 */
+	if (host_quals == NIL)
+		nrows = joinrel->rows;
+	else
+	{
+		RelOptInfo		dummy;
+
+		set_joinrel_size_estimates(root, &dummy,
+								   outer_rel,
+								   inner_rel,
+								   sjinfo,
+								   join_quals);
+		nrows = dummy.rows;
+	}
+	nrows_ratio = nrows / outer_rel->rows;
+
+	/*
+	 * If expected results generated by GPU looks too large, we immediately
+	 * give up to calculate this path.
+	 */
+	if (nrows_ratio > pgstrom_nrows_growth_ratio_limit)
+	{
+		if (client_min_messages <= DEBUG1)
+		{
+			initStringInfo(&buf);
+			__dump_gpujoin_path(&buf, root, outer_rel,
+								inner_rel, jointype, "J");
+			elog(DEBUG1, "Nrows growth ratio %.2f on %s too large, give up",
+				 nrows_ratio, buf.data);
+			pfree(buf.data);
+		}
+		return -1.0;
+	}
+	else if (nrows_ratio > pgstrom_nrows_growth_ratio_limit / 2.0)
+	{
+		if (client_min_messages <= DEBUG1)
+		{
+			initStringInfo(&buf);
+			__dump_gpujoin_path(&buf, root, outer_rel,
+								inner_rel, jointype, "J");
+			elog(DEBUG1,
+				 "Nrows growth ratio %.2f on %s looks large, rounded to %.2f",
+				 nrows_ratio, buf.data,
+				 pgstrom_nrows_growth_ratio_limit / 2.0);
+			pfree(buf.data);
+		}
+		nrows_ratio = pgstrom_nrows_growth_ratio_limit / 2.0;
+	}
+	return nrows_ratio;
 }
 
 /*
@@ -580,7 +665,28 @@ retry:
 		gpath->inners[i].kmrels_rate =
 			((double)gpath->inners[i].chunk_size / (double)kmrels_length);
 	}
-	dump_gpujoin_path(root, gpath);
+
+	/* Dumps candidate GpuJoinPath for debugging */
+	if (client_min_messages <= DEBUG1)
+	{
+		StringInfoData buf;
+		int			num_rels = gpath->num_rels;
+		RelOptInfo *outer_rel = gpath->outer_path->parent;
+		RelOptInfo *inner_rel = gpath->inners[num_rels - 1].scan_path->parent;
+		JoinType	join_type = gpath->inners[num_rels - 1].join_type;
+		bool		is_nestloop
+			= (gpath->inners[num_rels - 1].hash_quals == NIL);
+
+		initStringInfo(&buf);
+		__dump_gpujoin_path(&buf, root, outer_rel, inner_rel,
+							join_type, is_nestloop ? "NL" : "HJ");
+
+		elog(DEBUG1, "%s Cost=%.2f..%.2f",
+			 buf.data,
+			 gpath->cpath.path.startup_cost,
+			 gpath->cpath.path.total_cost);
+		pfree(buf.data);
+	}
 	return true;
 }
 
@@ -592,56 +698,17 @@ create_gpujoin_path(PlannerInfo *root,
 					Path *inner_path,
 					SpecialJoinInfo *sjinfo,
 					ParamPathInfo *param_info,
+					Relids required_outer,
 					List *hash_quals,
 					List *join_quals,
 					List *host_quals,
 					bool can_bulkload,
-					bool try_merge)
+					bool try_merge,
+					double nrows_ratio)
 {
 	GpuJoinPath	   *result;
 	GpuJoinPath	   *source = NULL;
-	double			nrows;
-	double			nrows_ratio;
 	int				num_rels;
-
-	/*
-	 * 'nrows_ratio' is used to estimate size of result buffer 
-	 * for GPU kernel execution. If joinrel contains host-only
-	 * qualifiers, we need to estimate number of rows at the time
-	 * of host-only qualifiers.
-	 */
-	if (host_quals == NIL)
-		nrows = joinrel->rows;
-	else
-	{
-		RelOptInfo		dummy;
-
-		set_joinrel_size_estimates(root, &dummy,
-								   outer_path->parent,
-								   inner_path->parent,
-								   sjinfo,
-								   join_quals);
-		nrows = dummy.rows;
-	}
-	nrows_ratio = nrows / outer_path->rows;
-
-	/*
-	 * If expected results generated by GPU looks too large, we immediately
-	 * give up to calculate this path.
-	 */
-	if (nrows_ratio > pgstrom_nrows_growth_ratio_limit)
-	{
-		elog(DEBUG1, "Number of rows growth ratio (%.2f) too large, give up",
-			 nrows_ratio);
-		return NULL;
-	}
-	else if (nrows_ratio > pgstrom_nrows_growth_ratio_limit / 2.0)
-	{
-		elog(DEBUG1,
-			 "Number of row growth ratio (%.2f) looks large, rounded to %.2f",
-			 nrows_ratio, pgstrom_nrows_growth_ratio_limit / 2.0);
-		nrows_ratio = pgstrom_nrows_growth_ratio_limit / 2.0;
-	}
 
 	if (!try_merge)
 		num_rels = 1;
@@ -687,6 +754,15 @@ create_gpujoin_path(PlannerInfo *root,
 	result->inners[num_rels - 1].nbatches = 1;			/* to be set later */
 	result->inners[num_rels - 1].nslots = 0;			/* to be set later */
 
+	/*
+	 * cost calculation, and returns NULL immediately if expected cost is
+	 * too unreasonable
+	 */
+	if (!cost_gpujoin(root, result, required_outer))
+	{
+		pfree(result);
+		return NULL;
+	}
 	return result;
 }
 
@@ -702,7 +778,8 @@ try_gpujoin_path(PlannerInfo *root,
 				 Relids extra_lateral_rels,
 				 List *hash_quals,
 				 List *join_quals,
-				 List *host_quals)
+				 List *host_quals,
+				 double nrows_ratio)
 {
 	GpuJoinPath	   *gpath;
 	ParamPathInfo  *param_info;
@@ -760,22 +837,20 @@ try_gpujoin_path(PlannerInfo *root,
 	{
 		gpath = create_gpujoin_path(root, joinrel, jointype,
 									outer_path, inner_path,
-									sjinfo, param_info,
+									sjinfo, param_info, required_outer,
 									hash_quals, join_quals, host_quals,
-									can_bulkload, false);
-		if (gpath != NULL &&
-			cost_gpujoin(root, gpath, required_outer))
+									can_bulkload, false, nrows_ratio);
+		if (gpath != NULL)
 			add_path(joinrel, &gpath->cpath.path);
 
 		if (path_is_mergeable_gpujoin(outer_path))
 		{
 			gpath = create_gpujoin_path(root, joinrel, jointype,
 										outer_path, inner_path,
-										sjinfo, param_info,
+										sjinfo, param_info, required_outer,
 										hash_quals, join_quals, host_quals,
-										can_bulkload, true);
-			if (gpath != NULL &&
-				cost_gpujoin(root, gpath, required_outer))
+										can_bulkload, true, nrows_ratio);
+			if (gpath != NULL)
 				add_path(joinrel, &gpath->cpath.path);
 		}
 	}
@@ -788,22 +863,20 @@ try_gpujoin_path(PlannerInfo *root,
 	{
 		gpath = create_gpujoin_path(root, joinrel, jointype,
 									outer_path, inner_path,
-									sjinfo, param_info,
+									sjinfo, param_info, required_outer,
 									NIL, join_quals, host_quals,
-									can_bulkload, false);
-		if (gpath != NULL &&
-			cost_gpujoin(root, gpath, required_outer))
+									can_bulkload, false, nrows_ratio);
+		if (gpath != NULL)
 			add_path(joinrel, &gpath->cpath.path);
 
 		if (path_is_mergeable_gpujoin(outer_path))
 		{
 			gpath = create_gpujoin_path(root, joinrel, jointype,
 										outer_path, inner_path,
-										sjinfo, param_info,
+										sjinfo, param_info, required_outer,
 										NIL, join_quals, host_quals,
-										can_bulkload, true);
-			if (gpath != NULL &&
-				cost_gpujoin(root, gpath, required_outer))
+										can_bulkload, true, nrows_ratio);
+			if (gpath != NULL)
 				add_path(joinrel, &gpath->cpath.path);
 		}
 	}
@@ -834,6 +907,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 	List	   *hash_quals = NIL;
 	List	   *join_quals = NIL;
 	ListCell   *lc;
+	double		nrows_ratio;
 
 	/* calls secondary module if exists */
 	if (set_join_pathlist_next)
@@ -920,6 +994,16 @@ gpujoin_add_join_path(PlannerInfo *root,
 	if (!join_quals)
 		return;
 
+	/*
+	 * Check nrows growth ratio. If too large PDS buffer is required,
+	 * we will give up GpuJoin at all.
+	 */
+	nrows_ratio = check_nrows_growth_ratio(root, joinrel, outerrel, innerrel,
+										   jointype, sjinfo,
+										   join_quals, host_quals);
+	if (nrows_ratio < 0.0)
+		return;
+
 	if (cheapest_startup_outer)
 	{
 		/* GpuHashJoin logic, if possible */
@@ -935,7 +1019,8 @@ gpujoin_add_join_path(PlannerInfo *root,
 							 extra_lateral_rels,
 							 hash_quals,
 							 join_quals,
-							 host_quals);
+							 host_quals,
+							 nrows_ratio);
 		/* GpuNestLoop logic, if possible */
 		if (jointype == JOIN_INNER || jointype == JOIN_RIGHT)
 			try_gpujoin_path(root,
@@ -949,7 +1034,8 @@ gpujoin_add_join_path(PlannerInfo *root,
 							 extra_lateral_rels,
 							 NIL,
 							 join_quals,
-							 host_quals);
+							 host_quals,
+							 nrows_ratio);
 	}
 
 	if (cheapest_startup_outer != cheapest_total_outer)
@@ -967,7 +1053,8 @@ gpujoin_add_join_path(PlannerInfo *root,
 							 extra_lateral_rels,
 							 hash_quals,
 							 join_quals,
-							 host_quals);
+							 host_quals,
+							 nrows_ratio);
 		/* GpuNestLoop logic, if possible */
 		if (jointype == JOIN_INNER || jointype == JOIN_RIGHT)
 			try_gpujoin_path(root,
@@ -981,7 +1068,8 @@ gpujoin_add_join_path(PlannerInfo *root,
 							 extra_lateral_rels,
 							 NIL,
 							 join_quals,
-							 host_quals);
+							 host_quals,
+							 nrows_ratio);
 	}
 }
 
@@ -1283,9 +1371,15 @@ create_gpujoin_plan(PlannerInfo *root,
 	if (IsA(outer_plan, CustomScan))
 	{
 		int		custom_flags = ((CustomScan *) outer_plan)->flags;
+		double	outer_density = pgstrom_get_bulkload_density(outer_plan);
 
-		if ((custom_flags & CUSTOMPATH_SUPPORT_BULKLOAD) != 0)
+		if ((custom_flags & CUSTOMPATH_SUPPORT_BULKLOAD) != 0 &&
+			outer_density >= (1.0 - pgstrom_bulkload_density) &&
+			outer_density <= (1.0 + pgstrom_bulkload_density))
+		{
 			gj_info.outer_bulkload = true;
+			gj_info.bulkload_density = outer_density;
+		}
 	}
 	outerPlan(cscan) = outer_plan;
 	gpath->outer_plan = outer_plan;		/* for convenience */
@@ -1447,6 +1541,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	 */
 	gjs->gts.scan_bulk =
 		(!pgstrom_bulkload_enabled ? false : gj_info->outer_bulkload);
+	gjs->gts.scan_bulk_density = gj_info->bulkload_density;
 
 	/*
 	 * initialize kernel execution parameter
@@ -1614,7 +1709,14 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	}
 
 	/* outer bulkload */
-	ExplainPropertyText("Bulkload", gjs->gts.scan_bulk ? "On" : "Off", es);
+	if (!gjs->gts.scan_bulk)
+		ExplainPropertyText("Bulkload", "Off", es);
+	else
+	{
+		char   *temp = psprintf("On (density: %.2f%%)",
+								100.0 * gjs->gts.scan_bulk_density);
+		ExplainPropertyText("Bulkload", temp, es);
+	}
 
 	/* outer qualifier if any */
 	if (gj_info->outer_quals)

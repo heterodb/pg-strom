@@ -37,6 +37,8 @@ static set_rel_pathlist_hook_type	set_rel_pathlist_next;
 static CustomPathMethods		gpuscan_path_methods;
 static CustomScanMethods		gpuscan_plan_methods;
 static PGStromExecMethods		gpuscan_exec_methods;
+static CustomScanMethods		bulkscan_plan_methods;
+static PGStromExecMethods		bulkscan_exec_methods;
 static bool						enable_gpuscan;
 
 /*
@@ -238,9 +240,9 @@ gpuscan_add_scan_path(PlannerInfo *root,
 			host_quals = lappend(host_quals, rinfo);
 	}
 
-	/*
-	 * FIXME: needs to pay attention for projection cost.
-	 */
+	/* GpuScan does not make sense if no device qualifiers */
+	if (dev_quals == NIL)
+		return;
 
 	/*
 	 * Construction of a custom-plan node.
@@ -259,6 +261,9 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	cost_gpuscan(pathnode, root, baserel,
 				 pathnode->path.param_info,
 				 host_quals, dev_quals, false);
+	/*
+	 * FIXME: needs to pay attention for projection cost.
+	 */
 
 	/* check bulk-load capability */
 	if (host_quals == NIL)
@@ -283,6 +288,28 @@ gpuscan_add_scan_path(PlannerInfo *root,
 }
 
 /*
+ * assign_bare_ntuples
+ *
+ * It assigns original number of tuples of the target relation when BulkScan
+ * is built, because original plan_rows introduces the number of tuples
+ * already filtered out, however, BulkScan will pull-up device executable
+ * qualifiers.
+ */
+static void
+assign_bare_ntuples(Plan *plannode, RangeTblEntry *rte)
+{
+	Relation		rel = heap_open(rte->relid, NoLock);
+	BlockNumber		num_pages;
+	double			num_tuples;
+	double			allvisfrac;
+
+	estimate_rel_size(rel, NULL, &num_pages, &num_tuples, &allvisfrac);
+	plannode->plan_rows = num_tuples;
+
+	heap_close(rel, NoLock);
+}
+
+/*
  * gpuscan_try_replace_relscan
  *
  * It tries to replace the supplied SeqScan plan by GpuScan, if it is
@@ -298,13 +325,7 @@ gpuscan_try_replace_seqscan(SeqScan *seqscan,
 	CustomScan	   *cscan;
 	GpuScanInfo		gs_info;
 	RangeTblEntry  *rte;
-	Relation		rel;
 	ListCell	   *lc;
-	BlockNumber		num_pages;
-	double			num_tuples;
-	double			allvisfrac;
-	double			spc_seq_page_cost;
-	Oid				tablespace_oid;
 
 	if (!enable_gpuscan)
 		return NULL;
@@ -346,7 +367,10 @@ gpuscan_try_replace_seqscan(SeqScan *seqscan,
 	 * choice than SeqScan.
 	 */
 	cscan = makeNode(CustomScan);
+	cscan->scan.plan.startup_cost = seqscan->plan.startup_cost;
+	cscan->scan.plan.total_cost = seqscan->plan.total_cost;
 	cscan->scan.plan.plan_width = seqscan->plan.plan_width;
+	assign_bare_ntuples(&cscan->scan.plan, rte);
 	cscan->scan.plan.targetlist = copyObject(seqscan->plan.targetlist);
 	cscan->scan.plan.qual = NIL;
 	cscan->scan.plan.extParam = bms_copy(seqscan->plan.extParam);
@@ -356,25 +380,7 @@ gpuscan_try_replace_seqscan(SeqScan *seqscan,
 	memset(&gs_info, 0, sizeof(GpuScanInfo));
 	form_gpuscan_info(cscan, &gs_info);
 	cscan->custom_relids = bms_make_singleton(seqscan->scanrelid);
-	cscan->methods = &gpuscan_plan_methods;
-
-	/*
-	 * Rebuild the cost estimation of the new plan. Overall logic is same
-	 * with estimate_rel_size(), although integration with cost_gpuhashjoin()
-	 * is more preferable for consistency....
-	 */
-	rel = heap_open(rte->relid, NoLock);
-	estimate_rel_size(rel, NULL, &num_pages, &num_tuples, &allvisfrac);
-	tablespace_oid = RelationGetForm(rel)->reltablespace;
-	get_tablespace_page_costs(tablespace_oid, NULL, &spc_seq_page_cost);
-
-	cscan->scan.plan.startup_cost = pgstrom_gpu_setup_cost;
-	cscan->scan.plan.total_cost = cscan->scan.plan.startup_cost
-		+ spc_seq_page_cost * num_pages;
-	cscan->scan.plan.plan_rows = num_tuples;
-    cscan->scan.plan.plan_width = seqscan->plan.plan_width;
-
-	heap_close(rel, NoLock);
+	cscan->methods = &bulkscan_plan_methods;
 
 	return &cscan->scan.plan;
 }
@@ -386,11 +392,14 @@ gpuscan_try_replace_seqscan(SeqScan *seqscan,
  * individually.
  */
 Plan *
-gpuscan_pullup_devquals(Plan *plannode, List **pullup_quals)
+gpuscan_pullup_devquals(Plan *plannode,
+						List *range_tables,
+						List **pullup_quals)
 {
 	CustomScan	   *cscan_old = (CustomScan *) plannode;
 	CustomScan	   *cscan_new;
-	GpuScanInfo		*gs_info;
+	GpuScanInfo	   *gs_info;
+	RangeTblEntry  *rte = rt_fetch(cscan_old->scan.scanrelid, range_tables);
 
 	Assert(pgstrom_plan_is_gpuscan(plannode));
 	gs_info = deform_gpuscan_info(&cscan_old->scan.plan);
@@ -398,12 +407,15 @@ gpuscan_pullup_devquals(Plan *plannode, List **pullup_quals)
 	/* in case of nothing to be changed */
 	if (gs_info->dev_quals == NIL)
 	{
+		Assert(cscan_old->methods == &bulkscan_plan_methods);
 		Assert(gs_info->kern_source == NULL);
 		*pullup_quals = NULL;
 		return &cscan_old->scan.plan;
 	}
 	*pullup_quals = copyObject(gs_info->dev_quals);
 	cscan_new = copyObject(cscan_old);
+	assign_bare_ntuples(&cscan_new->scan.plan, rte);
+	cscan_new->methods = &bulkscan_plan_methods;
 	memset(gs_info, 0, sizeof(GpuScanInfo));
 	form_gpuscan_info(cscan_new, gs_info);
 
@@ -548,7 +560,8 @@ pgstrom_plan_is_gpuscan(const Plan *plan)
 	CustomScan	   *cscan = (CustomScan *) plan;
 
 	if (IsA(cscan, CustomScan) &&
-		cscan->methods == &gpuscan_plan_methods)
+		(cscan->methods == &gpuscan_plan_methods ||
+		 cscan->methods == &bulkscan_plan_methods))
 		return true;
 	return false;
 }
@@ -588,7 +601,12 @@ gpuscan_create_scan_state(CustomScan *cscan)
 	/* Set tag and executor callbacks */
 	NodeSetTag(gss, T_CustomScanState);
 	gss->gts.css.flags = cscan->flags;
-	gss->gts.css.methods = &gpuscan_exec_methods.c;
+	if (cscan->methods == &gpuscan_plan_methods)
+		gss->gts.css.methods = &gpuscan_exec_methods.c;
+	else if (cscan->methods == &bulkscan_plan_methods)
+		gss->gts.css.methods = &bulkscan_exec_methods.c;
+	else
+		elog(ERROR, "Bug? unexpected CustomPlanMethods");
 
 	return (Node *) gss;
 }
@@ -629,9 +647,12 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 								gs_info->used_params,
 								gs_info->kern_source,
 								gs_info->extra_flags);
-	if (gss->gts.kern_source != NULL &&
-		(eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
-		pgstrom_preload_cuda_program(&gss->gts);
+	if (gss->gts.kern_source != NULL)
+	{
+		Assert(gss->gts.css.methods == &gpuscan_exec_methods.c);
+		if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+			pgstrom_preload_cuda_program(&gss->gts);
+	}
 	/* other run-time parameters */
     gss->num_rechecked = 0;
 }
@@ -834,6 +855,8 @@ gpuscan_exec_bulk(CustomScanState *node)
 	pgstrom_data_store *pds = NULL;
 	struct timeval		tv1, tv2;
 
+	Assert(!gss->gts.kern_source);
+
 	PERFMON_BEGIN(&gss->gts.pfm_accum, &tv1);
 
 	while (gss->curr_blknum < gss->last_blknum)
@@ -910,25 +933,36 @@ pgstrom_init_gpuscan(void)
 							 NULL, NULL, NULL);
 
 	/* setup path methods */
+	memset(&gpuscan_path_methods, 0, sizeof(gpuscan_path_methods));
 	gpuscan_path_methods.CustomName			= "GpuScan";
 	gpuscan_path_methods.PlanCustomPath		= create_gpuscan_plan;
-	gpuscan_path_methods.TextOutCustomPath	= NULL;
 
 	/* setup plan methods */
+	memset(&gpuscan_plan_methods, 0, sizeof(gpuscan_plan_methods));
 	gpuscan_plan_methods.CustomName			= "GpuScan";
 	gpuscan_plan_methods.CreateCustomScanState = gpuscan_create_scan_state;
-	gpuscan_plan_methods.TextOutCustomScan	= NULL;
+
+	memset(&bulkscan_plan_methods, 0, sizeof(bulkscan_plan_methods));
+	bulkscan_plan_methods.CustomName		= "BulkScan";
+	bulkscan_plan_methods.CreateCustomScanState = gpuscan_create_scan_state;
 
 	/* setup exec methods */
+	memset(&gpuscan_exec_methods, 0, sizeof(gpuscan_exec_methods));
 	gpuscan_exec_methods.c.CustomName         = "GpuScan";
 	gpuscan_exec_methods.c.BeginCustomScan    = gpuscan_begin;
 	gpuscan_exec_methods.c.ExecCustomScan     = gpuscan_exec;
 	gpuscan_exec_methods.c.EndCustomScan      = gpuscan_end;
 	gpuscan_exec_methods.c.ReScanCustomScan   = gpuscan_rescan;
-	gpuscan_exec_methods.c.MarkPosCustomScan  = NULL;
-	gpuscan_exec_methods.c.RestrPosCustomScan = NULL;
 	gpuscan_exec_methods.c.ExplainCustomScan  = gpuscan_explain;
 	gpuscan_exec_methods.ExecCustomBulk       = gpuscan_exec_bulk;
+
+	bulkscan_exec_methods.c.CustomName        = "BulkScan";
+	bulkscan_exec_methods.c.BeginCustomScan   = gpuscan_begin;
+	bulkscan_exec_methods.c.ExecCustomScan    = gpuscan_exec;
+	bulkscan_exec_methods.c.EndCustomScan     = gpuscan_end;
+	bulkscan_exec_methods.c.ReScanCustomScan  = gpuscan_rescan;
+	bulkscan_exec_methods.c.ExplainCustomScan = gpuscan_explain;
+	bulkscan_exec_methods.ExecCustomBulk      = gpuscan_exec_bulk;
 
 	/* hook registration */
 	set_rel_pathlist_next = set_rel_pathlist_hook;

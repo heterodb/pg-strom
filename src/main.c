@@ -39,6 +39,7 @@ bool	pgstrom_enabled;
 bool	pgstrom_perfmon_enabled;
 static bool pgstrom_debug_kernel_source;
 bool	pgstrom_bulkload_enabled;
+double	pgstrom_bulkload_density;
 int		pgstrom_max_async_tasks;
 
 /* cost factors */
@@ -80,6 +81,17 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
                              GUC_NOT_IN_SAMPLE,
                              NULL, NULL, NULL);
+	/* threshold of bulkload density */
+	DefineCustomRealVariable("pg_strom.bulkload_density",
+							 "Threshold to use bulkload for data exchange",
+							 NULL,
+							 &pgstrom_bulkload_density,
+							 0.50,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	/* turn on/off cuda kernel source saving */
 	DefineCustomBoolVariable("pg_strom.debug_kernel_source",
 							 "Turn on/off to display the kernel source path",

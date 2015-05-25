@@ -59,6 +59,7 @@ typedef struct
 	int				numCols;		/* number of grouping columns */
 	AttrNumber	   *grpColIdx;		/* their indexes in the target list */
 	bool			outer_bulkload;
+	double			bulkload_density;
 	double			num_groups;		/* estimated number of groups */
 	List		   *outer_quals;	/* device quals pulled-up */
 	const char	   *kern_source;
@@ -77,11 +78,8 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	List	   *exprs = NIL;
 	List	   *temp;
 	Bitmapset  *tempset;
+	long		lval;
 	int			i;
-	union {
-		long	ival;
-		double	fval;
-	} datum;
 
 	/* numCols and grpColIdx */
 	temp = NIL;
@@ -90,8 +88,10 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 
 	privs = lappend(privs, temp);
 	privs = lappend(privs, makeInteger(gpa_info->outer_bulkload));
-	datum.fval = gpa_info->num_groups;
-	privs = lappend(privs, makeInteger(datum.ival));
+	lval = double_as_long(gpa_info->bulkload_density);
+	privs = lappend(privs, makeInteger(lval));
+	lval = double_as_long(gpa_info->num_groups);
+	privs = lappend(privs, makeInteger(lval));
 	exprs = lappend(exprs, gpa_info->outer_quals);
 	privs = lappend(privs, makeString(pstrdup(gpa_info->kern_source)));
 	privs = lappend(privs, makeInteger(gpa_info->extra_flags));
@@ -129,10 +129,7 @@ deform_gpupreagg_info(CustomScan *cscan)
 	Bitmapset  *tempset;
 	List	   *temp;
 	ListCell   *cell;
-	union {
-		long	ival;
-		double	fval;
-	} datum;
+	double		fval;
 
 	/* numCols and grpColIdx */
 	temp = list_nth(privs, pindex++);
@@ -142,8 +139,10 @@ deform_gpupreagg_info(CustomScan *cscan)
 		gpa_info->grpColIdx[i++] = lfirst_int(cell);
 
 	gpa_info->outer_bulkload = intVal(list_nth(privs, pindex++));
-	datum.ival = intVal(list_nth(privs, pindex++));
-	gpa_info->num_groups = datum.fval;
+	fval = long_as_double(intVal(list_nth(privs, pindex++)));
+	gpa_info->bulkload_density = fval;
+	fval = long_as_double(intVal(list_nth(privs, pindex++)));
+	gpa_info->num_groups = fval;
 	gpa_info->outer_quals = list_nth(exprs, eindex++);
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
 	gpa_info->extra_flags = intVal(list_nth(privs, pindex++));
@@ -2624,6 +2623,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	Plan			newcost_gpreagg;
 	int				extra_flags = DEVKERNEL_NEEDS_GPUPREAGG;
 	bool			outer_bulkload = false;
+	double			bulkload_density = 0.0;
 	codegen_context context;
 
 	/* nothing to do, if feature is turned off */
@@ -2733,7 +2733,10 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	{
 		int		custom_flags = ((CustomScan *) outer_node)->flags;
 
-		if ((custom_flags & CUSTOMPATH_SUPPORT_BULKLOAD) != 0)
+		bulkload_density = pgstrom_get_bulkload_density(outer_node);
+		if ((custom_flags & CUSTOMPATH_SUPPORT_BULKLOAD) != 0 &&
+			bulkload_density >= (1.0 - pgstrom_bulkload_density) &&
+			bulkload_density <= (1.0 + pgstrom_bulkload_density))
 			outer_bulkload = true;
 	}
 
@@ -2805,6 +2808,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 									  sizeof(AttrNumber) * agg->numCols);
 	gpa_info.outer_quals    = outer_quals;
 	gpa_info.outer_bulkload = outer_bulkload;
+	gpa_info.bulkload_density = bulkload_density;
 	gpa_info.num_groups     = Max(agg->plan.plan_rows, 1.0);
 	gpa_info.outer_quals    = outer_quals;
 
@@ -2913,6 +2917,7 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	outerPlanState(gpas) = ExecInitNode(outerPlan(cscan), estate, eflags);
 	gpas->gts.scan_bulk =
 		(!pgstrom_bulkload_enabled ? false : gpa_info->outer_bulkload);
+	gpas->gts.scan_bulk_density = gpa_info->bulkload_density;
 
 	gpas->outer_overflow = NULL;
 
@@ -3254,7 +3259,14 @@ gpupreagg_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		= deform_gpupreagg_info((CustomScan *) node->ss.ps.plan);
 	const char	   *policy;
 
-	ExplainPropertyText("Bulkload", gpas->gts.scan_bulk ? "On" : "Off", es);
+	if (!gpas->gts.scan_bulk)
+		ExplainPropertyText("Bulkload", "Off", es);
+	else
+	{
+		char   *temp = psprintf("On (density: %.2f%%)",
+								100.0 * gpas->gts.scan_bulk_density);
+		ExplainPropertyText("Bulkload", temp, es);
+	}
 	if (!gpas->needs_grouping)
 		policy = "NoGroup";
 	else if (gpas->local_reduction)

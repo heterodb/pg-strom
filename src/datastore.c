@@ -137,7 +137,8 @@ pgstrom_try_replace_plannode(Plan *plannode, List *range_tables,
 			return NULL;
 		/* GpuScan may want to pull-up device qualifiers */
 		if (pgstrom_plan_is_gpuscan(plannode))
-			return gpuscan_pullup_devquals(plannode, pullup_quals);
+			return gpuscan_pullup_devquals(plannode, range_tables,
+										   pullup_quals);
 		*pullup_quals = NIL;
 		return plannode;
 	}
@@ -148,6 +149,34 @@ pgstrom_try_replace_plannode(Plan *plannode, List *range_tables,
 										   pullup_quals);
 	}
 	return NULL;
+}
+
+/*
+ * pgstrom_get_bulkload_density
+ *
+ * It returns an expected density on bulk-loading. In case when GpuJoin
+ * reduce much number of tuples, bulk-loading is not always effective
+ * method to exchange data. So, we may choose row-by-row interface if
+ * expected bulkload-density is out-of-threshold.
+ */
+double
+pgstrom_get_bulkload_density(Plan *child_plan)
+{
+	double		density = 1.0;
+
+	/*
+	 * At this moment, only GpuJoin takes bulk-input and also can have
+	 * bulk-output. So, we need to walk down if child node has bulk-
+	 * input.
+	 */
+	while (pgstrom_plan_is_gpujoin_bulkinput(child_plan))
+	{
+		Plan	   *curr_plan = child_plan;
+
+		child_plan = outerPlan(child_plan);
+		density *= (curr_plan->plan_rows / child_plan->plan_rows);
+	}
+	return density;
 }
 
 /*
