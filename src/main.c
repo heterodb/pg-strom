@@ -20,6 +20,7 @@
 #include "miscadmin.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
+#include "optimizer/planner.h"
 #include "storage/ipc.h"
 #include "storage/pg_shmem.h"
 #include "storage/shmem.h"
@@ -33,23 +34,29 @@
 PG_MODULE_MAGIC;
 
 /*
+ * Misc static variables
+ */
+static planner_hook_type	planner_hook_next;
+static HTAB				   *pgstrom_path_htab = NULL;
+
+/*
  * miscellaneous GUC parameters
  */
-bool	pgstrom_enabled;
-bool	pgstrom_perfmon_enabled;
-static bool pgstrom_debug_kernel_source;
-bool	pgstrom_bulkload_enabled;
-double	pgstrom_bulkload_density;
-int		pgstrom_max_async_tasks;
+bool		pgstrom_enabled;
+bool		pgstrom_perfmon_enabled;
+static bool	pgstrom_debug_kernel_source;
+bool		pgstrom_bulkload_enabled;
+double		pgstrom_bulkload_density;
+int			pgstrom_max_async_tasks;
 
 /* cost factors */
-double	pgstrom_gpu_setup_cost;
-double	pgstrom_gpu_operator_cost;
-double	pgstrom_gpu_tuple_cost;
+double		pgstrom_gpu_setup_cost;
+double		pgstrom_gpu_operator_cost;
+double		pgstrom_gpu_tuple_cost;
 
 /* buffer usage */
-double	pgstrom_nrows_growth_ratio_limit;
-double	pgstrom_nrows_growth_margin;
+double		pgstrom_nrows_growth_ratio_limit;
+double		pgstrom_nrows_growth_margin;
 
 static void
 pgstrom_init_misc_guc(void)
@@ -169,6 +176,298 @@ pgstrom_init_misc_guc(void)
 							 NULL, NULL, NULL);
 }
 
+/*
+ *
+ *
+ */
+typedef struct
+{
+	PlannerInfo	   *root;		/* hash key 1 -- must be first */
+	Relids			relids;		/* hash key 2 -- must be first */
+	CustomPath	   *cpath;
+} pgstrom_path_tracker;
+
+static uint32
+path_tracker_hash(const void *key, Size keysize)
+{
+	pgstrom_path_tracker   *hentry = (pgstrom_path_tracker *) key;
+	uint32		hash;
+
+	Assert(keysize == offsetof(pgstrom_path_tracker, cpath));
+	hash = uint32_hash(&hentry->root, sizeof(PlannerInfo *));
+	hash ^= bms_hash_value(hentry->relids);
+
+	return hash;
+}
+
+static int
+path_tracker_match(const void *key1, const void *key2, Size keysize)
+{
+	pgstrom_path_tracker   *hentry1 = (pgstrom_path_tracker *) key1;
+	pgstrom_path_tracker   *hentry2 = (pgstrom_path_tracker *) key2;
+
+	Assert(keysize == offsetof(pgstrom_path_tracker, cpath));
+	if (hentry1->root == hentry2->root &&
+		bms_equal(hentry1->relids, hentry2->relids))
+	{
+		return 0;	/* matched */
+	}
+	return 1;		/* not matched */
+}
+
+/*
+ * pgstrom_track_path
+ *
+ * It tracks self managed CustomPath node, for optimal construction.
+ */
+void
+pgstrom_track_path(PlannerInfo *root, RelOptInfo *rel, CustomPath *cpath)
+{
+	pgstrom_path_tracker   *hentry;
+	pgstrom_path_tracker	hkey;
+	bool					found;
+
+	/*
+	 * Create own Path hash-table, if first time
+	 */
+	if (!pgstrom_path_htab)
+	{
+		HASHCTL		hash_ctl;
+
+		/* Create the hash table */
+		MemSet(&hash_ctl, 0, sizeof(hash_ctl));
+		hash_ctl.keysize = offsetof(pgstrom_path_tracker, cpath);
+		hash_ctl.entrysize = sizeof(pgstrom_path_tracker);
+		hash_ctl.hash = path_tracker_hash;
+		hash_ctl.match = path_tracker_match;
+		hash_ctl.hcxt = CurrentMemoryContext;
+		pgstrom_path_htab = hash_create("PgStromPathHashTable",
+										256L,
+										&hash_ctl,
+										HASH_ELEM | HASH_FUNCTION |
+										HASH_COMPARE | HASH_CONTEXT);
+	}
+	/*
+	 * Find the hash entry
+	 */
+	memset(&hkey, 0, sizeof(pgstrom_path_tracker));
+	hkey.root = root;
+	hkey.relids = rel->relids;
+	hentry = (pgstrom_path_tracker *)
+		hash_search(pgstrom_path_htab, &hkey, HASH_ENTER, &found);
+	if (!found)
+	{
+		Assert(hentry->root == root &&
+			   bms_equal(hentry->relids, rel->relids));
+		hentry->cpath = cpath;
+	}
+	else
+	{
+		/* check total_cost of Path, then cheaper one will servive */
+		if (hentry->cpath->path.total_cost > cpath->path.total_cost)
+			hentry->cpath = cpath;
+	}
+}
+
+/*
+ * pgstrom_find_path
+ *
+ * It tries to find tracked CustomPath node.
+ */
+CustomPath *
+pgstrom_find_path(PlannerInfo *root, RelOptInfo *rel)
+{
+	/*
+	 * Find the required hash entry, if any
+	 */
+	if (pgstrom_path_htab)
+	{
+		pgstrom_path_tracker   *hentry;
+		pgstrom_path_tracker	hkey;
+
+		memset(&hkey, 0, sizeof(pgstrom_path_tracker));
+		hkey.root = root;
+		hkey.relids = rel->relids;
+		hentry = (pgstrom_path_tracker *)
+			hash_search(pgstrom_path_htab, &hkey, HASH_FIND, NULL);
+		if (hentry)
+			return hentry->cpath;
+	}
+	return NULL;
+}
+
+/*
+ * pgstrom_recursive_grafter
+ *
+ * It tries to inject GpuPreAgg and GpuSort (these are not "officially"
+ * supported by planner) on the pre-built plan tree.
+ */
+static void
+pgstrom_recursive_grafter(PlannedStmt *pstmt, Plan **p_curr_plan)
+{
+	Plan	   *plan = *p_curr_plan;
+	ListCell   *lc;
+
+	Assert(plan != NULL);
+
+	switch (nodeTag(plan))
+	{
+		case T_Agg:
+			/*
+			 * Try to inject GpuPreAgg plan if cost of the aggregate plan
+			 * is enough expensive to justify preprocess by GPU.
+			 */
+			pgstrom_try_insert_gpupreagg(pstmt, (Agg *) plan);
+			break;
+
+		case T_SubqueryScan:
+			{
+				SubqueryScan   *subquery = (SubqueryScan *) plan;
+				Plan		  **p_subplan = &subquery->subplan;
+				pgstrom_recursive_grafter(pstmt, p_subplan);
+			}
+			break;
+		case T_ModifyTable:
+			{
+				ModifyTable *mtplan = (ModifyTable *) plan;
+
+				foreach (lc, mtplan->plans)
+				{
+					Plan  **p_subplan = (Plan **) &lfirst(lc);
+					pgstrom_recursive_grafter(pstmt, p_subplan);
+				}
+			}
+			break;
+		case T_Append:
+			{
+				Append *aplan = (Append *) plan;
+
+				foreach (lc, aplan->appendplans)
+				{
+					Plan  **p_subplan = (Plan **) &lfirst(lc);
+					pgstrom_recursive_grafter(pstmt, p_subplan);
+				}
+			}
+			break;
+		case T_MergeAppend:
+			{
+				MergeAppend *maplan = (MergeAppend *) plan;
+
+				foreach (lc, maplan->mergeplans)
+				{
+					Plan  **p_subplan = (Plan **) &lfirst(lc);
+					pgstrom_recursive_grafter(pstmt, p_subplan);
+				}
+			}
+			break;
+		case T_BitmapAnd:
+			{
+				BitmapAnd  *baplan = (BitmapAnd *) plan;
+
+				foreach (lc, baplan->bitmapplans)
+				{
+					Plan  **p_subplan = (Plan **) &lfirst(lc);
+					pgstrom_recursive_grafter(pstmt, p_subplan);
+				}
+			}
+			break;
+		case T_BitmapOr:
+			{
+				BitmapOr   *boplan = (BitmapOr *) plan;
+
+				foreach (lc, boplan->bitmapplans)
+				{
+					Plan  **p_subplan = (Plan **) &lfirst(lc);
+					pgstrom_recursive_grafter(pstmt, p_subplan);
+				}
+			}
+			break;
+		default:
+			/* nothing to do, keep existgin one */
+			break;
+	}
+
+	/* also walk down left and right child plan sub-tree, if any */
+	if (plan->lefttree)
+		pgstrom_recursive_grafter(pstmt, &plan->lefttree);
+	if (plan->righttree)
+		pgstrom_recursive_grafter(pstmt, &plan->righttree);
+
+	switch (nodeTag(plan))
+	{
+		case T_Sort:
+			/* Try to replace Sort node by GpuSort node if cost of
+			 * the alternative plan is enough reasonable to replace.
+			 */
+			pgstrom_try_insert_gpusort(pstmt, p_curr_plan);
+			break;
+
+		default:
+			/* nothing to do, keep existing one */
+			break;
+	}
+}
+
+/*
+ * pgstrom_planner_entrypoint
+ *
+ * It overrides the planner_hook for two purposes.
+ * 1. To inject GpuPreAgg and GpuSort on the PlannedStmt once built.
+ *    (Note that it is not a usual way to inject paths, so we have
+ *     to be careful to inject it)
+ * 2. To initialize the hash table to save GPU accelerated Paths to
+ *    investigate N-way join, even if intermediation path was not
+ *    the cheapest one.
+ */
+static PlannedStmt *
+pgstrom_planner_entrypoint(Query *parse,
+						   int cursorOptions,
+						   ParamListInfo boundParams)
+{
+	PlannedStmt	*result;
+	HTAB		*pgstrom_path_htab_saved = pgstrom_path_htab;
+
+	PG_TRY();
+	{
+		pgstrom_path_htab = NULL;
+
+		if (planner_hook_next)
+			result = planner_hook_next(parse, cursorOptions, boundParams);
+		else
+			result = standard_planner(parse, cursorOptions, boundParams);
+
+		if (pgstrom_enabled)
+		{
+			ListCell   *cell;
+
+			Assert(result->planTree != NULL);
+			pgstrom_recursive_grafter(result, &result->planTree);
+
+			foreach (cell, result->subplans)
+			{
+				Plan  **p_subplan = (Plan **) &cell->data.ptr_value;
+				pgstrom_recursive_grafter(result, p_subplan);
+			}
+		}
+	}
+	PG_CATCH();
+	{
+		pgstrom_path_htab = pgstrom_path_htab_saved;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	pgstrom_path_htab = pgstrom_path_htab_saved;
+
+	return result;
+}
+
+/*
+ * _PG_init
+ *
+ * Main entrypoint of PG-Strom. It shall be invoked only once when postmaster
+ * process is starting up, then it calls other sub-systems to initialize for
+ * each ones.
+ */
 void
 _PG_init(void)
 {
@@ -196,12 +495,15 @@ _PG_init(void)
 	/* miscellaneous initializations */
 	pgstrom_init_misc_guc();
 	pgstrom_init_codegen();
-	pgstrom_init_grafter();
+
+	/* overall planner hook registration */
+	planner_hook_next = planner_hook;
+	planner_hook = pgstrom_planner_entrypoint;
 }
 
 /* ------------------------------------------------------------
  *
- * Routines copied from core PostgreSQL implementation
+ * Misc routines to support EXPLAIN command
  *
  * ------------------------------------------------------------
  */
@@ -607,108 +909,4 @@ pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es)
 	 */
 	if (es->analyze && gts->pfm_accum.enabled)
 		pgstrom_explain_perfmon(&gts->pfm_accum, es);
-}
-
-/*
- * XXX - copied from outfuncs.c
- *
- * _outToken
- *	  Convert an ordinary string (eg, an identifier) into a form that
- *	  will be decoded back to a plain token by read.c's functions.
- *
- *	  If a null or empty string is given, it is encoded as "<>".
- */
-void
-_outToken(StringInfo str, const char *s)
-{
-	if (s == NULL || *s == '\0')
-	{
-		appendStringInfoString(str, "<>");
-		return;
-	}
-
-	/*
-	 * Look for characters or patterns that are treated specially by read.c
-	 * (either in pg_strtok() or in nodeRead()), and therefore need a
-	 * protective backslash.
-	 */
-	/* These characters only need to be quoted at the start of the string */
-	if (*s == '<' ||
-		*s == '\"' ||
-		isdigit((unsigned char) *s) ||
-		((*s == '+' || *s == '-') &&
-		 (isdigit((unsigned char) s[1]) || s[1] == '.')))
-		appendStringInfoChar(str, '\\');
-	while (*s)
-	{
-		/* These chars must be backslashed anywhere in the string */
-		if (*s == ' ' || *s == '\n' || *s == '\t' ||
-			*s == '(' || *s == ')' || *s == '{' || *s == '}' ||
-			*s == '\\')
-			appendStringInfoChar(str, '\\');
-		appendStringInfoChar(str, *s++);
-	}
-}
-
-/*
- * formBitmapset / deformBitmapset
- *
- * It translate a Bitmapset to/from copyObject available form.
- * Logic was fully copied from outfunc.c and readfunc.c.
- *
- * Note: the output format is "(b int int ...)", similar to an integer List.
- */
-Value *
-formBitmapset(const Bitmapset *bms)
-{
-	StringInfoData str;
-	int		i;
-
-	initStringInfo(&str);
-	appendStringInfo(&str, "b:");
-	for (i=0; i < bms->nwords; i++)
-	{
-		if (i > 0)
-			appendStringInfoChar(&str, ',');
-		appendStringInfo(&str, "%08x", bms->words[i]);
-	}
-	return makeString(str.data);
-}
-
-Bitmapset *
-deformBitmapset(const Value *value)
-{
-	Bitmapset  *result;
-	char	   *temp = strVal(value);
-	char	   *token;
-	char	   *delim;
-	int			nwords;
-
-	if (!temp)
-		elog(ERROR, "incomplete Bitmapset structure");
-	if (strncmp(temp, "b:", 2) != 0)
-		elog(ERROR, "unrecognized Bitmapset format \"%s\"", temp);
-	if (temp[3] == '\0')
-		return NULL;	/* NULL bitmap */
-
-	token = temp = pstrdup(temp + 2);
-	nwords = strlen(temp) / (BITS_PER_BITMAPWORD / 4);
-	result = palloc0(offsetof(Bitmapset, words[nwords]));
-
-	do {
-		bitmapword	x;
-
-		delim = strchr(token, ',');
-		if (delim)
-			*delim = '\0';
-		if (sscanf(token, "%8x", &x) != 1)
-			elog(ERROR, "unrecognized Bitmapset token \"%s\"", token);
-		Assert(result->nwords < nwords);
-		result->words[result->nwords++] = x;
-		token = delim + 1;
-	} while (delim != NULL);
-
-	pfree(temp);
-
-	return result;
 }

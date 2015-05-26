@@ -3,7 +3,7 @@ EXTENSION = pg_strom
 DATA = src/pg_strom--1.0.sql
 
 # Source file of CPU portion
-STROM_OBJS = main.o codegen.o grafter.o datastore.o aggfuncs.o \
+STROM_OBJS = main.o codegen.o datastore.o aggfuncs.o \
 		cuda_control.o cuda_program.o cuda_mmgr.o \
 		gpuscan.o gpujoin.o gpupreagg.o gpusort.o multirels.o
 

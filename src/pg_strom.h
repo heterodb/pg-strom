@@ -629,6 +629,9 @@ extern double	pgstrom_gpu_operator_cost;
 extern double	pgstrom_gpu_tuple_cost;
 extern double	pgstrom_nrows_growth_ratio_limit;
 extern double	pgstrom_nrows_growth_margin;
+extern void		pgstrom_track_path(PlannerInfo *root, RelOptInfo *rel,
+								   CustomPath *cpath);
+extern CustomPath *pgstrom_find_path(PlannerInfo *root, RelOptInfo *rel);
 extern void _PG_init(void);
 extern const char *pgstrom_strerror(cl_int errcode);
 extern void show_scan_qual(List *qual, const char *qlabel,
@@ -640,9 +643,6 @@ extern void pgstrom_accum_perfmon(pgstrom_perfmon *accum,
 								  const pgstrom_perfmon *pfm);
 extern void
 pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es);
-extern void _outToken(StringInfo str, const char *s);
-extern Value *formBitmapset(const Bitmapset *bms);
-extern Bitmapset *deformBitmapset(const Value *value);
 
 /*
  * grafter.c

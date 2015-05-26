@@ -690,7 +690,7 @@ retry:
 	return true;
 }
 
-static GpuJoinPath *
+static void
 create_gpujoin_path(PlannerInfo *root,
 					RelOptInfo *joinrel,
 					JoinType jointype,
@@ -755,15 +755,16 @@ create_gpujoin_path(PlannerInfo *root,
 	result->inners[num_rels - 1].nslots = 0;			/* to be set later */
 
 	/*
-	 * cost calculation, and returns NULL immediately if expected cost is
-	 * too unreasonable
+	 * cost calculation of GpuJoin, then, add this path to the joinrel,
+	 * unless its cost is not obviously huge.
 	 */
 	if (!cost_gpujoin(root, result, required_outer))
-	{
 		pfree(result);
-		return NULL;
+	else
+	{
+		add_path(joinrel, &result->cpath.path);
+		pgstrom_track_path(root, joinrel, &result->cpath);
 	}
-	return result;
 }
 
 static void
@@ -781,7 +782,6 @@ try_gpujoin_path(PlannerInfo *root,
 				 List *host_quals,
 				 double nrows_ratio)
 {
-	GpuJoinPath	   *gpath;
 	ParamPathInfo  *param_info;
 	Relids			required_outer;
 	ListCell	   *lc;
@@ -835,23 +835,19 @@ try_gpujoin_path(PlannerInfo *root,
 	 */
 	if (enable_gpuhashjoin && hash_quals != NIL)
 	{
-		gpath = create_gpujoin_path(root, joinrel, jointype,
-									outer_path, inner_path,
-									sjinfo, param_info, required_outer,
-									hash_quals, join_quals, host_quals,
-									can_bulkload, false, nrows_ratio);
-		if (gpath != NULL)
-			add_path(joinrel, &gpath->cpath.path);
+		create_gpujoin_path(root, joinrel, jointype,
+							outer_path, inner_path,
+							sjinfo, param_info, required_outer,
+							hash_quals, join_quals, host_quals,
+							can_bulkload, false, nrows_ratio);
 
 		if (path_is_mergeable_gpujoin(outer_path))
 		{
-			gpath = create_gpujoin_path(root, joinrel, jointype,
-										outer_path, inner_path,
-										sjinfo, param_info, required_outer,
-										hash_quals, join_quals, host_quals,
-										can_bulkload, true, nrows_ratio);
-			if (gpath != NULL)
-				add_path(joinrel, &gpath->cpath.path);
+			create_gpujoin_path(root, joinrel, jointype,
+								outer_path, inner_path,
+								sjinfo, param_info, required_outer,
+								hash_quals, join_quals, host_quals,
+								can_bulkload, true, nrows_ratio);
 		}
 	}
 
@@ -861,23 +857,19 @@ try_gpujoin_path(PlannerInfo *root,
 	if (enable_gpunestloop &&
 		(jointype == JOIN_INNER || jointype == JOIN_LEFT))
 	{
-		gpath = create_gpujoin_path(root, joinrel, jointype,
-									outer_path, inner_path,
-									sjinfo, param_info, required_outer,
-									NIL, join_quals, host_quals,
-									can_bulkload, false, nrows_ratio);
-		if (gpath != NULL)
-			add_path(joinrel, &gpath->cpath.path);
+	    create_gpujoin_path(root, joinrel, jointype,
+							outer_path, inner_path,
+							sjinfo, param_info, required_outer,
+							NIL, join_quals, host_quals,
+							can_bulkload, false, nrows_ratio);
 
 		if (path_is_mergeable_gpujoin(outer_path))
 		{
-			gpath = create_gpujoin_path(root, joinrel, jointype,
-										outer_path, inner_path,
-										sjinfo, param_info, required_outer,
-										NIL, join_quals, host_quals,
-										can_bulkload, true, nrows_ratio);
-			if (gpath != NULL)
-				add_path(joinrel, &gpath->cpath.path);
+			create_gpujoin_path(root, joinrel, jointype,
+								outer_path, inner_path,
+								sjinfo, param_info, required_outer,
+								NIL, join_quals, host_quals,
+								can_bulkload, true, nrows_ratio);
 		}
 	}
 	return;

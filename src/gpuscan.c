@@ -285,6 +285,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 			pathnode->flags |= CUSTOMPATH_SUPPORT_BULKLOAD;
 	}
 	add_path(baserel, &pathnode->path);
+	pgstrom_track_path(root, baserel, pathnode);
 }
 
 /*
