@@ -64,6 +64,9 @@ typedef struct
 #define KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, depth)	\
 	((kmrels)->chunks[(depth)-1].right_outer)
 
+#if 0
+// integrated to KDS
+
 /*
  * Hash table and entry
  *
@@ -165,6 +168,7 @@ KERN_HASH_NEXT_ENTRY(kern_hashtable *khtable, kern_hashentry *khentry)
 		return NULL;
 	return (kern_hashentry *)((char *)khtable + khentry->next);
 }
+#endif
 
 /*
  * kern_gpujoin - control object of GpuJoin

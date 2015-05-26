@@ -525,6 +525,12 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 							   cl_uint nrooms,
 							   bool internal_format,
 							   pgstrom_data_store *ptoast);
+extern pgstrom_data_store *
+pgstrom_create_data_store_hash(GpuContext *gcontext,
+							   TupleDesc tupdesc,
+							   Size length,
+							   cl_uint nslots,
+							   bool file_mapped);
 extern void
 pgstrom_file_mmap_data_store(FileName kds_fname,
 							 Size kds_offset,
@@ -539,6 +545,9 @@ extern int pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 										   bool page_prune);
 extern bool pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 											TupleTableSlot *slot);
+extern bool pgstrom_data_store_insert_hashitem(pgstrom_data_store *pds,
+											   TupleTableSlot *slot,
+											   cl_uint hash_value);
 extern void pgstrom_dump_data_store(pgstrom_data_store *pds);
 extern void pgstrom_init_datastore(void);
 

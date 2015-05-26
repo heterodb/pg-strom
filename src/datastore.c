@@ -358,6 +358,9 @@ init_kern_data_store(kern_data_store *kds,
 	kds->tdhasoid = tupdesc->tdhasoid;
 	kds->tdtypeid = tupdesc->tdtypeid;
 	kds->tdtypmod = tupdesc->tdtypmod;
+	kds->nslots = 0;
+	kds->hash_min = 0;
+	kds->hash_max = UINT_MAX;
 
 	attcacheoff = offsetof(HeapTupleHeaderData, t_bits);
 	if (tupdesc->tdhasoid)
@@ -618,6 +621,37 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 	return pds;
 }
 
+pgstrom_data_store *
+pgstrom_create_data_store_hash(GpuContext *gcontext,
+							   TupleDesc tupdesc,
+							   Size length,
+							   cl_uint nslots,
+							   bool file_mapped)
+{
+	pgstrom_data_store *pds;
+	kern_data_store	   *kds;
+	Size				usage;
+
+	usage = (STROMALIGN(offsetof(kern_data_store,
+								 colmeta[tupdesc->natts])) +
+			 STROMALIGN(sizeof(cl_uint) * nslots));
+	if (usage > length)
+		elog(ERROR, "Required length for KDS-Hash is too short");
+
+	/*
+	 * KDS_FORMAT_HASH has almost same initialization to KDS_FORMAT_ROW,
+	 * so we once create it as _row format, then fixup the pds/kds.
+	 */
+	pds = pgstrom_create_data_store_row(gcontext, tupdesc,
+										length, file_mapped);
+	kds = pds->kds;
+	kds->usage = usage;
+	kds->format = KDS_FORMAT_HASH;
+	kds->nslots = nslots;
+
+	return pds;
+}
+
 /*
  * pgstrom_file_mmap_data_store
  *
@@ -837,6 +871,55 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 	return true;
 }
 
+
+/*
+ * pgstrom_data_store_insert_hashitem
+ *
+ * It inserts a tuple to the data store of hash format.
+ */
+bool
+pgstrom_data_store_insert_hashitem(pgstrom_data_store *pds,
+								   TupleTableSlot *slot,
+								   cl_uint hash_value)
+{
+	kern_data_store	   *kds = pds->kds;
+	cl_uint				index = hash_value % kds->nslots;
+	cl_uint			   *khslots = KERN_DATA_STORE_HASHSLOT(kds);
+	Size				required;
+	HeapTuple			tuple;
+	kern_hashitem	   *khitem;
+
+	/* No room to store a new kern_hashitem? */
+	if (kds->nitems >= kds->nrooms)
+		return false;
+	Assert(kds->ncols == slot->tts_tupleDescriptor->natts);
+
+	/* KDS has to be KDS_FORMAT_HASH */
+	if (kds->format != KDS_FORMAT_HASH)
+		elog(ERROR, "Bug? unexpected data-store format: %d", kds->format);
+
+	/* compute required length */
+	tuple = ExecFetchSlotTuple(slot);
+	required = LONGALIGN(offsetof(kern_hashitem, htup) + tuple->t_len);
+
+	Assert(kds->usage == LONGALIGN(kds->usage));
+	if (kds->usage + required > kds->length)
+		return false;	/* no more space to put */
+
+	/* OK, put a tuple */
+	khitem = (kern_hashitem *)((char *)kds + kds->usage);
+	khitem->hash = hash_value;
+	khitem->next = khslots[index];
+	khslots[index] = kds->usage;
+	khitem->rowid = kds->nitems++;
+	khitem->t_len = tuple->t_len;
+	memcpy(&khitem->htup, tuple->t_data, tuple->t_len);
+	kds->usage += required;
+
+	return true;
+}
+
+#ifdef NOT_USED
 /*
  * pgstrom_dump_data_store
  *
@@ -951,6 +1034,7 @@ pgstrom_dump_data_store(pgstrom_data_store *pds)
 		pfree(buf.data);
 	}
 }
+#endif
 
 void
 pgstrom_init_datastore(void)
