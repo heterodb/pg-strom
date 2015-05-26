@@ -770,13 +770,10 @@ create_gpujoin_path(PlannerInfo *root,
 static void
 try_gpujoin_path(PlannerInfo *root,
 				 RelOptInfo *joinrel,
+				 JoinType jointype,
 				 Path *outer_path,
                  Path *inner_path,
-				 List *restrictlist,	/* host + join quals */
-				 JoinType jointype,
-				 SpecialJoinInfo *sjinfo,
-				 Relids param_source_rels,
-				 Relids extra_lateral_rels,
+				 JoinPathExtraData *extra,
 				 List *hash_quals,
 				 List *join_quals,
 				 List *host_quals,
@@ -784,12 +781,14 @@ try_gpujoin_path(PlannerInfo *root,
 {
 	ParamPathInfo  *param_info;
 	Relids			required_outer;
+	List		   *restrictlist = extra->restrictlist;
 	ListCell	   *lc;
 	bool			can_bulkload = false;
 
 	required_outer = calc_non_nestloop_required_outer(outer_path,
 													  inner_path);
-	if (required_outer && !bms_overlap(required_outer, param_source_rels))
+	if (required_outer &&
+		!bms_overlap(required_outer, extra->param_source_rels))
 	{
 		bms_free(required_outer);
 		return;
@@ -799,7 +798,8 @@ try_gpujoin_path(PlannerInfo *root,
 	 * Independently of that, add parameterization needed for any
 	 * PlaceHolderVars that need to be computed at the join.
 	 */
-	required_outer = bms_add_members(required_outer, extra_lateral_rels);
+	required_outer = bms_add_members(required_outer,
+									 extra->extra_lateral_rels);
 
 	/*
 	 * Check availability of bulkload in this joinrel. If child GpuJoin
@@ -826,7 +826,7 @@ try_gpujoin_path(PlannerInfo *root,
 										   joinrel,
 										   outer_path,
 										   inner_path,
-										   sjinfo,
+										   extra->sjinfo,
 										   required_outer,
 										   &restrictlist);
 
@@ -837,7 +837,7 @@ try_gpujoin_path(PlannerInfo *root,
 	{
 		create_gpujoin_path(root, joinrel, jointype,
 							outer_path, inner_path,
-							sjinfo, param_info, required_outer,
+							extra->sjinfo, param_info, required_outer,
 							hash_quals, join_quals, host_quals,
 							can_bulkload, false, nrows_ratio);
 
@@ -845,7 +845,7 @@ try_gpujoin_path(PlannerInfo *root,
 		{
 			create_gpujoin_path(root, joinrel, jointype,
 								outer_path, inner_path,
-								sjinfo, param_info, required_outer,
+								extra->sjinfo, param_info, required_outer,
 								hash_quals, join_quals, host_quals,
 								can_bulkload, true, nrows_ratio);
 		}
@@ -859,7 +859,7 @@ try_gpujoin_path(PlannerInfo *root,
 	{
 	    create_gpujoin_path(root, joinrel, jointype,
 							outer_path, inner_path,
-							sjinfo, param_info, required_outer,
+							extra->sjinfo, param_info, required_outer,
 							NIL, join_quals, host_quals,
 							can_bulkload, false, nrows_ratio);
 
@@ -867,7 +867,7 @@ try_gpujoin_path(PlannerInfo *root,
 		{
 			create_gpujoin_path(root, joinrel, jointype,
 								outer_path, inner_path,
-								sjinfo, param_info, required_outer,
+								extra->sjinfo, param_info, required_outer,
 								NIL, join_quals, host_quals,
 								can_bulkload, true, nrows_ratio);
 		}
@@ -885,12 +885,8 @@ gpujoin_add_join_path(PlannerInfo *root,
 					  RelOptInfo *joinrel,
 					  RelOptInfo *outerrel,
 					  RelOptInfo *innerrel,
-					  List *restrictlist,
 					  JoinType jointype,
-					  SpecialJoinInfo *sjinfo,
-					  SemiAntiJoinFactors *semifactors,
-					  Relids param_source_rels,
-					  Relids extra_lateral_rels)
+					  JoinPathExtraData *extra)
 {
 	Path	   *cheapest_startup_outer = outerrel->cheapest_startup_path;
 	Path	   *cheapest_total_outer = outerrel->cheapest_total_path;
@@ -907,12 +903,8 @@ gpujoin_add_join_path(PlannerInfo *root,
 							   joinrel,
 							   outerrel,
 							   innerrel,
-							   restrictlist,
 							   jointype,
-							   sjinfo,
-							   semifactors,
-							   param_source_rels,
-							   extra_lateral_rels);
+							   extra);
 
 	/* nothing to do, if PG-Strom is not enabled */
 	if (!pgstrom_enabled)
@@ -936,7 +928,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 	/*
 	 * Check restrictions of joinrel.
 	 */
-	foreach (lc, restrictlist)
+	foreach (lc, extra->restrictlist)
 	{
 		RestrictInfo   *rinfo = (RestrictInfo *) lfirst(lc);
 
@@ -991,7 +983,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 	 * we will give up GpuJoin at all.
 	 */
 	nrows_ratio = check_nrows_growth_ratio(root, joinrel, outerrel, innerrel,
-										   jointype, sjinfo,
+										   jointype, extra->sjinfo,
 										   join_quals, host_quals);
 	if (nrows_ratio < 0.0)
 		return;
@@ -1002,13 +994,10 @@ gpujoin_add_join_path(PlannerInfo *root,
 		if (hash_quals != NIL)
 			try_gpujoin_path(root,
 							 joinrel,
+							 jointype,
 							 cheapest_startup_outer,
 							 cheapest_total_inner,
-							 restrictlist,
-							 jointype,
-							 sjinfo,
-							 param_source_rels,
-							 extra_lateral_rels,
+							 extra,
 							 hash_quals,
 							 join_quals,
 							 host_quals,
@@ -1017,13 +1006,10 @@ gpujoin_add_join_path(PlannerInfo *root,
 		if (jointype == JOIN_INNER || jointype == JOIN_RIGHT)
 			try_gpujoin_path(root,
 							 joinrel,
+							 jointype,
 							 cheapest_startup_outer,
 							 cheapest_total_inner,
-							 restrictlist,
-							 jointype,
-							 sjinfo,
-							 param_source_rels,
-							 extra_lateral_rels,
+							 extra,
 							 NIL,
 							 join_quals,
 							 host_quals,
@@ -1036,13 +1022,10 @@ gpujoin_add_join_path(PlannerInfo *root,
 		if (hash_quals != NIL)
 			try_gpujoin_path(root,
 							 joinrel,
+							 jointype,
 							 cheapest_total_outer,
 							 cheapest_total_inner,
-							 restrictlist,
-							 jointype,
-							 sjinfo,
-							 param_source_rels,
-							 extra_lateral_rels,
+							 extra,
 							 hash_quals,
 							 join_quals,
 							 host_quals,
@@ -1051,13 +1034,10 @@ gpujoin_add_join_path(PlannerInfo *root,
 		if (jointype == JOIN_INNER || jointype == JOIN_RIGHT)
 			try_gpujoin_path(root,
 							 joinrel,
+							 jointype,
 							 cheapest_total_outer,
 							 cheapest_total_inner,
-							 restrictlist,
-							 jointype,
-							 sjinfo,
-							 param_source_rels,
-							 extra_lateral_rels,
+							 extra,
 							 NIL,
 							 join_quals,
 							 host_quals,
@@ -1379,13 +1359,13 @@ create_gpujoin_plan(PlannerInfo *root,
 	/*
 	 * Build a pseudo-scan targetlist
 	 */
-	cscan->custom_ps_tlist = build_pseudo_targetlist(gpath, &gj_info, tlist);
+	cscan->custom_scan_tlist = build_pseudo_targetlist(gpath, &gj_info, tlist);
 
 	/*
 	 * construct kernel code
 	 */
 	pgstrom_init_codegen_context(&context);
-	context.pseudo_tlist = cscan->custom_ps_tlist;
+	context.pseudo_tlist = cscan->custom_scan_tlist;
 
 	gj_info.kern_source = gpujoin_codegen(root, cscan, &gj_info, &context);
 	gj_info.extra_flags = DEVKERNEL_NEEDS_GPUJOIN | context.extra_flags;
@@ -1684,13 +1664,13 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	if (es->verbose)
 	{
 		resetStringInfo(&str);
-		foreach (lc1, cscan->custom_ps_tlist)
+		foreach (lc1, cscan->custom_scan_tlist)
 		{
 			TargetEntry	   *tle = lfirst(lc1);
 
 			temp = deparse_expression((Node *)tle->expr,
 									  context, true, false);
-			if (lc1 != list_head(cscan->custom_ps_tlist))
+			if (lc1 != list_head(cscan->custom_scan_tlist))
 				appendStringInfo(&str, ", ");
 			if (!tle->resjunk)
 				appendStringInfo(&str, "%s", temp);

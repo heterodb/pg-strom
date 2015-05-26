@@ -16,6 +16,7 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
+#include "access/hash.h"
 #include "fmgr.h"
 #include "miscadmin.h"
 #include "optimizer/clauses.h"
@@ -194,7 +195,7 @@ path_tracker_hash(const void *key, Size keysize)
 	uint32		hash;
 
 	Assert(keysize == offsetof(pgstrom_path_tracker, cpath));
-	hash = uint32_hash(&hentry->root, sizeof(PlannerInfo *));
+	hash = hash_any((unsigned char *)&hentry->root, sizeof(PlannerInfo *));
 	hash ^= bms_hash_value(hentry->relids);
 
 	return hash;

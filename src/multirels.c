@@ -217,7 +217,7 @@ multirels_create_plan(PlannerInfo *root,
 	cscan->scan.plan.qual = NIL;
 	cscan->scan.scanrelid = 0;
 	cscan->flags = 0;
-	cscan->custom_ps_tlist = copyObject(outer_plan->targetlist);
+	cscan->custom_scan_tlist = copyObject(outer_plan->targetlist);
 	cscan->custom_relids = NULL;
 	cscan->methods = &multirels_plan_methods;
 	outerPlan(cscan) = outer_plan;

@@ -2776,7 +2776,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	cscan->scan.plan.qual         = NIL;
 	cscan->scan.scanrelid         = 0;
 	cscan->flags                  = 0;
-	cscan->custom_ps_tlist        = NIL;
+	cscan->custom_scan_tlist      = NIL;
 	cscan->custom_relids          = NULL;
 	cscan->methods                = &gpupreagg_scan_methods;
 	foreach (cell, outer_node->targetlist)
@@ -2792,10 +2792,10 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 						  exprCollation((Node *) tle->expr),
 						  0);
 		ps_tle = makeTargetEntry((Expr *) varnode,
-								 list_length(cscan->custom_ps_tlist) + 1,
+								 list_length(cscan->custom_scan_tlist) + 1,
 								 tle->resname ? pstrdup(tle->resname) : NULL,
 								 false);
-		cscan->custom_ps_tlist = lappend(cscan->custom_ps_tlist, ps_tle);
+		cscan->custom_scan_tlist = lappend(cscan->custom_scan_tlist, ps_tle);
 	}
 	if (IsA(outer_node, CustomScan))
 		((CustomScan *) outer_node)->flags |= CUSTOMPATH_PREFERE_ROW_FORMAT;

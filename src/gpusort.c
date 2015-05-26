@@ -790,7 +790,7 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	cscan->scan.plan.plan_width = sort->plan.plan_width;
 	cscan->scan.plan.targetlist = NIL;
 	cscan->scan.scanrelid       = 0;
-	cscan->custom_ps_tlist      = NIL;
+	cscan->custom_scan_tlist    = NIL;
 	cscan->custom_relids        = NULL;
 	cscan->methods = &gpusort_scan_methods;
 	foreach (cell, subplan->targetlist)
@@ -817,10 +817,10 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 		varnode = copyObject(varnode);
 		varnode->varno = OUTER_VAR;
 		tle_new = makeTargetEntry((Expr *) varnode,
-								  list_length(cscan->custom_ps_tlist) + 1,
+								  list_length(cscan->custom_scan_tlist) + 1,
 								  tle->resname ? pstrdup(tle->resname) : NULL,
 								  false);
-		cscan->custom_ps_tlist = lappend(cscan->custom_ps_tlist, tle_new);
+		cscan->custom_scan_tlist = lappend(cscan->custom_scan_tlist, tle_new);
 	}
 	/* informs our preference to fetch tuples */
 	if (IsA(subplan, CustomScan))

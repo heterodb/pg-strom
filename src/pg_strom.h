@@ -662,6 +662,11 @@ extern const char *pgstrom_cuda_textlib_code;
 extern const char *pgstrom_cuda_timelib_code;
 extern const char *pgstrom_cuda_numeric_code;
 
+/*
+ * createplan.c
+ */
+extern Plan *create_plan_recurse(PlannerInfo *root, Path *best_path);
+
 /* ----------------------------------------------------------------
  *
  * Miscellaneous static inline functions
