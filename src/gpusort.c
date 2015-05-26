@@ -935,11 +935,14 @@ static void
 gpusort_end(CustomScanState *node)
 {
 	GpuSortState   *gss = (GpuSortState *) node;
-	int				i;
 
 #ifdef USE_ASSERT_CHECKING
-	for (i=0; i < MAX_MERGECHUNKS_CLASS; i++)
-		Assert(!gss->sorted_chunks[i]);
+	{
+		int				i;
+
+		for (i=0; i < MAX_MERGECHUNKS_CLASS; i++)
+			Assert(!gss->sorted_chunks[i]);
+	}
 #endif
 	/*
 	 * Cleanup and relase any concurrent tasks
