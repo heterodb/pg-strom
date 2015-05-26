@@ -1024,6 +1024,7 @@ __gpujoin_projection_row(cl_int *errcode,
 			t_hoff += sizeof(cl_uint);
 		required += MAXALIGN(t_hoff) + MAXALIGN(data_len);
 	}
+	assert(required == MAXALIGN(required));
 
 	/*
 	 * Step.2 - takes advance usage counter of kds_dst->usage
@@ -1036,6 +1037,8 @@ __gpujoin_projection_row(cl_int *errcode,
 		else
 			usage_prev = 0;
 	}
+	__syncthreads();
+
 	/* check expected usage of the buffer */
 	if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
 		STROMALIGN(sizeof(cl_uint) * kresults->nitems) +
@@ -1059,6 +1062,7 @@ __gpujoin_projection_row(cl_int *errcode,
 
 		/* setup kern_tupitem */
 		htup_offset = kds_dst->length - (usage_prev + offset + required);
+		assert((htup_offset & (sizeof(cl_long) - 1)) == 0);
 		htup_index = (cl_uint *)KERN_DATA_STORE_BODY(kds_dst);
 		htup_index[res_index] = htup_offset;
 
@@ -1199,6 +1203,7 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 		assert(kresults->nrels == kgjoin->max_depth + 1);
 		assert(kds_src->format == KDS_FORMAT_ROW &&
 			   kds_dst->format == KDS_FORMAT_ROW);
+		assert(kds_dst->usage == 0);
 	}
 
 	if (get_global_id() == 0)
