@@ -31,12 +31,12 @@
 #include "parser/parsetree.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/pg_crc.h"
 #include "utils/ruleutils.h"
 #include <math.h>
 #include "pg_strom.h"
+#include "cuda_numeric.h"
 #include "cuda_gpujoin.h"
-
-
 
 /* forward declaration of the GTS callbacks */
 static bool	gpujoin_task_process(GpuTask *gtask);
@@ -63,18 +63,14 @@ typedef struct
 {
 	CustomPath		cpath;
 	Path		   *outer_path;
-	Plan		   *outer_plan;		/* for create_gpujoin_plan convenience */
 	Size			kmrels_length;
 	double			kresults_ratio;	/* expected total-items ratio */
 	int				num_rels;
 	List		   *host_quals;
 	struct {
-//		Cost		startup_cost;	/* outer scan cost + materialize */
-//		Cost		run_cost;		/* outer scan cost + materialize */
 		double		nrows_ratio;	/* nrows ratio towards outer rows */
 		JoinType	join_type;		/* one of JOIN_* */
 		Path	   *scan_path;		/* outer scan path */
-		Plan	   *scan_plan;		/* for create_gpujoin_plan convenience */
 		List	   *hash_quals;		/* valid quals, if hash-join */
 		List	   *join_quals;		/* all the device quals, incl hash_quals */
 		double		kmrels_rate;
@@ -94,14 +90,15 @@ typedef struct
 	int			extra_flags;
 	List	   *used_params;
 	double		kresults_ratio;
-	List	   *nrows_ratio;
 	bool		outer_bulkload;
 	double		bulkload_density;
 	Expr	   *outer_quals;
 	List	   *host_quals;
 	/* for each depth */
+	List	   *nrows_ratio;
 	List	   *join_types;
 	List	   *join_quals;
+	List	   *hash_inner_keys;
 	List	   *hash_outer_keys;
 	List	   *hash_nslots;
 	/* supplemental information of ps_tlist */
@@ -131,6 +128,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	exprs = lappend(exprs, gj_info->host_quals);
 	privs = lappend(privs, gj_info->join_types);
 	exprs = lappend(exprs, gj_info->join_quals);
+	exprs = lappend(exprs, gj_info->hash_inner_keys);
 	exprs = lappend(exprs, gj_info->hash_outer_keys);
 	privs = lappend(privs, gj_info->hash_nslots);
 	privs = lappend(privs, gj_info->ps_src_depth);
@@ -165,6 +163,7 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->host_quals = list_nth(exprs, eindex++);
 	gj_info->join_types = list_nth(privs, pindex++);
 	gj_info->join_quals = list_nth(exprs, eindex++);
+	gj_info->hash_inner_keys = list_nth(exprs, eindex++);
 	gj_info->hash_outer_keys = list_nth(exprs, eindex++);
 	gj_info->hash_nslots = list_nth(privs, pindex++);
 	gj_info->ps_src_depth = list_nth(privs, pindex++);
@@ -544,15 +543,14 @@ cost_gpujoin(PlannerInfo *root,
 	 * Estimation of multi-relations buffer size
 	 */
 retry:
+	startup_cost = pgstrom_gpu_setup_cost;
+	run_cost = outer_path->total_cost + cpu_tuple_cost * outer_path->rows;
+
 	kmrels_length = STROMALIGN(offsetof(kern_multirels,
 										chunks[num_rels]));
 	largest_size = 0;
 	largest_index = -1;
 	outer_ntuples = outer_path->rows;
-
-	/* fixed cost to initialize/setup/use GPU device */
-	startup_cost = pgstrom_gpu_setup_cost;
-
 	for (i=0; i < num_rels; i++)
 	{
 		Path	   *inner_path = gpath->inners[i].scan_path;
@@ -627,46 +625,32 @@ retry:
 		 */
 
 		/* cost to load tuples onto the buffer */
-		startup_cost = (inner_path->total_cost +
-						cpu_tuple_cost * inner_path->rows);
+		startup_cost += (inner_path->total_cost +
+						 cpu_tuple_cost * inner_path->rows);
 		/* cost to compute hash value, if hash-join */
 		if (gpath->inners[i].hash_quals != NIL)
 			startup_cost += (cpu_operator_cost * inner_path->rows *
 							 list_length(gpath->inners[i].hash_quals));
-		/* cost to execute previous stage */
-		if (i == 0)
-			run_cost = (outer_path->total_cost +
-						cpu_tuple_cost * outer_path->rows);
-		else
-			run_cost = (gpath->inners[i-1].startup_cost +
-						gpath->inners[i-1].run_cost);
-		/* iteration of outer scan/join */
-		run_cost *= (double) gpath->inners[i].nbatches;
-
 		/* cost to evaluate join qualifiers */
 		if (gpath->inners[i].hash_quals != NIL)
-			run_cost += (join_cost[i].per_tuple
+            run_cost += (join_cost[i].per_tuple
 						 * outer_ntuples
-						 * (inner_ntuples / (double)gpath->inners[i].nslots)
-						 * (double) gpath->inners[i].nbatches);
+                         * (inner_ntuples / (double)gpath->inners[i].nslots));
 		else
 			run_cost += (join_cost[i].per_tuple
-						 * outer_ntuples
-						 * clamp_row_est(inner_ntuples)
-						 * (double) gpath->inners[i].nbatches);
-		/* save the startup/run_cost in this depth */
-		gpath->inners[i].startup_cost = startup_cost;
-		gpath->inners[i].run_cost = run_cost;
+                         * outer_ntuples
+						 * clamp_row_est(inner_ntuples));
+		/* iteration if nbatches > 1 */
+		if (gpath->inners[i].nbatches > 1)
+			run_cost *= (double) gpath->inners[i].nbatches;
 
 		/* number of outer items on the next depth */
 		outer_ntuples = gpath->inners[i].nrows_ratio * outer_path->rows;
 	}
 	/* put cost value on the gpath */
-	gpath->cpath.path.startup_cost
-		= gpath->inners[num_rels - 1].startup_cost;
-	gpath->cpath.path.total_cost
-		= (gpath->inners[num_rels - 1].startup_cost +
-		   gpath->inners[num_rels - 1].run_cost);
+	gpath->cpath.path.startup_cost = startup_cost;
+	gpath->cpath.path.total_cost = startup_cost + run_cost;
+
 	/*
 	 * NOTE: In case when extreme number of rows are expected,
 	 * it does not make sense to split hash-tables because
@@ -746,7 +730,7 @@ create_gpujoin_path(PlannerInfo *root,
 	GpuJoinPath	   *result;
 	GpuJoinPath	   *source = NULL;
 	Size			length;
-	int				num_rels;
+	int				i, num_rels;
 
 	if (!outer_merge)
 		num_rels = 1;
@@ -782,8 +766,6 @@ create_gpujoin_path(PlannerInfo *root,
 			   offsetof(GpuJoinPath, inners[num_rels - 1]) -
 			   offsetof(GpuJoinPath, inners[0]));
 	}
-	result->inners[num_rels - 1].startup_cost = 0.0;	/* to be set later */
-	result->inners[num_rels - 1].run_cost = 0.0;		/* to be set later */
 	result->inners[num_rels - 1].nrows_ratio = nrows_ratio;
 	result->inners[num_rels - 1].scan_path = inner_path;
 	result->inners[num_rels - 1].join_type = jointype;
@@ -798,7 +780,17 @@ create_gpujoin_path(PlannerInfo *root,
 	 * unless its cost is not obviously huge.
 	 */
 	if (cost_gpujoin(root, result, required_outer))
+	{
+		List   *custom_children = list_make1(result->outer_path);
+
+		/* informs planner a list of child pathnodes */
+		for (i=0; i < num_rels; i++)
+			custom_children = lappend(custom_children,
+									  result->inners[i].scan_path);
+		result->cpath.custom_children = custom_children;
+		/* add GpuJoin path */
 		pgstrom_add_path(root, joinrel, &result->cpath, length);
+	}
 	else
 		pfree(result);
 }
@@ -1159,7 +1151,6 @@ build_pseudo_targetlist_walker(Node *node, build_ps_tlist_context *context)
 		Var	   *varnode = (Var *) node;
 		Var	   *ps_node;
 		int		ps_depth;
-		Plan   *plan;
 
 		foreach (cell, context->ps_tlist)
 		{
@@ -1182,7 +1173,6 @@ build_pseudo_targetlist_walker(Node *node, build_ps_tlist_context *context)
 		}
 		/* not in the pseudo-scan targetlist, so append this one */
 		rel = gpath->outer_path->parent;
-		plan = gpath->outer_plan;
 		if (bms_is_member(varnode->varno, rel->relids))
 			ps_depth = 0;
 		else
@@ -1192,7 +1182,6 @@ build_pseudo_targetlist_walker(Node *node, build_ps_tlist_context *context)
 			for (i=0; i < gpath->num_rels; i++)
 			{
 				rel = gpath->inners[i].scan_path->parent;
-				plan = gpath->inners[i].scan_plan;
 				if (bms_is_member(varnode->varno, rel->relids))
 					break;
 			}
@@ -1202,21 +1191,23 @@ build_pseudo_targetlist_walker(Node *node, build_ps_tlist_context *context)
 			ps_depth = i + 1;
 		}
 
-		foreach (cell, plan->targetlist)
+		foreach (cell, rel->reltargetlist)
 		{
-			TargetEntry	   *tle = lfirst(cell);
-			TargetEntry	   *tle_new;
+			Node	   *expr = lfirst(cell);
 
-			if (equal(varnode, tle->expr))
+			if (equal(varnode, expr))
 			{
-				tle_new = makeTargetEntry((Expr *) copyObject(varnode),
-										  list_length(context->ps_tlist) + 1,
-										  NULL,
-										  context->resjunk);
-				context->ps_tlist = lappend(context->ps_tlist, tle_new);
-				context->ps_depth = lappend_int(context->ps_depth, ps_depth);
-				context->ps_resno = lappend_int(context->ps_resno, tle->resno);
-
+				TargetEntry	   *ps_tle
+					= makeTargetEntry((Expr *) copyObject(varnode),
+									  list_length(context->ps_tlist) + 1,
+									  NULL,
+									  context->resjunk);
+				context->ps_tlist =
+					lappend(context->ps_tlist, ps_tle);
+				context->ps_depth =
+					lappend_int(context->ps_depth, ps_depth);
+				context->ps_resno =
+					lappend_int(context->ps_resno, ps_tle->resno);
 				return false;
 			}
 		}
@@ -1272,34 +1263,37 @@ create_gpujoin_plan(PlannerInfo *root,
 					RelOptInfo *rel,
 					CustomPath *best_path,
 					List *tlist,
-					List *clauses)
+					List *clauses,
+					List *custom_children)
 {
 	GpuJoinPath	   *gpath = (GpuJoinPath *) best_path;
 	GpuJoinInfo		gj_info;
 	CustomScan	   *cscan;
-	Plan		   *prev_plan = NULL;
-	Plan		   *outer_plan;
 	codegen_context	context;
+	Plan		   *outer_plan;
 	ListCell	   *lc;
 	int				i;
+
+	Assert(gpath->num_rels + 1 == list_length(custom_children));
+	outer_plan = linitial(custom_children);
 
 	cscan = makeNode(CustomScan);
 	cscan->scan.plan.targetlist = tlist;
 	cscan->scan.plan.qual = gpath->host_quals;
 	cscan->flags = best_path->flags;
 	cscan->methods = &gpujoin_plan_methods;
+	cscan->custom_children = list_copy_tail(custom_children, 1);
 
 	memset(&gj_info, 0, sizeof(GpuJoinInfo));
 	gj_info.num_rels = gpath->num_rels;
 	gj_info.kresults_ratio = gpath->kresults_ratio;
 	gj_info.host_quals = extract_actual_clauses(gpath->host_quals, false);
+
 	for (i=0; i < gpath->num_rels; i++)
 	{
-		CustomScan	   *mplan;
-		List		   *hash_inner_keys = NIL;
-		List		   *hash_outer_keys = NIL;
-		List		   *clauses;
-		int				nrows_ratio;
+		List	   *hash_inner_keys = NIL;
+		List	   *hash_outer_keys = NIL;
+		List	   *clauses;
 
 		foreach (lc, gpath->inners[i].hash_quals)
 		{
@@ -1332,35 +1326,23 @@ create_gpujoin_plan(PlannerInfo *root,
 			else
 				elog(ERROR, "Bug? hash-clause reference bogus varnos");
 		}
-		mplan = multirels_create_plan(root,
-									  i + 1,	/* depth */
-									  gpath->inners[i].startup_cost,
-									  gpath->inners[i].startup_cost +
-									  gpath->inners[i].run_cost,
-									  gpath->inners[i].join_type,
-									  gpath->inners[i].scan_path,
-									  gpath->kmrels_length,
-									  gpath->inners[i].kmrels_rate,
-									  gpath->inners[i].nbatches,
-									  gpath->inners[i].nslots,
-									  hash_inner_keys);
-		gpath->inners[i].scan_plan = (Plan *) mplan;
-		/* add properties of GpuJoinInfo */
+
+		/*
+		 * Add properties of GpuJoinInfo
+		 */
+		gj_info.nrows_ratio = lappend_int(gj_info.nrows_ratio,
+								float_as_int(gpath->inners[i].nrows_ratio));
 		gj_info.join_types = lappend_int(gj_info.join_types,
 										 gpath->inners[i].join_type);
 		clauses = extract_actual_clauses(gpath->inners[i].join_quals, false);
-		gj_info.join_quals =
-			lappend(gj_info.join_quals, build_flatten_qualifier(clauses));
+		gj_info.join_quals = lappend(gj_info.join_quals,
+									 build_flatten_qualifier(clauses));
+		gj_info.hash_inner_keys = lappend(gj_info.hash_inner_keys,
+										  hash_inner_keys);
 		gj_info.hash_outer_keys = lappend(gj_info.hash_outer_keys,
 										  hash_outer_keys);
-		nrows_ratio = (int)(gpath->inners[i].nrows_ratio * 1000000.0);
-		gj_info.nrows_ratio = lappend_int(gj_info.nrows_ratio, nrows_ratio);
-		/* chain it under the GpuJoin */
-		if (prev_plan)
-			innerPlan(prev_plan) = &mplan->scan.plan;
-		else
-			innerPlan(cscan) = &mplan->scan.plan;
-		prev_plan = &mplan->scan.plan;
+		gj_info.hash_nslots = lappend_int(gj_info.hash_nslots,
+										  gpath->inners[i].nslots);
 	}
 
 	/*
@@ -1399,7 +1381,6 @@ create_gpujoin_plan(PlannerInfo *root,
 		}
 	}
 	outerPlan(cscan) = outer_plan;
-	gpath->outer_plan = outer_plan;		/* for convenience */
 
 	/*
 	 * Build a pseudo-scan targetlist
@@ -1430,9 +1411,6 @@ gpujoin_textout_path(StringInfo str, const CustomPath *node)
 	/* outer_path */
 	appendStringInfo(str, " :outer_path %s",
 					 nodeToString(gpath->outer_path));
-	/* outer_plan */
-	appendStringInfo(str, " :outer_plan %s",
-					 nodeToString(gpath->outer_plan));
 	/* total_length */
 	appendStringInfo(str, " :kmrels_length %zu", gpath->kmrels_length);
 	/* kresults_ratio */
@@ -1446,20 +1424,12 @@ gpujoin_textout_path(StringInfo str, const CustomPath *node)
 	for (i=0; i < gpath->num_rels; i++)
 	{
 		appendStringInfo(str, "{");
-		/* startup_cost, run_cost */
-		appendStringInfo(str, " :startup_cost %.2f",
-						 gpath->inners[i].startup_cost);
-		appendStringInfo(str, " :run_cost %.2f",
-						 gpath->inners[i].run_cost);
 		/* join_type */
 		appendStringInfo(str, " :join_type %d",
 						 (int)gpath->inners[i].join_type);
 		/* scan_path */
 		appendStringInfo(str, " :scan_path %s",
 						 nodeToString(gpath->inners[i].scan_path));
-		/* scan_plan */
-		appendStringInfo(str, " :scan_plan %s",
-						 nodeToString(gpath->inners[i].scan_plan));
 		/* hash_quals */
 		appendStringInfo(str, " :hash_quals %s",
 						 nodeToString(gpath->inners[i].hash_quals));
@@ -2457,7 +2427,7 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 	 * Allocation of the destination data-store
 	 */
 	nrooms = (cl_uint)((double) pds_src->kds->nitems *
-					   (double) llast_int(gjs->nrows_ratio) / 1000000.0 *
+					   long_as_double(llast_int(gjs->nrows_ratio)) *
 					   (1.0 + pgstrom_nrows_growth_margin));
 	tupdesc = gjs->gts.css.ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 
@@ -3094,7 +3064,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	{
 		JoinType	join_type = (JoinType) lfirst_int(lc1);
 		bool		is_nestloop = (lfirst(lc2) == NIL);
-		double		nrows_ratio = (double)lfirst_int(lc3) / 1000000.0;
+		double		nrows_ratio = long_as_double(lfirst_int(lc3));
 		size_t		num_threads;
 
 		/*
@@ -3438,7 +3408,7 @@ static pg_crc32
 get_tuple_hashvalue(GpuJoinState *gjs, int depth, TupleTableSlot *slot)
 {
 	ExprContext	   *econtext = gjs->inner_econtext;
-	pg_crc32		hashvalue;
+	pg_crc32		hash;
 	List		   *hash_keys = gjs->inners[depth - 1].hash_keys;
 	List		   *hash_keylen = gjs->inners[depth - 1].hash_keylen;
 	List		   *hash_keybyval = gjs->inners[depth - 1].hash_keybyval;
@@ -3496,7 +3466,7 @@ get_tuple_hashvalue(GpuJoinState *gjs, int depth, TupleTableSlot *slot)
 	}
 	FIN_LEGACY_CRC32(hash);
 
-	return hashvalue;
+	return hash;
 }
 
 /*****/
