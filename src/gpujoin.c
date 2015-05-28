@@ -295,6 +295,20 @@ path_is_mergeable_gpujoin(Path *pathnode)
 	return true;
 }
 
+static Path *
+lookup_mergeable_gpujoin(PlannerInfo *root, RelOptInfo *outer_rel)
+{
+	CustomPath *cpath = pgstrom_find_path(root, outer_rel);
+
+	if (cpath)
+	{
+		Assert(cpath->path.parent == outer_rel);
+		if (path_is_mergeable_gpujoin(&cpath->path))
+			return &cpath->path;
+	}
+	return NULL;
+}
+
 /*
  * returns true, if plannode is GpuJoin
  */
@@ -702,15 +716,16 @@ create_gpujoin_path(PlannerInfo *root,
 					List *hash_quals,
 					List *join_quals,
 					List *host_quals,
-					bool can_bulkload,
-					bool try_merge,
+					bool support_bulkload,
+					bool outer_merge,
 					double nrows_ratio)
 {
 	GpuJoinPath	   *result;
 	GpuJoinPath	   *source = NULL;
+	Size			length;
 	int				num_rels;
 
-	if (!try_merge)
+	if (!outer_merge)
 		num_rels = 1;
 	else
 	{
@@ -720,17 +735,18 @@ create_gpujoin_path(PlannerInfo *root,
 		num_rels = source->num_rels + 1;
 		/* source path also has to support bulkload */
 		if ((source->cpath.flags & CUSTOMPATH_SUPPORT_BULKLOAD) == 0)
-			can_bulkload = false;
+			support_bulkload = false;
 	}
 
-	result = palloc0(offsetof(GpuJoinPath, inners[num_rels]));
+	length = offsetof(GpuJoinPath, inners[num_rels]);
+	result = palloc0(length);
 	NodeSetTag(result, T_CustomPath);
 	result->cpath.path.pathtype = T_CustomScan;
 	result->cpath.path.parent = joinrel;
 	result->cpath.path.param_info = param_info;
 	result->cpath.path.pathkeys = NIL;
 	result->cpath.path.rows = joinrel->rows;
-	result->cpath.flags = (can_bulkload ? CUSTOMPATH_SUPPORT_BULKLOAD : 0);
+	result->cpath.flags = (support_bulkload ? CUSTOMPATH_SUPPORT_BULKLOAD : 0);
 	result->cpath.methods = &gpujoin_path_methods;
 	result->outer_path = outer_path;
 	result->kmrels_length = 0;		/* to be set later */
@@ -758,13 +774,10 @@ create_gpujoin_path(PlannerInfo *root,
 	 * cost calculation of GpuJoin, then, add this path to the joinrel,
 	 * unless its cost is not obviously huge.
 	 */
-	if (!cost_gpujoin(root, result, required_outer))
-		pfree(result);
+	if (cost_gpujoin(root, result, required_outer))
+		pgstrom_add_path(root, joinrel, &result->cpath, length);
 	else
-	{
-		add_path(joinrel, &result->cpath.path);
-		pgstrom_track_path(root, joinrel, &result->cpath);
-	}
+		pfree(result);
 }
 
 static void
@@ -783,7 +796,7 @@ try_gpujoin_path(PlannerInfo *root,
 	Relids			required_outer;
 	List		   *restrictlist = extra->restrictlist;
 	ListCell	   *lc;
-	bool			can_bulkload = false;
+	bool			support_bulkload = false;
 
 	required_outer = calc_non_nestloop_required_outer(outer_path,
 													  inner_path);
@@ -816,7 +829,7 @@ try_gpujoin_path(PlannerInfo *root,
 				break;
 		}
 		if (lc == NULL)
-			can_bulkload = true;
+			support_bulkload = true;
 	}
 
 	/*
@@ -839,7 +852,7 @@ try_gpujoin_path(PlannerInfo *root,
 							outer_path, inner_path,
 							extra->sjinfo, param_info, required_outer,
 							hash_quals, join_quals, host_quals,
-							can_bulkload, false, nrows_ratio);
+							support_bulkload, false, nrows_ratio);
 
 		if (path_is_mergeable_gpujoin(outer_path))
 		{
@@ -847,7 +860,7 @@ try_gpujoin_path(PlannerInfo *root,
 								outer_path, inner_path,
 								extra->sjinfo, param_info, required_outer,
 								hash_quals, join_quals, host_quals,
-								can_bulkload, true, nrows_ratio);
+								support_bulkload, true, nrows_ratio);
 		}
 	}
 
@@ -861,7 +874,7 @@ try_gpujoin_path(PlannerInfo *root,
 							outer_path, inner_path,
 							extra->sjinfo, param_info, required_outer,
 							NIL, join_quals, host_quals,
-							can_bulkload, false, nrows_ratio);
+							support_bulkload, false, nrows_ratio);
 
 		if (path_is_mergeable_gpujoin(outer_path))
 		{
@@ -869,7 +882,7 @@ try_gpujoin_path(PlannerInfo *root,
 								outer_path, inner_path,
 								extra->sjinfo, param_info, required_outer,
 								NIL, join_quals, host_quals,
-								can_bulkload, true, nrows_ratio);
+								support_bulkload, true, nrows_ratio);
 		}
 	}
 	return;
@@ -888,9 +901,9 @@ gpujoin_add_join_path(PlannerInfo *root,
 					  JoinType jointype,
 					  JoinPathExtraData *extra)
 {
-	Path	   *cheapest_startup_outer = outerrel->cheapest_startup_path;
-	Path	   *cheapest_total_outer = outerrel->cheapest_total_path;
 	Path	   *cheapest_total_inner = innerrel->cheapest_total_path;
+	Path	   *cheapest_total_outer = outerrel->cheapest_total_path;
+	Path	   *mergeable_gpujoin_outer;
 	List	   *host_quals = NIL;
 	List	   *hash_quals = NIL;
 	List	   *join_quals = NIL;
@@ -913,16 +926,6 @@ gpujoin_add_join_path(PlannerInfo *root,
 	/* quick exit, if unsupported join type */
 	if (jointype != JOIN_INNER && jointype != JOIN_FULL &&
 		jointype != JOIN_RIGHT && jointype != JOIN_LEFT)
-		return;
-
-	/*
-	 * If either cheapest-total path is parameterized by the other rel, we
-	 * can't use a hashjoin.  (There's no use looking for alternative
-	 * input paths, since these should already be the least-parameterized
-	 * available paths.)
-	 */
-	if (PATH_PARAM_BY_REL(cheapest_total_outer, innerrel) ||
-		PATH_PARAM_BY_REL(cheapest_total_inner, outerrel))
 		return;
 
 	/*
@@ -988,60 +991,79 @@ gpujoin_add_join_path(PlannerInfo *root,
 	if (nrows_ratio < 0.0)
 		return;
 
-	if (cheapest_startup_outer)
+	/*
+	 * Find out an inner path with cheapest total cost, but not parameterized
+	 * by outer relation.
+	 */
+	if (PATH_PARAM_BY_REL(cheapest_total_inner, outerrel))
 	{
-		/* GpuHashJoin logic, if possible */
-		if (hash_quals != NIL)
-			try_gpujoin_path(root,
-							 joinrel,
-							 jointype,
-							 cheapest_startup_outer,
-							 cheapest_total_inner,
-							 extra,
-							 hash_quals,
-							 join_quals,
-							 host_quals,
-							 nrows_ratio);
-		/* GpuNestLoop logic, if possible */
-		if (jointype == JOIN_INNER || jointype == JOIN_RIGHT)
-			try_gpujoin_path(root,
-							 joinrel,
-							 jointype,
-							 cheapest_startup_outer,
-							 cheapest_total_inner,
-							 extra,
-							 NIL,
-							 join_quals,
-							 host_quals,
-							 nrows_ratio);
+		cheapest_total_inner = NULL;
+		foreach (lc, innerrel->pathlist)
+		{
+			Path   *curr_path = lfirst(lc);
+
+			if (!cheapest_total_inner ||
+				cheapest_total_inner->total_cost > curr_path->total_cost)
+				cheapest_total_inner = curr_path;
+		}
+		if (!cheapest_total_inner)
+			return;
 	}
 
-	if (cheapest_startup_outer != cheapest_total_outer)
+	/*
+	 * Find out an outer path with cheapest startup / total cost, but not
+	 * parameterized by inner relation.
+	 */
+	if (PATH_PARAM_BY_REL(cheapest_total_outer, innerrel))
 	{
-		/* GpuHashJoin logic, if possible */
-		if (hash_quals != NIL)
-			try_gpujoin_path(root,
-							 joinrel,
-							 jointype,
-							 cheapest_total_outer,
-							 cheapest_total_inner,
-							 extra,
-							 hash_quals,
-							 join_quals,
-							 host_quals,
-							 nrows_ratio);
-		/* GpuNestLoop logic, if possible */
-		if (jointype == JOIN_INNER || jointype == JOIN_RIGHT)
-			try_gpujoin_path(root,
-							 joinrel,
-							 jointype,
-							 cheapest_total_outer,
-							 cheapest_total_inner,
-							 extra,
-							 NIL,
-							 join_quals,
-							 host_quals,
-							 nrows_ratio);
+		cheapest_total_outer = NULL;
+		foreach (lc, outerrel->pathlist)
+		{
+			Path   *curr_path = lfirst(lc);
+
+			if (!cheapest_total_outer ||
+				cheapest_total_outer->total_cost > curr_path->total_cost)
+				cheapest_total_outer = curr_path;
+		}
+		if (!cheapest_total_outer)
+			return;
+	}
+
+	/*
+	 * Find out mergeable outer GpuJoin Path, if any
+	 */
+	mergeable_gpujoin_outer = lookup_mergeable_gpujoin(root, outerrel);
+
+	/*
+	 * Try, cheapest_total_inner + cheapest_total_outer
+	 */
+	try_gpujoin_path(root,
+					 joinrel,
+					 jointype,
+					 cheapest_total_outer,
+					 cheapest_total_inner,
+					 extra,
+					 hash_quals,
+					 join_quals,
+					 host_quals,
+					 nrows_ratio);
+
+	/*
+	 * Try, cheapest_total_inner + mergeable_gpujoin_outer
+	 */
+	if (mergeable_gpujoin_outer != NULL &&
+		mergeable_gpujoin_outer != cheapest_total_outer)
+	{
+		try_gpujoin_path(root,
+						 joinrel,
+						 jointype,
+						 mergeable_gpujoin_outer,
+						 cheapest_total_inner,
+						 extra,
+						 hash_quals,
+						 join_quals,
+						 host_quals,
+						 nrows_ratio);
 	}
 }
 

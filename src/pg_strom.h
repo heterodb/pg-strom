@@ -638,8 +638,8 @@ extern double	pgstrom_gpu_operator_cost;
 extern double	pgstrom_gpu_tuple_cost;
 extern double	pgstrom_nrows_growth_ratio_limit;
 extern double	pgstrom_nrows_growth_margin;
-extern void		pgstrom_track_path(PlannerInfo *root, RelOptInfo *rel,
-								   CustomPath *cpath);
+extern void		pgstrom_add_path(PlannerInfo *root, RelOptInfo *rel,
+								 CustomPath *cpath, Size cpath_length);
 extern CustomPath *pgstrom_find_path(PlannerInfo *root, RelOptInfo *rel);
 extern void _PG_init(void);
 extern const char *pgstrom_strerror(cl_int errcode);
@@ -681,61 +681,6 @@ extern Plan *create_plan_recurse(PlannerInfo *root, Path *best_path);
  * Miscellaneous static inline functions
  *
  * ---------------------------------------------------------------- */
-
-/* binary available pstrcpy() */
-static inline void *
-pmemcpy(void *from, size_t sz)
-{
-	/*
-	 * Note that usual palloc() has 1GB limitation because of historical
-	 * reason, so we have to use MemoryContextAllocHuge instead in case
-	 * when we expect sz > 1GB.
-	 * Also, *_huge has identical implementation expect for size checks,
-	 * we don't need to check the cases.
-	 */
-	void   *dest = MemoryContextAllocHuge(CurrentMemoryContext, sz);
-
-	return memcpy(dest, from, sz);
-}
-
-/* additional dlist stuff */
-static inline int
-dlist_length(dlist_head *head)
-{
-	dlist_iter	iter;
-	int			count = 0;
-
-	dlist_foreach(iter, head)
-		count++;
-	return count;
-}
-
-#ifdef NOT_USED
-static inline void
-dlist_move_tail(dlist_head *head, dlist_node *node)
-{
-	/* fast path if it's already at the head */
-	if (head->head.next == node)
-		return;
-	dlist_delete(node);
-    dlist_push_tail(head, node);
-
-    dlist_check(head);
-}
-
-static inline void
-dlist_move_all(dlist_head *dest, dlist_head *src)
-{
-	Assert(dlist_is_empty(dest));
-
-	dest->head.next = dlist_head_node(src);
-	dest->head.prev = dlist_tail_node(src);
-	dlist_head_node(src)->prev = &dest->head;
-	dlist_tail_node(src)->next = &dest->head;
-
-	dlist_init(src);
-}
-#endif
 
 /*
  * int/float reinterpret functions

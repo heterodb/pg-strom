@@ -21,6 +21,7 @@
 #include "miscadmin.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
+#include "optimizer/pathnode.h"
 #include "optimizer/planner.h"
 #include "storage/ipc.h"
 #include "storage/pg_shmem.h"
@@ -222,7 +223,8 @@ path_tracker_match(const void *key1, const void *key2, Size keysize)
  * It tracks self managed CustomPath node, for optimal construction.
  */
 void
-pgstrom_track_path(PlannerInfo *root, RelOptInfo *rel, CustomPath *cpath)
+pgstrom_add_path(PlannerInfo *root, RelOptInfo *rel,
+				 CustomPath *cpath, Size cpath_length)
 {
 	pgstrom_path_tracker   *hentry;
 	pgstrom_path_tracker	hkey;
@@ -248,8 +250,11 @@ pgstrom_track_path(PlannerInfo *root, RelOptInfo *rel, CustomPath *cpath)
 										HASH_ELEM | HASH_FUNCTION |
 										HASH_COMPARE | HASH_CONTEXT);
 	}
+
 	/*
-	 * Find the hash entry
+	 * Find a hash entry, and tracks this CustomPath node regardless
+	 * of the cost (because mergeable GpuJoin may offer cheaper total
+	 * cost later)
 	 */
 	memset(&hkey, 0, sizeof(pgstrom_path_tracker));
 	hkey.root = root;
@@ -260,14 +265,27 @@ pgstrom_track_path(PlannerInfo *root, RelOptInfo *rel, CustomPath *cpath)
 	{
 		Assert(hentry->root == root &&
 			   bms_equal(hentry->relids, rel->relids));
-		hentry->cpath = cpath;
+		hentry->cpath = palloc(cpath_length);
+		memcpy(hentry->cpath, cpath, cpath_length);
 	}
 	else
 	{
 		/* check total_cost of Path, then cheaper one will servive */
 		if (hentry->cpath->path.total_cost > cpath->path.total_cost)
-			hentry->cpath = cpath;
+		{
+			hentry->cpath = palloc(cpath_length);
+			memcpy(hentry->cpath, cpath, cpath_length);
+		}
 	}
+
+	/*
+	 * Finally, add this CustomPath node to the target relation.
+	 *
+	 * NOTE: If other path dominates this CustomPath node, add_path
+	 * may release the supplied CustomPath immediately. So, we have
+	 * to track CustomPath node prior to add_path().
+	 */
+	add_path(rel, &cpath->path);
 }
 
 /*

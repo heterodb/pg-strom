@@ -2804,8 +2804,9 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	/* also set up private information */
 	memset(&gpa_info, 0, sizeof(GpuPreAggInfo));
 	gpa_info.numCols        = agg->numCols;
-	gpa_info.grpColIdx      = pmemcpy(agg->grpColIdx,
-									  sizeof(AttrNumber) * agg->numCols);
+	gpa_info.grpColIdx      = palloc(sizeof(AttrNumber) * agg->numCols);
+	memcpy(gpa_info.grpColIdx, agg->grpColIdx,
+		   sizeof(AttrNumber) * agg->numCols);
 	gpa_info.outer_quals    = outer_quals;
 	gpa_info.outer_bulkload = outer_bulkload;
 	gpa_info.bulkload_density = bulkload_density;
