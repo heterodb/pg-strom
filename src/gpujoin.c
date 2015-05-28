@@ -69,8 +69,8 @@ typedef struct
 	int				num_rels;
 	List		   *host_quals;
 	struct {
-		Cost		startup_cost;	/* outer scan cost + materialize */
-		Cost		run_cost;		/* outer scan cost + materialize */
+//		Cost		startup_cost;	/* outer scan cost + materialize */
+//		Cost		run_cost;		/* outer scan cost + materialize */
 		double		nrows_ratio;	/* nrows ratio towards outer rows */
 		JoinType	join_type;		/* one of JOIN_* */
 		Path	   *scan_path;		/* outer scan path */
@@ -179,7 +179,6 @@ deform_gpujoin_info(CustomScan *cscan)
 typedef struct
 {
 	GpuTaskState	gts;
-	int				num_rels;
 	/* expressions to be used in fallback path */
 	List		   *join_types;
 	ExprState	   *outer_quals;
@@ -200,6 +199,31 @@ typedef struct
 	HeapTupleData	curr_tuple;
 	/* buffer for PDS on bulk-loading mode */
 	pgstrom_data_store *next_pds;
+
+	/*
+	 * Properties of underlying inner relations
+	 *
+	 */
+	int				num_rels;
+	struct {
+		PlanState  *state;
+		int			depth;
+		int			nbatches_plan;
+		int			nbatches_exec;
+		double		usage_rate;
+
+		/*
+		 * For hash-join
+		 */
+		cl_uint		nslots;
+		cl_uint		hgram_shift;
+		cl_uint		hgram_curr;
+		Size	   *hgram_size;
+		List	   *hash_keys;
+		List	   *hash_keylen;
+		List	   *hash_keybyval;
+		List	   *hash_keytype;
+	} inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinState;
 
 /*
@@ -565,25 +589,24 @@ retry:
 								  sizeof(ItemIdData) - SizeofHeapTupleHeader);
 		}
 
+		/* chunk_size estimation */
+		chunk_size = STROMALIGN(offsetof(kern_data_store,
+										 colmeta[ncols]));
 		if (gpath->inners[i].hash_quals != NIL)
 		{
-			/* header portion of kern_hashtable */
-			chunk_size = STROMALIGN(offsetof(kern_hashtable,
-											 colmeta[ncols]));
-			/* hash entry slot */
+			/* KDS_FORMAT_HASH */
+			/* hash slots */
 			nslots = Max((Size)inner_ntuples, 1024);
 			nslots = Min(nslots, gpuMemMaxAllocSize() / sizeof(void *));
 			chunk_size += STROMALIGN(sizeof(cl_uint) * (Size)nslots);
-			/* kern_hashentry body */
-			entry_size = offsetof(kern_hashentry, htup) + htup_size;
+			/* kern_hashitem body */
+			entry_size = offsetof(kern_hashitem, htup) + htup_size;
 			chunk_size += STROMALIGN(entry_size * (Size)inner_ntuples);
 		}
 		else
 		{
-			/* header portion of kern_data_store */
-			chunk_size = STROMALIGN(offsetof(kern_data_store,
-											 colmeta[ncols]));
-			/* row-index of the tuples */
+			/* KDS_FORMAT_ROW */
+			/* row-index to kern_tupitem */
 			chunk_size += STROMALIGN(sizeof(cl_uint) * (Size)inner_ntuples);
 			/* kern_tupitem body */
 			entry_size = offsetof(kern_tupitem, htup) + htup_size;
@@ -1466,7 +1489,10 @@ gpujoin_textout_path(StringInfo str, const CustomPath *node)
 static Node *
 gpujoin_create_scan_state(CustomScan *node)
 {
-	GpuJoinState   *gjs = palloc0(sizeof(GpuJoinState));
+	GpuJoinState   *gjs;
+	GpuJoinInfo	   *gj_info = deform_gpujoin_info(node);
+
+	gjs = palloc0(offsetof(GpuJoinState, inners[gj_info->num_rels]));
 
 	/* Set tag and executor callbacks */
 	NodeSetTag(gjs, T_CustomScanState);
@@ -3396,6 +3422,138 @@ gpujoin_task_process(GpuTask *gtask)
 		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
 
 	return status;
+}
+
+/* ================================================================
+ *
+ * Routines to preload inner relations (heap/hash)
+ *
+ * ================================================================
+ */
+
+
+
+/*****/
+static pg_crc32
+get_tuple_hashvalue(GpuJoinState *gjs, int depth, TupleTableSlot *slot)
+{
+	ExprContext	   *econtext = gjs->inner_econtext;
+	pg_crc32		hashvalue;
+	List		   *hash_keys = gjs->inners[depth - 1].hash_keys;
+	List		   *hash_keylen = gjs->inners[depth - 1].hash_keylen;
+	List		   *hash_keybyval = gjs->inners[depth - 1].hash_keybyval;
+	List		   *hash_keytype = gjs->inners[depth - 1].hash_keytype;
+	ListCell	   *lc1;
+	ListCell	   *lc2;
+	ListCell	   *lc3;
+	ListCell	   *lc4;
+
+	/* calculation of a hash value of this entry */
+	econtext->ecxt_scantuple = slot;
+	INIT_LEGACY_CRC32(hash);
+	forfour (lc1, hash_keys,
+			 lc2, hash_keylen,
+			 lc3, hash_keybyval,
+			 lc4, hash_keytype)
+	{
+		ExprState  *clause = lfirst(lc1);
+		int			keylen = lfirst_int(lc2);
+		bool		keybyval = lfirst_int(lc3);
+		Oid			keytype = lfirst_oid(lc4);
+		int			errcode;
+		Datum		value;
+		bool		isnull;
+
+		value = ExecEvalExpr(clause, econtext, &isnull, NULL);
+		if (isnull)
+			continue;
+
+		/* fixup host representation to special internal format. */
+		if (keytype == NUMERICOID)
+		{
+			pg_numeric_t	temp;
+
+			temp = pg_numeric_from_varlena(&errcode, (struct varlena *)
+										   DatumGetPointer(value));
+			keylen = sizeof(temp.value);
+			keybyval = true;
+			value = temp.value;
+		}
+
+		if (keylen > 0)
+		{
+			if (keybyval)
+				COMP_LEGACY_CRC32(hash, &value, keylen);
+			else
+				COMP_LEGACY_CRC32(hash, DatumGetPointer(value), keylen);
+		}
+		else
+		{
+			COMP_LEGACY_CRC32(hash,
+							  VARDATA_ANY(value),
+							  VARSIZE_ANY_EXHDR(value));
+		}
+	}
+	FIN_LEGACY_CRC32(hash);
+
+	return hashvalue;
+}
+
+/*****/
+static void
+gpujoin_inner_hash_preload()
+{}
+
+/*****/
+static void
+gpujoin_inner_heap_preload()
+{}
+
+
+
+
+
+/**********/
+static pgstrom_data_store *
+gpujoin_inner_preload(GpuJoinState *gjs, int depth)
+{
+	Assert(depth <= gjs->num_rels);
+
+
+	if (depth < gjs->num_rels)
+	{
+
+
+
+
+	}
+	else
+	{
+		/* No more deeper relations */
+
+
+
+
+	}
+
+
+	if (scan_forward)
+	{
+		pgstrom_data_store *curr_chunk = gjs->inners[depth - 1].curr_chunk;
+
+		if (curr_chunk)
+		{
+			pgstrom_release_data_store(curr_chunk);
+			gjs->inners[depth - 1].curr_chunk = NULL;
+		}
+
+		if (gjs->inners[depth - 1].hash_keys != NIL)
+			gpujoin_inner_hash_preload(gjs, );
+		else
+			gpujoin_inner_heap_preload(gjs, );
+	}
+
+	
 }
 
 /*
