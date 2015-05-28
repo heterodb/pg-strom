@@ -206,6 +206,7 @@ typedef struct
 	int				num_rels;
 	struct {
 		PlanState  *state;
+		ExprContext	*econtext;
 		int			depth;
 		int			nbatches_plan;
 		int			nbatches_exec;
@@ -1462,6 +1463,7 @@ gpujoin_create_scan_state(CustomScan *node)
 	GpuJoinState   *gjs;
 	GpuJoinInfo	   *gj_info = deform_gpujoin_info(node);
 
+	Assert(gj_info->num_rels == list_length(node->custom_children));
 	gjs = palloc0(offsetof(GpuJoinState, inners[gj_info->num_rels]));
 
 	/* Set tag and executor callbacks */
@@ -1481,6 +1483,8 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
 	TupleDesc		tupdesc = GTS_GET_RESULT_TUPDESC(gjs);
+	ListCell	   *lc;
+	int				i;
 
 	/* activate GpuContext for device execution */
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
@@ -1524,7 +1528,32 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	 * initialization of child nodes
 	 */
 	outerPlanState(gjs) = ExecInitNode(outerPlan(cscan), estate, eflags);
-	innerPlanState(gjs) = ExecInitNode(innerPlan(cscan), estate, eflags);
+	for (lc = list_head(cscan->custom_children), i = 0;
+		 lc != NULL;
+		 lc = lnext(lc), i++)
+	{
+		gjs->inners[i].state = ExecInitNode((Plan *) lfirst(lc),
+											estate, eflags);
+		gjs->inners[i].econtext = CreateExprContext(estate);
+		gjs->inners[i].depth = i + 1;
+		gjs->inners[i].nbatches_plan = ;
+		gjs->inners[i].nbatches_exec =
+			((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0 ? -1 : 0);
+		gjs->inners[i].usage_rate = ;
+		/* for hash join */
+		hash_nslots = list_nth_int(gj_info->hash_nslots);
+		gjs->inners[i].hash_nslots = int_as_float(hash_nslots);
+		gjs->inners[i].hgram_shift = ;
+		gjs->inners[i].hgram_curr =;
+		gjs->inners[i].hgram_size = ;
+		gjs->inners[i].hash_keys = ;
+		gjs->inners[i].hash_keylen = ;
+		gjs->inners[i].hash_keybyval = ;
+		gjs->inners[i].hash_keytype = ;
+
+		gjs->gts.css.custom_children = lappend(gjs->gts.css.custom_children,
+											   gjs->inners[i].state);
+	}
 
 	/*
 	 * Is bulkload available?
@@ -1603,12 +1632,14 @@ static void
 gpujoin_end(CustomScanState *node)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) node;
+	int				i;
 
 	/*
 	 * clean up subtree
 	 */
 	ExecEndNode(outerPlanState(node));
-	ExecEndNode(innerPlanState(node));
+	for (i=0; i < gjs->num_rels; i++)
+		ExecEndNode(gjs->inners[i].state);
 
 	pgstrom_release_gputaskstate(&gjs->gts);
 }
@@ -3407,7 +3438,7 @@ gpujoin_task_process(GpuTask *gtask)
 static pg_crc32
 get_tuple_hashvalue(GpuJoinState *gjs, int depth, TupleTableSlot *slot)
 {
-	ExprContext	   *econtext = gjs->inner_econtext;
+	ExprContext	   *econtext = gjs->inners[depth - 1].econtext;
 	pg_crc32		hash;
 	List		   *hash_keys = gjs->inners[depth - 1].hash_keys;
 	List		   *hash_keylen = gjs->inners[depth - 1].hash_keylen;
