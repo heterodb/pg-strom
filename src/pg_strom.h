@@ -568,44 +568,6 @@ extern void pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,
 extern void pgstrom_init_gpuscan(void);
 
 /*
- * multirels.c
- */
-struct pgstrom_multirels;
-typedef struct pgstrom_multirels pgstrom_multirels;
-
-extern bool	pgstrom_plan_is_multirels(const Plan *plan);
-extern bool pgstrom_planstate_is_multirels(const PlanState *planstate);
-extern CustomScan *
-multirels_create_plan(PlannerInfo *root,
-					  int depth,
-					  Cost mrels_startup_cost,
-					  Cost mrels_total_cost,
-					  JoinType join_type,
-					  Path *outer_path,
-					  Size kmrels_length,
-					  double kmrels_rate,
-					  cl_uint nbatches,
-					  cl_uint nslots,
-					  List *hash_inner_keys);
-extern struct pgstrom_multirels *
-pgstrom_multirels_exec_bulk(PlanState *plannode);
-extern size_t multirels_get_nitems(pgstrom_multirels *pmrels, int depth);
-extern size_t multirels_get_nslots(pgstrom_multirels *pmrels, int depth);
-extern pgstrom_multirels *multirels_attach_buffer(pgstrom_multirels *pmrels);
-extern bool multirels_get_buffer(pgstrom_multirels *pmrels,
-								 GpuTask *gtask,
-								 CUdeviceptr *p_kmrels,
-								 CUdeviceptr *p_lomaps);
-extern void multirels_put_buffer(pgstrom_multirels *pmrels,
-								 GpuTask *gtask);
-extern void multirels_send_buffer(pgstrom_multirels *pmrels,
-								  GpuTask *gtask);
-extern void multirels_gather_ojmaps(pgstrom_multirels *pmrels,
-									GpuTask *gtask, int depth);
-extern void multirels_detach_buffer(pgstrom_multirels *pmrels);
-extern void	pgstrom_init_multirels(void);
-
-/*
  * gpujoin.c
  */
 extern bool pgstrom_plan_is_gpujoin(Plan *plannode);
