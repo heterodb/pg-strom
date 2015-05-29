@@ -189,6 +189,45 @@ struct pgstrom_multirels;
 
 typedef struct
 {
+	/*
+	 * Execution status
+	 */
+	PlanState		   *state;
+	ExprContext		   *econtext;
+	pgstrom_data_store *curr_chunk;
+	TupleTableSlot	   *scan_overflow;
+	bool				scan_done;
+	Size				ntuples;
+	/* temp store, if KDS-hash overflow */
+	Tuplestorestate	   *tupstore;
+
+	/*
+	 * Join properties; both nest-loop and hash-join
+	 */
+	int					depth;
+	JoinType			join_type;
+	int					nbatches_plan;
+	int					nbatches_exec;
+	double				nrows_ratio;
+	double				kmrels_ratio;
+	ExprState		   *join_quals;
+
+	/*
+	 * Join properties; only hash-join
+	 */
+	cl_uint				hash_nslots;
+	cl_uint				hgram_shift;
+	cl_uint				hgram_curr;
+	Size			   *hgram_size;
+	List			   *hash_outer_keys;
+	List			   *hash_inner_keys;
+	List			   *hash_keylen;
+	List			   *hash_keybyval;
+	List			   *hash_keytype;
+} innerState;
+
+typedef struct
+{
 	GpuTaskState	gts;
 	/* expressions to be used in fallback path */
 	List		   *join_types;
@@ -216,44 +255,7 @@ typedef struct
 	 *
 	 */
 	int				num_rels;
-	struct {
-		/*
-		 * For all joins
-		 */
-		int			depth;
-		JoinType	join_type;
-		int			nbatches_plan;
-		int			nbatches_exec;
-		double		nrows_ratio;
-		double		kmrels_ratio;
-		ExprState  *join_quals;
-
-		/*
-		 * For hash-join
-		 */
-		cl_uint		hash_nslots;
-		cl_uint		hgram_shift;
-		cl_uint		hgram_curr;
-		Size	   *hgram_size;
-		List	   *hash_outer_keys;
-		List	   *hash_inner_keys;
-		List	   *hash_keylen;
-		List	   *hash_keybyval;
-		List	   *hash_keytype;
-
-		/*
-		 * Execution status
-		 */
-		PlanState	   *state;
-		ExprContext	   *econtext;
-		TupleTableSlot *scan_overflow;
-		bool			scan_done;
-
-		Tuplestorestate	*tupstore;	/* temp store, if hash overflow */
-
-		pgstrom_data_store *curr_chunk;
-		Size			ntuples;	/* number of tuples read */
-	} inners[FLEXIBLE_ARRAY_MEMBER];
+	innerState		inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinState;
 
 /*
@@ -3602,8 +3604,9 @@ static bool
 gpujoin_inner_hash_preload_partial(GpuJoinState *gjs, int depth,
 								   pgstrom_multirels *pmrels)
 {
+	innerState		*istate = &gjs->inners[depth - 1];
 	kern_data_store	*kds_hash;
-	TupleTableSlot *tupslot = gjs->inners[depth - 1].state->ps_ResultTupleSlot;
+	TupleTableSlot	*tupslot = istate->state->ps_ResultTupleSlot;
 	Tuplestorestate *tupstore = gjs->inners[depth - 1].tupstore;
 	cl_uint		hgram_shift = gjs->inners[depth - 1].hgram_shift;
 	cl_uint		hgram_curr = gjs->inners[depth - 1].hgram_curr;
