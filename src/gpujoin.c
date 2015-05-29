@@ -31,6 +31,7 @@
 #include "parser/parsetree.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/lsyscache.h"
 #include "utils/pg_crc.h"
 #include "utils/ruleutils.h"
 #include <math.h>
@@ -62,10 +63,10 @@ static bool					enable_gpuhashjoin;
 typedef struct
 {
 	CustomPath		cpath;
-	Path		   *outer_path;
-	Size			kmrels_length;
-	double			kresults_ratio;	/* expected total-items ratio */
 	int				num_rels;
+	Path		   *outer_path;
+	Size			kmrels_length;	/* expected inner buffer size */
+	double			kresults_ratio;	/* expected total-items ratio */
 	List		   *host_quals;
 	struct {
 		double		nrows_ratio;	/* nrows ratio towards outer rows */
@@ -73,10 +74,10 @@ typedef struct
 		Path	   *scan_path;		/* outer scan path */
 		List	   *hash_quals;		/* valid quals, if hash-join */
 		List	   *join_quals;		/* all the device quals, incl hash_quals */
-		double		kmrels_rate;
+		double		kmrels_ratio;
 		Size		chunk_size;		/* kmrels_length * kmrels_ratio */
 		int			nbatches;		/* expected iteration in this depth */
-		int			nslots;			/* expected hashjoin slots width, if any */
+		int			hash_nslots;	/* expected hashjoin slots width, if any */
 	} inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinPath;
 
@@ -89,6 +90,7 @@ typedef struct
 	char	   *kern_source;
 	int			extra_flags;
 	List	   *used_params;
+	Size		kmrels_length;
 	double		kresults_ratio;
 	bool		outer_bulkload;
 	double		bulkload_density;
@@ -96,11 +98,13 @@ typedef struct
 	List	   *host_quals;
 	/* for each depth */
 	List	   *nrows_ratio;
+	List	   *kmrels_ratio;
 	List	   *join_types;
 	List	   *join_quals;
-	List	   *hash_inner_keys;
-	List	   *hash_outer_keys;
-	List	   *hash_nslots;
+	List	   *nbatches;
+	List	   *hash_inner_keys;	/* if hash-join */
+	List	   *hash_outer_keys;	/* if hash-join */
+	List	   *hash_nslots;		/* if hash-join */
 	/* supplemental information of ps_tlist */
 	List	   *ps_src_depth;	/* source depth of the ps_tlist entry */
 	List	   *ps_src_resno;	/* source resno of the ps_tlist entry */
@@ -111,23 +115,25 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 {
 	List	   *privs = NIL;
 	List	   *exprs = NIL;
-	long		kresults_ratio;
-	long		lval;
 
 	privs = lappend(privs, makeInteger(gj_info->num_rels));
 	privs = lappend(privs, makeString(gj_info->kern_source));
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
 	exprs = lappend(exprs, gj_info->used_params);
-	kresults_ratio = (long)(gj_info->kresults_ratio * 1000000.0);
-	privs = lappend(privs, makeInteger(kresults_ratio));
-	privs = lappend(privs, gj_info->nrows_ratio);
+	privs = lappend(privs, makeInteger(gj_info->kmrels_length));
+	privs = lappend(privs,
+					makeInteger(double_as_long(gj_info->kresults_ratio)));
 	privs = lappend(privs, makeInteger(gj_info->outer_bulkload));
-	lval = double_as_long(gj_info->bulkload_density);
-	privs = lappend(privs, makeInteger(lval));
+	privs = lappend(privs,
+					makeInteger(double_as_long(gj_info->bulkload_density)));
 	exprs = lappend(exprs, gj_info->outer_quals);
 	exprs = lappend(exprs, gj_info->host_quals);
+	/* for each depth */
+	privs = lappend(privs, gj_info->nrows_ratio);
+	privs = lappend(privs, gj_info->kmrels_ratio);
 	privs = lappend(privs, gj_info->join_types);
 	exprs = lappend(exprs, gj_info->join_quals);
+	privs = lappend(privs, gj_info->nbatches);
 	exprs = lappend(exprs, gj_info->hash_inner_keys);
 	exprs = lappend(exprs, gj_info->hash_outer_keys);
 	privs = lappend(privs, gj_info->hash_nslots);
@@ -146,28 +152,32 @@ deform_gpujoin_info(CustomScan *cscan)
 	List	   *exprs = cscan->custom_exprs;
 	int			pindex = 0;
 	int			eindex = 0;
-	double		fval;
-	long		kresults_ratio;
 
 	gj_info->num_rels = intVal(list_nth(privs, pindex++));
 	gj_info->kern_source = strVal(list_nth(privs, pindex++));
 	gj_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gj_info->used_params = list_nth(exprs, eindex++);
-	kresults_ratio = intVal(list_nth(privs, pindex++));
-	gj_info->kresults_ratio = (double)kresults_ratio / 1000000.0;
-	gj_info->nrows_ratio = list_nth(privs, pindex++);
+	gj_info->kmrels_length = intVal(list_nth(privs, pindex++));
+	gj_info->kresults_ratio =
+		long_as_double(intVal(list_nth(privs, pindex++)));
 	gj_info->outer_bulkload = intVal(list_nth(privs, pindex++));
-	fval = long_as_double(intVal(list_nth(privs, pindex++)));
-	gj_info->bulkload_density = fval;
+	gj_info->bulkload_density =
+		long_as_double(intVal(list_nth(privs, pindex++)));
 	gj_info->outer_quals = list_nth(exprs, eindex++);
 	gj_info->host_quals = list_nth(exprs, eindex++);
+	/* for each depth */
+	gj_info->nrows_ratio = list_nth(privs, pindex++);
+	gj_info->kmrels_ratio = list_nth(privs, pindex++);
 	gj_info->join_types = list_nth(privs, pindex++);
-	gj_info->join_quals = list_nth(exprs, eindex++);
+    gj_info->join_quals = list_nth(exprs, eindex++);
+	gj_info->nbatches = list_nth(privs, pindex++);
 	gj_info->hash_inner_keys = list_nth(exprs, eindex++);
-	gj_info->hash_outer_keys = list_nth(exprs, eindex++);
+    gj_info->hash_outer_keys = list_nth(exprs, eindex++);
 	gj_info->hash_nslots = list_nth(privs, pindex++);
 	gj_info->ps_src_depth = list_nth(privs, pindex++);
 	gj_info->ps_src_resno = list_nth(privs, pindex++);
+	Assert(pindex == list_length(privs));
+	Assert(eindex == list_length(exprs));
 
 	return gj_info;
 }
@@ -189,8 +199,8 @@ typedef struct
 	int				result_format;
 	/* buffer population ratio */
 	int				result_width;	/* result width for buffer length calc */
+	Size			kmrels_length;	/* length of inner buffer */
 	double			kresults_ratio;	/* estimated number of rows to outer */
-	List		   *nrows_ratio;
 	/* supplemental information to ps_tlist  */
 	List		   *ps_src_depth;
 	List		   *ps_src_resno;
@@ -207,19 +217,23 @@ typedef struct
 	struct {
 		PlanState  *state;
 		ExprContext	*econtext;
+		JoinType	join_type;
 		int			depth;
 		int			nbatches_plan;
 		int			nbatches_exec;
-		double		usage_rate;
+		double		nrows_ratio;
+		double		kmrels_ratio;
+		ExprState  *join_quals;
 
 		/*
 		 * For hash-join
 		 */
-		cl_uint		nslots;
+		cl_uint		hash_nslots;
 		cl_uint		hgram_shift;
 		cl_uint		hgram_curr;
 		Size	   *hgram_size;
-		List	   *hash_keys;
+		List	   *hash_outer_keys;
+		List	   *hash_inner_keys;
 		List	   *hash_keylen;
 		List	   *hash_keybyval;
 		List	   *hash_keytype;
@@ -560,7 +574,7 @@ retry:
 		Size		chunk_size;
 		Size		entry_size;
 		Size		htup_size;
-		Size		nslots = 0;
+		Size		hash_nslots = 0;
 
 		/* force a plausible relation size if no information.
 		 * It expects 15% of margin to avoid unnecessary hash-
@@ -595,9 +609,10 @@ retry:
 		{
 			/* KDS_FORMAT_HASH */
 			/* hash slots */
-			nslots = Max((Size)inner_ntuples, 1024);
-			nslots = Min(nslots, gpuMemMaxAllocSize() / sizeof(void *));
-			chunk_size += STROMALIGN(sizeof(cl_uint) * (Size)nslots);
+			hash_nslots = Max((Size)inner_ntuples, 1024);
+			hash_nslots = Min(hash_nslots,
+							  gpuMemMaxAllocSize() / sizeof(void *));
+			chunk_size += STROMALIGN(sizeof(cl_uint) * (Size)hash_nslots);
 			/* kern_hashitem body */
 			entry_size = offsetof(kern_hashitem, htup) + htup_size;
 			chunk_size += STROMALIGN(entry_size * (Size)inner_ntuples);
@@ -612,7 +627,7 @@ retry:
 			chunk_size += STROMALIGN(entry_size * (Size)inner_ntuples);
 		}
 		gpath->inners[i].chunk_size = chunk_size;
-		gpath->inners[i].nslots = nslots;
+		gpath->inners[i].hash_nslots = hash_nslots;
 
 		if (largest_index < 0 || largest_size < chunk_size)
 		{
@@ -636,7 +651,8 @@ retry:
 		if (gpath->inners[i].hash_quals != NIL)
             run_cost += (join_cost[i].per_tuple
 						 * outer_ntuples
-                         * (inner_ntuples / (double)gpath->inners[i].nslots));
+                         * (inner_ntuples /
+							(double) gpath->inners[i].hash_nslots));
 		else
 			run_cost += (join_cost[i].per_tuple
                          * outer_ntuples
@@ -684,7 +700,7 @@ retry:
 	gpath->kmrels_length = kmrels_length;
 	for (i=0; i < num_rels; i++)
 	{
-		gpath->inners[i].kmrels_rate =
+		gpath->inners[i].kmrels_ratio =
 			((double)gpath->inners[i].chunk_size / (double)kmrels_length);
 	}
 
@@ -772,9 +788,9 @@ create_gpujoin_path(PlannerInfo *root,
 	result->inners[num_rels - 1].join_type = jointype;
 	result->inners[num_rels - 1].hash_quals = hash_quals;
 	result->inners[num_rels - 1].join_quals = join_quals;
-	result->inners[num_rels - 1].kmrels_rate = 0.0;		/* to be set later */
+	result->inners[num_rels - 1].kmrels_ratio = 0.0;	/* to be set later */
 	result->inners[num_rels - 1].nbatches = 1;			/* to be set later */
-	result->inners[num_rels - 1].nslots = 0;			/* to be set later */
+	result->inners[num_rels - 1].hash_nslots = 0;		/* to be set later */
 
 	/*
 	 * cost calculation of GpuJoin, then, add this path to the joinrel,
@@ -1286,9 +1302,10 @@ create_gpujoin_plan(PlannerInfo *root,
 	cscan->custom_children = list_copy_tail(custom_children, 1);
 
 	memset(&gj_info, 0, sizeof(GpuJoinInfo));
-	gj_info.num_rels = gpath->num_rels;
+	gj_info.kmrels_length = gpath->kmrels_length;
 	gj_info.kresults_ratio = gpath->kresults_ratio;
 	gj_info.host_quals = extract_actual_clauses(gpath->host_quals, false);
+	gj_info.num_rels = gpath->num_rels;
 
 	for (i=0; i < gpath->num_rels; i++)
 	{
@@ -1333,6 +1350,8 @@ create_gpujoin_plan(PlannerInfo *root,
 		 */
 		gj_info.nrows_ratio = lappend_int(gj_info.nrows_ratio,
 								float_as_int(gpath->inners[i].nrows_ratio));
+		gj_info.kmrels_ratio = lappend_int(gj_info.kmrels_ratio,
+								float_as_int(gpath->inners[i].kmrels_ratio));
 		gj_info.join_types = lappend_int(gj_info.join_types,
 										 gpath->inners[i].join_type);
 		clauses = extract_actual_clauses(gpath->inners[i].join_quals, false);
@@ -1343,7 +1362,7 @@ create_gpujoin_plan(PlannerInfo *root,
 		gj_info.hash_outer_keys = lappend(gj_info.hash_outer_keys,
 										  hash_outer_keys);
 		gj_info.hash_nslots = lappend_int(gj_info.hash_nslots,
-										  gpath->inners[i].nslots);
+										  gpath->inners[i].hash_nslots);
 	}
 
 	/*
@@ -1440,9 +1459,9 @@ gpujoin_textout_path(StringInfo str, const CustomPath *node)
 		/* nrows_ratio */
 		appendStringInfo(str, " :nrows_ratio %.2f",
 						 gpath->inners[i].nrows_ratio);
-		/* kmrels_rate */
-		appendStringInfo(str, " :kmrels_rate %.2f",
-						 gpath->inners[i].kmrels_rate);
+		/* kmrels_ratio */
+		appendStringInfo(str, " :kmrels_ratio %.2f",
+						 gpath->inners[i].kmrels_ratio);
 		/* chunk_size */
 		appendStringInfo(str, " :chunk_size %zu",
 						 gpath->inners[i].chunk_size);
@@ -1451,7 +1470,7 @@ gpujoin_textout_path(StringInfo str, const CustomPath *node)
 						 gpath->inners[i].nbatches);
 		/* nslots */
 		appendStringInfo(str, " :nslots %d",
-						 gpath->inners[i].nslots);
+						 gpath->inners[i].hash_nslots);
 		appendStringInfo(str, "}");
 	}
 	appendStringInfo(str, ")");
@@ -1483,7 +1502,6 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
 	TupleDesc		tupdesc = GTS_GET_RESULT_TUPDESC(gjs);
-	ListCell	   *lc;
 	int				i;
 
 	/* activate GpuContext for device execution */
@@ -1513,10 +1531,6 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	gjs->num_rels = gj_info->num_rels;
 	gjs->join_types = gj_info->join_types;
 	gjs->outer_quals = ExecInitExpr((Expr *)gj_info->outer_quals, ps);
-	gjs->hash_outer_keys = (List *)
-		ExecInitExpr((Expr *)gj_info->hash_outer_keys, ps);
-	gjs->join_quals = (List *)
-		ExecInitExpr((Expr *)gj_info->join_quals, ps);
 	gjs->gts.css.ss.ps.qual = (List *)
 		ExecInitExpr((Expr *)gj_info->host_quals, ps);
 
@@ -1528,31 +1542,58 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	 * initialization of child nodes
 	 */
 	outerPlanState(gjs) = ExecInitNode(outerPlan(cscan), estate, eflags);
-	for (lc = list_head(cscan->custom_children), i = 0;
-		 lc != NULL;
-		 lc = lnext(lc), i++)
+	for (i=0; i < gj_info->num_rels; i++)
 	{
-		gjs->inners[i].state = ExecInitNode((Plan *) lfirst(lc),
-											estate, eflags);
+		Plan	   *inner_plan = list_nth(cscan->custom_children, i);
+		List	   *hash_inner_keys;
+		ListCell   *lc;
+
+		gjs->inners[i].state = ExecInitNode(inner_plan, estate, eflags);
 		gjs->inners[i].econtext = CreateExprContext(estate);
 		gjs->inners[i].depth = i + 1;
-		gjs->inners[i].nbatches_plan = ;
+		gjs->inners[i].nbatches_plan = list_nth_int(gj_info->nbatches, i);
 		gjs->inners[i].nbatches_exec =
 			((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0 ? -1 : 0);
-		gjs->inners[i].usage_rate = ;
-		/* for hash join */
-		hash_nslots = list_nth_int(gj_info->hash_nslots);
-		gjs->inners[i].hash_nslots = int_as_float(hash_nslots);
-		gjs->inners[i].hgram_shift = ;
-		gjs->inners[i].hgram_curr =;
-		gjs->inners[i].hgram_size = ;
-		gjs->inners[i].hash_keys = ;
-		gjs->inners[i].hash_keylen = ;
-		gjs->inners[i].hash_keybyval = ;
-		gjs->inners[i].hash_keytype = ;
+		gjs->inners[i].nrows_ratio =
+			int_as_float(list_nth_int(gj_info->nrows_ratio, i));
+		gjs->inners[i].kmrels_ratio =
+			int_as_float(list_nth_int(gj_info->kmrels_ratio, i));
+		gjs->inners[i].join_type = list_nth_int(gj_info->join_types, i);
+		gjs->inners[i].join_quals =
+			ExecInitExpr(list_nth(gj_info->join_quals, i), ps);
+		gjs->inners[i].hash_outer_keys = (List *)
+			ExecInitExpr(list_nth(gj_info->hash_outer_keys, i), ps);
 
-		gjs->gts.css.custom_children = lappend(gjs->gts.css.custom_children,
-											   gjs->inners[i].state);
+		hash_inner_keys = list_nth(gj_info->hash_inner_keys, i);
+		foreach (lc, hash_inner_keys)
+		{
+			Expr	   *expr = lfirst(lc);
+			ExprState  *expr_state = ExecInitExpr(expr, ps);
+			Oid			type_oid = exprType((Node *)expr);
+			int16		typlen;
+			bool		typbyval;
+			cl_uint		shift;
+
+			gjs->inners[i].hash_inner_keys =
+				lappend(gjs->inners[i].hash_inner_keys, expr_state);
+
+			get_typlenbyval(type_oid, &typlen, &typbyval);
+			gjs->inners[i].hash_keytype =
+				lappend_oid(gjs->inners[i].hash_keytype, type_oid);
+			gjs->inners[i].hash_keylen =
+				lappend_int(gjs->inners[i].hash_keylen, typlen);
+			gjs->inners[i].hash_keybyval =
+				lappend_int(gjs->inners[i].hash_keybyval, typbyval);
+			/* usage histgram */
+			shift = get_next_log2(gjs->inners[i].nbatches_plan) + 4;
+			Assert(shift < sizeof(cl_uint) * BITS_PER_BYTE);
+			gjs->inners[i].hgram_size = palloc0(sizeof(Size) * (1U << shift));
+			gjs->inners[i].hgram_shift =
+				sizeof(cl_uint) * BITS_PER_BYTE - shift;
+			gjs->inners[i].hgram_curr = 0;
+		}
+		gjs->gts.css.custom_children =
+			lappend(gjs->gts.css.custom_children, gjs->inners[i].state);
 	}
 
 	/*
@@ -1586,8 +1627,8 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 						  t_bits[BITMAPLEN(tupdesc->natts)]) +
 				 (tupdesc->tdhasoid ? sizeof(Oid) : 0)) +
 		MAXALIGN(cscan->scan.plan.plan_width);	/* average width */
+	gjs->kmrels_length = gj_info->kmrels_length;
 	gjs->kresults_ratio = gj_info->kresults_ratio;
-	gjs->nrows_ratio = gj_info->nrows_ratio;
 }
 
 static TupleTableSlot *
@@ -2458,7 +2499,7 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 	 * Allocation of the destination data-store
 	 */
 	nrooms = (cl_uint)((double) pds_src->kds->nitems *
-					   long_as_double(llast_int(gjs->nrows_ratio)) *
+					   gjs->inners[gjs->num_rels - 1].nrows_ratio *
 					   (1.0 + pgstrom_nrows_growth_margin));
 	tupdesc = gjs->gts.css.ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 
@@ -2924,9 +2965,6 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	size_t			block_xsize;
 	size_t			block_ysize;
 	CUresult		rc;
-	ListCell	   *lc1;
-	ListCell	   *lc2;
-	ListCell	   *lc3;
 	void		   *kern_args[10];
 	int				depth;
 
@@ -3089,13 +3127,11 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	 */
 	depth = 1;
 	outer_ntuples = pds_src->kds->nitems;
-	forthree (lc1, gjs->join_types,
-			  lc2, gjs->hash_outer_keys,
-			  lc3, gjs->nrows_ratio)
+	for (depth = 1; depth <= gjs->num_rels; depth++)
 	{
-		JoinType	join_type = (JoinType) lfirst_int(lc1);
-		bool		is_nestloop = (lfirst(lc2) == NIL);
-		double		nrows_ratio = long_as_double(lfirst_int(lc3));
+		JoinType	join_type = gjs->inners[depth - 1].join_type;
+		bool		is_nestloop = (!gjs->inners[depth - 1].hash_outer_keys);
+		double		nrows_ratio = gjs->inners[depth - 1].nrows_ratio;
 		size_t		num_threads;
 
 		/*
@@ -3440,7 +3476,7 @@ get_tuple_hashvalue(GpuJoinState *gjs, int depth, TupleTableSlot *slot)
 {
 	ExprContext	   *econtext = gjs->inners[depth - 1].econtext;
 	pg_crc32		hash;
-	List		   *hash_keys = gjs->inners[depth - 1].hash_keys;
+	List		   *hash_inner_keys = gjs->inners[depth - 1].hash_inner_keys;
 	List		   *hash_keylen = gjs->inners[depth - 1].hash_keylen;
 	List		   *hash_keybyval = gjs->inners[depth - 1].hash_keybyval;
 	List		   *hash_keytype = gjs->inners[depth - 1].hash_keytype;
@@ -3452,7 +3488,7 @@ get_tuple_hashvalue(GpuJoinState *gjs, int depth, TupleTableSlot *slot)
 	/* calculation of a hash value of this entry */
 	econtext->ecxt_scantuple = slot;
 	INIT_LEGACY_CRC32(hash);
-	forfour (lc1, hash_keys,
+	forfour (lc1, hash_inner_keys,
 			 lc2, hash_keylen,
 			 lc3, hash_keybyval,
 			 lc4, hash_keytype)

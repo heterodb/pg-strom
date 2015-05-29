@@ -473,7 +473,8 @@ create_gpuscan_plan(PlannerInfo *root,
 					RelOptInfo *rel,
 					CustomPath *best_path,
 					List *tlist,
-					List *clauses)
+					List *clauses,
+					List *custom_children)
 {
 	CustomScan	   *cscan;
 	GpuScanInfo		gs_info;
@@ -486,6 +487,7 @@ create_gpuscan_plan(PlannerInfo *root,
 	/* It should be a base relation */
 	Assert(rel->relid > 0);
 	Assert(rel->rtekind == RTE_RELATION);
+	Assert(custom_children == NIL);
 
 	/*
 	 * Distribution of clauses into device executable and others.
