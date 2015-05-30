@@ -509,7 +509,6 @@ _PG_init(void)
 	pgstrom_init_gpujoin();
 	pgstrom_init_gpupreagg();
 	pgstrom_init_gpusort();
-	pgstrom_init_multirels();
 
 	/* miscellaneous initializations */
 	pgstrom_init_misc_guc();

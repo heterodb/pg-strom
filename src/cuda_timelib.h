@@ -2323,7 +2323,7 @@ assign_timelib_session_info(StringInfo buf)
 	{
 		appendStringInfo(
 			buf,
-			"        { %lld, %ld },\n",
+			"        { %ld, %ld },\n",
 			sp->lsis[i].ls_trans,
 			sp->lsis[i].ls_corr);
 	}

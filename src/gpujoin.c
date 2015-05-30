@@ -3528,14 +3528,10 @@ multirels_expand_length(GpuJoinState *gjs, pgstrom_multirels *pmrels)
 
 /*****/
 static pg_crc32
-get_tuple_hashvalue(GpuJoinState *gjs, int depth, TupleTableSlot *slot)
+get_tuple_hashvalue(innerState *istate, TupleTableSlot *slot)
 {
-	ExprContext	   *econtext = gjs->inners[depth - 1].econtext;
+	ExprContext	   *econtext = istate->econtext;
 	pg_crc32		hash;
-	List		   *hash_inner_keys = gjs->inners[depth - 1].hash_inner_keys;
-	List		   *hash_keylen = gjs->inners[depth - 1].hash_keylen;
-	List		   *hash_keybyval = gjs->inners[depth - 1].hash_keybyval;
-	List		   *hash_keytype = gjs->inners[depth - 1].hash_keytype;
 	ListCell	   *lc1;
 	ListCell	   *lc2;
 	ListCell	   *lc3;
@@ -3544,10 +3540,10 @@ get_tuple_hashvalue(GpuJoinState *gjs, int depth, TupleTableSlot *slot)
 	/* calculation of a hash value of this entry */
 	econtext->ecxt_scantuple = slot;
 	INIT_LEGACY_CRC32(hash);
-	forfour (lc1, hash_inner_keys,
-			 lc2, hash_keylen,
-			 lc3, hash_keybyval,
-			 lc4, hash_keytype)
+	forfour (lc1, istate->hash_inner_keys,
+			 lc2, istate->hash_keylen,
+			 lc3, istate->hash_keybyval,
+			 lc4, istate->hash_keytype)
 	{
 		ExprState  *clause = lfirst(lc1);
 		int			keylen = lfirst_int(lc2);
@@ -3557,7 +3553,7 @@ get_tuple_hashvalue(GpuJoinState *gjs, int depth, TupleTableSlot *slot)
 		Datum		value;
 		bool		isnull;
 
-		value = ExecEvalExpr(clause, econtext, &isnull, NULL);
+		value = ExecEvalExpr(clause, istate->econtext, &isnull, NULL);
 		if (isnull)
 			continue;
 
@@ -3601,16 +3597,12 @@ get_tuple_hashvalue(GpuJoinState *gjs, int depth, TupleTableSlot *slot)
  * of PostgreSQL.
  */
 static bool
-gpujoin_inner_hash_preload_partial(GpuJoinState *gjs, int depth,
-								   pgstrom_multirels *pmrels)
+gpujoin_inner_hash_preload_partial(innerState *istate,
+								   pgstrom_data_store *pds_hash)
 {
-	innerState		*istate = &gjs->inners[depth - 1];
-	kern_data_store	*kds_hash;
+	kern_data_store	*kds_hash = pds_hash->kds;
 	TupleTableSlot	*tupslot = istate->state->ps_ResultTupleSlot;
-	Tuplestorestate *tupstore = gjs->inners[depth - 1].tupstore;
-	cl_uint		hgram_shift = gjs->inners[depth - 1].hgram_shift;
-	cl_uint		hgram_curr = gjs->inners[depth - 1].hgram_curr;
-	Size	   *hgram_size = gjs->inners[depth - 1].hgram_size;
+	Tuplestorestate *tupstore = istate->tupstore;
 	cl_uint	   *hash_slots;
 	cl_uint		limit;
 	Size		required = 0;
@@ -3619,7 +3611,6 @@ gpujoin_inner_hash_preload_partial(GpuJoinState *gjs, int depth,
 	Assert(tupslot != NULL);
 
 	/* reset hash-table usage */
-	kds_hash = pmrels->inner_chunks[depth - 1]->kds;
 	Assert(kds_hash->hostptr == (uintptr_t)&kds_hash->hostptr);
 	Assert(kds_hash->format == KDS_FORMAT_HASH);
 	kds_hash->usage = KERN_DATA_STORE_HEAD_LENGTH(kds_hash) +
@@ -3631,26 +3622,26 @@ gpujoin_inner_hash_preload_partial(GpuJoinState *gjs, int depth,
 	/*
 	 * Find a suitable range of hash_min/hash_max
 	 */
-	limit = (1U << (sizeof(cl_uint) * BITS_PER_BYTE - hgram_shift));
-	if (gjs->inners[depth - 1].hgram_curr >= limit)
+	limit = (1U << (sizeof(cl_uint) * BITS_PER_BYTE - istate->hgram_shift));
+	if (istate->hgram_curr >= limit)
 		return false;	/* no more records to read */
-	kds_hash->hash_min = gjs->inners[depth - 1].hgram_curr;
+	kds_hash->hash_min = istate->hgram_curr;
 	kds_hash->hash_max = UINT_MAX;
-	while (hgram_curr < limit)
+	while (istate->hgram_curr < limit)
 	{
-		Size	next_size = hgram_size[hgram_curr];
+		Size	next_size = istate->hgram_size[istate->hgram_curr];
 
 		if (kds_hash->usage + required + next_size > kds_hash->length)
 		{
 			if (required == 0)
 				elog(ERROR, "hash-key didn't distribute tuples enough");
-			kds_hash->hash_max = hgram_curr * (1U << hgram_shift);
+			kds_hash->hash_max =
+				istate->hgram_curr * (1U << istate->hgram_shift);
 			break;
 		}
-		required += hgram_size[hgram_curr];
-		hgram_curr++;
+		required += istate->hgram_size[istate->hgram_curr];
+		istate->hgram_curr++;
 	}
-	gjs->inners[depth - 1].hgram_curr = hgram_curr;
 
 	/* No more records to read? */
 	if (required == 0)
@@ -3661,7 +3652,7 @@ gpujoin_inner_hash_preload_partial(GpuJoinState *gjs, int depth,
 	 */
 	while (tuplestore_gettupleslot(tupstore, true, false, tupslot))
 	{
-		pg_crc32	hash = get_tuple_hashvalue(gjs, depth, tupslot);
+		pg_crc32	hash = get_tuple_hashvalue(istate, tupslot);
 
 		if (hash >= kds_hash->hash_min && hash <= kds_hash->hash_max)
 		{
@@ -3698,13 +3689,164 @@ gpujoin_inner_hash_preload_partial(GpuJoinState *gjs, int depth,
  * join execution.
  */
 static void
-gpujoin_inner_hash_preload(GpuJoinState *gjs, int depth,
+gpujoin_inner_hash_preload(GpuJoinState *gjs,
+						   innerState *istate,
 						   pgstrom_multirels *pmrels)
 {
+	PlanState		   *scan_ps = istate->state;
+	TupleTableSlot	   *scan_slot = scan_ps->ps_ResultTupleSlot;
+	TupleDesc			scan_desc = scan_slot->tts_tupleDescriptor;
+	Size				chunk_size;
 	pgstrom_data_store *pds_hash;
+	kern_data_store	   *kds_hash;
+	cl_uint			   *hash_slots;
 
+	/*
+	 * Make a pgstrom_data_store for materialization
+	 */
+	chunk_size = (Size)(istate->kmrels_ratio *
+						(double)(pmrels->kmrels_length -
+								 pmrels->head_length));
+	pds_hash = pgstrom_create_data_store_hash(gjs->gts.gcontext,
+											  scan_desc,
+											  chunk_size,
+											  istate->hash_nslots,
+											  false);
+	kds_hash = pds_hash->kds;
+	hash_slots = KERN_DATA_STORE_HASHSLOT(kds_hash);
 
+	while (!istate->scan_done)
+	{
+		HeapTuple	tuple;
+		pg_crc32	hash;
+		Size		item_size;
+		int			index;
 
+		if (!istate->scan_overflow)
+			scan_slot = ExecProcNode(istate->state);
+		else
+		{
+			scan_slot = istate->scan_overflow;
+			istate->scan_overflow = NULL;
+		}
+
+		if (TupIsNull(scan_slot))
+		{
+			istate->scan_done = true;
+			break;
+		}
+		tuple = ExecFetchSlotTuple(scan_slot);
+		hash = get_tuple_hashvalue(istate, scan_slot);
+		item_size = MAXALIGN(offsetof(kern_hashitem, htup) + tuple->t_len);
+
+		/*
+		 * Once we switched to the Tuplestore instead of kern_data_store,
+		 * we try to materialize the inner relation once, then split it
+		 * to the suitable scale.
+		 */
+		if (istate->tupstore)
+		{
+			tuplestore_puttuple(istate->tupstore, tuple);
+			istate->hgram_size[hash >> istate->hgram_shift] += item_size;
+			continue;
+		}
+
+		/* do we have enough space to store? */
+		if (kds_hash->usage + item_size <= kds_hash->length)
+		{
+			kern_hashitem  *khitem = (kern_hashitem *)
+				((char *)kds_hash + kds_hash->usage);
+			khitem->hash = hash;
+			khitem->rowid = kds_hash->nitems++;
+			khitem->t_len = tuple->t_len;
+			memcpy(&khitem->htup, tuple->t_data, tuple->t_len);
+
+			index = hash % kds_hash->nslots;
+			khitem->next = hash_slots[index];
+			hash_slots[index] = kds_hash->usage;
+
+			/* usage increment */
+			kds_hash->usage += item_size;
+			/* histgram update */
+			istate->hgram_size[hash >> istate->hgram_shift] += item_size;
+		}
+		else
+		{
+			Assert(istate->scan_overflow == NULL);
+			istate->scan_overflow = scan_slot;
+
+			if (multirels_expand_length(gjs, pmrels))
+			{
+				Size    chunk_size_new = (Size)
+					(istate->kmrels_ratio *(double)(pmrels->kmrels_length -
+												   pmrels->head_length));
+                elog(DEBUG1, "KDS-Hash (depth=%d) expanded %zu => %zu",
+                     istate->depth, (Size)kds_hash->length, chunk_size_new);
+				pgstrom_expand_data_store(gjs->gts.gcontext,
+										  pds_hash, chunk_size_new);
+				kds_hash = pds_hash->kds;
+				hash_slots = KERN_DATA_STORE_HASHSLOT(kds_hash);
+			}
+			else if (istate->join_type == JOIN_INNER ||
+					 istate->join_type == JOIN_RIGHT)
+			{
+				/*
+				 * In case of INNER or RIGHT join, we don't need to
+				 * materialize the underlying relation once, because
+				 * its logic don't care about range of hash-value.
+				 */
+				break;
+			}
+			else
+			{
+				/*
+				 * If join logic is one of outer, and we cannot expand
+				 * a single kern_data_store chunk any more, we switch to
+				 * use tuple-store to materialize the underlying relation
+				 * once. Then, we split tuples according to the hash range.
+				 */
+				kern_hashitem  *khitem;
+				HeapTupleData	tupData;
+
+				istate->tupstore = tuplestore_begin_heap(false, false,
+														 work_mem);
+				for (index = 0; index < kds_hash->nslots; index++)
+				{
+					for (khitem = KERN_HASH_FIRST_ITEM(kds_hash, index);
+						 khitem != NULL;
+						 khitem = KERN_HASH_NEXT_ITEM(kds_hash, khitem))
+					{
+						tupData.t_len = khitem->t_len;
+						tupData.t_data = &khitem->htup;
+						tuplestore_puttuple(istate->tupstore, &tupData);
+					}
+				}
+			}
+		}
+	}
+
+	/*
+	 * Try to preload the kern_data_store if inner relation was too big
+	 * to load into a single chunk, thus we materialized them on the
+	 * tuple-store once.
+	 */
+	if (istate->tupstore &&
+		!gpujoin_inner_hash_preload_partial(istate, pds_hash))
+	{
+		Assert(istate->scan_done);
+		pgstrom_release_data_store(pds_hash);
+		return;
+	}
+
+	/* release data store, if no tuples were loaded */
+	if (kds_hash && kds_hash->nitems == 0)
+	{
+		pgstrom_release_data_store(pds_hash);
+		return;
+	}
+
+	/* OK, successfully preloaded */
+	istate->curr_chunk = pds_hash;
 
 
 }
@@ -3716,45 +3858,45 @@ gpujoin_inner_hash_preload(GpuJoinState *gjs, int depth,
  * loop execution.
  */
 static void
-gpujoin_inner_heap_preload(GpuJoinState *gjs, int depth,
+gpujoin_inner_heap_preload(GpuJoinState *gjs,
+						   innerState *istate,
 						   pgstrom_multirels *pmrels)
 {
-	PlanState		   *scan_ps = gjs->inners[depth - 1].state;
+	PlanState		   *scan_ps = istate->state;
 	TupleTableSlot	   *scan_slot = scan_ps->ps_ResultTupleSlot;
 	TupleDesc			scan_desc = scan_slot->tts_tupleDescriptor;
 	Size				chunk_size;
-	int					i = depth - 1;
-	pgstrom_data_store *pds;
+	pgstrom_data_store *pds_heap;
 
 	/*
 	 * Make a pgstrom_data_store for materialization
 	 */
-	chunk_size = (Size)(gjs->inners[i].kmrels_ratio *
+	chunk_size = (Size)(istate->kmrels_ratio *
 						(double)(pmrels->kmrels_length -
 								 pmrels->head_length));
-	pds = pgstrom_create_data_store_row(gjs->gts.gcontext,
-										scan_desc, chunk_size, false);
+	pds_heap = pgstrom_create_data_store_row(gjs->gts.gcontext,
+											 scan_desc, chunk_size, false);
 	while (true)
 	{
-		if (!gjs->inners[i].scan_overflow)
-			scan_slot = ExecProcNode(gjs->inners[i].state);
+		if (!istate->scan_overflow)
+			scan_slot = ExecProcNode(scan_ps);
 		else
 		{
-			scan_slot = gjs->inners[i].scan_overflow;
-			gjs->inners[i].scan_overflow = NULL;
+			scan_slot = istate->scan_overflow;
+			istate->scan_overflow = NULL;
 		}
 
 		if (TupIsNull(scan_slot))
 		{
-			gjs->inners[i].scan_done = true;
+			istate->scan_done = true;
 			break;
 		}
 
-		if (!pgstrom_data_store_insert_tuple(pds, scan_slot))
+		if (!pgstrom_data_store_insert_tuple(pds_heap, scan_slot))
 		{
 			/* to be inserted on the next try */
-			Assert(gjs->inners[i].scan_overflow = NULL);
-			gjs->inners[i].scan_overflow = scan_slot;
+			Assert(istate->scan_overflow = NULL);
+			istate->scan_overflow = scan_slot;
 
 			/*
              * We try to expand total length of pgstrom_multirels buffer,
@@ -3769,24 +3911,24 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs, int depth,
 			 * Once total length of the buffer got expanded, current store
 			 * also can have wider space.
 			 */
-			chunk_size = (Size)(gjs->inners[i].kmrels_ratio *
+			chunk_size = (Size)(istate->kmrels_ratio *
 								(double)(pmrels->kmrels_length -
 										 pmrels->head_length));
 			chunk_size = STROMALIGN_DOWN(chunk_size);
-			pgstrom_expand_data_store(gjs->gts.gcontext, pds, chunk_size);
+			pgstrom_expand_data_store(gjs->gts.gcontext, pds_heap, chunk_size);
 		}
 	}
 
 	/* How many tuples read? */
-	if (pds->kds->nitems > 0)
+	if (pds_heap->kds->nitems > 0)
 	{
-		gjs->inners[i].curr_chunk = pds;
-		gjs->inners[i].ntuples += pds->kds->nitems;
+		istate->curr_chunk = pds_heap;
+		istate->ntuples += pds_heap->kds->nitems;
 	}
 	else
 	{
-		Assert(gjs->inners[i].scan_done);
-		pgstrom_release_data_store(pds);
+		Assert(istate->scan_done);
+		pgstrom_release_data_store(pds_heap);
 	}
 	return;
 }
@@ -3885,47 +4027,46 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 	for (i = 0; i < gjs->num_rels; i++)
 	{
 		pgstrom_data_store *pds;
-		kern_data_store	   *kds;
-		bool				scan_forward = false;
+		innerState *istate = &gjs->inners[i];
+		bool		scan_forward = false;
 
-		if (!gjs->inners[i].scan_done)
+		if (!istate->scan_done)
 		{
-			if (gjs->inners[i].curr_chunk)
+			if (istate->curr_chunk)
 			{
-				pgstrom_release_data_store(gjs->inners[i].curr_chunk);
-				gjs->inners[i].curr_chunk = NULL;
+				pgstrom_release_data_store(istate->curr_chunk);
+				istate->curr_chunk = NULL;
 			}
-			if (gjs->inners[i].hash_inner_keys != NIL)
-				gpujoin_inner_hash_preload(gjs, i+1, pmrels);
+			if (istate->hash_inner_keys != NIL)
+				gpujoin_inner_hash_preload(gjs, istate, pmrels);
 			else
-				gpujoin_inner_heap_preload(gjs, i+1, pmrels);
+				gpujoin_inner_heap_preload(gjs, istate, pmrels);
 			scan_forward = true;
 		}
-		Assert(gjs->inners[i].curr_chunk != NULL);
-		pds = gjs->inners[i].curr_chunk;
-		kds = pds->kds;
+		Assert(istate->curr_chunk != NULL);
+		pds = istate->curr_chunk;
 
 		/* make advanced the usage counter */
 		pmrels->inner_chunks[i] = pds;
 		pmrels->kern.chunks[i].chunk_offset = pmrels->usage_length;
-		pmrels->usage_length += STROMALIGN(kds->length);
+		pmrels->usage_length += STROMALIGN(pds->kds->length);
 		Assert(pmrels->usage_length <= pmrels->kmrels_length);
 
-		if (gjs->inners[i].join_type == JOIN_RIGHT ||
-			gjs->inners[i].join_type == JOIN_FULL)
+		if (istate->join_type == JOIN_RIGHT ||
+			istate->join_type == JOIN_FULL)
 		{
 			pmrels->kern.chunks[i].right_outer = true;
 			pmrels->kern.chunks[i].ojmap_offset = pmrels->ojmap_length;
 			pmrels->ojmap_length += (STROMALIGN(sizeof(cl_bool) *
-												kds->nitems) *
+												pds->kds->nitems) *
 									 pmrels->kern.ndevs);
 		}
-		if (gjs->inners[i].join_type == JOIN_LEFT ||
-			gjs->inners[i].join_type == JOIN_FULL)
-			pmrels->kern.chunks[depth-1].left_outer = true;
+		if (istate->join_type == JOIN_LEFT ||
+			istate->join_type == JOIN_FULL)
+			pmrels->kern.chunks[i].left_outer = true;
 
 		if (scan_forward)
-			gjs->inners[i].ntuples += kds->nitems;
+			gjs->inners[i].ntuples += pds->kds->nitems;
 	}
 	PERFMON_END(&gjs->gts.pfm_accum, time_inner_load, &tv1, &tv2);
 
