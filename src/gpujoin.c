@@ -1273,7 +1273,7 @@ build_pseudo_targetlist_walker(Node *node, build_ps_tlist_context *context)
 				context->ps_depth =
 					lappend_int(context->ps_depth, ps_depth);
 				context->ps_resno =
-					lappend_int(context->ps_resno, ps_tle->resno);
+					lappend_int(context->ps_resno, varnode->varattno);
 				return false;
 			}
 		}
@@ -1406,6 +1406,8 @@ create_gpujoin_plan(PlannerInfo *root,
 		clauses = extract_actual_clauses(gpath->inners[i].join_quals, false);
 		gj_info.join_quals = lappend(gj_info.join_quals,
 									 build_flatten_qualifier(clauses));
+		gj_info.nbatches = lappend_int(gj_info.nbatches,
+									   gpath->inners[i].nbatches);
 		gj_info.hash_inner_keys = lappend(gj_info.hash_inner_keys,
 										  hash_inner_keys);
 		gj_info.hash_outer_keys = lappend(gj_info.hash_outer_keys,
@@ -1418,7 +1420,6 @@ create_gpujoin_plan(PlannerInfo *root,
 	 * Creation of the underlying outer Plan node. In case of SeqScan,
 	 * it may make sense to replace it with GpuScan for bulk-loading.
 	 */
-	outer_plan = create_plan_recurse(root, gpath->outer_path);
 	if (IsA(outer_plan, SeqScan) || IsA(outer_plan, CustomScan))
 	{
 		Query	   *parse = root->parse;
@@ -1525,6 +1526,62 @@ gpujoin_textout_path(StringInfo str, const CustomPath *node)
 	appendStringInfo(str, ")");
 }
 
+
+
+typedef struct
+{
+	int		depth;
+	List   *ps_src_depth;
+	List   *ps_src_resno;
+} fixup_varnode_to_origin_context;
+
+static Node *
+fixup_varnode_to_origin_mutator(Node *node,
+								fixup_varnode_to_origin_context *context)
+{
+	if (!node)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		Var	   *varnode = (Var *) node;
+		int		varattno = varnode->varattno;
+		int		src_depth;
+
+		Assert(varnode->varno == INDEX_VAR);
+		src_depth = list_nth_int(context->ps_src_depth,
+								 varnode->varattno - 1);
+		if (src_depth == context->depth)
+		{
+			Var	   *newnode = copyObject(varnode);
+
+			newnode->varno = INNER_VAR;
+			newnode->varattno = list_nth_int(context->ps_src_resno,
+											 varattno - 1);
+			return (Node *) newnode;
+		}
+		else if (src_depth > context->depth)
+			elog(ERROR, "Expression reference deeper than current depth");
+	}
+	return expression_tree_mutator(node, fixup_varnode_to_origin_mutator,
+								   (void *) context);
+}
+
+static List *
+fixup_varnode_to_origin(GpuJoinState *gjs, int depth, List *expr_list)
+{
+	fixup_varnode_to_origin_context	context;
+
+	Assert(IsA(expr_list, List));
+	context.depth = depth;
+	context.ps_src_depth = gjs->ps_src_depth;
+	context.ps_src_resno = gjs->ps_src_resno;
+
+	return (List *) fixup_varnode_to_origin_mutator((Node *) expr_list,
+													&context);
+}
+
+
+
 static Node *
 gpujoin_create_scan_state(CustomScan *node)
 {
@@ -1594,52 +1651,83 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	for (i=0; i < gj_info->num_rels; i++)
 	{
 		Plan	   *inner_plan = list_nth(cscan->custom_children, i);
+		innerState *istate = &gjs->inners[i];
 		List	   *hash_inner_keys;
+		List	   *hash_outer_keys;
 		ListCell   *lc;
 
-		gjs->inners[i].state = ExecInitNode(inner_plan, estate, eflags);
-		gjs->inners[i].econtext = CreateExprContext(estate);
-		gjs->inners[i].depth = i + 1;
-		gjs->inners[i].nbatches_plan = list_nth_int(gj_info->nbatches, i);
-		gjs->inners[i].nbatches_exec =
+		istate->state = ExecInitNode(inner_plan, estate, eflags);
+		istate->econtext = CreateExprContext(estate);
+		istate->depth = i + 1;
+		istate->nbatches_plan = list_nth_int(gj_info->nbatches, i);
+		istate->nbatches_exec =
 			((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0 ? -1 : 0);
-		gjs->inners[i].nrows_ratio =
+		istate->nrows_ratio =
 			int_as_float(list_nth_int(gj_info->nrows_ratio, i));
-		gjs->inners[i].kmrels_ratio =
+		istate->kmrels_ratio =
 			int_as_float(list_nth_int(gj_info->kmrels_ratio, i));
-		gjs->inners[i].join_type = list_nth_int(gj_info->join_types, i);
-		gjs->inners[i].join_quals =
+		istate->join_type = (JoinType)list_nth_int(gj_info->join_types, i);
+
+		/*
+		 * NOTE: We need to deal with Var-node references carefully,
+		 * because varno/varattno pair depends on the context when
+		 * ExecQual() is called.
+		 * - join_quals and hash_outer_keys are only called for
+		 * fallback process when CpuReCheck error was returned.
+		 * So, we can expect values are stored in ecxt_scantuple
+		 * according to the pseudo-scan-tlist.
+		 *- hash_inner_keys are only called to construct hash-table
+		 * prior to GPU execution, so, we can expect input values
+		 * are deployed according to the result of child plans.
+		 */
+		istate->join_quals =
 			ExecInitExpr(list_nth(gj_info->join_quals, i), ps);
-		gjs->inners[i].hash_outer_keys = (List *)
-			ExecInitExpr(list_nth(gj_info->hash_outer_keys, i), ps);
 
 		hash_inner_keys = list_nth(gj_info->hash_inner_keys, i);
-		foreach (lc, hash_inner_keys)
+		if (hash_inner_keys != NIL)
 		{
-			Expr	   *expr = lfirst(lc);
-			ExprState  *expr_state = ExecInitExpr(expr, ps);
-			Oid			type_oid = exprType((Node *)expr);
-			int16		typlen;
-			bool		typbyval;
 			cl_uint		shift;
 
-			gjs->inners[i].hash_inner_keys =
-				lappend(gjs->inners[i].hash_inner_keys, expr_state);
+			hash_inner_keys = fixup_varnode_to_origin(gjs, i+1,
+													  hash_inner_keys);
+			foreach (lc, hash_inner_keys)
+			{
+				Expr	   *expr = lfirst(lc);
+				ExprState  *expr_state = ExecInitExpr(expr, ps);
+				Oid			type_oid = exprType((Node *)expr);
+				int16		typlen;
+				bool		typbyval;
 
-			get_typlenbyval(type_oid, &typlen, &typbyval);
-			gjs->inners[i].hash_keytype =
-				lappend_oid(gjs->inners[i].hash_keytype, type_oid);
-			gjs->inners[i].hash_keylen =
-				lappend_int(gjs->inners[i].hash_keylen, typlen);
-			gjs->inners[i].hash_keybyval =
-				lappend_int(gjs->inners[i].hash_keybyval, typbyval);
+				istate->hash_inner_keys =
+					lappend(istate->hash_inner_keys, expr_state);
+
+				get_typlenbyval(type_oid, &typlen, &typbyval);
+				istate->hash_keytype =
+					lappend_oid(istate->hash_keytype, type_oid);
+				istate->hash_keylen =
+					lappend_int(istate->hash_keylen, typlen);
+				istate->hash_keybyval =
+					lappend_int(istate->hash_keybyval, typbyval);
+			}
+			/* outer keys also */
+			hash_outer_keys = list_nth(gj_info->hash_outer_keys, i);
+			Assert(hash_outer_keys != NIL);
+			istate->hash_outer_keys = (List *)
+				ExecInitExpr((Expr *)hash_outer_keys, ps);
+
+			Assert(IsA(istate->hash_outer_keys, List) &&
+				   list_length(istate->hash_inner_keys) ==
+				   list_length(istate->hash_outer_keys));
+
+			/* hash slot width */
+			istate->hash_nslots = list_nth_int(gj_info->hash_nslots, i);
+
 			/* usage histgram */
 			shift = get_next_log2(gjs->inners[i].nbatches_plan) + 4;
 			Assert(shift < sizeof(cl_uint) * BITS_PER_BYTE);
-			gjs->inners[i].hgram_size = palloc0(sizeof(Size) * (1U << shift));
-			gjs->inners[i].hgram_shift =
-				sizeof(cl_uint) * BITS_PER_BYTE - shift;
-			gjs->inners[i].hgram_curr = 0;
+			istate->hgram_size = palloc0(sizeof(Size) * (1U << shift));
+			istate->hgram_shift = sizeof(cl_uint) * BITS_PER_BYTE - shift;
+			istate->hgram_curr = 0;
 		}
 		gjs->gts.css.custom_children =
 			lappend(gjs->gts.css.custom_children, gjs->inners[i].state);
@@ -3538,7 +3626,7 @@ get_tuple_hashvalue(innerState *istate, TupleTableSlot *slot)
 	ListCell	   *lc4;
 
 	/* calculation of a hash value of this entry */
-	econtext->ecxt_scantuple = slot;
+	econtext->ecxt_innertuple = slot;
 	INIT_LEGACY_CRC32(hash);
 	forfour (lc1, istate->hash_inner_keys,
 			 lc2, istate->hash_keylen,
