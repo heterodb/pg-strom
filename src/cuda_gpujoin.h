@@ -42,13 +42,6 @@ typedef struct
 	((kern_data_store *)						\
 	 ((char *)(kmrels) + (kmrels)->chunks[(depth)-1].chunk_offset))
 
-#define KERN_MULTIRELS_INNER_HASH(kmrels, depth)			\
-	((kern_hashtable *)										\
-	 ((char *)(kmrels) + (kmrels)->chunks[(depth)-1].chunk_offset))
-
-#define KERN_MULTIRELS_INNER_NITEMS(kmrels, depth)	\
-	(KERN_MULTIRELS_INNER_KDS(kmrels, depth)->nitems)
-
 #define KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, nitems,		\
 									  cuda_index, outer_join_map)	\
 	((cl_bool *)													\
@@ -63,112 +56,6 @@ typedef struct
 
 #define KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, depth)	\
 	((kmrels)->chunks[(depth)-1].right_outer)
-
-#if 0
-// integrated to KDS
-
-/*
- * Hash table and entry
- *
- *
- * +-------------------+
- * | kern_hashtable    |
- * | +-----------------+
- * | |   :             |
- * | | ncols (=M)      |
- * | | nitems (=K)     |
- * | | nslots (=N)     |
- * | |   :             |
- * | +-----------------+
- * | | colmeta[0]      |
- * | |   :             |
- * | | colmeta[M-1]    |
- * +-+-----------------+
- * | cl_uint           |
- * |   hash_slot[0]    |
- * |     :             |
- * |   hash_slot[K-2] o-----+
- * |   hash_slot[K-1]  |    |
- * +-------------------+ <--+
- * | kern_hashentry    |
- * | +-----------------|
- * | | hash            |
- * | | next          o------+
- * | | rowid           |    |
- * | | htup            |    |
- * +-+-----------------+    |
- * |     :             |    |
- * +-------------------+ <--+  <---+
- * | kern_hashentry    |           |
- * | +-----------------|           |
- * | | hash            |           |
- * | | next            |           |
- * | | rowid           |           |
- * | | htup            |           |
- * +-+-----------------+           |
- * | cl_uint           |           |
- * |   row_index[0]    |           |
- * |   row_index[1]  o-------------+
- * |     :             |
- * |   row_offset[N-1] |
- * +-------------------+
- */
-typedef struct
-{
-	cl_uint			hash;   	/* 32-bit hash value */
-	cl_uint			next;		/* offset of the next */
-	cl_uint			rowid;		/* unique identifier of this hash entry */
-	cl_uint			t_len;		/* length of the tupe itself */
-	HeapTupleHeaderData htup;	/* variable length heap-tuple */
-} kern_hashentry;
-
-typedef struct
-{
-	hostptr_t		hostptr;
-	cl_uint			length;		/* length of this hashtable chunk */
-	cl_uint			usage;		/* usage of this hashtable chunk */
-	cl_uint			ncols;		/* number of inner relation's columns */
-	cl_uint			nitems;		/* number of inner relation's items */
-	/* NOTE: !fields above are compatible with kern_data_store! */
-	cl_uint			__dummy1__;
-	cl_char         __dummy2__;
-    cl_char         __dummy3__;
-    cl_uint         __dummy4__;
-    cl_int          __dummy5__;
-	cl_uint			nslots;		/* width of hash slot */
-	cl_uint			hash_min;	/* minimum hash value */
-	cl_uint			hash_max;	/* maximum hash value */
-	/*
-	 * NOTE: offsetof(kern_hashtable, colmeta) should be equivalent to
-	 * offsetof(kern_data_store, colmeta) for code simplification.
-	 */
-	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];
-} kern_hashtable;
-
-#define KERN_HASHTABLE_SLOT(khtable)					\
-	((cl_uint *)((char *)(khtable) +					\
-				 LONGALIGN(offsetof(kern_hashtable,		\
-									colmeta[(khtable)->ncols]))))
-
-STATIC_INLINE(kern_hashentry *)
-KERN_HASH_FIRST_ENTRY(kern_hashtable *khtable, cl_uint hash)
-{
-	cl_uint	   *slot = KERN_HASHTABLE_SLOT(khtable);
-	cl_uint		index = hash % khtable->nslots;
-
-	if (slot[index] == 0)
-		return NULL;
-	return (kern_hashentry *)((char *) khtable + slot[index]);
-}
-
-STATIC_INLINE(kern_hashentry *)
-KERN_HASH_NEXT_ENTRY(kern_hashtable *khtable, kern_hashentry *khentry)
-{
-	if (!khentry || khentry->next == 0)
-		return NULL;
-	return (kern_hashentry *)((char *)khtable + khentry->next);
-}
-#endif
 
 /*
  * kern_gpujoin - control object of GpuJoin
@@ -191,12 +78,12 @@ typedef struct
 #define KERN_GPUJOIN_HEAD_LENGTH(kgjoin)		\
 	((kgjoin)->kresults_1_offset +				\
 	 STROMALIGN(offsetof(kern_resultbuf, results[0])))
-#define KERN_GPUJOIN_IN_RESULTBUF(kgjoin,depth)			\
+#define KERN_GPUJOIN_IN_RESULTS(kgjoin,depth)			\
 	((kern_resultbuf *)((char *)(kgjoin) +				\
 						(((depth) & 0x01)				\
 						 ? (kgjoin)->kresults_1_offset	\
 						 : (kgjoin)->kresults_2_offset)))
-#define KERN_GPUJOIN_OUT_RESULTBUF(kgjoin,depth)		\
+#define KERN_GPUJOIN_OUT_RESULTS(kgjoin,depth)			\
 	((kern_resultbuf *)((char *)(kgjoin) +				\
 						(((depth) & 0x01)				\
 						 ? (kgjoin)->kresults_2_offset  \
@@ -210,7 +97,7 @@ typedef struct
 #define GPUJOIN_REF_HTUP(chunk,offset)			\
 	((offset) == 0								\
 	 ? NULL										\
-	 : (HeapTupleHeaderData *)((char *)(chunk) + (offset)))
+	 : (HeapTupleHeaderData *)((char *)(chunk) + (size_t)(offset)))
 /* utility macros for automatically generated code */
 #define GPUJOIN_REF_DATUM(colmeta,htup,colidx)	\
 	(!(htup) ? NULL : kern_get_datum_tuple((colmeta),(htup),(colidx)))
@@ -289,8 +176,8 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 		assert(kgjoin->kresults_1_offset > 0);
 		assert(kgjoin->kresults_2_offset > 0);
 	}
-	kresults_in = KERN_GPUJOIN_IN_RESULTBUF(kgjoin, depth);
-	kresults_out = KERN_GPUJOIN_OUT_RESULTBUF(kgjoin, depth);
+	kresults_in = KERN_GPUJOIN_IN_RESULTS(kgjoin, depth);
+	kresults_out = KERN_GPUJOIN_OUT_RESULTS(kgjoin, depth);
 	errcode = (depth > 1 ? kresults_in->errcode : StromError_Success);
 
 	/*
@@ -381,8 +268,8 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 					  cl_bool *outer_join_map)
 {
 	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
-	kern_resultbuf *kresults_in = KERN_GPUJOIN_IN_RESULTBUF(kgjoin, depth);
-	kern_resultbuf *kresults_out = KERN_GPUJOIN_OUT_RESULTBUF(kgjoin, depth);
+	kern_resultbuf *kresults_in = KERN_GPUJOIN_IN_RESULTS(kgjoin, depth);
+	kern_resultbuf *kresults_out = KERN_GPUJOIN_OUT_RESULTS(kgjoin, depth);
 	kern_data_store *kds_in;
 	cl_bool		   *lo_map;
 	size_t			nvalids;
@@ -464,7 +351,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 				lo_map[y_index] = true;
 		}
 		else
-			y_offset = UINT_MAX;
+			y_offset = INT_MIN;
 
 		/*
 		 * Expand kresults_out->nitems, and put values
@@ -512,18 +399,18 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 					  cl_int cuda_index,
 					  cl_bool *outer_join_map)
 {
-	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
-	kern_resultbuf *kresults_in = KERN_GPUJOIN_IN_RESULTBUF(kgjoin, depth);
-	kern_resultbuf *kresults_out = KERN_GPUJOIN_OUT_RESULTBUF(kgjoin, depth);
-	kern_hashtable *khtable = KERN_MULTIRELS_INNER_HASH(kmrels, depth);
-	cl_bool		   *lo_map;
-	size_t			nvalids;
-	cl_int			crc_index;
-	cl_int			x_index;
-	cl_int			x_limit;
-	cl_int			errcode;
-	__shared__ cl_uint base;
-	__shared__ cl_uint pg_crc32_table[256];
+	kern_parambuf	   *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
+	kern_resultbuf	   *kresults_in = KERN_GPUJOIN_IN_RESULTS(kgjoin, depth);
+	kern_resultbuf	   *kresults_out = KERN_GPUJOIN_OUT_RESULTS(kgjoin, depth);
+	kern_data_store	   *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+	cl_bool			   *lo_map;
+	size_t				nvalids;
+	cl_int				crc_index;
+	cl_int				x_index;
+	cl_int				x_limit;
+	cl_int				errcode;
+	__shared__ cl_uint	base;
+	__shared__ cl_uint	pg_crc32_table[256];
 
 	/*
 	 * immediate bailout if previous stage already have error status
@@ -569,14 +456,14 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			   get_local_xsize()) * get_local_xsize();
 
 	/* will be valid, if LEFT OUTER JOIN */
-	lo_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, khtable->nitems,
+	lo_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, kds_hash->nitems,
 										   cuda_index, outer_join_map);
 
 	for (x_index = get_global_xid();
 		 x_index < x_limit;
 		 x_index += get_global_xsize())
 	{
-		kern_hashentry *khentry = NULL;
+		kern_hashitem  *khitem = NULL;
 		cl_uint			hash_value;
         cl_int         *x_buffer = NULL;
         cl_int         *r_buffer;
@@ -598,10 +485,10 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 											kmrels,
 											depth,
 											x_buffer);
-			if (hash_value >= khtable->hash_min &&
-				hash_value <= khtable->hash_max)
+			if (hash_value >= kds_hash->hash_min &&
+				hash_value <= kds_hash->hash_max)
 			{
-				khentry = KERN_HASH_FIRST_ENTRY(khtable, hash_value);
+				khitem = KERN_HASH_FIRST_ITEM(kds_hash, hash_value);
 				needs_outer_row = true;
 			}
 		}
@@ -611,9 +498,9 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		 */
 		do {
 			HeapTupleHeaderData *h_htup
-				= (!khentry || khentry->hash != hash_value
+				= (!khitem || khitem->hash != hash_value
 				   ? NULL
-				   : &khentry->htup);
+				   : &khitem->htup);
 
 			is_matched = gpujoin_join_quals(&errcode,
 											kparams,
@@ -624,8 +511,8 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 											h_htup);	/* valid if in range */
 			if (is_matched)
 			{
-				if (lo_map && !lo_map[khentry->rowid])
-					lo_map[khentry->rowid] = true;
+				if (lo_map && !lo_map[khitem->rowid])
+					lo_map[khitem->rowid] = true;
 				needs_outer_row = false;
 			}
 
@@ -654,7 +541,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			{
 				r_buffer = KERN_GET_RESULT(kresults_out, base + offset);
 				memcpy(r_buffer, x_buffer, sizeof(cl_int) * depth);
-				r_buffer[depth] = (size_t)&khentry->htup - (size_t)khtable;
+				r_buffer[depth] = (size_t)&khitem->htup - (size_t)kds_hash;
 			}
 
 			/*
@@ -662,8 +549,8 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			 * threads still have valid hash-entry or not.
 			 * (NOTE: this routine contains reduction operation)
 			 */
-			khentry = KERN_HASH_NEXT_ENTRY(khtable, khentry);
-			arithmetic_stairlike_add(khentry != NULL ? 1 : 0, &count);
+			khitem = KERN_HASH_NEXT_ITEM(kds_hash, khitem);
+			arithmetic_stairlike_add(khitem != NULL ? 1 : 0, &count);
 		} while (count > 0);
 
 		/*
@@ -717,7 +604,7 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 					   cl_int cuda_index,
 					   cl_bool *outer_join_map)
 {
-	kern_resultbuf *kresults_out = KERN_GPUJOIN_OUT_RESULTBUF(kgjoin, depth);
+	kern_resultbuf *kresults_out = KERN_GPUJOIN_OUT_RESULTS(kgjoin, depth);
 	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 	cl_int			errcode;
 	cl_bool		   *lo_map;
@@ -817,17 +704,17 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 					   cl_int cuda_index,
 					   cl_bool *outer_join_map)
 {
-	kern_resultbuf *kresults_out = KERN_GPUJOIN_OUT_RESULTBUF(kgjoin, depth);
-	kern_hashtable *khtable = KERN_MULTIRELS_INNER_HASH(kmrels, depth);
-	kern_hashentry *khentry;
-	cl_bool		   *lo_map;
-	cl_bool			needs_outer_row;
-	cl_int			errcode;
-	cl_uint			offset;
-	cl_uint			count;
-	cl_int			i, ndevs = kmrels->ndevs;
-	cl_int		   *r_buffer;
-	__shared__ cl_uint base;
+	kern_resultbuf	   *kresults_out = KERN_GPUJOIN_OUT_RESULTS(kgjoin, depth);
+	kern_data_store	   *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+	kern_hashitem	   *khitem;
+	cl_bool			   *lo_map;
+	cl_bool				needs_outer_row;
+	cl_int				errcode;
+	cl_uint				offset;
+	cl_uint				count;
+	cl_int				i, ndevs = kmrels->ndevs;
+	cl_int			   *r_buffer;
+	__shared__ cl_uint	base;
 
 	/*
 	 * immediate bailout if previous stage already have error status
@@ -847,28 +734,28 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 	/*
 	 * Fetch a hash-entry from each hash-slot
 	 */
-	if (get_global_id() < khtable->nslots)
-		khentry = KERN_HASH_FIRST_ENTRY(khtable, get_global_id());
+	if (get_global_id() < kds_hash->nslots)
+		khitem = KERN_HASH_FIRST_ITEM(kds_hash, get_global_id());
 	else
-		khentry = NULL;
+		khitem = NULL;
 
 	do {
-		if (khentry != NULL)
+		if (khitem != NULL)
 		{
 			/*
 			 * check whether the relevant inner tuple has any matched outer
 			 * tuples, including the jobs by other devices.
 			 */
-			cl_uint		nitems = khtable->nitems;
+			cl_uint		nitems = kds_hash->nitems;
 
-			assert(khentry->rowid < nitems);
+			assert(khitem->rowid < nitems);
 			needs_outer_row = false;
 			for (i=0; i < ndevs; i++)
 			{
 				lo_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, nitems,
 													   i, outer_join_map);
 				assert(lo_map != NULL);
-				needs_outer_row |= (!lo_map[khentry->rowid] ? 1 : 0);
+				needs_outer_row |= (!lo_map[khitem->rowid] ? 1 : 0);
 			}
 		}
 		else
@@ -906,15 +793,15 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 		{
 			r_buffer = KERN_GET_RESULT(kresults_out, base + offset);
 			memset(r_buffer, 0, sizeof(cl_int) * depth);	/* NULL */
-			r_buffer[depth] = (size_t)&khentry->htup - (size_t)khtable;
+			r_buffer[depth] = (size_t)&khitem->htup - (size_t)kds_hash;
 		}
 
 		/*
 		 * Walk on the hash-chain until all the local threads reaches to
 		 * end of the hash-list
 		 */
-		khentry = KERN_HASH_NEXT_ENTRY(khtable, khentry);
-		arithmetic_stairlike_add(khentry != NULL ? 1 : 0, &count);
+		khitem = KERN_HASH_NEXT_ITEM(kds_hash, khitem);
+		arithmetic_stairlike_add(khitem != NULL ? 1 : 0, &count);
 	} while (count > 0);
 out:
 	kern_writeback_error_status(&kresults_out->errcode, errcode);
@@ -952,9 +839,9 @@ __gpujoin_projection_row(cl_int *errcode,
 	/* result buffer
 	 * -------------
 	 * r_buffer[0] -> offset from the 'kds_src'
-	 * r_buffer[i; i > 0] -> offset from the kern_data_store or
-	 *   kern_hashtable that can be picked up using
-	 *   KERN_MULTIRELS_INNER_KDS/HASH(kmrels, depth)
+	 * r_buffer[i; i > 0] -> offset from the kern_data_store of individual
+	 *   depth in the kern_multirels buffer.
+	 *   (can be picked up using KERN_MULTIRELS_INNER_KDS)
 	 * r_buffer[*] may be 0, if NULL-tuple was set
 	 */
 	if (res_index < kresults->nitems)
@@ -1197,13 +1084,11 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 	size_t		res_limit;
 	cl_int		errcode = StromError_Success;
 
-	kresults = KERN_GPUJOIN_OUT_RESULTBUF(kgjoin, kgjoin->max_depth);
+	kresults = KERN_GPUJOIN_OUT_RESULTS(kgjoin, kgjoin->max_depth);
 
 	/* sanity checks */
 	if (get_global_id() == 0)
 	{
-		assert(offsetof(kern_data_store, colmeta) ==
-			   offsetof(kern_hashtable, colmeta));
 		assert(kresults->nrels == kgjoin->max_depth + 1);
 		assert(kds_src->format == KDS_FORMAT_ROW &&
 			   kds_dst->format == KDS_FORMAT_ROW);
@@ -1272,9 +1157,9 @@ __gpujoin_projection_slot(cl_int *errcode,
 	/* result buffer
 	 * -------------
 	 * r_buffer[0] -> offset from the 'kds_src'
-	 * r_buffer[i; i > 0] -> offset from the kern_data_store or
-	 *   kern_hashtable that can be picked up using
-	 *   KERN_MULTIRELS_INNER_KDS/HASH(kmrels, depth)
+	 * r_buffer[i; i > 0] -> offset from the kern_data_store of individual
+	 *   depth in the kern_multirels buffer.
+	 *   (can be picked up using KERN_MULTIRELS_INNER_KDS)
 	 * r_buffer[*] may be 0, if NULL-tuple was set
 	 */
 	for (i=0; i < ncols; i++)
@@ -1365,7 +1250,7 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 	cl_int		errcode;
 	size_t		res_index;
 
-	kresults = KERN_GPUJOIN_OUT_RESULTBUF(kgjoin, kgjoin->max_depth);
+	kresults = KERN_GPUJOIN_OUT_RESULTS(kgjoin, kgjoin->max_depth);
 	errcode = kresults->errcode;
 
 	/* Update resource consumption information */
@@ -1393,8 +1278,6 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 	/* sanity checks */
 	if (get_global_id() == 0)
 	{
-		assert(offsetof(kern_data_store, colmeta) ==
-			   offsetof(kern_hashtable, colmeta));
 		assert(kresults->nrels == kgjoin->max_depth + 1);
 		assert(kds_src->format == KDS_FORMAT_ROW &&
 			   kds_dst->format == KDS_FORMAT_SLOT);

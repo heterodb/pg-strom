@@ -2040,8 +2040,6 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 							   codegen_context *context)
 {
 	bool		is_nestloop;
-	bool		needs_kds_in = false;
-	bool		needs_khtable = false;
 	List	   *kern_vars = NIL;
 	ListCell   *cell;
 	int			depth;
@@ -2079,13 +2077,6 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				kernode->varoattno = tle->resno;	/* resno on the ps_tlist */
 				if (src_depth < 0 || src_depth > cur_depth)
 					elog(ERROR, "Bug? device varnode out of range");
-				else if (src_depth > 0)
-				{
-					if (list_nth(gj_info->hash_outer_keys, src_depth - 1))
-						needs_khtable = true;	/* inner hashtable reference */
-					else
-						needs_kds_in = true;	/* inner datastore reference */
-				}
 				break;
 			}
 		}
@@ -2128,12 +2119,9 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 	appendStringInfo(
 		source,
 		"  HeapTupleHeaderData *htup;\n"
-		"  kern_colmeta *colmeta;\n");
-	if (needs_kds_in)
-		appendStringInfo(source, "  kern_data_store *kds_in;\n");
-	if (needs_khtable)
-		appendStringInfo(source, "  kern_hashtable *khtable;\n");
-	appendStringInfo(source, "  void *datum;\n");
+		"  kern_data_store *kds_in;\n"
+		"  kern_colmeta *colmeta;\n"
+		"  void *datum;\n");
 
 	foreach (cell, kern_vars)
 	{
@@ -2185,31 +2173,6 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 					"          GPUJOIN_REF_HTUP(kds,o_buffer[0]));\n"
 					);
 			}
-			else if (list_nth(gj_info->hash_outer_keys, keynode->varno - 1))
-			{
-				/* in case of inner hash table */
-				appendStringInfo(
-					source,
-					"  /* variables load in depth-%u (hash table) */\n"
-					"  khtable = KERN_MULTIRELS_INNER_HASH(kmrels, %u);\n"
-					"  assert(khtable != NULL);\n"
-					"  colmeta = khtable->colmeta;\n",
-					keynode->varno,
-					keynode->varno);
-				if (keynode->varno < cur_depth)
-					appendStringInfo(
-						source,
-						"  htup = (!o_buffer ? NULL :\n"
-						"          GPUJOIN_REF_HTUP(khtable,o_buffer[%d]));\n",
-						keynode->varno);
-				else if (keynode->varno == cur_depth)
-					appendStringInfo(
-						source,
-						"  htup = i_htup;\n"
-						);
-				else
-					elog(ERROR, "Bug? too deeper varnode reference");
-			}
 			else
 			{
 				/* in case of inner data store */
@@ -2217,10 +2180,15 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 					source,
 					"  /* variable load in depth-%u (data store) */\n"
 					"  kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, %u);\n"
-					"  assert(kds_in != NULL);\n"
+					"  assert(kds_in->format == %s);\n"
 					"  colmeta = kds_in->colmeta;\n",
 					keynode->varno,
-					keynode->varno);
+					keynode->varno,
+					list_nth(gj_info->hash_outer_keys,
+							 keynode->varno - 1) == NIL
+					? "KDS_FORMAT_ROW"
+					: "KDS_FORMAT_HASH");
+
 				if (keynode->varno < cur_depth)
 					appendStringInfo(
 						source,
@@ -3476,7 +3444,6 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 		}
 		outer_ntuples = (size_t)((double)outer_ntuples *
 								 Max(nrows_ratio, 1.0));
-		depth++;
 	}
 	Assert(pgjoin->kern.max_depth == depth - 1);
 	CUDA_EVENT_RECORD(pgjoin, ev_kern_join_end);
