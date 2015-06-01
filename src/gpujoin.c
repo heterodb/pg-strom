@@ -2627,7 +2627,8 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 		length = (STROMALIGN(offsetof(kern_data_store,
 									  colmeta[tupdesc->natts])) +
 				  STROMALIGN(sizeof(cl_uint) * nrooms) +
-				  gjs->result_width * nrooms);
+				  MAXALIGN(offsetof(kern_tupitem, htup) +
+						   gjs->result_width) * nrooms);
 		pds_dst = pgstrom_create_data_store_row(gcontext, tupdesc,
 												length, false);
 	}
@@ -2948,11 +2949,16 @@ gpujoin_task_complete(GpuTask *gtask)
 									   KERN_DATA_STORE_HEAD_LENGTH(kds_old) -
 									   sizeof(cl_uint) * kds_old->nitems) /
 								(Size) kds_old->nitems) + 1;
+				result_width =  MAXALIGN(result_width);
 
-				elog(NOTICE, "Destination KDS was small, "
-					 "size expanded: width %u => %zu, nrooms %u => %u",
-					 gjs->result_width, MAXALIGN(result_width),
-					 kds_old->nrooms, kds_old->nitems);
+				if (result_width > gjs->result_width)
+				{
+					elog(NOTICE, "Destination KDS was small, "
+						 "size expanded: width %u => %zu, nrooms %u => %u",
+						 gjs->result_width, MAXALIGN(result_width),
+						 kds_old->nrooms, kds_old->nitems);
+					gjs->result_width = result_width;
+				}
 			}
 			else
 			{
@@ -2979,7 +2985,8 @@ gpujoin_task_complete(GpuTask *gtask)
 			kds_length = (STROMALIGN(offsetof(kern_data_store,
 											  colmeta[ncols])) +
 						  STROMALIGN(sizeof(cl_uint) * nrooms) +
-						  gjs->result_width * nrooms);
+						  MAXALIGN(offsetof(kern_tupitem, htup) +
+								   gjs->result_width) * nrooms);
 		}
 		else
 			elog(ERROR, "Bug? unexpected result format: %d", kds_old->format);
