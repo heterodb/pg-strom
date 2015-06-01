@@ -696,16 +696,22 @@ retry:
 		if (gpath->inners[i].hash_quals != NIL)
 			startup_cost += (cpu_operator_cost * inner_path->rows *
 							 list_length(gpath->inners[i].hash_quals));
+
 		/* cost to evaluate join qualifiers */
 		if (gpath->inners[i].hash_quals != NIL)
+		{
+			double		hash_nsteps = (inner_path->rows /
+									   (double) gpath->inners[i].hash_nslots);
             run_cost += (join_cost[i].per_tuple
 						 * outer_ntuples
-                         * (inner_ntuples /
-							(double) gpath->inners[i].hash_nslots));
+						 * Max(hash_nsteps, 1.0));
+		}
 		else
+		{
 			run_cost += (join_cost[i].per_tuple
                          * outer_ntuples
-						 * clamp_row_est(inner_ntuples));
+						 * clamp_row_est(inner_path->rows));
+		}
 		/* iteration if nbatches > 1 */
 		if (gpath->inners[i].nbatches > 1)
 			run_cost *= (double) gpath->inners[i].nbatches;
@@ -729,7 +735,9 @@ retry:
 						   gpath->cpath.path.startup_cost,
 						   gpath->cpath.path.total_cost,
 						   NULL, required_outer))
+	{
 		return false;
+	}
 
 	/*
 	 * If size of inner multi-relations buffer is still larger than
@@ -1111,11 +1119,6 @@ gpujoin_add_join_path(PlannerInfo *root,
 	}
 
 	/*
-	 * Find out mergeable outer GpuJoin Path, if any
-	 */
-	mergeable_gpujoin_outer = lookup_mergeable_gpujoin(root, outerrel);
-
-	/*
 	 * Try, cheapest_total_inner + cheapest_total_outer
 	 */
 	try_gpujoin_path(root,
@@ -1132,6 +1135,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 	/*
 	 * Try, cheapest_total_inner + mergeable_gpujoin_outer
 	 */
+	mergeable_gpujoin_outer = lookup_mergeable_gpujoin(root, outerrel);
 	if (mergeable_gpujoin_outer != NULL &&
 		mergeable_gpujoin_outer != cheapest_total_outer)
 	{
@@ -1960,6 +1964,9 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		temp = deparse_expression((Node *)join_qual, context,
 								  es->verbose, false);
 		appendStringInfo(&str, ", JoinQual: %s", temp);
+
+		appendStringInfo(&str, ", nrows_ratio: %.8f",
+				 int_as_float(list_nth_int(gj_info->nrows_ratio, depth - 1)));
 
 		snprintf(qlabel, sizeof(qlabel), "Depth %d", depth);
 		ExplainPropertyText(qlabel, str.data, es);
