@@ -4054,7 +4054,7 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 
 	PERFMON_BEGIN(&gjs->gts.pfm_accum, &tv1);
 
-	for (depth = gjs->num_rels; depth > 1; depth--)
+	for (depth = gjs->num_rels; depth > 0; depth--)
 	{
 		if (!gjs->inners[depth - 1].scan_done)
 		{
