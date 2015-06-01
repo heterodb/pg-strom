@@ -520,17 +520,15 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	/* Type cast functions */
 	{ "date", 1, {DATEOID}, "ta/c:" },
 	{ "date", 1, {TIMESTAMPOID}, "t/F:timestamp_date" },
-	{ "time", 1, {TIMESTAMPOID}, "t/F:timestamp_time" },
-	{ "time", 1, {TIMEOID}, "ta/c:" },
-	{ "timestamp", 1, {TIMESTAMPOID}, "ta/c:" },
-	{ "timestamp", 1, {DATEOID}, "t/F:date_timestamp" },
-#ifdef NOT_USED
 	{ "date", 1, {TIMESTAMPTZOID}, "t/F:timestamptz_date" },
+	{ "time", 1, {TIMEOID}, "ta/c:" },
+	{ "time", 1, {TIMESTAMPOID}, "t/F:timestamp_time" },
 	{ "time", 1, {TIMESTAMPTZOID}, "t/F:timestamptz_time" },
+	{ "timestamp", 1, {DATEOID}, "t/F:date_timestamp" },
+	{ "timestamp", 1, {TIMESTAMPOID}, "ta/c:" },
 	{ "timestamp", 1, {TIMESTAMPTZOID}, "t/F:timestamptz_timestamp" },
+	{ "timestamptz", 1, {DATEOID}, "t/F:date_timestamptz" },
 	{ "timestamptz", 1, {TIMESTAMPOID}, "t/F:timestamp_timestamptz" },
-	{ "timestamptz", 1, {DATE}, "t/F:date_timestamptz" },
-#endif
 	/* timedata operators */
 	{ "date_pli", 2, {DATEOID, INT4OID}, "t/F:date_pli" },
 	{ "date_mii", 2, {DATEOID, INT4OID}, "t/F:date_mii" },
@@ -604,7 +602,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "timestamptz_ge", 2, {TIMESTAMPTZOID, TIMESTAMPTZOID}, "t/b:>=" },
 	{ "timestamptz_cmp", 2, {TIMESTAMPTZOID, TIMESTAMPTZOID}, 
 	  "t/f:devfunc_int_comp" },
-#ifdef NOT_USED
+
 	/* comparison between date and timestamptz */
 	{ "date_lt_timestamptz", 2, {DATEOID, TIMESTAMPTZOID},
 	  "t/F:date_lt_timestamptz" },
@@ -663,7 +661,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	/*
 	 * TODO: overlap() SQL function
 	 */
-#endif
+
 	/*
 	 * Text functions
 	 * ---------------------- */
