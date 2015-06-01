@@ -299,17 +299,13 @@ leaps_thru_end_of_no_recursive(const int y)
         return -(leaps_thru_end_of_no_recursive(-(y + 1)) + 1);
 #endif
 	}
-
-	return 0;
 }
 
 STATIC_INLINE(int)
 leaps_thru_end_of(const int y)
 {
     return (y >= 0) ? (y / 4 - y / 100 + y / 400) :
-        // -(leaps_thru_end_of(-(y + 1)) + 1);
         -(leaps_thru_end_of_no_recursive(-(y + 1)) + 1);
-	return 0;
 }
 
 STATIC_INLINE(struct pg_tm *)
@@ -452,16 +448,13 @@ STATIC_INLINE(struct pg_tm *)
 localsub_no_recursive(const cl_long *timep, /* pg_time_t in original */
 					  long offset,
 					  struct pg_tm * tmp,
-//					  const pg_tz *tz)
 					  const tz_state *sp)
 {
-	// const tz_state *sp;
 	const tz_ttinfo *ttisp;
 	int			i;
 	struct pg_tm *result;
 	const cl_long t = *timep;	/* pg_time_t in original */
 
-	// sp = &tz->state;
 	if ((sp->goback && t < sp->ats[0]) ||
 		(sp->goahead && t > sp->ats[sp->timecnt - 1]))
 	{
@@ -541,7 +534,7 @@ localsub_no_recursive(const cl_long *timep, /* pg_time_t in original */
 
 	result = timesub(&t, ttisp->tt_gmtoff, sp, tmp);
 	tmp->tm_isdst = ttisp->tt_isdst;
-	// tmp->tm_zone = &sp->chars[ttisp->tt_abbrind];
+
 	return result;
 }
 
@@ -549,16 +542,13 @@ STATIC_INLINE(struct pg_tm *)
 localsub(const cl_long *timep, 	/* pg_time_t in original */
 		 long offset,
 		 struct pg_tm * tmp,
-		 // const pg_tz *tz)
 		 const tz_state *sp)
 {
-	// const tz_state *sp;
 	const tz_ttinfo *ttisp;
 	int			i;
 	struct pg_tm *result;
 	const cl_long t = *timep;	/* pg_time_t in original */
 
-	// sp = &tz->state;
 	if ((sp->goback && t < sp->ats[0]) ||
 		(sp->goahead && t > sp->ats[sp->timecnt - 1]))
 	{
@@ -587,8 +577,7 @@ localsub(const cl_long *timep, 	/* pg_time_t in original */
 		if (newt < sp->ats[0] ||
 			newt > sp->ats[sp->timecnt - 1])
 			return NULL;		/* "cannot happen" */
-		// result = localsub(&newt, offset, tmp, tz);
-		// result = localsub_no_recursive(&newt, offset, tmp, tz);
+
 		result = localsub_no_recursive(&newt, offset, tmp, sp);
 		if (result == tmp)
 		{
@@ -635,14 +624,13 @@ localsub(const cl_long *timep, 	/* pg_time_t in original */
 
 	result = timesub(&t, ttisp->tt_gmtoff, sp, tmp);
 	tmp->tm_isdst = ttisp->tt_isdst;
-	// tmp->tm_zone = &sp->chars[ttisp->tt_abbrind];
+
 	return result;
 }
 
 STATIC_INLINE(struct pg_tm *)
 pg_localtime(const cl_long *timep, /* pg_time_t in original */
 			 struct pg_tm *tm,
-			 // const pg_tz *tz)
 			 const tz_state *sp)
 {
 	// pg_localtime() returns tm if success.
@@ -658,16 +646,13 @@ pg_next_dst_boundary_no_recursive(const cl_long *timep,	/* pg_time_t in original
 								  cl_long *boundary,		/* pg_time_t in original */
 								  long int *after_gmtoff,
 								  int *after_isdst,
-								  // const pg_tz *tz)
 								  const tz_state *sp)
 {
-	// const tz_state *sp;
 	const tz_ttinfo *ttisp;
 	int			i;
 	int			j;
 	const cl_long t = *timep;	/* pg_time_t in original */
 
-	// sp = &tz->state;
 	if (sp->timecnt == 0)
 	{
 		/* non-DST zone, use lowest-numbered standard type */
@@ -797,16 +782,13 @@ pg_next_dst_boundary(const cl_long *timep, /* pg_time_t in original */
 					 cl_long *boundary,	/* pg_time_t in original */
 					 long int *after_gmtoff,
 					 int *after_isdst,
-					 // const pg_tz *tz)
 					 const tz_state *sp)
 {
-	// const tz_state *sp;
 	const tz_ttinfo *ttisp;
 	int			i;
 	int			j;
 	const cl_long t = *timep;	/* pg_time_t in original */
 
-	// sp = &tz->state;
 	if (sp->timecnt == 0)
 	{
 		/* non-DST zone, use lowest-numbered standard type */
@@ -853,18 +835,11 @@ pg_next_dst_boundary(const cl_long *timep, /* pg_time_t in original */
 			newt > sp->ats[sp->timecnt - 1])
 			return -1;			/* "cannot happen" */
 
-		// result = pg_next_dst_boundary(&newt, before_gmtoff,
-		//								 before_isdst,
-		//								 boundary,
-		//								 after_gmtoff,
-		//								 after_isdst,
-		//								 tz);
 		result = pg_next_dst_boundary_no_recursive(&newt, before_gmtoff,
 												   before_isdst,
 												   boundary,
 												   after_gmtoff,
 												   after_isdst,
-												   // tz);
 												   sp);
 		if (t < sp->ats[0])
 			*boundary -= seconds;
@@ -933,12 +908,10 @@ pg_next_dst_boundary(const cl_long *timep, /* pg_time_t in original */
 
 STATIC_INLINE(cl_int)
 DetermineTimeZoneOffset(struct pg_tm *tm,
-						// pg_tz *tzp)
 						const tz_state *sp)
 {
 	cl_long t;	/* pg_time_t in original */
 
-    // return DetermineTimeZoneOffsetInternal(tm, tzp, &t);
 	cl_long	*tp = &t;	/* pg_time_t in original */
 
 	int		date, sec;
@@ -980,7 +953,6 @@ DetermineTimeZoneOffset(struct pg_tm *tm,
 							   &before_gmtoff, &before_isdst,
 							   &boundary,
 							   &after_gmtoff, &after_isdst,
-							   // tzp);
 							   sp);
 	if (res < 0)
 		goto overflow;			/* failure? */
@@ -1055,7 +1027,6 @@ overflow:
 /* simplified version; no timezone support now */
 STATIC_INLINE(cl_bool)
 timestamp2tm(Timestamp dt, int *tzp, struct pg_tm *tm, fsec_t *fsec,
-			 // pg_tz *attimezone)
 			 const tz_state *sp)
 {
 	cl_long		date;	/* Timestamp in original */
@@ -1063,8 +1034,6 @@ timestamp2tm(Timestamp dt, int *tzp, struct pg_tm *tm, fsec_t *fsec,
 	cl_long		utime;	/* pg_time_t in original */
 
 	/* Use session timezone if caller asks for default */
-    // if (attimezone == NULL)
-    //     attimezone = session_timezone;
     if (sp == NULL)
         sp = &session_timezone_state;
 
@@ -1090,7 +1059,6 @@ timestamp2tm(Timestamp dt, int *tzp, struct pg_tm *tm, fsec_t *fsec,
 	if (tzp == NULL) {
 		tm->tm_isdst = -1;
 		tm->tm_gmtoff = 0;
-		// tm->tm_zone = NULL;
 
 		return true;
 	}
@@ -1113,7 +1081,6 @@ timestamp2tm(Timestamp dt, int *tzp, struct pg_tm *tm, fsec_t *fsec,
     {
         struct pg_tm tx;
 
-		// pg_localtime(&utime, &tx, attimezone);
 		pg_localtime(&utime, &tx, sp);
 
         tm->tm_year = tx.tm_year + 1900;
@@ -1124,7 +1091,6 @@ timestamp2tm(Timestamp dt, int *tzp, struct pg_tm *tm, fsec_t *fsec,
         tm->tm_sec = tx.tm_sec;
         tm->tm_isdst = tx.tm_isdst;
         tm->tm_gmtoff = tx.tm_gmtoff;
-        // tm->tm_zone = tx.tm_zone;
         *tzp = -tm->tm_gmtoff;
     }
     else
@@ -1136,7 +1102,6 @@ timestamp2tm(Timestamp dt, int *tzp, struct pg_tm *tm, fsec_t *fsec,
         /* Mark this as *no* time zone available */
         tm->tm_isdst = -1;
         tm->tm_gmtoff = 0;
-        // tm->tm_zone = NULL;
     }
 
 	return true;
@@ -1652,7 +1617,6 @@ timestamp2timestamptz(cl_int *errcode, pg_timestamp_t arg)
 	}
 	else
 	{
-        // tz = DetermineTimeZoneOffset(&tm, session_timezone);
         tz = DetermineTimeZoneOffset(&tm, &session_timezone_state);
 		if (!tm2timestamp(&tm, fsec, &tz, &result.value))
 		{
@@ -1702,7 +1666,6 @@ date2timestamptz(cl_int *errcode, pg_date_t arg)
         tm.tm_hour = 0;
         tm.tm_min = 0;
         tm.tm_sec = 0;
-        // tz = DetermineTimeZoneOffset(&tm, session_timezone);
         tz = DetermineTimeZoneOffset(&tm, &session_timezone_state);
 
 		result.isnull = false;
@@ -2251,7 +2214,6 @@ assign_timelib_session_info(StringInfo buf)
 		sp->timecnt,
 		sp->timecnt,
 		sp->typecnt,
-//		sp->leapcnt
 		sp->leapcnt <= 0 ? 1 : sp->leapcnt
 		);
 	/*
@@ -2319,13 +2281,18 @@ assign_timelib_session_info(StringInfo buf)
 		"    },\n"
 		"    {    /* lsis[] */\n");
 
-	for (i=0; i < sp->leapcnt; i++)
+	if (sp->leapcnt <= 0)
+		appendStringInfo(buf, "        { 0, 0 },\n");
+	else 
 	{
-		appendStringInfo(
-			buf,
-			"        { %ld, %ld },\n",
-			sp->lsis[i].ls_trans,
-			sp->lsis[i].ls_corr);
+		for (i=0; i < sp->leapcnt; i++)
+		{
+			appendStringInfo(
+				buf,
+				"        { %lld, %ld },\n",
+				sp->lsis[i].ls_trans,
+				sp->lsis[i].ls_corr);
+		}
 	}
 
 	appendStringInfo(
