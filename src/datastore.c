@@ -417,52 +417,64 @@ pgstrom_expand_data_store(GpuContext *gcontext,
 	kern_data_store	   *kds_new;
 	Size				kds_length_old = kds_old->length;
 	Size				kds_usage = kds_old->usage;
-	Size				kds_offset;
 	cl_uint				i, nitems = kds_old->nitems;
 
 	/* sanity checks */
 	Assert(pds->kds_offset == 0);
 	Assert(pds->kds_length == kds_length_old);
 	Assert(pds->ptoast == NULL);
-	Assert(kds_old->format == KDS_FORMAT_ROW);
+	Assert(kds_old->format == KDS_FORMAT_ROW ||
+		   kds_old->format == KDS_FORMAT_HASH);
 
 	/* no need to expand? */
 	if (kds_length_old >= kds_length_new)
 		return;
-	kds_offset = kds_length_new - kds_length_old;
-
+	/*
+	 * expand the buffer first
+	 */
 	if (!pds->kds_fname)
 	{
-		cl_uint	   *tup_index_old;
-		cl_uint	   *tup_index_new;
-
 		kds_new = MemoryContextAlloc(gcontext->memcxt,
 									 kds_length_new);
 		memcpy(kds_new, kds_old, KERN_DATA_STORE_HEAD_LENGTH(kds_old));
 		kds_new->hostptr = (hostptr_t)&kds_new->hostptr;
 		kds_new->length = kds_length_new;
 
-		memcpy((char *)kds_new + kds_length_new - kds_usage,
-			   (char *)kds_old + kds_length_old - kds_usage,
-			   kds_usage);
+		/* move the contents to new buffer from the old one */
+		if (kds_old->format == KDS_FORMAT_ROW)
+		{
+			cl_uint	   *tup_index_old;
+			cl_uint	   *tup_index_new;
+			size_t		shift = kds_length_new - kds_length_old;
 
-		tup_index_old = (cl_uint *)KERN_DATA_STORE_BODY(kds_old);
-		tup_index_new = (cl_uint *)KERN_DATA_STORE_BODY(kds_new);
-		for (i=0; i < nitems; i++)
-			tup_index_new[i] = tup_index_old[i] + kds_offset;
+			memcpy((char *)kds_new + kds_length_new - kds_usage,
+				   (char *)kds_old + kds_length_old - kds_usage,
+				   kds_usage);
+
+			tup_index_old = (cl_uint *)KERN_DATA_STORE_BODY(kds_old);
+			tup_index_new = (cl_uint *)KERN_DATA_STORE_BODY(kds_new);
+			for (i=0; i < nitems; i++)
+				tup_index_new[i] = tup_index_old[i] + shift;
+		}
+		else
+		{
+			/* copy the hash_slots and kern_hashitem */
+			memcpy(KERN_DATA_STORE_BODY(kds_new),
+				   KERN_DATA_STORE_BODY(kds_old),
+				   kds_old->usage - KERN_DATA_STORE_HEAD_LENGTH(kds_old));
+		}
 		pfree(kds_old);
 	}
 	else
 	{
 		size_t		mmap_length = TYPEALIGN(BLCKSZ, kds_length_new);
-		cl_uint	   *tup_index;
 
 		/* expand the size of underlying file */
 		if (truncate(pds->kds_fname, mmap_length))
 			ereport(ERROR,
-                    (errcode_for_file_access(),
-                     errmsg("could not truncate file \"%s\" to %zu: %m",
-                            pds->kds_fname, mmap_length)));
+					(errcode_for_file_access(),
+					 errmsg("could not truncate file \"%s\" to %zu: %m",
+							pds->kds_fname, mmap_length)));
 		/* remap area */
 		kds_new = mremap(kds_old, TYPEALIGN(BLCKSZ, kds_length_old),
 						 mmap_length, MREMAP_MAYMOVE);
@@ -474,14 +486,21 @@ pgstrom_expand_data_store(GpuContext *gcontext,
 		kds_new->hostptr = (hostptr_t)&kds_new->hostptr;
 		kds_new->length = kds_length_new;
 
-		memmove((char *)kds_new + kds_length_new - kds_usage,
-				(char *)kds_new + kds_length_old - kds_usage,
-				kds_usage);
+		if (kds_old->format == KDS_FORMAT_ROW)
+		{
+			cl_uint	   *tup_index;
+			size_t		shift = kds_length_new - kds_length_old;
 
-		tup_index = (cl_uint *)KERN_DATA_STORE_BODY(kds_new);
-		for (i=0; i < nitems; i++)
-			tup_index[i] += kds_offset;
+			memmove((char *)kds_new + kds_length_new - kds_usage,
+					(char *)kds_new + kds_length_old - kds_usage,
+					kds_usage);
+			tup_index = (cl_uint *)KERN_DATA_STORE_BODY(kds_new);
+			for (i=0; i < nitems; i++)
+				tup_index[i] += shift;
+		}
+		/* no need to move the data if KDS_FORMAT_HASH */
 	}
+	/* update length and kernel buffer */
 	pds->kds_length = kds_length_new;
 	pds->kds = kds_new;
 }
