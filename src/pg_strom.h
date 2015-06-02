@@ -495,6 +495,7 @@ extern void pgstrom_init_codegen(void);
  * datastore.c
  */
 extern Size pgstrom_chunk_size(void);
+extern void subtract_tuplecost_if_bulkload(Cost *p_run_cost, Path *pathnode);
 extern double pgstrom_get_bulkload_density(Plan *child_plan);
 extern Plan *pgstrom_try_replace_plannode(Plan *child_plan,
 										  List *range_tables,

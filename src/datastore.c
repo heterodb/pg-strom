@@ -21,6 +21,7 @@
 #include "catalog/catalog.h"
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_type.h"
+#include "optimizer/cost.h"
 #include "storage/bufmgr.h"
 #include "storage/fd.h"
 #include "storage/predicate.h"
@@ -125,6 +126,74 @@ pgstrom_open_tempfile(const char **p_tempfilepath)
  *
  * ------------------------------------------------------------
  */
+void
+subtract_tuplecost_if_bulkload(Cost *p_run_cost, Path *pathnode)
+{
+	Cost		run_cost = *p_run_cost;
+	RelOptInfo *rel = pathnode->parent;
+
+	if (pathnode->pathtype == T_CustomScan)
+	{
+		CustomPath	   *cpath = (CustomPath *) pathnode;
+
+		/* No tuple-cost benefit, if bulkload is not supported. */
+		if ((cpath->flags & CUSTOMPATH_SUPPORT_BULKLOAD) == 0)
+			return;
+	}
+	else if (pathnode->pathtype == T_SeqScan)
+	{
+		ListCell	   *lc;
+
+		foreach (lc, rel->reltargetlist)
+		{
+			Expr	   *expr = lfirst(lc);
+
+			/*
+			 * All the items in targetlist have to be Var-nodes or device
+			 * executable expression.
+			 */
+			if (!IsA(expr, Var) &&
+				!pgstrom_codegen_available_expression(expr))
+				return;
+		}
+
+		foreach (lc, rel->baserestrictinfo)
+		{
+			RestrictInfo   *rinfo = lfirst(lc);
+
+			/* All the restrictclause has to be device executable */
+			if (!pgstrom_codegen_available_expression(rinfo->clause))
+				return;
+		}
+	}
+	else
+	{
+		/* elsewhere, bulkload is not supported anyway */
+		return;
+	}
+
+	/*
+	 * reduce cpu_tuple_cost; that assumes row-by-row mode
+	 */
+	run_cost -= cpu_tuple_cost * pathnode->rows;
+
+	/*
+	 * As discount rate, we use cpu_tuple_cost for each "block"
+	 */
+	if (rel->reloptkind == RELOPT_BASEREL)
+		run_cost += cpu_tuple_cost * rel->pages;
+	else
+	{
+		int		nattrs = list_length(rel->reltargetlist);
+		Size	tup_size
+			= MAXALIGN(offsetof(HeapTupleHeaderData,
+								t_bits[BITMAPLEN(nattrs)]) +
+					   rel->width);
+		run_cost += cpu_tuple_cost * Max(BLCKSZ / tup_size, 1);
+	}
+	*p_run_cost = run_cost;
+}
+
 Plan *
 pgstrom_try_replace_plannode(Plan *plannode, List *range_tables,
 							 List **pullup_quals)

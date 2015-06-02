@@ -607,8 +607,9 @@ cost_gpujoin(PlannerInfo *root,
 	 * Estimation of multi-relations buffer size
 	 */
 retry:
-	startup_cost = pgstrom_gpu_setup_cost;
-	run_cost = outer_path->total_cost + cpu_tuple_cost * outer_path->rows;
+	startup_cost = pgstrom_gpu_setup_cost + outer_path->startup_cost;
+	run_cost = outer_path->total_cost - outer_path->startup_cost;
+	subtract_tuplecost_if_bulkload(&run_cost, outer_path);
 
 	kmrels_length = STROMALIGN(offsetof(kern_multirels,
 										chunks[num_rels]));
@@ -620,6 +621,7 @@ retry:
 		Path	   *inner_path = gpath->inners[i].scan_path;
 		RelOptInfo *inner_rel = inner_path->parent;
 		cl_uint		ncols = list_length(inner_rel->reltargetlist);
+		cl_uint		num_hashkeys = list_length(gpath->inners[i].hash_quals);
 		Size		chunk_size;
 		Size		entry_size;
 		Size		htup_size;
@@ -689,25 +691,50 @@ retry:
 		 * Cost calculation in this depth
 		 */
 
-		/* cost to load tuples onto the buffer */
+		/*
+		 * cost to load all the tuples to the inner buffer
+		 */
 		startup_cost += (inner_path->total_cost +
 						 cpu_tuple_cost * inner_path->rows);
-		/* cost to compute hash value, if hash-join */
-		if (gpath->inners[i].hash_quals != NIL)
-			startup_cost += (cpu_operator_cost * inner_path->rows *
-							 list_length(gpath->inners[i].hash_quals));
+		/*
+		 * cost for join_qual startup
+		 */
+		startup_cost += join_cost[i].startup;
 
-		/* cost to evaluate join qualifiers */
+		/*
+		 * cost to evaluate join qualifiers according to join logic
+		 */
 		if (gpath->inners[i].hash_quals != NIL)
 		{
-			double		hash_nsteps = (inner_path->rows /
-									   (double) gpath->inners[i].hash_nslots);
-            run_cost += (join_cost[i].per_tuple
+			/*
+			 * GpuHashJoin
+			 *
+			 * It compute hash-value of inner tuples by CPU, outer tuples by
+			 * GPU, then it evaluates join-qualifier for each items on hash
+			 * table by GPU.
+			 */
+			double		hash_nsteps
+				= inner_path->rows / (double) gpath->inners[i].hash_nslots;
+
+			/* cost to compute inner hash value by CPU */
+			startup_cost += (cpu_operator_cost * num_hashkeys *
+							 inner_path->rows);
+			/* cost to compute outer hash value by GPU */
+			run_cost += (pgstrom_gpu_operator_cost * num_hashkeys *
+						 outer_ntuples);
+			/* cost to evaluate join qualifiers */
+			run_cost += (join_cost[i].per_tuple
 						 * outer_ntuples
 						 * Max(hash_nsteps, 1.0));
 		}
 		else
 		{
+			/*
+			 * GpuNestLoop:
+			 *
+			 * It evaluates join-qual for each pair of outer and inner tuple.
+			 * So, usually, its run_cost is higher than GpuHashJoin
+			 */
 			run_cost += (join_cost[i].per_tuple
                          * outer_ntuples
 						 * clamp_row_est(inner_path->rows));
@@ -719,6 +746,18 @@ retry:
 		/* number of outer items on the next depth */
 		outer_ntuples = gpath->inners[i].nrows_ratio * outer_path->rows;
 	}
+
+	/*
+	 * cost for host clauses, if any
+	 */
+	startup_cost += host_cost.startup;
+	run_cost += host_cost.per_tuple * outer_ntuples;
+
+	/*
+	 * cost of final materialization
+	 */
+	run_cost += cpu_tuple_cost * gpath->cpath.path.rows;
+
 	/* put cost value on the gpath */
 	gpath->cpath.path.startup_cost = startup_cost;
 	gpath->cpath.path.total_cost = startup_cost + run_cost;
