@@ -1268,7 +1268,8 @@ typedef struct
 	List	   *pre_tlist;
 	Bitmapset  *attr_refs;
 	int			extra_flags;
-	bool		gpupreagg_invalid;
+	bool		not_available;
+	const char *not_available_reason;
 } gpupreagg_rewrite_context;
 
 static Node *
@@ -1286,7 +1287,11 @@ gpupreagg_rewrite_mutator(Node *node, gpupreagg_rewrite_context *context)
 										&context->pre_tlist,
 										&context->extra_flags);
 		if (!altagg)
-			context->gpupreagg_invalid = true;
+		{
+			context->not_available = true;
+			context->not_available_reason =
+				"because no alternative functions are supported";
+		}
 		return (Node *) altagg;
 	}
 	else if (IsA(node, Var))
@@ -1307,7 +1312,9 @@ gpupreagg_rewrite_mutator(Node *node, gpupreagg_rewrite_context *context)
 				return copyObject(varnode);
 			}
 		}
-		context->gpupreagg_invalid = true;
+		context->not_available = true;
+		context->not_available_reason =
+			"because var-node referenced non-grouping key";
 		return NULL;
 	}
 	return expression_tree_mutator(node, gpupreagg_rewrite_mutator,
@@ -1368,12 +1375,21 @@ gpupreagg_rewrite_expr(Agg *agg,
 
 			/* grouping key must be a supported data type */
 			dtype = pgstrom_devtype_lookup(type_oid);
-			if (!dtype)
+			if (!dtype || !OidIsValid(dtype->type_eqfunc))
+			{
+				elog(DEBUG1, "Unabled to apply GpuPreAgg "
+					 "because of unsupported data type as grouping key: %s",
+					 format_type_be(type_oid));
 				return false;
+			}
 			/* grouping key type must have equality function on device */
-			if (!OidIsValid(dtype->type_eqfunc) ||
-				!pgstrom_devfunc_lookup(dtype->type_eqfunc, type_coll))
+			if (!pgstrom_devfunc_lookup(dtype->type_eqfunc, type_coll))
+			{
+				elog(DEBUG1, "Unabled to apply GpuPreAgg "
+					 "because of unsupported function in grouping key: %s",
+					 format_procedure(dtype->type_eqfunc));
 				return false;
+			}
 
 			/* check types that needs special treatment */
 			if (type_oid == NUMERICOID)
@@ -1426,8 +1442,13 @@ gpupreagg_rewrite_expr(Agg *agg,
 
 		newtle->expr = (Expr *)gpupreagg_rewrite_mutator((Node *)oldtle->expr,
 														 &context);
-		if (context.gpupreagg_invalid)
+		if (context.not_available)
+		{
+			elog(DEBUG1, "Unable to apply GpuPreAgg because %s: %s",
+				 context.not_available_reason,
+				 nodeToString(oldtle->expr));
 			return false;
+		}
 		type_oid = exprType((Node *)newtle->expr);
 		if (type_oid == NUMERICOID)
 			has_numeric = true;
@@ -1444,8 +1465,13 @@ gpupreagg_rewrite_expr(Agg *agg,
 
 		new_expr = (Expr *)gpupreagg_rewrite_mutator((Node *)old_expr,
 													 &context);
-		if (context.gpupreagg_invalid)
+		if (context.not_available)
+		{
+			elog(DEBUG1, "Unable to apply GpuPreAgg because %s: %s",
+                 context.not_available_reason,
+                 nodeToString(old_expr));
 			return false;
+		}
 		type_oid = exprType((Node *)new_expr);
 		if (type_oid == NUMERICOID)
 			has_numeric = true;
