@@ -1319,7 +1319,7 @@ pgfn_integer_pl_date(cl_int *errcode, pg_int4_t arg1, pg_date_t arg2)
 }
 
 STATIC_FUNCTION(pg_timestamp_t)
-pgfn_timedata_pl(cl_int *errcode, pg_time_t arg1, pg_date_t arg2)
+pgfn_timedate_pl(cl_int *errcode, pg_time_t arg1, pg_date_t arg2)
 {
 	return pgfn_datetime_pl(errcode, arg2, arg1);
 }
