@@ -1650,7 +1650,8 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	PlanState	   *ps = &gjs->gts.css.ss.ps;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
-	TupleDesc		tupdesc = GTS_GET_RESULT_TUPDESC(gjs);
+	TupleDesc		result_tupdesc = GTS_GET_RESULT_TUPDESC(gjs);
+	TupleDesc		scan_tupdesc;
 	int				i;
 
 	/* activate GpuContext for device execution */
@@ -1664,6 +1665,17 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	gjs->gts.cb_task_release = gpujoin_task_release;
 	gjs->gts.cb_next_chunk = gpujoin_next_chunk;
 	gjs->gts.cb_next_tuple = gpujoin_next_tuple;
+
+	/*
+	 * Re-initialization of scan tuple-descriptor and projection-info,
+	 * because commit 1a8a4e5cde2b7755e11bde2ea7897bd650622d3e of
+	 * PostgreSQL makes to assign result of ExecTypeFromTL() instead
+	 * of ExecCleanTypeFromTL; that leads unnecessary projection.
+	 * So, we try to remove junk attributes from the scan-descriptor.
+	 */
+	scan_tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist, false);
+	ExecAssignScanType(&gjs->gts.css.ss, scan_tupdesc);
+	ExecAssignScanProjectionInfoWithVarno(&gjs->gts.css.ss, INDEX_VAR);
 
 	/*
 	 * NOTE: outer_quals, hash_outer_keys and join_quals are intended
@@ -1804,8 +1816,8 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	/* expected kresults buffer expand rate */
 	gjs->result_width =
 		MAXALIGN(offsetof(HeapTupleHeaderData,
-						  t_bits[BITMAPLEN(tupdesc->natts)]) +
-				 (tupdesc->tdhasoid ? sizeof(Oid) : 0)) +
+						  t_bits[BITMAPLEN(result_tupdesc->natts)]) +
+				 (result_tupdesc->tdhasoid ? sizeof(Oid) : 0)) +
 		MAXALIGN(cscan->scan.plan.plan_width);	/* average width */
 	gjs->kmrels_length = gj_info->kmrels_length;
 	gjs->kresults_ratio = gj_info->kresults_ratio;

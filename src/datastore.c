@@ -555,7 +555,7 @@ pgstrom_expand_data_store(GpuContext *gcontext,
 		kds_new->hostptr = (hostptr_t)&kds_new->hostptr;
 		kds_new->length = kds_length_new;
 
-		if (kds_old->format == KDS_FORMAT_ROW)
+		if (kds_new->format == KDS_FORMAT_ROW)
 		{
 			cl_uint	   *tup_index;
 			size_t		shift = kds_length_new - kds_length_old;

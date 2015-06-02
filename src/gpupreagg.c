@@ -2919,6 +2919,7 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	PlanState	   *ps = &node->ss.ps;
 	CustomScan	   *cscan = (CustomScan *) ps->plan;
 	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
+	TupleDesc		tupdesc;
 	int				outer_width;
 
 	/* activate GpuContext for device execution */
@@ -2926,11 +2927,15 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 		gcontext = pgstrom_get_gpucontext();
 	/* common GpuTaskState setup */
 	pgstrom_init_gputaskstate(gcontext, &gpas->gts);
-    gpas->gts.cb_task_process = gpupreagg_task_process;
-    gpas->gts.cb_task_complete = gpupreagg_task_complete;
-    gpas->gts.cb_task_release = gpupreagg_task_release;
-    gpas->gts.cb_next_chunk = gpupreagg_next_chunk;
-    gpas->gts.cb_next_tuple = gpupreagg_next_tuple;
+	gpas->gts.cb_task_process = gpupreagg_task_process;
+	gpas->gts.cb_task_complete = gpupreagg_task_complete;
+	gpas->gts.cb_task_release = gpupreagg_task_release;
+	gpas->gts.cb_next_chunk = gpupreagg_next_chunk;
+	gpas->gts.cb_next_tuple = gpupreagg_next_tuple;
+	/* re-initialization of scan-descriptor and projection-info */
+	tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist, false);
+	ExecAssignScanType(&gpas->gts.css.ss, tupdesc);
+	ExecAssignScanProjectionInfoWithVarno(&gpas->gts.css.ss, INDEX_VAR);
 
 	/*
 	 * initialize own child expression

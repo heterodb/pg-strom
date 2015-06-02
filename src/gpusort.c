@@ -865,6 +865,7 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	GpuSortState   *gss = (GpuSortState *) node;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuSortInfo	   *gs_info = deform_gpusort_info(cscan);
+	TupleDesc		tupdesc;
 
 	/* activate GpuContext for device execution */
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
@@ -877,6 +878,10 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->gts.cb_task_polling = gpusort_task_polling;
 	gss->gts.cb_next_chunk = gpusort_next_chunk;
 	gss->gts.cb_next_tuple = gpusort_next_tuple;
+	/* re-initialization of scan-descriptor and projection-info */
+	tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist, false);
+	ExecAssignScanType(&gss->gts.css.ss, tupdesc);
+	ExecAssignScanProjectionInfoWithVarno(&gss->gts.css.ss, INDEX_VAR);
 
 	/* Like built-in Sort node doing, we shall provide random access
 	 * capability to the sort output, including backward scan or
