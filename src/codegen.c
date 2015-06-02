@@ -536,7 +536,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "datetime_pl", 2, {DATEOID, TIMEOID}, "t/F:datetime_pl" },
 	{ "integer_pl_date", 2, {INT4OID, DATEOID}, "t/F:integer_pl_date" },
 	//{ "time_mi_time", 2, {TIMEOID, TIMEOID}, "t/F:time_mi_time" },
-	{ "timedate_pl", 2, {TIMEOID, DATEOID}, "t/F:timedata_pl" },
+	{ "timedate_pl", 2, {TIMEOID, DATEOID}, "t/F:timedate_pl" },
 	//{ "timestamp_mi", 2, {TIMESTAMPOID, TIMESTAMPOID}, "" },
 	/* comparison between date */
 	{ "date_eq", 2, {DATEOID, DATEOID}, "t/b:==" },

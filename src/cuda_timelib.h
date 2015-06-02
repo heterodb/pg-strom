@@ -18,6 +18,7 @@
 #ifndef CUDA_TIMELIB_H
 #define CUDA_TIMELIB_H
 
+#ifdef __CUDACC__
 /* definitions copied from date.h */
 typedef cl_int		DateADT;
 typedef cl_long		TimeADT;
@@ -54,10 +55,8 @@ typedef cl_int	fsec_t;		/* fractional seconds (in microseconds) */
 #define USECS_PER_MINUTE	INT64CONST(60000000)
 #define USECS_PER_SEC		INT64CONST(1000000)
 
-#ifdef __CUDACC__
 #define DT_NOBEGIN		(-INT64CONST(0x7fffffffffffffff) - 1)
 #define DT_NOEND		(INT64CONST(0x7fffffffffffffff))
-#endif
 
 /* import from timezone/tzfile.h */
 #define SECSPERMIN		60
@@ -102,7 +101,7 @@ typedef cl_int	fsec_t;		/* fractional seconds (in microseconds) */
 #define YEARSPERREPEAT	400		/* years before a Gregorian repeat */
 #define AVGSECSPERYEAR	31556952L
 
-/* import from include//datatype/timestamp.h */
+/* import from include/datatype/timestamp.h */
 #define JULIAN_MINYEAR (-4713)
 #define JULIAN_MINMONTH (11)
 #define JULIAN_MINDAY (24)
@@ -141,8 +140,6 @@ typedef cl_int	fsec_t;		/* fractional seconds (in microseconds) */
 	} while(0)
 
 /* definition copied from pgtime.h */
-#ifdef __CUDACC__
-
 static const int mon_lengths[2][MONSPERYEAR] = {
 	{31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31},
 	{31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
@@ -191,9 +188,7 @@ STROMCL_SIMPLE_TYPE_TEMPLATE(timestamptz,TimestampTz)
 #define PG_INT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int4,cl_int);
 #endif
-#endif
 
-#ifdef __CUDACC__
 /*
  * Support routines
  */
@@ -288,17 +283,8 @@ increment_overflow(int *number, int delta)
 STATIC_INLINE(int)
 leaps_thru_end_of_no_recursive(const int y)
 {
-	if (y >= 0)
-		return y / 4 - y / 100 + y / 400;
-	else
-	{
-#if 1
-		// never reached, here
-		// ASSERT
-#else
-        return -(leaps_thru_end_of_no_recursive(-(y + 1)) + 1);
-#endif
-	}
+	assert(y >= 0);
+	return y / 4 - y / 100 + y / 400;
 }
 
 STATIC_INLINE(int)
@@ -445,23 +431,20 @@ timesub(const cl_long *timep,	/* pg_time_t in original */
 }
 
 STATIC_INLINE(struct pg_tm *)
-localsub_no_recursive(const cl_long *timep, /* pg_time_t in original */
+localsub_no_recursive(const cl_long *timep,	/* pg_time_t in original */
 					  long offset,
 					  struct pg_tm * tmp,
-					  const tz_state *sp)
+					  const tz_state *sp)	/* const pg_tz *tz in original */
 {
 	const tz_ttinfo *ttisp;
 	int			i;
 	struct pg_tm *result;
 	const cl_long t = *timep;	/* pg_time_t in original */
 
+#if 0
 	if ((sp->goback && t < sp->ats[0]) ||
 		(sp->goahead && t > sp->ats[sp->timecnt - 1]))
 	{
-#if 1
-		// never reached, here
-		// ASSERT
-#else
 		cl_long	newt = t;	/* pg_time_t in original */
 		cl_long	seconds;	/* pg_time_t in original */
 		cl_long	tcycles;	/* pg_time_t in original */
@@ -502,8 +485,13 @@ localsub_no_recursive(const cl_long *timep, /* pg_time_t in original */
 				return NULL;
 		}
 		return result;
-#endif
 	}
+#else
+	/* Don't recursive call in this function. */
+	assert(!((sp->goback && t < sp->ats[0]) ||
+			 (sp->goahead && t > sp->ats[sp->timecnt - 1])));
+#endif
+
 	if (sp->timecnt == 0 || t < sp->ats[0])
 	{
 		i = 0;
@@ -542,7 +530,7 @@ STATIC_INLINE(struct pg_tm *)
 localsub(const cl_long *timep, 	/* pg_time_t in original */
 		 long offset,
 		 struct pg_tm * tmp,
-		 const tz_state *sp)
+		 const tz_state *sp	    /* const pg_tz *tz in original*/ )
 {
 	const tz_ttinfo *ttisp;
 	int			i;
@@ -552,9 +540,9 @@ localsub(const cl_long *timep, 	/* pg_time_t in original */
 	if ((sp->goback && t < sp->ats[0]) ||
 		(sp->goahead && t > sp->ats[sp->timecnt - 1]))
 	{
-		cl_long	newt = t;	/* pg_time_t in original */
-		cl_long	seconds;	/* pg_time_t in original */
-		cl_long	tcycles;	/* pg_time_t in original */
+		cl_long	newt = t;		/* pg_time_t in original */
+		cl_long	seconds;		/* pg_time_t in original */
+		cl_long	tcycles;		/* pg_time_t in original */
 		cl_long	icycles;
 
 		if (t < sp->ats[0])
@@ -577,11 +565,10 @@ localsub(const cl_long *timep, 	/* pg_time_t in original */
 		if (newt < sp->ats[0] ||
 			newt > sp->ats[sp->timecnt - 1])
 			return NULL;		/* "cannot happen" */
-
 		result = localsub_no_recursive(&newt, offset, tmp, sp);
 		if (result == tmp)
 		{
-			cl_long	newy;	/* pg_time_t in original */
+			cl_long	newy;		/* pg_time_t in original */
 
 			newy = tmp->tm_year;
 			if (t < sp->ats[0])
@@ -629,24 +616,25 @@ localsub(const cl_long *timep, 	/* pg_time_t in original */
 }
 
 STATIC_INLINE(struct pg_tm *)
-pg_localtime(const cl_long *timep, /* pg_time_t in original */
+pg_localtime(const cl_long *timep,	/* pg_time_t in original */
 			 struct pg_tm *tm,
-			 const tz_state *sp)
+			 const tz_state *sp)	/* const pg_tz *tz in original */
 {
-	// pg_localtime() returns tm if success.
-	// otherwise return NULL.
-	// return localsub(timep, 0L, tm, tz);
+	/*
+	 * pg_localtime() returns tm if success. NULL, elsewhere.
+	 */
 	return localsub(timep, 0L, tm, sp);
 }
 
 STATIC_INLINE(int)
-pg_next_dst_boundary_no_recursive(const cl_long *timep,	/* pg_time_t in original */
-								  long int *before_gmtoff,
-								  int *before_isdst,
-								  cl_long *boundary,		/* pg_time_t in original */
-								  long int *after_gmtoff,
-								  int *after_isdst,
-								  const tz_state *sp)
+pg_next_dst_boundary_no_recursive(
+	const cl_long *timep,		/* pg_time_t in original */
+	long int *before_gmtoff,
+	int *before_isdst,
+	cl_long *boundary,			/* pg_time_t in original */
+	long int *after_gmtoff,
+	int *after_isdst,
+	const tz_state *sp)			/* const pg_tz *tz in original */
 {
 	const tz_ttinfo *ttisp;
 	int			i;
@@ -668,13 +656,10 @@ pg_next_dst_boundary_no_recursive(const cl_long *timep,	/* pg_time_t in original
 		*before_isdst = ttisp->tt_isdst;
 		return 0;
 	}
+#if 0
 	if ((sp->goback && t < sp->ats[0]) ||
 		(sp->goahead && t > sp->ats[sp->timecnt - 1]))
 	{
-#if 1
-		// Never reached here.
-		// ASSERT
-#else
 		/* For values outside the transition table, extrapolate */
 		cl_long	newt = t;	/* pg_time_t in original */
 		cl_long	seconds;	/* pg_time_t in original */
@@ -714,8 +699,12 @@ pg_next_dst_boundary_no_recursive(const cl_long *timep,	/* pg_time_t in original
 		else
 			*boundary += seconds;
 		return result;
-#endif
 	}
+#else
+	/* Don't recursive call in this function. */
+	assert(!((sp->goback && t < sp->ats[0]) ||
+			 (sp->goahead && t > sp->ats[sp->timecnt - 1])));
+#endif
 
 	if (t >= sp->ats[sp->timecnt - 1])
 	{
@@ -776,13 +765,13 @@ pg_next_dst_boundary_no_recursive(const cl_long *timep,	/* pg_time_t in original
 }
 
 STATIC_INLINE(int)
-pg_next_dst_boundary(const cl_long *timep, /* pg_time_t in original */
+pg_next_dst_boundary(const cl_long *timep,	/* pg_time_t in original */
 					 long int *before_gmtoff,
 					 int *before_isdst,
-					 cl_long *boundary,	/* pg_time_t in original */
+					 cl_long *boundary,		/* pg_time_t in original */
 					 long int *after_gmtoff,
 					 int *after_isdst,
-					 const tz_state *sp)
+					 const tz_state *sp)	/* const pg_tz *tz in original */
 {
 	const tz_ttinfo *ttisp;
 	int			i;
@@ -908,14 +897,15 @@ pg_next_dst_boundary(const cl_long *timep, /* pg_time_t in original */
 
 STATIC_INLINE(cl_int)
 DetermineTimeZoneOffset(struct pg_tm *tm,
-						const tz_state *sp)
+						const tz_state *sp)	/* pg_tz *tzp in original */
 {
-	cl_long t;	/* pg_time_t in original */
+	cl_long t;					/* pg_time_t in original */
 
-	cl_long	*tp = &t;	/* pg_time_t in original */
+	cl_long	*tp = &t;			/* pg_time_t in original */
 
 	int		date, sec;
-	cl_long	day, mytime, prevtime, boundary, beforetime, aftertime;	/* pg_time_t in original */
+	cl_long	day, mytime, boundary; /* pg_time_t in original */
+	cl_long	prevtime, beforetime, aftertime; /* pg_time_t in original */
 	long	before_gmtoff,after_gmtoff;
 	int		before_isdst, after_isdst;
 	int		res;
@@ -933,7 +923,8 @@ DetermineTimeZoneOffset(struct pg_tm *tm,
 	day = ((cl_long) date) * SECS_PER_DAY;
 	if (day / SECS_PER_DAY != date)
 		goto overflow;
-	sec = tm->tm_sec + (tm->tm_min + tm->tm_hour * MINS_PER_HOUR) * SECS_PER_MINUTE;
+	sec = (tm->tm_sec +
+		   (tm->tm_min + tm->tm_hour * MINS_PER_HOUR) * SECS_PER_MINUTE);
 	mytime = day + sec;
 	/* since sec >= 0, overflow could only be from +day to -mytime */
 	if (mytime < 0 && day > 0)
@@ -1027,7 +1018,7 @@ overflow:
 /* simplified version; no timezone support now */
 STATIC_INLINE(cl_bool)
 timestamp2tm(Timestamp dt, int *tzp, struct pg_tm *tm, fsec_t *fsec,
-			 const tz_state *sp)
+			 const tz_state *sp)	/* pg_tz *attimezone in original */
 {
 	cl_long		date;	/* Timestamp in original */
 	cl_long		time;	/* Timestamp in original */
@@ -1328,7 +1319,7 @@ pgfn_integer_pl_date(cl_int *errcode, pg_int4_t arg1, pg_date_t arg2)
 }
 
 STATIC_FUNCTION(pg_timestamp_t)
-pgfn_timedata_pl(cl_int *errcode, pg_time_t arg1, pg_date_t arg2)
+pgfn_timedate_pl(cl_int *errcode, pg_time_t arg1, pg_date_t arg2)
 {
 	return pgfn_datetime_pl(errcode, arg2, arg1);
 }
@@ -2105,6 +2096,7 @@ pgfn_timestamptz_ne_timestamp(cl_int *errcode,
 }
 
 #else	/* __CUDACC__ */
+
 #include "pgtime.h"
 
 /*
@@ -2117,11 +2109,8 @@ pgfn_timestamptz_ne_timestamp(cl_int *errcode,
 
 /* copied from src/timezone/tzfile.h */
 #define TZ_MAX_TIMES	1200
-
 #define TZ_MAX_TYPES	256		/* Limited by what (uchar)'s can hold */
-
 #define TZ_MAX_CHARS	50		/* Maximum number of abbreviation characters */
-
 #define TZ_MAX_LEAPS	50		/* Maximum number of leap second corrections */
 
 /* copied from src/timezone/pgtz.h */
@@ -2210,7 +2199,8 @@ assign_timelib_session_info(StringInfo buf)
 		"    tz_ttinfo       ttis[%d];\n"
 		"    /* GPU kernel does not use chars[] */\n"
 		"    tz_lsinfo       lsis[%d];\n"
-		"} tz_state;\n",
+		"} tz_state;\n"
+		"\n",
 		sp->timecnt,
 		sp->timecnt,
 		sp->typecnt,
@@ -2289,7 +2279,7 @@ assign_timelib_session_info(StringInfo buf)
 		{
 			appendStringInfo(
 				buf,
-				"        { %lld, %ld },\n",
+				"        { %ld, %ld },\n",
 				sp->lsis[i].ls_trans,
 				sp->lsis[i].ls_corr);
 		}
