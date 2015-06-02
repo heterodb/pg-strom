@@ -826,6 +826,7 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	if (IsA(subplan, CustomScan))
 		((CustomScan *) subplan)->flags |= CUSTOMPATH_PREFERE_ROW_FORMAT;
 	outerPlan(cscan) = subplan;
+	cscan->scan.plan.initPlan = sort->plan.initPlan;
 
 	pgstrom_init_codegen_context(&context);
 	gs_info.kern_source = pgstrom_gpusort_codegen(sort, &context);
