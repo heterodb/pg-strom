@@ -617,11 +617,9 @@ static void
 gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 {
 	Relation		scan_rel = node->ss.ss_currentRelation;
-	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuContext	   *gcontext = NULL;
 	GpuScanState   *gss = (GpuScanState *) node;
 	GpuScanInfo	   *gs_info = deform_gpuscan_info(node->ss.ps.plan);
-	TupleDesc		tupdesc;
 
 	/* gpuscan should not have inner/outer plan right now */
 	Assert(outerPlan(node) == NULL);
@@ -637,11 +635,6 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->gts.cb_task_release = pgstrom_release_gpuscan;
 	gss->gts.cb_next_chunk = gpuscan_next_chunk;
 	gss->gts.cb_next_tuple = gpuscan_next_tuple;
-
-	/* re-initialization of scan-descriptor and projection-info */
-	tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist, false);
-	ExecAssignScanType(&gss->gts.css.ss, tupdesc);
-	ExecAssignScanProjectionInfoWithVarno(&gss->gts.css.ss, INDEX_VAR);
 
 	/* initialize the start/end position */
 	gss->curr_blknum = 0;
