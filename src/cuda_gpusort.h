@@ -146,14 +146,11 @@ gpusort_preparation(kern_gpusort *kgpusort,		/* in */
 	int			errcode = StromError_Success;
 
 	/* sanity checks */
-	if (kresults->nrels != 2 ||
-		kresults->nitems != nitems ||
-		ktoast->format != KDS_FORMAT_ROW ||
-		kds->format != KDS_FORMAT_SLOT)
-	{
-		STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption);
-		goto out;
-	}
+	assert(kresults->nrels == 2);
+	assert(kresults->nitems == nitems);
+	assert(ktoast->format == KDS_FORMAT_ROW);
+	assert(kds->format == KDS_FORMAT_SLOT);
+
 	if (kds->nrooms < nitems)
 	{
 		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
@@ -390,17 +387,14 @@ gpusort_fixup_datastore(kern_gpusort *kgpusort,
 		cl_char	   *ts_isnull;
 
 		htup = kern_get_tuple_row(ktoast, get_global_id());
-		if (!htup)
-			STROM_SET_ERROR(&errcode, StromError_DataStoreCorruption);
-		else
-		{
-			ts_values = KERN_DATA_STORE_VALUES(kds, get_global_id());
-			ts_isnull = KERN_DATA_STORE_ISNULL(kds, get_global_id());
-			gpusort_fixup_variables(&errcode,
-									ts_values,
-									ts_isnull,
-									ktoast, htup);
-		}
+		assert(htup != NULL);
+
+		ts_values = KERN_DATA_STORE_VALUES(kds, get_global_id());
+		ts_isnull = KERN_DATA_STORE_ISNULL(kds, get_global_id());
+		gpusort_fixup_variables(&errcode,
+								ts_values,
+								ts_isnull,
+								ktoast, htup);
 	}
 	kern_writeback_error_status(&kresults->errcode, errcode);
 }

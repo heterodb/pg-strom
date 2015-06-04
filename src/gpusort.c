@@ -1483,7 +1483,10 @@ gpusort_task_complete(GpuTask *gtask)
 		gpusort_cleanup_cuda_resources(gpusort);
 
 		if (gpusort->task.errcode == StromError_CpuReCheck)
+		{
 			gpusort_fallback_quicksort(gss, gpusort);
+			gpusort->task.errcode = StromError_Success;
+		}
 	}
 	else
 	{
@@ -2378,8 +2381,6 @@ deform_pgstrom_flat_gpusort(dsm_segment *dsm_seg)
 	return gpusort;
 }
 
-
-
 /*
  * gpusort_fallback_gpu_chunks
  *
@@ -2399,7 +2400,7 @@ __gpusort_fallback_compare(GpuSortState *gss,
 	{
 		SortSupport		ssup = gss->ssup_keys + i;
 
-		j = ssup->ssup_attno;
+		j = ssup->ssup_attno - 1;
 		comp = ApplySortComparator(x_values[j],
 								   x_isnull[j],
 								   p_values[j],
@@ -2415,37 +2416,44 @@ static void
 __gpusort_fallback_quicksort(GpuSortState *gss,
 							 kern_resultbuf *kresults,
 							 kern_data_store *kds,
-							 cl_uint l_index, cl_uint r_index)
+							 cl_int l_bound, cl_int r_bound)
 {
-	if (l_index < r_index)
+	if (l_bound <= r_bound)
 	{
-		cl_uint		i = l_index;
-		cl_uint		j = r_index;
-		cl_uint		p_index = (l_index + r_index) / 2;
+		cl_int		l_index = l_bound;
+		cl_int		r_index = r_bound;
+		cl_int		p_index = kresults->results[(l_index + r_index) | 0x0001];
 		Datum	   *p_values = (Datum *) KERN_DATA_STORE_VALUES(kds, p_index);
 		bool	   *p_isnull = (bool *) KERN_DATA_STORE_ISNULL(kds, p_index);
-		int			temp;
 
-		while (true)
+		while (l_index <= r_index)
 		{
-			while (__gpusort_fallback_compare(gss, kds, i,
+			while (l_index <= r_bound &&
+				   __gpusort_fallback_compare(gss, kds,
+											  kresults->results[2*l_index + 1],
 											  p_values, p_isnull) < 0)
-				i++;
-			while (__gpusort_fallback_compare(gss, kds, j,
+				l_index++;
+			while (r_index >= l_bound &&
+				   __gpusort_fallback_compare(gss, kds,
+											  kresults->results[2*r_index + 1],
 											  p_values, p_isnull) > 0)
-				j--;
-			if (i >= j)
-				break;
-			/* swap index */
-			temp = kresults->results[2 * i + 1];
-			kresults->results[2 * i + 1] = kresults->results[2 * j + 1];
-			kresults->results[2 * j + 1] = temp;
-			/* make index advanced */
-			i++;
-			j--;
+				r_index--;
+
+			if (l_index <= r_index)
+			{
+				cl_int	l_prev = kresults->results[2*l_index + 1];
+				cl_int	r_prev = kresults->results[2*r_index + 1];
+
+				Assert(kresults->results[2*l_index] ==
+					   kresults->results[2*r_index]);
+				kresults->results[2*l_index + 1] = r_prev;
+				kresults->results[2*r_index + 1] = l_prev;
+				l_index++;
+				r_index--;
+			}
 		}
-		__gpusort_fallback_quicksort(gss, kresults, kds, l_index, i - 1);
-		__gpusort_fallback_quicksort(gss, kresults, kds, j + 1, r_index);
+		__gpusort_fallback_quicksort(gss, kresults, kds, l_bound, r_index);
+		__gpusort_fallback_quicksort(gss, kresults, kds, l_index, r_bound);
 	}
 }
 
@@ -2489,30 +2497,11 @@ gpusort_fallback_quicksort(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	 * receive DMA will back already flatten data store in kds/ktoast.
 	 */
 	Assert(kds->nitems == nitems);
-#ifdef NOT_USED
-	slot = gss->css.ss.ss_ScanTupleSlot;
 	for (i=0; i < nitems; i++)
 	{
-		kresults->results[2 * i] = gpusort->chunk_id;
-		kresults->results[2 * i + 1] = i;
-
-		tts_values = (Datum *) KERN_DATA_STORE_VALUES(kds, i);
-		tts_isnull = (bool *) KERN_DATA_STORE_ISNULL(kds, i);
-
-		if (!pgstrom_fetch_data_store(slot, ptoast, i, NULL))
-			elog(ERROR, "failed to fetch a tuple from data-store");
-		slot_getallattrs(slot);
-
-		/* NOTE: varlena is store as host accessable pointer */
-		for (j=0; j < gss->numCols; j++)
-		{
-			SortSupport		ssup = ssup_keys + i;
-
-			tts_values[j] = slot->tts_values[ssup->ssup_attno - 1];
-			tts_isnull[j] = slot->tts_isnull[ssup->ssup_attno - 1];
-		}
+		kresults->results[2*i] = gpusort->chunk_id;
+		kresults->results[2*i + 1] = i;
 	}
-#endif
 	/* fallback execution with QuickSort */
 	__gpusort_fallback_quicksort(gss, kresults, kds, 0, nitems - 1);
 
