@@ -789,6 +789,26 @@ pgstrom_release_gpucontext(GpuContext *gcontext)
 	memset(&gcontext->chain, 0, sizeof(dlist_node));
 
 	/*
+	 * Synchronization of all the asynchronouse events, if any
+	 */
+	for (i=0; i < gcontext->num_context; i++)
+	{
+		rc = cuCtxSetCurrent(gcontext->gpu[i].cuda_context);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuCtxSetCurrent: %s", errorText(rc));
+
+		rc = cuCtxSynchronize();
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuCtxSynchronize: %s", errorText(rc));
+	}
+	/* Ensure CUDA context is empty */
+	rc = cuCtxSetCurrent(NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(WARNING, "failed on cuCtxSetCurrent(NULL): %s", errorText(rc));
+
+
+
+	/*
 	 * Release pgstrom_data_store; because KDS_FORMAT_ROW may have mmap(2)
 	 * state in case of file-mapped data-store, so we have to ensure
 	 * these temporary files are removed and unmapped.
@@ -800,13 +820,6 @@ pgstrom_release_gpucontext(GpuContext *gcontext)
 							dlist_head_node(&gcontext->pds_list));
 		pgstrom_release_data_store(pds);
 	}
-
-	/*
-	 * Ensure CUDA context is empty
-	 */
-	rc = cuCtxSetCurrent(NULL);
-	if (rc != CUDA_SUCCESS)
-		elog(WARNING, "failed on cuCtxSetCurrent(NULL): %s", errorText(rc));
 
 	/*
 	 * NOTE: Be careful to drop the primary CUDA context because it also
