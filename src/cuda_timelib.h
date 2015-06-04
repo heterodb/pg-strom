@@ -2201,8 +2201,8 @@ assign_timelib_session_info(StringInfo buf)
 		"    tz_lsinfo       lsis[%d];\n"
 		"} tz_state;\n"
 		"\n",
-		sp->timecnt,
-		sp->timecnt,
+		sp->timecnt <= 0 ? 1 : sp->timecnt,
+		sp->timecnt <= 0 ? 1 : sp->timecnt,
 		sp->typecnt,
 		sp->leapcnt <= 0 ? 1 : sp->leapcnt
 		);
@@ -2227,12 +2227,17 @@ assign_timelib_session_info(StringInfo buf)
 		sp->goback,
 		sp->goahead);
 
-	for (i=0; i < sp->timecnt; i++)
+	if (sp->timecnt <= 0)
+		appendStringInfo(buf, "        0\n");
+	else 
 	{
-		appendStringInfo(
-			buf,
-			"        %ld,\n",
-			sp->ats[i]);
+		for (i=0; i < sp->timecnt; i++)
+		{
+			appendStringInfo(
+				buf,
+				"        %ld,\n",
+				sp->ats[i]);
+		}
 	}
 
 	appendStringInfo(
@@ -2240,11 +2245,16 @@ assign_timelib_session_info(StringInfo buf)
 		"    },\n"
 		"    {    /* types[] */");
 
-	for (i=0; i < sp->timecnt; i++)
+	if (sp->timecnt <= 0)
+		appendStringInfo(buf, "\n        0");
+	else 
 	{
-		if ((i % 12) == 0)
-			appendStringInfo(buf, "\n       ");
-		appendStringInfo(buf, " %d,", sp->types[i]);
+		for (i=0; i < sp->timecnt; i++)
+		{
+			if ((i % 12) == 0)
+				appendStringInfo(buf, "\n       ");
+			appendStringInfo(buf, " %d,", sp->types[i]);
+		}
 	}
 
 	appendStringInfo(
@@ -2267,12 +2277,11 @@ assign_timelib_session_info(StringInfo buf)
 
 	appendStringInfo(
 		buf,
-		"\n"
 		"    },\n"
 		"    {    /* lsis[] */\n");
 
 	if (sp->leapcnt <= 0)
-		appendStringInfo(buf, "        { 0, 0 },\n");
+		appendStringInfo(buf, "        { 0, 0 }\n");
 	else 
 	{
 		for (i=0; i < sp->leapcnt; i++)
