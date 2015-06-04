@@ -401,6 +401,17 @@ pgstrom_recursive_grafter(PlannedStmt *pstmt, Plan **p_curr_plan)
 				}
 			}
 			break;
+		case T_CustomScan:
+			{
+				CustomScan *cscan = (CustomScan *) plan;
+
+				foreach (lc, cscan->custom_children)
+				{
+					Plan  **p_subplan = (Plan **) &lfirst(lc);
+					pgstrom_recursive_grafter(pstmt, p_subplan);
+				}
+			}
+			break;
 		default:
 			/* nothing to do, keep existgin one */
 			break;
