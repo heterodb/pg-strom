@@ -4015,7 +4015,7 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs,
 		if (!pgstrom_data_store_insert_tuple(pds_heap, scan_slot))
 		{
 			/* to be inserted on the next try */
-			Assert(istate->scan_overflow = NULL);
+			Assert(istate->scan_overflow == NULL);
 			istate->scan_overflow = scan_slot;
 
 			/*
