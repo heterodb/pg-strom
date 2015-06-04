@@ -806,8 +806,6 @@ pgstrom_release_gpucontext(GpuContext *gcontext)
 	if (rc != CUDA_SUCCESS)
 		elog(WARNING, "failed on cuCtxSetCurrent(NULL): %s", errorText(rc));
 
-
-
 	/*
 	 * Release pgstrom_data_store; because KDS_FORMAT_ROW may have mmap(2)
 	 * state in case of file-mapped data-store, so we have to ensure

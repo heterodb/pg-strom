@@ -737,6 +737,9 @@ pgstrom_create_data_store_hash(GpuContext *gcontext,
 	kds->format = KDS_FORMAT_HASH;
 	kds->nslots = nslots;
 
+	/* zero clear of hash slots */
+	memset(KERN_DATA_STORE_HASHSLOT(kds), 0, sizeof(cl_uint) * nslots);
+
 	return pds;
 }
 
