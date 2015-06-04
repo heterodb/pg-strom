@@ -1191,7 +1191,18 @@ codegen_expression_walker(Node *node, codegen_context *context)
 
 		if (!pgstrom_devtype_lookup_and_track(con->consttype, context))
 			return false;
-
+#ifdef NOT_USED
+		/*
+		 * Even though we have identical Const node in used_params list,
+		 * we never reuse it to avoid too frequent GPU kernel build.
+		 * Assume the following expression.
+		 *   ... WHERE sqrt((x - 10)^2) < 2
+		 * Next time, people may want to use
+		 *   ... WHERE sqrt((x - 10)^2) < 5
+		 * If identical Const node would be mapped to the same kernel
+		 * parameters, second expression will take 3 individual parameters,
+		 * thus, it leads unnecessary GPU kernel build.
+		 */
 		foreach (cell, context->used_params)
 		{
 			if (equal(node, lfirst(cell)))
@@ -1203,6 +1214,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			}
 			index++;
 		}
+#endif
 		context->used_params = lappend(context->used_params,
 									   copyObject(node));
 		index = list_length(context->used_params) - 1;
