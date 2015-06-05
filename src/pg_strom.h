@@ -229,6 +229,7 @@ typedef struct
 		CUdevice	cuda_device;
 		CUcontext	cuda_context;
 		GpuMemHead	cuda_memory;	/* wrapper of device memory allocation */
+		size_t		gmem_used;		/* device memory allocated */
 	} gpu[FLEXIBLE_ARRAY_MEMBER];
 } GpuContext;
 
@@ -441,6 +442,7 @@ extern void pgstrom_compute_workgroup_size_2d(size_t *p_grid_xsize,
 extern void pgstrom_init_cuda_control(void);
 extern int pgstrom_baseline_cuda_capability(void);
 extern const char *errorText(int errcode);
+extern Datum pgstrom_scoreboard_info(PG_FUNCTION_ARGS);
 extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 
 /*

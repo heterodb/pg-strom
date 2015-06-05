@@ -16,6 +16,15 @@ CREATE FUNCTION pgstrom_device_info()
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
 
+CREATE TYPE __pgstrom_scoreboard_info AS (
+  attribute	text,
+  value		text
+);
+CREATE FUNCTION pgstrom_scoreboard_info()
+  RETURNS SETOF __pgstrom_scoreboard_info
+  AS 'MODULE_PATHNAME'
+  LANGUAGE C STRICT;
+
 CREATE TYPE __pgstrom_program_info AS (
   addr			int8,
   length		int8,

@@ -19,6 +19,7 @@
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "lib/ilist.h"
+#include "port/atomics.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/proc.h"
@@ -56,22 +57,38 @@ static shmem_startup_hook_type shmem_startup_next;
  * ----------------------------------------------------------------
  */
 typedef struct {
-	volatile slock_t lock;
-	cl_uint			num_devices;
-	cl_uint			num_backends;
+	cl_uint				num_devices;	/* never updated */
+	pg_atomic_uint32	num_gcontext;	/* total number of GpuContext */
 	struct {
-		size_t		gmem_size;
-		size_t		gmem_used;
+		cl_ulong			gmem_size;	/* never updated */
+		pg_atomic_uint64	gmem_used;	/* total amount of DRAM usage */
 	} gpu[FLEXIBLE_ARRAY_MEMBER];
 } GpuScoreBoard;
 
-static GpuScoreBoard	   *gpu_score_board;
+static GpuScoreBoard	   *gpuScoreBoard;
+
+#define GpuScoreCurrNumContext()				\
+	pg_atomic_read_u32(&gpuScoreBoard->num_gcontext)
+#define GpuScoreCurrMemUsage(cuda_index)		\
+	pg_atomic_read_u64(&gpuScoreBoard->gpu[(cuda_index)].gmem_used)
+#define GpuScoreInclMemUsage(gcontext,cuda_index,size)		\
+	do {													\
+		pg_atomic_fetch_add_u64(&gpuScoreBoard->gpu[(cuda_index)].gmem_used, \
+								(size));					\
+		gcontext->gpu[(cuda_index)].gmem_used += (size);	\
+	} while(0)
+#define GpuScoreDeclMemUsage(gcontext,cuda_index,size)		\
+	do {													\
+		pg_atomic_fetch_sub_u64(&gpuScoreBoard->gpu[(cuda_index)].gmem_used, \
+								(size));					\
+		(gcontext)->gpu[(cuda_index)].gmem_used -= (size);	\
+	} while(0)
 
 static void
 cleanup_cuda_score_board(int code, Datum arg)
 {
 	/*
-	 * decrement usage of gmem_used for each active GpuContext
+	 * TODO: decrement usage of gmem_used for each active GpuContext
 	 */
 }
 
@@ -278,6 +295,8 @@ __gpuMemAlloc(GpuContext *gcontext, int cuda_index, size_t bytesize)
 	CUdeviceptr		block_addr;
 	CUresult		rc;
 	int				index;
+	uint32			curr_numcxt;
+	size_t			curr_limit;
 	size_t			required;
 
 	/* round up to 1KB align */
@@ -335,6 +354,32 @@ __gpuMemAlloc(GpuContext *gcontext, int cuda_index, size_t bytesize)
 	}
 #endif
 	/*
+	 * NOTE: GPU device memory allocation limit.
+	 * We assume GPU has relatively small amount of RAM compared to the
+	 * host system, so large concurrent job easily makes memory starvation.
+	 * So, we put a resource limitation here to avoid overconsumption.
+	 * Individual backends cannot allocate device memory over the
+	 *   (total size of device memory) / sqrt(1 + (num of GpuContext))
+	 * constraint.
+	 */
+	curr_numcxt = GpuScoreCurrNumContext();
+	curr_limit = ((double)gpuScoreBoard->gpu[cuda_index].gmem_size /
+				  sqrt((double)(curr_numcxt + 1)));
+	if (gcontext->gpu[cuda_index].gmem_used >= curr_limit)
+	{
+		/*
+		 * Even if GPU memory usage is larger than threshold, we may be
+		 * able to allocate amount of actually allocated is smaller than
+		 * expectation, we allow GPU memory allocation.
+		 */
+
+		/* TODO: rule to allow device memory */
+		/* GpuScoreCurrMemUsage(cuda_index) */
+
+		return 0UL;		/* need to wait... */
+	}
+
+	/*
 	 * TODO: too frequent device memory allocation request will lock
 	 * down the system. We may need to have cooling-down time here.
 	 */
@@ -345,6 +390,9 @@ __gpuMemAlloc(GpuContext *gcontext, int cuda_index, size_t bytesize)
 			return 0UL;		/* need to wait... */
 		elog(ERROR, "failed on cuMemAlloc: %s", errorText(rc));
 	}
+	/* update scoreboard for resource control */
+	GpuScoreInclMemUsage(gcontext, cuda_index, required);
+
 	elog(DEBUG1, "cuMemAlloc(%08zx - %08zx, size=%zuMB)",
 		 (size_t)(block_addr),
 		 (size_t)(block_addr + required),
@@ -600,7 +648,10 @@ found:
 
 			rc = cuCtxPopCurrent(NULL);
 			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuCtxPopCurrent: %s", errorText(rc));
+				elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+
+			/* update scoreboard for resource control */
+			GpuScoreDeclMemUsage(gcontext, cuda_index, gm_block->block_size);
 
 			elog(DEBUG1, "cuMemFree(%08zx - %08zx, size=%zuMB)",
 				 (size_t)gm_block->block_addr,
@@ -718,6 +769,9 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 		}
 		gcontext->num_context = cuda_num_devices;
 		gcontext->next_context = (MyProc->pgprocno % cuda_num_devices);
+
+		/* Update the scoreboard of GPU usage */
+		pg_atomic_fetch_add_u32(&gpuScoreBoard->num_gcontext, 1);
 	}
 	PG_CATCH();
 	{
@@ -818,6 +872,13 @@ pgstrom_release_gpucontext(GpuContext *gcontext)
 							dlist_head_node(&gcontext->pds_list));
 		pgstrom_release_data_store(pds);
 	}
+
+	/*
+	 * Update GPU resource usage scoreboard
+	 */
+	for (i=0; i < gcontext->num_context; i++)
+		GpuScoreDeclMemUsage(gcontext, i, gcontext->gpu[i].gmem_used);
+	pg_atomic_fetch_sub_u32(&gpuScoreBoard->num_gcontext, 1);
 
 	/*
 	 * NOTE: Be careful to drop the primary CUDA context because it also
@@ -1861,22 +1922,20 @@ pgstrom_startup_cuda_control(void)
 	Assert(list_length(cuda_device_ordinals) ==
 		   list_length(cuda_device_mem_sizes));
 	num_devices = list_length(cuda_device_mem_sizes);
-	gpu_score_board = ShmemInitStruct("PG-Strom GPU Score Board",
-									  offsetof(GpuScoreBoard,
-											   gpu[num_devices]), &found);
+	gpuScoreBoard = ShmemInitStruct("PG-Strom GPU Score Board",
+									offsetof(GpuScoreBoard,
+											 gpu[num_devices]), &found);
 	if (found)
 		elog(ERROR, "Bug? shared memory for GPU score board already exists");
 
 	/* initialize fields */
-	SpinLockInit(&gpu_score_board->lock);
-	gpu_score_board->num_devices = num_devices;
-	gpu_score_board->num_backends = 0;
+	memset(gpuScoreBoard, 0, offsetof(GpuScoreBoard, gpu[num_devices]));
 	i = 0;
+	gpuScoreBoard->num_devices = num_devices;
 	foreach (lc, cuda_device_mem_sizes)
 	{
-		size_t		dev_memsz = lfirst_int(lc);
-		gpu_score_board->gpu[i].gmem_size = (dev_memsz << 20);
-		gpu_score_board->gpu[i].gmem_used = 0;
+		gpuScoreBoard->gpu[i].gmem_size = ((size_t)lfirst_int(lc) << 20);
+		i++;
 	}
 }
 
@@ -2050,6 +2109,89 @@ errorText(int errcode)
 	}
 	return buffer;
 }
+
+/*
+ * pgstrom_scoreboard_info
+ *
+ *
+ */
+Datum
+pgstrom_scoreboard_info(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *fncxt;
+	const char	   *att_name;
+	char		   *att_value;
+	Datum			values[2];
+	bool			isnull[2];
+	HeapTuple		tuple;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		TupleDesc		tupdesc;
+		MemoryContext	oldcxt;
+
+		fncxt = SRF_FIRSTCALL_INIT();
+        oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(2, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "attribute",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "value",
+						   TEXTOID, -1, 0);
+		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
+
+		fncxt->user_fctx = 0;
+
+		MemoryContextSwitchTo(oldcxt);
+	}
+	fncxt = SRF_PERCALL_SETUP();
+
+	if (fncxt->call_cntr == 0)
+	{
+		att_name = "num devices";
+		att_value = psprintf("%u", gpuScoreBoard->num_devices);
+	}
+	else if (fncxt->call_cntr == 1)
+	{
+		att_name = "num contexts";
+		att_value = psprintf("%u", GpuScoreCurrNumContext());
+	}
+	else if (fncxt->call_cntr < 2 + 2 * gpuScoreBoard->num_devices)
+	{
+		int		cuda_index = (fncxt->call_cntr - 2) / 2;
+		int		attr_index = (fncxt->call_cntr - 2) % 2;
+		size_t	length;
+
+		switch (attr_index)
+		{
+			case 0:
+				length = gpuScoreBoard->gpu[cuda_index].gmem_size;
+				att_name = psprintf("GPU RAM size %u", cuda_index);
+				att_value = psprintf("%zu MB", length >> 20);
+				break;
+			case 1:
+				length = GpuScoreCurrMemUsage(cuda_index);
+				att_name = psprintf("GPU RAM usage %u", cuda_index);
+				att_value = psprintf("%zu MB", length >> 20);
+				break;
+			default:
+				elog(ERROR, "unexpected attribute of pgstrom_scoreboard_info");
+				break;
+		}
+	}
+	else
+		SRF_RETURN_DONE(fncxt);
+
+	memset(isnull, 0, sizeof(isnull));
+	values[0] = CStringGetTextDatum(att_name);
+	values[1] = CStringGetTextDatum(att_value);
+
+	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
+
+	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
+}
+PG_FUNCTION_INFO_V1(pgstrom_scoreboard_info);
+
 
 /*
  * pgstrom_device_info
