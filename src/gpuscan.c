@@ -979,9 +979,6 @@ gpuscan_cleanup_cuda_resources(pgstrom_gpuscan *gpuscan)
 	CUDA_EVENT_DESTROY(gpuscan,ev_dma_send_stop);
 	CUDA_EVENT_DESTROY(gpuscan,ev_dma_send_start);
 
-	if (gpuscan->m_kds)
-		gpuMemFree(&gpuscan->task, gpuscan->m_kds);
-
 	if (gpuscan->m_gpuscan)
 		gpuMemFree(&gpuscan->task, gpuscan->m_gpuscan);
 
@@ -1109,15 +1106,14 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	/*
 	 * Allocation of device memory
 	 */
-	length = KERN_GPUSCAN_LENGTH(&gpuscan->kern);
+	length = (GPUMEMALIGN(KERN_GPUSCAN_LENGTH(&gpuscan->kern)) +
+			  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds->kds)));
 	gpuscan->m_gpuscan = gpuMemAlloc(&gpuscan->task, length);
 	if (!gpuscan->m_gpuscan)
 		goto out_of_resource;
 
-	length = KERN_DATA_STORE_LENGTH(pds->kds);
-	gpuscan->m_kds = gpuMemAlloc(&gpuscan->task, length);
-	if (!gpuscan->m_kds)
-		goto out_of_resource;
+	gpuscan->m_kds = (gpuscan->m_gpuscan +
+					  GPUMEMALIGN(KERN_GPUSCAN_LENGTH(&gpuscan->kern)));
 
 	/*
 	 * Creation of event objects, if any

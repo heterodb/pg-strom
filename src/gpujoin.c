@@ -2855,10 +2855,6 @@ gpujoin_cleanup_cuda_resources(pgstrom_gpujoin *pgjoin)
 
 	if (pgjoin->m_kgjoin)
 		gpuMemFree(&pgjoin->task, pgjoin->m_kgjoin);
-	if (pgjoin->m_kds_src)
-		gpuMemFree(&pgjoin->task, pgjoin->m_kds_src);
-	if (pgjoin->m_kds_dst)
-		gpuMemFree(&pgjoin->task, pgjoin->m_kds_dst);
 	if (pgjoin->m_kmrels)
 		multirels_put_buffer(pgjoin->pmrels, &pgjoin->task);
 
@@ -3121,6 +3117,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	GpuJoinState   *gjs = (GpuJoinState *) pgjoin->task.gts;
 	const char	   *kern_proj_name;
 	Size			length;
+	Size			total_length;
 	size_t			total_items;
 	size_t			outer_ntuples;
 	size_t			grid_xsize;
@@ -3198,23 +3195,19 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	pgjoin->kern.kresults_total_items = total_items;
 	pgjoin->kern.kresults_max_items = 0;
 	pgjoin->kern.errcode = StromError_Success;
-
 	length = pgjoin->kern.kresults_1_offset + 2 * length;
-	pgjoin->m_kgjoin = gpuMemAlloc(&pgjoin->task, length);
+
+	total_length = (GPUMEMALIGN(length) +
+					GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_src->kds)) +
+					GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_dst->kds)));
+	pgjoin->m_kgjoin = gpuMemAlloc(&pgjoin->task, total_length);
 	if (!pgjoin->m_kgjoin)
 		goto out_of_resource;
-
 	/* kern_data_store *kds_src */
-	length = KERN_DATA_STORE_LENGTH(pds_src->kds);
-	pgjoin->m_kds_src = gpuMemAlloc(&pgjoin->task, length);
-	if (!pgjoin->m_kds_src)
-		goto out_of_resource;
-
+	pgjoin->m_kds_src = pgjoin->m_kgjoin + GPUMEMALIGN(length);
 	/* kern_data_store *kds_dst */
-	length = KERN_DATA_STORE_LENGTH(pds_dst->kds);
-	pgjoin->m_kds_dst = gpuMemAlloc(&pgjoin->task, length);
-	if (!pgjoin->m_kds_dst)
-		goto out_of_resource;
+	pgjoin->m_kds_dst = (pgjoin->m_kds_src +
+						 GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_src->kds)));
 
 	/*
 	 * Creation of event objects, if needed

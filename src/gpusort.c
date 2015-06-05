@@ -1283,10 +1283,6 @@ gpusort_cleanup_cuda_resources(pgstrom_gpusort *gpusort)
 {
 	if (gpusort->m_gpusort)
 		gpuMemFree(&gpusort->task, gpusort->m_gpusort);
-	if (gpusort->m_kds)
-		gpuMemFree(&gpusort->task, gpusort->m_kds);
-	if (gpusort->m_ktoast)
-		gpuMemFree(&gpusort->task, gpusort->m_ktoast);
 
 	CUDA_EVENT_DESTROY(gpusort, ev_dma_send_start);
 	CUDA_EVENT_DESTROY(gpusort, ev_dma_send_stop);
@@ -1810,19 +1806,17 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	 */
 	length = (STROMALIGN(gss->gts.kern_params->length) +
 			  STROMALIGN(offsetof(kern_resultbuf, results[2 * nitems])));
+
+	length = (GPUMEMALIGN(length) +
+			  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds->kds)) +
+			  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(ptoast->kds)));
 	gpusort->m_gpusort = gpuMemAlloc(&gpusort->task, length);
 	if (!gpusort->m_gpusort)
 		goto out_of_resource;
 
-	length = KERN_DATA_STORE_LENGTH(pds->kds);
-	gpusort->m_kds = gpuMemAlloc(&gpusort->task, length);
-	if (!gpusort->m_kds)
-		goto out_of_resource;
-
-	length = KERN_DATA_STORE_LENGTH(ptoast->kds);
-	gpusort->m_ktoast = gpuMemAlloc(&gpusort->task, length);
-	if (!gpusort->m_ktoast)
-		goto out_of_resource;
+	gpusort->m_kds = gpusort->m_gpusort + GPUMEMALIGN(length);
+	gpusort->m_ktoast = gpusort->m_kds +
+		GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds->kds));
 
 	/*
 	 * creation of event objects, if any

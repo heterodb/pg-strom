@@ -3327,12 +3327,6 @@ gpupreagg_cleanup_cuda_resources(pgstrom_gpupreagg *gpreagg)
 {
 	if (gpreagg->m_gpreagg)
 		gpuMemFree(&gpreagg->task, gpreagg->m_gpreagg);
-	if (gpreagg->m_kds_in)
-		gpuMemFree(&gpreagg->task, gpreagg->m_kds_in);
-	if (gpreagg->m_kds_src)
-		gpuMemFree(&gpreagg->task, gpreagg->m_kds_src);
-	if (gpreagg->m_kds_dst)
-		gpuMemFree(&gpreagg->task, gpreagg->m_kds_dst);
 
 	CUDA_EVENT_DESTROY(gpreagg, ev_dma_send_start);
 	CUDA_EVENT_DESTROY(gpreagg, ev_dma_send_stop);
@@ -3529,29 +3523,22 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	/*
 	 * Allocation of device memory
 	 */
-	length = KERN_GPUPREAGG_LENGTH(&gpreagg->kern, nitems);
+	length = (GPUMEMALIGN(KERN_GPUPREAGG_LENGTH(&gpreagg->kern, nitems)) +
+			  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_in->kds)) +
+			  2 * GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_dst->kds)) +
+			  GPUMEMALIGN(gpreagg->kern.hash_size * sizeof(pagg_hashslot)));
 	gpreagg->m_gpreagg = gpuMemAlloc(&gpreagg->task, length);
 	if (!gpreagg->m_gpreagg)
-		goto out_of_resource;
+        goto out_of_resource;
 
-	length = KERN_DATA_STORE_LENGTH(pds_in->kds);
-	gpreagg->m_kds_in = gpuMemAlloc(&gpreagg->task, length);
-	if (!gpreagg->m_kds_in)
-		goto out_of_resource;
-
-	length = KERN_DATA_STORE_LENGTH(pds_dst->kds);
-	gpreagg->m_kds_src = gpuMemAlloc(&gpreagg->task, length);
-	if (!gpreagg->m_kds_src)
-		goto out_of_resource;
-	gpreagg->m_kds_dst = gpuMemAlloc(&gpreagg->task, length);
-	if (!gpreagg->m_kds_dst)
-		goto out_of_resource;
-
-	length = STROMALIGN(gpreagg->kern.hash_size * sizeof(pagg_hashslot));
-	gpreagg->m_ghash = gpuMemAlloc(&gpreagg->task, length);
-	if (!gpreagg->m_ghash)
-		goto out_of_resource;
-
+	gpreagg->m_kds_in = gpreagg->m_gpreagg +
+		GPUMEMALIGN(KERN_GPUPREAGG_LENGTH(&gpreagg->kern, nitems));
+	gpreagg->m_kds_src = gpreagg->m_kds_in +
+		GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_in->kds));
+	gpreagg->m_kds_dst = gpreagg->m_kds_src +
+		GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_dst->kds));
+	gpreagg->m_ghash = gpreagg->m_kds_dst +
+		GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_dst->kds));
 
 	/*
 	 * Creation of event objects, if any
