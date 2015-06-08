@@ -95,7 +95,6 @@ typedef struct
 	bool		outer_bulkload;
 	double		bulkload_density;
 	Expr	   *outer_quals;
-	List	   *host_quals;
 	/* for each depth */
 	List	   *nrows_ratio;
 	List	   *kmrels_ratio;
@@ -127,7 +126,6 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs,
 					makeInteger(double_as_long(gj_info->bulkload_density)));
 	exprs = lappend(exprs, gj_info->outer_quals);
-	exprs = lappend(exprs, gj_info->host_quals);
 	/* for each depth */
 	privs = lappend(privs, gj_info->nrows_ratio);
 	privs = lappend(privs, gj_info->kmrels_ratio);
@@ -164,7 +162,6 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->bulkload_density =
 		long_as_double(intVal(list_nth(privs, pindex++)));
 	gj_info->outer_quals = list_nth(exprs, eindex++);
-	gj_info->host_quals = list_nth(exprs, eindex++);
 	/* for each depth */
 	gj_info->nrows_ratio = list_nth(privs, pindex++);
 	gj_info->kmrels_ratio = list_nth(privs, pindex++);
@@ -1260,6 +1257,7 @@ build_pseudo_targetlist_walker(Node *node, build_ps_tlist_context *context)
 		Var	   *varnode = (Var *) node;
 		Var	   *ps_node;
 		int		ps_depth;
+		int		ps_resno;
 
 		foreach (cell, context->ps_tlist)
 		{
@@ -1300,6 +1298,7 @@ build_pseudo_targetlist_walker(Node *node, build_ps_tlist_context *context)
 			ps_depth = i + 1;
 		}
 
+		ps_resno = 1;
 		foreach (cell, rel->reltargetlist)
 		{
 			Node	   *expr = lfirst(cell);
@@ -1316,9 +1315,10 @@ build_pseudo_targetlist_walker(Node *node, build_ps_tlist_context *context)
 				context->ps_depth =
 					lappend_int(context->ps_depth, ps_depth);
 				context->ps_resno =
-					lappend_int(context->ps_resno, varnode->varattno);
+					lappend_int(context->ps_resno, ps_resno);
 				return false;
 			}
+			ps_resno++;
 		}
 		elog(ERROR, "Bug? uncertain origin of Var-node: %s",
 			 nodeToString(varnode));
@@ -1330,7 +1330,8 @@ build_pseudo_targetlist_walker(Node *node, build_ps_tlist_context *context)
 static List *
 build_pseudo_targetlist(GpuJoinPath *gpath,
 						GpuJoinInfo *gj_info,
-						List *targetlist)
+						List *targetlist,
+						List *host_quals)
 {
 	build_ps_tlist_context context;
 
@@ -1339,7 +1340,7 @@ build_pseudo_targetlist(GpuJoinPath *gpath,
 	context.resjunk = false;
 
 	build_pseudo_targetlist_walker((Node *)targetlist, &context);
-	build_pseudo_targetlist_walker((Node *)gj_info->host_quals, &context);
+	build_pseudo_targetlist_walker((Node *)host_quals, &context);
 
 	/*
 	 * Above are host referenced columns. On the other hands, the columns
@@ -1380,15 +1381,17 @@ create_gpujoin_plan(PlannerInfo *root,
 	CustomScan	   *cscan;
 	codegen_context	context;
 	Plan		   *outer_plan;
+	List		   *host_quals;
 	ListCell	   *lc;
 	int				i;
 
 	Assert(gpath->num_rels + 1 == list_length(custom_children));
 	outer_plan = linitial(custom_children);
+	host_quals = extract_actual_clauses(gpath->host_quals, false);
 
 	cscan = makeNode(CustomScan);
 	cscan->scan.plan.targetlist = tlist;
-	cscan->scan.plan.qual = gpath->host_quals;
+	cscan->scan.plan.qual = host_quals;
 	cscan->flags = best_path->flags;
 	cscan->methods = &gpujoin_plan_methods;
 	cscan->custom_children = list_copy_tail(custom_children, 1);
@@ -1396,7 +1399,6 @@ create_gpujoin_plan(PlannerInfo *root,
 	memset(&gj_info, 0, sizeof(GpuJoinInfo));
 	gj_info.kmrels_length = gpath->kmrels_length;
 	gj_info.kresults_ratio = gpath->kresults_ratio;
-	gj_info.host_quals = extract_actual_clauses(gpath->host_quals, false);
 	gj_info.num_rels = gpath->num_rels;
 
 	for (i=0; i < gpath->num_rels; i++)
@@ -1498,7 +1500,8 @@ create_gpujoin_plan(PlannerInfo *root,
 	/*
 	 * Build a pseudo-scan targetlist
 	 */
-	cscan->custom_scan_tlist = build_pseudo_targetlist(gpath, &gj_info, tlist);
+	cscan->custom_scan_tlist = build_pseudo_targetlist(gpath, &gj_info,
+													   tlist, host_quals);
 
 	/*
 	 * construct kernel code
@@ -1693,7 +1696,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	gjs->join_types = gj_info->join_types;
 	gjs->outer_quals = ExecInitExpr((Expr *)gj_info->outer_quals, ps);
 	gjs->gts.css.ss.ps.qual = (List *)
-		ExecInitExpr((Expr *)gj_info->host_quals, ps);
+		ExecInitExpr((Expr *)cscan->scan.plan.qual, ps);
 
 	/* needs to track corresponding columns */
 	gjs->ps_src_depth = gj_info->ps_src_depth;
@@ -2023,15 +2026,6 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		ExplainPropertyText(qlabel, str.data, es);
 
 		depth++;
-	}
-	/* host qualifier if any */
-	if (gj_info->host_quals)
-	{
-		temp = deparse_expression((Node *)gj_info->host_quals,
-								  context, es->verbose, false);
-		snprintf(qlabel, sizeof(qlabel), "HostQual (depth %d)",
-				 gj_info->num_rels);
-		ExplainPropertyText(qlabel, temp, es);
 	}
 	/* other common field */
 	pgstrom_explain_gputaskstate(&gjs->gts, es);
