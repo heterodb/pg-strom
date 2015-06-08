@@ -698,7 +698,7 @@ devfunc_setup_cast(devfunc_info *entry,
 									dtype->type_name,
 									entry->func_rettype->type_name));
 	entry->func_decl
-		= psprintf("__device__ pg_%s_t\n"
+		= psprintf("STATIC_FUNCTION(pg_%s_t)\n"
 				   "pgfn_%s(int *errcode, pg_%s_t arg)\n"
 				   "{\n"
 				   "    pg_%s_t result;\n"
@@ -730,7 +730,7 @@ devfunc_setup_oper_both(devfunc_info *entry,
 									dtype1->type_name,
 									dtype2->type_name));
 	entry->func_decl
-		= psprintf("__device__ pg_%s_t\n"
+		= psprintf("STATIC_FUNCTION(pg_%s_t)\n"
 				   "pgfn_%s(int *errcode, pg_%s_t arg1, pg_%s_t arg2)\n"
 				   "{\n"
 				   "    pg_%s_t result;\n"
@@ -764,7 +764,7 @@ devfunc_setup_oper_either(devfunc_info *entry,
 									entry->func_name,
 									dtype->type_name));
 	entry->func_decl
-		= psprintf("__device__ pg_%s_t\n"
+		= psprintf("STATIC_FUNCTION(pg_%s_t)\n"
 				   "pgfn_%s(int *errcode, pg_%s_t arg)\n"
 				   "{\n"
 				   "    pg_%s_t result;\n"
@@ -826,7 +826,7 @@ devfunc_setup_func_decl(devfunc_info *entry,
 	/* declaration */
 	resetStringInfo(&str);
 	appendStringInfo(&str,
-					 "__device__ pg_%s_t\n"
+					 "STATIC_FUNCTION(pg_%s_t)\n"
 					 "pgfn_%s(int *errcode",
 					 entry->func_rettype->type_name,
 					 entry->func_alias);
@@ -893,16 +893,21 @@ devfunc_setup_boolop(BoolExprType boolop, const char *fn_name, int fn_nargs)
 	StringInfoData	str;
 	int		i;
 
-	initStringInfo(&str);
-
+	entry->func_namespace = InvalidOid;		/* device only function */
+	entry->func_argtypes = palloc(sizeof(Oid) * fn_nargs);
 	for (i=0; i < fn_nargs; i++)
+	{
+		entry->func_argtypes[i] = BOOLOID;
 		entry->func_args = lappend(entry->func_args, dtype);
+	}
 	entry->func_rettype = dtype;
-	entry->func_name = pstrdup(fn_name);
+    entry->func_name = pstrdup(fn_name);
 	entry->func_alias = entry->func_name;	/* never has alias */
+	entry->func_collid = InvalidOid;		/* never has collation */
 
+	initStringInfo(&str);
 	appendStringInfo(&str,
-					 "__device__ pg_%s_t\n"
+					 "STATIC_FUNCTION(pg_%s_t)\n"
 					 "pgfn_%s(int *errcode",
 					 dtype->type_name, entry->func_alias);
 	for (i=0; i < fn_nargs; i++)
@@ -939,7 +944,8 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 							   int func_nargs,
 							   Oid func_argtypes[],
 							   Oid func_rettype,
-							   Oid func_collid)
+							   Oid func_collid,
+							   Node *devfn_expr)
 {
 	devfunc_info   *entry;
 	ListCell	   *cell;
@@ -967,7 +973,11 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 			return entry;
 		}
 	}
-	/* the function not found */
+	/*
+	 * Not found, so let's walk on the function catalog, unless it is
+	 * not device only function.
+	 */
+	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
 
 	/*
 	 * We may have device-only functions that has no namespace.
@@ -975,10 +985,18 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 	 * into the cache.
 	 */
 	if (func_namespace == InvalidOid)
-		return NULL;
+	{
+		if (IsA(devfn_expr, BoolExpr))
+		{
+			BoolExpr   *b = (BoolExpr *) devfn_expr;
 
-	/* Elsewhere, let's walk on the function catalog */
-	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+			entry = devfunc_setup_boolop(b->boolop, func_name, func_nargs);
+		}
+		else
+			elog(ERROR, "Bug? unexpected device-only function for %s",
+				 nodeToString(devfn_expr));
+		goto out;	/* register it on the hash table */
+	}
 
 	entry = palloc0(sizeof(devfunc_info));
 	entry->func_name = pstrdup(func_name);
@@ -1126,7 +1144,8 @@ pgstrom_devfunc_lookup(Oid func_oid, Oid func_collid)
 										   proc->pronargs,
 										   proc->proargtypes.values,
 										   proc->prorettype,
-										   func_collid);
+										   func_collid,
+										   NULL);
 	ReleaseSysCache(tuple);
 
 	return dfunc;
@@ -1446,9 +1465,10 @@ codegen_expression_walker(Node *node, codegen_context *context)
 												   nargs,
 												   argtypes,
 												   BOOLOID,
-												   InvalidOid);
-			if (!dfunc)
-				dfunc = devfunc_setup_boolop(b->boolop, namebuf, nargs);
+												   InvalidOid,
+												   (Node *) b);
+			Assert(dfunc != NULL);	/* not found, or create on demand */
+
 			context->func_defs = list_append_unique_ptr(context->func_defs,
 														dfunc);
 			context->extra_flags |= (dfunc->func_flags & DEVFUNC_INCL_FLAGS);

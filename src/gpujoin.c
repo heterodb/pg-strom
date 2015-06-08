@@ -193,6 +193,7 @@ typedef struct
 	ExprContext		   *econtext;
 	pgstrom_data_store *curr_chunk;
 	TupleTableSlot	   *scan_overflow;
+	bool				scan_begin;
 	bool				scan_done;
 	Size				ntuples;
 	/* temp store, if KDS-hash overflow */
@@ -3807,6 +3808,7 @@ gpujoin_inner_hash_preload(GpuJoinState *gjs,
 	pgstrom_data_store *pds_hash;
 	kern_data_store	   *kds_hash;
 	cl_uint			   *hash_slots;
+	bool				first_chunk = !istate->scan_begin;
 
 	/*
 	 * Make a pgstrom_data_store for materialization
@@ -3822,6 +3824,8 @@ gpujoin_inner_hash_preload(GpuJoinState *gjs,
 	kds_hash = pds_hash->kds;
 	hash_slots = KERN_DATA_STORE_HASHSLOT(kds_hash);
 
+	/* start inner scan */
+	istate->scan_begin = true;
 	while (!istate->scan_done)
 	{
 		HeapTuple	tuple;
@@ -3945,8 +3949,11 @@ gpujoin_inner_hash_preload(GpuJoinState *gjs,
 		return;
 	}
 
-	/* release data store, if no tuples were loaded */
-	if (kds_hash && kds_hash->nitems == 0)
+	/*
+	 * release data store, if no tuples were loaded even if it it not
+	 * the first chunk.
+	 */
+	if (!first_chunk && kds_hash->nitems == 0)
 	{
 		pgstrom_release_data_store(pds_hash);
 		return;
@@ -3954,8 +3961,6 @@ gpujoin_inner_hash_preload(GpuJoinState *gjs,
 
 	/* OK, successfully preloaded */
 	istate->curr_chunk = pds_hash;
-
-
 }
 
 /*
@@ -3973,6 +3978,7 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs,
 	TupleTableSlot	   *scan_slot = scan_ps->ps_ResultTupleSlot;
 	TupleDesc			scan_desc = scan_slot->tts_tupleDescriptor;
 	Size				chunk_size;
+	bool				first_chunk = !istate->scan_begin;
 	pgstrom_data_store *pds_heap;
 
 	/*
@@ -3983,6 +3989,8 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs,
 								 pmrels->head_length));
 	pds_heap = pgstrom_create_data_store_row(gjs->gts.gcontext,
 											 scan_desc, chunk_size, false);
+	/* begin inner heap scan */
+	istate->scan_begin = true;
 	while (true)
 	{
 		if (!istate->scan_overflow)
@@ -4027,7 +4035,7 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs,
 	}
 
 	/* How many tuples read? */
-	if (pds_heap->kds->nitems > 0)
+	if (first_chunk || pds_heap->kds->nitems > 0)
 	{
 		istate->curr_chunk = pds_heap;
 		istate->ntuples += pds_heap->kds->nitems;
@@ -4114,6 +4122,7 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 			for (i = depth; i < gjs->num_rels; i++)
 			{
 				ExecReScan(gjs->inners[i].state);
+				gjs->inners[i].scan_begin = false;
 				gjs->inners[i].scan_done = false;
 			}
 			break;
