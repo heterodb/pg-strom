@@ -1430,8 +1430,8 @@ pgfn_date_ge_timestamp(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_int4_t)
-date_cmp_timestamp(cl_int *errcode,
-				   pg_date_t arg1, pg_timestamp_t arg2)
+pgfn_date_cmp_timestamp(cl_int *errcode,
+						pg_date_t arg1, pg_timestamp_t arg2)
 {
 	pg_int4_t		result;
 	pg_timestamp_t	dt1 = pgfn_date_timestamp(errcode, arg1);
