@@ -387,7 +387,12 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 		pfree(pds->kds);
 	else
 	{
-		size_t	mmap_length = TYPEALIGN(BLCKSZ, pds->kds_length);
+		size_t		mmap_length = TYPEALIGN(BLCKSZ, pds->kds_length);
+		CUresult	rc;
+
+		rc = cuMemHostUnregister(pds->kds);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuMemHostUnregister: %s", errorText(rc));
 
 		if (munmap(pds->kds, mmap_length) != 0)
 			ereport(WARNING,
@@ -537,6 +542,7 @@ pgstrom_expand_data_store(GpuContext *gcontext,
 	else
 	{
 		size_t		mmap_length = TYPEALIGN(BLCKSZ, kds_length_new);
+		CUresult	rc;
 
 		/* expand the size of underlying file */
 		if (truncate(pds->kds_fname, mmap_length))
@@ -544,6 +550,12 @@ pgstrom_expand_data_store(GpuContext *gcontext,
 					(errcode_for_file_access(),
 					 errmsg("could not truncate file \"%s\" to %zu: %m",
 							pds->kds_fname, mmap_length)));
+
+		/* unregister the old KDS as page-locked region */
+		rc = cuMemHostUnregister(kds_old);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuMemHostUnregister: %s", errorText(rc));
+
 		/* remap area */
 		kds_new = mremap(kds_old, TYPEALIGN(BLCKSZ, kds_length_old),
 						 mmap_length, MREMAP_MAYMOVE);
@@ -568,6 +580,22 @@ pgstrom_expand_data_store(GpuContext *gcontext,
 				tup_index[i] += shift;
 		}
 		/* no need to move the data if KDS_FORMAT_HASH */
+
+		/*
+		 * Registers the file-mapped KDS as page-locked region again
+		 */
+		rc = cuCtxPushCurrent(gcontext->gpu[0].cuda_context);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+
+		rc = cuMemHostRegister(pds->kds, mmap_length,
+							   CU_MEMHOSTREGISTER_PORTABLE);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuMemHostRegister: %s", errorText(rc));
+
+		rc = cuCtxPopCurrent(NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
 	}
 	/* update length and kernel buffer */
 	pds->kds_length = kds_length_new;
@@ -599,6 +627,7 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 		const char *kds_fname;
 		int			kds_fdesc;
 		size_t		mmap_length;
+		CUresult	rc;
 
 		kds_fdesc = pgstrom_open_tempfile(&kds_fname);
 		pds->kds_fname = MemoryContextStrdup(gmcxt, kds_fname);
@@ -625,6 +654,23 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 
 		/* kds is still mapped - not to manage file desc by ourself */
 		CloseTransientFile(kds_fdesc);
+
+		/*
+		 * Registers the file-mapped KDS as page-locked region,
+		 * for asynchronous DMA transfer
+		 */
+		rc = cuCtxPushCurrent(gcontext->gpu[0].cuda_context);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+
+		rc = cuMemHostRegister(pds->kds, mmap_length,
+							   CU_MEMHOSTREGISTER_PORTABLE);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuMemHostRegister: %s", errorText(rc));
+
+		rc = cuCtxPopCurrent(NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
 	}
 	pds->ptoast = NULL;	/* never used */
 
@@ -658,7 +704,9 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 	else
 	{
 		int			kds_fdesc;
+		size_t		file_length;
 		size_t		mmap_length;
+		CUresult	rc;
 
 		/* append KDS after the ktoast file */
 		pds->kds_offset = TYPEALIGN(BLCKSZ, ptoast->kds_length);
@@ -672,13 +720,13 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 					 errmsg("could not open file-mapped data store \"%s\"",
 							pds->kds_fname)));
 
-		mmap_length = pds->kds_offset + TYPEALIGN(BLCKSZ, pds->kds_length);
-		if (ftruncate(kds_fdesc, mmap_length) != 0)
+		mmap_length = TYPEALIGN(BLCKSZ, pds->kds_length);
+		file_length = pds->kds_offset + mmap_length;
+		if (ftruncate(kds_fdesc, file_length) != 0)
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not truncate file \"%s\" to %zu: %m",
-							pds->kds_fname,
-							pds->kds_offset + pds->kds_length)));
+							pds->kds_fname, file_length)));
 
 		pds->kds = mmap(NULL, mmap_length,
 						PROT_READ | PROT_WRITE,
@@ -690,6 +738,20 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 					 errmsg("could not mmap \"%s\" with len/ofs=%zu/%zu: %m",
 							pds->kds_fname,
 							pds->kds_length, pds->kds_offset)));
+
+		/* registers this KDS as page-locked area */
+		rc = cuCtxPushCurrent(gcontext->gpu[0].cuda_context);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+
+		rc = cuMemHostRegister(pds->kds, mmap_length,
+							   CU_MEMHOSTREGISTER_PORTABLE);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuMemHostRegister: %s", errorText(rc));
+
+		rc = cuCtxPopCurrent(NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
 
 		/* kds is still mapped - not to manage file desc by ourself */
 		CloseTransientFile(kds_fdesc);

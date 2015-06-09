@@ -150,6 +150,7 @@ typedef struct
 	dsm_segment		   *litems_dsm;
 	dsm_segment		   *ritems_dsm;
 	dsm_segment		   *oitems_dsm;
+	bool				oitems_pinned;
 
 	/* ------------------------------------- *
 	 * Fields to run GPU sorting             *
@@ -237,6 +238,7 @@ typedef struct
 	pgstrom_data_store **pds_chunks;
 	pgstrom_data_store **pds_toasts;
 	Size			chunk_size;		/* expected best size for sorting chunk */
+	Size			chunk_nrooms;	/* expected nrooms of sorting chunk */
 
 	/* copied from the plan node */
     int				numCols;		/* number of sort-key columns */
@@ -289,6 +291,34 @@ static void gpusort_fallback_quicksort(GpuSortState *gss,
 static void bgw_cpusort_entrypoint(Datum main_arg);
 
 /*
+ *
+ *
+ */
+static inline Size
+gpusort_devmem_requirement(Size kparams_len, cl_int nattrs, Size nitems,
+						   Size chunk_size)
+{
+	Size	length;
+	Size	total_length = kparams_len;
+
+	/* for kern_gpusort + kern_resultbuf */
+	length = STROMALIGN(kparams_len) +
+		STROMALIGN(offsetof(kern_resultbuf, results[2 * nitems]));
+	total_length += GPUMEMALIGN(length);
+
+	/* for ktoast(row) */
+	total_length += GPUMEMALIGN(chunk_size);
+
+	/* for kds(slot) */
+	length = (STROMALIGN(offsetof(kern_data_store, colmeta[nattrs])) +
+			  (LONGALIGN(sizeof(bool) * nattrs) +
+			   LONGALIGN(sizeof(Datum) * nattrs)) * nitems);
+	total_length += GPUMEMALIGN(length);
+
+	return total_length;
+}
+
+/*
  * cost_gpusort
  *
  * cost estimation for GpuSort
@@ -313,7 +343,8 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 	double	chunk_margin = 1.10;
 	Size	chunk_head;
 	Size	chunk_size;
-	Size	chunk_size_both;
+	Size	kparams_len;
+	Size	total_length;
 
 	if (ntuples < 2.0)
 		ntuples = 2.0;
@@ -327,16 +358,20 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 	 */
 	chunk_head = STROMALIGN(offsetof(kern_data_store, colmeta[nattrs]));
 	width = MAXALIGN(offsetof(kern_tupitem, htup) +
-					 offsetof(HeapTupleHeaderData, t_bits) +
-					 MAXALIGN(BITMAPLEN(nattrs)) +
+					 MAXALIGN(offsetof(HeapTupleHeaderData, t_bits) +
+							  sizeof(Oid) +		/* if HEAP_HASOID */
+							  BITMAPLEN(nattrs)) +
 					 MAXALIGN(width));
 	chunk_size = chunk_head +
 		(sizeof(cl_uint) + width) * ntuples * chunk_margin;
-	chunk_size_both = chunk_size + chunk_head +
-		(LONGALIGN(sizeof(bool) * nattrs) +
-		 LONGALIGN(sizeof(Datum) * nattrs)) * ntuples * chunk_margin;
 
-	if (gpuMemMaxAllocSize() > chunk_size_both)
+	/* for kern_gpusort + kern_resultbuf */
+	kparams_len = 1024;
+	total_length = gpusort_devmem_requirement(kparams_len,
+											  nattrs,
+											  (Size)ntuples,
+											  chunk_size);
+	if (gpuMemMaxAllocSize() > total_length)
 	{
 		if (chunk_size < pgstrom_chunk_size())
 			chunk_size = pgstrom_chunk_size();
@@ -346,10 +381,23 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 	else
 	{
 		nrows_per_chunk =
-			(double)(gpuMemMaxAllocSize() - 2 * chunk_head) /
-			((sizeof(cl_uint) + width +
-			  LONGALIGN(sizeof(bool) * nattrs) +
-			  LONGALIGN(sizeof(Datum) * nattrs)) * chunk_margin);
+			(double)(gpuMemMaxAllocSize()
+					 /* for alignment */
+					 - 3 * GPUMEMALIGN_LEN
+					 /* for kern_gpusort */
+					 - STROMALIGN(kparams_len)
+					 - STROMALIGN(offsetof(kern_resultbuf, results[0]))
+					 /* for kern_data_store (row) */
+					 - STROMALIGN(offsetof(kern_data_store, colmeta[nattrs]))
+					 /* for kern_data_store (slot) */
+					 - STROMALIGN(offsetof(kern_data_store, colmeta[nattrs]))
+				) / (double)(2 * sizeof(cl_uint) +	/* kern_resultbuf */
+							 sizeof(cl_uint) + width +	/* kds(row) */
+							 LONGALIGN(sizeof(bool) * nattrs) +
+							 LONGALIGN(sizeof(Datum) * nattrs));
+		if (chunk_margin > 1.0)
+			nrows_per_chunk /= chunk_margin;
+
 		chunk_size = chunk_head +
 			(sizeof(cl_uint) + width) * nrows_per_chunk * chunk_margin;
 		num_chunks = Max(1.0, floor(ntuples / nrows_per_chunk + 0.9999));
@@ -913,7 +961,8 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->pds_toasts = palloc0(sizeof(pgstrom_data_store *) *
 							  gss->num_chunks_limit);
 	gss->chunk_size = gs_info->chunk_size;
-
+	gss->chunk_nrooms = (Size)(outerPlan(cscan)->plan_rows /
+							   (double)gs_info->num_chunks);
 	/* sorting keys */
 	gss->numCols = gs_info->numCols;
 	gss->sortColIdx = gs_info->sortColIdx;
@@ -955,9 +1004,6 @@ gpusort_end(CustomScanState *node)
 	 * (including pgstrom_data_store)
 	 */
 	pgstrom_release_gputaskstate(&gss->gts);
-
-	//for (i=0; i < gss->num_chunks; i++)
-	//	pgstrom_release_data_store(gss->pds_chunks[i]);
 
 	/* Clean up subtree */
     ExecEndNode(outerPlanState(node));
@@ -1166,6 +1212,7 @@ gpusort_next_chunk(GpuTaskState *gts)
 												   tupdesc,
 												   gss->chunk_size,
 												   true);
+			ptoast->kds->nrooms = (cl_uint)gss->chunk_nrooms;
 		}
 
 		/* Insert this tuple to the data store */
@@ -1178,14 +1225,16 @@ gpusort_next_chunk(GpuTaskState *gts)
 			 * length of kds + ktoast is less than max allocatable
 			 * device memory.
 			 */
-			nitems = ptoast->kds->nitems;
-			length = 2 * gss->chunk_size +	/* for ktoast */
-				KERN_DATA_STORE_SLOT_LENGTH_ESTIMATION(tupdesc, 2 * nitems);
+			length = gpusort_devmem_requirement(gss->gts.kern_params->length,
+												tupdesc->natts,
+												2 * ptoast->kds->nitems,
+												2 * gss->chunk_size);
 			if (length > gpuMemMaxAllocSize())
 				break;
 			/* OK, expand it and try again */
 			gss->chunk_size += gss->chunk_size;
 			pgstrom_expand_data_store(gcontext, ptoast, gss->chunk_size);
+			ptoast->kds->nrooms = 2 * ptoast->kds->nitems;
 		}
 	}
 	/* Did we read any tuples? */
@@ -1283,7 +1332,13 @@ gpusort_cleanup_cuda_resources(pgstrom_gpusort *gpusort)
 {
 	if (gpusort->m_gpusort)
 		gpuMemFree(&gpusort->task, gpusort->m_gpusort);
-
+	if (gpusort->oitems_pinned)
+	{
+		CUresult		rc
+			= cuMemHostUnregister(dsm_segment_address(gpusort->oitems_dsm));
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuMemHostUnregister: %s", errorText(rc));
+	}
 	CUDA_EVENT_DESTROY(gpusort, ev_dma_send_start);
 	CUDA_EVENT_DESTROY(gpusort, ev_dma_send_stop);
 	CUDA_EVENT_DESTROY(gpusort, ev_dma_recv_start);
@@ -1298,6 +1353,7 @@ gpusort_cleanup_cuda_resources(pgstrom_gpusort *gpusort)
 	gpusort->m_gpusort = 0UL;
 	gpusort->m_kds = 0UL;
 	gpusort->m_ktoast = 0UL;
+	gpusort->oitems_pinned = false;
 }
 
 static void
@@ -1838,16 +1894,19 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 	}
 
-#if 1
-	offset = STROMALIGN(gss->gts.kern_params->length);
-	length = dsm_segment_map_length(gpusort->oitems_dsm);
-	rc = cuMemHostRegister(dsm_segment_address(gpusort->oitems_dsm),
-						   length,
-						   0);
-	Assert(rc == CUDA_SUCCESS);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuMemHostRegister: %s", errorText(rc));
-#endif
+	/*
+	 * Registers oitems_dsm as host pinned memory
+	 */
+	if (!gpusort->oitems_pinned)
+	{
+		rc = cuMemHostRegister(dsm_segment_address(gpusort->oitems_dsm),
+							   dsm_segment_map_length(gpusort->oitems_dsm),
+							   CU_MEMHOSTREGISTER_PORTABLE);
+		Assert(rc == CUDA_SUCCESS);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuMemHostRegister: %s", errorText(rc));
+		gpusort->oitems_pinned = true;
+	}
 
 	/*
 	 * OK, enqueue a series of commands
