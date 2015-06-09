@@ -1756,6 +1756,7 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	pgstrom_data_store *pds;
 	pgstrom_data_store *ptoast;
 	void			   *kernel_args[8];
+	Size				total_length;
 	Size				length;
 	Size				offset;
 	size_t				nitems;
@@ -1807,10 +1808,10 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	length = (STROMALIGN(gss->gts.kern_params->length) +
 			  STROMALIGN(offsetof(kern_resultbuf, results[2 * nitems])));
 
-	length = (GPUMEMALIGN(length) +
-			  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds->kds)) +
-			  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(ptoast->kds)));
-	gpusort->m_gpusort = gpuMemAlloc(&gpusort->task, length);
+	total_length = (GPUMEMALIGN(length) +
+					GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds->kds)) +
+					GPUMEMALIGN(KERN_DATA_STORE_LENGTH(ptoast->kds)));
+	gpusort->m_gpusort = gpuMemAlloc(&gpusort->task, total_length);
 	if (!gpusort->m_gpusort)
 		goto out_of_resource;
 
