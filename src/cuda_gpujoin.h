@@ -825,7 +825,7 @@ __gpujoin_projection_row(cl_int *errcode,
 	cl_int		   *r_buffer;
 	size_t			required;
 	size_t			t_hoff;
-	size_t			data_len;
+	size_t			data_len = 0;
 	cl_bool			heap_hasnull = false;
 	cl_int			src_depth;
 	cl_int			src_colidx;
@@ -860,7 +860,6 @@ __gpujoin_projection_row(cl_int *errcode,
 
 		/* t_len and ctid */
 		required = offsetof(kern_tupitem, htup);
-		data_len = 0;
 		heap_hasnull = false;
 
 		/* estimation of data length */
@@ -913,7 +912,8 @@ __gpujoin_projection_row(cl_int *errcode,
 			t_hoff += bitmaplen(ncols);
 		if (kds_src->tdhasoid)
 			t_hoff += sizeof(cl_uint);
-		required += MAXALIGN(t_hoff) + MAXALIGN(data_len);
+		t_hoff = MAXALIGN(t_hoff);
+		required += t_hoff + MAXALIGN(data_len);
 	}
 	assert(required == MAXALIGN(required));
 
@@ -1060,7 +1060,7 @@ __gpujoin_projection_row(cl_int *errcode,
 					if (!VARATT_IS_1B(datum))
 					{
 						while (TYPEALIGN(cmeta.attalign, curr) != curr)
-							((char *)htup)[curr++] = 0;
+							((char *)htup)[curr++] = '\0';
 					}
 					memcpy((char *)htup + curr, datum, vl_len);
 					curr += vl_len;
@@ -1069,6 +1069,7 @@ __gpujoin_projection_row(cl_int *errcode,
 					htup->t_bits[i >> 3] |= (1 << (i & 0x07));
 			}
 		}
+		assert(t_hoff + data_len == curr);
 		titem->t_len = curr;
 	}
 }
