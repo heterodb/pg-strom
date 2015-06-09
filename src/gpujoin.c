@@ -1241,6 +1241,7 @@ typedef struct
 	List		   *ps_depth;
 	List		   *ps_resno;
 	GpuJoinPath	   *gpath;
+	List		   *custom_children;
 	bool			resjunk;
 } build_ps_tlist_context;
 
@@ -1257,8 +1258,7 @@ build_pseudo_targetlist_walker(Node *node, build_ps_tlist_context *context)
 	{
 		Var	   *varnode = (Var *) node;
 		Var	   *ps_node;
-		int		ps_depth;
-		int		ps_resno;
+		int		i;
 
 		foreach (cell, context->ps_tlist)
 		{
@@ -1279,47 +1279,48 @@ build_pseudo_targetlist_walker(Node *node, build_ps_tlist_context *context)
 				return false;
 			}
 		}
-		/* not in the pseudo-scan targetlist, so append this one */
-		rel = gpath->outer_path->parent;
-		if (bms_is_member(varnode->varno, rel->relids))
-			ps_depth = 0;
-		else
+
+		/*
+		 * Not in the pseudo-scan targetlist, so append this one
+		 */
+		for (i=0; i <= gpath->num_rels; i++)
 		{
-			int		i;
+			if (i == 0)
+				rel = gpath->outer_path->parent;
+			else
+				rel = gpath->inners[i-1].scan_path->parent;
 
-			for (i=0; i < gpath->num_rels; i++)
+			if (bms_is_member(varnode->varno, rel->relids))
 			{
-				rel = gpath->inners[i].scan_path->parent;
-				if (bms_is_member(varnode->varno, rel->relids))
-					break;
-			}
-			if (i == gpath->num_rels)
-				elog(ERROR, "Bug? uncertain origin of Var-node: %s",
-					 nodeToString(varnode));
-			ps_depth = i + 1;
-		}
+				Plan   *plan = list_nth(context->custom_children, i);
 
-		ps_resno = 1;
-		foreach (cell, rel->reltargetlist)
-		{
-			Node	   *expr = lfirst(cell);
+				foreach (cell, plan->targetlist)
+				{
+					TargetEntry *tle = lfirst(cell);
 
-			if (equal(varnode, expr))
-			{
-				TargetEntry	   *ps_tle
-					= makeTargetEntry((Expr *) copyObject(varnode),
-									  list_length(context->ps_tlist) + 1,
-									  NULL,
-									  context->resjunk);
-				context->ps_tlist =
-					lappend(context->ps_tlist, ps_tle);
-				context->ps_depth =
-					lappend_int(context->ps_depth, ps_depth);
-				context->ps_resno =
-					lappend_int(context->ps_resno, ps_resno);
-				return false;
+					if (!IsA(tle->expr, Var))
+						elog(ERROR, "Bug? unexpected node in tlist: %s",
+							 nodeToString(tle->expr));
+
+					if (equal(varnode, tle->expr))
+					{
+						TargetEntry	   *ps_tle =
+							makeTargetEntry((Expr *) copyObject(varnode),
+											list_length(context->ps_tlist) + 1,
+											NULL,
+											context->resjunk);
+						context->ps_tlist =
+							lappend(context->ps_tlist, ps_tle);
+						context->ps_depth =
+							lappend_int(context->ps_depth, i);
+						context->ps_resno =
+							lappend_int(context->ps_resno, tle->resno);
+
+						return false;
+					}
+				}
+				break;
 			}
-			ps_resno++;
 		}
 		elog(ERROR, "Bug? uncertain origin of Var-node: %s",
 			 nodeToString(varnode));
@@ -1332,12 +1333,14 @@ static List *
 build_pseudo_targetlist(GpuJoinPath *gpath,
 						GpuJoinInfo *gj_info,
 						List *targetlist,
-						List *host_quals)
+						List *host_quals,
+						List *custom_children)
 {
 	build_ps_tlist_context context;
 
 	memset(&context, 0, sizeof(build_ps_tlist_context));
 	context.gpath   = gpath;
+	context.custom_children = custom_children;
 	context.resjunk = false;
 
 	build_pseudo_targetlist_walker((Node *)targetlist, &context);
@@ -1502,7 +1505,8 @@ create_gpujoin_plan(PlannerInfo *root,
 	 * Build a pseudo-scan targetlist
 	 */
 	cscan->custom_scan_tlist = build_pseudo_targetlist(gpath, &gj_info,
-													   tlist, host_quals);
+													   tlist, host_quals,
+													   custom_children);
 
 	/*
 	 * construct kernel code
@@ -1962,6 +1966,10 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 				appendStringInfo(&str, "%s", temp);
 			else
 				appendStringInfo(&str, "(%s)", temp);
+
+			temp = format_type_with_typemod(exprType((Node *)tle->expr),
+											exprTypmod((Node *)tle->expr));
+			appendStringInfo(&str, "::%s", temp);
 		}
 		ExplainPropertyText("Pseudo Scan", str.data, es);
 	}
