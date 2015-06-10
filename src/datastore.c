@@ -612,7 +612,6 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 
 	/* allocation of pds */
 	pds = MemoryContextAllocZero(gmcxt, sizeof(pgstrom_data_store));
-	dlist_push_tail(&gcontext->pds_list, &pds->pds_chain);
 
 	/* allocation of kds */
 	pds->kds_length = (STROMALIGN(offsetof(kern_data_store,
@@ -621,7 +620,7 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 	pds->kds_offset = 0;
 
 	if (!file_mapped)
-		pds->kds = MemoryContextAlloc(gmcxt, pds->kds_length);
+		pds->kds = MemoryContextAllocHuge(gmcxt, pds->kds_length);
 	else
 	{
 		const char *kds_fname;
@@ -658,19 +657,36 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 		/*
 		 * Registers the file-mapped KDS as page-locked region,
 		 * for asynchronous DMA transfer
+		 *
+		 * Unless PDS is not tracked by GpuContext, mapped file is
+		 * never unmapped, so we have to care about the case when
+		 * cuMemHostRegister() got failed.
 		 */
-		rc = cuCtxPushCurrent(gcontext->gpu[0].cuda_context);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+		PG_TRY();
+		{
+			rc = cuCtxPushCurrent(gcontext->gpu[0].cuda_context);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
 
-		rc = cuMemHostRegister(pds->kds, mmap_length,
-							   CU_MEMHOSTREGISTER_PORTABLE);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemHostRegister: %s", errorText(rc));
+			rc = cuMemHostRegister(pds->kds, mmap_length,
+								   CU_MEMHOSTREGISTER_PORTABLE);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuMemHostRegister: %s", errorText(rc));
 
-		rc = cuCtxPopCurrent(NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+			rc = cuCtxPopCurrent(NULL);
+			if (rc != CUDA_SUCCESS)
+				elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+		}
+		PG_CATCH();
+		{
+			if (munmap(pds->kds, mmap_length) != 0)
+				elog(WARNING, "failed to unmap \"%s\" %p-%p",
+					 pds->kds_fname,
+					 (char *)pds->kds,
+					 (char *)pds->kds + mmap_length - 1);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 	}
 	pds->ptoast = NULL;	/* never used */
 
@@ -680,6 +696,10 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 	 */
 	init_kern_data_store(pds->kds, tupdesc, pds->kds_length,
 						 KDS_FORMAT_ROW, INT_MAX, false);
+
+	/* OK, it is now tracked by GpuContext */
+	dlist_push_tail(&gcontext->pds_list, &pds->pds_chain);
+
 	return pds;
 }
 
@@ -694,13 +714,12 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 
 	/* allocation of pds */
 	pds = MemoryContextAllocZero(gmcxt, sizeof(pgstrom_data_store));
-	dlist_push_tail(&gcontext->pds_list, &pds->pds_chain);
 
 	/* allocation of kds */
 	pds->kds_length = KERN_DATA_STORE_SLOT_LENGTH_ESTIMATION(tupdesc, nrooms);
 
 	if (!ptoast || !ptoast->kds_fname)
-		pds->kds = MemoryContextAlloc(gmcxt, pds->kds_length);
+		pds->kds = MemoryContextAllocHuge(gmcxt, pds->kds_length);
 	else
 	{
 		int			kds_fdesc;
@@ -739,22 +758,40 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 							pds->kds_fname,
 							pds->kds_length, pds->kds_offset)));
 
-		/* registers this KDS as page-locked area */
-		rc = cuCtxPushCurrent(gcontext->gpu[0].cuda_context);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
-
-		rc = cuMemHostRegister(pds->kds, mmap_length,
-							   CU_MEMHOSTREGISTER_PORTABLE);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemHostRegister: %s", errorText(rc));
-
-		rc = cuCtxPopCurrent(NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-
 		/* kds is still mapped - not to manage file desc by ourself */
 		CloseTransientFile(kds_fdesc);
+
+		/*
+		 * registers this KDS as page-locked area
+		 * Unless PDS is not tracked by GpuContext, mapped file is
+		 * never unmapped, so we have to care about the case when
+		 * cuMemHostRegister() got failed.
+		 */
+		PG_TRY();
+		{
+			rc = cuCtxPushCurrent(gcontext->gpu[0].cuda_context);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+
+			rc = cuMemHostRegister(pds->kds, mmap_length,
+								   CU_MEMHOSTREGISTER_PORTABLE);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuMemHostRegister: %s", errorText(rc));
+
+			rc = cuCtxPopCurrent(NULL);
+			if (rc != CUDA_SUCCESS)
+				elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+		}
+		PG_CATCH();
+		{
+			if (munmap(pds->kds, mmap_length) != 0)
+				elog(WARNING, "failed to unmap \"%s\" %p-%p",
+					 pds->kds_fname,
+					 (char *)pds->kds,
+					 (char *)pds->kds + mmap_length - 1);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 	}
 	/*
 	 * toast buffer shall be released with main data-store together,
@@ -768,6 +805,10 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 	}
 	init_kern_data_store(pds->kds, tupdesc, pds->kds_length,
 						 KDS_FORMAT_SLOT, nrooms, internal_format);
+
+	/* OK, now it is tracked by GpuContext */
+	dlist_push_tail(&gcontext->pds_list, &pds->pds_chain);
+
 	return pds;
 }
 
