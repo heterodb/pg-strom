@@ -1169,8 +1169,9 @@ pgfn_timestamp_date(cl_int *errcode, pg_timestamp_t arg1)
 	}
 	else
 	{
-		result.value = (date2j(tm.tm_year, tm.tm_mon, tm.tm_mday)
-						- POSTGRES_EPOCH_JDATE);
+		result.isnull = false;
+		result.value  = (date2j(tm.tm_year, tm.tm_mon, tm.tm_mday)
+						 - POSTGRES_EPOCH_JDATE);
 	}
 	return result;
 }
@@ -1701,8 +1702,9 @@ pgfn_timestamptz_date(cl_int *errcode, pg_timestamptz_t arg1)
 	}
 	else
 	{
-		result.value = (date2j(tm.tm_year, tm.tm_mon, tm.tm_mday)
-						- POSTGRES_EPOCH_JDATE);
+		result.isnull = false;
+		result.value  = (date2j(tm.tm_year, tm.tm_mon, tm.tm_mday)
+						 - POSTGRES_EPOCH_JDATE);
 	}
 	return result;
 }
