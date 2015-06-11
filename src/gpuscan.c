@@ -135,13 +135,15 @@ cost_gpuscan(CustomPath *pathnode, PlannerInfo *root,
 			 List *host_quals, List *dev_quals, bool is_bulkload)
 {
 	Path	   *path = &pathnode->path;
-	Cost		startup_cost = 0;
-	Cost		run_cost = 0;
+	Cost		startup_cost = 0.0;
+	Cost		run_cost = 0.0;
+	Cost		startup_delay = 0.0;
 	double		spc_seq_page_cost;
 	QualCost	dev_cost;
 	QualCost	host_cost;
 	Cost		gpu_per_tuple;
 	Cost		cpu_per_tuple;
+	cl_uint		num_chunks = estimate_num_chunks(path);
 	Selectivity	dev_sel;
 
 	/* Should only be applied to base relations */
@@ -193,9 +195,11 @@ cost_gpuscan(CustomPath *pathnode, PlannerInfo *root,
 	gpu_per_tuple = dev_cost.per_tuple;
 	run_cost += (gpu_per_tuple * baserel->tuples +
 				 cpu_per_tuple * dev_sel * baserel->tuples);
+	if (dev_quals != NIL)
+		startup_delay = run_cost * (1.0 / (double)num_chunks);
 
-	path->startup_cost = startup_cost;
-    path->total_cost = startup_cost + run_cost;
+	path->startup_cost = startup_cost + startup_delay;
+    path->total_cost = startup_cost + run_cost - startup_delay;
 }
 
 static void

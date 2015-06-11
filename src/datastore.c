@@ -52,6 +52,40 @@ pgstrom_chunk_size(void)
 }
 
 /*
+ * estimate_num_chunks
+ *
+ * it estimates number of chunks to be fetched from the supplied Path
+ */
+cl_uint
+estimate_num_chunks(Path *pathnode)
+{
+	RelOptInfo *rel = pathnode->parent;
+	int			ncols = list_length(rel->reltargetlist);
+    Size        htup_size;
+	cl_uint		num_chunks;
+
+	htup_size = MAXALIGN(offsetof(HeapTupleHeaderData,
+								  t_bits[BITMAPLEN(ncols)]));
+	if (rel->reloptkind != RELOPT_BASEREL)
+		htup_size += MAXALIGN(rel->width);
+	else
+	{
+		double      heap_size = (double)
+			(BLCKSZ - SizeOfPageHeaderData) * rel->pages;
+
+		htup_size += MAXALIGN(heap_size / Max(rel->tuples, 1.0) -
+							  sizeof(ItemIdData) - SizeofHeapTupleHeader);
+	}
+	num_chunks = (cl_uint)
+		((double)(htup_size + sizeof(cl_int)) * pathnode->rows /
+		 (double)(pgstrom_chunk_size() -
+				  STROMALIGN(offsetof(kern_data_store, colmeta[ncols]))));
+	num_chunks = Max(num_chunks, 1);
+
+	return num_chunks;
+}
+
+/*
  * pgstrom_temp_dirpath - makes a temporary file according to the system
  * setting. Note that we never gueran
  */

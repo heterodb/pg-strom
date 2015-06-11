@@ -564,8 +564,10 @@ cost_gpujoin(PlannerInfo *root,
 			 Relids required_outer)
 {
 	Path	   *outer_path = gpath->outer_path;
+	cl_uint		num_chunks = estimate_num_chunks(outer_path);
 	Cost		startup_cost;
 	Cost		run_cost;
+	Cost		startup_delay;
 	QualCost	host_cost;
 	QualCost   *join_cost;
 	double		gpu_cpu_ratio;
@@ -756,9 +758,16 @@ retry:
 	 */
 	run_cost += cpu_tuple_cost * gpath->cpath.path.rows;
 
-	/* put cost value on the gpath */
-	gpath->cpath.path.startup_cost = startup_cost;
-	gpath->cpath.path.total_cost = startup_cost + run_cost;
+	/*
+	 * delay to fetch the first tuple
+	 */
+	startup_delay = run_cost * (1.0 / (double)(num_chunks));
+
+	/*
+	 * Put cost value on the gpath.
+	 */
+	gpath->cpath.path.startup_cost = startup_cost + startup_delay;
+	gpath->cpath.path.total_cost = startup_cost + run_cost - startup_delay;
 
 	/*
 	 * NOTE: In case when extreme number of rows are expected,
