@@ -622,7 +622,7 @@ pgstrom_expand_data_store(GpuContext *gcontext,
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
 
-		rc = cuMemHostRegister(pds->kds, mmap_length,
+		rc = cuMemHostRegister(kds_new, mmap_length,
 							   CU_MEMHOSTREGISTER_PORTABLE);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemHostRegister: %s", errorText(rc));
