@@ -1583,9 +1583,16 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 	}
 }
 
-
-
-
+/*
+ * gpuMaxThreadsPerBlock
+ *
+ * it returns the max size of local threads per block on GPU device
+ */
+cl_uint
+gpuMaxThreadsPerBlock(void)
+{
+	return cuda_max_threads_per_block;
+}
 
 /*
  *

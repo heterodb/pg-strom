@@ -754,20 +754,23 @@ retry:
 	run_cost += host_cost.per_tuple * outer_ntuples;
 
 	/*
+	 * delay to fetch the first tuple
+	 */
+	startup_delay = (num_chunks > 1 ?
+					 run_cost * (1.0 / (double)(num_chunks)) :
+					 0.0);
+
+	/*
 	 * cost of final materialization
 	 */
 	run_cost += cpu_tuple_cost * gpath->cpath.path.rows;
 
-	/*
-	 * delay to fetch the first tuple
-	 */
-	startup_delay = run_cost * (1.0 / (double)(num_chunks));
 
 	/*
 	 * Put cost value on the gpath.
 	 */
 	gpath->cpath.path.startup_cost = startup_cost + startup_delay;
-	gpath->cpath.path.total_cost = startup_cost + run_cost - startup_delay;
+	gpath->cpath.path.total_cost = startup_cost + run_cost;
 
 	/*
 	 * NOTE: In case when extreme number of rows are expected,

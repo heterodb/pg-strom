@@ -35,6 +35,8 @@
 
 typedef struct
 {
+	Cost		startup_cost;	/* cost we actually estimated */
+	Cost		total_cost;		/* cost we actually estimated */
 	const char *kern_source;
 	int			extra_flags;
 	List	   *used_params;
@@ -56,6 +58,8 @@ form_gpusort_info(CustomScan *cscan, GpuSortInfo *gs_info)
 	List   *temp;
 	int		i;
 
+	privs = lappend(privs, makeInteger(double_as_long(gs_info->startup_cost)));
+	privs = lappend(privs, makeInteger(double_as_long(gs_info->total_cost)));
 	privs = lappend(privs, makeString(pstrdup(gs_info->kern_source)));
 	privs = lappend(privs, makeInteger(gs_info->extra_flags));
 	privs = lappend(privs, gs_info->used_params);
@@ -94,6 +98,8 @@ deform_gpusort_info(CustomScan *cscan)
 	int				pindex = 0;
 	int				i;
 
+	gs_info->startup_cost = long_as_double(intVal(list_nth(privs, pindex++)));
+	gs_info->total_cost = long_as_double(intVal(list_nth(privs, pindex++)));
 	gs_info->kern_source = strVal(list_nth(privs, pindex++));
 	gs_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gs_info->used_params = list_nth(privs, pindex++);
@@ -326,46 +332,57 @@ gpusort_devmem_requirement(Size kparams_len, cl_int nattrs, Size nitems,
 #define LOG2(x)		(log(x) / 0.693147180559945)
 
 static void
-cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
-			 long *p_num_chunks, Size *p_chunk_size,
-			 Plan *subplan)
+cost_gpusort(PlannedStmt *pstmt, Sort *sort,
+			 Cost *p_startup_cost, Cost *p_total_cost,
+			 long *p_num_chunks, Size *p_chunk_size)
 {
-	Cost	subplan_total = subplan->total_cost;
-	double	ntuples = subplan->plan_rows;
-	int		width = subplan->plan_width;
-	int		nattrs = list_length(subplan->targetlist);
-	Cost	cpu_comp_cost = 2.0 * cpu_operator_cost;
-	Cost	gpu_comp_cost = 2.0 * pgstrom_gpu_operator_cost;
-	Cost	startup_cost = subplan_total;
-	Cost	run_cost = 0.0;
-	double	nrows_per_chunk;
-	long	num_chunks;
-	double	chunk_margin = 1.10;
-	Size	chunk_head;
-	Size	chunk_size;
-	Size	kparams_len;
-	Size	total_length;
+	Plan	   *outer_plan = outerPlan(sort);
+	double		ntuples = outer_plan->plan_rows;
+	int			width = outer_plan->plan_width;
+	int			nattrs = list_length(outer_plan->targetlist);
+	Cost		startup_cost;
+	Cost		run_cost;
+	Cost		cpu_comp_cost = 2.0 * cpu_operator_cost;
+	Cost		gpu_comp_cost = 2.0 * pgstrom_gpu_operator_cost;
+	double		nrows_per_chunk;
+	double		num_chunks;
+	double		chunk_margin = 1.10;
+	Size		chunk_size;
+	Size		kparams_len;
+	Size		total_length;
+	ListCell   *lc;
 
 	if (ntuples < 2.0)
 		ntuples = 2.0;
-	/*
-	 * Fixed cost to kick GPU kernel
-	 */
+
+	/* Cost come from outer-plan and sub-plans */
+	startup_cost = outer_plan->total_cost;
+	run_cost = 0.0;
+	foreach (lc, sort->plan.initPlan)
+	{
+		SubPlan	   *subplan = lfirst(lc);
+		Plan	   *temp = list_nth(pstmt->subplans, subplan->plan_id - 1);
+
+		startup_cost += temp->startup_cost;
+		run_cost += temp->total_cost - temp->startup_cost;
+	}
+	/* Fixed cost to setup/launch GPU kernel */
 	startup_cost += pgstrom_gpu_setup_cost;
 
 	/*
-	 * calculate expected number of rows per chunk and number of chunks.
+	 * Estimate number of chunks and nrows per chunk
 	 */
-	chunk_head = STROMALIGN(offsetof(kern_data_store, colmeta[nattrs]));
 	width = MAXALIGN(offsetof(kern_tupitem, htup) +
 					 MAXALIGN(offsetof(HeapTupleHeaderData, t_bits) +
 							  sizeof(Oid) +		/* if HEAP_HASOID */
 							  BITMAPLEN(nattrs)) +
 					 MAXALIGN(width));
-	chunk_size = chunk_head +
-		(sizeof(cl_uint) + width) * ntuples * chunk_margin;
+	chunk_size = (STROMALIGN(offsetof(kern_data_store, colmeta[nattrs])) +
+				  (sizeof(cl_uint) + width) * ntuples * chunk_margin);
 
-	/* for kern_gpusort + kern_resultbuf */
+	/*
+	 * Does it suitable for device memory limitation?
+	 */
 	kparams_len = 1024;
 	total_length = gpusort_devmem_requirement(kparams_len,
 											  nattrs,
@@ -398,7 +415,7 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 		if (chunk_margin > 1.0)
 			nrows_per_chunk /= chunk_margin;
 
-		chunk_size = chunk_head +
+		chunk_size = STROMALIGN(offsetof(kern_data_store, colmeta[nattrs])) +
 			(sizeof(cl_uint) + width) * nrows_per_chunk * chunk_margin;
 		num_chunks = Max(1.0, floor(ntuples / nrows_per_chunk + 0.9999));
 	}
@@ -407,15 +424,15 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 	 * We'll use bitonic sorting logic on GPU device.
 	 * It's cost is N * Log2(N)
 	 */
-	startup_cost += gpu_comp_cost *
-		nrows_per_chunk * LOG2(nrows_per_chunk);
+	startup_cost += num_chunks *
+		gpu_comp_cost * nrows_per_chunk * LOG2(nrows_per_chunk);
 
 	/*
 	 * We'll also use CPU based merge sort, if # of chunks > 1.
 	 */
 	if (num_chunks > 1)
-		startup_cost += cpu_comp_cost *
-			(double) num_chunks * LOG2((double) num_chunks);
+		startup_cost += cpu_comp_cost * nrows_per_chunk *
+			num_chunks * (LOG2(num_chunks) + 1);
 
 	/*
 	 * Cost to communicate with upper node
@@ -423,8 +440,8 @@ cost_gpusort(Cost *p_startup_cost, Cost *p_total_cost,
 	run_cost += cpu_operator_cost * ntuples;
 
 	/* result */
-    *p_startup_cost = startup_cost;
-    *p_total_cost = startup_cost + run_cost;
+	*p_startup_cost = startup_cost;
+	*p_total_cost = startup_cost + run_cost;
 	*p_num_chunks = num_chunks;
 	*p_chunk_size = chunk_size;
 }
@@ -812,9 +829,9 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	/*
 	 * OK, cost estimation with GpuSort
 	 */
-	cost_gpusort(&startup_cost, &total_cost,
-				 &num_chunks, &chunk_size,
-				 subplan);
+	cost_gpusort(pstmt, sort,
+				 &startup_cost, &total_cost,
+				 &num_chunks, &chunk_size);
 
 	elog(DEBUG1,
 		 "GpuSort (cost=%.2f..%.2f) has%sadvantage to Sort (cost=%.2f..%.2f)",
@@ -832,8 +849,8 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	 * Let's return the 
 	 */
 	cscan = makeNode(CustomScan);
-	cscan->scan.plan.startup_cost = startup_cost;
-	cscan->scan.plan.total_cost = total_cost;
+	cscan->scan.plan.startup_cost = sort->plan.startup_cost;
+	cscan->scan.plan.total_cost = sort->plan.total_cost;
 	cscan->scan.plan.plan_rows = sort->plan.plan_rows;
 	cscan->scan.plan.plan_width = sort->plan.plan_width;
 	cscan->scan.plan.targetlist = NIL;
@@ -1084,6 +1101,26 @@ gpusort_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	List		   *sort_keys = NIL;
 	bool			use_prefix;
 	int				i;
+
+	/* actual cost we estimated */
+	if (es->verbose)
+	{
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			char   *temp = psprintf("%.2f...%.2f",
+									gs_info->startup_cost,
+									gs_info->total_cost);
+			ExplainPropertyText("Real cost", temp, es);
+			pfree(temp);
+		}
+		else
+		{
+			ExplainPropertyFloat("Real startup cost",
+								 gs_info->startup_cost, 3, es);
+			ExplainPropertyFloat("Real total cost",
+								 gs_info->total_cost, 3, es);
+		}
+	}
 
 	/* shows sorting keys */
 	context = set_deparse_context_planstate(es->deparse_cxt,

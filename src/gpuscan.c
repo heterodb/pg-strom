@@ -143,7 +143,7 @@ cost_gpuscan(CustomPath *pathnode, PlannerInfo *root,
 	QualCost	host_cost;
 	Cost		gpu_per_tuple;
 	Cost		cpu_per_tuple;
-	cl_uint		num_chunks = estimate_num_chunks(path);
+	cl_uint		num_chunks;
 	Selectivity	dev_sel;
 
 	/* Should only be applied to base relations */
@@ -155,6 +155,7 @@ cost_gpuscan(CustomPath *pathnode, PlannerInfo *root,
 		path->rows = param_info->ppi_rows;
 	else
 		path->rows = baserel->rows;
+	num_chunks = estimate_num_chunks(path);
 
 	/* fetch estimated page cost for tablespace containing table */
 	get_tablespace_page_costs(baserel->reltablespace,
@@ -193,13 +194,13 @@ cost_gpuscan(CustomPath *pathnode, PlannerInfo *root,
 	else
 		cpu_per_tuple = host_cost.per_tuple;
 	gpu_per_tuple = dev_cost.per_tuple;
-	run_cost += (gpu_per_tuple * baserel->tuples +
-				 cpu_per_tuple * dev_sel * baserel->tuples);
+	run_cost += gpu_per_tuple * baserel->tuples;
 	if (dev_quals != NIL)
 		startup_delay = run_cost * (1.0 / (double)num_chunks);
+	run_cost += cpu_per_tuple * dev_sel * baserel->tuples;
 
 	path->startup_cost = startup_cost + startup_delay;
-    path->total_cost = startup_cost + run_cost - startup_delay;
+    path->total_cost = startup_cost + run_cost;
 }
 
 static void

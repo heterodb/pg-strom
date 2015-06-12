@@ -28,6 +28,7 @@
 #include "parser/parse_func.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
+#include "optimizer/planner.h"
 #include "optimizer/var.h"
 #include "parser/parsetree.h"
 #include "utils/builtins.h"
@@ -608,62 +609,64 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 {
 	Cost		startup_cost;
 	Cost		run_cost;
-	Cost		comparison_cost;
-	QualCost	pagg_cost;
-	int			pagg_width;
-	int			outer_width;
+	QualCost	qual_cost;
+	int			gpagg_width;
 	double		outer_rows;
-	double		rows_per_chunk;
+	double		nrows_per_chunk;
 	double		num_chunks;
 	double		num_groups = Max(agg->plan.plan_rows, 1.0);
+	double		gpagg_ratio;
+	double		gpagg_nrows;
+	double		gpu_cpu_ratio;
+	cl_uint		ncols;
+	Size		htup_size;
 	ListCell   *cell;
 	Path		dummy;
 
 	Assert(outer_plan != NULL);
+
 	/*
-	 * GpuPreAgg internally takes partial sort and aggregation
-	 * on GPU devices. It is a factor of additional calculation,
-	 * but reduce number of rows to be processed on the later
-	 * stage.
-	 * Items to be considered is:
-	 * - cost for sorting by GPU
-	 * - cost for aggregation by GPU
-	 * - number of rows being reduced.
+	 * Fixed cost come from outer relation
 	 */
 	startup_cost = outer_plan->startup_cost;
 	run_cost = outer_plan->total_cost - startup_cost;
 	outer_rows = outer_plan->plan_rows;
-	outer_width = outer_plan->plan_width;
 
 	/*
-	 * fixed cost to launch GPU feature
+	 * Fixed cost to setup/launch GPU kernel
 	 */
 	startup_cost += pgstrom_gpu_setup_cost;
 
 	/*
-	 * cost estimation of internal sorting by GPU.
+	 * Estimate number of chunks and nrows per chunk
 	 */
-	rows_per_chunk =
-		((double)((pgstrom_chunk_size()) / BLCKSZ)) *
-		((double)(BLCKSZ - MAXALIGN(SizeOfPageHeaderData))) /
-        ((double)(sizeof(ItemIdData) +
-				  MAXALIGN(sizeof(HeapTupleHeaderData) +
-						   outer_width)));
-	num_chunks = outer_rows / rows_per_chunk;
+	ncols = list_length(outer_plan->targetlist);
+	htup_size = (MAXALIGN(offsetof(HeapTupleHeaderData,
+								   t_bits[BITMAPLEN(ncols)])) +
+				 MAXALIGN(outer_plan->plan_width));
+	nrows_per_chunk = (pgstrom_chunk_size() -
+					   STROMALIGN(offsetof(kern_data_store,
+										   colmeta[ncols])))
+		/ (htup_size + sizeof(cl_uint));
+	num_chunks = outer_rows / nrows_per_chunk;
 	if (num_chunks < 1.0)
 		num_chunks = 1.0;
 
-	comparison_cost = 2.0 * pgstrom_gpu_operator_cost;
-	startup_cost += (comparison_cost *
-					 LOG2(rows_per_chunk * rows_per_chunk) *
-					 num_chunks);
-	run_cost += pgstrom_gpu_operator_cost * outer_rows;
+	/*
+	 * Also, how much rows does GpuPreAgg will produce?
+	 */
+	if (num_groups >= nrows_per_chunk)
+		gpagg_ratio = 1.0;	/* no reduction is expected */
+	else
+		gpagg_ratio = Min(agg->plan.plan_rows / outer_rows, 1.0);
+	gpagg_nrows = num_chunks * nrows_per_chunk * gpagg_ratio;
 
 	/*
-	 * cost estimation of partial aggregate by GPU
+	 * Cost estimation of internal Hash operations on GPU
 	 */
-	memset(&pagg_cost, 0, sizeof(QualCost));
-	pagg_width = 0;
+	gpu_cpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
+	memset(&qual_cost, 0, sizeof(QualCost));
+	gpagg_width = 0;
 	foreach (cell, gpupreagg_tlist)
 	{
 		TargetEntry	   *tle = lfirst(cell);
@@ -671,25 +674,37 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 
 		/* no code uses PlannerInfo here. NULL may be OK */
 		cost_qual_eval_node(&cost, (Node *) tle->expr, NULL);
-		pagg_cost.startup += cost.startup;
-		pagg_cost.per_tuple += cost.per_tuple;
+		qual_cost.startup += cost.startup;
+		qual_cost.per_tuple += cost.per_tuple;
 
-		pagg_width += get_typavgwidth(exprType((Node *) tle->expr),
+		gpagg_width += get_typavgwidth(exprType((Node *) tle->expr),
 									  exprTypmod((Node *) tle->expr));
 	}
-	startup_cost += pagg_cost.startup;
-    run_cost += (pagg_cost.per_tuple *
-				 pgstrom_gpu_operator_cost /
-				 cpu_operator_cost *
-				 LOG2(rows_per_chunk) *
-				 num_chunks);
+	startup_cost += qual_cost.startup * gpu_cpu_ratio;
+
+	qual_cost.per_tuple += cpu_operator_cost * Max(agg->numCols, 1);
+
+	/*
+	 * TODO: run_cost of GPU execution depends on
+	 * - policy: nogroup, local+global, global
+	 * - probability of hash colision
+	 */
+	run_cost += qual_cost.per_tuple * gpu_cpu_ratio *
+		nrows_per_chunk * num_chunks;
+
+	/*
+	 * Cost to communicate upper node
+	 */
+	run_cost += cpu_tuple_cost * gpagg_nrows;
+
+
 	/*
 	 * set cost values on GpuPreAgg
 	 */
 	p_newcost_gpreagg->startup_cost = startup_cost;
 	p_newcost_gpreagg->total_cost = startup_cost + run_cost;
-	p_newcost_gpreagg->plan_rows = num_groups * num_chunks;
-	p_newcost_gpreagg->plan_width = pagg_width;
+	p_newcost_gpreagg->plan_rows = gpagg_nrows;
+	p_newcost_gpreagg->plan_width = gpagg_width;
 
 	/*
 	 * Update estimated sorting cost, if any.
@@ -707,8 +722,8 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 				  -1.0);
 		p_newcost_sort->startup_cost = dummy.startup_cost;
 		p_newcost_sort->total_cost = dummy.total_cost;
-		p_newcost_sort->plan_rows = p_newcost_gpreagg->plan_rows;
-		p_newcost_sort->plan_width = p_newcost_gpreagg->plan_width;
+		p_newcost_sort->plan_rows = gpagg_nrows;
+		p_newcost_sort->plan_width = gpagg_width;
 		/*
 		 * increase of startup_cost/run_cost according to the Sort
 		 * to be injected between Agg and GpuPreAgg.
@@ -729,11 +744,22 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 			 (double) agg->numGroups,
 			 startup_cost,
 			 startup_cost + run_cost,
-			 p_newcost_gpreagg->plan_rows);
+			 gpagg_nrows);
 	p_newcost_agg->startup_cost = dummy.startup_cost;
 	p_newcost_agg->total_cost   = dummy.total_cost;
 	p_newcost_agg->plan_rows    = agg->plan.plan_rows;
 	p_newcost_agg->plan_width   = agg->plan.plan_width;
+
+	/* cost for HAVING clause, if any */
+	if (agg->plan.qual)
+	{
+		cost_qual_eval(&qual_cost, agg->plan.qual, NULL);
+		p_newcost_agg->startup_cost += qual_cost.startup;
+		p_newcost_agg->total_cost += qual_cost.startup +
+			qual_cost.per_tuple * gpagg_nrows;
+	}
+	/* cost for tlist */
+	add_tlist_costs_to_plan(NULL, p_newcost_agg, agg->plan.targetlist);
 }
 
 /*
@@ -2880,10 +2906,17 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 														OUTER_VAR);
 		outerPlan(sort_node) = &cscan->scan.plan;
 	}
+#ifdef NOT_USED
+	/*
+	 * Adjust cost value of Agg node makes GpuSort injection being
+	 * confused. So, newcost_agg is only used to decide whether we
+	 * inject GpuPreAgg, or not.
+	 */
 	agg->plan.startup_cost = newcost_agg.startup_cost;
 	agg->plan.total_cost   = newcost_agg.total_cost;
 	agg->plan.plan_rows    = newcost_agg.plan_rows;
 	agg->plan.plan_width   = newcost_agg.plan_width;
+#endif
 	agg->plan.targetlist = agg_tlist;
 	agg->plan.qual = agg_quals;
 	agg->aggstrategy = new_agg_strategy;
@@ -2989,7 +3022,8 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	 * init misc stuff
 	 */
 	gpas->needs_grouping = (gpa_info->numCols > 0 ? true : false);
-	gpas->local_reduction = true;	/* tentative */
+	gpas->local_reduction =
+		(gpa_info->num_groups < gpuMaxThreadsPerBlock() / 2 ? true : false);
 	gpas->has_numeric = gpa_info->has_numeric;
 	gpas->has_varlena = gpa_info->has_varlena;
 	gpas->num_rechecks = 0;

@@ -322,7 +322,7 @@ pgstrom_find_path(PlannerInfo *root, RelOptInfo *rel)
  * supported by planner) on the pre-built plan tree.
  */
 static void
-pgstrom_recursive_grafter(PlannedStmt *pstmt, Plan **p_curr_plan)
+pgstrom_recursive_grafter(PlannedStmt *pstmt, Plan *parent, Plan **p_curr_plan)
 {
 	Plan	   *plan = *p_curr_plan;
 	ListCell   *lc;
@@ -343,7 +343,7 @@ pgstrom_recursive_grafter(PlannedStmt *pstmt, Plan **p_curr_plan)
 			{
 				SubqueryScan   *subquery = (SubqueryScan *) plan;
 				Plan		  **p_subplan = &subquery->subplan;
-				pgstrom_recursive_grafter(pstmt, p_subplan);
+				pgstrom_recursive_grafter(pstmt, plan, p_subplan);
 			}
 			break;
 		case T_ModifyTable:
@@ -353,7 +353,7 @@ pgstrom_recursive_grafter(PlannedStmt *pstmt, Plan **p_curr_plan)
 				foreach (lc, mtplan->plans)
 				{
 					Plan  **p_subplan = (Plan **) &lfirst(lc);
-					pgstrom_recursive_grafter(pstmt, p_subplan);
+					pgstrom_recursive_grafter(pstmt, plan, p_subplan);
 				}
 			}
 			break;
@@ -364,7 +364,7 @@ pgstrom_recursive_grafter(PlannedStmt *pstmt, Plan **p_curr_plan)
 				foreach (lc, aplan->appendplans)
 				{
 					Plan  **p_subplan = (Plan **) &lfirst(lc);
-					pgstrom_recursive_grafter(pstmt, p_subplan);
+					pgstrom_recursive_grafter(pstmt, plan, p_subplan);
 				}
 			}
 			break;
@@ -375,7 +375,7 @@ pgstrom_recursive_grafter(PlannedStmt *pstmt, Plan **p_curr_plan)
 				foreach (lc, maplan->mergeplans)
 				{
 					Plan  **p_subplan = (Plan **) &lfirst(lc);
-					pgstrom_recursive_grafter(pstmt, p_subplan);
+					pgstrom_recursive_grafter(pstmt, plan, p_subplan);
 				}
 			}
 			break;
@@ -386,7 +386,7 @@ pgstrom_recursive_grafter(PlannedStmt *pstmt, Plan **p_curr_plan)
 				foreach (lc, baplan->bitmapplans)
 				{
 					Plan  **p_subplan = (Plan **) &lfirst(lc);
-					pgstrom_recursive_grafter(pstmt, p_subplan);
+					pgstrom_recursive_grafter(pstmt, plan, p_subplan);
 				}
 			}
 			break;
@@ -397,7 +397,7 @@ pgstrom_recursive_grafter(PlannedStmt *pstmt, Plan **p_curr_plan)
 				foreach (lc, boplan->bitmapplans)
 				{
 					Plan  **p_subplan = (Plan **) &lfirst(lc);
-					pgstrom_recursive_grafter(pstmt, p_subplan);
+					pgstrom_recursive_grafter(pstmt, plan, p_subplan);
 				}
 			}
 			break;
@@ -408,7 +408,7 @@ pgstrom_recursive_grafter(PlannedStmt *pstmt, Plan **p_curr_plan)
 				foreach (lc, cscan->custom_children)
 				{
 					Plan  **p_subplan = (Plan **) &lfirst(lc);
-					pgstrom_recursive_grafter(pstmt, p_subplan);
+					pgstrom_recursive_grafter(pstmt, plan, p_subplan);
 				}
 			}
 			break;
@@ -419,14 +419,24 @@ pgstrom_recursive_grafter(PlannedStmt *pstmt, Plan **p_curr_plan)
 
 	/* also walk down left and right child plan sub-tree, if any */
 	if (plan->lefttree)
-		pgstrom_recursive_grafter(pstmt, &plan->lefttree);
+		pgstrom_recursive_grafter(pstmt, plan, &plan->lefttree);
 	if (plan->righttree)
-		pgstrom_recursive_grafter(pstmt, &plan->righttree);
+		pgstrom_recursive_grafter(pstmt, plan, &plan->righttree);
 
 	switch (nodeTag(plan))
 	{
 		case T_Sort:
-			/* Try to replace Sort node by GpuSort node if cost of
+			/*
+			 * Heuristically, we should avoid to replace Sort-node just
+			 * below the Limit-node, because Limit-node informs Sort-node
+			 * minimum required number of rows then Sort-node takes special
+			 * optimization. It is not easy to win with GpuSort...
+			 */
+			if (parent && IsA(parent, Limit))
+				break;
+
+			/*
+			 * Try to replace Sort node by GpuSort node if cost of
 			 * the alternative plan is enough reasonable to replace.
 			 */
 			pgstrom_try_insert_gpusort(pstmt, p_curr_plan);
@@ -471,12 +481,12 @@ pgstrom_planner_entrypoint(Query *parse,
 			ListCell   *cell;
 
 			Assert(result->planTree != NULL);
-			pgstrom_recursive_grafter(result, &result->planTree);
+			pgstrom_recursive_grafter(result, NULL, &result->planTree);
 
 			foreach (cell, result->subplans)
 			{
 				Plan  **p_subplan = (Plan **) &cell->data.ptr_value;
-				pgstrom_recursive_grafter(result, p_subplan);
+				pgstrom_recursive_grafter(result, NULL, p_subplan);
 			}
 		}
 	}
