@@ -648,6 +648,7 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 					   STROMALIGN(offsetof(kern_data_store,
 										   colmeta[ncols])))
 		/ (htup_size + sizeof(cl_uint));
+	nrows_per_chunk = Min(nrows_per_chunk, outer_rows);
 	num_chunks = outer_rows / nrows_per_chunk;
 	if (num_chunks < 1.0)
 		num_chunks = 1.0;
