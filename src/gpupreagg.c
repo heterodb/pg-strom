@@ -3682,6 +3682,8 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 
 	if (gpreagg->needs_grouping)
 	{
+		size_t			lmem_size;
+
 		if (gpreagg->local_reduction)
 		{
 			/* KERNEL_FUNCTION(void)
@@ -3702,11 +3704,13 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 			gpreagg->kern_lagg_args[1] = &gpreagg->m_kds_src;
 			gpreagg->kern_lagg_args[2] = &gpreagg->m_kds_dst;
 			gpreagg->kern_lagg_args[3] = &gpreagg->m_kds_in;
+			lmem_size = Max(Max(sizeof(pagg_hashslot),
+								sizeof(pagg_datum)) * block_size,
+							sizeof(gpreagg->kern.pg_crc32_table));
 			rc = cuLaunchKernel(gpreagg->kern_lagg,
 								grid_size, 1, 1,
 								block_size, 1, 1,
-								Max(sizeof(pagg_hashslot),
-									sizeof(pagg_datum)) * block_size,
+								lmem_size,
 								gpreagg->task.cuda_stream,
 								gpreagg->kern_lagg_args,
 								NULL);
@@ -3733,11 +3737,12 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		gpreagg->kern_gagg_args[1] = &gpreagg->m_kds_dst;
 		gpreagg->kern_gagg_args[2] = &gpreagg->m_kds_in;
 		gpreagg->kern_gagg_args[3] = &gpreagg->m_ghash;
-
+		lmem_size = Max(sizeof(cl_uint) * block_size,
+						sizeof(gpreagg->kern.pg_crc32_table));
 		rc = cuLaunchKernel(gpreagg->kern_gagg,
 							grid_size, 1, 1,
 							block_size, 1, 1,
-							sizeof(cl_uint) * block_size,
+							lmem_size,
 							gpreagg->task.cuda_stream,
 							gpreagg->kern_gagg_args,
 							NULL);

@@ -429,12 +429,8 @@ gpupreagg_preparation(kern_gpupreagg *kgpreagg,
 	}
 	__syncthreads();
 
-	/* out of range check -- usually, should not happen */
-	if (base + nitems > kds_src->nrooms)
-	{
-		errcode = StromError_DataStoreNoSpace;
-		goto out;
-	}
+	/* GpuPreAgg should never increase number of items */
+	assert(base + nitems <= kds_src->nrooms);
 
 	/* do projection */
 	if (kds_index < kds_in->nitems)
@@ -576,11 +572,9 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 	if (get_local_id() == 0)
 		base_index = atomicAdd(&kds_dst->nitems, ngroups);
 	__syncthreads();
-	if (kds_dst->nrooms < base_index + ngroups)
-	{
-		errcode = StromError_DataStoreNoSpace;
-		goto out;
-	}
+
+	/* should not growth the number of items over the nrooms */
+	assert(base_index + ngroups <= kds_dst->nrooms);
 	dest_index = base_index + index;
 
 	/*
@@ -762,12 +756,7 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	if (get_local_id() == 0)
 		base_index = atomicAdd(&kresults->nitems, ngroups);
 	__syncthreads();
-
-	if (kresults->nrooms <= base_index + ngroups)
-	{
-		errcode = StromError_DataStoreNoSpace;
-		goto out;
-	}
+	assert(base_index + ngroups <= kresults->nrooms);
 	dest_index = base_index + index;
 
 	if (get_global_id() < nitems &&
