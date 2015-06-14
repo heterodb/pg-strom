@@ -916,13 +916,6 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
 	assert(kds_dst->format == KDS_FORMAT_SLOT &&
 		   ktoast->format == KDS_FORMAT_ROW);
 
-	if (get_global_id() == 0)
-		printf("gid=%u/%u kresults {nroomt=%u nitems=%u}\n",
-			   get_global_id(),
-			   get_global_size(),
-			   kresults->nrooms,
-			   nitems);
-
 	if (get_global_id() < nitems)
 	{
 		rowidx = kresults->results[get_global_id()];
