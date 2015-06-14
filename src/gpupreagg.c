@@ -615,12 +615,11 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 	double		nrows_per_chunk;
 	double		num_chunks;
 	double		num_groups = Max(agg->plan.plan_rows, 1.0);
-	double		gpagg_ratio;
 	double		gpagg_nrows;
 	double		gpu_cpu_ratio;
 	cl_uint		ncols;
 	Size		htup_size;
-	ListCell   *cell;
+	ListCell   *lc;
 	Path		dummy;
 
 	Assert(outer_plan != NULL);
@@ -641,9 +640,21 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 	 * Estimate number of chunks and nrows per chunk
 	 */
 	ncols = list_length(outer_plan->targetlist);
-	htup_size = (MAXALIGN(offsetof(HeapTupleHeaderData,
-								   t_bits[BITMAPLEN(ncols)])) +
-				 MAXALIGN(outer_plan->plan_width));
+	htup_size = MAXALIGN(offsetof(HeapTupleHeaderData,
+								  t_bits[BITMAPLEN(ncols)]));
+	foreach (lc, outer_plan->targetlist)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+
+		/*
+		 * For more correctness, we'd like to reference table's
+		 * statistics if underlying outer-plan is Scan plan on
+		 * regular relation.
+		 */
+		htup_size += get_typavgwidth(exprType((Node *) tle->expr),
+									 exprTypmod((Node *) tle->expr));
+	}
+	htup_size = MAXALIGN(htup_size);
 	nrows_per_chunk = (pgstrom_chunk_size() -
 					   STROMALIGN(offsetof(kern_data_store,
 										   colmeta[ncols])))
@@ -654,13 +665,9 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 		num_chunks = 1.0;
 
 	/*
-	 * Also, how much rows does GpuPreAgg will produce?
+	 * Then, how much rows does GpuPreAgg will produce?
 	 */
-	if (num_groups >= nrows_per_chunk)
-		gpagg_ratio = 1.0;	/* no reduction is expected */
-	else
-		gpagg_ratio = Min(agg->plan.plan_rows / outer_rows, 1.0);
-	gpagg_nrows = num_chunks * nrows_per_chunk * gpagg_ratio;
+	gpagg_nrows = num_chunks * num_groups;
 
 	/*
 	 * Cost estimation of internal Hash operations on GPU
@@ -668,9 +675,9 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 	gpu_cpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
 	memset(&qual_cost, 0, sizeof(QualCost));
 	gpagg_width = 0;
-	foreach (cell, gpupreagg_tlist)
+	foreach (lc, gpupreagg_tlist)
 	{
-		TargetEntry	   *tle = lfirst(cell);
+		TargetEntry	   *tle = lfirst(lc);
 		QualCost		cost;
 
 		/* no code uses PlannerInfo here. NULL may be OK */
@@ -2062,7 +2069,6 @@ gpupreagg_codegen_projection_nrows(StringInfo body, FuncExpr *func,
 					 "  pg_%s_vstore(%s,errcode,%u,%s,temp_int4);\n",
 					 dtype->type_name,
 					 pc->kds_label,
-					 //pc->ktoast_label,
 					 pc->tle->resno - 1,
 					 pc->rowidx_label);
 }
@@ -2173,7 +2179,6 @@ gpupreagg_codegen_projection_misc(StringInfo body, FuncExpr *func,
 					 "  pg_%s_vstore(%s,errcode,%u,%s,%s);\n",
 					 dtype->type_name,
 					 pc->kds_label,
-					 //pc->ktoast_label,
 					 pc->tle->resno - 1,
 					 pc->rowidx_label,
 					 temp_val);
@@ -2239,7 +2244,6 @@ gpupreagg_codegen_projection_psum_x2(StringInfo body, FuncExpr *func,
 		temp_label,
 		dtype->type_name,
 		pc->kds_label,
-        //pc->ktoast_label,
         pc->tle->resno - 1,
         pc->rowidx_label,
 		temp_label);
@@ -2352,7 +2356,6 @@ gpupreagg_codegen_projection_corr(StringInfo body, FuncExpr *func,
 		"  pg_%s_vstore(%s,errcode,%u,%s,temp_float8x);\n",
 		dtype->type_name,
 		pc->kds_label,
-		//pc->ktoast_label,
 		pc->tle->resno - 1,
 		pc->rowidx_label);
 }
@@ -2423,7 +2426,6 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 				pc.tle->resno - 1,
 				dtype->type_name,
 				pc.kds_label,
-				//pc.ktoast_label,
 				pc.tle->resno - 1,
 				pc.rowidx_label,
 				var->varattno);
@@ -2446,7 +2448,6 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 				"  pg_common_vstore(%s,errcode,%u,%s,0,true);\n",
 				pc.tle->resno - 1,
 				pc.kds_label,
-				//pc.ktoast_label,
 				pc.tle->resno - 1,
 				pc.rowidx_label);
 		}
@@ -3557,10 +3558,18 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 
 	/*
 	 * Allocation of device memory
+	 *
+	 * NOTE: In case when GpuPreAgg kicks global-reduction without local-
+	 * reduction, we assign same buffer on kds_src/kds_dst because it will
+	 * bypass local reduction and global-reduction expects a buffer that
+	 * initialized with gpupreagg_projection().
 	 */
 	length = (GPUMEMALIGN(KERN_GPUPREAGG_LENGTH(&gpreagg->kern, nitems)) +
 			  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_in->kds)) +
-			  2 * GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_dst->kds)) +
+			  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_dst->kds)) +
+			  (!gpreagg->needs_grouping || gpreagg->local_reduction
+			   ? GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_dst->kds))
+			   : 0UL) +
 			  GPUMEMALIGN(gpreagg->kern.hash_size * sizeof(pagg_hashslot)));
 	gpreagg->m_gpreagg = gpuMemAlloc(&gpreagg->task, length);
 	if (!gpreagg->m_gpreagg)
@@ -3570,8 +3579,11 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		GPUMEMALIGN(KERN_GPUPREAGG_LENGTH(&gpreagg->kern, nitems));
 	gpreagg->m_kds_src = gpreagg->m_kds_in +
 		GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_in->kds));
-	gpreagg->m_kds_dst = gpreagg->m_kds_src +
-		GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_dst->kds));
+	if (!gpreagg->needs_grouping || gpreagg->local_reduction)
+		gpreagg->m_kds_dst = gpreagg->m_kds_src +
+			GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_dst->kds));
+	else
+		gpreagg->m_kds_dst = gpreagg->m_kds_src;
 	gpreagg->m_ghash = gpreagg->m_kds_dst +
 		GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_dst->kds));
 
