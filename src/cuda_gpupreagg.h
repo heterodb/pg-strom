@@ -798,7 +798,6 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 								  get_global_id());
 		}
 	}
-out:
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kresults->errcode, errcode);
 }
@@ -914,12 +913,8 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
 	kern_colmeta	cmeta;
 
 	/* Sanity checks */
-	if (kds_dst->format != KDS_FORMAT_SLOT ||
-		ktoast->format != KDS_FORMAT_ROW)
-	{
-		STROM_SET_ERROR(&errcode, StromError_SanityCheckViolation);
-		goto out;
-	}
+	assert(kds_dst->format == KDS_FORMAT_SLOT &&
+		   ktoast->format == KDS_FORMAT_ROW);
 
 	if (get_global_id() < nitems)
 	{
@@ -949,7 +944,6 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
 			}
 		}
 	}
-out:
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kresults->errcode, errcode);
 }

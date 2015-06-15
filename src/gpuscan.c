@@ -332,7 +332,7 @@ gpuscan_try_replace_seqscan(SeqScan *seqscan,
 	RangeTblEntry  *rte;
 	ListCell	   *lc;
 
-	if (!enable_gpuscan)
+	if (!enable_gpuscan || !pgstrom_bulkload_enabled)
 		return NULL;
 
 	Assert(IsA(seqscan, SeqScan));
