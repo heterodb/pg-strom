@@ -108,6 +108,22 @@ CREATE FUNCTION pgstrom.pmax(numeric)
   RETURNS numeric
   AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
   LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.pmax(date)
+  RETURNS date
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.pmax(time)
+  RETURNS time
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.pmax(timestamp)
+  RETURNS timestamp
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.pmax(timestamptz)
+  RETURNS timestamptz
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
+  LANGUAGE C STRICT;
 
 -- Definition of Partial MIN
 CREATE FUNCTION pgstrom.pmin(int2)
@@ -132,6 +148,22 @@ CREATE FUNCTION pgstrom.pmin(float8)
   LANGUAGE C STRICT;
 CREATE FUNCTION pgstrom.pmin(numeric)
   RETURNS numeric
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.pmin(date)
+  RETURNS date
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.pmin(time)
+  RETURNS time
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.pmin(timestamp)
+  RETURNS timestamp
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.pmin(timestamptz)
+  RETURNS timestamptz
   AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
   LANGUAGE C STRICT;
 

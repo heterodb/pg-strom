@@ -2097,6 +2097,58 @@ pgfn_timestamptz_ne_timestamp(cl_int *errcode,
 	return pgfn_timestamp_ne_timestamptz(errcode, arg2, arg1);
 }
 
+/*
+ * overlaps() SQL functions
+ *
+ * NOTE: Even though overlaps() has more variations, inline_function()
+ * preliminary break down combination with type-cast.
+ */
+STATIC_FUNCTION(pg_bool_t)
+pgfn_overlaps_time(cl_int *errcode,
+				   pg_time_t arg1, pg_time_t arg2,
+				   pg_time_t arg3, pg_time_t arg4)
+{
+	pg_bool_t	rc;
+
+	return rc;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+__overlaps_timestamp(cl_int *errcode,
+					 Timestamp ts1, cl_bool ts1_isnull,
+					 Timestamp te1, cl_bool te1_isnull,
+					 Timestamp ts2, cl_bool ts2_isnull,
+					 Timestamp te2, cl_bool te2_isnull)
+{
+	pg_bool_t	rc;
+
+	return rc;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_overlaps_timestamp(cl_int *errcode,
+						pg_timestamp_t arg1, pg_timestamp_t arg2,
+						pg_timestamp_t arg3, pg_timestamp_t arg4)
+{
+	return __overlaps_timestamp(errcode,
+								arg1.value, arg1.isnull,
+								arg2.value, arg2.isnull,
+								arg3.value, arg3.isnull,
+								arg4.value, arg4.isnull);
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_overlaps_timestamptz(cl_int *errcode,
+						  pg_timestamptz_t arg1, pg_timestamptz_t arg2,
+						  pg_timestamptz_t arg3, pg_timestamptz_t arg4)
+{
+	return __overlaps_timestamp(errcode,
+								(Timestamp) arg1.value, arg1.isnull,
+								(Timestamp) arg2.value, arg2.isnull,
+								(Timestamp) arg3.value, arg3.isnull,
+								(Timestamp) arg4.value, arg4.isnull);
+}
+
 #else	/* __CUDACC__ */
 
 #include "pgtime.h"

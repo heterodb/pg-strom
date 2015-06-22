@@ -311,6 +311,13 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	{ "max", 1, {FLOAT8OID}, "c:max", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PMAX}, 0},
 	{ "max", 1, {NUMERICOID},"c:max", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PMAX}, DEVFUNC_NEEDS_NUMERIC},
+	{ "max", 1, {DATEOID},   "c:max", 1, {DATEOID},   {ALTFUNC_EXPR_PMAX}, 0},
+	{ "max", 1, {TIMEOID},   "c:max", 1, {TIMEOID},   {ALTFUNC_EXPR_PMAX}, 0},
+	{ "max", 1, {TIMESTAMPOID}, "c:max", 1, {TIMESTAMPOID},
+	  {ALTFUNC_EXPR_PMAX}, 0},
+	{ "max", 1, {TIMESTAMPTZOID}, "c:max", 1, {TIMESTAMPTZOID},
+	  {ALTFUNC_EXPR_PMAX}, 0},
+
 	/* MIX(X) = MIN(PMIN(X)) */
 	{ "min", 1, {INT2OID},   "c:min", 1, {INT2OID},   {ALTFUNC_EXPR_PMIN}, 0},
 	{ "min", 1, {INT4OID},   "c:min", 1, {INT4OID},   {ALTFUNC_EXPR_PMIN}, 0},
@@ -319,6 +326,13 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	{ "min", 1, {FLOAT8OID}, "c:min", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PMIN}, 0},
 	{ "min", 1, {NUMERICOID},"c:min", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PMIN}, DEVFUNC_NEEDS_NUMERIC},
+	{ "min", 1, {DATEOID},   "c:min", 1, {DATEOID},   {ALTFUNC_EXPR_PMAX}, 0},
+	{ "min", 1, {TIMEOID},   "c:min", 1, {TIMEOID},   {ALTFUNC_EXPR_PMAX}, 0},
+	{ "min", 1, {TIMESTAMPOID},   "c:min", 1, {TIMESTAMPOID},
+	  {ALTFUNC_EXPR_PMAX}, 0},
+	{ "min", 1, {TIMESTAMPTZOID}, "c:min", 1, {TIMESTAMPTZOID},
+	  {ALTFUNC_EXPR_PMAX}, 0},
+
 	/* SUM(X) = SUM(PSUM(X)) */
 	{ "sum", 1, {INT2OID},   "s:sum", 1, {INT8OID},   {ALTFUNC_EXPR_PSUM}, 0},
 	{ "sum", 1, {INT4OID},   "s:sum", 1, {INT8OID},   {ALTFUNC_EXPR_PSUM}, 0},
@@ -1807,6 +1821,7 @@ aggcalc_method_of_typeoid(Oid type_oid)
 		case INT8OID:
 		case TIMEOID:
 		case TIMESTAMPOID:
+		case TIMESTAMPTZOID:
 			return "LONG";
 		case FLOAT4OID:
 			return "FLOAT";
@@ -2119,6 +2134,7 @@ gpupreagg_codegen_projection_misc(StringInfo body, FuncExpr *func,
 		case INT8OID:
 		case TIMEOID:
 		case TIMESTAMPOID:
+		case TIMESTAMPTZOID:
 			pc->use_temp_int8 = true;
             temp_val = "temp_int8";
             max_const = "LONG_MAX";
