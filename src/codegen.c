@@ -658,9 +658,20 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
       "t/F:timestamptz_gt_timestamp" },
 	{ "timestamptz_ne_timestamp", 2, {TIMESTAMPTZOID, TIMESTAMPOID},
       "t/F:timestamptz_ne_timestamp" },
-	/*
-	 * TODO: overlap() SQL function
-	 */
+
+	/* overlaps() */
+	{ "overlaps", 4, {TIMEOID, TIMEOID, TIMEOID, TIMEOID},
+	  "t/F:overlaps_time" },
+/*
+	{ "overlaps", 4, {TIMETZOID, TIMETZOID, TIMETZOID, TIMETZOID},
+	  "t/F:overlaps_timetz" },
+*/
+	{ "overlaps", 4, {TIMESTAMPOID, TIMESTAMPOID,
+					  TIMESTAMPOID, TIMESTAMPOID},
+	  "t/F:overlaps_timestamp" },
+	{ "overlaps", 4, {TIMESTAMPTZOID, TIMESTAMPTZOID,
+					  TIMESTAMPTZOID, TIMESTAMPTZOID},
+	  "t/F:overlaps_timestamptz" },
 
 	/*
 	 * Text functions
