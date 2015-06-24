@@ -33,6 +33,7 @@
 #include "utils/tqual.h"
 #include "pg_strom.h"
 #include "cuda_numeric.h"
+#include <float.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -40,7 +41,8 @@
 /*
  * GUC variables
  */
-static int		pgstrom_chunk_size_kb;
+static int	pgstrom_chunk_size_kb;
+double		pgstrom_chunk_max_inout_ratio;
 
 /*
  * pgstrom_chunk_size - configured chunk size
@@ -1277,4 +1279,14 @@ pgstrom_init_datastore(void)
 							PGC_USERSET,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							NULL, NULL, NULL);
+	DefineCustomRealVariable("pg_strom.chunk_max_inout_ratio",
+							 "",
+							 NULL,
+							 &pgstrom_chunk_max_inout_ratio,
+							 6.0,
+							 1.0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 }

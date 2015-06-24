@@ -299,6 +299,16 @@ typedef struct
 	CUevent			ev_kern_join_end;
 	CUevent			ev_dma_recv_start;
 	CUevent			ev_dma_recv_stop;
+	/*
+	 * NOTE: If expected size of the kds_dst is too large (that exceeds
+	 * pg_strom.chunk_max_inout_ratio), we split GpuJoin steps multiple
+	 * times. In this case, all we reference is kds_src[oitems_base] ...
+	 * kds_src[oitems_base + oitems_nums - 1] on the next invocation,
+	 * then this GpuJoinTask shall be reused with new oitems_base and
+	 * oitems_nums after the result is processed at CPU side.
+	 */
+	cl_uint			oitems_base;
+	cl_uint			oitems_nums;
 	pgstrom_multirels  *pmrels;		/* inner multi relations (heap or hash) */
 	pgstrom_data_store *pds_src;	/* data store of outer relation */
 	pgstrom_data_store *pds_dst;	/* data store of result buffer */
@@ -2648,6 +2658,8 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 				STROMALIGN(offsetof(kern_resultbuf, results[0])));
 	pgjoin = MemoryContextAllocZero(gcontext->memcxt, required);
 	pgstrom_init_gputask(&gjs->gts, &pgjoin->task);
+	pgjoin->oitems_base = 0;
+	pgjoin->oitems_nums = pds_src->kds->nitems;
 	pgjoin->pmrels = multirels_attach_buffer(gjs->curr_pmrels);
 	pgjoin->pds_src = pds_src;
 
