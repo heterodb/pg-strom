@@ -894,6 +894,8 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	cscan->scan.plan.initPlan = sort->plan.initPlan;
 
 	pgstrom_init_codegen_context(&context);
+	gs_info.startup_cost = startup_cost;
+	gs_info.total_cost = total_cost;
 	gs_info.kern_source = pgstrom_gpusort_codegen(sort, &context);
 	gs_info.extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSORT;
 	gs_info.used_params = context.used_params;
