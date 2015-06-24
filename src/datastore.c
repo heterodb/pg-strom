@@ -42,7 +42,8 @@
  * GUC variables
  */
 static int	pgstrom_chunk_size_kb;
-double		pgstrom_chunk_max_inout_ratio;
+double		pgstrom_chunk_inout_max_ratio;
+double		pgstrom_chunk_inout_margin;
 
 /*
  * pgstrom_chunk_size - configured chunk size
@@ -1282,9 +1283,19 @@ pgstrom_init_datastore(void)
 	DefineCustomRealVariable("pg_strom.chunk_max_inout_ratio",
 							 "",
 							 NULL,
-							 &pgstrom_chunk_max_inout_ratio,
+							 &pgstrom_chunk_inout_max_ratio,
 							 6.0,
 							 1.0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	DefineCustomRealVariable("pg_strom.chunk_inout_margin",
+							 "",
+							 NULL,
+							 &pgstrom_chunk_inout_margin,
+							 0.25,
+							 0.00,
 							 DBL_MAX,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,

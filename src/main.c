@@ -56,10 +56,6 @@ double		pgstrom_gpu_setup_cost;
 double		pgstrom_gpu_operator_cost;
 double		pgstrom_gpu_tuple_cost;
 
-/* buffer usage */
-double		pgstrom_nrows_growth_ratio_limit;
-double		pgstrom_nrows_growth_margin;
-
 static void
 pgstrom_init_misc_guc(void)
 {
@@ -154,6 +150,7 @@ pgstrom_init_misc_guc(void)
                              PGC_USERSET,
                              GUC_NOT_IN_SAMPLE,
                              NULL, NULL, NULL);
+#ifdef NOT_USED
 	/* max ratio (hard limit) for row population */
 	DefineCustomRealVariable("pg_strom.nrows_growth_ratio_limit",
 							 "Hard limit of rows growth ratio",
@@ -176,6 +173,7 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+#endif
 }
 
 /*
