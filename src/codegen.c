@@ -1436,7 +1436,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		if (b->boolop == NOT_EXPR)
 		{
 			Assert(list_length(b->args) == 1);
-			appendStringInfo(&context->str, "pg_boolop_not(errcode, ");
+			appendStringInfo(&context->str, "pgfn_boolop_not(errcode, ");
 			if (!codegen_expression_walker(linitial(b->args), context))
 				return false;
 			appendStringInfoChar(&context->str, ')');
