@@ -2103,26 +2103,155 @@ pgfn_timestamptz_ne_timestamp(cl_int *errcode,
  * NOTE: Even though overlaps() has more variations, inline_function()
  * preliminary break down combination with type-cast.
  */
+STATIC_INLINE(pg_bool_t)
+overlaps_cl_long(cl_int *errcode,
+				 cl_long ts1, cl_bool ts1_isnull,
+				 cl_long te1, cl_bool te1_isnull,
+				 cl_long ts2, cl_bool ts2_isnull,
+				 cl_long te2, cl_bool te2_isnull)
+{
+	pg_bool_t rc;
+
+	/*
+	 * If both endpoints of interval 1 are null, the result is null (unknown).
+	 * If just one endpoint is null, take ts1 as the non-null one. Otherwise,
+	 * take ts1 as the lesser endpoint.
+	 */
+	if (ts1_isnull)
+	{
+		if (te1_isnull)
+		{
+			rc.isnull = true;
+			return rc;
+		}
+		/* swap null for non-null */
+		ts1        = te1;
+		ts1_isnull = false;
+		te1_isnull = true;
+	}
+	else if (!te1_isnull)
+	{
+		if (ts1 > te1)
+		{
+			cl_long tmp = ts1;
+			ts1 = te1;
+			te1 = tmp;
+		}
+	}
+
+	/* Likewise for interval 2. */
+	if (ts2_isnull)
+	{
+		if (te2_isnull)
+		{
+			rc.isnull = true;
+			return rc;
+		}
+		/* swap null for non-null */
+		ts2        = te2;
+		ts2_isnull = false;
+		te2_isnull = true;
+	}
+	else if (!te2_isnull)
+	{
+		if (ts2 > te2)
+		{
+			cl_long tmp = ts2;
+			ts2 = te2;
+			te2 = tmp;
+		}
+	}
+
+	/*
+	 * At this point neither ts1 nor ts2 is null, so we can consider three
+	 * cases: ts1 > ts2, ts1 < ts2, ts1 = ts2
+	 */
+	if (ts1 > ts2)
+	{
+		/*
+		 * This case is ts1 < te2 OR te1 < te2, which may look redundant but
+		 * in the presence of nulls it's not quite completely so.
+		 */
+		if (te2_isnull)
+		{
+			rc.isnull = true;
+			return rc;
+		}
+		if (ts1 < te2)
+		{
+			rc.isnull = false;
+			rc.value  = true;
+			return rc;
+		}
+		if (te1_isnull)
+		{
+			rc.isnull = true;
+			return rc;
+		}
+
+		/*
+		 * If te1 is not null then we had ts1 <= te1 above, and we just found
+		 * ts1 >= te2, hence te1 >= te2.
+		 */
+		rc.isnull = false;
+		rc.value  = false;
+		return rc;
+	}
+	else if (ts1 < ts2)
+	{
+		/* This case is ts2 < te1 OR te2 < te1 */
+		if (te1_isnull)
+		{
+			rc.isnull = true;
+			return rc;
+		}
+		if (ts2 < te1)
+		{
+			rc.isnull = false;
+			rc.value  = true;
+			return rc;
+		}
+		if (te2_isnull)
+		{
+			rc.isnull = true;
+			return rc;
+		}
+
+		/*
+		 * If te2 is not null then we had ts2 <= te2 above, and we just found
+		 * ts2 >= te1, hence te2 >= te1.
+		 */
+		rc.isnull = false;
+		rc.value  = false;
+		return rc;
+	}
+	else
+	{
+		/*
+		 * For ts1 = ts2 the spec says te1 <> te2 OR te1 = te2, which is a
+		 * rather silly way of saying "true if both are nonnull, else null".
+		 */
+		if (te1_isnull || te2_isnull)
+		{
+			rc.isnull = true;
+			return rc;
+		}
+		rc.isnull = false;
+		rc.value  = true;
+		return rc;
+	}
+}
+
 STATIC_FUNCTION(pg_bool_t)
 pgfn_overlaps_time(cl_int *errcode,
 				   pg_time_t arg1, pg_time_t arg2,
 				   pg_time_t arg3, pg_time_t arg4)
 {
-	pg_bool_t	rc;
-
-	return rc;
-}
-
-STATIC_FUNCTION(pg_bool_t)
-__overlaps_timestamp(cl_int *errcode,
-					 Timestamp ts1, cl_bool ts1_isnull,
-					 Timestamp te1, cl_bool te1_isnull,
-					 Timestamp ts2, cl_bool ts2_isnull,
-					 Timestamp te2, cl_bool te2_isnull)
-{
-	pg_bool_t	rc;
-
-	return rc;
+  return overlaps_cl_long(errcode,
+						  arg1.value, arg1.isnull,
+						  arg2.value, arg2.isnull,
+						  arg3.value, arg3.isnull,
+						  arg4.value, arg4.isnull);
 }
 
 STATIC_FUNCTION(pg_bool_t)
@@ -2130,11 +2259,11 @@ pgfn_overlaps_timestamp(cl_int *errcode,
 						pg_timestamp_t arg1, pg_timestamp_t arg2,
 						pg_timestamp_t arg3, pg_timestamp_t arg4)
 {
-	return __overlaps_timestamp(errcode,
-								arg1.value, arg1.isnull,
-								arg2.value, arg2.isnull,
-								arg3.value, arg3.isnull,
-								arg4.value, arg4.isnull);
+  return overlaps_cl_long(errcode,
+						  arg1.value, arg1.isnull,
+						  arg2.value, arg2.isnull,
+						  arg3.value, arg3.isnull,
+						  arg4.value, arg4.isnull);
 }
 
 STATIC_FUNCTION(pg_bool_t)
@@ -2142,11 +2271,11 @@ pgfn_overlaps_timestamptz(cl_int *errcode,
 						  pg_timestamptz_t arg1, pg_timestamptz_t arg2,
 						  pg_timestamptz_t arg3, pg_timestamptz_t arg4)
 {
-	return __overlaps_timestamp(errcode,
-								(Timestamp) arg1.value, arg1.isnull,
-								(Timestamp) arg2.value, arg2.isnull,
-								(Timestamp) arg3.value, arg3.isnull,
-								(Timestamp) arg4.value, arg4.isnull);
+  return overlaps_cl_long(errcode,
+						  arg1.value, arg1.isnull,
+						  arg2.value, arg2.isnull,
+						  arg3.value, arg3.isnull,
+						  arg4.value, arg4.isnull);
 }
 
 #else	/* __CUDACC__ */
