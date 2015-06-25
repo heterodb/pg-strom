@@ -162,7 +162,9 @@ KERNEL_FUNCTION(void)
 gpujoin_preparation(kern_gpujoin *kgjoin,
 					kern_data_store *kds,
 					kern_multirels *kmrels,
-					cl_int depth)
+					cl_int depth,
+					cl_uint oitems_base,
+					cl_uint oitems_nums)
 {
 	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
 	kern_resultbuf *kresults_in;
@@ -190,9 +192,10 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 	 */
 	if (depth == 1)
 	{
-		cl_bool		is_matched;
+		cl_uint		kds_index = get_global_id() + oitems_base;
 		cl_uint		count;
 		cl_uint		offset;
+		cl_bool		is_matched;
 		__shared__ cl_int	base;
 
 		/*
@@ -200,9 +203,9 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 		 * then, it allocates result buffer on kresults_in and put
 		 * get_global_id() if it match.
 		 */
-		if (get_global_id() < kds->nitems)
-			is_matched = gpujoin_outer_quals(&errcode, kparams, kds,
-											 get_global_id());
+		assert(oitems_base + oitems_nums <= kds->nitems);
+		if (kds_index < oitems_base + oitems_nums)
+			is_matched = gpujoin_outer_quals(&errcode, kparams, kds, kds_index);
 		else
 			is_matched = false;
 
@@ -225,8 +228,7 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 
 		if (is_matched)
 		{
-			HeapTupleHeaderData	   *htup
-				= kern_get_tuple_row(kds, get_global_id());
+			HeapTupleHeaderData	   *htup = kern_get_tuple_row(kds, kds_index);
 			kresults_in->results[base + offset] = (size_t)htup - (size_t)kds;
 		}
 
@@ -234,7 +236,7 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 		if (get_global_id() == 0)
 		{
 			kresults_in->nrels = 1;
-			kresults_in->nrooms = kds->nitems;
+			kresults_in->nrooms = oitems_nums;
 			kresults_in->errcode = StromError_Success;
 		}
 	}

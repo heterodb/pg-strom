@@ -3317,7 +3317,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	 * OK, enqueue a series of requests
 	 */
 	depth = 1;
-	outer_ntuples = pds_src->kds->nitems;
+	outer_ntuples = pgjoin->oitems_nums;
 	for (depth = 1; depth <= gjs->num_rels; depth++)
 	{
 		JoinType	join_type = gjs->inners[depth - 1].join_type;
@@ -3333,7 +3333,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 		 *                     kern_multirels *kmrels,
 		 *                     cl_int depth)
 		 */
-		num_threads = (depth > 1 ? 1 : pds_src->kds->nitems);
+		num_threads = (depth > 1 ? 1 : outer_ntuples);
 		pgstrom_compute_workgroup_size(&grid_xsize,
 									   &block_xsize,
 									   pgjoin->kern_prep,
@@ -3345,6 +3345,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 		kern_args[1] = &pgjoin->m_kds_src;
 		kern_args[2] = &pgjoin->m_kmrels;
 		kern_args[3] = &depth;
+		kern_args[4] = &pgjoin->oitems_base;
+		kern_args[5] = &pgjoin->oitems_nums;
 
 		rc = cuLaunchKernel(pgjoin->kern_prep,
 							grid_xsize, 1, 1,
