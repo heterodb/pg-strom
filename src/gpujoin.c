@@ -852,81 +852,6 @@ create_gpujoin_path(PlannerInfo *root,
 		pfree(result);
 }
 
-
-static void
-estimate_kernel_buffer(PlannerInfo *root,
-					   RelOptInfo *joinrel,
-					   Path *outer_path,
-					   Path *inner_path,
-					   JoinPathExtraData *extra,
-					   List *hash_quals,
-					   List *join_quals,
-					   List *host_quals,
-					   double *p_nrows_ratio,
-					   cl_uint *p_outer_nloops)
-{
-	/* FIXME: ncols should be length of custom_scan_tlist */
-	cl_uint		ncols = list_length(joinrel->reltargetlist);
-	double		nrows;
-	double		nrows_ratio;
-	double		nrows_dest;
-	cl_uint		num_chunks;
-	cl_uint		outer_nloops;
-	Size		kbuffer_size;
-	Size		kbuffer_limit;
-
-	/*
-	 * 'nrows_ratio' is used to estimate size of result buffer
-	 * for GPU kernel execution. If joinrel contains host-only
-	 * qualifiers, we need to estimate number of rows when
-	 * host-only qualifiers are processed.
-	 */
-	if (host_quals == NIL)
-		nrows = joinrel->rows;
-	else
-	{
-		RelOptInfo		dummy;
-
-		set_joinrel_size_estimates(root, &dummy,
-								   outer_path->parent,
-								   inner_path->parent,
-								   extra->sjinfo,
-								   join_quals);
-		nrows = dummy.rows;
-	}
-	nrows_ratio = nrows / outer_path->parent->rows;
-
-	/*
-	 * Also, estimate size of the kernel buffer based on the result width
-	 * and expected number of rows. If its length exceeds the configured
-	 * threshold, we try to split outer scan multiple times.
-	 */
-	num_chunks = estimate_num_chunks(outer_path);
-
-	nrows_dest = (outer_path->parent->rows / (double)num_chunks) * nrows_ratio;
-	kbuffer_size = STROMALIGN(offsetof(kern_data_store,
-									   colmeta[ncols])) +
-		LONGALIGN((sizeof(Datum) + sizeof(char)) * ncols *
-				  (Size)(nrows_dest + pgstrom_chunk_inout_margin));
-
-	kbuffer_limit = (Size)(pgstrom_chunk_inout_max_ratio *
-						   (double)pgstrom_chunk_size());
-	if (kbuffer_size <= kbuffer_limit)
-		outer_nloops = 1;
-	else
-		outer_nloops = ceil((double) kbuffer_limit / (double) kbuffer_size);
-
-	/*
-	 * NOTE: outer_nloops is actually affected by expected usage of
-	 * result buffer to store intermediate result of GpuJoin.
-	 * It fully depends on whether GpuJoin shall be merged, or not.
-	 * So, we calculate it on the later phase.
-	 */
-	*p_nrows_ratio = nrows_ratio;
-	*p_outer_nloops = outer_nloops;
-}
-
-
 static void
 try_gpujoin_path(PlannerInfo *root,
 				 RelOptInfo *joinrel,
@@ -942,8 +867,8 @@ try_gpujoin_path(PlannerInfo *root,
 	Relids			required_outer;
 	List		   *restrictlist = extra->restrictlist;
 	ListCell	   *lc;
+	double			nrows_output;
 	double			nrows_ratio;
-	cl_uint			outer_nloops;
 	bool			support_bulkload = false;
 
 	required_outer = calc_non_nestloop_required_outer(outer_path,
@@ -981,14 +906,26 @@ try_gpujoin_path(PlannerInfo *root,
 	}
 
 	/*
-	 * buffer size estimation
+	 * Estimation of the nrows_ratio (# of device output rows / # of input rows).
+	 * It shall be adjusted during execution time, and used to split outer input
+	 * stream to fit output kernel buffer.
 	 *
-	 *
-	 *
+	 * TODO: add cost if outer input stream shall be divided to multiple portions.
 	 */
-	estimate_kernel_buffer(root, joinrel, outer_path, inner_path, extra,
-						   hash_quals, join_quals, host_quals,
-						   &nrows_ratio, &outer_nloops);
+	if (host_quals == NIL)
+		nrows_output = joinrel->rows;
+	else
+	{
+		RelOptInfo		dummy;
+
+		set_joinrel_size_estimates(root, &dummy,
+								   outer_path->parent,
+								   inner_path->parent,
+								   extra->sjinfo,
+								   join_quals);
+		nrows_output = dummy.rows;
+	}
+	nrows_ratio = nrows_output / outer_path->parent->rows;
 
 	/*
 	 * ParamPathInfo of this join
@@ -2632,8 +2569,9 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 	pgstrom_gpujoin	   *pgjoin;
 	kern_gpujoin	   *kgjoin;
 	TupleDesc			tupdesc;
-	cl_uint				nrooms;
-	cl_uint				total_items;
+	double				nrows_ratio;
+	Size				nrooms;
+	Size				total_items;
 	Size				kgjoin_head;
 	Size				required;
 	pgstrom_data_store *pds_dst;
@@ -2664,11 +2602,26 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 		pgjoin->is_last_chunk = (gjs->next_pds == NULL);
 
 	/*
-	 * Setup kern_gpujoin
+	 * Setup kern_gpujoin - its total length shall be shorter than chunk_size.
 	 */
-	total_items = (cl_uint)((double)pds_src->kds->nitems *
-							gjs->kresults_ratio *
-							(1.0 + pgstrom_chunk_inout_margin));
+	total_items = (Size)((double)pgjoin->oitems_nums *
+						 gjs->kresults_ratio *
+						 pgstrom_chunk_size_margin());
+	if (kgjoin_head +
+		2 * STROMALIGN(offsetof(kern_resultbuf,
+								results[total_items])) > pgstrom_chunk_size())
+	{
+		Size	reduced_items;
+		double	nsplit;
+
+		reduced_items = (((pgstrom_chunk_size() - kgjoin_head) / 2
+						  - STROMALIGN(offsetof(kern_resultbuf, results[0])))
+						 / sizeof(cl_uint));
+		Assert(reduced_items <= total_items);
+		nsplit = ceil((double) total_items / (double) reduced_items);
+		pgjoin->oitems_nums = (cl_uint)((double) pgjoin->oitems_nums / nsplit + 1.0);
+		total_items = reduced_items;
+	}
 	kgjoin = &pgjoin->kern;
 	kgjoin->kresults_1_offset = kgjoin_head;
 	kgjoin->kresults_2_offset = kgjoin_head +
@@ -2684,14 +2637,46 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 
 	/*
 	 * Allocation of the destination data-store
+	 *
+	 * Its length shall be less than pgstrom_chunk_size_limit(), thus, we may
+	 * reduce number of outer items to be processed on this task.
+	 * Note that pgjoin->oitems_nums may be smaller than nitems, because of
+	 * overconsumption of kern_resultbuf[].
 	 */
-	nrooms = (cl_uint)((double) pds_src->kds->nitems *
-					   gjs->inners[gjs->num_rels - 1].nrows_ratio *
-					   (1.0 + pgstrom_chunk_inout_margin));
+	nrows_ratio = gjs->inners[gjs->num_rels - 1].nrows_ratio;
+	nrooms = (Size)((double) pgjoin->oitems_nums *
+					nrows_ratio *
+					pgstrom_chunk_size_margin());
 	tupdesc = gjs->gts.css.ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 
 	if (gjs->result_format == KDS_FORMAT_SLOT)
 	{
+		Size	length;
+
+		length = (STROMALIGN(offsetof(kern_data_store,
+									  colmeta[tupdesc->natts])) +
+				  LONGALIGN((sizeof(Datum) + sizeof(char)) *
+							tupdesc->natts) * nrooms);
+		/* Is length larger than limitation? */
+		if (length > pgstrom_chunk_size_limit())
+		{
+			Size	nrooms_small;
+			Size	nitems_small;
+
+			/* maximum number of tuples we can store */
+			nrooms_small = (pgstrom_chunk_size_limit()
+							- STROMALIGN(offsetof(kern_data_store,
+												  colmeta[tupdesc->natts])))
+				/ LONGALIGN((sizeof(Datum) + sizeof(char)) * tupdesc->natts);
+			/* reduce number of outer items to be processed */
+			nitems_small = (Size)((double)nrooms_small /
+								  nrows_ratio /
+								  pgstrom_chunk_size_margin()) + 1;
+			Assert(nitems_small <= pgjoin->oitems_nums);
+
+			pgjoin->oitems_nums = nitems_small;
+			nrooms = nrooms_small;
+		}
 		pds_dst = pgstrom_create_data_store_slot(gcontext, tupdesc,
 												 nrooms, false, NULL);
 	}
@@ -2704,6 +2689,32 @@ gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 				  STROMALIGN(sizeof(cl_uint) * nrooms) +
 				  MAXALIGN(offsetof(kern_tupitem, htup) +
 						   gjs->result_width) * nrooms);
+		/* Is length larger than limitation? */
+		if (length > pgstrom_chunk_size_limit())
+		{
+			Size	nrooms_small;
+			Size	nitems_small;
+
+			/* maximum number of tuples we can store */
+			nrooms_small = (pgstrom_chunk_size_limit()
+							- STROMALIGN(offsetof(kern_data_store,
+												  colmeta[tupdesc->natts])))
+				/ (sizeof(cl_uint) + MAXALIGN(offsetof(kern_tupitem, htup) +
+											  gjs->result_width));
+			/* reduce number of outer items to be processed */
+			nitems_small = (Size)((double)nrooms_small /
+								  nrows_ratio /
+								  pgstrom_chunk_size_margin()) + 1;
+			Assert(nitems_small <= pgjoin->oitems_nums);
+			pgjoin->oitems_nums = nitems_small;
+			nrooms = nrooms_small;
+			/* length calculation again */
+			length = (STROMALIGN(offsetof(kern_data_store,
+										  colmeta[tupdesc->natts])) +
+					  STROMALIGN(sizeof(cl_uint) * nrooms) +
+					  MAXALIGN(offsetof(kern_tupitem, htup) +
+							   gjs->result_width) * nrooms);
+		}
 		pds_dst = pgstrom_create_data_store_row(gcontext, tupdesc,
 												length, false);
 	}
@@ -2986,8 +2997,8 @@ gpujoin_task_complete(GpuTask *gtask)
 			double	kresults_ratio_new;
 
 			/* kresults_max_items tells how many items are needed */
-			total_items = kgjoin->kresults_max_items *
-				(1 + pgstrom_chunk_inout_margin);
+			total_items = (kgjoin->kresults_max_items *
+						   pgstrom_chunk_size_margin());
 			nrooms = total_items / (gjs->num_rels + 1);
 			/* adjust estimation */
 			kresults_ratio_new = ((double)kgjoin->kresults_max_items /
@@ -3208,7 +3219,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	/* kern_gpujoin *kgjoin (includes 2x kern_resultbuf) */
 	total_items = (size_t)(gjs->kresults_ratio *
 						   (double) pds_src->kds->nitems *
-						   (1.0 + pgstrom_chunk_inout_margin));
+						   pgstrom_chunk_size_margin());
 	length = STROMALIGN(offsetof(kern_resultbuf, results[total_items]));
 
 	pgjoin->kern.kresults_1_offset =

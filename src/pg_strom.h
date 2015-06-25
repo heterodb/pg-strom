@@ -497,9 +497,9 @@ extern void pgstrom_init_codegen(void);
 /*
  * datastore.c
  */
-extern double pgstrom_chunk_inout_max_ratio;
-extern double pgstrom_chunk_inout_margin;
 extern Size pgstrom_chunk_size(void);
+extern Size pgstrom_chunk_size_limit(void);
+extern double pgstrom_chunk_size_margin(void);
 extern cl_uint estimate_num_chunks(Path *pathnode);
 extern void subtract_tuplecost_if_bulkload(Cost *p_run_cost, Path *pathnode);
 extern double pgstrom_get_bulkload_density(Plan *child_plan);
