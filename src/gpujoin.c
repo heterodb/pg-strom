@@ -838,13 +838,13 @@ create_gpujoin_path(PlannerInfo *root,
 	 */
 	if (cost_gpujoin(root, result, required_outer))
 	{
-		List   *custom_children = list_make1(result->outer_path);
+		List   *custom_paths = list_make1(result->outer_path);
 
 		/* informs planner a list of child pathnodes */
 		for (i=0; i < num_rels; i++)
-			custom_children = lappend(custom_children,
-									  result->inners[i].scan_path);
-		result->cpath.custom_children = custom_children;
+			custom_paths = lappend(custom_paths,
+								   result->inners[i].scan_path);
+		result->cpath.custom_paths = custom_paths;
 		/* add GpuJoin path */
 		pgstrom_add_path(root, joinrel, &result->cpath, length);
 	}
@@ -1197,7 +1197,7 @@ typedef struct
 	List		   *ps_depth;
 	List		   *ps_resno;
 	GpuJoinPath	   *gpath;
-	List		   *custom_children;
+	List		   *custom_plans;
 	bool			resjunk;
 } build_ps_tlist_context;
 
@@ -1248,7 +1248,7 @@ build_pseudo_targetlist_walker(Node *node, build_ps_tlist_context *context)
 
 			if (bms_is_member(varnode->varno, rel->relids))
 			{
-				Plan   *plan = list_nth(context->custom_children, i);
+				Plan   *plan = list_nth(context->custom_plans, i);
 
 				foreach (cell, plan->targetlist)
 				{
@@ -1290,13 +1290,13 @@ build_pseudo_targetlist(GpuJoinPath *gpath,
 						GpuJoinInfo *gj_info,
 						List *targetlist,
 						List *host_quals,
-						List *custom_children)
+						List *custom_plans)
 {
 	build_ps_tlist_context context;
 
 	memset(&context, 0, sizeof(build_ps_tlist_context));
 	context.gpath   = gpath;
-	context.custom_children = custom_children;
+	context.custom_plans = custom_plans;
 	context.resjunk = false;
 
 	build_pseudo_targetlist_walker((Node *)targetlist, &context);
@@ -1334,7 +1334,7 @@ create_gpujoin_plan(PlannerInfo *root,
 					CustomPath *best_path,
 					List *tlist,
 					List *clauses,
-					List *custom_children)
+					List *custom_plans)
 {
 	GpuJoinPath	   *gpath = (GpuJoinPath *) best_path;
 	GpuJoinInfo		gj_info;
@@ -1345,8 +1345,8 @@ create_gpujoin_plan(PlannerInfo *root,
 	ListCell	   *lc;
 	int				i;
 
-	Assert(gpath->num_rels + 1 == list_length(custom_children));
-	outer_plan = linitial(custom_children);
+	Assert(gpath->num_rels + 1 == list_length(custom_plans));
+	outer_plan = linitial(custom_plans);
 	host_quals = extract_actual_clauses(gpath->host_quals, false);
 
 	cscan = makeNode(CustomScan);
@@ -1354,7 +1354,7 @@ create_gpujoin_plan(PlannerInfo *root,
 	cscan->scan.plan.qual = host_quals;
 	cscan->flags = best_path->flags;
 	cscan->methods = &gpujoin_plan_methods;
-	cscan->custom_children = list_copy_tail(custom_children, 1);
+	cscan->custom_plans = list_copy_tail(custom_plans, 1);
 
 	memset(&gj_info, 0, sizeof(GpuJoinInfo));
 	gj_info.kmrels_length = gpath->kmrels_length;
@@ -1462,7 +1462,7 @@ create_gpujoin_plan(PlannerInfo *root,
 	 */
 	cscan->custom_scan_tlist = build_pseudo_targetlist(gpath, &gj_info,
 													   tlist, host_quals,
-													   custom_children);
+													   custom_plans);
 
 	/*
 	 * construct kernel code
@@ -1595,7 +1595,7 @@ gpujoin_create_scan_state(CustomScan *node)
 	GpuJoinState   *gjs;
 	GpuJoinInfo	   *gj_info = deform_gpujoin_info(node);
 
-	Assert(gj_info->num_rels == list_length(node->custom_children));
+	Assert(gj_info->num_rels == list_length(node->custom_plans));
 	gjs = palloc0(offsetof(GpuJoinState, inners[gj_info->num_rels]));
 
 	/* Set tag and executor callbacks */
@@ -1669,7 +1669,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	outerPlanState(gjs) = ExecInitNode(outerPlan(cscan), estate, eflags);
 	for (i=0; i < gj_info->num_rels; i++)
 	{
-		Plan	   *inner_plan = list_nth(cscan->custom_children, i);
+		Plan	   *inner_plan = list_nth(cscan->custom_plans, i);
 		innerState *istate = &gjs->inners[i];
 		List	   *hash_inner_keys;
 		List	   *hash_outer_keys;
@@ -1748,8 +1748,8 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 			istate->hgram_shift = sizeof(cl_uint) * BITS_PER_BYTE - shift;
 			istate->hgram_curr = 0;
 		}
-		gjs->gts.css.custom_children =
-			lappend(gjs->gts.css.custom_children, gjs->inners[i].state);
+		gjs->gts.css.custom_ps = lappend(gjs->gts.css.custom_ps,
+										 gjs->inners[i].state);
 	}
 
 	/*
