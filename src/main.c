@@ -405,7 +405,7 @@ pgstrom_recursive_grafter(PlannedStmt *pstmt, Plan *parent, Plan **p_curr_plan)
 			{
 				CustomScan *cscan = (CustomScan *) plan;
 
-				foreach (lc, cscan->custom_children)
+				foreach (lc, cscan->custom_plans)
 				{
 					Plan  **p_subplan = (Plan **) &lfirst(lc);
 					pgstrom_recursive_grafter(pstmt, plan, p_subplan);
