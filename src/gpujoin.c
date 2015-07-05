@@ -2562,6 +2562,373 @@ gpujoin_codegen(PlannerInfo *root,
 	return decl.data;
 }
 
+/*
+ * gpujoin_attach_result_buffer 
+ *
+ * 
+ *
+ *
+ */
+static void
+gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
+{
+	GpuContext	   *gcontext = gjs->gts.gcontext;
+	bool			is_retried = (pgjoin->pds_dst != NULL);
+	kern_gpujoin   *kgjoin = &pgjoin->kern;
+	Size			kgjoin_head;
+	Size			kgjoin_length;
+	Size			total_items;
+
+	/*
+	 * Calculation of kern_resultbuf
+	 *
+	 *
+	 *
+	 *
+	 *
+	 *
+	 */
+	if (!is_retried)
+		total_items = (Size)((double)pgjoin->oitems_nums *
+							 gjs->kresults_ratio);
+	else
+		total_item = kgjoin->kresults_max_items;
+
+	kgjoin_head = (offsetof(pgstrom_gpujoin, kern) +
+				   offsetof(kern_gpujoin, kparams) +
+				   STROMALIGN(gjs->gts.kern_params->length));
+	kgjoin_length = kgjoin_head +
+		STROMALIGN(offsetof(kern_resultbuf, results[total_items])) +
+		STROMALIGN(offsetof(kern_resultbuf, results[total_items]));
+	if (kgjoin_length > pgstrom_chunk_size())
+	{
+		Size	reduced_items;
+
+		reduced_items = (((pgstrom_chunk_size() - kgjoin_head) / 2
+						  - STROMALIGN(offsetof(kern_resultbuf, results[0])))
+						 / sizeof(cl_uint));
+		Assert(reduced_items <= total_items);
+
+		// reduction of oitems_nums
+	}
+	kgjoin->kresults_1_offset = kgjoin_head;
+	kgjoin->kresults_2_offset = kgjoin_head +
+		STROMALIGN(offsetof(kern_resultbuf, results[total_items]));
+	kgjoin->kresults_total_items = total_items;
+	kgjoin->kresults_max_items = 0;
+	kgjoin->max_depth = gjs->num_rels;
+	kgjoin->errcode = StromError_Success;
+
+	/*
+	 * Calculation of pds_dst
+	 *
+	 *
+	 *
+	 */
+
+
+
+
+
+
+	if (kgjoin_length_new > pgstrom_chunk_size())
+	{
+		cl_uint     total_items_new;
+		cl_uint     oitems_nums_new;
+
+		total_items_new = (((pgstrom_chunk_size() -
+							 kgjoin->kresults_1_offset) / 2 -
+							STROMALIGN(offsetof(kern_resultbuf,
+												results[0])))
+						   / sizeof(cl_int));
+		oitems_nums_new = (cl_uint)((double) total_items_new /
+									(double) total_items *
+									(double) pgjoin->oitems_nums);
+		/* !FIXME! */
+		if (oitems_nums_new == 0)
+			elog(ERROR, "unacceptable large kresults ratio: %.f",
+				 gjs->kresults_ratio);
+
+		elog(NOTICE, "restrictions on outer ntuples %u to %u of %u",
+			 pgjoin->oitems_nums,
+			 oitems_nums_new,
+			 pds_src->kds->nitems);
+
+		total_items = total_items_new;
+		pgjoin->oitems_nums = oitems_nums_new;
+	}
+
+
+
+
+	if (pgjoin->task.errcode == StromError_DataStoreNoSpace)
+	{
+		GpuContext		   *gcontext = gts->gcontext;
+		GpuJoinState	   *gjs = (GpuJoinState *) gts;
+		pgstrom_data_store *pds_src = pgjoin->pds_src;
+		pgstrom_data_store *pds_dst = pgjoin->pds_dst;
+		kern_data_store	   *kds_old = pds_dst->kds;
+		kern_data_store	   *kds_new;
+		Size				kds_length;
+		cl_uint				ncols = kds_old->ncols;
+		cl_uint				nrooms;
+		cl_uint				total_items;
+
+		/* GpuJoin should not take file-mapped data store */
+		Assert(!pds_dst->kds_fname);
+
+		/*
+		 * NOTE: StromError_DataStoreNoSpace may happen in two cases.
+		 * First, kern_resultbuf, that stores intermediate results, does
+		 * not have enough space, thus kernel code cannot generate join
+		 * result. Second, kern_data_store of destination didn't have
+		 * enough space, thus kernel projection got failed.
+		 * The kern_gpujoin->kresults_max_items tell us which is the
+		 * cause of this error.
+		 *
+		 * Then, we can have two solutions to follow up the error.
+		 * If resource consumption still below the limitation, we
+		 * simply expand the buffer then retry.
+		 * Elsewhere, we decrease oitems_nums to fit expected number of
+		 * results within the buffer size.
+		 *
+		 * TODO: If reduction of oitems_nums does not work well, it shall
+		 * be processed by CPU fallback, to be implemented.
+		 */
+		if (kgjoin->kresults_total_items < kgjoin->kresults_max_items)
+		{
+			double		kresults_ratio_new;
+			Size		kgjoin_length_new;
+			double		nrows_ratio;
+
+			/*
+			 * 1st scenario: GPU projection didn't work at all.
+			 * So, we expand the kern_resultbuf first, then adjust length
+			 * of the destination data-store according to the estimated
+			 * number of result items.
+			 */
+
+			/* kresults_max_items tells how many items were needed */
+			total_items = (kgjoin->kresults_max_items *
+						   pgstrom_chunk_size_margin());
+
+			/*
+			 * Adjust estimation for further tasks.
+			 *
+			 * FIXME: It may be too aggressive to expand gjs->kresults_ratio
+			 * immediately, because this chunk might be exceptional.
+			 */
+			kresults_ratio_new = ((double)kgjoin->kresults_max_items /
+								  (double)pgjoin->oitems_nums);
+			if (kresults_ratio_new > gjs->kresults_ratio)
+			{
+				elog(NOTICE, "kresults ratio was increased to %.2f => %.2f",
+					 gjs->kresults_ratio, kresults_ratio_new);
+				gjs->kresults_ratio = kresults_ratio_new;
+			}
+
+			/*
+			 * Length estimation of the new kern_gpujoin, then reduction of
+			 * oitems_nums if it exceeds the limitation.
+			 */
+			kgjoin_length_new = kgjoin->kresults_1_offset +
+				STROMALIGN(offsetof(kern_resultbuf, results[total_items])) +
+				STROMALIGN(offsetof(kern_resultbuf, results[total_items]));
+			if (kgjoin_length_new > pgstrom_chunk_size())
+			{
+				cl_uint		total_items_new;
+				cl_uint		oitems_nums_new;
+
+				total_items_new = (((pgstrom_chunk_size() -
+									 kgjoin->kresults_1_offset) / 2 -
+									STROMALIGN(offsetof(kern_resultbuf,
+														results[0])))
+								   / sizeof(cl_int));
+				oitems_nums_new = (cl_uint)((double) total_items_new /
+											(double) total_items *
+											(double) pgjoin->oitems_nums);
+				/* !FIXME! */
+				if (oitems_nums_new == 0)
+					elog(ERROR, "unacceptable large kresults ratio: %.f",
+						 gjs->kresults_ratio);
+
+				elog(NOTICE, "restrictions on outer ntuples %u to %u of %u",
+					 pgjoin->oitems_nums,
+					 oitems_nums_new,
+					 pds_src->kds->nitems);
+
+				total_items = total_items_new;
+				pgjoin->oitems_nums = oitems_nums_new;
+			}
+			/* reset kern_gpujoin */
+			kgjoin->kresults_2_offset = kgjoin->kresults_1_offset +
+				STROMALIGN(offsetof(kern_resultbuf, results[total_items]));
+			kgjoin->kresults_total_items = total_items;
+			kgjoin->kresults_max_items = 0;
+			kgjoin->errcode = StromError_Success;
+
+			/*
+			 * MEMO: The 1st scenario says nothing about expected final
+			 * number of items, so we just follow the way of
+			 * gpujoin_create_task(), but we have no guarantee whether
+			 * it reflects exact number of rows.
+			 */
+			nrows_ratio = gjs->inners[gjs->num_rels - 1].nrows_ratio;
+			nrooms = (cl_uint)((double) pgjoin->oitems_nums *
+							   nrows_ratio *
+							   pgstrom_chunk_size_margin());
+		}
+		else
+		{
+			/*
+			 * 2nd scenario: kds_old->nitems (that shall be larger than
+			 * kds_old->nrooms) and kds_usage will tell us exact usage
+			 * of the result buffer.
+			 */
+			if (kds_old->format == KDS_FORMAT_ROW)
+			{
+				Size	result_width;
+
+				result_width = ((Size)(kds_old->usage -
+									   KERN_DATA_STORE_HEAD_LENGTH(kds_old) -
+									   sizeof(cl_uint) * kds_old->nitems) /
+								(Size) kds_old->nitems) + 1;
+				result_width =  MAXALIGN(result_width);
+
+				if (result_width > gjs->result_width)
+				{
+					elog(NOTICE, "Destination KDS was small, "
+						 "size expanded: avg-width %u => %zu, nrooms %u => %u",
+						 gjs->result_width, MAXALIGN(result_width),
+						 kds_old->nrooms, kds_old->nitems);
+					gjs->result_width = result_width;
+				}
+			}
+			else
+			{
+				elog(NOTICE, "Destination KDS was small, "
+					 "size expanded: nrooms %u => %u",
+					 kds_old->nrooms, kds_old->nitems);
+			}
+			nrooms = kds_old->nitems;
+		}
+
+		/*
+		 * Expand kern_data_store according to the hint on previous
+		 * execution.
+		 */
+		if (kds_old->format == KDS_FORMAT_ROW)
+		{
+			kds_length = (STROMALIGN(offsetof(kern_data_store,
+											  colmeta[ncols])) +
+						  STROMALIGN(sizeof(cl_uint) * nrooms) +
+						  MAXALIGN(offsetof(kern_tupitem, htup) +
+								   gjs->result_width) * nrooms);
+			/* Length exceeds the limitation? */
+			if (kds_length > pgstrom_chunk_size_limit())
+			{
+				cl_uint		oitems_nums_new;
+				cl_uint		nrooms_new;
+
+				nrooms_new = (pgstrom_chunk_size_limit() -
+							  STROMALIGN(offsetof(kern_data_store,
+												  colmeta[ncols])) /
+							  (sizeof(cl_uint) +
+							   MAXALIGN(offsetof(kern_tupitem, htup) +
+										gjs->result_width)));
+
+				oitems_nums_new = (cl_uint)((double) nrooms_new /
+											(double) nrooms *
+											pgstrom_chunk_size_margin() *
+											(double) pgjoin->oitems_nums);
+				/* !FIXME! */
+				if (oitems_nums_new == 0)
+					elog(ERROR, "unacceptable large nrooms: %u",
+						 kds_old->nitems);
+
+				elog(NOTICE, "restrictions on outer ntuples %u to %u of %u",
+					 pgjoin->oitems_nums,
+					 oitems_nums_new,
+					 pds_src->kds->nitems);
+
+				pgjoin->oitems_nums = oitems_nums_new;
+				nrooms = nrooms_new;
+				kds_length = (STROMALIGN(offsetof(kern_data_store,
+												  colmeta[ncols])) +
+							  STROMALIGN(sizeof(cl_uint) * nrooms) +
+							  MAXALIGN(offsetof(kern_tupitem, htup) +
+									   gjs->result_width) * nrooms);
+			}
+		}
+		else if (kds_old->format == KDS_FORMAT_SLOT)
+		{
+			kds_length = STROMALIGN(offsetof(kern_data_store,
+											 colmeta[ncols])) +
+				(LONGALIGN(sizeof(bool) * ncols) +
+				 LONGALIGN(sizeof(Datum) * ncols)) * nrooms;
+			/* Length exceeds the limitation? */
+			if (kds_length > pgstrom_chunk_size_limit())
+			{
+				cl_uint		oitems_nums_new;
+				cl_uint		nrooms_new;
+
+				nrooms_new = (pgstrom_chunk_size_limit() -
+							  STROMALIGN(offsetof(kern_data_store,
+												  colmeta[ncols])) /
+							  (LONGALIGN(sizeof(bool) * ncols) +
+							   LONGALIGN(sizeof(Datum) * ncols)));
+
+				oitems_nums_new = (cl_uint)((double) nrooms_new /
+											(double) nrooms *
+											pgstrom_chunk_size_margin() *
+											(double) pgjoin->oitems_nums);
+				/* !FIXME! */
+				if (oitems_nums_new == 0)
+					elog(ERROR, "unacceptable large nitems: %u",
+						 kds_old->nitems);
+
+				elog(NOTICE, "restrictions on outer ntuples %u to %u of %u",
+					 pgjoin->oitems_nums,
+					 oitems_nums_new,
+					 pds_src->kds->nitems);
+
+				pgjoin->oitems_nums = oitems_nums_new;
+				nrooms = nrooms_new;
+				kds_length = STROMALIGN(offsetof(kern_data_store,
+												 colmeta[ncols])) +
+					(LONGALIGN(sizeof(bool) * ncols) +
+					 LONGALIGN(sizeof(Datum) * ncols)) * nrooms;
+			}
+		}
+		else
+			elog(ERROR, "Bug? unexpected result format: %d", kds_old->format);
+
+		if (kds_length <= kds_old->length)
+		{
+			/* no need to alloc again, just reset usage */
+			kds_old->usage = 0;
+			kds_old->nitems = 0;
+			kds_old->nrooms = nrooms;
+		}
+		else
+		{
+			kds_new = MemoryContextAllocZero(gcontext->memcxt, kds_length);
+			memcpy(kds_new, kds_old, KERN_DATA_STORE_HEAD_LENGTH(kds_old));
+			kds_new->hostptr = (hostptr_t) &kds_new->hostptr;
+			kds_new->length = kds_length;
+			kds_new->usage = 0;
+			kds_new->nitems = 0;
+			kds_new->nrooms = nrooms;
+			pds_dst->kds = kds_new;
+			pds_dst->kds_length = kds_new->length;
+			pfree(kds_old);
+		}
+
+
+
+
+}
+
 static GpuTask *
 gpujoin_create_task(GpuJoinState *gjs, pgstrom_data_store *pds_src)
 {
@@ -3045,268 +3412,7 @@ gpujoin_task_complete(GpuTask *gtask)
 
 
 
-	if (pgjoin->task.errcode == StromError_DataStoreNoSpace)
-	{
-		GpuContext		   *gcontext = gts->gcontext;
-		GpuJoinState	   *gjs = (GpuJoinState *) gts;
-		pgstrom_data_store *pds_src = pgjoin->pds_src;
-		pgstrom_data_store *pds_dst = pgjoin->pds_dst;
-		kern_data_store	   *kds_old = pds_dst->kds;
-		kern_data_store	   *kds_new;
-		Size				kds_length;
-		cl_uint				ncols = kds_old->ncols;
-		cl_uint				nrooms;
-		cl_uint				total_items;
 
-		/* GpuJoin should not take file-mapped data store */
-		Assert(!pds_dst->kds_fname);
-
-		/*
-		 * NOTE: StromError_DataStoreNoSpace may happen in two cases.
-		 * First, kern_resultbuf, that stores intermediate results, does
-		 * not have enough space, thus kernel code cannot generate join
-		 * result. Second, kern_data_store of destination didn't have
-		 * enough space, thus kernel projection got failed.
-		 * The kern_gpujoin->kresults_max_items tell us which is the
-		 * cause of this error.
-		 *
-		 * Then, we can have two solutions to follow up the error.
-		 * If resource consumption still below the limitation, we
-		 * simply expand the buffer then retry.
-		 * Elsewhere, we decrease oitems_nums to fit expected number of
-		 * results within the buffer size.
-		 *
-		 * TODO: If reduction of oitems_nums does not work well, it shall
-		 * be processed by CPU fallback, to be implemented.
-		 */
-		if (kgjoin->kresults_total_items < kgjoin->kresults_max_items)
-		{
-			double		kresults_ratio_new;
-			Size		kgjoin_length_new;
-			double		nrows_ratio;
-
-			/*
-			 * 1st scenario: GPU projection didn't work at all.
-			 * So, we expand the kern_resultbuf first, then adjust length
-			 * of the destination data-store according to the estimated
-			 * number of result items.
-			 */
-
-			/* kresults_max_items tells how many items were needed */
-			total_items = (kgjoin->kresults_max_items *
-						   pgstrom_chunk_size_margin());
-
-			/*
-			 * Adjust estimation for further tasks.
-			 *
-			 * FIXME: It may be too aggressive to expand gjs->kresults_ratio
-			 * immediately, because this chunk might be exceptional.
-			 */
-			kresults_ratio_new = ((double)kgjoin->kresults_max_items /
-								  (double)pgjoin->oitems_nums);
-			if (kresults_ratio_new > gjs->kresults_ratio)
-			{
-				elog(NOTICE, "kresults ratio was increased to %.2f => %.2f",
-					 gjs->kresults_ratio, kresults_ratio_new);
-				gjs->kresults_ratio = kresults_ratio_new;
-			}
-
-			/*
-			 * Length estimation of the new kern_gpujoin, then reduction of
-			 * oitems_nums if it exceeds the limitation.
-			 */
-			kgjoin_length_new = kgjoin->kresults_1_offset +
-				STROMALIGN(offsetof(kern_resultbuf, results[total_items])) +
-				STROMALIGN(offsetof(kern_resultbuf, results[total_items]));
-			if (kgjoin_length_new > pgstrom_chunk_size())
-			{
-				cl_uint		total_items_new;
-				cl_uint		oitems_nums_new;
-
-				total_items_new = (((pgstrom_chunk_size() -
-									 kgjoin->kresults_1_offset) / 2 -
-									STROMALIGN(offsetof(kern_resultbuf,
-														results[0])))
-								   / sizeof(cl_int));
-				oitems_nums_new = (cl_uint)((double) total_items_new /
-											(double) total_items *
-											(double) pgjoin->oitems_nums);
-				/* !FIXME! */
-				if (oitems_nums_new == 0)
-					elog(ERROR, "unacceptable large kresults ratio: %.f",
-						 gjs->kresults_ratio);
-
-				elog(NOTICE, "restrictions on outer ntuples %u to %u of %u",
-					 pgjoin->oitems_nums,
-					 oitems_nums_new,
-					 pds_src->kds->nitems);
-
-				total_items = total_items_new;
-				pgjoin->oitems_nums = oitems_nums_new;
-			}
-			/* reset kern_gpujoin */
-			kgjoin->kresults_2_offset = kgjoin->kresults_1_offset +
-				STROMALIGN(offsetof(kern_resultbuf, results[total_items]));
-			kgjoin->kresults_total_items = total_items;
-			kgjoin->kresults_max_items = 0;
-			kgjoin->errcode = StromError_Success;
-
-			/*
-			 * MEMO: The 1st scenario says nothing about expected final
-			 * number of items, so we just follow the way of
-			 * gpujoin_create_task(), but we have no guarantee whether
-			 * it reflects exact number of rows.
-			 */
-			nrows_ratio = gjs->inners[gjs->num_rels - 1].nrows_ratio;
-			nrooms = (cl_uint)((double) pgjoin->oitems_nums *
-							   nrows_ratio *
-							   pgstrom_chunk_size_margin());
-		}
-		else
-		{
-			/*
-			 * 2nd scenario: kds_old->nitems (that shall be larger than
-			 * kds_old->nrooms) and kds_usage will tell us exact usage
-			 * of the result buffer.
-			 */
-			if (kds_old->format == KDS_FORMAT_ROW)
-			{
-				Size	result_width;
-
-				result_width = ((Size)(kds_old->usage -
-									   KERN_DATA_STORE_HEAD_LENGTH(kds_old) -
-									   sizeof(cl_uint) * kds_old->nitems) /
-								(Size) kds_old->nitems) + 1;
-				result_width =  MAXALIGN(result_width);
-
-				if (result_width > gjs->result_width)
-				{
-					elog(NOTICE, "Destination KDS was small, "
-						 "size expanded: avg-width %u => %zu, nrooms %u => %u",
-						 gjs->result_width, MAXALIGN(result_width),
-						 kds_old->nrooms, kds_old->nitems);
-					gjs->result_width = result_width;
-				}
-			}
-			else
-			{
-				elog(NOTICE, "Destination KDS was small, "
-					 "size expanded: nrooms %u => %u",
-					 kds_old->nrooms, kds_old->nitems);
-			}
-			nrooms = kds_old->nitems;
-		}
-
-		/*
-		 * Expand kern_data_store according to the hint on previous
-		 * execution.
-		 */
-		if (kds_old->format == KDS_FORMAT_ROW)
-		{
-			kds_length = (STROMALIGN(offsetof(kern_data_store,
-											  colmeta[ncols])) +
-						  STROMALIGN(sizeof(cl_uint) * nrooms) +
-						  MAXALIGN(offsetof(kern_tupitem, htup) +
-								   gjs->result_width) * nrooms);
-			/* Length exceeds the limitation? */
-			if (kds_length > pgstrom_chunk_size_limit())
-			{
-				cl_uint		oitems_nums_new;
-				cl_uint		nrooms_new;
-
-				nrooms_new = (pgstrom_chunk_size_limit() -
-							  STROMALIGN(offsetof(kern_data_store,
-												  colmeta[ncols])) /
-							  (sizeof(cl_uint) +
-							   MAXALIGN(offsetof(kern_tupitem, htup) +
-										gjs->result_width)));
-
-				oitems_nums_new = (cl_uint)((double) nrooms_new /
-											(double) nrooms *
-											pgstrom_chunk_size_margin() *
-											(double) pgjoin->oitems_nums);
-				/* !FIXME! */
-				if (oitems_nums_new == 0)
-					elog(ERROR, "unacceptable large nrooms: %u",
-						 kds_old->nitems);
-
-				elog(NOTICE, "restrictions on outer ntuples %u to %u of %u",
-					 pgjoin->oitems_nums,
-					 oitems_nums_new,
-					 pds_src->kds->nitems);
-
-				pgjoin->oitems_nums = oitems_nums_new;
-				nrooms = nrooms_new;
-				kds_length = (STROMALIGN(offsetof(kern_data_store,
-												  colmeta[ncols])) +
-							  STROMALIGN(sizeof(cl_uint) * nrooms) +
-							  MAXALIGN(offsetof(kern_tupitem, htup) +
-									   gjs->result_width) * nrooms);
-			}
-		}
-		else if (kds_old->format == KDS_FORMAT_SLOT)
-		{
-			kds_length = STROMALIGN(offsetof(kern_data_store,
-											 colmeta[ncols])) +
-				(LONGALIGN(sizeof(bool) * ncols) +
-				 LONGALIGN(sizeof(Datum) * ncols)) * nrooms;
-			/* Length exceeds the limitation? */
-			if (kds_length > pgstrom_chunk_size_limit())
-			{
-				cl_uint		oitems_nums_new;
-				cl_uint		nrooms_new;
-
-				nrooms_new = (pgstrom_chunk_size_limit() -
-							  STROMALIGN(offsetof(kern_data_store,
-												  colmeta[ncols])) /
-							  (LONGALIGN(sizeof(bool) * ncols) +
-							   LONGALIGN(sizeof(Datum) * ncols)));
-
-				oitems_nums_new = (cl_uint)((double) nrooms_new /
-											(double) nrooms *
-											pgstrom_chunk_size_margin() *
-											(double) pgjoin->oitems_nums);
-				/* !FIXME! */
-				if (oitems_nums_new == 0)
-					elog(ERROR, "unacceptable large nitems: %u",
-						 kds_old->nitems);
-
-				elog(NOTICE, "restrictions on outer ntuples %u to %u of %u",
-					 pgjoin->oitems_nums,
-					 oitems_nums_new,
-					 pds_src->kds->nitems);
-
-				pgjoin->oitems_nums = oitems_nums_new;
-				nrooms = nrooms_new;
-				kds_length = STROMALIGN(offsetof(kern_data_store,
-												 colmeta[ncols])) +
-					(LONGALIGN(sizeof(bool) * ncols) +
-					 LONGALIGN(sizeof(Datum) * ncols)) * nrooms;
-			}
-		}
-		else
-			elog(ERROR, "Bug? unexpected result format: %d", kds_old->format);
-
-		if (kds_length <= kds_old->length)
-		{
-			/* no need to alloc again, just reset usage */
-			kds_old->usage = 0;
-			kds_old->nitems = 0;
-			kds_old->nrooms = nrooms;
-		}
-		else
-		{
-			kds_new = MemoryContextAllocZero(gcontext->memcxt, kds_length);
-			memcpy(kds_new, kds_old, KERN_DATA_STORE_HEAD_LENGTH(kds_old));
-			kds_new->hostptr = (hostptr_t) &kds_new->hostptr;
-			kds_new->length = kds_length;
-			kds_new->usage = 0;
-			kds_new->nitems = 0;
-			kds_new->nrooms = nrooms;
-			pds_dst->kds = kds_new;
-			pds_dst->kds_length = kds_new->length;
-			pfree(kds_old);
-		}
 
 		/*
 		 * OK, chain this task on the pending_tasks queue again
