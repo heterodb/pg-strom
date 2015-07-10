@@ -203,9 +203,9 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 		 * then, it allocates result buffer on kresults_in and put
 		 * get_global_id() if it match.
 		 */
-		assert(oitems_base + oitems_nums <= kds->nitems);
 		if (kds_index < oitems_base + oitems_nums)
-			is_matched = gpujoin_outer_quals(&errcode, kparams, kds, kds_index);
+			is_matched = gpujoin_outer_quals(&errcode, kparams,
+											 kds, kds_index);
 		else
 			is_matched = false;
 
@@ -222,7 +222,7 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 
 		if (base + count > kgjoin->kresults_total_items)
 		{
-			STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
+			STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace + 10000);
 			goto out;
 		}
 
@@ -249,6 +249,7 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 		kresults_out->nrooms = kgjoin->kresults_total_items / (depth + 1);
 		kresults_out->nitems = 0;
 		kresults_out->errcode = StromError_Success;
+		printf("kresults_out {nrels=%u nrooms=%u nitems=%u} total_items=%u\n", kresults_out->nrels, kresults_out->nrooms, kresults_out->nitems, kgjoin->kresults_total_items);
 	}
 out:
 	/* Update required length of kresults if overflow. */
@@ -534,7 +535,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			/* kresults_out still have enough space? */
 			if (base + count > kresults_out->nrooms)
 			{
-				STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
+				STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace + 30000);
 				goto out;
 			}
 
@@ -575,7 +576,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			/* kresults_out still have enough space? */
 			if (base + count > kresults_out->nrooms)
 			{
-				STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
+				STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace + 40000);
 				goto out;
 			}
 
@@ -671,7 +672,7 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 	 */
 	if (base + count > kresults_out->nrooms)
 	{
-		errcode = StromError_DataStoreNoSpace;
+		errcode = StromError_DataStoreNoSpace + 50000;
 		goto out;
 	}
 
@@ -782,7 +783,7 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 		 */
 		if (base + count > kresults_out->nrooms)
 		{
-			errcode = StromError_DataStoreNoSpace;
+			errcode = StromError_DataStoreNoSpace + 60000;
 			goto out;
 		}
 
@@ -937,7 +938,7 @@ __gpujoin_projection_row(cl_int *errcode,
 		STROMALIGN(sizeof(cl_uint) * kresults->nitems) +
 		usage_prev + total_length > kds_dst->length)
 	{
-		STROM_SET_ERROR(errcode, StromError_DataStoreNoSpace);
+		STROM_SET_ERROR(errcode, StromError_DataStoreNoSpace + 70000);
 		return;
 	}
 
@@ -1124,7 +1125,7 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 	if (kresults->nitems > kresults->nrooms ||
 		kresults->nitems > kds_dst->nrooms)
 	{
-		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
+		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace + 80000);
 		goto out;
 	}
 
@@ -1273,6 +1274,10 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 		 * of kds_dst is initialized.
 		 */
 		kds_dst->nitems = kresults->nitems;
+		printf("kresults {nitems=%u nrooms=%u} "
+			   "kgjoin->kresults_max_items=%u\n",
+			   kresults->nitems, kresults->nrooms,
+			   kgjoin->kresults_max_items);
 	}
 
 	if (errcode != StromError_Success)
@@ -1294,7 +1299,10 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 	if (kresults->nitems > kresults->nrooms ||
 		kresults->nitems > kds_dst->nrooms)
 	{
-		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
+		if (get_global_id() == 0)
+			printf("kresults {nitems=%u nrooms=%u} kds_dst {nitems=%u nrooms=%u}\n", kresults->nitems, kresults->nrooms, kds_dst->nitems, kds_dst->nrooms);
+
+		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace + 90000);
 		goto out;
 	}
 
