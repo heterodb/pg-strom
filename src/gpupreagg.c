@@ -326,12 +326,12 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	{ "min", 1, {FLOAT8OID}, "c:min", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PMIN}, 0},
 	{ "min", 1, {NUMERICOID},"c:min", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PMIN}, DEVFUNC_NEEDS_NUMERIC},
-	{ "min", 1, {DATEOID},   "c:min", 1, {DATEOID},   {ALTFUNC_EXPR_PMAX}, 0},
-	{ "min", 1, {TIMEOID},   "c:min", 1, {TIMEOID},   {ALTFUNC_EXPR_PMAX}, 0},
+	{ "min", 1, {DATEOID},   "c:min", 1, {DATEOID},   {ALTFUNC_EXPR_PMIN}, 0},
+	{ "min", 1, {TIMEOID},   "c:min", 1, {TIMEOID},   {ALTFUNC_EXPR_PMIN}, 0},
 	{ "min", 1, {TIMESTAMPOID},   "c:min", 1, {TIMESTAMPOID},
-	  {ALTFUNC_EXPR_PMAX}, 0},
+	  {ALTFUNC_EXPR_PMIN}, 0},
 	{ "min", 1, {TIMESTAMPTZOID}, "c:min", 1, {TIMESTAMPTZOID},
-	  {ALTFUNC_EXPR_PMAX}, 0},
+	  {ALTFUNC_EXPR_PMIN}, 0},
 
 	/* SUM(X) = SUM(PSUM(X)) */
 	{ "sum", 1, {INT2OID},   "s:sum", 1, {INT8OID},   {ALTFUNC_EXPR_PSUM}, 0},
@@ -2036,6 +2036,10 @@ typedef struct
 	bool			use_temp_float8x;
 	bool			use_temp_float8y;
 	bool			use_temp_numeric;
+	bool			use_temp_date;
+	bool			use_temp_time;
+	bool			use_temp_timestamp;
+	bool			use_temp_timestamptz;
 	TargetEntry	   *tle;
 } codegen_projection_context;
 
@@ -2123,7 +2127,6 @@ gpupreagg_codegen_projection_misc(StringInfo body, FuncExpr *func,
 			/* no break here */
 
 		case INT4OID:
-		case DATEOID:
 			pc->use_temp_int4 = true;
 			temp_val = "temp_int4";
 			max_const = "INT_MAX";
@@ -2132,9 +2135,6 @@ gpupreagg_codegen_projection_misc(StringInfo body, FuncExpr *func,
 			break;
 
 		case INT8OID:
-		case TIMEOID:
-		case TIMESTAMPOID:
-		case TIMESTAMPTZOID:
 			pc->use_temp_int8 = true;
             temp_val = "temp_int8";
             max_const = "LONG_MAX";
@@ -2164,6 +2164,38 @@ gpupreagg_codegen_projection_misc(StringInfo body, FuncExpr *func,
 			max_const = "PG_NUMERIC_MAX";
 			min_const = "PG_NUMERIC_MIN";
 			zero_const = "PG_NUMERIC_ZERO";
+			break;
+
+		case DATEOID:
+			pc->use_temp_date = true;
+			temp_val = "temp_date";
+			max_const = "INT_MAX";
+			min_const = "INT_MIN";
+			zero_const = "0";
+			break;
+
+		case TIMEOID:
+			pc->use_temp_time = true;
+			temp_val = "temp_time";
+			max_const = "LONG_MAX";
+			min_const = "LONG_MIN";
+			zero_const = "0";
+			break;
+
+		case TIMESTAMPOID:
+			pc->use_temp_timestamp = true;
+			temp_val = "temp_timestamp";
+			max_const = "LONG_MAX";
+			min_const = "LONG_MIN";
+			zero_const = "0";
+			break;
+
+		case TIMESTAMPTZOID:
+			pc->use_temp_timestamptz = true;
+			temp_val = "temp_timestamptz";
+			max_const = "LONG_MAX";
+			min_const = "LONG_MIN";
+			zero_const = "0";
 			break;
 
 		default:
@@ -2578,6 +2610,14 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 		appendStringInfo(&decl1, "  pg_float8_t temp_float8y;\n");
 	if (pc.use_temp_numeric)
 		appendStringInfo(&decl1, "  pg_numeric_t temp_numeric;\n");
+	if (pc.use_temp_date)
+		appendStringInfo(&decl1, "  pg_data_t temp_data;\n");
+	if (pc.use_temp_time)
+		appendStringInfo(&decl1, "  pg_time_t temp_time;\n");
+	if (pc.use_temp_timestamp)
+		appendStringInfo(&decl1, "  pg_timestamp_t temp_timestamp;\n");
+	if (pc.use_temp_timestamptz)
+		appendStringInfo(&decl1, "  pg_timestamptz_t temp_timestamptz;\n");
 
 	appendStringInfo(
 		&str,

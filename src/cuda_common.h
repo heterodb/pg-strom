@@ -556,10 +556,7 @@ pg_common_vstore(kern_data_store *kds,
 		cl_bool	   *ts_isnull = KERN_DATA_STORE_ISNULL(kds, rowidx);
 
 		ts_isnull[colidx] = pg_isnull;
-		if (pg_isnull)
-			ts_values[colidx] = 0UL;
-		else
-			ts_values[colidx] = pg_value;
+		ts_values[colidx] = pg_value;
 	}
 }
 
