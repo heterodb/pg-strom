@@ -47,6 +47,7 @@ static dlist_head	gcontext_list;
 /* CUDA runtime stuff per backend process */
 static int			cuda_num_devices = -1;
 static CUdevice	   *cuda_devices = NULL;
+static CUcontext   *cuda_last_contexts = NULL;	/* last used sanity context */
 
 /* misc static variables */
 static shmem_startup_hook_type shmem_startup_next;
@@ -674,6 +675,55 @@ gpuMemFree(GpuTask *gtask, CUdeviceptr chunk_addr)
 }
 
 /*
+ * gpuMemFreeAll
+ *
+ * It releases all the device memory associated with the supplied
+ * GpuContext.
+ */
+static void
+gpuMemFreeAll(GpuContext *gcontext)
+{
+	GpuMemHead	   *gm_head;
+	GpuMemBlock	   *gm_block;
+	dlist_node	   *dnode;
+	int				index;
+	CUresult		rc;
+
+	for (index=0; index < cuda_num_devices; index++)
+	{
+		rc = cuCtxPushCurrent(gcontext->gpu[index].cuda_context);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuCtxPushCurrent: %s", errorText(rc));
+
+		gm_head = &gcontext->gpu[index].cuda_memory;
+
+		while (!dlist_is_empty(&gm_head->active_blocks))
+		{
+			dnode = dlist_pop_head_node(&gm_head->active_blocks);
+			gm_block = dlist_container(GpuMemBlock, chain, dnode);
+
+			rc = cuMemFree(gm_block->block_addr);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuMemFree: %s", errorText(rc));
+			GpuScoreDeclMemUsage(gcontext, index, gm_block->block_size);
+		}
+
+		if (gm_head->empty_block)
+		{
+			gm_block = gm_head->empty_block;
+			rc = cuMemFree(gm_block->block_addr);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuMemFree: %s", errorText(rc));
+            GpuScoreDeclMemUsage(gcontext, index, gm_block->block_size);
+		}
+
+		rc = cuCtxPopCurrent(NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+	}
+}
+
+/*
  * pgstrom_cuda_init
  *
  * initialize CUDA runtime per backend process.
@@ -702,6 +752,9 @@ pgstrom_init_cuda(void)
 			elog(ERROR, "failed on cuDeviceGet: %s", errorText(rc));
 		cuda_devices[i++] = device;
 	}
+	cuda_last_contexts = MemoryContextAllocZero(TopMemoryContext,
+												sizeof(CUcontext) *
+												cuda_num_devices);
 }
 
 static GpuContext *
@@ -709,7 +762,7 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 {
 	GpuContext	   *gcontext = NULL;
 	MemoryContext	memcxt = NULL;
-	CUcontext		cuda_context;
+	CUcontext	   *cuda_context_temp;
 	Size			length_gcxt;
 	Size			length_init;
 	Size			length_max;
@@ -722,25 +775,44 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 	if (cuda_num_devices < 1)
 		elog(ERROR, "No cuda device were detected");
 
-	/* make a first CUcontext */
-	rc = cuCtxCreate(&cuda_context, CU_CTX_SCHED_AUTO, cuda_devices[0]);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
-	/* also change the L1/Shared configuration */
-	rc = cuCtxSetCacheConfig(CU_FUNC_CACHE_PREFER_SHARED);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuCtxSetCacheConfig: %s", errorText(rc));
-
+	/**/
+	cuda_context_temp = palloc0(sizeof(CUcontext) * cuda_num_devices);
 	PG_TRY();
 	{
-		/* make a new memory context */
+		if (cuda_last_contexts[0] != NULL)
+		{
+			elog(DEBUG2, "Cached CUDA context reused");
+			memcpy(cuda_context_temp, cuda_last_contexts,
+				   sizeof(CUcontext) * cuda_num_devices);
+			memset(cuda_last_contexts, 0,
+				   sizeof(CUcontext) * cuda_num_devices);
+		}
+		else
+		{
+			for (index=0; index < cuda_num_devices; index++)
+			{
+				rc = cuCtxCreate(&cuda_context_temp[index],
+								 CU_CTX_SCHED_AUTO,
+								 cuda_devices[index]);
+				if (rc != CUDA_SUCCESS)
+					elog(ERROR, "failed on cuCtxCreate: %s",
+						 errorText(rc));
+
+				rc = cuCtxSetCacheConfig(CU_FUNC_CACHE_PREFER_SHARED);
+				if (rc != CUDA_SUCCESS)
+					elog(ERROR, "failed on cuCtxSetCacheConfig: %s",
+						 errorText(rc));
+			}
+		}
+		/* cuda_context_temp[] contains cuContext references here */
+		/* make a new memory context on the primary cuda_context */
 		snprintf(namebuf, sizeof(namebuf), "GPU DMA Buffer (%p)", resowner);
 		length_init = 4 * (1UL << get_next_log2(pgstrom_chunk_size()));
 		length_max = 1024 * length_init;
 
 		memcxt = HostPinMemContextCreate(NULL,
 										 namebuf,
-										 cuda_context,
+										 cuda_context_temp[0],
 										 length_init,
 										 length_max);
 		length_gcxt = offsetof(GpuContext, gpu[cuda_num_devices]);
@@ -749,50 +821,32 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 		gcontext->resowner = resowner;
 		gcontext->memcxt = memcxt;
 		dlist_init(&gcontext->pds_list);
-		gcontext->gpu[0].cuda_context = cuda_context;
-		gcontext->gpu[0].cuda_device = cuda_devices[0];
-		gpuMemHeadInit(&gcontext->gpu[0].cuda_memory);
-		for (index=1; index < cuda_num_devices; index++)
+		for (index=0; index < cuda_num_devices; index++)
 		{
-			rc = cuCtxCreate(&gcontext->gpu[index].cuda_context,
-							 CU_CTX_SCHED_AUTO,
-							 cuda_devices[index]);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
-
-			rc = cuCtxSetCacheConfig(CU_FUNC_CACHE_PREFER_SHARED);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuCtxSetCacheConfig: %s",
-					 errorText(rc));
-
+			gcontext->gpu[index].cuda_context = cuda_context_temp[index];
 			gcontext->gpu[index].cuda_device = cuda_devices[index];
 			gpuMemHeadInit(&gcontext->gpu[index].cuda_memory);
 		}
 		gcontext->num_context = cuda_num_devices;
-		gcontext->next_context = (MyProc->pgprocno % cuda_num_devices);
+        gcontext->next_context = (MyProc->pgprocno % cuda_num_devices);
 
 		/* Update the scoreboard of GPU usage */
 		pg_atomic_fetch_add_u32(&gpuScoreBoard->num_gcontext, 1);
 	}
 	PG_CATCH();
 	{
-		if (!gcontext)
-		{
-			rc = cuCtxDestroy(cuda_context);
-			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
-		}
-		else
-		{
-			while (index > 0)
-			{
-				rc = cuCtxDestroy(gcontext->gpu[--index].cuda_context);
-				if (rc != CUDA_SUCCESS)
-					elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
-			}
-		}
 		if (memcxt != NULL)
 			MemoryContextDelete(memcxt);
+
+		for (index=0; index < cuda_num_devices; index++)
+		{
+			if (cuda_context_temp[index])
+			{
+				rc = cuCtxDestroy(cuda_context_temp[index]);
+				if (rc != CUDA_SUCCESS)
+                    elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
+			}
+		}
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -833,7 +887,7 @@ pgstrom_get_gpucontext(void)
 }
 
 static void
-pgstrom_release_gpucontext(GpuContext *gcontext)
+pgstrom_release_gpucontext(GpuContext *gcontext, bool sanity_release)
 {
 	CUcontext	cuda_context;
 	CUresult	rc;
@@ -872,14 +926,54 @@ pgstrom_release_gpucontext(GpuContext *gcontext)
 			dlist_container(pgstrom_data_store, pds_chain,
 							dlist_head_node(&gcontext->pds_list));
 		pgstrom_release_data_store(pds);
+
+		/* No PDS should be orphan if sanity release */
+		if (sanity_release)
+			elog(DEBUG1, "Orphan PDS found, no cuContext shall be cached");
+		sanity_release = false;
 	}
 
 	/*
-	 * Update GPU resource usage scoreboard
+	 * Release all the GPU device memory
 	 */
+	gpuMemFreeAll(gcontext);
+
 	for (i=0; i < gcontext->num_context; i++)
+	{
+		/* No device memory should be acquired if sanity release */
+		if (sanity_release && gcontext->gpu[i].gmem_used > 0)
+		{
+			elog(DEBUG1, "Orphan GPU memory %zuKB on device %u, no cuContext shall be cached",
+				 gcontext->gpu[i].gmem_used / 1024, i);
+			sanity_release = false;
+		}
 		GpuScoreDeclMemUsage(gcontext, i, gcontext->gpu[i].gmem_used);
+	}
+
+	/*
+	 * Also, decrement number of GpuContext
+	 */
 	pg_atomic_fetch_sub_u32(&gpuScoreBoard->num_gcontext, 1);
+
+	/*
+	 * If a series of queries are successfully executed, we keep cuContext
+	 * being cached for the next execution. In this case, only memory context
+	 * shall be released.
+	 */
+	if (sanity_release && cuda_last_contexts[0] == NULL)
+	{
+		for (i=0; i < cuda_num_devices; i++)
+		{
+			Assert(cuda_last_contexts[i] == NULL);
+			cuda_last_contexts[i] = gcontext->gpu[i].cuda_context;
+		}
+		/* release the host pinned memory context, but retain cuContext */
+		MemoryContextDelete(gcontext->memcxt);
+
+		elog(DEBUG2, "CUDA context is cached to reuse");
+
+		return;
+	}
 
 	/*
 	 * NOTE: Be careful to drop the primary CUDA context because it also
@@ -909,7 +1003,7 @@ pgstrom_put_gpucontext(GpuContext *gcontext)
 {
 	Assert(gcontext->refcnt > 0);
 	if (--gcontext->refcnt == 0)
-		pgstrom_release_gpucontext(gcontext);
+		pgstrom_release_gpucontext(gcontext, true);
 }
 
 /*
@@ -1578,7 +1672,7 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 		{
 			if (is_commit)
 				elog(WARNING, "Probably, someone forgot to put GpuContext");
-			pgstrom_release_gpucontext(gcontext);
+			pgstrom_release_gpucontext(gcontext, false);
 			break;
 		}
 	}
