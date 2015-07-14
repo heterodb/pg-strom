@@ -295,7 +295,7 @@ struct GpuTask
 /*
  * Type declarations for code generator
  */
-#define DEVINFO_IS_NEGATIVE				0x00000001
+//#define DEVINFO_IS_NEGATIVE				0x00000001
 #define DEVTYPE_IS_VARLENA				0x00000002
 #define DEVTYPE_HAS_INTERNAL_FORMAT		0x00000004
 #define DEVFUNC_NEEDS_TIMELIB			0x00000008
@@ -316,6 +316,8 @@ typedef struct devtype_info {
 	uint32		type_flags;
 	int16		type_length;
 	int16		type_align;
+	bool		type_byval;
+	bool		type_is_negative;
 	char	   *type_name;	/* name of device type; same of SQL's type */
 	char	   *type_base;	/* base name of this type (like varlena) */
 	/* oid of type related functions */
@@ -331,6 +333,7 @@ typedef struct devfunc_info {
 	List	   *func_args;	/* list of devtype_info */
 	devtype_info *func_rettype;
 	Oid			func_collid;/* OID of collation, if collation aware */
+	bool		func_is_negative;
 	const char *func_alias;	/* name of declared device function */
 	const char *func_decl;	/* declaration of device function */
 } devfunc_info;

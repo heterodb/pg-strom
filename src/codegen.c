@@ -86,7 +86,7 @@ pgstrom_devtype_lookup(Oid type_oid)
 		entry = lfirst(cell);
 		if (entry->type_oid == type_oid)
 		{
-			if (entry->type_flags & DEVINFO_IS_NEGATIVE)
+			if (entry->type_is_negative)
 				return NULL;
 			return entry;
 		}
@@ -121,6 +121,7 @@ pgstrom_devtype_lookup(Oid type_oid)
 		entry->type_flags |= devtype_catalog[i].type_flags;
 		entry->type_length = typeform->typlen;
 		entry->type_align = typealign_get_width(typeform->typalign);
+		entry->type_byval = typeform->typbyval;
 		entry->type_name = pstrdup(NameStr(typeform->typname));
 		entry->type_base = pstrdup(devtype_catalog[i].type_base);
 
@@ -129,14 +130,14 @@ pgstrom_devtype_lookup(Oid type_oid)
 		break;
 	}
 	if (i == lengthof(devtype_catalog))
-		entry->type_flags |= DEVINFO_IS_NEGATIVE;
+		entry->type_is_negative = true;
 
 	devtype_info_slot[hash] = lappend(devtype_info_slot[hash], entry);
 
 	MemoryContextSwitchTo(oldcxt);
 	ReleaseSysCache(tuple);
 
-	if (entry->type_flags & DEVINFO_IS_NEGATIVE)
+	if (entry->type_is_negative)
 		return NULL;
 	return entry;
 }
@@ -979,7 +980,7 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 			 entry->func_collid == func_collid))
 		{
 			Assert(entry->func_rettype->type_oid == func_rettype);
-			if (entry->func_flags & DEVINFO_IS_NEGATIVE)
+			if (entry->func_is_negative)
 				return NULL;
 			return entry;
 		}
@@ -1021,7 +1022,7 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 	 */
 	if (func_namespace != PG_CATALOG_NAMESPACE)
 	{
-		entry->func_flags = DEVINFO_IS_NEGATIVE;
+		entry->func_is_negative = true;
 		goto out;
 	}
 
@@ -1100,7 +1101,7 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 				entry->func_collid = func_collid;
 				if (OidIsValid(func_collid) && !lc_collate_is_c(func_collid))
 				{
-					entry->func_flags = DEVINFO_IS_NEGATIVE;
+					entry->func_is_negative = true;
 					goto out;
 				}
 			}
@@ -1122,18 +1123,18 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 			{
 				elog(NOTICE, "Bug? unknown device function template: '%s'",
 					 template);
-				entry->func_flags = DEVINFO_IS_NEGATIVE;
+				entry->func_is_negative = true;
 			}
 			goto out;
 		}
 	}
-	entry->func_flags = DEVINFO_IS_NEGATIVE;
+	entry->func_is_negative = true;
 out:
 	devfunc_info_slot[hash] = lappend(devfunc_info_slot[hash], entry);
 
 	MemoryContextSwitchTo(oldcxt);
 
-	if (entry->func_flags & DEVINFO_IS_NEGATIVE)
+	if (entry->func_is_negative)
 		return NULL;
 	return entry;
 }

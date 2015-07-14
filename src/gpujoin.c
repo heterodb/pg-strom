@@ -104,6 +104,8 @@ typedef struct
 	List	   *hash_inner_keys;	/* if hash-join */
 	List	   *hash_outer_keys;	/* if hash-join */
 	List	   *hash_nslots;		/* if hash-join */
+	List	   *gnl_shmem_xsize;	/* if nest-loop */
+	List	   *gnl_shmem_ysize;	/* if nest-loop */
 	/* supplemental information of ps_tlist */
 	List	   *ps_src_depth;	/* source depth of the ps_tlist entry */
 	List	   *ps_src_resno;	/* source resno of the ps_tlist entry */
@@ -135,6 +137,9 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	exprs = lappend(exprs, gj_info->hash_inner_keys);
 	exprs = lappend(exprs, gj_info->hash_outer_keys);
 	privs = lappend(privs, gj_info->hash_nslots);
+	privs = lappend(privs, gj_info->gnl_shmem_xsize);
+	privs = lappend(privs, gj_info->gnl_shmem_ysize);
+
 	privs = lappend(privs, gj_info->ps_src_depth);
 	privs = lappend(privs, gj_info->ps_src_resno);
 
@@ -171,6 +176,9 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->hash_inner_keys = list_nth(exprs, eindex++);
     gj_info->hash_outer_keys = list_nth(exprs, eindex++);
 	gj_info->hash_nslots = list_nth(privs, pindex++);
+	gj_info->gnl_shmem_xsize = list_nth(privs, pindex++);
+	gj_info->gnl_shmem_ysize = list_nth(privs, pindex++);
+
 	gj_info->ps_src_depth = list_nth(privs, pindex++);
 	gj_info->ps_src_resno = list_nth(privs, pindex++);
 	Assert(pindex == list_length(privs));
@@ -222,6 +230,12 @@ typedef struct
 	List			   *hash_keylen;
 	List			   *hash_keybyval;
 	List			   *hash_keytype;
+
+	/*
+	 * Join properties; only nest-loop
+	 */
+	cl_uint				gnl_shmem_xsize;
+	cl_uint				gnl_shmem_ysize;
 } innerState;
 
 typedef struct
@@ -1748,6 +1762,13 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 			istate->hgram_shift = sizeof(cl_uint) * BITS_PER_BYTE - shift;
 			istate->hgram_curr = 0;
 		}
+		else
+		{
+			istate->gnl_shmem_xsize
+				= list_nth_int(gj_info->gnl_shmem_xsize, i);
+			istate->gnl_shmem_ysize
+				= list_nth_int(gj_info->gnl_shmem_ysize, i);
+		}
 		gjs->gts.css.custom_ps = lappend(gjs->gts.css.custom_ps,
 										 gjs->inners[i].state);
 	}
@@ -2054,6 +2075,7 @@ static void
 gpujoin_codegen_var_param_decl(StringInfo source,
 							   GpuJoinInfo *gj_info,
 							   int cur_depth,
+							   StringInfo v_unaliases,
 							   codegen_context *context)
 {
 	bool		is_nestloop;
@@ -2061,9 +2083,12 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 	ListCell   *cell;
 	int			depth;
 	char	   *param_decl;
+	cl_int		gnl_shmem_xsize = 0;
+	cl_int		gnl_shmem_ysize = 0;
 
 	Assert(cur_depth > 0 && cur_depth <= gj_info->num_rels);
 	is_nestloop = (!list_nth(gj_info->hash_outer_keys, cur_depth - 1));
+	Assert(!is_nestloop || v_unaliases != NULL);
 
 	/*
 	 * Pick up variables in-use and append its properties in the order
@@ -2131,6 +2156,12 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 	}
 
 	/*
+	 * parameter declaration
+	 */
+	param_decl = pgstrom_codegen_param_declarations(context);
+	appendStringInfo(source, "%s\n", param_decl);
+
+	/*
 	 * variable declarations
 	 */
 	appendStringInfo(
@@ -2140,28 +2171,98 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 		"  kern_colmeta *colmeta;\n"
 		"  void *datum;\n");
 
-	foreach (cell, kern_vars)
+	if (is_nestloop)
 	{
-		Var			   *kernode = lfirst(cell);
-		devtype_info   *dtype;
+		StringInfoData	i_struct;
+		StringInfoData	o_struct;
 
-		dtype = pgstrom_devtype_lookup(kernode->vartype);
-		if (!dtype)
-			elog(ERROR, "device type \"%s\" not found",
-				 format_type_be(kernode->vartype));
+		initStringInfo(&i_struct);
+		initStringInfo(&o_struct);
 
+		appendStringInfo(&i_struct, "  __shared__ struct inner_struct {\n");
+		appendStringInfo(&o_struct, "  __shared__ struct outer_struct {\n");
+
+		foreach (cell, kern_vars)
+		{
+			Var			   *kernode = lfirst(cell);
+			devtype_info   *dtype;
+			size_t			field_size;
+
+			dtype = pgstrom_devtype_lookup(kernode->vartype);
+			if (!dtype)
+				elog(ERROR, "device type \"%s\" not found",
+					 format_type_be(kernode->vartype));
+
+			if (dtype->type_byval &&
+				dtype->type_length < sizeof(cl_ulong))
+				field_size = sizeof(cl_ulong);
+			else
+				field_size = 2 * sizeof(cl_ulong);
+
+			if (kernode->varno == cur_depth)
+				gnl_shmem_xsize += field_size;
+			else
+				gnl_shmem_ysize += field_size;
+
+			appendStringInfo(
+				kernode->varno == cur_depth
+				? &i_struct
+				: &o_struct,
+				"    pg_%s_t KVAR_%u;\n"
+				"#define KVAR_%u\t(%s[%s].KVAR_%u)\n",
+				/* for var decl */
+				dtype->type_name,
+				kernode->varoattno,
+				/* for alias */
+				kernode->varoattno,
+				kernode->varno == cur_depth
+				? "inner_values"
+				: "outer_values",
+				kernode->varno == cur_depth
+				? "get_local_yid()"
+				: "get_local_xid()",
+				kernode->varoattno);
+			appendStringInfo(
+				v_unaliases,
+				"#undef KVAR_%u\n",
+				kernode->varoattno);
+
+
+
+		}
+		appendStringInfo(&i_struct, "  } *inner_values;\n");
+		appendStringInfo(&o_struct, "  } *outer_values;\n");
 		appendStringInfo(
 			source,
-			"  pg_%s_t KVAR_%u;\n",
-			dtype->type_name,
-			kernode->varoattno);
+			"%s%s\n"
+			"  inner_values = SHARED_WORKMEM(struct inner_struct);\n"
+			"  outer_values = (struct outer_struct *)\n"
+			"                   (inner_values + get_local_ysize());\n",
+			i_struct.data,
+			o_struct.data);
+		pfree(i_struct.data);
+		pfree(o_struct.data);
+	}
+	else
+	{
+		foreach (cell, kern_vars)
+		{
+			Var			   *kernode = lfirst(cell);
+			devtype_info   *dtype;
+
+			dtype = pgstrom_devtype_lookup(kernode->vartype);
+			if (!dtype)
+				elog(ERROR, "device type \"%s\" not found",
+					 format_type_be(kernode->vartype));
+
+			appendStringInfo(
+				source,
+				"  pg_%s_t KVAR_%u;\n",
+				dtype->type_name,
+				kernode->varoattno);
+		}
 	}
 
-	/*
-	 * parameter declaration
-	 */
-	param_decl = pgstrom_codegen_param_declarations(context);
-	appendStringInfo(source, "%s\n", param_decl);
 
 	/*
 	 * variable initialization
@@ -2179,6 +2280,9 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 
 		if (depth != keynode->varno)
 		{
+			if (depth >= 0 && is_nestloop)
+				appendStringInfo(source, "  }\n\n");
+
 			if (keynode->varno == 0)
 			{
 				/* htup from KDS */
@@ -2221,47 +2325,35 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 					elog(ERROR, "Bug? too deeper varnode reference");
 			}
 			depth = keynode->varno;
-		}
 
-		if (is_nestloop)
-		{
-			appendStringInfo(
-				source,
-				"  if (get_local_%s() == 0)\n"
-				"  {\n"
-				"    datum = GPUJOIN_REF_DATUM(colmeta,htup,%u);\n"
-				"    assert(%u == 0 || (((cl_ulong)datum) & 0x0007UL) == 0);\n"
-				"    SHARED_WORKMEM(pg_%s_t)[get_local_%s()]\n"
-				"      = pg_%s_datum_ref(errcode, datum, false);\n"
-				"  }\n"
-				"  __syncthreads();\n"
-				"  KVAR_%u = SHARED_WORKMEM(pg_%s_t)[get_local_%s()];\n"
-				"  __syncthreads();\n"
-				"\n",
-				keynode->varno == cur_depth ? "xid" : "yid",
-				keynode->varattno - 1,
-				keynode->varattno - 1,	/* assert */
-				dtype->type_name,
-				keynode->varno == cur_depth ? "yid" : "xid",
-				dtype->type_name,
-				keynode->varoattno,
-				dtype->type_name,
-				keynode->varno == cur_depth ? "yid" : "xid");
+			if (is_nestloop)
+			{
+				appendStringInfo(
+					source,
+					"  if (get_local_%s() == 0)\n"
+					"  {\n",
+					depth == cur_depth ? "xid" : "yid");
+			}
 		}
-		else
-		{
-			appendStringInfo(
-				source,
-				"  datum = GPUJOIN_REF_DATUM(colmeta,htup,%u);\n"
-				"  assert(%u == 0 || (((cl_ulong)datum) & 0x0007UL) == 0);\n"
-				"  KVAR_%u = pg_%s_datum_ref(errcode,datum,false);\n"
-				"\n",
-				keynode->varattno - 1,
-				keynode->varattno - 1,	/* assert */
-				keynode->varoattno,
-				dtype->type_name);
-		}
+		appendStringInfo(
+			source,
+			"  datum = GPUJOIN_REF_DATUM(colmeta,htup,%u);\n"
+			"  KVAR_%u = pg_%s_datum_ref(errcode,datum,false);\n",
+			keynode->varattno - 1,
+			keynode->varoattno,
+			dtype->type_name);
 	}
+	if (is_nestloop)
+		appendStringInfo(source,
+						 "  }\n"
+						 "  __syncthreads();\n");
+
+	Assert(list_length(gj_info->gnl_shmem_xsize) == cur_depth - 1);
+	gj_info->gnl_shmem_xsize = lappend_int(gj_info->gnl_shmem_xsize,
+										   gnl_shmem_xsize);
+	Assert(list_length(gj_info->gnl_shmem_ysize) == cur_depth - 1);
+	gj_info->gnl_shmem_ysize = lappend_int(gj_info->gnl_shmem_ysize,
+										   gnl_shmem_ysize);
 }
 
 /*
@@ -2282,6 +2374,9 @@ gpujoin_codegen_join_quals(StringInfo source,
 {
 	List	   *join_qual;
 	char	   *join_code;
+	StringInfoData	v_unaliases;
+
+	initStringInfo(&v_unaliases);
 
 	Assert(cur_depth > 0 && cur_depth <= gj_info->num_rels);
 	join_qual = list_nth(gj_info->join_quals, cur_depth - 1);
@@ -2310,16 +2405,22 @@ gpujoin_codegen_join_quals(StringInfo source,
 	/*
 	 * variable/params declaration & initialization
 	 */
-	gpujoin_codegen_var_param_decl(source, gj_info, cur_depth, context);
+	gpujoin_codegen_var_param_decl(source, gj_info, cur_depth,
+								   &v_unaliases, context);
 
 	/*
 	 * evaluate join qualifier
 	 */
 	appendStringInfo(
 		source,
+		"\n"
 		"  return EVAL(%s);\n"
+		"%s"
 		"}\n\n",
-		join_code);
+		join_code,
+		v_unaliases.data);
+
+	pfree(v_unaliases.data);
 }
 
 /*
@@ -2391,7 +2492,7 @@ gpujoin_codegen_hash_value(StringInfo source,
 	/*
 	 * variable/params declaration & initialization
 	 */
-	gpujoin_codegen_var_param_decl(source, gj_info, cur_depth, context);
+	gpujoin_codegen_var_param_decl(source, gj_info, cur_depth, NULL, context);
 
 	appendStringInfo(
 		source,
@@ -3364,9 +3465,10 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	outer_ntuples = pgjoin->oitems_nums;
 	for (depth = 1; depth <= gjs->num_rels; depth++)
 	{
-		JoinType	join_type = gjs->inners[depth - 1].join_type;
-		bool		is_nestloop = (!gjs->inners[depth - 1].hash_outer_keys);
-		double		nrows_ratio = gjs->inners[depth - 1].nrows_ratio;
+		innerState *istate = &gjs->inners[depth - 1];
+		JoinType	join_type = istate->join_type;
+		bool		is_nestloop = (!istate->hash_outer_keys);
+		double		nrows_ratio = istate->nrows_ratio;
 		size_t		num_threads;
 
 		/*
@@ -3435,8 +3537,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
                                               pgjoin->task.cuda_device,
 											  outer_ntuples,
 											  inner_ntuples,
-											  2 * sizeof(Datum),
-											  2 * sizeof(Datum),
+											  istate->gnl_shmem_xsize,
+											  istate->gnl_shmem_ysize,
 											  sizeof(cl_uint));
 			kern_args[0] = &pgjoin->m_kgjoin;
 			kern_args[1] = &pgjoin->m_kds_src;
@@ -3445,9 +3547,9 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			kern_args[4] = &pgjoin->task.cuda_index;
 			kern_args[5] = &pgjoin->m_ojmaps;
 
-			shmem_size = Max(2 * sizeof(Datum) * Max(block_xsize,
-													 block_ysize),
-							 sizeof(cl_uint) * block_xsize * block_ysize);
+			shmem_size = Max(sizeof(cl_uint) * block_xsize * block_ysize,
+							 istate->gnl_shmem_xsize * block_xsize +
+							 istate->gnl_shmem_ysize * block_ysize);
 
 			rc = cuLaunchKernel(pgjoin->kern_exec_nl,
 								grid_xsize, grid_ysize, 1,
