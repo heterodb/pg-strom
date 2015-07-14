@@ -2230,6 +2230,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				"  if (get_local_%s() == 0)\n"
 				"  {\n"
 				"    datum = GPUJOIN_REF_DATUM(colmeta,htup,%u);\n"
+				"    assert(%u == 0 || (((cl_ulong)datum) & 0x0007UL) == 0);\n"
 				"    SHARED_WORKMEM(pg_%s_t)[get_local_%s()]\n"
 				"      = pg_%s_datum_ref(errcode, datum, false);\n"
 				"  }\n"
@@ -2239,6 +2240,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				"\n",
 				keynode->varno == cur_depth ? "xid" : "yid",
 				keynode->varattno - 1,
+				keynode->varattno - 1,	/* assert */
 				dtype->type_name,
 				keynode->varno == cur_depth ? "yid" : "xid",
 				dtype->type_name,
@@ -2251,7 +2253,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 			appendStringInfo(
 				source,
 				"  datum = GPUJOIN_REF_DATUM(colmeta,htup,%u);\n"
-				"  assert(%u == 0 || (((cl_ulong)datum) & 0x0007UL) == 0);"
+				"  assert(%u == 0 || (((cl_ulong)datum) & 0x0007UL) == 0);\n"
 				"  KVAR_%u = pg_%s_datum_ref(errcode,datum,false);\n"
 				"\n",
 				keynode->varattno - 1,
@@ -2577,6 +2579,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 	GpuContext		   *gcontext = gjs->gts.gcontext;
 	kern_gpujoin	   *kgjoin = &pgjoin->kern;
 	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
+	kern_resultbuf	   *kresults_in;
 	Size				kgjoin_head;
 	Size				kgjoin_length;
 	Size				total_items;
@@ -2602,10 +2605,8 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 	else
 		total_items = (Size)((double) kgjoin->kresults_max_items *
 							 pgstrom_chunk_size_margin());
-	elog(INFO, "total_items new = %zu", total_items);
 
-	kgjoin_head = (offsetof(pgstrom_gpujoin, kern) +
-				   offsetof(kern_gpujoin, kparams) +
+	kgjoin_head = (offsetof(kern_gpujoin, kparams) +
 				   STROMALIGN(gjs->gts.kern_params->length));
 	kgjoin_length = kgjoin_head +
 		STROMALIGN(offsetof(kern_resultbuf, results[total_items])) +
@@ -2629,7 +2630,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 				 total_items, pgjoin->oitems_nums);
 
 		if (pds_dst)
-			elog(INFO, "Reduction of outer ntuples (%u,%u) => (%u,%u)",
+			elog(NOTICE, "Reduction of outer ntuples (%u,%u) => (%u,%u)",
 				 pgjoin->oitems_base, pgjoin->oitems_nums,
 				 pgjoin->oitems_base, (cl_uint) oitems_nums);
 
@@ -2643,7 +2644,20 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 	kgjoin->kresults_max_items = 0;
 	kgjoin->max_depth = gjs->num_rels;
 	kgjoin->errcode = StromError_Success;
-	elog(INFO, "kgjoin new {total_items=%zu max_items=%zu}", kgjoin->kresults_total_items, kgjoin->kresults_max_items);
+
+	/* copies the constant/parameter buffer */
+	memcpy(KERN_GPUJOIN_PARAMBUF(kgjoin),
+		   gjs->gts.kern_params,
+		   gjs->gts.kern_params->length);
+
+	/*
+	 * Also, kresults_in of depth==1 has to be initialized preliminary
+	 */
+	kresults_in = KERN_GPUJOIN_IN_RESULTS(kgjoin, 1);
+	memset(kresults_in, 0, offsetof(kern_resultbuf, results[0]));
+	kresults_in->nrels = 1;
+	kresults_in->nrooms = total_items;
+	kresults_in->nitems = 0;
 
 	/*
 	 * Calculation of pds_dst
@@ -2672,7 +2686,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 		length = (STROMALIGN(offsetof(kern_data_store, colmeta[ncols])) +
 				  LONGALIGN((sizeof(Datum) +
 							 sizeof(char)) * ncols) * result_nitems);
-		elog(INFO, "length = %zu result_nitems = %zu ncols=%u nrooms=%u", length, result_nitems, ncols, pds_dst ? pds_dst->kds->nrooms : 0);
+
 		/* Is length larger than limitation? */
 		if (length > pgstrom_chunk_size_limit())
 		{
@@ -2694,7 +2708,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 					 pgjoin->oitems_nums, result_nitems);
 
 			if (pds_dst)
-				elog(INFO, "Reduction of outer Ntuples (%u,%u) => (%u,%u)",
+				elog(NOTICE, "Reduction of outer Ntuples (%u,%u) => (%u,%u)",
 					 pgjoin->oitems_base, pgjoin->oitems_nums,
 					 pgjoin->oitems_base, (cl_uint) oitems_nums);
 
@@ -2787,7 +2801,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 					 pgjoin->oitems_nums, result_nitems);
 
 			if (pds_dst)
-				elog(INFO, "Reduction of outer ntuples (%u,%u) => (%u,%u)",
+				elog(NOTICE, "Reduction of outer ntuples (%u,%u) => (%u,%u)",
 					 pgjoin->oitems_base, pgjoin->oitems_nums,
 					 pgjoin->oitems_base, (cl_uint) oitems_nums);
 
@@ -2838,17 +2852,16 @@ gpujoin_create_task(GpuJoinState *gjs,
 {
 	GpuContext		   *gcontext = gjs->gts.gcontext;
 	pgstrom_gpujoin	   *pgjoin;
-	Size				kgjoin_head;
+	Size				pgjoin_head;
 	Size				required;
 
 	/*
 	 * Allocation of pgstrom_gpujoin task object
 	 */
-	kgjoin_head = (offsetof(pgstrom_gpujoin, kern) +
+	pgjoin_head = (offsetof(pgstrom_gpujoin, kern) +
 				   offsetof(kern_gpujoin, kparams) +
 				   STROMALIGN(gjs->gts.kern_params->length));
-	required = (kgjoin_head +
-				STROMALIGN(offsetof(kern_resultbuf, results[0])));
+	required = pgjoin_head + STROMALIGN(offsetof(kern_resultbuf, results[0]));
 	pgjoin = MemoryContextAllocZero(gcontext->memcxt, required);
 	pgstrom_init_gputask(&gjs->gts, &pgjoin->task);
 	pgjoin->oitems_base = oitems_base;
@@ -2865,11 +2878,6 @@ gpujoin_create_task(GpuJoinState *gjs,
 		pgjoin->is_last_chunk = (gjs->gts.scan_overflow == NULL);
 	else
 		pgjoin->is_last_chunk = (gjs->next_pds == NULL);
-
-	/* setup kernel result buffer */
-	memcpy(KERN_GPUJOIN_PARAMBUF(&pgjoin->kern),
-		   gjs->gts.kern_params,
-		   gjs->gts.kern_params->length);
 
 	/* attach result buffer */
 	gpujoin_attach_result_buffer(gjs, pgjoin);
@@ -3205,7 +3213,6 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	const char	   *kern_proj_name;
 	Size			length;
 	Size			total_length;
-	size_t			total_items;
 	size_t			outer_ntuples;
 	size_t			grid_xsize;
 	size_t			grid_ysize;
@@ -3267,8 +3274,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	/*
 	 * Allocation of device memory for each chunks
 	 */
-	total_items = pgjoin->kern.kresults_total_items;
-	length = STROMALIGN(offsetof(kern_resultbuf, results[total_items]));
+	length = (pgjoin->kern.kresults_2_offset +
+			  pgjoin->kern.kresults_2_offset - pgjoin->kern.kresults_1_offset);
 	total_length = (GPUMEMALIGN(length) +
 					GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_src->kds)) +
 					GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_dst->kds)));
@@ -3315,7 +3322,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 
 	/* inner multi relations */
 	multirels_send_buffer(pgjoin->pmrels, &pgjoin->task);
-	/* kern_gpujoin */
+	/* kern_gpujoin + static portion of kern_resultbuf */
 	length = KERN_GPUJOIN_HEAD_LENGTH(&pgjoin->kern);
 	rc = cuMemcpyHtoDAsync(pgjoin->m_kgjoin,
 						   &pgjoin->kern,
@@ -3395,6 +3402,10 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 		pgjoin->task.pfm.num_kern_join++;
+		elog(DEBUG2, "CUDA launch %s grid:{%u,1,1}, block:{%u,1,1}",
+			 "gpujoin_preparation",
+			 (cl_uint)grid_xsize,
+			 (cl_uint)block_xsize);
 
 		/*
 		 * Main logic of GpuHashJoin or GpuNestLoop
@@ -3448,6 +3459,10 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 			pgjoin->task.pfm.num_kern_join++;
+			elog(DEBUG2, "CUDA launch %s grid:{%u,%u,1}, block:{%u,%u,1}",
+				 "gpujoin_exec_nestloop",
+				 (cl_uint)grid_xsize, (cl_uint)grid_ysize,
+				 (cl_uint)block_xsize, (cl_uint)block_ysize);
 
 			/*
 			 * Launch:
@@ -3489,6 +3504,11 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 				if (rc != CUDA_SUCCESS)
 					elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 				pgjoin->task.pfm.num_kern_join++;
+
+				elog(DEBUG2, "CUDA launch %s grid:{%u,1,1}, block:{%u,1,1}",
+					 "gpujoin_leftouter_nestloop",
+					 (cl_uint)grid_xsize,
+					 (cl_uint)block_xsize);
 			}
 		}
 		else
@@ -3531,6 +3551,10 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 			pgjoin->task.pfm.num_kern_join++;
+			elog(DEBUG2, "CUDA launch %s grid:{%u,1,1}, block:{%u,1,1}",
+				 "gpujoin_exec_hashjoin",
+				 (cl_uint)grid_xsize,
+				 (cl_uint)block_xsize);
 
 			/*
 			 * Launch:
@@ -3572,6 +3596,11 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 				if (rc != CUDA_SUCCESS)
 					elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 				pgjoin->task.pfm.num_kern_join++;
+
+				elog(DEBUG2, "CUDA launch %s grid:{%u,1,1}, block:{%u,1,1}",
+					 "gpujoin_leftouter_hashjoin",
+					 (cl_uint)grid_xsize,
+					 (cl_uint)block_xsize);
 			}
 		}
 		outer_ntuples = (size_t)((double)outer_ntuples *
@@ -3610,6 +3639,13 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 	pgjoin->task.pfm.num_kern_proj++;
+
+	elog(DEBUG2, "CUDA launch %s grid:{%u,1,1}, block:{%u,1,1}",
+		 (pds_dst->kds->format == KDS_FORMAT_ROW
+		  ? "gpujoin_projection_row"
+		  : "gpujoin_projection_slot"),
+		 (cl_uint)grid_xsize,
+		 (cl_uint)block_xsize);
 
 	CUDA_EVENT_RECORD(pgjoin, ev_dma_recv_start);
 
@@ -4325,6 +4361,7 @@ multirels_get_buffer(pgstrom_multirels *pmrels, GpuTask *gtask,
 		Assert(!pmrels->ev_loaded[cuda_index]);
 		pmrels->m_kmrels[cuda_index] = m_kmrels;
 	}
+
 	pmrels->refcnt[cuda_index]++;
 	*p_kmrels = pmrels->m_kmrels[cuda_index];
 	*p_ojmaps = pmrels->m_ojmaps[cuda_index];
