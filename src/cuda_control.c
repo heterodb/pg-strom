@@ -38,6 +38,7 @@ static List		   *cuda_device_capabilities = NIL;
 static List		   *cuda_device_mem_sizes = NIL;	/* in MB */
 static size_t		cuda_max_malloc_size = INT_MAX;
 static size_t		cuda_max_threads_per_block = INT_MAX;
+static size_t		cuda_local_mem_size = INT_MAX;
 static int			cuda_compute_capability = INT_MAX;
 
 /* stuffs related to GpuContext */
@@ -1584,6 +1585,17 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 }
 
 /*
+ * gpuLocalMemSize
+ *
+ * It returns the size of local memory block on GPU device
+ */
+size_t
+gpuLocalMemSize(void)
+{
+	return cuda_local_mem_size;
+}
+
+/*
  * gpuMaxThreadsPerBlock
  *
  * it returns the max size of local threads per block on GPU device
@@ -1806,6 +1818,7 @@ pgstrom_check_device_capability(int ordinal, CUdevice device,
 	int			dev_mpu_nums;
 	int			dev_mpu_clk;
 	int			dev_max_threads_per_block;
+	int			dev_local_mem_size;
 	int			num_cores;
 	CUresult	rc;
 	CUdevice_attribute attrib;
@@ -1820,6 +1833,11 @@ pgstrom_check_device_capability(int ordinal, CUdevice device,
 
 	attrib = CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK;
 	rc = cuDeviceGetAttribute(&dev_max_threads_per_block, attrib, device);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
+
+	attrib = CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK;
+	rc = cuDeviceGetAttribute(&dev_local_mem_size, attrib, device);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
@@ -1892,6 +1910,8 @@ pgstrom_check_device_capability(int ordinal, CUdevice device,
 							   (dev_mem_sz / 3) & ~((1UL << 20) - 1));
 	cuda_max_threads_per_block = Min(cuda_max_threads_per_block,
 									 dev_max_threads_per_block);
+	cuda_local_mem_size = Min(cuda_local_mem_size,
+							  dev_local_mem_size);
 	cuda_compute_capability = Min(cuda_compute_capability,
 								  10 * dev_cap_major + dev_cap_minor);
 

@@ -421,6 +421,7 @@ extern GpuTask *pgstrom_fetch_gputask(GpuTaskState *gts);
 extern TupleTableSlot *pgstrom_exec_gputask(GpuTaskState *gts);
 extern bool pgstrom_recheck_gputask(GpuTaskState *gts, TupleTableSlot *slot);
 extern void pgstrom_cleanup_gputask_cuda_resources(GpuTask *gtask);
+extern size_t gpuLocalMemSize(void);
 extern cl_uint gpuMaxThreadsPerBlock(void);
 extern void pgstrom_compute_workgroup_size(size_t *p_grid_size,
 										   size_t *p_block_size,
