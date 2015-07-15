@@ -758,7 +758,7 @@ pgstrom_init_cuda(void)
 }
 
 static GpuContext *
-pgstrom_create_gpucontext(ResourceOwner resowner)
+pgstrom_create_gpucontext(ResourceOwner resowner, bool *context_reused)
 {
 	GpuContext	   *gcontext = NULL;
 	MemoryContext	memcxt = NULL;
@@ -781,11 +781,11 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 	{
 		if (cuda_last_contexts[0] != NULL)
 		{
-			elog(DEBUG2, "Cached CUDA context reused");
 			memcpy(cuda_context_temp, cuda_last_contexts,
 				   sizeof(CUcontext) * cuda_num_devices);
 			memset(cuda_last_contexts, 0,
 				   sizeof(CUcontext) * cuda_num_devices);
+			*context_reused = true;
 		}
 		else
 		{
@@ -803,6 +803,7 @@ pgstrom_create_gpucontext(ResourceOwner resowner)
 					elog(ERROR, "failed on cuCtxSetCacheConfig: %s",
 						 errorText(rc));
 			}
+			*context_reused = false;
 		}
 		/* cuda_context_temp[] contains cuContext references here */
 		/* make a new memory context on the primary cuda_context */
@@ -859,6 +860,7 @@ pgstrom_get_gpucontext(void)
 {
 	GpuContext *gcontext;
 	dlist_iter	iter;
+	bool		context_reused;
 
 	/* Does the current resource owner already have a GpuContext? */
 	dlist_foreach (iter, &gcontext_list)
@@ -879,9 +881,11 @@ pgstrom_get_gpucontext(void)
 	 * Hmm... no gpu context is not attached this resource owner,
 	 * so create a new one.
 	 */
-	gcontext = pgstrom_create_gpucontext(CurrentResourceOwner);
+	gcontext = pgstrom_create_gpucontext(CurrentResourceOwner,
+										 &context_reused);
 	dlist_push_head(&gcontext_list, &gcontext->chain);
-	elog(DEBUG2, "Create new GpuContext (refcnt=%d, resowner=%p)",
+	elog(DEBUG2, "Create new GpuContext%s (refcnt=%d, resowner=%p)",
+		 context_reused ? " with CUDA context reused" : "",
 		 gcontext->refcnt, gcontext->resowner);
 	return gcontext;
 }
@@ -929,7 +933,7 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool sanity_release)
 
 		/* No PDS should be orphan if sanity release */
 		if (sanity_release)
-			elog(DEBUG1, "Orphan PDS found, no cuContext shall be cached");
+			elog(DEBUG1, "Orphan PDS found, no cuContext shall be cached %p", pds);
 		sanity_release = false;
 	}
 

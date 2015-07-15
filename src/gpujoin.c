@@ -1859,6 +1859,13 @@ gpujoin_end(CustomScanState *node)
 	for (i=0; i < gjs->num_rels; i++)
 		ExecEndNode(gjs->inners[i].state);
 
+	/*
+	 * clean up GpuJoin specific resources
+	 */
+	if (gjs->curr_pmrels)
+		multirels_detach_buffer(gjs->curr_pmrels);
+
+	/* then other generic resources */
 	pgstrom_release_gputaskstate(&gjs->gts);
 }
 
@@ -4615,6 +4622,13 @@ multirels_detach_buffer(pgstrom_multirels *pmrels)
 			Assert(pmrels->refcnt[index] == 0);
 			if (pmrels->m_ojmaps[index] != 0UL)
 				__gpuMemFree(gcontext, index, pmrels->m_ojmaps[index]);
+		}
+
+		for (index=0; index < pmrels->kern.nrels; index++)
+		{
+			pgstrom_data_store	   *pds = pmrels->inner_chunks[index];
+
+			pgstrom_release_data_store(pds);
 		}
 		pfree(pmrels);
 	}
