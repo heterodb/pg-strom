@@ -222,7 +222,7 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 
 		if (base + count > kgjoin->kresults_total_items)
 		{
-			STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace + 10000);
+			STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
 			goto out;
 		}
 
@@ -534,7 +534,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			/* kresults_out still have enough space? */
 			if (base + count > kresults_out->nrooms)
 			{
-				STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace + 30000);
+				STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
 				goto out;
 			}
 
@@ -575,7 +575,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			/* kresults_out still have enough space? */
 			if (base + count > kresults_out->nrooms)
 			{
-				STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace + 40000);
+				STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
 				goto out;
 			}
 
@@ -671,7 +671,7 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 	 */
 	if (base + count > kresults_out->nrooms)
 	{
-		errcode = StromError_DataStoreNoSpace + 50000;
+		errcode = StromError_DataStoreNoSpace;
 		goto out;
 	}
 
@@ -782,7 +782,7 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 		 */
 		if (base + count > kresults_out->nrooms)
 		{
-			errcode = StromError_DataStoreNoSpace + 60000;
+			errcode = StromError_DataStoreNoSpace;
 			goto out;
 		}
 
@@ -937,7 +937,7 @@ __gpujoin_projection_row(cl_int *errcode,
 		STROMALIGN(sizeof(cl_uint) * kresults->nitems) +
 		usage_prev + total_length > kds_dst->length)
 	{
-		STROM_SET_ERROR(errcode, StromError_DataStoreNoSpace + 70000);
+		STROM_SET_ERROR(errcode, StromError_DataStoreNoSpace);
 		return;
 	}
 
@@ -1124,7 +1124,7 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 	if (kresults->nitems > kresults->nrooms ||
 		kresults->nitems > kds_dst->nrooms)
 	{
-		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace + 80000);
+		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
 		goto out;
 	}
 
@@ -1294,7 +1294,7 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 	if (kresults->nitems > kresults->nrooms ||
 		kresults->nitems > kds_dst->nrooms)
 	{
-		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace + 90000);
+		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
 		goto out;
 	}
 

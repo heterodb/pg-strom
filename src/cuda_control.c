@@ -1436,15 +1436,24 @@ waitfor_ready_tasks(GpuTaskState *gts)
 static inline void
 gpucontext_health_check(GpuContext *gcontext)
 {
-	unsigned int	i, version;
-	CUresult		rc;
+	cl_uint			i;
 
 	for (i=0; i < gcontext->num_context; i++)
 	{
-		rc = cuCtxGetApiVersion(gcontext->gpu[i].cuda_context, &version);
+		size_t		pvalue;
+		CUresult	rc;
+
+		rc = cuCtxPushCurrent(gcontext->gpu[i].cuda_context);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "Previous & asynchronouse CUDA call got an error: %s",
-				 errorText(rc));
+			elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+
+		rc = cuCtxGetLimit(&pvalue, CU_LIMIT_STACK_SIZE);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuCtxGetLimit: %s", errorText(rc));
+
+		rc = cuCtxPopCurrent(NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
 	}
 }
 
