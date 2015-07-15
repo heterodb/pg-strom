@@ -4671,7 +4671,7 @@ pgstrom_init_gpujoin(void)
 	gpujoin_plan_methods.TextOutCustomScan		= NULL;
 
 	/* setup exec methods */
-	gpujoin_exec_methods.c.CustomName			= "GpuNestedLoop";
+	gpujoin_exec_methods.c.CustomName			= "GpuJoin";
 	gpujoin_exec_methods.c.BeginCustomScan		= gpujoin_begin;
 	gpujoin_exec_methods.c.ExecCustomScan		= gpujoin_exec;
 	gpujoin_exec_methods.c.EndCustomScan		= gpujoin_end;
