@@ -2186,8 +2186,8 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 		initStringInfo(&i_struct);
 		initStringInfo(&o_struct);
 
-		appendStringInfo(&i_struct, "  __shared__ struct inner_struct {\n");
-		appendStringInfo(&o_struct, "  __shared__ struct outer_struct {\n");
+		appendStringInfo(&i_struct, "  struct inner_struct {\n");
+		appendStringInfo(&o_struct, "  struct outer_struct {\n");
 
 		foreach (cell, kern_vars)
 		{
@@ -2216,7 +2216,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				? &i_struct
 				: &o_struct,
 				"    pg_%s_t KVAR_%u;\n"
-				"#define KVAR_%u\t(%s[%s].KVAR_%u)\n",
+				"#define KVAR_%u\t(%s->KVAR_%u)\n",
 				/* for var decl */
 				dtype->type_name,
 				kernode->varoattno,
@@ -2225,9 +2225,6 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				kernode->varno == cur_depth
 				? "inner_values"
 				: "outer_values",
-				kernode->varno == cur_depth
-				? "get_local_yid()"
-				: "get_local_xid()",
 				kernode->varoattno);
 			appendStringInfo(
 				v_unaliases,
@@ -2237,16 +2234,19 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 
 
 		}
-		appendStringInfo(&i_struct, "  } *inner_values;\n");
-		appendStringInfo(&o_struct, "  } *outer_values;\n");
 		appendStringInfo(
-			source,
-			"%s%s\n"
-			"  inner_values = SHARED_WORKMEM(struct inner_struct);\n"
-			"  outer_values = (struct outer_struct *)\n"
-			"                   (inner_values + get_local_ysize());\n",
-			i_struct.data,
-			o_struct.data);
+			&i_struct,
+			"  } *inner_values = (SHARED_WORKMEM(struct inner_struct) +\n"
+			"                     get_local_yid());\n");
+		appendStringInfo(
+			&o_struct,
+			"  } *outer_values = ((struct outer_struct *)\n"
+			"                     (SHARED_WORKMEM(struct inner_struct) +\n"
+			"                      get_local_ysize())) +\n"
+			"                     get_local_xid();\n");
+		appendStringInfo(source, "%s%s\n",
+						 i_struct.data,
+						 o_struct.data);
 		pfree(i_struct.data);
 		pfree(o_struct.data);
 	}
@@ -2381,7 +2381,10 @@ gpujoin_codegen_join_quals(StringInfo source,
 {
 	List	   *join_qual;
 	char	   *join_code;
+	bool		is_nestloop;
 	StringInfoData	v_unaliases;
+
+	is_nestloop = (!list_nth(gj_info->hash_outer_keys, cur_depth - 1));
 
 	initStringInfo(&v_unaliases);
 
@@ -2407,7 +2410,8 @@ gpujoin_codegen_join_quals(StringInfo source,
         "                           kern_multirels *kmrels,\n"
 		"                           cl_int *o_buffer,\n"
 		"                           HeapTupleHeaderData *i_htup)\n"
-		"{\n",
+		"{\n"
+		"  cl_bool result = false;\n",
 		cur_depth);
 	/*
 	 * variable/params declaration & initialization
@@ -2421,10 +2425,14 @@ gpujoin_codegen_join_quals(StringInfo source,
 	appendStringInfo(
 		source,
 		"\n"
-		"  return EVAL(%s);\n"
+		"  if (o_buffer != NULL && i_htup != NULL)\n"
+		"    result = EVAL(%s);\n"
+		"%s"
+		"  return result;\n"
 		"%s"
 		"}\n\n",
 		join_code,
+		is_nestloop ? "  __syncthreads();\n" : "",
 		v_unaliases.data);
 
 	pfree(v_unaliases.data);
