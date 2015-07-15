@@ -53,6 +53,7 @@ int			pgstrom_max_async_tasks;
 
 /* cost factors */
 double		pgstrom_gpu_setup_cost;
+double		pgstrom_gpu_task_cost;
 double		pgstrom_gpu_operator_cost;
 double		pgstrom_gpu_tuple_cost;
 
@@ -128,6 +129,17 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	/* cost factor for each Gpu task */
+	DefineCustomRealVariable("pg_strom.gpu_task_cost",
+							 "Cost to launch a GPU task",
+							 NULL,
+							 &pgstrom_gpu_task_cost,
+							 20 * DEFAULT_SEQ_PAGE_COST,
+							 0,
+							 DBL_MAX,
+                             PGC_USERSET,
+                             GUC_NOT_IN_SAMPLE,
+                             NULL, NULL, NULL);
 	/* cost factor for Gpu operator */
 	DefineCustomRealVariable("pg_strom.gpu_operator_cost",
 							 "Cost of processing each operators by GPU",
