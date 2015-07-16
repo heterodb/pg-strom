@@ -86,14 +86,6 @@ static GpuScoreBoard	   *gpuScoreBoard;
 		(gcontext)->gpu[(cuda_index)].gmem_used -= (size);	\
 	} while(0)
 
-static void
-cleanup_cuda_score_board(int code, Datum arg)
-{
-	/*
-	 * TODO: decrement usage of gmem_used for each active GpuContext
-	 */
-}
-
 /* ----------------------------------------------------------------
  *
  * Routines to support lightwight userspace device memory allocator
@@ -701,6 +693,16 @@ gpuMemFreeAll(GpuContext *gcontext)
 
 		gm_head = &gcontext->gpu[index].cuda_memory;
 
+		if (gm_head->empty_block)
+		{
+			gm_block = gm_head->empty_block;
+			rc = cuMemFree(gm_block->block_addr);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuMemFree: %s", errorText(rc));
+			GpuScoreDeclMemUsage(gcontext, index, gm_block->block_size);
+			gm_head->empty_block = NULL;
+		}
+
 		while (!dlist_is_empty(&gm_head->active_blocks))
 		{
 			dnode = dlist_pop_head_node(&gm_head->active_blocks);
@@ -724,6 +726,49 @@ gpuMemFreeAll(GpuContext *gcontext)
 		rc = cuCtxPopCurrent(NULL);
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+	}
+}
+
+/*
+ * gpuMemCleanupOnExit
+ *
+ * It cleans up any active CUDA resources (Does it really needed? It looks
+ * to me needed, at least. Hmm... proprietary module is mysterious), and
+ * fixes-up contents of the score-board.
+ */
+static void
+gpuMemCleanupOnExit(int code, Datum arg)
+{
+	/*
+	 * Decrement usage of GPU memory usage by every active GpuContext
+	 */
+	while (!dlist_is_empty(&gcontext_list))
+	{
+		dlist_node	   *dnode = dlist_pop_head_node(&gcontext_list);
+		GpuContext	   *gcontext = dlist_container(GpuContext, chain, dnode);
+
+		gpuMemFreeAll(gcontext);
+	}
+
+	/*
+	 * Drop cached CUDA context
+	 */
+	if (cuda_last_contexts && cuda_last_contexts[0] != NULL)
+	{
+		int		i;
+
+		for (i=0; i < cuda_num_devices; i++)
+		{
+			CUcontext	context = cuda_last_contexts[i];
+			CUresult	rc;
+
+			Assert(context != NULL);
+			cuda_last_contexts[i] = NULL;
+
+			rc = cuCtxDestroy(context);
+			if (rc != CUDA_SUCCESS)
+				elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
+		}
 	}
 }
 
@@ -2187,7 +2232,7 @@ pgstrom_init_cuda_control(void)
 	RequestAddinShmemSpace(MAXALIGN(offsetof(GpuScoreBoard, gpu[count])));
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_cuda_control;
-	on_shmem_exit(cleanup_cuda_score_board, 0);
+	on_shmem_exit(gpuMemCleanupOnExit, 0);
 }
 
 /*
