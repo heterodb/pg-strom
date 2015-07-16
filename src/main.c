@@ -85,8 +85,8 @@ pgstrom_init_misc_guc(void)
 							 &pgstrom_bulkload_enabled,
 							 true,
 							 PGC_USERSET,
-                             GUC_NOT_IN_SAMPLE,
-                             NULL, NULL, NULL);
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	/* threshold of bulkload density */
 	DefineCustomRealVariable("pg_strom.bulkload_density",
 							 "Threshold to use bulkload for data exchange",
@@ -137,9 +137,9 @@ pgstrom_init_misc_guc(void)
 							 20 * DEFAULT_SEQ_PAGE_COST,
 							 0,
 							 DBL_MAX,
-                             PGC_USERSET,
-                             GUC_NOT_IN_SAMPLE,
-                             NULL, NULL, NULL);
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	/* cost factor for Gpu operator */
 	DefineCustomRealVariable("pg_strom.gpu_operator_cost",
 							 "Cost of processing each operators by GPU",
@@ -159,33 +159,9 @@ pgstrom_init_misc_guc(void)
 							 DEFAULT_CPU_TUPLE_COST / 32,
 							 0,
 							 DBL_MAX,
-                             PGC_USERSET,
-                             GUC_NOT_IN_SAMPLE,
-                             NULL, NULL, NULL);
-#ifdef NOT_USED
-	/* max ratio (hard limit) for row population */
-	DefineCustomRealVariable("pg_strom.nrows_growth_ratio_limit",
-							 "Hard limit of rows growth ratio",
-							 NULL,
-							 &pgstrom_nrows_growth_ratio_limit,
-							 12.0,
-							 0,
-							 DBL_MAX,
-                             PGC_USERSET,
-                             GUC_NOT_IN_SAMPLE,
-                             NULL, NULL, NULL);
-	/* safety margin on row population */
-	DefineCustomRealVariable("pg_strom.nrows_growth_margin",
-							 "Safety margin if logic may grows # of rows",
-							 NULL,
-							 &pgstrom_nrows_growth_margin,
-							 0.25,
-							 0.0,
-							 DBL_MAX,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-#endif
 }
 
 /*
