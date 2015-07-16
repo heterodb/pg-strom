@@ -607,6 +607,7 @@ extern bool		pgstrom_bulkload_enabled;
 extern double	pgstrom_bulkload_density;
 extern int		pgstrom_max_async_tasks;
 extern double	pgstrom_gpu_setup_cost;
+extern double	pgstrom_gpu_task_cost;
 extern double	pgstrom_gpu_operator_cost;
 extern double	pgstrom_gpu_tuple_cost;
 extern double	pgstrom_nrows_growth_ratio_limit;

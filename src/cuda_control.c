@@ -377,6 +377,7 @@ __gpuMemAlloc(GpuContext *gcontext, int cuda_index, size_t bytesize)
 
 		/* TODO: rule to allow device memory */
 		/* GpuScoreCurrMemUsage(cuda_index) */
+		elog(DEBUG1, "gpuMemAlloc failed due to resource limitation");
 
 		return 0UL;		/* need to wait... */
 	}
@@ -389,7 +390,10 @@ __gpuMemAlloc(GpuContext *gcontext, int cuda_index, size_t bytesize)
 	if (rc != CUDA_SUCCESS)
 	{
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+		{
+			elog(DEBUG1, "cuMemAlloc failed due to CUDA_ERROR_OUT_OF_MEMORY");
 			return 0UL;		/* need to wait... */
+		}
 		elog(ERROR, "failed on cuMemAlloc: %s", errorText(rc));
 	}
 	/* update scoreboard for resource control */
@@ -1122,6 +1126,7 @@ pgstrom_init_gputaskstate(GpuContext *gcontext, GpuTaskState *gts)
 	dlist_init(&gts->running_tasks);
 	dlist_init(&gts->pending_tasks);
 	dlist_init(&gts->completed_tasks);
+	dlist_init(&gts->ready_tasks);
 	gts->num_running_tasks = 0;
 	gts->num_pending_tasks = 0;
 	gts->num_ready_tasks = 0;
@@ -1267,6 +1272,7 @@ launch_pending_tasks(GpuTaskState *gts)
 			if (rc != CUDA_SUCCESS)
 				elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
 		}
+
 		/*
 		 * Then, tries to launch this task.
 		 */
