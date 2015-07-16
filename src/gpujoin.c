@@ -67,7 +67,7 @@ typedef struct
 	Path		   *outer_path;
 	Size			kmrels_length;	/* expected inner buffer size */
 	double			kresults_ratio;	/* expected total-items ratio */
-	int				outer_nsplits;	/* expected number of outer split */
+	cl_uint			oitems_plan_nums;/* expected # of outer tuples per task */
 	List		   *host_quals;
 	struct {
 		double		nrows_ratio;	/* nrows ratio towards outer rows */
@@ -93,7 +93,7 @@ typedef struct
 	List	   *used_params;
 	Size		kmrels_length;
 	double		kresults_ratio;
-	int			outer_nsplits;
+	cl_uint		oitems_plan_nums;
 	bool		outer_bulkload;
 	double		bulkload_density;
 	Expr	   *outer_quals;
@@ -126,7 +126,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, makeInteger(gj_info->kmrels_length));
 	privs = lappend(privs,
 					makeInteger(double_as_long(gj_info->kresults_ratio)));
-	privs = lappend(privs, makeInteger(gj_info->outer_nsplits));
+	privs = lappend(privs, makeInteger(gj_info->oitems_plan_nums));
 	privs = lappend(privs, makeInteger(gj_info->outer_bulkload));
 	privs = lappend(privs,
 					makeInteger(double_as_long(gj_info->bulkload_density)));
@@ -166,7 +166,7 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->kmrels_length = intVal(list_nth(privs, pindex++));
 	gj_info->kresults_ratio =
 		long_as_double(intVal(list_nth(privs, pindex++)));
-	gj_info->outer_nsplits = intVal(list_nth(privs, pindex++));
+	gj_info->oitems_plan_nums = intVal(list_nth(privs, pindex++));
 	gj_info->outer_bulkload = intVal(list_nth(privs, pindex++));
 	gj_info->bulkload_density =
 		long_as_double(intVal(list_nth(privs, pindex++)));
@@ -258,7 +258,7 @@ typedef struct
 	int				result_width;	/* result width for buffer length calc */
 	Size			kmrels_length;	/* length of inner buffer */
 	double			kresults_ratio;	/* estimated number of rows to outer */
-	int				outer_nsplits;	/* number of outer input splits */
+	cl_uint			oitems_plan_nums;/* planned # of outer input rows */
 	/* supplemental information to ps_tlist  */
 	List		   *ps_src_depth;
 	List		   *ps_src_resno;
@@ -608,6 +608,7 @@ cost_gpujoin(PlannerInfo *root,
 			 bool support_bulkload)
 {
 	Path	   *outer_path = gpath->outer_path;
+	RelOptInfo *outer_rel = outer_path->parent;
 	cl_uint		num_chunks = estimate_num_chunks(outer_path);
 	Cost		startup_cost;
 	Cost		run_cost;
@@ -641,7 +642,8 @@ cost_gpujoin(PlannerInfo *root,
 	outer_nsplits = estimate_outer_nsplits(root, gpath, num_chunks,
 										   nrows_dev_output,
 										   support_bulkload);
-	gpath->outer_nsplits = outer_nsplits;
+	gpath->oitems_plan_nums = (outer_rel->rows /
+							   (double) (num_chunks * outer_nsplits));
 
 	/*
 	 * Cost of per-tuple evaluation
@@ -1487,7 +1489,7 @@ create_gpujoin_plan(PlannerInfo *root,
 	memset(&gj_info, 0, sizeof(GpuJoinInfo));
 	gj_info.kmrels_length = gpath->kmrels_length;
 	gj_info.kresults_ratio = gpath->kresults_ratio;
-	gj_info.outer_nsplits = gpath->outer_nsplits;
+	gj_info.oitems_plan_nums = gpath->oitems_plan_nums;
 	gj_info.num_rels = gpath->num_rels;
 
 	for (i=0; i < gpath->num_rels; i++)
@@ -1921,7 +1923,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 		MAXALIGN(cscan->scan.plan.plan_width);	/* average width */
 	gjs->kmrels_length = gj_info->kmrels_length;
 	gjs->kresults_ratio = gj_info->kresults_ratio;
-	gjs->outer_nsplits = gj_info->outer_nsplits;
+	gjs->oitems_plan_nums = gj_info->oitems_plan_nums;
 }
 
 static TupleTableSlot *
@@ -2471,12 +2473,20 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 						 "  }\n"
 						 "  __syncthreads();\n");
 
-	Assert(list_length(gj_info->gnl_shmem_xsize) == cur_depth - 1);
-	gj_info->gnl_shmem_xsize = lappend_int(gj_info->gnl_shmem_xsize,
-										   gnl_shmem_xsize);
-	Assert(list_length(gj_info->gnl_shmem_ysize) == cur_depth - 1);
-	gj_info->gnl_shmem_ysize = lappend_int(gj_info->gnl_shmem_ysize,
-										   gnl_shmem_ysize);
+	/*
+	 * FIXME: We want to add gnl_shmem_?size only when this function
+	 * was called to construct gpujoin_join_quals_depth%u().
+	 * Is there more graceful way to do?
+	 */
+	if (v_unaliases != NULL)
+	{
+		Assert(list_length(gj_info->gnl_shmem_xsize) == cur_depth - 1);
+		gj_info->gnl_shmem_xsize = lappend_int(gj_info->gnl_shmem_xsize,
+											   gnl_shmem_xsize);
+		Assert(list_length(gj_info->gnl_shmem_ysize) == cur_depth - 1);
+		gj_info->gnl_shmem_ysize = lappend_int(gj_info->gnl_shmem_ysize,
+											   gnl_shmem_ysize);
+	}
 }
 
 /*
@@ -3230,15 +3240,20 @@ retry:
 		goto retry;
 
 	/*
-	 * When we expect length of the result buffer is larger than limitation,
-	 * we try to reduce the number of outer tuples to be processed at once.
-	 * In this case, outer_nsplits larger than 1 shall be given.
+	 * When we expect length of the result buffer is larger then limitation,
+	 * we try to reduce number of the outer tuples to be processed at once.
+	 * gjs->oitems_plan_nums is its watermark in this case.
 	 *
-	 * TODO: outer_nsplits will be misleads if chunk is not filled.
-	 * Abstract length may be more suitable but...
+	 * FIXME: oitems_plan_nums is estimated on the plan time, so wrong size
+	 * estimation will lead unreasonable execution scenario. We need to
+	 * adjust oitems_plan_nums according to the run-time statistics.
 	 */
 	nitems = pds->kds->nitems;
-
+	if (nitems > (cl_uint)((double)gjs->oitems_plan_nums *
+						   pgstrom_chunk_size_margin()))
+	{
+		nitems = gjs->oitems_plan_nums;
+	}
 	return gpujoin_create_task(gjs, gjs->curr_pmrels, pds, 0, nitems);
 }
 
