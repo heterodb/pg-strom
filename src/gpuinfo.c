@@ -1,7 +1,21 @@
 /*
  * gpuinfo.c
  *
- * GPU device properties collector.
+ * Utility program to collect GPU device properties.
+ * 
+ * NOTE: The reason why we have separate utility program is, to avoid
+ * device memory leak (at least, it seems to us device memory is leaking
+ * on the following situation).
+ * We need to call cuInit() to initialize the CUDA runtime, to get device
+ * properties during postmaster startup. Once we initialize the runtime,
+ * it looks tp us, a small chunk of device memory is consumed.
+ * After that, postmaster process fork(2) child process for each connection,
+ * however, it looks to us (anyway, all the mysterious stuff was done in
+ * the proprietary driver...) the above small chunk of device memory is
+ * also duplicated but unmanaged by the child process, then it is still
+ * kept after exit(2) of child process.
+ * So, we launch gpuinfo command as a separated command to avoid to call
+ * cuInit() by postmaster process.
  * ----
  * Copyright 2011-2015 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2015 (C) The PG-Strom Development Team
@@ -19,6 +33,15 @@
 #include <unistd.h>
 #include <libgen.h>
 #include <cuda.h>
+
+/*
+ * command line options
+ */
+static int	machine_format = 0;
+static int	detailed_output = 0;
+
+#define lengthof(array)		(sizeof (array) / sizeof ((array)[0]))
+	
 
 static void
 __error_exit(const char *file_name, int lineno,
@@ -54,7 +77,7 @@ __error_exit(const char *file_name, int lineno,
 
 static struct
 {
-	CUdevice_attribute attnum;
+	CUdevice_attribute attcode;
 	int			attclass;
 	const char *attname_h;
 	const char *attname_m;
@@ -237,29 +260,158 @@ static struct
 			   INT, 0),
 };
 
+static void output_device(CUdevice device)
+{
+	char		dev_name[1024];
+	size_t		dev_memsz;
+	int			dev_prop;
+	int			i;
+	CUresult	rc;
+
+	/* device name */
+	rc = cuDeviceGetName(dev_name, sizeof(dev_name), device);
+	if (rc != CUDA_SUCCESS)
+		error_exit(rc, "failed on cuDeviceGetName");
+	if (!machine_format)
+		printf("Device Name: %s\n", dev_name);
+	else
+		printf("PGSTROM_DEVICE_NAME=%s\n", dev_name);
+
+	/* device RAM size */
+	rc = cuDeviceTotalMem(&dev_memsz, device);
+	if (rc != CUDA_SUCCESS)
+		error_exit(rc, "failed on cuDeviceTotalMem");
+	if (!machine_format)
+		printf("Global memory size: %zuMB\n", dev_memsz >> 20);
+	else
+		printf("PGSTROM_DEVICE_MEMORY_SIZE=%zu\n", dev_memsz);
+
+	for (i=0; i < lengthof(attribute_catalog); i++)
+	{
+		CUdevice_attribute attcode = attribute_catalog[i].attcode;
+		int         attclass  = attribute_catalog[i].attclass;
+		const char *attname_h = attribute_catalog[i].attname_h;
+		const char *attname_m = attribute_catalog[i].attname_m;
+		int         attdetail = attribute_catalog[i].attdetail;
+		const char *temp;
+
+		/* no need to output, if not detailed mode */
+		if (attdetail && !detailed_output)
+			continue;
+
+		rc = cuDeviceGetAttribute(&dev_prop, attcode, device);
+		if (rc != CUDA_SUCCESS)
+			error_exit(rc, "failed on cuDeviceGetAttribute");
+
+		switch (attclass)
+		{
+			case ATTRCLASS_INT:
+				if (!machine_format)
+					printf("%s: %d\n", attname_h, dev_prop);
+				else
+					printf("%s=%d\n", attname_m, dev_prop);
+				break;
+
+			case ATTRCLASS_BYTES:
+				if (!machine_format)
+					printf("%s: %dbytes\n", attname_h, dev_prop);
+				else
+					printf("%s=%d\n", attname_m, dev_prop);
+				break;
+
+			case ATTRCLASS_KB:
+				if (!machine_format)
+					printf("%s: %dKB\n", attname_h, dev_prop);
+				else
+					printf("%s=%d\n", attname_m, dev_prop);
+				break;
+
+			case ATTRCLASS_MB:
+				if (!machine_format)
+					printf("%s: %dMB\n", attname_h, dev_prop);
+				else
+					printf("%s=%d\n", attname_m, dev_prop);
+				break;
+
+			case ATTRCLASS_KHZ:
+				if (!machine_format)
+					printf("%s: %dKHZ\n", attname_h, dev_prop);
+				else
+					printf("%s=%d\n", attname_m, dev_prop);
+				break;
+
+			case ATTRCLASS_COMPUTEMODE:
+				switch (dev_prop)
+				{
+					case CU_COMPUTEMODE_DEFAULT:
+						temp = "default";
+						break;
+					case CU_COMPUTEMODE_EXCLUSIVE:
+						temp = "exclusive";
+						break;
+					case CU_COMPUTEMODE_PROHIBITED:
+						temp = "prohibited";
+						break;
+					case CU_COMPUTEMODE_EXCLUSIVE_PROCESS:
+						temp = "exclusive process";
+						break;
+					default:
+						temp = "unknown";
+						break;
+				}
+				if (!machine_format)
+					printf("%s: %s\n", attname_h, temp);
+				else
+					printf("%s=%s\n", attname_m, temp);
+				break;
+
+			case ATTRCLASS_BOOL:
+				if (!machine_format)
+					printf("%s: %s\n", attname_h,
+						   dev_prop ? "true" : "false");
+				else
+					printf("%s=%s\n", attname_m,
+						   dev_prop ? "true" : "false");
+				break;
+
+			default:
+				if (!machine_format)
+					printf("%s: %d\n", attname_h, dev_prop);
+				else
+					printf("%s=%d\n", attname_m, dev_prop);
+				break;
+		}
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	CUdevice	device;
 	CUresult	rc;
+	int			version;
 	int			i, count;
 	int			opt;
-	int			human_readable = -1;
+	FILE	   *filp;
 
 	/*
 	 * Parse options
 	 */
-	while ((opt = getopt(argc, argv, "mh")) != -1)
+	while ((opt = getopt(argc, argv, "mdh")) != -1)
 	{
 		switch (opt)
 		{
 			case 'm':
-				human_readable = 0;
+				machine_format = 1;
+				break;
+			case 'd':
+				detailed_output = 1;
 				break;
 			default:
 				fprintf(stderr, "unknown option: %c\n", opt);
 			case 'h':
 				fprintf(stderr,
-						"usage: %s [-m][-h]\n"
+						"usage: %s [-d][-m][-h]\n"
+						"  -d : detailed output\n"
 						"  -m : machine readable format\n"
 						"  -h : shows this message\n",
 						basename(argv[0]));
@@ -271,23 +423,59 @@ int main(int argc, char *argv[])
 	if (rc != CUDA_SUCCESS)
 		error_exit(rc, "failed on cuInit");
 
+	/*
+	 * CUDA Runtime version
+	 */
+	rc = cuDriverGetVersion(&version);
+	if (rc != CUDA_SUCCESS)
+		error_exit(rc, "failed on cuDriverGetVersion");
+	if (!machine_format)
+		printf("CUDA Runtime version: %d.%d.%d\n",
+			   (version / 1000),
+			   (version % 1000) / 10,
+			   (version % 10));
+	else
+		printf("PGSTROM_CUDA_RUNTIME_VERSION=%d.%d.%d\n",
+			   (version / 1000),
+               (version % 1000) / 10,
+               (version % 10));
+	/*
+	 * NVIDIA driver version
+	 */
+	filp = fopen("/sys/module/nvidia/version", "rb");
+	if (filp)
+	{
+		int		major;
+		int		minor;
+
+		if (fscanf(filp, "%d.%d", &major, &minor) == 2)
+		{
+			if (!machine_format)
+				printf("NVIDIA Driver version: %d.%d\n", major, minor);
+			else
+				printf("PGSTROM_NVIDIA_DRIVER_VERSION=%d.%d\n", major, minor);
+		}
+		fclose(filp);
+	}
+
+	/*
+	 * Number of devices available
+	 */
 	rc = cuDeviceGetCount(&count);
 	if (rc != CUDA_SUCCESS)
 		error_exit(rc, "failed on cuDeviceGetCount");
 
-	if (human_readable)
+	if (!machine_format)
 		printf("Number of devices: %d\n", count);
 	else
-		printf("CU_NUMBER_OF_DEVICE: %d\n", count);
+		printf("PGSTROM_NUMBER_OF_DEVICES=%d\n", count);
 
 	for (i=0; i < count; i++)
 	{
 		rc = cuDeviceGet(&device, i);
 		if (rc != CUDA_SUCCESS)
 			error_exit(rc, "failed on cuDeviceGet");
-
-
-
+		output_device(device);
 	}
 	return 0;
 }

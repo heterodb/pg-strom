@@ -51,10 +51,11 @@ else
 endif
 
 PG_CONFIG = pg_config
-PGSTROM_DEBUG := $(shell $(PG_CONFIG) --configure | \
+PGSTROM_FLAGS := $(shell $(PG_CONFIG) --configure | \
 	grep -q "'--enable-debug'" && \
 	echo "-Wall -DPGSTROM_DEBUG=1 -O0")
-PG_CPPFLAGS := $(PGSTROM_DEBUG) -I $(IPATH)
+PGSTROM_FLAGS += -DCMD_GPUINGO_PATH=$(shell $(PG_CONFIG) --bindir)/gpuinfo
+PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(IPATH)
 SHLIB_LINK := -L $(LPATH) -lnvrtc -lcuda
 
 EXTRA_CLEAN := $(CUDA_SOURCES)
@@ -69,4 +70,4 @@ $(CUDA_SOURCES): $(CUDA_SOURCES:.c=.h)
 	  echo ";") > $@
 
 src/gpuinfo: src/gpuinfo.c
-	$(CC) $(CFLAGS) src/gpuinfo.c $(PGSTROM_DEBUG) -I $(IPATH) -L $(LPATH) -lcuda -o $@$(X)
+	$(CC) $(CFLAGS) src/gpuinfo.c $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH) -lcuda -o $@$(X)
