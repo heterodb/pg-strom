@@ -30,6 +30,9 @@ LPATH := $(CUDA_PATH)/lib64
 MODULE_big = pg_strom
 OBJS =  $(addprefix src/,$(STROM_OBJS)) $(addprefix src/,$(CUDA_OBJS))
 
+# Support utilities
+SCRIPTS_built = src/gpuinfo
+
 # Regression test options
 REGRESS = --schedule=test/parallel_schedule
 ifndef PGSQL_BUILD_DIR 
@@ -64,3 +67,6 @@ $(CUDA_SOURCES): $(CUDA_SOURCES:.c=.h)
 	  sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
 	      -e 's/^/  "/g' -e 's/$$/\\n"/g' < $*.h; \
 	  echo ";") > $@
+
+src/gpuinfo: src/gpuinfo.c
+	$(CC) $(CFLAGS) src/gpuinfo.c $(PGSTROM_DEBUG) -I $(IPATH) -L $(LPATH) -lcuda -o $@$(X)
