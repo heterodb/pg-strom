@@ -2691,7 +2691,10 @@ gpujoin_codegen_projection_mapping(StringInfo source,
 	}
 	appendStringInfo(
 		source,
-
+		"  default:\n"
+		"    *src_depth = INT_MAX;\n"
+		"    *src_colidx = INT_MAX;\n"
+		"    break;\n"
 		"  }\n"
 		"}\n\n");
 }

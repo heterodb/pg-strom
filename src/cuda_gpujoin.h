@@ -203,7 +203,8 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 		 * then, it allocates result buffer on kresults_in and put
 		 * get_global_id() if it match.
 		 */
-		if (kds_index < oitems_base + oitems_nums)
+		if (kds_index < oitems_base + oitems_nums &&
+			kds_index < kds->nitems)
 			is_matched = gpujoin_outer_quals(&errcode, kparams,
 											 kds, kds_index);
 		else
@@ -230,14 +231,6 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 		{
 			HeapTupleHeaderData	   *htup = kern_get_tuple_row(kds, kds_index);
 			kresults_in->results[base + offset] = (size_t)htup - (size_t)kds;
-		}
-
-		/* init other base portion */
-		if (get_global_id() == 0)
-		{
-			kresults_in->nrels = 1;
-			kresults_in->nrooms = oitems_nums;
-			kresults_in->errcode = StromError_Success;
 		}
 	}
 
