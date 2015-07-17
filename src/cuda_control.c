@@ -764,6 +764,9 @@ pgstrom_init_cuda(void)
 static void
 pgstrom_cleanup_cuda(int code, Datum arg)
 {
+	int		count = 0;
+	bool	context_cached = false;
+
 	/*
 	 * Decrement usage of GPU memory usage by every active GpuContext
 	 */
@@ -773,6 +776,7 @@ pgstrom_cleanup_cuda(int code, Datum arg)
 		GpuContext	   *gcontext = dlist_container(GpuContext, chain, dnode);
 
 		gpuMemFreeAll(gcontext);
+		count++;
 	}
 
 	/*
@@ -794,8 +798,13 @@ pgstrom_cleanup_cuda(int code, Datum arg)
 			if (rc != CUDA_SUCCESS)
 				elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
 		}
+		context_cached = true;
 	}
-	elog(LOG, "%s is called", __FUNCTION__);
+
+	if (count > 0 || context_cached)
+		elog(DEBUG1, "%s: %u active GpuContext%s were released",
+			 __FUNCTION__, count,
+			 context_cached ? " and cached CUDA context" : "");
 }
 
 static GpuContext *
