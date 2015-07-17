@@ -442,7 +442,6 @@ gpupreagg_preparation(kern_gpupreagg *kgpreagg,
 							 kds_index,			/* rowidx of kds_in */
 							 base + offset);	/* rowidx of kds_src */
 	}
-out:
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kresults->errcode, errcode);
 }
@@ -645,7 +644,6 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 		}
 		__syncthreads();
 	}
-out:
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kresults->errcode, errcode);
 }
@@ -845,8 +843,9 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 
 		/* load this value from kds_src onto datum */
 		if (gid < nitems)
-			gpupreagg_data_load(&l_datum[get_local_id()], &errcode,
+			gpupreagg_data_load(&l_datum[lid], &errcode,
 								kds_src, ktoast, attnum, gid);
+
 		__syncthreads();
 
 		/* do reduction */
@@ -1010,7 +1009,7 @@ pg_atomic_max_long(cl_long *addr, cl_long value)
 #if __CUDA_ARCH__ < 350
 	PG_ATOMIC_LONG_TEMPLATE(Max, addr, value);
 #else
-	return __illAtomicMin(addr, value);	
+	return __illAtomicMax(addr, value);	
 #endif
 }
 
