@@ -1971,137 +1971,193 @@ pgstrom_compute_workgroup_size_2d(size_t *p_grid_xsize,
 	*p_grid_ysize = (y_nitems + block_ysize - 1) / block_ysize;
 }
 
-static bool
-pgstrom_check_device_capability(int ordinal, CUdevice device,
-								int *dev_cap, size_t *dev_memsz)
+/*
+ * Device properties referenced to log messages on starting-up time,
+ * and validate devices to be used.
+ */
+struct target_cuda_device
 {
-	bool		result = true;
-	char		dev_name[256];
-	size_t		dev_mem_sz;
-	int			dev_mem_clk;
-	int			dev_mem_width;
-	int			dev_l2_sz;
-	int			dev_cap_major;
-	int			dev_cap_minor;
-	int			dev_mpu_nums;
-	int			dev_mpu_clk;
-	int			dev_max_threads_per_block;
-	int			dev_local_mem_size;
-	int			num_cores;
-	CUresult	rc;
-	CUdevice_attribute attrib;
+	int		dev_id;
+	char   *dev_name;
+	size_t	dev_mem_sz;
+	int		dev_mem_clk;
+	int		dev_mem_width;
+	int		dev_l2_sz;
+	int		dev_cap_major;
+	int		dev_cap_minor;
+	int		dev_mpu_nums;
+	int		dev_mpu_clk;
+	int		dev_max_threads_per_block;
+	int		dev_local_mem_sz;
+};
 
-	rc = cuDeviceGetName(dev_name, sizeof(dev_name), device);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetName: %s", errorText(rc));
-
-	rc = cuDeviceTotalMem(&dev_mem_sz, device);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceTotalMem: %s", errorText(rc));
-
-	attrib = CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK;
-	rc = cuDeviceGetAttribute(&dev_max_threads_per_block, attrib, device);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
-
-	attrib = CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK;
-	rc = cuDeviceGetAttribute(&dev_local_mem_size, attrib, device);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
-
-	attrib = CU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE;
-	rc = cuDeviceGetAttribute(&dev_mem_clk, attrib, device);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
-
-	attrib = CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH;
-	rc = cuDeviceGetAttribute(&dev_mem_width, attrib, device);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
-
-	attrib = CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE;
-	rc = cuDeviceGetAttribute(&dev_l2_sz, attrib, device);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
-
-	attrib = CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR;
-	rc = cuDeviceGetAttribute(&dev_cap_major, attrib, device);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
-
-	attrib = CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR;
-	rc = cuDeviceGetAttribute(&dev_cap_minor, attrib, device);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
-
-	attrib = CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT;
-	rc = cuDeviceGetAttribute(&dev_mpu_nums, attrib, device);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
-
-	attrib = CU_DEVICE_ATTRIBUTE_CLOCK_RATE;
-	rc = cuDeviceGetAttribute(&dev_mpu_clk, attrib, device);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
+static inline void
+check_target_cuda_device(struct target_cuda_device *dattr)
+{
+	MemoryContext oldcxt;
+	int		cores_per_mpu;
+	int		dev_cap;
 
 	/*
 	 * CUDA device older than Kepler is not supported
 	 */
-	if (dev_cap_major < 3)
-		result = false;
+	if (dattr->dev_cap_major < 3)
+		goto out;
 
 	/*
 	 * Number of CUDA cores (just for log messages)
 	 */
-	if (dev_cap_major == 1)
-		num_cores = 8;
-	else if (dev_cap_major == 2)
+	if (dattr->dev_cap_major == 1)
+		cores_per_mpu = 8;
+	else if (dattr->dev_cap_major == 2)
 	{
-		if (dev_cap_minor == 0)
-			num_cores = 32;
-		else if (dev_cap_minor == 1)
-			num_cores = 48;
+		if (dattr->dev_cap_minor == 0)
+			cores_per_mpu = 32;
+		else if (dattr->dev_cap_minor == 1)
+			cores_per_mpu = 48;
 		else
-			num_cores = -1;
+			cores_per_mpu = -1;
 	}
-	else if (dev_cap_major == 3)
-		num_cores = 192;
-	else if (dev_cap_major == 5)
-		num_cores = 128;
+	else if (dattr->dev_cap_major == 3)
+		cores_per_mpu = 192;
+	else if (dattr->dev_cap_major == 5)
+		cores_per_mpu = 128;
 	else
-		num_cores = -1;		/* unknown */
+		cores_per_mpu = -1;		/* unknown */
+
+	/*
+	 * Referenced computing capability
+	 */
+	dev_cap = 10 * dattr->dev_cap_major + dattr->dev_cap_minor;
 
 	/*
 	 * Track referenced device property
 	 */
-	cuda_max_malloc_size = Min(cuda_max_malloc_size,
-							   (dev_mem_sz / 3) & ~((1UL << 20) - 1));
-	cuda_max_threads_per_block = Min(cuda_max_threads_per_block,
-									 dev_max_threads_per_block);
-	cuda_local_mem_size = Min(cuda_local_mem_size,
-							  dev_local_mem_size);
-	cuda_compute_capability = Min(cuda_compute_capability,
-								  10 * dev_cap_major + dev_cap_minor);
+	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 
+	cuda_max_malloc_size = Min(cuda_max_malloc_size,
+							   (dattr->dev_mem_sz / 3) & ~((1UL << 20) - 1));
+	cuda_max_threads_per_block = Min(cuda_max_threads_per_block,
+									 dattr->dev_max_threads_per_block);
+	cuda_local_mem_size = Min(cuda_local_mem_size,
+							  dattr->dev_local_mem_sz);
+	cuda_compute_capability = Min(cuda_compute_capability, dev_cap);
+
+	cuda_device_ordinals = lappend_int(cuda_device_ordinals, dattr->dev_id);
+	cuda_device_capabilities =
+		list_append_unique_int(cuda_device_capabilities, dev_cap);
+	cuda_device_mem_sizes = lappend_int(cuda_device_mem_sizes,
+										(int)(dattr->dev_mem_sz >> 20));
+	MemoryContextSwitchTo(oldcxt);
+out:
 	/* Log the brief CUDA device properties */
 	elog(LOG, "GPU%d %s (%d %s, %dMHz), L2 %dKB, RAM %zuMB (%dbits, %dKHz), capability %d.%d%s",
-		 ordinal,
-		 dev_name,
-		 num_cores > 0 ? num_cores * dev_mpu_nums : dev_mpu_nums,
-		 num_cores > 0 ? "CUDA cores" : "SMs",
-		 dev_mpu_clk / 1000,
-		 dev_l2_sz >> 10,
-		 dev_mem_sz >> 20,
-		 dev_mem_width,
-		 dev_mem_clk / 1000,
-		 dev_cap_major,
-		 dev_cap_minor,
-		 !result ? ", NOT SUPPORTED" : "");
-	/* track device capability */
-	*dev_cap = dev_cap_major * 10 + dev_cap_minor;
-	*dev_memsz = dev_mem_sz;
+		 dattr->dev_id,
+		 dattr->dev_name,
+		 (cores_per_mpu > 0 ? cores_per_mpu : 1) * dattr->dev_mpu_nums,
+		 (cores_per_mpu > 0 ? "CUDA cores" : "SMs"),
+		 dattr->dev_mpu_clk / 1000,
+		 dattr->dev_l2_sz >> 10,
+		 dattr->dev_mem_sz >> 20,
+		 dattr->dev_mem_width,
+		 dattr->dev_mem_clk / 1000,
+		 dattr->dev_cap_major,
+		 dattr->dev_cap_minor,
+		 dattr->dev_cap_major < 3 ? ", NOT SUPPORTED" : "");
 
-	return result;
+	/* clear the target_cuda_device structure */
+	if (dattr->dev_name)
+		pfree(dattr->dev_name);
+	memset(dattr, 0, sizeof(struct target_cuda_device));
+	dattr->dev_id = -1;
+}
+
+static void
+pickup_target_cuda_devices(void)
+{
+	FILE	   *filp;
+	char	   *cmdline;
+	char		linebuf[2048];
+	char	   *attkey;
+	char	   *attval;
+	char	   *pos;
+	struct target_cuda_device dattr;
+
+	/* device properties to be set */
+	memset(&dattr, 0, sizeof(dattr));
+	dattr.dev_id = -1;
+
+	cmdline = psprintf("%s -m", CMD_GPUINGO_PATH);
+	filp = OpenPipeStream(cmdline, PG_BINARY_R);
+
+	while (fgets(linebuf, sizeof(linebuf), filp) != NULL)
+	{
+		attval = strrchr(linebuf, '=');
+		if (!attval)
+		{
+			if (linebuf[0] == '\n' || linebuf[0] == '\0')
+				continue;
+			elog(ERROR, "Unexpected gpuinfo -m input:\n%s\n", linebuf);
+		}
+		*attval++ = '\0';
+		pos = attval + strlen(attval) - 1;
+		while (isspace(*pos))
+			*pos-- = '\0';
+
+		if (strncmp(linebuf, "CU_PLATFORM_ATTRIBUTE_", 22) == 0)
+		{
+			attkey = linebuf + 22;
+
+			if (strcmp(attkey, "CUDA_RUNTIME_VERSION") == 0)
+			{
+				elog(LOG, "CUDA Runtime version: %s", attval);
+			}
+			else if (strcmp(attkey, "NVIDIA_DRIVER_VERSION") == 0)
+			{
+				elog(LOG, "NVIDIA driver version: %s", attval);
+			}
+		}
+		else if (strncmp(linebuf, "CU_DEVICE_ATTRIBUTE_", 20) == 0)
+		{
+			attkey = linebuf + 20;
+
+			if (strcmp(attkey, "DEVICE_ID") == 0)
+			{
+				if (dattr.dev_id >= 0)
+					check_target_cuda_device(&dattr);
+				dattr.dev_id = atoi(attval);
+			}
+			else if (strcmp(attkey, "DEVICE_NAME") == 0)
+				dattr.dev_name = pstrdup(attval);
+			else if (strcmp(attkey, "GLOBAL_MEMORY_SIZE") == 0)
+				dattr.dev_mem_sz = (size_t) atol(attval);
+			else if (strcmp(attkey, "MAX_THREADS_PER_BLOCK") == 0)
+				dattr.dev_max_threads_per_block = atoi(attval);
+			else if (strcmp(attkey, "MAX_SHARED_MEMORY_PER_BLOCK") == 0)
+				dattr.dev_local_mem_sz = atoi(attval);
+			else if (strcmp(attkey, "MEMORY_CLOCK_RATE") == 0)
+				dattr.dev_mem_clk = atoi(attval);
+			else if (strcmp(attkey, "GLOBAL_MEMORY_BUS_WIDTH") == 0)
+				dattr.dev_mem_width = atoi(attval);
+			else if (strcmp(attkey, "L2_CACHE_SIZE") == 0)
+				dattr.dev_l2_sz = atoi(attval);
+			else if (strcmp(attkey, "COMPUTE_CAPABILITY_MAJOR") == 0)
+				dattr.dev_cap_major = atoi(attval);
+			else if (strcmp(attkey, "COMPUTE_CAPABILITY_MINOR") == 0)
+				dattr.dev_cap_minor = atoi(attval);
+			else if (strcmp(attkey, "MULTIPROCESSOR_COUNT") == 0)
+				dattr.dev_mpu_nums = atoi(attval);
+			else if (strcmp(attkey, "CLOCK_RATE") == 0)
+				dattr.dev_mpu_clk = atoi(attval);
+		}
+		else if (strcmp(linebuf, "\n") != 0)
+			elog(LOG, "Unknown attribute: %s", linebuf);
+	}
+	/* dump the last device */
+	if (dattr.dev_id >= 0)
+		check_target_cuda_device(&dattr);
+
+	ClosePipeStream(filp);
 }
 
 static void
@@ -2138,12 +2194,7 @@ void
 pgstrom_init_cuda_control(void)
 {
 	static char	   *cuda_visible_devices;
-	MemoryContext	oldcxt;
-	CUdevice		device;
-	CUresult		rc;
-	FILE		   *filp;
-	int				version;
-	int				i, count;
+	int				count;
 
 	/*
 	 * GPU variables related to CUDA environment
@@ -2163,67 +2214,9 @@ pgstrom_init_cuda_control(void)
 	}
 
 	/*
-	 * initialization of CUDA runtime
+	 * Picks up target CUDA devices
 	 */
-	rc = cuInit(0);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuInit(%s)", errorText(rc));
-
-	/*
-	 * Logs CUDA runtime version
-	 */
-	rc = cuDriverGetVersion(&version);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDriverGetVersion: %s", errorText(rc));
-	elog(LOG, "CUDA Runtime version %d.%d.%d",
-		 (version / 1000),
-		 (version % 1000) / 10,
-		 (version % 10));
-
-	/*
-	 * Logs nVIDIA driver version
-	 */
-	filp = AllocateFile("/sys/module/nvidia/version", "r");
-	if (!filp)
-		elog(LOG, "NVIDIA driver version: not loaded");
-	else
-	{
-		int		major;
-		int		minor;
-
-		if (fscanf(filp, "%d.%d", &major, &minor) != 2)
-			elog(LOG, "NVIDIA driver version: unknown");
-		else
-			elog(LOG, "NVIDIA driver version: %d.%d", major, minor);
-		FreeFile(filp);
-	}
-
-	/*
-	 * construct a list of available devices
-	 */
-	rc = cuDeviceGetCount(&count);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetCount(%s)", errorText(rc));
-
-	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
-	for (i=0; i < count; i++)
-	{
-		int		dev_cap;
-		size_t	dev_memsz;
-
-		rc = cuDeviceGet(&device, i);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuDeviceGet(%s)", errorText(rc));
-		if (pgstrom_check_device_capability(i, device, &dev_cap, &dev_memsz))
-		{
-			cuda_device_ordinals = lappend_int(cuda_device_ordinals, i);
-			cuda_device_capabilities =
-				list_append_unique_int(cuda_device_capabilities, dev_cap);
-			cuda_device_mem_sizes =
-				lappend_int(cuda_device_mem_sizes, (int)(dev_memsz >> 20));
-		}
-	}
-	MemoryContextSwitchTo(oldcxt);
+	pickup_target_cuda_devices();
 	if (cuda_device_ordinals == NIL)
 		elog(ERROR, "No CUDA devices, PG-Strom was disabled");
 	if (list_length(cuda_device_capabilities) > 1)
@@ -2238,7 +2231,7 @@ pgstrom_init_cuda_control(void)
 	/*
 	 * allocation of static shared memory for resource scoreboard
 	 */
-	
+	count = list_length(cuda_device_ordinals);
 	RequestAddinShmemSpace(MAXALIGN(offsetof(GpuScoreBoard, gpu[count])));
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_cuda_control;

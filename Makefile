@@ -54,7 +54,7 @@ PG_CONFIG = pg_config
 PGSTROM_FLAGS := $(shell $(PG_CONFIG) --configure | \
 	grep -q "'--enable-debug'" && \
 	echo "-Wall -DPGSTROM_DEBUG=1 -O0")
-PGSTROM_FLAGS += -DCMD_GPUINGO_PATH=$(shell $(PG_CONFIG) --bindir)/gpuinfo
+PGSTROM_FLAGS += -DCMD_GPUINGO_PATH=\"$(shell $(PG_CONFIG) --bindir)/gpuinfo\"
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(IPATH)
 SHLIB_LINK := -L $(LPATH) -lnvrtc -lcuda
 

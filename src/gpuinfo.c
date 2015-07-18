@@ -84,8 +84,6 @@ static struct
 	int			attdetail;	/* skip without -d option */
 } attribute_catalog[] = {
 	ATTR_ENTRY(CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
-			   "Max number of threads per block", INT, 0),
-	ATTR_ENTRY(CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
 			   "Maximum number of threads per block", INT, 0),
 	ATTR_ENTRY(CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X,
 			   "Maximum block dimension X", INT, 0),
@@ -260,13 +258,19 @@ static struct
 			   INT, 0),
 };
 
-static void output_device(CUdevice device)
+static void output_device(CUdevice device, int dev_id)
 {
 	char		dev_name[1024];
 	size_t		dev_memsz;
 	int			dev_prop;
 	int			i;
 	CUresult	rc;
+
+	/* device identifier */
+	if (!machine_format)
+		printf("--------\nDevice Identifier: %d\n", dev_id);
+	else
+		printf("CU_DEVICE_ATTRIBUTE_DEVICE_ID=%d\n", dev_id);
 
 	/* device name */
 	rc = cuDeviceGetName(dev_name, sizeof(dev_name), device);
@@ -275,7 +279,7 @@ static void output_device(CUdevice device)
 	if (!machine_format)
 		printf("Device Name: %s\n", dev_name);
 	else
-		printf("PGSTROM_DEVICE_NAME=%s\n", dev_name);
+		printf("CU_DEVICE_ATTRIBUTE_DEVICE_NAME=%s\n", dev_name);
 
 	/* device RAM size */
 	rc = cuDeviceTotalMem(&dev_memsz, device);
@@ -284,7 +288,7 @@ static void output_device(CUdevice device)
 	if (!machine_format)
 		printf("Global memory size: %zuMB\n", dev_memsz >> 20);
 	else
-		printf("PGSTROM_DEVICE_MEMORY_SIZE=%zu\n", dev_memsz);
+		printf("CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_SIZE=%zu\n", dev_memsz);
 
 	for (i=0; i < lengthof(attribute_catalog); i++)
 	{
@@ -435,7 +439,7 @@ int main(int argc, char *argv[])
 			   (version % 1000) / 10,
 			   (version % 10));
 	else
-		printf("PGSTROM_CUDA_RUNTIME_VERSION=%d.%d.%d\n",
+		printf("CU_PLATFORM_ATTRIBUTE_CUDA_RUNTIME_VERSION=%d.%d.%d\n",
 			   (version / 1000),
                (version % 1000) / 10,
                (version % 10));
@@ -453,7 +457,8 @@ int main(int argc, char *argv[])
 			if (!machine_format)
 				printf("NVIDIA Driver version: %d.%d\n", major, minor);
 			else
-				printf("PGSTROM_NVIDIA_DRIVER_VERSION=%d.%d\n", major, minor);
+				printf("CU_PLATFORM_ATTRIBUTE_NVIDIA_DRIVER_VERSION=%d.%d\n",
+					   major, minor);
 		}
 		fclose(filp);
 	}
@@ -468,14 +473,14 @@ int main(int argc, char *argv[])
 	if (!machine_format)
 		printf("Number of devices: %d\n", count);
 	else
-		printf("PGSTROM_NUMBER_OF_DEVICES=%d\n", count);
+		printf("CU_PLATFORM_ATTRIBUTE_NUMBER_OF_DEVICES=%d\n", count);
 
 	for (i=0; i < count; i++)
 	{
 		rc = cuDeviceGet(&device, i);
 		if (rc != CUDA_SUCCESS)
 			error_exit(rc, "failed on cuDeviceGet");
-		output_device(device);
+		output_device(device, i);
 	}
 	return 0;
 }
