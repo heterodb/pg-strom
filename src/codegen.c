@@ -57,10 +57,13 @@ static struct {
 	{ FLOAT4OID,	"cl_float",	0 },
 	{ FLOAT8OID,	"cl_double",0 },
 	/* date and time datatypes */
-	{ DATEOID,		"cl_int",	DEVFUNC_NEEDS_TIMELIB },
-	{ TIMEOID,		"cl_long",	DEVFUNC_NEEDS_TIMELIB },
-	{ TIMESTAMPOID,	"cl_long",	DEVFUNC_NEEDS_TIMELIB },
-	{ TIMESTAMPTZOID,"cl_long",	DEVFUNC_NEEDS_TIMELIB },
+	{ DATEOID,			"DateADT",		DEVFUNC_NEEDS_TIMELIB },
+	{ TIMEOID,			"TimeADT",		DEVFUNC_NEEDS_TIMELIB },
+//	{ TIMETZOID,		"TimeTzADT",	DEVFUNC_NEEDS_TIMELIB },
+	{ TIMESTAMPOID,		"Timestamp",	DEVFUNC_NEEDS_TIMELIB },
+	{ TIMESTAMPTZOID,	"TimestampTz",	DEVFUNC_NEEDS_TIMELIB },
+//	{ TINTERVALOID,		"TimeIntervalData",	DEVFUNC_NEEDS_TIMELIB },
+//	{ INTERVALOID,		"Interval",		DEVFUNC_NEEDS_TIMELIB },
 	/* variable length datatypes */
 	{ BPCHAROID,	"varlena",	DEVFUNC_NEEDS_TEXTLIB },
 	{ VARCHAROID,	"varlena",	DEVFUNC_NEEDS_TEXTLIB },
