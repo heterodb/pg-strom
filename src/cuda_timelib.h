@@ -22,6 +22,11 @@
 /* definitions copied from date.h */
 typedef cl_int		DateADT;
 typedef cl_long		TimeADT;
+typedef struct
+{
+	TimeADT			time;	/* all time units other than months and years */
+	cl_int			zone;	/* numeric time zone, in seconds */
+} TimeTzADT;
 typedef cl_long		TimeOffset;
 
 #define DATEVAL_NOBEGIN		((cl_int)(-0x7fffffff - 1))
@@ -38,6 +43,12 @@ typedef cl_long	Timestamp;
 typedef cl_long	TimestampTz;
 typedef cl_long	TimeOffset;
 typedef cl_int	fsec_t;		/* fractional seconds (in microseconds) */
+typedef struct
+{
+	TimeOffset	time;	/* all time units other than days, months and years */
+	cl_int		day;	/* days, after time for alignment */
+	cl_int		month;	/* months and years, after time for alignment */
+} Interval;
 
 #define DAYS_PER_YEAR	365.25	/* assumes leap year every four years */
 #define MONTHS_PER_YEAR	12
@@ -174,6 +185,11 @@ STROMCL_SIMPLE_TYPE_TEMPLATE(date,DateADT)
 STROMCL_SIMPLE_TYPE_TEMPLATE(time,TimeADT)
 #endif
 
+#ifndef PG_TIMETZ_TYPE_DEFINED
+#define PG_TIMETZ_TYPE_DEFINED
+STROMCL_INDIRECT_TYPE_TEMPLATE(timetz,TimeTzADT)
+#endif
+
 #ifndef PG_TIMESTAMP_TYPE_DEFINED
 #define PG_TIMESTAMP_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(timestamp,Timestamp)
@@ -182,6 +198,11 @@ STROMCL_SIMPLE_TYPE_TEMPLATE(timestamp,Timestamp)
 #ifndef PG_TIMESTAMPTZ_TYPE_DEFINED
 #define PG_TIMESTAMPTZ_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(timestamptz,TimestampTz)
+#endif
+
+#ifndef PG_INTERVAL_TYPE_DEFINED
+#define PG_INTERVAL_TYPE_DEFINED
+STROMCL_INDIRECT_TYPE_TEMPLATE(interval,Interval)
 #endif
 
 #ifndef PG_INT4_TYPE_DEFINED
@@ -1138,6 +1159,99 @@ tm2timestamp(struct pg_tm * tm, fsec_t fsec, int *tzp, Timestamp *result)
     return true;
 }
 
+/*
+ * date2timestamptz
+ *
+ * It translates pg_date_t to pg_timestamptz_t based on the session
+ * timezone information (session_timezone_state)
+ */
+STATIC_FUNCTION(pg_timestamptz_t)
+date2timestamptz(cl_int *errcode, pg_date_t arg)
+{
+	pg_timestamptz_t	result;
+	struct pg_tm	tm;
+	int				tz;
+
+	if (arg.isnull)
+	{
+		result.isnull = true;
+	}
+	else if (DATE_IS_NOBEGIN(arg.value))
+	{
+		result.isnull = false;
+		TIMESTAMP_NOBEGIN(result.value);
+	}
+	else if (DATE_IS_NOEND(arg.value))
+	{
+		result.isnull = false;
+		TIMESTAMP_NOEND(result.value);
+	}
+	else
+	{
+        j2date(arg.value + POSTGRES_EPOCH_JDATE,
+			   &tm.tm_year, &tm.tm_mon, &tm.tm_mday);
+        tm.tm_hour = 0;
+        tm.tm_min = 0;
+        tm.tm_sec = 0;
+        tz = DetermineTimeZoneOffset(&tm, &session_timezone_state);
+
+		result.isnull = false;
+		result.value = arg.value * USECS_PER_DAY + tz * USECS_PER_SEC;
+        /* Date's range is wider than timestamp's, so check for overflow */
+        if ((result.value - tz * USECS_PER_SEC) / USECS_PER_DAY != arg.value)
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		}
+	}
+	return result;
+}
+
+/*
+ * timestamp2timestamptz
+ *
+ * It translates pg_timestamp_t to pg_timestamptz_t based on the session
+ * timezone information (session_timezone_state)
+ */
+STATIC_FUNCTION(pg_timestamptz_t)
+timestamp2timestamptz(cl_int *errcode, pg_timestamp_t arg)
+{
+	pg_timestamptz_t	result;
+	struct pg_tm		tm;
+	fsec_t				fsec;
+	int					tz;
+
+	if (arg.isnull)
+	{
+		result.isnull = true;
+	}
+    else if (TIMESTAMP_NOT_FINITE(arg.value))
+	{
+		result.isnull = false;
+        result.value  = arg.value;
+	}
+	else if (!timestamp2tm(arg.value, NULL, &tm, &fsec, NULL))
+	{
+		result.isnull = true;
+		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+	}
+	else
+	{
+        tz = DetermineTimeZoneOffset(&tm, &session_timezone_state);
+		if (!tm2timestamp(&tm, fsec, &tz, &result.value))
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		}
+		else
+		{
+			result.isnull = false;
+		}
+	}
+
+	return result;
+}
+
 /* ---------------------------------------------------------------
  *
  * Type cast functions
@@ -1176,6 +1290,51 @@ pgfn_timestamp_date(cl_int *errcode, pg_timestamp_t arg1)
 	return result;
 }
 
+/*
+ * Data cast functions related to timezonetz
+ */
+STATIC_FUNCTION(pg_date_t)
+pgfn_timestamptz_date(cl_int *errcode, pg_timestamptz_t arg1)
+{
+	pg_date_t		result;
+	struct pg_tm	tm;
+	fsec_t			fsec;
+	int				tz;
+
+	if (arg1.isnull)
+		result.isnull = true;
+	else if (TIMESTAMP_IS_NOBEGIN(arg1.value))
+	{
+		result.isnull = false;
+		DATE_NOBEGIN(result.value);
+	}
+	else if (TIMESTAMP_IS_NOEND(arg1.value))
+	{
+		result.isnull = false;
+		DATE_NOEND(result.value);
+	}
+	else if (!timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL))
+	{
+		result.isnull = true;
+		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+	}
+	else
+	{
+		result.isnull = false;
+		result.value  = (date2j(tm.tm_year, tm.tm_mon, tm.tm_mday)
+						 - POSTGRES_EPOCH_JDATE);
+	}
+	return result;
+}
+
+#ifdef NOT_USED
+STATIC_FUNCTION(pg_time_t)
+timetz_time(cl_int *errcode, pg_timetz_t arg1)
+{
+
+}
+#endif
+
 STATIC_FUNCTION(pg_time_t)
 pgfn_timestamp_time(cl_int *errcode, pg_timestamp_t arg1)
 {
@@ -1203,6 +1362,49 @@ pgfn_timestamp_time(cl_int *errcode, pg_timestamp_t arg1)
 	}
 	return result;
 }
+
+STATIC_FUNCTION(pg_time_t)
+pgfn_timestamptz_time(cl_int *errcode, pg_timestamptz_t arg1)
+{
+	pg_time_t		result;
+	struct pg_tm	tm;
+	fsec_t			fsec;
+	int				tz;
+
+	if (arg1.isnull)
+		result.isnull = true;
+	else if (TIMESTAMP_NOT_FINITE(arg1.value))
+		result.isnull = true;
+	else if (!timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL))
+	{
+		result.isnull = true;
+		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+	}
+	else
+	{
+		result.isnull = false;
+		result.value =
+			((((tm.tm_hour * MINS_PER_HOUR
+				+ tm.tm_min) * SECS_PER_MINUTE)
+			    + tm.tm_sec) * USECS_PER_SEC)
+			    + fsec;
+	}
+	return result;
+}
+
+#ifdef NOT_USED
+STATIC_FUNCTION(pg_timetz_t)
+pgfn_time_timetz(cl_int *errcode, pg_time_t arg1)
+{}
+
+STATIC_FUNCTION(pg_timetz_t)
+pgfn_timestamptz_timetz(cl_int *errcode, pg_timestamptz_t arg1)
+{}
+
+STATIC_FUNCTION(pg_timetz_t)
+pgfn_timetz_scale(cl_int *errcode, pg_timetz_t arg1, pg_int4_t arg2)
+{}
+#endif
 
 STATIC_FUNCTION(pg_timestamp_t)
 pgfn_date_timestamp(cl_int *errcode, pg_date_t arg1)
@@ -1236,6 +1438,53 @@ pgfn_date_timestamp(cl_int *errcode, pg_date_t arg1)
 		}
 	}
 	return result;
+}
+
+STATIC_FUNCTION(pg_timestamp_t)
+pgfn_timestamptz_timestamp(cl_int *errcode, pg_timestamptz_t arg1)
+{
+	pg_timestamp_t	result;
+	struct pg_tm	tm;
+	fsec_t			fsec;
+	int				tz;
+
+	if (arg1.isnull)
+	{
+		result.isnull = true;
+	}
+	else if (TIMESTAMP_NOT_FINITE(arg1.value))
+	{
+		result.isnull = false;
+        result.value  = arg1.value;
+	}
+	else if (!timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL))
+	{
+		result.isnull = true;
+		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+	}
+	else if (!tm2timestamp(&tm, fsec, NULL, &result.value))
+	{
+		result.isnull = true;
+		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+	}
+	else
+	{
+		result.isnull = false;
+	}
+
+	return result;
+}
+
+STATIC_FUNCTION(pg_timestamptz_t)
+pgfn_date_timestamptz(cl_int *errcode, pg_date_t arg1)
+{
+	return date2timestamptz(errcode, arg1);
+}
+
+STATIC_FUNCTION(pg_timestamptz_t)
+pgfn_timestamp_timestamptz(cl_int *errcode, pg_timestamp_t arg1)
+{
+	return timestamp2timestamptz(errcode, arg1);
 }
 
 /*
@@ -1324,6 +1573,52 @@ pgfn_timedate_pl(cl_int *errcode, pg_time_t arg1, pg_date_t arg2)
 {
 	return pgfn_datetime_pl(errcode, arg2, arg1);
 }
+
+#ifdef NOT_USED
+STATIC_FUNCTION(pg_interval_t)
+pgfn_time_mi_time(cl_int *errcode, pg_time_t arg1, pg_time_t arg2)
+{}
+
+STATIC_FUNCTION(pg_interval_t)
+pgfn_timestamp_mi(cl_int *errcode, pg_timestamp_t arg1, pg_timestamp_t arg2)
+{}
+
+STATIC_FUNCTION(pg_timetz_t)
+pgfn_timetz_pl_interval(cl_int *errcode, pg_timetz_t arg1, pg_interval_t arg2)
+{}
+
+STATIC_FUNCTION(pg_timetz_t)
+pgfn_timetz_mi_interval(cl_int *errcode, pg_timetz_t arg1, pg_interval_t arg2)
+{}
+
+STATIC_FUNCTION(pg_timestamptz_t)
+pgfn_timestamptz_pl_interval(cl_int *errcode,
+							 pg_timestamptz_t arg1,
+							 pg_interval_t arg2)
+{}
+
+STATIC_FUNCTION(pg_timestamptz_t)
+pgfn_timestamptz_mi_interval(cl_int *errcode,
+							 pg_timestamptz_t arg1,
+							 pg_interval_t arg2)
+{}
+
+STATIC_FUNCTION(pg_interval_t)
+pgfn_interval_um(cl_int *errcode, pg_interval_t arg1)
+{}
+
+STATIC_FUNCTION(pg_interval_t)
+pgfn_interval_pl(cl_int *errcode, pg_interval_t arg1, pg_interval_t arg2)
+{}
+
+STATIC_FUNCTION(pg_interval_t)
+pgfn_interval_mi(cl_int *errcode, pg_interval_t arg1, pg_interval_t arg2)
+{}
+
+STATIC_FUNCTION(pg_timestamptz)
+pgfn_datetimetz_timestamptz(cl_int *errcode, pg_date_t arg1, pg_timetz_t arg2)
+{}
+#endif
 
 /*
  * Date comparison
@@ -1452,6 +1747,40 @@ pgfn_date_cmp_timestamp(cl_int *errcode,
 	return result;
 }
 
+#ifdef NOT_USED
+/*
+ * Comparison between timetz
+ */
+STATIC_FUNCTION(pg_bool_t)
+timetz_eq(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+timetz_ne(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+timetz_lt(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+timetz_le(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+timetz_ge(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+timetz_gt(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
+{}
+
+STATIC_FUNCTION(pg_bool_t)
+timetz_cmp(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
+{}
+
+#endif
+
 /*
  * Timestamp comparison
  */
@@ -1577,212 +1906,6 @@ pgfn_timestamp_cmp_date(cl_int *errcode,
 			result.value = 0;
 	}
 	return result;
-}
-
-/*
- * timestamp2timestamptz
- *
- * It translates pg_timestamp_t to pg_timestamptz_t based on the session
- * timezone information (session_timezone_state)
- */
-STATIC_FUNCTION(pg_timestamptz_t)
-timestamp2timestamptz(cl_int *errcode, pg_timestamp_t arg)
-{
-	pg_timestamptz_t	result;
-	struct pg_tm		tm;
-	fsec_t				fsec;
-	int					tz;
-
-	if (arg.isnull)
-	{
-		result.isnull = true;
-	}
-    else if (TIMESTAMP_NOT_FINITE(arg.value))
-	{
-		result.isnull = false;
-        result.value  = arg.value;
-	}
-	else if (!timestamp2tm(arg.value, NULL, &tm, &fsec, NULL))
-	{
-		result.isnull = true;
-		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
-	}
-	else
-	{
-        tz = DetermineTimeZoneOffset(&tm, &session_timezone_state);
-		if (!tm2timestamp(&tm, fsec, &tz, &result.value))
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(errcode, StromError_CpuReCheck);
-		}
-		else
-		{
-			result.isnull = false;
-		}
-	}
-
-	return result;
-}
-
-/*
- * date2timestamptz
- *
- * It translates pg_date_t to pg_timestamptz_t based on the session
- * timezone information (session_timezone_state)
- */
-STATIC_FUNCTION(pg_timestamptz_t)
-date2timestamptz(cl_int *errcode, pg_date_t arg)
-{
-	pg_timestamptz_t	result;
-	struct pg_tm	tm;
-	int				tz;
-
-	if (arg.isnull)
-	{
-		result.isnull = true;
-	}
-	else if (DATE_IS_NOBEGIN(arg.value))
-	{
-		result.isnull = false;
-		TIMESTAMP_NOBEGIN(result.value);
-	}
-	else if (DATE_IS_NOEND(arg.value))
-	{
-		result.isnull = false;
-		TIMESTAMP_NOEND(result.value);
-	}
-	else
-	{
-        j2date(arg.value + POSTGRES_EPOCH_JDATE,
-			   &tm.tm_year, &tm.tm_mon, &tm.tm_mday);
-        tm.tm_hour = 0;
-        tm.tm_min = 0;
-        tm.tm_sec = 0;
-        tz = DetermineTimeZoneOffset(&tm, &session_timezone_state);
-
-		result.isnull = false;
-		result.value = arg.value * USECS_PER_DAY + tz * USECS_PER_SEC;
-        /* Date's range is wider than timestamp's, so check for overflow */
-        if ((result.value - tz * USECS_PER_SEC) / USECS_PER_DAY != arg.value)
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(errcode, StromError_CpuReCheck);
-		}
-	}
-	return result;
-}
-
-/*
- * Data cast functions related to timezonetz
- */
-STATIC_FUNCTION(pg_date_t)
-pgfn_timestamptz_date(cl_int *errcode, pg_timestamptz_t arg1)
-{
-	pg_date_t		result;
-	struct pg_tm	tm;
-	fsec_t			fsec;
-	int				tz;
-
-	if (arg1.isnull)
-		result.isnull = true;
-	else if (TIMESTAMP_IS_NOBEGIN(arg1.value))
-	{
-		result.isnull = false;
-		DATE_NOBEGIN(result.value);
-	}
-	else if (TIMESTAMP_IS_NOEND(arg1.value))
-	{
-		result.isnull = false;
-		DATE_NOEND(result.value);
-	}
-	else if (!timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL))
-	{
-		result.isnull = true;
-		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
-	}
-	else
-	{
-		result.isnull = false;
-		result.value  = (date2j(tm.tm_year, tm.tm_mon, tm.tm_mday)
-						 - POSTGRES_EPOCH_JDATE);
-	}
-	return result;
-}
-
-STATIC_FUNCTION(pg_time_t)
-pgfn_timestamptz_time(cl_int *errcode, pg_timestamptz_t arg1)
-{
-	pg_time_t		result;
-	struct pg_tm	tm;
-	fsec_t			fsec;
-	int				tz;
-
-	if (arg1.isnull)
-		result.isnull = true;
-	else if (TIMESTAMP_NOT_FINITE(arg1.value))
-		result.isnull = true;
-	else if (!timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL))
-	{
-		result.isnull = true;
-		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
-	}
-	else
-	{
-		result.isnull = false;
-		result.value =
-			((((tm.tm_hour * MINS_PER_HOUR
-				+ tm.tm_min) * SECS_PER_MINUTE)
-			    + tm.tm_sec) * USECS_PER_SEC)
-			    + fsec;
-	}
-	return result;
-}
-
-STATIC_FUNCTION(pg_timestamp_t)
-pgfn_timestamptz_timestamp(cl_int *errcode, pg_timestamptz_t arg1)
-{
-	pg_timestamp_t	result;
-	struct pg_tm	tm;
-	fsec_t			fsec;
-	int				tz;
-
-	if (arg1.isnull)
-	{
-		result.isnull = true;
-	}
-	else if (TIMESTAMP_NOT_FINITE(arg1.value))
-	{
-		result.isnull = false;
-        result.value  = arg1.value;
-	}
-	else if (!timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL))
-	{
-		result.isnull = true;
-		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
-	}
-	else if (!tm2timestamp(&tm, fsec, NULL, &result.value))
-	{
-		result.isnull = true;
-		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
-	}
-	else
-	{
-		result.isnull = false;
-	}
-
-	return result;
-}
-
-STATIC_FUNCTION(pg_timestamptz_t)
-pgfn_timestamp_timestamptz(cl_int *errcode, pg_timestamp_t arg1)
-{
-	return timestamp2timestamptz(errcode, arg1);
-}
-
-STATIC_FUNCTION(pg_timestamptz_t)
-pgfn_date_timestamptz(cl_int *errcode, pg_date_t arg1)
-{
-	return date2timestamptz(errcode, arg1);
 }
 
 /*
@@ -2097,6 +2220,109 @@ pgfn_timestamptz_ne_timestamp(cl_int *errcode,
 	return pgfn_timestamp_ne_timestamptz(errcode, arg2, arg1);
 }
 
+#ifdef NOT_USED
+/*
+ * Comparison between pg_interval_t
+ */
+STATIC_INLINE(TimeOffset)
+interval_cmp_value(pg_interval_t interval)
+{
+	TimeOffset	span;
+
+	span = interval.time;
+	span += interval.month * INT64CONST(30) * USECS_PER_DAY;
+	span += interval.day * INT64CONST(24) * USECS_PER_HOUR;
+
+	return span;
+}
+
+STATIC_FUNCTION(cl_int)
+interval_cmp_internal(pg_interval_t arg1, pg_interval_t arg2)
+{
+	TimeOffset	span1 = interval_cmp_value(arg1);
+	TimeOffset	span2 = interval_cmp_value(arg2);
+
+	return ((span1 < span2) ? -1 : (span1 > span2) ? 1 : 0);
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_interval_eq(cl_int *errcode, pg_interval_t arg1, pg_interval_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = false;
+	result.value = (cl_bool)(interval_cmp_internal(arg1, arg2) == 0);
+
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_interval_ne(cl_int *errcode, pg_interval_t arg1, pg_interval_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = false;
+	result.value = (cl_bool)(interval_cmp_internal(arg1, arg2) != 0);
+
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_interval_lt(cl_int *errcode, pg_interval_t arg1, pg_interval_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = false;
+	result.value = (cl_bool)(interval_cmp_internal(arg1, arg2) < 0);
+
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_interval_le(cl_int *errcode, pg_interval_t arg1, pg_interval_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = false;
+	result.value = (cl_bool)(interval_cmp_internal(arg1, arg2) <= 0);
+
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_interval_ge(cl_int *errcode, pg_interval_t arg1, pg_interval_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = false;
+	result.value = (cl_bool)(interval_cmp_internal(arg1, arg2) >= 0);
+
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_interval_gt(cl_int *errcode, pg_interval_t arg1, pg_interval_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = false;
+	result.value = (cl_bool)(interval_cmp_internal(arg1, arg2) > 0);
+
+	return result;
+}
+
+STATIC_FUNCTION(pg_int4_t)
+pgfn_interval_cmp(cl_int *errcode, pg_interval_t arg1, pg_interval_t arg2)
+{
+	pg_int4_t	result;
+
+	result.isnull = false;
+	result.value = interval_cmp_internal(arg1, arg2);
+
+	return result;
+}
+#endif
+
 /*
  * overlaps() SQL functions
  *
@@ -2253,6 +2479,15 @@ pgfn_overlaps_time(cl_int *errcode,
 						  arg3.value, arg3.isnull,
 						  arg4.value, arg4.isnull);
 }
+
+#ifdef NOT_USED
+pgfn_overlaps_timetz(cl_int *errcode,
+					 pg_timetz_t arg1, pg_timetz_t arg2,
+					 pg_timetz_t arg3, pg_timetz_t arg4)
+{
+
+}
+#endif
 
 STATIC_FUNCTION(pg_bool_t)
 pgfn_overlaps_timestamp(cl_int *errcode,
