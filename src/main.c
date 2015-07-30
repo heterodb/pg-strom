@@ -172,6 +172,7 @@ typedef struct
 {
 	PlannerInfo	   *root;		/* hash key 1 -- must be first */
 	Relids			relids;		/* hash key 2 -- must be first */
+	Size			cpath_length;
 	CustomPath	   *cpath;
 } pgstrom_path_tracker;
 
@@ -251,6 +252,7 @@ pgstrom_add_path(PlannerInfo *root, RelOptInfo *rel,
 	{
 		Assert(hentry->root == root &&
 			   bms_equal(hentry->relids, rel->relids));
+		hentry->cpath_length = cpath_length;
 		hentry->cpath = palloc(cpath_length);
 		memcpy(hentry->cpath, cpath, cpath_length);
 	}
@@ -259,6 +261,7 @@ pgstrom_add_path(PlannerInfo *root, RelOptInfo *rel,
 		/* check total_cost of Path, then cheaper one will servive */
 		if (hentry->cpath->path.total_cost > cpath->path.total_cost)
 		{
+			hentry->cpath_length = cpath_length;
 			hentry->cpath = palloc(cpath_length);
 			memcpy(hentry->cpath, cpath, cpath_length);
 		}
@@ -282,6 +285,8 @@ pgstrom_add_path(PlannerInfo *root, RelOptInfo *rel,
 CustomPath *
 pgstrom_find_path(PlannerInfo *root, RelOptInfo *rel)
 {
+	CustomPath	   *result = NULL;
+
 	/*
 	 * Find the required hash entry, if any
 	 */
@@ -296,9 +301,13 @@ pgstrom_find_path(PlannerInfo *root, RelOptInfo *rel)
 		hentry = (pgstrom_path_tracker *)
 			hash_search(pgstrom_path_htab, &hkey, HASH_FIND, NULL);
 		if (hentry)
-			return hentry->cpath;
+		{
+			result = palloc0(hentry->cpath_length);
+			memcpy(result, hentry->cpath, hentry->cpath_length);
+			result->path.parent = NULL;
+		}
 	}
-	return NULL;
+	return result;
 }
 
 /*
