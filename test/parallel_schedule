@@ -22,15 +22,15 @@ test: test_init
 # GpuScan pattern
 # ----------
 # GpuScan parallel test-cases.
-test: explain_gs zero_gs normal_gs recheck_gs overflow_gs 
+#test: explain_gs zero_gs normal_gs recheck_gs overflow_gs 
 
 # ----------
 # GpuHashJoin pattern
 # ----------
 # GpuHashJoin parallel test-cases.
-#test: explain_ghj normal_ghj nobulk_ghj
+test: explain_ghj normal_ghj nobulk_ghj
 # GpuHashJoin closed issue test-cases.
-#test: varremap_ghj
+test: varremap_ghj
 
 # ----------
 # GpuSort pattern
