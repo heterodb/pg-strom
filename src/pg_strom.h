@@ -394,6 +394,8 @@ typedef struct
 /*
  * cuda_mmgr.c
  */
+extern void cudaHostMemAssert(void *pointer);
+
 extern MemoryContext
 HostPinMemContextCreate(MemoryContext parent,
                         const char *name,

@@ -1315,6 +1315,7 @@ typedef struct
 	Agg		   *agg;
 	List	   *pre_tlist;
 	Bitmapset  *attr_refs;
+	AttrNumber *attr_maps;
 	int			extra_flags;
 	bool		not_available;
 	const char *not_available_reason;
@@ -1344,21 +1345,16 @@ gpupreagg_rewrite_mutator(Node *node, gpupreagg_rewrite_context *context)
 	}
 	else if (IsA(node, Var))
 	{
-		Agg	   *agg = context->agg;
-		Var	   *varnode = (Var *) node;
-		int		i, x;
+		Var		   *varnode = (Var *) node;
+		Var		   *newnode;
+		AttrNumber	varattno = context->attr_maps[varnode->varattno - 1];
 
-		if (varnode->varno != OUTER_VAR)
-			elog(ERROR, "Bug? varnode references did not outer relation");
-		for (i=0; i < agg->numCols; i++)
+		if (varattno > 0)
 		{
-			if (varnode->varattno == agg->grpColIdx[i])
-			{
-				x = varnode->varattno - FirstLowInvalidHeapAttributeNumber;
-				context->attr_refs = bms_add_member(context->attr_refs, x);
+			newnode = copyObject(varnode);
+			newnode->varattno = varattno;
 
-				return copyObject(varnode);
-			}
+			return (Node *) newnode;
 		}
 		context->not_available = true;
 		context->not_available_reason =
@@ -1374,6 +1370,7 @@ gpupreagg_rewrite_expr(Agg *agg,
 					   List **p_agg_tlist,
 					   List **p_agg_quals,
 					   List **p_pre_tlist,
+					   AttrNumber **p_attr_maps,
 					   Bitmapset **p_attr_refs,
 					   int	*p_extra_flags,
 					   bool *p_has_numeric,
@@ -1384,7 +1381,9 @@ gpupreagg_rewrite_expr(Agg *agg,
 	List	   *pre_tlist = NIL;
 	List	   *agg_tlist = NIL;
 	List	   *agg_quals = NIL;
+	AttrNumber *attr_maps;
 	Bitmapset  *attr_refs = NULL;
+	Bitmapset  *grouping_keys = NULL;
 	bool		has_numeric = false;
 	bool		has_varlena = false;
 	ListCell   *cell;
@@ -1397,91 +1396,103 @@ gpupreagg_rewrite_expr(Agg *agg,
 	if (IsA(outer_plan, Sort))
 		outer_plan = outerPlan(outer_plan);
 
-	/* Head of target-list keeps original order not to adjust expression 
-	 * nodes in the Agg (and Sort if exists) node, but replaced to NULL
-	 * except for group-by key because all the non-key variables have to
-	 * be partial calculation result.
+	/*
+	 * Picks up all the grouping keys, includes the ones used to GROUPING
+	 * SET clause, then add them to pre_tlist.
 	 */
-	i = 0;
-	foreach (cell, outer_plan->targetlist)
+	for (i=0; i < agg->numCols; i++)
+		grouping_keys = bms_add_member(grouping_keys, agg->grpColIdx[i]);
+	foreach (cell, agg->chain)
 	{
-		TargetEntry	*tle = lfirst(cell);
-		TargetEntry *tle_new;
-		Oid			type_oid = exprType((Node *) tle->expr);
-		int32		type_mod = exprTypmod((Node *) tle->expr);
-		Oid			type_coll = exprCollation((Node *) tle->expr);
-		char	   *resname = (tle->resname ? pstrdup(tle->resname) : NULL);
+		Agg	   *subagg = (Agg *)lfirst(cell);
 
-		Assert(IsA(tle, TargetEntry));
-		for (i=0; i < agg->numCols; i++)
-		{
-			devtype_info   *dtype;
-			Expr		   *varnode;
+		Assert(subagg->plan.targetlist == NIL && subagg->plan.qual == NIL);
 
-			if (tle->resno != agg->grpColIdx[i])
-				continue;
-
-			/* grouping key must be a supported data type */
-			dtype = pgstrom_devtype_lookup(type_oid);
-			if (!dtype || !OidIsValid(dtype->type_eqfunc))
-			{
-				elog(DEBUG1, "Unabled to apply GpuPreAgg "
-					 "because of unsupported data type as grouping key: %s",
-					 format_type_be(type_oid));
-				return false;
-			}
-			/* grouping key type must have equality function on device */
-			if (!pgstrom_devfunc_lookup(dtype->type_eqfunc, type_coll))
-			{
-				elog(DEBUG1, "Unabled to apply GpuPreAgg "
-					 "because of unsupported function in grouping key: %s",
-					 format_procedure(dtype->type_eqfunc));
-				return false;
-			}
-
-			/* check types that needs special treatment */
-			if (type_oid == NUMERICOID)
-				has_numeric = true;
-			else if ((dtype->type_flags & DEVTYPE_IS_VARLENA) != 0)
-				has_varlena = true;
-
-			varnode = (Expr *) makeVar(INDEX_VAR,
-									   tle->resno,
-									   type_oid,
-									   type_mod,
-									   type_coll,
-									   0);
-			tle_new = makeTargetEntry(varnode,
-									  list_length(pre_tlist) + 1,
-									  resname,
-									  tle->resjunk);
-			pre_tlist = lappend(pre_tlist, tle_new);
-			attr_refs = bms_add_member(attr_refs, tle->resno -
-									   FirstLowInvalidHeapAttributeNumber);
-			break;
-		}
-		/* if not a grouping key, NULL is set instead */
-		if (i == agg->numCols)
-		{
-			Const  *cnst = makeNullConst(type_oid, type_mod, type_coll);
-
-			tle_new = makeTargetEntry((Expr *) cnst,
-									  list_length(pre_tlist) + 1,
-									  resname,
-									  tle->resjunk);
-			pre_tlist = lappend(pre_tlist, tle_new);
-		}
+		for (i=0; i < subagg->numCols; i++)
+			grouping_keys = bms_add_member(grouping_keys,
+										   subagg->grpColIdx[i]);
 	}
 
-	/* On the next, replace aggregate functions in tlist of Agg node
+	attr_maps = palloc0(sizeof(AttrNumber) *
+						list_length(outer_plan->targetlist));
+	foreach (cell, outer_plan->targetlist)
+	{
+		TargetEntry	   *tle = lfirst(cell);
+		TargetEntry	   *tle_new;
+		devtype_info   *dtype;
+		Expr		   *varnode;
+		Oid				type_oid;
+		int32			type_mod;
+		Oid				type_coll;
+		char		   *resname;
+
+		/* not a grouping key */
+		if (!bms_is_member(tle->resno, grouping_keys))
+			continue;
+
+		type_oid = exprType((Node *) tle->expr);
+		type_mod = exprTypmod((Node *) tle->expr);
+		type_coll = exprCollation((Node *) tle->expr);
+		resname = (tle->resname ? pstrdup(tle->resname) : NULL);
+
+		/* Grouping key must be a supported data type */
+		dtype = pgstrom_devtype_lookup(type_oid);
+		if (!dtype || !OidIsValid(dtype->type_eqfunc))
+		{
+			elog(DEBUG1, "Unabled to apply GpuPreAgg "
+				 "due to unsupported data type as grouping key: %s",
+				 format_type_be(type_oid));
+			return false;
+		}
+		/* grouping key type must have equality function on device */
+		if (!pgstrom_devfunc_lookup(dtype->type_eqfunc, type_coll))
+		{
+			elog(DEBUG1, "Unabled to apply GpuPreAgg "
+				 "due to unsupported equality function in grouping key: %s",
+				 format_procedure(dtype->type_eqfunc));
+			return false;
+		}
+
+		/* check whether types need special treatment */
+		if (type_oid == NUMERICOID)
+			has_numeric = true;
+		else if ((dtype->type_flags & DEVTYPE_IS_VARLENA) != 0)
+			has_varlena = true;
+
+		varnode = (Expr *) makeVar(INDEX_VAR,
+								   tle->resno,
+								   type_oid,
+								   type_mod,
+								   type_coll,
+								   0);
+		tle_new = makeTargetEntry(varnode,
+								  list_length(pre_tlist) + 1,
+								  resname,
+								  tle->resjunk);
+		pre_tlist = lappend(pre_tlist, tle_new);
+		attr_refs = bms_add_member(attr_refs, tle->resno -
+								   FirstLowInvalidHeapAttributeNumber);
+		attr_maps[tle->resno - 1] = tle_new->resno;
+	}
+
+	/*
+	 * On the next, replace aggregate functions in tlist of Agg node
 	 * according to the aggfunc_catalog[] definition.
 	 */
 	memset(&context, 0, sizeof(gpupreagg_rewrite_context));
 	context.agg = agg;
 	context.pre_tlist = pre_tlist;
 	context.attr_refs = attr_refs;
-	context.extra_flags = *p_extra_flags;
+	context.attr_maps = attr_maps;
+	context.extra_flags = 0;
 
+	/*
+	 * Construction of the modified target-list to be assigned 
+	 *
+	 *
+	 *
+	 *
+	 */
 	foreach (cell, agg->plan.targetlist)
 	{
 		TargetEntry	   *oldtle = lfirst(cell);
@@ -1505,6 +1516,9 @@ gpupreagg_rewrite_expr(Agg *agg,
 		agg_tlist = lappend(agg_tlist, newtle);
 	}
 
+	/*
+	 * Adjustment of varattno in the HAVING clause of newagg
+	 */
 	foreach (cell, agg->plan.qual)
 	{
 		Expr	   *old_expr = lfirst(cell);
@@ -1527,13 +1541,15 @@ gpupreagg_rewrite_expr(Agg *agg,
 			has_varlena = true;
 		agg_quals = lappend(agg_quals, new_expr);
 	}
-	*p_pre_tlist = context.pre_tlist;
 	*p_agg_tlist = agg_tlist;
 	*p_agg_quals = agg_quals;
+	*p_pre_tlist = context.pre_tlist;
+	*p_attr_maps = attr_maps;
 	*p_attr_refs = context.attr_refs;
 	*p_extra_flags = context.extra_flags;
 	*p_has_numeric = has_numeric;
 	*p_has_varlena = has_varlena;
+
 	return true;
 }
 
@@ -2480,25 +2496,6 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			/* track usage of this field */
 			gpagg_atts[pc.tle->resno - 1] = GPUPREAGG_FIELD_IS_GROUPKEY;
 		}
-		else if (IsA(pc.tle->expr, Const))
-		{
-			/*
-			 * Assignmnet of NULL value
-			 *
-			 * NOTE: we assume constant never appears on both of grouping-
-			 * keys and aggregated function (as literal), so we assume
-			 * target-entry with Const always represents junk fields.
-			 */
-			Assert(((Const *) pc.tle->expr)->constisnull);
-			appendStringInfo(
-				&body,
-				"  /* projection for resource %u */\n"
-				"  pg_common_vstore(%s,errcode,%u,%s,0,true);\n",
-				pc.tle->resno - 1,
-				pc.kds_label,
-				pc.tle->resno - 1,
-				pc.rowidx_label);
-		}
 		else if (IsA(pc.tle->expr, FuncExpr))
 		{
 			FuncExpr   *func = (FuncExpr *) pc.tle->expr;
@@ -2721,17 +2718,19 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	List		   *pre_tlist = NIL;
 	List		   *agg_quals = NIL;
 	List		   *agg_tlist = NIL;
+	AttrNumber	   *attr_maps = NULL;
 	Bitmapset	   *attr_refs = NULL;
 	List		   *outer_quals = NIL;
 	bool			has_numeric = false;
 	bool			has_varlena = false;
 	ListCell	   *cell;
+	int				i;
 	AggStrategy		new_agg_strategy;
 	AggClauseCosts	agg_clause_costs;
 	Plan			newcost_agg;
 	Plan			newcost_sort;
 	Plan			newcost_gpreagg;
-	int				extra_flags = DEVKERNEL_NEEDS_GPUPREAGG;
+	int				extra_flags;
 	bool			outer_bulkload = false;
 	double			bulkload_density = 0.0;
 	codegen_context context;
@@ -2748,11 +2747,14 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 								&agg_tlist,
 								&agg_quals,
 								&pre_tlist,
+								&attr_maps,
 								&attr_refs,
 								&extra_flags,
 								&has_numeric,
 								&has_varlena))
 		return;
+	/* main portion is always needed! */
+	extra_flags |= DEVKERNEL_NEEDS_GPUPREAGG;
 
 	/*
 	 * cost estimation of aggregate clauses
@@ -2914,9 +2916,9 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	/* also set up private information */
 	memset(&gpa_info, 0, sizeof(GpuPreAggInfo));
 	gpa_info.numCols        = agg->numCols;
-	gpa_info.grpColIdx      = palloc(sizeof(AttrNumber) * agg->numCols);
-	memcpy(gpa_info.grpColIdx, agg->grpColIdx,
-		   sizeof(AttrNumber) * agg->numCols);
+	gpa_info.grpColIdx      = palloc0(sizeof(AttrNumber) * agg->numCols);
+	for (i=0; i < agg->numCols; i++)
+		gpa_info.grpColIdx[i] = attr_maps[agg->grpColIdx[i] - 1];
 	gpa_info.outer_quals    = outer_quals;
 	gpa_info.outer_bulkload = outer_bulkload;
 	gpa_info.bulkload_density = bulkload_density;
@@ -2962,13 +2964,14 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		sort_node->plan.targetlist   = expr_fixup_varno(pre_tlist,
 														INDEX_VAR,
 														OUTER_VAR);
+		for (i=0; i < sort_node->numCols; i++)
+			sort_node->sortColIdx[i] = attr_maps[sort_node->sortColIdx[i] - 1];
 		outerPlan(sort_node) = &cscan->scan.plan;
 	}
 #ifdef NOT_USED
 	/*
-	 * Adjust cost value of Agg node makes GpuSort injection being
-	 * confused. So, newcost_agg is only used to decide whether we
-	 * inject GpuPreAgg, or not.
+	 * We don't adjust top-leve Agg-node because it mislead later
+	 * decision to inject GpuSort, or not.
 	 */
 	agg->plan.startup_cost = newcost_agg.startup_cost;
 	agg->plan.total_cost   = newcost_agg.total_cost;
@@ -2978,6 +2981,15 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	agg->plan.targetlist = agg_tlist;
 	agg->plan.qual = agg_quals;
 	agg->aggstrategy = new_agg_strategy;
+	for (i=0; i < agg->numCols; i++)
+		agg->grpColIdx[i] = attr_maps[agg->grpColIdx[i] - 1];
+	foreach (cell, agg->chain)
+	{
+		Agg	   *subagg = lfirst(cell);
+
+		for (i=0; i < subagg->numCols; i++)
+			subagg->grpColIdx[i] = attr_maps[subagg->grpColIdx[i] - 1];
+	}
 }
 
 bool
@@ -3243,13 +3255,13 @@ retry:
 	 * Fetch a tuple from the data-store
 	 */
 	ExecClearTuple(slot);
-	if (!pgstrom_fetch_data_store(slot, pds, row_index, &tuple))
+	if (pgstrom_fetch_data_store(slot, pds, row_index, &tuple))
 	{
+		ExprContext	   *econtext;
+		ExprDoneCond	is_done;
+
 		if (gpas->gts.scan_bulk)
 		{
-			ExprContext	   *econtext;
-			ExprDoneCond	is_done;
-
 			/*
 			 * check qualifier being pulled up from the outer scan, if any.
 			 * Outer_quals assumes fetched tuple is stored on the
@@ -3279,6 +3291,18 @@ retry:
 				if (is_done == ExprEndResult)
 					goto retry;
 			}
+		}
+
+		/*
+		 * Projection from scan-tuple to result-tuple
+		 */
+		if (gpas->gts.css.ss.ps.ps_ProjInfo != NULL)
+		{
+			econtext = gpas->gts.css.ss.ps.ps_ExprContext;
+			econtext->ecxt_scantuple = slot;
+			slot = ExecProject(gpas->gts.css.ss.ps.ps_ProjInfo, &is_done);
+			if (is_done == ExprEndResult)
+				goto retry;
 		}
 	}
 	return slot;
@@ -3331,6 +3355,7 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 				slot->tts_values[i] =
 					pgstrom_fixup_kernel_numeric(slot->tts_values[i]);
 			}
+
 			/* Now we expect GpuPreAgg takes KDS_FORMAT_TUPSLOT for result
 			 * buffer, it should not have tts_tuple to be fixed up too.
 			 */

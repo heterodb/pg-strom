@@ -447,8 +447,7 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 }
 
 /* length of kern_data_store */
-#define KERN_DATA_STORE_LENGTH(kds)		\
-	STROMALIGN((kds)->length)
+#define KERN_DATA_STORE_LENGTH(kds)		((kds)->length)
 
 /* length of the header portion of kern_data_store */
 #define KERN_DATA_STORE_HEAD_LENGTH(kds)			\
