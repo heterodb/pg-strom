@@ -3255,13 +3255,13 @@ retry:
 	 * Fetch a tuple from the data-store
 	 */
 	ExecClearTuple(slot);
-	if (!pgstrom_fetch_data_store(slot, pds, row_index, &tuple))
+	if (pgstrom_fetch_data_store(slot, pds, row_index, &tuple))
 	{
+		ExprContext	   *econtext;
+		ExprDoneCond	is_done;
+
 		if (gpas->gts.scan_bulk)
 		{
-			ExprContext	   *econtext;
-			ExprDoneCond	is_done;
-
 			/*
 			 * check qualifier being pulled up from the outer scan, if any.
 			 * Outer_quals assumes fetched tuple is stored on the
@@ -3291,6 +3291,18 @@ retry:
 				if (is_done == ExprEndResult)
 					goto retry;
 			}
+		}
+
+		/*
+		 * Projection from scan-tuple to result-tuple
+		 */
+		if (gpas->gts.css.ss.ps.ps_ProjInfo != NULL)
+		{
+			econtext = gpas->gts.css.ss.ps.ps_ExprContext;
+			econtext->ecxt_scantuple = slot;
+			slot = ExecProject(gpas->gts.css.ss.ps.ps_ProjInfo, &is_done);
+			if (is_done == ExprEndResult)
+				goto retry;
 		}
 	}
 	return slot;
@@ -3343,6 +3355,7 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 				slot->tts_values[i] =
 					pgstrom_fixup_kernel_numeric(slot->tts_values[i]);
 			}
+
 			/* Now we expect GpuPreAgg takes KDS_FORMAT_TUPSLOT for result
 			 * buffer, it should not have tts_tuple to be fixed up too.
 			 */
