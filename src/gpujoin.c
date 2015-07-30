@@ -416,9 +416,18 @@ lookup_mergeable_gpujoin(PlannerInfo *root, RelOptInfo *outer_rel)
 
 	if (cpath)
 	{
-		Assert(cpath->path.parent == outer_rel);
+		/*
+		 * XXX - It looks to me RelOptInfo was released even if it once
+		 * appeared in the past, cpath->path.parent may points invalid
+		 * address. (TPC-DS Q.68 raised an problem)
+		 * At this moment, we cannot identify what code can release
+		 * RelOptInfo.
+		 */
+		cpath->path.parent = outer_rel;
 		if (path_is_mergeable_gpujoin(&cpath->path))
 			return &cpath->path;
+
+		pfree(cpath);
 	}
 	return NULL;
 }
