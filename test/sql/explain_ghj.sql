@@ -2,9 +2,9 @@
 --#       Gpu HashJoin Explain TestCases. 
 --#
 
-set gpu_setup_cost=0;
-set enable_gpupreagg to off;
-set enable_gpusort to off;
+set pg_strom.gpu_setup_cost=0;
+set pg_strom.enable_gpupreagg to off;
+set pg_strom.enable_gpusort to off;
 set random_page_cost=1000000;   --# force off index_scan.
 set client_min_messages to warning;
 

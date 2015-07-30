@@ -3,7 +3,7 @@
 --#
 
 -- explain normal case
-set enable_gpusort to off;
+set pg_strom.enable_gpusort to off;
 set client_min_messages to warning;
 set extra_float_digits to -3;
 set pg_strom.debug_force_gpupreagg to on;
@@ -263,7 +263,7 @@ explain (verbose, costs off, timing off) select key,covar_pop(bigsrl_x,bigsrl_x)
 explain (verbose, costs off, timing off) select key,covar_samp(bigsrl_x,bigsrl_x) from strom_test group by key order by key;
 
 --explain aggregate function for statistic query case.
-set enable_gpusort to off;
+set pg_strom.enable_gpusort to off;
 set client_min_messages to warning;
 set extra_float_digits to -3;
 set pg_strom.debug_force_gpupreagg to on;
@@ -380,7 +380,7 @@ explain (verbose, costs off, timing off) select key,covar_samp(bigsrl_y,bigsrl_z
 
 
 -- explain zero query case.
-set enable_gpusort to off;
+set pg_strom.enable_gpusort to off;
 set extra_float_digits to -3;
 set pg_strom.debug_force_gpupreagg to on;
 set pg_strom.enabled=off;

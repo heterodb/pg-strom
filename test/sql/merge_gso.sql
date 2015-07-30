@@ -2,11 +2,11 @@
 --#       Gpu Sort in Merge Join TestCases. 
 --#
 
-set gpu_setup_cost=0;
+set pg_strom.gpu_setup_cost=0;
 set random_page_cost=1000000;   --# force off index_scan.   
-set enable_gpusort to on;                                                                                                                                       
+set pg_strom.enable_gpusort to on;                                                                                                                                       
 set client_min_messages to warning;
-set enable_gpuhashjoin to off;
+set pg_strom.enable_gpuhashjoin to off;
 set enable_hashjoin to off;
 
 --smallint

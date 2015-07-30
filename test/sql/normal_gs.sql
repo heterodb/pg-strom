@@ -6,9 +6,9 @@ set enable_seqscan to off;
 set enable_bitmapscan to off;
 set enable_indexscan to off;
 set random_page_cost=1000000;   --# force off index_scan.
-set enable_gpuhashjoin to off;
-set enable_gpupreagg to off;
-set enable_gpusort to off;
+set pg_strom.enable_gpuhashjoin to off;
+set pg_strom.enable_gpupreagg to off;
+set pg_strom.enable_gpusort to off;
 set client_min_messages to warning;
 
 -- normal
