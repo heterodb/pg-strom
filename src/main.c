@@ -39,7 +39,6 @@ PG_MODULE_MAGIC;
  * Misc static variables
  */
 static planner_hook_type	planner_hook_next;
-static HTAB				   *pgstrom_path_htab = NULL;
 
 /*
  * miscellaneous GUC parameters
@@ -162,152 +161,6 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-}
-
-/*
- *
- *
- */
-typedef struct
-{
-	PlannerInfo	   *root;		/* hash key 1 -- must be first */
-	Relids			relids;		/* hash key 2 -- must be first */
-	Size			cpath_length;
-	CustomPath	   *cpath;
-} pgstrom_path_tracker;
-
-static uint32
-path_tracker_hash(const void *key, Size keysize)
-{
-	pgstrom_path_tracker   *hentry = (pgstrom_path_tracker *) key;
-	uint32		hash;
-
-	Assert(keysize == offsetof(pgstrom_path_tracker, cpath));
-	hash = hash_any((unsigned char *)&hentry->root, sizeof(PlannerInfo *));
-	hash ^= bms_hash_value(hentry->relids);
-
-	return hash;
-}
-
-static int
-path_tracker_match(const void *key1, const void *key2, Size keysize)
-{
-	pgstrom_path_tracker   *hentry1 = (pgstrom_path_tracker *) key1;
-	pgstrom_path_tracker   *hentry2 = (pgstrom_path_tracker *) key2;
-
-	Assert(keysize == offsetof(pgstrom_path_tracker, cpath));
-	if (hentry1->root == hentry2->root &&
-		bms_equal(hentry1->relids, hentry2->relids))
-	{
-		return 0;	/* matched */
-	}
-	return 1;		/* not matched */
-}
-
-/*
- * pgstrom_track_path
- *
- * It tracks self managed CustomPath node, for optimal construction.
- */
-void
-pgstrom_add_path(PlannerInfo *root, RelOptInfo *rel,
-				 CustomPath *cpath, Size cpath_length)
-{
-	pgstrom_path_tracker   *hentry;
-	pgstrom_path_tracker	hkey;
-	bool					found;
-
-	/*
-	 * Create own Path hash-table, if first time
-	 */
-	if (!pgstrom_path_htab)
-	{
-		HASHCTL		hash_ctl;
-
-		/* Create the hash table */
-		MemSet(&hash_ctl, 0, sizeof(hash_ctl));
-		hash_ctl.keysize = offsetof(pgstrom_path_tracker, cpath);
-		hash_ctl.entrysize = sizeof(pgstrom_path_tracker);
-		hash_ctl.hash = path_tracker_hash;
-		hash_ctl.match = path_tracker_match;
-		hash_ctl.hcxt = CurrentMemoryContext;
-		pgstrom_path_htab = hash_create("PgStromPathHashTable",
-										256L,
-										&hash_ctl,
-										HASH_ELEM | HASH_FUNCTION |
-										HASH_COMPARE | HASH_CONTEXT);
-	}
-
-	/*
-	 * Find a hash entry, and tracks this CustomPath node regardless
-	 * of the cost (because mergeable GpuJoin may offer cheaper total
-	 * cost later)
-	 */
-	memset(&hkey, 0, sizeof(pgstrom_path_tracker));
-	hkey.root = root;
-	hkey.relids = rel->relids;
-	hentry = (pgstrom_path_tracker *)
-		hash_search(pgstrom_path_htab, &hkey, HASH_ENTER, &found);
-	if (!found)
-	{
-		Assert(hentry->root == root &&
-			   bms_equal(hentry->relids, rel->relids));
-		hentry->cpath_length = cpath_length;
-		hentry->cpath = palloc(cpath_length);
-		memcpy(hentry->cpath, cpath, cpath_length);
-	}
-	else
-	{
-		/* check total_cost of Path, then cheaper one will servive */
-		if (hentry->cpath->path.total_cost > cpath->path.total_cost)
-		{
-			hentry->cpath_length = cpath_length;
-			hentry->cpath = palloc(cpath_length);
-			memcpy(hentry->cpath, cpath, cpath_length);
-		}
-	}
-
-	/*
-	 * Finally, add this CustomPath node to the target relation.
-	 *
-	 * NOTE: If other path dominates this CustomPath node, add_path
-	 * may release the supplied CustomPath immediately. So, we have
-	 * to track CustomPath node prior to add_path().
-	 */
-	add_path(rel, &cpath->path);
-}
-
-/*
- * pgstrom_find_path
- *
- * It tries to find tracked CustomPath node.
- */
-CustomPath *
-pgstrom_find_path(PlannerInfo *root, RelOptInfo *rel)
-{
-	CustomPath	   *result = NULL;
-
-	/*
-	 * Find the required hash entry, if any
-	 */
-	if (pgstrom_path_htab)
-	{
-		pgstrom_path_tracker   *hentry;
-		pgstrom_path_tracker	hkey;
-
-		memset(&hkey, 0, sizeof(pgstrom_path_tracker));
-		hkey.root = root;
-		hkey.relids = rel->relids;
-		hentry = (pgstrom_path_tracker *)
-			hash_search(pgstrom_path_htab, &hkey, HASH_FIND, NULL);
-		if (hentry)
-		{
-			result = palloc0(hentry->cpath_length);
-			memcpy(result, hentry->cpath, hentry->cpath_length);
-			result->path.parent = NULL;
-		}
-	}
-	return result;
 }
 
 /*
@@ -450,9 +303,6 @@ pgstrom_recursive_grafter(PlannedStmt *pstmt, Plan *parent, Plan **p_curr_plan)
  * 1. To inject GpuPreAgg and GpuSort on the PlannedStmt once built.
  *    (Note that it is not a usual way to inject paths, so we have
  *     to be careful to inject it)
- * 2. To initialize the hash table to save GPU accelerated Paths to
- *    investigate N-way join, even if intermediation path was not
- *    the cheapest one.
  */
 static PlannedStmt *
 pgstrom_planner_entrypoint(Query *parse,
@@ -460,39 +310,25 @@ pgstrom_planner_entrypoint(Query *parse,
 						   ParamListInfo boundParams)
 {
 	PlannedStmt	*result;
-	HTAB		*pgstrom_path_htab_saved = pgstrom_path_htab;
 
-	PG_TRY();
+	if (planner_hook_next)
+		result = planner_hook_next(parse, cursorOptions, boundParams);
+	else
+		result = standard_planner(parse, cursorOptions, boundParams);
+
+	if (pgstrom_enabled)
 	{
-		pgstrom_path_htab = NULL;
+		ListCell   *cell;
 
-		if (planner_hook_next)
-			result = planner_hook_next(parse, cursorOptions, boundParams);
-		else
-			result = standard_planner(parse, cursorOptions, boundParams);
+		Assert(result->planTree != NULL);
+		pgstrom_recursive_grafter(result, NULL, &result->planTree);
 
-		if (pgstrom_enabled)
+		foreach (cell, result->subplans)
 		{
-			ListCell   *cell;
-
-			Assert(result->planTree != NULL);
-			pgstrom_recursive_grafter(result, NULL, &result->planTree);
-
-			foreach (cell, result->subplans)
-			{
-				Plan  **p_subplan = (Plan **) &cell->data.ptr_value;
-				pgstrom_recursive_grafter(result, NULL, p_subplan);
-			}
+			Plan  **p_subplan = (Plan **) &cell->data.ptr_value;
+			pgstrom_recursive_grafter(result, NULL, p_subplan);
 		}
 	}
-	PG_CATCH();
-	{
-		pgstrom_path_htab = pgstrom_path_htab_saved;
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	pgstrom_path_htab = pgstrom_path_htab_saved;
-
 	return result;
 }
 

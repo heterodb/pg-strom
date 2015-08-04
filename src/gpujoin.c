@@ -412,6 +412,13 @@ path_is_mergeable_gpujoin(Path *pathnode)
 static Path *
 lookup_mergeable_gpujoin(PlannerInfo *root, RelOptInfo *outer_rel)
 {
+#ifdef NOT_USED
+	/*
+	 * NOTE: Own Path node tracking mechanism is troublesome.
+	 * So, it is once removed from the main.c.
+	 * Instead of this, we try to walk down the pathnode to
+	 * pull-up join-subtree
+	 */
 	CustomPath *cpath = pgstrom_find_path(root, outer_rel);
 
 	if (cpath)
@@ -426,10 +433,23 @@ lookup_mergeable_gpujoin(PlannerInfo *root, RelOptInfo *outer_rel)
 		cpath->path.parent = outer_rel;
 		if (path_is_mergeable_gpujoin(&cpath->path))
 			return &cpath->path;
-
-		pfree(cpath);
 	}
+#endif
 	return NULL;
+}
+
+/*
+ * returns true, if pathnode is GpuJoin
+ */
+bool
+pgstrom_path_is_gpujoin(Path *pathnode)
+{
+	CustomPath *cpath = (CustomPath *) pathnode;
+
+	if (IsA(cpath, CustomPath) &&
+		cpath->methods == &gpujoin_path_methods)
+		return true;
+	return false;
 }
 
 /*
@@ -986,7 +1006,7 @@ create_gpujoin_path(PlannerInfo *root,
 								   result->inners[i].scan_path);
 		result->cpath.custom_paths = custom_paths;
 		/* add GpuJoin path */
-		pgstrom_add_path(root, joinrel, &result->cpath, length);
+		add_path(joinrel, &result->cpath.path);
 	}
 	else
 		pfree(result);
