@@ -4,6 +4,7 @@
 --#         If will support it, please remake expected outs and test_init.sql
 --#
 
+set pg_strom.debug_force_gpusort to on;
 set enable_hashagg to off;      --# force off HashAggregate
 set random_page_cost=1000000;   --# force off index_scan.
 set pg_strom.enable_gpuhashjoin to off;
