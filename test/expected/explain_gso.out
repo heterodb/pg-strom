@@ -1994,7 +1994,7 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2013,7 +2013,7 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2032,7 +2032,7 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2051,7 +2051,7 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2070,7 +2070,7 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 449.33...449.83
+               Real cost: 554.62...579.79
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2089,7 +2089,7 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 449.33...449.83
+               Real cost: 554.62...579.79
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2108,7 +2108,7 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 449.33...449.83
+               Real cost: 552.69...577.41
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2127,7 +2127,7 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 449.33...449.83
+               Real cost: 552.69...577.41
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2146,7 +2146,7 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2165,7 +2165,7 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2184,7 +2184,7 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2203,7 +2203,7 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2222,7 +2222,7 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 449.33...449.83
+               Real cost: 554.62...579.79
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2241,7 +2241,7 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 449.33...449.83
+               Real cost: 554.62...579.79
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2260,7 +2260,7 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 449.33...449.83
+               Real cost: 552.69...577.41
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2279,7 +2279,7 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 449.33...449.83
+               Real cost: 552.69...577.41
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2298,7 +2298,7 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2317,7 +2317,7 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2336,7 +2336,7 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2355,7 +2355,7 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2374,7 +2374,7 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 449.33...449.83
+               Real cost: 554.62...579.79
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2393,7 +2393,7 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 449.33...449.83
+               Real cost: 554.62...579.79
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2412,7 +2412,7 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 449.33...449.83
+               Real cost: 552.69...577.41
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2431,7 +2431,7 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 449.33...449.83
+               Real cost: 552.69...577.41
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2450,7 +2450,7 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2469,7 +2469,7 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2488,7 +2488,7 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2507,7 +2507,7 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2526,7 +2526,7 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 449.33...449.83
+               Real cost: 554.62...579.79
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2545,7 +2545,7 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 449.33...449.83
+               Real cost: 554.62...579.79
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2564,7 +2564,7 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 449.33...449.83
+               Real cost: 552.69...577.41
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2583,7 +2583,7 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 449.33...449.83
+               Real cost: 552.69...577.41
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2602,7 +2602,7 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2621,7 +2621,7 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2640,7 +2640,7 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2659,7 +2659,7 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2678,7 +2678,7 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 449.33...449.83
+               Real cost: 554.62...579.79
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2697,7 +2697,7 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 449.33...449.83
+               Real cost: 554.62...579.79
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2716,7 +2716,7 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 449.33...449.83
+               Real cost: 552.69...577.41
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2735,7 +2735,7 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 449.33...449.83
+               Real cost: 552.69...577.41
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2754,7 +2754,7 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2773,7 +2773,7 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2792,7 +2792,7 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2811,7 +2811,7 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2830,7 +2830,7 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 449.33...449.83
+               Real cost: 554.62...579.79
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2849,7 +2849,7 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 449.33...449.83
+               Real cost: 554.62...579.79
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2868,7 +2868,7 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 449.33...449.83
+               Real cost: 552.69...577.41
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2887,7 +2887,7 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 449.33...449.83
+               Real cost: 552.69...577.41
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2907,7 +2907,7 @@ explain (verbose, costs off, timing off) select row_number() over () as rowid, s
          Group Key: strom_test.smlint_x
          ->  Custom Scan (GpuSort)
                Output: smlint_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2926,7 +2926,7 @@ explain (verbose, costs off, timing off) select row_number() over () as rowid, s
          Group Key: strom_test.smlint_x
          ->  Custom Scan (GpuSort)
                Output: smlint_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2945,7 +2945,7 @@ explain (verbose, costs off, timing off) select row_number() over () as rowid, s
          Group Key: strom_test.smlint_x
          ->  Custom Scan (GpuSort)
                Output: smlint_x
-               Real cost: 449.33...449.83
+               Real cost: 554.62...579.79
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2964,7 +2964,7 @@ explain (verbose, costs off, timing off) select row_number() over () as rowid, s
          Group Key: strom_test.smlint_x
          ->  Custom Scan (GpuSort)
                Output: smlint_x
-               Real cost: 449.33...449.83
+               Real cost: 552.69...577.41
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2986,7 +2986,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.integer_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.integer_x
-                     Real cost: 449.33...449.83
+                     Real cost: 554.28...579.37
                      Sort Key: strom_test.integer_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3008,7 +3008,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.integer_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.integer_x
-                     Real cost: 449.33...449.83
+                     Real cost: 553.95...578.96
                      Sort Key: strom_test.integer_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3030,7 +3030,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.integer_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.integer_x
-                     Real cost: 449.33...449.83
+                     Real cost: 554.62...579.79
                      Sort Key: strom_test.integer_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3049,7 +3049,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
          Group Key: strom_test.integer_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 449.33...449.83
+               Real cost: 552.69...577.41
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3071,7 +3071,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.bigint_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.bigint_x
-                     Real cost: 449.33...449.83
+                     Real cost: 554.28...579.37
                      Sort Key: strom_test.bigint_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3093,7 +3093,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.bigint_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.bigint_x
-                     Real cost: 449.33...449.83
+                     Real cost: 553.95...578.96
                      Sort Key: strom_test.bigint_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3115,7 +3115,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.bigint_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.bigint_x
-                     Real cost: 449.33...449.83
+                     Real cost: 554.62...579.79
                      Sort Key: strom_test.bigint_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3134,7 +3134,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
          Group Key: strom_test.bigint_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 449.33...449.83
+               Real cost: 552.69...577.41
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3156,7 +3156,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.real_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.real_x
-                     Real cost: 449.33...449.83
+                     Real cost: 554.28...579.37
                      Sort Key: strom_test.real_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3178,7 +3178,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.real_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.real_x
-                     Real cost: 449.33...449.83
+                     Real cost: 553.95...578.96
                      Sort Key: strom_test.real_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3200,7 +3200,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.real_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.real_x
-                     Real cost: 449.33...449.83
+                     Real cost: 554.62...579.79
                      Sort Key: strom_test.real_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3219,7 +3219,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
          Group Key: strom_test.real_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 449.33...449.83
+               Real cost: 552.69...577.41
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3241,7 +3241,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.float_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.float_x
-                     Real cost: 449.33...449.83
+                     Real cost: 554.28...579.37
                      Sort Key: strom_test.float_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3263,7 +3263,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.float_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.float_x
-                     Real cost: 449.33...449.83
+                     Real cost: 553.95...578.96
                      Sort Key: strom_test.float_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3285,7 +3285,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.float_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.float_x
-                     Real cost: 449.33...449.83
+                     Real cost: 554.62...579.79
                      Sort Key: strom_test.float_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3304,7 +3304,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
          Group Key: strom_test.float_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 449.33...449.83
+               Real cost: 552.69...577.41
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3326,7 +3326,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.nume_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.nume_x
-                     Real cost: 449.33...449.83
+                     Real cost: 554.28...579.37
                      Sort Key: strom_test.nume_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3348,7 +3348,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.nume_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.nume_x
-                     Real cost: 449.33...449.83
+                     Real cost: 553.95...578.96
                      Sort Key: strom_test.nume_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3370,7 +3370,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.nume_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.nume_x
-                     Real cost: 449.33...449.83
+                     Real cost: 554.62...579.79
                      Sort Key: strom_test.nume_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3389,7 +3389,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
          Group Key: strom_test.nume_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 449.33...449.83
+               Real cost: 552.69...577.41
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3402,60 +3402,62 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
 set enable_hashjoin to off;
 set pg_strom.enable_gpuhashjoin to off;
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by t1.smlint_x desc) as rowid,t1.smlint_x,t2.smlint_x from strom_test t1, strom_test t2 where t1.smlint_x=t2.smlint_x and t1.id%100=0) as t where t.rowid%1000=0;
-                                                                            QUERY PLAN                                                                            
-------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
  Subquery Scan on t
    Output: t.rowid, t.smlint_x, t.smlint_x_1
    Filter: ((t.rowid % '1000'::bigint) = 0)
    ->  WindowAgg
          Output: row_number() OVER (?), t1.smlint_x, t2.smlint_x
-         ->  Custom Scan (GpuSort)
+         ->  Merge Join
                Output: t1.smlint_x, t2.smlint_x
-               Real cost: 1547.24...1647.24
-               Sort Key: t1.smlint_x
-               Features: format: tuple-slot, bulkload: unsupported
-               ->  Custom Scan (GpuJoin)
-                     Output: t1.smlint_x, t2.smlint_x
-                     Pseudo Scan: t1.smlint_x::smallint, t2.smlint_x::smallint
-                     Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.smlint_x = t2.smlint_x), nrows_ratio: 1.00000000
-                     Features: format: heap-tuple, bulkload: supported
-                     ->  Custom Scan (BulkScan) on public.strom_test t2
-                           Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
-                           Features: format: tuple-slot, bulkload: supported
+               Merge Cond: (t1.smlint_x = t2.smlint_x)
+               ->  Custom Scan (GpuSort)
+                     Output: t1.smlint_x
+                     Real cost: 449.33...449.83
+                     Sort Key: t1.smlint_x
+                     Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test t1
-                           Output: t1.id, t1.key, t1.smlint_x, t1.integer_x, t1.bigint_x, t1.real_x, t1.float_x, t1.nume_x, t1.smlsrl_x, t1.serial_x, t1.bigsrl_x
+                           Output: t1.smlint_x
                            Device Filter: ((t1.id % 100) = 0)
-                           Features: format: tuple-slot, bulkload: supported
-(23 rows)
+                           Features: format: heap-tuple, bulkload: supported
+               ->  Custom Scan (GpuSort)
+                     Output: t2.smlint_x
+                     Real cost: 871.58...971.58
+                     Sort Key: t2.smlint_x
+                     Features: format: tuple-slot, bulkload: unsupported
+                     ->  Seq Scan on public.strom_test t2
+                           Output: t2.smlint_x
+(24 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by t1.smlint_x asc) as rowid,t1.smlint_x,t2.smlint_x from strom_test t1, strom_test t2 where t1.smlint_x=t2.smlint_x and t1.id%100=0) as t where t.rowid%1000=0;
-                                                                            QUERY PLAN                                                                            
-------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
  Subquery Scan on t
    Output: t.rowid, t.smlint_x, t.smlint_x_1
    Filter: ((t.rowid % '1000'::bigint) = 0)
    ->  WindowAgg
          Output: row_number() OVER (?), t1.smlint_x, t2.smlint_x
-         ->  Custom Scan (GpuSort)
+         ->  Merge Join
                Output: t1.smlint_x, t2.smlint_x
-               Real cost: 1547.24...1647.24
-               Sort Key: t1.smlint_x
-               Features: format: tuple-slot, bulkload: unsupported
-               ->  Custom Scan (GpuJoin)
-                     Output: t1.smlint_x, t2.smlint_x
-                     Pseudo Scan: t1.smlint_x::smallint, t2.smlint_x::smallint
-                     Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.smlint_x = t2.smlint_x), nrows_ratio: 1.00000000
-                     Features: format: heap-tuple, bulkload: supported
-                     ->  Custom Scan (BulkScan) on public.strom_test t2
-                           Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
-                           Features: format: tuple-slot, bulkload: supported
+               Merge Cond: (t1.smlint_x = t2.smlint_x)
+               ->  Custom Scan (GpuSort)
+                     Output: t1.smlint_x
+                     Real cost: 449.33...449.83
+                     Sort Key: t1.smlint_x
+                     Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test t1
-                           Output: t1.id, t1.key, t1.smlint_x, t1.integer_x, t1.bigint_x, t1.real_x, t1.float_x, t1.nume_x, t1.smlsrl_x, t1.serial_x, t1.bigsrl_x
+                           Output: t1.smlint_x
                            Device Filter: ((t1.id % 100) = 0)
-                           Features: format: tuple-slot, bulkload: supported
-(23 rows)
+                           Features: format: heap-tuple, bulkload: supported
+               ->  Custom Scan (GpuSort)
+                     Output: t2.smlint_x
+                     Real cost: 871.58...971.58
+                     Sort Key: t2.smlint_x
+                     Features: format: tuple-slot, bulkload: unsupported
+                     ->  Seq Scan on public.strom_test t2
+                           Output: t2.smlint_x
+(24 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by t1.integer_x desc) as rowid,t1.integer_x,t2.integer_x from strom_test t1, strom_test t2 where t1.integer_x=t2.integer_x and t1.id%100=0) as t where t.rowid%10=0;
                                                                             QUERY PLAN                                                                            
@@ -3467,14 +3469,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.integer_x, t2.integer_x
          ->  Custom Scan (GpuSort)
                Output: t1.integer_x, t2.integer_x
-               Real cost: 1547.24...1647.24
+               Real cost: 1118.29...1118.68
                Sort Key: t1.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.integer_x, t2.integer_x
                      Pseudo Scan: t1.integer_x::integer, t2.integer_x::integer
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.integer_x = t2.integer_x), nrows_ratio: 1.00000000
+                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.integer_x = t2.integer_x), nrows_ratio: 0.00392500
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -3495,14 +3497,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.integer_x, t2.integer_x
          ->  Custom Scan (GpuSort)
                Output: t1.integer_x, t2.integer_x
-               Real cost: 1547.24...1647.24
+               Real cost: 1118.29...1118.68
                Sort Key: t1.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.integer_x, t2.integer_x
                      Pseudo Scan: t1.integer_x::integer, t2.integer_x::integer
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.integer_x = t2.integer_x), nrows_ratio: 1.00000000
+                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.integer_x = t2.integer_x), nrows_ratio: 0.00392500
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -3523,14 +3525,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.bigint_x, t2.bigint_x
          ->  Custom Scan (GpuSort)
                Output: t1.bigint_x, t2.bigint_x
-               Real cost: 1547.24...1647.24
+               Real cost: 1117.71...1117.97
                Sort Key: t1.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.bigint_x, t2.bigint_x
                      Pseudo Scan: t1.bigint_x::bigint, t2.bigint_x::bigint
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.bigint_x = t2.bigint_x), nrows_ratio: 1.00000000
+                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.bigint_x = t2.bigint_x), nrows_ratio: 0.00255000
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -3551,14 +3553,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.bigint_x, t2.bigint_x
          ->  Custom Scan (GpuSort)
                Output: t1.bigint_x, t2.bigint_x
-               Real cost: 1547.24...1647.24
+               Real cost: 1117.71...1117.97
                Sort Key: t1.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.bigint_x, t2.bigint_x
                      Pseudo Scan: t1.bigint_x::bigint, t2.bigint_x::bigint
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.bigint_x = t2.bigint_x), nrows_ratio: 1.00000000
+                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.bigint_x = t2.bigint_x), nrows_ratio: 0.00255000
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -3579,14 +3581,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.real_x, t2.real_x
          ->  Custom Scan (GpuSort)
                Output: t1.real_x, t2.real_x
-               Real cost: 1547.24...1647.24
+               Real cost: 1119.83...1120.59
                Sort Key: t1.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.real_x, t2.real_x
                      Pseudo Scan: t1.real_x::real, t2.real_x::real
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.real_x = t2.real_x), nrows_ratio: 1.00000000
+                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.real_x = t2.real_x), nrows_ratio: 0.00760000
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -3607,14 +3609,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.real_x, t2.real_x
          ->  Custom Scan (GpuSort)
                Output: t1.real_x, t2.real_x
-               Real cost: 1547.24...1647.24
+               Real cost: 1119.83...1120.59
                Sort Key: t1.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.real_x, t2.real_x
                      Pseudo Scan: t1.real_x::real, t2.real_x::real
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.real_x = t2.real_x), nrows_ratio: 1.00000000
+                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.real_x = t2.real_x), nrows_ratio: 0.00760000
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -3635,14 +3637,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.float_x, t2.float_x
          ->  Custom Scan (GpuSort)
                Output: t1.float_x, t2.float_x
-               Real cost: 1547.24...1647.24
+               Real cost: 1117.71...1117.97
                Sort Key: t1.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.float_x, t2.float_x
                      Pseudo Scan: t1.float_x::double precision, t2.float_x::double precision
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.float_x = t2.float_x), nrows_ratio: 1.00000000
+                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.float_x = t2.float_x), nrows_ratio: 0.00255000
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -3663,14 +3665,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.float_x, t2.float_x
          ->  Custom Scan (GpuSort)
                Output: t1.float_x, t2.float_x
-               Real cost: 1547.24...1647.24
+               Real cost: 1117.71...1117.97
                Sort Key: t1.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.float_x, t2.float_x
                      Pseudo Scan: t1.float_x::double precision, t2.float_x::double precision
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.float_x = t2.float_x), nrows_ratio: 1.00000000
+                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.float_x = t2.float_x), nrows_ratio: 0.00255000
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -3691,14 +3693,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.nume_x, t2.nume_x
          ->  Custom Scan (GpuSort)
                Output: t1.nume_x, t2.nume_x
-               Real cost: 1547.24...1647.24
+               Real cost: 1117.71...1117.97
                Sort Key: t1.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.nume_x, t2.nume_x
                      Pseudo Scan: t1.nume_x::numeric, t2.nume_x::numeric
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.nume_x = t2.nume_x), nrows_ratio: 1.00000000
+                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.nume_x = t2.nume_x), nrows_ratio: 0.00255000
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -3719,14 +3721,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.nume_x, t2.nume_x
          ->  Custom Scan (GpuSort)
                Output: t1.nume_x, t2.nume_x
-               Real cost: 1547.24...1647.24
+               Real cost: 1117.71...1117.97
                Sort Key: t1.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.nume_x, t2.nume_x
                      Pseudo Scan: t1.nume_x::numeric, t2.nume_x::numeric
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.nume_x = t2.nume_x), nrows_ratio: 1.00000000
+                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.nume_x = t2.nume_x), nrows_ratio: 0.00255000
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -3748,7 +3750,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3767,7 +3769,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3786,7 +3788,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3805,7 +3807,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3824,7 +3826,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3843,7 +3845,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3862,7 +3864,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3881,7 +3883,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 554.28...579.37
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3900,7 +3902,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3919,7 +3921,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3938,7 +3940,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3957,7 +3959,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3976,7 +3978,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3995,7 +3997,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -4014,7 +4016,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -4033,7 +4035,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 553.95...578.96
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -4052,7 +4054,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 554.62...579.79
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -4071,7 +4073,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 554.62...579.79
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -4090,7 +4092,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 554.62...579.79
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -4109,7 +4111,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 449.33...449.83
+               Real cost: 554.62...579.79
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -4202,7 +4204,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_string_test.char_x
          ->  Custom Scan (GpuSort)
                Output: strom_string_test.char_x
-               Real cost: 145.98...146.69
+               Real cost: 153.50...156.00
                Sort Key: strom_string_test.char_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_string_test
@@ -4219,7 +4221,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_string_test.char_x
          ->  Custom Scan (GpuSort)
                Output: strom_string_test.char_x
-               Real cost: 145.98...146.69
+               Real cost: 153.50...156.00
                Sort Key: strom_string_test.char_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_string_test
@@ -4236,7 +4238,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_string_test.id, strom_string_test.nchar_x
          ->  Custom Scan (GpuSort)
                Output: strom_string_test.nchar_x, strom_string_test.id
-               Real cost: 145.98...146.69
+               Real cost: 153.50...156.00
                Sort Key: strom_string_test.nchar_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_string_test
@@ -4253,7 +4255,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_string_test.id, strom_string_test.nchar_x
          ->  Custom Scan (GpuSort)
                Output: strom_string_test.nchar_x, strom_string_test.id
-               Real cost: 145.98...146.69
+               Real cost: 153.50...156.00
                Sort Key: strom_string_test.nchar_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_string_test
@@ -4270,7 +4272,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_string_test.vchar_x
          ->  Custom Scan (GpuSort)
                Output: strom_string_test.vchar_x
-               Real cost: 145.98...146.69
+               Real cost: 153.50...156.00
                Sort Key: strom_string_test.vchar_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_string_test
@@ -4287,7 +4289,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_string_test.vchar_x
          ->  Custom Scan (GpuSort)
                Output: strom_string_test.vchar_x
-               Real cost: 145.98...146.69
+               Real cost: 153.50...156.00
                Sort Key: strom_string_test.vchar_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_string_test
