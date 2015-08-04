@@ -1,6 +1,7 @@
 --#
 --#       Gpu PreAggregate TestCases with RECHECK
 --#
+set pg_strom.gpu_setup_cost=0;
 set pg_strom.debug_force_gpupreagg to on;
 set pg_strom.enable_gpusort to off;
 set client_min_messages to notice;
@@ -51,97 +52,22 @@ select sum(1E-1000);
 
 -- division by zero with GpuPreAggregate
 prepare p1 as select sum(smlint_x/(id%1000)) from strom_test;
-explain (verbose on, costs off) execute p1;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
- Aggregate
-   Output: pgstrom.sum((pgstrom.psum(((smlint_x / (id % 1000)))::bigint)))
-   ->  Custom Scan (GpuPreAgg)
-         Output: pgstrom.psum(((smlint_x / (id % 1000)))::bigint)
-         Bulkload: On (density: 100.00%)
-         Reduction: NoGroup
-         Features: format: tuple-slot, bulkload: unsupported
-         ->  Custom Scan (BulkScan) on public.strom_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-               Features: format: heap-tuple, bulkload: supported
-(10 rows)
-
 execute p1;
 ERROR:  division by zero
 deallocate p1;
 prepare p1 as select sum(integer_x/(id%1000)) from strom_test;
-explain (verbose on, costs off) execute p1;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
- Aggregate
-   Output: pgstrom.sum((pgstrom.psum(((integer_x / (id % 1000)))::bigint)))
-   ->  Custom Scan (GpuPreAgg)
-         Output: pgstrom.psum(((integer_x / (id % 1000)))::bigint)
-         Bulkload: On (density: 100.00%)
-         Reduction: NoGroup
-         Features: format: tuple-slot, bulkload: unsupported
-         ->  Custom Scan (BulkScan) on public.strom_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-               Features: format: heap-tuple, bulkload: supported
-(10 rows)
-
 execute p1;
 ERROR:  division by zero
 deallocate p1;
 prepare p1 as select sum(bigint_x/(id%1000)) from strom_test;
-explain (verbose on, costs off) execute p1;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
- Aggregate
-   Output: sum((pgstrom.psum((bigint_x / (id % 1000)))))
-   ->  Custom Scan (GpuPreAgg)
-         Output: pgstrom.psum((bigint_x / (id % 1000)))
-         Bulkload: On (density: 100.00%)
-         Reduction: NoGroup
-         Features: format: tuple-slot, bulkload: unsupported
-         ->  Custom Scan (BulkScan) on public.strom_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-               Features: format: heap-tuple, bulkload: supported
-(10 rows)
-
 execute p1;
 ERROR:  division by zero
 deallocate p1;
 prepare p1 as select sum(real_x/(id%1000)) from strom_test;
-explain (verbose on, costs off) execute p1;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
- Aggregate
-   Output: sum((pgstrom.psum((real_x / ((id % 1000))::double precision))))
-   ->  Custom Scan (GpuPreAgg)
-         Output: pgstrom.psum((real_x / ((id % 1000))::double precision))
-         Bulkload: On (density: 100.00%)
-         Reduction: NoGroup
-         Features: format: tuple-slot, bulkload: unsupported
-         ->  Custom Scan (BulkScan) on public.strom_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-               Features: format: heap-tuple, bulkload: supported
-(10 rows)
-
 execute p1;
 ERROR:  division by zero
 deallocate p1;
 prepare p1 as select sum(float_x/(id%1000)) from strom_test;
-explain (verbose on, costs off) execute p1;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
- Aggregate
-   Output: sum((pgstrom.psum((float_x / ((id % 1000))::double precision))))
-   ->  Custom Scan (GpuPreAgg)
-         Output: pgstrom.psum((float_x / ((id % 1000))::double precision))
-         Bulkload: On (density: 100.00%)
-         Reduction: NoGroup
-         Features: format: tuple-slot, bulkload: unsupported
-         ->  Custom Scan (BulkScan) on public.strom_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-               Features: format: heap-tuple, bulkload: supported
-(10 rows)
-
 execute p1;
 ERROR:  division by zero
 deallocate p1;

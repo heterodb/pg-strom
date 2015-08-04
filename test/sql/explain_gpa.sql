@@ -2,11 +2,14 @@
 --#       Gpu PreAggregate Explain TestCases
 --#
 
--- explain normal case
+-- global configuration
+set pg_strom.gpu_setup_cost to 0;
+set pg_strom.debug_force_gpupreagg to on;
+set extra_float_digits to -3;
 set pg_strom.enable_gpusort to off;
 set client_min_messages to warning;
-set extra_float_digits to -3;
-set pg_strom.debug_force_gpupreagg to on;
+
+-- explain normal case
 set pg_strom.enabled=off;
 explain (verbose, costs off, timing off) select key,avg(smlint_x)            from strom_test group by key order by key;
 explain (verbose, costs off, timing off) select key,count(smlint_x)          from strom_test group by key order by key;
@@ -134,6 +137,7 @@ explain (verbose, costs off, timing off) select key,var_samp(bigsrl_x)       fro
 explain (verbose, costs off, timing off) select key,corr(bigsrl_x,bigsrl_x) from strom_test group by key order by key;
 explain (verbose, costs off, timing off) select key,covar_pop(bigsrl_x,bigsrl_x) from strom_test group by key order by key;
 explain (verbose, costs off, timing off) select key,covar_samp(bigsrl_x,bigsrl_x) from strom_test group by key order by key;
+
 set pg_strom.enabled=on;
 explain (verbose, costs off, timing off) select key,avg(smlint_x)            from strom_test group by key order by key;
 explain (verbose, costs off, timing off) select key,count(smlint_x)          from strom_test group by key order by key;
@@ -263,10 +267,6 @@ explain (verbose, costs off, timing off) select key,covar_pop(bigsrl_x,bigsrl_x)
 explain (verbose, costs off, timing off) select key,covar_samp(bigsrl_x,bigsrl_x) from strom_test group by key order by key;
 
 --explain aggregate function for statistic query case.
-set pg_strom.enable_gpusort to off;
-set client_min_messages to warning;
-set extra_float_digits to -3;
-set pg_strom.debug_force_gpupreagg to on;
 set pg_strom.enabled=off;
 explain (verbose, costs off, timing off) select key,corr(smlint_x,smlint_z) from strom_mix group by key order by key;
 explain (verbose, costs off, timing off) select key,corr(smlint_y,smlint_z) from strom_mix group by key order by key;
@@ -322,6 +322,7 @@ explain (verbose, costs off, timing off) select key,covar_pop(bigsrl_x,bigsrl_z)
 explain (verbose, costs off, timing off) select key,covar_pop(bigsrl_y,bigsrl_z) from strom_mix group by key order by key;
 explain (verbose, costs off, timing off) select key,covar_samp(bigsrl_x,bigsrl_z) from strom_mix group by key order by key;
 explain (verbose, costs off, timing off) select key,covar_samp(bigsrl_y,bigsrl_z) from strom_mix group by key order by key;
+
 set pg_strom.enabled=on;
 explain (verbose, costs off, timing off) select key,corr(smlint_x,smlint_z) from strom_mix group by key order by key;
 explain (verbose, costs off, timing off) select key,corr(smlint_y,smlint_z) from strom_mix group by key order by key;
@@ -380,11 +381,7 @@ explain (verbose, costs off, timing off) select key,covar_samp(bigsrl_y,bigsrl_z
 
 
 -- explain zero query case.
-set pg_strom.enable_gpusort to off;
-set extra_float_digits to -3;
-set pg_strom.debug_force_gpupreagg to on;
 set pg_strom.enabled=off;
-
 explain (verbose, costs off, timing off) select avg(smlint_x)            from strom_zero_test ;
 explain (verbose, costs off, timing off) select count(smlint_x)          from strom_zero_test ;
 explain (verbose, costs off, timing off) select max(smlint_x)            from strom_zero_test ;
@@ -511,6 +508,7 @@ explain (verbose, costs off, timing off) select var_samp(bigsrl_x)       from st
 explain (verbose, costs off, timing off) select corr(bigsrl_x,bigsrl_x) from strom_zero_test ;
 explain (verbose, costs off, timing off) select covar_pop(bigsrl_x,bigsrl_x) from strom_zero_test ;
 explain (verbose, costs off, timing off) select covar_samp(bigsrl_x,bigsrl_x) from strom_zero_test ;
+
 set pg_strom.enabled=on;
 explain (verbose, costs off, timing off) select avg(smlint_x)            from strom_zero_test ;
 explain (verbose, costs off, timing off) select count(smlint_x)          from strom_zero_test ;
@@ -638,3 +636,19 @@ explain (verbose, costs off, timing off) select var_samp(bigsrl_x)       from st
 explain (verbose, costs off, timing off) select corr(bigsrl_x,bigsrl_x) from strom_zero_test ;
 explain (verbose, costs off, timing off) select covar_pop(bigsrl_x,bigsrl_x) from strom_zero_test ;
 explain (verbose, costs off, timing off) select covar_samp(bigsrl_x,bigsrl_x) from strom_zero_test ;
+
+
+-- division by zero with GpuPreAggregate
+set pg_strom.enabled=off;
+explain (verbose on, costs off) select sum(smlint_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) select sum(integer_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) select sum(bigint_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) select sum(real_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) select sum(float_x/(id%1000)) from strom_test;
+
+set pg_strom.enabled=on;
+explain (verbose on, costs off) select sum(smlint_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) select sum(integer_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) select sum(bigint_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) select sum(real_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) select sum(float_x/(id%1000)) from strom_test;

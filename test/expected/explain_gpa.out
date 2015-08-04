@@ -1,11 +1,13 @@
 --#
 --#       Gpu PreAggregate Explain TestCases
 --#
--- explain normal case
+-- global configuration
+set pg_strom.gpu_setup_cost to 0;
+set pg_strom.debug_force_gpupreagg to on;
+set extra_float_digits to -3;
 set pg_strom.enable_gpusort to off;
 set client_min_messages to warning;
-set extra_float_digits to -3;
-set pg_strom.debug_force_gpupreagg to on;
+-- explain normal case
 set pg_strom.enabled=off;
 explain (verbose, costs off, timing off) select key,avg(smlint_x)            from strom_test group by key order by key;
                                                      QUERY PLAN                                                      
@@ -3825,10 +3827,6 @@ explain (verbose, costs off, timing off) select key,covar_samp(bigsrl_x,bigsrl_x
 (14 rows)
 
 --explain aggregate function for statistic query case.
-set pg_strom.enable_gpusort to off;
-set client_min_messages to warning;
-set extra_float_digits to -3;
-set pg_strom.debug_force_gpupreagg to on;
 set pg_strom.enabled=off;
 explain (verbose, costs off, timing off) select key,corr(smlint_x,smlint_z) from strom_mix group by key order by key;
                                                                                                                                            QUERY PLAN                                                                                                                                            
@@ -5560,9 +5558,6 @@ explain (verbose, costs off, timing off) select key,covar_samp(bigsrl_y,bigsrl_z
 (14 rows)
 
 -- explain zero query case.
-set pg_strom.enable_gpusort to off;
-set extra_float_digits to -3;
-set pg_strom.debug_force_gpupreagg to on;
 set pg_strom.enabled=off;
 explain (verbose, costs off, timing off) select avg(smlint_x)            from strom_zero_test ;
                                                   QUERY PLAN                                                   
@@ -8369,6 +8364,129 @@ explain (verbose, costs off, timing off) select covar_samp(bigsrl_x,bigsrl_x) fr
          Reduction: NoGroup
          Features: format: tuple-slot, bulkload: unsupported
          ->  Custom Scan (BulkScan) on public.strom_zero_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+               Features: format: heap-tuple, bulkload: supported
+(10 rows)
+
+-- division by zero with GpuPreAggregate
+set pg_strom.enabled=off;
+explain (verbose on, costs off) select sum(smlint_x/(id%1000)) from strom_test;
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: sum((smlint_x / (id % 1000)))
+   ->  Seq Scan on public.strom_test
+         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(4 rows)
+
+explain (verbose on, costs off) select sum(integer_x/(id%1000)) from strom_test;
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: sum((integer_x / (id % 1000)))
+   ->  Seq Scan on public.strom_test
+         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(4 rows)
+
+explain (verbose on, costs off) select sum(bigint_x/(id%1000)) from strom_test;
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: sum((bigint_x / (id % 1000)))
+   ->  Seq Scan on public.strom_test
+         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(4 rows)
+
+explain (verbose on, costs off) select sum(real_x/(id%1000)) from strom_test;
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: sum((real_x / ((id % 1000))::double precision))
+   ->  Seq Scan on public.strom_test
+         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(4 rows)
+
+explain (verbose on, costs off) select sum(float_x/(id%1000)) from strom_test;
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: sum((float_x / ((id % 1000))::double precision))
+   ->  Seq Scan on public.strom_test
+         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(4 rows)
+
+set pg_strom.enabled=on;
+explain (verbose on, costs off) select sum(smlint_x/(id%1000)) from strom_test;
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: pgstrom.sum((pgstrom.psum(((smlint_x / (id % 1000)))::bigint)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: pgstrom.psum(((smlint_x / (id % 1000)))::bigint)
+         Bulkload: On (density: 100.00%)
+         Reduction: NoGroup
+         Features: format: tuple-slot, bulkload: unsupported
+         ->  Custom Scan (BulkScan) on public.strom_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+               Features: format: heap-tuple, bulkload: supported
+(10 rows)
+
+explain (verbose on, costs off) select sum(integer_x/(id%1000)) from strom_test;
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: pgstrom.sum((pgstrom.psum(((integer_x / (id % 1000)))::bigint)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: pgstrom.psum(((integer_x / (id % 1000)))::bigint)
+         Bulkload: On (density: 100.00%)
+         Reduction: NoGroup
+         Features: format: tuple-slot, bulkload: unsupported
+         ->  Custom Scan (BulkScan) on public.strom_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+               Features: format: heap-tuple, bulkload: supported
+(10 rows)
+
+explain (verbose on, costs off) select sum(bigint_x/(id%1000)) from strom_test;
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: sum((pgstrom.psum((bigint_x / (id % 1000)))))
+   ->  Custom Scan (GpuPreAgg)
+         Output: pgstrom.psum((bigint_x / (id % 1000)))
+         Bulkload: On (density: 100.00%)
+         Reduction: NoGroup
+         Features: format: tuple-slot, bulkload: unsupported
+         ->  Custom Scan (BulkScan) on public.strom_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+               Features: format: heap-tuple, bulkload: supported
+(10 rows)
+
+explain (verbose on, costs off) select sum(real_x/(id%1000)) from strom_test;
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: sum((pgstrom.psum((real_x / ((id % 1000))::double precision))))
+   ->  Custom Scan (GpuPreAgg)
+         Output: pgstrom.psum((real_x / ((id % 1000))::double precision))
+         Bulkload: On (density: 100.00%)
+         Reduction: NoGroup
+         Features: format: tuple-slot, bulkload: unsupported
+         ->  Custom Scan (BulkScan) on public.strom_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+               Features: format: heap-tuple, bulkload: supported
+(10 rows)
+
+explain (verbose on, costs off) select sum(float_x/(id%1000)) from strom_test;
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: sum((pgstrom.psum((float_x / ((id % 1000))::double precision))))
+   ->  Custom Scan (GpuPreAgg)
+         Output: pgstrom.psum((float_x / ((id % 1000))::double precision))
+         Bulkload: On (density: 100.00%)
+         Reduction: NoGroup
+         Features: format: tuple-slot, bulkload: unsupported
+         ->  Custom Scan (BulkScan) on public.strom_test
                Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
                Features: format: heap-tuple, bulkload: supported
 (10 rows)
