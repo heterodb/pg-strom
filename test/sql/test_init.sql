@@ -284,3 +284,6 @@ INSERT INTO strom_string_test SELECT
 			      -- ,rpad(md5(random()::text),1000,md5(random()::text))
 			      -- ,rpad(md5(random()::text),5000,md5(random()::text))
 			      ;
+
+--# absolutely needed!
+ANALYZE;
