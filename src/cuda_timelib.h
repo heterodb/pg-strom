@@ -19,6 +19,7 @@
 #define CUDA_TIMELIB_H
 
 #ifdef __CUDACC__
+
 /* definitions copied from date.h */
 typedef cl_int		DateADT;
 typedef cl_long		TimeADT;
@@ -29,6 +30,8 @@ typedef struct
 } TimeTzADT;
 typedef cl_long		TimeOffset;
 
+#define MAX_TIME_PRECISION	6
+
 #define DATEVAL_NOBEGIN		((cl_int)(-0x7fffffff - 1))
 #define DATEVAL_NOEND		((cl_int)  0x7fffffff)
 
@@ -37,7 +40,6 @@ typedef cl_long		TimeOffset;
 #define DATE_NOEND(j)		((j) = DATEVAL_NOEND)
 #define DATE_IS_NOEND(j)	((j) == DATEVAL_NOEND)
 #define DATE_NOT_FINITE(j)	(DATE_IS_NOBEGIN(j) || DATE_IS_NOEND(j))
-
 /* definitions copied from timestamp.h */
 typedef cl_long	Timestamp;
 typedef cl_long	TimestampTz;
@@ -143,12 +145,23 @@ typedef struct
 #define UNIX_EPOCH_JDATE		2440588	/* == date2j(1970, 1, 1) */
 #define POSTGRES_EPOCH_JDATE	2451545	/* == date2j(2000, 1, 1) */
 
+#ifndef SAMESIGN
+#define SAMESIGN(a,b)	(((a) < 0) == ((b) < 0))
+#endif
+
 /* definition copied from datetime.h */
 #define TMODULO(t,q,u) \
 	do {			   \
 		(q) = ((t) / (u));			  \
 		if ((q) != 0) (t) -= ((q) * (u));		\
 	} while(0)
+
+/* definition copied from datetime.c */
+static const int day_tab[2][13] =
+{
+    {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31, 0},
+    {31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31, 0}
+};
 
 /* definition copied from pgtime.h */
 static const int mon_lengths[2][MONSPERYEAR] = {
@@ -278,6 +291,12 @@ dt2time(Timestamp jd, cl_int *hour, cl_int *min, cl_int *sec, cl_int *fsec)
 	*fsec = time - (*sec * USECS_PER_SEC);
 }
 
+STATIC_INLINE(Timestamp)
+dt2local(Timestamp dt, int tz)
+{
+    return dt -= (tz * USECS_PER_SEC);
+}
+
 STATIC_INLINE(TimeOffset)
 time2t(const int hour, const int min, const int sec, const fsec_t fsec)
 {
@@ -285,10 +304,28 @@ time2t(const int hour, const int min, const int sec, const fsec_t fsec)
 			USECS_PER_SEC) + fsec;
 }
 
-STATIC_INLINE(Timestamp)
-dt2local(Timestamp dt, int tz)
+STATIC_INLINE(int)
+time2tm(TimeADT time, struct pg_tm *tm, fsec_t *fsec)
 {
-    return dt -= (tz * USECS_PER_SEC);
+    tm->tm_hour = time / USECS_PER_HOUR;
+    time -= tm->tm_hour * USECS_PER_HOUR;
+    tm->tm_min = time / USECS_PER_MINUTE;
+    time -= tm->tm_min * USECS_PER_MINUTE;
+    tm->tm_sec = time / USECS_PER_SEC;
+    time -= tm->tm_sec * USECS_PER_SEC;
+    *fsec = time;
+
+	return 0;
+}
+
+STATIC_INLINE(int)
+tm2timetz(struct pg_tm * tm, fsec_t fsec, int tz, TimeTzADT *result)
+{
+    result->time = ((((tm->tm_hour * MINS_PER_HOUR + tm->tm_min) 
+					  * SECS_PER_MINUTE) + tm->tm_sec) * USECS_PER_SEC) + fsec;
+    result->zone = tz;
+
+	return 0;
 }
 
 STATIC_INLINE(int)
@@ -1252,6 +1289,109 @@ timestamp2timestamptz(cl_int *errcode, pg_timestamp_t arg)
 	return result;
 }
 
+/*
+ *  GetCurrentTransactionStartTimestamp
+ */
+STATIC_INLINE(TimestampTz)
+GetCurrentTransactionStartTimestamp(void)
+{
+    return xactStartTimestamp;
+}
+
+/*
+ * GetCurrentDateTime()
+ *
+ * Get the transaction start time ("now()") broken down as a struct pg_tm.
+ */
+STATIC_INLINE(void)
+GetCurrentDateTime(struct pg_tm * tm)
+{
+	int		tz;
+	fsec_t	fsec;
+
+	timestamp2tm(GetCurrentTransactionStartTimestamp(), &tz, tm, &fsec, NULL);
+    /* Note: don't pass NULL tzp to timestamp2tm; affects behavior */
+}
+
+#ifdef NOT_USED
+/* AdjustTimeForTypmod()
+ * Force the precision of the time value to a specified value.
+ * Uses *exactly* the same code as in AdjustTimestampForTypemod()
+ * but we make a separate copy because those types do not
+ * have a fundamental tie together but rather a coincidence of
+ * implementation. - thomas
+ */
+static const cl_long TimeScales[MAX_TIME_PRECISION + 1] =
+{
+	INT64CONST(1000000),
+	INT64CONST(100000),
+	INT64CONST(10000),
+	INT64CONST(1000),
+	INT64CONST(100),
+	INT64CONST(10),
+	INT64CONST(1)
+};
+
+static const cl_long TimeOffsets[MAX_TIME_PRECISION + 1] =
+{
+	INT64CONST(500000),
+	INT64CONST(50000),
+	INT64CONST(5000),
+	INT64CONST(500),
+	INT64CONST(50),
+	INT64CONST(5),
+	INT64CONST(0)
+};
+
+STATIC_INLINE(void)
+AdjustTimeForTypmod(TimeADT *time, cl_int typmod)
+{
+	if (typmod >= 0 && typmod <= MAX_TIME_PRECISION)
+	{
+		/*
+		 * Note: this round-to-nearest code is not completely consistent about
+		 * rounding values that are exactly halfway between integral values.
+		 * On most platforms, rint() will implement round-to-nearest-even, but
+		 * the integer code always rounds up (away from zero).  Is it worth
+		 * trying to be consistent?
+		 */
+		if (*time >= 0LL)
+			*time = ((*time + TimeOffsets[typmod]) / TimeScales[typmod]) *
+				TimeScales[typmod];
+		else
+			*time = -((((-*time) + TimeOffsets[typmod]) / TimeScales[typmod]) *
+					  TimeScales[typmod]);
+	}
+}
+#endif
+
+STATIC_INLINE(Interval)
+interval_justify_hours(Interval span)
+{
+	Interval	result;
+	TimeOffset	wholeday;
+
+	result.month = span.month;
+	result.day	 = span.day;
+	result.time	 = span.time;
+
+	TMODULO(result.time, wholeday, USECS_PER_DAY);
+	result.day += wholeday;	/* could overflow... */
+
+	if (result.day > 0 && result.time < 0)
+	{
+		result.time += USECS_PER_DAY;
+		result.day--;
+	}
+	else if (result.day < 0 && result.time > 0)
+	{
+		result.time -= USECS_PER_DAY;
+		result.day++;
+	}
+
+	return result;
+}
+
 /* ---------------------------------------------------------------
  *
  * Type cast functions
@@ -1327,13 +1467,20 @@ pgfn_timestamptz_date(cl_int *errcode, pg_timestamptz_t arg1)
 	return result;
 }
 
-#ifdef NOT_USED
 STATIC_FUNCTION(pg_time_t)
-timetz_time(cl_int *errcode, pg_timetz_t arg1)
+pgfn_timetz_time(cl_int *errcode, pg_timetz_t arg1)
 {
+	pg_time_t result;
 
+	if (arg1.isnull) 
+		result.isnull = true;
+	else {
+		result.isnull = false;
+		result.value = arg1.value.time;
+	}
+
+	return result;
 }
-#endif
 
 STATIC_FUNCTION(pg_time_t)
 pgfn_timestamp_time(cl_int *errcode, pg_timestamp_t arg1)
@@ -1392,18 +1539,75 @@ pgfn_timestamptz_time(cl_int *errcode, pg_timestamptz_t arg1)
 	return result;
 }
 
-#ifdef NOT_USED
 STATIC_FUNCTION(pg_timetz_t)
 pgfn_time_timetz(cl_int *errcode, pg_time_t arg1)
-{}
+{
+	pg_timetz_t		result;
+    struct pg_tm	tm;
+    fsec_t			fsec;
+    int				tz;
+
+
+	if (arg1.isnull)
+		result.isnull = true;
+	else
+	{
+		GetCurrentDateTime(&tm);
+		time2tm(arg1.value, &tm, &fsec);
+		tz = DetermineTimeZoneOffset(&tm, &session_timezone_state);
+
+		result.isnull     = false;
+		result.value.time = arg1.value;
+		result.value.zone = tz;
+	}
+
+	return result;
+}
 
 STATIC_FUNCTION(pg_timetz_t)
 pgfn_timestamptz_timetz(cl_int *errcode, pg_timestamptz_t arg1)
-{}
+{
+	pg_timetz_t		result;
+	struct pg_tm	tm;
+	int				tz;
+	fsec_t			fsec;
 
+
+	if (arg1.isnull)
+		result.isnull = true;
+	else if (TIMESTAMP_NOT_FINITE(arg1.value))
+		result.isnull = true;
+	else if (timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL) != 0)
+	{
+		// STROM_SET_ERROR(errcode, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
+		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		result.isnull = true;
+	}
+	else
+		tm2timetz(&tm, fsec, tz, &(result.value));
+
+	return result;
+}
+
+#ifdef NOT_USED
 STATIC_FUNCTION(pg_timetz_t)
 pgfn_timetz_scale(cl_int *errcode, pg_timetz_t arg1, pg_int4_t arg2)
-{}
+{
+	pg_timetz_t	result;
+
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull     = false;
+		result.value.time = arg1.value.time;
+		result.value.zone = arg1.value.zone;
+
+		AdjustTimeForTypmod(&(result.value.time), arg2.value);
+	}
+
+	return result;
+}
 #endif
 
 STATIC_FUNCTION(pg_timestamp_t)
@@ -1574,51 +1778,323 @@ pgfn_timedate_pl(cl_int *errcode, pg_time_t arg1, pg_date_t arg2)
 	return pgfn_datetime_pl(errcode, arg2, arg1);
 }
 
-#ifdef NOT_USED
 STATIC_FUNCTION(pg_interval_t)
 pgfn_time_mi_time(cl_int *errcode, pg_time_t arg1, pg_time_t arg2)
-{}
+{
+	pg_interval_t result;
+
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else 
+	{
+		result.isnull      = false;
+		result.value.month = 0;
+		result.value.day   = 0;
+		result.value.time  = arg1.value - arg2.value;
+	}
+
+	return result;
+}
 
 STATIC_FUNCTION(pg_interval_t)
 pgfn_timestamp_mi(cl_int *errcode, pg_timestamp_t arg1, pg_timestamp_t arg2)
-{}
+{
+	pg_interval_t result;
+
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else if (TIMESTAMP_NOT_FINITE(arg1.value) || 
+			 TIMESTAMP_NOT_FINITE(arg2.value))
+	{
+		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		result.isnull = true;
+	}
+	else 
+	{
+		result.isnull      = false;
+		result.value.month = 0;
+		result.value.day   = 0;
+		result.value.time  = arg1.value - arg2.value;
+
+		/*----------
+		 *	This is wrong, but removing it breaks a lot of regression tests.
+		 *	For example:
+		 *
+		 *	test=> SET timezone = 'EST5EDT';
+		 *	test=> SELECT
+		 *	test-> ('2005-10-30 13:22:00-05'::timestamptz -
+		 *	test(>	'2005-10-29 13:22:00-04'::timestamptz);
+		 *	?column?
+		 *	----------------
+		 *	 1 day 01:00:00
+		 *	 (1 row)
+		 *
+		 *	so adding that to the first timestamp gets:
+		 *
+		 *	test=> SELECT
+		 *	test-> ('2005-10-29 13:22:00-04'::timestamptz +
+		 *	test(> ('2005-10-30 13:22:00-05'::timestamptz -
+		 *	test(>  '2005-10-29 13:22:00-04'::timestamptz)) at time zone 'EST';
+		 *		timezone
+		 *	--------------------
+		 *	2005-10-30 14:22:00
+		 *	(1 row)
+		 *----------
+		 */
+		result.value = interval_justify_hours(result.value);
+	}
+
+	return result;
+}
 
 STATIC_FUNCTION(pg_timetz_t)
 pgfn_timetz_pl_interval(cl_int *errcode, pg_timetz_t arg1, pg_interval_t arg2)
-{}
+{
+    pg_timetz_t	result;
+
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value.time = arg1.value.time + arg2.value.time;
+		result.value.time -= result.value.time / USECS_PER_DAY * USECS_PER_DAY;
+		if (result.value.time < INT64CONST(0))
+			result.value.time += USECS_PER_DAY;
+
+		result.value.zone = arg1.value.zone;
+	}
+
+	return result;
+}
 
 STATIC_FUNCTION(pg_timetz_t)
 pgfn_timetz_mi_interval(cl_int *errcode, pg_timetz_t arg1, pg_interval_t arg2)
-{}
+{
+	arg2.value.time = - arg2.value.time;
+
+	return pgfn_timetz_pl_interval(errcode, arg1, arg2);
+}
 
 STATIC_FUNCTION(pg_timestamptz_t)
 pgfn_timestamptz_pl_interval(cl_int *errcode,
 							 pg_timestamptz_t arg1,
 							 pg_interval_t arg2)
-{}
+{
+	pg_timestamptz_t	result;
+
+	if (arg1.isnull || arg2.isnull)
+	{
+		result.isnull = true;
+		return result;
+	}
+
+	if (TIMESTAMP_NOT_FINITE(arg1.value))
+		result = arg1;
+	else
+	{
+		if (arg2.value.month != 0)
+		{
+			struct pg_tm tm;
+			fsec_t fsec;
+
+			if (timestamp2tm(arg1.value, NULL, &tm, &fsec, NULL) != 0)
+			{
+				// STROM_SET_ERROR(errcode, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
+				STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+				result.isnull = true;
+				return result;
+			}
+
+			tm.tm_mon += arg2.value.month;
+			if (tm.tm_mon > MONTHS_PER_YEAR)
+			{
+				tm.tm_year +=  (tm.tm_mon - 1) / MONTHS_PER_YEAR;
+				tm.tm_mon   = ((tm.tm_mon - 1) % MONTHS_PER_YEAR) + 1;
+			}
+			else if (tm.tm_mon < 1)
+			{
+				tm.tm_year += tm.tm_mon / MONTHS_PER_YEAR - 1;
+				tm.tm_mon   = tm.tm_mon % MONTHS_PER_YEAR + MONTHS_PER_YEAR;
+			}
+
+			/* adjust for end of month boundary problems... */
+			if (tm.tm_mday > day_tab[isleap(tm.tm_year)][tm.tm_mon - 1])
+				tm.tm_mday = (day_tab[isleap(tm.tm_year)][tm.tm_mon - 1]);
+
+			if (tm2timestamp(&tm, fsec, NULL, &arg1.value) != 0)
+			{
+				// STROM_SET_ERROR(errcode, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
+				STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+				result.isnull = true;
+				return result;
+			}
+		}
+
+		if (arg2.value.day != 0)
+		{
+			struct pg_tm tm;
+			fsec_t fsec;
+			int julian;
+
+			if (timestamp2tm(arg1.value, NULL, &tm, &fsec, NULL) != 0)
+			{
+				// STROM_SET_ERROR(errcode, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
+				STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+				result.isnull = true;
+				return result;
+			}
+
+			/* Add days by converting to and from julian */
+			julian = date2j(tm.tm_year, tm.tm_mon, tm.tm_mday) + arg2.value.day;
+			j2date(julian, &tm.tm_year, &tm.tm_mon, &tm.tm_mday);
+
+			if (tm2timestamp(&tm, fsec, NULL, &arg1.value) != 0)
+			{
+				// STROM_SET_ERROR(errcode, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
+				STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+				result.isnull = true;
+				return result;
+			}
+		}
+		
+		result.isnull = false;
+		result.value  = arg1.value + arg2.value.time;
+	}
+
+	return result;
+}
 
 STATIC_FUNCTION(pg_timestamptz_t)
 pgfn_timestamptz_mi_interval(cl_int *errcode,
 							 pg_timestamptz_t arg1,
 							 pg_interval_t arg2)
-{}
+{
+	arg2.value.month = - arg2.value.month;
+	arg2.value.day   = - arg2.value.day;
+	arg2.value.time  = - arg2.value.time;
+
+	return pgfn_timestamptz_pl_interval(errcode, arg1, arg2);
+}
 
 STATIC_FUNCTION(pg_interval_t)
 pgfn_interval_um(cl_int *errcode, pg_interval_t arg1)
-{}
+{
+	pg_interval_t result;
+
+	if (arg1.isnull)
+	{
+		result.isnull = true;
+		return result;
+	}
+
+	result.value.time = - arg1.value.time;
+	/* overflow check copied from int4um */
+	if (arg1.value.time != 0 && SAMESIGN(result.value.time, arg1.value.time))
+	{
+		// STROM_SET_ERROR(errcode, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
+		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		result.isnull = true;
+		return result;
+	}
+	result.value.day = - arg1.value.day;
+	if (arg1.value.day != 0 && SAMESIGN(result.value.day, arg1.value.day))
+	{
+		// STROM_SET_ERROR(errcode, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
+		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		result.isnull = true;
+		return result;
+	}
+	result.value.month = - arg1.value.month;
+	if (arg1.value.month != 0 &&
+		SAMESIGN(result.value.month, arg1.value.month))
+	{
+		// STROM_SET_ERROR(errcode, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
+		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		result.isnull = true;
+		return result;
+	}
+	result.isnull = false;
+
+	return result;
+}
 
 STATIC_FUNCTION(pg_interval_t)
 pgfn_interval_pl(cl_int *errcode, pg_interval_t arg1, pg_interval_t arg2)
-{}
+{
+	pg_interval_t result;
+
+	if (arg1.isnull || arg2.isnull)
+	{
+		result.isnull = true;
+		return result;
+	}
+	
+	result.value.month = arg1.value.month + arg2.value.month;
+	/* overflow check copied from int4pl */
+	if (SAMESIGN(arg1.value.month, arg2.value.month) &&
+		!SAMESIGN(result.value.month, arg1.value.month))
+	{
+		// STROM_SET_ERROR(errcode, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
+		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		result.isnull = true;
+		return result;
+	}
+	result.value.day = arg1.value.day + arg2.value.day;
+	if (SAMESIGN(arg1.value.day, arg2.value.day) &&
+		!SAMESIGN(result.value.day, arg1.value.day))
+	{
+		// STROM_SET_ERROR(errcode, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
+		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		result.isnull = true;
+		return result;
+	}
+	result.value.time = arg1.value.time + arg2.value.time;
+	if (SAMESIGN(arg1.value.time, arg2.value.time) &&
+		!SAMESIGN(result.value.time, arg1.value.time))
+	{
+		// STROM_SET_ERROR(errcode, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
+		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		result.isnull = true;
+		return result;
+	}
+	result.isnull = false;
+
+	return result;
+}
 
 STATIC_FUNCTION(pg_interval_t)
 pgfn_interval_mi(cl_int *errcode, pg_interval_t arg1, pg_interval_t arg2)
-{}
+{
+	arg2.value.time  = - arg2.value.time;
+	arg2.value.day   = - arg2.value.day;
+	arg2.value.month = - arg2.value.month;
 
-STATIC_FUNCTION(pg_timestamptz)
+	return pgfn_interval_pl(errcode, arg1, arg2);
+}
+
+STATIC_FUNCTION(pg_timestamptz_t)
 pgfn_datetimetz_timestamptz(cl_int *errcode, pg_date_t arg1, pg_timetz_t arg2)
-{}
-#endif
+{
+    pg_timestamptz_t	result;
+
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = true;
+
+		if (DATE_IS_NOBEGIN(arg1.value))
+			TIMESTAMP_NOBEGIN(result.value);
+		else if (DATE_IS_NOEND(arg1.value))
+			TIMESTAMP_NOEND(result.value);
+		else
+			result.value = arg1.value * USECS_PER_DAY 
+				+ arg2.value.time + arg2.value.zone * USECS_PER_SEC;
+	}
+
+	return result;
+}
 
 /*
  * Date comparison
@@ -1747,39 +2223,190 @@ pgfn_date_cmp_timestamp(cl_int *errcode,
 	return result;
 }
 
-#ifdef NOT_USED
 /*
  * Comparison between timetz
  */
-STATIC_FUNCTION(pg_bool_t)
-timetz_eq(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
-{}
+STATIC_INLINE(cl_int)
+timetz_cmp_internal(TimeTzADT arg1, TimeTzADT arg2)
+{
+	TimeOffset	t1 = arg1.time + arg1.zone * USECS_PER_SEC;
+	TimeOffset	t2 = arg2.time + arg2.zone * USECS_PER_SEC;
+
+	cl_int	result;
+
+	if (t1 > t2)
+		result = 1;
+	else if (t1 < t2)
+		result = -1;
+	/*
+	 * If same GMT time, sort by timezone; we only want to say that two
+	 * timetz's are equal if both the time and zone parts are equal.
+	 */
+	else if (arg1.zone > arg2.zone)
+		result = 1;
+	else if (arg1.zone < arg2.zone)
+		result = -1;
+	else 
+		result = 0;
+
+    return result;	
+}
+
+STATIC_INLINE(cl_bool)
+timetz_eq_internal(TimeTzADT arg1, TimeTzADT arg2)
+{
+	return (cl_bool)(timetz_cmp_internal(arg1, arg2) == 0);
+}
+
+STATIC_INLINE(cl_bool)
+timetz_ne_internal(TimeTzADT arg1, TimeTzADT arg2)
+{
+	return (cl_bool)(timetz_cmp_internal(arg1, arg2) != 0);
+}
+
+STATIC_INLINE(cl_bool)
+timetz_lt_internal(TimeTzADT arg1, TimeTzADT arg2)
+{
+	return (cl_bool)(timetz_cmp_internal(arg1, arg2) < 0);
+}
+
+STATIC_INLINE(cl_bool)
+timetz_le_internal(TimeTzADT arg1, TimeTzADT arg2)
+{
+	return (cl_bool)(timetz_cmp_internal(arg1, arg2) <= 0);
+}
+
+STATIC_INLINE(cl_bool)
+timetz_ge_internal(TimeTzADT arg1, TimeTzADT arg2)
+{
+	return (cl_bool)(timetz_cmp_internal(arg1, arg2) >= 0);
+}
+
+STATIC_INLINE(cl_bool)
+timetz_gt_internal(TimeTzADT arg1, TimeTzADT arg2)
+{
+	return (cl_bool)(timetz_cmp_internal(arg1, arg2) > 0);
+}
+
 
 STATIC_FUNCTION(pg_bool_t)
-timetz_ne(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
-{}
+pgfn_timetz_eq(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
+{
+	pg_bool_t	result;
+	
+
+	if (arg1.isnull || arg2.isnull) 
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value  = timetz_eq_internal(arg1.value, arg2.value);
+	}	
+
+	return result;
+}
 
 STATIC_FUNCTION(pg_bool_t)
-timetz_lt(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
-{}
+pgfn_timetz_ne(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
+{
+	pg_bool_t	result;
+	
+
+	if (arg1.isnull || arg2.isnull) 
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value  = timetz_ne_internal(arg1.value, arg2.value);
+	}	
+
+	return result;
+}
 
 STATIC_FUNCTION(pg_bool_t)
-timetz_le(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
-{}
+pgfn_timetz_lt(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
+{
+	pg_bool_t	result;
+	
+
+	if (arg1.isnull || arg2.isnull) 
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value  = timetz_lt_internal(arg1.value, arg2.value);
+	}	
+
+	return result;
+}
 
 STATIC_FUNCTION(pg_bool_t)
-timetz_ge(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
-{}
+pgfn_timetz_le(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
+{
+	pg_bool_t	result;
+	
+
+	if (arg1.isnull || arg2.isnull) 
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value  = timetz_le_internal(arg1.value, arg2.value);
+	}	
+
+	return result;
+}
 
 STATIC_FUNCTION(pg_bool_t)
-timetz_gt(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
-{}
+pgfn_timetz_ge(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
+{
+	pg_bool_t	result;
+	
+
+	if (arg1.isnull || arg2.isnull) 
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value  = timetz_ge_internal(arg1.value, arg2.value);
+	}	
+
+	return result;
+}
 
 STATIC_FUNCTION(pg_bool_t)
-timetz_cmp(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
-{}
+pgfn_timetz_gt(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
+{
+	pg_bool_t	result;
+	
 
-#endif
+	if (arg1.isnull || arg2.isnull) 
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value  = timetz_gt_internal(arg1.value, arg2.value);
+	}	
+
+	return result;
+}
+
+STATIC_FUNCTION(pg_int4_t)
+pgfn_timetz_cmp(cl_int *errcode, pg_timetz_t arg1, pg_timetz_t arg2)
+{
+	pg_int4_t	result;
+
+
+	if (arg1.isnull || arg2.isnull) 
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value  = timetz_cmp_internal(arg1.value, arg2.value);
+	}
+
+    return result;	
+}
 
 /*
  * Timestamp comparison
@@ -2220,12 +2847,11 @@ pgfn_timestamptz_ne_timestamp(cl_int *errcode,
 	return pgfn_timestamp_ne_timestamptz(errcode, arg2, arg1);
 }
 
-#ifdef NOT_USED
 /*
  * Comparison between pg_interval_t
  */
 STATIC_INLINE(TimeOffset)
-interval_cmp_value(pg_interval_t interval)
+interval_cmp_value(const Interval interval)
 {
 	TimeOffset	span;
 
@@ -2236,8 +2862,8 @@ interval_cmp_value(pg_interval_t interval)
 	return span;
 }
 
-STATIC_FUNCTION(cl_int)
-interval_cmp_internal(pg_interval_t arg1, pg_interval_t arg2)
+STATIC_INLINE(cl_int)
+interval_cmp_internal(Interval arg1, Interval arg2)
 {
 	TimeOffset	span1 = interval_cmp_value(arg1);
 	TimeOffset	span2 = interval_cmp_value(arg2);
@@ -2250,8 +2876,14 @@ pgfn_interval_eq(cl_int *errcode, pg_interval_t arg1, pg_interval_t arg2)
 {
 	pg_bool_t	result;
 
-	result.isnull = false;
-	result.value = (cl_bool)(interval_cmp_internal(arg1, arg2) == 0);
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value =
+			(cl_bool)(interval_cmp_internal(arg1.value, arg2.value) == 0);
+	}
 
 	return result;
 }
@@ -2261,8 +2893,14 @@ pgfn_interval_ne(cl_int *errcode, pg_interval_t arg1, pg_interval_t arg2)
 {
 	pg_bool_t	result;
 
-	result.isnull = false;
-	result.value = (cl_bool)(interval_cmp_internal(arg1, arg2) != 0);
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value =
+			(cl_bool)(interval_cmp_internal(arg1.value, arg2.value) != 0);
+	}
 
 	return result;
 }
@@ -2272,8 +2910,14 @@ pgfn_interval_lt(cl_int *errcode, pg_interval_t arg1, pg_interval_t arg2)
 {
 	pg_bool_t	result;
 
-	result.isnull = false;
-	result.value = (cl_bool)(interval_cmp_internal(arg1, arg2) < 0);
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value =
+			(cl_bool)(interval_cmp_internal(arg1.value, arg2.value) < 0);
+	}
 
 	return result;
 }
@@ -2283,8 +2927,14 @@ pgfn_interval_le(cl_int *errcode, pg_interval_t arg1, pg_interval_t arg2)
 {
 	pg_bool_t	result;
 
-	result.isnull = false;
-	result.value = (cl_bool)(interval_cmp_internal(arg1, arg2) <= 0);
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value =
+			(cl_bool)(interval_cmp_internal(arg1.value, arg2.value) <= 0);
+	}
 
 	return result;
 }
@@ -2294,8 +2944,14 @@ pgfn_interval_ge(cl_int *errcode, pg_interval_t arg1, pg_interval_t arg2)
 {
 	pg_bool_t	result;
 
-	result.isnull = false;
-	result.value = (cl_bool)(interval_cmp_internal(arg1, arg2) >= 0);
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value =
+			(cl_bool)(interval_cmp_internal(arg1.value, arg2.value) >= 0);
+	}
 
 	return result;
 }
@@ -2305,8 +2961,14 @@ pgfn_interval_gt(cl_int *errcode, pg_interval_t arg1, pg_interval_t arg2)
 {
 	pg_bool_t	result;
 
-	result.isnull = false;
-	result.value = (cl_bool)(interval_cmp_internal(arg1, arg2) > 0);
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value =
+			(cl_bool)(interval_cmp_internal(arg1.value, arg2.value) > 0);
+	}
 
 	return result;
 }
@@ -2316,12 +2978,16 @@ pgfn_interval_cmp(cl_int *errcode, pg_interval_t arg1, pg_interval_t arg2)
 {
 	pg_int4_t	result;
 
-	result.isnull = false;
-	result.value = interval_cmp_internal(arg1, arg2);
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value = interval_cmp_internal(arg1.value, arg2.value);
+	}
 
 	return result;
 }
-#endif
 
 /*
  * overlaps() SQL functions
@@ -2329,6 +2995,7 @@ pgfn_interval_cmp(cl_int *errcode, pg_interval_t arg1, pg_interval_t arg2)
  * NOTE: Even though overlaps() has more variations, inline_function()
  * preliminary break down combination with type-cast.
  */
+#if 0
 STATIC_INLINE(pg_bool_t)
 overlaps_cl_long(cl_int *errcode,
 				 cl_long ts1, cl_bool ts1_isnull,
@@ -2467,6 +3134,127 @@ overlaps_cl_long(cl_int *errcode,
 		return rc;
 	}
 }
+#endif
+
+#define OVERLAPS(type,cmp_gt_ops,cmp_lt_ops)				\
+	STATIC_INLINE(pg_bool_t)								\
+	overlaps_##type(cl_int *errcode,						\
+					type ts1, bool ts1_isnull,				\
+					type te1, bool te1_isnull,				\
+					type ts2, bool ts2_isnull,				\
+					type te4, bool te4_isnull)				\
+	{														\
+		pg_bool_t result;									\
+															\
+		if (ts1_isnull)										\
+		{													\
+			if (te1_isnull)									\
+			{												\
+				result.isnull = true;						\
+				return result;								\
+			}												\
+			ts1 = te1;										\
+			ts1_isnull = false;								\
+			te1_isnull = true;								\
+		}													\
+		else if (! te1_isnull)								\
+		{													\
+			if (cmp_gt_ops(ts1, te1)) 						\
+			{												\
+				type tmp = ts1;								\
+				ts1 = te1;									\
+				te1 = tmp;									\
+			}												\
+		}													\
+															\
+		if (ts2_isnull)										\
+		{													\
+			if (te4_isnull)									\
+			{												\
+				result.isnull = true;						\
+				return result;								\
+			}												\
+			ts2 = te4;										\
+			ts2_isnull = false;								\
+			te4_isnull = true;								\
+		}													\
+		else if (! te4_isnull)								\
+		{													\
+			if (cmp_gt_ops(ts2, te4))						\
+			{												\
+				type tmp = ts2;								\
+				ts2 = te4;									\
+				te4 = tmp;									\
+			}												\
+		}													\
+															\
+		if (cmp_gt_ops(ts1, ts2))							\
+		{													\
+			if (te4_isnull)									\
+			{												\
+				result.isnull = true;						\
+				return result;								\
+			}												\
+			if (cmp_lt_ops(ts1, te4))						\
+			{												\
+				result.isnull = false;						\
+				result.value  = true;						\
+				return result;								\
+			}												\
+			if (te1_isnull)									\
+			{												\
+				result.isnull = true;						\
+				return result;								\
+			}												\
+															\
+			result.isnull = false;							\
+			result.value  = false;							\
+			return result;									\
+		}													\
+		else												\
+		{													\
+			if (cmp_lt_ops(ts1, ts2))						\
+			{												\
+				if (te1_isnull)								\
+				{											\
+					result.isnull = true;					\
+					return result;							\
+				}											\
+				if (cmp_lt_ops(ts2, te1))					\
+				{											\
+					result.isnull = false;					\
+					result.value  = true;					\
+					return result;							\
+				}											\
+				if (te4_isnull)								\
+				{											\
+					result.isnull = true;					\
+					return result;							\
+				}											\
+				result.isnull = false;						\
+				result.value  = false;						\
+				return result;								\
+			}												\
+			else											\
+			{												\
+				if (te1_isnull || te4_isnull)				\
+				{											\
+					result.isnull = true;					\
+					return result;							\
+				}											\
+				result.isnull = false;						\
+				result.value  = true;						\
+				return result;								\
+			}												\
+		}													\
+	}
+
+#define COMPARE_GT_OPS(x,y)	((x) > (y))
+#define COMPARE_LT_OPS(x,y)	((x) < (y))
+
+OVERLAPS(cl_long,COMPARE_GT_OPS,COMPARE_LT_OPS)
+OVERLAPS(TimeTzADT,timetz_gt_internal,timetz_lt_internal)
+
 
 STATIC_FUNCTION(pg_bool_t)
 pgfn_overlaps_time(cl_int *errcode,
@@ -2480,14 +3268,17 @@ pgfn_overlaps_time(cl_int *errcode,
 						  arg4.value, arg4.isnull);
 }
 
-#ifdef NOT_USED
+STATIC_FUNCTION(pg_bool_t)
 pgfn_overlaps_timetz(cl_int *errcode,
 					 pg_timetz_t arg1, pg_timetz_t arg2,
 					 pg_timetz_t arg3, pg_timetz_t arg4)
 {
-
+	return overlaps_TimeTzADT(errcode,
+							  arg1.value, arg1.isnull,
+							  arg2.value, arg2.isnull,
+							  arg3.value, arg3.isnull,
+							  arg4.value, arg4.isnull);
 }
-#endif
 
 STATIC_FUNCTION(pg_bool_t)
 pgfn_overlaps_timestamp(cl_int *errcode,
@@ -2515,6 +3306,7 @@ pgfn_overlaps_timestamptz(cl_int *errcode,
 
 #else	/* __CUDACC__ */
 
+#include "access/xact.h"
 #include "pgtime.h"
 
 /*
@@ -2716,6 +3508,9 @@ assign_timelib_session_info(StringInfo buf)
 		buf,
 		"    },\n"
 		"};\n");
+
+	appendStringInfo(buf, "static const cl_long xactStartTimestamp = %lld;\n",
+					 (long long)GetCurrentTransactionStartTimestamp());
 
 	appendStringInfo(
 		buf,

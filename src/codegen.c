@@ -59,10 +59,10 @@ static struct {
 	/* date and time datatypes */
 	{ DATEOID,			"DateADT",		DEVFUNC_NEEDS_TIMELIB },
 	{ TIMEOID,			"TimeADT",		DEVFUNC_NEEDS_TIMELIB },
-//	{ TIMETZOID,		"TimeTzADT",	DEVFUNC_NEEDS_TIMELIB },
+	{ TIMETZOID,		"TimeTzADT",	DEVFUNC_NEEDS_TIMELIB },
 	{ TIMESTAMPOID,		"Timestamp",	DEVFUNC_NEEDS_TIMELIB },
 	{ TIMESTAMPTZOID,	"TimestampTz",	DEVFUNC_NEEDS_TIMELIB },
-//	{ INTERVALOID,		"Interval",		DEVFUNC_NEEDS_TIMELIB },
+	{ INTERVALOID,		"Interval",		DEVFUNC_NEEDS_TIMELIB },
 	/* variable length datatypes */
 	{ BPCHAROID,	"varlena",	DEVFUNC_NEEDS_TEXTLIB },
 	{ VARCHAROID,	"varlena",	DEVFUNC_NEEDS_TEXTLIB },
@@ -525,14 +525,12 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "date", 1, {TIMESTAMPOID}, "t/F:timestamp_date" },
 	{ "date", 1, {TIMESTAMPTZOID}, "t/F:timestamptz_date" },
 	{ "time", 1, {TIMEOID}, "ta/c:" },
-#ifdef NOT_USED
 	{ "time", 1, {TIMETZOID}, "t/F:timetz_time" },
-#endif
 	{ "time", 1, {TIMESTAMPOID}, "t/F:timestamp_time" },
 	{ "time", 1, {TIMESTAMPTZOID}, "t/F:timestamptz_time" },
-#ifdef NOT_USED
-	{ "timetz", 1, {TIME}, "t/F:time_timetz" },
+	{ "timetz", 1, {TIMEOID}, "t/F:time_timetz" },
 	{ "timetz", 1, {TIMESTAMPTZOID}, "t/F:timestamptz_timetz" },
+#ifdef NOT_USED
 	{ "timetz", 2, {TIMETZOID, INT4OID}, "t/F:timetz_scale" },
 #endif
 	{ "timestamp", 1, {DATEOID}, "t/F:date_timestamp" },
@@ -547,7 +545,6 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "datetime_pl", 2, {DATEOID, TIMEOID}, "t/F:datetime_pl" },
 	{ "integer_pl_date", 2, {INT4OID, DATEOID}, "t/F:integer_pl_date" },
 	{ "timedate_pl", 2, {TIMEOID, DATEOID}, "t/F:timedate_pl" },
-#ifdef NOT_USED
 	/* time - time => interval */
 	{ "time_mi_time", 2, {TIMEOID, TIMEOID}, "t/F:time_mi_time" },
 	/* timestamp - timestamp => interval */
@@ -567,9 +564,8 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "interval_pl", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_pl" },
 	{ "interval_mi", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_mi" },
 	/* date + timetz => timestamptz */
-	{ "datetimetz_pl", 2, {DATEOID, TIMETZ}, "t/F:datetimetz_timestamptz" },
-	{ "timestamptz", 2, {DATEOID, TIMETZ}, "t/F:datetimetz_timestamptz" },
-#endif
+	{ "datetimetz_pl", 2, {DATEOID, TIMETZOID}, "t/F:datetimetz_timestamptz" },
+	{ "timestamptz", 2, {DATEOID, TIMETZOID}, "t/F:datetimetz_timestamptz" },
 	/* comparison between date */
 	{ "date_eq", 2, {DATEOID, DATEOID}, "t/b:==" },
 	{ "date_ne", 2, {DATEOID, DATEOID}, "t/b:!=" },
@@ -601,7 +597,6 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "time_gt", 2, {TIMEOID, TIMEOID}, "t/b:>"  },
 	{ "time_ge", 2, {TIMEOID, TIMEOID}, "t/b:>=" },
 	{ "time_cmp", 2, {TIMEOID, TIMEOID}, "t/f:devfunc_int_comp" },
-#ifdef NOT_USED
 	/* comparison between timetz */
 	{ "timetz_eq", 2, {TIMETZOID, TIMETZOID}, "t/F:timetz_eq" },
 	{ "timetz_ne", 2, {TIMETZOID, TIMETZOID}, "t/F:timetz_ne" },
@@ -610,7 +605,6 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "timetz_ge", 2, {TIMETZOID, TIMETZOID}, "t/F:timetz_ge" },
 	{ "timetz_gt", 2, {TIMETZOID, TIMETZOID}, "t/F:timetz_gt" },
 	{ "timetz_cmp", 2, {TIMETZOID, TIMETZOID}, "t/F:timetz_cmp" },
-#endif
 	/* comparison between timestamp */
 	{ "timestamp_eq", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/b:==" },
 	{ "timestamp_ne", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/b:!=" },
@@ -701,7 +695,6 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "timestamptz_ne_timestamp", 2, {TIMESTAMPTZOID, TIMESTAMPOID},
       "t/F:timestamptz_ne_timestamp" },
 
-#ifdef NOT_USED
 	/* comparison between intervals */
 	{ "interval_eq", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_eq" },
 	{ "interval_ne", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_eq" },
@@ -710,15 +703,12 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "interval_ge", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_eq" },
 	{ "interval_gt", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_eq" },
 	{ "interval_cmp", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_cmp" },
-#endif
 
 	/* overlaps() */
 	{ "overlaps", 4, {TIMEOID, TIMEOID, TIMEOID, TIMEOID},
 	  "t/F:overlaps_time" },
-#ifdef NOT_USED
 	{ "overlaps", 4, {TIMETZOID, TIMETZOID, TIMETZOID, TIMETZOID},
 	  "t/F:overlaps_timetz" },
-#endif
 	{ "overlaps", 4, {TIMESTAMPOID, TIMESTAMPOID,
 					  TIMESTAMPOID, TIMESTAMPOID},
 	  "t/F:overlaps_timestamp" },
