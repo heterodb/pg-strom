@@ -2298,6 +2298,51 @@ errorText(int errcode)
 }
 
 /*
+ * errorTextKernel
+ *
+ * translation from kern_error to human readable representation
+ */
+const char *
+errorTextKernel(kern_error *kerror)
+{
+	static __thread char buffer[1024];
+	const char *kernel_name;
+
+#define KERN_ENTRY(KERNEL)						\
+	case StromKernel_##KERNEL: kernel_name = #KERNEL; break
+
+	switch (kerror->kernel)
+	{
+		KERN_ENTRY(gpuscan_qual);
+		KERN_ENTRY(gpujoin_preparation);
+		KERN_ENTRY(gpujoin_exec_nestloop);
+		KERN_ENTRY(gpujoin_exec_hashjoin);
+		KERN_ENTRY(gpujoin_outer_nestloop);
+		KERN_ENTRY(gpujoin_outer_hashjoin);
+		KERN_ENTRY(gpujoin_projection_row);
+		KERN_ENTRY(gpujoin_projection_slot);
+		KERN_ENTRY(gpupreagg_preparation);
+		KERN_ENTRY(gpupreagg_local_reduction);
+		KERN_ENTRY(gpupreagg_global_reduction);
+		KERN_ENTRY(gpupreagg_nogroup_reduction);
+		KERN_ENTRY(gpupreagg_fixup_varlena);
+		KERN_ENTRY(gpusort_preparation);
+		KERN_ENTRY(gpusort_bitonic_local);
+		KERN_ENTRY(gpusort_bitonic_step);
+		KERN_ENTRY(gpusort_bitonic_merge);
+		KERN_ENTRY(gpusort_fixup_datastore);
+		default:
+			kernel_name = "unknown kernel";
+			break;
+	}
+#undef KERN_ENTRY
+	snprintf(buffer, sizeof(buffer), "%s:%d %s",
+			 kernel_name, kerror->lineno,
+			 errorText(kerror->errcode));
+	return buffer;
+}
+
+/*
  * pgstrom_scoreboard_info
  *
  *
