@@ -143,7 +143,6 @@ typedef struct
  * KPARAM_0 - array of the GPUPREAGG_FIELD_IS_* flags as cl_char[] array.
  * Each item informs usage of the related field.
  */
-#define GPUPREAGG_FIELD_IS_NULL			0
 #define GPUPREAGG_FIELD_IS_GROUPKEY		1
 #define GPUPREAGG_FIELD_IS_AGGFUNC		2
 

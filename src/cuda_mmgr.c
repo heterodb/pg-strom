@@ -69,8 +69,13 @@ typedef struct
 	Size				block_size_max;		/* max block size */
 } cudaHostMemHead;
 
-
-
+void
+cudaHostMemAssert(void *pointer)
+{
+	cudaHostMemChunk   *chunk = (cudaHostMemChunk *)
+		((char *)pointer - offsetof(cudaHostMemChunk, chunk_data));
+	Assert(HOSTMEM_CHUNK_MAGIC(chunk) == HOSTMEM_CHUNK_MAGIC_CODE);
+}
 
 static bool
 cudaHostMemSplit(cudaHostMemHead *chm_head, int chm_class)

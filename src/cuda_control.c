@@ -2051,7 +2051,7 @@ check_target_cuda_device(struct target_cuda_device *dattr)
 	MemoryContextSwitchTo(oldcxt);
 out:
 	/* Log the brief CUDA device properties */
-	elog(LOG, "GPU%d %s (%d %s, %dMHz), L2 %dKB, RAM %zuMB (%dbits, %dKHz), capability %d.%d%s",
+	elog(LOG, "GPU%d %s (%d %s, %dMHz), L2 %dKB, RAM %zuMB (%dbits, %dMHz), capability %d.%d%s",
 		 dattr->dev_id,
 		 dattr->dev_name,
 		 (cores_per_mpu > 0 ? cores_per_mpu : 1) * dattr->dev_mpu_nums,
