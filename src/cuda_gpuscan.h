@@ -145,32 +145,35 @@ gpuscan_qual(kern_gpuscan *kgpuscan,	/* in/out */
 {
 	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
 	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
+	kern_context	kcxt;
 	size_t			kds_index = get_global_id();
-	cl_int			errcode = StromError_Success;
 	cl_int			rc = 0;
+
+	INIT_KERNEL_CONTEXT(gpuscan_qual,&kcxt,kparams);
 
 	if (kds_index < kds->nitems)
 	{
-		if (gpuscan_qual_eval(&errcode, kparams, kds, ktoast, kds_index))
+		if (gpuscan_qual_eval(&kcxt.e.errcode,
+							  kparams, kds, ktoast, kds_index))
 		{
-			if (errcode == StromError_Success)
+			if (kcxt.e.errcode == StromError_Success)
 				rc = 1;
-			else if (errcode == StromError_CpuReCheck)
+			else if (kcxt.e.errcode == StromError_CpuReCheck)
 			{
 				rc = -1;
-				errcode = StromError_Success;	/* row-level rechecks */
+				kcxt.e.errcode = StromError_Success;	/* CPU rechecks */
 			}
 		}
-		else if (errcode == StromError_CpuReCheck)
+		else if (kcxt.e.errcode == StromError_CpuReCheck)
 		{
 			rc = -1;
-			errcode = StromError_Success;		/* row-level rechecks */
+			kcxt.e.errcode = StromError_Success;		/* CPU rechecks */
 		}
 	}
 	/* writeback the results */
 	gpuscan_writeback_results(kresults, rc);
 	/* chunk level error, if any */
-	kern_writeback_error_status(&kresults->errcode, errcode);
+	kern_writeback_error_status(&kresults->errcode, kcxt.e.errcode);
 }
 
 #endif	/* __CUDACC__ */

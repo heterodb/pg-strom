@@ -199,6 +199,54 @@ typedef uintptr_t	hostptr_t;
 #define StromError_DataStoreOutOfRange		2002 /* out of KDS range access */
 #define StromError_SanityCheckViolation		2003 /* sanity check violation */
 
+/*
+ * Kernel functions identifier
+ */
+#define StromKernel_gpuscan_qual					0x0101
+#define StromKernel_gpujoin_preparation				0x0201
+#define StromKernel_gpujoin_exec_nestloop			0x0202
+#define StromKernel_gpujoin_exec_hashjoin			0x0203
+#define StromKernel_gpujoin_outer_nestloop			0x0204
+#define StromKernel_gpujoin_outer_hashjoin			0x0205
+#define StromKernel_gpujoin_projection_row			0x0206
+#define StromKernel_gpujoin_projection_slot			0x0207
+#define StromKernel_gpupreagg_preparation			0x0301
+#define StromKernel_gpupreagg_local_reduction		0x0302
+#define StromKernel_gpupreagg_global_reduction		0x0303
+#define StromKernel_gpupreagg_nogroup_reduction		0x0304
+#define StromKernel_gpupreagg_fixup_varlena			0x0305
+#define StromKernel_gpusort_preparation				0x0401
+#define StromKernel_gpusort_bitonic_local			0x0402
+#define StromKernel_gpusort_bitonic_step			0x0403
+#define StromKernel_gpusort_bitonic_merge			0x0404
+#define StromKernel_gpusort_fixup_datastore			0x0405
+
+typedef struct
+{
+	cl_int		errcode;	/* one of the StromError_* */
+	cl_short	kernel;		/* one of the StromKernel_* */
+	cl_short	lineno;		/* line number STROM_SET_ERROR is called */
+} kern_error;
+
+/*
+ * kern_context - a set of run-time information
+ */
+struct kern_parambuf;
+
+typedef struct
+{
+	kern_error	e;
+	struct kern_parambuf *kparams;
+} kern_context;
+
+#define INIT_KERNEL_CONTEXT(KERNEL_FUNC,kcxt,kparams)	\
+	do {												\
+		(kcxt)->e.errcode = StromError_Success;			\
+		(kcxt)->e.kernel = StromKernel_##KERNEL_FUNC;	\
+		(kcxt)->e.lineno = 0;							\
+		(kcxt)->kparams = (kparams);					\
+	} while(0)
+
 #ifdef __CUDACC__
 /*
  * It sets an error code unless no significant error code is already set.
@@ -467,7 +515,8 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
  * scan, so it may make sense if it is obvious length of kern_parambuf is
  * less than constant memory (NOTE: not implemented yet).
  */
-typedef struct {
+typedef struct kern_parambuf
+{
 	cl_uint		length;		/* total length of parambuf */
 	cl_uint		nparams;	/* number of parameters */
 	cl_uint		poffset[FLEXIBLE_ARRAY_MEMBER];	/* offset of params */
