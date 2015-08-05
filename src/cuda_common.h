@@ -1323,7 +1323,9 @@ kern_writeback_error_status(cl_int *error_status, int own_errcode)
 	 * StromError_Success.
 	 */
 	errcode_0 = error_temp[0];
-	if (get_local_xid() == 0 && get_local_yid() == 0)
+	if (get_local_xid() == 0 &&
+		get_local_yid() == 0 &&
+		errcode_0 != StromError_Success)
 		atomicCAS(error_status, StromError_Success, errcode_0);
 }
 

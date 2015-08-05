@@ -2934,23 +2934,23 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 	kresults_in->nitems = 0;
 
 	/*
-	 * Calculation of pds_dst
-	 *
-	 *
-	 *
+	 * Calculation of the pds_dst length - If we have no run-time information,
+	 * all we can do is statistic based estimation. Elsewhere, kds->nitems
+	 * will tell us maximum number of row-slot consumption last time.
+	 * If StromError_DataStoreNoSpace happen due to lack of kern_resultbuf,
+	 * previous kds->nitems may shorter than estimation. So, for safety,
+	 * we adopts the larger one.
 	 */
-	if (!pds_dst)
+	result_format = gjs->result_format;
+	result_nitems = (Size)((double) pgjoin->oitems_nums *
+						   gjs->inners[gjs->num_rels - 1].nrows_ratio *
+						   pgstrom_chunk_size_margin());
+	if (pds_dst)
 	{
-		result_format = gjs->result_format;
-		result_nitems = (Size)((double) pgjoin->oitems_nums *
-							   gjs->inners[gjs->num_rels - 1].nrows_ratio *
-							   pgstrom_chunk_size_margin());
-	}
-	else
-	{
-		result_format = pds_dst->kds->format;
-		result_nitems = (Size)((double) pds_dst->kds->nitems *
-							   pgstrom_chunk_size_margin());
+		Assert(result_format == pds_dst->kds->format);
+		result_nitems = Max(result_nitems,
+							(Size)((double) pds_dst->kds->nitems *
+								   pgstrom_chunk_size_margin()));
 	}
 
 	if (result_format == KDS_FORMAT_SLOT)
@@ -2960,9 +2960,17 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 		length = (STROMALIGN(offsetof(kern_data_store, colmeta[ncols])) +
 				  LONGALIGN((sizeof(Datum) +
 							 sizeof(char)) * ncols) * result_nitems);
-
-		/* Is length larger than limitation? */
-		if (length > pgstrom_chunk_size_limit())
+		/*
+		 * Adjustment if too short or too large
+		 */
+		if (length < pgstrom_chunk_size() / 2)
+		{
+			result_nitems = (pgstrom_chunk_size() / 2 -
+							 STROMALIGN(offsetof(kern_data_store,
+												 colmeta[ncols])))
+				/ LONGALIGN((sizeof(Datum) + sizeof(char)) * ncols);
+		}
+		else if (length > pgstrom_chunk_size_limit())
 		{
 			Size		small_nitems;
 			cl_uint		oitems_nums;
@@ -3053,8 +3061,12 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 					  STROMALIGN(sizeof(cl_uint) * result_nitems) +
 					  MAXALIGN(offsetof(kern_tupitem, htup) +
 							   result_width) * result_nitems);
-		/* Is length larger than limitation? */
-		if (new_length > pgstrom_chunk_size_limit())
+		/*
+		 * Adjustment if too large or too short
+		 */
+		if (new_length < pgstrom_chunk_size() / 2)
+			new_length = pgstrom_chunk_size() / 2;
+		else if (new_length > pgstrom_chunk_size_limit())
 		{
 			Size		small_nitems;
 			cl_uint		oitems_nums;
@@ -3570,9 +3582,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 					GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_dst->kds)));
 	pgjoin->m_kgjoin = gpuMemAlloc(&pgjoin->task, total_length);
 	if (!pgjoin->m_kgjoin)
-	{
 		goto out_of_resource;
-	}
+
 	/* kern_data_store *kds_src */
 	pgjoin->m_kds_src = pgjoin->m_kgjoin + GPUMEMALIGN(length);
 	/* kern_data_store *kds_dst */
