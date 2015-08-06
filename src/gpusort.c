@@ -393,7 +393,7 @@ cost_gpusort(PlannedStmt *pstmt, Sort *sort,
 		if (chunk_size < pgstrom_chunk_size())
 			chunk_size = pgstrom_chunk_size();
 		nrows_per_chunk = ntuples;
-		num_chunks = 1;
+		num_chunks = 1.0;
 	}
 	else
 	{
@@ -428,11 +428,12 @@ cost_gpusort(PlannedStmt *pstmt, Sort *sort,
 		gpu_comp_cost * nrows_per_chunk * LOG2(nrows_per_chunk);
 
 	/*
-	 * We'll also use CPU based merge sort, if # of chunks > 1.
+	 * We'll also use CPU based N-way merge sort, if # of chunks > 1.
+	 * It is usually expensive, so we like to avoid it as long as we can.
 	 */
-	if (num_chunks > 1)
+	if (num_chunks > 1.0)
 		startup_cost += cpu_comp_cost * nrows_per_chunk *
-			num_chunks * (LOG2(num_chunks) + 1);
+			num_chunks * (num_chunks - 1.0);
 
 	/*
 	 * Cost to communicate with upper node
