@@ -534,6 +534,12 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
  */
 typedef struct kern_parambuf
 {
+	/*
+	 * Fields of system information on execution
+	 */
+	cl_long		xactStartTimestamp;	/* timestamp when transaction start */
+
+	/* variable length parameters / constants */
 	cl_uint		length;		/* total length of parambuf */
 	cl_uint		nparams;	/* number of parameters */
 	cl_uint		poffset[FLEXIBLE_ARRAY_MEMBER];	/* offset of params */
