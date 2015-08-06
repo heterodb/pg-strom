@@ -334,6 +334,7 @@ gpusort_devmem_requirement(Size kparams_len, cl_int nattrs, Size nitems,
 static void
 cost_gpusort(PlannedStmt *pstmt, Sort *sort,
 			 Cost *p_startup_cost, Cost *p_total_cost,
+	     		 double *p_nrows, int *p_width,
 			 long *p_num_chunks, Size *p_chunk_size)
 {
 	Plan	   *outer_plan = outerPlan(sort);
@@ -443,6 +444,8 @@ cost_gpusort(PlannedStmt *pstmt, Sort *sort,
 	/* result */
 	*p_startup_cost = startup_cost;
 	*p_total_cost = startup_cost + run_cost;
+	*p_nrows = ntuples;
+	*p_width = width;
 	*p_num_chunks = num_chunks;
 	*p_chunk_size = chunk_size;
 }
@@ -778,6 +781,8 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	ListCell   *cell;
 	Cost		startup_cost;
 	Cost		total_cost;
+	double		nrows;
+	int		width;
 	long		num_chunks;
 	Size		chunk_size;
 	CustomScan *cscan;
@@ -832,6 +837,7 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	 */
 	cost_gpusort(pstmt, sort,
 				 &startup_cost, &total_cost,
+		     		 &nrows, &width,
 				 &num_chunks, &chunk_size);
 
 	elog(DEBUG1,
@@ -850,10 +856,10 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	 * Let's return the 
 	 */
 	cscan = makeNode(CustomScan);
-	cscan->scan.plan.startup_cost = sort->plan.startup_cost;
-	cscan->scan.plan.total_cost = sort->plan.total_cost;
-	cscan->scan.plan.plan_rows = sort->plan.plan_rows;
-	cscan->scan.plan.plan_width = sort->plan.plan_width;
+	cscan->scan.plan.startup_cost = startup_cost;
+	cscan->scan.plan.total_cost = total_cost;
+	cscan->scan.plan.plan_rows = nrows;
+	cscan->scan.plan.plan_width = width;
 	cscan->scan.plan.targetlist = NIL;
 	cscan->scan.scanrelid       = 0;
 	cscan->custom_scan_tlist    = NIL;
@@ -1104,26 +1110,6 @@ gpusort_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	List		   *sort_keys = NIL;
 	bool			use_prefix;
 	int				i;
-
-	/* actual cost we estimated */
-	if (es->verbose)
-	{
-		if (es->format == EXPLAIN_FORMAT_TEXT)
-		{
-			char   *temp = psprintf("%.2f...%.2f",
-									gs_info->startup_cost,
-									gs_info->total_cost);
-			ExplainPropertyText("Real cost", temp, es);
-			pfree(temp);
-		}
-		else
-		{
-			ExplainPropertyFloat("Real startup cost",
-								 gs_info->startup_cost, 3, es);
-			ExplainPropertyFloat("Real total cost",
-								 gs_info->total_cost, 3, es);
-		}
-	}
 
 	/* shows sorting keys */
 	context = set_deparse_context_planstate(es->deparse_cxt,
