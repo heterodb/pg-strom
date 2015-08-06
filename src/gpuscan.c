@@ -452,7 +452,8 @@ gpuscan_codegen_quals(PlannerInfo *root,
 	/*
 	 * make declarations of var and param references
 	 */
-	appendStringInfo(&str, "%s\n", pgstrom_codegen_func_declarations(context));
+	appendStringInfo(&str, "%s\n",
+					 pgstrom_codegen_func_declarations(context));
 	appendStringInfo(&decl, "%s%s\n",
 					 pgstrom_codegen_param_declarations(context),
 					 pgstrom_codegen_var_declarations(context));
@@ -461,8 +462,7 @@ gpuscan_codegen_quals(PlannerInfo *root,
 	appendStringInfo(
 		&str,
 		"STATIC_FUNCTION(cl_bool)\n"
-		"gpuscan_qual_eval(cl_int *errcode,\n"
-		"                  kern_parambuf *kparams,\n"
+		"gpuscan_qual_eval(kern_context *kcxt,\n"
 		"                  kern_data_store *kds,\n"
 		"                  kern_data_store *ktoast,\n"
 		"                  size_t kds_index)\n"
@@ -1062,10 +1062,14 @@ pgstrom_respond_gpuscan(CUstream stream, CUresult status, void *private)
 		return;
 
 	/* OK, routine is called back in the usual context */
-	if (status != CUDA_SUCCESS)
-		gpuscan->task.errcode = status;
+	if (status == CUDA_SUCCESS)
+		gpuscan->task.kerror = kresults->kerror;
 	else
-		gpuscan->task.errcode = kresults->errcode;
+	{
+		gpuscan->task.kerror.errcode = status;
+		gpuscan->task.kerror.kernel = StromKernel_CudaRuntime;
+		gpuscan->task.kerror.lineno = 0;
+	}
 
 	/*
 	 * Remove from the running_tasks list, then attach it
@@ -1075,7 +1079,7 @@ pgstrom_respond_gpuscan(CUstream stream, CUresult status, void *private)
 	dlist_delete(&gpuscan->task.chain);
 	gts->num_running_tasks--;
 
-	if (gpuscan->task.errcode == StromError_Success)
+	if (gpuscan->task.kerror.errcode == StromError_Success)
 		dlist_push_tail(&gts->completed_tasks, &gpuscan->task.chain);
 	else
 		dlist_push_head(&gts->completed_tasks, &gpuscan->task.chain);
@@ -1178,7 +1182,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 								   gpuscan->task.cuda_device,
 								   false,
 								   kds->nitems,
-								   sizeof(cl_uint));
+								   sizeof(kern_errorbuf));
 	gpuscan->kern_qual_args[0] = &gpuscan->m_gpuscan;
 	gpuscan->kern_qual_args[1] = &gpuscan->m_kds;
 	gpuscan->kern_qual_args[2] = &m_ktoast;
@@ -1186,7 +1190,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	rc = cuLaunchKernel(gpuscan->kern_qual,
 						grid_size, 1, 1,
 						block_size, 1, 1,
-						sizeof(uint) * block_size,
+						sizeof(kern_errorbuf) * block_size,
 						gpuscan->task.cuda_stream,
 						gpuscan->kern_qual_args,
 						NULL);

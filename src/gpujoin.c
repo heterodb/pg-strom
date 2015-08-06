@@ -2187,8 +2187,7 @@ gpujoin_codegen_outer_quals(StringInfo source,
 	appendStringInfo(
 		source,
 		"STATIC_FUNCTION(cl_bool)\n"
-		"gpujoin_outer_quals(cl_int *errcode,\n"
-		"                    kern_parambuf *kparams,\n"
+		"gpujoin_outer_quals(kern_context *kcxt,\n"
 		"                    kern_data_store *kds,\n"
 		"                    size_t kds_index)\n"
 		"{\n");
@@ -2492,7 +2491,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 		appendStringInfo(
 			source,
 			"  datum = GPUJOIN_REF_DATUM(colmeta,htup,%u);\n"
-			"  KVAR_%u = pg_%s_datum_ref(errcode,datum,false);\n",
+			"  KVAR_%u = pg_%s_datum_ref(kcxt,datum,false);\n",
 			keynode->varattno - 1,
 			keynode->varoattno,
 			dtype->type_name);
@@ -2521,8 +2520,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 /*
  * codegen for:
  * STATIC_FUNCTION(cl_bool)
- * gpujoin_join_quals_depth%u(cl_int *errcode,
- *                            kern_parambuf *kparams,
+ * gpujoin_join_quals_depth%u(kern_context *kcxt,
  *                            kern_data_store *kds,
  *                            kern_multirels *kmrels,
  *                            cl_int *o_buffer,
@@ -2559,8 +2557,7 @@ gpujoin_codegen_join_quals(StringInfo source,
 	appendStringInfo(
 		source,
 		"STATIC_FUNCTION(cl_bool)\n"
-		"gpujoin_join_quals_depth%d(cl_int *errcode,\n"
-		"                           kern_parambuf *kparams,\n"
+		"gpujoin_join_quals_depth%d(kern_context *kcxt,\n"
 		"                           kern_data_store *kds,\n"
         "                           kern_multirels *kmrels,\n"
 		"                           cl_int *o_buffer,\n"
@@ -2596,8 +2593,7 @@ gpujoin_codegen_join_quals(StringInfo source,
 /*
  * codegen for:
  * STATIC_FUNCTION(cl_uint)
- * gpujoin_hash_value_depth%u(cl_int *errcode,
- *                            kern_parambuf *kparams,
+ * gpujoin_hash_value_depth%u(kern_context *kcxt,
  *                            cl_uint *pg_crc32_table,
  *                            kern_data_store *kds,
  *                            kern_multirels *kmrels,
@@ -2620,8 +2616,7 @@ gpujoin_codegen_hash_value(StringInfo source,
 	appendStringInfo(
 		source,
 		"STATIC_FUNCTION(cl_uint)\n"
-		"gpujoin_hash_value_depth%u(cl_int *errcode,\n"
-		"                           kern_parambuf *kparams,\n"
+		"gpujoin_hash_value_depth%u(kern_context *kcxt,\n"
 		"                           cl_uint *pg_crc32_table,\n"
 		"                           kern_data_store *kds,\n"
 		"                           kern_multirels *kmrels,\n"
@@ -2736,7 +2731,6 @@ gpujoin_codegen(PlannerInfo *root,
 {
 	StringInfoData decl;
 	StringInfoData source;
-	const char *args;
 	int			depth;
 	ListCell   *cell;
 
@@ -2752,8 +2746,7 @@ gpujoin_codegen(PlannerInfo *root,
 	appendStringInfo(
 		&source,
 		"STATIC_FUNCTION(cl_bool)\n"
-		"gpujoin_join_quals(cl_int *errcode,\n"
-		"                   kern_parambuf *kparams,\n"
+		"gpujoin_join_quals(kern_context *kcxt,\n"
 		"                   kern_data_store *kds,\n"
 		"                   kern_multirels *kmrels,\n"
 		"                   int depth,\n"
@@ -2763,19 +2756,18 @@ gpujoin_codegen(PlannerInfo *root,
 		"  switch (depth)\n"
 		"  {\n");
 
-	args = "errcode, kparams, kds, kmrels, outer_index, i_htup";
 	for (depth=1; depth <= gj_info->num_rels; depth++)
 	{
 		appendStringInfo(
 			&source,
 			"  case %d:\n"
-			"    return gpujoin_join_quals_depth%d(%s);\n",
-			depth, depth, args);
+			"    return gpujoin_join_quals_depth%d(kcxt, kds, kmrels, outer_index, i_htup);\n",
+			depth, depth);
 	}
 	appendStringInfo(
 		&source,
 		"  default:\n"
-		"    STROM_SET_ERROR(errcode, StromError_SanityCheckViolation);\n"
+		"    STROM_SET_ERROR(&kcxt->e, StromError_SanityCheckViolation);\n"
 		"    break;\n"
 		"  }\n"
 		"  return false;\n"
@@ -2794,8 +2786,7 @@ gpujoin_codegen(PlannerInfo *root,
 	appendStringInfo(
 		&source,
 		"STATIC_FUNCTION(cl_uint)\n"
-		"gpujoin_hash_value(cl_int *errcode,\n"
-		"                   kern_parambuf *kparams,\n"
+		"gpujoin_hash_value(kern_context *kcxt,\n"
 		"                   cl_uint *pg_crc32_table,\n"
 		"                   kern_data_store *kds,\n"
 		"                   kern_multirels *kmrels,\n"
@@ -2804,7 +2795,6 @@ gpujoin_codegen(PlannerInfo *root,
 		"{\n"
 		"  switch (depth)\n"
 		"  {\n");
-	args = "errcode,kparams,pg_crc32_table,kds,kmrels,o_buffer";
 	depth = 1;
 	foreach (cell, gj_info->hash_outer_keys)
 	{
@@ -2813,15 +2803,15 @@ gpujoin_codegen(PlannerInfo *root,
 			appendStringInfo(
 				&source,
 				"  case %u:\n"
-				"    return gpujoin_hash_value_depth%u(%s);\n",
-				depth, depth, args);
+				"    return gpujoin_hash_value_depth%u(kcxt,pg_crc32_table,kds,kmrels,o_buffer);\n",
+				depth, depth);
 		}
 		depth++;
 	}
 	appendStringInfo(
 		&source,
 		"  default:\n"
-		"    STROM_SET_ERROR(errcode, StromError_SanityCheckViolation);\n"
+		"    STROM_SET_ERROR(&kcxt->e, StromError_SanityCheckViolation);\n"
 		"    break;\n"
 		"  }\n"
 		"  return (cl_uint)(-1);\n"
@@ -2917,7 +2907,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 	kgjoin->kresults_total_items = total_items;
 	kgjoin->kresults_max_items = 0;
 	kgjoin->max_depth = gjs->num_rels;
-	kgjoin->errcode = StromError_Success;
+	memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
 
 	/* copies the constant/parameter buffer */
 	memcpy(KERN_GPUJOIN_PARAMBUF(kgjoin),
@@ -3416,7 +3406,7 @@ gpujoin_task_complete(GpuTask *gtask)
 	}
 	gpujoin_cleanup_cuda_resources(pgjoin);
 
-	if (pgjoin->task.errcode == StromError_Success)
+	if (pgjoin->task.kerror.errcode == StromError_Success)
 	{
 		pgstrom_data_store *pds_src = pgjoin->pds_src;
 		kern_data_store	   *kds_src = pds_src->kds;
@@ -3446,7 +3436,7 @@ gpujoin_task_complete(GpuTask *gtask)
 			SpinLockRelease(&gts->lock);
 		}
 	}
-	else if (pgjoin->task.errcode == StromError_DataStoreNoSpace)
+	else if (pgjoin->task.kerror.errcode == StromError_DataStoreNoSpace)
 	{
 		/*
 		 * StromError_DataStoreNoSpace indicates either/both of buffers
@@ -3482,10 +3472,14 @@ gpujoin_task_respond(CUstream stream, CUresult status, void *private)
 	if (status == CUDA_ERROR_INVALID_CONTEXT || !IsTransactionState())
 		return;
 
-	if (status != CUDA_SUCCESS)
-		pgjoin->task.errcode = status;
+	if (status == CUDA_SUCCESS)
+		pgjoin->task.kerror = pgjoin->kern.kerror;
 	else
-		pgjoin->task.errcode = pgjoin->kern.errcode;
+	{
+		pgjoin->task.kerror.errcode = status;
+		pgjoin->task.kerror.kernel = StromKernel_CudaRuntime;
+		pgjoin->task.kerror.lineno = 0;
+	}
 
 	/*
 	 * Remove from the running_tasks list, then attach it
@@ -3495,7 +3489,7 @@ gpujoin_task_respond(CUstream stream, CUresult status, void *private)
 	dlist_delete(&pgjoin->task.chain);
 	gts->num_running_tasks--;
 
-	if (pgjoin->task.errcode == StromError_Success)
+	if (pgjoin->task.kerror.errcode == StromError_Success)
 		dlist_push_tail(&gts->completed_tasks, &pgjoin->task.chain);
 	else
 		dlist_push_head(&gts->completed_tasks, &pgjoin->task.chain);
@@ -3687,7 +3681,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 									   pgjoin->task.cuda_device,
 									   false,
 									   num_threads,
-									   sizeof(cl_uint));
+									   sizeof(kern_errorbuf));
 		kern_args[0] = &pgjoin->m_kgjoin;
 		kern_args[1] = &pgjoin->m_kds_src;
 		kern_args[2] = &pgjoin->m_kmrels;
@@ -3698,7 +3692,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 		rc = cuLaunchKernel(pgjoin->kern_prep,
 							grid_xsize, 1, 1,
 							block_xsize, 1, 1,
-							sizeof(cl_uint) * block_xsize,
+							sizeof(kern_errorbuf) * block_xsize,
 							pgjoin->task.cuda_stream,
 							kern_args,
 							NULL);
@@ -3740,7 +3734,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 											  inner_ntuples,
 											  istate->gnl_shmem_xsize,
 											  istate->gnl_shmem_ysize,
-											  sizeof(cl_uint));
+											  sizeof(kern_errorbuf));
 			kern_args[0] = &pgjoin->m_kgjoin;
 			kern_args[1] = &pgjoin->m_kds_src;
 			kern_args[2] = &pgjoin->m_kmrels;
@@ -3748,7 +3742,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			kern_args[4] = &pgjoin->task.cuda_index;
 			kern_args[5] = &pgjoin->m_ojmaps;
 
-			shmem_size = Max(sizeof(cl_uint) * block_xsize * block_ysize,
+			shmem_size = Max(sizeof(kern_errorbuf) * block_xsize * block_ysize,
 							 istate->gnl_shmem_xsize * block_xsize +
 							 istate->gnl_shmem_ysize * block_ysize);
 
@@ -3789,7 +3783,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 											   pgjoin->task.cuda_device,
 											   false,
 											   inner_ntuples,
-											   sizeof(cl_uint));
+											   sizeof(kern_errorbuf));
 				kern_args[0] = &pgjoin->m_kgjoin;
 				kern_args[1] = &pgjoin->m_kds_src;
 				kern_args[2] = &pgjoin->m_kmrels;
@@ -3800,7 +3794,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 				rc = cuLaunchKernel(pgjoin->kern_outer_nl,
 									grid_xsize, 1, 1,
 									block_xsize, 1, 1,
-									sizeof(cl_uint) * block_xsize,
+									sizeof(kern_errorbuf) * block_xsize,
 									pgjoin->task.cuda_stream,
 									kern_args,
 									NULL);
@@ -3836,7 +3830,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 										   pgjoin->task.cuda_device,
 										   false,
 										   outer_ntuples,
-										   sizeof(cl_uint));
+										   sizeof(kern_errorbuf));
 			kern_args[0] = &pgjoin->m_kgjoin;
 			kern_args[1] = &pgjoin->m_kds_src;
 			kern_args[2] = &pgjoin->m_kmrels;
@@ -3847,7 +3841,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			rc = cuLaunchKernel(pgjoin->kern_exec_hj,
 								grid_xsize, 1, 1,
 								block_xsize, 1, 1,
-								sizeof(cl_uint) * block_xsize,
+								sizeof(kern_errorbuf) * block_xsize,
 								pgjoin->task.cuda_stream,
 								kern_args,
 								NULL);
@@ -3881,7 +3875,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 											   pgjoin->task.cuda_device,
 											   false,
 											   inner_nslots,
-											   sizeof(cl_uint));
+											   sizeof(kern_errorbuf));
 				kern_args[0] = &pgjoin->m_kgjoin;
 				kern_args[1] = &pgjoin->m_kds_src;
 				kern_args[2] = &pgjoin->m_kmrels;
@@ -3892,7 +3886,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 				rc = cuLaunchKernel(pgjoin->kern_outer_hj,
 									grid_xsize, 1, 1,
 									block_xsize, 1, 1,
-									sizeof(cl_uint) * block_xsize,
+									sizeof(kern_errorbuf) * block_xsize,
 									pgjoin->task.cuda_stream,
 									kern_args,
 									NULL);
@@ -3926,7 +3920,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 								   pgjoin->task.cuda_device,
 								   false,
 								   outer_ntuples,
-								   sizeof(cl_uint));
+								   sizeof(kern_errorbuf));
 	kern_args[0] = &pgjoin->m_kgjoin;
 	kern_args[1] = &pgjoin->m_kmrels;
 	kern_args[2] = &pgjoin->m_kds_src;
@@ -3935,7 +3929,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	rc = cuLaunchKernel(pgjoin->kern_proj,
 						grid_xsize, 1, 1,
 						block_xsize, 1, 1,
-						sizeof(cl_uint) * block_xsize,
+						sizeof(kern_errorbuf) * block_xsize,
 						pgjoin->task.cuda_stream,
 						kern_args,
 						NULL);
@@ -4075,7 +4069,6 @@ get_tuple_hashvalue(innerState *istate, TupleTableSlot *slot)
 		int			keylen = lfirst_int(lc2);
 		bool		keybyval = lfirst_int(lc3);
 		Oid			keytype = lfirst_oid(lc4);
-		int			errcode;
 		Datum		value;
 		bool		isnull;
 
@@ -4086,9 +4079,14 @@ get_tuple_hashvalue(innerState *istate, TupleTableSlot *slot)
 		/* fixup host representation to special internal format. */
 		if (keytype == NUMERICOID)
 		{
+			kern_context	dummy;
 			pg_numeric_t	temp;
 
-			temp = pg_numeric_from_varlena(&errcode, (struct varlena *)
+			/*
+			 * FIXME: If NUMERIC value is out of range, we cannot execute
+			 * GpuJoin in the kernel space, so needs a fallback routine.
+			 */
+			temp = pg_numeric_from_varlena(&dummy, (struct varlena *)
 										   DatumGetPointer(value));
 			keylen = sizeof(temp.value);
 			keybyval = true;

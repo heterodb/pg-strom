@@ -288,7 +288,7 @@ struct GpuTask
 	CUdevice		cuda_device;	/* just reference, no cleanup needed */
 	CUstream		cuda_stream;	/* owned for each GpuTask */
 	CUmodule		cuda_module;	/* just reference, no cleanup needed */
-	cl_int			errcode;
+	kern_errorbuf	kerror;		/* error status on CUDA kernel execution */
 	pgstrom_perfmon	pfm;
 };
 
@@ -449,7 +449,7 @@ extern void pgstrom_compute_workgroup_size_2d(size_t *p_grid_xsize,
 extern void pgstrom_init_cuda_control(void);
 extern int pgstrom_baseline_cuda_capability(void);
 extern const char *errorText(int errcode);
-extern const char *errorTextKernel(kern_error *kerror);
+extern const char *errorTextKernel(kern_errorbuf *kerror);
 extern Datum pgstrom_scoreboard_info(PG_FUNCTION_ARGS);
 extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 

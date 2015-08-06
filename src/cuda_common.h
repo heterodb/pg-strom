@@ -202,6 +202,8 @@ typedef uintptr_t	hostptr_t;
 /*
  * Kernel functions identifier
  */
+#define StromKernel_HostPGStrom						0x0001
+#define StromKernel_CudaRuntime						0x0002
 #define StromKernel_gpuscan_qual					0x0101
 #define StromKernel_gpujoin_preparation				0x0201
 #define StromKernel_gpujoin_exec_nestloop			0x0202
@@ -226,7 +228,7 @@ typedef struct
 	cl_int		errcode;	/* one of the StromError_* */
 	cl_short	kernel;		/* one of the StromKernel_* */
 	cl_short	lineno;		/* line number STROM_SET_ERROR is called */
-} kern_error;
+} kern_errorbuf;
 
 /*
  * kern_context - a set of run-time information
@@ -235,35 +237,50 @@ struct kern_parambuf;
 
 typedef struct
 {
-	kern_error	e;
+	kern_errorbuf	e;
 	struct kern_parambuf *kparams;
 } kern_context;
 
-#define INIT_KERNEL_CONTEXT(KERNEL_FUNC,kcxt,kparams)	\
+#define INIT_KERNEL_CONTEXT(kcxt,kfunction,kparams)		\
 	do {												\
 		(kcxt)->e.errcode = StromError_Success;			\
-		(kcxt)->e.kernel = StromKernel_##KERNEL_FUNC;	\
+		(kcxt)->e.kernel = StromKernel_##kfunction;		\
 		(kcxt)->e.lineno = 0;							\
 		(kcxt)->kparams = (kparams);					\
 	} while(0)
 
-#ifdef __CUDACC__
 /*
  * It sets an error code unless no significant error code is already set.
  * Also, CpuReCheck has higher priority than RowFiltered because CpuReCheck
  * implies device cannot run the given expression completely.
  * (Usually, due to compressed or external varlena datum)
  */
+#ifdef __CUDACC__
 STATIC_INLINE(void)
-STROM_SET_ERROR(cl_int *p_error, cl_int errcode)
+__STROM_SET_ERROR(kern_errorbuf *p_kerror, cl_int errcode, cl_int lineno)
 {
-	cl_int	oldcode = *p_error;
+	cl_int			oldcode = p_kerror->errcode;
 
 	if (oldcode == StromError_Success &&
 		errcode != StromError_Success)
-		*p_error = errcode;
+	{
+		p_kerror->errcode = errcode;
+		p_kerror->lineno = lineno;
+	}
 }
 
+#define STROM_SET_ERROR(p_kerror, errcode)		\
+	__STROM_SET_ERROR((p_kerror), (errcode), __LINE__)
+#else
+/*
+ * If case when STROM_SET_ERROR is called in the host code,
+ * it raises an error using ereport()
+ */
+#define STROM_SET_ERROR(p_kerror, errcode)		\
+	elog(ERROR, "%s:%d %s", __FUNCTION__, __LINE__, errorText(errcode))
+#endif
+
+#ifdef __CUDACC__
 /*
  * We need to re-define HeapTupleHeaderData and t_infomask related stuff
  */
@@ -536,17 +553,16 @@ kparam_get_value(kern_parambuf *kparams, cl_uint pindex)
  * kern_resultbuf
  *
  * Output buffer to write back calculation results on a parciular chunk.
- * 'errcode' informs a significant error that shall raise an error on
- * host side and abort transactions. 'results' informs row-level status.
+ * kern_errorbuf informs an error status that shall be raised on host-
+ * side to abort current transaction.
  */
 typedef struct {
 	cl_uint		nrels;		/* number of relations to be appeared */
 	cl_uint		nrooms;		/* max number of results rooms */
 	cl_uint		nitems;		/* number of results being written */
-	cl_int		errcode;	/* chunk-level error */
-	cl_char		has_rechecks;
-	cl_char		all_visible;
-	cl_char		__padding__[2];
+	cl_char		all_visible;/* GpuScan dumps all the tuples in chunk */
+	cl_char		__padding__[3];
+	kern_errorbuf kerror;	/* error information */
 	cl_int		results[FLEXIBLE_ARRAY_MEMBER];
 } kern_resultbuf;
 
@@ -590,14 +606,14 @@ kern_get_datum(kern_data_store *kds,
  */
 STATIC_FUNCTION(void)
 pg_common_vstore(kern_data_store *kds,
-				 int *errcode,
+				 kern_context *kcxt,
 				 cl_uint colidx, cl_uint rowidx,
 				 Datum pg_value, cl_bool pg_isnull)
 {
 	if (kds->format != KDS_FORMAT_SLOT)
-		STROM_SET_ERROR(errcode, StromError_SanityCheckViolation);
+		STROM_SET_ERROR(&kcxt->e, StromError_SanityCheckViolation);
 	else if (colidx >= kds->ncols || rowidx >= kds->nitems)
-		STROM_SET_ERROR(errcode, StromError_DataStoreOutOfRange);
+		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreOutOfRange);
 	else
 	{
 		Datum	   *ts_values = KERN_DATA_STORE_VALUES(kds, rowidx);
@@ -620,7 +636,7 @@ pg_common_vstore(kern_data_store *kds,
 
 #define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)			\
 	STATIC_FUNCTION(pg_##NAME##_t)							\
-	pg_##NAME##_datum_ref(int *errcode,						\
+	pg_##NAME##_datum_ref(kern_context *kcxt,				\
 						  void *datum,						\
 						  cl_bool internal_format)			\
 	{														\
@@ -638,18 +654,18 @@ pg_common_vstore(kern_data_store *kds,
 															\
 	STATIC_FUNCTION(pg_##NAME##_t)							\
 	pg_##NAME##_vref(kern_data_store *kds,					\
-					 int *errcode,							\
+					 kern_context *kcxt,					\
 					 cl_uint colidx,						\
 					 cl_uint rowidx)						\
 	{														\
 		void  *datum = kern_get_datum(kds,colidx,rowidx);	\
-		return pg_##NAME##_datum_ref(errcode,datum,false);	\
+		return pg_##NAME##_datum_ref(kcxt,datum,false);		\
 	}
 
 #define STROMCL_SIMPLE_VARSTORE_TEMPLATE(NAME,BASE)			\
 	STATIC_FUNCTION(void)									\
 	pg_##NAME##_vstore(kern_data_store *kds,				\
-					   int *errcode,						\
+					   kern_context *kcxt,					\
 					   cl_uint colidx,						\
 					   cl_uint rowidx,						\
 					   pg_##NAME##_t pg_datum)				\
@@ -661,16 +677,15 @@ pg_common_vstore(kern_data_store *kds,
 															\
 		temp.v_datum = 0UL;									\
 		temp.v_base = pg_datum.value;						\
-		pg_common_vstore(kds, errcode, colidx, rowidx,		\
+		pg_common_vstore(kds, kcxt, colidx, rowidx,			\
 						 temp.v_datum, pg_datum.isnull);	\
 	}
 
 #define STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)			\
 	STATIC_FUNCTION(pg_##NAME##_t)							\
-	pg_##NAME##_param(kern_parambuf *kparams,				\
-					  int *errcode,							\
-					  cl_uint param_id)						\
+	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)	\
 	{														\
+		kern_parambuf *kparams = kcxt->kparams;				\
 		pg_##NAME##_t result;								\
 															\
 		if (param_id < kparams->nparams &&					\
@@ -690,7 +705,7 @@ pg_common_vstore(kern_data_store *kds,
 
 #define STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)				\
 	STATIC_FUNCTION(pg_bool_t)								\
-	pgfn_##NAME##_isnull(int *errcode, pg_##NAME##_t arg)	\
+	pgfn_##NAME##_isnull(kern_context *kcxt, pg_##NAME##_t arg)	\
 	{														\
 		pg_bool_t result;									\
 															\
@@ -700,7 +715,7 @@ pg_common_vstore(kern_data_store *kds,
 	}														\
 															\
 	STATIC_FUNCTION(pg_bool_t)								\
-	pgfn_##NAME##_isnotnull(int *errcode, pg_##NAME##_t arg)\
+	pgfn_##NAME##_isnotnull(kern_context *kcxt, pg_##NAME##_t arg)	\
 	{														\
 		pg_bool_t result;									\
 															\
@@ -930,14 +945,14 @@ typedef struct varatt_indirect
  * datum (including the VARHDRSZ header)
  */
 STATIC_FUNCTION(size_t)
-toast_raw_datum_size(cl_int *errcode, varlena *attr)
+toast_raw_datum_size(kern_context *kcxt, varlena *attr)
 {
 	size_t		result;
 
 	if (VARATT_IS_EXTERNAL(attr))
 	{
 		/* should not appear in kernel space */
-		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		result = 0;
 	}
 	else if (VARATT_IS_COMPRESSED(attr))
@@ -1088,7 +1103,7 @@ kern_get_datum(kern_data_store *kds,
 STROMCL_SIMPLE_DATATYPE_TEMPLATE(varlena, varlena *)
 
 STATIC_FUNCTION(pg_varlena_t)
-pg_varlena_datum_ref(int *errcode,
+pg_varlena_datum_ref(kern_context *kcxt,
 					 void *datum,
 					 cl_bool internal_format)
 {
@@ -1107,7 +1122,7 @@ pg_varlena_datum_ref(int *errcode,
 		else
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		}
 	}
 	return result;
@@ -1115,20 +1130,19 @@ pg_varlena_datum_ref(int *errcode,
 
 STATIC_FUNCTION(pg_varlena_t)
 pg_varlena_vref(kern_data_store *kds,
-				int *errcode,
+				kern_context *kcxt,
 				cl_uint colidx,
 				cl_uint rowidx)
 {
 	void   *datum = kern_get_datum(kds,colidx,rowidx);
 
-	return pg_varlena_datum_ref(errcode,datum,false);
+	return pg_varlena_datum_ref(kcxt,datum,false);
 }
 
 STATIC_FUNCTION(pg_varlena_t)
-pg_varlena_param(kern_parambuf *kparams,
-				 int *errcode,
-				 cl_uint param_id)
+pg_varlena_param(kern_context *kcxt, cl_uint param_id)
 {
+	kern_parambuf  *kparams = kcxt->kparams;
 	pg_varlena_t	result;
 
 	if (param_id < kparams->nparams &&
@@ -1144,7 +1158,7 @@ pg_varlena_param(kern_parambuf *kparams,
 		else
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		}
 	}
 	else
@@ -1179,22 +1193,21 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 
 #define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)				\
 	STATIC_INLINE(pg_##NAME##_t)							\
-	pg_##NAME##_datum_ref(int *errcode,						\
+	pg_##NAME##_datum_ref(kern_context *kcxt,				\
 						  void *datum,						\
 						  cl_bool internal_format)			\
 	{														\
-		return pg_varlena_datum_ref(errcode,datum,			\
-									internal_format);		\
+		return pg_varlena_datum_ref(kcxt,datum,internal_format);	\
 	}														\
 															\
 	STATIC_INLINE(pg_##NAME##_t)							\
 	pg_##NAME##_vref(kern_data_store *kds,					\
-					 int *errcode,							\
+					 kern_context *kcxt,					\
 					 cl_uint colidx,						\
 					 cl_uint rowidx)						\
 	{														\
 		void  *datum = kern_get_datum(kds,colidx,rowidx);	\
-		return pg_varlena_datum_ref(errcode,datum,false);	\
+		return pg_varlena_datum_ref(kcxt,datum,false);		\
 	}
 
 #define STROMCL_VARLENA_VARSTORE_TEMPLATE(NAME)				\
@@ -1202,22 +1215,21 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 
 #define STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)						\
 	STATIC_INLINE(pg_##NAME##_t)									\
-	pg_##NAME##_param(kern_parambuf *kparams,						\
-					  int *errcode, cl_uint param_id)				\
+	pg_##NAME##_param(kern_context *kcxt, cl_uint param_id)			\
 	{																\
-		return pg_varlena_param(kparams,errcode,param_id);			\
+		return pg_varlena_param(kcxt,param_id);						\
 	}
 
 #define STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)						\
 	STATIC_INLINE(pg_bool_t)										\
-	pgfn_##NAME##_isnull(int *errcode, pg_##NAME##_t arg)			\
+	pgfn_##NAME##_isnull(kern_context *kcxt, pg_##NAME##_t arg)		\
 	{																\
-		return pgfn_varlena_isnull(errcode, arg);					\
+		return pgfn_varlena_isnull(kcxt, arg);					\
 	}																\
 	STATIC_INLINE(pg_bool_t)										\
-	pgfn_##NAME##_isnotnull(int *errcode, pg_##NAME##_t arg)		\
+	pgfn_##NAME##_isnotnull(kern_context *kcxt, pg_##NAME##_t arg)	\
 	{																\
-		return pgfn_varlena_isnotnull(errcode, arg);				\
+		return pgfn_varlena_isnotnull(kcxt, arg);					\
 	}
 
 #define STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)					\
@@ -1326,9 +1338,9 @@ arithmetic_stairlike_add(cl_uint my_value, cl_uint *total_sum)
  * to clear its error code if it is a minor one.
  */
 STATIC_FUNCTION(void)
-kern_writeback_error_status(cl_int *error_status, int own_errcode)
+kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf own_error)
 {
-	cl_int	   *error_temp = SHARED_WORKMEM(cl_int);
+	kern_errorbuf *error_temp = SHARED_WORKMEM(kern_errorbuf);
 	size_t		local_sz;
 	size_t		local_id;
 	size_t		unitsz;
@@ -1343,7 +1355,7 @@ kern_writeback_error_status(cl_int *error_status, int own_errcode)
 	local_id = get_local_yid() * get_local_xsize() + get_local_xid();
 
 	/* set initial value */
-	error_temp[local_id] = own_errcode;
+	error_temp[local_id] = own_error;
 	__syncthreads();
 
 	for (i=1, unitsz = local_sz; unitsz > 0; i++, unitsz >>= 1)
@@ -1354,55 +1366,37 @@ kern_writeback_error_status(cl_int *error_status, int own_errcode)
 		{
 			buddy = local_id + (1 << (i - 1));
 
-			errcode_0 = error_temp[local_id];
+			errcode_0 = error_temp[local_id].errcode;
 			errcode_1 = (buddy < local_sz
-						 ? error_temp[buddy]
+						 ? error_temp[buddy].errcode
 						 : StromError_Success);
 			if (errcode_0 == StromError_Success &&
 				errcode_1 != StromError_Success)
-				error_temp[local_id] = errcode_1;
+				error_temp[local_id] = error_temp[buddy];
 		}
 		__syncthreads();
 	}
 
 	/*
 	 * It writes back a statement level error, unless no other workgroup
-	 * put a significant error status.
-	 * This atomic operation set an error code, if it is still
-	 * StromError_Success.
+	 * put an error status preliminary. This atomic operation set an error
+	 * code, if it is still StromError_Success.
 	 */
-	errcode_0 = error_temp[0];
-	if (get_local_xid() == 0 &&
-		get_local_yid() == 0 &&
-		errcode_0 != StromError_Success)
-		atomicCAS(error_status, StromError_Success, errcode_0);
+	if (get_local_xid() == 0 && get_local_yid() == 0)
+	{
+		kern_errorbuf	kerror = error_temp[0];
+
+		if (kerror.errcode != StromError_Success &&
+			atomicCAS(&result->errcode,
+					  StromError_Success,
+					  kerror.errcode) == StromError_Success)
+		{
+			/* only primary error workgroup can come into */
+			result->kernel = kerror.kernel;
+			result->lineno = kerror.lineno;
+		}
+	}
 }
-
-/* ------------------------------------------------------------
- *
- * Support macro for data format transformation
- *
- * ------------------------------------------------------------
- */
-#define KDS_TRANSFORM_ROW2SLOT_TEMPLATE(label,errcode,\
-										kds_row,kds_slot,kds_index)
-
-#define KDS_TRANSFORM_SLOT2ROW_TEMPLATE(label,errcode,\
-										kds_slot,kds_row,kds_index)
-
-
-/* ------------------------------------------------------------
- *
- * Support macro to reference heap-tuple efficiently
- *
- * ------------------------------------------------------------
- */
-#define HTUP_EXTRACT_BEGIN(errcode,colmeta,htup)
-
-
-#define HTUP_EXTRACT_END(errcode,colmeta,htup)
-
-
 
 /* ------------------------------------------------------------
  *
@@ -1441,7 +1435,7 @@ EVAL(pg_bool_t arg)
  * Functions for BooleanTest
  */
 STATIC_FUNCTION(pg_bool_t)
-pgfn_bool_is_true(cl_int *errcode, pg_bool_t result)
+pgfn_bool_is_true(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = (!result.isnull && result.value);
 	result.isnull = false;
@@ -1449,7 +1443,7 @@ pgfn_bool_is_true(cl_int *errcode, pg_bool_t result)
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_bool_is_not_true(cl_int *errcode, pg_bool_t result)
+pgfn_bool_is_not_true(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = (result.isnull || !result.value);
 	result.isnull = false;
@@ -1457,7 +1451,7 @@ pgfn_bool_is_not_true(cl_int *errcode, pg_bool_t result)
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_bool_is_false(cl_int *errcode, pg_bool_t result)
+pgfn_bool_is_false(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = (!result.isnull && !result.value);
 	result.isnull = false;
@@ -1465,7 +1459,7 @@ pgfn_bool_is_false(cl_int *errcode, pg_bool_t result)
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_bool_is_not_false(cl_int *errcode, pg_bool_t result)
+pgfn_bool_is_not_false(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = (result.isnull || result.value);
 	result.isnull = false;
@@ -1473,7 +1467,7 @@ pgfn_bool_is_not_false(cl_int *errcode, pg_bool_t result)
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_bool_is_unknown(cl_int *errcode, pg_bool_t result)
+pgfn_bool_is_unknown(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = result.isnull;
 	result.isnull = false;
@@ -1481,7 +1475,7 @@ pgfn_bool_is_unknown(cl_int *errcode, pg_bool_t result)
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_bool_is_not_unknown(cl_int *errcode, pg_bool_t result)
+pgfn_bool_is_not_unknown(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = !result.isnull;
 	result.isnull = false;
@@ -1492,7 +1486,7 @@ pgfn_bool_is_not_unknown(cl_int *errcode, pg_bool_t result)
  * Functions for BoolOp (EXPR_AND and EXPR_OR shall be constructed on demand)
  */
 STATIC_FUNCTION(pg_bool_t)
-pgfn_boolop_not(cl_int *errcode, pg_bool_t result)
+pgfn_boolop_not(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = !result.value;
 	/* if null is given, result is also null */

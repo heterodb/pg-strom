@@ -1247,7 +1247,7 @@ check_completed_tasks(GpuTaskState *gts)
 			pgstrom_cleanup_gputask_cuda_resources(gtask);
 
 			SpinLockAcquire(&gts->lock);
-			if (gtask->errcode != StromError_Success)
+			if (gtask->kerror.errcode != StromError_Success)
 				dlist_push_head(&gts->ready_tasks, &gtask->chain);
 			else
 				dlist_push_tail(&gts->ready_tasks, &gtask->chain);
@@ -1627,12 +1627,12 @@ pgstrom_fetch_gputask(GpuTaskState *gts)
 	/*
 	 * Error handling
 	 */
-	if (gtask->errcode != StromError_Success)
+	if (gtask->kerror.errcode != StromError_Success)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("PG-Strom: CUDA execution error (%s)",
-						errorText(gtask->errcode))));
+						errorTextKernel(&gtask->kerror))));
 	}
 	return gtask;
 }
@@ -2300,10 +2300,10 @@ errorText(int errcode)
 /*
  * errorTextKernel
  *
- * translation from kern_error to human readable representation
+ * translation from kern_errorbuf to human readable representation
  */
 const char *
-errorTextKernel(kern_error *kerror)
+errorTextKernel(kern_errorbuf *kerror)
 {
 	static __thread char buffer[1024];
 	const char *kernel_name;
@@ -2313,6 +2313,7 @@ errorTextKernel(kern_error *kerror)
 
 	switch (kerror->kernel)
 	{
+		KERN_ENTRY(CudaRuntime);
 		KERN_ENTRY(gpuscan_qual);
 		KERN_ENTRY(gpujoin_preparation);
 		KERN_ENTRY(gpujoin_exec_nestloop);

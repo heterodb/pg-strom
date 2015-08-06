@@ -711,7 +711,7 @@ devfunc_setup_cast(devfunc_info *entry,
 									entry->func_rettype->type_name));
 	entry->func_decl
 		= psprintf("STATIC_FUNCTION(pg_%s_t)\n"
-				   "pgfn_%s(int *errcode, pg_%s_t arg)\n"
+				   "pgfn_%s(kern_context *kcxt, pg_%s_t arg)\n"
 				   "{\n"
 				   "    pg_%s_t result;\n"
 				   "    result.value  = (%s)arg.value;\n"
@@ -743,7 +743,7 @@ devfunc_setup_oper_both(devfunc_info *entry,
 									dtype2->type_name));
 	entry->func_decl
 		= psprintf("STATIC_FUNCTION(pg_%s_t)\n"
-				   "pgfn_%s(int *errcode, pg_%s_t arg1, pg_%s_t arg2)\n"
+				   "pgfn_%s(kern_context *kcxt, pg_%s_t arg1, pg_%s_t arg2)\n"
 				   "{\n"
 				   "    pg_%s_t result;\n"
 				   "    result.value = (%s)(arg1.value %s arg2.value);\n"
@@ -777,7 +777,7 @@ devfunc_setup_oper_either(devfunc_info *entry,
 									dtype->type_name));
 	entry->func_decl
 		= psprintf("STATIC_FUNCTION(pg_%s_t)\n"
-				   "pgfn_%s(int *errcode, pg_%s_t arg)\n"
+				   "pgfn_%s(kern_context *kcxt, pg_%s_t arg)\n"
 				   "{\n"
 				   "    pg_%s_t result;\n"
 				   "    result.value = (%s)(%sarg%s);\n"
@@ -839,7 +839,7 @@ devfunc_setup_func_decl(devfunc_info *entry,
 	resetStringInfo(&str);
 	appendStringInfo(&str,
 					 "STATIC_FUNCTION(pg_%s_t)\n"
-					 "pgfn_%s(int *errcode",
+					 "pgfn_%s(kern_context *kcxt",
 					 entry->func_rettype->type_name,
 					 entry->func_alias);
 	index = 1;
@@ -920,7 +920,7 @@ devfunc_setup_boolop(BoolExprType boolop, const char *fn_name, int fn_nargs)
 	initStringInfo(&str);
 	appendStringInfo(&str,
 					 "STATIC_FUNCTION(pg_%s_t)\n"
-					 "pgfn_%s(int *errcode",
+					 "pgfn_%s(kern_context *kcxt",
 					 dtype->type_name, entry->func_alias);
 	for (i=0; i < fn_nargs; i++)
 		appendStringInfo(&str, ", pg_%s_t arg%u",
@@ -1332,7 +1332,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		if (!dfunc)
 			return false;
 		appendStringInfo(&context->str,
-						 "pgfn_%s(errcode", dfunc->func_alias);
+						 "pgfn_%s(kcxt", dfunc->func_alias);
 
 		foreach (cell, func->args)
 		{
@@ -1355,7 +1355,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		if (!dfunc)
 			return false;
 		appendStringInfo(&context->str,
-						 "pgfn_%s(errcode", dfunc->func_alias);
+						 "pgfn_%s(kcxt", dfunc->func_alias);
 
 		foreach (cell, op->args)
 		{
@@ -1393,7 +1393,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 					 (int)nulltest->nulltesttype);
 				break;
 		}
-		appendStringInfo(&context->str, "pgfn_%s_%s(errcode, ",
+		appendStringInfo(&context->str, "pgfn_%s_%s(kcxt, ",
 						 dtype->type_name, func_name);
 		if (!codegen_expression_walker((Node *) nulltest->arg, context))
 			return false;
@@ -1435,7 +1435,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 					 (int)booltest->booltesttype);
 				break;
 		}
-		appendStringInfo(&context->str, "pgfn_%s(errcode, ", func_name);
+		appendStringInfo(&context->str, "pgfn_%s(kcxt, ", func_name);
 		if (!codegen_expression_walker((Node *) booltest->arg, context))
 			return false;
 		appendStringInfoChar(&context->str, ')');
@@ -1448,7 +1448,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		if (b->boolop == NOT_EXPR)
 		{
 			Assert(list_length(b->args) == 1);
-			appendStringInfo(&context->str, "pgfn_boolop_not(errcode, ");
+			appendStringInfo(&context->str, "pgfn_boolop_not(kcxt, ");
 			if (!codegen_expression_walker(linitial(b->args), context))
 				return false;
 			appendStringInfoChar(&context->str, ')');
@@ -1485,7 +1485,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 														dfunc);
 			context->extra_flags |= (dfunc->func_flags & DEVFUNC_INCL_FLAGS);
 
-			appendStringInfo(&context->str, "pgfn_%s(errcode",
+			appendStringInfo(&context->str, "pgfn_%s(kcxt",
 							 dfunc->func_alias);
 			foreach (cell, b->args)
 			{
@@ -1650,7 +1650,7 @@ pgstrom_codegen_param_declarations(codegen_context *context)
 
 			appendStringInfo(
 				&str,
-				"  pg_%s_t KPARAM_%u = pg_%s_param(kparams,errcode,%d);\n",
+				"  pg_%s_t KPARAM_%u = pg_%s_param(kcxt,%d);\n",
 				dtype->type_name, index, dtype->type_name, index);
 		}
 		else if (IsA(lfirst(cell), Param))
@@ -1661,7 +1661,7 @@ pgstrom_codegen_param_declarations(codegen_context *context)
 			Assert(dtype != NULL);
 			appendStringInfo(
 				&str,
-				"  pg_%s_t KPARAM_%u = pg_%s_param(kparams,errcode,%d);\n",
+				"  pg_%s_t KPARAM_%u = pg_%s_param(kcxt,%d);\n",
 				dtype->type_name, index, dtype->type_name, index);
 		}
 		else
@@ -1690,7 +1690,7 @@ pgstrom_codegen_var_declarations(codegen_context *context)
 		Assert(dtype != NULL);
 		appendStringInfo(
 			&str,
-			"  pg_%s_t %s_%u = pg_%s_vref(%s,errcode,%u,%s);\n",
+			"  pg_%s_t %s_%u = pg_%s_vref(%s,kcxt,%u,%s);\n",
 			dtype->type_name,
 			context->var_label,
 			var->varattno,
@@ -1742,7 +1742,7 @@ pgstrom_codegen_bulk_var_declarations(codegen_context *context,
 			Assert(outer_var->vartype == type_oid);
 			appendStringInfo(
 				&buf2,
-				"  pg_%s_t %s_%u = pg_%s_vref(%s,errcode,%u,%s);\n",
+				"  pg_%s_t %s_%u = pg_%s_vref(%s,kcxt,%u,%s);\n",
 				dtype->type_name,
 				context->var_label,
 				tle->resno,
@@ -1779,7 +1779,7 @@ pgstrom_codegen_bulk_var_declarations(codegen_context *context,
 		dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
 		appendStringInfo(
 			&buf1,
-			"  pg_%s_t OVAR_%u = pg_%s_vref(%s,errcode,%u,%s);\n",
+			"  pg_%s_t OVAR_%u = pg_%s_vref(%s,kcxt,%u,%s);\n",
 			dtype->type_name,
 			var->varattno,
 			dtype->type_name,

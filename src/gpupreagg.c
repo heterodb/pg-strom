@@ -1558,10 +1558,10 @@ gpupreagg_rewrite_expr(Agg *agg,
  * that check qualifier on individual tuples prior to the job of preagg
  *
  * static bool
- * gpupreagg_qual_eval(__private cl_int *errcode,
- *                     __global kern_parambuf *kparams,
- *                     __global kern_data_store *kds,
- *                     __global kern_data_store *ktoast,
+ * gpupreagg_qual_eval(kern_context *kcxt,
+ *                     kern_parambuf *kparams,
+ *                     kern_data_store *kds,
+ *                     kern_data_store *ktoast,
  *                     size_t kds_index);
  */
 static char *
@@ -1578,8 +1578,7 @@ gpupreagg_codegen_qual_eval(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	appendStringInfo(
         &str,
         "STATIC_FUNCTION(bool)\n"
-        "gpupreagg_qual_eval(cl_int *errcode,\n"
-        "                    kern_parambuf *kparams,\n"
+        "gpupreagg_qual_eval(kern_context *kcxt,\n"
         "                    kern_data_store *kds,\n"
         "                    kern_data_store *ktoast,\n"
         "                    size_t kds_index)\n"
@@ -1620,10 +1619,10 @@ gpupreagg_codegen_qual_eval(CustomScan *cscan, GpuPreAggInfo *gpa_info,
  *  
  *
  * static cl_uint
- * gpupreagg_hashvalue(__private cl_int *errcode,
- *                     __local cl_uint *crc32_table,
- *                     __global kern_data_store *kds,
- *                     __global kern_data_store *ktoast,
+ * gpupreagg_hashvalue(kern_context *kcxt,
+ *                     cl_uint *crc32_table,
+ *                     kern_data_store *kds,
+ *                     kern_data_store *ktoast,
  *                     size_t kds_index);
  */
 static char *
@@ -1642,7 +1641,7 @@ gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 
 	appendStringInfo(&decl,
 					 "STATIC_FUNCTION(cl_uint)\n"
-					 "gpupreagg_hashvalue(cl_int *errcode,\n"
+					 "gpupreagg_hashvalue(kern_context *kcxt,\n"
 					 "                    cl_uint *crc32_table,\n"
 					 "                    kern_data_store *kds,\n"
 					 "                    kern_data_store *ktoast,\n"
@@ -1675,7 +1674,7 @@ gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 		/* variable declarations */
 		appendStringInfo(
 			&decl,
-			"  pg_%s_t keyval_%u = pg_%s_vref(kds,errcode,%u,kds_index);\n",
+			"  pg_%s_t keyval_%u = pg_%s_vref(kds,kcxt,%u,kds_index);\n",
 			dtype->type_name, resno,
 			dtype->type_name, resno - 1);
 
@@ -1705,9 +1704,9 @@ gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
  * then returns -1 if X < Y, 0 if X = Y or 1 if X > Y.
  *
  * static cl_bool
- * gpupreagg_keymatch(__private cl_int *errcode,
- *                    __global kern_data_store *kds,
- *                    __global kern_data_store *ktoast,
+ * gpupreagg_keymatch(kern_context *kcxt,
+ *                    kern_data_store *kds,
+ *                    kern_data_store *ktoast,
  *                    size_t x_index,
  *                    size_t y_index);
  */
@@ -1764,11 +1763,11 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 		 */
 		appendStringInfo(
 			&body,
-			"  xkeyval_%u = pg_%s_vref(kds,errcode,%u,x_index);\n"
-			"  ykeyval_%u = pg_%s_vref(kds,errcode,%u,y_index);\n"
+			"  xkeyval_%u = pg_%s_vref(kds,kcxt,%u,x_index);\n"
+			"  ykeyval_%u = pg_%s_vref(kds,kcxt,%u,y_index);\n"
 			"  if (!xkeyval_%u.isnull && !ykeyval_%u.isnull)\n"
 			"  {\n"
-			"    if (!EVAL(pgfn_%s(errcode, xkeyval_%u, ykeyval_%u)))\n"
+			"    if (!EVAL(pgfn_%s(kcxt, xkeyval_%u, ykeyval_%u)))\n"
 			"      return false;\n"
 			"  }\n"
 			"  else if ((xkeyval_%u.isnull  && !ykeyval_%u.isnull) ||\n"
@@ -1795,7 +1794,7 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	/* make a whole key-compare function */
 	appendStringInfo(&str,
 					 "STATIC_FUNCTION(cl_bool)\n"
-					 "gpupreagg_keymatch(int *errcode,\n"
+					 "gpupreagg_keymatch(kern_context *kcxt,\n"
 					 "                   kern_data_store *kds,\n"
 					 "                   kern_data_store *ktoast,\n"
 					 "                   size_t x_index,\n"
@@ -1819,10 +1818,10 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
  * on the local memory.
  * The supplied accum is operated by newval, according to resno.
  *
- * gpupreagg_local_calc(__private cl_int *errcode,
+ * gpupreagg_local_calc(kern_context *kcxt,
  *                      cl_int attnum,
- *                      __local pagg_datum *accum,
- *                      __local pagg_datum *newval);
+ *                      pagg_datum *accum,
+ *                      pagg_datum *newval);
  */
 static inline const char *
 aggcalc_method_of_typeoid(Oid type_oid)
@@ -1865,19 +1864,19 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 		appendStringInfo(
 			&body,
 			"STATIC_FUNCTION(void)\n"
-			"gpupreagg_local_calc(cl_int *errcode,\n"
+			"gpupreagg_local_calc(kern_context *kcxt,\n"
 			"                     cl_int attnum,\n"
 			"                     pagg_datum *accum,\n"
 			"                     pagg_datum *newval)\n"
 			"{\n");
 		aggcalc_class = "LOCAL";
-        aggcalc_args = "errcode,accum,newval";
+        aggcalc_args = "kcxt,accum,newval";
 		break;
 	case AGGCALC_GLOBAL_REDUCTION:
 		appendStringInfo(
 			&body,
 			"STATIC_FUNCTION(void)\n"
-			"gpupreagg_global_calc(cl_int *errcode,\n"
+			"gpupreagg_global_calc(kern_context *kcxt,\n"
 			"                      cl_int attnum,\n"
 			"                      kern_data_store *kds,\n"
 			"                      kern_data_store *ktoast,\n"
@@ -1889,30 +1888,26 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			"  char     new_isnull;\n"
 			"  Datum    new_value;\n"
 			"\n"
-			"  if (kds->format != KDS_FORMAT_SLOT)\n"
-			"  {\n"
-			"    STROM_SET_ERROR(errcode,StromError_SanityCheckViolation);\n"
-			"    return;\n"
-			"  }\n"
+			"  assert(kds->format == KDS_FORMAT_SLOT);\n"
 			"  accum_isnull = KERN_DATA_STORE_ISNULL(kds,accum_index) + attnum;\n"
 			"  accum_value = KERN_DATA_STORE_VALUES(kds,accum_index) + attnum;\n"
 			"  new_isnull = *(KERN_DATA_STORE_ISNULL(kds,newval_index) + attnum);\n"
 			"  new_value = *(KERN_DATA_STORE_VALUES(kds,newval_index) + attnum);\n"
 			"\n");
 		aggcalc_class = "GLOBAL";
-		aggcalc_args = "errcode,accum_isnull,accum_value,new_isnull,new_value";
+		aggcalc_args = "kcxt,accum_isnull,accum_value,new_isnull,new_value";
 		break;
 	case AGGCALC_NOGROUP_REDUCTION:
 		appendStringInfo(
 			&body,
 			"STATIC_FUNCTION(void)\n"
-			"gpupreagg_nogroup_calc(cl_int *errcode,\n"
+			"gpupreagg_nogroup_calc(kern_context *kcxt,\n"
 			"                       cl_int attnum,\n"
 			"                       pagg_datum *accum,\n"
 			"                       pagg_datum *newval)\n"
 			"{\n");
 		aggcalc_class = "NOGROUP";
-        aggcalc_args = "errcode,accum,newval";
+        aggcalc_args = "kcxt,accum,newval";
 		break;
 	default:
 		elog(ERROR, "Invalid GpuPreAgg calc mode (%u)", mode);
@@ -2034,9 +2029,9 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 
 /*
  * static void
- * gpupreagg_projection(__private cl_int *errcode,
- *                      __global kern_data_store *kds_in,
- *                      __global kern_data_store *kds_src,
+ * gpupreagg_projection(kern_context *kcxt,
+ *                      kern_data_store *kds_in,
+ *                      kern_data_store *kds_src,
  *                      size_t kds_index);
  */
 typedef struct
@@ -2101,7 +2096,7 @@ gpupreagg_codegen_projection_nrows(StringInfo body, FuncExpr *func,
 						 "  temp_int4.isnull = false;\n"
 						 "  temp_int4.value = 1;\n");
 	appendStringInfo(body,
-					 "  pg_%s_vstore(%s,errcode,%u,%s,temp_int4);\n",
+					 "  pg_%s_vstore(%s,kcxt,%u,%s,temp_int4);\n",
 					 dtype->type_name,
 					 pc->kds_label,
 					 pc->tle->resno - 1,
@@ -2240,7 +2235,7 @@ gpupreagg_codegen_projection_misc(StringInfo body, FuncExpr *func,
 		elog(ERROR, "unexpected partial aggregate function: %s", func_name);
 
 	appendStringInfo(body,
-					 "  pg_%s_vstore(%s,errcode,%u,%s,%s);\n",
+					 "  pg_%s_vstore(%s,kcxt,%u,%s,%s);\n",
 					 dtype->type_name,
 					 pc->kds_label,
 					 pc->tle->resno - 1,
@@ -2295,8 +2290,8 @@ gpupreagg_codegen_projection_psum_x2(StringInfo body, FuncExpr *func,
 		"  if (%s.isnull)\n"
 		"    %s.value = %s;\n"
 		"  else\n"
-		"    %s = pgfn_%s(errcode, %s, %s);\n"
-		"  pg_%s_vstore(%s,errcode,%u,%s,%s);\n",
+		"    %s = pgfn_%s(kcxt, %s, %s);\n"
+		"  pg_%s_vstore(%s,kcxt,%u,%s,%s);\n",
 		temp_label,
         pgstrom_codegen_expression(clause, pc->context),
 		temp_label,
@@ -2417,7 +2412,7 @@ gpupreagg_codegen_projection_corr(StringInfo body, FuncExpr *func,
 		body,
 		"  if (temp_float8x.isnull)\n"
 		"    temp_float8x.value = 0.0;\n"
-		"  pg_%s_vstore(%s,errcode,%u,%s,temp_float8x);\n",
+		"  pg_%s_vstore(%s,kcxt,%u,%s,temp_float8x);\n",
 		dtype->type_name,
 		pc->kds_label,
 		pc->tle->resno - 1,
@@ -2486,7 +2481,7 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			appendStringInfo(
 				&body,
 				"  /* projection for resource %u */\n"
-				"  pg_%s_vstore(%s,errcode,%u,%s,KVAR_%u);\n",
+				"  pg_%s_vstore(%s,kcxt,%u,%s,KVAR_%u);\n",
 				pc.tle->resno - 1,
 				dtype->type_name,
 				pc.kds_label,
@@ -2573,7 +2568,7 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			appendStringInfo(
 				&decl1,
 				"  pg_%s_t KVAR_%u "
-				"= pg_%s_vref(kds_in,errcode,%u,rowidx_in);\n",
+				"= pg_%s_vref(kds_in,kcxt,%u,rowidx_in);\n",
 				dtype->type_name,
 				tle->resno,
 				dtype->type_name,
@@ -2619,8 +2614,7 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	appendStringInfo(
 		&str,
 		"STATIC_FUNCTION(void)\n"
-		"gpupreagg_projection(cl_int *errcode,\n"
-		"                     kern_parambuf *kparams,\n"
+		"gpupreagg_projection(kern_context *kcxt,\n"
 		"                     kern_data_store *kds_in,\n"
 		"                     kern_data_store *kds_src,\n"
 		"                     size_t rowidx_in, size_t rowidx_out)\n"
@@ -3138,9 +3132,8 @@ gpupreagg_task_create(GpuPreAggState *gpas, pgstrom_data_store *pds_in)
 	kresults->nrels = 1;
 	kresults->nrooms = nitems;
 	kresults->nitems = 0;
-	kresults->errcode = StromError_Success;
-	kresults->has_rechecks = false;
 	kresults->all_visible = true;
+	memset(&kresults->kerror, 0, sizeof(kern_errorbuf));
 
 	/*
 	 * allocation of the result buffer
@@ -3549,16 +3542,20 @@ gpupreagg_task_respond(CUstream stream, CUresult status, void *private)
 	if (status == CUDA_ERROR_INVALID_CONTEXT || !IsTransactionState())
 		return;
 
-	if (status != CUDA_SUCCESS)
-		gpreagg->task.errcode = status;
+	if (status == CUDA_SUCCESS)
+		gpreagg->task.kerror = kresults->kerror;
 	else
-		gpreagg->task.errcode = kresults->errcode;
+	{
+		gpreagg->task.kerror.errcode = status;
+		gpreagg->task.kerror.kernel = StromKernel_CudaRuntime;
+		gpreagg->task.kerror.lineno = 0;
+	}
 
 	/* mark a flag, if GPU required to retry it on CPU side */
-	if (gpreagg->task.errcode == StromError_CpuReCheck)
+	if (gpreagg->task.kerror.errcode == StromError_CpuReCheck)
 	{
 		gpreagg->needs_fallback = true;
-		gpreagg->task.errcode = StromError_Success;
+		gpreagg->task.kerror.errcode = StromError_Success;
 	}
 
 	/*
@@ -3569,7 +3566,7 @@ gpupreagg_task_respond(CUstream stream, CUresult status, void *private)
 	dlist_delete(&gpreagg->task.chain);
 	gts->num_running_tasks--;
 
-	if (gpreagg->task.errcode == StromError_Success)
+	if (gpreagg->task.kerror.errcode == StromError_Success)
 		dlist_push_tail(&gts->completed_tasks, &gpreagg->task.chain);
 	else
 		dlist_push_head(&gts->completed_tasks, &gpreagg->task.chain);
@@ -3756,7 +3753,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 								   gpreagg->task.cuda_device,
 								   false,
 								   nitems,
-								   sizeof(cl_uint));
+								   sizeof(kern_errorbuf));
 
 	gpreagg->kern_prep_args[0] = &gpreagg->m_gpreagg;
 	gpreagg->kern_prep_args[1] = &gpreagg->m_kds_in;
@@ -3765,7 +3762,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	rc = cuLaunchKernel(gpreagg->kern_prep,
 						grid_size, 1, 1,
                         block_size, 1, 1,
-						sizeof(cl_uint) * block_size,
+						sizeof(kern_errorbuf) * block_size,
 						gpreagg->task.cuda_stream,
 						gpreagg->kern_prep_args,
 						NULL);
@@ -3826,12 +3823,12 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 									   gpreagg->task.cuda_device,
 									   false,
 									   nitems,
-									   sizeof(cl_uint));
+									   sizeof(kern_errorbuf));
 		gpreagg->kern_gagg_args[0] = &gpreagg->m_gpreagg;
 		gpreagg->kern_gagg_args[1] = &gpreagg->m_kds_dst;
 		gpreagg->kern_gagg_args[2] = &gpreagg->m_kds_in;
 		gpreagg->kern_gagg_args[3] = &gpreagg->m_ghash;
-		lmem_size = Max(sizeof(cl_uint) * block_size,
+		lmem_size = Max(sizeof(kern_errorbuf) * block_size,
 						sizeof(gpreagg->kern.pg_crc32_table));
 		rc = cuLaunchKernel(gpreagg->kern_gagg,
 							grid_size, 1, 1,
@@ -3859,7 +3856,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 									   true,
 									   nitems,
 									   Max(sizeof(pagg_datum),
-										   sizeof(cl_uint)));
+										   sizeof(kern_errorbuf)));
 		gpreagg->kern_nogrp_args[0] = &gpreagg->m_gpreagg;
 		gpreagg->kern_nogrp_args[1] = &gpreagg->m_kds_src;
 		gpreagg->kern_nogrp_args[2] = &gpreagg->m_kds_dst;
@@ -3870,7 +3867,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 							grid_size, 1, 1,
 							block_size, 1, 1,
 							Max(sizeof(pagg_datum),
-								sizeof(cl_uint)) * block_size,
+								sizeof(kern_errorbuf)) * block_size,
 							gpreagg->task.cuda_stream,
 							gpreagg->kern_nogrp_args,
 							NULL);
@@ -3926,7 +3923,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 									   gpreagg->task.cuda_device,
 									   false,
 									   nitems,
-									   sizeof(cl_uint));
+									   sizeof(kern_errorbuf));
 		gpreagg->kern_fixvar_args[0] = &gpreagg->m_gpreagg;
 		gpreagg->kern_fixvar_args[1] = &gpreagg->m_kds_dst;
 		gpreagg->kern_fixvar_args[2] = &gpreagg->m_kds_in;
@@ -3934,7 +3931,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		rc = cuLaunchKernel(gpreagg->kern_fixvar,
 							grid_size, 1, 1,
 							block_size, 1, 1,
-							sizeof(cl_uint) * block_size,
+							sizeof(kern_errorbuf) * block_size,
 							gpreagg->task.cuda_stream,
 							gpreagg->kern_fixvar_args,
 							NULL);
