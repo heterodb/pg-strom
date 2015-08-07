@@ -103,6 +103,8 @@ gpuscan_writeback_results(kern_resultbuf *kresults, int result)
 	cl_uint		offset;
 	cl_uint		nitems;
 
+	assert(kresults->nrels == 1);
+
 	/*
 	 * A typical usecase of arithmetic_stairlike_add with binary value:
 	 * It takes 1 if thread wants to return a status to the host side,
@@ -130,8 +132,7 @@ gpuscan_writeback_results(kern_resultbuf *kresults, int result)
  * forward declaration of the function to be generated on the fly
  */
 STATIC_FUNCTION(cl_bool)
-gpuscan_qual_eval(cl_int *errcode,
-				  kern_parambuf *kparams,
+gpuscan_qual_eval(kern_context *kcxt,
 				  kern_data_store *kds,
 				  kern_data_store *ktoast,
 				  size_t kds_index);
@@ -149,12 +150,11 @@ gpuscan_qual(kern_gpuscan *kgpuscan,	/* in/out */
 	size_t			kds_index = get_global_id();
 	cl_int			rc = 0;
 
-	INIT_KERNEL_CONTEXT(gpuscan_qual,&kcxt,kparams);
+	INIT_KERNEL_CONTEXT(&kcxt,gpuscan_qual,kparams);
 
 	if (kds_index < kds->nitems)
 	{
-		if (gpuscan_qual_eval(&kcxt.e.errcode,
-							  kparams, kds, ktoast, kds_index))
+		if (gpuscan_qual_eval(&kcxt, kds, ktoast, kds_index))
 		{
 			if (kcxt.e.errcode == StromError_Success)
 				rc = 1;
@@ -173,7 +173,7 @@ gpuscan_qual(kern_gpuscan *kgpuscan,	/* in/out */
 	/* writeback the results */
 	gpuscan_writeback_results(kresults, rc);
 	/* chunk level error, if any */
-	kern_writeback_error_status(&kresults->errcode, kcxt.e.errcode);
+	kern_writeback_error_status(&kresults->kerror, kcxt.e);
 }
 
 #endif	/* __CUDACC__ */
