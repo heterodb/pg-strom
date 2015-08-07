@@ -1290,26 +1290,20 @@ timestamp2timestamptz(kern_context *kcxt, pg_timestamp_t arg)
 }
 
 /*
- *  GetCurrentTransactionStartTimestamp
- */
-STATIC_INLINE(TimestampTz)
-GetCurrentTransactionStartTimestamp(void)
-{
-    return xactStartTimestamp;
-}
-
-/*
  * GetCurrentDateTime()
  *
  * Get the transaction start time ("now()") broken down as a struct pg_tm.
  */
 STATIC_INLINE(void)
-GetCurrentDateTime(struct pg_tm * tm)
+GetCurrentDateTime(kern_context *kcxt, struct pg_tm * tm)
 {
 	int		tz;
 	fsec_t	fsec;
 
-	timestamp2tm(GetCurrentTransactionStartTimestamp(), &tz, tm, &fsec, NULL);
+	// TimestampTz dt = GetCurrentTransactionStartTimestamp();
+	TimestampTz dt = kcxt->kparams->xactStartTimestamp;
+
+	timestamp2tm(dt, &tz, tm, &fsec, NULL);
     /* Note: don't pass NULL tzp to timestamp2tm; affects behavior */
 }
 
@@ -1543,16 +1537,16 @@ STATIC_FUNCTION(pg_timetz_t)
 pgfn_time_timetz(kern_context *kcxt, pg_time_t arg1)
 {
 	pg_timetz_t		result;
-    struct pg_tm	tm;
-    fsec_t			fsec;
-    int				tz;
+	struct pg_tm	tm;
+	fsec_t			fsec;
+	int				tz;
 
 
 	if (arg1.isnull)
 		result.isnull = true;
 	else
 	{
-		GetCurrentDateTime(&tm);
+		GetCurrentDateTime(kcxt, &tm);
 		time2tm(arg1.value, &tm, &fsec);
 		tz = DetermineTimeZoneOffset(&tm, &session_timezone_state);
 
@@ -1584,7 +1578,10 @@ pgfn_timestamptz_timetz(kern_context *kcxt, pg_timestamptz_t arg1)
 		result.isnull = true;
 	}
 	else
+	{
 		tm2timetz(&tm, fsec, tz, &(result.value));
+		result.isnull = false;
+	}
 
 	return result;
 }
@@ -2083,7 +2080,7 @@ pgfn_datetimetz_timestamptz(kern_context *kcxt, pg_date_t arg1, pg_timetz_t arg2
 		result.isnull = true;
 	else
 	{
-		result.isnull = true;
+		result.isnull = false;
 
 		if (DATE_IS_NOBEGIN(arg1.value))
 			TIMESTAMP_NOBEGIN(result.value);
@@ -3509,9 +3506,6 @@ assign_timelib_session_info(StringInfo buf)
 		buf,
 		"    },\n"
 		"};\n");
-
-	appendStringInfo(buf, "static const cl_long xactStartTimestamp = %lld;\n",
-					 (long long)GetCurrentTransactionStartTimestamp());
 
 	appendStringInfo(
 		buf,
