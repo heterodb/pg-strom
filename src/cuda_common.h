@@ -736,7 +736,7 @@ pg_common_vstore(kern_data_store *kds,
  */
 #define STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)			\
 	STATIC_FUNCTION(pg_##NAME##_t)							\
-	pg_##NAME##_datum_ref(int *errcode,						\
+	pg_##NAME##_datum_ref(kern_context *kcxt,				\
 						  void *datum,						\
 						  cl_bool internal_format)			\
 	{														\
@@ -755,18 +755,18 @@ pg_common_vstore(kern_data_store *kds,
 															\
 	STATIC_FUNCTION(pg_##NAME##_t)							\
 	pg_##NAME##_vref(kern_data_store *kds,					\
-					 int *errcode,							\
+					 kern_context *kcxt,					\
 					 cl_uint colidx,						\
 					 cl_uint rowidx)						\
 	{														\
 		void  *datum = kern_get_datum(kds,colidx,rowidx);	\
-		return pg_##NAME##_datum_ref(errcode,datum,false);	\
+		return pg_##NAME##_datum_ref(kcxt,datum,false);		\
 	}
 
 #define STROMCL_INDIRECT_VARSTORE_TEMPLATE(NAME,BASE)		\
 	STATIC_FUNCTION(void)									\
 	pg_##NAME##_vstore(kern_data_store *kds,				\
-					   int *errcode,						\
+					   kern_context *kcxt,					\
 					   cl_uint colidx,						\
 					   cl_uint rowidx,						\
 					   pg_##NAME##_t pg_datum)				\
@@ -777,10 +777,9 @@ pg_common_vstore(kern_data_store *kds,
 
 #define STROMCL_INDIRECT_PARAMREF_TEMPLATE(NAME,BASE)		\
 	STATIC_FUNCTION(pg_##NAME##_t)							\
-	pg_##NAME##_param(kern_parambuf *kparams,				\
-					  int *errcode,							\
-					  cl_uint param_id)						\
+	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)	\
 	{														\
+		kern_parambuf *kparams = kcxt->kparams;				\
 		pg_##NAME##_t result;								\
 															\
 		if (param_id < kparams->nparams &&					\
