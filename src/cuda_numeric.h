@@ -525,7 +525,7 @@ pg_numeric_param(kern_context *kcxt,
 		if (VARATT_IS_4B_U(vl_val) || VARATT_IS_1B(vl_val))
 			return pg_numeric_from_varlena(kcxt, vl_val);
 
-		STROM_SET_ERROR(kcxt, StromError_CpuReCheck);
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 	}
 	result.isnull = true;
 	return result;
