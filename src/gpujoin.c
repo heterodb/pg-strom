@@ -2953,7 +2953,16 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 		/*
 		 * Adjustment if too short or too large
 		 */
-		if (length < pgstrom_chunk_size() / 2)
+		if (ncols == 0)
+		{
+			/* MEMO: Typical usage of ncols == 0 is GpuJoin underlying
+			 * COUNT(*) because it does not need to put any contents in
+			 * the slot. So, we can allow to increment nitems as long as
+			 * 32bit width. :-)
+			 */
+			result_nitems = INT_MAX;
+		}
+		else if (length < pgstrom_chunk_size() / 2)
 		{
 			result_nitems = (pgstrom_chunk_size() / 2 -
 							 STROMALIGN(offsetof(kern_data_store,
