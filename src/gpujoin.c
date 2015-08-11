@@ -925,48 +925,33 @@ retry:
 	return true;
 }
 
+
 static void
 create_gpujoin_path(PlannerInfo *root,
 					RelOptInfo *joinrel,
-					JoinType jointype,
+					List *join_type_list,
 					Path *outer_path,
-					Path *inner_path,
-					SpecialJoinInfo *sjinfo,
-					ParamPathInfo *param_info,
-					Relids required_outer,
-					List *hash_quals,
-					List *join_quals,
+					List *inner_path_list,
+					List *hash_quals_list,
+					List *join_quals_list,
 					List *host_quals,
-					bool support_bulkload,
-					bool outer_merge,
-					double nrows_dev_output)
+					Relids required_outer,
+					bool support_bulkload)
 {
 	GpuJoinPath	   *result;
 	GpuJoinPath	   *source = NULL;
+	cl_int			num_rels = list_length(inner_path_list);
 	Size			length;
-	int				i, num_rels;
-
-	if (!outer_merge)
-		num_rels = 1;
-	else
-	{
-		Assert(path_is_mergeable_gpujoin(outer_path));
-		source = (GpuJoinPath *) outer_path;
-		outer_path = source->outer_path;
-		num_rels = source->num_rels + 1;
-		/* source path also has to support bulkload */
-		if ((source->cpath.flags & CUSTOMPATH_SUPPORT_BULKLOAD) == 0)
-			support_bulkload = false;
-	}
+	int				i;
 
 	length = offsetof(GpuJoinPath, inners[num_rels]);
 	result = palloc0(length);
 	NodeSetTag(result, T_CustomPath);
 	result->cpath.path.pathtype = T_CustomScan;
 	result->cpath.path.parent = joinrel;
-	result->cpath.path.param_info = param_info;
+	result->cpath.path.param_info = param_info;	// XXXXXX
 	result->cpath.path.pathkeys = NIL;
-	result->cpath.path.rows = joinrel->rows;
+	result->cpath.path.rows = joinrel->rows;	// XXXXXX
 	result->cpath.flags = (support_bulkload ? CUSTOMPATH_SUPPORT_BULKLOAD : 0);
 	result->cpath.methods = &gpujoin_path_methods;
 	result->outer_path = outer_path;
@@ -974,21 +959,45 @@ create_gpujoin_path(PlannerInfo *root,
 	result->kresults_ratio = 0.0;	/* to be set later */
 	result->num_rels = num_rels;
 	result->host_quals = host_quals;
-	if (source && num_rels > 1)
+
+	i = 0;
+	forfour (lc1, join_type_list,
+			 lc2, inner_path_list,
+			 lc3, hash_quals_list,
+			 lc4, join_quals_list)
 	{
-		memcpy(result->inners, source->inners,
-			   offsetof(GpuJoinPath, inners[num_rels - 1]) -
-			   offsetof(GpuJoinPath, inners[0]));
+		JoinType	join_type = (JoinType) lfirst_int(lc1);
+		Path	   *inner_path = lfirst(lc2);
+		List	   *hash_quals = lfirst(lc3);
+		List	   *join_quals = lfirst(lc4);
+
+		/*
+		 * calculation of nrows_dev_output
+		 */
+		if (i == 0)
+		{
+
+
+
+		}
+
+
+
+
+
+
+
+		// calc nrows_dev_output
+		result->inners[i].nrows_ratio = ;
+		result->inners[i].scan_path = inner_path;
+		result->inners[i].join_type = join_type;
+		result->inners[i].hash_quals = hash_quals;
+		result->inners[i].join_quals = join_quals;
+		result->inners[i].kmrels_ratio = 0.0;	/* to be set later */
+		result->inners[i].nbatches = 1;			/* to be set later */
+		result->inners[i].hash_nslots = 0;		/* to be set later */
+		i++;
 	}
-	result->inners[num_rels - 1].nrows_ratio =
-		nrows_dev_output / outer_path->parent->rows;
-	result->inners[num_rels - 1].scan_path = inner_path;
-	result->inners[num_rels - 1].join_type = jointype;
-	result->inners[num_rels - 1].hash_quals = hash_quals;
-	result->inners[num_rels - 1].join_quals = join_quals;
-	result->inners[num_rels - 1].kmrels_ratio = 0.0;	/* to be set later */
-	result->inners[num_rels - 1].nbatches = 1;			/* to be set later */
-	result->inners[num_rels - 1].hash_nslots = 0;		/* to be set later */
 
 	/*
 	 * cost calculation of GpuJoin, then, add this path to the joinrel,
@@ -1013,156 +1022,114 @@ create_gpujoin_path(PlannerInfo *root,
 }
 
 /*
- * calc_gpujoin_required_outer
+ * gpujoin_find_cheapest_path
  *
- * Own calculation logic for required_outer and extra_lateral_rels
+ * finds the cheapest path-node but not parameralized by other relations
+ * involved in this GpuJoin.
  */
-static void
-calc_gpujoin_required_outer(PlannerInfo *root,
-							RelOptInfo *joinrel,
-							Path *outer_path,
-							List *inner_path_list,
-							Relids *p_required_outer,
-							Relids *p_extra_lateral_rels)
+static Path *
+gpujoin_find_cheapest_path(PlannerInfo *root,
+						   RelOptInfo *joinrel,
+						   RelOptInfo *inputrel)
 {
+	Path	   *input_path = inputrel->cheapest_total_path;
+	Relids		other_relids;
+	ListCell   *lc;
+
+	other_relids = bms_difference(joinrel->relids, inputrel->relids);
+	if (bms_overlap(PATH_REQ_OUTER(input_path), other_relids))
+	{
+		input_path = NULL;
+		foreach (lc, inputrel->pathlist)
+		{
+			Path   *curr_path = lfirst(lc);
+
+			if (bms_overlap(PATH_REQ_OUTER(curr_path), other_relids))
+				continue;
+			if (input_path == NULL ||
+				input_path->total_cost > curr_path->total_cost)
+				input_path = curr_path;
+		}
+	}
+	bms_free(other_relids);
+
+	return input_path;
 }
 
 /*
- * try_gpujoin_path
+ * gpujoin_calc_required_outer
  *
- * It tries to construct N-way GpuJoinPath
+ * calculation and validation of required_outer for this GpuJoin.
+ * Entire logic is described in calc_non_nestloop_required_outer()
  */
-static void
-try_gpujoin_path(PlannerInfo *root,
-				 RelOptInfo *joinrel,
-				 double nrows_dev_output,
-				 Path *outer_path,
-				 List *join_type_list,
-                 List *inner_path_list,
-				 List *hash_quals_list,
-				 List *join_quals_list,
-				 List *host_quals,
-				 Relids param_source_rels)
+static bool
+gpujoin_calc_required_outer(PlannerInfo *root,
+							RelOptInfo *joinrel,
+							Path *outer_path,
+							List *inner_path_list,
+							Relids param_source_rels,
+							Relids *p_required_outer)
 {
-	ParamPathInfo  *param_info;
-	Relids			outer_relids = bms_copy(outer_path->parent->relids);
-	Relids			required_outer = NULL;
-	Relids			extra_lateral_rels = NULL;
-	List		   *restrictlist = extra->restrictlist;
-	ListCell	   *lc1;
-	ListCell	   *lc2;
-	bool			support_bulkload = false;
+	Relids		outer_paramrels = PATH_REQ_OUTER(outer_path);
+	Relids		required_outer = NULL;
+	Relids		extra_lateral_rels = NULL;
+	ListCell   *lc1;
+	ListCell   *lc2;
 
-
-#if 1
 	/*
-     * XXX - JoinPathExtraData gives us outer relids, but assumes 2-way
-	 *       join, so we calculate these values for our purpose.
-     */
+	 * NOTE: Path-nodes that require relations being involved this
+	 * GpuJoin shall be dropped at gpujoin_find_cheapest_path
+	 */
+	Assert(!bms_overlap(outer_paramrels, joinrel->relids));
+	required_outer = bms_copy(outer_paramrels);
+
+	/* also, for each inner path-nodes */
 	foreach (lc1, inner_path_list)
 	{
 		Path   *inner_path = (Path *) lfirst(lc1);
 		Relids	inner_paramrels = PATH_REQ_OUTER(inner_path);
-		Relids	outer_paramrels = PATH_REQ_OUTER(outer_path);
 
-		/* neither path can require rels from the other */
-		Assert(!bms_overlap(outer_paramrels, inner_path->parent->relids));
-		Assert(!bms_overlap(inner_paramrels, outer_path->parent->relids));
-		/* form the union ... */
-		required_outer = bms_union(outer_paramrels, inner_paramrels);
-
-		foreach (lc2, root->placeholder_list)
-		{
-			PlaceHolderInfo *phinfo = (PlaceHolderInfo *) lfirst(lc2);
-
-			/* PHVs without lateral refs can be skipped over quickly */
-			if (phinfo->ph_lateral == NULL)
-				continue;
-
-			/*
-			 * Is it due to be evaluated at this join, and not in either
-			 * input?
-			 */
-			if (bms_is_subset(phinfo->ph_eval_at, joinrel->relids) &&
-				!bms_is_subset(phinfo->ph_eval_at, outer_relids) &&
-				!bms_is_subset(phinfo->ph_eval_at, inner_relids))
-			{
-				/* Yes, remember its lateral rels */
-				extra_lateral_rels = bms_add_members(extra_lateral_rels,
-													 phinfo->ph_lateral);
-			}
-		}
-		/* (outer + inner) is the outer of next depth */
-		outer_relids = bms_add_members(outer_relids, inner_relids);
+		Assert(!bms_overlap(inner_paramrels, joinrel->relids));
+		required_outer = bms_add_members(required_outer, inner_paramrels);
 	}
-
-	if (required_outer && !bms_overlap(required_outer, param_source_rels))
-	{
-		bms_free(required_outer);
-		return;
-	}
-	required_outer = bms_add_members(required_outer, extra_lateral_rels);
-#endif
 
 	/*
-	 * Check availability of bulkload in this joinrel. If child GpuJoin
-	 * is merginable, both of nodes have to support bulkload.
+	 * Check extra lateral references by PlaceHolderVars
 	 */
-	if (host_quals == NIL)
+	foreach (lc1, root->placeholder_list)
 	{
-		foreach (lc, joinrel->reltargetlist)
-		{
-			Expr   *expr = lfirst(lc);
+		PlaceHolderInfo *phinfo = (PlaceHolderInfo *) lfirst(lc1);
 
-			if (!IsA(expr, Var) &&
-				!pgstrom_codegen_available_expression(expr))
+		/* PHVs without lateral refs can be skipped over quickly */
+		if (phinfo->ph_lateral == NULL)
+			continue;
+		/* PHVs selection that shall be evaluated in this GpuJoin */
+		if (!bms_is_subset(phinfo->ph_eval_at, joinrel->relids))
+			continue;
+		if (bms_is_subset(phinfo->ph_eval_at, outer_relids))
+			continue;
+		foreach (lc2, inner_path_list)
+		{
+			Path   *inner_path = (Path *) lfirst(lc2);
+
+			if (bms_is_subset(phinfo->ph_eval_at, inner_path->parent->relids))
 				break;
 		}
-		if (lc == NULL)
-			support_bulkload = true;
+		/* Yes, remember its lateral rels */
+		if (lc2 == NULL)
+			extra_lateral_rels = bms_add_members(extra_lateral_rels,
+												 phinfo->ph_lateral);
 	}
 
 	/*
-	 * ParamPathInfo of this join
-	 *
-	 * XXXX - we may need to check it during gpujoin_add_join_path()
-	 * If host-only qualifier is attached, it breaks GpuJoin
-	 * Also, ppi_clauses will be extended?
-	 * sjinfo shall be returned by join_is_legal() or simply set up
+	 * Validation checks
 	 */
-	param_info = get_joinrel_parampathinfo(root,
-										   joinrel,
-										   outer_path,
-										   inner_path,
-										   extra->sjinfo,
-										   required_outer,
-										   &restrictlist);
+	if (required_outer && !bms_overlap(required_outer, param_source_rels))
+		return false;
 
-	/*
-	 * Try GpuHashJoin logic
-	 */
-	if (enable_gpuhashjoin && hash_quals != NIL)
-	{
-		create_gpujoin_path(root, joinrel, jointype,
-							outer_path, inner_path,
-							extra->sjinfo, param_info, required_outer,
-							hash_quals, join_quals, host_quals,
-							support_bulkload, false, nrows_dev_output);
-	}
+	*p_required_outer = bms_add_members(required_outer, extra_lateral_rels);
 
-	/*
-	 * Try GpuNestLoop logic
-	 */
-	if (enable_gpunestloop &&
-		(jointype == JOIN_INNER || jointype == JOIN_LEFT))
-	{
-	    create_gpujoin_path(root, joinrel, jointype,
-							outer_path, inner_path,
-							extra->sjinfo, param_info, required_outer,
-							NIL, join_quals, host_quals,
-							support_bulkload, false, nrows_dev_output);
-	}
-	return;
+	return true;
 }
 
 /*
@@ -1178,15 +1145,19 @@ gpujoin_add_join_path(PlannerInfo *root,
 					  JoinType jointype,
 					  JoinPathExtraData *extra)
 {
-	Path	   *outer_path = outerrel->cheapest_total_path;
-	Path	   *inner_path = innerrel->cheapest_total_path;
-	List	   *restrict_list = extra->restrictlist;
+	RelOptInfo *joinrel_curr;
+	Path	   *outer_path;
+	Path	   *inner_path;
+	List	   *restrict_clauses = extra->restrictlist;
 	List	   *join_type_list = NIL;
 	List	   *inner_path_list = NIL;
 	List	   *hash_quals_list = NIL;
 	List	   *join_quals_list = NIL;
 	List	   *host_quals = NIL;
+	SpecialJoinInfo *sjinfo;
+	SpecialJoinInfo  sjinfo_data;
 	double		nrows_dev_output = -1.0;
+	bool		support_bulkload;
 	bool		is_last_depth = true;
 
 	/* calls secondary module if exists */
@@ -1202,6 +1173,42 @@ gpujoin_add_join_path(PlannerInfo *root,
 	if (!pgstrom_enabled)
 		return;
 
+	/*
+	 * check bulk-load capability around targetlist of joinrel.
+	 * it may be turned off according to the host_quals if any.
+	 */
+	foreach (lc, joinrel->reltargetlist)
+	{
+		Expr   *expr = lfirst(lc);
+
+		if (!IsA(expr, Var) && !pgstrom_codegen_available_expression(expr))
+		{
+			support_bulkload = false;
+			break;
+		}
+	}
+
+	/*
+	 * Find out the cheapest inner and outer path from the standpoint
+	 * of total_cost, but not be parametalized by other relations in
+	 * this GpuJoin
+	 */
+	outer_path = gpujoin_find_cheapest_path(root, joinrel_base, outerrel);
+	inner_path = gpujoin_find_cheapest_path(root, joinrel_base, innerrel);
+	inner_path_list = lconst(inner_path, inner_path_list);
+	if (!gpujoin_calc_required_outer(root, joinrel_base,
+									 outer_path, inner_path_list,
+									 extra->param_source_rels,
+									 &required_outer))
+		return;
+
+	param_info = get_joinrel_parampathinfo(root,
+										   joinrel,
+										   outer_path,
+										   inner_path,
+										   extra->sjinfo,
+										   required_outer,
+										   &restrict_clauses);
 	for (;;)
 	{
 		List	   *hash_quals = NIL;
@@ -1214,6 +1221,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 		if (jointype != JOIN_INNER && jointype != JOIN_FULL &&
 			jointype != JOIN_RIGHT && jointype != JOIN_LEFT)
 			return;
+		join_type_list = lcons_int((int)jointype, join_type_list);
 
 		/*
 		 * Check restrictions of joinrel in this level
@@ -1229,6 +1237,11 @@ gpujoin_add_join_path(PlannerInfo *root,
 			 */
 			if (!pgstrom_codegen_available_expression(rinfo->clause))
 			{
+				/* only last depth can have host quals */
+				if (!is_last_depth)
+					return;
+				/* host quals turned off bulk-load capability */
+				support_bulkload = false;
 				host_quals = lappend(host_quals, rinfo);
 				continue;
 			}
@@ -1269,54 +1282,44 @@ gpujoin_add_join_path(PlannerInfo *root,
 		if (!join_quals)
 			return;
 
-		/*
-		 * Host only qualifier is only acceptable on the last depth,
-		 * because intermediation results depends on the result of
-		 * previous stage.
-		 */
-		if (is_last_depth || host_quals != NIL)
-			return;
+		join_quals_list = lcons(join_quals, join_quals_list);
+		hash_quals_list = lcons(hash_quals, hash_quals_list);
 
 		/*
-		 * Find out an outer path with cheapest startup cost,
-		 * but not parameterized by inner relation.
+		 * OK, try GpuHashJoin logic
 		 */
-		if (PATH_PARAM_BY_REL(outer_path, innerrel))
+		if (enable_gpuhashjoin && hash_quals != NIL)
 		{
-			outer_path = NULL;
-			foreach (lc, outerrel->pathlist)
-			{
-				Path   *curr_path = lfirst(lc);
-
-				if (!PATH_PARAM_BY_REL(curr_path, innerrel) &&
-					(outer_path == NULL ||
-					 outer_path->total_cost > curr_path->total_cost))
-					outer_path = curr_path;
-			}
-			if (!outer_path)
-				return;
+			create_gpujoin_path(root,
+								joinrel,
+								join_type_list,
+								outer_path,
+								inner_path_list,
+								hash_quals_list,
+								join_quals_list,
+								host_quals,
+								support_bulkload);
 		}
 
 		/*
-		 * Find out an inner path with cheapest total cost,
-		 * but not parameterized by outer relation
+		 * OK, try GpuNestLoop logic
 		 */
-		if (PATH_PARAM_BY_REL(inner_path, outerrel))
+		if (enable_gpunestloop &&
+			(jointype == JOIN_INNER || jointype == JOIN_LEFT))
 		{
-			inner_path = NULL;
-			foreach (lc, innerrel->pathlist)
-			{
-				Path   *curr_path = lfirst(lc);
-
-				if (!PATH_PARAM_BY_REL(curr_path, outerrel) &&
-					(inner_path == NULL ||
-					 inner_path->total_cost > curr_path->total_cost))
-					inner_path = curr_path;
-			}
-			if (!inner_path)
-				return;
+			create_gpujoin_path(root,
+								joinrel,
+								join_type_list,
+								outer_path,
+								inner_path_list,
+								hash_quals_list,
+								join_quals_list,
+								host_quals,
+								support_bulkload);
 		}
 
+
+#if 0
 		/*
 		 * Estimation of the nrows_ratio (# of device output rows per
 		 * # of input rows). It shall be adjusted during execution time,
@@ -1325,12 +1328,14 @@ gpujoin_add_join_path(PlannerInfo *root,
 		 * MEMO: We may add cost if outer input stream may be divided
 		 * to multiple portions (in case of nitems != oitems_nums).
 		 */
-		if (nrows_dev_output < 0.0)
+		if (is_last_depth)
 		{
 			if (host_quals == NIL)
 				nrows_dev_output = joinrel->rows;
 			else
 			{
+				
+
 				RelOptInfo		dummy;
 
 				set_joinrel_size_estimates(root, &dummy,
@@ -1341,32 +1346,18 @@ gpujoin_add_join_path(PlannerInfo *root,
 				nrows_dev_output = dummy.rows;
 			}
 		}
-		inner_path_list = lcons(inner_path, inner_path_list);
-		join_type_list = lcons_int((int)jointype, join_type_list);
-		join_quals_list = lcons(join_quals, join_quals_list);
-		hash_quals_list = lcons(hash_quals, hash_quals_list);
-		required_outer = calc_gpujoin_required_outer(root, joinrel,
-													 outer_path,
-													 inner_path_list);
-		extra_lateral_rels = calc_gpujoin_extra_lateral_rels(root, joinrel,
-															 outer_path,
-															 inner_path_list);
-		/*
-		 * Try to make GpuJoin path with these inner paths and outer path.
-		 */
-		try_gpujoin_path(root,
-						 joinrel,
-						 nrows_dev_output,
-						 outer_path,
-						 join_type_list,
-						 inner_path_list,
-						 hash_quals_list,
-						 join_quals_list,
-						 host_quals,
-						 extra->param_source_rels);
+		else
+			Assert(host_quals == NIL);
 
+
+
+
+
+#endif
 		/*
-		 * Try to pull up outer join path, if available
+		 * OK, we could add GpuJoin path-nodes probably.
+		 * If outer_path node is (known) join path, we try to pull-up it
+		 * to process much more relations join in GPU device at once.
 		 */
 		if (pgstrom_path_is_gpujoin(outerpath))
 		{
@@ -1411,23 +1402,60 @@ gpujoin_add_join_path(PlannerInfo *root,
 				 IsA(outerpath, MergePath))
 		{
 			JoinPath   *joinpath = (JoinPath *) outerpath;
-			RelOptInfo *outerrel_orig = outerrel_orig;
+			ParamPathInfo  *ppi_outer;
 
+			if (bms_overlap(PATH_REQ_OUTER(joinpath->innerjoinpath),
+							joinpath->outerjoinpath->parent->relids) ||
+				bms_overlap(PATH_REQ_OUTER(joinpath->outerjoinpath),
+							joinpath->innerjoinpath->parent->relids))
+			{
+				/*
+				 * TODO: picks up alternative inner and outer
+				 * joinpath includes these inner/outer
+				 */
+				return;
+			}
+			Assert(joinpath == outer_rel);
 			jointype = joinpath->jointype;
 			outer_path = joinpath->outerjoinpath;
 			outerrel = outer_path->parent;
 			inner_path = joinpath->innerjoinpath;
 			innerrel = inner_path->parent;
-			temprel = build_join_rel(root,
-									 outerrel_orig->relids,
-									 outerrel,
-									 innerrel,
-									 NULL,	/* should never be used */
-									 &restrict_list);
-			Assert(temprel == outerrel_orig);
+			restrict_list = joinpath->joinrestrictinfo;
+
+			ppi_outer = joinpath->path.param_info;
+			if (param_info)
+			{
+				/* Is it really needed? */
+				param_info = copyObject(param_info);
+				param_info->ppi_req_outer
+					= bms_union(param_info->ppi_req_outer,
+								ppi_outer->ppi_req_outer);
+				joinrel->ppilist = lappend(joinrel->ppilist, param_info);
+			}
+			else if (ppi_outer)
+			{
+				param_info = makeNode(ParamPathInfo);
+				param_info->ppi_req_outer = bms_copy(ppi_outer->ppi_req_outer);
+				param_info->rows = joinrel->rows;
+				param_info->ppi_clauses = NIL;
+				joinrel->ppilist = lappend(joinrel->ppilist, param_info);
+			}
 		}
 		else
 			break;
+
+
+		/*
+		 * XXX - calculation of required_outer but suitable to N-way join,
+		 * then give up immediately if param references are illigal.
+		 */
+		if (!gpujoin_calc_required_outer(root, joinrel_base,
+										 outer_path, inner_path_list,
+										 extra->param_source_rels,
+										 &required_outer))
+			return;
+
 
 		is_last_depth = false;
 	}
