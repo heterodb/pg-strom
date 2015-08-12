@@ -1858,10 +1858,13 @@ pgstrom_compute_workgroup_size(size_t *p_grid_size,
 	}
 
 	/*
-	 * Cut-off block-size, if it is larger than nitems
+	 * Adjustment of the block size, if it is larger than nitems including
+	 * the case when nitems == 0. We expects block_size it at least equal
+	 * to the WARP_SIZE.
 	 */
 	if (block_size > nitems)
 		block_size = (nitems + warp_size - 1) & ~(warp_size - 1);
+	block_size = Max(block_size, warp_size);
 
 	*p_block_size = block_size;
 	*p_grid_size = (nitems + block_size - 1) / block_size;
@@ -1938,7 +1941,9 @@ pgstrom_compute_workgroup_size_2d(size_t *p_grid_xsize,
 	root_block_size = (int) sqrt(max_block_size);
 
 	block_ysize = Min(root_block_size, y_nitems);
+	block_ysize = Max(block_ysize, 1);
 	block_xsize = ((max_block_size / block_ysize) & ~(warp_size - 1));
+	block_xsize = Max(block_xsize, 1);
 
 	/*
 	 * adjust block_xsize and _ysize according to the expected shared memory
@@ -1967,8 +1972,8 @@ pgstrom_compute_workgroup_size_2d(size_t *p_grid_xsize,
 	/* put results */
 	*p_block_xsize = block_xsize;
 	*p_block_ysize = block_ysize;
-	*p_grid_xsize = (x_nitems + block_xsize - 1) / block_xsize;
-	*p_grid_ysize = (y_nitems + block_ysize - 1) / block_ysize;
+	*p_grid_xsize = Max((x_nitems + block_xsize - 1) / block_xsize, 1);
+	*p_grid_ysize = Max((y_nitems + block_ysize - 1) / block_ysize, 1);
 }
 
 /*
