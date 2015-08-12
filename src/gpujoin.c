@@ -639,7 +639,7 @@ retry:
 		inner_ntuples = Max(inner_path->rows *
 							pgstrom_chunk_size_margin() /
 							(double)gpath->inners[i].nbatches,
-							1000.0);
+							100.0);
 
 		/*
 		 * NOTE: RelOptInfo->width is not reliable for base relations 
@@ -701,8 +701,8 @@ retry:
 		/*
 		 * cost to load all the tuples to the inner buffer
 		 */
-		startup_cost += (inner_path->total_cost +
-						 cpu_tuple_cost * inner_path->rows);
+		startup_cost += inner_path->total_cost;
+
 		/*
 		 * cost for join_qual startup
 		 */

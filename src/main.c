@@ -122,7 +122,7 @@ pgstrom_init_misc_guc(void)
 							 "Cost to setup GPU device to run",
 							 NULL,
 							 &pgstrom_gpu_setup_cost,
-							 1000 * DEFAULT_SEQ_PAGE_COST,
+							 3000 * DEFAULT_SEQ_PAGE_COST,
 							 0,
 							 DBL_MAX,
 							 PGC_USERSET,
