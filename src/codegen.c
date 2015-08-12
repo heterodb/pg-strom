@@ -556,9 +556,9 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	  "t/F:timetz_mi_interval" },
 	/* timestamptz +/- interval => timestamptz */
 	{ "timestamptz_pl_interval", 2, {TIMESTAMPTZOID, INTERVALOID},
-	  "F/t:timestamptz_pl_interval" },
+	  "t/F:timestamptz_pl_interval" },
 	{ "timestamptz_mi_interval", 2, {TIMESTAMPTZOID, INTERVALOID},
-	  "F/t:timestamptz_mi_interval" },
+	  "t/F:timestamptz_mi_interval" },
 	/* interval operators */
 	{ "interval_um", 1, {INTERVALOID}, "t/F:interval_um" },
 	{ "interval_pl", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_pl" },
@@ -697,11 +697,11 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 
 	/* comparison between intervals */
 	{ "interval_eq", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_eq" },
-	{ "interval_ne", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_eq" },
-	{ "interval_lt", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_eq" },
-	{ "interval_le", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_eq" },
-	{ "interval_ge", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_eq" },
-	{ "interval_gt", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_eq" },
+	{ "interval_ne", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_ne" },
+	{ "interval_lt", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_lt" },
+	{ "interval_le", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_le" },
+	{ "interval_ge", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_ge" },
+	{ "interval_gt", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_gt" },
 	{ "interval_cmp", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_cmp" },
 
 	/* overlaps() */
