@@ -742,6 +742,10 @@ retry:
 			 * It evaluates join-qual for each pair of outer and inner tuple.
 			 * So, usually, its run_cost is higher than GpuHashJoin
 			 */
+			/* cost to load inner heap tuples by CPU */
+			startup_cost += cpu_tuple_cost * inner_path->rows;
+
+			/* cost to evaluate join qualifiers */
 			run_cost += (join_cost[i].per_tuple
                          * outer_ntuples
 						 * clamp_row_est(inner_path->rows));
