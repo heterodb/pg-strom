@@ -721,11 +721,11 @@ retry:
 			 * table by GPU.
 			 */
 			double		hash_nsteps
-				= inner_path->rows / (double) gpath->inners[i].hash_nslots;
+				= inner_ntuples / (double) gpath->inners[i].hash_nslots;
 
 			/* cost to compute inner hash value by CPU */
 			startup_cost += (cpu_operator_cost * num_hashkeys *
-							 inner_path->rows);
+							 inner_ntuples);
 			/* cost to compute outer hash value by GPU */
 			run_cost += (pgstrom_gpu_operator_cost * num_hashkeys *
 						 outer_ntuples);
@@ -743,12 +743,12 @@ retry:
 			 * So, usually, its run_cost is higher than GpuHashJoin
 			 */
 			/* cost to load inner heap tuples by CPU */
-			startup_cost += cpu_tuple_cost * inner_path->rows;
+			startup_cost += cpu_tuple_cost * inner_ntuples;
 
 			/* cost to evaluate join qualifiers */
 			run_cost += (join_cost[i].per_tuple
                          * outer_ntuples
-						 * clamp_row_est(inner_path->rows));
+						 * clamp_row_est(inner_ntuples));
 		}
 		/* iteration if nbatches > 1 */
 		if (gpath->inners[i].nbatches > 1)
