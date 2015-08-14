@@ -670,9 +670,7 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 	pds = MemoryContextAllocZero(gmcxt, sizeof(pgstrom_data_store));
 
 	/* allocation of kds */
-	pds->kds_length = (STROMALIGN(offsetof(kern_data_store,
-										   colmeta[tupdesc->natts])) +
-					   STROMALIGN(length));
+	pds->kds_length = STROMALIGN_DOWN(length);
 	pds->kds_offset = 0;
 
 	if (!file_mapped)
