@@ -344,7 +344,8 @@ typedef struct devfunc_info {
  */
 typedef struct pgstrom_data_store
 {
-	dlist_node	pds_chain;		/* link to GpuContext->pds_list */
+	dlist_node	pds_chain;	/* link to GpuContext->pds_list */
+	cl_int		refcnt;		/* reference counter */
 	FileName	kds_fname;	/* filename, if file-mapped */
 	Size		kds_offset;	/* offset of mapped file */
 	Size		kds_length;	/* length of the kernel data store */
@@ -523,6 +524,7 @@ extern bool kern_fetch_data_store(TupleTableSlot *slot,
 								  kern_data_store *kds,
 								  size_t row_index,
 								  HeapTuple tuple);
+extern pgstrom_data_store *pgstrom_acquire_data_store(pgstrom_data_store *pds);
 extern void pgstrom_release_data_store(pgstrom_data_store *pds);
 extern void pgstrom_expand_data_store(GpuContext *gcontext,
 									  pgstrom_data_store *pds,

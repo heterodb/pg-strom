@@ -221,6 +221,7 @@ cudaHostMemFree(MemoryContext context, void *pointer)
 		((char *)pointer - offsetof(cudaHostMemChunk, chunk_data));
 	Assert(HOSTMEM_CHUNK_MAGIC(chunk) == HOSTMEM_CHUNK_MAGIC_CODE);
 	chm_block = chunk->chm_block;
+	Assert(memset(pointer, 0xc7, chunk->chunk_head.requested_size) == pointer);
 
 	while (true)
 	{

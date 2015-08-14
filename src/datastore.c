@@ -425,9 +425,24 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 	return kern_fetch_data_store(slot, pds->kds, row_index, tuple);
 }
 
+pgstrom_data_store *
+pgstrom_acquire_data_store(pgstrom_data_store *pds)
+{
+	Assert(pds->refcnt > 0);
+
+	pds->refcnt++;
+
+	return pds;
+}
+
 void
 pgstrom_release_data_store(pgstrom_data_store *pds)
 {
+	Assert(pds->refcnt > 0);
+	/* acquired by multiple owners? */
+	if (--pds->refcnt > 0)
+		return;
+
 	/* detach from the GpuContext */
 	if (pds->pds_chain.prev && pds->pds_chain.next)
 	{
@@ -668,6 +683,7 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 
 	/* allocation of pds */
 	pds = MemoryContextAllocZero(gmcxt, sizeof(pgstrom_data_store));
+	pds->refcnt = 1;	/* owned by the caller at least */
 
 	/* allocation of kds */
 	pds->kds_length = STROMALIGN_DOWN(length);
@@ -768,6 +784,7 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 
 	/* allocation of pds */
 	pds = MemoryContextAllocZero(gmcxt, sizeof(pgstrom_data_store));
+	pds->refcnt = 1;	/* owned by the caller at least */
 
 	/* allocation of kds */
 	pds->kds_length = KERN_DATA_STORE_SLOT_LENGTH_ESTIMATION(tupdesc, nrooms);

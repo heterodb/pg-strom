@@ -287,7 +287,7 @@ typedef struct pgstrom_multirels
 	Size			ojmap_length;	/* length of outer-join map */
 	pgstrom_data_store **inner_chunks;	/* array of inner PDS */
 	cl_int			n_attached;	/* Number of attached tasks */
-	cl_int		   *refcnt;		/* Reference counter for each context */
+	cl_int		   *refcnt;		/* Reference counter of each GpuContext */
 	CUdeviceptr	   *m_kmrels;	/* GPU memory for each CUDA context */
 	CUevent		   *ev_loaded;	/* Sync object for each CUDA context */
 	CUdeviceptr	   *m_ojmaps;	/* GPU memory for outer join maps */
@@ -3298,16 +3298,19 @@ retry:
 	{
 		pgstrom_multirels *pmrels;
 
-		/* unlink previous inner multi-relations */
+		/*
+		 * NOTE: gpujoin_inner_preload() has to be called prior to
+		 * multirels_detach_buffer() because some inner chunk (PDS)
+		 * may be reused on the next loop, thus, refcnt of the PDS
+		 * should not be touched to zero.
+		 */
+		pmrels = gpujoin_inner_preload(gjs);
 		if (gjs->curr_pmrels)
 		{
 			Assert(gjs->gts.scan_done);
 			multirels_detach_buffer(gjs->curr_pmrels);
 			gjs->curr_pmrels = NULL;
 		}
-
-		/* load an inner multi-relations buffer */
-		pmrels = gpujoin_inner_preload(gjs);
 		if (!pmrels)
 			return NULL;	/* end of inner multi-relations */
 		gjs->curr_pmrels = multirels_attach_buffer(pmrels);
@@ -4689,6 +4692,8 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 				gpujoin_inner_heap_preload(gjs, istate, pmrels);
 			scan_forward = true;
 		}
+		else
+			pgstrom_acquire_data_store(istate->curr_chunk);
 		Assert(istate->curr_chunk != NULL);
 		pds = istate->curr_chunk;
 
@@ -4727,9 +4732,14 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 static pgstrom_multirels *
 multirels_attach_buffer(pgstrom_multirels *pmrels)
 {
-	Assert(pmrels->n_attached >= 0);
+	int		i, num_rels = pmrels->kern.nrels;
 
+	/* attach this pmrels */
+	Assert(pmrels->n_attached >= 0);
 	pmrels->n_attached++;
+	/* also, data store */
+	for (i=0; i < num_rels; i++)
+		pgstrom_acquire_data_store(pmrels->inner_chunks[i]);
 
 	return pmrels;
 }
@@ -4917,6 +4927,13 @@ multirels_colocate_outer_join_maps(pgstrom_multirels *pmrels,
 static void
 multirels_detach_buffer(pgstrom_multirels *pmrels)
 {
+	int		i, num_rels = pmrels->kern.nrels;
+
+	/* release data store */
+	for (i=0; i < num_rels; i++)
+		pgstrom_release_data_store(pmrels->inner_chunks[i]);
+
+	/* Also, this pmrels */
 	Assert(pmrels->n_attached > 0);
 	if (--pmrels->n_attached == 0)
 	{
@@ -4928,13 +4945,6 @@ multirels_detach_buffer(pgstrom_multirels *pmrels)
 			Assert(pmrels->refcnt[index] == 0);
 			if (pmrels->m_ojmaps[index] != 0UL)
 				__gpuMemFree(gcontext, index, pmrels->m_ojmaps[index]);
-		}
-
-		for (index=0; index < pmrels->kern.nrels; index++)
-		{
-			pgstrom_data_store	   *pds = pmrels->inner_chunks[index];
-
-			pgstrom_release_data_store(pds);
 		}
 		pfree(pmrels);
 	}
