@@ -1097,7 +1097,6 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 	assert(kresults->nrels == kgjoin->max_depth + 1);
 	assert(kds_src->format == KDS_FORMAT_ROW &&
 		   kds_dst->format == KDS_FORMAT_ROW);
-	assert(kds_dst->usage == 0);
 
 	/*
 	 * Update nitems of kds_dst. note that get_global_id(0) is not always
