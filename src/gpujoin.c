@@ -97,6 +97,7 @@ typedef struct
 	bool		outer_bulkload;
 	double		bulkload_density;
 	Expr	   *outer_quals;
+	double		outer_ratio;
 	/* for each depth */
 	List	   *nrows_ratio;
 	List	   *kmrels_ratio;
@@ -131,6 +132,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs,
 					makeInteger(double_as_long(gj_info->bulkload_density)));
 	exprs = lappend(exprs, gj_info->outer_quals);
+	privs = lappend(privs, makeInteger(double_as_long(gj_info->outer_ratio)));
 	/* for each depth */
 	privs = lappend(privs, gj_info->nrows_ratio);
 	privs = lappend(privs, gj_info->kmrels_ratio);
@@ -171,6 +173,7 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->bulkload_density =
 		long_as_double(intVal(list_nth(privs, pindex++)));
 	gj_info->outer_quals = list_nth(exprs, eindex++);
+	gj_info->outer_ratio = long_as_double(intVal(list_nth(privs, pindex++)));
 	/* for each depth */
 	gj_info->nrows_ratio = list_nth(privs, pindex++);
 	gj_info->kmrels_ratio = list_nth(privs, pindex++);
@@ -248,6 +251,7 @@ typedef struct
 	/* expressions to be used in fallback path */
 	List		   *join_types;
 	ExprState	   *outer_quals;
+	double			outer_ratio;
 	List		   *hash_outer_keys;
 	List		   *join_quals;
 	/* current window of inner relations */
@@ -271,6 +275,7 @@ typedef struct
 	 * Properties of underlying inner relations
 	 */
 	int				num_rels;
+	size_t			source_nitems;
 	size_t			outer_nitems[GPUJOIN_MAX_DEPTH + 1];
 	innerState		inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinState;
@@ -1616,6 +1621,7 @@ create_gpujoin_plan(PlannerInfo *root,
 	gj_info.kmrels_length = gpath->kmrels_length;
 	gj_info.kresults_ratio = gpath->kresults_ratio;
 	gj_info.oitems_plan_nums = gpath->oitems_plan_nums;
+	gj_info.outer_ratio = 1.0;
 	gj_info.num_rels = gpath->num_rels;
 
 	for (i=0; i < gpath->num_rels; i++)
@@ -1688,14 +1694,17 @@ create_gpujoin_plan(PlannerInfo *root,
 	{
 		Query	   *parse = root->parse;
 		List	   *outer_quals = NIL;
+		double		outer_ratio = 1.0;
 		Plan	   *alter_plan;
 
 		alter_plan = pgstrom_try_replace_plannode(outer_plan,
 												  parse->rtable,
-												  &outer_quals);
+												  &outer_quals,
+												  &outer_ratio);
 		if (alter_plan)
 		{
 			gj_info.outer_quals = build_flatten_qualifier(outer_quals);
+			gj_info.outer_ratio = outer_ratio;
 			outer_plan = alter_plan;
 		}
 	}
@@ -1915,6 +1924,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	gjs->num_rels = gj_info->num_rels;
 	gjs->join_types = gj_info->join_types;
 	gjs->outer_quals = ExecInitExpr((Expr *)gj_info->outer_quals, ps);
+	gjs->outer_ratio = gj_info->outer_ratio;
 	gjs->gts.css.ss.ps.qual = (List *)
 		ExecInitExpr((Expr *)cscan->scan.plan.qual, ps);
 
@@ -2209,8 +2219,8 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		ExplainPropertyText("Bulkload", "Off", es);
 	else
 	{
-		char   *temp = psprintf("On (density: %.2f%%)",
-								100.0 * gjs->gts.scan_bulk_density);
+		temp = psprintf("On (density: %.2f%%)",
+						100.0 * gjs->gts.scan_bulk_density);
 		ExplainPropertyText("Bulkload", temp, es);
 	}
 
@@ -2219,6 +2229,16 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	{
 		temp = deparse_expression((Node *)gj_info->outer_quals,
 								  context, es->verbose, false);
+		if (es->analyze)
+			temp = psprintf("%s (%.2f%%, expected %.2f%%)",
+							temp,
+							100.0 * ((double) gjs->outer_nitems[0] /
+									 (double) gjs->source_nitems),
+							100.0 * gj_info->outer_ratio);
+		else
+			temp = psprintf("%s (%.2f%%)",
+							temp,
+							100.0 * gj_info->outer_ratio);
 		ExplainPropertyText("OuterQual", temp, es);
 	}
 
@@ -2260,7 +2280,7 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 
 		if (es->analyze)
 		{
-			size_t		nrows_in = gjs->outer_nitems[depth - 1];
+			size_t		nrows_in  = gjs->outer_nitems[depth - 1];
 			size_t		nrows_out = gjs->outer_nitems[depth];
 			cl_float	nrows_ratio
 				= int_as_float(list_nth_int(gj_info->nrows_ratio, depth - 1));
@@ -2270,15 +2290,15 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 							 nrows_in,
 							 nrows_out,
 							 100.0 * ((double) nrows_out /
-									  (double) nrows_in),
-							 100.0 * nrows_ratio);	// hoge
+									  (double) gjs->source_nitems),
+							 100.0 * nrows_ratio);
 		}
 		else
 		{
 			cl_float	nrows_ratio
 				= int_as_float(list_nth_int(gj_info->nrows_ratio, depth - 1));
 
-			appendStringInfo(&str, ", nrows_ratio: %.2f%%",
+			appendStringInfo(&str, ", nrows (ratio: %.2f%%)",
 							 100.0 * nrows_ratio);
 		}
 		snprintf(qlabel, sizeof(qlabel), "Depth %d", depth);
@@ -3541,9 +3561,10 @@ gpujoin_task_complete(GpuTask *gtask)
 		pgstrom_data_store *pds_src = pgjoin->pds_src;
 		kern_data_store	   *kds_src = pds_src->kds;
 		pgstrom_gpujoin	   *pgjoin_new;
+		cl_uint				kds_nitems = kds_src->nitems;
 		cl_int				i;
 
-		if (pgjoin->oitems_base + pgjoin->oitems_nums < kds_src->nitems)
+		if (pgjoin->oitems_base + pgjoin->oitems_nums < kds_nitems)
 		{
 			/* NOTE: The task completed has invalid outer input rows to
 			 * save the space of result buffer. Once we detach pds_src
@@ -3568,6 +3589,7 @@ gpujoin_task_complete(GpuTask *gtask)
 		}
 
 		/* Update statistics information */
+		gjs->source_nitems += kds_nitems;
 		for (i=0; i <= pgjoin->kern.num_rels; i++)
 			gjs->outer_nitems[i] += pgjoin->kern.outer_nitems[i];
 	}

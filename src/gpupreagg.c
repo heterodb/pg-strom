@@ -2755,6 +2755,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	AttrNumber	   *attr_maps = NULL;
 	Bitmapset	   *attr_refs = NULL;
 	List		   *outer_quals = NIL;
+	double			outer_ratio = 1.0;
 	bool			has_numeric = false;
 	bool			has_varlena = false;
 	ListCell	   *cell;
@@ -2814,7 +2815,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		outer_node = outerPlan(agg);
 		alter_node = pgstrom_try_replace_plannode(outer_node,
 												  pstmt->rtable,
-												  &outer_quals);
+												  &outer_quals,
+												  &outer_ratio);
 		if (alter_node)
 			outer_node = alter_node;
 		new_agg_strategy = agg->aggstrategy;
@@ -2831,7 +2833,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		outer_node = outerPlan(sort_node);
 		alter_node = pgstrom_try_replace_plannode(outer_node,
 												  pstmt->rtable,
-												  &outer_quals);
+												  &outer_quals,
+												  &outer_ratio);
 		if (alter_node)
 			outer_node = alter_node;
 		new_agg_strategy = agg->aggstrategy;
@@ -2851,7 +2854,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		outer_node = outerPlan(agg);
 		alter_node = pgstrom_try_replace_plannode(outer_node,
 												  pstmt->rtable,
-												  &outer_quals);
+												  &outer_quals,
+												  &outer_ratio);
 		if (alter_node)
 			outer_node = alter_node;
 		new_agg_strategy = AGG_HASHED;

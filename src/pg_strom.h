@@ -513,7 +513,8 @@ extern void subtract_tuplecost_if_bulkload(Cost *p_run_cost, Path *pathnode);
 extern double pgstrom_get_bulkload_density(Plan *child_plan);
 extern Plan *pgstrom_try_replace_plannode(Plan *child_plan,
 										  List *range_tables,
-										  List **pullup_quals);
+										  List **p_outer_quals,
+										  double *p_outer_ratio);
 extern pgstrom_data_store *BulkExecProcNode(PlanState *node);
 extern Datum pgstrom_fixup_kernel_numeric(Datum numeric_datum);
 extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
@@ -572,10 +573,12 @@ extern void pgstrom_init_datastore(void);
  */
 extern Plan *gpuscan_pullup_devquals(Plan *plannode,
 									 List *range_tables,
-									 List **pullup_quals);
+									 List **p_outer_quals,
+									 double *p_outer_ratio);
 extern Plan *gpuscan_try_replace_seqscan(SeqScan *seqscan,
 										 List *range_tables,
-										 List **pullup_quals);
+										 List **p_outer_quals,
+										 double *p_outer_ratio);
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern void pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,
