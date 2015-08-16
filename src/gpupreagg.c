@@ -868,6 +868,7 @@ makeZeroConst(Oid consttype, int32 consttypmod, Oid constcollid)
 /*
  * functions to make expression node of alternative aggregate/functions
  *
+ * make_expr_typecast() - makes type case to the destination type
  * make_expr_conditional() - makes the supplied expression conditional
  *   using CASE WHEN ... THEN ... ELSE ... END clause.
  * make_altfunc_expr() - makes alternative function expression
@@ -881,6 +882,11 @@ make_expr_typecast(Expr *expr, Oid target_type)
 	HeapTuple	tup;
 	Form_pg_cast cast;
 
+	/*
+	 * NOTE: Var->vano shall be replaced to INDEX_VAR on the following
+	 * make_altfunc_expr(), so we keep the expression as-is, at this
+	 * moment.
+	 */
 	if (source_type == target_type)
 		return expr;
 
@@ -933,6 +939,11 @@ make_expr_conditional(Expr *expr, Expr *filter, Expr *defresult)
 	CaseWhen   *case_when;
 	CaseExpr   *case_expr;
 
+	/*
+	 * NOTE: Var->vano shall be replaced to INDEX_VAR on the following
+	 * make_altfunc_expr(), so we keep the expression as-is, at this
+	 * moment.
+	 */
 	Assert(exprType((Node *) filter) == BOOLOID);
 	if (defresult)
 		defresult = expr_fixup_varno(defresult, OUTER_VAR, INDEX_VAR);
@@ -946,8 +957,8 @@ make_expr_conditional(Expr *expr, Expr *filter, Expr *defresult)
 
 	/* in case when the 'filter' is matched */
 	case_when = makeNode(CaseWhen);
-	case_when->expr = expr_fixup_varno(filter, OUTER_VAR, INDEX_VAR);
-	case_when->result = expr_fixup_varno(expr, OUTER_VAR, INDEX_VAR);
+	case_when->expr = filter;
+	case_when->result = expr;
 	case_when->location = -1;
 
 	/* case body */
