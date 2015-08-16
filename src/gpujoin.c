@@ -269,9 +269,9 @@ typedef struct
 
 	/*
 	 * Properties of underlying inner relations
-	 *
 	 */
 	int				num_rels;
+	size_t			outer_nitems[GPUJOIN_MAX_DEPTH + 1];
 	innerState		inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinState;
 
@@ -412,21 +412,19 @@ pgstrom_plan_is_gpujoin_bulkinput(Plan *plannode)
  * Dumps candidate GpuJoinPath for debugging
  */
 static void
-__dump_gpujoin_path(StringInfo buf, PlannerInfo *root,
-					RelOptInfo *outer_rel, RelOptInfo *inner_rel,
-					JoinType join_type, const char *join_label)
+__dump_gpujoin_path(StringInfo buf, PlannerInfo *root, Path *pathnode)
 {
-	Relids		outer_relids = outer_rel->relids;
-	Relids		inner_relids = inner_rel->relids;
+	RelOptInfo *rel = pathnode->parent;
+	Relids		relids = rel->relids;
 	List	   *range_tables = root->parse->rtable;
-	int			rtindex;
-	bool		is_first;
+	int			rtindex = -1;
+	bool		is_first = true;
 
-	/* outer relations */
-	appendStringInfo(buf, "(");
-	is_first = true;
-	rtindex = -1;
-	while ((rtindex = bms_next_member(outer_relids, rtindex)) >= 0)
+
+	if (rel->reloptkind != RELOPT_BASEREL)
+		appendStringInfo(buf, "(");
+
+	while ((rtindex = bms_next_member(relids, rtindex)) >= 0)
 	{
 		RangeTblEntry  *rte = rt_fetch(rtindex, range_tables);
 		Alias		   *eref = rte->eref;
@@ -437,27 +435,8 @@ __dump_gpujoin_path(StringInfo buf, PlannerInfo *root,
 		is_first = false;
 	}
 
-	/* join logic */
-	appendStringInfo(buf, ") %s%s (",
-					 join_type == JOIN_FULL ? "F" :
-					 join_type == JOIN_LEFT ? "L" :
-					 join_type == JOIN_RIGHT ? "R" : "I",
-					 join_label);
-
-	/* inner relations */
-	is_first = true;
-	rtindex = -1;
-	while ((rtindex = bms_next_member(inner_relids, rtindex)) >= 0)
-	{
-		RangeTblEntry  *rte = rt_fetch(rtindex, range_tables);
-		Alias		   *eref = rte->eref;
-
-		appendStringInfo(buf, "%s%s",
-						 is_first ? "" : ", ",
-						 eref->aliasname);
-		is_first = false;
-	}
-	appendStringInfo(buf, ")");
+	if (rel->reloptkind != RELOPT_BASEREL)
+		appendStringInfo(buf, ")");
 }
 
 /*
@@ -588,7 +567,10 @@ cost_gpujoin(PlannerInfo *root,
 	for (i=0; i < num_rels; i++)
 	{
 		kresults_ratio = Max(kresults_ratio,
-			(double)(i+2) * gpath->inners[i].join_nrows / outer_rel->rows);
+							 (double)(i+2)
+							 * gpath->inners[i].join_nrows
+							 * pgstrom_chunk_size_margin()
+							 / outer_rel->rows);
 	}
 	gpath->kresults_ratio = kresults_ratio;
 
@@ -834,18 +816,24 @@ retry:
 	if (client_min_messages <= DEBUG1)
 	{
 		StringInfoData buf;
-		int			num_rels = gpath->num_rels;
-		RelOptInfo *outer_rel = gpath->outer_path->parent;
-		RelOptInfo *inner_rel = gpath->inners[num_rels - 1].scan_path->parent;
-		JoinType	join_type = gpath->inners[num_rels - 1].join_type;
-		bool		is_nestloop
-			= (gpath->inners[num_rels - 1].hash_quals == NIL);
 
 		initStringInfo(&buf);
-		__dump_gpujoin_path(&buf, root, outer_rel, inner_rel,
-							join_type, is_nestloop ? "NL" : "HJ");
+		__dump_gpujoin_path(&buf, root, gpath->outer_path);
+		for (i=0; i < gpath->num_rels; i++)
+		{
+			JoinType	join_type = gpath->inners[i].join_type;
+			Path	   *inner_path = gpath->inners[i].scan_path;
+			bool		is_nestloop = (gpath->inners[i].hash_quals == NIL);
 
-		elog(DEBUG1, "%s Cost=%.2f..%.2f",
+			appendStringInfo(&buf, " %s%s ",
+							 join_type == JOIN_FULL ? "F" :
+							 join_type == JOIN_LEFT ? "L" :
+							 join_type == JOIN_RIGHT ? "R" : "I",
+							 is_nestloop ? "NL" : "HJ");
+
+			__dump_gpujoin_path(&buf, root, inner_path);
+		}
+		elog(DEBUG1, "GpuJoin: %s Cost=%.2f..%.2f",
 			 buf.data,
 			 gpath->cpath.path.startup_cost,
 			 gpath->cpath.path.total_cost);
@@ -1195,6 +1183,12 @@ gpujoin_add_join_path(PlannerInfo *root,
 		List	   *hash_quals = NIL;
 		List	   *join_quals = NIL;
 		ListCell   *lc;
+
+		/*
+		 * Quick exit if number of inner relations out of range
+		 */
+		if (list_length(inner_path_list) >= GPUJOIN_MAX_DEPTH)
+			break;
 
 		/*
 		 * Quick exit if unsupported join type
@@ -2264,9 +2258,29 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 								  es->verbose, false);
 		appendStringInfo(&str, ", JoinQual: %s", temp);
 
-		appendStringInfo(&str, ", nrows_ratio: %.8f",
-				 int_as_float(list_nth_int(gj_info->nrows_ratio, depth - 1)));
+		if (es->analyze)
+		{
+			size_t		nrows_in = gjs->outer_nitems[depth - 1];
+			size_t		nrows_out = gjs->outer_nitems[depth];
+			cl_float	nrows_ratio
+				= int_as_float(list_nth_int(gj_info->nrows_ratio, depth - 1));
 
+			appendStringInfo(&str,
+							 ", nrows (%zu -> %zu, %.2f%% expected %.2f%%)",
+							 nrows_in,
+							 nrows_out,
+							 100.0 * ((double) nrows_out /
+									  (double) nrows_in),
+							 100.0 * nrows_ratio);	// hoge
+		}
+		else
+		{
+			cl_float	nrows_ratio
+				= int_as_float(list_nth_int(gj_info->nrows_ratio, depth - 1));
+
+			appendStringInfo(&str, ", nrows_ratio: %.2f%%",
+							 100.0 * nrows_ratio);
+		}
 		snprintf(qlabel, sizeof(qlabel), "Depth %d", depth);
 		ExplainPropertyText(qlabel, str.data, es);
 
@@ -2279,8 +2293,7 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 /*
  * codegen for:
  * STATIC_FUNCTION(cl_bool)
- * gpujoin_outer_quals(cl_int *errcode,
- *                     kern_parambuf *kparams,
+ * gpujoin_outer_quals(kern_context *kcxt,
  *                     kern_data_store *kds,
  *                     size_t kds_index)
  */
@@ -3011,7 +3024,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 		STROMALIGN(offsetof(kern_resultbuf, results[total_items]));
 	kgjoin->kresults_total_items = total_items;
 	kgjoin->kresults_max_items = 0;
-	kgjoin->max_depth = gjs->num_rels;
+	kgjoin->num_rels = gjs->num_rels;
 	memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
 
 	/* copies the constant/parameter buffer */
@@ -3503,9 +3516,9 @@ static bool
 gpujoin_task_complete(GpuTask *gtask)
 {
 	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *) gtask;
-	GpuTaskState	   *gts = gtask->gts;
+	GpuJoinState	   *gjs = (GpuJoinState *) gtask->gts;
 
-	if (gts->pfm_accum.enabled)
+	if (gjs->gts.pfm_accum.enabled)
 	{
 		CUDA_EVENT_ELAPSED(pgjoin, time_dma_send,
 						   ev_dma_send_start,
@@ -3519,7 +3532,7 @@ gpujoin_task_complete(GpuTask *gtask)
 		CUDA_EVENT_ELAPSED(pgjoin, time_dma_recv,
 						   ev_dma_recv_start,
 						   ev_dma_recv_stop);
-		pgstrom_accum_perfmon(&gts->pfm_accum, &pgjoin->task.pfm);
+		pgstrom_accum_perfmon(&gjs->gts.pfm_accum, &pgjoin->task.pfm);
 	}
 	gpujoin_cleanup_cuda_resources(pgjoin);
 
@@ -3528,6 +3541,7 @@ gpujoin_task_complete(GpuTask *gtask)
 		pgstrom_data_store *pds_src = pgjoin->pds_src;
 		kern_data_store	   *kds_src = pds_src->kds;
 		pgstrom_gpujoin	   *pgjoin_new;
+		cl_int				i;
 
 		if (pgjoin->oitems_base + pgjoin->oitems_nums < kds_src->nitems)
 		{
@@ -3539,7 +3553,7 @@ gpujoin_task_complete(GpuTask *gtask)
 			pgjoin->pds_src = NULL;
 
 			pgjoin_new = (pgstrom_gpujoin *)
-				gpujoin_create_task((GpuJoinState *) gts,
+				gpujoin_create_task(gjs,
 									pgjoin->pmrels,
 									pds_src,
 									pgjoin->oitems_base +
@@ -3547,11 +3561,15 @@ gpujoin_task_complete(GpuTask *gtask)
 									pgjoin->oitems_nums);
 
 			/* add this new task to the pending list */
-			SpinLockAcquire(&gts->lock);
-			dlist_push_tail(&gts->pending_tasks, &pgjoin_new->task.chain);
-			gts->num_pending_tasks++;
-			SpinLockRelease(&gts->lock);
+			SpinLockAcquire(&gjs->gts.lock);
+			dlist_push_tail(&gjs->gts.pending_tasks, &pgjoin_new->task.chain);
+			gjs->gts.num_pending_tasks++;
+			SpinLockRelease(&gjs->gts.lock);
 		}
+
+		/* Update statistics information */
+		for (i=0; i <= pgjoin->kern.num_rels; i++)
+			gjs->outer_nitems[i] += pgjoin->kern.outer_nitems[i];
 	}
 	else if (pgjoin->task.kerror.errcode == StromError_DataStoreNoSpace)
 	{
@@ -3560,7 +3578,7 @@ gpujoin_task_complete(GpuTask *gtask)
 		 * were smaller than required. So, we expand the buffer or reduce
 		 * number of outer tuples, then kick this gputask again.
 		 */
-		gpujoin_attach_result_buffer((GpuJoinState *)gts, pgjoin);
+		gpujoin_attach_result_buffer(gjs, pgjoin);
 
 		/*
 		 * OK, chain this task on the pending_tasks queue again
@@ -3569,10 +3587,10 @@ gpujoin_task_complete(GpuTask *gtask)
 		 * callback handled this request by itself - we re-entered the
 		 * GpuTask on the pending_task queue to execute again.
 		 */
-		SpinLockAcquire(&gts->lock);
-		dlist_push_head(&gts->pending_tasks, &pgjoin->task.chain);
-		gts->num_pending_tasks++;
-		SpinLockRelease(&gts->lock);
+		SpinLockAcquire(&gjs->gts.lock);
+		dlist_push_head(&gjs->gts.pending_tasks, &pgjoin->task.chain);
+		gjs->gts.num_pending_tasks++;
+		SpinLockRelease(&gjs->gts.lock);
 
 		return false;
 	}
@@ -4020,7 +4038,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 		outer_ntuples = (size_t)((double)outer_ntuples *
 								 Max(nrows_ratio, 1.0));
 	}
-	Assert(pgjoin->kern.max_depth == depth - 1);
+	Assert(pgjoin->kern.num_rels == depth - 1);
 	CUDA_EVENT_RECORD(pgjoin, ev_kern_join_end);
 
 	/*

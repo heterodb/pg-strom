@@ -60,14 +60,25 @@ typedef struct
 /*
  * kern_gpujoin - control object of GpuJoin
  */
+#define GPUJOIN_MAX_DEPTH	24
+
 typedef struct
 {
+	/* offset to the primary kern_resultbuf */
 	size_t			kresults_1_offset;
+	/* offset to the secondary kern_resultbuf */
 	size_t			kresults_2_offset;
+	/* allocated number of kern_resultbuf items */
 	cl_uint			kresults_total_items;
+	/* number of kern_resultbuf items actually used (OUT) */
 	cl_uint			kresults_max_items;
-	cl_uint			max_depth;
+	/* number of inner relations */
+	cl_uint			num_rels;
+	/* number of outer rows for each depth actually used (OUT) */
+	cl_uint			outer_nitems[GPUJOIN_MAX_DEPTH + 1];
+	/* error status to be backed (OUT) */
 	kern_errorbuf	kerror;
+	/* run-time parameter buffer */
 	kern_parambuf	kparams;
 } kern_gpujoin;
 
@@ -168,7 +179,7 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 	kern_context	kcxt;
 
 	/* sanity check */
-	assert(depth > 0 && depth <= kgjoin->max_depth);
+	assert(depth > 0 && depth <= kgjoin->num_rels);
 	assert(kgjoin->kresults_1_offset > 0);
 	assert(kgjoin->kresults_2_offset > 0);
 	kresults_in = KERN_GPUJOIN_IN_RESULTS(kgjoin, depth);
@@ -216,6 +227,7 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 			else
 				base = 0;
 			atomicMax(&kgjoin->kresults_max_items, base + count);
+			atomicMax(&kgjoin->outer_nitems[0], base + count);
 		}
 		__syncthreads();
 
@@ -241,6 +253,11 @@ out:
 		kresults_out->nrooms = kgjoin->kresults_total_items / (depth + 1);
 		kresults_out->nitems = 0;
 		memset(&kresults_out->kerror, 0, sizeof(kern_errorbuf));
+		if (depth > 1)
+		{
+			assert(kgjoin->num_rels >= depth);
+			kgjoin->outer_nitems[depth - 1] = kresults_in->nitems;
+		}
 	}
 	kern_writeback_error_status(&kresults_in->kerror, kcxt.e);
 }
@@ -276,7 +293,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 	/* sanity checks */
 	if (get_global_id() == 0)
 	{
-		assert(depth > 0 && depth <= kgjoin->max_depth);
+		assert(depth > 0 && depth <= kgjoin->num_rels);
 		assert(kresults_out->nrels == depth + 1);
 		assert(kresults_in->nrels == depth);
 	}
@@ -413,7 +430,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	if (get_global_id() == 0)
 	{
 		assert(get_global_ysize() == 1);
-		assert(depth > 0 && depth <= kgjoin->max_depth);
+		assert(depth > 0 && depth <= kgjoin->num_rels);
 		assert(kresults_out->nrels == depth + 1);
 		assert(kresults_in->nrels == depth);
 	}
@@ -622,7 +639,7 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 	if (get_global_id() == 0)
 	{
 		assert(get_global_xsize() == 1);
-		assert(depth > 0 && depth <= kgjoin->max_depth);
+		assert(depth > 0 && depth <= kgjoin->num_rels);
 		assert(kresults_out->nrels == depth + 1);
 	}
 
@@ -730,7 +747,7 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 	if (get_global_id() == 0)
 	{
 		assert(get_global_ysize() == 1);
-		assert(depth > 0 && depth <= kgjoin->max_depth);
+		assert(depth > 0 && depth <= kgjoin->num_rels);
 		assert(kresults_out->nrels == depth + 1);
 	}
 
@@ -827,7 +844,7 @@ __gpujoin_projection_row(kern_context *kcxt,
 						 kern_data_store *kds_src,
 						 kern_data_store *kds_dst)
 {
-	cl_int			nrels = kgjoin->max_depth + 1;
+	cl_int			nrels = kgjoin->num_rels + 1;
 	cl_int		   *r_buffer;
 	size_t			required;
 	size_t			t_hoff;
@@ -1088,13 +1105,13 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 {
 	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
 	kern_resultbuf *kresults = KERN_GPUJOIN_OUT_RESULTS(kgjoin,
-														kgjoin->max_depth);
+														kgjoin->num_rels);
 	kern_context	kcxt;
 	size_t		res_index;
 	size_t		res_limit;
 
 	/* sanity checks */
-	assert(kresults->nrels == kgjoin->max_depth + 1);
+	assert(kresults->nrels == kgjoin->num_rels + 1);
 	assert(kds_src->format == KDS_FORMAT_ROW &&
 		   kds_dst->format == KDS_FORMAT_ROW);
 
@@ -1104,7 +1121,10 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 	 * of kds_dst is initialized.
 	 */
 	if (get_global_id() == 0)
+	{
 		kds_dst->nitems = kresults->nitems;
+		kgjoin->outer_nitems[kgjoin->num_rels] = kresults->nitems;;
+	}
 
 	/* Immediate bailout if previous stage raise an error status */
 	kcxt.e = kresults->kerror;
@@ -1247,12 +1267,12 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 {
 	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
 	kern_resultbuf *kresults = KERN_GPUJOIN_OUT_RESULTS(kgjoin,
-														kgjoin->max_depth);
+														kgjoin->num_rels);
 	kern_context	kcxt;
 	size_t			res_index;
 
 	/* sanity checks */
-	assert(kresults->nrels == kgjoin->max_depth + 1);
+	assert(kresults->nrels == kgjoin->num_rels + 1);
 	assert(kds_src->format == KDS_FORMAT_ROW &&
 		   kds_dst->format == KDS_FORMAT_SLOT);
 
@@ -1262,7 +1282,10 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 	 * of kds_dst is initialized.
 	 */
 	if (get_global_id() == 0)
+	{
 		kds_dst->nitems = kresults->nitems;
+		kgjoin->outer_nitems[kgjoin->num_rels] = kresults->nitems;
+	}
 
 	/* Immediate bailout if previous stage raise an error status */
 	kcxt.e = kresults->kerror;
