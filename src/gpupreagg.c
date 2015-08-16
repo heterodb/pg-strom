@@ -252,6 +252,15 @@ static TupleTableSlot *gpupreagg_next_tuple(GpuTaskState *gts);
 #define ALTFUNC_EXPR_PCOV_XY		110	/* PCOV_XY(X,Y) */
 
 /*
+ * XXX - GpuPreAgg with Numeric arguments are problematic because
+ * it is implemented with normal function call and iteration of
+ * cmpxchg. Thus, larger reduction ratio (usually works better)
+ * will increase atomic contension. So, at this moment we turned
+ * off GpuPreAgg + Numeric
+ */
+//#define GPUPREAGG_SUPPORT_NUMERIC			1
+
+/*
  * List of supported aggregate functions
  */
 typedef struct {
@@ -292,10 +301,12 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:avg",  2, {INT4OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0
 	},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "avg",	1, {NUMERICOID},
 	  "s:avg_numeric",	2, {INT4OID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, DEVFUNC_NEEDS_NUMERIC
 	},
+#endif
 	/* COUNT(*) = SUM(NROWS(*|X)) */
 	{ "count", 0, {},
 	  "s:count", 1, {INT4OID},
@@ -309,8 +320,10 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	{ "max", 1, {INT8OID},   "c:max", 1, {INT8OID},   {ALTFUNC_EXPR_PMAX}, 0},
 	{ "max", 1, {FLOAT4OID}, "c:max", 1, {FLOAT4OID}, {ALTFUNC_EXPR_PMAX}, 0},
 	{ "max", 1, {FLOAT8OID}, "c:max", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PMAX}, 0},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "max", 1, {NUMERICOID},"c:max", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PMAX}, DEVFUNC_NEEDS_NUMERIC},
+#endif
 	{ "max", 1, {DATEOID},   "c:max", 1, {DATEOID},   {ALTFUNC_EXPR_PMAX}, 0},
 	{ "max", 1, {TIMEOID},   "c:max", 1, {TIMEOID},   {ALTFUNC_EXPR_PMAX}, 0},
 	{ "max", 1, {TIMESTAMPOID}, "c:max", 1, {TIMESTAMPOID},
@@ -324,8 +337,10 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	{ "min", 1, {INT8OID},   "c:min", 1, {INT8OID},   {ALTFUNC_EXPR_PMIN}, 0},
 	{ "min", 1, {FLOAT4OID}, "c:min", 1, {FLOAT4OID}, {ALTFUNC_EXPR_PMIN}, 0},
 	{ "min", 1, {FLOAT8OID}, "c:min", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PMIN}, 0},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "min", 1, {NUMERICOID},"c:min", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PMIN}, DEVFUNC_NEEDS_NUMERIC},
+#endif
 	{ "min", 1, {DATEOID},   "c:min", 1, {DATEOID},   {ALTFUNC_EXPR_PMIN}, 0},
 	{ "min", 1, {TIMEOID},   "c:min", 1, {TIMEOID},   {ALTFUNC_EXPR_PMIN}, 0},
 	{ "min", 1, {TIMESTAMPOID},   "c:min", 1, {TIMESTAMPOID},
@@ -339,8 +354,10 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	{ "sum", 1, {INT8OID},   "c:sum", 1, {INT8OID},   {ALTFUNC_EXPR_PSUM}, 0},
 	{ "sum", 1, {FLOAT4OID}, "c:sum", 1, {FLOAT4OID}, {ALTFUNC_EXPR_PSUM}, 0},
 	{ "sum", 1, {FLOAT8OID}, "c:sum", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PSUM}, 0},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "sum", 1, {NUMERICOID},"c:sum", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PSUM}, DEVFUNC_NEEDS_NUMERIC},
+#endif
 	/* STDDEV(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
 	{ "stddev", 1, {FLOAT4OID},
 	  "s:stddev", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
@@ -354,12 +371,14 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0
 	},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "stddev", 1, {NUMERICOID},
 	  "s:stddev", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
 	},
+#endif
 	{ "stddev_pop", 1, {FLOAT4OID},
 	  "s:stddev_pop", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -372,12 +391,14 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0
 	},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "stddev_pop", 1, {NUMERICOID},
 	  "s:stddev_pop", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
        ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
 	},
+#endif
 	{ "stddev_samp", 1, {FLOAT4OID},
 	  "s:stddev_samp", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -390,12 +411,14 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0
 	},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "stddev_samp", 1, {NUMERICOID},
 	  "s:stddev_samp", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
 	},
+#endif
 	/* VARIANCE(X) = PGSTROM.VARIANCE(NROWS(), PSUM(X),PSUM(X^2)) */
 	{ "variance", 1, {FLOAT4OID},
 	  "s:variance", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
@@ -409,12 +432,14 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0
 	},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "variance", 1, {NUMERICOID},
 	  "s:variance", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
        ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
 	},
+#endif
 	{ "var_pop", 1, {FLOAT4OID},
 	  "s:var_pop", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -427,12 +452,14 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0
 	},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "var_pop", 1, {NUMERICOID},
 	  "s:var_pop", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
        ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
 	},
+#endif
 	{ "var_samp", 1, {FLOAT4OID},
 	  "s:var_samp", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -445,12 +472,14 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0
 	},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "var_samp", 1, {NUMERICOID},
 	  "s:var_samp", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
        ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
 	},
+#endif
 	/*
 	 * CORR(X,Y) = PGSTROM.CORR(NROWS(X,Y),
 	 *                          PCOV_X(X,Y),  PCOV_Y(X,Y)
