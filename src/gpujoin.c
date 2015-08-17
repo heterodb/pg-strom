@@ -3561,10 +3561,14 @@ gpujoin_task_complete(GpuTask *gtask)
 		pgstrom_data_store *pds_src = pgjoin->pds_src;
 		kern_data_store	   *kds_src = pds_src->kds;
 		pgstrom_gpujoin	   *pgjoin_new;
-		cl_uint				kds_nitems = kds_src->nitems;
+		size_t				source_nitems;
 		cl_int				i;
 
-		if (pgjoin->oitems_base + pgjoin->oitems_nums < kds_nitems)
+		/* number of rows actually processed */
+		source_nitems = Min(pgjoin->oitems_base + pgjoin->oitems_nums,
+							kds_src->nitems) - pgjoin->oitems_base;
+
+		if (pgjoin->oitems_base + pgjoin->oitems_nums < kds_src->nitems)
 		{
 			/* NOTE: The task completed has invalid outer input rows to
 			 * save the space of result buffer. Once we detach pds_src
@@ -3589,7 +3593,7 @@ gpujoin_task_complete(GpuTask *gtask)
 		}
 
 		/* Update statistics information */
-		gjs->source_nitems += kds_nitems;
+		gjs->source_nitems += source_nitems;
 		for (i=0; i <= pgjoin->kern.num_rels; i++)
 			gjs->outer_nitems[i] += pgjoin->kern.outer_nitems[i];
 	}
@@ -3656,6 +3660,53 @@ gpujoin_task_respond(CUstream stream, CUresult status, void *private)
 	SetLatch(&MyProc->procLatch);
 }
 
+/*
+ * compute_outer_ntuples
+ *
+ * It gives an optimal number of CUDA threads to be launched, according
+ * to the planned and run-time number of rows. Unless progress of outer
+ * scan reached to 30% of the planned scale, we merge both of the ratio.
+ */
+static size_t
+compute_outer_ntuples(GpuJoinState *gjs, int depth, cl_uint nitems)
+{
+	double	outer_plan_nrows = outerPlanState(gjs)->plan->plan_rows;
+	double	plan_ntuples;
+	double	exec_ntuples;
+	double	result;
+
+	Assert(depth > 0 && depth <= gjs->num_rels + 1);
+	if (depth == 1)
+		plan_ntuples = gjs->outer_ratio * (double) nitems;
+	else if (depth <= gjs->num_rels)
+		plan_ntuples = gjs->inners[depth - 1].nrows_ratio * (double) nitems;
+	else
+		plan_ntuples = (gjs->gts.css.ss.ps.plan->plan_rows *
+						((double) nitems / outer_plan_nrows));
+
+	if (gjs->source_nitems > 0)
+		exec_ntuples = ((double) gjs->outer_nitems[depth - 1] /
+						(double) gjs->source_nitems) * (double) nitems;
+	else
+		exec_ntuples = plan_ntuples;
+
+	if (gjs->source_nitems >= (size_t)(0.30 * outer_plan_nrows))
+		result = exec_ntuples;
+	else
+	{
+		double	merge_ratio = ((double) gjs->source_nitems /
+							   (double)(0.30 * outer_plan_nrows));
+		result = (exec_ntuples * merge_ratio +
+				  plan_ntuples * (1.0 - merge_ratio));
+	}
+	/*
+	 * At least 1 items are needed, and inject some margin.
+	 */
+	result = Max(result, 1.0) * pgstrom_chunk_size_margin();
+
+	return result;
+}
+
 static bool
 __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 {
@@ -3665,7 +3716,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	const char	   *kern_proj_name;
 	Size			length;
 	Size			total_length;
-	size_t			outer_ntuples;
+	double			outer_ntuples;
 	size_t			grid_xsize;
 	size_t			grid_ysize;
 	size_t			block_xsize;
@@ -3813,14 +3864,12 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	/*
 	 * OK, enqueue a series of requests
 	 */
-	depth = 1;
-	outer_ntuples = pgjoin->oitems_nums;
 	for (depth = 1; depth <= gjs->num_rels; depth++)
 	{
 		innerState *istate = &gjs->inners[depth - 1];
 		JoinType	join_type = istate->join_type;
 		bool		is_nestloop = (!istate->hash_outer_keys);
-		double		nrows_ratio = istate->nrows_ratio;
+		size_t		outer_ntuples;
 		size_t		num_threads;
 
 		/*
@@ -3831,7 +3880,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 		 *                     kern_multirels *kmrels,
 		 *                     cl_int depth)
 		 */
-		num_threads = (depth > 1 ? 1 : outer_ntuples);
+		num_threads = (depth > 1 ? 1 : pgjoin->oitems_nums);
 		pgstrom_compute_workgroup_size(&grid_xsize,
 									   &block_xsize,
 									   pgjoin->kern_prep,
@@ -3860,6 +3909,11 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			 "gpujoin_preparation",
 			 (cl_uint)grid_xsize,
 			 (cl_uint)block_xsize);
+
+		/*
+		 * Estimation of number of CUDA threads to be kicked
+		 */
+		outer_ntuples = compute_outer_ntuples(gjs, depth, pgjoin->oitems_nums);
 
 		/*
 		 * Main logic of GpuHashJoin or GpuNestLoop
@@ -4057,8 +4111,6 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 					 (cl_uint)block_xsize);
 			}
 		}
-		outer_ntuples = (size_t)((double)outer_ntuples *
-								 Max(nrows_ratio, 1.0));
 	}
 	Assert(pgjoin->kern.num_rels == depth - 1);
 	CUDA_EVENT_RECORD(pgjoin, ev_kern_join_end);
@@ -4071,6 +4123,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	 *                               kern_data_store *kds_src,
 	 *                               kern_data_store *kds_dst)
 	 */
+	outer_ntuples = compute_outer_ntuples(gjs, gjs->num_rels + 1,
+										  pgjoin->oitems_nums);
 	pgstrom_compute_workgroup_size(&grid_xsize,
 								   &block_xsize,
 								   pgjoin->kern_proj,
