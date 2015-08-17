@@ -3329,7 +3329,7 @@ gpujoin_next_chunk(GpuTaskState *gts)
 retry:
 	if (gjs->gts.scan_done || !gjs->curr_pmrels)
 	{
-		pgstrom_multirels *pmrels;
+		pgstrom_multirels *pmrels_new;
 
 		/*
 		 * NOTE: gpujoin_inner_preload() has to be called prior to
@@ -3337,16 +3337,16 @@ retry:
 		 * may be reused on the next loop, thus, refcnt of the PDS
 		 * should not be touched to zero.
 		 */
-		pmrels = gpujoin_inner_preload(gjs);
+		pmrels_new = gpujoin_inner_preload(gjs);
 		if (gjs->curr_pmrels)
 		{
 			Assert(gjs->gts.scan_done);
 			multirels_detach_buffer(gjs->curr_pmrels);
 			gjs->curr_pmrels = NULL;
 		}
-		if (!pmrels)
+		if (!pmrels_new)
 			return NULL;	/* end of inner multi-relations */
-		gjs->curr_pmrels = multirels_attach_buffer(pmrels);
+		gjs->curr_pmrels = pmrels_new;
 
 		/*
 		 * Rewind the outer scan pointer, if it is not first time
@@ -4813,6 +4813,8 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 		if (scan_forward)
 			gjs->inners[i].ntuples += pds->kds->nitems;
 	}
+	/* already attached on the caller's context */
+	pmrels->n_attached = 1;
 	PERFMON_END(&gjs->gts.pfm_accum, time_inner_load, &tv1, &tv2);
 
 	return pmrels;
@@ -4829,7 +4831,7 @@ multirels_attach_buffer(pgstrom_multirels *pmrels)
 	int		i, num_rels = pmrels->kern.nrels;
 
 	/* attach this pmrels */
-	Assert(pmrels->n_attached >= 0);
+	Assert(pmrels->n_attached > 0);
 	pmrels->n_attached++;
 	/* also, data store */
 	for (i=0; i < num_rels; i++)
