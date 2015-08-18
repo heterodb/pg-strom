@@ -17,6 +17,7 @@
  */
 #include "postgres.h"
 #include "access/twophase.h"
+#include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_type.h"
@@ -1014,6 +1015,7 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext)
 	}
 	Assert(STROMALIGN(str.len) == str.len);
 	kparams = (kern_parambuf *)str.data;
+	kparams->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
 	kparams->length = str.len;
 	kparams->nparams = nparams;
 

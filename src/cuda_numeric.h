@@ -183,7 +183,7 @@ typedef struct {
 	PG_NUMERIC_SET(PG_NUMERIC_EXPONENT_MAX,1,PG_NUMERIC_MANTISSA_MAX)
 
 STATIC_FUNCTION(pg_numeric_t)
-pg_numeric_from_varlena(int *errcode, struct varlena *vl_val)
+pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_val)
 {
 	pg_numeric_t		result;
 	union NumericChoice	numData;
@@ -205,7 +205,7 @@ pg_numeric_from_varlena(int *errcode, struct varlena *vl_val)
 		// PG-Strom numeric type support 18 characters.
 		result.isnull = true;
 		result.value  = 0;
-		*errcode      = StromError_CpuReCheck;
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		return result;
 	}
 
@@ -268,7 +268,7 @@ pg_numeric_from_varlena(int *errcode, struct varlena *vl_val)
 		if ((mant * base) / base != mant) {
 			result.isnull = true;
 			result.value  = 0;
-			*errcode      = StromError_CpuReCheck;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			return result;
 		}
 
@@ -297,7 +297,7 @@ pg_numeric_from_varlena(int *errcode, struct varlena *vl_val)
 				// magnify is overflow
 				result.isnull = true;
 				result.value  = 0;
-				*errcode = StromError_CpuReCheck;
+				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 				return result;
 			}
 
@@ -308,7 +308,7 @@ pg_numeric_from_varlena(int *errcode, struct varlena *vl_val)
 			if ((mant * mag) / mag != mant) {
 				result.isnull = true;
 				result.value  = 0;
-				*errcode      = StromError_CpuReCheck;
+				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 				return result;
 			}
 
@@ -321,7 +321,7 @@ pg_numeric_from_varlena(int *errcode, struct varlena *vl_val)
 			(mant & ~PG_NUMERIC_MANTISSA_MASK)) {
 			result.isnull = true;
 			result.value  = 0;
-			*errcode = StromError_CpuReCheck;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			return result;
 		}
 
@@ -352,7 +352,7 @@ pg_numeric_from_varlena(int *errcode, struct varlena *vl_val)
 #define NUMERIC_TO_VERLENA_USE_SHORT_FORMAT
 
 STATIC_INLINE(size_t)
-pg_numeric_to_varlena(int *errcode, pg_numeric_t arg, varlena *vl_val)
+pg_numeric_to_varlena(kern_context *kcxt, pg_numeric_t arg, varlena *vl_val)
 {
 	varattrib_4b		   *pHeader;
 	union NumericChoice	   *pNumData;
@@ -360,7 +360,7 @@ pg_numeric_to_varlena(int *errcode, pg_numeric_t arg, varlena *vl_val)
 	if (vl_val == NULL)
 	{
 		// No destination buffer
-		*errcode = StromError_CudaInternal;
+		STROM_SET_ERROR(&kcxt->e, StromError_CudaInternal);
 		return 0;
 	}
 
@@ -368,7 +368,7 @@ pg_numeric_to_varlena(int *errcode, pg_numeric_t arg, varlena *vl_val)
 	{
 		// Alignment error.
 		// Must be set 4 byte alignment for varlena buffer.
-		*errcode = StromError_CudaInternal;
+		STROM_SET_ERROR(&kcxt->e, StromError_CudaInternal);
 		return 0;
 	}
 
@@ -376,7 +376,7 @@ pg_numeric_to_varlena(int *errcode, pg_numeric_t arg, varlena *vl_val)
 	{
 		// The caller function set NULL to bitmapt if arg is NULL.
 		// And then, does not call this function.
-		*errcode = StromError_CudaInternal;
+		STROM_SET_ERROR(&kcxt->e, StromError_CudaInternal);
 		return 0;
 	}
 
@@ -476,7 +476,7 @@ pg_numeric_to_varlena(int *errcode, pg_numeric_t arg, varlena *vl_val)
  * tries to fetch fixed-length variable.
  */
 STATIC_FUNCTION(pg_numeric_t)
-pg_numeric_datum_ref(int *errcode,
+pg_numeric_datum_ref(kern_context *kcxt,
 					 void *datum,
 					 cl_bool internal_format)
 {
@@ -485,7 +485,7 @@ pg_numeric_datum_ref(int *errcode,
 	if (!datum)
 		result.isnull = true;
 	else if (!internal_format)
-		result = pg_numeric_from_varlena(errcode, (varlena *) datum);
+		result = pg_numeric_from_varlena(kcxt, (varlena *) datum);
 	else
 	{
 		result.isnull = false;
@@ -496,24 +496,24 @@ pg_numeric_datum_ref(int *errcode,
 
 STATIC_FUNCTION(pg_numeric_t)
 pg_numeric_vref(kern_data_store *kds,
-				int *errcode,
+				kern_context *kcxt,
 				cl_uint colidx,
 				cl_uint rowidx)
 {
 	void	   *datum = kern_get_datum(kds,colidx,rowidx);
 	cl_bool		internal_format = (kds->colmeta[colidx].attlen > 0);
 
-	return pg_numeric_datum_ref(errcode,datum,internal_format);
+	return pg_numeric_datum_ref(kcxt,datum,internal_format);
 }
 
 /* pg_numeric_vstore() is same as template */
 STROMCL_SIMPLE_VARSTORE_TEMPLATE(numeric, cl_ulong)
 
 STATIC_FUNCTION(pg_numeric_t)
-pg_numeric_param(kern_parambuf *kparams,
-				 int *errcode,
+pg_numeric_param(kern_context *kcxt,
 				 cl_uint param_id)
 {
+	kern_parambuf  *kparams = kcxt->kparams;
 	varlena		   *vl_val;
 	pg_numeric_t	result;
 
@@ -523,9 +523,9 @@ pg_numeric_param(kern_parambuf *kparams,
 		vl_val = (varlena *)((char *)kparams + kparams->poffset[param_id]);
 		/* only uncompressed & inline datum */
 		if (VARATT_IS_4B_U(vl_val) || VARATT_IS_1B(vl_val))
-			return pg_numeric_from_varlena(errcode, vl_val);
+			return pg_numeric_from_varlena(kcxt, vl_val);
 
-		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 	}
 	result.isnull = true;
 	return result;
@@ -543,7 +543,7 @@ STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(numeric,cl_long)
  * ----------------------------------------------------------------
  */
 STATIC_FUNCTION(pg_int8_t)
-numeric_to_integer(int *errcode, pg_numeric_t arg, cl_int size)
+numeric_to_integer(kern_context *kcxt, pg_numeric_t arg, cl_int size)
 {
 	pg_int8_t	v;
 	int		    sign, expo;
@@ -587,7 +587,7 @@ numeric_to_integer(int *errcode, pg_numeric_t arg, cl_int size)
 			if ((mant * mag) / mag != mant) {
 				v.isnull = true;
 				v.value  = 0;
-				*errcode = StromError_CpuReCheck;
+				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 				return v;
 			}
 
@@ -604,7 +604,7 @@ numeric_to_integer(int *errcode, pg_numeric_t arg, cl_int size)
 		   (sign != 0 && abs_min_val < mant)) {
 			v.isnull = true;
 			v.value  = 0;
-			*errcode = StromError_CpuReCheck;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			return v;
 		}
 	}
@@ -616,7 +616,7 @@ numeric_to_integer(int *errcode, pg_numeric_t arg, cl_int size)
 }
 
 STATIC_FUNCTION(pg_float8_t)
-numeric_to_float(int *errcode, pg_numeric_t arg)
+numeric_to_float(kern_context *kcxt, pg_numeric_t arg)
 {
 	pg_float8_t	v;
 	int			expo, sign;
@@ -646,7 +646,7 @@ numeric_to_float(int *errcode, pg_numeric_t arg)
 	if (isinf(fvalue) || isnan(fvalue)) {
 		v.isnull = true;
 		v.value  = 0;
-		*errcode = StromError_CpuReCheck;
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		return v;
 	}
 
@@ -657,10 +657,10 @@ numeric_to_float(int *errcode, pg_numeric_t arg)
 }
 
 STATIC_FUNCTION(pg_int2_t)
-pgfn_numeric_int2(int *errcode, pg_numeric_t arg)
+pgfn_numeric_int2(kern_context *kcxt, pg_numeric_t arg)
 {
 	pg_int2_t v;
-	pg_int8_t tmp = numeric_to_integer(errcode, arg, sizeof(v.value));
+	pg_int8_t tmp = numeric_to_integer(kcxt, arg, sizeof(v.value));
 
 	v.isnull = tmp.isnull;
 	v.value  = tmp.value;
@@ -669,10 +669,10 @@ pgfn_numeric_int2(int *errcode, pg_numeric_t arg)
 }
 
 STATIC_FUNCTION(pg_int4_t)
-pgfn_numeric_int4(int *errcode, pg_numeric_t arg)
+pgfn_numeric_int4(kern_context *kcxt, pg_numeric_t arg)
 {
 	pg_int4_t v;
-	pg_int8_t tmp = numeric_to_integer(errcode, arg, sizeof(v.value));
+	pg_int8_t tmp = numeric_to_integer(kcxt, arg, sizeof(v.value));
 
 	v.isnull = tmp.isnull;
 	v.value  = tmp.value;
@@ -681,36 +681,35 @@ pgfn_numeric_int4(int *errcode, pg_numeric_t arg)
 }
 
 STATIC_FUNCTION(pg_int8_t)
-pgfn_numeric_int8(int *errcode, pg_numeric_t arg)
+pgfn_numeric_int8(kern_context *kcxt, pg_numeric_t arg)
 {
 	pg_int8_t v;
-	return numeric_to_integer(errcode, arg, sizeof(v.value));
+	return numeric_to_integer(kcxt, arg, sizeof(v.value));
 }
 
 STATIC_FUNCTION(pg_float4_t)
-pgfn_numeric_float4(int *errcode, pg_numeric_t arg)
+pgfn_numeric_float4(kern_context *kcxt, pg_numeric_t arg)
 {
 
-	pg_float8_t tmp = numeric_to_float(errcode, arg);
+	pg_float8_t tmp = numeric_to_float(kcxt, arg);
 	pg_float4_t	v   = { (cl_float)tmp.value, tmp.isnull };
 
 	if (v.isnull == false  &&  isinf(v.value)) {
 		v.isnull	= true;
 		v.value		= 0;
-		*errcode	= StromError_CpuReCheck;
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 	}
-
 	return v;
 }
 
 STATIC_FUNCTION(pg_float8_t)
-pgfn_numeric_float8(int *errcode, pg_numeric_t arg)
+pgfn_numeric_float8(kern_context *kcxt, pg_numeric_t arg)
 {
-	return numeric_to_float(errcode, arg);
+	return numeric_to_float(kcxt, arg);
 }
 
 STATIC_FUNCTION(pg_numeric_t)
-integer_to_numeric(int *errcode, pg_int8_t arg, cl_int size)
+integer_to_numeric(kern_context *kcxt, pg_int8_t arg, cl_int size)
 {
 	pg_numeric_t	v;
 	int				sign;
@@ -750,7 +749,7 @@ integer_to_numeric(int *errcode, pg_int8_t arg, cl_int size)
 		if (mant & ~PG_NUMERIC_MANTISSA_MASK) {
 			v.isnull = true;
 			v.value  = 0;
-			*errcode = StromError_CpuReCheck;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			return v;
 		}
 	}
@@ -762,7 +761,7 @@ integer_to_numeric(int *errcode, pg_int8_t arg, cl_int size)
 }
 
 STATIC_FUNCTION(pg_numeric_t)
-float_to_numeric(int *errcode, pg_float8_t arg, int dig)
+float_to_numeric(kern_context *kcxt, pg_float8_t arg, int dig)
 {
 	pg_numeric_t	v;
 	int				sign, expo;
@@ -778,7 +777,7 @@ float_to_numeric(int *errcode, pg_float8_t arg, int dig)
 	if (isnan(arg.value) || isinf(arg.value)) {
 		v.isnull = true;
 		v.value  = 0;
-		*errcode = StromError_CpuReCheck;
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		return v;
 	}
 
@@ -806,7 +805,7 @@ float_to_numeric(int *errcode, pg_float8_t arg, int dig)
 		if(isinf(fmant)) {
 			v.isnull = true;
 			v.value  = 0;
-			*errcode = StromError_CpuReCheck;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			return v;
 		}
 
@@ -843,7 +842,7 @@ float_to_numeric(int *errcode, pg_float8_t arg, int dig)
 			// magnify is overflow
 			v.isnull = true;
 			v.value  = 0;
-			*errcode = StromError_CpuReCheck;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			return v;
 		}
 
@@ -854,7 +853,7 @@ float_to_numeric(int *errcode, pg_float8_t arg, int dig)
 		if ((mant * mag) / mag != mant) {
 			v.isnull = true;
 			v.value  = 0;
-			*errcode = StromError_CpuReCheck;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			return v;
 		}
 
@@ -867,7 +866,7 @@ float_to_numeric(int *errcode, pg_float8_t arg, int dig)
 		(mant & ~PG_NUMERIC_MANTISSA_MASK)) {
 		v.isnull = true;
 		v.value  = 0;
-		*errcode = StromError_CpuReCheck;
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		return v;
 	}
 
@@ -878,36 +877,36 @@ float_to_numeric(int *errcode, pg_float8_t arg, int dig)
 }
 
 STATIC_FUNCTION(pg_numeric_t)
-pgfn_int2_numeric(int *errcode, pg_int2_t arg)
+pgfn_int2_numeric(kern_context *kcxt, pg_int2_t arg)
 {
 	pg_int8_t tmp = { arg.value, arg.isnull };
-	return integer_to_numeric(errcode, tmp, sizeof(arg.value));
+	return integer_to_numeric(kcxt, tmp, sizeof(arg.value));
 }
 
 STATIC_FUNCTION(pg_numeric_t)
-pgfn_int4_numeric(int *errcode, pg_int4_t arg)
+pgfn_int4_numeric(kern_context *kcxt, pg_int4_t arg)
 {
 	pg_int8_t tmp = { arg.value, arg.isnull };
-	return integer_to_numeric(errcode, tmp, sizeof(arg.value));
+	return integer_to_numeric(kcxt, tmp, sizeof(arg.value));
 }
 
 STATIC_FUNCTION(pg_numeric_t)
-pgfn_int8_numeric(int *errcode, pg_int8_t arg)
+pgfn_int8_numeric(kern_context *kcxt, pg_int8_t arg)
 {
-	return integer_to_numeric(errcode, arg, sizeof(arg.value));
+	return integer_to_numeric(kcxt, arg, sizeof(arg.value));
 }
 
 STATIC_FUNCTION(pg_numeric_t)
-pgfn_float4_numeric(int *errcode, pg_float4_t arg)
+pgfn_float4_numeric(kern_context *kcxt, pg_float4_t arg)
 {
 	pg_float8_t tmp = { (cl_double)arg.value, arg.isnull };
-	return float_to_numeric(errcode, tmp, FLT_DIG);
+	return float_to_numeric(kcxt, tmp, FLT_DIG);
 }
 
 STATIC_FUNCTION(pg_numeric_t)
-pgfn_float8_numeric(int *errcode, pg_float8_t arg)
+pgfn_float8_numeric(kern_context *kcxt, pg_float8_t arg)
 {
-	return float_to_numeric(errcode, arg, DBL_DIG);
+	return float_to_numeric(kcxt, arg, DBL_DIG);
 }
 
 /*
@@ -915,14 +914,14 @@ pgfn_float8_numeric(int *errcode, pg_float8_t arg)
  * ----------------------------------------------------------------
  */
 STATIC_FUNCTION(pg_numeric_t)
-pgfn_numeric_uplus(int *errcode, pg_numeric_t arg)
+pgfn_numeric_uplus(kern_context *kcxt, pg_numeric_t arg)
 {
 	/* return the value as-is */
 	return arg;
 }
 
 STATIC_FUNCTION(pg_numeric_t)
-pgfn_numeric_uminus(int *errcode, pg_numeric_t arg)
+pgfn_numeric_uminus(kern_context *kcxt, pg_numeric_t arg)
 {
 	/* reverse the sign bit */
 	arg.value ^= PG_NUMERIC_SIGN_MASK;
@@ -930,7 +929,7 @@ pgfn_numeric_uminus(int *errcode, pg_numeric_t arg)
 }
 
 STATIC_FUNCTION(pg_numeric_t)
-pgfn_numeric_abs(int *errcode, pg_numeric_t arg)
+pgfn_numeric_abs(kern_context *kcxt, pg_numeric_t arg)
 {
 	/* clear the sign bit */
 	arg.value &= ~PG_NUMERIC_SIGN_MASK;
@@ -938,7 +937,7 @@ pgfn_numeric_abs(int *errcode, pg_numeric_t arg)
 }
 
 STATIC_FUNCTION(pg_numeric_t)
-pgfn_numeric_add(int *errcode,
+pgfn_numeric_add(kern_context *kcxt,
 				 pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_numeric_t	v;
@@ -971,7 +970,7 @@ pgfn_numeric_add(int *errcode,
 			// magnify is overflow
 			v.isnull = true;
 			v.value  = 0;
-			*errcode = StromError_CpuReCheck;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			return v;
 		}
 
@@ -984,7 +983,7 @@ pgfn_numeric_add(int *errcode,
 		if ((value * mag) / mag != value) {
 			v.isnull = true;
 			v.value  = 0;
-			*errcode = StromError_CpuReCheck;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			return v;
 		}
 
@@ -1010,7 +1009,7 @@ pgfn_numeric_add(int *errcode,
 			// Overflow
 			v.isnull = true;
 			v.value  = 0;
-			*errcode = StromError_CpuReCheck;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			return v;
 		}
 		mant1 += mant2;
@@ -1034,7 +1033,7 @@ pgfn_numeric_add(int *errcode,
 		(mant1 & ~PG_NUMERIC_MANTISSA_MASK)) {
 		v.isnull = true;
 		v.value  = 0;
-		*errcode = StromError_CpuReCheck;
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		return v;
 	}
 
@@ -1046,16 +1045,16 @@ pgfn_numeric_add(int *errcode,
 }
 
 STATIC_FUNCTION(pg_numeric_t)
-pgfn_numeric_sub(int *errcode,
+pgfn_numeric_sub(kern_context *kcxt,
 				 pg_numeric_t arg1, pg_numeric_t arg2)
 {
-	pg_numeric_t arg = pgfn_numeric_uminus(errcode, arg2);
+	pg_numeric_t arg = pgfn_numeric_uminus(kcxt, arg2);
 	
-	return pgfn_numeric_add(errcode, arg1, arg);
+	return pgfn_numeric_add(kcxt, arg1, arg);
 }
 
 STATIC_FUNCTION(pg_numeric_t)
-pgfn_numeric_mul(int *errcode,
+pgfn_numeric_mul(kern_context *kcxt,
 				 pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_numeric_t	v;
@@ -1093,7 +1092,7 @@ pgfn_numeric_mul(int *errcode,
 	if ((mant1 * mant2) / mant2 != mant1) {
 		v.isnull = true;
 		v.value  = 0;
-		*errcode = StromError_CpuReCheck;
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		return v;
 	}
 	mant1 *= mant2;
@@ -1114,7 +1113,7 @@ pgfn_numeric_mul(int *errcode,
 			// magnify is overflow
 			v.isnull = true;
 			v.value  = 0;
-			*errcode = StromError_CpuReCheck;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			return v;
 		}
 
@@ -1125,7 +1124,7 @@ pgfn_numeric_mul(int *errcode,
 		if ((mant1 * mag) / mag != mant1) {
 			v.isnull = true;
 			v.value  = 0;
-			*errcode = StromError_CpuReCheck;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			return v;
 		}
 
@@ -1138,7 +1137,7 @@ pgfn_numeric_mul(int *errcode,
 		(mant1 & ~PG_NUMERIC_MANTISSA_MASK)) {
 		v.isnull = true;
 		v.value  = 0;
-		*errcode = StromError_CpuReCheck;
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		return v;
 	}
 
@@ -1154,7 +1153,7 @@ pgfn_numeric_mul(int *errcode,
  * ----------------------------------------------------------------
  */
 STATIC_FUNCTION(int)
-numeric_cmp(cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
+numeric_cmp(kern_context *kcxt, pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	int			i, ret, expoDiff;
 	cl_ulong	mantL, mantR;
@@ -1215,7 +1214,7 @@ numeric_cmp(cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_numeric_eq(cl_int *errcode,
+pgfn_numeric_eq(kern_context *kcxt,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_bool_t	result;
@@ -1226,14 +1225,14 @@ pgfn_numeric_eq(cl_int *errcode,
 
 	} else {
 		result.isnull = false;
-		result.value = (numeric_cmp(errcode, arg1, arg2) == 0);
+		result.value = (numeric_cmp(kcxt, arg1, arg2) == 0);
 	}
 
 	return result;
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_numeric_ne(cl_int *errcode,
+pgfn_numeric_ne(kern_context *kcxt,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_bool_t	result;
@@ -1244,14 +1243,14 @@ pgfn_numeric_ne(cl_int *errcode,
 
 	} else {
 		result.isnull = false;
-		result.value = (numeric_cmp(errcode, arg1, arg2) != 0);
+		result.value = (numeric_cmp(kcxt, arg1, arg2) != 0);
 	}
 
 	return result;
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_numeric_lt(cl_int *errcode,
+pgfn_numeric_lt(kern_context *kcxt,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_bool_t	result;
@@ -1262,14 +1261,14 @@ pgfn_numeric_lt(cl_int *errcode,
 
 	} else {
 		result.isnull = false;
-		result.value = (numeric_cmp(errcode, arg1, arg2) < 0);
+		result.value = (numeric_cmp(kcxt, arg1, arg2) < 0);
 	}
 
 	return result;
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_numeric_le(cl_int *errcode,
+pgfn_numeric_le(kern_context *kcxt,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_bool_t	result;
@@ -1280,14 +1279,14 @@ pgfn_numeric_le(cl_int *errcode,
 
 	} else {
 		result.isnull = false;
-		result.value = (numeric_cmp(errcode, arg1, arg2) <= 0);
+		result.value = (numeric_cmp(kcxt, arg1, arg2) <= 0);
 	}
 
 	return result;
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_numeric_gt(cl_int *errcode,
+pgfn_numeric_gt(kern_context *kcxt,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_bool_t	result;
@@ -1298,14 +1297,14 @@ pgfn_numeric_gt(cl_int *errcode,
 
 	} else {
 		result.isnull = false;
-		result.value = (numeric_cmp(errcode, arg1, arg2) > 0);
+		result.value = (numeric_cmp(kcxt, arg1, arg2) > 0);
 	}
 
 	return result;
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_numeric_ge(cl_int *errcode,
+pgfn_numeric_ge(kern_context *kcxt,
 				pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_bool_t	result;
@@ -1316,14 +1315,14 @@ pgfn_numeric_ge(cl_int *errcode,
 
 	} else {
 		result.isnull = false;
-		result.value = (numeric_cmp(errcode, arg1, arg2) >= 0);
+		result.value = (numeric_cmp(kcxt, arg1, arg2) >= 0);
 	}
 
 	return result;
 }
 
 STATIC_FUNCTION(pg_int4_t)
-pgfn_numeric_cmp(cl_int *errcode,
+pgfn_numeric_cmp(kern_context *kcxt,
 				 pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_int4_t	result;
@@ -1334,16 +1333,16 @@ pgfn_numeric_cmp(cl_int *errcode,
 
 	} else {
 		result.isnull = false;
-		result.value = numeric_cmp(errcode, arg1, arg2);
+		result.value = numeric_cmp(kcxt, arg1, arg2);
 	}
 
 	return result;
 }
 
 STATIC_FUNCTION(pg_numeric_t)
-pgfn_numeric_max(cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
+pgfn_numeric_max(kern_context *kcxt, pg_numeric_t arg1, pg_numeric_t arg2)
 {
-	pg_bool_t v = pgfn_numeric_ge(errcode, arg1, arg2);
+	pg_bool_t v = pgfn_numeric_ge(kcxt, arg1, arg2);
 
 	if (v.isnull)
 	{
@@ -1358,9 +1357,9 @@ pgfn_numeric_max(cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
 }
 
 STATIC_FUNCTION(pg_numeric_t)
-pgfn_numeric_min(cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
+pgfn_numeric_min(kern_context *kcxt, pg_numeric_t arg1, pg_numeric_t arg2)
 {
-	pg_bool_t v = pgfn_numeric_ge(errcode, arg1, arg2);
+	pg_bool_t v = pgfn_numeric_ge(kcxt, arg1, arg2);
 
 	if (v.isnull)
 	{
@@ -1379,7 +1378,8 @@ pgfn_numeric_min(cl_int *errcode, pg_numeric_t arg1, pg_numeric_t arg2)
  * Atomic operation support
  */
 STATIC_INLINE(cl_ulong)
-pg_atomic_min_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
+pg_atomic_min_numeric(kern_context *kcxt,
+					  cl_ulong *ptr, cl_ulong numeric_value)
 {
 	pg_numeric_t	x, y;
 	pg_int4_t		comp;
@@ -1391,7 +1391,7 @@ pg_atomic_min_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
 		y.isnull = false;
 		x.value = oldval = curval;
 		y.value = numeric_value;
-		comp = pgfn_numeric_cmp(errcode, x, y);
+		comp = pgfn_numeric_cmp(kcxt, x, y);
 		if (comp.value < 0)
 			break;
 	} while ((curval = atomicCAS(ptr, oldval, numeric_value)) != oldval);
@@ -1400,7 +1400,8 @@ pg_atomic_min_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
 }
 
 STATIC_INLINE(cl_ulong)
-pg_atomic_max_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
+pg_atomic_max_numeric(kern_context *kcxt,
+					  cl_ulong *ptr, cl_ulong numeric_value)
 {
 	pg_numeric_t	x, y;
 	pg_int4_t		comp;
@@ -1412,7 +1413,7 @@ pg_atomic_max_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
 		y.isnull = false;
 		x.value = oldval = curval;
 		y.value = numeric_value;
-		comp = pgfn_numeric_cmp(errcode, x, y);
+		comp = pgfn_numeric_cmp(kcxt, x, y);
 		if (comp.value > 0)
 			break;
 	} while ((curval = atomicCAS(ptr, oldval, numeric_value)) != oldval);
@@ -1421,7 +1422,8 @@ pg_atomic_max_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
 }
 
 STATIC_INLINE(cl_ulong)
-pg_atomic_add_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
+pg_atomic_add_numeric(kern_context *kcxt,
+					  cl_ulong *ptr, cl_ulong numeric_value)
 {
 	pg_numeric_t x, y, z;
 	cl_ulong	oldval;
@@ -1433,7 +1435,7 @@ pg_atomic_add_numeric(cl_int *errcode, cl_ulong *ptr, cl_ulong numeric_value)
 		y.isnull = false;
 		x.value = oldval = curval;
 		y.value = numeric_value;
-		z = pgfn_numeric_add(errcode, x, y);
+		z = pgfn_numeric_add(kcxt, x, y);
 		newval = z.value;
 	} while ((curval = atomicCAS(ptr, oldval, newval)) != oldval);
 

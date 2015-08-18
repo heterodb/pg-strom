@@ -64,10 +64,10 @@ typedef struct
 {
 	size_t			kresults_1_offset;
 	size_t			kresults_2_offset;
-	size_t			kresults_total_items;
-	size_t			kresults_max_items;
+	cl_uint			kresults_total_items;
+	cl_uint			kresults_max_items;
 	cl_uint			max_depth;
-	cl_int			errcode;
+	kern_errorbuf	kerror;
 	kern_parambuf	kparams;
 } kern_gpujoin;
 
@@ -109,8 +109,7 @@ typedef struct
  * returns true.
  */
 STATIC_FUNCTION(cl_bool)
-gpujoin_outer_quals(cl_int *errcode,
-					kern_parambuf *kparams,
+gpujoin_outer_quals(kern_context *kcxt,
 					kern_data_store *kds,
 					size_t kds_index);
 /*
@@ -125,8 +124,7 @@ gpujoin_outer_quals(cl_int *errcode,
  * to reduce DRAM accesses.
  */
 STATIC_FUNCTION(cl_bool)
-gpujoin_join_quals(cl_int *errcode,
-				   kern_parambuf *kparams,
+gpujoin_join_quals(kern_context *kcxt,
 				   kern_data_store *kds,
 				   kern_multirels *kmrels,
 				   int depth,
@@ -139,8 +137,7 @@ gpujoin_join_quals(cl_int *errcode,
  * Calculation of hash value if this depth uses hash-join logic.
  */
 STATIC_FUNCTION(cl_uint)
-gpujoin_hash_value(cl_int *errcode,
-				   kern_parambuf *kparams,
+gpujoin_hash_value(kern_context *kcxt,
 				   cl_uint *pg_crc32_table,
 				   kern_data_store *kds,
 				   kern_multirels *kmrels,
@@ -157,7 +154,6 @@ gpujoin_projection_mapping(cl_int dest_colidx,
 						   cl_int *src_depth,
 						   cl_int *src_colidx);
 
-
 KERNEL_FUNCTION(void)
 gpujoin_preparation(kern_gpujoin *kgjoin,
 					kern_data_store *kds,
@@ -169,18 +165,18 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
 	kern_resultbuf *kresults_in;
 	kern_resultbuf *kresults_out;
-	cl_int			errcode;
+	kern_context	kcxt;
 
 	/* sanity check */
-	if (get_global_id() == 0)
-	{
-		assert(depth > 0 && depth <= kgjoin->max_depth);
-		assert(kgjoin->kresults_1_offset > 0);
-		assert(kgjoin->kresults_2_offset > 0);
-	}
+	assert(depth > 0 && depth <= kgjoin->max_depth);
+	assert(kgjoin->kresults_1_offset > 0);
+	assert(kgjoin->kresults_2_offset > 0);
 	kresults_in = KERN_GPUJOIN_IN_RESULTS(kgjoin, depth);
 	kresults_out = KERN_GPUJOIN_OUT_RESULTS(kgjoin, depth);
-	errcode = (depth > 1 ? kresults_in->errcode : StromError_Success);
+
+	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_preparation, kparams);
+	if (depth > 1 && kresults_in->kerror.errcode != StromError_Success)
+		kcxt.e = kresults_in->kerror;
 
 	/*
 	 * In case of depth == 1, input result buffer is not initialized
@@ -198,15 +194,16 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 		cl_bool		is_matched;
 		__shared__ cl_int	base;
 
+		assert(kresults_in->nrels == 1);
+		assert(kresults_in->nrooms == kgjoin->kresults_total_items);
 		/*
 		 * Check qualifier of outer scan that was pulled-up (if any).
 		 * then, it allocates result buffer on kresults_in and put
 		 * get_global_id() if it match.
 		 */
-		if (kds_index < oitems_base + oitems_nums &&
-			kds_index < kds->nitems)
-			is_matched = gpujoin_outer_quals(&errcode, kparams,
-											 kds, kds_index);
+		if (kds_index >= oitems_base &&
+			kds_index < min(oitems_base + oitems_nums, kds->nitems))
+			is_matched = gpujoin_outer_quals(&kcxt, kds, kds_index);
 		else
 			is_matched = false;
 
@@ -218,12 +215,13 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 				base = atomicAdd(&kresults_in->nitems, count);
 			else
 				base = 0;
+			atomicMax(&kgjoin->kresults_max_items, base + count);
 		}
 		__syncthreads();
 
 		if (base + count > kgjoin->kresults_total_items)
 		{
-			STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
+			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 			goto out;
 		}
 
@@ -234,6 +232,7 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 		}
 	}
 
+out:
 	/* init output kresults buffer */
 	if (get_global_id() == 0)
 	{
@@ -241,17 +240,9 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 		kresults_out->nrels = depth + 1;
 		kresults_out->nrooms = kgjoin->kresults_total_items / (depth + 1);
 		kresults_out->nitems = 0;
-		kresults_out->errcode = StromError_Success;
+		memset(&kresults_out->kerror, 0, sizeof(kern_errorbuf));
 	}
-out:
-	/* Update required length of kresults if overflow. */
-	if (depth > 1 && get_global_id() == 0)
-	{
-		size_t	last_total_items = kresults_in->nrels * kresults_in->nitems;
-		if (kgjoin->kresults_max_items < last_total_items)
-			kgjoin->kresults_max_items = last_total_items;
-	}
-	kern_writeback_error_status(&kresults_out->errcode, errcode);
+	kern_writeback_error_status(&kresults_in->kerror, kcxt.e);
 }
 
 KERNEL_FUNCTION_MAXTHREADS(void)
@@ -265,6 +256,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
 	kern_resultbuf *kresults_in = KERN_GPUJOIN_IN_RESULTS(kgjoin, depth);
 	kern_resultbuf *kresults_out = KERN_GPUJOIN_OUT_RESULTS(kgjoin, depth);
+	kern_context	kcxt;
 	kern_data_store *kds_in;
 	cl_bool		   *lo_map;
 	size_t			nvalids;
@@ -272,14 +264,14 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 	cl_int			y_offset;
 	cl_int			x_index;
 	cl_int			x_limit;
-	cl_int			errcode;
 
 	/*
 	 * immediate bailout if previous stage already have error status
 	 */
-	errcode = kresults_in->errcode;
-	if (errcode != StromError_Success)
+	kcxt.e = kresults_in->kerror;
+	if (kcxt.e.errcode != StromError_Success)
 		goto out;
+	INIT_KERNEL_CONTEXT(&kcxt,gpujoin_exec_nestloop,kparams);
 
 	/* sanity checks */
 	if (get_global_id() == 0)
@@ -332,8 +324,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 			y_htup = NULL;
 
 		/* does it satisfies join condition? */
-		is_matched = gpujoin_join_quals(&errcode,
-										kparams,
+		is_matched = gpujoin_join_quals(&kcxt,
 										kds,
 										kmrels,
 										depth,
@@ -358,13 +349,16 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 				base = atomicAdd(&kresults_out->nitems, count);
 			else
 				base = 0;
+
+			atomicMax(&kgjoin->kresults_max_items,
+					  (depth + 1) * base + count);
 		}
 		__syncthreads();
 
 		/* still have space to store? */
 		if (base + count > kresults_out->nrooms)
 		{
-			STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
+			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 			goto out;
 		}
 
@@ -377,7 +371,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 		}
 	}
 out:
-	kern_writeback_error_status(&kresults_out->errcode, errcode);
+	kern_writeback_error_status(&kresults_out->kerror, kcxt.e);
 }
 
 /*
@@ -398,21 +392,22 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	kern_resultbuf	   *kresults_in = KERN_GPUJOIN_IN_RESULTS(kgjoin, depth);
 	kern_resultbuf	   *kresults_out = KERN_GPUJOIN_OUT_RESULTS(kgjoin, depth);
 	kern_data_store	   *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+	kern_context		kcxt;
 	cl_bool			   *lo_map;
 	size_t				nvalids;
 	cl_int				crc_index;
 	cl_int				x_index;
 	cl_int				x_limit;
-	cl_int				errcode;
 	__shared__ cl_uint	base;
 	__shared__ cl_uint	pg_crc32_table[256];
 
 	/*
 	 * immediate bailout if previous stage already have error status
 	 */
-	errcode = kresults_in->errcode;
-	if (errcode != StromError_Success)
+	kcxt.e = kresults_in->kerror;
+	if (kcxt.e.errcode != StromError_Success)
 		goto out;
+	INIT_KERNEL_CONTEXT(&kcxt,gpujoin_exec_hashjoin,kparams);
 
 	/* sanity checks */
 	if (get_global_id() == 0)
@@ -453,7 +448,6 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	/* will be valid, if LEFT OUTER JOIN */
 	lo_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, kds_hash->nitems,
 										   cuda_index, outer_join_map);
-
 	for (x_index = get_global_xid();
 		 x_index < x_limit;
 		 x_index += get_global_xsize())
@@ -473,8 +467,8 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		if (x_index < nvalids)
 		{
 			x_buffer = KERN_GET_RESULT(kresults_in, x_index);
-			hash_value = gpujoin_hash_value(&errcode,
-											kparams,
+			assert(((size_t)x_buffer[0] & 7) == 0);
+			hash_value = gpujoin_hash_value(&kcxt,
 											pg_crc32_table,
 											kds,
 											kmrels,
@@ -497,8 +491,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 				   ? NULL
 				   : &khitem->htup);
 
-			is_matched = gpujoin_join_quals(&errcode,
-											kparams,
+			is_matched = gpujoin_join_quals(&kcxt,
 											kds,
 											kmrels,
 											depth,
@@ -521,13 +514,16 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 					base = atomicAdd(&kresults_out->nitems, count);
 				else
 					base = 0;
+
+				atomicMax(&kgjoin->kresults_max_items,
+						  (depth + 1) * base + count);
 			}
 			__syncthreads();
 
 			/* kresults_out still have enough space? */
 			if (base + count > kresults_out->nrooms)
 			{
-				STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
+				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 				goto out;
 			}
 
@@ -562,13 +558,16 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 					base = atomicAdd(&kresults_out->nitems, count);
 				else
 					base = 0;
+
+				atomicMax(&kgjoin->kresults_max_items,
+						  (depth + 1) * base + count);
 			}
 			__syncthreads();
 
 			/* kresults_out still have enough space? */
 			if (base + count > kresults_out->nrooms)
 			{
-				STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
+				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 				goto out;
 			}
 
@@ -583,7 +582,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		}
 	}
 out:
-	kern_writeback_error_status(&kresults_out->errcode, errcode);
+	kern_writeback_error_status(&kresults_out->kerror, kcxt.e);
 }
 
 /*
@@ -599,21 +598,25 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 					   cl_int cuda_index,
 					   cl_bool *outer_join_map)
 {
-	kern_resultbuf *kresults_out = KERN_GPUJOIN_OUT_RESULTS(kgjoin, depth);
-	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
-	cl_int			errcode;
-	cl_bool		   *lo_map;
-	cl_bool			needs_outer_row;
-	cl_uint			count;
-	cl_uint			offset;
-	cl_int		   *r_buffer;
-	cl_int			i, ndevs = kmrels->ndevs;
-	__shared__ cl_uint base;
+	kern_parambuf	   *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
+	kern_resultbuf	   *kresults_out = KERN_GPUJOIN_OUT_RESULTS(kgjoin, depth);
+	kern_data_store	   *kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+	kern_context		kcxt;
+	cl_bool			   *lo_map;
+	cl_bool				needs_outer_row;
+	cl_uint				count;
+	cl_uint				offset;
+	cl_int			   *r_buffer;
+	cl_int				i, ndevs = kmrels->ndevs;
+	__shared__ cl_uint	base;
 
-	/* if prior stage raised an error, we skip this kernel */
-	errcode = kresults_out->errcode;
-	if (errcode != StromError_Success)
+	/*
+	 * immediate bailout if previous stage already have error status
+	 */
+	kcxt.e = kresults_out->kerror;
+	if (kcxt.e.errcode != StromError_Success)
 		goto out;
+	INIT_KERNEL_CONTEXT(&kcxt,gpujoin_outer_nestloop,kparams);
 
 	/* sanity checks */
 	if (get_global_id() == 0)
@@ -655,6 +658,9 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 			base = atomicAdd(&kresults_out->nitems, count);
 		else
 			base = 0;
+
+		atomicMax(&kgjoin->kresults_max_items,
+				  (depth + 1) * base + count);
 	}
 	__syncthreads();
 
@@ -664,7 +670,7 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 	 */
 	if (base + count > kresults_out->nrooms)
 	{
-		errcode = StromError_DataStoreNoSpace;
+		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 		goto out;
 	}
 
@@ -682,7 +688,7 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 		r_buffer[depth] = (size_t)htup - (size_t)kds_in;
 	}
 out:
-	kern_writeback_error_status(&kresults_out->errcode, errcode);
+	kern_writeback_error_status(&kresults_out->kerror, kcxt.e);
 }
 
 /*
@@ -699,12 +705,13 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 					   cl_int cuda_index,
 					   cl_bool *outer_join_map)
 {
+	kern_parambuf	   *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
 	kern_resultbuf	   *kresults_out = KERN_GPUJOIN_OUT_RESULTS(kgjoin, depth);
 	kern_data_store	   *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 	kern_hashitem	   *khitem;
+	kern_context		kcxt;
 	cl_bool			   *lo_map;
 	cl_bool				needs_outer_row;
-	cl_int				errcode;
 	cl_uint				offset;
 	cl_uint				count;
 	cl_int				i, ndevs = kmrels->ndevs;
@@ -714,9 +721,10 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 	/*
 	 * immediate bailout if previous stage already have error status
 	 */
-	errcode = kresults_out->errcode;
-	if (errcode != StromError_Success)
+	kcxt.e = kresults_out->kerror;
+	if (kcxt.e.errcode != StromError_Success)
 		goto out;
+	INIT_KERNEL_CONTEXT(&kcxt,gpujoin_outer_hashjoin,kparams);
 
 	/* sanity checks */
 	if (get_global_id() == 0)
@@ -766,6 +774,9 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 				base = atomicAdd(&kresults_out->nitems, count);
 			else
 				base = 0;
+
+			atomicMax(&kgjoin->kresults_max_items,
+					  (depth + 1) * base + count);
 		}
 		__syncthreads();
 
@@ -775,7 +786,7 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 		 */
 		if (base + count > kresults_out->nrooms)
 		{
-			errcode = StromError_DataStoreNoSpace;
+			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 			goto out;
 		}
 
@@ -799,7 +810,7 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 		arithmetic_stairlike_add(khitem != NULL ? 1 : 0, &count);
 	} while (count > 0);
 out:
-	kern_writeback_error_status(&kresults_out->errcode, errcode);
+	kern_writeback_error_status(&kresults_out->kerror, kcxt.e);
 }
 
 /*
@@ -808,7 +819,7 @@ out:
  * It makes joined relation on kds_dst
  */
 STATIC_FUNCTION(void)
-__gpujoin_projection_row(cl_int *errcode,
+__gpujoin_projection_row(kern_context *kcxt,
 						 kern_gpujoin *kgjoin,
 						 kern_resultbuf *kresults,
 						 size_t res_index,
@@ -930,7 +941,7 @@ __gpujoin_projection_row(cl_int *errcode,
 		STROMALIGN(sizeof(cl_uint) * kresults->nitems) +
 		usage_prev + total_length > kds_dst->length)
 	{
-		STROM_SET_ERROR(errcode, StromError_DataStoreNoSpace);
+		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
 		return;
 	}
 
@@ -1075,39 +1086,32 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 					   kern_data_store *kds_src,
 					   kern_data_store *kds_dst)
 {
-	kern_resultbuf *kresults;
+	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
+	kern_resultbuf *kresults = KERN_GPUJOIN_OUT_RESULTS(kgjoin,
+														kgjoin->max_depth);
+	kern_context	kcxt;
 	size_t		res_index;
 	size_t		res_limit;
-	cl_int		errcode = StromError_Success;
-
-	kresults = KERN_GPUJOIN_OUT_RESULTS(kgjoin, kgjoin->max_depth);
 
 	/* sanity checks */
-	if (get_global_id() == 0)
-	{
-		assert(kresults->nrels == kgjoin->max_depth + 1);
-		assert(kds_src->format == KDS_FORMAT_ROW &&
-			   kds_dst->format == KDS_FORMAT_ROW);
-		assert(kds_dst->usage == 0);
-	}
+	assert(kresults->nrels == kgjoin->max_depth + 1);
+	assert(kds_src->format == KDS_FORMAT_ROW &&
+		   kds_dst->format == KDS_FORMAT_ROW);
+	assert(kds_dst->usage == 0);
 
+	/*
+	 * Update nitems of kds_dst. note that get_global_id(0) is not always
+	 * called earlier than other thread. So, we should not expect nitems
+	 * of kds_dst is initialized.
+	 */
 	if (get_global_id() == 0)
-	{
-		/*
-		 * Update max number of items on kern_resultbuf, if overflow.
-		 * Kernel retry will adjust length according to this information.
-		 */
-		size_t	last_total_items = kresults->nrels * kresults->nitems;
-
-		if (kgjoin->kresults_max_items < last_total_items)
-			kgjoin->kresults_max_items = last_total_items;
-		/*
-		 * Update nitems of kds_dst. note that get_global_id(0) is not always
-		 * called earlier than other thread. So, we should not expect nitems
-		 * of kds_dst is initialized.
-		 */		
 		kds_dst->nitems = kresults->nitems;
-	}
+
+	/* Immediate bailout if previous stage raise an error status */
+	kcxt.e = kresults->kerror;
+	if (kcxt.e.errcode != StromError_Success)
+		goto out;
+	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_projection_row, kparams);
 
 	/* Case of overflow; it shall be retried or executed by CPU instead,
 	 * so no projection is needed anyway. We quickly exit the kernel.
@@ -1117,7 +1121,7 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 	if (kresults->nitems > kresults->nrooms ||
 		kresults->nitems > kds_dst->nrooms)
 	{
-		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
+		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 		goto out;
 	}
 
@@ -1128,16 +1132,16 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 		 res_index < res_limit;
 		 res_index += get_global_size())
 	{
-		__gpujoin_projection_row(&errcode, kgjoin, kresults,
+		__gpujoin_projection_row(&kcxt, kgjoin, kresults,
 								 res_index, kmrels, kds_src, kds_dst);
 	}
 out:
 	/* write-back execution status to host-side */
-	kern_writeback_error_status(&kgjoin->errcode, errcode);
+	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
 }
 
 STATIC_FUNCTION(void)
-__gpujoin_projection_slot(cl_int *errcode,
+__gpujoin_projection_slot(kern_context *kcxt,
 						  kern_resultbuf *kresults,
 						  size_t res_index,
 						  kern_multirels *kmrels,
@@ -1242,44 +1246,33 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 						kern_data_store *kds_src,
 						kern_data_store *kds_dst)
 {
-	kern_resultbuf *kresults;
-	cl_int		errcode;
-	size_t		res_index;
-
-	kresults = KERN_GPUJOIN_OUT_RESULTS(kgjoin, kgjoin->max_depth);
-	errcode = kresults->errcode;
-
-	/* Update resource consumption information */
-	if (get_global_id() == 0)
-	{
-		/*
-		 * Update max number of items on kern_resultbuf, if overflow.
-		 * Kernel retry will adjust length according to this information.
-		 */
-		size_t	last_total_items = kresults->nrels * kresults->nitems;
-
-		if (kgjoin->kresults_max_items < last_total_items)
-			kgjoin->kresults_max_items = last_total_items;
-		/*
-		 * Update nitems of kds_dst. note that get_global_id(0) is not always
-		 * called earlier than other thread. So, we should not expect nitems
-		 * of kds_dst is initialized.
-		 */
-		kds_dst->nitems = kresults->nitems;
-	}
-
-	if (errcode != StromError_Success)
-		goto out;
+	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
+	kern_resultbuf *kresults = KERN_GPUJOIN_OUT_RESULTS(kgjoin,
+														kgjoin->max_depth);
+	kern_context	kcxt;
+	size_t			res_index;
 
 	/* sanity checks */
-	if (get_global_id() == 0)
-	{
-		assert(kresults->nrels == kgjoin->max_depth + 1);
-		assert(kds_src->format == KDS_FORMAT_ROW &&
-			   kds_dst->format == KDS_FORMAT_SLOT);
-	}
+	assert(kresults->nrels == kgjoin->max_depth + 1);
+	assert(kds_src->format == KDS_FORMAT_ROW &&
+		   kds_dst->format == KDS_FORMAT_SLOT);
 
-	/* Case of overflow; it shall be retried or executed by CPU instead,
+	/*
+	 * Update nitems of kds_dst. note that get_global_id(0) is not always
+	 * called earlier than other thread. So, we should not expect nitems
+	 * of kds_dst is initialized.
+	 */
+	if (get_global_id() == 0)
+		kds_dst->nitems = kresults->nitems;
+
+	/* Immediate bailout if previous stage raise an error status */
+	kcxt.e = kresults->kerror;
+	if (kcxt.e.errcode != StromError_Success)
+		goto out;
+	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_projection_slot, kparams);
+
+	/*
+	 * Case of overflow; it shall be retried or executed by CPU instead,
 	 * so no projection is needed anyway. We quickly exit the kernel.
 	 * No need to set an error code because kern_gpuhashjoin_main()
 	 * should already set it.
@@ -1287,7 +1280,7 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 	if (kresults->nitems > kresults->nrooms ||
 		kresults->nitems > kds_dst->nrooms)
 	{
-		STROM_SET_ERROR(&errcode, StromError_DataStoreNoSpace);
+		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 		goto out;
 	}
 
@@ -1296,12 +1289,12 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 		 res_index < kresults->nitems;
 		 res_index += get_global_size())
 	{
-		__gpujoin_projection_slot(&errcode, kresults, res_index,
+		__gpujoin_projection_slot(&kcxt, kresults, res_index,
 								  kmrels, kds_src, kds_dst);
 	}
 out:
 	/* write-back execution status to host-side */
-	kern_writeback_error_status(&kgjoin->errcode, errcode);
+	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
 }
 
 #endif	/* __CUDACC__ */

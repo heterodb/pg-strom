@@ -1247,7 +1247,7 @@ check_completed_tasks(GpuTaskState *gts)
 			pgstrom_cleanup_gputask_cuda_resources(gtask);
 
 			SpinLockAcquire(&gts->lock);
-			if (gtask->errcode != StromError_Success)
+			if (gtask->kerror.errcode != StromError_Success)
 				dlist_push_head(&gts->ready_tasks, &gtask->chain);
 			else
 				dlist_push_tail(&gts->ready_tasks, &gtask->chain);
@@ -1627,12 +1627,12 @@ pgstrom_fetch_gputask(GpuTaskState *gts)
 	/*
 	 * Error handling
 	 */
-	if (gtask->errcode != StromError_Success)
+	if (gtask->kerror.errcode != StromError_Success)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("PG-Strom: CUDA execution error (%s)",
-						errorText(gtask->errcode))));
+						errorTextKernel(&gtask->kerror))));
 	}
 	return gtask;
 }
@@ -1858,10 +1858,13 @@ pgstrom_compute_workgroup_size(size_t *p_grid_size,
 	}
 
 	/*
-	 * Cut-off block-size, if it is larger than nitems
+	 * Adjustment of the block size, if it is larger than nitems including
+	 * the case when nitems == 0. We expects block_size it at least equal
+	 * to the WARP_SIZE.
 	 */
 	if (block_size > nitems)
 		block_size = (nitems + warp_size - 1) & ~(warp_size - 1);
+	block_size = Max(block_size, warp_size);
 
 	*p_block_size = block_size;
 	*p_grid_size = (nitems + block_size - 1) / block_size;
@@ -1938,7 +1941,9 @@ pgstrom_compute_workgroup_size_2d(size_t *p_grid_xsize,
 	root_block_size = (int) sqrt(max_block_size);
 
 	block_ysize = Min(root_block_size, y_nitems);
+	block_ysize = Max(block_ysize, 1);
 	block_xsize = ((max_block_size / block_ysize) & ~(warp_size - 1));
+	block_xsize = Max(block_xsize, 1);
 
 	/*
 	 * adjust block_xsize and _ysize according to the expected shared memory
@@ -1967,8 +1972,8 @@ pgstrom_compute_workgroup_size_2d(size_t *p_grid_xsize,
 	/* put results */
 	*p_block_xsize = block_xsize;
 	*p_block_ysize = block_ysize;
-	*p_grid_xsize = (x_nitems + block_xsize - 1) / block_xsize;
-	*p_grid_ysize = (y_nitems + block_ysize - 1) / block_ysize;
+	*p_grid_xsize = Max((x_nitems + block_xsize - 1) / block_xsize, 1);
+	*p_grid_ysize = Max((y_nitems + block_ysize - 1) / block_ysize, 1);
 }
 
 /*
@@ -2294,6 +2299,52 @@ errorText(int errcode)
 			else
 				snprintf(buffer, sizeof(buffer), "%d - unknown", errcode);
 	}
+	return buffer;
+}
+
+/*
+ * errorTextKernel
+ *
+ * translation from kern_errorbuf to human readable representation
+ */
+const char *
+errorTextKernel(kern_errorbuf *kerror)
+{
+	static __thread char buffer[1024];
+	const char *kernel_name;
+
+#define KERN_ENTRY(KERNEL)						\
+	case StromKernel_##KERNEL: kernel_name = #KERNEL; break
+
+	switch (kerror->kernel)
+	{
+		KERN_ENTRY(CudaRuntime);
+		KERN_ENTRY(gpuscan_qual);
+		KERN_ENTRY(gpujoin_preparation);
+		KERN_ENTRY(gpujoin_exec_nestloop);
+		KERN_ENTRY(gpujoin_exec_hashjoin);
+		KERN_ENTRY(gpujoin_outer_nestloop);
+		KERN_ENTRY(gpujoin_outer_hashjoin);
+		KERN_ENTRY(gpujoin_projection_row);
+		KERN_ENTRY(gpujoin_projection_slot);
+		KERN_ENTRY(gpupreagg_preparation);
+		KERN_ENTRY(gpupreagg_local_reduction);
+		KERN_ENTRY(gpupreagg_global_reduction);
+		KERN_ENTRY(gpupreagg_nogroup_reduction);
+		KERN_ENTRY(gpupreagg_fixup_varlena);
+		KERN_ENTRY(gpusort_preparation);
+		KERN_ENTRY(gpusort_bitonic_local);
+		KERN_ENTRY(gpusort_bitonic_step);
+		KERN_ENTRY(gpusort_bitonic_merge);
+		KERN_ENTRY(gpusort_fixup_datastore);
+		default:
+			kernel_name = "unknown kernel";
+			break;
+	}
+#undef KERN_ENTRY
+	snprintf(buffer, sizeof(buffer), "%s:%d %s",
+			 kernel_name, kerror->lineno,
+			 errorText(kerror->errcode));
 	return buffer;
 }
 

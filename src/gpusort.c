@@ -393,7 +393,7 @@ cost_gpusort(PlannedStmt *pstmt, Sort *sort,
 		if (chunk_size < pgstrom_chunk_size())
 			chunk_size = pgstrom_chunk_size();
 		nrows_per_chunk = ntuples;
-		num_chunks = 1;
+		num_chunks = 1.0;
 	}
 	else
 	{
@@ -428,11 +428,12 @@ cost_gpusort(PlannedStmt *pstmt, Sort *sort,
 		gpu_comp_cost * nrows_per_chunk * LOG2(nrows_per_chunk);
 
 	/*
-	 * We'll also use CPU based merge sort, if # of chunks > 1.
+	 * We'll also use CPU based N-way merge sort, if # of chunks > 1.
+	 * It is usually expensive, so we like to avoid it as long as we can.
 	 */
-	if (num_chunks > 1)
+	if (num_chunks > 1.0)
 		startup_cost += cpu_comp_cost * nrows_per_chunk *
-			num_chunks * (LOG2(num_chunks) + 1);
+			num_chunks * (num_chunks - 1.0);
 
 	/*
 	 * Cost to communicate with upper node
@@ -513,7 +514,7 @@ gpusort_projection_addcase(StringInfo body,
 			"  else\n"
 			"  {\n"
 			"    pg_numeric_t temp =\n"
-			"      pg_numeric_from_varlena(errcode, (varlena *) datum);\n"
+			"      pg_numeric_from_varlena(kcxt, (varlena *) datum);\n"
 			"    ts_isnull[%d] = temp.isnull;\n"
 			"    ts_values[%d] = temp.value;\n"
 			"  }\n",
@@ -666,11 +667,11 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 		appendStringInfo(
 			&kc_body,
 			"  /* sort key comparison on the resource %d */\n"
-			"  KVAR_X%d = pg_%s_vref(kds,errcode,%d,x_index);\n"
-			"  KVAR_Y%d = pg_%s_vref(kds,errcode,%d,y_index);\n"
+			"  KVAR_X%d = pg_%s_vref(kds,kcxt,%d,x_index);\n"
+			"  KVAR_Y%d = pg_%s_vref(kds,kcxt,%d,y_index);\n"
 			"  if (!KVAR_X%d.isnull && !KVAR_Y%d.isnull)\n"
 			"  {\n"
-			"    comp = pgfn_%s(errcode, KVAR_X%d, KVAR_Y%d);\n"
+			"    comp = pgfn_%s(kcxt, KVAR_X%d, KVAR_Y%d);\n"
 			"    if (comp.value != 0)\n"
 			"      return %s;\n"
 			"  }\n"
@@ -720,7 +721,7 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 	appendStringInfo(
 		&result,
 		"STATIC_FUNCTION(void)\n"
-		"gpusort_projection(cl_int *errcode,\n"
+		"gpusort_projection(kern_context *kcxt,\n"
 		"                   Datum *ts_values,\n"
 		"                   cl_char *ts_isnull,\n"
 		"                   kern_data_store *ktoast,\n"
@@ -733,7 +734,7 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 	appendStringInfo(
         &result,
 		"STATIC_FUNCTION(void)\n"
-		"gpusort_fixup_variables(cl_int *errcode,\n"
+		"gpusort_fixup_variables(kern_context *kcxt,\n"
 		"                        Datum *ts_values,\n"
 		"                        cl_char *ts_isnull,\n"
 		"                        kern_data_store *ktoast,\n"
@@ -747,7 +748,7 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 	appendStringInfo(
 		&result,
 		"STATIC_FUNCTION(cl_int)\n"
-		"gpusort_keycomp(cl_int *errcode,\n"
+		"gpusort_keycomp(kern_context *kcxt,\n"
 		"                kern_data_store *kds,\n"
 		"                kern_data_store *ktoast,\n"
 		"                size_t x_index,\n"
@@ -1573,10 +1574,10 @@ gpusort_task_complete(GpuTask *gtask)
 		}
 		gpusort_cleanup_cuda_resources(gpusort);
 
-		if (gpusort->task.errcode == StromError_CpuReCheck)
+		if (gpusort->task.kerror.errcode == StromError_CpuReCheck)
 		{
 			gpusort_fallback_quicksort(gss, gpusort);
-			gpusort->task.errcode = StromError_Success;
+			gpusort->task.kerror.errcode = StromError_Success;
 		}
 	}
 	else
@@ -1682,10 +1683,14 @@ gpusort_task_respond(CUstream stream, CUresult status, void *private)
 	if (status == CUDA_ERROR_INVALID_CONTEXT || !IsTransactionState())
 		return;
 
-	if (status != CUDA_SUCCESS)
-		gpusort->task.errcode = status;
-    else
-		gpusort->task.errcode = kresults->errcode;
+	if (status == CUDA_SUCCESS)
+		gpusort->task.kerror = kresults->kerror;
+	else
+	{
+		gpusort->task.kerror.errcode = status;
+		gpusort->task.kerror.kernel = StromKernel_CudaRuntime;
+		gpusort->task.kerror.lineno = 0;
+	}
 
 	/*
 	 * Remove from the running_tasks list, then attach it
@@ -1695,7 +1700,7 @@ gpusort_task_respond(CUstream stream, CUresult status, void *private)
 	dlist_delete(&gpusort->task.chain);
 	gts->num_running_tasks--;
 
-	if (gpusort->task.errcode == StromError_Success)
+	if (gpusort->task.kerror.errcode == StromError_Success)
 		dlist_push_tail(&gts->completed_tasks, &gpusort->task.chain);
 	else
 		dlist_push_head(&gts->completed_tasks, &gpusort->task.chain);
@@ -1733,9 +1738,9 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 	sort_kernels[0] = gpusort->kern_bitonic_local;
 	sort_kernels[1] = gpusort->kern_bitonic_step;
 	sort_kernels[2] = gpusort->kern_bitonic_merge;
-	shmem_unitsz[0] = 2 * sizeof(cl_uint);
-	shmem_unitsz[1] = sizeof(cl_uint);
-	shmem_unitsz[2] = sizeof(cl_uint);
+	shmem_unitsz[0] = Max(2 * sizeof(cl_uint), sizeof(kern_errorbuf));
+	shmem_unitsz[1] = Max(sizeof(cl_uint), sizeof(kern_errorbuf));
+	shmem_unitsz[2] = Max(sizeof(cl_uint), sizeof(kern_errorbuf));
 
 	for (i=0; i < lengthof(sort_kernels); i++)
 	{
@@ -1776,7 +1781,8 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 	rc = cuLaunchKernel(gpusort->kern_bitonic_local,
 						grid_size, 1, 1,
 						block_size, 1, 1,
-						2 * sizeof(cl_uint) * block_size,
+						Max(2 * sizeof(cl_uint),
+							sizeof(kern_errorbuf)) * block_size,
 						gpusort->task.cuda_stream,
 						kernel_args,
 						NULL);
@@ -1809,7 +1815,8 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 			rc = cuLaunchKernel(gpusort->kern_bitonic_step,
 								grid_size, 1, 1,
 								block_size, 1, 1,
-								sizeof(cl_uint) * block_size,
+								Max(sizeof(cl_uint),
+									sizeof(kern_errorbuf)) * block_size,
 								gpusort->task.cuda_stream,
 								kernel_args,
 								NULL);
@@ -1831,7 +1838,8 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 		rc = cuLaunchKernel(gpusort->kern_bitonic_merge,
 							grid_size, 1, 1,
 							block_size, 1, 1,
-							2 * sizeof(cl_uint) * block_size,
+							Max(2 * sizeof(cl_uint),
+								sizeof(kern_errorbuf)) * block_size,
 							gpusort->task.cuda_stream,
 							kernel_args,
 							NULL);
@@ -2005,7 +2013,7 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 								   gpusort->task.cuda_device,
 								   false,
 								   nitems,
-								   sizeof(cl_uint));
+								   sizeof(kern_errorbuf));
 	kernel_args[0] = &gpusort->m_gpusort;
 	kernel_args[1] = &gpusort->m_kds;
 	kernel_args[2] = &gpusort->m_ktoast;
@@ -2013,7 +2021,7 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	rc = cuLaunchKernel(gpusort->kern_prep,
 						grid_size, 1, 1,
 						block_size, 1, 1,
-						sizeof(cl_uint) * block_size,
+						sizeof(kern_errorbuf) * block_size,
 						gpusort->task.cuda_stream,
 						kernel_args,
 						NULL);
@@ -2040,14 +2048,14 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 								   gpusort->task.cuda_device,
 								   false,
 								   nitems,
-								   sizeof(cl_uint));
+								   sizeof(kern_errorbuf));
 	kernel_args[0] = &gpusort->m_gpusort;
 	kernel_args[1] = &gpusort->m_kds;
 	kernel_args[2] = &gpusort->m_ktoast;
 	rc = cuLaunchKernel(gpusort->kern_fixup,
 						grid_size, 1, 1,
 						block_size, 1, 1,
-						sizeof(cl_uint) * block_size,
+						sizeof(kern_errorbuf) * block_size,
 						gpusort->task.cuda_stream,
 						kernel_args,
 						NULL);
@@ -2232,7 +2240,7 @@ form_pgstrom_flat_gpusort_base(GpuSortState *gss, cl_int chunk_id)
 	kresults->nrels = 2;
 	kresults->nrooms = nitems;
 	kresults->nitems = nitems;
-	kresults->errcode = StromError_Success;
+	memset(&kresults->kerror, 0, sizeof(kern_errorbuf));
 
 	return dsm_seg;
 }
@@ -2362,7 +2370,7 @@ form_pgstrom_flat_gpusort(GpuSortState *gss,
 	kresults->nrels = 2;
 	kresults->nrooms = nitems;
 	kresults->nitems = nitems;
-	kresults->errcode = ERRCODE_INTERNAL_ERROR;
+	kresults->kerror.errcode = ERRCODE_INTERNAL_ERROR;
 	snprintf((char *)kresults->results, sizeof(cl_int) * 2 * nitems,
 			 "An internal error on worker prior to DSM attachment");
 	buf.len += MAXALIGN(sizeof(kern_resultbuf)) + 80;
@@ -2599,7 +2607,7 @@ gpusort_fallback_quicksort(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	__gpusort_fallback_quicksort(gss, kresults, kds, 0, nitems - 1);
 
 	/* restore error status */
-	kresults->errcode = StromError_Success;
+	kresults->kerror.errcode = StromError_Success;
 	kresults->nitems = kds->nitems;
 }
 
@@ -2614,7 +2622,7 @@ pgstrom_init_gpusort(void)
 							 "Enables the use of GPU accelerated sorting",
 							 NULL,
 							 &enable_gpusort,
-							 true,
+							 false, /* not recommended now */
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
@@ -2849,7 +2857,7 @@ bgw_cpusort_entrypoint(Datum main_arg)
 	 */
 	pfg = dsm_segment_address(dsm_seg);
 	kresults = GPUSORT_GET_KRESULTS(dsm_seg);
-	kresults->errcode = 0;
+	kresults->kerror.errcode = StromError_Success;
 
 	/* get reference to the backend process */
 	backend_proc = pfg->backend_proc;
@@ -2888,7 +2896,7 @@ bgw_cpusort_entrypoint(Datum main_arg)
 		ErrorData	   *edata = CopyErrorData();
 		Size			buflen;
 
-		kresults->errcode = edata->sqlerrcode;
+		kresults->kerror.errcode = edata->sqlerrcode;
 		buflen = sizeof(cl_int) * kresults->nrels * kresults->nrooms;
 		snprintf((char *)kresults->results, buflen, "%s (%s, %s:%d)",
 				 edata->message, edata->funcname,

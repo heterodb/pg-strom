@@ -288,7 +288,7 @@ struct GpuTask
 	CUdevice		cuda_device;	/* just reference, no cleanup needed */
 	CUstream		cuda_stream;	/* owned for each GpuTask */
 	CUmodule		cuda_module;	/* just reference, no cleanup needed */
-	cl_int			errcode;
+	kern_errorbuf	kerror;		/* error status on CUDA kernel execution */
 	pgstrom_perfmon	pfm;
 };
 
@@ -449,6 +449,7 @@ extern void pgstrom_compute_workgroup_size_2d(size_t *p_grid_xsize,
 extern void pgstrom_init_cuda_control(void);
 extern int pgstrom_baseline_cuda_capability(void);
 extern const char *errorText(int errcode);
+extern const char *errorTextKernel(kern_errorbuf *kerror);
 extern Datum pgstrom_scoreboard_info(PG_FUNCTION_ARGS);
 extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 
@@ -583,6 +584,7 @@ extern void pgstrom_init_gpuscan(void);
 /*
  * gpujoin.c
  */
+extern bool pgstrom_path_is_gpujoin(Path *pathnode);
 extern bool pgstrom_plan_is_gpujoin(Plan *plannode);
 extern bool pgstrom_plan_is_gpujoin_bulkinput(Plan *plannode);
 extern void	pgstrom_init_gpujoin(void);
@@ -614,9 +616,7 @@ extern double	pgstrom_gpu_operator_cost;
 extern double	pgstrom_gpu_tuple_cost;
 extern double	pgstrom_nrows_growth_ratio_limit;
 extern double	pgstrom_nrows_growth_margin;
-extern void		pgstrom_add_path(PlannerInfo *root, RelOptInfo *rel,
-								 CustomPath *cpath, Size cpath_length);
-extern CustomPath *pgstrom_find_path(PlannerInfo *root, RelOptInfo *rel);
+
 extern void _PG_init(void);
 extern const char *pgstrom_strerror(cl_int errcode);
 extern void show_scan_qual(List *qual, const char *qlabel,

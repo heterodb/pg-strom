@@ -103,6 +103,8 @@ gpuscan_writeback_results(kern_resultbuf *kresults, int result)
 	cl_uint		offset;
 	cl_uint		nitems;
 
+	assert(kresults->nrels == 1);
+
 	/*
 	 * A typical usecase of arithmetic_stairlike_add with binary value:
 	 * It takes 1 if thread wants to return a status to the host side,
@@ -130,8 +132,7 @@ gpuscan_writeback_results(kern_resultbuf *kresults, int result)
  * forward declaration of the function to be generated on the fly
  */
 STATIC_FUNCTION(cl_bool)
-gpuscan_qual_eval(cl_int *errcode,
-				  kern_parambuf *kparams,
+gpuscan_qual_eval(kern_context *kcxt,
 				  kern_data_store *kds,
 				  kern_data_store *ktoast,
 				  size_t kds_index);
@@ -145,32 +146,34 @@ gpuscan_qual(kern_gpuscan *kgpuscan,	/* in/out */
 {
 	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
 	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
+	kern_context	kcxt;
 	size_t			kds_index = get_global_id();
-	cl_int			errcode = StromError_Success;
 	cl_int			rc = 0;
+
+	INIT_KERNEL_CONTEXT(&kcxt,gpuscan_qual,kparams);
 
 	if (kds_index < kds->nitems)
 	{
-		if (gpuscan_qual_eval(&errcode, kparams, kds, ktoast, kds_index))
+		if (gpuscan_qual_eval(&kcxt, kds, ktoast, kds_index))
 		{
-			if (errcode == StromError_Success)
+			if (kcxt.e.errcode == StromError_Success)
 				rc = 1;
-			else if (errcode == StromError_CpuReCheck)
+			else if (kcxt.e.errcode == StromError_CpuReCheck)
 			{
 				rc = -1;
-				errcode = StromError_Success;	/* row-level rechecks */
+				kcxt.e.errcode = StromError_Success;	/* CPU rechecks */
 			}
 		}
-		else if (errcode == StromError_CpuReCheck)
+		else if (kcxt.e.errcode == StromError_CpuReCheck)
 		{
 			rc = -1;
-			errcode = StromError_Success;		/* row-level rechecks */
+			kcxt.e.errcode = StromError_Success;		/* CPU rechecks */
 		}
 	}
 	/* writeback the results */
 	gpuscan_writeback_results(kresults, rc);
 	/* chunk level error, if any */
-	kern_writeback_error_status(&kresults->errcode, errcode);
+	kern_writeback_error_status(&kresults->kerror, kcxt.e);
 }
 
 #endif	/* __CUDACC__ */

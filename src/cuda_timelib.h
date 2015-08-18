@@ -1144,7 +1144,7 @@ tm2timestamp(struct pg_tm * tm, fsec_t fsec, int *tzp, Timestamp *result)
  *
  * --------------------------------------------------------------- */
 STATIC_FUNCTION(pg_date_t)
-pgfn_timestamp_date(cl_int *errcode, pg_timestamp_t arg1)
+pgfn_timestamp_date(kern_context *kcxt, pg_timestamp_t arg1)
 {
 	pg_date_t		result;
 	struct pg_tm	tm;
@@ -1165,7 +1165,7 @@ pgfn_timestamp_date(cl_int *errcode, pg_timestamp_t arg1)
 	else if (!timestamp2tm(arg1.value, NULL, &tm, &fsec, NULL))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 	}
 	else
 	{
@@ -1177,7 +1177,7 @@ pgfn_timestamp_date(cl_int *errcode, pg_timestamp_t arg1)
 }
 
 STATIC_FUNCTION(pg_time_t)
-pgfn_timestamp_time(cl_int *errcode, pg_timestamp_t arg1)
+pgfn_timestamp_time(kern_context *kcxt, pg_timestamp_t arg1)
 {
 	pg_time_t		result;
 	struct pg_tm	tm;
@@ -1190,7 +1190,7 @@ pgfn_timestamp_time(cl_int *errcode, pg_timestamp_t arg1)
 	else if (!timestamp2tm(arg1.value, NULL, &tm, &fsec, NULL))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 	}
 	else
 	{
@@ -1205,7 +1205,7 @@ pgfn_timestamp_time(cl_int *errcode, pg_timestamp_t arg1)
 }
 
 STATIC_FUNCTION(pg_timestamp_t)
-pgfn_date_timestamp(cl_int *errcode, pg_date_t arg1)
+pgfn_date_timestamp(kern_context *kcxt, pg_date_t arg1)
 {
 	pg_timestamp_t	result;
 
@@ -1232,7 +1232,7 @@ pgfn_date_timestamp(cl_int *errcode, pg_date_t arg1)
 		if (result.value / USECS_PER_DAY != arg1.value)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		}
 	}
 	return result;
@@ -1242,7 +1242,7 @@ pgfn_date_timestamp(cl_int *errcode, pg_date_t arg1)
  * Time/Date operators
  */
 STATIC_FUNCTION(pg_date_t)
-pgfn_date_pli(cl_int *errcode, pg_date_t arg1, pg_int4_t arg2)
+pgfn_date_pli(kern_context *kcxt, pg_date_t arg1, pg_int4_t arg2)
 {
 	pg_date_t	result;
 
@@ -1260,7 +1260,7 @@ pgfn_date_pli(cl_int *errcode, pg_date_t arg1, pg_int4_t arg2)
 }
 
 STATIC_FUNCTION(pg_date_t)
-pgfn_date_mii(cl_int *errcode, pg_date_t arg1, pg_int4_t arg2)
+pgfn_date_mii(kern_context *kcxt, pg_date_t arg1, pg_int4_t arg2)
 {
 	pg_date_t	result;
 
@@ -1278,7 +1278,7 @@ pgfn_date_mii(cl_int *errcode, pg_date_t arg1, pg_int4_t arg2)
 }
 
 STATIC_FUNCTION(pg_int4_t)
-pgfn_date_mi(cl_int *errcode, pg_date_t arg1, pg_date_t arg2)
+pgfn_date_mi(kern_context *kcxt, pg_date_t arg1, pg_date_t arg2)
 {
 	pg_int4_t	result;
 
@@ -1287,7 +1287,7 @@ pgfn_date_mi(cl_int *errcode, pg_date_t arg1, pg_date_t arg2)
 	else if (DATE_NOT_FINITE(arg1.value) || DATE_NOT_FINITE(arg2.value))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 	}
 	else
 	{
@@ -1298,7 +1298,7 @@ pgfn_date_mi(cl_int *errcode, pg_date_t arg1, pg_date_t arg2)
 }
 
 STATIC_FUNCTION(pg_timestamp_t)
-pgfn_datetime_pl(cl_int *errcode, pg_date_t arg1, pg_time_t arg2)
+pgfn_datetime_pl(kern_context *kcxt, pg_date_t arg1, pg_time_t arg2)
 {
 	pg_timestamp_t	result;
 
@@ -1306,7 +1306,7 @@ pgfn_datetime_pl(cl_int *errcode, pg_date_t arg1, pg_time_t arg2)
 		result.isnull = true;
 	else
 	{
-		result = pgfn_date_timestamp(errcode, arg1);
+		result = pgfn_date_timestamp(kcxt, arg1);
 		if (!TIMESTAMP_NOT_FINITE(result.value))
 			result.value += arg2.value;
 	}
@@ -1314,26 +1314,26 @@ pgfn_datetime_pl(cl_int *errcode, pg_date_t arg1, pg_time_t arg2)
 }
 
 STATIC_FUNCTION(pg_date_t)
-pgfn_integer_pl_date(cl_int *errcode, pg_int4_t arg1, pg_date_t arg2)
+pgfn_integer_pl_date(kern_context *kcxt, pg_int4_t arg1, pg_date_t arg2)
 {
-	return pgfn_date_pli(errcode, arg2, arg1);
+	return pgfn_date_pli(kcxt, arg2, arg1);
 }
 
 STATIC_FUNCTION(pg_timestamp_t)
-pgfn_timedate_pl(cl_int *errcode, pg_time_t arg1, pg_date_t arg2)
+pgfn_timedate_pl(kern_context *kcxt, pg_time_t arg1, pg_date_t arg2)
 {
-	return pgfn_datetime_pl(errcode, arg2, arg1);
+	return pgfn_datetime_pl(kcxt, arg2, arg1);
 }
 
 /*
  * Date comparison
  */
 STATIC_FUNCTION(pg_bool_t)
-pgfn_date_eq_timestamp(cl_int *errcode,
+pgfn_date_eq_timestamp(kern_context *kcxt,
 					   pg_date_t arg1, pg_timestamp_t arg2)
 {
 	pg_bool_t		result;
-	pg_timestamp_t	dt1 = pgfn_date_timestamp(errcode, arg1);
+	pg_timestamp_t	dt1 = pgfn_date_timestamp(kcxt, arg1);
 
 	if (dt1.isnull || arg2.isnull)
 		result.isnull = true;
@@ -1346,11 +1346,11 @@ pgfn_date_eq_timestamp(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_date_ne_timestamp(cl_int *errcode,
+pgfn_date_ne_timestamp(kern_context *kcxt,
 					   pg_date_t arg1, pg_timestamp_t arg2)
 {
 	pg_bool_t		result;
-	pg_timestamp_t	dt1 = pgfn_date_timestamp(errcode, arg1);
+	pg_timestamp_t	dt1 = pgfn_date_timestamp(kcxt, arg1);
 
 	if (dt1.isnull || arg2.isnull)
 		result.isnull = true;
@@ -1363,11 +1363,11 @@ pgfn_date_ne_timestamp(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_date_lt_timestamp(cl_int *errcode,
+pgfn_date_lt_timestamp(kern_context *kcxt,
 					   pg_date_t arg1, pg_timestamp_t arg2)
 {
 	pg_bool_t		result;
-	pg_timestamp_t	dt1 = pgfn_date_timestamp(errcode, arg1);
+	pg_timestamp_t	dt1 = pgfn_date_timestamp(kcxt, arg1);
 
 	if (dt1.isnull || arg2.isnull)
 		result.isnull = true;
@@ -1380,11 +1380,11 @@ pgfn_date_lt_timestamp(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_date_le_timestamp(cl_int *errcode,
+pgfn_date_le_timestamp(kern_context *kcxt,
 					   pg_date_t arg1, pg_timestamp_t arg2)
 {
 	pg_bool_t		result;
-	pg_timestamp_t	dt1 = pgfn_date_timestamp(errcode, arg1);
+	pg_timestamp_t	dt1 = pgfn_date_timestamp(kcxt, arg1);
 
 	if (dt1.isnull || arg2.isnull)
 		result.isnull = true;
@@ -1397,11 +1397,11 @@ pgfn_date_le_timestamp(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_date_gt_timestamp(cl_int *errcode,
+pgfn_date_gt_timestamp(kern_context *kcxt,
 					   pg_date_t arg1, pg_timestamp_t arg2)
 {
 	pg_bool_t		result;
-	pg_timestamp_t	dt1 = pgfn_date_timestamp(errcode, arg1);
+	pg_timestamp_t	dt1 = pgfn_date_timestamp(kcxt, arg1);
 
 	if (dt1.isnull || arg2.isnull)
 		result.isnull = true;
@@ -1414,11 +1414,11 @@ pgfn_date_gt_timestamp(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_date_ge_timestamp(cl_int *errcode,
+pgfn_date_ge_timestamp(kern_context *kcxt,
 					   pg_date_t arg1, pg_timestamp_t arg2)
 {
 	pg_bool_t		result;
-	pg_timestamp_t	dt1 = pgfn_date_timestamp(errcode, arg1);
+	pg_timestamp_t	dt1 = pgfn_date_timestamp(kcxt, arg1);
 
 	if (dt1.isnull || arg2.isnull)
 		result.isnull = true;
@@ -1431,11 +1431,11 @@ pgfn_date_ge_timestamp(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_int4_t)
-pgfn_date_cmp_timestamp(cl_int *errcode,
+pgfn_date_cmp_timestamp(kern_context *kcxt,
 						pg_date_t arg1, pg_timestamp_t arg2)
 {
 	pg_int4_t		result;
-	pg_timestamp_t	dt1 = pgfn_date_timestamp(errcode, arg1);
+	pg_timestamp_t	dt1 = pgfn_date_timestamp(kcxt, arg1);
 
 	if (dt1.isnull || arg2.isnull)
 		result.isnull = true;
@@ -1456,11 +1456,11 @@ pgfn_date_cmp_timestamp(cl_int *errcode,
  * Timestamp comparison
  */
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamp_eq_date(cl_int *errcode,
+pgfn_timestamp_eq_date(kern_context *kcxt,
 					   pg_timestamp_t arg1, pg_date_t arg2)
 {
 	pg_bool_t		result;
-	pg_timestamp_t	dt2 = pgfn_date_timestamp(errcode, arg2);
+	pg_timestamp_t	dt2 = pgfn_date_timestamp(kcxt, arg2);
 
 	if (arg1.isnull || dt2.isnull)
 		result.isnull = true;
@@ -1473,11 +1473,11 @@ pgfn_timestamp_eq_date(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamp_ne_date(cl_int *errcode,
+pgfn_timestamp_ne_date(kern_context *kcxt,
 					   pg_timestamp_t arg1, pg_date_t arg2)
 {
 	pg_bool_t		result;
-	pg_timestamp_t	dt2 = pgfn_date_timestamp(errcode, arg2);
+	pg_timestamp_t	dt2 = pgfn_date_timestamp(kcxt, arg2);
 
 	if (arg1.isnull || dt2.isnull)
 		result.isnull = true;
@@ -1490,11 +1490,11 @@ pgfn_timestamp_ne_date(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamp_lt_date(cl_int *errcode,
+pgfn_timestamp_lt_date(kern_context *kcxt,
 					   pg_timestamp_t arg1, pg_date_t arg2)
 {
 	pg_bool_t		result;
-	pg_timestamp_t	dt2 = pgfn_date_timestamp(errcode, arg2);
+	pg_timestamp_t	dt2 = pgfn_date_timestamp(kcxt, arg2);
 
 	if (arg1.isnull || dt2.isnull)
 		result.isnull = true;
@@ -1507,11 +1507,11 @@ pgfn_timestamp_lt_date(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamp_le_date(cl_int *errcode,
+pgfn_timestamp_le_date(kern_context *kcxt,
 					   pg_timestamp_t arg1, pg_date_t arg2)
 {
 	pg_bool_t		result;
-	pg_timestamp_t	dt2 = pgfn_date_timestamp(errcode, arg2);
+	pg_timestamp_t	dt2 = pgfn_date_timestamp(kcxt, arg2);
 
 	if (arg1.isnull || dt2.isnull)
 		result.isnull = true;
@@ -1524,11 +1524,11 @@ pgfn_timestamp_le_date(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamp_gt_date(cl_int *errcode,
+pgfn_timestamp_gt_date(kern_context *kcxt,
 					   pg_timestamp_t arg1, pg_date_t arg2)
 {
 	pg_bool_t		result;
-	pg_timestamp_t	dt2 = pgfn_date_timestamp(errcode, arg2);
+	pg_timestamp_t	dt2 = pgfn_date_timestamp(kcxt, arg2);
 
 	if (arg1.isnull || dt2.isnull)
 		result.isnull = true;
@@ -1541,11 +1541,11 @@ pgfn_timestamp_gt_date(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamp_ge_date(cl_int *errcode,
+pgfn_timestamp_ge_date(kern_context *kcxt,
 					   pg_timestamp_t arg1, pg_date_t arg2)
 {
 	pg_bool_t		result;
-	pg_timestamp_t	dt2 = pgfn_date_timestamp(errcode, arg2);
+	pg_timestamp_t	dt2 = pgfn_date_timestamp(kcxt, arg2);
 
 	if (arg1.isnull || dt2.isnull)
 		result.isnull = true;
@@ -1558,11 +1558,11 @@ pgfn_timestamp_ge_date(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_int4_t)
-pgfn_timestamp_cmp_date(cl_int *errcode,
+pgfn_timestamp_cmp_date(kern_context *kcxt,
 						pg_timestamp_t arg1, pg_date_t arg2)
 {
 	pg_int4_t		result;
-	pg_timestamp_t	dt2 = pgfn_date_timestamp(errcode, arg2);
+	pg_timestamp_t	dt2 = pgfn_date_timestamp(kcxt, arg2);
 
 	if (arg1.isnull || dt2.isnull)
 		result.isnull = true;
@@ -1586,7 +1586,7 @@ pgfn_timestamp_cmp_date(cl_int *errcode,
  * timezone information (session_timezone_state)
  */
 STATIC_FUNCTION(pg_timestamptz_t)
-timestamp2timestamptz(cl_int *errcode, pg_timestamp_t arg)
+timestamp2timestamptz(kern_context *kcxt, pg_timestamp_t arg)
 {
 	pg_timestamptz_t	result;
 	struct pg_tm		tm;
@@ -1605,7 +1605,7 @@ timestamp2timestamptz(cl_int *errcode, pg_timestamp_t arg)
 	else if (!timestamp2tm(arg.value, NULL, &tm, &fsec, NULL))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 	}
 	else
 	{
@@ -1613,7 +1613,7 @@ timestamp2timestamptz(cl_int *errcode, pg_timestamp_t arg)
 		if (!tm2timestamp(&tm, fsec, &tz, &result.value))
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		}
 		else
 		{
@@ -1631,7 +1631,7 @@ timestamp2timestamptz(cl_int *errcode, pg_timestamp_t arg)
  * timezone information (session_timezone_state)
  */
 STATIC_FUNCTION(pg_timestamptz_t)
-date2timestamptz(cl_int *errcode, pg_date_t arg)
+date2timestamptz(kern_context *kcxt, pg_date_t arg)
 {
 	pg_timestamptz_t	result;
 	struct pg_tm	tm;
@@ -1666,7 +1666,7 @@ date2timestamptz(cl_int *errcode, pg_date_t arg)
         if ((result.value - tz * USECS_PER_SEC) / USECS_PER_DAY != arg.value)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		}
 	}
 	return result;
@@ -1676,7 +1676,7 @@ date2timestamptz(cl_int *errcode, pg_date_t arg)
  * Data cast functions related to timezonetz
  */
 STATIC_FUNCTION(pg_date_t)
-pgfn_timestamptz_date(cl_int *errcode, pg_timestamptz_t arg1)
+pgfn_timestamptz_date(kern_context *kcxt, pg_timestamptz_t arg1)
 {
 	pg_date_t		result;
 	struct pg_tm	tm;
@@ -1698,7 +1698,7 @@ pgfn_timestamptz_date(cl_int *errcode, pg_timestamptz_t arg1)
 	else if (!timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 	}
 	else
 	{
@@ -1710,7 +1710,7 @@ pgfn_timestamptz_date(cl_int *errcode, pg_timestamptz_t arg1)
 }
 
 STATIC_FUNCTION(pg_time_t)
-pgfn_timestamptz_time(cl_int *errcode, pg_timestamptz_t arg1)
+pgfn_timestamptz_time(kern_context *kcxt, pg_timestamptz_t arg1)
 {
 	pg_time_t		result;
 	struct pg_tm	tm;
@@ -1724,7 +1724,7 @@ pgfn_timestamptz_time(cl_int *errcode, pg_timestamptz_t arg1)
 	else if (!timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 	}
 	else
 	{
@@ -1739,7 +1739,7 @@ pgfn_timestamptz_time(cl_int *errcode, pg_timestamptz_t arg1)
 }
 
 STATIC_FUNCTION(pg_timestamp_t)
-pgfn_timestamptz_timestamp(cl_int *errcode, pg_timestamptz_t arg1)
+pgfn_timestamptz_timestamp(kern_context *kcxt, pg_timestamptz_t arg1)
 {
 	pg_timestamp_t	result;
 	struct pg_tm	tm;
@@ -1758,12 +1758,12 @@ pgfn_timestamptz_timestamp(cl_int *errcode, pg_timestamptz_t arg1)
 	else if (!timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 	}
 	else if (!tm2timestamp(&tm, fsec, NULL, &result.value))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(errcode, StromError_CpuReCheck);
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 	}
 	else
 	{
@@ -1774,28 +1774,28 @@ pgfn_timestamptz_timestamp(cl_int *errcode, pg_timestamptz_t arg1)
 }
 
 STATIC_FUNCTION(pg_timestamptz_t)
-pgfn_timestamp_timestamptz(cl_int *errcode, pg_timestamp_t arg1)
+pgfn_timestamp_timestamptz(kern_context *kcxt, pg_timestamp_t arg1)
 {
-	return timestamp2timestamptz(errcode, arg1);
+	return timestamp2timestamptz(kcxt, arg1);
 }
 
 STATIC_FUNCTION(pg_timestamptz_t)
-pgfn_date_timestamptz(cl_int *errcode, pg_date_t arg1)
+pgfn_date_timestamptz(kern_context *kcxt, pg_date_t arg1)
 {
-	return date2timestamptz(errcode, arg1);
+	return date2timestamptz(kcxt, arg1);
 }
 
 /*
  * Comparison between date and timestamptz
  */
 STATIC_FUNCTION(pg_bool_t)
-pgfn_date_lt_timestamptz(cl_int *errcode,
+pgfn_date_lt_timestamptz(kern_context *kcxt,
 						 pg_date_t arg1, pg_timestamptz_t arg2)
 {
 	pg_timestamptz_t temp;
 	pg_bool_t	result;
 
-	temp = date2timestamptz(errcode, arg1);
+	temp = date2timestamptz(kcxt, arg1);
 	if (temp.isnull || arg2.isnull)
 		result.isnull = true;
 	else
@@ -1807,13 +1807,13 @@ pgfn_date_lt_timestamptz(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_date_le_timestamptz(cl_int *errcode,
+pgfn_date_le_timestamptz(kern_context *kcxt,
 						 pg_date_t arg1, pg_timestamptz_t arg2)
 {
 	pg_timestamptz_t temp;
 	pg_bool_t	result;
 
-	temp = date2timestamptz(errcode, arg1);
+	temp = date2timestamptz(kcxt, arg1);
 	if (temp.isnull || arg2.isnull)
 		result.isnull = true;
 	else
@@ -1825,13 +1825,13 @@ pgfn_date_le_timestamptz(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_date_eq_timestamptz(cl_int *errcode,
+pgfn_date_eq_timestamptz(kern_context *kcxt,
 						 pg_date_t arg1, pg_timestamptz_t arg2)
 {
 	pg_timestamptz_t temp;
 	pg_bool_t	result;
 
-	temp = date2timestamptz(errcode, arg1);
+	temp = date2timestamptz(kcxt, arg1);
 	if (temp.isnull || arg2.isnull)
 		result.isnull = true;
 	else
@@ -1843,13 +1843,13 @@ pgfn_date_eq_timestamptz(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_date_ge_timestamptz(cl_int *errcode,
+pgfn_date_ge_timestamptz(kern_context *kcxt,
 						 pg_date_t arg1, pg_timestamptz_t arg2)
 {
 	pg_timestamptz_t temp;
 	pg_bool_t	result;
 
-	temp = date2timestamptz(errcode, arg1);
+	temp = date2timestamptz(kcxt, arg1);
 	if (temp.isnull || arg2.isnull)
 		result.isnull = true;
 	else
@@ -1861,13 +1861,13 @@ pgfn_date_ge_timestamptz(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_date_gt_timestamptz(cl_int *errcode,
+pgfn_date_gt_timestamptz(kern_context *kcxt,
 						 pg_date_t arg1, pg_timestamptz_t arg2)
 {
 	pg_timestamptz_t temp;
 	pg_bool_t	result;
 
-	temp = date2timestamptz(errcode, arg1);
+	temp = date2timestamptz(kcxt, arg1);
 	if (temp.isnull || arg2.isnull)
 		result.isnull = true;
 	else
@@ -1879,13 +1879,13 @@ pgfn_date_gt_timestamptz(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_date_ne_timestamptz(cl_int *errcode,
+pgfn_date_ne_timestamptz(kern_context *kcxt,
 						 pg_date_t arg1, pg_timestamptz_t arg2)
 {
 	pg_timestamptz_t temp;
 	pg_bool_t	result;
 
-	temp = date2timestamptz(errcode, arg1);
+	temp = date2timestamptz(kcxt, arg1);
 	if (temp.isnull || arg2.isnull)
 		result.isnull = true;
 	else
@@ -1900,58 +1900,58 @@ pgfn_date_ne_timestamptz(cl_int *errcode,
  * Comparison between timestamptz and date
  */
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamptz_lt_date(cl_int *errcode,
+pgfn_timestamptz_lt_date(kern_context *kcxt,
 						 pg_timestamptz_t arg1, pg_date_t arg2)
 {
-	return pgfn_date_gt_timestamptz(errcode, arg2, arg1);
+	return pgfn_date_gt_timestamptz(kcxt, arg2, arg1);
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamptz_le_date(cl_int *errcode,
+pgfn_timestamptz_le_date(kern_context *kcxt,
 						 pg_timestamptz_t arg1, pg_date_t arg2)
 {
-	return pgfn_date_ge_timestamptz(errcode, arg2, arg1);
+	return pgfn_date_ge_timestamptz(kcxt, arg2, arg1);
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamptz_eq_date(cl_int *errcode,
+pgfn_timestamptz_eq_date(kern_context *kcxt,
 						 pg_timestamptz_t arg1, pg_date_t arg2)
 {
-	return pgfn_date_eq_timestamptz(errcode, arg2, arg1);
+	return pgfn_date_eq_timestamptz(kcxt, arg2, arg1);
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamptz_ge_date(cl_int *errcode,
+pgfn_timestamptz_ge_date(kern_context *kcxt,
 						 pg_timestamptz_t arg1, pg_date_t arg2)
 {
-	return pgfn_date_le_timestamptz(errcode, arg2, arg1);
+	return pgfn_date_le_timestamptz(kcxt, arg2, arg1);
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamptz_gt_date(cl_int *errcode,
+pgfn_timestamptz_gt_date(kern_context *kcxt,
 						 pg_timestamptz_t arg1, pg_date_t arg2)
 {
-	return pgfn_date_lt_timestamptz(errcode, arg2, arg1);
+	return pgfn_date_lt_timestamptz(kcxt, arg2, arg1);
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamptz_ne_date(cl_int *errcode,
+pgfn_timestamptz_ne_date(kern_context *kcxt,
 						 pg_timestamptz_t arg1, pg_date_t arg2)
 {
-	return pgfn_date_ne_timestamptz(errcode, arg2, arg1);
+	return pgfn_date_ne_timestamptz(kcxt, arg2, arg1);
 }
 
 /*
  * Comparison between timestamp and timestamptz
  */
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamp_lt_timestamptz(cl_int *errcode,
+pgfn_timestamp_lt_timestamptz(kern_context *kcxt,
 							  pg_timestamp_t arg1, pg_timestamptz_t arg2)
 {
 	pg_timestamptz_t temp;
 	pg_bool_t	result;
 
-	temp = timestamp2timestamptz(errcode, arg1);
+	temp = timestamp2timestamptz(kcxt, arg1);
 	if (temp.isnull || arg2.isnull)
 		result.isnull = true;
 	else
@@ -1963,13 +1963,13 @@ pgfn_timestamp_lt_timestamptz(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamp_le_timestamptz(cl_int *errcode,
+pgfn_timestamp_le_timestamptz(kern_context *kcxt,
 							  pg_timestamp_t arg1, pg_timestamptz_t arg2)
 {
 	pg_timestamptz_t temp;
 	pg_bool_t	result;
 
-	temp = timestamp2timestamptz(errcode, arg1);
+	temp = timestamp2timestamptz(kcxt, arg1);
 	if (temp.isnull || arg2.isnull)
 		result.isnull = true;
 	else
@@ -1981,13 +1981,13 @@ pgfn_timestamp_le_timestamptz(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamp_eq_timestamptz(cl_int *errcode,
+pgfn_timestamp_eq_timestamptz(kern_context *kcxt,
 							  pg_timestamp_t arg1, pg_timestamptz_t arg2)
 {
 	pg_timestamptz_t temp;
 	pg_bool_t	result;
 
-	temp = timestamp2timestamptz(errcode, arg1);
+	temp = timestamp2timestamptz(kcxt, arg1);
 	if (temp.isnull || arg2.isnull)
 		result.isnull = true;
 	else
@@ -1999,13 +1999,13 @@ pgfn_timestamp_eq_timestamptz(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamp_ge_timestamptz(cl_int *errcode,
+pgfn_timestamp_ge_timestamptz(kern_context *kcxt,
 							  pg_timestamp_t arg1, pg_timestamptz_t arg2)
 {
 	pg_timestamptz_t temp;
 	pg_bool_t	result;
 
-	temp = timestamp2timestamptz(errcode, arg1);
+	temp = timestamp2timestamptz(kcxt, arg1);
 	if (temp.isnull || arg2.isnull)
 		result.isnull = true;
 	else
@@ -2017,13 +2017,13 @@ pgfn_timestamp_ge_timestamptz(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamp_gt_timestamptz(cl_int *errcode,
+pgfn_timestamp_gt_timestamptz(kern_context *kcxt,
 							  pg_timestamp_t arg1, pg_timestamptz_t arg2)
 {
 	pg_timestamptz_t temp;
 	pg_bool_t	result;
 
-	temp = timestamp2timestamptz(errcode, arg1);
+	temp = timestamp2timestamptz(kcxt, arg1);
 	if (temp.isnull || arg2.isnull)
 		result.isnull = true;
 	else
@@ -2035,13 +2035,13 @@ pgfn_timestamp_gt_timestamptz(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamp_ne_timestamptz(cl_int *errcode,
+pgfn_timestamp_ne_timestamptz(kern_context *kcxt,
 							  pg_timestamp_t arg1, pg_timestamptz_t arg2)
 {
 	pg_timestamptz_t temp;
 	pg_bool_t	result;
 
-	temp = timestamp2timestamptz(errcode, arg1);
+	temp = timestamp2timestamptz(kcxt, arg1);
 	if (temp.isnull || arg2.isnull)
 		result.isnull = true;
 	else
@@ -2056,45 +2056,45 @@ pgfn_timestamp_ne_timestamptz(cl_int *errcode,
  * Comparison between timestamptz and timestamp
  */
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamptz_lt_timestamp(cl_int *errcode,
+pgfn_timestamptz_lt_timestamp(kern_context *kcxt,
 							  pg_timestamptz_t arg1, pg_timestamp_t arg2)
 {
-	return pgfn_timestamp_gt_timestamptz(errcode, arg2, arg1);
+	return pgfn_timestamp_gt_timestamptz(kcxt, arg2, arg1);
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamptz_le_timestamp(cl_int *errcode,
+pgfn_timestamptz_le_timestamp(kern_context *kcxt,
 							  pg_timestamptz_t arg1, pg_timestamp_t arg2)
 {
-	return pgfn_timestamp_ge_timestamptz(errcode, arg2, arg1);
+	return pgfn_timestamp_ge_timestamptz(kcxt, arg2, arg1);
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamptz_eq_timestamp(cl_int *errcode,
+pgfn_timestamptz_eq_timestamp(kern_context *kcxt,
 							  pg_timestamptz_t arg1, pg_timestamp_t arg2)
 {
-	return pgfn_timestamp_eq_timestamptz(errcode, arg2, arg1);
+	return pgfn_timestamp_eq_timestamptz(kcxt, arg2, arg1);
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamptz_ge_timestamp(cl_int *errcode,
+pgfn_timestamptz_ge_timestamp(kern_context *kcxt,
 							  pg_timestamptz_t arg1, pg_timestamp_t arg2)
 {
-	return pgfn_timestamp_le_timestamptz(errcode, arg2, arg1);
+	return pgfn_timestamp_le_timestamptz(kcxt, arg2, arg1);
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamptz_gt_timestamp(cl_int *errcode,
+pgfn_timestamptz_gt_timestamp(kern_context *kcxt,
 							  pg_timestamptz_t arg1, pg_timestamp_t arg2)
 {
-	return pgfn_timestamp_lt_timestamptz(errcode, arg2, arg1);
+	return pgfn_timestamp_lt_timestamptz(kcxt, arg2, arg1);
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_timestamptz_ne_timestamp(cl_int *errcode,
+pgfn_timestamptz_ne_timestamp(kern_context *kcxt,
 							  pg_timestamptz_t arg1, pg_timestamp_t arg2)
 {
-	return pgfn_timestamp_ne_timestamptz(errcode, arg2, arg1);
+	return pgfn_timestamp_ne_timestamptz(kcxt, arg2, arg1);
 }
 
 /*
@@ -2104,7 +2104,7 @@ pgfn_timestamptz_ne_timestamp(cl_int *errcode,
  * preliminary break down combination with type-cast.
  */
 STATIC_INLINE(pg_bool_t)
-overlaps_cl_long(cl_int *errcode,
+overlaps_cl_long(kern_context *kcxt,
 				 cl_long ts1, cl_bool ts1_isnull,
 				 cl_long te1, cl_bool te1_isnull,
 				 cl_long ts2, cl_bool ts2_isnull,
@@ -2243,11 +2243,11 @@ overlaps_cl_long(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_overlaps_time(cl_int *errcode,
+pgfn_overlaps_time(kern_context *kcxt,
 				   pg_time_t arg1, pg_time_t arg2,
 				   pg_time_t arg3, pg_time_t arg4)
 {
-  return overlaps_cl_long(errcode,
+  return overlaps_cl_long(kcxt,
 						  arg1.value, arg1.isnull,
 						  arg2.value, arg2.isnull,
 						  arg3.value, arg3.isnull,
@@ -2255,11 +2255,11 @@ pgfn_overlaps_time(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_overlaps_timestamp(cl_int *errcode,
+pgfn_overlaps_timestamp(kern_context *kcxt,
 						pg_timestamp_t arg1, pg_timestamp_t arg2,
 						pg_timestamp_t arg3, pg_timestamp_t arg4)
 {
-  return overlaps_cl_long(errcode,
+  return overlaps_cl_long(kcxt,
 						  arg1.value, arg1.isnull,
 						  arg2.value, arg2.isnull,
 						  arg3.value, arg3.isnull,
@@ -2267,11 +2267,11 @@ pgfn_overlaps_timestamp(cl_int *errcode,
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_overlaps_timestamptz(cl_int *errcode,
+pgfn_overlaps_timestamptz(kern_context *kcxt,
 						  pg_timestamptz_t arg1, pg_timestamptz_t arg2,
 						  pg_timestamptz_t arg3, pg_timestamptz_t arg4)
 {
-  return overlaps_cl_long(errcode,
+  return overlaps_cl_long(kcxt,
 						  arg1.value, arg1.isnull,
 						  arg2.value, arg2.isnull,
 						  arg3.value, arg3.isnull,
