@@ -2372,7 +2372,7 @@ gpupreagg_codegen_projection_corr(StringInfo body, FuncExpr *func,
 		appendStringInfo(
 			body,
 			"  else\n"
-			"    temp_float8x = pgfn_%s(errcode,\n"
+			"    temp_float8x = pgfn_%s(kcxt,\n"
 			"                           temp_float8x,\n"
 			"                           temp_float8x);\n",
 			dfunc->func_name);
@@ -2385,7 +2385,7 @@ gpupreagg_codegen_projection_corr(StringInfo body, FuncExpr *func,
 		appendStringInfo(
 			body,
 			"  else\n"
-			"    temp_float8x = pgfn_%s(errcode,\n"
+			"    temp_float8x = pgfn_%s(kcxt,\n"
 			"                           temp_float8y,\n"
 			"                           temp_float8y);\n",
 			dfunc->func_alias);
@@ -2398,7 +2398,7 @@ gpupreagg_codegen_projection_corr(StringInfo body, FuncExpr *func,
 		appendStringInfo(
 			body,
 			"  else\n"
-			"    temp_float8x = pgfn_%s(errcode,\n"
+			"    temp_float8x = pgfn_%s(kcxt,\n"
 			"                           temp_float8x,\n"
 			"                           temp_float8y);\n",
 			dfunc->func_alias);
