@@ -558,7 +558,8 @@ init_kern_data_store(kern_data_store *kds,
 void
 pgstrom_expand_data_store(GpuContext *gcontext,
 						  pgstrom_data_store *pds,
-						  Size kds_length_new)
+						  Size kds_length_new,
+						  cl_uint nslots_new)	/* if KDS_FORMAT_HASH */
 {
 	kern_data_store	   *kds_old = pds->kds;
 	kern_data_store	   *kds_new;
@@ -586,6 +587,7 @@ pgstrom_expand_data_store(GpuContext *gcontext,
 		memcpy(kds_new, kds_old, KERN_DATA_STORE_HEAD_LENGTH(kds_old));
 		kds_new->hostptr = (hostptr_t)&kds_new->hostptr;
 		kds_new->length = kds_length_new;
+		kds_new->nslots = nslots_new;
 
 		/* move the contents to new buffer from the old one */
 		if (kds_old->format == KDS_FORMAT_ROW)
@@ -602,6 +604,40 @@ pgstrom_expand_data_store(GpuContext *gcontext,
 			tup_index_new = (cl_uint *)KERN_DATA_STORE_BODY(kds_new);
 			for (i=0; i < nitems; i++)
 				tup_index_new[i] = tup_index_old[i] + shift;
+		}
+		else if (kds_old->format == KDS_FORMAT_HASH)
+		{
+			kern_hashitem  *hitem_old;
+			kern_hashitem  *hitem_new;
+			cl_uint		   *hash_slot;
+			size_t			offset;
+			size_t			length;
+			int				i, j;
+
+			memset(KERN_DATA_STORE_HASHSLOT(kds_new),
+				   0, sizeof(cl_uint) * nslots_new);
+			hash_slot = KERN_DATA_STORE_HASHSLOT(kds_new);
+			offset = STROMALIGN((uintptr_t)(hash_slot + nslots_new) -
+								(uintptr_t)(kds_new));
+
+			for (i=0; i < kds_old->nslots; i++)
+			{
+				for (hitem_old = KERN_HASH_FIRST_ITEM(kds_old, i);
+					 hitem_old != NULL;
+					 hitem_old = KERN_HASH_NEXT_ITEM(kds_old, hitem_old))
+				{
+					j = hitem_old->hash % kds_new->nslots;
+
+					length = offsetof(kern_hashitem, htup) + hitem_old->t_len;
+					hitem_new = (kern_hashitem *)((char *)kds_new + offset);
+					memcpy(hitem_new, hitem_old, length);
+					hitem_new->next = hash_slot[j];
+					hash_slot[j] = offset;
+
+					offset += MAXALIGN(length);
+					Assert(offset <= kds_new->length);
+				}
+			}
 		}
 		else
 		{
@@ -652,7 +688,11 @@ pgstrom_expand_data_store(GpuContext *gcontext,
 			for (i=0; i < nitems; i++)
 				tup_index[i] += shift;
 		}
-		/* no need to move the data if KDS_FORMAT_HASH */
+		/*
+		 * File mapped PDS shall be deprecated in the near future,
+		 * and KDS_FORMAT_HASH shall never appear
+		 */
+		Assert(kds_new->format == KDS_FORMAT_HASH);
 
 		/*
 		 * Registers the file-mapped KDS as page-locked region again

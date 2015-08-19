@@ -4516,12 +4516,15 @@ gpujoin_inner_hash_preload(GpuJoinState *gjs,
 			if (multirels_expand_length(gjs, pmrels))
 			{
 				Size    chunk_size_new = (Size)
-					(istate->kmrels_ratio *(double)(pmrels->kmrels_length -
-												   pmrels->head_length));
+					(istate->kmrels_ratio * (double)(pmrels->kmrels_length -
+													 pmrels->head_length));
+				cl_uint	nslots_new = Max(2 * kds_hash->nitems,
+										 2 * kds_hash->nslots);
+
                 elog(DEBUG1, "KDS-Hash (depth=%d) expanded %zu => %zu",
                      istate->depth, (Size)kds_hash->length, chunk_size_new);
-				pgstrom_expand_data_store(gjs->gts.gcontext,
-										  pds_hash, chunk_size_new);
+				pgstrom_expand_data_store(gjs->gts.gcontext, pds_hash,
+										  chunk_size_new, nslots_new);
 				kds_hash = pds_hash->kds;
 				hash_slots = KERN_DATA_STORE_HASHSLOT(kds_hash);
 			}
@@ -4657,7 +4660,8 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs,
 								(double)(pmrels->kmrels_length -
 										 pmrels->head_length));
 			chunk_size = STROMALIGN_DOWN(chunk_size);
-			pgstrom_expand_data_store(gjs->gts.gcontext, pds_heap, chunk_size);
+			pgstrom_expand_data_store(gjs->gts.gcontext, pds_heap,
+									  chunk_size, 0);
 		}
 	}
 

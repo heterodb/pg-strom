@@ -529,7 +529,8 @@ extern pgstrom_data_store *pgstrom_acquire_data_store(pgstrom_data_store *pds);
 extern void pgstrom_release_data_store(pgstrom_data_store *pds);
 extern void pgstrom_expand_data_store(GpuContext *gcontext,
 									  pgstrom_data_store *pds,
-									  Size kds_length_new);
+									  Size kds_length_new,
+									  cl_uint nslots_new);
 extern void pgstrom_shrink_data_store(pgstrom_data_store *pds);
 extern pgstrom_data_store *
 pgstrom_create_data_store_row(GpuContext *gcontext,
