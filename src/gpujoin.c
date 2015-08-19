@@ -4518,9 +4518,8 @@ gpujoin_inner_hash_preload(GpuJoinState *gjs,
 				Size    chunk_size_new = (Size)
 					(istate->kmrels_ratio * (double)(pmrels->kmrels_length -
 													 pmrels->head_length));
-				cl_uint	nslots_new = Max(2 * kds_hash->nitems,
-										 2 * kds_hash->nslots);
-
+				cl_uint	nslots_new = (cl_uint)(pgstrom_chunk_size_margin() *
+											   (double)(2 * kds_hash->nitems));
                 elog(DEBUG1, "KDS-Hash (depth=%d) expanded %zu => %zu",
                      istate->depth, (Size)kds_hash->length, chunk_size_new);
 				pgstrom_expand_data_store(gjs->gts.gcontext, pds_hash,

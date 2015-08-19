@@ -610,16 +610,14 @@ pgstrom_expand_data_store(GpuContext *gcontext,
 			kern_hashitem  *hitem_old;
 			kern_hashitem  *hitem_new;
 			cl_uint		   *hash_slot;
-			size_t			offset;
 			size_t			length;
 			int				i, j;
 
 			memset(KERN_DATA_STORE_HASHSLOT(kds_new),
 				   0, sizeof(cl_uint) * nslots_new);
 			hash_slot = KERN_DATA_STORE_HASHSLOT(kds_new);
-			offset = STROMALIGN((uintptr_t)(hash_slot + nslots_new) -
-								(uintptr_t)(kds_new));
-
+			kds_new->usage = STROMALIGN((uintptr_t)(hash_slot + nslots_new) -
+										(uintptr_t)(kds_new));
 			for (i=0; i < kds_old->nslots; i++)
 			{
 				for (hitem_old = KERN_HASH_FIRST_ITEM(kds_old, i);
@@ -629,13 +627,14 @@ pgstrom_expand_data_store(GpuContext *gcontext,
 					j = hitem_old->hash % kds_new->nslots;
 
 					length = offsetof(kern_hashitem, htup) + hitem_old->t_len;
-					hitem_new = (kern_hashitem *)((char *)kds_new + offset);
+					hitem_new = (kern_hashitem *)((char *)kds_new +
+												  kds_new->usage);
 					memcpy(hitem_new, hitem_old, length);
 					hitem_new->next = hash_slot[j];
-					hash_slot[j] = offset;
+					hash_slot[j] = kds_new->usage;
 
-					offset += MAXALIGN(length);
-					Assert(offset <= kds_new->length);
+					kds_new->usage += MAXALIGN(length);
+					Assert(kds_new->usage <= kds_new->length);
 				}
 			}
 		}
