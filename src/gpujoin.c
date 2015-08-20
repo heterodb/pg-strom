@@ -4846,9 +4846,9 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 		else
 			pgstrom_acquire_data_store(istate->curr_chunk);
 		Assert(istate->curr_chunk != NULL);
-		pds = istate->curr_chunk;
 
 		/* make advanced the usage counter */
+		pds = pgstrom_acquire_data_store(istate->curr_chunk);
 		pmrels->inner_chunks[i] = pds;
 		pmrels->kern.chunks[i].chunk_offset = pmrels->usage_length;
 		pmrels->usage_length += STROMALIGN(pds->kds->length);
