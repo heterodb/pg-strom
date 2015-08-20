@@ -1221,6 +1221,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 			 */
 			if (!pgstrom_codegen_available_expression(rinfo->clause))
 			{
+#ifdef NOT_USED
 				/* only last depth can have host quals */
 				if (!is_last_depth)
 					return;
@@ -1228,6 +1229,14 @@ gpujoin_add_join_path(PlannerInfo *root,
 				support_bulkload = false;
 				host_quals = lappend(host_quals, rinfo);
 				continue;
+#endif
+				/*
+				 * XXX - Host quals may increase the number of rows
+				 * generated. So, we will remove its support entirely.
+				 * If join quals contains host-only qualifiers, CPU
+				 * logic will be able to handle it better.
+				 */
+				return;
 			}
 			/* otherwise, device executable expression */
 			join_quals = lappend(join_quals, rinfo);
