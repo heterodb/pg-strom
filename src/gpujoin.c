@@ -2980,8 +2980,13 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 {
 	GpuContext		   *gcontext = gjs->gts.gcontext;
 	kern_gpujoin	   *kgjoin = &pgjoin->kern;
+	pgstrom_data_store *pds_src = pgjoin->pds_src;
 	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
 	kern_resultbuf	   *kresults_in;
+	double				kresults_ratio;
+	double				outer_plan_nrows;
+	double				dst_nrows_ratio;
+	cl_uint				oitems_nums;
 	Size				kgjoin_head;
 	Size				kgjoin_length;
 	Size				total_items;
@@ -2989,25 +2994,62 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 	cl_int				result_format;
 	TupleTableSlot	   *tupslot = gjs->gts.css.ss.ss_ScanTupleSlot;
 	TupleDesc			tupdesc = tupslot->tts_tupleDescriptor;
-	cl_int				ncols = tupdesc->natts;
+	cl_int				i, ncols = tupdesc->natts;
+
+	outer_plan_nrows = outerPlanState(gjs)->plan->plan_rows;
+
+	/* remained outer ntuples to be processed */
+	Assert(pgjoin->oitems_base < pds_src->kds->nitems);
+	oitems_nums = pds_src->kds->nitems - pgjoin->oitems_base;
 
 	/*
-	 * Calculation of kern_resultbuf
-	 *
-	 *
-	 *
-	 *
-	 *
-	 *
+	 * NOTE: calculation of expected ratio of kern_resultbuf usage
+	 * towards outer_ntuples. Unless progress of outer-scan does not
+	 * reach 30% of the expectation, we merge planned ratio and
+	 * run-time information.
+	 * In case of re-execution by NoDataSpace error, we assume at
+	 * least kresults_max_items items are consumed by the previous
+	 * oitems_nums. 
 	 */
-	if (!pds_dst)
-		total_items = (Size)((double) pgjoin->oitems_nums *
-							 gjs->kresults_ratio *
-							 pgstrom_chunk_size_margin());
+	if (gjs->source_nitems == 0)
+		kresults_ratio = gjs->kresults_ratio;
 	else
-		total_items = (Size)((double) kgjoin->kresults_max_items *
-							 pgstrom_chunk_size_margin());
+	{
+		double	kresults_ratio_plan = gjs->kresults_ratio;
+		double	kresults_ratio_exec = ((double) gjs->outer_nitems[0] /
+									   (double) gjs->source_nitems);
+		for (i=1; i <= gjs->num_rels; i++)
+		{
+			kresults_ratio_exec = Max(kresults_ratio_exec,
+									  (double) (i+1) *
+									  (double) gjs->outer_nitems[0] /
+									  (double) gjs->source_nitems);
+		}
+		if (gjs->source_nitems >= (size_t)(0.30 * outer_plan_nrows))
+			kresults_ratio = kresults_ratio_exec;
+		else
+		{
+			double	merge_ratio = ((double) gjs->source_nitems /
+								   (double) (0.30 * outer_plan_nrows));
+			kresults_ratio = (kresults_ratio_exec * merge_ratio +
+							  kresults_ratio_plan * (1.0 - merge_ratio));
+		}
+	}
 
+	/* In case of re-execution due to NoDataSpace error */
+	if (pds_dst)
+	{
+		double	kresults_ratio_prev = ((double) kgjoin->kresults_max_items /
+									   (double) pgjoin->oitems_nums);
+		kresults_ratio = Max(kresults_ratio, kresults_ratio_prev);
+	}
+	total_items = (Size)(kresults_ratio * (double)(oitems_nums) *
+						 pgstrom_chunk_size_margin());
+
+	/*
+	 * Length estimation of kern_gpujoin including two kern_resultbuf.
+	 * If too large, oitems_nums shall be reduced.
+	 */
 	kgjoin_head = (offsetof(kern_gpujoin, kparams) +
 				   STROMALIGN(gjs->gts.kern_params->length));
 	kgjoin_length = kgjoin_head +
@@ -3016,7 +3058,6 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 	if (kgjoin_length > pgstrom_chunk_size())
 	{
 		Size	reduced_items;
-		cl_uint	oitems_nums;
 
 		reduced_items = (((pgstrom_chunk_size() - kgjoin_head) / 2
 						  - STROMALIGN(offsetof(kern_resultbuf, results[0])))
@@ -3024,20 +3065,16 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 		Assert(reduced_items <= total_items);
 
 		/* reduction of oitems_nums to save the result_buffer*/
-		oitems_nums = (cl_uint)((double) pgjoin->oitems_nums *
+		oitems_nums = (cl_uint)((double) oitems_nums *
 								(double) reduced_items /
 								(double) total_items);
-		if (oitems_nums == 0)
-			elog(ERROR, "Too large kresults_ratio: %zu / %u",
-				 total_items, pgjoin->oitems_nums);
-
-		if (pds_dst)
-			elog(NOTICE, "Reduction of outer ntuples (%u,%u) => (%u,%u)",
-				 pgjoin->oitems_base, pgjoin->oitems_nums,
-				 pgjoin->oitems_base, (cl_uint) oitems_nums);
-
+		if (oitems_nums < 1)
+			elog(ERROR, "Kresults growth ratio too large: %.2f%%",
+				 100.0 * kresults_ratio);
+		if (pds_dst && oitems_nums < pgjoin->oitems_nums)
+			elog(NOTICE, "Reduction of outer_ntupls at %u, %u=>%u",
+				 pgjoin->oitems_base, pgjoin->oitems_nums, oitems_nums);
 		total_items = reduced_items;
-		pgjoin->oitems_nums = oitems_nums;
 	}
 	kgjoin->kresults_1_offset = kgjoin_head;
 	kgjoin->kresults_2_offset = kgjoin_head +
@@ -3070,22 +3107,40 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 	 * we adopts the larger one.
 	 */
 	result_format = gjs->result_format;
-	result_nitems = (Size)((double) pgjoin->oitems_nums *
-						   gjs->inners[gjs->num_rels - 1].nrows_ratio *
-						   pgstrom_chunk_size_margin());
+	if (gjs->source_nitems == 0)
+		dst_nrows_ratio = gjs->inners[gjs->num_rels - 1].nrows_ratio;
+	else
+	{
+		double	nrows_ratio_plan = gjs->inners[gjs->num_rels-1].nrows_ratio;
+		double	nrows_ratio_exec = ((double) gjs->outer_nitems[gjs->num_rels] /
+									(double) gjs->source_nitems);
+		if (gjs->source_nitems >= (size_t)(0.30 * outer_plan_nrows))
+			dst_nrows_ratio = nrows_ratio_exec;
+		else
+		{
+			double	merge_ratio = ((double) gjs->source_nitems /
+								   (double) (0.30 * outer_plan_nrows));
+			dst_nrows_ratio = (nrows_ratio_exec * merge_ratio +
+							   nrows_ratio_plan * (1.0 - merge_ratio));
+		}
+	}
+	/* In case of re-execution due to NoDataSpace error */
 	if (pds_dst)
 	{
 		Assert(result_format == pds_dst->kds->format);
-		result_nitems = Max(result_nitems,
-							(Size)((double) pds_dst->kds->nitems *
-								   pgstrom_chunk_size_margin()));
+		dst_nrows_ratio = Max(dst_nrows_ratio,
+							  (double) pds_dst->kds->nitems /
+							  (double) pgjoin->oitems_nums);
 	}
+	result_nitems = (Size)((double) oitems_nums * dst_nrows_ratio *
+						   pgstrom_chunk_size_margin());
 
 	if (result_format == KDS_FORMAT_SLOT)
 	{
 		Size	length;
 
-		length = (STROMALIGN(offsetof(kern_data_store, colmeta[ncols])) +
+		length = (STROMALIGN(offsetof(kern_data_store,
+									  colmeta[ncols])) +
 				  LONGALIGN((sizeof(Datum) +
 							 sizeof(char)) * ncols) * result_nitems);
 		/*
@@ -3100,9 +3155,14 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 			 */
 			result_nitems = INT_MAX;
 		}
-		else if (length < pgstrom_chunk_size() / 2)
+		else if (length < pgstrom_chunk_size() / 4)
 		{
-			result_nitems = (pgstrom_chunk_size() / 2 -
+			/*
+			 * MEMO: If destination buffer size is too small, we doubt
+			 * incorrect estimation by planner, so we try to prepare at
+			 * least 25% of pgstrom_chunk_size().
+			 */
+			result_nitems = (pgstrom_chunk_size() / 4 -
 							 STROMALIGN(offsetof(kern_data_store,
 												 colmeta[ncols])))
 				/ LONGALIGN((sizeof(Datum) + sizeof(char)) * ncols);
@@ -3110,7 +3170,6 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 		else if (length > pgstrom_chunk_size_limit())
 		{
 			Size		small_nitems;
-			cl_uint		oitems_nums;
 
 			/* maximum number of tuples we can store */
 			small_nitems = (pgstrom_chunk_size_limit() -
@@ -3119,20 +3178,18 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 				/ LONGALIGN((sizeof(Datum) + sizeof(char)) * ncols);
 
 			/* reduce number of outer items to be processed */
-			oitems_nums = (cl_uint) ((double) pgjoin->oitems_nums *
+			oitems_nums = (cl_uint) ((double) oitems_nums *
 									 (double) small_nitems /
 									 (double) result_nitems);
 			if (oitems_nums < 1)
-				elog(ERROR, "Too much growth of results tuples: %u -> %zu",
-					 pgjoin->oitems_nums, result_nitems);
+				elog(ERROR, "Too much growth of results tuples: %.f%%",
+					 100.0 * dst_nrows_ratio);
 
-			if (pds_dst)
-				elog(NOTICE, "Reduction of outer Ntuples (%u,%u) => (%u,%u)",
-					 pgjoin->oitems_base, pgjoin->oitems_nums,
-					 pgjoin->oitems_base, (cl_uint) oitems_nums);
+			if (pds_dst && oitems_nums < pgjoin->oitems_nums)
+				elog(NOTICE, "Reduction of outer Ntuples at %u, %u=>%u",
+					 pgjoin->oitems_base, pgjoin->oitems_nums, oitems_nums);
 
 			result_nitems = small_nitems;
-			pgjoin->oitems_nums = oitems_nums;
 		}
 
 		if (!pds_dst)
@@ -3201,12 +3258,11 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 		/*
 		 * Adjustment if too large or too short
 		 */
-		if (new_length < pgstrom_chunk_size() / 2)
-			new_length = pgstrom_chunk_size() / 2;
+		if (new_length < pgstrom_chunk_size() / 4)
+			new_length = pgstrom_chunk_size() / 4;
 		else if (new_length > pgstrom_chunk_size_limit())
 		{
 			Size		small_nitems;
-			cl_uint		oitems_nums;
 
 			/* maximum number of tuples we can store */
 			small_nitems = (pgstrom_chunk_size_limit() -
@@ -3216,20 +3272,16 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 											  result_width));
 
 			/* reduce number of outer items to be processed */
-			oitems_nums = (cl_uint) ((double) pgjoin->oitems_nums *
-									 (double) small_nitems /
-									 (double) result_nitems);
 			if (oitems_nums < 1)
-				elog(ERROR, "Too much growth of result tuples: %u -> %zu",
-					 pgjoin->oitems_nums, result_nitems);
+				elog(ERROR, "Too much growth of results tuples: %.f%%",
+					 100.0 * dst_nrows_ratio);
 
-			if (pds_dst)
-				elog(NOTICE, "Reduction of outer ntuples (%u,%u) => (%u,%u)",
-					 pgjoin->oitems_base, pgjoin->oitems_nums,
-					 pgjoin->oitems_base, (cl_uint) oitems_nums);
+			if (pds_dst && oitems_nums < pgjoin->oitems_nums)
+				elog(NOTICE, "Reduction of outer Ntuples at %u, %u=>%u",
+					 pgjoin->oitems_base, pgjoin->oitems_nums, oitems_nums);
 
+			result_nitems = small_nitems;
 			new_length = pgstrom_chunk_size_limit();
-			pgjoin->oitems_nums = oitems_nums;
 		}
 
 		if (!pds_dst)
@@ -3265,13 +3317,16 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 	}
 	else
 		elog(ERROR, "Bug? unexpected result format: %d", result_format);
+
+	/* outer ntuples to be fetched on the next kernel invocation */
+	pgjoin->oitems_nums = oitems_nums;
 }
 
 static GpuTask *
 gpujoin_create_task(GpuJoinState *gjs,
 					pgstrom_multirels *pmrels,
 					pgstrom_data_store *pds_src,
-					cl_uint oitems_base, cl_uint oitems_nums)
+					cl_uint oitems_base)
 {
 	GpuContext		   *gcontext = gjs->gts.gcontext;
 	pgstrom_gpujoin	   *pgjoin;
@@ -3288,7 +3343,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 	pgjoin = MemoryContextAllocZero(gcontext->memcxt, required);
 	pgstrom_init_gputask(&gjs->gts, &pgjoin->task);
 	pgjoin->oitems_base = oitems_base;
-	pgjoin->oitems_nums = oitems_nums;
+	pgjoin->oitems_nums = 0xefefefef;	/* to be set later */
 	pgjoin->pmrels = multirels_attach_buffer(pmrels);
 	pgjoin->pds_src = pds_src;
 
@@ -3438,7 +3493,7 @@ retry:
 	{
 		nitems = gjs->oitems_plan_nums;
 	}
-	return gpujoin_create_task(gjs, gjs->curr_pmrels, pds, 0, nitems);
+	return gpujoin_create_task(gjs, gjs->curr_pmrels, pds, 0);
 }
 
 static TupleTableSlot *
@@ -3582,7 +3637,6 @@ gpujoin_task_complete(GpuTask *gtask)
 									pgjoin->pmrels,
 									pds_src,
 									pgjoin->oitems_base +
-									pgjoin->oitems_nums,
 									pgjoin->oitems_nums);
 
 			/* add this new task to the pending list */
