@@ -714,6 +714,37 @@ pgstrom_expand_data_store(GpuContext *gcontext,
 	pds->kds = kds_new;
 }
 
+void
+pgstrom_shrink_data_store(pgstrom_data_store *pds)
+{
+	kern_data_store	   *kds = pds->kds;
+
+	if (kds->format == KDS_FORMAT_ROW)
+	{
+
+		/* to be done later */
+
+	}
+	else if (kds->format == KDS_FORMAT_SLOT)
+	{
+		size_t		new_length = KERN_DATA_STORE_HEAD_LENGTH(kds) +
+			(LONGALIGN(sizeof(bool) * kds->ncols) +
+			 LONGALIGN(sizeof(Datum) * kds->ncols)) * kds->nitems;
+
+		Assert(new_length <= kds->length);
+		kds->length = new_length;
+		pds->kds_length = kds->length;
+	}
+	else if (kds->format == KDS_FORMAT_HASH)
+	{
+		Assert(kds->usage <= kds->length);
+		kds->length = kds->usage;
+		pds->kds_length = kds->length;
+	}
+	else
+		elog(ERROR, "Bug? unexpected PDS to be shrinked");
+}
+
 pgstrom_data_store *
 pgstrom_create_data_store_row(GpuContext *gcontext,
 							  TupleDesc tupdesc, Size length,
