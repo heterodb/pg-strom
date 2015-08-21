@@ -8491,3 +8491,1030 @@ explain (verbose on, costs off) select sum(float_x/(id%1000)) from strom_test;
                Features: format: heap-tuple, bulkload: supported
 (10 rows)
 
+--explain GpuPreAggregation for Data/Time types
+set pg_strom.enabled=off;
+explain (verbose on, costs off) select key,max(timestamp_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (max(timestamp_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, max(timestamp_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,max(timestamptz_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (max(timestamptz_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, max(timestamptz_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,max(date_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (max(date_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, max(date_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,max(time_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (max(time_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, max(time_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,max(timetz_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (max(timetz_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, max(timetz_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,max(interval_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (max(interval_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, max(interval_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,min(timestamp_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (min(timestamp_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, min(timestamp_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,min(timestamptz_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (min(timestamptz_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, min(timestamptz_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,min(date_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (min(date_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, min(date_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,min(time_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (min(time_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, min(time_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,min(timetz_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (min(timetz_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, min(timetz_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,min(interval_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (min(interval_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, min(interval_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,count(timestamp_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (count(timestamp_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, count(timestamp_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,count(timestamptz_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (count(timestamptz_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, count(timestamptz_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,count(date_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (count(date_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, count(date_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,count(time_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (count(time_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, count(time_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,count(timetz_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (count(timetz_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, count(timetz_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,count(interval_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (count(interval_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, count(interval_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,avg(time_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (avg((time_x)::interval))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, avg((time_x)::interval)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,avg(interval_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (avg(interval_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, avg(interval_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select max(timestamp_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: max(timestamp_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select max(timestamptz_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: max(timestamptz_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select max(date_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: max(date_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select max(time_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: max(time_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select max(timetz_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: max(timetz_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select max(interval_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: max(interval_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select min(timestamp_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: min(timestamp_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select min(timestamptz_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: min(timestamptz_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select min(date_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: min(date_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select min(time_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: min(time_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select min(timetz_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: min(timetz_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select min(interval_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: min(interval_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select count(timestamp_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: count(timestamp_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select count(timestamptz_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: count(timestamptz_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select count(date_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: count(date_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select count(time_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: count(time_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select count(timetz_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: count(timetz_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select count(interval_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: count(interval_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select avg(time_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: avg((time_x)::interval)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select avg(interval_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: avg(interval_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+set pg_strom.enabled=on;
+explain (verbose on, costs off) select key,max(timestamp_x) from strom_time_test group by key order by key;
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (max((pgstrom.pmax(timestamp_x))))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, max((pgstrom.pmax(timestamp_x)))
+         Group Key: strom_time_test.key
+         ->  Custom Scan (GpuPreAgg)
+               Output: key, pgstrom.pmax(timestamp_x)
+               Bulkload: On (density: 100.00%)
+               Reduction: Local + Global
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Custom Scan (BulkScan) on public.strom_time_test
+                     Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+                     Features: format: heap-tuple, bulkload: supported
+(14 rows)
+
+explain (verbose on, costs off) select key,max(timestamptz_x) from strom_time_test group by key order by key;
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (max((pgstrom.pmax(timestamptz_x))))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, max((pgstrom.pmax(timestamptz_x)))
+         Group Key: strom_time_test.key
+         ->  Custom Scan (GpuPreAgg)
+               Output: key, pgstrom.pmax(timestamptz_x)
+               Bulkload: On (density: 100.00%)
+               Reduction: Local + Global
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Custom Scan (BulkScan) on public.strom_time_test
+                     Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+                     Features: format: heap-tuple, bulkload: supported
+(14 rows)
+
+explain (verbose on, costs off) select key,max(date_x) from strom_time_test group by key order by key;
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (max((pgstrom.pmax(date_x))))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, max((pgstrom.pmax(date_x)))
+         Group Key: strom_time_test.key
+         ->  Custom Scan (GpuPreAgg)
+               Output: key, pgstrom.pmax(date_x)
+               Bulkload: On (density: 100.00%)
+               Reduction: Local + Global
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Custom Scan (BulkScan) on public.strom_time_test
+                     Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+                     Features: format: heap-tuple, bulkload: supported
+(14 rows)
+
+explain (verbose on, costs off) select key,max(time_x) from strom_time_test group by key order by key;
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (max((pgstrom.pmax(time_x))))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, max((pgstrom.pmax(time_x)))
+         Group Key: strom_time_test.key
+         ->  Custom Scan (GpuPreAgg)
+               Output: key, pgstrom.pmax(time_x)
+               Bulkload: On (density: 100.00%)
+               Reduction: Local + Global
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Custom Scan (BulkScan) on public.strom_time_test
+                     Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+                     Features: format: heap-tuple, bulkload: supported
+(14 rows)
+
+explain (verbose on, costs off) select key,max(timetz_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (max(timetz_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, max(timetz_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,max(interval_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (max(interval_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, max(interval_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,min(timestamp_x) from strom_time_test group by key order by key;
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (min((pgstrom.pmin(timestamp_x))))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, min((pgstrom.pmin(timestamp_x)))
+         Group Key: strom_time_test.key
+         ->  Custom Scan (GpuPreAgg)
+               Output: key, pgstrom.pmin(timestamp_x)
+               Bulkload: On (density: 100.00%)
+               Reduction: Local + Global
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Custom Scan (BulkScan) on public.strom_time_test
+                     Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+                     Features: format: heap-tuple, bulkload: supported
+(14 rows)
+
+explain (verbose on, costs off) select key,min(timestamptz_x) from strom_time_test group by key order by key;
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (min((pgstrom.pmin(timestamptz_x))))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, min((pgstrom.pmin(timestamptz_x)))
+         Group Key: strom_time_test.key
+         ->  Custom Scan (GpuPreAgg)
+               Output: key, pgstrom.pmin(timestamptz_x)
+               Bulkload: On (density: 100.00%)
+               Reduction: Local + Global
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Custom Scan (BulkScan) on public.strom_time_test
+                     Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+                     Features: format: heap-tuple, bulkload: supported
+(14 rows)
+
+explain (verbose on, costs off) select key,min(date_x) from strom_time_test group by key order by key;
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (min((pgstrom.pmin(date_x))))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, min((pgstrom.pmin(date_x)))
+         Group Key: strom_time_test.key
+         ->  Custom Scan (GpuPreAgg)
+               Output: key, pgstrom.pmin(date_x)
+               Bulkload: On (density: 100.00%)
+               Reduction: Local + Global
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Custom Scan (BulkScan) on public.strom_time_test
+                     Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+                     Features: format: heap-tuple, bulkload: supported
+(14 rows)
+
+explain (verbose on, costs off) select key,min(time_x) from strom_time_test group by key order by key;
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (min((pgstrom.pmin(time_x))))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, min((pgstrom.pmin(time_x)))
+         Group Key: strom_time_test.key
+         ->  Custom Scan (GpuPreAgg)
+               Output: key, pgstrom.pmin(time_x)
+               Bulkload: On (density: 100.00%)
+               Reduction: Local + Global
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Custom Scan (BulkScan) on public.strom_time_test
+                     Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+                     Features: format: heap-tuple, bulkload: supported
+(14 rows)
+
+explain (verbose on, costs off) select key,min(timetz_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (min(timetz_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, min(timetz_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,min(interval_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (min(interval_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, min(interval_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,count(timestamp_x) from strom_time_test group by key order by key;
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (pgstrom.count((pgstrom.nrows((timestamp_x IS NOT NULL)))))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, pgstrom.count((pgstrom.nrows((timestamp_x IS NOT NULL))))
+         Group Key: strom_time_test.key
+         ->  Custom Scan (GpuPreAgg)
+               Output: key, pgstrom.nrows((timestamp_x IS NOT NULL))
+               Bulkload: On (density: 100.00%)
+               Reduction: Local + Global
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Custom Scan (BulkScan) on public.strom_time_test
+                     Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+                     Features: format: heap-tuple, bulkload: supported
+(14 rows)
+
+explain (verbose on, costs off) select key,count(timestamptz_x) from strom_time_test group by key order by key;
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (pgstrom.count((pgstrom.nrows((timestamptz_x IS NOT NULL)))))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, pgstrom.count((pgstrom.nrows((timestamptz_x IS NOT NULL))))
+         Group Key: strom_time_test.key
+         ->  Custom Scan (GpuPreAgg)
+               Output: key, pgstrom.nrows((timestamptz_x IS NOT NULL))
+               Bulkload: On (density: 100.00%)
+               Reduction: Local + Global
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Custom Scan (BulkScan) on public.strom_time_test
+                     Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+                     Features: format: heap-tuple, bulkload: supported
+(14 rows)
+
+explain (verbose on, costs off) select key,count(date_x) from strom_time_test group by key order by key;
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (pgstrom.count((pgstrom.nrows((date_x IS NOT NULL)))))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, pgstrom.count((pgstrom.nrows((date_x IS NOT NULL))))
+         Group Key: strom_time_test.key
+         ->  Custom Scan (GpuPreAgg)
+               Output: key, pgstrom.nrows((date_x IS NOT NULL))
+               Bulkload: On (density: 100.00%)
+               Reduction: Local + Global
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Custom Scan (BulkScan) on public.strom_time_test
+                     Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+                     Features: format: heap-tuple, bulkload: supported
+(14 rows)
+
+explain (verbose on, costs off) select key,count(time_x) from strom_time_test group by key order by key;
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (pgstrom.count((pgstrom.nrows((time_x IS NOT NULL)))))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, pgstrom.count((pgstrom.nrows((time_x IS NOT NULL))))
+         Group Key: strom_time_test.key
+         ->  Custom Scan (GpuPreAgg)
+               Output: key, pgstrom.nrows((time_x IS NOT NULL))
+               Bulkload: On (density: 100.00%)
+               Reduction: Local + Global
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Custom Scan (BulkScan) on public.strom_time_test
+                     Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+                     Features: format: heap-tuple, bulkload: supported
+(14 rows)
+
+explain (verbose on, costs off) select key,count(timetz_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (count(timetz_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, count(timetz_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,count(interval_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (count(interval_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, count(interval_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,avg(time_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (avg((time_x)::interval))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, avg((time_x)::interval)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select key,avg(interval_x) from strom_time_test group by key order by key;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Sort
+   Output: key, (avg(interval_x))
+   Sort Key: strom_time_test.key
+   ->  HashAggregate
+         Output: key, avg(interval_x)
+         Group Key: strom_time_test.key
+         ->  Seq Scan on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(8 rows)
+
+explain (verbose on, costs off) select max(timestamp_x) from strom_time_test;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: max((pgstrom.pmax(timestamp_x)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: pgstrom.pmax(timestamp_x)
+         Bulkload: On (density: 100.00%)
+         Reduction: NoGroup
+         Features: format: tuple-slot, bulkload: unsupported
+         ->  Custom Scan (BulkScan) on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+               Features: format: heap-tuple, bulkload: supported
+(10 rows)
+
+explain (verbose on, costs off) select max(timestamptz_x) from strom_time_test;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: max((pgstrom.pmax(timestamptz_x)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: pgstrom.pmax(timestamptz_x)
+         Bulkload: On (density: 100.00%)
+         Reduction: NoGroup
+         Features: format: tuple-slot, bulkload: unsupported
+         ->  Custom Scan (BulkScan) on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+               Features: format: heap-tuple, bulkload: supported
+(10 rows)
+
+explain (verbose on, costs off) select max(date_x) from strom_time_test;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: max((pgstrom.pmax(date_x)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: pgstrom.pmax(date_x)
+         Bulkload: On (density: 100.00%)
+         Reduction: NoGroup
+         Features: format: tuple-slot, bulkload: unsupported
+         ->  Custom Scan (BulkScan) on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+               Features: format: heap-tuple, bulkload: supported
+(10 rows)
+
+explain (verbose on, costs off) select max(time_x) from strom_time_test;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: max((pgstrom.pmax(time_x)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: pgstrom.pmax(time_x)
+         Bulkload: On (density: 100.00%)
+         Reduction: NoGroup
+         Features: format: tuple-slot, bulkload: unsupported
+         ->  Custom Scan (BulkScan) on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+               Features: format: heap-tuple, bulkload: supported
+(10 rows)
+
+explain (verbose on, costs off) select max(timetz_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: max(timetz_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select max(interval_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: max(interval_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select min(timestamp_x) from strom_time_test;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: min((pgstrom.pmin(timestamp_x)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: pgstrom.pmin(timestamp_x)
+         Bulkload: On (density: 100.00%)
+         Reduction: NoGroup
+         Features: format: tuple-slot, bulkload: unsupported
+         ->  Custom Scan (BulkScan) on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+               Features: format: heap-tuple, bulkload: supported
+(10 rows)
+
+explain (verbose on, costs off) select min(timestamptz_x) from strom_time_test;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: min((pgstrom.pmin(timestamptz_x)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: pgstrom.pmin(timestamptz_x)
+         Bulkload: On (density: 100.00%)
+         Reduction: NoGroup
+         Features: format: tuple-slot, bulkload: unsupported
+         ->  Custom Scan (BulkScan) on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+               Features: format: heap-tuple, bulkload: supported
+(10 rows)
+
+explain (verbose on, costs off) select min(date_x) from strom_time_test;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: min((pgstrom.pmin(date_x)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: pgstrom.pmin(date_x)
+         Bulkload: On (density: 100.00%)
+         Reduction: NoGroup
+         Features: format: tuple-slot, bulkload: unsupported
+         ->  Custom Scan (BulkScan) on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+               Features: format: heap-tuple, bulkload: supported
+(10 rows)
+
+explain (verbose on, costs off) select min(time_x) from strom_time_test;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: min((pgstrom.pmin(time_x)))
+   ->  Custom Scan (GpuPreAgg)
+         Output: pgstrom.pmin(time_x)
+         Bulkload: On (density: 100.00%)
+         Reduction: NoGroup
+         Features: format: tuple-slot, bulkload: unsupported
+         ->  Custom Scan (BulkScan) on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+               Features: format: heap-tuple, bulkload: supported
+(10 rows)
+
+explain (verbose on, costs off) select min(timetz_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: min(timetz_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select min(interval_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: min(interval_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select count(timestamp_x) from strom_time_test;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: pgstrom.count((pgstrom.nrows((timestamp_x IS NOT NULL))))
+   ->  Custom Scan (GpuPreAgg)
+         Output: pgstrom.nrows((timestamp_x IS NOT NULL))
+         Bulkload: On (density: 100.00%)
+         Reduction: NoGroup
+         Features: format: tuple-slot, bulkload: unsupported
+         ->  Custom Scan (BulkScan) on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+               Features: format: heap-tuple, bulkload: supported
+(10 rows)
+
+explain (verbose on, costs off) select count(timestamptz_x) from strom_time_test;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: pgstrom.count((pgstrom.nrows((timestamptz_x IS NOT NULL))))
+   ->  Custom Scan (GpuPreAgg)
+         Output: pgstrom.nrows((timestamptz_x IS NOT NULL))
+         Bulkload: On (density: 100.00%)
+         Reduction: NoGroup
+         Features: format: tuple-slot, bulkload: unsupported
+         ->  Custom Scan (BulkScan) on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+               Features: format: heap-tuple, bulkload: supported
+(10 rows)
+
+explain (verbose on, costs off) select count(date_x) from strom_time_test;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: pgstrom.count((pgstrom.nrows((date_x IS NOT NULL))))
+   ->  Custom Scan (GpuPreAgg)
+         Output: pgstrom.nrows((date_x IS NOT NULL))
+         Bulkload: On (density: 100.00%)
+         Reduction: NoGroup
+         Features: format: tuple-slot, bulkload: unsupported
+         ->  Custom Scan (BulkScan) on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+               Features: format: heap-tuple, bulkload: supported
+(10 rows)
+
+explain (verbose on, costs off) select count(time_x) from strom_time_test;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: pgstrom.count((pgstrom.nrows((time_x IS NOT NULL))))
+   ->  Custom Scan (GpuPreAgg)
+         Output: pgstrom.nrows((time_x IS NOT NULL))
+         Bulkload: On (density: 100.00%)
+         Reduction: NoGroup
+         Features: format: tuple-slot, bulkload: unsupported
+         ->  Custom Scan (BulkScan) on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+               Features: format: heap-tuple, bulkload: supported
+(10 rows)
+
+explain (verbose on, costs off) select count(timetz_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: count(timetz_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select count(interval_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: count(interval_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select avg(time_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: avg((time_x)::interval)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
+explain (verbose on, costs off) select avg(interval_x) from strom_time_test;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Aggregate
+   Output: avg(interval_x)
+   ->  Seq Scan on public.strom_time_test
+         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+(4 rows)
+
