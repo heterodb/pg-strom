@@ -285,5 +285,55 @@ INSERT INTO strom_string_test SELECT
 			      -- ,rpad(md5(random()::text),5000,md5(random()::text))
 			      ;
 
+--# create a table which has time/date data types.
+DROP TABLE IF EXISTS strom_time_test;
+CREATE TABLE strom_time_test (
+       id integer
+       , key integer
+       , timestamp_x timestamp
+       , timestamptz_x timestamp with time zone
+       , date_x date
+       , time_x time
+       , timetz_x time with time zone
+       , interval_x interval
+);
+
+INSERT INTO strom_time_test
+SELECT 
+id, 
+id%11 as key,
+timesrc as timestamp_x,
+timesrc as timestamptz_x,
+timesrc::date as date_x,
+timesrc::time as time_x,
+timesrc::time with time zone as timetz_x,
+timesrc - 'epoch' as interval_x
+FROM
+(SELECT row_number() OVER() as id, timesrc FROM
+  (
+    SELECT generate_series
+    ('4000-01-01 00:00:00 BC'::timestamp ,
+     '4000-12-31 23:59:59 AD'::timestamp ,
+     '11 years 11days 11hours 11minutes 11 seconds'::interval)::timestamp with time zone as timesrc
+    ORDER BY random()
+  ) AS TM
+) AS TM;
+
+-- INSERT NULL DATA
+INSERT INTO strom_time_test
+SELECT generate_series(1001,2000),generate_series(1,5),NULL,NULL,NULL,NULL,NULL,NULL;
+
+-- INSERT SUMMER TIME DATA
+INSERT INTO strom_time_test
+SELECT 
+generate_series(2001,2100),
+1000,
+NULL,
+'2015-03-08 1:59:59'::timestamp at time zone 'America/New_York',
+NULL,
+'2015-03-08 1:59:59'::timestamp at time zone 'America/New_York',
+NULL;
+
+
 --# absolutely needed!
 ANALYZE;
