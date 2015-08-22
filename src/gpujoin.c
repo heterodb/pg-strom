@@ -65,9 +65,7 @@ typedef struct
 	CustomPath		cpath;
 	int				num_rels;
 	Path		   *outer_path;
-	Size			kmrels_length;	/* expected inner buffer size */
 	double			kresults_ratio;	/* expected total-items ratio */
-	cl_uint			oitems_plan_nums;/* expected # of outer tuples per task */
 	List		   *host_quals;
 	struct {
 		JoinType	join_type;		/* one of JOIN_* */
@@ -90,9 +88,7 @@ typedef struct
 	char	   *kern_source;
 	int			extra_flags;
 	List	   *used_params;
-	Size		kmrels_length;
 	double		kresults_ratio;
-	cl_uint		oitems_plan_nums;
 	bool		outer_bulkload;
 	double		bulkload_density;
 	Expr	   *outer_quals;
@@ -123,10 +119,8 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, makeString(gj_info->kern_source));
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
 	exprs = lappend(exprs, gj_info->used_params);
-	privs = lappend(privs, makeInteger(gj_info->kmrels_length));
 	privs = lappend(privs,
 					makeInteger(double_as_long(gj_info->kresults_ratio)));
-	privs = lappend(privs, makeInteger(gj_info->oitems_plan_nums));
 	privs = lappend(privs, makeInteger(gj_info->outer_bulkload));
 	privs = lappend(privs,
 					makeInteger(double_as_long(gj_info->bulkload_density)));
@@ -164,10 +158,8 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->kern_source = strVal(list_nth(privs, pindex++));
 	gj_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gj_info->used_params = list_nth(exprs, eindex++);
-	gj_info->kmrels_length = intVal(list_nth(privs, pindex++));
 	gj_info->kresults_ratio =
 		long_as_double(intVal(list_nth(privs, pindex++)));
-	gj_info->oitems_plan_nums = intVal(list_nth(privs, pindex++));
 	gj_info->outer_bulkload = intVal(list_nth(privs, pindex++));
 	gj_info->bulkload_density =
 		long_as_double(intVal(list_nth(privs, pindex++)));
@@ -210,13 +202,6 @@ typedef struct
 	cl_int				pds_index;
 	Size				pds_limit;
 	Size				consumed;
-
-#if 0
-	pgstrom_data_store *curr_chunk;
-	TupleTableSlot	   *scan_overflow;
-	bool				scan_begin;
-	bool				scan_done;
-#endif
 	Size				ntuples;
 	/* temp store, if KDS-hash overflow */
 	Tuplestorestate	   *tupstore;
@@ -269,9 +254,7 @@ typedef struct
 	int				result_format;
 	/* buffer population ratio */
 	int				result_width;	/* result width for buffer length calc */
-	Size			kmrels_length;	/* length of inner buffer */
 	double			kresults_ratio;	/* estimated number of rows to outer */
-	cl_uint			oitems_plan_nums;/* planned # of outer input rows */
 	/* supplemental information to ps_tlist  */
 	List		   *ps_src_depth;
 	List		   *ps_src_resno;
@@ -295,7 +278,6 @@ typedef struct
 typedef struct pgstrom_multirels
 {
 	GpuJoinState   *gjs;		/* GpuJoinState of this buffer */
-	Size			kmrels_length;	/* total length of the kern_multirels */
 	Size			head_length;	/* length of the header portion */
 	Size			usage_length;	/* length actually in use */
 	Size			ojmap_length;	/* length of outer-join map */
@@ -367,7 +349,7 @@ static void multirels_put_buffer(pgstrom_multirels *pmrels, GpuTask *gtask);
 static void multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask);
 static void multirels_colocate_outer_join_maps(pgstrom_multirels *pmrels,
 											   GpuTask *gtask, int depth);
-static void multirels_detach_buffer(pgstrom_multirels *pmrels);
+static void multirels_detach_buffer(pgstrom_multirels *pmrels, const char *caller);
 
 /*
  * misc declarations
@@ -566,11 +548,18 @@ cost_gpujoin(PlannerInfo *root,
 	double		kresults_ratio;
 	double		outer_ntuples;
 	double		inner_ntuples;
-	Size		kmrels_length;
+	Size		inner_total_sz;
+	Size		inner_limit_sz;
 	Size		largest_size;
 	int			largest_index;
 	int			outer_nsplits;
 	int			i, num_rels = gpath->num_rels;
+
+	/*
+	 * NOTE: We try to expand the inner relations buffer unless its size
+	 * does not exceed pre-defined limitation (by GPU device capability)
+	 */
+	inner_limit_sz = gpuMemMaxAllocSize() / 2 - BLCKSZ * num_rels;
 
 	/* Buffer size estimation of kern_gpujoin; that contains two
 	 * kern_resultbuf to save the intermediation join results.
@@ -592,9 +581,6 @@ cost_gpujoin(PlannerInfo *root,
 	outer_nsplits = estimate_outer_nsplits(root, gpath, num_chunks,
 										   nrows_dev_output,
 										   support_bulkload);
-	gpath->oitems_plan_nums = (outer_rel->rows /
-							   (double) (num_chunks * outer_nsplits));
-
 	/*
 	 * Cost of per-tuple evaluation
 	 */
@@ -615,8 +601,7 @@ retry:
 	run_cost = outer_path->total_cost - outer_path->startup_cost;
 	subtract_tuplecost_if_bulkload(&run_cost, outer_path);
 
-	kmrels_length = STROMALIGN(offsetof(kern_multirels,
-										chunks[num_rels]));
+	inner_total_sz = STROMALIGN(offsetof(kern_multirels, chunks[num_rels]));
 	largest_size = 0;
 	largest_index = -1;
 	outer_ntuples = outer_path->rows;
@@ -688,7 +673,7 @@ retry:
 			largest_size = chunk_size;
 			largest_index = i;
 		}
-		kmrels_length += chunk_size;
+		inner_total_sz += chunk_size;
 
 		/*
 		 * Cost calculation in this depth
@@ -806,20 +791,14 @@ retry:
 
 	/*
 	 * If size of inner multi-relations buffer is still larger than
-	 * device allocatable limitation, we try to split the largest
-	 * relation then retry the estimation.
+	 * the pre-defined limitation, we try to split the largest relation
+	 * then retry the estimation.
 	 */
-	if (kmrels_length > gpuMemMaxAllocSize())
+	if (inner_total_sz > inner_limit_sz)
 	{
 		gpath->inners[largest_index].nbatches++;
 		goto retry;
 	}
-
-	/*
-	 * Update estimated multi-relations buffer length and portion
-	 * of the 
-	 */
-	gpath->kmrels_length = kmrels_length;
 
 	/* Dumps candidate GpuJoinPath for debugging */
 	if (client_min_messages <= DEBUG1)
@@ -888,7 +867,6 @@ create_gpujoin_path(PlannerInfo *root,
 	result->cpath.flags = (support_bulkload ? CUSTOMPATH_SUPPORT_BULKLOAD : 0);
 	result->cpath.methods = &gpujoin_path_methods;
 	result->outer_path = outer_path;
-	result->kmrels_length = 0;		/* to be set later */
 	result->kresults_ratio = 0.0;	/* to be set later */
 	result->num_rels = num_rels;
 	result->host_quals = host_quals;
@@ -1631,9 +1609,7 @@ create_gpujoin_plan(PlannerInfo *root,
 	cscan->custom_plans = list_copy_tail(custom_plans, 1);
 
 	memset(&gj_info, 0, sizeof(GpuJoinInfo));
-	gj_info.kmrels_length = gpath->kmrels_length;
 	gj_info.kresults_ratio = gpath->kresults_ratio;
-	gj_info.oitems_plan_nums = gpath->oitems_plan_nums;
 	gj_info.outer_ratio = 1.0;
 	gj_info.num_rels = gpath->num_rels;
 
@@ -1769,8 +1745,6 @@ gpujoin_textout_path(StringInfo str, const CustomPath *node)
 	/* outer_path */
 	appendStringInfo(str, " :outer_path %s",
 					 nodeToString(gpath->outer_path));
-	/* total_length */
-	appendStringInfo(str, " :kmrels_length %zu", gpath->kmrels_length);
 	/* kresults_ratio */
 	appendStringInfo(str, " :kresults_ratio %.2f", gpath->kresults_ratio);
 	/* num_rels */
@@ -2070,9 +2044,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 						  t_bits[BITMAPLEN(result_tupdesc->natts)]) +
 				 (result_tupdesc->tdhasoid ? sizeof(Oid) : 0)) +
 		MAXALIGN(cscan->scan.plan.plan_width);	/* average width */
-	gjs->kmrels_length = gj_info->kmrels_length;
 	gjs->kresults_ratio = gj_info->kresults_ratio;
-	gjs->oitems_plan_nums = gj_info->oitems_plan_nums;
 }
 
 static TupleTableSlot *
@@ -2130,7 +2102,7 @@ gpujoin_end(CustomScanState *node)
 	 * clean up GpuJoin specific resources
 	 */
 	if (gjs->curr_pmrels)
-		multirels_detach_buffer(gjs->curr_pmrels);
+		multirels_detach_buffer(gjs->curr_pmrels, __FUNCTION__);
 
 	/* then other generic resources */
 	pgstrom_release_gputaskstate(&gjs->gts);
@@ -2177,7 +2149,7 @@ gpujoin_rescan(CustomScanState *node)
 		/* detach previous inner relations buffer */
 		if (gjs->curr_pmrels)
 		{
-			multirels_detach_buffer(gjs->curr_pmrels);
+			multirels_detach_buffer(gjs->curr_pmrels, __FUNCTION__);
 			gjs->curr_pmrels = NULL;
 		}
 
@@ -2290,14 +2262,14 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		resetStringInfo(&str);
 		if (hash_outer_key != NULL)
 		{
-			appendStringInfo(&str, "Logic: GpuHash%sJoin",
+			appendStringInfo(&str, "GpuHash%sJoin",
 							 join_type == JOIN_FULL ? "Full" :
 							 join_type == JOIN_LEFT ? "Left" :
 							 join_type == JOIN_RIGHT ? "Right" : "");
 		}
 		else
 		{
-			appendStringInfo(&str, "Logic: GpuNestLoop%s",
+			appendStringInfo(&str, "GpuNestLoop%s",
 							 join_type == JOIN_FULL ? "Full" :
 							 join_type == JOIN_LEFT ? "Left" :
 							 join_type == JOIN_RIGHT ? "Right" : "");
@@ -2313,32 +2285,59 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 								  es->verbose, false);
 		appendStringInfo(&str, ", JoinQual: %s", temp);
 
+		snprintf(qlabel, sizeof(qlabel), "Depth% 2d", depth);
+		ExplainPropertyText(qlabel, str.data, es);
+		resetStringInfo(&str);
+
 		if (es->analyze)
 		{
-			size_t		nrows_in  = gjs->outer_nitems[depth - 1];
+			innerState *istate = &gjs->inners[depth-1];
+			size_t		nrows_in  = gjs->outer_nitems[depth-1];
 			size_t		nrows_out = gjs->outer_nitems[depth];
 			cl_float	nrows_ratio
 				= int_as_float(list_nth_int(gj_info->nrows_ratio, depth - 1));
 
 			appendStringInfo(&str,
-							 ", nrows (%zu -> %zu, %.2f%% expected %.2f%%)",
+							 "Nrows (in:%zu out:%zu, %.2f%% planned %.2f%%)",
 							 nrows_in,
 							 nrows_out,
 							 100.0 * ((double) nrows_out /
 									  (double) gjs->source_nitems),
 							 100.0 * nrows_ratio);
+			appendStringInfo(&str,
+							 ", KDS-%s (size: %s planned %s, "
+							 "nbatches: %u planned %u)",
+							 hash_outer_key ? "Hash" : "Heap",
+							 bytesz_unitary_format(istate->pds_limit),
+							 bytesz_unitary_format(istate->ichunk_size),
+							 istate->nbatches_exec,
+							 istate->nbatches_plan);
 		}
 		else
 		{
+			innerState *istate = &gjs->inners[depth-1];
 			cl_float	nrows_ratio
 				= int_as_float(list_nth_int(gj_info->nrows_ratio, depth - 1));
 
-			appendStringInfo(&str, ", nrows (ratio: %.2f%%)",
+			appendStringInfo(&str, "Nrows (in/out: %.2f%%)",
 							 100.0 * nrows_ratio);
+			appendStringInfo(&str,
+							 ", KDS-%s (size: %s, nbatches: %u)",
+							 hash_outer_key ? "Hash" : "Heap",
+							 bytesz_unitary_format((Size)istate->ichunk_size),
+							 istate->nbatches_plan);
 		}
-		snprintf(qlabel, sizeof(qlabel), "Depth %d", depth);
-		ExplainPropertyText(qlabel, str.data, es);
 
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			appendStringInfoSpaces(es->str, es->indent * 2);
+			appendStringInfo(es->str, "         %s\n", str.data);
+		}
+		else
+		{
+			snprintf(qlabel, sizeof(qlabel), "Depth %02d-Ext", depth);
+			ExplainPropertyText(qlabel, str.data, es);
+		}
 		depth++;
 	}
 	/* other common field */
@@ -3406,7 +3405,6 @@ gpujoin_next_chunk(GpuTaskState *gts)
 	PlanState	   *outer_node = outerPlanState(gjs);
 	TupleDesc		tupdesc = ExecGetResultType(outer_node);
 	pgstrom_data_store *pds = NULL;
-	cl_uint			nitems;
 	struct timeval	tv1, tv2;
 
 	/*
@@ -3431,7 +3429,7 @@ retry:
 		if (gjs->curr_pmrels)
 		{
 			Assert(gjs->gts.scan_done);
-			multirels_detach_buffer(gjs->curr_pmrels);
+			multirels_detach_buffer(gjs->curr_pmrels, __FUNCTION__);
 			gjs->curr_pmrels = NULL;
 		}
 		if (!pmrels_new)
@@ -3513,21 +3511,6 @@ retry:
 	if (!pds)
 		goto retry;
 
-	/*
-	 * When we expect length of the result buffer is larger then limitation,
-	 * we try to reduce number of the outer tuples to be processed at once.
-	 * gjs->oitems_plan_nums is its watermark in this case.
-	 *
-	 * FIXME: oitems_plan_nums is estimated on the plan time, so wrong size
-	 * estimation will lead unreasonable execution scenario. We need to
-	 * adjust oitems_plan_nums according to the run-time statistics.
-	 */
-	nitems = pds->kds->nitems;
-	if (nitems > (cl_uint)((double)gjs->oitems_plan_nums *
-						   pgstrom_chunk_size_margin()))
-	{
-		nitems = gjs->oitems_plan_nums;
-	}
 	return gpujoin_create_task(gjs, gjs->curr_pmrels, pds, 0);
 }
 
@@ -3611,7 +3594,7 @@ gpujoin_task_release(GpuTask *gtask)
 	gpujoin_cleanup_cuda_resources(pgjoin);
 	/* detach multi-relations buffer, if any */
 	if (pgjoin->pmrels)
-		multirels_detach_buffer(pgjoin->pmrels);
+		multirels_detach_buffer(pgjoin->pmrels, __FUNCTION__);
 	/* unlink source data store */
 	if (pgjoin->pds_src)
 		pgstrom_release_data_store(pgjoin->pds_src);
@@ -4780,7 +4763,6 @@ gpujoin_create_multirels(GpuJoinState *gjs)
 
 	pmrels = MemoryContextAllocZero(gcontext->memcxt, alloc_length);
 	pmrels->gjs = gjs;
-	pmrels->kmrels_length = gjs->kmrels_length;
 	pmrels->head_length = head_length;
 	pmrels->usage_length = head_length;
 	pmrels->ojmap_length = 0;
@@ -4889,8 +4871,12 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 		/* set up initial pds_index */
 		for (i=0; i < gjs->num_rels; i++)
 		{
-			Assert(list_length(gjs->inners[i].pds_list) > 0);
+			int		nbatches_exec = list_length(gjs->inners[i].pds_list);
+
+			Assert(nbatches_exec > 0);
 			gjs->inners[i].pds_index = 1;
+			/* also record actual nbatches */
+			gjs->inners[i].nbatches_exec = nbatches_exec;
 		}
 	}
 	else
@@ -4983,7 +4969,7 @@ multirels_get_buffer(pgstrom_multirels *pmrels, GpuTask *gtask,
 		CUdeviceptr	m_ojmaps = 0UL;
 
 		/* buffer for the inner multi-relations */
-		m_kmrels = gpuMemAlloc(gtask, pmrels->kmrels_length);
+		m_kmrels = gpuMemAlloc(gtask, pmrels->usage_length);
 		if (!m_kmrels)
 			return false;
 
@@ -5147,7 +5133,7 @@ multirels_colocate_outer_join_maps(pgstrom_multirels *pmrels,
 }
 
 static void
-multirels_detach_buffer(pgstrom_multirels *pmrels)
+multirels_detach_buffer(pgstrom_multirels *pmrels, const char *caller)
 {
 	int		i, num_rels = pmrels->kern.nrels;
 

@@ -795,4 +795,28 @@ typealign_get_width(char type_align)
 		 (cell3) = lnext(cell3), (cell4) = lnext(cell4))
 #endif
 
+static inline char *
+bytesz_unitary_format(Size nbytes)
+{
+	if (nbytes > (Size)(1UL << 43))
+		return psprintf("%.2fTB", (double)nbytes / (double)(1UL << 40));
+	else if (nbytes > (double)(1UL << 33))
+		return psprintf("%.2fGB", (double)nbytes / (double)(1UL << 30));
+	else if (nbytes > (double)(1UL << 23))
+		return psprintf("%.2fMB", (double)nbytes / (double)(1UL << 20));
+	else if (nbytes > (double)(1UL << 13))
+		return psprintf("%.2fKB", (double)nbytes / (double)(1UL << 10));
+	return psprintf("%uB", (unsigned int)nbytes);
+}
+
+static inline char *
+milliseconds_unitary_format(double milliseconds)
+{
+	if (milliseconds > 300000.0)    /* more then 5min */
+		return psprintf("%.2fmin", milliseconds / 60000.0);
+	else if (milliseconds > 8000.0) /* more than 8sec */
+		return psprintf("%.2fsec", milliseconds / 1000.0);
+	return psprintf("%.2fms", milliseconds);
+}
+
 #endif	/* PG_STROM_H */

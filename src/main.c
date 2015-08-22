@@ -493,30 +493,6 @@ pgstrom_accum_perfmon(pgstrom_perfmon *accum, const pgstrom_perfmon *pfm)
 	accum->time_debug4			+= pfm->time_debug4;
 }
 
-static char *
-bytesz_unitary_format(double nbytes)
-{
-	if (nbytes > (double)(1UL << 43))
-		return psprintf("%.2fTB", nbytes / (double)(1UL << 40));
-	else if (nbytes > (double)(1UL << 33))
-		return psprintf("%.2fGB", nbytes / (double)(1UL << 30));
-	else if (nbytes > (double)(1UL << 23))
-		return psprintf("%.2fMB", nbytes / (double)(1UL << 20));
-	else if (nbytes > (double)(1UL << 13))
-		return psprintf("%.2fKB", nbytes / (double)(1UL << 10));
-	return psprintf("%uB", (unsigned int)nbytes);
-}
-
-static char *
-milliseconds_unitary_format(double milliseconds)
-{
-	if (milliseconds > 300000.0)	/* more then 5min */
-		return psprintf("%.2fmin", milliseconds / 60000.0);
-	else if (milliseconds > 8000.0)	/* more than 8sec */
-		return psprintf("%.2fsec", milliseconds / 1000.0);
-	return psprintf("%.2fms", milliseconds);
-}
-
 static void
 pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 {
@@ -568,8 +544,8 @@ pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 
 	if (pfm->num_dma_send > 0)
 	{
-		double	band =
-			((double)pfm->bytes_dma_send * 1000.0 / pfm->time_dma_send);
+		Size	band = (Size)((double)pfm->bytes_dma_send *
+							  1000.0 / pfm->time_dma_send);
 		snprintf(buf, sizeof(buf),
 				 "%s/sec, len: %s, time: %s, count: %u",
 				 bytesz_unitary_format(band),
@@ -581,8 +557,8 @@ pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 
 	if (pfm->num_dma_recv > 0)
 	{
-		double	band =
-			((double)pfm->bytes_dma_recv * 1000.0 / pfm->time_dma_recv);
+		Size	band = (Size)((double)pfm->bytes_dma_recv *
+							  1000.0 / pfm->time_dma_recv);
 		snprintf(buf, sizeof(buf),
 				 "%s/sec, len: %s, time: %s, count: %u",
 				 bytesz_unitary_format(band),
