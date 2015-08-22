@@ -844,8 +844,6 @@ create_gpujoin_path(PlannerInfo *root,
 					RelOptInfo *joinrel,
 					Path *outer_path,
 					List *inner_path_list,
-					List *host_quals,
-					double nrows_dev_output,
 					ParamPathInfo *param_info,
 					Relids required_outer,
 					bool support_bulkload)
@@ -869,7 +867,7 @@ create_gpujoin_path(PlannerInfo *root,
 	result->outer_path = outer_path;
 	result->kresults_ratio = 0.0;	/* to be set later */
 	result->num_rels = num_rels;
-	result->host_quals = host_quals;
+	result->host_quals = NIL;	/* host_quals are no longer supported */
 
 	i = 0;
 	foreach (lc, inner_path_list)
@@ -892,8 +890,7 @@ create_gpujoin_path(PlannerInfo *root,
 	 * unless its cost is not obviously huge.
 	 */
 	if (cost_gpujoin(root, result, required_outer,
-					 nrows_dev_output,
-					 support_bulkload))
+					 joinrel->rows, support_bulkload))
 	{
 		List   *custom_paths = list_make1(result->outer_path);
 
@@ -1099,13 +1096,10 @@ gpujoin_add_join_path(PlannerInfo *root,
 	Path	   *inner_path;
 	List	   *inner_path_list;
 	List	   *restrict_clauses;
-	List	   *host_quals = NIL;
 	ListCell   *lc;
 	Relids		required_outer;
 	ParamPathInfo *param_info;
-	double		nrows_dev_output;
 	bool		support_bulkload;
-	bool		is_last_depth = true;
 	inner_path_item *ip_item;
 
 	/* calls secondary module if exists */
@@ -1168,7 +1162,6 @@ gpujoin_add_join_path(PlannerInfo *root,
 	for (;;)
 	{
 		List	   *hash_quals = NIL;
-		List	   *join_quals = NIL;
 		ListCell   *lc;
 
 		/*
@@ -1197,31 +1190,15 @@ gpujoin_add_join_path(PlannerInfo *root,
 			RestrictInfo   *rinfo = (RestrictInfo *) lfirst(lc);
 
 			/*
-			 * Even if clause is hash-joinable, here is no benefit
-			 * in case when clause is not runnable on CUDA device.
-			 * So, we drop them from the candidate of the join-key.
+			 * All the join-clauses must be executable on GPU device.
+			 * Even though older version supports HostQuals to be
+			 * applied post device join, it leads undesirable (often
+			 * unacceptable) growth of the result rows in device join.
+			 * So, we simply reject any join that contains host-only
+			 * qualifiers.
 			 */
 			if (!pgstrom_codegen_available_expression(rinfo->clause))
-			{
-#ifdef NOT_USED
-				/* only last depth can have host quals */
-				if (!is_last_depth)
-					return;
-				/* host quals turned off bulk-load capability */
-				support_bulkload = false;
-				host_quals = lappend(host_quals, rinfo);
-				continue;
-#endif
-				/*
-				 * XXX - Host quals may increase the number of rows
-				 * generated. So, we will remove its support entirely.
-				 * If join quals contains host-only qualifiers, CPU
-				 * logic will be able to handle it better.
-				 */
 				return;
-			}
-			/* otherwise, device executable expression */
-			join_quals = lappend(join_quals, rinfo);
 
 			/*
 			 * If processing an outer join, only use its own join clauses
@@ -1248,37 +1225,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 				hash_quals = lappend(hash_quals, rinfo);
 			}
 		}
-
-		/*
-		 * If no qualifiers are executable on GPU device, it does not
-		 * make sense to run with GpuJoin node, so we can add no paths
-		 * in this depth and more.
-		 */
-		if (!join_quals)
-			return;
-
-		/*
-		 * Estimation for number of the rows to be generated in this
-		 * depth. If no host_quals exists, RelOptInfo->rows are the
-		 * correct estimation, but we need to have another estimaiton
-		 * if valid host_quals exists on the last depth.
-		 */
-		if (is_last_depth)
-		{
-			if (host_quals == NIL)
-				nrows_dev_output = joinrel->rows;
-			else
-			{
-				nrows_dev_output =
-					get_parameterized_joinrel_size(root,
-												   joinrel,
-												   outerrel->rows,
-												   innerrel->rows,
-												   extra->sjinfo,
-												   join_quals);
-			}
-		}
-		ip_item->join_quals = join_quals;
+		ip_item->join_quals = restrict_clauses;
 
 		/*
 		 * OK, try GpuNestLoop logic
@@ -1291,8 +1238,6 @@ gpujoin_add_join_path(PlannerInfo *root,
 								joinrel,
 								outer_path,
 								inner_path_list,
-								host_quals,
-								nrows_dev_output,
 								param_info,
                                 required_outer,
                                 support_bulkload);
@@ -1308,8 +1253,6 @@ gpujoin_add_join_path(PlannerInfo *root,
 								joinrel,
 								outer_path,
 								inner_path_list,
-								host_quals,
-								nrows_dev_output,
 								param_info,
 								required_outer,
 								support_bulkload);
@@ -1329,11 +1272,8 @@ gpujoin_add_join_path(PlannerInfo *root,
 			List		   *inner_path_temp = NIL;
 			int				i;
 
-			/*
-			 * Only last depth can have host-only qualifier
-			 */
-			if (gpath->host_quals != NIL)
-				break;
+			/* host_quals are no longer supported */
+			Assert(gpath->host_quals == NIL);
 
 			for (i = 0; i < gpath->num_rels; i++)
 			{
@@ -1392,8 +1332,6 @@ gpujoin_add_join_path(PlannerInfo *root,
 										 extra->param_source_rels,
 										 &required_outer))
 			break;
-
-		is_last_depth = false;
 	}
 }
 
