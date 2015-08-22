@@ -1115,6 +1115,10 @@ gpujoin_add_join_path(PlannerInfo *root,
 	if (!pgstrom_enabled)
 		return;
 
+	/* no benefit to run cross join in GPU device */
+	if (!extra->restrictlist)
+		return;
+
 	/*
 	 * check bulk-load capability around targetlist of joinrel.
 	 * it may be turned off according to the host_quals if any.
@@ -1144,8 +1148,8 @@ gpujoin_add_join_path(PlannerInfo *root,
 	ip_item->join_quals = NIL;		/* to be set later */
 	ip_item->hash_quals = NIL;		/* to be set later */
 	ip_item->join_nrows = joinrel->rows;
-
 	inner_path_list = list_make1(ip_item);
+
 	if (!gpujoin_calc_required_outer(root, joinrel,
 									 outer_path, inner_path_list,
 									 extra->param_source_rels,
