@@ -4474,12 +4474,17 @@ gpujoin_inner_hash_preload(GpuJoinState *gjs,
 		/* put an empty hash table if no rows read */
 		if (istate->pds_list == NIL)
 		{
+			Size	empty_len;
+
 			scan_slot = scan_ps->ps_ResultTupleSlot;
 			scan_desc = scan_slot->tts_tupleDescriptor;
+			empty_len = (STROMALIGN(offsetof(kern_data_store,
+											 colmeta[scan_desc->natts])) +
+						 STROMALIGN(sizeof(cl_uint) * 4));
 			pds_hash = pgstrom_create_data_store_hash(gjs->gts.gcontext,
 													  scan_desc,
-													  256,
-													  32,
+													  empty_len,
+													  4,
 													  false);
 			istate->pds_list = list_make1(pds_hash);
 		}
@@ -4620,11 +4625,15 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs,
 		/* put an empty heap table if no rows read */
 		if (istate->pds_list == NIL)
 		{
+			Size	empty_len;
+
 			scan_slot = scan_ps->ps_ResultTupleSlot;
 			scan_desc = scan_slot->tts_tupleDescriptor;
-            pds_heap = pgstrom_create_data_store_row(gjs->gts.gcontext,
+			empty_len = STROMALIGN(offsetof(kern_data_store,
+											colmeta[scan_desc->natts]));
+			pds_heap = pgstrom_create_data_store_row(gjs->gts.gcontext,
 													 scan_desc,
-													 256,
+													 empty_len,
 													 false);
 			istate->pds_list = list_make1(pds_heap);
 		}

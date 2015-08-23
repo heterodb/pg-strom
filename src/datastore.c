@@ -582,8 +582,8 @@ pgstrom_expand_data_store(GpuContext *gcontext,
 	 */
 	if (!pds->kds_fname)
 	{
-		kds_new = MemoryContextAlloc(gcontext->memcxt,
-									 kds_length_new);
+		kds_new = MemoryContextAllocHuge(gcontext->memcxt,
+										 kds_length_new);
 		memcpy(kds_new, kds_old, KERN_DATA_STORE_HEAD_LENGTH(kds_old));
 		kds_new->hostptr = (hostptr_t)&kds_new->hostptr;
 		kds_new->length = kds_length_new;
@@ -691,7 +691,7 @@ pgstrom_expand_data_store(GpuContext *gcontext,
 		 * File mapped PDS shall be deprecated in the near future,
 		 * and KDS_FORMAT_HASH shall never appear
 		 */
-		Assert(kds_new->format == KDS_FORMAT_HASH);
+		Assert(kds_new->format != KDS_FORMAT_HASH);
 
 		/*
 		 * Registers the file-mapped KDS as page-locked region again
