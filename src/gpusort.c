@@ -1106,7 +1106,7 @@ gpusort_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	int				i;
 
 	/* actual cost we estimated */
-	if (es->verbose)
+	if (es->verbose && es->costs)
 	{
 		if (es->format == EXPLAIN_FORMAT_TEXT)
 		{
