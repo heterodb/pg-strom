@@ -1998,6 +1998,7 @@ pgstrom_codegen_available_expression(Expr *expr)
 		}
 		if (!pgstrom_codegen_available_expression((Expr *)caseexpr->defresult))
 			return false;
+		return true;
 	}
 	elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
 	return false;

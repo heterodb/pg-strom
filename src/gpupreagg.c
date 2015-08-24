@@ -252,6 +252,15 @@ static TupleTableSlot *gpupreagg_next_tuple(GpuTaskState *gts);
 #define ALTFUNC_EXPR_PCOV_XY		110	/* PCOV_XY(X,Y) */
 
 /*
+ * XXX - GpuPreAgg with Numeric arguments are problematic because
+ * it is implemented with normal function call and iteration of
+ * cmpxchg. Thus, larger reduction ratio (usually works better)
+ * will increase atomic contension. So, at this moment we turned
+ * off GpuPreAgg + Numeric
+ */
+//#define GPUPREAGG_SUPPORT_NUMERIC			1
+
+/*
  * List of supported aggregate functions
  */
 typedef struct {
@@ -292,10 +301,12 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:avg",  2, {INT4OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0
 	},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "avg",	1, {NUMERICOID},
 	  "s:avg_numeric",	2, {INT4OID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, DEVFUNC_NEEDS_NUMERIC
 	},
+#endif
 	/* COUNT(*) = SUM(NROWS(*|X)) */
 	{ "count", 0, {},
 	  "s:count", 1, {INT4OID},
@@ -309,8 +320,10 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	{ "max", 1, {INT8OID},   "c:max", 1, {INT8OID},   {ALTFUNC_EXPR_PMAX}, 0},
 	{ "max", 1, {FLOAT4OID}, "c:max", 1, {FLOAT4OID}, {ALTFUNC_EXPR_PMAX}, 0},
 	{ "max", 1, {FLOAT8OID}, "c:max", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PMAX}, 0},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "max", 1, {NUMERICOID},"c:max", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PMAX}, DEVFUNC_NEEDS_NUMERIC},
+#endif
 	{ "max", 1, {DATEOID},   "c:max", 1, {DATEOID},   {ALTFUNC_EXPR_PMAX}, 0},
 	{ "max", 1, {TIMEOID},   "c:max", 1, {TIMEOID},   {ALTFUNC_EXPR_PMAX}, 0},
 	{ "max", 1, {TIMESTAMPOID}, "c:max", 1, {TIMESTAMPOID},
@@ -324,8 +337,10 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	{ "min", 1, {INT8OID},   "c:min", 1, {INT8OID},   {ALTFUNC_EXPR_PMIN}, 0},
 	{ "min", 1, {FLOAT4OID}, "c:min", 1, {FLOAT4OID}, {ALTFUNC_EXPR_PMIN}, 0},
 	{ "min", 1, {FLOAT8OID}, "c:min", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PMIN}, 0},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "min", 1, {NUMERICOID},"c:min", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PMIN}, DEVFUNC_NEEDS_NUMERIC},
+#endif
 	{ "min", 1, {DATEOID},   "c:min", 1, {DATEOID},   {ALTFUNC_EXPR_PMIN}, 0},
 	{ "min", 1, {TIMEOID},   "c:min", 1, {TIMEOID},   {ALTFUNC_EXPR_PMIN}, 0},
 	{ "min", 1, {TIMESTAMPOID},   "c:min", 1, {TIMESTAMPOID},
@@ -339,8 +354,10 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	{ "sum", 1, {INT8OID},   "c:sum", 1, {INT8OID},   {ALTFUNC_EXPR_PSUM}, 0},
 	{ "sum", 1, {FLOAT4OID}, "c:sum", 1, {FLOAT4OID}, {ALTFUNC_EXPR_PSUM}, 0},
 	{ "sum", 1, {FLOAT8OID}, "c:sum", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PSUM}, 0},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "sum", 1, {NUMERICOID},"c:sum", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PSUM}, DEVFUNC_NEEDS_NUMERIC},
+#endif
 	/* STDDEV(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
 	{ "stddev", 1, {FLOAT4OID},
 	  "s:stddev", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
@@ -354,12 +371,14 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0
 	},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "stddev", 1, {NUMERICOID},
 	  "s:stddev", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
 	},
+#endif
 	{ "stddev_pop", 1, {FLOAT4OID},
 	  "s:stddev_pop", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -372,12 +391,14 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0
 	},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "stddev_pop", 1, {NUMERICOID},
 	  "s:stddev_pop", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
        ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
 	},
+#endif
 	{ "stddev_samp", 1, {FLOAT4OID},
 	  "s:stddev_samp", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -390,12 +411,14 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0
 	},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "stddev_samp", 1, {NUMERICOID},
 	  "s:stddev_samp", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
 	},
+#endif
 	/* VARIANCE(X) = PGSTROM.VARIANCE(NROWS(), PSUM(X),PSUM(X^2)) */
 	{ "variance", 1, {FLOAT4OID},
 	  "s:variance", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
@@ -409,12 +432,14 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0
 	},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "variance", 1, {NUMERICOID},
 	  "s:variance", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
        ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
 	},
+#endif
 	{ "var_pop", 1, {FLOAT4OID},
 	  "s:var_pop", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -427,12 +452,14 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0
 	},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "var_pop", 1, {NUMERICOID},
 	  "s:var_pop", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
        ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
 	},
+#endif
 	{ "var_samp", 1, {FLOAT4OID},
 	  "s:var_samp", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -445,12 +472,14 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0
 	},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "var_samp", 1, {NUMERICOID},
 	  "s:var_samp", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
        ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
 	},
+#endif
 	/*
 	 * CORR(X,Y) = PGSTROM.CORR(NROWS(X,Y),
 	 *                          PCOV_X(X,Y),  PCOV_Y(X,Y)
@@ -868,6 +897,7 @@ makeZeroConst(Oid consttype, int32 consttypmod, Oid constcollid)
 /*
  * functions to make expression node of alternative aggregate/functions
  *
+ * make_expr_typecast() - makes type case to the destination type
  * make_expr_conditional() - makes the supplied expression conditional
  *   using CASE WHEN ... THEN ... ELSE ... END clause.
  * make_altfunc_expr() - makes alternative function expression
@@ -881,6 +911,11 @@ make_expr_typecast(Expr *expr, Oid target_type)
 	HeapTuple	tup;
 	Form_pg_cast cast;
 
+	/*
+	 * NOTE: Var->vano shall be replaced to INDEX_VAR on the following
+	 * make_altfunc_expr(), so we keep the expression as-is, at this
+	 * moment.
+	 */
 	if (source_type == target_type)
 		return expr;
 
@@ -933,6 +968,11 @@ make_expr_conditional(Expr *expr, Expr *filter, Expr *defresult)
 	CaseWhen   *case_when;
 	CaseExpr   *case_expr;
 
+	/*
+	 * NOTE: Var->vano shall be replaced to INDEX_VAR on the following
+	 * make_altfunc_expr(), so we keep the expression as-is, at this
+	 * moment.
+	 */
 	Assert(exprType((Node *) filter) == BOOLOID);
 	if (defresult)
 		defresult = expr_fixup_varno(defresult, OUTER_VAR, INDEX_VAR);
@@ -946,8 +986,8 @@ make_expr_conditional(Expr *expr, Expr *filter, Expr *defresult)
 
 	/* in case when the 'filter' is matched */
 	case_when = makeNode(CaseWhen);
-	case_when->expr = expr_fixup_varno(filter, OUTER_VAR, INDEX_VAR);
-	case_when->result = expr_fixup_varno(expr, OUTER_VAR, INDEX_VAR);
+	case_when->expr = filter;
+	case_when->result = expr;
 	case_when->location = -1;
 
 	/* case body */
@@ -2603,7 +2643,7 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	if (pc.use_temp_numeric)
 		appendStringInfo(&decl1, "  pg_numeric_t temp_numeric;\n");
 	if (pc.use_temp_date)
-		appendStringInfo(&decl1, "  pg_data_t temp_data;\n");
+		appendStringInfo(&decl1, "  pg_date_t temp_date;\n");
 	if (pc.use_temp_time)
 		appendStringInfo(&decl1, "  pg_time_t temp_time;\n");
 	if (pc.use_temp_timestamp)
@@ -2715,6 +2755,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	AttrNumber	   *attr_maps = NULL;
 	Bitmapset	   *attr_refs = NULL;
 	List		   *outer_quals = NIL;
+	double			outer_ratio = 1.0;
 	bool			has_numeric = false;
 	bool			has_varlena = false;
 	ListCell	   *cell;
@@ -2774,7 +2815,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		outer_node = outerPlan(agg);
 		alter_node = pgstrom_try_replace_plannode(outer_node,
 												  pstmt->rtable,
-												  &outer_quals);
+												  &outer_quals,
+												  &outer_ratio);
 		if (alter_node)
 			outer_node = alter_node;
 		new_agg_strategy = agg->aggstrategy;
@@ -2791,7 +2833,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		outer_node = outerPlan(sort_node);
 		alter_node = pgstrom_try_replace_plannode(outer_node,
 												  pstmt->rtable,
-												  &outer_quals);
+												  &outer_quals,
+												  &outer_ratio);
 		if (alter_node)
 			outer_node = alter_node;
 		new_agg_strategy = agg->aggstrategy;
@@ -2811,7 +2854,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		outer_node = outerPlan(agg);
 		alter_node = pgstrom_try_replace_plannode(outer_node,
 												  pstmt->rtable,
-												  &outer_quals);
+												  &outer_quals,
+												  &outer_ratio);
 		if (alter_node)
 			outer_node = alter_node;
 		new_agg_strategy = AGG_HASHED;

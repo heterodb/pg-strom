@@ -344,7 +344,8 @@ typedef struct devfunc_info {
  */
 typedef struct pgstrom_data_store
 {
-	dlist_node	pds_chain;		/* link to GpuContext->pds_list */
+	dlist_node	pds_chain;	/* link to GpuContext->pds_list */
+	cl_int		refcnt;		/* reference counter */
 	FileName	kds_fname;	/* filename, if file-mapped */
 	Size		kds_offset;	/* offset of mapped file */
 	Size		kds_length;	/* length of the kernel data store */
@@ -512,7 +513,8 @@ extern void subtract_tuplecost_if_bulkload(Cost *p_run_cost, Path *pathnode);
 extern double pgstrom_get_bulkload_density(Plan *child_plan);
 extern Plan *pgstrom_try_replace_plannode(Plan *child_plan,
 										  List *range_tables,
-										  List **pullup_quals);
+										  List **p_outer_quals,
+										  double *p_outer_ratio);
 extern pgstrom_data_store *BulkExecProcNode(PlanState *node);
 extern Datum pgstrom_fixup_kernel_numeric(Datum numeric_datum);
 extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
@@ -523,10 +525,12 @@ extern bool kern_fetch_data_store(TupleTableSlot *slot,
 								  kern_data_store *kds,
 								  size_t row_index,
 								  HeapTuple tuple);
+extern pgstrom_data_store *pgstrom_acquire_data_store(pgstrom_data_store *pds);
 extern void pgstrom_release_data_store(pgstrom_data_store *pds);
 extern void pgstrom_expand_data_store(GpuContext *gcontext,
 									  pgstrom_data_store *pds,
-									  Size kds_length_new);
+									  Size kds_length_new,
+									  cl_uint nslots_new);
 extern void pgstrom_shrink_data_store(pgstrom_data_store *pds);
 extern pgstrom_data_store *
 pgstrom_create_data_store_row(GpuContext *gcontext,
@@ -570,10 +574,12 @@ extern void pgstrom_init_datastore(void);
  */
 extern Plan *gpuscan_pullup_devquals(Plan *plannode,
 									 List *range_tables,
-									 List **pullup_quals);
+									 List **p_outer_quals,
+									 double *p_outer_ratio);
 extern Plan *gpuscan_try_replace_seqscan(SeqScan *seqscan,
 										 List *range_tables,
-										 List **pullup_quals);
+										 List **p_outer_quals,
+										 double *p_outer_ratio);
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern void pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,
@@ -788,5 +794,29 @@ typealign_get_width(char type_align)
 		 (cell1) = lnext(cell1), (cell2) = lnext(cell2),			\
 		 (cell3) = lnext(cell3), (cell4) = lnext(cell4))
 #endif
+
+static inline char *
+bytesz_unitary_format(Size nbytes)
+{
+	if (nbytes > (Size)(1UL << 43))
+		return psprintf("%.2fTB", (double)nbytes / (double)(1UL << 40));
+	else if (nbytes > (double)(1UL << 33))
+		return psprintf("%.2fGB", (double)nbytes / (double)(1UL << 30));
+	else if (nbytes > (double)(1UL << 23))
+		return psprintf("%.2fMB", (double)nbytes / (double)(1UL << 20));
+	else if (nbytes > (double)(1UL << 13))
+		return psprintf("%.2fKB", (double)nbytes / (double)(1UL << 10));
+	return psprintf("%uB", (unsigned int)nbytes);
+}
+
+static inline char *
+milliseconds_unitary_format(double milliseconds)
+{
+	if (milliseconds > 300000.0)    /* more then 5min */
+		return psprintf("%.2fmin", milliseconds / 60000.0);
+	else if (milliseconds > 8000.0) /* more than 8sec */
+		return psprintf("%.2fsec", milliseconds / 1000.0);
+	return psprintf("%.2fms", milliseconds);
+}
 
 #endif	/* PG_STROM_H */
