@@ -2000,7 +2000,7 @@ static inline void
 check_target_cuda_device(struct target_cuda_device *dattr)
 {
 	MemoryContext oldcxt;
-	int		cores_per_mpu;
+	int		cores_per_mpu = -1;
 	int		dev_cap;
 
 	/*
@@ -2027,8 +2027,6 @@ check_target_cuda_device(struct target_cuda_device *dattr)
 		cores_per_mpu = 192;
 	else if (dattr->dev_cap_major == 5)
 		cores_per_mpu = 128;
-	else
-		cores_per_mpu = -1;		/* unknown */
 
 	/*
 	 * Referenced computing capability
