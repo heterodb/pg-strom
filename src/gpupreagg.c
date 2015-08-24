@@ -2643,7 +2643,7 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	if (pc.use_temp_numeric)
 		appendStringInfo(&decl1, "  pg_numeric_t temp_numeric;\n");
 	if (pc.use_temp_date)
-		appendStringInfo(&decl1, "  pg_data_t temp_data;\n");
+		appendStringInfo(&decl1, "  pg_date_t temp_date;\n");
 	if (pc.use_temp_time)
 		appendStringInfo(&decl1, "  pg_time_t temp_time;\n");
 	if (pc.use_temp_timestamp)
