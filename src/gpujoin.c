@@ -260,8 +260,14 @@ typedef struct
 	List		   *ps_src_resno;
 	/* buffer for row materialization  */
 	HeapTupleData	curr_tuple;
-	/* buffer for PDS on bulk-loading mode */
-	pgstrom_data_store *next_pds;
+
+	/*
+	 * The least depth to process RIGHT/FULL OUTER JOIN if any. We shall
+	 * generate zero tuples for earlier depths, obviously, so we can omit.
+	 * If no OUTER JOIN, it shall be initialized to UNIT_MAX, so never
+	 * kicked if unnecessary.
+	 */
+	cl_int			outer_join_start_depth;
 
 	/*
 	 * Properties of underlying inner relations
@@ -282,6 +288,7 @@ typedef struct pgstrom_multirels
 	Size			usage_length;	/* length actually in use */
 	Size			ojmap_length;	/* length of outer-join map */
 	pgstrom_data_store **inner_chunks;	/* array of inner PDS */
+	cl_bool			outer_join_kicked;	/* true, if OJ already kicked */
 	cl_int			n_attached;	/* Number of attached tasks */
 	cl_int		   *refcnt;		/* Reference counter of each GpuContext */
 	CUdeviceptr	   *m_kmrels;	/* GPU memory for each CUDA context */
@@ -307,13 +314,12 @@ typedef struct
 	CUdeviceptr		m_kds_src;
 	CUdeviceptr		m_kds_dst;
 	CUdeviceptr		m_ojmaps;
-	bool			is_last_chunk;	/* true, if this chunk is the last */
-	bool			inner_loader;	/* true, if this task is inner loader */
 	CUevent			ev_dma_send_start;
 	CUevent			ev_dma_send_stop;
 	CUevent			ev_kern_join_end;
 	CUevent			ev_dma_recv_start;
 	CUevent			ev_dma_recv_stop;
+
 	/*
 	 * NOTE: If expected size of the kds_dst is too large (that exceeds
 	 * pg_strom.chunk_max_inout_ratio), we split GpuJoin steps multiple
@@ -349,7 +355,8 @@ static void multirels_put_buffer(pgstrom_multirels *pmrels, GpuTask *gtask);
 static void multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask);
 static void multirels_colocate_outer_join_maps(pgstrom_multirels *pmrels,
 											   GpuTask *gtask, int depth);
-static void multirels_detach_buffer(pgstrom_multirels *pmrels, const char *caller);
+static void multirels_detach_buffer(pgstrom_multirels *pmrels,
+									bool may_kick_outer_join);
 
 /*
  * misc declarations
@@ -1810,7 +1817,8 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
 	TupleDesc		result_tupdesc = GTS_GET_RESULT_TUPDESC(gjs);
 	TupleDesc		scan_tupdesc;
-	int				i;
+	cl_int			outer_join_start_depth = INT_MAX;
+	cl_int			i;
 
 	/* activate GpuContext for device execution */
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
@@ -1880,6 +1888,11 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 			int_as_float(list_nth_int(gj_info->nrows_ratio, i));
 		istate->ichunk_size = list_nth_int(gj_info->ichunk_size, i);
 		istate->join_type = (JoinType)list_nth_int(gj_info->join_types, i);
+
+		if (outer_join_start_depth == INT_MAX &&
+			(istate->join_type == JOIN_RIGHT ||
+			 istate->join_type == JOIN_FULL))
+			outer_join_start_depth = istate->depth;
 
 		/*
 		 * NOTE: We need to deal with Var-node references carefully,
@@ -1963,6 +1976,11 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	gjs->gts.scan_bulk_density = gj_info->bulkload_density;
 
 	/*
+	 * Is OUTER RIGHT/FULL JOIN needed?
+	 */
+	gjs->outer_join_start_depth = outer_join_start_depth;
+
+	/*
 	 * initialize kernel execution parameter
 	 */
 	pgstrom_assign_cuda_program(&gjs->gts,
@@ -2044,7 +2062,7 @@ gpujoin_end(CustomScanState *node)
 	 * clean up GpuJoin specific resources
 	 */
 	if (gjs->curr_pmrels)
-		multirels_detach_buffer(gjs->curr_pmrels, __FUNCTION__);
+		multirels_detach_buffer(gjs->curr_pmrels, false);
 
 	/* then other generic resources */
 	pgstrom_release_gputaskstate(&gjs->gts);
@@ -2091,7 +2109,7 @@ gpujoin_rescan(CustomScanState *node)
 		/* detach previous inner relations buffer */
 		if (gjs->curr_pmrels)
 		{
-			multirels_detach_buffer(gjs->curr_pmrels, __FUNCTION__);
+			multirels_detach_buffer(gjs->curr_pmrels, false);
 			gjs->curr_pmrels = NULL;
 		}
 
@@ -3322,16 +3340,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 	pgjoin->oitems_nums = 0xefefefef;	/* to be set later */
 	pgjoin->pmrels = multirels_attach_buffer(pmrels);
 	pgjoin->pds_src = pds_src;
-
-	/*
-	 * Last chunk checks - this information is needed to handle left outer
-	 * join case because last chunk also kicks special kernel to generate
-	 * half-null tuples on GPU.
-	 */
-	if (!gjs->gts.scan_bulk)
-		pgjoin->is_last_chunk = (gjs->gts.scan_overflow == NULL);
-	else
-		pgjoin->is_last_chunk = (gjs->next_pds == NULL);
+	pgjoin->pds_dst = NULL;		/* to be set later */
 
 	/* attach result buffer */
 	gpujoin_attach_result_buffer(gjs, pgjoin);
@@ -3371,7 +3380,7 @@ retry:
 		if (gjs->curr_pmrels)
 		{
 			Assert(gjs->gts.scan_done);
-			multirels_detach_buffer(gjs->curr_pmrels, __FUNCTION__);
+			multirels_detach_buffer(gjs->curr_pmrels, true);
 			gjs->curr_pmrels = NULL;
 		}
 		if (!pmrels_new)
@@ -3430,17 +3439,9 @@ retry:
 	}
 	else
 	{
-		if (!gjs->next_pds)
-			gjs->next_pds = BulkExecProcNode(outer_node);
-
-		pds = gjs->next_pds;
-		if (pds)
-			gjs->next_pds = BulkExecProcNode(outer_node);
-		else
-		{
-			gjs->next_pds = NULL;
+		pds = BulkExecProcNode(outer_node);
+		if (!pds)
 			gjs->gts.scan_done = true;
-		}
 	}
 	PERFMON_END(&gjs->gts.pfm_accum, time_outer_load, &tv1, &tv2);
 
@@ -3536,7 +3537,7 @@ gpujoin_task_release(GpuTask *gtask)
 	gpujoin_cleanup_cuda_resources(pgjoin);
 	/* detach multi-relations buffer, if any */
 	if (pgjoin->pmrels)
-		multirels_detach_buffer(pgjoin->pmrels, __FUNCTION__);
+		multirels_detach_buffer(pgjoin->pmrels, false);
 	/* unlink source data store */
 	if (pgjoin->pds_src)
 		pgstrom_release_data_store(pgjoin->pds_src);
@@ -3578,6 +3579,14 @@ gpujoin_task_complete(GpuTask *gtask)
 		pgstrom_gpujoin	   *pgjoin_new;
 		size_t				source_nitems;
 		cl_int				i;
+
+		/*
+		 * TODO: multirels_detach_buffer() shall be called here,
+		 * to kick RIGHT/FULL OUTER JOIN if I'm final context
+		 * that references this inner multirels.
+		 */
+
+
 
 		/* number of rows actually processed */
 		source_nitems = Min(pgjoin->oitems_base + pgjoin->oitems_nums,
@@ -3684,6 +3693,11 @@ gpujoin_task_respond(CUstream stream, CUresult status, void *private)
 static size_t
 compute_outer_ntuples(GpuJoinState *gjs, int depth, cl_uint nitems)
 {
+	HOGE;
+	/*
+	 * TODO: !!!!needs to compute ntuples for OUTER JOIN!!!!
+	 */
+
 	double	outer_plan_nrows = outerPlanState(gjs)->plan->plan_rows;
 	double	plan_ntuples;
 	double	exec_ntuples;
@@ -3996,8 +4010,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			 *                            cl_uint cuda_index,
 			 *                            cl_bool *outer_join_maps)
 			 */
-			if ((join_type == JOIN_RIGHT ||
-				 join_type == JOIN_FULL) && pgjoin->is_last_chunk)
+			if ((join_type == JOIN_RIGHT || join_type == JOIN_FULL) &&
+				depth >= gjs->outer_join_start_depth)
 			{
 				/* gather the outer join map, if multi-GPUs environment */
 				multirels_colocate_outer_join_maps(pgjoin->pmrels,
@@ -4088,8 +4102,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			 *                            cl_uint cuda_index,
 			 *                            cl_bool *outer_join_maps)
 			 */
-			if ((join_type == JOIN_RIGHT ||
-				 join_type == JOIN_FULL) && pgjoin->is_last_chunk)
+			if ((join_type == JOIN_RIGHT || join_type == JOIN_FULL) &&
+				depth >= gjs->outer_join_start_depth)
 			{
 				/* gather the outer join map, if multi-GPUs environment */
 				multirels_colocate_outer_join_maps(pgjoin->pmrels,
@@ -5084,16 +5098,35 @@ multirels_colocate_outer_join_maps(pgstrom_multirels *pmrels,
 }
 
 static void
-multirels_detach_buffer(pgstrom_multirels *pmrels, const char *caller)
+multirels_detach_buffer(pgstrom_multirels *pmrels, bool may_kick_outer_join)
 {
 	int		i, num_rels = pmrels->kern.nrels;
+
+	Assert(pmrels->n_attached > 0);
+
+	/*
+	 * NOTE: Invocation of multirels_detach_buffer with n_attached==1 means
+	 * release of pgstrom_multirels buffer. If GpuJoin contains RIGHT or
+	 * FULL OUTER JOIN, we need to kick OUTER JOIN task prior on the last.
+	 * pgstrom_gpujoin task with pds_src==NULL means OUTER JOIN launch.
+	 */
+	if (may_kick_outer_join &&
+		pmrels->n_attached == 1 &&
+		pmrels->outer_join_kicked == false)
+	{
+
+		// enqueue outer join task here
+
+
+		/* no need to kick outer join task twice */
+		pmrels->outer_join_kicked = true;
+	}
 
 	/* release data store */
 	for (i=0; i < num_rels; i++)
 		pgstrom_release_data_store(pmrels->inner_chunks[i]);
 
 	/* Also, this pmrels */
-	Assert(pmrels->n_attached > 0);
 	if (--pmrels->n_attached == 0)
 	{
 		GpuContext *gcontext = pmrels->gjs->gts.gcontext;
