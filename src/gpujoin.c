@@ -4412,7 +4412,7 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 	pds_hash->kds->hash_min = hash_min;
 	pds_hash->kds->hash_max = UINT_MAX;
 	pds_list = lappend(pds_list, pds_hash);
-	hash_max_list = lappend_int(hash_max_list, (int) pds_hash->kds->hash_max);
+	hash_max_list = lappend_int(hash_max_list, (int) UINT_MAX);
 
 	/*
 	 * Load from the tuplestore
