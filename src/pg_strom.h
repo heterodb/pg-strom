@@ -47,6 +47,9 @@
  *
  * --------------------------------------------------------------------
  */
+#if PG_VERSION_NUM < 90500
+#error Not supported PostgreSQL version
+#endif
 #if SIZEOF_DATUM != 8
 #error PG-Strom expects 64bit platform
 #endif

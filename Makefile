@@ -1,6 +1,19 @@
-# Makefile of pg_strom
+#
+# Makefile of PG-Strom
+#
+PG_CONFIG=pg_config
+PG_VERSION_NUM=$(shell $(PG_CONFIG) --version | awk '{print $$NF}'	\
+	| sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g'			\
+	| awk '{printf "%d%02d%02d", $$1, $$2, (NF >=3) ? $$3 : 0}')
+#
+# Definition of PG-Strom Extension
+#
 EXTENSION = pg_strom
+ifeq ($(shell test $(PG_VERSION_NUM) -ge 90600; echo $??),0)
 DATA = src/pg_strom--1.0.sql
+else
+DATA = src/pg_strom--1.0.sql
+endif
 
 # Source file of CPU portion
 STROM_OBJS = main.o codegen.o datastore.o aggfuncs.o \
@@ -50,7 +63,6 @@ else
 	endif
 endif
 
-PG_CONFIG = pg_config
 PGSTROM_FLAGS := $(shell $(PG_CONFIG) --configure | \
 	grep -q "'--enable-debug'" && \
 	echo "-Wall -DPGSTROM_DEBUG=1")
