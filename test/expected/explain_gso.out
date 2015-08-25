@@ -1976,6 +1976,385 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by nvchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by text_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by text_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+--gpusort order by date/time types.
+explain (verbose, costs off, timing off) select rowid,timestamp_x from (select timestamp_x, row_number() over (order by timestamp_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timestamp_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.timestamp_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.timestamp_x
+               Sort Key: strom_time_test.timestamp_x
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.timestamp_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select rowid,timestamp_x from (select timestamp_x, row_number() over (order by timestamp_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timestamp_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.timestamp_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.timestamp_x
+               Sort Key: strom_time_test.timestamp_x NULLS FIRST
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.timestamp_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select rowid,timestamp_x from (select timestamp_x, row_number() over (order by timestamp_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timestamp_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.timestamp_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.timestamp_x
+               Sort Key: strom_time_test.timestamp_x DESC NULLS LAST
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.timestamp_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, timestamp_x from strom_time_test group by timestamp_x ) as t where t.rowid%50=0;
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timestamp_x
+   Filter: ((t.rowid % '50'::bigint) = 0)
+   ->  WindowAgg
+         Output: row_number() OVER (?), strom_time_test.timestamp_x
+         ->  Group
+               Output: strom_time_test.timestamp_x
+               Group Key: strom_time_test.timestamp_x
+               ->  Sort
+                     Output: strom_time_test.timestamp_x
+                     Sort Key: strom_time_test.timestamp_x
+                     ->  Seq Scan on public.strom_time_test
+                           Output: strom_time_test.timestamp_x
+(13 rows)
+
+explain (verbose, costs off, timing off) select rowid,timestamptz_x from (select timestamptz_x, row_number() over (order by timestamptz_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timestamptz_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.timestamptz_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.timestamptz_x
+               Sort Key: strom_time_test.timestamptz_x
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.timestamptz_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select rowid,timestamptz_x from (select timestamptz_x, row_number() over (order by timestamptz_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timestamptz_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.timestamptz_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.timestamptz_x
+               Sort Key: strom_time_test.timestamptz_x NULLS FIRST
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.timestamptz_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select rowid,timestamptz_x from (select timestamptz_x, row_number() over (order by timestamptz_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timestamptz_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.timestamptz_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.timestamptz_x
+               Sort Key: strom_time_test.timestamptz_x DESC NULLS LAST
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.timestamptz_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, timestamptz_x from strom_time_test group by timestamptz_x ) as t where t.rowid%50=0;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timestamptz_x
+   Filter: ((t.rowid % '50'::bigint) = 0)
+   ->  WindowAgg
+         Output: row_number() OVER (?), strom_time_test.timestamptz_x
+         ->  Group
+               Output: strom_time_test.timestamptz_x
+               Group Key: strom_time_test.timestamptz_x
+               ->  Sort
+                     Output: strom_time_test.timestamptz_x
+                     Sort Key: strom_time_test.timestamptz_x
+                     ->  Seq Scan on public.strom_time_test
+                           Output: strom_time_test.timestamptz_x
+(13 rows)
+
+explain (verbose, costs off, timing off) select rowid,date_x from (select date_x, row_number() over (order by date_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.date_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.date_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.date_x
+               Sort Key: strom_time_test.date_x
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.date_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select rowid,date_x from (select date_x, row_number() over (order by date_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.date_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.date_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.date_x
+               Sort Key: strom_time_test.date_x NULLS FIRST
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.date_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select rowid,date_x from (select date_x, row_number() over (order by date_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.date_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.date_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.date_x
+               Sort Key: strom_time_test.date_x DESC NULLS LAST
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.date_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, date_x from strom_time_test group by date_x ) as t where t.rowid%50=0;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.date_x
+   Filter: ((t.rowid % '50'::bigint) = 0)
+   ->  WindowAgg
+         Output: row_number() OVER (?), strom_time_test.date_x
+         ->  Group
+               Output: strom_time_test.date_x
+               Group Key: strom_time_test.date_x
+               ->  Sort
+                     Output: strom_time_test.date_x
+                     Sort Key: strom_time_test.date_x
+                     ->  Seq Scan on public.strom_time_test
+                           Output: strom_time_test.date_x
+(13 rows)
+
+explain (verbose, costs off, timing off) select rowid,time_x from (select time_x, row_number() over (order by time_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.time_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.time_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.time_x
+               Sort Key: strom_time_test.time_x
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.time_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select rowid,time_x from (select time_x, row_number() over (order by time_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.time_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.time_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.time_x
+               Sort Key: strom_time_test.time_x NULLS FIRST
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.time_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select rowid,time_x from (select time_x, row_number() over (order by time_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.time_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.time_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.time_x
+               Sort Key: strom_time_test.time_x DESC NULLS LAST
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.time_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, time_x from strom_time_test group by time_x ) as t where t.rowid%50=0;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.time_x
+   Filter: ((t.rowid % '50'::bigint) = 0)
+   ->  WindowAgg
+         Output: row_number() OVER (?), strom_time_test.time_x
+         ->  Group
+               Output: strom_time_test.time_x
+               Group Key: strom_time_test.time_x
+               ->  Sort
+                     Output: strom_time_test.time_x
+                     Sort Key: strom_time_test.time_x
+                     ->  Seq Scan on public.strom_time_test
+                           Output: strom_time_test.time_x
+(13 rows)
+
+explain (verbose, costs off, timing off) select rowid,timetz_x from (select timetz_x, row_number() over (order by timetz_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timetz_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.timetz_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.timetz_x
+               Sort Key: strom_time_test.timetz_x
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.timetz_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select rowid,timetz_x from (select timetz_x, row_number() over (order by timetz_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timetz_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.timetz_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.timetz_x
+               Sort Key: strom_time_test.timetz_x NULLS FIRST
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.timetz_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select rowid,timetz_x from (select timetz_x, row_number() over (order by timetz_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timetz_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.timetz_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.timetz_x
+               Sort Key: strom_time_test.timetz_x DESC NULLS LAST
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.timetz_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, timetz_x from strom_time_test group by timetz_x ) as t where t.rowid%50=0;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timetz_x
+   Filter: ((t.rowid % '50'::bigint) = 0)
+   ->  WindowAgg
+         Output: row_number() OVER (?), strom_time_test.timetz_x
+         ->  Group
+               Output: strom_time_test.timetz_x
+               Group Key: strom_time_test.timetz_x
+               ->  Sort
+                     Output: strom_time_test.timetz_x
+                     Sort Key: strom_time_test.timetz_x
+                     ->  Seq Scan on public.strom_time_test
+                           Output: strom_time_test.timetz_x
+(13 rows)
+
+explain (verbose, costs off, timing off) select rowid,interval_x from (select interval_x, row_number() over (order by interval_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.interval_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.interval_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.interval_x
+               Sort Key: strom_time_test.interval_x
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.interval_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select rowid,interval_x from (select interval_x, row_number() over (order by interval_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.interval_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.interval_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.interval_x
+               Sort Key: strom_time_test.interval_x NULLS FIRST
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.interval_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select rowid,interval_x from (select interval_x, row_number() over (order by interval_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.interval_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.interval_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.interval_x
+               Sort Key: strom_time_test.interval_x DESC NULLS LAST
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.interval_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, interval_x from strom_time_test group by interval_x ) as t where t.rowid%50=0;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.interval_x
+   Filter: ((t.rowid % '50'::bigint) = 0)
+   ->  WindowAgg
+         Output: row_number() OVER (?), strom_time_test.interval_x
+         ->  Group
+               Output: strom_time_test.interval_x
+               Group Key: strom_time_test.interval_x
+               ->  Sort
+                     Output: strom_time_test.interval_x
+                     Sort Key: strom_time_test.interval_x
+                     ->  Seq Scan on public.strom_time_test
+                           Output: strom_time_test.interval_x
+(13 rows)
+
 set pg_strom.enabled=on;
 set pg_strom.gpu_setup_cost=0;
 set enable_hashagg to off;      --# force off HashAggregate
@@ -1994,7 +2373,7 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2013,7 +2392,7 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2032,7 +2411,7 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2051,7 +2430,7 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2070,7 +2449,7 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 554.62...579.79
+               Real cost: 554.63...579.80
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2089,7 +2468,7 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 554.62...579.79
+               Real cost: 554.63...579.80
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2108,7 +2487,7 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 552.69...577.41
+               Real cost: 553.41...578.30
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2127,7 +2506,7 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 552.69...577.41
+               Real cost: 553.41...578.30
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2146,7 +2525,7 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2165,7 +2544,7 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2184,7 +2563,7 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2203,7 +2582,7 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2222,7 +2601,7 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 554.62...579.79
+               Real cost: 554.63...579.80
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2241,7 +2620,7 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 554.62...579.79
+               Real cost: 554.63...579.80
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2260,7 +2639,7 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 552.69...577.41
+               Real cost: 553.41...578.30
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2279,7 +2658,7 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 552.69...577.41
+               Real cost: 553.41...578.30
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2298,7 +2677,7 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2317,7 +2696,7 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2336,7 +2715,7 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2355,7 +2734,7 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2374,7 +2753,7 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 554.62...579.79
+               Real cost: 554.63...579.80
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2393,7 +2772,7 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 554.62...579.79
+               Real cost: 554.63...579.80
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2412,7 +2791,7 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 552.69...577.41
+               Real cost: 553.41...578.30
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2431,7 +2810,7 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 552.69...577.41
+               Real cost: 553.41...578.30
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2450,7 +2829,7 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2469,7 +2848,7 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2488,7 +2867,7 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2507,7 +2886,7 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2526,7 +2905,7 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 554.62...579.79
+               Real cost: 554.63...579.80
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2545,7 +2924,7 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 554.62...579.79
+               Real cost: 554.63...579.80
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2564,7 +2943,7 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 552.69...577.41
+               Real cost: 553.41...578.30
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2583,7 +2962,7 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 552.69...577.41
+               Real cost: 553.41...578.30
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2602,7 +2981,7 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2621,7 +3000,7 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2640,7 +3019,7 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2659,7 +3038,7 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2678,7 +3057,7 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 554.62...579.79
+               Real cost: 554.63...579.80
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2697,7 +3076,7 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 554.62...579.79
+               Real cost: 554.63...579.80
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2716,7 +3095,7 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 552.69...577.41
+               Real cost: 553.41...578.30
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2735,7 +3114,7 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 552.69...577.41
+               Real cost: 553.41...578.30
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2754,7 +3133,7 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2773,7 +3152,7 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2792,7 +3171,7 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2811,7 +3190,7 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2830,7 +3209,7 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 554.62...579.79
+               Real cost: 554.63...579.80
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2849,7 +3228,7 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 554.62...579.79
+               Real cost: 554.63...579.80
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2868,7 +3247,7 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 552.69...577.41
+               Real cost: 553.41...578.30
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2887,7 +3266,7 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 552.69...577.41
+               Real cost: 553.41...578.30
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2907,7 +3286,7 @@ explain (verbose, costs off, timing off) select row_number() over () as rowid, s
          Group Key: strom_test.smlint_x
          ->  Custom Scan (GpuSort)
                Output: smlint_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2926,7 +3305,7 @@ explain (verbose, costs off, timing off) select row_number() over () as rowid, s
          Group Key: strom_test.smlint_x
          ->  Custom Scan (GpuSort)
                Output: smlint_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2945,7 +3324,7 @@ explain (verbose, costs off, timing off) select row_number() over () as rowid, s
          Group Key: strom_test.smlint_x
          ->  Custom Scan (GpuSort)
                Output: smlint_x
-               Real cost: 554.62...579.79
+               Real cost: 554.63...579.80
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2964,7 +3343,7 @@ explain (verbose, costs off, timing off) select row_number() over () as rowid, s
          Group Key: strom_test.smlint_x
          ->  Custom Scan (GpuSort)
                Output: smlint_x
-               Real cost: 552.69...577.41
+               Real cost: 553.41...578.30
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -2986,7 +3365,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.integer_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.integer_x
-                     Real cost: 554.28...579.37
+                     Real cost: 553.97...578.99
                      Sort Key: strom_test.integer_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3008,7 +3387,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.integer_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.integer_x
-                     Real cost: 553.95...578.96
+                     Real cost: 553.53...578.45
                      Sort Key: strom_test.integer_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3030,7 +3409,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.integer_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.integer_x
-                     Real cost: 554.62...579.79
+                     Real cost: 554.63...579.80
                      Sort Key: strom_test.integer_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3049,7 +3428,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
          Group Key: strom_test.integer_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 552.69...577.41
+               Real cost: 553.41...578.30
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3071,7 +3450,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.bigint_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.bigint_x
-                     Real cost: 554.28...579.37
+                     Real cost: 553.97...578.99
                      Sort Key: strom_test.bigint_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3093,7 +3472,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.bigint_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.bigint_x
-                     Real cost: 553.95...578.96
+                     Real cost: 553.53...578.45
                      Sort Key: strom_test.bigint_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3115,7 +3494,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.bigint_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.bigint_x
-                     Real cost: 554.62...579.79
+                     Real cost: 554.63...579.80
                      Sort Key: strom_test.bigint_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3134,7 +3513,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
          Group Key: strom_test.bigint_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 552.69...577.41
+               Real cost: 553.41...578.30
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3156,7 +3535,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.real_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.real_x
-                     Real cost: 554.28...579.37
+                     Real cost: 553.97...578.99
                      Sort Key: strom_test.real_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3178,7 +3557,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.real_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.real_x
-                     Real cost: 553.95...578.96
+                     Real cost: 553.53...578.45
                      Sort Key: strom_test.real_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3200,7 +3579,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.real_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.real_x
-                     Real cost: 554.62...579.79
+                     Real cost: 554.63...579.80
                      Sort Key: strom_test.real_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3219,7 +3598,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
          Group Key: strom_test.real_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 552.69...577.41
+               Real cost: 553.41...578.30
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3241,7 +3620,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.float_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.float_x
-                     Real cost: 554.28...579.37
+                     Real cost: 553.97...578.99
                      Sort Key: strom_test.float_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3263,7 +3642,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.float_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.float_x
-                     Real cost: 553.95...578.96
+                     Real cost: 553.53...578.45
                      Sort Key: strom_test.float_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3285,7 +3664,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.float_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.float_x
-                     Real cost: 554.62...579.79
+                     Real cost: 554.63...579.80
                      Sort Key: strom_test.float_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3304,7 +3683,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
          Group Key: strom_test.float_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 552.69...577.41
+               Real cost: 553.41...578.30
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3326,7 +3705,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.nume_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.nume_x
-                     Real cost: 554.28...579.37
+                     Real cost: 553.97...578.99
                      Sort Key: strom_test.nume_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3348,7 +3727,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.nume_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.nume_x
-                     Real cost: 553.95...578.96
+                     Real cost: 553.53...578.45
                      Sort Key: strom_test.nume_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3370,7 +3749,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.nume_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.nume_x
-                     Real cost: 554.62...579.79
+                     Real cost: 554.63...579.80
                      Sort Key: strom_test.nume_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
@@ -3389,7 +3768,7 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
          Group Key: strom_test.nume_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 552.69...577.41
+               Real cost: 553.41...578.30
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3581,14 +3960,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.real_x, t2.real_x
          ->  Custom Scan (GpuSort)
                Output: t1.real_x, t2.real_x
-               Real cost: 1119.83...1120.59
+               Real cost: 1119.81...1120.57
                Sort Key: t1.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.real_x, t2.real_x
                      Pseudo Scan: t1.real_x::real, t2.real_x::real
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.real_x = t2.real_x), nrows_ratio: 0.00760000
+                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.real_x = t2.real_x), nrows_ratio: 0.00757500
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -3609,14 +3988,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.real_x, t2.real_x
          ->  Custom Scan (GpuSort)
                Output: t1.real_x, t2.real_x
-               Real cost: 1119.83...1120.59
+               Real cost: 1119.81...1120.57
                Sort Key: t1.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.real_x, t2.real_x
                      Pseudo Scan: t1.real_x::real, t2.real_x::real
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.real_x = t2.real_x), nrows_ratio: 0.00760000
+                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.real_x = t2.real_x), nrows_ratio: 0.00757500
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -3750,7 +4129,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3769,7 +4148,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3788,7 +4167,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3807,7 +4186,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3826,7 +4205,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3845,7 +4224,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3864,7 +4243,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3883,7 +4262,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 554.28...579.37
+               Real cost: 553.97...578.99
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3902,7 +4281,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3921,7 +4300,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3940,7 +4319,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3959,7 +4338,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3978,7 +4357,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -3997,7 +4376,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -4016,7 +4395,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -4035,7 +4414,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.95...578.96
+               Real cost: 553.53...578.45
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -4054,7 +4433,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 554.62...579.79
+               Real cost: 554.63...579.80
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -4073,7 +4452,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 554.62...579.79
+               Real cost: 554.63...579.80
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -4092,7 +4471,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 554.62...579.79
+               Real cost: 554.63...579.80
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -4111,7 +4490,7 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 554.62...579.79
+               Real cost: 554.63...579.80
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
@@ -4300,3 +4679,414 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by nvchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by text_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by text_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+--gpusort order by date/time types.
+explain (verbose, costs off, timing off) select rowid,timestamp_x from (select timestamp_x, row_number() over (order by timestamp_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timestamp_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.timestamp_x, row_number() OVER (?)
+         ->  Custom Scan (GpuSort)
+               Output: strom_time_test.timestamp_x
+               Real cost: 33.25...37.81
+               Sort Key: strom_time_test.timestamp_x
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.timestamp_x
+(12 rows)
+
+explain (verbose, costs off, timing off) select rowid,timestamp_x from (select timestamp_x, row_number() over (order by timestamp_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timestamp_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.timestamp_x, row_number() OVER (?)
+         ->  Custom Scan (GpuSort)
+               Output: strom_time_test.timestamp_x
+               Real cost: 33.25...37.81
+               Sort Key: strom_time_test.timestamp_x
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.timestamp_x
+(12 rows)
+
+explain (verbose, costs off, timing off) select rowid,timestamp_x from (select timestamp_x, row_number() over (order by timestamp_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timestamp_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.timestamp_x, row_number() OVER (?)
+         ->  Custom Scan (GpuSort)
+               Output: strom_time_test.timestamp_x
+               Real cost: 33.25...37.81
+               Sort Key: strom_time_test.timestamp_x
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.timestamp_x
+(12 rows)
+
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, timestamp_x from strom_time_test group by timestamp_x ) as t where t.rowid%50=0;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timestamp_x
+   Filter: ((t.rowid % '50'::bigint) = 0)
+   ->  WindowAgg
+         Output: row_number() OVER (?), strom_time_test.timestamp_x
+         ->  Group
+               Output: strom_time_test.timestamp_x
+               Group Key: strom_time_test.timestamp_x
+               ->  Custom Scan (GpuSort)
+                     Output: strom_time_test.timestamp_x
+                     Real cost: 33.25...37.81
+                     Sort Key: strom_time_test.timestamp_x
+                     Features: format: tuple-slot, bulkload: unsupported
+                     ->  Seq Scan on public.strom_time_test
+                           Output: strom_time_test.timestamp_x
+(15 rows)
+
+explain (verbose, costs off, timing off) select rowid,timestamptz_x from (select timestamptz_x, row_number() over (order by timestamptz_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timestamptz_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.timestamptz_x, row_number() OVER (?)
+         ->  Custom Scan (GpuSort)
+               Output: strom_time_test.timestamptz_x
+               Real cost: 33.25...37.81
+               Sort Key: strom_time_test.timestamptz_x
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.timestamptz_x
+(12 rows)
+
+explain (verbose, costs off, timing off) select rowid,timestamptz_x from (select timestamptz_x, row_number() over (order by timestamptz_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timestamptz_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.timestamptz_x, row_number() OVER (?)
+         ->  Custom Scan (GpuSort)
+               Output: strom_time_test.timestamptz_x
+               Real cost: 33.25...37.81
+               Sort Key: strom_time_test.timestamptz_x
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.timestamptz_x
+(12 rows)
+
+explain (verbose, costs off, timing off) select rowid,timestamptz_x from (select timestamptz_x, row_number() over (order by timestamptz_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timestamptz_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.timestamptz_x, row_number() OVER (?)
+         ->  Custom Scan (GpuSort)
+               Output: strom_time_test.timestamptz_x
+               Real cost: 33.25...37.81
+               Sort Key: strom_time_test.timestamptz_x
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.timestamptz_x
+(12 rows)
+
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, timestamptz_x from strom_time_test group by timestamptz_x ) as t where t.rowid%50=0;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timestamptz_x
+   Filter: ((t.rowid % '50'::bigint) = 0)
+   ->  WindowAgg
+         Output: row_number() OVER (?), strom_time_test.timestamptz_x
+         ->  Group
+               Output: strom_time_test.timestamptz_x
+               Group Key: strom_time_test.timestamptz_x
+               ->  Custom Scan (GpuSort)
+                     Output: strom_time_test.timestamptz_x
+                     Real cost: 33.25...37.81
+                     Sort Key: strom_time_test.timestamptz_x
+                     Features: format: tuple-slot, bulkload: unsupported
+                     ->  Seq Scan on public.strom_time_test
+                           Output: strom_time_test.timestamptz_x
+(15 rows)
+
+explain (verbose, costs off, timing off) select rowid,date_x from (select date_x, row_number() over (order by date_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.date_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.date_x, row_number() OVER (?)
+         ->  Custom Scan (GpuSort)
+               Output: strom_time_test.date_x
+               Real cost: 33.25...37.81
+               Sort Key: strom_time_test.date_x
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.date_x
+(12 rows)
+
+explain (verbose, costs off, timing off) select rowid,date_x from (select date_x, row_number() over (order by date_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.date_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.date_x, row_number() OVER (?)
+         ->  Custom Scan (GpuSort)
+               Output: strom_time_test.date_x
+               Real cost: 33.25...37.81
+               Sort Key: strom_time_test.date_x
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.date_x
+(12 rows)
+
+explain (verbose, costs off, timing off) select rowid,date_x from (select date_x, row_number() over (order by date_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.date_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.date_x, row_number() OVER (?)
+         ->  Custom Scan (GpuSort)
+               Output: strom_time_test.date_x
+               Real cost: 33.25...37.81
+               Sort Key: strom_time_test.date_x
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.date_x
+(12 rows)
+
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, date_x from strom_time_test group by date_x ) as t where t.rowid%50=0;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.date_x
+   Filter: ((t.rowid % '50'::bigint) = 0)
+   ->  WindowAgg
+         Output: row_number() OVER (?), strom_time_test.date_x
+         ->  Group
+               Output: strom_time_test.date_x
+               Group Key: strom_time_test.date_x
+               ->  Custom Scan (GpuSort)
+                     Output: strom_time_test.date_x
+                     Real cost: 33.25...37.81
+                     Sort Key: strom_time_test.date_x
+                     Features: format: tuple-slot, bulkload: unsupported
+                     ->  Seq Scan on public.strom_time_test
+                           Output: strom_time_test.date_x
+(15 rows)
+
+explain (verbose, costs off, timing off) select rowid,time_x from (select time_x, row_number() over (order by time_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.time_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.time_x, row_number() OVER (?)
+         ->  Custom Scan (GpuSort)
+               Output: strom_time_test.time_x
+               Real cost: 33.25...37.81
+               Sort Key: strom_time_test.time_x
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.time_x
+(12 rows)
+
+explain (verbose, costs off, timing off) select rowid,time_x from (select time_x, row_number() over (order by time_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.time_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.time_x, row_number() OVER (?)
+         ->  Custom Scan (GpuSort)
+               Output: strom_time_test.time_x
+               Real cost: 33.25...37.81
+               Sort Key: strom_time_test.time_x
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.time_x
+(12 rows)
+
+explain (verbose, costs off, timing off) select rowid,time_x from (select time_x, row_number() over (order by time_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.time_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.time_x, row_number() OVER (?)
+         ->  Custom Scan (GpuSort)
+               Output: strom_time_test.time_x
+               Real cost: 33.25...37.81
+               Sort Key: strom_time_test.time_x
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.time_x
+(12 rows)
+
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, time_x from strom_time_test group by time_x ) as t where t.rowid%50=0;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.time_x
+   Filter: ((t.rowid % '50'::bigint) = 0)
+   ->  WindowAgg
+         Output: row_number() OVER (?), strom_time_test.time_x
+         ->  Group
+               Output: strom_time_test.time_x
+               Group Key: strom_time_test.time_x
+               ->  Custom Scan (GpuSort)
+                     Output: strom_time_test.time_x
+                     Real cost: 33.25...37.81
+                     Sort Key: strom_time_test.time_x
+                     Features: format: tuple-slot, bulkload: unsupported
+                     ->  Seq Scan on public.strom_time_test
+                           Output: strom_time_test.time_x
+(15 rows)
+
+explain (verbose, costs off, timing off) select rowid,timetz_x from (select timetz_x, row_number() over (order by timetz_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timetz_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.timetz_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.timetz_x
+               Sort Key: strom_time_test.timetz_x
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.timetz_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select rowid,timetz_x from (select timetz_x, row_number() over (order by timetz_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timetz_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.timetz_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.timetz_x
+               Sort Key: strom_time_test.timetz_x NULLS FIRST
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.timetz_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select rowid,timetz_x from (select timetz_x, row_number() over (order by timetz_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timetz_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.timetz_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.timetz_x
+               Sort Key: strom_time_test.timetz_x DESC NULLS LAST
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.timetz_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, timetz_x from strom_time_test group by timetz_x ) as t where t.rowid%50=0;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.timetz_x
+   Filter: ((t.rowid % '50'::bigint) = 0)
+   ->  WindowAgg
+         Output: row_number() OVER (?), strom_time_test.timetz_x
+         ->  Group
+               Output: strom_time_test.timetz_x
+               Group Key: strom_time_test.timetz_x
+               ->  Sort
+                     Output: strom_time_test.timetz_x
+                     Sort Key: strom_time_test.timetz_x
+                     ->  Seq Scan on public.strom_time_test
+                           Output: strom_time_test.timetz_x
+(13 rows)
+
+explain (verbose, costs off, timing off) select rowid,interval_x from (select interval_x, row_number() over (order by interval_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.interval_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.interval_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.interval_x
+               Sort Key: strom_time_test.interval_x
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.interval_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select rowid,interval_x from (select interval_x, row_number() over (order by interval_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.interval_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.interval_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.interval_x
+               Sort Key: strom_time_test.interval_x NULLS FIRST
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.interval_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select rowid,interval_x from (select interval_x, row_number() over (order by interval_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.interval_x
+   Filter: ((t.rowid % '100'::bigint) = 0)
+   ->  WindowAgg
+         Output: strom_time_test.interval_x, row_number() OVER (?)
+         ->  Sort
+               Output: strom_time_test.interval_x
+               Sort Key: strom_time_test.interval_x DESC NULLS LAST
+               ->  Seq Scan on public.strom_time_test
+                     Output: strom_time_test.interval_x
+(10 rows)
+
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, interval_x from strom_time_test group by interval_x ) as t where t.rowid%50=0;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Subquery Scan on t
+   Output: t.rowid, t.interval_x
+   Filter: ((t.rowid % '50'::bigint) = 0)
+   ->  WindowAgg
+         Output: row_number() OVER (?), strom_time_test.interval_x
+         ->  Group
+               Output: strom_time_test.interval_x
+               Group Key: strom_time_test.interval_x
+               ->  Sort
+                     Output: strom_time_test.interval_x
+                     Sort Key: strom_time_test.interval_x
+                     ->  Seq Scan on public.strom_time_test
+                           Output: strom_time_test.interval_x
+(13 rows)
+

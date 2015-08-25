@@ -168,6 +168,37 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by text_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by text_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 
+--gpusort order by date/time types.
+explain (verbose, costs off, timing off) select rowid,timestamp_x from (select timestamp_x, row_number() over (order by timestamp_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,timestamp_x from (select timestamp_x, row_number() over (order by timestamp_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,timestamp_x from (select timestamp_x, row_number() over (order by timestamp_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, timestamp_x from strom_time_test group by timestamp_x ) as t where t.rowid%50=0;
+
+explain (verbose, costs off, timing off) select rowid,timestamptz_x from (select timestamptz_x, row_number() over (order by timestamptz_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,timestamptz_x from (select timestamptz_x, row_number() over (order by timestamptz_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,timestamptz_x from (select timestamptz_x, row_number() over (order by timestamptz_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, timestamptz_x from strom_time_test group by timestamptz_x ) as t where t.rowid%50=0;
+
+explain (verbose, costs off, timing off) select rowid,date_x from (select date_x, row_number() over (order by date_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,date_x from (select date_x, row_number() over (order by date_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,date_x from (select date_x, row_number() over (order by date_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, date_x from strom_time_test group by date_x ) as t where t.rowid%50=0;
+
+explain (verbose, costs off, timing off) select rowid,time_x from (select time_x, row_number() over (order by time_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,time_x from (select time_x, row_number() over (order by time_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,time_x from (select time_x, row_number() over (order by time_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, time_x from strom_time_test group by time_x ) as t where t.rowid%50=0;
+
+explain (verbose, costs off, timing off) select rowid,timetz_x from (select timetz_x, row_number() over (order by timetz_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,timetz_x from (select timetz_x, row_number() over (order by timetz_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,timetz_x from (select timetz_x, row_number() over (order by timetz_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, timetz_x from strom_time_test group by timetz_x ) as t where t.rowid%50=0;
+
+explain (verbose, costs off, timing off) select rowid,interval_x from (select interval_x, row_number() over (order by interval_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,interval_x from (select interval_x, row_number() over (order by interval_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,interval_x from (select interval_x, row_number() over (order by interval_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, interval_x from strom_time_test group by interval_x ) as t where t.rowid%50=0;
+
 set pg_strom.enabled=on;
 set pg_strom.gpu_setup_cost=0;
 set enable_hashagg to off;      --# force off HashAggregate
@@ -332,3 +363,34 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
 
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by text_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by text_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
+
+--gpusort order by date/time types.
+explain (verbose, costs off, timing off) select rowid,timestamp_x from (select timestamp_x, row_number() over (order by timestamp_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,timestamp_x from (select timestamp_x, row_number() over (order by timestamp_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,timestamp_x from (select timestamp_x, row_number() over (order by timestamp_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, timestamp_x from strom_time_test group by timestamp_x ) as t where t.rowid%50=0;
+
+explain (verbose, costs off, timing off) select rowid,timestamptz_x from (select timestamptz_x, row_number() over (order by timestamptz_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,timestamptz_x from (select timestamptz_x, row_number() over (order by timestamptz_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,timestamptz_x from (select timestamptz_x, row_number() over (order by timestamptz_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, timestamptz_x from strom_time_test group by timestamptz_x ) as t where t.rowid%50=0;
+
+explain (verbose, costs off, timing off) select rowid,date_x from (select date_x, row_number() over (order by date_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,date_x from (select date_x, row_number() over (order by date_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,date_x from (select date_x, row_number() over (order by date_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, date_x from strom_time_test group by date_x ) as t where t.rowid%50=0;
+
+explain (verbose, costs off, timing off) select rowid,time_x from (select time_x, row_number() over (order by time_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,time_x from (select time_x, row_number() over (order by time_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,time_x from (select time_x, row_number() over (order by time_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, time_x from strom_time_test group by time_x ) as t where t.rowid%50=0;
+
+explain (verbose, costs off, timing off) select rowid,timetz_x from (select timetz_x, row_number() over (order by timetz_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,timetz_x from (select timetz_x, row_number() over (order by timetz_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,timetz_x from (select timetz_x, row_number() over (order by timetz_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, timetz_x from strom_time_test group by timetz_x ) as t where t.rowid%50=0;
+
+explain (verbose, costs off, timing off) select rowid,interval_x from (select interval_x, row_number() over (order by interval_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,interval_x from (select interval_x, row_number() over (order by interval_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select rowid,interval_x from (select interval_x, row_number() over (order by interval_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
+explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, interval_x from strom_time_test group by interval_x ) as t where t.rowid%50=0;
