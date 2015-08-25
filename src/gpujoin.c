@@ -264,8 +264,7 @@ typedef struct
 	/*
 	 * The least depth to process RIGHT/FULL OUTER JOIN if any. We shall
 	 * generate zero tuples for earlier depths, obviously, so we can omit.
-	 * If no OUTER JOIN, it shall be initialized to UNIT_MAX, so never
-	 * kicked if unnecessary.
+	 * If no OUTER JOIN cases, it shall be initialized to 1.
 	 */
 	cl_int			outer_join_start_depth;
 
@@ -1819,7 +1818,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
 	TupleDesc		result_tupdesc = GTS_GET_RESULT_TUPDESC(gjs);
 	TupleDesc		scan_tupdesc;
-	cl_int			outer_join_start_depth = INT_MAX;
+	cl_int			outer_join_start_depth = -1;
 	cl_int			i;
 
 	/* activate GpuContext for device execution */
@@ -1891,7 +1890,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 		istate->ichunk_size = list_nth_int(gj_info->ichunk_size, i);
 		istate->join_type = (JoinType)list_nth_int(gj_info->join_types, i);
 
-		if (outer_join_start_depth == INT_MAX &&
+		if (outer_join_start_depth < 0 &&
 			(istate->join_type == JOIN_RIGHT ||
 			 istate->join_type == JOIN_FULL))
 			outer_join_start_depth = istate->depth;
@@ -1980,7 +1979,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	/*
 	 * Is OUTER RIGHT/FULL JOIN needed?
 	 */
-	gjs->outer_join_start_depth = outer_join_start_depth;
+	gjs->outer_join_start_depth = Max(outer_join_start_depth, 1);
 
 	/*
 	 * initialize kernel execution parameter
@@ -3834,8 +3833,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	 * sanity checks
 	 */
 	Assert(pds_src == NULL || pds_src->kds->format == KDS_FORMAT_ROW);
-	Assert(pds_src == NULL ?
-		   gjs->outer_join_start_depth == INT_MAX :
+	Assert(gjs->outer_join_start_depth >= 1 &&
 		   gjs->outer_join_start_depth <= gjs->num_rels);
 	Assert(pds_dst->kds->format == KDS_FORMAT_ROW ||
 		   pds_dst->kds->format == KDS_FORMAT_SLOT);
@@ -3986,7 +3984,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	/*
 	 * OK, enqueue a series of requests
 	 */
-	start_depth = (!pds_src ? gjs->outer_join_start_depth : 1);
+	start_depth = gjs->outer_join_start_depth;
 	for (depth = start_depth; depth <= gjs->num_rels; depth++)
 	{
 		innerState *istate = &gjs->inners[depth - 1];
