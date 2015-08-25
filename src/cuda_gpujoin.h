@@ -74,6 +74,8 @@ typedef struct
 	cl_uint			kresults_max_items;
 	/* number of inner relations */
 	cl_uint			num_rels;
+	/* least depth in this call chain */
+	cl_uint			start_depth;
 	/* number of outer rows for each depth actually used (OUT) */
 	cl_uint			outer_nitems[GPUJOIN_MAX_DEPTH + 1];
 	/* error status to be backed (OUT) */
@@ -177,16 +179,20 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 	kern_resultbuf *kresults_in;
 	kern_resultbuf *kresults_out;
 	kern_context	kcxt;
+	cl_uint			start_depth = kgjoin->start_depth;
 
 	/* sanity check */
 	assert(depth > 0 && depth <= kgjoin->num_rels);
+	assert(depth >= start_depth && start_depth <= kgjoin->num_rels);
+	assert(!kmrels || start_depth == 1);
 	assert(kgjoin->kresults_1_offset > 0);
 	assert(kgjoin->kresults_2_offset > 0);
 	kresults_in = KERN_GPUJOIN_IN_RESULTS(kgjoin, depth);
 	kresults_out = KERN_GPUJOIN_OUT_RESULTS(kgjoin, depth);
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_preparation, kparams);
-	if (depth > 1 && kresults_in->kerror.errcode != StromError_Success)
+	if (depth > start_depth &&
+		kresults_in->kerror.errcode != StromError_Success)
 		kcxt.e = kresults_in->kerror;
 
 	/*
@@ -197,13 +203,29 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 	 * kern_resultbuf structure is zero cleared, so host-side has to
 	 * call cuMemsetD32() or others.
 	 */
-	if (depth == 1)
+	if (depth == start_depth)
 	{
 		cl_uint		kds_index = get_global_id() + oitems_base;
 		cl_uint		count;
 		cl_uint		offset;
 		cl_bool		is_matched;
 		__shared__ cl_int	base;
+
+		/*
+		 * Special case if RIGHT/FULL OUTER JOIN. We have no input rows
+		 * on depth == start_depth, so results_in shall be simply cleared.
+		 */
+		if (!kds)
+		{
+			if (get_global_id() == 0)
+			{
+				kresults_in->nrels = depth;
+				kresults_in->nrooms = 0;
+				kresults_in->nitems = 0;
+				memset(&kresults_in->kerror, 0, sizeof(kern_errorbuf));
+			}
+			goto out;
+		}
 
 		assert(kresults_in->nrels == 1);
 		assert(kresults_in->nrooms == kgjoin->kresults_total_items);
@@ -243,7 +265,6 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 			kresults_in->results[base + offset] = (size_t)htup - (size_t)kds;
 		}
 	}
-
 out:
 	/* init output kresults buffer */
 	if (get_global_id() == 0)
