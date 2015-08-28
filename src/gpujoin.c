@@ -273,7 +273,7 @@ typedef struct
 	 */
 	int				num_rels;
 	size_t			source_nitems;
-	size_t			outer_nitems[GPUJOIN_MAX_DEPTH + 1];
+	size_t			result_nitems[GPUJOIN_MAX_DEPTH + 1];
 	innerState		inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinState;
 
@@ -327,8 +327,11 @@ typedef struct
 	 * then this GpuJoinTask shall be reused with new oitems_base and
 	 * oitems_nums after the result is processed at CPU side.
 	 */
-	cl_uint			oitems_base;
-	cl_uint			oitems_nums;
+	cl_uint			inner_base[GPUJOIN_MAX_DEPTH + 1];
+	cl_uint			inner_nums[GPUJOIN_MAX_DEPTH + 1];
+
+//	cl_uint			oitems_base;
+//	cl_uint			oitems_nums;
 	pgstrom_multirels  *pmrels;		/* inner multi relations (heap or hash) */
 	pgstrom_data_store *pds_src;	/* data store of outer relation */
 	pgstrom_data_store *pds_dst;	/* data store of result buffer */
@@ -355,10 +358,13 @@ static void multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask);
 static void multirels_colocate_outer_join_maps(pgstrom_multirels *pmrels,
 											   GpuTask *gtask, int depth);
 static void multirels_detach_buffer(pgstrom_multirels *pmrels,
-									bool may_kick_outer_join);
-static size_t compute_outer_ntuples_OJ(GpuJoinState *gjs,
-									   pgstrom_gpujoin *pgjoin,
-									   int depth, double *p_kresults_ratio);
+									bool may_kick_outer_join,
+									const char *caller);
+static size_t compute_outer_ntuples(GpuJoinState *gjs,
+									pgstrom_gpujoin *pgjoin,
+									int depth,
+									size_t input_nitems,
+									double *p_kresults_ratio);
 /*
  * misc declarations
  */
@@ -2063,7 +2069,7 @@ gpujoin_end(CustomScanState *node)
 	 * clean up GpuJoin specific resources
 	 */
 	if (gjs->curr_pmrels)
-		multirels_detach_buffer(gjs->curr_pmrels, false);
+		multirels_detach_buffer(gjs->curr_pmrels, false, __FUNCTION__);
 
 	/* then other generic resources */
 	pgstrom_release_gputaskstate(&gjs->gts);
@@ -2110,7 +2116,7 @@ gpujoin_rescan(CustomScanState *node)
 		/* detach previous inner relations buffer */
 		if (gjs->curr_pmrels)
 		{
-			multirels_detach_buffer(gjs->curr_pmrels, false);
+			multirels_detach_buffer(gjs->curr_pmrels, false, __FUNCTION__);
 			gjs->curr_pmrels = NULL;
 		}
 
@@ -2200,7 +2206,7 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		if (es->analyze)
 			temp = psprintf("%s (%.2f%%, expected %.2f%%)",
 							temp,
-							100.0 * ((double) gjs->outer_nitems[0] /
+							100.0 * ((double) gjs->result_nitems[0] /
 									 (double) gjs->source_nitems),
 							100.0 * gj_info->outer_ratio);
 		else
@@ -2253,8 +2259,8 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		if (es->analyze)
 		{
 			innerState *istate = &gjs->inners[depth-1];
-			size_t		nrows_in  = gjs->outer_nitems[depth-1];
-			size_t		nrows_out = gjs->outer_nitems[depth];
+			size_t		nrows_in  = gjs->result_nitems[depth-1];
+			size_t		nrows_out = gjs->result_nitems[depth];
 			cl_float	nrows_ratio
 				= int_as_float(list_nth_int(gj_info->nrows_ratio, depth - 1));
 
@@ -2970,11 +2976,18 @@ gpujoin_codegen(PlannerInfo *root,
  *
  *
  */
+#define KERN_GPUJOIN_LENGTH(gjs,total_items)						\
+	(offsetof(kern_gpujoin, kparams) +								\
+	 STROMALIGN((gjs)->gts.kern_params->length) +					\
+	 STROMALIGN(offsetof(kern_resultbuf, results[(total_items)])) +	\
+	 STROMALIGN(offsetof(kern_resultbuf, results[(total_items)])))
+
 static void
 gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 {
 	GpuContext		   *gcontext = gjs->gts.gcontext;
 	kern_gpujoin	   *kgjoin = &pgjoin->kern;
+	pgstrom_multirels  *pmrels = pgjoin->pmrels;
 	pgstrom_data_store *pds_src = pgjoin->pds_src;
 	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
 	kern_resultbuf	   *kresults_in;
@@ -2982,95 +2995,164 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 	double				outer_plan_nrows;
 	double				dst_nrows_ratio;
 	cl_uint				oitems_nums;
+	Size				ntuples;
 	Size				kgjoin_head;
 	Size				kgjoin_length;
 	Size				total_items;
 	Size				result_nitems;
 	TupleTableSlot	   *tupslot = gjs->gts.css.ss.ss_ScanTupleSlot;
 	TupleDesc			tupdesc = tupslot->tts_tupleDescriptor;
-	cl_int				i, ncols = tupdesc->natts;
+	cl_int				ncols = tupdesc->natts;
+
+	double				plan_ratio;
+	double				exec_ratio;
+	double				merge_ratio;
+
 
 	outer_plan_nrows = outerPlanState(gjs)->plan->plan_rows;
 
+	/*
+	 * NOTE: calculation of expected ratio of kern_resultbuf usage towards
+	 * outer_ntuples. Unless progress of outer-scan does not reach 30% of
+	 * the expectation, we merge planned ratio and run-time information.
+	 * In case of re-execution by NoDataSpace error, we assume at least
+	 * kresults_max_items items are consumed by the previous oitems_nums. 
+	 */
+retry:
 	if (pds_src != NULL)
+	{
+		if (!gjs->outer_quals)
+			outer_nitems = (double) pds_src->kds->nitems;
+		else if (gjs->source_nitems == 0)
+			outer_nitems = gjs->outer_ratio * (double) pds_src->kds->nitems;
+		else
+		{
+			plan_ratio = gjs->outer_ratio;
+			exec_ratio = ((double) gjs->result_nitems[0] /
+						  (double) gjs->source_nitems);
+			if (gjs->source_nitems >= (size_t)(0.30 * outer_plan_nrows))
+				outer_nitems = exec_ratio * (double) pds_src->kds->nitems;
+			else
+			{
+				merge_ratio = ((double) gjs->source_nitems /
+							   (double)(0.30 * outer_plan_nrows));
+				outer_nitems = (exec_ntuples * merge_ratio +
+								plan_ntuples * (1.0 - merge_ratio));
+			}
+		}
+		/*
+		 * NOTE: depth==1 (reduction by outer_quals) never makes overflow
+		 * because it never increases number of rows more than pds_src.
+		 */
+		pgjoin->inner_nums[1] = (cl_uint) outer_nitems;
+		start_depth = 1;
+	}
+	else
+	{
+		pgstrom_data_store *pds_in;
+		innerState		   *istate;
+
+		Assert(gjs->outer_join_start_depth <= gjs->num_rels &&
+			   gjs->outer_join_start_depth >= 1);
+		start_depth = gjs->outer_join_start_depth;
+		pds_in = pmrels->inner_chunks[start_depth - 1];
+
+		/*
+		 * FIXME: Just a workaround, we assume 30% of rows are unreferenced
+		 * outer side. It shall be determined based on statistical basis.
+		 */
+		pgjoin->inner_nums[start_depth] = Max(pds_in->
+
+
+		istate = gjs->inners[start_depth - 1];
+
+
+		selectivity = 
+
+
+		selectivity = ;
+
+
+
+
+		result_nitems = (pds_in->kds->nitems -
+						 pgjoin->inner_base[start_depth]) * selectivity;
+
+		
+		
+
+
+		if (offsetof(kern_gpujoin, kparams) +
+			STROMALIGN(gjs->gts.kern_params->length)
+
+
+
+
+
+
+	}
+
+
+
+
+
+	
+	for (depth = start_depth; depth <= gjs->num_rels; depth++)
+	{
+		if (pds_src != NULL && depth == 1)
+			ntuples = num of outer rows;
+		else if (!pds_src && depth == start_depth)
+			ntuples = num of 
+
+
+
+		// reduce total_nums if overflow
+
+
+		// OJ adds missing rows
+		if (!pds_src)
+		{
+			// reduce inner_nums if overflow
+
+
+		}
+		retry;
+	}
+
+	// if pds_dst overflow, try to split the largest inner
+
+
+
+
+
 	{
 		/* remained outer ntuples to be processed */
 		Assert(pgjoin->oitems_base < pds_src->kds->nitems);
 		oitems_nums = pds_src->kds->nitems - pgjoin->oitems_base;
-
-		/*
-		 * NOTE: calculation of expected ratio of kern_resultbuf usage
-		 * towards outer_ntuples. Unless progress of outer-scan does not
-		 * reach 30% of the expectation, we merge planned ratio and
-		 * run-time information.
-		 * In case of re-execution by NoDataSpace error, we assume at
-		 * least kresults_max_items items are consumed by the previous
-		 * oitems_nums. 
-		 */
-		if (gjs->source_nitems == 0)
-		{
-			kresults_ratio = gjs->kresults_ratio;
-			dst_nrows_ratio = gjs->inners[gjs->num_rels-1].nrows_ratio;
-		}
-		else
-		{
-			double	dst_nrows_ratio_plan;
-			double	dst_nrows_ratio_exec;
-			double	kresults_ratio_plan;
-			double	kresults_ratio_exec;
-			int		i_last = gjs->num_rels - 1;
-
-			kresults_ratio_plan = gjs->kresults_ratio;
-			kresults_ratio_exec = ((double) gjs->outer_nitems[0] /
-								   (double) gjs->source_nitems);
-			for (i=1; i <= gjs->num_rels; i++)
-			{
-				kresults_ratio_exec = Max(kresults_ratio_exec,
-										  (double) (i+1) *
-										  (double) gjs->outer_nitems[0] /
-										  (double) gjs->source_nitems);
-			}
-			dst_nrows_ratio_plan = gjs->inners[i_last].nrows_ratio;
-			dst_nrows_ratio_exec = ((double)gjs->outer_nitems[i_last] /
-									(double) gjs->source_nitems);
-			if (gjs->source_nitems >= (size_t)(0.30 * outer_plan_nrows))
-			{
-				kresults_ratio = kresults_ratio_exec;
-				dst_nrows_ratio = dst_nrows_ratio_exec;
-			}
-			else
-			{
-				double	merge_ratio = ((double) gjs->source_nitems /
-									   (double) (0.30 * outer_plan_nrows));
-				kresults_ratio = (kresults_ratio_exec * merge_ratio +
-								  kresults_ratio_plan * (1.0 - merge_ratio));
-				dst_nrows_ratio = (dst_nrows_ratio_exec * merge_ratio +
-								   dst_nrows_ratio_plan * (1.0 - merge_ratio));
-			}
-		}
 	}
 	else
 	{
 		/*
 		 * NOTE: Special treatment of RIGHT/FULL OUTER JOIN. We assume
 		 * all the normal join process is already done when OUTER JOIN
-		 * task was kicked. So, we rely on outer_nitems[]
+		 * task was kicked. So, we rely on gjs->result_nitems[]
 		 */
 		pgstrom_multirels  *pmrels = pgjoin->pmrels;
 		pgstrom_data_store *pds_in;
-		size_t				ntuples = 0;
 
 		Assert(gjs->outer_join_start_depth <= gjs->num_rels &&
 			   gjs->outer_join_start_depth >= 1);
 		pds_in = pmrels->inner_chunks[gjs->outer_join_start_depth - 1];
 		oitems_nums = pds_in->kds->nitems - pgjoin->oitems_base;
-
-		ntuples = compute_outer_ntuples_OJ(gjs, pgjoin, gjs->num_rels + 1,
-										   &kresults_ratio);
-		dst_nrows_ratio = (double) ntuples / (double) oitems_nums;
 	}
+	ntuples = compute_outer_ntuples(gjs, pgjoin, gjs->num_rels + 1,
+									oitems_nums, &kresults_ratio);
+	dst_nrows_ratio = (double) ntuples / (double) oitems_nums;
 
-	/* In case of re-execution due to NoDataSpace error */
+	/*
+	 * In case of re-execution due to NoDataSpace error
+	 * We can pick up number of rows actually required.
+	 */
 	if (pds_dst)
 	{
 		double	kresults_ratio_prev = ((double) kgjoin->kresults_max_items /
@@ -3338,7 +3420,7 @@ static GpuTask *
 gpujoin_create_task(GpuJoinState *gjs,
 					pgstrom_multirels *pmrels,
 					pgstrom_data_store *pds_src,
-					cl_uint oitems_base)
+					cl_uint *inner_base)
 {
 	GpuContext		   *gcontext = gjs->gts.gcontext;
 	pgstrom_gpujoin	   *pgjoin;
@@ -3354,8 +3436,11 @@ gpujoin_create_task(GpuJoinState *gjs,
 	required = pgjoin_head + STROMALIGN(offsetof(kern_resultbuf, results[0]));
 	pgjoin = MemoryContextAllocZero(gcontext->memcxt, required);
 	pgstrom_init_gputask(&gjs->gts, &pgjoin->task);
-	pgjoin->oitems_base = oitems_base;
-	pgjoin->oitems_nums = 0xefefefef;	/* to be set later */
+	if (!inner_base)
+		memset(pgjoin->inner_base, 0, sizeof(pgjoin->inner_base));
+	else
+		memcpy(pgjoin->inner_base, inner_base, sizeof(pgjoin->inner_base));
+	memset(pgjoin->inner_nums, 0, sizeof(pgjoin->inner_base));	/* set later */
 	pgjoin->pmrels = multirels_attach_buffer(pmrels);
 	pgjoin->pds_src = pds_src;
 	pgjoin->pds_dst = NULL;		/* to be set later */
@@ -3398,7 +3483,7 @@ retry:
 		if (gjs->curr_pmrels)
 		{
 			Assert(gjs->gts.scan_done);
-			multirels_detach_buffer(gjs->curr_pmrels, true);
+			multirels_detach_buffer(gjs->curr_pmrels, true, __FUNCTION__);
 			gjs->curr_pmrels = NULL;
 		}
 		if (!pmrels_new)
@@ -3472,7 +3557,7 @@ retry:
 	if (!pds)
 		goto retry;
 
-	return gpujoin_create_task(gjs, gjs->curr_pmrels, pds, 0);
+	return gpujoin_create_task(gjs, gjs->curr_pmrels, pds, NULL);
 }
 
 static TupleTableSlot *
@@ -3555,7 +3640,7 @@ gpujoin_task_release(GpuTask *gtask)
 	gpujoin_cleanup_cuda_resources(pgjoin);
 	/* detach multi-relations buffer, if any */
 	if (pgjoin->pmrels)
-		multirels_detach_buffer(pgjoin->pmrels, false);
+		multirels_detach_buffer(pgjoin->pmrels, false, __FUNCTION__);
 	/* unlink source data store */
 	if (pgjoin->pds_src)
 		pgstrom_release_data_store(pgjoin->pds_src);
@@ -3593,22 +3678,34 @@ gpujoin_task_complete(GpuTask *gtask)
 	if (pgjoin->task.kerror.errcode == StromError_Success)
 	{
 		pgstrom_data_store *pds_src = pgjoin->pds_src;
-		kern_data_store	   *kds_src = pds_src->kds;
 		pgstrom_gpujoin	   *pgjoin_new;
-		size_t				source_nitems;
+		size_t				oitems_total;
 		cl_int				i;
 
 		/*
 		 * Update run-time statistics information according to the number
 		 * of rows actually processed by this GpuJoin task.
+		 * In case of OUTER JOIN task, we don't count source items because
+		 * it is generated as result of unmatched tuples.
 		 */
-		source_nitems = Min(pgjoin->oitems_base + pgjoin->oitems_nums,
-							kds_src->nitems) - pgjoin->oitems_base;
-		gjs->source_nitems += source_nitems;
+		if (pds_src)
+		{
+			oitems_total = pds_src->kds->nitems;
+			gjs->source_nitems += Min(pgjoin->oitems_base +
+									  pgjoin->oitems_nums,
+									  oitems_total) - pgjoin->oitems_base;
+		}
+		else
+		{
+			pgstrom_multirels  *pmrels = pgjoin->pmrels;
+			pgstrom_data_store *pds_in =
+				pmrels->inner_chunks[gjs->outer_join_start_depth - 1];
+			oitems_total = pds_in->kds->nitems;
+		}
 		for (i=0; i <= pgjoin->kern.num_rels; i++)
-			gjs->outer_nitems[i] += pgjoin->kern.outer_nitems[i];
+			gjs->result_nitems[i] += pgjoin->kern.result_nitems[i];
 
-		if (pgjoin->oitems_base + pgjoin->oitems_nums < kds_src->nitems)
+		if (pgjoin->oitems_base + pgjoin->oitems_nums < oitems_total)
 		{
 			/* NOTE: The task completed has invalid outer input rows to
 			 * save the space of result buffer. Once we detach pds_src
@@ -3630,6 +3727,14 @@ gpujoin_task_complete(GpuTask *gtask)
 			gjs->gts.num_pending_tasks++;
 			SpinLockRelease(&gjs->gts.lock);
 		}
+		/*
+		 * NOTE: We have to detach inner chunks here, because it may kick
+		 * OUTER JOIN task if this context is the last holder of inner
+		 * buffer.
+		 */
+		Assert(pgjoin->pmrels != NULL);
+		multirels_detach_buffer(pgjoin->pmrels, true, __FUNCTION__);
+		pgjoin->pmrels = NULL;
 	}
 	else if (pgjoin->task.kerror.errcode == StromError_DataStoreNoSpace)
 	{
@@ -3706,120 +3811,150 @@ gpujoin_task_respond(CUstream stream, CUresult status, void *private)
  * of result items in (depth-1) level.
  */
 static size_t
-compute_outer_ntuples_OJ(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin,
-						 int depth, double *p_kresults_ratio)
+compute_outer_ntuples(GpuJoinState *gjs,
+					  pgstrom_gpujoin *pgjoin,
+					  int depth,
+					  size_t input_nitems,
+					  double *p_kresults_ratio)
 {
-	pgstrom_multirels  *pmrels = pgjoin->pmrels;
-	double				kresults_ratio = 0.0;
-	double				ntuples = 0.0;
-	cl_uint				oitems_nums = pgjoin->oitems_nums;
-	cl_int				i;
+	double		ntuples = 0.0;
+	double		kresults_ratio = 0.0;
+	cl_int		i;
 
-	/* should be never called to depth == 1 */
-	Assert(depth > 1);
-	Assert(gjs->outer_join_start_depth <= depth &&
-		   gjs->outer_join_start_depth >= 1);
+	Assert(depth >= 1 && depth <= gjs->num_rels + 1);
 
-	for (i=gjs->outer_join_start_depth; i < depth; i++)
+	if (pgjoin->pds_src != NULL)
 	{
-		innerState *istate = &gjs->inners[i-1];
-		double		exec_nrows_ratio;
+		/*
+		 * Number of rows estimation in normal JOIN case
+		 */
+		double		outer_plan_nrows = outerPlanState(gjs)->plan->plan_rows;
+		double		plan_ntuples;
+		double		exec_ntuples;
 
-		Assert(istate->depth == i);
-		if (gjs->outer_nitems[i-1] > 0)
-			exec_nrows_ratio = ((double) gjs->outer_nitems[i] /
-								(double) gjs->outer_nitems[i-1]);
+		if (depth == 1)
+			plan_ntuples = gjs->outer_ratio * (double) input_nitems;
+		else if (depth <= gjs->num_rels)
+			plan_ntuples = (gjs->inners[depth - 1].nrows_ratio *
+							(double) input_nitems);
+		else
+			plan_ntuples = (gjs->gts.css.ss.ps.plan->plan_rows *
+							((double) input_nitems / outer_plan_nrows));
+
+		if (gjs->source_nitems > 0)
+			exec_ntuples = ((double) gjs->result_nitems[depth - 1] /
+							(double) gjs->source_nitems *
+							(double) input_nitems);
+		else
+			exec_ntuples = plan_ntuples;
+
+		if (gjs->source_nitems == 0)
+		{
+			ntuples = plan_ntuples;
+			kresults_ratio = gjs->kresults_ratio;
+		}
 		else
 		{
-			/*
-			 * NOTE: If outer_nitems[] of this depth is positive in
-			 * spite of zero input from the previous depth, it maens
-			 * FULL OUTER JOIN generated rows which are not matched.
-			 * So, we assume exec_nrows_ratio = 1.0 for this case.
-			 * Elsewhere, it implies all the rows were filtered in
-			 * this depth, so exec_nrows_ratio = 0.0.
-			 */
-			exec_nrows_ratio = (gjs->outer_nitems[i] > 0 ? 1.0 : 0.0);
-		}
-		/* row selectivity in this depth */
-		if (istate->depth > gjs->outer_join_start_depth)
-			ntuples *= (exec_nrows_ratio * pgstrom_chunk_size_margin());
-		/* row population by RIGHT/FULL OUTER JOIN */
-		if (istate->join_type == JOIN_RIGHT ||
-			istate->join_type == JOIN_FULL)
-		{
-			pgstrom_data_store *pds_in = pmrels->inner_chunks[i-1];
+			double	kresults_ratio_plan = gjs->kresults_ratio;
+			double	kresults_ratio_exec = ((double) gjs->result_nitems[0] /
+										   (double) gjs->source_nitems);
+			for (i=1; i < depth; i++)
+			{
+				kresults_ratio_exec = Max(kresults_ratio_exec,
+										  (double) (i+1) *
+										  (double) gjs->result_nitems[i] /
+										  (double) gjs->source_nitems);
+			}
 
-			ntuples += (1.0 - Min(exec_nrows_ratio, 1.0))
-				* pgstrom_chunk_size_margin()
-				* (double) (pds_in->kds->nitems);
+			if (gjs->source_nitems >= (size_t)(0.30 * outer_plan_nrows))
+			{
+				ntuples = exec_ntuples;
+				kresults_ratio = kresults_ratio_exec;
+			}
+			else
+			{
+				double	merge_ratio = ((double) gjs->source_nitems /
+									   (double)(0.30 * outer_plan_nrows));
+				ntuples = (exec_ntuples * merge_ratio +
+						   plan_ntuples * (1.0 - merge_ratio));
+				kresults_ratio = (kresults_ratio_exec * merge_ratio +
+								  kresults_ratio_plan * (1.0 - merge_ratio));
+			}
 		}
-		/* update kresults_ratio */
-		kresults_ratio = Max(kresults_ratio,
-							 (double)(i+1) * ntuples /
-							 (double)(oitems_nums));
 	}
+	else
+	{
+		/*
+		 * Number of rows estimation, generated by OUTER JOIN
+		 */
+		double	selectivity;
+
+		for (i=gjs->outer_join_start_depth; i < depth; i++)
+		{
+			pgstrom_data_store *pds_in = pgjoin->pmrels->inner_chunks[i-1];
+			innerState		   *istate = &gjs->inners[i-1];
+
+			if (gjs->result_nitems[i-1] > 0)
+			{
+				selectivity = ((double) gjs->result_nitems[i] /
+							   (double) gjs->result_nitems[i-1]);
+			}
+			else
+			{
+				/*
+				 * NOTE: If result_nitems[] of this depth is positive in
+				 * spite of zero input from the previous depth, it maens
+				 * FULL OUTER JOIN generated rows which are not matched.
+				 * So, we assume exec_nrows_ratio = 1.0 for this case.
+				 * Elsewhere, it implies all the rows were filtered in
+				 * this depth, so exec_nrows_ratio = 0.0.
+				 */
+				selectivity = (gjs->result_nitems[i] > 0 ? 1.0 : 0.0);
+			}
+
+			/* adjust number of rows by normal join */
+			if (i > gjs->outer_join_start_depth)
+				ntuples *= selectivity * pgstrom_chunk_size_margin();
+
+			/* row population by RIGHT/FULL OUTER JOIN */
+			if (istate->join_type == JOIN_RIGHT ||
+				istate->join_type == JOIN_FULL)
+			{
+				double	inner_nitems
+					= (gjs->outer_join_start_depth == i
+					   ? (double) input_nitems
+					   : (double) pds_in->kds->nitems);
+
+				ntuples += inner_nitems * (pgstrom_chunk_size_margin() -
+										   Min(selectivity, 1.0));
+			}
+			kresults_ratio = Max(kresults_ratio,
+								 (double)(i+1)
+								 * ntuples
+								 * pgstrom_chunk_size_margin()
+								 / (double) input_nitems);
+		}
+	}
+	/* At least 1 items are needed, and inject some margin */
+	ntuples = Max(ntuples, 1.0) * pgstrom_chunk_size_margin();
 
 	if (p_kresults_ratio)
 		*p_kresults_ratio = kresults_ratio;
 
-	return (size_t) ntuples;
-}
-
-static size_t
-compute_outer_ntuples(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin, int depth)
-{
-	double		outer_plan_nrows = outerPlanState(gjs)->plan->plan_rows;
-	double		oitems_nums = (double) pgjoin->oitems_nums;
-	double		plan_ntuples;
-	double		exec_ntuples;
-	double		result;
-
-	if (!pgjoin->pds_src)
-		return compute_outer_ntuples_OJ(gjs, pgjoin, depth, NULL);
-
-	Assert(depth > 0 && depth <= gjs->num_rels + 1);
-	if (depth == 1)
-		plan_ntuples = gjs->outer_ratio * oitems_nums;
-	else if (depth <= gjs->num_rels)
-		plan_ntuples = gjs->inners[depth - 1].nrows_ratio * oitems_nums;
-	else
-		plan_ntuples = (gjs->gts.css.ss.ps.plan->plan_rows *
-						(oitems_nums / outer_plan_nrows));
-
-	if (gjs->source_nitems > 0)
-		exec_ntuples = ((double) gjs->outer_nitems[depth - 1] /
-						(double) gjs->source_nitems) * oitems_nums;
-	else
-		exec_ntuples = plan_ntuples;
-
-	if (gjs->source_nitems >= (size_t)(0.30 * outer_plan_nrows))
-		result = exec_ntuples;
-	else
-	{
-		double	merge_ratio = ((double) gjs->source_nitems /
-							   (double)(0.30 * outer_plan_nrows));
-		result = (exec_ntuples * merge_ratio +
-				  plan_ntuples * (1.0 - merge_ratio));
-	}
-	/*
-	 * At least 1 items are needed, and inject some margin.
-	 */
-	result = Max(result, 1.0) * pgstrom_chunk_size_margin();
-
-	return result;
+	return ntuples;
 }
 
 static bool
 __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 {
+	pgstrom_multirels  *pmrels = pgjoin->pmrels;
 	pgstrom_data_store *pds_src = pgjoin->pds_src;
 	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
 	GpuJoinState   *gjs = (GpuJoinState *) pgjoin->task.gts;
 	const char	   *kern_proj_name;
 	Size			length;
 	Size			total_length;
-	double			outer_ntuples;
+	Size			outer_ntuples;
 	size_t			grid_xsize;
 	size_t			grid_ysize;
 	size_t			block_xsize;
@@ -3837,6 +3972,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 		   gjs->outer_join_start_depth <= gjs->num_rels);
 	Assert(pds_dst->kds->format == KDS_FORMAT_ROW ||
 		   pds_dst->kds->format == KDS_FORMAT_SLOT);
+
+	elog(INFO, "GpuJoin (%p) pds_src=%p oitems(%u,%u)", pgjoin, pgjoin->pds_src, pgjoin->oitems_base, pgjoin->oitems_nums);
 
 	/*
 	 * GPU kernel function lookup
@@ -3942,7 +4079,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	CUDA_EVENT_RECORD(pgjoin, ev_dma_send_start);
 
 	/* inner multi relations */
-	multirels_send_buffer(pgjoin->pmrels, &pgjoin->task);
+	multirels_send_buffer(pmrels, &pgjoin->task);
 	/* kern_gpujoin + static portion of kern_resultbuf */
 	length = KERN_GPUJOIN_HEAD_LENGTH(&pgjoin->kern);
 	rc = cuMemcpyHtoDAsync(pgjoin->m_kgjoin,
@@ -3990,7 +4127,6 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 		innerState *istate = &gjs->inners[depth - 1];
 		JoinType	join_type = istate->join_type;
 		bool		is_nestloop = (!istate->hash_outer_keys);
-		size_t		outer_ntuples;
 		size_t		num_threads;
 
 		/*
@@ -4030,20 +4166,14 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			 "gpujoin_preparation",
 			 (cl_uint)grid_xsize,
 			 (cl_uint)block_xsize);
-
-		/*
-		 * Estimation of number of CUDA threads to be kicked
-		 */
-		outer_ntuples = compute_outer_ntuples(gjs, pgjoin, depth);
-
 		/*
 		 * Main logic of GpuHashJoin or GpuNestLoop
 		 */
 		if (is_nestloop)
 		{
-			pgstrom_data_store *pds = pgjoin->pmrels->inner_chunks[depth - 1];
-			size_t	inner_ntuples = pds->kds->nitems;
-			size_t	shmem_size;
+			pgstrom_data_store *pds_in = pmrels->inner_chunks[depth - 1];
+			cl_uint		inner_ntuples = pds_in->kds->nitems;
+			cl_uint		shmem_size;
 
 			/* NestLoop logic cannot run LEFT JOIN */
 			Assert(join_type != JOIN_LEFT && join_type != JOIN_FULL);
@@ -4060,6 +4190,9 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			 */
 			if (pds_src != NULL || depth > gjs->outer_join_start_depth)
 			{
+				outer_ntuples = compute_outer_ntuples(gjs, pgjoin, depth,
+													  pgjoin->oitems_nums,
+													  NULL);
 				pgstrom_compute_workgroup_size_2d(&grid_xsize, &block_xsize,
 												  &grid_ysize, &block_ysize,
 												  pgjoin->kern_exec_nl,
@@ -4107,12 +4240,19 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			 *                            cl_uint cuda_index,
 			 *                            cl_bool *outer_join_maps)
 			 */
-			if (join_type == JOIN_RIGHT || join_type == JOIN_FULL)
+			if (pds_src == NULL &&
+				(join_type == JOIN_RIGHT || join_type == JOIN_FULL))
 			{
 				Assert(depth >= gjs->outer_join_start_depth);
+
+				/* we may limit input ntuples */
+				if (depth == gjs->outer_join_start_depth)
+					inner_ntuples = pgjoin->oitems_nums;
+
 				/* gather the outer join map, if multi-GPUs environment */
-				multirels_colocate_outer_join_maps(pgjoin->pmrels,
-												   &pgjoin->task, depth);
+				multirels_colocate_outer_join_maps(pmrels,
+												   &pgjoin->task,
+												   depth);
 				pgstrom_compute_workgroup_size(&grid_xsize,
 											   &block_xsize,
 											   pgjoin->kern_outer_nl,
@@ -4126,6 +4266,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 				kern_args[3] = &depth;
 				kern_args[4] = &pgjoin->task.cuda_index;
 				kern_args[5] = &pgjoin->m_ojmaps;
+				kern_args[6] = &pgjoin->oitems_base;
+				kern_args[7] = &inner_ntuples;
 
 				rc = cuLaunchKernel(pgjoin->kern_outer_nl,
 									grid_xsize, 1, 1,
@@ -4146,10 +4288,6 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 		}
 		else
 		{
-			pgstrom_data_store *pds = pgjoin->pmrels->inner_chunks[depth - 1];
-			size_t	inner_nslots = pds->kds->nslots;
-
-			Assert(inner_nslots > 0);
 			/*
 			 * Launch:
 			 * KERNEL_FUNCTION(void)
@@ -4162,6 +4300,9 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			 */
 			if (pds_src != NULL || depth > gjs->outer_join_start_depth)
 			{
+				outer_ntuples = compute_outer_ntuples(gjs, pgjoin, depth,
+													  pgjoin->oitems_nums,
+													  NULL);
 				pgstrom_compute_workgroup_size(&grid_xsize,
 											   &block_xsize,
 											   pgjoin->kern_exec_hj,
@@ -4202,8 +4343,16 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			 *                            cl_uint cuda_index,
 			 *                            cl_bool *outer_join_maps)
 			 */
-			if (join_type == JOIN_RIGHT || join_type == JOIN_FULL)
+			if (pds_src == NULL &&
+				(join_type == JOIN_RIGHT || join_type == JOIN_FULL))
 			{
+				pgstrom_data_store *pds_in = pmrels->inner_chunks[depth - 1];
+				cl_uint		inner_nslots = pds_in->kds->nslots;
+
+				Assert(inner_nslots > 0);
+				if (depth == gjs->outer_join_start_depth)
+					inner_nslots = pgjoin->oitems_nums;
+
 				Assert(depth >= gjs->outer_join_start_depth);
 				/* gather the outer join map, if multi-GPUs environment */
 				multirels_colocate_outer_join_maps(pgjoin->pmrels,
@@ -4221,6 +4370,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 				kern_args[3] = &depth;
 				kern_args[4] = &pgjoin->task.cuda_index;
 				kern_args[5] = &pgjoin->m_ojmaps;
+				kern_args[6] = &pgjoin->oitems_base;
+				kern_args[7] = &inner_nslots;
 
 				rc = cuLaunchKernel(pgjoin->kern_outer_hj,
 									grid_xsize, 1, 1,
@@ -4251,7 +4402,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	 *                               kern_data_store *kds_src,
 	 *                               kern_data_store *kds_dst)
 	 */
-	outer_ntuples = compute_outer_ntuples(gjs, pgjoin, gjs->num_rels + 1);
+	outer_ntuples = compute_outer_ntuples(gjs, pgjoin, gjs->num_rels + 1,
+										  pgjoin->oitems_nums, NULL);
 	pgstrom_compute_workgroup_size(&grid_xsize,
 								   &block_xsize,
 								   pgjoin->kern_proj,
@@ -5197,7 +5349,8 @@ multirels_colocate_outer_join_maps(pgstrom_multirels *pmrels,
 }
 
 static void
-multirels_detach_buffer(pgstrom_multirels *pmrels, bool may_kick_outer_join)
+multirels_detach_buffer(pgstrom_multirels *pmrels, bool may_kick_outer_join,
+						const char *caller)
 {
 	int		i, num_rels = pmrels->kern.nrels;
 
@@ -5215,7 +5368,7 @@ multirels_detach_buffer(pgstrom_multirels *pmrels, bool may_kick_outer_join)
 	{
 		GpuJoinState	   *gjs = pmrels->gjs;
 		pgstrom_gpujoin	   *pgjoin_new = (pgstrom_gpujoin *)
-			gpujoin_create_task(gjs, pmrels, NULL, 0);
+			gpujoin_create_task(gjs, pmrels, NULL, NULL);
 
 		/* Enqueue OUTER JOIN task here */
 		SpinLockAcquire(&gjs->gts.lock);

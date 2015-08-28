@@ -76,8 +76,8 @@ typedef struct
 	cl_uint			num_rels;
 	/* least depth in this call chain */
 	cl_uint			start_depth;
-	/* number of outer rows for each depth actually used (OUT) */
-	cl_uint			outer_nitems[GPUJOIN_MAX_DEPTH + 1];
+	/* number of result rows actually generated for each depth */
+	cl_uint			result_nitems[GPUJOIN_MAX_DEPTH + 1];
 	/* error status to be backed (OUT) */
 	kern_errorbuf	kerror;
 	/* run-time parameter buffer */
@@ -249,7 +249,7 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 			else
 				base = 0;
 			atomicMax(&kgjoin->kresults_max_items, base + count);
-			atomicMax(&kgjoin->outer_nitems[0], base + count);
+			atomicMax(&kgjoin->result_nitems[0], base + count);
 		}
 		__syncthreads();
 
@@ -277,7 +277,7 @@ out:
 		if (depth > 1)
 		{
 			assert(kgjoin->num_rels >= depth);
-			kgjoin->outer_nitems[depth - 1] = kresults_in->nitems;
+			kgjoin->result_nitems[depth - 1] = kresults_in->nitems;
 		}
 	}
 	kern_writeback_error_status(&kresults_in->kerror, kcxt.e);
@@ -389,7 +389,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 				base = 0;
 
 			atomicMax(&kgjoin->kresults_max_items,
-					  (depth + 1) * base + count);
+					  (depth + 1) * (base + count));
 		}
 		__syncthreads();
 
@@ -505,7 +505,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		if (x_index < nvalids)
 		{
 			x_buffer = KERN_GET_RESULT(kresults_in, x_index);
-			assert(((size_t)x_buffer[0] & 7) == 0);
+			assert(((size_t)x_buffer[0] & (sizeof(cl_ulong) - 1)) == 0);
 			hash_value = gpujoin_hash_value(&kcxt,
 											pg_crc32_table,
 											kds,
@@ -546,7 +546,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			 * Expand kresults_out->nitems
 			 */
 			offset = arithmetic_stairlike_add(is_matched ? 1 : 0, &count);
-			if (get_local_id() == 0)
+			if (get_local_xid() == 0)
 			{
 				if (count > 0)
 					base = atomicAdd(&kresults_out->nitems, count);
@@ -554,7 +554,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 					base = 0;
 
 				atomicMax(&kgjoin->kresults_max_items,
-						  (depth + 1) * base + count);
+						  (depth + 1) * (base + count));
 			}
 			__syncthreads();
 
@@ -590,7 +590,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		{
 			offset = arithmetic_stairlike_add(needs_outer_row ? 1 : 0,
 											  &count);
-			if (get_local_id() == 0)
+			if (get_local_xid() == 0)
 			{
 				if (count > 0)
 					base = atomicAdd(&kresults_out->nitems, count);
@@ -634,7 +634,9 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 					   kern_multirels *kmrels,
 					   cl_int depth,
 					   cl_int cuda_index,
-					   cl_bool *outer_join_map)
+					   cl_bool *outer_join_map,
+					   cl_uint oitems_base,
+					   cl_uint oitems_nums)
 {
 	kern_parambuf	   *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
 	kern_resultbuf	   *kresults_out = KERN_GPUJOIN_OUT_RESULTS(kgjoin, depth);
@@ -642,6 +644,7 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 	kern_context		kcxt;
 	cl_bool			   *lo_map;
 	cl_bool				needs_outer_row;
+	size_t				kds_index = get_global_id() + oitems_base;
 	cl_uint				count;
 	cl_uint				offset;
 	cl_int			   *r_buffer;
@@ -657,28 +660,26 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 	INIT_KERNEL_CONTEXT(&kcxt,gpujoin_outer_nestloop,kparams);
 
 	/* sanity checks */
-	if (get_global_id() == 0)
-	{
-		assert(get_global_xsize() == 1);
-		assert(depth > 0 && depth <= kgjoin->num_rels);
-		assert(kresults_out->nrels == depth + 1);
-	}
+	assert(get_global_xsize() == 1);
+	assert(depth > 0 && depth <= kgjoin->num_rels);
+	assert(kresults_out->nrels == depth + 1);
 
 	/*
 	 * check whether the relevant inner tuple has any matched outer tuples,
 	 * including the jobs by other devices.
 	 */
-	if (get_global_id() < kds_in->nitems)
+	if (get_global_id() < oitems_nums)
 	{
 		cl_uint		nitems = kds_in->nitems;
 
-		needs_outer_row = false;
+		needs_outer_row = true;
 		for (i=0; i < ndevs; i++)
 		{
 			lo_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, nitems,
 												   i, outer_join_map);
 			assert(lo_map != NULL);
-			needs_outer_row |= (!lo_map[get_global_id()] ? 1 : 0);
+			if (lo_map[kds_index])
+				needs_outer_row = false;
 		}
 	}
 	else
@@ -698,7 +699,7 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 			base = 0;
 
 		atomicMax(&kgjoin->kresults_max_items,
-				  (depth + 1) * base + count);
+				  (depth + 1) * (base + count));
 	}
 	__syncthreads();
 
@@ -719,8 +720,7 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 	 */
 	if (needs_outer_row)
 	{
-		HeapTupleHeaderData	   *htup
-			= kern_get_tuple_row(kds_in, get_global_id());
+		HeapTupleHeaderData	   *htup = kern_get_tuple_row(kds_in, kds_index);
 		r_buffer = KERN_GET_RESULT(kresults_out, base + offset);
 		memset(r_buffer, 0, sizeof(cl_int) * depth);	/* NULL */
 		r_buffer[depth] = (size_t)htup - (size_t)kds_in;
@@ -741,13 +741,16 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 					   kern_multirels *kmrels,
 					   cl_int depth,
 					   cl_int cuda_index,
-					   cl_bool *outer_join_map)
+					   cl_bool *outer_join_map,
+					   cl_uint oitems_base,
+					   cl_uint oitems_nums)
 {
 	kern_parambuf	   *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
 	kern_resultbuf	   *kresults_out = KERN_GPUJOIN_OUT_RESULTS(kgjoin, depth);
 	kern_data_store	   *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 	kern_hashitem	   *khitem;
 	kern_context		kcxt;
+	size_t				kds_index = get_global_id() + oitems_base;
 	cl_bool			   *lo_map;
 	cl_bool				needs_outer_row;
 	cl_uint				offset;
@@ -765,18 +768,16 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 	INIT_KERNEL_CONTEXT(&kcxt,gpujoin_outer_hashjoin,kparams);
 
 	/* sanity checks */
-	if (get_global_id() == 0)
-	{
-		assert(get_global_ysize() == 1);
-		assert(depth > 0 && depth <= kgjoin->num_rels);
-		assert(kresults_out->nrels == depth + 1);
-	}
+	assert(get_global_ysize() == 1);
+	assert(depth > 0 && depth <= kgjoin->num_rels);
+	assert(kresults_out->nrels == depth + 1);
+	assert(oitems_nums <= kds_hash->nslots);
 
 	/*
 	 * Fetch a hash-entry from each hash-slot
 	 */
-	if (get_global_id() < kds_hash->nslots)
-		khitem = KERN_HASH_FIRST_ITEM(kds_hash, get_global_id());
+	if (kds_index < oitems_nums)
+		khitem = KERN_HASH_FIRST_ITEM(kds_hash, kds_index);
 	else
 		khitem = NULL;
 
@@ -790,13 +791,14 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 			cl_uint		nitems = kds_hash->nitems;
 
 			assert(khitem->rowid < nitems);
-			needs_outer_row = false;
+			needs_outer_row = true;
 			for (i=0; i < ndevs; i++)
 			{
 				lo_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, nitems,
 													   i, outer_join_map);
 				assert(lo_map != NULL);
-				needs_outer_row |= (!lo_map[khitem->rowid] ? 1 : 0);
+				if (lo_map[khitem->rowid])
+					needs_outer_row = false;
 			}
 		}
 		else
@@ -814,7 +816,7 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 				base = 0;
 
 			atomicMax(&kgjoin->kresults_max_items,
-					  (depth + 1) * base + count);
+					  (depth + 1) * (base + count));
 		}
 		__syncthreads();
 
@@ -920,6 +922,7 @@ __gpujoin_projection_row(kern_context *kcxt,
 				src_htup = NULL;
 			else if (src_depth == 0)
 			{
+				assert(kds_src != NULL);
 				src_colmeta = kds_src->colmeta;
                 src_htup = GPUJOIN_REF_HTUP(kds_src, r_buffer[0]);
 			}
@@ -954,7 +957,7 @@ __gpujoin_projection_row(kern_context *kcxt,
 		t_hoff = offsetof(HeapTupleHeaderData, t_bits);
 		if (heap_hasnull)
 			t_hoff += bitmaplen(ncols);
-		if (kds_src->tdhasoid)
+		if (kds_dst->tdhasoid)
 			t_hoff += sizeof(cl_uint);
 		t_hoff = MAXALIGN(t_hoff);
 		required += t_hoff + MAXALIGN(data_len);
@@ -1035,6 +1038,7 @@ __gpujoin_projection_row(kern_context *kcxt,
 				src_htup = NULL;
 			else if (src_depth == 0)
 			{
+				assert(kds_src != NULL);
 				src_colmeta = kds_src->colmeta;
 				src_htup = GPUJOIN_REF_HTUP(kds_src, r_buffer[0]);
 			}
@@ -1133,8 +1137,8 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 
 	/* sanity checks */
 	assert(kresults->nrels == kgjoin->num_rels + 1);
-	assert(kds_src->format == KDS_FORMAT_ROW &&
-		   kds_dst->format == KDS_FORMAT_ROW);
+	assert(kds_src == NULL || kds_src->format == KDS_FORMAT_ROW);
+	assert(kds_dst->format == KDS_FORMAT_ROW);
 
 	/*
 	 * Update nitems of kds_dst. note that get_global_id(0) is not always
@@ -1144,7 +1148,7 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 	if (get_global_id() == 0)
 	{
 		kds_dst->nitems = kresults->nitems;
-		kgjoin->outer_nitems[kgjoin->num_rels] = kresults->nitems;;
+		kgjoin->result_nitems[kgjoin->num_rels] = kresults->nitems;;
 	}
 
 	/* Immediate bailout if previous stage raise an error status */
@@ -1221,6 +1225,7 @@ __gpujoin_projection_slot(kern_context *kcxt,
 			src_htup = NULL;
 		else if (src_depth == 0)
 		{
+			assert(kds_src != NULL);
 			src_colmeta = kds_src->colmeta;
 			src_htup = GPUJOIN_REF_HTUP(kds_src, r_buffer[0]);
 			src_hostptr = &kds_src->hostptr;
@@ -1294,8 +1299,8 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 
 	/* sanity checks */
 	assert(kresults->nrels == kgjoin->num_rels + 1);
-	assert(kds_src->format == KDS_FORMAT_ROW &&
-		   kds_dst->format == KDS_FORMAT_SLOT);
+	assert(kds_src == NULL || kds_src->format == KDS_FORMAT_ROW);
+	assert(kds_dst->format == KDS_FORMAT_SLOT);
 
 	/*
 	 * Update nitems of kds_dst. note that get_global_id(0) is not always
@@ -1305,7 +1310,7 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 	if (get_global_id() == 0)
 	{
 		kds_dst->nitems = kresults->nitems;
-		kgjoin->outer_nitems[kgjoin->num_rels] = kresults->nitems;
+		kgjoin->result_nitems[kgjoin->num_rels] = kresults->nitems;
 	}
 
 	/* Immediate bailout if previous stage raise an error status */
