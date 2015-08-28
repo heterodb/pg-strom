@@ -1099,7 +1099,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 	ListCell   *lc;
 	Relids		required_outer;
 	ParamPathInfo *param_info;
-	bool		support_bulkload;
+	bool		support_bulkload = true;
 	inner_path_item *ip_item;
 
 	/* calls secondary module if exists */
