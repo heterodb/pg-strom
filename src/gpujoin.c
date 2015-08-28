@@ -648,7 +648,7 @@ retry:
 		{
 			/* KDS_FORMAT_HASH */
 			/* hash slots */
-			hash_nslots = Max((Size)inner_ntuples, 1024);
+			hash_nslots = Max((Size)(1.5 * inner_ntuples), 1024);
 			hash_nslots = Min(hash_nslots,
 							  gpuMemMaxAllocSize() / sizeof(void *));
 			chunk_size += STROMALIGN(sizeof(cl_uint) * (Size)hash_nslots);

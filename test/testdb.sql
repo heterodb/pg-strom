@@ -4,20 +4,28 @@ DROP TABLE IF EXISTS t2;
 DROP TABLE IF EXISTS t3;
 DROP TABLE IF EXISTS t4;
 DROP TABLE IF EXISTS t5;
+DROP TABLE IF EXISTS t6;
+DROP TABLE IF EXISTS t7;
+DROP TABLE IF EXISTS t8;
 
+CREATE TABLE t0 (id int primary key, cat text, aid int, bid int, cid int, did int, eid int, fid int, gid int, hid int);
+CREATE TABLE t1 (aid int, atext text, ax float);
+CREATE TABLE t2 (bid int, btext text, bx float);
+CREATE TABLE t3 (cid int, ctext text, cx float);
+CREATE TABLE t4 (did int, dtext text, dx float);
+CREATE TABLE t5 (eid int, etext text, ex float);
+CREATE TABLE t6 (fid int, ftext text, fx float);
+CREATE TABLE t7 (gid int, gtext text, gx float);
+CREATE TABLE t8 (hid int, htext text, hx float);
 
-CREATE TABLE t0 (id int primary key, cat text, aid int, bid int, cid int, did int, eid int, x float, y float, z text);
-CREATE TABLE t1 (aid int, atext text);
-CREATE TABLE t2 (bid int, btext text);
-CREATE TABLE t3 (cid int, ctext text);
-CREATE TABLE t4 (did int, dtext text);
-CREATE TABLE t5 (eid int, etext text);
-
-INSERT INTO t1 (SELECT x, md5((x+1)::text) FROM generate_series(1,40000) x);
-INSERT INTO t2 (SELECT x, md5((x+2)::text) FROM generate_series(1,40000) x);
-INSERT INTO t3 (SELECT x, md5((x+3)::text) FROM generate_series(1,40000) x);
-INSERT INTO t4 (SELECT x, md5((x+4)::text) FROM generate_series(1,40000) x);
-INSERT INTO t5 (SELECT x, md5((x+4)::text) FROM generate_series(1,40000) x);
+INSERT INTO t1 (SELECT x, md5((x+1)::text), random()*100.0 FROM generate_series(1,100000) x);
+INSERT INTO t2 (SELECT x, md5((x+2)::text), random()*100.0 FROM generate_series(1,100000) x);
+INSERT INTO t3 (SELECT x, md5((x+3)::text), random()*100.0 FROM generate_series(1,100000) x);
+INSERT INTO t4 (SELECT x, md5((x+4)::text), random()*100.0 FROM generate_series(1,100000) x);
+INSERT INTO t5 (SELECT x, md5((x+5)::text), random()*100.0 FROM generate_series(1,100000) x);
+INSERT INTO t6 (SELECT x, md5((x+6)::text), random()*100.0 FROM generate_series(1,100000) x);
+INSERT INTO t7 (SELECT x, md5((x+7)::text), random()*100.0 FROM generate_series(1,100000) x);
+INSERT INTO t8 (SELECT x, md5((x+8)::text), random()*100.0 FROM generate_series(1,100000) x);
 INSERT INTO t0 (SELECT x, CASE floor(random()*26)
                           WHEN  0 THEN 'aaa'
                           WHEN  1 THEN 'bbb'
@@ -46,19 +54,12 @@ INSERT INTO t0 (SELECT x, CASE floor(random()*26)
                           WHEN 24 THEN 'yyy'
                           ELSE 'zzz'
                           END,
-                       floor(random() * 40000 + 1),
-                       floor(random() * 40000 + 1),
-                       floor(random() * 40000 + 1),
-                       floor(random() * 40000 + 1),
-                       floor(random() * 40000 + 1),
-                       random() * 100,
-                       random() * 100,
-                       md5(x::text) FROM generate_series(1,10000000) x);
-
-CREATE TABLE s0 (a int, x int, atext text);
-CREATE TABLE s1 (b int, y int, btext text);
-
-INSERT INTO s0 (SELECT x, floor(random() * 100), md5(x::text)
-                FROM generate_series(1,200) x);
-INSERT INTO s1 (SELECT 2*x-1, floor(random() * 100), md5(x::text)
-                FROM generate_series(1,150) x);
+                       floor(random() * 100000 + 1),
+                       floor(random() * 100000 + 1),
+                       floor(random() * 100000 + 1),
+                       floor(random() * 100000 + 1),
+                       floor(random() * 100000 + 1),
+                       floor(random() * 100000 + 1),
+                       floor(random() * 100000 + 1),
+                       floor(random() * 100000 + 1)
+					   FROM generate_series(1,100000000) x);
