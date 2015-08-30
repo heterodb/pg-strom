@@ -49,6 +49,8 @@ static bool	pgstrom_debug_kernel_source;
 bool		pgstrom_bulkload_enabled;
 double		pgstrom_bulkload_density;
 int			pgstrom_max_async_tasks;
+double		pgstrom_num_threads_margin;
+double		pgstrom_chunk_size_margin;
 
 /* cost factors */
 double		pgstrom_gpu_setup_cost;
@@ -117,6 +119,28 @@ pgstrom_init_misc_guc(void)
 							PGC_USERSET,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
+	/* margin of number of CUDA threads */
+	DefineCustomRealVariable("pg_strom.num_threads_margin",
+							 "margin of number of CUDA threads if not predictable exactly",
+							 NULL,
+							 &pgstrom_num_threads_margin,
+							 1.10,
+							 1.00,	/* 0% margin - strict estimation */
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/**/
+	DefineCustomRealVariable("pg_strom.chunk_size_margin",
+							 "margin of chunk size if not predictable exactly",
+							 NULL,
+							 &pgstrom_chunk_size_margin,
+							 1.25,
+							 1.00,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	/* cost factor for Gpu setup */
 	DefineCustomRealVariable("pg_strom.gpu_setup_cost",
 							 "Cost to setup GPU device to run",
