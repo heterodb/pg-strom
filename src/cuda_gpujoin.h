@@ -76,8 +76,10 @@ typedef struct
 	cl_uint			num_rels;
 	/* least depth in this call chain */
 	cl_uint			start_depth;
-	/* number of result rows actually generated for each depth */
+	/* OUT: number of result rows actually generated for each depth */
 	cl_uint			result_nitems[GPUJOIN_MAX_DEPTH + 1];
+	/* OUT: maximum valid depth in the above result */
+	cl_uint			result_valid_until;
 	/* error status to be backed (OUT) */
 	kern_errorbuf	kerror;
 	/* run-time parameter buffer */
@@ -194,76 +196,76 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 		kcxt.e = kresults_in->kerror;
 
 	/*
-	 * In case of depth == 1, input result buffer is not initialized
+	 * In case of start depth, input result buffer is not initialized
 	 * yet. So, we need to put initial values first of all.
-	 *
-	 * NOTE: gpunestloop_prep(depth==1) expects base portion of the
-	 * kern_resultbuf structure is zero cleared, so host-side has to
-	 * call cuMemsetD32() or others.
 	 */
 	if (depth == start_depth)
 	{
-		cl_uint		kds_index = get_global_id();
-		cl_uint		count;
-		cl_uint		offset;
-		cl_bool		is_matched;
-		__shared__ cl_int	base;
-
-		/*
-		 * Special case if RIGHT/FULL OUTER JOIN. We have no input rows
-		 * on depth == start_depth, so results_in shall be simply cleared.
-		 */
-		if (!kds)
+		if (kds == NULL)
 		{
+			/*
+			 * Special case if RIGHT/FULL OUTER JOIN. We have no input rows
+			 * on depth == start_depth, so results_in shall be simply cleared.
+			 */
 			if (get_global_id() == 0)
 			{
 				kresults_in->nrels = depth;
 				kresults_in->nrooms = 0;
 				kresults_in->nitems = 0;
-				memset(&kresults_in->kerror, 0, sizeof(kern_errorbuf));
+				memset(&kresults_in->kerror, 0,
+					   sizeof(kern_errorbuf));
+				memset(kgjoin->result_nitems, 0,
+					   sizeof(kgjoin->result_nitems));
 			}
-			goto out;
 		}
-
-		assert(kresults_in->nrels == 1);
-		assert(kresults_in->nrooms == kgjoin->kresults_total_items);
-		/*
-		 * Check qualifier of outer scan that was pulled-up (if any).
-		 * then, it allocates result buffer on kresults_in and put
-		 * get_global_id() if it match.
-		 */
-		if (kds_index < kds->nitems)
-			is_matched = gpujoin_outer_quals(&kcxt, kds, kds_index);
 		else
-			is_matched = false;
-
-		/* expand kresults_in->nitems */
-		offset = arithmetic_stairlike_add(is_matched ? 1 : 0, &count);
-		if (get_local_id() == 0)
 		{
-			if (count > 0)
-				base = atomicAdd(&kresults_in->nitems, count);
+			cl_uint		kds_index = get_global_id();
+			cl_uint		count;
+			cl_uint		offset;
+			cl_bool		is_matched;
+			__shared__ cl_int	base;
+
+			assert(depth == 1);
+			assert(kresults_in->nrels == 1);
+			assert(kresults_in->nrooms == kgjoin->kresults_total_items);
+			/*
+			 * Check qualifier of outer scan that was pulled-up (if any).
+			 * then, it allocates result buffer on kresults_in and put
+			 * get_global_id() if it match.
+			 */
+			if (kds_index < kds->nitems)
+				is_matched = gpujoin_outer_quals(&kcxt, kds, kds_index);
 			else
-				base = 0;
-			atomicMax(&kgjoin->kresults_max_items, base + count);
-			atomicMax(&kgjoin->result_nitems[0], base + count);
-		}
-		__syncthreads();
+				is_matched = false;
 
-		if (base + count > kgjoin->kresults_total_items)
-		{
-			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-			goto out;
-		}
+			/* expand kresults_in->nitems */
+			offset = arithmetic_stairlike_add(is_matched ? 1 : 0, &count);
+			if (get_local_id() == 0)
+			{
+				if (count > 0)
+					base = atomicAdd(&kresults_in->nitems, count);
+				else
+					base = 0;
+				atomicMax(&kgjoin->kresults_max_items, base + count);
+				atomicMax(&kgjoin->result_nitems[0], base + count);
+			}
+			__syncthreads();
 
-		if (is_matched)
-		{
-			HeapTupleHeaderData	   *htup = kern_get_tuple_row(kds, kds_index);
-			kresults_in->results[base + offset] = (size_t)htup - (size_t)kds;
+			if (base + count >= kgjoin->kresults_total_items)
+				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+			else if (is_matched)
+			{
+				HeapTupleHeaderData	   *htup
+					= kern_get_tuple_row(kds, kds_index);
+				kresults_in->results[base + offset]
+					= (size_t)htup - (size_t)kds;
+			}
 		}
 	}
-out:
-	/* init output kresults buffer */
+	/*
+	 * Initialize output kresults buffer
+	 */
 	if (get_global_id() == 0)
 	{
 		assert(kresults_in->nrels == depth);
@@ -271,10 +273,19 @@ out:
 		kresults_out->nrooms = kgjoin->kresults_total_items / (depth + 1);
 		kresults_out->nitems = 0;
 		memset(&kresults_out->kerror, 0, sizeof(kern_errorbuf));
-		if (depth > 1)
+		/*
+		 * Update statistics - unless we have no errors, nitems in the
+		 * previous depth is reliable.
+		 *
+		 * NOTE: The reason why result_valid_until will have 'depth', not
+		 * 'depth - 1', is that we shall put exact value on result_nitems[]
+		 * even if next depth will raise NoSpaceDataStore error. So, host
+		 * code can know the number of rows to be generated in this depth.
+		 */
+		if (kresults_in->kerror.errcode == StromError_Success)
 		{
-			assert(kgjoin->num_rels >= depth);
 			kgjoin->result_nitems[depth - 1] = kresults_in->nitems;
+			kgjoin->result_valid_until = depth;
 		}
 	}
 	kern_writeback_error_status(&kresults_in->kerror, kcxt.e);
@@ -392,13 +403,9 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 		__syncthreads();
 
 		/* still have space to store? */
-		if (base + count > kresults_out->nrooms)
-		{
+		if (base + count >= kresults_out->nrooms)
 			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-			goto out;
-		}
-
-		if (is_matched)
+		else if (is_matched)
 		{
 			assert(x_buffer != NULL && y_htup != NULL);
 			r_buffer = KERN_GET_RESULT(kresults_out, base + offset);
@@ -562,14 +569,9 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			__syncthreads();
 
 			/* kresults_out still have enough space? */
-			if (base + count > kresults_out->nrooms)
-			{
+			if (base + count >= kresults_out->nrooms)
 				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-				goto out;
-			}
-
-			/* put offset of the items */
-			if (is_matched)
+			else if (is_matched)
 			{
 				r_buffer = KERN_GET_RESULT(kresults_out, base + offset);
 				memcpy(r_buffer, x_buffer, sizeof(cl_int) * depth);
@@ -606,14 +608,9 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			__syncthreads();
 
 			/* kresults_out still have enough space? */
-			if (base + count > kresults_out->nrooms)
-			{
+			if (base + count >= kresults_out->nrooms)
 				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-				goto out;
-			}
-
-			/* put offset of the outer join tuple */
-			if (needs_outer_row)
+			else if (needs_outer_row)
 			{
 				assert(x_buffer != NULL);
 				r_buffer = KERN_GET_RESULT(kresults_out, base + offset);
@@ -710,19 +707,15 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 	 * we don't have enough space to write back nested-loop results.
 	 * So, we have to tell the host-side to acquire larger kern_resultbuf.
 	 */
-	if (base + count > kresults_out->nrooms)
-	{
+	if (base + count >= kresults_out->nrooms)
 		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-		goto out;
-	}
-
-	/*
-	 * OK, we know which row should be materialized using left outer
-	 * join manner, and result buffer was acquired. Let's put result
-	 * for the next stage.
-	 */
-	if (needs_outer_row)
+	else if (needs_outer_row)
 	{
+		/*
+		 * OK, we know which row should be materialized using left outer
+		 * join manner, and result buffer was acquired. Let's put result
+		 * for the next stage.
+		 */
 		HeapTupleHeaderData	   *htup = kern_get_tuple_row(kds_in, kds_index);
 		r_buffer = KERN_GET_RESULT(kresults_out, base + offset);
 		memset(r_buffer, 0, sizeof(cl_int) * depth);	/* NULL */
@@ -827,19 +820,15 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 		 * we don't have enough space to write back nested-loop results.
 		 * So, we have to tell the host-side to acquire larger kern_resultbuf.
 		 */
-		if (base + count > kresults_out->nrooms)
-		{
+		if (base + count >= kresults_out->nrooms)
 			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-			goto out;
-		}
-
-		/*
-		 * OK, we know which row should be materialized using left outer join
-		 * manner, and result buffer was acquired. Let's put result for the
-		 * next stage.
-		 */
-		if (needs_outer_row)
+		else if (needs_outer_row)
 		{
+			/*
+			 * OK, we know which row should be materialized using left outer
+			 * join manner, and result buffer was acquired. Let's put result
+			 * for the next stage.
+			 */
 			r_buffer = KERN_GET_RESULT(kresults_out, base + offset);
 			memset(r_buffer, 0, sizeof(cl_int) * depth);	/* NULL */
 			r_buffer[depth] = (size_t)&khitem->htup - (size_t)kds_hash;
@@ -1151,7 +1140,9 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 	if (get_global_id() == 0)
 	{
 		kds_dst->nitems = kresults->nitems;
-		kgjoin->result_nitems[kgjoin->num_rels] = kresults->nitems;;
+		kgjoin->result_nitems[kgjoin->num_rels] = kresults->nitems;
+		if (kresults->kerror.errcode == StromError_Success)
+			kgjoin->result_valid_until = kgjoin->num_rels;
 	}
 
 	/* Immediate bailout if previous stage raise an error status */
@@ -1314,6 +1305,8 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 	{
 		kds_dst->nitems = kresults->nitems;
 		kgjoin->result_nitems[kgjoin->num_rels] = kresults->nitems;
+		if (kresults->kerror.errcode == StromError_Success)
+			kgjoin->result_valid_until = kgjoin->num_rels;
 	}
 
 	/* Immediate bailout if previous stage raise an error status */

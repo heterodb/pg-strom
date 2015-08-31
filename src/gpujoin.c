@@ -2995,6 +2995,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 	double				ntuples_next;
 	Size				kgjoin_length;
 	Size				total_items;
+	Size				max_items;
 	Size				dst_nrooms;
 	cl_int				start_depth;
 	cl_int				depth;
@@ -3039,6 +3040,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 	}
 
 retry:
+	max_items = 0;
 	largest_depth = 1;
 	largest_growth = -1.0;
 	inner_ratio_total = 1.0;
@@ -3046,19 +3048,39 @@ retry:
 	/* num_threads[] depends on ntuples of intermediation result */
 	memset(num_threads, 0, sizeof(num_threads));
 
-	/*
-	 * Estimate number of input rows that servive outer_quals.
-	 * If outer_quals == NIL, it's obviously same as kds_src->nitems.
-	 * If OUTER JOIN task, it's obviously zero.
-	 */
+	/* Estimate number of input rows that servive outer_quals */
 	if (pds_src != NULL)
 	{
-		if (!gjs->outer_quals)
+		if (pds_dst)
+		{
+			/* If DataStoreNoSpace error, last result the most exact
+			 * information. So just pick up result of depth==0.
+			 */
+			ntuples = (double) pgjoin->kern.result_nitems[0];
+		}
+		else if (!gjs->outer_quals)
+		{
+			/* If no outer quals, ntuples should not be filtered.
+			 * It is obviously same as kds_src->nitems.
+			 */
 			ntuples = (double) pds_src->kds->nitems;
+		}
 		else if (gjs->source_nitems == 0)
+		{
+			/* If no run-time information, all we can rely on is
+			 * plan estimation.
+			 */
 			ntuples = gjs->outer_ratio * (double) pds_src->kds->nitems;
+		}
 		else
 		{
+			/* Elsewhere, we estimate number of input rows using plan
+			 * estimation and run-time statistics information. Until
+			 * outer scan progress is less than 30%, we merge both of
+			 * estimation according to the marge ration.
+			 * Once progress goes beyond 30%, we rely on run-time
+			 * statistics rather than plan estimation.
+			 */
 			plan_ratio = gjs->outer_ratio;
 			exec_ratio = ((double) gjs->result_nitems[0] /
 						  (double) gjs->source_nitems);
@@ -3073,6 +3095,8 @@ retry:
 						   (double) pds_src->kds->nitems);
 			}
 		}
+		max_items = (Size)(ntuples * pgstrom_chunk_size_margin);
+
 		/*
 		 * NOTE: ntuples is number of input rows at depth==1, never grow up
 		 * than original, thus, it never larger than chunk size.
@@ -3095,55 +3119,75 @@ retry:
 		pgstrom_data_store *pds_in = pmrels->inner_chunks[depth - 1];
 		innerState		   *istate = &gjs->inners[depth - 1];
 
-		num_threads[depth-1] = (cl_uint) ntuples;
+		num_threads[depth-1] = Max((cl_uint) ntuples, 1);
 
 		inner_ratio = ((double) inner_size[depth-1] /
 					   (double)(pds_in->kds->format != KDS_FORMAT_HASH
 								? pds_in->kds->nitems
 								: pds_in->kds->nslots));
-		if (gjs->result_nitems[depth - 1] == 0)
-			ntuples_next = istate->nrows_ratio * inner_ratio * ntuples;
+
+		if (pds_dst && depth <= pgjoin->kern.result_valid_until)
+		{
+			double	reduction_ratio = ((double)inner_size[depth - 1] /
+									   (double)pgjoin->inner_size[depth - 1]);
+			/*
+			 * In case of DataStoreNoSpace and retry, the last execution
+			 * result tells us exact number of tuples to be generated.
+			 */
+			ntuples_next = ((double) inner_size[depth - 1] /
+							(double) pgjoin->inner_size[depth - 1]) *
+				(double) pgjoin->kern.result_nitems[depth];
+		}
 		else
 		{
-			plan_ratio = istate->nrows_ratio;
-			exec_ratio = ((double) gjs->result_nitems[depth] /
-						  (double) gjs->result_nitems[depth - 1]);
-			if (gjs->source_nitems >= (size_t)(0.30 * outer_plan_nrows))
-				ntuples_next = exec_ratio * inner_ratio * ntuples;
+			if (gjs->result_nitems[depth - 1] == 0)
+				ntuples_next = istate->nrows_ratio * inner_ratio * ntuples;
 			else
 			{
-				merge_ratio = ((double) gjs->source_nitems /
-							   (double)(0.30 * outer_plan_nrows));
-				ntuples_next = (exec_ratio * merge_ratio +
-								plan_ratio * (1.0 - merge_ratio)) *
-					inner_ratio * ntuples;
+				plan_ratio = istate->nrows_ratio;
+				exec_ratio = ((double) gjs->result_nitems[depth] /
+							  (double) gjs->result_nitems[depth - 1]);
+				if (gjs->source_nitems >= (size_t)(0.30 * outer_plan_nrows))
+					ntuples_next = exec_ratio * inner_ratio * ntuples;
+				else
+				{
+					merge_ratio = ((double) gjs->source_nitems /
+								   (double)(0.30 * outer_plan_nrows));
+					ntuples_next = (exec_ratio * merge_ratio +
+									plan_ratio * (1.0 - merge_ratio)) *
+						inner_ratio * ntuples;
+				}
 			}
-		}
 
-		/*
-		 * OUTER JOIN will add ntuples in this depth
-		 */
-		if (!pds_src && (istate->join_type == JOIN_RIGHT ||
-						 istate->join_type == JOIN_FULL))
-		{
-			pgstrom_data_store *pds_in = pmrels->inner_chunks[depth - 1];
-			double		selectivity;
-			double		match_ratio;
-
-			if (pds_in->kds->nitems == 0)
-				selectivity = 0.0;
-			else
+			/*
+			 * OUTER JOIN will add ntuples in this depth
+			 */
+			if (!pds_src && (istate->join_type == JOIN_RIGHT ||
+							 istate->join_type == JOIN_FULL))
 			{
-				/*
-				 * XXX - we assume number of unmatched row ratio using:
-				 *   1.0 - SQRT(# of result rows) / (# of inner rows)
-				 */
-				match_ratio = (sqrt((double) gjs->result_nitems[depth])
-							   / (double) pds_in->kds->nitems);
-				selectivity = 1.0 - Min(1.0, match_ratio);
+				pgstrom_data_store *pds_in = pmrels->inner_chunks[depth - 1];
+				double		selectivity;
+				double		match_ratio;
+
+				if (pds_in->kds->nitems == 0)
+					selectivity = 0.0;
+				else
+				{
+					/*
+					 * XXX - we assume number of unmatched row ratio using:
+					 *   1.0 - SQRT(# of result rows) / (# of inner rows)
+					 */
+					match_ratio = (sqrt((double) gjs->result_nitems[depth])
+								   / (double) pds_in->kds->nitems);
+					selectivity = 1.0 - Min(1.0, match_ratio);
+				}
+				selectivity = Min(0.05, selectivity);	/* XXX - at least 5% */
+				ntuples_next += selectivity * inner_size[depth-1];
+
+				elog(INFO,
+					 "match_ratio=%.6f selectivity=%.6f ntuples_next=%.2f",
+					 match_ratio, selectivity, ntuples_next);
 			}
-			selectivity = Min(0.05, selectivity);	/* XXX - at least 5% */
-			ntuples_next += selectivity * inner_size[depth-1];
 		}
 
 		/*
@@ -3160,9 +3204,11 @@ retry:
 		 */
 		if (kgjoin_length > pgstrom_chunk_size())
 		{
+			elog(INFO, "inner_base[%d]=%u inner_size[%d] %u => %u", depth-1, pgjoin->inner_base[depth-1], depth-1, inner_size[depth-1], inner_size[depth-1]/2);
 			inner_size[depth-1] /= 2;
 			continue;
 		}
+		max_items = Max(max_items, total_items);
 
 		/* save the depth with largest row growth ratio */
 		if (ntuples_next - ntuples > largest_growth)
@@ -3176,7 +3222,7 @@ retry:
 		depth++;
 	}
 	Assert(depth == gjs->num_rels + 1);
-	num_threads[depth-1] = (cl_uint) ntuples;
+	num_threads[depth-1] = Max((cl_uint) ntuples, 1);
 
 	/*
 	 * Calculation of the pds_dst length - If we have no run-time information,
@@ -3187,6 +3233,8 @@ retry:
 	 * we adopts the larger one.
 	 */
 	dst_nrooms = (Size)(ntuples * (double) pgstrom_chunk_size_margin);
+	if (pds_dst)
+		elog(INFO, "nrooms %u=>%u", pds_dst->kds->nrooms, (cl_uint)dst_nrooms);
 
 	if (gjs->result_format == KDS_FORMAT_SLOT)
 	{
@@ -3356,18 +3404,17 @@ retry:
 	/*
 	 * Setup kern_gpujoin structure
 	 */
-	total_items = (gjs->num_rels + 1) * (Size)dst_nrooms;
 	kgjoin_length = offsetof(kern_gpujoin, kparams)
 		+ STROMALIGN(gjs->gts.kern_params->length)
-		+ STROMALIGN(offsetof(kern_resultbuf, results[total_items]))
-		+ STROMALIGN(offsetof(kern_resultbuf, results[total_items]));
+		+ STROMALIGN(offsetof(kern_resultbuf, results[max_items]))
+		+ STROMALIGN(offsetof(kern_resultbuf, results[max_items]));
 	Assert(kgjoin_length <= pgstrom_chunk_size());
 
 	kgjoin->kresults_1_offset = (offsetof(kern_gpujoin, kparams) +
 								 STROMALIGN(gjs->gts.kern_params->length));
 	kgjoin->kresults_2_offset = kgjoin->kresults_1_offset
-		+ STROMALIGN(offsetof(kern_resultbuf, results[total_items]));
-	kgjoin->kresults_total_items = total_items;
+		+ STROMALIGN(offsetof(kern_resultbuf, results[max_items]));
+	kgjoin->kresults_total_items = max_items;
 	kgjoin->kresults_max_items = 0;
 	kgjoin->num_rels = gjs->num_rels;
 	kgjoin->start_depth = start_depth;
@@ -3383,7 +3430,7 @@ retry:
 	kresults_in = KERN_GPUJOIN_IN_RESULTS(kgjoin, 1);
 	memset(kresults_in, 0, offsetof(kern_resultbuf, results[0]));
 	kresults_in->nrels = 1;
-	kresults_in->nrooms = total_items;
+	kresults_in->nrooms = max_items;
 	kresults_in->nitems = 0;
 
 	/* copy inner_size[] and num_threads[] */
@@ -3393,13 +3440,13 @@ retry:
 #if 0
 	for (depth=start_depth; depth <= gjs->num_rels; depth++)
 	{
-		elog(INFO, "pgjoin=%p depth=%d num_threads=%u inner=(%u,%u) total_items=%zu ntuples=%zu",
+		elog(INFO, "pgjoin=%p depth=%d num_threads=%u inner=(%u,%u) max_items=%zu ntuples=%zu",
 			 pgjoin,
 			 depth,
 			 pgjoin->num_threads[depth-1],
 			 pgjoin->inner_base[depth-1],
 			 pgjoin->inner_size[depth-1],
-			 (Size) total_items,
+			 (Size) max_items,
 			 (Size) ntuples);
 	}
 #endif
@@ -3734,6 +3781,8 @@ gpujoin_task_complete(GpuTask *gtask)
 	}
 	else if (pgjoin->task.kerror.errcode == StromError_DataStoreNoSpace)
 	{
+		cl_int		i;
+
 		/*
 		 * StromError_DataStoreNoSpace indicates either/both of buffers
 		 * were smaller than required. So, we expand the buffer or reduce
@@ -4448,7 +4497,7 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 	TupleTableSlot	   *scan_slot = scan_ps->ps_ResultTupleSlot;
 	TupleDesc			scan_desc = scan_slot->tts_tupleDescriptor;
 	Tuplestorestate	   *tupstore = istate->tupstore;
-	TupleTableSlot	   *tupslot = NULL;
+//	TupleTableSlot	   *tupslot = NULL;
 	pgstrom_data_store *pds_hash;
 	List			   *pds_list = NIL;
 	List			   *hash_max_list = NIL;
@@ -4525,9 +4574,9 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 	/*
 	 * Load from the tuplestore
 	 */
-	while (tuplestore_gettupleslot(tupstore, true, false, tupslot))
+	while (tuplestore_gettupleslot(tupstore, true, false, scan_slot))
 	{
-		pg_crc32	hash = get_tuple_hashvalue(istate, tupslot);
+		pg_crc32	hash = get_tuple_hashvalue(istate, scan_slot);
 
 		forboth (lc1, pds_list,
 				 lc2, hash_max_list)
@@ -4537,7 +4586,7 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 
 			if (hash <= hash_max)
 			{
-				if (pgstrom_data_store_insert_hashitem(pds, tupslot, hash))
+				if (pgstrom_data_store_insert_hashitem(pds, scan_slot, hash))
 					break;
 				elog(ERROR, "Bug? GpuHashJoin Histgram was not correct");
 			}
@@ -4694,6 +4743,8 @@ retry:
 		cl_uint	nitems_old = pds_hash->kds->nitems;
 		cl_uint	nslots_new = (cl_uint)(pgstrom_chunk_size_margin *
 									   (double)(2 * nitems_old));
+
+		elog(INFO, "hash_nslots %u =>%u nitems=%u", pds_hash->kds->nslots, nslots_new, pds_hash->kds->nitems);
 
 		pgstrom_expand_data_store(gjs->gts.gcontext,
 								  pds_hash,
@@ -4922,7 +4973,7 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 		pfree(istate_buf);
 
 		/*
-		 * FIXME: we may omit some depths if nitems==0 and JOIN_INNER
+		 * TODO: we may omit some depths if nitems==0 and JOIN_INNER
 		 *
 		 * needs to clarify its condition!!
 		 */
@@ -4965,7 +5016,8 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 	for (i=0; i < gjs->num_rels; i++)
 	{
 		innerState		   *istate = &gjs->inners[i];
-		pgstrom_data_store *pds = linitial(istate->pds_list);
+		pgstrom_data_store *pds = list_nth(istate->pds_list,
+										   gjs->inners[i].pds_index - 1);
 
 		pmrels->inner_chunks[i] = pgstrom_acquire_data_store(pds);
 		pmrels->kern.chunks[i].chunk_offset = pmrels->usage_length;
@@ -4984,6 +5036,8 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 		if (istate->join_type == JOIN_LEFT ||
 			istate->join_type == JOIN_FULL)
 			pmrels->kern.chunks[i].left_outer = true;
+
+		elog(INFO, "IPreLoad depth=%d index=%d of %d nitems=%u nslots=%u", istate->depth, gjs->inners[i].pds_index, list_length(gjs->inners[i].pds_list), pds->kds->nitems, pds->kds->nslots);
 	}
 	/* already attached on the caller's context */
 	pmrels->n_attached = 1;
