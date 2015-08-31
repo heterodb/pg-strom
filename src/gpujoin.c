@@ -3122,8 +3122,6 @@ retry:
 
 		if (pds_dst && depth <= pgjoin->kern.result_valid_until)
 		{
-			double	reduction_ratio = ((double)inner_size[depth - 1] /
-									   (double)pgjoin->inner_size[depth - 1]);
 			/*
 			 * In case of DataStoreNoSpace and retry, the last execution
 			 * result tells us exact number of tuples to be generated.
@@ -3177,10 +3175,6 @@ retry:
 				}
 				selectivity = Min(0.05, selectivity);	/* XXX - at least 5% */
 				ntuples_next += selectivity * inner_size[depth-1];
-
-				elog(INFO,
-					 "match_ratio=%.6f selectivity=%.6f ntuples_next=%.2f",
-					 match_ratio, selectivity, ntuples_next);
 			}
 		}
 
@@ -3198,7 +3192,6 @@ retry:
 		 */
 		if (kgjoin_length > pgstrom_chunk_size())
 		{
-			elog(INFO, "inner_base[%d]=%u inner_size[%d] %u => %u", depth-1, pgjoin->inner_base[depth-1], depth-1, inner_size[depth-1], inner_size[depth-1]/2);
 			inner_size[depth-1] /= 2;
 			continue;
 		}
@@ -3227,8 +3220,6 @@ retry:
 	 * we adopts the larger one.
 	 */
 	dst_nrooms = (Size)(ntuples * (double) pgstrom_chunk_size_margin);
-	if (pds_dst)
-		elog(INFO, "nrooms %u=>%u", pds_dst->kds->nrooms, (cl_uint)dst_nrooms);
 
 	if (gjs->result_format == KDS_FORMAT_SLOT)
 	{
@@ -3316,7 +3307,10 @@ retry:
 		Size		result_width;
 		Size		new_length;
 
-		/* average length of the result tuple */
+		/*
+		 * average length of the result tuple
+		 * of course, last execution knows exact length of tuple width
+		 */
 		if (!pds_dst)
 			result_width = gjs->result_width;
 		else
@@ -3431,19 +3425,6 @@ retry:
 	memcpy(pgjoin->inner_size, inner_size, sizeof(pgjoin->inner_size));
 	memcpy(pgjoin->num_threads, num_threads, sizeof(pgjoin->num_threads));
 	pgjoin->inner_ratio = inner_ratio_total;
-#if 0
-	for (depth=start_depth; depth <= gjs->num_rels; depth++)
-	{
-		elog(INFO, "pgjoin=%p depth=%d num_threads=%u inner=(%u,%u) max_items=%zu ntuples=%zu",
-			 pgjoin,
-			 depth,
-			 pgjoin->num_threads[depth-1],
-			 pgjoin->inner_base[depth-1],
-			 pgjoin->inner_size[depth-1],
-			 (Size) max_items,
-			 (Size) ntuples);
-	}
-#endif
 }
 
 static GpuTask *
@@ -3775,8 +3756,21 @@ gpujoin_task_complete(GpuTask *gtask)
 	}
 	else if (pgjoin->task.kerror.errcode == StromError_DataStoreNoSpace)
 	{
+#ifdef PGSTROM_DEBUG
+		/* For debug output */
+		kern_data_store	   *kds_dst = pgjoin->pds_dst->kds;
+		cl_uint		inner_base[GPUJOIN_MAX_DEPTH + 1];
+		cl_uint		inner_size[GPUJOIN_MAX_DEPTH + 1];
+		cl_uint		nrooms_old;
+		cl_uint		length_old;
 		cl_int		i;
+		StringInfoData	str;
 
+		memcpy(inner_base, pgjoin->inner_base, sizeof(inner_base));
+		memcpy(inner_size, pgjoin->inner_size, sizeof(inner_size));
+		length_old = kds_dst->length;
+		nrooms_old = kds_dst->nrooms;
+#endif
 		/*
 		 * StromError_DataStoreNoSpace indicates either/both of buffers
 		 * were smaller than required. So, we expand the buffer or reduce
@@ -3784,6 +3778,31 @@ gpujoin_task_complete(GpuTask *gtask)
 		 */
 		gpujoin_attach_result_buffer(gjs, pgjoin, pgjoin->inner_base);
 
+#ifdef PGSTROM_DEBUG
+		initStringInfo(&str);
+		appendStringInfo(&str, "inner_base=(");
+		for (i=0; i <= gjs->num_rels; i++)
+			appendStringInfo(&str, "%s%u", i==0 ? "" : ", ",
+							 pgjoin->inner_base[i]);
+		appendStringInfo(&str, ") inner_size=(");
+
+		for (i=0; i <= gjs->num_rels; i++)
+			appendStringInfo(&str, "%s%u", i==0 ? "" : ", ",
+							 inner_size[i]);
+		appendStringInfo(&str, ") => (");
+		for (i=0; i <= gjs->num_rels; i++)
+			appendStringInfo(&str, "%s%u", i==0 ? "" : ", ",
+							 pgjoin->inner_size[i]);
+		appendStringInfo(&str, ")");
+		kds_dst = pgjoin->pds_dst->kds;
+		if (kds_dst->format == KDS_FORMAT_ROW)
+			elog(NOTICE, "GpuJoin: DataStoreNoSpace length %u => %u %s",
+				 length_old, kds_dst->length, str.data);
+		else
+			elog(NOTICE, "GpuJoin: DataStoreNoSpace nrooms %u => %u %s",
+				 nrooms_old, kds_dst->nrooms, str.data);
+		pfree(str.data);
+#endif
 		/*
 		 * OK, chain this task on the pending_tasks queue again
 		 *
@@ -4527,7 +4546,7 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 						  STROMALIGN(sizeof(cl_uint) * nslots) +
 						  curr_size);
 
-			hash_max = (i + 1) * (1U << istate->hgram_shift) - 1;
+			hash_max = i * (1U << istate->hgram_shift) - 1;
 			pds_hash = pgstrom_create_data_store_hash(gjs->gts.gcontext,
 													  scan_desc,
 													  kds_length,
@@ -4583,6 +4602,7 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 			{
 				if (pgstrom_data_store_insert_hashitem(pds, scan_slot, hash))
 					break;
+				Assert(false);
 				elog(ERROR, "Bug? GpuHashJoin Histgram was not correct");
 			}
 		}
@@ -5033,8 +5053,6 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 		if (istate->join_type == JOIN_LEFT ||
 			istate->join_type == JOIN_FULL)
 			pmrels->kern.chunks[i].left_outer = true;
-
-		elog(INFO, "IPreLoad depth=%d index=%d of %d nitems=%u nslots=%u", istate->depth, gjs->inners[i].pds_index, list_length(gjs->inners[i].pds_list), pds->kds->nitems, pds->kds->nslots);
 	}
 	/* already attached on the caller's context */
 	pmrels->n_attached = 1;

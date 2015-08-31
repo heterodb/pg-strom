@@ -64,9 +64,11 @@ else
 endif
 
 PGSTROM_FLAGS := $(shell $(PG_CONFIG) --configure | \
-	grep -q "'--enable-debug'" && \
-	echo "-Wall -DPGSTROM_DEBUG=1 -O0 -g")
-PGSTROM_FLAGS += -DCMD_GPUINGO_PATH=\"$(shell $(PG_CONFIG) --bindir)/gpuinfo\"
+  awk '/'--enable-debug'/ {print "-Wall -DPGSTROM_DEBUG=1"}')
+PGSTROM_FLAGS += $(shell $(PG_CONFIG) --cflags | \
+  sed -E 's/[ ]+/\n/g' | \
+  awk 'BEGIN{ CCOPT="" } /^-O[0-9]$$/{ CCOPT=$$1 } END{ print CCOPT }')
+PGSTROM_FLAGS += -DCMD_GPUINFO_PATH=\"$(shell $(PG_CONFIG) --bindir)/gpuinfo\"
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(IPATH)
 SHLIB_LINK := -L $(LPATH) -lnvrtc -lcuda
 
