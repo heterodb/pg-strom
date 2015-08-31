@@ -519,14 +519,8 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			if (hash_value >= kds_hash->hash_min &&
 				hash_value <= kds_hash->hash_max)
 			{
-				cl_uint		slot_index = hash_value % kds_hash->nslots;
-
-				if (slot_index >= inner_base &&
-					slot_index <  inner_base + inner_size)
-				{
-					khitem = KERN_HASH_FIRST_ITEM(kds_hash, hash_value);
-					needs_outer_row = true;
-				}
+				khitem = KERN_HASH_FIRST_ITEM(kds_hash, hash_value);
+				needs_outer_row = true;
 			}
 		}
 
@@ -534,10 +528,14 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		 * walks on the hash entries
 		 */
 		do {
-			HeapTupleHeaderData *h_htup
-				= (!khitem || khitem->hash != hash_value
-				   ? NULL
-				   : &khitem->htup);
+			HeapTupleHeaderData *h_htup;
+
+			if (khitem && (khitem->hash  == hash_value &&
+						   khitem->rowid >= inner_base &&
+						   khitem->rowid <  inner_base + inner_size))
+				h_htup = &khitem->htup;
+			else
+				h_htup = NULL;
 
 			is_matched = gpujoin_join_quals(&kcxt,
 											kds,
@@ -746,7 +744,6 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 	kern_data_store	   *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 	kern_hashitem	   *khitem;
 	kern_context		kcxt;
-	size_t				kds_index = get_global_id() + inner_base;
 	cl_bool			   *lo_map;
 	cl_bool				needs_outer_row;
 	cl_uint				offset;
@@ -767,18 +764,19 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 	assert(get_global_ysize() == 1);
 	assert(depth > 0 && depth <= kgjoin->num_rels);
 	assert(kresults_out->nrels == depth + 1);
-	assert(inner_base + inner_size <= kds_hash->nslots);
+	assert(inner_base + inner_size <= kds_hash->nitems);
 
 	/*
 	 * Fetch a hash-entry from each hash-slot
 	 */
-	if (get_global_id() < inner_size)
-		khitem = KERN_HASH_FIRST_ITEM(kds_hash, kds_index);
+	if (get_global_id() < kds_hash->nslots)
+		khitem = KERN_HASH_FIRST_ITEM(kds_hash, get_global_id());
 	else
 		khitem = NULL;
 
 	do {
-		if (khitem != NULL)
+		if (khitem && (khitem->rowid >= inner_base &&
+					   khitem->rowid <  inner_base + inner_size))
 		{
 			/*
 			 * check whether the relevant inner tuple has any matched outer

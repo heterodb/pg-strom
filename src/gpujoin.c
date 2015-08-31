@@ -3030,12 +3030,8 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 		for (depth=1; depth <= gjs->num_rels; depth++)
 		{
 			pgstrom_data_store *pds_in = pmrels->inner_chunks[depth - 1];
-			if (pds_in->kds->format != KDS_FORMAT_HASH)
-				inner_size[depth-1] = (pds_in->kds->nitems -
-									   pgjoin->inner_base[depth-1]);
-			else
-				inner_size[depth-1] = (pds_in->kds->nslots -
-									   pgjoin->inner_base[depth-1]);
+			inner_size[depth-1] = (pds_in->kds->nitems -
+								   pgjoin->inner_base[depth-1]);
 		}
 	}
 
@@ -3122,9 +3118,7 @@ retry:
 		num_threads[depth-1] = Max((cl_uint) ntuples, 1);
 
 		inner_ratio = ((double) inner_size[depth-1] /
-					   (double)(pds_in->kds->format != KDS_FORMAT_HASH
-								? pds_in->kds->nitems
-								: pds_in->kds->nslots));
+					   (double) pds_in->kds->nitems);
 
 		if (pds_dst && depth <= pgjoin->kern.result_valid_until)
 		{
@@ -4247,6 +4241,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			if (pds_src == NULL &&
 				(join_type == JOIN_RIGHT || join_type == JOIN_FULL))
 			{
+				pgstrom_data_store *pds_in = pmrels->inner_chunks[depth - 1];
+
 				Assert(depth >= gjs->outer_join_start_depth);
 				/* gather the outer join map, if multi-GPUs environment */
 				multirels_colocate_outer_join_maps(pgjoin->pmrels,
@@ -4256,7 +4252,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 											   pgjoin->kern_outer_hj,
 											   pgjoin->task.cuda_device,
 											   false,
-											   inner_size,
+											   pds_in->kds->nslots,
 											   sizeof(kern_errorbuf));
 				kern_args[0] = &pgjoin->m_kgjoin;
 				kern_args[1] = &pgjoin->m_kds_src;
@@ -4497,7 +4493,6 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 	TupleTableSlot	   *scan_slot = scan_ps->ps_ResultTupleSlot;
 	TupleDesc			scan_desc = scan_slot->tts_tupleDescriptor;
 	Tuplestorestate	   *tupstore = istate->tupstore;
-//	TupleTableSlot	   *tupslot = NULL;
 	pgstrom_data_store *pds_hash;
 	List			   *pds_list = NIL;
 	List			   *hash_max_list = NIL;
@@ -4594,7 +4589,10 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 	}
 
 	foreach (lc1, pds_list)
-		pgstrom_shrink_data_store((pgstrom_data_store *) lfirst(lc1));
+	{
+		pgstrom_data_store *pds_in = lfirst(lc1);
+		pgstrom_shrink_data_store(pds_in);
+	}
 	Assert(istate->pds_list == NIL);
 	istate->pds_list = pds_list;
 
@@ -4668,7 +4666,9 @@ gpujoin_inner_hash_preload(GpuJoinState *gjs,
 	hash = get_tuple_hashvalue(istate, scan_slot);
 	consumption = sizeof(cl_uint) +	/* for hash_slot */
 		MAXALIGN(offsetof(kern_hashitem, htup) + tuple->t_len);
-	/* histgram update */
+	/*
+	 * Update Histgram
+	 */
 	index = (hash >> istate->hgram_shift);
 	istate->hgram_size[index] += consumption;
 	istate->hgram_nitems[index]++;
@@ -4692,7 +4692,7 @@ retry:
 		istate->pds_limit <= istate->consumed + consumption)
 	{
 		if (istate->join_type == JOIN_INNER ||
-			istate->join_type == JOIN_RIGHT)
+			istate->join_type == JOIN_LEFT)
 		{
 			cl_uint		hash_nslots;
 
@@ -4743,9 +4743,6 @@ retry:
 		cl_uint	nitems_old = pds_hash->kds->nitems;
 		cl_uint	nslots_new = (cl_uint)(pgstrom_chunk_size_margin *
 									   (double)(2 * nitems_old));
-
-		elog(INFO, "hash_nslots %u =>%u nitems=%u", pds_hash->kds->nslots, nslots_new, pds_hash->kds->nitems);
-
 		pgstrom_expand_data_store(gjs->gts.gcontext,
 								  pds_hash,
 								  2 * pds_hash->kds_length,
