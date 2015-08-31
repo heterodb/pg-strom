@@ -37,7 +37,7 @@ test: varremap_ghj
 # GpuSort pattern
 # ----------
 # GpuSort parallel test-cases.
-test: explain_gso normal_gso group_gso multikey_gso text_gso zero_gso
+test: explain_gso normal_gso group_gso multikey_gso text_gso zero_gso time_gso
 #test: merge_gso
 # GpuSort closed issue test-cases.
 test: 2+key_gso
