@@ -11,6 +11,7 @@ set pg_strom.gpu_setup_cost to 0;
 set pg_strom.debug_force_gpupreagg to on;
 set pg_strom.enable_gpusort to off;
 set client_min_messages to warning;
+set datestyle to 'Postgres, MDY';
 
 -- timezone JST-9
 set timezone to 'JST-9';
