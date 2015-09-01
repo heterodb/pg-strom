@@ -3779,28 +3779,41 @@ gpujoin_task_complete(GpuTask *gtask)
 		gpujoin_attach_result_buffer(gjs, pgjoin, pgjoin->inner_base);
 
 #ifdef PGSTROM_DEBUG
-		initStringInfo(&str);
-		appendStringInfo(&str, "inner_base=(");
-		for (i=0; i <= gjs->num_rels; i++)
-			appendStringInfo(&str, "%s%u", i==0 ? "" : ", ",
-							 pgjoin->inner_base[i]);
-		appendStringInfo(&str, ") inner_size=(");
-
-		for (i=0; i <= gjs->num_rels; i++)
-			appendStringInfo(&str, "%s%u", i==0 ? "" : ", ",
-							 inner_size[i]);
-		appendStringInfo(&str, ") => (");
-		for (i=0; i <= gjs->num_rels; i++)
-			appendStringInfo(&str, "%s%u", i==0 ? "" : ", ",
-							 pgjoin->inner_size[i]);
-		appendStringInfo(&str, ")");
+		/* kds_dst might be replaced */
 		kds_dst = pgjoin->pds_dst->kds;
+		initStringInfo(&str);
+		if (!pgjoin->pds_src)
+			appendStringInfo(&str, "OJTask ");
+
 		if (kds_dst->format == KDS_FORMAT_ROW)
-			elog(NOTICE, "GpuJoin: DataStoreNoSpace length %u => %u %s",
-				 length_old, kds_dst->length, str.data);
+		{
+			if (length_old == kds_dst->length)
+				appendStringInfo(&str, "length: %u", length_old);
+			else
+				appendStringInfo(&str, "length: %u=>%u",
+								 length_old, kds_dst->length);
+		}
 		else
-			elog(NOTICE, "GpuJoin: DataStoreNoSpace nrooms %u => %u %s",
-				 nrooms_old, kds_dst->nrooms, str.data);
+		{
+			if (nrooms_old == kds_dst->nrooms)
+				appendStringInfo(&str, "nrooms: %u", nrooms_old);
+			else
+				appendStringInfo(&str, "nrooms: %u=>%u",
+								 nrooms_old, kds_dst->nrooms);
+		}
+		appendStringInfo(&str, " inners: ");
+		for (i=0; i < gjs->num_rels; i++)
+		{
+			Assert(inner_base[i] == pgjoin->inner_base[i]);
+			if (inner_size[i] == pgjoin->inner_size[i])
+				appendStringInfo(&str, "%s(%u, %u)", i > 0 ? ", " : "",
+								 inner_base[i], inner_size[i]);
+			else
+				appendStringInfo(&str, "%s(%u, %u=>%u)", i > 0 ? ", " : "",
+								 inner_base[i], inner_size[i],
+								 pgjoin->inner_size[i]);
+		}
+		elog(NOTICE, "GpuJoin(%p) DataStoreNoSpace %s", pgjoin, str.data);
 		pfree(str.data);
 #endif
 		/*

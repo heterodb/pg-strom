@@ -545,6 +545,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 											h_htup);	/* valid if in range */
 			if (is_matched)
 			{
+				assert(khitem->rowid < kds_hash->nitems);
 				if (lo_map && !lo_map[khitem->rowid])
 					lo_map[khitem->rowid] = true;
 				needs_outer_row = false;
@@ -763,9 +764,67 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 	/* sanity checks */
 	assert(get_global_ysize() == 1);
 	assert(depth > 0 && depth <= kgjoin->num_rels);
+	assert(ndevs > 0);
 	assert(kresults_out->nrels == depth + 1);
 	assert(inner_base + inner_size <= kds_hash->nitems);
+	assert(inner_size > 0);
 
+#if 1
+	/*
+	 * A workaround implementation based on global memory operation.
+	 *
+	 * NOTE: we had a trouble around the code at #else .. #endif
+	 * It looks to me the problem comes from shared memory and inter-
+	 * thread synchronization, however, not ensured 100% at this moment.
+	 * So, I put alternative implementation without reduction operation
+	 * on the shared memory, but takes atomic operation on global
+	 * memory for each outer tuple. It is a concern.
+	 */
+	if (get_global_id() < kds_hash->nslots)
+		khitem = KERN_HASH_FIRST_ITEM(kds_hash, get_global_id());
+	else
+		khitem = NULL;
+
+	while (khitem != NULL)
+	{
+		assert((khitem->hash % kds_hash->nslots) == get_global_id());
+		if (khitem->rowid >= inner_base &&
+			khitem->rowid <  inner_base + inner_size)
+		{
+			cl_uint		nitems = kds_hash->nitems;
+
+			assert(khitem->rowid < nitems);
+			needs_outer_row = true;
+			for (i=0; i < ndevs; i++)
+			{
+				lo_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, nitems,
+													   i, outer_join_map);
+				assert(lo_map != NULL);
+				assert(khitem->rowid < nitems);
+				if (lo_map[khitem->rowid])
+					needs_outer_row = false;
+			}
+
+			if (needs_outer_row)
+			{
+				cl_uint		index = atomicAdd(&kresults_out->nitems, 1);
+
+				atomicMax(&kgjoin->kresults_max_items,
+						  (depth + 1) * (index));
+				if (index < kresults_out->nrooms)
+				{
+					r_buffer = KERN_GET_RESULT(kresults_out, index);
+					memset(r_buffer, 0, sizeof(cl_int) * depth);    /* NULL */
+					r_buffer[depth] = (size_t)&khitem->htup - (size_t)kds_hash;
+					assert((size_t)&khitem->htup - (size_t)kds_hash > 0UL);
+				}
+				else
+					STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+			}
+		}
+		khitem = KERN_HASH_NEXT_ITEM(kds_hash, khitem);
+	}
+#else
 	/*
 	 * Fetch a hash-entry from each hash-slot
 	 */
@@ -775,8 +834,12 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 		khitem = NULL;
 
 	do {
-		if (khitem && (khitem->rowid >= inner_base &&
-					   khitem->rowid <  inner_base + inner_size))
+		__syncthreads();
+		assert(!khitem || (khitem->hash %
+						   kds_hash->nslots) == get_global_id());
+
+		if (khitem != NULL && (khitem->rowid >= inner_base &&
+							   khitem->rowid <  inner_base + inner_size))
 		{
 			/*
 			 * check whether the relevant inner tuple has any matched outer
@@ -791,7 +854,8 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 				lo_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, nitems,
 													   i, outer_join_map);
 				assert(lo_map != NULL);
-				if (lo_map[khitem->rowid])	// offset by inner_base?
+				assert(khitem->rowid < nitems);
+				if (lo_map[khitem->rowid])
 					needs_outer_row = false;
 			}
 		}
@@ -813,15 +877,19 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 					  (depth + 1) * (base + count));
 		}
 		__syncthreads();
+		assert(count <= get_global_xsize());
 
 		/* In case when (base + num_unmatched) is larger than nrooms, it means
 		 * we don't have enough space to write back nested-loop results.
 		 * So, we have to tell the host-side to acquire larger kern_resultbuf.
 		 */
 		if (base + count >= kresults_out->nrooms)
+		{
 			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+		}
 		else if (needs_outer_row)
 		{
+			assert(khitem != NULL);
 			/*
 			 * OK, we know which row should be materialized using left outer
 			 * join manner, and result buffer was acquired. Let's put result
@@ -830,6 +898,7 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 			r_buffer = KERN_GET_RESULT(kresults_out, base + offset);
 			memset(r_buffer, 0, sizeof(cl_int) * depth);	/* NULL */
 			r_buffer[depth] = (size_t)&khitem->htup - (size_t)kds_hash;
+			assert((size_t)&khitem->htup - (size_t)kds_hash > 0UL);
 		}
 
 		/*
@@ -838,7 +907,11 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 		 */
 		khitem = KERN_HASH_NEXT_ITEM(kds_hash, khitem);
 		arithmetic_stairlike_add(khitem != NULL ? 1 : 0, &count);
+		//__syncthreads();
+		assert(++loop < 100000);
 	} while (count > 0);
+	__syncthreads();
+#endif
 out:
 	kern_writeback_error_status(&kresults_out->kerror, kcxt.e);
 }
