@@ -1106,7 +1106,7 @@ gpusort_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	int				i;
 
 	/* actual cost we estimated */
-	if (es->verbose)
+	if (es->verbose && es->costs)
 	{
 		if (es->format == EXPLAIN_FORMAT_TEXT)
 		{
@@ -1273,7 +1273,7 @@ gpusort_next_chunk(GpuTaskState *gts)
 				break;
 			/* OK, expand it and try again */
 			gss->chunk_size += gss->chunk_size;
-			pgstrom_expand_data_store(gcontext, ptoast, gss->chunk_size);
+			pgstrom_expand_data_store(gcontext, ptoast, gss->chunk_size, 0);
 			ptoast->kds->nrooms = 2 * ptoast->kds->nitems;
 		}
 	}

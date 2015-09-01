@@ -731,6 +731,72 @@ pg_common_vstore(kern_data_store *kds,
 	}
 
 /*
+ * Template of variable classes: fixed-length referenced by pointer
+ * ----------------------------------------------------------------
+ */
+#define STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)			\
+	STATIC_FUNCTION(pg_##NAME##_t)							\
+	pg_##NAME##_datum_ref(kern_context *kcxt,				\
+						  void *datum,						\
+						  cl_bool internal_format)			\
+	{														\
+		pg_##NAME##_t	result;								\
+															\
+		if (!datum)											\
+			result.isnull = true;							\
+		else												\
+		{													\
+			result.isnull = false;							\
+			memcpy(&result.value, (BASE *) datum,			\
+				   sizeof(BASE));							\
+		}													\
+		return result;										\
+	}														\
+															\
+	STATIC_FUNCTION(pg_##NAME##_t)							\
+	pg_##NAME##_vref(kern_data_store *kds,					\
+					 kern_context *kcxt,					\
+					 cl_uint colidx,						\
+					 cl_uint rowidx)						\
+	{														\
+		void  *datum = kern_get_datum(kds,colidx,rowidx);	\
+		return pg_##NAME##_datum_ref(kcxt,datum,false);		\
+	}
+
+#define STROMCL_INDIRECT_VARSTORE_TEMPLATE(NAME,BASE)		\
+	STATIC_FUNCTION(void)									\
+	pg_##NAME##_vstore(kern_data_store *kds,				\
+					   kern_context *kcxt,					\
+					   cl_uint colidx,						\
+					   cl_uint rowidx,						\
+					   pg_##NAME##_t pg_datum)				\
+	{														\
+		/* should not be used at this moment */				\
+		assert(0);											\
+	}
+
+#define STROMCL_INDIRECT_PARAMREF_TEMPLATE(NAME,BASE)		\
+	STATIC_FUNCTION(pg_##NAME##_t)							\
+	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)	\
+	{														\
+		kern_parambuf *kparams = kcxt->kparams;				\
+		pg_##NAME##_t result;								\
+															\
+		if (param_id < kparams->nparams &&					\
+			kparams->poffset[param_id] > 0)					\
+		{													\
+			BASE *addr = (BASE *)((char *)kparams +			\
+								  kparams->poffset[param_id]);	\
+			memcpy(&result.value, addr, sizeof(BASE));		\
+			result.isnull = false;							\
+		}													\
+		else												\
+			result.isnull = true;							\
+															\
+		return result;										\
+	}
+
+/*
  * Macros to calculate CRC32 value.
  * (logic was copied from pg_crc32.c)
  */
@@ -770,6 +836,14 @@ pg_common_vstore(kern_data_store *kds,
 	STROMCL_SIMPLE_VARSTORE_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)			\
+	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)
+
+#define STROMCL_INDIRECT_TYPE_TEMPLATE(NAME,BASE)	\
+	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)		\
+	STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)		\
+	STROMCL_INDIRECT_VARSTORE_TEMPLATE(NAME,BASE)	\
+	STROMCL_INDIRECT_PARAMREF_TEMPLATE(NAME,BASE)	\
+	STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)          \
 	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)
 
 /* pg_bool_t */

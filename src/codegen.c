@@ -57,10 +57,12 @@ static struct {
 	{ FLOAT4OID,	"cl_float",	0 },
 	{ FLOAT8OID,	"cl_double",0 },
 	/* date and time datatypes */
-	{ DATEOID,		"cl_int",	DEVFUNC_NEEDS_TIMELIB },
-	{ TIMEOID,		"cl_long",	DEVFUNC_NEEDS_TIMELIB },
-	{ TIMESTAMPOID,	"cl_long",	DEVFUNC_NEEDS_TIMELIB },
-	{ TIMESTAMPTZOID,"cl_long",	DEVFUNC_NEEDS_TIMELIB },
+	{ DATEOID,			"DateADT",		DEVFUNC_NEEDS_TIMELIB },
+	{ TIMEOID,			"TimeADT",		DEVFUNC_NEEDS_TIMELIB },
+	{ TIMETZOID,		"TimeTzADT",	DEVFUNC_NEEDS_TIMELIB },
+	{ TIMESTAMPOID,		"Timestamp",	DEVFUNC_NEEDS_TIMELIB },
+	{ TIMESTAMPTZOID,	"TimestampTz",	DEVFUNC_NEEDS_TIMELIB },
+	{ INTERVALOID,		"Interval",		DEVFUNC_NEEDS_TIMELIB },
 	/* variable length datatypes */
 	{ BPCHAROID,	"varlena",	DEVFUNC_NEEDS_TEXTLIB },
 	{ VARCHAROID,	"varlena",	DEVFUNC_NEEDS_TEXTLIB },
@@ -523,8 +525,14 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "date", 1, {TIMESTAMPOID}, "t/F:timestamp_date" },
 	{ "date", 1, {TIMESTAMPTZOID}, "t/F:timestamptz_date" },
 	{ "time", 1, {TIMEOID}, "ta/c:" },
+	{ "time", 1, {TIMETZOID}, "t/F:timetz_time" },
 	{ "time", 1, {TIMESTAMPOID}, "t/F:timestamp_time" },
 	{ "time", 1, {TIMESTAMPTZOID}, "t/F:timestamptz_time" },
+	{ "timetz", 1, {TIMEOID}, "t/F:time_timetz" },
+	{ "timetz", 1, {TIMESTAMPTZOID}, "t/F:timestamptz_timetz" },
+#ifdef NOT_USED
+	{ "timetz", 2, {TIMETZOID, INT4OID}, "t/F:timetz_scale" },
+#endif
 	{ "timestamp", 1, {DATEOID}, "t/F:date_timestamp" },
 	{ "timestamp", 1, {TIMESTAMPOID}, "ta/c:" },
 	{ "timestamp", 1, {TIMESTAMPTZOID}, "t/F:timestamptz_timestamp" },
@@ -536,9 +544,28 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "date_mi", 2, {DATEOID, DATEOID}, "t/F:date_mi" },
 	{ "datetime_pl", 2, {DATEOID, TIMEOID}, "t/F:datetime_pl" },
 	{ "integer_pl_date", 2, {INT4OID, DATEOID}, "t/F:integer_pl_date" },
-	//{ "time_mi_time", 2, {TIMEOID, TIMEOID}, "t/F:time_mi_time" },
 	{ "timedate_pl", 2, {TIMEOID, DATEOID}, "t/F:timedate_pl" },
-	//{ "timestamp_mi", 2, {TIMESTAMPOID, TIMESTAMPOID}, "" },
+	/* time - time => interval */
+	{ "time_mi_time", 2, {TIMEOID, TIMEOID}, "t/F:time_mi_time" },
+	/* timestamp - timestamp => interval */
+	{ "timestamp_mi", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/F:timestamp_mi" },
+	/* timetz +/- interval => timetz */
+	{ "timetz_pl_interval", 2, {TIMETZOID, INTERVALOID},
+	  "t/F:timetz_pl_interval" },
+	{ "timetz_mi_interval", 2, {TIMETZOID, INTERVALOID},
+	  "t/F:timetz_mi_interval" },
+	/* timestamptz +/- interval => timestamptz */
+	{ "timestamptz_pl_interval", 2, {TIMESTAMPTZOID, INTERVALOID},
+	  "t/F:timestamptz_pl_interval" },
+	{ "timestamptz_mi_interval", 2, {TIMESTAMPTZOID, INTERVALOID},
+	  "t/F:timestamptz_mi_interval" },
+	/* interval operators */
+	{ "interval_um", 1, {INTERVALOID}, "t/F:interval_um" },
+	{ "interval_pl", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_pl" },
+	{ "interval_mi", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_mi" },
+	/* date + timetz => timestamptz */
+	{ "datetimetz_pl", 2, {DATEOID, TIMETZOID}, "t/F:datetimetz_timestamptz" },
+	{ "timestamptz", 2, {DATEOID, TIMETZOID}, "t/F:datetimetz_timestamptz" },
 	/* comparison between date */
 	{ "date_eq", 2, {DATEOID, DATEOID}, "t/b:==" },
 	{ "date_ne", 2, {DATEOID, DATEOID}, "t/b:!=" },
@@ -562,7 +589,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	  "t/F:date_ge_timestamp" },
 	{ "date_cmp_timestamp", 2, {DATEOID, TIMESTAMPOID},
 	  "t/F:date_cmp_timestamp" },
-	/* comparion between time */
+	/* comparison between time */
 	{ "time_eq", 2, {TIMEOID, TIMEOID}, "t/b:==" },
 	{ "time_ne", 2, {TIMEOID, TIMEOID}, "t/b:!=" },
 	{ "time_lt", 2, {TIMEOID, TIMEOID}, "t/b:<"  },
@@ -570,6 +597,14 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "time_gt", 2, {TIMEOID, TIMEOID}, "t/b:>"  },
 	{ "time_ge", 2, {TIMEOID, TIMEOID}, "t/b:>=" },
 	{ "time_cmp", 2, {TIMEOID, TIMEOID}, "t/f:devfunc_int_comp" },
+	/* comparison between timetz */
+	{ "timetz_eq", 2, {TIMETZOID, TIMETZOID}, "t/F:timetz_eq" },
+	{ "timetz_ne", 2, {TIMETZOID, TIMETZOID}, "t/F:timetz_ne" },
+	{ "timetz_lt", 2, {TIMETZOID, TIMETZOID}, "t/F:timetz_lt" },
+	{ "timetz_le", 2, {TIMETZOID, TIMETZOID}, "t/F:timetz_le" },
+	{ "timetz_ge", 2, {TIMETZOID, TIMETZOID}, "t/F:timetz_ge" },
+	{ "timetz_gt", 2, {TIMETZOID, TIMETZOID}, "t/F:timetz_gt" },
+	{ "timetz_cmp", 2, {TIMETZOID, TIMETZOID}, "t/F:timetz_cmp" },
 	/* comparison between timestamp */
 	{ "timestamp_eq", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/b:==" },
 	{ "timestamp_ne", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/b:!=" },
@@ -660,13 +695,20 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "timestamptz_ne_timestamp", 2, {TIMESTAMPTZOID, TIMESTAMPOID},
       "t/F:timestamptz_ne_timestamp" },
 
+	/* comparison between intervals */
+	{ "interval_eq", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_eq" },
+	{ "interval_ne", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_ne" },
+	{ "interval_lt", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_lt" },
+	{ "interval_le", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_le" },
+	{ "interval_ge", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_ge" },
+	{ "interval_gt", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_gt" },
+	{ "interval_cmp", 2, {INTERVALOID, INTERVALOID}, "t/F:interval_cmp" },
+
 	/* overlaps() */
 	{ "overlaps", 4, {TIMEOID, TIMEOID, TIMEOID, TIMEOID},
 	  "t/F:overlaps_time" },
-/*
 	{ "overlaps", 4, {TIMETZOID, TIMETZOID, TIMETZOID, TIMETZOID},
 	  "t/F:overlaps_timetz" },
-*/
 	{ "overlaps", 4, {TIMESTAMPOID, TIMESTAMPOID,
 					  TIMESTAMPOID, TIMESTAMPOID},
 	  "t/F:overlaps_timestamp" },
@@ -1956,6 +1998,7 @@ pgstrom_codegen_available_expression(Expr *expr)
 		}
 		if (!pgstrom_codegen_available_expression((Expr *)caseexpr->defresult))
 			return false;
+		return true;
 	}
 	elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
 	return false;

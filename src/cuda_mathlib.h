@@ -32,7 +32,9 @@
 		}															\
 	} while(0)
 
+#ifndef SAMESIGN
 #define SAMESIGN(a,b)	(((a) < 0) == ((b) < 0))
+#endif
 
 /*
  * Functions for addition operator on basic data types

@@ -32,6 +32,9 @@
 	*((cl_uint *)((char *)(chunk) +				\
 				  (chunk)->chunk_head.size -	\
 				  sizeof(cl_uint)))
+#define HOSTMEM_CHUNK_BY_POINTER(pointer)		\
+	((cudaHostMemChunk *)						\
+	 ((char *)(pointer) - offsetof(cudaHostMemChunk, chunk_data)))
 
 struct cudaHostMemBlock;
 
@@ -72,8 +75,9 @@ typedef struct
 void
 cudaHostMemAssert(void *pointer)
 {
-	cudaHostMemChunk   *chunk = (cudaHostMemChunk *)
-		((char *)pointer - offsetof(cudaHostMemChunk, chunk_data));
+	cudaHostMemChunk   *chunk __attribute__((unused))
+		= HOSTMEM_CHUNK_BY_POINTER(pointer);
+
 	Assert(HOSTMEM_CHUNK_MAGIC(chunk) == HOSTMEM_CHUNK_MAGIC_CODE);
 }
 
@@ -217,10 +221,10 @@ cudaHostMemFree(MemoryContext context, void *pointer)
 	uintptr_t			offset;
 	int					index;
 
-	chunk = (cudaHostMemChunk *)
-		((char *)pointer - offsetof(cudaHostMemChunk, chunk_data));
+	chunk = HOSTMEM_CHUNK_BY_POINTER(pointer);
 	Assert(HOSTMEM_CHUNK_MAGIC(chunk) == HOSTMEM_CHUNK_MAGIC_CODE);
 	chm_block = chunk->chm_block;
+	Assert(memset(pointer, 0xc7, chunk->chunk_head.requested_size) == pointer);
 
 	while (true)
 	{
@@ -296,8 +300,7 @@ cudaHostMemRealloc(MemoryContext context, void *pointer, Size size)
 	Size				length;
 	void			   *result;
 
-	chm_chunk = (cudaHostMemChunk *)
-		((char *)pointer - offsetof(cudaHostMemChunk, chunk_data));
+	chm_chunk = HOSTMEM_CHUNK_BY_POINTER(pointer);
 
 	/* if newsize is still in margin, nothing to do */
 	length = MAXALIGN(offsetof(cudaHostMemChunk, chunk_data) +
@@ -364,10 +367,7 @@ cudaHostMemDelete(MemoryContext context)
 static Size
 cudaHostMemGetChunkSpace(MemoryContext context, void *pointer)
 {
-	cudaHostMemChunk   *chm_chunk =
-		(cudaHostMemChunk *)((char *)pointer -
-							 offsetof(cudaHostMemChunk, chunk_head) -
-							 STANDARDCHUNKHEADERSIZE);
+	cudaHostMemChunk   *chm_chunk = HOSTMEM_CHUNK_BY_POINTER(pointer);
 	Assert(!chm_chunk->free_chain.prev &&
 		   !chm_chunk->free_chain.next);
 	return chm_chunk->chunk_head.size;

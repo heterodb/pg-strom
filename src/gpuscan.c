@@ -325,7 +325,8 @@ assign_bare_ntuples(Plan *plannode, RangeTblEntry *rte)
 Plan *
 gpuscan_try_replace_seqscan(SeqScan *seqscan,
 							List *range_tables,
-							List **pullup_quals)
+							List **p_outer_quals,
+							double *p_outer_ratio)
 {
 	CustomScan	   *cscan;
 	GpuScanInfo		gs_info;
@@ -364,7 +365,6 @@ gpuscan_try_replace_seqscan(SeqScan *seqscan,
 	 */
 	if (!pgstrom_codegen_available_expression((Expr *) seqscan->plan.qual))
 		return NULL;
-	*pullup_quals = copyObject(seqscan->plan.qual);
 
 	/*
 	 * OK, SeqScan with all device executable (or no) qualifiers, and
@@ -387,6 +387,10 @@ gpuscan_try_replace_seqscan(SeqScan *seqscan,
 	cscan->custom_relids = bms_make_singleton(seqscan->scanrelid);
 	cscan->methods = &bulkscan_plan_methods;
 
+	*p_outer_quals = copyObject(seqscan->plan.qual);
+	*p_outer_ratio = Min(seqscan->plan.plan_rows /
+						 cscan->scan.plan.plan_rows, 1.0);
+
 	return &cscan->scan.plan;
 }
 
@@ -399,12 +403,14 @@ gpuscan_try_replace_seqscan(SeqScan *seqscan,
 Plan *
 gpuscan_pullup_devquals(Plan *plannode,
 						List *range_tables,
-						List **pullup_quals)
+						List **p_outer_quals,
+						double *p_outer_ratio)
 {
 	CustomScan	   *cscan_old = (CustomScan *) plannode;
 	CustomScan	   *cscan_new;
 	GpuScanInfo	   *gs_info;
 	RangeTblEntry  *rte = rt_fetch(cscan_old->scan.scanrelid, range_tables);
+	List		   *outer_quals;
 
 	Assert(pgstrom_plan_is_gpuscan(plannode));
 	gs_info = deform_gpuscan_info(&cscan_old->scan.plan);
@@ -414,16 +420,21 @@ gpuscan_pullup_devquals(Plan *plannode,
 	{
 		Assert(cscan_old->methods == &bulkscan_plan_methods);
 		Assert(gs_info->kern_source == NULL);
-		*pullup_quals = NULL;
+		*p_outer_quals = NIL;
+		*p_outer_ratio = 1.0;
 		return &cscan_old->scan.plan;
 	}
-	*pullup_quals = copyObject(gs_info->dev_quals);
+	outer_quals = copyObject(gs_info->dev_quals);
+
 	cscan_new = copyObject(cscan_old);
 	assign_bare_ntuples(&cscan_new->scan.plan, rte);
 	cscan_new->methods = &bulkscan_plan_methods;
 	memset(gs_info, 0, sizeof(GpuScanInfo));
 	form_gpuscan_info(cscan_new, gs_info);
 
+	*p_outer_quals = outer_quals;
+	*p_outer_ratio = Min(cscan_old->scan.plan.plan_rows /
+						 cscan_new->scan.plan.plan_rows, 1.0);
 	return &cscan_new->scan.plan;
 }
 

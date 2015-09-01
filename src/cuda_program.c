@@ -924,6 +924,8 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext)
 	int			index = 0;
 	int			nparams = list_length(used_params);
 
+	memset(padding, 0, sizeof(padding));
+
 	/* seek to the head of variable length field */
 	offset = STROMALIGN(offsetof(kern_parambuf, poffset[nparams]));
 	initStringInfo(&str);
@@ -942,17 +944,25 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext)
 			kparams = (kern_parambuf *)str.data;
 			if (con->constisnull)
 				kparams->poffset[index] = 0;	/* null */
+			else if (con->constbyval)
+			{
+				Assert(con->constlen > 0);
+				kparams->poffset[index] = str.len;
+				appendBinaryStringInfo(&str,
+									   (char *)&con->constvalue,
+									   con->constlen);
+			}
 			else
 			{
 				kparams->poffset[index] = str.len;
 				if (con->constlen > 0)
 					appendBinaryStringInfo(&str,
-										   (char *)&con->constvalue,
+										   DatumGetPointer(con->constvalue),
 										   con->constlen);
 				else
 					appendBinaryStringInfo(&str,
-										   DatumGetPointer(con->constvalue),
-										   VARSIZE(con->constvalue));
+                                           DatumGetPointer(con->constvalue),
+                                           VARSIZE(con->constvalue));
 			}
 		}
 		else if (IsA(node, Param))
@@ -988,14 +998,17 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext)
 					kparams->poffset[index] = 0;	/* null */
 				else
 				{
-					int		typlen = get_typlen(prm->ptype);
+					int16	typlen;
+					bool	typbyval;
 
-					if (typlen == 0)
-						elog(ERROR, "cache lookup failed for type %u",
-							 prm->ptype);
-					if (typlen > 0)
+					get_typlenbyval(prm->ptype, &typlen, &typbyval);
+					if (typbyval)
 						appendBinaryStringInfo(&str,
 											   (char *)&prm->value,
+											   typlen);
+					else if (typlen > 0)
+						appendBinaryStringInfo(&str,
+											   DatumGetPointer(prm->value),
 											   typlen);
 					else
 						appendBinaryStringInfo(&str,
