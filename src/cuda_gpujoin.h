@@ -741,6 +741,7 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 					   cl_uint inner_size)
 {
 	kern_parambuf	   *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
+	kern_resultbuf	   *kresults_in = KERN_GPUJOIN_IN_RESULTS(kgjoin, depth);
 	kern_resultbuf	   *kresults_out = KERN_GPUJOIN_OUT_RESULTS(kgjoin, depth);
 	kern_data_store	   *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 	kern_hashitem	   *khitem;
@@ -756,7 +757,7 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 	/*
 	 * immediate bailout if previous stage already have error status
 	 */
-	kcxt.e = kresults_out->kerror;
+	kcxt.e = kresults_in->kerror;
 	if (kcxt.e.errcode != StromError_Success)
 		goto out;
 	INIT_KERNEL_CONTEXT(&kcxt,gpujoin_outer_hashjoin,kparams);
@@ -807,10 +808,11 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 
 			if (needs_outer_row)
 			{
-				cl_uint		index = atomicAdd(&kresults_out->nitems, 1);
+				cl_uint		index;
 
+				index = atomicAdd(&kresults_out->nitems, 1);
 				atomicMax(&kgjoin->kresults_max_items,
-						  (depth + 1) * (index));
+						  (depth + 1) * (index + 1));
 				if (index < kresults_out->nrooms)
 				{
 					r_buffer = KERN_GET_RESULT(kresults_out, index);

@@ -3162,7 +3162,7 @@ retry:
 				double		match_ratio;
 
 				if (pds_in->kds->nitems == 0)
-					selectivity = 0.0;
+					selectivity = 0.0;	/* obviously, no OUTER JOIN rows */
 				else
 				{
 					/*
@@ -3173,7 +3173,7 @@ retry:
 								   / (double) pds_in->kds->nitems);
 					selectivity = 1.0 - Min(1.0, match_ratio);
 				}
-				selectivity = Min(0.05, selectivity);	/* XXX - at least 5% */
+				selectivity = Max(0.05, selectivity);	/* XXX - at least 5% */
 				ntuples_next += selectivity * inner_size[depth-1];
 			}
 		}
@@ -3192,7 +3192,7 @@ retry:
 		 */
 		if (kgjoin_length > pgstrom_chunk_size())
 		{
-			inner_size[depth-1] /= 2;
+			inner_size[depth-1] /= (kgjoin_length / pgstrom_chunk_size()) + 1;
 			continue;
 		}
 		max_items = Max(max_items, total_items);
@@ -3761,6 +3761,7 @@ gpujoin_task_complete(GpuTask *gtask)
 		kern_data_store	   *kds_dst = pgjoin->pds_dst->kds;
 		cl_uint		inner_base[GPUJOIN_MAX_DEPTH + 1];
 		cl_uint		inner_size[GPUJOIN_MAX_DEPTH + 1];
+		cl_uint		nitems_old;
 		cl_uint		nrooms_old;
 		cl_uint		length_old;
 		cl_int		i;
@@ -3770,6 +3771,7 @@ gpujoin_task_complete(GpuTask *gtask)
 		memcpy(inner_size, pgjoin->inner_size, sizeof(inner_size));
 		length_old = kds_dst->length;
 		nrooms_old = kds_dst->nrooms;
+		nitems_old = kds_dst->nitems;
 #endif
 		/*
 		 * StromError_DataStoreNoSpace indicates either/both of buffers
@@ -3784,6 +3786,7 @@ gpujoin_task_complete(GpuTask *gtask)
 		initStringInfo(&str);
 		if (!pgjoin->pds_src)
 			appendStringInfo(&str, "OJTask ");
+		appendStringInfo(&str, "nitems: %u ", nitems_old);
 
 		if (kds_dst->format == KDS_FORMAT_ROW)
 		{
