@@ -65,7 +65,6 @@ typedef struct
 	CustomPath		cpath;
 	int				num_rels;
 	Path		   *outer_path;
-	double			kresults_ratio;	/* expected total-items ratio */
 	List		   *host_quals;
 	struct {
 		JoinType	join_type;		/* one of JOIN_* */
@@ -74,6 +73,7 @@ typedef struct
 		List	   *hash_quals;		/* valid quals, if hash-join */
 		List	   *join_quals;		/* all the device quals, incl hash_quals */
 		Size		ichunk_size;	/* expected inner chunk size */
+		int			ichunk_nloops;	/* expected number of loops */
 		int			nbatches;		/* expected iteration in this depth */
 		int			hash_nslots;	/* expected hashjoin slots width, if any */
 	} inners[FLEXIBLE_ARRAY_MEMBER];
@@ -88,7 +88,6 @@ typedef struct
 	char	   *kern_source;
 	int			extra_flags;
 	List	   *used_params;
-	double		kresults_ratio;
 	bool		outer_bulkload;
 	double		bulkload_density;
 	Expr	   *outer_quals;
@@ -119,8 +118,6 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, makeString(gj_info->kern_source));
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
 	exprs = lappend(exprs, gj_info->used_params);
-	privs = lappend(privs,
-					makeInteger(double_as_long(gj_info->kresults_ratio)));
 	privs = lappend(privs, makeInteger(gj_info->outer_bulkload));
 	privs = lappend(privs,
 					makeInteger(double_as_long(gj_info->bulkload_density)));
@@ -158,8 +155,6 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->kern_source = strVal(list_nth(privs, pindex++));
 	gj_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gj_info->used_params = list_nth(exprs, eindex++);
-	gj_info->kresults_ratio =
-		long_as_double(intVal(list_nth(privs, pindex++)));
 	gj_info->outer_bulkload = intVal(list_nth(privs, pindex++));
 	gj_info->bulkload_density =
 		long_as_double(intVal(list_nth(privs, pindex++)));
@@ -254,7 +249,6 @@ typedef struct
 	int				result_format;
 	/* buffer population ratio */
 	int				result_width;	/* result width for buffer length calc */
-	double			kresults_ratio;	/* estimated number of rows to outer */
 	/* supplemental information to ps_tlist  */
 	List		   *ps_src_depth;
 	List		   *ps_src_resno;
@@ -445,92 +439,180 @@ __dump_gpujoin_path(StringInfo buf, PlannerInfo *root, Path *pathnode)
 }
 
 /*
- * This routine checks whether the destination result buffer is sufficient
- * to write-back the joined relations according to the planner estimation.
- * If we need to split outer input stream, it returns number of expected
- * number of chunk split.
+ * estimate_buffersize_gpujoin 
+ *
+ * Top half of cost_gpujoin - we determine expected buffer consumption.
+ * If inner relations buffer is too large, we must split pmrels on
+ * preloading. If result is too large, we must split range of inner
+ * chunks logically.
  */
-static cl_int
-estimate_outer_nsplits(PlannerInfo *root,
-					   GpuJoinPath *gpath,
-					   cl_uint num_chunks,
-					   double nrows_dev_output,
-					   bool support_bulkload)
+static void
+estimate_buffersize_gpujoin(PlannerInfo *root,
+							RelOptInfo *joinrel,
+							GpuJoinPath *gpath,
+							int num_chunks)
 {
-	Path	   *outer_path = gpath->outer_path;
-	RelOptInfo *outer_rel = outer_path->parent;
-	RelOptInfo *join_rel = gpath->cpath.path.parent;
-	Size		kresults_nitems;
-	Size		kgjoin_headsz;
-	Size		kgjoin_length;
-	Size		desttup_length;
-	Size		destbuf_length;
-	double		output_ntuples;
-	cl_int		ncols;
-	cl_int		outer_nsplits = 1;
+	cl_int			num_rels = gpath->num_rels;
 
-	/* number of kresults items per chunk */
-	kresults_nitems = gpath->kresults_ratio *
-		(outer_rel->rows / (double) num_chunks) *
-		pgstrom_chunk_size_margin;
-
-	/* Expected length of kern_gpujoin - if it exceeds the standard chunk
-	 * size, we will split outer input stream.
+	/*
+	 * Estimation: size of multi relational inner buffer
 	 */
-	kgjoin_headsz = (offsetof(kern_gpujoin, kparams) +
-					 BLCKSZ / 2);	/* rough estimation of kern_parambuf */
-	kgjoin_length = kgjoin_headsz +
-		STROMALIGN(offsetof(kern_resultbuf, results[kresults_nitems])) +
-		STROMALIGN(offsetof(kern_resultbuf, results[kresults_nitems]));
-	if (kgjoin_length > pgstrom_chunk_size())
-	{
-		Size	reduced_items;
+	do {
+		Size		inner_limit_sz;
+		Size		inner_total_sz;
+		cl_int		inner_nloops = 1;
+		Size		largest_chunk_size = 0;
+		cl_int		largest_chunk_index = -1;
+		Size		largest_growth_ntuples = 0.0;
+		cl_int		largest_growth_index = -1;
+		Size		buffer_size;
+		double		inner_ntuples;
+		double		join_ntuples;
+		double		prev_ntuples;
+		cl_int		i, ncols;
 
-		reduced_items = (((pgstrom_chunk_size() - kgjoin_headsz) / 2
-						  - STROMALIGN(offsetof(kern_resultbuf, results[0])))
-						 / sizeof(cl_uint));
-		Assert(reduced_items <= kresults_nitems);
-		outer_nsplits = (cl_int) ceil((double) kresults_nitems /
-									  (double) reduced_items);
-	}
+		inner_total_sz = STROMALIGN(offsetof(kern_multirels,
+											 chunks[num_rels]));
+		prev_ntuples = gpath->outer_path->rows / (double) num_chunks;
+		for (i=0; i < num_rels; i++)
+		{
+			Path	   *inner_path = gpath->inners[i].scan_path;
+			RelOptInfo *inner_rel = inner_path->parent;
+			Size		chunk_size;
+			Size		entry_size;
+			Size		hash_nslots;
+			Size		num_items;
 
-	/* Expected length of pgstrom_data_store for destination bufffer.
-	 * If it exceeds the maximum chunk length, we will split outer input
-	 * stream as well.
-	 * Length of the output buffer depends on format of the data-store,
-	 * to be determined on the later stage, so we take worse case if this
-	 * GpuJoin may be able to support bulk-loading.
-	 */
-	ncols = list_length(join_rel->reltargetlist);
-	output_ntuples = nrows_dev_output * pgstrom_chunk_size_margin
-		/ (double)(num_chunks * outer_nsplits);
-	/* size per tuple if slot format */
-	desttup_length = LONGALIGN((sizeof(Datum) + sizeof(char)) * ncols);
-	/* size per tuple if row format and may happen */
-	if (support_bulkload)
-	{
-		desttup_length = Max(desttup_length,
-							 MAXALIGN(offsetof(HeapTupleHeaderData,
-											   t_bits[BITMAPLEN(ncols)])) +
-							 MAXALIGN(join_rel->width));
-	}
-	/* size of destination buffer in worse case */
-	destbuf_length = (STROMALIGN(offsetof(kern_data_store,
-										  colmeta[ncols])) +
-					  desttup_length * (Size) ceil(output_ntuples));
+			/* force a plausible relation size if no information. */
+			inner_ntuples = Max(inner_path->rows *
+								pgstrom_chunk_size_margin /
+								(double)gpath->inners[i].nbatches,
+								100.0);
 
-	/* increase outer_nsplits, if it exceeds the limitation */
-	if (destbuf_length > pgstrom_chunk_size_limit())
-	{
-		double		reduced_ntuples
-			= (pgstrom_chunk_size_limit() -
-			   STROMALIGN(offsetof(kern_data_store,
-								   colmeta[ncols]))) / desttup_length;
+			/*
+			 * NOTE: RelOptInfo->width is not reliable for base relations 
+			 * because this fields shows the length of attributes which
+			 * are actually referenced, however, we usually load physical
+			 * tuples on the KDS/KHash buffer if base relation.
+			 */
+			ncols = list_length(inner_rel->reltargetlist);
+			entry_size = MAXALIGN(offsetof(HeapTupleHeaderData,
+										   t_bits[BITMAPLEN(ncols)]));
+			if (inner_rel->reloptkind != RELOPT_BASEREL)
+				entry_size += MAXALIGN(inner_rel->width);
+			else
+			{
+				entry_size += MAXALIGN(((double)(BLCKSZ -
+												 SizeOfPageHeaderData)
+										* inner_rel->pages
+										/ Max(inner_rel->tuples, 1.0))
+									   - sizeof(ItemIdData)
+									   - SizeofHeapTupleHeader);
+			}
 
-		outer_nsplits = (nrows_dev_output * pgstrom_chunk_size_margin /
-						 ((double)num_chunks * reduced_ntuples));
-	}
-	return outer_nsplits;
+			if (gpath->inners[i].hash_quals != NIL)
+			{
+				entry_size = offsetof(kern_hashitem, htup) + entry_size;
+				hash_nslots = (Size)(inner_ntuples *
+									 pgstrom_chunk_size_margin);
+			}
+			else
+			{
+				entry_size = offsetof(kern_tupitem, htup) + entry_size;
+				hash_nslots = 0;
+			}
+
+			/*
+			 * inner chunk size estimation
+			 */
+			chunk_size = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]))
+				+ STROMALIGN(gpath->inners[i].hash_quals != NIL
+							 ? sizeof(cl_uint) * hash_nslots
+							 : sizeof(cl_uint) * (Size)(inner_ntuples))
+				+ STROMALIGN(entry_size * (Size)(inner_ntuples));
+
+			gpath->inners[i].ichunk_size = chunk_size;
+			gpath->inners[i].hash_nslots = hash_nslots;
+
+			if (largest_chunk_index < 0 || largest_chunk_size < chunk_size)
+			{
+				largest_chunk_size = chunk_size;
+				largest_chunk_index = i;
+			}
+			inner_total_sz += chunk_size;
+
+			/*
+			 * NOTE: The number of intermediation result of GpuJoin has to
+			 * fit pgstrom_chunk_size(). If too large number of rows are
+			 * expected, we try to run same chunk multiple times with
+			 * smaller inner_size[].
+			 */
+			join_ntuples = (gpath->inners[i].join_nrows /
+							(double)(num_chunks * inner_nloops));
+			num_items = (Size)((double)(i+2) * join_ntuples *
+							   pgstrom_chunk_size_margin);
+			buffer_size = offsetof(kern_gpujoin, kparams)
+				+ BLCKSZ	/* alternative of kern_parambuf */
+				+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]))
+				+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]));
+			if (buffer_size <= pgstrom_chunk_size())
+				gpath->inners[i].ichunk_nloops = 1;
+			else
+			{
+				gpath->inners[i].ichunk_nloops =
+					(buffer_size / pgstrom_chunk_size()) + 1;
+				inner_nloops *= gpath->inners[i].ichunk_nloops;
+			}
+
+			if (largest_growth_index < 0 ||
+				join_ntuples - prev_ntuples > largest_growth_ntuples)
+			{
+				largest_growth_index = i;
+				largest_growth_ntuples = join_ntuples - prev_ntuples;
+			}
+			prev_ntuples = join_ntuples;
+		}
+
+		/*
+		 * NOTE:If expected consumption of destination buffer exceeds the
+		 * limitation, we logically divide an inner chunk (with largest
+		 * growth ratio) and run GpuJoin task multiple times towards same
+		 * data set.
+		 * At this moment, we cannot determine which result format shall
+		 * be used (KDS_FORMAT_ROW or KDS_FORMAT_SLOT), so we adopt the
+		 * larger one, for safety.
+		 */
+		Assert(gpath->inners[num_rels-1].join_nrows == gpath->cpath.path.rows);
+		join_ntuples = gpath->cpath.path.rows / (double)(num_chunks *
+														 inner_nloops);
+		ncols = list_length(joinrel->reltargetlist);
+		buffer_size = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+		buffer_size += (Max(LONGALIGN((sizeof(Datum) + sizeof(char)) * ncols),
+							MAXALIGN(offsetof(kern_tupitem, htup) +
+									 joinrel->width) + sizeof(cl_uint))
+						* (Size) join_ntuples);
+		if (buffer_size > pgstrom_chunk_size_limit())
+		{
+			Assert(largest_growth_index >= 0);
+			gpath->inners[i].ichunk_nloops /=
+				(buffer_size / pgstrom_chunk_size_limit()) + 1;
+			continue;
+		}
+
+		/*
+		 * NOTE: If total size of inner multi-relations buffer is out of
+		 * range, we have to split inner buffer multiple portions to fit
+		 * GPU RAMs. It is a restriction come from H/W capability.
+		 */
+		inner_limit_sz = gpuMemMaxAllocSize() / 2 - BLCKSZ * num_rels;
+		if (inner_total_sz > inner_limit_sz)
+		{
+			Assert(largest_chunk_index >= 0);
+			gpath->inners[largest_chunk_index].nbatches
+				/= (inner_total_sz / inner_limit_sz) + 1;
+			continue;
+		}
+	} while (false);
 }
 
 /*
@@ -540,241 +622,145 @@ estimate_outer_nsplits(PlannerInfo *root,
  */
 static bool
 cost_gpujoin(PlannerInfo *root,
+			 RelOptInfo *joinrel,
 			 GpuJoinPath *gpath,
 			 Relids required_outer,
-			 double nrows_dev_output,
 			 bool support_bulkload)
 {
 	Path	   *outer_path = gpath->outer_path;
-	RelOptInfo *outer_rel = outer_path->parent;
 	cl_uint		num_chunks = estimate_num_chunks(outer_path);
 	Cost		startup_cost;
 	Cost		run_cost;
+	Cost		run_cost_per_chunk;
 	Cost		startup_delay;
-	QualCost	host_cost;
 	QualCost   *join_cost;
-	double		gpu_cpu_ratio;
-	double		kresults_ratio;
-	double		outer_ntuples;
+	Size		inner_total_sz = 0;
+	double		chunk_ntuples;
 	double		inner_ntuples;
-	Size		inner_total_sz;
-	Size		inner_limit_sz;
-	Size		largest_size;
-	int			largest_index;
-	int			outer_nsplits;
+	int			inner_nloops_outside = 1;	/* loops by pmrels overflow */
+	int			inner_nloops_inside = 1;	/* loops by kds_dst overflow */
 	int			i, num_rels = gpath->num_rels;
 
 	/*
-	 * NOTE: We try to expand the inner relations buffer unless its size
-	 * does not exceed pre-defined limitation (by GPU device capability)
+	 * Estimation of inner / destination buffer consumption
 	 */
-	inner_limit_sz = gpuMemMaxAllocSize() / 2 - BLCKSZ * num_rels;
+	estimate_buffersize_gpujoin(root, joinrel, gpath, num_chunks);
 
-	/* Buffer size estimation of kern_gpujoin; that contains two
-	 * kern_resultbuf to save the intermediation join results.
-	 * It must be less than pgstrom_chunk_size(). If not, executor
-	 * tries to put smaller oitems_nums to avoid NoDataSpace error.
-	 */
-	kresults_ratio = 1.0;
 	for (i=0; i < num_rels; i++)
 	{
-		kresults_ratio = Max(kresults_ratio,
-							 (double)(i+2)
-							 * gpath->inners[i].join_nrows
-							 * pgstrom_chunk_size_margin
-							 / outer_rel->rows);
+		inner_nloops_outside *= gpath->inners[i].nbatches;
+		inner_nloops_inside *= gpath->inners[i].ichunk_nloops;
 	}
-	gpath->kresults_ratio = kresults_ratio;
 
-	/* do we need to split outer input stream? */
-	outer_nsplits = estimate_outer_nsplits(root, gpath, num_chunks,
-										   nrows_dev_output,
-										   support_bulkload);
+	/*
+	 * Minimum cost comes from outer-path
+	 */
+	startup_cost = pgstrom_gpu_setup_cost + outer_path->startup_cost;
+	run_cost = outer_path->total_cost - outer_path->startup_cost;
+	run_cost_per_chunk = 0.0;
+	subtract_tuplecost_if_bulkload(&run_cost, outer_path);
+
 	/*
 	 * Cost of per-tuple evaluation
 	 */
-	gpu_cpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
 	join_cost = palloc0(sizeof(QualCost) * num_rels);
 	for (i=0; i < num_rels; i++)
 	{
 		cost_qual_eval(&join_cost[i], gpath->inners[i].join_quals, root);
-		join_cost[i].per_tuple *= gpu_cpu_ratio;
+		join_cost[i].per_tuple *= (pgstrom_gpu_operator_cost /
+								   cpu_operator_cost);
 	}
-	cost_qual_eval(&host_cost, gpath->host_quals, root);
 
 	/*
-	 * Estimation of multi-relations buffer size
+	 * Cost for each depth
 	 */
-retry:
-	startup_cost = pgstrom_gpu_setup_cost + outer_path->startup_cost;
-	run_cost = outer_path->total_cost - outer_path->startup_cost;
-	subtract_tuplecost_if_bulkload(&run_cost, outer_path);
-
-	inner_total_sz = STROMALIGN(offsetof(kern_multirels, chunks[num_rels]));
-	largest_size = 0;
-	largest_index = -1;
-	outer_ntuples = outer_path->rows;
+	chunk_ntuples = gpath->outer_path->rows / (double) num_chunks;
 	for (i=0; i < num_rels; i++)
 	{
-		Path	   *inner_path = gpath->inners[i].scan_path;
-		RelOptInfo *inner_rel = inner_path->parent;
-		cl_uint		ncols = list_length(inner_rel->reltargetlist);
-		cl_uint		num_hashkeys = list_length(gpath->inners[i].hash_quals);
-		Size		chunk_size;
-		Size		entry_size;
-		Size		htup_size;
-		Size		hash_nslots = 0;
+		Path	   *scan_path = gpath->inners[i].scan_path;
 
-		/* force a plausible relation size if no information. */
-		inner_ntuples = Max(inner_path->rows *
-							pgstrom_chunk_size_margin /
-							(double)gpath->inners[i].nbatches,
-							100.0);
+		/* cost to load all the tuples from inner-path */
+		startup_cost += scan_path->total_cost;
 
-		/*
-		 * NOTE: RelOptInfo->width is not reliable for base relations 
-		 * because this fields shows the length of attributes which
-		 * are actually referenced, however, we once load physical
-		 * tuple on the KDS/KHash buffer if base relation.
-		 */
-		htup_size = MAXALIGN(offsetof(HeapTupleHeaderData,
-									  t_bits[BITMAPLEN(ncols)]));
-		if (inner_rel->reloptkind != RELOPT_BASEREL)
-			htup_size += MAXALIGN(inner_rel->width);
-		else
-		{
-			double		heap_size = (double)
-				(BLCKSZ - SizeOfPageHeaderData) * inner_rel->pages;
-
-			htup_size += MAXALIGN(heap_size / Max(inner_rel->tuples, 1.0) -
-								  sizeof(ItemIdData) - SizeofHeapTupleHeader);
-		}
-
-		/* chunk_size estimation */
-		chunk_size = STROMALIGN(offsetof(kern_data_store,
-										 colmeta[ncols]));
-		if (gpath->inners[i].hash_quals != NIL)
-		{
-			/* KDS_FORMAT_HASH */
-			/* hash slots */
-			hash_nslots = Max((Size)inner_ntuples, 1024);
-			hash_nslots = Min(hash_nslots,
-							  gpuMemMaxAllocSize() / sizeof(void *));
-			chunk_size += STROMALIGN(sizeof(cl_uint) * (Size)hash_nslots);
-			/* kern_hashitem body */
-			entry_size = offsetof(kern_hashitem, htup) + htup_size;
-			chunk_size += STROMALIGN(entry_size * (Size)inner_ntuples);
-		}
-		else
-		{
-			/* KDS_FORMAT_ROW */
-			/* row-index to kern_tupitem */
-			chunk_size += STROMALIGN(sizeof(cl_uint) * (Size)inner_ntuples);
-			/* kern_tupitem body */
-			entry_size = offsetof(kern_tupitem, htup) + htup_size;
-			chunk_size += STROMALIGN(entry_size * (Size)inner_ntuples);
-		}
-		gpath->inners[i].ichunk_size = chunk_size;
-		gpath->inners[i].hash_nslots = hash_nslots;
-
-		if (largest_index < 0 || largest_size < chunk_size)
-		{
-			largest_size = chunk_size;
-			largest_index = i;
-		}
-		inner_total_sz += chunk_size;
-
-		/*
-		 * Cost calculation in this depth
-		 */
-
-		/*
-		 * cost to load all the tuples to the inner buffer
-		 */
-		startup_cost += inner_path->total_cost;
-
-		/*
-		 * cost for join_qual startup
-		 */
+		/* cost for join_qual startup */
 		startup_cost += join_cost[i].startup;
 
 		/*
-		 * cost to evaluate join qualifiers according to join logic
+		 * cost to evaluate join qualifiers according to
+		 * the GpuJoin logic
 		 */
 		if (gpath->inners[i].hash_quals != NIL)
 		{
 			/*
-			 * GpuHashJoin
-			 *
-			 * It compute hash-value of inner tuples by CPU, outer tuples by
-			 * GPU, then it evaluates join-qualifier for each items on hash
-			 * table by GPU.
+			 * GpuHashJoin - It computes hash-value of inner tuples by CPU,
+			 * but outer tuples by GPU, then it evaluates join-qualifiers
+			 * for each items on inner hash table by GPU.
 			 */
-			double		hash_nsteps
-				= inner_ntuples / (double) gpath->inners[i].hash_nslots;
+			List	   *hash_quals = gpath->inners[i].hash_quals;
+			cl_uint		num_hashkeys = list_length(hash_quals);
+			cl_uint		hash_nslots = gpath->inners[i].hash_nslots;
+			double		hash_nsteps = inner_ntuples / (double) hash_nslots;
 
 			/* cost to compute inner hash value by CPU */
 			startup_cost += (cpu_operator_cost * num_hashkeys *
-							 inner_ntuples);
-			/* cost to compute outer hash value by GPU */
-			run_cost += (pgstrom_gpu_operator_cost * num_hashkeys *
-						 outer_ntuples);
+							 scan_path->rows);
+			/* cost to compute hash value by GPU */
+			run_cost_per_chunk = (pgstrom_gpu_operator_cost *
+								  num_hashkeys *
+								  chunk_ntuples);
 			/* cost to evaluate join qualifiers */
-			run_cost += (join_cost[i].per_tuple
-						 * outer_ntuples
-						 * Max(hash_nsteps, 1.0));
+			run_cost_per_chunk = (join_cost[i].per_tuple *
+								  chunk_ntuples *
+								  Max(hash_nsteps, 1.0));
 		}
 		else
 		{
 			/*
-			 * GpuNestLoop:
-			 *
-			 * It evaluates join-qual for each pair of outer and inner tuple.
-			 * So, usually, its run_cost is higher than GpuHashJoin
+			 * GpuNestLoop - It evaluates join-qual for each pair of outer
+			 * and inner tuples. So, its run_cost is usually higher than
+			 * GpuHashJoin.
 			 */
+			double		inner_ntuples = scan_path->rows
+				/ ((double) gpath->inners[i].nbatches *
+				   (double) gpath->inners[i].ichunk_nloops);
+
 			/* cost to load inner heap tuples by CPU */
-			startup_cost += cpu_tuple_cost * inner_ntuples;
+			startup_cost += cpu_tuple_cost * scan_path->rows;
 
 			/* cost to evaluate join qualifiers */
-			run_cost += (join_cost[i].per_tuple
-                         * outer_ntuples
-						 * clamp_row_est(inner_ntuples));
+			run_cost_per_chunk += (join_cost[i].per_tuple *
+								   chunk_ntuples *
+								   clamp_row_est(inner_ntuples));
 		}
-		/* iteration if nbatches > 1 */
-		if (gpath->inners[i].nbatches > 1)
-			run_cost *= (double) gpath->inners[i].nbatches;
-
 		/* number of outer items on the next depth */
-		outer_ntuples = gpath->inners[i].join_nrows;
+		chunk_ntuples = (gpath->inners[i].join_nrows /
+						 ((double) num_chunks *
+						  (double) gpath->inners[i].ichunk_nloops));
+
+		/* consider inner chunk size to be sent over DMA */
+		inner_total_sz += gpath->inners[i].ichunk_size;
 	}
+	/* total GPU execution cost */
+	run_cost += (run_cost_per_chunk *
+				 (double) num_chunks *
+				 (double) inner_nloops_inside);
+	run_cost *= inner_nloops_outside;
 
-	/*
-	 * cost for kernel launch
-	 */
-	if (num_chunks > 0)
-	{
-		startup_cost += pgstrom_gpu_task_cost;
-		run_cost += pgstrom_gpu_task_cost * (num_chunks * outer_nsplits - 1);
-	}
-
-	/*
-	 * cost for host clauses, if any
-	 */
-	startup_cost += host_cost.startup;
-	run_cost += host_cost.per_tuple * outer_ntuples;
-
+	/* cost to send inner buffer; assume 25% of kernel kick will take DMA */
+	run_cost += ((double)(inner_total_sz / pgstrom_chunk_size())
+				 * pgstrom_gpu_dma_cost
+				 * (double)(num_chunks *
+							inner_nloops_inside *
+							inner_nloops_outside) * 0.25);
 	/*
 	 * delay to fetch the first tuple
 	 */
-	startup_delay = (num_chunks > 1 ?
-					 run_cost * (1.0 / (double)(num_chunks)) :
-					 0.0);
+	startup_delay = run_cost * (1.0 / (double)(num_chunks));
 
 	/*
-	 * cost of final materialization
+	 * cost of final materialization, but GPU does projection
 	 */
 	run_cost += cpu_tuple_cost * gpath->cpath.path.rows;
-
 
 	/*
 	 * Put cost value on the gpath.
@@ -782,61 +768,41 @@ retry:
 	gpath->cpath.path.startup_cost = startup_cost + startup_delay;
 	gpath->cpath.path.total_cost = startup_cost + run_cost;
 
-	/*
-	 * NOTE: In case when extreme number of rows are expected,
-	 * it does not make sense to split hash-tables because
-	 * increasion of numbatches also increases the total cost
-	 * by iteration of outer scan. In this case, the best
-	 * strategy is to give up this path, instead of incredible
-	 * number of numbatches!
-	 */
-	if (!add_path_precheck(gpath->cpath.path.parent,
-						   gpath->cpath.path.startup_cost,
-						   gpath->cpath.path.total_cost,
-						   NULL, required_outer))
+	if (add_path_precheck(gpath->cpath.path.parent,
+						  gpath->cpath.path.startup_cost,
+						  gpath->cpath.path.total_cost,
+						  NULL, required_outer))
 	{
-		return false;
-	}
-
-	/*
-	 * If size of inner multi-relations buffer is still larger than
-	 * the pre-defined limitation, we try to split the largest relation
-	 * then retry the estimation.
-	 */
-	if (inner_total_sz > inner_limit_sz)
-	{
-		gpath->inners[largest_index].nbatches++;
-		goto retry;
-	}
-
-	/* Dumps candidate GpuJoinPath for debugging */
-	if (client_min_messages <= DEBUG1)
-	{
-		StringInfoData buf;
-
-		initStringInfo(&buf);
-		__dump_gpujoin_path(&buf, root, gpath->outer_path);
-		for (i=0; i < gpath->num_rels; i++)
+		/* Dumps candidate GpuJoinPath for debugging */
+		if (client_min_messages <= DEBUG1)
 		{
-			JoinType	join_type = gpath->inners[i].join_type;
-			Path	   *inner_path = gpath->inners[i].scan_path;
-			bool		is_nestloop = (gpath->inners[i].hash_quals == NIL);
+			StringInfoData buf;
 
-			appendStringInfo(&buf, " %s%s ",
-							 join_type == JOIN_FULL ? "F" :
-							 join_type == JOIN_LEFT ? "L" :
-							 join_type == JOIN_RIGHT ? "R" : "I",
-							 is_nestloop ? "NL" : "HJ");
+			initStringInfo(&buf);
+			__dump_gpujoin_path(&buf, root, gpath->outer_path);
+			for (i=0; i < gpath->num_rels; i++)
+			{
+				JoinType	join_type = gpath->inners[i].join_type;
+				Path	   *inner_path = gpath->inners[i].scan_path;
+				bool		is_nestloop = (gpath->inners[i].hash_quals == NIL);
 
-			__dump_gpujoin_path(&buf, root, inner_path);
+				appendStringInfo(&buf, " %s%s ",
+								 join_type == JOIN_FULL ? "F" :
+								 join_type == JOIN_LEFT ? "L" :
+								 join_type == JOIN_RIGHT ? "R" : "I",
+								 is_nestloop ? "NL" : "HJ");
+
+				__dump_gpujoin_path(&buf, root, inner_path);
+			}
+			elog(DEBUG1, "GpuJoin: %s Cost=%.2f..%.2f",
+				 buf.data,
+				 gpath->cpath.path.startup_cost,
+				 gpath->cpath.path.total_cost);
+			pfree(buf.data);
 		}
-		elog(DEBUG1, "GpuJoin: %s Cost=%.2f..%.2f",
-			 buf.data,
-			 gpath->cpath.path.startup_cost,
-			 gpath->cpath.path.total_cost);
-		pfree(buf.data);
+		return true;
 	}
-	return true;
+	return false;
 }
 
 typedef struct
@@ -874,7 +840,6 @@ create_gpujoin_path(PlannerInfo *root,
 	result->cpath.flags = (support_bulkload ? CUSTOMPATH_SUPPORT_BULKLOAD : 0);
 	result->cpath.methods = &gpujoin_path_methods;
 	result->outer_path = outer_path;
-	result->kresults_ratio = 0.0;	/* to be set later */
 	result->num_rels = num_rels;
 	result->host_quals = NIL;	/* host_quals are no longer supported */
 
@@ -889,6 +854,7 @@ create_gpujoin_path(PlannerInfo *root,
 		result->inners[i].hash_quals = ip_item->hash_quals;
 		result->inners[i].join_quals = ip_item->join_quals;
 		result->inners[i].ichunk_size = 0;		/* to be set later */
+		result->inners[i].ichunk_nloops = 0;	/* to be set later */
 		result->inners[i].nbatches = 1;			/* to be set later */
 		result->inners[i].hash_nslots = 0;		/* to be set later */
 		i++;
@@ -898,8 +864,8 @@ create_gpujoin_path(PlannerInfo *root,
 	 * cost calculation of GpuJoin, then, add this path to the joinrel,
 	 * unless its cost is not obviously huge.
 	 */
-	if (cost_gpujoin(root, result, required_outer,
-					 joinrel->rows, support_bulkload))
+	if (cost_gpujoin(root, joinrel, result, required_outer,
+					 support_bulkload))
 	{
 		List   *custom_paths = list_make1(result->outer_path);
 
@@ -1561,7 +1527,6 @@ create_gpujoin_plan(PlannerInfo *root,
 	cscan->custom_plans = list_copy_tail(custom_plans, 1);
 
 	memset(&gj_info, 0, sizeof(GpuJoinInfo));
-	gj_info.kresults_ratio = gpath->kresults_ratio;
 	gj_info.outer_ratio = 1.0;
 	gj_info.num_rels = gpath->num_rels;
 
@@ -1699,8 +1664,6 @@ gpujoin_textout_path(StringInfo str, const CustomPath *node)
 	/* outer_path */
 	appendStringInfo(str, " :outer_path %s",
 					 nodeToString(gpath->outer_path));
-	/* kresults_ratio */
-	appendStringInfo(str, " :kresults_ratio %.2f", gpath->kresults_ratio);
 	/* num_rels */
 	appendStringInfo(str, " :num_rels %d", gpath->num_rels);
 	/* host_quals */
@@ -1728,6 +1691,9 @@ gpujoin_textout_path(StringInfo str, const CustomPath *node)
 		/* ichunk_size */
 		appendStringInfo(str, " :ichunk_size %zu",
 						 gpath->inners[i].ichunk_size);
+		/* ichunk_nloops */
+		appendStringInfo(str, " :ichunk_nloops %u",
+                         gpath->inners[i].ichunk_nloops);
 		/* nbatches */
 		appendStringInfo(str, " :nbatches %d",
 						 gpath->inners[i].nbatches);
@@ -2009,7 +1975,6 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 						  t_bits[BITMAPLEN(result_tupdesc->natts)]) +
 				 (result_tupdesc->tdhasoid ? sizeof(Oid) : 0)) +
 		MAXALIGN(cscan->scan.plan.plan_width);	/* average width */
-	gjs->kresults_ratio = gj_info->kresults_ratio;
 }
 
 static TupleTableSlot *
