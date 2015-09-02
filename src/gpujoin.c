@@ -636,7 +636,6 @@ cost_gpujoin(PlannerInfo *root,
 	QualCost   *join_cost;
 	Size		inner_total_sz = 0;
 	double		chunk_ntuples;
-	double		inner_ntuples;
 	int			inner_nloops_outside = 1;	/* loops by pmrels overflow */
 	int			inner_nloops_inside = 1;	/* loops by kds_dst overflow */
 	int			i, num_rels = gpath->num_rels;
@@ -699,7 +698,7 @@ cost_gpujoin(PlannerInfo *root,
 			List	   *hash_quals = gpath->inners[i].hash_quals;
 			cl_uint		num_hashkeys = list_length(hash_quals);
 			cl_uint		hash_nslots = gpath->inners[i].hash_nslots;
-			double		hash_nsteps = inner_ntuples / (double) hash_nslots;
+			double		hash_nsteps = scan_path->rows / (double) hash_nslots;
 
 			/* cost to compute inner hash value by CPU */
 			startup_cost += (cpu_operator_cost * num_hashkeys *
@@ -3152,6 +3151,7 @@ retry:
 			STROMALIGN(gjs->gts.kern_params->length) +
 			STROMALIGN(offsetof(kern_resultbuf, results[total_items])) +
 			STROMALIGN(offsetof(kern_resultbuf, results[total_items]));
+
 		/*
 		 * If too large, split this inner chunk and retry
 		 */
@@ -3363,15 +3363,14 @@ retry:
 		+ STROMALIGN(offsetof(kern_resultbuf, results[max_items]));
 	Assert(kgjoin_length <= pgstrom_chunk_size());
 
+	memset(kgjoin, 0, offsetof(kern_gpujoin, kparams));
 	kgjoin->kresults_1_offset = (offsetof(kern_gpujoin, kparams) +
 								 STROMALIGN(gjs->gts.kern_params->length));
 	kgjoin->kresults_2_offset = kgjoin->kresults_1_offset
 		+ STROMALIGN(offsetof(kern_resultbuf, results[max_items]));
-	kgjoin->kresults_total_items = max_items;
-	kgjoin->kresults_max_items = 0;
+	kgjoin->kresults_max_space = max_items;
 	kgjoin->num_rels = gjs->num_rels;
 	kgjoin->start_depth = start_depth;
-	memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
 
 	/* copies the constant/parameter buffer */
 	memcpy(KERN_GPUJOIN_PARAMBUF(kgjoin),

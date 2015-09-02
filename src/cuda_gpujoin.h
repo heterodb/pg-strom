@@ -68,10 +68,8 @@ typedef struct
 	size_t			kresults_1_offset;
 	/* offset to the secondary kern_resultbuf */
 	size_t			kresults_2_offset;
-	/* allocated number of kern_resultbuf items */
-	cl_uint			kresults_total_items;
-	/* number of kern_resultbuf items actually used (OUT) */
-	cl_uint			kresults_max_items;
+	/* max allocatable number of kern_resultbuf items */
+	cl_uint			kresults_max_space;
 	/* number of inner relations */
 	cl_uint			num_rels;
 	/* least depth in this call chain */
@@ -228,7 +226,7 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 
 			assert(depth == 1);
 			assert(kresults_in->nrels == 1);
-			assert(kresults_in->nrooms == kgjoin->kresults_total_items);
+			assert(kresults_in->nrooms == kgjoin->kresults_max_space);
 			/*
 			 * Check qualifier of outer scan that was pulled-up (if any).
 			 * then, it allocates result buffer on kresults_in and put
@@ -247,12 +245,11 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 					base = atomicAdd(&kresults_in->nitems, count);
 				else
 					base = 0;
-				atomicMax(&kgjoin->kresults_max_items, base + count);
 				atomicMax(&kgjoin->result_nitems[0], base + count);
 			}
 			__syncthreads();
 
-			if (base + count >= kgjoin->kresults_total_items)
+			if (base + count >= kgjoin->kresults_max_space)
 				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 			else if (is_matched)
 			{
@@ -270,7 +267,7 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 	{
 		assert(kresults_in->nrels == depth);
 		kresults_out->nrels = depth + 1;
-		kresults_out->nrooms = kgjoin->kresults_total_items / (depth + 1);
+		kresults_out->nrooms = kgjoin->kresults_max_space / (depth + 1);
 		kresults_out->nitems = 0;
 		memset(&kresults_out->kerror, 0, sizeof(kern_errorbuf));
 		/*
@@ -396,9 +393,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 				base = atomicAdd(&kresults_out->nitems, count);
 			else
 				base = 0;
-
-			atomicMax(&kgjoin->kresults_max_items,
-					  (depth + 1) * (base + count));
+			atomicMax(&kgjoin->result_nitems[depth], base + count);
 		}
 		__syncthreads();
 
@@ -561,9 +556,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 					base = atomicAdd(&kresults_out->nitems, count);
 				else
 					base = 0;
-
-				atomicMax(&kgjoin->kresults_max_items,
-						  (depth + 1) * (base + count));
+				atomicMax(&kgjoin->result_nitems[depth], base + count);
 			}
 			__syncthreads();
 
@@ -600,9 +593,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 					base = atomicAdd(&kresults_out->nitems, count);
 				else
 					base = 0;
-
-				atomicMax(&kgjoin->kresults_max_items,
-						  (depth + 1) * base + count);
+				atomicMax(&kgjoin->result_nitems[depth], base + count);
 			}
 			__syncthreads();
 
@@ -696,9 +687,7 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 			base = atomicAdd(&kresults_out->nitems, count);
 		else
 			base = 0;
-
-		atomicMax(&kgjoin->kresults_max_items,
-				  (depth + 1) * (base + count));
+		atomicMax(&kgjoin->result_nitems[depth], base + count);
 	}
 	__syncthreads();
 
@@ -811,8 +800,8 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 				cl_uint		index;
 
 				index = atomicAdd(&kresults_out->nitems, 1);
-				atomicMax(&kgjoin->kresults_max_items,
-						  (depth + 1) * (index + 1));
+				atomicMax(&kgjoin->result_nitems[depth], index + 1);
+
 				if (index < kresults_out->nrooms)
 				{
 					r_buffer = KERN_GET_RESULT(kresults_out, index);
@@ -875,8 +864,7 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 			else
 				base = 0;
 
-			atomicMax(&kgjoin->kresults_max_items,
-					  (depth + 1) * (base + count));
+			atomicMax(&kgjoin->result_nitems[depth], base + count);
 		}
 		__syncthreads();
 		assert(count <= get_global_xsize());
