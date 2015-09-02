@@ -1021,9 +1021,9 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 			(!OidIsValid(entry->func_collid) ||
 			 entry->func_collid == func_collid))
 		{
-			Assert(entry->func_rettype->type_oid == func_rettype);
 			if (entry->func_is_negative)
 				return NULL;
+			Assert(entry->func_rettype->type_oid == func_rettype);
 			return entry;
 		}
 	}
