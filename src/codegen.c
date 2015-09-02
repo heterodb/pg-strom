@@ -717,6 +717,11 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	  "t/F:overlaps_timestamptz" },
 
 	/*
+	 * Misc time and date functions
+	 */
+	{ "now", 0, {}, "t/F:now" },
+
+	/*
 	 * Text functions
 	 * ---------------------- */
 	{ "bpchareq",  2, {BPCHAROID,BPCHAROID},  "s/F:bpchareq" },

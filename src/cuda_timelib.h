@@ -2988,6 +2988,21 @@ pgfn_interval_cmp(kern_context *kcxt, pg_interval_t arg1, pg_interval_t arg2)
 }
 
 /*
+ * current date time function
+ */
+STATIC_FUNCTION(pg_timestamptz_t)
+pgfn_now(kern_context *kcxt)
+{
+	pg_timestamptz_t	result;
+	kern_parambuf	   *kparams = kcxt->kparams;
+
+	result.value  = kparams->xactStartTimestamp;
+	result.isnull = false;
+
+	return result;
+}
+
+/*
  * overlaps() SQL functions
  *
  * NOTE: Even though overlaps() has more variations, inline_function()
