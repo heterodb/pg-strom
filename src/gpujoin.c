@@ -266,7 +266,8 @@ typedef struct
 	 * Properties of underlying inner relations
 	 */
 	int				num_rels;
-	size_t			source_nitems;
+	size_t			source_ntasks;	/* number of sampled tasks */
+	size_t			source_nitems;	/* number of sampled source items */
 	size_t			result_nitems[GPUJOIN_MAX_DEPTH + 1];
 	innerState		inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinState;
@@ -3054,7 +3055,8 @@ retry:
 			plan_ratio = gjs->outer_ratio;
 			exec_ratio = ((double) gjs->result_nitems[0] /
 						  (double) gjs->source_nitems);
-			if (gjs->source_nitems >= (size_t)(0.30 * outer_plan_nrows))
+			if (gjs->source_nitems >= (size_t)(0.30 * outer_plan_nrows) ||
+				gjs->source_ntasks > 20)
 				ntuples = exec_ratio * (double) pds_src->kds->nitems;
 			else
 			{
@@ -3113,7 +3115,8 @@ retry:
 				plan_ratio = istate->nrows_ratio;
 				exec_ratio = ((double) gjs->result_nitems[depth] /
 							  (double) gjs->result_nitems[depth - 1]);
-				if (gjs->source_nitems >= (size_t)(0.30 * outer_plan_nrows))
+				if (gjs->source_nitems >= (size_t)(0.30 * outer_plan_nrows) ||
+					gjs->source_ntasks > 20)
 					ntuples_next = exec_ratio * inner_ratio * ntuples;
 				else
 				{
@@ -3184,7 +3187,7 @@ retry:
 		depth++;
 	}
 	Assert(depth == gjs->num_rels + 1);
-	num_threads[depth-1] = Max((cl_uint) ntuples, 1);
+	num_threads[gjs->num_rels] = Max((cl_uint) ntuples, 1);
 
 	/*
 	 * Calculation of the pds_dst length - If we have no run-time information,
@@ -3690,6 +3693,7 @@ gpujoin_task_complete(GpuTask *gtask)
 		 * In case of OUTER JOIN task, we don't count source items because
 		 * it is generated as result of unmatched tuples.
 		 */
+		gjs->source_ntasks++;
 		if (pds_src)
 			gjs->source_nitems += (Size)
 				(pgjoin->inner_ratio * (double) pds_src->kds->nitems);
@@ -3755,6 +3759,7 @@ gpujoin_task_complete(GpuTask *gtask)
 #ifdef PGSTROM_DEBUG
 		/* For debug output */
 		kern_data_store	   *kds_dst = pgjoin->pds_dst->kds;
+		cl_uint		num_threads[GPUJOIN_MAX_DEPTH + 1];
 		cl_uint		inner_base[GPUJOIN_MAX_DEPTH + 1];
 		cl_uint		inner_size[GPUJOIN_MAX_DEPTH + 1];
 		cl_uint		result_nitems[GPUJOIN_MAX_DEPTH + 1];
@@ -3763,9 +3768,12 @@ gpujoin_task_complete(GpuTask *gtask)
 		cl_uint		length_old;
 		cl_uint		max_space_old;
 		cl_int		i;
+		double		progress;
 		bool		has_resized = false;
 		StringInfoData	str;
 
+		memcpy(num_threads, pgjoin->num_threads,
+			   sizeof(num_threads));
 		memcpy(inner_base, pgjoin->inner_base,
 			   sizeof(inner_base));
 		memcpy(inner_size, pgjoin->inner_size,
@@ -3776,6 +3784,8 @@ gpujoin_task_complete(GpuTask *gtask)
 		length_old = kds_dst->length;
 		nrooms_old = kds_dst->nrooms;
 		max_space_old = pgjoin->kern.kresults_max_space;
+		progress = 100.0 * ((double) gjs->source_nitems /
+							(double) outerPlanState(gjs)->plan->plan_rows);
 #endif
 		/*
 		 * StromError_DataStoreNoSpace indicates either/both of buffers
@@ -3836,6 +3846,21 @@ gpujoin_task_complete(GpuTask *gtask)
 				has_resized = true;
 			}
 		}
+		appendStringInfo(&str, " Nthreads: (");
+		for (i=0; i <= gjs->num_rels; i++)
+		{
+			if (num_threads[i] == pgjoin->num_threads[i])
+				appendStringInfo(&str, "%s%u", i > 0 ? ", " : "",
+								 pgjoin->num_threads[i]);
+			else
+			{
+				appendStringInfo(&str, "%s%u=>%u", i > 0 ? ", " : "",
+								 num_threads[i], pgjoin->num_threads[i]);
+				has_resized = true;
+			}
+		}
+		appendStringInfo(&str, ")");
+
 		appendStringInfo(&str, " inners: ");
 		for (i=0; i < gjs->num_rels; i++)
 		{
@@ -3863,8 +3888,8 @@ gpujoin_task_complete(GpuTask *gtask)
 		appendStringInfo(&str, "]");
 
 		elog(has_resized ? NOTICE : ERROR,
-			 "GpuJoin(%p) DataStoreNoSpace retry=%d %s%s",
-			 pgjoin, pgjoin->retry_count, str.data,
+			 "GpuJoin(%p) DataStoreNoSpace retry=%d [%.2f%%] %s%s",
+			 pgjoin, pgjoin->retry_count, progress, str.data,
 			 has_resized ? "" : ", but not resized actually");
 		pfree(str.data);
 #endif
