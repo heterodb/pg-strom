@@ -3289,12 +3289,13 @@ retry:
 		 * average length of the result tuple
 		 * of course, last execution knows exact length of tuple width
 		 */
-		if (!pds_dst)
+		if (!pds_dst || pds_dst->kds->usage == 0)
 			result_width = gjs->result_width;
 		else
 		{
 			kern_data_store	   *kds_dst = pds_dst->kds;
 
+			Assert(kds_dst->nitems > 0);
 			result_width =
 				MAXALIGN((Size)(kds_dst->usage -
 								KERN_DATA_STORE_HEAD_LENGTH(kds_dst) -
