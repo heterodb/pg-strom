@@ -3372,7 +3372,29 @@ retry:
 		+ STROMALIGN(offsetof(kern_resultbuf, results[max_items]))
 		+ STROMALIGN(offsetof(kern_resultbuf, results[max_items]));
 	Assert(kgjoin_length <= pgstrom_chunk_size());
-
+	/*
+	 * Minimum guarantee of the kern_gpujoin buffer.
+	 *
+	 * NOTE: we usually have large volatility when GpuJoin tries to filter
+	 * many rows, especially hwne row growth ratio is less than 5%, then
+	 * it leads unnecessary retry of GpuJoin task.
+	 * As long as it is several megabytes, larger kern_gpujoin buffer is
+	 * almost harmless because its relevant kern_resultbuf is never sent
+	 * or received over DMA.
+	 */
+	if (kgjoin_length < pgstrom_chunk_size() / 8)
+	{
+		Size	alt_items
+			= ((pgstrom_chunk_size() / 8
+				- offsetof(kern_gpujoin, kparams) 
+				- STROMALIGN(gjs->gts.kern_params->length)
+				- STROMALIGN(offsetof(kern_resultbuf, results[0]))
+				- STROMALIGN(offsetof(kern_resultbuf, results[0])))
+			   / (2 * sizeof(cl_uint)));
+		Assert(alt_items >= max_items);
+		kgjoin_length = pgstrom_chunk_size() / 8;
+		max_items = alt_items;
+	}
 	memset(kgjoin, 0, offsetof(kern_gpujoin, kparams));
 	kgjoin->kresults_1_offset = (offsetof(kern_gpujoin, kparams) +
 								 STROMALIGN(gjs->gts.kern_params->length));
