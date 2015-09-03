@@ -824,12 +824,18 @@ create_gpujoin_path(PlannerInfo *root,
 {
 	GpuJoinPath	   *result;
 	cl_int			num_rels = list_length(inner_path_list);
-	Size			length;
 	ListCell	   *lc;
 	int				i;
 
-	length = offsetof(GpuJoinPath, inners[num_rels]);
-	result = palloc0(length);
+	/*
+	 * FIXME: TPC-DS Q4 and Q76 got failed when we allocate gpath
+	 * using offsetof(GpuJoinPath, inners[num_rels]), but not happen
+	 * if inners[num_rels + 1]. It looks like someone's memory write
+	 * violation, however, I cannot find out who does it.
+	 * As a workaround we extended length of gpath.
+	 * (03-Sep-2015)
+	 */
+	result = palloc0(offsetof(GpuJoinPath, inners[num_rels + 1]));
 	NodeSetTag(result, T_CustomPath);
 	result->cpath.path.pathtype = T_CustomScan;
 	result->cpath.path.parent = joinrel;
@@ -858,6 +864,7 @@ create_gpujoin_path(PlannerInfo *root,
 		result->inners[i].hash_nslots = 0;		/* to be set later */
 		i++;
 	}
+	Assert(i == num_rels);
 
 	/*
 	 * cost calculation of GpuJoin, then, add this path to the joinrel,
