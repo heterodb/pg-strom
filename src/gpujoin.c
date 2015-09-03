@@ -313,6 +313,9 @@ typedef struct
 	CUevent			ev_dma_recv_start;
 	CUevent			ev_dma_recv_stop;
 
+	/* number of task retry because of DataStoreNoSpace */
+	cl_int			retry_count;
+
 	/*
 	 * NOTE: If expected size of the kds_dst is too large (that exceeds
 	 * pg_strom.chunk_max_inout_ratio), we split GpuJoin steps multiple
@@ -594,7 +597,7 @@ estimate_buffersize_gpujoin(PlannerInfo *root,
 		if (buffer_size > pgstrom_chunk_size_limit())
 		{
 			Assert(largest_growth_index >= 0);
-			gpath->inners[i].ichunk_nloops /=
+			gpath->inners[i].ichunk_nloops *=
 				(buffer_size / pgstrom_chunk_size_limit()) + 1;
 			continue;
 		}
@@ -609,7 +612,7 @@ estimate_buffersize_gpujoin(PlannerInfo *root,
 		{
 			Assert(largest_chunk_index >= 0);
 			gpath->inners[largest_chunk_index].nbatches
-				/= (inner_total_sz / inner_limit_sz) + 1;
+				*= (inner_total_sz / inner_limit_sz) + 1;
 			continue;
 		}
 	} while (false);
@@ -3732,17 +3735,25 @@ gpujoin_task_complete(GpuTask *gtask)
 		kern_data_store	   *kds_dst = pgjoin->pds_dst->kds;
 		cl_uint		inner_base[GPUJOIN_MAX_DEPTH + 1];
 		cl_uint		inner_size[GPUJOIN_MAX_DEPTH + 1];
-		cl_uint		nitems_old;
+		cl_uint		result_nitems[GPUJOIN_MAX_DEPTH + 1];
+		cl_uint		result_valid_until;
 		cl_uint		nrooms_old;
 		cl_uint		length_old;
+		cl_uint		max_space_old;
 		cl_int		i;
+		bool		has_resized = false;
 		StringInfoData	str;
 
-		memcpy(inner_base, pgjoin->inner_base, sizeof(inner_base));
-		memcpy(inner_size, pgjoin->inner_size, sizeof(inner_size));
+		memcpy(inner_base, pgjoin->inner_base,
+			   sizeof(inner_base));
+		memcpy(inner_size, pgjoin->inner_size,
+			   sizeof(inner_size));
+		memcpy(result_nitems, pgjoin->kern.result_nitems,
+			   sizeof(result_nitems));
+		result_valid_until = pgjoin->kern.result_valid_until;
 		length_old = kds_dst->length;
 		nrooms_old = kds_dst->nrooms;
-		nitems_old = kds_dst->nitems;
+		max_space_old = pgjoin->kern.kresults_max_space;
 #endif
 		/*
 		 * StromError_DataStoreNoSpace indicates either/both of buffers
@@ -3750,30 +3761,58 @@ gpujoin_task_complete(GpuTask *gtask)
 		 * number of outer tuples, then kick this gputask again.
 		 */
 		gpujoin_attach_result_buffer(gjs, pgjoin, pgjoin->inner_base);
+		pgjoin->retry_count++;
 
 #ifdef PGSTROM_DEBUG
+		/*
+		 * DEBUG OUTPUT if GpuJoinTask retry happen - to track how many
+		 * items are required and actually required.
+		 */
+
 		/* kds_dst might be replaced */
 		kds_dst = pgjoin->pds_dst->kds;
 		initStringInfo(&str);
-		if (!pgjoin->pds_src)
-			appendStringInfo(&str, "OJTask ");
-		appendStringInfo(&str, "nitems: %u ", nitems_old);
+		if (pgjoin->pds_src)
+			appendStringInfo(&str, "src_nitems: %u",
+							 pgjoin->pds_src->kds->nitems);
+		else
+		{
+			pgstrom_multirels  *pmrels = pgjoin->pmrels;
+			pgstrom_data_store *pds_in =
+				pmrels->inner_chunks[gjs->outer_join_start_depth];
+			appendStringInfo(&str, "in_nitems: %u", pds_in->kds->nitems);
+		}
+
+		if (max_space_old == pgjoin->kern.kresults_max_space)
+			appendStringInfo(&str, " max_space: %u ", max_space_old);
+		else
+		{
+			appendStringInfo(&str, " max_space: %u=>%u ",
+							 max_space_old, pgjoin->kern.kresults_max_space);
+			has_resized = true;
+		}
 
 		if (kds_dst->format == KDS_FORMAT_ROW)
 		{
 			if (length_old == kds_dst->length)
 				appendStringInfo(&str, "length: %u", length_old);
 			else
+			{
 				appendStringInfo(&str, "length: %u=>%u",
 								 length_old, kds_dst->length);
+				has_resized = true;
+			}
 		}
 		else
 		{
 			if (nrooms_old == kds_dst->nrooms)
 				appendStringInfo(&str, "nrooms: %u", nrooms_old);
 			else
+			{
 				appendStringInfo(&str, "nrooms: %u=>%u",
 								 nrooms_old, kds_dst->nrooms);
+				has_resized = true;
+			}
 		}
 		appendStringInfo(&str, " inners: ");
 		for (i=0; i < gjs->num_rels; i++)
@@ -3783,11 +3822,28 @@ gpujoin_task_complete(GpuTask *gtask)
 				appendStringInfo(&str, "%s(%u, %u)", i > 0 ? ", " : "",
 								 inner_base[i], inner_size[i]);
 			else
+			{
 				appendStringInfo(&str, "%s(%u, %u=>%u)", i > 0 ? ", " : "",
 								 inner_base[i], inner_size[i],
 								 pgjoin->inner_size[i]);
+				has_resized = true;
+			}
 		}
-		elog(NOTICE, "GpuJoin(%p) DataStoreNoSpace %s", pgjoin, str.data);
+		appendStringInfo(&str, " results: [");
+		for (i=0; i <= gjs->num_rels; i++)
+		{
+			if (i <= result_valid_until)
+				appendStringInfo(&str, "%s%u", i > 0 ? ", " : "",
+								 result_nitems[i]);
+			else
+				appendStringInfo(&str, "%s*", i > 0 ? ", " : "");
+		}
+		appendStringInfo(&str, "]");
+
+		elog(has_resized ? NOTICE : ERROR,
+			 "GpuJoin(%p) DataStoreNoSpace retry=%d %s%s",
+			 pgjoin, pgjoin->retry_count, str.data,
+			 has_resized ? "" : ", but not resized actually");
 		pfree(str.data);
 #endif
 		/*
