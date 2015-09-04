@@ -73,8 +73,8 @@ typedef struct
 		List	   *hash_quals;		/* valid quals, if hash-join */
 		List	   *join_quals;		/* all the device quals, incl hash_quals */
 		Size		ichunk_size;	/* expected inner chunk size */
-		int			ichunk_nloops;	/* expected number of loops */
-		int			nbatches;		/* expected iteration in this depth */
+		int			nloops_minor;	/* # of virtual segment of inner buffer */
+		int			nloops_major;	/* # of physical split of inner buffer */
 		int			hash_nslots;	/* expected hashjoin slots width, if any */
 	} inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinPath;
@@ -97,7 +97,8 @@ typedef struct
 	List	   *ichunk_size;
 	List	   *join_types;
 	List	   *join_quals;
-	List	   *nbatches;
+	List	   *nloops_minor;
+	List	   *nloops_major;
 	List	   *hash_inner_keys;	/* if hash-join */
 	List	   *hash_outer_keys;	/* if hash-join */
 	List	   *hash_nslots;		/* if hash-join */
@@ -128,7 +129,8 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, gj_info->ichunk_size);
 	privs = lappend(privs, gj_info->join_types);
 	exprs = lappend(exprs, gj_info->join_quals);
-	privs = lappend(privs, gj_info->nbatches);
+	privs = lappend(privs, gj_info->nloops_minor);
+	privs = lappend(privs, gj_info->nloops_major);
 	exprs = lappend(exprs, gj_info->hash_inner_keys);
 	exprs = lappend(exprs, gj_info->hash_outer_keys);
 	privs = lappend(privs, gj_info->hash_nslots);
@@ -165,7 +167,8 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->ichunk_size = list_nth(privs, pindex++);
 	gj_info->join_types = list_nth(privs, pindex++);
     gj_info->join_quals = list_nth(exprs, eindex++);
-	gj_info->nbatches = list_nth(privs, pindex++);
+	gj_info->nloops_minor = list_nth(privs, pindex++);
+	gj_info->nloops_major = list_nth(privs, pindex++);
 	gj_info->hash_inner_keys = list_nth(exprs, eindex++);
     gj_info->hash_outer_keys = list_nth(exprs, eindex++);
 	gj_info->hash_nslots = list_nth(privs, pindex++);
@@ -263,12 +266,18 @@ typedef struct
 	cl_int			outer_join_start_depth;
 
 	/*
-	 * Properties of underlying inner relations
+	 * Runtime statistics
 	 */
 	int				num_rels;
 	size_t			source_ntasks;	/* number of sampled tasks */
 	size_t			source_nitems;	/* number of sampled source items */
 	size_t			result_nitems[GPUJOIN_MAX_DEPTH + 1];
+	size_t			inner_dma_nums;	/* number of inner DMA calls */
+	size_t			inner_dma_size;	/* total length of inner DMA calls */
+
+	/*
+	 * Properties of underlying inner relations
+	 */
 	innerState		inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinState;
 
@@ -461,8 +470,8 @@ estimate_buffersize_gpujoin(PlannerInfo *root,
 	/* init number of loops */
 	for (i=0; i < num_rels; i++)
 	{
-		gpath->inners[i].ichunk_nloops = 1;
-		gpath->inners[i].nbatches = 1;
+		gpath->inners[i].nloops_minor = 1;
+		gpath->inners[i].nloops_major = 1;
 	}
 
 	/*
@@ -497,7 +506,7 @@ estimate_buffersize_gpujoin(PlannerInfo *root,
 			/* force a plausible relation size if no information. */
 			inner_ntuples = Max(inner_path->rows *
 								pgstrom_chunk_size_margin /
-								(double)gpath->inners[i].nbatches,
+								(double)gpath->inners[i].nloops_major,
 								100.0);
 
 			/*
@@ -567,7 +576,7 @@ estimate_buffersize_gpujoin(PlannerInfo *root,
 				+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]))
 				+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]));
 			if (buffer_size <= pgstrom_chunk_size())
-				gpath->inners[i].ichunk_nloops = 1;
+				gpath->inners[i].nloops_minor = 1;
 			{
 				Size	nloops_minor
 					= (buffer_size / pgstrom_chunk_size()) + 1;
@@ -585,7 +594,7 @@ estimate_buffersize_gpujoin(PlannerInfo *root,
 					 */
 					return false;
 				}
-				gpath->inners[i].ichunk_nloops = nloops_minor;
+				gpath->inners[i].nloops_minor = nloops_minor;
 				inner_nloops *= nloops_minor;
 			}
 
@@ -629,7 +638,7 @@ estimate_buffersize_gpujoin(PlannerInfo *root,
 			}
 			Assert(largest_growth_index >= 0 &&
 				   largest_growth_index < num_rels);
-			gpath->inners[largest_growth_index].ichunk_nloops *= nloops_minor;
+			gpath->inners[largest_growth_index].nloops_minor *= nloops_minor;
 			continue;
 		}
 
@@ -651,7 +660,7 @@ estimate_buffersize_gpujoin(PlannerInfo *root,
 			}
 			Assert(largest_chunk_index >= 0 &&
 				   largest_chunk_index < num_rels);
-			gpath->inners[largest_chunk_index].nbatches *= nloops_major;
+			gpath->inners[largest_chunk_index].nloops_major *= nloops_major;
 			continue;
 		}
 	} while (false);
@@ -680,8 +689,8 @@ cost_gpujoin(PlannerInfo *root,
 	QualCost   *join_cost;
 	Size		inner_total_sz = 0;
 	double		chunk_ntuples;
-	double		inner_nloops_outside = 1.0;	/* loops by pmrels overflow */
-	double		inner_nloops_inside = 1.0;	/* loops by kds_dst overflow */
+	double		total_nloops_minor = 1.0;	/* loops by kds_dst overflow */
+	double		total_nloops_major = 1.0;	/* loops by pmrels overflow */
 	int			i, num_rels = gpath->num_rels;
 
 	/*
@@ -692,8 +701,8 @@ cost_gpujoin(PlannerInfo *root,
 
 	for (i=0; i < num_rels; i++)
 	{
-		inner_nloops_outside *= (double)gpath->inners[i].nbatches;
-		inner_nloops_inside *= (double)gpath->inners[i].ichunk_nloops;
+		total_nloops_major *= (double)gpath->inners[i].nloops_major;
+		total_nloops_minor *= (double)gpath->inners[i].nloops_minor;
 	}
 
 	/*
@@ -765,8 +774,8 @@ cost_gpujoin(PlannerInfo *root,
 			 * GpuHashJoin.
 			 */
 			double		inner_ntuples = scan_path->rows
-				/ ((double) gpath->inners[i].nbatches *
-				   (double) gpath->inners[i].ichunk_nloops);
+				/ ((double) gpath->inners[i].nloops_major *
+				   (double) gpath->inners[i].nloops_minor);
 
 			/* cost to load inner heap tuples by CPU */
 			startup_cost += cpu_tuple_cost * scan_path->rows;
@@ -779,7 +788,7 @@ cost_gpujoin(PlannerInfo *root,
 		/* number of outer items on the next depth */
 		chunk_ntuples = (gpath->inners[i].join_nrows /
 						 ((double) num_chunks *
-						  (double) gpath->inners[i].ichunk_nloops));
+						  (double) gpath->inners[i].nloops_minor));
 
 		/* consider inner chunk size to be sent over DMA */
 		inner_total_sz += gpath->inners[i].ichunk_size;
@@ -787,15 +796,15 @@ cost_gpujoin(PlannerInfo *root,
 	/* total GPU execution cost */
 	run_cost += (run_cost_per_chunk *
 				 (double) num_chunks *
-				 (double) inner_nloops_inside);
-	run_cost *= inner_nloops_outside;
+				 (double) total_nloops_minor);
+	run_cost *= total_nloops_major;
 
 	/* cost to send inner buffer; assume 25% of kernel kick will take DMA */
 	run_cost += ((double)(inner_total_sz / pgstrom_chunk_size())
 				 * pgstrom_gpu_dma_cost
 				 * ((double)num_chunks *
-					inner_nloops_inside *
-					inner_nloops_outside) * 0.25);
+					total_nloops_minor *
+					total_nloops_major) * 0.25);
 	/*
 	 * delay to fetch the first tuple
 	 */
@@ -913,8 +922,8 @@ create_gpujoin_path(PlannerInfo *root,
 		result->inners[i].hash_quals = ip_item->hash_quals;
 		result->inners[i].join_quals = ip_item->join_quals;
 		result->inners[i].ichunk_size = 0;		/* to be set later */
-		result->inners[i].ichunk_nloops = 0;	/* to be set later */
-		result->inners[i].nbatches = 1;			/* to be set later */
+		result->inners[i].nloops_minor = 1;		/* to be set later */
+		result->inners[i].nloops_major = 1;		/* to be set later */
 		result->inners[i].hash_nslots = 0;		/* to be set later */
 		i++;
 	}
@@ -1643,8 +1652,10 @@ create_gpujoin_plan(PlannerInfo *root,
 		clauses = extract_actual_clauses(gpath->inners[i].join_quals, false);
 		gj_info.join_quals = lappend(gj_info.join_quals,
 									 build_flatten_qualifier(clauses));
-		gj_info.nbatches = lappend_int(gj_info.nbatches,
-									   gpath->inners[i].nbatches);
+		gj_info.nloops_minor = lappend_int(gj_info.nloops_minor,
+										   gpath->inners[i].nloops_minor);
+		gj_info.nloops_major = lappend_int(gj_info.nloops_major,
+										   gpath->inners[i].nloops_major);
 		gj_info.hash_inner_keys = lappend(gj_info.hash_inner_keys,
 										  hash_inner_keys);
 		gj_info.hash_outer_keys = lappend(gj_info.hash_outer_keys,
@@ -1751,12 +1762,12 @@ gpujoin_textout_path(StringInfo str, const CustomPath *node)
 		/* ichunk_size */
 		appendStringInfo(str, " :ichunk_size %zu",
 						 gpath->inners[i].ichunk_size);
-		/* ichunk_nloops */
-		appendStringInfo(str, " :ichunk_nloops %u",
-                         gpath->inners[i].ichunk_nloops);
-		/* nbatches */
-		appendStringInfo(str, " :nbatches %d",
-						 gpath->inners[i].nbatches);
+		/* nloops_minor */
+		appendStringInfo(str, " :nloops_minor %d",
+						 gpath->inners[i].nloops_minor);
+		/* nloops_major */
+		appendStringInfo(str, " :nloops_major %d",
+						 gpath->inners[i].nloops_major);
 		/* hash_nslots */
 		appendStringInfo(str, " :hash_nslots %d",
 						 gpath->inners[i].hash_nslots);
@@ -1912,7 +1923,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 		istate->state = ExecInitNode(inner_plan, estate, eflags);
 		istate->econtext = CreateExprContext(estate);
 		istate->depth = i + 1;
-		istate->nbatches_plan = list_nth_int(gj_info->nbatches, i);
+		istate->nbatches_plan = list_nth_int(gj_info->nloops_major, i);
 		istate->nbatches_exec =
 			((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0 ? -1 : 0);
 		istate->nrows_ratio =
@@ -2329,6 +2340,39 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 			ExplainPropertyText(qlabel, str.data, es);
 		}
 		depth++;
+	}
+	/* inner multirels buffer statistics */
+	if (es->analyze)
+	{
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			resetStringInfo(&str);
+			for (depth=1; depth <= gjs->num_rels; depth++)
+			{
+				innerState *istate = &gjs->inners[depth-1];
+
+				appendStringInfo(&str, "%s(", depth > 1 ? "x" : "");
+				foreach (lc1, istate->pds_list)
+				{
+					pgstrom_data_store *pds = lfirst(lc1);
+
+					if (lc1 != list_head(istate->pds_list))
+						appendStringInfo(&str, ", ");
+					appendStringInfo(&str, "%s",
+									 bytesz_unitary_format(pds->kds->length));
+				}
+				appendStringInfo(&str, ")");
+			}
+			appendStringInfo(&str, ", DMA nums: %zu, size: %s",
+							 gjs->inner_dma_nums,
+							 bytesz_unitary_format(gjs->inner_dma_size));
+			ExplainPropertyText("Inner Buffer", str.data, es);
+   		}
+		else
+		{
+			ExplainPropertyLong("Num of Inner-DMA", gjs->inner_dma_nums, es);
+			ExplainPropertyLong("Size of Inner-DMA", gjs->inner_dma_size, es);
+		}
 	}
 	/* other common field */
 	pgstrom_explain_gputaskstate(&gjs->gts, es);
@@ -5316,9 +5360,11 @@ multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
 	Assert(&pmrels->gjs->gts == gtask->gts);
 	if (!pmrels->ev_loaded[cuda_index])
 	{
-		CUdeviceptr	m_kmrels = pmrels->m_kmrels[cuda_index];
-		Size		length;
-		cl_int		i;
+		GpuJoinState   *gjs = pmrels->gjs;
+		CUdeviceptr		m_kmrels = pmrels->m_kmrels[cuda_index];
+		Size			total_length = 0;
+		Size			length;
+		cl_int			i;
 
 		rc = cuEventCreate(&ev_loaded, CU_EVENT_DEFAULT);
 		if (rc != CUDA_SUCCESS)
@@ -5329,6 +5375,7 @@ multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
 		rc = cuMemcpyHtoDAsync(m_kmrels, &pmrels->kern, length, cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		total_length += length;
 
 		for (i=0; i < pmrels->kern.nrels; i++)
 		{
@@ -5340,6 +5387,7 @@ multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
 								   cuda_stream);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+			total_length += kds->length;
 		}
 		/* DMA Send synchronization */
 		rc = cuEventRecord(ev_loaded, cuda_stream);
@@ -5347,6 +5395,10 @@ multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
 			elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
 		/* save the event */
 		pmrels->ev_loaded[cuda_index] = ev_loaded;
+
+		/* update statistics */
+		gjs->inner_dma_nums++;
+		gjs->inner_dma_size += total_length;
 	}
 	else
 	{
