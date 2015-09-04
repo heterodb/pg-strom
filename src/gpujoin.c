@@ -450,13 +450,20 @@ __dump_gpujoin_path(StringInfo buf, PlannerInfo *root, Path *pathnode)
  * preloading. If result is too large, we must split range of inner
  * chunks logically.
  */
-static void
+static bool
 estimate_buffersize_gpujoin(PlannerInfo *root,
 							RelOptInfo *joinrel,
 							GpuJoinPath *gpath,
 							int num_chunks)
 {
-	cl_int			num_rels = gpath->num_rels;
+	cl_int			i, num_rels = gpath->num_rels;
+
+	/* init number of loops */
+	for (i=0; i < num_rels; i++)
+	{
+		gpath->inners[i].ichunk_nloops = 1;
+		gpath->inners[i].nbatches = 1;
+	}
 
 	/*
 	 * Estimation: size of multi relational inner buffer
@@ -464,7 +471,7 @@ estimate_buffersize_gpujoin(PlannerInfo *root,
 	do {
 		Size		inner_limit_sz;
 		Size		inner_total_sz;
-		cl_int		inner_nloops = 1;
+		Size		inner_nloops = 1;
 		Size		largest_chunk_size = 0;
 		cl_int		largest_chunk_index = -1;
 		Size		largest_growth_ntuples = 0.0;
@@ -473,7 +480,7 @@ estimate_buffersize_gpujoin(PlannerInfo *root,
 		double		inner_ntuples;
 		double		join_ntuples;
 		double		prev_ntuples;
-		cl_int		i, ncols;
+		cl_int		ncols;
 
 		inner_total_sz = STROMALIGN(offsetof(kern_multirels,
 											 chunks[num_rels]));
@@ -561,11 +568,25 @@ estimate_buffersize_gpujoin(PlannerInfo *root,
 				+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]));
 			if (buffer_size <= pgstrom_chunk_size())
 				gpath->inners[i].ichunk_nloops = 1;
-			else
 			{
-				gpath->inners[i].ichunk_nloops =
-					(buffer_size / pgstrom_chunk_size()) + 1;
-				inner_nloops *= gpath->inners[i].ichunk_nloops;
+				Size	nloops_minor
+					= (buffer_size / pgstrom_chunk_size()) + 1;
+
+				if (nloops_minor > INT_MAX)
+				{
+					elog(DEBUG1, "Too large kgjoin {nitems=%zu size=%zu}",
+						 num_items, buffer_size);
+					/*
+					 * NOTE: Heuristically, it is not a reasonable plan to
+					 * expect massive amount of intermediation result items.
+					 * It will lead very large ammount of minor iteration
+					 * for GpuJoin kernel invocations. So, we bail out this
+					 * plan immediately.
+					 */
+					return false;
+				}
+				gpath->inners[i].ichunk_nloops = nloops_minor;
+				inner_nloops *= nloops_minor;
 			}
 
 			if (largest_growth_index < 0 ||
@@ -597,9 +618,18 @@ estimate_buffersize_gpujoin(PlannerInfo *root,
 						* (Size) join_ntuples);
 		if (buffer_size > pgstrom_chunk_size_limit())
 		{
-			Assert(largest_growth_index >= 0);
-			gpath->inners[i].ichunk_nloops *=
-				(buffer_size / pgstrom_chunk_size_limit()) + 1;
+			Size	nloops_minor
+				= (buffer_size / pgstrom_chunk_size_limit()) + 1;
+
+			if (nloops_minor > INT_MAX)
+			{
+				elog(DEBUG1, "Too large KDS-Dest {nrooms=%zu size=%zu}",
+					 (Size) join_ntuples, (Size) buffer_size);
+				return false;
+			}
+			Assert(largest_growth_index >= 0 &&
+				   largest_growth_index < num_rels);
+			gpath->inners[largest_growth_index].ichunk_nloops *= nloops_minor;
 			continue;
 		}
 
@@ -611,12 +641,22 @@ estimate_buffersize_gpujoin(PlannerInfo *root,
 		inner_limit_sz = gpuMemMaxAllocSize() / 2 - BLCKSZ * num_rels;
 		if (inner_total_sz > inner_limit_sz)
 		{
-			Assert(largest_chunk_index >= 0);
-			gpath->inners[largest_chunk_index].nbatches
-				*= (inner_total_sz / inner_limit_sz) + 1;
+			Size	nloops_major = (inner_total_sz / inner_limit_sz) + 1;
+
+			if (nloops_major > INT_MAX)
+			{
+				elog(DEBUG1, "Too large Inner multirel buffer {size=%zu}",
+					 (Size) inner_total_sz);
+				return false;
+			}
+			Assert(largest_chunk_index >= 0 &&
+				   largest_chunk_index < num_rels);
+			gpath->inners[largest_chunk_index].nbatches *= nloops_major;
 			continue;
 		}
 	} while (false);
+
+	return true;	/* probably, reasonable plan for buffer usage */
 }
 
 /*
@@ -640,19 +680,20 @@ cost_gpujoin(PlannerInfo *root,
 	QualCost   *join_cost;
 	Size		inner_total_sz = 0;
 	double		chunk_ntuples;
-	int			inner_nloops_outside = 1;	/* loops by pmrels overflow */
-	int			inner_nloops_inside = 1;	/* loops by kds_dst overflow */
+	double		inner_nloops_outside = 1.0;	/* loops by pmrels overflow */
+	double		inner_nloops_inside = 1.0;	/* loops by kds_dst overflow */
 	int			i, num_rels = gpath->num_rels;
 
 	/*
 	 * Estimation of inner / destination buffer consumption
 	 */
-	estimate_buffersize_gpujoin(root, joinrel, gpath, num_chunks);
+	if (!estimate_buffersize_gpujoin(root, joinrel, gpath, num_chunks))
+		return false;
 
 	for (i=0; i < num_rels; i++)
 	{
-		inner_nloops_outside *= gpath->inners[i].nbatches;
-		inner_nloops_inside *= gpath->inners[i].ichunk_nloops;
+		inner_nloops_outside *= (double)gpath->inners[i].nbatches;
+		inner_nloops_inside *= (double)gpath->inners[i].ichunk_nloops;
 	}
 
 	/*
@@ -752,9 +793,9 @@ cost_gpujoin(PlannerInfo *root,
 	/* cost to send inner buffer; assume 25% of kernel kick will take DMA */
 	run_cost += ((double)(inner_total_sz / pgstrom_chunk_size())
 				 * pgstrom_gpu_dma_cost
-				 * (double)(num_chunks *
-							inner_nloops_inside *
-							inner_nloops_outside) * 0.25);
+				 * ((double)num_chunks *
+					inner_nloops_inside *
+					inner_nloops_outside) * 0.25);
 	/*
 	 * delay to fetch the first tuple
 	 */
@@ -770,6 +811,15 @@ cost_gpujoin(PlannerInfo *root,
 	 */
 	gpath->cpath.path.startup_cost = startup_cost + startup_delay;
 	gpath->cpath.path.total_cost = startup_cost + run_cost;
+
+	/*
+	 * NOTE: If very large number of rows are estimated, it may cause
+	 * overflow of variables, then makes nearly negative infinite cost
+	 * even though the plan is very bad.
+	 * At this moment, we put assertion to detect it.
+	 */
+	Assert(gpath->cpath.path.startup_cost >= 0.0 &&
+		   gpath->cpath.path.total_cost >= 0.0);
 
 	if (add_path_precheck(gpath->cpath.path.parent,
 						  gpath->cpath.path.startup_cost,
