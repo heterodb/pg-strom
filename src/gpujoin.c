@@ -465,7 +465,19 @@ estimate_buffersize_gpujoin(PlannerInfo *root,
 							GpuJoinPath *gpath,
 							int num_chunks)
 {
-	cl_int			i, num_rels = gpath->num_rels;
+	Size		inner_limit_sz;
+	Size		inner_total_sz;
+	Size		inner_nloops = 1;
+	Size		largest_chunk_size = 0;
+	cl_int		largest_chunk_index = -1;
+	Size		largest_growth_ntuples = 0.0;
+	cl_int		largest_growth_index = -1;
+	Size		buffer_size;
+	double		inner_ntuples;
+	double		join_ntuples;
+	double		prev_ntuples;
+	cl_int		ncols;
+	cl_int		i, num_rels = gpath->num_rels;
 
 	/* init number of loops */
 	for (i=0; i < num_rels; i++)
@@ -477,194 +489,185 @@ estimate_buffersize_gpujoin(PlannerInfo *root,
 	/*
 	 * Estimation: size of multi relational inner buffer
 	 */
-	do {
-		Size		inner_limit_sz;
-		Size		inner_total_sz;
-		Size		inner_nloops = 1;
-		Size		largest_chunk_size = 0;
-		cl_int		largest_chunk_index = -1;
-		Size		largest_growth_ntuples = 0.0;
-		cl_int		largest_growth_index = -1;
-		Size		buffer_size;
-		double		inner_ntuples;
-		double		join_ntuples;
-		double		prev_ntuples;
-		cl_int		ncols;
+retry:
+	inner_nloops = 1;
+	largest_chunk_size = 0;
+	largest_chunk_index = -1;
+	largest_growth_ntuples = 0.0;
+	largest_growth_index = -1;
 
-		inner_total_sz = STROMALIGN(offsetof(kern_multirels,
-											 chunks[num_rels]));
-		prev_ntuples = gpath->outer_path->rows / (double) num_chunks;
-		for (i=0; i < num_rels; i++)
+	inner_total_sz = STROMALIGN(offsetof(kern_multirels,
+										 chunks[num_rels]));
+	prev_ntuples = gpath->outer_path->rows / (double) num_chunks;
+	for (i=0; i < num_rels; i++)
+	{
+		Path	   *inner_path = gpath->inners[i].scan_path;
+		RelOptInfo *inner_rel = inner_path->parent;
+		Size		chunk_size;
+		Size		entry_size;
+		Size		hash_nslots;
+		Size		num_items;
+
+		/* force a plausible relation size if no information. */
+		inner_ntuples = Max(inner_path->rows *
+							pgstrom_chunk_size_margin /
+							(double)gpath->inners[i].nloops_major,
+							100.0);
+
+		/*
+		 * NOTE: RelOptInfo->width is not reliable for base relations 
+		 * because this fields shows the length of attributes which
+		 * are actually referenced, however, we usually load physical
+		 * tuples on the KDS/KHash buffer if base relation.
+		 */
+		ncols = list_length(inner_rel->reltargetlist);
+		entry_size = MAXALIGN(offsetof(HeapTupleHeaderData,
+									   t_bits[BITMAPLEN(ncols)]));
+		if (inner_rel->reloptkind != RELOPT_BASEREL)
+			entry_size += MAXALIGN(inner_rel->width);
+		else
 		{
-			Path	   *inner_path = gpath->inners[i].scan_path;
-			RelOptInfo *inner_rel = inner_path->parent;
-			Size		chunk_size;
-			Size		entry_size;
-			Size		hash_nslots;
-			Size		num_items;
+			entry_size += MAXALIGN(((double)(BLCKSZ -
+											 SizeOfPageHeaderData)
+									* inner_rel->pages
+									/ Max(inner_rel->tuples, 1.0))
+								   - sizeof(ItemIdData)
+								   - SizeofHeapTupleHeader);
+		}
 
-			/* force a plausible relation size if no information. */
-			inner_ntuples = Max(inner_path->rows *
-								pgstrom_chunk_size_margin /
-								(double)gpath->inners[i].nloops_major,
-								100.0);
-
-			/*
-			 * NOTE: RelOptInfo->width is not reliable for base relations 
-			 * because this fields shows the length of attributes which
-			 * are actually referenced, however, we usually load physical
-			 * tuples on the KDS/KHash buffer if base relation.
-			 */
-			ncols = list_length(inner_rel->reltargetlist);
-			entry_size = MAXALIGN(offsetof(HeapTupleHeaderData,
-										   t_bits[BITMAPLEN(ncols)]));
-			if (inner_rel->reloptkind != RELOPT_BASEREL)
-				entry_size += MAXALIGN(inner_rel->width);
-			else
-			{
-				entry_size += MAXALIGN(((double)(BLCKSZ -
-												 SizeOfPageHeaderData)
-										* inner_rel->pages
-										/ Max(inner_rel->tuples, 1.0))
-									   - sizeof(ItemIdData)
-									   - SizeofHeapTupleHeader);
-			}
-
-			if (gpath->inners[i].hash_quals != NIL)
-			{
-				entry_size = offsetof(kern_hashitem, htup) + entry_size;
-				hash_nslots = (Size)(inner_ntuples *
-									 pgstrom_chunk_size_margin);
-			}
-			else
-			{
-				entry_size = offsetof(kern_tupitem, htup) + entry_size;
-				hash_nslots = 0;
-			}
-
-			/*
-			 * inner chunk size estimation
-			 */
-			chunk_size = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]))
-				+ STROMALIGN(gpath->inners[i].hash_quals != NIL
-							 ? sizeof(cl_uint) * hash_nslots
-							 : sizeof(cl_uint) * (Size)(inner_ntuples))
-				+ STROMALIGN(entry_size * (Size)(inner_ntuples));
-
-			gpath->inners[i].ichunk_size = chunk_size;
-			gpath->inners[i].hash_nslots = hash_nslots;
-
-			if (largest_chunk_index < 0 || largest_chunk_size < chunk_size)
-			{
-				largest_chunk_size = chunk_size;
-				largest_chunk_index = i;
-			}
-			inner_total_sz += chunk_size;
-
-			/*
-			 * NOTE: The number of intermediation result of GpuJoin has to
-			 * fit pgstrom_chunk_size(). If too large number of rows are
-			 * expected, we try to run same chunk multiple times with
-			 * smaller inner_size[].
-			 */
-			join_ntuples = (gpath->inners[i].join_nrows /
-							(double)(num_chunks * inner_nloops));
-			num_items = (Size)((double)(i+2) * join_ntuples *
-							   pgstrom_chunk_size_margin);
-			buffer_size = offsetof(kern_gpujoin, kparams)
-				+ BLCKSZ	/* alternative of kern_parambuf */
-				+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]))
-				+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]));
-			if (buffer_size <= pgstrom_chunk_size())
-				gpath->inners[i].nloops_minor = 1;
-			{
-				Size	nloops_minor
-					= (buffer_size / pgstrom_chunk_size()) + 1;
-
-				if (nloops_minor > INT_MAX)
-				{
-					elog(DEBUG1, "Too large kgjoin {nitems=%zu size=%zu}",
-						 num_items, buffer_size);
-					/*
-					 * NOTE: Heuristically, it is not a reasonable plan to
-					 * expect massive amount of intermediation result items.
-					 * It will lead very large ammount of minor iteration
-					 * for GpuJoin kernel invocations. So, we bail out this
-					 * plan immediately.
-					 */
-					return false;
-				}
-				gpath->inners[i].nloops_minor = nloops_minor;
-				inner_nloops *= nloops_minor;
-			}
-
-			if (largest_growth_index < 0 ||
-				join_ntuples - prev_ntuples > largest_growth_ntuples)
-			{
-				largest_growth_index = i;
-				largest_growth_ntuples = join_ntuples - prev_ntuples;
-			}
-			prev_ntuples = join_ntuples;
+		if (gpath->inners[i].hash_quals != NIL)
+		{
+			entry_size += offsetof(kern_hashitem, htup);
+			hash_nslots = (Size)(inner_ntuples *
+								 pgstrom_chunk_size_margin);
+		}
+		else
+		{
+			entry_size += offsetof(kern_tupitem, htup);
+			hash_nslots = 0;
 		}
 
 		/*
-		 * NOTE:If expected consumption of destination buffer exceeds the
-		 * limitation, we logically divide an inner chunk (with largest
-		 * growth ratio) and run GpuJoin task multiple times towards same
-		 * data set.
-		 * At this moment, we cannot determine which result format shall
-		 * be used (KDS_FORMAT_ROW or KDS_FORMAT_SLOT), so we adopt the
-		 * larger one, for safety.
+		 * inner chunk size estimation
 		 */
-		Assert(gpath->inners[num_rels-1].join_nrows == gpath->cpath.path.rows);
-		join_ntuples = gpath->cpath.path.rows / (double)(num_chunks *
-														 inner_nloops);
-		ncols = list_length(joinrel->reltargetlist);
-		buffer_size = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
-		buffer_size += (Max(LONGALIGN((sizeof(Datum) + sizeof(char)) * ncols),
-							MAXALIGN(offsetof(kern_tupitem, htup) +
-									 joinrel->width) + sizeof(cl_uint))
-						* (Size) join_ntuples);
-		if (buffer_size > pgstrom_chunk_size_limit())
+		chunk_size = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]))
+			+ STROMALIGN(gpath->inners[i].hash_quals != NIL
+						 ? sizeof(cl_uint) * hash_nslots
+						 : sizeof(cl_uint) * (Size)(inner_ntuples))
+			+ STROMALIGN(entry_size * (Size)(inner_ntuples));
+
+		gpath->inners[i].ichunk_size = chunk_size;
+		gpath->inners[i].hash_nslots = hash_nslots;
+
+		if (largest_chunk_index < 0 || largest_chunk_size < chunk_size)
+		{
+			largest_chunk_size = chunk_size;
+			largest_chunk_index = i;
+		}
+		inner_total_sz += chunk_size;
+
+		/*
+		 * NOTE: The number of intermediation result of GpuJoin has to
+		 * fit pgstrom_chunk_size(). If too large number of rows are
+		 * expected, we try to run same chunk multiple times with
+		 * smaller inner_size[].
+		 */
+		join_ntuples = (gpath->inners[i].join_nrows /
+						(double)(num_chunks * inner_nloops));
+		num_items = (Size)((double)(i+2) * join_ntuples *
+						   pgstrom_chunk_size_margin);
+		buffer_size = offsetof(kern_gpujoin, kparams)
+			+ BLCKSZ	/* alternative of kern_parambuf */
+			+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]))
+			+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]));
+		if (buffer_size <= pgstrom_chunk_size())
+			gpath->inners[i].nloops_minor = 1;
+		else
 		{
 			Size	nloops_minor
-				= (buffer_size / pgstrom_chunk_size_limit()) + 1;
+				= (buffer_size / pgstrom_chunk_size()) + 1;
 
 			if (nloops_minor > INT_MAX)
 			{
-				elog(DEBUG1, "Too large KDS-Dest {nrooms=%zu size=%zu}",
-					 (Size) join_ntuples, (Size) buffer_size);
+				elog(DEBUG1, "Too large kgjoin {nitems=%zu size=%zu}",
+					 num_items, buffer_size);
+				/*
+				 * NOTE: Heuristically, it is not a reasonable plan to
+				 * expect massive amount of intermediation result items.
+				 * It will lead very large ammount of minor iteration
+				 * for GpuJoin kernel invocations. So, we bail out this
+				 * plan immediately.
+				 */
 				return false;
 			}
-			Assert(largest_growth_index >= 0 &&
-				   largest_growth_index < num_rels);
-			gpath->inners[largest_growth_index].nloops_minor *= nloops_minor;
-			continue;
+			gpath->inners[i].nloops_minor = nloops_minor;
+			inner_nloops *= nloops_minor;
 		}
 
-		/*
-		 * NOTE: If total size of inner multi-relations buffer is out of
-		 * range, we have to split inner buffer multiple portions to fit
-		 * GPU RAMs. It is a restriction come from H/W capability.
-		 */
-		inner_limit_sz = gpuMemMaxAllocSize() / 2 - BLCKSZ * num_rels;
-		if (inner_total_sz > inner_limit_sz)
+		if (largest_growth_index < 0 ||
+			join_ntuples - prev_ntuples > largest_growth_ntuples)
 		{
-			Size	nloops_major = (inner_total_sz / inner_limit_sz) + 1;
-
-			if (nloops_major > INT_MAX)
-			{
-				elog(DEBUG1, "Too large Inner multirel buffer {size=%zu}",
-					 (Size) inner_total_sz);
-				return false;
-			}
-			Assert(largest_chunk_index >= 0 &&
-				   largest_chunk_index < num_rels);
-			gpath->inners[largest_chunk_index].nloops_major *= nloops_major;
-			continue;
+			largest_growth_index = i;
+			largest_growth_ntuples = join_ntuples - prev_ntuples;
 		}
-	} while (false);
+		prev_ntuples = join_ntuples;
+	}
 
+	/*
+	 * NOTE:If expected consumption of destination buffer exceeds the
+	 * limitation, we logically divide an inner chunk (with largest
+	 * growth ratio) and run GpuJoin task multiple times towards same
+	 * data set.
+	 * At this moment, we cannot determine which result format shall
+	 * be used (KDS_FORMAT_ROW or KDS_FORMAT_SLOT), so we adopt the
+	 * larger one, for safety.
+	 */
+	Assert(gpath->inners[num_rels-1].join_nrows == gpath->cpath.path.rows);
+	join_ntuples = gpath->cpath.path.rows / (double)(num_chunks *
+													 inner_nloops);
+	ncols = list_length(joinrel->reltargetlist);
+	buffer_size = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+	buffer_size += (Max(LONGALIGN((sizeof(Datum) + sizeof(char)) * ncols),
+						MAXALIGN(offsetof(kern_tupitem, htup) +
+								 joinrel->width) + sizeof(cl_uint))
+					* (Size) join_ntuples);
+	if (buffer_size > pgstrom_chunk_size_limit())
+	{
+		Size	nloops_minor = (buffer_size / pgstrom_chunk_size_limit()) + 1;
+
+		if (nloops_minor > INT_MAX)
+		{
+			elog(DEBUG1, "Too large KDS-Dest {nrooms=%zu size=%zu}",
+				 (Size) join_ntuples, (Size) buffer_size);
+			return false;
+		}
+		Assert(largest_growth_index >= 0 &&
+			   largest_growth_index < num_rels);
+		gpath->inners[largest_growth_index].nloops_minor *= nloops_minor;
+		goto retry;
+	}
+
+	/*
+	 * NOTE: If total size of inner multi-relations buffer is out of
+	 * range, we have to split inner buffer multiple portions to fit
+	 * GPU RAMs. It is a restriction come from H/W capability.
+	 */
+	inner_limit_sz = gpuMemMaxAllocSize() / 2 - BLCKSZ * num_rels;
+	if (inner_total_sz > inner_limit_sz)
+	{
+		Size	nloops_major = (inner_total_sz / inner_limit_sz) + 1;
+
+		if (nloops_major > INT_MAX)
+		{
+			elog(DEBUG1, "Too large Inner multirel buffer {size=%zu}",
+				 (Size) inner_total_sz);
+			return false;
+		}
+		Assert(largest_chunk_index >= 0 &&
+			   largest_chunk_index < num_rels);
+		gpath->inners[largest_chunk_index].nloops_major *= nloops_major;
+		goto retry;
+	}
 	return true;	/* probably, reasonable plan for buffer usage */
 }
 
