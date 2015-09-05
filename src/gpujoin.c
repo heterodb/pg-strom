@@ -1159,10 +1159,6 @@ gpujoin_add_join_path(PlannerInfo *root,
 	if (!pgstrom_enabled)
 		return;
 
-	/* no benefit to run cross join in GPU device */
-	if (!extra->restrictlist)
-		return;
-
 	/*
 	 * check bulk-load capability around targetlist of joinrel.
 	 * it may be turned off according to the host_quals if any.
@@ -1229,6 +1225,10 @@ gpujoin_add_join_path(PlannerInfo *root,
 
 		Assert(outerrel == outer_path->parent);
 		Assert(innerrel == ip_item->inner_path->parent);
+
+		/* no benefit to run cross join in GPU device */
+		if (!restrict_clauses)
+			return;
 
 		/*
 		 * Check restrictions of joinrel in this level
