@@ -5,7 +5,6 @@
 -- global configuration
 set pg_strom.gpu_setup_cost to 0;
 set pg_strom.debug_force_gpupreagg to on;
-set extra_float_digits to -3;
 set pg_strom.enable_gpusort to off;
 set client_min_messages to warning;
 

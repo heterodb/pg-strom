@@ -3,15 +3,16 @@
 --#
 --#   "About Calculation errors in floating-point number"
 --#
---#   Some queries have been adjusted so as not affected 
---#   by the floating point error on pg_strom.
+--#   stddev(float4/float8) and corr(float4/float8) except 
+--#   from this test case because their functions may return
+--#   wrong results due to floating point error.
+--# 
 --#   Please refer to the following for more information.
 --#   https://github.com/pg-strom/devel/wiki/Known-Issues
 --#
 set pg_strom.debug_force_gpupreagg to on;
-set enable_gpusort to off;
+set pg_strom.enable_gpusort to off;
 set client_min_messages to warning;
-set extra_float_digits to -3;
 -- smallint
 select key, avg(smlint_x)::smallint            from strom_overflow_test  group by key order by key;
  key |  avg   
@@ -917,39 +918,39 @@ select key,covar_samp(bigint_x,bigint_x)::bigint from strom_overflow_test  group
 ERROR:  bigint out of range
 --real
 select key, avg(real_x)::real            from strom_overflow_test  group by key order by key;
- key |    avg    
------+-----------
-   1 |     1e+38
-   2 |     1e+38
-   3 |     1e+38
-   4 |     1e+38
-   5 |     1e+38
-   6 |     1e+38
-   7 |     1e+38
-   8 |     1e+38
-   9 |     1e+38
-  10 |     1e+38
-  11 |    -1e+38
-  12 |    -1e+38
-  13 |    -1e+38
-  14 |    -1e+38
-  15 |    -1e+38
-  16 |    -1e+38
-  17 |    -1e+38
-  18 |    -1e+38
-  19 |    -1e+38
-  20 |    -1e+38
-  21 | -1.35e+36
-  22 | -2.35e+35
-  23 | -5.48e+35
-  24 | -1.08e+36
-  25 |  3.87e+35
-  26 |  3.38e+35
-  27 |  1.79e+36
-  28 |  2.02e+36
-  29 |   1.9e+36
-  30 |  1.14e+36
-     |          
+ key |     avg      
+-----+--------------
+   1 |        1e+38
+   2 |        1e+38
+   3 |        1e+38
+   4 |        1e+38
+   5 |        1e+38
+   6 |        1e+38
+   7 |        1e+38
+   8 |        1e+38
+   9 |        1e+38
+  10 |        1e+38
+  11 |       -1e+38
+  12 |       -1e+38
+  13 |       -1e+38
+  14 |       -1e+38
+  15 |       -1e+38
+  16 |       -1e+38
+  17 |       -1e+38
+  18 |       -1e+38
+  19 |       -1e+38
+  20 |       -1e+38
+  21 | -1.34906e+36
+  22 | -2.35014e+35
+  23 | -5.48249e+35
+  24 | -1.08084e+36
+  25 |  3.87356e+35
+  26 |  3.38282e+35
+  27 |  1.79019e+36
+  28 |  2.01509e+36
+  29 |  1.89653e+36
+  30 |  1.14087e+36
+     |             
 (31 rows)
 
 select key, count(real_x)::real           from strom_overflow_test  group by key order by key;
@@ -989,229 +990,89 @@ select key, count(real_x)::real           from strom_overflow_test  group by key
 (31 rows)
 
 select key, max(real_x)::real             from strom_overflow_test  group by key order by key;
- key |   max    
------+----------
-   1 |    1e+38
-   2 |    1e+38
-   3 |    1e+38
-   4 |    1e+38
-   5 |    1e+38
-   6 |    1e+38
-   7 |    1e+38
-   8 |    1e+38
-   9 |    1e+38
-  10 |    1e+38
-  11 |   -1e+38
-  12 |   -1e+38
-  13 |   -1e+38
-  14 |   -1e+38
-  15 |   -1e+38
-  16 |   -1e+38
-  17 |   -1e+38
-  18 |   -1e+38
-  19 |   -1e+38
-  20 |   -1e+38
-  21 | 9.98e+37
-  22 | 9.99e+37
-  23 | 9.95e+37
-  24 | 9.95e+37
-  25 | 9.98e+37
-  26 | 9.98e+37
-  27 | 9.95e+37
-  28 | 9.99e+37
-  29 |    1e+38
-  30 | 9.99e+37
-     |         
+ key |     max     
+-----+-------------
+   1 |       1e+38
+   2 |       1e+38
+   3 |       1e+38
+   4 |       1e+38
+   5 |       1e+38
+   6 |       1e+38
+   7 |       1e+38
+   8 |       1e+38
+   9 |       1e+38
+  10 |       1e+38
+  11 |      -1e+38
+  12 |      -1e+38
+  13 |      -1e+38
+  14 |      -1e+38
+  15 |      -1e+38
+  16 |      -1e+38
+  17 |      -1e+38
+  18 |      -1e+38
+  19 |      -1e+38
+  20 |      -1e+38
+  21 | 9.97806e+37
+  22 | 9.99283e+37
+  23 | 9.95498e+37
+  24 | 9.94817e+37
+  25 | 9.98492e+37
+  26 | 9.97683e+37
+  27 | 9.94521e+37
+  28 | 9.98919e+37
+  29 | 9.99772e+37
+  30 | 9.98589e+37
+     |            
 (31 rows)
 
 select key, min(real_x)::real             from strom_overflow_test  group by key order by key;
- key |    min    
------+-----------
-   1 |     1e+38
-   2 |     1e+38
-   3 |     1e+38
-   4 |     1e+38
-   5 |     1e+38
-   6 |     1e+38
-   7 |     1e+38
-   8 |     1e+38
-   9 |     1e+38
-  10 |     1e+38
-  11 |    -1e+38
-  12 |    -1e+38
-  13 |    -1e+38
-  14 |    -1e+38
-  15 |    -1e+38
-  16 |    -1e+38
-  17 |    -1e+38
-  18 |    -1e+38
-  19 |    -1e+38
-  20 |    -1e+38
-  21 | -9.99e+37
-  22 | -9.99e+37
-  23 | -9.96e+37
-  24 | -9.99e+37
-  25 | -9.98e+37
-  26 |    -1e+38
-  27 |    -1e+38
-  28 | -9.98e+37
-  29 |    -1e+38
-  30 | -9.99e+37
-     |          
+ key |     min      
+-----+--------------
+   1 |        1e+38
+   2 |        1e+38
+   3 |        1e+38
+   4 |        1e+38
+   5 |        1e+38
+   6 |        1e+38
+   7 |        1e+38
+   8 |        1e+38
+   9 |        1e+38
+  10 |        1e+38
+  11 |       -1e+38
+  12 |       -1e+38
+  13 |       -1e+38
+  14 |       -1e+38
+  15 |       -1e+38
+  16 |       -1e+38
+  17 |       -1e+38
+  18 |       -1e+38
+  19 |       -1e+38
+  20 |       -1e+38
+  21 | -9.98908e+37
+  22 | -9.98593e+37
+  23 | -9.96371e+37
+  24 | -9.99338e+37
+  25 | -9.98024e+37
+  26 | -9.99901e+37
+  27 | -9.99594e+37
+  28 | -9.98172e+37
+  29 | -9.99905e+37
+  30 | -9.98754e+37
+     |             
 (31 rows)
 
 select key, sum(real_x)::real             from strom_overflow_test  group by key order by key;
 ERROR:  value out of range: overflow
-select key, stddev(real_x)::real          from strom_overflow_test  group by key order by key;
- key |  stddev  
------+----------
-   1 |        0
-   2 |        0
-   3 |        0
-   4 |        0
-   5 |        0
-   6 |        0
-   7 |        0
-   8 |        0
-   9 |        0
-  10 |        0
-  11 |        0
-  12 |        0
-  13 |        0
-  14 |        0
-  15 |        0
-  16 |        0
-  17 |        0
-  18 |        0
-  19 |        0
-  20 |        0
-  21 | 5.71e+37
-  22 | 5.82e+37
-  23 | 5.65e+37
-  24 | 5.76e+37
-  25 | 5.79e+37
-  26 | 5.68e+37
-  27 | 5.61e+37
-  28 | 5.73e+37
-  29 | 5.82e+37
-  30 | 5.86e+37
-     |         
-(31 rows)
-
-select key, stddev_pop(real_x)::real      from strom_overflow_test  group by key order by key;
- key | stddev_pop 
------+------------
-   1 |          0
-   2 |          0
-   3 |          0
-   4 |          0
-   5 |          0
-   6 |          0
-   7 |          0
-   8 |          0
-   9 |          0
-  10 |          0
-  11 |          0
-  12 |          0
-  13 |          0
-  14 |          0
-  15 |          0
-  16 |          0
-  17 |          0
-  18 |          0
-  19 |          0
-  20 |          0
-  21 |    5.7e+37
-  22 |   5.81e+37
-  23 |   5.64e+37
-  24 |   5.76e+37
-  25 |   5.78e+37
-  26 |   5.68e+37
-  27 |    5.6e+37
-  28 |   5.73e+37
-  29 |   5.81e+37
-  30 |   5.86e+37
-     |           
-(31 rows)
-
-select key, stddev_samp(real_x)::real     from strom_overflow_test  group by key order by key;
- key | stddev_samp 
------+-------------
-   1 |           0
-   2 |           0
-   3 |           0
-   4 |           0
-   5 |           0
-   6 |           0
-   7 |           0
-   8 |           0
-   9 |           0
-  10 |           0
-  11 |           0
-  12 |           0
-  13 |           0
-  14 |           0
-  15 |           0
-  16 |           0
-  17 |           0
-  18 |           0
-  19 |           0
-  20 |           0
-  21 |    5.71e+37
-  22 |    5.82e+37
-  23 |    5.65e+37
-  24 |    5.76e+37
-  25 |    5.79e+37
-  26 |    5.68e+37
-  27 |    5.61e+37
-  28 |    5.73e+37
-  29 |    5.82e+37
-  30 |    5.86e+37
-     |            
-(31 rows)
-
+-- select key, stddev(real_x)::real          from strom_overflow_test  group by key order by key;
+-- select key, stddev_pop(real_x)::real      from strom_overflow_test  group by key order by key;
+-- select key, stddev_samp(real_x)::real     from strom_overflow_test  group by key order by key;
 select key, variance(real_x)::real        from strom_overflow_test  group by key order by key;
 ERROR:  value out of range: overflow
 select key, var_pop(real_x)::real         from strom_overflow_test  group by key order by key;
 ERROR:  value out of range: overflow
 select key, var_samp(real_x)::real        from strom_overflow_test  group by key order by key;
 ERROR:  value out of range: overflow
-select key,corr(real_x,real_x)::real  from strom_overflow_test  group by key order by key;
- key | corr 
------+------
-   1 |     
-   2 |     
-   3 |     
-   4 |     
-   5 |     
-   6 |     
-   7 |     
-   8 |     
-   9 |     
-  10 |     
-  11 |     
-  12 |     
-  13 |     
-  14 |     
-  15 |     
-  16 |     
-  17 |     
-  18 |     
-  19 |     
-  20 |     
-  21 |    1
-  22 |    1
-  23 |    1
-  24 |    1
-  25 |    1
-  26 |    1
-  27 |    1
-  28 |    1
-  29 |    1
-  30 |    1
-     |     
-(31 rows)
-
+-- select key,corr(real_x,real_x)::real  from strom_overflow_test  group by key order by key;
 select key,covar_pop(real_x,real_x)::real  from strom_overflow_test  group by key order by key;
 ERROR:  value out of range: overflow
 select key,covar_samp(real_x,real_x)::real  from strom_overflow_test  group by key order by key;
@@ -1256,93 +1117,89 @@ select key, count(float_x)::float           from strom_overflow_test  group by k
 (31 rows)
 
 select key, max(float_x)::float             from strom_overflow_test  group by key order by key;
- key |        max         
------+--------------------
-   1 |             1e+308
-   2 |             1e+308
-   3 |             1e+308
-   4 |             1e+308
-   5 |             1e+308
-   6 |             1e+308
-   7 |             1e+308
-   8 |             1e+308
-   9 |             1e+308
-  10 |             1e+308
-  11 |            -1e+308
-  12 |            -1e+308
-  13 |            -1e+308
-  14 |            -1e+308
-  15 |            -1e+308
-  16 |            -1e+308
-  17 |            -1e+308
-  18 |            -1e+308
-  19 |            -1e+308
-  20 |            -1e+308
-  21 | 9.99527945183e+307
-  22 | 9.98813641258e+307
-  23 |  9.9796069134e+307
-  24 | 9.93206185289e+307
-  25 | 9.99703846872e+307
-  26 | 9.97420649044e+307
-  27 | 9.97632752173e+307
-  28 | 9.98502329923e+307
-  29 | 9.95182529092e+307
-  30 | 9.92153377272e+307
-     |                   
+ key |          max          
+-----+-----------------------
+   1 |                1e+308
+   2 |                1e+308
+   3 |                1e+308
+   4 |                1e+308
+   5 |                1e+308
+   6 |                1e+308
+   7 |                1e+308
+   8 |                1e+308
+   9 |                1e+308
+  10 |                1e+308
+  11 |               -1e+308
+  12 |               -1e+308
+  13 |               -1e+308
+  14 |               -1e+308
+  15 |               -1e+308
+  16 |               -1e+308
+  17 |               -1e+308
+  18 |               -1e+308
+  19 |               -1e+308
+  20 |               -1e+308
+  21 | 9.99527945183218e+307
+  22 | 9.98813641257584e+307
+  23 | 9.97960691340268e+307
+  24 | 9.93206185288727e+307
+  25 | 9.99703846871853e+307
+  26 | 9.97420649044216e+307
+  27 | 9.97632752172649e+307
+  28 | 9.98502329923213e+307
+  29 | 9.95182529091835e+307
+  30 | 9.92153377272189e+307
+     |                      
 (31 rows)
 
 select key, min(float_x)::float             from strom_overflow_test  group by key order by key;
- key |         min         
------+---------------------
-   1 |              1e+308
-   2 |              1e+308
-   3 |              1e+308
-   4 |              1e+308
-   5 |              1e+308
-   6 |              1e+308
-   7 |              1e+308
-   8 |              1e+308
-   9 |              1e+308
-  10 |              1e+308
-  11 |             -1e+308
-  12 |             -1e+308
-  13 |             -1e+308
-  14 |             -1e+308
-  15 |             -1e+308
-  16 |             -1e+308
-  17 |             -1e+308
-  18 |             -1e+308
-  19 |             -1e+308
-  20 |             -1e+308
-  21 | -9.96138229035e+307
-  22 | -9.99781461433e+307
-  23 | -9.96753358282e+307
-  24 |   -9.906487111e+307
-  25 | -9.98455223627e+307
-  26 | -9.99770946801e+307
-  27 | -9.98397724703e+307
-  28 | -9.99285292812e+307
-  29 | -9.99192949384e+307
-  30 | -9.99421687797e+307
-     |                    
+ key |          min           
+-----+------------------------
+   1 |                 1e+308
+   2 |                 1e+308
+   3 |                 1e+308
+   4 |                 1e+308
+   5 |                 1e+308
+   6 |                 1e+308
+   7 |                 1e+308
+   8 |                 1e+308
+   9 |                 1e+308
+  10 |                 1e+308
+  11 |                -1e+308
+  12 |                -1e+308
+  13 |                -1e+308
+  14 |                -1e+308
+  15 |                -1e+308
+  16 |                -1e+308
+  17 |                -1e+308
+  18 |                -1e+308
+  19 |                -1e+308
+  20 |                -1e+308
+  21 | -9.96138229034841e+307
+  22 | -9.99781461432576e+307
+  23 | -9.96753358282149e+307
+  24 | -9.90648711100221e+307
+  25 | -9.98455223627388e+307
+  26 | -9.99770946800709e+307
+  27 | -9.98397724702954e+307
+  28 | -9.99285292811692e+307
+  29 | -9.99192949384451e+307
+  30 | -9.99421687796712e+307
+     |                       
 (31 rows)
 
 select key, sum(float_x)::float             from strom_overflow_test  group by key order by key;
 ERROR:  value out of range: overflow
-select key, stddev(float_x)::float          from strom_overflow_test  group by key order by key;
-ERROR:  value out of range: overflow
-select key, stddev_pop(float_x)::float      from strom_overflow_test  group by key order by key;
-ERROR:  value out of range: overflow
-select key, stddev_samp(float_x)::float     from strom_overflow_test  group by key order by key;
-ERROR:  value out of range: overflow
+-- select key, stddev(float_x)::float          from strom_overflow_test  group by key order by key;
+-- select key, stddev_pop(float_x)::float      from strom_overflow_test  group by key order by key;
+-- select key, stddev_samp(float_x)::float     from strom_overflow_test  group by key order by key;
 select key, variance(float_x)::float        from strom_overflow_test  group by key order by key;
 ERROR:  value out of range: overflow
 select key, var_pop(float_x)::float         from strom_overflow_test  group by key order by key;
 ERROR:  value out of range: overflow
 select key, var_samp(float_x)::float        from strom_overflow_test  group by key order by key;
 ERROR:  value out of range: overflow
-select key,corr(float_x,float_x)::float  from strom_overflow_test  group by key order by key;
-ERROR:  value out of range: overflow
+-- select key,corr(float_x,float_x)::float  from strom_overflow_test  group by key order by key;
 select key,covar_pop(float_x,float_x)::float  from strom_overflow_test  group by key order by key;
 ERROR:  value out of range: overflow
 select key,covar_samp(float_x,float_x)::float  from strom_overflow_test  group by key order by key;

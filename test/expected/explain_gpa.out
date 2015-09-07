@@ -4,7 +4,6 @@
 -- global configuration
 set pg_strom.gpu_setup_cost to 0;
 set pg_strom.debug_force_gpupreagg to on;
-set extra_float_digits to -3;
 set pg_strom.enable_gpusort to off;
 set client_min_messages to warning;
 -- explain normal case
@@ -2871,23 +2870,17 @@ explain (verbose, costs off, timing off) select key,covar_samp(float_x,float_x) 
 (14 rows)
 
 explain (verbose, costs off, timing off) select key,avg(nume_x)            from strom_test group by key order by key;
-                                                        QUERY PLAN                                                         
----------------------------------------------------------------------------------------------------------------------------
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (pgstrom.avg_numeric((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x))))
+   Output: key, (avg(nume_x))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, pgstrom.avg_numeric((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)))
+         Output: key, avg(nume_x)
          Group Key: strom_test.key
-         ->  Custom Scan (GpuPreAgg)
-               Output: key, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x)
-               Bulkload: On (density: 100.00%)
-               Reduction: Local + Global
-               Features: format: tuple-slot, bulkload: unsupported
-               ->  Custom Scan (BulkScan) on public.strom_test
-                     Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-                     Features: format: heap-tuple, bulkload: supported
-(14 rows)
+         ->  Seq Scan on public.strom_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(8 rows)
 
 explain (verbose, costs off, timing off) select key,count(nume_x)          from strom_test group by key order by key;
                                                         QUERY PLAN                                                         
@@ -2909,175 +2902,121 @@ explain (verbose, costs off, timing off) select key,count(nume_x)          from 
 (14 rows)
 
 explain (verbose, costs off, timing off) select key,max(nume_x)            from strom_test group by key order by key;
-                                                        QUERY PLAN                                                         
----------------------------------------------------------------------------------------------------------------------------
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (max((pgstrom.pmax(nume_x))))
+   Output: key, (max(nume_x))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, max((pgstrom.pmax(nume_x)))
+         Output: key, max(nume_x)
          Group Key: strom_test.key
-         ->  Custom Scan (GpuPreAgg)
-               Output: key, pgstrom.pmax(nume_x)
-               Bulkload: On (density: 100.00%)
-               Reduction: Local + Global
-               Features: format: tuple-slot, bulkload: unsupported
-               ->  Custom Scan (BulkScan) on public.strom_test
-                     Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-                     Features: format: heap-tuple, bulkload: supported
-(14 rows)
+         ->  Seq Scan on public.strom_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(8 rows)
 
 explain (verbose, costs off, timing off) select key,min(nume_x)            from strom_test group by key order by key;
-                                                        QUERY PLAN                                                         
----------------------------------------------------------------------------------------------------------------------------
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (min((pgstrom.pmin(nume_x))))
+   Output: key, (min(nume_x))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, min((pgstrom.pmin(nume_x)))
+         Output: key, min(nume_x)
          Group Key: strom_test.key
-         ->  Custom Scan (GpuPreAgg)
-               Output: key, pgstrom.pmin(nume_x)
-               Bulkload: On (density: 100.00%)
-               Reduction: Local + Global
-               Features: format: tuple-slot, bulkload: unsupported
-               ->  Custom Scan (BulkScan) on public.strom_test
-                     Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-                     Features: format: heap-tuple, bulkload: supported
-(14 rows)
+         ->  Seq Scan on public.strom_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(8 rows)
 
 explain (verbose, costs off, timing off) select key,sum(nume_x)            from strom_test group by key order by key;
-                                                        QUERY PLAN                                                         
----------------------------------------------------------------------------------------------------------------------------
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (sum((pgstrom.psum(nume_x))))
+   Output: key, (sum(nume_x))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, sum((pgstrom.psum(nume_x)))
+         Output: key, sum(nume_x)
          Group Key: strom_test.key
-         ->  Custom Scan (GpuPreAgg)
-               Output: key, pgstrom.psum(nume_x)
-               Bulkload: On (density: 100.00%)
-               Reduction: Local + Global
-               Features: format: tuple-slot, bulkload: unsupported
-               ->  Custom Scan (BulkScan) on public.strom_test
-                     Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-                     Features: format: heap-tuple, bulkload: supported
-(14 rows)
+         ->  Seq Scan on public.strom_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(8 rows)
 
 explain (verbose, costs off, timing off) select key,stddev(nume_x)         from strom_test group by key order by key;
-                                                          QUERY PLAN                                                           
--------------------------------------------------------------------------------------------------------------------------------
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (pgstrom.stddev((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x))))
+   Output: key, (stddev(nume_x))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, pgstrom.stddev((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
+         Output: key, stddev(nume_x)
          Group Key: strom_test.key
-         ->  Custom Scan (GpuPreAgg)
-               Output: key, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
-               Bulkload: On (density: 100.00%)
-               Reduction: Local + Global
-               Features: format: tuple-slot, bulkload: unsupported
-               ->  Custom Scan (BulkScan) on public.strom_test
-                     Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-                     Features: format: heap-tuple, bulkload: supported
-(14 rows)
+         ->  Seq Scan on public.strom_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(8 rows)
 
 explain (verbose, costs off, timing off) select key,stddev_pop(nume_x)     from strom_test group by key order by key;
-                                                            QUERY PLAN                                                             
------------------------------------------------------------------------------------------------------------------------------------
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (pgstrom.stddev_pop((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x))))
+   Output: key, (stddev_pop(nume_x))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, pgstrom.stddev_pop((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
+         Output: key, stddev_pop(nume_x)
          Group Key: strom_test.key
-         ->  Custom Scan (GpuPreAgg)
-               Output: key, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
-               Bulkload: On (density: 100.00%)
-               Reduction: Local + Global
-               Features: format: tuple-slot, bulkload: unsupported
-               ->  Custom Scan (BulkScan) on public.strom_test
-                     Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-                     Features: format: heap-tuple, bulkload: supported
-(14 rows)
+         ->  Seq Scan on public.strom_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(8 rows)
 
 explain (verbose, costs off, timing off) select key,stddev_samp(nume_x)    from strom_test group by key order by key;
-                                                             QUERY PLAN                                                             
-------------------------------------------------------------------------------------------------------------------------------------
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (pgstrom.stddev_samp((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x))))
+   Output: key, (stddev_samp(nume_x))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, pgstrom.stddev_samp((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
+         Output: key, stddev_samp(nume_x)
          Group Key: strom_test.key
-         ->  Custom Scan (GpuPreAgg)
-               Output: key, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
-               Bulkload: On (density: 100.00%)
-               Reduction: Local + Global
-               Features: format: tuple-slot, bulkload: unsupported
-               ->  Custom Scan (BulkScan) on public.strom_test
-                     Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-                     Features: format: heap-tuple, bulkload: supported
-(14 rows)
+         ->  Seq Scan on public.strom_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(8 rows)
 
 explain (verbose, costs off, timing off) select key,variance(nume_x)       from strom_test group by key order by key;
-                                                           QUERY PLAN                                                            
----------------------------------------------------------------------------------------------------------------------------------
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (pgstrom.variance((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x))))
+   Output: key, (variance(nume_x))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, pgstrom.variance((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
+         Output: key, variance(nume_x)
          Group Key: strom_test.key
-         ->  Custom Scan (GpuPreAgg)
-               Output: key, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
-               Bulkload: On (density: 100.00%)
-               Reduction: Local + Global
-               Features: format: tuple-slot, bulkload: unsupported
-               ->  Custom Scan (BulkScan) on public.strom_test
-                     Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-                     Features: format: heap-tuple, bulkload: supported
-(14 rows)
+         ->  Seq Scan on public.strom_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(8 rows)
 
 explain (verbose, costs off, timing off) select key,var_pop(nume_x)        from strom_test group by key order by key;
-                                                           QUERY PLAN                                                           
---------------------------------------------------------------------------------------------------------------------------------
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (pgstrom.var_pop((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x))))
+   Output: key, (var_pop(nume_x))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, pgstrom.var_pop((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
+         Output: key, var_pop(nume_x)
          Group Key: strom_test.key
-         ->  Custom Scan (GpuPreAgg)
-               Output: key, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
-               Bulkload: On (density: 100.00%)
-               Reduction: Local + Global
-               Features: format: tuple-slot, bulkload: unsupported
-               ->  Custom Scan (BulkScan) on public.strom_test
-                     Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-                     Features: format: heap-tuple, bulkload: supported
-(14 rows)
+         ->  Seq Scan on public.strom_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(8 rows)
 
 explain (verbose, costs off, timing off) select key,var_samp(nume_x)       from strom_test group by key order by key;
-                                                           QUERY PLAN                                                            
----------------------------------------------------------------------------------------------------------------------------------
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (pgstrom.var_samp((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x))))
+   Output: key, (var_samp(nume_x))
    Sort Key: strom_test.key
    ->  HashAggregate
-         Output: key, pgstrom.var_samp((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
+         Output: key, var_samp(nume_x)
          Group Key: strom_test.key
-         ->  Custom Scan (GpuPreAgg)
-               Output: key, pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
-               Bulkload: On (density: 100.00%)
-               Reduction: Local + Global
-               Features: format: tuple-slot, bulkload: unsupported
-               ->  Custom Scan (BulkScan) on public.strom_test
-                     Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-                     Features: format: heap-tuple, bulkload: supported
-(14 rows)
+         ->  Seq Scan on public.strom_test
+               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(8 rows)
 
 explain (verbose, costs off, timing off) select key,corr(nume_x,nume_x) from strom_test group by key order by key;
                                                                                                                                                                                                                                                                         QUERY PLAN                                                                                                                                                                                                                                                                         
@@ -7637,19 +7576,13 @@ explain (verbose, costs off, timing off) select covar_samp(float_x,float_x) from
 (10 rows)
 
 explain (verbose, costs off, timing off) select avg(nume_x)            from strom_zero_test ;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: pgstrom.avg_numeric((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)))
-   ->  Custom Scan (GpuPreAgg)
-         Output: pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x)
-         Bulkload: On (density: 100.00%)
-         Reduction: NoGroup
-         Features: format: tuple-slot, bulkload: unsupported
-         ->  Custom Scan (BulkScan) on public.strom_zero_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-               Features: format: heap-tuple, bulkload: supported
-(10 rows)
+   Output: avg(nume_x)
+   ->  Seq Scan on public.strom_zero_test
+         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(4 rows)
 
 explain (verbose, costs off, timing off) select count(nume_x)          from strom_zero_test ;
                                                      QUERY PLAN                                                      
@@ -7667,139 +7600,85 @@ explain (verbose, costs off, timing off) select count(nume_x)          from stro
 (10 rows)
 
 explain (verbose, costs off, timing off) select max(nume_x)            from strom_zero_test ;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: max((pgstrom.pmax(nume_x)))
-   ->  Custom Scan (GpuPreAgg)
-         Output: pgstrom.pmax(nume_x)
-         Bulkload: On (density: 100.00%)
-         Reduction: NoGroup
-         Features: format: tuple-slot, bulkload: unsupported
-         ->  Custom Scan (BulkScan) on public.strom_zero_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-               Features: format: heap-tuple, bulkload: supported
-(10 rows)
+   Output: max(nume_x)
+   ->  Seq Scan on public.strom_zero_test
+         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(4 rows)
 
 explain (verbose, costs off, timing off) select min(nume_x)            from strom_zero_test ;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: min((pgstrom.pmin(nume_x)))
-   ->  Custom Scan (GpuPreAgg)
-         Output: pgstrom.pmin(nume_x)
-         Bulkload: On (density: 100.00%)
-         Reduction: NoGroup
-         Features: format: tuple-slot, bulkload: unsupported
-         ->  Custom Scan (BulkScan) on public.strom_zero_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-               Features: format: heap-tuple, bulkload: supported
-(10 rows)
+   Output: min(nume_x)
+   ->  Seq Scan on public.strom_zero_test
+         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(4 rows)
 
 explain (verbose, costs off, timing off) select sum(nume_x)            from strom_zero_test ;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: sum((pgstrom.psum(nume_x)))
-   ->  Custom Scan (GpuPreAgg)
-         Output: pgstrom.psum(nume_x)
-         Bulkload: On (density: 100.00%)
-         Reduction: NoGroup
-         Features: format: tuple-slot, bulkload: unsupported
-         ->  Custom Scan (BulkScan) on public.strom_zero_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-               Features: format: heap-tuple, bulkload: supported
-(10 rows)
+   Output: sum(nume_x)
+   ->  Seq Scan on public.strom_zero_test
+         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(4 rows)
 
 explain (verbose, costs off, timing off) select stddev(nume_x)         from strom_zero_test ;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: pgstrom.stddev((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
-   ->  Custom Scan (GpuPreAgg)
-         Output: pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
-         Bulkload: On (density: 100.00%)
-         Reduction: NoGroup
-         Features: format: tuple-slot, bulkload: unsupported
-         ->  Custom Scan (BulkScan) on public.strom_zero_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-               Features: format: heap-tuple, bulkload: supported
-(10 rows)
+   Output: stddev(nume_x)
+   ->  Seq Scan on public.strom_zero_test
+         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(4 rows)
 
 explain (verbose, costs off, timing off) select stddev_pop(nume_x)     from strom_zero_test ;
-                                                       QUERY PLAN                                                       
-------------------------------------------------------------------------------------------------------------------------
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: pgstrom.stddev_pop((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
-   ->  Custom Scan (GpuPreAgg)
-         Output: pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
-         Bulkload: On (density: 100.00%)
-         Reduction: NoGroup
-         Features: format: tuple-slot, bulkload: unsupported
-         ->  Custom Scan (BulkScan) on public.strom_zero_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-               Features: format: heap-tuple, bulkload: supported
-(10 rows)
+   Output: stddev_pop(nume_x)
+   ->  Seq Scan on public.strom_zero_test
+         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(4 rows)
 
 explain (verbose, costs off, timing off) select stddev_samp(nume_x)    from strom_zero_test ;
-                                                       QUERY PLAN                                                        
--------------------------------------------------------------------------------------------------------------------------
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: pgstrom.stddev_samp((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
-   ->  Custom Scan (GpuPreAgg)
-         Output: pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
-         Bulkload: On (density: 100.00%)
-         Reduction: NoGroup
-         Features: format: tuple-slot, bulkload: unsupported
-         ->  Custom Scan (BulkScan) on public.strom_zero_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-               Features: format: heap-tuple, bulkload: supported
-(10 rows)
+   Output: stddev_samp(nume_x)
+   ->  Seq Scan on public.strom_zero_test
+         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(4 rows)
 
 explain (verbose, costs off, timing off) select variance(nume_x)       from strom_zero_test ;
-                                                      QUERY PLAN                                                      
-----------------------------------------------------------------------------------------------------------------------
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: pgstrom.variance((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
-   ->  Custom Scan (GpuPreAgg)
-         Output: pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
-         Bulkload: On (density: 100.00%)
-         Reduction: NoGroup
-         Features: format: tuple-slot, bulkload: unsupported
-         ->  Custom Scan (BulkScan) on public.strom_zero_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-               Features: format: heap-tuple, bulkload: supported
-(10 rows)
+   Output: variance(nume_x)
+   ->  Seq Scan on public.strom_zero_test
+         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(4 rows)
 
 explain (verbose, costs off, timing off) select var_pop(nume_x)        from strom_zero_test ;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: pgstrom.var_pop((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
-   ->  Custom Scan (GpuPreAgg)
-         Output: pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
-         Bulkload: On (density: 100.00%)
-         Reduction: NoGroup
-         Features: format: tuple-slot, bulkload: unsupported
-         ->  Custom Scan (BulkScan) on public.strom_zero_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-               Features: format: heap-tuple, bulkload: supported
-(10 rows)
+   Output: var_pop(nume_x)
+   ->  Seq Scan on public.strom_zero_test
+         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(4 rows)
 
 explain (verbose, costs off, timing off) select var_samp(nume_x)       from strom_zero_test ;
-                                                      QUERY PLAN                                                      
-----------------------------------------------------------------------------------------------------------------------
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: pgstrom.var_samp((pgstrom.nrows((nume_x IS NOT NULL))), (pgstrom.psum(nume_x)), (pgstrom.psum_x2(nume_x)))
-   ->  Custom Scan (GpuPreAgg)
-         Output: pgstrom.nrows((nume_x IS NOT NULL)), pgstrom.psum(nume_x), pgstrom.psum_x2(nume_x)
-         Bulkload: On (density: 100.00%)
-         Reduction: NoGroup
-         Features: format: tuple-slot, bulkload: unsupported
-         ->  Custom Scan (BulkScan) on public.strom_zero_test
-               Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-               Features: format: heap-tuple, bulkload: supported
-(10 rows)
+   Output: var_samp(nume_x)
+   ->  Seq Scan on public.strom_zero_test
+         Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+(4 rows)
 
 explain (verbose, costs off, timing off) select corr(nume_x,nume_x) from strom_zero_test ;
                                                                                                                                                                                                                                                                    QUERY PLAN                                                                                                                                                                                                                                                                   
@@ -9215,30 +9094,42 @@ explain (verbose on, costs off) select key,count(time_x) from strom_time_test gr
 (14 rows)
 
 explain (verbose on, costs off) select key,count(timetz_x) from strom_time_test group by key order by key;
-                                           QUERY PLAN                                            
--------------------------------------------------------------------------------------------------
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (count(timetz_x))
+   Output: key, (pgstrom.count((pgstrom.nrows((timetz_x IS NOT NULL)))))
    Sort Key: strom_time_test.key
    ->  HashAggregate
-         Output: key, count(timetz_x)
+         Output: key, pgstrom.count((pgstrom.nrows((timetz_x IS NOT NULL))))
          Group Key: strom_time_test.key
-         ->  Seq Scan on public.strom_time_test
-               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
-(8 rows)
+         ->  Custom Scan (GpuPreAgg)
+               Output: key, pgstrom.nrows((timetz_x IS NOT NULL))
+               Bulkload: On (density: 100.00%)
+               Reduction: Local + Global
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Custom Scan (BulkScan) on public.strom_time_test
+                     Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+                     Features: format: heap-tuple, bulkload: supported
+(14 rows)
 
 explain (verbose on, costs off) select key,count(interval_x) from strom_time_test group by key order by key;
-                                           QUERY PLAN                                            
--------------------------------------------------------------------------------------------------
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
  Sort
-   Output: key, (count(interval_x))
+   Output: key, (pgstrom.count((pgstrom.nrows((interval_x IS NOT NULL)))))
    Sort Key: strom_time_test.key
    ->  HashAggregate
-         Output: key, count(interval_x)
+         Output: key, pgstrom.count((pgstrom.nrows((interval_x IS NOT NULL))))
          Group Key: strom_time_test.key
-         ->  Seq Scan on public.strom_time_test
-               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
-(8 rows)
+         ->  Custom Scan (GpuPreAgg)
+               Output: key, pgstrom.nrows((interval_x IS NOT NULL))
+               Bulkload: On (density: 100.00%)
+               Reduction: Local + Global
+               Features: format: tuple-slot, bulkload: unsupported
+               ->  Custom Scan (BulkScan) on public.strom_time_test
+                     Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+                     Features: format: heap-tuple, bulkload: supported
+(14 rows)
 
 explain (verbose on, costs off) select key,avg(time_x) from strom_time_test group by key order by key;
                                            QUERY PLAN                                            
@@ -9483,22 +9374,34 @@ explain (verbose on, costs off) select count(time_x) from strom_time_test;
 (10 rows)
 
 explain (verbose on, costs off) select count(timetz_x) from strom_time_test;
-                                        QUERY PLAN                                         
--------------------------------------------------------------------------------------------
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
  Aggregate
-   Output: count(timetz_x)
-   ->  Seq Scan on public.strom_time_test
-         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
-(4 rows)
+   Output: pgstrom.count((pgstrom.nrows((timetz_x IS NOT NULL))))
+   ->  Custom Scan (GpuPreAgg)
+         Output: pgstrom.nrows((timetz_x IS NOT NULL))
+         Bulkload: On (density: 100.00%)
+         Reduction: NoGroup
+         Features: format: tuple-slot, bulkload: unsupported
+         ->  Custom Scan (BulkScan) on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+               Features: format: heap-tuple, bulkload: supported
+(10 rows)
 
 explain (verbose on, costs off) select count(interval_x) from strom_time_test;
-                                        QUERY PLAN                                         
--------------------------------------------------------------------------------------------
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
  Aggregate
-   Output: count(interval_x)
-   ->  Seq Scan on public.strom_time_test
-         Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
-(4 rows)
+   Output: pgstrom.count((pgstrom.nrows((interval_x IS NOT NULL))))
+   ->  Custom Scan (GpuPreAgg)
+         Output: pgstrom.nrows((interval_x IS NOT NULL))
+         Bulkload: On (density: 100.00%)
+         Reduction: NoGroup
+         Features: format: tuple-slot, bulkload: unsupported
+         ->  Custom Scan (BulkScan) on public.strom_time_test
+               Output: id, key, timestamp_x, timestamptz_x, date_x, time_x, timetz_x, interval_x
+               Features: format: heap-tuple, bulkload: supported
+(10 rows)
 
 explain (verbose on, costs off) select avg(time_x) from strom_time_test;
                                         QUERY PLAN                                         
