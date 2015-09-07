@@ -467,7 +467,8 @@ estimate_buffersize_gpujoin(PlannerInfo *root,
 {
 	Size		inner_limit_sz;
 	Size		inner_total_sz;
-	Size		inner_nloops = 1;
+	Size		prev_nloops_minor;
+	Size		curr_nloops_minor;
 	Size		largest_chunk_size = 0;
 	cl_int		largest_chunk_index = -1;
 	Size		largest_growth_ntuples = 0.0;
@@ -489,8 +490,8 @@ estimate_buffersize_gpujoin(PlannerInfo *root,
 	/*
 	 * Estimation: size of multi relational inner buffer
 	 */
-retry:
-	inner_nloops = 1;
+retry_major:
+	prev_nloops_minor = 1;
 	largest_chunk_size = 0;
 	largest_chunk_index = -1;
 	largest_growth_ntuples = 0.0;
@@ -507,6 +508,11 @@ retry:
 		Size		entry_size;
 		Size		hash_nslots;
 		Size		num_items;
+
+	retry_minor:
+		/* total number of inner nloops until this depth */
+		curr_nloops_minor = (prev_nloops_minor *
+							 gpath->inners[i].nloops_minor);
 
 		/* force a plausible relation size if no information. */
 		inner_ntuples = Max(inner_path->rows *
@@ -573,21 +579,18 @@ retry:
 		 * smaller inner_size[].
 		 */
 		join_ntuples = (gpath->inners[i].join_nrows /
-						(double)(num_chunks * inner_nloops));
+						(double)(num_chunks * curr_nloops_minor));
 		num_items = (Size)((double)(i+2) * join_ntuples *
 						   pgstrom_chunk_size_margin);
 		buffer_size = offsetof(kern_gpujoin, kparams)
 			+ BLCKSZ	/* alternative of kern_parambuf */
 			+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]))
 			+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]));
-		if (buffer_size <= pgstrom_chunk_size())
-			gpath->inners[i].nloops_minor = 1;
-		else
+		if (buffer_size > pgstrom_chunk_size())
 		{
-			Size	nloops_minor
-				= (buffer_size / pgstrom_chunk_size()) + 1;
+			Size	nsplit_minor = (buffer_size / pgstrom_chunk_size()) + 1;
 
-			if (nloops_minor > INT_MAX)
+			if (nsplit_minor > INT_MAX)
 			{
 				elog(DEBUG1, "Too large kgjoin {nitems=%zu size=%zu}",
 					 num_items, buffer_size);
@@ -600,8 +603,8 @@ retry:
 				 */
 				return false;
 			}
-			gpath->inners[i].nloops_minor = nloops_minor;
-			inner_nloops *= nloops_minor;
+			gpath->inners[i].nloops_minor *= nsplit_minor;
+			goto retry_minor;
 		}
 
 		if (largest_growth_index < 0 ||
@@ -610,6 +613,7 @@ retry:
 			largest_growth_index = i;
 			largest_growth_ntuples = join_ntuples - prev_ntuples;
 		}
+		prev_nloops_minor = curr_nloops_minor;
 		prev_ntuples = join_ntuples;
 	}
 
@@ -624,7 +628,7 @@ retry:
 	 */
 	Assert(gpath->inners[num_rels-1].join_nrows == gpath->cpath.path.rows);
 	join_ntuples = gpath->cpath.path.rows / (double)(num_chunks *
-													 inner_nloops);
+													 prev_nloops_minor);
 	ncols = list_length(joinrel->reltargetlist);
 	buffer_size = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
 	buffer_size += (Max(LONGALIGN((sizeof(Datum) + sizeof(char)) * ncols),
@@ -644,7 +648,7 @@ retry:
 		Assert(largest_growth_index >= 0 &&
 			   largest_growth_index < num_rels);
 		gpath->inners[largest_growth_index].nloops_minor *= nloops_minor;
-		goto retry;
+		goto retry_major;
 	}
 
 	/*
@@ -666,7 +670,7 @@ retry:
 		Assert(largest_chunk_index >= 0 &&
 			   largest_chunk_index < num_rels);
 		gpath->inners[largest_chunk_index].nloops_major *= nloops_major;
-		goto retry;
+		goto retry_major;
 	}
 	return true;	/* probably, reasonable plan for buffer usage */
 }
