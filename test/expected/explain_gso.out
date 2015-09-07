@@ -2373,14 +2373,13 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,smlint_x from (select smlint_x, row_number() over (order by smlint_x asc ) as rowid from strom_test where id between     1 and 10000) as t where t.rowid%1000=0;
                                        QUERY PLAN                                       
@@ -2392,14 +2391,13 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,smlint_x from (select smlint_x, row_number() over (order by smlint_x desc) as rowid from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2411,14 +2409,13 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,smlint_x from (select smlint_x, row_number() over (order by smlint_x asc ) as rowid from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2430,14 +2427,13 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,smlint_x from (select smlint_x, row_number() over (order by smlint_x desc) as rowid from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2449,14 +2445,13 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 554.63...579.80
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x
                      Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,smlint_x from (select smlint_x, row_number() over (order by smlint_x asc ) as rowid from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2468,14 +2463,13 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 554.63...579.80
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x
                      Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,smlint_x from (select smlint_x, row_number() over (order by smlint_x desc) as rowid from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2487,14 +2481,13 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 553.41...578.30
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x
                      Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,smlint_x from (select smlint_x, row_number() over (order by smlint_x asc ) as rowid from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2506,14 +2499,13 @@ explain (verbose, costs off, timing off) select rowid,smlint_x from (select smli
          Output: strom_test.smlint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x
-               Real cost: 553.41...578.30
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x
                      Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,integer_x from (select integer_x, row_number() over (order by integer_x desc) as rowid from strom_test where id between     1 and 10000) as t where t.rowid%1000=0;
                                        QUERY PLAN                                       
@@ -2525,14 +2517,13 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.integer_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,integer_x from (select integer_x, row_number() over (order by integer_x asc ) as rowid from strom_test where id between     1 and 10000) as t where t.rowid%1000=0;
                                        QUERY PLAN                                       
@@ -2544,14 +2535,13 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.integer_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,integer_x from (select integer_x, row_number() over (order by integer_x desc) as rowid from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2563,14 +2553,13 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.integer_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,integer_x from (select integer_x, row_number() over (order by integer_x asc ) as rowid from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2582,14 +2571,13 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.integer_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,integer_x from (select integer_x, row_number() over (order by integer_x desc) as rowid from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2601,14 +2589,13 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 554.63...579.80
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.integer_x
                      Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,integer_x from (select integer_x, row_number() over (order by integer_x asc ) as rowid from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2620,14 +2607,13 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 554.63...579.80
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.integer_x
                      Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,integer_x from (select integer_x, row_number() over (order by integer_x desc) as rowid from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2639,14 +2625,13 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 553.41...578.30
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.integer_x
                      Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,integer_x from (select integer_x, row_number() over (order by integer_x asc ) as rowid from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2658,14 +2643,13 @@ explain (verbose, costs off, timing off) select rowid,integer_x from (select int
          Output: strom_test.integer_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 553.41...578.30
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.integer_x
                      Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigint_x, row_number() over (order by bigint_x desc) as rowid from strom_test where id between     1 and 10000) as t where t.rowid%1000=0;
                                        QUERY PLAN                                       
@@ -2677,14 +2661,13 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.bigint_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigint_x, row_number() over (order by bigint_x asc ) as rowid from strom_test where id between     1 and 10000) as t where t.rowid%1000=0;
                                        QUERY PLAN                                       
@@ -2696,14 +2679,13 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.bigint_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigint_x, row_number() over (order by bigint_x desc) as rowid from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2715,14 +2697,13 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.bigint_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigint_x, row_number() over (order by bigint_x asc ) as rowid from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2734,14 +2715,13 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.bigint_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigint_x, row_number() over (order by bigint_x desc) as rowid from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2753,14 +2733,13 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 554.63...579.80
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.bigint_x
                      Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigint_x, row_number() over (order by bigint_x asc ) as rowid from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2772,14 +2751,13 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 554.63...579.80
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.bigint_x
                      Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigint_x, row_number() over (order by bigint_x desc) as rowid from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2791,14 +2769,13 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 553.41...578.30
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.bigint_x
                      Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigint_x, row_number() over (order by bigint_x asc ) as rowid from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2810,14 +2787,13 @@ explain (verbose, costs off, timing off) select rowid,bigint_x from (select bigi
          Output: strom_test.bigint_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 553.41...578.30
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.bigint_x
                      Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,real_x from (select real_x, row_number() over (order by real_x desc) as rowid from strom_test where id between     1 and 10000) as t where t.rowid%1000=0;
                                        QUERY PLAN                                       
@@ -2829,14 +2805,13 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.real_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,real_x from (select real_x, row_number() over (order by real_x asc ) as rowid from strom_test where id between     1 and 10000) as t where t.rowid%1000=0;
                                        QUERY PLAN                                       
@@ -2848,14 +2823,13 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.real_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,real_x from (select real_x, row_number() over (order by real_x desc) as rowid from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2867,14 +2841,13 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.real_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,real_x from (select real_x, row_number() over (order by real_x asc ) as rowid from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2886,14 +2859,13 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.real_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,real_x from (select real_x, row_number() over (order by real_x desc) as rowid from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2905,14 +2877,13 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 554.63...579.80
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.real_x
                      Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,real_x from (select real_x, row_number() over (order by real_x asc ) as rowid from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2924,14 +2895,13 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 554.63...579.80
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.real_x
                      Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,real_x from (select real_x, row_number() over (order by real_x desc) as rowid from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2943,14 +2913,13 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 553.41...578.30
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.real_x
                      Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,real_x from (select real_x, row_number() over (order by real_x asc ) as rowid from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -2962,14 +2931,13 @@ explain (verbose, costs off, timing off) select rowid,real_x from (select real_x
          Output: strom_test.real_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 553.41...578.30
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.real_x
                      Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,float_x from (select float_x, row_number() over (order by float_x desc) as rowid from strom_test where id between     1 and 10000) as t where t.rowid%1000=0;
                                        QUERY PLAN                                       
@@ -2981,14 +2949,13 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.float_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,float_x from (select float_x, row_number() over (order by float_x asc ) as rowid from strom_test where id between     1 and 10000) as t where t.rowid%1000=0;
                                        QUERY PLAN                                       
@@ -3000,14 +2967,13 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.float_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,float_x from (select float_x, row_number() over (order by float_x desc) as rowid from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -3019,14 +2985,13 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.float_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,float_x from (select float_x, row_number() over (order by float_x asc ) as rowid from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -3038,14 +3003,13 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.float_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,float_x from (select float_x, row_number() over (order by float_x desc) as rowid from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -3057,14 +3021,13 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 554.63...579.80
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.float_x
                      Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,float_x from (select float_x, row_number() over (order by float_x asc ) as rowid from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -3076,14 +3039,13 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 554.63...579.80
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.float_x
                      Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,float_x from (select float_x, row_number() over (order by float_x desc) as rowid from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -3095,14 +3057,13 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 553.41...578.30
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.float_x
                      Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,float_x from (select float_x, row_number() over (order by float_x asc ) as rowid from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -3114,14 +3075,13 @@ explain (verbose, costs off, timing off) select rowid,float_x from (select float
          Output: strom_test.float_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 553.41...578.30
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.float_x
                      Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x, row_number() over (order by nume_x desc) as rowid from strom_test where id between     1 and 10000) as t where t.rowid%1000=0;
                                        QUERY PLAN                                       
@@ -3133,14 +3093,13 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.nume_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x, row_number() over (order by nume_x asc ) as rowid from strom_test where id between     1 and 10000) as t where t.rowid%1000=0;
                                        QUERY PLAN                                       
@@ -3152,14 +3111,13 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.nume_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x, row_number() over (order by nume_x desc) as rowid from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -3171,14 +3129,13 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.nume_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x, row_number() over (order by nume_x asc ) as rowid from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -3190,14 +3147,13 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.nume_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x, row_number() over (order by nume_x desc) as rowid from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -3209,14 +3165,13 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 554.63...579.80
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.nume_x
                      Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x, row_number() over (order by nume_x asc ) as rowid from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -3228,14 +3183,13 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 554.63...579.80
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.nume_x
                      Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x, row_number() over (order by nume_x desc) as rowid from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -3247,14 +3201,13 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 553.41...578.30
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.nume_x
                      Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x, row_number() over (order by nume_x asc ) as rowid from strom_test where id between 30001 and 40000) as t where t.rowid%1000=0;
                                          QUERY PLAN                                         
@@ -3266,14 +3219,13 @@ explain (verbose, costs off, timing off) select rowid,nume_x from (select nume_x
          Output: strom_test.nume_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 553.41...578.30
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.nume_x
                      Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 --grouping
 explain (verbose, costs off, timing off) select row_number() over () as rowid, smlint_x from strom_test where id between     1 and 10000 group by smlint_x;
@@ -3286,14 +3238,13 @@ explain (verbose, costs off, timing off) select row_number() over () as rowid, s
          Group Key: strom_test.smlint_x
          ->  Custom Scan (GpuSort)
                Output: smlint_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: smlint_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select row_number() over () as rowid, smlint_x from strom_test where id between 10001 and 20000 group by smlint_x;
                                          QUERY PLAN                                         
@@ -3305,14 +3256,13 @@ explain (verbose, costs off, timing off) select row_number() over () as rowid, s
          Group Key: strom_test.smlint_x
          ->  Custom Scan (GpuSort)
                Output: smlint_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: smlint_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select row_number() over () as rowid, smlint_x from strom_test where id between 20001 and 30000 group by smlint_x;
                                          QUERY PLAN                                         
@@ -3324,14 +3274,13 @@ explain (verbose, costs off, timing off) select row_number() over () as rowid, s
          Group Key: strom_test.smlint_x
          ->  Custom Scan (GpuSort)
                Output: smlint_x
-               Real cost: 554.63...579.80
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: smlint_x
                      Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select row_number() over () as rowid, smlint_x from strom_test where id between 30001 and 40000 group by smlint_x;
                                          QUERY PLAN                                         
@@ -3343,14 +3292,13 @@ explain (verbose, costs off, timing off) select row_number() over () as rowid, s
          Group Key: strom_test.smlint_x
          ->  Custom Scan (GpuSort)
                Output: smlint_x
-               Real cost: 553.41...578.30
                Sort Key: strom_test.smlint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: smlint_x
                      Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, integer_x from strom_test where id between     1 and 10000 group by integer_x ) as t where t.rowid%100=0;
                                           QUERY PLAN                                          
@@ -3365,14 +3313,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.integer_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.integer_x
-                     Real cost: 553.97...578.99
                      Sort Key: strom_test.integer_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
                            Output: strom_test.integer_x
                            Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                            Features: format: heap-tuple, bulkload: supported
-(17 rows)
+(16 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, integer_x from strom_test where id between 10001 and 20000 group by integer_x ) as t where t.rowid%100=0;
                                             QUERY PLAN                                            
@@ -3387,14 +3334,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.integer_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.integer_x
-                     Real cost: 553.53...578.45
                      Sort Key: strom_test.integer_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
                            Output: strom_test.integer_x
                            Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                            Features: format: heap-tuple, bulkload: supported
-(17 rows)
+(16 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, integer_x from strom_test where id between 20001 and 30000 group by integer_x ) as t where t.rowid%100=0;
                                             QUERY PLAN                                            
@@ -3409,14 +3355,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.integer_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.integer_x
-                     Real cost: 554.63...579.80
                      Sort Key: strom_test.integer_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
                            Output: strom_test.integer_x
                            Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                            Features: format: heap-tuple, bulkload: supported
-(17 rows)
+(16 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, integer_x from strom_test where id between 30001 and 40000 group by integer_x ) as t;
                                          QUERY PLAN                                         
@@ -3428,14 +3373,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
          Group Key: strom_test.integer_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.integer_x
-               Real cost: 553.41...578.30
                Sort Key: strom_test.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.integer_x
                      Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, bigint_x from strom_test where id between     1 and 10000 group by bigint_x ) as t where t.rowid%100=0;
                                           QUERY PLAN                                          
@@ -3450,14 +3394,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.bigint_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.bigint_x
-                     Real cost: 553.97...578.99
                      Sort Key: strom_test.bigint_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
                            Output: strom_test.bigint_x
                            Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                            Features: format: heap-tuple, bulkload: supported
-(17 rows)
+(16 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, bigint_x from strom_test where id between 10001 and 20000 group by bigint_x ) as t where t.rowid%100=0;
                                             QUERY PLAN                                            
@@ -3472,14 +3415,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.bigint_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.bigint_x
-                     Real cost: 553.53...578.45
                      Sort Key: strom_test.bigint_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
                            Output: strom_test.bigint_x
                            Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                            Features: format: heap-tuple, bulkload: supported
-(17 rows)
+(16 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, bigint_x from strom_test where id between 20001 and 30000 group by bigint_x ) as t where t.rowid%100=0;
                                             QUERY PLAN                                            
@@ -3494,14 +3436,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.bigint_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.bigint_x
-                     Real cost: 554.63...579.80
                      Sort Key: strom_test.bigint_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
                            Output: strom_test.bigint_x
                            Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                            Features: format: heap-tuple, bulkload: supported
-(17 rows)
+(16 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, bigint_x from strom_test where id between 30001 and 40000 group by bigint_x ) as t;
                                          QUERY PLAN                                         
@@ -3513,14 +3454,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
          Group Key: strom_test.bigint_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.bigint_x
-               Real cost: 553.41...578.30
                Sort Key: strom_test.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.bigint_x
                      Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, real_x from strom_test where id between     1 and 10000 group by real_x ) as t where t.rowid%100=0;
                                           QUERY PLAN                                          
@@ -3535,14 +3475,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.real_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.real_x
-                     Real cost: 553.97...578.99
                      Sort Key: strom_test.real_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
                            Output: strom_test.real_x
                            Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                            Features: format: heap-tuple, bulkload: supported
-(17 rows)
+(16 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, real_x from strom_test where id between 10001 and 20000 group by real_x ) as t where t.rowid%100=0;
                                             QUERY PLAN                                            
@@ -3557,14 +3496,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.real_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.real_x
-                     Real cost: 553.53...578.45
                      Sort Key: strom_test.real_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
                            Output: strom_test.real_x
                            Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                            Features: format: heap-tuple, bulkload: supported
-(17 rows)
+(16 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, real_x from strom_test where id between 20001 and 30000 group by real_x ) as t where t.rowid%100=0;
                                             QUERY PLAN                                            
@@ -3579,14 +3517,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.real_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.real_x
-                     Real cost: 554.63...579.80
                      Sort Key: strom_test.real_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
                            Output: strom_test.real_x
                            Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                            Features: format: heap-tuple, bulkload: supported
-(17 rows)
+(16 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, real_x from strom_test where id between 30001 and 40000 group by real_x ) as t;
                                          QUERY PLAN                                         
@@ -3598,14 +3535,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
          Group Key: strom_test.real_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.real_x
-               Real cost: 553.41...578.30
                Sort Key: strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.real_x
                      Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, float_x from strom_test where id between     1 and 10000 group by float_x ) as t where t.rowid%100=0;
                                           QUERY PLAN                                          
@@ -3620,14 +3556,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.float_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.float_x
-                     Real cost: 553.97...578.99
                      Sort Key: strom_test.float_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
                            Output: strom_test.float_x
                            Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                            Features: format: heap-tuple, bulkload: supported
-(17 rows)
+(16 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, float_x from strom_test where id between 10001 and 20000 group by float_x ) as t where t.rowid%100=0;
                                             QUERY PLAN                                            
@@ -3642,14 +3577,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.float_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.float_x
-                     Real cost: 553.53...578.45
                      Sort Key: strom_test.float_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
                            Output: strom_test.float_x
                            Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                            Features: format: heap-tuple, bulkload: supported
-(17 rows)
+(16 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, float_x from strom_test where id between 20001 and 30000 group by float_x ) as t where t.rowid%100=0;
                                             QUERY PLAN                                            
@@ -3664,14 +3598,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.float_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.float_x
-                     Real cost: 554.63...579.80
                      Sort Key: strom_test.float_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
                            Output: strom_test.float_x
                            Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                            Features: format: heap-tuple, bulkload: supported
-(17 rows)
+(16 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, float_x from strom_test where id between 30001 and 40000 group by float_x ) as t;
                                          QUERY PLAN                                         
@@ -3683,14 +3616,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
          Group Key: strom_test.float_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.float_x
-               Real cost: 553.41...578.30
                Sort Key: strom_test.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.float_x
                      Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, nume_x from strom_test where id between     1 and 10000 group by nume_x ) as t where t.rowid%100=0;
                                           QUERY PLAN                                          
@@ -3705,14 +3637,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.nume_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.nume_x
-                     Real cost: 553.97...578.99
                      Sort Key: strom_test.nume_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
                            Output: strom_test.nume_x
                            Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                            Features: format: heap-tuple, bulkload: supported
-(17 rows)
+(16 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, nume_x from strom_test where id between 10001 and 20000 group by nume_x ) as t where t.rowid%100=0;
                                             QUERY PLAN                                            
@@ -3727,14 +3658,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.nume_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.nume_x
-                     Real cost: 553.53...578.45
                      Sort Key: strom_test.nume_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
                            Output: strom_test.nume_x
                            Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                            Features: format: heap-tuple, bulkload: supported
-(17 rows)
+(16 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, nume_x from strom_test where id between 20001 and 30000 group by nume_x ) as t where t.rowid%100=0;
                                             QUERY PLAN                                            
@@ -3749,14 +3679,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_test.nume_x
                ->  Custom Scan (GpuSort)
                      Output: strom_test.nume_x
-                     Real cost: 554.63...579.80
                      Sort Key: strom_test.nume_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test
                            Output: strom_test.nume_x
                            Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                            Features: format: heap-tuple, bulkload: supported
-(17 rows)
+(16 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, nume_x from strom_test where id between 30001 and 40000 group by nume_x ) as t;
                                          QUERY PLAN                                         
@@ -3768,14 +3697,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
          Group Key: strom_test.nume_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.nume_x
-               Real cost: 553.41...578.30
                Sort Key: strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.nume_x
                      Device Filter: ((strom_test.id >= 30001) AND (strom_test.id <= 40000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 --merge
 set enable_hashjoin to off;
@@ -3793,7 +3721,6 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
                Merge Cond: (t1.smlint_x = t2.smlint_x)
                ->  Custom Scan (GpuSort)
                      Output: t1.smlint_x
-                     Real cost: 449.33...449.83
                      Sort Key: t1.smlint_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test t1
@@ -3802,12 +3729,11 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
                            Features: format: heap-tuple, bulkload: supported
                ->  Custom Scan (GpuSort)
                      Output: t2.smlint_x
-                     Real cost: 871.58...971.58
                      Sort Key: t2.smlint_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Seq Scan on public.strom_test t2
                            Output: t2.smlint_x
-(24 rows)
+(22 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by t1.smlint_x asc) as rowid,t1.smlint_x,t2.smlint_x from strom_test t1, strom_test t2 where t1.smlint_x=t2.smlint_x and t1.id%100=0) as t where t.rowid%1000=0;
                                  QUERY PLAN                                  
@@ -3822,7 +3748,6 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
                Merge Cond: (t1.smlint_x = t2.smlint_x)
                ->  Custom Scan (GpuSort)
                      Output: t1.smlint_x
-                     Real cost: 449.33...449.83
                      Sort Key: t1.smlint_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Custom Scan (GpuScan) on public.strom_test t1
@@ -3831,12 +3756,11 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
                            Features: format: heap-tuple, bulkload: supported
                ->  Custom Scan (GpuSort)
                      Output: t2.smlint_x
-                     Real cost: 871.58...971.58
                      Sort Key: t2.smlint_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Seq Scan on public.strom_test t2
                            Output: t2.smlint_x
-(24 rows)
+(22 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by t1.integer_x desc) as rowid,t1.integer_x,t2.integer_x from strom_test t1, strom_test t2 where t1.integer_x=t2.integer_x and t1.id%100=0) as t where t.rowid%10=0;
                                                                             QUERY PLAN                                                                            
@@ -3848,14 +3772,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.integer_x, t2.integer_x
          ->  Custom Scan (GpuSort)
                Output: t1.integer_x, t2.integer_x
-               Real cost: 1118.29...1118.68
                Sort Key: t1.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.integer_x, t2.integer_x
                      Pseudo Scan: t1.integer_x::integer, t2.integer_x::integer
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.integer_x = t2.integer_x), nrows_ratio: 0.00392500
+                     Depth 1: GpuNestLoop, JoinQual: (t1.integer_x = t2.integer_x)
+                              Nrows (in/out: 0.39%), KDS-Heap (size: 24.48KB, nbatches: 1)
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -3876,14 +3800,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.integer_x, t2.integer_x
          ->  Custom Scan (GpuSort)
                Output: t1.integer_x, t2.integer_x
-               Real cost: 1118.29...1118.68
                Sort Key: t1.integer_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.integer_x, t2.integer_x
                      Pseudo Scan: t1.integer_x::integer, t2.integer_x::integer
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.integer_x = t2.integer_x), nrows_ratio: 0.00392500
+                     Depth 1: GpuNestLoop, JoinQual: (t1.integer_x = t2.integer_x)
+                              Nrows (in/out: 0.39%), KDS-Heap (size: 24.48KB, nbatches: 1)
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -3904,14 +3828,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.bigint_x, t2.bigint_x
          ->  Custom Scan (GpuSort)
                Output: t1.bigint_x, t2.bigint_x
-               Real cost: 1117.71...1117.97
                Sort Key: t1.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.bigint_x, t2.bigint_x
                      Pseudo Scan: t1.bigint_x::bigint, t2.bigint_x::bigint
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.bigint_x = t2.bigint_x), nrows_ratio: 0.00255000
+                     Depth 1: GpuNestLoop, JoinQual: (t1.bigint_x = t2.bigint_x)
+                              Nrows (in/out: 0.26%), KDS-Heap (size: 24.48KB, nbatches: 1)
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -3932,14 +3856,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.bigint_x, t2.bigint_x
          ->  Custom Scan (GpuSort)
                Output: t1.bigint_x, t2.bigint_x
-               Real cost: 1117.71...1117.97
                Sort Key: t1.bigint_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.bigint_x, t2.bigint_x
                      Pseudo Scan: t1.bigint_x::bigint, t2.bigint_x::bigint
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.bigint_x = t2.bigint_x), nrows_ratio: 0.00255000
+                     Depth 1: GpuNestLoop, JoinQual: (t1.bigint_x = t2.bigint_x)
+                              Nrows (in/out: 0.26%), KDS-Heap (size: 24.48KB, nbatches: 1)
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -3960,14 +3884,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.real_x, t2.real_x
          ->  Custom Scan (GpuSort)
                Output: t1.real_x, t2.real_x
-               Real cost: 1119.81...1120.57
                Sort Key: t1.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.real_x, t2.real_x
                      Pseudo Scan: t1.real_x::real, t2.real_x::real
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.real_x = t2.real_x), nrows_ratio: 0.00757500
+                     Depth 1: GpuNestLoop, JoinQual: (t1.real_x = t2.real_x)
+                              Nrows (in/out: 0.76%), KDS-Heap (size: 24.48KB, nbatches: 1)
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -3988,14 +3912,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.real_x, t2.real_x
          ->  Custom Scan (GpuSort)
                Output: t1.real_x, t2.real_x
-               Real cost: 1119.81...1120.57
                Sort Key: t1.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.real_x, t2.real_x
                      Pseudo Scan: t1.real_x::real, t2.real_x::real
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.real_x = t2.real_x), nrows_ratio: 0.00757500
+                     Depth 1: GpuNestLoop, JoinQual: (t1.real_x = t2.real_x)
+                              Nrows (in/out: 0.76%), KDS-Heap (size: 24.48KB, nbatches: 1)
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -4016,14 +3940,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.float_x, t2.float_x
          ->  Custom Scan (GpuSort)
                Output: t1.float_x, t2.float_x
-               Real cost: 1117.71...1117.97
                Sort Key: t1.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.float_x, t2.float_x
                      Pseudo Scan: t1.float_x::double precision, t2.float_x::double precision
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.float_x = t2.float_x), nrows_ratio: 0.00255000
+                     Depth 1: GpuNestLoop, JoinQual: (t1.float_x = t2.float_x)
+                              Nrows (in/out: 0.26%), KDS-Heap (size: 24.48KB, nbatches: 1)
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -4044,14 +3968,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.float_x, t2.float_x
          ->  Custom Scan (GpuSort)
                Output: t1.float_x, t2.float_x
-               Real cost: 1117.71...1117.97
                Sort Key: t1.float_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.float_x, t2.float_x
                      Pseudo Scan: t1.float_x::double precision, t2.float_x::double precision
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.float_x = t2.float_x), nrows_ratio: 0.00255000
+                     Depth 1: GpuNestLoop, JoinQual: (t1.float_x = t2.float_x)
+                              Nrows (in/out: 0.26%), KDS-Heap (size: 24.48KB, nbatches: 1)
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -4072,14 +3996,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.nume_x, t2.nume_x
          ->  Custom Scan (GpuSort)
                Output: t1.nume_x, t2.nume_x
-               Real cost: 1117.71...1117.97
                Sort Key: t1.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.nume_x, t2.nume_x
                      Pseudo Scan: t1.nume_x::numeric, t2.nume_x::numeric
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.nume_x = t2.nume_x), nrows_ratio: 0.00255000
+                     Depth 1: GpuNestLoop, JoinQual: (t1.nume_x = t2.nume_x)
+                              Nrows (in/out: 0.26%), KDS-Heap (size: 24.48KB, nbatches: 1)
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -4100,14 +4024,14 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), t1.nume_x, t2.nume_x
          ->  Custom Scan (GpuSort)
                Output: t1.nume_x, t2.nume_x
-               Real cost: 1117.71...1117.97
                Sort Key: t1.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuJoin)
                      Output: t1.nume_x, t2.nume_x
                      Pseudo Scan: t1.nume_x::numeric, t2.nume_x::numeric
                      Bulkload: On (density: 100.00%)
-                     Depth 1: Logic: GpuNestLoop, JoinQual: (t1.nume_x = t2.nume_x), nrows_ratio: 0.00255000
+                     Depth 1: GpuNestLoop, JoinQual: (t1.nume_x = t2.nume_x)
+                              Nrows (in/out: 0.26%), KDS-Heap (size: 24.48KB, nbatches: 1)
                      Features: format: heap-tuple, bulkload: supported
                      ->  Custom Scan (BulkScan) on public.strom_test t2
                            Output: t2.id, t2.key, t2.smlint_x, t2.integer_x, t2.bigint_x, t2.real_x, t2.float_x, t2.nume_x, t2.smlsrl_x, t2.serial_x, t2.bigsrl_x
@@ -4129,14 +4053,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by smlint_x  asc,integer_x  asc,bigint_x  asc,real_x  asc,float_x  asc,nume_x  asc) as rowid,* from strom_test where id between     1 and 10000) as t where t.rowid%1000=0;
                                                                                                                           QUERY PLAN                                                                                                                           
@@ -4148,14 +4071,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by smlint_x  asc,integer_x desc,bigint_x  asc,real_x desc,float_x  asc,nume_x desc) as rowid,* from strom_test where id between     1 and 10000) as t where t.rowid%1000=0;
                                                                                                                           QUERY PLAN                                                                                                                           
@@ -4167,14 +4089,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by smlint_x desc,integer_x  asc,bigint_x desc,real_x  asc,float_x desc,nume_x  asc) as rowid,* from strom_test where id between     1 and 10000) as t where t.rowid%1000=0;
                                                                                                                           QUERY PLAN                                                                                                                           
@@ -4186,14 +4107,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x desc,nume_x desc,smlint_x desc,integer_x desc,bigint_x desc,real_x desc) as rowid,* from strom_test where id between     1 and 10000) as t where t.rowid%1000=0;
                                                                                                                           QUERY PLAN                                                                                                                           
@@ -4205,14 +4125,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x  asc,nume_x  asc,smlint_x  asc,integer_x  asc,bigint_x  asc,real_x  asc) as rowid,* from strom_test where id between     1 and 10000) as t where t.rowid%1000=0;
                                                                                                                           QUERY PLAN                                                                                                                           
@@ -4224,14 +4143,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x  asc,nume_x desc,smlint_x  asc,integer_x desc,bigint_x  asc,real_x desc) as rowid,* from strom_test where id between     1 and 10000) as t where t.rowid%1000=0;
                                                                                                                           QUERY PLAN                                                                                                                           
@@ -4243,14 +4161,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x desc,nume_x  asc,smlint_x desc,integer_x  asc,bigint_x desc,real_x  asc) as rowid,* from strom_test where id between     1 and 10000) as t where t.rowid%1000=0;
                                                                                                                           QUERY PLAN                                                                                                                           
@@ -4262,14 +4179,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.97...578.99
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 1) AND (strom_test.id <= 10000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by smlint_x desc,integer_x desc,bigint_x desc,real_x desc,float_x desc,nume_x desc) as rowid,* from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                                                                                                           QUERY PLAN                                                                                                                           
@@ -4281,14 +4197,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by smlint_x  asc,integer_x  asc,bigint_x  asc,real_x  asc,float_x  asc,nume_x  asc) as rowid,* from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                                                                                                           QUERY PLAN                                                                                                                           
@@ -4300,14 +4215,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by smlint_x  asc,integer_x desc,bigint_x  asc,real_x desc,float_x  asc,nume_x desc) as rowid,* from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                                                                                                           QUERY PLAN                                                                                                                           
@@ -4319,14 +4233,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by smlint_x desc,integer_x  asc,bigint_x desc,real_x  asc,float_x desc,nume_x  asc) as rowid,* from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                                                                                                           QUERY PLAN                                                                                                                           
@@ -4338,14 +4251,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x desc,nume_x desc,smlint_x desc,integer_x desc,bigint_x desc,real_x desc) as rowid,* from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                                                                                                           QUERY PLAN                                                                                                                           
@@ -4357,14 +4269,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x  asc,nume_x  asc,smlint_x  asc,integer_x  asc,bigint_x  asc,real_x  asc) as rowid,* from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                                                                                                           QUERY PLAN                                                                                                                           
@@ -4376,14 +4287,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x  asc,nume_x desc,smlint_x  asc,integer_x desc,bigint_x  asc,real_x desc) as rowid,* from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                                                                                                           QUERY PLAN                                                                                                                           
@@ -4395,14 +4305,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by float_x desc,nume_x  asc,smlint_x desc,integer_x  asc,bigint_x desc,real_x  asc) as rowid,* from strom_test where id between 10001 and 20000) as t where t.rowid%1000=0;
                                                                                                                           QUERY PLAN                                                                                                                           
@@ -4414,14 +4323,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 553.53...578.45
                Sort Key: strom_test.float_x, strom_test.nume_x, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 10001) AND (strom_test.id <= 20000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by smlint_x desc,integer_x desc,bigint_x desc,real_x desc,float_x desc,nume_x desc) as rowid,* from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
                                                                                                                           QUERY PLAN                                                                                                                           
@@ -4433,14 +4341,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 554.63...579.80
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by smlint_x  asc,integer_x  asc,bigint_x  asc,real_x  asc,float_x  asc,nume_x  asc) as rowid,* from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
                                                                                                                           QUERY PLAN                                                                                                                           
@@ -4452,14 +4359,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 554.63...579.80
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by smlint_x  asc,integer_x desc,bigint_x  asc,real_x desc,float_x  asc,nume_x desc) as rowid,* from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
                                                                                                                           QUERY PLAN                                                                                                                           
@@ -4471,14 +4377,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 554.63...579.80
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by smlint_x desc,integer_x  asc,bigint_x desc,real_x  asc,float_x desc,nume_x  asc) as rowid,* from strom_test where id between 20001 and 30000) as t where t.rowid%1000=0;
                                                                                                                           QUERY PLAN                                                                                                                           
@@ -4490,14 +4395,13 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_test.id, strom_test.key, strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
          ->  Custom Scan (GpuSort)
                Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
-               Real cost: 554.63...579.80
                Sort Key: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Custom Scan (GpuScan) on public.strom_test
                      Output: strom_test.smlint_x, strom_test.integer_x, strom_test.bigint_x, strom_test.real_x, strom_test.float_x, strom_test.nume_x, strom_test.id, strom_test.key, strom_test.smlsrl_x, strom_test.serial_x, strom_test.bigsrl_x
                      Device Filter: ((strom_test.id >= 20001) AND (strom_test.id <= 30000))
                      Features: format: heap-tuple, bulkload: supported
-(14 rows)
+(13 rows)
 
 --gpusort on zero table
 explain (verbose, costs off, timing off) select * from strom_zero_test order by smlint_x;
@@ -4505,72 +4409,66 @@ explain (verbose, costs off, timing off) select * from strom_zero_test order by 
 ---------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuSort)
    Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-   Real cost: 17.86...19.73
    Sort Key: strom_zero_test.smlint_x
    Features: format: tuple-slot, bulkload: unsupported
    ->  Seq Scan on public.strom_zero_test
          Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(7 rows)
+(6 rows)
 
 explain (verbose, costs off, timing off) select * from strom_zero_test order by integer_x;
                                                   QUERY PLAN                                                   
 ---------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuSort)
    Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-   Real cost: 17.86...19.73
    Sort Key: strom_zero_test.integer_x
    Features: format: tuple-slot, bulkload: unsupported
    ->  Seq Scan on public.strom_zero_test
          Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(7 rows)
+(6 rows)
 
 explain (verbose, costs off, timing off) select * from strom_zero_test order by bigint_x;
                                                   QUERY PLAN                                                   
 ---------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuSort)
    Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-   Real cost: 17.86...19.73
    Sort Key: strom_zero_test.bigint_x
    Features: format: tuple-slot, bulkload: unsupported
    ->  Seq Scan on public.strom_zero_test
          Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(7 rows)
+(6 rows)
 
 explain (verbose, costs off, timing off) select * from strom_zero_test order by real_x;
                                                   QUERY PLAN                                                   
 ---------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuSort)
    Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-   Real cost: 17.86...19.73
    Sort Key: strom_zero_test.real_x
    Features: format: tuple-slot, bulkload: unsupported
    ->  Seq Scan on public.strom_zero_test
          Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(7 rows)
+(6 rows)
 
 explain (verbose, costs off, timing off) select * from strom_zero_test order by float_x;
                                                   QUERY PLAN                                                   
 ---------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuSort)
    Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-   Real cost: 17.86...19.73
    Sort Key: strom_zero_test.float_x
    Features: format: tuple-slot, bulkload: unsupported
    ->  Seq Scan on public.strom_zero_test
          Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(7 rows)
+(6 rows)
 
 explain (verbose, costs off, timing off) select * from strom_zero_test order by nume_x;
                                                   QUERY PLAN                                                   
 ---------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuSort)
    Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-   Real cost: 17.86...19.73
    Sort Key: strom_zero_test.nume_x
    Features: format: tuple-slot, bulkload: unsupported
    ->  Seq Scan on public.strom_zero_test
          Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
-(7 rows)
+(6 rows)
 
 --gpusort by text-key
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by char_x desc) as rowid,char_x from strom_string_test) as t where t.rowid%100=0;
@@ -4583,12 +4481,11 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_string_test.char_x
          ->  Custom Scan (GpuSort)
                Output: strom_string_test.char_x
-               Real cost: 153.50...156.00
                Sort Key: strom_string_test.char_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_string_test
                      Output: strom_string_test.char_x
-(12 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by char_x asc) as rowid,char_x from strom_string_test) as t where t.rowid%100=0;
                             QUERY PLAN                             
@@ -4600,12 +4497,11 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_string_test.char_x
          ->  Custom Scan (GpuSort)
                Output: strom_string_test.char_x
-               Real cost: 153.50...156.00
                Sort Key: strom_string_test.char_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_string_test
                      Output: strom_string_test.char_x
-(12 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by nchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
                                        QUERY PLAN                                       
@@ -4617,12 +4513,11 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_string_test.id, strom_string_test.nchar_x
          ->  Custom Scan (GpuSort)
                Output: strom_string_test.nchar_x, strom_string_test.id
-               Real cost: 153.50...156.00
                Sort Key: strom_string_test.nchar_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_string_test
                      Output: strom_string_test.nchar_x, strom_string_test.id
-(12 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by nchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
                                        QUERY PLAN                                       
@@ -4634,12 +4529,11 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_string_test.id, strom_string_test.nchar_x
          ->  Custom Scan (GpuSort)
                Output: strom_string_test.nchar_x, strom_string_test.id
-               Real cost: 153.50...156.00
                Sort Key: strom_string_test.nchar_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_string_test
                      Output: strom_string_test.nchar_x, strom_string_test.id
-(12 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x desc) as rowid,vchar_x from strom_string_test) as t where t.rowid%100=0;
                             QUERY PLAN                             
@@ -4651,12 +4545,11 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_string_test.vchar_x
          ->  Custom Scan (GpuSort)
                Output: strom_string_test.vchar_x
-               Real cost: 153.50...156.00
                Sort Key: strom_string_test.vchar_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_string_test
                      Output: strom_string_test.vchar_x
-(12 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select * from (select row_number() over (order by vchar_x asc) as rowid,vchar_x from strom_string_test) as t where t.rowid%100=0;
                             QUERY PLAN                             
@@ -4668,12 +4561,11 @@ explain (verbose, costs off, timing off) select * from (select row_number() over
          Output: row_number() OVER (?), strom_string_test.vchar_x
          ->  Custom Scan (GpuSort)
                Output: strom_string_test.vchar_x
-               Real cost: 153.50...156.00
                Sort Key: strom_string_test.vchar_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_string_test
                      Output: strom_string_test.vchar_x
-(12 rows)
+(11 rows)
 
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by nvchar_x desc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
 -- explain (verbose, costs off, timing off) select * from (select row_number() over (order by nvchar_x asc) as rowid,id from strom_string_test) as t where t.rowid%100=0;
@@ -4690,12 +4582,11 @@ explain (verbose, costs off, timing off) select rowid,timestamp_x from (select t
          Output: strom_time_test.timestamp_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_time_test.timestamp_x
-               Real cost: 33.25...37.81
                Sort Key: strom_time_test.timestamp_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_time_test
                      Output: strom_time_test.timestamp_x
-(12 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select rowid,timestamp_x from (select timestamp_x, row_number() over (order by timestamp_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
                              QUERY PLAN                             
@@ -4707,12 +4598,11 @@ explain (verbose, costs off, timing off) select rowid,timestamp_x from (select t
          Output: strom_time_test.timestamp_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_time_test.timestamp_x
-               Real cost: 33.25...37.81
                Sort Key: strom_time_test.timestamp_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_time_test
                      Output: strom_time_test.timestamp_x
-(12 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select rowid,timestamp_x from (select timestamp_x, row_number() over (order by timestamp_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
                              QUERY PLAN                             
@@ -4724,12 +4614,11 @@ explain (verbose, costs off, timing off) select rowid,timestamp_x from (select t
          Output: strom_time_test.timestamp_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_time_test.timestamp_x
-               Real cost: 33.25...37.81
                Sort Key: strom_time_test.timestamp_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_time_test
                      Output: strom_time_test.timestamp_x
-(12 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, timestamp_x from strom_time_test group by timestamp_x ) as t where t.rowid%50=0;
                                QUERY PLAN                                
@@ -4744,12 +4633,11 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_time_test.timestamp_x
                ->  Custom Scan (GpuSort)
                      Output: strom_time_test.timestamp_x
-                     Real cost: 33.25...37.81
                      Sort Key: strom_time_test.timestamp_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Seq Scan on public.strom_time_test
                            Output: strom_time_test.timestamp_x
-(15 rows)
+(14 rows)
 
 explain (verbose, costs off, timing off) select rowid,timestamptz_x from (select timestamptz_x, row_number() over (order by timestamptz_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
                               QUERY PLAN                              
@@ -4761,12 +4649,11 @@ explain (verbose, costs off, timing off) select rowid,timestamptz_x from (select
          Output: strom_time_test.timestamptz_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_time_test.timestamptz_x
-               Real cost: 33.25...37.81
                Sort Key: strom_time_test.timestamptz_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_time_test
                      Output: strom_time_test.timestamptz_x
-(12 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select rowid,timestamptz_x from (select timestamptz_x, row_number() over (order by timestamptz_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
                               QUERY PLAN                              
@@ -4778,12 +4665,11 @@ explain (verbose, costs off, timing off) select rowid,timestamptz_x from (select
          Output: strom_time_test.timestamptz_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_time_test.timestamptz_x
-               Real cost: 33.25...37.81
                Sort Key: strom_time_test.timestamptz_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_time_test
                      Output: strom_time_test.timestamptz_x
-(12 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select rowid,timestamptz_x from (select timestamptz_x, row_number() over (order by timestamptz_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
                               QUERY PLAN                              
@@ -4795,12 +4681,11 @@ explain (verbose, costs off, timing off) select rowid,timestamptz_x from (select
          Output: strom_time_test.timestamptz_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_time_test.timestamptz_x
-               Real cost: 33.25...37.81
                Sort Key: strom_time_test.timestamptz_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_time_test
                      Output: strom_time_test.timestamptz_x
-(12 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, timestamptz_x from strom_time_test group by timestamptz_x ) as t where t.rowid%50=0;
                                QUERY PLAN                                
@@ -4815,12 +4700,11 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_time_test.timestamptz_x
                ->  Custom Scan (GpuSort)
                      Output: strom_time_test.timestamptz_x
-                     Real cost: 33.25...37.81
                      Sort Key: strom_time_test.timestamptz_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Seq Scan on public.strom_time_test
                            Output: strom_time_test.timestamptz_x
-(15 rows)
+(14 rows)
 
 explain (verbose, costs off, timing off) select rowid,date_x from (select date_x, row_number() over (order by date_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
                             QUERY PLAN                             
@@ -4832,12 +4716,11 @@ explain (verbose, costs off, timing off) select rowid,date_x from (select date_x
          Output: strom_time_test.date_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_time_test.date_x
-               Real cost: 33.25...37.81
                Sort Key: strom_time_test.date_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_time_test
                      Output: strom_time_test.date_x
-(12 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select rowid,date_x from (select date_x, row_number() over (order by date_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
                             QUERY PLAN                             
@@ -4849,12 +4732,11 @@ explain (verbose, costs off, timing off) select rowid,date_x from (select date_x
          Output: strom_time_test.date_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_time_test.date_x
-               Real cost: 33.25...37.81
                Sort Key: strom_time_test.date_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_time_test
                      Output: strom_time_test.date_x
-(12 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select rowid,date_x from (select date_x, row_number() over (order by date_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
                             QUERY PLAN                             
@@ -4866,12 +4748,11 @@ explain (verbose, costs off, timing off) select rowid,date_x from (select date_x
          Output: strom_time_test.date_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_time_test.date_x
-               Real cost: 33.25...37.81
                Sort Key: strom_time_test.date_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_time_test
                      Output: strom_time_test.date_x
-(12 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, date_x from strom_time_test group by date_x ) as t where t.rowid%50=0;
                                QUERY PLAN                                
@@ -4886,12 +4767,11 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_time_test.date_x
                ->  Custom Scan (GpuSort)
                      Output: strom_time_test.date_x
-                     Real cost: 33.25...37.81
                      Sort Key: strom_time_test.date_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Seq Scan on public.strom_time_test
                            Output: strom_time_test.date_x
-(15 rows)
+(14 rows)
 
 explain (verbose, costs off, timing off) select rowid,time_x from (select time_x, row_number() over (order by time_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
                             QUERY PLAN                             
@@ -4903,12 +4783,11 @@ explain (verbose, costs off, timing off) select rowid,time_x from (select time_x
          Output: strom_time_test.time_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_time_test.time_x
-               Real cost: 33.25...37.81
                Sort Key: strom_time_test.time_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_time_test
                      Output: strom_time_test.time_x
-(12 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select rowid,time_x from (select time_x, row_number() over (order by time_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
                             QUERY PLAN                             
@@ -4920,12 +4799,11 @@ explain (verbose, costs off, timing off) select rowid,time_x from (select time_x
          Output: strom_time_test.time_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_time_test.time_x
-               Real cost: 33.25...37.81
                Sort Key: strom_time_test.time_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_time_test
                      Output: strom_time_test.time_x
-(12 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select rowid,time_x from (select time_x, row_number() over (order by time_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
                             QUERY PLAN                             
@@ -4937,12 +4815,11 @@ explain (verbose, costs off, timing off) select rowid,time_x from (select time_x
          Output: strom_time_test.time_x, row_number() OVER (?)
          ->  Custom Scan (GpuSort)
                Output: strom_time_test.time_x
-               Real cost: 33.25...37.81
                Sort Key: strom_time_test.time_x
                Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_time_test
                      Output: strom_time_test.time_x
-(12 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, time_x from strom_time_test group by time_x ) as t where t.rowid%50=0;
                                QUERY PLAN                                
@@ -4957,61 +4834,63 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
                Group Key: strom_time_test.time_x
                ->  Custom Scan (GpuSort)
                      Output: strom_time_test.time_x
-                     Real cost: 33.25...37.81
                      Sort Key: strom_time_test.time_x
                      Features: format: tuple-slot, bulkload: unsupported
                      ->  Seq Scan on public.strom_time_test
                            Output: strom_time_test.time_x
-(15 rows)
+(14 rows)
 
 explain (verbose, costs off, timing off) select rowid,timetz_x from (select timetz_x, row_number() over (order by timetz_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
-                           QUERY PLAN                            
------------------------------------------------------------------
+                            QUERY PLAN                             
+-------------------------------------------------------------------
  Subquery Scan on t
    Output: t.rowid, t.timetz_x
    Filter: ((t.rowid % '100'::bigint) = 0)
    ->  WindowAgg
          Output: strom_time_test.timetz_x, row_number() OVER (?)
-         ->  Sort
+         ->  Custom Scan (GpuSort)
                Output: strom_time_test.timetz_x
                Sort Key: strom_time_test.timetz_x
+               Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_time_test
                      Output: strom_time_test.timetz_x
-(10 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select rowid,timetz_x from (select timetz_x, row_number() over (order by timetz_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
-                           QUERY PLAN                            
------------------------------------------------------------------
+                            QUERY PLAN                             
+-------------------------------------------------------------------
  Subquery Scan on t
    Output: t.rowid, t.timetz_x
    Filter: ((t.rowid % '100'::bigint) = 0)
    ->  WindowAgg
          Output: strom_time_test.timetz_x, row_number() OVER (?)
-         ->  Sort
+         ->  Custom Scan (GpuSort)
                Output: strom_time_test.timetz_x
-               Sort Key: strom_time_test.timetz_x NULLS FIRST
+               Sort Key: strom_time_test.timetz_x
+               Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_time_test
                      Output: strom_time_test.timetz_x
-(10 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select rowid,timetz_x from (select timetz_x, row_number() over (order by timetz_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
-                            QUERY PLAN                            
-------------------------------------------------------------------
+                            QUERY PLAN                             
+-------------------------------------------------------------------
  Subquery Scan on t
    Output: t.rowid, t.timetz_x
    Filter: ((t.rowid % '100'::bigint) = 0)
    ->  WindowAgg
          Output: strom_time_test.timetz_x, row_number() OVER (?)
-         ->  Sort
+         ->  Custom Scan (GpuSort)
                Output: strom_time_test.timetz_x
-               Sort Key: strom_time_test.timetz_x DESC NULLS LAST
+               Sort Key: strom_time_test.timetz_x
+               Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_time_test
                      Output: strom_time_test.timetz_x
-(10 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, timetz_x from strom_time_test group by timetz_x ) as t where t.rowid%50=0;
-                           QUERY PLAN                            
------------------------------------------------------------------
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
  Subquery Scan on t
    Output: t.rowid, t.timetz_x
    Filter: ((t.rowid % '50'::bigint) = 0)
@@ -5020,12 +4899,13 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
          ->  Group
                Output: strom_time_test.timetz_x
                Group Key: strom_time_test.timetz_x
-               ->  Sort
+               ->  Custom Scan (GpuSort)
                      Output: strom_time_test.timetz_x
                      Sort Key: strom_time_test.timetz_x
+                     Features: format: tuple-slot, bulkload: unsupported
                      ->  Seq Scan on public.strom_time_test
                            Output: strom_time_test.timetz_x
-(13 rows)
+(14 rows)
 
 explain (verbose, costs off, timing off) select rowid,interval_x from (select interval_x, row_number() over (order by interval_x asc ) as rowid from strom_time_test) as t where t.rowid%100=0;
                             QUERY PLAN                             
@@ -5035,12 +4915,13 @@ explain (verbose, costs off, timing off) select rowid,interval_x from (select in
    Filter: ((t.rowid % '100'::bigint) = 0)
    ->  WindowAgg
          Output: strom_time_test.interval_x, row_number() OVER (?)
-         ->  Sort
+         ->  Custom Scan (GpuSort)
                Output: strom_time_test.interval_x
                Sort Key: strom_time_test.interval_x
+               Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_time_test
                      Output: strom_time_test.interval_x
-(10 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select rowid,interval_x from (select interval_x, row_number() over (order by interval_x asc NULLS FIRST) as rowid from strom_time_test) as t where t.rowid%100=0;
                             QUERY PLAN                             
@@ -5050,31 +4931,33 @@ explain (verbose, costs off, timing off) select rowid,interval_x from (select in
    Filter: ((t.rowid % '100'::bigint) = 0)
    ->  WindowAgg
          Output: strom_time_test.interval_x, row_number() OVER (?)
-         ->  Sort
+         ->  Custom Scan (GpuSort)
                Output: strom_time_test.interval_x
-               Sort Key: strom_time_test.interval_x NULLS FIRST
+               Sort Key: strom_time_test.interval_x
+               Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_time_test
                      Output: strom_time_test.interval_x
-(10 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select rowid,interval_x from (select interval_x, row_number() over (order by interval_x desc NULLS LAST) as rowid from strom_time_test) as t where t.rowid%100=0;
-                             QUERY PLAN                             
---------------------------------------------------------------------
+                            QUERY PLAN                             
+-------------------------------------------------------------------
  Subquery Scan on t
    Output: t.rowid, t.interval_x
    Filter: ((t.rowid % '100'::bigint) = 0)
    ->  WindowAgg
          Output: strom_time_test.interval_x, row_number() OVER (?)
-         ->  Sort
+         ->  Custom Scan (GpuSort)
                Output: strom_time_test.interval_x
-               Sort Key: strom_time_test.interval_x DESC NULLS LAST
+               Sort Key: strom_time_test.interval_x
+               Features: format: tuple-slot, bulkload: unsupported
                ->  Seq Scan on public.strom_time_test
                      Output: strom_time_test.interval_x
-(10 rows)
+(11 rows)
 
 explain (verbose, costs off, timing off) select * from ( select row_number() over () as rowid, interval_x from strom_time_test group by interval_x ) as t where t.rowid%50=0;
-                            QUERY PLAN                             
--------------------------------------------------------------------
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
  Subquery Scan on t
    Output: t.rowid, t.interval_x
    Filter: ((t.rowid % '50'::bigint) = 0)
@@ -5083,10 +4966,11 @@ explain (verbose, costs off, timing off) select * from ( select row_number() ove
          ->  Group
                Output: strom_time_test.interval_x
                Group Key: strom_time_test.interval_x
-               ->  Sort
+               ->  Custom Scan (GpuSort)
                      Output: strom_time_test.interval_x
                      Sort Key: strom_time_test.interval_x
+                     Features: format: tuple-slot, bulkload: unsupported
                      ->  Seq Scan on public.strom_time_test
                            Output: strom_time_test.interval_x
-(13 rows)
+(14 rows)
 

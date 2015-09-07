@@ -14,29 +14,30 @@ test: test_init
 # GpuPreAgg Pattern
 # ----------
 # GpuPreAgg parallel test-cases.
-test: explain_gpa zero_gpa where_gpa nogrp_gpa recheck_gpa group_gpa time_gpa overflow_gpa
+#test: explain_gpa zero_gpa where_gpa nogrp_gpa recheck_gpa group_gpa time_gpa overflow_gpa
 # GpuPreAgg Complex test-case
-test: misc_gpa
+#test: misc_gpa
 
 # ----------
 # GpuScan pattern
 # ----------
 # GpuScan parallel test-cases.
-test: explain_gs zero_gs normal_gs recheck_gs overflow_gs 
+#test: explain_gs zero_gs normal_gs recheck_gs overflow_gs 
 
 # ----------
 # GpuHashJoin pattern
 # ----------
 # GpuHashJoin parallel test-cases.
-test: explain_ghj normal_ghj nobulk_ghj
+#test: explain_ghj normal_ghj nobulk_ghj
 # GpuHashJoin closed issue test-cases.
-test: varremap_ghj
+#test: varremap_ghj
 
 # ----------
 # GpuSort pattern
 # ----------
 # GpuSort parallel test-cases.
-test: explain_gso normal_gso group_gso multikey_gso text_gso zero_gso time_gso
+#test: explain_gso normal_gso group_gso multikey_gso text_gso zero_gso time_gso
 #test: merge_gso
 # GpuSort closed issue test-cases.
-test: 2+key_gso
+#test: 2+key_gso
+test: explain_gso
