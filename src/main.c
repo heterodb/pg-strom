@@ -49,10 +49,12 @@ static bool	pgstrom_debug_kernel_source;
 bool		pgstrom_bulkload_enabled;
 double		pgstrom_bulkload_density;
 int			pgstrom_max_async_tasks;
+double		pgstrom_num_threads_margin;
+double		pgstrom_chunk_size_margin;
 
 /* cost factors */
 double		pgstrom_gpu_setup_cost;
-double		pgstrom_gpu_task_cost;
+double		pgstrom_gpu_dma_cost;
 double		pgstrom_gpu_operator_cost;
 double		pgstrom_gpu_tuple_cost;
 
@@ -117,34 +119,56 @@ pgstrom_init_misc_guc(void)
 							PGC_USERSET,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
+	/* margin of number of CUDA threads */
+	DefineCustomRealVariable("pg_strom.num_threads_margin",
+							 "margin of number of CUDA threads if not predictable exactly",
+							 NULL,
+							 &pgstrom_num_threads_margin,
+							 1.10,
+							 1.00,	/* 0% margin - strict estimation */
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/**/
+	DefineCustomRealVariable("pg_strom.chunk_size_margin",
+							 "margin of chunk size if not predictable exactly",
+							 NULL,
+							 &pgstrom_chunk_size_margin,
+							 1.25,
+							 1.00,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	/* cost factor for Gpu setup */
 	DefineCustomRealVariable("pg_strom.gpu_setup_cost",
 							 "Cost to setup GPU device to run",
 							 NULL,
 							 &pgstrom_gpu_setup_cost,
-							 3000 * DEFAULT_SEQ_PAGE_COST,
+							 4000 * DEFAULT_SEQ_PAGE_COST,
 							 0,
 							 DBL_MAX,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* cost factor for each Gpu task */
-	DefineCustomRealVariable("pg_strom.gpu_task_cost",
-							 "Cost to launch a GPU task",
+	DefineCustomRealVariable("pg_strom.gpu_dma_cost",
+							 "Cost to send/recv data via DMA",
 							 NULL,
-							 &pgstrom_gpu_task_cost,
-							 20 * DEFAULT_SEQ_PAGE_COST,
+							 &pgstrom_gpu_dma_cost,
+							 DEFAULT_SEQ_PAGE_COST,
 							 0,
 							 DBL_MAX,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
+                             PGC_USERSET,
+                             GUC_NOT_IN_SAMPLE,
+                             NULL, NULL, NULL);
 	/* cost factor for Gpu operator */
 	DefineCustomRealVariable("pg_strom.gpu_operator_cost",
 							 "Cost of processing each operators by GPU",
 							 NULL,
 							 &pgstrom_gpu_operator_cost,
-							 DEFAULT_CPU_OPERATOR_COST / 100.0,
+							 DEFAULT_CPU_OPERATOR_COST / 32.0,
 							 0,
 							 DBL_MAX,
 							 PGC_USERSET,
@@ -155,7 +179,7 @@ pgstrom_init_misc_guc(void)
 							 "Cost of processing each tuple for GPU",
 							 NULL,
 							 &pgstrom_gpu_tuple_cost,
-							 DEFAULT_CPU_TUPLE_COST / 32,
+							 DEFAULT_CPU_TUPLE_COST / 32.0,
 							 0,
 							 DBL_MAX,
 							 PGC_USERSET,

@@ -43,7 +43,6 @@
  */
 static int		pgstrom_chunk_size_kb;
 static double	pgstrom_chunk_size_limit_ratio;
-static double	__pgstrom_chunk_size_margin;
 
 /*
  * pgstrom_chunk_size - configured chunk size
@@ -62,15 +61,6 @@ pgstrom_chunk_size_limit(void)
 {
 	return (Size)((double)pgstrom_chunk_size() *
 				  pgstrom_chunk_size_limit_ratio);
-}
-
-/*
- * pgstrom_chunk_size_margin
- */
-double
-pgstrom_chunk_size_margin(void)
-{
-	return 1.0 + __pgstrom_chunk_size_margin;
 }
 
 /*
@@ -1392,16 +1382,6 @@ pgstrom_init_datastore(void)
 							 &pgstrom_chunk_size_limit_ratio,
 							 6.0,
 							 1.0,
-							 DBL_MAX,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	DefineCustomRealVariable("pg_strom.chunk_size_margin",
-							 "margin parcent if result buffer may larger than input",
-							 NULL,
-							 &__pgstrom_chunk_size_margin,
-							 0.25,
-							 0.00,
 							 DBL_MAX,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,

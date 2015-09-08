@@ -2090,7 +2090,7 @@ pickup_target_cuda_devices(void)
 	memset(&dattr, 0, sizeof(dattr));
 	dattr.dev_id = -1;
 
-	cmdline = psprintf("%s -m", CMD_GPUINGO_PATH);
+	cmdline = psprintf("%s -m", CMD_GPUINFO_PATH);
 	filp = OpenPipeStream(cmdline, PG_BINARY_R);
 
 	while (fgets(linebuf, sizeof(linebuf), filp) != NULL)

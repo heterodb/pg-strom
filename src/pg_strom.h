@@ -47,6 +47,9 @@
  *
  * --------------------------------------------------------------------
  */
+#if PG_VERSION_NUM < 90500
+#error Not supported PostgreSQL version
+#endif
 #if SIZEOF_DATUM != 8
 #error PG-Strom expects 64bit platform
 #endif
@@ -507,7 +510,6 @@ extern void pgstrom_init_codegen(void);
  */
 extern Size pgstrom_chunk_size(void);
 extern Size pgstrom_chunk_size_limit(void);
-extern double pgstrom_chunk_size_margin(void);
 extern cl_uint estimate_num_chunks(Path *pathnode);
 extern void subtract_tuplecost_if_bulkload(Cost *p_run_cost, Path *pathnode);
 extern double pgstrom_get_bulkload_density(Plan *child_plan);
@@ -617,11 +619,13 @@ extern bool		pgstrom_bulkload_enabled;
 extern double	pgstrom_bulkload_density;
 extern int		pgstrom_max_async_tasks;
 extern double	pgstrom_gpu_setup_cost;
-extern double	pgstrom_gpu_task_cost;
+extern double	pgstrom_gpu_dma_cost;
 extern double	pgstrom_gpu_operator_cost;
 extern double	pgstrom_gpu_tuple_cost;
 extern double	pgstrom_nrows_growth_ratio_limit;
 extern double	pgstrom_nrows_growth_margin;
+extern double	pgstrom_num_threads_margin;
+extern double	pgstrom_chunk_size_margin;
 
 extern void _PG_init(void);
 extern const char *pgstrom_strerror(cl_int errcode);
