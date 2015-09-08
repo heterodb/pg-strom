@@ -48,14 +48,9 @@ SCRIPTS_built = src/gpuinfo
 
 # Regression test options
 REGRESS = --schedule=test/parallel_schedule
-ifndef PGSQL_BUILD_DIR 
-	REGRESS_OPTS = --inputdir=test
-else
-	RET := $(shell ln -sn $(CURDIR) $(PGSQL_BUILD_DIR)/contrib/pg_strom)
-	REGRESS_OPTS = --inputdir=test \
-               --top-builddir=$(PGSQL_BUILD_DIR) \
-               --extra-install=contrib/pg_strom \
-               --temp-install=tmp_check
+REGRESS_OPTS = --inputdir=test
+ifdef TEMP_INSTANCE
+	REGRESS_OPTS += --temp-instance=tmp_check
 	ifndef CPUTEST 
 		REGRESS_OPTS += --temp-config=test/enable.conf
 	else

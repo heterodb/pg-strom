@@ -2,7 +2,8 @@
 --#       Gpu Scan TestCases with CPU Recheck
 --#
 
-set enable_gpusort to off;
+set pg_strom.gpu_setup_cost=0;
+set pg_strom.enable_gpusort to off;
 set client_min_messages to notice;
 
 -- NO RECHECK
@@ -70,26 +71,21 @@ select * from strom_test where nume_x<-1e-1000 and id%1000=0 order by id;
 
 -- division by zero with GpuScan
 prepare p1 as select * from strom_test where smlint_x/(id%1000) = 1;
-explain (verbose on, costs off) execute p1;
 execute p1;
 deallocate p1;
 
 prepare p1 as select * from strom_test where integer_x/(id%1000) = 1;
-explain (verbose on, costs off) execute p1;
 execute p1;
 deallocate p1;
 
 prepare p1 as select * from strom_test where bigint_x/(id%1000) = 1;
-explain (verbose on, costs off) execute p1;
 execute p1;
 deallocate p1;
 
 prepare p1 as select * from strom_test where real_x/(id%1000) = 1;
-explain (verbose on, costs off) execute p1;
 execute p1;
 deallocate p1;
 
 prepare p1 as select * from strom_test where float_x/(id%1000) = 1;
-explain (verbose on, costs off) execute p1;
 execute p1;
 deallocate p1;

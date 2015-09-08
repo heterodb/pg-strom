@@ -2,9 +2,10 @@
 --#       Gpu HashJoin Explain TestCases. 
 --#
 
-set gpu_setup_cost=0;
-set enable_gpupreagg to off;
-set enable_gpusort to off;
+set enable_nestloop to off;
+set pg_strom.gpu_setup_cost=0;
+set pg_strom.enable_gpupreagg to off;
+set pg_strom.enable_gpusort to off;
 set random_page_cost=1000000;   --# force off index_scan.
 set client_min_messages to warning;
 
@@ -144,7 +145,7 @@ explain (verbose, costs off, timing off) select a.id,case when a.bigsrl_x = b.bi
 (select * from strom_test where id between 20001 and 30000 and id%100=0 and id::text not like '' ) as b
  on a.bigsrl_x=b.bigsrl_x and a.id=b.id order by a.id;
 
-
+set enable_nestloop=on;
 set pg_strom.enabled=on;
 ---
 --- BULKLOAD ON

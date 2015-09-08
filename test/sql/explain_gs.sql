@@ -6,9 +6,9 @@ set enable_seqscan to off;
 set enable_bitmapscan to off;
 set enable_indexscan to off;
 set random_page_cost=1000000;   --# force off index_scan.
-set enable_gpuhashjoin to off;
-set enable_gpupreagg to off;
-set enable_gpusort to off;
+set pg_strom.enable_gpuhashjoin to off;
+set pg_strom.enable_gpupreagg to off;
+set pg_strom.enable_gpusort to off;
 set client_min_messages to warning;
 
 set pg_strom.enabled=off;
@@ -58,7 +58,7 @@ explain (verbose, costs off, timing off) select  id,serial_x    from strom_test 
 explain (verbose, costs off, timing off) select  id,bigsrl_x    from strom_test where abs(bigsrl_x) IS NOT NULL order by id limit 100;
 
 set pg_strom.enabled=on;
-set enable_gpusort to off;
+set pg_strom.enable_gpusort to off;
 -- normal
 explain (verbose, costs off, timing off) select  smlint_x    from strom_test order by id limit 100;
 explain (verbose, costs off, timing off) select  integer_x    from strom_test order by id limit 100;
@@ -103,3 +103,19 @@ explain (verbose, costs off, timing off) select  id,nume_x    from strom_test wh
 explain (verbose, costs off, timing off) select  id,smlsrl_x    from strom_test where abs(smlsrl_x) IS NOT NULL order by id limit 100;
 explain (verbose, costs off, timing off) select  id,serial_x    from strom_test where abs(serial_x) IS NOT NULL order by id limit 100;
 explain (verbose, costs off, timing off) select  id,bigsrl_x    from strom_test where abs(bigsrl_x) IS NOT NULL order by id limit 100;
+
+
+-- division by zero with GpuScan
+set pg_strom.enabled=on;
+explain (verbose on, costs off) select * from strom_test where smlint_x/(id%1000) = 1;
+explain (verbose on, costs off) select * from strom_test where integer_x/(id%1000) = 1;
+explain (verbose on, costs off) select * from strom_test where bigint_x/(id%1000) = 1;
+explain (verbose on, costs off) select * from strom_test where real_x/(id%1000) = 1;
+explain (verbose on, costs off) select * from strom_test where float_x/(id%1000) = 1;
+
+set pg_strom.enabled=off;
+explain (verbose on, costs off) select * from strom_test where smlint_x/(id%1000) = 1;
+explain (verbose on, costs off) select * from strom_test where integer_x/(id%1000) = 1;
+explain (verbose on, costs off) select * from strom_test where bigint_x/(id%1000) = 1;
+explain (verbose on, costs off) select * from strom_test where real_x/(id%1000) = 1;
+explain (verbose on, costs off) select * from strom_test where float_x/(id%1000) = 1;

@@ -2,11 +2,13 @@
 --#       Gpu PreAggregate Explain TestCases
 --#
 
--- explain normal case
-set enable_gpusort to off;
-set client_min_messages to warning;
-set extra_float_digits to -3;
+-- global configuration
+set pg_strom.gpu_setup_cost to 0;
 set pg_strom.debug_force_gpupreagg to on;
+set pg_strom.enable_gpusort to off;
+set client_min_messages to warning;
+
+-- explain normal case
 set pg_strom.enabled=off;
 explain (verbose, costs off, timing off) select key,avg(smlint_x)            from strom_test group by key order by key;
 explain (verbose, costs off, timing off) select key,count(smlint_x)          from strom_test group by key order by key;
@@ -134,6 +136,7 @@ explain (verbose, costs off, timing off) select key,var_samp(bigsrl_x)       fro
 explain (verbose, costs off, timing off) select key,corr(bigsrl_x,bigsrl_x) from strom_test group by key order by key;
 explain (verbose, costs off, timing off) select key,covar_pop(bigsrl_x,bigsrl_x) from strom_test group by key order by key;
 explain (verbose, costs off, timing off) select key,covar_samp(bigsrl_x,bigsrl_x) from strom_test group by key order by key;
+
 set pg_strom.enabled=on;
 explain (verbose, costs off, timing off) select key,avg(smlint_x)            from strom_test group by key order by key;
 explain (verbose, costs off, timing off) select key,count(smlint_x)          from strom_test group by key order by key;
@@ -263,10 +266,6 @@ explain (verbose, costs off, timing off) select key,covar_pop(bigsrl_x,bigsrl_x)
 explain (verbose, costs off, timing off) select key,covar_samp(bigsrl_x,bigsrl_x) from strom_test group by key order by key;
 
 --explain aggregate function for statistic query case.
-set enable_gpusort to off;
-set client_min_messages to warning;
-set extra_float_digits to -3;
-set pg_strom.debug_force_gpupreagg to on;
 set pg_strom.enabled=off;
 explain (verbose, costs off, timing off) select key,corr(smlint_x,smlint_z) from strom_mix group by key order by key;
 explain (verbose, costs off, timing off) select key,corr(smlint_y,smlint_z) from strom_mix group by key order by key;
@@ -322,6 +321,7 @@ explain (verbose, costs off, timing off) select key,covar_pop(bigsrl_x,bigsrl_z)
 explain (verbose, costs off, timing off) select key,covar_pop(bigsrl_y,bigsrl_z) from strom_mix group by key order by key;
 explain (verbose, costs off, timing off) select key,covar_samp(bigsrl_x,bigsrl_z) from strom_mix group by key order by key;
 explain (verbose, costs off, timing off) select key,covar_samp(bigsrl_y,bigsrl_z) from strom_mix group by key order by key;
+
 set pg_strom.enabled=on;
 explain (verbose, costs off, timing off) select key,corr(smlint_x,smlint_z) from strom_mix group by key order by key;
 explain (verbose, costs off, timing off) select key,corr(smlint_y,smlint_z) from strom_mix group by key order by key;
@@ -380,11 +380,7 @@ explain (verbose, costs off, timing off) select key,covar_samp(bigsrl_y,bigsrl_z
 
 
 -- explain zero query case.
-set enable_gpusort to off;
-set extra_float_digits to -3;
-set pg_strom.debug_force_gpupreagg to on;
 set pg_strom.enabled=off;
-
 explain (verbose, costs off, timing off) select avg(smlint_x)            from strom_zero_test ;
 explain (verbose, costs off, timing off) select count(smlint_x)          from strom_zero_test ;
 explain (verbose, costs off, timing off) select max(smlint_x)            from strom_zero_test ;
@@ -511,6 +507,7 @@ explain (verbose, costs off, timing off) select var_samp(bigsrl_x)       from st
 explain (verbose, costs off, timing off) select corr(bigsrl_x,bigsrl_x) from strom_zero_test ;
 explain (verbose, costs off, timing off) select covar_pop(bigsrl_x,bigsrl_x) from strom_zero_test ;
 explain (verbose, costs off, timing off) select covar_samp(bigsrl_x,bigsrl_x) from strom_zero_test ;
+
 set pg_strom.enabled=on;
 explain (verbose, costs off, timing off) select avg(smlint_x)            from strom_zero_test ;
 explain (verbose, costs off, timing off) select count(smlint_x)          from strom_zero_test ;
@@ -638,3 +635,105 @@ explain (verbose, costs off, timing off) select var_samp(bigsrl_x)       from st
 explain (verbose, costs off, timing off) select corr(bigsrl_x,bigsrl_x) from strom_zero_test ;
 explain (verbose, costs off, timing off) select covar_pop(bigsrl_x,bigsrl_x) from strom_zero_test ;
 explain (verbose, costs off, timing off) select covar_samp(bigsrl_x,bigsrl_x) from strom_zero_test ;
+
+
+-- division by zero with GpuPreAggregate
+set pg_strom.enabled=off;
+explain (verbose on, costs off) select sum(smlint_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) select sum(integer_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) select sum(bigint_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) select sum(real_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) select sum(float_x/(id%1000)) from strom_test;
+
+set pg_strom.enabled=on;
+explain (verbose on, costs off) select sum(smlint_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) select sum(integer_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) select sum(bigint_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) select sum(real_x/(id%1000)) from strom_test;
+explain (verbose on, costs off) select sum(float_x/(id%1000)) from strom_test;
+
+
+--explain GpuPreAggregation for Data/Time types
+set pg_strom.enabled=off;
+explain (verbose on, costs off) select key,max(timestamp_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,max(timestamptz_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,max(date_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,max(time_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,max(timetz_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,max(interval_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,min(timestamp_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,min(timestamptz_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,min(date_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,min(time_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,min(timetz_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,min(interval_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,count(timestamp_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,count(timestamptz_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,count(date_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,count(time_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,count(timetz_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,count(interval_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,avg(time_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,avg(interval_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select max(timestamp_x) from strom_time_test;
+explain (verbose on, costs off) select max(timestamptz_x) from strom_time_test;
+explain (verbose on, costs off) select max(date_x) from strom_time_test;
+explain (verbose on, costs off) select max(time_x) from strom_time_test;
+explain (verbose on, costs off) select max(timetz_x) from strom_time_test;
+explain (verbose on, costs off) select max(interval_x) from strom_time_test;
+explain (verbose on, costs off) select min(timestamp_x) from strom_time_test;
+explain (verbose on, costs off) select min(timestamptz_x) from strom_time_test;
+explain (verbose on, costs off) select min(date_x) from strom_time_test;
+explain (verbose on, costs off) select min(time_x) from strom_time_test;
+explain (verbose on, costs off) select min(timetz_x) from strom_time_test;
+explain (verbose on, costs off) select min(interval_x) from strom_time_test;
+explain (verbose on, costs off) select count(timestamp_x) from strom_time_test;
+explain (verbose on, costs off) select count(timestamptz_x) from strom_time_test;
+explain (verbose on, costs off) select count(date_x) from strom_time_test;
+explain (verbose on, costs off) select count(time_x) from strom_time_test;
+explain (verbose on, costs off) select count(timetz_x) from strom_time_test;
+explain (verbose on, costs off) select count(interval_x) from strom_time_test;
+explain (verbose on, costs off) select avg(time_x) from strom_time_test;
+explain (verbose on, costs off) select avg(interval_x) from strom_time_test;
+
+set pg_strom.enabled=on;
+explain (verbose on, costs off) select key,max(timestamp_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,max(timestamptz_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,max(date_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,max(time_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,max(timetz_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,max(interval_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,min(timestamp_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,min(timestamptz_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,min(date_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,min(time_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,min(timetz_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,min(interval_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,count(timestamp_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,count(timestamptz_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,count(date_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,count(time_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,count(timetz_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,count(interval_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,avg(time_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select key,avg(interval_x) from strom_time_test group by key order by key;
+explain (verbose on, costs off) select max(timestamp_x) from strom_time_test;
+explain (verbose on, costs off) select max(timestamptz_x) from strom_time_test;
+explain (verbose on, costs off) select max(date_x) from strom_time_test;
+explain (verbose on, costs off) select max(time_x) from strom_time_test;
+explain (verbose on, costs off) select max(timetz_x) from strom_time_test;
+explain (verbose on, costs off) select max(interval_x) from strom_time_test;
+explain (verbose on, costs off) select min(timestamp_x) from strom_time_test;
+explain (verbose on, costs off) select min(timestamptz_x) from strom_time_test;
+explain (verbose on, costs off) select min(date_x) from strom_time_test;
+explain (verbose on, costs off) select min(time_x) from strom_time_test;
+explain (verbose on, costs off) select min(timetz_x) from strom_time_test;
+explain (verbose on, costs off) select min(interval_x) from strom_time_test;
+explain (verbose on, costs off) select count(timestamp_x) from strom_time_test;
+explain (verbose on, costs off) select count(timestamptz_x) from strom_time_test;
+explain (verbose on, costs off) select count(date_x) from strom_time_test;
+explain (verbose on, costs off) select count(time_x) from strom_time_test;
+explain (verbose on, costs off) select count(timetz_x) from strom_time_test;
+explain (verbose on, costs off) select count(interval_x) from strom_time_test;
+explain (verbose on, costs off) select avg(time_x) from strom_time_test;
+explain (verbose on, costs off) select avg(interval_x) from strom_time_test;

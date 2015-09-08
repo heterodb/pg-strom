@@ -4,9 +4,10 @@
 --#         If will support it, please remake expected outs and test_init.sql
 --#
 
-set gpu_setup_cost=0;
+set pg_strom.debug_force_gpusort to on;
+set pg_strom.gpu_setup_cost=0;
 set random_page_cost=1000000;   --# force off index_scan.   
-set enable_gpusort to on;                                                                                                                                       
+set pg_strom.enable_gpusort to on;                                                                                                                                       
 set client_min_messages to warning;
 
 

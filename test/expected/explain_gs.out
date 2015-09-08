@@ -5,9 +5,9 @@ set enable_seqscan to off;
 set enable_bitmapscan to off;
 set enable_indexscan to off;
 set random_page_cost=1000000;   --# force off index_scan.
-set enable_gpuhashjoin to off;
-set enable_gpupreagg to off;
-set enable_gpusort to off;
+set pg_strom.enable_gpuhashjoin to off;
+set pg_strom.enable_gpupreagg to off;
+set pg_strom.enable_gpusort to off;
 set client_min_messages to warning;
 set pg_strom.enabled=off;
 -- normal
@@ -147,8 +147,8 @@ explain (verbose, costs off, timing off) select  integer_x    from strom_test wh
 (8 rows)
 
 explain (verbose, costs off, timing off) select  bigint_x    from strom_test where abs(bigint_x) between 1000000000000 and 10000000000000 order by id limit 100;
-                                                              QUERY PLAN                                                              
---------------------------------------------------------------------------------------------------------------------------------------
+                                                                QUERY PLAN                                                                
+------------------------------------------------------------------------------------------------------------------------------------------
  Limit
    Output: bigint_x, id
    ->  Sort
@@ -156,12 +156,12 @@ explain (verbose, costs off, timing off) select  bigint_x    from strom_test whe
          Sort Key: strom_test.id
          ->  Seq Scan on public.strom_test
                Output: bigint_x, id
-               Filter: ((abs(strom_test.bigint_x) >= 1000000000000::bigint) AND (abs(strom_test.bigint_x) <= 10000000000000::bigint))
+               Filter: ((abs(strom_test.bigint_x) >= '1000000000000'::bigint) AND (abs(strom_test.bigint_x) <= '10000000000000'::bigint))
 (8 rows)
 
 explain (verbose, costs off, timing off) select  real_x    from strom_test where abs(real_x) between 0.001 and 0.01 order by id limit 100;
-                                                             QUERY PLAN                                                             
-------------------------------------------------------------------------------------------------------------------------------------
+                                                               QUERY PLAN                                                               
+----------------------------------------------------------------------------------------------------------------------------------------
  Limit
    Output: real_x, id
    ->  Sort
@@ -169,12 +169,12 @@ explain (verbose, costs off, timing off) select  real_x    from strom_test where
          Sort Key: strom_test.id
          ->  Seq Scan on public.strom_test
                Output: real_x, id
-               Filter: ((abs(strom_test.real_x) >= 0.001::double precision) AND (abs(strom_test.real_x) <= 0.01::double precision))
+               Filter: ((abs(strom_test.real_x) >= '0.001'::double precision) AND (abs(strom_test.real_x) <= '0.01'::double precision))
 (8 rows)
 
 explain (verbose, costs off, timing off) select  float_x    from strom_test where abs(float_x) between 0.001 and 0.01 order by id limit 100;
-                                                              QUERY PLAN                                                              
---------------------------------------------------------------------------------------------------------------------------------------
+                                                                QUERY PLAN                                                                
+------------------------------------------------------------------------------------------------------------------------------------------
  Limit
    Output: float_x, id
    ->  Sort
@@ -182,7 +182,7 @@ explain (verbose, costs off, timing off) select  float_x    from strom_test wher
          Sort Key: strom_test.id
          ->  Seq Scan on public.strom_test
                Output: float_x, id
-               Filter: ((abs(strom_test.float_x) >= 0.001::double precision) AND (abs(strom_test.float_x) <= 0.01::double precision))
+               Filter: ((abs(strom_test.float_x) >= '0.001'::double precision) AND (abs(strom_test.float_x) <= '0.01'::double precision))
 (8 rows)
 
 explain (verbose, costs off, timing off) select  nume_x    from strom_test where abs(nume_x) between 0.001 and 0.01 order by id limit 100;
@@ -225,8 +225,8 @@ explain (verbose, costs off, timing off) select  serial_x    from strom_test whe
 (8 rows)
 
 explain (verbose, costs off, timing off) select  bigsrl_x    from strom_test where abs(bigsrl_x) between 1000000000000 and 10000000000000 order by id limit 100;
-                                                              QUERY PLAN                                                              
---------------------------------------------------------------------------------------------------------------------------------------
+                                                                QUERY PLAN                                                                
+------------------------------------------------------------------------------------------------------------------------------------------
  Limit
    Output: bigsrl_x, id
    ->  Sort
@@ -234,7 +234,7 @@ explain (verbose, costs off, timing off) select  bigsrl_x    from strom_test whe
          Sort Key: strom_test.id
          ->  Seq Scan on public.strom_test
                Output: bigsrl_x, id
-               Filter: ((abs(strom_test.bigsrl_x) >= 1000000000000::bigint) AND (abs(strom_test.bigsrl_x) <= 10000000000000::bigint))
+               Filter: ((abs(strom_test.bigsrl_x) >= '1000000000000'::bigint) AND (abs(strom_test.bigsrl_x) <= '10000000000000'::bigint))
 (8 rows)
 
 -- NULL
@@ -474,129 +474,120 @@ explain (verbose, costs off, timing off) select  id,bigsrl_x    from strom_test 
 (8 rows)
 
 set pg_strom.enabled=on;
-set enable_gpusort to off;
+set pg_strom.enable_gpusort to off;
 -- normal
 explain (verbose, costs off, timing off) select  smlint_x    from strom_test order by id limit 100;
-                       QUERY PLAN                       
---------------------------------------------------------
+                QUERY PLAN                 
+-------------------------------------------
  Limit
    Output: smlint_x, id
    ->  Sort
          Output: smlint_x, id
          Sort Key: strom_test.id
-         ->  Custom Scan (GpuScan) on public.strom_test
+         ->  Seq Scan on public.strom_test
                Output: smlint_x, id
-               Features: likely-tuple-slot
-(8 rows)
+(7 rows)
 
 explain (verbose, costs off, timing off) select  integer_x    from strom_test order by id limit 100;
-                       QUERY PLAN                       
---------------------------------------------------------
+                QUERY PLAN                 
+-------------------------------------------
  Limit
    Output: integer_x, id
    ->  Sort
          Output: integer_x, id
          Sort Key: strom_test.id
-         ->  Custom Scan (GpuScan) on public.strom_test
+         ->  Seq Scan on public.strom_test
                Output: integer_x, id
-               Features: likely-tuple-slot
-(8 rows)
+(7 rows)
 
 explain (verbose, costs off, timing off) select  bigint_x    from strom_test order by id limit 100;
-                       QUERY PLAN                       
---------------------------------------------------------
+                QUERY PLAN                 
+-------------------------------------------
  Limit
    Output: bigint_x, id
    ->  Sort
          Output: bigint_x, id
          Sort Key: strom_test.id
-         ->  Custom Scan (GpuScan) on public.strom_test
+         ->  Seq Scan on public.strom_test
                Output: bigint_x, id
-               Features: likely-tuple-slot
-(8 rows)
+(7 rows)
 
 explain (verbose, costs off, timing off) select  real_x    from strom_test order by id limit 100;
-                       QUERY PLAN                       
---------------------------------------------------------
+                QUERY PLAN                 
+-------------------------------------------
  Limit
    Output: real_x, id
    ->  Sort
          Output: real_x, id
          Sort Key: strom_test.id
-         ->  Custom Scan (GpuScan) on public.strom_test
+         ->  Seq Scan on public.strom_test
                Output: real_x, id
-               Features: likely-tuple-slot
-(8 rows)
+(7 rows)
 
 explain (verbose, costs off, timing off) select  float_x    from strom_test order by id limit 100;
-                       QUERY PLAN                       
---------------------------------------------------------
+                QUERY PLAN                 
+-------------------------------------------
  Limit
    Output: float_x, id
    ->  Sort
          Output: float_x, id
          Sort Key: strom_test.id
-         ->  Custom Scan (GpuScan) on public.strom_test
+         ->  Seq Scan on public.strom_test
                Output: float_x, id
-               Features: likely-tuple-slot
-(8 rows)
+(7 rows)
 
 explain (verbose, costs off, timing off) select  nume_x    from strom_test order by id limit 100;
-                       QUERY PLAN                       
---------------------------------------------------------
+                QUERY PLAN                 
+-------------------------------------------
  Limit
    Output: nume_x, id
    ->  Sort
          Output: nume_x, id
          Sort Key: strom_test.id
-         ->  Custom Scan (GpuScan) on public.strom_test
+         ->  Seq Scan on public.strom_test
                Output: nume_x, id
-               Features: likely-tuple-slot
-(8 rows)
+(7 rows)
 
 explain (verbose, costs off, timing off) select  smlsrl_x    from strom_test order by id limit 100;
-                       QUERY PLAN                       
---------------------------------------------------------
+                QUERY PLAN                 
+-------------------------------------------
  Limit
    Output: smlsrl_x, id
    ->  Sort
          Output: smlsrl_x, id
          Sort Key: strom_test.id
-         ->  Custom Scan (GpuScan) on public.strom_test
+         ->  Seq Scan on public.strom_test
                Output: smlsrl_x, id
-               Features: likely-tuple-slot
-(8 rows)
+(7 rows)
 
 explain (verbose, costs off, timing off) select  serial_x    from strom_test order by id limit 100;
-                       QUERY PLAN                       
---------------------------------------------------------
+                QUERY PLAN                 
+-------------------------------------------
  Limit
    Output: serial_x, id
    ->  Sort
          Output: serial_x, id
          Sort Key: strom_test.id
-         ->  Custom Scan (GpuScan) on public.strom_test
+         ->  Seq Scan on public.strom_test
                Output: serial_x, id
-               Features: likely-tuple-slot
-(8 rows)
+(7 rows)
 
 explain (verbose, costs off, timing off) select  bigsrl_x    from strom_test order by id limit 100;
-                       QUERY PLAN                       
---------------------------------------------------------
+                QUERY PLAN                 
+-------------------------------------------
  Limit
    Output: bigsrl_x, id
    ->  Sort
          Output: bigsrl_x, id
          Sort Key: strom_test.id
-         ->  Custom Scan (GpuScan) on public.strom_test
+         ->  Seq Scan on public.strom_test
                Output: bigsrl_x, id
-               Features: likely-tuple-slot
-(8 rows)
+(7 rows)
 
 -- where
 explain (verbose, costs off, timing off) select  smlint_x    from strom_test where abs(smlint_x) between 1 and 1000 order by id limit 100;
-                                           QUERY PLAN                                           
-------------------------------------------------------------------------------------------------
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
  Limit
    Output: smlint_x, id
    ->  Sort
@@ -604,13 +595,13 @@ explain (verbose, costs off, timing off) select  smlint_x    from strom_test whe
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: smlint_x, id
-               Filter: ((abs(strom_test.smlint_x) >= 1) AND (abs(strom_test.smlint_x) <= 1000))
-               Features: likely-tuple-slot
+               Device Filter: ((abs(strom_test.smlint_x) >= 1) AND (abs(strom_test.smlint_x) <= 1000))
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  integer_x    from strom_test where abs(integer_x) between 100000 and 1000000 order by id limit 100;
-                                                QUERY PLAN                                                
-----------------------------------------------------------------------------------------------------------
+                                                   QUERY PLAN                                                    
+-----------------------------------------------------------------------------------------------------------------
  Limit
    Output: integer_x, id
    ->  Sort
@@ -618,13 +609,13 @@ explain (verbose, costs off, timing off) select  integer_x    from strom_test wh
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: integer_x, id
-               Filter: ((abs(strom_test.integer_x) >= 100000) AND (abs(strom_test.integer_x) <= 1000000))
-               Features: likely-tuple-slot
+               Device Filter: ((abs(strom_test.integer_x) >= 100000) AND (abs(strom_test.integer_x) <= 1000000))
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  bigint_x    from strom_test where abs(bigint_x) between 1000000000000 and 10000000000000 order by id limit 100;
-                                                              QUERY PLAN                                                              
---------------------------------------------------------------------------------------------------------------------------------------
+                                                                   QUERY PLAN                                                                    
+-------------------------------------------------------------------------------------------------------------------------------------------------
  Limit
    Output: bigint_x, id
    ->  Sort
@@ -632,13 +623,13 @@ explain (verbose, costs off, timing off) select  bigint_x    from strom_test whe
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: bigint_x, id
-               Filter: ((abs(strom_test.bigint_x) >= 1000000000000::bigint) AND (abs(strom_test.bigint_x) <= 10000000000000::bigint))
-               Features: likely-tuple-slot
+               Device Filter: ((abs(strom_test.bigint_x) >= '1000000000000'::bigint) AND (abs(strom_test.bigint_x) <= '10000000000000'::bigint))
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  real_x    from strom_test where abs(real_x) between 0.001 and 0.01 order by id limit 100;
-                                                             QUERY PLAN                                                             
-------------------------------------------------------------------------------------------------------------------------------------
+                                                                  QUERY PLAN                                                                   
+-----------------------------------------------------------------------------------------------------------------------------------------------
  Limit
    Output: real_x, id
    ->  Sort
@@ -646,13 +637,13 @@ explain (verbose, costs off, timing off) select  real_x    from strom_test where
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: real_x, id
-               Filter: ((abs(strom_test.real_x) >= 0.001::double precision) AND (abs(strom_test.real_x) <= 0.01::double precision))
-               Features: likely-tuple-slot
+               Device Filter: ((abs(strom_test.real_x) >= '0.001'::double precision) AND (abs(strom_test.real_x) <= '0.01'::double precision))
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  float_x    from strom_test where abs(float_x) between 0.001 and 0.01 order by id limit 100;
-                                                              QUERY PLAN                                                              
---------------------------------------------------------------------------------------------------------------------------------------
+                                                                   QUERY PLAN                                                                    
+-------------------------------------------------------------------------------------------------------------------------------------------------
  Limit
    Output: float_x, id
    ->  Sort
@@ -660,8 +651,8 @@ explain (verbose, costs off, timing off) select  float_x    from strom_test wher
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: float_x, id
-               Filter: ((abs(strom_test.float_x) >= 0.001::double precision) AND (abs(strom_test.float_x) <= 0.01::double precision))
-               Features: likely-tuple-slot
+               Device Filter: ((abs(strom_test.float_x) >= '0.001'::double precision) AND (abs(strom_test.float_x) <= '0.01'::double precision))
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  nume_x    from strom_test where abs(nume_x) between 0.001 and 0.01 order by id limit 100;
@@ -675,12 +666,12 @@ explain (verbose, costs off, timing off) select  nume_x    from strom_test where
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: nume_x, id
                Device Filter: ((abs(strom_test.nume_x) >= 0.001) AND (abs(strom_test.nume_x) <= 0.01))
-               Features: likely-tuple-slot
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  smlsrl_x    from strom_test where abs(smlsrl_x) between 1 and 1000 order by id limit 100;
-                                           QUERY PLAN                                           
-------------------------------------------------------------------------------------------------
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
  Limit
    Output: smlsrl_x, id
    ->  Sort
@@ -688,13 +679,13 @@ explain (verbose, costs off, timing off) select  smlsrl_x    from strom_test whe
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: smlsrl_x, id
-               Filter: ((abs(strom_test.smlsrl_x) >= 1) AND (abs(strom_test.smlsrl_x) <= 1000))
-               Features: likely-tuple-slot
+               Device Filter: ((abs(strom_test.smlsrl_x) >= 1) AND (abs(strom_test.smlsrl_x) <= 1000))
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  serial_x    from strom_test where abs(serial_x) between 100000 and 1000000 order by id limit 100;
-                                               QUERY PLAN                                               
---------------------------------------------------------------------------------------------------------
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
  Limit
    Output: serial_x, id
    ->  Sort
@@ -702,13 +693,13 @@ explain (verbose, costs off, timing off) select  serial_x    from strom_test whe
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: serial_x, id
-               Filter: ((abs(strom_test.serial_x) >= 100000) AND (abs(strom_test.serial_x) <= 1000000))
-               Features: likely-tuple-slot
+               Device Filter: ((abs(strom_test.serial_x) >= 100000) AND (abs(strom_test.serial_x) <= 1000000))
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  bigsrl_x    from strom_test where abs(bigsrl_x) between 1000000000000 and 10000000000000 order by id limit 100;
-                                                              QUERY PLAN                                                              
---------------------------------------------------------------------------------------------------------------------------------------
+                                                                   QUERY PLAN                                                                    
+-------------------------------------------------------------------------------------------------------------------------------------------------
  Limit
    Output: bigsrl_x, id
    ->  Sort
@@ -716,14 +707,14 @@ explain (verbose, costs off, timing off) select  bigsrl_x    from strom_test whe
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: bigsrl_x, id
-               Filter: ((abs(strom_test.bigsrl_x) >= 1000000000000::bigint) AND (abs(strom_test.bigsrl_x) <= 10000000000000::bigint))
-               Features: likely-tuple-slot
+               Device Filter: ((abs(strom_test.bigsrl_x) >= '1000000000000'::bigint) AND (abs(strom_test.bigsrl_x) <= '10000000000000'::bigint))
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 -- NULL
 explain (verbose, costs off, timing off) select  id,smlint_x    from strom_test where abs(smlint_x) IS NULL order by id limit 100;
-                        QUERY PLAN                        
-----------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Limit
    Output: id, smlint_x
    ->  Sort
@@ -731,13 +722,13 @@ explain (verbose, costs off, timing off) select  id,smlint_x    from strom_test 
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, smlint_x
-               Filter: (abs(strom_test.smlint_x) IS NULL)
-               Features: likely-tuple-slot
+               Device Filter: (abs(strom_test.smlint_x) IS NULL)
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  id,integer_x    from strom_test where abs(integer_x) IS NULL order by id limit 100;
-                        QUERY PLAN                         
------------------------------------------------------------
+                            QUERY PLAN                            
+------------------------------------------------------------------
  Limit
    Output: id, integer_x
    ->  Sort
@@ -745,13 +736,13 @@ explain (verbose, costs off, timing off) select  id,integer_x    from strom_test
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, integer_x
-               Filter: (abs(strom_test.integer_x) IS NULL)
-               Features: likely-tuple-slot
+               Device Filter: (abs(strom_test.integer_x) IS NULL)
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  id,bigint_x    from strom_test where abs(bigint_x) IS NULL order by id limit 100;
-                        QUERY PLAN                        
-----------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Limit
    Output: id, bigint_x
    ->  Sort
@@ -759,13 +750,13 @@ explain (verbose, costs off, timing off) select  id,bigint_x    from strom_test 
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, bigint_x
-               Filter: (abs(strom_test.bigint_x) IS NULL)
-               Features: likely-tuple-slot
+               Device Filter: (abs(strom_test.bigint_x) IS NULL)
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  id,real_x    from strom_test where abs(real_x) IS NULL order by id limit 100;
-                       QUERY PLAN                       
---------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Limit
    Output: id, real_x
    ->  Sort
@@ -773,13 +764,13 @@ explain (verbose, costs off, timing off) select  id,real_x    from strom_test wh
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, real_x
-               Filter: (abs(strom_test.real_x) IS NULL)
-               Features: likely-tuple-slot
+               Device Filter: (abs(strom_test.real_x) IS NULL)
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  id,float_x    from strom_test where abs(float_x) IS NULL order by id limit 100;
-                       QUERY PLAN                        
----------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Limit
    Output: id, float_x
    ->  Sort
@@ -787,13 +778,13 @@ explain (verbose, costs off, timing off) select  id,float_x    from strom_test w
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, float_x
-               Filter: (abs(strom_test.float_x) IS NULL)
-               Features: likely-tuple-slot
+               Device Filter: (abs(strom_test.float_x) IS NULL)
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  id,nume_x    from strom_test where abs(nume_x) IS NULL order by id limit 100;
-                          QUERY PLAN                           
----------------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Limit
    Output: id, nume_x
    ->  Sort
@@ -802,12 +793,12 @@ explain (verbose, costs off, timing off) select  id,nume_x    from strom_test wh
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, nume_x
                Device Filter: (abs(strom_test.nume_x) IS NULL)
-               Features: likely-tuple-slot
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  id,smlsrl_x    from strom_test where abs(smlsrl_x) IS NULL order by id limit 100;
-                        QUERY PLAN                        
-----------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Limit
    Output: id, smlsrl_x
    ->  Sort
@@ -815,13 +806,13 @@ explain (verbose, costs off, timing off) select  id,smlsrl_x    from strom_test 
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, smlsrl_x
-               Filter: (abs(strom_test.smlsrl_x) IS NULL)
-               Features: likely-tuple-slot
+               Device Filter: (abs(strom_test.smlsrl_x) IS NULL)
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  id,serial_x    from strom_test where abs(serial_x) IS NULL order by id limit 100;
-                        QUERY PLAN                        
-----------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Limit
    Output: id, serial_x
    ->  Sort
@@ -829,13 +820,13 @@ explain (verbose, costs off, timing off) select  id,serial_x    from strom_test 
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, serial_x
-               Filter: (abs(strom_test.serial_x) IS NULL)
-               Features: likely-tuple-slot
+               Device Filter: (abs(strom_test.serial_x) IS NULL)
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  id,bigsrl_x    from strom_test where abs(bigsrl_x) IS NULL order by id limit 100;
-                        QUERY PLAN                        
-----------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Limit
    Output: id, bigsrl_x
    ->  Sort
@@ -843,14 +834,14 @@ explain (verbose, costs off, timing off) select  id,bigsrl_x    from strom_test 
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, bigsrl_x
-               Filter: (abs(strom_test.bigsrl_x) IS NULL)
-               Features: likely-tuple-slot
+               Device Filter: (abs(strom_test.bigsrl_x) IS NULL)
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 -- NOT NULL
 explain (verbose, costs off, timing off) select  id,smlint_x    from strom_test where abs(smlint_x) IS NOT NULL order by id limit 100;
-                          QUERY PLAN                          
---------------------------------------------------------------
+                             QUERY PLAN                              
+---------------------------------------------------------------------
  Limit
    Output: id, smlint_x
    ->  Sort
@@ -858,13 +849,13 @@ explain (verbose, costs off, timing off) select  id,smlint_x    from strom_test 
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, smlint_x
-               Filter: (abs(strom_test.smlint_x) IS NOT NULL)
-               Features: likely-tuple-slot
+               Device Filter: (abs(strom_test.smlint_x) IS NOT NULL)
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  id,integer_x    from strom_test where abs(integer_x) IS NOT NULL order by id limit 100;
-                          QUERY PLAN                           
----------------------------------------------------------------
+                              QUERY PLAN                              
+----------------------------------------------------------------------
  Limit
    Output: id, integer_x
    ->  Sort
@@ -872,13 +863,13 @@ explain (verbose, costs off, timing off) select  id,integer_x    from strom_test
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, integer_x
-               Filter: (abs(strom_test.integer_x) IS NOT NULL)
-               Features: likely-tuple-slot
+               Device Filter: (abs(strom_test.integer_x) IS NOT NULL)
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  id,bigint_x    from strom_test where abs(bigint_x) IS NOT NULL order by id limit 100;
-                          QUERY PLAN                          
---------------------------------------------------------------
+                             QUERY PLAN                              
+---------------------------------------------------------------------
  Limit
    Output: id, bigint_x
    ->  Sort
@@ -886,13 +877,13 @@ explain (verbose, costs off, timing off) select  id,bigint_x    from strom_test 
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, bigint_x
-               Filter: (abs(strom_test.bigint_x) IS NOT NULL)
-               Features: likely-tuple-slot
+               Device Filter: (abs(strom_test.bigint_x) IS NOT NULL)
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  id,real_x    from strom_test where abs(real_x) IS NOT NULL order by id limit 100;
-                         QUERY PLAN                         
-------------------------------------------------------------
+                            QUERY PLAN                             
+-------------------------------------------------------------------
  Limit
    Output: id, real_x
    ->  Sort
@@ -900,13 +891,13 @@ explain (verbose, costs off, timing off) select  id,real_x    from strom_test wh
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, real_x
-               Filter: (abs(strom_test.real_x) IS NOT NULL)
-               Features: likely-tuple-slot
+               Device Filter: (abs(strom_test.real_x) IS NOT NULL)
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  id,float_x    from strom_test where abs(float_x) IS NOT NULL order by id limit 100;
-                         QUERY PLAN                          
--------------------------------------------------------------
+                             QUERY PLAN                             
+--------------------------------------------------------------------
  Limit
    Output: id, float_x
    ->  Sort
@@ -914,8 +905,8 @@ explain (verbose, costs off, timing off) select  id,float_x    from strom_test w
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, float_x
-               Filter: (abs(strom_test.float_x) IS NOT NULL)
-               Features: likely-tuple-slot
+               Device Filter: (abs(strom_test.float_x) IS NOT NULL)
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  id,nume_x    from strom_test where abs(nume_x) IS NOT NULL order by id limit 100;
@@ -929,12 +920,12 @@ explain (verbose, costs off, timing off) select  id,nume_x    from strom_test wh
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, nume_x
                Device Filter: (abs(strom_test.nume_x) IS NOT NULL)
-               Features: likely-tuple-slot
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  id,smlsrl_x    from strom_test where abs(smlsrl_x) IS NOT NULL order by id limit 100;
-                          QUERY PLAN                          
---------------------------------------------------------------
+                             QUERY PLAN                              
+---------------------------------------------------------------------
  Limit
    Output: id, smlsrl_x
    ->  Sort
@@ -942,13 +933,13 @@ explain (verbose, costs off, timing off) select  id,smlsrl_x    from strom_test 
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, smlsrl_x
-               Filter: (abs(strom_test.smlsrl_x) IS NOT NULL)
-               Features: likely-tuple-slot
+               Device Filter: (abs(strom_test.smlsrl_x) IS NOT NULL)
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  id,serial_x    from strom_test where abs(serial_x) IS NOT NULL order by id limit 100;
-                          QUERY PLAN                          
---------------------------------------------------------------
+                             QUERY PLAN                              
+---------------------------------------------------------------------
  Limit
    Output: id, serial_x
    ->  Sort
@@ -956,13 +947,13 @@ explain (verbose, costs off, timing off) select  id,serial_x    from strom_test 
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, serial_x
-               Filter: (abs(strom_test.serial_x) IS NOT NULL)
-               Features: likely-tuple-slot
+               Device Filter: (abs(strom_test.serial_x) IS NOT NULL)
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
 
 explain (verbose, costs off, timing off) select  id,bigsrl_x    from strom_test where abs(bigsrl_x) IS NOT NULL order by id limit 100;
-                          QUERY PLAN                          
---------------------------------------------------------------
+                             QUERY PLAN                              
+---------------------------------------------------------------------
  Limit
    Output: id, bigsrl_x
    ->  Sort
@@ -970,7 +961,95 @@ explain (verbose, costs off, timing off) select  id,bigsrl_x    from strom_test 
          Sort Key: strom_test.id
          ->  Custom Scan (GpuScan) on public.strom_test
                Output: id, bigsrl_x
-               Filter: (abs(strom_test.bigsrl_x) IS NOT NULL)
-               Features: likely-tuple-slot
+               Device Filter: (abs(strom_test.bigsrl_x) IS NOT NULL)
+               Features: format: tuple-slot, bulkload: supported
 (9 rows)
+
+-- division by zero with GpuScan
+set pg_strom.enabled=on;
+explain (verbose on, costs off) select * from strom_test where smlint_x/(id%1000) = 1;
+                                               QUERY PLAN                                                
+---------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on public.strom_test
+   Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+   Device Filter: ((strom_test.smlint_x / (strom_test.id % 1000)) = 1)
+   Features: format: tuple-slot, bulkload: supported
+(4 rows)
+
+explain (verbose on, costs off) select * from strom_test where integer_x/(id%1000) = 1;
+                                               QUERY PLAN                                                
+---------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on public.strom_test
+   Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+   Device Filter: ((strom_test.integer_x / (strom_test.id % 1000)) = 1)
+   Features: format: tuple-slot, bulkload: supported
+(4 rows)
+
+explain (verbose on, costs off) select * from strom_test where bigint_x/(id%1000) = 1;
+                                               QUERY PLAN                                                
+---------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on public.strom_test
+   Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+   Device Filter: ((strom_test.bigint_x / (strom_test.id % 1000)) = 1)
+   Features: format: tuple-slot, bulkload: supported
+(4 rows)
+
+explain (verbose on, costs off) select * from strom_test where real_x/(id%1000) = 1;
+                                                 QUERY PLAN                                                  
+-------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on public.strom_test
+   Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+   Device Filter: ((strom_test.real_x / ((strom_test.id % 1000))::double precision) = '1'::double precision)
+   Features: format: tuple-slot, bulkload: supported
+(4 rows)
+
+explain (verbose on, costs off) select * from strom_test where float_x/(id%1000) = 1;
+                                                  QUERY PLAN                                                  
+--------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on public.strom_test
+   Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+   Device Filter: ((strom_test.float_x / ((strom_test.id % 1000))::double precision) = '1'::double precision)
+   Features: format: tuple-slot, bulkload: supported
+(4 rows)
+
+set pg_strom.enabled=off;
+explain (verbose on, costs off) select * from strom_test where smlint_x/(id%1000) = 1;
+                                               QUERY PLAN                                                
+---------------------------------------------------------------------------------------------------------
+ Seq Scan on public.strom_test
+   Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+   Filter: ((strom_test.smlint_x / (strom_test.id % 1000)) = 1)
+(3 rows)
+
+explain (verbose on, costs off) select * from strom_test where integer_x/(id%1000) = 1;
+                                               QUERY PLAN                                                
+---------------------------------------------------------------------------------------------------------
+ Seq Scan on public.strom_test
+   Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+   Filter: ((strom_test.integer_x / (strom_test.id % 1000)) = 1)
+(3 rows)
+
+explain (verbose on, costs off) select * from strom_test where bigint_x/(id%1000) = 1;
+                                               QUERY PLAN                                                
+---------------------------------------------------------------------------------------------------------
+ Seq Scan on public.strom_test
+   Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+   Filter: ((strom_test.bigint_x / (strom_test.id % 1000)) = 1)
+(3 rows)
+
+explain (verbose on, costs off) select * from strom_test where real_x/(id%1000) = 1;
+                                               QUERY PLAN                                                
+---------------------------------------------------------------------------------------------------------
+ Seq Scan on public.strom_test
+   Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+   Filter: ((strom_test.real_x / ((strom_test.id % 1000))::double precision) = '1'::double precision)
+(3 rows)
+
+explain (verbose on, costs off) select * from strom_test where float_x/(id%1000) = 1;
+                                               QUERY PLAN                                                
+---------------------------------------------------------------------------------------------------------
+ Seq Scan on public.strom_test
+   Output: id, key, smlint_x, integer_x, bigint_x, real_x, float_x, nume_x, smlsrl_x, serial_x, bigsrl_x
+   Filter: ((strom_test.float_x / ((strom_test.id % 1000))::double precision) = '1'::double precision)
+(3 rows)
 

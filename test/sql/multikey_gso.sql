@@ -2,9 +2,10 @@
 --#       Gpu Sort Multi-Key TestCases. 
 --#
 
-set gpu_setup_cost=0;
+set pg_strom.debug_force_gpusort to on;
+set pg_strom.gpu_setup_cost=0;
 set random_page_cost=1000000;   --# force off index_scan.   
-set enable_gpusort to on;                                                                                                                                       
+set pg_strom.enable_gpusort to on;                                                                                                                                       
 set client_min_messages to warning;
 
 select * from (select row_number() over (order by smlint_x desc,integer_x desc,bigint_x desc,real_x desc,float_x desc,nume_x desc) as rowid,* from strom_test where id between     1 and 10000) as t where t.rowid%1000=0;

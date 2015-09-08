@@ -3,9 +3,8 @@
 --#
 
 set pg_strom.debug_force_gpupreagg to on;
-set enable_gpusort to off;
+set pg_strom.enable_gpusort to off;
 set client_min_messages to warning;
-set extra_float_digits to -3;
 
 -- smallint
 select  avg(smlint_x)            from strom_zero_test ;

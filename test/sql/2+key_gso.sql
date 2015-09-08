@@ -3,7 +3,8 @@
 ---#    #137, ...
 ---#
 
-set enable_gpusort to on;
+set pg_strom.debug_force_gpusort to on;
+set pg_strom.enable_gpusort to on;
 set enable_sort to off;
 set log_min_messages = debug1;
 set client_min_messages to warning;
