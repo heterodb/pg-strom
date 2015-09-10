@@ -168,31 +168,12 @@ deform_gpupreagg_info(CustomScan *cscan)
 	return gpa_info;
 }
 
-/*
- * GpuPreAggSegment
- *
- * It groups a bunch of chunks that shares the final result buffer.
- * The finalizer task has to synchronize completion of other kernels,
- */
-typedef struct
-{
-	dlist_node		chain;			/* link to the pending_segment list */
-	dlist_head		completed_tasks;/* list of completed tasks */
-	pgstrom_data_store *pds_final;	/* result buffer in host */
-	CUdeviceptr		m_kds_final;	/* result buffer in device */
-	cl_bool			has_fallback;	/* true, if any chunk needs fallback */
-	cl_uint			num_chunks;		/* # of chunks in this segment */
-	CUevent		   *ev_dma_recv_start;	/* event of kernel execution end */
-	kern_resultbuf	kresults;		/* index to the final result */
-} gpupreagg_segment;
-
 typedef struct
 {
 	GpuTaskState	gts;
 	ProjectionInfo *bulk_proj;
 	TupleTableSlot *bulk_slot;
 	double			num_groups;		/* estimated number of groups */
-	double			ntups_per_page;	/* average number of tuples per page */
 	List		   *outer_quals;
 	TupleTableSlot *outer_overflow;
 
@@ -202,20 +183,55 @@ typedef struct
 	bool			has_varlena;
 
 	/*
-	 *
-	 *
+	 * management of the segment
 	 */
-	dlist_head		pending_segment;
+	dlist_head		segment_list;
 	cl_uint			curr_segment_id;
 	cl_uint			curr_segment_count;
 
 	/*
 	 * Run-time statistics
 	 */
-	// TO BE ADDED
+	double			plan_num_groups;	/* # of groups in plan time */
+	double			exec_num_groups;	/* # of groups in last segment */
+	cl_uint			exec_num_chunks;	/* # of chunks in last segment */
+	Size			exec_src_nitems;	/* # of input rows in last segment */
+	Size			exec_var_length;	/* usage of varlena buffer */
+	double			prev_agg_ratio_1;	/* reduction ratio */
+	double			prev_agg_ratio_2;	/* reduction ratio */
 } GpuPreAggState;
 
-/* Host side representation of kern_gpupreagg. It can perform as a message
+/*
+ * gpupreagg_segment
+ *
+ * It groups a bunch of chunks that shares the final result buffer.
+ * The finalizer task has to synchronize completion of other kernels.
+ *
+ * NOTE: CUDA event mechanism ensures all the concurrent kernel shall be
+ * done prior to the device-to-host DMA onto final result buffer, however,
+ * here is no guarantee completion hook of the finalizer is called on the
+ * tail. So, we have to treat gpupreagg_segment carefully. The finalizer
+ * task is responsible to back pds_final buffer to the state machine,
+ * however, a series of buffer release shall be executed by the last task
+ * who references this segment.
+ */
+typedef struct
+{
+	dlist_node		chain;			/* link to the pending_segment list */
+	dlist_head		member_tasks;	/* GpuPreAgg tasks in this segment */
+	pgstrom_data_store *pds_final;	/* final result buffer in host */
+	CUdeviceptr		m_kds_final;	/* final result buffer in device */
+	cl_bool			needs_fallback;	/* true, if some chunk needs fallback */
+	cl_int			refcnt;			/* reference counter by task */
+	cl_int			cuda_index;		/* index of the CUDA device */
+	CUevent		   *ev_dma_recv_start;	/* event of kernel execution end */
+	kern_resultbuf	kresults;		/* index to the final result */
+} gpupreagg_segment;
+
+/*
+ * pgstrom_gpupreagg
+ *
+ * Host side representation of kern_gpupreagg. It can perform as a message
  * object of PG-Strom, has key of OpenCL device program, a source row/column
  * store and a destination kern_data_store.
  */
@@ -223,7 +239,6 @@ typedef struct
 {
 	GpuTask			task;
 	GpuPreAggSegment *segment;		/* reference to the task segment */
-	dlist_node		segment_chain;	/* link to the task segment */
 	bool			needs_fallback;	/* true, if StromError_CpuReCheck */
 	bool			needs_grouping;	/* true, if it takes GROUP BY clause */
 	bool			local_reduction;/* true, if it needs local reduction */
@@ -1449,7 +1464,9 @@ gpupreagg_rewrite_expr(Agg *agg,
 	bool		has_numeric = false;
 	bool		has_varlena = false;
 	ListCell   *cell;
-	int			i;
+	Size		final_length;
+	Size		final_nslots;
+	int			i, ncols;
 
 	/* In case of sort-aggregate, it has an underlying Sort node on top
 	 * of the scan node. GpuPreAgg shall be injected under the Sort node
@@ -1535,6 +1552,25 @@ gpupreagg_rewrite_expr(Agg *agg,
 		attr_refs = bms_add_member(attr_refs, tle->resno -
 								   FirstLowInvalidHeapAttributeNumber);
 		attr_maps[tle->resno - 1] = tle_new->resno;
+	}
+
+	/*
+	 * Estimation of the required final result buffer size.
+	 * At least, it has to be smaller than allocatable length in GPU RAM.
+	 * Elsewhere, we have no choice to run GpuPreAgg towards this node.
+	 */
+	ncols = pre_tlist->length;
+	final_nslots = (Size)(2.5 * agg->plan.plan_rows *
+						  pgstrom_chunk_size_margin);
+	final_length = STROMALIGN(offsetof(kern_data_store,
+										colmeta[ncols])) +
+		STROMALIGN(LONGALIGN((sizeof(Datum) +
+							  sizeof(char)) * ncols) * final_nslots) +
+		STROMALIGN(sizeof(kern_gpupreagg) * final_nslots);
+	if (final_length > gpuMemMaxAllocSize() / 2)
+	{
+		elog(DEBUG1, "GpuPreAgg: expected final result buffer too large");
+		return false;
 	}
 
 	/*
@@ -3110,18 +3146,14 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	 * initialize child node
 	 */
 	outerPlanState(gpas) = ExecInitNode(outerPlan(cscan), estate, eflags);
-	gpas->gts.scan_bulk =
-		(!pgstrom_bulkload_enabled ? false : gpa_info->outer_bulkload);
+	if (pgstrom_bulkload_enabled)
+		gpas->gts.scan_bulk = gpa_info->outer_bulkload;
 	gpas->gts.scan_bulk_density = gpa_info->bulkload_density;
 
 	gpas->outer_overflow = NULL;
 
 	outer_width = outerPlanState(gpas)->plan->plan_width;
-	gpas->num_groups = gpa_info->num_groups;
-	gpas->ntups_per_page =
-		((double)(BLCKSZ - MAXALIGN(SizeOfPageHeaderData))) /
-		((double)(sizeof(ItemIdData) +
-				  sizeof(HeapTupleHeaderData) + outer_width));
+	gpas->plan_num_groups = gpa_info->num_groups;
 
 	/*
 	 * initialize result tuple type and projection info
@@ -3152,8 +3184,8 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	 * init misc stuff
 	 */
 	gpas->needs_grouping = (gpa_info->numCols > 0 ? true : false);
-	gpas->local_reduction =
-		(gpa_info->num_groups < gpuMaxThreadsPerBlock() / 2 ? true : false);
+	if (gpas->plan_num_groups < gpuMaxThreadsPerBlock() / 2)
+		gpas->local_reduction = true;
 	gpas->has_numeric = gpa_info->has_numeric;
 	gpas->has_varlena = gpa_info->has_varlena;
 }
@@ -3180,7 +3212,7 @@ gpupreagg_task_create(GpuPreAggState *gpas, pgstrom_data_store *pds_in)
 	gpreagg->needs_grouping = gpas->needs_grouping;
 	gpreagg->local_reduction = gpas->local_reduction;
 	gpreagg->has_varlena = gpas->has_varlena;
-	gpreagg->num_groups = gpas->num_groups;
+	gpreagg->num_groups = gpas->plan_num_groups;
 	gpreagg->pds_in = pds_in;
 
 	/* also initialize kern_gpupreagg portion */
