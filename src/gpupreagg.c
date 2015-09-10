@@ -168,10 +168,23 @@ deform_gpupreagg_info(CustomScan *cscan)
 	return gpa_info;
 }
 
-
-
-
-
+/*
+ * GpuPreAggSegment
+ *
+ * It groups a bunch of chunks that shares the final result buffer.
+ * The finalizer task has to synchronize completion of other kernels,
+ */
+typedef struct
+{
+	dlist_node		chain;			/* link to the pending_segment list */
+	dlist_head		completed_tasks;/* list of completed tasks */
+	pgstrom_data_store *pds_final;	/* result buffer in host */
+	CUdeviceptr		m_kds_final;	/* result buffer in device */
+	cl_bool			has_fallback;	/* true, if any chunk needs fallback */
+	cl_uint			num_chunks;		/* # of chunks in this segment */
+	CUevent		   *ev_dma_recv_start;	/* event of kernel execution end */
+	kern_resultbuf	kresults;		/* index to the final result */
+} gpupreagg_segment;
 
 typedef struct
 {
@@ -187,22 +200,19 @@ typedef struct
 	bool			local_reduction;
 	bool			has_numeric;
 	bool			has_varlena;
+
 	/*
-	 * 
+	 *
+	 *
 	 */
-	dlist_head		aggregated_tasks;
+	dlist_head		pending_segment;
 	cl_uint			curr_segment_id;
-	cl_uint			segment_count;
-	Bitmapset		valid_segment_map;
+	cl_uint			curr_segment_count;
 
 	/*
 	 * Run-time statistics
 	 */
-	cl_uint			last_segment_id;
-	cl_uint			segment_size;
-	Size			source_nitems;
-	Size			result_nitems;
-	Size			varlena_length;
+	// TO BE ADDED
 } GpuPreAggState;
 
 /* Host side representation of kern_gpupreagg. It can perform as a message
@@ -212,6 +222,8 @@ typedef struct
 typedef struct
 {
 	GpuTask			task;
+	GpuPreAggSegment *segment;		/* reference to the task segment */
+	dlist_node		segment_chain;	/* link to the task segment */
 	bool			needs_fallback;	/* true, if StromError_CpuReCheck */
 	bool			needs_grouping;	/* true, if it takes GROUP BY clause */
 	bool			local_reduction;/* true, if it needs local reduction */
@@ -224,6 +236,7 @@ typedef struct
 	CUfunction		kern_fixvar;
 	CUdeviceptr		m_gpreagg;
 	CUdeviceptr		m_kds_in;		/* kds_in : input stream */
+	// TODO: kds_src/kds_dst is misleading. to be kds_1/kds_2
 	CUdeviceptr		m_kds_src;		/* kds_src : slot form of kds_in */
 	CUdeviceptr		m_kds_dst;		/* kds_dst : final aggregation result */
 	CUdeviceptr		m_ghash;		/* global hash slot */
@@ -231,7 +244,7 @@ typedef struct
 	CUevent			ev_dma_send_stop;
 	CUevent			ev_kern_prep_end;
 	CUevent			ev_kern_lagg_end;
-	CUevent			ev_dma_recv_start;
+	//CUevent			ev_dma_recv_start;
 	CUevent			ev_dma_recv_stop;
 	pgstrom_data_store *pds_in;		/* source data-store */
 	pgstrom_data_store *pds_dst;	/* result data-store */
@@ -3198,6 +3211,7 @@ gpupreagg_task_create(GpuPreAggState *gpas, pgstrom_data_store *pds_in)
 													  tupdesc,
 													  nitems,
 													  gpas->has_numeric,
+													  0,
 													  NULL);
 	return gpreagg;
 }

@@ -839,6 +839,7 @@ pgstrom_data_store *
 pgstrom_create_data_store_slot(GpuContext *gcontext,
 							   TupleDesc tupdesc, cl_uint nrooms,
 							   bool internal_format,
+							   Size extra_length,
 							   pgstrom_data_store *ptoast)
 {
 	pgstrom_data_store *pds;
@@ -849,7 +850,11 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 	pds->refcnt = 1;	/* owned by the caller at least */
 
 	/* allocation of kds */
-	pds->kds_length = KERN_DATA_STORE_SLOT_LENGTH_ESTIMATION(tupdesc, nrooms);
+	pds->kds_length = STROMALIGN(offsetof(kern_data_store,
+										  colmeta[tupdesc->natts])) +
+		STROMALIGN(LONGALIGN((sizeof(Datum) +
+							  sizeof(char)) * tupdesc->natts) * nrooms) +
+		STROMALIGN(extra_length);
 
 	if (!ptoast || !ptoast->kds_fname)
 		pds->kds = MemoryContextAllocHuge(gmcxt, pds->kds_length);

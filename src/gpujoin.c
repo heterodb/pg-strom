@@ -3346,7 +3346,7 @@ retry:
 		if (!pds_dst)
 			pgjoin->pds_dst = pgstrom_create_data_store_slot(gcontext, tupdesc,
 															 dst_nrooms,
-															 false, NULL);
+															 false, 0, NULL);
 		else
 		{
 			/* in case of StromError_DataStoreNoSpace */

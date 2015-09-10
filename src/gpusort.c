@@ -1286,7 +1286,7 @@ gpusort_next_chunk(GpuTaskState *gts)
 	/* Expand the backend file of the data chunk */
 	nitems = ptoast->kds->nitems;
 	pds = pgstrom_create_data_store_slot(gcontext, tupdesc,
-										 nitems, true, ptoast);
+										 nitems, true, 0, ptoast);
 	/* Save this chunk on the global array */
 	chunk_id = gss->num_chunks++;
 	if (chunk_id >= gss->num_chunks_limit)

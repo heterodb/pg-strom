@@ -544,6 +544,7 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 							   TupleDesc tupdesc,
 							   cl_uint nrooms,
 							   bool internal_format,
+							   Size extra_length,
 							   pgstrom_data_store *ptoast);
 extern pgstrom_data_store *
 pgstrom_create_data_store_hash(GpuContext *gcontext,
