@@ -62,6 +62,8 @@ typedef struct
 	bool			outer_bulkload;
 	double			bulkload_density;
 	double			num_groups;		/* estimated number of groups */
+	cl_int			safety_limit;	/* reasonable limit for reduction */
+	cl_int			group_key_salt;	/* salt, if more distribution needed */
 	List		   *outer_quals;	/* device quals pulled-up */
 	const char	   *kern_source;
 	int				extra_flags;
@@ -93,24 +95,24 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, makeInteger(lval));
 	lval = double_as_long(gpa_info->num_groups);
 	privs = lappend(privs, makeInteger(lval));
+	privs = lappend(privs, makeInteger(gpa_info->safety_limit));
+	privs = lappend(privs, makeInteger(gpa_info->group_key_salt));
 	exprs = lappend(exprs, gpa_info->outer_quals);
 	privs = lappend(privs, makeString(pstrdup(gpa_info->kern_source)));
 	privs = lappend(privs, makeInteger(gpa_info->extra_flags));
 	exprs = lappend(exprs, gpa_info->used_params);
 	/* outer_attrefs */
 	temp = NIL;
-	tempset = bms_copy(gpa_info->outer_attrefs);
-	while ((i = bms_first_member(tempset)) >= 0)
+	i = -1;
+	while ((i = bms_next_member(gpa_info->outer_attrefs, i)) >= 0)
 		temp = lappend_int(temp, i);
 	privs = lappend(privs, temp);
-	bms_free(tempset);
 	/* tlist_attrefs */
 	temp = NIL;
-	tempset = bms_copy(gpa_info->tlist_attrefs);
-	while ((i = bms_first_member(tempset)) >= 0)
+	i = -1;
+	while ((i = bms_next_member(gpa_info->tlist_attrefs, i)) >= 0)
 		temp = lappend_int(temp, i);
 	privs = lappend(privs, temp);
-	bms_free(tempset);
 	privs = lappend(privs, makeInteger(gpa_info->has_numeric));
 	privs = lappend(privs, makeInteger(gpa_info->has_varlena));
 
@@ -144,6 +146,8 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->bulkload_density = fval;
 	fval = long_as_double(intVal(list_nth(privs, pindex++)));
 	gpa_info->num_groups = fval;
+	gpa_info->safety_limit = intVal(list_nth(privs, pindex++));
+	gpa_info->group_key_salt = intVal(list_nth(privs, pindex++));
 	gpa_info->outer_quals = list_nth(exprs, eindex++);
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
 	gpa_info->extra_flags = intVal(list_nth(privs, pindex++));
@@ -173,7 +177,8 @@ typedef struct
 	GpuTaskState	gts;
 	ProjectionInfo *bulk_proj;
 	TupleTableSlot *bulk_slot;
-	double			num_groups;		/* estimated number of groups */
+	cl_int			safety_limit;
+	cl_int			group_key_salt;
 	List		   *outer_quals;
 	TupleTableSlot *outer_overflow;
 
@@ -183,11 +188,9 @@ typedef struct
 	bool			has_varlena;
 
 	/*
-	 * management of the segment
+	 * segment is a set of chunks to be aggregated
 	 */
-	dlist_head		segment_list;
-	cl_uint			curr_segment_id;
-	cl_uint			curr_segment_count;
+	struct gpupreagg_segment *curr_segment; 
 
 	/*
 	 * Run-time statistics
@@ -215,17 +218,19 @@ typedef struct
  * however, a series of buffer release shall be executed by the last task
  * who references this segment.
  */
-typedef struct
+typedef struct gpupreagg_segment
 {
-	dlist_node		chain;			/* link to the pending_segment list */
-	dlist_head		member_tasks;	/* GpuPreAgg tasks in this segment */
-	pgstrom_data_store *pds_final;	/* final result buffer in host */
-	CUdeviceptr		m_kds_final;	/* final result buffer in device */
-	cl_bool			needs_fallback;	/* true, if some chunk needs fallback */
-	cl_int			refcnt;			/* reference counter by task */
-	cl_int			cuda_index;		/* index of the CUDA device */
+	pgstrom_data_store *pds_final;		/* destination buffer on host */
+	CUdeviceptr		m_kds_final;		/* destination buffer on device */
+	cl_int			num_chunks;			/* # of chunks in this segment */
+	cl_int			idx_chunks;			/* index of the chunk array */
+	cl_int			refcnt;				/* referenced by pgstrom_gpupreagg */
+	cl_int			cuda_index;			/* device to be used */
+	cl_bool			needs_fallback;		/* true, if CPU fallback needed */
+	pgstrom_data_store **src_pds;		/* reference to source PDSs */
+	CUevent			ev_dest_loaded;		/* event of dest-buffer load */
 	CUevent		   *ev_dma_recv_start;	/* event of kernel execution end */
-	kern_resultbuf	kresults;		/* index to the final result */
+	kern_resultbuf	kresults;
 } gpupreagg_segment;
 
 /*
@@ -238,10 +243,10 @@ typedef struct
 typedef struct
 {
 	GpuTask			task;
-	GpuPreAggSegment *segment;		/* reference to the task segment */
-	bool			needs_fallback;	/* true, if StromError_CpuReCheck */
+	gpupreagg_segment *segment;		/* reference to the preagg segment */
 	bool			needs_grouping;	/* true, if it takes GROUP BY clause */
 	bool			local_reduction;/* true, if it needs local reduction */
+	bool			global_reduction;/* true, if it needs global reduction */
 	bool			has_varlena;	/* true, if it has varlena grouping keys */
 	double			num_groups;		/* estimated number of groups */
 	CUfunction		kern_prep;
@@ -314,146 +319,220 @@ typedef struct {
 	int			altfn_nargs;
 	Oid			altfn_argtypes[8];
 	int			altfn_argexprs[8];
-	int			altfn_flags;
+	int			extra_flags;
+	int			safety_limit;
 } aggfunc_catalog_t;
 static aggfunc_catalog_t  aggfunc_catalog[] = {
 	/* AVG(X) = EX_AVG(NROWS(), PSUM(X)) */
 	{ "avg",    1, {INT2OID},
 	  "s:avg",  2, {INT4OID, INT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0
+	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "avg",    1, {INT4OID},
 	  "s:avg",  2, {INT4OID, INT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0
+	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "avg",    1, {INT8OID},
 	  "s:avg_int8",  2, {INT4OID, INT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0
+	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "avg",    1, {FLOAT4OID},
 	  "s:avg",  2, {INT4OID, FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0
+	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "avg",    1, {FLOAT8OID},
 	  "s:avg",  2, {INT4OID, FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0
+	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "avg",	1, {NUMERICOID},
 	  "s:avg_numeric",	2, {INT4OID, NUMERICOID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, DEVFUNC_NEEDS_NUMERIC
+	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
+	  DEVFUNC_NEEDS_NUMERIC, 100
 	},
 #endif
 	/* COUNT(*) = SUM(NROWS(*|X)) */
 	{ "count", 0, {},
 	  "s:count", 1, {INT4OID},
-	  {ALTFUNC_EXPR_NROWS}, 0},
+	  {ALTFUNC_EXPR_NROWS}, 0, INT_MAX
+	},
 	{ "count", 1, {ANYOID},
 	  "s:count", 1, {INT4OID},
-	  {ALTFUNC_EXPR_NROWS}, 0},
+	  {ALTFUNC_EXPR_NROWS}, 0, INT_MAX
+	},
 	/* MAX(X) = MAX(PMAX(X)) */
-	{ "max", 1, {INT2OID},   "c:max", 1, {INT2OID},   {ALTFUNC_EXPR_PMAX}, 0},
-	{ "max", 1, {INT4OID},   "c:max", 1, {INT4OID},   {ALTFUNC_EXPR_PMAX}, 0},
-	{ "max", 1, {INT8OID},   "c:max", 1, {INT8OID},   {ALTFUNC_EXPR_PMAX}, 0},
-	{ "max", 1, {FLOAT4OID}, "c:max", 1, {FLOAT4OID}, {ALTFUNC_EXPR_PMAX}, 0},
-	{ "max", 1, {FLOAT8OID}, "c:max", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PMAX}, 0},
+	{ "max", 1, {INT2OID},
+	  "c:max", 1, {INT2OID},
+	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
+	},
+	{ "max", 1, {INT4OID},
+	  "c:max", 1, {INT4OID},
+	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
+	},
+	{ "max", 1, {INT8OID},
+	  "c:max", 1, {INT8OID},
+	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
+	},
+	{ "max", 1, {FLOAT4OID},
+	  "c:max", 1, {FLOAT4OID},
+	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
+	},
+	{ "max", 1, {FLOAT8OID},
+	  "c:max", 1, {FLOAT8OID},
+	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
+	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
-	{ "max", 1, {NUMERICOID},"c:max", 1, {NUMERICOID},
-	  {ALTFUNC_EXPR_PMAX}, DEVFUNC_NEEDS_NUMERIC},
+	{ "max", 1, {NUMERICOID},
+	  "c:max", 1, {NUMERICOID},
+	  {ALTFUNC_EXPR_PMAX}, DEVFUNC_NEEDS_NUMERIC, INT_MAX
+	},
 #endif
-	{ "max", 1, {DATEOID},   "c:max", 1, {DATEOID},   {ALTFUNC_EXPR_PMAX}, 0},
-	{ "max", 1, {TIMEOID},   "c:max", 1, {TIMEOID},   {ALTFUNC_EXPR_PMAX}, 0},
-	{ "max", 1, {TIMESTAMPOID}, "c:max", 1, {TIMESTAMPOID},
-	  {ALTFUNC_EXPR_PMAX}, 0},
-	{ "max", 1, {TIMESTAMPTZOID}, "c:max", 1, {TIMESTAMPTZOID},
-	  {ALTFUNC_EXPR_PMAX}, 0},
-
+	{ "max", 1, {DATEOID},
+	  "c:max", 1, {DATEOID},
+	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
+	},
+	{ "max", 1, {TIMEOID},
+	  "c:max", 1, {TIMEOID},
+	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
+	},
+	{ "max", 1, {TIMESTAMPOID},
+	  "c:max", 1, {TIMESTAMPOID},
+	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
+	},
+	{ "max", 1, {TIMESTAMPTZOID},
+	  "c:max", 1, {TIMESTAMPTZOID},
+	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
+	},
 	/* MIX(X) = MIN(PMIN(X)) */
-	{ "min", 1, {INT2OID},   "c:min", 1, {INT2OID},   {ALTFUNC_EXPR_PMIN}, 0},
-	{ "min", 1, {INT4OID},   "c:min", 1, {INT4OID},   {ALTFUNC_EXPR_PMIN}, 0},
-	{ "min", 1, {INT8OID},   "c:min", 1, {INT8OID},   {ALTFUNC_EXPR_PMIN}, 0},
-	{ "min", 1, {FLOAT4OID}, "c:min", 1, {FLOAT4OID}, {ALTFUNC_EXPR_PMIN}, 0},
-	{ "min", 1, {FLOAT8OID}, "c:min", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PMIN}, 0},
+	{ "min", 1, {INT2OID},
+	  "c:min", 1, {INT2OID},
+	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
+	},
+	{ "min", 1, {INT4OID},
+	  "c:min", 1, {INT4OID},
+	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
+	},
+	{ "min", 1, {INT8OID},
+	  "c:min", 1, {INT8OID},
+	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
+	},
+	{ "min", 1, {FLOAT4OID},
+	  "c:min", 1, {FLOAT4OID},
+	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
+	},
+	{ "min", 1, {FLOAT8OID},
+	  "c:min", 1, {FLOAT8OID},
+	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
+	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
-	{ "min", 1, {NUMERICOID},"c:min", 1, {NUMERICOID},
-	  {ALTFUNC_EXPR_PMIN}, DEVFUNC_NEEDS_NUMERIC},
+	{ "min", 1, {NUMERICOID},
+	  "c:min", 1, {NUMERICOID},
+	  {ALTFUNC_EXPR_PMIN}, DEVFUNC_NEEDS_NUMERIC, INT_MAX
+	},
 #endif
-	{ "min", 1, {DATEOID},   "c:min", 1, {DATEOID},   {ALTFUNC_EXPR_PMIN}, 0},
-	{ "min", 1, {TIMEOID},   "c:min", 1, {TIMEOID},   {ALTFUNC_EXPR_PMIN}, 0},
-	{ "min", 1, {TIMESTAMPOID},   "c:min", 1, {TIMESTAMPOID},
-	  {ALTFUNC_EXPR_PMIN}, 0},
-	{ "min", 1, {TIMESTAMPTZOID}, "c:min", 1, {TIMESTAMPTZOID},
-	  {ALTFUNC_EXPR_PMIN}, 0},
+	{ "min", 1, {DATEOID},
+	  "c:min", 1, {DATEOID},
+	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
+	},
+	{ "min", 1, {TIMEOID},
+	  "c:min", 1, {TIMEOID},
+	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
+	},
+	{ "min", 1, {TIMESTAMPOID},
+	  "c:min", 1, {TIMESTAMPOID},
+	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
+	},
+	{ "min", 1, {TIMESTAMPTZOID},
+	  "c:min", 1, {TIMESTAMPTZOID},
+	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
+	},
 
 	/* SUM(X) = SUM(PSUM(X)) */
-	{ "sum", 1, {INT2OID},   "s:sum", 1, {INT8OID},   {ALTFUNC_EXPR_PSUM}, 0},
-	{ "sum", 1, {INT4OID},   "s:sum", 1, {INT8OID},   {ALTFUNC_EXPR_PSUM}, 0},
-	{ "sum", 1, {INT8OID},   "c:sum", 1, {INT8OID},   {ALTFUNC_EXPR_PSUM}, 0},
-	{ "sum", 1, {FLOAT4OID}, "c:sum", 1, {FLOAT4OID}, {ALTFUNC_EXPR_PSUM}, 0},
-	{ "sum", 1, {FLOAT8OID}, "c:sum", 1, {FLOAT8OID}, {ALTFUNC_EXPR_PSUM}, 0},
+	{ "sum", 1, {INT2OID},
+	  "s:sum", 1, {INT8OID},
+	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
+	},
+	{ "sum", 1, {INT4OID},
+	  "s:sum", 1, {INT8OID},
+	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
+	},
+	{ "sum", 1, {INT8OID},
+	  "c:sum", 1, {INT8OID},
+	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
+	},
+	{ "sum", 1, {FLOAT4OID},
+	  "c:sum", 1, {FLOAT4OID},
+	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
+	},
+	{ "sum", 1, {FLOAT8OID},
+	  "c:sum", 1, {FLOAT8OID},
+	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
+	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
-	{ "sum", 1, {NUMERICOID},"c:sum", 1, {NUMERICOID},
-	  {ALTFUNC_EXPR_PSUM}, DEVFUNC_NEEDS_NUMERIC},
+	{ "sum", 1, {NUMERICOID},
+	  "c:sum", 1, {NUMERICOID},
+	  {ALTFUNC_EXPR_PSUM}, DEVFUNC_NEEDS_NUMERIC, 100
+	},
 #endif
 	/* STDDEV(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
 	{ "stddev", 1, {FLOAT4OID},
 	  "s:stddev", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 	{ "stddev", 1, {FLOAT8OID},
 	  "s:stddev", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "stddev", 1, {NUMERICOID},
 	  "s:stddev", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
+	   ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC, 32
 	},
 #endif
 	{ "stddev_pop", 1, {FLOAT4OID},
 	  "s:stddev_pop", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 	{ "stddev_pop", 1, {FLOAT8OID},
 	  "s:stddev_pop", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "stddev_pop", 1, {NUMERICOID},
 	  "s:stddev_pop", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
+       ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC, 32
 	},
 #endif
 	{ "stddev_samp", 1, {FLOAT4OID},
 	  "s:stddev_samp", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 	{ "stddev_samp", 1, {FLOAT8OID},
 	  "s:stddev_samp", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "stddev_samp", 1, {NUMERICOID},
 	  "s:stddev_samp", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
+	   ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC, 32
 	},
 #endif
 	/* VARIANCE(X) = PGSTROM.VARIANCE(NROWS(), PSUM(X),PSUM(X^2)) */
@@ -461,60 +540,60 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:variance", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 	{ "variance", 1, {FLOAT8OID},
 	  "s:variance", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "variance", 1, {NUMERICOID},
 	  "s:variance", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
+       ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC, 32
 	},
 #endif
 	{ "var_pop", 1, {FLOAT4OID},
 	  "s:var_pop", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 	{ "var_pop", 1, {FLOAT8OID},
 	  "s:var_pop", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "var_pop", 1, {NUMERICOID},
 	  "s:var_pop", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
+       ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC, 32
 	},
 #endif
 	{ "var_samp", 1, {FLOAT4OID},
 	  "s:var_samp", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 	{ "var_samp", 1, {FLOAT8OID},
 	  "s:var_samp", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "var_samp", 1, {NUMERICOID},
 	  "s:var_samp", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC
+       ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC, 32
 	},
 #endif
 	/*
@@ -531,7 +610,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0},
+	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
+	},
 	{ "covar_pop", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:covar_pop", 6,
 	  {INT4OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
@@ -540,7 +620,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0},
+	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
+	},
 	{ "covar_samp", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:covar_samp", 6,
 	  {INT4OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
@@ -549,7 +630,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0},
+	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
+	},
 	/*
 	 * Aggregation to support least squares method
 	 *
@@ -564,7 +646,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
        ALTFUNC_EXPR_PCOV_X2,
        ALTFUNC_EXPR_PCOV_Y,
        ALTFUNC_EXPR_PCOV_Y2,
-       ALTFUNC_EXPR_PCOV_XY}, 0
+       ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_avgy", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:regr_avgy", 6,
@@ -574,7 +656,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0
+	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_count", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:regr_count", 1, {INT4OID}, {ALTFUNC_EXPR_NROWS}, 0
@@ -587,7 +669,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0
+	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_r2", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:regr_r2", 6,
@@ -597,7 +679,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0
+	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_slope", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:regr_slope", 6,
@@ -607,7 +689,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0
+	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_sxx", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:regr_sxx", 6,
@@ -617,7 +699,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0
+	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_sxy", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:regr_sxy", 6,
@@ -627,7 +709,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0
+	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_syy", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:regr_syy", 6,
@@ -637,7 +719,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0
+	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 };
 
@@ -685,7 +767,9 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 			   AggClauseCosts *agg_clause_costs,
 			   Plan *p_newcost_agg,
 			   Plan *p_newcost_sort,
-			   Plan *p_newcost_gpreagg)
+			   Plan *p_newcost_gpreagg,
+			   double num_groups,
+			   cl_int safety_limit)
 {
 	Cost		startup_cost;
 	Cost		run_cost;
@@ -694,9 +778,11 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 	double		outer_rows;
 	double		nrows_per_chunk;
 	double		num_chunks;
-	double		num_groups = Max(agg->plan.plan_rows, 1.0);
+	double		segment_width;
+	double		num_segments;
 	double		gpagg_nrows;
 	double		gpu_cpu_ratio;
+	cl_int		group_key_salt = 1;
 	cl_uint		ncols;
 	Size		htup_size;
 	ListCell   *lc;
@@ -734,20 +820,19 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 		htup_size += get_typavgwidth(exprType((Node *) tle->expr),
 									 exprTypmod((Node *) tle->expr));
 	}
-	htup_size = MAXALIGN(htup_size);
 	nrows_per_chunk = (pgstrom_chunk_size() -
 					   STROMALIGN(offsetof(kern_data_store,
 										   colmeta[ncols])))
-		/ (htup_size + sizeof(cl_uint));
+		/ (MAXALIGN(htup_size) + sizeof(cl_uint));
 	nrows_per_chunk = Min(nrows_per_chunk, outer_rows);
-	num_chunks = outer_rows / nrows_per_chunk;
-	if (num_chunks < 1.0)
-		num_chunks = 1.0;
+	num_chunks = Max(outer_rows / nrows_per_chunk, 1.0);
+	segment_width = Max(num_groups / nrows_per_chunk, 1.0);
+	num_segments = Max(num_chunks / (segment_width * safety_limit), 1.0);
 
 	/*
 	 * Then, how much rows does GpuPreAgg will produce?
 	 */
-	gpagg_nrows = num_chunks * num_groups;
+	gpagg_nrows = num_segments * num_groups;
 
 	/*
 	 * Cost estimation of internal Hash operations on GPU
@@ -1128,7 +1213,8 @@ make_altfunc_pcov_expr(Aggref *aggref, const char *func_name)
  * partially aggregated results on the target-list of GpuPreAgg node.
  */
 static Aggref *
-make_gpupreagg_refnode(Aggref *aggref, List **prep_tlist, int *extra_flags)
+make_gpupreagg_refnode(Aggref *aggref, List **prep_tlist,
+					   int *extra_flags, int *safety_limit)
 {
 	const aggfunc_catalog_t *aggfn_cat;
 	const char *altfn_name;
@@ -1162,7 +1248,9 @@ make_gpupreagg_refnode(Aggref *aggref, List **prep_tlist, int *extra_flags)
 		   !aggref->aggvariadic &&
 		   list_length(aggref->args) <= 2);
 	/* update extra flags */
-	*extra_flags |= aggfn_cat->altfn_flags;
+	*extra_flags |= aggfn_cat->extra_flags;
+	/* update safety limit */
+	*safety_limit = Min(*safety_limit, aggfn_cat->safety_limit);
 
 	/*
 	 * Expression node that is executed in the device kernel has to be
@@ -1394,6 +1482,7 @@ typedef struct
 	Bitmapset  *attr_refs;
 	AttrNumber *attr_maps;
 	int			extra_flags;
+	int			safety_limit;
 	bool		not_available;
 	const char *not_available_reason;
 } gpupreagg_rewrite_context;
@@ -1411,7 +1500,8 @@ gpupreagg_rewrite_mutator(Node *node, gpupreagg_rewrite_context *context)
 
 		altagg = make_gpupreagg_refnode(orgagg,
 										&context->pre_tlist,
-										&context->extra_flags);
+										&context->extra_flags,
+										&context->safety_limit);
 		if (!altagg)
 		{
 			context->not_available = true;
@@ -1451,7 +1541,8 @@ gpupreagg_rewrite_expr(Agg *agg,
 					   Bitmapset **p_attr_refs,
 					   int	*p_extra_flags,
 					   bool *p_has_numeric,
-					   bool *p_has_varlena)
+					   bool *p_has_varlena,
+					   cl_int *p_safety_limit)
 {
 	gpupreagg_rewrite_context context;
 	Plan	   *outer_plan = outerPlan(agg);
@@ -1583,13 +1674,13 @@ gpupreagg_rewrite_expr(Agg *agg,
 	context.attr_refs = attr_refs;
 	context.attr_maps = attr_maps;
 	context.extra_flags = 0;
+	context.safety_limit = INT_MAX;
 
 	/*
 	 * Construction of the modified target-list to be assigned 
 	 *
-	 *
-	 *
-	 *
+	 * New Agg node shall have alternative aggregate function that takes
+	 * partially aggregated result in GpuPreAgg.
 	 */
 	foreach (cell, agg->plan.targetlist)
 	{
@@ -1647,6 +1738,7 @@ gpupreagg_rewrite_expr(Agg *agg,
 	*p_extra_flags = context.extra_flags;
 	*p_has_numeric = has_numeric;
 	*p_has_varlena = has_varlena;
+	*p_safety_limit = context.safety_limit;
 
 	return true;
 }
@@ -2816,6 +2908,9 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	double			outer_ratio = 1.0;
 	bool			has_numeric = false;
 	bool			has_varlena = false;
+	cl_int			safety_limit;
+	cl_int			group_key_salt;
+	double			num_groups;
 	ListCell	   *cell;
 	int				i;
 	AggStrategy		new_agg_strategy;
@@ -2844,7 +2939,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 								&attr_refs,
 								&extra_flags,
 								&has_numeric,
-								&has_varlena))
+								&has_varlena,
+								&safety_limit))
 		return;
 	/* main portion is always needed! */
 	extra_flags |= DEVKERNEL_NEEDS_GPUPREAGG;
@@ -2949,6 +3045,23 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	}
 
 	/*
+	 * Estimation of the "effective" number of groups.
+	 *
+	 * NOTE: If number of groups are too small, it leads too much atomic
+	 * contention. So, we add a small salt to distribute grouping keys
+	 * to reasonable level. Of course, it shall be adjusted in run-time.
+	 * So, it is just a baseline parameter.
+	 */
+	num_groups = Max(agg->plan.plan_rows, 1.0);
+	if (num_groups < (gpuMaxThreadsPerBlock() / 4))
+	{
+		group_key_salt = (gpuMaxThreadsPerBlock() / 4) / (cl_uint) num_groups;
+		num_groups *= (double) group_key_salt;
+	}
+	else
+		group_key_salt = 1;
+
+	/*
 	 * Estimate the cost if GpuPreAgg would be injected, and determine
 	 * which plan is cheaper, unless pg_strom.debug_force_gpupreagg is
 	 * not turned on.
@@ -2959,7 +3072,9 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 				   &agg_clause_costs,
 				   &newcost_agg,
 				   &newcost_sort,
-				   &newcost_gpreagg);
+				   &newcost_gpreagg,
+				   num_groups,
+				   safety_limit);
 	elog(DEBUG1,
 		 "GpuPreAgg (cost=%.2f..%.2f) has%sadvantage to Agg(cost=%.2f...%.2f)",
 		 newcost_agg.startup_cost,
@@ -3018,7 +3133,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	gpa_info.outer_quals    = outer_quals;
 	gpa_info.outer_bulkload = outer_bulkload;
 	gpa_info.bulkload_density = bulkload_density;
-	gpa_info.num_groups     = Max(agg->plan.plan_rows, 1.0);
+	gpa_info.num_groups     = num_groups;
+	gpa_info.group_key_salt = group_key_salt;
 	gpa_info.outer_quals    = outer_quals;
 
 	/*
@@ -3154,6 +3270,8 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 
 	outer_width = outerPlanState(gpas)->plan->plan_width;
 	gpas->plan_num_groups = gpa_info->num_groups;
+	gpas->safety_limit = gpa_info->safety_limit;
+	gpas->group_key_salt = gpa_info->group_key_salt;
 
 	/*
 	 * initialize result tuple type and projection info
@@ -3190,10 +3308,117 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	gpas->has_varlena = gpa_info->has_varlena;
 }
 
+/*
+ * gpupreagg_create_segment
+ *
+ *
+ *
+ */
+static gpupreagg_segment *
+gpupreagg_create_segment(GpuPreAggState *gpas, cl_uint num_chunks)
+{
+	GpuContext	   *gcontext = gpas->gts.gcontext;
+	pgstrom_data_store *pds_final;
+
+	/*
+	 * TODO: How to determine the nrooms?
+	 *
+	 */
+
+	tupdesc = gpas->gts.css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
+	pds_final = pgstrom_create_data_store_slot(gcontext,
+											   tupdesc,
+											   nrooms,
+											   gpas->has_numeric,
+											   extra_length,
+											   NULL);
+
+	required = offsetof(gpupreagg_segment, kresults) +
+		STROMALIGN(kern_resultbuf, results[nrooms]) +
+		STROMALIGN(sizeof(pgstrom_data_store *) * num_chunks) +
+		STROMALIGN(sizeof(CUevent) * num_chunks);
+	segment = MemoryContextAllocZero(gcontext->memcxt, required);
+	segment->pds_final = pds_final;		/* refcnt==1 */
+	segment->m_kds_final = 0UL;
+	segment->num_chunks = num_chunks;
+	segment->idx_chunks = 0;
+	segment->refcnt = 1;
+	segment->cuda_index = ???;
+	segment->needs_fallback = false;
+	segment->pds_src = (pgstrom_data_store **)
+		((char *)segment + (offsetof(gpupreagg_segment, kresults) +
+							STROMALIGN(kern_resultbuf, results[nrooms])));
+	segment->ev_dma_recv_start = (CUevent *)
+		((char *)segment->pds_src +
+		 STROMALIGN(sizeof(pgstrom_data_store *) * num_chunks));
+
+	segment->kresults.nrels = 1;
+	segment->kresults.nrooms = nrooms;
+	segment->kresults.nitems = 0;
+
+	return segment;
+}
+
+/*
+ * gpupreagg_get_segment
+ */
+static gpupreagg_segment *
+gpupreagg_get_segment(gpupreagg_segment *segment)
+{
+	Assert(segment->refcnt > 0);
+	segment->refcnt++;
+	return segment;
+}
+
+/*
+ * gpupreagg_put_segment
+ */
+static void
+gpupreagg_put_segment(gpupreagg_segment *segment)
+{
+	int			i;
+	CUrecult	rc;
+
+	Assert(segment->refcnt > 0);
+
+	if (--segment->refcnt == 0)
+	{
+		if (segment->pds_final)
+			pgstrom_release_data_store(segment->pds_final);
+		Assert(segment->m_kds_final == 0UL);
+
+		if (segment->ev_dest_loaded)
+		{
+			rc = cuEventDestroy(segment->ev_dest_loaded);
+			if (rc != CUDA_SUCCESS)
+				elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
+		}
+
+		for (i=0; i < segment->num_chunks; i++)
+		{
+			if (segment->ev_dma_recv_start[i] != NULL)
+			{
+				rc = cuEventDestroy(segment->ev_dma_recv_start[i]);
+				if (rc != CUDA_SUCCESS)
+					elog(WARNING, "failed on cuEventDestroy: %s",
+						 errorText(rc));
+			}
+			if (segment->pds_src[i])
+				pgstrom_release_data_store(segment->pds_src[i]);
+		}
+		pfree(segment);
+	}
+}
+
+
+
+
+
 static pgstrom_gpupreagg *
 gpupreagg_task_create(GpuPreAggState *gpas, pgstrom_data_store *pds_in)
 {
 	GpuContext		   *gcontext = gpas->gts.gcontext;
+	gpupreagg_segment  *segment;
 	pgstrom_gpupreagg  *gpreagg;
 	kern_resultbuf	   *kresults;
 	TupleDesc			tupdesc;
@@ -4104,25 +4329,6 @@ gpupreagg_task_process(GpuTask *gtask)
 
 	return status;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /*
  * entrypoint of GpuPreAgg

@@ -803,6 +803,27 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 }
 
 /*
+ * gpupreagg_final_reduction
+ *
+ * kds_dst = result of local or global reduction
+ * kds_final = destination buffer in this case.
+ *             kds_final->usage points current available variable length
+ *             area, until kds_final->length. Use atomicAdd().
+ * g_hashslot = hash slot of the final buffer
+ */
+KERNEL_FUNCTION(void)
+gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,
+						  kern_data_store *kds_dst,
+						  kern_data_store *kds_final,
+						  pagg_hashslot *g_hashslot)
+{
+
+
+
+
+}
+
+/*
  * gpupreagg_nogroup_reduction
  *
  * It makes aggregation if no GROUP-BY clause given. We can omit atomic-
