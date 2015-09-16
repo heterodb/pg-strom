@@ -62,8 +62,9 @@ typedef struct
 	bool			outer_bulkload;
 	double			bulkload_density;
 	double			num_groups;		/* estimated number of groups */
+	Size			keys_varlen;	/* estimated size of variable keys */
 	cl_int			safety_limit;	/* reasonable limit for reduction */
-	cl_int			group_key_salt;	/* salt, if more distribution needed */
+	cl_int			key_dist_salt;	/* salt, if more distribution needed */
 	List		   *outer_quals;	/* device quals pulled-up */
 	const char	   *kern_source;
 	int				extra_flags;
@@ -80,7 +81,6 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	List	   *privs = NIL;
 	List	   *exprs = NIL;
 	List	   *temp;
-	Bitmapset  *tempset;
 	long		lval;
 	int			i;
 
@@ -95,8 +95,9 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, makeInteger(lval));
 	lval = double_as_long(gpa_info->num_groups);
 	privs = lappend(privs, makeInteger(lval));
+	privs = lappend(privs, makeInteger(gpa_info->keys_varlen));
 	privs = lappend(privs, makeInteger(gpa_info->safety_limit));
-	privs = lappend(privs, makeInteger(gpa_info->group_key_salt));
+	privs = lappend(privs, makeInteger(gpa_info->key_dist_salt));
 	exprs = lappend(exprs, gpa_info->outer_quals);
 	privs = lappend(privs, makeString(pstrdup(gpa_info->kern_source)));
 	privs = lappend(privs, makeInteger(gpa_info->extra_flags));
@@ -146,8 +147,9 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->bulkload_density = fval;
 	fval = long_as_double(intVal(list_nth(privs, pindex++)));
 	gpa_info->num_groups = fval;
+	gpa_info->keys_varlen = intVal(list_nth(privs, pindex++));
 	gpa_info->safety_limit = intVal(list_nth(privs, pindex++));
-	gpa_info->group_key_salt = intVal(list_nth(privs, pindex++));
+	gpa_info->key_dist_salt = intVal(list_nth(privs, pindex++));
 	gpa_info->outer_quals = list_nth(exprs, eindex++);
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
 	gpa_info->extra_flags = intVal(list_nth(privs, pindex++));
@@ -178,9 +180,10 @@ typedef struct
 	ProjectionInfo *bulk_proj;
 	TupleTableSlot *bulk_slot;
 	cl_int			safety_limit;
-	cl_int			group_key_salt;
+	cl_int			key_dist_salt;
 	List		   *outer_quals;
 	TupleTableSlot *outer_overflow;
+	pgstrom_data_store *outer_bulk_overflow;
 
 	bool			needs_grouping;
 	bool			local_reduction;
@@ -199,7 +202,8 @@ typedef struct
 	double			exec_num_groups;	/* # of groups in last segment */
 	cl_uint			exec_num_chunks;	/* # of chunks in last segment */
 	Size			exec_src_nitems;	/* # of input rows in last segment */
-	Size			exec_var_length;	/* usage of varlena buffer */
+	Size			plan_keys_varlen;	/* expected usage of varlena buffer */
+	Size			exec_keys_varlen;	/* actual usage of varlena buffer */
 	double			prev_agg_ratio_1;	/* reduction ratio */
 	double			prev_agg_ratio_2;	/* reduction ratio */
 } GpuPreAggState;
@@ -227,7 +231,7 @@ typedef struct gpupreagg_segment
 	cl_int			refcnt;				/* referenced by pgstrom_gpupreagg */
 	cl_int			cuda_index;			/* device to be used */
 	cl_bool			needs_fallback;		/* true, if CPU fallback needed */
-	pgstrom_data_store **src_pds;		/* reference to source PDSs */
+	pgstrom_data_store **pds_src;		/* reference to source PDSs */
 	CUevent			ev_dest_loaded;		/* event of dest-buffer load */
 	CUevent		   *ev_dma_recv_start;	/* event of kernel execution end */
 	kern_resultbuf	kresults;
@@ -244,6 +248,7 @@ typedef struct
 {
 	GpuTask			task;
 	gpupreagg_segment *segment;		/* reference to the preagg segment */
+	bool			is_terminator;	/* true, if it collects final result */
 	bool			needs_grouping;	/* true, if it takes GROUP BY clause */
 	bool			local_reduction;/* true, if it needs local reduction */
 	bool			global_reduction;/* true, if it needs global reduction */
@@ -782,7 +787,6 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 	double		num_segments;
 	double		gpagg_nrows;
 	double		gpu_cpu_ratio;
-	cl_int		group_key_salt = 1;
 	cl_uint		ncols;
 	Size		htup_size;
 	ListCell   *lc;
@@ -1542,6 +1546,7 @@ gpupreagg_rewrite_expr(Agg *agg,
 					   int	*p_extra_flags,
 					   bool *p_has_numeric,
 					   bool *p_has_varlena,
+					   Size *p_keys_varlen,
 					   cl_int *p_safety_limit)
 {
 	gpupreagg_rewrite_context context;
@@ -1554,6 +1559,7 @@ gpupreagg_rewrite_expr(Agg *agg,
 	Bitmapset  *grouping_keys = NULL;
 	bool		has_numeric = false;
 	bool		has_varlena = false;
+	Size		keys_varlen = 0;
 	ListCell   *cell;
 	Size		final_length;
 	Size		final_nslots;
@@ -1624,11 +1630,18 @@ gpupreagg_rewrite_expr(Agg *agg,
 		}
 
 		/* check whether types need special treatment */
-		if (type_oid == NUMERICOID)
+		if (dtype->type_oid == NUMERICOID)
 			has_numeric = true;
 		else if ((dtype->type_flags & DEVTYPE_IS_VARLENA) != 0)
+		{
 			has_varlena = true;
-
+			/*
+			 * We also need to estimate average size of varlene grouping keys
+			 * to make copies of varlena datum on extra area of the final
+			 * result buffer.
+			 */
+			keys_varlen += MAXALIGN(get_typavgwidth(type_oid, type_mod));
+		}
 		varnode = (Expr *) makeVar(INDEX_VAR,
 								   tle->resno,
 								   type_oid,
@@ -1654,9 +1667,12 @@ gpupreagg_rewrite_expr(Agg *agg,
 	final_nslots = (Size)(2.5 * agg->plan.plan_rows *
 						  pgstrom_chunk_size_margin);
 	final_length = STROMALIGN(offsetof(kern_data_store,
-										colmeta[ncols])) +
+									   colmeta[ncols])) +
 		STROMALIGN(LONGALIGN((sizeof(Datum) +
 							  sizeof(char)) * ncols) * final_nslots) +
+		STROMALIGN((Size)((double) keys_varlen *
+						  agg->plan.plan_rows *
+						  pgstrom_chunk_size_margin)) +
 		STROMALIGN(sizeof(kern_gpupreagg) * final_nslots);
 	if (final_length > gpuMemMaxAllocSize() / 2)
 	{
@@ -1738,6 +1754,7 @@ gpupreagg_rewrite_expr(Agg *agg,
 	*p_extra_flags = context.extra_flags;
 	*p_has_numeric = has_numeric;
 	*p_has_varlena = has_varlena;
+	*p_keys_varlen = keys_varlen;
 	*p_safety_limit = context.safety_limit;
 
 	return true;
@@ -2908,8 +2925,9 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	double			outer_ratio = 1.0;
 	bool			has_numeric = false;
 	bool			has_varlena = false;
+	Size			keys_varlen;
 	cl_int			safety_limit;
-	cl_int			group_key_salt;
+	cl_int			key_dist_salt;
 	double			num_groups;
 	ListCell	   *cell;
 	int				i;
@@ -2940,6 +2958,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 								&extra_flags,
 								&has_numeric,
 								&has_varlena,
+								&keys_varlen,
 								&safety_limit))
 		return;
 	/* main portion is always needed! */
@@ -3055,11 +3074,11 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	num_groups = Max(agg->plan.plan_rows, 1.0);
 	if (num_groups < (gpuMaxThreadsPerBlock() / 4))
 	{
-		group_key_salt = (gpuMaxThreadsPerBlock() / 4) / (cl_uint) num_groups;
-		num_groups *= (double) group_key_salt;
+		key_dist_salt = (gpuMaxThreadsPerBlock() / 4) / (cl_uint) num_groups;
+		num_groups *= (double) key_dist_salt;
 	}
 	else
-		group_key_salt = 1;
+		key_dist_salt = 1;
 
 	/*
 	 * Estimate the cost if GpuPreAgg would be injected, and determine
@@ -3134,7 +3153,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	gpa_info.outer_bulkload = outer_bulkload;
 	gpa_info.bulkload_density = bulkload_density;
 	gpa_info.num_groups     = num_groups;
-	gpa_info.group_key_salt = group_key_salt;
+	gpa_info.key_dist_salt  = key_dist_salt;
 	gpa_info.outer_quals    = outer_quals;
 
 	/*
@@ -3160,6 +3179,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	}
 	gpa_info.has_numeric = has_numeric;
 	gpa_info.has_varlena = has_varlena;
+	gpa_info.keys_varlen = keys_varlen;
 	form_gpupreagg_info(cscan, &gpa_info);
 
 	/*
@@ -3269,9 +3289,8 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	gpas->outer_overflow = NULL;
 
 	outer_width = outerPlanState(gpas)->plan->plan_width;
-	gpas->plan_num_groups = gpa_info->num_groups;
 	gpas->safety_limit = gpa_info->safety_limit;
-	gpas->group_key_salt = gpa_info->group_key_salt;
+	gpas->key_dist_salt = gpa_info->key_dist_salt;
 
 	/*
 	 * initialize result tuple type and projection info
@@ -3306,6 +3325,18 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 		gpas->local_reduction = true;
 	gpas->has_numeric = gpa_info->has_numeric;
 	gpas->has_varlena = gpa_info->has_varlena;
+
+	/*
+	 * init run-time statistics
+	 */
+	gpas->plan_num_groups = gpa_info->num_groups;
+	gpas->exec_num_groups = -1.0;
+	gpas->exec_num_chunks = 0;
+	gpas->exec_src_nitems = 0;
+	gpas->plan_keys_varlen = gpa_info->keys_varlen;
+	gpas->exec_keys_varlen = 0;
+	gpas->prev_agg_ratio_1 = -1.0;
+	gpas->prev_agg_ratio_2 = -1.0;
 }
 
 /*
@@ -3315,13 +3346,38 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
  *
  */
 static gpupreagg_segment *
-gpupreagg_create_segment(GpuPreAggState *gpas, cl_uint num_chunks)
+gpupreagg_create_segment(GpuPreAggState *gpas)
 {
 	GpuContext	   *gcontext = gpas->gts.gcontext;
+	TupleDesc		tupdesc;
+	cl_uint			num_chunks;
+	cl_uint			nrooms;
+	Size			extra_length;
+	Size			required;
 	pgstrom_data_store *pds_final;
+	gpupreagg_segment  *segment;
+
+
+
+	if (gpas->
+
+
+
+
+
+
+
+
+
+hogehoge
+
+
+
+
+
 
 	/*
-	 * TODO: How to determine the nrooms?
+	 * TODO: How to determine the nrooms? num_chunks?
 	 *
 	 */
 
@@ -3334,7 +3390,7 @@ gpupreagg_create_segment(GpuPreAggState *gpas, cl_uint num_chunks)
 											   NULL);
 
 	required = offsetof(gpupreagg_segment, kresults) +
-		STROMALIGN(kern_resultbuf, results[nrooms]) +
+		STROMALIGN(offsetof(kern_resultbuf, results[nrooms])) +
 		STROMALIGN(sizeof(pgstrom_data_store *) * num_chunks) +
 		STROMALIGN(sizeof(CUevent) * num_chunks);
 	segment = MemoryContextAllocZero(gcontext->memcxt, required);
@@ -3347,7 +3403,8 @@ gpupreagg_create_segment(GpuPreAggState *gpas, cl_uint num_chunks)
 	segment->needs_fallback = false;
 	segment->pds_src = (pgstrom_data_store **)
 		((char *)segment + (offsetof(gpupreagg_segment, kresults) +
-							STROMALIGN(kern_resultbuf, results[nrooms])));
+							STROMALIGN(offsetof(kern_resultbuf,
+												results[nrooms]))));
 	segment->ev_dma_recv_start = (CUevent *)
 		((char *)segment->pds_src +
 		 STROMALIGN(sizeof(pgstrom_data_store *) * num_chunks));
@@ -3377,7 +3434,7 @@ static void
 gpupreagg_put_segment(gpupreagg_segment *segment)
 {
 	int			i;
-	CUrecult	rc;
+	CUresult	rc;
 
 	Assert(segment->refcnt > 0);
 
@@ -3415,7 +3472,10 @@ gpupreagg_put_segment(gpupreagg_segment *segment)
 
 
 static pgstrom_gpupreagg *
-gpupreagg_task_create(GpuPreAggState *gpas, pgstrom_data_store *pds_in)
+gpupreagg_task_create(GpuPreAggState *gpas,
+					  pgstrom_data_store *pds_in,
+					  gpupreagg_segment *segment,
+					  bool is_terminator)
 {
 	GpuContext		   *gcontext = gpas->gts.gcontext;
 	gpupreagg_segment  *segment;
@@ -3433,7 +3493,8 @@ gpupreagg_task_create(GpuPreAggState *gpas, pgstrom_data_store *pds_in)
 
 	/* initialize GpuTask object */
 	pgstrom_init_gputask(&gpas->gts, &gpreagg->task);
-	gpreagg->needs_fallback = false;
+	gpreagg->segment = segment;
+	gpreagg->is_terminator = is_terminator;
 	gpreagg->needs_grouping = gpas->needs_grouping;
 	gpreagg->local_reduction = gpas->local_reduction;
 	gpreagg->has_varlena = gpas->has_varlena;
@@ -3480,6 +3541,9 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 	GpuPreAggState	   *gpas = (GpuPreAggState *) gts;
 	PlanState		   *subnode = outerPlanState(gpas);
 	pgstrom_data_store *pds = NULL;
+	pgstrom_gpupreagg  *gpreagg;
+	gpupreagg_segment  *segment;
+	bool				is_terminator = false;
 	struct timeval		tv1, tv2;
 
 	if (gpas->gts.scan_done)
@@ -3524,20 +3588,52 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 				break;
 			}
 		}
+		/* Any more tuples expected? */
+		if (!gpas->outer_overflow)
+			is_terminator = true;
 	}
 	else
 	{
-		/* Load a bunch of records at once */
-		pds = BulkExecProcNode(subnode);
+		/* Load a bunch of records at once on the first time */
+		if (!gpas->outer_bulk_overflow)
+			gpas->outer_bulk_overflow = BulkExecProcNode(subnode);
+		/* Picks up the cached one to detect the final chunk */
+		pds = gpas->outer_bulk_overflow;
 		if (!pds)
 			gpas->gts.scan_done = true;
+		else
+			gpas->outer_bulk_overflow = BulkExecProcNode(subnode);
+		/* Any more chunk expected? */
+		if (!gpas->outer_bulk_overflow)
+			is_terminator = true;
 	}
 	PERFMON_END(&gts->pfm_accum, time_outer_load, &tv1, &tv2);
 
 	if (!pds)
 		return NULL;	/* no more tuples to read */
 
-	return (GpuTask *) gpupreagg_task_create(gpas, pds);
+	/*
+	 * Create or acquire a segment that has final result buffer of this
+	 * GpuPreAgg task.
+	 */
+	if (!gpas->curr_segment)
+		segment = gpupreagg_create_segment(gpas);
+	else
+		segment = gpupreagg_get_segment(gpas->curr_segment);
+
+	Assert(segment->idx_chunks < segment->num_chunks);
+	segment->pds_src[segment->idx_chunks++] = pgstrom_acquire_data_store(pds);
+	if (segment->idx_chunks == segment->num_chunks)
+		is_terminator = true;
+
+	gpreagg = gpupreagg_task_create(gpas, pds, segment, is_terminator);
+
+	if (is_terminator)
+	{
+		gpupreagg_put_segment(gpas->curr_segment);
+		gpas->curr_segment = NULL;
+	}
+	return &gpreagg->task;
 }
 
 /*
@@ -3629,24 +3725,26 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 {
 	GpuPreAggState	   *gpas = (GpuPreAggState *) gts;
 	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) gpas->gts.curr_task;
-	kern_resultbuf	   *kresults = gpreagg->kresults;
-	pgstrom_data_store *pds_dst = gpreagg->pds_dst;
+	gpupreagg_segment  *segment = gpreagg->segment;
+	kern_resultbuf	   *kresults = &segment->kresults;
+	pgstrom_data_store *pds_final = gpreagg->pds_final;
 	TupleTableSlot	   *slot = NULL;
 	HeapTupleData		tuple;
 	struct timeval		tv1, tv2;
 
+	Assert(gpreagg->is_terminator);
 	Assert(kresults == KERN_GPUPREAGG_RESULTBUF(&gpreagg->kern));
 
 	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
-	if (gpreagg->needs_fallback)
-		slot = gpupreagg_next_tuple_fallback(gpas, gpreagg);
+	if (segment->needs_fallback)
+		slot = gpupreagg_next_tuple_fallback(gpas, segment);
 	else if (gpas->gts.curr_index < kresults->nitems)
 	{
 		size_t		index = kresults->results[gpas->gts.curr_index++];
 
 		slot = gts->css.ss.ps.ps_ResultTupleSlot;
 		ExecClearTuple(slot);
-		if (!pgstrom_fetch_data_store(slot, pds_dst, index, &tuple))
+		if (!pgstrom_fetch_data_store(slot, pds_final, index, &tuple))
 		{
 			elog(NOTICE, "Bug? empty slot was specified by kern_resultbuf");
 			slot = NULL;
@@ -3760,7 +3858,7 @@ gpupreagg_cleanup_cuda_resources(pgstrom_gpupreagg *gpreagg)
 	CUDA_EVENT_DESTROY(gpreagg, ev_dma_send_stop);
 	CUDA_EVENT_DESTROY(gpreagg, ev_kern_prep_end);
 	CUDA_EVENT_DESTROY(gpreagg, ev_kern_lagg_end);
-	CUDA_EVENT_DESTROY(gpreagg, ev_dma_recv_start);
+	//CUDA_EVENT_DESTROY(gpreagg, ev_dma_recv_start);
 	CUDA_EVENT_DESTROY(gpreagg, ev_dma_recv_stop);
 
 	/* clear the pointers */
