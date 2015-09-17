@@ -62,6 +62,7 @@ typedef struct
 	bool			outer_bulkload;
 	double			bulkload_density;
 	double			num_groups;		/* estimated number of groups */
+	double			nrows_per_chunk;/* estimated nrows per chunk */
 	Size			keys_varlen;	/* estimated size of variable keys */
 	cl_int			safety_limit;	/* reasonable limit for reduction */
 	cl_int			key_dist_salt;	/* salt, if more distribution needed */
@@ -81,7 +82,6 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	List	   *privs = NIL;
 	List	   *exprs = NIL;
 	List	   *temp;
-	long		lval;
 	int			i;
 
 	/* numCols and grpColIdx */
@@ -91,10 +91,11 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 
 	privs = lappend(privs, temp);
 	privs = lappend(privs, makeInteger(gpa_info->outer_bulkload));
-	lval = double_as_long(gpa_info->bulkload_density);
-	privs = lappend(privs, makeInteger(lval));
-	lval = double_as_long(gpa_info->num_groups);
-	privs = lappend(privs, makeInteger(lval));
+	privs = lappend(privs,
+					makeInteger(double_as_long(gpa_info->bulkload_density)));
+	privs = lappend(privs, makeInteger(double_as_long(gpa_info->num_groups)));
+	privs = lappend(privs,
+					makeInteger(double_as_long(gpa_info->nrows_per_chunk)));
 	privs = lappend(privs, makeInteger(gpa_info->keys_varlen));
 	privs = lappend(privs, makeInteger(gpa_info->safety_limit));
 	privs = lappend(privs, makeInteger(gpa_info->key_dist_salt));
@@ -133,7 +134,6 @@ deform_gpupreagg_info(CustomScan *cscan)
 	Bitmapset  *tempset;
 	List	   *temp;
 	ListCell   *cell;
-	double		fval;
 
 	/* numCols and grpColIdx */
 	temp = list_nth(privs, pindex++);
@@ -143,10 +143,12 @@ deform_gpupreagg_info(CustomScan *cscan)
 		gpa_info->grpColIdx[i++] = lfirst_int(cell);
 
 	gpa_info->outer_bulkload = intVal(list_nth(privs, pindex++));
-	fval = long_as_double(intVal(list_nth(privs, pindex++)));
-	gpa_info->bulkload_density = fval;
-	fval = long_as_double(intVal(list_nth(privs, pindex++)));
-	gpa_info->num_groups = fval;
+	gpa_info->bulkload_density =
+		long_as_double(intVal(list_nth(privs, pindex++)));
+	gpa_info->num_groups =
+		long_as_double(intVal(list_nth(privs, pindex++)));
+	gpa_info->nrows_per_chunk =
+		long_as_double(intVal(list_nth(privs, pindex++)));
 	gpa_info->keys_varlen = intVal(list_nth(privs, pindex++));
 	gpa_info->safety_limit = intVal(list_nth(privs, pindex++));
 	gpa_info->key_dist_salt = intVal(list_nth(privs, pindex++));
@@ -194,12 +196,14 @@ typedef struct
 	 * segment is a set of chunks to be aggregated
 	 */
 	struct gpupreagg_segment *curr_segment; 
+	cl_int			curr_cuda_index;
 
 	/*
 	 * Run-time statistics
 	 */
 	double			plan_num_groups;	/* # of groups in plan time */
 	double			exec_num_groups;	/* # of groups in last segment */
+	double			plan_nrows_per_chunk; /* # of rows per chunk in plan */
 	cl_uint			exec_num_chunks;	/* # of chunks in last segment */
 	Size			exec_src_nitems;	/* # of input rows in last segment */
 	Size			plan_keys_varlen;	/* expected usage of varlena buffer */
@@ -232,8 +236,9 @@ typedef struct gpupreagg_segment
 	cl_int			cuda_index;			/* device to be used */
 	cl_bool			needs_fallback;		/* true, if CPU fallback needed */
 	pgstrom_data_store **pds_src;		/* reference to source PDSs */
-	CUevent			ev_dest_loaded;		/* event of dest-buffer load */
-	CUevent		   *ev_dma_recv_start;	/* event of kernel execution end */
+	CUevent			ev_final_loaded;	/* event of final-buffer load */
+	CUevent		   *ev_kern_exec_end;	/* event of kernel execution end */
+	cl_int			num_kern_exec_end;	/* # of ev_kern_exec_end events */
 	kern_resultbuf	kresults;
 } gpupreagg_segment;
 
@@ -257,6 +262,7 @@ typedef struct
 	CUfunction		kern_prep;
 	CUfunction		kern_lagg;
 	CUfunction		kern_gagg;
+	CUfunction		kern_fagg;
 	CUfunction		kern_nogrp;
 	CUfunction		kern_fixvar;
 	CUdeviceptr		m_gpreagg;
@@ -269,7 +275,7 @@ typedef struct
 	CUevent			ev_dma_send_stop;
 	CUevent			ev_kern_prep_end;
 	CUevent			ev_kern_lagg_end;
-	//CUevent			ev_dma_recv_start;
+	CUevent			ev_dma_recv_start;
 	CUevent			ev_dma_recv_stop;
 	pgstrom_data_store *pds_in;		/* source data-store */
 	pgstrom_data_store *pds_dst;	/* result data-store */
@@ -774,6 +780,7 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 			   Plan *p_newcost_sort,
 			   Plan *p_newcost_gpreagg,
 			   double num_groups,
+			   double *p_nrows_per_chunk,
 			   cl_int safety_limit)
 {
 	Cost		startup_cost;
@@ -832,6 +839,8 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 	num_chunks = Max(outer_rows / nrows_per_chunk, 1.0);
 	segment_width = Max(num_groups / nrows_per_chunk, 1.0);
 	num_segments = Max(num_chunks / (segment_width * safety_limit), 1.0);
+
+	*p_nrows_per_chunk = nrows_per_chunk;
 
 	/*
 	 * Then, how much rows does GpuPreAgg will produce?
@@ -2929,6 +2938,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	cl_int			safety_limit;
 	cl_int			key_dist_salt;
 	double			num_groups;
+	double			nrows_per_chunk;
 	ListCell	   *cell;
 	int				i;
 	AggStrategy		new_agg_strategy;
@@ -3093,6 +3103,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 				   &newcost_sort,
 				   &newcost_gpreagg,
 				   num_groups,
+				   &nrows_per_chunk,
 				   safety_limit);
 	elog(DEBUG1,
 		 "GpuPreAgg (cost=%.2f..%.2f) has%sadvantage to Agg(cost=%.2f...%.2f)",
@@ -3153,6 +3164,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	gpa_info.outer_bulkload = outer_bulkload;
 	gpa_info.bulkload_density = bulkload_density;
 	gpa_info.num_groups     = num_groups;
+	gpa_info.nrows_per_chunk= nrows_per_chunk;
 	gpa_info.key_dist_salt  = key_dist_salt;
 	gpa_info.outer_quals    = outer_quals;
 
@@ -3325,12 +3337,15 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 		gpas->local_reduction = true;
 	gpas->has_numeric = gpa_info->has_numeric;
 	gpas->has_varlena = gpa_info->has_varlena;
+	gpas->curr_segment = NULL;
+	gpas->curr_cuda_index = 0;
 
 	/*
 	 * init run-time statistics
 	 */
 	gpas->plan_num_groups = gpa_info->num_groups;
 	gpas->exec_num_groups = -1.0;
+	gpas->plan_nrows_per_chunk = gpa_info->nrows_per_chunk;
 	gpas->exec_num_chunks = 0;
 	gpas->exec_src_nitems = 0;
 	gpas->plan_keys_varlen = gpa_info->keys_varlen;
@@ -3342,45 +3357,53 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 /*
  * gpupreagg_create_segment
  *
- *
- *
+ * It makes a segment and final result buffer.
  */
 static gpupreagg_segment *
 gpupreagg_create_segment(GpuPreAggState *gpas)
 {
 	GpuContext	   *gcontext = gpas->gts.gcontext;
 	TupleDesc		tupdesc;
-	cl_uint			num_chunks;
-	cl_uint			nrooms;
+	Size			num_chunks;
+	Size			nrooms;
 	Size			extra_length;
+	Size			offset;
 	Size			required;
+	double			reduction_ratio;
+	cl_int			cuda_index;
 	pgstrom_data_store *pds_final;
 	gpupreagg_segment  *segment;
 
+	/*
+	 * FIXME: We shall adjust buffer size according to run-time statistics
+	 * later. However, at this moment, we rely on planner estimation.
+	 */
+	nrooms = (cl_uint)(2.5 * gpas->plan_num_groups *
+					   pgstrom_chunk_size_margin);
+	/*
+	 * FIXME: At this moment, we have a hard limit (2GB) for temporary
+	 * consumption by pds_src[] chunks. It shall be configurable and
+	 * controled under GpuContext.
+	 */
+	num_chunks = 0x80000000UL / pgstrom_chunk_size();
+	reduction_ratio = Max(1.0, gpas->plan_nrows_per_chunk /
+						  (gpas->plan_num_groups * gpas->key_dist_salt));
+	num_chunks = Min(num_chunks, reduction_ratio * gpas->safety_limit);
+	Assert(num_chunks > 0);
 
-
-	if (gpas->
-
-
-
-
-
-
-
-
-
-hogehoge
-
-
-
-
-
+	extra_length = (Size)(gpas->plan_keys_varlen *
+						  gpas->plan_num_groups *
+						  pgstrom_chunk_size_margin);
 
 	/*
-	 * TODO: How to determine the nrooms? num_chunks?
-	 *
+	 * FIXME: We may need more wise way to determine CUDA device rather
+	 * than round-robin.
 	 */
+	cuda_index = gpas->curr_cuda_index++ % gcontext->num_context;
 
+	/*
+	 * Makes a final buffer of this segment
+	 */
 	tupdesc = gpas->gts.css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
 	pds_final = pgstrom_create_data_store_slot(gcontext,
 											   tupdesc,
@@ -3389,8 +3412,9 @@ hogehoge
 											   extra_length,
 											   NULL);
 
-	required = offsetof(gpupreagg_segment, kresults) +
-		STROMALIGN(offsetof(kern_resultbuf, results[nrooms])) +
+	offset = offsetof(gpupreagg_segment, kresults) +
+		STROMALIGN(offsetof(kern_resultbuf, results[nrooms]));
+	required = offset +
 		STROMALIGN(sizeof(pgstrom_data_store *) * num_chunks) +
 		STROMALIGN(sizeof(CUevent) * num_chunks);
 	segment = MemoryContextAllocZero(gcontext->memcxt, required);
@@ -3399,16 +3423,12 @@ hogehoge
 	segment->num_chunks = num_chunks;
 	segment->idx_chunks = 0;
 	segment->refcnt = 1;
-	segment->cuda_index = ???;
+	segment->cuda_index = cuda_index;
 	segment->needs_fallback = false;
-	segment->pds_src = (pgstrom_data_store **)
-		((char *)segment + (offsetof(gpupreagg_segment, kresults) +
-							STROMALIGN(offsetof(kern_resultbuf,
-												results[nrooms]))));
-	segment->ev_dma_recv_start = (CUevent *)
-		((char *)segment->pds_src +
-		 STROMALIGN(sizeof(pgstrom_data_store *) * num_chunks));
-
+	segment->pds_src = (pgstrom_data_store **)((char *)segment + offset);
+	offset += STROMALIGN(sizeof(pgstrom_data_store *) * num_chunks);
+	segment->ev_kern_exec_end = (CUevent *)((char *)segment + offset);
+	segment->num_kern_exec_end = 0;
 	segment->kresults.nrels = 1;
 	segment->kresults.nrooms = nrooms;
 	segment->kresults.nitems = 0;
@@ -3444,9 +3464,9 @@ gpupreagg_put_segment(gpupreagg_segment *segment)
 			pgstrom_release_data_store(segment->pds_final);
 		Assert(segment->m_kds_final == 0UL);
 
-		if (segment->ev_dest_loaded)
+		if (segment->ev_final_loaded)
 		{
-			rc = cuEventDestroy(segment->ev_dest_loaded);
+			rc = cuEventDestroy(segment->ev_final_loaded);
 			if (rc != CUDA_SUCCESS)
 				elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
 		}
@@ -3467,8 +3487,75 @@ gpupreagg_put_segment(gpupreagg_segment *segment)
 	}
 }
 
+static void
+gpupreagg_send_segment(pgstrom_gpupreagg *gpreagg)
+{
+	gpupreagg_segment  *segment = gpreagg->segment;
+	pgstrom_data_store *pds_final = segment->pds_final;
+	CUstream			cuda_stream = gpreagg->task.cuda_stream;
+	CUevent				ev_final_loaded;
+	CUresult			rc;
 
+	if (!segment->ev_final_loaded)
+	{
+		rc = cuEventCreate(&ev_final_loaded, CU_EVENT_DEFAULT);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 
+		/* Device memory allocation and enqueue DMA send */
+		length = pds_final->kds->length;
+		m_kds_final = gpuMemAlloc(&pgjoin->task, total_length);
+		if (!m_kds_final)
+			/* error */;
+
+		rc = cuMemcpyHtoDAsync(m_kmrels, &pmrels->kern, length, cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			/* error */;
+
+		/* DMA Send Synchronization */
+		rc = cuEventRecord(ev_final_loaded, cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
+
+	}
+	else
+	{
+		/* DMA Send synchronization, kicked by other task */
+		ev_final_loaded = segment->ev_final_loaded;
+		rc = cuStreamWaitEvent(cuda_stream, ev_final_loaded, 0);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuStreamWaitEvent: %s", errorText(rc));
+	}
+}
+
+static void
+gpupreagg_recv_segment(pgstrom_gpupreagg *gpreagg)
+{
+	gpupreagg_segment *segment = gpreagg->segment;
+	pgstrom_data_store *pds_final = segment->pds_final;
+	CUstream			cuda_stream = gpreagg->task.cuda_stream;
+	CUevent				ev_dma_recv_start;
+
+	Assert(gpreagg->is_terminator);
+
+	/* synchronize kernel execution */
+	for (i=0; i < segment->idx_chunks; i++)
+	{
+		ev_dma_recv_start = segment->ev_dma_recv_start[i];
+
+		if (!ev_dma_recv_start)
+			continue;
+		rc = cuStreamWaitEvent(cuda_stream, ev_dma_recv_start, 0);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuStreamWaitEvent: %s", errorText(rc));
+	}
+
+	/* enqueue DMA receive after all the kernel execution */
+	rc = cuMemcpyDtoHAsync(pds_final->kds, segment->m_kds_final,
+						   pds_final->kds->length, cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyDtoHAsync: %s", errorText(rc));
+}
 
 
 static pgstrom_gpupreagg *
@@ -3478,7 +3565,6 @@ gpupreagg_task_create(GpuPreAggState *gpas,
 					  bool is_terminator)
 {
 	GpuContext		   *gcontext = gpas->gts.gcontext;
-	gpupreagg_segment  *segment;
 	pgstrom_gpupreagg  *gpreagg;
 	kern_resultbuf	   *kresults;
 	TupleDesc			tupdesc;
@@ -3493,7 +3579,7 @@ gpupreagg_task_create(GpuPreAggState *gpas,
 
 	/* initialize GpuTask object */
 	pgstrom_init_gputask(&gpas->gts, &gpreagg->task);
-	gpreagg->segment = segment;
+	gpreagg->segment = segment;	/* caller already acquired */
 	gpreagg->is_terminator = is_terminator;
 	gpreagg->needs_grouping = gpas->needs_grouping;
 	gpreagg->local_reduction = gpas->local_reduction;
@@ -3617,16 +3703,15 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 	 * GpuPreAgg task.
 	 */
 	if (!gpas->curr_segment)
-		segment = gpupreagg_create_segment(gpas);
-	else
-		segment = gpupreagg_get_segment(gpas->curr_segment);
+		gpas->curr_segment = gpupreagg_create_segment(gpas);
+	segment = gpupreagg_get_segment(gpas->curr_segment);
 
 	Assert(segment->idx_chunks < segment->num_chunks);
 	segment->pds_src[segment->idx_chunks++] = pgstrom_acquire_data_store(pds);
 	if (segment->idx_chunks == segment->num_chunks)
 		is_terminator = true;
-
 	gpreagg = gpupreagg_task_create(gpas, pds, segment, is_terminator);
+	gpreagg->segment_id = segment_id;
 
 	if (is_terminator)
 	{
@@ -3644,11 +3729,10 @@ gpupreagg_next_chunk(GpuTaskState *gts)
  * no performance benefit once it happen.
  */
 static TupleTableSlot *
-gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, pgstrom_gpupreagg *gpreagg)
+gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, gpupreagg_segment *segment)
 {
-	pgstrom_data_store *pds = gpreagg->pds_in;
+	pgstrom_data_store *pds;
 	TupleTableSlot	   *slot;
-	size_t				nitems = pds->kds->nitems;
 	cl_uint				row_index;
 	HeapTupleData		tuple;
 
@@ -3657,17 +3741,27 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, pgstrom_gpupreagg *gpreagg)
 		slot = gpas->gts.css.ss.ss_ScanTupleSlot;
 	else
 		slot = gpas->bulk_slot;
-
 retry:
-	if (gpas->gts.curr_index >= nitems)
+	if (segment->idx_chunks == 0)
 		return NULL;
+	pds = segment->pds_src[segment->idx_chunks - 1];
+	Assert(pds != NULL);
+
 	row_index = gpas->gts.curr_index++;
 
 	/*
-	 * Fetch a tuple from the data-store
-	 */
+     * Fetch a tuple from the data-store
+     */
 	ExecClearTuple(slot);
-	if (pgstrom_fetch_data_store(slot, pds, row_index, &tuple))
+	if (!pgstrom_fetch_data_store(slot, pds, row_index, &tuple))
+	{
+		pgstrom_release_data_store(pds);
+		segment->pds_src[segment->idx_chunks - 1] = NULL;
+		segment->idx_chunks--;
+
+		goto retry;
+	}
+	else
 	{
 		ExprContext	   *econtext;
 		ExprDoneCond	is_done;
@@ -3727,7 +3821,7 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) gpas->gts.curr_task;
 	gpupreagg_segment  *segment = gpreagg->segment;
 	kern_resultbuf	   *kresults = &segment->kresults;
-	pgstrom_data_store *pds_final = gpreagg->pds_final;
+	pgstrom_data_store *pds_final = segment->pds_final;
 	TupleTableSlot	   *slot = NULL;
 	HeapTupleData		tuple;
 	struct timeval		tv1, tv2;
@@ -3816,13 +3910,14 @@ gpupreagg_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	GpuPreAggInfo  *gpa_info
 		= deform_gpupreagg_info((CustomScan *) node->ss.ps.plan);
 	const char	   *policy;
+	char			temp[2048];
 
 	if (!gpas->gts.scan_bulk)
 		ExplainPropertyText("Bulkload", "Off", es);
 	else
 	{
-		char   *temp = psprintf("On (density: %.2f%%)",
-								100.0 * gpas->gts.scan_bulk_density);
+		snprintf(temp, sizeof(temp), "On (density: %.2f%%)",
+				 100.0 * gpas->gts.scan_bulk_density);
 		ExplainPropertyText("Bulkload", temp, es);
 	}
 	if (!gpas->needs_grouping)
@@ -3839,6 +3934,15 @@ gpupreagg_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 					   "Device Filter", &gpas->gts.css.ss.ps, ancestors, es);
 		show_instrumentation_count("Rows Removed by Device Fileter",
                                    2, &gpas->gts.css.ss.ps, es);
+	}
+
+	if (es->verbose)
+	{
+		snprintf(temp, sizeof(temp),
+				 "SafetyLimit: %u, KeyDistSalt: %u",
+				 gpas->safety_limit,
+				 gpas->key_dist_salt);
+		ExplainPropertyText("Logic Parameter", temp, es);
 	}
 	pgstrom_explain_gputaskstate(&gpas->gts, es);
 }
@@ -3865,6 +3969,7 @@ gpupreagg_cleanup_cuda_resources(pgstrom_gpupreagg *gpreagg)
 	gpreagg->kern_prep = NULL;
 	gpreagg->kern_lagg = NULL;
 	gpreagg->kern_gagg = NULL;
+	gpreagg->kern_fagg = NULL;
 	gpreagg->kern_nogrp = NULL;
 	gpreagg->kern_fixvar = NULL;
 	gpreagg->m_gpreagg = 0UL;
@@ -4002,52 +4107,50 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	size_t				grid_size;
 	size_t				block_size;
 	CUresult			rc;
+	cl_int				i;
 	void			   *kern_args[10];
 
 	/*
-	 * Kernel function lookup
+	 * Lookup kernel functions
 	 */
 	rc = cuModuleGetFunction(&gpreagg->kern_prep,
 							 gpreagg->task.cuda_module,
 							 "gpupreagg_preparation");
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction : %s", errorText(rc));
-	if (gpreagg->needs_grouping)
-	{
-		if (gpreagg->local_reduction)
-		{
-			rc = cuModuleGetFunction(&gpreagg->kern_lagg,
-									 gpreagg->task.cuda_module,
-									 "gpupreagg_local_reduction");
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuModuleGetFunction : %s",
-					 errorText(rc));
-		}
-		rc = cuModuleGetFunction(&gpreagg->kern_gagg,
-								 gpreagg->task.cuda_module,
-								 "gpupreagg_global_reduction");
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuModuleGetFunction : %s", errorText(rc));
-	}
-	else
-	{
-		rc = cuModuleGetFunction(&gpreagg->kern_nogrp,
-								 gpreagg->task.cuda_module,
-								 "gpupreagg_nogroup_reduction");
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuModuleGetFunction : %s", errorText(rc));
-	}
-	if (gpreagg->has_varlena)
-	{
-		rc = cuModuleGetFunction(&gpreagg->kern_fixvar,
-								 gpreagg->task.cuda_module,
-								 "gpupreagg_fixup_varlena");
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuModuleGetFunction : %s", errorText(rc));
-	}
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+	rc = cuModuleGetFunction(&gpreagg->kern_lagg,
+							 gpreagg->task.cuda_module,
+							 "gpupreagg_local_reduction");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+	rc = cuModuleGetFunction(&gpreagg->kern_gagg,
+							 gpreagg->task.cuda_module,
+							 "gpupreagg_global_reduction");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+	rc = cuModuleGetFunction(&gpreagg->kern_fagg,
+							 gpreagg->task.cuda_module,
+							 "gpupreagg_final_reduction");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+	rc = cuModuleGetFunction(&gpreagg->kern_nogrp,
+							 gpreagg->task.cuda_module,
+							 "gpupreagg_nogroup_reduction");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+	rc = cuModuleGetFunction(&gpreagg->kern_fixvar,
+							 gpreagg->task.cuda_module,
+							 "gpupreagg_fixup_varlena");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
 
 	/*
-	 * Allocation of device memory
+	 * Allocation of own device memory
 	 *
 	 * NOTE: In case when GpuPreAgg kicks global-reduction without local-
 	 * reduction, we assign same buffer on kds_src/kds_dst because it will
@@ -4078,6 +4181,13 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_dst->kds));
 
 	/*
+	 * Allocation and setup final result buffer of this segment, or
+	 * synchronize initialization by other task
+	 */
+	if (!gpupreagg_send_segment(gpreagg))
+		goto out_of_resource;
+
+	/*
 	 * Creation of event objects, if any
 	 */
 	if (gpreagg->task.pfm.enabled)
@@ -4101,6 +4211,11 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 	}
+	rc = cuEventCreate(&ev_kern_exec_end, CU_EVENT_DEFAULT);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+	Assert(segment->num_kern_exec_end < segment->num_chunks);
+	segment->ev_kern_exec_end[segment->num_kern_exec_end++] = ev_kern_exec_end;
 
 	/*
 	 * OK, enqueue a series of commands
@@ -4352,6 +4467,13 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	}
 
 	/*
+	 * Record kernel execution end event
+	 */
+	rc = cuEventRecord(ev_kern_exec_end, gpreagg->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
+
+	/*
 	 * commands for DMA recv
 	 */
 	CUDA_EVENT_RECORD(gpreagg, ev_dma_recv_start);
@@ -4363,7 +4485,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
                            length,
                            gpreagg->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
+		elog(ERROR, "failed on cuMemcpyDtoHAsync: %s", errorText(rc));
     gpreagg->task.pfm.bytes_dma_recv += length;
     gpreagg->task.pfm.num_dma_recv++;
 
