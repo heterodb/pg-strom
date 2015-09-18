@@ -2329,6 +2329,8 @@ errorTextKernel(kern_errorbuf *kerror)
 		KERN_ENTRY(gpupreagg_local_reduction);
 		KERN_ENTRY(gpupreagg_global_reduction);
 		KERN_ENTRY(gpupreagg_nogroup_reduction);
+		KERN_ENTRY(gpupreagg_final_preparation);
+		KERN_ENTRY(gpupreagg_final_reduction);
 		KERN_ENTRY(gpupreagg_fixup_varlena);
 		KERN_ENTRY(gpusort_preparation);
 		KERN_ENTRY(gpusort_bitonic_local);

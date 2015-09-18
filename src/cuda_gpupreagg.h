@@ -87,11 +87,9 @@ typedef struct
 	(offsetof(kern_gpupreagg, kparams) +				\
 	 KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg) +			\
 	 offsetof(kern_resultbuf, results[0]))
-#define KERN_GPUPREAGG_DMARECV_OFFSET(kgpreagg)			\
-	((uintptr_t)KERN_GPUPREAGG_RESULTBUF(kgpreagg) -	\
-	 (uintptr_t)(kgpreagg))
-#define KERN_GPUPREAGG_DMARECV_LENGTH(kgpreagg,nitems)	\
-	offsetof(kern_resultbuf, results[(nitems)])
+#define KERN_GPUPREAGG_DMARECV_OFFSET(kgpreagg)		0
+#define KERN_GPUPREAGG_DMARECV_LENGTH(kgpreagg)			\
+	offsetof(kern_gpupreagg, pg_crc32_table[0])
 
 /*
  * NOTE: hashtable of gpupreagg is an array of pagg_hashslot.
@@ -803,6 +801,35 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 }
 
 /*
+ * gpupreagg_final_preparation
+ *
+ * It initializes kern_resultbuf prior to gpupreagg_final_reduction if no
+ * other kernel functions are called in the previous steps (in case when
+ * number of groups are large enough for chunk-level-reduction).
+ */
+KERNEL_FUNCTION(void)
+gpupreagg_final_preparation(kern_gpupreagg *kgpreagg,
+							kern_data_store *kds_src)
+{
+	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	kern_resultbuf *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
+	kern_context	kcxt;
+	cl_uint			nitems = kds_src->nitems;
+
+	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_final_preparation, kparams);
+
+	if (get_global_id() == 0)
+		kresults->nitems = nitems;
+	assert(nitems <= kresults->nrooms);
+
+	if (get_global_id() < nitems)
+		kresults->results[get_global_id()] = get_global_id();
+
+	/* write-back execution status into host-side */
+	kern_writeback_error_status(&kresults->kerror, kcxt.e);
+}
+
+/*
  * gpupreagg_final_reduction
  *
  * kds_dst = result of local or global reduction
@@ -918,35 +945,29 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
  */
 KERNEL_FUNCTION(void)
 gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
-						kern_data_store *kds_dst,
-						kern_data_store *ktoast)
+						kern_resultbuf *kresults_final,
+						kern_data_store *kds_final)
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	kern_resultbuf *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
 	kern_context	kcxt;
 	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
 	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
-	cl_uint			nattrs = kds_dst->ncols;
-	cl_uint			nitems = kresults->nitems;
+	cl_uint			nattrs = kds_final->ncols;
+	cl_uint			nitems = kresults_final->nitems;
 	cl_uint			colidx;
-	cl_uint			rowidx;
-	Datum		   *ts_values;
-	cl_bool		   *ts_isnull;
 	size_t			offset;
-	size_t			ktoast_length = ktoast->length;
 	kern_colmeta	cmeta;
 
 	/* Sanity checks */
-	assert(kds_dst->format == KDS_FORMAT_SLOT &&
-		   ktoast->format == KDS_FORMAT_ROW);
+	assert(kds_final->format == KDS_FORMAT_SLOT);
 
 	INIT_KERNEL_CONTEXT(&kcxt,gpupreagg_fixup_varlena,kparams);
 
 	if (get_global_id() < nitems)
 	{
-		rowidx = kresults->results[get_global_id()];
-		ts_values = KERN_DATA_STORE_VALUES(kds_dst, rowidx);
-		ts_isnull = KERN_DATA_STORE_ISNULL(kds_dst, rowidx);
+		cl_uint		rowidx = kresults_final->results[get_global_id()];
+		Datum	   *ts_values = KERN_DATA_STORE_VALUES(kds_final, rowidx);
+		cl_bool	   *ts_isnull = KERN_DATA_STORE_ISNULL(kds_final, rowidx);
 
 		for (colidx = 0; colidx < nattrs; colidx++)
 		{
@@ -960,9 +981,10 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
 			if (ts_isnull[colidx])
 				continue;
 			/* fixup pointer variables */
-			offset = ((size_t)ts_values[colidx] - (size_t)&ktoast->hostptr);
-			if (offset < ktoast_length)
-				ts_values[colidx] = ktoast->hostptr + offset;
+			offset = ((size_t)ts_values[colidx] -
+					  (size_t)&kds_final->hostptr);
+			if (offset < kds_final->length)
+				ts_values[colidx] = kds_final->hostptr + offset;
 			else
 			{
 				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreOutOfRange);
@@ -971,7 +993,7 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
 		}
 	}
 	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kresults->kerror, kcxt.e);
+	kern_writeback_error_status(&kresults_final->kerror, kcxt.e);
 }
 
 /* ----------------------------------------------------------------

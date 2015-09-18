@@ -475,13 +475,13 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 	pfree(pds);
 }
 
-static void
-init_kern_data_store(kern_data_store *kds,
-					 TupleDesc tupdesc,
-					 Size length,
-					 int format,
-					 uint nrooms,
-					 bool internal_format)
+void
+init_kernel_data_store(kern_data_store *kds,
+					   TupleDesc tupdesc,
+					   Size length,
+					   int format,
+					   uint nrooms,
+					   bool internal_format)
 {
 	int		i, attcacheoff;
 
@@ -826,8 +826,8 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 	 * initialize common part of kds. Note that row-format cannot
 	 * determine 'nrooms' preliminary, so INT_MAX instead.
 	 */
-	init_kern_data_store(pds->kds, tupdesc, pds->kds_length,
-						 KDS_FORMAT_ROW, INT_MAX, false);
+	init_kernel_data_store(pds->kds, tupdesc, pds->kds_length,
+						   KDS_FORMAT_ROW, INT_MAX, false);
 
 	/* OK, it is now tracked by GpuContext */
 	dlist_push_tail(&gcontext->pds_list, &pds->pds_chain);
@@ -941,8 +941,8 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 		memset(&ptoast->pds_chain, 0, sizeof(dlist_node));
 		pds->ptoast = ptoast;
 	}
-	init_kern_data_store(pds->kds, tupdesc, pds->kds_length,
-						 KDS_FORMAT_SLOT, nrooms, internal_format);
+	init_kernel_data_store(pds->kds, tupdesc, pds->kds_length,
+						   KDS_FORMAT_SLOT, nrooms, internal_format);
 
 	/* OK, now it is tracked by GpuContext */
 	dlist_push_tail(&gcontext->pds_list, &pds->pds_chain);

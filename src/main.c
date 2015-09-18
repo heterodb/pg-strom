@@ -492,10 +492,12 @@ pgstrom_accum_perfmon(pgstrom_perfmon *accum, const pgstrom_perfmon *pfm)
 	accum->num_kern_prep		+= pfm->num_kern_prep;
 	accum->num_kern_lagg		+= pfm->num_kern_lagg;
 	accum->num_kern_gagg		+= pfm->num_kern_gagg;
+	accum->num_kern_fagg		+= pfm->num_kern_fagg;
 	accum->num_kern_nogrp		+= pfm->num_kern_nogrp;
 	accum->time_kern_prep		+= pfm->time_kern_prep;
 	accum->time_kern_lagg		+= pfm->time_kern_lagg;
 	accum->time_kern_gagg		+= pfm->time_kern_gagg;
+	accum->time_kern_fagg		+= pfm->time_kern_fagg;
 	accum->time_kern_nogrp		+= pfm->time_kern_nogrp;
 	/* in case of gpusort */
 	accum->num_prep_sort		+= pfm->num_prep_sort;
@@ -651,6 +653,16 @@ pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 											 (double)pfm->num_kern_gagg),
 				 pfm->num_kern_gagg);
         ExplainPropertyText("Global reduction kernel", buf, es);
+	}
+
+	if (pfm->num_kern_fagg > 0)
+	{
+		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
+				 milliseconds_unitary_format((double)pfm->time_kern_fagg),
+				 milliseconds_unitary_format((double)pfm->time_kern_fagg /
+											 (double)pfm->num_kern_fagg),
+				 pfm->num_kern_fagg);
+        ExplainPropertyText("Final reduction kernel", buf, es);
 	}
 
 	if (pfm->num_kern_nogrp > 0)

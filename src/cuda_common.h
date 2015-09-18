@@ -216,7 +216,9 @@ typedef uintptr_t	hostptr_t;
 #define StromKernel_gpupreagg_local_reduction		0x0302
 #define StromKernel_gpupreagg_global_reduction		0x0303
 #define StromKernel_gpupreagg_nogroup_reduction		0x0304
-#define StromKernel_gpupreagg_fixup_varlena			0x0305
+#define StromKernel_gpupreagg_final_preparation		0x0305
+#define StromKernel_gpupreagg_final_reduction		0x0306
+#define StromKernel_gpupreagg_fixup_varlena			0x0307
 #define StromKernel_gpusort_preparation				0x0401
 #define StromKernel_gpusort_bitonic_local			0x0402
 #define StromKernel_gpusort_bitonic_step			0x0403
