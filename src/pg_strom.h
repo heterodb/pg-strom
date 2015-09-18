@@ -178,6 +178,15 @@ typedef struct {
 		}														\
 	} while(0)
 
+#define CUDA_EVENT_CREATE(node,ev_field)					\
+	do {													\
+		CUresult __rc = cuEventCreate(&(node)->ev_field,	\
+									  CU_EVENT_DEFAULT);	\
+		if (__rc != CUDA_SUCCESS)							\
+			elog(ERROR, "failed on cuEventCreate: %s",		\
+				 errorText(__rc));							\
+	} while(0)
+
 #define CUDA_EVENT_DESTROY(node,ev_field)						\
 	do {														\
 		if ((node)->ev_field)									\

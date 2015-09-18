@@ -3525,18 +3525,32 @@ gpupreagg_send_segment(pgstrom_gpupreagg *gpreagg)
 {
 	gpupreagg_segment  *segment = gpreagg->segment;
 	pgstrom_data_store *pds_final = segment->pds_final;
-	Size				nrooms = pds_final->kds->nrooms;
+	size_t				nrooms = pds_final->kds->nrooms;
+	size_t				grid_size;
+	size_t				block_size;
+	size_t				length;
+	CUfunction			kern_final_prep;
 	CUdeviceptr			m_kresults_final;
 	CUdeviceptr			m_hashslot_final;
 	CUdeviceptr			m_kds_final;
 	CUevent				ev_final_loaded;
 	CUresult			rc;
+	void			   *kern_args[4];
+
+	/*
+	 * FIXME: hash_size is nrooms of pds_final. Is it really right estimation?
+	 */
 
 	if (!segment->ev_final_loaded)
 	{
-		Size	length;
+		/* Lookup gpupreagg_final_preparation */
+		rc = cuModuleGetFunction(&kern_final_prep,
+								 gpreagg->task.cuda_module,
+								 "gpupreagg_final_preparation");
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
 
-		/* device memory allocation for kds_final and kresults_final */
+		/* Device memory allocation for kds_final and kresults_final */
 		length = (GPUMEMALIGN(offsetof(kern_resultbuf, results[nrooms])) +
 				  GPUMEMALIGN(sizeof(pagg_hashslot) * nrooms) +
 				  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_final->kds)));
@@ -3565,6 +3579,30 @@ gpupreagg_send_segment(pgstrom_gpupreagg *gpreagg)
 							   gpreagg->task.cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+
+		/* Launch:
+		 * KERNEL_FUNCTION(void)
+		 * gpupreagg_final_preparation(size_t hash_size,
+		 *                             pagg_hashslot *f_hashslot)
+		 */
+		pgstrom_compute_workgroup_size(&grid_size,
+									   &block_size,
+									   kern_final_prep,
+									   gpreagg->task.cuda_device,
+									   false,
+									   nrooms,
+									   sizeof(kern_errorbuf));
+		kern_args[0] = &nrooms;
+		kern_args[1] = &m_hashslot_final;
+		rc = cuLaunchKernel(kern_final_prep,
+							grid_size, 1, 1,
+							block_size, 1, 1,
+							sizeof(kern_errorbuf) * block_size,
+							gpreagg->task.cuda_stream,
+							kern_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 
 		/* DMA send synchronization of final buffer */
 		rc = cuEventRecord(ev_final_loaded, gpreagg->task.cuda_stream);
@@ -3600,20 +3638,16 @@ gpupreagg_task_create(GpuPreAggState *gpas,
 	kern_resultbuf	   *kresults;
 	TupleDesc			tupdesc;
 	size_t				nitems = pds_in->kds->nitems;
-	Size				kresults_length;
-	Size				kds_head_length;
-	Size				required;
+	Size				length;
 
 	/* allocation of pgtrom_gpupreagg */
 	tupdesc = gpas->gts.css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
-	kresults_length = STROMALIGN(offsetof(kern_resultbuf, results[nitems]));
-	kds_head_length = STROMALIGN(offsetof(kern_data_store,
-										  colmeta[tupdesc->natts]));
-	required = (STROMALIGN(offsetof(pgstrom_gpupreagg, kern.kparams) +
-						   gpas->gts.kern_params->length) +
-				kresults_length +
-				kds_head_length);
-	gpreagg = MemoryContextAllocZero(gcontext->memcxt, required);
+	length = (STROMALIGN(offsetof(pgstrom_gpupreagg, kern.kparams) +
+						 gpas->gts.kern_params->length) +
+			  STROMALIGN(offsetof(kern_resultbuf, results[0])) +
+			  STROMALIGN(offsetof(kern_data_store,
+								  colmeta[tupdesc->natts])));
+	gpreagg = MemoryContextAllocZero(gcontext->memcxt, length);
 
 	/* initialize GpuTask object */
 	pgstrom_init_gputask(&gpas->gts, &gpreagg->task);
@@ -3634,21 +3668,24 @@ gpupreagg_task_create(GpuPreAggState *gpas,
 		   gpas->gts.kern_params,
 		   gpas->gts.kern_params->length);
 	/* kern_resultbuf */
-	kresults = gpreagg->kresults = KERN_GPUPREAGG_RESULTBUF(&gpreagg->kern);
-	kresults->nrels = 1;
-	kresults->nrooms = nitems;
-	kresults->nitems = 0;
-	kresults->all_visible = true;
+	gpreagg->kresults = KERN_GPUPREAGG_RESULTBUF(&gpreagg->kern);
+	gpreagg->kresults->nrels = 1;
+	gpreagg->kresults->nrooms = nitems;
+	gpreagg->kresults->nitems = 0;
+	gpreagg->kresults->all_visible =
+		(gpreagg->reduction_mode == GPUPREAGG_FINAL_REDUCTION);
 	memset(&kresults->kerror, 0, sizeof(kern_errorbuf));
 
 	/* kds_head - template of intermediation buffer */
-	gpreagg->kds_head = (kern_data_store *)((char *)kresults +
-											kresults_length);
+	gpreagg->kds_head = (kern_data_store *)
+		((char *)kresults + STROMALIGN(offsetof(kern_resultbuf, results[0])));
+	length = (STROMALIGN(offsetof(kern_data_store,
+								  colmeta[tupdesc->natts])) +
+			  STROMALIGN(LONGALIGN((sizeof(Datum) + sizeof(char)) *
+								   tupdesc->natts) * nitems));
 	init_kernel_data_store(gpreagg->kds_head,
 						   tupdesc,
-						   kds_head_length +
-						   STROMALIGN(LONGALIGN((sizeof(Datum) + sizeof(char))
-												* tupdesc->natts) * nitems),
+						   length,
 						   KDS_FORMAT_SLOT,
 						   nitems,
 						   gpas->has_numeric);
@@ -4005,6 +4042,7 @@ gpupreagg_cleanup_cuda_resources(pgstrom_gpupreagg *gpreagg)
 	CUDA_EVENT_DESTROY(gpreagg, ev_kern_lagg_end);
 	CUDA_EVENT_DESTROY(gpreagg, ev_kern_gagg_end);
 	CUDA_EVENT_DESTROY(gpreagg, ev_kern_fagg_end);
+	CUDA_EVENT_DESTROY(gpreagg, ev_kern_fixvar_begin);
 	CUDA_EVENT_DESTROY(gpreagg, ev_dma_recv_start);
 	CUDA_EVENT_DESTROY(gpreagg, ev_dma_recv_stop);
 
@@ -4115,7 +4153,7 @@ static void
 gpupreagg_task_respond(CUstream stream, CUresult status, void *private)
 {
 	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) private;
-	kern_resultbuf	   *kresults = KERN_GPUPREAGG_RESULTBUF(&gpreagg->kern);
+	kern_resultbuf	   *kresults = gpreagg->kresults;
 	GpuTaskState	   *gts = gpreagg->task.gts;
 
 	/* See comments in pgstrom_respond_gpuscan() */
@@ -4166,6 +4204,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	kern_data_store	   *kds_head = gpreagg->kds_head;
 	gpupreagg_segment  *segment = gpreagg->segment;
 	size_t				nitems = pds_in->kds->nitems;
+	size_t				__nitems;
 	size_t				offset;
 	size_t				length;
 	size_t				grid_size;
@@ -4223,7 +4262,8 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	 * bypass local reduction and global-reduction expects a buffer that
 	 * initialized with gpupreagg_projection().
 	 */
-	length = (GPUMEMALIGN(KERN_GPUPREAGG_LENGTH(&gpreagg->kern, nitems)) +
+	__nitems = (gpreagg->kresults->all_visible ? 0 : nitems);
+	length = (GPUMEMALIGN(KERN_GPUPREAGG_LENGTH(&gpreagg->kern, __nitems)) +
 			  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_in->kds)) +
 			  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(kds_head)) +
 			  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(kds_head)) +
@@ -4231,9 +4271,8 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	gpreagg->m_gpreagg = gpuMemAlloc(&gpreagg->task, length);
 	if (!gpreagg->m_gpreagg)
         goto out_of_resource;
-
 	gpreagg->m_kds_in = gpreagg->m_gpreagg +
-		GPUMEMALIGN(KERN_GPUPREAGG_LENGTH(&gpreagg->kern, nitems));
+		GPUMEMALIGN(KERN_GPUPREAGG_LENGTH(&gpreagg->kern, __nitems));
 	gpreagg->m_kds_src = gpreagg->m_kds_in +
 		GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_in->kds));
 	gpreagg->m_kds_dst = gpreagg->m_kds_src +
@@ -4253,36 +4292,16 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	 */
 	if (gpreagg->task.pfm.enabled)
 	{
-		rc = cuEventCreate(&gpreagg->ev_dma_send_start, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-		rc = cuEventCreate(&gpreagg->ev_dma_send_stop, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-		rc = cuEventCreate(&gpreagg->ev_kern_prep_end, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-		rc = cuEventCreate(&gpreagg->ev_kern_nogrp_end, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-		rc = cuEventCreate(&gpreagg->ev_kern_lagg_end, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-		rc = cuEventCreate(&gpreagg->ev_kern_gagg_end, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-		rc = cuEventCreate(&gpreagg->ev_kern_fagg_end, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-		rc = cuEventCreate(&gpreagg->ev_kern_fixvar_begin, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-		rc = cuEventCreate(&gpreagg->ev_dma_recv_start, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-		rc = cuEventCreate(&gpreagg->ev_dma_recv_stop, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+		CUDA_EVENT_CREATE(gpreagg, ev_dma_send_start);
+		CUDA_EVENT_CREATE(gpreagg, ev_dma_send_stop);
+		CUDA_EVENT_CREATE(gpreagg, ev_kern_prep_end);
+		CUDA_EVENT_CREATE(gpreagg, ev_kern_nogrp_end);
+		CUDA_EVENT_CREATE(gpreagg, ev_kern_lagg_end);
+		CUDA_EVENT_CREATE(gpreagg, ev_kern_gagg_end);
+		CUDA_EVENT_CREATE(gpreagg, ev_kern_fagg_end);
+		CUDA_EVENT_CREATE(gpreagg, ev_kern_fixvar_begin);
+		CUDA_EVENT_CREATE(gpreagg, ev_dma_recv_start);
+		CUDA_EVENT_CREATE(gpreagg, ev_dma_recv_stop);
 	}
 
 	/*
@@ -4321,6 +4340,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	gpreagg->task.pfm.bytes_dma_send += length;
 	gpreagg->task.pfm.num_dma_send++;
 
+	length = KERN_DATA_STORE_HEAD_LENGTH(kds_head);
 	rc = cuMemcpyHtoDAsync(gpreagg->m_kds_dst,
 						   kds_head,
 						   length,
@@ -4492,32 +4512,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		CUDA_EVENT_RECORD(gpreagg, ev_kern_gagg_end);
 	}
 	else
-	{
-		/* Launch:
-		 * KERNEL_FUNCTION(void)
-		 * gpupreagg_final_preparation(kern_gpupreagg *kgpreagg,
-		 *                             kern_data_store *kds_src)
-		 */
-		pgstrom_compute_workgroup_size(&grid_size,
-									   &block_size,
-									   gpreagg->kern_fprep,
-									   gpreagg->task.cuda_device,
-									   false,
-									   nitems,
-									   sizeof(kern_errorbuf));
-		kern_args[0] = &gpreagg->m_gpreagg;
-		kern_args[1] = &gpreagg->m_kds_src;
-
-		rc = cuLaunchKernel(gpreagg->kern_fprep,
-							grid_size, 1, 1,
-							block_size, 1, 1,
-							sizeof(kern_errorbuf) * block_size,
-							gpreagg->task.cuda_stream,
-							kern_args,
-							NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-	}
+		Assert(gpreagg->reduction_mode == GPUPREAGG_FINAL_REDUCTION);
 
 	/* Launch:
 	 * KERNEL_FUNCTION(void)

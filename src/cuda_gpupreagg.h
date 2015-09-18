@@ -803,30 +803,22 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 /*
  * gpupreagg_final_preparation
  *
- * It initializes kern_resultbuf prior to gpupreagg_final_reduction if no
- * other kernel functions are called in the previous steps (in case when
- * number of groups are large enough for chunk-level-reduction).
+ * It initializes the f_hashslot prior to gpupreagg_final_reduction
  */
 KERNEL_FUNCTION(void)
-gpupreagg_final_preparation(kern_gpupreagg *kgpreagg,
-							kern_data_store *kds_src)
+gpupreagg_final_preparation(kern_data_store *kds_final,
+							pagg_hashslot *f_hashslot)
 {
-	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	kern_resultbuf *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
-	kern_context	kcxt;
-	cl_uint			nitems = kds_src->nitems;
+	size_t		hash_size = kds_final->nrooms;
+	size_t		hash_index;
 
-	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_final_preparation, kparams);
-
-	if (get_global_id() == 0)
-		kresults->nitems = nitems;
-	assert(nitems <= kresults->nrooms);
-
-	if (get_global_id() < nitems)
-		kresults->results[get_global_id()] = get_global_id();
-
-	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kresults->kerror, kcxt.e);
+	for (hash_index = get_global_id();
+		 hash_index < hash_size;
+		 hash_index += get_global_size())
+	{
+		f_hashslot[hash_index].s.hash = 0;
+		f_hashslot[hash_index].s.index = (cl_uint)(0xffffffff);
+	}
 }
 
 /*
@@ -836,14 +828,25 @@ gpupreagg_final_preparation(kern_gpupreagg *kgpreagg,
  * kds_final = destination buffer in this case.
  *             kds_final->usage points current available variable length
  *             area, until kds_final->length. Use atomicAdd().
- * g_hashslot = hash slot of the final buffer
+ * f_hashslot = hash slot of the final buffer
  */
 KERNEL_FUNCTION(void)
 gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,
 						  kern_data_store *kds_dst,
 						  kern_data_store *kds_final,
-						  pagg_hashslot *g_hashslot)
+						  pagg_hashslot *f_hashslot)
 {
+	kern_resultbuf *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
+	size_t			kds_index;
+
+	/* row-index on kds_dst buffer */
+	if (kresults->all_visible)
+		kds_index = get_global_id();
+	else if (get_global_id() < kresults->nitems)
+		kds_index = kresults->results[get_global_id()];
+	else
+		kds_index = kresults->nitems;	/* always out of range */
+
 
 
 
