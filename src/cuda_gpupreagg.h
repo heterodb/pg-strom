@@ -59,8 +59,8 @@
  */
 typedef struct
 {
+	cl_uint			key_dist_salt;			/* hashkey distribution salt */
 	cl_uint			hash_size;				/* size of global hash-slots */
-	char			__padding__[4];			/* alignment */
 	cl_uint			pg_crc32_table[256];	/* master CRC32 table */
 	kern_parambuf	kparams;
 	/*
@@ -393,6 +393,11 @@ gpupreagg_preparation(kern_gpupreagg *kgpreagg,
 
 	INIT_KERNEL_CONTEXT(&kcxt,gpupreagg_preparation,kparams);
 
+	/* sanity checks */
+	assert(kgpreagg->key_dist_salt > 0);
+	assert(kds_in->format == KDS_FORMAT_ROW);
+	assert(kds_src->format == KDS_FORMAT_SLOT);
+
 	/* init global hash slot */
 	hash_size = kgpreagg->hash_size;;
 	for (hash_index = get_global_id();
@@ -491,7 +496,8 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 	if (get_global_id() < nitems)
 		hash_value = gpupreagg_hashvalue(&kcxt, crc32_table,
 										 kds_src, ktoast,
-										 get_global_id());
+										 get_global_id(),
+										 kgpreagg->key_dist_salt);
 
 	/*
 	 * Find a hash-slot to determine the item index that represents
@@ -694,7 +700,8 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	{
 		hash_value = gpupreagg_hashvalue(&kcxt, crc32_table,
 										 kds_dst, ktoast,
-										 get_global_id());
+										 get_global_id(),
+										 kgpreagg->key_dist_salt);
 		/*
 		 * Find a hash-slot to determine the item index that represents
 		 * a particular group-keys.

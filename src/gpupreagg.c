@@ -1848,7 +1848,8 @@ gpupreagg_codegen_qual_eval(CustomScan *cscan, GpuPreAggInfo *gpa_info,
  *                     cl_uint *crc32_table,
  *                     kern_data_store *kds,
  *                     kern_data_store *ktoast,
- *                     size_t kds_index);
+ *                     size_t kds_index,
+ *                     cl_uint key_dist_salt)
  */
 static char *
 gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
@@ -1870,11 +1871,15 @@ gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 					 "                    cl_uint *crc32_table,\n"
 					 "                    kern_data_store *kds,\n"
 					 "                    kern_data_store *ktoast,\n"
-					 "                    size_t kds_index)\n"
+					 "                    size_t kds_index,\n"
+					 "                    cl_uint key_dist_salt)\n"
 					 "{\n");
 	appendStringInfo(&body,
-					 "  cl_uint hashval;\n"
+					 "  pg_int4_t my_salt;\n"
+					 "  cl_uint   hashval;\n"
 					 "\n"
+					 "  my_salt.isnull = !(key_dist_salt > 1);\n"
+					 "  my_salt.value = (kds_index %% key_dist_salt);\n"
 					 "  INIT_LEGACY_CRC32(hashval);\n");
 
 	for (i=0; i < gpa_info->numCols; i++)
@@ -1911,7 +1916,11 @@ gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	}
 	/* no constants should be appear */
 	Assert(bms_is_empty(context->param_refs));
-
+	/* add key distribution salt if aggregation is too aggressive */
+	appendStringInfo(
+		&body,
+		"  hashval = pg_int4_comp_crc32(crc32_table, hashval, my_salt);\n");
+	/* finalize hash value calculation */
 	appendStringInfo(&body,
 					 "  FIN_LEGACY_CRC32(hashval);\n");
 	appendStringInfo(&decl,
