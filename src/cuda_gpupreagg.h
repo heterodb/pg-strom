@@ -815,14 +815,13 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
  * It initializes the f_hashslot prior to gpupreagg_final_reduction
  */
 KERNEL_FUNCTION(void)
-gpupreagg_final_preparation(kern_data_store *kds_final,
+gpupreagg_final_preparation(size_t f_hashsize,
 							pagg_hashslot *f_hashslot)
 {
-	size_t		hash_size = kds_final->nrooms;
 	size_t		hash_index;
 
 	for (hash_index = get_global_id();
-		 hash_index < hash_size;
+		 hash_index < f_hashsize;
 		 hash_index += get_global_size())
 	{
 		f_hashslot[hash_index].s.hash = 0;
@@ -837,13 +836,16 @@ gpupreagg_final_preparation(kern_data_store *kds_final,
  * kds_final = destination buffer in this case.
  *             kds_final->usage points current available variable length
  *             area, until kds_final->length. Use atomicAdd().
+ * f_hashsize = size of the f_hashslot hash slot
  * f_hashslot = hash slot of the final buffer
  */
 KERNEL_FUNCTION(void)
-gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,
-						  kern_data_store *kds_dst,
-						  kern_data_store *kds_final,
-						  pagg_hashslot *f_hashslot)
+gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
+						  kern_data_store *kds_dst,		/* in */
+						  kern_resultbuf *kresults_final,	/* out */
+						  kern_data_store *kds_final,		/* out */
+						  size_t         f_hashsize,
+						  pagg_hashslot *f_hashslot) /* only internal usage */
 {
 	kern_resultbuf *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
 	size_t			kds_index;

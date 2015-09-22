@@ -233,6 +233,7 @@ typedef struct gpupreagg_segment
 	CUdeviceptr		m_kresults_final;	/* final kresults buffer on device */
 	CUdeviceptr		m_hashslot_final;	/* final reduction hash table */
 	CUdeviceptr		m_kds_final;		/* final kds buffer on device */
+	size_t			f_hashsize;			/* size of final reduction hashtable */
 	cl_int			num_chunks;			/* # of chunks in this segment */
 	cl_int			idx_chunks;			/* index of the chunk array */
 	cl_int			refcnt;				/* referenced by pgstrom_gpupreagg */
@@ -3455,6 +3456,11 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 	segment->m_kds_final = 0UL;
 	segment->m_hashslot_final = 0UL;
 	segment->m_kresults_final = 0UL;
+	/*
+	 * FIXME: f_hashsize is nroom of the pds_final. It is not a reasonable
+	 * estimation, thus needs to be revised.
+	 */
+	segment->f_hashsize = nrooms;
 	segment->num_chunks = num_chunks;
 	segment->idx_chunks = 0;
 	segment->refcnt = 1;
@@ -3548,10 +3554,6 @@ gpupreagg_send_segment(pgstrom_gpupreagg *gpreagg)
 	CUresult			rc;
 	void			   *kern_args[4];
 
-	/*
-	 * FIXME: hash_size is nrooms of pds_final. Is it really right estimation?
-	 */
-
 	if (!segment->ev_final_loaded)
 	{
 		/* Lookup gpupreagg_final_preparation */
@@ -3563,7 +3565,7 @@ gpupreagg_send_segment(pgstrom_gpupreagg *gpreagg)
 
 		/* Device memory allocation for kds_final and kresults_final */
 		length = (GPUMEMALIGN(offsetof(kern_resultbuf, results[nrooms])) +
-				  GPUMEMALIGN(sizeof(pagg_hashslot) * nrooms) +
+				  GPUMEMALIGN(sizeof(pagg_hashslot) * segment->f_hashsize) +
 				  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_final->kds)));
 		m_kresults_final = gpuMemAlloc(&gpreagg->task, length);
 		if (!m_kresults_final)
@@ -3571,7 +3573,7 @@ gpupreagg_send_segment(pgstrom_gpupreagg *gpreagg)
 		m_hashslot_final = m_kresults_final +
 			GPUMEMALIGN(offsetof(kern_resultbuf, results[nrooms]));
 		m_kds_final = m_hashslot_final +
-			GPUMEMALIGN(sizeof(pagg_hashslot) * nrooms);
+			GPUMEMALIGN(sizeof(pagg_hashslot) * segment->f_hashsize);
 
 		/* create an event object */
 		rc = cuEventCreate(&ev_final_loaded, CU_EVENT_DEFAULT);
@@ -3603,7 +3605,7 @@ gpupreagg_send_segment(pgstrom_gpupreagg *gpreagg)
 									   false,
 									   nrooms,
 									   sizeof(kern_errorbuf));
-		kern_args[0] = &nrooms;
+		kern_args[0] = &segment->f_hashsize;
 		kern_args[1] = &m_hashslot_final;
 		rc = cuLaunchKernel(kern_final_prep,
 							grid_size, 1, 1,
@@ -4544,7 +4546,9 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	 * KERNEL_FUNCTION(void)
 	 * gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,
 	 *                           kern_data_store *kds_dst,
+	 *                           kern_resultbuf *kresults_final,
 	 *                           kern_data_store *kds_final,
+	 *                           size_t         f_hashsize,
 	 *                           pagg_hashslot *f_hashslot)
 	 */
 	pgstrom_compute_workgroup_size(&grid_size,
@@ -4556,8 +4560,10 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 								   sizeof(kern_errorbuf));
 	kern_args[0] = &gpreagg->m_gpreagg;
 	kern_args[1] = &gpreagg->m_kds_dst;
-	kern_args[2] = &segment->m_kds_final;
-	kern_args[3] = &segment->m_hashslot_final;
+	kern_args[2] = &segment->m_kresults_final;
+	kern_args[3] = &segment->m_kds_final;
+	kern_args[4] = &segment->f_hashsize;
+	kern_args[5] = &segment->m_hashslot_final;
 	lmem_size = Max(sizeof(kern_errorbuf) * block_size,
 					sizeof(gpreagg->kern.pg_crc32_table));
 	rc = cuLaunchKernel(gpreagg->kern_fagg,
