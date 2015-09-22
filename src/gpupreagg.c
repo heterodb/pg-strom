@@ -3183,6 +3183,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	gpa_info.bulkload_density = bulkload_density;
 	gpa_info.num_groups     = num_groups;
 	gpa_info.nrows_per_chunk= nrows_per_chunk;
+	gpa_info.keys_varlen    = keys_varlen;
+	gpa_info.safety_limit   = safety_limit;
 	gpa_info.key_dist_salt  = key_dist_salt;
 	gpa_info.outer_quals    = outer_quals;
 
@@ -3644,7 +3646,6 @@ gpupreagg_task_create(GpuPreAggState *gpas,
 {
 	GpuContext		   *gcontext = gpas->gts.gcontext;
 	pgstrom_gpupreagg  *gpreagg;
-	kern_resultbuf	   *kresults;
 	TupleDesc			tupdesc;
 	size_t				nitems = pds_in->kds->nitems;
 	Size				length;
@@ -3678,16 +3679,17 @@ gpupreagg_task_create(GpuPreAggState *gpas,
 		   gpas->gts.kern_params->length);
 	/* kern_resultbuf */
 	gpreagg->kresults = KERN_GPUPREAGG_RESULTBUF(&gpreagg->kern);
+	memset(&gpreagg->kresults, 0, sizeof(kern_resultbuf));
 	gpreagg->kresults->nrels = 1;
 	gpreagg->kresults->nrooms = nitems;
 	gpreagg->kresults->nitems = 0;
 	gpreagg->kresults->all_visible =
 		(gpreagg->reduction_mode == GPUPREAGG_FINAL_REDUCTION);
-	memset(&kresults->kerror, 0, sizeof(kern_errorbuf));
 
 	/* kds_head - template of intermediation buffer */
 	gpreagg->kds_head = (kern_data_store *)
-		((char *)kresults + STROMALIGN(offsetof(kern_resultbuf, results[0])));
+		((char *)gpreagg->kresults + STROMALIGN(offsetof(kern_resultbuf,
+														 results[0])));
 	length = (STROMALIGN(offsetof(kern_data_store,
 								  colmeta[tupdesc->natts])) +
 			  STROMALIGN(LONGALIGN((sizeof(Datum) + sizeof(char)) *
@@ -4151,7 +4153,17 @@ gpupreagg_task_complete(GpuTask *gtask)
 						   ev_dma_recv_stop);
 		pgstrom_accum_perfmon(&gts->pfm_accum, &gpreagg->task.pfm);
 	}
-	gpupreagg_cleanup_cuda_resources(gpreagg);	
+
+	/*
+	 * NOTE: Only terminator task shall be returned to the main logic.
+	 * Elsewhere, task is silently released as if nothing were returned.
+	 */
+	if (!gpreagg->is_terminator)
+	{
+		gpupreagg_task_release(&gpreagg->task);
+		return false;
+	}
+	gpupreagg_cleanup_cuda_resources(gpreagg);
 	return true;
 }
 
@@ -4162,7 +4174,7 @@ static void
 gpupreagg_task_respond(CUstream stream, CUresult status, void *private)
 {
 	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) private;
-	kern_resultbuf	   *kresults = gpreagg->kresults;
+	gpupreagg_segment  *segment = gpreagg->segment;
 	GpuTaskState	   *gts = gpreagg->task.gts;
 
 	/* See comments in pgstrom_respond_gpuscan() */
@@ -4170,7 +4182,7 @@ gpupreagg_task_respond(CUstream stream, CUresult status, void *private)
 		return;
 
 	if (status == CUDA_SUCCESS)
-		gpreagg->task.kerror = kresults->kerror;
+		gpreagg->task.kerror = gpreagg->kern.kerror;
 	else
 	{
 		gpreagg->task.kerror.errcode = status;
@@ -4178,10 +4190,15 @@ gpupreagg_task_respond(CUstream stream, CUresult status, void *private)
 		gpreagg->task.kerror.lineno = 0;
 	}
 
-	/* mark a flag, if GPU required to retry it on CPU side */
-	if (gpreagg->task.kerror.errcode == StromError_CpuReCheck)
+	/* Set a flag, if GPU required to retry it on CPU side */
+	/*
+	 * TODO: If DataStoreNoSpace, we may be able to help the segment
+	 *       with retrying larger final buffer.
+	 */
+	if (gpreagg->task.kerror.errcode == StromError_CpuReCheck ||
+		gpreagg->task.kerror.errcode == StromError_DataStoreNoSpace)
 	{
-		gpreagg->needs_fallback = true;
+		segment->needs_fallback = true;
 		gpreagg->task.kerror.errcode = StromError_Success;
 	}
 

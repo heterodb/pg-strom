@@ -59,6 +59,8 @@
  */
 typedef struct
 {
+	kern_errorbuf	kerror;					/* kernel error information */
+	/* -- TODO: run-time statistics to be here -- */
 	cl_uint			key_dist_salt;			/* hashkey distribution salt */
 	cl_uint			hash_size;				/* size of global hash-slots */
 	cl_uint			pg_crc32_table[256];	/* master CRC32 table */
@@ -444,7 +446,7 @@ gpupreagg_preparation(kern_gpupreagg *kgpreagg,
 							 base + offset);	/* rowidx of kds_src */
 	}
 	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kresults->kerror, kcxt.e);
+	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
 
 /*
@@ -649,7 +651,7 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 		__syncthreads();
 	}
 	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kresults->kerror, kcxt.e);
+	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
 
 /*
@@ -804,7 +806,7 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 		}
 	}
 	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kresults->kerror, kcxt.e);
+	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
 
 /*
@@ -942,7 +944,7 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 	}
 
 	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kresults->kerror, kcxt.e);
+	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
 
 
@@ -1003,7 +1005,7 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
 		}
 	}
 	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kresults_final->kerror, kcxt.e);
+	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
 
 /* ----------------------------------------------------------------
