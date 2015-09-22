@@ -3671,6 +3671,8 @@ gpupreagg_task_create(GpuPreAggState *gpas,
 	gpreagg->pds_in = pds_in;
 
 	/* also initialize kern_gpupreagg portion */
+	memset(&gpreagg->kern.kerror, 0, sizeof(kern_errorbuf));
+	gpreagg->kern.key_dist_salt = gpas->key_dist_salt;
 	gpreagg->kern.hash_size = nitems;
 	memcpy(gpreagg->kern.pg_crc32_table,
 		   pg_crc32_table,
@@ -3681,7 +3683,7 @@ gpupreagg_task_create(GpuPreAggState *gpas,
 		   gpas->gts.kern_params->length);
 	/* kern_resultbuf */
 	gpreagg->kresults = KERN_GPUPREAGG_RESULTBUF(&gpreagg->kern);
-	memset(&gpreagg->kresults, 0, sizeof(kern_resultbuf));
+	memset(gpreagg->kresults, 0, sizeof(kern_resultbuf));
 	gpreagg->kresults->nrels = 1;
 	gpreagg->kresults->nrooms = nitems;
 	gpreagg->kresults->nitems = 0;
