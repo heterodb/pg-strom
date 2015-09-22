@@ -3581,13 +3581,13 @@ gpupreagg_send_segment(pgstrom_gpupreagg *gpreagg)
 			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 
 		/* enqueue DMA send request */
-		rc = cuMemcpyHtoDAsync(m_kresults_final, &gpreagg->kresults,
+		rc = cuMemcpyHtoDAsync(m_kresults_final, gpreagg->kresults,
 							   offsetof(kern_resultbuf, results[0]),
 							   gpreagg->task.cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 
-		rc = cuMemcpyHtoDAsync(m_kresults_final, pds_final->kds,
+		rc = cuMemcpyHtoDAsync(m_kds_final, pds_final->kds,
 							   KERN_DATA_STORE_HEAD_LENGTH(pds_final->kds),
 							   gpreagg->task.cuda_stream);
 		if (rc != CUDA_SUCCESS)
