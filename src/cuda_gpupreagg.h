@@ -491,7 +491,7 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 	 */
 	crc32_table = SHARED_WORKMEM(cl_uint);
 	for (index = get_local_id();
-		 index < lengthof(crc32_table);
+		 index < lengthof(kgpreagg->pg_crc32_table);
 		 index += get_local_size())
 		crc32_table[index] = kgpreagg->pg_crc32_table[index];
 	__syncthreads();
@@ -694,7 +694,7 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	 */
 	crc32_table = SHARED_WORKMEM(cl_uint);	/* 1KB */
 	for (index = get_local_id();
-		 index < lengthof(crc32_table);
+		 index < lengthof(kgpreagg->pg_crc32_table);
 		 index += get_local_size())
 		crc32_table[index] = kgpreagg->pg_crc32_table[index];
 	__syncthreads();
