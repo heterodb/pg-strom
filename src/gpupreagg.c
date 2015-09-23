@@ -1682,7 +1682,7 @@ gpupreagg_rewrite_expr(Agg *agg,
 	 * At least, it has to be smaller than allocatable length in GPU RAM.
 	 * Elsewhere, we have no choice to run GpuPreAgg towards this node.
 	 */
-	ncols = pre_tlist->length;
+	ncols = list_length(pre_tlist);
 	final_nslots = (Size)(2.5 * agg->plan.plan_rows *
 						  pgstrom_chunk_size_margin);
 	final_length = STROMALIGN(offsetof(kern_data_store,
