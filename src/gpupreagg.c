@@ -273,9 +273,8 @@ typedef struct
 	CUfunction		kern_fixvar;
 	CUdeviceptr		m_gpreagg;
 	CUdeviceptr		m_kds_in;		/* kds_in : input stream */
-	// TODO: kds_src/kds_dst is misleading. to be kds_1/kds_2
-	CUdeviceptr		m_kds_src;		/* kds_src : slot form of kds_in */
-	CUdeviceptr		m_kds_dst;		/* kds_dst : final aggregation result */
+	CUdeviceptr		m_kds_1st;		/* 1st per-chunk KDS buffer */
+	CUdeviceptr		m_kds_2nd;		/* 2nd per-chunk KDS buffer */
 	CUdeviceptr		m_ghash;		/* global hash slot */
 	CUevent			ev_dma_send_start;
 	CUevent			ev_dma_send_stop;
@@ -4107,8 +4106,8 @@ gpupreagg_cleanup_cuda_resources(pgstrom_gpupreagg *gpreagg)
 	gpreagg->kern_fixvar = NULL;
 	gpreagg->m_gpreagg = 0UL;
 	gpreagg->m_kds_in = 0UL;
-	gpreagg->m_kds_src = 0UL;
-	gpreagg->m_kds_dst = 0UL;
+	gpreagg->m_kds_1st = 0UL;
+	gpreagg->m_kds_2nd = 0UL;
 	gpreagg->m_ghash = 0UL;
 }
 
@@ -4293,6 +4292,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	CUevent				ev_kern_exec_end;
 	CUresult			rc;
 	cl_int				i;
+	bool				final_source_is_kds_1st = true;
 	void			   *kern_args[10];
 
 	/*
@@ -4353,11 +4353,11 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
         goto out_of_resource;
 	gpreagg->m_kds_in = gpreagg->m_gpreagg +
 		GPUMEMALIGN(KERN_GPUPREAGG_LENGTH(&gpreagg->kern, __nitems));
-	gpreagg->m_kds_src = gpreagg->m_kds_in +
+	gpreagg->m_kds_1st = gpreagg->m_kds_in +
 		GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_in->kds));
-	gpreagg->m_kds_dst = gpreagg->m_kds_src +
+	gpreagg->m_kds_2nd = gpreagg->m_kds_1st +
 		GPUMEMALIGN(KERN_DATA_STORE_LENGTH(kds_head));
-	gpreagg->m_ghash = gpreagg->m_kds_dst +
+	gpreagg->m_ghash = gpreagg->m_kds_2nd +
 		GPUMEMALIGN(KERN_DATA_STORE_LENGTH(kds_head));
 
 	/*
@@ -4411,7 +4411,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	gpreagg->task.pfm.num_dma_send++;
 
 	length = KERN_DATA_STORE_HEAD_LENGTH(kds_head);
-	rc = cuMemcpyHtoDAsync(gpreagg->m_kds_src,
+	rc = cuMemcpyHtoDAsync(gpreagg->m_kds_1st,
 						   kds_head,
 						   length,
 						   gpreagg->task.cuda_stream);
@@ -4421,7 +4421,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	gpreagg->task.pfm.num_dma_send++;
 
 	length = KERN_DATA_STORE_HEAD_LENGTH(kds_head);
-	rc = cuMemcpyHtoDAsync(gpreagg->m_kds_dst,
+	rc = cuMemcpyHtoDAsync(gpreagg->m_kds_2nd,
 						   kds_head,
 						   length,
 						   gpreagg->task.cuda_stream);
@@ -4449,7 +4449,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 
 	kern_args[0] = &gpreagg->m_gpreagg;
 	kern_args[1] = &gpreagg->m_kds_in;
-	kern_args[2] = &gpreagg->m_kds_src;
+	kern_args[2] = &gpreagg->m_kds_1st;
 	kern_args[3] = &gpreagg->m_ghash;
 	rc = cuLaunchKernel(gpreagg->kern_prep,
 						grid_size, 1, 1,
@@ -4481,11 +4481,11 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 									   Max(sizeof(pagg_datum),
 										   sizeof(kern_errorbuf)));
 		kern_args[0] = &gpreagg->m_gpreagg;
-		kern_args[1] = &gpreagg->m_kds_src;
-		kern_args[2] = &gpreagg->m_kds_dst;
+		kern_args[1] = &gpreagg->m_kds_1st;
+		kern_args[2] = &gpreagg->m_kds_2nd;
 		kern_args[3] = &gpreagg->m_kds_in;
 
-		/* 1st path: data reduction (kds_src => kds_dst) */
+		/* 1st path: data reduction (kds_1st => kds_2nd) */
 		rc = cuLaunchKernel(gpreagg->kern_nogrp,
 							grid_size, 1, 1,
 							block_size, 1, 1,
@@ -4498,10 +4498,15 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
             elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 		gpreagg->task.pfm.num_kern_nogrp++;
 
-		/* 2nd path: data reduction (kds_dst => kds_src) */
+		/* 2nd path: data reduction (kds_2nd => kds_1st) */
+
+		/*
+		 * TODO: we can reduce number of kernel thread because nogroup
+		 * reduction always generate one row per block
+		 */
 		kern_args[0] = &gpreagg->m_gpreagg;
-		kern_args[1] = &gpreagg->m_kds_dst;
-		kern_args[2] = &gpreagg->m_kds_src;
+		kern_args[1] = &gpreagg->m_kds_2nd;
+		kern_args[2] = &gpreagg->m_kds_1st;
 		kern_args[3] = &gpreagg->m_kds_in;
 		rc = cuLaunchKernel(gpreagg->kern_nogrp,
 							grid_size, 1, 1,
@@ -4516,8 +4521,6 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		gpreagg->task.pfm.num_kern_nogrp++;
 
 		CUDA_EVENT_RECORD(gpreagg, ev_kern_nogrp_end);
-
-		// FIXME: nitems can be reduced for smaller kernel thread launch
 	}
 	else if (gpreagg->reduction_mode == GPUPREAGG_LOCAL_REDUCTION ||
 			 gpreagg->reduction_mode == GPUPREAGG_GLOBAL_REDUCTION)
@@ -4540,8 +4543,8 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 										   Max(sizeof(pagg_hashslot),
 											   sizeof(pagg_datum)));
 			kern_args[0] = &gpreagg->m_gpreagg;
-			kern_args[1] = &gpreagg->m_kds_src;
-			kern_args[2] = &gpreagg->m_kds_dst;
+			kern_args[1] = &gpreagg->m_kds_1st;
+			kern_args[2] = &gpreagg->m_kds_2nd;
 			kern_args[3] = &gpreagg->m_kds_in;
 			lmem_size = Max(Max(sizeof(pagg_hashslot),
 								sizeof(pagg_datum)) * block_size,
@@ -4557,7 +4560,10 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 				elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 			gpreagg->task.pfm.num_kern_lagg++;
 			CUDA_EVENT_RECORD(gpreagg, ev_kern_lagg_end);
+
+			final_source_is_kds_1st = false;
 		}
+
 		/* Launch:
 		 * KERNEL_FUNCTION(void)
 		 * gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
@@ -4573,7 +4579,9 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 									   nitems,
 									   sizeof(kern_errorbuf));
 		kern_args[0] = &gpreagg->m_gpreagg;
-		kern_args[1] = &gpreagg->m_kds_dst;
+		kern_args[1] = (gpreagg->reduction_mode == GPUPREAGG_LOCAL_REDUCTION
+						? &gpreagg->m_kds_2nd
+						: &gpreagg->m_kds_1st);
 		kern_args[2] = &gpreagg->m_kds_in;
 		kern_args[3] = &gpreagg->m_ghash;
 		lmem_size = Max(sizeof(kern_errorbuf) * block_size,
@@ -4611,7 +4619,9 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 								   nitems,
 								   sizeof(kern_errorbuf));
 	kern_args[0] = &gpreagg->m_gpreagg;
-	kern_args[1] = &gpreagg->m_kds_dst;
+	kern_args[1] = (final_source_is_kds_1st
+					? &gpreagg->m_kds_1st
+					: &gpreagg->m_kds_2nd);
 	kern_args[2] = &segment->m_kresults_final;
 	kern_args[3] = &segment->m_kds_final;
 	kern_args[4] = &segment->f_hashsize;
