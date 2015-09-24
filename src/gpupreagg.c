@@ -3400,8 +3400,6 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 	Size			required;
 	double			reduction_ratio;
 	cl_int			cuda_index;
-	cl_int			i;
-	CUresult		rc;
 	pgstrom_data_store *pds_final;
 	kern_resultbuf	   *kresults_final;
 	gpupreagg_segment  *segment;
@@ -3472,13 +3470,7 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 	segment->pds_src = (pgstrom_data_store **)((char *)segment + offset);
 	offset += STROMALIGN(sizeof(pgstrom_data_store *) * num_chunks);
 	segment->ev_kern_exec_end = (CUevent *)((char *)segment + offset);
-	for (i=0; i < num_chunks; i++)
-	{
-		rc = cuEventCreate(segment->ev_kern_exec_end + i,
-						   CU_EVENT_DISABLE_TIMING);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-	}
+
 	return segment;
 }
 
@@ -3512,7 +3504,7 @@ gpupreagg_put_segment(gpupreagg_segment *segment)
 
 		if (segment->kresults_final)
 			pfree(segment->kresults_final);
-		Assert(segment->m_kresults_final);
+		Assert(segment->m_kresults_final == 0UL);
 
 		if (segment->ev_final_loaded)
 		{
@@ -3555,6 +3547,7 @@ gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg)
 	CUdeviceptr			m_kds_final;
 	CUevent				ev_final_loaded;
 	CUresult			rc;
+	cl_int				i;
 	void			   *kern_args[4];
 
 	if (!segment->ev_final_loaded)
@@ -3578,10 +3571,20 @@ gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg)
 		m_kds_final = m_hashslot_final +
 			GPUMEMALIGN(sizeof(pagg_hashslot) * segment->f_hashsize);
 
-		/* create an event object */
+		/* Create an event object to synchronize setup of this segment */
 		rc = cuEventCreate(&ev_final_loaded, CU_EVENT_DEFAULT);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+
+		/* Create event object to synchronize every kernel execution end */
+		for (i=0; i < segment->num_chunks; i++)
+		{
+			Assert(segment->ev_kern_exec_end[i] == NULL);
+			rc = cuEventCreate(&segment->ev_kern_exec_end[i],
+							   CU_EVENT_DISABLE_TIMING);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+		}
 
 		/* enqueue DMA send request */
 		rc = cuMemcpyHtoDAsync(m_kresults_final, gpreagg->kresults,
