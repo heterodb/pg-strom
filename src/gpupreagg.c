@@ -1998,8 +1998,8 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 		 */
 		appendStringInfo(
 			&body,
-			"  xkeyval_%u = pg_%s_vref(kds,kcxt,%u,x_index);\n"
-			"  ykeyval_%u = pg_%s_vref(kds,kcxt,%u,y_index);\n"
+			"  xkeyval_%u = pg_%s_vref(x_kds,kcxt,%u,x_index);\n"
+			"  ykeyval_%u = pg_%s_vref(y_kds,kcxt,%u,y_index);\n"
 			"  if (!xkeyval_%u.isnull && !ykeyval_%u.isnull)\n"
 			"  {\n"
 			"    if (!EVAL(pgfn_%s(kcxt, xkeyval_%u, ykeyval_%u)))\n"
@@ -2030,7 +2030,8 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	appendStringInfo(&str,
 					 "STATIC_FUNCTION(cl_bool)\n"
 					 "gpupreagg_keymatch(kern_context *kcxt,\n"
-					 "                   kern_data_store *kds,\n"
+					 "                   kern_data_store *x_kds,\n"
+					 "                   kern_data_store *y_kds,\n"
 					 "                   kern_data_store *ktoast,\n"
 					 "                   size_t x_index,\n"
 					 "                   size_t y_index)\n"
@@ -2113,7 +2114,8 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			"STATIC_FUNCTION(void)\n"
 			"gpupreagg_global_calc(kern_context *kcxt,\n"
 			"                      cl_int attnum,\n"
-			"                      kern_data_store *kds,\n"
+			"                      kern_data_store *accum_kds,\n"
+			"                      kern_data_store *newval_kds,\n"
 			"                      kern_data_store *ktoast,\n"
 			"                      size_t accum_index,\n"
 			"                      size_t newval_index)\n"
@@ -2123,11 +2125,12 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			"  char     new_isnull;\n"
 			"  Datum    new_value;\n"
 			"\n"
-			"  assert(kds->format == KDS_FORMAT_SLOT);\n"
-			"  accum_isnull = KERN_DATA_STORE_ISNULL(kds,accum_index) + attnum;\n"
-			"  accum_value = KERN_DATA_STORE_VALUES(kds,accum_index) + attnum;\n"
-			"  new_isnull = *(KERN_DATA_STORE_ISNULL(kds,newval_index) + attnum);\n"
-			"  new_value = *(KERN_DATA_STORE_VALUES(kds,newval_index) + attnum);\n"
+			"  assert(accum_kds->format == KDS_FORMAT_SLOT);\n"
+			"  assert(newval_kds->format == KDS_FORMAT_SLOT);\n"
+			"  accum_isnull = KERN_DATA_STORE_ISNULL(accum_kds,accum_index) + attnum;\n"
+			"  accum_value = KERN_DATA_STORE_VALUES(accum_kds,accum_index) + attnum;\n"
+			"  new_isnull = *(KERN_DATA_STORE_ISNULL(newval_kds,newval_index) + attnum);\n"
+			"  new_value = *(KERN_DATA_STORE_VALUES(newval_kds,newval_index) + attnum);\n"
 			"\n");
 		aggcalc_class = "GLOBAL";
 		aggcalc_args = "kcxt,accum_isnull,accum_value,new_isnull,new_value";
