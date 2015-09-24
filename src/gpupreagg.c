@@ -3541,7 +3541,7 @@ gpupreagg_put_segment(gpupreagg_segment *segment)
 }
 
 static bool
-gpupreagg_send_segment(pgstrom_gpupreagg *gpreagg)
+gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg)
 {
 	gpupreagg_segment  *segment = gpreagg->segment;
 	pgstrom_data_store *pds_final = segment->pds_final;
@@ -3641,6 +3641,36 @@ gpupreagg_send_segment(pgstrom_gpupreagg *gpreagg)
 	return true;
 }
 
+static void
+gpupreagg_cleanup_segment(pgstrom_gpupreagg *gpreagg)
+{
+	gpupreagg_segment  *segment = gpreagg->segment;
+	CUresult	rc;
+	cl_int		i;
+
+	Assert(gpreagg->is_terminator);
+
+	Assert(segment->m_kresults_final != 0UL);
+	gpuMemFree(&gpreagg->task, segment->m_kresults_final);
+	segment->m_kresults_final = 0UL;
+	segment->m_hashslot_final = 0UL;
+	segment->m_kds_final = 0UL;
+
+	Assert(segment->ev_final_loaded != NULL);
+	rc = cuEventDestroy(segment->ev_final_loaded);
+	if (rc != CUDA_SUCCESS)
+		elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
+	segment->ev_final_loaded = NULL;
+
+	for (i=0; i < segment->num_chunks; i++)
+	{
+		Assert(segment->ev_kern_exec_end[i] != NULL);
+		rc = cuEventDestroy(segment->ev_kern_exec_end[i]);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
+		segment->ev_kern_exec_end[i] = NULL;
+	}
+}
 
 
 static pgstrom_gpupreagg *
@@ -4163,13 +4193,27 @@ gpupreagg_task_complete(GpuTask *gtask)
 
 	/*
 	 * NOTE: Only terminator task shall be returned to the main logic.
-	 * Elsewhere, task is silently released as if nothing were returned.
+	 * Elsewhere, task shall be no longer referenced and released
+	 * immediately as if nothing were returned.
 	 */
 	if (!gpreagg->is_terminator)
 	{
+		/* detach from the task tracking list */
+		SpinLockAcquire(&gts->lock);
+		dlist_delete(&gpreagg->task.tracker);
+		memset(&gpreagg->task.tracker, 0, sizeof(dlist_node));
+		SpinLockRelease(&gts->lock);
+		/* then release the task immediately */
 		gpupreagg_task_release(&gpreagg->task);
 		return false;
 	}
+
+	/*
+	 * NOTE: completion of terminator task means, here is no other kernel
+	 * functions are in-progress. So, we release the relevant CUDA resource
+	 * here.
+	 */
+	gpupreagg_cleanup_segment(gpreagg);
 	gpupreagg_cleanup_cuda_resources(gpreagg);
 	return true;
 }
@@ -4317,7 +4361,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	 * Allocation and setup final result buffer of this segment, or
 	 * synchronize initialization by other task
 	 */
-	if (!gpupreagg_send_segment(gpreagg))
+	if (!gpupreagg_setup_segment(gpreagg))
 		goto out_of_resource;
 
 	/*
