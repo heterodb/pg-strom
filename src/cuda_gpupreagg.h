@@ -368,6 +368,69 @@ gpupreagg_data_move(kern_context *kcxt,
 	dst_values[colidx] = src_values[colidx];
 }
 
+
+
+STATIC_FUNCTION(void)
+gpupreagg_final_data_move(kern_context *kcxt,
+						  kern_data_store *kds_src,
+						  kern_data_store *kds_dst,
+						  kern_data_store *ktoast,
+						  cl_uint colidx,
+						  cl_uint rowidx_src,
+						  cl_uint rowidx_dst)
+{
+	Datum	   *src_values;
+	Datum	   *dst_values;
+	cl_char	   *src_isnull;
+	cl_char	   *dst_isnull;
+
+	kern_colmeta cmeta = kds_src->colmeta[colidx];
+
+
+	/*
+	 * XXX - Paranoire checks?
+	 */
+	if (kds_src->format != KDS_FORMAT_SLOT ||
+		kds_dst->format != KDS_FORMAT_SLOT)
+	{
+		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreCorruption);
+		return;
+	}
+	if (colidx >= kds_src->ncols || colidx >= kds_dst->ncols)
+	{
+		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreCorruption);
+		return;
+	}
+	src_values = KERN_DATA_STORE_VALUES(kds_src, rowidx_src);
+	src_isnull = KERN_DATA_STORE_ISNULL(kds_src, rowidx_src);
+	dst_values = KERN_DATA_STORE_VALUES(kds_dst, rowidx_dst);
+	dst_isnull = KERN_DATA_STORE_ISNULL(kds_dst, rowidx_dst);
+
+	dst_isnull[colidx] = src_isnull[colidx];
+
+	if (src_isnull[colidx])
+		return;
+	else if (cmeta.attbyval) 
+		dst_values[colidx] = src_values[colidx];
+	else
+	{
+		void *datum = kern_get_datum(kds_src,colidx,rowidx_src);
+		pg_varlena_t src = pg_varlena_datum_ref(kcxt,datum,false);
+		int	length = ((cmeta.attlen >= 0)
+					  ? cmeta.attlen
+					  : (VARSIZE_ANY(src.value)));
+		cl_uint allocSize = MAXALIGN(length);
+		int offset = atomicAdd(&kds_dst->usage, allocSize);
+		char *allocPtr = (char *)kds_dst + offset;
+
+		assert(offset + allocSize <= kds_dst->length);
+
+		memcpy(allocPtr, src.value, length);
+		*dst_values = (Datum)allocPtr;
+	}
+}
+
+
 /*
  * gpupreagg_preparation - It translaes an input kern_data_store (that
  * reflects outer relation's tupdesc) into the form of running total
@@ -926,10 +989,10 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 			assert(new_slot.s.index < kds_final->nrooms);
 			for (attnum = 0; attnum < nattrs; attnum++)
 			{
-				gpupreagg_data_move(&kctx,
-									kds_dst, kds_final, ktoast,
-									attnum,
-									kds_index,	new_slot.s.index);
+				gpupreagg_final_data_move(&kctx,
+										  kds_dst, kds_final, ktoast,
+										  attnum,
+										  kds_index, new_slot.s.index);
 			}
 			__threadfence();
 			f_hashslot[index].s.index = new_slot.s.index;
@@ -983,9 +1046,6 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	dest_index = base_index + index;
 	if (get_global_id() < nitems  &&  isOwner)
 		kresults_final->results[dest_index] = owner_index;
-
-//	if (get_global_id() == 0  &&  ngroups != 0) 
-//		printf("nitems=%d, ngroups=%d\n", nitems, ngroups);
 
 	/*
 	 * Global reduction for each column
