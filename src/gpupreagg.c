@@ -72,7 +72,8 @@ typedef struct
 	Bitmapset	   *outer_attrefs;	/* bitmap of referenced outer attributes */
 	Bitmapset	   *tlist_attrefs;	/* bitmap of referenced tlist attributes */
 	bool			has_numeric;	/* if true, result contains numeric val */
-	bool			has_varlena;	/* if true, result contains varlena val */
+	bool			has_notbyval;	/* if true, result contains varlena or
+									 * indirect reference (!attbyval) */
 } GpuPreAggInfo;
 
 static inline void
@@ -115,7 +116,7 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 		temp = lappend_int(temp, i);
 	privs = lappend(privs, temp);
 	privs = lappend(privs, makeInteger(gpa_info->has_numeric));
-	privs = lappend(privs, makeInteger(gpa_info->has_varlena));
+	privs = lappend(privs, makeInteger(gpa_info->has_notbyval));
 
 	cscan->custom_private = privs;
 	cscan->custom_exprs = exprs;
@@ -170,7 +171,7 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->tlist_attrefs = tempset;
 
 	gpa_info->has_numeric = intVal(list_nth(privs, pindex++));
-	gpa_info->has_varlena = intVal(list_nth(privs, pindex++));
+	gpa_info->has_notbyval = intVal(list_nth(privs, pindex++));
 
 	return gpa_info;
 }
@@ -187,10 +188,8 @@ typedef struct
 	TupleTableSlot *outer_overflow;
 	pgstrom_data_store *outer_bulk_overflow;
 
-//	bool			needs_grouping;
-//	bool			local_reduction;
 	bool			has_numeric;
-	bool			has_varlena;
+	bool			has_notbyval;
 
 	/*
 	 * segment is a set of chunks to be aggregated
@@ -257,12 +256,8 @@ typedef struct
 	gpupreagg_segment *segment;		/* reference to the preagg segment */
 	cl_int			segment_id;		/* my index within segment */
 	cl_int			reduction_mode;	/* one of GPUPREAGG_*_REDUCTION */
-	bool			is_terminator;	/* true, if it collects final result */
-
-//	bool			needs_grouping;	/* true, if it takes GROUP BY clause */
-//	bool			local_reduction;/* true, if it needs local reduction */
-//	bool			global_reduction;/* true, if it needs global reduction */
-	bool			has_varlena;	/* true, if it has varlena grouping keys */
+	bool			is_terminator;	/* If true, collector of final result */
+	bool			has_notbyval;	/* If true, it has varlena/indirect keys */
 	double			num_groups;		/* estimated number of groups */
 	CUfunction		kern_prep;
 	CUfunction		kern_lagg;
@@ -1563,7 +1558,7 @@ gpupreagg_rewrite_expr(Agg *agg,
 					   Bitmapset **p_attr_refs,
 					   int	*p_extra_flags,
 					   bool *p_has_numeric,
-					   bool *p_has_varlena,
+					   bool *p_has_notbyval,
 					   Size *p_keys_varlen,
 					   cl_int *p_safety_limit)
 {
@@ -1576,7 +1571,7 @@ gpupreagg_rewrite_expr(Agg *agg,
 	Bitmapset  *attr_refs = NULL;
 	Bitmapset  *grouping_keys = NULL;
 	bool		has_numeric = false;
-	bool		has_varlena = false;
+	bool		has_notbyval = false;
 	Size		keys_varlen = 0;
 	ListCell   *cell;
 	Size		final_length;
@@ -1650,13 +1645,13 @@ gpupreagg_rewrite_expr(Agg *agg,
 		/* check whether types need special treatment */
 		if (dtype->type_oid == NUMERICOID)
 			has_numeric = true;
-		else if ((dtype->type_flags & DEVTYPE_IS_VARLENA) != 0)
+		else if (!dtype->type_byval)
 		{
-			has_varlena = true;
+			has_notbyval = true;
 			/*
-			 * We also need to estimate average size of varlene grouping keys
-			 * to make copies of varlena datum on extra area of the final
-			 * result buffer.
+			 * We also need to estimate average size of varlene or indirect
+			 * grouping keys to make copies of varlena datum on extra area
+			 * of the final result buffer.
 			 */
 			keys_varlen += MAXALIGN(get_typavgwidth(type_oid, type_mod));
 		}
@@ -1735,7 +1730,7 @@ gpupreagg_rewrite_expr(Agg *agg,
 		if (type_oid == NUMERICOID)
 			has_numeric = true;
 		else if (get_typlen(type_oid) < 0)
-			has_varlena = true;
+			has_notbyval = true;
 		agg_tlist = lappend(agg_tlist, newtle);
 	}
 
@@ -1761,7 +1756,7 @@ gpupreagg_rewrite_expr(Agg *agg,
 		if (type_oid == NUMERICOID)
 			has_numeric = true;
 		else if (get_typlen(type_oid) < 0)
-			has_varlena = true;
+			has_notbyval = true;
 		agg_quals = lappend(agg_quals, new_expr);
 	}
 	*p_agg_tlist = agg_tlist;
@@ -1771,7 +1766,7 @@ gpupreagg_rewrite_expr(Agg *agg,
 	*p_attr_refs = context.attr_refs;
 	*p_extra_flags = context.extra_flags;
 	*p_has_numeric = has_numeric;
-	*p_has_varlena = has_varlena;
+	*p_has_notbyval = has_notbyval;
 	*p_keys_varlen = keys_varlen;
 	*p_safety_limit = context.safety_limit;
 
@@ -2954,7 +2949,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	List		   *outer_quals = NIL;
 	double			outer_ratio = 1.0;
 	bool			has_numeric = false;
-	bool			has_varlena = false;
+	bool			has_notbyval = false;
 	Size			keys_varlen;
 	cl_int			safety_limit;
 	cl_int			key_dist_salt;
@@ -2988,7 +2983,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 								&attr_refs,
 								&extra_flags,
 								&has_numeric,
-								&has_varlena,
+								&has_notbyval,
 								&keys_varlen,
 								&safety_limit))
 		return;
@@ -3213,7 +3208,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 						   FirstLowInvalidHeapAttributeNumber);
 	}
 	gpa_info.has_numeric = has_numeric;
-	gpa_info.has_varlena = has_varlena;
+	gpa_info.has_notbyval = has_notbyval;
 	gpa_info.keys_varlen = keys_varlen;
 	form_gpupreagg_info(cscan, &gpa_info);
 
@@ -3364,7 +3359,7 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	else
 		gpas->reduction_mode = GPUPREAGG_FINAL_REDUCTION;
 	gpas->has_numeric = gpa_info->has_numeric;
-	gpas->has_varlena = gpa_info->has_varlena;
+	gpas->has_notbyval = gpa_info->has_notbyval;
 	gpas->curr_segment = NULL;
 	gpas->curr_cuda_index = 0;
 
@@ -3701,7 +3696,7 @@ gpupreagg_task_create(GpuPreAggState *gpas,
 	gpreagg->segment = segment;	/* caller already acquired */
 	gpreagg->is_terminator = is_terminator;
 	gpreagg->reduction_mode = gpas->reduction_mode;
-	gpreagg->has_varlena = gpas->has_varlena;
+	gpreagg->has_notbyval = gpas->has_notbyval;
 	gpreagg->num_groups = gpas->plan_num_groups;
 	gpreagg->pds_in = pds_in;
 
@@ -4181,7 +4176,7 @@ gpupreagg_task_complete(GpuTask *gtask)
 				elog(ERROR, "Unknown reduction mode: %d",
 					 gpreagg->reduction_mode);
 		}
-		if (gpreagg->is_terminator && gpreagg->has_varlena)
+		if (gpreagg->is_terminator && gpreagg->has_notbyval)
 		{
 			CUDA_EVENT_ELAPSED(gpreagg, time_kern_fixvar,
 							   ev_kern_fixvar_begin,
@@ -4667,7 +4662,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		/*
 		 * Fixup varlena values, if needed
 		 */
-		if (gpreagg->has_varlena)
+		if (gpreagg->has_notbyval)
 		{
 			CUDA_EVENT_RECORD(gpreagg, ev_kern_fixvar_begin);
 			/* Launch:
