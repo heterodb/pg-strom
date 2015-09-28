@@ -2272,6 +2272,7 @@ typedef struct
 	const char	   *kds_label;
 	const char	   *ktoast_label;
 	const char	   *rowidx_label;
+	bool			use_temp_datum;
 	bool			use_temp_int2;
 	bool			use_temp_int4;
 	bool			use_temp_int8;
@@ -2707,19 +2708,46 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 
 			Assert(var->varno == INDEX_VAR);
 			Assert(var->varattno > 0);
-			attr_refs = bms_add_member(attr_refs, var->varattno -
-									   FirstLowInvalidHeapAttributeNumber);
 			dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
-			appendStringInfo(
-				&body,
-				"  /* projection for resource %u */\n"
-				"  pg_%s_vstore(%s,kcxt,%u,%s,KVAR_%u);\n",
-				pc.tle->resno - 1,
-				dtype->type_name,
-				pc.kds_label,
-				pc.tle->resno - 1,
-				pc.rowidx_label,
-				var->varattno);
+
+			if (!dtype->type_byval && dtype->type_length > 0)
+			{
+				/*
+				 * NOTE: Indirect data type (fixed-length but referenced by
+				 * pointer) needs special treatment when we put initial
+				 * values of KDS slot, by gpupreagg_preparation().
+				 * Because indirect data type is kept as inline in kernel
+				 * space, however, it lost pointer information where the
+				 * value is originally kept in kds_in.
+				 */
+				appendStringInfo(
+					&body,
+					"  /* projection for resource %u */\n"
+					"  temp_datum = kern_get_datum(kds_in,%u,rowidx_in);\n"
+					"  pg_common_vstore(%s,kcxt,%u,%s,(Datum)temp_datum,\n"
+					"                   !temp_datum ? true : false);\n",
+					pc.tle->resno - 1,
+					var->varattno - 1,
+					pc.kds_label,
+					pc.tle->resno - 1,
+					pc.rowidx_label);
+				pc.use_temp_datum = true;
+			}
+			else
+			{
+				attr_refs = bms_add_member(attr_refs, var->varattno -
+										   FirstLowInvalidHeapAttributeNumber);
+				appendStringInfo(
+					&body,
+					"  /* projection for resource %u */\n"
+					"  pg_%s_vstore(%s,kcxt,%u,%s,KVAR_%u);\n",
+					pc.tle->resno - 1,
+					dtype->type_name,
+					pc.kds_label,
+					pc.tle->resno - 1,
+					pc.rowidx_label,
+					var->varattno);
+			}
 			/* track usage of this field */
 			gpagg_atts[pc.tle->resno - 1] = GPUPREAGG_FIELD_IS_GROUPKEY;
 		}
@@ -2820,6 +2848,8 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	}
 
 	/* declaration of other temp variables */
+	if (pc.use_temp_datum)
+		appendStringInfo(&decl1, "  void   *temp_datum;\n");
 	if (pc.use_temp_int2)
 		appendStringInfo(&decl1, "  pg_int2_t temp_int2;\n");
 	if (pc.use_temp_int4)
