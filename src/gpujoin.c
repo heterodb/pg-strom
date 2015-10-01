@@ -116,7 +116,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	List	   *exprs = NIL;
 
 	privs = lappend(privs, makeInteger(gj_info->num_rels));
-	privs = lappend(privs, makeString(gj_info->kern_source));
+	privs = lappend(privs, makeString(pstrdup(gj_info->kern_source)));
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
 	exprs = lappend(exprs, gj_info->used_params);
 	privs = lappend(privs, makeInteger(gj_info->outer_bulkload));

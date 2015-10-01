@@ -64,24 +64,34 @@ typedef struct {
 static inline void
 form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gscan_info)
 {
-	cscan->custom_private =
-		list_make2(makeString(gscan_info->kern_source),
-				   makeInteger(gscan_info->extra_flags));
-	cscan->custom_exprs =
-		list_make3(gscan_info->used_params,
-				   gscan_info->used_vars,
-				   gscan_info->dev_quals);
+	Value	   *kern_source = NULL;
+	Value	   *extra_flags;
+
+	if (gscan_info->kern_source)
+		kern_source = makeString(pstrdup(gscan_info->kern_source));
+	extra_flags = makeInteger(gscan_info->extra_flags);
+
+	cscan->custom_private = list_make2(kern_source,
+									   extra_flags);
+	cscan->custom_exprs = list_make3(gscan_info->used_params,
+									 gscan_info->used_vars,
+									 gscan_info->dev_quals);
 }
 
 static GpuScanInfo *
 deform_gpuscan_info(Plan *plan)
 {
-	GpuScanInfo *result = palloc0(sizeof(GpuScanInfo));
-	CustomScan	*cscan = (CustomScan *) plan;
+	GpuScanInfo	   *result = palloc0(sizeof(GpuScanInfo));
+	CustomScan	   *cscan = (CustomScan *) plan;
+	Value		   *kern_source;
+	Value		   *extra_flags;
 
 	Assert(IsA(cscan, CustomScan));
-	result->kern_source = strVal(linitial(cscan->custom_private));
-	result->extra_flags = intVal(lsecond(cscan->custom_private));
+	kern_source = linitial(cscan->custom_private);
+	extra_flags = lsecond(cscan->custom_private);
+
+	result->kern_source = (kern_source != NULL ? strVal(kern_source) : NULL);
+	result->extra_flags = intVal(extra_flags);
 	result->used_params = linitial(cscan->custom_exprs);
 	result->used_vars = lsecond(cscan->custom_exprs);
 	result->dev_quals = lthird(cscan->custom_exprs);
