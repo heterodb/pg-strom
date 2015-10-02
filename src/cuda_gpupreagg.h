@@ -981,7 +981,7 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	/* row-index on kds_dst buffer */
 	if (kresults->all_visible)
 	{
-		nitems = kds_final->nitems;
+		nitems = kds_dst->nitems;
 		kds_index = get_global_id();
 	}
 	else
