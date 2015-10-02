@@ -115,6 +115,22 @@ typedef union
 } pagg_hashslot;
 
 /*
+ * kern_global_hashslot
+ *
+ * An array of pagg_datum and its usage statistics, to be placed on
+ * global memory area. Usage counter is used to break a loop to find-
+ * out an empty slot if hash-slot is already filled-up.
+ */
+#define GLOBAL_HASHSLOT_THRESHOLD	0.75
+
+typedef struct
+{
+	cl_uint			hash_usage;		/* current number of hash_slot in use */
+	cl_uint			hash_size;		/* total size of the hash_slot below */
+	pagg_hashslot	hash_slot[FLEXIBLE_ARRAY_MEMBER];
+} kern_global_hashslot;
+
+/*
  * NOTE: pagg_datum is a set of information to calculate running total.
  * group_id indicates which group does this work-item belong to, instead
  * of gpupreagg_keymatch().
@@ -447,7 +463,7 @@ KERNEL_FUNCTION(void)
 gpupreagg_preparation(kern_gpupreagg *kgpreagg,
 					  kern_data_store *kds_in,	/* in: KDS_FORMAT_ROW */
 					  kern_data_store *kds_src,	/* out: KDS_FORMAT_SLOT */
-					  pagg_hashslot *g_hashslot)
+					  kern_global_hashslot *g_hash)
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
@@ -467,12 +483,17 @@ gpupreagg_preparation(kern_gpupreagg *kgpreagg,
 
 	/* init global hash slot */
 	hash_size = kgpreagg->hash_size;;
+	if (get_global_id() == 0)
+	{
+		g_hash->hash_usage = 0;
+		g_hash->hash_size = hash_size;
+	}
 	for (hash_index = get_global_id();
 		 hash_index < hash_size;
 		 hash_index += get_global_size())
 	{
-		g_hashslot[hash_index].s.hash = 0;
-		g_hashslot[hash_index].s.index = (cl_uint)(0xffffffff);
+		g_hash->hash_slot[hash_index].s.hash = 0;
+		g_hash->hash_slot[hash_index].s.index = (cl_uint)(0xffffffff);
 	}
 
 	/* check qualifiers */
@@ -724,14 +745,14 @@ KERNEL_FUNCTION(void)
 gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 						   kern_data_store *kds_dst,
 						   kern_data_store *ktoast,
-						   pagg_hashslot *g_hashslot)
+						   kern_global_hashslot *g_hash)
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_resultbuf *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
 	kern_context	kcxt;
 	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
 	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
-	size_t			hash_size = kgpreagg->hash_size;
+	size_t			hash_size = g_hash->hash_size;
 	size_t			dest_index;
 	size_t			owner_index;
 	cl_uint			hash_value;
@@ -784,7 +805,7 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 		old_slot.s.index = (cl_uint)(0xffffffff);
 		index = hash_value % hash_size;
 	retry:
-		cur_slot.value = atomicCAS(&g_hashslot[index].value,
+		cur_slot.value = atomicCAS(&g_hash->hash_slot[index].value,
 								   old_slot.value,
 								   new_slot.value);
 		if (cur_slot.value == old_slot.value)
@@ -823,7 +844,10 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	index = arithmetic_stairlike_add(get_global_id() == owner_index ? 1 : 0,
 									 &ngroups);
 	if (get_local_id() == 0)
+	{
 		base_index = atomicAdd(&kresults->nitems, ngroups);
+		// atomicAdd(&g_hash->hash_usage, ngroups); -- really needed?
+	}
 	__syncthreads();
 	assert(base_index + ngroups <= kresults->nrooms);
 	dest_index = base_index + index;
@@ -865,6 +889,7 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 								  owner_index, get_global_id());
 		}
 	}
+
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
@@ -872,20 +897,26 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 /*
  * gpupreagg_final_preparation
  *
- * It initializes the f_hashslot prior to gpupreagg_final_reduction
+ * It initializes the f_hash prior to gpupreagg_final_reduction
  */
 KERNEL_FUNCTION(void)
 gpupreagg_final_preparation(size_t f_hashsize,
-							pagg_hashslot *f_hashslot)
+							kern_global_hashslot *f_hash)
 {
 	size_t		hash_index;
+
+	if (get_global_id() == 0)
+	{
+		f_hash->hash_usage = 0;
+		f_hash->hash_size = f_hashsize;
+	}
 
 	for (hash_index = get_global_id();
 		 hash_index < f_hashsize;
 		 hash_index += get_global_size())
 	{
-		f_hashslot[hash_index].s.hash = 0;
-		f_hashslot[hash_index].s.index = (cl_uint)(0xffffffff);
+		f_hash->hash_slot[hash_index].s.hash = 0;
+		f_hash->hash_slot[hash_index].s.index = (cl_uint)(0xffffffff);
 	}
 }
 
@@ -896,16 +927,14 @@ gpupreagg_final_preparation(size_t f_hashsize,
  * kds_final = destination buffer in this case.
  *             kds_final->usage points current available variable length
  *             area, until kds_final->length. Use atomicAdd().
- * f_hashsize = size of the f_hashslot hash slot
- * f_hashslot = hash slot of the final buffer
+ * f_hash = hash slot of the final buffer
  */
 KERNEL_FUNCTION(void)
 gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 						  kern_data_store *kds_dst,		/* in */
 						  kern_resultbuf *kresults_final,	/* out */
 						  kern_data_store *kds_final,		/* out */
-						  size_t         f_hashsize,
-						  pagg_hashslot *f_hashslot) /* only internal usage */
+						  kern_global_hashslot *f_hash)	/* only internal */
 {
 	/* start : temporary code */
 	kern_data_store *ktoast = NULL;
@@ -919,13 +948,15 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	size_t			kds_index;
 	size_t			dest_index;
 	size_t			owner_index;
+	size_t			f_hashsize = f_hash->hash_size;
 	cl_uint			hash_value;
-	cl_uint			nitems = kresults->nitems;
+	cl_uint			nitems;
 	cl_uint			ngroups;
 	cl_uint			index;
 	cl_uint			nattrs = kds_dst->ncols;
 	cl_uint			attnum;
 	cl_bool			isOwner = false;
+	cl_int			loop;
 	pagg_hashslot	old_slot;
 	pagg_hashslot	new_slot;
 	pagg_hashslot	cur_slot;
@@ -949,13 +980,20 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
  
 	/* row-index on kds_dst buffer */
 	if (kresults->all_visible)
+	{
+		nitems = kds_final->nitems;
 		kds_index = get_global_id();
-	else if (get_global_id() < kresults->nitems)
-		kds_index = kresults->results[get_global_id()];
+	}
 	else
-		kds_index = kds_final->nrooms; /* always out of range */
+	{
+		nitems = kresults->nitems;
+		if (get_global_id() < nitems)
+			kds_index = kresults->results[get_global_id()];
+		else
+			kds_index = kresults->nrooms;	/* always out of range */
+	}
 
-	if (get_global_id() < nitems)
+	if (kds_index < nitems)
 	{
 		hash_value = gpupreagg_hashvalue(&kctx, crc32_table,
 										 kds_dst, ktoast, kds_index,
@@ -978,7 +1016,7 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 		old_slot.s.index = (cl_uint)(0xffffffff); /* INVALID */
 		index  = hash_value % f_hashsize;
 	retry:
-		cur_slot.value = atomicCAS(&f_hashslot[index].value,
+		cur_slot.value = atomicCAS(&f_hash->hash_slot[index].value,
 								   old_slot.value, new_slot.value);
 		if (cur_slot.value == old_slot.value)
 		{
@@ -995,15 +1033,17 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 										  kds_index, new_slot.s.index);
 			}
 			__threadfence();
-			f_hashslot[index].s.index = new_slot.s.index;
-		} 
+			f_hash->hash_slot[index].s.index = new_slot.s.index;
+		}
 		// __syncthreads();
 
 		/* wait a updating hash slot. */
 		while (cur_slot.s.index == (cl_uint)(0xfffffffe))
 		{
-			cur_slot.s.index = *(volatile int *)&f_hashslot[index].s.index;
+			cur_slot.s.index = *((volatile int *)
+								 &f_hash->hash_slot[index].s.index);
 		}
+
 		if (cur_slot.value == old_slot.value)
 		{
 //			printf("Allocate %d, %x\n", new_slot.s.index, hash_value);
@@ -1024,7 +1064,8 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 			index = (index + 1) % f_hashsize;
 			goto retry;
 		}
-	} else
+	}
+	else
 		owner_index = (cl_uint)(0xffffffff);
 
 	/*
@@ -1038,8 +1079,10 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	 */
 	__syncthreads();
 	index = arithmetic_stairlike_add(isOwner ? 1 : 0, &ngroups);
-	if (get_local_id() == 0) {
+	if (get_local_id() == 0)
+	{
 		base_index = atomicAdd(&kresults_final->nitems, ngroups);
+		atomicAdd(&f_hash->hash_usage, ngroups);
 	}
 	__syncthreads();
 	assert(base_index + ngroups <= kresults_final->nrooms);

@@ -3585,7 +3585,8 @@ gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg)
 
 		/* Device memory allocation for kds_final and kresults_final */
 		length = (GPUMEMALIGN(offsetof(kern_resultbuf, results[nrooms])) +
-				  GPUMEMALIGN(sizeof(pagg_hashslot) * segment->f_hashsize) +
+				  GPUMEMALIGN(offsetof(kern_global_hashslot,
+									   hash_slot[segment->f_hashsize])) +
 				  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_final->kds)));
 		m_kresults_final = gpuMemAlloc(&gpreagg->task, length);
 		if (!m_kresults_final)
@@ -3593,7 +3594,8 @@ gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg)
 		m_hashslot_final = m_kresults_final +
 			GPUMEMALIGN(offsetof(kern_resultbuf, results[nrooms]));
 		m_kds_final = m_hashslot_final +
-			GPUMEMALIGN(sizeof(pagg_hashslot) * segment->f_hashsize);
+			GPUMEMALIGN(offsetof(kern_global_hashslot,
+								 hash_slot[segment->f_hashsize]));
 
 		/* Create an event object to synchronize setup of this segment */
 		rc = cuEventCreate(&ev_final_loaded, CU_EVENT_DEFAULT);
@@ -3626,7 +3628,7 @@ gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg)
 		/* Launch:
 		 * KERNEL_FUNCTION(void)
 		 * gpupreagg_final_preparation(size_t hash_size,
-		 *                             pagg_hashslot *f_hashslot)
+		 *                             kern_global_hashslot *f_hashslot)
 		 */
 		pgstrom_compute_workgroup_size(&grid_size,
 									   &block_size,
@@ -3635,6 +3637,8 @@ gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg)
 									   false,
 									   nrooms,
 									   sizeof(kern_errorbuf));
+		elog(INFO, "final_prep f_hash=%zx hashsize=%zu",
+			 (size_t)m_hashslot_final, segment->f_hashsize);
 		kern_args[0] = &segment->f_hashsize;
 		kern_args[1] = &m_hashslot_final;
 		rc = cuLaunchKernel(kern_final_prep,
@@ -4372,7 +4376,8 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 			  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_in->kds)) +
 			  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(kds_head)) +
 			  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(kds_head)) +
-			  GPUMEMALIGN(gpreagg->kern.hash_size * sizeof(pagg_hashslot)));
+			  GPUMEMALIGN(offsetof(kern_global_hashslot,
+								   hash_slot[gpreagg->kern.hash_size])));
 	gpreagg->m_gpreagg = gpuMemAlloc(&gpreagg->task, length);
 	if (!gpreagg->m_gpreagg)
         goto out_of_resource;
@@ -4462,7 +4467,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	 * gpupreagg_preparation(kern_gpupreagg *kgpreagg,
 	 *                       kern_data_store *kds_in,
 	 *                       kern_data_store *kds_src,
-	 *                       pagg_hashslot *g_hashslot)
+	 *                       kern_global_hashslot *g_hashslot)
 	 */
 	pgstrom_compute_workgroup_size(&grid_size,
 								   &block_size,
@@ -4594,7 +4599,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		 * gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 		 *                            kern_data_store *kds_dst,
 		 *                            kern_data_store *ktoast,
-		 *                            pagg_hashslot *g_hashslot)
+		 *                            kern_global_hashslot *g_hashslot)
 		 */
 		pgstrom_compute_workgroup_size(&grid_size,
 									   &block_size,
@@ -4633,8 +4638,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	 *                           kern_data_store *kds_dst,
 	 *                           kern_resultbuf *kresults_final,
 	 *                           kern_data_store *kds_final,
-	 *                           size_t         f_hashsize,
-	 *                           pagg_hashslot *f_hashslot)
+	 *                           kern_global_hashslot *f_hashslot)
 	 */
 	pgstrom_compute_workgroup_size(&grid_size,
 								   &block_size,
@@ -4649,8 +4653,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 					: &gpreagg->m_kds_2nd);
 	kern_args[2] = &segment->m_kresults_final;
 	kern_args[3] = &segment->m_kds_final;
-	kern_args[4] = &segment->f_hashsize;
-	kern_args[5] = &segment->m_hashslot_final;
+	kern_args[4] = &segment->m_hashslot_final;
 	lmem_size = Max(sizeof(kern_errorbuf) * block_size,
 					sizeof(gpreagg->kern.pg_crc32_table));
 	rc = cuLaunchKernel(gpreagg->kern_fagg,
