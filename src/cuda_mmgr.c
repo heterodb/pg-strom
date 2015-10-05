@@ -382,44 +382,82 @@ cudaHostMemIsEmpty(MemoryContext context)
 }
 
 static void
-cudaHostMemStats(MemoryContext context, int level)
+cudaHostMemStats(MemoryContext context, int level
+#if PG_VERSION_NUM >= 90600
+				 ,bool print
+				 ,MemoryContextCounters *totals
+#endif
+	)
 {
 	cudaHostMemHead	   *chm_head = (cudaHostMemHead *) context;
-	dlist_iter			iter1;
-	dlist_iter			iter2;
+	dlist_iter	iter1;
+	dlist_iter	iter2;
+	Size		nblocks		__attribute__((__unused__)) = 0;
+	Size		freechunks	__attribute__((__unused__)) = 0;
+	Size		totalspace	__attribute__((__unused__)) = 0;
+	Size		freespace	__attribute__((__unused__)) = 0;
+#if PG_VERSION_NUM < 90600
+	bool		print = true;
+#endif
 
 	dlist_foreach(iter1, &chm_head->blocks)
 	{
 		cudaHostMemBlock   *chm_block;
 		cudaHostMemChunk   *head_chunk;
 		cudaHostMemChunk   *tail_chunk;
+		bool			is_active;
+		bool			corrupted;
 
 		chm_block = dlist_container(cudaHostMemBlock, chain, iter1.cur);
 		Assert(!dlist_is_empty(&chm_block->addr_chunks));
+		nblocks++;
 		head_chunk = dlist_container(cudaHostMemChunk, addr_chain,
 									 dlist_head_node(&chm_block->addr_chunks));
 		tail_chunk = dlist_container(cudaHostMemChunk, addr_chain,
 									 dlist_tail_node(&chm_block->addr_chunks));
-		elog(INFO, "---- cuda host memory block [%p - %p] ----",
-			 (char *)head_chunk,
-			 (char *)tail_chunk + tail_chunk->chunk_head.size - 1);
+		if (print)
+			elog(INFO, "---- cuda host memory block [%p - %p] ----",
+				 (char *)head_chunk,
+				 (char *)tail_chunk + tail_chunk->chunk_head.size - 1);
+		/* add stat */
+		nblocks++;
+		totalspace += (Size)((char *)tail_chunk + tail_chunk->chunk_head.size -
+							 (char *)head_chunk);
 
 		dlist_foreach(iter2, &chm_block->addr_chunks)
 		{
 			cudaHostMemChunk   *chm_chunk
 				= dlist_container(cudaHostMemChunk, addr_chain, iter2.cur);
-			elog(INFO, "%p - %p %s (size: %zu%s)",
-				 (char *)chm_chunk,
-				 (char *)chm_chunk + chm_chunk->chunk_head.size,
-				 (!chm_chunk->free_chain.prev &&
-				  !chm_chunk->free_chain.next) ? "active" : "free",
-				 chm_chunk->chunk_head.size,
-				 (!chm_chunk->free_chain.prev &&
-				  !chm_chunk->free_chain.next &&
-				  HOSTMEM_CHUNK_MAGIC(chm_chunk) != HOSTMEM_CHUNK_MAGIC_CODE
-				  ? ", corrupted" : ""));
+
+			is_active = (!chm_chunk->free_chain.prev &&
+						 !chm_chunk->free_chain.next);
+			corrupted = (is_active &&
+				HOSTMEM_CHUNK_MAGIC(chm_chunk) != HOSTMEM_CHUNK_MAGIC_CODE);
+
+			if (print)
+				elog(INFO, "%p - %p %s (size: %zu%s)",
+					 (char *)chm_chunk,
+					 (char *)chm_chunk + chm_chunk->chunk_head.size,
+					 is_active ? "active" : "free",
+					 chm_chunk->chunk_head.size,
+					 corrupted ? ", corrupted" : "");
+			if (!is_active)
+			{
+				freechunks++;
+				freespace += chm_chunk->chunk_head.size;
+			}
 		}
 	}
+
+#if PG_VERSION_NUM >= 90600
+	if (totals)
+	{
+		totals->nblocks += nblocks;
+		totals->freechunks += freechunks;
+		totals->totalspace += totalspace;
+		totals->freespace += freespace;
+	}
+#endif
 }
 
 #ifdef MEMORY_CONTEXT_CHECKING

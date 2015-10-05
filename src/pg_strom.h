@@ -49,6 +49,14 @@
  */
 #if PG_VERSION_NUM < 90500
 #error Not supported PostgreSQL version
+#else
+/* check only for v9.5 series */
+#if PG_VERSION_NUM < 90600
+#ifndef PG_USE_INLINE
+/* inline function became minimum requirement at v9.6 */
+#error PG-Strom expects inline function is supported by compiler
+#endif	/* PG_USE_INLINE */
+#endif
 #endif
 #if SIZEOF_DATUM != 8
 #error PG-Strom expects 64bit platform
@@ -61,9 +69,6 @@
 #endif
 #ifndef HAVE_INT64_TIMESTAMP
 #error PG-Strom expects timestamp has 64bit integer format
-#endif
-#ifndef PG_USE_INLINE
-#error PG-Strom expects inline function is supported by compiler
 #endif
 
 /*
