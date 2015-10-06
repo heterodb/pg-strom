@@ -998,7 +998,7 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_resultbuf *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
-	kern_context	kctx;
+	kern_context	kcxt;
 	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
 	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
 	size_t			kds_index;
@@ -1022,7 +1022,7 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	__shared__ cl_uint	crc32_table[256];
 	__shared__ size_t	base_index;
 
-	INIT_KERNEL_CONTEXT(&kctx,gpupreagg_final_reduction,kparams);
+	INIT_KERNEL_CONTEXT(&kcxt,gpupreagg_final_reduction,kparams);
 
 	/*
 	 * calculation of the hash value of grouping keys in this record.
@@ -1062,7 +1062,7 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 		 * Calculation of initial hash value
 		 */
 		INIT_LEGACY_CRC32(hash_value);
-		hash_value = gpupreagg_hashvalue(&kctx, crc32_table,
+		hash_value = gpupreagg_hashvalue(&kcxt, crc32_table,
 										 hash_value,
 										 kds_dst,
 										 kds_index);
@@ -1107,7 +1107,7 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 			assert(new_slot.s.index < kds_final->nrooms);
 			for (attnum = 0; attnum < nattrs; attnum++)
 			{
-				gpupreagg_final_data_move(&kctx,
+				gpupreagg_final_data_move(&kcxt,
 										  kds_dst, kds_final, ktoast,
 										  attnum,
 										  kds_index, new_slot.s.index);
@@ -1131,7 +1131,7 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 			isOwner = true;
 		}
 		else if (cur_slot.s.hash == new_slot.s.hash  &&
-				 gpupreagg_keymatch(&kctx,
+				 gpupreagg_keymatch(&kcxt,
 									kds_dst, kds_final, ktoast,
 									kds_index, cur_slot.s.index))
 		{
@@ -1207,14 +1207,14 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 		 */
 		if (source_is_valid && !isOwner)
 		{
-			gpupreagg_global_calc(&kctx, attnum,
+			gpupreagg_global_calc(&kcxt, attnum,
 								  kds_final, kds_dst, ktoast,
 								  owner_index, kds_index);
 		}
 	}
 
 	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kresults_final->kerror, kctx.e);
+	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
 
 /*
