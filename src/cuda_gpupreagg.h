@@ -1087,7 +1087,7 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	__syncthreads();
 	assert(base_index + ngroups <= kresults_final->nrooms);
 	dest_index = base_index + index;
-	if (get_global_id() < nitems  &&  isOwner)
+	if (kds_index < nitems  &&  isOwner)
 		kresults_final->results[dest_index] = owner_index;
 
 	/*
@@ -1112,7 +1112,7 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 		 * identifier on the kern_row_map. Once kernel execution gets done,
 		 * this index points the location of aggregate value.
 		 */
-		if (get_global_id() < nitems  &&  ! isOwner)
+		if (kds_index < nitems  &&  !isOwner)
 		{
 			gpupreagg_global_calc(&kctx, attnum,
 								  kds_final, kds_dst, ktoast,

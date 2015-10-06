@@ -227,6 +227,7 @@ typedef struct
  */
 typedef struct gpupreagg_segment
 {
+	GpuPreAggState *gpas;				/* reference to GpuPreAggState */
 	pgstrom_data_store *pds_final;		/* final pds/kds buffer on host */
 	kern_resultbuf *kresults_final;		/* final kresults buffer on host */
 	CUdeviceptr		m_kresults_final;	/* final kresults buffer on device */
@@ -237,6 +238,7 @@ typedef struct gpupreagg_segment
 	cl_int			idx_chunks;			/* index of the chunk array */
 	cl_int			refcnt;				/* referenced by pgstrom_gpupreagg */
 	cl_int			cuda_index;			/* device to be used */
+	cl_bool			has_terminator;		/* true, if any terminator task */
 	cl_bool			needs_fallback;		/* true, if CPU fallback needed */
 	pgstrom_data_store **pds_src;		/* reference to source PDSs */
 	CUevent			ev_final_loaded;	/* event of final-buffer load */
@@ -3476,6 +3478,7 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 		STROMALIGN(sizeof(pgstrom_data_store *) * num_chunks) +
 		STROMALIGN(sizeof(CUevent) * num_chunks);
 	segment = MemoryContextAllocZero(gcontext->memcxt, required);
+	segment->gpas = gpas;
 	segment->pds_final = pds_final;		/* refcnt==1 */
 	segment->kresults_final = kresults_final;
 	segment->m_kds_final = 0UL;
@@ -3490,12 +3493,52 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 	segment->idx_chunks = 0;
 	segment->refcnt = 1;
 	segment->cuda_index = cuda_index;
+	segment->has_terminator = false;
 	segment->needs_fallback = false;
 	segment->pds_src = (pgstrom_data_store **)((char *)segment + offset);
 	offset += STROMALIGN(sizeof(pgstrom_data_store *) * num_chunks);
 	segment->ev_kern_exec_end = (CUevent *)((char *)segment + offset);
 
 	return segment;
+}
+
+/*
+ * gpupreagg_cleanup_segment - release relevant CUDA resources
+ */
+static void
+gpupreagg_cleanup_segment(gpupreagg_segment *segment)
+{
+	GpuContext *gcontext = segment->gpas->gts.gcontext;
+	CUresult	rc;
+	cl_int		i;
+
+	if (segment->m_kresults_final != 0UL)
+	{
+		__gpuMemFree(gcontext, segment->cuda_index,
+					 segment->m_kresults_final);
+		segment->m_kresults_final = 0UL;
+		segment->m_hashslot_final = 0UL;
+		segment->m_kds_final = 0UL;
+	}
+
+	if (segment->ev_final_loaded)
+	{
+		rc = cuEventDestroy(segment->ev_final_loaded);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
+		segment->ev_final_loaded = NULL;
+	}
+
+	for (i=0; i < segment->num_chunks; i++)
+	{
+		if (segment->ev_kern_exec_end[i])
+		{
+			rc = cuEventDestroy(segment->ev_kern_exec_end[i]);
+			if (rc != CUDA_SUCCESS)
+				elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
+			segment->ev_kern_exec_end[i] = NULL;
+		}
+	}
 }
 
 /*
@@ -3516,37 +3559,29 @@ static void
 gpupreagg_put_segment(gpupreagg_segment *segment)
 {
 	int			i;
-	CUresult	rc;
 
 	Assert(segment->refcnt > 0);
 
 	if (--segment->refcnt == 0)
 	{
+		/* unless error path or fallback, it shall be released already */
+		gpupreagg_cleanup_segment(segment);
+
 		if (segment->pds_final)
+		{
 			pgstrom_release_data_store(segment->pds_final);
-		Assert(segment->m_kds_final == 0UL);
+			segment->pds_final = NULL;
+		}
 
 		if (segment->kresults_final)
-			pfree(segment->kresults_final);
-		Assert(segment->m_kresults_final == 0UL);
-
-		if (segment->ev_final_loaded)
 		{
-			rc = cuEventDestroy(segment->ev_final_loaded);
-			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
+			pfree(segment->kresults_final);
+			segment->kresults_final = NULL;
 		}
 
 		for (i=0; i < segment->num_chunks; i++)
 		{
-			if (segment->ev_kern_exec_end[i] != NULL)
-			{
-				rc = cuEventDestroy(segment->ev_kern_exec_end[i]);
-				if (rc != CUDA_SUCCESS)
-					elog(WARNING, "failed on cuEventDestroy: %s",
-						 errorText(rc));
-			}
-			if (segment->pds_src[i])
+			if (segment->pds_src[i] != NULL)
 			{
 				pgstrom_release_data_store(segment->pds_src[i]);
 				segment->pds_src[i] = NULL;
@@ -3637,8 +3672,6 @@ gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg)
 									   false,
 									   nrooms,
 									   sizeof(kern_errorbuf));
-		elog(INFO, "final_prep f_hash=%zx hashsize=%zu",
-			 (size_t)m_hashslot_final, segment->f_hashsize);
 		kern_args[0] = &segment->f_hashsize;
 		kern_args[1] = &m_hashslot_final;
 		rc = cuLaunchKernel(kern_final_prep,
@@ -3671,38 +3704,6 @@ gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg)
 	}
 	return true;
 }
-
-static void
-gpupreagg_cleanup_segment(pgstrom_gpupreagg *gpreagg)
-{
-	gpupreagg_segment  *segment = gpreagg->segment;
-	CUresult	rc;
-	cl_int		i;
-
-	Assert(gpreagg->is_terminator);
-
-	Assert(segment->m_kresults_final != 0UL);
-	gpuMemFree(&gpreagg->task, segment->m_kresults_final);
-	segment->m_kresults_final = 0UL;
-	segment->m_hashslot_final = 0UL;
-	segment->m_kds_final = 0UL;
-
-	Assert(segment->ev_final_loaded != NULL);
-	rc = cuEventDestroy(segment->ev_final_loaded);
-	if (rc != CUDA_SUCCESS)
-		elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
-	segment->ev_final_loaded = NULL;
-
-	for (i=0; i < segment->num_chunks; i++)
-	{
-		Assert(segment->ev_kern_exec_end[i] != NULL);
-		rc = cuEventDestroy(segment->ev_kern_exec_end[i]);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
-		segment->ev_kern_exec_end[i] = NULL;
-	}
-}
-
 
 static pgstrom_gpupreagg *
 gpupreagg_task_create(GpuPreAggState *gpas,
@@ -3854,10 +3855,28 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 	 * Create or acquire a segment that has final result buffer of this
 	 * GpuPreAgg task.
 	 */
+retry_segment:
 	if (!gpas->curr_segment)
 		gpas->curr_segment = gpupreagg_create_segment(gpas);
 	segment = gpupreagg_get_segment(gpas->curr_segment);
+	/*
+	 * Once a segment gets marked as 'needs_fallback', it is not available
+	 * and does not make sense to add new tasks any more.
+	 * So, we have to switch new segment immediately
+	 */
+	pg_memory_barrier();	/* CUDA callback may set needs_fallback */
+	if (segment->needs_fallback)
+	{
+		gpupreagg_put_segment(segment);
+		/* GpuPreAggState also unreference this segment */
+		gpupreagg_put_segment(gpas->curr_segment);
+		gpas->curr_segment = NULL;
+		goto retry_segment;
+	}
 
+	/*
+	 * OK, assign this PDS on the segment
+	 */
 	Assert(segment->idx_chunks < segment->num_chunks);
 	segment_id = segment->idx_chunks++;
 	segment->pds_src[segment_id] = pgstrom_acquire_data_store(pds);
@@ -3868,6 +3887,9 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 
 	if (is_terminator)
 	{
+		Assert(!segment->has_terminator);
+		segment->has_terminator = true;
+
 		gpupreagg_put_segment(gpas->curr_segment);
 		gpas->curr_segment = NULL;
 	}
@@ -4162,6 +4184,7 @@ static bool
 gpupreagg_task_complete(GpuTask *gtask)
 {
 	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) gtask;
+	gpupreagg_segment  *segment = gpreagg->segment;
 	GpuTaskState	   *gts = gtask->gts;
 
 	if (gpreagg->task.pfm.enabled)
@@ -4221,11 +4244,57 @@ gpupreagg_task_complete(GpuTask *gtask)
 						   ev_dma_recv_stop);
 		pgstrom_accum_perfmon(&gts->pfm_accum, &gpreagg->task.pfm);
 	}
+	/* OK, CUDA resource of this task is no longer referenced */
+	gpupreagg_cleanup_cuda_resources(gpreagg);
 
 	/*
-	 * NOTE: Only terminator task shall be returned to the main logic.
-	 * Elsewhere, task shall be no longer referenced and released
-	 * immediately as if nothing were returned.
+	 * NOTE: We have to ensure that a segment has terminator task, even if
+	 * not attached yet. Also we have to pay attention that no additional
+	 * task shall be added to the segment once 'needs_fallback' gets set
+	 * (it might be set by CUDA callback).
+	 * So, this segment may have no terminator task even though it has
+	 * responsible to generate result.
+	 */
+	if (segment->needs_fallback)
+	{
+		/*  */
+		if (gpreagg->task.kerror.errcode == StromError_CpuReCheck ||
+			gpreagg->task.kerror.errcode == StromError_DataStoreNoSpace)
+		{
+			elog(NOTICE, "%s, GpuPreAgg task is processed by CPU fallback",
+				 errorTextKernel(&gpreagg->task.kerror));
+			gpreagg->task.kerror.errcode = StromError_Success;
+		}
+		/*
+		 * Someone has to be segment terminator even if it is not assigned
+		 * yet. Once needs_fallback is set, no task shall be added any more.
+		 * So, this task will perform as segment terminator.
+		 */
+		if (!segment->has_terminator)
+		{
+			gpreagg->is_terminator = true;
+			segment->has_terminator = true;
+		}
+	}
+	else if (gpreagg->is_terminator)
+	{
+		/*
+		 * Completion of the terminator task without 'needs_fallback' means
+		 * no other GPU kernels are in-progress. So, we can release relevant
+		 * CUDA resource immediately.
+		 *
+		 * TODO: We might be able to release CUDA resource sooner even if
+		 * 'needs_fallback' scenario. However, at this moment, we have no
+		 * mechanism to track concurrent tasks that may be launched
+		 * asynchronously. So, we move on the safety side.
+		 */
+		gpupreagg_cleanup_segment(segment);
+	}
+
+	/*
+	 * Only terminator task shall be returned to the main logic.
+	 * Elsewhere, task shall be no longer referenced thus we can release
+	 * relevant buffer immediately as if nothing were returned.
 	 */
 	if (!gpreagg->is_terminator)
 	{
@@ -4238,14 +4307,6 @@ gpupreagg_task_complete(GpuTask *gtask)
 		gpupreagg_task_release(&gpreagg->task);
 		return false;
 	}
-
-	/*
-	 * NOTE: completion of terminator task means, here is no other kernel
-	 * functions are in-progress. So, we release the relevant CUDA resource
-	 * here.
-	 */
-	gpupreagg_cleanup_segment(gpreagg);
-	gpupreagg_cleanup_cuda_resources(gpreagg);
 	return true;
 }
 
@@ -4272,17 +4333,17 @@ gpupreagg_task_respond(CUstream stream, CUresult status, void *private)
 		gpreagg->task.kerror.lineno = 0;
 	}
 
-	/* Set a flag, if GPU required to retry it on CPU side */
 	/*
-	 * TODO: If DataStoreNoSpace, we may be able to help the segment
-	 *       with retrying larger final buffer.
+	 * Set fallback flag if GPU kernel required CPU fallback to process
+	 * this segment. Also, it means no more tasks can be added any more,
+	 * so we don't want to wait for invocation of complete callback above.
+	 *
+	 * NOTE: We may have performance advantage if segment was retried
+	 * with larger final reduction buffer. But not yet.
 	 */
 	if (gpreagg->task.kerror.errcode == StromError_CpuReCheck ||
 		gpreagg->task.kerror.errcode == StromError_DataStoreNoSpace)
-	{
 		segment->needs_fallback = true;
-		gpreagg->task.kerror.errcode = StromError_Success;
-	}
 
 	/*
 	 * Remove from the running_tasks list, then attach it
@@ -4323,6 +4384,27 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	cl_int				i;
 	bool				final_source_is_kds_1st = true;
 	void			   *kern_args[10];
+
+	/*
+	 * Emergency bail out if previous gpupreagg task that references 
+	 * same segment already failed thus CPU failback is needed.
+	 * It is entirely nonsense to run remaining tasks in GPU kernel.
+	 *
+	 * NOTE: We don't need to synchronize completion of other tasks
+	 * on the CPU fallback scenario, because we have no chance to add
+	 * new tasks any more and its kds_final shall be never referenced.
+	 */
+	pg_memory_barrier();	/* CUDA callback may set needs_fallback */
+	if (segment->needs_fallback)
+	{
+		GpuTaskState   *gts = gpreagg->task.gts;
+
+		SpinLockAcquire(&gts->lock);
+		Assert(!gpreagg->task.chain.prev && !gpreagg->task.chain.next);
+		dlist_push_tail(&gts->completed_tasks, &gpreagg->task.chain);
+		SpinLockRelease(&gts->lock);
+		return true;
+	}
 
 	/*
 	 * Lookup kernel functions
