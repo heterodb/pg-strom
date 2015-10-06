@@ -988,7 +988,6 @@ gpupreagg_final_preparation(size_t f_hashsize,
 KERNEL_FUNCTION(void)
 gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 						  kern_data_store *kds_dst,		/* in */
-						  kern_resultbuf *kresults_final,	/* out */
 						  kern_data_store *kds_final,		/* out */
 						  kern_global_hashslot *f_hash)	/* only internal */
 {
@@ -1102,6 +1101,10 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 		{
 			/* Hash slot was empty, so this thread shall be responsible
 			 * to this grouping-key.
+			 *
+			 * MEMO: Can we reduce of number of atomic operation using
+			 * arithmetic_stairlike_add() on shared memory?
+			 * It is a possible optimization if # of groups is large.
 			 */
 			new_slot.s.index = atomicAdd(&kds_final->nitems, 1);
 			assert(new_slot.s.index < kds_final->nrooms);
@@ -1160,28 +1163,6 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	}
 	else
 		owner_index = (cl_uint)(0xffffffff);
-
-	/*
-	 * Allocation of a slot of kern_rowmap to point which slot is
-	 * responsible to grouping key.
-	 * All the threads that are not responsible to the grouping-key,
-	 * it updates the value of responsible thread.
-	 *
-	 * NOTE: Length of kern_row_map should be same as kds->nrooms.
-	 * So, we can use kds->nrooms to check array boundary.
-	 */
-	__syncthreads();
-	index = arithmetic_stairlike_add(isOwner ? 1 : 0, &ngroups);
-	if (get_local_id() == 0)
-	{
-		base_index = atomicAdd(&kresults_final->nitems, ngroups);
-		atomicAdd(&f_hash->hash_usage, ngroups);
-	}
-	__syncthreads();
-	assert(base_index + ngroups <= kresults_final->nrooms);
-	dest_index = base_index + index;
-	if (source_is_valid && isOwner)
-		kresults_final->results[dest_index] = owner_index;
 
 	/*
 	 * Global reduction for each column
@@ -1311,16 +1292,13 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
  * So, we need to fix up its value to adjust offset by hostptr.
  */
 KERNEL_FUNCTION(void)
-gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
-						kern_resultbuf *kresults_final,
-						kern_data_store *kds_final)
+gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg, kern_data_store *kds_final)
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
 	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
 	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
 	cl_uint			nattrs = kds_final->ncols;
-	cl_uint			nitems = kresults_final->nitems;
 	cl_uint			colidx;
 	size_t			offset;
 	kern_colmeta	cmeta;
@@ -1330,11 +1308,11 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
 
 	INIT_KERNEL_CONTEXT(&kcxt,gpupreagg_fixup_varlena,kparams);
 
-	if (get_global_id() < nitems)
+	if (get_global_id() < kds_final->nitems)
 	{
-		cl_uint		rowidx = kresults_final->results[get_global_id()];
-		Datum	   *ts_values = KERN_DATA_STORE_VALUES(kds_final, rowidx);
-		cl_bool	   *ts_isnull = KERN_DATA_STORE_ISNULL(kds_final, rowidx);
+		size_t		kds_index = get_global_id();
+		Datum	   *ts_values = KERN_DATA_STORE_VALUES(kds_final, kds_index);
+		cl_bool	   *ts_isnull = KERN_DATA_STORE_ISNULL(kds_final, kds_index);
 
 		for (colidx = 0; colidx < nattrs; colidx++)
 		{

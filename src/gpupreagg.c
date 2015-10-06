@@ -230,7 +230,6 @@ typedef struct gpupreagg_segment
 	GpuPreAggState *gpas;				/* reference to GpuPreAggState */
 	pgstrom_data_store *pds_final;		/* final pds/kds buffer on host */
 	kern_resultbuf *kresults_final;		/* final kresults buffer on host */
-	CUdeviceptr		m_kresults_final;	/* final kresults buffer on device */
 	CUdeviceptr		m_hashslot_final;	/* final reduction hash table */
 	CUdeviceptr		m_kds_final;		/* final kds buffer on device */
 	size_t			f_hashsize;			/* size of final reduction hashtable */
@@ -3469,7 +3468,7 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 	segment->kresults_final = kresults_final;
 	segment->m_kds_final = 0UL;
 	segment->m_hashslot_final = 0UL;
-	segment->m_kresults_final = 0UL;
+
 	/*
 	 * FIXME: f_hashsize is nroom of the pds_final. It is not a reasonable
 	 * estimation, thus needs to be revised.
@@ -3498,11 +3497,10 @@ gpupreagg_cleanup_segment(gpupreagg_segment *segment)
 	CUresult	rc;
 	cl_int		i;
 
-	if (segment->m_kresults_final != 0UL)
+	if (segment->m_hashslot_final != 0UL)
 	{
 		__gpuMemFree(gcontext, segment->cuda_index,
-					 segment->m_kresults_final);
-		segment->m_kresults_final = 0UL;
+					 segment->m_hashslot_final);
 		segment->m_hashslot_final = 0UL;
 		segment->m_kds_final = 0UL;
 	}
@@ -3587,7 +3585,6 @@ gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg)
 	size_t				block_size;
 	size_t				length;
 	CUfunction			kern_final_prep;
-	CUdeviceptr			m_kresults_final;
 	CUdeviceptr			m_hashslot_final;
 	CUdeviceptr			m_kds_final;
 	CUevent				ev_final_loaded;
@@ -3605,15 +3602,12 @@ gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg)
 			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
 
 		/* Device memory allocation for kds_final and kresults_final */
-		length = (GPUMEMALIGN(offsetof(kern_resultbuf, results[nrooms])) +
-				  GPUMEMALIGN(offsetof(kern_global_hashslot,
+		length = (GPUMEMALIGN(offsetof(kern_global_hashslot,
 									   hash_slot[segment->f_hashsize])) +
 				  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_final->kds)));
-		m_kresults_final = gpuMemAlloc(&gpreagg->task, length);
-		if (!m_kresults_final)
+		m_hashslot_final = gpuMemAlloc(&gpreagg->task, length);
+		if (!m_hashslot_final)
 			return false;
-		m_hashslot_final = m_kresults_final +
-			GPUMEMALIGN(offsetof(kern_resultbuf, results[nrooms]));
 		m_kds_final = m_hashslot_final +
 			GPUMEMALIGN(offsetof(kern_global_hashslot,
 								 hash_slot[segment->f_hashsize]));
@@ -3634,12 +3628,6 @@ gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg)
 		}
 
 		/* enqueue DMA send request */
-		rc = cuMemcpyHtoDAsync(m_kresults_final, gpreagg->kresults,
-							   offsetof(kern_resultbuf, results[0]),
-							   gpreagg->task.cuda_stream);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-
 		rc = cuMemcpyHtoDAsync(m_kds_final, pds_final->kds,
 							   KERN_DATA_STORE_HEAD_LENGTH(pds_final->kds),
 							   gpreagg->task.cuda_stream);
@@ -3675,7 +3663,6 @@ gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg)
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuStreamWaitEvent: %s", errorText(rc));
 
-		segment->m_kresults_final = m_kresults_final;
 		segment->m_hashslot_final = m_hashslot_final;
 		segment->m_kds_final = m_kds_final;
 		segment->ev_final_loaded = ev_final_loaded;
@@ -3981,8 +3968,9 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 	GpuPreAggState	   *gpas = (GpuPreAggState *) gts;
 	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) gpas->gts.curr_task;
 	gpupreagg_segment  *segment = gpreagg->segment;
-	kern_resultbuf	   *kresults_final = segment->kresults_final;
+//	kern_resultbuf	   *kresults_final = segment->kresults_final;
 	pgstrom_data_store *pds_final = segment->pds_final;
+	kern_data_store	   *kds_final = pds_final->kds;
 	TupleTableSlot	   *slot = NULL;
 	HeapTupleData		tuple;
 	struct timeval		tv1, tv2;
@@ -3992,9 +3980,9 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
 	if (segment->needs_fallback)
 		slot = gpupreagg_next_tuple_fallback(gpas, segment);
-	else if (gpas->gts.curr_index < kresults_final->nitems)
+	else if (gpas->gts.curr_index < kds_final->nitems)
 	{
-		size_t		index = kresults_final->results[gpas->gts.curr_index++];
+		size_t		index = gpas->gts.curr_index++;
 
 		slot = gts->css.ss.ps.ps_ResultTupleSlot;
 		ExecClearTuple(slot);
@@ -4702,7 +4690,6 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	 * KERNEL_FUNCTION(void)
 	 * gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,
 	 *                           kern_data_store *kds_dst,
-	 *                           kern_resultbuf *kresults_final,
 	 *                           kern_data_store *kds_final,
 	 *                           kern_global_hashslot *f_hashslot)
 	 */
@@ -4717,9 +4704,8 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	kern_args[1] = (final_source_is_kds_1st
 					? &gpreagg->m_kds_1st
 					: &gpreagg->m_kds_2nd);
-	kern_args[2] = &segment->m_kresults_final;
-	kern_args[3] = &segment->m_kds_final;
-	kern_args[4] = &segment->m_hashslot_final;
+	kern_args[2] = &segment->m_kds_final;
+	kern_args[3] = &segment->m_hashslot_final;
 	lmem_size = sizeof(kern_errorbuf) * block_size;
 	rc = cuLaunchKernel(gpreagg->kern_fagg,
 						grid_size, 1, 1,
@@ -4766,7 +4752,6 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 			/* Launch:
 			 * KERNEL_FUNCTION(void)
 			 * gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
-			 *                         kern_resultbuf *kresults_final,
 			 *                         kern_data_store *kds_final)
 			 */
 			pgstrom_compute_workgroup_size(&grid_size,
@@ -4777,8 +4762,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 										   nitems,
 										   sizeof(kern_errorbuf));
 			kern_args[0] = &gpreagg->m_gpreagg;
-			kern_args[1] = &segment->m_kresults_final;
-			kern_args[2] = &segment->m_kds_final;
+			kern_args[1] = &segment->m_kds_final;
 
 			rc = cuLaunchKernel(gpreagg->kern_fixvar,
 								grid_size, 1, 1,
@@ -4814,18 +4798,6 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	if (gpreagg->is_terminator)
 	{
 		pgstrom_data_store *pds_final = segment->pds_final;
-		cl_uint				nrooms_final = segment->kresults_final->nrooms;
-
-		/* recv of kresults_final */
-		length = offsetof(kern_resultbuf, results[nrooms_final]);
-		rc = cuMemcpyDtoHAsync(segment->kresults_final,
-							   segment->m_kresults_final,
-							   length,
-							   gpreagg->task.cuda_stream);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		gpreagg->task.pfm.bytes_dma_recv += length;
-		gpreagg->task.pfm.num_dma_send++;
 
 		/* recv of kds_final */
 		length = pds_final->kds->length;
