@@ -955,7 +955,7 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	cl_uint			nattrs = kds_dst->ncols;
 	cl_uint			attnum;
 	cl_bool			isOwner = false;
-	cl_bool			source_is_valid = true;
+	cl_bool			source_is_valid = false;
 	cl_int			loop;
 	pagg_hashslot	old_slot;
 	pagg_hashslot	new_slot;
@@ -982,20 +982,24 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	if (kresults->all_visible)
 	{
 		if (get_global_id() < kds_dst->nitems)
+		{
 			kds_index = get_global_id();
-		else
-			source_is_valid = false;
+			source_is_valid = true;
+		}
 	}
 	else
 	{
 		if (get_global_id() < kresults->nitems)
+		{
 			kds_index = kresults->results[get_global_id()];
-		else
-			source_is_valid = false;
+			source_is_valid = true;
+		}
 	}
 
 	if (source_is_valid)
 	{
+		int		nloops = 1;		// !!!for debug!!!
+
 		hash_value = gpupreagg_hashvalue(&kctx, crc32_table,
 										 kds_dst, ktoast, kds_index,
 										 kgpreagg->key_dist_salt);
@@ -1017,6 +1021,7 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 		old_slot.s.index = (cl_uint)(0xffffffff); /* INVALID */
 		index  = hash_value % f_hashsize;
 	retry:
+		assert(nloops < 10000);
 		cur_slot.value = atomicCAS(&f_hash->hash_slot[index].value,
 								   old_slot.value, new_slot.value);
 		if (cur_slot.value == old_slot.value)
@@ -1056,13 +1061,14 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 									kds_dst, kds_final, ktoast,
 									kds_index, cur_slot.s.index))
 		{
-//			printf("Match %d\n", cur_slot.s.index);
+//			printf("Match gid=%u %d\n", get_global_id(), cur_slot.s.index);
 			owner_index = cur_slot.s.index;
 		}
 		else
 		{
-//			printf("Retry %d\n", (int)index);
+//			printf("Retry gid=%u %d\n", get_global_id(), (int)index);
 			index = (index + 1) % f_hashsize;
+			nloops++;
 			goto retry;
 		}
 	}
