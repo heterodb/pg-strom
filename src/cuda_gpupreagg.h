@@ -950,12 +950,12 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	size_t			owner_index;
 	size_t			f_hashsize = f_hash->hash_size;
 	cl_uint			hash_value;
-	cl_uint			nitems;
 	cl_uint			ngroups;
 	cl_uint			index;
 	cl_uint			nattrs = kds_dst->ncols;
 	cl_uint			attnum;
 	cl_bool			isOwner = false;
+	cl_bool			source_is_valid = true;
 	cl_int			loop;
 	pagg_hashslot	old_slot;
 	pagg_hashslot	new_slot;
@@ -977,23 +977,24 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 		 index += get_local_size())
 		crc32_table[index] = kgpreagg->pg_crc32_table[index];
 	__syncthreads();
- 
-	/* row-index on kds_dst buffer */
+
+	/* row-index on the kds_dst buffer */
 	if (kresults->all_visible)
 	{
-		nitems = kds_dst->nitems;
-		kds_index = get_global_id();
+		if (get_global_id() < kds_dst->nitems)
+			kds_index = get_global_id();
+		else
+			source_is_valid = false;
 	}
 	else
 	{
-		nitems = kresults->nitems;
-		if (get_global_id() < nitems)
+		if (get_global_id() < kresults->nitems)
 			kds_index = kresults->results[get_global_id()];
 		else
-			kds_index = kresults->nrooms;	/* always out of range */
+			source_is_valid = false;
 	}
 
-	if (kds_index < nitems)
+	if (source_is_valid)
 	{
 		hash_value = gpupreagg_hashvalue(&kctx, crc32_table,
 										 kds_dst, ktoast, kds_index,
@@ -1087,7 +1088,7 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	__syncthreads();
 	assert(base_index + ngroups <= kresults_final->nrooms);
 	dest_index = base_index + index;
-	if (kds_index < nitems  &&  isOwner)
+	if (source_is_valid && isOwner)
 		kresults_final->results[dest_index] = owner_index;
 
 	/*
@@ -1112,7 +1113,7 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 		 * identifier on the kern_row_map. Once kernel execution gets done,
 		 * this index points the location of aggregate value.
 		 */
-		if (kds_index < nitems  &&  !isOwner)
+		if (source_is_valid && !isOwner)
 		{
 			gpupreagg_global_calc(&kctx, attnum,
 								  kds_final, kds_dst, ktoast,
