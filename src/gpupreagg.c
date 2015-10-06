@@ -1843,10 +1843,9 @@ gpupreagg_codegen_qual_eval(CustomScan *cscan, GpuPreAggInfo *gpa_info,
  * static cl_uint
  * gpupreagg_hashvalue(kern_context *kcxt,
  *                     cl_uint *crc32_table,
+ *                     cl_uint hash_value,
  *                     kern_data_store *kds,
- *                     kern_data_store *ktoast,
- *                     size_t kds_index,
- *                     cl_uint key_dist_salt)
+ *                     size_t kds_index)
  */
 static char *
 gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
@@ -1866,18 +1865,10 @@ gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 					 "STATIC_FUNCTION(cl_uint)\n"
 					 "gpupreagg_hashvalue(kern_context *kcxt,\n"
 					 "                    cl_uint *crc32_table,\n"
+					 "                    cl_uint hash_value,\n"
 					 "                    kern_data_store *kds,\n"
-					 "                    kern_data_store *ktoast,\n"
-					 "                    size_t kds_index,\n"
-					 "                    cl_uint key_dist_salt)\n"
+					 "                    size_t kds_index)\n"
 					 "{\n");
-	appendStringInfo(&body,
-					 "  pg_int4_t my_salt;\n"
-					 "  cl_uint   hashval;\n"
-					 "\n"
-					 "  my_salt.isnull = !(key_dist_salt > 1);\n"
-					 "  my_salt.value = (kds_index %% key_dist_salt);\n"
-					 "  INIT_LEGACY_CRC32(hashval);\n");
 
 	for (i=0; i < gpa_info->numCols; i++)
 	{
@@ -1908,21 +1899,16 @@ gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 		/* crc32 computing */
 		appendStringInfo(
 			&body,
-			"  hashval = pg_%s_comp_crc32(crc32_table, hashval, keyval_%u);\n",
+			"  hash_value = pg_%s_comp_crc32(crc32_table,\n"
+			"                                hash_value, keyval_%u);\n",
 			dtype->type_name, resno);
 	}
 	/* no constants should be appear */
 	Assert(bms_is_empty(context->param_refs));
-	/* add key distribution salt if aggregation is too aggressive */
-	appendStringInfo(
-		&body,
-		"  hashval = pg_int4_comp_crc32(crc32_table, hashval, my_salt);\n");
-	/* finalize hash value calculation */
-	appendStringInfo(&body,
-					 "  FIN_LEGACY_CRC32(hashval);\n");
+
 	appendStringInfo(&decl,
 					 "%s\n"
-					 "  return hashval;\n"
+					 "  return hash_value;\n"
 					 "}\n", body.data);
 	pfree(body.data);
 
@@ -4658,9 +4644,8 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 			kern_args[1] = &gpreagg->m_kds_1st;
 			kern_args[2] = &gpreagg->m_kds_2nd;
 			kern_args[3] = &gpreagg->m_kds_in;
-			lmem_size = Max(Max(sizeof(pagg_hashslot),
-								sizeof(pagg_datum)) * block_size,
-							sizeof(gpreagg->kern.pg_crc32_table));
+			lmem_size = Max(sizeof(pagg_hashslot),
+							sizeof(pagg_datum)) * block_size;
 			rc = cuLaunchKernel(gpreagg->kern_lagg,
 								grid_size, 1, 1,
 								block_size, 1, 1,
@@ -4696,8 +4681,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 						: &gpreagg->m_kds_1st);
 		kern_args[2] = &gpreagg->m_kds_in;
 		kern_args[3] = &gpreagg->m_ghash;
-		lmem_size = Max(sizeof(kern_errorbuf) * block_size,
-						sizeof(gpreagg->kern.pg_crc32_table));
+		lmem_size = sizeof(kern_errorbuf) * block_size;
 		rc = cuLaunchKernel(gpreagg->kern_gagg,
 							grid_size, 1, 1,
 							block_size, 1, 1,
@@ -4736,8 +4720,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	kern_args[2] = &segment->m_kresults_final;
 	kern_args[3] = &segment->m_kds_final;
 	kern_args[4] = &segment->m_hashslot_final;
-	lmem_size = Max(sizeof(kern_errorbuf) * block_size,
-					sizeof(gpreagg->kern.pg_crc32_table));
+	lmem_size = sizeof(kern_errorbuf) * block_size;
 	rc = cuLaunchKernel(gpreagg->kern_fagg,
 						grid_size, 1, 1,
 						block_size, 1, 1,
