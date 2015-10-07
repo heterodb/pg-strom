@@ -3508,6 +3508,8 @@ retry:
 	kgjoin->kresults_max_space = max_items;
 	kgjoin->num_rels = gjs->num_rels;
 	kgjoin->start_depth = start_depth;
+	memset(kgjoin->result_nitems, 0, sizeof(kgjoin->result_nitems));
+	kgjoin->result_valid_until = 0;
 
 	/* copies the constant/parameter buffer */
 	memcpy(KERN_GPUJOIN_PARAMBUF(kgjoin),
@@ -3801,12 +3803,53 @@ gpujoin_task_complete(GpuTask *gtask)
 				(pgjoin->inner_ratio * (double) pds_src->kds->nitems);
 		for (i=0; i <= pgjoin->kern.num_rels; i++)
 			gjs->result_nitems[i] += pgjoin->kern.result_nitems[i];
+#if 0
+		/*
+		 * For debug, to observe success cases
+		 */
+		{
+			kern_data_store	   *kds_dst = pgjoin->pds_dst->kds;
+			StringInfoData		str;
+
+			initStringInfo(&str);
+
+			appendStringInfo(&str, "Success src_nitems: %u max_space: %u ",
+							 pgjoin->pds_src->kds->nitems,
+							 pgjoin->kern.kresults_max_space);
+			if (kds_dst->format == KDS_FORMAT_ROW)
+				appendStringInfo(&str, "length: %u ", kds_dst->length);
+			else
+				appendStringInfo(&str, "nrooms: %u ", kds_dst->nrooms);
+
+			appendStringInfo(&str, " Nthreads: (");
+			for (i=0; i <= gjs->num_rels; i++)
+				appendStringInfo(&str, "%s%u", i > 0 ? ", " : "",
+								 pgjoin->num_threads[i]);
+			appendStringInfo(&str, ")");
+
+			appendStringInfo(&str, " Inners: ");
+			for (i=0; i < gjs->num_rels; i++)
+				appendStringInfo(&str, "%s(%u, %u)", i > 0 ? ", " : "",
+								 pgjoin->inner_base[i],
+								 pgjoin->inner_size[i]);
+			appendStringInfo(&str, " Results: [");
+			for (i=0; i <= gjs->num_rels; i++)
+				appendStringInfo(&str, "%s%u", i > 0 ? ", " : "",
+								 pgjoin->kern.result_nitems[i]);
+			appendStringInfo(&str, "]");
+
+			elog(INFO, "Success: %s retry=%d",
+				 str.data, pgjoin->retry_count);
+			pfree(str.data);
+		}
+#endif
 
 		/*
 		 * Enqueue another GpuJoin taks if completed one was run towards
 		 * a piece of inner chunk, and we have to make inner_base[] and
 		 * inner_size[] advanced.
 		 */
+		memcpy(inner_base, pgjoin->inner_base, sizeof(inner_base));
 		for (i=gjs->num_rels-1; i >= 0; i--)
 		{
 			pgstrom_data_store *pds_in = pmrels->inner_chunks[i];
