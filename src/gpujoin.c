@@ -3813,8 +3813,9 @@ gpujoin_task_complete(GpuTask *gtask)
 
 			initStringInfo(&str);
 
-			appendStringInfo(&str, "Success src_nitems: %u max_space: %u ",
+			appendStringInfo(&str, "src_nitems: %u (%.2f%%) max_space: %u ",
 							 pgjoin->pds_src->kds->nitems,
+							 100.0 * pgjoin->inner_ratio,
 							 pgjoin->kern.kresults_max_space);
 			if (kds_dst->format == KDS_FORMAT_ROW)
 				appendStringInfo(&str, "length: %u ", kds_dst->length);
@@ -3853,13 +3854,9 @@ gpujoin_task_complete(GpuTask *gtask)
 		for (i=gjs->num_rels-1; i >= 0; i--)
 		{
 			pgstrom_data_store *pds_in = pmrels->inner_chunks[i];
-			cl_uint				inner_limit
-				= (pds_in->kds->format != KDS_FORMAT_ROW
-				   ? pds_in->kds->nitems
-				   : pds_in->kds->nslots);
 
-			inner_base[i] = (pgjoin->inner_base[i] + pgjoin->inner_size[i]);
-			if (inner_base[i] < inner_limit)
+			inner_base[i] += pgjoin->inner_size[i];
+			if (inner_base[i] < pds_in->kds->nitems)
 			{
 				while (++i <= gjs->num_rels)
 					inner_base[i] = 0;
@@ -3884,6 +3881,20 @@ gpujoin_task_complete(GpuTask *gtask)
 									pgjoin->pmrels,
 									pds_src,
 									inner_base);
+#if 1
+			{
+				StringInfoData	str;
+
+				initStringInfo(&str);
+				appendStringInfo(&str, " Inners: ");
+				for (i=0; i < gjs->num_rels; i++)
+					appendStringInfo(&str, "%s(%u, %u)", i > 0 ? ", " : "",
+				   					 pgjoin_new->inner_base[i],
+								   	 pgjoin_new->inner_size[i]);
+				elog(INFO, "Next(%p): %s", pgjoin_new, str.data);
+				pfree(str.data);
+			}
+#endif
 			/* add this new task to the pending list */
 			SpinLockAcquire(&gjs->gts.lock);
 			dlist_push_tail(&gjs->gts.pending_tasks, &pgjoin_new->task.chain);
