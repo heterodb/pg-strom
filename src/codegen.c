@@ -50,12 +50,15 @@ static struct {
 	int32			type_flags;		/* library to declare this type */
 } devtype_catalog[] = {
 	/* basic datatypes */
-	{ BOOLOID,		"cl_bool",	0 },
-	{ INT2OID,		"cl_short",	0 },
-	{ INT4OID,		"cl_int",	0 },
-	{ INT8OID,		"cl_long",	0 },
-	{ FLOAT4OID,	"cl_float",	0 },
-	{ FLOAT8OID,	"cl_double",0 },
+	{ BOOLOID,		"cl_bool",	0 },	/* bool */
+	{ INT2OID,		"cl_short",	0 },	/* smallint */
+	{ INT4OID,		"cl_int",	0 },	/* int */
+	{ INT8OID,		"cl_long",	0 },	/* bigint */
+	{ FLOAT4OID,	"cl_float",	0 },	/* real */
+	{ FLOAT8OID,	"cl_double",0 },	/* float */
+#if 0
+	{ CASHOID,		"cl_long",	0 },	/* money */
+#endif
 	/* date and time datatypes */
 	{ DATEOID,			"DateADT",		DEVFUNC_NEEDS_TIMELIB },
 	{ TIMEOID,			"TimeADT",		DEVFUNC_NEEDS_TIMELIB },
@@ -168,9 +171,11 @@ pgstrom_devtype_lookup(Oid type_oid)
  * attributes:
  * 'a' : this function needs an alias, instead of SQL function name
  * 'c' : this function is locale aware, so unavailable if not simple collation
- * 'n' : this function needs opencl_numeric.h
- * 's' : this function needs opencl_textlib.h
- * 't' : this function needs opencl_timelib.h
+ * 'm' : this function needs cuda_mathlib.h
+ * 'n' : this function needs cuda_numeric.h
+ * 's' : this function needs cuda_textlib.h
+ * 't' : this function needs cuda_timelib.h
+ * 'y' : this function needs cuda_money.h
  *
  * class character:
  * 'c' : this function is type cast that takes an argument
@@ -439,7 +444,36 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "btfloat48cmp", 2, {FLOAT4OID, FLOAT8OID}, "f:devfunc_float_comp" },
 	{ "btfloat84cmp", 2, {FLOAT8OID, FLOAT4OID}, "f:devfunc_float_comp" },
 	{ "btfloat8cmp",  2, {FLOAT8OID, FLOAT8OID}, "f:devfunc_float_comp" },
-
+#if 0
+	/* currency cast */
+	{ "money",			1, {NUMERICOID},			"y/F:numeric_cash" },
+	{ "money",			1, {INT4OID},				"y/F:int4_cash" },
+	{ "money",			1, {INT8OID},				"y/F:int8_cash" },
+	/* currency operators */
+	{ "cash_pl",		2, {CASHOID, CASHOID},		"y/F:cash_pl" },
+	{ "cash_mi",		2, {CASHOID, CASHOID},		"y/F:cash_mi" },
+	{ "cash_div_cash",	2, {CASHOID, CASHOID},		"y/F:cash_div_cash" },
+	{ "cash_mul_int2",	2, {CASHOID, INT2OID},		"y/F:cash_mul_int2" },
+	{ "cash_mul_int4",	2, {CASHOID, INT4OID},		"y/F:cash_mul_int4" },
+	{ "cash_mul_flt4",	2, {CASHOID, FLOAT4OID},	"y/F:cash_mul_flt4" },
+	{ "cash_mul_flt8",	2, {CASHOID, FLOAT8OID},	"y/F:cash_mul_flt8" },
+	{ "cash_div_int2",	2, {CASHOID, INT2OID},		"y/F:cash_div_int2" },
+	{ "cash_div_int4",	2, {CASHOID, INT4OID},		"y/F:cash_div_int4" },
+	{ "cash_div_flt4",	2, {CASHOID, FLOAT4OID},	"y/F:cash_div_flt4" },
+	{ "cash_div_flt8",	2, {CASHOID, FLOAT8OID},	"y/F:cash_div_flt8" },
+	{ "int2_mul_cash",	2, {INT2OID, CASHOID},		"y/F:int2_mul_cash" },
+	{ "int4_mul_cash",	2, {INT4OID, CASHOID},		"y/F:int4_mul_cash" },
+	{ "flt4_mul_cash",	2, {FLOAT4OID, CASHOID},	"y/F:flt4_mul_cash" },
+	{ "flt8_mul_cash",	2, {FLOAT8OID, CASHOID},	"y/F:flt8_mul_cash" },
+	/* currency comparison */
+	{ "cash_cmp",		2, {CASHOID, CASHOID},		"y/F:cash_cmp" },
+	{ "cash_eq",		2, {CASHOID, CASHOID},		"y/F:cash_eq" },
+	{ "cash_ne",		2, {CASHOID, CASHOID},		"y/F:cash_ne" },
+	{ "cash_lt",		2, {CASHOID, CASHOID},		"y/F:cash_lt" },
+	{ "cash_le",		2, {CASHOID, CASHOID},		"y/F:cash_le" },
+	{ "cash_gt",		2, {CASHOID, CASHOID},		"y/F:cash_gt" },
+	{ "cash_ge",		2, {CASHOID, CASHOID},		"y/F:cash_ge" },
+#endif
 	/*
      * Mathmatical functions
      */
@@ -1126,6 +1160,9 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 							break;
 						case 't':
 							flags |= DEVFUNC_NEEDS_TIMELIB;
+							break;
+						case 'y':
+							flags |= DEVFUNC_NEEDS_MONEYLIB;
 							break;
 						default:
 							elog(NOTICE,

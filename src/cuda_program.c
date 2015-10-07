@@ -34,6 +34,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include "pg_strom.h"
+#include "cuda_moneylib.h"
 #include "cuda_timelib.h"
 
 typedef struct
@@ -1052,14 +1053,17 @@ pgstrom_assign_cuda_program(GpuTaskState *gts,
 	const char	   *kern_define;
 	StringInfoData	buf;
 
-	if ((extra_flags & (DEVFUNC_NEEDS_TIMELIB)) != 0)
+	if ((extra_flags & (DEVFUNC_NEEDS_TIMELIB |
+						DEVFUNC_NEEDS_MONEYLIB)) != 0)
 	{
 		initStringInfo(&buf);
 
 		/* put timezone info */
-		assign_timelib_session_info(&buf);
-
-		kern_define = buf.data;
+		if ((extra_flags & DEVFUNC_NEEDS_TIMELIB) != 0)
+			assign_timelib_session_info(&buf);
+		/* put currency info */
+		if ((extra_flags & DEVFUNC_NEEDS_MONEYLIB) != 0)
+			assign_moneylib_session_info(&buf);
 	}
 	else
 		kern_define = "";	/* no session specific code */
