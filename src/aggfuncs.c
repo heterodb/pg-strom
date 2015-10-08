@@ -20,6 +20,7 @@
 #include "fmgr.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/cash.h"
 #include "utils/numeric.h"
 #include <math.h>
 #include "pg_strom.h"
@@ -35,6 +36,7 @@ Datum gpupreagg_psum_float8(PG_FUNCTION_ARGS);
 Datum gpupreagg_psum_x2_float(PG_FUNCTION_ARGS);
 Datum gpupreagg_psum_numeric(PG_FUNCTION_ARGS);
 Datum gpupreagg_psum_x2_numeric(PG_FUNCTION_ARGS);
+Datum gpupreagg_psum_money(PG_FUNCTION_ARGS);
 Datum gpupreagg_corr_psum_x(PG_FUNCTION_ARGS);
 Datum gpupreagg_corr_psum_y(PG_FUNCTION_ARGS);
 Datum gpupreagg_corr_psum_x2(PG_FUNCTION_ARGS);
@@ -151,6 +153,16 @@ gpupreagg_psum_x2_numeric(PG_FUNCTION_ARGS)
 										  PG_GETARG_DATUM(0)));
 }
 PG_FUNCTION_INFO_V1(gpupreagg_psum_x2_numeric);
+
+Datum
+gpupreagg_psum_money(PG_FUNCTION_ARGS)
+{
+	Assert(PG_NARGS() == 1);
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+	PG_RETURN_CASH(PG_GETARG_CASH(0));
+}
+PG_FUNCTION_INFO_V1(gpupreagg_psum_money);
 
 /* gpupreagg_corr_psum - placeholder function that generates partial sum
  * of the arguments. _x2 generates square value of the input

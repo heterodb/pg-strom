@@ -108,6 +108,10 @@ CREATE FUNCTION pgstrom.pmax(numeric)
   RETURNS numeric
   AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
   LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.pmax(money)
+  RETURNS money
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
+  LANGUAGE C STRICT;
 CREATE FUNCTION pgstrom.pmax(date)
   RETURNS date
   AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
@@ -148,6 +152,10 @@ CREATE FUNCTION pgstrom.pmin(float8)
   LANGUAGE C STRICT;
 CREATE FUNCTION pgstrom.pmin(numeric)
   RETURNS numeric
+  AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.pmin(money)
+  RETURNS money
   AS 'MODULE_PATHNAME', 'gpupreagg_pseudo_expr'
   LANGUAGE C STRICT;
 CREATE FUNCTION pgstrom.pmin(date)
@@ -192,6 +200,11 @@ CREATE FUNCTION pgstrom.psum_x2(numeric)
   RETURNS numeric
   AS 'MODULE_PATHNAME', 'gpupreagg_psum_x2_numeric'
   LANGUAGE C CALLED ON NULL INPUT;
+CREATE FUNCTION pgstrom.psum(money)
+  RETURNS money
+  AS 'MODULE_PATHNAME', 'gpupreagg_psum_money'
+  LANGUAGE C CALLED ON NULL INPUT;
+
   
 -- Definition of Partial SUM for covariance/least square method (only float8)
 CREATE FUNCTION pgstrom.pcov_x(bool, float8, float8)
