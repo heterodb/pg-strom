@@ -1162,7 +1162,7 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 							flags |= DEVFUNC_NEEDS_TIMELIB;
 							break;
 						case 'y':
-							flags |= DEVFUNC_NEEDS_MONEYLIB;
+							flags |= DEVFUNC_NEEDS_MONEY;
 							break;
 						default:
 							elog(NOTICE,

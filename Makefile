@@ -29,7 +29,8 @@ CUDA_OBJS = cuda_common.o \
 	cuda_mathlib.o \
 	cuda_textlib.o \
 	cuda_timelib.o \
-	cuda_numeric.o
+	cuda_numeric.o \
+	cuda_money.o
 CUDA_SOURCES = $(addprefix src/,$(CUDA_OBJS:.o=.c))
 
 # Header and Libraries of CUDA
