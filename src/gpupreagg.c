@@ -403,6 +403,10 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_PMAX}, DEVFUNC_NEEDS_NUMERIC, INT_MAX
 	},
 #endif
+	{ "max", 1, {CASHOID},
+	  "c:max", 1, {CASHOID},
+	  {ALTFUNC_EXPR_PMAX}, DEVFUNC_NEEDS_MONEY, INT_MAX
+	},
 	{ "max", 1, {DATEOID},
 	  "c:max", 1, {DATEOID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
@@ -419,6 +423,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "c:max", 1, {TIMESTAMPTZOID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
+
 	/* MIX(X) = MIN(PMIN(X)) */
 	{ "min", 1, {INT2OID},
 	  "c:min", 1, {INT2OID},
@@ -446,6 +451,10 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_PMIN}, DEVFUNC_NEEDS_NUMERIC, INT_MAX
 	},
 #endif
+	{ "min", 1, {CASHOID},
+	  "c:max", 1, {CASHOID},
+	  {ALTFUNC_EXPR_PMAX}, DEVFUNC_NEEDS_MONEY, INT_MAX
+	},
 	{ "min", 1, {DATEOID},
 	  "c:min", 1, {DATEOID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
@@ -490,6 +499,10 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_PSUM}, DEVFUNC_NEEDS_NUMERIC, 100
 	},
 #endif
+	{ "sum", 1, {CASHOID},
+	  "c:sum", 1, {CASHOID},
+	  {ALTFUNC_EXPR_PSUM}, DEVFUNC_NEEDS_MONEY, INT_MAX
+	},
 	/* STDDEV(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
 	{ "stddev", 1, {FLOAT4OID},
 	  "s:stddev", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
@@ -2051,6 +2064,7 @@ aggcalc_method_of_typeoid(Oid type_oid)
 		case DATEOID:
 			return "INT";
 		case INT8OID:
+		case CASHOID:
 		case TIMEOID:
 		case TIMESTAMPOID:
 		case TIMESTAMPTZOID:
@@ -2267,6 +2281,7 @@ typedef struct
 	bool			use_temp_float8x;
 	bool			use_temp_float8y;
 	bool			use_temp_numeric;
+	bool			use_temp_money;
 	bool			use_temp_date;
 	bool			use_temp_time;
 	bool			use_temp_timestamp;
@@ -2395,6 +2410,14 @@ gpupreagg_codegen_projection_misc(StringInfo body, FuncExpr *func,
 			max_const = "PG_NUMERIC_MAX";
 			min_const = "PG_NUMERIC_MIN";
 			zero_const = "PG_NUMERIC_ZERO";
+			break;
+
+		case CASHOID:
+			pc->use_temp_money = true;
+			temp_val = "temp_money";
+            max_const = "LONG_MAX";
+            min_const = "LONG_MIN";
+            zero_const = "0";
 			break;
 
 		case DATEOID:
@@ -2851,6 +2874,8 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 		appendStringInfo(&decl1, "  pg_float8_t temp_float8y;\n");
 	if (pc.use_temp_numeric)
 		appendStringInfo(&decl1, "  pg_numeric_t temp_numeric;\n");
+	if (pc.use_temp_money)
+		appendStringInfo(&decl1, "  pg_money_t temp_money;\n");
 	if (pc.use_temp_date)
 		appendStringInfo(&decl1, "  pg_date_t temp_date;\n");
 	if (pc.use_temp_time)

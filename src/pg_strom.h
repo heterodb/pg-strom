@@ -323,7 +323,8 @@ struct GpuTask
 #define DEVFUNC_NEEDS_TEXTLIB			0x00000010
 #define DEVFUNC_NEEDS_NUMERIC			0x00000020
 #define DEVFUNC_NEEDS_MATHLIB			0x00000040
-#define DEVFUNC_INCL_FLAGS				0x00000078
+#define DEVFUNC_NEEDS_MONEY				0x00000080
+#define DEVFUNC_INCL_FLAGS				0x000000f8
 #define DEVKERNEL_NEEDS_GPUSCAN			0x00010000
 #define DEVKERNEL_NEEDS_GPUJOIN			0x00020000
 #define DEVKERNEL_NEEDS_GPUPREAGG		0x00040000
@@ -681,6 +682,7 @@ extern const char *pgstrom_cuda_mathlib_code;
 extern const char *pgstrom_cuda_textlib_code;
 extern const char *pgstrom_cuda_timelib_code;
 extern const char *pgstrom_cuda_numeric_code;
+extern const char *pgstrom_cuda_money_code;
 
 /*
  * createplan.c

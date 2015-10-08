@@ -34,6 +34,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include "pg_strom.h"
+#include "cuda_money.h"
 #include "cuda_timelib.h"
 
 typedef struct
@@ -396,6 +397,9 @@ construct_flat_cuda_source(const char *kern_source,
 	/* cuda numeric.h */
 	if (extra_flags & DEVFUNC_NEEDS_NUMERIC)
 		appendStringInfoString(&source, pgstrom_cuda_numeric_code);
+	/* cuda money.h */
+	if (extra_flags & DEVFUNC_NEEDS_MONEY)
+		appendStringInfoString(&source, pgstrom_cuda_money_code);
 
 	/* Main logic of each GPU tasks */
 
@@ -1052,12 +1056,17 @@ pgstrom_assign_cuda_program(GpuTaskState *gts,
 	const char	   *kern_define;
 	StringInfoData	buf;
 
-	if ((extra_flags & (DEVFUNC_NEEDS_TIMELIB)) != 0)
+	if ((extra_flags & (DEVFUNC_NEEDS_TIMELIB |
+						DEVFUNC_NEEDS_MONEY)) != 0)
 	{
 		initStringInfo(&buf);
 
 		/* put timezone info */
-		assign_timelib_session_info(&buf);
+		if ((extra_flags & DEVFUNC_NEEDS_TIMELIB) != 0)
+			assign_timelib_session_info(&buf);
+		/* put currency info */
+		if ((extra_flags & DEVFUNC_NEEDS_MONEY) != 0)
+			assign_moneylib_session_info(&buf);
 
 		kern_define = buf.data;
 	}
