@@ -56,7 +56,7 @@ static struct {
 	{ INT8OID,		"cl_long",	0 },	/* bigint */
 	{ FLOAT4OID,	"cl_float",	0 },	/* real */
 	{ FLOAT8OID,	"cl_double",0 },	/* float */
-	{ CASHOID,		"cl_long",	0 },	/* money */
+	{ CASHOID,		"cl_long",	DEVFUNC_NEEDS_MONEY },	/* money */
 	/* date and time datatypes */
 	{ DATEOID,			"DateADT",		DEVFUNC_NEEDS_TIMELIB },
 	{ TIMEOID,			"TimeADT",		DEVFUNC_NEEDS_TIMELIB },

@@ -1067,6 +1067,8 @@ pgstrom_assign_cuda_program(GpuTaskState *gts,
 		/* put currency info */
 		if ((extra_flags & DEVFUNC_NEEDS_MONEY) != 0)
 			assign_moneylib_session_info(&buf);
+
+		kern_define = buf.data;
 	}
 	else
 		kern_define = "";	/* no session specific code */

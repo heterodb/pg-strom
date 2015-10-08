@@ -28,12 +28,13 @@ STROMCL_SIMPLE_TYPE_TEMPLATE(money, cl_long);
 /*
  * Cast function to currency data type
  */
-
+#ifdef PG_NUMERIC_TYPE_DEFINED
 STATIC_FUNCTION(pg_money_t)
 pgfn_numeric_cash(kern_context *kcxt, pg_numeric_t arg1)
 {
 
 }
+#endif
 
 STATIC_FUNCTION(pg_money_t)
 pgfn_int4_cash(kern_context *kcxt, pg_int4_t arg1)
@@ -133,7 +134,7 @@ pgfn_cash_div_cash(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 		else														\
 		{															\
 			result.isnull = false;									\
-			result.value =  rint(arg1.value * arg2.value);			\
+			result.value =  arg1.value * arg2.value;				\
 		}															\
 		return result;												\
 	}
@@ -164,7 +165,7 @@ PGFN_MONEY_MULFUNC_TEMPLATE(flt8, float8)
 			else													\
 			{														\
 				result.isnull = false;								\
-				result.value =  rint(arg1.value / arg2.value);		\
+				result.value =  arg1.value / arg2.value;			\
 			}														\
 		}															\
 		return result;												\
@@ -173,7 +174,7 @@ PGFN_MONEY_MULFUNC_TEMPLATE(flt8, float8)
 PGFN_MONEY_DIVFUNC_TEMPLATE(int2, int2, 0)
 PGFN_MONEY_DIVFUNC_TEMPLATE(int4, int4, 0)
 //PGFN_MONEY_DIVFUNC_TEMPLATE(int8, int8, 0)
-PGFN_MONEY_DIVFUNC_TEMPLATE(flt8, float8, 0.0)
+PGFN_MONEY_DIVFUNC_TEMPLATE(flt4, float4, 0.0)
 PGFN_MONEY_DIVFUNC_TEMPLATE(flt8, float8, 0.0)
 #undef PGFN_MONEY_DIVFUNC_TEMPLATE
 
@@ -205,7 +206,7 @@ pgfn_flt8_mul_cash(kern_context *kcxt, pg_float8_t arg1, pg_money_t arg2)
  * Currency comparison functions
  */
 STATIC_FUNCTION(pg_int4_t)
-pgfn_cash_cmp(kern_context *kcxt, pg_money_t arg1, pg_money_arg2)
+pgfn_cash_cmp(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 {
 	pg_int4_t	result;
 
@@ -221,7 +222,7 @@ pgfn_cash_cmp(kern_context *kcxt, pg_money_t arg1, pg_money_arg2)
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_cash_eq(kern_context *kcxt, pg_money_t arg1, pg_money_arg2)
+pgfn_cash_eq(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 {
 	pg_bool_t	result;
 
@@ -236,7 +237,7 @@ pgfn_cash_eq(kern_context *kcxt, pg_money_t arg1, pg_money_arg2)
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_cash_ne(kern_context *kcxt, pg_money_t arg1, pg_money_arg2)
+pgfn_cash_ne(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 {
 	pg_bool_t	result;
 
@@ -251,7 +252,7 @@ pgfn_cash_ne(kern_context *kcxt, pg_money_t arg1, pg_money_arg2)
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_cash_lt(kern_context *kcxt, pg_money_t arg1, pg_money_arg2)
+pgfn_cash_lt(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 {
 	pg_bool_t	result;
 
@@ -266,7 +267,7 @@ pgfn_cash_lt(kern_context *kcxt, pg_money_t arg1, pg_money_arg2)
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_cash_le(kern_context *kcxt, pg_money_t arg1, pg_money_arg2)
+pgfn_cash_le(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 {
 	pg_bool_t	result;
 
@@ -281,7 +282,7 @@ pgfn_cash_le(kern_context *kcxt, pg_money_t arg1, pg_money_arg2)
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_cash_gt(kern_context *kcxt, pg_money_t arg1, pg_money_arg2)
+pgfn_cash_gt(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 {
 	pg_bool_t	result;
 
@@ -296,7 +297,7 @@ pgfn_cash_gt(kern_context *kcxt, pg_money_t arg1, pg_money_arg2)
 }
 
 STATIC_FUNCTION(pg_bool_t)
-pgfn_cash_ge(kern_context *kcxt, pg_money_t arg1, pg_money_arg2)
+pgfn_cash_ge(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 {
 	pg_bool_t	result;
 
@@ -335,7 +336,7 @@ assign_moneylib_session_info(StringInfo buf)
 		buf,
 		"#ifdef __CUDACC__\n"
 		"/* ================================================\n"
-		" * session information for cuda_moneylib.h\n"
+		" * session information for cuda_money.h\n"
 		" * ================================================ */\n"
 		"\n"
 		"#define PGLC_CURRENCY_SCALE_LOG10  %d\n"
