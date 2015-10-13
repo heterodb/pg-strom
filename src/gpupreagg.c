@@ -3931,7 +3931,7 @@ retry:
 		pgstrom_release_data_store(pds);
 		segment->pds_src[segment->idx_chunks - 1] = NULL;
 		segment->idx_chunks--;
-
+		gpas->gts.curr_index = 0;
 		goto retry;
 	}
 	else
