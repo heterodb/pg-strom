@@ -266,6 +266,15 @@ typedef struct
 	cl_int			outer_join_start_depth;
 
 	/*
+	 * flag to set if outer plan reached to end of the relation
+	 *
+	 * NOTE: Don't use gts->scan_done for this purpose, because it means
+	 * end of the scan on this node itself. It indicates wrong state to
+	 * the cuda_control.c
+	 */
+	bool			outer_scan_done;
+
+	/*
 	 * Runtime statistics
 	 */
 	int				num_rels;
@@ -278,6 +287,7 @@ typedef struct
 	/*
 	 * Properties of underlying inner relations
 	 */
+	bool			inner_preloaded;
 	innerState		inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinState;
 
@@ -355,7 +365,7 @@ static char *gpujoin_codegen(PlannerInfo *root,
 							 codegen_context *context);
 
 
-static pgstrom_multirels *gpujoin_inner_preload(GpuJoinState *gjs);
+static pgstrom_multirels *gpujoin_inner_getnext(GpuJoinState *gjs);
 static pgstrom_multirels *multirels_attach_buffer(pgstrom_multirels *pmrels);
 static bool multirels_get_buffer(pgstrom_multirels *pmrels, GpuTask *gtask,
 								 CUdeviceptr *p_kmrels,
@@ -2120,7 +2130,7 @@ static void
 gpujoin_rescan(CustomScanState *node)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) node;
-	bool			keep_pmrels = true;
+	bool			keep_inners = true;
 	ListCell	   *lc;
 	cl_int			i;
 
@@ -2138,7 +2148,7 @@ gpujoin_rescan(CustomScanState *node)
 			UpdateChangedParamSet(gjs->inners[i].state,
 								  gjs->gts.css.ss.ps.chgParam);
 			if (gjs->inners[i].state->chgParam != NULL)
-				keep_pmrels = false;
+				keep_inners = false;
 		}
 	}
 
@@ -2147,20 +2157,36 @@ gpujoin_rescan(CustomScanState *node)
 	 */
 	gjs->gts.scan_done = false;
 	gjs->gts.scan_overflow = NULL;
+	gjs->outer_scan_done = true;
 	ExecReScan(outerPlanState(gjs));
 
 	/*
-	 * Rewind the inner relation
+	 * Detach previous inner relations buffer
 	 */
-	if (!keep_pmrels)
+	if (gjs->curr_pmrels)
 	{
-		/* detach previous inner relations buffer */
-		if (gjs->curr_pmrels)
-		{
-			multirels_detach_buffer(gjs->curr_pmrels, false, __FUNCTION__);
-			gjs->curr_pmrels = NULL;
-		}
+		multirels_detach_buffer(gjs->curr_pmrels, false, __FUNCTION__);
+		gjs->curr_pmrels = NULL;
+	}
 
+	if (keep_inners)
+	{
+		/*
+		 * Just rewind the inner pointer.
+		 *
+		 * NOTE: It is a tricky hack. gpujoin_inner_getnext() increments
+		 * the pds_index prior to construction of pmrels, so all pds_index
+		 * shall be reverted to 1, as expected beginning point.
+		 */
+        for (i=0; i < gjs->num_rels; i++)
+            gjs->inners[i].pds_index = 0;
+	}
+	else
+	{
+		/*
+		 * Unload the inner relations since it is not valid no longer
+		 */
+		gjs->inner_preloaded = false;
 		for (i=0; i < gjs->num_rels; i++)
 		{
 			innerState *istate = &gjs->inners[i];
@@ -3570,100 +3596,107 @@ gpujoin_next_chunk(GpuTaskState *gts)
 	struct timeval	tv1, tv2;
 
 	/*
-     * Logic to fetch inner multi-relations looks like nested-loop.
-     * If all the underlying inner scan already scaned its outer
+	 * Logic to fetch inner multi-relations looks like nested-loop.
+	 * If all the underlying inner scan already scaned its outer
 	 * relation, current depth makes advance its scan pointer with
 	 * reset of underlying scan pointer, or returns NULL if it is
 	 * already reached end of scan.
-     */
-retry:
-	if (gjs->gts.scan_done || !gjs->curr_pmrels)
-	{
-		pgstrom_multirels *pmrels_new;
-
-		/*
-		 * NOTE: gpujoin_inner_preload() has to be called prior to
-		 * multirels_detach_buffer() because some inner chunk (PDS)
-		 * may be reused on the next loop, thus, refcnt of the PDS
-		 * should not be touched to zero.
-		 */
-		pmrels_new = gpujoin_inner_preload(gjs);
-		if (gjs->curr_pmrels)
+	 */
+	do {
+		if (gjs->outer_scan_done || !gjs->curr_pmrels)
 		{
-			Assert(gjs->gts.scan_done);
-			multirels_detach_buffer(gjs->curr_pmrels, true, __FUNCTION__);
-			gjs->curr_pmrels = NULL;
-		}
-		if (!pmrels_new)
-			return NULL;	/* end of inner multi-relations */
-		gjs->curr_pmrels = pmrels_new;
+			pgstrom_multirels *pmrels_new;
 
-		/*
-		 * Rewind the outer scan pointer, if it is not first time
-		 */
-		if (gjs->gts.scan_done)
-		{
-			ExecReScan(outerPlanState(gjs));
-			gjs->gts.scan_done = false;
-		}
-	}
-
-	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
-	if (!gjs->gts.scan_bulk)
-	{
-		while (true)
-		{
-			TupleTableSlot *slot;
-
-			if (gjs->gts.scan_overflow)
+			/*
+			 * NOTE: gpujoin_inner_getnext() has to be called prior to
+			 * multirels_detach_buffer() because some inner chunk (PDS)
+			 * may be reused on the next loop, thus, refcnt of the PDS
+			 * should not be touched to zero.
+			 */
+			pmrels_new = gpujoin_inner_getnext(gjs);
+			if (gjs->curr_pmrels)
 			{
-				slot = gjs->gts.scan_overflow;
-				gjs->gts.scan_overflow = NULL;
-				
+				Assert(gjs->outer_scan_done);
+				multirels_detach_buffer(gjs->curr_pmrels, true, __FUNCTION__);
+				gjs->curr_pmrels = NULL;
 			}
-			else
+
+			/*
+			 * NOTE: Neither inner nor outer relation has rows to be
+			 * read any more, so we break the GpuJoin.
+			 */
+			if (!pmrels_new)
 			{
-				slot = ExecProcNode(outer_node);
-				if (TupIsNull(slot))
+				gjs->gts.scan_done = true;
+				return NULL;
+			}
+			gjs->curr_pmrels = pmrels_new;
+
+			/*
+			 * Rewind the outer scan pointer,
+			 * if it is not the first time
+			 */
+			if (gjs->outer_scan_done)
+			{
+				ExecReScan(outerPlanState(gjs));
+				gjs->outer_scan_done = false;
+			}
+		}
+
+		PERFMON_BEGIN(&gts->pfm_accum, &tv1);
+		if (!gjs->gts.scan_bulk)
+		{
+			while (true)
+			{
+				TupleTableSlot *slot;
+
+				if (gjs->gts.scan_overflow)
 				{
-					gjs->gts.scan_done = true;
+					slot = gjs->gts.scan_overflow;
+					gjs->gts.scan_overflow = NULL;
+				}
+				else
+				{
+					slot = ExecProcNode(outer_node);
+					if (TupIsNull(slot))
+					{
+						gjs->outer_scan_done = true;
+						break;
+					}
+				}
+
+				/* create a new data-store if not constructed yet */
+				if (!pds)
+				{
+					pds = pgstrom_create_data_store_row(gjs->gts.gcontext,
+														tupdesc,
+														pgstrom_chunk_size(),
+														false);
+				}
+
+				/* insert the tuple on the data-store */
+				if (!pgstrom_data_store_insert_tuple(pds, slot))
+				{
+					gjs->gts.scan_overflow = slot;
 					break;
 				}
 			}
-
-			/* create a new data-store if not constructed yet */
-			if (!pds)
-			{
-				pds = pgstrom_create_data_store_row(gjs->gts.gcontext,
-													tupdesc,
-													pgstrom_chunk_size(),
-													false);
-			}
-
-			/* insert the tuple on the data-store */
-			if (!pgstrom_data_store_insert_tuple(pds, slot))
-			{
-				gjs->gts.scan_overflow = slot;
-				break;
-			}
 		}
-	}
-	else
-	{
-		pds = BulkExecProcNode(outer_node);
-		if (!pds)
-			gjs->gts.scan_done = true;
-	}
-	PERFMON_END(&gjs->gts.pfm_accum, time_outer_load, &tv1, &tv2);
+		else
+		{
+			pds = BulkExecProcNode(outer_node);
+			if (!pds)
+				gjs->outer_scan_done = true;
+		}
+		PERFMON_END(&gjs->gts.pfm_accum, time_outer_load, &tv1, &tv2);
 
-	/*
-	 * We also need to check existence of next inner hash-chunks, even if
-	 * here is no more outer records, In case of multi-relations splited-out,
-	 * we have to rewind the outer relation scan, then makes relations
-	 * join with the next inner hash chunks.
-	 */
-	if (!pds)
-		goto retry;
+		/*
+		 * We also need to check existence of next inner hash-chunks,
+		 * even if here is no more outer records, In case of multi-relations
+		 * splited-out, we have to rewind the outer relation scan, then
+		 * makes relations join with the next inner hash chunks.
+		 */
+	} while (!pds);
 
 	return gpujoin_create_task(gjs, gjs->curr_pmrels, pds, NULL);
 }
@@ -5165,122 +5198,168 @@ gpujoin_create_multirels(GpuJoinState *gjs)
 	return pmrels;
 }
 
-/*****/
-static pgstrom_multirels *
+/*
+ * gpujoin_inner_preload
+ *
+ * It preload inner relation to the GPU DMA buffer once, even if larger
+ * than device memory. If size is over the capacity, inner chunks are
+ * splitted into multiple portions.
+ */
+static bool
 gpujoin_inner_preload(GpuJoinState *gjs)
 {
-	pgstrom_multirels  *pmrels = NULL;
-	int					i, j;
-	struct timeval		tv1, tv2;
+	innerState	  **istate_buf;
+	cl_int			istate_nums = gjs->num_rels;
+	Size			total_limit;
+	Size			total_usage;
+	bool			kmrels_size_fixed = false;
+	int				i;
+	struct timeval	tv1, tv2;
+
 
 	PERFMON_BEGIN(&gjs->gts.pfm_accum, &tv1);
+	/*
+	 * Half of the max allocatable GPU memory (and minus some margin) is
+	 * the current hard limit of the inner relations buffer.
+	 */
+	total_limit = gpuMemMaxAllocSize() / 2 - BLCKSZ * gjs->num_rels;
+	total_usage = STROMALIGN(offsetof(kern_multirels,
+									  chunks[gjs->num_rels]));
+	istate_buf = palloc0(sizeof(innerState *) * gjs->num_rels);
+	for (i=0; i < istate_nums; i++)
+		istate_buf[i] = &gjs->inners[i];
 
-	if (!gjs->curr_pmrels)
+	/* load tuples from the inner relations with round-robin policy */
+	while (istate_nums > 0)
 	{
-		innerState	  **istate_buf;
-		cl_int			istate_nums = gjs->num_rels;
-		Size			total_limit;
-		Size			total_usage;
-		bool			kmrels_size_fixed = false;
-
-		/*
-		 * Half of the max allocatable GPU memory (and minus some margin) is
-		 * the current hard limit of the inner relations buffer.
-		 */
-		total_limit = gpuMemMaxAllocSize() / 2 - BLCKSZ * gjs->num_rels;
-		total_usage = STROMALIGN(offsetof(kern_multirels,
-										  chunks[gjs->num_rels]));
-		istate_buf = palloc0(sizeof(innerState *) * gjs->num_rels);
 		for (i=0; i < istate_nums; i++)
-			istate_buf[i] = &gjs->inners[i];
-
-		while (istate_nums > 0)
 		{
-			for (i=0; i < istate_nums; i++)
-			{
-				innerState *istate = istate_buf[i];
+			innerState *istate = istate_buf[i];
 
-				if (!(istate->hash_inner_keys != NIL
-					  ? gpujoin_inner_hash_preload(gjs, istate, &total_usage)
-					  : gpujoin_inner_heap_preload(gjs, istate, &total_usage)))
-				{
-					memmove(istate_buf + i,
-							istate_buf + i + 1,
-							sizeof(innerState *) * (istate_nums - (i+1)));
-					istate_nums--;
-					i--;
-				}
-			}
-
-			if (!kmrels_size_fixed && total_usage >= total_limit)
+			if (!(istate->hash_inner_keys != NIL
+				  ? gpujoin_inner_hash_preload(gjs, istate, &total_usage)
+				  : gpujoin_inner_heap_preload(gjs, istate, &total_usage)))
 			{
-				/*
-				 * XXX - current usage became a limitation, so next call
-				 * of gpujoin_inner_XXXX_preload makes second chunk.
-				 */
-				for (i=0; i < gjs->num_rels; i++)
-					gjs->inners[i].pds_limit = gjs->inners[i].consumed;
-				kmrels_size_fixed = true;
+				memmove(istate_buf + i,
+						istate_buf + i + 1,
+						sizeof(innerState *) * (istate_nums - (i+1)));
+				istate_nums--;
+				i--;
 			}
 		}
 
-		/*
-		 * XXX - It is ideal case; all the inner chunk can be loaded to
-		 * a single multi-relations buffer.
-		 */
-		if (!kmrels_size_fixed)
+		if (!kmrels_size_fixed && total_usage >= total_limit)
 		{
+			/*
+			 * XXX - current usage became a limitation, so next call
+			 * of gpujoin_inner_XXXX_preload makes second chunk.
+			 */
 			for (i=0; i < gjs->num_rels; i++)
 				gjs->inners[i].pds_limit = gjs->inners[i].consumed;
+			kmrels_size_fixed = true;
 		}
-		pfree(istate_buf);
+	}
+	PERFMON_END(&gjs->gts.pfm_accum, time_inner_load, &tv1, &tv2);
 
-		/*
-		 * TODO: we may omit some depths if nitems==0 and JOIN_INNER
-		 *
-		 * needs to clarify its condition!!
-		 */
-
-		/* set up initial pds_index */
+	/*
+	 * XXX - It is ideal case; all the inner chunk can be loaded to
+	 * a single multi-relations buffer.
+	 */
+	if (!kmrels_size_fixed)
+	{
 		for (i=0; i < gjs->num_rels; i++)
-		{
-			int		nbatches_exec = list_length(gjs->inners[i].pds_list);
+			gjs->inners[i].pds_limit = gjs->inners[i].consumed;
+	}
+	pfree(istate_buf);
 
-			Assert(nbatches_exec > 0);
-			gjs->inners[i].pds_index = 1;
-			/* also record actual nbatches */
-			gjs->inners[i].nbatches_exec = nbatches_exec;
+	/*
+	 * NOTE: Special optimization case. In case when any chunk has no items,
+	 * and all deeper level is inner join, it is obvious no tuples shall be
+	 * produced in this GpuJoin. We can omit outer relation load that shall
+	 * be eventually dropped.
+	 */
+	for (i=gjs->num_rels; i > 0; i--)
+	{
+		innerState	   *istate = &gjs->inners[i-1];
+
+		/* outer join can produce something from empty */
+		if (istate->join_type != JOIN_INNER)
+			break;
+
+		if (list_length(istate->pds_list) == 1)
+		{
+			pgstrom_data_store *pds_in = linitial(istate->pds_list);
+
+			if (pds_in->kds->nitems == 0)
+				return false;
 		}
+	}
+
+	/* How much chunks actually needed? */
+	for (i=0; i < gjs->num_rels; i++)
+	{
+		int		nbatches_exec = list_length(gjs->inners[i].pds_list);
+
+		Assert(nbatches_exec > 0);
+		gjs->inners[i].nbatches_exec = nbatches_exec;
+	}
+	return true;
+}
+
+/*
+ * gpujoin_inner_getnext
+ *
+ * It constructs the next inner buffer based on current index of inner
+ * relations.
+ */
+static pgstrom_multirels *
+gpujoin_inner_getnext(GpuJoinState *gjs)
+{
+	pgstrom_multirels  *pmrels = NULL;
+	pgstrom_data_store *pds;
+	int		i, j;
+
+	if (!gjs->inner_preloaded)
+	{
+		if (!gpujoin_inner_preload(gjs))
+			return NULL;	/* no join result is expected */
+		gjs->inner_preloaded = true;
+		/* setup initial inner index position */
+		for (i=0; i < gjs->num_rels; i++)
+			gjs->inners[i].pds_index = 1;
 	}
 	else
 	{
-		for (i=gjs->num_rels - 1; i >= 0; i--)
+		/*
+		 * Make advance the index of inner chunks
+		 */
+		for (i=gjs->num_rels; i > 0; i--)
 		{
-			int		n = list_length(gjs->inners[i].pds_list);
+			innerState *istate = &gjs->inners[i-1];
 
-			if (gjs->inners[i].pds_index < n)
+			if (istate->pds_index < list_length(istate->pds_list))
 			{
-				gjs->inners[i].pds_index++;
-				for (j=i+1; j < gjs->num_rels; j++)
-					gjs->inners[i].pds_index = 1;
+				istate->pds_index++;
+				for (j=i; j < gjs->num_rels; j++)
+					istate->pds_index = 1;
 				break;
 			}
 		}
-		/* end of the inner scan */
-		if (i < 0)
-		{
-			PERFMON_END(&gjs->gts.pfm_accum, time_inner_load, &tv1, &tv2);
-			return NULL;
-		}
+		if (i == 0)
+			return NULL;	/* end of inner chunks */
 	}
 
-	/* make a first pmrels */
+	/*
+	 * OK, makes next pgstrom_multirels buffer
+	 */
 	pmrels = gpujoin_create_multirels(gjs);
 	for (i=0; i < gjs->num_rels; i++)
 	{
 		innerState		   *istate = &gjs->inners[i];
-		pgstrom_data_store *pds = list_nth(istate->pds_list,
-										   gjs->inners[i].pds_index - 1);
+
+		Assert(istate->pds_index > 0 &&
+			   istate->pds_index <= list_length(istate->pds_list));
+		pds = list_nth(istate->pds_list, istate->pds_index - 1);
 
 		pmrels->inner_chunks[i] = pgstrom_acquire_data_store(pds);
 		pmrels->kern.chunks[i].chunk_offset = pmrels->usage_length;
@@ -5302,7 +5381,6 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 	}
 	/* already attached on the caller's context */
 	pmrels->n_attached = 1;
-	PERFMON_END(&gjs->gts.pfm_accum, time_inner_load, &tv1, &tv2);
 
 	return pmrels;
 }
