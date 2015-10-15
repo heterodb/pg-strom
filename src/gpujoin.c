@@ -3298,6 +3298,8 @@ retry:
 		if (kgjoin_length > pgstrom_chunk_size())
 		{
 			inner_size[depth-1] /= (kgjoin_length / pgstrom_chunk_size()) + 1;
+			if (inner_size[depth-1] < 1)
+				elog(ERROR, "Too much growth of result rows");
 			continue;
 		}
 		max_items = Max(max_items, total_items);
@@ -3503,6 +3505,7 @@ retry:
 		+ STROMALIGN(offsetof(kern_resultbuf, results[max_items]))
 		+ STROMALIGN(offsetof(kern_resultbuf, results[max_items]));
 	Assert(kgjoin_length <= pgstrom_chunk_size());
+
 	/*
 	 * Minimum guarantee of the kern_gpujoin buffer.
 	 *
@@ -3534,7 +3537,6 @@ retry:
 	kgjoin->kresults_max_space = max_items;
 	kgjoin->num_rels = gjs->num_rels;
 	kgjoin->start_depth = start_depth;
-	memset(kgjoin->result_nitems, 0, sizeof(kgjoin->result_nitems));
 	kgjoin->result_valid_until = 0;
 
 	/* copies the constant/parameter buffer */
@@ -3831,11 +3833,13 @@ gpujoin_task_complete(GpuTask *gtask)
 		 * it is generated as result of unmatched tuples.
 		 */
 		gjs->source_ntasks++;
+
 		if (pds_src)
 			gjs->source_nitems += (Size)
 				(pgjoin->inner_ratio * (double) pds_src->kds->nitems);
 		for (i=0; i <= pgjoin->kern.num_rels; i++)
-			gjs->result_nitems[i] += pgjoin->kern.result_nitems[i];
+			gjs->result_nitems[i] += (Size)
+				(pgjoin->inner_ratio * (double) pgjoin->kern.result_nitems[i]);
 #if 0
 		/*
 		 * For debug, to observe success cases
@@ -4035,6 +4039,7 @@ gpujoin_task_complete(GpuTask *gtask)
 				has_resized = true;
 			}
 		}
+
 		appendStringInfo(&str, " Nthreads: (");
 		for (i=0; i <= gjs->num_rels; i++)
 		{
@@ -4077,8 +4082,9 @@ gpujoin_task_complete(GpuTask *gtask)
 		appendStringInfo(&str, "]");
 
 		elog(has_resized ? NOTICE : ERROR,
-			 "GpuJoin(%p) DataStoreNoSpace retry=%d [%.2f%%] %s%s",
-			 pgjoin, pgjoin->retry_count, progress, str.data,
+			 "GpuJoin(%p) %s retry=%d [%.2f%%] %s%s",
+			 pgjoin, errorTextKernel(&pgjoin->task.kerror),
+			 pgjoin->retry_count, progress, str.data,
 			 has_resized ? "" : ", but not resized actually");
 		pfree(str.data);
 #endif
