@@ -2008,7 +2008,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 			istate->hash_nslots = list_nth_int(gj_info->hash_nslots, i);
 
 			/* usage histgram */
-			shift = get_next_log2(gjs->inners[i].nbatches_plan) + 4;
+			shift = get_next_log2(gjs->inners[i].nbatches_plan) + 8;
 			Assert(shift < sizeof(cl_uint) * BITS_PER_BYTE);
 			istate->hgram_width = (1U << shift);
 			istate->hgram_size = palloc0(sizeof(Size) * istate->hgram_width);
