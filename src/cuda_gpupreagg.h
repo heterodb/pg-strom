@@ -899,19 +899,22 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	__syncthreads();
 	index = arithmetic_stairlike_add(get_global_id() == owner_index ? 1 : 0,
 									 &ngroups);
-	if (get_local_id() == 0)
+	if (ngroups > 0)
 	{
-		base_index = atomicAdd(&kresults->nitems, ngroups);
-		// atomicAdd(&g_hash->hash_usage, ngroups); -- really needed?
-	}
-	__syncthreads();
-	assert(base_index + ngroups <= kresults->nrooms);
-	dest_index = base_index + index;
+		if (get_local_id() == 0)
+		{
+			base_index = atomicAdd(&kresults->nitems, ngroups);
+			// atomicAdd(&g_hash->hash_usage, ngroups); -- really needed?
+		}
+		__syncthreads();
+		assert(base_index + ngroups <= kresults->nrooms);
+		dest_index = base_index + index;
 
-	if (get_global_id() < nitems &&
-		get_global_id() == owner_index)
-	{
-		kresults->results[dest_index] = get_global_id();
+		if (get_global_id() < nitems &&
+			get_global_id() == owner_index)
+		{
+			kresults->results[dest_index] = get_global_id();
+		}
 	}
 
 	/*
@@ -945,7 +948,6 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 								  owner_index, get_global_id());
 		}
 	}
-
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
@@ -976,6 +978,27 @@ gpupreagg_final_preparation(size_t f_hashsize,
 	}
 }
 
+
+/*
+ * Check whether the global hash-slot has enough free space at this moment.
+ */
+STATIC_INLINE(cl_bool)
+check_global_hashslot_usage(kern_context *kcxt, kern_global_hashslot *f_hash)
+{
+	cl_uint		hash_limit;
+	cl_uint		hash_usage;
+
+	hash_limit = (cl_uint)((double) f_hash->hash_size *
+						   GLOBAL_HASHSLOT_THRESHOLD);
+	hash_usage = *((volatile cl_uint *)&f_hash->hash_usage);
+	if (hash_usage >= hash_limit)
+	{
+		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
+		return false;	/* hash usage exceeds the limitation */
+	}
+	return true;		/* ok, we still have rooms */
+}
+
 /*
  * gpupreagg_final_reduction
  *
@@ -1001,14 +1024,12 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
 	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
 	size_t			kds_index;
-	size_t			dest_index;
 	size_t			owner_index;
 	size_t			f_hashsize = f_hash->hash_size;
 	cl_uint			key_dist_salt = kgpreagg->key_dist_salt;
 	cl_uint			key_dist_index = 0;
 	cl_uint			hash_value;
 	cl_uint			hash_value_base;
-	cl_uint			ngroups;
 	cl_uint			index;
 	cl_uint			nattrs = kds_dst->ncols;
 	cl_uint			attnum;
@@ -1019,9 +1040,14 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	pagg_hashslot	new_slot;
 	pagg_hashslot	cur_slot;
 	__shared__ cl_uint	crc32_table[256];
-	__shared__ size_t	base_index;
 
 	INIT_KERNEL_CONTEXT(&kcxt,gpupreagg_final_reduction,kparams);
+
+	/*
+	 * Check availability of global hashslot usage
+	 */
+	if (!check_global_hashslot_usage(&kcxt, f_hash))
+		goto error_exit;
 
 	/*
 	 * calculation of the hash value of grouping keys in this record.
@@ -1053,116 +1079,114 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 		}
 	}
 
-	if (source_is_valid)
-	{
-		int		nloops = 1;		// !!!for debug!!!
+	if (!source_is_valid)
+		goto error_exit;
 
-		/*
-		 * Calculation of initial hash value
+	/*
+	 * Calculation of initial hash value
+	 */
+	INIT_LEGACY_CRC32(hash_value);
+	hash_value = gpupreagg_hashvalue(&kcxt, crc32_table,
+									 hash_value,
+									 kds_dst,
+									 kds_index);
+	hash_value_base = hash_value;
+	if (key_dist_salt > 1)
+	{
+		key_dist_factor.isnull = false;
+		key_dist_factor.value = (get_global_id() % key_dist_salt);
+		hash_value = pg_int4_comp_crc32(crc32_table,
+										hash_value,
+										key_dist_factor);
+	}
+	FIN_LEGACY_CRC32(hash_value);
+
+	/*
+	 * Find a hash-slot to determine the item index that represents
+	 * a particular group-keys.
+	 * The array of hash-slot is initialized to 'all empty', so first
+	 * one will take a place using atomic operation. Then. here are
+	 * two cases for hash conflicts; case of same grouping-key, or
+	 * case of different grouping-key but same hash-value.
+	 * The first conflict case informs us the item-index responsible
+	 * to the grouping key. We cannot help the later case, so retry
+	 * the steps with next hash-slot.
+	 */
+retry_major:
+	new_slot.s.hash  = hash_value;
+	new_slot.s.index = (cl_uint)(0xfffffffe); /* LOCK */
+	old_slot.s.hash  = 0;
+	old_slot.s.index = (cl_uint)(0xffffffff); /* INVALID */
+	index  = hash_value % f_hashsize;
+retry_minor:
+
+	cur_slot.value = atomicCAS(&f_hash->hash_slot[index].value,
+							   old_slot.value, new_slot.value);
+	if (cur_slot.value == old_slot.value)
+	{
+		/* Hash slot was empty, so this thread shall be responsible
+		 * to this grouping-key.
+		 *
+		 * MEMO: Can we reduce of number of atomic operation using
+		 * arithmetic_stairlike_add() on shared memory?
+		 * It is a possible optimization if # of groups is large.
 		 */
-		INIT_LEGACY_CRC32(hash_value);
-		hash_value = gpupreagg_hashvalue(&kcxt, crc32_table,
-										 hash_value,
-										 kds_dst,
-										 kds_index);
-		hash_value_base = hash_value;
-		if (key_dist_salt > 1)
+		atomicAdd(&kds_final->nitems, 1);
+
+		new_slot.s.index = atomicAdd(&f_hash->hash_usage, 1);
+		assert(new_slot.s.index < f_hash->hash_usage);
+		for (attnum = 0; attnum < nattrs; attnum++)
 		{
+			gpupreagg_final_data_move(&kcxt,
+									  kds_dst, kds_final, ktoast,
+									  attnum,
+									  kds_index, new_slot.s.index);
+		}
+		__threadfence();
+		f_hash->hash_slot[index].s.index = new_slot.s.index;
+	}
+
+	/* wait a updating hash slot. */
+	while (cur_slot.s.index == (cl_uint)(0xfffffffe))
+	{
+		cur_slot.s.index = *((volatile int *)
+							 &f_hash->hash_slot[index].s.index);
+	}
+
+	if (cur_slot.value == old_slot.value)
+	{
+//		printf("Allocate %d, %x\n", new_slot.s.index, hash_value);
+		owner_index = new_slot.s.index;
+		isOwner = true;
+	}
+	else if (cur_slot.s.hash == new_slot.s.hash  &&
+			 gpupreagg_keymatch(&kcxt,
+								kds_dst, kds_final, ktoast,
+								kds_index, cur_slot.s.index))
+	{
+//		printf("Match gid=%u %d\n", get_global_id(), cur_slot.s.index);
+		owner_index = cur_slot.s.index;
+	}
+	else
+	{
+		if (key_dist_salt > 1 && ++key_dist_index < key_dist_salt)
+		{
+			hash_value = hash_value_base;
 			key_dist_factor.isnull = false;
-			key_dist_factor.value = (get_global_id() % key_dist_salt);
+			key_dist_factor.value =
+				(get_global_id() + key_dist_index) % key_dist_salt;
 			hash_value = pg_int4_comp_crc32(crc32_table,
 											hash_value,
 											key_dist_factor);
+			FIN_LEGACY_CRC32(hash_value);
+			goto retry_major;
 		}
-		FIN_LEGACY_CRC32(hash_value);
-
-		/*
-		 * Find a hash-slot to determine the item index that represents
-		 * a particular group-keys.
-		 * The array of hash-slot is initialized to 'all empty', so first
-		 * one will take a place using atomic operation. Then. here are
-		 * two cases for hash conflicts; case of same grouping-key, or
-		 * case of different grouping-key but same hash-value.
-		 * The first conflict case informs us the item-index responsible
-		 * to the grouping key. We cannot help the later case, so retry
-		 * the steps with next hash-slot.
-		 */
-	retry_major:
-		new_slot.s.hash  = hash_value;
-		new_slot.s.index = (cl_uint)(0xfffffffe); /* LOCK */
-		old_slot.s.hash  = 0;
-		old_slot.s.index = (cl_uint)(0xffffffff); /* INVALID */
-		index  = hash_value % f_hashsize;
-	retry_minor:
-		assert(nloops < 10000);
-		cur_slot.value = atomicCAS(&f_hash->hash_slot[index].value,
-								   old_slot.value, new_slot.value);
-		if (cur_slot.value == old_slot.value)
-		{
-			/* Hash slot was empty, so this thread shall be responsible
-			 * to this grouping-key.
-			 *
-			 * MEMO: Can we reduce of number of atomic operation using
-			 * arithmetic_stairlike_add() on shared memory?
-			 * It is a possible optimization if # of groups is large.
-			 */
-			new_slot.s.index = atomicAdd(&kds_final->nitems, 1);
-			assert(new_slot.s.index < kds_final->nrooms);
-			for (attnum = 0; attnum < nattrs; attnum++)
-			{
-				gpupreagg_final_data_move(&kcxt,
-										  kds_dst, kds_final, ktoast,
-										  attnum,
-										  kds_index, new_slot.s.index);
-			}
-			__threadfence();
-			f_hash->hash_slot[index].s.index = new_slot.s.index;
-		}
-		// __syncthreads();
-
-		/* wait a updating hash slot. */
-		while (cur_slot.s.index == (cl_uint)(0xfffffffe))
-		{
-			cur_slot.s.index = *((volatile int *)
-								 &f_hash->hash_slot[index].s.index);
-		}
-
-		if (cur_slot.value == old_slot.value)
-		{
-//			printf("Allocate %d, %x\n", new_slot.s.index, hash_value);
-			owner_index = new_slot.s.index;
-			isOwner = true;
-		}
-		else if (cur_slot.s.hash == new_slot.s.hash  &&
-				 gpupreagg_keymatch(&kcxt,
-									kds_dst, kds_final, ktoast,
-									kds_index, cur_slot.s.index))
-		{
-//			printf("Match gid=%u %d\n", get_global_id(), cur_slot.s.index);
-			owner_index = cur_slot.s.index;
-		}
-		else
-		{
-			if (key_dist_salt > 1 && ++key_dist_index < key_dist_salt)
-			{
-				hash_value = hash_value_base;
-				key_dist_factor.isnull = false;
-				key_dist_factor.value =
-					(get_global_id() + key_dist_index) % key_dist_salt;
-				hash_value = pg_int4_comp_crc32(crc32_table,
-												hash_value,
-												key_dist_factor);
-				FIN_LEGACY_CRC32(hash_value);
-				goto retry_major;
-			}
-//			printf("Retry gid=%u %d\n", get_global_id(), (int)index);
-			index = (index + 1) % f_hashsize;
-			nloops++;
-			goto retry_minor;
-		}
+//		printf("Retry gid=%u %d\n", get_global_id(), (int)index);
+		if (!check_global_hashslot_usage(&kcxt, f_hash))
+			goto error_exit;
+		index = (index + 1) % f_hashsize;
+		goto retry_minor;
 	}
-	else
-		owner_index = (cl_uint)(0xffffffff);
 
 	/*
 	 * Global reduction for each column
@@ -1172,28 +1196,29 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	 * Once atomic operations got finished, values of pagg_datum in the
 	 * respobsible thread will have partially aggregated one.
 	 */
-	for (attnum = 0; attnum < nattrs; attnum++)
+	if (!isOwner)
 	{
-		if (gpagg_atts[attnum] != GPUPREAGG_FIELD_IS_AGGFUNC)
-			continue;
-
-		/*
-		 * Reduction, using global atomic operation
-		 *
-		 * If thread is responsible to the grouping-key, other threads but
-		 * NOT responsible will accumlate their values here, then it shall
-		 * become aggregated result. So, we mark the "responsible" thread
-		 * identifier on the kern_row_map. Once kernel execution gets done,
-		 * this index points the location of aggregate value.
-		 */
-		if (source_is_valid && !isOwner)
+		for (attnum = 0; attnum < nattrs; attnum++)
 		{
+			if (gpagg_atts[attnum] != GPUPREAGG_FIELD_IS_AGGFUNC)
+				continue;
+			
+			/*
+			 * Reduction, using global atomic operation
+			 *
+			 * If thread is responsible to the grouping-key, other threads but
+			 * NOT responsible will accumlate their values here, then it shall
+			 * become aggregated result. So, we mark the "responsible" thread
+			 * identifier on the kern_row_map. Once kernel execution gets done,
+			 * this index points the location of aggregate value.
+			 */
 			gpupreagg_global_calc(&kcxt, attnum,
 								  kds_final, kds_dst, ktoast,
 								  owner_index, kds_index);
 		}
 	}
 
+error_exit:
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
