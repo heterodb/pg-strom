@@ -2008,7 +2008,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 			istate->hash_nslots = list_nth_int(gj_info->hash_nslots, i);
 
 			/* usage histgram */
-			shift = get_next_log2(gjs->inners[i].nbatches_plan) + 4;
+			shift = get_next_log2(gjs->inners[i].nbatches_plan) + 8;
 			Assert(shift < sizeof(cl_uint) * BITS_PER_BYTE);
 			istate->hgram_width = (1U << shift);
 			istate->hgram_size = palloc0(sizeof(Size) * istate->hgram_width);
@@ -3859,12 +3859,14 @@ gpujoin_task_complete(GpuTask *gtask)
 			else
 				appendStringInfo(&str, "nrooms: %u ", kds_dst->nrooms);
 
-			appendStringInfo(&str, " Nthreads: (");
-			for (i=0; i <= gjs->num_rels; i++)
-				appendStringInfo(&str, "%s%u", i > 0 ? ", " : "",
-								 pgjoin->num_threads[i]);
-			appendStringInfo(&str, ")");
-
+			if (client_min_messages <= DEBUG1)
+			{
+				appendStringInfo(&str, " Nthreads: (");
+				for (i=0; i <= gjs->num_rels; i++)
+					appendStringInfo(&str, "%s%u", i > 0 ? ", " : "",
+									 pgjoin->num_threads[i]);
+				appendStringInfo(&str, ")");
+			}
 			appendStringInfo(&str, " Inners: ");
 			for (i=0; i < gjs->num_rels; i++)
 				appendStringInfo(&str, "%s(%u, %u)", i > 0 ? ", " : "",
@@ -4040,20 +4042,23 @@ gpujoin_task_complete(GpuTask *gtask)
 			}
 		}
 
-		appendStringInfo(&str, " Nthreads: (");
-		for (i=0; i <= gjs->num_rels; i++)
+		if (client_min_messages <= DEBUG1)
 		{
-			if (num_threads[i] == pgjoin->num_threads[i])
-				appendStringInfo(&str, "%s%u", i > 0 ? ", " : "",
-								 pgjoin->num_threads[i]);
-			else
+			appendStringInfo(&str, " Nthreads: (");
+			for (i=0; i <= gjs->num_rels; i++)
 			{
-				appendStringInfo(&str, "%s%u=>%u", i > 0 ? ", " : "",
-								 num_threads[i], pgjoin->num_threads[i]);
-				has_resized = true;
+				if (num_threads[i] == pgjoin->num_threads[i])
+					appendStringInfo(&str, "%s%u", i > 0 ? ", " : "",
+									 pgjoin->num_threads[i]);
+				else
+				{
+					appendStringInfo(&str, "%s%u=>%u", i > 0 ? ", " : "",
+									 num_threads[i], pgjoin->num_threads[i]);
+					has_resized = true;
+				}
 			}
+			appendStringInfo(&str, ")");
 		}
-		appendStringInfo(&str, ")");
 
 		appendStringInfo(&str, " inners: ");
 		for (i=0; i < gjs->num_rels; i++)
@@ -4714,6 +4719,81 @@ gpujoin_task_process(GpuTask *gtask)
  */
 
 /*
+ * add_extra_randomness
+ *
+ * BUG#211 - In case when we have to split inner relations virtually,
+ * extra randomness is significant to avoid singularity. In theorem,
+ * rowid of KDS (assigned sequentially on insertion) is independent
+ * concept from the join key. However, people usually insert tuples
+ * according to the key value (referenced by join) sequentially.
+ * It eventually leads unexpected results - A particular number of
+ * outer rows generates unexpected number of results rows. Even if
+ * CPU reduced inner_size according to the run-time statistics, retry
+ * shall be repeated until the virtual inner relation boundary goes
+ * across the problematic key value.
+ * This extra randomness makes distribution of the join keys flatten.
+ * Because rowid of KDS items are randomized, we can expect reduction
+ * of inner_size[] will reduce scale of the join result as expectation
+ * of statistical result.
+ *
+ * NOTE: we may be able to add this extra randomness only when inner_size
+ * is smaller than kds->nitems and not yet randomized. However, we also
+ * pay attention the case when NVRTC support dynamic parallelism then
+ * GPU kernel get capability to control inner_size[] inside GPU kernel.
+ */
+static void
+add_extra_randomness(pgstrom_data_store *pds)
+{
+	kern_data_store	   *kds = pds->kds;
+	cl_uint				i, j, temp;
+
+	/* nothing to do */
+	if (kds->nitems == 0)
+		return;
+
+	if (kds->format == KDS_FORMAT_ROW)
+	{
+		cl_uint		   *htup_offset = (cl_uint *)KERN_DATA_STORE_BODY(kds);
+
+		for (i=0; i < kds->nitems; i++)
+		{
+			temp = htup_offset[i];
+			j = rand() % kds->nitems;
+			htup_offset[i] = htup_offset[j];
+			htup_offset[j] = temp;
+		}
+	}
+	else if (kds->format == KDS_FORMAT_HASH)
+	{
+		cl_uint		   *rowid_new = palloc(sizeof(cl_uint) * kds->nitems);
+		kern_hashitem  *khitem;
+
+		for (i=0; i < kds->nitems; i++)
+			rowid_new[i] = i;
+		for (i=0; i < kds->nitems; i++)
+		{
+			temp = rowid_new[i];
+			j = rand() % kds->nitems;
+			rowid_new[i] = rowid_new[j];
+			rowid_new[j] = temp;
+		}
+		for (i=0; i < kds->nslots; i++)
+		{
+			for (khitem = KERN_HASH_FIRST_ITEM(kds, i);
+				 khitem != NULL;
+				 khitem = KERN_HASH_NEXT_ITEM(kds, khitem))
+			{
+				Assert(khitem->rowid < kds->nitems);
+				khitem->rowid = rowid_new[khitem->rowid];
+			}
+		}
+		pfree(rowid_new);
+	}
+	else
+		elog(ERROR, "Unexpected data chunk format: %u", kds->format);
+}
+
+/*
  * calculation of the hash-value
  */
 static pg_crc32
@@ -4925,6 +5005,7 @@ gpujoin_inner_hash_preload(GpuJoinState *gjs,
 	pgstrom_data_store *pds_hash = NULL;
 	pg_crc32			hash;
 	cl_int				index;
+	ListCell		   *lc;
 
 	scan_slot = ExecProcNode(istate->state);
 	if (TupIsNull(scan_slot))
@@ -4948,6 +5029,9 @@ gpujoin_inner_hash_preload(GpuJoinState *gjs,
 													  false);
 			istate->pds_list = list_make1(pds_hash);
 		}
+		/* add extra randomness for better key distribution */
+		foreach (lc, istate->pds_list)
+			add_extra_randomness((pgstrom_data_store *) lfirst(lc));
 		return false;
 	}
 
@@ -5083,6 +5167,8 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs,
 	scan_slot = ExecProcNode(scan_ps);
 	if (TupIsNull(scan_slot))
 	{
+		ListCell   *lc;
+
 		/* put an empty heap table if no rows read */
 		if (istate->pds_list == NIL)
 		{
@@ -5098,6 +5184,9 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs,
 													 false);
 			istate->pds_list = list_make1(pds_heap);
 		}
+		/* add extra randomness for better key distribution */
+		foreach (lc, istate->pds_list)
+			add_extra_randomness((pgstrom_data_store *) lfirst(lc));
 		return false;
 	}
 	scan_desc = scan_slot->tts_tupleDescriptor;

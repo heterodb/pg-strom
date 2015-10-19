@@ -446,7 +446,8 @@ typedef struct
 	cl_uint				hash;	/* 32-bit hash value */
 	cl_uint				next;	/* offset of the next */
 	cl_uint				rowid;	/* unique identifier of this hash entry */
-	cl_uint				t_len;	/* length of tuple */
+	cl_ushort			dseed;	/* distribution seed (random value) */
+	cl_ushort			t_len;	/* length of the tuple */
 	HeapTupleHeaderData	htup;
 } kern_hashitem;
 
