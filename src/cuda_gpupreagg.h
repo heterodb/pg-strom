@@ -1993,21 +1993,21 @@ pg_atomic_add_double(cl_double *addr, cl_double value)
 								 Add((accum)->int_val,		\
 									 (newval)->int_val))
 #define AGGCALC_NOGROUP_PADD_LONG(kcxt,accum,newval)		\
-	AGGCALC_NOGROUP_TEMPLATE_LONG((kcxt),accum,newval,			\
+	AGGCALC_NOGROUP_TEMPLATE_LONG((kcxt),accum,newval,		\
 								  CHECK_OVERFLOW_INT,		\
 								  Add((accum)->long_val,	\
 									  (newval)->long_val))
-#define AGGCALC_NOGROUP_PADD_FLOAT(kcxt,accum,newval)	\
-    AGGCALC_NOGROUP_TEMPLATE_FLOAT((kcxt),accum,newval,			\
+#define AGGCALC_NOGROUP_PADD_FLOAT(kcxt,accum,newval)		\
+    AGGCALC_NOGROUP_TEMPLATE_FLOAT((kcxt),accum,newval,		\
 								   CHECK_OVERFLOW_FLOAT,	\
 								   Add((accum)->float_val,	\
 									   (newval)->float_val))
-#define AGGCALC_NOGROUP_PADD_DOUBLE(kcxt,accum,newval)	\
-	AGGCALC_NOGROUP_TEMPLATE_DOUBLE((kcxt),accum,newval,		\
+#define AGGCALC_NOGROUP_PADD_DOUBLE(kcxt,accum,newval)		\
+	AGGCALC_NOGROUP_TEMPLATE_DOUBLE((kcxt),accum,newval,	\
 									CHECK_OVERFLOW_FLOAT,	\
 									Add((accum)->double_val,\
 										(newval)->double_val))
-#define AGGCALC_NOGROUP_PADD_NUMERIC(kcxt,accum,newval)	\
+#define AGGCALC_NOGROUP_PADD_NUMERIC(kcxt,accum,newval)		\
 	AGGCALC_NOGROUP_TEMPLATE_NUMERIC((kcxt),accum,newval,	\
 									 pgfn_numeric_add)
 
