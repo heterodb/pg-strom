@@ -60,7 +60,11 @@
 typedef struct
 {
 	kern_errorbuf	kerror;					/* kernel error information */
-	/* -- TODO: run-time statistics to be here -- */
+	/* -- runtime statistics -- */
+	cl_uint			num_new_groups;			/* out: # of new groups */
+	cl_uint			varlena_usage;			/* out: size of varlena usage */
+	cl_uint			hash_conflicts;			/* out: # of hash conflicts */
+	/* -- other hashing parameters -- */
 	cl_uint			key_dist_salt;			/* hashkey distribution salt */
 	cl_uint			hash_size;				/* size of global hash-slots */
 	cl_uint			pg_crc32_table[256];	/* master CRC32 table */
@@ -383,9 +387,14 @@ gpupreagg_data_move(kern_context *kcxt,
 	dst_values[colidx] = src_values[colidx];
 }
 
-
-
-STATIC_FUNCTION(void)
+/*
+ * gpupreagg_final_data_move
+ *
+ * It moves the value from source buffer to destination buffer. If it needs
+ * to allocate variable-length buffer, it expands extra area of the final
+ * buffer and returns allocated area.
+ */
+STATIC_FUNCTION(cl_uint)
 gpupreagg_final_data_move(kern_context *kcxt,
 						  kern_data_store *kds_src,
 						  kern_data_store *kds_dst,
@@ -398,51 +407,55 @@ gpupreagg_final_data_move(kern_context *kcxt,
 	Datum	   *dst_values;
 	cl_char	   *src_isnull;
 	cl_char	   *dst_isnull;
+	cl_uint		alloc_size = 0;
 
 	kern_colmeta cmeta = kds_src->colmeta[colidx];
 
+	/* Paranoire checks? */
+	assert(kds_src->format == KDS_FORMAT_SLOT &&
+		   kds_dst->format == KDS_FORMAT_SLOT);
+	assert(colidx < kds_src->ncols && colidx < kds_dst->ncols);
 
-	/*
-	 * XXX - Paranoire checks?
-	 */
-	if (kds_src->format != KDS_FORMAT_SLOT ||
-		kds_dst->format != KDS_FORMAT_SLOT)
-	{
-		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreCorruption);
-		return;
-	}
-	if (colidx >= kds_src->ncols || colidx >= kds_dst->ncols)
-	{
-		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreCorruption);
-		return;
-	}
+	/* Get relevant slot */
 	src_values = KERN_DATA_STORE_VALUES(kds_src, rowidx_src);
 	src_isnull = KERN_DATA_STORE_ISNULL(kds_src, rowidx_src);
 	dst_values = KERN_DATA_STORE_VALUES(kds_dst, rowidx_dst);
 	dst_isnull = KERN_DATA_STORE_ISNULL(kds_dst, rowidx_dst);
 
-	dst_isnull[colidx] = src_isnull[colidx];
-
 	if (src_isnull[colidx])
-		return;
-	else if (cmeta.attbyval) 
+		dst_isnull[colidx] = true;
+	else if (cmeta.attbyval)
+	{
+		dst_isnull[colidx] = false;
 		dst_values[colidx] = src_values[colidx];
+	}
 	else
 	{
-		void *datum = kern_get_datum(kds_src,colidx,rowidx_src);
-		pg_varlena_t src = pg_varlena_datum_ref(kcxt,datum,false);
-		int	length = ((cmeta.attlen >= 0)
-					  ? cmeta.attlen
-					  : (VARSIZE_ANY(src.value)));
-		cl_uint allocSize = MAXALIGN(length);
-		int offset = atomicAdd(&kds_dst->usage, allocSize);
-		char *allocPtr = (char *)kds_dst + offset;
+		void		   *datum = kern_get_datum(kds_src,colidx,rowidx_src);
+		pg_varlena_t	vl_src = pg_varlena_datum_ref(kcxt,datum,false);
+		cl_uint			vl_len;
+		cl_uint			offset;
 
-		assert(offset + allocSize <= kds_dst->length);
+		vl_len = (cmeta.attlen >= 0
+				  ? cmeta.attlen
+				  : VARSIZE_ANY(vl_src.value));
+		alloc_size = MAXALIGN(vl_len);
+		offset = atomicAdd(&kds_dst->usage, alloc_size);
+		if (offset + alloc_size >= kds_dst->length)
+		{
+			STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
+			dst_isnull[colidx] = true;
+		}
+		else
+		{
+			char	   *alloc_ptr = (char *)kds_dst + offset;
 
-		memcpy(allocPtr, src.value, length);
-		*dst_values = (Datum)allocPtr;
+			memcpy(alloc_ptr, vl_src.value, vl_len);
+			dst_isnull[colidx] = false;
+			dst_values[colidx] = (Datum) alloc_ptr;
+		}
 	}
+	return alloc_size;
 }
 
 
@@ -1033,6 +1046,9 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	cl_uint			index;
 	cl_uint			nattrs = kds_dst->ncols;
 	cl_uint			attnum;
+	cl_uint			count;
+	cl_uint			nconflicts = 0;
+	cl_uint			allocated = 0;
 	cl_bool			isOwner = false;
 	cl_bool			source_is_valid = false;
 	pg_int4_t		key_dist_factor;
@@ -1047,7 +1063,7 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	 * Check availability of global hashslot usage
 	 */
 	if (!check_global_hashslot_usage(&kcxt, f_hash))
-		goto error_exit;
+		goto out;
 
 	/*
 	 * calculation of the hash value of grouping keys in this record.
@@ -1080,7 +1096,7 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	}
 
 	if (!source_is_valid)
-		goto error_exit;
+		goto out;
 
 	/*
 	 * Calculation of initial hash value
@@ -1137,10 +1153,13 @@ retry_minor:
 		assert(new_slot.s.index < f_hash->hash_usage);
 		for (attnum = 0; attnum < nattrs; attnum++)
 		{
-			gpupreagg_final_data_move(&kcxt,
-									  kds_dst, kds_final, ktoast,
-									  attnum,
-									  kds_index, new_slot.s.index);
+			allocated += gpupreagg_final_data_move(&kcxt,
+												   kds_dst,
+												   kds_final,
+												   ktoast,
+												   attnum,
+												   kds_index,
+												   new_slot.s.index);
 		}
 		__threadfence();
 		f_hash->hash_slot[index].s.index = new_slot.s.index;
@@ -1155,7 +1174,6 @@ retry_minor:
 
 	if (cur_slot.value == old_slot.value)
 	{
-//		printf("Allocate %d, %x\n", new_slot.s.index, hash_value);
 		owner_index = new_slot.s.index;
 		isOwner = true;
 	}
@@ -1164,11 +1182,12 @@ retry_minor:
 								kds_dst, kds_final, ktoast,
 								kds_index, cur_slot.s.index))
 	{
-//		printf("Match gid=%u %d\n", get_global_id(), cur_slot.s.index);
 		owner_index = cur_slot.s.index;
 	}
 	else
 	{
+		/* hash slot conflicts */
+		nconflicts++;
 		if (key_dist_salt > 1 && ++key_dist_index < key_dist_salt)
 		{
 			hash_value = hash_value_base;
@@ -1181,9 +1200,8 @@ retry_minor:
 			FIN_LEGACY_CRC32(hash_value);
 			goto retry_major;
 		}
-//		printf("Retry gid=%u %d\n", get_global_id(), (int)index);
 		if (!check_global_hashslot_usage(&kcxt, f_hash))
-			goto error_exit;
+			goto out;
 		index = (index + 1) % f_hashsize;
 		goto retry_minor;
 	}
@@ -1218,7 +1236,23 @@ retry_minor:
 		}
 	}
 
-error_exit:
+out:
+	/* update run-time statistics */
+	arithmetic_stairlike_add(isOwner ? 1 : 0, &count);
+	if (count > 0 && get_local_id() == 0)
+		atomicAdd(&kgpreagg->num_new_groups, count);
+	__syncthreads();
+
+	arithmetic_stairlike_add(allocated, &count);
+	if (count > 0 && get_local_id() == 0)
+		atomicAdd(&kgpreagg->varlena_usage, count);
+	__syncthreads();
+
+	arithmetic_stairlike_add(nconflicts, &count);
+	if (count > 0 && get_local_id() == 0)
+		atomicAdd(&kgpreagg->hash_conflicts, count);
+	__syncthreads();
+
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }

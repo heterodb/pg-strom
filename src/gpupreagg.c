@@ -242,6 +242,13 @@ typedef struct gpupreagg_segment
 	pgstrom_data_store **pds_src;		/* reference to source PDSs */
 	CUevent			ev_final_loaded;	/* event of final-buffer load */
 	CUevent		   *ev_kern_exec_end;	/* event of kernel-exec end */
+	/* run-time statistics */
+	size_t			total_ntasks;		/* # of tasks already processed */
+	size_t			total_nitems;		/* # of items already consumed */
+	size_t			total_ngroups;		/* # of groups already generated */
+	size_t			total_varlena;		/* total usage of varlena buffer */
+	double			delta_nitems;		/* delta of the total_nitems */
+	double			delta_ngroups;		/* delta of the delta_ngroups */
 } gpupreagg_segment;
 
 /*
@@ -3509,6 +3516,12 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 	offset += STROMALIGN(sizeof(pgstrom_data_store *) * num_chunks);
 	segment->ev_kern_exec_end = (CUevent *)((char *)segment + offset);
 
+	/* run-time statistics */
+	segment->total_ntasks = 0;
+	segment->total_nitems = 0;
+	segment->total_ngroups = 0;
+	segment->total_varlena = 0;
+
 	return segment;
 }
 
@@ -4245,6 +4258,29 @@ gpupreagg_task_complete(GpuTask *gtask)
 	}
 	/* OK, CUDA resource of this task is no longer referenced */
 	gpupreagg_cleanup_cuda_resources(gpreagg);
+
+	/*
+	 * Collection of run-time statistics
+	 */
+	elog(DEBUG1, "chunk: %d, nitems: %u, ngroups: %u, vl_usage: %u, retry: %u",
+		 gpreagg->segment_id,
+		 gpreagg->pds_in->kds->nitems,
+		 gpreagg->kern.num_new_groups,
+		 gpreagg->kern.varlena_usage,
+		 gpreagg->kern.hash_conflicts);
+	segment->total_ntasks++;
+	if (segment->total_ntasks > 1)
+	{
+		segment->delta_nitems =
+			(double)(segment->total_nitems + gpreagg->pds_in->kds->nitems) /
+			(double)(segment->total_nitems);
+		segment->delta_ngroups =
+			(double)(segment->total_ngroups + gpreagg->kern.num_new_groups) /
+			(double)(segment->total_ngroups);
+	}
+	segment->total_nitems += gpreagg->pds_in->kds->nitems;
+	segment->total_ngroups += gpreagg->kern.num_new_groups;
+	segment->total_varlena += gpreagg->kern.varlena_usage;
 
 	/*
 	 * NOTE: We have to ensure that a segment has terminator task, even if
