@@ -4130,13 +4130,17 @@ gpujoin_task_respond(CUstream stream, CUresult status, void *private)
 	}
 
 	/*
-	 * Remove from the running_tasks list, then attach it
-	 * on the completed_tasks list
+	 * Remove the GpuTask from the running_tasks list, and attach it
+	 * on the completed_tasks list again. Note that this routine may
+	 * be called by CUDA runtime, prior to attachment of GpuTask on
+	 * the running_tasks by cuda_control.c.
 	 */
 	SpinLockAcquire(&gts->lock);
-	dlist_delete(&pgjoin->task.chain);
-	gts->num_running_tasks--;
-
+	if (pgjoin->task.chain.prev && pgjoin->task.chain.next)
+	{
+		dlist_delete(&pgjoin->task.chain);
+		gts->num_running_tasks--;
+	}
 	if (pgjoin->task.kerror.errcode == StromError_Success)
 		dlist_push_tail(&gts->completed_tasks, &pgjoin->task.chain);
 	else

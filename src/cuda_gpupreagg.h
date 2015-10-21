@@ -61,9 +61,10 @@ typedef struct
 {
 	kern_errorbuf	kerror;					/* kernel error information */
 	/* -- runtime statistics -- */
-	cl_uint			num_new_groups;			/* out: # of new groups */
+	cl_uint			num_groups;				/* out: # of new groups */
 	cl_uint			varlena_usage;			/* out: size of varlena usage */
-	cl_uint			hash_conflicts;			/* out: # of hash conflicts */
+	cl_uint			ghash_conflicts;		/* out: # of ghash conflicts */
+	cl_uint			fhash_conflicts;		/* out: # of fhash conflicts */
 	/* -- other hashing parameters -- */
 	cl_uint			key_dist_salt;			/* hashkey distribution salt */
 	cl_uint			hash_size;				/* size of global hash-slots */
@@ -802,6 +803,8 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	cl_uint			index;
 	cl_uint			nattrs = kds_dst->ncols;
 	cl_uint			attnum;
+	cl_uint			nconflicts = 0;
+	cl_uint			count;
 	pg_int4_t		key_dist_factor;
 	pagg_hashslot	old_slot;
 	pagg_hashslot	new_slot;
@@ -881,6 +884,7 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 		}
 		else
 		{
+			nconflicts++;
 			if (key_dist_salt > 1 && ++key_dist_index < key_dist_salt)
 			{
 				hash_value = hash_value_base;
@@ -955,12 +959,19 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 		if (get_global_id() < nitems &&
 			get_global_id() != owner_index)
 		{
+			assert(owner_index < kds_dst->nrooms);
 			gpupreagg_global_calc(&kcxt,
 								  attnum,
 								  kds_dst, kds_dst, ktoast,
 								  owner_index, get_global_id());
 		}
 	}
+	/* collect run-time statistics */
+	arithmetic_stairlike_add(nconflicts, &count);
+	if (count > 0 && get_local_id() == 0)
+		atomicAdd(&kgpreagg->ghash_conflicts, count);
+	__syncthreads();
+
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
@@ -1050,7 +1061,6 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	cl_uint			nconflicts = 0;
 	cl_uint			allocated = 0;
 	cl_bool			isOwner = false;
-	cl_bool			source_is_valid = false;
 	pg_int4_t		key_dist_factor;
 	pagg_hashslot	old_slot;
 	pagg_hashslot	new_slot;
@@ -1081,22 +1091,18 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	if (kresults->all_visible)
 	{
 		if (get_global_id() < kds_dst->nitems)
-		{
 			kds_index = get_global_id();
-			source_is_valid = true;
-		}
+		else
+			goto out;
 	}
 	else
 	{
 		if (get_global_id() < kresults->nitems)
-		{
 			kds_index = kresults->results[get_global_id()];
-			source_is_valid = true;
-		}
+		else
+			goto out;
+		assert(kds_index < kds_dst->nitems);
 	}
-
-	if (!source_is_valid)
-		goto out;
 
 	/*
 	 * Calculation of initial hash value
@@ -1140,6 +1146,13 @@ retry_minor:
 							   old_slot.value, new_slot.value);
 	if (cur_slot.value == old_slot.value)
 	{
+		cl_uint		f_hashusage;
+		/* We could get an empty slot, so hash_usage should be smaller than
+		 * hash_size, at least.
+		 */
+		f_hashusage = atomicAdd(&f_hash->hash_usage, 1);
+		assert(f_hashusage < f_hashsize);
+
 		/* Hash slot was empty, so this thread shall be responsible
 		 * to this grouping-key.
 		 *
@@ -1147,19 +1160,23 @@ retry_minor:
 		 * arithmetic_stairlike_add() on shared memory?
 		 * It is a possible optimization if # of groups is large.
 		 */
-		atomicAdd(&kds_final->nitems, 1);
-
-		new_slot.s.index = atomicAdd(&f_hash->hash_usage, 1);
-		assert(new_slot.s.index < f_hash->hash_usage);
-		for (attnum = 0; attnum < nattrs; attnum++)
+		new_slot.s.index = atomicAdd(&kds_final->nitems, 1);
+		if (new_slot.s.index < kds_final->nrooms)
 		{
-			allocated += gpupreagg_final_data_move(&kcxt,
-												   kds_dst,
-												   kds_final,
-												   ktoast,
-												   attnum,
-												   kds_index,
-												   new_slot.s.index);
+			for (attnum = 0; attnum < nattrs; attnum++)
+			{
+				allocated += gpupreagg_final_data_move(&kcxt,
+													   kds_dst,
+													   kds_final,
+													   ktoast,
+													   attnum,
+													   kds_index,
+													   new_slot.s.index);
+			}
+		}
+		else
+		{
+			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 		}
 		__threadfence();
 		f_hash->hash_slot[index].s.index = new_slot.s.index;
@@ -1177,11 +1194,21 @@ retry_minor:
 		owner_index = new_slot.s.index;
 		isOwner = true;
 	}
-	else if (cur_slot.s.hash == new_slot.s.hash  &&
-			 gpupreagg_keymatch(&kcxt,
-								kds_dst, kds_final, ktoast,
-								kds_index, cur_slot.s.index))
+	else if (cur_slot.s.hash == new_slot.s.hash &&
+			 (cur_slot.s.index < kds_final->nrooms
+			  ? gpupreagg_keymatch(&kcxt,
+								   kds_dst, kds_final, ktoast,
+								   kds_index, cur_slot.s.index)
+			  : true))
 	{
+		/*
+		 * NOTE: If hash value was identical but cur_slot.s.index is out
+		 * of range thus we cannot use gpupreagg_keymatch, we cannot
+		 * determine whether this hash slot is actually owned by other
+		 * row that has identical grouping keys.
+		 * However, it is obvious this kernel invocation will return
+		 * DataStoreNoSpace error, then CPU fallback will work.
+		 */
 		owner_index = cur_slot.s.index;
 	}
 	else
@@ -1214,7 +1241,7 @@ retry_minor:
 	 * Once atomic operations got finished, values of pagg_datum in the
 	 * respobsible thread will have partially aggregated one.
 	 */
-	if (!isOwner)
+	if (!isOwner && owner_index < kds_final->nrooms)
 	{
 		for (attnum = 0; attnum < nattrs; attnum++)
 		{
@@ -1240,7 +1267,7 @@ out:
 	/* update run-time statistics */
 	arithmetic_stairlike_add(isOwner ? 1 : 0, &count);
 	if (count > 0 && get_local_id() == 0)
-		atomicAdd(&kgpreagg->num_new_groups, count);
+		atomicAdd(&kgpreagg->num_groups, count);
 	__syncthreads();
 
 	arithmetic_stairlike_add(allocated, &count);
@@ -1250,7 +1277,7 @@ out:
 
 	arithmetic_stairlike_add(nconflicts, &count);
 	if (count > 0 && get_local_id() == 0)
-		atomicAdd(&kgpreagg->hash_conflicts, count);
+		atomicAdd(&kgpreagg->fhash_conflicts, count);
 	__syncthreads();
 
 	/* write-back execution status into host-side */
