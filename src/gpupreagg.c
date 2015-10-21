@@ -1803,7 +1803,6 @@ gpupreagg_rewrite_expr(Agg *agg,
  * gpupreagg_qual_eval(kern_context *kcxt,
  *                     kern_parambuf *kparams,
  *                     kern_data_store *kds,
- *                     kern_data_store *ktoast,
  *                     size_t kds_index);
  */
 static char *
@@ -1822,7 +1821,6 @@ gpupreagg_codegen_qual_eval(CustomScan *cscan, GpuPreAggInfo *gpa_info,
         "STATIC_FUNCTION(bool)\n"
         "gpupreagg_qual_eval(kern_context *kcxt,\n"
         "                    kern_data_store *kds,\n"
-        "                    kern_data_store *ktoast,\n"
         "                    size_t kds_index)\n"
         "{\n");
 
@@ -1942,10 +1940,8 @@ gpupreagg_codegen_hashvalue(CustomScan *cscan, GpuPreAggInfo *gpa_info,
  *
  * static cl_bool
  * gpupreagg_keymatch(kern_context *kcxt,
- *                    kern_data_store *kds,
- *                    kern_data_store *ktoast,
- *                    size_t x_index,
- *                    size_t y_index);
+ *                    kern_data_store *kds_x, size_t x_index,
+ *                    kern_data_store *kds_y, size_t y_index)
  */
 static char *
 gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
@@ -2029,21 +2025,19 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	}
 
 	/* make a whole key-compare function */
-	appendStringInfo(&str,
-					 "STATIC_FUNCTION(cl_bool)\n"
-					 "gpupreagg_keymatch(kern_context *kcxt,\n"
-					 "                   kern_data_store *x_kds,\n"
-					 "                   kern_data_store *y_kds,\n"
-					 "                   kern_data_store *ktoast,\n"
-					 "                   size_t x_index,\n"
-					 "                   size_t y_index)\n"
-					 "{\n"
-					 "%s"	/* variable/params declarations */
-					 "%s"
-					 "  return true;\n"
-					 "}\n",
-					 decl.data,
-					 body.data);
+	appendStringInfo(
+		&str,
+		"STATIC_FUNCTION(cl_bool)\n"
+		"gpupreagg_keymatch(kern_context *kcxt,\n"
+		"                   kern_data_store *x_kds, size_t x_index,\n"
+		"                   kern_data_store *y_kds, size_t y_index)\n"
+		"{\n"
+		"%s"	/* variable/params declarations */
+		"%s"
+		"  return true;\n"
+		"}\n",
+		decl.data,
+		body.data);
 	pfree(decl.data);
 	pfree(body.data);
 
@@ -2118,9 +2112,8 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			"gpupreagg_global_calc(kern_context *kcxt,\n"
 			"                      cl_int attnum,\n"
 			"                      kern_data_store *accum_kds,\n"
-			"                      kern_data_store *newval_kds,\n"
-			"                      kern_data_store *ktoast,\n"
 			"                      size_t accum_index,\n"
+			"                      kern_data_store *newval_kds,\n"
 			"                      size_t newval_index)\n"
 			"{\n"
 			"  char    *accum_isnull;\n"
@@ -4725,8 +4718,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		 * KERNEL_FUNCTION(void)
 		 * gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 		 *                             kern_data_store *kds_src,
-		 *                             kern_data_store *kds_dst,
-		 *                             kern_data_store *ktoast)
+		 *                             kern_data_store *kds_dst)
 		 */
 		pgstrom_compute_workgroup_size(&grid_size,
 									   &block_size,
@@ -4739,7 +4731,6 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		kern_args[0] = &gpreagg->m_gpreagg;
 		kern_args[1] = &gpreagg->m_kds_1st;
 		kern_args[2] = &gpreagg->m_kds_2nd;
-		kern_args[3] = &gpreagg->m_kds_in;
 
 		/* 1st path: data reduction (kds_1st => kds_2nd) */
 		rc = cuLaunchKernel(gpreagg->kern_nogrp,
@@ -4787,8 +4778,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 			 * KERNEL_FUNCTION(void)
 			 * gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 			 *                           kern_data_store *kds_src,
-			 *                           kern_data_store *kds_dst,
-			 *                           kern_data_store *ktoast)
+			 *                           kern_data_store *kds_dst)
 			 */
 			pgstrom_compute_workgroup_size(&grid_size,
 										   &block_size,
@@ -4801,7 +4791,6 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 			kern_args[0] = &gpreagg->m_gpreagg;
 			kern_args[1] = &gpreagg->m_kds_1st;
 			kern_args[2] = &gpreagg->m_kds_2nd;
-			kern_args[3] = &gpreagg->m_kds_in;
 			lmem_size = Max(sizeof(pagg_hashslot),
 							sizeof(pagg_datum)) * block_size;
 			rc = cuLaunchKernel(gpreagg->kern_lagg,
@@ -4823,7 +4812,6 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		 * KERNEL_FUNCTION(void)
 		 * gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 		 *                            kern_data_store *kds_dst,
-		 *                            kern_data_store *ktoast,
 		 *                            kern_global_hashslot *g_hashslot)
 		 */
 		pgstrom_compute_workgroup_size(&grid_size,
@@ -4837,8 +4825,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		kern_args[1] = (gpreagg->reduction_mode == GPUPREAGG_LOCAL_REDUCTION
 						? &gpreagg->m_kds_2nd
 						: &gpreagg->m_kds_1st);
-		kern_args[2] = &gpreagg->m_kds_in;
-		kern_args[3] = &gpreagg->m_ghash;
+		kern_args[2] = &gpreagg->m_ghash;
 		lmem_size = sizeof(kern_errorbuf) * block_size;
 		rc = cuLaunchKernel(gpreagg->kern_gagg,
 							grid_size, 1, 1,
