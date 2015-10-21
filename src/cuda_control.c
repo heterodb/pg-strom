@@ -1305,7 +1305,13 @@ launch_pending_tasks(GpuTaskState *gts)
 			CUresult	rc;
 			int			index;
 
-			index = (gcontext->next_context++ % gcontext->num_context);
+			Assert(gtask->cuda_index == UINT_MAX ||
+				   gtask->cuda_index < gcontext->num_context);
+			if (gtask->cuda_index == UINT_MAX)
+				index = (gcontext->next_context++ % gcontext->num_context);
+			else
+				index = gtask->cuda_index;
+
 			cuda_device = gcontext->gpu[index].cuda_device;
 			cuda_context = gcontext->gpu[index].cuda_context;
 			cuda_module = gts->cuda_modules[index];
@@ -1680,6 +1686,7 @@ pgstrom_init_gputask(GpuTaskState *gts, GpuTask *gtask)
 {
 	memset(gtask, 0, sizeof(GpuTask));
 	gtask->gts = gts;
+	gtask->cuda_index = UINT_MAX;	/* assign automatically */
 	/* to be tracked by GpuTaskState */
 	SpinLockAcquire(&gts->lock);
 	dlist_push_tail(&gts->tracked_tasks, &gtask->tracker);
@@ -1717,7 +1724,7 @@ pgstrom_cleanup_gputask_cuda_resources(GpuTask *gtask)
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuStreamDestroy: %s", errorText(rc));
 	}
-	gtask->cuda_index = 0;
+	gtask->cuda_index = UINT_MAX;
 	gtask->cuda_context = NULL;
 	gtask->cuda_device = 0UL;
 	gtask->cuda_stream = NULL;

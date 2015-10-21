@@ -61,7 +61,6 @@ typedef struct
 	bool			outer_bulkload;
 	double			bulkload_density;
 	double			num_groups;		/* estimated number of groups */
-	double			nrows_per_chunk;/* estimated nrows per chunk */
 	cl_int			num_chunks;		/* estimated number of chunks */
 	Size			varlena_unitsz;	/* estimated unit size of varlena */
 	cl_int			safety_limit;	/* reasonable limit for reduction */
@@ -95,8 +94,6 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs,
 					makeInteger(double_as_long(gpa_info->bulkload_density)));
 	privs = lappend(privs, makeInteger(double_as_long(gpa_info->num_groups)));
-	privs = lappend(privs,
-					makeInteger(double_as_long(gpa_info->nrows_per_chunk)));
 	privs = lappend(privs, makeInteger(gpa_info->num_chunks));
 	privs = lappend(privs, makeInteger(gpa_info->varlena_unitsz));
 	privs = lappend(privs, makeInteger(gpa_info->safety_limit));
@@ -149,8 +146,6 @@ deform_gpupreagg_info(CustomScan *cscan)
 		long_as_double(intVal(list_nth(privs, pindex++)));
 	gpa_info->num_groups =
 		long_as_double(intVal(list_nth(privs, pindex++)));
-	gpa_info->nrows_per_chunk =
-		long_as_double(intVal(list_nth(privs, pindex++)));
 	gpa_info->num_chunks = intVal(list_nth(privs, pindex++));
 	gpa_info->varlena_unitsz = intVal(list_nth(privs, pindex++));
 	gpa_info->safety_limit = intVal(list_nth(privs, pindex++));
@@ -198,14 +193,12 @@ typedef struct
 	 * segment is a set of chunks to be aggregated
 	 */
 	struct gpupreagg_segment *curr_segment; 
-	cl_int			curr_cuda_index;
 
 	/*
 	 * Run-time statistics; recorded per segment
 	 */
 	cl_uint			stat_num_segments;	/* # of total segments */
 	double			stat_num_groups;	/* # of groups in plan/exec avg */
-	double			plan_nrows_per_chunk; /* # of rows per chunk in plan (obsolete?) */
 	double			stat_num_chunks;	/* # of chunks in plan/exec avg */
 	double			stat_src_nitems;	/* # of source rows in plan/exec avg */
 	double			stat_varlena_unitsz;/* unitsz of varlena buffer in plan */
@@ -805,7 +798,6 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 			   Plan *p_newcost_sort,
 			   Plan *p_newcost_gpreagg,
 			   double num_groups,
-			   double *p_nrows_per_chunk,
 			   cl_int *p_num_chunks,
 			   cl_int safety_limit)
 {
@@ -866,7 +858,8 @@ cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
 	segment_width = Max(num_groups / nrows_per_chunk, 1.0);
 	num_segments = Max(num_chunks / (segment_width * safety_limit), 1.0);
 
-	*p_nrows_per_chunk = nrows_per_chunk;
+	/* write back */
+	*p_num_chunks = num_chunks;
 
 	/*
 	 * Then, how much rows does GpuPreAgg will produce?
@@ -2997,7 +2990,6 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	cl_int			safety_limit;
 	cl_int			key_dist_salt;
 	double			num_groups;
-	double			nrows_per_chunk;
 	cl_int			num_chunks;
 	ListCell	   *cell;
 	int				i;
@@ -3163,7 +3155,6 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 				   &newcost_sort,
 				   &newcost_gpreagg,
 				   num_groups,
-				   &nrows_per_chunk,
 				   &num_chunks,
 				   safety_limit);
 	elog(DEBUG1,
@@ -3225,7 +3216,6 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	gpa_info.outer_bulkload = outer_bulkload;
 	gpa_info.bulkload_density = bulkload_density;
 	gpa_info.num_groups     = num_groups;
-	gpa_info.nrows_per_chunk= nrows_per_chunk;
 	gpa_info.num_chunks     = num_chunks;
 	gpa_info.varlena_unitsz = varlena_unitsz;
 	gpa_info.safety_limit   = safety_limit;
@@ -3330,7 +3320,7 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	CustomScan	   *cscan = (CustomScan *) ps->plan;
 	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
 	TupleDesc		tupdesc;
-	//int				outer_width;
+	double			outer_nitems;
 
 	/* activate GpuContext for device execution */
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
@@ -3357,6 +3347,7 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	 * initialize child node
 	 */
 	outerPlanState(gpas) = ExecInitNode(outerPlan(cscan), estate, eflags);
+	outer_nitems = outerPlanState(gpas)->plan->plan_rows;
 	if (pgstrom_bulkload_enabled)
 		gpas->gts.scan_bulk = gpa_info->outer_bulkload;
 	gpas->gts.scan_bulk_density = gpa_info->bulkload_density;
@@ -3399,14 +3390,13 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 		gpas->reduction_mode = GPUPREAGG_NOGROUP_REDUCTION;
 	else if (gpa_info->num_groups < (gpuMaxThreadsPerBlock() / 4))
 		gpas->reduction_mode = GPUPREAGG_LOCAL_REDUCTION;
-	else if (gpa_info->num_groups < (gpa_info->nrows_per_chunk / 4))
+	else if (gpa_info->num_groups < (outer_nitems / gpa_info->num_chunks) / 4)
 		gpas->reduction_mode = GPUPREAGG_GLOBAL_REDUCTION;
 	else
 		gpas->reduction_mode = GPUPREAGG_FINAL_REDUCTION;
 	gpas->has_numeric = gpa_info->has_numeric;
 	gpas->has_notbyval = gpa_info->has_notbyval;
 	gpas->curr_segment = NULL;
-	gpas->curr_cuda_index = 0;
 
 	/*
 	 * init run-time statistics
@@ -3418,9 +3408,8 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	gpas->stat_num_segments = 0;
 	gpas->stat_num_groups = gpa_info->num_groups;
 	gpas->stat_num_chunks = gpa_info->num_chunks;
-	gpas->stat_src_nitems = outerPlanState(gpas)->plan->plan_rows;
+	gpas->stat_src_nitems = outer_nitems;
 	gpas->stat_varlena_unitsz = gpa_info->varlena_unitsz;
-	gpas->plan_nrows_per_chunk = gpa_info->nrows_per_chunk; //NEEDED?
 }
 
 /*
@@ -3501,7 +3490,7 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 	GpuContext	   *gcontext = gpas->gts.gcontext;
 	TupleDesc		tupdesc;
 	Size			num_chunks;
-	Size			nrooms;
+	Size			f_nrooms;
 	Size			extra_length;
 	Size			offset;
 	Size			required;
@@ -3511,11 +3500,13 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 	gpupreagg_segment  *segment;
 
 	/*
-	 * FIXME: We shall adjust buffer size according to run-time statistics
-	 * later. However, at this moment, we rely on planner estimation.
+	 * (50% + plan/exec avg) x configured margin is scale of the final
+	 * reduction buffer.
 	 */
-	nrooms = (cl_uint)(2.5 * gpas->stat_num_groups *
-					   pgstrom_chunk_size_margin);
+	f_nrooms = (Size)(1.5 * gpas->stat_num_groups *
+					  pgstrom_chunk_size_margin);
+	extra_length = (Size)(gpas->stat_varlena_unitsz * (double) f_nrooms);
+
 	/*
 	 * FIXME: At this moment, we have a hard limit (2GB) for temporary
 	 * consumption by pds_src[] chunks. It shall be configurable and
@@ -3528,21 +3519,18 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 	num_chunks = Min(num_chunks, reduction_ratio * gpas->safety_limit);
 	Assert(num_chunks > 0);
 
-	extra_length = (Size)(gpas->stat_varlena_unitsz *
-						  gpas->stat_num_groups *
-						  pgstrom_chunk_size_margin);
-
 	/*
-	 * FIXME: We may need more wise way to determine CUDA device rather
-	 * than round-robin.
+	 * Any tasks that share same segment has to be kicked on the same
+	 * GPU device. At this moment, we don't support multiple device
+	 * mode to process GpuPreAgg. It's a TODO.
 	 */
-	cuda_index = gpas->curr_cuda_index++ % gcontext->num_context;
+	cuda_index = gcontext->next_context++ % gcontext->num_context;
 
 	/* pds_final buffer */
 	tupdesc = gpas->gts.css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
 	pds_final = pgstrom_create_data_store_slot(gcontext,
 											   tupdesc,
-											   nrooms,
+											   f_nrooms,
 											   gpas->has_numeric,
 											   extra_length,
 											   NULL);
@@ -3561,7 +3549,7 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 	 * FIXME: f_hashsize is nroom of the pds_final. It is not a reasonable
 	 * estimation, thus needs to be revised.
 	 */
-	segment->f_hashsize = 2 * nrooms;
+	segment->f_hashsize = 2 * f_nrooms;
 	segment->num_chunks = num_chunks;
 	segment->idx_chunks = 0;
 	segment->refcnt = 1;
@@ -3573,7 +3561,7 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 	segment->ev_kern_exec_end = (CUevent *)((char *)segment + offset);
 
 	/* run-time statistics */
-	segment->allocated_nrooms = nrooms;
+	segment->allocated_nrooms = f_nrooms;
 	segment->allocated_varlena = extra_length;
 	segment->total_ntasks = 0;
 	segment->total_nitems = 0;
