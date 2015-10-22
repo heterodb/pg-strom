@@ -3467,14 +3467,26 @@ gpupreagg_check_segment_capacity(GpuPreAggState *gpas,
 	/* check available noom of the kds_final */
 	extra_ngroups = (double)(segment->total_ngroups +
 							 extra_ngroups) * pgstrom_chunk_size_margin;
-	if (extra_ngroups >= segment->allocated_nrooms)
+	if (extra_ngroups > segment->allocated_nrooms)
+	{
+		elog(DEBUG1,
+			 "expected ngroups usage is larger than allocation: %zu of %zu",
+			 (Size)extra_ngroups,
+			 (Size)segment->allocated_nrooms);
 		return false;
+	}
 
 	/* check available space of the varlena buffer */
 	extra_varlena = (double)(segment->total_varlena +
 							 extra_varlena) * pgstrom_chunk_size_margin;
-	if (extra_varlena >= segment->allocated_varlena)
+	if (extra_varlena > segment->allocated_varlena)
+	{
+		elog(DEBUG1,
+			 "expected varlena usage is larger than allocation: %zu of %zu",
+			 (Size)extra_varlena,
+			 (Size)segment->allocated_varlena);
 		return false;
+	}
 	/* OK, we still have rooms for final reduction */
 	return true;
 }
@@ -3488,10 +3500,12 @@ static gpupreagg_segment *
 gpupreagg_create_segment(GpuPreAggState *gpas)
 {
 	GpuContext	   *gcontext = gpas->gts.gcontext;
-	TupleDesc		tupdesc;
+	TupleDesc		tupdesc
+		= gpas->gts.css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
 	Size			num_chunks;
 	Size			f_nrooms;
-	Size			extra_length;
+	Size			varlena_length;
+	Size			total_length;
 	Size			offset;
 	Size			required;
 	double			reduction_ratio;
@@ -3502,10 +3516,38 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 	/*
 	 * (50% + plan/exec avg) x configured margin is scale of the final
 	 * reduction buffer.
+	 *
+	 * NOTE: We ensure the final buffer has at least 2039 rooms to store
+	 * the reduction results, because planner often estimate Ngroups
+	 * too smaller than actual and it eventually leads destructive
+	 * performance loss. Also, saving the KB scale memory does not affect
+	 * entire resource consumption.
+	 *
+	 * NOTE: We also guarantee at least 1/2 of chunk size for minimum
+	 * allocation size of the final result buffer.
 	 */
 	f_nrooms = (Size)(1.5 * gpas->stat_num_groups *
 					  pgstrom_chunk_size_margin);
-	extra_length = (Size)(gpas->stat_varlena_unitsz * (double) f_nrooms);
+	/* minimum available nrooms? */
+	f_nrooms = Max(f_nrooms, 2039);
+	varlena_length = (Size)(gpas->stat_varlena_unitsz * (double) f_nrooms);
+
+	/* minimum available buffer size? */
+	total_length = (STROMALIGN(offsetof(kern_data_store,
+										colmeta[tupdesc->natts])) +
+					LONGALIGN((sizeof(Datum) +
+							   sizeof(char)) * tupdesc->natts) * f_nrooms +
+					varlena_length);
+	if (total_length < pgstrom_chunk_size() / 2)
+	{
+		f_nrooms = (pgstrom_chunk_size() / 2 -
+					STROMALIGN(offsetof(kern_data_store,
+										colmeta[tupdesc->natts]))) /
+			(LONGALIGN((sizeof(Datum) +
+						sizeof(char)) * tupdesc->natts) +
+			 gpas->stat_varlena_unitsz);
+		varlena_length = (Size)(gpas->stat_varlena_unitsz * (double) f_nrooms);
+	}
 
 	/*
 	 * FIXME: At this moment, we have a hard limit (2GB) for temporary
@@ -3527,12 +3569,11 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 	cuda_index = gcontext->next_context++ % gcontext->num_context;
 
 	/* pds_final buffer */
-	tupdesc = gpas->gts.css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
 	pds_final = pgstrom_create_data_store_slot(gcontext,
 											   tupdesc,
 											   f_nrooms,
 											   gpas->has_numeric,
-											   extra_length,
+											   varlena_length,
 											   NULL);
 	/* gpupreagg_segment itself */
 	offset = STROMALIGN(sizeof(gpupreagg_segment));
@@ -3549,7 +3590,7 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 	 * FIXME: f_hashsize is nroom of the pds_final. It is not a reasonable
 	 * estimation, thus needs to be revised.
 	 */
-	segment->f_hashsize = 2 * f_nrooms;
+	segment->f_hashsize = f_nrooms;
 	segment->num_chunks = num_chunks;
 	segment->idx_chunks = 0;
 	segment->refcnt = 1;
@@ -3562,7 +3603,7 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 
 	/* run-time statistics */
 	segment->allocated_nrooms = f_nrooms;
-	segment->allocated_varlena = extra_length;
+	segment->allocated_varlena = varlena_length;
 	segment->total_ntasks = 0;
 	segment->total_nitems = 0;
 	segment->total_ngroups = 0;
@@ -3676,7 +3717,6 @@ gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg)
 {
 	gpupreagg_segment  *segment = gpreagg->segment;
 	pgstrom_data_store *pds_final = segment->pds_final;
-	size_t				nrooms = pds_final->kds->nrooms;
 	size_t				grid_size;
 	size_t				block_size;
 	size_t				length;
@@ -3740,7 +3780,7 @@ gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg)
 									   kern_final_prep,
 									   gpreagg->task.cuda_device,
 									   false,
-									   nrooms,
+									   segment->f_hashsize,
 									   sizeof(kern_errorbuf));
 		kern_args[0] = &segment->f_hashsize;
 		kern_args[1] = &m_hashslot_final;
@@ -4145,6 +4185,7 @@ gpupreagg_end(CustomScanState *node)
 	/* Clean up subtree */
 	ExecEndNode(outerPlanState(node));
 
+#if 0
 	/* dump stat */
 	elog(INFO, "stat {num_segments: %u, num_groups: %.0f, num_chunks: %.0f, src_nitems: %.0f, varlena_unitsz: %.0f}",
 		 gpas->stat_num_segments,
@@ -4152,6 +4193,7 @@ gpupreagg_end(CustomScanState *node)
 		 gpas->stat_num_chunks,
 		 gpas->stat_src_nitems,
 		 gpas->stat_varlena_unitsz);
+#endif
 }
 
 static void

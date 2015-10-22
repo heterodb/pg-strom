@@ -126,7 +126,8 @@ typedef union
  * global memory area. Usage counter is used to break a loop to find-
  * out an empty slot if hash-slot is already filled-up.
  */
-#define GLOBAL_HASHSLOT_THRESHOLD	0.75
+#define GLOBAL_HASHSLOT_THRESHOLD(g_hashsize)	\
+	((size_t)(0.75 * (double)(g_hashsize)))
 
 typedef struct
 {
@@ -768,15 +769,10 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
  * Check whether the global hash-slot has enough free space at this moment.
  */
 STATIC_INLINE(cl_bool)
-check_global_hashslot_usage(kern_context *kcxt, kern_global_hashslot *g_hash)
+check_global_hashslot_usage(kern_context *kcxt,
+							size_t g_hashusage, size_t g_hashlimit)
 {
-	cl_uint		hash_limit;
-	cl_uint		hash_usage;
-
-	hash_limit = (cl_uint)((double) g_hash->hash_size *
-						   GLOBAL_HASHSLOT_THRESHOLD);
-	hash_usage = *((volatile cl_uint *)&g_hash->hash_usage);
-	if (hash_usage >= hash_limit)
+	if (g_hashusage >= g_hashlimit)
 	{
 		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
 		return false;	/* hash usage exceeds the limitation */
@@ -798,6 +794,7 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
 	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
 	size_t			g_hashsize = g_hash->hash_size;
+	size_t			g_hashlimit = GLOBAL_HASHSLOT_THRESHOLD(g_hashsize);
 	size_t			dest_index;
 	size_t			owner_index;
 	cl_uint			key_dist_salt = kgpreagg->key_dist_salt;
@@ -816,6 +813,7 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	pagg_hashslot	cur_slot;
 	__shared__ cl_uint	crc32_table[256];
 	__shared__ cl_uint	base;
+	__shared__ cl_uint	g_hashusage;
 
 	INIT_KERNEL_CONTEXT(&kcxt,gpupreagg_global_reduction,kparams);
 
@@ -830,6 +828,17 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 		 index += get_local_size())
 		crc32_table[index] = kgpreagg->pg_crc32_table[index];
 	__syncthreads();
+
+	/*
+	 * check g_hash slot usage first - this kernel uses staircase operation,
+	 * so quick exit must be atomically.
+	 */
+	__threadfence();
+	if (get_local_id() == 0)
+		g_hashusage = g_hash->hash_usage;
+	__syncthreads();
+	if (!check_global_hashslot_usage(&kcxt, g_hashusage, g_hashlimit))
+		goto out;
 
 	if (get_global_id() < kds_dst->nitems)
 	{
@@ -907,7 +916,9 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 				FIN_LEGACY_CRC32(hash_value);
 				goto retry_major;
 			}
-			if (check_global_hashslot_usage(&kcxt, g_hash))
+			__threadfence();
+			if (check_global_hashslot_usage(&kcxt, g_hash->hash_usage,
+											g_hashlimit))
 			{
 				index = (index + 1) % g_hashsize;
 				goto retry_minor;
@@ -1038,6 +1049,7 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	cl_uint			kds_index;
 	cl_uint			owner_index;
 	size_t			f_hashsize = f_hash->hash_size;
+	size_t			f_hashlimit = GLOBAL_HASHSLOT_THRESHOLD(f_hashsize);
 	cl_uint			key_dist_salt = kgpreagg->key_dist_salt;
 	cl_uint			key_dist_index = 0;
 	cl_uint			hash_value;
@@ -1054,16 +1066,19 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	pagg_hashslot	new_slot;
 	pagg_hashslot	cur_slot;
 	__shared__ cl_uint	crc32_table[256];
+	__shared__ cl_uint	f_hashusage;
 
 	INIT_KERNEL_CONTEXT(&kcxt,gpupreagg_final_reduction,kparams);
 
-#if 0
 	/*
-	 * Check availability of global hashslot usage
+	 * check availability of final hashslot usage
 	 */
-	if (!check_global_hashslot_usage(&kcxt, f_hash))
+	__threadfence();
+	if (get_local_id() == 0)
+		f_hashusage = f_hash->hash_usage;
+	__syncthreads();
+	if (!check_global_hashslot_usage(&kcxt, f_hashusage, f_hashlimit))
 		goto out;
-#endif
 
 	/*
 	 * calculation of the hash value of grouping keys in this record.
@@ -1132,9 +1147,9 @@ retry_major:
 	old_slot.s.index = (cl_uint)(0xffffffff); /* INVALID */
 	index  = hash_value % f_hashsize;
 retry_minor:
-
 	cur_slot.value = atomicCAS(&f_hash->hash_slot[index].value,
 							   old_slot.value, new_slot.value);
+
 	if (cur_slot.value == old_slot.value)
 	{
 		/*
@@ -1171,12 +1186,11 @@ retry_minor:
 		__threadfence();
 		f_hash->hash_slot[index].s.index = new_slot.s.index;
 	}
-
-	/* wait a updating hash slot. */
+	/* wait updating the hash slot. */
 	while (cur_slot.s.index == (cl_uint)(0xfffffffe))
 	{
-		cur_slot.s.index = *((volatile int *)
-							 &f_hash->hash_slot[index].s.index);
+		__threadfence();
+		cur_slot.s.index = f_hash->hash_slot[index].s.index;
 	}
 
 	if (cur_slot.value == old_slot.value)
@@ -1217,7 +1231,9 @@ retry_minor:
 			FIN_LEGACY_CRC32(hash_value);
 			goto retry_major;
 		}
-		if (!check_global_hashslot_usage(&kcxt, f_hash))
+		__threadfence();
+		if (!check_global_hashslot_usage(&kcxt, f_hash->hash_usage,
+										 f_hashlimit))
 			goto out;
 		index = (index + 1) % f_hashsize;
 		goto retry_minor;
