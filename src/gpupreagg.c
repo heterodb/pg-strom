@@ -4810,9 +4810,9 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 									   nitems,
 									   sizeof(kern_errorbuf));
 		kern_args[0] = &gpreagg->m_gpreagg;
-		kern_args[1] = (gpreagg->reduction_mode == GPUPREAGG_LOCAL_REDUCTION
-						? &gpreagg->m_kds_2nd
-						: &gpreagg->m_kds_1st);
+		kern_args[1] = (final_source_is_kds_1st
+						? &gpreagg->m_kds_1st
+						: &gpreagg->m_kds_2nd);
 		kern_args[2] = &gpreagg->m_ghash;
 		lmem_size = sizeof(kern_errorbuf) * block_size;
 		rc = cuLaunchKernel(gpreagg->kern_gagg,

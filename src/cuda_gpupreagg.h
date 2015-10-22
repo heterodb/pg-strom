@@ -401,6 +401,8 @@ gpupreagg_final_data_move(kern_context *kcxt,
 	assert(kds_src->format == KDS_FORMAT_SLOT &&
 		   kds_dst->format == KDS_FORMAT_SLOT);
 	assert(colidx < kds_src->ncols && colidx < kds_dst->ncols);
+	assert(rowidx_src < kds_src->nitems);
+	assert(rowidx_dst < kds_dst->nitems);
 
 	/* Get relevant slot */
 	src_values = KERN_DATA_STORE_VALUES(kds_src, rowidx_src);
@@ -763,6 +765,26 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 }
 
 /*
+ * Check whether the global hash-slot has enough free space at this moment.
+ */
+STATIC_INLINE(cl_bool)
+check_global_hashslot_usage(kern_context *kcxt, kern_global_hashslot *g_hash)
+{
+	cl_uint		hash_limit;
+	cl_uint		hash_usage;
+
+	hash_limit = (cl_uint)((double) g_hash->hash_size *
+						   GLOBAL_HASHSLOT_THRESHOLD);
+	hash_usage = *((volatile cl_uint *)&g_hash->hash_usage);
+	if (hash_usage >= hash_limit)
+	{
+		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
+		return false;	/* hash usage exceeds the limitation */
+	}
+	return true;		/* ok, we still have rooms */
+}
+
+/*
  * gpupreagg_global_reduction
  */
 KERNEL_FUNCTION(void)
@@ -775,14 +797,13 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	kern_context	kcxt;
 	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
 	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
-	size_t			hash_size = g_hash->hash_size;
+	size_t			g_hashsize = g_hash->hash_size;
 	size_t			dest_index;
 	size_t			owner_index;
 	cl_uint			key_dist_salt = kgpreagg->key_dist_salt;
 	cl_uint			key_dist_index = 0;
 	cl_uint			hash_value;
 	cl_uint			hash_value_base;
-	cl_uint			nitems = kds_dst->nitems;
 	cl_uint			ngroups;
 	cl_uint			index;
 	cl_uint			nattrs = kds_dst->ncols;
@@ -794,7 +815,7 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	pagg_hashslot	new_slot;
 	pagg_hashslot	cur_slot;
 	__shared__ cl_uint	crc32_table[256];
-	__shared__ size_t	base_index;
+	__shared__ cl_uint	base;
 
 	INIT_KERNEL_CONTEXT(&kcxt,gpupreagg_global_reduction,kparams);
 
@@ -810,7 +831,7 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 		crc32_table[index] = kgpreagg->pg_crc32_table[index];
 	__syncthreads();
 
-	if (get_global_id() < nitems)
+	if (get_global_id() < kds_dst->nitems)
 	{
 		/*
 		 * Calculation of initial hash value
@@ -847,23 +868,28 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 		new_slot.s.index = get_global_id();
 		old_slot.s.hash = 0;
 		old_slot.s.index = (cl_uint)(0xffffffff);
-		index = hash_value % hash_size;
+		index = hash_value % g_hashsize;
 	retry_minor:
 		cur_slot.value = atomicCAS(&g_hash->hash_slot[index].value,
 								   old_slot.value,
 								   new_slot.value);
 		if (cur_slot.value == old_slot.value)
 		{
-			/* Hash slot was empty, so this thread shall be responsible
+			cl_uint		g_hashusage = atomicAdd(&g_hash->hash_usage, 1);
+			assert(g_hashusage < g_hashsize);
+			/*
+			 * Hash slot was empty, so this thread shall be responsible
 			 * to this grouping-key.
 			 */
 			owner_index = new_slot.s.index;
+
 		}
 		else if (cur_slot.s.hash == new_slot.s.hash &&
 				 gpupreagg_keymatch(&kcxt,
 									kds_dst, get_global_id(),
 									kds_dst, cur_slot.s.index))
 		{
+			assert(cur_slot.s.index < kds_dst->nitems);
 			owner_index = cur_slot.s.index;
 		}
 		else
@@ -881,8 +907,12 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 				FIN_LEGACY_CRC32(hash_value);
 				goto retry_major;
 			}
-			index = (index + 1) % hash_size;
-			goto retry_minor;
+			if (check_global_hashslot_usage(&kcxt, g_hash))
+			{
+				index = (index + 1) % g_hashsize;
+				goto retry_minor;
+			}
+			owner_index = (cl_uint)(0xffffffff);
 		}
 	}
 	else
@@ -900,18 +930,16 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	__syncthreads();
 	index = arithmetic_stairlike_add(get_global_id() == owner_index ? 1 : 0,
 									 &ngroups);
+	__syncthreads();
 	if (ngroups > 0)
 	{
 		if (get_local_id() == 0)
-		{
-			base_index = atomicAdd(&kresults->nitems, ngroups);
-			// atomicAdd(&g_hash->hash_usage, ngroups); -- really needed?
-		}
+			base = atomicAdd(&kresults->nitems, ngroups);
 		__syncthreads();
-		assert(base_index + ngroups <= kresults->nrooms);
-		dest_index = base_index + index;
+		assert(base + ngroups <= kresults->nrooms);
+		dest_index = base + index;
 
-		if (get_global_id() < nitems &&
+		if (get_global_id() < kds_dst->nitems &&
 			get_global_id() == owner_index)
 		{
 			kresults->results[dest_index] = get_global_id();
@@ -940,7 +968,7 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 		 * identifier on the kern_row_map. Once kernel execution gets done,
 		 * this index points the location of aggregate value.
 		 */
-		if (get_global_id() < nitems &&
+		if (get_global_id() < kds_dst->nitems &&
 			get_global_id() != owner_index)
 		{
 			assert(owner_index < kds_dst->nrooms);
@@ -950,6 +978,7 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 								  kds_dst, get_global_id());
 		}
 	}
+out:
 	/* collect run-time statistics */
 	arithmetic_stairlike_add(nconflicts, &count);
 	if (count > 0 && get_local_id() == 0)
@@ -986,27 +1015,6 @@ gpupreagg_final_preparation(size_t f_hashsize,
 	}
 }
 
-
-/*
- * Check whether the global hash-slot has enough free space at this moment.
- */
-STATIC_INLINE(cl_bool)
-check_global_hashslot_usage(kern_context *kcxt, kern_global_hashslot *f_hash)
-{
-	cl_uint		hash_limit;
-	cl_uint		hash_usage;
-
-	hash_limit = (cl_uint)((double) f_hash->hash_size *
-						   GLOBAL_HASHSLOT_THRESHOLD);
-	hash_usage = *((volatile cl_uint *)&f_hash->hash_usage);
-	if (hash_usage >= hash_limit)
-	{
-		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
-		return false;	/* hash usage exceeds the limitation */
-	}
-	return true;		/* ok, we still have rooms */
-}
-
 /*
  * gpupreagg_final_reduction
  *
@@ -1027,8 +1035,8 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	kern_context	kcxt;
 	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
 	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
-	size_t			kds_index;
-	size_t			owner_index;
+	cl_uint			kds_index;
+	cl_uint			owner_index;
 	size_t			f_hashsize = f_hash->hash_size;
 	cl_uint			key_dist_salt = kgpreagg->key_dist_salt;
 	cl_uint			key_dist_index = 0;
@@ -1049,11 +1057,13 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 
 	INIT_KERNEL_CONTEXT(&kcxt,gpupreagg_final_reduction,kparams);
 
+#if 0
 	/*
 	 * Check availability of global hashslot usage
 	 */
 	if (!check_global_hashslot_usage(&kcxt, f_hash))
 		goto out;
+#endif
 
 	/*
 	 * calculation of the hash value of grouping keys in this record.
@@ -1077,7 +1087,8 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	}
 	else
 	{
-		if (get_global_id() < kresults->nitems)
+		if (get_global_id() < min(kresults->nitems,
+								  kresults->nrooms))
 			kds_index = kresults->results[get_global_id()];
 		else
 			goto out;
@@ -1126,15 +1137,15 @@ retry_minor:
 							   old_slot.value, new_slot.value);
 	if (cur_slot.value == old_slot.value)
 	{
-		cl_uint		f_hashusage;
-		/* We could get an empty slot, so hash_usage should be smaller than
-		 * hash_size, at least.
+		/*
+		 * We could get an empty slot, so hash_usage should be smaller
+		 * than hash_size itself, at least.
 		 */
-		f_hashusage = atomicAdd(&f_hash->hash_usage, 1);
+		cl_uint		f_hashusage = atomicAdd(&f_hash->hash_usage, 1);
 		assert(f_hashusage < f_hashsize);
 
-		/* Hash slot was empty, so this thread shall be responsible
-		 * to this grouping-key.
+		/*
+		 * This thread shall be responsible to this grouping-key
 		 *
 		 * MEMO: Can we reduce of number of atomic operation using
 		 * arithmetic_stairlike_add() on shared memory?
