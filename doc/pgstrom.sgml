@@ -1,0 +1,43 @@
+<!-- sgml/pgstrom.sgml -->
+
+<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook V4.2//EN" [
+
+<!ENTITY % pgstrom_version SYSTEM "version.sgml">
+%pgstrom_version;
+<!ENTITY % filelist SYSTEM "filelist.sgml">
+%filelist;
+
+]>
+
+<book id="pgstrom">
+  <title>PG-Strom &pgstrom_version; Documentation</title>
+
+  <bookinfo>
+    <corpauthor>The PG-Strom Development Team</corpauthor>
+	<author>
+	  <personname>
+		<surname>KaiGai</surname>
+		<firstname>Kohei</firstname>
+	  </personname>
+	</author>
+  </bookinfo>
+
+  <part id="tutorial">
+	<title>Tutorial</title>
+	&overview;
+  </part>
+
+<!--
+  <part id="administration">
+	<title>Administration</title>
+  </part>
+
+  <part id="developer">
+	<title>Development</title>
+  </part>
+
+  <part id="appendix">
+	<title>Appendix</title>
+  </part>
+-->
+</book>
