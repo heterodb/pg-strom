@@ -19,22 +19,25 @@
     &legal;
   </bookinfo>
 
-  <part id="tutorial">
-	<title>Tutorial</title>
-	&overview;
+  <part id="getting-started">
+    <title>Getting started</title>
+    &overview;
+    &install;
   </part>
-
-<!--
-  <part id="administration">
-	<title>Administration</title>
+  <part id="admin-manual">
+    <title>Administration Manual</title>
+    &parameters;
   </part>
-
-  <part id="developer">
-	<title>Development</title>
+  <part id="internal-manual">
+    <title>Internals</title>
+    &gpucontext;
+    &gpuscan;
+    &gpujoin;
+    &gpupreagg;
+    &gpusort;
   </part>
-
   <part id="appendix">
-	<title>Appendix</title>
+    <title>Appendix</title>
+    &release-notes;
   </part>
--->
 </book>
