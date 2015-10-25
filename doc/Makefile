@@ -1,4 +1,6 @@
-include ../Makefile.common
+# Load the common definition
+PGSTROM_MAKEFILE_IN_SUBDIR := 1
+include ../Makefile
 
 EXTRA_CLEAN := $(EXTRA_CLEAN_DOC)
 
