@@ -14,12 +14,9 @@
 
   <bookinfo>
     <corpauthor>The PG-Strom Development Team</corpauthor>
-	<author>
-	  <personname>
-		<surname>KaiGai</surname>
-		<firstname>Kohei</firstname>
-	  </personname>
-	</author>
+    <productname>PG-Strom</productname>
+    <productnumber>&pgstrom_version;</productnumber>
+    &legal;
   </bookinfo>
 
   <part id="tutorial">

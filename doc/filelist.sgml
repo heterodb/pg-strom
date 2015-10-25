@@ -1,9 +1,12 @@
 <!-- sgml/filelist.sgml -->
 
+<!ENTITY legal		SYSTEM "legal.sgml">
+
 <!-- back matter -->
+<!ENTITY bookindex	SYSTEM "bookindex.sgml">
 
 <!-- tutrial -->
-<!ENTITY overview      SYSTEM "overview.sgml">
+<!ENTITY overview	SYSTEM "overview.sgml">
 
 <!-- Administration -->
 

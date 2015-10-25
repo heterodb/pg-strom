@@ -8,7 +8,7 @@ PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
 ifndef JADE
-JADE = $(missing) jade
+JADE = jade
 endif
 
 SGMLINCLUDE = -D .
@@ -29,13 +29,11 @@ html: html-stamp
 html-stamp: pgstrom.sgml $(ALLSGML) $(GENERATED_SGML) stylesheet.dsl website-docs.css
 	$(MKDIR_P) html
 	$(JADE.html.call) -i include-index $<
-	cp $(srcdir)/stylesheet.css $(srcdir)/website-docs.css html/
+	cp stylesheet.css website-docs.css html
 	touch $@
 
 version.sgml:
-	{ \
-	  echo "<!ENTITY pgstrom_version \"$(PGSTROM_VERSION)\">"; \
-	} > $@
+	@echo "<!ENTITY pgstrom_version \"$(PGSTROM_VERSION)\">" > $@
 
 HTML.index: pgstrom.sgml $(ALMOSTALLSGML) stylesheet.dsl
 	@$(MKDIR_P) html
@@ -45,7 +43,7 @@ bookindex.sgml: HTML.index
 ifdef COLLATEINDEX
 	LC_ALL=C $(PERL) $(COLLATEINDEX) -f -g -i 'bookindex' -o $@ $<
 else
-	@$(missing) collateindex.pl $< $@
+	collateindex.pl $< $@
 endif
 
 .PHONY: html all
