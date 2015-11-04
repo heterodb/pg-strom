@@ -1,15 +1,15 @@
 # Load the common definition
 PGSTROM_MAKEFILE_IN_SUBDIR := 1
-include ../Makefile.common
+include ../Makefile
 
 #
 # Definition of PG-Strom Extension
 #
 EXTENSION = pg_strom
 ifeq ($(shell test $(PG_VERSION_NUM) -ge 90600; echo $??),0)
-DATA = src/pg_strom--1.0.sql
+DATA = pg_strom--1.0.sql
 else
-DATA = src/pg_strom--1.0.sql
+DATA = pg_strom--1.0.sql
 endif
 
 # Header and Libraries of CUDA
