@@ -1,0 +1,43 @@
+<!-- sgml/pgstrom.sgml -->
+
+<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook V4.2//EN" [
+
+<!ENTITY % pgstrom_version SYSTEM "version.sgml">
+%pgstrom_version;
+<!ENTITY % filelist SYSTEM "filelist.sgml">
+%filelist;
+
+]>
+
+<book id="pgstrom">
+  <title>PG-Strom &pgstrom_version; Documentation</title>
+
+  <bookinfo>
+    <corpauthor>The PG-Strom Development Team</corpauthor>
+    <productname>PG-Strom</productname>
+    <productnumber>&pgstrom_version;</productnumber>
+    &legal;
+  </bookinfo>
+
+  <part id="getting-started">
+    <title>Getting started</title>
+    &overview;
+    &install;
+  </part>
+  <part id="admin-manual">
+    <title>Administration Manual</title>
+    &parameters;
+  </part>
+  <part id="internal-manual">
+    <title>Internals</title>
+    &gpucontext;
+    &gpuscan;
+    &gpujoin;
+    &gpupreagg;
+    &gpusort;
+  </part>
+  <part id="appendix">
+    <title>Appendix</title>
+    &release-notes;
+  </part>
+</book>

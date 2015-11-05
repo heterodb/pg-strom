@@ -446,8 +446,7 @@ typedef struct
 	cl_uint				hash;	/* 32-bit hash value */
 	cl_uint				next;	/* offset of the next */
 	cl_uint				rowid;	/* unique identifier of this hash entry */
-	cl_ushort			dseed;	/* distribution seed (random value) */
-	cl_ushort			t_len;	/* length of the tuple */
+	cl_uint				t_len;	/* length of tuple */
 	HeapTupleHeaderData	htup;
 } kern_hashitem;
 
@@ -825,6 +824,28 @@ pg_common_vstore(kern_data_store *kds,
 		}														\
 		return hash;											\
 	}
+
+/*
+ * utility routine to compute crc32 of cl_uint data type
+ */
+STATIC_INLINE(cl_uint)
+cl_uint_comp_crc32(const cl_uint *crc32_table, cl_uint value)
+{
+	cl_uint		__len = sizeof(cl_uint);
+	cl_uint		__index;
+	cl_uint		hash;
+
+	INIT_LEGACY_CRC32(hash);
+	while (__len-- > 0)
+	{
+		__index = (((hash) >> 24) ^ value) & 0xff;
+		hash = crc32_table[__index] ^ ((hash) << 8);
+		value = (value >> 8);
+	}
+	FIN_LEGACY_CRC32(hash);
+
+	return hash;
+}
 
 #define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)		\
