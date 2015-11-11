@@ -329,6 +329,7 @@ struct GpuTask
 #define DEVKERNEL_NEEDS_GPUJOIN			0x00020000
 #define DEVKERNEL_NEEDS_GPUPREAGG		0x00040000
 #define DEVKERNEL_NEEDS_GPUSORT			0x00080000
+#define DEVKERNEL_NEEDS_LIBCUDART		0x80000000
 
 struct devtype_info;
 struct devfunc_info;
@@ -470,7 +471,7 @@ extern void pgstrom_compute_workgroup_size_2d(size_t *p_grid_xsize,
 											  size_t dynamic_shmem_per_yitems,
 											  size_t dynamic_shmem_per_thread);
 extern void pgstrom_init_cuda_control(void);
-extern int pgstrom_baseline_cuda_capability(void);
+extern cl_ulong pgstrom_baseline_cuda_capability(void);
 extern const char *errorText(int errcode);
 extern const char *errorTextKernel(kern_errorbuf *kerror);
 extern Datum pgstrom_scoreboard_info(PG_FUNCTION_ARGS);

@@ -48,7 +48,8 @@ typedef struct
 	int			extra_flags;
 	char	   *kern_define;
 	char	   *kern_source;
-	char	   *ptx_image;
+	char	   *bin_image;
+	size_t		bin_length;
 	char	   *error_msg;
 	char		data[FLEXIBLE_ARRAY_MEMBER];
 } program_cache_entry;
@@ -362,6 +363,8 @@ construct_flat_cuda_source(const char *kern_source,
 
 	initStringInfo(&source);
 	appendStringInfo(&source,
+					 "#include <cuda_device_runtime_api.h>\n"
+					 "\n"
 					 "#define HOSTPTRLEN %u\n"
 					 "#define DEVICEPTRLEN %lu\n"
 					 "#define BLCKSZ %u\n"
@@ -425,6 +428,96 @@ construct_flat_cuda_source(const char *kern_source,
 					 "}\n"
 					 "#endif /* __cplusplus */\n");
 	return source.data;
+}
+
+/*
+ * link_cuda_libraries - links CUDA libraries with the supplied PTX binary
+ */
+static void
+link_cuda_libraries(char *ptx_image, size_t ptx_length, cl_uint extra_flags,
+					void **p_bin_image, size_t *p_bin_length)
+{
+	GpuContext	   *gcontext;
+	CUlinkState		lstate;
+	CUresult		rc;
+	CUjit_option	jit_options[10];
+	void		   *jit_option_values[10];
+	int				jit_index = 0;
+	void		   *bin_image;
+	size_t			bin_length;
+	char			pathname[MAXPGPATH];
+
+	/* at least one library has to be specified */
+	Assert((extra_flags & DEVKERNEL_NEEDS_LIBCUDART) != 0);
+
+	/*
+	 * NOTE: cuLinkXXXX() APIs works under a particular CUDA context,
+	 * so we pick up one of the available GPU device contexts. In case
+	 * of background worker, we also have to initialize CUDA library,
+	 * pgstrom_get_gpucontext() does it internally.
+	 */
+	gcontext = pgstrom_get_gpucontext();
+	rc = cuCtxPushCurrent(gcontext->gpu[0].cuda_context);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuCtxPushCurrent");
+
+	/*
+	 * JIT Options
+	 *
+	 * NOTE: Even though CU_JIT_TARGET expects CU_TARGET_COMPUTE_XX is
+	 * supplied, it is actually defined as (10 * <major capability> +
+	 * <minor capability>), thus it is equivalent to the definition
+	 * of pgstrom_baseline_cuda_capability.
+	 */
+	jit_options[jit_index] = CU_JIT_TARGET;
+	jit_option_values[jit_index] = (void *)pgstrom_baseline_cuda_capability();
+	jit_index++;
+
+#ifdef PGSTROM_DEBUG
+	jit_options[jit_index] = CU_JIT_GENERATE_DEBUG_INFO;
+	jit_option_values[jit_index] = (void *)1UL;
+	jit_index++;
+
+	jit_options[jit_index] = CU_JIT_GENERATE_LINE_INFO;
+	jit_option_values[jit_index] = (void *)1UL;
+	jit_index++;
+#endif
+
+	/* makes a linkage object */
+	rc = cuLinkCreate(jit_index, jit_options, jit_option_values, &lstate);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuLinkCreate: %s", errorText(rc));
+
+	/* add the base PTX image */
+	rc = cuLinkAddData(lstate, CU_JIT_INPUT_PTX, ptx_image, ptx_length,
+					   "pg-strom", 0, NULL, NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuLinkAddData: %s", errorText(rc));
+
+	/* libcudart.a, if any */
+	if (extra_flags & DEVKERNEL_NEEDS_LIBCUDART)
+	{
+		snprintf(pathname, sizeof(pathname), "%s/libcudadevrt.a",
+				 CUDA_LIBRARY_PATH);
+		rc = cuLinkAddFile(lstate, CU_JIT_INPUT_LIBRARY, pathname,
+						   0, NULL, NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuLinkAddFile(\"%s\"): %s",
+				 pathname, errorText(rc));
+	}
+
+	/* do the linkage */
+	rc = cuLinkComplete(lstate, &bin_image, &bin_length);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuLinkComplete: %s", errorText(rc));
+
+	rc = cuCtxPopCurrent(NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+	pgstrom_put_gpucontext(gcontext);
+
+	*p_bin_image = bin_image;
+	*p_bin_length = bin_length;
 }
 
 /*
@@ -520,7 +613,8 @@ __build_cuda_program(program_cache_entry *old_entry)
 	nvrtcResult		rc;
 	const char	   *options[10];
 	int				opt_index = 0;
-	char		   *ptx_image;
+	void		   *bin_image;
+	size_t			bin_length;
 	char		   *build_log;
 	size_t			length;
 	Size			required;
@@ -548,14 +642,18 @@ __build_cuda_program(program_cache_entry *old_entry)
 	/*
 	 * Put command line options
 	 */
+	options[opt_index++] = "-I " CUDA_INCLUDE_PATH;
 	options[opt_index++] =
-		psprintf("--gpu-architecture=compute_%u",
+		psprintf("--gpu-architecture=compute_%lu",
 				 pgstrom_baseline_cuda_capability());
 #ifdef PGSTROM_DEBUG
 	options[opt_index++] = "--device-debug";
 	options[opt_index++] = "--generate-line-info";
 #endif
 	options[opt_index++] = "--use_fast_math";
+	/* library linkage needs relocatable PTX */
+	if (old_entry->extra_flags & DEVKERNEL_NEEDS_LIBCUDART)
+		options[opt_index++] = "--relocatable-device-code=true";
 
 	/*
 	 * Kick runtime compiler
@@ -580,20 +678,39 @@ __build_cuda_program(program_cache_entry *old_entry)
 	 * Read PTX Binary
 	 */
 	if (build_failure)
-		ptx_image = NULL;
+		bin_image = NULL;
 	else
 	{
-		rc = nvrtcGetPTXSize(program, &length);
+		char	   *ptx_image;
+		size_t		ptx_length;
+
+		rc = nvrtcGetPTXSize(program, &ptx_length);
 		if (rc != NVRTC_SUCCESS)
 			elog(ERROR, "failed on nvrtcGetPTXSize: %s",
 				 nvrtcGetErrorString(rc));
-		ptx_image = palloc(length + 1);
+		ptx_image = palloc(ptx_length + 1);
 
 		rc = nvrtcGetPTX(program, ptx_image);
 		if (rc != NVRTC_SUCCESS)
 			elog(ERROR, "failed on nvrtcGetPTX: %s",
 				 nvrtcGetErrorString(rc));
-		ptx_image[length] = '\0';	/* may not be necessary */
+		ptx_image[ptx_length++] = '\0';	/* may not be necessary */
+
+		/*
+		 * Link the required run-time libraries, if any
+		 */
+		if (old_entry->extra_flags & DEVKERNEL_NEEDS_LIBCUDART)
+		{
+			link_cuda_libraries(ptx_image, ptx_length,
+								old_entry->extra_flags,
+								&bin_image, &bin_length);
+			pfree(ptx_image);
+		}
+		else
+		{
+			bin_image = ptx_image;
+			bin_length = ptx_length;
+		}
 	}
 
 	/*
@@ -616,8 +733,8 @@ __build_cuda_program(program_cache_entry *old_entry)
 	 */
 	required = MAXALIGN(strlen(old_entry->kern_source) + 1);
 	required += MAXALIGN(strlen(old_entry->kern_define) + 1);
-	if (ptx_image)
-		required += MAXALIGN(strlen(ptx_image) + 1);
+	if (bin_image)
+		required += MAXALIGN(bin_length);
 	required += MAXALIGN(strlen(build_log) + 1);
 	required += 512;	/* margin for error message */
 
@@ -645,27 +762,30 @@ __build_cuda_program(program_cache_entry *old_entry)
 		   old_entry->kern_define, length + 1);
 	usage += MAXALIGN(length + 1);
 
-	if (!ptx_image)
-		new_entry->ptx_image = CUDA_PROGRAM_BUILD_FAILURE;
+	if (!bin_image)
+	{
+		new_entry->bin_image = CUDA_PROGRAM_BUILD_FAILURE;
+		new_entry->bin_length = 0;
+	}
 	else
 	{
-		new_entry->ptx_image = new_entry->data + usage;
-		length = strlen(ptx_image);
-		memcpy(new_entry->ptx_image, ptx_image, length + 1);
-		usage += MAXALIGN(length + 1);
+		new_entry->bin_image = new_entry->data + usage;
+		new_entry->bin_length = bin_length;
+		memcpy(new_entry->bin_image, bin_image, bin_length);
+		usage += MAXALIGN(bin_length);
 	}
 	new_entry->error_msg = new_entry->data + usage;
 	length = PGCACHE_ERRORMSG_LEN(new_entry);
 	if (source_pathname)
 		snprintf(new_entry->error_msg, length,
 				 "build: %s\n%s\nsource: %s\n",
-				 !ptx_image ? "failed" : "success",
+				 !bin_image ? "failed" : "success",
 				 build_log,
 				 source_pathname);
 	else
 		snprintf(new_entry->error_msg, length,
 				 "build: %s\n%s",
-				 !ptx_image ? "failed" : "success",
+				 !bin_image ? "failed" : "success",
 				 build_log);
 	/*
 	 * Add new_entry to the hash slot
@@ -697,7 +817,7 @@ pgstrom_build_cuda_program(Datum cuda_program)
 	MemoryContext	memcxt = CurrentMemoryContext;
 	MemoryContext	oldcxt;
 
-	Assert(entry->ptx_image == NULL);
+	Assert(entry->bin_image == NULL);
 
 	PG_TRY();
 	{
@@ -711,7 +831,7 @@ pgstrom_build_cuda_program(Datum cuda_program)
 		errdata = CopyErrorData();
 
 		SpinLockAcquire(&pgcache_head->lock);
-		if (!entry->ptx_image)
+		if (!entry->bin_image)
 		{
 			snprintf(entry->error_msg, PGCACHE_ERRORMSG_LEN(entry),
 					 "(%s:%d, %s) %s",
@@ -719,7 +839,7 @@ pgstrom_build_cuda_program(Datum cuda_program)
 					 errdata->lineno,
 					 errdata->funcname,
 					 errdata->message);
-			entry->ptx_image = CUDA_PROGRAM_BUILD_FAILURE;
+			entry->bin_image = CUDA_PROGRAM_BUILD_FAILURE;
 		}
 		pgstrom_wakeup_backends(entry->waiting_backends);
 		SpinLockRelease(&pgcache_head->lock);
@@ -774,7 +894,7 @@ retry:
 			dlist_move_head(&pgcache_head->lru_list, &entry->lru_chain);
 
 			/* This kernel build already lead an error */
-			if (entry->ptx_image == CUDA_PROGRAM_BUILD_FAILURE)
+			if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
 			{
 				SpinLockRelease(&pgcache_head->lock);
 				if (!is_preload)
@@ -782,7 +902,7 @@ retry:
 				return false;
 			}
 			/* Kernel build is still in-progress */
-			if (!entry->ptx_image)
+			if (!entry->bin_image)
 			{
 				Bitmapset  *waiting_backends = entry->waiting_backends;
 				waiting_backends->words[WORDNUM(MyProc->pgprocno)]
@@ -812,7 +932,7 @@ retry:
 							 errorText(rc));
 
 					rc = cuModuleLoadData(&cuda_modules[i],
-										  entry->ptx_image);
+										  entry->bin_image);
 					if (rc != CUDA_SUCCESS)
 						elog(ERROR, "failed on cuModuleLoadData (%s)\n",
 							 errorText(rc));
@@ -866,7 +986,8 @@ retry:
 	memcpy(entry->kern_define, kern_define, kern_define_len + 1);
 	usage += MAXALIGN(kern_define_len + 1);
 	/* no cuda binary yet */
-	entry->ptx_image = NULL;
+	entry->bin_image = NULL;
+	entry->bin_length = 0;
 	/* remaining are for error message */
 	entry->error_msg = (char *)(entry->data + usage);
 
@@ -1094,7 +1215,7 @@ typedef struct
 	int32		flags;
 	text	   *kern_define;
 	text	   *kern_source;
-	text	   *ptx_image;
+	bytea	   *kern_binary;
 	text	   *error_msg;
 	text	   *backends;
 } program_info;
@@ -1112,9 +1233,9 @@ __collect_program_info(void)
 		pinfo->addr = (int64) entry;
 		pinfo->length = (1UL << entry->shift);
 		pinfo->active = PGCACHE_ACTIVE_ENTRY(entry);
-		if (entry->ptx_image == CUDA_PROGRAM_BUILD_FAILURE)
+		if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
 			pinfo->status = "Build Failed";
-		else if (!entry->ptx_image)
+		else if (!entry->bin_image)
 			pinfo->status = "In Progress";
 		else
 			pinfo->status = "Ready";
@@ -1124,8 +1245,11 @@ __collect_program_info(void)
 			pinfo->kern_define = cstring_to_text(entry->kern_define);
 		if (entry->kern_source)
 			pinfo->kern_source = cstring_to_text(entry->kern_source);
-		if (entry->ptx_image)
-			pinfo->ptx_image = cstring_to_text(entry->ptx_image);
+		if (entry->bin_image != NULL &&
+			entry->bin_image != CUDA_PROGRAM_BUILD_FAILURE)
+			pinfo->kern_binary = (bytea *)
+				cstring_to_text_with_len(entry->bin_image,
+										 entry->bin_length);
 		if (entry->error_msg)
 			pinfo->error_msg = cstring_to_text(entry->error_msg);
 		if (entry->waiting_backends)
@@ -1196,7 +1320,7 @@ pgstrom_program_info(PG_FUNCTION_ARGS)
 		fncxt = SRF_FIRSTCALL_INIT();
 		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
 
-		tupdesc = CreateTemplateTupleDesc(10, false);
+		tupdesc = CreateTemplateTupleDesc(11, false);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "addr",
 						   INT8OID, -1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "length",
@@ -1213,8 +1337,8 @@ pgstrom_program_info(PG_FUNCTION_ARGS)
 						   TEXTOID, -1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 8, "kern_source",
 						   TEXTOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 9, "ptx_image",
-						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 9, "kern_binary",
+						   BYTEAOID, -1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 10, "error_msg",
 						   TEXTOID, -1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 11, "backends",
@@ -1262,10 +1386,10 @@ pgstrom_program_info(PG_FUNCTION_ARGS)
 			isnull[7] = true;
 		else
 			values[7] = PointerGetDatum(pinfo->kern_source);
-		if (!pinfo->ptx_image)
+		if (!pinfo->kern_binary)
 			isnull[8] = true;
 		else
-			values[8] = PointerGetDatum(pinfo->ptx_image);
+			values[8] = PointerGetDatum(pinfo->kern_binary);
 		if (!pinfo->error_msg)
 			isnull[9] = true;
 		else

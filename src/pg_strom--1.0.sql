@@ -34,7 +34,7 @@ CREATE TYPE __pgstrom_program_info AS (
   flags			int4,
   kern_define   text,
   kern_source	text,
-  ptx_image		text,
+  kern_binary	bytea,
   error_msg		text,
   backends		text
 );

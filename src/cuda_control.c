@@ -39,7 +39,7 @@ static List		   *cuda_device_mem_sizes = NIL;	/* in MB */
 static size_t		cuda_max_malloc_size = INT_MAX;
 static size_t		cuda_max_threads_per_block = INT_MAX;
 static size_t		cuda_local_mem_size = INT_MAX;
-static int			cuda_compute_capability = INT_MAX;
+static cl_ulong		cuda_compute_capability = INT_MAX;
 
 /* stuffs related to GpuContext */
 static dlist_head	gcontext_list;
@@ -2017,8 +2017,8 @@ static inline void
 check_target_cuda_device(struct target_cuda_device *dattr)
 {
 	MemoryContext oldcxt;
-	int		cores_per_mpu = -1;
-	int		dev_cap;
+	cl_int		cores_per_mpu = -1;
+	cl_ulong	dev_cap;
 
 	/*
 	 * CUDA device older than Kepler is not supported
@@ -2262,7 +2262,7 @@ pgstrom_init_cuda_control(void)
  *
  * it returns the baseline cuda capability to be compiled.
  */
-int
+cl_ulong
 pgstrom_baseline_cuda_capability(void)
 {
 	return cuda_compute_capability;
