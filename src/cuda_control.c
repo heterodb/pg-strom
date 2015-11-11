@@ -1468,6 +1468,13 @@ __waitfor_ready_tasks(GpuTaskState *gts)
 static bool
 waitfor_ready_tasks(GpuTaskState *gts)
 {
+#if PG_VERSION_NUM < 90600
+	/*
+	 * NOTE: db0f6cad4884bd4c835156d3a720d9a79dbd63a9 of PostgreSQL
+	 * removed 'set_latch_on_sigusr1' because of less performance
+	 * benefit, so v9.6 or later don't need to save and restore the
+	 * status.
+	 */
 	bool	save_set_latch_on_sigusr1 = set_latch_on_sigusr1;
 	bool	status;
 
@@ -1485,6 +1492,9 @@ waitfor_ready_tasks(GpuTaskState *gts)
 	set_latch_on_sigusr1 = save_set_latch_on_sigusr1;
 
 	return status;
+#else
+	return __waitfor_ready_tasks(gts);
+#endif
 }
 
 /*
