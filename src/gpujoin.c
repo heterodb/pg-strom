@@ -5778,7 +5778,6 @@ pgstrom_init_gpujoin(void)
 	/* setup plan methods */
 	gpujoin_plan_methods.CustomName				= "GpuJoin";
 	gpujoin_plan_methods.CreateCustomScanState	= gpujoin_create_scan_state;
-	gpujoin_plan_methods.TextOutCustomScan		= NULL;
 
 	/* setup exec methods */
 	gpujoin_exec_methods.c.CustomName			= "GpuJoin";
