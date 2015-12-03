@@ -37,7 +37,8 @@ CUDA_SOURCES = $(CUDA_OBJS:.o=.c)
 # Extra files to be cleaned
 #
 EXTRA_CLEAN_SRC=$(CUDA_SOURCES)
-EXTRA_CLEAN_DOC=html version.sgml bookindex.sgml HTML.index html-stamp
+EXTRA_CLEAN_DOC=html version.sgml bookindex.sgml \
+		HTML.index html-stamp html.single-stamp
 
 ifndef PGSTROM_MAKEFILE_IN_SUBDIR
 all:
