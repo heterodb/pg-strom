@@ -24,6 +24,7 @@
     &overview;
     &install;
   </part>
+<!--
   <part id="admin-manual">
     <title>Administration Manual</title>
     &parameters;
@@ -36,6 +37,7 @@
     &gpupreagg;
     &gpusort;
   </part>
+-->
   <part id="appendix">
     <title>Appendix</title>
     &release-notes;

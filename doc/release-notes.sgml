@@ -1,8 +1,10 @@
 <!-- doc/release-notes.sgml -->
 <chapter id="release-notes" xreflabel="release-notes">
  <title>Releases Notes</title>
-
- <para>
-   here is release notes
- </para>
+ <sect1 id="release-notes-1_0">
+  <title><productname>PG-Strom</> 1.0 Release Notes</title>
+  <para>
+   Here is release notes of 1.0
+  </para>
+ </sect1>
 </chapter>

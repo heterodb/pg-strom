@@ -9,14 +9,18 @@
 <!ENTITY install	SYSTEM "install.sgml">
 
 <!-- Administration -->
+<!--
 <!ENTITY parameters	SYSTEM "parameters.sgml">
+-->
 
 <!-- Internal -->
+<!--
 <!ENTITY gpucontext	SYSTEM "gpucontext.sgml">
 <!ENTITY gpuscan	SYSTEM "gpuscan.sgml">
 <!ENTITY gpujoin	SYSTEM "gpujoin.sgml">
 <!ENTITY gpupreagg	SYSTEM "gpupreagg.sgml">
 <!ENTITY gpusort	SYSTEM "gpusort.sgml">
+-->
 
 <!-- Appendid -->
 <!ENTITY release-notes	SYSTEM "release-notes.sgml">
