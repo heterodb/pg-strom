@@ -1,12 +1,12 @@
 <!-- sgml/filelist.sgml -->
 
 <!-- overall stuff -->
-<!ENTITY legal		SYSTEM "legal.sgml">
 <!ENTITY bookindex	SYSTEM "bookindex.sgml">
 
 <!-- tutrial -->
 <!ENTITY overview	SYSTEM "overview.sgml">
 <!ENTITY install	SYSTEM "install.sgml">
+<!ENTITY tutrial	SYSTEM "tutrial.sgml">
 
 <!-- Administration -->
 <!--

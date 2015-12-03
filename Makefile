@@ -49,6 +49,9 @@ check installcheck:
 html:
 	$(MAKE) -C doc $@ $(MAKEFLAGS)
 
+html.single:
+	$(MAKE) -C doc $@ $(MAKEFLAGS)
+
 %:
 	$(MAKE) -C src $* $(MAKEFLAGS)
 

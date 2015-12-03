@@ -1,0 +1,39 @@
+<!-- doc/tutrial.sgml -->
+<chapter id="tutrial">
+ <title>User Tutrial</title>
+ <para>
+  This chapter introduces typical usage in the <productname>PostgreSQL</>
+  environment with <productname>PG-Strom</> enabled.
+ </para>
+ <sect1 id="tutrial-basic">
+  <title>Basic Operations</title>
+  <sect2>
+   <title>Turn on/off PG-Strom</title>
+   <para>
+    You can turn on/off feature of <productname>PG-Strom</> using
+    <literal>pg_strom.enabled</> parameter.
+   </para>
+   <para>
+    Below is the command to enable <productname>PG-Strom</>:
+<programlisting>
+# SET pg_strom.enabled = on;
+</programlisting>
+   </para>
+   <para>
+    Below is the command to disable <productname>PG-Strom</>:
+<programlisting>
+# SET pg_strom.enabled = off;
+</programlisting>
+   </para>
+   <para>
+    If you face a problems, above command identify whether the problem
+    is reproducable when <productname>PG-Strom</> is disabled.
+   </para>
+  </sect2>
+  <sect2>
+   <title>Still under construction...</title>
+   <para>
+   </para>
+  </sect2>
+ </sect1>
+</chapter>

@@ -497,16 +497,68 @@ work_mem = 10GB
    </variablelist>
   </sect2>
   <sect2 id="instal-post-initscript">
-   <title></title>
+   <title>Init script of PostgreSQL</title>
    <para>
-    aaa
+    <filename>contrib/start-scripts/linux</> of <productname>PostgreSQL</>
+    source tree provides well designed template for init script.
+    You can adjust some parameters, then deploy the script to start
+    <productname>PostgreSQL</> on system startup time.
+   </para>
+   <para>
+    All you have to adjust are the following three parameters.
+    The <literal>PGDATA</> is the directry where <command>initdb</> run on.
+    The <literal>PGUSER</> is the user who launches <productname>PostgreSQL</>
+    server process, but should not be <literal>root</>.
+    The <literal>PGLOG</> is the path to the log file; that has to be writable
+    by <literal>PGUSER</>.
+<programlisting>
+# Data directory
+PGDATA="/usr/local/pgsql/data"
+
+# Who to run the postmaster as, usually "postgres".  (NOT "root")
+PGUSER=postgres
+
+# Where to keep a log file
+PGLOG="$PGDATA/serverlog"
+</programlisting>
+   </para>
+   <para>
+    Once the script file is deployed on, you can register the init script
+    using <command>chkconfig</>, like:
+<programlisting>
+# cp /path/to/postgresql/contrib/start-scripts/linux /etc/init.d/postgresql
+# chkconfig add postgres
+</programlisting>
    </para>
   </sect2>
+
+  <sect2 id="install-post-create-extension">
+   <title>Define Objects of PG-Strom</title>
+   <para>
+    Once <productname>PostgreSQL</> server process gets started, we need to
+    define database objects related to <productname>PG-Strom</>.
+    <command>CREATE EXTENSION</> allows to run a set of SQL commands
+    prepared for each extensions. You need to run the command below, to
+    define schema, functions, types and others required by
+    <productname>PG-Strom</>.
+<programlisting>
+# CREATE EXTENSION pg_strom;
+</programlisting>
+   </para>
+   <para>
+    If you can run the command on the <literal>template1</> database also,
+    not only your working database, further databases that shall be created
+    later will already have required database object on its construction time.
+   </para>
+  </sect2>
+
+<!--
   <sect2 id="install-post-coredump">
    <title></title>
    <para>
     core dump setup
    </para>
   </sect2>
+-->
  </sect1>
 </chapter>

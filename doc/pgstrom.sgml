@@ -16,13 +16,13 @@
     <corpauthor>The PG-Strom Development Team</corpauthor>
     <productname>PG-Strom</productname>
     <productnumber>&pgstrom_version;</productnumber>
-    &legal;
   </bookinfo>
 
   <part id="getting-started">
     <title>Getting started</title>
     &overview;
     &install;
+    &tutrial;
   </part>
 <!--
   <part id="admin-manual">
