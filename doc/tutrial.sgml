@@ -30,6 +30,66 @@
     is reproducable when <productname>PG-Strom</> is disabled.
    </para>
   </sect2>
+
+  <sect2>
+   <title>Confirm PG-Strom is working</title>
+   <para>
+    <command>EXPLAIN</> statement enables to display query execution plan.
+    Once <productname>PG-Strom</> gets responsibility to execute all or
+    a part of query workloads, it shall be shown as <literal>CustomScan</>
+    node; implemented by <productname>PG-Strom</>.
+<programlisting>
+postgres=# EXPLAIN
+           SELECT cat, avg(ax) FROM t0 NATURAL JOIN t1 NATURAL JOIN t2 GROUP BY cat;
+                                    QUERY PLAN
+-----------------------------------------------------------------------------------
+ HashAggregate  (cost=2347813.66..2347813.98 rows=26 width=12)
+   Group Key: t0.cat
+   ->  Custom Scan (GpuPreAgg)  (cost=14189.15..1878462.46 rows=234 width=44)
+         Bulkload: On (density: 99.33%)
+         Reduction: Local + Global
+         ->  Custom Scan (GpuJoin)  (cost=10189.15..1851180.43 rows=99326645 width=12)
+               Bulkload: On (density: 100.00%)
+               Depth 1: GpuHashJoin, HashKeys: (bid), JoinQual: (bid = bid)
+                        Nrows (in/out: 99.33%), KDS-Hash (size: 12.04MB, nbatches: 1)
+               Depth 2: GpuHashJoin, HashKeys: (aid), JoinQual: (aid = aid)
+                        Nrows (in/out: 100.00%), KDS-Hash (size: 12.04MB, nbatches: 1)
+               ->  Custom Scan (BulkScan) on t0  (cost=0.00..1833334.80 rows=100000080 width=12)
+               ->  Seq Scan on t2  (cost=0.00..1935.00 rows=100000 width=4)
+               ->  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)
+(14 rows)
+</programlisting>
+   </para>
+   <para>
+    In the above example, we can see <literal>GpuJoin</> and
+    <literal>GpuPreAgg</> to process relation's join and partial aggregation,
+    by <productname>PG-Strom</>.
+    On the other hands, once we turned off <productname>PG-Strom</>, then
+    same query generate different query execution plan.
+<programlisting>
+postgres=# SET pg_strom.enabled = off;
+SET
+postgres=# EXPLAIN
+           SELECT cat, avg(ax) FROM t0 NATURAL JOIN t1 NATURAL JOIN t2 GROUP BY cat;
+                                    QUERY PLAN
+-----------------------------------------------------------------------------------
+ HashAggregate  (cost=6824660.14..6824660.47 rows=26 width=12)
+   Group Key: t0.cat
+   ->  Hash Join  (cost=7250.00..6328026.92 rows=99326645 width=12)
+         Hash Cond: (t0.aid = t1.aid)
+         ->  Hash Join  (cost=3576.00..4182132.55 rows=99326645 width=8)
+               Hash Cond: (t0.bid = t2.bid)
+               ->  Seq Scan on t0  (cost=0.00..1833334.80 rows=100000080 width=12)
+               ->  Hash  (cost=1935.00..1935.00 rows=100000 width=4)
+                     ->  Seq Scan on t2  (cost=0.00..1935.00 rows=100000 width=4)
+         ->  Hash  (cost=1935.00..1935.00 rows=100000 width=12)
+               ->  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)
+(11 rows)
+</programlisting>
+    Here is no <literal>CustomScan</> node, thus <productname>PG-Strom</> is not
+    responsible to execution of the query.
+   </para>  
+  </sect2>
   <sect2>
    <title>Still under construction...</title>
    <para>
