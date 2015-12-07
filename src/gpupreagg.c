@@ -3837,6 +3837,9 @@ gpupreagg_task_create(GpuPreAggState *gpas,
 
 	/* initialize GpuTask object */
 	pgstrom_init_gputask(&gpas->gts, &gpreagg->task);
+	/* NOTE: gpreagg task has to perform on the GPU device
+	 * where the segment is located on. */
+	gpreagg->task.cuda_index = segment->cuda_index;
 	gpreagg->segment = segment;	/* caller already acquired */
 	gpreagg->is_terminator = is_terminator;
 	gpreagg->reduction_mode = gpas->reduction_mode;
