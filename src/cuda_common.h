@@ -1581,7 +1581,7 @@ operator || (pg_bool_t arg1, pg_bool_t arg2)
 /*
  * Functions for BooleanTest
  */
-STATIC_FUNCTION(pg_bool_t)
+STATIC_INLINE(pg_bool_t)
 pgfn_bool_is_true(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = (!result.isnull && result.value);
@@ -1589,7 +1589,7 @@ pgfn_bool_is_true(kern_context *kcxt, pg_bool_t result)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+STATIC_INLINE(pg_bool_t)
 pgfn_bool_is_not_true(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = (result.isnull || !result.value);
@@ -1597,7 +1597,7 @@ pgfn_bool_is_not_true(kern_context *kcxt, pg_bool_t result)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+STATIC_INLINE(pg_bool_t)
 pgfn_bool_is_false(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = (!result.isnull && !result.value);
@@ -1605,7 +1605,7 @@ pgfn_bool_is_false(kern_context *kcxt, pg_bool_t result)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+STATIC_INLINE(pg_bool_t)
 pgfn_bool_is_not_false(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = (result.isnull || result.value);
@@ -1613,7 +1613,7 @@ pgfn_bool_is_not_false(kern_context *kcxt, pg_bool_t result)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+STATIC_INLINE(pg_bool_t)
 pgfn_bool_is_unknown(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = result.isnull;
@@ -1621,7 +1621,7 @@ pgfn_bool_is_unknown(kern_context *kcxt, pg_bool_t result)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+STATIC_INLINE(pg_bool_t)
 pgfn_bool_is_not_unknown(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = !result.isnull;
