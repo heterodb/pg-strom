@@ -307,7 +307,7 @@ pgfn_textlen(kern_context *kcxt, pg_text_t arg1)
 	 */
 	result.isnull = arg1.isnull;
 	if (!result.isnull)
-		result.value = toast_raw_datum_size(kcxt, arg1.value);
+		result.value = toast_raw_datum_size(kcxt, arg1.value) - VARHDRSZ;
 	return result;
 }
 
