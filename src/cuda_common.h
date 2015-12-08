@@ -1514,6 +1514,56 @@ EVAL(pg_bool_t arg)
 }
 
 /*
+ * Support routine for BoolExpr
+ */
+STATIC_INLINE(pg_bool_t)
+operator ! (pg_bool_t arg)
+{
+	arg.value = !arg.value;
+	return arg;
+}
+
+STATIC_INLINE(pg_bool_t)
+operator && (pg_bool_t arg1, pg_bool_t arg2)
+{
+	pg_bool_t	result;
+
+	/* If either of expression is FALSE, entire BoolExpr is also FALSE */
+	if ((!arg1.isnull && !arg1.value) ||
+		(!arg2.isnull && !arg2.value))
+	{
+		result.isnull = false;
+		result.value  = false;
+	}
+	else
+	{
+		result.isnull = arg1.isnull | arg2.isnull;
+		result.value  = (arg1.value && arg2.value ? true : false);
+	}
+	return result;
+}
+
+STATIC_INLINE(pg_bool_t)
+operator || (pg_bool_t arg1, pg_bool_t arg2)
+{
+	pg_bool_t	result;
+
+	/* If either of expression is TRUE, entire BoolExpr is also TRUE */
+	if ((!arg1.isnull && arg1.value) ||
+		(!arg2.isnull && arg2.value))
+	{
+		result.isnull = false;
+		result.value  = true;
+	}
+	else
+	{
+		result.isnull = arg1.isnull | arg2.isnull;
+		result.value  = (arg1.value || arg2.value ? true : false);
+	}
+	return result;
+}
+
+/*
  * macros for general binary compare functions
  */
 #define devfunc_int_comp(x,y)					\
@@ -1576,17 +1626,6 @@ pgfn_bool_is_not_unknown(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = !result.isnull;
 	result.isnull = false;
-	return result;
-}
-
-/*
- * Functions for BoolOp (EXPR_AND and EXPR_OR shall be constructed on demand)
- */
-STATIC_FUNCTION(pg_bool_t)
-pgfn_boolop_not(kern_context *kcxt, pg_bool_t result)
-{
-	result.value = !result.value;
-	/* if null is given, result is also null */
 	return result;
 }
 

@@ -195,6 +195,8 @@ typedef struct devfunc_catalog_t {
 
 static devfunc_catalog_t devfunc_common_catalog[] = {
 	/* Type cast functions */
+	{ "bool", 1, {INT4OID},   "m/F:int4_bool" },
+
 	{ "int2", 1, {INT4OID},   "a/c:" },
 	{ "int2", 1, {INT8OID},   "a/c:" },
 	{ "int2", 1, {FLOAT4OID}, "a/c:" },
@@ -294,11 +296,11 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "float8up", 1, {FLOAT8OID}, "l:+" },
 
 	/* '-' : unary minus operators */
-	{ "int2mi", 1, {INT2OID}, "l:-" },
-	{ "int4mi", 1, {INT4OID}, "l:-" },
-	{ "int8mi", 1, {INT8OID}, "l:-" },
-	{ "float4mi", 1, {FLOAT4OID}, "l:-" },
-	{ "float8mi", 1, {FLOAT8OID}, "l:-" },
+	{ "int2um", 1, {INT2OID}, "l:-" },
+	{ "int4um", 1, {INT4OID}, "l:-" },
+	{ "int8um", 1, {INT8OID}, "l:-" },
+	{ "float4um", 1, {FLOAT4OID}, "l:-" },
+	{ "float8um", 1, {FLOAT8OID}, "l:-" },
 
 	/* '@' : absolute value operators */
 	{ "int2abs", 1, {INT2OID}, "f:abs" },
@@ -859,7 +861,7 @@ devfunc_setup_oper_either(devfunc_info *entry,
 				   "pgfn_%s(kern_context *kcxt, pg_%s_t arg)\n"
 				   "{\n"
 				   "    pg_%s_t result;\n"
-				   "    result.value = (%s)(%sarg%s);\n"
+				   "    result.value = (%s)(%sarg.value%s);\n"
 				   "    result.isnull = arg.isnull;\n"
 				   "    return result;\n"
 				   "}\n",
@@ -1530,49 +1532,26 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		if (b->boolop == NOT_EXPR)
 		{
 			Assert(list_length(b->args) == 1);
-			appendStringInfo(&context->str, "pgfn_boolop_not(kcxt, ");
+			appendStringInfo(&context->str, "(!");
 			if (!codegen_expression_walker(linitial(b->args), context))
 				return false;
 			appendStringInfoChar(&context->str, ')');
 		}
 		else if (b->boolop == AND_EXPR || b->boolop == OR_EXPR)
 		{
-			char	namebuf[NAMEDATALEN];
-			int		nargs = list_length(b->args);
-			Oid	   *argtypes = alloca(sizeof(Oid) * nargs);
-			int		i;
+			Assert(list_length(b->args) > 1);
 
-			if (b->boolop == AND_EXPR)
-				snprintf(namebuf, sizeof(namebuf), "boolop_and_%u", nargs);
-			else
-				snprintf(namebuf, sizeof(namebuf), "boolop_or_%u", nargs);
-
-			for (i=0; i < nargs; i++)
-				argtypes[i] = BOOLOID;
-
-			/*
-			 * AND/OR Expr is device only functions, so no catalog entries
-			 * and needs to set up here.
-			 */
-			dfunc = pgstrom_devfunc_lookup_by_name(namebuf,
-												   InvalidOid,
-												   nargs,
-												   argtypes,
-												   BOOLOID,
-												   InvalidOid,
-												   (Node *) b);
-			Assert(dfunc != NULL);	/* not found, or create on demand */
-
-			context->func_defs = list_append_unique_ptr(context->func_defs,
-														dfunc);
-			context->extra_flags |= (dfunc->func_flags & DEVFUNC_INCL_FLAGS);
-
-			appendStringInfo(&context->str, "pgfn_%s(kcxt",
-							 dfunc->func_alias);
+			appendStringInfoChar(&context->str, '(');
 			foreach (cell, b->args)
 			{
 				Assert(exprType(lfirst(cell)) == BOOLOID);
-				appendStringInfo(&context->str, ", ");
+				if (cell != list_head(b->args))
+				{
+					if (b->boolop == AND_EXPR)
+						appendStringInfo(&context->str, " && ");
+					else
+						appendStringInfo(&context->str, " || ");
+				}
 				if (!codegen_expression_walker(lfirst(cell), context))
 					return false;
 			}

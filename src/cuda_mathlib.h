@@ -37,6 +37,19 @@
 #endif
 
 /*
+ * Type case functions
+ */
+STATIC_FUNCTION(pg_bool_t)
+pgfn_int4_bool(kern_context *kcxt, pg_int4_t arg)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg.isnull;
+	result.value  = (arg.value != 0 ? true : false);
+	return result;
+}
+
+/*
  * Functions for addition operator on basic data types
  */
 #define BASIC_INT_ADDFUNC_TEMPLATE(name,r_type,x_type,y_type)		\
