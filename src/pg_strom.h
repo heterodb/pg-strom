@@ -349,16 +349,16 @@ typedef struct devtype_info {
 } devtype_info;
 
 typedef struct devfunc_info {
-	int32		func_flags;
-	Oid			func_namespace;
-	Oid		   *func_argtypes;
-	const char *func_name;	/* name of SQL function */
-	List	   *func_args;	/* list of devtype_info */
-	devtype_info *func_rettype;
-	Oid			func_collid;/* OID of collation, if collation aware */
-	bool		func_is_negative;
-	const char *func_alias;	/* name of declared device function */
-	const char *func_decl;	/* declaration of device function */
+	Oid			func_oid;		/* OID of the SQL function */
+	Oid			func_collid;	/* OID of collation, if collation aware */
+	int32		func_flags;		/* Extra flags of this function */
+	bool		func_is_negative;	/* True, if not supported by GPU */
+	bool		func_is_strict;		/* True, if NULL strict function */
+	List	   *func_args;		/* argument types by devtype_info */
+	devtype_info *func_rettype;	/* result type by devtype_info */
+	const char *func_sqlname;	/* name of the function in SQL side */
+	const char *func_devname;	/* name of the function in device side */
+	const char *func_decl;	/* declaration of device function, if any */
 } devfunc_info;
 
 /*

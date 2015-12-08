@@ -683,7 +683,7 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 			i+1, dtype->type_name, colidx-1,
 			i+1, dtype->type_name, colidx-1,
 			i+1, i+1,
-			dfunc->func_alias, i+1, i+1,
+			dfunc->func_devname, i+1, i+1,
 			is_reverse ? "-comp.value" : "comp.value",
 			i+1, i+1, null_first ? -1 : 1,
 			i+1, i+1, null_first ? 1 : -1);

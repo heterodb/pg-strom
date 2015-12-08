@@ -145,6 +145,36 @@ pgstrom_devtype_lookup(Oid type_oid)
 	return entry;
 }
 
+static void
+pgstrom_devtype_track(codegen_context *context, devtype_info *dtype)
+{
+	ListCell   *lc;
+
+	foreach (lc, context->type_defs)
+	{
+		Oid		type_oid = intVal(lfirst(lc));
+
+		if (type_oid == dtype->type_oid)
+			return;
+	}
+	context->type_defs = lappend(context->type_defs,
+								 makeInteger(dtype->type_oid));
+}
+
+devtype_info *
+pgstrom_devtype_lookup_and_track(Oid type_oid, codegen_context *context)
+{
+	devtype_info   *dtype = pgstrom_devtype_lookup(type_oid);
+
+	if (!dtype)
+		return NULL;
+
+	context->extra_flags |= (dtype->type_flags & DEVFUNC_INCL_FLAGS);
+	pgstrom_devtype_track(context, dtype);
+
+	return dtype;
+}
+
 /*
  * Catalog of functions supported by device code
  *
@@ -784,12 +814,12 @@ devfunc_setup_cast(devfunc_info *entry,
 	devtype_info   *dtype = linitial(entry->func_args);
 
 	Assert(procat->func_nargs == 1);
-	entry->func_name = pstrdup(procat->func_name);
-	entry->func_alias = (!has_alias
-						 ? entry->func_name
-						 : psprintf("%s_%s",
-									dtype->type_name,
-									entry->func_rettype->type_name));
+	entry->func_sqlname = pstrdup(procat->func_name);
+	entry->func_devname = (!has_alias
+						   ? entry->func_sqlname
+						   : psprintf("%s_%s",
+									  dtype->type_name,
+									  entry->func_rettype->type_name));
 	entry->func_decl
 		= psprintf("STATIC_FUNCTION(pg_%s_t)\n"
 				   "pgfn_%s(kern_context *kcxt, pg_%s_t arg)\n"
@@ -800,7 +830,7 @@ devfunc_setup_cast(devfunc_info *entry,
 				   "    return result;\n"
 				   "}\n",
 				   entry->func_rettype->type_name,
-				   entry->func_alias,
+				   entry->func_devname,
 				   dtype->type_name,
 				   entry->func_rettype->type_name,
 				   entry->func_rettype->type_base);
@@ -815,13 +845,13 @@ devfunc_setup_oper_both(devfunc_info *entry,
 	devtype_info   *dtype2 = lsecond(entry->func_args);
 
 	Assert(procat->func_nargs == 2);
-	entry->func_name = pstrdup(procat->func_name);
-	entry->func_alias = (!has_alias
-						 ? entry->func_name
-						 : psprintf("%s_%s_%s",
-									entry->func_name,
-									dtype1->type_name,
-									dtype2->type_name));
+	entry->func_sqlname = pstrdup(procat->func_name);
+	entry->func_devname = (!has_alias
+						   ? entry->func_sqlname
+						   : psprintf("%s_%s_%s",
+									  entry->func_sqlname,
+									  dtype1->type_name,
+									  dtype2->type_name));
 	entry->func_decl
 		= psprintf("STATIC_FUNCTION(pg_%s_t)\n"
 				   "pgfn_%s(kern_context *kcxt, pg_%s_t arg1, pg_%s_t arg2)\n"
@@ -832,7 +862,7 @@ devfunc_setup_oper_both(devfunc_info *entry,
 				   "    return result;\n"
 				   "}\n",
 				   entry->func_rettype->type_name,
-				   entry->func_alias,
+				   entry->func_devname,
 				   dtype1->type_name,
 				   dtype2->type_name,
 				   entry->func_rettype->type_name,
@@ -850,12 +880,12 @@ devfunc_setup_oper_either(devfunc_info *entry,
 	devtype_info   *dtype = linitial(entry->func_args);
 
 	Assert(procat->func_nargs == 1);
-	entry->func_name = pstrdup(procat->func_name);
-	entry->func_alias = (!has_alias
-						 ? entry->func_name
-						 : psprintf("%s_%s",
-									entry->func_name,
-									dtype->type_name));
+	entry->func_sqlname = pstrdup(procat->func_name);
+	entry->func_devname = (!has_alias
+						   ? entry->func_sqlname
+						   : psprintf("%s_%s",
+									  entry->func_sqlname,
+									  dtype->type_name));
 	entry->func_decl
 		= psprintf("STATIC_FUNCTION(pg_%s_t)\n"
 				   "pgfn_%s(kern_context *kcxt, pg_%s_t arg)\n"
@@ -866,7 +896,7 @@ devfunc_setup_oper_either(devfunc_info *entry,
 				   "    return result;\n"
 				   "}\n",
 				   entry->func_rettype->type_name,
-				   entry->func_alias,
+				   entry->func_devname,
 				   dtype->type_name,
 				   entry->func_rettype->type_name,
 				   entry->func_rettype->type_base,
@@ -901,19 +931,19 @@ devfunc_setup_func_decl(devfunc_info *entry,
 
 	initStringInfo(&str);
 
-	entry->func_name = pstrdup(procat->func_name);
+	entry->func_sqlname = pstrdup(procat->func_name);
 	if (!has_alias)
-		entry->func_alias = entry->func_name;
+		entry->func_devname = entry->func_sqlname;
 	else
 	{
-		appendStringInfo(&str, "%s", entry->func_name);
+		appendStringInfo(&str, "%s", entry->func_sqlname);
 		foreach (cell, entry->func_args)
 		{
 			devtype_info   *dtype = lfirst(cell);
 
 			appendStringInfo(&str, "_%s", dtype->type_name);
 		}
-		entry->func_alias = pstrdup(str.data);
+		entry->func_devname = pstrdup(str.data);
 	}
 
 	/* declaration */
@@ -922,7 +952,7 @@ devfunc_setup_func_decl(devfunc_info *entry,
 					 "STATIC_FUNCTION(pg_%s_t)\n"
 					 "pgfn_%s(kern_context *kcxt",
 					 entry->func_rettype->type_name,
-					 entry->func_alias);
+					 entry->func_devname);
 	index = 1;
 	foreach (cell, entry->func_args)
 	{
@@ -972,130 +1002,29 @@ devfunc_setup_func_impl(devfunc_info *entry,
 						devfunc_catalog_t *procat,
 						const char *extra, bool has_alias)
 {
-	entry->func_name = pstrdup(procat->func_name);
+	entry->func_sqlname = pstrdup(procat->func_name);
 	if (has_alias)
 		elog(ERROR, "Bug? implimented device function should not have alias");
-	entry->func_alias = extra;
+	entry->func_devname = extra;
 }
 
 static devfunc_info *
-devfunc_setup_boolop(BoolExprType boolop, const char *fn_name, int fn_nargs)
-{
-	devfunc_info   *entry = palloc0(sizeof(devfunc_info));
-	devtype_info   *dtype = pgstrom_devtype_lookup(BOOLOID);
-	StringInfoData	str;
-	int		i;
-
-	entry->func_namespace = InvalidOid;		/* device only function */
-	entry->func_argtypes = palloc(sizeof(Oid) * fn_nargs);
-	for (i=0; i < fn_nargs; i++)
-	{
-		entry->func_argtypes[i] = BOOLOID;
-		entry->func_args = lappend(entry->func_args, dtype);
-	}
-	entry->func_rettype = dtype;
-    entry->func_name = pstrdup(fn_name);
-	entry->func_alias = entry->func_name;	/* never has alias */
-	entry->func_collid = InvalidOid;		/* never has collation */
-
-	initStringInfo(&str);
-	appendStringInfo(&str,
-					 "STATIC_FUNCTION(pg_%s_t)\n"
-					 "pgfn_%s(kern_context *kcxt",
-					 dtype->type_name, entry->func_alias);
-	for (i=0; i < fn_nargs; i++)
-		appendStringInfo(&str, ", pg_%s_t arg%u",
-						 dtype->type_name, i+1);
-	appendStringInfo(&str, ")\n"
-					 "{\n"
-					 "  pg_%s_t result;\n"
-					 "  result.isnull = ",
-					 dtype->type_name);
-	for (i=0; i < fn_nargs; i++)
-		appendStringInfo(&str, "%sarg%u.isnull",
-						 (i > 0 ? " | " : ""), i+1);
-	appendStringInfo(&str, ";\n"
-					 "  result.value = ");
-	for (i=0; i < fn_nargs; i++)
-	{
-		if (boolop == AND_EXPR)
-			appendStringInfo(&str, "%sarg%u.value", (i > 0 ? " & " : ""), i+1);
-		else
-			appendStringInfo(&str, "%sarg%u.value", (i > 0 ? " | " : ""), i+1);
-	}
-	appendStringInfo(&str, ";\n"
-					 "  return result;\n"
-					 "}\n");
-	entry->func_decl = str.data;
-
-	return entry;
-}
-
-static devfunc_info *
-pgstrom_devfunc_lookup_by_name(const char *func_name,
-							   Oid func_namespace,
-							   int func_nargs,
-							   Oid func_argtypes[],
-							   Oid func_rettype,
-							   Oid func_collid,
-							   Node *devfn_expr)
+pgstrom_devfunc_construct(Oid func_oid,
+						  Oid func_collid,
+						  const char *func_name,
+						  Oid func_namespace,
+						  int func_nargs,
+						  Oid func_argtypes[],
+						  Oid func_rettype,
+						  bool func_is_strict)
 {
 	devfunc_info   *entry;
-	ListCell	   *cell;
-	MemoryContext	oldcxt;
-	int				i, j, hash;
-
-	hash = (hash_any((void *)func_name, strlen(func_name)) ^
-			hash_any((void *)func_argtypes, sizeof(Oid) * func_nargs))
-		% lengthof(devfunc_info_slot);
-
-	foreach (cell, devfunc_info_slot[hash])
-	{
-		entry = lfirst(cell);
-		if (func_namespace == entry->func_namespace &&
-			strcmp(func_name, entry->func_name) == 0 &&
-			func_nargs == list_length(entry->func_args) &&
-			memcmp(func_argtypes, entry->func_argtypes,
-				   sizeof(Oid) * func_nargs) == 0 &&
-			(!OidIsValid(entry->func_collid) ||
-			 entry->func_collid == func_collid))
-		{
-			if (entry->func_is_negative)
-				return NULL;
-			Assert(entry->func_rettype->type_oid == func_rettype);
-			return entry;
-		}
-	}
-	/*
-	 * Not found, so let's walk on the function catalog, unless it is
-	 * not device only function.
-	 */
-	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
-
-	/*
-	 * We may have device-only functions that has no namespace.
-	 * The caller has to be responsible to add these function entries
-	 * into the cache.
-	 */
-	if (func_namespace == InvalidOid)
-	{
-		if (IsA(devfn_expr, BoolExpr))
-		{
-			BoolExpr   *b = (BoolExpr *) devfn_expr;
-
-			entry = devfunc_setup_boolop(b->boolop, func_name, func_nargs);
-		}
-		else
-			elog(ERROR, "Bug? unexpected device-only function for %s",
-				 nodeToString(devfn_expr));
-		goto out;	/* register it on the hash table */
-	}
+	int				i, j;
 
 	entry = palloc0(sizeof(devfunc_info));
-	entry->func_name = pstrdup(func_name);
-	entry->func_namespace = func_namespace;
-	entry->func_argtypes = palloc(sizeof(Oid) * func_nargs);
-	memcpy(entry->func_argtypes, func_argtypes, sizeof(Oid) * func_nargs);
+	entry->func_oid = func_oid;
+	entry->func_sqlname = pstrdup(func_name);
+	entry->func_is_strict = func_is_strict;
 
 	/*
 	 * At this moment, only (part-of) built-in functions are supported
@@ -1104,7 +1033,7 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 	if (func_namespace != PG_CATALOG_NAMESPACE)
 	{
 		entry->func_is_negative = true;
-		goto out;
+		return entry;
 	}
 
 	for (i=0; i < lengthof(devfunc_common_catalog); i++)
@@ -1186,7 +1115,7 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 				if (OidIsValid(func_collid) && !lc_collate_is_c(func_collid))
 				{
 					entry->func_is_negative = true;
-					goto out;
+					return entry;
 				}
 			}
 
@@ -1209,56 +1138,90 @@ pgstrom_devfunc_lookup_by_name(const char *func_name,
 					 template);
 				entry->func_is_negative = true;
 			}
-			goto out;
+			return entry;
 		}
 	}
+	/* no entries on the device function catalog */
 	entry->func_is_negative = true;
-out:
-	devfunc_info_slot[hash] = lappend(devfunc_info_slot[hash], entry);
-
-	MemoryContextSwitchTo(oldcxt);
-
-	if (entry->func_is_negative)
-		return NULL;
 	return entry;
 }
 
 devfunc_info *
 pgstrom_devfunc_lookup(Oid func_oid, Oid func_collid)
 {
+	devfunc_info   *entry;
 	Form_pg_proc	proc;
 	HeapTuple		tuple;
-	devfunc_info   *dfunc;
+	ListCell	   *lc;
+	int				index;
+	MemoryContext	oldcxt;
 
+	index = hash_uint32((uint32) func_oid) % lengthof(devfunc_info_slot);
+	foreach (lc, devfunc_info_slot[index])
+	{
+		entry = lfirst(lc);
+
+		if (entry->func_oid == func_oid &&
+			(!OidIsValid(entry->func_oid) ||
+			 entry->func_collid == func_collid))
+		{
+			if (entry->func_is_negative)
+				return NULL;
+			return entry;
+		}
+	}
+
+	/*
+	 * Not found, construct a new entry for device function
+	 */
 	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
 	if (!HeapTupleIsValid(tuple))
 		elog(ERROR, "cache lookup failed for function %u", func_oid);
 	proc = (Form_pg_proc) GETSTRUCT(tuple);
 
-	dfunc = pgstrom_devfunc_lookup_by_name(NameStr(proc->proname),
-										   proc->pronamespace,
-										   proc->pronargs,
-										   proc->proargtypes.values,
-										   proc->prorettype,
-										   func_collid,
-										   NULL);
+	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+	entry = pgstrom_devfunc_construct(func_oid,
+									  func_collid,
+									  NameStr(proc->proname),
+									  proc->pronamespace,
+									  proc->pronargs,
+									  proc->proargtypes.values,
+									  proc->prorettype,
+									  proc->proisstrict);
+	devfunc_info_slot[index] = lappend(devfunc_info_slot[index], entry);
+	MemoryContextSwitchTo(oldcxt);
+
 	ReleaseSysCache(tuple);
 
-	return dfunc;
+	if (entry->func_is_negative)
+		return NULL;
+	return entry;
 }
 
-devtype_info *
-pgstrom_devtype_lookup_and_track(Oid type_oid, codegen_context *context)
+static void
+pgstrom_devfunc_track(codegen_context *context, devfunc_info *dfunc)
 {
-	devtype_info   *dtype = pgstrom_devtype_lookup(type_oid);
+	ListCell   *lc;
+	union {
+		struct {
+			Oid		func_oid;
+			Oid		func_collid;
+		} f;
+		long		packed;
+	} uval;
 
-	if (!dtype)
-		return NULL;
+	foreach (lc, context->func_defs)
+	{
+		uval.packed = intVal(lfirst(lc));
 
-	context->extra_flags |= (dtype->type_flags & DEVFUNC_INCL_FLAGS);
-	context->type_defs = list_append_unique_ptr(context->type_defs, dtype);
-
-	return dtype;
+		if (uval.f.func_oid == dfunc->func_oid &&
+			uval.f.func_collid == dfunc->func_collid)
+			return;
+	}
+	uval.f.func_oid = dfunc->func_oid;
+	uval.f.func_collid = dfunc->func_collid;
+	context->func_defs = lappend(context->func_defs,
+								 makeInteger(uval.packed));	
 }
 
 devfunc_info *
@@ -1272,19 +1235,19 @@ pgstrom_devfunc_lookup_and_track(Oid func_oid, Oid func_collid,
 	if (!dfunc)
 		return NULL;
 	/* track device function */
-	context->func_defs = list_append_unique_ptr(context->func_defs, dfunc);
 	context->extra_flags |= (dfunc->func_flags & DEVFUNC_INCL_FLAGS);
+	pgstrom_devfunc_track(context, dfunc);
 
 	/* track function arguments and result type also */
 	dtype = dfunc->func_rettype;
 	context->extra_flags |= (dtype->type_flags & DEVFUNC_INCL_FLAGS);
-	context->type_defs = list_append_unique_ptr(context->type_defs, dtype);
+	pgstrom_devtype_track(context, dtype);
 
 	foreach (cell, dfunc->func_args)
 	{
 		dtype = lfirst(cell);
 		context->extra_flags |= (dtype->type_flags & DEVFUNC_INCL_FLAGS);
-		context->type_defs = list_append_unique_ptr(context->type_defs, dtype);
+		pgstrom_devtype_track(context, dtype);
 	}
 	return dfunc;
 }
@@ -1416,7 +1379,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		if (!dfunc)
 			return false;
 		appendStringInfo(&context->str,
-						 "pgfn_%s(kcxt", dfunc->func_alias);
+						 "pgfn_%s(kcxt", dfunc->func_devname);
 
 		foreach (cell, func->args)
 		{
@@ -1439,7 +1402,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		if (!dfunc)
 			return false;
 		appendStringInfo(&context->str,
-						 "pgfn_%s(kcxt", dfunc->func_alias);
+						 "pgfn_%s(kcxt", dfunc->func_devname);
 
 		foreach (cell, op->args)
 		{
@@ -1598,7 +1561,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 				if (!dfunc)
 					return false;
 				appendStringInfo(&context->str,
-								 "EVAL(pgfn_%s(", dfunc->func_alias);
+								 "EVAL(pgfn_%s(", dfunc->func_devname);
 				codegen_expression_walker((Node *) caseexpr->arg, context);
 				appendStringInfo(&context->str, ", ");
 				codegen_expression_walker((Node *) casewhen->expr, context);
@@ -1672,13 +1635,26 @@ char *
 pgstrom_codegen_func_declarations(codegen_context *context)
 {
 	StringInfoData	str;
-	ListCell	   *cell;
+	ListCell	   *lc;
+	devfunc_info   *dfunc;
+	union {
+		struct {
+			Oid		func_oid;
+			Oid		func_collid;
+		} f;
+		long		packed;
+	} uval;
 
 	initStringInfo(&str);
-	foreach (cell, context->func_defs)
+	foreach (lc, context->func_defs)
 	{
-		devfunc_info   *dfunc = lfirst(cell);
+		uval.packed = intVal(lfirst(lc));
 
+		dfunc = pgstrom_devfunc_lookup(uval.f.func_oid,
+									   uval.f.func_collid);
+		if (!dfunc)
+			elog(ERROR, "Failed to lookup tracked function: %u",
+				 uval.f.func_oid);
 		if (dfunc->func_decl)
 			appendStringInfo(&str, "%s\n", dfunc->func_decl);
 	}

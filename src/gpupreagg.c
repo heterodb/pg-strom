@@ -2002,7 +2002,7 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			resno, dtype->type_name, resno - 1,
 			resno, dtype->type_name, resno - 1,
 			resno, resno,
-			dfunc->func_alias, resno, resno,
+			dfunc->func_devname, resno, resno,
 			resno, resno,
 			resno, resno);
 	}
@@ -2535,7 +2535,7 @@ gpupreagg_codegen_projection_psum_x2(StringInfo body, FuncExpr *func,
 		temp_label,
 		zero_label,
 		temp_label,
-		dfunc->func_alias,
+		dfunc->func_devname,
 		temp_label,
 		temp_label,
 		dtype->type_name,
@@ -2612,7 +2612,7 @@ gpupreagg_codegen_projection_corr(StringInfo body, FuncExpr *func,
 			"    temp_float8x = pgfn_%s(kcxt,\n"
 			"                           temp_float8x,\n"
 			"                           temp_float8x);\n",
-			dfunc->func_name);
+			dfunc->func_devname);
 	}
 	else if (strcmp(func_name, "pcov_y2") == 0)
 	{
@@ -2625,7 +2625,7 @@ gpupreagg_codegen_projection_corr(StringInfo body, FuncExpr *func,
 			"    temp_float8x = pgfn_%s(kcxt,\n"
 			"                           temp_float8y,\n"
 			"                           temp_float8y);\n",
-			dfunc->func_alias);
+			dfunc->func_devname);
 	}
 	else if (strcmp(func_name, "pcov_xy") == 0)
 	{
@@ -2638,7 +2638,7 @@ gpupreagg_codegen_projection_corr(StringInfo body, FuncExpr *func,
 			"    temp_float8x = pgfn_%s(kcxt,\n"
 			"                           temp_float8x,\n"
 			"                           temp_float8y);\n",
-			dfunc->func_alias);
+			dfunc->func_devname);
 	}
 	else if (strcmp(func_name, "pcov_x") != 0)
 		elog(ERROR, "unexpected partial covariance function: %s",
@@ -2918,7 +2918,7 @@ gpupreagg_codegen(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	 * keys, or target of (partial) aggregate function.
 	 */
 	context->used_params = list_make1(makeNullConst(BYTEAOID, -1, InvalidOid));
-	context->type_defs = list_make1(pgstrom_devtype_lookup(BYTEAOID));
+	pgstrom_devtype_lookup_and_track(BYTEAOID, context);
 
 	/* generate a qual evaluation function */
 	fn_qualeval = gpupreagg_codegen_qual_eval(cscan, gpa_info, context);
